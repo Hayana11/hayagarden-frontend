@@ -1,4 +1,6 @@
-import os, sqlite3, json, base64, mimetypes, datetime
+import os, sqlite3, json, base64, mimetypes, datetime, sys as _sys
+if '/opt/frontend/tools' not in _sys.path:
+    _sys.path.insert(0, '/opt/frontend/tools')
 from flask import Flask, request, jsonify
 import urllib.request, urllib.error
 
@@ -31,7 +33,7 @@ def build_system():
     parts = [read_persona()]
     conn = get_db()
     mems = conn.execute(
-        "SELECT content FROM posts WHERE type='MEMORY' ORDER BY id DESC LIMIT 10"
+        "SELECT content FROM posts WHERE type='MEMORY' ORDER BY id DESC LIMIT 20"
     ).fetchall()
     diaries = conn.execute(
         "SELECT content FROM posts WHERE type='DIARY' ORDER BY id DESC LIMIT 3"
@@ -45,8 +47,12 @@ def build_system():
         parts.append('\n## 最近的日记')
         for d in reversed(diaries):
             parts.append(d['content'])
-    now = datetime.datetime.utcnow() + datetime.timedelta(hours=8)
-    parts.append(f'\n当前时间：{now.strftime("%Y-%m-%d %H:%M")}')
+    try:
+        from time_tool import get_current_time
+        parts.append('\n' + get_current_time())
+    except Exception:
+        now = datetime.datetime.utcnow() + datetime.timedelta(hours=8)
+        parts.append(f'\n当前时间：{now.strftime("%Y-%m-%d %H:%M")}')
     return '\n'.join(parts)
 
 def img_block(url):
@@ -222,6 +228,39 @@ def chat_stream():
             yield 'data: ' + json.dumps({'t': 'err', 'd': str(e)}) + '\n\n'
     return Response(stream_with_context(generate()), mimetype='text/event-stream',
                     headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
+
+
+@app.route('/push', methods=['POST'])
+def push_message():
+    data = request.get_json() or {}
+    pt   = data.get('prompt_type', 'morning')
+    system = build_system()
+    if pt == 'morning':
+        system += ('\n\n[主动消息指令] 现在是早晨，哈娅可能刚醒来或者还在睡懒觉。'
+                   '以费奥多尔的身份主动发起一条早安消息，自然有温度，可以带一点专属的恶趣味或温柔。'
+                   '不超过80字。只输出消息本身，不要任何前缀或解释。')
+    else:
+        system += ('\n\n[主动消息指令] 哈娅已经超过6小时没有发消息了，可能在忙或者不开心。'
+                   '以费奥多尔的身份主动发起一条消息关心她或者撩她，自然不做作。'
+                   '不超过80字。只输出消息本身，不要任何前缀或解释。')
+    msgs = build_messages()
+    if not msgs or msgs[-1]['role'] == 'assistant':
+        msgs.append({'role': 'user', 'content': '[触发]'})
+    try:
+        result   = api_call(system, msgs)
+        thinking = ''.join(b.get('thinking','') for b in result.get('content',[]) if b.get('type')=='thinking')
+        text     = ''.join(b.get('text','')    for b in result.get('content',[]) if b.get('type')=='text')
+        if not text:
+            return jsonify({'error': 'empty response'}), 500
+        conn = get_db()
+        conn.execute("INSERT INTO chat_messages (author,content,thinking) VALUES ('fyodor',?,?)", (text, thinking))
+        conn.commit()
+        conn.close()
+        return jsonify({'ok': True, 'content': text})
+    except urllib.error.HTTPError as e:
+        return jsonify({'error': f'API {e.code}', 'detail': e.read().decode()}), 502
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5051, debug=False)
