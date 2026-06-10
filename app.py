@@ -314,5 +314,54 @@ def drift_found():
     conn.close()
     return jsonify({"bottles": [dict(r) for r in rows]})
 
+
+
+# ── Mijia light setup & proxy ──
+import urllib.request as _urlreq
+import urllib.error as _urlerr
+LIGHT_DAEMON = 'http://127.0.0.1:5052'
+
+@app.route('/setup/mijia')
+def setup_mijia():
+    html = """<!DOCTYPE html><html lang=zh><head><meta charset=UTF-8>
+<meta name=viewport content="width=device-width,initial-scale=1">
+<title>米家授权</title>
+<style>
+body{margin:0;min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;
+font-family:-apple-system,'PingFang SC',sans-serif;background:#f8f8f6;color:#2a2020;gap:22px;padding:30px;}
+.card{background:#fff;border-radius:20px;padding:30px;box-shadow:0 8px 28px rgba(0,0,0,.08);text-align:center;max-width:320px;}
+h1{font-size:18px;font-weight:500;margin:0 0 6px;}
+p{font-size:13px;color:#9a8a8a;margin:0 0 18px;line-height:1.7;}
+img{width:240px;height:240px;border-radius:12px;background:#f0ebf4;object-fit:contain;}
+.tip{font-size:11px;color:#b8b0b8;margin-top:14px;}
+</style></head><body>
+<div class=card>
+<h1>米家授权</h1>
+<p>用米家 App 扫码授权<br>授权次卧灯的控制权限</p>
+<img src="/static/qrcode.png?t=" id="qr" alt="二维码加载中…">
+<div class=tip>二维码 2 分钟内有效，过期请重新运行登录脚本</div>
+</div>
+<script>
+// 二维码可能稍后才生成，定时刷新
+function refresh(){document.getElementById('qr').src='/static/qrcode.png?t='+Date.now();}
+refresh();setInterval(refresh,5000);
+</script>
+</body></html>"""
+    return html
+
+@app.route('/api/light/<path:action>', methods=['GET','POST'])
+def light_proxy(action):
+    url = f"{LIGHT_DAEMON}/light/{action}"
+    body = request.get_data() if request.method == 'POST' else None
+    req = _urlreq.Request(url, data=body, method=request.method,
+                          headers={'Content-Type': 'application/json'})
+    try:
+        with _urlreq.urlopen(req, timeout=15) as resp:
+            return resp.read(), resp.status, {'Content-Type': 'application/json'}
+    except _urlerr.HTTPError as e:
+        return e.read(), e.code, {'Content-Type': 'application/json'}
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 502
+
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5050, debug=False)

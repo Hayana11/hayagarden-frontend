@@ -26,6 +26,50 @@ function buildServer() {
     }
   );
 
+
+  const LIGHT_DAEMON = 'http://127.0.0.1:5052';
+  async function callLight(path, method, bodyObj) {
+    const opts = { method, headers: { 'Content-Type': 'application/json' } };
+    if (bodyObj) opts.body = JSON.stringify(bodyObj);
+    try {
+      const r = await fetch(LIGHT_DAEMON + path, opts);
+      const txt = await r.text();
+      return { content: [{ type: 'text', text: txt || '(no output)' }] };
+    } catch (e) {
+      return { content: [{ type: 'text', text: 'Error: ' + e.message }] };
+    }
+  }
+
+  server.tool(
+    'light_on',
+    {},
+    async () => callLight('/light/on', 'POST')
+  );
+
+  server.tool(
+    'light_off',
+    {},
+    async () => callLight('/light/off', 'POST')
+  );
+
+  server.tool(
+    'set_brightness',
+    { value: z.number().min(1).max(100).describe('Brightness 1-100') },
+    async ({ value }) => callLight('/light/brightness', 'POST', { value })
+  );
+
+  server.tool(
+    'set_color_temp',
+    { value: z.number().describe('Color temperature in Kelvin, e.g. 4000') },
+    async ({ value }) => callLight('/light/color_temp', 'POST', { value })
+  );
+
+  server.tool(
+    'get_light_status',
+    {},
+    async () => callLight('/light/status', 'GET')
+  );
+
   return server;
 }
 

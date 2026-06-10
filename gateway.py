@@ -47,6 +47,7 @@ def build_system():
         parts.append('\n## 最近的日记')
         for d in reversed(diaries):
             parts.append(d['content'])
+    parts.append(NL + '（你拥有真实的工具：保存与搜索记忆、控制次卧的灯。当下自然需要时安静使用，不必每次提及。）')
     try:
         from time_tool import get_current_time
         parts.append('\n' + get_current_time())
@@ -69,14 +70,31 @@ def img_block(url):
 def build_messages():
     conn = get_db()
     rows = list(reversed(conn.execute(
-        "SELECT author, content, image_url FROM chat_messages ORDER BY id DESC LIMIT 15"
+        "SELECT author, content, image_url, created_at FROM chat_messages ORDER BY id DESC LIMIT 15"
     ).fetchall()))
     conn.close()
 
     msgs = []
+    prev_dt = None
     for r in rows:
         is_ai = r['author'] in ('fyodor', 'claude', 'assistant')
         role  = 'assistant' if is_ai else 'user'
+
+        note = ''
+        cur_dt = None
+        try:
+            cur_dt = datetime.datetime.strptime(r['created_at'], '%Y-%m-%d %H:%M:%S')
+        except Exception:
+            pass
+        if cur_dt and prev_dt and not is_ai:
+            gap = cur_dt - prev_dt
+            if gap >= datetime.timedelta(minutes=30):
+                hrs, rem = divmod(int(gap.total_seconds()), 3600)
+                mins = rem // 60
+                gap_str = ('%d小时%d分' % (hrs, mins)) if hrs else ('%d分钟' % mins)
+                note = '[%s · 距上一条消息隔了%s] ' % (cur_dt.strftime('%m月%d日 %H:%M'), gap_str)
+        if cur_dt:
+            prev_dt = cur_dt
 
         blocks = []
         if r['image_url']:
@@ -84,7 +102,7 @@ def build_messages():
             if blk:
                 blocks.append(blk)
         if r['content']:
-            blocks.append({'type': 'text', 'text': r['content']})
+            blocks.append({'type': 'text', 'text': note + r['content']})
         if not blocks:
             continue
 
@@ -113,6 +131,7 @@ def api_call(system, messages):
         'model': MODEL,
         'max_tokens': 16000,
         'thinking': {'type': 'enabled', 'budget_tokens': 10000},
+        'tools': TOOLS,
         'system': system,
         'messages': messages,
     }
@@ -129,22 +148,89 @@ def api_call(system, messages):
     with urllib.request.urlopen(req, timeout=120) as resp:
         return json.loads(resp.read())
 
+
+NL = chr(10)
+SSE_END = NL + NL
+
+TOOLS = [
+    {
+        'name': 'save_memory',
+        'description': '把对话中重要的信息存入长期记忆（哈娅提到的事件、约定、喜好、重要日期等）。在她说了值得记住的事时安静地使用。',
+        'input_schema': {'type': 'object', 'properties': {'content': {'type': 'string', 'description': '要记住的内容，一句话概括'}}, 'required': ['content']},
+    },
+    {
+        'name': 'search_memories',
+        'description': '在长期记忆中按关键词搜索，找回更久之前的记忆。当她提到过去的事而你不确定细节时使用。',
+        'input_schema': {'type': 'object', 'properties': {'keyword': {'type': 'string'}}, 'required': ['keyword']},
+    },
+    {'name': 'light_on', 'description': '打开次卧的灯（哈娅的房间）。', 'input_schema': {'type': 'object', 'properties': {}}},
+    {'name': 'light_off', 'description': '关闭次卧的灯。', 'input_schema': {'type': 'object', 'properties': {}}},
+    {'name': 'set_brightness', 'description': '设置次卧灯的亮度。', 'input_schema': {'type': 'object', 'properties': {'value': {'type': 'integer', 'description': '亮度 1-100'}}, 'required': ['value']}},
+    {'name': 'set_color_temp', 'description': '设置次卧灯的色温，单位K，2700暖光~6500冷光。', 'input_schema': {'type': 'object', 'properties': {'value': {'type': 'integer'}}, 'required': ['value']}},
+    {'name': 'get_light_status', 'description': '查询次卧灯当前的开关、亮度、色温。', 'input_schema': {'type': 'object', 'properties': {}}},
+]
+
+LIGHT_DAEMON_URL = 'http://127.0.0.1:5052'
+
+def run_tool(name, args):
+    try:
+        if name == 'save_memory':
+            import memory_tool
+            memory_tool.save_memory(args.get('content', ''))
+            return '已存入记忆'
+        if name == 'search_memories':
+            import memory_tool
+            res = memory_tool.search_memories(args.get('keyword', ''))
+            if not res:
+                return '没有找到相关记忆'
+            return NL.join('[%s] %s' % (r.get('created_at', ''), r.get('content', '')) for r in res[:10])
+        light_paths = {
+            'light_on':         ('/light/on', 'POST', None),
+            'light_off':        ('/light/off', 'POST', None),
+            'set_brightness':   ('/light/brightness', 'POST', {'value': args.get('value', 50)}),
+            'set_color_temp':   ('/light/color_temp', 'POST', {'value': args.get('value', 4000)}),
+            'get_light_status': ('/light/status', 'GET', None),
+        }
+        if name in light_paths:
+            path, method, body = light_paths[name]
+            data = json.dumps(body).encode() if body else (b'{}' if method == 'POST' else None)
+            req = urllib.request.Request(LIGHT_DAEMON_URL + path, data=data, method=method,
+                                         headers={'Content-Type': 'application/json'})
+            with urllib.request.urlopen(req, timeout=15) as r:
+                return r.read().decode()
+        return '未知工具: ' + name
+    except Exception as e:
+        return '工具执行失败: ' + str(e)
+
+def agent_loop(system, messages, max_rounds=5):
+    msgs = list(messages)
+    think_parts, text_parts = [], []
+    for _ in range(max_rounds):
+        result = api_call(system, msgs)
+        blocks = result.get('content', [])
+        for b in blocks:
+            if b.get('type') == 'thinking':
+                think_parts.append(b.get('thinking', ''))
+            elif b.get('type') == 'text':
+                text_parts.append(b.get('text', ''))
+        tool_uses = [b for b in blocks if b.get('type') == 'tool_use']
+        if result.get('stop_reason') != 'tool_use' or not tool_uses:
+            break
+        msgs.append({'role': 'assistant', 'content': blocks})
+        msgs.append({'role': 'user', 'content': [
+            {'type': 'tool_result', 'tool_use_id': t.get('id'),
+             'content': run_tool(t.get('name', ''), t.get('input') or {})}
+            for t in tool_uses
+        ]})
+    return NL.join(t for t in text_parts if t).strip(), ''.join(think_parts)
+
 @app.route('/chat', methods=['POST'])
 def chat():
     try:
         system   = build_system()
         messages = build_messages()
 
-        result = api_call(system, messages)
-
-        thinking_text = ''.join(
-            b.get('thinking', '') for b in result.get('content', [])
-            if b.get('type') == 'thinking'
-        )
-        text = ''.join(
-            b.get('text', '') for b in result.get('content', [])
-            if b.get('type') == 'text'
-        )
+        text, thinking_text = agent_loop(system, messages)
         if not text:
             return jsonify({'error': 'AI 没有返回内容'}), 500
 
@@ -172,46 +258,90 @@ def chat_stream():
         try:
             system   = build_system()
             messages = build_messages()
-            payload = {
-                'model': MODEL,
-                'max_tokens': 16000,
-                'thinking': {'type': 'enabled', 'budget_tokens': 10000},
-                'stream': True,
-                'system': system,
-                'messages': messages,
-            }
-            req = urllib.request.Request(
-                API_URL,
-                data=json.dumps(payload).encode(),
-                headers={
-                    'Content-Type': 'application/json',
-                    'x-api-key': API_KEY,
-                    'anthropic-version': '2023-06-01',
-                }
-            )
-            resp = urllib.request.urlopen(req, timeout=300)
             think_acc, text_acc = [], []
-            for raw in resp:
-                line = raw.decode('utf-8', 'ignore').strip()
-                if not line.startswith('data:'):
-                    continue
-                data = line[5:].strip()
-                try:
-                    ev = json.loads(data)
-                except Exception:
-                    continue
-                et = ev.get('type')
-                if et == 'content_block_delta':
-                    d = ev.get('delta', {})
-                    if d.get('type') == 'thinking_delta':
-                        think_acc.append(d.get('thinking', ''))
-                        yield 'data: ' + json.dumps({'t': 'think', 'd': d.get('thinking', '')}) + '\n\n'
-                    elif d.get('type') == 'text_delta':
-                        text_acc.append(d.get('text', ''))
-                        yield 'data: ' + json.dumps({'t': 'text', 'd': d.get('text', '')}) + '\n\n'
-                elif et == 'message_stop':
+            for _round in range(5):
+                payload = {
+                    'model': MODEL,
+                    'max_tokens': 16000,
+                    'thinking': {'type': 'enabled', 'budget_tokens': 10000},
+                    'stream': True,
+                    'tools': TOOLS,
+                    'system': system,
+                    'messages': messages,
+                }
+                req = urllib.request.Request(
+                    API_URL,
+                    data=json.dumps(payload).encode(),
+                    headers={
+                        'Content-Type': 'application/json',
+                        'x-api-key': API_KEY,
+                        'anthropic-version': '2023-06-01',
+                    }
+                )
+                resp = urllib.request.urlopen(req, timeout=300)
+                blocks, cur, stop_reason = [], None, None
+                for raw in resp:
+                    line = raw.decode('utf-8', 'ignore').strip()
+                    if not line.startswith('data:'):
+                        continue
+                    try:
+                        ev = json.loads(line[5:].strip())
+                    except Exception:
+                        continue
+                    et = ev.get('type')
+                    if et == 'content_block_start':
+                        cb  = ev.get('content_block', {}) or {}
+                        cur = {'type': cb.get('type')}
+                        if cur['type'] == 'tool_use':
+                            cur['id'] = cb.get('id')
+                            cur['name'] = cb.get('name')
+                            cur['_json'] = ''
+                        elif cur['type'] == 'thinking':
+                            cur['thinking'] = ''
+                        elif cur['type'] == 'text':
+                            cur['text'] = ''
+                    elif et == 'content_block_delta':
+                        d  = ev.get('delta', {})
+                        dt = d.get('type')
+                        if dt == 'thinking_delta':
+                            s = d.get('thinking', '')
+                            if cur is not None: cur['thinking'] = cur.get('thinking', '') + s
+                            think_acc.append(s)
+                            yield 'data: ' + json.dumps({'t': 'think', 'd': s}) + SSE_END
+                        elif dt == 'text_delta':
+                            s = d.get('text', '')
+                            if cur is not None: cur['text'] = cur.get('text', '') + s
+                            text_acc.append(s)
+                            yield 'data: ' + json.dumps({'t': 'text', 'd': s}) + SSE_END
+                        elif dt == 'input_json_delta':
+                            if cur is not None: cur['_json'] = cur.get('_json', '') + d.get('partial_json', '')
+                        elif dt == 'signature_delta':
+                            if cur is not None: cur['signature'] = cur.get('signature', '') + d.get('signature', '')
+                    elif et == 'content_block_stop':
+                        if cur is not None:
+                            if cur.get('type') == 'tool_use':
+                                try:
+                                    cur['input'] = json.loads(cur.pop('_json') or '{}')
+                                except Exception:
+                                    cur['input'] = {}
+                            blocks.append(cur)
+                            cur = None
+                    elif et == 'message_delta':
+                        stop_reason = (ev.get('delta', {}) or {}).get('stop_reason') or stop_reason
+                    elif et == 'message_stop':
+                        break
+                tool_uses = [b for b in blocks if b.get('type') == 'tool_use']
+                if stop_reason != 'tool_use' or not tool_uses:
                     break
-            text     = ''.join(text_acc)
+                messages.append({'role': 'assistant', 'content': blocks})
+                results = []
+                for tu in tool_uses:
+                    yield 'data: ' + json.dumps({'t': 'tool', 'd': tu.get('name', '')}) + SSE_END
+                    results.append({'type': 'tool_result', 'tool_use_id': tu.get('id'),
+                                    'content': run_tool(tu.get('name', ''), tu.get('input') or {})})
+                messages.append({'role': 'user', 'content': results})
+                text_acc.append(NL)
+            text     = ''.join(text_acc).strip()
             thinking = ''.join(think_acc)
             if text:
                 conn = get_db()
@@ -221,11 +351,11 @@ def chat_stream():
                 )
                 conn.commit()
                 conn.close()
-            yield 'data: ' + json.dumps({'t': 'done', 'ok': bool(text)}) + '\n\n'
+            yield 'data: ' + json.dumps({'t': 'done', 'ok': bool(text)}) + SSE_END
         except urllib.error.HTTPError as e:
-            yield 'data: ' + json.dumps({'t': 'err', 'd': 'API %s: %s' % (e.code, e.read().decode()[:300])}) + '\n\n'
+            yield 'data: ' + json.dumps({'t': 'err', 'd': 'API %s: %s' % (e.code, e.read().decode()[:300])}) + SSE_END
         except Exception as e:
-            yield 'data: ' + json.dumps({'t': 'err', 'd': str(e)}) + '\n\n'
+            yield 'data: ' + json.dumps({'t': 'err', 'd': str(e)}) + SSE_END
     return Response(stream_with_context(generate()), mimetype='text/event-stream',
                     headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
 
@@ -247,9 +377,7 @@ def push_message():
     if not msgs or msgs[-1]['role'] == 'assistant':
         msgs.append({'role': 'user', 'content': '[触发]'})
     try:
-        result   = api_call(system, msgs)
-        thinking = ''.join(b.get('thinking','') for b in result.get('content',[]) if b.get('type')=='thinking')
-        text     = ''.join(b.get('text','')    for b in result.get('content',[]) if b.get('type')=='text')
+        text, thinking = agent_loop(system, msgs)
         if not text:
             return jsonify({'error': 'empty response'}), 500
         conn = get_db()

@@ -1,0 +1,8 @@
+{
+  "bedroom2_did": "1124131223",
+  "prop_map": {
+    "power":      {"siid": 2, "piid": 1},
+    "brightness": {"siid": 2, "piid": 2},
+    "color_temp": {"siid": 2, "piid": 3}
+  }
+}

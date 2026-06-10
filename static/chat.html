@@ -432,6 +432,7 @@ function dayLabel(dt){
 }
 
 // Thinking toggle
+var openThinks = new Set();
 function toggleThink(btn) {
   var body = btn.nextElementSibling;
   var isOpen = body.classList.contains('open');
@@ -439,6 +440,11 @@ function toggleThink(btn) {
   btn.classList.toggle('open');
   var lbl = btn.querySelector('.tl');
   if(lbl) lbl.textContent = isOpen ? '▶ thinking' : '▼ thinking';
+  var wrap = btn.closest('.think-wrap');
+  if (wrap && wrap.dataset.mid !== undefined) {
+    if (isOpen) openThinks.delete(String(wrap.dataset.mid));
+    else openThinks.add(String(wrap.dataset.mid));
+  }
 }
 
 // Build message HTML
@@ -470,13 +476,14 @@ function buildHtml(list) {
 
     var innerHtml = '';
     if(fy && thinking) {
+      var tOpen = openThinks.has(String(m.id));
       innerHtml +=
-        '<div class="think-wrap">' +
-          '<button class="think-toggle" onclick="toggleThink(this)">' +
+        '<div class="think-wrap" data-mid="'+m.id+'">' +
+          '<button class="think-toggle'+(tOpen?' open':'')+'" onclick="toggleThink(this)">' +
             '<i class="ti ti-chevron-right"></i>' +
-            '<span class="tl">▶ thinking</span>' +
+            '<span class="tl">'+(tOpen?'▼ thinking':'▶ thinking')+'</span>' +
           '</button>' +
-          '<div class="think-body">'+escHtml(thinking)+'</div>' +
+          '<div class="think-body'+(tOpen?' open':'')+'">'+escHtml(thinking)+'</div>' +
         '</div>';
     }
     if(hasImg) innerHtml += '<img src="'+escHtml(m.image_url)+'" loading="lazy" onclick="openLb(\''+escHtml(m.image_url)+'\')">';
@@ -668,36 +675,49 @@ setInterval(checkBlocked, 15000);
 
 
 // ── Streaming reply ──
+var TW_CPS = 18; // 打字机速度：每秒字符数，调这里
 async function streamReply(){
   var resp = await fetch('/api/gw/chat/stream',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
   if(!resp.ok||!resp.body) throw new Error('stream failed');
+  var SSE_SEP = String.fromCharCode(10)+String.fromCharCode(10);
   var reader=resp.body.getReader(), decoder=new TextDecoder();
-  var buf='', text='', live=null;
+  var buf='', target='', shown=0, live=null, err=null;
   var c=document.getElementById('msgs');
-  while(true){
-    var chunk=await reader.read();
-    if(chunk.done) break;
-    buf+=decoder.decode(chunk.value,{stream:true});
-    var parts=buf.split('\n\n');
-    buf=parts.pop();
-    for(var i=0;i<parts.length;i++){
-      var line=parts[i].trim();
-      if(line.indexOf('data:')!==0) continue;
-      var ev; try{ ev=JSON.parse(line.slice(5)); }catch(e){ continue; }
-      if(ev.t==='text'){
-        text+=ev.d;
-        if(!live){
-          hideTyping();
-          c.insertAdjacentHTML('beforeend','<div class="msg-row fy" id="live-row"><div class="bwrap"><div class="bubble fy" id="live-bubble"></div></div></div>');
-          live=document.getElementById('live-bubble');
-        }
-        live.innerHTML=escHtml(text);
-        c.scrollTop=c.scrollHeight;
-      } else if(ev.t==='err'){ throw new Error(ev.d); }
+  var timer=setInterval(function(){
+    if(shown>=target.length) return;
+    if(!live){
+      hideTyping();
+      c.insertAdjacentHTML('beforeend','<div class="msg-row fy" id="live-row"><div class="bwrap"><div class="bubble fy" id="live-bubble"></div></div></div>');
+      live=document.getElementById('live-bubble');
     }
+    shown=Math.min(target.length, shown+1);
+    live.innerHTML=escHtml(target.slice(0,shown));
+    var atB=c.scrollHeight-c.scrollTop-c.clientHeight<120;
+    if(atB) c.scrollTop=c.scrollHeight;
+  }, Math.round(1000/TW_CPS));
+  try{
+    while(true){
+      var chunk=await reader.read();
+      if(chunk.done) break;
+      buf+=decoder.decode(chunk.value,{stream:true});
+      var parts=buf.split(SSE_SEP);
+      buf=parts.pop();
+      for(var i=0;i<parts.length;i++){
+        var line=parts[i].trim();
+        if(line.indexOf('data:')!==0) continue;
+        var ev; try{ ev=JSON.parse(line.slice(5)); }catch(e){ continue; }
+        if(ev.t==='text'){ target+=ev.d; }
+        else if(ev.t==='err'){ err=new Error(ev.d); }
+      }
+      if(err) break;
+    }
+    while(!err && shown<target.length){ await new Promise(function(r){setTimeout(r,80);}); }
+  } finally {
+    clearInterval(timer);
+    var lr=document.getElementById('live-row'); if(lr) lr.remove();
   }
-  var lr=document.getElementById('live-row'); if(lr) lr.remove();
-  return text;
+  if(err) throw err;
+  return target;
 }
 
 // ── Drift reply notification ──
