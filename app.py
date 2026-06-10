@@ -56,12 +56,26 @@ def icon(size):
 
 @app.route('/api/posts', methods=['GET'])
 def get_posts():
-    t = request.args.get('type','')
-    conn = get_db()
+    t        = request.args.get('type','')
+    tags     = request.args.get('tags','')
+    search   = request.args.get('search','')
+    resolved = request.args.get('resolved','')
+    limit    = min(int(request.args.get('limit','200')), 1000)
+    where, params = [], []
     if t:
-        rows = conn.execute("SELECT * FROM posts WHERE type=? ORDER BY id DESC LIMIT 50",(t,)).fetchall()
-    else:
-        rows = conn.execute("SELECT * FROM posts ORDER BY id DESC LIMIT 50").fetchall()
+        where.append('type=?'); params.append(t)
+    if tags:
+        where.append('tags LIKE ?'); params.append('%'+tags+'%')
+    if search:
+        where.append('content LIKE ?'); params.append('%'+search+'%')
+    if resolved != '':
+        where.append('resolved=?'); params.append(int(resolved))
+    clause = ('WHERE '+' AND '.join(where)) if where else ''
+    conn = get_db()
+    rows = conn.execute(
+        f'SELECT * FROM posts {clause} ORDER BY id DESC LIMIT ?',
+        params+[limit]
+    ).fetchall()
     conn.close()
     return jsonify({"posts":[dict(r) for r in rows]})
 
@@ -71,9 +85,10 @@ def create_post():
     content = data.get('content','').strip()
     if not content:
         return jsonify({"error":"empty"}),400
+    tags = data.get('tags','')
     conn = get_db()
-    cur = conn.execute("INSERT INTO posts (type,content,author) VALUES (?,?,?)",
-        (data.get('type','MEMORY'), content, data.get('author','user')))
+    cur = conn.execute("INSERT INTO posts (type,content,author,tags) VALUES (?,?,?,?)",
+        (data.get('type','MEMORY'), content, data.get('author','user'), tags))
     conn.commit()
     conn.close()
     return jsonify({"ok":True,"id":cur.lastrowid})
@@ -362,6 +377,69 @@ def light_proxy(action):
         return e.read(), e.code, {'Content-Type': 'application/json'}
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 502
+
+# ── Core page ──
+
+@app.route('/core')
+def core_page():
+    return send_from_directory('/opt/frontend/static', 'core.html')
+
+# ── Settings key/value ──
+
+@app.route('/api/settings/<key>', methods=['GET'])
+def get_setting(key):
+    conn = get_db()
+    row = conn.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+    conn.close()
+    if not row:
+        return jsonify({"ok": False, "value": None}), 404
+    return jsonify({"ok": True, "value": row['value']})
+
+@app.route('/api/settings/<key>', methods=['POST'])
+def set_setting(key):
+    data = request.get_json()
+    value = data.get('value', '')
+    conn = get_db()
+    conn.execute("INSERT OR REPLACE INTO settings (key,value) VALUES (?,?)", (key, value))
+    conn.commit()
+    conn.close()
+    return jsonify({"ok": True})
+
+# ── Persona read/write ──
+
+@app.route('/api/persona', methods=['GET'])
+def get_persona():
+    try:
+        text = open('/opt/frontend/prompts/persona.md').read()
+        return jsonify({"ok": True, "content": text})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+@app.route('/api/persona', methods=['POST'])
+def save_persona():
+    import subprocess
+    data = request.get_json()
+    content = data.get('content', '')
+    try:
+        open('/opt/frontend/prompts/persona.md', 'w').write(content)
+        subprocess.Popen(['systemctl', 'restart', 'frontend-gw'])
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+# ── Posts PATCH (tags / resolved) ──
+
+@app.route('/api/posts/<int:pid>', methods=['PATCH'])
+def patch_post(pid):
+    data = request.get_json()
+    conn = get_db()
+    if 'tags' in data:
+        conn.execute("UPDATE posts SET tags=? WHERE id=?", (data['tags'], pid))
+    if 'resolved' in data:
+        conn.execute("UPDATE posts SET resolved=? WHERE id=?", (int(data['resolved']), pid))
+    conn.commit()
+    conn.close()
+    return jsonify({"ok": True})
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5050, debug=False)

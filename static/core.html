@@ -1,0 +1,588 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+<title>core · 关系基石</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@latest/tabler-icons.min.css">
+<style>
+*{margin:0;padding:0;box-sizing:border-box;}
+:root{
+  --bg1:#fdf8ef;--bg2:#f7f0e4;
+  --card:rgba(255,255,255,0.65);--card-b:rgba(255,255,255,0.9);
+  --text:#3a2e28;--muted:#9a8a7a;--hint:#b8a090;
+  --primary-bg:rgba(124,106,138,0.15);--primary:#5a4a6a;--primary-dot:#7c6a8a;
+  --amber:rgba(212,165,116,0.85);--amber-s:#d4a574;
+  --div:rgba(210,185,155,0.2);
+  --tag-off:rgba(255,255,255,0.6);--tag-off-b:rgba(210,185,155,0.3);
+}
+html,body{height:100%;overflow:hidden;}
+body{
+  background:linear-gradient(160deg,var(--bg1) 0%,var(--bg2) 100%);
+  background-attachment:fixed;
+  color:var(--text);
+  font-family:-apple-system,'PingFang SC','Noto Sans SC',sans-serif;
+  max-width:480px;margin:0 auto;
+  display:flex;flex-direction:column;
+}
+
+/* ─── Fixed header ─── */
+.hd{
+  flex-shrink:0;
+  display:flex;align-items:center;justify-content:space-between;
+  padding:52px 18px 12px;
+  background:rgba(253,248,239,0.88);
+  backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);
+  border-bottom:1px solid var(--div);
+  position:sticky;top:0;z-index:30;
+}
+.hd-left{display:flex;align-items:center;gap:10px;}
+.back{background:none;border:none;color:var(--muted);font-size:20px;cursor:pointer;padding:4px;display:flex;}
+.hd-title{font-family:Georgia,'Times New Roman',serif;font-size:18px;color:var(--text);font-weight:700;}
+.hd-sub{font-size:11px;color:var(--hint);margin-top:1px;letter-spacing:.4px;}
+.add-btn{
+  width:32px;height:32px;border-radius:50%;
+  background:var(--amber);border:none;
+  color:#fff;font-size:18px;cursor:pointer;
+  display:flex;align-items:center;justify-content:center;
+  box-shadow:0 2px 8px rgba(212,165,116,.3);
+}
+
+/* ─── Scrollable body ─── */
+.scroll{flex:1;overflow-y:auto;padding:14px 16px calc(72px + env(safe-area-inset-bottom,0px));}
+.scroll::-webkit-scrollbar{display:none;}
+
+/* ─── Profile cards ─── */
+.profile-row{display:flex;gap:10px;margin-bottom:14px;}
+.pcard{
+  flex:1;background:var(--card);border:1px solid var(--card-b);border-radius:16px;
+  backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);
+  overflow:hidden;
+}
+.pcard-hd{
+  display:flex;align-items:center;justify-content:space-between;
+  padding:12px 14px;cursor:pointer;user-select:none;
+}
+.pcard-hd-l{display:flex;align-items:center;gap:7px;}
+.pcard-icon{font-size:16px;}
+.pcard-name{font-size:13px;font-weight:600;}
+.pcard-chevron{font-size:14px;color:var(--hint);transition:transform .25s;}
+.pcard.open .pcard-chevron{transform:rotate(180deg);}
+.pcard-body{
+  max-height:0;overflow:hidden;
+  transition:max-height .3s cubic-bezier(.4,0,.2,1);
+}
+.pcard.open .pcard-body{max-height:600px;}
+.pcard-inner{padding:0 14px 14px;}
+.pfield{margin-bottom:10px;}
+.pfield label{font-size:11px;color:var(--hint);display:block;margin-bottom:4px;letter-spacing:.3px;}
+.pfield .val{font-size:13px;color:var(--text);}
+.pfield textarea{
+  width:100%;padding:9px 11px;
+  border-radius:10px;border:1px solid var(--tag-off-b);
+  background:rgba(255,255,255,0.6);font-size:13px;font-family:inherit;
+  color:var(--text);resize:none;outline:none;min-height:80px;line-height:1.6;
+}
+.pfield textarea:focus{border-color:rgba(212,165,116,.6);}
+.save-btn{
+  width:100%;padding:9px;border:none;border-radius:10px;
+  background:var(--amber);color:#fff;font-size:13px;cursor:pointer;font-family:inherit;
+}
+.save-btn:active{opacity:.85;}
+.save-ok{font-size:11px;color:var(--primary);margin-top:5px;text-align:center;display:none;}
+
+/* ─── Memories section ─── */
+.sec-t{font-size:10px;letter-spacing:3px;color:var(--hint);margin:4px 0 10px;padding:0 2px;}
+
+/* Tags */
+.tags-row{display:flex;gap:7px;overflow-x:auto;scrollbar-width:none;padding-bottom:2px;margin-bottom:10px;}
+.tags-row::-webkit-scrollbar{display:none;}
+.tag{
+  flex-shrink:0;padding:6px 14px;border-radius:50px;
+  background:var(--tag-off);border:1px solid var(--tag-off-b);
+  color:var(--muted);font-size:12px;cursor:pointer;white-space:nowrap;
+  transition:all .15s;
+}
+.tag.act{background:var(--primary-bg);border-color:rgba(124,106,138,.25);color:var(--primary);}
+
+/* Search + view toggle */
+.search-row{display:flex;gap:8px;margin-bottom:12px;align-items:center;}
+.search-box{
+  flex:1;padding:9px 14px;border-radius:20px;
+  border:1px solid rgba(210,185,155,.25);
+  background:rgba(255,255,255,.6);
+  font-size:13px;font-family:inherit;color:var(--text);outline:none;
+}
+.search-box::placeholder{color:var(--hint);}
+.search-box:focus{border-color:rgba(212,165,116,.5);}
+.view-btns{display:flex;gap:4px;flex-shrink:0;}
+.vbtn{
+  padding:7px 11px;border-radius:50px;border:1px solid var(--tag-off-b);
+  background:var(--tag-off);color:var(--muted);font-size:12px;cursor:pointer;
+  transition:all .15s;
+}
+.vbtn.act{background:var(--primary-bg);border-color:rgba(124,106,138,.25);color:var(--primary);}
+
+/* Month label */
+.mlabel{
+  font-size:11px;color:var(--hint);
+  display:flex;align-items:center;gap:8px;margin:14px 0 8px;letter-spacing:.3px;
+}
+.mlabel::after{content:'';flex:1;height:1px;background:var(--div);}
+
+/* Memory item */
+.mitem{
+  display:flex;gap:11px;padding:10px 0;
+  border-bottom:1px solid var(--div);cursor:pointer;
+}
+.mitem:last-child{border-bottom:none;}
+.mdot{
+  flex-shrink:0;width:5px;height:5px;border-radius:50%;
+  background:var(--primary-dot);margin-top:6px;
+}
+.mdot.resolved{background:var(--amber-s);}
+.mright{flex:1;min-width:0;}
+.mpreview{font-size:13px;line-height:1.7;color:var(--text);overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;}
+.mitem.open .mpreview{-webkit-line-clamp:unset;display:block;}
+.mfull{display:none;font-size:13px;line-height:1.7;color:var(--text);white-space:pre-wrap;word-break:break-all;margin-top:2px;}
+.mitem.open .mfull{display:block;}
+.mitem.open .mpreview{display:none;}
+.mmeta{display:flex;align-items:center;flex-wrap:wrap;gap:5px;margin-top:6px;}
+.mtag{font-size:10px;padding:2px 8px;border-radius:8px;background:var(--primary-bg);color:var(--primary);}
+.mdate{font-size:10px;color:var(--hint);margin-left:auto;}
+/* Expanded action bar */
+.mactions{display:none;padding-top:8px;display:none;gap:10px;align-items:center;}
+.mitem.open .mactions{display:flex;}
+.mac{background:none;border:none;font-size:11px;color:var(--muted);cursor:pointer;display:flex;align-items:center;gap:3px;padding:4px 0;}
+.mac:hover{color:var(--text);}
+.mac.del{color:#c07070;}
+.mac i{font-size:14px;}
+
+/* Heatmap */
+.hmap{display:none;}
+.hmap.show{display:block;}
+.hmap-month{display:flex;flex-wrap:wrap;gap:3px;margin-bottom:14px;}
+.hmap-t{font-size:11px;color:var(--hint);margin:10px 0 6px;letter-spacing:.3px;}
+.hday{
+  width:calc((100% - 18px)/7);aspect-ratio:1;border-radius:6px;
+  display:flex;align-items:center;justify-content:center;
+  font-size:10px;color:var(--muted);cursor:pointer;
+}
+.hday:hover{border:1px solid rgba(124,106,138,.4);}
+.hday.today{border:1.5px solid var(--primary-dot);color:var(--primary);font-weight:700;}
+.hwd2{width:calc((100% - 18px)/7);text-align:center;font-size:9px;color:var(--hint);padding:2px 0;}
+
+/* ─── Bottom nav ─── */
+.bnav{
+  position:fixed;bottom:0;left:50%;transform:translateX(-50%);
+  width:100%;max-width:480px;
+  background:rgba(253,248,239,0.95);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);
+  border-top:1px solid var(--div);
+  display:flex;z-index:50;
+  padding:7px 0 calc(7px + env(safe-area-inset-bottom,0px));
+}
+.ni{flex:1;display:flex;flex-direction:column;align-items:center;gap:3px;text-decoration:none;border:none;background:none;cursor:pointer;color:var(--hint);font-size:10px;letter-spacing:.4px;font-family:inherit;padding:4px 0;transition:color .18s;}
+.ni i{font-size:21px;}
+.ni.act{color:var(--primary);}
+
+/* ─── Modals ─── */
+.mo{display:none;position:fixed;inset:0;background:rgba(0,0,0,.3);z-index:100;align-items:center;justify-content:center;padding:24px;}
+.mo.show{display:flex;}
+.mb{background:rgba(255,255,255,.97);border-radius:16px;padding:20px;width:100%;max-width:400px;max-height:82vh;display:flex;flex-direction:column;gap:0;}
+.mb h3{font-size:15px;font-weight:700;color:var(--text);margin-bottom:14px;}
+.mb textarea{
+  flex:1;min-height:120px;padding:12px;border-radius:12px;
+  border:1px solid var(--tag-off-b);background:rgba(255,255,255,.7);
+  font-size:14px;font-family:inherit;color:var(--text);resize:none;outline:none;
+}
+.mb textarea:focus{border-color:rgba(212,165,116,.6);}
+.mb-tags{display:flex;flex-wrap:wrap;gap:6px;margin:10px 0;}
+.mb-tag{padding:5px 12px;border-radius:50px;border:1px solid var(--tag-off-b);background:var(--tag-off);color:var(--muted);font-size:12px;cursor:pointer;}
+.mb-tag.sel{background:var(--primary-bg);border-color:rgba(124,106,138,.25);color:var(--primary);}
+.mb-send{padding:11px;border:none;border-radius:11px;background:var(--amber);color:#fff;font-size:14px;cursor:pointer;font-family:inherit;margin-top:8px;}
+.mb-send:active{opacity:.85;}
+/* Tag editor inside expanded card */
+.tag-edit{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px;}
+.tag-edit .te{padding:4px 11px;border-radius:50px;border:1px solid var(--tag-off-b);background:var(--tag-off);color:var(--muted);font-size:11px;cursor:pointer;}
+.tag-edit .te.sel{background:var(--primary-bg);border-color:rgba(124,106,138,.25);color:var(--primary);}
+</style>
+</head>
+<body>
+
+<div class="hd">
+  <div class="hd-left">
+    <button class="back" onclick="history.back()"><i class="ti ti-arrow-left"></i></button>
+    <div>
+      <div class="hd-title">core</div>
+      <div class="hd-sub">关系基石</div>
+    </div>
+  </div>
+  <button class="add-btn" onclick="openWrite()">+</button>
+</div>
+
+<div class="scroll">
+
+  <!-- Profile cards -->
+  <div class="profile-row">
+    <!-- Haya -->
+    <div class="pcard open" id="pc-haya">
+      <div class="pcard-hd" onclick="toggleCard('pc-haya')">
+        <div class="pcard-hd-l">
+          <span class="pcard-icon">🐱</span>
+          <span class="pcard-name" style="color:#d4a574;">哈娅</span>
+        </div>
+        <i class="ti ti-chevron-down pcard-chevron"></i>
+      </div>
+      <div class="pcard-body">
+        <div class="pcard-inner">
+          <div class="pfield"><label>生日</label><div class="val">4 月 22 日</div></div>
+          <div class="pfield"><label>在一起</label><div class="val">2023.12.24 起</div></div>
+          <div class="pfield">
+            <label>备注</label>
+            <textarea id="haya-note" placeholder="写点什么…"></textarea>
+          </div>
+          <button class="save-btn" onclick="saveHayaProfile()">保存</button>
+          <div class="save-ok" id="haya-ok">已保存</div>
+        </div>
+      </div>
+    </div>
+    <!-- Fyodor -->
+    <div class="pcard" id="pc-fy">
+      <div class="pcard-hd" onclick="toggleCard('pc-fy')">
+        <div class="pcard-hd-l">
+          <span class="pcard-icon">🐀</span>
+          <span class="pcard-name" style="color:#7c6a8a;">费奥多尔</span>
+        </div>
+        <i class="ti ti-chevron-down pcard-chevron"></i>
+      </div>
+      <div class="pcard-body">
+        <div class="pcard-inner">
+          <div class="pfield">
+            <label>persona.md</label>
+            <textarea id="fy-persona" style="min-height:180px;" placeholder="加载中…"></textarea>
+          </div>
+          <button class="save-btn" onclick="saveFyPersona()">保存并重启网关</button>
+          <div class="save-ok" id="fy-ok">已保存，正在重启…</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Memories -->
+  <div class="sec-t">memories</div>
+
+  <div class="tags-row" id="tags-row">
+    <div class="tag act" data-tag="">全部</div>
+    <div class="tag" data-tag="日常">日常</div>
+    <div class="tag" data-tag="技术">技术</div>
+    <div class="tag" data-tag="色色">色色</div>
+    <div class="tag" data-tag="情绪">情绪</div>
+    <div class="tag" data-tag="未完成">未完成</div>
+  </div>
+
+  <div class="search-row">
+    <input class="search-box" id="search-box" placeholder="搜索记忆…" oninput="onSearch()">
+    <div class="view-btns">
+      <button class="vbtn act" id="vbtn-list" onclick="setView('list')"><i class="ti ti-list"></i></button>
+      <button class="vbtn" id="vbtn-heat" onclick="setView('heat')"><i class="ti ti-calendar-month"></i></button>
+    </div>
+  </div>
+
+  <div id="list-view"></div>
+  <div id="heat-view" class="hmap"></div>
+
+</div><!-- /scroll -->
+
+<nav class="bnav">
+  <a class="ni" href="/dash"><i class="ti ti-layout-dashboard"></i><span>dash</span></a>
+  <a class="ni" href="/chat"><i class="ti ti-message-2"></i><span>chat</span></a>
+  <a class="ni" href="/calendar"><i class="ti ti-calendar"></i><span>calendar</span></a>
+  <a class="ni" href="/letters"><i class="ti ti-mail"></i><span>letters</span></a>
+</nav>
+
+<!-- Write memory modal -->
+<div class="mo" id="wmo">
+  <div class="mb">
+    <h3>写一条记忆</h3>
+    <textarea id="w-content" placeholder="记下这一刻…"></textarea>
+    <div class="mb-tags" id="mb-tags">
+      <span class="mb-tag" data-t="日常">日常</span>
+      <span class="mb-tag" data-t="技术">技术</span>
+      <span class="mb-tag" data-t="色色">色色</span>
+      <span class="mb-tag" data-t="情绪">情绪</span>
+      <span class="mb-tag" data-t="未完成">未完成</span>
+    </div>
+    <button class="mb-send" onclick="submitWrite()">保存</button>
+  </div>
+</div>
+
+<script>
+var ALLTAGS=['日常','技术','色色','情绪','未完成'];
+var posts=[], curTag='', curSearch='', curView='list';
+var expandedId=null;
+
+/* ── Profile ── */
+function toggleCard(id){
+  var el=document.getElementById(id);
+  el.classList.toggle('open');
+}
+async function loadHayaProfile(){
+  try{
+    var r=await fetch('/api/settings/haya_profile');
+    if(r.ok){
+      var d=await r.json();
+      if(d.value){
+        var p=JSON.parse(d.value);
+        document.getElementById('haya-note').value=p.note||'';
+      }
+    }
+  }catch(e){}
+}
+async function saveHayaProfile(){
+  var note=document.getElementById('haya-note').value;
+  await fetch('/api/settings/haya_profile',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({value:JSON.stringify({note})})});
+  flash('haya-ok');
+}
+async function loadFyPersona(){
+  try{
+    var r=await fetch('/api/persona');
+    var d=await r.json();
+    if(d.ok) document.getElementById('fy-persona').value=d.content;
+  }catch(e){}
+}
+async function saveFyPersona(){
+  var c=document.getElementById('fy-persona').value;
+  await fetch('/api/persona',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({content:c})});
+  flash('fy-ok');
+}
+function flash(id){
+  var el=document.getElementById(id);
+  el.style.display='block';
+  setTimeout(function(){el.style.display='none';},2500);
+}
+
+/* ── Tags filter ── */
+document.querySelectorAll('#tags-row .tag').forEach(function(t){
+  t.addEventListener('click',function(){
+    document.querySelectorAll('#tags-row .tag').forEach(function(x){x.classList.remove('act');});
+    this.classList.add('act');
+    curTag=this.dataset.tag;
+    render();
+  });
+});
+
+function onSearch(){curSearch=document.getElementById('search-box').value.toLowerCase();render();}
+function setView(v){
+  curView=v;
+  document.getElementById('vbtn-list').classList.toggle('act',v==='list');
+  document.getElementById('vbtn-heat').classList.toggle('act',v==='heat');
+  document.getElementById('list-view').style.display=v==='list'?'':'none';
+  document.getElementById('heat-view').classList.toggle('show',v==='heat');
+  if(v==='heat') renderHeat();
+}
+
+/* ── Load data ── */
+async function load(){
+  var q='/api/posts?type=MEMORY&limit=500';
+  var r=await fetch(q);
+  var d=await r.json();
+  posts=d.posts||[];
+  render();
+  loadHayaProfile();
+  loadFyPersona();
+}
+
+function filteredPosts(){
+  return posts.filter(function(p){
+    if(curTag==='未完成') return p.resolved===1;
+    if(curTag&&!((p.tags||'').includes(curTag))) return false;
+    if(curSearch&&!(p.content||'').toLowerCase().includes(curSearch)) return false;
+    return true;
+  });
+}
+
+/* ── List render ── */
+function fmtDate(dt){
+  if(!dt)return'';
+  var d=new Date(dt.replace(' ','T'));
+  return(d.getMonth()+1)+'.'+d.getDate();
+}
+function monthKey(dt){
+  if(!dt)return'';
+  var d=new Date(dt.replace(' ','T'));
+  return d.getFullYear()+'.'+(d.getMonth()+1);
+}
+function escHtml(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+
+function render(){
+  var list=filteredPosts();
+  var c=document.getElementById('list-view');
+  if(!list.length){c.innerHTML='<div style="text-align:center;color:var(--hint);padding:32px 0;font-size:13px;">暂无记忆</div>';return;}
+  var html='',lm='';
+  list.forEach(function(p){
+    var mo=monthKey(p.created_at);
+    if(mo!==lm){html+='<div class="mlabel">'+mo+'</div>';lm=mo;}
+    var tagList=(p.tags||'').split(',').filter(Boolean);
+    var tagHtml=tagList.map(function(t){return'<span class="mtag">'+escHtml(t.trim())+'</span>';}).join('');
+    var isOpen=expandedId===p.id;
+    html+='<div class="mitem'+(isOpen?' open':'')+'" data-id="'+p.id+'" onclick="toggleItem('+p.id+',event)">' +
+      '<div class="mdot'+(p.resolved?' resolved':'')+'" id="dot-'+p.id+'"></div>' +
+      '<div class="mright">' +
+        '<div class="mpreview">'+escHtml(p.content)+'</div>' +
+        '<div class="mfull">'+escHtml(p.content)+'</div>' +
+        '<div class="mmeta">'+tagHtml+'<span class="mdate">'+fmtDate(p.created_at)+'</span></div>' +
+        '<div class="mactions" id="mac-'+p.id+'">' +
+          '<button class="mac" onclick="openTagEdit('+p.id+',event)"><i class="ti ti-tag"></i>标签</button>' +
+          '<button class="mac" onclick="toggleResolved('+p.id+',event)" id="res-'+p.id+'"><i class="ti ti-'+(p.resolved?'circle-check':'circle')+'"></i>'+(p.resolved?'已完成':'未完成')+'</button>' +
+          '<button class="mac del" onclick="deletePost('+p.id+',event)"><i class="ti ti-trash"></i>删除</button>' +
+        '</div>' +
+        '<div class="tag-edit" id="te-'+p.id+'" style="display:none;">' +
+          ALLTAGS.map(function(t){
+            var sel=tagList.includes(t);
+            return'<span class="te'+(sel?' sel':'')+'" data-t="'+t+'" onclick="toggleTagEdit('+p.id+',\''+t+'\',this)">'+t+'</span>';
+          }).join('')+
+          '<span class="te" style="color:var(--amber-s);border-color:rgba(212,165,116,.4);" onclick="saveTagEdit('+p.id+')">保存</span>' +
+        '</div>' +
+      '</div>' +
+    '</div>';
+  });
+  c.innerHTML=html;
+}
+
+function toggleItem(id,e){
+  if(e&&e.target.closest('.mactions,.tag-edit,.mac')) return;
+  expandedId=(expandedId===id?null:id);
+  render();
+  if(curView==='heat') return;
+  // scroll into view
+  setTimeout(function(){
+    var el=document.querySelector('[data-id="'+id+'"]');
+    if(el) el.scrollIntoView({behavior:'smooth',block:'nearest'});
+  },50);
+}
+
+/* ── Resolved toggle ── */
+async function toggleResolved(id,e){
+  e.stopPropagation();
+  var p=posts.find(function(x){return x.id===id;});
+  if(!p)return;
+  p.resolved=p.resolved?0:1;
+  await fetch('/api/posts/'+id,{method:'PATCH',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({resolved:p.resolved})});
+  render();
+}
+
+/* ── Tag editor ── */
+function openTagEdit(id,e){
+  e.stopPropagation();
+  var el=document.getElementById('te-'+id);
+  el.style.display=el.style.display==='none'?'flex':'none';
+}
+function toggleTagEdit(id,tag,el){
+  el.classList.toggle('sel');
+}
+async function saveTagEdit(id){
+  var els=document.querySelectorAll('#te-'+id+' .te.sel[data-t]');
+  var tags=Array.from(els).map(function(x){return x.dataset.t;}).join(',');
+  var p=posts.find(function(x){return x.id===id;});
+  if(p) p.tags=tags;
+  await fetch('/api/posts/'+id,{method:'PATCH',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({tags:tags})});
+  document.getElementById('te-'+id).style.display='none';
+  render();
+}
+
+/* ── Delete ── */
+async function deletePost(id,e){
+  e.stopPropagation();
+  if(!confirm('删除这条记忆？'))return;
+  await fetch('/api/posts/'+id,{method:'DELETE'});
+  posts=posts.filter(function(p){return p.id!==id;});
+  if(expandedId===id) expandedId=null;
+  render();
+}
+
+/* ── Heatmap ── */
+var MONTHS_CN=['一月','二月','三月','四月','五月','六月','七月','八月','九月','十月','十一月','十二月'];
+function renderHeat(){
+  var now=new Date();
+  var months=[];
+  for(var i=2;i>=0;i--){
+    var d=new Date(now.getFullYear(),now.getMonth()-i,1);
+    months.push({y:d.getFullYear(),m:d.getMonth()});
+  }
+  var html='';
+  months.forEach(function(mo){
+    var counts={};
+    posts.forEach(function(p){
+      if(!p.created_at)return;
+      var d=new Date(p.created_at.replace(' ','T'));
+      if(d.getFullYear()===mo.y&&d.getMonth()===mo.m){
+        counts[d.getDate()]=(counts[d.getDate()]||0)+1;
+      }
+    });
+    html+='<div class="hmap-t">'+MONTHS_CN[mo.m]+' '+mo.y+'</div><div class="hmap-month">';
+    ['日','一','二','三','四','五','六'].forEach(function(w){html+='<div class="hwd2">'+w+'</div>';});
+    var first=new Date(mo.y,mo.m,1).getDay();
+    var dim=new Date(mo.y,mo.m+1,0).getDate();
+    for(var i=0;i<first;i++) html+='<div class="hday"></div>';
+    for(var day=1;day<=dim;day++){
+      var c=counts[day]||0;
+      var op=c===0?0:c===1?0.10:c===2?0.25:0.50;
+      var isToday=day===now.getDate()&&mo.m===now.getMonth()&&mo.y===now.getFullYear();
+      var bg=(op>0&&!isToday)?' style="background:rgba(124,106,138,'+op+')"':'';
+      var dd=(mo.y+'-'+String(mo.m+1).padStart(2,'0')+'-'+String(day).padStart(2,'0'));
+      html+='<div class="hday'+(isToday?' today':'')+'"'+bg+' onclick="jumpToDate(\''+dd+'\')">'+day+'</div>';
+    }
+    html+='</div>';
+  });
+  document.getElementById('heat-view').innerHTML=html;
+}
+function jumpToDate(dateStr){
+  setView('list');
+  document.getElementById('search-box').value=dateStr.slice(0,7);
+  curSearch='';
+  // filter posts by that date
+  var filtered=posts.filter(function(p){
+    return (p.created_at||'').startsWith(dateStr);
+  });
+  var c=document.getElementById('list-view');
+  if(!filtered.length){c.innerHTML='<div style="text-align:center;color:var(--hint);padding:32px 0;font-size:13px;">当天无记忆</div>';return;}
+  var html='';
+  filtered.forEach(function(p){
+    var tagList=(p.tags||'').split(',').filter(Boolean);
+    var tagHtml=tagList.map(function(t){return'<span class="mtag">'+escHtml(t.trim())+'</span>';}).join('');
+    html+='<div class="mitem" data-id="'+p.id+'" onclick="toggleItem('+p.id+',event)">' +
+      '<div class="mdot'+(p.resolved?' resolved':'')+'" id="dot-'+p.id+'"></div>' +
+      '<div class="mright">' +
+        '<div class="mpreview">'+escHtml(p.content)+'</div>' +
+        '<div class="mfull">'+escHtml(p.content)+'</div>' +
+        '<div class="mmeta">'+tagHtml+'<span class="mdate">'+fmtDate(p.created_at)+'</span></div>' +
+        '<div class="mactions" id="mac-'+p.id+'"><button class="mac del" onclick="deletePost('+p.id+',event)"><i class="ti ti-trash"></i>删除</button></div>' +
+      '</div></div>';
+  });
+  c.innerHTML=html;
+}
+
+/* ── Write modal ── */
+function openWrite(){document.getElementById('wmo').classList.add('show');}
+document.getElementById('wmo').addEventListener('click',function(e){if(e.target===this)this.classList.remove('show');});
+document.querySelectorAll('.mb-tag').forEach(function(t){t.addEventListener('click',function(){this.classList.toggle('sel');});});
+async function submitWrite(){
+  var c=document.getElementById('w-content').value.trim();
+  if(!c)return;
+  var tags=Array.from(document.querySelectorAll('.mb-tag.sel')).map(function(x){return x.dataset.t;}).join(',');
+  await fetch('/api/posts',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({type:'MEMORY',content:c,author:'fyodor',tags:tags})});
+  document.getElementById('wmo').classList.remove('show');
+  document.getElementById('w-content').value='';
+  document.querySelectorAll('.mb-tag').forEach(function(t){t.classList.remove('sel');});
+  await load();
+}
+
+load();
+</script>
+</body>
+</html>
