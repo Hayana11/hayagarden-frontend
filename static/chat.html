@@ -168,6 +168,29 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:14px;heigh
 .drift-badge i{font-size:12px;}
 .bubble.drift{background:linear-gradient(135deg,rgba(212,165,116,.12),rgba(124,106,138,.08));border:1px solid rgba(212,165,116,.25);border-radius:16px 16px 16px 4px;padding:10px 14px;font-size:var(--msg-font);line-height:1.7;word-break:break-all;color:var(--text);}
 .bubble.drift.sent{border-radius:16px 16px 4px 16px;}
+
+/* ── Dark mode ── */
+html[data-theme=dark]{--bg:#161312;--card:#211d1c;--text:#e8e2dc;--muted:#9a8d8d;--primary:#a392b5;--primary-bg:#2c2733;--primary-light:rgba(163,146,181,.13);--amber:#d4a574;--amber-bg:#352a1d;--amber-text:#3a2402;--border:#332d2b;}
+html[data-theme=dark] .hd,html[data-theme=dark] .inp-area,html[data-theme=dark] .bnav{background:rgba(26,22,21,.97);}
+html[data-theme=dark] .think-body{color:rgba(232,226,220,.5);}
+html[data-theme=dark] .drift-card{background:#262120;}
+html[data-theme=dark] .drift-card-title{color:#e8d9c4;}
+html[data-theme=dark] .inp-area.blocked .inp-txt{background:#262120;}
+html[data-theme=dark] .ni{color:#6a5f5f;}
+/* ── Action sheet ── */
+.sheet-ov{display:none;position:fixed;inset:0;background:rgba(0,0,0,.35);z-index:500;align-items:flex-end;justify-content:center;}
+.sheet-ov.show{display:flex;}
+.sheet{background:var(--card);border-radius:18px 18px 0 0;width:100%;max-width:480px;padding:10px 14px calc(16px + env(safe-area-inset-bottom,0px));}
+.sheet-btn{display:flex;align-items:center;gap:10px;width:100%;padding:14px 10px;border:none;background:none;font-size:15px;font-family:inherit;color:var(--text);cursor:pointer;border-radius:10px;}
+.sheet-btn:active{background:var(--primary-light);}
+.sheet-btn i{font-size:19px;color:var(--muted);}
+.sheet-cancel{justify-content:center;color:var(--muted);}
+.toast{position:fixed;bottom:120px;left:50%;transform:translateX(-50%);background:rgba(42,32,32,.88);color:#fff;font-size:13px;padding:9px 18px;border-radius:20px;z-index:600;opacity:0;transition:opacity .25s;pointer-events:none;}
+.toast.show{opacity:1;}
+/* ── Floating bottles list ── */
+.drift-floating{display:flex;flex-direction:column;gap:6px;max-height:130px;overflow-y:auto;}
+.drift-float-item{font-size:11px;color:var(--muted);background:var(--primary-light);border-radius:10px;padding:8px 12px;display:flex;align-items:center;gap:6px;}
+.drift-float-item i{font-size:13px;color:var(--amber);opacity:.7;}
 </style>
 </head>
 <body>
@@ -179,6 +202,7 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:14px;heigh
     <span class="hd-name">Fyodor</span>
   </div>
   <div class="hd-right">
+    <button class="hd-btn" id="theme-btn" onclick="toggleTheme()" title="theme"><i class="ti ti-moon"></i></button>
     <button class="hd-btn" id="aa-btn" onclick="togglePanel('aa-panel','aa-btn')" title="font size">Aa</button>
     <button class="hd-btn" onclick="openHistory()" title="history"><i class="ti ti-clock"></i></button>
     <button class="hd-btn" id="sp-btn" onclick="togglePanel('status-panel','sp-btn')" title="Fyodor"><i class="ti ti-user"></i></button>
@@ -273,8 +297,19 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:14px;heigh
     <textarea class="drift-textarea" id="drift-txt" placeholder="……" rows="5"></textarea>
     <button class="drift-send-btn" id="drift-send-btn" onclick="sendBottle()">投出去</button>
     <div class="drift-sent-msg" id="drift-sent-msg">漂流瓶已投出<br>等待被捡到…</div>
+    <div class="drift-floating" id="drift-floating"></div>
   </div>
 </div>
+
+<!-- Action sheet -->
+<div class="sheet-ov" id="sheet-ov" onclick="if(event.target===this)closeSheet()">
+  <div class="sheet">
+    <button class="sheet-btn" onclick="sheetCopy()"><i class="ti ti-copy"></i>复制</button>
+    <button class="sheet-btn" onclick="sheetMemory()"><i class="ti ti-heart"></i>收藏到回忆</button>
+    <button class="sheet-btn sheet-cancel" onclick="closeSheet()">取消</button>
+  </div>
+</div>
+<div class="toast" id="toast"></div>
 
 <!-- Lightbox -->
 <div class="lb" id="lb" onclick="closeLb()">
@@ -283,6 +318,19 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:14px;heigh
 </div>
 
 <script>
+function applyTheme(t){
+  document.documentElement.setAttribute('data-theme', t);
+  var ic=document.querySelector('#theme-btn i');
+  if(ic) ic.className = t==='dark' ? 'ti ti-sun' : 'ti ti-moon';
+}
+var curTheme = localStorage.getItem('theme') || (window.matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light');
+applyTheme(curTheme);
+function toggleTheme(){
+  curTheme = curTheme==='dark'?'light':'dark';
+  localStorage.setItem('theme', curTheme);
+  applyTheme(curTheme);
+}
+
 var curAuthor = 'hayana';
 var pendingFile = null;
 var sending = false;
@@ -395,15 +443,16 @@ function toggleThink(btn) {
 
 // Build message HTML
 function buildHtml(list) {
+  window.curMsgList = list;
   if(!list.length) return '<div class="empty-tip">no messages yet<br>say the first thing</div>';
   var html='', lastDay='';
-  list.forEach(function(m){
+  list.forEach(function(m,i){
     var dk = dayKey(m.created_at);
     if(dk !== lastDay){ html += '<div class="date-sep">'+dayLabel(m.created_at)+'</div>'; lastDay=dk; }
     if(m.drift){
       var dside = m.drift==='sent' ? 'ha' : 'fy';
       html +=
-        '<div class="msg-row '+dside+'">' +
+        '<div class="msg-row '+dside+'" data-idx="'+i+'">' +
           '<div class="bwrap">' +
             '<div class="drift-badge"'+(dside==='ha'?' style="justify-content:flex-end"':'')+'><i class="ti ti-mail-forward"></i> '+(m.drift==='sent'?'漂流瓶 · 已投出':'漂流瓶回信')+'</div>' +
             '<div class="bubble drift'+(dside==='ha'?' sent':'')+'">'+escHtml(m.content)+'</div>' +
@@ -434,7 +483,7 @@ function buildHtml(list) {
     if(hasTxt) innerHtml += (hasImg?'<div class="img-then-text">':'')+escHtml(m.content)+(hasImg?'</div>':'');
 
     html +=
-      '<div class="msg-row '+side+'">' +
+      '<div class="msg-row '+side+'" data-idx="'+i+'">' +
         '<div class="bwrap">' +
           '<div class="bubble '+side+(imgOnly?' img-only':'')+'">'+innerHtml+'</div>' +
           '<div class="msg-time">'+fmtTime(m.created_at)+'</div>' +
@@ -457,6 +506,7 @@ async function loadMsgs(isInit){
         if(b.status==='found'&&b.reply) list.push({author:'fyodor',content:b.reply,created_at:b.found_at,drift:'reply'});
       });
       list.sort(function(a,b){return String(a.created_at).localeCompare(String(b.created_at));});
+      notifyNewDriftReplies(db.bottles||[]);
     }catch(e){}
     var c=document.getElementById('msgs');
     var wasAtBottom=c.scrollHeight-c.scrollTop-c.clientHeight<80;
@@ -518,10 +568,16 @@ async function send(){
     if(fromHayana){
       showTyping();
       try{
-        var gr=await fetch('/api/gw/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({})});
-        var gd=await gr.json();
+        var fullText='';
+        try{ fullText=await streamReply(); }
+        catch(se){
+          console.warn('stream failed, fallback', se);
+          var gr=await fetch('/api/gw/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({})});
+          var gd=await gr.json();
+          fullText=gd.content||'';
+        }
         await loadMsgs(false);
-        if(gd.content&&document.hidden) notify('Fyodor',gd.content.slice(0,50));
+        if(fullText&&document.hidden) notify('Fyodor',fullText.slice(0,50));
       }catch(e){ console.error('gateway',e); }
       hideTyping();
     }
@@ -585,6 +641,7 @@ function openBottle() {
   document.getElementById('drift-send-btn').style.display = '';
   document.getElementById('drift-send-btn').disabled = false;
   document.getElementById('drift-sent-msg').style.display = 'none';
+  loadFloating();
   setTimeout(function(){ document.getElementById('drift-txt').focus(); }, 100);
 }
 function closeDriftModal() { document.getElementById('drift-modal').classList.remove('show'); }
@@ -609,6 +666,126 @@ async function sendBottle() {
 checkBlocked();
 setInterval(checkBlocked, 15000);
 
+
+// ── Streaming reply ──
+async function streamReply(){
+  var resp = await fetch('/api/gw/chat/stream',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
+  if(!resp.ok||!resp.body) throw new Error('stream failed');
+  var reader=resp.body.getReader(), decoder=new TextDecoder();
+  var buf='', text='', live=null;
+  var c=document.getElementById('msgs');
+  while(true){
+    var chunk=await reader.read();
+    if(chunk.done) break;
+    buf+=decoder.decode(chunk.value,{stream:true});
+    var parts=buf.split('\n\n');
+    buf=parts.pop();
+    for(var i=0;i<parts.length;i++){
+      var line=parts[i].trim();
+      if(line.indexOf('data:')!==0) continue;
+      var ev; try{ ev=JSON.parse(line.slice(5)); }catch(e){ continue; }
+      if(ev.t==='text'){
+        text+=ev.d;
+        if(!live){
+          hideTyping();
+          c.insertAdjacentHTML('beforeend','<div class="msg-row fy" id="live-row"><div class="bwrap"><div class="bubble fy" id="live-bubble"></div></div></div>');
+          live=document.getElementById('live-bubble');
+        }
+        live.innerHTML=escHtml(text);
+        c.scrollTop=c.scrollHeight;
+      } else if(ev.t==='err'){ throw new Error(ev.d); }
+    }
+  }
+  var lr=document.getElementById('live-row'); if(lr) lr.remove();
+  return text;
+}
+
+// ── Drift reply notification ──
+function notifyNewDriftReplies(bottles){
+  var found=bottles.filter(function(b){return b.status==='found'&&b.reply;}).map(function(b){return b.id;});
+  if(localStorage.getItem('driftSeen')===null){
+    localStorage.setItem('driftSeen',JSON.stringify(found));
+    return;
+  }
+  var seen=[];
+  try{ seen=JSON.parse(localStorage.getItem('driftSeen')||'[]'); }catch(e){}
+  var fresh=found.filter(function(id){return seen.indexOf(id)===-1;});
+  if(fresh.length){
+    var b=bottles.find(function(x){return x.id===fresh[0];});
+    notify('漂流瓶被捡到了','费奥多尔回信："'+(b?b.reply.slice(0,50):'')+'…"');
+    localStorage.setItem('driftSeen',JSON.stringify(found));
+  }
+}
+
+// ── Floating bottles list ──
+function timeAgo(dt){
+  try{
+    var d=new Date(String(dt).replace(' ','T'));
+    var mins=Math.max(1,Math.round((Date.now()-d.getTime())/60000));
+    if(mins<60) return mins+' 分钟前';
+    var h=Math.round(mins/60); if(h<24) return h+' 小时前';
+    return Math.round(h/24)+' 天前';
+  }catch(e){ return ''; }
+}
+async function loadFloating(){
+  var el=document.getElementById('drift-floating');
+  el.innerHTML='';
+  try{
+    var r=await fetch('/api/drift/bottles');
+    var d=await r.json();
+    var fl=(d.bottles||[]).filter(function(b){return b.status==='floating';});
+    el.innerHTML=fl.map(function(b){
+      return '<div class="drift-float-item"><i class="ti ti-ripple"></i>投出于 '+timeAgo(b.created_at)+' · 还在漂\u2026</div>';
+    }).join('');
+  }catch(e){}
+}
+
+// ── Long-press menu ──
+var sheetMsg=null, lpTimer=null;
+var msgsEl=document.getElementById('msgs');
+msgsEl.addEventListener('touchstart',function(e){
+  var row=e.target.closest('.msg-row');
+  if(!row||row.dataset.idx===undefined) return;
+  lpTimer=setTimeout(function(){ openSheet(parseInt(row.dataset.idx)); },550);
+},{passive:true});
+msgsEl.addEventListener('touchmove',function(){ clearTimeout(lpTimer); },{passive:true});
+msgsEl.addEventListener('touchend',function(){ clearTimeout(lpTimer); });
+msgsEl.addEventListener('contextmenu',function(e){
+  var row=e.target.closest('.msg-row');
+  if(!row||row.dataset.idx===undefined) return;
+  e.preventDefault();
+  openSheet(parseInt(row.dataset.idx));
+});
+function openSheet(idx){
+  var list=window.curMsgList||[];
+  if(!list[idx]||!(list[idx].content||'').trim()) return;
+  sheetMsg=list[idx];
+  document.getElementById('sheet-ov').classList.add('show');
+}
+function closeSheet(){ document.getElementById('sheet-ov').classList.remove('show'); }
+function showToast(t){
+  var el=document.getElementById('toast');
+  el.textContent=t; el.classList.add('show');
+  setTimeout(function(){ el.classList.remove('show'); },1800);
+}
+async function sheetCopy(){
+  if(!sheetMsg) return;
+  try{ await navigator.clipboard.writeText(sheetMsg.content); }
+  catch(e){
+    var ta=document.createElement('textarea'); ta.value=sheetMsg.content;
+    document.body.appendChild(ta); ta.select(); document.execCommand('copy'); ta.remove();
+  }
+  showToast('已复制'); closeSheet();
+}
+async function sheetMemory(){
+  if(!sheetMsg) return;
+  try{
+    await fetch('/api/posts',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({type:'MEMORY',content:sheetMsg.content,author:isFy(sheetMsg.author)?'fyodor':'user'})});
+    showToast('已收藏到回忆 \u2661');
+  }catch(e){ showToast('收藏失败'); }
+  closeSheet();
+}
 </script>
 </body>
 </html>

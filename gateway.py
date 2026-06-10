@@ -158,5 +158,70 @@ def chat():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
+
+@app.route('/chat/stream', methods=['POST'])
+def chat_stream():
+    from flask import Response, stream_with_context
+    def generate():
+        try:
+            system   = build_system()
+            messages = build_messages()
+            payload = {
+                'model': MODEL,
+                'max_tokens': 16000,
+                'thinking': {'type': 'enabled', 'budget_tokens': 10000},
+                'stream': True,
+                'system': system,
+                'messages': messages,
+            }
+            req = urllib.request.Request(
+                API_URL,
+                data=json.dumps(payload).encode(),
+                headers={
+                    'Content-Type': 'application/json',
+                    'x-api-key': API_KEY,
+                    'anthropic-version': '2023-06-01',
+                }
+            )
+            resp = urllib.request.urlopen(req, timeout=300)
+            think_acc, text_acc = [], []
+            for raw in resp:
+                line = raw.decode('utf-8', 'ignore').strip()
+                if not line.startswith('data:'):
+                    continue
+                data = line[5:].strip()
+                try:
+                    ev = json.loads(data)
+                except Exception:
+                    continue
+                et = ev.get('type')
+                if et == 'content_block_delta':
+                    d = ev.get('delta', {})
+                    if d.get('type') == 'thinking_delta':
+                        think_acc.append(d.get('thinking', ''))
+                        yield 'data: ' + json.dumps({'t': 'think', 'd': d.get('thinking', '')}) + '\n\n'
+                    elif d.get('type') == 'text_delta':
+                        text_acc.append(d.get('text', ''))
+                        yield 'data: ' + json.dumps({'t': 'text', 'd': d.get('text', '')}) + '\n\n'
+                elif et == 'message_stop':
+                    break
+            text     = ''.join(text_acc)
+            thinking = ''.join(think_acc)
+            if text:
+                conn = get_db()
+                conn.execute(
+                    "INSERT INTO chat_messages (author, content, thinking) VALUES ('assistant', ?, ?)",
+                    (text, thinking)
+                )
+                conn.commit()
+                conn.close()
+            yield 'data: ' + json.dumps({'t': 'done', 'ok': bool(text)}) + '\n\n'
+        except urllib.error.HTTPError as e:
+            yield 'data: ' + json.dumps({'t': 'err', 'd': 'API %s: %s' % (e.code, e.read().decode()[:300])}) + '\n\n'
+        except Exception as e:
+            yield 'data: ' + json.dumps({'t': 'err', 'd': str(e)}) + '\n\n'
+    return Response(stream_with_context(generate()), mimetype='text/event-stream',
+                    headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
+
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5051, debug=False)
