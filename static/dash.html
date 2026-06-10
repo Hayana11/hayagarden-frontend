@@ -1,0 +1,385 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+<title>我们家</title>
+<link rel="manifest" href="/manifest.json">
+<meta name="theme-color" content="#7c6a8a">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="我们家">
+<link rel="apple-touch-icon" href="/icon-192.png">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@latest/tabler-icons.min.css">
+<style>
+*{margin:0;padding:0;box-sizing:border-box;}
+:root{
+  --bg:#f8f8f6;--card:#fff;--text:#2a2020;--muted:#9a8a8a;
+  --primary:#7c6a8a;--primary-bg:#f0ebf4;--primary-light:#e8dff0;
+  --amber:#d4a574;--amber-bg:#fdf4e7;--amber-light:#f5e4cc;
+  --border:#ece6e0;--shadow:0 1px 8px rgba(40,20,20,.07);
+}
+body{background:var(--bg);color:var(--text);font-family:-apple-system,'PingFang SC','Noto Sans SC',sans-serif;min-height:100vh;max-width:480px;margin:0 auto;padding-bottom:calc(72px + env(safe-area-inset-bottom,0px));}
+
+/* Header */
+.hd{padding:40px 20px 14px;text-align:center;}
+.hd h1{font-size:22px;font-weight:700;letter-spacing:2px;color:var(--text);}
+.hd h1 .fy{color:var(--primary);}
+.hd h1 .ha{color:var(--amber);}
+.hd .sub{font-size:12px;color:var(--muted);margin-top:5px;letter-spacing:.5px;}
+
+/* Stats */
+.stats{display:flex;justify-content:center;gap:24px;padding:12px 20px 8px;}
+.st{text-align:center;}
+.st-n{font-size:26px;font-weight:800;line-height:1;}
+.st-n.d{color:#6ba3c0;}.st-n.f{color:var(--primary);}.st-n.h{color:var(--amber);}.st-n.m{color:#c47884;}
+.st-l{font-size:11px;color:var(--muted);margin-top:3px;}
+
+/* Countdowns */
+.cds{display:flex;gap:10px;padding:10px 20px 4px;overflow-x:auto;scrollbar-width:none;}
+.cds::-webkit-scrollbar{display:none;}
+.cd-card{flex-shrink:0;background:var(--card);border-radius:14px;padding:11px 16px;text-align:center;box-shadow:var(--shadow);}
+.cd-em{font-size:20px;}
+.cd-days{font-size:22px;font-weight:800;color:var(--primary);}
+.cd-title{font-size:11px;color:var(--muted);margin-top:2px;}
+
+/* Miss button */
+.miss-wrap{padding:14px 20px 8px;text-align:center;}
+.miss-btn{background:var(--primary);color:#fff;border:none;border-radius:50px;padding:12px 36px;font-size:15px;cursor:pointer;font-family:inherit;transition:transform .15s;box-shadow:0 2px 12px rgba(124,106,138,.3);letter-spacing:.5px;}
+.miss-btn:active{transform:scale(.94);}
+@keyframes beat{0%,100%{transform:scale(1)}50%{transform:scale(1.22)}}
+.miss-btn.beating{animation:beat .3s ease;}
+.miss-info{font-size:12px;color:var(--muted);margin-top:6px;}
+
+/* Filters */
+.filters{padding:4px 20px;}
+.frow{display:flex;gap:7px;margin-bottom:7px;overflow-x:auto;scrollbar-width:none;padding-bottom:1px;}
+.frow::-webkit-scrollbar{display:none;}
+.fb{flex-shrink:0;padding:7px 15px;border-radius:50px;border:1.5px solid var(--border);background:var(--card);color:var(--muted);font-size:13px;cursor:pointer;transition:all .15s;font-family:inherit;}
+.fb.a{background:var(--primary);border-color:var(--primary);color:#fff;}
+.fb.af{background:var(--primary);border-color:var(--primary);color:#fff;}
+.fb.ah{background:var(--amber);border-color:var(--amber);color:#fff;}
+
+/* Action buttons */
+.act-btn{display:block;margin:10px 20px 0;width:calc(100% - 40px);padding:13px;color:#fff;border:none;border-radius:12px;font-size:14px;cursor:pointer;font-family:inherit;transition:opacity .18s;letter-spacing:.3px;text-align:center;}
+.act-btn:active{opacity:.82;}
+.act-btn.purple{background:var(--primary);box-shadow:0 2px 10px rgba(124,106,138,.22);}
+.act-btn.amber{background:var(--amber);box-shadow:0 2px 10px rgba(212,165,116,.22);}
+
+/* Memory cards */
+.mems{padding:4px 20px 8px;}
+.month-lbl{font-size:11px;color:var(--muted);margin:14px 0 8px;display:flex;align-items:center;gap:8px;letter-spacing:.3px;}
+.month-lbl::after{content:'';flex:1;height:1px;background:var(--border);}
+.card{background:var(--card);border-radius:14px;padding:14px 16px;margin-bottom:9px;box-shadow:var(--shadow);}
+.card.fc{background:var(--primary-bg);}
+.card.hc{background:var(--amber-bg);}
+.ch{display:flex;align-items:center;gap:7px;margin-bottom:8px;}
+.cav{font-size:16px;}
+.cau{font-size:13px;font-weight:600;}
+.cau.f{color:var(--primary);}.cau.h{color:var(--amber);}
+.ctm{font-size:11px;color:var(--muted);margin-left:auto;}
+.cdel{background:none;border:none;color:var(--muted);font-size:12px;cursor:pointer;padding:0;margin-left:6px;opacity:.6;}
+.cdel:hover{opacity:1;}
+.badge{display:inline-block;font-size:10px;padding:2px 8px;border-radius:8px;margin-bottom:6px;letter-spacing:.3px;}
+.badge.fb2{background:var(--primary-light);color:var(--primary);}
+.badge.hb{background:var(--amber-light);color:var(--amber);}
+.badge.def{background:#f0ece8;color:var(--muted);}
+.cc{font-size:14px;line-height:1.7;color:var(--text);word-break:break-all;white-space:pre-wrap;}
+.empty{text-align:center;color:var(--muted);padding:48px 20px;font-size:14px;line-height:2.2;}
+
+/* Bottom nav */
+.bnav{position:fixed;bottom:0;left:50%;transform:translateX(-50%);width:100%;max-width:480px;background:rgba(255,255,255,.97);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);border-top:1px solid var(--border);display:flex;z-index:50;padding:7px 0 calc(7px + env(safe-area-inset-bottom,0px));}
+.ni{flex:1;display:flex;flex-direction:column;align-items:center;gap:3px;text-decoration:none;border:none;background:none;cursor:pointer;color:#b0a0aa;font-size:10px;letter-spacing:.4px;font-family:inherit;padding:4px 0;transition:color .18s;}
+.ni i{font-size:21px;}
+.ni.act{color:var(--primary);}
+
+/* Modals */
+.mo{display:none;position:fixed;inset:0;background:rgba(0,0,0,.25);z-index:100;align-items:flex-end;justify-content:center;}
+.mo.show{display:flex;}
+.mb{background:var(--bg);border-radius:22px 22px 0 0;padding:22px 20px calc(44px + env(safe-area-inset-bottom,0px));width:100%;max-width:480px;}
+.mb h3{font-size:16px;font-weight:700;margin-bottom:16px;text-align:center;color:var(--text);}
+.mb select,.mb textarea,.mb input{width:100%;padding:11px 14px;border-radius:11px;border:1.5px solid var(--border);background:var(--card);font-size:14px;font-family:inherit;color:var(--text);margin-bottom:10px;outline:none;-webkit-appearance:none;}
+.mb select:focus,.mb textarea:focus,.mb input:focus{border-color:var(--primary);}
+.mb textarea{min-height:100px;resize:none;}
+.mbtns{display:flex;gap:10px;margin-top:4px;}
+.mbtns button{flex:1;padding:12px;border-radius:11px;border:none;font-size:14px;cursor:pointer;font-family:inherit;}
+.bcn{background:var(--border);color:var(--muted);}
+.bsb{background:var(--primary);color:#fff;}
+</style>
+</head>
+<body>
+
+<div class="hd">
+  <h1><span class="fy">Fyodor</span> &amp; <span class="ha">Haya</span></h1>
+  <div class="sub" id="hd-sub">together · loading…</div>
+</div>
+
+<div class="stats">
+  <div class="st"><div class="st-n d" id="s-days">—</div><div class="st-l">days</div></div>
+  <div class="st"><div class="st-n f" id="s-fy">—</div><div class="st-l">Fyodor</div></div>
+  <div class="st"><div class="st-n h" id="s-ha">—</div><div class="st-l">Haya</div></div>
+  <div class="st"><div class="st-n m" id="s-miss">—</div><div class="st-l">missing</div></div>
+</div>
+
+<div class="cds" id="cds"></div>
+
+<div class="miss-wrap">
+  <button class="miss-btn" id="miss-btn" onclick="pressMiss()">missing you</button>
+  <div class="miss-info" id="miss-info"></div>
+</div>
+
+<div class="filters">
+  <div class="frow" id="af">
+    <button class="fb a" onclick="setAF('all',this)">all</button>
+    <button class="fb" onclick="setAF('fyodor',this)">Fyodor</button>
+    <button class="fb" onclick="setAF('hayana',this)">Haya</button>
+  </div>
+  <div class="frow" id="tf">
+    <button class="fb a" onclick="setTF('all',this)">all</button>
+    <button class="fb" onclick="setTF('MEMORY',this)">memory</button>
+    <button class="fb" onclick="setTF('DIARY',this)">diary</button>
+    <button class="fb" onclick="setTF('EVENT',this)">event</button>
+    <button class="fb" onclick="setTF('PROMISE',this)">promise</button>
+    <button class="fb" onclick="setTF('MOMENT',this)">moment</button>
+    <button class="fb" onclick="setTF('WISH',this)">wish</button>
+  </div>
+</div>
+
+<button class="act-btn purple" onclick="openWrite()">write a memory</button>
+<button class="act-btn amber" id="diary-btn" onclick="genDiary()" style="margin-top:8px;">Fyodor writes today's diary</button>
+
+<div class="mems" id="mems"></div>
+
+<nav class="bnav">
+  <a class="ni act" href="/dash"><i class="ti ti-layout-dashboard"></i><span>dash</span></a>
+  <a class="ni" href="/chat"><i class="ti ti-message-2"></i><span>chat</span></a>
+  <a class="ni" href="/calendar"><i class="ti ti-calendar"></i><span>calendar</span></a>
+  <a class="ni" href="/letters"><i class="ti ti-mail"></i><span>letters</span></a>
+</nav>
+
+<!-- Write Modal -->
+<div class="mo" id="wmo">
+  <div class="mb">
+    <h3>write a memory</h3>
+    <select id="w-author">
+      <option value="hayana">Haya</option>
+      <option value="fyodor">Fyodor</option>
+    </select>
+    <select id="w-type">
+      <option value="MEMORY">memory</option>
+      <option value="DIARY">diary</option>
+      <option value="EVENT">event</option>
+      <option value="PROMISE">promise</option>
+      <option value="MOMENT">moment</option>
+      <option value="WISH">wish</option>
+    </select>
+    <textarea id="w-content" placeholder="write it down…"></textarea>
+    <div class="mbtns">
+      <button class="bcn" onclick="closeWrite()">cancel</button>
+      <button class="bsb" onclick="submitMem()">save</button>
+    </div>
+  </div>
+</div>
+
+<!-- Countdown Modal -->
+<div class="mo" id="cdmo">
+  <div class="mb">
+    <h3>add countdown</h3>
+    <input type="text" id="cd-title" placeholder="title">
+    <input type="text" id="cd-emoji" placeholder="emoji (e.g. 🎂)">
+    <input type="date" id="cd-date">
+    <select id="cd-type">
+      <option value="countdown">countdown (days until)</option>
+      <option value="countup">countup (days since)</option>
+    </select>
+    <div class="mbtns">
+      <button class="bcn" onclick="closeCD()">cancel</button>
+      <button class="bsb" onclick="submitCD()">add</button>
+    </div>
+  </div>
+</div>
+
+<script>
+var AF='all', TF='all', posts=[];
+var TNAME={MEMORY:'memory',DIARY:'diary',EVENT:'event',PROMISE:'promise',MOMENT:'moment',WISH:'wish',MISS:'missing'};
+var TOGETHER_SINCE = new Date('2023-12-24');
+
+function isFy(a){return['fyodor','claude','assistant'].includes(String(a).toLowerCase());}
+
+function fmtDate(dt){
+  if(!dt)return'';
+  var d=new Date(dt.replace(' ','T'));
+  return(d.getMonth()+1)+'.'+d.getDate()+' '+
+    String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0');
+}
+
+function monthKey(dt){
+  if(!dt)return'';
+  var d=new Date(dt.replace(' ','T'));
+  return d.getFullYear()+'.'+(d.getMonth()+1);
+}
+
+async function load(){
+  try{
+    var r=await fetch('/api/posts');
+    var d=await r.json();
+    posts=d.posts||[];
+    updateStats(); render();
+  }catch(e){console.error(e);}
+}
+
+function updateStats(){
+  var fy=posts.filter(p=>isFy(p.author)&&p.type!=='MISS');
+  var ha=posts.filter(p=>!isFy(p.author)&&p.type!=='MISS');
+  var ms=posts.filter(p=>p.type==='MISS');
+  document.getElementById('s-fy').textContent=fy.length;
+  document.getElementById('s-ha').textContent=ha.length;
+  document.getElementById('s-miss').textContent=ms.length;
+  var days=Math.floor((new Date()-TOGETHER_SINCE)/(864e5));
+  document.getElementById('s-days').textContent=days;
+  document.getElementById('hd-sub').textContent='together '+days+' days · love-style.xyz';
+  if(ms.length>0){
+    var last=ms[ms.length-1];
+    document.getElementById('miss-info').textContent=
+      ms.length+' times · last '+fmtDate(last.created_at);
+  }
+}
+
+function render(){
+  var list=posts.filter(p=>p.type!=='MISS');
+  if(AF==='fyodor') list=list.filter(p=>isFy(p.author));
+  else if(AF==='hayana') list=list.filter(p=>!isFy(p.author));
+  if(TF!=='all') list=list.filter(p=>p.type===TF);
+  var c=document.getElementById('mems');
+  if(!list.length){c.innerHTML='<div class="empty">nothing here yet</div>';return;}
+  var html='',lm='';
+  list.forEach(function(p){
+    var mo=monthKey(p.created_at);
+    if(mo!==lm){html+='<div class="month-lbl">'+mo+'</div>';lm=mo;}
+    var f=isFy(p.author);
+    var bc=f?'badge fb2':'badge hb';
+    html+='<div class="card '+(f?'fc':'hc')+'">' +
+      '<div class="ch">' +
+        '<span class="cav">'+(f?'🐀':'🐱')+'</span>' +
+        '<span class="cau '+(f?'f':'h')+'">'+(f?'Fyodor':'Haya')+'</span>' +
+        '<span class="ctm">'+fmtDate(p.created_at)+'</span>' +
+        '<button class="cdel" onclick="delPost('+p.id+',event)">×</button>' +
+      '</div>' +
+      '<span class="'+bc+'">'+(TNAME[p.type]||p.type)+'</span>' +
+      '<div class="cc">'+escHtml(p.content)+'</div>' +
+    '</div>';
+  });
+  c.innerHTML=html;
+}
+
+function escHtml(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+
+function setAF(v,btn){
+  AF=v;
+  document.querySelectorAll('#af .fb').forEach(b=>b.className='fb');
+  btn.classList.add(v==='fyodor'?'af':v==='hayana'?'ah':'a');
+  render();
+}
+function setTF(v,btn){
+  TF=v;
+  document.querySelectorAll('#tf .fb').forEach(b=>b.className='fb');
+  btn.classList.add('a');
+  render();
+}
+
+async function pressMiss(){
+  var btn=document.getElementById('miss-btn');
+  btn.classList.add('beating');
+  setTimeout(()=>btn.classList.remove('beating'),350);
+  await fetch('/api/posts',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({type:'MISS',content:'missing you',author:'hayana'})});
+  var fd=new FormData(); fd.append('author','hayana'); fd.append('content','想你了');
+  await fetch('/api/chat/send',{method:'POST',body:fd});
+  try{
+    var r=await fetch('/api/gw/chat',{method:'POST',
+      headers:{'Content-Type':'application/json'},body:JSON.stringify({})});
+    var d=await r.json();
+    if(d.content) notify('Fyodor', d.content.slice(0,80));
+  }catch(e){}
+  await load();
+}
+
+async function delPost(id,e){
+  e.stopPropagation();
+  if(!confirm('delete this?'))return;
+  await fetch('/api/posts/'+id,{method:'DELETE'});
+  await load();
+}
+
+function openWrite(){document.getElementById('wmo').classList.add('show');}
+function closeWrite(){document.getElementById('wmo').classList.remove('show');document.getElementById('w-content').value='';}
+
+async function submitMem(){
+  var c=document.getElementById('w-content').value.trim();
+  if(!c)return;
+  await fetch('/api/posts',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({type:document.getElementById('w-type').value,
+      content:c,author:document.getElementById('w-author').value})});
+  closeWrite(); await load();
+}
+
+async function loadCD(){
+  try{
+    var r=await fetch('/api/countdowns');
+    var d=await r.json();
+    var cds=d.countdowns||[];
+    var c=document.getElementById('cds');
+    if(!cds.length){c.style.display='none';return;}
+    c.innerHTML=cds.map(cd=>
+      '<div class="cd-card"><div class="cd-em">'+cd.emoji+'</div>' +
+      '<div class="cd-days">'+cd.days+'</div>' +
+      '<div class="cd-title">'+cd.title+'</div></div>'
+    ).join('');
+  }catch(e){}
+}
+
+function openCD(){document.getElementById('cdmo').classList.add('show');}
+function closeCD(){document.getElementById('cdmo').classList.remove('show');}
+async function submitCD(){
+  var t=document.getElementById('cd-title').value.trim();
+  var date=document.getElementById('cd-date').value;
+  if(!t||!date)return;
+  await fetch('/api/countdowns',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({title:t,target_date:date,
+      emoji:document.getElementById('cd-emoji').value||'📅',
+      type:document.getElementById('cd-type').value})});
+  closeCD(); loadCD();
+}
+
+document.querySelectorAll('.mo').forEach(function(o){
+  o.addEventListener('click',function(e){if(e.target===this)this.classList.remove('show');});
+});
+
+async function genDiary(){
+  var btn=document.getElementById('diary-btn');
+  btn.disabled=true; btn.textContent='writing…';
+  try{
+    var r=await fetch('/api/diary/generate',{method:'POST'});
+    var d=await r.json();
+    if(d.ok){await load(); notify('Fyodor','diary done — '+d.content.slice(0,50));}
+    else alert(d.message||d.error||'failed');
+  }catch(e){alert('error: '+e.message);}
+  btn.disabled=false; btn.textContent='Fyodor writes today\'s diary';
+}
+
+var swReg=null;
+async function notify(title,body){
+  if(!('Notification' in window))return;
+  if(Notification.permission==='default') await Notification.requestPermission();
+  if(Notification.permission!=='granted')return;
+  if(swReg&&swReg.active) swReg.active.postMessage({type:'NOTIFY',title,body});
+  else new Notification(title,{body,icon:'/icon-192.png'});
+}
+if('serviceWorker' in navigator){
+  navigator.serviceWorker.register('/sw.js').then(r=>{swReg=r;}).catch(console.error);
+}
+
+load(); loadCD();
+</script>
+</body>
+</html>

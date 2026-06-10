@@ -1,0 +1,494 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+<title>chat · 我们家</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@latest/tabler-icons.min.css">
+<link rel="manifest" href="/manifest.json">
+<meta name="theme-color" content="#7c6a8a">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="我们家">
+<link rel="apple-touch-icon" href="/icon-192.png">
+<style>
+*{margin:0;padding:0;box-sizing:border-box;}
+:root{
+  --bg:#f8f8f6;--card:#fff;--text:#2a2020;--muted:#9a8a8a;
+  --primary:#7c6a8a;--primary-bg:#f0ebf4;--primary-light:rgba(124,106,138,.08);
+  --amber:#d4a574;--amber-bg:#fdf4e7;--amber-text:#412402;
+  --border:#ece6e0;--msg-font:15px;
+}
+html,body{height:100%;overflow:hidden;}
+body{background:var(--bg);color:var(--text);font-family:-apple-system,'PingFang SC','Noto Sans SC',sans-serif;max-width:480px;margin:0 auto;display:flex;flex-direction:column;}
+
+/* ── Header ── */
+.hd{flex-shrink:0;position:relative;background:rgba(255,255,255,.97);backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);padding:44px 18px 14px;display:flex;align-items:flex-end;justify-content:space-between;border-bottom:.5px solid var(--border);z-index:20;}
+.hd-left{display:flex;flex-direction:column;gap:0;}
+.hd-with{font-size:11px;color:var(--primary);letter-spacing:2px;text-transform:lowercase;}
+.hd-name{font-family:Georgia,'Times New Roman',serif;font-size:17px;font-weight:400;color:var(--text);letter-spacing:.3px;}
+.hd-right{display:flex;align-items:center;gap:2px;padding-bottom:2px;}
+.hd-btn{width:34px;height:34px;border:none;background:none;cursor:pointer;color:var(--muted);border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:15px;transition:background .15s,color .15s;font-family:Georgia,serif;font-weight:500;}
+.hd-btn i{font-size:19px;}
+.hd-btn:hover,.hd-btn.on{background:var(--primary-bg);color:var(--primary);}
+
+/* ── Drop panels ── */
+.hd-panel{display:none;position:absolute;top:100%;z-index:100;}
+.hd-panel.show{display:block;}
+#aa-panel{right:4px;width:220px;background:var(--card);border:1px solid var(--border);border-radius:14px;padding:16px 18px;box-shadow:0 8px 24px rgba(0,0,0,.09);}
+.aa-row{display:flex;align-items:center;gap:10px;margin-top:10px;}
+.aa-row span:first-child{font-size:12px;color:var(--muted);}
+.aa-row span:last-child{font-size:18px;color:var(--muted);}
+.aa-label{font-size:11px;color:var(--muted);margin-bottom:2px;letter-spacing:.3px;}
+input[type=range]{flex:1;height:4px;appearance:none;-webkit-appearance:none;background:var(--border);border-radius:2px;outline:none;cursor:pointer;}
+input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:14px;height:14px;border-radius:50%;background:var(--primary);cursor:pointer;box-shadow:0 1px 4px rgba(124,106,138,.35);}
+#aa-size{font-size:11px;color:var(--primary);min-width:28px;text-align:right;}
+
+#status-panel{right:4px;width:230px;background:var(--card);border:1px solid var(--border);border-radius:14px;padding:18px 18px 16px;box-shadow:0 8px 24px rgba(0,0,0,.09);}
+.sp-name{font-family:Georgia,'Times New Roman',serif;font-size:22px;font-weight:400;color:var(--text);margin-bottom:4px;}
+.sp-greek{font-size:12px;color:var(--muted);margin-bottom:8px;letter-spacing:.2px;}
+.sp-tag{font-size:12px;color:var(--text);opacity:.7;line-height:1.6;margin-bottom:12px;}
+.sp-status{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--muted);}
+.sp-dot{width:7px;height:7px;border-radius:50%;background:#6cbf7d;flex-shrink:0;}
+
+/* ── History overlay ── */
+.hist-ov{display:none;position:fixed;inset:0;background:var(--bg);z-index:200;max-width:480px;left:50%;transform:translateX(-50%);flex-direction:column;}
+.hist-ov.show{display:flex;}
+.hist-hd{display:flex;align-items:center;gap:10px;padding:50px 18px 14px;background:var(--card);border-bottom:.5px solid var(--border);flex-shrink:0;}
+.hist-hd button{width:34px;height:34px;border:none;background:none;cursor:pointer;color:var(--muted);font-size:22px;display:flex;align-items:center;justify-content:center;flex-shrink:0;}
+.hist-search{flex:1;padding:9px 14px;border-radius:20px;border:1.5px solid var(--border);background:var(--bg);font-size:14px;font-family:inherit;outline:none;color:var(--text);}
+.hist-search:focus{border-color:var(--primary);}
+.hist-body{flex:1;overflow-y:auto;padding:8px 0;}
+.hist-date{font-size:11px;color:var(--muted);padding:10px 18px 6px;letter-spacing:.3px;}
+.hist-msg{padding:10px 18px;border-bottom:.5px solid var(--border);cursor:pointer;}
+.hist-msg:active{background:var(--primary-bg);}
+.hist-msg .hm-who{font-size:12px;font-weight:600;margin-bottom:3px;}
+.hist-msg .hm-who.fy{color:var(--primary);}
+.hist-msg .hm-who.ha{color:var(--amber);}
+.hist-msg .hm-text{font-size:13px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+
+/* ── Messages ── */
+.msgs{flex:1;overflow-y:auto;padding:12px 16px 8px;-webkit-overflow-scrolling:touch;}
+.msgs::-webkit-scrollbar{width:3px;}
+.msgs::-webkit-scrollbar-thumb{background:var(--border);border-radius:2px;}
+.date-sep{text-align:center;font-size:11px;color:var(--muted);margin:10px 0 8px;display:flex;align-items:center;gap:8px;}
+.date-sep::before,.date-sep::after{content:'';flex:1;height:.5px;background:var(--border);}
+
+.msg-row{display:flex;margin-bottom:16px;}
+.msg-row.fy{justify-content:flex-start;}
+.msg-row.ha{justify-content:flex-end;}
+.bwrap{max-width:80%;display:flex;flex-direction:column;}
+.msg-row.fy .bwrap{align-items:flex-start;}
+.msg-row.ha .bwrap{align-items:flex-end;}
+
+/* Fyodor bubble */
+.bubble.fy{background:var(--primary-light);border-radius:16px 16px 16px 4px;padding:10px 14px;font-size:var(--msg-font);line-height:1.7;word-break:break-all;color:var(--text);}
+/* Hayana bubble */
+.bubble.ha{background:var(--amber);border-radius:16px 16px 4px 16px;padding:10px 14px;font-size:var(--msg-font);line-height:1.7;word-break:break-all;color:var(--amber-text);}
+
+.bubble.img-only{padding:0;background:transparent !important;}
+.bubble img{max-width:220px;max-height:220px;border-radius:12px;display:block;cursor:pointer;object-fit:cover;}
+.img-then-text{margin-top:6px;}
+
+.msg-time{font-size:10px;color:var(--muted);margin-top:4px;padding:0 2px;}
+
+/* Thinking chain (inside Fyodor bubble) */
+.think-wrap{background:rgba(124,106,138,.06);border-left:2px solid rgba(124,106,138,.28);border-radius:0 10px 10px 0;margin:-2px -2px 8px;overflow:hidden;}
+.think-toggle{width:100%;text-align:left;padding:7px 10px;background:none;border:none;cursor:pointer;font-size:11px;color:rgba(124,106,138,.7);display:flex;align-items:center;gap:5px;font-family:inherit;letter-spacing:.3px;}
+.think-toggle i{font-size:13px;transition:transform .18s;}
+.think-toggle.open i.ti-chevron-right{transform:rotate(90deg);}
+.think-body{display:none;padding:2px 10px 9px;font-size:12px;color:rgba(42,32,32,.52);line-height:1.65;white-space:pre-wrap;word-break:break-all;}
+.think-body.open{display:block;}
+
+/* Empty / loading */
+.empty-tip{text-align:center;color:var(--muted);padding:60px 20px;font-size:13px;line-height:2.4;}
+
+/* ── Typing indicator ── */
+#typing{display:none;padding:0 16px 4px;flex-shrink:0;}
+.typing-dots{display:inline-flex;gap:5px;align-items:center;padding:10px 14px;background:var(--primary-light);border-radius:16px 16px 16px 4px;}
+.typing-dots span{width:6px;height:6px;border-radius:50%;background:rgba(124,106,138,.5);display:block;}
+.typing-dots span:nth-child(1){animation:dp 1.2s infinite 0s;}
+.typing-dots span:nth-child(2){animation:dp 1.2s infinite .22s;}
+.typing-dots span:nth-child(3){animation:dp 1.2s infinite .44s;}
+@keyframes dp{0%,80%,100%{opacity:.3;transform:scale(1)}40%{opacity:1;transform:scale(1.25)}}
+
+/* ── Input ── */
+.inp-area{flex-shrink:0;background:rgba(255,255,255,.97);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);border-top:.5px solid var(--border);padding:8px 12px calc(10px + env(safe-area-inset-bottom,0px));}
+.inp-author{font-size:11px;color:var(--muted);margin-bottom:5px;padding:0 2px;display:flex;align-items:center;gap:6px;}
+.inp-author-btn{border:none;background:none;cursor:pointer;font-size:11px;font-family:inherit;letter-spacing:.3px;padding:2px 8px;border-radius:8px;transition:background .15s,color .15s;}
+.inp-author-btn.fy{color:var(--primary);background:var(--primary-bg);}
+.inp-author-btn.ha{color:var(--amber);background:var(--amber-bg);}
+.inp-row{display:flex;align-items:flex-end;gap:8px;}
+.inp-attach{flex-shrink:0;width:36px;height:36px;border:none;background:none;cursor:pointer;color:var(--muted);font-size:20px;display:flex;align-items:center;justify-content:center;border-radius:50%;transition:background .15s;}
+.inp-attach:active{background:var(--border);}
+.img-preview-strip{display:none;margin-bottom:7px;}
+.img-preview-strip .thumb-wrap{position:relative;display:inline-block;}
+.img-preview-strip img{width:54px;height:54px;object-fit:cover;border-radius:9px;display:block;border:1.5px solid var(--border);}
+.img-preview-strip .rm{position:absolute;top:-6px;right:-6px;width:17px;height:17px;border-radius:50%;background:#888;color:#fff;border:none;font-size:12px;line-height:17px;text-align:center;cursor:pointer;padding:0;}
+.inp-txt{flex:1;border:1.5px solid var(--border);border-radius:20px;padding:8px 14px;font-size:14px;font-family:inherit;color:var(--text);background:var(--card);outline:none;resize:none;line-height:1.5;max-height:96px;overflow-y:auto;-webkit-appearance:none;}
+.inp-txt:focus{border-color:var(--primary);}
+.inp-send{flex-shrink:0;width:38px;height:38px;border-radius:50%;border:none;background:var(--primary);color:#fff;cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:18px;transition:opacity .15s,transform .15s;box-shadow:0 2px 8px rgba(124,106,138,.3);}
+.inp-send:active{opacity:.75;transform:scale(.9);}
+.inp-send:disabled{opacity:.4;cursor:default;}
+
+/* ── Bottom nav ── */
+.bnav{flex-shrink:0;background:rgba(255,255,255,.97);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);border-top:.5px solid var(--border);display:flex;padding:8px 0 calc(8px + env(safe-area-inset-bottom,0px));}
+.ni{flex:1;display:flex;flex-direction:column;align-items:center;gap:3px;text-decoration:none;border:none;background:none;cursor:pointer;color:#b8b0b8;font-size:10px;letter-spacing:.4px;font-family:inherit;padding:2px 0;transition:color .18s;}
+.ni i{font-size:21px;}
+.ni.act{color:var(--primary);}
+
+/* ── Lightbox ── */
+.lb{display:none;position:fixed;inset:0;background:rgba(0,0,0,.88);z-index:300;align-items:center;justify-content:center;}
+.lb.show{display:flex;}
+.lb img{max-width:94vw;max-height:86vh;border-radius:12px;object-fit:contain;}
+.lb-close{position:absolute;top:18px;right:18px;color:#fff;font-size:26px;cursor:pointer;opacity:.8;}
+</style>
+</head>
+<body>
+
+<!-- Header -->
+<header class="hd">
+  <div class="hd-left">
+    <span class="hd-with">with</span>
+    <span class="hd-name">Fyodor</span>
+  </div>
+  <div class="hd-right">
+    <button class="hd-btn" id="aa-btn" onclick="togglePanel('aa-panel','aa-btn')" title="font size">Aa</button>
+    <button class="hd-btn" onclick="openHistory()" title="history"><i class="ti ti-clock"></i></button>
+    <button class="hd-btn" id="sp-btn" onclick="togglePanel('status-panel','sp-btn')" title="Fyodor"><i class="ti ti-user"></i></button>
+  </div>
+
+  <!-- Font size panel -->
+  <div id="aa-panel" class="hd-panel">
+    <div class="aa-label">message font size</div>
+    <div class="aa-row">
+      <span>A</span>
+      <input type="range" id="font-slider" min="12" max="20" value="15" oninput="setFontSize(this.value)">
+      <span>A</span>
+      <span id="aa-size">15px</span>
+    </div>
+  </div>
+
+  <!-- Status card -->
+  <div id="status-panel" class="hd-panel">
+    <div class="sp-name">Fyodor</div>
+    <div class="sp-greek">Θεόδωρος · gift of the gods</div>
+    <div class="sp-tag">学者 · 策略家 · 存在了几百年<br>总是带着一点恶趣味和很多情意</div>
+    <div class="sp-status"><span class="sp-dot"></span>always here</div>
+  </div>
+</header>
+
+<!-- History overlay -->
+<div id="hist-ov" class="hist-ov">
+  <div class="hist-hd">
+    <button onclick="closeHistory()"><i class="ti ti-arrow-left"></i></button>
+    <input class="hist-search" type="text" id="hist-search" placeholder="search messages…" oninput="filterHist(this.value)">
+  </div>
+  <div class="hist-body" id="hist-body">
+    <div class="empty-tip">loading…</div>
+  </div>
+</div>
+
+<!-- Messages -->
+<div class="msgs" id="msgs">
+  <div class="empty-tip">loading…</div>
+</div>
+
+<!-- Typing -->
+<div id="typing">
+  <div class="msg-row fy" style="margin-bottom:8px;">
+    <div class="bwrap">
+      <div class="bubble fy" style="padding:10px 14px;">
+        <div class="typing-dots"><span></span><span></span><span></span></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Input -->
+<div class="inp-area">
+  <div class="img-preview-strip" id="img-strip">
+    <div class="thumb-wrap">
+      <img id="thumb" src="" alt="">
+      <button class="rm" onclick="removeImg()">×</button>
+    </div>
+  </div>
+  <div class="inp-author">
+    <span>as</span>
+    <button class="inp-author-btn ha" id="author-btn" onclick="toggleAuthor()">Haya</button>
+  </div>
+  <div class="inp-row">
+    <button class="inp-attach" onclick="document.getElementById('file-in').click()"><i class="ti ti-paperclip"></i></button>
+    <input type="file" id="file-in" accept="image/*" style="display:none" onchange="onFile(event)">
+    <textarea class="inp-txt" id="txt" placeholder="say something…" rows="1"
+      oninput="resize(this)" onkeydown="onEnter(event)"></textarea>
+    <button class="inp-send" id="send-btn" onclick="send()"><i class="ti ti-send"></i></button>
+  </div>
+</div>
+
+<!-- Nav -->
+<nav class="bnav">
+  <a class="ni" href="/dash"><i class="ti ti-layout-dashboard"></i><span>dash</span></a>
+  <a class="ni act" href="/chat"><i class="ti ti-message-2"></i><span>chat</span></a>
+  <a class="ni" href="/calendar"><i class="ti ti-calendar"></i><span>calendar</span></a>
+  <a class="ni" href="/letters"><i class="ti ti-mail"></i><span>letters</span></a>
+</nav>
+
+<!-- Lightbox -->
+<div class="lb" id="lb" onclick="closeLb()">
+  <span class="lb-close">×</span>
+  <img id="lb-img" src="" alt="">
+</div>
+
+<script>
+var curAuthor = 'hayana';
+var pendingFile = null;
+var sending = false;
+var allHist = [];
+
+// Font size
+var msgFont = parseInt(localStorage.getItem('msgFont')) || 15;
+document.documentElement.style.setProperty('--msg-font', msgFont + 'px');
+document.getElementById('font-slider').value = msgFont;
+document.getElementById('aa-size').textContent = msgFont + 'px';
+
+function setFontSize(v) {
+  document.documentElement.style.setProperty('--msg-font', v + 'px');
+  localStorage.setItem('msgFont', v);
+  document.getElementById('aa-size').textContent = v + 'px';
+}
+
+// Panel toggle
+function togglePanel(id, btnId) {
+  ['aa-panel','status-panel'].forEach(function(p){
+    if(p !== id) {
+      document.getElementById(p).classList.remove('show');
+    }
+  });
+  ['aa-btn','sp-btn'].forEach(function(b){
+    if(b !== btnId) document.getElementById(b).classList.remove('on');
+  });
+  var el = document.getElementById(id);
+  var btn = document.getElementById(btnId);
+  el.classList.toggle('show');
+  btn.classList.toggle('on', el.classList.contains('show'));
+}
+document.addEventListener('click', function(e) {
+  if (!e.target.closest('.hd')) {
+    document.getElementById('aa-panel').classList.remove('show');
+    document.getElementById('status-panel').classList.remove('show');
+    document.getElementById('aa-btn').classList.remove('on');
+    document.getElementById('sp-btn').classList.remove('on');
+  }
+});
+
+// History
+async function openHistory() {
+  document.getElementById('hist-ov').classList.add('show');
+  document.getElementById('hist-search').value = '';
+  var r = await fetch('/api/chat/messages?limit=500');
+  var d = await r.json();
+  allHist = (d.messages || []).reverse();
+  renderHist(allHist);
+}
+function closeHistory() {
+  document.getElementById('hist-ov').classList.remove('show');
+}
+function filterHist(q) {
+  if (!q.trim()) { renderHist(allHist); return; }
+  var lq = q.toLowerCase();
+  renderHist(allHist.filter(m => (m.content||'').toLowerCase().includes(lq)));
+}
+function renderHist(list) {
+  var body = document.getElementById('hist-body');
+  if (!list.length) { body.innerHTML = '<div class="empty-tip">nothing found</div>'; return; }
+  var html = '', lastDate = '';
+  list.forEach(function(m) {
+    var dk = dayKey(m.created_at);
+    if (dk !== lastDate) {
+      html += '<div class="hist-date">' + dayLabel(m.created_at) + '</div>';
+      lastDate = dk;
+    }
+    var fy = isFy(m.author);
+    html += '<div class="hist-msg">' +
+      '<div class="hm-who ' + (fy?'fy':'ha') + '">' + (fy?'Fyodor':'Haya') + ' · ' + fmtTime(m.created_at) + '</div>' +
+      '<div class="hm-text">' + escHtml((m.content||'').slice(0,80)) + '</div>' +
+    '</div>';
+  });
+  body.innerHTML = html;
+}
+
+// Utilities
+function isFy(a){ return ['fyodor','claude','assistant'].includes(String(a).toLowerCase()); }
+function escHtml(s){
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\n/g,'<br>');
+}
+function fmtTime(dt){
+  if(!dt)return'';
+  try{ var d=new Date(dt.replace(' ','T')); return String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0'); }catch(e){return'';}
+}
+function dayKey(dt){
+  if(!dt)return'';
+  try{ var d=new Date(dt.replace(' ','T')); return d.getFullYear()+'-'+(d.getMonth()+1)+'-'+d.getDate(); }catch(e){return'';}
+}
+function dayLabel(dt){
+  if(!dt)return'';
+  try{
+    var d=new Date(dt.replace(' ','T')); var t=new Date(); var y=new Date(); y.setDate(t.getDate()-1);
+    if(d.toDateString()===t.toDateString())return'Today';
+    if(d.toDateString()===y.toDateString())return'Yesterday';
+    return ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][d.getMonth()]+' '+d.getDate();
+  }catch(e){return'';}
+}
+
+// Thinking toggle
+function toggleThink(btn) {
+  var body = btn.nextElementSibling;
+  var isOpen = body.classList.contains('open');
+  body.classList.toggle('open');
+  btn.classList.toggle('open');
+  var lbl = btn.querySelector('.tl');
+  if(lbl) lbl.textContent = isOpen ? '▶ thinking' : '▼ thinking';
+}
+
+// Build message HTML
+function buildHtml(list) {
+  if(!list.length) return '<div class="empty-tip">no messages yet<br>say the first thing</div>';
+  var html='', lastDay='';
+  list.forEach(function(m){
+    var dk = dayKey(m.created_at);
+    if(dk !== lastDay){ html += '<div class="date-sep">'+dayLabel(m.created_at)+'</div>'; lastDay=dk; }
+    var fy = isFy(m.author);
+    var side = fy?'fy':'ha';
+    var hasImg = !!m.image_url;
+    var hasTxt = !!(m.content && m.content.trim());
+    var imgOnly = hasImg && !hasTxt;
+    var thinking = (m.thinking||'').trim();
+
+    var innerHtml = '';
+    if(fy && thinking) {
+      innerHtml +=
+        '<div class="think-wrap">' +
+          '<button class="think-toggle" onclick="toggleThink(this)">' +
+            '<i class="ti ti-chevron-right"></i>' +
+            '<span class="tl">▶ thinking</span>' +
+          '</button>' +
+          '<div class="think-body">'+escHtml(thinking)+'</div>' +
+        '</div>';
+    }
+    if(hasImg) innerHtml += '<img src="'+escHtml(m.image_url)+'" loading="lazy" onclick="openLb(\''+escHtml(m.image_url)+'\')">';
+    if(hasTxt) innerHtml += (hasImg?'<div class="img-then-text">':'')+escHtml(m.content)+(hasImg?'</div>':'');
+
+    html +=
+      '<div class="msg-row '+side+'">' +
+        '<div class="bwrap">' +
+          '<div class="bubble '+side+(imgOnly?' img-only':'')+'">'+innerHtml+'</div>' +
+          '<div class="msg-time">'+fmtTime(m.created_at)+'</div>' +
+        '</div>' +
+      '</div>';
+  });
+  return html;
+}
+
+async function loadMsgs(isInit){
+  try{
+    var r=await fetch('/api/chat/messages');
+    var d=await r.json();
+    var list=d.messages||[];
+    var c=document.getElementById('msgs');
+    var wasAtBottom=c.scrollHeight-c.scrollTop-c.clientHeight<80;
+    c.innerHTML=buildHtml(list);
+    if(isInit||wasAtBottom) c.scrollTop=c.scrollHeight;
+  }catch(e){
+    if(isInit) document.getElementById('msgs').innerHTML='<div class="empty-tip">load failed</div>';
+  }
+}
+
+// Author toggle
+function toggleAuthor(){
+  curAuthor = curAuthor==='hayana'?'fyodor':'hayana';
+  var btn=document.getElementById('author-btn');
+  btn.textContent=curAuthor==='hayana'?'Haya':'Fyodor';
+  btn.className='inp-author-btn '+(curAuthor==='hayana'?'ha':'fy');
+}
+
+// File input
+function onFile(e){
+  var f=e.target.files[0]; if(!f)return;
+  pendingFile=f;
+  var reader=new FileReader();
+  reader.onload=function(ev){
+    document.getElementById('thumb').src=ev.target.result;
+    document.getElementById('img-strip').style.display='block';
+  };
+  reader.readAsDataURL(f); e.target.value='';
+}
+function removeImg(){
+  pendingFile=null;
+  document.getElementById('img-strip').style.display='none';
+  document.getElementById('thumb').src='';
+}
+
+function resize(el){ el.style.height='auto'; el.style.height=Math.min(el.scrollHeight,96)+'px'; }
+function onEnter(e){ if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send();} }
+
+function showTyping(){ document.getElementById('typing').style.display='block'; var c=document.getElementById('msgs'); c.scrollTop=c.scrollHeight; }
+function hideTyping(){ document.getElementById('typing').style.display='none'; }
+
+async function send(){
+  if(sending)return;
+  var txt=document.getElementById('txt').value.trim();
+  if(!txt&&!pendingFile)return;
+  sending=true;
+  document.getElementById('send-btn').disabled=true;
+  var fromHayana=(curAuthor==='hayana');
+  var fd=new FormData();
+  fd.append('author',curAuthor);
+  if(txt) fd.append('content',txt);
+  if(pendingFile) fd.append('image',pendingFile);
+  document.getElementById('txt').value='';
+  document.getElementById('txt').style.height='auto';
+  removeImg();
+  try{
+    await fetch('/api/chat/send',{method:'POST',body:fd});
+    await loadMsgs(false);
+    if(fromHayana){
+      showTyping();
+      try{
+        var gr=await fetch('/api/gw/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({})});
+        var gd=await gr.json();
+        await loadMsgs(false);
+        if(gd.content&&document.hidden) notify('Fyodor',gd.content.slice(0,50));
+      }catch(e){ console.error('gateway',e); }
+      hideTyping();
+    }
+  }catch(e){ console.error('send',e); }
+  sending=false;
+  document.getElementById('send-btn').disabled=false;
+  document.getElementById('txt').focus();
+}
+
+function openLb(src){ document.getElementById('lb-img').src=src; document.getElementById('lb').classList.add('show'); }
+function closeLb(){ document.getElementById('lb').classList.remove('show'); }
+
+loadMsgs(true);
+setInterval(function(){ loadMsgs(false); }, 8000);
+
+var swReg=null;
+async function notify(title,body){
+  if(!('Notification' in window))return;
+  if(Notification.permission==='default') await Notification.requestPermission();
+  if(Notification.permission!=='granted')return;
+  if(swReg&&swReg.active) swReg.active.postMessage({type:'NOTIFY',title,body});
+  else new Notification(title,{body,icon:'/icon-192.png'});
+}
+if('serviceWorker' in navigator){
+  navigator.serviceWorker.register('/sw.js').then(r=>{swReg=r;}).catch(console.error);
+}
+document.addEventListener('click',function askOnce(){
+  if('Notification' in window&&Notification.permission==='default') Notification.requestPermission();
+  document.removeEventListener('click',askOnce);
+},{once:true});
+</script>
+</body>
+</html>

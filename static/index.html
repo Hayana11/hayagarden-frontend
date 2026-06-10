@@ -1,0 +1,453 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+<title>我们的家</title>
+<link rel="manifest" href="/manifest.json">
+<meta name="theme-color" content="#7c6a8a">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="我们家">
+<link rel="apple-touch-icon" href="/icon-192.png">
+<style>
+*{margin:0;padding:0;box-sizing:border-box;}
+:root{
+  --bg:#f8f8f6;--card:#fff;--text:#3d3535;--sub:#a08a85;
+  --fy:#8b7aa8;--fy-bg:#f3f0f8;--fy-light:#ede8f5;
+  --ha:#c4964a;--ha-bg:#fdf7ee;--ha-light:#f5e8d0;
+  --accent:#a67884;--accent-bg:#f5eaec;--border:#ede8e4;
+}
+body{background:var(--bg);color:var(--text);font-family:-apple-system,'PingFang SC','Noto Sans SC',sans-serif;min-height:100vh;max-width:480px;margin:0 auto;}
+
+/* Header */
+.hd{padding:36px 20px 12px;text-align:center;}
+.hd-em{font-size:30px;letter-spacing:10px;margin-bottom:10px;}
+.hd h1{font-size:24px;font-weight:800;letter-spacing:3px;}
+.hd h1 .fy{color:var(--fy);}
+.hd h1 .ha{color:var(--ha);}
+.hd .sub{font-size:12px;color:var(--sub);margin-top:5px;letter-spacing:1px;}
+
+/* Stats */
+.stats{display:flex;justify-content:center;gap:20px;padding:16px 20px 8px;}
+.st{text-align:center;}
+.st-n{font-size:26px;font-weight:800;line-height:1;}
+.st-n.d{color:#7aadcc;} .st-n.f{color:var(--fy);} .st-n.h{color:var(--ha);} .st-n.m{color:var(--accent);}
+.st-l{font-size:11px;color:var(--sub);margin-top:3px;}
+
+/* Countdowns */
+.cds{display:flex;gap:10px;padding:12px 20px 4px;overflow-x:auto;scrollbar-width:none;}
+.cds::-webkit-scrollbar{display:none;}
+.cd-card{flex-shrink:0;background:var(--card);border-radius:16px;padding:12px 18px;text-align:center;box-shadow:0 1px 6px rgba(0,0,0,.07);}
+.cd-em{font-size:22px;}
+.cd-days{font-size:22px;font-weight:800;color:var(--accent);}
+.cd-title{font-size:11px;color:var(--sub);margin-top:2px;}
+
+/* Miss button */
+.miss-wrap{padding:16px 20px 8px;text-align:center;}
+.miss-btn{background:var(--accent);color:#fff;border:none;border-radius:50px;padding:13px 36px;font-size:16px;cursor:pointer;font-family:inherit;transition:transform .15s;box-shadow:0 2px 12px rgba(166,120,132,.3);}
+.miss-btn:active{transform:scale(.94);}
+@keyframes beat{0%,100%{transform:scale(1)}50%{transform:scale(1.25)}}
+.miss-btn.beating{animation:beat .3s ease;}
+.miss-info{font-size:12px;color:var(--sub);margin-top:7px;}
+
+/* Filters */
+.filters{padding:4px 20px;}
+.frow{display:flex;gap:7px;margin-bottom:7px;overflow-x:auto;scrollbar-width:none;padding-bottom:1px;}
+.frow::-webkit-scrollbar{display:none;}
+.fb{flex-shrink:0;padding:7px 15px;border-radius:50px;border:1.5px solid var(--border);background:var(--card);color:var(--text);font-size:13px;cursor:pointer;transition:all .18s;font-family:inherit;}
+.fb.a{background:var(--accent);border-color:var(--accent);color:#fff;}
+.fb.af{background:var(--fy);border-color:var(--fy);color:#fff;}
+.fb.ah{background:var(--ha);border-color:var(--ha);color:#fff;}
+
+/* Write btn */
+.write-btn{display:block;margin:10px 20px;width:calc(100% - 40px);padding:14px;background:var(--accent);color:#fff;border:none;border-radius:14px;font-size:15px;cursor:pointer;font-family:inherit;box-shadow:0 2px 10px rgba(166,120,132,.25);transition:opacity .18s;}
+.write-btn:active{opacity:.85;}
+
+/* Memory cards */
+.mems{padding:4px 20px 110px;}
+.month-lbl{font-size:12px;color:var(--sub);margin:14px 0 8px;display:flex;align-items:center;gap:8px;}
+.month-lbl::after{content:'';flex:1;height:1px;background:var(--border);}
+.card{background:var(--card);border-radius:16px;padding:14px 16px;margin-bottom:10px;box-shadow:0 1px 5px rgba(0,0,0,.06);transition:transform .12s;}
+.card:active{transform:scale(.99);}
+.card.fc{background:var(--fy-bg);}
+.card.hc{background:var(--ha-bg);}
+.ch{display:flex;align-items:center;gap:7px;margin-bottom:8px;}
+.cav{font-size:18px;}
+.cau{font-size:13px;font-weight:700;}
+.cau.f{color:var(--fy);} .cau.h{color:var(--ha);}
+.ctm{font-size:11px;color:var(--sub);margin-left:auto;}
+.cdel{background:none;border:none;color:var(--sub);font-size:12px;cursor:pointer;padding:0;margin-left:6px;}
+.badge{display:inline-block;font-size:10px;padding:2px 9px;border-radius:10px;background:var(--accent-bg);color:var(--accent);margin-bottom:7px;}
+.badge.fb2{background:var(--fy-light);color:var(--fy);}
+.badge.hb{background:var(--ha-light);color:var(--ha);}
+.cc{font-size:14px;line-height:1.65;color:var(--text);word-break:break-all;}
+.empty{text-align:center;color:var(--sub);padding:48px 20px;font-size:14px;line-height:2;}
+
+/* Bottom nav */
+.bnav{position:fixed;bottom:0;left:50%;transform:translateX(-50%);width:100%;max-width:480px;background:rgba(255,255,255,.95);backdrop-filter:blur(12px);border-top:1px solid var(--border);display:flex;padding:6px 0 22px;}
+.ni{flex:1;text-align:center;border:none;background:none;color:var(--sub);font-size:10px;cursor:pointer;font-family:inherit;padding:4px 0;}
+.ni.act{color:var(--accent);}
+.ni-ic{font-size:22px;display:block;margin-bottom:2px;}
+
+/* Modals */
+.mo{display:none;position:fixed;inset:0;background:rgba(0,0,0,.28);z-index:100;align-items:flex-end;justify-content:center;}
+.mo.show{display:flex;}
+.mb{background:var(--bg);border-radius:24px 24px 0 0;padding:22px 20px 44px;width:100%;max-width:480px;}
+.mb h3{font-size:17px;font-weight:700;margin-bottom:16px;text-align:center;}
+.mb select,.mb textarea,.mb input{width:100%;padding:12px 14px;border-radius:12px;border:1.5px solid var(--border);background:var(--card);font-size:14px;font-family:inherit;color:var(--text);margin-bottom:10px;outline:none;-webkit-appearance:none;}
+.mb textarea{min-height:110px;resize:none;}
+.mbtns{display:flex;gap:10px;margin-top:4px;}
+.mbtns button{flex:1;padding:13px;border-radius:12px;border:none;font-size:15px;cursor:pointer;font-family:inherit;}
+.bcn{background:var(--border);color:var(--sub);}
+.bsb{background:var(--accent);color:#fff;}
+
+/* Letters list */
+.lcard{background:var(--card);border-radius:12px;padding:11px 13px;margin-bottom:8px;}
+.lmeta{font-size:11px;color:var(--sub);margin-bottom:4px;}
+.lcont{font-size:13px;color:var(--text);line-height:1.5;}
+.unread-dot{color:var(--accent);}
+</style>
+</head>
+<body>
+
+<div class="hd">
+  <div class="hd-em">🐀 ♡ 🐱</div>
+  <h1><span class="fy">费奥多尔</span> & <span class="ha">哈娅</span></h1>
+  <div class="sub">我们的小家 · love-style.xyz</div>
+</div>
+
+<div class="stats">
+  <div class="st"><div class="st-n d" id="s-days">—</div><div class="st-l">天</div></div>
+  <div class="st"><div class="st-n f" id="s-fy">—</div><div class="st-l">🐀</div></div>
+  <div class="st"><div class="st-n h" id="s-ha">—</div><div class="st-l">🐱</div></div>
+  <div class="st"><div class="st-n m" id="s-miss">—</div><div class="st-l">想你了</div></div>
+</div>
+
+<div class="cds" id="cds"></div>
+
+<div class="miss-wrap">
+  <button class="miss-btn" id="miss-btn" onclick="pressMiss()">🐱 想你了</button>
+  <div class="miss-info" id="miss-info"></div>
+</div>
+
+<div class="filters">
+  <div class="frow" id="af">
+    <button class="fb a" onclick="setAF('all',this)">♡ 全部</button>
+    <button class="fb" onclick="setAF('fyodor',this)">🐀 费奥多尔</button>
+    <button class="fb" onclick="setAF('hayana',this)">🐱 哈娅</button>
+  </div>
+  <div class="frow" id="tf">
+    <button class="fb a" onclick="setTF('all',this)">全部</button>
+    <button class="fb" onclick="setTF('MEMORY',this)">记忆</button>
+    <button class="fb" onclick="setTF('DIARY',this)">日记</button>
+    <button class="fb" onclick="setTF('EVENT',this)">事件</button>
+    <button class="fb" onclick="setTF('PROMISE',this)">承诺</button>
+    <button class="fb" onclick="setTF('MOMENT',this)">碎片</button>
+    <button class="fb" onclick="setTF('WISH',this)">心愿</button>
+  </div>
+</div>
+
+<button class="write-btn" onclick="openWrite()">🐾 写一条记忆</button>
+<button class="write-btn" id="diary-btn" onclick="genDiary()" style="background:var(--fy);margin-top:0;box-shadow:0 2px 10px rgba(139,122,168,.25);">📖 让费奥多尔写今天的日记</button>
+
+<div class="mems" id="mems"></div>
+
+<div class="bnav">
+  <button class="ni act"><span class="ni-ic">🏠</span>记忆库</button>
+  <button class="ni" onclick="location.href='/chat'"><span class="ni-ic">💬</span>聊天</button>
+  <button class="ni" onclick="openLetters()"><span class="ni-ic">✉️</span>信件</button>
+  <button class="ni" onclick="openCD()"><span class="ni-ic">📅</span>倒计时</button>
+</div>
+
+<!-- Write Modal -->
+<div class="mo" id="wmo">
+  <div class="mb">
+    <h3>写一条记忆</h3>
+    <select id="w-author">
+      <option value="hayana">🐱 哈娅</option>
+      <option value="fyodor">🐀 费奥多尔</option>
+    </select>
+    <select id="w-type">
+      <option value="MEMORY">💭 记忆</option>
+      <option value="DIARY">📖 日记</option>
+      <option value="EVENT">🌟 事件</option>
+      <option value="PROMISE">🤝 承诺</option>
+      <option value="MOMENT">✨ 碎片</option>
+      <option value="WISH">🌙 心愿</option>
+    </select>
+    <textarea id="w-content" placeholder="写下你想记住的..."></textarea>
+    <div class="mbtns">
+      <button class="bcn" onclick="closeWrite()">取消</button>
+      <button class="bsb" onclick="submitMem()">保存 🐾</button>
+    </div>
+  </div>
+</div>
+
+<!-- Letters Modal -->
+<div class="mo" id="lmo">
+  <div class="mb">
+    <h3>✉️ 信件</h3>
+    <div id="llist" style="max-height:240px;overflow-y:auto;margin-bottom:12px;"></div>
+    <select id="l-to">
+      <option value="fyodor">写给 🐀 费奥多尔</option>
+      <option value="hayana">写给 🐱 哈娅</option>
+    </select>
+    <textarea id="l-content" placeholder="亲爱的..."></textarea>
+    <div class="mbtns">
+      <button class="bcn" onclick="closeLetters()">关闭</button>
+      <button class="bsb" onclick="submitLetter()">寄出 ✉️</button>
+    </div>
+  </div>
+</div>
+
+<!-- Countdown Modal -->
+<div class="mo" id="cdmo">
+  <div class="mb">
+    <h3>📅 添加倒计时</h3>
+    <input type="text" id="cd-title" placeholder="名称（如：在一起一周年）">
+    <input type="text" id="cd-emoji" placeholder="emoji（如 🎂）">
+    <input type="date" id="cd-date">
+    <select id="cd-type">
+      <option value="countdown">倒计时（还有几天）</option>
+      <option value="countup">正计时（已经几天了）</option>
+    </select>
+    <div class="mbtns">
+      <button class="bcn" onclick="closeCD()">取消</button>
+      <button class="bsb" onclick="submitCD()">添加</button>
+    </div>
+  </div>
+</div>
+
+<script>
+var AF='all', TF='all', posts=[];
+var TNAME={MEMORY:'记忆',DIARY:'日记',EVENT:'事件',PROMISE:'承诺',MOMENT:'碎片',WISH:'心愿',MISS:'想你了'};
+
+// ★ 在这里改成你们在一起的日期 ★
+var TOGETHER_SINCE = new Date('2023-12-24');
+
+function isFy(a){return['fyodor','claude','assistant'].includes(a);}
+
+function fmtDate(dt){
+  if(!dt)return'';
+  var d=new Date(dt.replace(' ','T'));
+  return(d.getMonth()+1)+'.'+d.getDate()+' '+
+    String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0');
+}
+
+function monthKey(dt){
+  if(!dt)return'';
+  var d=new Date(dt.replace(' ','T'));
+  return d.getFullYear()+'年'+(d.getMonth()+1)+'月';
+}
+
+async function load(){
+  try{
+    var r=await fetch('/api/posts');
+    var d=await r.json();
+    posts=d.posts||[];
+    updateStats(); render();
+  }catch(e){console.error(e);}
+}
+
+function updateStats(){
+  var fy=posts.filter(p=>isFy(p.author)&&p.type!=='MISS');
+  var ha=posts.filter(p=>!isFy(p.author)&&p.type!=='MISS');
+  var ms=posts.filter(p=>p.type==='MISS');
+  document.getElementById('s-fy').textContent=fy.length;
+  document.getElementById('s-ha').textContent=ha.length;
+  document.getElementById('s-miss').textContent=ms.length;
+  var days=Math.floor((new Date()-TOGETHER_SINCE)/(864e5));
+  document.getElementById('s-days').textContent=days;
+  if(ms.length>0){
+    var last=ms[ms.length-1];
+    document.getElementById('miss-info').textContent=
+      '共按了 '+ms.length+' 次 · 上次 '+fmtDate(last.created_at);
+  }
+}
+
+function render(){
+  var list=posts.filter(p=>p.type!=='MISS');
+  if(AF==='fyodor') list=list.filter(p=>isFy(p.author));
+  else if(AF==='hayana') list=list.filter(p=>!isFy(p.author));
+  if(TF!=='all') list=list.filter(p=>p.type===TF);
+  var c=document.getElementById('mems');
+  if(!list.length){c.innerHTML='<div class="empty">还没有记忆<br>写下第一条吧 🐾</div>';return;}
+  var html='',lm='';
+  list.forEach(function(p){
+    var mo=monthKey(p.created_at);
+    if(mo!==lm){html+='<div class="month-lbl">'+mo+'</div>';lm=mo;}
+    var f=isFy(p.author);
+    var badge=f?'badge fb2':'badge hb';
+    html+='<div class="card '+(f?'fc':'hc')+'">' +
+      '<div class="ch">' +
+        '<span class="cav">'+(f?'🐀':'🐱')+'</span>' +
+        '<span class="cau '+(f?'f':'h')+'">'+(f?'费奥多尔':'哈娅')+'</span>' +
+        '<span class="ctm">'+fmtDate(p.created_at)+'</span>' +
+        '<button class="cdel" onclick="delPost('+p.id+',event)">删除</button>' +
+      '</div>' +
+      '<span class="'+badge+'">'+(TNAME[p.type]||p.type)+'</span>' +
+      '<div class="cc">'+p.content.replace(/\n/g,'<br>')+'</div>' +
+    '</div>';
+  });
+  c.innerHTML=html;
+}
+
+function setAF(v,btn){
+  AF=v;
+  document.querySelectorAll('#af .fb').forEach(b=>b.className='fb');
+  btn.classList.add(v==='fyodor'?'af':v==='hayana'?'ah':'a');
+  render();
+}
+
+function setTF(v,btn){
+  TF=v;
+  document.querySelectorAll('#tf .fb').forEach(b=>b.className='fb');
+  btn.classList.add('a');
+  render();
+}
+
+async function pressMiss(){
+  var btn=document.getElementById('miss-btn');
+  btn.classList.add('beating');
+  setTimeout(()=>btn.classList.remove('beating'),350);
+
+  // 1. 存入记忆库
+  await fetch('/api/posts',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({type:'MISS',content:'想你了 🐱',author:'hayana'})});
+
+  // 2. 同时发一条聊天消息
+  var fd=new FormData();
+  fd.append('author','hayana'); fd.append('content','想你了🐱');
+  await fetch('/api/chat/send',{method:'POST',body:fd});
+
+  // 3. 调网关拿回复
+  try{
+    var r=await fetch('/api/gw/chat',{method:'POST',
+      headers:{'Content-Type':'application/json'},body:JSON.stringify({})});
+    var d=await r.json();
+    if(d.content) notify('🐀 费奥多尔', d.content.slice(0,80));
+  }catch(e){}
+
+  await load();
+}
+
+async function delPost(id,e){
+  e.stopPropagation();
+  if(!confirm('确定删除？'))return;
+  await fetch('/api/posts/'+id,{method:'DELETE'});
+  await load();
+}
+
+function openWrite(){document.getElementById('wmo').classList.add('show');}
+function closeWrite(){
+  document.getElementById('wmo').classList.remove('show');
+  document.getElementById('w-content').value='';
+}
+
+async function submitMem(){
+  var c=document.getElementById('w-content').value.trim();
+  if(!c)return;
+  await fetch('/api/posts',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({type:document.getElementById('w-type').value,
+      content:c,author:document.getElementById('w-author').value})});
+  closeWrite(); await load();
+}
+
+async function openLetters(){
+  document.getElementById('lmo').classList.add('show');
+  var r=await fetch('/api/letters');
+  var d=await r.json();
+  var ls=d.letters||[];
+  var html=ls.length?ls.map(l=>
+    '<div class="lcard">' +
+    '<div class="lmeta">'+(isFy(l.from_who)?'🐀':'🐱')+' → '+(isFy(l.to_who)?'🐀':'🐱')+
+    ' · '+fmtDate(l.created_at)+(!l.read?'<span class="unread-dot"> ●</span>':'')+
+    '</div><div class="lcont">'+l.content.substring(0,80)+(l.content.length>80?'…':'')+'</div></div>'
+  ).join(''):'<div style="text-align:center;color:var(--sub);padding:16px">还没有信件</div>';
+  document.getElementById('llist').innerHTML=html;
+}
+function closeLetters(){
+  document.getElementById('lmo').classList.remove('show');
+  document.getElementById('l-content').value='';
+}
+async function submitLetter(){
+  var c=document.getElementById('l-content').value.trim();
+  if(!c)return;
+  await fetch('/api/letters',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({from_who:'hayana',to_who:document.getElementById('l-to').value,content:c})});
+  closeLetters();
+}
+
+async function loadCD(){
+  try{
+    var r=await fetch('/api/countdowns');
+    var d=await r.json();
+    var cds=d.countdowns||[];
+    var c=document.getElementById('cds');
+    if(!cds.length){c.style.display='none';return;}
+    c.innerHTML=cds.map(cd=>
+      '<div class="cd-card">' +
+      '<div class="cd-em">'+cd.emoji+'</div>' +
+      '<div class="cd-days">'+cd.days+'</div>' +
+      '<div class="cd-title">'+cd.title+'</div>' +
+      '</div>'
+    ).join('');
+  }catch(e){}
+}
+
+function openCD(){document.getElementById('cdmo').classList.add('show');}
+function closeCD(){document.getElementById('cdmo').classList.remove('show');}
+async function submitCD(){
+  var t=document.getElementById('cd-title').value.trim();
+  var date=document.getElementById('cd-date').value;
+  if(!t||!date)return;
+  await fetch('/api/countdowns',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({title:t,target_date:date,
+      emoji:document.getElementById('cd-emoji').value||'📅',
+      type:document.getElementById('cd-type').value})});
+  closeCD(); loadCD();
+}
+
+document.querySelectorAll('.mo').forEach(function(o){
+  o.addEventListener('click',function(e){if(e.target===this)this.classList.remove('show');});
+});
+
+load(); loadCD();
+
+// ── 自动日记 ─────────────────────────────────────────
+async function genDiary(){
+  var btn = document.getElementById('diary-btn');
+  btn.disabled = true;
+  btn.textContent = '📖 费奥多尔正在写…';
+  try{
+    var r = await fetch('/api/diary/generate', {method:'POST'});
+    var d = await r.json();
+    if(d.ok){
+      await load();
+      notify('📖 费奥多尔写好日记了', d.content.slice(0, 60));
+    } else {
+      alert(d.message || d.error || '生成失败');
+    }
+  }catch(e){ alert('网络错误：'+e.message); }
+  btn.disabled = false;
+  btn.textContent = '📖 让费奥多尔写今天的日记';
+}
+
+// ── PWA ──────────────────────────────────────────────
+var swReg = null;
+
+async function notify(title, body){
+  if(!('Notification' in window)) return;
+  if(Notification.permission==='default') await Notification.requestPermission();
+  if(Notification.permission!=='granted') return;
+  if(swReg) swReg.active.postMessage({type:'NOTIFY',title,body});
+  else new Notification(title,{body,icon:'/icon-192.png'});
+}
+
+if('serviceWorker' in navigator){
+  navigator.serviceWorker.register('/sw.js').then(r=>{swReg=r;}).catch(console.error);
+}
+</script>
+</body>
+</html>

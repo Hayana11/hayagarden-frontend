@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+<title>calendar · 我们家</title>
+<link rel="manifest" href="/manifest.json">
+<meta name="theme-color" content="#7c6a8a">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="我们家">
+<link rel="apple-touch-icon" href="/icon-192.png">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@latest/tabler-icons.min.css">
+<style>
+*{margin:0;padding:0;box-sizing:border-box;}
+:root{
+  --bg:#f8f8f6;--card:#fff;--text:#2a2020;--muted:#9a8a8a;
+  --primary:#7c6a8a;--primary-bg:#f0ebf4;--primary-light:#e8dff0;
+  --amber:#d4a574;--amber-bg:#fdf4e7;--amber-light:#f5e4cc;
+  --border:#ece6e0;--shadow:0 1px 8px rgba(40,20,20,.07);
+}
+body{background:var(--bg);color:var(--text);font-family:-apple-system,'PingFang SC','Noto Sans SC',sans-serif;min-height:100vh;max-width:480px;margin:0 auto;padding-bottom:calc(72px + env(safe-area-inset-bottom,0px));}
+
+/* Header */
+.hd{padding:44px 20px 14px;text-align:center;}
+.hd h1{font-size:22px;font-weight:700;letter-spacing:2px;color:var(--text);}
+.hd h1 span{color:var(--primary);}
+.hd .sub{font-size:12px;color:var(--muted);margin-top:4px;letter-spacing:.5px;}
+
+/* Section cards */
+.section{margin:0 20px 16px;background:var(--card);border-radius:16px;padding:20px;box-shadow:var(--shadow);}
+.section h2{font-size:14px;font-weight:700;color:var(--text);margin-bottom:14px;display:flex;align-items:center;gap:8px;}
+.section h2 .dot{width:8px;height:8px;border-radius:50%;background:var(--primary);display:inline-block;flex-shrink:0;}
+.section h2 .dot.amber{background:var(--amber);}
+
+/* Coming soon placeholder */
+.soon{text-align:center;padding:28px 0 8px;color:var(--muted);}
+.soon i{font-size:32px;color:var(--border);display:block;margin-bottom:10px;}
+.soon p{font-size:13px;line-height:1.8;}
+.soon .hint{font-size:11px;color:#c0b0b0;margin-top:4px;}
+
+/* Month calendar */
+.cal-hd{display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;}
+.cal-hd-title{font-size:15px;font-weight:700;color:var(--text);}
+.cal-nav{width:32px;height:32px;border:none;background:none;cursor:pointer;color:var(--muted);font-size:20px;display:flex;align-items:center;justify-content:center;border-radius:8px;transition:background .15s;}
+.cal-nav:hover{background:var(--primary-bg);color:var(--primary);}
+.cal-grid{display:grid;grid-template-columns:repeat(7,1fr);gap:2px;}
+.cal-dh{font-size:11px;color:var(--muted);padding:4px 0;text-align:center;font-weight:500;}
+.cal-day{font-size:14px;padding:7px 2px;text-align:center;cursor:pointer;border-radius:8px;transition:background .15s;line-height:1;}
+.cal-day:not(:empty):hover{background:var(--primary-bg);}
+.cal-day.today{background:var(--primary);color:#fff;font-weight:700;}
+.cal-day.sat,.cal-day.sun{color:var(--amber);}
+
+/* Countdown section */
+.cd-list{display:grid;grid-template-columns:1fr 1fr;gap:10px;}
+.cd-card{background:var(--primary-bg);border-radius:12px;padding:14px 12px;text-align:center;}
+.cd-em{font-size:18px;}
+.cd-days{font-size:24px;font-weight:800;color:var(--primary);line-height:1.1;margin:2px 0;}
+.cd-title{font-size:11px;color:var(--muted);}
+.cd-add{display:block;width:100%;margin-top:10px;padding:10px;border-radius:10px;border:1.5px dashed var(--border);background:transparent;color:var(--muted);font-size:13px;cursor:pointer;font-family:inherit;}
+.cd-add:hover{border-color:var(--primary);color:var(--primary);}
+
+/* Bottom nav */
+.bnav{position:fixed;bottom:0;left:50%;transform:translateX(-50%);width:100%;max-width:480px;background:rgba(255,255,255,.97);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);border-top:1px solid var(--border);display:flex;z-index:50;padding:7px 0 calc(7px + env(safe-area-inset-bottom,0px));}
+.ni{flex:1;display:flex;flex-direction:column;align-items:center;gap:3px;text-decoration:none;border:none;background:none;cursor:pointer;color:#b0a0aa;font-size:10px;letter-spacing:.4px;font-family:inherit;padding:4px 0;transition:color .18s;}
+.ni i{font-size:21px;}
+.ni.act{color:var(--primary);}
+
+/* Countdown add modal */
+.mo{display:none;position:fixed;inset:0;background:rgba(0,0,0,.25);z-index:100;align-items:flex-end;justify-content:center;}
+.mo.show{display:flex;}
+.mb{background:var(--bg);border-radius:22px 22px 0 0;padding:22px 20px calc(44px + env(safe-area-inset-bottom,0px));width:100%;max-width:480px;}
+.mb h3{font-size:16px;font-weight:700;margin-bottom:16px;text-align:center;color:var(--text);}
+.mb select,.mb input{width:100%;padding:11px 14px;border-radius:11px;border:1.5px solid var(--border);background:var(--card);font-size:14px;font-family:inherit;color:var(--text);margin-bottom:10px;outline:none;-webkit-appearance:none;}
+.mb select:focus,.mb input:focus{border-color:var(--primary);}
+.mbtns{display:flex;gap:10px;margin-top:4px;}
+.mbtns button{flex:1;padding:12px;border-radius:11px;border:none;font-size:14px;cursor:pointer;font-family:inherit;}
+.bcn{background:var(--border);color:var(--muted);}
+.bsb{background:var(--primary);color:#fff;}
+</style>
+</head>
+<body>
+
+<div class="hd">
+  <h1>calendar</h1>
+  <div class="sub">dates &amp; plans</div>
+</div>
+
+<!-- Countdowns (live) -->
+<div class="section">
+  <h2><span class="dot"></span>countdowns</h2>
+  <div class="cd-list" id="cd-list">
+    <div style="grid-column:1/-1;text-align:center;color:var(--muted);font-size:13px;padding:12px 0;">loading…</div>
+  </div>
+  <button class="cd-add" onclick="openCD()">+ add countdown</button>
+</div>
+
+<!-- Month calendar -->
+<div class="section">
+  <div class="cal-hd">
+    <button class="cal-nav" onclick="changeMonth(-1)"><i class="ti ti-chevron-left"></i></button>
+    <span class="cal-hd-title" id="cal-title"></span>
+    <button class="cal-nav" onclick="changeMonth(1)"><i class="ti ti-chevron-right"></i></button>
+  </div>
+  <div class="cal-grid" id="cal-grid"></div>
+</div>
+
+<!-- Todos — coming soon -->
+<div class="section">
+  <h2><span class="dot amber"></span>to-do list</h2>
+  <div class="soon">
+    <i class="ti ti-checkbox"></i>
+    <p>coming soon</p>
+    <div class="hint">shared tasks &amp; reminders</div>
+  </div>
+</div>
+
+<!-- Period tracker — coming soon -->
+<div class="section">
+  <h2><span class="dot amber"></span>cycle tracker</h2>
+  <div class="soon">
+    <i class="ti ti-heart"></i>
+    <p>coming soon</p>
+    <div class="hint">cycle tracking for Haya</div>
+  </div>
+</div>
+
+<nav class="bnav">
+  <a class="ni" href="/dash"><i class="ti ti-layout-dashboard"></i><span>dash</span></a>
+  <a class="ni" href="/chat"><i class="ti ti-message-2"></i><span>chat</span></a>
+  <a class="ni act" href="/calendar"><i class="ti ti-calendar"></i><span>calendar</span></a>
+  <a class="ni" href="/letters"><i class="ti ti-mail"></i><span>letters</span></a>
+</nav>
+
+<!-- Countdown Modal -->
+<div class="mo" id="cdmo">
+  <div class="mb">
+    <h3>add countdown</h3>
+    <input type="text" id="cd-title" placeholder="title">
+    <input type="text" id="cd-emoji" placeholder="emoji (e.g. 🎂)">
+    <input type="date" id="cd-date">
+    <select id="cd-type">
+      <option value="countdown">countdown (days until)</option>
+      <option value="countup">countup (days since)</option>
+    </select>
+    <div class="mbtns">
+      <button class="bcn" onclick="closeCD()">cancel</button>
+      <button class="bsb" onclick="submitCD()">add</button>
+    </div>
+  </div>
+</div>
+
+<script>
+var calYear, calMonth;
+(function(){var n=new Date(); calYear=n.getFullYear(); calMonth=n.getMonth();}());
+
+var MONTHS=['January','February','March','April','May','June','July','August','September','October','November','December'];
+var DAYS=['Mo','Tu','We','Th','Fr','Sa','Su'];
+
+function renderCal(){
+  var today=new Date();
+  var first=new Date(calYear,calMonth,1);
+  var last=new Date(calYear,calMonth+1,0);
+  var startDow=(first.getDay()+6)%7; // Mon=0
+
+  document.getElementById('cal-title').textContent=MONTHS[calMonth]+' '+calYear;
+
+  var html='';
+  DAYS.forEach(function(d){html+='<div class="cal-dh">'+d+'</div>';});
+  for(var i=0;i<startDow;i++) html+='<div></div>';
+  for(var d=1;d<=last.getDate();d++){
+    var dow=(new Date(calYear,calMonth,d).getDay()+6)%7;
+    var cls='cal-day';
+    if(d===today.getDate()&&calMonth===today.getMonth()&&calYear===today.getFullYear()) cls+=' today';
+    else if(dow===5) cls+=' sat';
+    else if(dow===6) cls+=' sun';
+    html+='<div class="'+cls+'">'+d+'</div>';
+  }
+  document.getElementById('cal-grid').innerHTML=html;
+}
+
+function changeMonth(dir){
+  calMonth+=dir;
+  if(calMonth<0){calMonth=11;calYear--;}
+  if(calMonth>11){calMonth=0;calYear++;}
+  renderCal();
+}
+
+renderCal();
+
+async function loadCD(){
+  try{
+    var r=await fetch('/api/countdowns');
+    var d=await r.json();
+    var cds=d.countdowns||[];
+    var c=document.getElementById('cd-list');
+    if(!cds.length){
+      c.innerHTML='<div style="grid-column:1/-1;text-align:center;color:var(--muted);font-size:13px;padding:12px 0;">no countdowns yet</div>';
+      return;
+    }
+    c.innerHTML=cds.map(cd=>
+      '<div class="cd-card">' +
+        '<div class="cd-em">'+(cd.emoji||'📅')+'</div>' +
+        '<div class="cd-days">'+cd.days+'</div>' +
+        '<div class="cd-title">'+cd.title+'</div>' +
+      '</div>'
+    ).join('');
+  }catch(e){}
+}
+
+function openCD(){document.getElementById('cdmo').classList.add('show');}
+function closeCD(){document.getElementById('cdmo').classList.remove('show');}
+document.getElementById('cdmo').addEventListener('click',function(e){if(e.target===this)closeCD();});
+
+async function submitCD(){
+  var t=document.getElementById('cd-title').value.trim();
+  var date=document.getElementById('cd-date').value;
+  if(!t||!date)return;
+  await fetch('/api/countdowns',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({title:t,target_date:date,
+      emoji:document.getElementById('cd-emoji').value||'📅',
+      type:document.getElementById('cd-type').value})});
+  closeCD(); loadCD();
+}
+
+if('serviceWorker' in navigator){
+  navigator.serviceWorker.register('/sw.js').catch(console.error);
+}
+loadCD();
+</script>
+</body>
+</html>

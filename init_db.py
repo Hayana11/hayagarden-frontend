@@ -1,0 +1,11 @@
+import sqlite3
+conn = sqlite3.connect('/opt/frontend/memories.db')
+conn.execute("CREATE TABLE IF NOT EXISTS posts (id INTEGER PRIMARY KEY AUTOINCREMENT, type TEXT NOT NULL, content TEXT NOT NULL, author TEXT DEFAULT 'user', created_at DATETIME DEFAULT (datetime('now', '+8 hours')), pinned INTEGER DEFAULT 0)")
+conn.execute("CREATE TABLE IF NOT EXISTS letters (id INTEGER PRIMARY KEY AUTOINCREMENT, from_who TEXT NOT NULL, to_who TEXT NOT NULL, content TEXT NOT NULL, read INTEGER DEFAULT 0, created_at DATETIME DEFAULT (datetime('now', '+8 hours')))")
+conn.execute("CREATE TABLE IF NOT EXISTS countdowns (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, target_date TEXT NOT NULL, emoji TEXT DEFAULT '📅', type TEXT DEFAULT 'countdown', created_at DATETIME DEFAULT (datetime('now', '+8 hours')))")
+conn.execute("CREATE TABLE IF NOT EXISTS chat_messages (id INTEGER PRIMARY KEY AUTOINCREMENT, author TEXT NOT NULL DEFAULT 'user', content TEXT NOT NULL, thinking TEXT DEFAULT '', image_url TEXT DEFAULT '', session_id INTEGER DEFAULT 1, created_at DATETIME DEFAULT (datetime('now', '+8 hours')))")
+conn.execute("CREATE TABLE IF NOT EXISTS chat_sessions (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT DEFAULT '默认窗口', created_at DATETIME DEFAULT (datetime('now', '+8 hours')))")
+conn.execute("INSERT INTO chat_sessions (name) VALUES ('默认窗口')")
+conn.commit()
+conn.close()
+print("数据库初始化完成")

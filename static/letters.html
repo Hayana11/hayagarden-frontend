@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+<title>letters · 我们家</title>
+<link rel="manifest" href="/manifest.json">
+<meta name="theme-color" content="#7c6a8a">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="我们家">
+<link rel="apple-touch-icon" href="/icon-192.png">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@latest/tabler-icons.min.css">
+<style>
+*{margin:0;padding:0;box-sizing:border-box;}
+:root{
+  --bg:#f8f8f6;--card:#fff;--text:#2a2020;--muted:#9a8a8a;
+  --primary:#7c6a8a;--primary-bg:#f0ebf4;--primary-light:#e8dff0;
+  --amber:#d4a574;--amber-bg:#fdf4e7;--amber-light:#f5e4cc;
+  --border:#ece6e0;--shadow:0 1px 8px rgba(40,20,20,.07);
+}
+body{background:var(--bg);color:var(--text);font-family:-apple-system,'PingFang SC','Noto Sans SC',sans-serif;min-height:100vh;max-width:480px;margin:0 auto;padding-bottom:calc(72px + env(safe-area-inset-bottom,0px));}
+
+/* Header */
+.hd{padding:44px 20px 14px;text-align:center;}
+.hd h1{font-size:22px;font-weight:700;letter-spacing:2px;color:var(--text);}
+.hd h1 span{color:var(--primary);}
+.hd .sub{font-size:12px;color:var(--muted);margin-top:4px;letter-spacing:.5px;}
+
+/* Action button */
+.write-btn{display:block;margin:0 20px 16px;padding:13px;background:var(--primary);color:#fff;border:none;border-radius:12px;font-size:14px;cursor:pointer;font-family:inherit;letter-spacing:.3px;box-shadow:0 2px 10px rgba(124,106,138,.22);text-align:center;width:calc(100% - 40px);}
+.write-btn:active{opacity:.85;}
+
+/* Letters list */
+.letters-list{padding:0 20px;}
+
+.month-lbl{font-size:11px;color:var(--muted);margin:14px 0 8px;display:flex;align-items:center;gap:8px;letter-spacing:.3px;}
+.month-lbl::after{content:'';flex:1;height:1px;background:var(--border);}
+
+.letter-card{background:var(--card);border-radius:14px;padding:16px 18px;margin-bottom:9px;box-shadow:var(--shadow);cursor:pointer;transition:transform .15s;}
+.letter-card:active{transform:scale(.98);}
+.letter-card.to-fy{background:var(--primary-bg);border-left:3px solid var(--primary);}
+.letter-card.to-ha{background:var(--amber-bg);border-left:3px solid var(--amber);}
+.lc-head{display:flex;align-items:center;gap:8px;margin-bottom:8px;}
+.lc-from{font-size:13px;font-weight:600;}
+.lc-from.f{color:var(--primary);}
+.lc-from.h{color:var(--amber);}
+.lc-arrow{font-size:12px;color:var(--muted);}
+.lc-to{font-size:12px;color:var(--muted);}
+.lc-time{font-size:11px;color:var(--muted);margin-left:auto;}
+.lc-body{font-size:14px;line-height:1.7;color:var(--text);white-space:pre-wrap;word-break:break-all;}
+.lc-body.collapsed{display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;}
+.lc-expand{font-size:12px;color:var(--primary);margin-top:6px;cursor:pointer;display:inline-block;}
+
+.empty{text-align:center;color:var(--muted);padding:56px 20px;font-size:14px;line-height:2.2;}
+
+/* Bottom nav */
+.bnav{position:fixed;bottom:0;left:50%;transform:translateX(-50%);width:100%;max-width:480px;background:rgba(255,255,255,.97);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);border-top:1px solid var(--border);display:flex;z-index:50;padding:7px 0 calc(7px + env(safe-area-inset-bottom,0px));}
+.ni{flex:1;display:flex;flex-direction:column;align-items:center;gap:3px;text-decoration:none;border:none;background:none;cursor:pointer;color:#b0a0aa;font-size:10px;letter-spacing:.4px;font-family:inherit;padding:4px 0;transition:color .18s;}
+.ni i{font-size:21px;}
+.ni.act{color:var(--primary);}
+
+/* Write Modal */
+.mo{display:none;position:fixed;inset:0;background:rgba(0,0,0,.25);z-index:100;align-items:flex-end;justify-content:center;}
+.mo.show{display:flex;}
+.mb{background:var(--bg);border-radius:22px 22px 0 0;padding:22px 20px calc(44px + env(safe-area-inset-bottom,0px));width:100%;max-width:480px;}
+.mb h3{font-size:16px;font-weight:700;margin-bottom:16px;text-align:center;color:var(--text);}
+.mb select,.mb textarea{width:100%;padding:11px 14px;border-radius:11px;border:1.5px solid var(--border);background:var(--card);font-size:14px;font-family:inherit;color:var(--text);margin-bottom:10px;outline:none;-webkit-appearance:none;}
+.mb select:focus,.mb textarea:focus{border-color:var(--primary);}
+.mb textarea{min-height:140px;resize:none;}
+.char-count{font-size:11px;color:var(--muted);text-align:right;margin:-6px 0 10px;}
+.mbtns{display:flex;gap:10px;margin-top:4px;}
+.mbtns button{flex:1;padding:12px;border-radius:11px;border:none;font-size:14px;cursor:pointer;font-family:inherit;}
+.bcn{background:var(--border);color:var(--muted);}
+.bsb{background:var(--primary);color:#fff;}
+</style>
+</head>
+<body>
+
+<div class="hd">
+  <h1>letters</h1>
+  <div class="sub">write to each other</div>
+</div>
+
+<button class="write-btn" onclick="openWrite()">write a letter</button>
+
+<div class="letters-list" id="letters-list">
+  <div class="empty">loading…</div>
+</div>
+
+<nav class="bnav">
+  <a class="ni" href="/dash"><i class="ti ti-layout-dashboard"></i><span>dash</span></a>
+  <a class="ni" href="/chat"><i class="ti ti-message-2"></i><span>chat</span></a>
+  <a class="ni" href="/calendar"><i class="ti ti-calendar"></i><span>calendar</span></a>
+  <a class="ni act" href="/letters"><i class="ti ti-mail"></i><span>letters</span></a>
+</nav>
+
+<!-- Write Modal -->
+<div class="mo" id="wmo">
+  <div class="mb">
+    <h3>write a letter</h3>
+    <select id="w-from">
+      <option value="hayana">from Haya</option>
+      <option value="fyodor">from Fyodor</option>
+    </select>
+    <select id="w-to">
+      <option value="fyodor">to Fyodor</option>
+      <option value="hayana">to Haya</option>
+    </select>
+    <textarea id="w-content" placeholder="dear …" oninput="updateCount()"></textarea>
+    <div class="char-count" id="char-count">0 chars</div>
+    <div class="mbtns">
+      <button class="bcn" onclick="closeWrite()">cancel</button>
+      <button class="bsb" onclick="submitLetter()">send</button>
+    </div>
+  </div>
+</div>
+
+<script>
+function isFy(a){return['fyodor','claude','assistant'].includes(String(a).toLowerCase());}
+function escHtml(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+function fmtDate(dt){
+  if(!dt)return'';
+  var d=new Date(dt.replace(' ','T'));
+  return(d.getMonth()+1)+'.'+d.getDate();
+}
+function monthKey(dt){
+  if(!dt)return'';
+  var d=new Date(dt.replace(' ','T'));
+  return d.getFullYear()+'.'+(d.getMonth()+1);
+}
+function updateCount(){
+  var v=document.getElementById('w-content').value;
+  document.getElementById('char-count').textContent=v.length+' chars';
+}
+
+async function load(){
+  try{
+    var r=await fetch('/api/letters');
+    var d=await r.json();
+    render(d.letters||[]);
+  }catch(e){
+    document.getElementById('letters-list').innerHTML='<div class="empty">load failed</div>';
+  }
+}
+
+function render(list){
+  var c=document.getElementById('letters-list');
+  if(!list.length){c.innerHTML='<div class="empty">no letters yet<br>write the first one</div>';return;}
+  var html='',lm='';
+  list.forEach(function(l,i){
+    var mo=monthKey(l.created_at);
+    if(mo!==lm){html+='<div class="month-lbl">'+mo+'</div>';lm=mo;}
+    var fyFrom=isFy(l.from_who);
+    var fyTo=isFy(l.to_who);
+    var cardClass=fyTo?'to-fy':'to-ha';
+    html+='<div class="letter-card '+cardClass+'" id="lc'+i+'">' +
+      '<div class="lc-head">' +
+        '<span class="lc-from '+(fyFrom?'f':'h')+'">'+(fyFrom?'Fyodor':'Haya')+'</span>' +
+        '<span class="lc-arrow">→</span>' +
+        '<span class="lc-to">'+(fyTo?'Fyodor':'Haya')+'</span>' +
+        '<span class="lc-time">'+fmtDate(l.created_at)+'</span>' +
+      '</div>' +
+      '<div class="lc-body collapsed" id="lb'+i+'">' +escHtml(l.content)+'</div>' +
+      '<span class="lc-expand" onclick="expand('+i+',event)">read more</span>' +
+    '</div>';
+  });
+  c.innerHTML=html;
+}
+
+function expand(i,e){
+  e.stopPropagation();
+  var b=document.getElementById('lb'+i);
+  var ex=e.target;
+  if(b.classList.contains('collapsed')){
+    b.classList.remove('collapsed');
+    ex.textContent='collapse';
+  }else{
+    b.classList.add('collapsed');
+    ex.textContent='read more';
+  }
+}
+
+function openWrite(){
+  document.getElementById('wmo').classList.add('show');
+  document.getElementById('w-content').value='';
+  updateCount();
+}
+function closeWrite(){document.getElementById('wmo').classList.remove('show');}
+
+document.getElementById('wmo').addEventListener('click',function(e){if(e.target===this)closeWrite();});
+
+async function submitLetter(){
+  var c=document.getElementById('w-content').value.trim();
+  if(!c)return;
+  var from=document.getElementById('w-from').value;
+  var to=document.getElementById('w-to').value;
+  await fetch('/api/letters',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({from_who:from,to_who:to,content:c})});
+  closeWrite();
+  load();
+}
+
+if('serviceWorker' in navigator){
+  navigator.serviceWorker.register('/sw.js').catch(console.error);
+}
+load();
+</script>
+</body>
+</html>
