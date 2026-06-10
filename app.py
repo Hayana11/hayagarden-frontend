@@ -228,5 +228,91 @@ def diary_generate():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+
+
+# ── Block / Settings ──
+
+@app.route('/api/status/blocked')
+def status_blocked():
+    conn = get_db()
+    row = conn.execute("SELECT value FROM settings WHERE key='blocked'").fetchone()
+    conn.close()
+    blocked = (row['value'] == 'true') if row else False
+    return jsonify({"blocked": blocked})
+
+@app.route('/api/block', methods=['POST'])
+def toggle_block():
+    if request.headers.get('X-Admin') != 'true':
+        return jsonify({"error": "unauthorized"}), 403
+    conn = get_db()
+    row = conn.execute("SELECT value FROM settings WHERE key='blocked'").fetchone()
+    new_val = 'false' if (row and row['value'] == 'true') else 'true'
+    conn.execute("INSERT OR REPLACE INTO settings (key,value) VALUES ('blocked',?)", (new_val,))
+    conn.commit()
+    conn.close()
+    return jsonify({"blocked": new_val == 'true'})
+
+# ── Drift Bottles ──
+
+@app.route('/api/drift/bottles')
+def drift_bottles_list():
+    conn = get_db()
+    rows = conn.execute("SELECT * FROM drift_bottles ORDER BY id DESC").fetchall()
+    conn.close()
+    return jsonify({"bottles": [dict(r) for r in rows]})
+
+@app.route('/api/drift/send', methods=['POST'])
+def drift_send():
+    import random
+    data = request.get_json()
+    content = (data.get('content') or '').strip()
+    if not content:
+        return jsonify({"error": "empty"}), 400
+    minutes = random.randint(30, 1440)
+    found_at = (datetime.datetime.utcnow() + datetime.timedelta(hours=8, minutes=minutes)).strftime('%Y-%m-%d %H:%M:%S')
+    conn = get_db()
+    conn.execute("INSERT INTO drift_bottles (content,found_at) VALUES (?,?)", (content, found_at))
+    conn.commit()
+    conn.close()
+    return jsonify({"ok": True, "found_in_minutes": minutes})
+
+@app.route('/api/drift/check')
+def drift_check():
+    import requests as req
+    now_str = (datetime.datetime.utcnow() + datetime.timedelta(hours=8)).strftime('%Y-%m-%d %H:%M:%S')
+    conn = get_db()
+    bottles = conn.execute(
+        "SELECT * FROM drift_bottles WHERE status='floating' AND found_at <= ?", (now_str,)
+    ).fetchall()
+    results = []
+    for b in bottles:
+        try:
+            persona = open('/opt/frontend/prompts/persona.md').read()
+            now_dt = datetime.datetime.utcnow() + datetime.timedelta(hours=8)
+            system = (persona + "\n\n当前时间：" + now_dt.strftime('%Y-%m-%d %H:%M') +
+                      "\n\n哈娅给你写了一封漂流瓶。请以费奥多尔的口吻回复，简短有温度。")
+            resp = req.post(API_URL,
+                headers={'Content-Type':'application/json','x-api-key':API_KEY,'anthropic-version':'2023-06-01'},
+                json={'model':MODEL,'max_tokens':512,'system':system,
+                      'messages':[{'role':'user','content':b['content']}]},
+                timeout=60)
+            text = ''.join(x.get('text','') for x in resp.json().get('content',[]) if x.get('type')=='text')
+            conn.execute("UPDATE drift_bottles SET status='found', reply=? WHERE id=?", (text, b['id']))
+            conn.commit()
+            results.append({'id': b['id'], 'ok': True})
+        except Exception as e:
+            results.append({'id': b['id'], 'error': str(e)})
+    conn.close()
+    return jsonify({"checked": len(bottles), "results": results})
+
+@app.route('/api/drift/found')
+def drift_found():
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT * FROM drift_bottles WHERE status='found' ORDER BY found_at DESC LIMIT 20"
+    ).fetchall()
+    conn.close()
+    return jsonify({"bottles": [dict(r) for r in rows]})
+
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5050, debug=False)

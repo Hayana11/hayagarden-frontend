@@ -142,6 +142,32 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:14px;heigh
 .lb.show{display:flex;}
 .lb img{max-width:94vw;max-height:86vh;border-radius:12px;object-fit:contain;}
 .lb-close{position:absolute;top:18px;right:18px;color:#fff;font-size:26px;cursor:pointer;opacity:.8;}
+
+/* ── Blocked state ── */
+.inp-area.blocked .inp-txt{background:#f5f3f0;color:var(--muted);cursor:not-allowed;pointer-events:none;}
+.inp-area.blocked .inp-send{display:none;}
+.inp-area.blocked .inp-attach{opacity:.3;pointer-events:none;}
+.drift-btn-wrap{display:none;flex-direction:column;align-items:center;gap:2px;flex-shrink:0;}
+.inp-area.blocked .drift-btn-wrap{display:flex;}
+.drift-hint{font-size:9px;color:var(--muted);letter-spacing:.2px;white-space:nowrap;}
+.drift-btn{width:38px;height:38px;border-radius:50%;border:none;background:var(--amber-bg);color:var(--amber);cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:18px;transition:opacity .15s,transform .15s;box-shadow:0 2px 8px rgba(212,165,116,.3);}
+.drift-btn:active{opacity:.75;transform:scale(.9);}
+/* ── Drift modal ── */
+.drift-modal{display:none;position:fixed;inset:0;background:rgba(0,0,0,.52);z-index:400;align-items:center;justify-content:center;}
+.drift-modal.show{display:flex;}
+.drift-card{background:#fffcf7;border-radius:20px;padding:28px 22px 22px;width:min(360px,88vw);box-shadow:0 16px 48px rgba(0,0,0,.2);display:flex;flex-direction:column;gap:14px;}
+.drift-card-title{font-family:Georgia,'Times New Roman',serif;font-size:17px;color:var(--amber-text);text-align:center;letter-spacing:.4px;}
+.drift-card-sub{font-size:11px;color:var(--muted);text-align:center;margin-top:-8px;}
+.drift-textarea{border:1.5px solid var(--border);border-radius:12px;padding:12px 14px;font-size:14px;font-family:inherit;color:var(--text);background:var(--card);resize:none;outline:none;line-height:1.65;min-height:110px;}
+.drift-textarea:focus{border-color:var(--amber);}
+.drift-send-btn{padding:12px;border-radius:12px;border:none;background:var(--amber);color:var(--amber-text);font-size:14px;font-family:inherit;cursor:pointer;font-weight:500;transition:opacity .15s;}
+.drift-send-btn:active,.drift-send-btn:disabled{opacity:.6;}
+.drift-sent-msg{display:none;text-align:center;font-size:13px;color:var(--muted);line-height:1.8;padding:8px 0;}
+/* ── Drift bubble ── */
+.drift-badge{font-size:10px;color:var(--amber);margin-bottom:5px;display:flex;align-items:center;gap:4px;opacity:.8;}
+.drift-badge i{font-size:12px;}
+.bubble.drift{background:linear-gradient(135deg,rgba(212,165,116,.12),rgba(124,106,138,.08));border:1px solid rgba(212,165,116,.25);border-radius:16px 16px 16px 4px;padding:10px 14px;font-size:var(--msg-font);line-height:1.7;word-break:break-all;color:var(--text);}
+.bubble.drift.sent{border-radius:16px 16px 4px 16px;}
 </style>
 </head>
 <body>
@@ -223,6 +249,10 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:14px;heigh
     <textarea class="inp-txt" id="txt" placeholder="say something…" rows="1"
       oninput="resize(this)" onkeydown="onEnter(event)"></textarea>
     <button class="inp-send" id="send-btn" onclick="send()"><i class="ti ti-send"></i></button>
+    <div class="drift-btn-wrap" id="drift-btn-wrap">
+      <span class="drift-hint">你现在只能用这个</span>
+      <button class="drift-btn" onclick="openBottle()"><i class="ti ti-mail-forward"></i></button>
+    </div>
   </div>
 </div>
 
@@ -233,6 +263,18 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:14px;heigh
   <a class="ni" href="/calendar"><i class="ti ti-calendar"></i><span>calendar</span></a>
   <a class="ni" href="/letters"><i class="ti ti-mail"></i><span>letters</span></a>
 </nav>
+
+
+<!-- Drift bottle modal -->
+<div class="drift-modal" id="drift-modal" onclick="driftBgClick(event)">
+  <div class="drift-card">
+    <div class="drift-card-title">漂流瓶</div>
+    <div class="drift-card-sub">写下你想说的话，它会漂向他</div>
+    <textarea class="drift-textarea" id="drift-txt" placeholder="……" rows="5"></textarea>
+    <button class="drift-send-btn" id="drift-send-btn" onclick="sendBottle()">投出去</button>
+    <div class="drift-sent-msg" id="drift-sent-msg">漂流瓶已投出<br>等待被捡到…</div>
+  </div>
+</div>
 
 <!-- Lightbox -->
 <div class="lb" id="lb" onclick="closeLb()">
@@ -358,6 +400,18 @@ function buildHtml(list) {
   list.forEach(function(m){
     var dk = dayKey(m.created_at);
     if(dk !== lastDay){ html += '<div class="date-sep">'+dayLabel(m.created_at)+'</div>'; lastDay=dk; }
+    if(m.drift){
+      var dside = m.drift==='sent' ? 'ha' : 'fy';
+      html +=
+        '<div class="msg-row '+dside+'">' +
+          '<div class="bwrap">' +
+            '<div class="drift-badge"'+(dside==='ha'?' style="justify-content:flex-end"':'')+'><i class="ti ti-mail-forward"></i> '+(m.drift==='sent'?'漂流瓶 · 已投出':'漂流瓶回信')+'</div>' +
+            '<div class="bubble drift'+(dside==='ha'?' sent':'')+'">'+escHtml(m.content)+'</div>' +
+            '<div class="msg-time">'+fmtTime(m.created_at)+'</div>' +
+          '</div>' +
+        '</div>';
+      return;
+    }
     var fy = isFy(m.author);
     var side = fy?'fy':'ha';
     var hasImg = !!m.image_url;
@@ -395,6 +449,15 @@ async function loadMsgs(isInit){
     var r=await fetch('/api/chat/messages');
     var d=await r.json();
     var list=d.messages||[];
+    try{
+      var rb=await fetch('/api/drift/bottles');
+      var db=await rb.json();
+      (db.bottles||[]).forEach(function(b){
+        list.push({author:'hayana',content:b.content,created_at:b.created_at,drift:'sent'});
+        if(b.status==='found'&&b.reply) list.push({author:'fyodor',content:b.reply,created_at:b.found_at,drift:'reply'});
+      });
+      list.sort(function(a,b){return String(a.created_at).localeCompare(String(b.created_at));});
+    }catch(e){}
     var c=document.getElementById('msgs');
     var wasAtBottom=c.scrollHeight-c.scrollTop-c.clientHeight<80;
     c.innerHTML=buildHtml(list);
@@ -436,7 +499,7 @@ function showTyping(){ document.getElementById('typing').style.display='block'; 
 function hideTyping(){ document.getElementById('typing').style.display='none'; }
 
 async function send(){
-  if(sending)return;
+  if(sending||blockedState)return;
   var txt=document.getElementById('txt').value.trim();
   if(!txt&&!pendingFile)return;
   sending=true;
@@ -489,6 +552,63 @@ document.addEventListener('click',function askOnce(){
   if('Notification' in window&&Notification.permission==='default') Notification.requestPermission();
   document.removeEventListener('click',askOnce);
 },{once:true});
+
+// ── Block & Drift ──
+var blockedState = false;
+
+async function checkBlocked() {
+  try {
+    var r = await fetch('/api/status/blocked');
+    var d = await r.json();
+    var isBlocked = !!d.blocked;
+    if (isBlocked !== blockedState) { blockedState = isBlocked; applyBlockedUI(isBlocked); }
+  } catch(e) {}
+}
+
+function applyBlockedUI(blocked) {
+  var area = document.querySelector('.inp-area');
+  var txt = document.getElementById('txt');
+  if (blocked) {
+    area.classList.add('blocked');
+    txt.placeholder = '——';
+    txt.disabled = true;
+  } else {
+    area.classList.remove('blocked');
+    txt.placeholder = 'say something…';
+    txt.disabled = false;
+  }
+}
+
+function openBottle() {
+  document.getElementById('drift-modal').classList.add('show');
+  document.getElementById('drift-txt').value = '';
+  document.getElementById('drift-send-btn').style.display = '';
+  document.getElementById('drift-send-btn').disabled = false;
+  document.getElementById('drift-sent-msg').style.display = 'none';
+  setTimeout(function(){ document.getElementById('drift-txt').focus(); }, 100);
+}
+function closeDriftModal() { document.getElementById('drift-modal').classList.remove('show'); }
+function driftBgClick(e) { if(e.target===document.getElementById('drift-modal')) closeDriftModal(); }
+
+async function sendBottle() {
+  var content = document.getElementById('drift-txt').value.trim();
+  if (!content) return;
+  var btn = document.getElementById('drift-send-btn');
+  btn.disabled = true;
+  try {
+    await fetch('/api/drift/send', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({content:content})});
+    btn.style.display = 'none';
+    document.getElementById('drift-sent-msg').style.display = 'block';
+    loadMsgs(false).then(function(){var c=document.getElementById('msgs');c.scrollTop=c.scrollHeight;});
+    setTimeout(closeDriftModal, 2500);
+  } catch(e) { btn.disabled = false; }
+}
+
+
+
+checkBlocked();
+setInterval(checkBlocked, 15000);
+
 </script>
 </body>
 </html>
