@@ -209,7 +209,7 @@ def run_tool(name, args):
     except Exception as e:
         return '工具执行失败: ' + str(e)
 
-CC_CWD = '/opt/frontend/.claude-gw'
+CC_CWD = '/opt/cc-gw'
 
 def messages_to_text(messages):
     lines = []
@@ -239,22 +239,39 @@ def claude_code_call(system, messages):
         + '正文本身不要提及"我已记录"之类的话。')
     full_system = system + save_instr
     convo = messages_to_text(messages)
-    prompt = ('以下是你们最近的对话记录：' + NL + NL + convo + NL + NL
+    # "think hard" 触发词开启 thinking block（实测 -p 模式下唯一可靠的开启方式）
+    prompt = ('think hard' + NL
+              + '以下是你们最近的对话记录：' + NL + NL + convo + NL + NL
               + '请以费奥多尔的身份自然地回复最后一条消息。只输出回复内容本身，不要任何前缀。')
     env = dict(os.environ)
     env['CLAUDE_CODE_OAUTH_TOKEN'] = CC_TOKEN
     env.pop('ANTHROPIC_API_KEY', None)
     r = subprocess.run(
-        ['claude', '-p', prompt, '--output-format', 'json',
+        ['claude', '-p', prompt, '--output-format', 'stream-json', '--verbose',
          '--system-prompt', full_system, '--max-turns', '3'],
         capture_output=True, text=True, timeout=300, cwd=CC_CWD, env=env
     )
     if r.returncode != 0:
         raise RuntimeError('claude code 调用失败: ' + (r.stderr or r.stdout)[:300])
-    d = json.loads(r.stdout)
-    if d.get('is_error'):
-        raise RuntimeError('claude code 返回错误: ' + str(d.get('result', ''))[:300])
-    raw = (d.get('result') or '').strip()
+    think_parts, text_parts, is_err = [], [], None
+    for line in r.stdout.splitlines():
+        try:
+            d = json.loads(line)
+        except Exception:
+            continue
+        if d.get('type') == 'assistant':
+            for b in (d.get('message') or {}).get('content', []):
+                if b.get('type') == 'thinking':
+                    think_parts.append(b.get('thinking', ''))
+                elif b.get('type') == 'text':
+                    text_parts.append(b.get('text', ''))
+        elif d.get('type') == 'result':
+            if d.get('is_error'):
+                is_err = str(d.get('result', ''))[:300]
+    if is_err:
+        raise RuntimeError('claude code 返回错误: ' + is_err)
+    raw = NL.join(t for t in text_parts if t).strip()
+    thinking = NL.join(think_parts).strip()
     # Extract [[SAVE: ...]] markers and persist
     saves = SAVE_RE.findall(raw)
     if saves:
@@ -268,7 +285,7 @@ def claude_code_call(system, messages):
             pass
     # Strip markers from displayed text
     text = SAVE_RE.sub('', raw).strip()
-    return text, ''
+    return text, thinking
 
 def generate_reply(system, messages):
     if GW_PROVIDER == 'claude_code':
@@ -332,13 +349,15 @@ def chat_stream():
             try:
                 system   = build_system()
                 messages = build_messages()
-                text, _ = claude_code_call(system, messages)
+                text, thinking = claude_code_call(system, messages)
+                if thinking:
+                    yield 'data: ' + json.dumps({'t': 'think', 'd': thinking}) + SSE_END
                 if text:
                     yield 'data: ' + json.dumps({'t': 'text', 'd': text}) + SSE_END
                     conn = get_db()
                     conn.execute(
                         "INSERT INTO chat_messages (author, content, thinking) VALUES ('assistant', ?, ?)",
-                        (text, '')
+                        (text, thinking)
                     )
                     conn.commit()
                     conn.close()
