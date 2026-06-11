@@ -332,6 +332,15 @@ def drift_found():
     conn.close()
     return jsonify({"bottles": [dict(r) for r in rows]})
 
+@app.route('/api/drift/mine')
+def drift_mine():
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT * FROM drift_bottles ORDER BY created_at DESC"
+    ).fetchall()
+    conn.close()
+    return jsonify({"bottles": [dict(r) for r in rows]})
+
 
 
 # ── Mijia light setup & proxy ──

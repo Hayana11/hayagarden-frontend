@@ -105,6 +105,9 @@ body{background:linear-gradient(160deg,var(--bg1) 0%,var(--bg2) 100%);background
     <div class="tag" data-tag="记忆">记忆</div>
     <div class="tag" data-tag="日记">日记</div>
     <div class="tag" data-tag="想你了">想你了</div>
+    <div class="tag" data-tag="漂流瓶">漂流瓶</div>
+    <div class="tag" data-tag="情绪">情绪</div>
+    <div class="tag" data-tag="色色">色色</div>
   </div>
   <div class="search-row">
     <input class="search-box" id="search-box" placeholder="搜索…" oninput="onSearch()">
@@ -118,7 +121,7 @@ body{background:linear-gradient(160deg,var(--bg1) 0%,var(--bg2) 100%);background
   <a class="ni" href="/letters"><i class="ti ti-mail"></i><span>letters</span></a>
 </nav>
 <script>
-var posts=[],curTag='',curSearch='';
+var posts=[],drifts=[],curTag='',curSearch='';
 var expandedId=null,editingId=null;
 var TYPE_MAP={记忆:'MEMORY',日记:'DIARY',想你了:'MISS'};
 var TYPE_BADGE={
@@ -134,20 +137,33 @@ document.querySelectorAll('#tags-row .tag').forEach(function(t){
   });
 });
 function onSearch(){curSearch=document.getElementById('search-box').value.toLowerCase();render();}
+
 async function load(){
-  var r=await fetch('/api/posts?limit=500');
-  var d=await r.json();
+  var r1=await fetch('/api/posts?limit=500');
+  var r2=await fetch('/api/drift/mine');
+  var d1=await r1.json(),d2=await r2.json();
   var cutoff=Date.now()-30*864e5;
-  posts=(d.posts||[]).filter(function(p){
+  posts=(d1.posts||[]).filter(function(p){
     if(!p.created_at)return false;
     return new Date(p.created_at.replace(' ','T')).getTime()>=cutoff;
   });
+  drifts=(d2.bottles||[]).filter(function(b){
+    if(!b.created_at)return false;
+    return new Date(b.created_at.replace(' ','T')).getTime()>=cutoff;
+  });
   render();
 }
-function filteredPosts(){
+
+function filteredItems(){
+  if(curTag==='漂流瓶'){
+    if(!curSearch)return drifts;
+    return drifts.filter(function(b){return(b.content||'').toLowerCase().includes(curSearch);});
+  }
   var typeFilter=TYPE_MAP[curTag]||'';
+  var tagFilter=(curTag==='情绪'||curTag==='色色')?curTag:'';
   return posts.filter(function(p){
     if(typeFilter&&p.type!==typeFilter)return false;
+    if(tagFilter&&!(p.tags||'').includes(tagFilter))return false;
     if(curSearch&&!(p.content||'').toLowerCase().includes(curSearch))return false;
     return true;
   });
@@ -161,6 +177,7 @@ function toggleItem(id,e){
   render();
   setTimeout(function(){var el=document.querySelector('[data-id="'+id+'"]');if(el)el.scrollIntoView({behavior:'smooth',block:'nearest'});},50);
 }
+function toggleDrift(uid,e){expandedId=(expandedId===uid?null:uid);render();}
 function startEdit(id,e){
   e.stopPropagation();editingId=id;expandedId=id;render();
   setTimeout(function(){var ta=document.getElementById('eta-'+id);if(ta){ta.focus();ta.setSelectionRange(ta.value.length,ta.value.length);}},30);
@@ -186,8 +203,7 @@ function typeBadge(p){
 function buildItem(p){
   var isOpen=expandedId===p.id,isEditing=editingId===p.id;
   var h='<div class="mitem'+(isOpen||isEditing?' open':'')+'" data-id="'+p.id+'" onclick="toggleItem('+p.id+',event)">';
-  h+='<div class="mdot"></div>';
-  h+='<div class="mright">';
+  h+='<div class="mdot"></div><div class="mright">';
   if(isEditing){
     h+='<textarea class="medit-ta" id="eta-'+p.id+'" onclick="event.stopPropagation()">'+escHtml(p.content)+'</textarea>';
     h+='<div class="medit-row"><button class="medit-save" onclick="saveEdit('+p.id+',event)">保存</button><button class="medit-cancel" onclick="cancelEdit(event)">取消</button></div>';
@@ -201,14 +217,35 @@ function buildItem(p){
   h+='</div></div></div>';
   return h;
 }
+function buildDriftItem(b){
+  var uid='d'+b.id,isOpen=expandedId===uid;
+  var found=b.status==='found';
+  var sBg=found?'rgba(100,160,120,.15)':'rgba(212,165,116,.15)';
+  var sColor=found?'#407050':'#a07040';
+  var sLabel=found?'已找到':'漂流中';
+  var h='<div class="mitem'+(isOpen?' open':'')+'" data-id="'+uid+'" onclick="toggleDrift(\''+uid+'\',event)">';
+  h+='<div class="mdot" style="background:var(--amber-s)"></div><div class="mright">';
+  var disp=stripThinking(b.content);
+  h+='<div class="mpreview">'+escHtml(disp)+'</div>';
+  h+='<div class="mfull">'+escHtml(disp)+'</div>';
+  if(isOpen&&b.reply){
+    var rd=stripThinking(b.reply);
+    h+='<div style="margin-top:10px;padding:10px 12px;border-radius:10px;background:rgba(124,106,138,.08);font-size:12px;line-height:1.7;color:var(--text);white-space:pre-wrap;word-break:break-all;">';
+    h+='<span style="font-size:10px;color:var(--primary);display:block;margin-bottom:4px;">费奥多尔的回应</span>';
+    h+=escHtml(rd)+'</div>';
+  }
+  h+='<div class="mmeta"><span class="tbadge" style="background:'+sBg+';color:'+sColor+'">'+sLabel+'</span>';
+  h+='<span class="mdate">'+fmtDate(b.created_at)+'</span></div></div></div>';
+  return h;
+}
 function render(){
-  var list=filteredPosts(),c=document.getElementById('list-view');
+  var list=filteredItems(),c=document.getElementById('list-view');
   if(!list.length){c.innerHTML='<div style="text-align:center;color:var(--hint);padding:32px 0;font-size:13px;">暂无记录</div>';return;}
-  var html='',lm='';
+  var html='',lm='',isDrift=(curTag==='漂流瓶');
   list.forEach(function(p){
     var mo=monthKey(p.created_at);
     if(mo!==lm){html+='<div class="mlabel">'+mo+'</div>';lm=mo;}
-    html+=buildItem(p);
+    html+=isDrift?buildDriftItem(p):buildItem(p);
   });
   c.innerHTML=html;
 }
