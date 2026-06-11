@@ -8,12 +8,12 @@ import urllib.request as _req
 import urllib.error as _err
 
 DB_PATH = '/opt/frontend/memories.db'
-API_URL = 'https://api.treegpt.cc/v1/messages'
-MODEL   = 'claude-haiku-4-5-20251001'
+API_URL = 'https://api.deepseek.com/v1/chat/completions'
+MODEL   = 'deepseek-chat'
 
 API_KEY = ''
 for line in open('/opt/frontend/.env'):
-    if line.startswith('ANTHROPIC_API_KEY='):
+    if line.startswith('DEEPSEEK_API_KEY='):
         API_KEY = line.split('=', 1)[1].strip()
 
 def log(msg):
@@ -38,22 +38,21 @@ def ask(prompt, expect_json=False):
         method='POST',
         headers={
             'Content-Type': 'application/json',
-            'x-api-key': API_KEY,
-            'anthropic-version': '2023-06-01',
+            'Authorization': f'Bearer {API_KEY}',
         }
     )
     try:
         with _req.urlopen(request, timeout=60) as resp:
             data = json.load(resp)
-        text = ''.join(b.get('text', '') for b in data.get('content', []) if b.get('type') == 'text').strip()
-        time.sleep(1.2)
+        text = (data.get('choices', [{}])[0].get('message', {}).get('content') or '').strip()
+        time.sleep(0.5)
         if expect_json:
             m = re.search(r'\{.*\}', text, re.DOTALL)
             return json.loads(m.group()) if m else {}
         return text
     except Exception as e:
         log(f'  API error: {e}')
-        time.sleep(2)
+        time.sleep(1)
         return {} if expect_json else ''
 
 
