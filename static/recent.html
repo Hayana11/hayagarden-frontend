@@ -102,7 +102,6 @@ body{background:linear-gradient(160deg,var(--bg1) 0%,var(--bg2) 100%);background
   <div class="sec-t">last 30 days</div>
   <div class="tags-row" id="tags-row">
     <div class="tag act" data-tag="">全部</div>
-    <div class="tag" data-tag="记忆">记忆</div>
     <div class="tag" data-tag="日记">日记</div>
     <div class="tag" data-tag="想你了">想你了</div>
     <div class="tag" data-tag="漂流瓶">漂流瓶</div>
@@ -123,9 +122,7 @@ body{background:linear-gradient(160deg,var(--bg1) 0%,var(--bg2) 100%);background
 <script>
 var posts=[],drifts=[],curTag='',curSearch='';
 var expandedId=null,editingId=null;
-var TYPE_MAP={记忆:'MEMORY',日记:'DIARY',想你了:'MISS'};
 var TYPE_BADGE={
-  MEMORY:['var(--primary-bg)','var(--primary)','记忆'],
   DIARY:['rgba(212,165,116,.15)','#a07040','日记'],
   MISS:['rgba(200,100,100,.10)','#c07070','想你了']
 };
@@ -139,34 +136,40 @@ document.querySelectorAll('#tags-row .tag').forEach(function(t){
 function onSearch(){curSearch=document.getElementById('search-box').value.toLowerCase();render();}
 
 async function load(){
-  var r1=await fetch('/api/posts?limit=500');
-  var r2=await fetch('/api/drift/mine');
-  var d1=await r1.json(),d2=await r2.json();
+  var [r1,r2,r3]=await Promise.all([
+    fetch('/api/posts?type=DIARY&limit=500'),
+    fetch('/api/posts?type=MISS&limit=500'),
+    fetch('/api/drift/mine')
+  ]);
+  var d1=await r1.json(),d2=await r2.json(),d3=await r3.json();
   var cutoff=Date.now()-30*864e5;
-  posts=(d1.posts||[]).filter(function(p){
-    if(!p.created_at)return false;
-    return new Date(p.created_at.replace(' ','T')).getTime()>=cutoff;
-  });
-  drifts=(d2.bottles||[]).filter(function(b){
-    if(!b.created_at)return false;
-    return new Date(b.created_at.replace(' ','T')).getTime()>=cutoff;
-  });
+  var ts=function(s){return s?new Date(s.replace(' ','T')).getTime():0;};
+  var diary=(d1.posts||[]).filter(function(p){return ts(p.created_at)>=cutoff;});
+  var miss=(d2.posts||[]).filter(function(p){return ts(p.created_at)>=cutoff;});
+  posts=diary.concat(miss).sort(function(a,b){return b.id-a.id;});
+  drifts=(d3.bottles||[]).filter(function(b){return ts(b.created_at)>=cutoff;});
   render();
 }
 
 function filteredItems(){
+  var items;
+  var ts=function(s){return s?new Date(s.replace(' ','T')).getTime():0;};
   if(curTag==='漂流瓶'){
-    if(!curSearch)return drifts;
-    return drifts.filter(function(b){return(b.content||'').toLowerCase().includes(curSearch);});
+    items=drifts.map(function(b){var o=Object.assign({},b);o._isDrift=true;return o;});
+  }else if(curTag==='日记'){
+    items=posts.filter(function(p){return p.type==='DIARY';});
+  }else if(curTag==='想你了'){
+    items=posts.filter(function(p){return p.type==='MISS';});
+  }else if(curTag==='情绪'||curTag==='色色'){
+    items=posts.filter(function(p){return(p.tags||'').includes(curTag);});
+  }else{
+    var dd=drifts.map(function(b){var o=Object.assign({},b);o._isDrift=true;return o;});
+    items=posts.concat(dd).sort(function(a,b){return ts(b.created_at)-ts(a.created_at);});
   }
-  var typeFilter=TYPE_MAP[curTag]||'';
-  var tagFilter=(curTag==='情绪'||curTag==='色色')?curTag:'';
-  return posts.filter(function(p){
-    if(typeFilter&&p.type!==typeFilter)return false;
-    if(tagFilter&&!(p.tags||'').includes(tagFilter))return false;
-    if(curSearch&&!(p.content||'').toLowerCase().includes(curSearch))return false;
-    return true;
-  });
+  if(curSearch){
+    items=items.filter(function(p){return(p.content||'').toLowerCase().includes(curSearch);});
+  }
+  return items;
 }
 
 function toggleItem(id,e){
@@ -241,11 +244,11 @@ function buildDriftItem(b){
 function render(){
   var list=filteredItems(),c=document.getElementById('list-view');
   if(!list.length){c.innerHTML='<div style="text-align:center;color:var(--hint);padding:32px 0;font-size:13px;">暂无记录</div>';return;}
-  var html='',lm='',isDrift=(curTag==='漂流瓶');
+  var html='',lm='';
   list.forEach(function(p){
     var mo=monthKey(p.created_at);
     if(mo!==lm){html+='<div class="mlabel">'+mo+'</div>';lm=mo;}
-    html+=isDrift?buildDriftItem(p):buildItem(p);
+    html+=p._isDrift?buildDriftItem(p):buildItem(p);
   });
   c.innerHTML=html;
 }
