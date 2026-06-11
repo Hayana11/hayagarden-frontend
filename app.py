@@ -60,10 +60,13 @@ def get_posts():
     tags     = request.args.get('tags','')
     search   = request.args.get('search','')
     resolved = request.args.get('resolved','')
+    layer    = request.args.get('layer','')
     limit    = min(int(request.args.get('limit','200')), 1000)
     where, params = [], []
     if t:
         where.append('type=?'); params.append(t)
+    if layer:
+        where.append('layer=?'); params.append(layer)
     if tags:
         where.append('tags LIKE ?'); params.append('%'+tags+'%')
     if search:

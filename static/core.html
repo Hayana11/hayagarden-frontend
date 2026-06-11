@@ -222,7 +222,7 @@ function setView(v){
   if(v==='heat')renderHeat();
 }
 async function load(){
-  var r=await fetch('/api/posts?type=MEMORY&limit=500');
+  var r=await fetch('/api/posts?type=MEMORY&layer=core&limit=500');
   var d=await r.json();posts=d.posts||[];
   render();loadHayaProfile();loadFyPersona();
 }

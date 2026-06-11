@@ -177,6 +177,7 @@ async function saveEdit(id,e){
 function fmtDate(dt){if(!dt)return'';var d=new Date(dt.replace(' ','T'));return(d.getMonth()+1)+'.'+d.getDate();}
 function monthKey(dt){if(!dt)return'';var d=new Date(dt.replace(' ','T'));return d.getFullYear()+'.'+(d.getMonth()+1);}
 function escHtml(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+function stripThinking(s){return (s||'').replace(/<thinking>[\s\S]*?<\/thinking>\s*/g,'').trim();}
 function typeBadge(p){
   var m=TYPE_BADGE[p.type];
   if(!m)return'';
@@ -191,8 +192,9 @@ function buildItem(p){
     h+='<textarea class="medit-ta" id="eta-'+p.id+'" onclick="event.stopPropagation()">'+escHtml(p.content)+'</textarea>';
     h+='<div class="medit-row"><button class="medit-save" onclick="saveEdit('+p.id+',event)">保存</button><button class="medit-cancel" onclick="cancelEdit(event)">取消</button></div>';
   } else {
-    h+='<div class="mpreview">'+escHtml(p.content)+'</div>';
-    h+='<div class="mfull">'+escHtml(p.content)+'</div>';
+    var disp=stripThinking(p.content);
+    h+='<div class="mpreview">'+escHtml(disp)+'</div>';
+    h+='<div class="mfull">'+escHtml(disp)+'</div>';
   }
   h+='<div class="mmeta">'+typeBadge(p)+'<span class="mdate">'+fmtDate(p.created_at)+'</span>';
   if(!isEditing)h+='<button class="mpencil" onclick="startEdit('+p.id+',event)"><i class="ti ti-pencil"></i></button>';

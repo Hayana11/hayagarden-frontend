@@ -63,10 +63,10 @@ def dedup():
     log('=== Task 1: Deduplication ===')
     conn = get_db()
     rows = conn.execute(
-        "SELECT id, content, created_at FROM posts WHERE type='MEMORY' ORDER BY id"
+        "SELECT id, content, created_at FROM posts ORDER BY id"
     ).fetchall()
     rows = list(rows)
-    log(f'  Loaded {len(rows)} MEMORY records')
+    log(f'  Loaded {len(rows)} records')
 
     def keywords(text):
         # simple CJK word split: 2-char ngrams + split on punctuation/spaces
@@ -127,9 +127,9 @@ def auto_tag():
     log('=== Task 2: Auto-tag ===')
     conn = get_db()
     rows = conn.execute(
-        "SELECT id, content FROM posts WHERE (tags IS NULL OR tags='') AND type='MEMORY'"
+        "SELECT id, content FROM posts WHERE (tags IS NULL OR tags='')"
     ).fetchall()
-    log(f'  {len(rows)} untagged MEMORY records')
+    log(f'  {len(rows)} untagged records')
     tagged = 0
     for r in rows:
         prompt = (

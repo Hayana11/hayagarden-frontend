@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """每晚 23:50 自动生成费奥多尔的日记，也可以被 Flask API 调用。"""
-import os, sqlite3, json, datetime, urllib.request, urllib.error
+import os, sqlite3, json, datetime, re, urllib.request, urllib.error
 
 DB_PATH  = '/opt/frontend/memories.db'
 ENV_PATH = '/opt/frontend/.env'
@@ -115,6 +115,8 @@ def generate():
     if not diary:
         raise RuntimeError('API 返回空内容')
 
+    # strip <thinking>...</thinking> blocks the model may have emitted
+    diary = re.sub(r'<thinking>.*?</thinking>\s*', '', diary, flags=re.DOTALL).strip()
     save_diary(diary)
     return diary
 
