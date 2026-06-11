@@ -1,4 +1,4 @@
-import os, sqlite3, json, base64, mimetypes, datetime, sys as _sys
+import os, re, sqlite3, json, base64, mimetypes, datetime, sys as _sys
 if '/opt/frontend/tools' not in _sys.path:
     _sys.path.insert(0, '/opt/frontend/tools')
 from flask import Flask, request, jsonify
@@ -156,6 +156,7 @@ def api_call(system, messages):
 
 
 NL = chr(10)
+SAVE_RE = re.compile(r'\[\[SAVE:\s*(.*?)\]\]', re.DOTALL)
 SSE_END = NL + NL
 
 TOOLS = [
@@ -230,6 +231,13 @@ def claude_code_call(system, messages):
     if not CC_TOKEN:
         raise RuntimeError('未配置订阅 token，请先在 api 设置页填入')
     os.makedirs(CC_CWD, exist_ok=True)
+    # Inject save_memory pseudo-tool instruction
+    save_instr = (NL + NL
+        + '【记忆存储】当你认为对话中出现了值得长期记住的信息时，'
+        + '在回复正文的最后另起一行，写一个或多个 [[SAVE: 内容]] 标记，'
+        + '用一句话概括要保存的内容。这些标记会被自动处理，不会显示给哈娅。'
+        + '正文本身不要提及"我已记录"之类的话。')
+    full_system = system + save_instr
     convo = messages_to_text(messages)
     prompt = ('以下是你们最近的对话记录：' + NL + NL + convo + NL + NL
               + '请以费奥多尔的身份自然地回复最后一条消息。只输出回复内容本身，不要任何前缀。')
@@ -238,7 +246,7 @@ def claude_code_call(system, messages):
     env.pop('ANTHROPIC_API_KEY', None)
     r = subprocess.run(
         ['claude', '-p', prompt, '--output-format', 'json',
-         '--system-prompt', system, '--max-turns', '3'],
+         '--system-prompt', full_system, '--max-turns', '3'],
         capture_output=True, text=True, timeout=300, cwd=CC_CWD, env=env
     )
     if r.returncode != 0:
@@ -246,7 +254,21 @@ def claude_code_call(system, messages):
     d = json.loads(r.stdout)
     if d.get('is_error'):
         raise RuntimeError('claude code 返回错误: ' + str(d.get('result', ''))[:300])
-    return (d.get('result') or '').strip(), ''
+    raw = (d.get('result') or '').strip()
+    # Extract [[SAVE: ...]] markers and persist
+    saves = SAVE_RE.findall(raw)
+    if saves:
+        try:
+            import memory_tool
+            for item in saves:
+                item = item.strip()
+                if item:
+                    memory_tool.save_memory(item)
+        except Exception:
+            pass
+    # Strip markers from displayed text
+    text = SAVE_RE.sub('', raw).strip()
+    return text, ''
 
 def generate_reply(system, messages):
     if GW_PROVIDER == 'claude_code':
