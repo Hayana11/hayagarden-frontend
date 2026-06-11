@@ -14,7 +14,7 @@
   --primary-bg:rgba(124,106,138,0.15);--primary:#5a4a6a;--primary-dot:#7c6a8a;
   --amber:rgba(212,165,116,0.85);--amber-s:#d4a574;
   --div:rgba(210,185,155,0.2);
-  --hl:rgba(212,165,116,0.18);
+  --hl:rgba(212,165,116,0.28);
 }
 html,body{height:100%;overflow:hidden;}
 body{background:linear-gradient(160deg,var(--bg1) 0%,var(--bg2) 100%);background-attachment:fixed;color:var(--text);font-family:-apple-system,'PingFang SC','Noto Sans SC',sans-serif;max-width:480px;margin:0 auto;display:flex;flex-direction:column;}
@@ -31,7 +31,7 @@ body{background:linear-gradient(160deg,var(--bg1) 0%,var(--bg2) 100%);background
 .scroll{flex:1;overflow-y:auto;position:relative;}
 .scroll::-webkit-scrollbar{display:none;}
 .text-area{padding:20px 20px 16px;position:relative;}
-.para{font-size:15px;line-height:1.9;color:var(--text);margin-bottom:1.2em;position:relative;user-select:text;}
+.para{font-size:15px;line-height:1.9;color:var(--text);margin-bottom:1.2em;position:relative;user-select:text;-webkit-user-select:text;}
 mark.hl{background:var(--hl);border-radius:2px;padding:1px 0;}
 .ann-dot{position:absolute;right:-14px;top:0.3em;width:8px;height:8px;border-radius:50%;cursor:pointer;transition:transform .15s;}
 .ann-dot:hover{transform:scale(1.4);}
@@ -39,11 +39,31 @@ mark.hl{background:var(--hl);border-radius:2px;padding:1px 0;}
 .ann-card .ann-who{font-size:10px;color:var(--primary);margin-bottom:4px;}
 .ann-card .ann-txt{font-size:13px;line-height:1.7;color:var(--text);}
 .ann-card .ann-quote{font-size:11px;color:var(--muted);margin-top:5px;font-style:italic;}
-/* selection toolbar */
-.sel-bar{display:none;position:fixed;background:rgba(58,46,40,0.92);border-radius:20px;padding:5px 4px;z-index:200;gap:2px;}
+/* selection toolbar — position:fixed, shows above selected text */
+.sel-bar{
+  display:none;position:fixed;
+  background:rgba(42,32,28,0.93);
+  backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);
+  border-radius:22px;padding:5px 5px;
+  z-index:600;gap:2px;
+  box-shadow:0 4px 16px rgba(0,0,0,.22);
+  /* arrow pointing down */
+  --arr:#2a201c;
+}
+.sel-bar::after{
+  content:'';position:absolute;bottom:-6px;left:50%;transform:translateX(-50%);
+  border:6px solid transparent;border-bottom:none;border-top-color:rgba(42,32,28,0.93);
+}
 .sel-bar.show{display:flex;}
-.sbtn{background:none;border:none;color:#fff;font-size:12px;padding:5px 12px;border-radius:14px;cursor:pointer;white-space:nowrap;}
-.sbtn:hover{background:rgba(255,255,255,0.12);}
+.sbtn{
+  background:none;border:none;color:#fff;font-size:12px;
+  padding:6px 13px;border-radius:16px;cursor:pointer;white-space:nowrap;
+  display:flex;align-items:center;gap:4px;letter-spacing:.2px;
+  -webkit-tap-highlight-color:transparent;
+  touch-action:manipulation;
+}
+.sbtn:active{background:rgba(255,255,255,0.15);}
+.sbtn i{font-size:14px;}
 /* toc drawer */
 .toc-drawer{position:fixed;top:0;right:-100%;width:75%;max-width:320px;height:100%;background:rgba(253,248,239,0.97);backdrop-filter:blur(14px);z-index:300;transition:right .28s cubic-bezier(.4,0,.2,1);display:flex;flex-direction:column;border-left:1px solid var(--div);}
 .toc-drawer.open{right:0;}
@@ -58,7 +78,7 @@ mark.hl{background:var(--hl);border-radius:2px;padding:1px 0;}
 .toc-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.2);z-index:299;}
 .toc-overlay.show{display:block;}
 /* note modal */
-.mo{display:none;position:fixed;inset:0;background:rgba(0,0,0,.3);z-index:400;align-items:flex-end;justify-content:center;padding-bottom:0;}
+.mo{display:none;position:fixed;inset:0;background:rgba(0,0,0,.3);z-index:500;align-items:flex-end;justify-content:center;padding-bottom:0;}
 .mo.show{display:flex;}
 .mb{background:rgba(255,255,255,.97);border-radius:18px 18px 0 0;padding:16px 18px calc(16px + env(safe-area-inset-bottom,0px));width:100%;max-width:480px;}
 .mb h4{font-size:14px;font-weight:700;color:var(--text);margin-bottom:6px;}
@@ -82,7 +102,7 @@ mark.hl{background:var(--hl);border-radius:2px;padding:1px 0;}
 .chat-input:focus{border-color:rgba(212,165,116,.5);}
 .send-btn{width:36px;height:36px;border-radius:50%;background:var(--amber);border:none;color:#fff;font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0;}
 /* chat reply panel */
-.reply-panel{position:fixed;bottom:0;left:50%;transform:translateX(-50%);width:100%;max-width:480px;background:rgba(253,248,239,0.97);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);border-top:1px solid var(--div);border-radius:18px 18px 0 0;padding:0 0 calc(env(safe-area-inset-bottom,0px));z-index:500;transform-origin:bottom center;transition:transform .3s cubic-bezier(.4,0,.2,1);transform:translateX(-50%) translateY(100%);box-shadow:0 -8px 32px rgba(0,0,0,.08);}
+.reply-panel{position:fixed;bottom:0;left:50%;transform:translateX(-50%);width:100%;max-width:480px;background:rgba(253,248,239,0.97);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);border-top:1px solid var(--div);border-radius:18px 18px 0 0;padding:0 0 calc(env(safe-area-inset-bottom,0px));z-index:400;transform-origin:bottom center;transition:transform .3s cubic-bezier(.4,0,.2,1);transform:translateX(-50%) translateY(100%);box-shadow:0 -8px 32px rgba(0,0,0,.08);}
 .reply-panel.show{transform:translateX(-50%) translateY(0);}
 .rp-hd{display:flex;align-items:center;justify-content:space-between;padding:12px 16px 8px;}
 .rp-title{font-size:12px;color:var(--hint);letter-spacing:.5px;}
@@ -132,10 +152,10 @@ mark.hl{background:var(--hl);border-radius:2px;padding:1px 0;}
   <div class="toc-hd">目录<button class="toc-close" onclick="closeToc()"><i class="ti ti-x"></i></button></div>
   <div class="toc-list" id="toc-list"></div>
 </div>
-<!-- selection toolbar -->
+<!-- selection toolbar: use pointerdown so mobile tap fires BEFORE selection collapses -->
 <div class="sel-bar" id="sel-bar">
-  <button class="sbtn" onclick="doHighlight()"><i class="ti ti-highlight"></i> 划线</button>
-  <button class="sbtn" onclick="openNote()"><i class="ti ti-edit"></i> 写想法</button>
+  <button class="sbtn" onpointerdown="doHighlight(event)"><i class="ti ti-highlight"></i> 划线</button>
+  <button class="sbtn" onpointerdown="openNote(event)"><i class="ti ti-edit"></i> 写想法</button>
 </div>
 <!-- note modal -->
 <div class="mo" id="note-mo">
@@ -147,6 +167,23 @@ mark.hl{background:var(--hl);border-radius:2px;padding:1px 0;}
       <button class="mb-cancel" onclick="closeMo()">取消</button>
       <button class="mb-send" onclick="submitNote()">保存</button>
     </div>
+  </div>
+</div>
+<!-- chat reply panel -->
+<div class="reply-panel" id="reply-panel">
+  <div class="rp-hd">
+    <span class="rp-title">费奥多尔说</span>
+    <button class="rp-close" onclick="closeReply()"><i class="ti ti-x"></i></button>
+  </div>
+  <div class="rp-body">
+    <div class="rp-msg" id="rp-msg"></div>
+    <div id="rp-typing" class="rp-typing" style="display:none;">
+      <span></span><span></span><span></span>
+    </div>
+    <div class="rp-reply" id="rp-reply" style="display:none;"></div>
+  </div>
+  <div class="rp-footer">
+    <a class="rp-link" href="/chat">查看完整对话 →</a>
   </div>
 </div>
 <script>
@@ -167,7 +204,6 @@ async function load(){
   annotations=d2.annotations||[];
   document.getElementById('hd-title').textContent=bookTitle;
 
-  // resume from progress
   var r3=await fetch('/api/books/current');
   var d3=await r3.json();
   var lastChunk=(d3.book&&d3.book.bookId===bookId)?d3.book.lastChunkId:null;
@@ -202,7 +238,6 @@ async function renderChunk(){
   var d=await r.json();
   renderText(d.text||'', ch.id);
 
-  // mark read
   fetch('/api/books/'+encodeURIComponent(bookId)+'/progress',{
     method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({chunkId:ch.id})
@@ -216,7 +251,6 @@ function renderText(text, chunkId){
   var paras=text.split(/\n+/).filter(function(p){return p.trim();});
   var chAnns=annotations.filter(function(a){return a.chunkId===chunkId;});
   var html=paras.map(function(p,i){
-    var pid='p-'+i;
     var pAnns=chAnns.filter(function(a){return a.paragraphIdx===i;});
     var dotHtml='';
     var expanded='';
@@ -232,17 +266,15 @@ function renderText(text, chunkId){
       });
     }
     var txt=esc(p);
-    // apply highlights
     chAnns.forEach(function(a){
       if(a.kind==='highlight'&&a.quote){
         txt=txt.replace(esc(a.quote),'<mark class="hl">'+esc(a.quote)+'</mark>');
       }
     });
-    return '<div class="para" id="'+pid+'" data-idx="'+i+'" style="position:relative;">'
+    return '<div class="para" id="p-'+i+'" data-idx="'+i+'">'
       +txt+dotHtml+'</div>'+expanded;
   }).join('');
   document.getElementById('text-area').innerHTML=html||'<div style="color:var(--hint);text-align:center;padding:40px 0;">（空章节）</div>';
-  attachSel();
 }
 
 function toggleAnn(id){
@@ -262,24 +294,80 @@ function closeToc(){
   document.getElementById('toc-ov').classList.remove('show');
 }
 
-// selection
-function attachSel(){
-  document.getElementById('text-area').addEventListener('mouseup',onSel);
-  document.getElementById('text-area').addEventListener('touchend',function(){setTimeout(onSel,50);});
-}
-function onSel(){
+/* ---- selection toolbar ---- */
+function positionSelBar(){
   var sel=window.getSelection();
-  if(!sel||sel.isCollapsed){hideSelBar();return;}
-  selQuote=sel.toString().trim();
-  if(selQuote.length<2){hideSelBar();return;}
-  selRange=sel.getRangeAt(0);
-  var rect=selRange.getBoundingClientRect();
+  if(!sel||sel.isCollapsed||!sel.rangeCount)return false;
+  var q=sel.toString().trim();
+  if(q.length<2)return false;
+
+  // must be within text-area
+  var ta=document.getElementById('text-area');
+  var range=sel.getRangeAt(0);
+  if(!ta.contains(range.commonAncestorContainer))return false;
+
+  selQuote=q;
+  selRange=range.cloneRange();
+
+  var rect=range.getBoundingClientRect();
   var bar=document.getElementById('sel-bar');
-  bar.style.left=Math.max(4,rect.left+(rect.width/2)-60)+'px';
-  bar.style.top=(rect.top+window.scrollY-48)+'px';
-  bar.classList.add('show');
+  // measure bar width (it's display:none so temporarily show to measure, or use fixed estimate)
+  var barW=160;
+  var left=rect.left+(rect.width/2)-(barW/2);
+  left=Math.max(8, Math.min(window.innerWidth-barW-8, left));
+  var top=rect.top-48;
+  // flip below if too close to top edge (header ~95px)
+  if(top<100) top=rect.bottom+10;
+  bar.style.left=left+'px';
+  bar.style.top=top+'px';
+  return true;
 }
-function hideSelBar(){document.getElementById('sel-bar').classList.remove('show');}
+
+function showSelBar(){
+  if(positionSelBar()){
+    document.getElementById('sel-bar').classList.add('show');
+  }
+}
+function hideSelBar(){
+  document.getElementById('sel-bar').classList.remove('show');
+}
+
+// attach once at page load
+document.addEventListener('mouseup', function(e){
+  // don't interfere if clicking sel-bar itself
+  if(e.target.closest('#sel-bar'))return;
+  // small delay so browser finishes updating selection
+  setTimeout(function(){
+    var sel=window.getSelection();
+    if(sel&&!sel.isCollapsed&&sel.toString().trim().length>=2){
+      showSelBar();
+    } else {
+      hideSelBar();
+    }
+  },10);
+});
+
+document.addEventListener('touchend', function(e){
+  if(e.target.closest('#sel-bar'))return;
+  // longer delay on touch — iOS needs more time to finalize selection
+  setTimeout(function(){
+    var sel=window.getSelection();
+    if(sel&&!sel.isCollapsed&&sel.toString().trim().length>=2){
+      showSelBar();
+    } else {
+      hideSelBar();
+    }
+  },120);
+});
+
+// hide when selection collapses (user taps elsewhere)
+document.addEventListener('selectionchange', function(){
+  var sel=window.getSelection();
+  if(sel&&sel.isCollapsed){
+    // delay so pointerdown on sel-bar buttons can fire first
+    setTimeout(hideSelBar, 150);
+  }
+});
 
 function getParagraphIdx(){
   if(!selRange)return 0;
@@ -289,25 +377,31 @@ function getParagraphIdx(){
   return el?parseInt(el.dataset.idx):0;
 }
 
-async function doHighlight(){
+// pointerdown fires before selection collapses on mobile tap
+function doHighlight(e){
+  if(e){e.preventDefault();e.stopPropagation();}
   hideSelBar();
   var ch=chunks[curIdx];
-  if(!ch)return;
+  if(!ch||!selQuote)return;
   var ann={chunkId:ch.id,quote:selQuote,kind:'highlight',author:'haya',paragraphIdx:getParagraphIdx()};
-  var r=await fetch('/api/books/'+encodeURIComponent(bookId)+'/annotations',{
+  fetch('/api/books/'+encodeURIComponent(bookId)+'/annotations',{
     method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(ann)
+  }).then(function(r){return r.json();}).then(function(d){
+    if(d.annotation)annotations.push(d.annotation);
+    window.getSelection().removeAllRanges();
+    return fetch('/api/books/'+encodeURIComponent(bookId)+'/chunks/'+encodeURIComponent(ch.id));
+  }).then(function(r){return r.json();}).then(function(d){
+    renderText(d.text||'', ch.id);
   });
-  var d=await r.json();
-  if(d.annotation)annotations.push(d.annotation);
-  window.getSelection().removeAllRanges();
-  renderText((await (await fetch('/api/books/'+encodeURIComponent(bookId)+'/chunks/'+encodeURIComponent(ch.id))).json()).text||'', ch.id);
 }
 
-function openNote(){
+function openNote(e){
+  if(e){e.preventDefault();e.stopPropagation();}
   hideSelBar();
   document.getElementById('note-quote').textContent=selQuote;
   document.getElementById('note-ta').value='';
   document.getElementById('note-mo').classList.add('show');
+  setTimeout(function(){document.getElementById('note-ta').focus();},100);
 }
 function closeMo(){document.getElementById('note-mo').classList.remove('show');}
 async function submitNote(){
@@ -322,10 +416,12 @@ async function submitNote(){
   if(d.annotation)annotations.push(d.annotation);
   window.getSelection().removeAllRanges();
   closeMo();
-  var ch2=chunks[curIdx];
-  renderText((await (await fetch('/api/books/'+encodeURIComponent(bookId)+'/chunks/'+encodeURIComponent(ch2.id))).json()).text||'', ch2.id);
+  var r2=await fetch('/api/books/'+encodeURIComponent(bookId)+'/chunks/'+encodeURIComponent(ch.id));
+  var d2=await r2.json();
+  renderText(d2.text||'', ch.id);
 }
 
+/* ---- chat ---- */
 async function sendChat(){
   var inp=document.getElementById('chat-inp');
   var msg=inp.value.trim();
@@ -335,62 +431,32 @@ async function sendChat(){
   var ctx=ch?'\n\n[阅读上下文：《'+bookTitle+'》·「'+ch.title+'」]':'';
   var fullMsg=msg+ctx;
 
-  // show panel with user message
   document.getElementById('rp-msg').textContent=msg;
   document.getElementById('rp-reply').style.display='none';
   document.getElementById('rp-typing').style.display='flex';
   document.getElementById('reply-panel').classList.add('show');
 
   try{
-    // 1. save user message to DB
     await fetch('/api/chat/send',{
       method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({author:'hayana',content:fullMsg})
     });
-    // 2. call gateway to get reply
-    var r=await fetch('/api/gw/chat',{
-      method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({})
-    });
+    var r=await fetch('/api/gw/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({})});
     var d=await r.json();
     document.getElementById('rp-typing').style.display='none';
     document.getElementById('rp-reply').style.display='block';
     document.getElementById('rp-reply').textContent=d.content||d.error||'（没有回复）';
-  }catch(e){
+  }catch(err){
     document.getElementById('rp-typing').style.display='none';
     document.getElementById('rp-reply').style.display='block';
-    document.getElementById('rp-reply').textContent='请求失败：'+e.message;
+    document.getElementById('rp-reply').textContent='请求失败：'+err.message;
   }
 }
-
-function closeReply(){
-  document.getElementById('reply-panel').classList.remove('show');
-}
+function closeReply(){document.getElementById('reply-panel').classList.remove('show');}
 
 function esc(s){return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
 
-document.addEventListener('click',function(e){
-  if(!e.target.closest('#sel-bar'))hideSelBar();
-});
-
 load();
 </script>
-<!-- chat reply panel -->
-<div class="reply-panel" id="reply-panel">
-  <div class="rp-hd">
-    <span class="rp-title">费奥多尔说</span>
-    <button class="rp-close" onclick="closeReply()"><i class="ti ti-x"></i></button>
-  </div>
-  <div class="rp-body">
-    <div class="rp-msg" id="rp-msg"></div>
-    <div id="rp-typing" class="rp-typing" style="display:none;">
-      <span></span><span></span><span></span>
-    </div>
-    <div class="rp-reply" id="rp-reply" style="display:none;"></div>
-  </div>
-  <div class="rp-footer">
-    <a class="rp-link" href="/chat">查看完整对话 →</a>
-  </div>
-</div>
 </body>
 </html>
