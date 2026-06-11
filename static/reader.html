@@ -1,0 +1,335 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+<title>reader · 阅读</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@latest/tabler-icons.min.css">
+<style>
+*{margin:0;padding:0;box-sizing:border-box;}
+:root{
+  --bg1:#fdf8ef;--bg2:#f7f0e4;
+  --card:rgba(255,255,255,0.65);--card-b:rgba(255,255,255,0.9);
+  --text:#3a2e28;--muted:#9a8a7a;--hint:#b8a090;
+  --primary-bg:rgba(124,106,138,0.15);--primary:#5a4a6a;--primary-dot:#7c6a8a;
+  --amber:rgba(212,165,116,0.85);--amber-s:#d4a574;
+  --div:rgba(210,185,155,0.2);
+  --hl:rgba(212,165,116,0.18);
+}
+html,body{height:100%;overflow:hidden;}
+body{background:linear-gradient(160deg,var(--bg1) 0%,var(--bg2) 100%);background-attachment:fixed;color:var(--text);font-family:-apple-system,'PingFang SC','Noto Sans SC',sans-serif;max-width:480px;margin:0 auto;display:flex;flex-direction:column;}
+/* header */
+.hd{flex-shrink:0;padding:48px 14px 10px;background:rgba(253,248,239,0.92);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);border-bottom:1px solid var(--div);display:flex;align-items:center;gap:10px;}
+.back{background:none;border:none;color:var(--muted);font-size:20px;cursor:pointer;padding:4px;display:flex;flex-shrink:0;}
+.hd-mid{flex:1;min-width:0;}
+.hd-title{font-family:Georgia,'Times New Roman',serif;font-size:14px;font-weight:700;color:var(--text);overflow:hidden;white-space:nowrap;text-overflow:ellipsis;}
+.hd-ch{font-size:11px;color:var(--hint);margin-top:1px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;}
+.hd-acts{display:flex;gap:6px;flex-shrink:0;}
+.hact{background:none;border:none;color:var(--muted);font-size:19px;cursor:pointer;padding:4px;display:flex;transition:color .15s;}
+.hact:hover{color:var(--primary);}
+/* reading area */
+.scroll{flex:1;overflow-y:auto;position:relative;}
+.scroll::-webkit-scrollbar{display:none;}
+.text-area{padding:20px 20px 16px;position:relative;}
+.para{font-size:15px;line-height:1.9;color:var(--text);margin-bottom:1.2em;position:relative;user-select:text;}
+mark.hl{background:var(--hl);border-radius:2px;padding:1px 0;}
+.ann-dot{position:absolute;right:-14px;top:0.3em;width:8px;height:8px;border-radius:50%;cursor:pointer;transition:transform .15s;}
+.ann-dot:hover{transform:scale(1.4);}
+.ann-card{background:var(--card-b);border:1px solid var(--card-b);border-left:3px solid var(--primary-dot);border-radius:10px;padding:10px 12px;margin:6px 0 10px;backdrop-filter:blur(8px);}
+.ann-card .ann-who{font-size:10px;color:var(--primary);margin-bottom:4px;}
+.ann-card .ann-txt{font-size:13px;line-height:1.7;color:var(--text);}
+.ann-card .ann-quote{font-size:11px;color:var(--muted);margin-top:5px;font-style:italic;}
+/* selection toolbar */
+.sel-bar{display:none;position:fixed;background:rgba(58,46,40,0.92);border-radius:20px;padding:5px 4px;z-index:200;gap:2px;}
+.sel-bar.show{display:flex;}
+.sbtn{background:none;border:none;color:#fff;font-size:12px;padding:5px 12px;border-radius:14px;cursor:pointer;white-space:nowrap;}
+.sbtn:hover{background:rgba(255,255,255,0.12);}
+/* toc drawer */
+.toc-drawer{position:fixed;top:0;right:-100%;width:75%;max-width:320px;height:100%;background:rgba(253,248,239,0.97);backdrop-filter:blur(14px);z-index:300;transition:right .28s cubic-bezier(.4,0,.2,1);display:flex;flex-direction:column;border-left:1px solid var(--div);}
+.toc-drawer.open{right:0;}
+.toc-hd{padding:54px 16px 12px;border-bottom:1px solid var(--div);font-family:Georgia,serif;font-size:15px;font-weight:700;display:flex;justify-content:space-between;align-items:center;}
+.toc-close{background:none;border:none;color:var(--muted);font-size:20px;cursor:pointer;}
+.toc-list{flex:1;overflow-y:auto;padding:8px 0;}
+.toc-list::-webkit-scrollbar{display:none;}
+.toc-item{padding:10px 16px;font-size:13px;color:var(--muted);cursor:pointer;border-bottom:1px solid var(--div);line-height:1.4;}
+.toc-item:hover{background:var(--primary-bg);}
+.toc-item.act{color:var(--primary);font-weight:600;}
+.toc-item .toc-read{float:right;font-size:10px;color:var(--amber-s);}
+.toc-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.2);z-index:299;}
+.toc-overlay.show{display:block;}
+/* note modal */
+.mo{display:none;position:fixed;inset:0;background:rgba(0,0,0,.3);z-index:400;align-items:flex-end;justify-content:center;padding-bottom:0;}
+.mo.show{display:flex;}
+.mb{background:rgba(255,255,255,.97);border-radius:18px 18px 0 0;padding:16px 18px calc(16px + env(safe-area-inset-bottom,0px));width:100%;max-width:480px;}
+.mb h4{font-size:14px;font-weight:700;color:var(--text);margin-bottom:6px;}
+.mb .quote-preview{font-size:11px;color:var(--muted);font-style:italic;margin-bottom:10px;line-height:1.6;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;}
+.mb textarea{width:100%;padding:10px 12px;border-radius:10px;border:1px solid rgba(210,185,155,.3);background:rgba(255,255,255,.7);font-size:13px;font-family:inherit;color:var(--text);resize:none;outline:none;min-height:80px;line-height:1.6;}
+.mb textarea:focus{border-color:rgba(212,165,116,.6);}
+.mb-row{display:flex;gap:8px;margin-top:10px;}
+.mb-cancel{flex:1;padding:10px;border:1px solid rgba(210,185,155,.3);border-radius:10px;background:rgba(255,255,255,.6);color:var(--muted);font-size:13px;cursor:pointer;}
+.mb-send{flex:1;padding:10px;border:none;border-radius:10px;background:var(--amber);color:#fff;font-size:13px;cursor:pointer;}
+/* bottom bar */
+.bbar{flex-shrink:0;background:rgba(253,248,239,0.95);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);border-top:1px solid var(--div);padding:8px 14px calc(8px + env(safe-area-inset-bottom,0px));}
+.prog-row{display:flex;align-items:center;gap:10px;margin-bottom:8px;}
+.prog-bar{flex:1;height:3px;background:rgba(210,185,155,0.25);border-radius:2px;overflow:hidden;}
+.prog-fill{height:100%;background:var(--primary-dot);border-radius:2px;transition:width .4s;}
+.nav-row{display:flex;align-items:center;gap:8px;}
+.nav-btn{width:36px;height:36px;border-radius:50%;border:1px solid rgba(210,185,155,.3);background:rgba(255,255,255,.6);color:var(--muted);font-size:18px;cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0;transition:all .15s;}
+.nav-btn:hover{border-color:var(--amber-s);color:var(--amber-s);}
+.nav-btn:disabled{opacity:.3;cursor:default;}
+.chat-input{flex:1;padding:9px 14px;border-radius:20px;border:1px solid rgba(210,185,155,.25);background:rgba(255,255,255,.6);font-size:13px;font-family:inherit;color:var(--text);outline:none;}
+.chat-input::placeholder{color:var(--hint);}
+.chat-input:focus{border-color:rgba(212,165,116,.5);}
+.send-btn{width:36px;height:36px;border-radius:50%;background:var(--amber);border:none;color:#fff;font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0;}
+</style>
+</head>
+<body>
+<div class="hd">
+  <button class="back" onclick="history.back()"><i class="ti ti-arrow-left"></i></button>
+  <div class="hd-mid">
+    <div class="hd-title" id="hd-title">—</div>
+    <div class="hd-ch" id="hd-ch"></div>
+  </div>
+  <div class="hd-acts">
+    <button class="hact" title="目录" onclick="toggleToc()"><i class="ti ti-list"></i></button>
+  </div>
+</div>
+<div class="scroll" id="scroll">
+  <div class="text-area" id="text-area"><div style="color:var(--hint);padding:40px 0;text-align:center;">加载中…</div></div>
+</div>
+<div class="bbar">
+  <div class="prog-row">
+    <div class="prog-bar"><div class="prog-fill" id="prog-fill" style="width:0%"></div></div>
+    <span style="font-size:11px;color:var(--hint)" id="prog-txt">0/0</span>
+  </div>
+  <div class="nav-row">
+    <button class="nav-btn" id="btn-prev" onclick="goPrev()"><i class="ti ti-chevron-left"></i></button>
+    <input class="chat-input" id="chat-inp" placeholder="关于这一段，和费奥多尔聊聊…" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendChat();}">
+    <button class="send-btn" onclick="sendChat()"><i class="ti ti-send"></i></button>
+    <button class="nav-btn" id="btn-next" onclick="goNext()"><i class="ti ti-chevron-right"></i></button>
+  </div>
+</div>
+<!-- toc -->
+<div class="toc-overlay" id="toc-ov" onclick="closeToc()"></div>
+<div class="toc-drawer" id="toc-drawer">
+  <div class="toc-hd">目录<button class="toc-close" onclick="closeToc()"><i class="ti ti-x"></i></button></div>
+  <div class="toc-list" id="toc-list"></div>
+</div>
+<!-- selection toolbar -->
+<div class="sel-bar" id="sel-bar">
+  <button class="sbtn" onclick="doHighlight()"><i class="ti ti-highlight"></i> 划线</button>
+  <button class="sbtn" onclick="openNote()"><i class="ti ti-edit"></i> 写想法</button>
+</div>
+<!-- note modal -->
+<div class="mo" id="note-mo">
+  <div class="mb">
+    <h4>写批注</h4>
+    <div class="quote-preview" id="note-quote"></div>
+    <textarea id="note-ta" placeholder="写下你的想法…"></textarea>
+    <div class="mb-row">
+      <button class="mb-cancel" onclick="closeMo()">取消</button>
+      <button class="mb-send" onclick="submitNote()">保存</button>
+    </div>
+  </div>
+</div>
+<script>
+var params=new URLSearchParams(location.search);
+var bookId=params.get('book')||'';
+var chunks=[],curIdx=0,annotations=[],bookTitle='';
+var selRange=null,selQuote='';
+
+async function load(){
+  if(!bookId)return;
+  var [r1,r2]=await Promise.all([
+    fetch('/api/books/'+encodeURIComponent(bookId)+'/chunks'),
+    fetch('/api/books/'+encodeURIComponent(bookId)+'/annotations')
+  ]);
+  var d1=await r1.json(), d2=await r2.json();
+  chunks=d1.chunks||[];
+  bookTitle=d1.title||bookId;
+  annotations=d2.annotations||[];
+  document.getElementById('hd-title').textContent=bookTitle;
+
+  // resume from progress
+  var r3=await fetch('/api/books/current');
+  var d3=await r3.json();
+  var lastChunk=(d3.book&&d3.book.bookId===bookId)?d3.book.lastChunkId:null;
+  if(lastChunk){curIdx=chunks.findIndex(function(c){return c.id===lastChunk;});}
+  if(curIdx<0)curIdx=0;
+
+  renderToc();
+  renderChunk();
+}
+
+function renderToc(){
+  document.getElementById('toc-list').innerHTML=chunks.map(function(ch,i){
+    return '<div class="toc-item'+(i===curIdx?' act':'')+'" onclick="jumpTo('+i+')">'
+      +esc(ch.title)
+      +(ch.read?'<span class="toc-read">✓</span>':'')
+      +'</div>';
+  }).join('');
+}
+
+async function renderChunk(){
+  var ch=chunks[curIdx];
+  if(!ch)return;
+  document.getElementById('hd-ch').textContent=ch.title||'';
+  document.getElementById('btn-prev').disabled=(curIdx===0);
+  document.getElementById('btn-next').disabled=(curIdx===chunks.length-1);
+  var p=Math.round((curIdx+1)/chunks.length*100);
+  document.getElementById('prog-fill').style.width=p+'%';
+  document.getElementById('prog-txt').textContent=(curIdx+1)+'/'+chunks.length;
+  document.getElementById('text-area').innerHTML='<div style="color:var(--hint);padding:40px 0;text-align:center;">加载中…</div>';
+
+  var r=await fetch('/api/books/'+encodeURIComponent(bookId)+'/chunks/'+encodeURIComponent(ch.id));
+  var d=await r.json();
+  renderText(d.text||'', ch.id);
+
+  // mark read
+  fetch('/api/books/'+encodeURIComponent(bookId)+'/progress',{
+    method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({chunkId:ch.id})
+  });
+  chunks[curIdx].read=true;
+  renderToc();
+  document.getElementById('scroll').scrollTop=0;
+}
+
+function renderText(text, chunkId){
+  var paras=text.split(/\n+/).filter(function(p){return p.trim();});
+  var chAnns=annotations.filter(function(a){return a.chunkId===chunkId;});
+  var html=paras.map(function(p,i){
+    var pid='p-'+i;
+    var pAnns=chAnns.filter(function(a){return a.paragraphIdx===i;});
+    var dotHtml='';
+    var expanded='';
+    if(pAnns.length){
+      pAnns.forEach(function(a,ai){
+        var col=a.author==='fyodor'?'#7c6a8a':'#d4a574';
+        dotHtml+='<span class="ann-dot" style="background:'+col+';top:'+(0.3+ai*1.2)+'em" onclick="toggleAnn(\'ann-'+a.id+'\')"></span>';
+        expanded+='<div class="ann-card" id="ann-'+a.id+'" style="display:none">'
+          +'<div class="ann-who">'+(a.author==='fyodor'?'费奥多尔':'哈娅')+'</div>'
+          +'<div class="ann-txt">'+esc(a.note)+'</div>'
+          +(a.quote?'<div class="ann-quote">「'+esc(a.quote)+'」</div>':'')
+          +'</div>';
+      });
+    }
+    var txt=esc(p);
+    // apply highlights
+    chAnns.forEach(function(a){
+      if(a.kind==='highlight'&&a.quote){
+        txt=txt.replace(esc(a.quote),'<mark class="hl">'+esc(a.quote)+'</mark>');
+      }
+    });
+    return '<div class="para" id="'+pid+'" data-idx="'+i+'" style="position:relative;">'
+      +txt+dotHtml+'</div>'+expanded;
+  }).join('');
+  document.getElementById('text-area').innerHTML=html||'<div style="color:var(--hint);text-align:center;padding:40px 0;">（空章节）</div>';
+  attachSel();
+}
+
+function toggleAnn(id){
+  var el=document.getElementById(id);
+  if(el)el.style.display=el.style.display==='none'?'block':'none';
+}
+
+function goPrev(){if(curIdx>0){curIdx--;renderChunk();renderToc();}}
+function goNext(){if(curIdx<chunks.length-1){curIdx++;renderChunk();renderToc();}}
+function jumpTo(i){curIdx=i;closeToc();renderChunk();renderToc();}
+function toggleToc(){
+  document.getElementById('toc-drawer').classList.toggle('open');
+  document.getElementById('toc-ov').classList.toggle('show');
+}
+function closeToc(){
+  document.getElementById('toc-drawer').classList.remove('open');
+  document.getElementById('toc-ov').classList.remove('show');
+}
+
+// selection
+function attachSel(){
+  document.getElementById('text-area').addEventListener('mouseup',onSel);
+  document.getElementById('text-area').addEventListener('touchend',function(){setTimeout(onSel,50);});
+}
+function onSel(){
+  var sel=window.getSelection();
+  if(!sel||sel.isCollapsed){hideSelBar();return;}
+  selQuote=sel.toString().trim();
+  if(selQuote.length<2){hideSelBar();return;}
+  selRange=sel.getRangeAt(0);
+  var rect=selRange.getBoundingClientRect();
+  var bar=document.getElementById('sel-bar');
+  bar.style.left=Math.max(4,rect.left+(rect.width/2)-60)+'px';
+  bar.style.top=(rect.top+window.scrollY-48)+'px';
+  bar.classList.add('show');
+}
+function hideSelBar(){document.getElementById('sel-bar').classList.remove('show');}
+
+function getParagraphIdx(){
+  if(!selRange)return 0;
+  var el=selRange.startContainer;
+  while(el&&el.nodeType!==1)el=el.parentNode;
+  while(el&&!el.dataset.idx)el=el.parentNode;
+  return el?parseInt(el.dataset.idx):0;
+}
+
+async function doHighlight(){
+  hideSelBar();
+  var ch=chunks[curIdx];
+  if(!ch)return;
+  var ann={chunkId:ch.id,quote:selQuote,kind:'highlight',author:'haya',paragraphIdx:getParagraphIdx()};
+  var r=await fetch('/api/books/'+encodeURIComponent(bookId)+'/annotations',{
+    method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(ann)
+  });
+  var d=await r.json();
+  if(d.annotation)annotations.push(d.annotation);
+  window.getSelection().removeAllRanges();
+  renderText((await (await fetch('/api/books/'+encodeURIComponent(bookId)+'/chunks/'+encodeURIComponent(ch.id))).json()).text||'', ch.id);
+}
+
+function openNote(){
+  hideSelBar();
+  document.getElementById('note-quote').textContent=selQuote;
+  document.getElementById('note-ta').value='';
+  document.getElementById('note-mo').classList.add('show');
+}
+function closeMo(){document.getElementById('note-mo').classList.remove('show');}
+async function submitNote(){
+  var note=document.getElementById('note-ta').value.trim();
+  var ch=chunks[curIdx];
+  if(!ch||!note)return;
+  var ann={chunkId:ch.id,quote:selQuote,kind:'note',author:'haya',note:note,paragraphIdx:getParagraphIdx()};
+  var r=await fetch('/api/books/'+encodeURIComponent(bookId)+'/annotations',{
+    method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(ann)
+  });
+  var d=await r.json();
+  if(d.annotation)annotations.push(d.annotation);
+  window.getSelection().removeAllRanges();
+  closeMo();
+  var ch2=chunks[curIdx];
+  renderText((await (await fetch('/api/books/'+encodeURIComponent(bookId)+'/chunks/'+encodeURIComponent(ch2.id))).json()).text||'', ch2.id);
+}
+
+async function sendChat(){
+  var inp=document.getElementById('chat-inp');
+  var msg=inp.value.trim();
+  if(!msg)return;
+  inp.value='';
+  var ch=chunks[curIdx];
+  var ctx=ch?'\n\n[当前阅读：《'+bookTitle+'》·「'+ch.title+'」]':'';
+  var r=await fetch('/api/gw/chat',{
+    method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({message:msg+ctx})
+  });
+  if(r.ok){window.location.href='/chat';}
+}
+
+function esc(s){return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+
+document.addEventListener('click',function(e){
+  if(!e.target.closest('#sel-bar'))hideSelBar();
+});
+
+load();
+</script>
+</body>
+</html>

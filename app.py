@@ -479,5 +479,142 @@ def update_post(pid):
     conn.close()
     return jsonify({"ok": True})
 
+
+# ── Co-Reading book routes ──
+
+import json as _json, glob as _glob
+
+CO_DATA = '/opt/co-reading/data'
+
+def _read_json(p, fallback=None):
+    try:
+        return _json.loads(open(p).read())
+    except Exception:
+        return fallback
+
+def _book_colors(bid):
+    h = sum(ord(x) for x in bid) % 360
+    return f'hsl({h},35%,72%)', f'hsl({(h+40)%360},30%,60%)'
+
+@app.route('/api/books', methods=['GET'])
+def books_list():
+    books = []
+    for mf in _glob.glob(f'{CO_DATA}/books/*/manifest.json'):
+        m = _read_json(mf)
+        if m:
+            prog = _read_json(f'{CO_DATA}/progress.json', {})
+            bp = prog.get(m['bookId'], {})
+            total = len(m.get('chunks', []))
+            read = len(bp.get('readChunkIds', []))
+            c1, c2 = _book_colors(m['bookId'])
+            books.append({
+                'bookId': m['bookId'], 'title': m['title'],
+                'author': m.get('author',''), 'total': total,
+                'read': read, 'color1': c1, 'color2': c2,
+                'lastReadAt': bp.get('lastReadAt'),
+            })
+    books.sort(key=lambda x: x.get('lastReadAt') or '', reverse=True)
+    return jsonify({'books': books})
+
+@app.route('/api/books/current', methods=['GET'])
+def books_current():
+    prog = _read_json(f'{CO_DATA}/progress.json', {})
+    if not prog:
+        return jsonify({'book': None})
+    bid = max(prog, key=lambda k: prog[k].get('lastReadAt',''))
+    m = _read_json(f'{CO_DATA}/books/{bid}/manifest.json')
+    if not m:
+        return jsonify({'book': None})
+    bp = prog.get(bid, {})
+    total = len(m.get('chunks', []))
+    read = len(bp.get('readChunkIds', []))
+    c1, c2 = _book_colors(bid)
+    return jsonify({'book': {
+        'bookId': bid, 'title': m['title'], 'author': m.get('author',''),
+        'total': total, 'read': read, 'color1': c1, 'color2': c2,
+        'lastChunkId': bp.get('lastChunkId'),
+        'progress': round(read / total * 100) if total else 0,
+    }})
+
+@app.route('/api/books/<book_id>/chunks', methods=['GET'])
+def book_chunks(book_id):
+    m = _read_json(f'{CO_DATA}/books/{book_id}/manifest.json')
+    if not m:
+        return jsonify({'error': 'not found'}), 404
+    prog = _read_json(f'{CO_DATA}/progress.json', {})
+    read_ids = set(prog.get(book_id, {}).get('readChunkIds', []))
+    chunks = [{**ch, 'read': ch['id'] in read_ids} for ch in m.get('chunks', [])]
+    return jsonify({'chunks': chunks, 'title': m['title']})
+
+@app.route('/api/books/<book_id>/chunks/<chunk_id>', methods=['GET'])
+def book_chunk(book_id, chunk_id):
+    m = _read_json(f'{CO_DATA}/books/{book_id}/manifest.json')
+    if not m:
+        return jsonify({'error': 'not found'}), 404
+    chunk_meta = next((ch for ch in m.get('chunks',[]) if ch['id']==chunk_id), None)
+    if not chunk_meta:
+        return jsonify({'error': 'chunk not found'}), 404
+    try:
+        text = open(f"{CO_DATA}/books/{book_id}/{chunk_meta['path']}").read()
+    except Exception:
+        return jsonify({'error': 'file not found'}), 404
+    return jsonify({'chunk': chunk_meta, 'text': text, 'bookTitle': m['title']})
+
+@app.route('/api/books/<book_id>/annotations', methods=['GET'])
+def book_annotations(book_id):
+    rows = []
+    try:
+        for line in open(f'{CO_DATA}/annotations.jsonl'):
+            line = line.strip()
+            if not line:
+                continue
+            obj = _json.loads(line)
+            if obj.get('bookId') == book_id:
+                rows.append(obj)
+    except FileNotFoundError:
+        pass
+    return jsonify({'annotations': rows})
+
+@app.route('/api/books/<book_id>/annotations', methods=['POST'])
+def create_annotation(book_id):
+    import uuid, datetime as _dt
+    data = request.get_json()
+    ann = {
+        'id': str(uuid.uuid4()),
+        'bookId': book_id,
+        'chunkId': data.get('chunkId',''),
+        'quote': data.get('quote',''),
+        'kind': data.get('kind','highlight'),
+        'author': data.get('author','haya'),
+        'note': data.get('note',''),
+        'createdAt': _dt.datetime.utcnow().isoformat() + 'Z',
+    }
+    with open(f'{CO_DATA}/annotations.jsonl', 'a') as f:
+        f.write(_json.dumps(ann, ensure_ascii=False) + '\n')
+    return jsonify({'annotation': ann}), 201
+
+@app.route('/api/books/<book_id>/progress', methods=['POST'])
+def update_book_progress(book_id):
+    import datetime as _dt
+    data = request.get_json()
+    prog = _read_json(f'{CO_DATA}/progress.json', {})
+    bp = prog.get(book_id, {'readChunkIds': []})
+    chunk_id = data.get('chunkId')
+    if chunk_id and chunk_id not in bp['readChunkIds']:
+        bp['readChunkIds'].append(chunk_id)
+    bp['lastChunkId'] = chunk_id or bp.get('lastChunkId')
+    bp['lastReadAt'] = _dt.datetime.utcnow().isoformat() + 'Z'
+    prog[book_id] = bp
+    open(f'{CO_DATA}/progress.json','w').write(_json.dumps(prog, ensure_ascii=False, indent=2))
+    return jsonify({'ok': True})
+
+@app.route('/read')
+def read_page():
+    return send_from_directory('/opt/frontend/static', 'read.html')
+
+@app.route('/reader')
+def reader_page():
+    return send_from_directory('/opt/frontend/static', 'reader.html')
+
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5050, debug=False)

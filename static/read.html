@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+<title>read · 共读</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@latest/tabler-icons.min.css">
+<style>
+*{margin:0;padding:0;box-sizing:border-box;}
+:root{
+  --bg1:#fdf8ef;--bg2:#f7f0e4;
+  --card:rgba(255,255,255,0.65);--card-b:rgba(255,255,255,0.9);
+  --text:#3a2e28;--muted:#9a8a7a;--hint:#b8a090;
+  --primary-bg:rgba(124,106,138,0.15);--primary:#5a4a6a;--primary-dot:#7c6a8a;
+  --amber:rgba(212,165,116,0.85);--amber-s:#d4a574;
+  --div:rgba(210,185,155,0.2);
+  --tag-off:rgba(255,255,255,0.6);--tag-off-b:rgba(210,185,155,0.3);
+}
+html,body{height:100%;overflow:hidden;}
+body{background:linear-gradient(160deg,var(--bg1) 0%,var(--bg2) 100%);background-attachment:fixed;color:var(--text);font-family:-apple-system,'PingFang SC','Noto Sans SC',sans-serif;max-width:480px;margin:0 auto;display:flex;flex-direction:column;}
+.hd{flex-shrink:0;padding:52px 20px 16px;background:rgba(253,248,239,0.88);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);border-bottom:1px solid var(--div);text-align:center;}
+.hd-title{font-family:Georgia,'Times New Roman',serif;font-size:22px;letter-spacing:6px;color:var(--text);font-weight:700;}
+.hd-sub{font-size:11px;letter-spacing:1px;color:var(--amber-s);margin-top:4px;}
+.scroll{flex:1;overflow-y:auto;padding:20px 16px calc(80px + env(safe-area-inset-bottom,0px));}
+.scroll::-webkit-scrollbar{display:none;}
+.sec-label{font-size:10px;letter-spacing:3px;color:var(--hint);margin:0 2px 12px;text-transform:uppercase;}
+/* now reading card */
+.now-card{background:var(--card);border:1px solid var(--card-b);border-radius:18px;backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);padding:16px;display:flex;gap:14px;margin-bottom:24px;cursor:pointer;transition:transform .15s;}
+.now-card:active{transform:scale(.98);}
+.now-cover{width:72px;height:96px;border-radius:10px;flex-shrink:0;display:flex;align-items:center;justify-content:center;}
+.now-info{flex:1;min-width:0;display:flex;flex-direction:column;justify-content:space-between;}
+.now-title{font-family:Georgia,'Times New Roman',serif;font-size:15px;font-weight:700;color:var(--text);line-height:1.4;margin-bottom:4px;}
+.now-author{font-size:12px;color:var(--muted);margin-bottom:12px;}
+.prog-bar{height:4px;background:rgba(210,185,155,0.25);border-radius:2px;overflow:hidden;margin-bottom:5px;}
+.prog-fill{height:100%;background:var(--primary-dot);border-radius:2px;transition:width .4s;}
+.prog-txt{font-size:11px;color:var(--hint);}
+.now-empty{text-align:center;color:var(--hint);font-size:13px;padding:24px 0;}
+/* bookshelf */
+.shelf-hd{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;}
+.add-btn{width:30px;height:30px;border-radius:50%;background:var(--amber);border:none;color:#fff;font-size:18px;cursor:pointer;display:flex;align-items:center;justify-content:center;}
+.book-list{display:flex;flex-direction:column;gap:10px;}
+.book-card{background:var(--card);border:1px solid var(--card-b);border-radius:14px;backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);padding:12px 14px;display:flex;gap:12px;cursor:pointer;transition:transform .15s;}
+.book-card:active{transform:scale(.98);}
+.book-cover{width:42px;height:56px;border-radius:7px;flex-shrink:0;}
+.book-info{flex:1;min-width:0;display:flex;flex-direction:column;justify-content:center;}
+.book-title{font-size:13px;font-weight:600;color:var(--text);margin-bottom:3px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;}
+.book-author{font-size:11px;color:var(--muted);margin-bottom:8px;}
+.book-prog{display:flex;align-items:center;gap:8px;}
+.book-prog-bar{flex:1;height:3px;background:rgba(210,185,155,0.25);border-radius:2px;overflow:hidden;}
+.book-prog-fill{height:100%;background:var(--primary-dot);border-radius:2px;}
+.book-prog-txt{font-size:10px;color:var(--hint);flex-shrink:0;}
+/* add modal */
+.mo{display:none;position:fixed;inset:0;background:rgba(0,0,0,.3);z-index:100;align-items:center;justify-content:center;padding:24px;}
+.mo.show{display:flex;}
+.mb{background:rgba(255,255,255,.97);border-radius:16px;padding:20px;width:100%;max-width:400px;}
+.mb h3{font-size:15px;font-weight:700;color:var(--text);margin-bottom:14px;}
+.mb input,.mb textarea{width:100%;padding:10px 12px;border-radius:10px;border:1px solid var(--tag-off-b);background:rgba(255,255,255,.7);font-size:13px;font-family:inherit;color:var(--text);outline:none;margin-bottom:10px;}
+.mb textarea{resize:none;min-height:80px;line-height:1.6;}
+.mb input:focus,.mb textarea:focus{border-color:rgba(212,165,116,.6);}
+.mb-row{display:flex;gap:8px;margin-top:4px;}
+.mb-cancel{flex:1;padding:10px;border:1px solid var(--tag-off-b);border-radius:10px;background:var(--tag-off);color:var(--muted);font-size:13px;cursor:pointer;}
+.mb-send{flex:1;padding:10px;border:none;border-radius:10px;background:var(--amber);color:#fff;font-size:13px;cursor:pointer;}
+/* bottom nav */
+.bnav{position:fixed;bottom:0;left:50%;transform:translateX(-50%);width:100%;max-width:480px;background:rgba(253,248,239,0.95);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);border-top:1px solid var(--div);display:flex;z-index:50;padding:7px 0 calc(7px + env(safe-area-inset-bottom,0px));}
+.ni{flex:1;display:flex;flex-direction:column;align-items:center;gap:3px;text-decoration:none;border:none;background:none;cursor:pointer;color:var(--hint);font-size:10px;letter-spacing:.4px;font-family:inherit;padding:4px 0;transition:color .18s;}
+.ni i{font-size:21px;}
+.ni.act{color:var(--primary);}
+</style>
+</head>
+<body>
+<div class="hd">
+  <div class="hd-title">read</div>
+  <div class="hd-sub">she is reading · with me</div>
+</div>
+<div class="scroll">
+  <div class="sec-label">now reading</div>
+  <div id="now-area"></div>
+  <div class="sec-label">bookshelf</div>
+  <div class="shelf-hd">
+    <div></div>
+    <button class="add-btn" onclick="openAdd()">+</button>
+  </div>
+  <div class="book-list" id="book-list"></div>
+</div>
+<nav class="bnav">
+  <a class="ni" href="/dash"><i class="ti ti-layout-dashboard"></i><span>dash</span></a>
+  <a class="ni" href="/chat"><i class="ti ti-message-2"></i><span>chat</span></a>
+  <a class="ni" href="/calendar"><i class="ti ti-calendar"></i><span>calendar</span></a>
+  <a class="ni act" href="/read"><i class="ti ti-book"></i><span>read</span></a>
+</nav>
+<div class="mo" id="add-mo">
+  <div class="mb">
+    <h3>添加书籍</h3>
+    <input id="add-title" placeholder="书名" />
+    <input id="add-author" placeholder="作者" />
+    <textarea id="add-text" placeholder="粘贴正文内容（导入为文本书籍）…"></textarea>
+    <div class="mb-row">
+      <button class="mb-cancel" onclick="closeAdd()">取消</button>
+      <button class="mb-send" onclick="submitAdd()">导入</button>
+    </div>
+  </div>
+</div>
+<script>
+var books=[], currentBook=null;
+
+function cover(c1,c2,size){
+  return '<div style="width:'+size+'px;height:'+(size*4/3)+'px;border-radius:'+(size*0.14)+'px;background:linear-gradient(135deg,'+c1+','+c2+');flex-shrink:0;"></div>';
+}
+function pct(r,t){return t?Math.round(r/t*100):0;}
+
+async function load(){
+  var [r1,r2]=await Promise.all([fetch('/api/books/current'),fetch('/api/books')]);
+  var d1=await r1.json(), d2=await r2.json();
+  currentBook=d1.book;
+  books=d2.books||[];
+  renderNow();
+  renderShelf();
+}
+
+function renderNow(){
+  var el=document.getElementById('now-area');
+  if(!currentBook){el.innerHTML='<div class="now-empty">还没有正在阅读的书</div>';return;}
+  var b=currentBook;
+  var p=b.progress||0;
+  el.innerHTML='<div class="now-card" onclick="openBook(\''+escId(b.bookId)+'\')">'
+    +'<div class="now-cover" style="background:linear-gradient(135deg,'+b.color1+','+b.color2+')"></div>'
+    +'<div class="now-info">'
+    +'<div><div class="now-title">'+esc(b.title)+'</div>'
+    +'<div class="now-author">'+esc(b.author)+'</div></div>'
+    +'<div><div class="prog-bar"><div class="prog-fill" style="width:'+p+'%"></div></div>'
+    +'<div class="prog-txt">'+p+'% · '+b.read+'/'+b.total+' 章</div></div>'
+    +'</div></div>';
+}
+
+function renderShelf(){
+  var el=document.getElementById('book-list');
+  if(!books.length){el.innerHTML='<div style="color:var(--hint);font-size:13px;text-align:center;padding:20px 0;">书架空空的</div>';return;}
+  el.innerHTML=books.map(function(b){
+    var p=pct(b.read,b.total);
+    return '<div class="book-card" onclick="openBook(\''+escId(b.bookId)+'\')">'
+      +'<div class="book-cover" style="background:linear-gradient(135deg,'+b.color1+','+b.color2+')"></div>'
+      +'<div class="book-info">'
+      +'<div class="book-title">'+esc(b.title)+'</div>'
+      +'<div class="book-author">'+esc(b.author)+'</div>'
+      +'<div class="book-prog">'
+      +'<div class="book-prog-bar"><div class="book-prog-fill" style="width:'+p+'%"></div></div>'
+      +'<span class="book-prog-txt">'+p+'%</span>'
+      +'</div></div></div>';
+  }).join('');
+}
+
+function openBook(bookId){
+  window.location.href='/reader?book='+encodeURIComponent(bookId);
+}
+
+function esc(s){return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
+function escId(s){return String(s||'').replace(/'/g,"\\'");}
+
+function openAdd(){document.getElementById('add-mo').classList.add('show');}
+function closeAdd(){document.getElementById('add-mo').classList.remove('show');}
+async function submitAdd(){
+  var title=document.getElementById('add-title').value.trim();
+  var author=document.getElementById('add-author').value.trim();
+  var text=document.getElementById('add-text').value.trim();
+  if(!title||!text)return;
+  // import via co-reading HTTP server
+  var r=await fetch('/reading/api/import',{
+    method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({title,author,text,source:{type:'text'}})
+  });
+  if(r.ok){closeAdd();load();}else{alert('导入失败');}
+}
+
+load();
+</script>
+</body>
+</html>

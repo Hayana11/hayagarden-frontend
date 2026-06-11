@@ -1,5 +1,5 @@
 const CACHE = 'home-v2';
-const PRECACHE = ['/dash', '/chat', '/calendar', '/letters', '/manifest.json', '/icon-192.png', '/icon-512.png'];
+const PRECACHE = ['/dash', '/chat', '/calendar', '/read', '/manifest.json', '/icon-192.png', '/icon-512.png'];
 
 self.addEventListener('install', e => {
   e.waitUntil(
