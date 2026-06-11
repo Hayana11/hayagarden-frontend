@@ -732,5 +732,50 @@ def config_test_send():
 def api_test_page():
     return send_from_directory('/opt/frontend/static', 'api-test.html')
 
+
+# ── EPUB upload & import ──
+
+@app.route('/api/books/upload', methods=['POST'])
+def upload_epub():
+    import subprocess, tempfile, os as _os, json as _json
+    if 'file' not in request.files:
+        return jsonify({'error': 'no file field'}), 400
+    f = request.files['file']
+    if not f.filename:
+        return jsonify({'error': 'empty filename'}), 400
+    # save to temp file
+    tmp = tempfile.NamedTemporaryFile(suffix='.epub', delete=False)
+    f.save(tmp.name)
+    tmp.close()
+    try:
+        result = subprocess.run(
+            ['python3', '/opt/co-reading/scripts/import_epub.py',
+             tmp.name,
+             '--out', '/opt/co-reading/data/books'],
+            capture_output=True, text=True, timeout=120
+        )
+        if result.returncode != 0:
+            return jsonify({'error': result.stderr.strip() or 'import failed'}), 500
+        book_dir = result.stdout.strip()
+        # read manifest to return metadata
+        mf_path = _os.path.join(book_dir, 'manifest.json')
+        mf = _json.loads(open(mf_path).read()) if _os.path.exists(mf_path) else {}
+        return jsonify({
+            'ok': True,
+            'bookId': mf.get('bookId', ''),
+            'title': mf.get('title', ''),
+            'author': mf.get('author', ''),
+            'chunks': len(mf.get('chunks', [])),
+        })
+    except subprocess.TimeoutExpired:
+        return jsonify({'error': 'import timeout'}), 504
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+    finally:
+        try:
+            _os.unlink(tmp.name)
+        except Exception:
+            pass
+
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5050, debug=False)
