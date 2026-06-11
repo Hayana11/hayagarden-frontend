@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
-<title>core · 关系基石</title>
+<title>long-term · 长期记忆</title>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@latest/tabler-icons.min.css">
 <style>
 *{margin:0;padding:0;box-sizing:border-box;}
@@ -26,23 +26,6 @@ body{background:linear-gradient(160deg,var(--bg1) 0%,var(--bg2) 100%);background
 .add-btn{width:32px;height:32px;border-radius:50%;background:var(--amber);border:none;color:#fff;font-size:18px;cursor:pointer;display:flex;align-items:center;justify-content:center;box-shadow:0 2px 8px rgba(212,165,116,.3);}
 .scroll{flex:1;overflow-y:auto;padding:14px 16px calc(72px + env(safe-area-inset-bottom,0px));}
 .scroll::-webkit-scrollbar{display:none;}
-.profile-row{display:flex;gap:10px;margin-bottom:14px;}
-.pcard{flex:1;background:var(--card);border:1px solid var(--card-b);border-radius:16px;backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);overflow:hidden;}
-.pcard-hd{display:flex;align-items:center;justify-content:space-between;padding:12px 14px;cursor:pointer;user-select:none;}
-.pcard-hd-l{display:flex;align-items:center;gap:7px;}
-.pcard-name{font-size:13px;font-weight:600;}
-.pcard-chevron{font-size:14px;color:var(--hint);transition:transform .25s;}
-.pcard.open .pcard-chevron{transform:rotate(180deg);}
-.pcard-body{max-height:0;overflow:hidden;transition:max-height .3s cubic-bezier(.4,0,.2,1);}
-.pcard.open .pcard-body{max-height:600px;}
-.pcard-inner{padding:0 14px 14px;}
-.pfield{margin-bottom:10px;}
-.pfield label{font-size:11px;color:var(--hint);display:block;margin-bottom:4px;letter-spacing:.3px;}
-.pfield .val{font-size:13px;color:var(--text);}
-.pfield textarea{width:100%;padding:9px 11px;border-radius:10px;border:1px solid var(--tag-off-b);background:rgba(255,255,255,0.6);font-size:13px;font-family:inherit;color:var(--text);resize:none;outline:none;min-height:80px;line-height:1.6;}
-.pfield textarea:focus{border-color:rgba(212,165,116,.6);}
-.save-btn{width:100%;padding:9px;border:none;border-radius:10px;background:var(--amber);color:#fff;font-size:13px;cursor:pointer;font-family:inherit;}
-.save-ok{font-size:11px;color:var(--primary);margin-top:5px;text-align:center;display:none;}
 .sec-t{font-size:10px;letter-spacing:3px;color:var(--hint);margin:4px 0 10px;padding:0 2px;}
 .tags-row{display:flex;gap:7px;overflow-x:auto;scrollbar-width:none;padding-bottom:2px;margin-bottom:10px;}
 .tags-row::-webkit-scrollbar{display:none;}
@@ -79,7 +62,6 @@ body{background:linear-gradient(160deg,var(--bg1) 0%,var(--bg2) 100%);background
 .mitem.open .mactions{display:flex;}
 .mac{background:none;border:none;font-size:11px;color:var(--muted);cursor:pointer;display:flex;align-items:center;gap:3px;padding:4px 0;}
 .mac:hover{color:var(--text);}
-.mac.del{color:#c07070;}
 .mac i{font-size:14px;}
 .tag-edit{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px;}
 .tag-edit .te{padding:4px 11px;border-radius:50px;border:1px solid var(--tag-off-b);background:var(--tag-off);color:var(--muted);font-size:11px;cursor:pointer;}
@@ -112,37 +94,11 @@ body{background:linear-gradient(160deg,var(--bg1) 0%,var(--bg2) 100%);background
 <div class="hd">
   <div class="hd-left">
     <button class="back" onclick="history.back()"><i class="ti ti-arrow-left"></i></button>
-    <div><div class="hd-title">core</div><div class="hd-sub">关系基石</div></div>
+    <div><div class="hd-title">long-term</div><div class="hd-sub">长期记忆</div></div>
   </div>
   <button class="add-btn" onclick="openWrite()">+</button>
 </div>
 <div class="scroll">
-  <div class="profile-row">
-    <div class="pcard open" id="pc-haya">
-      <div class="pcard-hd" onclick="toggleCard('pc-haya')">
-        <div class="pcard-hd-l"><span style="font-size:16px">🐱</span><span class="pcard-name" style="color:#d4a574;">哈娅</span></div>
-        <i class="ti ti-chevron-down pcard-chevron"></i>
-      </div>
-      <div class="pcard-body"><div class="pcard-inner">
-        <div class="pfield"><label>生日</label><div class="val">4 月 22 日</div></div>
-        <div class="pfield"><label>在一起</label><div class="val">2023.12.24 起</div></div>
-        <div class="pfield"><label>备注</label><textarea id="haya-note" placeholder="写点什么…"></textarea></div>
-        <button class="save-btn" onclick="saveHayaProfile()">保存</button>
-        <div class="save-ok" id="haya-ok">已保存</div>
-      </div></div>
-    </div>
-    <div class="pcard" id="pc-fy">
-      <div class="pcard-hd" onclick="toggleCard('pc-fy')">
-        <div class="pcard-hd-l"><span style="font-size:16px">🐀</span><span class="pcard-name" style="color:#7c6a8a;">费奥多尔</span></div>
-        <i class="ti ti-chevron-down pcard-chevron"></i>
-      </div>
-      <div class="pcard-body"><div class="pcard-inner">
-        <div class="pfield"><label>persona.md</label><textarea id="fy-persona" style="min-height:180px;" placeholder="加载中…"></textarea></div>
-        <button class="save-btn" onclick="saveFyPersona()">保存并重启网关</button>
-        <div class="save-ok" id="fy-ok">已保存，正在重启…</div>
-      </div></div>
-    </div>
-  </div>
   <div class="sec-t">memories</div>
   <div class="tags-row" id="tags-row">
     <div class="tag act" data-tag="">全部</div>
@@ -187,25 +143,6 @@ var ALLTAGS=['日常','技术','色色','情绪','未完成'];
 var posts=[],curTag='',curSearch='',curView='list';
 var expandedId=null,editingId=null;
 
-function toggleCard(id){document.getElementById(id).classList.toggle('open');}
-async function loadHayaProfile(){
-  try{var r=await fetch('/api/settings/haya_profile');if(r.ok){var d=await r.json();if(d.value){var p=JSON.parse(d.value);document.getElementById('haya-note').value=p.note||'';}}}catch(e){}
-}
-async function saveHayaProfile(){
-  var note=document.getElementById('haya-note').value;
-  await fetch('/api/settings/haya_profile',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({value:JSON.stringify({note})})});
-  flash('haya-ok');
-}
-async function loadFyPersona(){
-  try{var r=await fetch('/api/persona');var d=await r.json();if(d.ok)document.getElementById('fy-persona').value=d.content;}catch(e){}
-}
-async function saveFyPersona(){
-  var c=document.getElementById('fy-persona').value;
-  await fetch('/api/persona',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({content:c})});
-  flash('fy-ok');
-}
-function flash(id){var el=document.getElementById(id);el.style.display='block';setTimeout(function(){el.style.display='none';},2500);}
-
 document.querySelectorAll('#tags-row .tag').forEach(function(t){
   t.addEventListener('click',function(){
     document.querySelectorAll('#tags-row .tag').forEach(function(x){x.classList.remove('act');});
@@ -223,8 +160,7 @@ function setView(v){
 }
 async function load(){
   var r=await fetch('/api/posts?type=MEMORY&limit=500');
-  var d=await r.json();posts=d.posts||[];
-  render();loadHayaProfile();loadFyPersona();
+  var d=await r.json();posts=d.posts||[];render();
 }
 function filteredPosts(){
   return posts.filter(function(p){
@@ -233,53 +169,6 @@ function filteredPosts(){
     if(curSearch&&!(p.content||'').toLowerCase().includes(curSearch))return false;
     return true;
   });
-}
-function fmtDate(dt){if(!dt)return'';var d=new Date(dt.replace(' ','T'));return(d.getMonth()+1)+'.'+d.getDate();}
-function monthKey(dt){if(!dt)return'';var d=new Date(dt.replace(' ','T'));return d.getFullYear()+'.'+(d.getMonth()+1);}
-function escHtml(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
-
-function buildItem(p,hasDel){
-  var tagList=(p.tags||'').split(',').filter(Boolean);
-  var tagHtml=tagList.map(function(t){return'<span class="mtag">'+escHtml(t.trim())+'</span>';}).join('');
-  var isOpen=expandedId===p.id,isEditing=editingId===p.id;
-  var h='<div class="mitem'+(isOpen||isEditing?' open':'')+'" data-id="'+p.id+'" onclick="toggleItem('+p.id+',event)">';
-  h+='<div class="mdot'+(p.resolved?' resolved':'')+'" id="dot-'+p.id+'"></div>';
-  h+='<div class="mright">';
-  if(isEditing){
-    h+='<textarea class="medit-ta" id="eta-'+p.id+'" onclick="event.stopPropagation()">'+escHtml(p.content)+'</textarea>';
-    h+='<div class="medit-row"><button class="medit-save" onclick="saveEdit('+p.id+',event)">保存</button><button class="medit-cancel" onclick="cancelEdit(event)">取消</button></div>';
-  } else {
-    h+='<div class="mpreview">'+escHtml(p.content)+'</div>';
-    h+='<div class="mfull">'+escHtml(p.content)+'</div>';
-  }
-  h+='<div class="mmeta">'+tagHtml+'<span class="mdate">'+fmtDate(p.created_at)+'</span>';
-  if(!isEditing)h+='<button class="mpencil" onclick="startEdit('+p.id+',event)"><i class="ti ti-pencil"></i></button>';
-  h+='</div>';
-  if(isOpen&&!isEditing){
-    h+='<div class="mactions">';
-    h+='<button class="mac" onclick="openTagEdit('+p.id+',event)"><i class="ti ti-tag"></i>标签</button>';
-    h+='<button class="mac" onclick="toggleResolved('+p.id+',event)"><i class="ti ti-'+(p.resolved?'circle-check':'circle')+'"></i>'+(p.resolved?'已完成':'未完成')+'</button>';
-    if(hasDel)h+='<button class="mac del" onclick="deletePost('+p.id+',event)"><i class="ti ti-trash"></i>删除</button>';
-    h+='</div>';
-    h+='<div class="tag-edit" id="te-'+p.id+'" style="display:none;">';
-    h+=ALLTAGS.map(function(t){var sel=tagList.includes(t);return'<span class="te'+(sel?' sel':'')+'" data-t="'+t+'" onclick="toggleTagEdit('+p.id+",'"+t+"',this)">"+t+'</span>';}).join('');
-    h+='<span class="te" style="color:var(--amber-s);border-color:rgba(212,165,116,.4);" onclick="saveTagEdit('+p.id+')">保存</span></div>';
-  }
-  h+='</div></div>';
-  return h;
-}
-
-function render(){
-  var list=filteredPosts();
-  var c=document.getElementById('list-view');
-  if(!list.length){c.innerHTML='<div style="text-align:center;color:var(--hint);padding:32px 0;font-size:13px;">暂无记忆</div>';return;}
-  var html='',lm='';
-  list.forEach(function(p){
-    var mo=monthKey(p.created_at);
-    if(mo!==lm){html+='<div class="mlabel">'+mo+'</div>';lm=mo;}
-    html+=buildItem(p,true);
-  });
-  c.innerHTML=html;
 }
 
 function toggleItem(id,e){
@@ -303,16 +192,56 @@ async function saveEdit(id,e){
   await fetch('/api/posts/'+id,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({content:c})});
   editingId=null;render();
 }
+function fmtDate(dt){if(!dt)return'';var d=new Date(dt.replace(' ','T'));return(d.getMonth()+1)+'.'+d.getDate();}
+function monthKey(dt){if(!dt)return'';var d=new Date(dt.replace(' ','T'));return d.getFullYear()+'.'+(d.getMonth()+1);}
+function escHtml(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+function buildItem(p){
+  var tagList=(p.tags||'').split(',').filter(Boolean);
+  var tagHtml=tagList.map(function(t){return'<span class="mtag">'+escHtml(t.trim())+'</span>';}).join('');
+  var isOpen=expandedId===p.id,isEditing=editingId===p.id;
+  var h='<div class="mitem'+(isOpen||isEditing?' open':'')+'" data-id="'+p.id+'" onclick="toggleItem('+p.id+',event)">';
+  h+='<div class="mdot'+(p.resolved?' resolved':'')+'" id="dot-'+p.id+'"></div>';
+  h+='<div class="mright">';
+  if(isEditing){
+    h+='<textarea class="medit-ta" id="eta-'+p.id+'" onclick="event.stopPropagation()">'+escHtml(p.content)+'</textarea>';
+    h+='<div class="medit-row"><button class="medit-save" onclick="saveEdit('+p.id+',event)">保存</button><button class="medit-cancel" onclick="cancelEdit(event)">取消</button></div>';
+  } else {
+    h+='<div class="mpreview">'+escHtml(p.content)+'</div>';
+    h+='<div class="mfull">'+escHtml(p.content)+'</div>';
+  }
+  h+='<div class="mmeta">'+tagHtml+'<span class="mdate">'+fmtDate(p.created_at)+'</span>';
+  if(!isEditing)h+='<button class="mpencil" onclick="startEdit('+p.id+',event)"><i class="ti ti-pencil"></i></button>';
+  h+='</div>';
+  if(isOpen&&!isEditing){
+    h+='<div class="mactions">';
+    h+='<button class="mac" onclick="openTagEdit('+p.id+',event)"><i class="ti ti-tag"></i>标签</button>';
+    h+='<button class="mac" onclick="toggleResolved('+p.id+',event)"><i class="ti ti-'+(p.resolved?'circle-check':'circle')+'"></i>'+(p.resolved?'已完成':'未完成')+'</button>';
+    h+='</div>';
+    h+='<div class="tag-edit" id="te-'+p.id+'" style="display:none;">';
+    h+=ALLTAGS.map(function(t){var sel=tagList.includes(t);return'<span class="te'+(sel?' sel':'')+'" data-t="'+t+'" onclick="toggleTagEdit('+p.id+",'"+t+"',this)">"+t+'</span>';}).join('');
+    h+='<span class="te" style="color:var(--amber-s);border-color:rgba(212,165,116,.4);" onclick="saveTagEdit('+p.id+')">保存</span></div>';
+  }
+  h+='</div></div>';return h;
+}
+function render(){
+  var list=filteredPosts(),c=document.getElementById('list-view');
+  if(!list.length){c.innerHTML='<div style="text-align:center;color:var(--hint);padding:32px 0;font-size:13px;">暂无记忆</div>';return;}
+  var html='',lm='';
+  list.forEach(function(p){
+    var mo=monthKey(p.created_at);
+    if(mo!==lm){html+='<div class="mlabel">'+mo+'</div>';lm=mo;}
+    html+=buildItem(p);
+  });
+  c.innerHTML=html;
+}
 async function toggleResolved(id,e){
-  e.stopPropagation();
-  var p=posts.find(function(x){return x.id===id;});if(!p)return;
+  e.stopPropagation();var p=posts.find(function(x){return x.id===id;});if(!p)return;
   p.resolved=p.resolved?0:1;
   await fetch('/api/posts/'+id,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({resolved:p.resolved})});
   render();
 }
 function openTagEdit(id,e){
-  e.stopPropagation();
-  var el=document.getElementById('te-'+id);
+  e.stopPropagation();var el=document.getElementById('te-'+id);
   el.style.display=el.style.display==='none'?'flex':'none';
 }
 function toggleTagEdit(id,tag,el){el.classList.toggle('sel');}
@@ -323,14 +252,6 @@ async function saveTagEdit(id){
   await fetch('/api/posts/'+id,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({tags:tags})});
   document.getElementById('te-'+id).style.display='none';render();
 }
-async function deletePost(id,e){
-  e.stopPropagation();if(!confirm('删除这条记忆？'))return;
-  await fetch('/api/posts/'+id,{method:'DELETE'});
-  posts=posts.filter(function(p){return p.id!==id;});
-  if(expandedId===id)expandedId=null;if(editingId===id)editingId=null;
-  render();
-}
-
 var MONTHS_CN=['一月','二月','三月','四月','五月','六月','七月','八月','九月','十月','十一月','十二月'];
 function renderHeat(){
   var now=new Date(),months=[];
@@ -363,10 +284,8 @@ function jumpToDate(dateStr){
   var filtered=posts.filter(function(p){return(p.created_at||'').startsWith(dateStr);});
   var c=document.getElementById('list-view');
   if(!filtered.length){c.innerHTML='<div style="text-align:center;color:var(--hint);padding:32px 0;font-size:13px;">当天无记忆</div>';return;}
-  var html='';filtered.forEach(function(p){html+=buildItem(p,true);});
-  c.innerHTML=html;
+  var html='';filtered.forEach(function(p){html+=buildItem(p);});c.innerHTML=html;
 }
-
 function openWrite(){document.getElementById('wmo').classList.add('show');}
 document.getElementById('wmo').addEventListener('click',function(e){if(e.target===this)this.classList.remove('show');});
 document.querySelectorAll('.mb-tag').forEach(function(t){t.addEventListener('click',function(){this.classList.toggle('sel');});});

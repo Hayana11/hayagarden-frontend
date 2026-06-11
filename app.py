@@ -441,5 +441,31 @@ def patch_post(pid):
     conn.close()
     return jsonify({"ok": True})
 
+# ── Long-term / Recent pages ──
+
+@app.route('/long-term')
+def long_term_page():
+    return send_from_directory('/opt/frontend/static', 'long-term.html')
+
+@app.route('/recent')
+def recent_page():
+    return send_from_directory('/opt/frontend/static', 'recent.html')
+
+# ── Posts PUT (content / tags only) ──
+
+@app.route('/api/posts/<int:pid>', methods=['PUT'])
+def update_post(pid):
+    data = request.get_json()
+    conn = get_db()
+    if 'content' in data:
+        c = str(data['content']).strip()
+        if c:
+            conn.execute("UPDATE posts SET content=? WHERE id=?", (c, pid))
+    if 'tags' in data:
+        conn.execute("UPDATE posts SET tags=? WHERE id=?", (data['tags'], pid))
+    conn.commit()
+    conn.close()
+    return jsonify({"ok": True})
+
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5050, debug=False)
