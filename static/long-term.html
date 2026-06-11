@@ -218,7 +218,7 @@ function buildItem(p){
     h+='<button class="mac" onclick="toggleResolved('+p.id+',event)"><i class="ti ti-'+(p.resolved?'circle-check':'circle')+'"></i>'+(p.resolved?'已完成':'未完成')+'</button>';
     h+='</div>';
     h+='<div class="tag-edit" id="te-'+p.id+'" style="display:none;">';
-    h+=ALLTAGS.map(function(t){var sel=tagList.includes(t);return'<span class="te'+(sel?' sel':'')+'" data-t="'+t+'" onclick="toggleTagEdit('+p.id+",'"+t+"',this)">"+t+'</span>';}).join('');
+    h+=ALLTAGS.map(function(t){var sel=tagList.includes(t);return'<span class="te'+(sel?' sel':'')+'" data-t="'+t+'" onclick="toggleTagEdit('+p.id+',\''+t+'\',this)">'+t+'</span>';}).join('');
     h+='<span class="te" style="color:var(--amber-s);border-color:rgba(212,165,116,.4);" onclick="saveTagEdit('+p.id+')">保存</span></div>';
   }
   h+='</div></div>';return h;
@@ -273,7 +273,7 @@ function renderHeat(){
       var isToday=day===now.getDate()&&mo.m===now.getMonth()&&mo.y===now.getFullYear();
       var bg=(op>0&&!isToday)?' style="background:rgba(124,106,138,'+op+')"':'';
       var dd=mo.y+'-'+String(mo.m+1).padStart(2,'0')+'-'+String(day).padStart(2,'0');
-      html+='<div class="hday'+(isToday?' today':'')+'"'+bg+' onclick="jumpToDate(''+dd+'')">'+day+'</div>';
+      html+='<div class="hday'+(isToday?' today':'')+'"'+bg+' onclick="jumpToDate(\''+dd+'\')">'+day+'</div>';
     }
     html+='</div>';
   });

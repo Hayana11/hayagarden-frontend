@@ -1,6 +1,5 @@
 import datetime
 
-_DAYS = ['周一','周二','周三','周四','周五','周六','周日']
 _PERIODS = [(0,'深夜'),(6,'早上'),(9,'上午'),(12,'中午'),(14,'下午'),(18,'晚上'),(22,'深夜')]
 
 def _period(h):
@@ -10,16 +9,10 @@ def _period(h):
             p = name
     return p
 
-def _fmt(dt):
-    return (f"{dt.year}年{dt.month}月{dt.day}日 {_DAYS[dt.weekday()]} "
-            f"{_period(dt.hour)}{dt.hour}点{dt.minute:02d}分")
-
 def get_current_time():
-    utc = datetime.datetime.utcnow()
-    beijing = utc + datetime.timedelta(hours=8)
-    osaka   = utc + datetime.timedelta(hours=9)
-    return (f"现在北京时间 {_fmt(beijing)}，"
-            f"大阪时间 {_fmt(osaka)}（比北京快1小时）")
+    beijing = datetime.datetime.utcnow() + datetime.timedelta(hours=8)
+    return (f"现在是{beijing.year}年{beijing.month}月{beijing.day}日 "
+            f"{_period(beijing.hour)}{beijing.hour}点{beijing.minute:02d}分（北京时间）")
 
 if __name__ == '__main__':
     print(get_current_time())
