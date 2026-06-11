@@ -777,5 +777,60 @@ def upload_epub():
         except Exception:
             pass
 
+
+def _env_set(key, value):
+    path = '/opt/frontend/.env'
+    lines = open(path).read().splitlines()
+    found = False
+    for i, ln in enumerate(lines):
+        if ln.startswith(key + '='):
+            lines[i] = key + '=' + value
+            found = True
+            break
+    if not found:
+        lines.append(key + '=' + value)
+    open(path, 'w').write('\n'.join(lines) + '\n')
+
+@app.route('/api/config/provider', methods=['GET'])
+def config_get_provider():
+    provider, has_token = 'treegpt', False
+    try:
+        for line in open('/opt/frontend/.env'):
+            if line.startswith('GW_PROVIDER='):
+                provider = line.split('=', 1)[1].strip() or 'treegpt'
+            elif line.startswith('CLAUDE_CODE_OAUTH_TOKEN='):
+                has_token = bool(line.split('=', 1)[1].strip())
+    except Exception:
+        pass
+    return jsonify({'provider': provider, 'cc_token_set': has_token})
+
+@app.route('/api/config/provider', methods=['POST'])
+def config_set_provider():
+    import subprocess
+    data = request.get_json() or {}
+    provider = (data.get('provider') or '').strip()
+    if provider not in ('treegpt', 'claude_code'):
+        return jsonify({'error': 'provider must be treegpt or claude_code'}), 400
+    try:
+        _env_set('GW_PROVIDER', provider)
+        subprocess.run(['systemctl', 'restart', 'frontend-gw'], timeout=15)
+        return jsonify({'ok': True, 'provider': provider})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/config/cc-token', methods=['POST'])
+def config_set_cc_token():
+    import subprocess
+    data = request.get_json() or {}
+    token = (data.get('token') or '').strip()
+    if not token:
+        return jsonify({'error': 'empty token'}), 400
+    try:
+        _env_set('CLAUDE_CODE_OAUTH_TOKEN', token)
+        subprocess.run(['systemctl', 'restart', 'frontend-gw'], timeout=15)
+        return jsonify({'ok': True})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5050, debug=False)

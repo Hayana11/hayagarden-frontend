@@ -66,6 +66,13 @@ body{background:linear-gradient(160deg,var(--bg1) 0%,var(--bg2) 100%);background
 .mi-switch{font-size:11px;padding:4px 10px;border-radius:14px;border:1px solid rgba(124,106,138,.25);background:var(--primary-bg);color:var(--primary);cursor:pointer;font-family:inherit;transition:all .15s;}
 .mi-switch:hover{background:var(--primary);color:#fff;}
 .mi-switch.done{background:var(--green-bg);border-color:var(--green);color:var(--green);cursor:default;}
+/* provider */
+.prov-row{display:flex;gap:8px;}
+.prov-opt{flex:1;padding:12px;border-radius:12px;border:1.5px solid var(--tag-off-b);background:var(--tag-off);cursor:pointer;transition:all .15s;}
+.prov-opt.act{border-color:var(--primary-dot);background:var(--primary-bg);}
+.prov-name{font-size:13px;font-weight:600;color:var(--text);margin-bottom:3px;}
+.prov-opt.act .prov-name{color:var(--primary);}
+.prov-desc{font-size:10px;color:var(--hint);line-height:1.5;}
 /* key modal */
 .mo{display:none;position:fixed;inset:0;background:rgba(0,0,0,.3);z-index:100;align-items:flex-end;justify-content:center;padding-bottom:0;}
 .mo.show{display:flex;}
@@ -118,6 +125,25 @@ body{background:linear-gradient(160deg,var(--bg1) 0%,var(--bg2) 100%);background
   </div>
 </div>
 <div class="scroll">
+
+  <!-- Card 0: Provider -->
+  <div class="card">
+    <div class="card-hd">
+      <div class="card-title">provider</div>
+      <button class="card-action" onclick="openTokenMo()">订阅 token</button>
+    </div>
+    <div class="prov-row">
+      <div class="prov-opt" id="prov-treegpt" onclick="setProvider('treegpt')">
+        <div class="prov-name">中转 API</div>
+        <div class="prov-desc">treegpt.cc<br>按 token 计费</div>
+      </div>
+      <div class="prov-opt" id="prov-claude_code" onclick="setProvider('claude_code')">
+        <div class="prov-name">订阅 Claude Code</div>
+        <div class="prov-desc">官方原生<br>固定月费</div>
+      </div>
+    </div>
+    <div id="prov-note" style="font-size:11px;color:var(--hint);margin-top:8px;"></div>
+  </div>
 
   <!-- Card 1: Key -->
   <div class="card">
@@ -200,16 +226,91 @@ body{background:linear-gradient(160deg,var(--bg1) 0%,var(--bg2) 100%);background
   </div>
 </div>
 
+<!-- CC token modal -->
+<div class="mo" id="token-mo">
+  <div class="mb">
+    <h4>填入订阅 token</h4>
+    <div class="mb-note">在自己电脑上运行 <b>claude setup-token</b>（需要已订阅的 claude.ai 账号登录浏览器授权），把生成的 token 粘贴到这里。token 将写入 .env 并重启网关。<br>⚠️ 不要把这个 token 给任何其他人或网站。</div>
+    <input id="token-inp" type="password" placeholder="sk-ant-oat01-…">
+    <div class="mb-row">
+      <button class="mb-cancel" onclick="closeTokenMo()">取消</button>
+      <button class="mb-send" onclick="submitToken()">保存重启</button>
+    </div>
+  </div>
+</div>
+
 <div class="toast" id="toast"></div>
 
 <script>
 var currentModel='', currentKey='', rawKeyLen=0;
 
 async function init(){
+  loadProvider();
   loadKeyStatus();
   loadModel();
   pingLatency();
   loadModels();
+}
+
+var curProvider='treegpt', ccTokenSet=false;
+var PROV_NOTES={
+  treegpt:'当前走中转 API：人设与记忆由网关注入，支持工具（记忆/灯）。',
+  claude_code:'当前走订阅 Claude Code：官方原生，固定月费。暂不支持工具调用（记忆保存/灯控不可用），回复整段返回（无逐字流式）。'
+};
+
+async function loadProvider(){
+  try{
+    var r=await fetch('/api/config/provider');
+    var d=await r.json();
+    curProvider=d.provider||'treegpt';
+    ccTokenSet=!!d.cc_token_set;
+    renderProvider();
+  }catch(e){}
+}
+function renderProvider(){
+  document.getElementById('prov-treegpt').classList.toggle('act',curProvider==='treegpt');
+  document.getElementById('prov-claude_code').classList.toggle('act',curProvider==='claude_code');
+  var note=PROV_NOTES[curProvider]||'';
+  if(curProvider==='claude_code'&&!ccTokenSet)note='⚠️ 尚未填入订阅 token，点右上角「订阅 token」配置。';
+  if(curProvider==='treegpt'&&!ccTokenSet)note+='（订阅模式需先填 token）';
+  document.getElementById('prov-note').textContent=note;
+}
+async function setProvider(p){
+  if(p===curProvider)return;
+  if(p==='claude_code'&&!ccTokenSet){
+    toast('请先填入订阅 token');
+    openTokenMo();
+    return;
+  }
+  var r=await fetch('/api/config/provider',{
+    method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({provider:p})
+  });
+  if(r.ok){
+    curProvider=p;
+    renderProvider();
+    toast('已切换到'+(p==='claude_code'?'订阅模式':'中转 API')+'，网关重启中');
+  }else{
+    toast('切换失败');
+  }
+}
+function openTokenMo(){document.getElementById('token-mo').classList.add('show');document.getElementById('token-inp').value='';}
+function closeTokenMo(){document.getElementById('token-mo').classList.remove('show');}
+async function submitToken(){
+  var t=document.getElementById('token-inp').value.trim();
+  if(!t)return;
+  var r=await fetch('/api/config/cc-token',{
+    method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({token:t})
+  });
+  if(r.ok){
+    ccTokenSet=true;
+    closeTokenMo();
+    renderProvider();
+    toast('token 已保存，网关重启中');
+  }else{
+    toast('保存失败');
+  }
 }
 
 async function loadKeyStatus(){
@@ -403,6 +504,9 @@ function toast(msg){
 
 document.getElementById('key-mo').addEventListener('click',function(e){
   if(e.target===this)closeKeyMo();
+});
+document.getElementById('token-mo').addEventListener('click',function(e){
+  if(e.target===this)closeTokenMo();
 });
 
 init();

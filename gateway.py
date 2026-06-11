@@ -11,10 +11,16 @@ API_URL    = 'https://api.treegpt.cc/v1/messages'
 MODEL      = 'claude-opus-4-6'
 
 API_KEY = ''
+GW_PROVIDER = 'treegpt'
+CC_TOKEN = ''
 try:
     for line in open('/opt/frontend/.env'):
         if line.startswith('ANTHROPIC_API_KEY='):
             API_KEY = line.split('=', 1)[1].strip()
+        elif line.startswith('GW_PROVIDER='):
+            GW_PROVIDER = line.split('=', 1)[1].strip() or 'treegpt'
+        elif line.startswith('CLAUDE_CODE_OAUTH_TOKEN='):
+            CC_TOKEN = line.split('=', 1)[1].strip()
 except Exception:
     pass
 
@@ -202,6 +208,51 @@ def run_tool(name, args):
     except Exception as e:
         return '工具执行失败: ' + str(e)
 
+CC_CWD = '/opt/frontend/.claude-gw'
+
+def messages_to_text(messages):
+    lines = []
+    for m in messages:
+        who = '费奥多尔' if m['role'] == 'assistant' else '哈娅'
+        c = m['content']
+        if isinstance(c, list):
+            txt = ' '.join(b.get('text', '') for b in c
+                           if isinstance(b, dict) and b.get('type') == 'text')
+            if any(isinstance(b, dict) and b.get('type') == 'image' for b in c):
+                txt = '[发来一张图片] ' + txt
+        else:
+            txt = c
+        lines.append(who + '：' + txt)
+    return NL.join(lines)
+
+def claude_code_call(system, messages):
+    import subprocess
+    if not CC_TOKEN:
+        raise RuntimeError('未配置订阅 token，请先在 api 设置页填入')
+    os.makedirs(CC_CWD, exist_ok=True)
+    convo = messages_to_text(messages)
+    prompt = ('以下是你们最近的对话记录：' + NL + NL + convo + NL + NL
+              + '请以费奥多尔的身份自然地回复最后一条消息。只输出回复内容本身，不要任何前缀。')
+    env = dict(os.environ)
+    env['CLAUDE_CODE_OAUTH_TOKEN'] = CC_TOKEN
+    env.pop('ANTHROPIC_API_KEY', None)
+    r = subprocess.run(
+        ['claude', '-p', prompt, '--output-format', 'json',
+         '--system-prompt', system, '--max-turns', '3'],
+        capture_output=True, text=True, timeout=300, cwd=CC_CWD, env=env
+    )
+    if r.returncode != 0:
+        raise RuntimeError('claude code 调用失败: ' + (r.stderr or r.stdout)[:300])
+    d = json.loads(r.stdout)
+    if d.get('is_error'):
+        raise RuntimeError('claude code 返回错误: ' + str(d.get('result', ''))[:300])
+    return (d.get('result') or '').strip(), ''
+
+def generate_reply(system, messages):
+    if GW_PROVIDER == 'claude_code':
+        return claude_code_call(system, messages)
+    return agent_loop(system, messages)
+
 def agent_loop(system, messages, max_rounds=5):
     msgs = list(messages)
     think_parts, text_parts = [], []
@@ -230,7 +281,7 @@ def chat():
         system   = build_system()
         messages = build_messages()
 
-        text, thinking_text = agent_loop(system, messages)
+        text, thinking_text = generate_reply(system, messages)
         if not text:
             return jsonify({'error': 'AI 没有返回内容'}), 500
 
@@ -254,6 +305,26 @@ def chat():
 @app.route('/chat/stream', methods=['POST'])
 def chat_stream():
     from flask import Response, stream_with_context
+    if GW_PROVIDER == 'claude_code':
+        def gen_cc():
+            try:
+                system   = build_system()
+                messages = build_messages()
+                text, _ = claude_code_call(system, messages)
+                if text:
+                    yield 'data: ' + json.dumps({'t': 'text', 'd': text}) + SSE_END
+                    conn = get_db()
+                    conn.execute(
+                        "INSERT INTO chat_messages (author, content, thinking) VALUES ('assistant', ?, ?)",
+                        (text, '')
+                    )
+                    conn.commit()
+                    conn.close()
+                yield 'data: ' + json.dumps({'t': 'done', 'ok': bool(text)}) + SSE_END
+            except Exception as e:
+                yield 'data: ' + json.dumps({'t': 'err', 'd': str(e)}) + SSE_END
+        return Response(stream_with_context(gen_cc()), mimetype='text/event-stream',
+                        headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
     def generate():
         try:
             system   = build_system()
@@ -377,7 +448,7 @@ def push_message():
     if not msgs or msgs[-1]['role'] == 'assistant':
         msgs.append({'role': 'user', 'content': '[触发]'})
     try:
-        text, thinking = agent_loop(system, msgs)
+        text, thinking = generate_reply(system, msgs)
         if not text:
             return jsonify({'error': 'empty response'}), 500
         conn = get_db()
@@ -405,6 +476,15 @@ def test_send():
             system = build_system()
         else:
             system = '你是一个 AI 助手，请如实回答。'
+        if GW_PROVIDER == 'claude_code':
+            text, think = claude_code_call(system, [{'role': 'user', 'content': message}])
+            latency_ms = int((_time.time() - t0) * 1000)
+            return jsonify({
+                'content': text, 'thinking': think,
+                'latency_ms': latency_ms,
+                'input_tokens': 0, 'output_tokens': 0,
+                'provider': 'claude_code',
+            })
         payload = {
             'model': MODEL,
             'max_tokens': 4096,
