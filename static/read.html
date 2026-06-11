@@ -49,7 +49,7 @@ body{background:linear-gradient(160deg,var(--bg1) 0%,var(--bg2) 100%);background
 .book-prog-bar{flex:1;height:3px;background:rgba(210,185,155,0.25);border-radius:2px;overflow:hidden;}
 .book-prog-fill{height:100%;background:var(--primary-dot);border-radius:2px;}
 .book-prog-txt{font-size:10px;color:var(--hint);flex-shrink:0;}
-/* add modal */
+/* modal base */
 .mo{display:none;position:fixed;inset:0;background:rgba(0,0,0,.3);z-index:100;align-items:center;justify-content:center;padding:24px;}
 .mo.show{display:flex;}
 .mb{background:rgba(255,255,255,.97);border-radius:16px;padding:20px;width:100%;max-width:400px;}
@@ -60,6 +60,28 @@ body{background:linear-gradient(160deg,var(--bg1) 0%,var(--bg2) 100%);background
 .mb-row{display:flex;gap:8px;margin-top:4px;}
 .mb-cancel{flex:1;padding:10px;border:1px solid var(--tag-off-b);border-radius:10px;background:var(--tag-off);color:var(--muted);font-size:13px;cursor:pointer;}
 .mb-send{flex:1;padding:10px;border:none;border-radius:10px;background:var(--amber);color:#fff;font-size:13px;cursor:pointer;}
+.mb-send:disabled{opacity:.5;cursor:not-allowed;}
+/* tab bar */
+.tab-bar{display:flex;gap:3px;margin-bottom:14px;background:rgba(210,185,155,0.15);border-radius:10px;padding:3px;}
+.tab-btn{flex:1;padding:7px;border:none;border-radius:8px;background:transparent;color:var(--muted);font-size:12px;cursor:pointer;font-family:inherit;transition:all .15s;}
+.tab-btn.act{background:#fff;color:var(--text);font-weight:600;box-shadow:0 1px 4px rgba(0,0,0,.08);}
+/* drop zone */
+.drop-zone{border:1.5px dashed rgba(210,185,155,0.6);border-radius:12px;padding:28px 20px;display:flex;flex-direction:column;align-items:center;gap:6px;cursor:pointer;transition:border-color .15s,background .15s;margin-bottom:10px;}
+.drop-zone:hover,.drop-zone.drag-over{border-color:var(--amber-s);background:rgba(212,165,116,0.05);}
+.drop-zone i{font-size:28px;color:var(--hint);}
+.drop-zone .dz-main{font-size:13px;color:var(--muted);}
+.drop-zone .dz-hint{font-size:11px;color:var(--hint);}
+/* file info row */
+.file-info-row{display:flex;align-items:center;gap:8px;padding:9px 12px;background:rgba(210,185,155,0.12);border-radius:9px;margin-bottom:10px;}
+.file-info-name{font-size:12px;color:var(--text);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.file-info-size{font-size:11px;color:var(--hint);flex-shrink:0;}
+.file-remove{border:none;background:none;color:var(--hint);cursor:pointer;font-size:16px;line-height:1;padding:0 2px;flex-shrink:0;}
+/* spinner */
+@keyframes spin{to{transform:rotate(360deg)}}
+.spinner{display:inline-block;width:14px;height:14px;border:2px solid rgba(255,255,255,0.4);border-top-color:#fff;border-radius:50%;animation:spin .6s linear infinite;vertical-align:middle;margin-right:5px;}
+/* status messages */
+.up-ok{font-size:13px;color:#6a9a6a;text-align:center;padding:6px 0;}
+.up-err{font-size:13px;color:#c06060;text-align:center;padding:6px 0;}
 /* bottom nav */
 .bnav{position:fixed;bottom:0;left:50%;transform:translateX(-50%);width:100%;max-width:480px;background:rgba(253,248,239,0.95);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);border-top:1px solid var(--div);display:flex;z-index:50;padding:7px 0 calc(7px + env(safe-area-inset-bottom,0px));}
 .ni{flex:1;display:flex;flex-direction:column;align-items:center;gap:3px;text-decoration:none;border:none;background:none;cursor:pointer;color:var(--hint);font-size:10px;letter-spacing:.4px;font-family:inherit;padding:4px 0;transition:color .18s;}
@@ -88,20 +110,52 @@ body{background:linear-gradient(160deg,var(--bg1) 0%,var(--bg2) 100%);background
   <a class="ni" href="/calendar"><i class="ti ti-calendar"></i><span>calendar</span></a>
   <a class="ni act" href="/read"><i class="ti ti-book"></i><span>read</span></a>
 </nav>
+
+<!-- add book modal -->
 <div class="mo" id="add-mo">
   <div class="mb">
     <h3>添加书籍</h3>
-    <input id="add-title" placeholder="书名" />
-    <input id="add-author" placeholder="作者" />
-    <textarea id="add-text" placeholder="粘贴正文内容（导入为文本书籍）…"></textarea>
-    <div class="mb-row">
-      <button class="mb-cancel" onclick="closeAdd()">取消</button>
-      <button class="mb-send" onclick="submitAdd()">导入</button>
+    <!-- tab bar -->
+    <div class="tab-bar">
+      <button class="tab-btn act" id="tab-up-btn" onclick="switchTab('upload')">上传文件</button>
+      <button class="tab-btn" id="tab-ps-btn" onclick="switchTab('paste')">粘贴文本</button>
+    </div>
+
+    <!-- upload tab -->
+    <div id="tab-upload">
+      <div class="drop-zone" id="drop-zone" onclick="document.getElementById('file-inp').click()">
+        <i class="ti ti-upload"></i>
+        <span class="dz-main">点击或拖拽上传</span>
+        <span class="dz-hint">.epub 或 .txt</span>
+      </div>
+      <input type="file" id="file-inp" accept=".epub,.txt" style="display:none" onchange="onFileSelect(this)">
+      <div id="file-row" style="display:none" class="file-info-row">
+        <span class="file-info-name" id="file-name"></span>
+        <span class="file-info-size" id="file-size"></span>
+        <button class="file-remove" onclick="resetUpload()">×</button>
+      </div>
+      <div id="up-status"></div>
+      <div class="mb-row">
+        <button class="mb-cancel" onclick="closeAdd()">取消</button>
+        <button class="mb-send" id="up-btn" onclick="submitUpload()" disabled>上传</button>
+      </div>
+    </div>
+
+    <!-- paste tab -->
+    <div id="tab-paste" style="display:none">
+      <input id="add-title" placeholder="书名" />
+      <input id="add-author" placeholder="作者" />
+      <textarea id="add-text" placeholder="粘贴正文内容（导入为文本书籍）…"></textarea>
+      <div class="mb-row">
+        <button class="mb-cancel" onclick="closeAdd()">取消</button>
+        <button class="mb-send" onclick="submitAdd()">导入</button>
+      </div>
     </div>
   </div>
 </div>
+
 <script>
-var books=[], currentBook=null;
+var books=[], currentBook=null, selectedFile=null;
 
 function cover(c1,c2,size){
   return '<div style="width:'+size+'px;height:'+(size*4/3)+'px;border-radius:'+(size*0.14)+'px;background:linear-gradient(135deg,'+c1+','+c2+');flex-shrink:0;"></div>';
@@ -156,20 +210,111 @@ function openBook(bookId){
 function esc(s){return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
 function escId(s){return String(s||'').replace(/'/g,"\\'");}
 
-function openAdd(){document.getElementById('add-mo').classList.add('show');}
-function closeAdd(){document.getElementById('add-mo').classList.remove('show');}
+/* ---- modal ---- */
+function openAdd(){
+  resetUpload();
+  switchTab('upload');
+  document.getElementById('add-mo').classList.add('show');
+}
+function closeAdd(){
+  document.getElementById('add-mo').classList.remove('show');
+  resetUpload();
+}
+
+function switchTab(tab){
+  var isUp = tab==='upload';
+  document.getElementById('tab-upload').style.display = isUp ? '' : 'none';
+  document.getElementById('tab-paste').style.display  = isUp ? 'none' : '';
+  document.getElementById('tab-up-btn').classList.toggle('act', isUp);
+  document.getElementById('tab-ps-btn').classList.toggle('act', !isUp);
+}
+
+function resetUpload(){
+  selectedFile = null;
+  var inp = document.getElementById('file-inp');
+  if(inp) inp.value='';
+  document.getElementById('drop-zone').style.display='';
+  document.getElementById('file-row').style.display='none';
+  document.getElementById('up-status').innerHTML='';
+  var btn=document.getElementById('up-btn');
+  btn.disabled=true;
+  btn.innerHTML='上传';
+}
+
+function fmtSize(b){
+  if(b<1024) return b+' B';
+  if(b<1048576) return (b/1024).toFixed(1)+' KB';
+  return (b/1048576).toFixed(1)+' MB';
+}
+
+function onFileSelect(inp){
+  if(inp.files&&inp.files[0]) setFile(inp.files[0]);
+}
+
+function setFile(file){
+  var ext=file.name.split('.').pop().toLowerCase();
+  if(ext!=='epub'&&ext!=='txt'){alert('只支持 .epub 和 .txt 文件');return;}
+  selectedFile=file;
+  document.getElementById('drop-zone').style.display='none';
+  document.getElementById('file-name').textContent=file.name;
+  document.getElementById('file-size').textContent=fmtSize(file.size);
+  document.getElementById('file-row').style.display='flex';
+  document.getElementById('up-status').innerHTML='';
+  document.getElementById('up-btn').disabled=false;
+}
+
+async function submitUpload(){
+  if(!selectedFile) return;
+  var btn=document.getElementById('up-btn');
+  var status=document.getElementById('up-status');
+  btn.disabled=true;
+  btn.innerHTML='<span class="spinner"></span>上传中';
+  status.innerHTML='';
+  var fd=new FormData();
+  fd.append('file',selectedFile);
+  try{
+    var r=await fetch('/api/books/upload',{method:'POST',body:fd});
+    var d=await r.json();
+    if(r.ok&&d.ok){
+      status.innerHTML='<div class="up-ok">导入成功，共 '+d.chunks+' 章节</div>';
+      setTimeout(function(){closeAdd();load();},1500);
+    } else {
+      btn.disabled=false;
+      btn.innerHTML='上传';
+      status.innerHTML='<div class="up-err">'+(d.error||'上传失败')+'</div>';
+    }
+  } catch(e){
+    btn.disabled=false;
+    btn.innerHTML='上传';
+    status.innerHTML='<div class="up-err">网络错误</div>';
+  }
+}
+
+/* ---- paste text (original flow) ---- */
 async function submitAdd(){
   var title=document.getElementById('add-title').value.trim();
   var author=document.getElementById('add-author').value.trim();
   var text=document.getElementById('add-text').value.trim();
-  if(!title||!text)return;
-  // import via co-reading HTTP server
+  if(!title||!text) return;
   var r=await fetch('/reading/api/import',{
     method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({title,author,text,source:{type:'text'}})
   });
   if(r.ok){closeAdd();load();}else{alert('导入失败');}
 }
+
+/* ---- drag and drop ---- */
+(function(){
+  var dz=document.getElementById('drop-zone');
+  dz.addEventListener('dragover',function(e){e.preventDefault();dz.classList.add('drag-over');});
+  dz.addEventListener('dragleave',function(){dz.classList.remove('drag-over');});
+  dz.addEventListener('drop',function(e){
+    e.preventDefault();
+    dz.classList.remove('drag-over');
+    var files=e.dataTransfer.files;
+    if(files&&files[0]) setFile(files[0]);
+  });
+})();
 
 load();
 </script>
