@@ -390,5 +390,56 @@ def push_message():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
+
+@app.route('/test', methods=['POST'])
+def test_send():
+    import time as _time
+    data = request.get_json() or {}
+    message = (data.get('message') or '').strip()
+    inject_memory = data.get('inject_memory', True)
+    if not message:
+        return jsonify({'error': 'message is required'}), 400
+    try:
+        t0 = _time.time()
+        if inject_memory:
+            system = build_system()
+        else:
+            system = '你是一个 AI 助手，请如实回答。'
+        payload = {
+            'model': MODEL,
+            'max_tokens': 4096,
+            'thinking': {'type': 'enabled', 'budget_tokens': 5000},
+            'system': system,
+            'messages': [{'role': 'user', 'content': message}],
+        }
+        req = urllib.request.Request(
+            API_URL,
+            data=json.dumps(payload).encode(),
+            headers={
+                'Content-Type': 'application/json',
+                'x-api-key': API_KEY,
+                'anthropic-version': '2023-06-01',
+            }
+        )
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            result = json.loads(resp.read())
+        latency_ms = int((_time.time() - t0) * 1000)
+        blocks = result.get('content', [])
+        text  = NL.join(b.get('text', '') for b in blocks if b.get('type') == 'text').strip()
+        think = ''.join(b.get('thinking', '') for b in blocks if b.get('type') == 'thinking')
+        usage = result.get('usage', {})
+        return jsonify({
+            'content':       text,
+            'thinking':      think,
+            'latency_ms':    latency_ms,
+            'input_tokens':  usage.get('input_tokens', 0),
+            'output_tokens': usage.get('output_tokens', 0),
+        })
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode()
+        return jsonify({'error': f'API 错误 {e.code}', 'detail': detail}), 502
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5051, debug=False)

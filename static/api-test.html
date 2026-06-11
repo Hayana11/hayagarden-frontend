@@ -371,35 +371,20 @@ async function runTest(){
   res.classList.remove('show');
   var t0=Date.now();
   try{
-    var text,tokens=null;
-    if(useGateway){
-      await fetch('/api/chat/send',{
-        method:'POST',headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({author:'hayana',content:msg})
-      });
-      var r=await fetch('/api/gw/chat',{
-        method:'POST',headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({})
-      });
-      var d=await r.json();
-      text=d.content||d.error||'(空)';
-    }else{
-      var r=await fetch('/api/config/test-send',{
-        method:'POST',headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({message:msg})
-      });
-      var d=await r.json();
-      text=d.text||d.error||'(空)';
-      tokens=d.tokens||null;
-    }
+    var r=await fetch('/api/gw/test',{
+      method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({message:msg,inject_memory:useGateway})
+    });
+    var d=await r.json();
     var ms=Date.now()-t0;
     var modeEl=document.getElementById('res-mode');
     modeEl.textContent=useGateway?'网关':'裸调';
     modeEl.className='res-mode '+(useGateway?'gw':'raw');
     modeEl.style.display='';
-    document.getElementById('res-time').textContent=ms+' ms';
-    document.getElementById('res-tokens').textContent=tokens?tokens+' tokens':'—';
-    document.getElementById('res-txt').textContent=text;
+    document.getElementById('res-time').textContent=(d.latency_ms||ms)+' ms';
+    var tok=(d.input_tokens||d.output_tokens)?(d.input_tokens||0)+'in / '+(d.output_tokens||0)+'out':'—';
+    document.getElementById('res-tokens').textContent=tok;
+    document.getElementById('res-txt').textContent=d.content||d.error||'(空)';
     res.classList.add('show');
   }catch(e){
     document.getElementById('res-mode').style.display='none';
