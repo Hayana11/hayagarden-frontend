@@ -85,8 +85,23 @@ body{background:linear-gradient(160deg,var(--bg1) 0%,var(--bg2) 100%);background
 .test-note{font-size:11px;color:var(--hint);text-align:center;margin-top:6px;}
 .test-result{margin-top:12px;padding:12px;border-radius:12px;background:rgba(255,255,255,.5);border:1px solid var(--div);font-size:12px;line-height:1.7;display:none;}
 .test-result.show{display:block;}
-.result-meta{display:flex;gap:12px;margin-bottom:8px;font-size:11px;color:var(--muted);}
+.result-meta{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px;font-size:11px;color:var(--muted);}
 .result-txt{color:var(--text);white-space:pre-wrap;word-break:break-all;}
+/* inject toggle */
+.inject-row{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;padding:8px 0;}
+.inject-lbl{display:flex;flex-direction:column;gap:2px;}
+.inject-title{font-size:12px;color:var(--text);font-weight:500;}
+.inject-desc{font-size:10px;color:var(--hint);line-height:1.4;}
+.tog{position:relative;width:44px;height:26px;flex-shrink:0;cursor:pointer;}
+.tog input{opacity:0;width:0;height:0;position:absolute;}
+.tog-track{position:absolute;inset:0;border-radius:13px;background:rgba(185,168,148,0.35);border:1px solid rgba(210,185,155,.4);transition:background .22s,border-color .22s;}
+.tog input:checked + .tog-track{background:var(--primary-dot);border-color:var(--primary-dot);}
+.tog-thumb{position:absolute;top:3px;left:3px;width:18px;height:18px;border-radius:50%;background:#fff;box-shadow:0 1px 4px rgba(0,0,0,.18);transition:transform .22s;pointer-events:none;}
+.tog input:checked ~ .tog-thumb{transform:translateX(18px);}
+/* result mode tag */
+.res-mode{font-size:10px;padding:2px 9px;border-radius:10px;font-weight:500;letter-spacing:.3px;}
+.res-mode.gw{background:var(--primary-bg);color:var(--primary);}
+.res-mode.raw{background:rgba(210,185,155,.18);color:var(--hint);}
 .toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:rgba(58,46,40,.88);color:#fff;font-size:12px;padding:8px 18px;border-radius:20px;pointer-events:none;opacity:0;transition:opacity .25s;white-space:nowrap;z-index:999;}
 .toast.show{opacity:1;}
 </style>
@@ -147,10 +162,22 @@ body{background:linear-gradient(160deg,var(--bg1) 0%,var(--bg2) 100%);background
       <div class="card-title">test send</div>
     </div>
     <textarea class="test-ta" id="test-ta" placeholder="输入测试消息…">你好，这是一条测试消息。请用一句话回复。</textarea>
+    <!-- inject toggle -->
+    <div class="inject-row">
+      <div class="inject-lbl">
+        <span class="inject-title">注入记忆</span>
+        <span class="inject-desc" id="inject-desc">走网关，注入人设与记忆</span>
+      </div>
+      <label class="tog">
+        <input type="checkbox" id="inject-tog" checked onchange="onToggleInject()">
+        <span class="tog-track"></span>
+        <span class="tog-thumb"></span>
+      </label>
+    </div>
     <button class="test-send" id="test-btn" onclick="runTest()">发送测试</button>
-    <div class="test-note">不走网关 · 不注入记忆 · 不存入聊天记录</div>
     <div class="test-result" id="test-result">
       <div class="result-meta">
+        <span class="res-mode" id="res-mode" style="display:none"></span>
         <span id="res-time">—</span>
         <span id="res-tokens">—</span>
       </div>
@@ -327,6 +354,14 @@ async function submitKey(){
   else{toast('保存失败');}
 }
 
+var useGateway=true;
+function onToggleInject(){
+  useGateway=document.getElementById('inject-tog').checked;
+  document.getElementById('inject-desc').textContent=useGateway
+    ?'走网关，注入人设与记忆'
+    :'裸调 API，无人设无记忆';
+}
+
 async function runTest(){
   var msg=document.getElementById('test-ta').value.trim();
   if(!msg)return;
@@ -336,18 +371,38 @@ async function runTest(){
   res.classList.remove('show');
   var t0=Date.now();
   try{
-    // call treegpt directly via our backend proxy (to avoid CORS)
-    var r=await fetch('/api/config/test-send',{
-      method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({message:msg})
-    });
-    var d=await r.json();
+    var text,tokens=null;
+    if(useGateway){
+      await fetch('/api/chat/send',{
+        method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({author:'hayana',content:msg})
+      });
+      var r=await fetch('/api/gw/chat',{
+        method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({})
+      });
+      var d=await r.json();
+      text=d.content||d.error||'(空)';
+    }else{
+      var r=await fetch('/api/config/test-send',{
+        method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({message:msg})
+      });
+      var d=await r.json();
+      text=d.text||d.error||'(空)';
+      tokens=d.tokens||null;
+    }
     var ms=Date.now()-t0;
+    var modeEl=document.getElementById('res-mode');
+    modeEl.textContent=useGateway?'网关':'裸调';
+    modeEl.className='res-mode '+(useGateway?'gw':'raw');
+    modeEl.style.display='';
     document.getElementById('res-time').textContent=ms+' ms';
-    document.getElementById('res-tokens').textContent=(d.tokens||'—')+' tokens';
-    document.getElementById('res-txt').textContent=d.text||d.error||'(空)';
+    document.getElementById('res-tokens').textContent=tokens?tokens+' tokens':'—';
+    document.getElementById('res-txt').textContent=text;
     res.classList.add('show');
   }catch(e){
+    document.getElementById('res-mode').style.display='none';
     document.getElementById('res-txt').textContent='请求失败: '+e.message;
     res.classList.add('show');
   }
