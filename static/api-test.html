@@ -1,0 +1,371 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+<title>api · 连接测试</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@latest/tabler-icons.min.css">
+<style>
+*{margin:0;padding:0;box-sizing:border-box;}
+:root{
+  --bg1:#fdf8ef;--bg2:#f7f0e4;
+  --card:rgba(255,255,255,0.65);--card-b:rgba(255,255,255,0.9);
+  --text:#3a2e28;--muted:#9a8a7a;--hint:#b8a090;
+  --primary-bg:rgba(124,106,138,0.15);--primary:#5a4a6a;--primary-dot:#7c6a8a;
+  --amber:rgba(212,165,116,0.85);--amber-s:#d4a574;
+  --div:rgba(210,185,155,0.2);
+  --tag-off:rgba(255,255,255,0.6);--tag-off-b:rgba(210,185,155,0.3);
+  --green:#52a06e;--green-bg:rgba(82,160,110,.12);
+  --orange:#c08840;--orange-bg:rgba(192,136,64,.12);
+}
+html,body{height:100%;overflow:hidden;}
+body{background:linear-gradient(160deg,var(--bg1) 0%,var(--bg2) 100%);background-attachment:fixed;color:var(--text);font-family:-apple-system,'PingFang SC','Noto Sans SC',sans-serif;max-width:480px;margin:0 auto;display:flex;flex-direction:column;}
+.hd{flex-shrink:0;display:flex;align-items:center;justify-content:space-between;padding:52px 18px 12px;background:rgba(253,248,239,0.88);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);border-bottom:1px solid var(--div);}
+.hd-left{display:flex;align-items:center;gap:10px;}
+.back{background:none;border:none;color:var(--muted);font-size:20px;cursor:pointer;padding:4px;display:flex;}
+.hd-title{font-family:Georgia,'Times New Roman',serif;font-size:18px;color:var(--text);font-weight:700;}
+.hd-sub{font-size:11px;color:var(--hint);margin-top:1px;letter-spacing:.4px;}
+.conn-badge{display:flex;align-items:center;gap:6px;font-size:12px;}
+.conn-dot{width:8px;height:8px;border-radius:50%;background:#aaa;flex-shrink:0;transition:background .3s;}
+.conn-dot.ok{background:var(--green);}
+.conn-dot.err{background:#c07070;}
+.conn-txt{color:var(--muted);}
+.scroll{flex:1;overflow-y:auto;padding:16px 16px 40px;}
+.scroll::-webkit-scrollbar{display:none;}
+/* card */
+.card{background:var(--card);border:1px solid var(--card-b);border-radius:16px;backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);padding:16px;margin-bottom:14px;}
+.card-hd{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;}
+.card-title{font-size:11px;letter-spacing:2px;color:var(--hint);text-transform:uppercase;}
+.card-action{background:none;border:1px solid var(--tag-off-b);color:var(--muted);font-size:11px;padding:4px 10px;border-radius:20px;cursor:pointer;font-family:inherit;transition:all .15s;}
+.card-action:hover{border-color:var(--amber-s);color:var(--amber-s);}
+.kv{display:flex;justify-content:space-between;align-items:center;padding:5px 0;border-bottom:1px solid var(--div);}
+.kv:last-child{border-bottom:none;}
+.kv-key{font-size:12px;color:var(--muted);}
+.kv-val{font-size:13px;color:var(--text);font-weight:500;font-family:ui-monospace,'SF Mono',monospace;}
+.kv-val.dim{color:var(--hint);font-weight:400;}
+.latency{display:inline-flex;align-items:center;gap:4px;}
+.lat-dot{width:6px;height:6px;border-radius:50%;}
+/* model display */
+.model-row{display:flex;align-items:center;gap:10px;}
+.model-name{font-size:14px;color:var(--text);font-weight:600;flex:1;font-family:ui-monospace,'SF Mono',monospace;}
+.pencil-btn{background:none;border:none;color:var(--hint);font-size:17px;cursor:pointer;padding:3px;display:flex;transition:color .15s;}
+.pencil-btn:hover{color:var(--amber-s);}
+.model-edit-row{display:flex;gap:8px;margin-top:8px;}
+.model-inp{flex:1;padding:8px 11px;border-radius:10px;border:1.5px solid var(--amber-s);background:rgba(255,255,255,.75);font-size:13px;font-family:ui-monospace,'SF Mono',monospace;color:var(--text);outline:none;}
+.save-btn{padding:8px 14px;border:none;border-radius:10px;background:var(--amber);color:#fff;font-size:12px;cursor:pointer;font-family:inherit;}
+.cancel-btn{padding:8px 12px;border:1px solid var(--tag-off-b);border-radius:10px;background:var(--tag-off);color:var(--muted);font-size:12px;cursor:pointer;}
+/* models list */
+.model-item{display:flex;align-items:center;gap:10px;padding:9px 0;border-bottom:1px solid var(--div);}
+.model-item:last-child{border-bottom:none;}
+.mi-dot{width:7px;height:7px;border-radius:50%;flex-shrink:0;}
+.mi-dot.active{background:var(--primary-dot);}
+.mi-dot.avail{background:var(--green);}
+.mi-dot.untested{background:var(--orange);}
+.mi-name{flex:1;font-size:12px;font-family:ui-monospace,'SF Mono',monospace;color:var(--text);line-height:1.4;}
+.mi-badge{font-size:10px;color:var(--muted);padding:2px 7px;border-radius:8px;background:rgba(210,185,155,.15);}
+.mi-switch{font-size:11px;padding:4px 10px;border-radius:14px;border:1px solid rgba(124,106,138,.25);background:var(--primary-bg);color:var(--primary);cursor:pointer;font-family:inherit;transition:all .15s;}
+.mi-switch:hover{background:var(--primary);color:#fff;}
+.mi-switch.done{background:var(--green-bg);border-color:var(--green);color:var(--green);cursor:default;}
+/* key modal */
+.mo{display:none;position:fixed;inset:0;background:rgba(0,0,0,.3);z-index:100;align-items:flex-end;justify-content:center;padding-bottom:0;}
+.mo.show{display:flex;}
+.mb{background:rgba(255,255,255,.97);border-radius:18px 18px 0 0;padding:20px 18px calc(20px + env(safe-area-inset-bottom,0px));width:100%;max-width:480px;}
+.mb h4{font-size:15px;font-weight:700;color:var(--text);margin-bottom:12px;}
+.mb input{width:100%;padding:10px 12px;border-radius:10px;border:1px solid var(--tag-off-b);background:rgba(255,255,255,.7);font-size:13px;font-family:ui-monospace,'SF Mono',monospace;color:var(--text);outline:none;margin-bottom:10px;}
+.mb input:focus{border-color:rgba(212,165,116,.6);}
+.mb-note{font-size:11px;color:var(--hint);margin-bottom:12px;line-height:1.6;}
+.mb-row{display:flex;gap:8px;}
+.mb-cancel{flex:1;padding:10px;border:1px solid var(--tag-off-b);border-radius:10px;background:var(--tag-off);color:var(--muted);font-size:13px;cursor:pointer;}
+.mb-send{flex:1;padding:10px;border:none;border-radius:10px;background:var(--amber);color:#fff;font-size:13px;cursor:pointer;}
+/* test area */
+.test-ta{width:100%;padding:11px 13px;border-radius:12px;border:1px solid rgba(210,185,155,.25);background:rgba(255,255,255,.6);font-size:13px;font-family:inherit;color:var(--text);resize:none;outline:none;min-height:80px;line-height:1.6;margin-bottom:10px;}
+.test-ta:focus{border-color:rgba(212,165,116,.5);}
+.test-send{width:100%;padding:11px;border:none;border-radius:11px;background:var(--primary-dot);color:#fff;font-size:13px;cursor:pointer;font-family:inherit;transition:opacity .15s;}
+.test-send:disabled{opacity:.5;cursor:default;}
+.test-note{font-size:11px;color:var(--hint);text-align:center;margin-top:6px;}
+.test-result{margin-top:12px;padding:12px;border-radius:12px;background:rgba(255,255,255,.5);border:1px solid var(--div);font-size:12px;line-height:1.7;display:none;}
+.test-result.show{display:block;}
+.result-meta{display:flex;gap:12px;margin-bottom:8px;font-size:11px;color:var(--muted);}
+.result-txt{color:var(--text);white-space:pre-wrap;word-break:break-all;}
+.toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:rgba(58,46,40,.88);color:#fff;font-size:12px;padding:8px 18px;border-radius:20px;pointer-events:none;opacity:0;transition:opacity .25s;white-space:nowrap;z-index:999;}
+.toast.show{opacity:1;}
+</style>
+</head>
+<body>
+<div class="hd">
+  <div class="hd-left">
+    <button class="back" onclick="history.back()"><i class="ti ti-arrow-left"></i></button>
+    <div><div class="hd-title">api</div><div class="hd-sub">连接状态与测试</div></div>
+  </div>
+  <div class="conn-badge">
+    <div class="conn-dot" id="conn-dot"></div>
+    <span class="conn-txt" id="conn-txt">检测中</span>
+  </div>
+</div>
+<div class="scroll">
+
+  <!-- Card 1: Key -->
+  <div class="card">
+    <div class="card-hd">
+      <div class="card-title">current key</div>
+      <button class="card-action" onclick="openKeyMo()">更换</button>
+    </div>
+    <div class="kv"><span class="kv-key">key</span><span class="kv-val" id="k-key">—</span></div>
+    <div class="kv"><span class="kv-key">来源</span><span class="kv-val dim" id="k-src">treegpt.cc</span></div>
+    <div class="kv"><span class="kv-key">今日消息</span><span class="kv-val" id="k-msgs">—</span></div>
+    <div class="kv"><span class="kv-key">响应延迟</span><span class="kv-val" id="k-lat">—</span></div>
+  </div>
+
+  <!-- Card 2: Model -->
+  <div class="card">
+    <div class="card-hd">
+      <div class="card-title">current model</div>
+    </div>
+    <div class="model-row" id="model-display-row">
+      <span class="model-name" id="cur-model-name">—</span>
+      <button class="pencil-btn" onclick="startModelEdit()" title="修改"><i class="ti ti-pencil"></i></button>
+    </div>
+    <div class="model-edit-row" id="model-edit-row" style="display:none;">
+      <input class="model-inp" id="model-inp" placeholder="输入模型名…">
+      <button class="save-btn" onclick="saveModel()">保存</button>
+      <button class="cancel-btn" onclick="cancelModelEdit()">取消</button>
+    </div>
+    <div id="model-msg" style="font-size:11px;color:var(--green);margin-top:6px;display:none;">已切换，网关重启中…</div>
+  </div>
+
+  <!-- Card 3: Available models -->
+  <div class="card">
+    <div class="card-hd">
+      <div class="card-title">available models</div>
+    </div>
+    <div id="models-list"><div style="color:var(--hint);font-size:12px;text-align:center;padding:8px 0;">加载中…</div></div>
+  </div>
+
+  <!-- Section 4: Test send -->
+  <div class="card">
+    <div class="card-hd">
+      <div class="card-title">test send</div>
+    </div>
+    <textarea class="test-ta" id="test-ta" placeholder="输入测试消息…">你好，这是一条测试消息。请用一句话回复。</textarea>
+    <button class="test-send" id="test-btn" onclick="runTest()">发送测试</button>
+    <div class="test-note">不走网关 · 不注入记忆 · 不存入聊天记录</div>
+    <div class="test-result" id="test-result">
+      <div class="result-meta">
+        <span id="res-time">—</span>
+        <span id="res-tokens">—</span>
+      </div>
+      <div class="result-txt" id="res-txt"></div>
+    </div>
+  </div>
+
+</div>
+
+<!-- Key modal -->
+<div class="mo" id="key-mo">
+  <div class="mb">
+    <h4>更换 API Key</h4>
+    <div class="mb-note">新 key 将写入 .env 并重启网关（约 3 秒后生效）。</div>
+    <input id="key-inp" type="password" placeholder="sk-ant-…">
+    <div class="mb-row">
+      <button class="mb-cancel" onclick="closeKeyMo()">取消</button>
+      <button class="mb-send" onclick="submitKey()">保存重启</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+var currentModel='', currentKey='', rawKeyLen=0;
+
+async function init(){
+  loadKeyStatus();
+  loadModel();
+  pingLatency();
+  loadModels();
+}
+
+async function loadKeyStatus(){
+  var r=await fetch('/api/config/key-status');
+  var d=await r.json();
+  document.getElementById('k-key').textContent=d.masked_key||'—';
+  document.getElementById('k-msgs').textContent=d.today_msgs+' 条';
+  document.getElementById('k-src').textContent=d.source||'treegpt.cc';
+  rawKeyLen=d.raw_len||0;
+  currentKey=d.masked_key||'';
+}
+
+async function loadModel(){
+  var r=await fetch('/api/config/model');
+  var d=await r.json();
+  currentModel=d.model||'';
+  document.getElementById('cur-model-name').textContent=currentModel;
+  document.getElementById('model-inp').value=currentModel;
+}
+
+async function pingLatency(){
+  var dot=document.getElementById('conn-dot');
+  var txt=document.getElementById('conn-txt');
+  var latEl=document.getElementById('k-lat');
+  var t0=Date.now();
+  try{
+    var r=await fetch('/api/config/key-status');
+    if(!r.ok)throw new Error('err');
+    var ms=Date.now()-t0;
+    dot.className='conn-dot ok';
+    txt.textContent='connected';
+    latEl.innerHTML='<span style="color:var(--green)">'+ms+' ms</span>';
+  }catch(e){
+    dot.className='conn-dot err';
+    txt.textContent='error';
+    latEl.textContent='超时';
+  }
+}
+
+async function loadModels(){
+  var el=document.getElementById('models-list');
+  try{
+    // fetch model list from treegpt.cc (OpenAI-compatible)
+    var keyR=await fetch('/api/config/key-status');
+    var kd=await keyR.json();
+    // We use a backend proxy approach – call treegpt via the test endpoint
+    // Actually just show known models since treegpt may not have /v1/models
+    renderKnownModels();
+  }catch(e){
+    renderKnownModels();
+  }
+}
+
+var KNOWN_MODELS=[
+  {id:'claude-opus-4-8',label:'Claude Opus 4.8',note:''},
+  {id:'claude-opus-4-6',label:'Claude Opus 4.6',note:''},
+  {id:'claude-sonnet-4-6',label:'Claude Sonnet 4.6',note:''},
+  {id:'claude-haiku-4-5-20251001',label:'Claude Haiku 4.5',note:''},
+  {id:'claude-fable-5',label:'Claude Fable 5',note:''},
+  {id:'deepseek-v4-flash',label:'DeepSeek v4 Flash',note:'保洁阿姨专用',locked:true},
+];
+
+function renderKnownModels(){
+  var el=document.getElementById('models-list');
+  el.innerHTML=KNOWN_MODELS.map(function(m){
+    var isActive=m.id===currentModel;
+    var dotCls=isActive?'active':'avail';
+    var right='';
+    if(m.locked){
+      right='<span class="mi-badge">'+m.note+'</span>';
+    } else if(isActive){
+      right='<span class="mi-badge" style="background:var(--primary-bg);color:var(--primary);">使用中</span>';
+    } else {
+      right='<button class="mi-switch" onclick="switchModel(\''+m.id+'\')">切换</button>';
+    }
+    return '<div class="model-item">'
+      +'<div class="mi-dot '+dotCls+'"></div>'
+      +'<div class="mi-name">'+m.label+'<br><span style="color:var(--hint);font-size:10px;">'+m.id+'</span></div>'
+      +right+'</div>';
+  }).join('');
+}
+
+async function switchModel(modelId){
+  var btn=event.target;
+  btn.disabled=true;btn.textContent='切换中…';
+  var r=await fetch('/api/config/model',{
+    method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({model:modelId})
+  });
+  if(r.ok){
+    currentModel=modelId;
+    btn.className='mi-switch done';btn.textContent='已切换';
+    document.getElementById('cur-model-name').textContent=modelId;
+    toast('已切换到 '+modelId+'，网关重启中');
+    setTimeout(function(){renderKnownModels();},2000);
+  } else {
+    btn.disabled=false;btn.textContent='切换';
+    toast('切换失败');
+  }
+}
+
+function startModelEdit(){
+  document.getElementById('model-edit-row').style.display='flex';
+  document.getElementById('model-display-row').style.display='none';
+  document.getElementById('model-inp').focus();
+}
+function cancelModelEdit(){
+  document.getElementById('model-edit-row').style.display='none';
+  document.getElementById('model-display-row').style.display='flex';
+}
+async function saveModel(){
+  var v=document.getElementById('model-inp').value.trim();
+  if(!v)return;
+  var r=await fetch('/api/config/model',{
+    method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({model:v})
+  });
+  if(r.ok){
+    currentModel=v;
+    document.getElementById('cur-model-name').textContent=v;
+    cancelModelEdit();
+    var msg=document.getElementById('model-msg');
+    msg.style.display='block';
+    setTimeout(function(){msg.style.display='none';},3000);
+    toast('模型已更新');
+    renderKnownModels();
+  } else {
+    toast('保存失败');
+  }
+}
+
+function openKeyMo(){document.getElementById('key-mo').classList.add('show');document.getElementById('key-inp').value='';}
+function closeKeyMo(){document.getElementById('key-mo').classList.remove('show');}
+async function submitKey(){
+  var k=document.getElementById('key-inp').value.trim();
+  if(!k)return;
+  var r=await fetch('/api/config/key',{
+    method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({key:k})
+  });
+  if(r.ok){closeKeyMo();toast('Key 已更新，网关重启中');setTimeout(loadKeyStatus,3000);}
+  else{toast('保存失败');}
+}
+
+async function runTest(){
+  var msg=document.getElementById('test-ta').value.trim();
+  if(!msg)return;
+  var btn=document.getElementById('test-btn');
+  btn.disabled=true;btn.textContent='发送中…';
+  var res=document.getElementById('test-result');
+  res.classList.remove('show');
+  var t0=Date.now();
+  try{
+    // call treegpt directly via our backend proxy (to avoid CORS)
+    var r=await fetch('/api/config/test-send',{
+      method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({message:msg})
+    });
+    var d=await r.json();
+    var ms=Date.now()-t0;
+    document.getElementById('res-time').textContent=ms+' ms';
+    document.getElementById('res-tokens').textContent=(d.tokens||'—')+' tokens';
+    document.getElementById('res-txt').textContent=d.text||d.error||'(空)';
+    res.classList.add('show');
+  }catch(e){
+    document.getElementById('res-txt').textContent='请求失败: '+e.message;
+    res.classList.add('show');
+  }
+  btn.disabled=false;btn.textContent='发送测试';
+}
+
+function toast(msg){
+  var el=document.getElementById('toast');
+  el.textContent=msg;el.classList.add('show');
+  clearTimeout(el._t);
+  el._t=setTimeout(function(){el.classList.remove('show');},2200);
+}
+
+document.getElementById('key-mo').addEventListener('click',function(e){
+  if(e.target===this)closeKeyMo();
+});
+
+init();
+</script>
+</body>
+</html>

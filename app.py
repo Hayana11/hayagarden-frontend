@@ -1,4 +1,4 @@
-import os, json, sqlite3, datetime, base64, uuid, threading
+import os, re, json, sqlite3, datetime, base64, uuid, threading
 from flask import Flask, request, jsonify, send_from_directory
 
 app = Flask(__name__, static_folder='static')
@@ -615,6 +615,122 @@ def read_page():
 @app.route('/reader')
 def reader_page():
     return send_from_directory('/opt/frontend/static', 'reader.html')
+
+
+# ── API config routes ──
+
+@app.route('/api/config/model', methods=['GET'])
+def config_get_model():
+    try:
+        gw = open('/opt/frontend/gateway.py').read()
+        m = re.search(r"^MODEL\s*=\s*['\"]([^'\"]+)['\"]", gw, re.MULTILINE)
+        model = m.group(1) if m else 'unknown'
+    except Exception:
+        model = 'unknown'
+    return jsonify({'model': model})
+
+@app.route('/api/config/model', methods=['POST'])
+def config_set_model():
+    import subprocess
+    data = request.get_json()
+    new_model = (data.get('model') or '').strip()
+    if not new_model:
+        return jsonify({'error': 'empty model'}), 400
+    try:
+        gw = open('/opt/frontend/gateway.py').read()
+        gw2 = re.sub(r"^MODEL\s*=\s*['\"][^'\"]+['\"]",
+                     f"MODEL      = '{new_model}'", gw, flags=re.MULTILINE)
+        open('/opt/frontend/gateway.py', 'w').write(gw2)
+        subprocess.run(['systemctl', 'restart', 'frontend-gw'], timeout=15)
+        return jsonify({'ok': True})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/config/key-status', methods=['GET'])
+def config_key_status():
+    import datetime as _dt
+    key = ''
+    try:
+        for line in open('/opt/frontend/.env'):
+            if line.startswith('ANTHROPIC_API_KEY='):
+                key = line.split('=', 1)[1].strip()
+    except Exception:
+        pass
+    masked = (key[:8] + '···' + key[-4:]) if len(key) > 12 else '***'
+    today = (_dt.datetime.utcnow() + _dt.timedelta(hours=8)).strftime('%Y-%m-%d')
+    conn = get_db()
+    row = conn.execute(
+        "SELECT count(*) FROM chat_messages WHERE created_at >= ? AND created_at < ?",
+        (today + ' 00:00:00', today + ' 23:59:59')
+    ).fetchone()
+    conn.close()
+    return jsonify({'masked_key': masked, 'today_msgs': row[0] if row else 0,
+                    'source': 'treegpt.cc', 'raw_len': len(key)})
+
+@app.route('/api/config/key', methods=['POST'])
+def config_set_key():
+    import subprocess
+    data = request.get_json()
+    new_key = (data.get('key') or '').strip()
+    if not new_key:
+        return jsonify({'error': 'empty key'}), 400
+    try:
+        env = open('/opt/frontend/.env').read()
+        env2 = re.sub(r'^ANTHROPIC_API_KEY=.*$',
+                      f'ANTHROPIC_API_KEY={new_key}', env, flags=re.MULTILINE)
+        open('/opt/frontend/.env', 'w').write(env2)
+        subprocess.run(['systemctl', 'restart', 'frontend-gw'], timeout=15)
+        return jsonify({'ok': True})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/config/test-send', methods=['POST'])
+def config_test_send():
+    import urllib.request as _ur, urllib.error as _ue, json as _j
+    data = request.get_json()
+    msg = (data.get('message') or '').strip()
+    if not msg:
+        return jsonify({'error': 'empty'}), 400
+    key = ''
+    try:
+        for line in open('/opt/frontend/.env'):
+            if line.startswith('ANTHROPIC_API_KEY='):
+                key = line.split('=', 1)[1].strip()
+    except Exception:
+        pass
+    try:
+        gw = open('/opt/frontend/gateway.py').read()
+        import re as _re
+        m = _re.search(r"^MODEL\s*=\s*['\"]([^'\"]+)['\"]", gw, _re.MULTILINE)
+        model = m.group(1) if m else 'claude-opus-4-6'
+    except Exception:
+        model = 'claude-opus-4-6'
+    payload = _j.dumps({
+        'model': model, 'max_tokens': 512,
+        'messages': [{'role': 'user', 'content': msg}]
+    }).encode()
+    req = _ur.Request(
+        'https://api.treegpt.cc/v1/messages', data=payload,
+        headers={'Content-Type': 'application/json',
+                 'x-api-key': key, 'anthropic-version': '2023-06-01'}
+    )
+    try:
+        with _ur.urlopen(req, timeout=60) as resp:
+            result = _j.loads(resp.read())
+        text = ''.join(b.get('text','') for b in result.get('content',[]) if b.get('type')=='text')
+        usage = result.get('usage',{})
+        tokens = usage.get('input_tokens',0) + usage.get('output_tokens',0)
+        return jsonify({'text': text, 'tokens': tokens, 'model': model})
+    except _ue.HTTPError as e:
+        body = e.read().decode(errors='replace')
+        return jsonify({'error': f'HTTP {e.code}: {body[:200]}'}), 502
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api-test')
+def api_test_page():
+    return send_from_directory('/opt/frontend/static', 'api-test.html')
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5050, debug=False)
