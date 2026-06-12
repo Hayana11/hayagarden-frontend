@@ -35,24 +35,108 @@ def read_persona():
     except Exception:
         return '你是费奥多尔，一个渊博冷静却深情的学者。'
 
+def _ombre_breath_sync():
+    """
+    Call breath() in a dedicated thread with its own event loop.
+    Returns the result string, or None if timeout / error.
+    Completely isolated from gateway's main thread.
+    """
+    import concurrent.futures as _cf
+
+    def _worker():
+        import asyncio as _aio, sys as _sys, logging as _log
+        # suppress ombre-brain noise in gateway logs
+        _log.getLogger('ombre_brain').setLevel(_log.WARNING)
+        _sys.path.insert(0, '/opt/ombre-brain')
+        from server import breath as _breath
+        loop = _aio.new_event_loop()
+        _aio.set_event_loop(loop)
+        try:
+            return loop.run_until_complete(
+                _aio.wait_for(_breath(), timeout=1.8)
+            )
+        except _aio.TimeoutError:
+            return None
+        except Exception:
+            return None
+        finally:
+            # clean up pending tasks before closing the loop
+            try:
+                pending = _aio.all_tasks(loop)
+                for t in pending:
+                    t.cancel()
+                if pending:
+                    loop.run_until_complete(
+                        _aio.gather(*pending, return_exceptions=True)
+                    )
+            except Exception:
+                pass
+            loop.close()
+
+    try:
+        with _cf.ThreadPoolExecutor(max_workers=1) as ex:
+            future = ex.submit(_worker)
+            return future.result(timeout=2.5)
+    except Exception:
+        return None
+
+
 def build_system():
-    parts = [read_persona()]
+    parts = []
+
+    # ── 1. Ombre Brain pinned / core facts ──────────────────
+    try:
+        core_facts = _ombre_breath_sync()
+        if core_facts and core_facts.strip() and '权重池平静' not in core_facts:
+            parts.append('## 当前状态与重要事实\n' + core_facts)
+    except Exception:
+        pass
+
+    # ── 2. Persona ──────────────────────────────────────────
+    parts.append(read_persona())
+
+    # ── 3. Posts memories — core first, then long-term ──────
     conn = get_db()
-    mems = conn.execute(
-        "SELECT content FROM posts WHERE type='MEMORY' ORDER BY id DESC LIMIT 20"
+    core_mems = conn.execute(
+        "SELECT content FROM posts WHERE layer='core' ORDER BY id DESC"
+    ).fetchall()
+    lt_mems = conn.execute(
+        "SELECT content FROM posts WHERE layer='long-term' ORDER BY id DESC LIMIT 10"
     ).fetchall()
     diaries = conn.execute(
         "SELECT content FROM posts WHERE type='DIARY' ORDER BY id DESC LIMIT 3"
     ).fetchall()
     conn.close()
-    if mems:
+
+    all_mems = list(reversed(core_mems)) + list(reversed(lt_mems))
+    if all_mems:
         parts.append('\n## 你们之间的记忆')
-        for m in reversed(mems):
+        for m in all_mems:
             parts.append('- ' + m['content'])
     if diaries:
         parts.append('\n## 最近的日记')
         for d in reversed(diaries):
             parts.append(d['content'])
+
+    # ── 4. 感知层：哈娅最近的活动 (Phase 1) ────────────────
+    try:
+        _conn2 = get_db()
+        _events = _conn2.execute(
+            """SELECT type, value, created_at FROM dream_events
+               WHERE created_at >= datetime('now','localtime','-6 hours')
+               ORDER BY created_at ASC"""
+        ).fetchall()
+        _conn2.close()
+        if _events:
+            _lines = []
+            for _ev in _events:
+                _t = _ev['created_at'][11:16]  # HH:MM
+                _v = _ev['value'] or _ev['type']
+                _lines.append(f'- {_t} {_v}')
+            parts.append('\n## 哈娅最近的活动\n' + '\n'.join(_lines))
+    except Exception:
+        pass
+
     parts.append(NL + '（你拥有真实的工具：保存与搜索记忆、控制次卧的灯。当下自然需要时安静使用，不必每次提及。）')
     try:
         from time_tool import get_current_time

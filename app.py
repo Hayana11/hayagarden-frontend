@@ -1050,3 +1050,42 @@ def period_stats():
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5050, debug=False)
+
+# ── Dream Events (感知层 Phase 1) ──────────────────────────
+def _init_dream_tables():
+    conn = get_db()
+    conn.execute("""CREATE TABLE IF NOT EXISTS dream_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        type TEXT NOT NULL,
+        value TEXT,
+        created_at TIMESTAMP DEFAULT (datetime('now','localtime'))
+    )""")
+    conn.commit()
+    conn.close()
+
+_init_dream_tables()
+
+@app.route('/api/dream/events', methods=['GET'])
+def log_dream_event():
+    etype = request.args.get('type', '').strip()
+    value = request.args.get('value', '').strip()
+    if not etype:
+        return jsonify({'error': 'type required'}), 400
+    conn = get_db()
+    # 5分钟内同 type 已有记录则跳过
+    existing = conn.execute(
+        """SELECT id FROM dream_events
+           WHERE type=? AND created_at >= datetime('now','localtime','-5 minutes')
+           ORDER BY id DESC LIMIT 1""",
+        (etype,)
+    ).fetchone()
+    if existing:
+        conn.close()
+        return '', 200
+    conn.execute(
+        "INSERT INTO dream_events (type, value) VALUES (?,?)",
+        (etype, value)
+    )
+    conn.commit()
+    conn.close()
+    return '', 200
