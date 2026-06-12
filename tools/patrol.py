@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Server patrol script — reads logs, asks DeepSeek to analyse, stores result."""
 
-import os, sys, sqlite3, subprocess, urllib.request, urllib.error, json
+import sqlite3, subprocess, urllib.request, json
 from datetime import datetime
 
 DB_PATH  = '/opt/frontend/memories.db'
@@ -9,19 +9,21 @@ ENV_PATH = '/opt/frontend/.env'
 API_URL  = 'https://api.deepseek.com/v1/chat/completions'
 MODEL    = 'deepseek-v4-flash'
 
+SERVICES = ['frontend', 'frontend-gw', 'mcp-http', 'ombre-brain', 'mijia-light', 'co-reading']
+
 SYSTEM_PROMPT = (
     "你是一个服务器巡逻员，分析以下日志，找出错误、异常和需要关注的问题。"
     "用中文简洁描述，每个问题一行，格式：[级别] 描述。"
     "级别：❌严重 ⚠️警告 ℹ️信息。如果一切正常就回复：✅ 一切正常"
 )
 
-def load_key():
+def _load_key():
     for line in open(ENV_PATH):
         if line.startswith('DEEPSEEK_API_KEY='):
             return line.split('=', 1)[1].strip()
     raise RuntimeError("DEEPSEEK_API_KEY not found in .env")
 
-def tail_file(path, n):
+def _tail_file(path, n):
     try:
         r = subprocess.run(['tail', '-n', str(n), path],
                            capture_output=True, text=True, timeout=5)
@@ -29,11 +31,10 @@ def tail_file(path, n):
     except Exception as e:
         return f'(error reading {path}: {e})'
 
-def tail_journal(unit, n):
+def _tail_journal(unit, n):
     try:
         r = subprocess.run(
-            ['journalctl', '-u', unit, '-n', str(n),
-             '--no-pager', '--output=short'],
+            ['journalctl', '-u', unit, '-n', str(n), '--no-pager', '--output=short'],
             capture_output=True, text=True, timeout=6
         )
         lines = [l for l in r.stdout.splitlines() if not l.startswith('--')]
@@ -41,7 +42,19 @@ def tail_journal(unit, n):
     except Exception as e:
         return f'(error reading journal {unit}: {e})'
 
-def ask_deepseek(api_key, user_content):
+def _check_services():
+    """直接用 systemctl is-active 检查每个服务——不依赖时间戳推断。"""
+    results = {}
+    for svc in SERVICES:
+        try:
+            r = subprocess.run(['systemctl', 'is-active', svc],
+                               capture_output=True, text=True, timeout=3)
+            results[svc] = r.stdout.strip()   # 'active' / 'inactive' / 'failed'
+        except Exception as e:
+            results[svc] = f'error({e})'
+    return results
+
+def _ask_deepseek(api_key, user_content):
     payload = json.dumps({
         'model': MODEL,
         'messages': [
@@ -57,40 +70,65 @@ def ask_deepseek(api_key, user_content):
                  'Authorization': f'Bearer {api_key}'}
     )
     with urllib.request.urlopen(req, timeout=60) as resp:
-        data = json.loads(resp.read())
-    return data['choices'][0]['message']['content'].strip()
+        return json.loads(resp.read())['choices'][0]['message']['content'].strip()
 
 def run_patrol():
-    api_key = load_key()
+    api_key = _load_key()
+    now     = datetime.now().strftime('%Y-%m-%d %H:%M')
 
-    gw_log    = tail_journal('frontend-gw.service', 100)
-    brain_log = tail_file('/var/log/ombre-brain.log', 100)
-    nginx_log = tail_file('/var/log/nginx/error.log', 50)
+    # ── 1. 服务健康检查（直接判断，不依赖 AI）──────────────
+    svc_status  = _check_services()
+    down_svcs   = [s for s, st in svc_status.items() if st != 'active']
+    svc_summary = '服务状态：' + ' | '.join(f'{s}={st}' for s, st in svc_status.items())
 
+    # ── 2. 日志收集 + DeepSeek 分析 ─────────────────────────
     user_content = (
-        "=== frontend-gw 日志（最近100行）===\n" + gw_log + "\n\n"
-        "=== ombre-brain 日志（最近100行）===\n" + brain_log + "\n\n"
-        "=== nginx error log（最近50行）===\n" + nginx_log
+        f"=== 服务运行状态（systemctl is-active）===\n{svc_summary}\n\n"
+        "=== frontend-gw 日志（最近100行）===\n" + _tail_journal('frontend-gw.service', 100) + "\n\n"
+        "=== ombre-brain 日志（最近100行）===\n" + _tail_file('/var/log/ombre-brain.log', 100) + "\n\n"
+        "=== nginx error log（最近50行）===\n"   + _tail_file('/var/log/nginx/error.log', 50)
     )
-
-    analysis = ask_deepseek(api_key, user_content)
-
-    now    = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    report = f'[巡逻报告 {now}]\n{analysis}'
+    analysis = _ask_deepseek(api_key, user_content)
+    report   = f'[巡逻报告 {now}]\n{svc_summary}\n{analysis}'
 
     conn = sqlite3.connect(DB_PATH)
+
+    # ── 3. 每次都记入 fixes ──────────────────────────────────
     conn.execute("INSERT INTO fixes (content) VALUES (?)", (report,))
 
+    # ── 4. 服务宕机 → bugs + board 紧急 ─────────────────────
+    if down_svcs:
+        msg = f'[巡逻 {now}] 服务宕机：{", ".join(down_svcs)}'
+        conn.execute("INSERT INTO bugs (content) VALUES (?)", (msg,))
+        conn.execute(
+            "INSERT INTO board (author,tag,content,status) VALUES ('patrol','紧急',?,'open')",
+            (msg,)
+        )
+
+    # ── 5. AI 发现 ❌ → bugs + board 紧急 ────────────────────
     if '❌' in analysis:
         critical = '\n'.join(l for l in analysis.splitlines() if '❌' in l)
-        conn.execute("INSERT INTO bugs (content) VALUES (?)",
-                     (f'[巡逻发现严重问题 {now}]\n{critical}',))
+        msg = f'[巡逻发现严重问题 {now}]\n{critical}'
+        conn.execute("INSERT INTO bugs (content) VALUES (?)", (msg,))
+        conn.execute(
+            "INSERT INTO board (author,tag,content,status) VALUES ('patrol','紧急',?,'open')",
+            (msg,)
+        )
+
+    # ── 6. AI 发现 ⚠️（无 ❌）→ board 需求 ──────────────────
+    elif '⚠️' in analysis:
+        warn = '\n'.join(l for l in analysis.splitlines() if '⚠️' in l)
+        conn.execute(
+            "INSERT INTO board (author,tag,content,status) VALUES ('patrol','需求',?,'open')",
+            (f'[巡逻 {now}] {warn}',)
+        )
 
     conn.commit()
     conn.close()
     return analysis
 
 if __name__ == '__main__':
+    import sys
     try:
         print(run_patrol())
     except Exception as e:

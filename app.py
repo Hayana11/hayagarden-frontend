@@ -1075,7 +1075,7 @@ def log_dream_event():
     # 5分钟内同 type 已有记录则跳过
     existing = conn.execute(
         """SELECT id FROM dream_events
-           WHERE type=? AND created_at >= datetime('now','localtime','-5 minutes')
+           WHERE type=? AND created_at >= datetime('now','+8 hours','-5 minutes')
            ORDER BY id DESC LIMIT 1""",
         (etype,)
     ).fetchone()
@@ -1083,7 +1083,7 @@ def log_dream_event():
         conn.close()
         return '', 200
     conn.execute(
-        "INSERT INTO dream_events (type, value) VALUES (?,?)",
+        "INSERT INTO dream_events (type, value, created_at) VALUES (?,?,datetime('now','+8 hours'))",
         (etype, value)
     )
     conn.commit()
@@ -1105,3 +1105,67 @@ def _init_wake_tables():
     conn.close()
 
 _init_wake_tables()
+
+# ── Board 留言板 ───────────────────────────────────────────
+@app.route('/board')
+def board_page():
+    return send_from_directory('/opt/frontend/static', 'board.html')
+
+@app.route('/api/board', methods=['GET'])
+def get_board():
+    status_f = request.args.get('status', '').strip()
+    tag_f    = request.args.get('tag', '').strip()
+    conn = get_db()
+    where, params = [], []
+    if status_f:
+        where.append("b.status=?"); params.append(status_f)
+    if tag_f:
+        tags = [t.strip() for t in tag_f.split(',') if t.strip()]
+        where.append(f"b.tag IN ({','.join('?'*len(tags))})"); params.extend(tags)
+    sql = "SELECT * FROM board" + (" WHERE " + " AND ".join(where) if where else "") + " ORDER BY created_at DESC"
+    rows = conn.execute(sql, params).fetchall()
+    result = []
+    for row in rows:
+        replies = conn.execute(
+            "SELECT * FROM board_replies WHERE board_id=? ORDER BY created_at ASC", (row['id'],)
+        ).fetchall()
+        item = dict(row); item['replies'] = [dict(r) for r in replies]
+        result.append(item)
+    conn.close()
+    return jsonify(result)
+
+@app.route('/api/board', methods=['POST'])
+def post_board():
+    data = request.get_json() or {}
+    author  = (data.get('author') or 'hayana').strip()
+    tag     = (data.get('tag') or '闲聊').strip()
+    content = (data.get('content') or '').strip()
+    if not content:
+        return jsonify({'error': 'content required'}), 400
+    conn = get_db()
+    cur = conn.execute("INSERT INTO board (author,tag,content,status) VALUES (?,?,?,'open')", (author, tag, content))
+    conn.commit(); new_id = cur.lastrowid; conn.close()
+    return jsonify({'ok': True, 'id': new_id})
+
+@app.route('/api/board/<int:bid>/reply', methods=['POST'])
+def post_board_reply(bid):
+    data    = request.get_json() or {}
+    author  = (data.get('author') or 'hayana').strip()
+    content = (data.get('content') or '').strip()
+    if not content:
+        return jsonify({'error': 'content required'}), 400
+    conn = get_db()
+    conn.execute("INSERT INTO board_replies (board_id,author,content) VALUES (?,?,?)", (bid, author, content))
+    conn.commit(); conn.close()
+    return jsonify({'ok': True})
+
+@app.route('/api/board/<int:bid>/status', methods=['POST'])
+def update_board_status(bid):
+    data   = request.get_json() or {}
+    status = (data.get('status') or 'open').strip()
+    if status not in ('open', 'done'):
+        return jsonify({'error': 'invalid status'}), 400
+    conn = get_db()
+    conn.execute("UPDATE board SET status=? WHERE id=?", (status, bid))
+    conn.commit(); conn.close()
+    return jsonify({'ok': True})
