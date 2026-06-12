@@ -9,6 +9,11 @@ DB_PATH  = '/opt/frontend/memories.db'
 GW_WAKE  = 'http://localhost:5051/wake'
 LOG_FILE = '/var/log/dream_wake.log'
 
+import sys as _sys
+if '/opt/frontend' not in _sys.path:
+    _sys.path.insert(0, '/opt/frontend')
+from bot_config import WAKE_ACTIVE_START, WAKE_ACTIVE_END, WAKE_PROB_MAX, WAKE_PROB_SCALE
+
 def _now():
     return datetime.datetime.utcnow() + datetime.timedelta(hours=8)
 
@@ -29,7 +34,7 @@ def _db():
 def _in_active_hours(now):
     """只在 08:00 - 次日 01:00 允许触发，避免凌晨骚扰。"""
     h = now.hour
-    return h >= 8 or h < 1   # 8点到午夜1点
+    return h >= WAKE_ACTIVE_START or h < WAKE_ACTIVE_END
 
 def _calc_t_hours(now):
     """计算距离"上次有效互动"的小时数。"""
@@ -66,7 +71,7 @@ def run():
         return
 
     t_hours = _calc_t_hours(now)
-    p = min(0.9, t_hours / 12)
+    p = min(WAKE_PROB_MAX, t_hours / WAKE_PROB_SCALE)
     roll = random.random()
     _log(f"T={t_hours:.1f}h p={p:.2f} roll={roll:.2f}")
 

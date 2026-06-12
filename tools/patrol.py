@@ -9,13 +9,10 @@ ENV_PATH = '/opt/frontend/.env'
 API_URL  = 'https://api.deepseek.com/v1/chat/completions'
 MODEL    = 'deepseek-v4-flash'
 
-SERVICES = ['frontend', 'frontend-gw', 'mcp-http', 'ombre-brain', 'mijia-light', 'co-reading']
-
-SYSTEM_PROMPT = (
-    "你是一个服务器巡逻员，分析以下日志，找出错误、异常和需要关注的问题。"
-    "用中文简洁描述，每个问题一行，格式：[级别] 描述。"
-    "级别：❌严重 ⚠️警告 ℹ️信息。如果一切正常就回复：✅ 一切正常"
-)
+import sys as _sys
+if '/opt/frontend' not in _sys.path:
+    _sys.path.insert(0, '/opt/frontend')
+from bot_config import PATROL_SERVICES as SERVICES, PATROL_SYSTEM_PROMPT as SYSTEM_PROMPT
 
 def _load_key():
     for line in open(ENV_PATH):

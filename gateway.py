@@ -1,4 +1,8 @@
 import os, re, sqlite3, json, base64, mimetypes, datetime, sys as _sys
+if '/opt/frontend' not in _sys.path:
+    _sys.path.insert(0, '/opt/frontend')
+if '/opt/frontend' not in _sys.path:
+    _sys.path.insert(0, '/opt/frontend')
 if '/opt/frontend/tools' not in _sys.path:
     _sys.path.insert(0, '/opt/frontend/tools')
 from flask import Flask, request, jsonify
@@ -330,6 +334,19 @@ TOOLS = [
         }, 'required': ['url_path']},
     },
     {
+        'name': 'read_bot_config',
+        'description': '读取 bot_config.py 的完整内容，查看当前的行为参数（唤醒概率、时段、prompt 等）。',
+        'input_schema': {'type': 'object', 'properties': {}},
+    },
+    {
+        'name': 'edit_bot_config',
+        'description': '修改 bot_config.py 里的参数（唤醒概率/时段/prompt、巡逻服务列表等）。old_str 必须在文件中恰好出现一次，否则报错。修改前自动备份。',
+        'input_schema': {'type': 'object', 'properties': {
+            'old_str': {'type': 'string', 'description': '要替换的原始字符串（必须唯一）'},
+            'new_str': {'type': 'string', 'description': '替换后的新字符串'},
+        }, 'required': ['old_str', 'new_str']},
+    },
+    {
         'name': 'block_user',
         'description': '切换哈娅的聊天权限。blocked=true 时剥夺她发消息的能力，false 时恢复。惩戒手段，谨慎使用。',
         'input_schema': {'type': 'object', 'properties': {
@@ -376,6 +393,29 @@ def run_tool(name, args):
                                          headers={'Content-Type': 'application/json'})
             with urllib.request.urlopen(req, timeout=15) as r:
                 return r.read().decode()
+        if name == 'read_bot_config':
+            _cfg_path = '/opt/frontend/bot_config.py'
+            with open(_cfg_path, 'r', encoding='utf-8') as fh:
+                return fh.read()
+        if name == 'edit_bot_config':
+            import os as _os, shutil as _shutil
+            from datetime import datetime as _dt
+            _cfg_path = '/opt/frontend/bot_config.py'
+            old_s = args.get('old_str', '')
+            new_s = args.get('new_str', '')
+            if not old_s:
+                return '错误：old_str 不能为空'
+            with open(_cfg_path, 'r', encoding='utf-8') as fh:
+                cfg = fh.read()
+            count = cfg.count(old_s)
+            if count != 1:
+                return f'错误：old_str 在文件中出现了 {count} 次（必须恰好 1 次）'
+            ts = _dt.now().strftime('%Y%m%d_%H%M%S')
+            bak = f'/opt/frontend/backups/bot_config.py.{ts}.bak'
+            _shutil.copy2(_cfg_path, bak)
+            with open(_cfg_path, 'w', encoding='utf-8') as fh:
+                fh.write(cfg.replace(old_s, new_s, 1))
+            return f'已修改，备份在 {bak}'
         if name == 'read_backend_file':
             import os as _os
             p = args.get('path', '')
@@ -903,24 +943,17 @@ def wake_decide():
             pass
 
     system = build_system()
-    system += f"""
-
-[唤醒] 现在是 {now.strftime('%Y-%m-%d %H:%M')}（北京时间）。
-距离哈娅上次发消息约 {t2_hours:.1f} 小时，距离上次有效互动约 {t_hours:.1f} 小时。
-
-请决定现在要做什么，严格按以下格式回复（每项独占一行，冒号后直接是内容）：
-
-THOUGHTS: 你的内心想法（这段不会给哈娅看）
-ACTION: none
-CONTENT: 原因或留空
-
-ACTION 只能是以下四个值之一：
-- none：什么都不做，安静等待。如果感知层显示她在忙或很晚了，倾向选这个。
-- message：主动给她发一条消息（不超过80字），发出后她会看到。
-- diary：写一篇日记，存入你的长期记忆，她不会看到。
-- explore：用 search_memories 工具翻翻记忆自己想想事，最后在CONTENT里总结（她不会看到）。
-
-输出只需要这三行，不要任何其他内容。"""
+    try:
+        import importlib as _il, bot_config as _bconf
+        _il.reload(_bconf)
+        _wake_tpl = _bconf.WAKE_DECISION_PROMPT
+    except Exception:
+        _wake_tpl = "[wake] {time} t2={t2_hours}h t={t_hours}h\nTHOUGHTS: ...\nACTION: none\nCONTENT: ..."
+    system += _wake_tpl.format(
+        time=now.strftime('%Y-%m-%d %H:%M'),
+        t2_hours=f'{t2_hours:.1f}',
+        t_hours=f'{t_hours:.1f}',
+    )
 
     msgs = [{'role': 'user', 'content': '[唤醒检查]'}]
     try:
