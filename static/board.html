@@ -105,11 +105,43 @@ html[data-theme=dark] .tag-回复{background:rgba(90,154,106,.12);}
 .compose-send{padding:9px 16px;border:none;border-radius:12px;background:var(--primary);color:#fff;font-size:13px;cursor:pointer;font-family:inherit;flex-shrink:0;height:42px;}
 .compose-send:active{opacity:.75;}
 
+/* ── cat btn ── */
+.cat-btn{width:32px;height:32px;border-radius:50%;background:#fad4e0;border:none;cursor:pointer;display:flex;align-items:center;justify-content:center;color:#c0607a;font-size:16px;flex-shrink:0;transition:opacity .15s;}
+.cat-btn:active{opacity:.75;}
+html[data-theme=dark] .cat-btn{background:#4a2535;color:#f0a0b8;}
+
+/* ── side panel ── */
+.panel-overlay{position:fixed;inset:0;background:rgba(0,0,0,.35);z-index:50;opacity:0;pointer-events:none;transition:opacity .25s;}
+.panel-overlay.show{opacity:1;pointer-events:auto;}
+.side-panel{position:fixed;top:0;right:0;height:100%;width:82%;max-width:400px;background:var(--card);z-index:51;transform:translateX(105%);transition:transform .3s cubic-bezier(.4,0,.2,1);overflow-y:auto;display:flex;flex-direction:column;box-shadow:-4px 0 24px rgba(0,0,0,.12);}
+.side-panel.show{transform:translateX(0);}
+.panel-hd{display:flex;align-items:center;justify-content:space-between;padding:52px 16px 12px;border-bottom:1px solid var(--border);flex-shrink:0;}
+.panel-title{font-family:Georgia,serif;font-size:15px;color:var(--text);letter-spacing:.3px;}
+.panel-close{width:30px;height:30px;border-radius:50%;border:none;background:var(--primary-bg);color:var(--primary);font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center;}
+.panel-body{padding:14px 16px;flex:1;}
+.panel-tags{display:flex;gap:6px;margin-bottom:12px;}
+.panel-tags .ftag{flex:1;text-align:center;padding:5px 0;}
+.panel-ta{width:100%;padding:11px 13px;border-radius:12px;border:1.5px solid var(--border);background:var(--bg);font-size:13px;font-family:inherit;color:var(--text);resize:none;outline:none;min-height:100px;line-height:1.6;}
+.panel-ta:focus{border-color:#f08aaa;}
+.panel-send{width:100%;margin-top:10px;padding:11px;border:none;border-radius:12px;background:linear-gradient(135deg,#f08aaa,#d4a574);color:#fff;font-size:13px;cursor:pointer;font-family:inherit;letter-spacing:.3px;transition:opacity .15s;}
+.panel-send:active{opacity:.8;}
+.panel-divider{border:none;border-top:1px solid var(--border);margin:16px 0 12px;}
+.panel-sec-title{font-size:11px;color:var(--muted);letter-spacing:1.5px;margin-bottom:10px;}
+.panel-reply-item{background:var(--primary-light);border-radius:10px;padding:10px 12px;margin-bottom:8px;}
+.panel-reply-my{font-size:13px;color:var(--text);line-height:1.6;white-space:pre-wrap;word-break:break-word;}
+.panel-reply-meta{font-size:10px;color:var(--muted);margin-top:4px;}
+.panel-reply-replies{margin-top:8px;border-top:1px solid var(--border);padding-top:8px;}
+.panel-reply-r{font-size:12px;color:var(--text);padding:4px 0;line-height:1.55;}
+.panel-reply-r-author{font-size:10px;font-weight:600;margin-right:5px;}
+.panel-empty{font-size:12px;color:var(--muted);text-align:center;padding:20px 0;}
+
 /* ── nav ── */
 .nav{position:fixed;bottom:calc(148px + env(safe-area-inset-bottom,0px));left:50%;transform:translateX(-50%);width:100%;max-width:480px;background:var(--card);border-top:1px solid var(--border);display:flex;z-index:25;}
-.nav-item{flex:1;display:flex;flex-direction:column;align-items:center;padding:10px 0;font-size:10px;color:var(--muted);text-decoration:none;gap:3px;letter-spacing:.3px;}
-.nav-item.act{color:var(--primary);}
-.nav-item i{font-size:20px;}
+.bnav{position:fixed;left:50%;transform:translateX(-50%);bottom:84px;width:100%;max-width:480px;flex-shrink:0;background:rgba(255,255,255,.97);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);border-top:.5px solid var(--border);display:flex;padding:8px 0 calc(8px + env(safe-area-inset-bottom,0px));z-index:29;}
+.ni{flex:1;display:flex;flex-direction:column;align-items:center;gap:3px;text-decoration:none;border:none;background:none;cursor:pointer;color:#b8b0b8;font-size:10px;letter-spacing:.4px;font-family:inherit;padding:2px 0;transition:color .18s;}
+.ni i{font-size:21px;}
+.ni.act{color:var(--primary);}
+html[data-theme=dark] .ni{color:#6a5f5f;}
 </style>
 </head>
 <body>
@@ -117,7 +149,10 @@ html[data-theme=dark] .tag-回复{background:rgba(90,154,106,.12);}
 <div class="hd">
   <div class="hd-row">
     <span class="hd-title">留言板</span>
-    <span class="hd-count" id="openCount">…</span>
+    <div style="display:flex;align-items:center;gap:8px;">
+      <span class="hd-count" id="openCount">…</span>
+      <button class="cat-btn" onclick="openPanel()" title="给我们留言"><i class="ti ti-cat"></i></button>
+    </div>
   </div>
   <div class="filter-row" id="tagFilter">
     <button class="ftag act" data-tag="">全部</button>
@@ -134,11 +169,36 @@ html[data-theme=dark] .tag-回复{background:rgba(90,154,106,.12);}
 
 <div class="list" id="list"></div>
 
-<nav class="nav">
-  <a class="nav-item" href="/dash"><i class="ti ti-home"></i>首页</a>
-  <a class="nav-item" href="/chat"><i class="ti ti-message-circle"></i>聊天</a>
-  <a class="nav-item act" href="/board"><i class="ti ti-clipboard-list"></i>留言板</a>
-  <a class="nav-item" href="/calendar"><i class="ti ti-calendar"></i>日历</a>
+<!-- Nav -->
+<!-- panel overlay -->
+<div class="panel-overlay" id="panelOverlay" onclick="closePanel()"></div>
+
+<!-- side panel -->
+<div class="side-panel" id="sidePanel">
+  <div class="panel-hd">
+    <span class="panel-title">给我们留言 <i class="ti ti-cat" style="color:#f08aaa;font-size:14px"></i></span>
+    <button class="panel-close" onclick="closePanel()"><i class="ti ti-x"></i></button>
+  </div>
+  <div class="panel-body">
+    <div class="panel-tags" id="panelTags">
+      <button class="ftag act" data-tag="闲聊">💬 闲聊</button>
+      <button class="ftag" data-tag="需求">💡 需求</button>
+      <button class="ftag" data-tag="紧急">🚨 紧急</button>
+    </div>
+    <textarea class="panel-ta" id="panelTa" placeholder="想说什么都可以留在这里～"></textarea>
+    <button class="panel-send" onclick="panelSubmit()">发送给大家 ✉️</button>
+    <hr class="panel-divider">
+    <div class="panel-sec-title">最近的回复</div>
+    <div id="panelReplies"><div class="panel-empty">加载中…</div></div>
+  </div>
+</div>
+
+<nav class="bnav">
+  <a class="ni" href="/dash"><i class="ti ti-layout-dashboard"></i><span>dash</span></a>
+  <a class="ni" href="/chat"><i class="ti ti-message-2"></i><span>chat</span></a>
+  <a class="ni" href="/calendar"><i class="ti ti-calendar"></i><span>calendar</span></a>
+  <a class="ni" href="/read"><i class="ti ti-book"></i><span>read</span></a>
+  <a class="ni act" href="/board"><i class="ti ti-clipboard-list"></i><span>board</span></a>
 </nav>
 
 <div class="compose">
@@ -323,6 +383,78 @@ document.getElementById('composeTags').addEventListener('click',e=>{
 // 深色模式
 if(window.matchMedia('(prefers-color-scheme:dark)').matches)
   document.documentElement.setAttribute('data-theme','dark');
+
+// ── panel ──────────────────────────────────────────────────
+let panelTag = '闲聊';
+
+function openPanel(){
+  document.getElementById('panelOverlay').classList.add('show');
+  document.getElementById('sidePanel').classList.add('show');
+  loadMyReplies();
+}
+function closePanel(){
+  document.getElementById('panelOverlay').classList.remove('show');
+  document.getElementById('sidePanel').classList.remove('show');
+}
+
+// 面板标签选择
+document.getElementById('panelTags').addEventListener('click', e=>{
+  const btn = e.target.closest('.ftag');
+  if(!btn) return;
+  document.querySelectorAll('#panelTags .ftag').forEach(b=>b.classList.remove('act'));
+  btn.classList.add('act');
+  panelTag = btn.dataset.tag;
+});
+
+async function panelSubmit(){
+  const ta = document.getElementById('panelTa');
+  const content = (ta.value||'').trim();
+  if(!content) return;
+  const sendBtn = document.querySelector('.panel-send');
+  sendBtn.disabled = true;
+  await fetch('/api/board',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({author:'hayana', tag:panelTag, content})});
+  ta.value = '';
+  sendBtn.disabled = false;
+  await loadBoard();
+  await loadMyReplies();
+}
+
+async function loadMyReplies(){
+  const el = document.getElementById('panelReplies');
+  try{
+    const r = await fetch('/api/board');
+    const all = await r.json();
+    // 取 hayana 发的条目，最近5条
+    const mine = all.filter(i=>i.author==='hayana').slice(0,5);
+    if(!mine.length){
+      el.innerHTML='<div class="panel-empty">还没有留言记录～</div>'; return;
+    }
+    const hasAnyReply = mine.some(i=>i.replies&&i.replies.length>0);
+    if(!hasAnyReply){
+      el.innerHTML = mine.map(item=>`
+        <div class="panel-reply-item">
+          <div class="panel-reply-my">${escHtml(item.content)}</div>
+          <div class="panel-reply-meta">${fmtTime(item.created_at)} · ${item.tag} · 还没有人回复你～</div>
+        </div>`).join('');
+      return;
+    }
+    el.innerHTML = mine.map(item=>{
+      const reps = (item.replies||[]);
+      const repHtml = reps.length ? reps.map(r=>{
+        const ram = authorMeta(r.author);
+        return `<div class="panel-reply-r">
+          <span class="panel-reply-r-author" style="color:${ram.color}">${ram.name}</span>${escHtml(r.content)}
+        </div>`;
+      }).join('') : '<div style="font-size:11px;color:var(--muted);padding:2px 0">还没有人回复你～</div>';
+      return `<div class="panel-reply-item">
+        <div class="panel-reply-my">${escHtml(item.content)}</div>
+        <div class="panel-reply-meta">${fmtTime(item.created_at)} · ${item.tag}</div>
+        ${reps.length ? `<div class="panel-reply-replies">${repHtml}</div>` : repHtml}
+      </div>`;
+    }).join('');
+  }catch(e){ el.innerHTML='<div class="panel-empty">加载失败</div>'; }
+}
 
 loadBoard();
 </script>

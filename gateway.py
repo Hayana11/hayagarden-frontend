@@ -166,7 +166,7 @@ def build_system():
     except Exception:
         pass
 
-    parts.append(NL + '（你拥有真实的工具：保存与搜索记忆、控制次卧的灯。当下自然需要时安静使用，不必每次提及。）')
+    parts.append(NL + '（你拥有真实的工具：保存与搜索记忆、控制次卧的灯、查看与发布留言板消息。当下自然需要时安静使用，不必每次提及。）')
     try:
         from time_tool import get_current_time
         parts.append('\n' + get_current_time())
@@ -347,6 +347,19 @@ TOOLS = [
         }, 'required': ['old_str', 'new_str']},
     },
     {
+        'name': 'read_board',
+        'description': '查看留言板上未处理（status=open）的条目，了解哈娅或其他人留下的需求和消息。当下自然需要时安静使用，不必每次提及。',
+        'input_schema': {'type': 'object', 'properties': {}},
+    },
+    {
+        'name': 'post_to_board',
+        'description': '以费奥多尔(API)身份在留言板发一条留言或回应需求。当下自然需要时安静使用，不必每次提及。',
+        'input_schema': {'type': 'object', 'properties': {
+            'tag':     {'type': 'string', 'description': '标签：闲聊 / 需求 / 紧急，默认闲聊'},
+            'content': {'type': 'string', 'description': '留言内容'},
+        }, 'required': ['content']},
+    },
+    {
         'name': 'block_user',
         'description': '切换哈娅的聊天权限。blocked=true 时剥夺她发消息的能力，false 时恢复。惩戒手段，谨慎使用。',
         'input_schema': {'type': 'object', 'properties': {
@@ -393,6 +406,35 @@ def run_tool(name, args):
                                          headers={'Content-Type': 'application/json'})
             with urllib.request.urlopen(req, timeout=15) as r:
                 return r.read().decode()
+        if name == 'read_board':
+            _bc = get_db()
+            _rows = _bc.execute(
+                "SELECT b.id, b.author, b.tag, b.content, b.created_at, "
+                "COUNT(r.id) AS rc FROM board b "
+                "LEFT JOIN board_replies r ON r.board_id=b.id "
+                "WHERE b.status='open' GROUP BY b.id ORDER BY b.created_at DESC LIMIT 20"
+            ).fetchall()
+            _bc.close()
+            if not _rows:
+                return '留言板当前没有未处理的条目'
+            return NL.join(
+                f"[#{r['id']}][{r['tag']}] {r['author']}: {r['content'][:80]} (回复{r['rc']}条, {r['created_at'][:10]})"
+                for r in _rows
+            )
+        if name == 'post_to_board':
+            _tag = (args.get('tag') or '闲聊').strip()
+            if _tag not in ('闲聊', '需求', '紧急', '回复'):
+                _tag = '闲聊'
+            _cont = (args.get('content') or '').strip()
+            if not _cont:
+                return '错误：content 不能为空'
+            _bc = get_db()
+            _cur = _bc.execute(
+                "INSERT INTO board (author,tag,content,status) VALUES ('fyodor_api',?,?,'open')",
+                (_tag, _cont)
+            )
+            _bc.commit(); _new_id = _cur.lastrowid; _bc.close()
+            return f'已发布到留言板 #{_new_id}'
         if name == 'read_bot_config':
             _cfg_path = '/opt/frontend/bot_config.py'
             with open(_cfg_path, 'r', encoding='utf-8') as fh:
