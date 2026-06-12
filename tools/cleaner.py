@@ -1,9 +1,9 @@
 #!/usr/bin/env python3.11
 """
-Memory cleaner: dedup / auto-tag / importance / resolve
+Memory cleaner: dedup / auto-tag / importance / resolve / Ombre Brain sync
 Runs nightly at 03:00
 """
-import sqlite3, json, re, datetime, os, time
+import sqlite3, json, re, datetime, os, sys, time
 import urllib.request as _req
 import urllib.error as _err
 
@@ -57,6 +57,35 @@ def ask(prompt, expect_json=False):
 
 
 # ─────────────────────────────────────────────────────────────
+# Ombre Brain sync — batch hold via server.hold()
+# ─────────────────────────────────────────────────────────────
+import asyncio as _asyncio
+
+async def _batch_hold(sync_items):
+    """
+    Call server.hold() for each item in ONE shared event loop.
+    Importing inside the coroutine so module-level server init
+    (BucketManager / Dehydrator / DecayEngine) runs inside the loop.
+    """
+    sys.path.insert(0, '/opt/ombre-brain')
+    from server import hold
+
+    results = []
+    for item in sync_items:
+        try:
+            r = await hold(
+                content    = item['content'],
+                tags       = item['tags_str'],
+                importance = item['importance'],
+                pinned     = item['pinned'],
+            )
+            results.append((item['id'], r, None))
+        except Exception as e:
+            results.append((item['id'], None, str(e)))
+    return results
+
+
+# ─────────────────────────────────────────────────────────────
 # Task 1 · Deduplication
 # ─────────────────────────────────────────────────────────────
 def dedup():
@@ -69,7 +98,6 @@ def dedup():
     log(f'  Loaded {len(rows)} records')
 
     def keywords(text):
-        # simple CJK word split: 2-char ngrams + split on punctuation/spaces
         text = re.sub(r'[^一-鿿A-Za-z0-9]', ' ', text)
         words = set()
         tokens = text.split()
@@ -84,7 +112,6 @@ def dedup():
     for i in range(len(rows)):
         for j in range(i+1, len(rows)):
             a, b = rows[i], rows[j]
-            # rough filter: at least 3 shared keywords from first 20 chars
             ka = keywords((a['content'] or '')[:80])
             kb = keywords((b['content'] or '')[:80])
             shared = ka & kb
@@ -100,16 +127,14 @@ def dedup():
             try:
                 result = ask(prompt, expect_json=True)
                 if result.get('is_duplicate') and result.get('merged'):
-                    # keep newer (higher id = b), update content, delete older
-                    newer_id  = b['id']
-                    older_id  = a['id']
-                    merged_c  = str(result['merged']).strip()
+                    newer_id = b['id']
+                    older_id = a['id']
+                    merged_c = str(result['merged']).strip()
                     conn.execute("UPDATE posts SET content=? WHERE id=?", (merged_c, newer_id))
                     conn.execute("DELETE FROM posts WHERE id=?", (older_id,))
                     conn.commit()
                     log(f'  Merged id={older_id} into id={newer_id}')
                     merged += 1
-                    # remove older from local list to avoid double-processing
                     rows[i] = None
                     break
             except Exception as e:
@@ -121,13 +146,13 @@ def dedup():
 
 
 # ─────────────────────────────────────────────────────────────
-# Task 2 · Auto-tag
+# Task 2 · Auto-tag  (skips already-processed records)
 # ─────────────────────────────────────────────────────────────
 def auto_tag():
     log('=== Task 2: Auto-tag ===')
     conn = get_db()
     rows = conn.execute(
-        "SELECT id, content FROM posts WHERE (tags IS NULL OR tags='')"
+        "SELECT id, content FROM posts WHERE (tags IS NULL OR tags='') AND processed=0"
     ).fetchall()
     log(f'  {len(rows)} untagged records')
     tagged = 0
@@ -139,7 +164,6 @@ def auto_tag():
         )
         try:
             tags = ask(prompt).strip().strip('。').strip()
-            # validate: keep only known tags
             valid = {'日常', '技术', '色色', '情绪', '未完成'}
             picked = [t.strip() for t in tags.split(',') if t.strip() in valid]
             if picked:
@@ -154,21 +178,21 @@ def auto_tag():
 
 
 # ─────────────────────────────────────────────────────────────
-# Task 3 · Importance scoring
+# Task 3 · Importance scoring  (skips already-processed records)
 # ─────────────────────────────────────────────────────────────
 def score_importance():
     log('=== Task 3: Importance scoring ===')
     conn = get_db()
-    # ensure column exists
     try:
         conn.execute("ALTER TABLE posts ADD COLUMN importance INTEGER DEFAULT 0")
         conn.commit()
         log('  Added importance column')
     except Exception:
-        pass  # already exists
+        pass
 
     rows = conn.execute(
-        "SELECT id, content FROM posts WHERE type='MEMORY' AND (importance IS NULL OR importance=0)"
+        "SELECT id, content FROM posts "
+        "WHERE type='MEMORY' AND (importance IS NULL OR importance=0) AND processed=0"
     ).fetchall()
     log(f'  {len(rows)} records need scoring')
     scored = 0
@@ -226,6 +250,96 @@ def mark_resolved():
 
 
 # ─────────────────────────────────────────────────────────────
+# Task 5 · Process new memories & sync to Ombre Brain
+# ─────────────────────────────────────────────────────────────
+def process_and_sync():
+    log('=== Task 5: Process new & sync to Ombre Brain ===')
+    conn = get_db()
+
+    rows = conn.execute(
+        "SELECT id, content, type FROM posts "
+        "WHERE processed=0 AND type IN ('MEMORY','DIARY','MISS')"
+    ).fetchall()
+    log(f'  {len(rows)} unprocessed records')
+
+    total = len(rows)
+    promoted_core = promoted_long = 0
+    sync_queue = []   # collect items for batch Ombre sync
+
+    # ── Phase 1: DeepSeek analysis + DB updates ──────────────
+    for r in rows:
+        try:
+            prompt = (
+                '分析这条记忆，返回 JSON：\n'
+                '{\n'
+                '  "importance": 1到10的整数,\n'
+                '  "valence": -1到1的小数（情绪愉悦度，负=不愉快，正=愉快）,\n'
+                '  "arousal": 0到1的小数（情绪激活度，0=平静，1=激动）,\n'
+                '  "tags": "逗号分隔的标签（从：日常/技术/色色/情绪/未完成 中选1-2个）"\n'
+                '}\n'
+                '只返回JSON，不要其他内容。\n'
+                f'记忆内容：{r["content"]}'
+            )
+            result = ask(prompt, expect_json=True)
+            if not result:
+                log(f'  id={r["id"]} API empty, skipping')
+                continue
+
+            importance = max(1, min(10, int(result.get('importance', 5))))
+            valence    = max(-1.0, min(1.0, float(result.get('valence', 0.0))))
+            arousal    = max(0.0,  min(1.0, float(result.get('arousal', 0.3))))
+            tags_raw   = result.get('tags', '')
+            valid_tags = {'日常', '技术', '色色', '情绪', '未完成'}
+            tags_list  = [t.strip() for t in str(tags_raw).split(',') if t.strip() in valid_tags]
+            tags_str   = ','.join(tags_list) if tags_list else '日常'
+
+            if importance >= 8:
+                layer = 'core';    promoted_core += 1
+            elif importance >= 5:
+                layer = 'long-term'; promoted_long += 1
+            else:
+                layer = 'recent'
+
+            conn.execute(
+                "UPDATE posts SET importance=?, valence=?, arousal=?, tags=?, layer=?, processed=1 "
+                "WHERE id=?",
+                (importance, valence, arousal, tags_str, layer, r['id'])
+            )
+            conn.commit()
+            log(f'  id={r["id"]} → imp={importance} layer={layer} tags={tags_str}')
+
+            sync_queue.append({
+                'id':         r['id'],
+                'content':    r['content'],
+                'tags_str':   tags_str,
+                'importance': importance,
+                'pinned':     (importance >= 8),
+            })
+        except Exception as e:
+            log(f'  id={r["id"]} DeepSeek error: {e}')
+
+    conn.close()
+
+    # ── Phase 2: Ombre Brain — one asyncio.run() for all records ──
+    synced = 0
+    if sync_queue:
+        log(f'  Syncing {len(sync_queue)} records to Ombre Brain (hold)…')
+        try:
+            hold_results = _asyncio.run(_batch_hold(sync_queue))
+            for rid, bucket_result, err in hold_results:
+                if err:
+                    log(f'  id={rid} Ombre hold failed: {err}')
+                else:
+                    log(f'  id={rid} → Ombre: {str(bucket_result)[:60]}')
+                    synced += 1
+        except Exception as e:
+            log(f'  Ombre Brain batch error: {e}')
+
+    log(f'  Done: processed={total}, →core={promoted_core}, →long-term={promoted_long}, ' +
+        f'ombre_synced={synced}')
+
+
+# ─────────────────────────────────────────────────────────────
 if __name__ == '__main__':
     log('====== Memory Cleaner started ======')
     try:
@@ -244,4 +358,8 @@ if __name__ == '__main__':
         mark_resolved()
     except Exception as e:
         log(f'Task 4 failed: {e}')
+    try:
+        process_and_sync()
+    except Exception as e:
+        log(f'Task 5 failed: {e}')
     log('====== Memory Cleaner finished ======')

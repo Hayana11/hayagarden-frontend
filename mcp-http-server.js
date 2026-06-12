@@ -70,6 +70,12 @@ function buildServer() {
     async () => callLight('/light/status', 'GET')
   );
 
+  server.tool(
+    'light_bedside_warm',
+    {},
+    async () => callLight('/light/bedside/warm', 'POST')
+  );
+
   return server;
 }
 

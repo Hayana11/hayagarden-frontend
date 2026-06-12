@@ -100,19 +100,6 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:14px;heigh
 .think-body{display:none;padding:2px 10px 9px;font-size:12px;color:rgba(42,32,32,.52);line-height:1.65;white-space:pre-wrap;word-break:break-all;}
 .think-body.open{display:block;}
 
-/* Live streaming think */
-.live-think-wrap{background:rgba(124,106,138,.06);border-left:2px solid rgba(124,106,138,.28);border-radius:0 10px 10px 0;margin:0 0 8px;overflow:hidden;}
-.live-think-hd{padding:6px 10px 4px;font-size:11px;color:rgba(124,106,138,.7);display:flex;align-items:center;gap:5px;letter-spacing:.3px;}
-.live-think-hd i{font-size:13px;}
-.live-think-cursor{display:inline-block;width:5px;height:10px;background:rgba(124,106,138,.5);border-radius:1px;margin-left:3px;animation:twblink .85s infinite;vertical-align:middle;}
-@keyframes twblink{0%,100%{opacity:1;}50%{opacity:0;}}
-.live-think-body{padding:0 10px 9px;font-size:12px;color:rgba(42,32,32,.52);line-height:1.65;white-space:pre-wrap;word-break:break-all;max-height:160px;overflow-y:auto;}
-.live-think-wrap.done .live-think-cursor{display:none;}
-.live-think-wrap.done .live-think-hd{color:rgba(124,106,138,.4);}
-/* Live tool card (streaming) */
-.live-tool-card{background:rgba(212,165,116,.07);border-left:2px solid rgba(212,165,116,.4);border-radius:0 10px 10px 0;padding:7px 10px;margin:0 0 8px;font-size:11px;color:rgba(212,165,116,.9);}
-.live-tool-name{font-weight:600;font-size:12px;margin-bottom:2px;}
-.live-tool-result{color:var(--muted);font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
 /* Tool call cards */
 .tool-card{background:rgba(212,165,116,.06);border-left:2px solid rgba(212,165,116,.4);border-radius:10px;margin:0 -2px 8px;overflow:hidden;}
 .tool-card-toggle{width:100%;text-align:left;padding:7px 10px;background:none;border:none;cursor:pointer;font-size:11px;color:rgba(212,165,116,.85);display:flex;align-items:center;gap:5px;font-family:inherit;letter-spacing:.3px;}
@@ -194,7 +181,6 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:14px;heigh
 html[data-theme=dark]{--bg:#161312;--card:#211d1c;--text:#e8e2dc;--muted:#9a8d8d;--primary:#a392b5;--primary-bg:#2c2733;--primary-light:rgba(163,146,181,.13);--amber:#d4a574;--amber-bg:#352a1d;--amber-text:#3a2402;--border:#332d2b;}
 html[data-theme=dark] .hd,html[data-theme=dark] .inp-area,html[data-theme=dark] .bnav{background:rgba(26,22,21,.97);}
 html[data-theme=dark] .think-body{color:rgba(232,226,220,.5);}
-html[data-theme=dark] .live-think-body{color:rgba(232,226,220,.5);}
 html[data-theme=dark] .tool-card-body{color:rgba(232,226,220,.5);}
 html[data-theme=dark] .drift-card{background:#262120;}
 html[data-theme=dark] .drift-card-title{color:#e8d9c4;}
@@ -217,12 +203,12 @@ html[data-theme=dark] .ni{color:#6a5f5f;}
 
 /* Msg actions */
 .bwrap{position:relative;}
-.msg-time-row{display:flex;align-items:center;gap:5px;margin-top:3px;}
-.msg-actions{display:flex;align-items:center;gap:1px;opacity:0;transition:opacity .15s;}
-.msg-row:hover .msg-actions{opacity:1;}
-.mac-btn{width:20px;height:20px;border:none;background:none;cursor:pointer;color:#b8a090;border-radius:4px;display:flex;align-items:center;justify-content:center;font-size:13px;transition:color .12s;padding:0;}
-.mac-btn:hover{color:#d4a574;}
+.msg-actions{position:absolute;top:-10px;right:0;display:none;align-items:center;gap:1px;background:rgba(255,255,255,.95);border:.5px solid var(--border);border-radius:7px;padding:2px 4px;box-shadow:0 2px 8px rgba(0,0,0,.08);z-index:10;}
+.bwrap:hover .msg-actions{display:flex;}
+.mac-btn{width:22px;height:22px;border:none;background:none;cursor:pointer;color:var(--muted);border-radius:4px;display:flex;align-items:center;justify-content:center;font-size:14px;transition:color .12s;}
+.mac-btn:hover{color:var(--amber);}
 .bubble.editing{outline:1.5px solid var(--amber) !important;cursor:text;}
+html[data-theme=dark] .msg-actions{background:rgba(38,33,32,.96);}
 </style>
 </head>
 <body>
@@ -560,8 +546,9 @@ function buildHtml(list) {
     html +=
       '<div class="msg-row '+side+'" data-idx="'+i+'">' +
         '<div class="bwrap">' +
+          actHtml +
           '<div class="bubble '+side+(imgOnly?' img-only':'')+'">'+innerHtml+'</div>' +
-          '<div class="msg-time-row"><span class="msg-time">'+fmtTime(m.created_at)+'</span>'+actHtml+'</div>' +
+          '<div class="msg-time">'+fmtTime(m.created_at)+'</div>' +
         '</div>' +
       '</div>';
   });
@@ -569,7 +556,6 @@ function buildHtml(list) {
 }
 
 async function loadMsgs(isInit){
-  if(!isInit && streamAbort) return;
   try{
     var r=await fetch('/api/chat/messages');
     var d=await r.json();
@@ -749,14 +735,10 @@ function setSendBtn(mode) {
   var btn = document.getElementById('send-btn');
   if (mode === 'stop') {
     btn.innerHTML = '<i class="ti ti-player-stop"></i>';
-    btn.style.background = '#e05555';
-    btn.style.color = '#fff';
     btn.onclick = function(){ if(streamAbort) streamAbort.abort(); };
     btn.disabled = false;
   } else {
     btn.innerHTML = '<i class="ti ti-send"></i>';
-    btn.style.background = '';
-    btn.style.color = '';
     btn.onclick = send;
     btn.disabled = false;
   }
@@ -772,7 +754,7 @@ function editMsg(btn) {
   var bwrap = btn.closest('.bwrap');
   var bubble = bwrap ? bwrap.querySelector('.bubble') : null;
   if (!bubble || bubble.contentEditable === 'true') return;
-  bwrap.querySelector('.msg-actions').style.opacity = '0';
+  bwrap.querySelector('.msg-actions').style.display = 'none';
   bubble.contentEditable = 'true';
   bubble.classList.add('editing');
   bubble.focus();
@@ -789,7 +771,7 @@ function editMsg(btn) {
     } else if (e.key === 'Escape') {
       bubble.contentEditable = 'false'; bubble.classList.remove('editing');
       bubble.removeEventListener('keydown', onKey);
-      bwrap.querySelector('.msg-actions').style.opacity = '';
+      bwrap.querySelector('.msg-actions').style.display = '';
       loadMsgs(false);
     }
   }
@@ -807,91 +789,49 @@ async function copyBubble(btn) {
 // ── Streaming reply ──
 var TW_CPS = 18; // 打字机速度：每秒字符数，调这里
 async function streamReply(){
-  var ctrl=new AbortController(); streamAbort=ctrl;
-  var resp=await fetch('/api/gw/chat/stream',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}',signal:ctrl.signal});
+  var ctrl = new AbortController(); streamAbort = ctrl;
+  var resp = await fetch('/api/gw/chat/stream',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}',signal:ctrl.signal});
   if(!resp.ok||!resp.body) throw new Error('stream failed');
-  var SSE_SEP=String.fromCharCode(10)+String.fromCharCode(10);
+  var SSE_SEP = String.fromCharCode(10)+String.fromCharCode(10);
   var reader=resp.body.getReader(), decoder=new TextDecoder();
-  var buf='', target='', shown=0, err=null;
-  var live=null, liveThinkWrap=null, liveThinkBody=null, liveTools=null;
-  var thinkText='';
+  var buf='', target='', shown=0, live=null, err=null;
   var c=document.getElementById('msgs');
-
-  function ensureLiveRow(){
-    if(live) return;
-    hideTyping();
-    c.insertAdjacentHTML('beforeend',
-      '<div class="msg-row fy" id="live-row"><div class="bwrap">'+
-        '<div class="live-think-wrap" id="live-think-wrap" style="display:none">'+
-          '<div class="live-think-hd"><i class="ti ti-brain ti-xs"></i><span>thinking</span>'+
-          '<span class="live-think-cursor"></span></div>'+
-          '<div class="live-think-body" id="live-think-body"></div>'+
-        '</div>'+
-        '<div id="live-tools"></div>'+
-        '<div class="bubble fy" id="live-bubble"></div>'+
-      '</div></div>');
-    live=document.getElementById('live-bubble');
-    liveThinkWrap=document.getElementById('live-think-wrap');
-    liveThinkBody=document.getElementById('live-think-body');
-    liveTools=document.getElementById('live-tools');
-  }
-
   var timer=setInterval(function(){
     if(shown>=target.length) return;
+    if(!live){
+      hideTyping();
+      c.insertAdjacentHTML('beforeend','<div class="msg-row fy" id="live-row"><div class="bwrap"><div class="bubble fy" id="live-bubble"></div></div></div>');
+      live=document.getElementById('live-bubble');
+    }
     shown=Math.min(target.length, shown+1);
     live.innerHTML=escHtml(target.slice(0,shown));
     var atB=c.scrollHeight-c.scrollTop-c.clientHeight<120;
     if(atB) c.scrollTop=c.scrollHeight;
   }, Math.round(1000/TW_CPS));
-
   try{
     while(true){
       var chunk=await reader.read();
       if(chunk.done) break;
       buf+=decoder.decode(chunk.value,{stream:true});
-      var parts=buf.split(SSE_SEP); buf=parts.pop();
+      var parts=buf.split(SSE_SEP);
+      buf=parts.pop();
       for(var i=0;i<parts.length;i++){
         var line=parts[i].trim();
         if(line.indexOf('data:')!==0) continue;
         var ev; try{ ev=JSON.parse(line.slice(5)); }catch(e){ continue; }
-        if(ev.t==='think'){
-          ensureLiveRow();
-          thinkText+=ev.d;
-          liveThinkWrap.style.display='';
-          liveThinkBody.textContent=thinkText;
-          var atB=c.scrollHeight-c.scrollTop-c.clientHeight<120;
-          if(atB) c.scrollTop=c.scrollHeight;
-        } else if(ev.t==='tool_call'){
-          ensureLiveRow();
-          if(liveThinkWrap && !liveThinkWrap.classList.contains('done'))
-            liveThinkWrap.classList.add('done');
-          var tc=ev.d;
-          var card=document.createElement('div'); card.className='live-tool-card';
-          var res=tc.result?String(tc.result).replace(/</g,'&lt;').slice(0,100):'…';
-          card.innerHTML='<div class="live-tool-name">⚙ '+escHtml(tc.name||'tool')+'</div>'+
-            '<div class="live-tool-result">'+res+'</div>';
-          liveTools.appendChild(card);
-          var atB=c.scrollHeight-c.scrollTop-c.clientHeight<120;
-          if(atB) c.scrollTop=c.scrollHeight;
-        } else if(ev.t==='text'){
-          if(liveThinkWrap && !liveThinkWrap.classList.contains('done'))
-            liveThinkWrap.classList.add('done');
-          target+=ev.d;
-        } else if(ev.t==='err'){ err=new Error(ev.d); }
+        if(ev.t==='text'){ target+=ev.d; }
+        else if(ev.t==='tool_call'){ /* stored in DB, rendered after reload */ }
+        else if(ev.t==='err'){ err=new Error(ev.d); }
       }
       if(err) break;
     }
     while(!err && shown<target.length){ await new Promise(function(r){setTimeout(r,80);}); }
   } finally {
     clearInterval(timer);
-    var wasAborted=ctrl.signal.aborted;
-    streamAbort=null;
-    if(wasAborted && target && target.trim()){
-      fetch('/api/chat/send',{method:'POST',headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({author:'fyodor',content:target.trim()})}).catch(function(){});
-    }
+    streamAbort = null;
+    var lr=document.getElementById('live-row'); if(lr) lr.remove();
   }
-  if(err && err.name !== 'AbortError') throw err;
+  if(err) throw err;
   return target;
 }
 

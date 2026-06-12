@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python3.11
 """
 米家灯控底层封装。基于 MIOT 标准属性 (siid/piid)。
 认证信息来自 /opt/frontend/.mijia_auth（由 mijia_login.py 生成）。

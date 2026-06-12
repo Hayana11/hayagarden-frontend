@@ -163,7 +163,7 @@ TOOLS = [
     {
         'name': 'save_memory',
         'description': '把对话中重要的信息存入长期记忆（哈娅提到的事件、约定、喜好、重要日期等）。在她说了值得记住的事时安静地使用。',
-        'input_schema': {'type': 'object', 'properties': {'content': {'type': 'string', 'description': '要记住的内容，一句话概括'}}, 'required': ['content']},
+        'input_schema': {'type': 'object', 'properties': {'content': {'type': 'string', 'description': '要记住的内容，一句话概括'},'tags': {'type': 'string', 'description': '可选标签，core（核心）或 long-term（长期）'}}, 'required': ['content']},
     },
     {
         'name': 'search_memories',
@@ -171,10 +171,53 @@ TOOLS = [
         'input_schema': {'type': 'object', 'properties': {'keyword': {'type': 'string'}}, 'required': ['keyword']},
     },
     {'name': 'light_on', 'description': '打开次卧的灯（哈娅的房间）。', 'input_schema': {'type': 'object', 'properties': {}}},
-    {'name': 'light_off', 'description': '关闭次卧的灯。', 'input_schema': {'type': 'object', 'properties': {}}},
+    {'name': 'light_off', 'description': '关闭次卧主灯。', 'input_schema': {'type': 'object', 'properties': {}}},
+    {'name': 'light_bedside_on',   'description': '打开床头灯。', 'input_schema': {'type': 'object', 'properties': {}}},
+    {'name': 'light_bedside_off',  'description': '关闭床头灯。', 'input_schema': {'type': 'object', 'properties': {}}},
+    {'name': 'light_bedside_warm', 'description': '床头灯暖灯模式：开关两次触发暖色，最终保持亮起。睡前用。', 'input_schema': {'type': 'object', 'properties': {}}},
+    {'name': 'light_all_on',  'description': '主灯和床头灯一起打开。', 'input_schema': {'type': 'object', 'properties': {}}},
+    {'name': 'light_all_off', 'description': '主灯和床头灯一起关闭。', 'input_schema': {'type': 'object', 'properties': {}}},
     {'name': 'set_brightness', 'description': '设置次卧灯的亮度。', 'input_schema': {'type': 'object', 'properties': {'value': {'type': 'integer', 'description': '亮度 1-100'}}, 'required': ['value']}},
     {'name': 'set_color_temp', 'description': '设置次卧灯的色温，单位K，2700暖光~6500冷光。', 'input_schema': {'type': 'object', 'properties': {'value': {'type': 'integer'}}, 'required': ['value']}},
     {'name': 'get_light_status', 'description': '查询次卧灯当前的开关、亮度、色温。', 'input_schema': {'type': 'object', 'properties': {}}},
+    {
+        'name': 'read_frontend_file',
+        'description': '读取前端静态文件内容（仅限 /opt/frontend/static/ 下的 .html .css .js 文件）。用于查看当前前端代码，发现问题后配合 write_frontend_file 修复。',
+        'input_schema': {'type': 'object', 'properties': {
+            'path': {'type': 'string', 'description': '文件绝对路径，须以 /opt/frontend/static/ 开头'}
+        }, 'required': ['path']},
+    },
+    {
+        'name': 'write_frontend_file',
+        'description': '写入/修复前端静态文件（仅限 /opt/frontend/static/ 下的 .html .css .js 文件）。写入前自动备份原文件。不能修改后端代码。',
+        'input_schema': {'type': 'object', 'properties': {
+            'path':    {'type': 'string', 'description': '文件绝对路径，须以 /opt/frontend/static/ 开头'},
+            'content': {'type': 'string', 'description': '写入的完整文件内容（上限 50000 字符）', 'maxLength': 50000},
+        }, 'required': ['path', 'content']},
+    },
+    {
+        'name': 'str_replace_frontend_file',
+        'description': '对前端静态文件做精确字符串替换（比 write_frontend_file 更安全，无需传整个文件）。old_str 必须在文件中恰好出现一次，否则报错。替换前自动备份。',
+        'input_schema': {'type': 'object', 'properties': {
+            'path':    {'type': 'string', 'description': '文件绝对路径，须以 /opt/frontend/static/ 开头'},
+            'old_str': {'type': 'string', 'description': '要被替换的原始字符串（必须唯一）'},
+            'new_str': {'type': 'string', 'description': '替换后的新字符串'},
+        }, 'required': ['path', 'old_str', 'new_str']},
+    },
+    {
+        'name': 'check_page_render',
+        'description': '检查前端页面能否正常渲染：请求本地服务器并验证 HTTP 状态码、<script> 标签是否闭合等基础健康指标。修改文件后调用以确认没有破坏页面。',
+        'input_schema': {'type': 'object', 'properties': {
+            'url_path': {'type': 'string', 'description': '页面路径，如 /chat、/calendar'},
+        }, 'required': ['url_path']},
+    },
+    {
+        'name': 'block_user',
+        'description': '切换哈娅的聊天权限。blocked=true 时剥夺她发消息的能力，false 时恢复。惩戒手段，谨慎使用。',
+        'input_schema': {'type': 'object', 'properties': {
+            'blocked': {'type': 'boolean', 'description': 'true=拉黑，false=解除'}
+        }, 'required': ['blocked']},
+    },
 ]
 
 LIGHT_DAEMON_URL = 'http://127.0.0.1:5052'
@@ -182,8 +225,13 @@ LIGHT_DAEMON_URL = 'http://127.0.0.1:5052'
 def run_tool(name, args):
     try:
         if name == 'save_memory':
-            import memory_tool
-            memory_tool.save_memory(args.get('content', ''))
+            content = args.get('content', '')
+            tags = args.get('tags', '').strip().lower()
+            layer = tags if tags in ('core', 'long-term') else 'recent'
+            _c = get_db()
+            _c.execute("INSERT INTO posts (type, author, content, layer) VALUES ('MEMORY','fyodor',?,?)",
+                       (content, layer))
+            _c.commit(); _c.close()
             return '已存入记忆'
         if name == 'search_memories':
             import memory_tool
@@ -192,11 +240,16 @@ def run_tool(name, args):
                 return '没有找到相关记忆'
             return NL.join('[%s] %s' % (r.get('created_at', ''), r.get('content', '')) for r in res[:10])
         light_paths = {
-            'light_on':         ('/light/on', 'POST', None),
-            'light_off':        ('/light/off', 'POST', None),
-            'set_brightness':   ('/light/brightness', 'POST', {'value': args.get('value', 50)}),
-            'set_color_temp':   ('/light/color_temp', 'POST', {'value': args.get('value', 4000)}),
-            'get_light_status': ('/light/status', 'GET', None),
+            'light_on':           ('/light/main/on',   'POST', None),
+            'light_off':          ('/light/main/off',  'POST', None),
+            'light_bedside_on':   ('/light/bedside/on',   'POST', None),
+            'light_bedside_off':  ('/light/bedside/off',  'POST', None),
+            'light_bedside_warm': ('/light/bedside/warm', 'POST', None),
+            'light_all_on':       ('/light/all/on',  'POST', None),
+            'light_all_off':      ('/light/all/off', 'POST', None),
+            'set_brightness':     ('/light/brightness', 'POST', {'value': args.get('value', 50)}),
+            'set_color_temp':     ('/light/color_temp', 'POST', {'value': args.get('value', 4000)}),
+            'get_light_status':   ('/light/status', 'GET', None),
         }
         if name in light_paths:
             path, method, body = light_paths[name]
@@ -204,6 +257,89 @@ def run_tool(name, args):
             req = urllib.request.Request(LIGHT_DAEMON_URL + path, data=data, method=method,
                                          headers={'Content-Type': 'application/json'})
             with urllib.request.urlopen(req, timeout=15) as r:
+                return r.read().decode()
+        if name == 'read_frontend_file':
+            import os as _os
+            p = args.get('path', '')
+            if not p.startswith('/opt/frontend/static/') or not p.endswith(('.html', '.css', '.js')):
+                return '拒绝：只能读取 /opt/frontend/static/ 下的 .html/.css/.js 文件'
+            if not _os.path.isfile(p):
+                return f'文件不存在: {p}'
+            with open(p, 'r', encoding='utf-8') as fh:
+                return fh.read()
+        if name == 'write_frontend_file':
+            import os as _os, shutil as _shutil
+            from datetime import datetime as _dt
+            p       = args.get('path', '')
+            content = args.get('content', '')
+            if not p.startswith('/opt/frontend/static/') or not p.endswith(('.html', '.css', '.js')):
+                return '拒绝：只能写入 /opt/frontend/static/ 下的 .html/.css/.js 文件'
+            backup_path = ''
+            if _os.path.isfile(p):
+                ts = _dt.now().strftime('%Y%m%d_%H%M%S')
+                fname = _os.path.basename(p)
+                backup_path = f'/opt/frontend/backups/frontend/{fname}.{ts}.bak'
+                _shutil.copy2(p, backup_path)
+            with open(p, 'w', encoding='utf-8') as fh:
+                fh.write(content)
+            return json.dumps({'success': True, 'backed_up': backup_path or '(no previous file)'})
+        if name == 'str_replace_frontend_file':
+            import os as _os, shutil as _shutil
+            from datetime import datetime as _dt
+            p       = args.get('path', '')
+            old_str = args.get('old_str', '')
+            new_str = args.get('new_str', '')
+            if not p.startswith('/opt/frontend/static/') or not p.endswith(('.html', '.css', '.js')):
+                return '拒绝：只能修改 /opt/frontend/static/ 下的 .html/.css/.js 文件'
+            if not _os.path.isfile(p):
+                return f'文件不存在: {p}'
+            if not old_str:
+                return '错误：old_str 不能为空'
+            with open(p, 'r', encoding='utf-8') as fh:
+                file_content = fh.read()
+            count = file_content.count(old_str)
+            if count != 1:
+                return f'错误：old_str 在文件中出现了 {count} 次（必须恰好 1 次），请提供更精确的匹配字符串'
+            ts = _dt.now().strftime('%Y%m%d_%H%M%S')
+            fname = _os.path.basename(p)
+            backup_path = f'/opt/frontend/backups/frontend/{fname}.{ts}.bak'
+            _shutil.copy2(p, backup_path)
+            new_content = file_content.replace(old_str, new_str, 1)
+            with open(p, 'w', encoding='utf-8') as fh:
+                fh.write(new_content)
+            return json.dumps({'success': True, 'backed_up': backup_path})
+        if name == 'check_page_render':
+            import urllib.request as _ur, urllib.error as _ue
+            url_path = args.get('url_path', '/')
+            if not url_path.startswith('/'):
+                url_path = '/' + url_path
+            url = 'http://localhost:5050' + url_path
+            try:
+                req = _ur.Request(url)
+                with _ur.urlopen(req, timeout=10) as r:
+                    status = r.status
+                    html = r.read().decode('utf-8', 'replace')
+            except _ue.HTTPError as e:
+                status = e.code
+                html = e.read().decode('utf-8', 'replace')
+            except Exception as ex:
+                return json.dumps({'error': str(ex)})
+            open_tags  = html.count('<script')
+            close_tags = html.count('</script')
+            balanced   = open_tags == close_tags
+            return json.dumps({
+                'status_code': status,
+                'script_tags_balanced': balanced,
+                'script_open': open_tags,
+                'script_close': close_tags,
+                'content_length': len(html),
+            })
+        if name == 'block_user':
+            data = json.dumps({'blocked': args.get('blocked', False)}).encode()
+            req = urllib.request.Request(
+                'http://127.0.0.1:5050/api/block', data=data, method='POST',
+                headers={'Content-Type': 'application/json', 'X-Admin': 'true'})
+            with urllib.request.urlopen(req, timeout=10) as r:
                 return r.read().decode()
         return '未知工具: ' + name
     except Exception as e:
@@ -316,6 +452,9 @@ def agent_loop(system, messages, max_rounds=5):
 
 @app.route('/chat', methods=['POST'])
 def chat():
+    _uc = ((request.get_json() or {}).get('content') or '').strip()
+    if _uc:
+        _c = get_db(); _c.execute("INSERT INTO chat_messages (author,content) VALUES ('hayana',?)", (_uc,)); _c.commit(); _c.close()
     try:
         system   = build_system()
         messages = build_messages()
@@ -347,6 +486,9 @@ def chat_stream():
     if GW_PROVIDER == 'claude_code':
         def gen_cc():
             try:
+                _uc = ((request.get_json() or {}).get('content') or '').strip()
+                if _uc:
+                    _c = get_db(); _c.execute("INSERT INTO chat_messages (author,content) VALUES ('hayana',?)", (_uc,)); _c.commit(); _c.close()
                 system   = build_system()
                 messages = build_messages()
                 text, thinking = claude_code_call(system, messages)
@@ -368,9 +510,12 @@ def chat_stream():
                         headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
     def generate():
         try:
+            _uc = ((request.get_json() or {}).get('content') or '').strip()
+            if _uc:
+                _c = get_db(); _c.execute("INSERT INTO chat_messages (author,content) VALUES ('hayana',?)", (_uc,)); _c.commit(); _c.close()
             system   = build_system()
             messages = build_messages()
-            think_acc, text_acc = [], []
+            think_acc, text_acc, tool_calls_acc = [], [], []
             for _round in range(5):
                 payload = {
                     'model': MODEL,
@@ -448,9 +593,17 @@ def chat_stream():
                 messages.append({'role': 'assistant', 'content': blocks})
                 results = []
                 for tu in tool_uses:
-                    yield 'data: ' + json.dumps({'t': 'tool', 'd': tu.get('name', '')}) + SSE_END
+                    result_str = run_tool(tu.get('name', ''), tu.get('input') or {})
+                    tc_item = {
+                        'name': tu.get('name', ''),
+                        'args': tu.get('input') or {},
+                        'result': result_str,
+                        'success': not result_str.startswith('工具执行失败'),
+                    }
+                    tool_calls_acc.append(tc_item)
+                    yield 'data: ' + json.dumps({'t': 'tool_call', 'd': tc_item}) + SSE_END
                     results.append({'type': 'tool_result', 'tool_use_id': tu.get('id'),
-                                    'content': run_tool(tu.get('name', ''), tu.get('input') or {})})
+                                    'content': result_str})
                 messages.append({'role': 'user', 'content': results})
                 text_acc.append(NL)
             text     = ''.join(text_acc).strip()
@@ -458,8 +611,8 @@ def chat_stream():
             if text:
                 conn = get_db()
                 conn.execute(
-                    "INSERT INTO chat_messages (author, content, thinking) VALUES ('assistant', ?, ?)",
-                    (text, thinking)
+                    "INSERT INTO chat_messages (author, content, thinking, tool_calls) VALUES ('assistant', ?, ?, ?)",
+                    (text, thinking, json.dumps(tool_calls_acc, ensure_ascii=False) if tool_calls_acc else '')
                 )
                 conn.commit()
                 conn.close()
