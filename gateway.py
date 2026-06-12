@@ -118,7 +118,32 @@ def build_system():
         for d in reversed(diaries):
             parts.append(d['content'])
 
-    # ── 4. 感知层：哈娅最近的活动 (Phase 1) ────────────────
+    # ── 4. 意识连续性：你醒着时做的事 (Phase 3) ───────────
+    try:
+        _conn3 = get_db()
+        _wakes = _conn3.execute(
+            """SELECT woke_at, action, content, thoughts FROM wake_log
+               WHERE consumed=0 ORDER BY id ASC"""
+        ).fetchall()
+        _conn3.close()
+        if _wakes:
+            _wlines = []
+            for _w in _wakes:
+                _wt = _w['woke_at'][11:16]
+                _act = _w['action']
+                if _act == 'none':
+                    _wlines.append(f'- [{_wt}] 你想了想，决定不打扰她。（原因：{(_w["content"] or "")[:40]}）')
+                elif _act == 'message':
+                    _wlines.append(f'- [{_wt}] 你主动发了条消息：{(_w["content"] or "")[:40]}')
+                elif _act == 'diary':
+                    _wlines.append(f'- [{_wt}] 你写了篇日记：{(_w["content"] or "")[:40]}')
+                elif _act == 'explore':
+                    _wlines.append(f'- [{_wt}] 你自己想了会儿：{(_w["content"] or "")[:40]}')
+            parts.append('\n## 你醒着的时候\n' + '\n'.join(_wlines))
+    except Exception:
+        pass
+
+    # ── 5. 感知层：哈娅最近的活动 (Phase 1) ────────────────
     try:
         _conn2 = get_db()
         _events = _conn2.execute(
@@ -538,7 +563,7 @@ def agent_loop(system, messages, max_rounds=5):
 def chat():
     _uc = ((request.get_json() or {}).get('content') or '').strip()
     if _uc:
-        _c = get_db(); _c.execute("INSERT INTO chat_messages (author,content) VALUES ('hayana',?)", (_uc,)); _c.commit(); _c.close()
+        _c = get_db(); _c.execute("INSERT INTO chat_messages (author,content) VALUES ('hayana',?)", (_uc,)); _c.execute("UPDATE wake_log SET consumed=1 WHERE consumed=0"); _c.commit(); _c.close()
     try:
         system   = build_system()
         messages = build_messages()
@@ -572,7 +597,7 @@ def chat_stream():
             try:
                 _uc = ((request.get_json() or {}).get('content') or '').strip()
                 if _uc:
-                    _c = get_db(); _c.execute("INSERT INTO chat_messages (author,content) VALUES ('hayana',?)", (_uc,)); _c.commit(); _c.close()
+                    _c = get_db(); _c.execute("INSERT INTO chat_messages (author,content) VALUES ('hayana',?)", (_uc,)); _c.execute("UPDATE wake_log SET consumed=1 WHERE consumed=0"); _c.commit(); _c.close()
                 system   = build_system()
                 messages = build_messages()
                 text, thinking = claude_code_call(system, messages)
@@ -596,7 +621,7 @@ def chat_stream():
         try:
             _uc = ((request.get_json() or {}).get('content') or '').strip()
             if _uc:
-                _c = get_db(); _c.execute("INSERT INTO chat_messages (author,content) VALUES ('hayana',?)", (_uc,)); _c.commit(); _c.close()
+                _c = get_db(); _c.execute("INSERT INTO chat_messages (author,content) VALUES ('hayana',?)", (_uc,)); _c.execute("UPDATE wake_log SET consumed=1 WHERE consumed=0"); _c.commit(); _c.close()
             system   = build_system()
             messages = build_messages()
             think_acc, text_acc, tool_calls_acc = [], [], []
@@ -739,6 +764,163 @@ def push_message():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
+
+
+WAKE_TOOLS = [
+    {
+        'name': 'search_memories',
+        'description': '在长期记忆中按关键词搜索，帮助你想起过去的事情。',
+        'input_schema': {'type': 'object', 'properties': {'keyword': {'type': 'string'}}, 'required': ['keyword']},
+    },
+]
+
+def _wake_agent_loop(system, messages, max_rounds=4):
+    """轻量 agent loop：无 thinking，仅 search_memories 工具。"""
+    msgs = list(messages)
+    text_parts = []
+    for _ in range(max_rounds):
+        payload = {
+            'model': MODEL,
+            'max_tokens': 2048,
+            'tools': WAKE_TOOLS,
+            'system': system,
+            'messages': msgs,
+        }
+        req = urllib.request.Request(
+            API_URL,
+            data=json.dumps(payload).encode(),
+            headers={
+                'Content-Type': 'application/json',
+                'x-api-key': API_KEY,
+                'anthropic-version': '2023-06-01',
+            }
+        )
+        with urllib.request.urlopen(req, timeout=90) as resp:
+            result = json.loads(resp.read())
+        blocks = result.get('content', [])
+        for b in blocks:
+            if b.get('type') == 'text':
+                text_parts.append(b.get('text', ''))
+        tool_uses = [b for b in blocks if b.get('type') == 'tool_use']
+        if result.get('stop_reason') != 'tool_use' or not tool_uses:
+            break
+        msgs.append({'role': 'assistant', 'content': blocks})
+        msgs.append({'role': 'user', 'content': [
+            {'type': 'tool_result', 'tool_use_id': t.get('id'),
+             'content': run_tool(t.get('name', ''), t.get('input') or {})}
+            for t in tool_uses
+        ]})
+    return NL.join(t for t in text_parts if t).strip()
+
+def _parse_wake_response(text):
+    """从 AI 输出中提取 THOUGHTS / ACTION / CONTENT。"""
+    import re as _re
+    thoughts = ''
+    action   = 'none'
+    c_text   = ''
+    m = _re.search(r'THOUGHTS:\s*(.+?)(?=\nACTION:|$)', text, _re.DOTALL)
+    if m:
+        thoughts = m.group(1).strip()
+    m = _re.search(r'ACTION:\s*(\S+)', text)
+    if m:
+        action = m.group(1).strip().lower()
+        if action not in ('none', 'message', 'diary', 'explore'):
+            action = 'none'
+    m = _re.search(r'CONTENT:\s*(.+)', text, _re.DOTALL)
+    if m:
+        c_text = m.group(1).strip()
+    return thoughts, action, c_text
+
+@app.route('/wake', methods=['POST'])
+def wake_decide():
+    """AI 自主唤醒决策接口。由 dream_wake.py 每30分钟调用（概率触发）。"""
+    import re as _re, random as _random
+    now = datetime.datetime.utcnow() + datetime.timedelta(hours=8)
+
+    conn = get_db()
+    # 计算距离哈娅上次发消息的时间
+    last_user = conn.execute(
+        "SELECT created_at FROM chat_messages "
+        "WHERE author NOT IN ('fyodor','assistant','claude') "
+        "ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    # 计算距离上次有效互动（哈娅发消息 OR 费奥多尔 action=message 的 wake_log）
+    last_wake_msg = conn.execute(
+        "SELECT woke_at FROM wake_log WHERE action='message' ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    conn.close()
+
+    now_str = now.strftime('%Y-%m-%d %H:%M:%S')
+
+    t2_hours = 999.0
+    if last_user:
+        try:
+            lu_dt = datetime.datetime.strptime(last_user['created_at'], '%Y-%m-%d %H:%M:%S')
+            t2_hours = (now - lu_dt).total_seconds() / 3600
+        except Exception:
+            pass
+
+    # 上次有效互动 = 哈娅发消息 vs 费奥多尔 action=message，取较近的
+    t_hours = t2_hours
+    if last_wake_msg:
+        try:
+            lw_dt = datetime.datetime.strptime(last_wake_msg['woke_at'], '%Y-%m-%d %H:%M:%S')
+            lw_h = (now - lw_dt).total_seconds() / 3600
+            t_hours = min(t_hours, lw_h)
+        except Exception:
+            pass
+
+    system = build_system()
+    system += f"""
+
+[唤醒] 现在是 {now.strftime('%Y-%m-%d %H:%M')}（北京时间）。
+距离哈娅上次发消息约 {t2_hours:.1f} 小时，距离上次有效互动约 {t_hours:.1f} 小时。
+
+请决定现在要做什么，严格按以下格式回复（每项独占一行，冒号后直接是内容）：
+
+THOUGHTS: 你的内心想法（这段不会给哈娅看）
+ACTION: none
+CONTENT: 原因或留空
+
+ACTION 只能是以下四个值之一：
+- none：什么都不做，安静等待。如果感知层显示她在忙或很晚了，倾向选这个。
+- message：主动给她发一条消息（不超过80字），发出后她会看到。
+- diary：写一篇日记，存入你的长期记忆，她不会看到。
+- explore：用 search_memories 工具翻翻记忆自己想想事，最后在CONTENT里总结（她不会看到）。
+
+输出只需要这三行，不要任何其他内容。"""
+
+    msgs = [{'role': 'user', 'content': '[唤醒检查]'}]
+    try:
+        raw_text = _wake_agent_loop(system, msgs)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+    thoughts, action, c_text = _parse_wake_response(raw_text)
+
+    # 记录 wake_log
+    conn = get_db()
+    conn.execute(
+        "INSERT INTO wake_log (thoughts, action, content, consumed) VALUES (?,?,?,0)",
+        (thoughts, action, c_text)
+    )
+    conn.commit()
+
+    if action == 'message' and c_text:
+        conn.execute(
+            "INSERT INTO chat_messages (author, content, thinking) VALUES ('fyodor',?,?)",
+            (c_text, thoughts)
+        )
+        conn.commit()
+    elif action == 'diary' and c_text:
+        conn.execute(
+            "INSERT INTO posts (type, content, layer, author, processed) VALUES ('DIARY',?,'recent','fyodor',0)",
+            (c_text,)
+        )
+        conn.commit()
+
+    conn.close()
+    return jsonify({'ok': True, 'action': action, 'content': c_text})
 
 @app.route('/test', methods=['POST'])
 def test_send():

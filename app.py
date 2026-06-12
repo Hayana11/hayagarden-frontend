@@ -1089,3 +1089,19 @@ def log_dream_event():
     conn.commit()
     conn.close()
     return '', 200
+
+# ── Wake Log (Phase 2) ─────────────────────────────────────
+def _init_wake_tables():
+    conn = get_db()
+    conn.execute("""CREATE TABLE IF NOT EXISTS wake_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        woke_at TIMESTAMP DEFAULT (datetime('now','localtime')),
+        thoughts TEXT,
+        action TEXT,
+        content TEXT,
+        consumed INTEGER DEFAULT 0
+    )""")
+    conn.commit()
+    conn.close()
+
+_init_wake_tables()
