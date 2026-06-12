@@ -148,7 +148,7 @@ def build_system():
         _conn2 = get_db()
         _events = _conn2.execute(
             """SELECT type, value, created_at FROM dream_events
-               WHERE created_at >= datetime('now','localtime','-6 hours')
+               WHERE created_at >= datetime('now','+8 hours','-6 hours')
                ORDER BY created_at ASC"""
         ).fetchall()
         _conn2.close()
@@ -290,6 +290,15 @@ TOOLS = [
     {'name': 'set_color_temp', 'description': '设置次卧灯的色温，单位K，2700暖光~6500冷光。', 'input_schema': {'type': 'object', 'properties': {'value': {'type': 'integer'}}, 'required': ['value']}},
     {'name': 'get_light_status', 'description': '查询次卧灯当前的开关、亮度、色温。', 'input_schema': {'type': 'object', 'properties': {}}},
     {
+        'name': 'read_backend_file',
+        'description': '读取后端 Python 源码（只读）。可以读 /opt/frontend/*.py 和 /opt/frontend/tools/*.py，但不能读 .env 等配置文件，也不能修改任何文件。start_line/end_line 可选，用于只看大文件的某一段（从1开始）。',
+        'input_schema': {'type': 'object', 'properties': {
+            'path':       {'type': 'string', 'description': '文件绝对路径，须以 /opt/frontend/ 开头且以 .py 结尾'},
+            'start_line': {'type': 'integer', 'description': '从第几行开始读（含，从1计数）'},
+            'end_line':   {'type': 'integer', 'description': '读到第几行结束（含）'},
+        }, 'required': ['path']},
+    },
+    {
         'name': 'read_frontend_file',
         'description': '读取前端静态文件内容（仅限 /opt/frontend/static/ 下的 .html .css .js 文件）。用于查看当前前端代码，发现问题后配合 write_frontend_file 修复。',
         'input_schema': {'type': 'object', 'properties': {
@@ -367,6 +376,29 @@ def run_tool(name, args):
                                          headers={'Content-Type': 'application/json'})
             with urllib.request.urlopen(req, timeout=15) as r:
                 return r.read().decode()
+        if name == 'read_backend_file':
+            import os as _os
+            p = args.get('path', '')
+            if not p.startswith('/opt/frontend/') or not p.endswith('.py'):
+                return '拒绝：只能读取 /opt/frontend/ 下的 .py 文件'
+            # 防止路径穿越
+            real = _os.path.realpath(p)
+            if not real.startswith('/opt/frontend/'):
+                return '拒绝：路径不合法'
+            if not _os.path.isfile(real):
+                return f'文件不存在: {p}'
+            with open(real, 'r', encoding='utf-8') as fh:
+                lines = fh.readlines()
+            start = args.get('start_line')
+            end   = args.get('end_line')
+            if start or end:
+                s = max(0, (start or 1) - 1)
+                e = (end or len(lines))
+                lines = lines[s:e]
+                header = '# ' + p + '  (L' + str(s+1) + '-' + str(s+len(lines)) + ')\n'
+            else:
+                header = '# ' + p + '  (' + str(len(lines)) + ' lines)\n'
+            return header + ''.join(lines)
         if name == 'read_frontend_file':
             import os as _os
             p = args.get('path', '')
@@ -901,7 +933,7 @@ ACTION 只能是以下四个值之一：
     # 记录 wake_log
     conn = get_db()
     conn.execute(
-        "INSERT INTO wake_log (thoughts, action, content, consumed) VALUES (?,?,?,0)",
+        "INSERT INTO wake_log (thoughts, action, content, consumed, woke_at) VALUES (?,?,?,0,datetime('now','+8 hours'))",
         (thoughts, action, c_text)
     )
     conn.commit()
