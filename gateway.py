@@ -166,7 +166,39 @@ def build_system():
     except Exception:
         pass
 
-    parts.append(NL + '（你拥有真实的工具：保存与搜索记忆、控制次卧的灯、查看与发布留言板消息。当下自然需要时安静使用，不必每次提及。）')
+    # ── 灯·实时状态注入 ─────────────────────────────────────
+    try:
+        _lreq = urllib.request.Request('http://127.0.0.1:5052/light/status')
+        with urllib.request.urlopen(_lreq, timeout=3) as _lr:
+            _ls = json.loads(_lr.read()).get('result', {})
+        def _fmt_l(l):
+            if not l.get('power'): return '关'
+            p = ['开']
+            if l.get('brightness'): p.append(str(l['brightness']) + '%')
+            if l.get('color_temp'): p.append(str(l['color_temp']) + 'K')
+            return ' '.join(p)
+        _ms = _fmt_l(_ls.get('main', {})); _bs = _fmt_l(_ls.get('bedside', {}))
+        parts.append(NL + '（你拥有真实的工具：保存与搜索记忆、控制次卧的灯、查看与发布留言板消息。当下自然需要时安静使用，不必每次提及。）')
+        parts.append(f'（灯·当前状态：主灯 {_ms}，床头灯 {_bs}。操作灯前先看这里——关着的灯不要再去"调暗"，会重新开起来。）')
+    except Exception:
+        parts.append(NL + '（你拥有真实的工具：保存与搜索记忆、控制次卧的灯、查看与发布留言板消息。当下自然需要时安静使用，不必每次提及。）')
+
+    # ── 6. Board 待处理项 ────────────────────────────────────
+    try:
+        _conn_board = get_db()
+        _board_items = _conn_board.execute(
+            "SELECT id, author, tag, content FROM board WHERE status='open' ORDER BY id DESC LIMIT 5"
+        ).fetchall()
+        _conn_board.close()
+        if _board_items:
+            _board_lines = []
+            for _bi in _board_items:
+                _tag = _bi["tag"]
+                _cont = (_bi["content"] or "")[:80]
+                _board_lines.append(f"- #{_bi['id']} [{_tag}] {_bi['author']}: {_cont}")
+            parts.append("\n## 留言板 · 待处理\n" + "\n".join(_board_lines))
+    except Exception:
+        pass
     try:
         from time_tool import get_current_time
         parts.append('\n' + get_current_time())
@@ -992,6 +1024,10 @@ def _parse_wake_response(text):
 def wake_decide():
     """AI 自主唤醒决策接口。由 dream_wake.py 每30分钟调用（概率触发）。"""
     import re as _re, random as _random
+    data = request.get_json() or {}
+    mode = data.get('mode', 'normal')
+    activity_desc = data.get('activity_desc', '')
+    ritual_type = data.get('ritual_type', '')
     now = datetime.datetime.utcnow() + datetime.timedelta(hours=8)
 
     conn = get_db()
@@ -1031,16 +1067,40 @@ def wake_decide():
     try:
         import importlib as _il, bot_config as _bconf
         _il.reload(_bconf)
-        _wake_tpl = _bconf.WAKE_DECISION_PROMPT
+        if mode == 'ritual':
+            if ritual_type == 'solstice':
+                _wake_tpl = _bconf.RITUAL_SOLSTICE_PROMPT
+            elif ritual_type == 'birthday':
+                _wake_tpl = _bconf.RITUAL_BIRTHDAY_PROMPT
+            else:
+                _wake_tpl = _bconf.WAKE_DECISION_PROMPT
+        elif mode == 'nightwatch':
+            _wake_tpl = _bconf.NIGHTWATCH_DECISION_PROMPT
+        else:
+            _wake_tpl = _bconf.WAKE_DECISION_PROMPT
     except Exception:
         _wake_tpl = "[wake] {time} t2={t2_hours}h t={t_hours}h\nTHOUGHTS: ...\nACTION: none\nCONTENT: ..."
-    system += _wake_tpl.format(
-        time=now.strftime('%Y-%m-%d %H:%M'),
-        t2_hours=f'{t2_hours:.1f}',
-        t_hours=f'{t_hours:.1f}',
-    )
+    if mode == 'ritual':
+        system += _wake_tpl
+    elif mode == 'nightwatch':
+        system += _wake_tpl.format(
+            time=now.strftime('%Y-%m-%d %H:%M'),
+            activity_desc=activity_desc,
+        )
+    else:
+        system += _wake_tpl.format(
+            time=now.strftime('%Y-%m-%d %H:%M'),
+            t2_hours=f'{t2_hours:.1f}',
+            t_hours=f'{t_hours:.1f}',
+        )
 
-    msgs = [{'role': 'user', 'content': '[唤醒检查]'}]
+    if mode == 'ritual':
+        trigger = f'[仪式:{ritual_type}]'
+    elif mode == 'nightwatch':
+        trigger = '[夜巡]'
+    else:
+        trigger = '[唤醒检查]'
+    msgs = [{'role': 'user', 'content': trigger}]
     try:
         raw_text = _wake_agent_loop(system, msgs)
     except Exception as e:
