@@ -20,41 +20,11 @@
   --border:#ece6e0;--shadow:0 1px 8px rgba(40,20,20,.07);
 }
 body{background:var(--bg);color:var(--text);font-family:-apple-system,'PingFang SC','Noto Sans SC',sans-serif;min-height:100vh;max-width:480px;margin:0 auto;padding-bottom:calc(72px + env(safe-area-inset-bottom,0px));}
-.hd{background:var(--card);border-bottom:1px solid var(--border);position:sticky;top:0;z-index:20;padding:44px 20px 0;}
-.hd-title{font-family:Georgia,'Times New Roman',serif;font-size:16px;color:var(--text);padding-bottom:10px;letter-spacing:.3px;}
-.tab-row{display:flex;}
-.tab{flex:1;padding:10px 0;border:none;background:none;font-size:13px;font-family:inherit;color:var(--muted);cursor:pointer;border-bottom:2px solid transparent;transition:color .15s,border-color .15s;letter-spacing:.8px;}
-.tab.act{color:var(--primary);border-bottom-color:var(--primary);}
-.tab-pane{padding:16px 16px 0;}
-.tab-pane.hidden{display:none;}
+.hd{background:var(--card);border-bottom:1px solid var(--border);position:sticky;top:0;z-index:20;padding:44px 20px 10px;}
+.hd-title{font-family:Georgia,'Times New Roman',serif;font-size:16px;color:var(--text);letter-spacing:.3px;}
 .card{background:var(--card);border:1px solid var(--border);border-radius:14px;padding:16px;margin-bottom:14px;box-shadow:var(--shadow);}
 .card-title{font-size:11px;letter-spacing:2px;color:var(--muted);text-transform:lowercase;margin-bottom:12px;display:flex;align-items:center;gap:6px;}
 .card-title i{font-size:14px;color:var(--primary);opacity:.8;}
-.svc-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;}
-.svc-item{display:flex;align-items:center;gap:8px;padding:9px 11px;background:var(--primary-light);border-radius:10px;}
-.svc-dot{width:7px;height:7px;border-radius:50%;background:var(--border);flex-shrink:0;transition:background .3s;}
-.svc-dot.on{background:#6cbf7d;}
-.svc-dot.off{background:#e05555;}
-.svc-name{font-size:12px;color:var(--text);}
-.log-list{max-height:200px;overflow-y:auto;display:flex;flex-direction:column;}
-.log-list::-webkit-scrollbar{width:2px;}
-.log-list::-webkit-scrollbar-thumb{background:var(--border);}
-.log-item{font-size:11px;padding:5px 0;border-bottom:.5px solid var(--border);line-height:1.5;font-family:'SF Mono',Menlo,monospace;word-break:break-all;color:var(--muted);}
-.log-item:last-child{border-bottom:none;}
-.log-item.success{color:#5a9a6a;}
-.log-item.error{color:#e05555;}
-.mon-ta{width:100%;padding:10px 12px;border-radius:10px;border:1.5px solid var(--border);background:var(--bg);font-size:13px;font-family:inherit;color:var(--text);resize:none;outline:none;min-height:72px;line-height:1.6;}
-.mon-ta:focus{border-color:var(--primary);}
-.mon-submit{width:100%;margin-top:8px;padding:10px;border:none;border-radius:10px;background:var(--primary);color:#fff;font-size:13px;cursor:pointer;font-family:inherit;transition:opacity .15s;}
-.mon-submit:active{opacity:.75;}
-.bug-ok{font-size:12px;color:var(--primary);text-align:center;margin-top:7px;display:none;}
-.fix-item{padding:8px 0;border-bottom:.5px solid var(--border);font-size:13px;line-height:1.6;color:var(--text);}
-.fix-item:last-child{border-bottom:none;}
-.fix-meta{font-size:10px;color:var(--muted);margin-top:1px;}
-.fix-add-row{display:flex;gap:8px;margin-top:10px;}
-.fix-add-input{flex:1;padding:9px 12px;border-radius:10px;border:1.5px solid var(--border);background:var(--bg);font-size:13px;font-family:inherit;color:var(--text);outline:none;}
-.fix-add-input:focus{border-color:var(--primary);}
-.fix-add-btn{padding:9px 14px;border:none;border-radius:10px;background:var(--amber);color:#fff;font-size:13px;cursor:pointer;font-family:inherit;}
 .empty-hint{font-size:12px;color:var(--muted);text-align:center;padding:12px 0;}
 .hd-cal{padding:20px 0 14px;text-align:center;}
 .hd-cal h1{font-size:22px;font-weight:700;letter-spacing:2px;color:var(--text);}
@@ -85,7 +55,6 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,'PingFang 
 .cd-title{font-size:11px;color:var(--muted);}
 .cd-add{display:block;width:100%;margin-top:10px;padding:10px;border-radius:10px;border:1.5px dashed var(--border);background:transparent;color:var(--muted);font-size:13px;cursor:pointer;font-family:inherit;}
 .cd-add:hover{border-color:var(--primary);color:var(--primary);}
-/* Period tracker styles */
 .pd-heart{position:absolute;bottom:1px;right:2px;font-size:8px;color:var(--amber);line-height:1;}
 .ps-row{display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:.5px solid var(--border);}
 .ps-row:last-child{border-bottom:none;}
@@ -96,19 +65,16 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,'PingFang 
 .pd-btn:active{opacity:.7;}
 .pd-btn.period{background:rgba(220,100,100,0.15);color:#b44;}
 .pd-btn.sex{background:var(--amber-bg);color:var(--amber-text);}
-/* Day modal */
 .dm-rec{display:flex;align-items:center;justify-content:space-between;padding:10px 0;border-bottom:.5px solid var(--border);font-size:13px;}
 .dm-rec:last-child{border-bottom:none;}
 .dm-del{border:none;background:none;color:#e05555;font-size:12px;cursor:pointer;font-family:inherit;}
 .dm-add-row{display:flex;gap:8px;margin-top:12px;}
 .dm-add-btn{flex:1;padding:10px;border-radius:10px;border:1.5px solid var(--border);background:var(--card);font-size:12px;cursor:pointer;font-family:inherit;color:var(--text);}
 .dm-add-btn:active{background:var(--primary-bg);}
-/* Bottom nav */
 .bnav{position:fixed;bottom:0;left:50%;transform:translateX(-50%);width:100%;max-width:480px;background:rgba(255,255,255,.97);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);border-top:1px solid var(--border);display:flex;z-index:50;padding:7px 0 calc(7px + env(safe-area-inset-bottom,0px));}
 .ni{flex:1;display:flex;flex-direction:column;align-items:center;gap:3px;text-decoration:none;border:none;background:none;cursor:pointer;color:#b0a0aa;font-size:10px;letter-spacing:.4px;font-family:inherit;padding:4px 0;transition:color .18s;}
 .ni i{font-size:21px;}
 .ni.act{color:var(--primary);}
-/* Modals */
 .mo{display:none;position:fixed;inset:0;background:rgba(0,0,0,.25);z-index:100;align-items:flex-end;justify-content:center;}
 .mo.show{display:flex;}
 .mb{background:var(--bg);border-radius:22px 22px 0 0;padding:22px 20px calc(44px + env(safe-area-inset-bottom,0px));width:100%;max-width:480px;}
@@ -119,7 +85,6 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,'PingFang 
 .mbtns button{flex:1;padding:12px;border-radius:11px;border:none;font-size:14px;cursor:pointer;font-family:inherit;}
 .bcn{background:var(--border);color:var(--muted);}
 .bsb{background:var(--primary);color:#fff;}
-/* Period overlay */
 .cal-day.pd:not(.today){background:rgba(220,100,100,.18);color:#b44;}
 .cal-day.pd-pred:not(.today){outline:1.5px dashed rgba(220,100,100,.45);outline-offset:-2px;color:var(--text);}
 .cal-day.ovul:not(.today){background:rgba(124,106,138,.25);color:var(--primary);}
@@ -130,40 +95,10 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,'PingFang 
 
 <div class="hd">
   <div class="hd-title">我们家</div>
-  <div class="tab-row">
-    <button class="tab act" id="tab-btn-monitor" onclick="switchTab('monitor')">monitor</button>
-    <button class="tab" id="tab-btn-calendar" onclick="switchTab('calendar')">calendar</button>
-  </div>
 </div>
 
-<!-- Monitor tab -->
-<div id="tab-monitor" class="tab-pane">
-  <div class="card">
-    <div class="card-title"><i class="ti ti-server"></i>services</div>
-    <div class="svc-grid" id="svc-grid"><div class="empty-hint" style="grid-column:1/-1">loading…</div></div>
-  </div>
-  <div class="card">
-    <div class="card-title"><i class="ti ti-terminal-2"></i>recent logs</div>
-    <div class="log-list" id="log-list"><div class="empty-hint">loading…</div></div>
-  </div>
-  <div class="card">
-    <div class="card-title"><i class="ti ti-bug"></i>report a bug</div>
-    <textarea class="mon-ta" id="bug-ta" placeholder="describe the issue…" rows="3"></textarea>
-    <button class="mon-submit" onclick="submitBug()">submit</button>
-    <div class="bug-ok" id="bug-ok">已收到，费奥多尔会处理</div>
-  </div>
-  <div class="card">
-    <div class="card-title"><i class="ti ti-tool"></i>fix history</div>
-    <div id="fix-list"><div class="empty-hint">loading…</div></div>
-    <div class="fix-add-row">
-      <input type="text" class="fix-add-input" id="fix-input" placeholder="add a fix note…">
-      <button class="fix-add-btn" onclick="submitFix()">add</button>
-    </div>
-  </div>
-</div>
+<div style="padding:0 16px">
 
-<!-- Calendar tab -->
-<div id="tab-calendar" class="tab-pane hidden">
   <div class="hd-cal"><h1>calendar</h1><div class="sub">dates &amp; plans</div></div>
 
   <div class="section">
@@ -194,6 +129,7 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,'PingFang 
     <h2><span class="dot amber"></span>to-do list</h2>
     <div class="soon"><i class="ti ti-checkbox"></i><p>coming soon</p><div class="hint">shared tasks &amp; reminders</div></div>
   </div>
+
 </div>
 
 <nav class="bnav">
@@ -201,6 +137,7 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,'PingFang 
   <a class="ni" href="/chat"><i class="ti ti-message-2"></i><span>chat</span></a>
   <a class="ni act" href="/calendar"><i class="ti ti-calendar"></i><span>calendar</span></a>
   <a class="ni" href="/read"><i class="ti ti-book"></i><span>read</span></a>
+  <a class="ni" href="/board"><i class="ti ti-clipboard-list"></i><span>board</span></a>
 </nav>
 
 <!-- Countdown modal -->
@@ -237,22 +174,7 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,'PingFang 
 </div>
 
 <script>
-var SERVICES=['frontend','frontend-gw','mcp-http','ombre-brain','mijia-light','co-reading'];
 function escHtml(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
-function switchTab(name){
-  document.getElementById('tab-monitor').classList.toggle('hidden',name!=='monitor');
-  document.getElementById('tab-calendar').classList.toggle('hidden',name!=='calendar');
-  document.getElementById('tab-btn-monitor').classList.toggle('act',name==='monitor');
-  document.getElementById('tab-btn-calendar').classList.toggle('act',name==='calendar');
-}
-async function pollServices(){try{var r=await fetch('/api/monitor/services');var d=await r.json();document.getElementById('svc-grid').innerHTML=SERVICES.map(function(s){var on=d[s];return'<div class="svc-item"><div class="svc-dot '+(on?'on':'off')+'"></div><div class="svc-name">'+s+'</div></div>';}).join('');}catch(e){}}
-async function pollLogs(){try{var r=await fetch('/api/monitor/logs');var d=await r.json();var logs=d.logs||[];if(!logs.length){document.getElementById('log-list').innerHTML='<div class="empty-hint">no logs</div>';return;}document.getElementById('log-list').innerHTML=logs.map(function(l){return'<div class="log-item '+l.level+'">'+escHtml(l.text)+'</div>';}).join('');var el=document.getElementById('log-list');el.scrollTop=el.scrollHeight;}catch(e){}}
-function pollMonitor(){pollServices();pollLogs();}
-pollMonitor();setInterval(pollMonitor,5000);
-async function submitBug(){var ta=document.getElementById('bug-ta');var c=ta.value.trim();if(!c)return;try{await fetch('/api/monitor/bugs',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({content:c})});ta.value='';var ok=document.getElementById('bug-ok');ok.style.display='block';setTimeout(function(){ok.style.display='none';},3000);}catch(e){}}
-async function loadFixes(){try{var r=await fetch('/api/monitor/fixes');var d=await r.json();var f=d.fixes||[];document.getElementById('fix-list').innerHTML=f.length?f.map(function(x){return'<div class="fix-item">'+escHtml(x.content)+'<div class="fix-meta">'+escHtml(x.created_at)+'</div></div>';}).join(''):'<div class="empty-hint">no fixes yet</div>';}catch(e){}}
-async function submitFix(){var inp=document.getElementById('fix-input');var c=inp.value.trim();if(!c)return;try{await fetch('/api/monitor/fixes',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({content:c})});inp.value='';loadFixes();}catch(e){}}
-loadFixes();
 
 // Calendar
 var calYear,calMonth;

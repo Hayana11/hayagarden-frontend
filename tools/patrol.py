@@ -90,23 +90,18 @@ def run_patrol():
 
     conn = sqlite3.connect(DB_PATH)
 
-    # ── 3. 每次都记入 fixes ──────────────────────────────────
-    conn.execute("INSERT INTO fixes (content) VALUES (?)", (report,))
-
-    # ── 4. 服务宕机 → bugs + board 紧急 ─────────────────────
+    # ── 4. 服务宕机 → board 紧急 ────────────────────────────
     if down_svcs:
         msg = f'[巡逻 {now}] 服务宕机：{", ".join(down_svcs)}'
-        conn.execute("INSERT INTO bugs (content) VALUES (?)", (msg,))
         conn.execute(
             "INSERT INTO board (author,tag,content,status) VALUES ('patrol','紧急',?,'open')",
             (msg,)
         )
 
-    # ── 5. AI 发现 ❌ → bugs + board 紧急 ────────────────────
+    # ── 5. AI 发现 ❌ → board 紧急 ──────────────────────────
     if '❌' in analysis:
         critical = '\n'.join(l for l in analysis.splitlines() if '❌' in l)
         msg = f'[巡逻发现严重问题 {now}]\n{critical}'
-        conn.execute("INSERT INTO bugs (content) VALUES (?)", (msg,))
         conn.execute(
             "INSERT INTO board (author,tag,content,status) VALUES ('patrol','紧急',?,'open')",
             (msg,)

@@ -1118,10 +1118,10 @@ def get_board():
     conn = get_db()
     where, params = [], []
     if status_f:
-        where.append("b.status=?"); params.append(status_f)
+        where.append("status=?"); params.append(status_f)
     if tag_f:
         tags = [t.strip() for t in tag_f.split(',') if t.strip()]
-        where.append(f"b.tag IN ({','.join('?'*len(tags))})"); params.extend(tags)
+        where.append(f"tag IN ({','.join('?'*len(tags))})"); params.extend(tags)
     sql = "SELECT * FROM board" + (" WHERE " + " AND ".join(where) if where else "") + " ORDER BY created_at DESC"
     rows = conn.execute(sql, params).fetchall()
     result = []

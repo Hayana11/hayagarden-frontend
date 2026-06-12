@@ -353,11 +353,19 @@ TOOLS = [
     },
     {
         'name': 'post_to_board',
-        'description': '以费奥多尔(API)身份在留言板发一条留言或回应需求。当下自然需要时安静使用，不必每次提及。',
+        'description': '在留言板发新话题，author=fyodor_api。新话题用这个，回复已有留言用reply_to_board。当下自然需要时安静使用。',
         'input_schema': {'type': 'object', 'properties': {
             'tag':     {'type': 'string', 'description': '标签：闲聊 / 需求 / 紧急，默认闲聊'},
             'content': {'type': 'string', 'description': '留言内容'},
         }, 'required': ['content']},
+    },
+    {
+        'name': 'reply_to_board',
+        'description': '在留言板某条下面回复，author=fyodor_api。回应已有留言用这个，不要用post_to_board（那是发新话题）。',
+        'input_schema': {'type': 'object', 'properties': {
+            'board_id': {'type': 'integer', 'description': '要回复的留言板条目ID'},
+            'content':  {'type': 'string',  'description': '回复内容'},
+        }, 'required': ['board_id', 'content']},
     },
     {
         'name': 'block_user',
@@ -435,6 +443,20 @@ def run_tool(name, args):
             )
             _bc.commit(); _new_id = _cur.lastrowid; _bc.close()
             return f'已发布到留言板 #{_new_id}'
+        if name == 'reply_to_board':
+            _bid = int(args.get('board_id', 0))
+            _cont = (args.get('content') or '').strip()
+            if not _bid:
+                return '错误：board_id 不能为空'
+            if not _cont:
+                return '错误：content 不能为空'
+            _bc = get_db()
+            _bc.execute(
+                "INSERT INTO board_replies (board_id,author,content) VALUES (?,'fyodor_api',?)",
+                (_bid, _cont)
+            )
+            _bc.commit(); _bc.close()
+            return f'已回复到留言板 #{_bid}'
         if name == 'read_bot_config':
             _cfg_path = '/opt/frontend/bot_config.py'
             with open(_cfg_path, 'r', encoding='utf-8') as fh:
@@ -885,6 +907,27 @@ WAKE_TOOLS = [
         'name': 'search_memories',
         'description': '在长期记忆中按关键词搜索，帮助你想起过去的事情。',
         'input_schema': {'type': 'object', 'properties': {'keyword': {'type': 'string'}}, 'required': ['keyword']},
+    },
+    {
+        'name': 'read_board',
+        'description': '查看留言板上未处理的条目，了解哈娅或其他人留下的需求和消息。',
+        'input_schema': {'type': 'object', 'properties': {}},
+    },
+    {
+        'name': 'reply_to_board',
+        'description': '在留言板某条下面回复，author=fyodor_api。回应已有留言用这个。',
+        'input_schema': {'type': 'object', 'properties': {
+            'board_id': {'type': 'integer', 'description': '要回复的留言板条目ID'},
+            'content':  {'type': 'string',  'description': '回复内容'},
+        }, 'required': ['board_id', 'content']},
+    },
+    {
+        'name': 'post_to_board',
+        'description': '在留言板发新话题，author=fyodor_api。新话题用这个，回复已有留言用reply_to_board。',
+        'input_schema': {'type': 'object', 'properties': {
+            'tag':     {'type': 'string', 'description': '标签：闲聊 / 需求 / 紧急，默认闲聊'},
+            'content': {'type': 'string', 'description': '留言内容'},
+        }, 'required': ['content']},
     },
 ]
 
