@@ -11,7 +11,7 @@ import urllib.request, urllib.error
 app = Flask(__name__)
 DB_PATH    = '/opt/frontend/memories.db'
 STATIC_DIR = '/opt/frontend/static'
-API_URL    = 'https://api.treegpt.cc/v1/messages'
+API_URL    = 'https://gua.guagua.uk/v1/messages'
 MODEL      = 'claude-sonnet-4-6'
 
 API_KEY = ''
@@ -1003,15 +1003,17 @@ WAKE_TOOLS = [
     },
 ]
 
-def _wake_agent_loop(system, messages, max_rounds=4):
+def _wake_agent_loop(system, messages, max_rounds=4, tools=None):
     """轻量 agent loop：无 thinking，仅 search_memories 工具。"""
     msgs = list(messages)
     text_parts = []
+    if tools is None:
+        tools = WAKE_TOOLS
     for _ in range(max_rounds):
         payload = {
             'model': MODEL,
             'max_tokens': 2048,
-            'tools': WAKE_TOOLS,
+            'tools': tools,
             'system': system,
             'messages': msgs,
         }
@@ -1041,25 +1043,46 @@ def _wake_agent_loop(system, messages, max_rounds=4):
         ]})
     return NL.join(t for t in text_parts if t).strip()
 
+_THOUGHT_PLACEHOLDERS = {
+    '你的内心想法（这段不会给哈娅看）',
+    '此刻的内心——她还醒着，你在想什么',
+    '一句话关于这个梦的内在感受',
+    '一句话内心感受',
+}
+
 def _parse_wake_response(text):
-    """从 AI 输出中提取 THOUGHTS / ACTION / CONTENT。"""
+    """从 AI 输出中提取 THOUGHTS / ACTION / CONTENT。
+    agent loop 多轮拼接时只取最后一组完整输出；过滤抄写prompt字段说明的占位符；
+    content 里若仍混有格式标记，视为解析污染，不发送/不存储。"""
     import re as _re
     thoughts = ''
     action   = 'none'
     c_text   = ''
-    m = _re.search(r'THOUGHTS:\s*(.+?)(?=\nACTION:|$)', text, _re.DOTALL)
+
+    blocks = list(_re.finditer(r'THOUGHTS:', text))
+    search_text = text[blocks[-1].start():] if blocks else text
+
+    m = _re.search(r'THOUGHTS:\s*(.+?)(?=\nACTION:|$)', search_text, _re.DOTALL)
     if m:
         thoughts = m.group(1).strip()
-    m = _re.search(r'ACTION:\s*(\S+)', text)
+    m = _re.search(r'ACTION:\s*(\S+)', search_text)
     if m:
         action = m.group(1).strip().lower()
         if action == 'send':
             action = 'message'
         elif action not in ('none', 'message', 'diary', 'explore'):
             action = 'none'
-    m = _re.search(r'CONTENT:\s*(.+)', text, _re.DOTALL)
+    m = _re.search(r'CONTENT:\s*(.+)', search_text, _re.DOTALL)
     if m:
         c_text = m.group(1).strip()
+
+    if thoughts in _THOUGHT_PLACEHOLDERS:
+        thoughts = ''
+
+    _dirty_markers = ('THOUGHTS:', 'ACTION:', 'CONTENT:', '<thinking', '</thinking')
+    if any(mk in c_text for mk in _dirty_markers):
+        action = 'none'
+
     return thoughts, action, c_text
 
 @app.route('/wake', methods=['POST'])
@@ -1166,8 +1189,13 @@ def wake_decide():
     else:
         trigger = '[唤醒检查]'
     msgs = [{'role': 'user', 'content': trigger}]
+    if mode in ('dream', 'summarize', 'ritual'):
+        # 做梦/摘要/仪式模式：不挂留言板写权限，避免梦境内容被当作"新话题"发到board
+        _wake_tools = [t for t in WAKE_TOOLS if t['name'] not in ('post_to_board', 'reply_to_board')]
+    else:
+        _wake_tools = WAKE_TOOLS
     try:
-        raw_text = _wake_agent_loop(system, msgs)
+        raw_text = _wake_agent_loop(system, msgs, tools=_wake_tools)
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
@@ -1181,7 +1209,7 @@ def wake_decide():
     )
     conn.commit()
 
-    if action == 'message' and c_text and mode != 'summarize':
+    if action == 'message' and c_text and mode not in ('summarize', 'dream'):
         conn.execute(
             "INSERT INTO chat_messages (author, content, thinking) VALUES ('fyodor',?,?)",
             (c_text, thoughts)
