@@ -1,0 +1,441 @@
+ * Serving Flask app 'gateway'
+ * Debug mode: off
+WARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.
+ * Running on all addresses (0.0.0.0)
+ * Running on http://127.0.0.1:5051
+ * Running on http://139.180.198.8:5051
+Press CTRL+C to quit
+Building prefix dict from the default dictionary ...
+[2026-06-13 06:59:39] jieba DEBUG: Building prefix dict from the default dictionary ...
+Loading model from cache /tmp/jieba.cache
+[2026-06-13 06:59:39] jieba DEBUG: Loading model from cache /tmp/jieba.cache
+Loading model cost 1.000 seconds.
+[2026-06-13 06:59:40] jieba DEBUG: Loading model cost 1.000 seconds.
+Prefix dict has been built successfully.
+[2026-06-13 06:59:40] jieba DEBUG: Prefix dict has been built successfully.
+127.0.0.1 - - [13/Jun/2026 06:59:44] "POST /chat/stream HTTP/1.0" 200 -
+[2026-06-13 06:59:44] werkzeug INFO: 127.0.0.1 - - [13/Jun/2026 06:59:44] "POST /chat/stream HTTP/1.0" 200 -
+127.0.0.1 - - [13/Jun/2026 07:07:19] "POST /chat/stream HTTP/1.0" 200 -
+[2026-06-13 07:07:19] werkzeug INFO: 127.0.0.1 - - [13/Jun/2026 07:07:19] "POST /chat/stream HTTP/1.0" 200 -
+127.0.0.1 - - [13/Jun/2026 07:09:17] "POST /chat/stream HTTP/1.0" 200 -
+[2026-06-13 07:09:17] werkzeug INFO: 127.0.0.1 - - [13/Jun/2026 07:09:17] "POST /chat/stream HTTP/1.0" 200 -
+127.0.0.1 - - [13/Jun/2026 07:22:15] "POST /chat/stream HTTP/1.0" 200 -
+[2026-06-13 07:22:15] werkzeug INFO: 127.0.0.1 - - [13/Jun/2026 07:22:15] "POST /chat/stream HTTP/1.0" 200 -
+ * Serving Flask app 'gateway'
+ * Debug mode: off
+WARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.
+ * Running on all addresses (0.0.0.0)
+ * Running on http://127.0.0.1:5051
+ * Running on http://139.180.198.8:5051
+Press CTRL+C to quit
+Building prefix dict from the default dictionary ...
+[2026-06-13 07:34:41] jieba DEBUG: Building prefix dict from the default dictionary ...
+Loading model from cache /tmp/jieba.cache
+[2026-06-13 07:34:41] jieba DEBUG: Loading model from cache /tmp/jieba.cache
+Loading model cost 1.033 seconds.
+[2026-06-13 07:34:42] jieba DEBUG: Loading model cost 1.033 seconds.
+Prefix dict has been built successfully.
+[2026-06-13 07:34:42] jieba DEBUG: Prefix dict has been built successfully.
+127.0.0.1 - - [13/Jun/2026 07:34:58] "POST /wake HTTP/1.1" 200 -
+[2026-06-13 07:34:58] werkzeug INFO: 127.0.0.1 - - [13/Jun/2026 07:34:58] "POST /wake HTTP/1.1" 200 -
+127.0.0.1 - - [13/Jun/2026 07:35:28] "POST /wake HTTP/1.1" 200 -
+[2026-06-13 07:35:28] werkzeug INFO: 127.0.0.1 - - [13/Jun/2026 07:35:28] "POST /wake HTTP/1.1" 200 -
+ * Serving Flask app 'gateway'
+ * Debug mode: off
+WARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.
+ * Running on all addresses (0.0.0.0)
+ * Running on http://127.0.0.1:5051
+ * Running on http://139.180.198.8:5051
+Press CTRL+C to quit
+Building prefix dict from the default dictionary ...
+[2026-06-13 07:35:57] jieba DEBUG: Building prefix dict from the default dictionary ...
+Loading model from cache /tmp/jieba.cache
+[2026-06-13 07:35:57] jieba DEBUG: Loading model from cache /tmp/jieba.cache
+Loading model cost 1.105 seconds.
+[2026-06-13 07:35:59] jieba DEBUG: Loading model cost 1.105 seconds.
+Prefix dict has been built successfully.
+[2026-06-13 07:35:59] jieba DEBUG: Prefix dict has been built successfully.
+ * Serving Flask app 'gateway'
+ * Debug mode: off
+WARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.
+ * Running on all addresses (0.0.0.0)
+ * Running on http://127.0.0.1:5051
+ * Running on http://139.180.198.8:5051
+Press CTRL+C to quit
+Building prefix dict from the default dictionary ...
+[2026-06-13 07:36:42] jieba DEBUG: Building prefix dict from the default dictionary ...
+Loading model from cache /tmp/jieba.cache
+[2026-06-13 07:36:42] jieba DEBUG: Loading model from cache /tmp/jieba.cache
+Loading model cost 1.022 seconds.
+[2026-06-13 07:36:43] jieba DEBUG: Loading model cost 1.022 seconds.
+Prefix dict has been built successfully.
+[2026-06-13 07:36:43] jieba DEBUG: Prefix dict has been built successfully.
+127.0.0.1 - - [13/Jun/2026 07:37:24] "POST /wake HTTP/1.1" 200 -
+[2026-06-13 07:37:24] werkzeug INFO: 127.0.0.1 - - [13/Jun/2026 07:37:24] "POST /wake HTTP/1.1" 200 -
+127.0.0.1 - - [13/Jun/2026 07:37:49] "POST /wake HTTP/1.1" 200 -
+[2026-06-13 07:37:49] werkzeug INFO: 127.0.0.1 - - [13/Jun/2026 07:37:49] "POST /wake HTTP/1.1" 200 -
+127.0.0.1 - - [13/Jun/2026 07:39:01] "POST /wake HTTP/1.1" 200 -
+[2026-06-13 07:39:01] werkzeug INFO: 127.0.0.1 - - [13/Jun/2026 07:39:01] "POST /wake HTTP/1.1" 200 -
+127.0.0.1 - - [13/Jun/2026 07:39:43] "POST /wake HTTP/1.1" 200 -
+[2026-06-13 07:39:43] werkzeug INFO: 127.0.0.1 - - [13/Jun/2026 07:39:43] "POST /wake HTTP/1.1" 200 -
+ * Serving Flask app 'gateway'
+ * Debug mode: off
+WARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.
+ * Running on all addresses (0.0.0.0)
+ * Running on http://127.0.0.1:5051
+ * Running on http://139.180.198.8:5051
+Press CTRL+C to quit
+Building prefix dict from the default dictionary ...
+[2026-06-13 07:48:12] jieba DEBUG: Building prefix dict from the default dictionary ...
+Loading model from cache /tmp/jieba.cache
+[2026-06-13 07:48:12] jieba DEBUG: Loading model from cache /tmp/jieba.cache
+Loading model cost 1.191 seconds.
+[2026-06-13 07:48:13] jieba DEBUG: Loading model cost 1.191 seconds.
+Prefix dict has been built successfully.
+[2026-06-13 07:48:13] jieba DEBUG: Prefix dict has been built successfully.
+127.0.0.1 - - [13/Jun/2026 07:48:56] "POST /chat/stream HTTP/1.0" 200 -
+[2026-06-13 07:48:56] werkzeug INFO: 127.0.0.1 - - [13/Jun/2026 07:48:56] "POST /chat/stream HTTP/1.0" 200 -
+127.0.0.1 - - [13/Jun/2026 07:48:57] "POST /wake HTTP/1.1" 200 -
+[2026-06-13 07:48:57] werkzeug INFO: 127.0.0.1 - - [13/Jun/2026 07:48:57] "POST /wake HTTP/1.1" 200 -
+127.0.0.1 - - [13/Jun/2026 07:49:58] "POST /wake HTTP/1.1" 200 -
+[2026-06-13 07:49:58] werkzeug INFO: 127.0.0.1 - - [13/Jun/2026 07:49:58] "POST /wake HTTP/1.1" 200 -
+ * Serving Flask app 'gateway'
+ * Debug mode: off
+WARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.
+ * Running on all addresses (0.0.0.0)
+ * Running on http://127.0.0.1:5051
+ * Running on http://139.180.198.8:5051
+Press CTRL+C to quit
+Building prefix dict from the default dictionary ...
+[2026-06-13 07:50:32] jieba DEBUG: Building prefix dict from the default dictionary ...
+Loading model from cache /tmp/jieba.cache
+[2026-06-13 07:50:32] jieba DEBUG: Loading model from cache /tmp/jieba.cache
+Loading model cost 1.134 seconds.
+[2026-06-13 07:50:33] jieba DEBUG: Loading model cost 1.134 seconds.
+Prefix dict has been built successfully.
+[2026-06-13 07:50:33] jieba DEBUG: Prefix dict has been built successfully.
+127.0.0.1 - - [13/Jun/2026 07:51:16] "POST /wake HTTP/1.1" 200 -
+[2026-06-13 07:51:16] werkzeug INFO: 127.0.0.1 - - [13/Jun/2026 07:51:16] "POST /wake HTTP/1.1" 200 -
+127.0.0.1 - - [13/Jun/2026 07:51:58] "POST /wake HTTP/1.1" 200 -
+[2026-06-13 07:51:58] werkzeug INFO: 127.0.0.1 - - [13/Jun/2026 07:51:58] "POST /wake HTTP/1.1" 200 -
+127.0.0.1 - - [13/Jun/2026 07:52:49] "POST /wake HTTP/1.1" 200 -
+[2026-06-13 07:52:49] werkzeug INFO: 127.0.0.1 - - [13/Jun/2026 07:52:49] "POST /wake HTTP/1.1" 200 -
+127.0.0.1 - - [13/Jun/2026 07:53:12] "POST /wake HTTP/1.1" 200 -
+[2026-06-13 07:53:12] werkzeug INFO: 127.0.0.1 - - [13/Jun/2026 07:53:12] "POST /wake HTTP/1.1" 200 -
+127.0.0.1 - - [13/Jun/2026 07:53:58] "POST /wake HTTP/1.1" 200 -
+[2026-06-13 07:53:58] werkzeug INFO: 127.0.0.1 - - [13/Jun/2026 07:53:58] "POST /wake HTTP/1.1" 200 -
+127.0.0.1 - - [13/Jun/2026 07:54:29] "POST /wake HTTP/1.1" 200 -
+[2026-06-13 07:54:29] werkzeug INFO: 127.0.0.1 - - [13/Jun/2026 07:54:29] "POST /wake HTTP/1.1" 200 -
+ * Serving Flask app 'gateway'
+ * Debug mode: off
+WARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.
+ * Running on all addresses (0.0.0.0)
+ * Running on http://127.0.0.1:5051
+ * Running on http://139.180.198.8:5051
+Press CTRL+C to quit
+Building prefix dict from the default dictionary ...
+[2026-06-13 07:54:51] jieba DEBUG: Building prefix dict from the default dictionary ...
+Loading model from cache /tmp/jieba.cache
+[2026-06-13 07:54:51] jieba DEBUG: Loading model from cache /tmp/jieba.cache
+Loading model cost 1.004 seconds.
+[2026-06-13 07:54:52] jieba DEBUG: Loading model cost 1.004 seconds.
+Prefix dict has been built successfully.
+[2026-06-13 07:54:52] jieba DEBUG: Prefix dict has been built successfully.
+127.0.0.1 - - [13/Jun/2026 07:55:19] "POST /chat/stream HTTP/1.0" 200 -
+[2026-06-13 07:55:19] werkzeug INFO: 127.0.0.1 - - [13/Jun/2026 07:55:19] "POST /chat/stream HTTP/1.0" 200 -
+127.0.0.1 - - [13/Jun/2026 07:55:41] "POST /wake HTTP/1.1" 200 -
+[2026-06-13 07:55:41] werkzeug INFO: 127.0.0.1 - - [13/Jun/2026 07:55:41] "POST /wake HTTP/1.1" 200 -
+127.0.0.1 - - [13/Jun/2026 07:56:13] "POST /wake HTTP/1.1" 200 -
+[2026-06-13 07:56:13] werkzeug INFO: 127.0.0.1 - - [13/Jun/2026 07:56:13] "POST /wake HTTP/1.1" 200 -
+ * Serving Flask app 'gateway'
+ * Debug mode: off
+WARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.
+ * Running on all addresses (0.0.0.0)
+ * Running on http://127.0.0.1:5051
+ * Running on http://139.180.198.8:5051
+Press CTRL+C to quit
+Building prefix dict from the default dictionary ...
+[2026-06-13 07:56:51] jieba DEBUG: Building prefix dict from the default dictionary ...
+Loading model from cache /tmp/jieba.cache
+[2026-06-13 07:56:51] jieba DEBUG: Loading model from cache /tmp/jieba.cache
+Loading model cost 1.010 seconds.
+[2026-06-13 07:56:52] jieba DEBUG: Loading model cost 1.010 seconds.
+Prefix dict has been built successfully.
+[2026-06-13 07:56:52] jieba DEBUG: Prefix dict has been built successfully.
+127.0.0.1 - - [13/Jun/2026 07:57:28] "POST /wake HTTP/1.1" 200 -
+[2026-06-13 07:57:28] werkzeug INFO: 127.0.0.1 - - [13/Jun/2026 07:57:28] "POST /wake HTTP/1.1" 200 -
+ * Serving Flask app 'gateway'
+ * Debug mode: off
+WARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.
+ * Running on all addresses (0.0.0.0)
+ * Running on http://127.0.0.1:5051
+ * Running on http://139.180.198.8:5051
+Press CTRL+C to quit
+Building prefix dict from the default dictionary ...
+[2026-06-13 07:58:04] jieba DEBUG: Building prefix dict from the default dictionary ...
+Loading model from cache /tmp/jieba.cache
+[2026-06-13 07:58:04] jieba DEBUG: Loading model from cache /tmp/jieba.cache
+Loading model cost 1.065 seconds.
+[2026-06-13 07:58:05] jieba DEBUG: Loading model cost 1.065 seconds.
+Prefix dict has been built successfully.
+[2026-06-13 07:58:05] jieba DEBUG: Prefix dict has been built successfully.
+127.0.0.1 - - [13/Jun/2026 07:58:41] "POST /wake HTTP/1.1" 200 -
+[2026-06-13 07:58:41] werkzeug INFO: 127.0.0.1 - - [13/Jun/2026 07:58:41] "POST /wake HTTP/1.1" 200 -
+ * Serving Flask app 'gateway'
+ * Debug mode: off
+WARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.
+ * Running on all addresses (0.0.0.0)
+ * Running on http://127.0.0.1:5051
+ * Running on http://139.180.198.8:5051
+Press CTRL+C to quit
+Building prefix dict from the default dictionary ...
+[2026-06-13 07:59:12] jieba DEBUG: Building prefix dict from the default dictionary ...
+Loading model from cache /tmp/jieba.cache
+[2026-06-13 07:59:12] jieba DEBUG: Loading model from cache /tmp/jieba.cache
+Loading model cost 1.129 seconds.
+[2026-06-13 07:59:13] jieba DEBUG: Loading model cost 1.129 seconds.
+Prefix dict has been built successfully.
+[2026-06-13 07:59:13] jieba DEBUG: Prefix dict has been built successfully.
+127.0.0.1 - - [13/Jun/2026 07:59:37] "POST /chat HTTP/1.0" 200 -
+[2026-06-13 07:59:37] werkzeug INFO: 127.0.0.1 - - [13/Jun/2026 07:59:37] "POST /chat HTTP/1.0" 200 -
+127.0.0.1 - - [13/Jun/2026 07:59:54] "POST /wake HTTP/1.1" 200 -
+[2026-06-13 07:59:54] werkzeug INFO: 127.0.0.1 - - [13/Jun/2026 07:59:54] "POST /wake HTTP/1.1" 200 -
+127.0.0.1 - - [13/Jun/2026 08:00:44] "POST /wake HTTP/1.1" 200 -
+[2026-06-13 08:00:44] werkzeug INFO: 127.0.0.1 - - [13/Jun/2026 08:00:44] "POST /wake HTTP/1.1" 200 -
+127.0.0.1 - - [13/Jun/2026 08:01:45] "POST /wake HTTP/1.1" 200 -
+[2026-06-13 08:01:45] werkzeug INFO: 127.0.0.1 - - [13/Jun/2026 08:01:45] "POST /wake HTTP/1.1" 200 -
+127.0.0.1 - - [13/Jun/2026 08:02:21] "POST /wake HTTP/1.1" 200 -
+[2026-06-13 08:02:21] werkzeug INFO: 127.0.0.1 - - [13/Jun/2026 08:02:21] "POST /wake HTTP/1.1" 200 -
+ * Serving Flask app 'gateway'
+ * Debug mode: off
+WARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.
+ * Running on all addresses (0.0.0.0)
+ * Running on http://127.0.0.1:5051
+ * Running on http://139.180.198.8:5051
+Press CTRL+C to quit
+127.0.0.1 - - [13/Jun/2026 08:29:50] "GET /api/brain/diary HTTP/1.1" 200 -
+127.0.0.1 - - [13/Jun/2026 08:29:57] "GET /api/brain/dreams HTTP/1.1" 200 -
+ * Serving Flask app 'gateway'
+ * Debug mode: off
+WARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.
+ * Running on all addresses (0.0.0.0)
+ * Running on http://127.0.0.1:5051
+ * Running on http://139.180.198.8:5051
+Press CTRL+C to quit
+127.0.0.1 - - [13/Jun/2026 08:30:22] "GET /api/brain/dreams HTTP/1.1" 200 -
+127.0.0.1 - - [13/Jun/2026 08:30:29] "GET /api/brain/dreams HTTP/1.1" 200 -
+127.0.0.1 - - [13/Jun/2026 08:30:53] "GET /api/brain/diary HTTP/1.1" 200 -
+127.0.0.1 - - [13/Jun/2026 08:30:54] "GET /api/brain/dreams HTTP/1.1" 200 -
+127.0.0.1 - - [13/Jun/2026 08:41:17] "GET /api/brain/diary HTTP/1.1" 200 -
+Building prefix dict from the default dictionary ...
+[2026-06-13 10:00:04] jieba DEBUG: Building prefix dict from the default dictionary ...
+Loading model from cache /tmp/jieba.cache
+[2026-06-13 10:00:04] jieba DEBUG: Loading model from cache /tmp/jieba.cache
+Loading model cost 1.040 seconds.
+[2026-06-13 10:00:05] jieba DEBUG: Loading model cost 1.040 seconds.
+Prefix dict has been built successfully.
+[2026-06-13 10:00:05] jieba DEBUG: Prefix dict has been built successfully.
+127.0.0.1 - - [13/Jun/2026 10:00:47] "POST /wake HTTP/1.1" 200 -
+[2026-06-13 10:00:47] werkzeug INFO: 127.0.0.1 - - [13/Jun/2026 10:00:47] "POST /wake HTTP/1.1" 200 -
+127.0.0.1 - - [13/Jun/2026 11:30:34] "POST /wake HTTP/1.1" 200 -
+[2026-06-13 11:30:34] werkzeug INFO: 127.0.0.1 - - [13/Jun/2026 11:30:34] "POST /wake HTTP/1.1" 200 -
+127.0.0.1 - - [13/Jun/2026 12:00:57] "POST /wake HTTP/1.1" 200 -
+[2026-06-13 12:00:57] werkzeug INFO: 127.0.0.1 - - [13/Jun/2026 12:00:57] "POST /wake HTTP/1.1" 200 -
+127.0.0.1 - - [13/Jun/2026 12:06:50] "GET /api/brain/diary HTTP/1.1" 200 -
+[2026-06-13 12:06:50] werkzeug INFO: 127.0.0.1 - - [13/Jun/2026 12:06:50] "GET /api/brain/diary HTTP/1.1" 200 -
+ * Serving Flask app 'gateway'
+ * Debug mode: off
+Address already in use
+Port 5051 is in use by another program. Either identify and stop that program, or start the server with a different port.
+ * Serving Flask app 'gateway'
+ * Debug mode: off
+Address already in use
+Port 5051 is in use by another program. Either identify and stop that program, or start the server with a different port.
+ * Serving Flask app 'gateway'
+ * Debug mode: off
+Address already in use
+Port 5051 is in use by another program. Either identify and stop that program, or start the server with a different port.
+ * Serving Flask app 'gateway'
+ * Debug mode: off
+Address already in use
+Port 5051 is in use by another program. Either identify and stop that program, or start the server with a different port.
+ * Serving Flask app 'gateway'
+ * Debug mode: off
+Address already in use
+Port 5051 is in use by another program. Either identify and stop that program, or start the server with a different port.
+ * Serving Flask app 'gateway'
+ * Debug mode: off
+Address already in use
+Port 5051 is in use by another program. Either identify and stop that program, or start the server with a different port.
+ * Serving Flask app 'gateway'
+ * Debug mode: off
+Address already in use
+Port 5051 is in use by another program. Either identify and stop that program, or start the server with a different port.
+ * Serving Flask app 'gateway'
+ * Debug mode: off
+Address already in use
+Port 5051 is in use by another program. Either identify and stop that program, or start the server with a different port.
+ * Serving Flask app 'gateway'
+ * Debug mode: off
+Address already in use
+Port 5051 is in use by another program. Either identify and stop that program, or start the server with a different port.
+ * Serving Flask app 'gateway'
+ * Debug mode: off
+Address already in use
+Port 5051 is in use by another program. Either identify and stop that program, or start the server with a different port.
+ * Serving Flask app 'gateway'
+ * Debug mode: off
+Address already in use
+Port 5051 is in use by another program. Either identify and stop that program, or start the server with a different port.
+ * Serving Flask app 'gateway'
+ * Debug mode: off
+Address already in use
+Port 5051 is in use by another program. Either identify and stop that program, or start the server with a different port.
+ * Serving Flask app 'gateway'
+ * Debug mode: off
+Address already in use
+Port 5051 is in use by another program. Either identify and stop that program, or start the server with a different port.
+ * Serving Flask app 'gateway'
+ * Debug mode: off
+Address already in use
+Port 5051 is in use by another program. Either identify and stop that program, or start the server with a different port.
+ * Serving Flask app 'gateway'
+ * Debug mode: off
+Address already in use
+Port 5051 is in use by another program. Either identify and stop that program, or start the server with a different port.
+ * Serving Flask app 'gateway'
+ * Debug mode: off
+Address already in use
+Port 5051 is in use by another program. Either identify and stop that program, or start the server with a different port.
+ * Serving Flask app 'gateway'
+ * Debug mode: off
+Address already in use
+Port 5051 is in use by another program. Either identify and stop that program, or start the server with a different port.
+ * Serving Flask app 'gateway'
+ * Debug mode: off
+Address already in use
+Port 5051 is in use by another program. Either identify and stop that program, or start the server with a different port.
+ * Serving Flask app 'gateway'
+ * Debug mode: off
+Address already in use
+Port 5051 is in use by another program. Either identify and stop that program, or start the server with a different port.
+ * Serving Flask app 'gateway'
+ * Debug mode: off
+Address already in use
+Port 5051 is in use by another program. Either identify and stop that program, or start the server with a different port.
+ * Serving Flask app 'gateway'
+ * Debug mode: off
+Address already in use
+Port 5051 is in use by another program. Either identify and stop that program, or start the server with a different port.
+ * Serving Flask app 'gateway'
+ * Debug mode: off
+Address already in use
+Port 5051 is in use by another program. Either identify and stop that program, or start the server with a different port.
+ * Serving Flask app 'gateway'
+ * Debug mode: off
+Address already in use
+Port 5051 is in use by another program. Either identify and stop that program, or start the server with a different port.
+ * Serving Flask app 'gateway'
+ * Debug mode: off
+Address already in use
+Port 5051 is in use by another program. Either identify and stop that program, or start the server with a different port.
+ * Serving Flask app 'gateway'
+ * Debug mode: off
+Address already in use
+Port 5051 is in use by another program. Either identify and stop that program, or start the server with a different port.
+ * Serving Flask app 'gateway'
+ * Debug mode: off
+Address already in use
+Port 5051 is in use by another program. Either identify and stop that program, or start the server with a different port.
+ * Serving Flask app 'gateway'
+ * Debug mode: off
+Address already in use
+Port 5051 is in use by another program. Either identify and stop that program, or start the server with a different port.
+ * Serving Flask app 'gateway'
+ * Debug mode: off
+Address already in use
+Port 5051 is in use by another program. Either identify and stop that program, or start the server with a different port.
+ * Serving Flask app 'gateway'
+ * Debug mode: off
+Address already in use
+Port 5051 is in use by another program. Either identify and stop that program, or start the server with a different port.
+ * Serving Flask app 'gateway'
+ * Debug mode: off
+Address already in use
+Port 5051 is in use by another program. Either identify and stop that program, or start the server with a different port.
+ * Serving Flask app 'gateway'
+ * Debug mode: off
+Address already in use
+Port 5051 is in use by another program. Either identify and stop that program, or start the server with a different port.
+ * Serving Flask app 'gateway'
+ * Debug mode: off
+Address already in use
+Port 5051 is in use by another program. Either identify and stop that program, or start the server with a different port.
+ * Serving Flask app 'gateway'
+ * Debug mode: off
+Address already in use
+Port 5051 is in use by another program. Either identify and stop that program, or start the server with a different port.
+ * Serving Flask app 'gateway'
+ * Debug mode: off
+Address already in use
+Port 5051 is in use by another program. Either identify and stop that program, or start the server with a different port.
+ * Serving Flask app 'gateway'
+ * Debug mode: off
+Address already in use
+Port 5051 is in use by another program. Either identify and stop that program, or start the server with a different port.
+ * Serving Flask app 'gateway'
+ * Debug mode: off
+Address already in use
+Port 5051 is in use by another program. Either identify and stop that program, or start the server with a different port.
+ * Serving Flask app 'gateway'
+ * Debug mode: off
+Address already in use
+Port 5051 is in use by another program. Either identify and stop that program, or start the server with a different port.
+ * Serving Flask app 'gateway'
+ * Debug mode: off
+Address already in use
+Port 5051 is in use by another program. Either identify and stop that program, or start the server with a different port.
+ * Serving Flask app 'gateway'
+ * Debug mode: off
+Address already in use
+Port 5051 is in use by another program. Either identify and stop that program, or start the server with a different port.
+ * Serving Flask app 'gateway'
+ * Debug mode: off
+Address already in use
+Port 5051 is in use by another program. Either identify and stop that program, or start the server with a different port.
+ * Serving Flask app 'gateway'
+ * Debug mode: off
+Address already in use
+Port 5051 is in use by another program. Either identify and stop that program, or start the server with a different port.
+ * Serving Flask app 'gateway'
+ * Debug mode: off
+Address already in use
+Port 5051 is in use by another program. Either identify and stop that program, or start the server with a different port.
+ * Serving Flask app 'gateway'
+ * Debug mode: off
+Address already in use
+Port 5051 is in use by another program. Either identify and stop that program, or start the server with a different port.
+ * Serving Flask app 'gateway'
+ * Debug mode: off
+Address already in use
+Port 5051 is in use by another program. Either identify and stop that program, or start the server with a different port.
+ * Serving Flask app 'gateway'
+ * Debug mode: off
+Address already in use
+Port 5051 is in use by another program. Either identify and stop that program, or start the server with a different port.
+ * Serving Flask app 'gateway'
+ * Debug mode: off
+Address already in use
+Port 5051 is in use by another program. Either identify and stop that program, or start the server with a different port.
+ * Serving Flask app 'gateway'
+ * Debug mode: off
+Address already in use
+Port 5051 is in use by another program. Either identify and stop that program, or start the server with a different port.
+ * Serving Flask app 'gateway'
+ * Debug mode: off
+Address already in use
+Port 5051 is in use by another program. Either identify and stop that program, or start the server with a different port.
+ * Serving Flask app 'gateway'
+ * Debug mode: off
+Address already in use
+Port 5051 is in use by another program. Either identify and stop that program, or start the server with a different port.

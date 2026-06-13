@@ -72,9 +72,6 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,'PingFang 
 .loading{text-align:center;color:var(--muted);padding:50px;font-size:13px;}
 
 /* gen diary button */
-.gen-diary-btn{display:block;width:calc(100% - 32px);margin:16px auto 0;padding:13px;border:none;border-radius:13px;background:var(--primary);color:#fff;font-size:13px;cursor:pointer;font-family:inherit;letter-spacing:.5px;transition:opacity .15s;}
-.gen-diary-btn:disabled{opacity:.5;cursor:default;}
-.gen-diary-msg{text-align:center;font-size:11px;color:var(--muted);margin-top:8px;min-height:16px;}
 </style>
 </head>
 <body>
@@ -83,7 +80,7 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,'PingFang 
   <div class="hd-row">
     <div>
       <div class="hd-title"><i class="ti ti-moon-stars"></i>白夜</div>
-      <div class="hd-sub">情绪 · 梦 · 深夜想法</div>
+      <div class="hd-sub">情绪 · 梦 · 深夜想法 · 日记</div>
     </div>
     <div class="back" onclick="goBack()"><i class="ti ti-arrow-left"></i></div>
   </div>
@@ -91,6 +88,7 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,'PingFang 
     <div class="tab active" onclick="switchTab('emotions',event)"><i class="ti ti-heart"></i>情绪时间线</div>
     <div class="tab" onclick="switchTab('dreams',event)"><i class="ti ti-mood-smile"></i>梦</div>
     <div class="tab" onclick="switchTab('thoughts',event)"><i class="ti ti-brain"></i>深夜想法</div>
+    <div class="tab" onclick="switchTab('diary',event)"><i class="ti ti-notebook"></i>日记</div>
   </div>
 </div>
 
@@ -115,10 +113,15 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,'PingFang 
       <div class="loading">加载中…</div>
     </div>
   </div>
+
+  <!-- 日记 -->
+  <div id="diary" class="section">
+    <div id="diary-list">
+      <div class="loading">加载中…</div>
+    </div>
+  </div>
 </div>
 
-<button class="gen-diary-btn" id="gen-diary-btn" onclick="genDiary()">费奥多尔写今日日记</button>
-<div class="gen-diary-msg" id="gen-diary-msg"></div>
 
 
 <script>
@@ -139,6 +142,7 @@ async function loadSection(name){
   if(name==='emotions') await loadEmotions();
   else if(name==='dreams') await loadDreams();
   else if(name==='thoughts') await loadThoughts();
+  else if(name==='diary') await loadDiary();
 }
 
 async function loadEmotions(){
@@ -218,19 +222,28 @@ async function loadThoughts(){
   }
 }
 
-window.addEventListener('load', () => loadEmotions());
-async function genDiary(){
-  var btn=document.getElementById('gen-diary-btn');
-  var msg=document.getElementById('gen-diary-msg');
-  btn.disabled=true; btn.textContent='writing…'; msg.textContent='';
+async function loadDiary(){
   try{
-    var r=await fetch('/api/diary/generate',{method:'POST'});
-    var d=await r.json();
-    if(d.ok){msg.textContent='日记已写好 · '+d.content.slice(0,40)+'…';}
-    else{msg.textContent=d.message||d.error||'写入失败';}
-  }catch(e){msg.textContent='请求失败: '+e.message;}
-  btn.disabled=false; btn.textContent='费奥多尔写今日日记';
+    const r = await fetch('/api/brain/diary');
+    const data = await r.json();
+    const container = document.getElementById('diary-list');
+    if(!data.items || data.items.length===0){
+      container.innerHTML = '<div class="empty"><i class="ti ti-notebook"></i><p>暂无日记</p></div>';
+      return;
+    }
+    container.innerHTML = data.items.map(d => `
+      <div class="thought-card">
+        <div class="thought-time">${d.date}</div>
+        <div class="thought-content" style="white-space:pre-wrap">${d.content}</div>
+      </div>
+    `).join('');
+  }catch(e){
+    console.error(e);
+    document.getElementById('diary-list').innerHTML = '<div class="empty">加载失败</div>';
+  }
 }
+
+window.addEventListener('load', () => loadEmotions());
 
 </script>
 </body>

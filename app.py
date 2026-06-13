@@ -1111,6 +1111,28 @@ def brain_thoughts_proxy():
         return jsonify({'ok': False, 'error': str(e)}), 500
 
 
+@app.route('/api/brain/diary', methods=['GET'])
+def brain_diary_proxy():
+    try:
+        conn = get_db()
+        rows = conn.execute(
+            "SELECT content, created_at FROM posts WHERE type='DAILY_SUMMARY' "
+            "ORDER BY created_at DESC LIMIT 14"
+        ).fetchall()
+        conn.close()
+        items = []
+        seen = set()
+        for r in rows:
+            c = (r['content'] or '').strip()
+            if not c or c in seen:
+                continue
+            seen.add(c)
+            items.append({'date': r['created_at'][:10] if r['created_at'] else '\u2014', 'content': c})
+        return jsonify({'ok': True, 'items': items})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+
 @app.route('/api/config/relay', methods=['POST'])
 def config_relay():
     import subprocess as _sp

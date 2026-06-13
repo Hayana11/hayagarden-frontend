@@ -1314,11 +1314,16 @@ def brain_dreams():
         ).fetchall()
         conn.close()
         items = []
+        seen = set()
         for r in rows:
+            c = (r['content'] or '').strip()
+            if not c or c in seen:
+                continue
+            seen.add(c)
             items.append({
                 'date': r['created_at'][:10] if r['created_at'] else '—',
-                'title': (r['content'][:40] + '...') if r['content'] else '无题',
-                'content': r['content'][:300] if r['content'] else '',
+                'title': (c[:40] + '...') if c else '无题',
+                'content': c[:300],
                 'emotion': '朦胧'
             })
         return jsonify({'ok': True, 'items': items})
@@ -1341,6 +1346,32 @@ def brain_thoughts():
                     'time': r['woke_at'][11:16] if r['woke_at'] else '—',
                     'content': r['thoughts'][:200]
                 })
+        return jsonify({'ok': True, 'items': items})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+
+@app.route('/api/brain/diary', methods=['GET'])
+def brain_diary():
+    """日摘要 - 费奥多尔的日记归档"""
+    try:
+        conn = get_db()
+        rows = conn.execute(
+            "SELECT content, created_at FROM posts WHERE type='DAILY_SUMMARY' "
+            "ORDER BY created_at DESC LIMIT 14"
+        ).fetchall()
+        conn.close()
+        items = []
+        seen = set()
+        for r in rows:
+            c = (r['content'] or '').strip()
+            if not c or c in seen:
+                continue
+            seen.add(c)
+            items.append({
+                'date': r['created_at'][:10] if r['created_at'] else '—',
+                'content': c,
+            })
         return jsonify({'ok': True, 'items': items})
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e)}), 500

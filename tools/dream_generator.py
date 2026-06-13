@@ -225,9 +225,18 @@ def generate_dream():
     else:
         _log("got AI-generated dream text")
 
-    # 存入 posts
+    # 存入 posts（检查最近1小时内是否已有相同内容的梦）
     try:
         conn = _db()
+        existing = conn.execute(
+            "SELECT id FROM posts WHERE type='DREAM' AND content=? "
+            "AND created_at > datetime('now','+8 hours','-1 hour')",
+            (dream_text,)
+        ).fetchone()
+        if existing:
+            _log(f"duplicate dream skipped")
+            conn.close()
+            return False
         conn.execute(
             "INSERT INTO posts (type, content, layer, author, processed) VALUES ('DREAM',?,'recent','fyodor',0)",
             (dream_text,)

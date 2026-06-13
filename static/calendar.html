@@ -109,8 +109,9 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,'PingFang 
 .todo-add-inp{width:100%;padding:9px 12px;border-radius:10px;border:1.5px solid var(--border);background:var(--bg);font-size:13px;font-family:inherit;color:var(--text);outline:none;margin-bottom:8px;}
 .todo-add-inp:focus{border-color:var(--primary);}
 .todo-add-row2{display:flex;gap:8px;align-items:center;}
-.todo-add-date{flex:1;padding:7px 10px;border-radius:9px;border:1.5px solid var(--border);background:var(--bg);font-size:12px;font-family:inherit;color:var(--text);outline:none;}
-.todo-add-date:focus{border-color:var(--primary);}
+.todo-date-btn{flex:1;padding:7px 10px;border-radius:9px;border:1.5px solid var(--border);background:var(--bg);font-size:12px;font-family:inherit;color:var(--muted);outline:none;display:flex;align-items:center;justify-content:center;gap:5px;cursor:pointer;white-space:nowrap;}
+.todo-date-btn.set{color:var(--text);border-color:var(--primary);}
+.cal-day.sel:not(.today){background:var(--primary);color:#fff;}
 .todo-authors{display:flex;gap:5px;}
 .ta-btn{width:28px;height:28px;border-radius:50%;border:1.5px solid var(--border);background:none;cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:13px;color:var(--muted);transition:all .15s;flex-shrink:0;}
 .ta-btn.act{border-color:var(--primary);background:var(--primary-bg);color:var(--primary);}
@@ -170,7 +171,7 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,'PingFang 
     <div class="todo-add">
       <input class="todo-add-inp" id="todo-inp" placeholder="添加待办…" onkeydown="if(event.key==='Enter')addTodo()">
       <div class="todo-add-row2">
-        <input class="todo-add-date" type="date" id="todo-date">
+        <button class="todo-date-btn" id="todo-date-btn" onclick="openTDPicker()"><i class="ti ti-calendar"></i><span id="todo-date-label">日期</span></button>
         <div class="todo-authors" id="todo-authors">
           <button class="ta-btn" data-author="hayana" onclick="pickAuthor(this)" title="哈娅"><i class="ti ti-heart"></i></button>
           <button class="ta-btn" data-author="fyodor_web" onclick="pickAuthor(this)" title="费奥多尔·网页"><i class="ti ti-mouse"></i></button>
@@ -193,13 +194,44 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,'PingFang 
   <a class="ni" href="/board"><i class="ti ti-clipboard-list"></i><span>board</span></a>
 </nav>
 
+<!-- Todo date picker -->
+<div class="mo" id="tdmo">
+  <div class="mb">
+    <div class="cal-hd">
+      <button class="cal-nav" onclick="changeTDMonth(-1)"><i class="ti ti-chevron-left"></i></button>
+      <span class="cal-hd-title" id="td-cal-title"></span>
+      <button class="cal-nav" onclick="changeTDMonth(1)"><i class="ti ti-chevron-right"></i></button>
+    </div>
+    <div class="cal-grid" id="td-cal-grid"></div>
+    <div class="mbtns" style="margin-top:14px;">
+      <button class="bcn" onclick="clearTDDate()">清除</button>
+      <button class="bcn" onclick="closeTDPicker()">关闭</button>
+    </div>
+  </div>
+</div>
+
+<!-- Countdown date picker -->
+<div class="mo" id="cddpmo">
+  <div class="mb">
+    <div class="cal-hd">
+      <button class="cal-nav" onclick="changeCDMonth(-1)"><i class="ti ti-chevron-left"></i></button>
+      <span class="cal-hd-title" id="cd-cal-title"></span>
+      <button class="cal-nav" onclick="changeCDMonth(1)"><i class="ti ti-chevron-right"></i></button>
+    </div>
+    <div class="cal-grid" id="cd-cal-grid"></div>
+    <div class="mbtns" style="margin-top:14px;">
+      <button class="bcn" onclick="closeCDPicker()">关闭</button>
+    </div>
+  </div>
+</div>
+
 <!-- Countdown modal -->
 <div class="mo" id="cdmo">
   <div class="mb">
     <h3>add countdown</h3>
     <input type="text" id="cd-title-inp" placeholder="title">
     <input type="text" id="cd-emoji" placeholder="emoji (e.g. 🎂)">
-    <input type="date" id="cd-date">
+    <button class="todo-date-btn" id="cd-date-btn" onclick="openCDPicker()"><i class="ti ti-calendar"></i><span id="cd-date-label">选择日期</span></button>
     <select id="cd-type">
       <option value="countdown">countdown (days until)</option>
       <option value="countup">countup (days since)</option>
@@ -246,12 +278,46 @@ function renderCal(){
 function changeMonth(dir){calMonth+=dir;if(calMonth<0){calMonth=11;calYear--;}if(calMonth>11){calMonth=0;calYear++;}renderCal();if(typeof refreshPeriod==='function')refreshPeriod();}
 renderCal();
 
+// Todo date picker
+var tdYear, tdMonth, tdSelectedDate=null;
+function renderTDCal(){
+  var today=new Date();var first=new Date(tdYear,tdMonth,1);var last=new Date(tdYear,tdMonth+1,0);var startDow=(first.getDay()+6)%7;
+  document.getElementById('td-cal-title').textContent=MONTHS[tdMonth]+' '+tdYear;
+  var html='';DAYS.forEach(function(d){html+='<div class="cal-dh">'+d+'</div>';});
+  for(var i=0;i<startDow;i++)html+='<div></div>';
+  for(var day=1;day<=last.getDate();day++){var dow=(new Date(tdYear,tdMonth,day).getDay()+6)%7;var cls='cal-day';if(day===today.getDate()&&tdMonth===today.getMonth()&&tdYear===today.getFullYear())cls+=' today';else if(dow===5)cls+=' sat';else if(dow===6)cls+=' sun';var mm=pad2(tdMonth+1),dd=pad2(day),ds=tdYear+'-'+mm+'-'+dd;if(ds===tdSelectedDate)cls+=' sel';html+='<div class="'+cls+'" onclick="pickTDDate(\''+ds+'\')"><span>'+day+'</span></div>';}
+  document.getElementById('td-cal-grid').innerHTML=html;
+}
+function changeTDMonth(dir){tdMonth+=dir;if(tdMonth<0){tdMonth=11;tdYear--;}if(tdMonth>11){tdMonth=0;tdYear++;}renderTDCal();}
+function openTDPicker(){var now=new Date();if(tdSelectedDate){var p=tdSelectedDate.split('-');tdYear=+p[0];tdMonth=+p[1]-1;}else{tdYear=now.getFullYear();tdMonth=now.getMonth();}renderTDCal();document.getElementById('tdmo').classList.add('show');}
+function closeTDPicker(){document.getElementById('tdmo').classList.remove('show');}
+function pickTDDate(ds){tdSelectedDate=ds;var p=ds.split('-');var btn=document.getElementById('todo-date-btn');btn.classList.add('set');document.getElementById('todo-date-label').textContent=(+p[1])+'月'+(+p[2])+'日';closeTDPicker();}
+function clearTDDate(){tdSelectedDate=null;document.getElementById('todo-date-btn').classList.remove('set');document.getElementById('todo-date-label').textContent='日期';closeTDPicker();}
+document.getElementById('tdmo').addEventListener('click',function(e){if(e.target===this)closeTDPicker();});
+
+// Countdown date picker (mirrors todo date picker)
+var cdYear, cdMonth, cdSelectedDate=null;
+function renderCDCal(){
+  var today=new Date();var first=new Date(cdYear,cdMonth,1);var last=new Date(cdYear,cdMonth+1,0);var startDow=(first.getDay()+6)%7;
+  document.getElementById('cd-cal-title').textContent=MONTHS[cdMonth]+' '+cdYear;
+  var html='';DAYS.forEach(function(d){html+='<div class="cal-dh">'+d+'</div>';});
+  for(var i=0;i<startDow;i++)html+='<div></div>';
+  for(var day=1;day<=last.getDate();day++){var dow=(new Date(cdYear,cdMonth,day).getDay()+6)%7;var cls='cal-day';if(day===today.getDate()&&cdMonth===today.getMonth()&&cdYear===today.getFullYear())cls+=' today';else if(dow===5)cls+=' sat';else if(dow===6)cls+=' sun';var mm=pad2(cdMonth+1),dd=pad2(day),ds=cdYear+'-'+mm+'-'+dd;if(ds===cdSelectedDate)cls+=' sel';html+='<div class="'+cls+'" onclick="pickCDDate(\''+ds+'\')"><span>'+day+'</span></div>';}
+  document.getElementById('cd-cal-grid').innerHTML=html;
+}
+function changeCDMonth(dir){cdMonth+=dir;if(cdMonth<0){cdMonth=11;cdYear--;}if(cdMonth>11){cdMonth=0;cdYear++;}renderCDCal();}
+function openCDPicker(){var now=new Date();if(cdSelectedDate){var p=cdSelectedDate.split('-');cdYear=+p[0];cdMonth=+p[1]-1;}else{cdYear=now.getFullYear();cdMonth=now.getMonth();}renderCDCal();document.getElementById('cddpmo').classList.add('show');}
+function closeCDPicker(){document.getElementById('cddpmo').classList.remove('show');}
+function pickCDDate(ds){cdSelectedDate=ds;var p=ds.split('-');var btn=document.getElementById('cd-date-btn');btn.classList.add('set');document.getElementById('cd-date-label').textContent=(+p[0])+'年'+(+p[1])+'月'+(+p[2])+'日';closeCDPicker();}
+function resetCDDate(){cdSelectedDate=null;document.getElementById('cd-date-btn').classList.remove('set');document.getElementById('cd-date-label').textContent='选择日期';}
+document.getElementById('cddpmo').addEventListener('click',function(e){if(e.target===this)closeCDPicker();});
+
 async function loadCD(){try{var r=await fetch('/api/countdowns');var d=await r.json();var cds=d.countdowns||[];var c=document.getElementById('cd-list');if(!cds.length){c.innerHTML='<div style="grid-column:1/-1;text-align:center;color:var(--muted);font-size:13px;padding:12px 0;">no countdowns yet</div>';return;}c.innerHTML=cds.map(function(cd){return'<div class="cd-card"><div class="cd-em">'+(cd.emoji||'📅')+'</div><div class="cd-days">'+cd.days+'</div><div class="cd-title">'+escHtml(cd.title)+'</div></div>';}).join('');}catch(e){}}
 function openCD(){document.getElementById('cdmo').classList.add('show');}
 function closeCD(){document.getElementById('cdmo').classList.remove('show');}
 document.getElementById('cdmo').addEventListener('click',function(e){if(e.target===this)closeCD();});
 document.getElementById('day-modal').addEventListener('click',function(e){if(e.target===this)closeDayModal();});
-async function submitCD(){var t=document.getElementById('cd-title-inp').value.trim();var date=document.getElementById('cd-date').value;if(!t||!date)return;await fetch('/api/countdowns',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({title:t,target_date:date,emoji:document.getElementById('cd-emoji').value||'📅',type:document.getElementById('cd-type').value})});closeCD();loadCD();}
+async function submitCD(){var t=document.getElementById('cd-title-inp').value.trim();var date=cdSelectedDate;if(!t||!date)return;await fetch('/api/countdowns',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({title:t,target_date:date,emoji:document.getElementById('cd-emoji').value||'📅',type:document.getElementById('cd-type').value})});document.getElementById('cd-title-inp').value='';document.getElementById('cd-emoji').value='';resetCDDate();closeCD();loadCD();}
 if('serviceWorker' in navigator){navigator.serviceWorker.register('/sw.js').catch(console.error);}
 loadCD();
 
@@ -313,13 +379,13 @@ async function addTodo(){
   var inp = document.getElementById('todo-inp');
   var content = inp.value.trim();
   if(!content) return;
-  var due = document.getElementById('todo-date').value || null;
+  var due = tdSelectedDate;
   var body = {content: content};
   if(due) body.due_date = due;
   if(pickedAuthor) body.author = pickedAuthor;
   try{
     await fetch('/api/todos',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
-    inp.value=''; document.getElementById('todo-date').value='';
+    inp.value=''; clearTDDate();
     pickedAuthor='';
     document.querySelectorAll('#todo-authors .ta-btn').forEach(function(b){ b.classList.remove('act'); });
     await loadTodos();

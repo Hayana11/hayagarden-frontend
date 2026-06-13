@@ -1,8 +1,8 @@
 'use strict';
 
+const express                            = require('express');
 const { McpServer }                      = require('@modelcontextprotocol/sdk/server/mcp.js');
 const { StreamableHTTPServerTransport }  = require('@modelcontextprotocol/sdk/server/streamableHttp.js');
-const { createMcpExpressApp }            = require('@modelcontextprotocol/sdk/server/express.js');
 const { execSync }                       = require('child_process');
 const { z }                              = require('zod');
 
@@ -26,13 +26,12 @@ function buildServer() {
     }
   );
 
-
   const LIGHT_DAEMON = 'http://127.0.0.1:5052';
   async function callLight(path, method, bodyObj) {
     const opts = { method, headers: { 'Content-Type': 'application/json' } };
     if (bodyObj) opts.body = JSON.stringify(bodyObj);
     try {
-      const r = await fetch(LIGHT_DAEMON + path, opts);
+      const r   = await fetch(LIGHT_DAEMON + path, opts);
       const txt = await r.text();
       return { content: [{ type: 'text', text: txt || '(no output)' }] };
     } catch (e) {
@@ -40,61 +39,35 @@ function buildServer() {
     }
   }
 
-  server.tool(
-    'light_on',
-    {},
-    async () => callLight('/light/on', 'POST')
-  );
-
-  server.tool(
-    'light_off',
-    {},
-    async () => callLight('/light/off', 'POST')
-  );
-
+  server.tool('light_on',  {}, () => callLight('/light/on',  'POST'));
+  server.tool('light_off', {}, () => callLight('/light/off', 'POST'));
+  server.tool('get_light_status', {}, () => callLight('/light/status', 'GET'));
+  server.tool('light_bedside_warm', {}, () => callLight('/light/bedside/warm', 'POST'));
   server.tool(
     'set_brightness',
     { value: z.number().min(1).max(100).describe('Brightness 1-100') },
-    async ({ value }) => callLight('/light/brightness', 'POST', { value })
+    ({ value }) => callLight('/light/brightness', 'POST', { value })
   );
-
   server.tool(
     'set_color_temp',
     { value: z.number().describe('Color temperature in Kelvin, e.g. 4000') },
-    async ({ value }) => callLight('/light/color_temp', 'POST', { value })
-  );
-
-  server.tool(
-    'get_light_status',
-    {},
-    async () => callLight('/light/status', 'GET')
-  );
-
-  server.tool(
-    'light_bedside_warm',
-    {},
-    async () => callLight('/light/bedside/warm', 'POST')
+    ({ value }) => callLight('/light/color_temp', 'POST', { value })
   );
 
   return server;
 }
 
-// host: '0.0.0.0' — disable localhost-only DNS-rebinding middleware
-// (nginx handles host validation upstream)
-const app = createMcpExpressApp({ host: '0.0.0.0' });
+const app = express();
+app.use(express.json());
 
-app.post('/mcp', async (req, res) => {
-  const server = buildServer();
+// Stateless streamable-http: new transport + server per request, no sessions, no auth
+app.all('/mcp', async (req, res) => {
+  const server    = buildServer();
+  const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+  await server.connect(transport);
   try {
-    const transport = new StreamableHTTPServerTransport({
-      sessionIdGenerator: undefined,   // stateless — no sessions, no auth
-    });
-    await server.connect(transport);
     await transport.handleRequest(req, res, req.body);
-    res.on('close', () => {
-      transport.close();
-      server.close();
-    });
+    res.on('close', () => { transport.close(); server.close(); });
   } catch (err) {
     console.error('MCP request error:', err);
     if (!res.headersSent) {
@@ -104,29 +77,13 @@ app.post('/mcp', async (req, res) => {
         id: null,
       });
     }
+    transport.close();
+    server.close();
   }
 });
 
-app.get('/mcp', (_req, res) => {
-  res.status(405).json({
-    jsonrpc: '2.0',
-    error: { code: -32000, message: 'Method not allowed.' },
-    id: null,
-  });
-});
-
-app.delete('/mcp', (_req, res) => {
-  res.status(405).json({
-    jsonrpc: '2.0',
-    error: { code: -32000, message: 'Method not allowed.' },
-    id: null,
-  });
-});
-
-const PORT = 3100;
-app.listen(PORT, '0.0.0.0', (err) => {
-  if (err) { console.error('Failed to start:', err); process.exit(1); }
-  console.log(`MCP Streamable HTTP server on port ${PORT}, endpoint POST /mcp`);
+app.listen(3100, '127.0.0.1', () => {
+  console.log('MCP streamable-http server listening on 127.0.0.1:3100/mcp');
 });
 
 process.on('SIGTERM', () => process.exit(0));
