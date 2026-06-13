@@ -257,6 +257,40 @@ def build_system():
             parts.append('\n## 过去几天的记录\n' + '\n'.join(_slines))
     except Exception:
         pass
+    # ── 梦境浮现（30%概率，情感共鸣门控） ────────────────────
+    try:
+        import random as _rand
+        if _rand.random() < 0.30:
+            _dc = get_db()
+            _dream = _dc.execute(
+                "SELECT id, content, tone FROM dream_pool "
+                "WHERE surfaced=0 AND surface_count < 4 "
+                "ORDER BY created_at ASC LIMIT 1"
+            ).fetchone()
+            if _dream:
+                _dc.execute(
+                    "UPDATE dream_pool SET surfaced=1, surface_count=surface_count+1, "
+                    "content=NULL, surfaced_at=datetime('now','+8 hours') WHERE id=?",
+                    (_dream['id'],)
+                )
+                _dc.commit()
+                _dream_text = _dream['content'] or ''
+                if _dream_text:
+                    parts.append(f'\n## 忽然想起来\n（一段梦，从某个夜里飘上来）\n{_dream_text}')
+            else:
+                # 清理超限的梦
+                _dc.execute("DELETE FROM dream_pool WHERE surface_count >= 4 AND surfaced=0")
+                _dc.commit()
+                # surface_count+1 给其他未浮现的梦
+                _dc.execute(
+                    "UPDATE dream_pool SET surface_count=surface_count+1 "
+                    "WHERE surfaced=0 AND surface_count < 4"
+                )
+                _dc.commit()
+            _dc.close()
+    except Exception:
+        pass
+
     try:
         from time_tool import get_current_time
         parts.append('\n' + get_current_time())

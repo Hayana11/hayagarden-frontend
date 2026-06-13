@@ -225,25 +225,31 @@ def generate_dream():
     else:
         _log("got AI-generated dream text")
 
-    # 存入 posts（检查最近1小时内是否已有相同内容的梦）
+    # 存入 dream_pool（藏起来，等情感共鸣时才浮现）
     try:
         conn = _db()
+        now_str = (_now()).strftime('%Y-%m-%d %H:%M:%S')
+        # 最近2小时内已有相同梦则跳过
         existing = conn.execute(
-            "SELECT id FROM posts WHERE type='DREAM' AND content=? "
-            "AND created_at > datetime('now','+8 hours','-1 hour')",
-            (dream_text,)
+            "SELECT id FROM dream_pool WHERE content=? AND created_at > ?",
+            (dream_text, (_now() - __import__('datetime').timedelta(hours=2)).strftime('%Y-%m-%d %H:%M:%S'))
         ).fetchone()
         if existing:
-            _log(f"duplicate dream skipped")
+            _log("duplicate dream skipped")
             conn.close()
             return False
+        # 计算平均情感坐标
+        all_v = [m['valence'] for m in merged] or [0.5]
+        all_a = [m['arousal'] for m in merged] or [0.5]
+        avg_v = sum(all_v) / len(all_v)
+        avg_a = sum(all_a) / len(all_a)
         conn.execute(
-            "INSERT INTO posts (type, content, layer, author, processed) VALUES ('DREAM',?,'recent','fyodor',0)",
-            (dream_text,)
+            "INSERT INTO dream_pool (content, valence, arousal, tone, created_at) VALUES (?,?,?,?,?)",
+            (dream_text, avg_v, avg_a, tone, now_str)
         )
         conn.commit()
         conn.close()
-        _log(f"dream stored: {dream_text[:60]}")
+        _log(f"dream stored in pool: {dream_text[:60]}")
         return True
     except Exception as e:
         _log(f"dream store error: {e}")
