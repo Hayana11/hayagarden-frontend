@@ -69,7 +69,9 @@ def main():
 
     print(f'[cc_board_check] triggering CC for {len(new_trigger)} item(s): {[it["id"] for it in new_trigger]}')
     subprocess.run(
-        [CLAUDE_BIN, '-p', prompt],
+        [CLAUDE_BIN, '-p', prompt,
+         '--allowedTools', 'mcp__home__exec_vps,mcp__ombre-brain__breath,mcp__ombre-brain__pulse,mcp__ombre-brain__grow,Bash,Read,Edit,Write,Glob,Grep',
+         '--dangerously-skip-permissions'],
         timeout=300,
         check=False
     )
