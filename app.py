@@ -1179,6 +1179,68 @@ def config_models():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
+
+def _init_todos_table():
+    conn = get_db()
+    conn.execute(
+        'CREATE TABLE IF NOT EXISTS todos ('
+        'id INTEGER PRIMARY KEY AUTOINCREMENT, '
+        'content TEXT NOT NULL, '
+        'done INTEGER DEFAULT 0, '
+        'due_date TEXT, '
+        'author TEXT, '
+        "created_at DATETIME DEFAULT (datetime('now','+8 hours')))"
+    )
+    conn.commit()
+    conn.close()
+
+_init_todos_table()
+
+
+# -- To-Do List --
+
+@app.route('/api/todos', methods=['GET'])
+def get_todos():
+    conn = get_db()
+    undone = conn.execute(
+        'SELECT * FROM todos WHERE done=0 ORDER BY '
+        "CASE WHEN due_date IS NULL OR due_date='' THEN 1 ELSE 0 END, "
+        'due_date ASC, id ASC'
+    ).fetchall()
+    done = conn.execute(
+        'SELECT * FROM todos WHERE done=1 ORDER BY id DESC LIMIT 5'
+    ).fetchall()
+    conn.close()
+    return jsonify({'todos': [dict(r) for r in undone] + [dict(r) for r in done]})
+
+@app.route('/api/todos', methods=['POST'])
+def add_todo():
+    data = request.get_json() or {}
+    content = (data.get('content') or '').strip()
+    if not content:
+        return jsonify({'error': 'content required'}), 400
+    due_date = (data.get('due_date') or '').strip() or None
+    author   = (data.get('author')   or '').strip() or None
+    conn = get_db()
+    conn.execute('INSERT INTO todos (content, due_date, author) VALUES (?,?,?)',
+        (content, due_date, author))
+    conn.commit(); conn.close()
+    return jsonify({'ok': True})
+
+@app.route('/api/todos/<int:tid>/toggle', methods=['POST'])
+def toggle_todo(tid):
+    conn = get_db()
+    conn.execute('UPDATE todos SET done = 1 - done WHERE id=?', (tid,))
+    conn.commit(); conn.close()
+    return jsonify({'ok': True})
+
+@app.route('/api/todos/<int:tid>', methods=['DELETE'])
+def delete_todo(tid):
+    conn = get_db()
+    conn.execute('DELETE FROM todos WHERE id=?', (tid,))
+    conn.commit(); conn.close()
+    return jsonify({'ok': True})
+
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5050, debug=False)
 

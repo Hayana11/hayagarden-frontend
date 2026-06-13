@@ -89,6 +89,45 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,'PingFang 
 .cal-day.pd-pred:not(.today){outline:1.5px dashed rgba(220,100,100,.45);outline-offset:-2px;color:var(--text);}
 .cal-day.ovul:not(.today){background:rgba(124,106,138,.25);color:var(--primary);}
 .cal-day.fertile:not(.today){background:rgba(124,106,138,.1);}
+/* ── to-do list ── */
+.todo-item{display:flex;align-items:flex-start;gap:10px;padding:10px 0;border-bottom:.5px solid var(--border);}
+.todo-item:last-child{border-bottom:none;}
+.todo-cb{width:17px;height:17px;border-radius:5px;border:1.5px solid var(--border);background:none;cursor:pointer;flex-shrink:0;margin-top:1px;display:flex;align-items:center;justify-content:center;transition:all .15s;}
+.todo-cb.checked{background:var(--primary);border-color:var(--primary);}
+.todo-cb.checked::after{content:'';width:9px;height:5px;border-left:2px solid #fff;border-bottom:2px solid #fff;transform:rotate(-45deg) translateY(-1px);display:block;}
+.todo-body{flex:1;min-width:0;}
+.todo-text{font-size:13px;line-height:1.5;color:var(--text);word-break:break-word;}
+.todo-item.done .todo-text{text-decoration:line-through;color:var(--muted);}
+.todo-meta{display:flex;align-items:center;gap:6px;margin-top:4px;}
+.todo-due{font-size:10px;padding:1px 7px;border-radius:8px;background:var(--amber-bg);color:var(--amber-text);letter-spacing:.2px;}
+.todo-due.overdue{background:rgba(224,85,85,.12);color:var(--red);}
+.todo-author{font-size:12px;color:var(--muted);}
+.todo-del{background:none;border:none;color:var(--border);cursor:pointer;font-size:13px;padding:2px;flex-shrink:0;transition:color .15s;margin-top:1px;}
+.todo-del:hover{color:var(--red);}
+/* add row */
+.todo-add{margin-top:14px;border-top:.5px solid var(--border);padding-top:14px;}
+.todo-add-inp{width:100%;padding:9px 12px;border-radius:10px;border:1.5px solid var(--border);background:var(--bg);font-size:13px;font-family:inherit;color:var(--text);outline:none;margin-bottom:8px;}
+.todo-add-inp:focus{border-color:var(--primary);}
+.todo-add-row2{display:flex;gap:8px;align-items:center;}
+.todo-add-date{flex:1;padding:7px 10px;border-radius:9px;border:1.5px solid var(--border);background:var(--bg);font-size:12px;font-family:inherit;color:var(--text);outline:none;}
+.todo-add-date:focus{border-color:var(--primary);}
+.todo-authors{display:flex;gap:5px;}
+.ta-btn{width:28px;height:28px;border-radius:50%;border:1.5px solid var(--border);background:none;cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:13px;color:var(--muted);transition:all .15s;flex-shrink:0;}
+.ta-btn.act{border-color:var(--primary);background:var(--primary-bg);color:var(--primary);}
+.todo-add-btn{padding:7px 14px;border:none;border-radius:9px;background:var(--primary);color:#fff;font-size:12px;cursor:pointer;font-family:inherit;white-space:nowrap;}
+/* calendar todo dot */
+.cal-day{position:relative;}
+.todo-dot{position:absolute;bottom:2px;right:3px;width:4px;height:4px;border-radius:50%;background:var(--primary);opacity:.7;}
+/* day-modal todo section */
+.dm-todo-sep{font-size:10px;letter-spacing:1.5px;color:var(--muted);text-transform:uppercase;margin:12px 0 6px;padding-top:10px;border-top:.5px solid var(--border);}
+.dm-todo-item{display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:.5px solid var(--border);font-size:12.5px;}
+.dm-todo-item:last-child{border-bottom:none;}
+.dm-todo-cb{width:14px;height:14px;border-radius:4px;border:1.5px solid var(--border);flex-shrink:0;cursor:pointer;background:none;display:flex;align-items:center;justify-content:center;}
+.dm-todo-cb.checked{background:var(--primary);border-color:var(--primary);}
+.dm-todo-cb.checked::after{content:'';width:7px;height:4px;border-left:1.5px solid #fff;border-bottom:1.5px solid #fff;transform:rotate(-45deg) translateY(-1px);display:block;}
+.dm-todo-text{flex:1;color:var(--text);}
+.dm-todo-item.done .dm-todo-text{text-decoration:line-through;color:var(--muted);}
+
 </style>
 </head>
 <body>
@@ -127,7 +166,21 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,'PingFang 
 
   <div class="section">
     <h2><span class="dot amber"></span>to-do list</h2>
-    <div class="soon"><i class="ti ti-checkbox"></i><p>coming soon</p><div class="hint">shared tasks &amp; reminders</div></div>
+    <div id="todo-list"><div class="empty-hint">loading…</div></div>
+    <div class="todo-add">
+      <input class="todo-add-inp" id="todo-inp" placeholder="添加待办…" onkeydown="if(event.key==='Enter')addTodo()">
+      <div class="todo-add-row2">
+        <input class="todo-add-date" type="date" id="todo-date">
+        <div class="todo-authors" id="todo-authors">
+          <button class="ta-btn" data-author="hayana" onclick="pickAuthor(this)" title="哈娅"><i class="ti ti-heart"></i></button>
+          <button class="ta-btn" data-author="fyodor_web" onclick="pickAuthor(this)" title="费奥多尔·网页"><i class="ti ti-mouse"></i></button>
+          <button class="ta-btn" data-author="cc" onclick="pickAuthor(this)" title="CC"><i class="ti ti-moon"></i></button>
+          <button class="ta-btn" data-author="fyodor_api" onclick="pickAuthor(this)" title="费奥多尔·API"><i class="ti ti-chess-knight"></i></button>
+        </div>
+        <button class="todo-add-btn" onclick="addTodo()">+ 添加</button>
+      </div>
+    </div>
+
   </div>
 
 </div>
@@ -201,6 +254,154 @@ document.getElementById('day-modal').addEventListener('click',function(e){if(e.t
 async function submitCD(){var t=document.getElementById('cd-title-inp').value.trim();var date=document.getElementById('cd-date').value;if(!t||!date)return;await fetch('/api/countdowns',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({title:t,target_date:date,emoji:document.getElementById('cd-emoji').value||'📅',type:document.getElementById('cd-type').value})});closeCD();loadCD();}
 if('serviceWorker' in navigator){navigator.serviceWorker.register('/sw.js').catch(console.error);}
 loadCD();
+
+// ── To-Do List ──────────────────────────────────────────────
+var TODO_AUTHOR_META = {
+  hayana:     {color:'#7c6a8a', icon:'ti-heart'},
+  fyodor_web: {color:'#d4a574', icon:'ti-mouse'},
+  cc:         {color:'#5a9a6a', icon:'ti-moon'},
+  fyodor_api: {color:'#c0956a', icon:'ti-chess-knight'},
+};
+var todos = [];
+var pickedAuthor = '';
+
+function todoAuthorMeta(a){ return TODO_AUTHOR_META[a] || null; }
+
+function pickAuthor(btn){
+  var a = btn.getAttribute('data-author');
+  if(pickedAuthor === a){ pickedAuthor=''; btn.classList.remove('act'); return; }
+  document.querySelectorAll('#todo-authors .ta-btn').forEach(function(b){ b.classList.remove('act'); });
+  pickedAuthor = a; btn.classList.add('act');
+}
+
+function fmtDue(due){
+  if(!due) return '';
+  var today = new Date(); var ds = today.getFullYear()+'-'+pad2(today.getMonth()+1)+'-'+pad2(today.getDate());
+  var cls = due < ds ? 'todo-due overdue' : 'todo-due';
+  var parts = due.split('-'); var label = parseInt(parts[1])+'月'+parseInt(parts[2])+'日';
+  return '<span class="'+cls+'">'+label+'</span>';
+}
+
+function renderTodos(){
+  var el = document.getElementById('todo-list');
+  if(!todos.length){ el.innerHTML = '<div class="empty-hint">还没有待办</div>'; return; }
+  el.innerHTML = todos.map(function(t){
+    var am = todoAuthorMeta(t.author);
+    var authorHtml = am ? '<i class="ti '+am.icon+'" style="color:'+am.color+';font-size:12px" title="'+t.author+'"></i>' : '';
+    var dueHtml = fmtDue(t.due_date);
+    var meta = (dueHtml||authorHtml) ? '<div class="todo-meta">'+(dueHtml||'')+authorHtml+'</div>' : '';
+    return '<div class="todo-item'+(t.done?' done':'') +'" id="ti-'+t.id+'">'
+      +'<div class="todo-cb'+(t.done?' checked':'')+'" onclick="toggleTodo('+t.id+')"></div>'
+      +'<div class="todo-body"><div class="todo-text">'+escHtml(t.content)+'</div>'+meta+'</div>'
+      +'<button class="todo-del" onclick="deleteTodo('+t.id+')" title="删除"><i class="ti ti-x"></i></button>'
+      +'</div>';
+  }).join('');
+  // re-render cal to update dots
+  renderCal();
+}
+
+async function loadTodos(){
+  try{
+    var r = await fetch('/api/todos');
+    var d = await r.json();
+    todos = d.todos || [];
+    renderTodos();
+  }catch(e){ document.getElementById('todo-list').innerHTML='<div class="empty-hint">加载失败</div>'; }
+}
+
+async function addTodo(){
+  var inp = document.getElementById('todo-inp');
+  var content = inp.value.trim();
+  if(!content) return;
+  var due = document.getElementById('todo-date').value || null;
+  var body = {content: content};
+  if(due) body.due_date = due;
+  if(pickedAuthor) body.author = pickedAuthor;
+  try{
+    await fetch('/api/todos',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    inp.value=''; document.getElementById('todo-date').value='';
+    pickedAuthor='';
+    document.querySelectorAll('#todo-authors .ta-btn').forEach(function(b){ b.classList.remove('act'); });
+    await loadTodos();
+  }catch(e){}
+}
+
+async function toggleTodo(id){
+  try{
+    await fetch('/api/todos/'+id+'/toggle',{method:'POST'});
+    await loadTodos();
+  }catch(e){}
+}
+
+async function deleteTodo(id){
+  try{
+    await fetch('/api/todos/'+id,{method:'DELETE'});
+    await loadTodos();
+  }catch(e){}
+}
+
+// ── Calendar todo dot integration ───────────────────────────
+var _origRenderCal = renderCal;
+renderCal = function(){
+  _origRenderCal();
+  // add dots for days with pending todos
+  var undone = todos.filter(function(t){ return !t.done && t.due_date; });
+  undone.forEach(function(t){
+    var cell = document.querySelector('[data-date="'+t.due_date+'"]');
+    if(cell && !cell.querySelector('.todo-dot')){
+      var dot = document.createElement('div'); dot.className='todo-dot';
+      cell.appendChild(dot);
+    }
+  });
+};
+
+// ── Day modal todo integration ───────────────────────────────
+var _origOpenDayModal = typeof openDayModal === 'function' ? openDayModal : null;
+
+function openDayModalWithTodos(ds){
+  if(_origOpenDayModal) _origOpenDayModal(ds);
+  // append todos for this day
+  var dayTodos = todos.filter(function(t){ return t.due_date === ds; });
+  var mb = document.querySelector('#day-modal .mb');
+  if(!mb) return;
+  var existing = document.getElementById('dm-todo-sec');
+  if(existing) existing.remove();
+  if(!dayTodos.length) return;
+  var sec = document.createElement('div'); sec.id='dm-todo-sec';
+  sec.innerHTML = '<div class="dm-todo-sep">当天待办</div>'
+    + dayTodos.map(function(t){
+        return '<div class="dm-todo-item'+(t.done?' done':'')+'">'
+          +'<div class="dm-todo-cb'+(t.done?' checked':'')+'" onclick="toggleTodo('+t.id+');this.closest(\'.dm-todo-item\').classList.toggle(\'done\');this.classList.toggle(\'checked\');loadTodos()"></div>'
+          +'<div class="dm-todo-text">'+escHtml(t.content)+'</div>'
+          +'</div>';
+      }).join('');
+  mb.insertBefore(sec, mb.querySelector('.mbtns'));
+}
+
+// Override openDayModal globally after period.js also loads
+window.addEventListener('load', function(){
+  var real = window.openDayModal || _origOpenDayModal;
+  window.openDayModal = function(ds){
+    if(real) real(ds);
+    var dayTodos = todos.filter(function(t){ return t.due_date === ds; });
+    var mb = document.querySelector('#day-modal .mb');
+    if(!mb) return;
+    var existing = document.getElementById('dm-todo-sec');
+    if(existing) existing.remove();
+    if(!dayTodos.length) return;
+    var sec = document.createElement('div'); sec.id='dm-todo-sec';
+    sec.innerHTML = '<div class="dm-todo-sep">当天待办</div>'
+      + dayTodos.map(function(t){
+          return '<div class="dm-todo-item'+(t.done?' done':'')+'">'
+            +'<div class="dm-todo-cb'+(t.done?' checked':'')+'" onclick="toggleTodo('+t.id+');loadTodos();var p=this.closest(\'.dm-todo-item\');p.classList.toggle(\'done\');this.classList.toggle(\'checked\')"></div>'
+            +'<div class="dm-todo-text">'+escHtml(t.content)+'</div>'
+            +'</div>';
+        }).join('');
+    mb.insertBefore(sec, mb.querySelector('.mbtns'));
+  };
+  loadTodos();
+});
+
 </script>
 <script src="/static/period.js"></script>
 </body>
