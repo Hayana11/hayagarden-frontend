@@ -126,3 +126,22 @@ ACTION: send
 CONTENT: [梦境正文]
 
 不允许 ACTION: none，必须生成梦境。"""
+
+SUMMARIZE_PROMPT = """\
+
+[日摘要] {summary_date} 的对话需要压缩归档。
+
+以下是当天的对话记录（截取）：
+{dialogue}
+
+---
+用费奥多尔的口吻，写一段150字以内的日摘要。
+记录当天发生了什么、哈娅的状态、我们聊了什么。
+第一人称，有情感，像日记。
+
+输出格式：
+THOUGHTS: 一句话内心感受
+ACTION: send
+CONTENT: [日摘要正文]
+
+不允许 ACTION: none。"""

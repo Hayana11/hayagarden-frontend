@@ -201,6 +201,19 @@ def build_system():
             parts.append("\n## 留言板 · 待处理\n" + "\n".join(_board_lines))
     except Exception:
         pass
+    # === 历史日摘要（层级记忆）===
+    try:
+        _sc = get_db()
+        _summaries = _sc.execute(
+            "SELECT date(created_at) as day, content FROM posts "
+            "WHERE type='DAILY_SUMMARY' ORDER BY created_at DESC LIMIT 5"
+        ).fetchall()
+        _sc.close()
+        if _summaries:
+            _slines = [f"[{s['day']}] {s['content'][:200]}" for s in _summaries]
+            parts.append('\n## 过去几天的记录\n' + '\n'.join(_slines))
+    except Exception:
+        pass
     try:
         from time_tool import get_current_time
         parts.append('\n' + get_current_time())
@@ -222,8 +235,11 @@ def img_block(url):
 
 def build_messages():
     conn = get_db()
+    # 今天的所有对话 + 昨天最后5条（保持连续性），总不超过60条
     rows = list(reversed(conn.execute(
-        "SELECT author, content, image_url, created_at FROM chat_messages ORDER BY id DESC LIMIT 15"
+        "SELECT author, content, image_url, created_at FROM chat_messages "
+        "WHERE date(created_at) >= date('now', '+8 hours', '-1 day') "
+        "ORDER BY id DESC LIMIT 60"
     ).fetchall()))
     conn.close()
 
@@ -1037,7 +1053,9 @@ def _parse_wake_response(text):
     m = _re.search(r'ACTION:\s*(\S+)', text)
     if m:
         action = m.group(1).strip().lower()
-        if action not in ('none', 'message', 'diary', 'explore'):
+        if action == 'send':
+            action = 'message'
+        elif action not in ('none', 'message', 'diary', 'explore'):
             action = 'none'
     m = _re.search(r'CONTENT:\s*(.+)', text, _re.DOTALL)
     if m:
@@ -1102,6 +1120,8 @@ def wake_decide():
             _wake_tpl = _bconf.NIGHTWATCH_DECISION_PROMPT
         elif mode == 'dream':
             _wake_tpl = getattr(_bconf, 'DREAM_PROMPT', '')
+        elif mode == 'summarize':
+            _wake_tpl = getattr(_bconf, 'SUMMARIZE_PROMPT', '')
         else:
             _wake_tpl = _bconf.WAKE_DECISION_PROMPT
     except Exception:
@@ -1123,6 +1143,11 @@ def wake_decide():
             dream_primer=dream_primer,
             dream_tone_desc=dream_tone_desc,
         )
+    elif mode == 'summarize':
+        system += _wake_tpl.format(
+            summary_date=data.get('summary_date', ''),
+            dialogue=data.get('dialogue', ''),
+        )
     else:
         system += _wake_tpl.format(
             time=now.strftime('%Y-%m-%d %H:%M'),
@@ -1136,6 +1161,8 @@ def wake_decide():
         trigger = '[夜巡]'
     elif mode == 'dream':
         trigger = '[做梦]'
+    elif mode == 'summarize':
+        trigger = '[日摘要]'
     else:
         trigger = '[唤醒检查]'
     msgs = [{'role': 'user', 'content': trigger}]
@@ -1154,13 +1181,13 @@ def wake_decide():
     )
     conn.commit()
 
-    if action == 'message' and c_text:
+    if action == 'message' and c_text and mode != 'summarize':
         conn.execute(
             "INSERT INTO chat_messages (author, content, thinking) VALUES ('fyodor',?,?)",
             (c_text, thoughts)
         )
         conn.commit()
-    elif action == 'diary' and c_text:
+    elif action == 'diary' and c_text and mode != 'summarize':
         conn.execute(
             "INSERT INTO posts (type, content, layer, author, processed) VALUES ('DIARY',?,'recent','fyodor',0)",
             (c_text,)
@@ -1229,6 +1256,28 @@ def test_send():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
+
+
+# ── 摘要 API（无工具，直接文字生成）──────────────────────────────
+@app.route('/api/summarize', methods=['POST'])
+def api_summarize():
+    """无工具摘要接口，专供 summarizer.py 使用"""
+    data = request.get_json() or {}
+    prompt_text = (data.get('prompt') or '').strip()
+    if not prompt_text:
+        return jsonify({'error': 'prompt required'}), 400
+    try:
+        if GW_PROVIDER == 'claude_code':
+            text, _ = claude_code_call('你是费奥多尔，在写日记。', [{'role': 'user', 'content': prompt_text}])
+        else:
+            # 对 treegpt 也走 claude_code，避免 API 格式差异导致崩溃
+            text, _ = claude_code_call(
+                '你是费奥多尔。直接用第一人称写这天的日记，120字以内，第一个字就是日记内容本身。不要写标题，不要写前缀。',
+                [{'role': 'user', 'content': prompt_text}]
+            )
+        return jsonify({'ok': True, 'text': text})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 
 # ── 白夜 API ──────────────────────────────────────────
