@@ -12,7 +12,7 @@ app = Flask(__name__)
 DB_PATH    = '/opt/frontend/memories.db'
 STATIC_DIR = '/opt/frontend/static'
 API_URL    = 'https://gua.guagua.uk/v1/messages'
-MODEL      = 'claude-sonnet-4-6'
+MODEL      = 'claude-opus-4-6'
 
 API_KEY = ''
 GW_PROVIDER = 'treegpt'
@@ -87,14 +87,57 @@ def _ombre_breath_sync():
         return None
 
 
+def _ombre_handoff_sync():
+    """
+    Call handoff() for new window continuity.
+    Returns compact self_anchor + portraits + recent continuity.
+    """
+    import concurrent.futures as _cf
+
+    def _worker():
+        import asyncio as _aio, sys as _sys, logging as _log
+        _log.getLogger('ombre_brain').setLevel(_log.WARNING)
+        _sys.path.insert(0, '/opt/ombre-brain')
+        from server import handoff as _handoff
+        loop = _aio.new_event_loop()
+        _aio.set_event_loop(loop)
+        try:
+            return loop.run_until_complete(
+                _aio.wait_for(_handoff(), timeout=3.0)
+            )
+        except _aio.TimeoutError:
+            return None
+        except Exception:
+            return None
+        finally:
+            try:
+                pending = _aio.all_tasks(loop)
+                for t in pending:
+                    t.cancel()
+                if pending:
+                    loop.run_until_complete(
+                        _aio.gather(*pending, return_exceptions=True)
+                    )
+            except Exception:
+                pass
+            loop.close()
+
+    try:
+        with _cf.ThreadPoolExecutor(max_workers=1) as ex:
+            future = ex.submit(_worker)
+            return future.result(timeout=4.0)
+    except Exception:
+        return None
+
+
 def build_system():
     parts = []
 
-    # ── 1. Ombre Brain pinned / core facts ──────────────────
+    # ── 1. Handoff：自我锚点 + 用户/关系画像 + 近期连续性 ──
     try:
-        core_facts = _ombre_breath_sync()
-        if core_facts and core_facts.strip() and '权重池平静' not in core_facts:
-            parts.append('## 当前状态与重要事实\n' + core_facts)
+        handoff_text = _ombre_handoff_sync()
+        if handoff_text and handoff_text.strip() and '无交接信息' not in handoff_text:
+            parts.append('## 开窗交接\n' + handoff_text)
     except Exception:
         pass
 
