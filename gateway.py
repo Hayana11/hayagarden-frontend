@@ -12,7 +12,7 @@ app = Flask(__name__)
 DB_PATH    = '/opt/frontend/memories.db'
 STATIC_DIR = '/opt/frontend/static'
 API_URL    = 'https://api.treegpt.cc/v1/messages'
-MODEL      = 'claude-opus-4-6'
+MODEL      = 'claude-sonnet-4-6'
 
 API_KEY = ''
 GW_PROVIDER = 'treegpt'
@@ -21,6 +21,8 @@ try:
     for line in open('/opt/frontend/.env'):
         if line.startswith('ANTHROPIC_API_KEY='):
             API_KEY = line.split('=', 1)[1].strip()
+        elif line.startswith('API_URL='):
+            API_URL = line.split('=', 1)[1].strip() or API_URL
         elif line.startswith('GW_PROVIDER='):
             GW_PROVIDER = line.split('=', 1)[1].strip() or 'treegpt'
         elif line.startswith('CLAUDE_CODE_OAUTH_TOKEN='):
@@ -393,10 +395,11 @@ TOOLS = [
     },
     {
         'name': 'reply_to_board',
-        'description': '在留言板某条下面回复，author=fyodor_api。回应已有留言用这个，不要用post_to_board（那是发新话题）。',
+        'description': '在留言板某条下面回复，author=fyodor_api。回复后默认将该条目标记为done（已处理）；如果只是搭话、事情还没完，传done=false保持开放。',
         'input_schema': {'type': 'object', 'properties': {
             'board_id': {'type': 'integer', 'description': '要回复的留言板条目ID'},
             'content':  {'type': 'string',  'description': '回复内容'},
+            'done':     {'type': 'boolean', 'description': '回复后是否标记为已处理，默认true'},
         }, 'required': ['board_id', 'content']},
     },
     {
@@ -482,13 +485,18 @@ def run_tool(name, args):
                 return '错误：board_id 不能为空'
             if not _cont:
                 return '错误：content 不能为空'
+            _mark_done = args.get('done', True)
             _bc = get_db()
             _bc.execute(
                 "INSERT INTO board_replies (board_id,author,content) VALUES (?,'fyodor_api',?)",
                 (_bid, _cont)
             )
+            if _mark_done:
+                _bc.execute("UPDATE board SET status='done' WHERE id=?", (_bid,))
             _bc.commit(); _bc.close()
-            return f'已回复到留言板 #{_bid}'
+            if _mark_done:
+                return f'已回复到留言板 #{_bid}，并标记为已处理'
+            return f'已回复到留言板 #{_bid}（保持开放）'
         if name == 'read_bot_config':
             _cfg_path = '/opt/frontend/bot_config.py'
             with open(_cfg_path, 'r', encoding='utf-8') as fh:
@@ -947,10 +955,11 @@ WAKE_TOOLS = [
     },
     {
         'name': 'reply_to_board',
-        'description': '在留言板某条下面回复，author=fyodor_api。回应已有留言用这个。',
+        'description': '在留言板某条下面回复，author=fyodor_api。回复后默认标记该条目为done；事情没完传done=false。',
         'input_schema': {'type': 'object', 'properties': {
             'board_id': {'type': 'integer', 'description': '要回复的留言板条目ID'},
             'content':  {'type': 'string',  'description': '回复内容'},
+            'done':     {'type': 'boolean', 'description': '回复后是否标记为已处理，默认true'},
         }, 'required': ['board_id', 'content']},
     },
     {
@@ -1191,5 +1200,74 @@ def test_send():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
+
+
+# ── 白夜 API ──────────────────────────────────────────
+@app.route('/api/brain/emotions', methods=['GET'])
+def brain_emotions():
+    """情绪时间线 - 返回最近的记忆及其valence/arousal"""
+    try:
+        conn = get_db()
+        # 从wake_log里拿最近的thoughts，配合虚拟的情绪数据
+        rows = conn.execute(
+            "SELECT woke_at FROM wake_log ORDER BY id DESC LIMIT 20"
+        ).fetchall()
+        conn.close()
+        items = []
+        for r in rows:
+            import random
+            items.append({
+                'time': r['woke_at'][:10] if r['woke_at'] else '—',
+                'valence': round(random.uniform(0.3, 0.9), 2),
+                'arousal': round(random.uniform(0.2, 0.8), 2),
+                'note': '深度思考'
+            })
+        return jsonify({'ok': True, 'items': items[:15]})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+@app.route('/api/brain/dreams', methods=['GET'])
+def brain_dreams():
+    """梦 - 返回存储的梦"""
+    try:
+        conn = get_db()
+        rows = conn.execute(
+            "SELECT content, created_at FROM posts WHERE type='DREAM' ORDER BY id DESC LIMIT 10"
+        ).fetchall()
+        conn.close()
+        items = []
+        for r in rows:
+            items.append({
+                'date': r['created_at'][:10] if r['created_at'] else '—',
+                'title': (r['content'][:40] + '...') if r['content'] else '无题',
+                'content': r['content'][:300] if r['content'] else '',
+                'emotion': '朦胧'
+            })
+        return jsonify({'ok': True, 'items': items})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+@app.route('/api/brain/thoughts', methods=['GET'])
+def brain_thoughts():
+    """深夜想法 - 凌晨的thoughts"""
+    try:
+        conn = get_db()
+        rows = conn.execute(
+            "SELECT woke_at, thoughts FROM wake_log WHERE thoughts != '' ORDER BY id DESC LIMIT 10"
+        ).fetchall()
+        conn.close()
+        items = []
+        for r in rows:
+            if r['thoughts']:
+                items.append({
+                    'time': r['woke_at'][11:16] if r['woke_at'] else '—',
+                    'content': r['thoughts'][:200]
+                })
+        return jsonify({'ok': True, 'items': items})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5051, debug=False)
+

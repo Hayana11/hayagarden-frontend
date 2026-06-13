@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>白夜 · 费奥多尔的大脑</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons@latest/tabler-icons.min.css">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: "Segoe UI", Verdana, sans-serif; background: #0f0f0f; color: #e0e0e0; line-height: 1.6; }
+        .container { max-width: 1200px; margin: 0 auto; padding: 20px; }
+        .header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 40px; border-bottom: 1px solid rgba(255,255,255,.1); padding-bottom: 20px; }
+        .header h1 { font-size: 2.5em; font-weight: 300; letter-spacing: 2px; }
+        .header .back { cursor: pointer; color: #888; transition: color 0.3s; }
+        .header .back:hover { color: #fff; }
+        
+        .tabs { display: flex; gap: 30px; margin-bottom: 40px; border-bottom: 1px solid rgba(255,255,255,.1); padding-bottom: 15px; }
+        .tab { cursor: pointer; padding: 10px 0; color: #888; transition: color 0.3s; position: relative; }
+        .tab.active { color: #fff; }
+        .tab.active::after { content: ''; position: absolute; bottom: -15px; left: 0; right: 0; height: 2px; background: #fff; }
+        
+        .section { display: none; }
+        .section.active { display: block; }
+        
+        /* 情绪时间线 */
+        .emotion-timeline { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 20px; }
+        .emotion-card { background: rgba(255,255,255,.05); border: 1px solid rgba(255,255,255,.1); padding: 20px; border-radius: 8px; }
+        .emotion-card .time { color: #888; font-size: 0.9em; }
+        .emotion-card .mood { margin: 10px 0; display: flex; gap: 15px; }
+        .emotion-card .mood .val { flex: 1; }
+        .emotion-card .mood .val-label { font-size: 0.8em; color: #888; margin-bottom: 5px; }
+        .emotion-card .mood .bar { height: 8px; background: rgba(255,255,255,.1); border-radius: 4px; overflow: hidden; }
+        .emotion-card .mood .bar-fill { height: 100%; background: linear-gradient(90deg, #ff6b6b, #ffd93d, #6bcf7f); transition: width 0.3s; }
+        
+        /* 梦 */
+        .dreams-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(400px, 1fr)); gap: 20px; }
+        .dream-card { background: rgba(138, 43, 226, .1); border: 1px solid rgba(138, 43, 226, .3); padding: 25px; border-radius: 8px; }
+        .dream-card .dream-date { color: #888; font-size: 0.9em; margin-bottom: 10px; }
+        .dream-card .dream-title { font-size: 1.3em; font-weight: 500; margin-bottom: 15px; color: #d0a0ff; }
+        .dream-card .dream-content { color: #d0d0d0; margin: 15px 0; line-height: 1.8; }
+        .dream-card .dream-emotion { font-size: 0.9em; color: #888; margin-top: 15px; font-style: italic; }
+        
+        .empty { text-align: center; color: #666; padding: 40px 20px; }
+        .empty i { font-size: 3em; margin-bottom: 15px; opacity: 0.5; }
+        
+        .loading { text-align: center; color: #888; padding: 40px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>白夜</h1>
+            <div class="back" onclick="goBack()"><i class="ti ti-arrow-left"></i> 返回</div>
+        </div>
+        
+        <div class="tabs">
+            <div class="tab active" onclick="switchTab('emotions')"><i class="ti ti-heart"></i> 情绪时间线</div>
+            <div class="tab" onclick="switchTab('dreams')"><i class="ti ti-mood-smile"></i> 梦</div>
+            <div class="tab" onclick="switchTab('thoughts')"><i class="ti ti-brain"></i> 深夜想法</div>
+        </div>
+        
+        <!-- 情绪时间线 -->
+        <div id="emotions" class="section active">
+            <div id="emotion-timeline" class="emotion-timeline">
+                <div class="loading">加载中...</div>
+            </div>
+        </div>
+        
+        <!-- 梦 -->
+        <div id="dreams" class="section">
+            <div id="dreams-list" class="dreams-list">
+                <div class="loading">加载中...</div>
+            </div>
+        </div>
+        
+        <!-- 深夜想法 -->
+        <div id="thoughts" class="section">
+            <div id="thoughts-list">
+                <div class="loading">加载中...</div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        function goBack() { window.location.href = '/static/dash.html'; }
+        
+        function switchTab(name) {
+            document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+            document.querySelectorAll('.section').forEach(s => s.classList.remove('active'));
+            event.target.closest('.tab').classList.add('active');
+            document.getElementById(name).classList.add('active');
+            loadSection(name);
+        }
+        
+        async function loadSection(name) {
+            if (name === 'emotions') await loadEmotions();
+            else if (name === 'dreams') await loadDreams();
+            else if (name === 'thoughts') await loadThoughts();
+        }
+        
+        async function loadEmotions() {
+            try {
+                const r = await fetch('/api/brain/emotions');
+                const data = await r.json();
+                const container = document.getElementById('emotion-timeline');
+                if (!data.items || data.items.length === 0) {
+                    container.innerHTML = '<div class="empty"><i class="ti ti-mood-sad"></i><p>暂无情绪记录</p></div>';
+                    return;
+                }
+                container.innerHTML = data.items.map(item => `
+                    <div class="emotion-card">
+                        <div class="time">${item.time}</div>
+                        <div class="mood">
+                            <div class="val">
+                                <div class="val-label">情感 (Valence)</div>
+                                <div class="bar"><div class="bar-fill" style="width: ${item.valence * 100}%"></div></div>
+                                <small>${(item.valence * 100).toFixed(0)}%</small>
+                            </div>
+                            <div class="val">
+                                <div class="val-label">觉醒 (Arousal)</div>
+                                <div class="bar"><div class="bar-fill" style="width: ${item.arousal * 100}%; background: linear-gradient(90deg, #6bcf7f, #ffd93d, #ff6b6b);"></div></div>
+                                <small>${(item.arousal * 100).toFixed(0)}%</small>
+                            </div>
+                        </div>
+                        <div style="color: #888; font-size: 0.85em; margin-top: 10px;">${item.note || ''}</div>
+                    </div>
+                `).join('');
+            } catch (e) {
+                console.error(e);
+                document.getElementById('emotion-timeline').innerHTML = '<div class="empty">加载失败</div>';
+            }
+        }
+        
+        async function loadDreams() {
+            try {
+                const r = await fetch('/api/brain/dreams');
+                const data = await r.json();
+                const container = document.getElementById('dreams-list');
+                if (!data.items || data.items.length === 0) {
+                    container.innerHTML = '<div class="empty"><i class="ti ti-mood-smile"></i><p>还没有做过梦</p></div>';
+                    return;
+                }
+                container.innerHTML = data.items.map(dream => `
+                    <div class="dream-card">
+                        <div class="dream-date">${dream.date}</div>
+                        <div class="dream-title">${dream.title}</div>
+                        <div class="dream-content">${dream.content}</div>
+                        ${dream.emotion ? `<div class="dream-emotion">情绪：${dream.emotion}</div>` : ''}
+                    </div>
+                `).join('');
+            } catch (e) {
+                console.error(e);
+                document.getElementById('dreams-list').innerHTML = '<div class="empty">加载失败</div>';
+            }
+        }
+        
+        async function loadThoughts() {
+            try {
+                const r = await fetch('/api/brain/thoughts');
+                const data = await r.json();
+                const container = document.getElementById('thoughts-list');
+                if (!data.items || data.items.length === 0) {
+                    container.innerHTML = '<div class="empty"><i class="ti ti-brain"></i><p>暂无深夜想法</p></div>';
+                    return;
+                }
+                container.innerHTML = '<div style="display: grid; gap: 20px;">' + data.items.map(thought => `
+                    <div style="background: rgba(255,255,255,.05); border: 1px solid rgba(255,255,255,.1); padding: 20px; border-radius: 8px;">
+                        <div style="color: #888; font-size: 0.9em; margin-bottom: 10px;">${thought.time}</div>
+                        <div style="color: #e0e0e0; line-height: 1.8;">${thought.content}</div>
+                    </div>
+                `).join('') + '</div>';
+            } catch (e) {
+                console.error(e);
+                document.getElementById('thoughts-list').innerHTML = '<div class="empty">加载失败</div>';
+            }
+        }
+        
+        // 页面加载时加载情绪数据
+        window.addEventListener('load', () => loadEmotions());
+    </script>
+</body>
+</html>

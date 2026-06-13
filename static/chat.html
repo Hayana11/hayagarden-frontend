@@ -296,10 +296,7 @@ html[data-theme=dark] .ni{color:#6a5f5f;}
       <button class="rm" onclick="removeImg()">×</button>
     </div>
   </div>
-  <div class="inp-author">
-    <span>as</span>
-    <button class="inp-author-btn ha" id="author-btn" onclick="toggleAuthor()">Haya</button>
-  </div>
+
   <div class="inp-row">
     <button class="inp-attach" onclick="document.getElementById('file-in').click()"><i class="ti ti-paperclip"></i></button>
     <input type="file" id="file-in" accept="image/*" style="display:none" onchange="onFile(event)">
@@ -319,6 +316,7 @@ html[data-theme=dark] .ni{color:#6a5f5f;}
   <a class="ni act" href="/chat"><i class="ti ti-message-2"></i><span>chat</span></a>
   <a class="ni" href="/calendar"><i class="ti ti-calendar"></i><span>calendar</span></a>
   <a class="ni" href="/read"><i class="ti ti-book"></i><span>read</span></a>
+  <a class="ni" href="/board"><i class="ti ti-clipboard-list"></i><span>board</span></a>
 </nav>
 
 
@@ -593,13 +591,8 @@ async function loadMsgs(isInit){
   }
 }
 
-// Author toggle
-function toggleAuthor(){
-  curAuthor = curAuthor==='hayana'?'fyodor':'hayana';
-  var btn=document.getElementById('author-btn');
-  btn.textContent=curAuthor==='hayana'?'Haya':'Fyodor';
-  btn.className='inp-author-btn '+(curAuthor==='hayana'?'ha':'fy');
-}
+// Author fixed
+
 
 // File input
 function onFile(e){
