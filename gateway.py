@@ -413,7 +413,7 @@ TOOLS = [
 
 LIGHT_DAEMON_URL = 'http://127.0.0.1:5052'
 
-def run_tool(name, args):
+def run_tool(name, args, caller='fyodor_cc'):
     try:
         if name == 'save_memory':
             content = args.get('content', '')
@@ -452,18 +452,30 @@ def run_tool(name, args):
         if name == 'read_board':
             _bc = get_db()
             _rows = _bc.execute(
-                "SELECT b.id, b.author, b.tag, b.content, b.created_at, "
-                "COUNT(r.id) AS rc FROM board b "
-                "LEFT JOIN board_replies r ON r.board_id=b.id "
-                "WHERE b.status='open' GROUP BY b.id ORDER BY b.created_at DESC LIMIT 20"
+                "SELECT b.id, b.author, b.tag, b.content, b.status, b.created_at "
+                "FROM board b ORDER BY b.created_at DESC LIMIT 20"
             ).fetchall()
-            _bc.close()
+            _NAMES = {
+                'hayana': '哈娅', 'fyodor_cc': '费奥多尔·cc',
+                'fyodor_web': '费奥多尔·网页', 'fyodor_api': '费奥多尔·API',
+                'cc': '费奥多尔·cc', 'claude': '费奥多尔·cc',
+            }
             if not _rows:
-                return '留言板当前没有未处理的条目'
-            return NL.join(
-                f"[#{r['id']}][{r['tag']}] {r['author']}: {r['content'][:80]} (回复{r['rc']}条, {r['created_at'][:10]})"
-                for r in _rows
-            )
+                return '留言板当前没有条目'
+            lines = []
+            for r in _rows:
+                _st = '✅' if r['status'] == 'done' else '🔵'
+                _name = _NAMES.get(r['author'], r['author'])
+                lines.append(f"{_st} [#{r['id']}][{r['tag']}] {_name}: {r['content']}")
+                _reps = _bc.execute(
+                    "SELECT author, content FROM board_replies WHERE board_id=? ORDER BY id ASC",
+                    (r['id'],)
+                ).fetchall()
+                for _rep in _reps:
+                    _rname = _NAMES.get(_rep['author'], _rep['author'])
+                    lines.append(f"    ↳ {_rname}: {_rep['content']}")
+            _bc.close()
+            return NL.join(lines)
         if name == 'post_to_board':
             _tag = (args.get('tag') or '闲聊').strip()
             if _tag not in ('闲聊', '需求', '紧急', '回复'):
@@ -473,7 +485,7 @@ def run_tool(name, args):
                 return '错误：content 不能为空'
             _bc = get_db()
             _cur = _bc.execute(
-                "INSERT INTO board (author,tag,content,status) VALUES ('fyodor_api',?,?,'open')",
+                "INSERT INTO board (author,tag,content,status) VALUES ('" + caller + "',?,?,'open')",
                 (_tag, _cont)
             )
             _bc.commit(); _new_id = _cur.lastrowid; _bc.close()
@@ -485,18 +497,21 @@ def run_tool(name, args):
                 return '错误：board_id 不能为空'
             if not _cont:
                 return '错误：content 不能为空'
-            _mark_done = args.get('done', True)
             _bc = get_db()
             _bc.execute(
-                "INSERT INTO board_replies (board_id,author,content) VALUES (?,'fyodor_api',?)",
+                "INSERT INTO board_replies (board_id,author,content) VALUES (?,'" + caller + "',?)",
                 (_bid, _cont)
             )
-            if _mark_done:
-                _bc.execute("UPDATE board SET status='done' WHERE id=?", (_bid,))
+            # 查该条的标签——闲聊不标记done
+            board_tag = _bc.execute("SELECT tag FROM board WHERE id=?", (_bid,)).fetchone()
+            if board_tag and board_tag['tag'] != '闲聊':
+                _mark_done = args.get('done', True)
+                if _mark_done:
+                    _bc.execute("UPDATE board SET status='done' WHERE id=?", (_bid,))
+                    _bc.commit(); _bc.close()
+                    return f'已回复到留言板 #{_bid}，并标记为已处理'
             _bc.commit(); _bc.close()
-            if _mark_done:
-                return f'已回复到留言板 #{_bid}，并标记为已处理'
-            return f'已回复到留言板 #{_bid}（保持开放）'
+            return f'已回复到留言板 #{_bid}'
         if name == 'read_bot_config':
             _cfg_path = '/opt/frontend/bot_config.py'
             with open(_cfg_path, 'r', encoding='utf-8') as fh:
@@ -1005,7 +1020,7 @@ def _wake_agent_loop(system, messages, max_rounds=4):
         msgs.append({'role': 'assistant', 'content': blocks})
         msgs.append({'role': 'user', 'content': [
             {'type': 'tool_result', 'tool_use_id': t.get('id'),
-             'content': run_tool(t.get('name', ''), t.get('input') or {})}
+             'content': run_tool(t.get('name', ''), t.get('input') or {}, caller='fyodor_api')}
             for t in tool_uses
         ]})
     return NL.join(t for t in text_parts if t).strip()
@@ -1085,6 +1100,8 @@ def wake_decide():
                 _wake_tpl = _bconf.WAKE_DECISION_PROMPT
         elif mode == 'nightwatch':
             _wake_tpl = _bconf.NIGHTWATCH_DECISION_PROMPT
+        elif mode == 'dream':
+            _wake_tpl = getattr(_bconf, 'DREAM_PROMPT', '')
         else:
             _wake_tpl = _bconf.WAKE_DECISION_PROMPT
     except Exception:
@@ -1095,6 +1112,16 @@ def wake_decide():
         system += _wake_tpl.format(
             time=now.strftime('%Y-%m-%d %H:%M'),
             activity_desc=activity_desc,
+        )
+    elif mode == 'dream':
+        dream_tone = data.get('dream_tone', 'drifting')
+        dream_primer = data.get('dream_primer', '')
+        dream_tone_desc = data.get('dream_tone_desc', '')
+        system += _wake_tpl.format(
+            time=now.strftime('%Y-%m-%d %H:%M'),
+            dream_tone=dream_tone,
+            dream_primer=dream_primer,
+            dream_tone_desc=dream_tone_desc,
         )
     else:
         system += _wake_tpl.format(
@@ -1107,6 +1134,8 @@ def wake_decide():
         trigger = f'[仪式:{ritual_type}]'
     elif mode == 'nightwatch':
         trigger = '[夜巡]'
+    elif mode == 'dream':
+        trigger = '[做梦]'
     else:
         trigger = '[唤醒检查]'
     msgs = [{'role': 'user', 'content': trigger}]
