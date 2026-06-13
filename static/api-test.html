@@ -111,6 +111,16 @@ body{background:linear-gradient(160deg,var(--bg1) 0%,var(--bg2) 100%);background
 .res-mode.raw{background:rgba(210,185,155,.18);color:var(--hint);}
 .toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:rgba(58,46,40,.88);color:#fff;font-size:12px;padding:8px 18px;border-radius:20px;pointer-events:none;opacity:0;transition:opacity .25s;white-space:nowrap;z-index:999;}
 .toast.show{opacity:1;}
+
+.relay-row{display:flex;gap:8px;align-items:flex-start;margin-bottom:8px;}
+.relay-inp{flex:1;padding:9px 11px;border-radius:10px;border:1.5px solid var(--tag-off-b);background:rgba(255,255,255,.75);font-size:12px;font-family:ui-monospace,'SF Mono',monospace;color:var(--text);outline:none;}
+.relay-inp:focus{border-color:rgba(212,165,116,.6);}
+.relay-inp.url{font-size:11px;}
+.relay-save{padding:9px 14px;border:none;border-radius:10px;background:var(--amber);color:#fff;font-size:12px;cursor:pointer;font-family:inherit;white-space:nowrap;}
+.relay-save:disabled{opacity:.5;cursor:default;}
+.relay-status{font-size:11px;color:var(--green);margin-top:4px;min-height:16px;}
+.dyn-model-select{width:100%;padding:9px 11px;border-radius:10px;border:1.5px solid var(--tag-off-b);background:rgba(255,255,255,.75);font-size:12px;font-family:ui-monospace,'SF Mono',monospace;color:var(--text);outline:none;margin-top:8px;-webkit-appearance:none;}
+.dyn-model-select:focus{border-color:rgba(212,165,116,.6);}
 </style>
 </head>
 <body>
@@ -155,6 +165,25 @@ body{background:linear-gradient(160deg,var(--bg1) 0%,var(--bg2) 100%);background
     <div class="kv"><span class="kv-key">来源</span><span class="kv-val dim" id="k-src">treegpt.cc</span></div>
     <div class="kv"><span class="kv-key">今日消息</span><span class="kv-val" id="k-msgs">—</span></div>
     <div class="kv"><span class="kv-key">响应延迟</span><span class="kv-val" id="k-lat">—</span></div>
+  </div>
+
+
+  <!-- Card 1b: Relay -->
+  <div class="card">
+    <div class="card-hd">
+      <div class="card-title">relay / 中转站</div>
+    </div>
+    <div class="relay-row">
+      <input class="relay-inp url" id="relay-url" placeholder="https://example.com/v1/messages">
+    </div>
+    <div class="relay-row">
+      <input class="relay-inp" id="relay-key" type="password" placeholder="API Key（不改则留空）">
+      <button class="relay-save" id="relay-save-btn" onclick="saveRelay()">保存</button>
+    </div>
+    <div class="relay-status" id="relay-status"></div>
+    <select class="dyn-model-select" id="dyn-model-sel" onchange="applyDynModel(this.value)" style="display:none">
+      <option value="">— 选择模型 —</option>
+    </select>
   </div>
 
   <!-- Card 2: Model -->
@@ -247,6 +276,7 @@ var currentModel='', currentKey='', rawKeyLen=0;
 async function init(){
   loadProvider();
   loadKeyStatus();
+  loadRelayUrl();
   loadModel();
   pingLatency();
   loadModels();
@@ -508,6 +538,77 @@ document.getElementById('key-mo').addEventListener('click',function(e){
 document.getElementById('token-mo').addEventListener('click',function(e){
   if(e.target===this)closeTokenMo();
 });
+
+async function loadRelayUrl(){
+  try{
+    var r=await fetch('/api/config/key-status');
+    var d=await r.json();
+    // populate relay URL input from source field
+    var url=d.source||'';
+    if(url && url.startsWith('http')){
+      document.getElementById('relay-url').value=url;
+    }
+  }catch(e){}
+}
+
+async function saveRelay(){
+  var url=document.getElementById('relay-url').value.trim();
+  var key=document.getElementById('relay-key').value.trim();
+  if(!url){document.getElementById('relay-status').textContent='请填写中转站地址';return;}
+  var btn=document.getElementById('relay-save-btn');
+  btn.disabled=true;btn.textContent='保存中…';
+  var st=document.getElementById('relay-status');st.textContent='';
+  try{
+    var r=await fetch('/api/config/relay',{
+      method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({url:url,key:key})
+    });
+    var d=await r.json();
+    if(!d.ok){st.textContent='保存失败: '+(d.error||'unknown');btn.disabled=false;btn.textContent='保存';return;}
+    st.textContent='已保存，正在获取可用模型…';
+    // reload key-status for updated source
+    setTimeout(loadKeyStatus,2500);
+    // fetch models from new relay
+    await loadDynModels();
+  }catch(e){st.textContent='请求失败: '+e.message;}
+  btn.disabled=false;btn.textContent='保存';
+}
+
+async function loadDynModels(){
+  var st=document.getElementById('relay-status');
+  var sel=document.getElementById('dyn-model-sel');
+  try{
+    var r=await fetch('/api/config/models');
+    var d=await r.json();
+    if(!d.ok||!d.models||!d.models.length){
+      st.textContent='中转站未返回模型列表（直接在下方手动填写模型名即可）';
+      sel.style.display='none';
+      return;
+    }
+    sel.innerHTML='<option value="">— 选择并切换模型 —</option>'+
+      d.models.map(function(m){return '<option value="'+m+'">'+m+'</option>';}).join('');
+    sel.style.display='block';
+    st.textContent='已保存，共 '+d.models.length+' 个可用模型 ↓';
+  }catch(e){
+    st.textContent='获取模型列表失败: '+e.message;
+    sel.style.display='none';
+  }
+}
+
+async function applyDynModel(modelId){
+  if(!modelId)return;
+  var r=await fetch('/api/config/model',{
+    method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({model:modelId})
+  });
+  if(r.ok){
+    currentModel=modelId;
+    document.getElementById('cur-model-name').textContent=modelId;
+    document.getElementById('model-inp').value=modelId;
+    renderKnownModels();
+    toast('已切换到 '+modelId+'，网关重启中');
+  }else{toast('切换失败');}
+}
 
 init();
 </script>

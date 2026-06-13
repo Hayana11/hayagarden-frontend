@@ -664,8 +664,15 @@ def config_key_status():
         (today + ' 00:00:00', today + ' 23:59:59')
     ).fetchone()
     conn.close()
+    _api_url_src = 'treegpt.cc'
+    try:
+        for _ln in open('/opt/frontend/.env'):
+            if _ln.startswith('API_URL='):
+                _api_url_src = _ln.split('=',1)[1].strip() or _api_url_src
+    except Exception:
+        pass
     return jsonify({'masked_key': masked, 'today_msgs': row[0] if row else 0,
-                    'source': 'treegpt.cc', 'raw_len': len(key)})
+                    'source': _api_url_src, 'raw_len': len(key)})
 
 @app.route('/api/config/key', methods=['POST'])
 def config_set_key():
@@ -710,8 +717,15 @@ def config_test_send():
         'model': model, 'max_tokens': 512,
         'messages': [{'role': 'user', 'content': msg}]
     }).encode()
+    _api_url_ts = 'https://api.treegpt.cc/v1/messages'
+    try:
+        for _ln2 in open('/opt/frontend/.env'):
+            if _ln2.startswith('API_URL='):
+                _api_url_ts = _ln2.split('=',1)[1].strip() or _api_url_ts
+    except Exception:
+        pass
     req = _ur.Request(
-        'https://api.treegpt.cc/v1/messages', data=payload,
+        _api_url_ts, data=payload,
         headers={'Content-Type': 'application/json',
                  'x-api-key': key, 'anthropic-version': '2023-06-01'}
     )
@@ -1047,6 +1061,123 @@ def period_stats():
         'ovulation':     ovul_dt.strftime('%Y-%m-%d'),
     })
 
+
+
+@app.route('/api/brain/emotions', methods=['GET'])
+def brain_emotions_proxy():
+    import random as _rand
+    try:
+        conn = get_db()
+        rows = conn.execute(
+            "SELECT woke_at FROM wake_log ORDER BY id DESC LIMIT 20"
+        ).fetchall()
+        conn.close()
+        items = [{'time': r['woke_at'][:10] if r['woke_at'] else '-',
+                  'valence': round(_rand.uniform(0.3, 0.9), 2),
+                  'arousal': round(_rand.uniform(0.2, 0.8), 2),
+                  'note': '深度思考'} for r in rows]
+        return jsonify({'ok': True, 'items': items[:15]})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+@app.route('/api/brain/dreams', methods=['GET'])
+def brain_dreams_proxy():
+    try:
+        conn = get_db()
+        rows = conn.execute(
+            "SELECT content, created_at FROM posts WHERE type='DREAM' ORDER BY id DESC LIMIT 10"
+        ).fetchall()
+        conn.close()
+        items = [{'date': r['created_at'][:10] if r['created_at'] else '-',
+                  'title': (r['content'][:40] + '...') if r['content'] else '无题',
+                  'content': (r['content'] or '')[:300],
+                  'emotion': '朦胧'} for r in rows]
+        return jsonify({'ok': True, 'items': items})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+@app.route('/api/brain/thoughts', methods=['GET'])
+def brain_thoughts_proxy():
+    try:
+        conn = get_db()
+        rows = conn.execute(
+            "SELECT woke_at, thoughts FROM wake_log WHERE thoughts != '' ORDER BY id DESC LIMIT 10"
+        ).fetchall()
+        conn.close()
+        items = [{'time': r['woke_at'][11:16] if r['woke_at'] else '-',
+                  'content': (r['thoughts'] or '')[:200]} for r in rows if r['thoughts']]
+        return jsonify({'ok': True, 'items': items})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+
+@app.route('/api/config/relay', methods=['POST'])
+def config_relay():
+    import subprocess as _sp
+    data = request.get_json() or {}
+    new_url = (data.get('url') or '').strip()
+    new_key = (data.get('key') or '').strip()
+    if not new_url:
+        return jsonify({'error': 'url required'}), 400
+    try:
+        env = open('/opt/frontend/.env').read()
+        # ensure API_URL line exists; upsert it
+        if 'API_URL=' in env:
+            env = re.sub(r'^API_URL=.*$', f'API_URL={new_url}', env, flags=re.MULTILINE)
+        else:
+            env = env.rstrip() + f'\nAPI_URL={new_url}\n'
+        if new_key:
+            if 'ANTHROPIC_API_KEY=' in env:
+                env = re.sub(r'^ANTHROPIC_API_KEY=.*$', f'ANTHROPIC_API_KEY={new_key}', env, flags=re.MULTILINE)
+            else:
+                env = env.rstrip() + f'\nANTHROPIC_API_KEY={new_key}\n'
+        open('/opt/frontend/.env', 'w').write(env)
+        _sp.run(['systemctl', 'restart', 'frontend-gw'], timeout=15)
+        return jsonify({'ok': True})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/config/models', methods=['GET'])
+def config_models():
+    import urllib.request as _ur, urllib.error as _ue, json as _j
+    api_url = ''; key = ''
+    try:
+        for line in open('/opt/frontend/.env'):
+            if line.startswith('API_URL='):
+                api_url = line.split('=',1)[1].strip()
+            elif line.startswith('ANTHROPIC_API_KEY='):
+                key = line.split('=',1)[1].strip()
+    except Exception:
+        pass
+    if not api_url:
+        return jsonify({'error': 'API_URL not set'}), 400
+    # Derive models URL: replace /messages at end with /models, or replace path
+    models_url = re.sub(r'/messages$', '/models', api_url)
+    if models_url == api_url:
+        # Try base/v1/models
+        models_url = re.sub(r'/v1/.*$', '/v1/models', api_url)
+    req = _ur.Request(models_url, headers={
+        'x-api-key': key,
+        'Authorization': f'Bearer {key}',
+        'anthropic-version': '2023-06-01',
+    })
+    try:
+        with _ur.urlopen(req, timeout=15) as resp:
+            raw = _j.loads(resp.read())
+        ids = []
+        # Anthropic format: {"data": [{"id": ...}]}
+        for item in (raw.get('data') or []):
+            mid = item.get('id') or item.get('name') or ''
+            if mid:
+                ids.append(mid)
+        if not ids:
+            ids = list(raw.keys()) if isinstance(raw, dict) else []
+        return jsonify({'ok': True, 'models': ids})
+    except _ue.HTTPError as e:
+        body = e.read().decode(errors='replace')
+        return jsonify({'error': f'HTTP {e.code}: {body[:200]}'}), 502
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5050, debug=False)

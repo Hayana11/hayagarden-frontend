@@ -123,7 +123,7 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,'PingFang 
     <div class="mcard p" onclick="window.location.href='/core'"><i class="ti ti-bookmark"></i><div class="n" id="m-core">—</div><div class="l">core · 核心</div></div>
     <div class="mcard p" onclick="window.location.href='/long-term'"><i class="ti ti-archive"></i><div class="n" id="m-long">—</div><div class="l">long-term · 长期</div></div>
     <div class="mcard a" onclick="window.location.href='/recent'"><i class="ti ti-clock"></i><div class="n" id="m-recent">—</div><div class="l">recent · 近期</div></div>
-    <div class="mcard a diary" onclick="openDiary()"><i class="ti ti-pencil"></i><div class="n" id="m-diary">—</div><div class="l">diary · 日记</div></div>
+    <div class="mcard a diary" onclick="openDiary()"><i class="ti ti-moon"></i><div class="n" id="m-diary">—</div><div class="l">white-night · 白夜</div></div>
   </div>
 </div>
 
@@ -138,23 +138,15 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,'PingFang 
   多</div>
 </div>
 
-<button class="act-btn" id="diary-btn" onclick="genDiary()">fyodor writes today's diary</button>
 
 <nav class="bnav">
   <a class="ni act" href="/dash"><i class="ti ti-layout-dashboard"></i><span>dash</span></a>
   <a class="ni" href="/chat"><i class="ti ti-message-2"></i><span>chat</span></a>
   <a class="ni" href="/calendar"><i class="ti ti-calendar"></i><span>calendar</span></a>
   <a class="ni" href="/read"><i class="ti ti-book"></i><span>read</span></a>
+  <a class="ni" href="/board"><i class="ti ti-clipboard-list"></i><span>board</span></a>
 </nav>
 
-<!-- Diary write modal -->
-<div class="mo" id="dmo">
-  <div class="mb">
-    <h3>今天想说什么</h3>
-    <textarea id="d-content" placeholder="write it down…"></textarea>
-    <button class="d-send" onclick="submitDiary()">发送</button>
-  </div>
-</div>
 
 <!-- Read-only list modal -->
 <div class="mo" id="lmo">
@@ -256,16 +248,8 @@ function openList(kind){
   document.getElementById('lmo').classList.add('show');
 }
 
-function openDiary(){document.getElementById('dmo').classList.add('show');}
-function closeDiary(){document.getElementById('dmo').classList.remove('show');document.getElementById('d-content').value='';}
+function openDiary(){window.location.href='/static/white-night.html';}
 
-async function submitDiary(){
-  var c=document.getElementById('d-content').value.trim();
-  if(!c)return;
-  await fetch('/api/posts',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({type:'DIARY',content:c,author:'hayana'})});
-  closeDiary(); await load();
-}
 
 async function pressMiss(){
   var btn=document.getElementById('miss-btn');
@@ -273,8 +257,7 @@ async function pressMiss(){
   setTimeout(function(){btn.classList.remove('beating');},350);
   await fetch('/api/posts',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({type:'MISS',content:'missing you',author:'hayana'})});
-  var fd=new FormData(); fd.append('author','hayana'); fd.append('content','想你了');
-  await fetch('/api/chat/send',{method:'POST',body:fd});
+  await fetch('/api/chat/send',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({author:'hayana',content:'*悄悄按了一下 missing you*'})});
   try{
     var r=await fetch('/api/gw/chat',{method:'POST',
       headers:{'Content-Type':'application/json'},body:JSON.stringify({})});
@@ -284,13 +267,6 @@ async function pressMiss(){
   await load();
 }
 
-async function genDiary(){
-  var btn=document.getElementById('diary-btn');
-  btn.disabled=true; btn.textContent='writing…';
-  try{
-    var r=await fetch('/api/diary/generate',{method:'POST'});
-    var d=await r.json();
-    if(d.ok){await load(); notify('Fyodor','diary done — '+d.content.slice(0,50));}
     else alert(d.message||d.error||'failed');
   }catch(e){alert('error: '+e.message);}
   btn.disabled=false; btn.textContent="fyodor writes today's diary";

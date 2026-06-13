@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>白夜 · 费奥多尔的大脑</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons@latest/tabler-icons.min.css">
+<style>
+:root{
+  --bg:#f8f8f6;--card:#fff;--text:#2a2020;--muted:#9a8a8a;
+  --primary:#7c6a8a;--primary-bg:#f0ebf4;--primary-light:rgba(124,106,138,.08);
+  --amber:#d4a574;--amber-bg:#fdf4e7;
+  --border:#ece6e0;--shadow:0 1px 8px rgba(40,20,20,.07);
+  --red:#e05555;--green:#5a9a6a;
+}
+html[data-theme=dark]{
+  --bg:#1a1616;--card:#241f1f;--text:#e8e2dc;--muted:#7a6a6a;
+  --primary:#a08aaa;--primary-bg:#2e2838;--primary-light:rgba(160,138,170,.1);
+  --amber:#d4a574;--amber-bg:#2e2418;
+  --border:#3a3030;--shadow:0 1px 8px rgba(0,0,0,.3);
+}
+*{margin:0;padding:0;box-sizing:border-box;}
+body{background:var(--bg);color:var(--text);font-family:-apple-system,'PingFang SC','Noto Sans SC',sans-serif;line-height:1.6;min-height:100vh;max-width:480px;margin:0 auto;padding-bottom:calc(40px + env(safe-area-inset-bottom,0px));}
+
+/* header */
+.hd{background:var(--card);border-bottom:1px solid var(--border);position:sticky;top:0;z-index:20;padding:44px 16px 14px;}
+.hd-row{display:flex;align-items:center;justify-content:space-between;}
+.hd-title{display:flex;align-items:center;gap:8px;font-family:Georgia,'Times New Roman',serif;font-size:22px;color:var(--text);letter-spacing:1px;}
+.hd-title i{color:var(--primary);font-size:20px;}
+.hd-sub{font-size:11px;color:var(--muted);margin-top:4px;letter-spacing:.5px;}
+.back{cursor:pointer;color:var(--muted);font-size:18px;padding:6px;transition:color .15s;}
+.back:hover{color:var(--text);}
+
+/* tabs */
+.tabs{display:flex;gap:6px;padding:12px 16px 0;overflow-x:auto;scrollbar-width:none;}
+.tab{flex-shrink:0;display:flex;align-items:center;gap:5px;padding:6px 14px;border:1.5px solid var(--border);border-radius:20px;background:none;font-size:12.5px;color:var(--muted);cursor:pointer;transition:all .15s;font-family:inherit;letter-spacing:.3px;}
+.tab i{font-size:14px;}
+.tab.active{background:var(--primary);border-color:var(--primary);color:#fff;}
+
+.container{padding:14px 16px;}
+.section{display:none;}
+.section.active{display:block;}
+
+/* 情绪时间线 */
+.emotion-card{background:var(--card);border:1px solid var(--border);border-radius:14px;box-shadow:var(--shadow);padding:14px;margin-bottom:10px;}
+.emotion-card .time{color:var(--muted);font-size:11px;letter-spacing:.3px;}
+.emotion-card .mood{margin:10px 0 0;display:flex;gap:14px;}
+.emotion-card .mood .val{flex:1;}
+.emotion-card .mood .val-label{font-size:10.5px;color:var(--muted);margin-bottom:5px;letter-spacing:.3px;}
+.emotion-card .mood .bar{height:6px;background:var(--primary-light);border-radius:4px;overflow:hidden;}
+.emotion-card .mood .bar-fill{height:100%;border-radius:4px;background:linear-gradient(90deg,var(--muted),var(--amber));transition:width .3s;}
+.emotion-card .mood small{display:block;margin-top:4px;font-size:10.5px;color:var(--muted);}
+.emotion-note{color:var(--muted);font-size:12px;margin-top:10px;line-height:1.6;}
+
+/* 梦 */
+.dream-card{background:var(--primary-light);border:1px solid var(--border);border-radius:14px;padding:16px;margin-bottom:10px;}
+.dream-card .dream-date{color:var(--muted);font-size:11px;margin-bottom:8px;letter-spacing:.3px;}
+.dream-card .dream-title{display:flex;align-items:center;gap:6px;font-family:Georgia,'Times New Roman',serif;font-size:16px;font-weight:500;margin-bottom:10px;color:var(--primary);}
+.dream-card .dream-title i{font-size:15px;}
+.dream-card .dream-content{color:var(--text);margin:10px 0;line-height:1.8;font-size:13.5px;white-space:pre-wrap;}
+.dream-card .dream-emotion{font-size:11.5px;color:var(--muted);margin-top:12px;font-style:italic;padding-top:10px;border-top:1px solid var(--border);}
+
+/* 深夜想法 */
+.thought-card{background:var(--card);border:1px solid var(--border);border-radius:14px;box-shadow:var(--shadow);padding:14px;margin-bottom:10px;}
+.thought-time{color:var(--muted);font-size:11px;margin-bottom:8px;letter-spacing:.3px;}
+.thought-content{color:var(--text);line-height:1.8;font-size:13.5px;white-space:pre-wrap;}
+
+/* 空状态/加载 */
+.empty{text-align:center;color:var(--muted);padding:50px 20px;}
+.empty i{font-size:2.2em;margin-bottom:12px;opacity:.5;display:block;}
+.empty p{font-size:13px;}
+.loading{text-align:center;color:var(--muted);padding:50px;font-size:13px;}
+
+/* gen diary button */
+.gen-diary-btn{display:block;width:calc(100% - 32px);margin:16px auto 0;padding:13px;border:none;border-radius:13px;background:var(--primary);color:#fff;font-size:13px;cursor:pointer;font-family:inherit;letter-spacing:.5px;transition:opacity .15s;}
+.gen-diary-btn:disabled{opacity:.5;cursor:default;}
+.gen-diary-msg{text-align:center;font-size:11px;color:var(--muted);margin-top:8px;min-height:16px;}
+</style>
+</head>
+<body>
+
+<div class="hd">
+  <div class="hd-row">
+    <div>
+      <div class="hd-title"><i class="ti ti-moon-stars"></i>白夜</div>
+      <div class="hd-sub">情绪 · 梦 · 深夜想法</div>
+    </div>
+    <div class="back" onclick="goBack()"><i class="ti ti-arrow-left"></i></div>
+  </div>
+  <div class="tabs">
+    <div class="tab active" onclick="switchTab('emotions',event)"><i class="ti ti-heart"></i>情绪时间线</div>
+    <div class="tab" onclick="switchTab('dreams',event)"><i class="ti ti-mood-smile"></i>梦</div>
+    <div class="tab" onclick="switchTab('thoughts',event)"><i class="ti ti-brain"></i>深夜想法</div>
+  </div>
+</div>
+
+<div class="container">
+  <!-- 情绪时间线 -->
+  <div id="emotions" class="section active">
+    <div id="emotion-timeline">
+      <div class="loading">加载中…</div>
+    </div>
+  </div>
+
+  <!-- 梦 -->
+  <div id="dreams" class="section">
+    <div id="dreams-list">
+      <div class="loading">加载中…</div>
+    </div>
+  </div>
+
+  <!-- 深夜想法 -->
+  <div id="thoughts" class="section">
+    <div id="thoughts-list">
+      <div class="loading">加载中…</div>
+    </div>
+  </div>
+</div>
+
+<button class="gen-diary-btn" id="gen-diary-btn" onclick="genDiary()">费奥多尔写今日日记</button>
+<div class="gen-diary-msg" id="gen-diary-msg"></div>
+
+
+<script>
+if(window.matchMedia('(prefers-color-scheme:dark)').matches)
+  document.documentElement.setAttribute('data-theme','dark');
+
+function goBack(){ window.location.href='/static/dash.html'; }
+
+function switchTab(name, ev){
+  document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
+  document.querySelectorAll('.section').forEach(s=>s.classList.remove('active'));
+  ev.target.closest('.tab').classList.add('active');
+  document.getElementById(name).classList.add('active');
+  loadSection(name);
+}
+
+async function loadSection(name){
+  if(name==='emotions') await loadEmotions();
+  else if(name==='dreams') await loadDreams();
+  else if(name==='thoughts') await loadThoughts();
+}
+
+async function loadEmotions(){
+  try{
+    const r = await fetch('/api/brain/emotions');
+    const data = await r.json();
+    const container = document.getElementById('emotion-timeline');
+    if(!data.items || data.items.length===0){
+      container.innerHTML = '<div class="empty"><i class="ti ti-mood-sad"></i><p>暂无情绪记录</p></div>';
+      return;
+    }
+    container.innerHTML = data.items.map(item => `
+      <div class="emotion-card">
+        <div class="time">${item.time}</div>
+        <div class="mood">
+          <div class="val">
+            <div class="val-label">情感 Valence</div>
+            <div class="bar"><div class="bar-fill" style="width:${item.valence*100}%"></div></div>
+            <small>${(item.valence*100).toFixed(0)}%</small>
+          </div>
+          <div class="val">
+            <div class="val-label">觉醒 Arousal</div>
+            <div class="bar"><div class="bar-fill" style="width:${item.arousal*100}%;background:linear-gradient(90deg,var(--primary-light),var(--primary));"></div></div>
+            <small>${(item.arousal*100).toFixed(0)}%</small>
+          </div>
+        </div>
+        ${item.note ? `<div class="emotion-note">${item.note}</div>` : ''}
+      </div>
+    `).join('');
+  }catch(e){
+    console.error(e);
+    document.getElementById('emotion-timeline').innerHTML = '<div class="empty">加载失败</div>';
+  }
+}
+
+async function loadDreams(){
+  try{
+    const r = await fetch('/api/brain/dreams');
+    const data = await r.json();
+    const container = document.getElementById('dreams-list');
+    if(!data.items || data.items.length===0){
+      container.innerHTML = '<div class="empty"><i class="ti ti-mood-smile"></i><p>还没有做过梦</p></div>';
+      return;
+    }
+    container.innerHTML = data.items.map(dream => `
+      <div class="dream-card">
+        <div class="dream-date">${dream.date}</div>
+        <div class="dream-title"><i class="ti ti-moon"></i>${dream.title}</div>
+        <div class="dream-content">${dream.content}</div>
+        ${dream.emotion ? `<div class="dream-emotion">情绪：${dream.emotion}</div>` : ''}
+      </div>
+    `).join('');
+  }catch(e){
+    console.error(e);
+    document.getElementById('dreams-list').innerHTL = '<div class="empty">加载失败</div>';
+  }
+}
+
+async function loadThoughts(){
+  try{
+    const r = await fetch('/api/brain/thoughts');
+    const data = await r.json();
+    const container = document.getElementById('thoughts-list');
+    if(!data.items || data.items.length===0){
+      container.innerHTML = '<div class="empty"><i class="ti ti-brain"></i><p>暂无深夜想法</p></div>';
+      return;
+    }
+    container.innerHTML = data.items.map(t => `
+      <div class="thought-card">
+        <div class="thought-time">${t.time}</div>
+        <div class="thought-content">${t.content}</div>
+      </div>
+    `).join('');
+  }catch(e){
+    console.error(e);
+    document.getElementById('thoughts-list').innerHTML = '<div class="empty">加载失败</div>';
+  }
+}
+
+window.addEventListener('load', () => loadEmotions());
+async function genDiary(){
+  var btn=document.getElementById('gen-diary-btn');
+  var msg=document.getElementById('gen-diary-msg');
+  btn.disabled=true; btn.textContent='writing…'; msg.textContent='';
+  try{
+    var r=await fetch('/api/diary/generate',{method:'POST'});
+    var d=await r.json();
+    if(d.ok){msg.textContent='日记已写好 · '+d.content.slice(0,40)+'…';}
+    else{msg.textContent=d.message||d.error||'写入失败';}
+  }catch(e){msg.textContent='请求失败: '+e.message;}
+  btn.disabled=false; btn.textContent='费奥多尔写今日日记';
+}
+
+</script>
+</body>
+</html>
