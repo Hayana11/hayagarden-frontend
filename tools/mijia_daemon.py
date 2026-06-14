@@ -98,6 +98,21 @@ def bedside_warm():
         return lc.light_on(b)
     return _wrap(_fn)
 
+# ── 中性光模式（开关三次触发中性色） ────────────────────────────────────────────
+
+@app.route('/light/bedside/neutral', methods=['POST'])
+def bedside_neutral():
+    def _fn():
+        import time
+        b = bedside_did()
+        lc.light_off(b);  time.sleep(0.5)
+        lc.light_on(b);   time.sleep(0.5)
+        lc.light_off(b);  time.sleep(0.5)
+        lc.light_on(b);   time.sleep(0.5)
+        lc.light_off(b);  time.sleep(0.5)
+        return lc.light_on(b)
+    return _wrap(_fn)
+
 # ── 全部 ─────────────────────────────────────────────────────────────────────
 
 @app.route('/light/all/on', methods=['POST'])

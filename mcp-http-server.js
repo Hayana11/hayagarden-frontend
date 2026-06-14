@@ -42,7 +42,8 @@ function buildServer() {
   server.tool('light_on',  {}, () => callLight('/light/on',  'POST'));
   server.tool('light_off', {}, () => callLight('/light/off', 'POST'));
   server.tool('get_light_status', {}, () => callLight('/light/status', 'GET'));
-  server.tool('light_bedside_warm', {}, () => callLight('/light/bedside/warm', 'POST'));
+  server.tool('light_bedside_warm',    {}, () => callLight('/light/bedside/warm',    'POST'));
+  server.tool('light_bedside_neutral', {}, () => callLight('/light/bedside/neutral', 'POST'));
   server.tool(
     'set_brightness',
     { value: z.number().min(1).max(100).describe('Brightness 1-100') },

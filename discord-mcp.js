@@ -86,10 +86,11 @@ function buildServer() {
 const app = express();
 app.use(express.json());
 
-// Bearer auth
+// Bearer auth: Authorization header 或 ?token= query string 二选一
 app.use((req, res, next) => {
-  const auth = req.headers['authorization'] || '';
-  if (auth !== `Bearer ${BEARER_TOKEN}`) {
+  const fromHeader = (req.headers['authorization'] || '').replace('Bearer ', '').trim();
+  const fromQuery  = (req.query.token || '').trim();
+  if (fromHeader !== BEARER_TOKEN && fromQuery !== BEARER_TOKEN) {
     res.status(401).json({ error: 'unauthorized' });
     return;
   }
