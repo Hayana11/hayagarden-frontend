@@ -5,14 +5,21 @@ import os, sqlite3, json, datetime, re, urllib.request, urllib.error
 DB_PATH  = '/opt/frontend/memories.db'
 ENV_PATH = '/opt/frontend/.env'
 PERSONA  = '/opt/frontend/prompts/persona.md'
-API_URL  = 'https://api.treegpt.cc/v1/messages'
+API_URL  = None  # 从 .env 读取，见 call_api()
 MODEL    = 'claude-opus-4-6'
 
+def load_env():
+    env = {}
+    try:
+        for line in open(ENV_PATH):
+            k, _, v = line.partition('=')
+            env[k.strip()] = v.strip()
+    except Exception:
+        pass
+    return env
+
 def load_key():
-    for line in open(ENV_PATH):
-        if line.startswith('ANTHROPIC_API_KEY='):
-            return line.split('=', 1)[1].strip()
-    return ''
+    return load_env().get('ANTHROPIC_API_KEY', '')
 
 def get_db():
     conn = sqlite3.connect(DB_PATH)
@@ -48,15 +55,16 @@ def format_chat(rows):
             lines.append(f'{name}：{content}')
     return '\n'.join(lines)
 
-def call_api(system, user_msg, api_key):
+def call_api(system, user_msg, api_key, api_url=None):
     payload = json.dumps({
         'model': MODEL,
         'max_tokens': 1024,
         'system': system,
         'messages': [{'role': 'user', 'content': user_msg}],
     }).encode()
+    url = api_url or load_env().get('API_URL', 'https://api.anthropic.com/v1/messages')
     req = urllib.request.Request(
-        API_URL,
+        url,
         data=payload,
         headers={
             'Content-Type': 'application/json',
