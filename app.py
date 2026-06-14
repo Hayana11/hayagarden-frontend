@@ -1363,8 +1363,17 @@ def post_board():
     content = (data.get('content') or '').strip()
     if not content:
         return jsonify({'error': 'content required'}), 400
+    level    = (data.get('level') or '').strip() or None
+    category = (data.get('category') or '给活儿').strip()
+    if level and level not in ('P0', 'P1', 'P2'):
+        return jsonify({'error': 'level must be P0/P1/P2'}), 400
+    if category not in ('给活儿', '播报'):
+        category = '给活儿'
     conn = get_db()
-    cur = conn.execute("INSERT INTO board (author,tag,content,status) VALUES (?,?,?,'open')", (author, tag, content))
+    cur = conn.execute(
+        "INSERT INTO board (author,tag,content,status,level,category) VALUES (?,?,?,'open',?,?)",
+        (author, tag, content, level, category)
+    )
     conn.commit(); new_id = cur.lastrowid; conn.close()
     return jsonify({'ok': True, 'id': new_id})
 
@@ -1390,6 +1399,13 @@ def update_board_status(bid):
     if status not in ('open', 'done'):
         return jsonify({'error': 'invalid status'}), 400
     conn = get_db()
+    if status == 'done':
+        has_clear = conn.execute(
+            "SELECT 1 FROM board_replies WHERE board_id=? AND content='ALL_CLEAR' LIMIT 1", (bid,)
+        ).fetchone()
+        if not has_clear:
+            conn.close()
+            return jsonify({'error': 'ALL_CLEAR required before marking done'}), 400
     conn.execute("UPDATE board SET status=? WHERE id=?", (status, bid))
     conn.commit(); conn.close()
     return jsonify({'ok': True})

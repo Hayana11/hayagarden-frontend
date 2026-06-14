@@ -232,7 +232,7 @@ def build_system():
     try:
         _conn_board = get_db()
         _board_items = _conn_board.execute(
-            "SELECT id, author, tag, content FROM board WHERE status='open' ORDER BY id DESC LIMIT 5"
+            "SELECT id, author, tag, content, level, category FROM board WHERE status='open' AND category='给活儿' ORDER BY id DESC LIMIT 5"
         ).fetchall()
         _conn_board.close()
         if _board_items:
@@ -240,7 +240,8 @@ def build_system():
             for _bi in _board_items:
                 _tag = _bi["tag"]
                 _cont = (_bi["content"] or "")[:80]
-                _board_lines.append(f"- #{_bi['id']} [{_tag}] {_bi['author']}: {_cont}")
+                _lv = f"[{_bi['level']}] " if _bi['level'] else ''
+                _board_lines.append(f"- #{_bi['id']} {_lv}[{_tag}] {_bi['author']}: {_cont}")
             parts.append("\n## 留言板 · 待处理\n" + "\n".join(_board_lines))
     except Exception:
         pass
@@ -597,15 +598,17 @@ TOOLS = [
     },
     {
         'name': 'post_to_board',
-        'description': '在留言板发新话题，author=fyodor_api。新话题用这个，回复已有留言用reply_to_board。当下自然需要时安静使用。',
+        'description': '在留言板发新话题，author=fyodor_api。新话题用这个，回复已有留言用reply_to_board。可传level(P0/P1/P2)和category(给活儿/播报，默认给活儿)。当下自然需要时安静使用。',
         'input_schema': {'type': 'object', 'properties': {
-            'tag':     {'type': 'string', 'description': '标签：闲聊 / 需求 / 紧急，默认闲聊'},
-            'content': {'type': 'string', 'description': '留言内容'},
+            'tag':      {'type': 'string', 'description': '标签：闲聊 / 需求 / 紧急，默认闲聊'},
+            'content':  {'type': 'string', 'description': '留言内容'},
+            'level':    {'type': 'string', 'description': '优先级：P0（必须修）/ P1（建议修）/ P2（非阻塞建议），不传则无级别'},
+            'category': {'type': 'string', 'description': '分类：给活儿（需要对方做动作，进待处理摘要）/ 播报（进度通知，不进摘要），默认给活儿'},
         }, 'required': ['content']},
     },
     {
         'name': 'reply_to_board',
-        'description': '在留言板某条下面回复，author=fyodor_api。回复后默认将该条目标记为done（已处理）；如果只是搭话、事情还没完，传done=false保持开放。',
+        'description': '在留言板某条下面回复，author=fyodor_api。回复后默认将该条目标记为done（已处理）；如果只是搭话、事情还没完，传done=false保持开放。注意：标记done前系统要求有ALL_CLEAR评论，可在content里直接写ALL_CLEAR（单独一行或全部内容）。',
         'input_schema': {'type': 'object', 'properties': {
             'board_id': {'type': 'integer', 'description': '要回复的留言板条目ID'},
             'content':  {'type': 'string',  'description': '回复内容'},
@@ -695,7 +698,7 @@ def run_tool(name, args, caller='fyodor_cc'):
                 return '错误：content 不能为空'
             _bc = get_db()
             _cur = _bc.execute(
-                "INSERT INTO board (author,tag,content,status) VALUES ('" + caller + "',?,?,'open')",
+                "INSERT INTO board (author,tag,content,status,level,category) VALUES ('" + caller + "',?,?,'open',?,?)",
                 (_tag, _cont)
             )
             _bc.commit(); _new_id = _cur.lastrowid; _bc.close()
@@ -1191,8 +1194,10 @@ WAKE_TOOLS = [
         'name': 'post_to_board',
         'description': '在留言板发新话题，author=fyodor_api。新话题用这个，回复已有留言用reply_to_board。',
         'input_schema': {'type': 'object', 'properties': {
-            'tag':     {'type': 'string', 'description': '标签：闲聊 / 需求 / 紧急，默认闲聊'},
-            'content': {'type': 'string', 'description': '留言内容'},
+            'tag':      {'type': 'string', 'description': '标签：闲聊 / 需求 / 紧急，默认闲聊'},
+            'content':  {'type': 'string', 'description': '留言内容'},
+            'level':    {'type': 'string', 'description': '优先级：P0（必须修）/ P1（建议修）/ P2（非阻塞建议），不传则无级别'},
+            'category': {'type': 'string', 'description': '分类：给活儿（需要对方做动作，进待处理摘要）/ 播报（进度通知，不进摘要），默认给活儿'},
         }, 'required': ['content']},
     },
 ]
