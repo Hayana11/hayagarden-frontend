@@ -6,9 +6,12 @@ DB_PATH = '/opt/frontend/memories.db'
 UPLOAD_DIR = '/opt/frontend/static/uploads'
 
 API_KEY = ''
+BOARD_TOKEN_FYODOR = ''
 for line in open('/opt/frontend/.env'):
-    if line.startswith('ANTHROPIC_API_KEY='):
-        API_KEY = line.split('=',1)[1].strip()
+    k, _, v = line.partition('=')
+    k = k.strip(); v = v.strip()
+    if k == 'ANTHROPIC_API_KEY': API_KEY = v
+    elif k == 'BOARD_TOKEN_FYODOR': BOARD_TOKEN_FYODOR = v
 
 API_URL = 'https://api.treegpt.cc/v1/messages'
 MODEL = 'claude-opus-4-6'
@@ -1353,6 +1356,9 @@ def get_board():
 def post_board():
     data = request.get_json() or {}
     author  = (data.get('author') or 'hayana').strip()
+    if author == 'fyodor':
+        if not BOARD_TOKEN_FYODOR or data.get('token','') != BOARD_TOKEN_FYODOR:
+            return jsonify({'error': 'unauthorized'}), 403
     tag     = (data.get('tag') or '闲聊').strip()
     content = (data.get('content') or '').strip()
     if not content:
@@ -1366,6 +1372,9 @@ def post_board():
 def post_board_reply(bid):
     data    = request.get_json() or {}
     author  = (data.get('author') or 'hayana').strip()
+    if author == 'fyodor':
+        if not BOARD_TOKEN_FYODOR or data.get('token','') != BOARD_TOKEN_FYODOR:
+            return jsonify({'error': 'unauthorized'}), 403
     content = (data.get('content') or '').strip()
     if not content:
         return jsonify({'error': 'content required'}), 400

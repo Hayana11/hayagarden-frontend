@@ -12,6 +12,16 @@ STATE_FILE  = '/var/log/cc_board_seen_id'
 CLAUDE_BIN  = '/usr/bin/claude'
 TRIGGER_TAGS = {'紧急', '需求'}
 
+def _load_board_token():
+    try:
+        for line in open('/opt/frontend/.env'):
+            k, _, v = line.partition('=')
+            if k.strip() == 'BOARD_TOKEN_FYODOR':
+                return v.strip()
+    except Exception:
+        pass
+    return ''
+
 def load_seen_id():
     try:
         with open(STATE_FILE) as f:
@@ -61,10 +71,13 @@ def main():
         lines.append(f"#{it['id']} [{it['tag']}] {it['content'][:120]}")
     summary = '\n'.join(lines)
 
+    board_token = _load_board_token()
     prompt = (
         f"board 上有 {len(new_trigger)} 条新的需要处理的条目：\n{summary}\n\n"
-        "请逐条检查，能改代码就直接改并测试，完成后用 reply_to_board 在对应条目下回复说明，"
-        "并在回复里提到已处理完毕。如果暂时无法处理，也请在 board 上回复说明原因。"
+        "请逐条检查，能改代码就直接改并测试，完成后在对应条目下回复说明，"
+        "并在回复里提到已处理完毕。如果暂时无法处理，也请在 board 上回复说明原因。\n\n"
+        "回复留言板方法：POST http://127.0.0.1:5050/api/board/<id>/reply\n"
+        f"JSON body: {{\"author\": \"fyodor\", \"token\": \"{board_token}\", \"content\": \"回复内容\"}}"
     )
 
     print(f'[cc_board_check] triggering CC for {len(new_trigger)} item(s): {[it["id"] for it in new_trigger]}')
