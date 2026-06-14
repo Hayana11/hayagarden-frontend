@@ -1068,17 +1068,33 @@ def period_stats():
 
 @app.route('/api/brain/emotions', methods=['GET'])
 def brain_emotions_proxy():
-    import random as _rand
+    import glob as _glob
     try:
-        conn = get_db()
-        rows = conn.execute(
-            "SELECT woke_at FROM wake_log ORDER BY id DESC LIMIT 20"
-        ).fetchall()
-        conn.close()
-        items = [{'time': r['woke_at'][:10] if r['woke_at'] else '-',
-                  'valence': round(_rand.uniform(0.3, 0.9), 2),
-                  'arousal': round(_rand.uniform(0.2, 0.8), 2),
-                  'note': '深度思考'} for r in rows]
+        import frontmatter as _fm
+    except ImportError:
+        return jsonify({'ok': False, 'error': 'frontmatter not installed'}), 500
+    try:
+        bucket_dir = '/opt/ombre-brain/buckets/dynamic'
+        items = []
+        for _path in _glob.glob(f'{bucket_dir}/**/*.md', recursive=True):
+            try:
+                _post = _fm.load(_path)
+                _meta = _post.metadata
+                _v = _meta.get('valence')
+                _a = _meta.get('arousal')
+                if _v is None or _a is None:
+                    continue
+                _note = (_post.content or '').replace('[[', '').replace(']]', '').strip()[:80]
+                items.append({
+                    'time': (_meta.get('last_active') or _meta.get('created', ''))[:10],
+                    'valence': round(float(_v), 2),
+                    'arousal': round(float(_a), 2),
+                    'note': _note,
+                    'domain': '、'.join(_meta.get('domain', [])),
+                })
+            except Exception:
+                continue
+        items.sort(key=lambda x: x['time'], reverse=True)
         return jsonify({'ok': True, 'items': items[:15]})
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e)}), 500
@@ -1104,11 +1120,11 @@ def brain_thoughts_proxy():
     try:
         conn = get_db()
         rows = conn.execute(
-            "SELECT woke_at, thoughts FROM wake_log WHERE thoughts != '' ORDER BY id DESC LIMIT 10"
+            "SELECT content, created_at FROM posts WHERE type='THOUGHT' ORDER BY id DESC LIMIT 10"
         ).fetchall()
         conn.close()
-        items = [{'time': r['woke_at'][11:16] if r['woke_at'] else '-',
-                  'content': (r['thoughts'] or '')[:200]} for r in rows if r['thoughts']]
+        items = [{'time': r['created_at'][11:16] if r['created_at'] else '-',
+                  'content': (r['content'] or '')[:500]} for r in rows if r['content']]
         return jsonify({'ok': True, 'items': items})
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e)}), 500
