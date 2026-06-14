@@ -195,8 +195,8 @@ function updateStats(){
     document.getElementById('miss-info').textContent=ms.length+' 次 · 最近 '+fmtDate(last.created_at);
   }
   var mems=posts.filter(p=>p.type==='MEMORY');
-  document.getElementById('m-core').textContent=mems.filter(p=>String(p.content||'').length>100).length;
-  document.getElementById('m-long').textContent=mems.length;
+  document.getElementById('m-core').textContent=mems.filter(p=>p.layer==='core').length;
+  document.getElementById('m-long').textContent=mems.filter(p=>p.layer==='long-term').length;
   var wk=Date.now()-7*864e5;
   document.getElementById('m-recent').textContent=posts.filter(function(p){
     var d=postDate(p); return d&&d.getTime()>=wk;
@@ -228,8 +228,8 @@ function renderHeat(){
 }
 
 var LISTS={
-  core:{title:'core · 核心记忆',filter:function(p){return p.type==='MEMORY'&&String(p.content||'').length>100;}},
-  long:{title:'long-term · 长期记忆',filter:function(p){return p.type==='MEMORY';}},
+  core:{title:'core · 核心记忆',filter:function(p){return p.type==='MEMORY'&&p.layer==='core';}},
+  long:{title:'long-term · 长期记忆',filter:function(p){return p.type==='MEMORY'&&p.layer==='long-term';}},
   recent:{title:'recent · 近 7 天',filter:function(p){var d=postDate(p);return d&&d.getTime()>=Date.now()-7*864e5;}}
 };
 

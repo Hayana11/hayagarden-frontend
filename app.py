@@ -1384,3 +1384,25 @@ def update_board_status(bid):
     conn.execute("UPDATE board SET status=? WHERE id=?", (status, bid))
     conn.commit(); conn.close()
     return jsonify({'ok': True})
+
+SCREEN_STATE_FILE = '/opt/frontend/screen_state.json'
+
+@app.route('/api/screen', methods=['POST'])
+def update_screen():
+    data = request.get_json(silent=True) or {}
+    status = (data.get('status') or '').strip().lower()
+    if status not in ('on', 'off'):
+        return jsonify({'error': 'status must be on or off'}), 400
+    import datetime as _dt
+    state = {'status': status, 'time': _dt.datetime.now(_dt.timezone.utc).isoformat()}
+    with open(SCREEN_STATE_FILE, 'w') as f:
+        json.dump(state, f)
+    return jsonify({'ok': True})
+
+@app.route('/api/screen', methods=['GET'])
+def get_screen():
+    try:
+        with open(SCREEN_STATE_FILE) as f:
+            return jsonify(json.load(f))
+    except FileNotFoundError:
+        return jsonify({'status': 'unknown', 'time': None})

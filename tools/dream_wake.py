@@ -73,8 +73,26 @@ def _calc_t_hours(now):
             pass
     return t
 
+def _get_screen_off_minutes(now):
+    """读取 /api/screen 写入的状态；若屏幕已关闭，返回关闭时长(分钟)，否则 None"""
+    try:
+        with open('/opt/frontend/screen_state.json') as f:
+            state = json.load(f)
+        if state.get('status') != 'off':
+            return None
+        t = datetime.datetime.fromisoformat(state['time'])
+        t_utc_naive = t.astimezone(datetime.timezone.utc).replace(tzinfo=None)
+        now_utc_naive = now - datetime.timedelta(hours=8)  # now 是北京时间 naive
+        return (now_utc_naive - t_utc_naive).total_seconds() / 60
+    except Exception:
+        return None
+
 def _get_recent_activity(now):
-    """查询 dream_events 最近的记录"""
+    """查询 dream_events 最近的记录；屏幕已关闭一段时间则优先判定为不活跃，
+    避免 dream_events 残留记录导致"已入睡却被判定还醒着"。"""
+    off_min = _get_screen_off_minutes(now)
+    if off_min is not None and off_min >= 10:
+        return False, f"屏幕已关闭约{off_min:.0f}分钟，应已入睡"
     conn = _db()
     cutoff = now - datetime.timedelta(minutes=NIGHTWATCH_ACTIVITY_WINDOW)
     cutoff_str = cutoff.strftime('%Y-%m-%d %H:%M:%S')
@@ -154,13 +172,14 @@ def run_nightwatch(now):
 
 def run():
     now = _now()
-    
-    # 先尝试生成梦（入睡检查）
-    try:
-        run_dreaming(now)
-    except Exception:
-        pass
-    
+
+    # 做梦只在凌晨 1-3 点检查（NIGHTWATCH 时段），避免白天/傍晚被误判"睡着60分钟"而做梦
+    if _in_nightwatch_hours(now):
+        try:
+            run_dreaming(now)
+        except Exception:
+            pass
+
     # 凌晨夜巡
     if _in_nightwatch_hours(now):
         run_nightwatch(now)

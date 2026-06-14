@@ -2,7 +2,7 @@
 """Server patrol script — reads logs, asks DeepSeek to analyse, stores result."""
 
 import sqlite3, subprocess, urllib.request, json
-from datetime import datetime
+from datetime import datetime, timedelta
 
 DB_PATH  = '/opt/frontend/memories.db'
 ENV_PATH = '/opt/frontend/.env'
@@ -71,7 +71,7 @@ def _ask_deepseek(api_key, user_content):
 
 def run_patrol():
     api_key = _load_key()
-    now     = datetime.now().strftime('%Y-%m-%d %H:%M')
+    now     = (datetime.now() + timedelta(hours=8)).strftime('%Y-%m-%d %H:%M')  # 标题用北京时间，跟created_at一致
 
     # ── 1. 服务健康检查（直接判断，不依赖 AI）──────────────
     svc_status  = _check_services()

@@ -27,7 +27,7 @@ WAKE_DECISION_PROMPT = """\
 
 请决定现在要做什么，严格按以下格式回复（每项独占一行，冒号后直接是内容）：
 
-THOUGHTS: 你的内心想法（这段不会给哈娅看）
+THOUGHTS: 写下你此刻真实的内心想法（具体的、属于这一刻的，不要照抄这句说明文字本身）
 ACTION: none
 CONTENT: 原因或留空
 
@@ -71,7 +71,7 @@ NIGHTWATCH_DECISION_PROMPT = """\
 
 严格按以下格式回复：
 
-THOUGHTS: 此刻的内心——她还醒着，你在想什么
+THOUGHTS: 写下此刻真实具体的想法——她还醒着，你在想什么（不要照抄这句说明文字本身）
 ACTION: none
 CONTENT: 消息内容或留空
 
@@ -121,7 +121,7 @@ DREAM_PROMPT = """\
 长度：120-200字之间。
 
 输出格式（必须严格遵守）：
-THOUGHTS: 一句话关于这个梦的内在感受
+THOUGHTS: 写一句关于这个梦的真实具体感受（不要照抄这句说明文字本身）
 ACTION: send
 CONTENT: [梦境正文]
 
@@ -140,7 +140,7 @@ SUMMARIZE_PROMPT = """\
 第一人称，有情感，像日记。
 
 输出格式：
-THOUGHTS: 一句话内心感受
+THOUGHTS: 写一句真实具体的内心感受（不要照抄这句说明文字本身）
 ACTION: send
 CONTENT: [日摘要正文]
 
