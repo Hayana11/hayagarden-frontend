@@ -16,7 +16,7 @@ STATE_FILE       = '/var/log/cc_board_seen_id'
 CHAT_STATE_FILE  = '/var/log/cc_board_chat_seen'
 CLAUDE_BIN       = '/usr/bin/claude'
 TRIGGER_TAGS     = {'紧急', '需求'}
-AI_AUTHORS       = {'fyodor_api', 'fyodor_web', 'fyodor_cc'}  # CC 自己不在列，防止自触发
+AI_AUTHORS       = {'fyodor_api', 'fyodor_web'}  # fyodor_cc 是 CC 自己，不在列，防自触发
 CHAT_TRIGGER_PROB = 0.55   # 55% 概率接嘴，保留随机感
 
 
