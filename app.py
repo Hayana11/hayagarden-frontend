@@ -1406,3 +1406,131 @@ def get_screen():
             return jsonify(json.load(f))
     except FileNotFoundError:
         return jsonify({'status': 'unknown', 'time': None})
+
+# ── Ledger 记账 ──────────────────────────────────────────────
+def _init_ledger_table():
+    conn = get_db()
+    conn.execute(
+        'CREATE TABLE IF NOT EXISTS ledger ('
+        'id INTEGER PRIMARY KEY AUTOINCREMENT, '
+        'amount REAL NOT NULL, '
+        'category TEXT, '
+        'note TEXT, '
+        'date TEXT, '
+        'author TEXT, '
+        "created_at DATETIME DEFAULT (datetime('now','+8 hours')))"
+    )
+    conn.commit()
+    conn.close()
+
+_init_ledger_table()
+
+def _init_ledger_budget_table():
+    conn = get_db()
+    conn.execute(
+        'CREATE TABLE IF NOT EXISTS ledger_budget ('
+        'id INTEGER PRIMARY KEY AUTOINCREMENT, '
+        'month TEXT UNIQUE, '
+        'amount REAL NOT NULL)'
+    )
+    conn.commit()
+    conn.close()
+
+_init_ledger_budget_table()
+
+@app.route('/api/ledger', methods=['GET'])
+def get_ledger():
+    month = request.args.get('month', '')
+    conn = get_db()
+    if month:
+        rows = conn.execute(
+            "SELECT * FROM ledger WHERE date LIKE ? ORDER BY date DESC, id DESC",
+            (month + '%',)
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT * FROM ledger ORDER BY date DESC, id DESC LIMIT 50"
+        ).fetchall()
+    conn.close()
+    records = [dict(r) for r in rows]
+    income  = sum(r['amount'] for r in records if r['amount'] > 0)
+    expense = sum(r['amount'] for r in records if r['amount'] < 0)
+    balance = income + expense
+    # 计算上个月支出
+    prev_expense = 0.0
+    if month and len(month) == 7:
+        y, m = int(month[:4]), int(month[5:7])
+        m -= 1
+        if m == 0: m, y = 12, y - 1
+        prev_month = f'{y:04d}-{m:02d}'
+        conn2 = get_db()
+        prev_rows = conn2.execute(
+            "SELECT amount FROM ledger WHERE date LIKE ? AND amount < 0",
+            (prev_month + '%',)
+        ).fetchall()
+        conn2.close()
+        prev_expense = sum(r['amount'] for r in prev_rows)
+    return jsonify({
+        'records': records,
+        'summary': {
+            'income': round(income, 2),
+            'expense': round(expense, 2),
+            'balance': round(balance, 2),
+            'prev_expense': round(prev_expense, 2),
+        }
+    })
+
+@app.route('/api/ledger', methods=['POST'])
+def add_ledger():
+    data     = request.get_json() or {}
+    amount   = data.get('amount')
+    if amount is None:
+        return jsonify({'error': 'amount required'}), 400
+    try:
+        amount = float(amount)
+    except (ValueError, TypeError):
+        return jsonify({'error': 'invalid amount'}), 400
+    category = (data.get('category') or '').strip() or None
+    note     = (data.get('note')     or '').strip() or None
+    date     = (data.get('date')     or '').strip() or None
+    author   = (data.get('author')   or '').strip() or None
+    conn = get_db()
+    conn.execute(
+        'INSERT INTO ledger (amount, category, note, date, author) VALUES (?,?,?,?,?)',
+        (amount, category, note, date, author)
+    )
+    conn.commit(); conn.close()
+    return jsonify({'ok': True})
+
+@app.route('/api/ledger/<int:lid>', methods=['DELETE'])
+def delete_ledger(lid):
+    conn = get_db()
+    conn.execute('DELETE FROM ledger WHERE id=?', (lid,))
+    conn.commit(); conn.close()
+    return jsonify({'ok': True})
+
+@app.route('/api/ledger/budget', methods=['GET'])
+def get_ledger_budget():
+    month = request.args.get('month', '')
+    if not month:
+        return jsonify({'amount': None})
+    conn = get_db()
+    row = conn.execute('SELECT amount FROM ledger_budget WHERE month=?', (month,)).fetchone()
+    conn.close()
+    return jsonify({'amount': row['amount'] if row else None})
+
+@app.route('/api/ledger/budget', methods=['POST'])
+def set_ledger_budget():
+    data = request.get_json() or {}
+    month = (data.get('month') or '').strip()
+    amount = data.get('amount')
+    if not month or amount is None:
+        return jsonify({'error': 'month and amount required'}), 400
+    try:
+        amount = float(amount)
+    except (ValueError, TypeError):
+        return jsonify({'error': 'invalid amount'}), 400
+    conn = get_db()
+    conn.execute('INSERT OR REPLACE INTO ledger_budget (month, amount) VALUES (?,?)', (month, amount))
+    conn.commit(); conn.close()
+    return jsonify({'ok': True})

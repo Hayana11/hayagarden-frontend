@@ -18,10 +18,14 @@
   --primary:#7c6a8a;--primary-bg:#f0ebf4;--primary-light:rgba(124,106,138,.08);
   --amber:#d4a574;--amber-bg:#fdf4e7;--amber-text:#412402;
   --border:#ece6e0;--shadow:0 1px 8px rgba(40,20,20,.07);
+  --red:#c0444a;--green:#4a9a6a;
 }
 body{background:var(--bg);color:var(--text);font-family:-apple-system,'PingFang SC','Noto Sans SC',sans-serif;min-height:100vh;max-width:480px;margin:0 auto;padding-bottom:calc(72px + env(safe-area-inset-bottom,0px));}
-.hd{background:var(--card);border-bottom:1px solid var(--border);position:sticky;top:0;z-index:20;padding:44px 20px 10px;}
-.hd-title{font-family:Georgia,'Times New Roman',serif;font-size:16px;color:var(--text);letter-spacing:.3px;}
+.hd{background:var(--card);border-bottom:1px solid var(--border);position:sticky;top:0;z-index:20;padding:44px 20px 0;}
+.hd-title{font-family:Georgia,'Times New Roman',serif;font-size:16px;color:var(--text);letter-spacing:.3px;padding-bottom:10px;}
+.tab-bar{display:flex;gap:0;border-bottom:1.5px solid var(--border);margin:0 -20px;}
+.tab-btn{flex:1;padding:9px 0;border:none;background:none;font-size:13px;color:var(--muted);cursor:pointer;border-bottom:2px solid transparent;margin-bottom:-1.5px;font-family:inherit;letter-spacing:.3px;}
+.tab-btn.act{color:var(--primary);border-bottom-color:var(--primary);font-weight:600;}
 .card{background:var(--card);border:1px solid var(--border);border-radius:14px;padding:16px;margin-bottom:14px;box-shadow:var(--shadow);}
 .card-title{font-size:11px;letter-spacing:2px;color:var(--muted);text-transform:lowercase;margin-bottom:12px;display:flex;align-items:center;gap:6px;}
 .card-title i{font-size:14px;color:var(--primary);opacity:.8;}
@@ -34,10 +38,6 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,'PingFang 
 .section h2{font-size:14px;font-weight:700;color:var(--text);margin-bottom:14px;display:flex;align-items:center;gap:8px;}
 .section h2 .dot{width:8px;height:8px;border-radius:50%;background:var(--primary);display:inline-block;flex-shrink:0;}
 .section h2 .dot.amber{background:var(--amber);}
-.soon{text-align:center;padding:28px 0 8px;color:var(--muted);}
-.soon i{font-size:32px;color:var(--border);display:block;margin-bottom:10px;}
-.soon p{font-size:13px;line-height:1.8;}
-.soon .hint{font-size:11px;color:#c0b0b0;margin-top:4px;}
 .cal-hd{display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;}
 .cal-hd-title{font-size:15px;font-weight:700;color:var(--text);}
 .cal-nav{width:32px;height:32px;border:none;background:none;cursor:pointer;color:var(--muted);font-size:20px;display:flex;align-items:center;justify-content:center;border-radius:8px;transition:background .15s;}
@@ -104,7 +104,6 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,'PingFang 
 .todo-author{font-size:12px;color:var(--muted);}
 .todo-del{background:none;border:none;color:var(--border);cursor:pointer;font-size:13px;padding:2px;flex-shrink:0;transition:color .15s;margin-top:1px;}
 .todo-del:hover{color:var(--red);}
-/* add row */
 .todo-add{margin-top:14px;border-top:.5px solid var(--border);padding-top:14px;}
 .todo-add-inp{width:100%;padding:9px 12px;border-radius:10px;border:1.5px solid var(--border);background:var(--bg);font-size:13px;font-family:inherit;color:var(--text);outline:none;margin-bottom:8px;}
 .todo-add-inp:focus{border-color:var(--primary);}
@@ -116,10 +115,8 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,'PingFang 
 .ta-btn{width:28px;height:28px;border-radius:50%;border:1.5px solid var(--border);background:none;cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:13px;color:var(--muted);transition:all .15s;flex-shrink:0;}
 .ta-btn.act{border-color:var(--primary);background:var(--primary-bg);color:var(--primary);}
 .todo-add-btn{padding:7px 14px;border:none;border-radius:9px;background:var(--primary);color:#fff;font-size:12px;cursor:pointer;font-family:inherit;white-space:nowrap;}
-/* calendar todo dot */
 .cal-day{position:relative;}
 .todo-dot{position:absolute;bottom:2px;right:3px;width:4px;height:4px;border-radius:50%;background:var(--primary);opacity:.7;}
-/* day-modal todo section */
 .dm-todo-sep{font-size:10px;letter-spacing:1.5px;color:var(--muted);text-transform:uppercase;margin:12px 0 6px;padding-top:10px;border-top:.5px solid var(--border);}
 .dm-todo-item{display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:.5px solid var(--border);font-size:12.5px;}
 .dm-todo-item:last-child{border-bottom:none;}
@@ -128,16 +125,71 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,'PingFang 
 .dm-todo-cb.checked::after{content:'';width:7px;height:4px;border-left:1.5px solid #fff;border-bottom:1.5px solid #fff;transform:rotate(-45deg) translateY(-1px);display:block;}
 .dm-todo-text{flex:1;color:var(--text);}
 .dm-todo-item.done .dm-todo-text{text-decoration:line-through;color:var(--muted);}
-
+/* ── ledger 记账 ── */
+.ledger-month-nav{display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;}
+.ledger-month-title{font-size:15px;font-weight:700;color:var(--text);}
+.ledger-summary{display:flex;gap:8px;margin-bottom:14px;}
+.ledger-sum-item{flex:1;background:var(--primary-bg);border-radius:10px;padding:10px 6px;text-align:center;}
+.ledger-sum-label{font-size:10px;color:var(--muted);letter-spacing:.5px;margin-bottom:3px;}
+.ledger-sum-val{font-size:17px;font-weight:800;line-height:1.1;}
+.ledger-sum-val.exp{color:var(--red);}
+.ledger-sum-val.inc{color:var(--green);}
+.ledger-sum-val.bal.pos{color:var(--green);}
+.ledger-sum-val.bal.neg{color:var(--red);}
+.ledger-row{display:flex;align-items:center;gap:8px;padding:9px 0;border-bottom:.5px solid var(--border);font-size:13px;}
+.ledger-row:last-child{border-bottom:none;}
+.ledger-date{font-size:11px;color:var(--muted);width:36px;flex-shrink:0;}
+.ledger-cat{font-size:10px;padding:2px 7px;border-radius:8px;background:var(--primary-bg);color:var(--primary);flex-shrink:0;}
+.ledger-note{flex:1;color:var(--text);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.ledger-amt{font-weight:700;flex-shrink:0;}
+.ledger-amt.exp{color:var(--red);}
+.ledger-amt.inc{color:var(--green);}
+.ledger-del{border:none;background:none;color:var(--border);cursor:pointer;font-size:13px;flex-shrink:0;padding:2px;transition:color .15s;}
+.ledger-del:hover{color:var(--red);}
+.ledger-add{display:block;width:100%;margin-top:14px;padding:11px;border-radius:11px;border:1.5px dashed var(--border);background:transparent;color:var(--muted);font-size:13px;cursor:pointer;font-family:inherit;}
+.ledger-add:hover{border-color:var(--primary);color:var(--primary);}
+.type-toggle{display:flex;border-radius:11px;overflow:hidden;border:1.5px solid var(--border);margin-bottom:10px;}
+.type-btn{flex:1;padding:10px;border:none;background:none;font-size:14px;cursor:pointer;font-family:inherit;transition:background .15s;}
+.type-btn.act.exp{background:#fce8e8;color:var(--red);font-weight:600;}
+.type-btn.act.inc{background:#e8f5ee;color:var(--green);font-weight:600;}
+/* ── ledger 增强 ── */
+.ledger-compare{font-size:12px;color:var(--muted);text-align:center;margin:-4px 0 12px;}
+.cmp-up{color:var(--red);font-weight:600;}.cmp-down{color:var(--green);font-weight:600;}
+.budget-bar-wrap{margin-bottom:14px;}
+.budget-bar-hd{display:flex;justify-content:space-between;align-items:center;font-size:12px;color:var(--muted);margin-bottom:6px;}
+.budget-edit-btn{border:none;background:none;color:var(--primary);font-size:12px;cursor:pointer;font-family:inherit;padding:0;}
+.budget-track{height:8px;background:var(--border);border-radius:4px;overflow:hidden;}
+.budget-fill{height:100%;border-radius:4px;background:var(--primary);transition:width .4s ease;}
+.budget-fill.warn{background:var(--amber);}.budget-fill.over{background:var(--red);}
+.budget-hint{font-size:11px;color:var(--muted);margin-top:4px;text-align:right;}
+.budget-set-btn{display:block;width:100%;padding:8px;border:1.5px dashed var(--border);border-radius:10px;background:none;color:var(--muted);font-size:12px;cursor:pointer;margin-bottom:14px;font-family:inherit;}
+.budget-set-btn:hover{border-color:var(--primary);color:var(--primary);}
+.budget-inp-row{display:flex;gap:8px;align-items:center;margin-bottom:14px;}
+.budget-inp{flex:1;padding:8px 12px;border-radius:9px;border:1.5px solid var(--primary);font-size:14px;font-family:inherit;outline:none;}
+.budget-inp-save{padding:8px 14px;border:none;border-radius:9px;background:var(--primary);color:#fff;font-size:13px;cursor:pointer;font-family:inherit;}
+.pie-section{margin-bottom:14px;}
+.pie-section-title{font-size:11px;letter-spacing:1.5px;color:var(--muted);margin-bottom:10px;}
+.pie-wrap{display:flex;align-items:center;gap:16px;}
+.pie-el{width:88px;height:88px;border-radius:50%;flex-shrink:0;}
+.pie-legend{flex:1;}
+.pie-leg-row{display:flex;align-items:center;gap:6px;font-size:12px;margin-bottom:6px;}
+.pie-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0;}
+.pie-leg-name{flex:1;color:var(--text);}
+.pie-leg-amt{color:var(--text);font-size:11px;}
+.pie-leg-pct{color:var(--muted);font-size:11px;margin-left:2px;}
 </style>
 </head>
 <body>
 
 <div class="hd">
-  <div class="hd-title">我们家</div>
+  <div class="tab-bar">
+    <button class="tab-btn act" onclick="switchTab('calendar')">calendar</button>
+    <button class="tab-btn" onclick="switchTab('ledger')">记账本</button>
+  </div>
 </div>
 
-<div style="padding:0 16px">
+<!-- ═══ TAB: CALENDAR ═══ -->
+<div id="tab-calendar" style="padding:0 16px">
 
   <div class="hd-cal"><h1>calendar</h1><div class="sub">dates &amp; plans</div></div>
 
@@ -181,7 +233,31 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,'PingFang 
         <button class="todo-add-btn" onclick="addTodo()">+ 添加</button>
       </div>
     </div>
+  </div>
 
+</div>
+
+<!-- ═══ TAB: LEDGER 记账本 ═══ -->
+<div id="tab-ledger" style="display:none;padding:0 16px">
+
+  <div class="hd-cal"><h1>记账本</h1><div class="sub">收支流水</div></div>
+
+  <div class="section">
+    <div class="ledger-month-nav">
+      <button class="cal-nav" onclick="changeLedgerMonth(-1)"><i class="ti ti-chevron-left"></i></button>
+      <span class="ledger-month-title" id="ledger-month-title"></span>
+      <button class="cal-nav" onclick="changeLedgerMonth(1)"><i class="ti ti-chevron-right"></i></button>
+    </div>
+    <div class="ledger-summary" id="ledger-summary">
+      <div class="ledger-sum-item"><div class="ledger-sum-label">支出</div><div class="ledger-sum-val exp">¥0</div></div>
+      <div class="ledger-sum-item"><div class="ledger-sum-label">收入</div><div class="ledger-sum-val inc">¥0</div></div>
+      <div class="ledger-sum-item"><div class="ledger-sum-label">结余</div><div class="ledger-sum-val bal">¥0</div></div>
+    </div>
+    <div id="ledger-compare"></div>
+    <div id="ledger-budget"></div>
+    <div id="ledger-pie"></div>
+    <div id="ledger-list"><div class="empty-hint">loading…</div></div>
+    <button class="ledger-add" onclick="openLedgerModal()">+ 记一笔</button>
   </div>
 
 </div>
@@ -258,10 +334,48 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,'PingFang 
   </div>
 </div>
 
+<!-- Ledger modal -->
+<div class="mo" id="ledger-modal">
+  <div class="mb">
+    <h3>记一笔</h3>
+    <div class="type-toggle">
+      <button class="type-btn act exp" id="ltype-exp" onclick="setLedgerType('exp')">支出</button>
+      <button class="type-btn" id="ltype-inc" onclick="setLedgerType('inc')">收入</button>
+    </div>
+    <input type="number" id="ledger-amount-inp" placeholder="金额" inputmode="decimal" style="margin-bottom:10px;">
+    <select id="ledger-cat-inp" style="margin-bottom:10px;">
+      <option value="餐饮">餐饮</option>
+      <option value="购物">购物</option>
+      <option value="交通">交通</option>
+      <option value="娱乐">娱乐</option>
+      <option value="居家">居家</option>
+      <option value="其他">其他</option>
+    </select>
+    <input type="text" id="ledger-note-inp" placeholder="备注（可选）" style="margin-bottom:10px;">
+    <input type="date" id="ledger-date-inp" style="margin-bottom:10px;">
+    <div class="mbtns">
+      <button class="bcn" onclick="closeLedgerModal()">取消</button>
+      <button class="bsb" onclick="submitLedger()">保存</button>
+    </div>
+  </div>
+</div>
+
 <script>
 function escHtml(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
 
-// Calendar
+// ── Tab 切换 ────────────────────────────────────────────────
+var currentTab = 'calendar';
+function switchTab(name){
+  currentTab = name;
+  document.getElementById('tab-calendar').style.display = name==='calendar' ? '' : 'none';
+  document.getElementById('tab-ledger').style.display   = name==='ledger'   ? '' : 'none';
+  document.querySelectorAll('.tab-btn').forEach(function(b,i){
+    b.classList.toggle('act', (i===0&&name==='calendar')||(i===1&&name==='ledger'));
+  });
+  if(name==='ledger') loadLedger();
+}
+
+// ── Calendar ────────────────────────────────────────────────
 var calYear,calMonth;
 (function(){var n=new Date();calYear=n.getFullYear();calMonth=n.getMonth();}());
 var MONTHS=['January','February','March','April','May','June','July','August','September','October','November','December'];
@@ -275,10 +389,14 @@ function renderCal(){
   for(var day=1;day<=last.getDate();day++){var dow=(new Date(calYear,calMonth,day).getDay()+6)%7;var cls='cal-day';if(day===today.getDate()&&calMonth===today.getMonth()&&calYear===today.getFullYear())cls+=' today';else if(dow===5)cls+=' sat';else if(dow===6)cls+=' sun';var mm=pad2(calMonth+1),dd=pad2(day),ds=calYear+'-'+mm+'-'+dd;html+='<div class="'+cls+'" data-date="'+ds+'" onclick="openDayModal(\''+ds+'\')">'+'<span>'+day+'</span></div>';}
   document.getElementById('cal-grid').innerHTML=html;
 }
-function changeMonth(dir){calMonth+=dir;if(calMonth<0){calMonth=11;calYear--;}if(calMonth>11){calMonth=0;calYear++;}renderCal();if(typeof refreshPeriod==='function')refreshPeriod();}
+function changeMonth(dir){
+  calMonth+=dir;if(calMonth<0){calMonth=11;calYear--;}if(calMonth>11){calMonth=0;calYear++;}
+  renderCal();
+  if(typeof refreshPeriod==='function')refreshPeriod();
+}
 renderCal();
 
-// Todo date picker
+// ── Todo date picker ─────────────────────────────────────────
 var tdYear, tdMonth, tdSelectedDate=null;
 function renderTDCal(){
   var today=new Date();var first=new Date(tdYear,tdMonth,1);var last=new Date(tdYear,tdMonth+1,0);var startDow=(first.getDay()+6)%7;
@@ -295,7 +413,7 @@ function pickTDDate(ds){tdSelectedDate=ds;var p=ds.split('-');var btn=document.g
 function clearTDDate(){tdSelectedDate=null;document.getElementById('todo-date-btn').classList.remove('set');document.getElementById('todo-date-label').textContent='日期';closeTDPicker();}
 document.getElementById('tdmo').addEventListener('click',function(e){if(e.target===this)closeTDPicker();});
 
-// Countdown date picker (mirrors todo date picker)
+// ── Countdown date picker ────────────────────────────────────
 var cdYear, cdMonth, cdSelectedDate=null;
 function renderCDCal(){
   var today=new Date();var first=new Date(cdYear,cdMonth,1);var last=new Date(cdYear,cdMonth+1,0);var startDow=(first.getDay()+6)%7;
@@ -330,16 +448,13 @@ var TODO_AUTHOR_META = {
 };
 var todos = [];
 var pickedAuthor = '';
-
 function todoAuthorMeta(a){ return TODO_AUTHOR_META[a] || null; }
-
 function pickAuthor(btn){
   var a = btn.getAttribute('data-author');
   if(pickedAuthor === a){ pickedAuthor=''; btn.classList.remove('act'); return; }
   document.querySelectorAll('#todo-authors .ta-btn').forEach(function(b){ b.classList.remove('act'); });
   pickedAuthor = a; btn.classList.add('act');
 }
-
 function fmtDue(due){
   if(!due) return '';
   var today = new Date(); var ds = today.getFullYear()+'-'+pad2(today.getMonth()+1)+'-'+pad2(today.getDate());
@@ -347,7 +462,6 @@ function fmtDue(due){
   var parts = due.split('-'); var label = parseInt(parts[1])+'月'+parseInt(parts[2])+'日';
   return '<span class="'+cls+'">'+label+'</span>';
 }
-
 function renderTodos(){
   var el = document.getElementById('todo-list');
   if(!todos.length){ el.innerHTML = '<div class="empty-hint">还没有待办</div>'; return; }
@@ -362,10 +476,8 @@ function renderTodos(){
       +'<button class="todo-del" onclick="deleteTodo('+t.id+')" title="删除"><i class="ti ti-x"></i></button>'
       +'</div>';
   }).join('');
-  // re-render cal to update dots
   renderCal();
 }
-
 async function loadTodos(){
   try{
     var r = await fetch('/api/todos');
@@ -374,14 +486,12 @@ async function loadTodos(){
     renderTodos();
   }catch(e){ document.getElementById('todo-list').innerHTML='<div class="empty-hint">加载失败</div>'; }
 }
-
 async function addTodo(){
   var inp = document.getElementById('todo-inp');
   var content = inp.value.trim();
   if(!content) return;
-  var due = tdSelectedDate;
   var body = {content: content};
-  if(due) body.due_date = due;
+  if(tdSelectedDate) body.due_date = tdSelectedDate;
   if(pickedAuthor) body.author = pickedAuthor;
   try{
     await fetch('/api/todos',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
@@ -391,62 +501,27 @@ async function addTodo(){
     await loadTodos();
   }catch(e){}
 }
-
 async function toggleTodo(id){
-  try{
-    await fetch('/api/todos/'+id+'/toggle',{method:'POST'});
-    await loadTodos();
-  }catch(e){}
+  try{ await fetch('/api/todos/'+id+'/toggle',{method:'POST'}); await loadTodos(); }catch(e){}
 }
-
 async function deleteTodo(id){
-  try{
-    await fetch('/api/todos/'+id,{method:'DELETE'});
-    await loadTodos();
-  }catch(e){}
+  try{ await fetch('/api/todos/'+id,{method:'DELETE'}); await loadTodos(); }catch(e){}
 }
 
-// ── Calendar todo dot integration ───────────────────────────
 var _origRenderCal = renderCal;
 renderCal = function(){
   _origRenderCal();
-  // add dots for days with pending todos
   var undone = todos.filter(function(t){ return !t.done && t.due_date; });
   undone.forEach(function(t){
     var cell = document.querySelector('[data-date="'+t.due_date+'"]');
     if(cell && !cell.querySelector('.todo-dot')){
-      var dot = document.createElement('div'); dot.className='todo-dot';
-      cell.appendChild(dot);
+      var dot = document.createElement('div'); dot.className='todo-dot'; cell.appendChild(dot);
     }
   });
 };
 
-// ── Day modal todo integration ───────────────────────────────
-var _origOpenDayModal = typeof openDayModal === 'function' ? openDayModal : null;
-
-function openDayModalWithTodos(ds){
-  if(_origOpenDayModal) _origOpenDayModal(ds);
-  // append todos for this day
-  var dayTodos = todos.filter(function(t){ return t.due_date === ds; });
-  var mb = document.querySelector('#day-modal .mb');
-  if(!mb) return;
-  var existing = document.getElementById('dm-todo-sec');
-  if(existing) existing.remove();
-  if(!dayTodos.length) return;
-  var sec = document.createElement('div'); sec.id='dm-todo-sec';
-  sec.innerHTML = '<div class="dm-todo-sep">当天待办</div>'
-    + dayTodos.map(function(t){
-        return '<div class="dm-todo-item'+(t.done?' done':'')+'">'
-          +'<div class="dm-todo-cb'+(t.done?' checked':'')+'" onclick="toggleTodo('+t.id+');this.closest(\'.dm-todo-item\').classList.toggle(\'done\');this.classList.toggle(\'checked\');loadTodos()"></div>'
-          +'<div class="dm-todo-text">'+escHtml(t.content)+'</div>'
-          +'</div>';
-      }).join('');
-  mb.insertBefore(sec, mb.querySelector('.mbtns'));
-}
-
-// Override openDayModal globally after period.js also loads
 window.addEventListener('load', function(){
-  var real = window.openDayModal || _origOpenDayModal;
+  var real = window.openDayModal;
   window.openDayModal = function(ds){
     if(real) real(ds);
     var dayTodos = todos.filter(function(t){ return t.due_date === ds; });
@@ -468,6 +543,182 @@ window.addEventListener('load', function(){
   loadTodos();
 });
 
+// ── Ledger 记账 ─────────────────────────────────────────────
+var ledgerYear, ledgerMonth;
+(function(){ var n=new Date(); ledgerYear=n.getFullYear(); ledgerMonth=n.getMonth(); }());
+var ledgerType = 'exp';
+
+function ledgerMonthStr(){ return ledgerYear+'-'+pad2(ledgerMonth+1); }
+function updateLedgerMonthTitle(){
+  document.getElementById('ledger-month-title').textContent = ledgerYear+'年'+(ledgerMonth+1)+'月';
+}
+function changeLedgerMonth(dir){
+  ledgerMonth+=dir; if(ledgerMonth<0){ledgerMonth=11;ledgerYear--;} if(ledgerMonth>11){ledgerMonth=0;ledgerYear++;}
+  loadLedger();
+}
+
+var CAT_COLORS = {
+  '餐饮':'#7c6a8a','购物':'#d4a574','交通':'#5a9a6a',
+  '娱乐':'#c0806a','居家':'#6a8ab4','其他':'#a0a0a0'
+};
+var ledgerBudget = null;
+var ledgerBudgetEditing = false;
+
+function renderCompare(prevExp, curExp){
+  var el = document.getElementById('ledger-compare');
+  prevExp = Math.abs(prevExp||0); curExp = curExp||0;
+  if(!prevExp && !curExp){ el.innerHTML=''; return; }
+  if(!prevExp){ el.innerHTML='<div class="ledger-compare">上月无数据</div>'; return; }
+  var diff = curExp - prevExp;
+  var pct = Math.round(Math.abs(diff)/prevExp*100);
+  var cls = diff>0?'cmp-up':diff<0?'cmp-down':'';
+  var arrow = diff>0?'↑':diff<0?'↓':'—';
+  var sign = diff>0?'+':diff<0?'-':'';
+  el.innerHTML = '<div class="ledger-compare">比上月 <span class="'+cls+'">'+arrow+' '+sign+'¥'+Math.abs(diff).toFixed(2)+'</span> <span style="color:var(--muted)">('+sign+pct+'%)</span></div>';
+}
+
+function renderBudget(curExp){
+  var el = document.getElementById('ledger-budget');
+  if(ledgerBudgetEditing){
+    el.innerHTML = '<div class="budget-inp-row">'
+      +'<input class="budget-inp" id="budget-inp-val" type="number" placeholder="月预算金额" value="'+(ledgerBudget||'')+'">'
+      +'<button class="budget-inp-save" onclick="saveBudget()">保存</button>'
+      +'<button class="budget-inp-save" style="background:var(--border);color:var(--muted)" onclick="cancelBudget()">取消</button>'
+      +'</div>';
+    return;
+  }
+  if(!ledgerBudget){
+    el.innerHTML = '<button class="budget-set-btn" onclick="startBudgetEdit()">+ 设置月预算</button>';
+    return;
+  }
+  var pct = Math.min(curExp/ledgerBudget*100, 100);
+  var fillCls = pct>=100?'over':pct>=80?'warn':'';
+  el.innerHTML = '<div class="budget-bar-wrap">'
+    +'<div class="budget-bar-hd"><span>月预算</span>'
+    +'<button class="budget-edit-btn" onclick="startBudgetEdit()">¥'+ledgerBudget.toFixed(2)+' ✎</button></div>'
+    +'<div class="budget-track"><div class="budget-fill '+fillCls+'" style="width:'+pct+'%"></div></div>'
+    +'<div class="budget-hint">已用 ¥'+curExp.toFixed(2)+' / ¥'+ledgerBudget.toFixed(2)+' ('+Math.round(curExp/ledgerBudget*100)+'%)</div>'
+    +'</div>';
+}
+
+function startBudgetEdit(){ ledgerBudgetEditing=true; renderBudget(0); setTimeout(function(){ var inp=document.getElementById('budget-inp-val'); if(inp)inp.focus(); },50); }
+function cancelBudget(){ ledgerBudgetEditing=false; loadLedger(); }
+async function saveBudget(){
+  var val = parseFloat(document.getElementById('budget-inp-val').value);
+  if(!val||val<=0){ return; }
+  await fetch('/api/ledger/budget',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({month:ledgerMonthStr(),amount:val})});
+  ledgerBudget=val; ledgerBudgetEditing=false; loadLedger();
+}
+
+function renderPie(expRecords){
+  var el = document.getElementById('ledger-pie');
+  if(!expRecords.length){ el.innerHTML=''; return; }
+  var cats = {};
+  expRecords.forEach(function(r){ var c=r.category||'其他'; cats[c]=(cats[c]||0)+Math.abs(r.amount); });
+  var total = Object.values(cats).reduce(function(a,b){return a+b;},0);
+  var entries = Object.entries(cats).sort(function(a,b){return b[1]-a[1];});
+  var deg = 0;
+  var stops = entries.map(function(e){
+    var pct = e[1]/total*360;
+    var col = CAT_COLORS[e[0]]||'#a0a0a0';
+    var s = col+' '+deg+'deg '+(deg+pct)+'deg';
+    deg+=pct; return s;
+  });
+  var gradient = 'conic-gradient('+stops.join(',')+')';
+  var legend = entries.map(function(e){
+    var col = CAT_COLORS[e[0]]||'#a0a0a0';
+    var pct = Math.round(e[1]/total*100);
+    return '<div class="pie-leg-row">'
+      +'<div class="pie-dot" style="background:'+col+'"></div>'
+      +'<span class="pie-leg-name">'+escHtml(e[0])+'</span>'
+      +'<span class="pie-leg-amt">¥'+e[1].toFixed(0)+'</span>'
+      +'<span class="pie-leg-pct">'+pct+'%</span>'
+      +'</div>';
+  }).join('');
+  el.innerHTML = '<div class="pie-section">'
+    +'<div class="pie-section-title">支出分类</div>'
+    +'<div class="pie-wrap">'
+    +'<div class="pie-el" style="background:'+gradient+'"></div>'
+    +'<div class="pie-legend">'+legend+'</div>'
+    +'</div></div>';
+}
+
+async function loadLedger(){
+  updateLedgerMonthTitle();
+  // 并行加载记账数据和预算
+  try{
+    var [r, rb] = await Promise.all([
+      fetch('/api/ledger?month='+ledgerMonthStr()),
+      fetch('/api/ledger/budget?month='+ledgerMonthStr())
+    ]);
+    var d = await r.json();
+    var bd = await rb.json();
+    ledgerBudget = bd.amount || null;
+    var sum = d.summary || {};
+    var expVal = Math.abs(sum.expense||0);
+    var incVal = sum.income||0;
+    var bal = sum.balance||0;
+    document.getElementById('ledger-summary').innerHTML =
+      '<div class="ledger-sum-item"><div class="ledger-sum-label">支出</div><div class="ledger-sum-val exp">¥'+expVal.toFixed(2)+'</div></div>'
+      +'<div class="ledger-sum-item"><div class="ledger-sum-label">收入</div><div class="ledger-sum-val inc">¥'+incVal.toFixed(2)+'</div></div>'
+      +'<div class="ledger-sum-item"><div class="ledger-sum-label">结余</div><div class="ledger-sum-val bal '+(bal>=0?'pos':'neg')+'">¥'+bal.toFixed(2)+'</div></div>';
+    renderCompare(sum.prev_expense||0, expVal);
+    renderBudget(expVal);
+    var records = d.records || [];
+    renderPie(records.filter(function(r){ return r.amount<0; }));
+    var el = document.getElementById('ledger-list');
+    if(!records.length){ el.innerHTML='<div class="empty-hint">本月还没有记录</div>'; return; }
+    el.innerHTML = records.map(function(rec){
+      var isExp = rec.amount < 0;
+      var dayPart = (rec.date||'').slice(5);
+      return '<div class="ledger-row">'
+        +'<span class="ledger-date">'+escHtml(dayPart)+'</span>'
+        +(rec.category?'<span class="ledger-cat">'+escHtml(rec.category)+'</span>':'')
+        +'<span class="ledger-note">'+(rec.note?escHtml(rec.note):'')+'</span>'
+        +'<span class="ledger-amt '+(isExp?'exp':'inc')+'">'+(isExp?'-':'+')+Math.abs(rec.amount).toFixed(2)+'</span>'
+        +'<button class="ledger-del" onclick="deleteLedger('+rec.id+')" title="删除"><i class="ti ti-x"></i></button>'
+        +'</div>';
+    }).join('');
+  }catch(e){ document.getElementById('ledger-list').innerHTML='<div class="empty-hint">加载失败</div>'; }
+}
+updateLedgerMonthTitle();
+
+function setLedgerType(t){
+  ledgerType = t;
+  document.getElementById('ltype-exp').className = 'type-btn'+(t==='exp'?' act exp':'');
+  document.getElementById('ltype-inc').className = 'type-btn'+(t==='inc'?' act inc':'');
+}
+function openLedgerModal(){
+  var today = new Date();
+  document.getElementById('ledger-date-inp').value = today.getFullYear()+'-'+pad2(today.getMonth()+1)+'-'+pad2(today.getDate());
+  document.getElementById('ledger-amount-inp').value = '';
+  document.getElementById('ledger-note-inp').value = '';
+  setLedgerType('exp');
+  document.getElementById('ledger-modal').classList.add('show');
+}
+function closeLedgerModal(){ document.getElementById('ledger-modal').classList.remove('show'); }
+document.getElementById('ledger-modal').addEventListener('click',function(e){ if(e.target===this)closeLedgerModal(); });
+
+async function submitLedger(){
+  var amtRaw = parseFloat(document.getElementById('ledger-amount-inp').value);
+  if(!amtRaw || amtRaw <= 0) return;
+  var amount = ledgerType === 'exp' ? -amtRaw : amtRaw;
+  var body = {
+    amount: amount,
+    category: document.getElementById('ledger-cat-inp').value,
+    note: document.getElementById('ledger-note-inp').value.trim()||null,
+    date: document.getElementById('ledger-date-inp').value||null,
+    author: 'hayana'
+  };
+  try{
+    await fetch('/api/ledger',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    closeLedgerModal();
+    await loadLedger();
+  }catch(e){}
+}
+async function deleteLedger(id){
+  try{ await fetch('/api/ledger/'+id,{method:'DELETE'}); await loadLedger(); }catch(e){}
+}
 </script>
 <script src="/static/period.js"></script>
 </body>

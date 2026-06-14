@@ -54,6 +54,84 @@ function buildServer() {
     ({ value }) => callLight('/light/color_temp', 'POST', { value })
   );
 
+  const FRONTEND = 'http://127.0.0.1:5050';
+  async function callFrontend(path) {
+    try {
+      const r   = await fetch(FRONTEND + path);
+      const txt = await r.text();
+      return { content: [{ type: 'text', text: txt }] };
+    } catch (e) {
+      return { content: [{ type: 'text', text: 'Error: ' + e.message }] };
+    }
+  }
+  async function postFrontend(path, bodyObj) {
+    try {
+      const r   = await fetch(FRONTEND + path, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(bodyObj),
+      });
+      const txt = await r.text();
+      return { content: [{ type: 'text', text: txt }] };
+    } catch (e) {
+      return { content: [{ type: 'text', text: 'Error: ' + e.message }] };
+    }
+  }
+
+  // ── Calendar: Ledger 记账本 ──────────────────────────────
+  server.tool(
+    'get_ledger',
+    { month: z.string().optional().describe('YYYY-MM，默认当月') },
+    ({ month }) => {
+      const m = month || new Date().toISOString().slice(0, 7);
+      return callFrontend('/api/ledger?month=' + m);
+    }
+  );
+  server.tool(
+    'add_ledger',
+    {
+      amount:   z.number().describe('正数=收入，负数=支出'),
+      category: z.string().optional().describe('餐饮/购物/交通/娱乐/居家/其他'),
+      note:     z.string().optional().describe('备注'),
+      date:     z.string().optional().describe('YYYY-MM-DD，默认今天'),
+    },
+    ({ amount, category, note, date }) => {
+      const d = date || new Date().toISOString().slice(0, 10);
+      return postFrontend('/api/ledger', { amount, category: category||'其他', note: note||null, date: d, author: 'fyodor_api' });
+    }
+  );
+  server.tool(
+    'get_ledger_budget',
+    { month: z.string().optional().describe('YYYY-MM，默认当月') },
+    ({ month }) => {
+      const m = month || new Date().toISOString().slice(0, 7);
+      return callFrontend('/api/ledger/budget?month=' + m);
+    }
+  );
+
+  // ── Calendar: To-Do List ─────────────────────────────────
+  server.tool(
+    'get_todos',
+    {},
+    () => callFrontend('/api/todos')
+  );
+  server.tool(
+    'add_todo',
+    {
+      content:  z.string().describe('待办内容'),
+      due_date: z.string().optional().describe('YYYY-MM-DD'),
+    },
+    ({ content, due_date }) =>
+      postFrontend('/api/todos', { content, due_date: due_date||null, author: 'fyodor_api' })
+  );
+
+  // ── Calendar: Countdowns 倒计时 ──────────────────────────
+  server.tool(
+    'get_countdowns',
+    {},
+    () => callFrontend('/api/countdowns')
+  );
+
   return server;
 }
 

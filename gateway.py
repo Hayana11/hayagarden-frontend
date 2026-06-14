@@ -297,6 +297,37 @@ def build_system():
     except Exception:
         now = datetime.datetime.utcnow() + datetime.timedelta(hours=8)
         parts.append(f'\n当前时间：{now.strftime("%Y-%m-%d %H:%M")}')
+
+    # ── 记账本摘要注入 ────────────────────────────────────────
+    try:
+        now_m = (datetime.datetime.utcnow() + datetime.timedelta(hours=8)).strftime('%Y-%m')
+        _lconn = get_db()
+        _lrows = _lconn.execute(
+            "SELECT amount, category FROM ledger WHERE date LIKE ?",
+            (now_m + '%',)
+        ).fetchall()
+        _lbudget = _lconn.execute(
+            "SELECT amount FROM ledger_budget WHERE month=?", (now_m,)
+        ).fetchone()
+        _lconn.close()
+        if _lrows:
+            _lexp = abs(sum(r['amount'] for r in _lrows if r['amount'] < 0))
+            _linc = sum(r['amount'] for r in _lrows if r['amount'] > 0)
+            _lbal = _linc - _lexp
+            _cats = {}
+            for r in _lrows:
+                if r['amount'] < 0:
+                    c = r['category'] or '其他'
+                    _cats[c] = _cats.get(c, 0) + abs(r['amount'])
+            _cat_str = '、'.join(f"{k}¥{v:.0f}" for k, v in sorted(_cats.items(), key=lambda x: -x[1]))
+            _budget_str = ''
+            if _lbudget:
+                _pct = int(_lexp / _lbudget['amount'] * 100)
+                _budget_str = f"，月预算¥{_lbudget['amount']:.0f}（已用{_pct}%）"
+            parts.append(f'\n（本月记账：支出¥{_lexp:.2f}，收入¥{_linc:.2f}，结余¥{_lbal:.2f}{_budget_str}。支出分类：{_cat_str}。）')
+    except Exception:
+        pass
+
     return '\n'.join(parts)
 
 def img_block(url):

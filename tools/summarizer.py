@@ -83,9 +83,12 @@ def _call_summarize(day_str, messages):
             env=env, cwd="/opt/frontend"
         )
         text = result.stdout.strip()[:350]
-        if text:
+        if text and 'API Error' not in text and 'authenticate' not in text and 'Invalid' not in text:
             return text
-        _log("claude CLI empty for " + day_str)
+        if text:
+            _log("claude CLI returned error for " + day_str + ": " + text[:80])
+        else:
+            _log("claude CLI empty for " + day_str)
         return None
     except Exception as e:
         _log("summarize CLI error for " + day_str + ": " + str(e))

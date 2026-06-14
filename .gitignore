@@ -7,3 +7,6 @@ __pycache__/
 *.pyo
 .mijia_auth
 static/qrcode.png
+-e 
+gateway.log
+mcp-http.log
