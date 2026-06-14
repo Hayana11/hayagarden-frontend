@@ -165,6 +165,18 @@ async function loadEmotions(){
       <div class="emotion-card">
         <div class="time">${item.time}${item.domain ? ' · ' + item.domain : ''}</div>
         ${item.emotion ? `<span class="emotion-chip ec-${item.emotion}">${item.emotion}</span>` : ''}
+        <div class="mood">
+          <div class="val">
+            <div class="val-label">情感 Valence</div>
+            <div class="bar"><div class="bar-fill" style="width:${item.valence*100}%"></div></div>
+            <small>${(item.valence*100).toFixed(0)}%</small>
+          </div>
+          <div class="val">
+            <div class="val-label">觉醒 Arousal</div>
+            <div class="bar"><div class="bar-fill" style="width:${item.arousal*100}%;background:linear-gradient(90deg,var(--primary-light),var(--primary));"></div></div>
+            <small>${(item.arousal*100).toFixed(0)}%</small>
+          </div>
+        </div>
         ${item.note ? `<div class="emotion-note">${item.note}</div>` : ''}
       </div>
     `).join('');
