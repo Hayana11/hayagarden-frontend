@@ -17,6 +17,8 @@ from bot_config import (
     WAKE_ACTIVE_START, WAKE_ACTIVE_END, WAKE_PROB_MAX, WAKE_PROB_SCALE,
     NIGHTWATCH_START, NIGHTWATCH_END, NIGHTWATCH_PROB, NIGHTWATCH_ACTIVITY_WINDOW,
 )
+DREAMING_START = 3   # 凌晨3点后才做梦
+DREAMING_END   = 5
 
 def _now():
     return datetime.datetime.utcnow() + datetime.timedelta(hours=8)
@@ -173,14 +175,14 @@ def run_nightwatch(now):
 def run():
     now = _now()
 
-    # 做梦只在凌晨 1-3 点检查（NIGHTWATCH 时段），避免白天/傍晚被误判"睡着60分钟"而做梦
-    if _in_nightwatch_hours(now):
+    # 做梦：凌晨3-5点，她睡着60分钟后才触发
+    if DREAMING_START <= now.hour < DREAMING_END:
         try:
             run_dreaming(now)
         except Exception:
             pass
 
-    # 凌晨夜巡
+    # 凌晨夜巡（1-3点）
     if _in_nightwatch_hours(now):
         run_nightwatch(now)
         return
