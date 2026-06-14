@@ -122,7 +122,14 @@ def run_patrol():
 if __name__ == '__main__':
     import sys
     try:
-        print(run_patrol())
+        result = run_patrol()
+        print(result)
+        # 巡逻完立即触发 CC 检查，不等30分钟的cron周期
+        if result and ('❌' in result or '⚠️' in result):
+            subprocess.run(
+                [sys.executable, '/opt/frontend/tools/cc_board_check.py'],
+                timeout=360, check=False
+            )
     except Exception as e:
         print(f'[patrol error] {e}', file=sys.stderr)
         sys.exit(1)
