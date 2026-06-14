@@ -7,7 +7,7 @@
   STATE_FILE      保存最后处理过的最大 board ID（主帖去重）
   CHAT_STATE_FILE 保存各闲聊帖已见到的最大 reply ID（dict json）
 """
-import json, random, subprocess, sys, os
+import json, random, subprocess, sys, os, sqlite3
 from urllib.request import urlopen
 from urllib.error import URLError
 
@@ -18,6 +18,7 @@ CLAUDE_BIN       = '/usr/bin/claude'
 TRIGGER_TAGS     = {'紧急', '需求'}
 AI_AUTHORS       = {'fyodor_api', 'fyodor_web'}  # fyodor_cc 是 CC 自己，不在列，防自触发
 CHAT_TRIGGER_PROB = 0.55   # 55% 概率接嘴，保留随机感
+DB_PATH           = '/opt/frontend/memories.db'
 
 
 def _load_board_token():
@@ -122,7 +123,29 @@ def trigger_chat_reply(item, board_token):
     )
 
 
+
+def auto_close_stale_chat():
+    """闲聊主帖超过 12 小时且有回复 → 自动标记 done"""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        rows = conn.execute(
+            """SELECT b.id FROM board b
+               WHERE b.tag='闲聊' AND b.status='open'
+                 AND b.created_at <= datetime('now','+8 hours','-12 hours')
+                 AND EXISTS (SELECT 1 FROM board_replies r WHERE r.board_id=b.id)"""
+        ).fetchall()
+        if rows:
+            ids = [r[0] for r in rows]
+            conn.executemany("UPDATE board SET status='done' WHERE id=?", [(i,) for i in ids])
+            conn.commit()
+            print(f'[cc_board_check] auto-closed stale chat posts: {ids}')
+        conn.close()
+    except Exception as e:
+        print(f'[cc_board_check] auto_close error: {e}', file=sys.stderr)
+
+
 def main():
+    auto_close_stale_chat()
     seen_id   = load_seen_id()
     chat_seen = load_chat_seen()
 
