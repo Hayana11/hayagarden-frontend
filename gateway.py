@@ -130,7 +130,7 @@ def _ombre_handoff_sync():
         return None
 
 
-def build_system():
+def build_system(wake=False):
     parts = []
 
     # ── 1. Handoff：自我锚点 + 用户/关系画像 + 近期连续性 ──
@@ -259,26 +259,27 @@ def build_system():
     except Exception:
         pass
 
-    # ── 最近对话片段 ───────────────────────────────────────────
-    try:
-        _mc = get_db()
-        _recent = _mc.execute(
-            """SELECT author, content, created_at FROM chat_messages
-               WHERE created_at >= datetime('now','+8 hours','-8 hours')
-               ORDER BY id DESC LIMIT 8"""
-        ).fetchall()
-        _mc.close()
-        if _recent:
-            _recent = list(reversed(_recent))
-            _mlines = []
-            for _i, _m in enumerate(_recent):
-                _who = '哈娅' if _m['author'] not in ('fyodor', 'assistant', 'claude') else '你'
-                _t = _m['created_at'][11:16]
-                _limit = 200 if _i == len(_recent) - 1 else 100
-                _mlines.append(f'[{_t}] {_who}：{(_m["content"] or "")[:_limit]}')
-            parts.append('\n## 最近的对话\n' + '\n'.join(_mlines))
-    except Exception:
-        pass
+    # ── 最近对话片段（仅 wake 模式，chat 里 messages 已有完整记录）──
+    if wake:
+        try:
+            _mc = get_db()
+            _recent = _mc.execute(
+                """SELECT author, content, created_at FROM chat_messages
+                   WHERE created_at >= datetime('now','+8 hours','-8 hours')
+                   ORDER BY id DESC LIMIT 8"""
+            ).fetchall()
+            _mc.close()
+            if _recent:
+                _recent = list(reversed(_recent))
+                _mlines = []
+                for _i, _m in enumerate(_recent):
+                    _who = '哈娅' if _m['author'] not in ('fyodor', 'assistant', 'claude') else '你'
+                    _t = _m['created_at'][11:16]
+                    _limit = 200 if _i == len(_recent) - 1 else 100
+                    _mlines.append(f'[{_t}] {_who}：{(_m["content"] or "")[:_limit]}')
+                parts.append('\n## 最近的对话\n' + '\n'.join(_mlines))
+        except Exception:
+            pass
 
     # ── 梦境浮现（30%概率，情感共鸣门控） ────────────────────
     try:
@@ -1349,7 +1350,7 @@ def wake_decide():
         except Exception:
             pass
 
-    system = build_system()
+    system = build_system(wake=True)
     try:
         import importlib as _il, bot_config as _bconf
         _il.reload(_bconf)
