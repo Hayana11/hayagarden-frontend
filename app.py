@@ -1073,6 +1073,18 @@ def brain_emotions_proxy():
         import frontmatter as _fm
     except ImportError:
         return jsonify({'ok': False, 'error': 'frontmatter not installed'}), 500
+
+    def _emotion_label(v, a):
+        if v >= 0.65 and a >= 0.60: return '喜悦'
+        if v >= 0.65 and a >= 0.40: return '愉悦'
+        if v >= 0.65:                return '平静'
+        if v >= 0.45 and a >= 0.65: return '兴奋'
+        if v >= 0.45 and a < 0.35:  return '松弛'
+        if v < 0.35  and a >= 0.60: return '焦虑'
+        if v < 0.35  and a >= 0.35: return '沉重'
+        if v < 0.35:                 return '低落'
+        return '迷离'
+
     try:
         bucket_dir = '/opt/ombre-brain/buckets/dynamic'
         items = []
@@ -1084,11 +1096,13 @@ def brain_emotions_proxy():
                 _a = _meta.get('arousal')
                 if _v is None or _a is None:
                     continue
+                _fv, _fa = float(_v), float(_a)
                 _note = (_post.content or '').replace('[[', '').replace(']]', '').strip()[:80]
                 items.append({
                     'time': (_meta.get('last_active') or _meta.get('created', ''))[:10],
-                    'valence': round(float(_v), 2),
-                    'arousal': round(float(_a), 2),
+                    'valence': round(_fv, 2),
+                    'arousal': round(_fa, 2),
+                    'emotion': _emotion_label(_fv, _fa),
                     'note': _note,
                     'domain': '、'.join(_meta.get('domain', [])),
                 })
