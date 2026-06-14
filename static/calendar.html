@@ -89,6 +89,13 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,'PingFang 
 .cal-day.pd-pred:not(.today){outline:1.5px dashed rgba(220,100,100,.45);outline-offset:-2px;color:var(--text);}
 .cal-day.ovul:not(.today){background:rgba(124,106,138,.25);color:var(--primary);}
 .cal-day.fertile:not(.today){background:rgba(124,106,138,.1);}
+.cal-legend{display:flex;flex-wrap:wrap;gap:12px;margin-top:10px;padding-top:10px;border-top:1px solid var(--border);font-size:11px;color:var(--muted);}
+.cal-legend-item{display:flex;align-items:center;gap:5px;}
+.cal-legend-dot{width:13px;height:13px;border-radius:4px;flex-shrink:0;}
+.cal-legend-dot.pd{background:rgba(220,100,100,.18);}
+.cal-legend-dot.pd-pred{background:transparent;outline:1.5px dashed rgba(220,100,100,.45);outline-offset:-1px;}
+.cal-legend-dot.ovul{background:rgba(124,106,138,.25);}
+.cal-legend-dot.fertile{background:rgba(124,106,138,.1);}
 /* ── to-do list ── */
 .todo-item{display:flex;align-items:flex-start;gap:10px;padding:10px 0;border-bottom:.5px solid var(--border);}
 .todo-item:last-child{border-bottom:none;}
@@ -117,6 +124,12 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,'PingFang 
 .todo-add-btn{padding:7px 14px;border:none;border-radius:9px;background:var(--primary);color:#fff;font-size:12px;cursor:pointer;font-family:inherit;white-space:nowrap;}
 .cal-day{position:relative;}
 .todo-dot{position:absolute;bottom:2px;right:3px;width:4px;height:4px;border-radius:50%;background:var(--primary);opacity:.7;}
+.expense-dot{position:absolute;bottom:2px;left:3px;width:4px;height:4px;border-radius:50%;background:var(--amber);opacity:.85;}
+.ledger-trend{display:flex;align-items:flex-end;gap:5px;height:54px;margin:4px 0 14px;}
+.lt-bar-wrap{flex:1;display:flex;flex-direction:column;align-items:center;height:100%;}
+.lt-bar{width:100%;max-width:22px;background:var(--primary-bg);border-radius:4px 4px 0 0;min-height:2px;transition:height .2s;}
+.lt-bar.cur{background:var(--primary);}
+.lt-label{font-size:9px;color:var(--muted);margin-top:3px;}
 .dm-todo-sep{font-size:10px;letter-spacing:1.5px;color:var(--muted);text-transform:uppercase;margin:12px 0 6px;padding-top:10px;border-top:.5px solid var(--border);}
 .dm-todo-item{display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:.5px solid var(--border);font-size:12.5px;}
 .dm-todo-item:last-child{border-bottom:none;}
@@ -148,6 +161,22 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,'PingFang 
 .ledger-del:hover{color:var(--red);}
 .ledger-add{display:block;width:100%;margin-top:14px;padding:11px;border-radius:11px;border:1.5px dashed var(--border);background:transparent;color:var(--muted);font-size:13px;cursor:pointer;font-family:inherit;}
 .ledger-add:hover{border-color:var(--primary);color:var(--primary);}
+/* ── wishlist 心愿单 ── */
+.wish-row{display:flex;align-items:center;flex-wrap:wrap;gap:8px;padding:9px 0;border-bottom:.5px solid var(--border);font-size:13px;}
+.wish-row:last-child{border-bottom:none;}
+.wish-row.bought{opacity:.4;}
+.wish-row.bought .wish-name{text-decoration:line-through;}
+.wish-who{font-size:14px;flex-shrink:0;color:var(--primary);width:18px;text-align:center;}
+.wish-name{flex:1;color:var(--text);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.wish-price{font-weight:700;color:var(--text);flex-shrink:0;font-size:12px;}
+.wish-link{color:var(--muted);flex-shrink:0;font-size:13px;}
+.wish-reason{flex-basis:100%;padding-left:42px;font-size:11px;color:var(--muted);line-height:1.4;margin-top:-2px;}
+.wish-check{border:1.5px solid var(--border);background:none;cursor:pointer;color:transparent;flex-shrink:0;width:20px;height:20px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:12px;transition:all .15s;padding:0;}
+.wish-check.done{background:var(--green);border-color:var(--green);color:#fff;}
+.wish-del{border:none;background:none;color:var(--border);cursor:pointer;font-size:13px;flex-shrink:0;padding:2px;transition:color .15s;}
+.wish-del:hover{color:var(--red);}
+.wish-add{display:block;width:100%;margin-top:14px;padding:11px;border-radius:11px;border:1.5px dashed var(--border);background:transparent;color:var(--muted);font-size:13px;cursor:pointer;font-family:inherit;}
+.wish-add:hover{border-color:var(--primary);color:var(--primary);}
 .type-toggle{display:flex;border-radius:11px;overflow:hidden;border:1.5px solid var(--border);margin-bottom:10px;}
 .type-btn{flex:1;padding:10px;border:none;background:none;font-size:14px;cursor:pointer;font-family:inherit;transition:background .15s;}
 .type-btn.act.exp{background:#fce8e8;color:var(--red);font-weight:600;}
@@ -206,6 +235,12 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,'PingFang 
       <button class="cal-nav" onclick="changeMonth(1)"><i class="ti ti-chevron-right"></i></button>
     </div>
     <div class="cal-grid" id="cal-grid"></div>
+    <div class="cal-legend">
+      <div class="cal-legend-item"><span class="cal-legend-dot pd"></span>经期</div>
+      <div class="cal-legend-item"><span class="cal-legend-dot pd-pred"></span>预测经期</div>
+      <div class="cal-legend-item"><span class="cal-legend-dot ovul"></span>排卵日</div>
+      <div class="cal-legend-item"><span class="cal-legend-dot fertile"></span>易孕期</div>
+    </div>
   </div>
 
   <div class="section">
@@ -254,10 +289,17 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,'PingFang 
       <div class="ledger-sum-item"><div class="ledger-sum-label">结余</div><div class="ledger-sum-val bal">¥0</div></div>
     </div>
     <div id="ledger-compare"></div>
+    <div id="ledger-trend"></div>
     <div id="ledger-budget"></div>
     <div id="ledger-pie"></div>
     <div id="ledger-list"><div class="empty-hint">loading…</div></div>
     <button class="ledger-add" onclick="openLedgerModal()">+ 记一笔</button>
+  </div>
+
+  <div class="section">
+    <h2><span class="dot amber"></span>心愿单</h2>
+    <div id="wishlist-list"><div class="empty-hint">loading…</div></div>
+    <button class="wish-add" onclick="openWishlistModal()">+ 加一个</button>
   </div>
 
 </div>
@@ -360,6 +402,26 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,'PingFang 
   </div>
 </div>
 
+<!-- Wishlist modal -->
+<div class="mo" id="wishlist-modal">
+  <div class="mb">
+    <h3>心愿单 · 加一个</h3>
+    <input type="text" id="wish-name-inp" placeholder="想要什么" style="margin-bottom:10px;">
+    <input type="number" id="wish-price-inp" placeholder="价格（可选）" inputmode="decimal" style="margin-bottom:10px;">
+    <div class="todo-authors" id="wish-who" style="margin-bottom:10px;">
+      <button class="ta-btn" data-who="hayana" onclick="pickWishWho(this)" title="哈娅"><i class="ti ti-heart"></i></button>
+      <button class="ta-btn" data-who="fyodor" onclick="pickWishWho(this)" title="费奥多尔"><i class="ti ti-mouse"></i></button>
+      <button class="ta-btn" data-who="both" onclick="pickWishWho(this)" title="我们"><i class="ti ti-infinity"></i></button>
+    </div>
+    <input type="text" id="wish-url-inp" placeholder="链接（可选）" style="margin-bottom:10px;">
+    <input type="text" id="wish-note-inp" placeholder="为什么想要它（可选）" style="margin-bottom:10px;">
+    <div class="mbtns">
+      <button class="bcn" onclick="closeWishlistModal()">取消</button>
+      <button class="bsb" onclick="submitWishlist()">保存</button>
+    </div>
+  </div>
+</div>
+
 <script>
 function escHtml(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
 
@@ -372,7 +434,7 @@ function switchTab(name){
   document.querySelectorAll('.tab-btn').forEach(function(b,i){
     b.classList.toggle('act', (i===0&&name==='calendar')||(i===1&&name==='ledger'));
   });
-  if(name==='ledger') loadLedger();
+  if(name==='ledger'){ loadLedger(); loadWishlist(); }
 }
 
 // ── Calendar ────────────────────────────────────────────────
@@ -393,6 +455,7 @@ function changeMonth(dir){
   calMonth+=dir;if(calMonth<0){calMonth=11;calYear--;}if(calMonth>11){calMonth=0;calYear++;}
   renderCal();
   if(typeof refreshPeriod==='function')refreshPeriod();
+  loadCalExpenses();
 }
 renderCal();
 
@@ -520,6 +583,37 @@ renderCal = function(){
   });
 };
 
+// ── 大额支出标记 ──────────────────────────────────────────
+var EXPENSE_THRESHOLD = 300;
+var calExpenseDates = {};
+async function loadCalExpenses(){
+  try{
+    var mstr = calYear+'-'+pad2(calMonth+1);
+    var r = await fetch('/api/ledger?month='+mstr);
+    var d = await r.json();
+    calExpenseDates = {};
+    (d.records||[]).forEach(function(rec){
+      if(rec.amount < -EXPENSE_THRESHOLD){
+        calExpenseDates[rec.date] = true;
+      }
+    });
+    markCalExpenses();
+  }catch(e){}
+}
+function markCalExpenses(){
+  Object.keys(calExpenseDates).forEach(function(ds){
+    var cell = document.querySelector('[data-date="'+ds+'"]');
+    if(cell && !cell.querySelector('.expense-dot')){
+      var dot = document.createElement('div'); dot.className='expense-dot'; cell.appendChild(dot);
+    }
+  });
+}
+var _origRenderCal2 = renderCal;
+renderCal = function(){
+  _origRenderCal2();
+  markCalExpenses();
+};
+
 window.addEventListener('load', function(){
   var real = window.openDayModal;
   window.openDayModal = function(ds){
@@ -541,6 +635,7 @@ window.addEventListener('load', function(){
     mb.insertBefore(sec, mb.querySelector('.mbtns'));
   };
   loadTodos();
+  loadCalExpenses();
 });
 
 // ── Ledger 记账 ─────────────────────────────────────────────
@@ -643,6 +738,24 @@ function renderPie(expRecords){
     +'</div></div>';
 }
 
+async function loadLedgerTrend(){
+  var el = document.getElementById('ledger-trend');
+  try{
+    var r = await fetch('/api/ledger/trend');
+    var data = await r.json();
+    var max = Math.max.apply(null, data.map(function(d){return d.expense;}).concat([1]));
+    var curMonth = ledgerMonthStr();
+    el.innerHTML = data.map(function(d){
+      var h = Math.max(2, Math.round(d.expense/max*48));
+      var isCur = d.month === curMonth;
+      var mm = d.month.slice(5);
+      return '<div class="lt-bar-wrap">'
+        +'<div class="lt-bar'+(isCur?' cur':'')+'" style="height:'+h+'px" title="¥'+d.expense.toFixed(0)+'"></div>'
+        +'<div class="lt-label">'+mm+'月</div>'
+        +'</div>';
+    }).join('');
+  }catch(e){ el.innerHTML=''; }
+}
 async function loadLedger(){
   updateLedgerMonthTitle();
   // 并行加载记账数据和预算
@@ -664,6 +777,7 @@ async function loadLedger(){
       +'<div class="ledger-sum-item"><div class="ledger-sum-label">结余</div><div class="ledger-sum-val bal '+(bal>=0?'pos':'neg')+'">¥'+bal.toFixed(2)+'</div></div>';
     renderCompare(sum.prev_expense||0, expVal);
     renderBudget(expVal);
+    loadLedgerTrend();
     var records = d.records || [];
     renderPie(records.filter(function(r){ return r.amount<0; }));
     var el = document.getElementById('ledger-list');
@@ -718,6 +832,72 @@ async function submitLedger(){
 }
 async function deleteLedger(id){
   try{ await fetch('/api/ledger/'+id,{method:'DELETE'}); await loadLedger(); }catch(e){}
+}
+
+// ── Wishlist 心愿单 ────────────────────────────────────────
+var wishWho = 'hayana';
+var WISH_ICON = {hayana:'<i class="ti ti-heart"></i>', fyodor:'<i class="ti ti-mouse"></i>', both:'<i class="ti ti-infinity"></i>'};
+async function loadWishlist(){
+  var el = document.getElementById('wishlist-list');
+  try{
+    var r = await fetch('/api/wishlist');
+    var items = await r.json();
+    if(!items.length){ el.innerHTML='<div class="empty-hint">心愿单还是空的</div>'; return; }
+    el.innerHTML = items.map(function(it){
+      var done = it.status === 'bought';
+      var icon = WISH_ICON[it.who] || '';
+      return '<div class="wish-row'+(done?' bought':'')+'">'
+        +'<button class="wish-check'+(done?' done':'')+'" onclick="toggleWishlist('+it.id+','+(done?'false':'true')+')" title="标记'+(done?'未购':'已购')+'"><i class="ti ti-check"></i></button>'
+        +'<span class="wish-who">'+icon+'</span>'
+        +'<span class="wish-name">'+escHtml(it.name)+'</span>'
+        +(it.price!=null?'<span class="wish-price">¥'+Number(it.price).toFixed(0)+'</span>':'')
+        +(it.url?'<a class="wish-link" href="'+escHtml(it.url)+'" target="_blank" title="链接"><i class="ti ti-external-link"></i></a>':'')
+        +'<button class="wish-del" onclick="deleteWishlist('+it.id+')" title="删除"><i class="ti ti-x"></i></button>'
+        +(it.note?'<span class="wish-reason">'+escHtml(it.note)+'</span>':'')
+        +'</div>';
+    }).join('');
+  }catch(e){ el.innerHTML='<div class="empty-hint">加载失败</div>'; }
+}
+function pickWishWho(btn){
+  wishWho = btn.getAttribute('data-who');
+  document.querySelectorAll('#wish-who .ta-btn').forEach(function(b){ b.classList.remove('act'); });
+  btn.classList.add('act');
+}
+function openWishlistModal(){
+  document.getElementById('wish-name-inp').value = '';
+  document.getElementById('wish-price-inp').value = '';
+  document.getElementById('wish-url-inp').value = '';
+  document.getElementById('wish-note-inp').value = '';
+  wishWho = 'hayana';
+  document.querySelectorAll('#wish-who .ta-btn').forEach(function(b,i){ b.classList.toggle('act', i===0); });
+  document.getElementById('wishlist-modal').classList.add('show');
+}
+function closeWishlistModal(){ document.getElementById('wishlist-modal').classList.remove('show'); }
+document.getElementById('wishlist-modal').addEventListener('click',function(e){ if(e.target===this)closeWishlistModal(); });
+async function submitWishlist(){
+  var name = document.getElementById('wish-name-inp').value.trim();
+  if(!name) return;
+  var body = {
+    name: name,
+    price: document.getElementById('wish-price-inp').value || null,
+    who: wishWho,
+    url: document.getElementById('wish-url-inp').value.trim() || null,
+    note: document.getElementById('wish-note-inp').value.trim() || null
+  };
+  try{
+    await fetch('/api/wishlist',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    closeWishlistModal();
+    await loadWishlist();
+  }catch(e){}
+}
+async function toggleWishlist(id, makeDone){
+  try{
+    await fetch('/api/wishlist/'+id+'/status',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({status: makeDone?'bought':'want'})});
+    await loadWishlist();
+  }catch(e){}
+}
+async function deleteWishlist(id){
+  try{ await fetch('/api/wishlist/'+id,{method:'DELETE'}); await loadWishlist(); }catch(e){}
 }
 </script>
 <script src="/static/period.js"></script>

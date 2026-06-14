@@ -1447,6 +1447,100 @@ def _init_ledger_budget_table():
 
 _init_ledger_budget_table()
 
+def _init_wishlist_table():
+    conn = get_db()
+    conn.execute(
+        'CREATE TABLE IF NOT EXISTS wishlist ('
+        'id INTEGER PRIMARY KEY AUTOINCREMENT, '
+        'name TEXT NOT NULL, '
+        'price REAL, '
+        'who TEXT, '
+        'url TEXT, '
+        'note TEXT, '
+        "status TEXT DEFAULT 'want', "
+        "created_at DATETIME DEFAULT (datetime('now','+8 hours')))"
+    )
+    conn.commit()
+    conn.close()
+
+_init_wishlist_table()
+
+@app.route('/api/ledger/trend', methods=['GET'])
+def ledger_trend():
+    now = datetime.datetime.utcnow() + datetime.timedelta(hours=8)
+    months = []
+    y, m = now.year, now.month
+    for i in range(5, -1, -1):
+        yy, mm = y, m - i
+        while mm <= 0:
+            mm += 12
+            yy -= 1
+        months.append(f'{yy:04d}-{mm:02d}')
+    conn = get_db()
+    result = []
+    for mon in months:
+        rows = conn.execute(
+            "SELECT amount FROM ledger WHERE date LIKE ? AND amount<0", (mon + '%',)
+        ).fetchall()
+        exp = abs(sum(r['amount'] for r in rows))
+        result.append({'month': mon, 'expense': round(exp, 2)})
+    conn.close()
+    return jsonify(result)
+
+
+@app.route('/api/wishlist', methods=['GET'])
+def get_wishlist():
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT * FROM wishlist ORDER BY (status='bought'), created_at DESC"
+    ).fetchall()
+    conn.close()
+    return jsonify([dict(r) for r in rows])
+
+@app.route('/api/wishlist', methods=['POST'])
+def add_wishlist():
+    data = request.get_json() or {}
+    name = (data.get('name') or '').strip()
+    if not name:
+        return jsonify({'error': 'name required'}), 400
+    price = data.get('price')
+    if price is not None and price != '':
+        try:
+            price = float(price)
+        except (ValueError, TypeError):
+            return jsonify({'error': 'invalid price'}), 400
+    else:
+        price = None
+    who  = (data.get('who')  or '').strip() or None
+    url  = (data.get('url')  or '').strip() or None
+    note = (data.get('note') or '').strip() or None
+    conn = get_db()
+    conn.execute(
+        'INSERT INTO wishlist (name, price, who, url, note) VALUES (?,?,?,?,?)',
+        (name, price, who, url, note)
+    )
+    conn.commit(); conn.close()
+    return jsonify({'ok': True})
+
+@app.route('/api/wishlist/<int:wid>/status', methods=['POST'])
+def update_wishlist_status(wid):
+    data = request.get_json() or {}
+    status = (data.get('status') or 'want').strip()
+    if status not in ('want', 'bought'):
+        return jsonify({'error': 'invalid status'}), 400
+    conn = get_db()
+    conn.execute('UPDATE wishlist SET status=? WHERE id=?', (status, wid))
+    conn.commit(); conn.close()
+    return jsonify({'ok': True})
+
+@app.route('/api/wishlist/<int:wid>', methods=['DELETE'])
+def delete_wishlist(wid):
+    conn = get_db()
+    conn.execute('DELETE FROM wishlist WHERE id=?', (wid,))
+    conn.commit(); conn.close()
+    return jsonify({'ok': True})
+
+
 @app.route('/api/ledger', methods=['GET'])
 def get_ledger():
     month = request.args.get('month', '')

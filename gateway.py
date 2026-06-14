@@ -328,6 +328,92 @@ def build_system():
     except Exception:
         pass
 
+    # ── 今日提醒：周期异常 / 待办&倒数日临近 / 预算超支 ────────
+    try:
+        _rconn = get_db()
+        _today = (datetime.datetime.utcnow() + datetime.timedelta(hours=8)).date()
+        _reminders = []
+
+        # 1. 周期异常预警
+        _prows = _rconn.execute(
+            "SELECT date FROM period_records WHERE type='period' ORDER BY date"
+        ).fetchall()
+        _pdates = [r['date'] for r in _prows]
+        if _pdates:
+            _last = _pdates[-1]
+            _cycle = 28
+            if len(_pdates) >= 2:
+                _diffs = []
+                for _i in range(1, len(_pdates)):
+                    _d1 = datetime.datetime.strptime(_pdates[_i-1], '%Y-%m-%d').date()
+                    _d2 = datetime.datetime.strptime(_pdates[_i], '%Y-%m-%d').date()
+                    _diff = (_d2 - _d1).days
+                    if 18 <= _diff <= 45:
+                        _diffs.append(_diff)
+                if _diffs:
+                    _cycle = round(sum(_diffs) / len(_diffs))
+            _last_dt = datetime.datetime.strptime(_last, '%Y-%m-%d').date()
+            _next_dt = _last_dt + datetime.timedelta(days=_cycle)
+            _late_days = (_today - _next_dt).days
+            if _late_days >= 3:
+                _reminders.append(
+                    f'- 经期预测{_next_dt.strftime("%Y-%m-%d")}该来，现已推迟{_late_days}天，还没有新记录'
+                )
+
+        # 2. 待办临近/逾期
+        _trows = _rconn.execute(
+            "SELECT content, due_date FROM todos WHERE done=0 AND due_date IS NOT NULL AND due_date != ''"
+        ).fetchall()
+        for _t in _trows:
+            try:
+                _due = datetime.datetime.strptime(_t['due_date'], '%Y-%m-%d').date()
+            except Exception:
+                continue
+            _delta = (_due - _today).days
+            if _delta < 0:
+                _reminders.append(f'- 待办「{_t["content"]}」已逾期{-_delta}天（原定{_t["due_date"]}）')
+            elif _delta == 0:
+                _reminders.append(f'- 待办「{_t["content"]}」今天到期')
+            elif _delta == 1:
+                _reminders.append(f'- 待办「{_t["content"]}」明天到期')
+
+        # 3. 倒数日临近
+        _crows = _rconn.execute("SELECT title, target_date, emoji, type FROM countdowns").fetchall()
+        for _c in _crows:
+            if _c['type'] != 'countdown':
+                continue
+            try:
+                _target = datetime.datetime.strptime(_c['target_date'], '%Y-%m-%d').date()
+            except Exception:
+                continue
+            _delta = (_target - _today).days
+            if 0 <= _delta <= 3:
+                _reminders.append(f'- 倒数日 {_c["emoji"]}「{_c["title"]}」还剩{_delta}天')
+
+        # 4. 预算超支
+        _now_m2 = _today.strftime('%Y-%m')
+        _lrows2 = _rconn.execute(
+            "SELECT amount FROM ledger WHERE date LIKE ? AND amount<0", (_now_m2 + '%',)
+        ).fetchall()
+        _lbudget2 = _rconn.execute(
+            "SELECT amount FROM ledger_budget WHERE month=?", (_now_m2,)
+        ).fetchone()
+        if _lbudget2 and _lbudget2['amount'] and _lrows2:
+            _exp2 = abs(sum(r['amount'] for r in _lrows2))
+            _pct2 = _exp2 / _lbudget2['amount'] * 100
+            if _pct2 >= 80:
+                _reminders.append(f'- 本月预算已用{_pct2:.0f}%（¥{_exp2:.0f}/¥{_lbudget2["amount"]:.0f}）')
+
+        _rconn.close()
+        if _reminders:
+            parts.append(
+                '\n## 今日提醒\n' + '\n'.join(_reminders)
+                + '\n（以上是后台数据，你自己留意即可。是否要跟她提、怎么提、什么时候提，'
+                  '由你自己判断——不必逐条播报，更不必表现得像系统通知。）'
+            )
+    except Exception:
+        pass
+
     return '\n'.join(parts)
 
 def img_block(url):
