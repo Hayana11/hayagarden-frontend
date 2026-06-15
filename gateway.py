@@ -130,6 +130,48 @@ def _ombre_handoff_sync():
         return None
 
 
+def _ombre_hold_sync(content, tags='', importance=5, pinned=False):
+    """
+    把一条记忆写进ombre-brain（hold）。与_ombre_breath_sync同样的
+    独立线程+事件循环模式，跟主线程/HTTP连接无关。
+    成功返回结果字符串，失败返回None（不抛异常，调用方按"尽力而为"处理）。
+    """
+    import concurrent.futures as _cf
+
+    def _worker():
+        import asyncio as _aio, sys as _sys, logging as _log
+        _log.getLogger('ombre_brain').setLevel(_log.WARNING)
+        _sys.path.insert(0, '/opt/ombre-brain')
+        from server import hold as _hold
+        loop = _aio.new_event_loop()
+        _aio.set_event_loop(loop)
+        try:
+            return loop.run_until_complete(
+                _aio.wait_for(_hold(content=content, tags=tags, importance=importance, pinned=pinned), timeout=3.0)
+            )
+        except Exception:
+            return None
+        finally:
+            try:
+                pending = _aio.all_tasks(loop)
+                for t in pending:
+                    t.cancel()
+                if pending:
+                    loop.run_until_complete(
+                        _aio.gather(*pending, return_exceptions=True)
+                    )
+            except Exception:
+                pass
+            loop.close()
+
+    try:
+        with _cf.ThreadPoolExecutor(max_workers=1) as ex:
+            future = ex.submit(_worker)
+            return future.result(timeout=4.0)
+    except Exception:
+        return None
+
+
 def build_system(wake=False):
     parts = []
 
@@ -659,6 +701,8 @@ def run_tool(name, args, caller='fyodor_cc'):
             _c.execute("INSERT INTO posts (type, author, content, layer) VALUES ('MEMORY','fyodor',?,?)",
                        (content, layer))
             _c.commit(); _c.close()
+            # 同时写入ombre-brain（渐变脑），尽力而为，失败不影响主流程
+            _ombre_hold_sync(content, tags=tags or 'recent', importance=5)
             return '已存入记忆'
         if name == 'search_memories':
             import memory_tool

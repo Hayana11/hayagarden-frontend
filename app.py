@@ -1459,13 +1459,6 @@ def update_board_status(bid):
     if status not in ('open', 'done'):
         return jsonify({'error': 'invalid status'}), 400
     conn = get_db()
-    if status == 'done':
-        has_clear = conn.execute(
-            "SELECT 1 FROM board_replies WHERE board_id=? AND content='ALL_CLEAR' LIMIT 1", (bid,)
-        ).fetchone()
-        if not has_clear:
-            conn.close()
-            return jsonify({'error': 'ALL_CLEAR required before marking done'}), 400
     conn.execute("UPDATE board SET status=? WHERE id=?", (status, bid))
     conn.commit(); conn.close()
     return jsonify({'ok': True})

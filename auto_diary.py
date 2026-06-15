@@ -82,7 +82,7 @@ def call_api(system, user_msg, api_key, api_url=None):
 def save_diary(text):
     conn = get_db()
     conn.execute(
-        "INSERT INTO posts (type, content, author) VALUES ('DIARY', ?, 'fyodor')",
+        "INSERT INTO posts (type, content, author, layer) VALUES ('DIARY', ?, 'fyodor', 'recent')",
         (text,)
     )
     conn.commit()

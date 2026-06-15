@@ -20,7 +20,7 @@
   --border:#ece6e0;--msg-font:15px;
 }
 html,body{height:100%;overflow:hidden;}
-body{background:var(--bg);color:var(--text);font-family:-apple-system,'PingFang SC','Noto Sans SC',sans-serif;max-width:480px;margin:0 auto;display:flex;flex-direction:column;}
+body{background:var(--bg);color:var(--text);font-family:-apple-system,'PingFang SC','HarmonyOS Sans SC','Noto Sans CJK SC','Noto Sans SC',sans-serif;max-width:480px;margin:0 auto;display:flex;flex-direction:column;}
 
 /* ── Header ── */
 .hd{flex-shrink:0;position:relative;background:rgba(255,255,255,.97);backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);padding:44px 18px 14px;display:flex;align-items:flex-end;justify-content:space-between;border-bottom:.5px solid var(--border);z-index:20;}
@@ -100,6 +100,19 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:14px;heigh
 .think-body{display:none;padding:2px 10px 9px;font-size:12px;color:rgba(42,32,32,.52);line-height:1.65;white-space:pre-wrap;word-break:break-all;}
 .think-body.open{display:block;}
 
+/* Live streaming think */
+.live-think-wrap{background:rgba(124,106,138,.06);border-left:2px solid rgba(124,106,138,.28);border-radius:0 10px 10px 0;margin:0 0 8px;overflow:hidden;}
+.live-think-hd{padding:6px 10px 4px;font-size:11px;color:rgba(124,106,138,.7);display:flex;align-items:center;gap:5px;letter-spacing:.3px;}
+.live-think-hd i{font-size:13px;}
+.live-think-cursor{display:inline-block;width:5px;height:10px;background:rgba(124,106,138,.5);border-radius:1px;margin-left:3px;animation:twblink .85s infinite;vertical-align:middle;}
+@keyframes twblink{0%,100%{opacity:1;}50%{opacity:0;}}
+.live-think-body{padding:0 10px 9px;font-size:12px;color:rgba(42,32,32,.52);line-height:1.65;white-space:pre-wrap;word-break:break-all;max-height:160px;overflow-y:auto;}
+.live-think-wrap.done .live-think-cursor{display:none;}
+.live-think-wrap.done .live-think-hd{color:rgba(124,106,138,.4);}
+/* Live tool card (streaming) */
+.live-tool-card{background:rgba(212,165,116,.07);border-left:2px solid rgba(212,165,116,.4);border-radius:0 10px 10px 0;padding:7px 10px;margin:0 0 8px;font-size:11px;color:rgba(212,165,116,.9);}
+.live-tool-name{font-weight:600;font-size:12px;margin-bottom:2px;}
+.live-tool-result{color:var(--muted);font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
 /* Tool call cards */
 .tool-card{background:rgba(212,165,116,.06);border-left:2px solid rgba(212,165,116,.4);border-radius:10px;margin:0 -2px 8px;overflow:hidden;}
 .tool-card-toggle{width:100%;text-align:left;padding:7px 10px;background:none;border:none;cursor:pointer;font-size:11px;color:rgba(212,165,116,.85);display:flex;align-items:center;gap:5px;font-family:inherit;letter-spacing:.3px;}
@@ -181,6 +194,7 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:14px;heigh
 html[data-theme=dark]{--bg:#161312;--card:#211d1c;--text:#e8e2dc;--muted:#9a8d8d;--primary:#a392b5;--primary-bg:#2c2733;--primary-light:rgba(163,146,181,.13);--amber:#d4a574;--amber-bg:#352a1d;--amber-text:#3a2402;--border:#332d2b;}
 html[data-theme=dark] .hd,html[data-theme=dark] .inp-area,html[data-theme=dark] .bnav{background:rgba(26,22,21,.97);}
 html[data-theme=dark] .think-body{color:rgba(232,226,220,.5);}
+html[data-theme=dark] .live-think-body{color:rgba(232,226,220,.5);}
 html[data-theme=dark] .tool-card-body{color:rgba(232,226,220,.5);}
 html[data-theme=dark] .drift-card{background:#262120;}
 html[data-theme=dark] .drift-card-title{color:#e8d9c4;}
@@ -203,12 +217,16 @@ html[data-theme=dark] .ni{color:#6a5f5f;}
 
 /* Msg actions */
 .bwrap{position:relative;}
-.msg-actions{position:absolute;top:-10px;right:0;display:none;align-items:center;gap:1px;background:rgba(255,255,255,.95);border:.5px solid var(--border);border-radius:7px;padding:2px 4px;box-shadow:0 2px 8px rgba(0,0,0,.08);z-index:10;}
-.bwrap:hover .msg-actions{display:flex;}
-.mac-btn{width:22px;height:22px;border:none;background:none;cursor:pointer;color:var(--muted);border-radius:4px;display:flex;align-items:center;justify-content:center;font-size:14px;transition:color .12s;}
-.mac-btn:hover{color:var(--amber);}
+.msg-time-row{display:flex;align-items:center;gap:5px;margin-top:3px;}
+.msg-actions{display:flex;align-items:center;gap:1px;opacity:0;transition:opacity .15s;}
+.msg-row:hover .msg-actions{opacity:1;}
+.mac-btn{width:20px;height:20px;border:none;background:none;cursor:pointer;color:#b8a090;border-radius:4px;display:flex;align-items:center;justify-content:center;font-size:13px;transition:color .12s;padding:0;}
+.mac-btn:hover{color:#d4a574;}
 .bubble.editing{outline:1.5px solid var(--amber) !important;cursor:text;}
-html[data-theme=dark] .msg-actions{background:rgba(38,33,32,.96);}
+.branch-bar{display:inline-flex;align-items:center;gap:2px;user-select:none;margin-left:4px;}
+.branch-nav{cursor:pointer;padding:2px 5px;font-size:13px;opacity:.4;border-radius:3px;}
+.branch-nav:hover{opacity:.7;}
+.branch-count{font-family:monospace;font-size:10px;opacity:.4;min-width:20px;text-align:center;}
 </style>
 </head>
 <body>
@@ -282,10 +300,7 @@ html[data-theme=dark] .msg-actions{background:rgba(38,33,32,.96);}
       <button class="rm" onclick="removeImg()">×</button>
     </div>
   </div>
-  <div class="inp-author">
-    <span>as</span>
-    <button class="inp-author-btn ha" id="author-btn" onclick="toggleAuthor()">Haya</button>
-  </div>
+
   <div class="inp-row">
     <button class="inp-attach" onclick="document.getElementById('file-in').click()"><i class="ti ti-paperclip"></i></button>
     <input type="file" id="file-in" accept="image/*" style="display:none" onchange="onFile(event)">
@@ -305,6 +320,7 @@ html[data-theme=dark] .msg-actions{background:rgba(38,33,32,.96);}
   <a class="ni act" href="/chat"><i class="ti ti-message-2"></i><span>chat</span></a>
   <a class="ni" href="/calendar"><i class="ti ti-calendar"></i><span>calendar</span></a>
   <a class="ni" href="/read"><i class="ti ti-book"></i><span>read</span></a>
+  <a class="ni" href="/board"><i class="ti ti-clipboard-list"></i><span>board</span></a>
 </nav>
 
 
@@ -498,6 +514,8 @@ function buildHtml(list) {
   window.curMsgList = list;
   if(!list.length) return '<div class="empty-tip">no messages yet<br>say the first thing</div>';
   var html='', lastDay='';
+  var lastAiIdx = -1;
+  for(var j=list.length-1; j>=0; j--){ if(isFy(list[j].author)){lastAiIdx=j; break;} }
   list.forEach(function(m,i){
     var dk = dayKey(m.created_at);
     if(dk !== lastDay){ html += '<div class="date-sep">'+dayLabel(m.created_at)+'</div>'; lastDay=dk; }
@@ -540,22 +558,40 @@ function buildHtml(list) {
     if(hasImg) innerHtml += '<img src="'+escHtml(m.image_url)+'" loading="lazy" onclick="openLb(\''+escHtml(m.image_url)+'\')">';
     if(hasTxt) innerHtml += (hasImg?'<div class="img-then-text">':'')+escHtml(m.content)+(hasImg?'</div>':'');
 
-    var actHtml = fy
-      ? '<div class="msg-actions"><button class="mac-btn" title="复制" onclick="copyBubble(this)"><i class="ti ti-copy"></i></button></div>'
-      : '<div class="msg-actions">'+'<button class="mac-btn" title="重发" onclick="replayMsg(this)"><i class="ti ti-refresh"></i></button>'+'<button class="mac-btn" title="编辑" onclick="editMsg(this)"><i class="ti ti-edit"></i></button></div>';
-    html +=
-      '<div class="msg-row '+side+'" data-idx="'+i+'">' +
-        '<div class="bwrap">' +
-          actHtml +
-          '<div class="bubble '+side+(imgOnly?' img-only':'')+'">'+innerHtml+'</div>' +
-          '<div class="msg-time">'+fmtTime(m.created_at)+'</div>' +
-        '</div>' +
-      '</div>';
+    var actHtml;
+    if(fy) {
+      var branches = [];
+      try { if(m.branches) branches = JSON.parse(m.branches); } catch(e) {}
+      var branchBar = branches.length > 1
+        ? '<span class="branch-bar"><span class="branch-nav" onclick="switchBranch('+m.id+',-1)">&#8249;</span><span class="branch-count">'+((m.branch_idx||0)+1)+'/'+branches.length+'</span><span class="branch-nav" onclick="switchBranch('+m.id+',1)">&#8250;</span></span>'
+        : '';
+      var regenBtn = (i === lastAiIdx)
+        ? '<button class="mac-btn" title="重新生成" onclick="doRegen('+m.id+')"><i class="ti ti-refresh"></i></button>'
+        : '';
+      actHtml = '<div class="msg-actions">'+regenBtn+'<button class="mac-btn" title="复制" onclick="copyBubble(this)"><i class="ti ti-copy"></i></button></div>';
+      html +=
+        '<div class="msg-row '+side+'" data-idx="'+i+'" data-mid="'+m.id+'">' +
+          '<div class="bwrap">' +
+            '<div class="bubble '+side+(imgOnly?' img-only':'')+'">'+innerHtml+'</div>' +
+            '<div class="msg-time-row"><span class="msg-time">'+fmtTime(m.created_at)+'</span>'+branchBar+actHtml+'</div>' +
+          '</div>' +
+        '</div>';
+    } else {
+      actHtml = '<div class="msg-actions"><button class="mac-btn" title="编辑" onclick="editMsg(this,'+m.id+')"><i class="ti ti-edit"></i></button></div>';
+      html +=
+        '<div class="msg-row '+side+'" data-idx="'+i+'" data-mid="'+m.id+'">' +
+          '<div class="bwrap">' +
+            '<div class="bubble '+side+(imgOnly?' img-only':'')+'">'+innerHtml+'</div>' +
+            '<div class="msg-time-row"><span class="msg-time">'+fmtTime(m.created_at)+'</span>'+actHtml+'</div>' +
+          '</div>' +
+        '</div>';
+    }
   });
   return html;
 }
 
 async function loadMsgs(isInit){
+  if(!isInit && streamAbort) return;
   try{
     var r=await fetch('/api/chat/messages');
     var d=await r.json();
@@ -579,13 +615,8 @@ async function loadMsgs(isInit){
   }
 }
 
-// Author toggle
-function toggleAuthor(){
-  curAuthor = curAuthor==='hayana'?'fyodor':'hayana';
-  var btn=document.getElementById('author-btn');
-  btn.textContent=curAuthor==='hayana'?'Haya':'Fyodor';
-  btn.className='inp-author-btn '+(curAuthor==='hayana'?'ha':'fy');
-}
+// Author fixed
+
 
 // File input
 function onFile(e){
@@ -654,6 +685,12 @@ function closeLb(){ document.getElementById('lb').classList.remove('show'); }
 
 loadMsgs(true);
 setInterval(function(){ loadMsgs(false); }, 8000);
+
+// 切回前台时立刻刷新一次——即使之前的streamReply因为切走而连接断开，
+// 后端现在会在生成完成时就把回复写库，这里能马上把它捞出来显示
+document.addEventListener('visibilitychange', function(){
+  if(!document.hidden) loadMsgs(true);
+});
 
 var swReg=null;
 async function notify(title,body){
@@ -735,10 +772,14 @@ function setSendBtn(mode) {
   var btn = document.getElementById('send-btn');
   if (mode === 'stop') {
     btn.innerHTML = '<i class="ti ti-player-stop"></i>';
+    btn.style.background = '#e05555';
+    btn.style.color = '#fff';
     btn.onclick = function(){ if(streamAbort) streamAbort.abort(); };
     btn.disabled = false;
   } else {
     btn.innerHTML = '<i class="ti ti-send"></i>';
+    btn.style.background = '';
+    btn.style.color = '';
     btn.onclick = send;
     btn.disabled = false;
   }
@@ -750,11 +791,11 @@ function replayMsg(btn) {
   document.getElementById('txt').value = content;
   send();
 }
-function editMsg(btn) {
+function editMsg(btn, msgId) {
   var bwrap = btn.closest('.bwrap');
   var bubble = bwrap ? bwrap.querySelector('.bubble') : null;
   if (!bubble || bubble.contentEditable === 'true') return;
-  bwrap.querySelector('.msg-actions').style.display = 'none';
+  bwrap.querySelector('.msg-actions').style.opacity = '0';
   bubble.contentEditable = 'true';
   bubble.classList.add('editing');
   bubble.focus();
@@ -764,15 +805,14 @@ function editMsg(btn) {
   function onKey(e) {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
-      var newContent = bubble.innerText.trim();
+      var nc = bubble.innerText.trim();
       bubble.contentEditable = 'false'; bubble.classList.remove('editing');
       bubble.removeEventListener('keydown', onKey);
-      if (newContent && !sending && !blockedState) { document.getElementById('txt').value = newContent; send(); }
+      if (nc && !sending && !blockedState) doEdit(msgId, nc);
     } else if (e.key === 'Escape') {
       bubble.contentEditable = 'false'; bubble.classList.remove('editing');
       bubble.removeEventListener('keydown', onKey);
-      bwrap.querySelector('.msg-actions').style.display = '';
-      loadMsgs(false);
+      bwrap.querySelector('.msg-actions').style.opacity = '';
     }
   }
   bubble.addEventListener('keydown', onKey);
@@ -786,50 +826,136 @@ async function copyBubble(btn) {
   showToast('已复制');
 }
 
+async function doRegen(msgId) {
+  if(sending) return;
+  sending = true; setSendBtn('stop');
+  try {
+    var prep = await fetch('/api/chat/regen/prepare', {method:'POST',
+      headers:{'Content-Type':'application/json'}, body:JSON.stringify({msg_id:msgId})});
+    var pd = await prep.json();
+    if(!pd.ok){ sending=false; setSendBtn('send'); return; }
+    showTyping();
+    try {
+      await streamReply();
+      await fetch('/api/chat/regen/finalize', {method:'POST',
+        headers:{'Content-Type':'application/json'}, body:JSON.stringify({old_branches:pd.old_branches})});
+    } catch(e) { console.error('regen stream failed',e); }
+    hideTyping();
+    await loadMsgs(false);
+  } catch(e) { console.error('doRegen',e); }
+  sending = false; setSendBtn('send');
+}
+
+async function doEdit(msgId, newContent) {
+  if(sending) return;
+  sending = true; setSendBtn('stop');
+  try {
+    await fetch('/api/chat/edit', {method:'POST',
+      headers:{'Content-Type':'application/json'}, body:JSON.stringify({msg_id:msgId, content:newContent})});
+    await loadMsgs(false);
+    showTyping();
+    try { await streamReply(); } catch(e) { console.error('doEdit stream failed',e); }
+    hideTyping();
+    await loadMsgs(false);
+  } catch(e) { console.error('doEdit',e); }
+  sending = false; setSendBtn('send');
+}
+
+async function switchBranch(msgId, dir) {
+  try {
+    var r = await fetch('/api/chat/branch/switch', {method:'POST',
+      headers:{'Content-Type':'application/json'}, body:JSON.stringify({msg_id:msgId, direction:dir})});
+    var d = await r.json();
+    if(d.ok) await loadMsgs(false);
+  } catch(e) { console.error('switchBranch',e); }
+}
+
 // ── Streaming reply ──
 var TW_CPS = 18; // 打字机速度：每秒字符数，调这里
 async function streamReply(){
-  var ctrl = new AbortController(); streamAbort = ctrl;
-  var resp = await fetch('/api/gw/chat/stream',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}',signal:ctrl.signal});
+  var ctrl=new AbortController(); streamAbort=ctrl;
+  var resp=await fetch('/api/gw/chat/stream',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}',signal:ctrl.signal});
   if(!resp.ok||!resp.body) throw new Error('stream failed');
-  var SSE_SEP = String.fromCharCode(10)+String.fromCharCode(10);
+  var SSE_SEP=String.fromCharCode(10)+String.fromCharCode(10);
   var reader=resp.body.getReader(), decoder=new TextDecoder();
-  var buf='', target='', shown=0, live=null, err=null;
+  var buf='', target='', shown=0, err=null;
+  var live=null, liveThinkWrap=null, liveThinkBody=null, liveTools=null;
+  var thinkText='';
   var c=document.getElementById('msgs');
+
+  function ensureLiveRow(){
+    if(live) return;
+    hideTyping();
+    c.insertAdjacentHTML('beforeend',
+      '<div class="msg-row fy" id="live-row"><div class="bwrap">'+
+        '<div class="live-think-wrap" id="live-think-wrap" style="display:none">'+
+          '<div class="live-think-hd"><i class="ti ti-brain ti-xs"></i><span>thinking</span>'+
+          '<span class="live-think-cursor"></span></div>'+
+          '<div class="live-think-body" id="live-think-body"></div>'+
+        '</div>'+
+        '<div id="live-tools"></div>'+
+        '<div class="bubble fy" id="live-bubble"></div>'+
+      '</div></div>');
+    live=document.getElementById('live-bubble');
+    liveThinkWrap=document.getElementById('live-think-wrap');
+    liveThinkBody=document.getElementById('live-think-body');
+    liveTools=document.getElementById('live-tools');
+  }
+
   var timer=setInterval(function(){
     if(shown>=target.length) return;
-    if(!live){
-      hideTyping();
-      c.insertAdjacentHTML('beforeend','<div class="msg-row fy" id="live-row"><div class="bwrap"><div class="bubble fy" id="live-bubble"></div></div></div>');
-      live=document.getElementById('live-bubble');
-    }
     shown=Math.min(target.length, shown+1);
     live.innerHTML=escHtml(target.slice(0,shown));
     var atB=c.scrollHeight-c.scrollTop-c.clientHeight<120;
     if(atB) c.scrollTop=c.scrollHeight;
   }, Math.round(1000/TW_CPS));
+
   try{
     while(true){
-      var chunk=await reader.read();
+      var chunk;
+      try{ chunk=await reader.read(); }
+      catch(re){
+        if(re && re.name==='AbortError') break; // 暂停：后端早已写库，直接收尾，不再单独补发
+        throw re;
+      }
       if(chunk.done) break;
       buf+=decoder.decode(chunk.value,{stream:true});
-      var parts=buf.split(SSE_SEP);
-      buf=parts.pop();
+      var parts=buf.split(SSE_SEP); buf=parts.pop();
       for(var i=0;i<parts.length;i++){
         var line=parts[i].trim();
         if(line.indexOf('data:')!==0) continue;
         var ev; try{ ev=JSON.parse(line.slice(5)); }catch(e){ continue; }
-        if(ev.t==='text'){ target+=ev.d; }
-        else if(ev.t==='tool_call'){ /* stored in DB, rendered after reload */ }
-        else if(ev.t==='err'){ err=new Error(ev.d); }
+        if(ev.t==='think'){
+          ensureLiveRow();
+          thinkText+=ev.d;
+          liveThinkWrap.style.display='';
+          liveThinkBody.textContent=thinkText;
+          var atB=c.scrollHeight-c.scrollTop-c.clientHeight<120;
+          if(atB) c.scrollTop=c.scrollHeight;
+        } else if(ev.t==='tool_call'){
+          ensureLiveRow();
+          if(liveThinkWrap && !liveThinkWrap.classList.contains('done'))
+            liveThinkWrap.classList.add('done');
+          var tc=ev.d;
+          var card=document.createElement('div'); card.className='live-tool-card';
+          var res=tc.result?String(tc.result).replace(/</g,'&lt;').slice(0,100):'…';
+          card.innerHTML='<div class="live-tool-name">⚙ '+escHtml(tc.name||'tool')+'</div>'+
+            '<div class="live-tool-result">'+res+'</div>';
+          liveTools.appendChild(card);
+          var atB=c.scrollHeight-c.scrollTop-c.clientHeight<120;
+          if(atB) c.scrollTop=c.scrollHeight;
+        } else if(ev.t==='text'){
+          if(liveThinkWrap && !liveThinkWrap.classList.contains('done'))
+            liveThinkWrap.classList.add('done');
+          target+=ev.d;
+        } else if(ev.t==='err'){ err=new Error(ev.d); }
       }
       if(err) break;
     }
     while(!err && shown<target.length){ await new Promise(function(r){setTimeout(r,80);}); }
   } finally {
     clearInterval(timer);
-    streamAbort = null;
-    var lr=document.getElementById('live-row'); if(lr) lr.remove();
+    streamAbort=null;
   }
   if(err) throw err;
   return target;
