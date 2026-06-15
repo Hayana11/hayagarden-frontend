@@ -662,6 +662,12 @@ function closeLb(){ document.getElementById('lb').classList.remove('show'); }
 loadMsgs(true);
 setInterval(function(){ loadMsgs(false); }, 8000);
 
+// 切回前台时立刻刷新一次——即使之前的streamReply因为切走而连接断开，
+// 后端现在会在生成完成时就把回复写库，这里能马上把它捞出来显示
+document.addEventListener('visibilitychange', function(){
+  if(!document.hidden) loadMsgs(true);
+});
+
 var swReg=null;
 async function notify(title,body){
   if(!('Notification' in window))return;

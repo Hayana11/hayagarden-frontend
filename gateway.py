@@ -1028,10 +1028,10 @@ def chat_stream():
                 system   = build_system()
                 messages = build_messages()
                 text, thinking = claude_code_call(system, messages)
-                if thinking:
-                    yield 'data: ' + json.dumps({'t': 'think', 'd': thinking}) + SSE_END
+                # 先写库，再尝试推给前端——claude_code_call已经跑完且与连接无关；
+                # 即使她已经切到别的app、连接断了，回复也已经落地，
+                # 下次loadMsgs轮询时能拿到，不会再丢
                 if text:
-                    yield 'data: ' + json.dumps({'t': 'text', 'd': text}) + SSE_END
                     conn = get_db()
                     conn.execute(
                         "INSERT INTO chat_messages (author, content, thinking) VALUES ('assistant', ?, ?)",
@@ -1039,6 +1039,10 @@ def chat_stream():
                     )
                     conn.commit()
                     conn.close()
+                if thinking:
+                    yield 'data: ' + json.dumps({'t': 'think', 'd': thinking}) + SSE_END
+                if text:
+                    yield 'data: ' + json.dumps({'t': 'text', 'd': text}) + SSE_END
                 yield 'data: ' + json.dumps({'t': 'done', 'ok': bool(text)}) + SSE_END
             except Exception as e:
                 yield 'data: ' + json.dumps({'t': 'err', 'd': str(e)}) + SSE_END
