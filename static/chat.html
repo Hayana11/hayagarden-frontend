@@ -912,7 +912,12 @@ async function streamReply(){
 
   try{
     while(true){
-      var chunk=await reader.read();
+      var chunk;
+      try{ chunk=await reader.read(); }
+      catch(re){
+        if(re && re.name==='AbortError') break; // 暂停：后端早已写库，直接收尾，不再单独补发
+        throw re;
+      }
       if(chunk.done) break;
       buf+=decoder.decode(chunk.value,{stream:true});
       var parts=buf.split(SSE_SEP); buf=parts.pop();
@@ -950,14 +955,9 @@ async function streamReply(){
     while(!err && shown<target.length){ await new Promise(function(r){setTimeout(r,80);}); }
   } finally {
     clearInterval(timer);
-    var wasAborted=ctrl.signal.aborted;
     streamAbort=null;
-    if(wasAborted && target && target.trim()){
-      fetch('/api/chat/send',{method:'POST',headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({author:'fyodor',content:target.trim()})}).catch(function(){});
-    }
   }
-  if(err && err.name !== 'AbortError') throw err;
+  if(err) throw err;
   return target;
 }
 
