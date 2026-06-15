@@ -42,6 +42,7 @@ async function streamReply(){
     var div=document.createElement('div'); div.className='tool-card';
     div.innerHTML='<button class="tool-card-toggle" onclick="toggleToolCard(this)"><i class="ti ti-chevron-right"></i><span>\u26A1 '+escHtml(label)+' <span style="opacity:.6">\u00B7 \u2026</span></span></button><div class="tool-card-body"><div style="opacity:.65">'+escHtml(JSON.stringify(tc.args||{}))+'</div></div>';
     liveBubble.appendChild(div);
+    liveThinkBody = null; thinkBuf = ''; thinkShown = 0;
   }
 
   function updateToolResult(tc, idx){
@@ -89,7 +90,7 @@ async function streamReply(){
         var line=parts[i].trim();
         if(line.indexOf('data:')!==0) continue;
         var ev; try{ ev=JSON.parse(line.slice(5)); }catch(e){ continue; }
-        if(ev.t==='thinking'){
+        if(ev.t==='think'){
           ensureThinkBlock();
           thinkBuf+=ev.d;
         } else if(ev.t==='tool_call'){

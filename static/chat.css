@@ -54,6 +54,7 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:14px;heigh
 .msg-row.fy{justify-content:flex-start;}
 .msg-row.ha{justify-content:flex-end;}
 .bwrap{max-width:80%;display:flex;flex-direction:column;position:relative;}
+.msg-row.fy .bwrap{max-width:92%;}
 .msg-row.fy .bwrap{align-items:flex-start;}
 .msg-row.ha .bwrap{align-items:flex-end;}
 .bubble.fy{background:var(--primary-light);border-radius:16px 16px 16px 4px;padding:10px 14px;font-size:var(--msg-font);line-height:1.7;overflow-wrap:break-word;word-break:break-word;color:var(--text);}
