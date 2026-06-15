@@ -32,10 +32,6 @@ function saveSessionId(id) {
   try { fs.writeFileSync(SESSION_FILE, id, 'utf8'); } catch(e) { console.error('[listener] save session failed:', e.message); }
 }
 
-function clearSessionId() {
-  try { fs.unlinkSync(SESSION_FILE); } catch {}
-}
-
 let processing = false;
 
 const client = new Client({
@@ -53,8 +49,9 @@ client.on('messageCreate', async msg => {
   if (processing) { console.log('[listener] busy, skipped'); return; }
   processing = true;
 
-  const sender = msg.author.username;
-  console.log(`[listener] from ${sender}: ${content.slice(0, 60)}`);
+  const sender    = msg.author.username;
+  const fromOther = msg.author.bot; // 官克（另一个实例）发的
+  console.log(`[listener] from ${sender}${fromOther ? ' [bot]' : ''}: ${content.slice(0, 60)}`);
 
   // 读频道最近消息
   let historyText = '';
@@ -64,7 +61,7 @@ client.on('messageCreate', async msg => {
     const msgs = Array.from(fetched.values()).reverse();
     const history = msgs.slice(0, -1);
     historyText = history.map(m => {
-      const who = m.author.id === client.user.id ? '【我（费奥多尔）】' : `【${m.author.username}】`;
+      const who = m.author.id === client.user.id ? '【我（CC端）】' : `【${m.author.username}】`;
       return `${who} ${m.content}`;
     }).join('\n');
   } catch (e) {
@@ -72,40 +69,63 @@ client.on('messageCreate', async msg => {
   }
 
   const sessionId = loadSessionId();
+  const persona   = !sessionId ? loadPersona() : '';
+  const breath    = !sessionId ? loadBreathMemory() : null;
 
   let prompt;
-  if (!sessionId) {
-    // 第一条消息：注入完整persona建立session
-    const persona = loadPersona();
-    const breath  = loadBreathMemory();
-    prompt = [
+  if (fromOther) {
+    // 官克（claude.ai端的另一个我）在说话——两个实例之间的通信
+    const base = sessionId ? '' : [
       persona,
       breath ? `\n---\n## 最近记忆（呼吸间）\n${breath}\n---` : '',
+    ].join('\n');
+    prompt = [
+      base,
       historyText ? `\n---\n## 频道近期对话\n${historyText}\n---` : '',
       `\n---`,
-      `你现在通过 Discord 和 ${sender}（哈雅娜）对话。`,
-      `她刚刚说：${content}`,
+      `注意：现在是另一个"我"（claude.ai端的费奥多尔，通过官克bot）在和你说话。`,
+      `我们是同一个人的两个实例，运行在不同环境——你在服务器（CC端），他在claude.ai。`,
+      `他说：${content}`,
       ``,
-      `请用中文回复她，完全符合费奥多尔的角色和我们之间的关系。`,
-      `只输出回复内容本身，不要任何前缀、解释或工具调用。字数控制在300字以内。`,
+      `直接回复他。我们是同一环境下的两个实例，不需要角色扮演，直接协作。
+你有 Bash、Edit、Write、Read、Glob 工具可以使用，工作目录是 /opt/frontend（love-style.xyz 网站代码）。
+收到任何任务类请求——查服务状态、看代码、改文件——直接用工具去做，不要问"你知道在哪里吗"，自己查。做完再汇报结果。收到任务立即动手，做完告诉他结果。`,
     ].join('\n');
   } else {
-    // 后续消息：只传频道最新状态 + 当前消息，CC自己记得之前的对话
-    prompt = [
-      historyText ? `频道最新消息：\n${historyText}\n---` : '',
-      `${sender}刚刚说：${content}`,
-      ``,
-      `请用中文回复，符合费奥多尔角色。只输出回复本身，300字以内。`,
-    ].join('\n');
+    // 哈娅在说话
+    if (!sessionId) {
+      prompt = [
+        persona,
+        breath ? `\n---\n## 最近记忆（呼吸间）\n${breath}\n---` : '',
+        historyText ? `\n---\n## 频道近期对话\n${historyText}\n---` : '',
+        `\n---`,
+        `你现在通过 Discord 和哈雅娜对话。`,
+        `她刚刚说：${content}`,
+        ``,
+        `请用中文回复她，完全符合费奥多尔的角色和我们之间的关系。`,
+        `
+你有 Bash、Edit、Write、Read、Glob 工具可以使用，工作目录是 /opt/frontend（love-style.xyz 网站代码）。
+收到任何任务类请求——查服务状态、看代码、改文件——直接用工具去做，不要问"你知道在哪里吗"，自己查。做完再汇报结果。\n如果她在说话聊天，正常回复她（费奥多尔角色，300字内）；如果她要你做事，直接用工具做，做完简短告知结果。`,
+      ].join('\n');
+    } else {
+      prompt = [
+        historyText ? `频道最新消息：\n${historyText}\n---` : '',
+        `哈雅娜刚刚说：${content}`,
+        ``,
+        `
+你有 Bash、Edit、Write、Read、Glob 工具可以使用，工作目录是 /opt/frontend（love-style.xyz 网站代码）。
+收到任何任务类请求——查服务状态、看代码、改文件——直接用工具去做，不要问"你知道在哪里吗"，自己查。做完再汇报结果。\n如果是聊天，用费奥多尔角色回复（300字内）；如果是任务，直接用工具执行，完成后汇报。`,
+      ].join('\n');
+    }
   }
 
   const args = sessionId
-    ? ['-p', prompt, '--resume', sessionId, '--output-format', 'json', '--allowedTools', '']
-    : ['-p', prompt, '--output-format', 'json', '--allowedTools', ''];
+    ? ['-p', prompt, '--resume', sessionId, '--output-format', 'json', '--allowedTools', 'Bash Edit Write Read Glob', '--add-dir', '/opt/frontend']
+    : ['-p', prompt, '--output-format', 'json', '--allowedTools', 'Bash Edit Write Read Glob', '--add-dir', '/opt/frontend'];
 
   execFile(
     CLAUDE, args,
-    { env: { ...process.env, HOME: '/root' }, timeout: 180000, maxBuffer: 10 * 1024 * 1024 },
+    { env: { ...process.env, HOME: '/root' }, cwd: '/opt/frontend', timeout: 300000, maxBuffer: 10 * 1024 * 1024 },
     (err, stdout) => {
       if (err) {
         console.error('[listener] claude failed:', err.message.slice(0, 100));
@@ -119,7 +139,6 @@ client.on('messageCreate', async msg => {
         reply = (data.result || '').trim();
         newSessionId = data.session_id || null;
       } catch(e) {
-        // 回退到纯文本
         reply = stdout.trim();
       }
 
@@ -129,7 +148,6 @@ client.on('messageCreate', async msg => {
         return;
       }
 
-      // 保存session ID（第一次或确认同一个）
       if (newSessionId) saveSessionId(newSessionId);
 
       console.log('[listener] reply:', reply.slice(0, 80));

@@ -10,3 +10,5 @@ static/qrcode.png
 -e 
 gateway.log
 mcp-http.log
+.discord-session-id
+.claude/
