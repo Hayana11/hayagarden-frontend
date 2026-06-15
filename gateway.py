@@ -1573,7 +1573,7 @@ def brain_dreams():
             items.append({
                 'date': r['created_at'][:10] if r['created_at'] else '—',
                 'title': (c[:40] + '...') if c else '无题',
-                'content': c[:300],
+                'content': c,
                 'emotion': '朦胧'
             })
         return jsonify({'ok': True, 'items': items})
@@ -1594,7 +1594,7 @@ def brain_thoughts():
             if r['thoughts']:
                 items.append({
                     'time': r['woke_at'][11:16] if r['woke_at'] else '—',
-                    'content': r['thoughts'][:200]
+                    'content': r['thoughts']
                 })
         return jsonify({'ok': True, 'items': items})
     except Exception as e:

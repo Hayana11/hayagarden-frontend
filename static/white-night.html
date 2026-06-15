@@ -136,6 +136,12 @@ if(window.matchMedia('(prefers-color-scheme:dark)').matches)
   document.documentElement.setAttribute('data-theme','dark');
 
 function goBack(){ window.location.href='/static/dash.html'; }
+function stripThinking(s){
+  s = (s||'');
+  s = s.replace(/<thinking>[\s\S]*?<\/thinking>\s*/g,'');
+  s = s.replace(/<thinking>[\s\S]*$/,'');
+  return s.trim();
+}
 
 function switchTab(name, ev){
   document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
@@ -199,7 +205,7 @@ async function loadDreams(){
       <div class="dream-card">
         <div class="dream-date">${dream.date}</div>
         <div class="dream-title"><i class="ti ti-moon"></i>${dream.title}</div>
-        <div class="dream-content">${dream.content}</div>
+        <div class="dream-content">${stripThinking(dream.content) || "（这条记录没有可显示的内容）"}</div>
         ${dream.emotion ? `<div class="dream-emotion">情绪：${dream.emotion}</div>` : ''}
       </div>
     `).join('');
@@ -221,7 +227,7 @@ async function loadThoughts(){
     container.innerHTML = data.items.map(t => `
       <div class="thought-card">
         <div class="thought-time">${t.time}</div>
-        <div class="thought-content">${t.content}</div>
+        <div class="thought-content">${stripThinking(t.content) || "（这条记录没有可显示的内容）"}</div>
       </div>
     `).join('');
   }catch(e){
@@ -242,7 +248,7 @@ async function loadDiary(){
     container.innerHTML = data.items.map(d => `
       <div class="thought-card">
         <div class="thought-time">${d.date}</div>
-        <div class="thought-content" style="white-space:pre-wrap">${d.content}</div>
+        <div class="thought-content" style="white-space:pre-wrap">${stripThinking(d.content) || "（这条记录没有可显示的内容）"}</div>
       </div>
     `).join('');
   }catch(e){

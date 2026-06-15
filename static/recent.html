@@ -198,7 +198,15 @@ async function saveEdit(id,e){
 function fmtDate(dt){if(!dt)return'';var d=new Date(dt.replace(' ','T'));return(d.getMonth()+1)+'.'+d.getDate();}
 function monthKey(dt){if(!dt)return'';var d=new Date(dt.replace(' ','T'));return d.getFullYear()+'.'+(d.getMonth()+1);}
 function escHtml(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
-function stripThinking(s){return (s||'').replace(/<thinking>[\s\S]*?<\/thinking>\s*/g,'').trim();}
+function stripThinking(s){
+  s = (s||'').replace(/<thinking>[\s\S]*?<\/thinking>\s*/g,'');
+  // 未闭合的<thinking>（输出被截断）：连带其后内容一起去掉，只保留前面真正写出的正文
+  s = s.replace(/<thinking>[\s\S]*$/,'');
+  return s.trim();
+}
+function dispHtml(disp){
+  return disp ? escHtml(disp) : '<span style="opacity:.4;font-style:italic">（这条记录没有可显示的内容）</span>';
+}
 function typeBadge(p){
   var m=TYPE_BADGE[p.type];
   if(!m)return'';
@@ -213,8 +221,8 @@ function buildItem(p){
     h+='<div class="medit-row"><button class="medit-save" onclick="saveEdit('+p.id+',event)">保存</button><button class="medit-cancel" onclick="cancelEdit(event)">取消</button></div>';
   } else {
     var disp=stripThinking(p.content);
-    h+='<div class="mpreview">'+escHtml(disp)+'</div>';
-    h+='<div class="mfull">'+escHtml(disp)+'</div>';
+    h+='<div class="mpreview">'+dispHtml(disp)+'</div>';
+    h+='<div class="mfull">'+dispHtml(disp)+'</div>';
   }
   h+='<div class="mmeta">'+typeBadge(p)+'<span class="mdate">'+fmtDate(p.created_at)+'</span>';
   if(!isEditing)h+='<button class="mpencil" onclick="startEdit('+p.id+',event)"><i class="ti ti-pencil"></i></button>';
@@ -230,8 +238,8 @@ function buildDriftItem(b){
   var h='<div class="mitem'+(isOpen?' open':'')+'" data-id="'+uid+'" onclick="toggleDrift(\''+uid+'\',event)">';
   h+='<div class="mdot" style="background:var(--amber-s)"></div><div class="mright">';
   var disp=stripThinking(b.content);
-  h+='<div class="mpreview">'+escHtml(disp)+'</div>';
-  h+='<div class="mfull">'+escHtml(disp)+'</div>';
+  h+='<div class="mpreview">'+dispHtml(disp)+'</div>';
+  h+='<div class="mfull">'+dispHtml(disp)+'</div>';
   if(isOpen&&b.reply){
     var rd=stripThinking(b.reply);
     h+='<div style="margin-top:10px;padding:10px 12px;border-radius:10px;background:rgba(124,106,138,.08);font-size:12px;line-height:1.7;color:var(--text);white-space:pre-wrap;word-break:break-all;">';

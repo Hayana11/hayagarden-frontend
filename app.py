@@ -91,6 +91,11 @@ def create_post():
     content = data.get('content','').strip()
     if not content:
         return jsonify({"error":"empty"}),400
+    # 防止把未输出完的<thinking>原始块当成正文存进来（输出被截断时常见）
+    if '<thinking>' in content and '</thinking>' not in content:
+        content = content.split('<thinking>')[0].strip()
+        if not content:
+            return jsonify({"error":"content looks like an unterminated <thinking> block, nothing to save"}), 400
     tags = data.get('tags','')
     conn = get_db()
     cur = conn.execute("INSERT INTO posts (type,content,author,tags) VALUES (?,?,?,?)",
@@ -1123,7 +1128,7 @@ def brain_dreams_proxy():
         conn.close()
         items = [{'date': r['created_at'][:10] if r['created_at'] else '-',
                   'title': (r['content'][:40] + '...') if r['content'] else '无题',
-                  'content': (r['content'] or '')[:300],
+                  'content': (r['content'] or ''),
                   'emotion': '朦胧'} for r in rows]
         return jsonify({'ok': True, 'items': items})
     except Exception as e:
@@ -1138,7 +1143,7 @@ def brain_thoughts_proxy():
         ).fetchall()
         conn.close()
         items = [{'time': r['created_at'][11:16] if r['created_at'] else '-',
-                  'content': (r['content'] or '')[:500]} for r in rows if r['content']]
+                  'content': (r['content'] or '')} for r in rows if r['content']]
         return jsonify({'ok': True, 'items': items})
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e)}), 500
