@@ -1713,3 +1713,131 @@ def set_ledger_budget():
     conn.execute('INSERT OR REPLACE INTO ledger_budget (month, amount) VALUES (?,?)', (month, amount))
     conn.commit(); conn.close()
     return jsonify({'ok': True})
+
+
+# ── Chat branches (regen + edit) ──────────────────────────
+
+@app.route('/api/chat/regen/prepare', methods=['POST'])
+def regen_prepare():
+    import json as _json
+    data = request.get_json() or {}
+    msg_id = data.get('msg_id')
+    if not msg_id:
+        return jsonify({'error': 'msg_id required'}), 400
+    conn = get_db()
+    row = conn.execute('SELECT * FROM chat_messages WHERE id=?', (msg_id,)).fetchone()
+    if not row:
+        conn.close()
+        return jsonify({'error': 'not found'}), 404
+    # Build old_branches: if branches already exist reuse them, else init from current content
+    old_branches = []
+    existing = (row['branches'] or '').strip()
+    if existing:
+        try:
+            old_branches = _json.loads(existing)
+        except Exception:
+            old_branches = []
+    if not old_branches:
+        old_branches = [{
+            'content': row['content'],
+            'thinking': row['thinking'] or '',
+            'tool_calls': row['tool_calls'] or ''
+        }]
+    conn.execute('DELETE FROM chat_messages WHERE id=?', (msg_id,))
+    conn.commit()
+    conn.close()
+    return jsonify({'ok': True, 'old_branches': old_branches})
+
+
+@app.route('/api/chat/regen/finalize', methods=['POST'])
+def regen_finalize():
+    import json as _json
+    data = request.get_json() or {}
+    old_branches = data.get('old_branches', [])
+    conn = get_db()
+    row = conn.execute(
+        "SELECT * FROM chat_messages WHERE author IN ('fyodor','assistant','claude') ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    if not row:
+        conn.close()
+        return jsonify({'error': 'no AI row'}), 404
+    new_branch = {
+        'content': row['content'],
+        'thinking': row['thinking'] or '',
+        'tool_calls': row['tool_calls'] or ''
+    }
+    all_branches = old_branches + [new_branch]
+    branch_idx = len(all_branches) - 1
+    conn.execute(
+        'UPDATE chat_messages SET branches=?, branch_idx=? WHERE id=?',
+        (_json.dumps(all_branches, ensure_ascii=False), branch_idx, row['id'])
+    )
+    conn.commit()
+    conn.close()
+    return jsonify({'ok': True, 'branch_idx': branch_idx, 'total': len(all_branches)})
+
+
+@app.route('/api/chat/branch/switch', methods=['POST'])
+def branch_switch():
+    import json as _json
+    data = request.get_json() or {}
+    msg_id = data.get('msg_id')
+    direction = int(data.get('direction', 0))
+    conn = get_db()
+    row = conn.execute('SELECT * FROM chat_messages WHERE id=?', (msg_id,)).fetchone()
+    if not row:
+        conn.close()
+        return jsonify({'error': 'not found'}), 404
+    branches = []
+    try:
+        branches = _json.loads(row['branches'] or '[]')
+    except Exception:
+        pass
+    if len(branches) < 2:
+        conn.close()
+        return jsonify({'error': 'no branches'}), 400
+    cur_idx = row['branch_idx'] or 0
+    new_idx = max(0, min(len(branches) - 1, cur_idx + direction))
+    if new_idx != cur_idx:
+        b = branches[new_idx]
+        conn.execute(
+            'UPDATE chat_messages SET content=?, thinking=?, tool_calls=?, branch_idx=? WHERE id=?',
+            (b['content'], b.get('thinking', ''), b.get('tool_calls', ''), new_idx, msg_id)
+        )
+        conn.commit()
+    conn.close()
+    return jsonify({'ok': True, 'branch_idx': new_idx, 'total': len(branches)})
+
+
+@app.route('/api/chat/edit', methods=['POST'])
+def edit_message():
+    import json as _json
+    data = request.get_json() or {}
+    msg_id = data.get('msg_id')
+    new_content = (data.get('content') or '').strip()
+    if not msg_id or not new_content:
+        return jsonify({'error': 'msg_id and content required'}), 400
+    conn = get_db()
+    row = conn.execute('SELECT * FROM chat_messages WHERE id=?', (msg_id,)).fetchone()
+    if not row:
+        conn.close()
+        return jsonify({'error': 'not found'}), 404
+    # Save entire tail (this row + everything after) as an edit branch
+    tail_rows = conn.execute(
+        'SELECT * FROM chat_messages WHERE id >= ? ORDER BY id ASC', (msg_id,)
+    ).fetchall()
+    tail_json = _json.dumps([dict(r) for r in tail_rows], ensure_ascii=False, default=str)
+    conn.execute(
+        'INSERT INTO chat_edit_branches (fork_msg_id, original_content, messages_json) VALUES (?,?,?)',
+        (msg_id, row['content'], tail_json)
+    )
+    # Update the edited row's content, clear branches (fresh start)
+    conn.execute(
+        'UPDATE chat_messages SET content=?, branches="", branch_idx=0 WHERE id=?',
+        (new_content, msg_id)
+    )
+    # Delete everything after this row
+    conn.execute('DELETE FROM chat_messages WHERE id > ?', (msg_id,))
+    conn.commit()
+    conn.close()
+    return jsonify({'ok': True})

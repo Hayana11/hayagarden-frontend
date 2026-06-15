@@ -20,7 +20,7 @@
   --border:#ece6e0;--msg-font:15px;
 }
 html,body{height:100%;overflow:hidden;}
-body{background:var(--bg);color:var(--text);font-family:-apple-system,'PingFang SC','Noto Sans SC',sans-serif;max-width:480px;margin:0 auto;display:flex;flex-direction:column;}
+body{background:var(--bg);color:var(--text);font-family:-apple-system,'PingFang SC','HarmonyOS Sans SC','Noto Sans CJK SC','Noto Sans SC',sans-serif;max-width:480px;margin:0 auto;display:flex;flex-direction:column;}
 
 /* ── Header ── */
 .hd{flex-shrink:0;position:relative;background:rgba(255,255,255,.97);backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);padding:44px 18px 14px;display:flex;align-items:flex-end;justify-content:space-between;border-bottom:.5px solid var(--border);z-index:20;}
@@ -223,6 +223,10 @@ html[data-theme=dark] .ni{color:#6a5f5f;}
 .mac-btn{width:20px;height:20px;border:none;background:none;cursor:pointer;color:#b8a090;border-radius:4px;display:flex;align-items:center;justify-content:center;font-size:13px;transition:color .12s;padding:0;}
 .mac-btn:hover{color:#d4a574;}
 .bubble.editing{outline:1.5px solid var(--amber) !important;cursor:text;}
+.branch-bar{display:inline-flex;align-items:center;gap:2px;user-select:none;margin-left:4px;}
+.branch-nav{cursor:pointer;padding:2px 5px;font-size:13px;opacity:.4;border-radius:3px;}
+.branch-nav:hover{opacity:.7;}
+.branch-count{font-family:monospace;font-size:10px;opacity:.4;min-width:20px;text-align:center;}
 </style>
 </head>
 <body>
@@ -510,6 +514,8 @@ function buildHtml(list) {
   window.curMsgList = list;
   if(!list.length) return '<div class="empty-tip">no messages yet<br>say the first thing</div>';
   var html='', lastDay='';
+  var lastAiIdx = -1;
+  for(var j=list.length-1; j>=0; j--){ if(isFy(list[j].author)){lastAiIdx=j; break;} }
   list.forEach(function(m,i){
     var dk = dayKey(m.created_at);
     if(dk !== lastDay){ html += '<div class="date-sep">'+dayLabel(m.created_at)+'</div>'; lastDay=dk; }
@@ -552,16 +558,34 @@ function buildHtml(list) {
     if(hasImg) innerHtml += '<img src="'+escHtml(m.image_url)+'" loading="lazy" onclick="openLb(\''+escHtml(m.image_url)+'\')">';
     if(hasTxt) innerHtml += (hasImg?'<div class="img-then-text">':'')+escHtml(m.content)+(hasImg?'</div>':'');
 
-    var actHtml = fy
-      ? '<div class="msg-actions"><button class="mac-btn" title="复制" onclick="copyBubble(this)"><i class="ti ti-copy"></i></button></div>'
-      : '<div class="msg-actions">'+'<button class="mac-btn" title="重发" onclick="replayMsg(this)"><i class="ti ti-refresh"></i></button>'+'<button class="mac-btn" title="编辑" onclick="editMsg(this)"><i class="ti ti-edit"></i></button></div>';
-    html +=
-      '<div class="msg-row '+side+'" data-idx="'+i+'">' +
-        '<div class="bwrap">' +
-          '<div class="bubble '+side+(imgOnly?' img-only':'')+'">'+innerHtml+'</div>' +
-          '<div class="msg-time-row"><span class="msg-time">'+fmtTime(m.created_at)+'</span>'+actHtml+'</div>' +
-        '</div>' +
-      '</div>';
+    var actHtml;
+    if(fy) {
+      var branches = [];
+      try { if(m.branches) branches = JSON.parse(m.branches); } catch(e) {}
+      var branchBar = branches.length > 1
+        ? '<span class="branch-bar"><span class="branch-nav" onclick="switchBranch('+m.id+',-1)">&#8249;</span><span class="branch-count">'+((m.branch_idx||0)+1)+'/'+branches.length+'</span><span class="branch-nav" onclick="switchBranch('+m.id+',1)">&#8250;</span></span>'
+        : '';
+      var regenBtn = (i === lastAiIdx)
+        ? '<button class="mac-btn" title="重新生成" onclick="doRegen('+m.id+')"><i class="ti ti-refresh"></i></button>'
+        : '';
+      actHtml = '<div class="msg-actions">'+regenBtn+'<button class="mac-btn" title="复制" onclick="copyBubble(this)"><i class="ti ti-copy"></i></button></div>';
+      html +=
+        '<div class="msg-row '+side+'" data-idx="'+i+'" data-mid="'+m.id+'">' +
+          '<div class="bwrap">' +
+            '<div class="bubble '+side+(imgOnly?' img-only':'')+'">'+innerHtml+'</div>' +
+            '<div class="msg-time-row"><span class="msg-time">'+fmtTime(m.created_at)+'</span>'+branchBar+actHtml+'</div>' +
+          '</div>' +
+        '</div>';
+    } else {
+      actHtml = '<div class="msg-actions"><button class="mac-btn" title="编辑" onclick="editMsg(this,'+m.id+')"><i class="ti ti-edit"></i></button></div>';
+      html +=
+        '<div class="msg-row '+side+'" data-idx="'+i+'" data-mid="'+m.id+'">' +
+          '<div class="bwrap">' +
+            '<div class="bubble '+side+(imgOnly?' img-only':'')+'">'+innerHtml+'</div>' +
+            '<div class="msg-time-row"><span class="msg-time">'+fmtTime(m.created_at)+'</span>'+actHtml+'</div>' +
+          '</div>' +
+        '</div>';
+    }
   });
   return html;
 }
@@ -767,7 +791,7 @@ function replayMsg(btn) {
   document.getElementById('txt').value = content;
   send();
 }
-function editMsg(btn) {
+function editMsg(btn, msgId) {
   var bwrap = btn.closest('.bwrap');
   var bubble = bwrap ? bwrap.querySelector('.bubble') : null;
   if (!bubble || bubble.contentEditable === 'true') return;
@@ -781,15 +805,14 @@ function editMsg(btn) {
   function onKey(e) {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
-      var newContent = bubble.innerText.trim();
+      var nc = bubble.innerText.trim();
       bubble.contentEditable = 'false'; bubble.classList.remove('editing');
       bubble.removeEventListener('keydown', onKey);
-      if (newContent && !sending && !blockedState) { document.getElementById('txt').value = newContent; send(); }
+      if (nc && !sending && !blockedState) doEdit(msgId, nc);
     } else if (e.key === 'Escape') {
       bubble.contentEditable = 'false'; bubble.classList.remove('editing');
       bubble.removeEventListener('keydown', onKey);
       bwrap.querySelector('.msg-actions').style.opacity = '';
-      loadMsgs(false);
     }
   }
   bubble.addEventListener('keydown', onKey);
@@ -801,6 +824,50 @@ async function copyBubble(btn) {
   try { await navigator.clipboard.writeText(text); }
   catch(e) { var ta=document.createElement('textarea'); ta.value=text; document.body.appendChild(ta); ta.select(); document.execCommand('copy'); ta.remove(); }
   showToast('已复制');
+}
+
+async function doRegen(msgId) {
+  if(sending) return;
+  sending = true; setSendBtn('stop');
+  try {
+    var prep = await fetch('/api/chat/regen/prepare', {method:'POST',
+      headers:{'Content-Type':'application/json'}, body:JSON.stringify({msg_id:msgId})});
+    var pd = await prep.json();
+    if(!pd.ok){ sending=false; setSendBtn('send'); return; }
+    showTyping();
+    try {
+      await streamReply();
+      await fetch('/api/chat/regen/finalize', {method:'POST',
+        headers:{'Content-Type':'application/json'}, body:JSON.stringify({old_branches:pd.old_branches})});
+    } catch(e) { console.error('regen stream failed',e); }
+    hideTyping();
+    await loadMsgs(false);
+  } catch(e) { console.error('doRegen',e); }
+  sending = false; setSendBtn('send');
+}
+
+async function doEdit(msgId, newContent) {
+  if(sending) return;
+  sending = true; setSendBtn('stop');
+  try {
+    await fetch('/api/chat/edit', {method:'POST',
+      headers:{'Content-Type':'application/json'}, body:JSON.stringify({msg_id:msgId, content:newContent})});
+    await loadMsgs(false);
+    showTyping();
+    try { await streamReply(); } catch(e) { console.error('doEdit stream failed',e); }
+    hideTyping();
+    await loadMsgs(false);
+  } catch(e) { console.error('doEdit',e); }
+  sending = false; setSendBtn('send');
+}
+
+async function switchBranch(msgId, dir) {
+  try {
+    var r = await fetch('/api/chat/branch/switch', {method:'POST',
+      headers:{'Content-Type':'application/json'}, body:JSON.stringify({msg_id:msgId, direction:dir})});
+    var d = await r.json();
+    if(d.ok) await loadMsgs(false);
+  } catch(e) { console.error('switchBranch',e); }
 }
 
 // ── Streaming reply ──
