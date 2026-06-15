@@ -1354,10 +1354,35 @@ def _init_wake_tables():
         content TEXT,
         consumed INTEGER DEFAULT 0
     )""")
+    try:
+        conn.execute("ALTER TABLE wake_log ADD COLUMN notified INTEGER DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass
     conn.commit()
     conn.close()
 
 _init_wake_tables()
+
+@app.route('/api/wake_log/pending_notification', methods=['GET'])
+def pending_notification():
+    """供VII app轮询：是否有费奥多尔自主发出的、还没推送过的消息。
+    取最新一条未推送的 action='message'，并把所有未推送的一并标记，
+    避免她隔几小时打开时被一堆补发的旧通知刷屏。"""
+    conn = get_db()
+    row = conn.execute(
+        "SELECT id, content, woke_at FROM wake_log "
+        "WHERE action='message' AND (notified IS NULL OR notified=0) "
+        "ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    if not row:
+        conn.close()
+        return jsonify({'has_message': False})
+    conn.execute(
+        "UPDATE wake_log SET notified=1 WHERE action='message' AND (notified IS NULL OR notified=0)"
+    )
+    conn.commit()
+    conn.close()
+    return jsonify({'has_message': True, 'content': row['content'], 'woke_at': row['woke_at']})
 
 # ── Board 留言板 ───────────────────────────────────────────
 @app.route('/board')
