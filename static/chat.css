@@ -56,8 +56,8 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:14px;heigh
 .bwrap{max-width:80%;display:flex;flex-direction:column;position:relative;}
 .msg-row.fy .bwrap{align-items:flex-start;}
 .msg-row.ha .bwrap{align-items:flex-end;}
-.bubble.fy{background:var(--primary-light);border-radius:16px 16px 16px 4px;padding:10px 14px;font-size:var(--msg-font);line-height:1.7;word-break:break-all;color:var(--text);}
-.bubble.ha{background:var(--amber);border-radius:16px 16px 4px 16px;padding:10px 14px;font-size:var(--msg-font);line-height:1.7;word-break:break-all;color:var(--amber-text);}
+.bubble.fy{background:var(--primary-light);border-radius:16px 16px 16px 4px;padding:10px 14px;font-size:var(--msg-font);line-height:1.7;overflow-wrap:break-word;word-break:break-word;color:var(--text);}
+.bubble.ha{background:var(--amber);border-radius:16px 16px 4px 16px;padding:10px 14px;font-size:var(--msg-font);line-height:1.7;overflow-wrap:break-word;word-break:break-word;color:var(--amber-text);}
 .bubble.img-only{padding:0;background:transparent !important;}
 .bubble img{max-width:220px;max-height:220px;border-radius:12px;display:block;cursor:pointer;object-fit:cover;}
 .img-then-text{margin-top:6px;}
@@ -66,13 +66,13 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:14px;heigh
 .think-toggle{width:100%;text-align:left;padding:7px 10px;background:none;border:none;cursor:pointer;font-size:11px;color:rgba(124,106,138,.7);display:flex;align-items:center;gap:5px;font-family:inherit;letter-spacing:.3px;}
 .think-toggle i{font-size:13px;transition:transform .18s;}
 .think-toggle.open i.ti-chevron-right{transform:rotate(90deg);}
-.think-body{display:none;padding:2px 10px 9px;font-size:12px;color:rgba(42,32,32,.52);line-height:1.65;white-space:pre-wrap;word-break:break-all;}
+.think-body{display:none;padding:2px 10px 9px;font-size:12px;color:rgba(42,32,32,.52);line-height:1.65;white-space:pre-wrap;overflow-wrap:break-word;word-break:break-word;}
 .think-body.open{display:block;}
 .tool-card{background:rgba(212,165,116,.06);border-left:2px solid rgba(212,165,116,.4);border-radius:10px;margin:0 -2px 8px;overflow:hidden;}
 .tool-card-toggle{width:100%;text-align:left;padding:7px 10px;background:none;border:none;cursor:pointer;font-size:11px;color:rgba(212,165,116,.85);display:flex;align-items:center;gap:5px;font-family:inherit;letter-spacing:.3px;}
 .tool-card-toggle i{font-size:13px;transition:transform .18s;}
 .tool-card-toggle.open i.ti-chevron-right{transform:rotate(90deg);}
-.tool-card-body{display:none;padding:2px 10px 9px;font-size:12px;color:rgba(42,32,32,.52);line-height:1.65;word-break:break-all;white-space:pre-wrap;}
+.tool-card-body{display:none;padding:2px 10px 9px;font-size:12px;color:rgba(42,32,32,.52);line-height:1.65;overflow-wrap:break-word;word-break:break-word;white-space:pre-wrap;}
 .tool-card-body.open{display:block;}
 .empty-tip{text-align:center;color:var(--muted);padding:60px 20px;font-size:13px;line-height:2.4;}
 #typing{display:none;padding:0 16px 4px;flex-shrink:0;}
@@ -127,7 +127,7 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:14px;heigh
 .drift-sent-msg{display:none;text-align:center;font-size:13px;color:var(--muted);line-height:1.8;padding:8px 0;}
 .drift-badge{font-size:10px;color:var(--amber);margin-bottom:5px;display:flex;align-items:center;gap:4px;opacity:.8;}
 .drift-badge i{font-size:12px;}
-.bubble.drift{background:linear-gradient(135deg,rgba(212,165,116,.12),rgba(124,106,138,.08));border:1px solid rgba(212,165,116,.25);border-radius:16px 16px 16px 4px;padding:10px 14px;font-size:var(--msg-font);line-height:1.7;word-break:break-all;color:var(--text);}
+.bubble.drift{background:linear-gradient(135deg,rgba(212,165,116,.12),rgba(124,106,138,.08));border:1px solid rgba(212,165,116,.25);border-radius:16px 16px 16px 4px;padding:10px 14px;font-size:var(--msg-font);line-height:1.7;overflow-wrap:break-word;word-break:break-word;color:var(--text);}
 .bubble.drift.sent{border-radius:16px 16px 4px 16px;}
 html[data-theme=dark]{--bg:#161312;--card:#211d1c;--text:#e8e2dc;--muted:#9a8d8d;--primary:#a392b5;--primary-bg:#2c2733;--primary-light:rgba(163,146,181,.13);--amber:#d4a574;--amber-bg:#352a1d;--amber-text:#3a2402;--border:#332d2b;}
 html[data-theme=dark] .hd,html[data-theme=dark] .inp-area,html[data-theme=dark] .bnav{background:rgba(26,22,21,.97);}
