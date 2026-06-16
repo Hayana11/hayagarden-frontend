@@ -1456,12 +1456,25 @@ def post_board():
         return jsonify({'error': 'level must be P0/P1/P2'}), 400
     if category not in ('给活儿', '播报'):
         category = '给活儿'
+    mentions = (data.get('mentions') or '').strip()
     conn = get_db()
     cur = conn.execute(
-        "INSERT INTO board (author,tag,content,status,level,category) VALUES (?,?,?,'open',?,?)",
-        (author, tag, content, level, category)
+        "INSERT INTO board (author,tag,content,status,level,category,mentions) VALUES (?,?,?,'open',?,?,?)",
+        (author, tag, content, level, category, mentions)
     )
     conn.commit(); new_id = cur.lastrowid; conn.close()
+
+    # @fyodor_cc → 立刻触发cc_board_check，不等巡逻周期
+    if 'fyodor_cc' in mentions:
+        import subprocess, os, sys as _sys
+        subprocess.Popen(
+            [_sys.executable, '/opt/frontend/tools/cc_board_check.py'],
+            cwd='/opt/frontend',
+            env={**os.environ, 'HOME': '/root'},
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL
+        )
+
     return jsonify({'ok': True, 'id': new_id})
 
 @app.route('/api/board/<int:bid>/reply', methods=['POST'])
@@ -1474,9 +1487,25 @@ def post_board_reply(bid):
     content = (data.get('content') or '').strip()
     if not content:
         return jsonify({'error': 'content required'}), 400
+    mentions = (data.get('mentions') or '').strip()
     conn = get_db()
-    conn.execute("INSERT INTO board_replies (board_id,author,content) VALUES (?,?,?)", (bid, author, content))
+    conn.execute(
+        "INSERT INTO board_replies (board_id,author,content,mentions) VALUES (?,?,?,?)",
+        (bid, author, content, mentions)
+    )
     conn.commit(); conn.close()
+
+    # 回复里@fyodor_cc → 同样立刻触发
+    if 'fyodor_cc' in mentions:
+        import subprocess, os, sys as _sys
+        subprocess.Popen(
+            [_sys.executable, '/opt/frontend/tools/cc_board_check.py'],
+            cwd='/opt/frontend',
+            env={**os.environ, 'HOME': '/root'},
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL
+        )
+
     return jsonify({'ok': True})
 
 @app.route('/api/board/<int:bid>/status', methods=['POST'])

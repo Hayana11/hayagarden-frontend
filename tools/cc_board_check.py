@@ -163,11 +163,23 @@ def main():
     # 关键修复：不能按最大ID盲目推进seen_id
     # 应该处理"所有open状态的紧急/需求帖"，而不只是"比seen_id新的"
     # 因为patrol巡逻会产生新帖子并更新max_id，导致hayana的帖子被跳过
+    def _cc_should_handle(it):
+        """判断这条帖子是否该CC处理：
+        1. mentions里有fyodor_cc → 明确@了CC，处理
+        2. mentions为空 → 没有@任何人，按旧逻辑处理需求/紧急
+        3. mentions里没有fyodor_cc但有其他人 → 不是给CC的，跳过
+        """
+        mentions = (it.get('mentions') or '').strip()
+        if not mentions:
+            return True   # 没@任何人，旧逻辑，CC来处理
+        return 'fyodor_cc' in mentions.split(',')
+
     new_trigger = [
         it for it in items
         if it.get('tag') in TRIGGER_TAGS
         and it.get('status') == 'open'
         and not any(r.get('author') == 'fyodor_cc' for r in it.get('replies', []))
+        and _cc_should_handle(it)
     ]
 
     # seen_id只用于防止无限重复处理——只在真正处理完之后才推进

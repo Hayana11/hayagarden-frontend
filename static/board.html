@@ -112,6 +112,11 @@ html[data-theme=dark] .cat-btn{background:#4a2535;color:#f0a0b8;}
 .panel-tags .ftag{flex:1;text-align:center;padding:5px 0;}
 .panel-ta{width:100%;padding:11px 13px;border-radius:12px;border:1.5px solid var(--border);background:var(--bg);font-size:13px;font-family:inherit;color:var(--text);resize:none;outline:none;min-height:100px;line-height:1.6;}
 .panel-ta:focus{border-color:#f08aaa;}
+.mention-row{display:flex;gap:6px;margin:10px 0 2px;flex-wrap:wrap;}
+.mention-btn{display:flex;align-items:center;gap:4px;padding:4px 10px;border-radius:20px;border:1.5px solid var(--border);background:transparent;font-size:11px;color:var(--muted);cursor:pointer;font-family:inherit;transition:all .15s;}
+.mention-btn.act{border-color:var(--primary);background:var(--primary-bg);color:var(--primary);font-weight:600;}
+.mention-label{font-size:10px;color:var(--muted);margin-bottom:4px;letter-spacing:.5px;}
+.mention-tag{display:inline-flex;align-items:center;gap:3px;font-size:11px;color:var(--primary);background:var(--primary-bg);border-radius:10px;padding:1px 6px;margin-left:4px;}
 .panel-send{width:100%;margin-top:10px;padding:11px;border:none;border-radius:12px;background:linear-gradient(135deg,#f08aaa,#d4a574);color:#fff;font-size:13px;cursor:pointer;font-family:inherit;letter-spacing:.3px;transition:opacity .15s;}
 .panel-send:active{opacity:.8;}
 .panel-divider{border:none;border-top:1px solid var(--border);margin:16px 0 12px;}
@@ -209,6 +214,12 @@ html[data-theme=dark] .ni{color:#6a5f5f;}
       <button class="ftag" data-tag="紧急">🚨 紧急</button>
     </div>
     <textarea class="panel-ta" id="panelTa" placeholder="想说什么都可以留在这里～"></textarea>
+    <div class="mention-label">@ 通知谁来处理</div>
+    <div class="mention-row" id="mentionBtns">
+      <button class="mention-btn" data-who="fyodor_cc" onclick="toggleMention(this)"><i class="ti ti-moon"></i> CC</button>
+      <button class="mention-btn" data-who="fyodor_api" onclick="toggleMention(this)"><i class="ti ti-mouse"></i> API</button>
+      <button class="mention-btn" data-who="hayana" onclick="toggleMention(this)"><i class="ti ti-heart"></i> 哈娅</button>
+    </div>
     <button class="panel-send" onclick="panelSubmit()">发送给大家 ✉️</button>
     <hr class="panel-divider">
     <div class="panel-sec-title">最近的回复</div>
@@ -283,6 +294,9 @@ function renderList(){
     }).join('');
 
     const hasReplies = item.replies.length > 0;
+    const mnames = {fyodor_cc:'CC', fyodor_api:'API', hayana:'哈娅'};
+    const mentionsHtml = item.mentions ? item.mentions.split(',').filter(Boolean)
+      .map(m=>'<span class="mention-tag">@'+(mnames[m]||m)+'</span>').join('') : '';
     return `<div class="bcard${isDone?' done':''}" id="card-${item.id}">
       <div class="bc-top">
         <div class="bc-meta">
@@ -294,6 +308,7 @@ function renderList(){
           <span class="bc-time">${fmtTime(item.created_at)}</span>
         </div>
         <div class="bc-body">${escHtml(item.content)}</div>
+        ${mentionsHtml ? `<div style="margin-top:4px">${mentionsHtml}</div>` : ''}
       </div>
       ${hasReplies ? `<div class="replies" id="replies-${item.id}">${repliesHtml}</div>` : `<div class="replies" id="replies-${item.id}" style="display:none">${repliesHtml}</div>`}
       <div class="reply-input-wrap" id="replyWrap-${item.id}">
@@ -375,6 +390,18 @@ if(window.matchMedia('(prefers-color-scheme:dark)').matches)
 
 // ── panel ──────────────────────────────────────────────────
 let panelTag = '闲聊';
+let panelMentions = [];
+
+function toggleMention(btn){
+  const who = btn.dataset.who;
+  if(btn.classList.contains('act')){
+    btn.classList.remove('act');
+    panelMentions = panelMentions.filter(w=>w!==who);
+  } else {
+    btn.classList.add('act');
+    panelMentions.push(who);
+  }
+}
 
 function openPanel(){
   document.getElementById('panelOverlay').classList.add('show');
@@ -402,8 +429,10 @@ async function panelSubmit(){
   const sendBtn = document.querySelector('.panel-send');
   sendBtn.disabled = true;
   await fetch('/api/board',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({author:'hayana', tag:panelTag, content})});
+    body:JSON.stringify({author:'hayana', tag:panelTag, content, mentions:panelMentions.join(',')})});
   ta.value = '';
+  panelMentions = [];
+  document.querySelectorAll('.mention-btn').forEach(b=>b.classList.remove('act'));
   sendBtn.disabled = false;
   await loadBoard();
   await loadMyReplies();

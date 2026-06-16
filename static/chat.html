@@ -372,6 +372,7 @@ var curAuthor = 'hayana';
 var pendingFile = null;
 var sending = false;
 var allHist = [];
+var editingMsgId = null; // 正在编辑的消息id，编辑期间暂停轮询刷新，避免重新渲染把编辑框闪掉
 
 // Font size
 var msgFont = parseInt(localStorage.getItem('msgFont')) || 15;
@@ -594,6 +595,7 @@ function buildHtml(list) {
 
 async function loadMsgs(isInit){
   if(!isInit && streamAbort) return;
+  if(editingMsgId !== null) return; // 编辑中跳过重渲染，防止闪一下退出编辑
   try{
     var r=await fetch('/api/chat/messages');
     var d=await r.json();
@@ -797,6 +799,7 @@ function editMsg(btn, msgId) {
   var bwrap = btn.closest('.bwrap');
   var bubble = bwrap ? bwrap.querySelector('.bubble') : null;
   if (!bubble || bubble.contentEditable === 'true') return;
+  editingMsgId = msgId;
   bwrap.querySelector('.msg-actions').style.opacity = '0';
   bubble.contentEditable = 'true';
   bubble.classList.add('editing');
@@ -804,20 +807,27 @@ function editMsg(btn, msgId) {
   var range = document.createRange();
   range.selectNodeContents(bubble); range.collapse(false);
   window.getSelection().removeAllRanges(); window.getSelection().addRange(range);
+  function exitEdit() {
+    bubble.contentEditable = 'false'; bubble.classList.remove('editing');
+    bubble.removeEventListener('keydown', onKey);
+    bubble.removeEventListener('blur', onBlur);
+    var actions = bwrap.querySelector('.msg-actions');
+    if (actions) actions.style.opacity = '';
+    if (editingMsgId === msgId) editingMsgId = null;
+  }
   function onKey(e) {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       var nc = bubble.innerText.trim();
-      bubble.contentEditable = 'false'; bubble.classList.remove('editing');
-      bubble.removeEventListener('keydown', onKey);
+      exitEdit();
       if (nc && !sending && !blockedState) doEdit(msgId, nc);
     } else if (e.key === 'Escape') {
-      bubble.contentEditable = 'false'; bubble.classList.remove('editing');
-      bubble.removeEventListener('keydown', onKey);
-      bwrap.querySelector('.msg-actions').style.opacity = '';
+      exitEdit();
     }
   }
+  function onBlur() { exitEdit(); }
   bubble.addEventListener('keydown', onKey);
+  bubble.addEventListener('blur', onBlur);
 }
 async function copyBubble(btn) {
   var bubble = btn.closest('.bwrap').querySelector('.bubble');
