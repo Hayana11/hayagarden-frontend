@@ -1325,7 +1325,9 @@ def log_dream_event():
     if not etype:
         return jsonify({'error': 'type required'}), 400
     conn = get_db()
-    # 5分钟内同 type 已有记录则跳过
+    now_str = "datetime('now','+8 hours')"
+
+    # 5分钟内同 type 已有记录则跳过（去重）
     existing = conn.execute(
         """SELECT id FROM dream_events
            WHERE type=? AND created_at >= datetime('now','+8 hours','-5 minutes')
@@ -1335,6 +1337,31 @@ def log_dream_event():
     if existing:
         conn.close()
         return '', 200
+
+    # 计算上一条记录（不同type）距今的时长，作为"上一个app的使用时长"写回去
+    prev = conn.execute(
+        """SELECT id, created_at FROM dream_events
+           WHERE type != ? ORDER BY id DESC LIMIT 1""",
+        (etype,)
+    ).fetchone()
+    if prev:
+        try:
+            from datetime import datetime
+            prev_time = datetime.strptime(prev['created_at'], '%Y-%m-%d %H:%M:%S')
+            now_time = datetime.utcnow().replace(tzinfo=None)
+            # created_at已经是+8小时，now也需要+8
+            import datetime as _dt
+            now_bj = (_dt.datetime.utcnow() + _dt.timedelta(hours=8))
+            diff_minutes = round((now_bj - prev_time).total_seconds() / 60, 1)
+            # 只写入合理范围内的时长（1分钟~4小时），过短或过长都忽略
+            if 1 <= diff_minutes <= 240:
+                conn.execute(
+                    "UPDATE dream_events SET duration_minutes=? WHERE id=?",
+                    (diff_minutes, prev['id'])
+                )
+        except Exception:
+            pass
+
     conn.execute(
         "INSERT INTO dream_events (type, value, created_at) VALUES (?,?,datetime('now','+8 hours'))",
         (etype, value)

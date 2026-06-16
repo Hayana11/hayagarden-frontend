@@ -238,7 +238,7 @@ def build_system(wake=False):
     try:
         _conn2 = get_db()
         _events = _conn2.execute(
-            """SELECT type, value, created_at FROM dream_events
+            """SELECT type, value, created_at, duration_minutes FROM dream_events
                WHERE created_at >= datetime('now','+8 hours','-6 hours')
                ORDER BY created_at ASC"""
         ).fetchall()
@@ -248,7 +248,12 @@ def build_system(wake=False):
             for _ev in _events:
                 _t = _ev['created_at'][11:16]  # HH:MM
                 _v = _ev['value'] or _ev['type']
-                _lines.append(f'- {_t} {_v}')
+                _dur = _ev['duration_minutes']
+                if _dur and _dur >= 1:
+                    _dur_str = f'{int(_dur)}分钟' if _dur < 60 else f'{int(_dur//60)}小时{int(_dur%60)}分钟'
+                    _lines.append(f'- {_t} {_v}（用了约{_dur_str}）')
+                else:
+                    _lines.append(f'- {_t} {_v}')
             parts.append('\n## 哈娅最近的活动\n' + '\n'.join(_lines))
     except Exception:
         pass
