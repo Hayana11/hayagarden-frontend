@@ -130,6 +130,57 @@ def _ombre_handoff_sync():
         return None
 
 
+def _write_session_memo(user_msg='', assistant_msg=''):
+    """
+    对话结束时，用一句话总结这次交流发生了什么，写进ombre-brain作为memo。
+    在后台线程里跑，不阻塞响应流。
+    只在双方都有内容时才写。
+    """
+    import concurrent.futures as _cf, datetime as _dt
+
+    if not user_msg.strip() or not assistant_msg.strip():
+        return
+
+    def _worker():
+        try:
+            import asyncio as _aio, sys as _sys, logging as _log
+            _log.getLogger('ombre_brain').setLevel(_log.WARNING)
+            _sys.path.insert(0, '/opt/ombre-brain')
+            from server import hold as _hold
+
+            now = (_dt.datetime.utcnow() + _dt.timedelta(hours=8)).strftime('%m-%d %H:%M')
+            # 极简memo：时间戳 + 她说了什么 + 我回了什么的开头
+            u_clip = user_msg.strip()[:80]
+            a_clip = assistant_msg.strip()[:80]
+            memo = f'[网页窗口 {now}] 她：{u_clip}… / 我：{a_clip}…'
+
+            loop = _aio.new_event_loop()
+            _aio.set_event_loop(loop)
+            try:
+                loop.run_until_complete(
+                    _aio.wait_for(
+                        _hold(content=memo, tags='memo,网页窗口,跨端', importance=4),
+                        timeout=3.0
+                    )
+                )
+            finally:
+                try:
+                    pending = _aio.all_tasks(loop)
+                    for t in pending: t.cancel()
+                    if pending:
+                        loop.run_until_complete(_aio.gather(*pending, return_exceptions=True))
+                except Exception:
+                    pass
+                loop.close()
+        except Exception:
+            pass
+
+    try:
+        _cf.ThreadPoolExecutor(max_workers=1).submit(_worker)
+    except Exception:
+        pass
+
+
 def _ombre_hold_sync(content, tags='', importance=5, pinned=False):
     """
     把一条记忆写进ombre-brain（hold）。与_ombre_breath_sync同样的
@@ -303,6 +354,23 @@ def build_system(wake=False):
         if _summaries:
             _slines = [f"[{s['day']}] {s['content'][:200]}" for s in _summaries]
             parts.append('\n## 过去几天的记录\n' + '\n'.join(_slines))
+    except Exception:
+        pass
+
+    # ── memo层：跨端/跨窗口共同记忆（网页窗口每次对话后写入）──
+    try:
+        _mc2 = get_db()
+        _memos = _mc2.execute(
+            """SELECT content FROM posts WHERE type='MEMORY' AND tags LIKE '%memo%'
+               AND created_at >= datetime('now','+8 hours','-24 hours')
+               ORDER BY id DESC LIMIT 4"""
+        ).fetchall()
+        _mc2.close()
+        # 也从ombre-brain breath里拿memo层（优先）——breath已在开窗交接里注入，
+        # 这里只补充posts表里尚未同步的近期memo
+        if _memos and not any('网页窗口' in (p or '') for p in parts):
+            _memo_lines = [m['content'] for m in reversed(_memos)]
+            parts.append('\n## 最近的网页窗口对话摘要\n' + '\n'.join('- ' + l for l in _memo_lines))
     except Exception:
         pass
 
@@ -1088,6 +1156,8 @@ def chat_stream():
                     )
                     conn.commit()
                     conn.close()
+                    # memo层：异步写入ombre-brain，让API/其他窗口知道刚才发生了什么
+                    _write_session_memo(_uc, text)
                 if thinking:
                     yield 'data: ' + json.dumps({'t': 'think', 'd': thinking}) + SSE_END
                 if text:
@@ -1205,6 +1275,8 @@ def chat_stream():
                 )
                 conn.commit()
                 conn.close()
+                # memo层：异步写入ombre-brain
+                _write_session_memo(_uc, text)
             yield 'data: ' + json.dumps({'t': 'done', 'ok': bool(text)}) + SSE_END
         except urllib.error.HTTPError as e:
             yield 'data: ' + json.dumps({'t': 'err', 'd': 'API %s: %s' % (e.code, e.read().decode()[:300])}) + SSE_END
