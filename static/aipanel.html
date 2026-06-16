@@ -26,61 +26,74 @@ html[data-theme=dark]{
   --amber:#d4a574;--amber-bg:#2e2418;
   --border:#3a3030;--shadow:0 1px 8px rgba(0,0,0,.3);
 }
-body{background:var(--bg);color:var(--text);font-family:-apple-system,'PingFang SC','HarmonyOS Sans SC','Noto Sans CJK SC','Noto Sans SC',sans-serif;min-height:100vh;max-width:480px;margin:0 auto;padding-bottom:calc(70px + env(safe-area-inset-bottom,0px));}
+html,body{height:100%;overflow:hidden;}
+body{background:var(--bg);color:var(--text);font-family:-apple-system,'PingFang SC','HarmonyOS Sans SC','Noto Sans CJK SC','Noto Sans SC',sans-serif;max-width:480px;margin:0 auto;display:flex;flex-direction:column;}
 
-.hd{background:var(--card);border-bottom:1px solid var(--border);position:sticky;top:0;z-index:20;padding:calc(env(safe-area-inset-top, 0px) + 12px) 16px 0;}
-.hd-row{display:flex;align-items:center;justify-content:space-between;padding-bottom:10px;}
-.hd-title{font-family:Georgia,'Times New Roman',serif;font-size:16px;color:var(--text);letter-spacing:.3px;}
-.hd-count{font-size:11px;color:var(--muted);background:var(--primary-bg);padding:2px 8px;border-radius:20px;}
-.st-row{display:flex;gap:6px;padding:0 0 10px;}
-.fst{padding:4px 10px;border:1.5px solid var(--border);border-radius:20px;background:none;font-size:11px;font-family:inherit;color:var(--muted);cursor:pointer;transition:all .15s;}
-.fst.act{background:var(--primary-bg);border-color:var(--primary);color:var(--primary);}
+/* ── Top bar ── */
+.hd{flex-shrink:0;background:var(--card);border-bottom:1px solid var(--border);position:relative;z-index:20;padding:calc(env(safe-area-inset-top, 0px) + 12px) 16px 12px;display:flex;align-items:center;justify-content:space-between;gap:10px;}
+.hd-title{font-family:Georgia,'Times New Roman',serif;font-size:15px;color:var(--text);letter-spacing:.3px;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.hd-pill{font-size:11px;color:var(--muted);background:var(--primary-bg);padding:3px 10px;border-radius:20px;white-space:nowrap;flex-shrink:0;}
+.hd-pill.clickable{cursor:pointer;color:var(--primary);}
+.hd-pill.done{background:#e8f5ea;color:var(--green);}
 
-.list{padding:14px 14px 0;}
-.empty{text-align:center;color:var(--muted);font-size:13px;padding:40px 0;}
+/* ── Body row: sidebar + chat ── */
+.body-row{flex:1;display:flex;overflow:hidden;min-height:0;}
 
-.bcard{background:var(--card);border:1px solid var(--border);border-radius:14px;margin-bottom:12px;box-shadow:var(--shadow);overflow:hidden;transition:opacity .2s;}
-.bcard.done{opacity:.55;}
-.bc-top{padding:12px 14px 10px;}
-.bc-meta{display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap;}
-.bc-author{display:flex;align-items:center;gap:5px;font-size:12px;font-weight:600;}
-.bc-author i{font-size:14px;}
-.bc-level{font-size:10px;padding:2px 8px;border-radius:10px;letter-spacing:.3px;font-weight:700;}
-.level-P0{background:#fdeaea;color:var(--red);}
-.level-P1{background:var(--amber-bg);color:#a06030;}
-.level-P2{background:#eef0ee;color:#8a9a8a;}
-html[data-theme=dark] .level-P0{background:rgba(224,85,85,.15);}
-html[data-theme=dark] .level-P1{background:rgba(212,165,116,.12);}
-html[data-theme=dark] .level-P2{background:rgba(140,150,140,.12);}
-.bc-spacer{flex:1;}
-.bc-time{font-size:10px;color:var(--muted);}
-.bc-body{font-size:13.5px;line-height:1.65;color:var(--text);white-space:pre-wrap;word-break:break-word;}
-.bc-actions{padding:8px 14px 10px;display:flex;align-items:center;gap:8px;border-top:1px solid var(--border);background:rgba(0,0,0,.015);}
-.bc-done-btn{font-size:11px;padding:4px 10px;border:1.5px solid var(--border);border-radius:20px;background:none;color:var(--muted);cursor:pointer;font-family:inherit;transition:all .15s;display:flex;align-items:center;gap:4px;}
-.bc-done-btn:hover{border-color:var(--green);color:var(--green);}
-.bcard.done .bc-done-btn{border-color:var(--green);color:var(--green);}
-.bc-reply-btn{font-size:11px;padding:4px 10px;border:1.5px solid var(--border);border-radius:20px;background:none;color:var(--muted);cursor:pointer;font-family:inherit;transition:all .15s:display:flex;align-items:center;gap:4px;margin-left:auto;}
-.bc-reply-btn:hover{border-color:var(--primary);color:var(--primary);}
-.bc-reply-count{font-size:10px;color:var(--muted);padding:4px 8px;background:var(--primary-light);border-radius:20px;}
+.sidebar{width:120px;flex-shrink:0;display:flex;flex-direction:column;border-right:1px solid var(--border);background:var(--card);overflow:hidden;}
+.sb-filter{display:flex;gap:4px;padding:8px 6px 4px;flex-shrink:0;}
+.fchip{flex:1;font-size:9.5px;padding:4px 0;border:1px solid var(--border);border-radius:8px;background:none;color:var(--muted);cursor:pointer;font-family:inherit;}
+.fchip.act{background:var(--primary-bg);border-color:var(--primary);color:var(--primary);}
+.sb-list{flex:1;overflow-y:auto;padding:4px 6px;min-height:0;}
+.sb-empty{text-align:center;color:var(--muted);font-size:10.5px;padding:30px 6px;line-height:1.7;}
 
-.replies{border-top:1px solid var(--border);background:rgba(0,0,0,.012);}
-.reply-item{padding:9px 14px;border-bottom:.5px solid var(--border);display:flex;gap:9px;}
-.reply-item:last-child{border-bottom:none;}
-.reply-dot{width:6px;height:6px;border-radius:50%;margin-top:6px;flex-shrink:0;}
-.reply-body{flex:1;}
-.reply-author{font-size:10px;font-weight:600;margin-bottom:2px;display:flex;align-items:center;gap:6px;}
-.reply-text{font-size:12.5px;color:var(--text);line-height:1.6;white-space:pre-wrap;word-break:break-word;}
-.reply-time{font-size:10px;color:var(--muted);margin-top:2px;}
-.reply-input-wrap{padding:8px 14px 10px;border-top:.5px solid var(--border);display:none;gap:8px;align-items:flex-end;}
-.reply-input-wrap.show{display:flex;}
-.reply-ta{flex:1;padding:7px 11px;border-radius:10px;border:1.5px solid var(--border);background:var(--bg);font-size:12px;font-family:inherit;color:var(--text);resize:none;outline:none;line-height:1.5;}
-.reply-ta:focus{border-color:var(--primary);}
-.reply-send{padding:8px 12px;border:none;border-radius:10px;background:var(--primary);color:#fff;font-size:12px;cursor:pointer;font-family:inherit;flex-shrink:0;opacity:.9;}
-.reply-send:active{opacity:.7;}
+.task-item{padding:8px;border-radius:10px;margin-bottom:5px;cursor:pointer;border-left:3px solid transparent;transition:background .15s;}
+.task-item:active{background:var(--primary-light);}
+.task-item.act{border-left-color:var(--primary);background:var(--primary-bg);}
+.ti-top{min-height:14px;margin-bottom:3px;}
+.ti-badge{font-size:9px;padding:1px 6px;border-radius:8px;font-weight:700;letter-spacing:.2px;}
+.badge-P0{background:#fdeaea;color:var(--red);}
+.badge-P1{background:var(--amber-bg);color:#a06030;}
+.badge-P2{background:#eef0ee;color:#8a9a8a;}
+.badge-ok{background:#e8f5ea;color:var(--green);}
+html[data-theme=dark] .badge-P0{background:rgba(224,85,85,.15);}
+html[data-theme=dark] .badge-P1{background:rgba(212,165,116,.12);}
+html[data-theme=dark] .badge-P2{background:rgba(140,150,140,.12);}
+html[data-theme=dark] .badge-ok{background:rgba(90,154,106,.15);}
+.ti-title{font-size:11px;line-height:1.4;color:var(--text);display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;word-break:break-all;}
+.ti-count{font-size:9.5px;color:var(--muted);margin-top:4px;display:flex;align-items:center;gap:3px;}
+.ti-count i{font-size:11px;}
 
-.cat-btn{width:32px;height:32px;border-radius:50%;background:#d8e8e0;border:none;cursor:pointer;display:flex;align-items:center;justify-content:center;color:#5a8a70;font-size:16px;flex-shrink:0;transition:opacity .15s;}
-.cat-btn:active{opacity:.75;}
-html[data-theme=dark] .cat-btn{background:#1f3a2c;color:#8ad0a8;}
+.sb-new{flex-shrink:0;padding:8px;border-top:1px solid var(--border);}
+.sb-new-btn{width:100%;padding:8px 0;border:none;border-radius:10px;background:var(--primary);color:#fff;font-size:11px;font-family:inherit;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:4px;}
+.sb-new-btn:active{opacity:.8;}
+.sb-new-btn i{font-size:13px;}
+
+.chat-col{flex:1;display:flex;flex-direction:column;overflow:hidden;min-width:0;}
+.chat-msgs{flex:1;overflow-y:auto;padding:14px 14px 6px;min-height:0;}
+.chat-msgs::-webkit-scrollbar{width:3px;}
+.chat-msgs::-webkit-scrollbar-thumb{background:var(--border);border-radius:2px;}
+.chat-empty{text-align:center;color:var(--muted);font-size:12.5px;padding:60px 16px;line-height:2;}
+
+.msg-row{display:flex;margin-bottom:14px;}
+.msg-row.right{justify-content:flex-end;}
+.msg-row.left{justify-content:flex-start;}
+.bwrap{max-width:80%;display:flex;flex-direction:column;}
+.msg-row.right .bwrap{align-items:flex-end;}
+.msg-row.left .bwrap{align-items:flex-start;}
+.msg-author{font-size:10.5px;font-weight:600;margin-bottom:3px;display:flex;align-items:center;gap:4px;}
+.msg-author i{font-size:12px;}
+.msg-row.right .msg-author{flex-direction:row-reverse;}
+.msg-level{font-size:9px;padding:1px 6px;border-radius:8px;font-weight:700;background:rgba(0,0,0,.08);}
+.chat-bubble{padding:9px 13px;font-size:13.5px;line-height:1.6;white-space:pre-wrap;word-break:break-word;}
+.chat-bubble.right{border-radius:14px 14px 4px 14px;}
+.chat-bubble.left{border-radius:14px 14px 14px 4px;}
+.msg-time{font-size:9.5px;color:var(--muted);margin-top:3px;padding:0 2px;}
+
+.chat-input{flex-shrink:0;border-top:.5px solid var(--border);padding:8px 12px calc(8px + env(safe-area-inset-bottom,0px));background:var(--card);display:flex;align-items:flex-end;gap:8px;}
+.chat-ta{flex:1;border:1.5px solid var(--border);border-radius:18px;padding:8px 14px;font-size:13.5px;font-family:inherit;color:var(--text);background:var(--bg);outline:none;resize:none;line-height:1.5;max-height:90px;overflow-y:auto;}
+.chat-ta:focus{border-color:var(--primary);}
+.chat-send{flex-shrink:0;width:36px;height:36px;border-radius:50%;border:none;background:var(--primary);color:#fff;cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:16px;transition:opacity .15s,transform .15s;}
+.chat-send:active{opacity:.75;transform:scale(.92);}
 
 .panel-overlay{position:fixed;inset:0;background:rgba(0,0,0,.35);z-index:50;opacity:0;pointer-events:none;transition:opacity .25s;}
 .panel-overlay.show{opacity:1;pointer-events:auto;}
@@ -91,11 +104,13 @@ html[data-theme=dark] .cat-btn{background:#1f3a2c;color:#8ad0a8;}
 .panel-close{width:30px;height:30px;border-radius:50%;border:none;background:var(--primary-bg);color:var(--primary);font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center;}
 .panel-body{padding:14px 16px;flex:1;}
 .panel-ta{width:100%;padding:11px 13px;border-radius:12px;border:1.5px solid var(--border);background:var(--bg);font-size:13px;font-family:inherit;color:var(--text);resize:none;outline:none;min-height:100px;line-height:1.6;}
-.panel-ta:focus{border-color:#5a8a70;}
+.panel-ta:focus{border-color:var(--primary);}
 .panel-send{width:100%;margin-top:10px;padding:11px;border:none;border-radius:12px;background:linear-gradient(135deg,#5a8a70,#7c6a8a);color:#fff;font-size:13px;cursor:pointer;font-family:inherit;letter-spacing:.3px;transition:opacity .15s;}
 .panel-send:active{opacity:.8;}
+.panel-send:disabled{opacity:.5;}
 
-.bnav{position:fixed;left:50%;transform:translateX(-50%);bottom:0;width:100%;max-width:480px;flex-shrink:0;background:rgba(255,255,255,.97);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);border-top:.5px solid var(--border);display:flex;padding:8px 0 calc(8px + env(safe-area-inset-bottom,0px));z-index:29;}
+.bnav{flex-shrink:0;background:rgba(255,255,255,.97);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);border-top:.5px solid var(--border);display:flex;padding:8px 0 calc(8px + env(safe-area-inset-bottom,0px));}
+html[data-theme=dark] .bnav{background:rgba(26,22,21,.97);}
 .ni{flex:1;display:flex;flex-direction:column;align-items:center;gap:3px;text-decoration:none;border:none;background:none;cursor:pointer;color:#b8b0b8;font-size:10px;letter-spacing:.4px;font-family:inherit;padding:2px 0;transition:color .18s;}
 .ni i{font-size:21px;}
 .ni.act{color:var(--primary);}
@@ -105,31 +120,43 @@ html[data-theme=dark] .ni{color:#6a5f5f;}
 <body>
 
 <div class="hd">
-  <div class="hd-row">
-    <span class="hd-title">AI协作</span>
-    <div style="display:flex;align-items:center;gap:8px;">
-      <span class="hd-count" id="openCount">…</span>
-      <button class="cat-btn" onclick="openPanel()" title="发布任务"><i class="ti ti-bulb"></i></button>
+  <span class="hd-title" id="hdTitle">AI协作</span>
+  <span class="hd-pill" id="hdPill">…</span>
+</div>
+
+<div class="body-row">
+  <div class="sidebar">
+    <div class="sb-filter" id="sbFilter">
+      <button class="fchip act" data-st="">全部</button>
+      <button class="fchip" data-st="open">未办</button>
+    </div>
+    <div class="sb-list" id="sbList"></div>
+    <div class="sb-new">
+      <button class="sb-new-btn" onclick="openNewTask()"><i class="ti ti-plus"></i>新建任务</button>
     </div>
   </div>
-  <div class="st-row" id="stFilter">
-    <button class="fst act" data-st="">全部</button>
-    <button class="fst" data-st="open">仅未处理</button>
+
+  <div class="chat-col">
+    <div class="chat-msgs" id="chatMsgs"><div class="chat-empty">加载中…</div></div>
+    <div class="chat-input" id="chatInputArea" style="display:none">
+      <textarea class="chat-ta" id="chatTa" placeholder="回复…" rows="1"
+        oninput="this.style.height='auto';this.style.height=Math.min(this.scrollHeight,90)+'px'"
+        onkeydown="onChatEnter(event)"></textarea>
+      <button class="chat-send" onclick="sendChatMsg()"><i class="ti ti-send"></i></button>
+    </div>
   </div>
 </div>
 
-<div class="list" id="list"></div>
-
-<div class="panel-overlay" id="panelOverlay" onclick="closePanel()"></div>
+<div class="panel-overlay" id="panelOverlay" onclick="closeNewTask()"></div>
 
 <div class="side-panel" id="sidePanel">
   <div class="panel-hd">
     <span class="panel-title">发布任务 <i class="ti ti-bulb" style="color:#5a8a70;font-size:14px"></i></span>
-    <button class="panel-close" onclick="closePanel()"><i class="ti ti-x"></i></button>
+    <button class="panel-close" onclick="closeNewTask()"><i class="ti ti-x"></i></button>
   </div>
   <div class="panel-body">
     <textarea class="panel-ta" id="panelTa" placeholder="想让蛋壳/DeepSeek看看的任务、方案或代码…"></textarea>
-    <button class="panel-send" onclick="panelSubmit()">发布 ✉️</button>
+    <button class="panel-send" onclick="submitNewTask()">发布 ✉️</button>
   </div>
 </div>
 
@@ -144,14 +171,15 @@ html[data-theme=dark] .ni{color:#6a5f5f;}
 
 <script>
 const AUTHOR_META = {
-  hayana:          { color:'#7c6a8a', icon:'ti-heart',  name:'哈娅' },
-  fyodor_cc:       { color:'#5a9a6a', icon:'ti-moon',   name:'蛋壳(Claude)' },
-  fyodor_deepseek: { color:'#3a7ad4', icon:'ti-brain',  name:'DeepSeek' },
+  hayana:          { side:'right', bg:'#7c6a8a',  color:'#fff',    border:null,      icon:'ti-heart', name:'哈娅' },
+  fyodor_cc:       { side:'left',  bg:'#EEEDFE',  color:'#3C3489', border:'#AFA9EC', icon:'ti-moon',  name:'蛋壳(Claude)' },
+  fyodor_deepseek: { side:'left',  bg:'#E1F5EE',  color:'#085041', border:'#5DCAA5', icon:'ti-brain', name:'DeepSeek' },
 };
-function authorMeta(a){ return AUTHOR_META[a] || {color:'#9a8a8a', icon:'ti-user', name:a}; }
+function authorMeta(a){ return AUTHOR_META[a] || { side:'left', bg:'#eee', color:'#666', border:null, icon:'ti-user', name:a }; }
 
-let allItems = [];
-let activeSt = '';
+let allTasks = [];
+let activeId = null;
+let activeFilter = '';
 
 function fmtTime(s){
   if(!s) return '';
@@ -166,140 +194,178 @@ function fmtTime(s){
   return `${mo}-${dd} ${h}:${m}`;
 }
 
-function escHtml(s){ return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function escHtml(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 
-function renderList(){
-  const list = document.getElementById('list');
-  let items = allItems;
-  if(activeSt) items = items.filter(i=>i.status===activeSt);
+function taskCount(t){ return 1 + (t.replies ? t.replies.length : 0); }
+function taskBadge(t){
+  if(t.status === 'done') return '<span class="ti-badge badge-ok">ok</span>';
+  if(t.level) return `<span class="ti-badge badge-${t.level}">${t.level}</span>`;
+  return '';
+}
 
-  const open = allItems.filter(i=>i.status==='open').length;
-  document.getElementById('openCount').textContent = open > 0 ? `${open} 进行中` : '全部完成';
-
+function renderSidebar(){
+  const wrap = document.getElementById('sbList');
+  let items = allTasks;
+  if(activeFilter) items = items.filter(t=>t.status===activeFilter);
   if(!items.length){
-    list.innerHTML = '<div class="empty">还没有任务</div>';
+    wrap.innerHTML = '<div class="sb-empty">还没有任务</div>';
     return;
   }
-
-  list.innerHTML = items.map(item=>{
-    const am = authorMeta(item.author);
-    const isDone = item.status === 'done';
-    const repliesHtml = item.replies.map(r=>{
-      const ram = authorMeta(r.author);
-      const levelBadge = r.level ? `<span class="bc-level level-${r.level}">${r.level}</span>` : '';
-      return `<div class="reply-item">
-        <div class="reply-dot" style="background:${ram.color}"></div>
-        <div class="reply-body">
-          <div class="reply-author" style="color:${ram.color}"><i class="ti ${ram.icon}" style="font-size:11px"></i> ${ram.name} ${levelBadge}</div>
-          <div class="reply-text">${escHtml(r.content)}</div>
-          <div class="reply-time">${fmtTime(r.created_at)}</div>
-        </div>
-      </div>`;
-    }).join('');
-
-    const hasReplies = item.replies.length > 0;
-    const levelBadge = item.level ? `<span class="bc-level level-${item.level}">${item.level}</span>` : '';
-    return `<div class="bcard${isDone?' done':''}" id="card-${item.id}">
-      <div class="bc-top">
-        <div class="bc-meta">
-          <div class="bc-author" style="color:${am.color}">
-            <i class="ti ${am.icon}"></i>${am.name}
-          </div>
-          ${levelBadge}
-          <span class="bc-spacer"></span>
-          <span class="bc-time">${fmtTime(item.created_at)}</span>
-        </div>
-        <div class="bc-body">${escHtml(item.content)}</div>
-      </div>
-      ${hasReplies ? `<div class="replies" id="replies-${item.id}">${repliesHtml}</div>` : `<div class="replies" id="replies-${item.id}" style="display:none">${repliesHtml}</div>`}
-      <div class="reply-input-wrap" id="replyWrap-${item.id}">
-        <textarea class="reply-ta" id="replyTa-${item.id}" placeholder="回复…" rows="1"
-          oninput="this.style.height='auto';this.style.height=Math.min(this.scrollHeight,80)+'px'"></textarea>
-        <button class="reply-send" onclick="sendReply(${item.id})">发送</button>
-      </div>
-      <div class="bc-actions">
-        <button class="bc-done-btn" onclick="toggleDone(${item.id},'${isDone?'open':'done'}')">
-          <i class="ti ${isDone?'ti-refresh':'ti-check'}"></i>${isDone?'重新打开':'标记完成'}
-        </button>
-        ${hasReplies ? `<span class="bc-reply-count">${item.replies.length}条回复</span>` : ''}
-        <button class="bc-reply-btn" onclick="toggleReplyBox(${item.id})">
-          <i class="ti ti-corner-down-right"></i>回复
-        </button>
-      </div>
-    </div>`;
-  }).join('');
+  wrap.innerHTML = items.map(t=>`
+    <div class="task-item${t.id===activeId?' act':''}" onclick="selectTask(${t.id})">
+      <div class="ti-top">${taskBadge(t)}</div>
+      <div class="ti-title">${escHtml(t.content)}</div>
+      <div class="ti-count"><i class="ti ti-message-circle"></i>${taskCount(t)}</div>
+    </div>
+  `).join('');
 }
 
-async function loadPanel(){
-  try{
-    const r = await fetch('/api/aipanel');
-    allItems = await r.json();
-    renderList();
-  }catch(e){ document.getElementById('list').innerHTL='<div class="empty">加载失败</div>'; }
-}
-
-function toggleDone(id, newStatus){
-  fetch(`/api/aipanel/${id}/status`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({status:newStatus})})
-    .then(()=>loadPanel());
-}
-
-function toggleReplyBox(id){
-  const wrap = document.getElementById(`replyWrap-${id}`);
-  const repliesEl = document.getElementById(`replies-${id}`);
-  const isShow = wrap.classList.contains('show');
-  wrap.classList.toggle('show', !isShow);
-  if(!isShow) {
-    repliesEl.style.display = '';
-    document.getElementById(`replyTa-${id}`)?.focus();
+function renderTopBar(){
+  const titleEl = document.getElementById('hdTitle');
+  const pillEl = document.getElementById('hdPill');
+  const task = allTasks.find(t=>t.id===activeId);
+  if(task){
+    const oneLine = task.content.replace(/\n/g,' ');
+    titleEl.textContent = oneLine.length > 18 ? oneLine.slice(0,18) + '…' : oneLine;
+    pillEl.classList.add('clickable');
+    pillEl.classList.toggle('done', task.status === 'done');
+    pillEl.textContent = task.status === 'done' ? '已完成' : '进行中';
+    pillEl.onclick = () => toggleStatus(task.id, task.status === 'done' ? 'open' : 'done');
+  } else {
+    titleEl.textContent = 'AI协作';
+    pillEl.classList.remove('clickable','done');
+    pillEl.onclick = null;
+    const openCount = allTasks.filter(t=>t.status==='open').length;
+    pillEl.textContent = openCount > 0 ? `${openCount} 进行中` : '全部完成';
   }
 }
 
-async function sendReply(id){
-  const ta = document.getElementById(`replyTa-${id}`);
-  const content = (ta?.value||'').trim();
-  if(!content) return;
-  await fetch(`/api/aipanel/${id}/reply`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({author:'hayana',content})});
-  ta.value=''; ta.style.height='auto';
-  await loadPanel();
+function buildBubble(msg){
+  const am = authorMeta(msg.author);
+  const levelBadge = msg.level ? `<span class="msg-level">${msg.level}</span>` : '';
+  let style = `background:${am.bg};color:${am.color}`;
+  if(am.border) style += `;border:0.5px solid ${am.border}`;
+  return `<div class="msg-row ${am.side}">
+      <div class="bwrap">
+        <div class="msg-author" style="color:${am.side==='right'?am.bg:am.color}"><i class="ti ${am.icon}"></i>${escHtml(am.name)}${levelBadge}</div>
+        <div class="chat-bubble ${am.side}" style="${style}">${escHtml(msg.content)}</div>
+        <div class="msg-time">${fmtTime(msg.created_at)}</div>
+      </div>
+    </div>`;
 }
 
-document.getElementById('stFilter").addEventListener('click',e=>{
-  const btn = e.target.closest('.fst');
+function renderChat(){
+  const c = document.getElementById('chatMsgs');
+  const task = allTasks.find(t=>t.id===activeId);
+  if(!task){
+    c.innerHTML = '<div class="chat-empty">选一个任务，或新建一个 ✦</div>';
+    return;
+  }
+  const msgs = [
+    { author: task.author, content: task.content, level: null, created_at: task.created_at },
+    ...task.replies
+  ];
+  c.innerHTML = msgs.map(buildBubble).join('');
+}
+
+function scrollChatBottom(){
+  const c = document.getElementById('chatMsgs');
+  c.scrollTop = c.scrollHeight;
+}
+
+function selectTask(id){
+  activeId = id;
+  renderSidebar();
+  renderTopBar();
+  renderChat();
+  document.getElementById('chatInputArea').style.display = '';
+  scrollChatBottom();
+}
+
+async function loadTasks(isInit){
+  try{
+    const r = await fetch('/api/aipanel');
+    const data = await r.json();
+    allTasks = data;
+    if(isInit && activeId === null && allTasks.length) activeId = allTasks[0].id;
+    if(activeId !== null && !allTasks.some(t=>t.id===activeId)) activeId = allTasks.length ? allTasks[0].id : null;
+
+    const c = document.getElementById('chatMsgs');
+    const wasAtBottom = c.scrollHeight - c.scrollTop - c.clientHeight < 80;
+
+    renderSidebar();
+    renderTopBar();
+    renderChat();
+    document.getElementById('chatInputArea').style.display = activeId !== null ? '' : 'none';
+    if(isInit || wasAtBottom) scrollChatBottom();
+  }catch(e){
+    if(isInit) document.getElementById('chatMsgs').innerHTML = '<div class="chat-empty">加载失败</div>';
+  }
+}
+
+function toggleStatus(id, newStatus){
+  fetch(`/api/aipanel/${id}/status`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({status:newStatus})})
+    .then(()=>loadTasks(false));
+}
+
+function onChatEnter(e){
+  if(e.key === 'Enter' && !e.shiftKey){ e.preventDefault(); sendChatMsg(); }
+}
+
+async function sendChatMsg(){
+  if(activeId === null) return;
+  const ta = document.getElementById('chatTa');
+  const content = (ta.value || '').trim();
+  if(!content) return;
+  ta.value = ''; ta.style.height = 'auto';
+  await fetch(`/api/aipanel/${activeId}/reply`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({author:'hayana',content})});
+  await loadTasks(false);
+  scrollChatBottom();
+}
+
+document.getElementById('sbFilter').addEventListener('click', e=>{
+  const btn = e.target.closest('.fchip');
   if(!btn) return;
-  document.querySelectorAll('.fst').forEach(b=>b.classList.remove('act'));
+  document.querySelectorAll('.fchip').forEach(b=>b.classList.remove('act'));
   btn.classList.add('act');
-  activeSt = btn.dataset.st;
-  renderList();
+  activeFilter = btn.dataset.st;
+  renderSidebar();
 });
 
 if(window.matchMedia('(prefers-color-scheme:dark)').matches)
   document.documentElement.setAttribute('data-theme','dark');
 
-function openPanel(){
+function openNewTask(){
   document.getElementById('panelOverlay').classList.add('show');
   document.getElementById('sidePanel').classList.add('show');
 }
-function closePanel(){
+function closeNewTask(){
   document.getElementById('panelOverlay').classList.remove('show');
   document.getElementById('sidePanel').classList.remove('show');
 }
 
-async function panelSubmit(){
+async function submitNewTask(){
   const ta = document.getElementById('panelTa');
-  const content = (ta.value||'').trim();
+  const content = (ta.value || '').trim();
   if(!content) return;
   const sendBtn = document.querySelector('.panel-send');
   sendBtn.disabled = true;
-  await fetch('/api/aipanel',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({author:'hayana', content})});
-  ta.value = '';
-  sendBtn.disabled = false;
-  closePanel();
-  await loadPanel();
+  try{
+    const r = await fetch('/api/aipanel',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({author:'hayana', content})});
+    const d = await r.json();
+    ta.value = '';
+    closeNewTask();
+    await loadTasks(false);
+    if(d && d.id) selectTask(d.id);
+  } finally {
+    sendBtn.disabled = false;
+  }
 }
 
 if('serviceWorker' in navigator){navigator.serviceWorker.register('/sw.js').then(function(r){r.update();}).catch(console.error);}
-loadPanel();
+loadTasks(true);
+setInterval(()=>loadTasks(false), 5000);
 </script>
 </body>
 </html>
