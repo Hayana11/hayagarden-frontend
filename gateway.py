@@ -846,6 +846,37 @@ def run_tool(name, args, caller='fyodor_cc'):
             label = '开始' if event_type == 'start' else '结束'
             return f'已记录经期{label}：{date_str}' + (f'，备注：{note}' if note else '')
 
+        if name == 'set_self_trigger':
+            import urllib.request as _ur, json as _j
+            minutes = int(args.get('minutes', 30))
+            note = args.get('note', '')
+            req = _ur.Request(
+                'http://localhost:5050/api/self_triggers',
+                data=_j.dumps({'minutes': minutes, 'note': note}).encode(),
+                headers={'Content-Type': 'application/json'},
+                method='POST'
+            )
+            try:
+                with _ur.urlopen(req, timeout=5) as r:
+                    res = _j.loads(r.read())
+                return f'已设定：{minutes}分钟后提醒（触发时间：{res.get("trigger_at","")}）'
+            except Exception as e:
+                return f'设定失败：{e}'
+        if name == 'cancel_self_trigger':
+            import urllib.request as _ur, json as _j
+            tid = args.get('id')
+            req = _ur.Request(
+                'http://localhost:5050/api/self_triggers/cancel',
+                data=_j.dumps({'id': tid} if tid else {}).encode(),
+                headers={'Content-Type': 'application/json'},
+                method='POST'
+            )
+            try:
+                with _ur.urlopen(req, timeout=5) as r:
+                    pass
+                return '已取消提醒'
+            except Exception as e:
+                return f'取消失败：{e}'
         if name == 'save_memory':
             content = args.get('content', '')
             tags = args.get('tags', '').strip().lower()

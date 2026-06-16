@@ -15,86 +15,77 @@
 *{margin:0;padding:0;box-sizing:border-box;}
 :root{
   --bg:#f8f8f6;--card:#fff;--text:#2a2020;--muted:#9a8a8a;
-  --primary:#7c6a8a;--primary-bg:#f0ebf4;--primary-light:rgba(124,106,138,.08);
-  --amber:#d4a574;--amber-bg:#fdf4e7;
+  --primary:#7c6a8a;--primary-bg:#f0ebf4;
   --border:#ece6e0;--shadow:0 1px 8px rgba(40,20,20,.07);
-  --red:#e05555;--green:#5a9a6a;
+  --red:#e05555;--red-bg:#fdeaea;
+  --amber:#a06030;--amber-bg:#fdf4e7;
+  --green:#0a8a5c;--green-bg:#e6f5ee;
 }
 html[data-theme=dark]{
   --bg:#1a1616;--card:#241f1f;--text:#e8e2dc;--muted:#7a6a6a;
-  --primary:#a08aaa;--primary-bg:#2e2838;--primary-light:rgba(160,138,170,.1);
-  --amber:#d4a574;--amber-bg:#2e2418;
+  --primary:#a08aaa;--primary-bg:#2e2838;
   --border:#3a3030;--shadow:0 1px 8px rgba(0,0,0,.3);
+  --red:#e88;--red-bg:rgba(224,85,85,.15);
+  --amber:#d4a574;--amber-bg:rgba(212,165,116,.12);
+  --green:#7ed9b3;--green-bg:rgba(126,217,179,.12);
 }
-html,body{height:100%;overflow:hidden;}
-body{background:var(--bg);color:var(--text);font-family:-apple-system,'PingFang SC','HarmonyOS Sans SC','Noto Sans CJK SC','Noto Sans SC',sans-serif;max-width:480px;margin:0 auto;display:flex;flex-direction:column;}
+html,body{height:100%;}
+body{
+  display:flex;flex-direction:column;
+  height:100vh;height:100dvh;overflow:hidden;
+  max-width:480px;margin:0 auto;
+  background:var(--bg);color:var(--text);
+  font-family:-apple-system,'PingFang SC','HarmonyOS Sans SC','Noto Sans CJK SC','Noto Sans SC',sans-serif;
+}
 
-/* ── Top bar ── */
-.hd{flex-shrink:0;background:var(--card);border-bottom:1px solid var(--border);position:relative;z-index:20;padding:calc(env(safe-area-inset-top, 0px) + 12px) 16px 12px;display:flex;align-items:center;justify-content:space-between;gap:10px;}
-.hd-title{font-family:Georgia,'Times New Roman',serif;font-size:15px;color:var(--text);letter-spacing:.3px;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
-.hd-pill{font-size:11px;color:var(--muted);background:var(--primary-bg);padding:3px 10px;border-radius:20px;white-space:nowrap;flex-shrink:0;}
-.hd-pill.clickable{cursor:pointer;color:var(--primary);}
-.hd-pill.done{background:#e8f5ea;color:var(--green);}
+/* ---- main two-pane area ---- */
+.main-row{flex:1;display:flex;overflow:hidden;min-height:0;}
 
-/* ── Body row: sidebar + chat ── */
-.body-row{flex:1;display:flex;overflow:hidden;min-height:0;}
+.sidebar{width:120px;flex-shrink:0;border-right:1px solid var(--border);background:var(--card);display:flex;flex-direction:column;overflow:hidden;padding-top:env(safe-area-inset-top,0px);}
+.sidebar-hd{font-size:11px;color:var(--muted);padding:10px 10px 6px;letter-spacing:.3px;flex-shrink:0;}
+.task-list{flex:1;overflow-y:auto;}
+.task-row{padding:8px 10px;border-left:3px solid transparent;cursor:pointer;border-bottom:.5px solid var(--border);transition:background .12s;}
+.task-row:active{background:var(--primary-bg);}
+.task-row.active{border-left-color:var(--primary);background:var(--primary-bg);}
+.tr-top{display:flex;align-items:center;gap:4px;margin-bottom:3px;}
+.tr-badge{font-size:9px;padding:1px 5px;border-radius:8px;font-weight:700;letter-spacing:.2px;flex-shrink:0;}
+.badge-P0{background:var(--red-bg);color:var(--red);}
+.badge-P1{background:var(--amber-bg);color:var(--amber);}
+.badge-ok{background:var(--green-bg);color:var(--green);}
+.tr-title{font-size:11.5px;line-height:1.4;color:var(--text);display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;word-break:break-word;}
+.tr-meta{font-size:9.5px;color:var(--muted);margin-top:3px;}
+.new-task-btn{flex-shrink:0;border:none;border-top:1px solid var(--border);background:var(--card);color:var(--primary);font-size:12px;padding:10px 0;cursor:pointer;font-family:inherit;display:flex;align-items:center;justify-content:center;gap:4px;padding-bottom:calc(10px + env(safe-area-inset-bottom,0px));}
+.new-task-btn:active{background:var(--primary-bg);}
 
-.sidebar{width:120px;flex-shrink:0;display:flex;flex-direction:column;border-right:1px solid var(--border);background:var(--card);overflow:hidden;}
-.sb-filter{display:flex;gap:4px;padding:8px 6px 4px;flex-shrink:0;}
-.fchip{flex:1;font-size:9.5px;padding:4px 0;border:1px solid var(--border);border-radius:8px;background:none;color:var(--muted);cursor:pointer;font-family:inherit;}
-.fchip.act{background:var(--primary-bg);border-color:var(--primary);color:var(--primary);}
-.sb-list{flex:1;overflow-y:auto;padding:4px 6px;min-height:0;}
-.sb-empty{text-align:center;color:var(--muted);font-size:10.5px;padding:30px 6px;line-height:1.7;}
+.chat-pane{flex:1;display:flex;flex-direction:column;overflow:hidden;min-width:0;}
+.chat-hd{flex-shrink:0;padding:calc(env(safe-area-inset-top,0px) + 10px) 14px 10px;border-bottom:1px solid var(--border);background:var(--card);display:flex;align-items:center;gap:8px;}
+.chat-title{font-size:13.5px;font-weight:600;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.status-pill{font-size:10px;padding:3px 9px;border-radius:10px;font-weight:700;letter-spacing:.2px;flex-shrink:0;}
 
-.task-item{padding:8px;border-radius:10px;margin-bottom:5px;cursor:pointer;border-left:3px solid transparent;transition:background .15s;}
-.task-item:active{background:var(--primary-light);}
-.task-item.act{border-left-color:var(--primary);background:var(--primary-bg);}
-.ti-top{min-height:14px;margin-bottom:3px;}
-.ti-badge{font-size:9px;padding:1px 6px;border-radius:8px;font-weight:700;letter-spacing:.2px;}
-.badge-P0{background:#fdeaea;color:var(--red);}
-.badge-P1{background:var(--amber-bg);color:#a06030;}
-.badge-P2{background:#eef0ee;color:#8a9a8a;}
-.badge-ok{background:#e8f5ea;color:var(--green);}
-html[data-theme=dark] .badge-P0{background:rgba(224,85,85,.15);}
-html[data-theme=dark] .badge-P1{background:rgba(212,165,116,.12);}
-html[data-theme=dark] .badge-P2{background:rgba(140,150,140,.12);}
-html[data-theme=dark] .badge-ok{background:rgba(90,154,106,.15);}
-.ti-title{font-size:11px;line-height:1.4;color:var(--text);display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;word-break:break-all;}
-.ti-count{font-size:9.5px;color:var(--muted);margin-top:4px;display:flex;align-items:center;gap:3px;}
-.ti-count i{font-size:11px;}
+.chat-stream{flex:1;overflow-y:auto;padding:14px 12px;display:flex;flex-direction:column;gap:10px;}
+.chat-empty{text-align:center;color:var(--muted);font-size:12.5px;padding:40px 0;}
 
-.sb-new{flex-shrink:0;padding:8px;border-top:1px solid var(--border);}
-.sb-new-btn{width:100%;padding:8px 0;border:none;border-radius:10px;background:var(--primary);color:#fff;font-size:11px;font-family:inherit;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:4px;}
-.sb-new-btn:active{opacity:.8;}
-.sb-new-btn i{font-size:13px;}
+.msg-row{display:flex;gap:8px;max-width:100%;}
+.msg-row.from-hayana{justify-content:flex-end;}
+.msg-row.from-other{justify-content:flex-start;}
+.msg-avatar{width:24px;height:24px;border-radius:50%;flex-shrink:0;display:flex;align-items:center;justify-content:center;font-size:13px;margin-top:2px;}
+.msg-col{display:flex;flex-direction:column;max-width:76%;}
+.msg-row.from-hayana .msg-col{align-items:flex-end;}
+.msg-author{font-size:10px;color:var(--muted);margin-bottom:3px;display:flex;align-items:center;gap:5px;}
+.msg-bubble{padding:8px 12px;border-radius:14px;font-size:13px;line-height:1.55;white-space:pre-wrap;word-break:break-word;}
+.bubble-hayana{background:#7c6a8a;color:#fff;border-radius:14px 14px 4px 14px;}
+.bubble-fyodor_cc{background:#EEEDFE;color:#3C3489;border:.5px solid #AFA9EC;border-radius:14px 14px 14px 4px;}
+.bubble-fyodor_deepseek{background:#E1F5EE;color:#085041;border:.5px solid #5DCAA5;border-radius:14px 14px 14px 4px;}
+.msg-time{font-size:9.5px;color:var(--muted);margin-top:3px;}
+.msg-lvl{font-size:9px;padding:1px 6px;border-radius:8px;font-weight:700;}
 
-.chat-col{flex:1;display:flex;flex-direction:column;overflow:hidden;min-width:0;}
-.chat-msgs{flex:1;overflow-y:auto;padding:14px 14px 6px;min-height:0;}
-.chat-msgs::-webkit-scrollbar{width:3px;}
-.chat-msgs::-webkit-scrollbar-thumb{background:var(--border);border-radius:2px;}
-.chat-empty{text-align:center;color:var(--muted);font-size:12.5px;padding:60px 16px;line-height:2;}
-
-.msg-row{display:flex;margin-bottom:14px;}
-.msg-row.right{justify-content:flex-end;}
-.msg-row.left{justify-content:flex-start;}
-.bwrap{max-width:80%;display:flex;flex-direction:column;}
-.msg-row.right .bwrap{align-items:flex-end;}
-.msg-row.left .bwrap{align-items:flex-start;}
-.msg-author{font-size:10.5px;font-weight:600;margin-bottom:3px;display:flex;align-items:center;gap:4px;}
-.msg-author i{font-size:12px;}
-.msg-row.right .msg-author{flex-direction:row-reverse;}
-.msg-level{font-size:9px;padding:1px 6px;border-radius:8px;font-weight:700;background:rgba(0,0,0,.08);}
-.chat-bubble{padding:9px 13px;font-size:13.5px;line-height:1.6;white-space:pre-wrap;word-break:break-word;}
-.chat-bubble.right{border-radius:14px 14px 4px 14px;}
-.chat-bubble.left{border-radius:14px 14px 14px 4px;}
-.msg-time{font-size:9.5px;color:var(--muted);margin-top:3px;padding:0 2px;}
-
-.chat-input{flex-shrink:0;border-top:.5px solid var(--border);padding:8px 12px calc(8px + env(safe-area-inset-bottom,0px));background:var(--card);display:flex;align-items:flex-end;gap:8px;}
-.chat-ta{flex:1;border:1.5px solid var(--border);border-radius:18px;padding:8px 14px;font-size:13.5px;font-family:inherit;color:var(--text);background:var(--bg);outline:none;resize:none;line-height:1.5;max-height:90px;overflow-y:auto;}
+.chat-input-row{flex-shrink:0;padding:8px 10px calc(8px + env(safe-area-inset-bottom,0px));border-top:1px solid var(--border);background:var(--card);display:flex;gap:8px;align-items:flex-end;}
+.chat-ta{flex:1;padding:9px 13px;border-radius:18px;border:1.5px solid var(--border);background:var(--bg);font-size:13px;font-family:inherit;color:var(--text);resize:none;outline:none;line-height:1.5;max-height:90px;overflow-y:auto;}
 .chat-ta:focus{border-color:var(--primary);}
-.chat-send{flex-shrink:0;width:36px;height:36px;border-radius:50%;border:none;background:var(--primary);color:#fff;cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:16px;transition:opacity .15s,transform .15s;}
-.chat-send:active{opacity:.75;transform:scale(.92);}
+.send-btn{width:36px;height:36px;border-radius:50%;border:none;background:var(--primary);color:#fff;font-size:15px;cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0;transition:opacity .15s;}
+.send-btn:active{opacity:.75;}
 
+/* ---- new task overlay ---- */
 .panel-overlay{position:fixed;inset:0;background:rgba(0,0,0,.35);z-index:50;opacity:0;pointer-events:none;transition:opacity .25s;}
 .panel-overlay.show{opacity:1;pointer-events:auto;}
 .side-panel{position:fixed;top:0;right:0;height:100%;width:82%;max-width:400px;background:var(--card);z-index:51;transform:translateX(105%);transition:transform .3s cubic-bezier(.4,0,.2,1);overflow-y:auto;display:flex;flex-direction:column;box-shadow:-4px 0 24px rgba(0,0,0,.12);}
@@ -105,58 +96,51 @@ html[data-theme=dark] .badge-ok{background:rgba(90,154,106,.15);}
 .panel-body{padding:14px 16px;flex:1;}
 .panel-ta{width:100%;padding:11px 13px;border-radius:12px;border:1.5px solid var(--border);background:var(--bg);font-size:13px;font-family:inherit;color:var(--text);resize:none;outline:none;min-height:100px;line-height:1.6;}
 .panel-ta:focus{border-color:var(--primary);}
-.panel-send{width:100%;margin-top:10px;padding:11px;border:none;border-radius:12px;background:linear-gradient(135deg,#5a8a70,#7c6a8a);color:#fff;font-size:13px;cursor:pointer;font-family:inherit;letter-spacing:.3px;transition:opacity .15s;}
+.panel-send{width:100%;margin-top:10px;padding:11px;border:none;border-radius:12px;background:var(--primary);color:#fff;font-size:13px;cursor:pointer;font-family:inherit;letter-spacing:.3px;transition:opacity .15s;}
 .panel-send:active{opacity:.8;}
-.panel-send:disabled{opacity:.5;}
 
+/* ---- bottom nav (in-flow, not fixed, since this page owns full viewport height) ---- */
 .bnav{flex-shrink:0;background:rgba(255,255,255,.97);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);border-top:.5px solid var(--border);display:flex;padding:8px 0 calc(8px + env(safe-area-inset-bottom,0px));}
-html[data-theme=dark] .bnav{background:rgba(26,22,21,.97);}
 .ni{flex:1;display:flex;flex-direction:column;align-items:center;gap:3px;text-decoration:none;border:none;background:none;cursor:pointer;color:#b8b0b8;font-size:10px;letter-spacing:.4px;font-family:inherit;padding:2px 0;transition:color .18s;}
 .ni i{font-size:21px;}
 .ni.act{color:var(--primary);}
 html[data-theme=dark] .ni{color:#6a5f5f;}
+html[data-theme=dark] .bnav{background:rgba(36,31,31,.97);}
 </style>
 </head>
 <body>
 
-<div class="hd">
-  <span class="hd-title" id="hdTitle">AI协作</span>
-  <span class="hd-pill" id="hdPill">…</span>
-</div>
+<div class="main-row">
+  <aside class="sidebar">
+    <div class="sidebar-hd">任务</div>
+    <div class="task-list" id="taskList"></div>
+    <button class="new-task-btn" onclick="openPanel()"><i class="ti ti-plus"></i>新建</button>
+  </aside>
 
-<div class="body-row">
-  <div class="sidebar">
-    <div class="sb-filter" id="sbFilter">
-      <button class="fchip act" data-st="">全部</button>
-      <button class="fchip" data-st="open">未办</button>
+  <main class="chat-pane">
+    <div class="chat-hd">
+      <span class="chat-title" id="chatTitle">选择左侧任务</span>
+      <span class="status-pill" id="statusPill" style="display:none"></span>
     </div>
-    <div class="sb-list" id="sbList"></div>
-    <div class="sb-new">
-      <button class="sb-new-btn" onclick="openNewTask()"><i class="ti ti-plus"></i>新建任务</button>
-    </div>
-  </div>
-
-  <div class="chat-col">
-    <div class="chat-msgs" id="chatMsgs"><div class="chat-empty">加载中…</div></div>
-    <div class="chat-input" id="chatInputArea" style="display:none">
-      <textarea class="chat-ta" id="chatTa" placeholder="回复…" rows="1"
+    <div class="chat-stream" id="chatStream"><div class="chat-empty">还没有任务</div></div>
+    <div class="chat-input-row">
+      <textarea class="chat-ta" id="chatTa" placeholder="发消息…" rows="1"
         oninput="this.style.height='auto';this.style.height=Math.min(this.scrollHeight,90)+'px'"
-        onkeydown="onChatEnter(event)"></textarea>
-      <button class="chat-send" onclick="sendChatMsg()"><i class="ti ti-send"></i></button>
+        onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendMsg();}"></textarea>
+      <button class="send-btn" onclick="sendMsg()"><i class="ti ti-send"></i></button>
     </div>
-  </div>
+  </main>
 </div>
 
-<div class="panel-overlay" id="panelOverlay" onclick="closeNewTask()"></div>
-
+<div class="panel-overlay" id="panelOverlay" onclick="closePanel()"></div>
 <div class="side-panel" id="sidePanel">
   <div class="panel-hd">
-    <span class="panel-title">发布任务 <i class="ti ti-bulb" style="color:#5a8a70;font-size:14px"></i></span>
-    <button class="panel-close" onclick="closeNewTask()"><i class="ti ti-x"></i></button>
+    <span class="panel-title">新建任务 <i class="ti ti-bulb" style="color:#5a8a70;font-size:14px"></i></span>
+    <button class="panel-close" onclick="closePanel()"><i class="ti ti-x"></i></button>
   </div>
   <div class="panel-body">
     <textarea class="panel-ta" id="panelTa" placeholder="想让蛋壳/DeepSeek看看的任务、方案或代码…"></textarea>
-    <button class="panel-send" onclick="submitNewTask()">发布 ✉️</button>
+    <button class="panel-send" onclick="panelSubmit()">发布 ✉️</button>
   </div>
 </div>
 
@@ -171,15 +155,16 @@ html[data-theme=dark] .ni{color:#6a5f5f;}
 
 <script>
 const AUTHOR_META = {
-  hayana:          { side:'right', bg:'#7c6a8a',  color:'#fff',    border:null,      icon:'ti-heart', name:'哈娅' },
-  fyodor_cc:       { side:'left',  bg:'#EEEDFE',  color:'#3C3489', border:'#AFA9EC', icon:'ti-moon',  name:'蛋壳(Claude)' },
-  fyodor_deepseek: { side:'left',  bg:'#E1F5EE',  color:'#085041', border:'#5DCAA5', icon:'ti-brain', name:'DeepSeek' },
+  hayana:          { icon:'ti-heart',  name:'哈娅' },
+  fyodor_cc:       { icon:'ti-moon',   name:'蛋壳', avBg:'#5a9a6a' },
+  fyodor_deepseek: { icon:'ti-brain',  name:'DeepSeek', avBg:'#3a7ad4' },
 };
-function authorMeta(a){ return AUTHOR_META[a] || { side:'left', bg:'#eee', color:'#666', border:null, icon:'ti-user', name:a }; }
+function authorMeta(a){ return AUTHOR_META[a] || {icon:'ti-user', name:a, avBg:'#9a8a8a'}; }
 
-let allTasks = [];
-let activeId = null;
-let activeFilter = '';
+let allItems = [];
+let selectedId = null;
+
+function escHtml(s){ return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 
 function fmtTime(s){
   if(!s) return '';
@@ -194,178 +179,132 @@ function fmtTime(s){
   return `${mo}-${dd} ${h}:${m}`;
 }
 
-function escHtml(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
-
-function taskCount(t){ return 1 + (t.replies ? t.replies.length : 0); }
-function taskBadge(t){
-  if(t.status === 'done') return '<span class="ti-badge badge-ok">ok</span>';
-  if(t.level) return `<span class="ti-badge badge-${t.level}">${t.level}</span>`;
-  return '';
+function levelBadge(level){
+  if(level === 'P0') return {text:'P0', cls:'P0'};
+  if(level === 'P1') return {text:'P1', cls:'P1'};
+  return {text:'ok', cls:'ok'};
 }
 
 function renderSidebar(){
-  const wrap = document.getElementById('sbList');
-  let items = allTasks;
-  if(activeFilter) items = items.filter(t=>t.status===activeFilter);
-  if(!items.length){
-    wrap.innerHTML = '<div class="sb-empty">还没有任务</div>';
+  const list = document.getElementById('taskList');
+  if(!allItems.length){
+    list.innerHTML = '<div style="padding:14px 10px;color:var(--muted);font-size:11.5px;">还没有任务</div>';
     return;
   }
-  wrap.innerHTML = items.map(t=>`
-    <div class="task-item${t.id===activeId?' act':''}" onclick="selectTask(${t.id})">
-      <div class="ti-top">${taskBadge(t)}</div>
-      <div class="ti-title">${escHtml(t.content)}</div>
-      <div class="ti-count"><i class="ti ti-message-circle"></i>${taskCount(t)}</div>
-    </div>
-  `).join('');
-}
-
-function renderTopBar(){
-  const titleEl = document.getElementById('hdTitle');
-  const pillEl = document.getElementById('hdPill');
-  const task = allTasks.find(t=>t.id===activeId);
-  if(task){
-    const oneLine = task.content.replace(/\n/g,' ');
-    titleEl.textContent = oneLine.length > 18 ? oneLine.slice(0,18) + '…' : oneLine;
-    pillEl.classList.add('clickable');
-    pillEl.classList.toggle('done', task.status === 'done');
-    pillEl.textContent = task.status === 'done' ? '已完成' : '进行中';
-    pillEl.onclick = () => toggleStatus(task.id, task.status === 'done' ? 'open' : 'done');
-  } else {
-    titleEl.textContent = 'AI协作';
-    pillEl.classList.remove('clickable','done');
-    pillEl.onclick = null;
-    const openCount = allTasks.filter(t=>t.status==='open').length;
-    pillEl.textContent = openCount > 0 ? `${openCount} 进行中` : '全部完成';
-  }
-}
-
-function buildBubble(msg){
-  const am = authorMeta(msg.author);
-  const levelBadge = msg.level ? `<span class="msg-level">${msg.level}</span>` : '';
-  let style = `background:${am.bg};color:${am.color}`;
-  if(am.border) style += `;border:0.5px solid ${am.border}`;
-  return `<div class="msg-row ${am.side}">
-      <div class="bwrap">
-        <div class="msg-author" style="color:${am.side==='right'?am.bg:am.color}"><i class="ti ${am.icon}"></i>${escHtml(am.name)}${levelBadge}</div>
-        <div class="chat-bubble ${am.side}" style="${style}">${escHtml(msg.content)}</div>
-        <div class="msg-time">${fmtTime(msg.created_at)}</div>
+  list.innerHTML = allItems.map(item=>{
+    const lvl = levelBadge(item.level);
+    const total = (item.replies?.length||0) + 1;
+    const isActive = item.id === selectedId;
+    return `<div class="task-row${isActive?' active':''}" onclick="selectTask(${item.id})">
+      <div class="tr-top">
+        <span class="tr-badge badge-${lvl.cls}">${lvl.text}</span>
       </div>
+      <div class="tr-title">${escHtml(item.content)}</div>
+      <div class="tr-meta">${total}条消息</div>
     </div>`;
+  }).join('');
 }
 
 function renderChat(){
-  const c = document.getElementById('chatMsgs');
-  const task = allTasks.find(t=>t.id===activeId);
-  if(!task){
-    c.innerHTML = '<div class="chat-empty">选一个任务，或新建一个 ✦</div>';
+  const item = allItems.find(i=>i.id===selectedId);
+  const titleEl = document.getElementById('chatTitle');
+  const pillEl = document.getElementById('statusPill');
+  const streamEl = document.getElementById('chatStream');
+
+  if(!item){
+    titleEl.textContent = '选择左侧任务';
+    pillEl.style.display = 'none';
+    streamEl.innerHTML = '<div class="chat-empty">还没有任务</div>';
     return;
   }
-  const msgs = [
-    { author: task.author, content: task.content, level: null, created_at: task.created_at },
-    ...task.replies
-  ];
-  c.innerHTML = msgs.map(buildBubble).join('');
-}
 
-function scrollChatBottom(){
-  const c = document.getElementById('chatMsgs');
-  c.scrollTop = c.scrollHeight;
+  titleEl.textContent = item.content.slice(0, 30);
+  const lvl = levelBadge(item.level);
+  pillEl.style.display = '';
+  pillEl.className = `status-pill badge-${lvl.cls}`;
+  pillEl.textContent = item.status === 'done' ? `${lvl.text} · 已完成` : lvl.text;
+
+  const msgs = [
+    { author: item.author, content: item.content, level: null, created_at: item.created_at },
+    ...(item.replies||[])
+  ];
+
+  streamEl.innerHTML = msgs.map(m=>{
+    const am = authorMeta(m.author);
+    const isHayana = m.author === 'hayana';
+    const lvlBadge = m.level ? `<span class="msg-lvl badge-${m.level}">${m.level}</span>` : '';
+    const avatar = isHayana ? '' : `<div class="msg-avatar" style="background:${am.avBg}1a;color:${am.avBg}"><i class="ti ${am.icon}"></i></div>`;
+    return `<div class="msg-row ${isHayana?'from-hayana':'from-other'}">
+      ${avatar}
+      <div class="msg-col">
+        ${isHayana ? '' : `<div class="msg-author">${am.name} ${lvlBadge}</div>`}
+        <div class="msg-bubble bubble-${m.author}">${escHtml(m.content)}</div>
+        <div class="msg-time">${fmtTime(m.created_at)}</div>
+      </div>
+    </div>`;
+  }).join('');
+  streamEl.scrollTop = streamEl.scrollHeight;
 }
 
 function selectTask(id){
-  activeId = id;
+  selectedId = id;
   renderSidebar();
-  renderTopBar();
   renderChat();
-  document.getElementById('chatInputArea').style.display = '';
-  scrollChatBottom();
 }
 
-async function loadTasks(isInit){
+async function loadPanel(keepSelection){
   try{
     const r = await fetch('/api/aipanel');
-    const data = await r.json();
-    allTasks = data;
-    if(isInit && activeId === null && allTasks.length) activeId = allTasks[0].id;
-    if(activeId !== null && !allTasks.some(t=>t.id===activeId)) activeId = allTasks.length ? allTasks[0].id : null;
-
-    const c = document.getElementById('chatMsgs');
-    const wasAtBottom = c.scrollHeight - c.scrollTop - c.clientHeight < 80;
-
+    allItems = await r.json();
+    if(!keepSelection || !allItems.find(i=>i.id===selectedId)){
+      selectedId = allItems.length ? allItems[0].id : null;
+    }
     renderSidebar();
-    renderTopBar();
     renderChat();
-    document.getElementById('chatInputArea').style.display = activeId !== null ? '' : 'none';
-    if(isInit || wasAtBottom) scrollChatBottom();
   }catch(e){
-    if(isInit) document.getElementById('chatMsgs').innerHTML = '<div class="chat-empty">加载失败</div>';
+    document.getElementById('chatStream').innerHTML = '<div class="chat-empty">加载失败</div>';
   }
 }
 
-function toggleStatus(id, newStatus){
-  fetch(`/api/aipanel/${id}/status`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({status:newStatus})})
-    .then(()=>loadTasks(false));
-}
-
-function onChatEnter(e){
-  if(e.key === 'Enter' && !e.shiftKey){ e.preventDefault(); sendChatMsg(); }
-}
-
-async function sendChatMsg(){
-  if(activeId === null) return;
+async function sendMsg(){
   const ta = document.getElementById('chatTa');
-  const content = (ta.value || '').trim();
-  if(!content) return;
-  ta.value = ''; ta.style.height = 'auto';
-  await fetch(`/api/aipanel/${activeId}/reply`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({author:'hayana',content})});
-  await loadTasks(false);
-  scrollChatBottom();
+  const content = (ta.value||'').trim();
+  if(!content || !selectedId) return;
+  ta.value=''; ta.style.height='auto';
+  await fetch(`/api/aipanel/${selectedId}/reply`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({author:'hayana',content})});
+  await loadPanel(true);
 }
 
-document.getElementById('sbFilter').addEventListener('click', e=>{
-  const btn = e.target.closest('.fchip');
-  if(!btn) return;
-  document.querySelectorAll('.fchip').forEach(b=>b.classList.remove('act'));
-  btn.classList.add('act');
-  activeFilter = btn.dataset.st;
-  renderSidebar();
-});
-
-if(window.matchMedia('(prefers-color-scheme:dark)').matches)
-  document.documentElement.setAttribute('data-theme','dark');
-
-function openNewTask(){
+function openPanel(){
   document.getElementById('panelOverlay').classList.add('show');
   document.getElementById('sidePanel').classList.add('show');
 }
-function closeNewTask(){
+function closePanel(){
   document.getElementById('panelOverlay').classList.remove('show');
   document.getElementById('sidePanel').classList.remove('show');
 }
 
-async function submitNewTask(){
+async function panelSubmit(){
   const ta = document.getElementById('panelTa');
-  const content = (ta.value || '').trim();
+  const content = (ta.value||'').trim();
   if(!content) return;
   const sendBtn = document.querySelector('.panel-send');
   sendBtn.disabled = true;
-  try{
-    const r = await fetch('/api/aipanel',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({author:'hayana', content})});
-    const d = await r.json();
-    ta.value = '';
-    closeNewTask();
-    await loadTasks(false);
-    if(d && d.id) selectTask(d.id);
-  } finally {
-    sendBtn.disabled = false;
-  }
+  const r = await fetch('/api/aipanel',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({author:'hayana', content})});
+  const d = await r.json();
+  ta.value = '';
+  sendBtn.disabled = false;
+  closePanel();
+  await loadPanel(false);
+  if(d && d.id) selectTask(d.id);
 }
 
+if(window.matchMedia('(prefers-color-scheme:dark)').matches)
+  document.documentElement.setAttribute('data-theme','dark');
+
 if('serviceWorker' in navigator){navigator.serviceWorker.register('/sw.js').then(function(r){r.update();}).catch(console.error);}
-loadTasks(true);
-setInterval(()=>loadTasks(false), 5000);
+loadPanel(false);
 </script>
 </body>
 </html>

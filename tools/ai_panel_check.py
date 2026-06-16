@@ -13,8 +13,27 @@ REPLY_URL    = 'http://127.0.0.1:5050/api/aipanel/{}/reply'
 CLAUDE_BIN   = '/usr/bin/claude'
 CC_CWD       = '/opt/cc-gw'
 DEEPSEEK_URL = 'https://api.deepseek.com/chat/completions'
+CHEAP_MODEL  = 'claude-haiku-4-5-20251001'  # P2小改动走便宜模型，省token
 
 LEVEL_RE = re.compile(r'\[(P0|P1|P2)\]')
+
+# 任务重量分级：标签/内容里出现这些关键词，大概率是小改动(P2)，
+# CC review时改用Haiku而不是默认的Sonnet。判断不准也没关系，
+# 最坏情况只是省钱判断省错了，不影响正确性（Claude自己仍会给出P0/P1/P2结论）。
+CHEAP_HINTS = (
+    'css', '颜色', '色值', '文案', '措辞', '文字', '排版', '样式', '格式',
+    '字体', '间距', 'padding', 'margin', 'color', 'wording', 'copy', '改色',
+    '换个词', '错别字', '拼写',
+)
+
+
+def _looks_cheap(item):
+    """粗略猜这条任务是不是P2级小改动(CSS/文案/格式)，猜错也无妨。"""
+    if item.get('level') == 'P2':
+        return True
+    text = f"{item.get('tag', '')} {item.get('content', '')}".lower()
+    return any(h in text for h in CHEAP_HINTS)
+
 
 CLAUDE_SYSTEM = (
     '你是这套AI协作面板里的审核者之一(Claude)。针对给出的任务，'
@@ -84,11 +103,16 @@ def trigger_claude(item, token, cc_token):
     env = dict(os.environ)
     env['CLAUDE_CODE_OAUTH_TOKEN'] = cc_token
     env.pop('ANTHROPIC_API_KEY', None)
+    cmd = [CLAUDE_BIN, '-p', prompt, '--output-format', 'stream-json', '--verbose',
+           '--system-prompt', CLAUDE_SYSTEM, '--max-turns', '1', '--tools', '']
+    cheap = _looks_cheap(item)
+    if cheap:
+        cmd += ['--model', CHEAP_MODEL]
+    print(f"[ai_panel_check] #{item['id']} model={'haiku(cheap)' if cheap else 'default(sonnet)'}")
     try:
         os.makedirs(CC_CWD, exist_ok=True)
         r = subprocess.run(
-            [CLAUDE_BIN, '-p', prompt, '--output-format', 'stream-json', '--verbose',
-             '--system-prompt', CLAUDE_SYSTEM, '--max-turns', '1', '--tools', ''],
+            cmd,
             capture_output=True, text=True, timeout=120, cwd=CC_CWD, env=env
         )
     except Exception as e:
