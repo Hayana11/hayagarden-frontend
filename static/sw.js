@@ -1,5 +1,5 @@
-const CACHE = 'home-v3';
-const PRECACHE = ['/dash', '/chat', '/calendar', '/read', '/manifest.json', '/icon-192.png', '/icon-512.png'];
+const CACHE = 'home-v5';
+const PRECACHE = ['/dash', '/chat', '/calendar', '/read', '/board', '/manifest.json', '/icon-192.png', '/icon-512.png'];
 
 self.addEventListener('install', e => {
   e.waitUntil(
@@ -16,9 +16,14 @@ self.addEventListener('activate', e => {
 });
 
 self.addEventListener('fetch', e => {
-  // Only cache GET requests for same-origin pages/assets; pass API calls through
+  // Let navigation requests (page loads) go directly to network
   const url = new URL(e.request.url);
-  if (e.request.method !== 'GET' || url.pathname.startsWith('/api') || url.pathname.startsWith('/mcp')) {
+  if (
+    e.request.mode === 'navigate' ||
+    e.request.method !== 'GET' ||
+    url.pathname.startsWith('/api') ||
+    url.pathname.startsWith('/mcp')
+  ) {
     return;
   }
   e.respondWith(

@@ -29,7 +29,7 @@ html[data-theme=dark]{
 body{background:var(--bg);color:var(--text);font-family:-apple-system,'PingFang SC','HarmonyOS Sans SC','Noto Sans CJK SC','Noto Sans SC',sans-serif;min-height:100vh;max-width:480px;margin:0 auto;padding-bottom:calc(70px + env(safe-area-inset-bottom,0px));}
 
 /* ── header ── */
-.hd{background:var(--card);border-bottom:1px solid var(--border);position:sticky;top:0;z-index:20;padding:44px 16px 0;}
+.hd{background:var(--card);border-bottom:1px solid var(--border);position:sticky;top:0;z-index:20;padding:calc(env(safe-area-inset-top, 0px) + 12px) 16px 0;}
 .hd-row{display:flex;align-items:center;justify-content:space-between;padding-bottom:10px;}
 .hd-title{font-family:Georgia,'Times New Roman',serif;font-size:16px;color:var(--text);letter-spacing:.3px;}
 .hd-count{font-size:11px;color:var(--muted);background:var(--primary-bg);padding:2px 8px;border-radius:20px;}

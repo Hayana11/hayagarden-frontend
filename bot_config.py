@@ -12,7 +12,7 @@ WAKE_ACTIVE_END   = 1    # 凌晨几点截止（< ACTIVE_END 则允许）
 
 # 触发概率曲线：p = min(WAKE_PROB_MAX, T_hours / WAKE_PROB_SCALE)
 # 例：T=6h → p=0.5/2=0.25；T=12h → p=0.5（触及上限）
-WAKE_PROB_MAX   = 0.5    # 概率上限；观察一两天后可调到 0.9
+WAKE_PROB_MAX   = 0.8    # 概率上限；哈娅说白天想多看到我
 WAKE_PROB_SCALE = 12     # 几小时无联系时概率触顶
 
 # ── 唤醒决策 prompt ──────────────────────────────────────────────
