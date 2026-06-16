@@ -160,11 +160,17 @@ def main():
     max_id = max(it['id'] for it in items)
 
     # ── 任务触发（紧急/需求）────────────────────────────────────
+    # 关键修复：不能按最大ID盲目推进seen_id
+    # 应该处理"所有open状态的紧急/需求帖"，而不只是"比seen_id新的"
+    # 因为patrol巡逻会产生新帖子并更新max_id，导致hayana的帖子被跳过
     new_trigger = [
         it for it in items
-        if it['id'] > seen_id and it.get('tag') in TRIGGER_TAGS
+        if it.get('tag') in TRIGGER_TAGS
+        and it.get('status') == 'open'
+        and not any(r.get('author') == 'fyodor_cc' for r in it.get('replies', []))
     ]
 
+    # seen_id只用于防止无限重复处理——只在真正处理完之后才推进
     if max_id > seen_id:
         save_seen_id(max_id)
 
