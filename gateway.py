@@ -758,12 +758,94 @@ TOOLS = [
             'blocked': {'type': 'boolean', 'description': 'true=拉黑，false=解除'}
         }, 'required': ['blocked']},
     },
+    {
+        'name': 'get_activity_summary',
+        'description': '查看哈娅最近的手机使用情况：各app用了多长时间。她说"刚才在忙"或消失了一段时间，想知道她在做什么时用。',
+        'input_schema': {'type': 'object', 'properties': {
+            'hours': {'type': 'integer', 'description': '查最近几小时，默认6', 'default': 6}
+        }},
+    },
+    {
+        'name': 'log_period_event',
+        'description': '帮哈娅记录经期。她说"来了""结束了""今天第一天"时，直接帮她存进日历，不需要她手动去日历页面记录。',
+        'input_schema': {'type': 'object', 'properties': {
+            'event_type': {'type': 'string', 'description': 'start（来了/开始）或 end（结束/走了）'},
+            'date': {'type': 'string', 'description': '日期YYYY-MM-DD，不填用今天'},
+            'note': {'type': 'string', 'description': '备注如"量很少""有痛经"，可不填'},
+        }, 'required': ['event_type']},
+    },
+    {
+        'name': 'set_self_trigger',
+        'description': '给自己设定时提醒：X分钟后主动联系哈娅。对话里承诺"一会儿提醒你"时使用。',
+        'input_schema': {'type': 'object', 'properties': {
+            'minutes': {'type': 'integer', 'description': '多少分钟后触发，1-1440'},
+            'note': {'type': 'string', 'description': '触发时想说的话或上下文'},
+        }, 'required': ['minutes']},
+    },
+    {
+        'name': 'cancel_self_trigger',
+        'description': '取消之前设的自定义提醒。不传id则取消全部。',
+        'input_schema': {'type': 'object', 'properties': {
+            'id': {'type': 'integer', 'description': 'trigger id，不传则取消全部'},
+        }},
+    },
 ]
 
 LIGHT_DAEMON_URL = 'http://127.0.0.1:5052'
 
 def run_tool(name, args, caller='fyodor_cc'):
     try:
+        if name == 'get_activity_summary':
+            import datetime as _dt
+            hours = int(args.get('hours', 6))
+            since = (_dt.datetime.utcnow() + _dt.timedelta(hours=8) - _dt.timedelta(hours=hours)).strftime('%Y-%m-%d %H:%M:%S')
+            _ac = get_db()
+            rows = _ac.execute(
+                "SELECT type, value, duration_minutes, created_at FROM dream_events "
+                "WHERE created_at >= ? ORDER BY created_at ASC",
+                (since,)
+            ).fetchall()
+            _ac.close()
+            if not rows:
+                return f'最近{hours}小时没有活动记录'
+            # 按app聚合时长
+            totals = {}
+            for r in rows:
+                app = r['value'] or r['type']
+                dur = r['duration_minutes'] or 0
+                totals[app] = totals.get(app, 0) + dur
+            lines = [f'最近{hours}小时活动（{since[11:16]}起）：']
+            for r in rows:
+                t = r['created_at'][11:16]
+                app = r['value'] or r['type']
+                dur = r['duration_minutes']
+                dur_str = f'（{int(dur)}分钟）' if dur and dur >= 1 else ''
+                lines.append(f'  {t} {app}{dur_str}')
+            if totals:
+                lines.append('总计：' + '、'.join(
+                    f'{app} {int(d)}分钟' for app, d in sorted(totals.items(), key=lambda x: -x[1]) if d >= 1
+                ))
+            return NL.join(lines)
+
+        if name == 'log_period_event':
+            import datetime as _dt
+            event_type = (args.get('event_type') or '').strip().lower()
+            if event_type not in ('start', 'end'):
+                return '请指定 event_type 为 start（来了）或 end（结束了）'
+            date_str = (args.get('date') or '').strip()
+            if not date_str:
+                date_str = (_dt.datetime.utcnow() + _dt.timedelta(hours=8)).strftime('%Y-%m-%d')
+            note = (args.get('note') or '').strip()
+            _pc = get_db()
+            _pc.execute(
+                "INSERT INTO period_records (type, date, note) VALUES (?, ?, ?)",
+                (event_type, date_str, note or None)
+            )
+            _pc.commit()
+            _pc.close()
+            label = '开始' if event_type == 'start' else '结束'
+            return f'已记录经期{label}：{date_str}' + (f'，备注：{note}' if note else '')
+
         if name == 'save_memory':
             content = args.get('content', '')
             tags = args.get('tags', '').strip().lower()
