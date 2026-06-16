@@ -237,28 +237,26 @@ def build_system(wake=False):
     # ── 2. Persona ──────────────────────────────────────────
     parts.append(read_persona())
 
-    # ── 3. Posts memories — core first, then long-term ──────
+    # ── 3. Posts memories — 精简版：core层由渐变脑固化桶覆盖，不再重复注入 ──
     conn = get_db()
-    core_mems = conn.execute(
-        "SELECT content FROM posts WHERE layer='core' ORDER BY id DESC"
-    ).fetchall()
     lt_mems = conn.execute(
-        "SELECT content FROM posts WHERE layer='long-term' ORDER BY id DESC LIMIT 10"
+        "SELECT content FROM posts WHERE layer='long-term' ORDER BY id DESC LIMIT 3"
     ).fetchall()
     diaries = conn.execute(
-        "SELECT content FROM posts WHERE type='DIARY' ORDER BY id DESC LIMIT 3"
+        "SELECT content FROM posts WHERE type='DIARY' ORDER BY id DESC LIMIT 2"
     ).fetchall()
     conn.close()
 
-    all_mems = list(reversed(core_mems)) + list(reversed(lt_mems))
-    if all_mems:
+    if lt_mems:
         parts.append('\n## 你们之间的记忆')
-        for m in all_mems:
-            parts.append('- ' + m['content'])
+        for m in reversed(lt_mems):
+            c = m['content']
+            parts.append('- ' + (c[:120] + '…' if len(c) > 120 else c))
     if diaries:
         parts.append('\n## 最近的日记')
         for d in reversed(diaries):
-            parts.append(d['content'])
+            c = d['content']
+            parts.append(c[:400] + '…' if len(c) > 400 else c)
 
     # ── 4. 意识连续性：你醒着时做的事 (Phase 3) ───────────
     try:

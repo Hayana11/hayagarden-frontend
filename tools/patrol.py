@@ -119,17 +119,86 @@ def run_patrol():
     conn.close()
     return analysis
 
+def run_code_review():
+    """CC改完代码后调用：检查语法、接口、关键表结构，结果写留言板。"""
+    api_key = _load_key()
+    now = (datetime.now() + timedelta(hours=8)).strftime('%Y-%m-%d %H:%M')
+
+    checks = []
+
+    # 1. Python语法
+    import py_compile, glob, traceback as _tb
+    py_files = glob.glob('/opt/frontend/*.py') + glob.glob('/opt/frontend/tools/*.py')
+    syntax_errors = []
+    for f in py_files:
+        try:
+            py_compile.compile(f, doraise=True)
+        except py_compile.PyCompileError as e:
+            syntax_errors.append(f'{f}: {e}')
+    checks.append('Python语法: ' + ('✅ 全部通过' if not syntax_errors else '❌ ' + '; '.join(syntax_errors)))
+
+    # 2. 关键接口联通
+    import urllib.request as _ur
+    endpoints = [
+        ('http://localhost:5050/api/todos', 'app'),
+        ('http://localhost:5050/api/wishlist', 'wishlist'),
+        ('http://localhost:5050/api/self_triggers/pending', 'self_trigger'),
+        ('http://localhost:5050/api/ledger/trend', 'ledger_trend'),
+    ]
+    ep_results = []
+    for url, name in endpoints:
+        try:
+            with _ur.urlopen(url, timeout=5) as r:
+                ep_results.append(f'{name}={r.status}')
+        except Exception as e:
+            ep_results.append(f'{name}=❌{e}')
+    checks.append('接口检查: ' + ' | '.join(ep_results))
+
+    # 3. 数据库关键表存在
+    conn = sqlite3.connect(DB_PATH)
+    tables = [r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
+    conn.close()
+    required = ['chat_messages','dream_events','wake_log','self_triggers','board','wishlist','todos']
+    missing = [t for t in required if t not in tables]
+    checks.append('数据库表: ' + ('✅ 全部存在' if not missing else '❌ 缺失: ' + ','.join(missing)))
+
+    # 4. 服务状态
+    svc_status = _check_services()
+    down = [s for s,st in svc_status.items() if st != 'active']
+    checks.append('服务状态: ' + ('✅ 全部运行' if not down else '❌ 宕机: ' + ','.join(down)))
+
+    summary = '\n'.join(checks)
+    has_error = '❌' in summary
+    report = f'[保洁阿姨验收报告 {now}]\n{summary}'
+
+    conn2 = sqlite3.connect(DB_PATH)
+    tag = '紧急' if has_error else '需求'
+    status_str = 'open' if has_error else 'done'
+    conn2.execute(
+        "INSERT INTO board (author,tag,content,status,mentions) VALUES ('patrol',?,?,?,?)",
+        (tag, report, status_str, 'fyodor_web' if has_error else '')
+    )
+    conn2.commit()
+    conn2.close()
+    print(report)
+    return not has_error  # True=通过
+
+
 if __name__ == '__main__':
     import sys
+    mode = sys.argv[1] if len(sys.argv) > 1 else 'patrol'
     try:
-        result = run_patrol()
-        print(result)
-        # 巡逻完立即触发 CC 检查，不等30分钟的cron周期
-        if result and ('❌' in result or '⚠️' in result):
-            subprocess.run(
-                [sys.executable, '/opt/frontend/tools/cc_board_check.py'],
-                timeout=360, check=False
-            )
+        if mode == 'code_review':
+            ok = run_code_review()
+            sys.exit(0 if ok else 1)
+        else:
+            result = run_patrol()
+            print(result)
+            if result and ('❌' in result or '⚠️' in result):
+                subprocess.run(
+                    [sys.executable, '/opt/frontend/tools/cc_board_check.py'],
+                    timeout=360, check=False
+                )
     except Exception as e:
         print(f'[patrol error] {e}', file=sys.stderr)
         sys.exit(1)
