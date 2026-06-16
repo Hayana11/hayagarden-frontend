@@ -1447,11 +1447,16 @@ def wake_decide():
             dialogue=data.get('dialogue', ''),
         )
     else:
-        system += _wake_tpl.format(
+        _fmt_str = _wake_tpl.format(
             time=now.strftime('%Y-%m-%d %H:%M'),
             t2_hours=f'{t2_hours:.1f}',
             t_hours=f'{t_hours:.1f}',
         )
+        # 如果是self_trigger触发，在prompt开头加上note作为上下文
+        _self_note = data.get('self_trigger_note', '').strip()
+        if _self_note:
+            _fmt_str = '[自定义提醒触发] 你之前给自己设的备注：' + _self_note + '\n\n' + _fmt_str
+        system += _fmt_str
 
     if mode == 'ritual':
         trigger = f'[仪式:{ritual_type}]'

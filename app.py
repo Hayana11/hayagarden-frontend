@@ -1561,6 +1561,73 @@ def _init_wishlist_table():
 
 _init_wishlist_table()
 
+def _init_self_triggers_table():
+    conn = get_db()
+    conn.execute(
+        'CREATE TABLE IF NOT EXISTS self_triggers ('
+        'id INTEGER PRIMARY KEY AUTOINCREMENT, '
+        'trigger_at DATETIME NOT NULL, '
+        'note TEXT, '
+        'consumed INTEGER DEFAULT 0, '
+        "created_at DATETIME DEFAULT (datetime('now','+8 hours')))"
+    )
+    conn.commit()
+    conn.close()
+
+_init_self_triggers_table()
+
+@app.route('/api/self_triggers', methods=['POST'])
+def create_self_trigger():
+    data = request.get_json() or {}
+    minutes = data.get('minutes')
+    note = (data.get('note') or '').strip()
+    if not minutes:
+        return jsonify({'error': 'minutes required'}), 400
+    try:
+        minutes = int(minutes)
+        if not (1 <= minutes <= 1440):
+            raise ValueError
+    except (ValueError, TypeError):
+        return jsonify({'error': 'minutes must be 1-1440'}), 400
+    conn = get_db()
+    cur = conn.execute(
+        "INSERT INTO self_triggers (trigger_at, note) VALUES (datetime('now','+8 hours',?),?)",
+        (f'+{minutes} minutes', note or None)
+    )
+    conn.commit()
+    trigger_id = cur.lastrowid
+    # 计算实际触发时间（返回给调用方确认）
+    row = conn.execute("SELECT trigger_at FROM self_triggers WHERE id=?", (trigger_id,)).fetchone()
+    conn.close()
+    return jsonify({'ok': True, 'id': trigger_id, 'trigger_at': row['trigger_at']})
+
+@app.route('/api/self_triggers/cancel', methods=['POST'])
+def cancel_self_trigger():
+    data = request.get_json() or {}
+    trigger_id = data.get('id')
+    conn = get_db()
+    if trigger_id:
+        conn.execute("UPDATE self_triggers SET consumed=1 WHERE id=? AND consumed=0", (trigger_id,))
+    else:
+        # 取消所有未触发的
+        conn.execute("UPDATE self_triggers SET consumed=1 WHERE consumed=0")
+    conn.commit()
+    conn.close()
+    return jsonify({'ok': True})
+
+@app.route('/api/self_triggers/pending', methods=['GET'])
+def get_pending_triggers():
+    """dream_wake.py轮询用：返回当前到期且未消费的triggers"""
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT id, trigger_at, note FROM self_triggers "
+        "WHERE consumed=0 AND trigger_at <= datetime('now','+8 hours') "
+        "ORDER BY trigger_at ASC"
+    ).fetchall()
+    conn.close()
+    return jsonify([dict(r) for r in rows])
+
+
 @app.route('/api/ledger/trend', methods=['GET'])
 def ledger_trend():
     now = datetime.datetime.utcnow() + datetime.timedelta(hours=8)

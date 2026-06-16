@@ -172,8 +172,49 @@ def run_nightwatch(now):
     except Exception as e:
         _log(f"nightwatch error: {e}")
 
+def run_self_triggers():
+    """检查并触发到期的self_trigger——优先级最高，不受时段/概率限制。"""
+    try:
+        with urllib.request.urlopen('http://localhost:5050/api/self_triggers/pending', timeout=5) as r:
+            triggers = json.loads(r.read())
+    except Exception as e:
+        _log(f"self_trigger fetch error: {e}")
+        return False
+
+    if not triggers:
+        return False
+
+    for t in triggers:
+        tid = t['id']
+        note = t.get('note') or ''
+        _log(f"self_trigger #{tid} fired: {note[:40]}")
+        try:
+            # 带上note作为上下文触发一次 /wake
+            result = _call_wake({'mode': 'normal', 'self_trigger_note': note})
+            _log(f"self_trigger result: {result.get('action')}")
+        except Exception as e:
+            _log(f"self_trigger wake error: {e}")
+        # 无论成功与否都标记消费，避免重复触发
+        try:
+            req = urllib.request.Request(
+                'http://localhost:5050/api/self_triggers/cancel',
+                data=json.dumps({'id': tid}).encode(),
+                headers={'Content-Type': 'application/json'},
+                method='POST'
+            )
+            urllib.request.urlopen(req, timeout=5)
+        except Exception:
+            pass
+
+    return True  # 本轮已处理self_trigger，跳过普通唤醒
+
+
 def run():
     now = _now()
+
+    # ── 最优先：自定义触发器 ─────────────────────────────────
+    if run_self_triggers():
+        return  # self_trigger处理完就结束本轮，不再走概率唤醒
 
     # 做梦：凌晨3-5点，她睡着60分钟后才触发
     if DREAMING_START <= now.hour < DREAMING_END:
