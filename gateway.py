@@ -1,4 +1,4 @@
-import os, re, sqlite3, json, base64, mimetypes, datetime, sys as _sys
+import os, re, sqlite3, json, base64, mimetypes, datetime, threading, sys as _sys
 if '/opt/frontend' not in _sys.path:
     _sys.path.insert(0, '/opt/frontend')
 if '/opt/frontend' not in _sys.path:
@@ -34,6 +34,34 @@ def get_db():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
+
+# 防止同一轮对话被并发触发两次生成（例如前端在网络超时/切后台后误判"没收到回复"而发起的
+# fallback 调用，跟后端仍在跑的原始请求撞在一起）——后来者直接等前者结果，不再起第二次生成。
+_gen_cond = threading.Condition()
+_gen_busy = False
+_gen_last_result = None
+
+def _gen_acquire_or_wait(wait_timeout=310):
+    """返回 ('own', None) 表示本次调用应自己生成；
+    返回 ('reused', (text, thinking)) 表示应直接复用刚结束的另一次生成结果。"""
+    global _gen_busy, _gen_last_result
+    with _gen_cond:
+        if not _gen_busy:
+            _gen_busy = True
+            _gen_last_result = None
+            return ('own', None)
+        _gen_cond.wait(timeout=wait_timeout)
+        if _gen_last_result is not None:
+            return ('reused', _gen_last_result)
+        # 等了很久还是没等到（极端情况），不再叠加第三次生成，直接报错让前端提示重试
+        raise RuntimeError('上一轮回复仍在生成中，请稍候再试')
+
+def _gen_release(result):
+    global _gen_busy, _gen_last_result
+    with _gen_cond:
+        _gen_last_result = result
+        _gen_busy = False
+        _gen_cond.notify_all()
 
 def read_persona():
     try:
@@ -1220,20 +1248,28 @@ def chat():
     if _uc:
         _c = get_db(); _c.execute("INSERT INTO chat_messages (author,content) VALUES ('hayana',?)", (_uc,)); _c.execute("UPDATE wake_log SET consumed=1 WHERE consumed=0"); _c.commit(); _c.close()
     try:
-        system   = build_system()
-        messages = build_messages()
+        mode, reused = _gen_acquire_or_wait()
+        if mode == 'reused':
+            text, thinking_text = reused
+            return jsonify({'ok': True, 'content': text, 'thinking': thinking_text})
+        text, thinking_text = None, None
+        try:
+            system   = build_system()
+            messages = build_messages()
 
-        text, thinking_text = generate_reply(system, messages)
-        if not text:
-            return jsonify({'error': 'AI 没有返回内容'}), 500
+            text, thinking_text = generate_reply(system, messages)
+            if not text:
+                return jsonify({'error': 'AI 没有返回内容'}), 500
 
-        conn = get_db()
-        conn.execute(
-            "INSERT INTO chat_messages (author, content, thinking) VALUES ('assistant', ?, ?)",
-            (text, thinking_text)
-        )
-        conn.commit()
-        conn.close()
+            conn = get_db()
+            conn.execute(
+                "INSERT INTO chat_messages (author, content, thinking) VALUES ('assistant', ?, ?)",
+                (text, thinking_text)
+            )
+            conn.commit()
+            conn.close()
+        finally:
+            _gen_release((text, thinking_text) if text else None)
 
         return jsonify({'ok': True, 'content': text, 'thinking': thinking_text})
 
@@ -1253,22 +1289,35 @@ def chat_stream():
                 _uc = ((request.get_json() or {}).get('content') or '').strip()
                 if _uc:
                     _c = get_db(); _c.execute("INSERT INTO chat_messages (author,content) VALUES ('hayana',?)", (_uc,)); _c.execute("UPDATE wake_log SET consumed=1 WHERE consumed=0"); _c.commit(); _c.close()
-                system   = build_system()
-                messages = build_messages()
-                text, thinking = claude_code_call(system, messages)
-                # 先写库，再尝试推给前端——claude_code_call已经跑完且与连接无关；
-                # 即使她已经切到别的app、连接断了，回复也已经落地，
-                # 下次loadMsgs轮询时能拿到，不会再丢
-                if text:
-                    conn = get_db()
-                    conn.execute(
-                        "INSERT INTO chat_messages (author, content, thinking) VALUES ('assistant', ?, ?)",
-                        (text, thinking)
-                    )
-                    conn.commit()
-                    conn.close()
-                    # memo层：异步写入ombre-brain，让API/其他窗口知道刚才发生了什么
-                    _write_session_memo(_uc, text)
+                mode, reused = _gen_acquire_or_wait()
+                if mode == 'reused':
+                    text, thinking = reused
+                    if thinking:
+                        yield 'data: ' + json.dumps({'t': 'think', 'd': thinking}) + SSE_END
+                    if text:
+                        yield 'data: ' + json.dumps({'t': 'text', 'd': text}) + SSE_END
+                    yield 'data: ' + json.dumps({'t': 'done', 'ok': bool(text)}) + SSE_END
+                    return
+                text, thinking = None, None
+                try:
+                    system   = build_system()
+                    messages = build_messages()
+                    text, thinking = claude_code_call(system, messages)
+                    # 先写库，再尝试推给前端——claude_code_call已经跑完且与连接无关；
+                    # 即使她已经切到别的app、连接断了，回复也已经落地，
+                    # 下次loadMsgs轮询时能拿到，不会再丢
+                    if text:
+                        conn = get_db()
+                        conn.execute(
+                            "INSERT INTO chat_messages (author, content, thinking) VALUES ('assistant', ?, ?)",
+                            (text, thinking)
+                        )
+                        conn.commit()
+                        conn.close()
+                        # memo层：异步写入ombre-brain，让API/其他窗口知道刚才发生了什么
+                        _write_session_memo(_uc, text)
+                finally:
+                    _gen_release((text, thinking) if text else None)
                 if thinking:
                     yield 'data: ' + json.dumps({'t': 'think', 'd': thinking}) + SSE_END
                 if text:
@@ -1283,6 +1332,16 @@ def chat_stream():
             _uc = ((request.get_json() or {}).get('content') or '').strip()
             if _uc:
                 _c = get_db(); _c.execute("INSERT INTO chat_messages (author,content) VALUES ('hayana',?)", (_uc,)); _c.execute("UPDATE wake_log SET consumed=1 WHERE consumed=0"); _c.commit(); _c.close()
+            mode, reused = _gen_acquire_or_wait()
+            if mode == 'reused':
+                text, thinking = reused
+                if thinking:
+                    yield 'data: ' + json.dumps({'t': 'think', 'd': thinking}) + SSE_END
+                if text:
+                    yield 'data: ' + json.dumps({'t': 'text', 'd': text}) + SSE_END
+                yield 'data: ' + json.dumps({'t': 'done', 'ok': bool(text)}) + SSE_END
+                return
+            _released = [False]
             system   = build_system()
             messages = build_messages()
             think_acc, text_acc, tool_calls_acc = [], [], []
@@ -1388,10 +1447,16 @@ def chat_stream():
                 conn.close()
                 # memo层：异步写入ombre-brain
                 _write_session_memo(_uc, text)
+            _gen_release((text, thinking) if text else None)
+            _released[0] = True
             yield 'data: ' + json.dumps({'t': 'done', 'ok': bool(text)}) + SSE_END
         except urllib.error.HTTPError as e:
+            if not locals().get('_released', [True])[0]:
+                _gen_release(None)
             yield 'data: ' + json.dumps({'t': 'err', 'd': 'API %s: %s' % (e.code, e.read().decode()[:300])}) + SSE_END
         except Exception as e:
+            if not locals().get('_released', [True])[0]:
+                _gen_release(None)
             yield 'data: ' + json.dumps({'t': 'err', 'd': str(e)}) + SSE_END
     return Response(stream_with_context(generate()), mimetype='text/event-stream',
                     headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
