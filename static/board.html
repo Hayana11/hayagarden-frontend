@@ -233,6 +233,7 @@ html[data-theme=dark] .ni{color:#6a5f5f;}
   <a class="ni" href="/calendar"><i class="ti ti-calendar"></i><span>calendar</span></a>
   <a class="ni" href="/read"><i class="ti ti-book"></i><span>read</span></a>
   <a class="ni act" href="/board"><i class="ti ti-clipboard-list"></i><span>board</span></a>
+  <a class="ni" href="/aipanel"><i class="ti ti-robot"></i><span>ai协作</span></a>
 </nav>
 
 <script>
@@ -474,6 +475,7 @@ async function loadMyReplies(){
   }catch(e){ el.innerHTML='<div class="panel-empty">加载失败</div>'; }
 }
 
+if('serviceWorker' in navigator){navigator.serviceWorker.register('/sw.js').then(function(r){r.update();}).catch(console.error);}
 loadBoard();
 
 var SS_SERVICES=['frontend','frontend-gw','mcp-http','ombre-brain','mijia-light','co-reading'];
@@ -489,5 +491,6 @@ async function loadSysstat(){
 }
 
 </script>
+<script src="/static/smart-quote.js"></script>
 </body>
 </html>

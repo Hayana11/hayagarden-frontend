@@ -277,7 +277,7 @@ async function notify(title,body){
   else new Notification(title,{body,icon:'/icon-192.png'});
 }
 if('serviceWorker' in navigator){
-  navigator.serviceWorker.register('/sw.js').then(function(r){swReg=r;}).catch(console.error);
+  navigator.serviceWorker.register('/sw.js').then(function(r){swReg=r;r.update();}).catch(console.error);
 }
 
 document.querySelectorAll('.mo').forEach(function(o){
@@ -286,5 +286,6 @@ document.querySelectorAll('.mo').forEach(function(o){
 
 load();
 </script>
+<script src="/static/smart-quote.js"></script>
 </body>
 </html>

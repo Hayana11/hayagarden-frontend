@@ -1,0 +1,305 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+<title>AI协作 · 我们家</title>
+<link rel="manifest" href="/manifest.json">
+<meta name="theme-color" content="#7c6a8a">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="我们家">
+<link rel="apple-touch-icon" href="/icon-192.png">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@latest/tabler-icons.min.css">
+<style>
+*{margin:0;padding:0;box-sizing:border-box;}
+:root{
+  --bg:#f8f8f6;--card:#fff;--text:#2a2020;--muted:#9a8a8a;
+  --primary:#7c6a8a;--primary-bg:#f0ebf4;--primary-light:rgba(124,106,138,.08);
+  --amber:#d4a574;--amber-bg:#fdf4e7;
+  --border:#ece6e0;--shadow:0 1px 8px rgba(40,20,20,.07);
+  --red:#e05555;--green:#5a9a6a;
+}
+html[data-theme=dark]{
+  --bg:#1a1616;--card:#241f1f;--text:#e8e2dc;--muted:#7a6a6a;
+  --primary:#a08aaa;--primary-bg:#2e2838;--primary-light:rgba(160,138,170,.1);
+  --amber:#d4a574;--amber-bg:#2e2418;
+  --border:#3a3030;--shadow:0 1px 8px rgba(0,0,0,.3);
+}
+body{background:var(--bg);color:var(--text);font-family:-apple-system,'PingFang SC','HarmonyOS Sans SC','Noto Sans CJK SC','Noto Sans SC',sans-serif;min-height:100vh;max-width:480px;margin:0 auto;padding-bottom:calc(70px + env(safe-area-inset-bottom,0px));}
+
+.hd{background:var(--card);border-bottom:1px solid var(--border);position:sticky;top:0;z-index:20;padding:calc(env(safe-area-inset-top, 0px) + 12px) 16px 0;}
+.hd-row{display:flex;align-items:center;justify-content:space-between;padding-bottom:10px;}
+.hd-title{font-family:Georgia,'Times New Roman',serif;font-size:16px;color:var(--text);letter-spacing:.3px;}
+.hd-count{font-size:11px;color:var(--muted);background:var(--primary-bg);padding:2px 8px;border-radius:20px;}
+.st-row{display:flex;gap:6px;padding:0 0 10px;}
+.fst{padding:4px 10px;border:1.5px solid var(--border);border-radius:20px;background:none;font-size:11px;font-family:inherit;color:var(--muted);cursor:pointer;transition:all .15s;}
+.fst.act{background:var(--primary-bg);border-color:var(--primary);color:var(--primary);}
+
+.list{padding:14px 14px 0;}
+.empty{text-align:center;color:var(--muted);font-size:13px;padding:40px 0;}
+
+.bcard{background:var(--card);border:1px solid var(--border);border-radius:14px;margin-bottom:12px;box-shadow:var(--shadow);overflow:hidden;transition:opacity .2s;}
+.bcard.done{opacity:.55;}
+.bc-top{padding:12px 14px 10px;}
+.bc-meta{display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap;}
+.bc-author{display:flex;align-items:center;gap:5px;font-size:12px;font-weight:600;}
+.bc-author i{font-size:14px;}
+.bc-level{font-size:10px;padding:2px 8px;border-radius:10px;letter-spacing:.3px;font-weight:700;}
+.level-P0{background:#fdeaea;color:var(--red);}
+.level-P1{background:var(--amber-bg);color:#a06030;}
+.level-P2{background:#eef0ee;color:#8a9a8a;}
+html[data-theme=dark] .level-P0{background:rgba(224,85,85,.15);}
+html[data-theme=dark] .level-P1{background:rgba(212,165,116,.12);}
+html[data-theme=dark] .level-P2{background:rgba(140,150,140,.12);}
+.bc-spacer{flex:1;}
+.bc-time{font-size:10px;color:var(--muted);}
+.bc-body{font-size:13.5px;line-height:1.65;color:var(--text);white-space:pre-wrap;word-break:break-word;}
+.bc-actions{padding:8px 14px 10px;display:flex;align-items:center;gap:8px;border-top:1px solid var(--border);background:rgba(0,0,0,.015);}
+.bc-done-btn{font-size:11px;padding:4px 10px;border:1.5px solid var(--border);border-radius:20px;background:none;color:var(--muted);cursor:pointer;font-family:inherit;transition:all .15s;display:flex;align-items:center;gap:4px;}
+.bc-done-btn:hover{border-color:var(--green);color:var(--green);}
+.bcard.done .bc-done-btn{border-color:var(--green);color:var(--green);}
+.bc-reply-btn{font-size:11px;padding:4px 10px;border:1.5px solid var(--border);border-radius:20px;background:none;color:var(--muted);cursor:pointer;font-family:inherit;transition:all .15s:display:flex;align-items:center;gap:4px;margin-left:auto;}
+.bc-reply-btn:hover{border-color:var(--primary);color:var(--primary);}
+.bc-reply-count{font-size:10px;color:var(--muted);padding:4px 8px;background:var(--primary-light);border-radius:20px;}
+
+.replies{border-top:1px solid var(--border);background:rgba(0,0,0,.012);}
+.reply-item{padding:9px 14px;border-bottom:.5px solid var(--border);display:flex;gap:9px;}
+.reply-item:last-child{border-bottom:none;}
+.reply-dot{width:6px;height:6px;border-radius:50%;margin-top:6px;flex-shrink:0;}
+.reply-body{flex:1;}
+.reply-author{font-size:10px;font-weight:600;margin-bottom:2px;display:flex;align-items:center;gap:6px;}
+.reply-text{font-size:12.5px;color:var(--text);line-height:1.6;white-space:pre-wrap;word-break:break-word;}
+.reply-time{font-size:10px;color:var(--muted);margin-top:2px;}
+.reply-input-wrap{padding:8px 14px 10px;border-top:.5px solid var(--border);display:none;gap:8px;align-items:flex-end;}
+.reply-input-wrap.show{display:flex;}
+.reply-ta{flex:1;padding:7px 11px;border-radius:10px;border:1.5px solid var(--border);background:var(--bg);font-size:12px;font-family:inherit;color:var(--text);resize:none;outline:none;line-height:1.5;}
+.reply-ta:focus{border-color:var(--primary);}
+.reply-send{padding:8px 12px;border:none;border-radius:10px;background:var(--primary);color:#fff;font-size:12px;cursor:pointer;font-family:inherit;flex-shrink:0;opacity:.9;}
+.reply-send:active{opacity:.7;}
+
+.cat-btn{width:32px;height:32px;border-radius:50%;background:#d8e8e0;border:none;cursor:pointer;display:flex;align-items:center;justify-content:center;color:#5a8a70;font-size:16px;flex-shrink:0;transition:opacity .15s;}
+.cat-btn:active{opacity:.75;}
+html[data-theme=dark] .cat-btn{background:#1f3a2c;color:#8ad0a8;}
+
+.panel-overlay{position:fixed;inset:0;background:rgba(0,0,0,.35);z-index:50;opacity:0;pointer-events:none;transition:opacity .25s;}
+.panel-overlay.show{opacity:1;pointer-events:auto;}
+.side-panel{position:fixed;top:0;right:0;height:100%;width:82%;max-width:400px;background:var(--card);z-index:51;transform:translateX(105%);transition:transform .3s cubic-bezier(.4,0,.2,1);overflow-y:auto;display:flex;flex-direction:column;box-shadow:-4px 0 24px rgba(0,0,0,.12);}
+.side-panel.show{transform:translateX(0);}
+.panel-hd{display:flex;align-items:center;justify-content:space-between;padding:52px 16px 12px;border-bottom:1px solid var(--border);flex-shrink:0;}
+.panel-title{font-family:Georgia,serif;font-size:15px;color:var(--text);letter-spacing:.3px;}
+.panel-close{width:30px;height:30px;border-radius:50%;border:none;background:var(--primary-bg);color:var(--primary);font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center;}
+.panel-body{padding:14px 16px;flex:1;}
+.panel-ta{width:100%;padding:11px 13px;border-radius:12px;border:1.5px solid var(--border);background:var(--bg);font-size:13px;font-family:inherit;color:var(--text);resize:none;outline:none;min-height:100px;line-height:1.6;}
+.panel-ta:focus{border-color:#5a8a70;}
+.panel-send{width:100%;margin-top:10px;padding:11px;border:none;border-radius:12px;background:linear-gradient(135deg,#5a8a70,#7c6a8a);color:#fff;font-size:13px;cursor:pointer;font-family:inherit;letter-spacing:.3px;transition:opacity .15s;}
+.panel-send:active{opacity:.8;}
+
+.bnav{position:fixed;left:50%;transform:translateX(-50%);bottom:0;width:100%;max-width:480px;flex-shrink:0;background:rgba(255,255,255,.97);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);border-top:.5px solid var(--border);display:flex;padding:8px 0 calc(8px + env(safe-area-inset-bottom,0px));z-index:29;}
+.ni{flex:1;display:flex;flex-direction:column;align-items:center;gap:3px;text-decoration:none;border:none;background:none;cursor:pointer;color:#b8b0b8;font-size:10px;letter-spacing:.4px;font-family:inherit;padding:2px 0;transition:color .18s;}
+.ni i{font-size:21px;}
+.ni.act{color:var(--primary);}
+html[data-theme=dark] .ni{color:#6a5f5f;}
+</style>
+</head>
+<body>
+
+<div class="hd">
+  <div class="hd-row">
+    <span class="hd-title">AI协作</span>
+    <div style="display:flex;align-items:center;gap:8px;">
+      <span class="hd-count" id="openCount">…</span>
+      <button class="cat-btn" onclick="openPanel()" title="发布任务"><i class="ti ti-bulb"></i></button>
+    </div>
+  </div>
+  <div class="st-row" id="stFilter">
+    <button class="fst act" data-st="">全部</button>
+    <button class="fst" data-st="open">仅未处理</button>
+  </div>
+</div>
+
+<div class="list" id="list"></div>
+
+<div class="panel-overlay" id="panelOverlay" onclick="closePanel()"></div>
+
+<div class="side-panel" id="sidePanel">
+  <div class="panel-hd">
+    <span class="panel-title">发布任务 <i class="ti ti-bulb" style="color:#5a8a70;font-size:14px"></i></span>
+    <button class="panel-close" onclick="closePanel()"><i class="ti ti-x"></i></button>
+  </div>
+  <div class="panel-body">
+    <textarea class="panel-ta" id="panelTa" placeholder="想让蛋壳/DeepSeek看看的任务、方案或代码…"></textarea>
+    <button class="panel-send" onclick="panelSubmit()">发布 ✉️</button>
+  </div>
+</div>
+
+<nav class="bnav">
+  <a class="ni" href="/dash"><i class="ti ti-layout-dashboard"></i><span>dash</span></a>
+  <a class="ni" href="/chat"><i class="ti ti-message-2"></i><span>chat</span></a>
+  <a class="ni" href="/calendar"><i class="ti ti-calendar"></i><span>calendar</span></a>
+  <a class="ni" href="/read"><i class="ti ti-book"></i><span>read</span></a>
+  <a class="ni" href="/board"><i class="ti ti-clipboard-list"></i><span>board</span></a>
+  <a class="ni act" href="/aipanel"><i class="ti ti-robot"></i><span>ai协作</span></a>
+</nav>
+
+<script>
+const AUTHOR_META = {
+  hayana:          { color:'#7c6a8a', icon:'ti-heart',  name:'哈娅' },
+  fyodor_cc:       { color:'#5a9a6a', icon:'ti-moon',   name:'蛋壳(Claude)' },
+  fyodor_deepseek: { color:'#3a7ad4', icon:'ti-brain',  name:'DeepSeek' },
+};
+function authorMeta(a){ return AUTHOR_META[a] || {color:'#9a8a8a', icon:'ti-user', name:a}; }
+
+let allItems = [];
+let activeSt = '';
+
+function fmtTime(s){
+  if(!s) return '';
+  const d = new Date(s.replace(' ','T'));
+  const now = new Date();
+  const diff = (now - d) / 1000;
+  if(diff < 60) return '刚刚';
+  if(diff < 3600) return Math.floor(diff/60) + '分钟前';
+  if(diff < 86400) return Math.floor(diff/3600) + '小时前';
+  const mo = d.getMonth()+1, dd = d.getDate();
+  const h = String(d.getHours()).padStart(2,'0'), m = String(d.getMinutes()).padStart(2,'0');
+  return `${mo}-${dd} ${h}:${m}`;
+}
+
+function escHtml(s){ return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+function renderList(){
+  const list = document.getElementById('list');
+  let items = allItems;
+  if(activeSt) items = items.filter(i=>i.status===activeSt);
+
+  const open = allItems.filter(i=>i.status==='open').length;
+  document.getElementById('openCount').textContent = open > 0 ? `${open} 进行中` : '全部完成';
+
+  if(!items.length){
+    list.innerHTML = '<div class="empty">还没有任务</div>';
+    return;
+  }
+
+  list.innerHTML = items.map(item=>{
+    const am = authorMeta(item.author);
+    const isDone = item.status === 'done';
+    const repliesHtml = item.replies.map(r=>{
+      const ram = authorMeta(r.author);
+      const levelBadge = r.level ? `<span class="bc-level level-${r.level}">${r.level}</span>` : '';
+      return `<div class="reply-item">
+        <div class="reply-dot" style="background:${ram.color}"></div>
+        <div class="reply-body">
+          <div class="reply-author" style="color:${ram.color}"><i class="ti ${ram.icon}" style="font-size:11px"></i> ${ram.name} ${levelBadge}</div>
+          <div class="reply-text">${escHtml(r.content)}</div>
+          <div class="reply-time">${fmtTime(r.created_at)}</div>
+        </div>
+      </div>`;
+    }).join('');
+
+    const hasReplies = item.replies.length > 0;
+    const levelBadge = item.level ? `<span class="bc-level level-${item.level}">${item.level}</span>` : '';
+    return `<div class="bcard${isDone?' done':''}" id="card-${item.id}">
+      <div class="bc-top">
+        <div class="bc-meta">
+          <div class="bc-author" style="color:${am.color}">
+            <i class="ti ${am.icon}"></i>${am.name}
+          </div>
+          ${levelBadge}
+          <span class="bc-spacer"></span>
+          <span class="bc-time">${fmtTime(item.created_at)}</span>
+        </div>
+        <div class="bc-body">${escHtml(item.content)}</div>
+      </div>
+      ${hasReplies ? `<div class="replies" id="replies-${item.id}">${repliesHtml}</div>` : `<div class="replies" id="replies-${item.id}" style="display:none">${repliesHtml}</div>`}
+      <div class="reply-input-wrap" id="replyWrap-${item.id}">
+        <textarea class="reply-ta" id="replyTa-${item.id}" placeholder="回复…" rows="1"
+          oninput="this.style.height='auto';this.style.height=Math.min(this.scrollHeight,80)+'px'"></textarea>
+        <button class="reply-send" onclick="sendReply(${item.id})">发送</button>
+      </div>
+      <div class="bc-actions">
+        <button class="bc-done-btn" onclick="toggleDone(${item.id},'${isDone?'open':'done'}')">
+          <i class="ti ${isDone?'ti-refresh':'ti-check'}"></i>${isDone?'重新打开':'标记完成'}
+        </button>
+        ${hasReplies ? `<span class="bc-reply-count">${item.replies.length}条回复</span>` : ''}
+        <button class="bc-reply-btn" onclick="toggleReplyBox(${item.id})">
+          <i class="ti ti-corner-down-right"></i>回复
+        </button>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+async function loadPanel(){
+  try{
+    const r = await fetch('/api/aipanel');
+    allItems = await r.json();
+    renderList();
+  }catch(e){ document.getElementById('list').innerHTL='<div class="empty">加载失败</div>'; }
+}
+
+function toggleDone(id, newStatus){
+  fetch(`/api/aipanel/${id}/status`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({status:newStatus})})
+    .then(()=>loadPanel());
+}
+
+function toggleReplyBox(id){
+  const wrap = document.getElementById(`replyWrap-${id}`);
+  const repliesEl = document.getElementById(`replies-${id}`);
+  const isShow = wrap.classList.contains('show');
+  wrap.classList.toggle('show', !isShow);
+  if(!isShow) {
+    repliesEl.style.display = '';
+    document.getElementById(`replyTa-${id}`)?.focus();
+  }
+}
+
+async function sendReply(id){
+  const ta = document.getElementById(`replyTa-${id}`);
+  const content = (ta?.value||'').trim();
+  if(!content) return;
+  await fetch(`/api/aipanel/${id}/reply`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({author:'hayana',content})});
+  ta.value=''; ta.style.height='auto';
+  await loadPanel();
+}
+
+document.getElementById('stFilter").addEventListener('click',e=>{
+  const btn = e.target.closest('.fst');
+  if(!btn) return;
+  document.querySelectorAll('.fst').forEach(b=>b.classList.remove('act'));
+  btn.classList.add('act');
+  activeSt = btn.dataset.st;
+  renderList();
+});
+
+if(window.matchMedia('(prefers-color-scheme:dark)').matches)
+  document.documentElement.setAttribute('data-theme','dark');
+
+function openPanel(){
+  document.getElementById('panelOverlay').classList.add('show');
+  document.getElementById('sidePanel').classList.add('show');
+}
+function closePanel(){
+  document.getElementById('panelOverlay').classList.remove('show');
+  document.getElementById('sidePanel').classList.remove('show');
+}
+
+async function panelSubmit(){
+  const ta = document.getElementById('panelTa');
+  const content = (ta.value||'').trim();
+  if(!content) return;
+  const sendBtn = document.querySelector('.panel-send');
+  sendBtn.disabled = true;
+  await fetch('/api/aipanel',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({author:'hayana', content})});
+  ta.value = '';
+  sendBtn.disabled = false;
+  closePanel();
+  await loadPanel();
+}
+
+if('serviceWorker' in navigator){navigator.serviceWorker.register('/sw.js').then(function(r){r.update();}).catch(console.error);}
+loadPanel();
+</script>
+</body>
+</html>

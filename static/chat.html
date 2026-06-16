@@ -613,6 +613,7 @@ async function loadMsgs(isInit){
       list.sort(function(a,b){return String(a.created_at).localeCompare(String(b.created_at));});
       notifyNewDriftReplies(db.bottles||[]);
     }catch(e){}
+    if(editingMsgId !== null) return; // 拉取期间用户开始编辑了，丢弃这次结果，不要打断编辑
     var c=document.getElementById('msgs');
     var wasAtBottom=c.scrollHeight-c.scrollTop-c.clientHeight<80;
     c.innerHTML=buildHtml(list);
@@ -666,15 +667,21 @@ async function send(){
     await fetch('/api/chat/send',{method:'POST',body:fd});
     await loadMsgs(false);
     if(fromHayana){
+      var baseId=0;
+      (window.curMsgList||[]).forEach(function(m){ if(typeof m.id==='number'&&m.id>baseId) baseId=m.id; });
       showTyping();
       try{
         var fullText='';
         try{ fullText=await streamReply(); }
         catch(se){
-          console.warn('stream failed, fallback', se);
-          var gr=await fetch('/api/gw/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({})});
-          var gd=await gr.json();
-          fullText=gd.content||'';
+          console.warn('stream failed, checking if reply was already saved before retrying', se);
+          await loadMsgs(true);
+          var hasNewReply=(window.curMsgList||[]).some(function(m){ return typeof m.id==='number'&&m.id>baseId&&isFy(m.author); });
+          if(!hasNewReply){
+            var gr=await fetch('/api/gw/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({})});
+            var gd=await gr.json();
+            fullText=gd.content||'';
+          }
         }
         await loadMsgs(false);
         if(fullText&&document.hidden) notify('Fyodor',fullText.slice(0,50));
@@ -708,7 +715,7 @@ async function notify(title,body){
   else new Notification(title,{body,icon:'/icon-192.png'});
 }
 if('serviceWorker' in navigator){
-  navigator.serviceWorker.register('/sw.js').then(r=>{swReg=r;}).catch(console.error);
+  navigator.serviceWorker.register('/sw.js').then(r=>{swReg=r;r.update();}).catch(console.error);
 }
 document.addEventListener('click',function askOnce(){
   if('Notification' in window&&Notification.permission==='default') Notification.requestPermission();
@@ -1074,5 +1081,6 @@ async function sheetDelete(){
   }catch(e){ showToast('删除失败'); }
 }
 </script>
+<script src="/static/smart-quote.js"></script>
 </body>
 </html>

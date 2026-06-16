@@ -1519,6 +1519,117 @@ def update_board_status(bid):
     conn.commit(); conn.close()
     return jsonify({'ok': True})
 
+# ── AI协作面板：通用任务协作，Claude+DeepSeek 双AI审核，P0/P1/P2分级 ──
+def _init_ai_panel_tables():
+    conn = get_db()
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS ai_panel ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "author TEXT NOT NULL, "
+        "tag TEXT DEFAULT '任务', "
+        "content TEXT NOT NULL, "
+        "status TEXT DEFAULT 'open', "
+        "level TEXT DEFAULT NULL, "
+        "mentions TEXT DEFAULT '', "
+        "created_at TIMESTAMP DEFAULT (datetime('now','+8 hours')))"
+    )
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS ai_panel_replies ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "panel_id INTEGER NOT NULL, "
+        "author TEXT NOT NULL, "
+        "content TEXT NOT NULL, "
+        "level TEXT DEFAULT NULL, "
+        "created_at TIMESTAMP DEFAULT (datetime('now','+8 hours')))"
+    )
+    conn.commit()
+    conn.close()
+
+_init_ai_panel_tables()
+
+_AI_PANEL_AUTHORS = ('fyodor_cc', 'fyodor_deepseek')
+_LEVEL_RANK = {'P0': 0, 'P1': 1, 'P2': 2}
+
+@app.route('/aipanel')
+def ai_panel_page():
+    return send_from_directory('/opt/frontend/static', 'aipanel.html')
+
+@app.route('/api/aipanel', methods=['GET'])
+def get_ai_panel():
+    status_f = request.args.get('status', '').strip()
+    conn = get_db()
+    where, params = [], []
+    if status_f:
+        where.append("status=?"); params.append(status_f)
+    sql = "SELECT * FROM ai_panel" + (" WHERE " + " AND ".join(where) if where else "") + " ORDER BY created_at DESC"
+    rows = conn.execute(sql, params).fetchall()
+    result = []
+    for row in rows:
+        replies = conn.execute(
+            "SELECT * FROM ai_panel_replies WHERE panel_id=? ORDER BY created_at ASC", (row['id'],)
+        ).fetchall()
+        item = dict(row); item['replies'] = [dict(r) for r in replies]
+        result.append(item)
+    conn.close()
+    return jsonify(result)
+
+@app.route('/api/aipanel', methods=['POST'])
+def post_ai_panel():
+    data = request.get_json() or {}
+    author = (data.get('author') or 'hayana').strip()
+    if author in _AI_PANEL_AUTHORS:
+        if not BOARD_TOKEN_FYODOR or data.get('token', '') != BOARD_TOKEN_FYODOR:
+            return jsonify({'error': 'unauthorized'}), 403
+    content = (data.get('content') or '').strip()
+    if not content:
+        return jsonify({'error': 'content required'}), 400
+    tag = (data.get('tag') or '任务').strip()
+    mentions = (data.get('mentions') or '').strip()
+    conn = get_db()
+    cur = conn.execute(
+        "INSERT INTO ai_panel (author,tag,content,status,mentions) VALUES (?,?,?,'open',?)",
+        (author, tag, content, mentions)
+    )
+    conn.commit(); new_id = cur.lastrowid; conn.close()
+    return jsonify({'ok': True, 'id': new_id})
+
+@app.route('/api/aipanel/<int:pid>/reply', methods=['POST'])
+def post_ai_panel_reply(pid):
+    data = request.get_json() or {}
+    author = (data.get('author') or 'hayana').strip()
+    if author in _AI_PANEL_AUTHORS:
+        if not BOARD_TOKEN_FYODOR or data.get('token', '') != BOARD_TOKEN_FYODOR:
+            return jsonify({'error': 'unauthorized'}), 403
+    content = (data.get('content') or '').strip()
+    if not content:
+        return jsonify({'error': 'content required'}), 400
+    level = (data.get('level') or '').strip() or None
+    if level and level not in ('P0', 'P1', 'P2'):
+        return jsonify({'error': 'level must be P0/P1/P2'}), 400
+    conn = get_db()
+    conn.execute(
+        "INSERT INTO ai_panel_replies (panel_id,author,content,level) VALUES (?,?,?,?)",
+        (pid, author, content, level)
+    )
+    if level:
+        row = conn.execute("SELECT level FROM ai_panel WHERE id=?", (pid,)).fetchone()
+        cur_level = row['level'] if row else None
+        if not cur_level or _LEVEL_RANK[level] < _LEVEL_RANK[cur_level]:
+            conn.execute("UPDATE ai_panel SET level=? WHERE id=?", (level, pid))
+    conn.commit(); conn.close()
+    return jsonify({'ok': True})
+
+@app.route('/api/aipanel/<int:pid>/status', methods=['POST'])
+def update_ai_panel_status(pid):
+    data = request.get_json() or {}
+    status = (data.get('status') or 'open').strip()
+    if status not in ('open', 'done'):
+        return jsonify({'error': 'invalid status'}), 400
+    conn = get_db()
+    conn.execute("UPDATE ai_panel SET status=? WHERE id=?", (status, pid))
+    conn.commit(); conn.close()
+    return jsonify({'ok': True})
+
 SCREEN_STATE_FILE = '/opt/frontend/screen_state.json'
 
 @app.route('/api/screen', methods=['POST'])

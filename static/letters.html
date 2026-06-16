@@ -203,9 +203,10 @@ async function submitLetter(){
 }
 
 if('serviceWorker' in navigator){
-  navigator.serviceWorker.register('/sw.js').catch(console.error);
+  navigator.serviceWorker.register('/sw.js').then(function(r){r.update();}).catch(console.error);
 }
 load();
 </script>
+<script src="/static/smart-quote.js"></script>
 </body>
 </html>

@@ -446,8 +446,9 @@ async function notify(title, body){
 }
 
 if('serviceWorker' in navigator){
-  navigator.serviceWorker.register('/sw.js').then(r=>{swReg=r;}).catch(console.error);
+  navigator.serviceWorker.register('/sw.js').then(r=>{swReg=r;r.update();}).catch(console.error);
 }
 </script>
+<script src="/static/smart-quote.js"></script>
 </body>
 </html>

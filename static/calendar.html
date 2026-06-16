@@ -499,7 +499,7 @@ function closeCD(){document.getElementById('cdmo').classList.remove('show');}
 document.getElementById('cdmo').addEventListener('click',function(e){if(e.target===this)closeCD();});
 document.getElementById('day-modal').addEventListener('click',function(e){if(e.target===this)closeDayModal();});
 async function submitCD(){var t=document.getElementById('cd-title-inp').value.trim();var date=cdSelectedDate;if(!t||!date)return;await fetch('/api/countdowns',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({title:t,target_date:date,emoji:document.getElementById('cd-emoji').value||'📅',type:document.getElementById('cd-type').value})});document.getElementById('cd-title-inp').value='';document.getElementById('cd-emoji').value='';resetCDDate();closeCD();loadCD();}
-if('serviceWorker' in navigator){navigator.serviceWorker.register('/sw.js').catch(console.error);}
+if('serviceWorker' in navigator){navigator.serviceWorker.register('/sw.js').then(function(r){r.update();}).catch(console.error);}
 loadCD();
 
 // ── To-Do List ──────────────────────────────────────────────
@@ -901,5 +901,6 @@ async function deleteWishlist(id){
 }
 </script>
 <script src="/static/period.js"></script>
+<script src="/static/smart-quote.js"></script>
 </body>
 </html>
