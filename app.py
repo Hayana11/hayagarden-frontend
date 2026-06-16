@@ -1957,3 +1957,16 @@ def edit_message():
     conn.commit()
     conn.close()
     return jsonify({'ok': True})
+
+
+@app.route('/api/chat/delete', methods=['POST'])
+def delete_message():
+    data = request.get_json() or {}
+    msg_id = data.get('msg_id')
+    if not msg_id:
+        return jsonify({'error': 'msg_id required'}), 400
+    conn = get_db()
+    conn.execute('DELETE FROM chat_messages WHERE id=?', (msg_id,))
+    conn.commit()
+    conn.close()
+    return jsonify({'ok': True})

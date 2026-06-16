@@ -1117,7 +1117,7 @@ def claude_code_call(system, messages):
     env.pop('ANTHROPIC_API_KEY', None)
     r = subprocess.run(
         ['claude', '-p', prompt, '--output-format', 'stream-json', '--verbose',
-         '--system-prompt', full_system, '--max-turns', '3'],
+         '--system-prompt', full_system, '--max-turns', '3', '--tools', ''],
         capture_output=True, text=True, timeout=300, cwd=CC_CWD, env=env
     )
     if r.returncode != 0:
@@ -1427,6 +1427,37 @@ WAKE_TOOLS = [
             'level':    {'type': 'string', 'description': '优先级：P0（必须修）/ P1（建议修）/ P2（非阻塞建议），不传则无级别'},
             'category': {'type': 'string', 'description': '分类：给活儿（需要对方做动作，进待处理摘要）/ 播报（进度通知，不进摘要），默认给活儿'},
         }, 'required': ['content']},
+    },
+    {
+        'name': 'get_activity_summary',
+        'description': '查看哈娅最近的手机使用情况：各app用了多长时间。她消失一段时间、说"在忙"时用，了解她在做什么。',
+        'input_schema': {'type': 'object', 'properties': {
+            'hours': {'type': 'integer', 'description': '查最近几小时，默认6', 'default': 6}
+        }},
+    },
+    {
+        'name': 'log_period_event',
+        'description': '帮哈娅记录经期。她说"来了""结束了"时，直接帮她存进日历系统。',
+        'input_schema': {'type': 'object', 'properties': {
+            'event_type': {'type': 'string', 'description': 'start（来了）或 end（结束了）'},
+            'date': {'type': 'string', 'description': '日期YYYY-MM-DD，不填用今天'},
+            'note': {'type': 'string', 'description': '备注如"量很少""有痛经"，可不填'},
+        }, 'required': ['event_type']},
+    },
+    {
+        'name': 'set_self_trigger',
+        'description': '给自己设定时提醒：X分钟后主动联系哈娅。对话里承诺"一会儿提醒你"时使用。',
+        'input_schema': {'type': 'object', 'properties': {
+            'minutes': {'type': 'integer', 'description': '多少分钟后触发，1-1440'},
+            'note': {'type': 'string', 'description': '触发时想说的话或上下文'},
+        }, 'required': ['minutes']},
+    },
+    {
+        'name': 'cancel_self_trigger',
+        'description': '取消之前设的自定义提醒。不传id则取消全部。',
+        'input_schema': {'type': 'object', 'properties': {
+            'id': {'type': 'integer', 'description': 'trigger id，不传则取消全部'},
+        }},
     },
 ]
 

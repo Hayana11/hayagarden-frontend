@@ -210,6 +210,8 @@ html[data-theme=dark] .ni{color:#6a5f5f;}
 .sheet-btn:active{background:var(--primary-light);}
 .sheet-btn i{font-size:19px;color:var(--muted);}
 .sheet-cancel{justify-content:center;color:var(--muted);}
+.sheet-danger{color:#e05a5a;}
+.sheet-danger i{color:#e05a5a;}
 .toast{position:fixed;bottom:120px;left:50%;transform:translateX(-50%);background:rgba(42,32,32,.88);color:#fff;font-size:13px;padding:9px 18px;border-radius:20px;z-index:600;opacity:0;transition:opacity .25s;pointer-events:none;}
 .toast.show{opacity:1;}
 /* ── Floating bottles list ── */
@@ -343,6 +345,7 @@ html[data-theme=dark] .ni{color:#6a5f5f;}
   <div class="sheet">
     <button class="sheet-btn" onclick="sheetCopy()"><i class="ti ti-copy"></i>复制</button>
     <button class="sheet-btn" onclick="sheetMemory()"><i class="ti ti-heart"></i>收藏到回忆</button>
+    <button class="sheet-btn sheet-danger" onclick="sheetDelete()"><i class="ti ti-trash"></i>删除</button>
     <button class="sheet-btn sheet-cancel" onclick="closeSheet()">取消</button>
   </div>
 </div>
@@ -1058,6 +1061,17 @@ async function sheetMemory(){
     showToast('已收藏到回忆 \u2661');
   }catch(e){ showToast('收藏失败'); }
   closeSheet();
+}
+async function sheetDelete(){
+  if(!sheetMsg||!sheetMsg.id) { closeSheet(); return; }
+  closeSheet();
+  if(!confirm('删除这条消息？')) return;
+  try{
+    await fetch('/api/chat/delete',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({msg_id:sheetMsg.id})});
+    showToast('已删除');
+    loadMsgs(true);
+  }catch(e){ showToast('删除失败'); }
 }
 </script>
 </body>
