@@ -164,7 +164,7 @@ def _write_session_memo(user_msg='', assistant_msg=''):
     在后台线程里跑，不阻塞响应流。
     只在双方都有内容时才写。
     """
-    import concurrent.futures as _cf, datetime as _dt
+    import threading as _threading, datetime as _dt, logging as _mlog
 
     if not user_msg.strip() or not assistant_msg.strip():
         return
@@ -182,15 +182,17 @@ def _write_session_memo(user_msg='', assistant_msg=''):
             a_clip = assistant_msg.strip()[:80]
             memo = f'[网页窗口 {now}] 她：{u_clip}… / 我：{a_clip}…'
 
+            _mlog.getLogger('gateway').info('[memo] 开始写入 ombre-brain: %s', memo[:60])
             loop = _aio.new_event_loop()
             _aio.set_event_loop(loop)
             try:
                 loop.run_until_complete(
                     _aio.wait_for(
                         _hold(content=memo, tags='memo,网页窗口,跨端', importance=4),
-                        timeout=3.0
+                        timeout=10.0
                     )
                 )
+                _mlog.getLogger('gateway').info('[memo] 写入 ombre-brain 成功')
             finally:
                 try:
                     pending = _aio.all_tasks(loop)
@@ -200,13 +202,19 @@ def _write_session_memo(user_msg='', assistant_msg=''):
                 except Exception:
                     pass
                 loop.close()
-        except Exception:
-            pass
+        except Exception as _e:
+            import logging as _log2
+            _log2.getLogger('gateway').error('[memo] 写入 ombre-brain 失败: %s', _e, exc_info=True)
 
     try:
-        _cf.ThreadPoolExecutor(max_workers=1).submit(_worker)
-    except Exception:
-        pass
+        # 用 daemon thread 而非裸 ThreadPoolExecutor.submit()——
+        # 裸 submit 时 executor 对象没有引用，Python 3.11 的 GC 会立即回收并
+        # cancel_futures=True，导致任务还没跑就被取消。daemon=True 保证不阻塞进程退出。
+        t = _threading.Thread(target=_worker, daemon=True, name='session-memo')
+        t.start()
+        _mlog.getLogger('gateway').info('[memo] 后台线程已启动')
+    except Exception as _e:
+        _mlog.getLogger('gateway').error('[memo] 线程启动失败: %s', _e)
 
 
 def _ombre_hold_sync(content, tags='', importance=5, pinned=False):
