@@ -1552,6 +1552,11 @@ _LEVEL_RANK = {'P0': 0, 'P1': 1, 'P2': 2}
 
 @app.route('/aipanel')
 def ai_panel_page():
+    from flask import redirect
+    return redirect('/team', code=301)
+
+@app.route('/team')
+def team_page():
     return send_from_directory('/opt/frontend/static', 'aipanel.html')
 
 @app.route('/api/aipanel', methods=['GET'])

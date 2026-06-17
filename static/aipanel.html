@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
-<title>AI协作 · 我们家</title>
+<title>AI 协作面板</title>
 <link rel="manifest" href="/manifest.json">
 <meta name="theme-color" content="#7c6a8a">
 <meta name="apple-mobile-web-app-capable" content="yes">
@@ -41,7 +41,7 @@ body{
 /* ---- main two-pane area ---- */
 .main-row{flex:1;display:flex;overflow:hidden;min-height:0;}
 
-.sidebar{width:120px;flex-shrink:0;border-right:1px solid var(--border);background:var(--card);display:flex;flex-direction:column;overflow:hidden;padding-top:env(safe-area-inset-top,0px);}
+.sidebar{width:120px;flex-shrink:0;border-right:1px solid var(--border);background:var(--card);display:flex;flex-direction:column;overflow:hidden;}
 .sidebar-hd{font-size:11px;color:var(--muted);padding:10px 10px 6px;letter-spacing:.3px;flex-shrink:0;}
 .task-list{flex:1;overflow-y:auto;}
 .task-row{padding:8px 10px;border-left:3px solid transparent;cursor:pointer;border-bottom:.5px solid var(--border);transition:background .12s;}
@@ -99,17 +99,20 @@ body{
 .panel-send{width:100%;margin-top:10px;padding:11px;border:none;border-radius:12px;background:var(--primary);color:#fff;font-size:13px;cursor:pointer;font-family:inherit;letter-spacing:.3px;transition:opacity .15s;}
 .panel-send:active{opacity:.8;}
 
-/* ---- bottom nav (in-flow, not fixed, since this page owns full viewport height) ---- */
-.bnav{flex-shrink:0;background:rgba(255,255,255,.97);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);border-top:.5px solid var(--border);display:flex;padding:8px 0 calc(8px + env(safe-area-inset-bottom,0px));}
-.ni{flex:1;display:flex;flex-direction:column;align-items:center;gap:3px;text-decoration:none;border:none;background:none;cursor:pointer;color:#b8b0b8;font-size:10px;letter-spacing:.4px;font-family:inherit;padding:2px 0;transition:color .18s;}
-.ni i{font-size:21px;}
-.ni.act{color:var(--primary);}
-html[data-theme=dark] .ni{color:#6a5f5f;}
-html[data-theme=dark] .bnav{background:rgba(36,31,31,.97);}
+/* ---- team top-bar（取代原bottom nav，协作面板属于独立工作区） ---- */
+.team-hd{flex-shrink:0;display:flex;align-items:center;gap:8px;padding:calc(8px + env(safe-area-inset-top,0px)) 12px 8px;border-bottom:1px solid var(--border);background:var(--card);}
+.team-back{display:flex;align-items:center;gap:3px;text-decoration:none;color:var(--muted);font-size:12px;transition:color .15s;}
+.team-back i{font-size:15px;}
+.team-back:active{color:var(--primary);}
+.team-lbl{font-size:12px;color:var(--muted);letter-spacing:.4px;flex:1;text-align:right;}
 </style>
 </head>
 <body>
 
+<div class="team-hd">
+  <a class="team-back" href="/dash"><i class="ti ti-arrow-left"></i><span>主页</span></a>
+  <span class="team-lbl">AI 协作面板</span>
+</div>
 <div class="main-row">
   <aside class="sidebar">
     <div class="sidebar-hd">任务</div>
@@ -144,14 +147,7 @@ html[data-theme=dark] .bnav{background:rgba(36,31,31,.97);}
   </div>
 </div>
 
-<nav class="bnav">
-  <a class="ni" href="/dash"><i class="ti ti-layout-dashboard"></i><span>dash</span></a>
-  <a class="ni" href="/chat"><i class="ti ti-message-2"></i><span>chat</span></a>
-  <a class="ni" href="/calendar"><i class="ti ti-calendar"></i><span>calendar</span></a>
-  <a class="ni" href="/read"><i class="ti ti-book"></i><span>read</span></a>
-  <a class="ni" href="/board"><i class="ti ti-clipboard-list"></i><span>board</span></a>
-  <a class="ni act" href="/aipanel"><i class="ti ti-robot"></i><span>ai协作</span></a>
-</nav>
+
 
 <script>
 const AUTHOR_META = {
