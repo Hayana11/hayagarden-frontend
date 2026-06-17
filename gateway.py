@@ -186,13 +186,13 @@ def _write_session_memo(user_msg='', assistant_msg=''):
             loop = _aio.new_event_loop()
             _aio.set_event_loop(loop)
             try:
-                loop.run_until_complete(
+                _hold_result = loop.run_until_complete(
                     _aio.wait_for(
                         _hold(content=memo, tags='memo,网页窗口,跨端', importance=4),
                         timeout=10.0
                     )
                 )
-                _mlog.getLogger('gateway').info('[memo] 写入 ombre-brain 成功')
+                _mlog.getLogger('gateway').info('[memo] 写入 ombre-brain 成功: %s', _hold_result)
             finally:
                 try:
                     pending = _aio.all_tasks(loop)
