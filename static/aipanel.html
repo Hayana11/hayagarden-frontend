@@ -41,11 +41,25 @@ body{
   background:var(--bg);color:var(--text);
   font-family:-apple-system,'PingFang SC','HarmonyOS Sans SC','Noto Sans CJK SC','Noto Sans SC',sans-serif;
 }
+.main-row{flex:1;display:flex;overflow:hidden;min-height:0;position:relative;}
 
-.main-row{flex:1;display:flex;overflow:hidden;min-height:0;}
-
-.sidebar{width:120px;flex-shrink:0;border-right:1px solid var(--border);background:var(--card);display:flex;flex-direction:column;overflow:hidden;}
-.sidebar-hd{font-size:11px;color:var(--muted);padding:10px 10px 6px;letter-spacing:.3px;flex-shrink:0;}
+/* ---- sidebar (drawer) ---- */
+.sidebar-overlay{position:absolute;inset:0;background:rgba(0,0,0,.3);z-index:10;opacity:0;pointer-events:none;transition:opacity .25s;}
+.sidebar-overlay.show{opacity:1;pointer-events:auto;}
+.sidebar{
+  position:absolute;left:0;top:0;bottom:0;
+  width:140px;
+  background:var(--card);
+  border-right:1px solid var(--border);
+  display:flex;flex-direction:column;overflow:hidden;
+  transform:translateX(-100%);
+  transition:transform .28s cubic-bezier(.4,0,.2,1);
+  z-index:11;
+  box-shadow:2px 0 12px rgba(0,0,0,.08);
+}
+.sidebar.open{transform:translateX(0);}
+.sidebar-hd{font-size:11px;color:var(--muted);padding:10px 10px 6px;letter-spacing:.3px;flex-shrink:0;display:flex;align-items:center;justify-content:space-between;}
+.sidebar-close{background:none;border:none;color:var(--muted);font-size:16px;cursor:pointer;padding:0 2px;line-height:1;display:flex;align-items:center;}
 .task-list{flex:1;overflow-y:auto;}
 .task-row{padding:8px 10px;border-left:3px solid transparent;cursor:pointer;border-bottom:.5px solid var(--border);transition:background .12s;}
 .task-row:active{background:var(--primary-bg);}
@@ -55,19 +69,32 @@ body{
 .badge-P0{background:var(--red-bg);color:var(--red);}
 .badge-P1{background:var(--amber-bg);color:var(--amber);}
 .badge-ok{background:var(--green-bg);color:var(--green);}
-.badge-kind{background:var(--primary-bg);color:var(--primary);font-size:8.5px;padding:1px 5px;border-radius:8px;font-weight:600;letter-spacing:.2px;}
+.badge-kind{background:var(--primary-bg);color:var(--primary);font-size:8.5px;padding:1px 5px;border-radius:8px;font-weight:600;}
 .tr-title{font-size:11.5px;line-height:1.4;color:var(--text);display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;word-break:break-word;}
 .tr-meta{font-size:9.5px;color:var(--muted);margin-top:3px;}
 .new-task-btn{flex-shrink:0;border:none;border-top:1px solid var(--border);background:var(--card);color:var(--primary);font-size:12px;padding:10px 0;cursor:pointer;font-family:inherit;display:flex;align-items:center;justify-content:center;gap:4px;padding-bottom:calc(10px + env(safe-area-inset-bottom,0px));}
 .new-task-btn:active{background:var(--primary-bg);}
 
+/* ---- collapsed sidebar trigger strip ---- */
+.sidebar-strip{
+  width:36px;flex-shrink:0;
+  border-right:1px solid var(--border);background:var(--card);
+  display:flex;flex-direction:column;align-items:center;padding-top:8px;gap:6px;
+  cursor:pointer;
+}
+.strip-btn{background:none;border:none;color:var(--muted);font-size:18px;cursor:pointer;padding:4px;display:flex;align-items:center;justify-content:center;}
+.strip-btn:active{color:var(--primary);}
+.task-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0;}
+.dot-P0{background:var(--red);}
+.dot-P1{background:var(--amber);}
+.dot-ok{background:var(--green);}
+
+/* ---- chat pane ---- */
 .chat-pane{flex:1;display:flex;flex-direction:column;overflow:hidden;min-width:0;}
 .chat-hd{flex-shrink:0;padding:calc(env(safe-area-inset-top,0px) + 10px) 14px 10px;border-bottom:1px solid var(--border);background:var(--card);display:flex;align-items:center;gap:8px;}
 .chat-title{font-size:13.5px;font-weight:600;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 .status-pill{font-size:10px;padding:3px 9px;border-radius:10px;font-weight:700;letter-spacing:.2px;flex-shrink:0;cursor:pointer;}
 .status-pill:active{opacity:.75;}
-
-/* status colors */
 .s-open{background:var(--primary-bg);color:var(--primary);}
 .s-waiting_review{background:var(--amber-bg);color:var(--amber);}
 .s-resolved{background:var(--green-bg);color:var(--green);}
@@ -77,55 +104,72 @@ body{
 .chat-stream{flex:1;overflow-y:auto;padding:14px 12px;display:flex;flex-direction:column;gap:10px;}
 .chat-empty{text-align:center;color:var(--muted);font-size:12.5px;padding:40px 0;}
 
+/* ---- messages ---- */
 .msg-row{display:flex;gap:8px;max-width:100%;}
 .msg-row.from-hayana{justify-content:flex-end;}
 .msg-row.from-other{justify-content:flex-start;}
 .msg-avatar{width:24px;height:24px;border-radius:50%;flex-shrink:0;display:flex;align-items:center;justify-content:center;font-size:13px;margin-top:2px;}
-.msg-col{display:flex;flex-direction:column;max-width:80%;}
+.msg-col{display:flex;flex-direction:column;max-width:82%;}
 .msg-row.from-hayana .msg-col{align-items:flex-end;}
 .msg-author{font-size:10px;color:var(--muted);margin-bottom:3px;display:flex;align-items:center;gap:5px;}
 .msg-bubble{padding:8px 12px;border-radius:14px;font-size:13px;line-height:1.55;word-break:break-word;}
-.msg-bubble.md{white-space:normal;}
 .msg-bubble:not(.md){white-space:pre-wrap;}
 .bubble-hayana{background:#7c6a8a;color:#fff;border-radius:14px 14px 4px 14px;}
 .bubble-fyodor_cc{background:#EEEDFE;color:#3C3489;border:.5px solid #AFA9EC;border-radius:14px 14px 14px 4px;}
 .bubble-fyodor_deepseek{background:#E1F5EE;color:#085041;border:.5px solid #5DCAA5;border-radius:14px 14px 14px 4px;}
 .msg-time{font-size:9.5px;color:var(--muted);margin-top:3px;}
 .msg-lvl{font-size:9px;padding:1px 6px;border-radius:8px;font-weight:700;}
-/* md styles inside bubble */
+
+/* ---- bubble collapse ---- */
+.bubble-wrap{position:relative;}
+.bubble-wrap.collapsible .msg-bubble{max-height:4.8em;overflow:hidden;-webkit-mask-image:linear-gradient(to bottom,black 60%,transparent 100%);mask-image:linear-gradient(to bottom,black 60%,transparent 100%);}
+.bubble-wrap.collapsible.expanded .msg-bubble{max-height:none;-webkit-mask-image:none;mask-image:none;}
+.collapse-btn{margin-top:4px;background:none;border:none;color:var(--primary);font-size:11px;cursor:pointer;padding:0;align-self:flex-start;font-family:inherit;}
+.from-hayana .collapse-btn{align-self:flex-end;}
+.collapse-btn:active{opacity:.7;}
+
+/* ---- body card ---- */
+.body-card{background:rgba(0,0,0,.04);border-radius:8px;padding:8px 10px;margin-bottom:6px;font-size:12px;line-height:1.5;white-space:pre-wrap;color:var(--text);border-left:2px solid var(--primary);}
+
+/* ---- md styles ---- */
 .msg-bubble.md p{margin:.3em 0;}
 .msg-bubble.md code{font-family:monospace;font-size:.85em;background:rgba(0,0,0,.08);padding:1px 4px;border-radius:3px;}
 .msg-bubble.md pre{background:rgba(0,0,0,.08);border-radius:6px;padding:8px;overflow-x:auto;margin:.4em 0;}
 .msg-bubble.md pre code{background:none;padding:0;}
-.msg-bubble.md ul,
-.msg-bubble.md ol{padding-left:1.4em;margin:.3em 0;}
+.msg-bubble.md ul,.msg-bubble.md ol{padding-left:1.4em;margin:.3em 0;}
 .msg-bubble.md li{margin:.15em 0;}
 .msg-bubble.md h1,.msg-bubble.md h2,.msg-bubble.md h3{font-size:1em;font-weight:700;margin:.4em 0 .2em;}
 .msg-bubble.md strong{font-weight:700;}
 .msg-bubble.md em{font-style:italic;}
 .msg-bubble.md hr{border:none;border-top:1px solid rgba(0,0,0,.15);margin:.5em 0;}
-/* body preview card in chat */
-.body-card{background:rgba(0,0,0,.04);border-radius:8px;padding:8px 10px;margin-bottom:6px;font-size:12px;line-height:1.5;white-space:pre-wrap;color:var(--text);border-left:2px solid var(--primary);}
 
-.chat-input-row{flex-shrink:0;padding:8px 10px calc(8px + env(safe-area-inset-bottom,0px));border-top:1px solid var(--border);background:var(--card);display:flex;gap:8px;align-items:flex-end;}
-.chat-ta{flex:1;padding:9px 13px;border-radius:18px;border:1.5px solid var(--border);background:var(--bg);font-size:13px;font-family:inherit;color:var(--text);resize:none;outline:none;line-height:1.5;max-height:90px;overflow-y:auto;}
+/* ---- input ---- */
+.chat-input-row{flex-shrink:0;padding:8px 10px calc(8px + env(safe-area-inset-bottom,0px));border-top:1px solid var(--border);background:var(--card);display:flex;flex-direction:column;gap:6px;}
+.chat-ta{width:100%;padding:9px 13px;border-radius:18px;border:1.5px solid var(--border);background:var(--bg);font-size:13px;font-family:inherit;color:var(--text);resize:none;outline:none;line-height:1.5;max-height:90px;overflow-y:auto;}
 .chat-ta:focus{border-color:var(--primary);}
+.input-row-btns{display:flex;gap:8px;align-items:center;justify-content:flex-end;}
+.trigger-hint{flex:1;font-size:11px;color:var(--muted);}
+.trigger-hint.active{color:var(--primary);}
 .send-btn{width:36px;height:36px;border-radius:50%;border:none;background:var(--primary);color:#fff;font-size:15px;cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0;transition:opacity .15s;}
 .send-btn:active{opacity:.75;}
 
-/* status dropdown */
-.status-menu{position:absolute;right:14px;top:calc(env(safe-area-inset-top,0px) + 40px);background:var(--card);border:1px solid var(--border);border-radius:10px;box-shadow:var(--shadow);z-index:20;overflow:hidden;display:none;}
+/* ---- status dropdown ---- */
+.status-menu{position:absolute;right:14px;top:calc(env(safe-area-inset-top,0px) + 46px);background:var(--card);border:1px solid var(--border);border-radius:10px;box-shadow:var(--shadow);z-index:20;overflow:hidden;display:none;}
 .status-menu.show{display:block;}
 .status-opt{padding:9px 16px;font-size:12.5px;cursor:pointer;white-space:nowrap;}
-.status-opt:active{background:var(--primary-bg);}
+.status-opt:active,.status-opt.active{background:var(--primary-bg);color:var(--primary);}
 
-/* new task overlay */
+/* ---- polling indicator ---- */
+.poll-bar{font-size:11px;color:var(--primary);padding:4px 14px;background:var(--primary-bg);text-align:center;display:none;}
+.poll-bar.show{display:block;}
+
+/* ---- new task overlay ---- */
 .panel-overlay{position:fixed;inset:0;background:rgba(0,0,0,.35);z-index:50;opacity:0;pointer-events:none;transition:opacity .25s;}
 .panel-overlay.show{opacity:1;pointer-events:auto;}
 .side-panel{position:fixed;top:0;right:0;height:100%;width:82%;max-width:400px;background:var(--card);z-index:51;transform:translateX(105%);transition:transform .3s cubic-bezier(.4,0,.2,1);overflow-y:auto;display:flex;flex-direction:column;box-shadow:-4px 0 24px rgba(0,0,0,.12);}
 .side-panel.show{transform:translateX(0);}
 .panel-hd{display:flex;align-items:center;justify-content:space-between;padding:52px 16px 12px;border-bottom:1px solid var(--border);flex-shrink:0;}
-.panel-title{font-family:Georgia,serif;font-size:15px;color:var(--text);letter-spacing:.3px;}
+.panel-title-text{font-family:Georgia,serif;font-size:15px;color:var(--text);letter-spacing:.3px;}
 .panel-close{width:30px;height:30px;border-radius:50%;border:none;background:var(--primary-bg);color:var(--primary);font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center;}
 .panel-body{padding:14px 16px;flex:1;display:flex;flex-direction:column;gap:10px;}
 .panel-input{width:100%;padding:10px 13px;border-radius:12px;border:1.5px solid var(--border);background:var(--bg);font-size:13px;font-family:inherit;color:var(--text);outline:none;}
@@ -138,9 +182,9 @@ body{
 .panel-send{width:100%;padding:11px;border:none;border-radius:12px;background:var(--primary);color:#fff;font-size:13px;cursor:pointer;font-family:inherit;letter-spacing:.3px;transition:opacity .15s;}
 .panel-send:active{opacity:.8;}
 
-/* team top-bar */
+/* ---- top bar ---- */
 .team-hd{flex-shrink:0;display:flex;align-items:center;gap:8px;padding:calc(8px + env(safe-area-inset-top,0px)) 12px 8px;border-bottom:1px solid var(--border);background:var(--card);}
-.team-back{display:flex;align-items:center;gap:3px;text-decoration:none;color:var(--muted);font-size:12px;transition:color .15s;}
+.team-back{display:flex;align-items:center;gap:3px;text-decoration:none;color:var(--muted);font-size:12px;}
 .team-back i{font-size:15px;}
 .team-back:active{color:var(--primary);}
 .team-lbl{font-size:12px;color:var(--muted);letter-spacing:.4px;flex:1;text-align:right;}
@@ -152,13 +196,32 @@ body{
   <a class="team-back" href="/dash"><i class="ti ti-arrow-left"></i><span>主页</span></a>
   <span class="team-lbl">AI 协作面板</span>
 </div>
-<div class="main-row">
-  <aside class="sidebar">
-    <div class="sidebar-hd">任务</div>
+
+<!-- polling indicator -->
+<div class="poll-bar" id="pollBar">蛋壳处理中，等待回复…</div>
+
+<div class="main-row" id="mainRow">
+
+  <!-- collapsed strip -->
+  <div class="sidebar-strip" id="sidebarStrip" onclick="openDrawer()">
+    <button class="strip-btn" title="打开任务列表"><i class="ti ti-layout-sidebar"></i></button>
+    <div id="stripDots"></div>
+  </div>
+
+  <!-- drawer overlay -->
+  <div class="sidebar-overlay" id="sidebarOverlay" onclick="closeDrawer()"></div>
+
+  <!-- sidebar drawer -->
+  <aside class="sidebar" id="sidebar">
+    <div class="sidebar-hd">
+      <span>任务</span>
+      <button class="sidebar-close" onclick="closeDrawer()"><i class="ti ti-x"></i></button>
+    </div>
     <div class="task-list" id="taskList"></div>
     <button class="new-task-btn" onclick="openPanel()"><i class="ti ti-plus"></i>新建</button>
   </aside>
 
+  <!-- chat pane -->
   <main class="chat-pane" style="position:relative;">
     <div class="chat-hd">
       <span class="chat-title" id="chatTitle">选择左侧任务</span>
@@ -167,18 +230,22 @@ body{
     <div class="status-menu" id="statusMenu"></div>
     <div class="chat-stream" id="chatStream"><div class="chat-empty">还没有任务</div></div>
     <div class="chat-input-row">
-      <textarea class="chat-ta" id="chatTa" placeholder="发消息…" rows="1"
-        oninput="this.style.height='auto';this.style.height=Math.min(this.scrollHeight,90)+'px'"
+      <textarea class="chat-ta" id="chatTa" placeholder="发消息… 用 @cc 或 @deepseek 触发 AI" rows="1"
+        oninput="onTaInput(this)"
         onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendMsg();}"></textarea>
-      <button class="send-btn" onclick="sendMsg()"><i class="ti ti-send"></i></button>
+      <div class="input-row-btns">
+        <span class="trigger-hint" id="triggerHint"></span>
+        <button class="send-btn" onclick="sendMsg()"><i class="ti ti-send"></i></button>
+      </div>
     </div>
   </main>
 </div>
 
+<!-- new task overlay -->
 <div class="panel-overlay" id="panelOverlay" onclick="closePanel()"></div>
 <div class="side-panel" id="sidePanel">
   <div class="panel-hd">
-    <span class="panel-title">新建任务 <i class="ti ti-bulb" style="color:#5a8a70;font-size:14px"></i></span>
+    <span class="panel-title-text">新建任务 <i class="ti ti-bulb" style="color:#5a8a70;font-size:14px"></i></span>
     <button class="panel-close" onclick="closePanel()"><i class="ti ti-x"></i></button>
   </div>
   <div class="panel-body">
@@ -206,94 +273,96 @@ body{
 <script>
 const AUTHOR_META = {
   hayana:          { icon:'ti-heart',  name:'哈娅' },
-  fyodor_cc:       { icon:'ti-moon',   name:'蛋壳', avBg:'#5a9a6a' },
+  fyodor_cc:       { icon:'ti-moon',   name:'蛋壳',     avBg:'#5a9a6a' },
   fyodor_deepseek: { icon:'ti-brain',  name:'DeepSeek', avBg:'#3a7ad4' },
 };
-function authorMeta(a){ return AUTHOR_META[a] || {icon:'ti-user', name:a, avBg:'#9a8a8a'}; }
+function authorMeta(a){ return AUTHOR_META[a]||{icon:'ti-user',name:a,avBg:'#9a8a8a'}; }
 
 const STATUS_META = {
-  open:           { text:'进行中',  cls:'s-open' },
-  waiting_review: { text:'待审查',  cls:'s-waiting_review' },
-  resolved:       { text:'已解决',  cls:'s-resolved' },
-  archived:       { text:'已归档',  cls:'s-archived' },
-  done:           { text:'已完成',  cls:'s-done' },
+  open:           {text:'进行中',  cls:'s-open'},
+  waiting_review: {text:'待审查',  cls:'s-waiting_review'},
+  resolved:       {text:'已解决',  cls:'s-resolved'},
+  archived:       {text:'已归档',  cls:'s-archived'},
+  done:           {text:'已完成',  cls:'s-done'},
 };
 const STATUS_CYCLE = ['open','waiting_review','resolved','archived'];
 
-const KIND_LABELS = {
-  task:'任务', question:'问题', review_request:'审查', broadcast:'广播'
-};
+const KIND_LABELS = {task:'任务',question:'问题',review_request:'审查',broadcast:'广播'};
 
-let allItems = [];
-let selectedId = null;
+let allItems = [], selectedId = null;
+let _pollTimer = null, _pollEnd = 0;
 
-function escHtml(s){ return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function escHtml(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 
 function fmtTime(s){
   if(!s) return '';
   const d = new Date(s.replace(' ','T'));
-  const now = new Date();
-  const diff = (now - d) / 1000;
-  if(diff < 60) return '刚刚';
-  if(diff < 3600) return Math.floor(diff/60) + '分钟前';
-  if(diff < 86400) return Math.floor(diff/3600) + '小时前';
-  const mo = d.getMonth()+1, dd = d.getDate();
-  const h = String(d.getHours()).padStart(2,'0'), m = String(d.getMinutes()).padStart(2,'0');
-  return `${mo}-${dd} ${h}:${m}`;
+  const diff = (Date.now()-d)/1000;
+  if(diff<60) return '刚刚';
+  if(diff<3600) return Math.floor(diff/60)+'分钟前';
+  if(diff<86400) return Math.floor(diff/3600)+'小时前';
+  const mo=d.getMonth()+1,dd=d.getDate();
+  return `${mo}-${dd} ${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
 }
 
-function levelBadge(level){
-  if(level === 'P0') return {text:'P0', cls:'P0'};
-  if(level === 'P1') return {text:'P1', cls:'P1'};
-  return {text:'ok', cls:'ok'};
-}
+function levelBadge(l){ return l==='P0'?{text:'P0',cls:'P0'}:l==='P1'?{text:'P1',cls:'P1'}:{text:'ok',cls:'ok'}; }
 
-// minimal markdown renderer
+// minimal markdown
 function renderMd(text){
-  if(!text) return '';
-  let s = escHtml(text);
-  // code blocks
-  s = s.replace(/```[\w]*\n?([\s\S]*?)```/g, (_,c)=>`<pre><code>${c.trim()}</code></pre>`);
-  // inline code
-  s = s.replace(/`([^`]+)`/g, '<code>$1</code>');
-  // bold
-  s = s.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
-  // italic
-  s = s.replace(/\*([^*]+)\*/g, '<em>$1</em>');
-  // headers
-  s = s.replace(/^### (.+)$/gm, '<h3>$1</h3>');
-  s = s.replace(/^## (.+)$/gm, '<h2>$1</h2>');
-  s = s.replace(/^# (.+)$/gm, '<h1>$1</h1>');
-  // hr
-  s = s.replace(/^---+$/gm, '<hr>');
-  // lists (simple)
-  s = s.replace(/^- (.+)$/gm, '<li>$1</li>');
-  s = s.replace(/(<li>.*<\/li>\n?)+/g, m=>`<ul>${m}</ul>`);
-  // paragraphs (split on blank lines)
-  s = s.split(/\n{2,}/).map(p=>{
-    p = p.trim();
-    if(!p || p.startsWith('<')) return p;
-    return '<p>' + p.replace(/\n/g,'<br>') + '</p>';
+  let s=escHtml(text);
+  s=s.replace(/```[\w]*\n?([\s\S]*?)```/g,(_,c)=>`<pre><code>${c.trim()}</code></pre>`);
+  s=s.replace(/`([^`]+)`/g,'<code>$1</code>');
+  s=s.replace(/\*\*([^*]+)\*\*/g,'<strong>$1</strong>');
+  s=s.replace(/\*([^*\n]+)\*/g,'<em>$1</em>');
+  s=s.replace(/^### (.+)$/gm,'<h3>$1</h3>');
+  s=s.replace(/^## (.+)$/gm,'<h2>$1</h2>');
+  s=s.replace(/^# (.+)$/gm,'<h1>$1</h1>');
+  s=s.replace(/^---+$/gm,'<hr>');
+  s=s.replace(/^- (.+)$/gm,'<li>$1</li>');
+  s=s.replace(/(<li>.*?<\/li>\n?)+/g,m=>`<ul>${m}</ul>`);
+  s=s.split(/\n{2,}/).map(p=>{
+    p=p.trim();
+    if(!p||p.startsWith('<')) return p;
+    return '<p>'+p.replace(/\n/g,'<br>')+'</p>';
   }).join('\n');
   return s;
 }
 
-function getItemTitle(item){
-  return item.title || item.content.slice(0,40);
+function getItemTitle(item){ return item.title||item.content.slice(0,40); }
+
+// ---- Drawer ----
+function openDrawer(){
+  document.getElementById('sidebar').classList.add('open');
+  document.getElementById('sidebarOverlay').classList.add('show');
+}
+function closeDrawer(){
+  document.getElementById('sidebar').classList.remove('open');
+  document.getElementById('sidebarOverlay').classList.remove('show');
 }
 
+// ---- Dots in strip ----
+function renderStripDots(){
+  const container = document.getElementById('stripDots');
+  const dots = allItems.slice(0,8).map(it=>{
+    const cls = it.level==='P0'?'dot-P0':it.level==='P1'?'dot-P1':'dot-ok';
+    return `<div class="task-dot ${cls}" title="${escHtml(getItemTitle(it))}"></div>`;
+  });
+  container.innerHTML = dots.join('');
+}
+
+// ---- Sidebar task list ----
 function renderSidebar(){
   const list = document.getElementById('taskList');
   if(!allItems.length){
-    list.innerHTML = '<div style="padding:14px 10px;color:var(--muted);font-size:11.5px;">还没有任务</div>';
-    return;
+    list.innerHTML='<div style="padding:14px 10px;color:var(--muted);font-size:11.5px;">还没有任务</div>';
+    renderStripDots(); return;
   }
-  list.innerHTML = allItems.map(item=>{
-    const lvl = levelBadge(item.level);
-    const total = (item.replies?.length||0) + 1;
-    const isActive = item.id === selectedId;
-    const kindLabel = KIND_LABELS[item.kind] || item.kind || '任务';
-    return `<div class="task-row${isActive?' active':''}" onclick="selectTask(${item.id})">
+  list.innerHTML=allItems.map(item=>{
+    const lvl=levelBadge(item.level);
+    const total=(item.replies?.length||0)+1;
+    const isActive=item.id===selectedId;
+    const kindLabel=KIND_LABELS[item.kind]||item.kind||'任务';
+    return `<div class="task-row${isActive?' active':''}" onclick="selectTask(${item.id});closeDrawer()">
       <div class="tr-top">
         <span class="tr-badge badge-${lvl.cls}">${lvl.text}</span>
         <span class="tr-badge badge-kind">${escHtml(kindLabel)}</span>
@@ -302,164 +371,210 @@ function renderSidebar(){
       <div class="tr-meta">${total}条消息</div>
     </div>`;
   }).join('');
+  renderStripDots();
 }
 
+// ---- Chat ----
 function renderChat(){
-  const item = allItems.find(i=>i.id===selectedId);
-  const titleEl = document.getElementById('chatTitle');
-  const pillEl = document.getElementById('statusPill');
-  const streamEl = document.getElementById('chatStream');
+  const item=allItems.find(i=>i.id===selectedId);
+  const titleEl=document.getElementById('chatTitle');
+  const pillEl=document.getElementById('statusPill');
+  const streamEl=document.getElementById('chatStream');
 
   if(!item){
-    titleEl.textContent = '选择左侧任务';
-    pillEl.style.display = 'none';
-    streamEl.innerHTML = '<div class="chat-empty">还没有任务</div>';
+    titleEl.textContent='选择左侧任务';
+    pillEl.style.display='none';
+    streamEl.innerHTML='<div class="chat-empty">还没有任务</div>';
     return;
   }
 
-  titleEl.textContent = getItemTitle(item);
-  const sm = STATUS_META[item.status] || STATUS_META.open;
-  pillEl.style.display = '';
-  pillEl.className = `status-pill ${sm.cls}`;
-  pillEl.textContent = sm.text;
+  titleEl.textContent=getItemTitle(item);
+  const sm=STATUS_META[item.status]||STATUS_META.open;
+  pillEl.style.display='';
+  pillEl.className=`status-pill ${sm.cls}`;
+  pillEl.textContent=sm.text;
 
-  // build message list: opening post first, then replies
-  const openingBody = item.body || (item.title ? item.content : null);
-  const openingContent = item.title ? item.title : item.content;
-
-  const msgs = [
-    { author: item.author, content: openingContent, body: openingBody, level: null, created_at: item.created_at, isOpening: true },
-    ...(item.replies||[]).map(r=>({...r, isOpening:false}))
+  const openingBody=item.body||(item.title?item.content:null);
+  const openingContent=item.title?item.title:item.content;
+  const msgs=[
+    {author:item.author,content:openingContent,body:openingBody,level:null,created_at:item.created_at,isOpening:true},
+    ...(item.replies||[]).map(r=>({...r,isOpening:false}))
   ];
 
-  streamEl.innerHTML = msgs.map(m=>{
-    const am = authorMeta(m.author);
-    const isHayana = m.author === 'hayana';
-    const lvlBadge = m.level ? `<span class="msg-lvl badge-${m.level}">${m.level}</span>` : '';
-    const avatar = isHayana ? '' : `<div class="msg-avatar" style="background:${am.avBg}1a;color:${am.avBg}"><i class="ti ${am.icon}"></i></div>`;
+  streamEl.innerHTML=msgs.map((m,idx)=>{
+    const am=authorMeta(m.author);
+    const isHayana=m.author==='hayana';
+    const lvlBadge=m.level?`<span class="msg-lvl badge-${m.level}">${m.level}</span>`:'';
+    const avatar=isHayana?'':`<div class="msg-avatar" style="background:${am.avBg}1a;color:${am.avBg}"><i class="ti ${am.icon}"></i></div>`;
 
-    let bubbleInner = '';
-    // If opening post has a separate body, show body card above bubble
-    let bodyCard = '';
-    if(m.isOpening && m.body){
-      bodyCard = `<div class="body-card">${escHtml(m.body)}</div>`;
-    }
-    // detect markdown in content (non-opening replies can also have markdown)
-    const hasMd = /[*#`\[\]]/.test(m.content);
-    const bubbleCls = `msg-bubble bubble-${m.author}${hasMd?' md':''}`;
-    bubbleInner = hasMd ? renderMd(m.content) : escHtml(m.content);
+    let bodyCard='';
+    if(m.isOpening&&m.body) bodyCard=`<div class="body-card">${escHtml(m.body)}</div>`;
+
+    const hasMd=/[*#`\[\]]/.test(m.content);
+    const bubbleCls=`msg-bubble bubble-${m.author}${hasMd?' md':''}`;
+    const bubbleInner=hasMd?renderMd(m.content):escHtml(m.content);
+
+    // Collapse for non-hayana bubbles with >5 lines or >300 chars
+    const lineCount=(m.content.match(/\n/g)||[]).length;
+    const collapsible=!isHayana&&(lineCount>5||m.content.length>300);
+    const wrapCls=`bubble-wrap${collapsible?' collapsible':''}`;
+    const colBtn=collapsible?`<button class="collapse-btn" onclick="toggleCollapse(${idx})">展开 ▼</button>`:'';
 
     return `<div class="msg-row ${isHayana?'from-hayana':'from-other'}">
       ${avatar}
       <div class="msg-col">
-        ${isHayana ? '' : `<div class="msg-author">${escHtml(am.name)} ${lvlBadge}</div>`}
+        ${isHayana?'':`<div class="msg-author">${escHtml(am.name)} ${lvlBadge}</div>`}
         ${bodyCard}
-        <div class="${bubbleCls}">${bubbleInner}</div>
+        <div class="${wrapCls}" data-idx="${idx}">
+          <div class="${bubbleCls}">${bubbleInner}</div>
+          ${colBtn}
+        </div>
         <div class="msg-time">${fmtTime(m.created_at)}</div>
       </div>
     </div>`;
   }).join('');
-  streamEl.scrollTop = streamEl.scrollHeight;
+  streamEl.scrollTop=streamEl.scrollHeight;
 }
 
-function buildStatusMenu(currentStatus){
-  const menu = document.getElementById('statusMenu');
-  menu.innerHTML = STATUS_CYCLE.map(s=>{
-    const sm = STATUS_META[s];
-    const isCur = s === currentStatus;
-    return `<div class="status-opt${isCur?' active':''}" onclick="setStatus('${s}')">${sm.text}${isCur?' ✓':''}</div>`;
+function toggleCollapse(idx){
+  const wrap=document.querySelector(`.bubble-wrap[data-idx="${idx}"]`);
+  if(!wrap) return;
+  const expanded=wrap.classList.toggle('expanded');
+  const btn=wrap.querySelector('.collapse-btn');
+  if(btn) btn.textContent=expanded?'收起 ▲':'展开 ▼';
+}
+
+// ---- Status menu ----
+function buildStatusMenu(cur){
+  document.getElementById('statusMenu').innerHTML=STATUS_CYCLE.map(s=>{
+    const sm=STATUS_META[s];
+    return `<div class="status-opt${s===cur?' active':''}" onclick="setStatus('${s}')">${sm.text}${s===cur?' ✓':''}</div>`;
   }).join('');
 }
-
 function toggleStatusMenu(){
-  const menu = document.getElementById('statusMenu');
-  const item = allItems.find(i=>i.id===selectedId);
+  const menu=document.getElementById('statusMenu');
+  const item=allItems.find(i=>i.id===selectedId);
   if(!item) return;
-  if(menu.classList.contains('show')){
-    menu.classList.remove('show');
-  } else {
-    buildStatusMenu(item.status);
-    menu.classList.add('show');
-  }
+  if(menu.classList.toggle('show')) buildStatusMenu(item.status);
 }
-
-document.addEventListener('click', e=>{
-  const menu = document.getElementById('statusMenu');
-  if(menu.classList.contains('show') && !menu.contains(e.target) && !document.getElementById('statusPill').contains(e.target)){
+document.addEventListener('click',e=>{
+  const menu=document.getElementById('statusMenu');
+  if(menu.classList.contains('show')&&!menu.contains(e.target)&&!document.getElementById('statusPill').contains(e.target))
     menu.classList.remove('show');
-  }
 });
-
-async function setStatus(status){
+async function setStatus(s){
   document.getElementById('statusMenu').classList.remove('show');
   if(!selectedId) return;
-  await fetch(`/api/aipanel/${selectedId}/status`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({status})});
+  await fetch(`/api/aipanel/${selectedId}/status`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({status:s})});
   await loadPanel(true);
 }
 
+// ---- Polling for CC/DS reply ----
+function startPolling(pid){
+  if(_pollTimer) clearInterval(_pollTimer);
+  _pollEnd=Date.now()+5*60*1000;
+  document.getElementById('pollBar').classList.add('show');
+  const prevReplyCount=((allItems.find(i=>i.id===pid)||{}).replies||[]).length;
+
+  _pollTimer=setInterval(async()=>{
+    if(Date.now()>_pollEnd){ stopPolling(); return; }
+    await loadPanel(true);
+    const cur=(allItems.find(i=>i.id===pid)||{}).replies||[];
+    const newAI=cur.filter(r=>r.author!=='hayana');
+    if(newAI.length>0&&cur.length>prevReplyCount){ stopPolling(); }
+  },5000);
+}
+function stopPolling(){
+  if(_pollTimer){ clearInterval(_pollTimer); _pollTimer=null; }
+  document.getElementById('pollBar').classList.remove('show');
+}
+
+// ---- Input hint ----
+function onTaInput(el){
+  el.style.height='auto';
+  el.style.height=Math.min(el.scrollHeight,90)+'px';
+  const v=el.value;
+  const hint=document.getElementById('triggerHint');
+  if(/@cc\b/.test(v)){ hint.textContent='@cc → 蛋壳立即处理'; hint.className='trigger-hint active'; }
+  else if(/@deepseek\b/.test(v)){ hint.textContent='@deepseek → 请 DS 审查'; hint.className='trigger-hint active'; }
+  else{ hint.textContent=''; hint.className='trigger-hint'; }
+}
+
+// ---- Send ----
 function selectTask(id){
-  selectedId = id;
+  selectedId=id;
+  stopPolling();
   document.getElementById('statusMenu').classList.remove('show');
-  renderSidebar();
-  renderChat();
+  renderSidebar(); renderChat();
 }
 
 async function loadPanel(keepSelection){
   try{
-    const r = await fetch('/api/aipanel');
-    allItems = await r.json();
-    if(!keepSelection || !allItems.find(i=>i.id===selectedId)){
-      selectedId = allItems.length ? allItems[0].id : null;
-    }
-    renderSidebar();
-    renderChat();
+    const r=await fetch('/api/aipanel'); allItems=await r.json();
+    if(!keepSelection||!allItems.find(i=>i.id===selectedId))
+      selectedId=allItems.length?allItems[0].id:null;
+    renderSidebar(); renderChat();
   }catch(e){
-    document.getElementById('chatStream').innerHTML = '<div class="chat-empty">加载失败</div>';
+    document.getElementById('chatStream').innerHTML='<div class="chat-empty">加载失败</div>';
   }
 }
 
 async function sendMsg(){
-  const ta = document.getElementById('chatTa');
-  const content = (ta.value||'').trim();
-  if(!content || !selectedId) return;
+  const ta=document.getElementById('chatTa');
+  const content=(ta.value||'').trim();
+  if(!content||!selectedId) return;
   ta.value=''; ta.style.height='auto';
-  await fetch(`/api/aipanel/${selectedId}/reply`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({author:'hayana',content})});
+  document.getElementById('triggerHint').textContent='';
+
+  await fetch(`/api/aipanel/${selectedId}/reply`,{
+    method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({author:'hayana',content})
+  });
+
+  // detect @trigger
+  const mention=/@cc\b/.test(content)?'cc':/@deepseek\b/.test(content)?'deepseek':null;
+  if(mention){
+    fetch(`/api/aipanel/${selectedId}/trigger`,{
+      method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({mention})
+    });
+    startPolling(selectedId);
+  }
   await loadPanel(true);
 }
 
 function openPanel(){
+  closeDrawer();
   document.getElementById('panelOverlay').classList.add('show');
   document.getElementById('sidePanel').classList.add('show');
-  document.getElementById('panelTitleInput').focus();
+  setTimeout(()=>document.getElementById('panelTitleInput').focus(),300);
 }
 function closePanel(){
   document.getElementById('panelOverlay').classList.remove('show');
   document.getElementById('sidePanel').classList.remove('show');
 }
-
 async function panelSubmit(){
-  const title = (document.getElementById('panelTitleInput').value||'').trim();
-  const body  = (document.getElementById('panelTa').value||'').trim() || null;
-  const kind  = document.getElementById('panelKindSelect').value;
-  if(!title) { document.getElementById('panelTitleInput').focus(); return; }
-  const sendBtn = document.querySelector('.panel-send');
-  sendBtn.disabled = true;
-  const r = await fetch('/api/aipanel',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({author:'hayana', title, body, content: title, kind})});
-  const d = await r.json();
-  document.getElementById('panelTitleInput').value = '';
-  document.getElementById('panelTa').value = '';
-  document.getElementById('panelKindSelect').value = 'task';
-  sendBtn.disabled = false;
+  const title=(document.getElementById('panelTitleInput').value||'').trim();
+  const body=(document.getElementById('panelTa').value||'').trim()||null;
+  const kind=document.getElementById('panelKindSelect').value;
+  if(!title){document.getElementById('panelTitleInput').focus();return;}
+  const sendBtn=document.querySelector('.panel-send');
+  sendBtn.disabled=true;
+  const r=await fetch('/api/aipanel',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({author:'hayana',title,body,content:title,kind})});
+  const d=await r.json();
+  document.getElementById('panelTitleInput').value='';
+  document.getElementById('panelTa').value='';
+  document.getElementById('panelKindSelect').value='task';
+  sendBtn.disabled=false;
   closePanel();
   await loadPanel(false);
-  if(d && d.id) selectTask(d.id);
+  if(d&&d.id) selectTask(d.id);
 }
 
 if(window.matchMedia('(prefers-color-scheme:dark)').matches)
   document.documentElement.setAttribute('data-theme','dark');
-
-if('serviceWorker' in navigator){navigator.serviceWorker.register('/sw.js').then(function(r){r.update();}).catch(console.error);}
+if('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').then(r=>r.update()).catch(console.error);
 loadPanel(false);
 </script>
 </body>

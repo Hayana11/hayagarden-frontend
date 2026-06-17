@@ -94,6 +94,18 @@ def main():
             return
         post_to_panel(args.panel_id, text, level, token)
         print(f'\n已回贴到 /aipanel #{args.panel_id}', file=sys.stderr)
+        # ALL_CLEAR → auto-resolve the task
+        if 'all_clear' in text.lower() or 'all clear' in text.lower():
+            try:
+                import requests as _req
+                _req.post(
+                    f'http://127.0.0.1:5050/api/aipanel/{args.panel_id}/status',
+                    json={'status': 'resolved'},
+                    timeout=5
+                )
+                print(f'[deepseek] ALL_CLEAR detected → status set to resolved', file=sys.stderr)
+            except Exception as _e:
+                print(f'[deepseek] status update failed: {_e}', file=sys.stderr)
 
 
 if __name__ == '__main__':
