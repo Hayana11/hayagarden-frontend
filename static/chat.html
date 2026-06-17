@@ -563,8 +563,25 @@ function buildHtml(list) {
     }
     if(hasImg) innerHtml += '<img src="'+escHtml(m.image_url)+'" loading="lazy" onclick="openLb(\''+escHtml(m.image_url)+'\')">';
     // 过滤掉content里意外写入的工具调用JSON片段（如{"name":"user_time_v0","input":{}}）
-    // 用正则 strip，覆盖夹在正文中间的情况，不只判断整体是否纯 JSON
-    var displayContent = (m.content || '').replace(/\{\s*"name"\s*:\s*"[^"]*"\s*,\s*"input"\s*:\s*\{[^}]*\}\s*\}/g, '').trim();
+    // 用括号平衡法 strip，正确处理任意深度嵌套的 input 对象
+    var displayContent = (function(s){
+      var out='', i=0;
+      while(i<s.length){
+        var st=s.indexOf('{"name":',i);
+        if(st===-1){out+=s.slice(i);break;}
+        out+=s.slice(i,st);
+        var depth=0,j=st;
+        while(j<s.length){
+          if(s[j]==='{')depth++;
+          else if(s[j]==='}'){depth--;if(depth===0){j++;break;}}
+          j++;
+        }
+        var frag=s.slice(st,j);
+        try{var p=JSON.parse(frag);if(p&&typeof p.name==='string'&&p.input!==undefined){i=j;continue;}}catch(e){}
+        out+=frag;i=j;
+      }
+      return out.trim();
+    })(m.content||'');
     if(hasTxt && displayContent) innerHtml += (hasImg?'<div class="img-then-text">':'')+escHtml(displayContent)+(hasImg?'</div>':''  );
 
     var actHtml;
