@@ -1533,6 +1533,14 @@ def _init_ai_panel_tables():
         "mentions TEXT DEFAULT '', "
         "created_at TIMESTAMP DEFAULT (datetime('now','+8 hours')))"
     )
+    # add columns introduced in v2 schema (safe to re-run)
+    for _col_sql in [
+        "ALTER TABLE ai_panel ADD COLUMN title TEXT DEFAULT NULL",
+        "ALTER TABLE ai_panel ADD COLUMN body  TEXT DEFAULT NULL",
+        "ALTER TABLE ai_panel ADD COLUMN kind  TEXT DEFAULT 'task'",
+    ]:
+        try: conn.execute(_col_sql)
+        except Exception: pass
     conn.execute(
         "CREATE TABLE IF NOT EXISTS ai_panel_replies ("
         "id INTEGER PRIMARY KEY AUTOINCREMENT, "
@@ -1585,15 +1593,20 @@ def post_ai_panel():
     if author in _AI_PANEL_AUTHORS:
         if not BOARD_TOKEN_FYODOR or data.get('token', '') != BOARD_TOKEN_FYODOR:
             return jsonify({'error': 'unauthorized'}), 403
-    content = (data.get('content') or '').strip()
+    title   = (data.get('title')   or '').strip() or None
+    body    = (data.get('body')    or '').strip() or None
+    content = (data.get('content') or title or '').strip()
     if not content:
         return jsonify({'error': 'content required'}), 400
-    tag = (data.get('tag') or '任务').strip()
+    tag     = (data.get('tag')     or '任务').strip()
+    kind    = (data.get('kind')    or 'task').strip()
+    if kind not in ('question', 'review_request', 'broadcast', 'task'):
+        kind = 'task'
     mentions = (data.get('mentions') or '').strip()
     conn = get_db()
     cur = conn.execute(
-        "INSERT INTO ai_panel (author,tag,content,status,mentions) VALUES (?,?,?,'open',?)",
-        (author, tag, content, mentions)
+        "INSERT INTO ai_panel (author,tag,content,title,body,kind,status,mentions) VALUES (?,?,?,?,?,?,'open',?)",
+        (author, tag, content, title, body, kind, mentions)
     )
     conn.commit(); new_id = cur.lastrowid; conn.close()
     return jsonify({'ok': True, 'id': new_id})
@@ -1628,7 +1641,7 @@ def post_ai_panel_reply(pid):
 def update_ai_panel_status(pid):
     data = request.get_json() or {}
     status = (data.get('status') or 'open').strip()
-    if status not in ('open', 'done'):
+    if status not in ('open', 'waiting_review', 'resolved', 'archived', 'done'):
         return jsonify({'error': 'invalid status'}), 400
     conn = get_db()
     conn.execute("UPDATE ai_panel SET status=? WHERE id=?", (status, pid))
