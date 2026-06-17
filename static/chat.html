@@ -562,14 +562,10 @@ function buildHtml(list) {
       tcs.forEach(function(tc) { innerHtml += buildToolCardHtml(tc); });
     }
     if(hasImg) innerHtml += '<img src="'+escHtml(m.image_url)+'" loading="lazy" onclick="openLb(\''+escHtml(m.image_url)+'\')">';
-    // 过滤掉content字段里意外存进去的工具调用原始JSON（如{"name":"user_time_v0",...}）
-    var displayContent = m.content || '';
-    var looksLikeToolCall = false;
-    try {
-      var parsed = JSON.parse(displayContent);
-      if(parsed && parsed.name && parsed.input !== undefined) looksLikeToolCall = true;
-    } catch(e) {}
-    if(hasTxt && !looksLikeToolCall) innerHtml += (hasImg?'<div class="img-then-text">':'')+escHtml(displayContent)+(hasImg?'</div>':''  );
+    // 过滤掉content里意外写入的工具调用JSON片段（如{"name":"user_time_v0","input":{}}）
+    // 用正则 strip，覆盖夹在正文中间的情况，不只判断整体是否纯 JSON
+    var displayContent = (m.content || '').replace(/\{\s*"name"\s*:\s*"[^"]*"\s*,\s*"input"\s*:\s*\{[^}]*\}\s*\}/g, '').trim();
+    if(hasTxt && displayContent) innerHtml += (hasImg?'<div class="img-then-text">':'')+escHtml(displayContent)+(hasImg?'</div>':''  );
 
     var actHtml;
     if(fy) {
