@@ -1721,46 +1721,52 @@ def post_ai_panel_reply(pid):
 
 @app.route('/api/aipanel/<int:pid>/trigger', methods=['POST'])
 def trigger_aipanel(pid):
-    """Immediately trigger CC or DeepSeek to process a panel task (runs in background thread)."""
-    import threading, subprocess as _sp
+    """Trigger CC or DeepSeek as a detached process (start_new_session=True — survives service restart)."""
+    import subprocess as _sp
     data    = request.get_json() or {}
     mention = (data.get('mention') or 'cc').strip()
     if mention not in ('cc', 'deepseek'):
         return jsonify({'error': 'mention must be cc or deepseek'}), 400
 
-    # verify panel exists
-    conn = get_db(); row = conn.execute("SELECT id FROM ai_panel WHERE id=?", (pid,)).fetchone(); conn.close()
+    conn = get_db()
+    row  = conn.execute("SELECT id FROM ai_panel WHERE id=?", (pid,)).fetchone()
     if not row:
+        conn.close()
         return jsonify({'error': 'not found'}), 404
 
     _env = {**os.environ, 'HOME': '/root'}
 
-    def _run_cc():
-        _sp.run(['/usr/bin/python3.11', '/opt/frontend/tools/cc_aipanel_check.py', str(pid)],
-                timeout=330, check=False, cwd='/opt/frontend', env=_env)
-
-    def _run_ds():
-        conn2 = get_db()
-        item  = conn2.execute("SELECT * FROM ai_panel WHERE id=?", (pid,)).fetchone()
-        reps  = conn2.execute(
+    if mention == 'cc':
+        cmd = ['/usr/bin/python3.11', '/opt/frontend/tools/cc_aipanel_check.py', str(pid)]
+        conn.close()
+    else:
+        item  = conn.execute("SELECT * FROM ai_panel WHERE id=?", (pid,)).fetchone()
+        reps  = conn.execute(
             "SELECT * FROM ai_panel_replies WHERE panel_id=? ORDER BY created_at ASC", (pid,)
         ).fetchall()
-        conn2.close()
-        if not item:
-            return
-        title = item['title'] or item['content'][:80]
+        conn.close()
+        title   = (item['title'] or item['content'][:80]) if item else f'task#{pid}'
         cc_reps = [r for r in reps if r['author'] == 'fyodor_cc']
         ctx = (
             f"任务#{pid}: {title}\n\nCC回复：{cc_reps[-1]['content'][:800]}"
             if cc_reps else f"任务#{pid}: {title}"
-        )
-        ctx += "\n\n请审查以上工作，给出评级和意见。如果没问题写 ALL_CLEAR。"
-        _sp.run(['/usr/bin/python3.11', '/opt/frontend/tools/deepseek_review.py',
-                 '--panel-id', str(pid), ctx],
-                timeout=200, check=False, cwd='/opt/frontend', env=_env)
+        ) + "\n\n请审查以上工作，给出评级和意见。如果没问题写 ALL_CLEAR。"
+        cmd = ['/usr/bin/python3.11', '/opt/frontend/tools/deepseek_review.py',
+               '--panel-id', str(pid), ctx]
 
-    target = _run_cc if mention == 'cc' else _run_ds
-    threading.Thread(target=target, daemon=True, name=f'aipanel-trigger-{pid}-{mention}').start()
+    # Popen with start_new_session=True: child becomes its own session leader,
+    # detached from the parent's process group — service restarts won't kill it.
+    # Timeout is enforced internally: cc_aipanel_check.py has subprocess.run(timeout=300),
+    # deepseek_review.py has requests.post(timeout=180) — neither can hang forever.
+    try:
+        with open('/var/log/cc_aipanel.log', 'a') as _log:
+            _sp.Popen(cmd, cwd='/opt/frontend', env=_env,
+                      stdout=_log, stderr=_log, start_new_session=True)
+    except OSError as _e:
+        import logging as _log2
+        _log2.getLogger('app').error('[trigger] Popen failed pid=%s mention=%s: %s', pid, mention, _e)
+        return jsonify({'error': f'spawn failed: {_e}'}), 500
+
     return jsonify({'ok': True, 'triggered': mention})
 
 
