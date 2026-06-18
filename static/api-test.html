@@ -205,6 +205,10 @@ body{background:linear-gradient(160deg,var(--bg1) 0%,var(--bg2) 100%);background
       <button class="card-action" onclick="loadModels()">刷新</button>
     </div>
     <div id="models-list"><div style="color:var(--hint);font-size:12px;text-align:center;padding:8px 0;">加载中…</div></div>
+    <div style="border-top:.5px solid var(--border);margin-top:8px;padding-top:8px;">
+      <div style="font-size:10px;color:var(--hint);letter-spacing:.3px;margin-bottom:6px;">常用预设</div>
+      <div id="preset-models-list"></div>
+    </div>
   </div>
 
   <!-- Section 4: Test send -->
@@ -465,6 +469,7 @@ async function loadModel() {
   currentModel = d.model || '';
   document.getElementById('cur-model-name').textContent = currentModel;
   document.getElementById('model-inp').value = currentModel;
+  renderPresetModels();
 }
 function startModelEdit() {
   document.getElementById('model-edit-row').style.display = 'flex';
@@ -488,6 +493,7 @@ async function saveModel() {
     setTimeout(function(){ msg.style.display = 'none'; }, 3000);
     toast('模型已更新');
     renderDynModels();
+    renderPresetModels();
   } else { toast('保存失败'); }
 }
 
@@ -502,6 +508,7 @@ async function switchModel(modelId) {
     document.getElementById('model-inp').value = modelId;
     toast('已切换到 ' + modelId + '，网关重启中');
     renderDynModels();
+    renderPresetModels();
   } else { toast('切换失败'); }
 }
 
@@ -513,17 +520,54 @@ async function loadModels() {
     var r = await fetch('/api/config/models');
     var d = await r.json();
     if (!d.ok || !d.models || !d.models.length) {
-      el.innerHTML = '<div style="color:var(--hint);font-size:12px;padding:8px 0;">'
-        + escH(d.error || '中转站未返回模型列表，可在上方手动输入模型名') + '</div>';
+      if (d.error) console.warn('[models]', d.error);
+      var _code = (d.error||'').match(/HTTP (\d+)/);
+      var _hint = _code ? '中转站模型接口返回 ' + _code[1] + '，请手动输入模型名' : '中转站未返回模型列表，请手动输入模型名';
+      el.innerHTML = '<div style="color:var(--hint);font-size:12px;padding:8px 0;">' + escH(_hint) + '</div>';
       currentModels = [];
+      renderPresetModels();
       return;
     }
     currentModels = d.models;
     renderDynModels();
+    renderPresetModels();
   } catch(e) {
     el.innerHTML = '<div style="color:#c07070;font-size:12px;">获取失败: ' + escH(e.message) + '</div>';
     currentModels = [];
+    renderPresetModels();
   }
+}
+
+var PRESET_MODELS = [
+  { id: 'claude-opus-4-8',            label: 'Opus 4.8',    tier: 'flagship' },
+  { id: 'claude-opus-4-6',            label: 'Opus 4.6',    tier: 'flagship' },
+  { id: 'claude-sonnet-4-6',          label: 'Sonnet 4.6',  tier: 'standard' },
+  { id: 'claude-haiku-4-5-20251001',  label: 'Haiku 4.5',   tier: 'fast'     },
+  { id: 'claude-fable-5',             label: 'Fable 5',     tier: 'standard' },
+  { id: 'claude-3-7-sonnet-20250219', label: 'Sonnet 3.7',  tier: 'standard' },
+  { id: 'claude-3-5-sonnet-20241022', label: 'Sonnet 3.5',  tier: 'standard' },
+  { id: 'claude-3-5-haiku-20241022',  label: 'Haiku 3.5',   tier: 'fast'     },
+  { id: 'claude-3-opus-20240229',     label: 'Opus 3',      tier: 'flagship' },
+];
+
+var TIER_COLOR = { flagship: '#7c6a8a', standard: '#3a7ad4', fast: '#0a8a5c' };
+
+function renderPresetModels() {
+  var el = document.getElementById('preset-models-list');
+  el.innerHTML = PRESET_MODELS.map(function(p) {
+    var isActive = p.id === currentModel;
+    var col = TIER_COLOR[p.tier] || '#9a8a8a';
+    var right = isActive
+      ? '<span class="mi-badge" style="background:var(--primary-bg);color:var(--primary);">使用中</span>'
+      : '<button class="mi-switch" onclick="switchModel('' + escH(p.id) + '')">切换</button>';
+    return '<div class="model-item">'
+      + '<div class="mi-dot" style="background:' + col + (isActive ? '' : '66') + '"></div>'
+      + '<div class="mi-name" style="flex:1">'
+      + escH(p.label)
+      + '<span style="font-size:9.5px;color:var(--hint);margin-left:5px;">' + escH(p.id) + '</span>'
+      + '</div>'
+      + right + '</div>';
+  }).join('');
 }
 
 function renderDynModels() {
