@@ -1240,6 +1240,88 @@ def config_models():
         return jsonify({'error': str(e)}), 500
 
 
+def _init_relay_presets_table():
+    conn = get_db()
+    conn.execute('''CREATE TABLE IF NOT EXISTS relay_presets (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        url TEXT NOT NULL,
+        key TEXT,
+        created_at DATETIME DEFAULT (datetime('now','+8 hours'))
+    )''')
+    conn.commit()
+    conn.close()
+
+@app.route('/api/config/relay-presets', methods=['GET'])
+def get_relay_presets():
+    _init_relay_presets_table()
+    active_url = ''
+    try:
+        for line in open('/opt/frontend/.env'):
+            if line.startswith('API_URL='):
+                active_url = line.split('=', 1)[1].strip()
+    except Exception:
+        pass
+    conn = get_db()
+    rows = conn.execute('SELECT * FROM relay_presets ORDER BY created_at').fetchall()
+    conn.close()
+    presets = [{'id': r['id'], 'name': r['name'], 'url': r['url'], 'active': r['url'] == active_url} for r in rows]
+    return jsonify({'ok': True, 'presets': presets, 'active_url': active_url})
+
+@app.route('/api/config/relay-presets', methods=['POST'])
+def add_relay_preset():
+    _init_relay_presets_table()
+    data = request.get_json() or {}
+    name = (data.get('name') or '').strip()
+    url = (data.get('url') or '').strip()
+    key = (data.get('key') or '').strip()
+    if not name or not url:
+        return jsonify({'error': 'name and url required'}), 400
+    conn = get_db()
+    cur = conn.execute('INSERT INTO relay_presets (name, url, key) VALUES (?,?,?)', (name, url, key))
+    conn.commit()
+    preset_id = cur.lastrowid
+    conn.close()
+    return jsonify({'ok': True, 'id': preset_id})
+
+@app.route('/api/config/relay-presets/<int:preset_id>', methods=['DELETE'])
+def delete_relay_preset(preset_id):
+    _init_relay_presets_table()
+    conn = get_db()
+    conn.execute('DELETE FROM relay_presets WHERE id=?', (preset_id,))
+    conn.commit()
+    conn.close()
+    return jsonify({'ok': True})
+
+@app.route('/api/config/relay-presets/<int:preset_id>/activate', methods=['POST'])
+def activate_relay_preset(preset_id):
+    import subprocess as _sp
+    _init_relay_presets_table()
+    conn = get_db()
+    row = conn.execute('SELECT * FROM relay_presets WHERE id=?', (preset_id,)).fetchone()
+    conn.close()
+    if not row:
+        return jsonify({'error': 'not found'}), 404
+    new_url = row['url']
+    new_key = row['key'] or ''
+    try:
+        env = open('/opt/frontend/.env').read()
+        if 'API_URL=' in env:
+            env = re.sub(r'^API_URL=.*$', f'API_URL={new_url}', env, flags=re.MULTILINE)
+        else:
+            env = env.rstrip() + f'\nAPI_URL={new_url}\n'
+        if new_key:
+            if 'ANTHROPIC_API_KEY=' in env:
+                env = re.sub(r'^ANTHROPIC_API_KEY=.*$', f'ANTHROPIC_API_KEY={new_key}', env, flags=re.MULTILINE)
+            else:
+                env = env.rstrip() + f'\nANTHROPIC_API_KEY={new_key}\n'
+        open('/opt/frontend/.env', 'w').write(env)
+        _sp.run(['systemctl', 'restart', 'frontend-gw'], timeout=15)
+        return jsonify({'ok': True})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
 def _init_todos_table():
     conn = get_db()
     conn.execute(

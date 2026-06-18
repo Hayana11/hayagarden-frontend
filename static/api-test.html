@@ -73,13 +73,14 @@ body{background:linear-gradient(160deg,var(--bg1) 0%,var(--bg2) 100%);background
 .prov-name{font-size:13px;font-weight:600;color:var(--text);margin-bottom:3px;}
 .prov-opt.act .prov-name{color:var(--primary);}
 .prov-desc{font-size:10px;color:var(--hint);line-height:1.5;}
-/* key modal */
+/* modals */
 .mo{display:none;position:fixed;inset:0;background:rgba(0,0,0,.3);z-index:100;align-items:flex-end;justify-content:center;padding-bottom:0;}
 .mo.show{display:flex;}
 .mb{background:rgba(255,255,255,.97);border-radius:18px 18px 0 0;padding:20px 18px calc(20px + env(safe-area-inset-bottom,0px));width:100%;max-width:480px;}
 .mb h4{font-size:15px;font-weight:700;color:var(--text);margin-bottom:12px;}
 .mb input{width:100%;padding:10px 12px;border-radius:10px;border:1px solid var(--tag-off-b);background:rgba(255,255,255,.7);font-size:13px;font-family:ui-monospace,'SF Mono',monospace;color:var(--text);outline:none;margin-bottom:10px;}
 .mb input:focus{border-color:rgba(212,165,116,.6);}
+.mb input.url{font-size:11px;}
 .mb-note{font-size:11px;color:var(--hint);margin-bottom:12px;line-height:1.6;}
 .mb-row{display:flex;gap:8px;}
 .mb-cancel{flex:1;padding:10px;border:1px solid var(--tag-off-b);border-radius:10px;background:var(--tag-off);color:var(--muted);font-size:13px;cursor:pointer;}
@@ -111,16 +112,17 @@ body{background:linear-gradient(160deg,var(--bg1) 0%,var(--bg2) 100%);background
 .res-mode.raw{background:rgba(210,185,155,.18);color:var(--hint);}
 .toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:rgba(58,46,40,.88);color:#fff;font-size:12px;padding:8px 18px;border-radius:20px;pointer-events:none;opacity:0;transition:opacity .25s;white-space:nowrap;z-index:999;}
 .toast.show{opacity:1;}
-
-.relay-row{display:flex;gap:8px;align-items:flex-start;margin-bottom:8px;}
-.relay-inp{flex:1;padding:9px 11px;border-radius:10px;border:1.5px solid var(--tag-off-b);background:rgba(255,255,255,.75);font-size:12px;font-family:ui-monospace,'SF Mono',monospace;color:var(--text);outline:none;}
-.relay-inp:focus{border-color:rgba(212,165,116,.6);}
-.relay-inp.url{font-size:11px;}
-.relay-save{padding:9px 14px;border:none;border-radius:10px;background:var(--amber);color:#fff;font-size:12px;cursor:pointer;font-family:inherit;white-space:nowrap;}
-.relay-save:disabled{opacity:.5;cursor:default;}
-.relay-status{font-size:11px;color:var(--green);margin-top:4px;min-height:16px;}
-.dyn-model-select{width:100%;padding:9px 11px;border-radius:10px;border:1.5px solid var(--tag-off-b);background:rgba(255,255,255,.75);font-size:12px;font-family:ui-monospace,'SF Mono',monospace;color:var(--text);outline:none;margin-top:8px;-webkit-appearance:none;}
-.dyn-model-select:focus{border-color:rgba(212,165,116,.6);}
+/* relay presets */
+.preset-item{display:flex;align-items:center;gap:8px;padding:9px 0;border-bottom:1px solid var(--div);}
+.preset-item:last-child{border-bottom:none;}
+.preset-info{flex:1;min-width:0;}
+.preset-name{font-size:13px;color:var(--text);font-weight:500;}
+.preset-url{font-size:10px;color:var(--hint);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:2px;}
+.preset-active{font-size:10px;color:var(--primary);background:var(--primary-bg);padding:2px 8px;border-radius:8px;flex-shrink:0;white-space:nowrap;}
+.preset-del{background:none;border:none;color:var(--hint);font-size:15px;cursor:pointer;padding:4px 3px;display:flex;flex-shrink:0;transition:color .15s;}
+.preset-del:hover{color:#c07070;}
+.relay-status{font-size:11px;color:var(--green);margin-top:6px;min-height:16px;}
+.relay-status.err{color:#c07070;}
 </style>
 </head>
 <body>
@@ -145,7 +147,7 @@ body{background:linear-gradient(160deg,var(--bg1) 0%,var(--bg2) 100%);background
     <div class="prov-row">
       <div class="prov-opt" id="prov-treegpt" onclick="setProvider('treegpt')">
         <div class="prov-name">中转 API</div>
-        <div class="prov-desc">treegpt.cc<br>按 token 计费</div>
+        <div class="prov-desc">中转站代理<br>按 token 计费</div>
       </div>
       <div class="prov-opt" id="prov-claude_code" onclick="setProvider('claude_code')">
         <div class="prov-name">订阅 Claude Code</div>
@@ -162,28 +164,21 @@ body{background:linear-gradient(160deg,var(--bg1) 0%,var(--bg2) 100%);background
       <button class="card-action" onclick="openKeyMo()">更换</button>
     </div>
     <div class="kv"><span class="kv-key">key</span><span class="kv-val" id="k-key">—</span></div>
-    <div class="kv"><span class="kv-key">来源</span><span class="kv-val dim" id="k-src">treegpt.cc</span></div>
+    <div class="kv"><span class="kv-key">来源</span><span class="kv-val dim" id="k-src">—</span></div>
     <div class="kv"><span class="kv-key">今日消息</span><span class="kv-val" id="k-msgs">—</span></div>
     <div class="kv"><span class="kv-key">响应延迟</span><span class="kv-val" id="k-lat">—</span></div>
   </div>
 
-
-  <!-- Card 1b: Relay -->
+  <!-- Card 1b: Relay Presets -->
   <div class="card">
     <div class="card-hd">
       <div class="card-title">relay / 中转站</div>
+      <button class="card-action" onclick="openRelayAdd()">添加预设</button>
     </div>
-    <div class="relay-row">
-      <input class="relay-inp url" id="relay-url" placeholder="https://example.com/v1/messages">
-    </div>
-    <div class="relay-row">
-      <input class="relay-inp" id="relay-key" type="password" placeholder="API Key（不改则留空）">
-      <button class="relay-save" id="relay-save-btn" onclick="saveRelay()">保存</button>
+    <div id="relay-presets-list">
+      <div style="color:var(--hint);font-size:12px;text-align:center;padding:8px 0;">加载中…</div>
     </div>
     <div class="relay-status" id="relay-status"></div>
-    <select class="dyn-model-select" id="dyn-model-sel" onchange="applyDynModel(this.value)" style="display:none">
-      <option value="">— 选择模型 —</option>
-    </select>
   </div>
 
   <!-- Card 2: Model -->
@@ -207,6 +202,7 @@ body{background:linear-gradient(160deg,var(--bg1) 0%,var(--bg2) 100%);background
   <div class="card">
     <div class="card-hd">
       <div class="card-title">available models</div>
+      <button class="card-action" onclick="loadModels()">刷新</button>
     </div>
     <div id="models-list"><div style="color:var(--hint);font-size:12px;text-align:center;padding:8px 0;">加载中…</div></div>
   </div>
@@ -268,347 +264,337 @@ body{background:linear-gradient(160deg,var(--bg1) 0%,var(--bg2) 100%);background
   </div>
 </div>
 
+<!-- Add relay preset modal -->
+<div class="mo" id="relay-add-mo">
+  <div class="mb">
+    <h4>添加中转站预设</h4>
+    <input id="relay-name-inp" placeholder="名称（如：treegpt / 备用站）" autocomplete="off">
+    <input id="relay-url-inp" class="url" placeholder="https://api.example.com/v1/messages" autocomplete="off">
+    <input id="relay-key-inp" type="password" placeholder="API Key（可留空，保持当前 Key）">
+    <div class="mb-row">
+      <button class="mb-cancel" onclick="closeRelayAdd()">取消</button>
+      <button class="mb-send" onclick="submitRelayAdd()">保存</button>
+    </div>
+  </div>
+</div>
+
 <div class="toast" id="toast"></div>
 
 <script>
-var currentModel='', currentKey='', rawKeyLen=0;
+var currentModel = '', currentKey = '', currentModels = [];
 
-async function init(){
+async function init() {
   loadProvider();
   loadKeyStatus();
-  loadRelayUrl();
+  loadRelayPresets();
   loadModel();
   pingLatency();
   loadModels();
 }
 
-var curProvider='treegpt', ccTokenSet=false;
-var PROV_NOTES={
-  treegpt:'当前走中转 API：人设与记忆由网关注入，支持工具（记忆/灯）。',
-  claude_code:'当前走订阅 Claude Code：官方原生，固定月费。暂不支持工具调用（记忆保存/灯控不可用），回复整段返回（无逐字流式）。'
+// ── Provider ──────────────────────────────────────────
+var curProvider = 'treegpt', ccTokenSet = false;
+var PROV_NOTES = {
+  treegpt: '当前走中转 API：人设与记忆由网关注入，支持工具（记忆/灯）。',
+  claude_code: '当前走订阅 Claude Code：官方原生，固定月费。暂不支持工具调用（记忆保存/灯控不可用），回复整段返回（无逐字流式）。'
 };
 
-async function loadProvider(){
-  try{
-    var r=await fetch('/api/config/provider');
-    var d=await r.json();
-    curProvider=d.provider||'treegpt';
-    ccTokenSet=!!d.cc_token_set;
+async function loadProvider() {
+  try {
+    var r = await fetch('/api/config/provider');
+    var d = await r.json();
+    curProvider = d.provider || 'treegpt';
+    ccTokenSet = !!d.cc_token_set;
     renderProvider();
-  }catch(e){}
+  } catch(e) {}
 }
-function renderProvider(){
-  document.getElementById('prov-treegpt').classList.toggle('act',curProvider==='treegpt');
-  document.getElementById('prov-claude_code').classList.toggle('act',curProvider==='claude_code');
-  var note=PROV_NOTES[curProvider]||'';
-  if(curProvider==='claude_code'&&!ccTokenSet)note='⚠️ 尚未填入订阅 token，点右上角「订阅 token」配置。';
-  if(curProvider==='treegpt'&&!ccTokenSet)note+='（订阅模式需先填 token）';
-  document.getElementById('prov-note').textContent=note;
+function renderProvider() {
+  document.getElementById('prov-treegpt').classList.toggle('act', curProvider === 'treegpt');
+  document.getElementById('prov-claude_code').classList.toggle('act', curProvider === 'claude_code');
+  var note = PROV_NOTES[curProvider] || '';
+  if (curProvider === 'claude_code' && !ccTokenSet) note = '⚠️ 尚未填入订阅 token，点右上角「订阅 token」配置。';
+  if (curProvider === 'treegpt' && !ccTokenSet) note += '（订阅模式需先填 token）';
+  document.getElementById('prov-note').textContent = note;
 }
-async function setProvider(p){
-  if(p===curProvider)return;
-  if(p==='claude_code'&&!ccTokenSet){
-    toast('请先填入订阅 token');
-    openTokenMo();
-    return;
-  }
-  var r=await fetch('/api/config/provider',{
-    method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({provider:p})
+async function setProvider(p) {
+  if (p === curProvider) return;
+  if (p === 'claude_code' && !ccTokenSet) { toast('请先填入订阅 token'); openTokenMo(); return; }
+  var r = await fetch('/api/config/provider', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({provider: p})
   });
-  if(r.ok){
-    curProvider=p;
-    renderProvider();
-    toast('已切换到'+(p==='claude_code'?'订阅模式':'中转 API')+'，网关重启中');
-  }else{
-    toast('切换失败');
-  }
+  if (r.ok) { curProvider = p; renderProvider(); toast('已切换到' + (p === 'claude_code' ? '订阅模式' : '中转 API') + '，网关重启中'); }
+  else { toast('切换失败'); }
 }
-function openTokenMo(){document.getElementById('token-mo').classList.add('show');document.getElementById('token-inp').value='';}
-function closeTokenMo(){document.getElementById('token-mo').classList.remove('show');}
-async function submitToken(){
-  var t=document.getElementById('token-inp').value.trim();
-  if(!t)return;
-  var r=await fetch('/api/config/cc-token',{
-    method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({token:t})
-  });
-  if(r.ok){
-    ccTokenSet=true;
-    closeTokenMo();
-    renderProvider();
-    toast('token 已保存，网关重启中');
-  }else{
-    toast('保存失败');
-  }
+function openTokenMo() { document.getElementById('token-mo').classList.add('show'); document.getElementById('token-inp').value = ''; }
+function closeTokenMo() { document.getElementById('token-mo').classList.remove('show'); }
+async function submitToken() {
+  var t = document.getElementById('token-inp').value.trim();
+  if (!t) return;
+  var r = await fetch('/api/config/cc-token', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({token: t})});
+  if (r.ok) { ccTokenSet = true; closeTokenMo(); renderProvider(); toast('token 已保存，网关重启中'); }
+  else { toast('保存失败'); }
 }
 
-async function loadKeyStatus(){
-  var r=await fetch('/api/config/key-status');
-  var d=await r.json();
-  document.getElementById('k-key').textContent=d.masked_key||'—';
-  document.getElementById('k-msgs').textContent=d.today_msgs+' 条';
-  document.getElementById('k-src').textContent=d.source||'treegpt.cc';
-  rawKeyLen=d.raw_len||0;
-  currentKey=d.masked_key||'';
+// ── Key ───────────────────────────────────────────────
+async function loadKeyStatus() {
+  var r = await fetch('/api/config/key-status');
+  var d = await r.json();
+  document.getElementById('k-key').textContent = d.masked_key || '—';
+  document.getElementById('k-msgs').textContent = d.today_msgs + ' 条';
+  document.getElementById('k-src').textContent = d.source || '—';
+  currentKey = d.masked_key || '';
+}
+function openKeyMo() { document.getElementById('key-mo').classList.add('show'); document.getElementById('key-inp').value = ''; }
+function closeKeyMo() { document.getElementById('key-mo').classList.remove('show'); }
+async function submitKey() {
+  var k = document.getElementById('key-inp').value.trim();
+  if (!k) return;
+  var r = await fetch('/api/config/key', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({key: k})});
+  if (r.ok) { closeKeyMo(); toast('Key 已更新，网关重启中'); setTimeout(loadKeyStatus, 3000); }
+  else { toast('保存失败'); }
 }
 
-async function loadModel(){
-  var r=await fetch('/api/config/model');
-  var d=await r.json();
-  currentModel=d.model||'';
-  document.getElementById('cur-model-name').textContent=currentModel;
-  document.getElementById('model-inp').value=currentModel;
-}
-
-async function pingLatency(){
-  var dot=document.getElementById('conn-dot');
-  var txt=document.getElementById('conn-txt');
-  var latEl=document.getElementById('k-lat');
-  var t0=Date.now();
-  try{
-    var r=await fetch('/api/config/key-status');
-    if(!r.ok)throw new Error('err');
-    var ms=Date.now()-t0;
-    dot.className='conn-dot ok';
-    txt.textContent='connected';
-    latEl.innerHTML='<span style="color:var(--green)">'+ms+' ms</span>';
-  }catch(e){
-    dot.className='conn-dot err';
-    txt.textContent='error';
-    latEl.textContent='超时';
+// ── Latency ───────────────────────────────────────────
+async function pingLatency() {
+  var dot = document.getElementById('conn-dot');
+  var txt = document.getElementById('conn-txt');
+  var latEl = document.getElementById('k-lat');
+  var t0 = Date.now();
+  try {
+    var r = await fetch('/api/config/key-status');
+    if (!r.ok) throw new Error('err');
+    var ms = Date.now() - t0;
+    dot.className = 'conn-dot ok'; txt.textContent = 'connected';
+    latEl.innerHTML = '<span style="color:var(--green)">' + ms + ' ms</span>';
+  } catch(e) {
+    dot.className = 'conn-dot err'; txt.textContent = 'error'; latEl.textContent = '超时';
   }
 }
 
-async function loadModels(){
-  var el=document.getElementById('models-list');
-  try{
-    // fetch model list from treegpt.cc (OpenAI-compatible)
-    var keyR=await fetch('/api/config/key-status');
-    var kd=await keyR.json();
-    // We use a backend proxy approach – call treegpt via the test endpoint
-    // Actually just show known models since treegpt may not have /v1/models
-    renderKnownModels();
-  }catch(e){
-    renderKnownModels();
-  }
+// ── Relay Presets ─────────────────────────────────────
+function escH(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 
-var KNOWN_MODELS=[
-  {id:'claude-opus-4-8',label:'Claude Opus 4.8',note:''},
-  {id:'claude-opus-4-6',label:'Claude Opus 4.6',note:''},
-  {id:'claude-sonnet-4-6',label:'Claude Sonnet 4.6',note:''},
-  {id:'claude-haiku-4-5-20251001',label:'Claude Haiku 4.5',note:''},
-  {id:'claude-fable-5',label:'Claude Fable 5',note:''},
-  {id:'deepseek-v4-flash',label:'DeepSeek v4 Flash',note:'保洁阿姨专用',locked:true},
-];
-
-function renderKnownModels(){
-  var el=document.getElementById('models-list');
-  el.innerHTML=KNOWN_MODELS.map(function(m){
-    var isActive=m.id===currentModel;
-    var dotCls=isActive?'active':'avail';
-    var right='';
-    if(m.locked){
-      right='<span class="mi-badge">'+m.note+'</span>';
-    } else if(isActive){
-      right='<span class="mi-badge" style="background:var(--primary-bg);color:var(--primary);">使用中</span>';
-    } else {
-      right='<button class="mi-switch" onclick="switchModel(\''+m.id+'\')">切换</button>';
+async function loadRelayPresets() {
+  var el = document.getElementById('relay-presets-list');
+  try {
+    var r = await fetch('/api/config/relay-presets');
+    var d = await r.json();
+    if (!d.presets || !d.presets.length) {
+      el.innerHTML = '<div style="color:var(--hint);font-size:12px;padding:8px 0;">还没有预设，点「添加预设」新增</div>';
+      return;
     }
+    el.innerHTML = d.presets.map(function(p) {
+      var actionEl = p.active
+        ? '<span class="preset-active">使用中</span>'
+        : '<button class="mi-switch" onclick="activatePreset(' + p.id + ')">切换</button>';
+      return '<div class="preset-item">'
+        + '<div class="preset-info">'
+        + '<div class="preset-name">' + escH(p.name) + '</div>'
+        + '<div class="preset-url">' + escH(p.url) + '</div>'
+        + '</div>'
+        + actionEl
+        + '<button class="preset-del" onclick="deletePreset(' + p.id + ')" title="删除"><i class="ti ti-trash"></i></button>'
+        + '</div>';
+    }).join('');
+  } catch(e) {
+    el.innerHTML = '<div style="color:#c07070;font-size:12px;">加载失败</div>';
+  }
+}
+
+function openRelayAdd() {
+  document.getElementById('relay-add-mo').classList.add('show');
+  document.getElementById('relay-name-inp').value = '';
+  document.getElementById('relay-url-inp').value = '';
+  document.getElementById('relay-key-inp').value = '';
+  setTimeout(function(){ document.getElementById('relay-name-inp').focus(); }, 100);
+}
+function closeRelayAdd() { document.getElementById('relay-add-mo').classList.remove('show'); }
+
+async function submitRelayAdd() {
+  var name = document.getElementById('relay-name-inp').value.trim();
+  var url = document.getElementById('relay-url-inp').value.trim();
+  var key = document.getElementById('relay-key-inp').value.trim();
+  if (!name || !url) { toast('请填写名称和地址'); return; }
+  var r = await fetch('/api/config/relay-presets', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({name: name, url: url, key: key})
+  });
+  var d = await r.json();
+  if (d.ok) { closeRelayAdd(); toast('已添加'); loadRelayPresets(); }
+  else { toast('保存失败: ' + (d.error || 'unknown')); }
+}
+
+async function activatePreset(id) {
+  var st = document.getElementById('relay-status');
+  st.className = 'relay-status';
+  st.textContent = '切换中，网关重启约需 3 秒…';
+  try {
+    var r = await fetch('/api/config/relay-presets/' + id + '/activate', {method: 'POST'});
+    var d = await r.json();
+    if (d.ok) {
+      loadRelayPresets();
+      setTimeout(function() {
+        loadKeyStatus();
+        loadModels();
+        st.textContent = '';
+      }, 3000);
+      toast('已切换，网关重启中');
+    } else {
+      st.className = 'relay-status err';
+      st.textContent = '切换失败: ' + (d.error || 'unknown');
+    }
+  } catch(e) {
+    st.className = 'relay-status err';
+    st.textContent = '请求失败: ' + e.message;
+  }
+}
+
+async function deletePreset(id) {
+  var r = await fetch('/api/config/relay-presets/' + id, {method: 'DELETE'});
+  if (r.ok) { loadRelayPresets(); toast('已删除'); }
+  else { toast('删除失败'); }
+}
+
+// ── Model ─────────────────────────────────────────────
+async function loadModel() {
+  var r = await fetch('/api/config/model');
+  var d = await r.json();
+  currentModel = d.model || '';
+  document.getElementById('cur-model-name').textContent = currentModel;
+  document.getElementById('model-inp').value = currentModel;
+}
+function startModelEdit() {
+  document.getElementById('model-edit-row').style.display = 'flex';
+  document.getElementById('model-display-row').style.display = 'none';
+  document.getElementById('model-inp').focus();
+}
+function cancelModelEdit() {
+  document.getElementById('model-edit-row').style.display = 'none';
+  document.getElementById('model-display-row').style.display = 'flex';
+}
+async function saveModel() {
+  var v = document.getElementById('model-inp').value.trim();
+  if (!v) return;
+  var r = await fetch('/api/config/model', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({model: v})});
+  if (r.ok) {
+    currentModel = v;
+    document.getElementById('cur-model-name').textContent = v;
+    cancelModelEdit();
+    var msg = document.getElementById('model-msg');
+    msg.style.display = 'block';
+    setTimeout(function(){ msg.style.display = 'none'; }, 3000);
+    toast('模型已更新');
+    renderDynModels();
+  } else { toast('保存失败'); }
+}
+
+async function switchModel(modelId) {
+  var r = await fetch('/api/config/model', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({model: modelId})
+  });
+  if (r.ok) {
+    currentModel = modelId;
+    document.getElementById('cur-model-name').textContent = modelId;
+    document.getElementById('model-inp').value = modelId;
+    toast('已切换到 ' + modelId + '，网关重启中');
+    renderDynModels();
+  } else { toast('切换失败'); }
+}
+
+// ── Dynamic Models ────────────────────────────────────
+async function loadModels() {
+  var el = document.getElementById('models-list');
+  el.innerHTML = '<div style="color:var(--hint);font-size:12px;text-align:center;padding:8px 0;">加载中…</div>';
+  try {
+    var r = await fetch('/api/config/models');
+    var d = await r.json();
+    if (!d.ok || !d.models || !d.models.length) {
+      el.innerHTML = '<div style="color:var(--hint);font-size:12px;padding:8px 0;">'
+        + escH(d.error || '中转站未返回模型列表，可在上方手动输入模型名') + '</div>';
+      currentModels = [];
+      return;
+    }
+    currentModels = d.models;
+    renderDynModels();
+  } catch(e) {
+    el.innerHTML = '<div style="color:#c07070;font-size:12px;">获取失败: ' + escH(e.message) + '</div>';
+    currentModels = [];
+  }
+}
+
+function renderDynModels() {
+  var el = document.getElementById('models-list');
+  if (!currentModels.length) return;
+  el.innerHTML = currentModels.map(function(m) {
+    var isActive = m === currentModel;
+    var dotCls = isActive ? 'active' : 'avail';
+    var right = isActive
+      ? '<span class="mi-badge" style="background:var(--primary-bg);color:var(--primary);">使用中</span>'
+      : '<button class="mi-switch" onclick="switchModel(\'' + escH(m) + '\')">切换</button>';
     return '<div class="model-item">'
-      +'<div class="mi-dot '+dotCls+'"></div>'
-      +'<div class="mi-name">'+m.label+'<br><span style="color:var(--hint);font-size:10px;">'+m.id+'</span></div>'
-      +right+'</div>';
+      + '<div class="mi-dot ' + dotCls + '"></div>'
+      + '<div class="mi-name">' + escH(m) + '</div>'
+      + right + '</div>';
   }).join('');
 }
 
-async function switchModel(modelId){
-  var btn=event.target;
-  btn.disabled=true;btn.textContent='切换中…';
-  var r=await fetch('/api/config/model',{
-    method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({model:modelId})
-  });
-  if(r.ok){
-    currentModel=modelId;
-    btn.className='mi-switch done';btn.textContent='已切换';
-    document.getElementById('cur-model-name').textContent=modelId;
-    toast('已切换到 '+modelId+'，网关重启中');
-    setTimeout(function(){renderKnownModels();},2000);
-  } else {
-    btn.disabled=false;btn.textContent='切换';
-    toast('切换失败');
-  }
+// ── Test send ─────────────────────────────────────────
+var useGateway = true;
+function onToggleInject() {
+  useGateway = document.getElementById('inject-tog').checked;
+  document.getElementById('inject-desc').textContent = useGateway ? '走网关，注入人设与记忆' : '裸调 API，无人设无记忆';
 }
 
-function startModelEdit(){
-  document.getElementById('model-edit-row').style.display='flex';
-  document.getElementById('model-display-row').style.display='none';
-  document.getElementById('model-inp').focus();
-}
-function cancelModelEdit(){
-  document.getElementById('model-edit-row').style.display='none';
-  document.getElementById('model-display-row').style.display='flex';
-}
-async function saveModel(){
-  var v=document.getElementById('model-inp').value.trim();
-  if(!v)return;
-  var r=await fetch('/api/config/model',{
-    method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({model:v})
-  });
-  if(r.ok){
-    currentModel=v;
-    document.getElementById('cur-model-name').textContent=v;
-    cancelModelEdit();
-    var msg=document.getElementById('model-msg');
-    msg.style.display='block';
-    setTimeout(function(){msg.style.display='none';},3000);
-    toast('模型已更新');
-    renderKnownModels();
-  } else {
-    toast('保存失败');
-  }
-}
-
-function openKeyMo(){document.getElementById('key-mo').classList.add('show');document.getElementById('key-inp').value='';}
-function closeKeyMo(){document.getElementById('key-mo').classList.remove('show');}
-async function submitKey(){
-  var k=document.getElementById('key-inp').value.trim();
-  if(!k)return;
-  var r=await fetch('/api/config/key',{
-    method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({key:k})
-  });
-  if(r.ok){closeKeyMo();toast('Key 已更新，网关重启中');setTimeout(loadKeyStatus,3000);}
-  else{toast('保存失败');}
-}
-
-var useGateway=true;
-function onToggleInject(){
-  useGateway=document.getElementById('inject-tog').checked;
-  document.getElementById('inject-desc').textContent=useGateway
-    ?'走网关，注入人设与记忆'
-    :'裸调 API，无人设无记忆';
-}
-
-async function runTest(){
-  var msg=document.getElementById('test-ta').value.trim();
-  if(!msg)return;
-  var btn=document.getElementById('test-btn');
-  btn.disabled=true;btn.textContent='发送中…';
-  var res=document.getElementById('test-result');
+async function runTest() {
+  var msg = document.getElementById('test-ta').value.trim();
+  if (!msg) return;
+  var btn = document.getElementById('test-btn');
+  btn.disabled = true; btn.textContent = '发送中…';
+  var res = document.getElementById('test-result');
   res.classList.remove('show');
-  var t0=Date.now();
-  try{
-    var r=await fetch('/api/gw/test',{
-      method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({message:msg,inject_memory:useGateway})
+  var t0 = Date.now();
+  try {
+    var r = await fetch('/api/gw/test', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({message: msg, inject_memory: useGateway})
     });
-    var d=await r.json();
-    var ms=Date.now()-t0;
-    var modeEl=document.getElementById('res-mode');
-    modeEl.textContent=useGateway?'网关':'裸调';
-    modeEl.className='res-mode '+(useGateway?'gw':'raw');
-    modeEl.style.display='';
-    document.getElementById('res-time').textContent=(d.latency_ms||ms)+' ms';
-    var tok=(d.input_tokens||d.output_tokens)?(d.input_tokens||0)+'in / '+(d.output_tokens||0)+'out':'—';
-    document.getElementById('res-tokens').textContent=tok;
-    document.getElementById('res-txt').textContent=d.content||d.error||'(空)';
+    var d = await r.json();
+    var ms = Date.now() - t0;
+    var modeEl = document.getElementById('res-mode');
+    modeEl.textContent = useGateway ? '网关' : '裸调';
+    modeEl.className = 'res-mode ' + (useGateway ? 'gw' : 'raw');
+    modeEl.style.display = '';
+    document.getElementById('res-time').textContent = (d.latency_ms || ms) + ' ms';
+    var tok = (d.input_tokens || d.output_tokens) ? (d.input_tokens || 0) + 'in / ' + (d.output_tokens || 0) + 'out' : '—';
+    document.getElementById('res-tokens').textContent = tok;
+    document.getElementById('res-txt').textContent = d.content || d.error || '(空)';
     res.classList.add('show');
-  }catch(e){
-    document.getElementById('res-mode').style.display='none';
-    document.getElementById('res-txt').textContent='请求失败: '+e.message;
+  } catch(e) {
+    document.getElementById('res-mode').style.display = 'none';
+    document.getElementById('res-txt').textContent = '请求失败: ' + e.message;
     res.classList.add('show');
   }
-  btn.disabled=false;btn.textContent='发送测试';
+  btn.disabled = false; btn.textContent = '发送测试';
 }
 
-function toast(msg){
-  var el=document.getElementById('toast');
-  el.textContent=msg;el.classList.add('show');
+// ── Toast ─────────────────────────────────────────────
+function toast(msg) {
+  var el = document.getElementById('toast');
+  el.textContent = msg; el.classList.add('show');
   clearTimeout(el._t);
-  el._t=setTimeout(function(){el.classList.remove('show');},2200);
+  el._t = setTimeout(function(){ el.classList.remove('show'); }, 2200);
 }
 
-document.getElementById('key-mo').addEventListener('click',function(e){
-  if(e.target===this)closeKeyMo();
-});
-document.getElementById('token-mo').addEventListener('click',function(e){
-  if(e.target===this)closeTokenMo();
-});
-
-async function loadRelayUrl(){
-  try{
-    var r=await fetch('/api/config/key-status');
-    var d=await r.json();
-    // populate relay URL input from source field
-    var url=d.source||'';
-    if(url && url.startsWith('http')){
-      document.getElementById('relay-url').value=url;
-    }
-  }catch(e){}
-}
-
-async function saveRelay(){
-  var url=document.getElementById('relay-url').value.trim();
-  var key=document.getElementById('relay-key').value.trim();
-  if(!url){document.getElementById('relay-status').textContent='请填写中转站地址';return;}
-  var btn=document.getElementById('relay-save-btn');
-  btn.disabled=true;btn.textContent='保存中…';
-  var st=document.getElementById('relay-status');st.textContent='';
-  try{
-    var r=await fetch('/api/config/relay',{
-      method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({url:url,key:key})
-    });
-    var d=await r.json();
-    if(!d.ok){st.textContent='保存失败: '+(d.error||'unknown');btn.disabled=false;btn.textContent='保存';return;}
-    st.textContent='已保存，正在获取可用模型…';
-    // reload key-status for updated source
-    setTimeout(loadKeyStatus,2500);
-    // fetch models from new relay
-    await loadDynModels();
-  }catch(e){st.textContent='请求失败: '+e.message;}
-  btn.disabled=false;btn.textContent='保存';
-}
-
-async function loadDynModels(){
-  var st=document.getElementById('relay-status');
-  var sel=document.getElementById('dyn-model-sel');
-  try{
-    var r=await fetch('/api/config/models');
-    var d=await r.json();
-    if(!d.ok||!d.models||!d.models.length){
-      st.textContent='中转站未返回模型列表（直接在下方手动填写模型名即可）';
-      sel.style.display='none';
-      return;
-    }
-    sel.innerHTML='<option value="">— 选择并切换模型 —</option>'+
-      d.models.map(function(m){return '<option value="'+m+'">'+m+'</option>';}).join('');
-    sel.style.display='block';
-    st.textContent='已保存，共 '+d.models.length+' 个可用模型 ↓';
-  }catch(e){
-    st.textContent='获取模型列表失败: '+e.message;
-    sel.style.display='none';
-  }
-}
-
-async function applyDynModel(modelId){
-  if(!modelId)return;
-  var r=await fetch('/api/config/model',{
-    method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({model:modelId})
+// ── Modal backdrop close ──────────────────────────────
+['key-mo', 'token-mo', 'relay-add-mo'].forEach(function(id) {
+  document.getElementById(id).addEventListener('click', function(e) {
+    if (e.target === this) this.classList.remove('show');
   });
-  if(r.ok){
-    currentModel=modelId;
-    document.getElementById('cur-model-name').textContent=modelId;
-    document.getElementById('model-inp').value=modelId;
-    renderKnownModels();
-    toast('已切换到 '+modelId+'，网关重启中');
-  }else{toast('切换失败');}
-}
+});
 
 init();
 </script>
