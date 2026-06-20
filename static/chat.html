@@ -85,8 +85,8 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:14px;heigh
 
 /* Fyodor bubble */
 .bubble.fy{background:var(--primary-light);border-radius:16px 16px 16px 4px;padding:10px 14px;font-size:var(--msg-font);line-height:1.7;word-break:break-all;color:var(--text);}
-.cache-info{font-size:10px;color:var(--muted);margin-top:3px;padding-left:2px;opacity:.7;}
-.cache-info.hit{color:#3B6D11;}
+.cache-info{font-size:10px;color:var(--muted);opacity:.65;margin-right:6px;}
+.cache-info.hit{color:#5a9c3a;opacity:.85;}
 .err-banner{font-size:11px;color:#A32D2D;background:#FCEBEB;border-radius:8px;padding:6px 10px;margin-top:4px;display:flex;align-items:center;gap:6px;}
 .err-banner button{font-size:10px;border:none;background:#A32D2D;color:#fff;border-radius:6px;padding:2px 8px;cursor:pointer;font-family:inherit;}
 /* Hayana bubble */
@@ -587,12 +587,13 @@ function buildHtml(list) {
       return out.trim();
     })(m.content||'');
     if(hasTxt && displayContent) innerHtml += (hasImg?'<div class="img-then-text">':'')+escHtml(displayContent)+(hasImg?'</div>':''  );
+    var cacheInfoHtml = '';
     if(fy && m.cache_info){
       try{
         var ci = JSON.parse(m.cache_info);
         var hit = (ci.cache_read||0) > 0;
-        var ciText = hit ? ('✓ 命中缓存 '+ci.cache_read+' tokens') : (ci.cache_creation ? ('首次建缓存 '+ci.cache_creation+' tokens') : '');
-        if(ciText) innerHtml += '<div class="cache-info'+(hit?' hit':'')+'">'+ciText+'</div>';
+        var ciText = hit ? ('✓ '+ci.cache_read) : (ci.cache_creation ? ('建缓存 '+ci.cache_creation) : '');
+        if(ciText) cacheInfoHtml = '<span class="cache-info'+(hit?' hit':'')+'">'+ciText+'</span>';
       }catch(e){}
     }
 
@@ -611,7 +612,7 @@ function buildHtml(list) {
         '<div class="msg-row '+side+'" data-idx="'+i+'" data-mid="'+m.id+'">' +
           '<div class="bwrap">' +
             '<div class="bubble '+side+(imgOnly?' img-only':'')+'">'+innerHtml+'</div>' +
-            '<div class="msg-time-row"><span class="msg-time">'+fmtTime(m.created_at)+'</span>'+branchBar+actHtml+'</div>' +
+            '<div class="msg-time-row">'+cacheInfoHtml+'<span class="msg-time">'+fmtTime(m.created_at)+'</span>'+branchBar+actHtml+'</div>' +
           '</div>' +
         '</div>';
     } else {
