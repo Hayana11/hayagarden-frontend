@@ -649,7 +649,7 @@ def config_set_model():
         gw2 = re.sub(r"^MODEL\s*=\s*['\"][^'\"]+['\"]",
                      f"MODEL      = '{new_model}'", gw, flags=re.MULTILINE)
         open('/opt/frontend/gateway.py', 'w').write(gw2)
-        subprocess.run(['systemctl', 'restart', 'frontend-gw'], timeout=15)
+        subprocess.Popen(['systemctl', 'restart', 'frontend-gw'])
         return jsonify({'ok': True})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -694,7 +694,7 @@ def config_set_key():
         env2 = re.sub(r'^ANTHROPIC_API_KEY=.*$',
                       f'ANTHROPIC_API_KEY={new_key}', env, flags=re.MULTILINE)
         open('/opt/frontend/.env', 'w').write(env2)
-        subprocess.run(['systemctl', 'restart', 'frontend-gw'], timeout=15)
+        subprocess.Popen(['systemctl', 'restart', 'frontend-gw'])
         return jsonify({'ok': True})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -835,7 +835,7 @@ def config_set_provider():
         return jsonify({'error': 'provider must be treegpt or claude_code'}), 400
     try:
         _env_set('GW_PROVIDER', provider)
-        subprocess.run(['systemctl', 'restart', 'frontend-gw'], timeout=15)
+        subprocess.Popen(['systemctl', 'restart', 'frontend-gw'])
         return jsonify({'ok': True, 'provider': provider})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -849,7 +849,7 @@ def config_set_cc_token():
         return jsonify({'error': 'empty token'}), 400
     try:
         _env_set('CLAUDE_CODE_OAUTH_TOKEN', token)
-        subprocess.run(['systemctl', 'restart', 'frontend-gw'], timeout=15)
+        subprocess.Popen(['systemctl', 'restart', 'frontend-gw'])
         return jsonify({'ok': True})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -1192,7 +1192,7 @@ def config_relay():
             else:
                 env = env.rstrip() + f'\nANTHROPIC_API_KEY={new_key}\n'
         open('/opt/frontend/.env', 'w').write(env)
-        _sp.run(['systemctl', 'restart', 'frontend-gw'], timeout=15)
+        _sp.Popen(['systemctl', 'restart', 'frontend-gw'])
         return jsonify({'ok': True})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -1316,7 +1316,7 @@ def activate_relay_preset(preset_id):
             else:
                 env = env.rstrip() + f'\nANTHROPIC_API_KEY={new_key}\n'
         open('/opt/frontend/.env', 'w').write(env)
-        _sp.run(['systemctl', 'restart', 'frontend-gw'], timeout=15)
+        _sp.Popen(['systemctl', 'restart', 'frontend-gw'])
         return jsonify({'ok': True})
     except Exception as e:
         return jsonify({'error': str(e)}), 500

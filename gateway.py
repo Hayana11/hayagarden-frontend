@@ -12,7 +12,7 @@ app = Flask(__name__)
 DB_PATH    = '/opt/frontend/memories.db'
 STATIC_DIR = '/opt/frontend/static'
 API_URL    = 'https://gua.guagua.uk/v1/messages'
-MODEL      = 'claude-opus-4-6'
+MODEL      = 'claude-sonnet-4-6'
 
 API_KEY = ''
 GW_PROVIDER = 'treegpt'
