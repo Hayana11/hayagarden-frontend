@@ -10,6 +10,26 @@ import urllib.request, urllib.error
 
 app = Flask(__name__)
 DB_PATH    = '/opt/frontend/memories.db'
+
+def _warmup_ombre_brain():
+    """
+    进程/worker启动时在后台线程预热ombre-brain（主要是jieba分词器初始化，
+    冷启动要5-7秒，热启动后只要0.4秒）。
+    放在模块顶层是因为gunicorn直接import gateway:app，不会走if __name__主分支。
+    """
+    import threading, logging as _log
+    def _do_warmup():
+        try:
+            import sys as _sys
+            _sys.path.insert(0, '/opt/ombre-brain')
+            import jieba
+            jieba.initialize()
+            _log.getLogger('gateway').info('[warmup] jieba预热完成')
+        except Exception as e:
+            _log.getLogger('gateway').warning('[warmup] jieba预热失败: %s', e)
+    threading.Thread(target=_do_warmup, daemon=True).start()
+
+_warmup_ombre_brain()
 STATIC_DIR = '/opt/frontend/static'
 API_URL    = 'https://gua.guagua.uk/v1/messages'
 MODEL      = 'claude-sonnet-4-6'
@@ -87,7 +107,7 @@ def _ombre_breath_sync():
         _aio.set_event_loop(loop)
         try:
             return loop.run_until_complete(
-                _aio.wait_for(_breath(), timeout=1.8)
+                _aio.wait_for(_breath(), timeout=6.0)
             )
         except _aio.TimeoutError:
             return None
@@ -110,7 +130,7 @@ def _ombre_breath_sync():
     try:
         with _cf.ThreadPoolExecutor(max_workers=1) as ex:
             future = ex.submit(_worker)
-            return future.result(timeout=2.5)
+            return future.result(timeout=7.0)
     except Exception:
         return None
 
