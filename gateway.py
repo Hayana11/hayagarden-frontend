@@ -260,20 +260,11 @@ def _ombre_hold_sync(content, tags='', importance=5, pinned=False):
 
 
 def build_system(wake=False):
-    parts = []
+    # ── BP1 · Persona（永不变，缓存断点1）────────────────────
+    bp1_text = read_persona()
 
-    # ── 1. Handoff：自我锚点 + 用户/关系画像 + 近期连续性 ──
-    try:
-        handoff_text = _ombre_handoff_sync()
-        if handoff_text and handoff_text.strip() and '无交接信息' not in handoff_text:
-            parts.append('## 开窗交接\n' + handoff_text)
-    except Exception:
-        pass
-
-    # ── 2. Persona ──────────────────────────────────────────
-    parts.append(read_persona())
-
-    # ── 3. Posts memories — 精简版：core层由渐变脑固化桶覆盖，不再重复注入 ──
+    # ── BP2 · 相对稳定记忆（几小时~一天变一次，缓存断点2）───────
+    bp2_parts = []
     conn = get_db()
     lt_mems = conn.execute(
         "SELECT content FROM posts WHERE layer='long-term' ORDER BY id DESC LIMIT 3"
@@ -282,19 +273,29 @@ def build_system(wake=False):
         "SELECT content FROM posts WHERE type='DIARY' ORDER BY id DESC LIMIT 2"
     ).fetchall()
     conn.close()
-
     if lt_mems:
-        parts.append('\n## 你们之间的记忆')
+        bp2_parts.append('\n## 你们之间的记忆')
         for m in reversed(lt_mems):
             c = m['content']
-            parts.append('- ' + (c[:120] + '…' if len(c) > 120 else c))
+            bp2_parts.append('- ' + (c[:120] + '…' if len(c) > 120 else c))
     if diaries:
-        parts.append('\n## 最近的日记')
+        bp2_parts.append('\n## 最近的日记')
         for d in reversed(diaries):
             c = d['content']
-            parts.append(c[:400] + '…' if len(c) > 400 else c)
+            bp2_parts.append(c[:400] + '…' if len(c) > 400 else c)
 
-    # ── 4. 意识连续性：你醒着时做的事 (Phase 3) ───────────
+    # ── BP3 · 动态内容（每次都变，不挂缓存标）───────────────────
+    parts = []
+
+    # 1. Handoff：自我锚点 + 用户/关系画像 + 近期连续性
+    try:
+        handoff_text = _ombre_handoff_sync()
+        if handoff_text and handoff_text.strip() and '无交接信息' not in handoff_text:
+            parts.append('## 开窗交接\n' + handoff_text)
+    except Exception:
+        pass
+
+    # 2. 意识连续性：你醒着时做的事 (Phase 3)
     try:
         _conn3 = get_db()
         _wakes = _conn3.execute(
@@ -319,7 +320,7 @@ def build_system(wake=False):
     except Exception:
         pass
 
-    # ── 5. 感知层：哈娅最近的活动 (Phase 1) ────────────────
+    # 3. 感知层：哈娅最近的活动 (Phase 1)
     try:
         _conn2 = get_db()
         _events = _conn2.execute(
@@ -343,7 +344,7 @@ def build_system(wake=False):
     except Exception:
         pass
 
-    # ── 灯·实时状态注入 ─────────────────────────────────────
+    # 4. 灯·实时状态注入
     try:
         _lreq = urllib.request.Request('http://127.0.0.1:5052/light/status')
         with urllib.request.urlopen(_lreq, timeout=3) as _lr:
@@ -360,7 +361,7 @@ def build_system(wake=False):
     except Exception:
         parts.append(NL + '（你拥有真实的工具：保存与搜索记忆、控制次卧的灯、查看与发布留言板消息。当下自然需要时安静使用，不必每次提及。）')
 
-    # ── 6. Board 待处理项 ────────────────────────────────────
+    # 5. Board 待处理项
     try:
         _conn_board = get_db()
         _board_items = _conn_board.execute(
@@ -377,7 +378,8 @@ def build_system(wake=False):
             parts.append("\n## 留言板 · 待处理\n" + "\n".join(_board_lines))
     except Exception:
         pass
-    # === 历史日摘要（层级记忆）===
+
+    # 6. 历史日摘要（层级记忆）
     try:
         _sc = get_db()
         _summaries = _sc.execute(
@@ -391,7 +393,7 @@ def build_system(wake=False):
     except Exception:
         pass
 
-    # ── memo层：跨端/跨窗口共同记忆（网页窗口每次对话后写入）──
+    # 7. memo层：跨端/跨窗口共同记忆（网页窗口每次对话后写入）
     try:
         _mc2 = get_db()
         _memos = _mc2.execute(
@@ -400,15 +402,13 @@ def build_system(wake=False):
                ORDER BY id DESC LIMIT 4"""
         ).fetchall()
         _mc2.close()
-        # 也从ombre-brain breath里拿memo层（优先）——breath已在开窗交接里注入，
-        # 这里只补充posts表里尚未同步的近期memo
         if _memos and not any('网页窗口' in (p or '') for p in parts):
             _memo_lines = [m['content'] for m in reversed(_memos)]
             parts.append('\n## 最近的网页窗口对话摘要\n' + '\n'.join('- ' + l for l in _memo_lines))
     except Exception:
         pass
 
-    # ── 最近对话片段（仅 wake 模式，chat 里 messages 已有完整记录）──
+    # 8. 最近对话片段（仅 wake 模式，chat 里 messages 已有完整记录）
     if wake:
         try:
             _mc = get_db()
@@ -430,7 +430,7 @@ def build_system(wake=False):
         except Exception:
             pass
 
-    # ── 梦境浮现（30%概率，情感共鸣门控） ────────────────────
+    # 9. 梦境浮现（30%概率，情感共鸣门控）
     try:
         import random as _rand
         if _rand.random() < 0.30:
@@ -451,10 +451,8 @@ def build_system(wake=False):
                 if _dream_text:
                     parts.append(f'\n## 忽然想起来\n（一段梦，从某个夜里飘上来）\n{_dream_text}')
             else:
-                # 清理超限的梦
                 _dc.execute("DELETE FROM dream_pool WHERE surface_count >= 4 AND surfaced=0")
                 _dc.commit()
-                # surface_count+1 给其他未浮现的梦
                 _dc.execute(
                     "UPDATE dream_pool SET surface_count=surface_count+1 "
                     "WHERE surfaced=0 AND surface_count < 4"
@@ -464,6 +462,7 @@ def build_system(wake=False):
     except Exception:
         pass
 
+    # 10. 当前时间
     try:
         from time_tool import get_current_time
         parts.append('\n' + get_current_time())
@@ -471,7 +470,7 @@ def build_system(wake=False):
         now = datetime.datetime.utcnow() + datetime.timedelta(hours=8)
         parts.append(f'\n当前时间：{now.strftime("%Y-%m-%d %H:%M")}')
 
-    # ── 记账本摘要注入 ────────────────────────────────────────
+    # 11. 记账本摘要注入
     try:
         now_m = (datetime.datetime.utcnow() + datetime.timedelta(hours=8)).strftime('%Y-%m')
         _lconn = get_db()
@@ -501,13 +500,12 @@ def build_system(wake=False):
     except Exception:
         pass
 
-    # ── 今日提醒：周期异常 / 待办&倒数日临近 / 预算超支 ────────
+    # 12. 今日提醒：周期异常 / 待办&倒数日临近 / 预算超支
     try:
         _rconn = get_db()
         _today = (datetime.datetime.utcnow() + datetime.timedelta(hours=8)).date()
         _reminders = []
 
-        # 1. 周期异常预警
         _prows = _rconn.execute(
             "SELECT date FROM period_records WHERE type='period' ORDER BY date"
         ).fetchall()
@@ -533,7 +531,6 @@ def build_system(wake=False):
                     f'- 经期预测{_next_dt.strftime("%Y-%m-%d")}该来，现已推迟{_late_days}天，还没有新记录'
                 )
 
-        # 2. 待办临近/逾期
         _trows = _rconn.execute(
             "SELECT content, due_date FROM todos WHERE done=0 AND due_date IS NOT NULL AND due_date != ''"
         ).fetchall()
@@ -550,7 +547,6 @@ def build_system(wake=False):
             elif _delta == 1:
                 _reminders.append(f'- 待办「{_t["content"]}」明天到期')
 
-        # 3. 倒数日临近
         _crows = _rconn.execute("SELECT title, target_date, emoji, type FROM countdowns").fetchall()
         for _c in _crows:
             if _c['type'] != 'countdown':
@@ -563,7 +559,6 @@ def build_system(wake=False):
             if 0 <= _delta <= 3:
                 _reminders.append(f'- 倒数日 {_c["emoji"]}「{_c["title"]}」还剩{_delta}天')
 
-        # 4. 预算超支
         _now_m2 = _today.strftime('%Y-%m')
         _lrows2 = _rconn.execute(
             "SELECT amount FROM ledger WHERE date LIKE ? AND amount<0", (_now_m2 + '%',)
@@ -587,7 +582,29 @@ def build_system(wake=False):
     except Exception:
         pass
 
-    return '\n'.join(parts)
+    # ── 组装 system blocks（prompt caching 格式）────────────────
+    # BP1 和 BP2 挂 cache_control，前缀稳定时命中缓存；BP3 纯动态不挂标
+    system_blocks = [
+        {'type': 'text', 'text': bp1_text, 'cache_control': {'type': 'ephemeral'}},
+    ]
+    if bp2_parts:
+        system_blocks.append({
+            'type': 'text',
+            'text': '\n'.join(bp2_parts),
+            'cache_control': {'type': 'ephemeral'},
+        })
+    if parts:
+        system_blocks.append({'type': 'text', 'text': '\n'.join(parts)})
+
+    return system_blocks
+
+
+def _blocks_to_str(blocks):
+    """Flatten system blocks list to a single string (for the CLI claude_code path)."""
+    if isinstance(blocks, str):
+        return blocks
+    return '\n'.join(b.get('text', '') for b in blocks if isinstance(b, dict) and b.get('type') == 'text')
+
 
 def img_block(url):
     if not url:
@@ -670,6 +687,7 @@ def api_call(system, messages):
         'tools': TOOLS,
         'system': system,
         'messages': messages,
+        'metadata': {'user_id': 'hayana-fyodor-stable'},
     }
 
     req = urllib.request.Request(
@@ -679,6 +697,7 @@ def api_call(system, messages):
             'Content-Type': 'application/json',
             'x-api-key': API_KEY,
             'anthropic-version': '2023-06-01',
+            'anthropic-beta': 'prompt-caching-2024-07-31',
         }
     )
     with urllib.request.urlopen(req, timeout=120) as resp:
@@ -1173,7 +1192,7 @@ def claude_code_call(system, messages):
         + '在回复正文的最后另起一行，写一个或多个 [[SAVE: 内容]] 标记，'
         + '用一句话概括要保存的内容。这些标记会被自动处理，不会显示给哈娅。'
         + '正文本身不要提及"我已记录"之类的话。')
-    full_system = system + save_instr
+    full_system = _blocks_to_str(system) + save_instr
     convo = messages_to_text(messages)
     # "think hard" 触发词开启 thinking block（实测 -p 模式下唯一可靠的开启方式）
     prompt = ('think hard' + NL
@@ -1362,6 +1381,7 @@ def chat_stream():
                     'tools': TOOLS,
                     'system': system,
                     'messages': messages,
+                    'metadata': {'user_id': 'hayana-fyodor-stable'},
                 }
                 req = urllib.request.Request(
                     API_URL,
@@ -1370,6 +1390,7 @@ def chat_stream():
                         'Content-Type': 'application/json',
                         'x-api-key': API_KEY,
                         'anthropic-version': '2023-06-01',
+                        'anthropic-beta': 'prompt-caching-2024-07-31',
                     }
                 )
                 resp = urllib.request.urlopen(req, timeout=300)
