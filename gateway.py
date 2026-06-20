@@ -1,4 +1,4 @@
-import os, re, sqlite3, json, base64, mimetypes, datetime, threading, sys as _sys
+import os, re, sqlite3, json, base64, mimetypes, datetime, threading, time, sys as _sys
 if '/opt/frontend' not in _sys.path:
     _sys.path.insert(0, '/opt/frontend')
 if '/opt/frontend' not in _sys.path:
@@ -39,15 +39,22 @@ def get_db():
 # fallback 调用，跟后端仍在跑的原始请求撞在一起）——后来者直接等前者结果，不再起第二次生成。
 _gen_cond = threading.Condition()
 _gen_busy = False
+_gen_busy_since = 0.0   # epoch seconds when lock was last acquired
 _gen_last_result = None
+_GEN_ZOMBIE_TTL = 90    # seconds before a held lock is treated as zombie
 
 def _gen_acquire_or_wait(wait_timeout=310):
     """返回 ('own', None) 表示本次调用应自己生成；
     返回 ('reused', (text, thinking)) 表示应直接复用刚结束的另一次生成结果。"""
-    global _gen_busy, _gen_last_result
+    global _gen_busy, _gen_busy_since, _gen_last_result
     with _gen_cond:
+        if _gen_busy and (time.time() - _gen_busy_since) > _GEN_ZOMBIE_TTL:
+            # 持锁超过 TTL 秒但仍未释放 —— 原持有者已经挂掉，强制重置
+            _gen_busy = False
+            _gen_last_result = None
         if not _gen_busy:
             _gen_busy = True
+            _gen_busy_since = time.time()
             _gen_last_result = None
             return ('own', None)
         _gen_cond.wait(timeout=wait_timeout)
@@ -1435,135 +1442,133 @@ def chat_stream():
                     yield 'data: ' + json.dumps({'t': 'text', 'd': text}) + SSE_END
                 yield 'data: ' + json.dumps({'t': 'done', 'ok': bool(text)}) + SSE_END
                 return
+            # 持有锁，必须在 finally 里释放（含 GeneratorExit / 客户端断开场景）
+            text, thinking = None, None
             _released = [False]
-            system   = build_system()
-            messages = build_messages()
-            think_acc, text_acc, tool_calls_acc = [], [], []
-            cache_read_total, cache_create_total = 0, 0
-            for _round in range(5):
-                payload = {
-                    'model': MODEL,
-                    'max_tokens': 16000,
-                    'thinking': {'type': 'enabled', 'budget_tokens': 10000},
-                    'stream': True,
-                    'tools': TOOLS,
-                    'system': system,
-                    'messages': messages,
-                    'metadata': {'user_id': 'hayana-fyodor-stable'},
-                }
-                req = urllib.request.Request(
-                    API_URL,
-                    data=json.dumps(payload).encode(),
-                    headers={
-                        'Content-Type': 'application/json',
-                        'x-api-key': API_KEY,
-                        'anthropic-version': '2023-06-01',
-                        'anthropic-beta': 'prompt-caching-2024-07-31',
+            try:
+                system   = build_system()
+                messages = build_messages()
+                think_acc, text_acc, tool_calls_acc = [], [], []
+                cache_read_total, cache_create_total = 0, 0
+                for _round in range(5):
+                    payload = {
+                        'model': MODEL,
+                        'max_tokens': 16000,
+                        'thinking': {'type': 'enabled', 'budget_tokens': 10000},
+                        'stream': True,
+                        'tools': TOOLS,
+                        'system': system,
+                        'messages': messages,
+                        'metadata': {'user_id': 'hayana-fyodor-stable'},
                     }
-                )
-                resp = urllib.request.urlopen(req, timeout=300)
-                blocks, cur, stop_reason = [], None, None
-                for raw in resp:
-                    line = raw.decode('utf-8', 'ignore').strip()
-                    if not line.startswith('data:'):
-                        continue
-                    try:
-                        ev = json.loads(line[5:].strip())
-                    except Exception:
-                        continue
-                    et = ev.get('type')
-                    if et == 'message_start':
-                        _u = (ev.get('message') or {}).get('usage') or {}
-                        cache_read_total  += _u.get('cache_read_input_tokens', 0) or 0
-                        cache_create_total += _u.get('cache_creation_input_tokens', 0) or 0
-                    elif et == 'content_block_start':
-                        cb  = ev.get('content_block', {}) or {}
-                        cur = {'type': cb.get('type')}
-                        if cur['type'] == 'tool_use':
-                            cur['id'] = cb.get('id')
-                            cur['name'] = cb.get('name')
-                            cur['_json'] = ''
-                        elif cur['type'] == 'thinking':
-                            cur['thinking'] = ''
-                        elif cur['type'] == 'text':
-                            cur['text'] = ''
-                    elif et == 'content_block_delta':
-                        d  = ev.get('delta', {})
-                        dt = d.get('type')
-                        if dt == 'thinking_delta':
-                            s = d.get('thinking', '')
-                            if cur is not None: cur['thinking'] = cur.get('thinking', '') + s
-                            think_acc.append(s)
-                            yield 'data: ' + json.dumps({'t': 'think', 'd': s}) + SSE_END
-                        elif dt == 'text_delta':
-                            s = d.get('text', '')
-                            if cur is not None: cur['text'] = cur.get('text', '') + s
-                            text_acc.append(s)
-                            yield 'data: ' + json.dumps({'t': 'text', 'd': s}) + SSE_END
-                        elif dt == 'input_json_delta':
-                            if cur is not None: cur['_json'] = cur.get('_json', '') + d.get('partial_json', '')
-                        elif dt == 'signature_delta':
-                            if cur is not None: cur['signature'] = cur.get('signature', '') + d.get('signature', '')
-                    elif et == 'content_block_stop':
-                        if cur is not None:
-                            if cur.get('type') == 'tool_use':
-                                try:
-                                    cur['input'] = json.loads(cur.pop('_json') or '{}')
-                                except Exception:
-                                    cur['input'] = {}
-                            blocks.append(cur)
-                            cur = None
-                    elif et == 'message_delta':
-                        stop_reason = (ev.get('delta', {}) or {}).get('stop_reason') or stop_reason
-                    elif et == 'message_stop':
+                    req = urllib.request.Request(
+                        API_URL,
+                        data=json.dumps(payload).encode(),
+                        headers={
+                            'Content-Type': 'application/json',
+                            'x-api-key': API_KEY,
+                            'anthropic-version': '2023-06-01',
+                            'anthropic-beta': 'prompt-caching-2024-07-31',
+                        }
+                    )
+                    resp = urllib.request.urlopen(req, timeout=300)
+                    blocks, cur, stop_reason = [], None, None
+                    for raw in resp:
+                        line = raw.decode('utf-8', 'ignore').strip()
+                        if not line.startswith('data:'):
+                            continue
+                        try:
+                            ev = json.loads(line[5:].strip())
+                        except Exception:
+                            continue
+                        et = ev.get('type')
+                        if et == 'message_start':
+                            _u = (ev.get('message') or {}).get('usage') or {}
+                            cache_read_total  += _u.get('cache_read_input_tokens', 0) or 0
+                            cache_create_total += _u.get('cache_creation_input_tokens', 0) or 0
+                        elif et == 'content_block_start':
+                            cb  = ev.get('content_block', {}) or {}
+                            cur = {'type': cb.get('type')}
+                            if cur['type'] == 'tool_use':
+                                cur['id'] = cb.get('id')
+                                cur['name'] = cb.get('name')
+                                cur['_json'] = ''
+                            elif cur['type'] == 'thinking':
+                                cur['thinking'] = ''
+                            elif cur['type'] == 'text':
+                                cur['text'] = ''
+                        elif et == 'content_block_delta':
+                            d  = ev.get('delta', {})
+                            dt = d.get('type')
+                            if dt == 'thinking_delta':
+                                s = d.get('thinking', '')
+                                if cur is not None: cur['thinking'] = cur.get('thinking', '') + s
+                                think_acc.append(s)
+                                yield 'data: ' + json.dumps({'t': 'think', 'd': s}) + SSE_END
+                            elif dt == 'text_delta':
+                                s = d.get('text', '')
+                                if cur is not None: cur['text'] = cur.get('text', '') + s
+                                text_acc.append(s)
+                                yield 'data: ' + json.dumps({'t': 'text', 'd': s}) + SSE_END
+                            elif dt == 'input_json_delta':
+                                if cur is not None: cur['_json'] = cur.get('_json', '') + d.get('partial_json', '')
+                            elif dt == 'signature_delta':
+                                if cur is not None: cur['signature'] = cur.get('signature', '') + d.get('signature', '')
+                        elif et == 'content_block_stop':
+                            if cur is not None:
+                                if cur.get('type') == 'tool_use':
+                                    try:
+                                        cur['input'] = json.loads(cur.pop('_json') or '{}')
+                                    except Exception:
+                                        cur['input'] = {}
+                                blocks.append(cur)
+                                cur = None
+                        elif et == 'message_delta':
+                            stop_reason = (ev.get('delta', {}) or {}).get('stop_reason') or stop_reason
+                        elif et == 'message_stop':
+                            break
+                    tool_uses = [b for b in blocks if b.get('type') == 'tool_use']
+                    if stop_reason != 'tool_use' or not tool_uses:
                         break
-                tool_uses = [b for b in blocks if b.get('type') == 'tool_use']
-                if stop_reason != 'tool_use' or not tool_uses:
-                    break
-                messages.append({'role': 'assistant', 'content': blocks})
-                results = []
-                for tu in tool_uses:
-                    result_str = run_tool(tu.get('name', ''), tu.get('input') or {})
-                    tc_item = {
-                        'name': tu.get('name', ''),
-                        'args': tu.get('input') or {},
-                        'result': result_str,
-                        'success': not result_str.startswith('工具执行失败'),
-                    }
-                    tool_calls_acc.append(tc_item)
-                    yield 'data: ' + json.dumps({'t': 'tool_call', 'd': tc_item}) + SSE_END
-                    results.append({'type': 'tool_result', 'tool_use_id': tu.get('id'),
-                                    'content': result_str})
-                messages.append({'role': 'user', 'content': results})
-                text_acc.append(NL)
-            text     = ''.join(text_acc).strip()
-            thinking = ''.join(think_acc)
-            if text:
-                conn = get_db()
-                conn.execute(
-                    "INSERT INTO chat_messages (author, content, thinking, tool_calls) VALUES ('assistant', ?, ?, ?)",
-                    (text, thinking, json.dumps(tool_calls_acc, ensure_ascii=False) if tool_calls_acc else '')
-                )
-                conn.commit()
-                conn.close()
-                # memo层：异步写入ombre-brain
-                _write_session_memo(_uc, text)
-            _gen_release((text, thinking) if text else None)
-            _released[0] = True
+                    messages.append({'role': 'assistant', 'content': blocks})
+                    results = []
+                    for tu in tool_uses:
+                        result_str = run_tool(tu.get('name', ''), tu.get('input') or {})
+                        tc_item = {
+                            'name': tu.get('name', ''),
+                            'args': tu.get('input') or {},
+                            'result': result_str,
+                            'success': not result_str.startswith('工具执行失败'),
+                        }
+                        tool_calls_acc.append(tc_item)
+                        yield 'data: ' + json.dumps({'t': 'tool_call', 'd': tc_item}) + SSE_END
+                        results.append({'type': 'tool_result', 'tool_use_id': tu.get('id'),
+                                        'content': result_str})
+                    messages.append({'role': 'user', 'content': results})
+                    text_acc.append(NL)
+                text     = ''.join(text_acc).strip()
+                thinking = ''.join(think_acc)
+                if text:
+                    conn = get_db()
+                    conn.execute(
+                        "INSERT INTO chat_messages (author, content, thinking, tool_calls) VALUES ('assistant', ?, ?, ?)",
+                        (text, thinking, json.dumps(tool_calls_acc, ensure_ascii=False) if tool_calls_acc else '')
+                    )
+                    conn.commit()
+                    conn.close()
+                    # memo层：异步写入ombre-brain
+                    _write_session_memo(_uc, text)
+            finally:
+                _released[0] = True
+                _gen_release((text, thinking) if text else None)
             if cache_read_total or cache_create_total:
                 yield 'data: ' + json.dumps({'t': 'usage', 'cache_read': cache_read_total, 'cache_creation': cache_create_total}) + SSE_END
             yield 'data: ' + json.dumps({'t': 'done', 'ok': bool(text)}) + SSE_END
         except urllib.error.HTTPError as e:
-            if not locals().get('_released', [True])[0]:
-                _gen_release(None)
             yield 'data: ' + json.dumps({'t': 'err', 'd': 'API %s: %s' % (e.code, e.read().decode()[:300])}) + SSE_END
         except urllib.error.URLError:
-            if not locals().get('_released', [True])[0]:
-                _gen_release(None)
             yield 'data: ' + json.dumps({'t': 'err', 'd': '上游API超时，请重试'}) + SSE_END
         except Exception as e:
-            if not locals().get('_released', [True])[0]:
-                _gen_release(None)
             yield 'data: ' + json.dumps({'t': 'err', 'd': str(e)}) + SSE_END
     return Response(stream_with_context(generate()), mimetype='text/event-stream',
                     headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
