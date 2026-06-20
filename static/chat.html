@@ -89,6 +89,10 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:14px;heigh
 .cache-info{font-size:9px;color:var(--muted);opacity:.45;width:100%;margin-top:1px;}
 .err-banner{font-size:11px;color:#A32D2D;background:#FCEBEB;border-radius:8px;padding:6px 10px;margin-top:4px;display:flex;align-items:center;gap:6px;}
 .err-banner button{font-size:10px;border:none;background:#A32D2D;color:#fff;border-radius:6px;padding:2px 8px;cursor:pointer;font-family:inherit;}
+#err-toast{display:none;margin:0 auto 10px;max-width:90%;background:#FCEBEB;border:0.5px solid #E8B4B4;border-radius:10px;padding:8px 12px;font-size:12px;color:#A32D2D;display:none;align-items:center;justify-content:space-between;gap:10px;}
+#err-toast.show{display:flex;}
+#err-toast button{font-size:11px;border:none;background:#A32D2D;color:#fff;border-radius:6px;padding:4px 10px;cursor:pointer;font-family:inherit;flex-shrink:0;}
+#err-toast .err-text{flex:1;}
 /* Hayana bubble */
 .bubble.ha{background:var(--amber);border-radius:16px 16px 4px 16px;padding:10px 14px;font-size:var(--msg-font);line-height:1.7;word-break:break-all;color:var(--amber-text);}
 
@@ -287,6 +291,11 @@ html[data-theme=dark] .ni{color:#6a5f5f;}
 <!-- Messages -->
 <div class="msgs" id="msgs">
   <div class="empty-tip">loading…</div>
+</div>
+
+<div id="err-toast">
+  <span class="err-text" id="err-toast-text"></span>
+  <button onclick="retryLastMessage()">重试</button>
 </div>
 
 <!-- Typing -->
@@ -680,12 +689,39 @@ function resize(el){ el.style.height='auto'; el.style.height=Math.min(el.scrollH
 function onEnter(e){ if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send();} }
 
 function showTyping(){ document.getElementById('typing').style.display='block'; var c=document.getElementById('msgs'); c.scrollTop=c.scrollHeight; }
+
+var lastUserMsgText = '';
+function humanizeError(raw){
+  var s = String(raw||'');
+  if(/timed out|timeout|超时/i.test(s)) return '⚠ 上游响应超时，请重试';
+  if(/HTTPError|API \d{3}|API错误|502|503|504/i.test(s)) return '⚠ AI服务暂时不可用，请重试';
+  if(/未配置订阅|CC_TOKEN|token/i.test(s)) return '⚠ 配置异常，请联系费奥多尔检查';
+  if(/Connection|ConnectionError|网络/i.test(s)) return '⚠ 网络连接失败，请检查后重试';
+  if(s.length > 60) return '⚠ 出错了：' + s.slice(0,60) + '…';
+  return s ? ('⚠ ' + s) : '⚠ 出错了，请重试';
+}
+function showErrToast(raw){
+  var box = document.getElementById('err-toast');
+  document.getElementById('err-toast-text').textContent = humanizeError(raw);
+  box.classList.add('show');
+}
+function hideErrToast(){
+  document.getElementById('err-toast').classList.remove('show');
+}
+function retryLastMessage(){
+  hideErrToast();
+  if(!lastUserMsgText) return;
+  document.getElementById('txt').value = lastUserMsgText;
+  sendMsg();
+}
 function hideTyping(){ document.getElementById('typing').style.display='none'; }
 
 async function send(){
   if(sending||blockedState)return;
   var txt=document.getElementById('txt').value.trim();
   if(!txt&&!pendingFile)return;
+  hideErrToast();
+  lastUserMsgText = txt;
   sending=true;
   setSendBtn('stop');
   var fromHayana=(curAuthor==='hayana');
@@ -703,25 +739,33 @@ async function send(){
       var baseId=0;
       (window.curMsgList||[]).forEach(function(m){ if(typeof m.id==='number'&&m.id>baseId) baseId=m.id; });
       showTyping();
+      var streamErrMsg = null;
       try{
         var fullText='';
         try{ fullText=await streamReply(); }
         catch(se){
+          streamErrMsg = se && se.message;
           console.warn('stream failed, checking if reply was already saved before retrying', se);
           await loadMsgs(true);
           var hasNewReply=(window.curMsgList||[]).some(function(m){ return typeof m.id==='number'&&m.id>baseId&&isFy(m.author); });
           if(!hasNewReply){
-            var gr=await fetch('/api/gw/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({})});
-            var gd=await gr.json();
-            fullText=gd.content||'';
+            try{
+              var gr=await fetch('/api/gw/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({})});
+              var gd=await gr.json();
+              if(gd.error){ streamErrMsg = gd.error; fullText=''; }
+              else { fullText=gd.content||''; streamErrMsg=null; }
+            }catch(fe){ streamErrMsg = (fe&&fe.message)||streamErrMsg; }
+          } else {
+            streamErrMsg = null; // 实际已经存进库了，不是真错误
           }
         }
         await loadMsgs(false);
         if(fullText&&document.hidden) notify('Fyodor',fullText.slice(0,50));
-      }catch(e){ console.error('gateway',e); }
+        if(streamErrMsg && !fullText) showErrToast(streamErrMsg);
+      }catch(e){ console.error('gateway',e); showErrToast(e&&e.message); }
       hideTyping();
     }
-  }catch(e){ console.error('send',e); }
+  }catch(e){ console.error('send',e); showErrToast(e&&e.message); }
   sending=false;
   setSendBtn('send');
   document.getElementById('txt').focus();
