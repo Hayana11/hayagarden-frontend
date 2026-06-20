@@ -697,6 +697,7 @@ function humanizeError(raw){
   if(/HTTPError|API \d{3}|API错误|502|503|504/i.test(s)) return '⚠ AI服务暂时不可用，请重试';
   if(/未配置订阅|CC_TOKEN|token/i.test(s)) return '⚠ 配置异常，请联系费奥多尔检查';
   if(/Connection|ConnectionError|网络/i.test(s)) return '⚠ 网络连接失败，请检查后重试';
+  if(/Name or service not known|urlopen error|getaddrinfo|DNS|Errno -2|Errno 111|refused/i.test(s)) return '⚠ 服务器连接失败，请稍后重试';
   if(s.length > 60) return '⚠ 出错了：' + s.slice(0,60) + '…';
   return s ? ('⚠ ' + s) : '⚠ 出错了，请重试';
 }
