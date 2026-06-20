@@ -609,16 +609,37 @@ def build_system(wake=False):
 
     return '\n'.join(parts)
 
-def img_block(url):
+def img_block(url, max_dim=1568):
+    """
+    读图片转base64 block。会先压缩到Claude API推荐的最大边长(1568px)以内，
+    避免手机原图(动辄4000x3000+几MB)直接塞进payload，
+    撑爆请求体大小、拖垮上传时间，表现为聊天"一直转圈/卡死"。
+    """
     if not url:
         return None
     path = STATIC_DIR + url[7:] if url.startswith('/static/') else None
     if not path or not os.path.exists(path):
         return None
-    mime = mimetypes.guess_type(path)[0] or 'image/jpeg'
-    with open(path, 'rb') as f:
-        data = base64.standard_b64encode(f.read()).decode()
-    return {'type': 'image', 'source': {'type': 'base64', 'media_type': mime, 'data': data}}
+    try:
+        from PIL import Image
+        import io as _io
+        img = Image.open(path)
+        if img.mode in ('RGBA', 'P'):
+            img = img.convert('RGB')
+        w, h = img.size
+        if max(w, h) > max_dim:
+            scale = max_dim / max(w, h)
+            img = img.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
+        buf = _io.BytesIO()
+        img.save(buf, format='JPEG', quality=82)
+        data = base64.standard_b64encode(buf.getvalue()).decode()
+        return {'type': 'image', 'source': {'type': 'base64', 'media_type': 'image/jpeg', 'data': data}}
+    except Exception:
+        # Pillow处理失败则退回原图（极端兜底，正常不会走到这里）
+        mime = mimetypes.guess_type(path)[0] or 'image/jpeg'
+        with open(path, 'rb') as f:
+            data = base64.standard_b64encode(f.read()).decode()
+        return {'type': 'image', 'source': {'type': 'base64', 'media_type': mime, 'data': data}}
 
 def build_messages():
     conn = get_db()
@@ -630,9 +651,15 @@ def build_messages():
     ).fetchall()))
     conn.close()
 
+    # 图片大小限制：base64编码后的图片payload很容易让请求体爆炸到几十MB，
+    # 拖垮上传时间甚至触发中转站的请求体大小限制，表现为"一直转圈/卡死"。
+    # 只给最近2张图片带原图，更早的图片只留文字占位，不影响对话连续性。
+    _img_indices = [i for i, r in enumerate(rows) if r['image_url']]
+    _keep_img_indices = set(_img_indices[-2:])  # 只保留最后2张
+
     msgs = []
     prev_dt = None
-    for r in rows:
+    for _ri, r in enumerate(rows):
         is_ai = r['author'] in ('fyodor', 'claude', 'assistant')
         role  = 'assistant' if is_ai else 'user'
 
@@ -654,9 +681,13 @@ def build_messages():
 
         blocks = []
         if r['image_url']:
-            blk = img_block(r['image_url'])
-            if blk:
-                blocks.append(blk)
+            if _ri in _keep_img_indices:
+                blk = img_block(r['image_url'])
+                if blk:
+                    blocks.append(blk)
+            else:
+                # 较早的图片不再携带原图数据，只留占位文字，避免payload爆炸
+                blocks.append({'type': 'text', 'text': '[一张较早发送的图片，内容已不在上下文中]'})
         if r['content']:
             blocks.append({'type': 'text', 'text': note + r['content']})
         if not blocks:
@@ -1990,6 +2021,17 @@ def brain_diary():
         return jsonify({'ok': True, 'items': items})
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e)}), 500
+
+
+@app.route('/api/debug/provider', methods=['GET'])
+def debug_provider():
+    return jsonify({
+        'GW_PROVIDER': GW_PROVIDER,
+        'CC_TOKEN_set': bool(CC_TOKEN),
+        'API_KEY_set': bool(API_KEY),
+        'API_URL': API_URL,
+        'gen_busy': _gen_busy,
+    })
 
 
 if __name__ == '__main__':
