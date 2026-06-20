@@ -815,11 +815,11 @@ def _env_set(key, value):
 
 @app.route('/api/config/provider', methods=['GET'])
 def config_get_provider():
-    provider, has_token = 'treegpt', False
+    provider, has_token = 'api_relay', False
     try:
         for line in open('/opt/frontend/.env'):
             if line.startswith('GW_PROVIDER='):
-                provider = line.split('=', 1)[1].strip() or 'treegpt'
+                provider = line.split('=', 1)[1].strip() or 'api_relay'
             elif line.startswith('CLAUDE_CODE_OAUTH_TOKEN='):
                 has_token = bool(line.split('=', 1)[1].strip())
     except Exception:
@@ -831,8 +831,8 @@ def config_set_provider():
     import subprocess
     data = request.get_json() or {}
     provider = (data.get('provider') or '').strip()
-    if provider not in ('treegpt', 'claude_code'):
-        return jsonify({'error': 'provider must be treegpt or claude_code'}), 400
+    if provider not in ('api_relay', 'claude_code'):
+        return jsonify({'error': 'provider must be api_relay or claude_code'}), 400
     try:
         _env_set('GW_PROVIDER', provider)
         subprocess.Popen(['systemctl', 'restart', 'frontend-gw'])

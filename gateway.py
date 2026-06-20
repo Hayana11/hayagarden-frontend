@@ -15,7 +15,7 @@ API_URL    = 'https://gua.guagua.uk/v1/messages'
 MODEL      = 'claude-sonnet-4-6'
 
 API_KEY = ''
-GW_PROVIDER = 'treegpt'
+GW_PROVIDER = 'api_relay'
 CC_TOKEN = ''
 try:
     for line in open('/opt/frontend/.env'):
@@ -24,7 +24,7 @@ try:
         elif line.startswith('API_URL='):
             API_URL = line.split('=', 1)[1].strip() or API_URL
         elif line.startswith('GW_PROVIDER='):
-            GW_PROVIDER = line.split('=', 1)[1].strip() or 'treegpt'
+            GW_PROVIDER = line.split('=', 1)[1].strip() or 'api_relay'
         elif line.startswith('CLAUDE_CODE_OAUTH_TOKEN='):
             CC_TOKEN = line.split('=', 1)[1].strip()
 except Exception:
@@ -1968,7 +1968,7 @@ def api_summarize():
         if GW_PROVIDER == 'claude_code':
             text, _ = claude_code_call('你是费奥多尔，在写日记。', [{'role': 'user', 'content': prompt_text}])
         else:
-            # 对 treegpt 也走 claude_code，避免 API 格式差异导致崩溃
+            # 对 api_relay 也走 claude_code，避免 API 格式差异导致崩溃
             text, _ = claude_code_call(
                 '你是费奥多尔。直接用第一人称写这天的日记，120字以内，第一个字就是日记内容本身。不要写标题，不要写前缀。',
                 [{'role': 'user', 'content': prompt_text}]
