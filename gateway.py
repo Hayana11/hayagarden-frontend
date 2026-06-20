@@ -1201,14 +1201,16 @@ def _cc_prepare(system, messages):
     env.pop('ANTHROPIC_API_KEY', None)
     return full_system, prompt, env
 
+CC_STREAM_TIMEOUT = 360  # seconds; kills hung process
+
 def _cc_stream_gen(full_system, prompt, env):
     """
     Generator: yields ('think', chunk) and ('text', chunk) as they arrive,
     then ('done', (full_text, full_thinking)) when the process finishes.
-    Raises RuntimeError on CLI error.
+    Raises RuntimeError on CLI error or timeout.
     --tools '' keeps all agent tools disabled (no bash/file access).
     """
-    import subprocess
+    import subprocess, threading
     proc = subprocess.Popen(
         ['claude', '-p', prompt,
          '--output-format', 'stream-json',
@@ -1220,6 +1222,15 @@ def _cc_stream_gen(full_system, prompt, env):
         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         text=True, bufsize=1, cwd=CC_CWD, env=env,
     )
+    # Kill the child if it hangs for more than CC_STREAM_TIMEOUT seconds
+    _timed_out = [False]
+    def _kill():
+        _timed_out[0] = True
+        try: proc.kill()
+        except Exception: pass
+    _timer = threading.Timer(CC_STREAM_TIMEOUT, _kill)
+    _timer.daemon = True
+    _timer.start()
     think_acc, text_acc, is_err = [], [], None
     try:
         for raw_line in proc.stdout:
@@ -1249,19 +1260,23 @@ def _cc_stream_gen(full_system, prompt, env):
                 if d.get('is_error'):
                     is_err = str(d.get('result', ''))[:300]
     finally:
+        _timer.cancel()
         proc.stdout.close()
         try:
             proc.wait(timeout=10)
         except Exception:
             proc.terminate()
-            proc.wait()
+            try: proc.wait(timeout=15)
+            except Exception: proc.kill(); proc.wait()
         stderr_txt = ''
         try:
             stderr_txt = proc.stderr.read()
             proc.stderr.close()
         except Exception:
             pass
-        if proc.returncode != 0 and not is_err:
+        if _timed_out[0]:
+            is_err = 'claude code 调用超时 (%ds)' % CC_STREAM_TIMEOUT
+        elif proc.returncode != 0 and not is_err:
             is_err = ('调用失败 (exit %d): ' % proc.returncode) + (stderr_txt or '')[:200]
     if is_err:
         raise RuntimeError('claude code 返回错误: ' + is_err)
@@ -1396,11 +1411,12 @@ def chat_stream():
                         conn.close()
                         _write_session_memo(_uc, text)
                 finally:
-                    _gen_release((text, thinking) if text else None)
                     _released[0] = True
+                    _gen_release((text, thinking) if text else None)
                 yield 'data: ' + json.dumps({'t': 'done', 'ok': bool(text)}) + SSE_END
             except Exception as e:
                 if not _released[0]:
+                    _released[0] = True
                     _gen_release(None)
                 yield 'data: ' + json.dumps({'t': 'err', 'd': str(e)}) + SSE_END
         return Response(stream_with_context(gen_cc()), mimetype='text/event-stream',
