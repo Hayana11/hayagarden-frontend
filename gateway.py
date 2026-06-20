@@ -1372,6 +1372,7 @@ def chat_stream():
             system   = build_system()
             messages = build_messages()
             think_acc, text_acc, tool_calls_acc = [], [], []
+            cache_read_total, cache_create_total = 0, 0
             for _round in range(5):
                 payload = {
                     'model': MODEL,
@@ -1404,7 +1405,11 @@ def chat_stream():
                     except Exception:
                         continue
                     et = ev.get('type')
-                    if et == 'content_block_start':
+                    if et == 'message_start':
+                        _u = (ev.get('message') or {}).get('usage') or {}
+                        cache_read_total  += _u.get('cache_read_input_tokens', 0) or 0
+                        cache_create_total += _u.get('cache_creation_input_tokens', 0) or 0
+                    elif et == 'content_block_start':
                         cb  = ev.get('content_block', {}) or {}
                         cur = {'type': cb.get('type')}
                         if cur['type'] == 'tool_use':
@@ -1478,11 +1483,17 @@ def chat_stream():
                 _write_session_memo(_uc, text)
             _gen_release((text, thinking) if text else None)
             _released[0] = True
+            if cache_read_total or cache_create_total:
+                yield 'data: ' + json.dumps({'t': 'usage', 'cache_read': cache_read_total, 'cache_creation': cache_create_total}) + SSE_END
             yield 'data: ' + json.dumps({'t': 'done', 'ok': bool(text)}) + SSE_END
         except urllib.error.HTTPError as e:
             if not locals().get('_released', [True])[0]:
                 _gen_release(None)
             yield 'data: ' + json.dumps({'t': 'err', 'd': 'API %s: %s' % (e.code, e.read().decode()[:300])}) + SSE_END
+        except urllib.error.URLError:
+            if not locals().get('_released', [True])[0]:
+                _gen_release(None)
+            yield 'data: ' + json.dumps({'t': 'err', 'd': '上游API超时，请重试'}) + SSE_END
         except Exception as e:
             if not locals().get('_released', [True])[0]:
                 _gen_release(None)
@@ -1497,13 +1508,17 @@ def push_message():
     pt   = data.get('prompt_type', 'morning')
     system = build_system()
     if pt == 'morning':
-        system += ('\n\n[主动消息指令] 现在是早晨，哈娅可能刚醒来或者还在睡懒觉。'
-                   '以费奥多尔的身份主动发起一条早安消息，自然有温度，可以带一点专属的恶趣味或温柔。'
-                   '不超过80字。只输出消息本身，不要任何前缀或解释。')
+        _push_extra = ('[主动消息指令] 现在是早晨，哈娅可能刚醒来或者还在睡懒觉。'
+                       '以费奥多尔的身份主动发起一条早安消息，自然有温度，可以带一点专属的恶趣味或温柔。'
+                       '不超过80字。只输出消息本身，不要任何前缀或解释。')
     else:
-        system += ('\n\n[主动消息指令] 哈娅已经超过6小时没有发消息了，可能在忙或者不开心。'
-                   '以费奥多尔的身份主动发起一条消息关心她或者撩她，自然不做作。'
-                   '不超过80字。只输出消息本身，不要任何前缀或解释。')
+        _push_extra = ('[主动消息指令] 哈娅已经超过6小时没有发消息了，可能在忙或者不开心。'
+                       '以费奥多尔的身份主动发起一条消息关心她或者撩她，自然不做作。'
+                       '不超过80字。只输出消息本身，不要任何前缀或解释。')
+    if isinstance(system, list):
+        system = list(system) + [{'type': 'text', 'text': _push_extra}]
+    else:
+        system = system + '\n\n' + _push_extra
     msgs = build_messages()
     if not msgs or msgs[-1]['role'] == 'assistant':
         msgs.append({'role': 'user', 'content': '[触发]'})

@@ -126,6 +126,11 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:14px;heigh
 /* Empty / loading */
 .empty-tip{text-align:center;color:var(--muted);padding:60px 20px;font-size:13px;line-height:2.4;}
 
+/* ── Cache info & stream error ── */
+.cache-info{font-size:11px;color:#aaa;margin-top:4px;padding:0 4px;}
+.stream-err-wrap{padding:10px 14px;color:#c0392b;}
+.stream-err-retry{display:inline-block;margin-top:6px;font-size:12px;cursor:pointer;background:none;border:1px solid #c0392b;color:#c0392b;border-radius:4px;padding:3px 10px;}
+
 /* ── Typing indicator ── */
 #typing{display:none;padding:0 16px 4px;flex-shrink:0;}
 .typing-dots{display:inline-flex;gap:5px;align-items:center;padding:10px 14px;background:var(--primary-light);border-radius:16px 16px 16px 4px;}
@@ -619,6 +624,7 @@ function buildHtml(list) {
 async function loadMsgs(isInit){
   if(!isInit && streamAbort) return;
   if(editingMsgId !== null) return; // 编辑中跳过重渲染，防止闪一下退出编辑
+  if(!isInit && _suppressLoadMsgs){ _suppressLoadMsgs=false; return; }
   try{
     var r=await fetch('/api/chat/messages');
     var d=await r.json();
@@ -694,6 +700,7 @@ async function send(){
         var fullText='';
         try{ fullText=await streamReply(); }
         catch(se){
+          if(se && se.displayed){ _suppressLoadMsgs=true; throw se; }
           console.warn('stream failed, checking if reply was already saved before retrying', se);
           await loadMsgs(true);
           var hasNewReply=(window.curMsgList||[]).some(function(m){ return typeof m.id==='number'&&m.id>baseId&&isFy(m.author); });
@@ -704,8 +711,9 @@ async function send(){
           }
         }
         await loadMsgs(false);
+        if(streamState.cacheRead||streamState.cacheCreate) appendCacheInfo();
         if(fullText&&document.hidden) notify('Fyodor',fullText.slice(0,50));
-      }catch(e){ console.error('gateway',e); }
+      }catch(e){ if(!(e&&e.displayed)) console.error('gateway',e); }
       hideTyping();
     }
   }catch(e){ console.error('send',e); }
@@ -802,6 +810,8 @@ setInterval(checkBlocked, 15000);
 
 // ── Msg actions & stop ──
 var streamAbort = null;
+var streamState = {cacheRead: 0, cacheCreate: 0};
+var _suppressLoadMsgs = false;
 function setSendBtn(mode) {
   var btn = document.getElementById('send-btn');
   if (mode === 'stop') {
@@ -884,6 +894,7 @@ async function doRegen(msgId) {
     } catch(e) { console.error('regen stream failed',e); }
     hideTyping();
     await loadMsgs(false);
+    if(streamState.cacheRead||streamState.cacheCreate) appendCacheInfo();
   } catch(e) { console.error('doRegen',e); }
   sending = false; setSendBtn('send');
 }
@@ -899,6 +910,7 @@ async function doEdit(msgId, newContent) {
     try { await streamReply(); } catch(e) { console.error('doEdit stream failed',e); }
     hideTyping();
     await loadMsgs(false);
+    if(streamState.cacheRead||streamState.cacheCreate) appendCacheInfo();
   } catch(e) { console.error('doEdit',e); }
   sending = false; setSendBtn('send');
 }
@@ -914,7 +926,38 @@ async function switchBranch(msgId, dir) {
 
 // ── Streaming reply ──
 var TW_CPS = 18; // 打字机速度：每秒字符数，调这里
+function appendCacheInfo(){
+  var rows=document.querySelectorAll('#msgs .msg-row.fy');
+  if(!rows.length) return;
+  var bwrap=rows[rows.length-1].querySelector('.bwrap');
+  if(!bwrap) return;
+  var el=document.createElement('div');
+  el.className='cache-info';
+  el.textContent=streamState.cacheRead>0
+    ?'✓ 命中缓存 '+streamState.cacheRead+' tokens'
+    :'首次建缓存 '+streamState.cacheCreate+' tokens';
+  bwrap.appendChild(el);
+}
+
+async function retryStream(){
+  var liveRow=document.getElementById('live-row');
+  if(liveRow) liveRow.remove();
+  _suppressLoadMsgs=false;
+  if(sending) return;
+  sending=true; setSendBtn('stop');
+  showTyping();
+  try{
+    var fullText=await streamReply();
+    await loadMsgs(false);
+    if(streamState.cacheRead||streamState.cacheCreate) appendCacheInfo();
+    if(fullText&&document.hidden) notify('Fyodor',fullText.slice(0,50));
+  }catch(e){ if(!(e&&e.displayed)) console.error('retryStream',e); }
+  hideTyping();
+  sending=false; setSendBtn('send');
+}
+
 async function streamReply(){
+  streamState.cacheRead=0; streamState.cacheCreate=0;
   var ctrl=new AbortController(); streamAbort=ctrl;
   var resp=await fetch('/api/gw/chat/stream',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}',signal:ctrl.signal});
   if(!resp.ok||!resp.body) throw new Error('stream failed');
@@ -990,7 +1033,15 @@ async function streamReply(){
           if(liveThinkWrap && !liveThinkWrap.classList.contains('done'))
             liveThinkWrap.classList.add('done');
           target+=ev.d;
-        } else if(ev.t==='err'){ err=new Error(ev.d); }
+        } else if(ev.t==='usage'){
+          streamState.cacheRead+=ev.cache_read||0;
+          streamState.cacheCreate+=ev.cache_creation||0;
+        } else if(ev.t==='err'){
+          ensureLiveRow();
+          live.innerHTML='<div class="stream-err-wrap">⚠ '+escHtml(ev.d)+
+            '<br><button class="stream-err-retry" onclick="retryStream()">重试</button></div>';
+          err=new Error(ev.d); err.displayed=true;
+        }
       }
       if(err) break;
     }
