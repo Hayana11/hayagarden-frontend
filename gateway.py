@@ -1520,11 +1520,15 @@ def chat_stream():
                 text_acc.append(NL)
             text     = ''.join(text_acc).strip()
             thinking = ''.join(think_acc)
+            _cache_info_json = (
+                json.dumps({'cache_read': cache_read_total, 'cache_creation': cache_create_total})
+                if (cache_read_total or cache_create_total) else ''
+            )
             if text:
                 conn = get_db()
                 conn.execute(
-                    "INSERT INTO chat_messages (author, content, thinking, tool_calls) VALUES ('assistant', ?, ?, ?)",
-                    (text, thinking, json.dumps(tool_calls_acc, ensure_ascii=False) if tool_calls_acc else '')
+                    "INSERT INTO chat_messages (author, content, thinking, tool_calls, cache_info) VALUES ('assistant', ?, ?, ?, ?)",
+                    (text, thinking, json.dumps(tool_calls_acc, ensure_ascii=False) if tool_calls_acc else '', _cache_info_json)
                 )
                 conn.commit()
                 conn.close()

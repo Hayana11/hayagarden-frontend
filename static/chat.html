@@ -587,6 +587,14 @@ function buildHtml(list) {
       return out.trim();
     })(m.content||'');
     if(hasTxt && displayContent) innerHtml += (hasImg?'<div class="img-then-text">':'')+escHtml(displayContent)+(hasImg?'</div>':''  );
+    if(fy && m.cache_info){
+      try{
+        var ci = JSON.parse(m.cache_info);
+        var hit = (ci.cache_read||0) > 0;
+        var ciText = hit ? ('✓ 命中缓存 '+ci.cache_read+' tokens') : (ci.cache_creation ? ('首次建缓存 '+ci.cache_creation+' tokens') : '');
+        if(ciText) innerHtml += '<div class="cache-info'+(hit?' hit':'')+'">'+ciText+'</div>';
+      }catch(e){}
+    }
 
     var actHtml;
     if(fy) {
@@ -1006,15 +1014,8 @@ async function streamReply(){
     streamAbort=null;
   }
   if(err) throw err;
-  if(cacheInfo && live){
-    var hit = (cacheInfo.cache_read||0) > 0;
-    var infoEl = document.createElement('div');
-    infoEl.className = 'cache-info' + (hit ? ' hit' : '');
-    infoEl.textContent = hit
-      ? ('✓ 命中缓存 ' + cacheInfo.cache_read + ' tokens')
-      : (cacheInfo.cache_creation ? ('首次建缓存 ' + cacheInfo.cache_creation + ' tokens') : '');
-    if(infoEl.textContent && live.parentElement) live.parentElement.appendChild(infoEl);
-  }
+  // 注：缓存信息现在跟随消息持久化(cache_info列)，由loadMsgs()重新渲染时正确显示，
+  // 不再在这里临时插DOM——那样会被随后的loadMsgs()刷新整体覆盖掉。
   return target;
 }
 
