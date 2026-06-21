@@ -1278,7 +1278,15 @@ def messages_to_text(messages, describe_last_n_images=2):
     return NL.join(lines)
 
 def _cc_prepare(system, messages):
-    """Build (full_system, prompt, env) for the Claude CLI subprocess."""
+    """Build (full_system, prompt, env) for the Claude CLI subprocess.
+
+    Prompt-caching strategy: blocks with cache_control (BP1 + BP2, stable
+    persona + long-term memories) stay in --system-prompt so the CLI can
+    cache them across calls.  Blocks without cache_control (BP3, runtime
+    state: lamp status, current time, activity feed, board items…) are
+    prepended to the user prompt — they change every turn anyway, so
+    keeping them out of the system prompt prevents cache invalidation.
+    """
     if not CC_TOKEN:
         raise RuntimeError('未配置订阅 token，请先在 api 设置页填入')
     os.makedirs(CC_CWD, exist_ok=True)
@@ -1287,11 +1295,28 @@ def _cc_prepare(system, messages):
         + '在回复正文的最后另起一行，写一个或多个 [[SAVE: 内容]] 标记，'
         + '用一句话概括要保存的内容。这些标记会被自动处理，不会显示给哈娅。'
         + '正文本身不要提及"我已记录"之类的话。')
-    full_system = _blocks_to_str(system) + save_instr
+
+    if isinstance(system, list):
+        # BP1 + BP2（有 cache_control）→ system prompt，保持稳定让 CLI 命中缓存
+        static_text = '\n'.join(
+            b.get('text', '') for b in system
+            if isinstance(b, dict) and b.get('cache_control') and b.get('text')
+        )
+        # BP3（无 cache_control）→ 追加到 prompt，动态内容不污染缓存键
+        dynamic_text = '\n'.join(
+            b.get('text', '') for b in system
+            if isinstance(b, dict) and not b.get('cache_control') and b.get('text')
+        )
+    else:
+        static_text = system or ''
+        dynamic_text = ''
+
+    full_system = static_text + save_instr
     convo = messages_to_text(messages)
-    prompt = ('think hard' + NL
-              + '以下是你们最近的对话记录：' + NL + NL + convo + NL + NL
-              + '请以费奥多尔的身份自然地回复最后一条消息。只输出回复内容本身，不要任何前缀。')
+    prompt_body = ('think hard' + NL
+                   + '以下是你们最近的对话记录：' + NL + NL + convo + NL + NL
+                   + '请以费奥多尔的身份自然地回复最后一条消息。只输出回复内容本身，不要任何前缀。')
+    prompt = (('【当前状态】\n' + dynamic_text + '\n\n') if dynamic_text else '') + prompt_body
     env = dict(os.environ)
     env['CLAUDE_CODE_OAUTH_TOKEN'] = CC_TOKEN
     env.pop('ANTHROPIC_API_KEY', None)
