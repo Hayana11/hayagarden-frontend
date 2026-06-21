@@ -1341,7 +1341,8 @@ def _cc_stream_gen(full_system, prompt, env):
          '--include-partial-messages',
          '--system-prompt', full_system,
          '--max-turns', '3',
-         '--tools', ''],
+         '--tools', '',
+         '--exclude-dynamic-system-prompt-sections'],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         text=True, bufsize=1, cwd=CC_CWD, env=env,
     )
