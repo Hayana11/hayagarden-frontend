@@ -145,7 +145,7 @@ body{background:linear-gradient(160deg,var(--bg1) 0%,var(--bg2) 100%);background
       <button class="card-action" onclick="openTokenMo()">订阅 token</button>
     </div>
     <div class="prov-row">
-      <div class="prov-opt" id="prov-treegpt" onclick="setProvider('treegpt')">
+      <div class="prov-opt" id="prov-api_relay" onclick="setProvider('api_relay')">
         <div class="prov-name">中转 API</div>
         <div class="prov-desc">中转站代理<br>按 token 计费</div>
       </div>
@@ -272,7 +272,7 @@ body{background:linear-gradient(160deg,var(--bg1) 0%,var(--bg2) 100%);background
 <div class="mo" id="relay-add-mo">
   <div class="mb">
     <h4>添加中转站预设</h4>
-    <input id="relay-name-inp" placeholder="名称（如：treegpt / 备用站）" autocomplete="off">
+    <input id="relay-name-inp" placeholder="名称（如：金瓜瓜 / 备用站）" autocomplete="off">
     <input id="relay-url-inp" class="url" placeholder="https://api.example.com/v1/messages" autocomplete="off">
     <input id="relay-key-inp" type="password" placeholder="API Key（可留空，保持当前 Key）">
     <div class="mb-row">
@@ -297,9 +297,9 @@ async function init() {
 }
 
 // ── Provider ──────────────────────────────────────────
-var curProvider = 'treegpt', ccTokenSet = false;
+var curProvider = 'api_relay', ccTokenSet = false;
 var PROV_NOTES = {
-  treegpt: '当前走中转 API：人设与记忆由网关注入，支持工具（记忆/灯）。',
+  api_relay: '当前走中转 API：人设与记忆由网关注入，支持工具（记忆/灯）。',
   claude_code: '当前走订阅 Claude Code：官方原生，固定月费。暂不支持工具调用（记忆保存/灯控不可用），回复整段返回（无逐字流式）。'
 };
 
@@ -307,17 +307,17 @@ async function loadProvider() {
   try {
     var r = await fetch('/api/config/provider');
     var d = await r.json();
-    curProvider = d.provider || 'treegpt';
+    curProvider = d.provider || 'api_relay';
     ccTokenSet = !!d.cc_token_set;
     renderProvider();
   } catch(e) {}
 }
 function renderProvider() {
-  document.getElementById('prov-treegpt').classList.toggle('act', curProvider === 'treegpt');
+  document.getElementById('prov-api_relay').classList.toggle('act', curProvider === 'api_relay');
   document.getElementById('prov-claude_code').classList.toggle('act', curProvider === 'claude_code');
   var note = PROV_NOTES[curProvider] || '';
   if (curProvider === 'claude_code' && !ccTokenSet) note = '⚠️ 尚未填入订阅 token，点右上角「订阅 token」配置。';
-  if (curProvider === 'treegpt' && !ccTokenSet) note += '（订阅模式需先填 token）';
+  if (curProvider === 'api_relay' && !ccTokenSet) note += '（订阅模式需先填 token）';
   document.getElementById('prov-note').textContent = note;
 }
 async function setProvider(p) {

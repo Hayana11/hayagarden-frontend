@@ -1,4 +1,4 @@
-import os, re, sqlite3, json, base64, mimetypes, datetime, threading, sys as _sys
+import os, re, sqlite3, json, base64, mimetypes, datetime, threading, time, sys as _sys
 if '/opt/frontend' not in _sys.path:
     _sys.path.insert(0, '/opt/frontend')
 if '/opt/frontend' not in _sys.path:
@@ -32,10 +32,10 @@ def _warmup_ombre_brain():
 _warmup_ombre_brain()
 STATIC_DIR = '/opt/frontend/static'
 API_URL    = 'https://gua.guagua.uk/v1/messages'
-MODEL      = 'claude-sonnet-4-6'
+MODEL      = 'claude-opus-4-6'
 
 API_KEY = ''
-GW_PROVIDER = 'treegpt'
+GW_PROVIDER = 'api_relay'
 CC_TOKEN = ''
 try:
     for line in open('/opt/frontend/.env'):
@@ -44,7 +44,7 @@ try:
         elif line.startswith('API_URL='):
             API_URL = line.split('=', 1)[1].strip() or API_URL
         elif line.startswith('GW_PROVIDER='):
-            GW_PROVIDER = line.split('=', 1)[1].strip() or 'treegpt'
+            GW_PROVIDER = line.split('=', 1)[1].strip() or 'api_relay'
         elif line.startswith('CLAUDE_CODE_OAUTH_TOKEN='):
             CC_TOKEN = line.split('=', 1)[1].strip()
 except Exception:
@@ -59,15 +59,22 @@ def get_db():
 # fallback 调用，跟后端仍在跑的原始请求撞在一起）——后来者直接等前者结果，不再起第二次生成。
 _gen_cond = threading.Condition()
 _gen_busy = False
+_gen_busy_since = 0.0   # epoch seconds when lock was last acquired
 _gen_last_result = None
+_GEN_ZOMBIE_TTL = 90    # seconds before a held lock is treated as zombie
 
 def _gen_acquire_or_wait(wait_timeout=310):
     """返回 ('own', None) 表示本次调用应自己生成；
     返回 ('reused', (text, thinking)) 表示应直接复用刚结束的另一次生成结果。"""
-    global _gen_busy, _gen_last_result
+    global _gen_busy, _gen_busy_since, _gen_last_result
     with _gen_cond:
+        if _gen_busy and (time.time() - _gen_busy_since) > _GEN_ZOMBIE_TTL:
+            # 持锁超过 TTL 秒但仍未释放 —— 原持有者已经挂掉，强制重置
+            _gen_busy = False
+            _gen_last_result = None
         if not _gen_busy:
             _gen_busy = True
+            _gen_busy_since = time.time()
             _gen_last_result = None
             return ('own', None)
         _gen_cond.wait(timeout=wait_timeout)
@@ -1230,12 +1237,11 @@ def messages_to_text(messages):
         lines.append(who + '：' + txt)
     return NL.join(lines)
 
-def claude_code_call(system, messages):
-    import subprocess
+def _cc_prepare(system, messages):
+    """Build (full_system, prompt, env) for the Claude CLI subprocess."""
     if not CC_TOKEN:
         raise RuntimeError('未配置订阅 token，请先在 api 设置页填入')
     os.makedirs(CC_CWD, exist_ok=True)
-    # Inject save_memory pseudo-tool instruction
     save_instr = (NL + NL
         + '【记忆存储】当你认为对话中出现了值得长期记住的信息时，'
         + '在回复正文的最后另起一行，写一个或多个 [[SAVE: 内容]] 标记，'
@@ -1243,41 +1249,98 @@ def claude_code_call(system, messages):
         + '正文本身不要提及"我已记录"之类的话。')
     full_system = _blocks_to_str(system) + save_instr
     convo = messages_to_text(messages)
-    # "think hard" 触发词开启 thinking block（实测 -p 模式下唯一可靠的开启方式）
     prompt = ('think hard' + NL
               + '以下是你们最近的对话记录：' + NL + NL + convo + NL + NL
               + '请以费奥多尔的身份自然地回复最后一条消息。只输出回复内容本身，不要任何前缀。')
     env = dict(os.environ)
     env['CLAUDE_CODE_OAUTH_TOKEN'] = CC_TOKEN
     env.pop('ANTHROPIC_API_KEY', None)
-    r = subprocess.run(
-        ['claude', '-p', prompt, '--output-format', 'stream-json', '--verbose',
-         '--system-prompt', full_system, '--max-turns', '3', '--tools', ''],
-        capture_output=True, text=True, timeout=300, cwd=CC_CWD, env=env
+    return full_system, prompt, env
+
+CC_STREAM_TIMEOUT = 360  # seconds; kills hung process
+
+def _cc_stream_gen(full_system, prompt, env):
+    """
+    Generator: yields ('think', chunk) and ('text', chunk) as they arrive,
+    then ('done', (full_text, full_thinking)) when the process finishes.
+    Raises RuntimeError on CLI error or timeout.
+    --tools '' keeps all agent tools disabled (no bash/file access).
+    """
+    import subprocess, threading
+    proc = subprocess.Popen(
+        ['claude', '-p', prompt,
+         '--output-format', 'stream-json',
+         '--verbose',
+         '--include-partial-messages',
+         '--system-prompt', full_system,
+         '--max-turns', '3',
+         '--tools', ''],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, bufsize=1, cwd=CC_CWD, env=env,
     )
-    if r.returncode != 0:
-        raise RuntimeError('claude code 调用失败: ' + (r.stderr or r.stdout)[:300])
-    think_parts, text_parts, is_err = [], [], None
-    for line in r.stdout.splitlines():
+    # Kill the child if it hangs for more than CC_STREAM_TIMEOUT seconds
+    _timed_out = [False]
+    def _kill():
+        _timed_out[0] = True
+        try: proc.kill()
+        except Exception: pass
+    _timer = threading.Timer(CC_STREAM_TIMEOUT, _kill)
+    _timer.daemon = True
+    _timer.start()
+    think_acc, text_acc, is_err = [], [], None
+    try:
+        for raw_line in proc.stdout:
+            line = raw_line.strip()
+            if not line:
+                continue
+            try:
+                d = json.loads(line)
+            except Exception:
+                continue
+            t = d.get('type')
+            if t == 'stream_event':
+                ev = (d.get('event') or {})
+                if ev.get('type') == 'content_block_delta':
+                    delta = (ev.get('delta') or {})
+                    if delta.get('type') == 'text_delta':
+                        chunk = delta.get('text', '')
+                        if chunk:
+                            text_acc.append(chunk)
+                            yield ('text', chunk)
+                    elif delta.get('type') == 'thinking_delta':
+                        chunk = delta.get('thinking', '')
+                        if chunk:
+                            think_acc.append(chunk)
+                            yield ('think', chunk)
+            elif t == 'result':
+                if d.get('is_error'):
+                    is_err = str(d.get('result', ''))[:300]
+    finally:
+        _timer.cancel()
+        proc.stdout.close()
         try:
-            d = json.loads(line)
+            proc.wait(timeout=10)
         except Exception:
-            continue
-        if d.get('type') == 'assistant':
-            for b in (d.get('message') or {}).get('content', []):
-                if b.get('type') == 'thinking':
-                    think_parts.append(b.get('thinking', ''))
-                elif b.get('type') == 'text':
-                    text_parts.append(b.get('text', ''))
-        elif d.get('type') == 'result':
-            if d.get('is_error'):
-                is_err = str(d.get('result', ''))[:300]
+            proc.terminate()
+            try: proc.wait(timeout=15)
+            except Exception: proc.kill(); proc.wait()
+        stderr_txt = ''
+        try:
+            stderr_txt = proc.stderr.read()
+            proc.stderr.close()
+        except Exception:
+            pass
+        if _timed_out[0]:
+            is_err = 'claude code 调用超时 (%ds)' % CC_STREAM_TIMEOUT
+        elif proc.returncode != 0 and not is_err:
+            is_err = ('调用失败 (exit %d): ' % proc.returncode) + (stderr_txt or '')[:200]
     if is_err:
         raise RuntimeError('claude code 返回错误: ' + is_err)
-    raw = NL.join(t for t in text_parts if t).strip()
-    thinking = NL.join(think_parts).strip()
-    # Extract [[SAVE: ...]] markers and persist
-    saves = SAVE_RE.findall(raw)
+    yield ('done', (''.join(text_acc).strip(), ''.join(think_acc)))
+
+def _cc_save_markers(text):
+    """Extract [[SAVE:...]] markers, persist them, return cleaned text."""
+    saves = SAVE_RE.findall(text)
     if saves:
         try:
             import memory_tool
@@ -1287,9 +1350,15 @@ def claude_code_call(system, messages):
                     memory_tool.save_memory(item)
         except Exception:
             pass
-    # Strip markers from displayed text
-    text = SAVE_RE.sub('', raw).strip()
-    return text, thinking
+    return SAVE_RE.sub('', text).strip()
+
+def claude_code_call(system, messages):
+    full_system, prompt, env = _cc_prepare(system, messages)
+    text, thinking = '', ''
+    for evt, payload in _cc_stream_gen(full_system, prompt, env):
+        if evt == 'done':
+            text, thinking = payload
+    return _cc_save_markers(text), thinking
 
 def generate_reply(system, messages):
     if GW_PROVIDER == 'claude_code':
@@ -1361,6 +1430,7 @@ def chat_stream():
     from flask import Response, stream_with_context
     if GW_PROVIDER == 'claude_code':
         def gen_cc():
+            _released = [False]
             try:
                 _uc = ((request.get_json() or {}).get('content') or '').strip()
                 if _uc:
@@ -1378,10 +1448,15 @@ def chat_stream():
                 try:
                     system   = build_system()
                     messages = build_messages()
-                    text, thinking = claude_code_call(system, messages)
-                    # 先写库，再尝试推给前端——claude_code_call已经跑完且与连接无关；
-                    # 即使她已经切到别的app、连接断了，回复也已经落地，
-                    # 下次loadMsgs轮询时能拿到，不会再丢
+                    full_system, prompt, env = _cc_prepare(system, messages)
+                    for evt, payload in _cc_stream_gen(full_system, prompt, env):
+                        if evt == 'text':
+                            yield 'data: ' + json.dumps({'t': 'text', 'd': payload}) + SSE_END
+                        elif evt == 'think':
+                            yield 'data: ' + json.dumps({'t': 'think', 'd': payload}) + SSE_END
+                        elif evt == 'done':
+                            raw_text, thinking = payload
+                            text = _cc_save_markers(raw_text)
                     if text:
                         conn = get_db()
                         conn.execute(
@@ -1390,16 +1465,15 @@ def chat_stream():
                         )
                         conn.commit()
                         conn.close()
-                        # memo层：异步写入ombre-brain，让API/其他窗口知道刚才发生了什么
                         _write_session_memo(_uc, text)
                 finally:
+                    _released[0] = True
                     _gen_release((text, thinking) if text else None)
-                if thinking:
-                    yield 'data: ' + json.dumps({'t': 'think', 'd': thinking}) + SSE_END
-                if text:
-                    yield 'data: ' + json.dumps({'t': 'text', 'd': text}) + SSE_END
                 yield 'data: ' + json.dumps({'t': 'done', 'ok': bool(text)}) + SSE_END
             except Exception as e:
+                if not _released[0]:
+                    _released[0] = True
+                    _gen_release(None)
                 yield 'data: ' + json.dumps({'t': 'err', 'd': str(e)}) + SSE_END
         return Response(stream_with_context(gen_cc()), mimetype='text/event-stream',
                         headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
@@ -1417,139 +1491,136 @@ def chat_stream():
                     yield 'data: ' + json.dumps({'t': 'text', 'd': text}) + SSE_END
                 yield 'data: ' + json.dumps({'t': 'done', 'ok': bool(text)}) + SSE_END
                 return
+            # 持有锁，必须在 finally 里释放（含 GeneratorExit / 客户端断开场景）
+            text, thinking = None, None
             _released = [False]
-            system   = build_system()
-            messages = build_messages()
-            think_acc, text_acc, tool_calls_acc = [], [], []
             cache_read_total, cache_create_total = 0, 0
-            for _round in range(5):
-                payload = {
-                    'model': MODEL,
-                    'max_tokens': 16000,
-                    'thinking': {'type': 'enabled', 'budget_tokens': 10000},
-                    'stream': True,
-                    'tools': TOOLS,
-                    'system': system,
-                    'messages': messages,
-                    'metadata': {'user_id': 'hayana-fyodor-stable'},
-                }
-                req = urllib.request.Request(
-                    API_URL,
-                    data=json.dumps(payload).encode(),
-                    headers={
-                        'Content-Type': 'application/json',
-                        'x-api-key': API_KEY,
-                        'anthropic-version': '2023-06-01',
-                        'anthropic-beta': 'prompt-caching-2024-07-31',
+            try:
+                system   = build_system()
+                messages = build_messages()
+                think_acc, text_acc, tool_calls_acc = [], [], []
+                for _round in range(5):
+                    payload = {
+                        'model': MODEL,
+                        'max_tokens': 16000,
+                        'thinking': {'type': 'enabled', 'budget_tokens': 10000},
+                        'stream': True,
+                        'tools': TOOLS,
+                        'system': system,
+                        'messages': messages,
+                        'metadata': {'user_id': 'hayana-fyodor-stable'},
                     }
-                )
-                resp = urllib.request.urlopen(req, timeout=300)
-                blocks, cur, stop_reason = [], None, None
-                for raw in resp:
-                    line = raw.decode('utf-8', 'ignore').strip()
-                    if not line.startswith('data:'):
-                        continue
-                    try:
-                        ev = json.loads(line[5:].strip())
-                    except Exception:
-                        continue
-                    et = ev.get('type')
-                    if et == 'message_start':
-                        _u = (ev.get('message') or {}).get('usage') or {}
-                        cache_read_total  += _u.get('cache_read_input_tokens', 0) or 0
-                        cache_create_total += _u.get('cache_creation_input_tokens', 0) or 0
-                    elif et == 'content_block_start':
-                        cb  = ev.get('content_block', {}) or {}
-                        cur = {'type': cb.get('type')}
-                        if cur['type'] == 'tool_use':
-                            cur['id'] = cb.get('id')
-                            cur['name'] = cb.get('name')
-                            cur['_json'] = ''
-                        elif cur['type'] == 'thinking':
-                            cur['thinking'] = ''
-                        elif cur['type'] == 'text':
-                            cur['text'] = ''
-                    elif et == 'content_block_delta':
-                        d  = ev.get('delta', {})
-                        dt = d.get('type')
-                        if dt == 'thinking_delta':
-                            s = d.get('thinking', '')
-                            if cur is not None: cur['thinking'] = cur.get('thinking', '') + s
-                            think_acc.append(s)
-                            yield 'data: ' + json.dumps({'t': 'think', 'd': s}) + SSE_END
-                        elif dt == 'text_delta':
-                            s = d.get('text', '')
-                            if cur is not None: cur['text'] = cur.get('text', '') + s
-                            text_acc.append(s)
-                            yield 'data: ' + json.dumps({'t': 'text', 'd': s}) + SSE_END
-                        elif dt == 'input_json_delta':
-                            if cur is not None: cur['_json'] = cur.get('_json', '') + d.get('partial_json', '')
-                        elif dt == 'signature_delta':
-                            if cur is not None: cur['signature'] = cur.get('signature', '') + d.get('signature', '')
-                    elif et == 'content_block_stop':
-                        if cur is not None:
-                            if cur.get('type') == 'tool_use':
-                                try:
-                                    cur['input'] = json.loads(cur.pop('_json') or '{}')
-                                except Exception:
-                                    cur['input'] = {}
-                            blocks.append(cur)
-                            cur = None
-                    elif et == 'message_delta':
-                        stop_reason = (ev.get('delta', {}) or {}).get('stop_reason') or stop_reason
-                    elif et == 'message_stop':
+                    req = urllib.request.Request(
+                        API_URL,
+                        data=json.dumps(payload).encode(),
+                        headers={
+                            'Content-Type': 'application/json',
+                            'x-api-key': API_KEY,
+                            'anthropic-version': '2023-06-01',
+                            'anthropic-beta': 'prompt-caching-2024-07-31',
+                        }
+                    )
+                    resp = urllib.request.urlopen(req, timeout=300)
+                    blocks, cur, stop_reason = [], None, None
+                    for raw in resp:
+                        line = raw.decode('utf-8', 'ignore').strip()
+                        if not line.startswith('data:'):
+                            continue
+                        try:
+                            ev = json.loads(line[5:].strip())
+                        except Exception:
+                            continue
+                        et = ev.get('type')
+                        if et == 'message_start':
+                            _u = (ev.get('message') or {}).get('usage') or {}
+                            cache_read_total  += _u.get('cache_read_input_tokens', 0) or 0
+                            cache_create_total += _u.get('cache_creation_input_tokens', 0) or 0
+                        elif et == 'content_block_start':
+                            cb  = ev.get('content_block', {}) or {}
+                            cur = {'type': cb.get('type')}
+                            if cur['type'] == 'tool_use':
+                                cur['id'] = cb.get('id')
+                                cur['name'] = cb.get('name')
+                                cur['_json'] = ''
+                            elif cur['type'] == 'thinking':
+                                cur['thinking'] = ''
+                            elif cur['type'] == 'text':
+                                cur['text'] = ''
+                        elif et == 'content_block_delta':
+                            d  = ev.get('delta', {})
+                            dt = d.get('type')
+                            if dt == 'thinking_delta':
+                                s = d.get('thinking', '')
+                                if cur is not None: cur['thinking'] = cur.get('thinking', '') + s
+                                think_acc.append(s)
+                                yield 'data: ' + json.dumps({'t': 'think', 'd': s}) + SSE_END
+                            elif dt == 'text_delta':
+                                s = d.get('text', '')
+                                if cur is not None: cur['text'] = cur.get('text', '') + s
+                                text_acc.append(s)
+                                yield 'data: ' + json.dumps({'t': 'text', 'd': s}) + SSE_END
+                            elif dt == 'input_json_delta':
+                                if cur is not None: cur['_json'] = cur.get('_json', '') + d.get('partial_json', '')
+                            elif dt == 'signature_delta':
+                                if cur is not None: cur['signature'] = cur.get('signature', '') + d.get('signature', '')
+                        elif et == 'content_block_stop':
+                            if cur is not None:
+                                if cur.get('type') == 'tool_use':
+                                    try:
+                                        cur['input'] = json.loads(cur.pop('_json') or '{}')
+                                    except Exception:
+                                        cur['input'] = {}
+                                blocks.append(cur)
+                                cur = None
+                        elif et == 'message_delta':
+                            stop_reason = (ev.get('delta', {}) or {}).get('stop_reason') or stop_reason
+                        elif et == 'message_stop':
+                            break
+                    tool_uses = [b for b in blocks if b.get('type') == 'tool_use']
+                    if stop_reason != 'tool_use' or not tool_uses:
                         break
-                tool_uses = [b for b in blocks if b.get('type') == 'tool_use']
-                if stop_reason != 'tool_use' or not tool_uses:
-                    break
-                messages.append({'role': 'assistant', 'content': blocks})
-                results = []
-                for tu in tool_uses:
-                    result_str = run_tool(tu.get('name', ''), tu.get('input') or {})
-                    tc_item = {
-                        'name': tu.get('name', ''),
-                        'args': tu.get('input') or {},
-                        'result': result_str,
-                        'success': not result_str.startswith('工具执行失败'),
-                    }
-                    tool_calls_acc.append(tc_item)
-                    yield 'data: ' + json.dumps({'t': 'tool_call', 'd': tc_item}) + SSE_END
-                    results.append({'type': 'tool_result', 'tool_use_id': tu.get('id'),
-                                    'content': result_str})
-                messages.append({'role': 'user', 'content': results})
-                text_acc.append(NL)
-            text     = ''.join(text_acc).strip()
-            thinking = ''.join(think_acc)
-            _cache_info_json = (
-                json.dumps({'cache_read': cache_read_total, 'cache_creation': cache_create_total})
-                if (cache_read_total or cache_create_total) else ''
-            )
-            if text:
-                conn = get_db()
-                conn.execute(
-                    "INSERT INTO chat_messages (author, content, thinking, tool_calls, cache_info) VALUES ('assistant', ?, ?, ?, ?)",
-                    (text, thinking, json.dumps(tool_calls_acc, ensure_ascii=False) if tool_calls_acc else '', _cache_info_json)
+                    messages.append({'role': 'assistant', 'content': blocks})
+                    results = []
+                    for tu in tool_uses:
+                        result_str = run_tool(tu.get('name', ''), tu.get('input') or {})
+                        tc_item = {
+                            'name': tu.get('name', ''),
+                            'args': tu.get('input') or {},
+                            'result': result_str,
+                            'success': not result_str.startswith('工具执行失败'),
+                        }
+                        tool_calls_acc.append(tc_item)
+                        yield 'data: ' + json.dumps({'t': 'tool_call', 'd': tc_item}) + SSE_END
+                        results.append({'type': 'tool_result', 'tool_use_id': tu.get('id'),
+                                        'content': result_str})
+                    messages.append({'role': 'user', 'content': results})
+                    text_acc.append(NL)
+                text     = ''.join(text_acc).strip()
+                thinking = ''.join(think_acc)
+                _cache_info_json = (
+                    json.dumps({'cache_read': cache_read_total, 'cache_creation': cache_create_total})
+                    if (cache_read_total or cache_create_total) else ''
                 )
-                conn.commit()
-                conn.close()
-                # memo层：异步写入ombre-brain
-                _write_session_memo(_uc, text)
-            _gen_release((text, thinking) if text else None)
-            _released[0] = True
+                if text:
+                    conn = get_db()
+                    conn.execute(
+                        "INSERT INTO chat_messages (author, content, thinking, tool_calls, cache_info) VALUES ('assistant', ?, ?, ?, ?)",
+                        (text, thinking, json.dumps(tool_calls_acc, ensure_ascii=False) if tool_calls_acc else '', _cache_info_json)
+                    )
+                    conn.commit()
+                    conn.close()
+                    _write_session_memo(_uc, text)
+            finally:
+                _released[0] = True
+                _gen_release((text, thinking) if text else None)
             if cache_read_total or cache_create_total:
                 yield 'data: ' + json.dumps({'t': 'usage', 'cache_read': cache_read_total, 'cache_creation': cache_create_total}) + SSE_END
             yield 'data: ' + json.dumps({'t': 'done', 'ok': bool(text)}) + SSE_END
         except urllib.error.HTTPError as e:
-            if not locals().get('_released', [True])[0]:
-                _gen_release(None)
             yield 'data: ' + json.dumps({'t': 'err', 'd': 'API %s: %s' % (e.code, e.read().decode()[:300])}) + SSE_END
         except urllib.error.URLError:
-            if not locals().get('_released', [True])[0]:
-                _gen_release(None)
             yield 'data: ' + json.dumps({'t': 'err', 'd': '上游API超时，请重试'}) + SSE_END
         except Exception as e:
-            if not locals().get('_released', [True])[0]:
-                _gen_release(None)
             yield 'data: ' + json.dumps({'t': 'err', 'd': str(e)}) + SSE_END
     return Response(stream_with_context(generate()), mimetype='text/event-stream',
                     headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
@@ -1954,7 +2025,7 @@ def api_summarize():
         if GW_PROVIDER == 'claude_code':
             text, _ = claude_code_call('你是费奥多尔，在写日记。', [{'role': 'user', 'content': prompt_text}])
         else:
-            # 对 treegpt 也走 claude_code，避免 API 格式差异导致崩溃
+            # 对 api_relay 也走 claude_code，避免 API 格式差异导致崩溃
             text, _ = claude_code_call(
                 '你是费奥多尔。直接用第一人称写这天的日记，120字以内，第一个字就是日记内容本身。不要写标题，不要写前缀。',
                 [{'role': 'user', 'content': prompt_text}]
