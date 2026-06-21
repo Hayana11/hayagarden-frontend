@@ -1353,6 +1353,7 @@ def _cc_stream_gen(full_system, prompt, env):
     _timer.daemon = True
     _timer.start()
     think_acc, text_acc, is_err = [], [], None
+    cache_read_total, cache_create_total = 0, 0
     try:
         for raw_line in proc.stdout:
             line = raw_line.strip()
@@ -1365,7 +1366,8 @@ def _cc_stream_gen(full_system, prompt, env):
             t = d.get('type')
             if t == 'stream_event':
                 ev = (d.get('event') or {})
-                if ev.get('type') == 'content_block_delta':
+                ev_type = ev.get('type')
+                if ev_type == 'content_block_delta':
                     delta = (ev.get('delta') or {})
                     if delta.get('type') == 'text_delta':
                         chunk = delta.get('text', '')
@@ -1377,9 +1379,23 @@ def _cc_stream_gen(full_system, prompt, env):
                         if chunk:
                             think_acc.append(chunk)
                             yield ('think', chunk)
+                elif ev_type == 'message_start':
+                    u = (ev.get('message') or {}).get('usage') or {}
+                    cache_read_total = max(cache_read_total, u.get('cache_read_input_tokens', 0) or 0)
+                    cache_create_total = max(cache_create_total, u.get('cache_creation_input_tokens', 0) or 0)
+                elif ev_type == 'message_delta':
+                    u = ev.get('usage') or {}
+                    if u.get('cache_read_input_tokens'):
+                        cache_read_total = max(cache_read_total, u.get('cache_read_input_tokens', 0) or 0)
+                    if u.get('cache_creation_input_tokens'):
+                        cache_create_total = max(cache_create_total, u.get('cache_creation_input_tokens', 0) or 0)
             elif t == 'result':
                 if d.get('is_error'):
                     is_err = str(d.get('result', ''))[:300]
+                u = d.get('usage') or {}
+                if u:
+                    cache_read_total = u.get('cache_read_input_tokens', cache_read_total) or cache_read_total
+                    cache_create_total = u.get('cache_creation_input_tokens', cache_create_total) or cache_create_total
     finally:
         _timer.cancel()
         proc.stdout.close()
@@ -1401,7 +1417,7 @@ def _cc_stream_gen(full_system, prompt, env):
             is_err = ('调用失败 (exit %d): ' % proc.returncode) + (stderr_txt or '')[:200]
     if is_err:
         raise RuntimeError('claude code 返回错误: ' + is_err)
-    yield ('done', (''.join(text_acc).strip(), ''.join(think_acc)))
+    yield ('done', (''.join(text_acc).strip(), ''.join(think_acc), cache_read_total, cache_create_total))
 
 def _cc_save_markers(text):
     """Extract [[SAVE:...]] markers, persist them, return cleaned text."""
@@ -1422,7 +1438,7 @@ def claude_code_call(system, messages):
     text, thinking = '', ''
     for evt, payload in _cc_stream_gen(full_system, prompt, env):
         if evt == 'done':
-            text, thinking = payload
+            text, thinking = payload[0], payload[1]
     return _cc_save_markers(text), thinking
 
 def generate_reply(system, messages):
@@ -1510,6 +1526,7 @@ def chat_stream():
                     yield 'data: ' + json.dumps({'t': 'done', 'ok': bool(text)}) + SSE_END
                     return
                 text, thinking = None, None
+                cc_cache_read, cc_cache_create = 0, 0
                 try:
                     system   = build_system()
                     messages = build_messages()
@@ -1520,13 +1537,17 @@ def chat_stream():
                         elif evt == 'think':
                             yield 'data: ' + json.dumps({'t': 'think', 'd': payload}) + SSE_END
                         elif evt == 'done':
-                            raw_text, thinking = payload
+                            raw_text, thinking, cc_cache_read, cc_cache_create = payload
                             text = _cc_save_markers(raw_text)
                     if text:
+                        _cache_info_json = (
+                            json.dumps({'cache_read': cc_cache_read, 'cache_creation': cc_cache_create})
+                            if (cc_cache_read or cc_cache_create) else ''
+                        )
                         conn = get_db()
                         conn.execute(
-                            "INSERT INTO chat_messages (author, content, thinking) VALUES ('assistant', ?, ?)",
-                            (text, thinking)
+                            "INSERT INTO chat_messages (author, content, thinking, cache_info) VALUES ('assistant', ?, ?, ?)",
+                            (text, thinking, _cache_info_json)
                         )
                         conn.commit()
                         conn.close()
@@ -1534,6 +1555,8 @@ def chat_stream():
                 finally:
                     _released[0] = True
                     _gen_release((text, thinking) if text else None)
+                if cc_cache_read or cc_cache_create:
+                    yield 'data: ' + json.dumps({'t': 'usage', 'cache_read': cc_cache_read, 'cache_creation': cc_cache_create}) + SSE_END
                 yield 'data: ' + json.dumps({'t': 'done', 'ok': bool(text)}) + SSE_END
             except Exception as e:
                 if not _released[0]:
