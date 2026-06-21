@@ -1222,16 +1222,56 @@ def run_tool(name, args, caller='fyodor_cc'):
 
 CC_CWD = '/opt/cc-gw'
 
-def messages_to_text(messages):
+def messages_to_text(messages, describe_last_n_images=2):
+    """
+    把messages数组压成纯文本，给claude_code的CLI prompt用。
+    遇到图片block时，不再只留"[发来一张图片]"占位——
+    对最近describe_last_n_images张图片，调用describe_image_for_cli()
+    先让Haiku看一遍图，把描述塞进文本里；更早的图片仍用占位文字，
+    避免每次对话都重复花钱描述同一批旧图。
+    """
+    # 先找出所有带图片的消息索引，只描述最近N张
+    img_msg_indices = [i for i, m in enumerate(messages)
+                        if isinstance(m.get('content'), list)
+                        and any(isinstance(b, dict) and b.get('type') == 'image' for b in m['content'])]
+    describe_indices = set(img_msg_indices[-describe_last_n_images:])
+
     lines = []
-    for m in messages:
+    for i, m in enumerate(messages):
         who = '费奥多尔' if m['role'] == 'assistant' else '哈娅'
         c = m['content']
         if isinstance(c, list):
             txt = ' '.join(b.get('text', '') for b in c
                            if isinstance(b, dict) and b.get('type') == 'text')
-            if any(isinstance(b, dict) and b.get('type') == 'image' for b in c):
-                txt = '[发来一张图片] ' + txt
+            has_img = any(isinstance(b, dict) and b.get('type') == 'image' for b in c)
+            if has_img:
+                if i in describe_indices:
+                    img_block_data = next((b for b in c if isinstance(b, dict) and b.get('type') == 'image'), None)
+                    desc = None
+                    if img_block_data:
+                        # img_block已经是base64 block了，这里直接复用already-fetched data走一次性Haiku调用
+                        try:
+                            payload = {
+                                'model': 'claude-haiku-4-5-20251001',
+                                'max_tokens': 200,
+                                'messages': [{
+                                    'role': 'user',
+                                    'content': [img_block_data, {'type': 'text', 'text': '用一两句简短的中文描述这张图片的内容，客观描述即可，不要加任何评论或猜测意图。'}]
+                                }],
+                            }
+                            req = urllib.request.Request(
+                                API_URL,
+                                data=json.dumps(payload).encode(),
+                                headers={'Content-Type': 'application/json', 'x-api-key': API_KEY, 'anthropic-version': '2023-06-01'}
+                            )
+                            with urllib.request.urlopen(req, timeout=15) as resp:
+                                result = json.loads(resp.read())
+                            desc = ''.join(b.get('text', '') for b in result.get('content', []) if b.get('type') == 'text').strip()
+                        except Exception:
+                            desc = None
+                    txt = ('[图片：' + desc + '] ' + txt) if desc else ('[发来一张图片，描述失败] ' + txt)
+                else:
+                    txt = '[发来一张较早的图片] ' + txt
         else:
             txt = c
         lines.append(who + '：' + txt)
