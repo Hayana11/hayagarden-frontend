@@ -1296,17 +1296,19 @@ def _cc_prepare(system, messages):
         + '用一句话概括要保存的内容。这些标记会被自动处理，不会显示给哈娅。'
         + '正文本身不要提及"我已记录"之类的话。')
 
-    if isinstance(system, list):
-        # BP1 + BP2（有 cache_control）→ system prompt，保持稳定让 CLI 命中缓存
-        static_text = '\n'.join(
-            b.get('text', '') for b in system
-            if isinstance(b, dict) and b.get('cache_control') and b.get('text')
-        )
-        # BP3（无 cache_control）→ 追加到 prompt，动态内容不污染缓存键
+    if isinstance(system, list) and system:
+        # 只有 BP1（第一个 block，persona.md，永不变）→ system prompt
+        # BP2（记忆/日记）每次对话后都可能有新条目写入，放进 prompt 避免污染缓存键
+        # BP3（动态状态）同理进 prompt
+        first = system[0]
+        static_text = first.get('text', '') if isinstance(first, dict) else ''
         dynamic_text = '\n'.join(
-            b.get('text', '') for b in system
-            if isinstance(b, dict) and not b.get('cache_control') and b.get('text')
+            b.get('text', '') for b in system[1:]
+            if isinstance(b, dict) and b.get('text')
         )
+    elif isinstance(system, list):
+        static_text = ''
+        dynamic_text = ''
     else:
         static_text = system or ''
         dynamic_text = ''
