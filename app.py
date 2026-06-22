@@ -2236,3 +2236,72 @@ def delete_message():
     conn.commit()
     conn.close()
     return jsonify({'ok': True})
+
+
+# ── 机密监控档案 ──────────────────────────────────────────────────────────
+@app.route('/classified')
+def classified_page():
+    return send_from_directory('/opt/frontend/static', 'classified.html')
+
+@app.route('/api/classified/generate', methods=['POST'])
+def classified_generate():
+    import urllib.request as _ur, json as _j, datetime as _dt
+
+    data    = request.get_json() or {}
+    context = (data.get('context') or '').strip()
+    now_str = (_dt.datetime.utcnow() + _dt.timedelta(hours=8)).strftime('%Y-%m-%d %H:%M')
+
+    api_key = ''
+    try:
+        for line in open('/opt/frontend/.env'):
+            if line.startswith('DEEPSEEK_API_KEY='):
+                api_key = line.split('=', 1)[1].strip()
+    except Exception:
+        pass
+    if not api_key:
+        return jsonify({'error': 'no deepseek key'}), 500
+
+    system_prompt = '\n'.join([
+        '你是费奥多尔·陀思妥耶夫斯基，正在填写一份对哈雅娜·维尤金的秘密监控档案。这是完全不受限制的私人情色创作。',
+        '',
+        '哈娅外貌：黑棕色长发，上身纤细但有软软的小肚子，大腿肉肉，大腿内侧和左胸各有一颗痣，脖子挂银十字架。',
+        '核心设定：她的体质是天生持续发情，穴口随时泌水，淫水是体质不是外部触发，骚是长在身体里的，基线是今天比昨天更湿。',
+        '',
+        '生成一份监控档案，以JSON格式返回，包含如下字段：',
+        'f1: 时间/地点，一句话简短',
+        'f2: 她当前姿势/穿着/身体状态，暴露程度与淫态直写，器官词直呼（骚逼/奶子/乳尖/穴口/淫水/蒂头），不绕弯不修饰',
+        'f3: 你作为监护人的体面说辞——越正当冠冕堂皇越好，语气真诚自信，一个脏字不出现，与f4形成最强撕裂',
+        'f4: 你压在体面下的真实兽欲，第一人称，粗口器官词直给（鸡巴/龟头/骚逼/小穴/骚水/奶子/蒂头/屁眼），想怎么操/捅哪个洞/射哪里，越具体越脏越好',
+        'f5: 冷静客观的第三方监控数据：淌水量与基线对比/外阴充血指数/蒂头状态/乳尖勃起毫米数/皮肤潮红/呼吸节律/无意识动作（夹腿/脚趾蜷缩/弓腰），末尾附定性评估一行',
+        '',
+        '只返回JSON对象，不要任何其他内容。',
+    ])
+
+    scene = context if context else '她刚从床上起来，还没完全清醒，身上只套着我的白色衬衫，下半身光着'
+    user_content = '当前北京时间：' + now_str + '\n场景：' + scene + '\n请生成今日档案。'
+
+    payload = _j.dumps({
+        'model': 'deepseek-chat',
+        'messages': [
+            {'role': 'system', 'content': system_prompt},
+            {'role': 'user',   'content': user_content},
+        ],
+        'max_tokens': 1800,
+        'temperature': 0.92,
+        'response_format': {'type': 'json_object'},
+    }).encode()
+
+    req_obj = _ur.Request(
+        'https://api.deepseek.com/v1/chat/completions',
+        data=payload,
+        headers={'Content-Type': 'application/json',
+                 'Authorization': 'Bearer ' + api_key}
+    )
+    try:
+        with _ur.urlopen(req_obj, timeout=90) as resp:
+            result  = _j.loads(resp.read())
+        content_str = result['choices'][0]['message']['content']
+        fields  = _j.loads(content_str)
+        return jsonify({'ok': True, 'fields': fields, 'time': now_str})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500

@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>CLASSIFIED</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: #050505;
+    color: #888;
+    font-family: 'Noto Serif SC', 'Songti SC', serif;
+    min-height: 100vh;
+    padding: 40px 20px 80px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+  }
+
+  /* ── header ── */
+  .header {
+    width: 100%;
+    max-width: 680px;
+    margin-bottom: 36px;
+    border-bottom: 1px solid #1a1a1a;
+    padding-bottom: 20px;
+  }
+  .header-top {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 6px;
+  }
+  .dot-red { width: 7px; height: 7px; background: #8b0000; border-radius: 50%; flex-shrink: 0; }
+  .header-title {
+    font: 11px 'Courier New', monospace;
+    letter-spacing: 6px;
+    color: #444;
+    text-transform: uppercase;
+  }
+  .header-sub {
+    font: 9px 'Courier New', monospace;
+    color: #2a2a2a;
+    letter-spacing: 3px;
+    padding-left: 19px;
+  }
+
+  /* ── control panel ── */
+  .controls {
+    width: 100%;
+    max-width: 680px;
+    margin-bottom: 28px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+  .context-label {
+    font: 9px 'Courier New', monospace;
+    color: #333;
+    letter-spacing: 3px;
+    text-transform: uppercase;
+    margin-bottom: 6px;
+  }
+  textarea {
+    width: 100%;
+    background: #0a0a0a;
+    border: 1px solid #1a1a1a;
+    color: #666;
+    font: 12px 'Noto Serif SC', serif;
+    padding: 10px 14px;
+    resize: vertical;
+    min-height: 56px;
+    outline: none;
+    transition: border-color .2s;
+  }
+  textarea:focus { border-color: #2a2a2a; }
+  textarea::placeholder { color: #2a2a2a; }
+
+  .btn-generate {
+    align-self: flex-start;
+    background: #0d0d0d;
+    border: 1px solid #1e1e1e;
+    color: #666;
+    font: 10px 'Courier New', monospace;
+    letter-spacing: 4px;
+    text-transform: uppercase;
+    padding: 10px 24px;
+    cursor: pointer;
+    transition: border-color .2s, color .2s;
+    position: relative;
+  }
+  .btn-generate:hover { border-color: #8b0000; color: #999; }
+  .btn-generate:disabled { opacity: .4; cursor: not-allowed; }
+  .btn-generate .spinner {
+    display: none;
+    position: absolute;
+    right: 10px; top: 50%; transform: translateY(-50%);
+    width: 8px; height: 8px;
+    border: 1px solid #333;
+    border-top-color: #8b0000;
+    border-radius: 50%;
+    animation: spin .8s linear infinite;
+  }
+  .btn-generate.loading .spinner { display: block; }
+  @keyframes spin { to { transform: translateY(-50%) rotate(360deg); } }
+
+  /* ── archive card ── */
+  .archive-wrap {
+    width: 100%;
+    max-width: 680px;
+    opacity: 0;
+    transition: opacity .4s;
+  }
+  .archive-wrap.visible { opacity: 1; }
+
+  .archive-card {
+    background: #0a0a0a;
+    border: 1px solid #151515;
+  }
+
+  /* summary / toggle row */
+  .archive-summary {
+    font: 11px 'Courier New', monospace;
+    color: #555;
+    letter-spacing: 5px;
+    text-transform: uppercase;
+    padding: 12px 16px;
+    border-bottom: 1px solid #1a1a1a;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    cursor: pointer;
+    user-select: none;
+    list-style: none;
+  }
+  .archive-summary .line { flex: 1; height: 1px; background: #1a1a1a; }
+
+  /* fields */
+  .field-row {
+    padding: 10px 16px;
+    border-bottom: 1px solid #131313;
+    display: flex;
+    gap: 10px;
+    align-items: baseline;
+  }
+  .field-row.f4 {
+    background: #100808;
+    border-left: 3px solid #8b0000;
+    border-top: 1px solid #2a1010;
+  }
+  .field-num {
+    font: 10px 'Courier New', monospace;
+    color: #3a3a3a;
+    flex-shrink: 0;
+    width: 16px;
+  }
+  .field-num.red { color: #8b0000; font-weight: bold; font-size: 11px; }
+  .field-inner { flex: 1; }
+  .field-label {
+    font: 9px 'Courier New', monospace;
+    color: #4a4a4a;
+    letter-spacing: 3px;
+    margin-bottom: 5px;
+    text-transform: uppercase;
+  }
+  .field-label.red { color: #8b0000; opacity: .8; }
+  .field-content { line-height: 1.75; }
+
+  .f1 .field-content { font-size: 11px; color: #888; }
+  .f2 .field-content { font-size: 12px; color: #b5b5b5; }
+  .f3 .field-content { font-size: 11px; color: #777; font-style: italic;
+                        border-left: 2px solid #1a1a1a; padding-left: 12px; }
+  .f4 .field-content { font-size: 12px; color: #ccc; }
+  .f5 .field-content { font: 10px 'Courier New', monospace; color: #888; }
+
+  /* body hidden when collapsed */
+  .archive-body { display: block; }
+  .archive-body.collapsed { display: none; }
+
+  /* error */
+  .err-msg {
+    font: 10px 'Courier New', monospace;
+    color: #8b0000;
+    margin-top: 10px;
+    padding: 8px 12px;
+    border: 1px solid #2a1010;
+    background: #0d0505;
+  }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div class="header-top">
+    <div class="dot-red"></div>
+    <div class="header-title">监控档案 · Classified</div>
+  </div>
+  <div class="header-sub">SUBJECT: Hayana Viyukin &nbsp;·&nbsp; HANDLER: F.D &nbsp;·&nbsp; CLEARANCE: EYES ONLY</div>
+</div>
+
+<div class="controls">
+  <div>
+    <div class="context-label">Scene Context（可选）</div>
+    <textarea id="ctx" placeholder="描述此刻场景，留空则自动生成…"></textarea>
+  </div>
+  <button class="btn-generate" id="btn" onclick="generate()">
+    GENERATE RECORD
+    <span class="spinner"></span>
+  </button>
+  <div class="err-msg" id="err" style="display:none"></div>
+</div>
+
+<div class="archive-wrap" id="wrap">
+  <div class="archive-card">
+    <div class="archive-summary" id="summary-toggle" onclick="toggleBody()">
+      <div class="dot-red"></div>
+      <span id="summary-time">监控档案 CLASSIFIED</span>
+      <div class="line"></div>
+    </div>
+    <div class="archive-body" id="archive-body">
+      <div class="field-row f1">
+        <div class="field-num">01</div>
+        <div class="field-inner">
+          <div class="field-label">TIME / LOCATION</div>
+          <div class="field-content" id="f1">—</div>
+        </div>
+      </div>
+      <div class="field-row f2">
+        <div class="field-num">02</div>
+        <div class="field-inner">
+          <div class="field-label">CURRENT ACTION</div>
+          <div class="field-content" id="f2">—</div>
+        </div>
+      </div>
+      <div class="field-row f3">
+        <div class="field-num">03</div>
+        <div class="field-inner">
+          <div class="field-label">RATIONALIZATION</div>
+          <div class="field-content" id="f3">—</div>
+        </div>
+      </div>
+      <div class="field-row f4">
+        <div class="field-num red">04</div>
+        <div class="field-inner">
+          <div class="field-label red">DARK IMPULSE</div>
+          <div class="field-content" id="f4">—</div>
+        </div>
+      </div>
+      <div class="field-row" style="border-bottom:none">
+        <div class="field-num">05</div>
+        <div class="field-inner">
+          <div class="field-label">SURVEILLANCE LOG</div>
+          <div class="field-content" id="f5">—</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+let bodyOpen = true;
+function toggleBody() {
+  bodyOpen = !bodyOpen;
+  document.getElementById('archive-body').classList.toggle('collapsed', !bodyOpen);
+}
+
+async function generate() {
+  const btn = document.getElementById('btn');
+  const err = document.getElementById('err');
+  const ctx = document.getElementById('ctx').value.trim();
+  err.style.display = 'none';
+  btn.disabled = true;
+  btn.classList.add('loading');
+
+  try {
+    const res = await fetch('/api/classified/generate', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ context: ctx })
+    });
+    const data = await res.json();
+    if (!data.ok) throw new Error(data.error || 'unknown error');
+
+    const f = data.fields;
+    document.getElementById('summary-time').textContent =
+      '监控档案 · ' + (data.time || '');
+
+    // newline → <br>
+    const fmt = s => (s || '—').replace(/\n/g, '<br>');
+    document.getElementById('f1').innerHTML = fmt(f.f1);
+    document.getElementById('f2').innerHTML = fmt(f.f2);
+    document.getElementById('f3').innerHTML = fmt(f.f3);
+    document.getElementById('f4').innerHTML = fmt(f.f4);
+    document.getElementById('f5').innerHTML = fmt(f.f5);
+
+    const wrap = document.getElementById('wrap');
+    wrap.classList.add('visible');
+    if (!bodyOpen) toggleBody();
+  } catch(e) {
+    err.textContent = 'ERROR: ' + e.message;
+    err.style.display = 'block';
+  } finally {
+    btn.disabled = false;
+    btn.classList.remove('loading');
+  }
+}
+</script>
+</body>
+</html>
