@@ -194,7 +194,7 @@ if __name__ == '__main__':
         else:
             result = run_patrol()
             print(result)
-            if result and ('❌' in result or '⚠️' in result):
+            if result and '@CC' in result:
                 subprocess.run(
                     [sys.executable, '/opt/frontend/tools/cc_board_check.py'],
                     timeout=360, check=False

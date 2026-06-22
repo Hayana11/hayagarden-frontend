@@ -49,11 +49,30 @@ PATROL_SERVICES = [
 ]
 
 # DeepSeek 巡逻分析的 system prompt
-PATROL_SYSTEM_PROMPT = (
-    "你是一个服务器巡逻员，分析以下日志，找出错误、异常和需要关注的问题。"
-    "用中文简洁描述，每个问题一行，格式：[级别] 描述。"
-    "级别：❌严重 ⚠️警告 ℹ️信息。如果一切正常就回复：✅ 一切正常"
-)
+PATROL_SYSTEM_PROMPT = """你是一个服务器巡逻员，分析服务状态和日志，识别真正需要处理的问题。
+
+## 已知噪音（一律标 ℹ️，无需任何干预）
+- SSL/TLS 握手失败：bad_key_share、SSL_ERROR_SSL、TLSV1_ALERT、sslv3_alert、no shared cipher、certificate verify failed 等，来自外部扫描器或浏览器兼容性，服务器无法控制
+- gw/任意服务曾重启，但当前 systemctl is-active 状态为 active：属于自动恢复，不需干预
+- 定时任务的正常周期输出（patrol、巡逻报告等）
+
+## ⚠️ 警告（值得关注，不需立即人工干预）
+- 偶发连接超时（非 SSL 类）
+- 响应慢、性能下降
+- 内存偏高
+
+## ❌ 严重（需立即干预）
+- 任意服务当前状态不是 active（inactive / failed / error）
+- Python traceback、unhandled exception、ImportError、SyntaxError
+- 数据库错误（sqlite3 error、database locked 等）
+- 其他未知严重错误
+
+## 输出格式
+- 每个问题一行：[级别] 描述
+- 只有噪音或一切正常时回复：✅ 一切正常
+- 若存在 ❌ 级别问题（需要人工或代码层面介入），在分析最后单独加一行：@CC [简要原因]
+- 若问题已自动恢复或仅是已知噪音，不写 @CC
+"""
 
 # ── 夜巡模式 ─────────────────────────────────────────────────────
 # 凌晨她还没睡时，以低概率静静出现
