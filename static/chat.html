@@ -472,6 +472,14 @@ function isFy(a){ return ['fyodor','claude','assistant'].includes(String(a).toLo
 function escHtml(s){
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\n/g,'<br>');
 }
+function renderContent(s, isFyodor){
+  if(isFyodor && /<(div|details|summary|span)\b[^>]*style\s*=/i.test(s)){
+    // 把 HTML 块之外的纯文本换行转为 <br>
+    // 用一个简单策略：按 HTML 标签拆分，非标签部分的 \n 转 <br>
+    return s.replace(/(^[^<]+|>[^<]*(?=<|$))/g, function(m){ return m.replace(/\n/g,'<br>'); });
+  }
+  return escHtml(s);
+}
 function fmtTime(dt){
   if(!dt)return'';
   try{ var d=new Date(dt.replace(' ','T')); return String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0'); }catch(e){return'';}
@@ -600,7 +608,7 @@ function buildHtml(list) {
       }
       return out.trim();
     })(m.content||'');
-    if(hasTxt && displayContent) innerHtml += (hasImg?'<div class="img-then-text">':'')+escHtml(displayContent)+(hasImg?'</div>':''  );
+    if(hasTxt && displayContent) innerHtml += (hasImg?'<div class="img-then-text">':'')+renderContent(displayContent, fy)+(hasImg?'</div>':''  );
     var cacheInfoHtml = '';
     if(fy && m.cache_info){
       try{
@@ -1045,8 +1053,13 @@ async function streamReply(){
 
   var timer=setInterval(function(){
     if(shown>=target.length) return;
-    shown=Math.min(target.length, shown+1);
-    live.innerHTML=escHtml(target.slice(0,shown));
+    if(/<(div|details|summary|span)\b[^>]*style\s*=/i.test(target)){
+      shown=target.length;
+      live.innerHTML=renderContent(target,true);
+    } else {
+      shown=Math.min(target.length, shown+1);
+      live.innerHTML=escHtml(target.slice(0,shown));
+    }
     var atB=c.scrollHeight-c.scrollTop-c.clientHeight<120;
     if(atB) c.scrollTop=c.scrollHeight;
   }, Math.round(1000/TW_CPS));
