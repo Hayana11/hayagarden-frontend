@@ -314,12 +314,19 @@ def build_system(wake=False):
     # ── BP3 · 动态内容（每次都变，不挂缓存标）───────────────────
     parts = []
 
-    # 0. 情绪快照（emotion_engine）
+    # 0. 情绪快照 + 驱动条（emotion_engine + drive_engine）
     try:
         import emotion_engine as _ee
         _emotion_snip = _ee.get_bp3_snippet()
         if _emotion_snip:
             parts.append(_emotion_snip)
+    except Exception:
+        pass
+    try:
+        import drive_engine as _de
+        _drive_bp3 = _de.get_bp3_snippet()
+        if _drive_bp3:
+            parts.append(_drive_bp3)
     except Exception:
         pass
 
@@ -1499,6 +1506,15 @@ def chat():
                 _ee2.apply_desire_delta_async(_d['p_delta'], _d['i_delta'])
         except Exception:
             pass
+        try:
+            import drive_engine as _de2
+            _de2.rest()   # 她在线 → fatigue 缓解，attachment 微降
+            _de_d = _de2.get_drive()
+            if _de_d.get('attachment', 0) > 0.3:
+                import drive_engine as _de3
+                _de3.discharge('attachment')
+        except Exception:
+            pass
         except Exception:
             pass
     try:
@@ -2044,6 +2060,16 @@ def wake_decide():
             _fmt_str = '[自定义提醒触发] 你之前给自己设的备注：' + _self_note + '\n\n' + _fmt_str
         system += _fmt_str
 
+    # 注入八维驱动条（所有 wake 模式通用，dream/summarize 除外）
+    if mode not in ('dream', 'summarize'):
+        try:
+            import drive_engine as _de
+            _drive_snip = _de.get_wake_snippet()
+            if _drive_snip:
+                system += '\n\n' + _drive_snip
+        except Exception:
+            pass
+
     if mode == 'ritual':
         trigger = f'[仪式:{ritual_type}]'
     elif mode == 'nightwatch':
@@ -2089,6 +2115,15 @@ def wake_decide():
         conn.commit()
 
     conn.close()
+
+    # wake 行为结束 → discharge 对应 drive 维度
+    if mode not in ('dream', 'summarize'):
+        try:
+            import drive_engine as _de
+            _de.discharge_by_action(action, thoughts)
+        except Exception:
+            pass
+
     return jsonify({'ok': True, 'action': action, 'content': c_text})
 
 @app.route('/test', methods=['POST'])

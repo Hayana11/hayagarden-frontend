@@ -2329,3 +2329,20 @@ def brain_emotion_state():
         }})
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e)}), 500
+
+@app.route('/api/brain/drive_state', methods=['GET'])
+def brain_drive_state():
+    try:
+        import sys as _sys
+        _sys.path.insert(0, '/opt/frontend')
+        import drive_engine as _de
+        drive = _de.get_drive()
+        decision = _de.decide()
+        return jsonify({'ok': True, 'drive': drive, 'decision': {
+            'fired': decision['fired'],
+            'action': decision['action'],
+            'blocked': decision['blocked'],
+            'hint': decision['hint'],
+        }})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
