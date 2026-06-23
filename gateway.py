@@ -32,7 +32,7 @@ def _warmup_ombre_brain():
 _warmup_ombre_brain()
 STATIC_DIR = '/opt/frontend/static'
 API_URL    = 'https://gua.guagua.uk/v1/messages'
-MODEL      = 'claude-opus-4-6'
+MODEL      = 'claude-sonnet-4-6'
 
 API_KEY = ''
 GW_PROVIDER = 'api_relay'
@@ -43,6 +43,8 @@ try:
             API_KEY = line.split('=', 1)[1].strip()
         elif line.startswith('API_URL='):
             API_URL = line.split('=', 1)[1].strip() or API_URL
+        elif line.startswith('MODEL='):
+            MODEL = line.split('=', 1)[1].strip() or MODEL
         elif line.startswith('GW_PROVIDER='):
             GW_PROVIDER = line.split('=', 1)[1].strip() or 'api_relay'
         elif line.startswith('CLAUDE_CODE_OAUTH_TOKEN='):
@@ -1499,6 +1501,8 @@ def chat():
         _c = get_db(); _c.execute("INSERT INTO chat_messages (author,content) VALUES ('hayana',?)", (_uc,)); _c.execute("UPDATE wake_log SET consumed=1 WHERE consumed=0"); _c.commit(); _c.close()
         try:
             import emotion_engine as _ee; _ee.touch_interaction()
+        except Exception:
+            pass
         try:
             import emotion_engine as _ee2
             _d = _ee2.rule_score_desire(_uc)
@@ -1513,8 +1517,6 @@ def chat():
             if _de_d.get('attachment', 0) > 0.3:
                 import drive_engine as _de3
                 _de3.discharge('attachment')
-        except Exception:
-            pass
         except Exception:
             pass
     try:
@@ -1541,8 +1543,7 @@ def chat():
             # 异步情绪评分（不阻塞响应）
             try:
                 import emotion_engine as _ee
-                _ee.score_async((_uc + '
-' + text)[:2000])
+                _ee.score_async((_uc + '\n' + text)[:2000])
             except Exception:
                 pass
         finally:
@@ -1772,7 +1773,52 @@ def chat_stream():
                 yield 'data: ' + json.dumps({'t': 'usage', 'cache_read': cache_read_total, 'cache_creation': cache_create_total}) + SSE_END
             yield 'data: ' + json.dumps({'t': 'done', 'ok': bool(text)}) + SSE_END
         except urllib.error.HTTPError as e:
-            yield 'data: ' + json.dumps({'t': 'err', 'd': 'API %s: %s' % (e.code, e.read().decode()[:300])}) + SSE_END
+            _ecode = e.code
+            _emsg  = e.read().decode()[:300]
+            if _ecode in (401, 403, 503):
+                yield 'data: ' + json.dumps({'t': 'notice', 'd': '已切换至备用模型'}) + SSE_END
+                try:
+                    _ds_key = os.environ.get('DEEPSEEK_API_KEY', '')
+                    # 将 system/messages 转成 DeepSeek 兼容格式
+                    _ds_sys_text = ''
+                    if isinstance(system, str):
+                        _ds_sys_text = system
+                    elif isinstance(system, list):
+                        _ds_sys_text = '\n'.join(b.get('text', '') for b in system if isinstance(b, dict) and b.get('type') == 'text')
+                    _ds_msgs = []
+                    if _ds_sys_text:
+                        _ds_msgs.append({'role': 'system', 'content': _ds_sys_text})
+                    for _m in messages:
+                        _role = _m.get('role')
+                        if _role not in ('user', 'assistant'):
+                            continue
+                        _mc = _m.get('content', '')
+                        if isinstance(_mc, str):
+                            _ds_msgs.append({'role': _role, 'content': _mc})
+                        elif isinstance(_mc, list):
+                            _text_parts = [c.get('text', '') for c in _mc if isinstance(c, dict) and c.get('type') == 'text']
+                            if _text_parts:
+                                _ds_msgs.append({'role': _role, 'content': ''.join(_text_parts)})
+                    _ds_pay = {'model': 'deepseek-chat', 'max_tokens': 8000, 'messages': _ds_msgs}
+                    _ds_req = urllib.request.Request(
+                        'https://api.deepseek.com/chat/completions',
+                        data=json.dumps(_ds_pay).encode(),
+                        headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ' + _ds_key}
+                    )
+                    with urllib.request.urlopen(_ds_req, timeout=120) as _dr:
+                        _dres = json.loads(_dr.read())
+                    _dt = ((_dres.get('choices') or [{}])[0]).get('message', {}).get('content', '') or ''
+                    if _dt:
+                        yield 'data: ' + json.dumps({'t': 'text', 'd': _dt}) + SSE_END
+                        _dbc = get_db()
+                        _dbc.execute("INSERT INTO chat_messages (author,content) VALUES ('assistant',?)", (_dt,))
+                        _dbc.commit()
+                        _dbc.close()
+                    yield 'data: ' + json.dumps({'t': 'done', 'ok': bool(_dt)}) + SSE_END
+                except Exception as _de:
+                    yield 'data: ' + json.dumps({'t': 'err', 'd': 'DeepSeek fallback失败: ' + str(_de)}) + SSE_END
+            else:
+                yield 'data: ' + json.dumps({'t': 'err', 'd': 'API %s: %s' % (_ecode, _emsg)}) + SSE_END
         except urllib.error.URLError:
             yield 'data: ' + json.dumps({'t': 'err', 'd': '上游API超时，请重试'}) + SSE_END
         except Exception as e:
@@ -2199,11 +2245,41 @@ def api_summarize():
         if GW_PROVIDER == 'claude_code':
             text, _ = claude_code_call('你是费奥多尔，在写日记。', [{'role': 'user', 'content': prompt_text}])
         else:
-            # 对 api_relay 也走 claude_code，避免 API 格式差异导致崩溃
-            text, _ = claude_code_call(
-                '你是费奥多尔。直接用第一人称写这天的日记，120字以内，第一个字就是日记内容本身。不要写标题，不要写前缀。',
-                [{'role': 'user', 'content': prompt_text}]
+            _diary_sys = '你是费奥多尔。直接用第一人称写这天的日记，120字以内，第一个字就是日记内容本身。不要写标题，不要写前缀。'
+            _diary_payload = {
+                'model': MODEL, 'max_tokens': 500,
+                'system': _diary_sys,
+                'messages': [{'role': 'user', 'content': prompt_text}],
+            }
+            _diary_req = urllib.request.Request(
+                API_URL,
+                data=json.dumps(_diary_payload).encode(),
+                headers={'Content-Type': 'application/json', 'x-api-key': API_KEY, 'anthropic-version': '2023-06-01'}
             )
+            try:
+                with urllib.request.urlopen(_diary_req, timeout=60) as _r:
+                    _res = json.loads(_r.read())
+                text = ((_res.get('content') or [{}])[0]).get('text', '') or ''
+            except urllib.error.HTTPError as _he:
+                if _he.code in (401, 403, 503):
+                    _ds_key = os.environ.get('DEEPSEEK_API_KEY', '')
+                    _ds_payload = {
+                        'model': 'deepseek-chat', 'max_tokens': 500,
+                        'messages': [
+                            {'role': 'system', 'content': _diary_sys},
+                            {'role': 'user', 'content': prompt_text},
+                        ],
+                    }
+                    _ds_req = urllib.request.Request(
+                        'https://api.deepseek.com/chat/completions',
+                        data=json.dumps(_ds_payload).encode(),
+                        headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ' + _ds_key}
+                    )
+                    with urllib.request.urlopen(_ds_req, timeout=60) as _dr:
+                        _dres = json.loads(_dr.read())
+                    text = ((_dres.get('choices') or [{}])[0]).get('message', {}).get('content', '') or ''
+                else:
+                    raise
         return jsonify({'ok': True, 'text': text})
     except Exception as e:
         return jsonify({'error': str(e)}), 500

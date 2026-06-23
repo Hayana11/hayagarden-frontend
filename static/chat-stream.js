@@ -103,7 +103,7 @@ async function streamReply(){
         } else if(ev.t==='text'){
           ensureTextNode();
           textBuf+=ev.d;
-        } else if(ev.t==='err'){ err=new Error(ev.d); }
+        } else if(ev.t==='notice'){ showToast(ev.d); } else if(ev.t==='err'){ err=new Error(ev.d); }
       }
       if(err) break;
     }
