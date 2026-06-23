@@ -1471,7 +1471,10 @@ def agent_loop(system, messages, max_rounds=5):
              'content': run_tool(t.get('name', ''), t.get('input') or {})}
             for t in tool_uses
         ]})
-    return NL.join(t for t in text_parts if t).strip(), ''.join(think_parts)
+    joined = NL.join(t for t in text_parts if t).strip()
+    joined = re.sub(r'```tool_use\s.*?```\s*', '', joined, flags=re.DOTALL).strip()
+    joined = re.sub(r'```tool_result\s.*?```\s*', '', joined, flags=re.DOTALL).strip()
+    return joined, ''.join(think_parts)
 
 @app.route('/chat', methods=['POST'])
 def chat():
@@ -1689,6 +1692,9 @@ def chat_stream():
                     messages.append({'role': 'user', 'content': results})
                     text_acc.append(NL)
                 text     = ''.join(text_acc).strip()
+                # 过滤掉模型可能在text里叙述的tool markdown代码块
+                text = re.sub(r'```tool_use\s.*?```\s*', '', text, flags=re.DOTALL).strip()
+                text = re.sub(r'```tool_result\s.*?```\s*', '', text, flags=re.DOTALL).strip()
                 thinking = ''.join(think_acc)
                 _cache_info_json = (
                     json.dumps({'cache_read': cache_read_total, 'cache_creation': cache_create_total})
