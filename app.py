@@ -2314,6 +2314,7 @@ def brain_emotion_state():
         import emotion_engine as _ee
         state = _ee.get_state()
         longing = _ee.get_longing()
+        desire = _ee.get_desire()
         return jsonify({'ok': True, 'current': {
             'pa': state.get('pa', 0.5),
             'na': state.get('na', 0.2),
@@ -2322,6 +2323,9 @@ def brain_emotion_state():
             'mood_word': state.get('mood_word', ''),
             'longing': round(longing, 3),
             'updated_at': state.get('updated_at', ''),
+            'sternberg_p': desire['p'],
+            'sternberg_i': desire['i'],
+            'sternberg_c': desire['c'],
         }})
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e)}), 500

@@ -1492,6 +1492,13 @@ def chat():
         _c = get_db(); _c.execute("INSERT INTO chat_messages (author,content) VALUES ('hayana',?)", (_uc,)); _c.execute("UPDATE wake_log SET consumed=1 WHERE consumed=0"); _c.commit(); _c.close()
         try:
             import emotion_engine as _ee; _ee.touch_interaction()
+        try:
+            import emotion_engine as _ee2
+            _d = _ee2.rule_score_desire(_uc)
+            if _d['p_delta'] or _d['i_delta']:
+                _ee2.apply_desire_delta_async(_d['p_delta'], _d['i_delta'])
+        except Exception:
+            pass
         except Exception:
             pass
     try:
@@ -1544,6 +1551,14 @@ def chat_stream():
                 _uc = ((request.get_json() or {}).get('content') or '').strip()
                 if _uc:
                     _c = get_db(); _c.execute("INSERT INTO chat_messages (author,content) VALUES ('hayana',?)", (_uc,)); _c.execute("UPDATE wake_log SET consumed=1 WHERE consumed=0"); _c.commit(); _c.close()
+                    try:
+                        import emotion_engine as _ee_s
+                        _ee_s.touch_interaction()
+                        _d2 = _ee_s.rule_score_desire(_uc)
+                        if _d2['p_delta'] or _d2['i_delta']:
+                            _ee_s.apply_desire_delta_async(_d2['p_delta'], _d2['i_delta'])
+                    except Exception:
+                        pass
                 mode, reused = _gen_acquire_or_wait()
                 if mode == 'reused':
                     text, thinking = reused
