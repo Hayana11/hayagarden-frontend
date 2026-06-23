@@ -314,6 +314,15 @@ def build_system(wake=False):
     # ── BP3 · 动态内容（每次都变，不挂缓存标）───────────────────
     parts = []
 
+    # 0. 情绪快照（emotion_engine）
+    try:
+        import emotion_engine as _ee
+        _emotion_snip = _ee.get_bp3_snippet()
+        if _emotion_snip:
+            parts.append(_emotion_snip)
+    except Exception:
+        pass
+
     # 1. Handoff：自我锚点 + 用户/关系画像 + 近期连续性
     try:
         handoff_text = _ombre_handoff_sync()
@@ -1481,6 +1490,10 @@ def chat():
     _uc = ((request.get_json() or {}).get('content') or '').strip()
     if _uc:
         _c = get_db(); _c.execute("INSERT INTO chat_messages (author,content) VALUES ('hayana',?)", (_uc,)); _c.execute("UPDATE wake_log SET consumed=1 WHERE consumed=0"); _c.commit(); _c.close()
+        try:
+            import emotion_engine as _ee; _ee.touch_interaction()
+        except Exception:
+            pass
     try:
         mode, reused = _gen_acquire_or_wait()
         if mode == 'reused':
@@ -1502,6 +1515,13 @@ def chat():
             )
             conn.commit()
             conn.close()
+            # 异步情绪评分（不阻塞响应）
+            try:
+                import emotion_engine as _ee
+                _ee.score_async((_uc + '
+' + text)[:2000])
+            except Exception:
+                pass
         finally:
             _gen_release((text, thinking_text) if text else None)
 
@@ -1560,6 +1580,11 @@ def chat_stream():
                         conn.commit()
                         conn.close()
                         _write_session_memo(_uc, text)
+                        try:
+                            import emotion_engine as _ee
+                            _ee.score_async((_uc + chr(10) + text)[:2000])
+                        except Exception:
+                            pass
                 finally:
                     _released[0] = True
                     _gen_release((text, thinking) if text else None)
@@ -2137,24 +2162,27 @@ def api_summarize():
 # ── 白夜 API ──────────────────────────────────────────
 @app.route('/api/brain/emotions', methods=['GET'])
 def brain_emotions():
-    """情绪时间线 - 返回最近的记忆及其valence/arousal"""
+    """情绪状态 - 返回真实emotion_state + 历史趋势"""
     try:
+        import emotion_engine as _ee
+        state = _ee.get_state()
+        longing = _ee.get_longing()
+        # 历史：取最近chat_messages里情绪相关的节点（以updated_at粒度）
         conn = get_db()
-        # 从wake_log里拿最近的thoughts，配合虚拟的情绪数据
-        rows = conn.execute(
-            "SELECT woke_at FROM wake_log ORDER BY id DESC LIMIT 20"
+        hist = conn.execute(
+            "SELECT updated_at, pa, na, valence, arousal, mood_word FROM emotion_state WHERE id=1"
         ).fetchall()
         conn.close()
-        items = []
-        for r in rows:
-            import random
-            items.append({
-                'time': r['woke_at'][:10] if r['woke_at'] else '—',
-                'valence': round(random.uniform(0.3, 0.9), 2),
-                'arousal': round(random.uniform(0.2, 0.8), 2),
-                'note': '深度思考'
-            })
-        return jsonify({'ok': True, 'items': items[:15]})
+        current = {
+            'pa': state.get('pa', 0.5),
+            'na': state.get('na', 0.2),
+            'valence': state.get('valence', 0.6),
+            'arousal': state.get('arousal', 0.3),
+            'mood_word': state.get('mood_word', '平静'),
+            'longing': longing,
+            'updated_at': state.get('updated_at', ''),
+        }
+        return jsonify({'ok': True, 'current': current})
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e)}), 500
 

@@ -2305,3 +2305,23 @@ def classified_generate():
         return jsonify({'ok': True, 'fields': fields, 'time': now_str})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+
+@app.route('/api/brain/emotion_state', methods=['GET'])
+def brain_emotion_state():
+    try:
+        import sys as _sys
+        _sys.path.insert(0, '/opt/frontend')
+        import emotion_engine as _ee
+        state = _ee.get_state()
+        longing = _ee.get_longing()
+        return jsonify({'ok': True, 'current': {
+            'pa': state.get('pa', 0.5),
+            'na': state.get('na', 0.2),
+            'valence': state.get('valence', 0.6),
+            'arousal': state.get('arousal', 0.3),
+            'mood_word': state.get('mood_word', ''),
+            'longing': round(longing, 3),
+            'updated_at': state.get('updated_at', ''),
+        }})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
