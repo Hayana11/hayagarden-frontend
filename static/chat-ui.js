@@ -58,7 +58,7 @@ async function send(){
         }
         await loadMsgs(false);
         if(fullText&&document.hidden) notify('Fyodor',fullText.slice(0,50));
-      }catch(e){ console.error('gateway',e); }
+      }catch(e){ console.error('gateway',e); showErr('费佳暂时离线：' + (e.message||'连接失败')); }
       hideTyping();
     }
   }catch(e){ console.error('send',e); }
@@ -207,7 +207,8 @@ function openSheet(idx){
   document.getElementById('sheet-ov').classList.add('show');
 }
 function closeSheet(){ document.getElementById('sheet-ov').classList.remove('show'); }
-function showToast(t){ var el=document.getElementById('toast'); el.textContent=t; el.classList.add('show'); setTimeout(function(){ el.classList.remove('show'); },1800); }
+function showToast(t,dur,type){ var el=document.getElementById('toast'); el.textContent=t; el.className='toast show '+(type||''); setTimeout(function(){ el.classList.remove('show'); },dur||1800); }
+function showErr(t){ showToast(t,6000,'toast-err'); }
 async function sheetCopy(){
   if(!sheetMsg) return;
   try{ await navigator.clipboard.writeText(sheetMsg.content); }

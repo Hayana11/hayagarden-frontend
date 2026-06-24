@@ -38,8 +38,9 @@ function buildHtml(list) {
 }
 
 async function loadMsgs(isInit){
+  window.historyMode = false;
   try{
-    var r=await fetch('/api/chat/messages');
+    var r=await fetch('/api/chat/messages?limit=500');
     var d=await r.json();
     var list=d.messages||[];
     try{

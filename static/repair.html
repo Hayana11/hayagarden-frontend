@@ -1,0 +1,322 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+<title>维修工 · 我们家</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@latest/tabler-icons.min.css">
+<style>
+*{margin:0;padding:0;box-sizing:border-box;}
+:root{
+  --bg:#f8f8f6;--card:#fff;--text:#2a2020;--muted:#9a8a8a;
+  --primary:#7c6a8a;--primary-bg:#f0ebf4;--border:#ece6e0;
+  --green:#4a9e6b;--green-bg:#edf7f1;
+  --red:#c0443a;--red-bg:#fdf0ef;
+  --code-bg:#f3f0f8;
+}
+html,body{height:100%;overflow:hidden;}
+body{background:var(--bg);color:var(--text);font-family:-apple-system,'PingFang SC','HarmonyOS Sans SC',sans-serif;max-width:480px;margin:0 auto;display:flex;flex-direction:column;}
+
+.hd{flex-shrink:0;background:rgba(255,255,255,.97);backdrop-filter:blur(10px);padding:calc(env(safe-area-inset-top,0px) + 12px) 18px 14px;display:flex;align-items:center;gap:12px;border-bottom:.5px solid var(--border);}
+.hd-back{width:34px;height:34px;border:none;background:none;cursor:pointer;color:var(--muted);border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:19px;}
+.hd-back:hover{background:var(--primary-bg);color:var(--primary);}
+.hd-title{font-family:Georgia,'Times New Roman',serif;font-size:17px;color:var(--text);}
+.hd-sub{font-size:11px;color:var(--muted);margin-left:auto;letter-spacing:.3px;}
+
+.body{flex:1;overflow-y:auto;padding:16px;}
+
+/* 系统状态 */
+.status-card{background:var(--card);border-radius:14px;border:.5px solid var(--border);padding:14px 16px;margin-bottom:12px;}
+.status-title{font-size:11px;color:var(--muted);letter-spacing:.5px;margin-bottom:10px;}
+.status-row{display:flex;align-items:center;justify-content:space-between;padding:5px 0;border-bottom:.5px solid var(--border);}
+.status-row:last-child{border-bottom:none;}
+.status-name{font-size:13px;color:var(--text);}
+.status-badge{font-size:11px;padding:2px 8px;border-radius:20px;font-weight:500;}
+.badge-ok{background:var(--green-bg);color:var(--green);}
+.badge-err{background:var(--red-bg);color:var(--red);}
+.badge-checking{background:var(--primary-bg);color:var(--primary);}
+.refresh-btn{border:none;background:none;color:var(--muted);font-size:13px;cursor:pointer;padding:2px 6px;border-radius:6px;}
+.refresh-btn:hover{color:var(--primary);}
+
+/* 对话区 */
+.chat-area{flex:1;display:flex;flex-direction:column;gap:10px;margin-bottom:12px;}
+.msg{border-radius:14px;padding:11px 14px;font-size:14px;line-height:1.6;max-width:100%;}
+.msg-sys{background:var(--primary-bg);color:var(--primary);font-size:12px;text-align:center;border-radius:8px;}
+.msg-user{background:var(--primary);color:#fff;align-self:flex-end;max-width:85%;}
+.msg-ai{background:var(--card);border:.5px solid var(--border);align-self:flex-start;}
+.msg-ai pre{background:var(--code-bg);border-radius:8px;padding:10px 12px;margin:8px 0;font-size:12px;overflow-x:auto;white-space:pre-wrap;word-break:break-all;font-family:'SF Mono','Fira Code',monospace;}
+.msg-ai code{background:var(--code-bg);padding:1px 5px;border-radius:4px;font-size:12px;font-family:'SF Mono','Fira Code',monospace;}
+.copy-btn{display:inline-flex;align-items:center;gap:4px;font-size:11px;color:var(--primary);border:1px solid var(--primary-bg);background:var(--primary-bg);border-radius:6px;padding:3px 8px;cursor:pointer;margin-top:4px;}
+.copy-btn:hover{background:var(--primary);color:#fff;}
+
+/* 输入区 */
+.inp-area{flex-shrink:0;background:var(--card);border-top:.5px solid var(--border);padding:10px 14px calc(env(safe-area-inset-bottom,0px) + 10px);}
+.inp-row{display:flex;gap:8px;align-items:flex-end;}
+.inp-box{flex:1;border:1.5px solid var(--border);border-radius:16px;padding:9px 14px;font-size:14px;font-family:inherit;outline:none;resize:none;background:var(--bg);color:var(--text);max-height:100px;line-height:1.5;}
+.inp-box:focus{border-color:var(--primary);}
+.inp-send{width:38px;height:38px;border-radius:50%;border:none;background:var(--primary);color:#fff;cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:17px;flex-shrink:0;}
+.inp-send:disabled{opacity:.4;cursor:not-allowed;}
+
+/* 快捷问题 */
+.quick-wrap{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px;}
+.quick-btn{font-size:11px;padding:5px 10px;border-radius:20px;border:1px solid var(--border);background:var(--card);color:var(--muted);cursor:pointer;white-space:nowrap;}
+.quick-btn:hover{border-color:var(--primary);color:var(--primary);}
+
+.typing{display:flex;gap:4px;align-items:center;padding:8px 12px;}
+.typing span{width:6px;height:6px;border-radius:50%;background:var(--muted);animation:blink 1.2s infinite;}
+.typing span:nth-child(2){animation-delay:.2s;}
+.typing span:nth-child(3){animation-delay:.4s;}
+@keyframes blink{0%,80%,100%{opacity:.2;}40%{opacity:1;}}
+</style>
+</head>
+<body>
+
+<div class="hd">
+  <button class="hd-back" onclick="history.back()"><i class="ti ti-arrow-left"></i></button>
+  <span class="hd-title">维修工</span>
+  <span class="hd-sub">DeepSeek · 不花cc额度</span>
+</div>
+
+<div class="body" id="body">
+
+  <!-- 服务状态 -->
+  <div class="status-card">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;">
+      <span class="status-title">SERVICE STATUS</span>
+      <button class="refresh-btn" onclick="checkStatus()"><i class="ti ti-refresh"></i></button>
+    </div>
+    <div id="status-list">
+      <div class="status-row"><span class="status-name">frontend (5050)</span><span class="status-badge badge-checking" id="s-5050">检查中</span></div>
+      <div class="status-row"><span class="status-name">frontend-gw (5051)</span><span class="status-badge badge-checking" id="s-5051">检查中</span></div>
+      <div class="status-row"><span class="status-name">ombre-brain (8000)</span><span class="status-badge badge-checking" id="s-8000">检查中</span></div>
+    </div>
+  </div>
+
+  <!-- 对话区 -->
+  <div class="chat-area" id="chat">
+    <div class="msg msg-sys">描述故障现象，维修工给出可执行命令</div>
+  </div>
+
+  <!-- 快捷问题 -->
+  <div class="quick-wrap" id="quick">
+    <button class="quick-btn" onclick="quickAsk('前端不回复了')">前端不回复</button>
+    <button class="quick-btn" onclick="quickAsk('generation lock卡住了')">lock卡住</button>
+    <button class="quick-btn" onclick="quickAsk('frontend-gw服务异常')">gw异常</button>
+    <button class="quick-btn" onclick="quickAsk('API返回401或503')">API报错</button>
+    <button class="quick-btn" onclick="quickAsk('渐变脑连接不上')">渐变脑挂了</button>
+  </div>
+
+</div>
+
+<div class="inp-area">
+  <div class="inp-row">
+    <textarea class="inp-box" id="inp" placeholder="描述问题…" rows="1"
+      oninput="this.style.height='auto';this.style.height=this.scrollHeight+'px'"
+      onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();send();}"></textarea>
+    <button class="inp-send" id="send-btn" onclick="send()"><i class="ti ti-send"></i></button>
+  </div>
+</div>
+
+<script>
+const SYSTEM_CTX = `你是一个专门维修 love-style.xyz 服务器的维修工。以下是这个系统的完整信息：
+
+【系统架构】
+- VPS: Vultr Tokyo, Ubuntu 24
+- 主域名: love-style.xyz (HTTPS, Nginx反向代理)
+- Python 3.11, Node.js 20
+
+【关键服务】
+- frontend (systemd服务): gunicorn跑 /opt/frontend/app.py, 端口5050
+  - 路由: /chat, /api/chat/send, /api/chat/reply, /api/brain/* 等
+- frontend-gw (systemd服务): gunicorn跑 /opt/frontend/gateway.py, 端口5051
+  - 路由: /chat/stream (聊天主路由), /api/gw/*
+  - Nginx: /api/gw/ → 5051, 其余 → 5050
+- ombre-brain: Python服务端口8000, 路径/opt/ombre-brain/
+- discord-mcp: Node服务端口3101
+
+【关键文件】
+- /opt/frontend/app.py (主后端)
+- /opt/frontend/gateway.py (AI网关，聊天流式回复)
+- /opt/frontend/.env (API key, MODEL, GW_PROVIDER等配置)
+- /opt/frontend/static/ (前端文件)
+- /opt/frontend/memories.db (SQLite数据库)
+- /opt/frontend/prompts/persona.md (人格设定)
+
+【.env关键字段】
+ANTHROPIC_API_KEY, API_URL, MODEL, GW_PROVIDER(api_relay或claude_code), CLAUDE_CODE_OAUTH_TOKEN, DEEPSEEK_API_KEY
+
+【常见故障和解法】
+1. 前端不回复/generation lock卡住
+   现象: 发消息没反应，或返回"上一轮回复仍在生成中"
+   解法: systemctl restart frontend-gw && sleep 2 && systemctl is-active frontend-gw
+
+2. 服务crash-loop / orphan进程
+   现象: systemctl is-active显示failed，但端口还有响应
+   诊断: systemctl status frontend-gw | head -20
+   清理: fuser -k 5051/tcp && systemctl restart frontend-gw
+
+3. API 401/403 (认证失败)
+   原因: .env里的API_KEY或CLAUDE_CODE_OAUTH_TOKEN过期
+   诊断: curl -s http://localhost:5051/status | python3 -m json.tool
+   解法: 更新.env里对应的key，然后 systemctl restart frontend-gw
+
+4. API 503 / model_not_found
+   原因: .env里MODEL名称错误，或中转平台不支持该model
+   解法: 编辑/opt/frontend/.env，改MODEL=claude-sonnet-4-6，重启frontend-gw
+
+5. 数据库查最近消息
+   sqlite3 /opt/frontend/memories.db "SELECT id,author,substr(content,1,100) FROM chat_messages ORDER BY id DESC LIMIT 5;"
+
+6. 语法检查
+   Python: python3 -c "import ast; ast.parse(open('/opt/frontend/gateway.py').read()); print('ok')"
+   JS: node --check /opt/frontend/static/chat-ui.js
+
+【重要规则】
+- 改完Python文件一定要ast.parse验证语法
+- 改完JS文件一定要node --check验证
+- 改完systemd服务的文件一定要restart并确认is-active是active
+- /opt/frontend是git仓库，重要改动记得git add && git commit
+
+你的任务：根据用户描述的故障现象，给出诊断判断和具体可执行的命令。
+命令用代码块包裹，每条命令单独一个代码块，方便用户复制。
+语言简洁，直接给结论和命令，不要废话。`;
+
+let history = [];
+let checking = false;
+
+async function checkStatus() {
+  ['5050','5051','8000'].forEach(p => {
+    const el = document.getElementById('s-' + p);
+    el.textContent = '检查中';
+    el.className = 'status-badge badge-checking';
+  });
+  try {
+    const r = await fetch('/api/repair/status', {method:'GET'});
+    if(r.ok) {
+      const d = await r.json();
+      ['5050','5051','8000'].forEach(p => {
+        const el = document.getElementById('s-' + p);
+        const ok = d['port_' + p];
+        el.textContent = ok ? '正常' : '异常';
+        el.className = 'status-badge ' + (ok ? 'badge-ok' : 'badge-err');
+      });
+    }
+  } catch(e) {
+    ['5050','5051','8000'].forEach(p => {
+      const el = document.getElementById('s-' + p);
+      el.textContent = '无法检查';
+      el.className = 'status-badge badge-err';
+    });
+  }
+}
+
+function quickAsk(text) {
+  document.getElementById('inp').value = text;
+  send();
+}
+
+function addMsg(role, text) {
+  const chat = document.getElementById('chat');
+  const div = document.createElement('div');
+  if(role === 'user') {
+    div.className = 'msg msg-user';
+    div.textContent = text;
+  } else {
+    div.className = 'msg msg-ai';
+    div.innerHTML = formatAI(text);
+  }
+  chat.appendChild(div);
+  div.scrollIntoView({behavior:'smooth',block:'end'});
+  return div;
+}
+
+function formatAI(text) {
+  // 代码块处理
+  text = text.replace(/```(\w*)\n?([\s\S]*?)```/g, function(_, lang, code) {
+    const escaped = code.trim().replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    const id = 'code-' + Math.random().toString(36).slice(2,8);
+    return '<pre id="' + id + '">' + escaped + '</pre>' +
+      '<button class="copy-btn" onclick="copyCode(\'' + id + '\')"><i class="ti ti-copy"></i>复制命令</button>';
+  });
+  // 行内code
+  text = text.replace(/`([^`]+)`/g, '<code>$1</code>');
+  // 换行
+  text = text.replace(/\n/g, '<br>');
+  return text;
+}
+
+function copyCode(id) {
+  const el = document.getElementById(id);
+  if(!el) return;
+  navigator.clipboard.writeText(el.textContent).then(function() {
+    const btn = el.nextElementSibling;
+    if(btn) { btn.innerHTML = '<i class="ti ti-check"></i>已复制'; setTimeout(function(){btn.innerHTML='<i class="ti ti-copy"></i>复制命令';},1500); }
+  });
+}
+
+function showTyping() {
+  const chat = document.getElementById('chat');
+  const div = document.createElement('div');
+  div.className = 'msg msg-ai';
+  div.id = 'typing-indicator';
+  div.innerHTML = '<div class="typing"><span></span><span></span><span></span></div>';
+  chat.appendChild(div);
+  div.scrollIntoView({behavior:'smooth',block:'end'});
+}
+
+function hideTyping() {
+  const el = document.getElementById('typing-indicator');
+  if(el) el.remove();
+}
+
+async function send() {
+  const inp = document.getElementById('inp');
+  const text = inp.value.trim();
+  if(!text || checking) return;
+  checking = true;
+  document.getElementById('send-btn').disabled = true;
+  document.getElementById('quick').style.display = 'none';
+  inp.value = '';
+  inp.style.height = 'auto';
+
+  addMsg('user', text);
+  history.push({role:'user', content: text});
+
+  showTyping();
+
+  try {
+    const resp = await fetch('https://api.deepseek.com/v1/chat/completions', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json', 'Authorization':'Bearer ' + await getKey()},
+      body: JSON.stringify({
+        model: 'deepseek-chat',
+        max_tokens: 800,
+        messages: [{role:'system', content: SYSTEM_CTX}, ...history]
+      })
+    });
+    const d = await resp.json();
+    const reply = d.choices?.[0]?.message?.content || '维修工暂时没有回应。';
+    hideTyping();
+    history.push({role:'assistant', content: reply});
+    addMsg('ai', reply);
+  } catch(e) {
+    hideTyping();
+    addMsg('ai', '连接失败：' + e.message);
+  }
+
+  checking = false;
+  document.getElementById('send-btn').disabled = false;
+}
+
+async function getKey() {
+  try {
+    const r = await fetch('/api/repair/key');
+    const d = await r.json();
+    return d.key || '';
+  } catch(e) { return ''; }
+}
+
+checkStatus();
+</script>
+</body>
+</html>

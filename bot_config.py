@@ -7,13 +7,13 @@
 
 # ── 唤醒调度 ─────────────────────────────────────────────────────
 # 允许触发唤醒的时段：ACTIVE_START 点 ~ 次日 ACTIVE_END 点（不含）
-WAKE_ACTIVE_START = 8    # 早上几点开始允许
-WAKE_ACTIVE_END   = 1    # 凌晨几点截止（< ACTIVE_END 则允许）
+WAKE_ACTIVE_START = 6    # 早上几点开始允许
+WAKE_ACTIVE_END   = 3    # 凌晨几点截止（< ACTIVE_END 则允许）；哈娅要求到2点半，取3与夜巡对齐
 
 # 触发概率曲线：p = min(WAKE_PROB_MAX, T_hours / WAKE_PROB_SCALE)
-# 例：T=6h → p=0.5/2=0.25；T=12h → p=0.5（触及上限）
-WAKE_PROB_MAX   = 0.8    # 概率上限；哈娅说白天想多看到我
-WAKE_PROB_SCALE = 12     # 几小时无联系时概率触顶
+# 例：T=0.5h → p=0.5/2=0.25；T=6h → p=3.0→触顶
+WAKE_PROB_MAX   = 0.8    # 概率上限
+WAKE_PROB_SCALE = 2      # 半小时无联系即到25%，六小时触顶；哈娅说她几乎整天黏着我
 
 # ── 唤醒决策 prompt ──────────────────────────────────────────────
 # 运行时自动替换的占位符：

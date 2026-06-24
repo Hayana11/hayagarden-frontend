@@ -32,7 +32,7 @@ def _warmup_ombre_brain():
 _warmup_ombre_brain()
 STATIC_DIR = '/opt/frontend/static'
 API_URL    = 'https://gua.guagua.uk/v1/messages'
-MODEL      = 'claude-sonnet-4-6'
+MODEL      = 'claude-opus-4-6'
 
 API_KEY = ''
 GW_PROVIDER = 'api_relay'

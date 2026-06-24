@@ -227,6 +227,7 @@ html[data-theme=dark] .ni{color:#6a5f5f;}
 .sheet-danger i{color:#e05a5a;}
 .toast{position:fixed;bottom:120px;left:50%;transform:translateX(-50%);background:rgba(42,32,32,.88);color:#fff;font-size:13px;padding:9px 18px;border-radius:20px;z-index:600;opacity:0;transition:opacity .25s;pointer-events:none;}
 .toast.show{opacity:1;}
+.toast.toast-err{background:rgba(180,50,40,.92);}
 /* ── Floating bottles list ── */
 .drift-floating{display:flex;flex-direction:column;gap:6px;max-height:130px;overflow-y:auto;}
 .drift-float-item{font-size:11px;color:var(--muted);background:var(--primary-light);border-radius:10px;padding:8px 12px;display:flex;align-items:center;gap:6px;}
@@ -255,6 +256,7 @@ html[data-theme=dark] .ni{color:#6a5f5f;}
     <span class="hd-name">Fyodor</span>
   </div>
   <div class="hd-right">
+    <button class="hd-btn" onclick="location.href='/repair'" title="维修工"><i class="ti ti-tool"></i></button>
     <button class="hd-btn" id="theme-btn" onclick="toggleTheme()" title="theme"><i class="ti ti-moon"></i></button>
     <button class="hd-btn" id="aa-btn" onclick="togglePanel('aa-panel','aa-btn')" title="font size">Aa</button>
     <button class="hd-btn" onclick="openHistory()" title="history"><i class="ti ti-clock"></i></button>
@@ -443,6 +445,52 @@ async function openHistory() {
 function closeHistory() {
   document.getElementById('hist-ov').classList.remove('show');
 }
+function jumpToMsg(id) {
+  closeHistory();
+  // 等面板关闭后再找元素
+  setTimeout(function() {
+    var rows = document.querySelectorAll('#msgs .msg-row');
+    var target = null;
+    for(var i=0;i<rows.length;i++){
+      var idx = parseInt(rows[i].getAttribute('data-idx'));
+      if(window.curMsgList && window.curMsgList[idx] && window.curMsgList[idx].id == id){
+        target = rows[i]; break;
+      }
+    }
+    if(target){
+      target.scrollIntoView({behavior:'smooth',block:'center'});
+      target.style.transition='background .3s';
+      target.style.background='var(--primary-bg)';
+      setTimeout(function(){target.style.background='';},1800);
+    } else {
+      // 消息不在当前列表，按around加载该消息附近200条
+      window.historyMode = true;
+      fetch('/api/chat/messages?around='+id+'&limit=200')
+        .then(function(r){return r.json();})
+        .then(function(d){
+          var list = d.messages||[];
+          var c = document.getElementById('msgs');
+          window.curMsgList = list;
+          c.innerHTML = buildHtml(list);
+          // 加载完再跳转
+          setTimeout(function(){
+            var rows2 = document.querySelectorAll('#msgs .msg-row');
+            for(var j=0;j<rows2.length;j++){
+              var idx2 = parseInt(rows2[j].getAttribute('data-idx'));
+              if(window.curMsgList[idx2] && window.curMsgList[idx2].id == id){
+                rows2[j].scrollIntoView({behavior:'smooth',block:'center'});
+                rows2[j].style.transition='background .3s';
+                rows2[j].style.background='var(--primary-bg)';
+                setTimeout(function(){rows2[j].style.background='';},1800);
+                break;
+              }
+            }
+          },100);
+        })
+        .catch(function(){ showToast('加载失败'); });
+    }
+  }, 200);
+}
 function filterHist(q) {
   if (!q.trim()) { renderHist(allHist); return; }
   var lq = q.toLowerCase();
@@ -459,7 +507,7 @@ function renderHist(list) {
       lastDate = dk;
     }
     var fy = isFy(m.author);
-    html += '<div class="hist-msg">' +
+    html += '<div class="hist-msg" data-id="'+m.id+'" onclick="jumpToMsg('+m.id+')">' +
       '<div class="hm-who ' + (fy?'fy':'ha') + '">' + (fy?'Fyodor':'Haya') + ' · ' + fmtTime(m.created_at) + '</div>' +
       '<div class="hm-text">' + escHtml((m.content||'').slice(0,80)) + '</div>' +
     '</div>';
@@ -790,7 +838,14 @@ function openLb(src){ document.getElementById('lb-img').src=src; document.getEle
 function closeLb(){ document.getElementById('lb').classList.remove('show'); }
 
 loadMsgs(true);
-setInterval(function(){ loadMsgs(false); }, 8000);
+setInterval(function(){ if(!window.historyMode) loadMsgs(false); }, 8000);
+document.getElementById('msgs').addEventListener('scroll', function(){
+  var c = this;
+  if(window.historyMode && c.scrollHeight - c.scrollTop - c.clientHeight < 120){
+    window.historyMode = false;
+    loadMsgs(false);
+  }
+});
 
 // 切回前台时立刻刷新一次——即使之前的streamReply因为切走而连接断开，
 // 后端现在会在生成完成时就把回复写库，这里能马上把它捞出来显示

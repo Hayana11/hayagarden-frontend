@@ -168,10 +168,19 @@ def upload_image():
 def get_chat_messages():
     limit = request.args.get('limit', 50, type=int)
     limit = min(max(limit, 1), 1000)
+    around = request.args.get('around', None, type=int)
     conn = get_db()
-    rows = conn.execute("SELECT * FROM chat_messages ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+    if around:
+        half = limit // 2
+        rows = conn.execute(
+            "SELECT * FROM chat_messages WHERE id >= ? ORDER BY id ASC LIMIT ?",
+            (max(1, around - half), limit)
+        ).fetchall()
+    else:
+        rows = conn.execute("SELECT * FROM chat_messages ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+        rows = list(reversed(rows))
     conn.close()
-    return jsonify({"messages":[dict(r) for r in reversed(rows)]})
+    return jsonify({"messages":[dict(r) for r in rows]})
 
 @app.route('/api/chat/send', methods=['POST'])
 def send_chat():
@@ -753,6 +762,30 @@ def config_test_send():
 @app.route('/api-test')
 def api_test_page():
     return send_from_directory('/opt/frontend/static', 'api-test.html')
+
+@app.route('/repair')
+def repair_page():
+    return send_from_directory('/opt/frontend/static', 'repair.html')
+
+@app.route('/api/repair/key')
+def repair_key():
+    key = ''
+    try:
+        for line in open('/opt/frontend/.env'):
+            if line.startswith('DEEPSEEK_API_KEY='):
+                key = line.split('=',1)[1].strip()
+    except: pass
+    return jsonify({'key': key})
+
+@app.route('/api/repair/status')
+def repair_status():
+    import socket
+    def port_open(p):
+        try:
+            s = socket.create_connection(('127.0.0.1', p), timeout=1)
+            s.close(); return True
+        except: return False
+    return jsonify({'port_5050': port_open(5050), 'port_5051': port_open(5051), 'port_8000': port_open(8000)})
 
 
 # ── EPUB upload & import ──
