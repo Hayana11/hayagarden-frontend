@@ -37,6 +37,8 @@ MODEL      = 'claude-opus-4-6'
 API_KEY = ''
 GW_PROVIDER = 'api_relay'
 CC_TOKEN = ''
+DESIRE_DRIVEN = '0'
+LONGING_ENABLED = '1'
 try:
     for line in open('/opt/frontend/.env'):
         if line.startswith('ANTHROPIC_API_KEY='):
@@ -49,6 +51,10 @@ try:
             GW_PROVIDER = line.split('=', 1)[1].strip() or 'api_relay'
         elif line.startswith('CLAUDE_CODE_OAUTH_TOKEN='):
             CC_TOKEN = line.split('=', 1)[1].strip()
+        elif line.startswith('DESIRE_DRIVEN='):
+            DESIRE_DRIVEN = line.split('=', 1)[1].strip() or '0'
+        elif line.startswith('LONGING_ENABLED='):
+            LONGING_ENABLED = line.split('=', 1)[1].strip() or '1'
 except Exception:
     pass
 
@@ -331,6 +337,15 @@ def build_system(wake=False):
             parts.append(_drive_bp3)
     except Exception:
         pass
+    # Longing系统隐性注入（对话时）
+    if LONGING_ENABLED == '1':
+        try:
+            import desire as _des_bp3
+            _longing_hint = _des_bp3.get_longing_system_hint()
+            if _longing_hint:
+                parts.append(_longing_hint)
+        except Exception:
+            pass
 
     # 1. Handoff：自我锚点 + 用户/关系画像 + 近期连续性
     try:
@@ -1504,6 +1519,11 @@ def chat():
         except Exception:
             pass
         try:
+            import desire as _des_chat
+            _des_chat.touch_hayana()
+        except Exception:
+            pass
+        try:
             import emotion_engine as _ee2
             _d = _ee2.rule_score_desire(_uc)
             if _d['p_delta'] or _d['i_delta']:
@@ -2051,6 +2071,18 @@ def wake_decide():
         except Exception:
             pass
 
+    # 心跳开始：V/A校准费佳驱动条
+    if DESIRE_DRIVEN == '1':
+        try:
+            import desire as _des_wake, emotion_engine as _ee_wake
+            _es_wake = _ee_wake.get_state()
+            _des_wake.calibrate_va(
+                _es_wake.get('valence', 0.5),
+                _es_wake.get('arousal', 0.3),
+            )
+        except Exception:
+            pass
+
     system = build_system(wake=True)
     try:
         import importlib as _il, bot_config as _bconf
@@ -2115,6 +2147,15 @@ def wake_decide():
                 system += '\n\n' + _drive_snip
         except Exception:
             pass
+    # 注入费佳驱动 v1（7维 + Longing）
+    if mode not in ('dream', 'summarize') and (DESIRE_DRIVEN == '1' or LONGING_ENABLED == '1'):
+        try:
+            import desire as _des_snip
+            _dv1_snip = _des_snip.get_wake_snippet()
+            if _dv1_snip:
+                system += '\n\n' + _dv1_snip
+        except Exception:
+            pass
 
     if mode == 'ritual':
         trigger = f'[仪式:{ritual_type}]'
@@ -2167,6 +2208,13 @@ def wake_decide():
         try:
             import drive_engine as _de
             _de.discharge_by_action(action, thoughts)
+        except Exception:
+            pass
+    # 费佳驱动 v1 → satisfy
+    if mode not in ('dream', 'summarize') and DESIRE_DRIVEN == '1':
+        try:
+            import desire as _des_sat
+            _des_sat.satisfy(action)
         except Exception:
             pass
 
