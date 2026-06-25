@@ -71,25 +71,29 @@ _gen_busy_since = 0.0   # epoch seconds when lock was last acquired
 _gen_last_result = None
 _GEN_ZOMBIE_TTL = 90    # seconds before a held lock is treated as zombie
 
-def _gen_acquire_or_wait(wait_timeout=310):
+def _gen_acquire_or_wait(wait_timeout=15):
     """返回 ('own', None) 表示本次调用应自己生成；
     返回 ('reused', (text, thinking)) 表示应直接复用刚结束的另一次生成结果。"""
     global _gen_busy, _gen_busy_since, _gen_last_result
+    deadline = time.time() + wait_timeout
     with _gen_cond:
-        if _gen_busy and (time.time() - _gen_busy_since) > _GEN_ZOMBIE_TTL:
-            # 持锁超过 TTL 秒但仍未释放 —— 原持有者已经挂掉，强制重置
-            _gen_busy = False
-            _gen_last_result = None
-        if not _gen_busy:
-            _gen_busy = True
-            _gen_busy_since = time.time()
-            _gen_last_result = None
-            return ('own', None)
-        _gen_cond.wait(timeout=wait_timeout)
-        if _gen_last_result is not None:
-            return ('reused', _gen_last_result)
-        # 等了很久还是没等到（极端情况），不再叠加第三次生成，直接报错让前端提示重试
-        raise RuntimeError('上一轮回复仍在生成中，请稍候再试')
+        while True:
+            # 每次循环都检查TTL，主动踢掉僵尸锁
+            if _gen_busy and (time.time() - _gen_busy_since) > _GEN_ZOMBIE_TTL:
+                _gen_busy = False
+                _gen_last_result = None
+            if not _gen_busy:
+                _gen_busy = True
+                _gen_busy_since = time.time()
+                _gen_last_result = None
+                return ('own', None)
+            # 等到有结果或者到期
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                raise RuntimeError('上一轮回复仍在生成中，请稍候再试')
+            _gen_cond.wait(timeout=min(remaining, 5))  # 每5秒重新检查一次TTL
+            if _gen_last_result is not None:
+                return ('reused', _gen_last_result)
 
 def _gen_release(result):
     global _gen_busy, _gen_last_result
@@ -2031,6 +2035,13 @@ def _parse_wake_response(text):
 @app.route('/wake', methods=['POST'])
 def wake_decide():
     """AI 自主唤醒决策接口。由 dream_wake.py 每30分钟调用（概率触发）。"""
+    # drive定期flush：把当前实时值写回DB（防止积累时间过长撞顶）
+    try:
+        import drive_engine as _de_flush
+        _cur = _de_flush.get_drive()
+        _de_flush._flush(_cur)
+    except Exception:
+        pass
     import re as _re, random as _random
     data = request.get_json() or {}
     mode = data.get('mode', 'normal')
