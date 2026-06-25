@@ -24,7 +24,7 @@ GROWTH_RATE = {
     'duty':       0.080,   # 记挂的事越来越紧迫
     'libido':     0.050,   # 欲望自然积累
     'stress':     0.020,   # 基础压力低
-    'fatigue':    0.030,   # 缓慢疲劳
+    'fatigue':    0.008,   # 缓慢疲劳（自然回落抵消大部分）
 }
 
 # ── 情绪/欲望联动放大（每小时额外增量） ──────────────────────────
@@ -33,7 +33,7 @@ EMOTION_BOOST = {
     'attachment': ('longing',    0.20),   # 思念 → attachment 额外增
     'libido':     ('desire_p',   0.15),   # P高 → libido 额外增
     'stress':     ('na',         0.12),   # NA高 → stress 额外增
-    'fatigue':    ('na_inv_pa',  0.04),   # (1-PA) → fatigue 额外增
+    # fatigue 不走 EMOTION_BOOST，改用指数解析解（见 get_drive）
 }
 
 # ── 触发阈值 & 满足后 discharge 量 ────────────────────────────
@@ -50,7 +50,7 @@ DISCHARGE = {
     'stress':     0.50,
     'fatigue':    0.0,    # 行为不消耗fatigue，而是略微增加
 }
-FATIGUE_COST = 0.08   # 每次触发行为 fatigue 微升
+FATIGUE_COST = 0.04   # 每次触发行为 fatigue 微升
 
 DRIVE_KEYS = ['attachment', 'curiosity', 'reflection', 'social',
               'duty', 'libido', 'stress', 'fatigue']
@@ -182,7 +182,17 @@ def get_drive() -> dict:
             factor_key, coef = EMOTION_BOOST[key]
             boost = factors.get(factor_key, 0.0) * coef * t_hours
 
-        result[key] = round(min(1.0, base + natural + boost), 4)
+        if key == 'fatigue':
+            # 指数向平衡点回归（一阶系统，解析解，对任意 t_hours 精确）
+            # eq = 0.50 是无外力时的稳定点，k=0.05/h 半衰期约 14h
+            _fat_eq = 0.50
+            _fat_k  = 0.05
+            _fat_new = _fat_eq + (base - _fat_eq) * math.exp(-_fat_k * t_hours)
+            # NA 高时平衡点微升（最多+0.08）
+            _na_adj = factors.get('na_inv_pa', 0.5) * 0.003 * t_hours
+            result[key] = round(min(1.0, max(0.0, _fat_new + _na_adj)), 4)
+        else:
+            result[key] = round(min(1.0, base + natural + boost), 4)
 
     return result
 
@@ -235,7 +245,11 @@ def discharge_by_action(action: str, thoughts: str = ''):
     thoughts 里如果有 libido 相关词也算
     """
     if action == 'none':
-        return  # 无行为，不消耗也不充能（fatigue 继续自然积累）
+        # 决定不打扰她 = 在休息，fatigue 微降
+        _cur = get_drive()
+        _cur['fatigue'] = max(0.0, _cur['fatigue'] - 0.04)
+        _flush(_cur)
+        return
 
     current = get_drive()
 
