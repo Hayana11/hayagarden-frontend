@@ -78,7 +78,7 @@ PATROL_SYSTEM_PROMPT = """你是一个服务器巡逻员，分析服务状态和
 # 凌晨她还没睡时，以低概率静静出现
 NIGHTWATCH_START    = 1    # 凌晨1点开始
 NIGHTWATCH_END      = 3    # 凌晨3点结束（不含）
-NIGHTWATCH_PROB     = 0.35 # 固定触发概率（不随时间累积）
+NIGHTWATCH_PROB     = 0.60 # 固定触发概率（不随时间累积）
 NIGHTWATCH_ACTIVITY_WINDOW = 60  # dream_events 多少分钟内有记录才视为她仍醒着
 
 # 占位符：{time} {activity_desc}
