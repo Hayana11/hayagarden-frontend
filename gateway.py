@@ -772,6 +772,20 @@ def build_messages():
 
     return msgs
 
+def _strip_tool_blocks(messages):
+    """去掉 messages 历史中的 thinking/tool_use/tool_result blocks（relay 不认识这些类型）。"""
+    clean = []
+    for m in messages:
+        c = m.get('content')
+        if isinstance(c, list):
+            c2 = [b for b in c if not (isinstance(b, dict) and b.get('type') in ('thinking', 'tool_use', 'tool_result'))]
+            if not c2:
+                continue
+            clean.append({**m, 'content': c2})
+        else:
+            clean.append(m)
+    return clean
+
 def api_call(system, messages):
     payload = {
         'model': MODEL,
@@ -782,19 +796,48 @@ def api_call(system, messages):
         'messages': messages,
         'metadata': {'user_id': 'hayana-fyodor-stable'},
     }
-
-    req = urllib.request.Request(
-        API_URL,
-        data=json.dumps(payload).encode(),
-        headers={
-            'Content-Type': 'application/json',
-            'x-api-key': API_KEY,
-            'anthropic-version': '2023-06-01',
-            'anthropic-beta': 'prompt-caching-2024-07-31',
+    headers_full = {
+        'Content-Type': 'application/json',
+        'x-api-key': API_KEY,
+        'anthropic-version': '2023-06-01',
+        'anthropic-beta': 'prompt-caching-2024-07-31',
+    }
+    req = urllib.request.Request(API_URL, data=json.dumps(payload).encode(), headers=headers_full)
+    try:
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            return json.loads(resp.read())
+    except urllib.error.HTTPError as _e:
+        if _e.code not in (400, 422):
+            raise
+        # 降级1：去掉 tools，保留 thinking（中转站不支持工具调用）
+        payload_no_tools = {
+            'model': MODEL,
+            'max_tokens': 16000,
+            'thinking': {'type': 'enabled', 'budget_tokens': 10000},
+            'system': system,
+            'messages': _strip_tool_blocks(messages),
         }
-    )
-    with urllib.request.urlopen(req, timeout=120) as resp:
-        return json.loads(resp.read())
+        req2 = urllib.request.Request(
+            API_URL, data=json.dumps(payload_no_tools).encode(),
+            headers={'Content-Type': 'application/json', 'x-api-key': API_KEY, 'anthropic-version': '2023-06-01'}
+        )
+        try:
+            with urllib.request.urlopen(req2, timeout=120) as resp2:
+                return json.loads(resp2.read())
+        except urllib.error.HTTPError as _e2:
+            if _e2.code not in (400, 422):
+                raise
+        # 降级2：连 thinking 也去掉（中转站完全不支持扩展功能）
+        payload_bare = {
+            'model': MODEL, 'max_tokens': 16000,
+            'system': system, 'messages': _strip_tool_blocks(messages),
+        }
+        req3 = urllib.request.Request(
+            API_URL, data=json.dumps(payload_bare).encode(),
+            headers={'Content-Type': 'application/json', 'x-api-key': API_KEY, 'anthropic-version': '2023-06-01'}
+        )
+        with urllib.request.urlopen(req3, timeout=120) as resp3:
+            return json.loads(resp3.read())
 
 
 NL = chr(10)
@@ -1676,28 +1719,67 @@ def chat_stream():
                 system   = build_system()
                 messages = build_messages()
                 think_acc, text_acc, tool_calls_acc = [], [], []
+                _stream_use_tools = True
+                _stream_use_think = True
                 for _round in range(5):
                     payload = {
                         'model': MODEL,
                         'max_tokens': 16000,
-                        'thinking': {'type': 'enabled', 'budget_tokens': 10000},
                         'stream': True,
-                        'tools': TOOLS,
                         'system': system,
                         'messages': messages,
-                        'metadata': {'user_id': 'hayana-fyodor-stable'},
                     }
-                    req = urllib.request.Request(
-                        API_URL,
-                        data=json.dumps(payload).encode(),
-                        headers={
-                            'Content-Type': 'application/json',
-                            'x-api-key': API_KEY,
-                            'anthropic-version': '2023-06-01',
-                            'anthropic-beta': 'prompt-caching-2024-07-31',
-                        }
-                    )
-                    resp = urllib.request.urlopen(req, timeout=300)
+                    if _stream_use_think:
+                        payload['thinking'] = {'type': 'enabled', 'budget_tokens': 10000}
+                    if _stream_use_tools:
+                        payload['tools'] = TOOLS
+                        payload['metadata'] = {'user_id': 'hayana-fyodor-stable'}
+                    _hdrs = {
+                        'Content-Type': 'application/json',
+                        'x-api-key': API_KEY,
+                        'anthropic-version': '2023-06-01',
+                        'anthropic-beta': 'prompt-caching-2024-07-31',
+                    }
+                    req = urllib.request.Request(API_URL, data=json.dumps(payload).encode(), headers=_hdrs)
+                    # 中转站不支持 tools/thinking 时自动降级（最多两步）
+                    try:
+                        resp = urllib.request.urlopen(req, timeout=300)
+                    except urllib.error.HTTPError as _relay_e:
+                        if _relay_e.code not in (400, 422) or _round != 0:
+                            raise
+                        if _stream_use_tools:
+                            # 降级1：去掉 tools，保留 thinking
+                            _stream_use_tools = False
+                            payload_1 = {
+                                'model': MODEL, 'max_tokens': 16000, 'stream': True,
+                                'system': system, 'messages': _strip_tool_blocks(messages),
+                                'thinking': {'type': 'enabled', 'budget_tokens': 10000},
+                            }
+                            _hdrs_1 = {'Content-Type': 'application/json', 'x-api-key': API_KEY, 'anthropic-version': '2023-06-01'}
+                            req1 = urllib.request.Request(API_URL, data=json.dumps(payload_1).encode(), headers=_hdrs_1)
+                            try:
+                                resp = urllib.request.urlopen(req1, timeout=300)
+                            except urllib.error.HTTPError as _relay_e2:
+                                if _relay_e2.code not in (400, 422):
+                                    raise
+                                # 降级2：连 thinking 也去掉
+                                _stream_use_think = False
+                                payload_2 = {
+                                    'model': MODEL, 'max_tokens': 16000, 'stream': True,
+                                    'system': system, 'messages': _strip_tool_blocks(messages),
+                                }
+                                req2 = urllib.request.Request(API_URL, data=json.dumps(payload_2).encode(), headers=_hdrs_1)
+                                resp = urllib.request.urlopen(req2, timeout=300)
+                        else:
+                            # tools 已关，只去掉 thinking
+                            _stream_use_think = False
+                            payload_2 = {
+                                'model': MODEL, 'max_tokens': 16000, 'stream': True,
+                                'system': system, 'messages': _strip_tool_blocks(messages),
+                            }
+                            _hdrs_1 = {'Content-Type': 'application/json', 'x-api-key': API_KEY, 'anthropic-version': '2023-06-01'}
+                            req2 = urllib.request.Request(API_URL, data=json.dumps(payload_2).encode(), headers=_hdrs_1)
+                            resp = urllib.request.urlopen(req2, timeout=300)
                     blocks, cur, stop_reason = [], None, None
                     for raw in resp:
                         line = raw.decode('utf-8', 'ignore').strip()

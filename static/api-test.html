@@ -559,7 +559,7 @@ function renderPresetModels() {
     var col = TIER_COLOR[p.tier] || '#9a8a8a';
     var right = isActive
       ? '<span class="mi-badge" style="background:var(--primary-bg);color:var(--primary);">使用中</span>'
-      : '<button class="mi-switch" onclick="switchModel(' + escH(p.id) + ')">切换</button>';
+      : '<button class="mi-switch" onclick="switchModel(\'' + escH(p.id) + '\')">切换</button>';
     return '<div class="model-item">'
       + '<div class="mi-dot" style="background:' + col + (isActive ? '' : '66') + '"></div>'
       + '<div class="mi-name" style="flex:1">'

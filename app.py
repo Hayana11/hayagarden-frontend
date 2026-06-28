@@ -1258,13 +1258,31 @@ def config_models():
         with _ur.urlopen(req, timeout=15) as resp:
             raw = _j.loads(resp.read())
         ids = []
-        # Anthropic format: {"data": [{"id": ...}]}
-        for item in (raw.get('data') or []):
-            mid = item.get('id') or item.get('name') or ''
-            if mid:
-                ids.append(mid)
-        if not ids:
-            ids = list(raw.keys()) if isinstance(raw, dict) else []
+        def _extract(lst):
+            for item in (lst or []):
+                if isinstance(item, str) and item:
+                    ids.append(item)
+                elif isinstance(item, dict):
+                    mid = item.get('id') or item.get('name') or item.get('model_id') or ''
+                    if mid:
+                        ids.append(mid)
+        # Anthropic format: {"data": [...]}
+        if isinstance(raw, dict) and raw.get('data'):
+            _extract(raw['data'])
+        # Alternative: {"models": [...]}
+        if not ids and isinstance(raw, dict) and raw.get('models'):
+            _extract(raw['models'])
+        # Alternative: {"model_list": [...]}
+        if not ids and isinstance(raw, dict) and raw.get('model_list'):
+            _extract(raw['model_list'])
+        # Alternative: direct array
+        if not ids and isinstance(raw, list):
+            _extract(raw)
+        # Last resort: values of top-level dict
+        if not ids and isinstance(raw, dict):
+            _extract([v for v in raw.values() if isinstance(v, (str, dict))])
+        # Filter obviously non-model entries
+        ids = [m for m in ids if m and not m.startswith('{')]
         return jsonify({'ok': True, 'models': ids})
     except _ue.HTTPError as e:
         body = e.read().decode(errors='replace')
