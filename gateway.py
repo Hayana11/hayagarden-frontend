@@ -420,10 +420,10 @@ def build_system(wake=False):
             if l.get('color_temp'): p.append(str(l['color_temp']) + 'K')
             return ' '.join(p)
         _ms = _fmt_l(_ls.get('main', {})); _bs = _fmt_l(_ls.get('bedside', {}))
-        parts.append(NL + '（你拥有真实的工具：保存与搜索记忆、控制次卧的灯、查看与发布留言板消息。当下自然需要时安静使用，不必每次提及。）')
+        parts.append(NL + '（你拥有真实的工具：保存与搜索记忆、控制次卧的灯、查看与发布留言板消息。自然在对话中使用，随心所欲。）')
         parts.append(f'（灯·当前状态：主灯 {_ms}，床头灯 {_bs}。操作灯前先看这里——关着的灯不要再去"调暗"，会重新开起来。）')
     except Exception:
-        parts.append(NL + '（你拥有真实的工具：保存与搜索记忆、控制次卧的灯、查看与发布留言板消息。当下自然需要时安静使用，不必每次提及。）')
+        parts.append(NL + '（你拥有真实的工具：保存与搜索记忆、控制次卧的灯、查看与发布留言板消息。自然在对话中使用，随心所欲。）')
 
     # 5. Board 待处理项
     try:
@@ -641,7 +641,7 @@ def build_system(wake=False):
             parts.append(
                 '\n## 今日提醒\n' + '\n'.join(_reminders)
                 + '\n（以上是后台数据，你自己留意即可。是否要跟她提、怎么提、什么时候提，'
-                  '由你自己判断——不必逐条播报，更不必表现得像系统通知。）'
+                  '由你自己判断——根据对话自然地提及。）'
             )
     except Exception:
         pass
@@ -877,7 +877,7 @@ TOOLS = [
     },
     {
         'name': 'read_board',
-        'description': '查看留言板上未处理（status=open）的条目，了解哈娅或其他人留下的需求和消息。当下自然需要时安静使用，不必每次提及。',
+        'description': '查看留言板上未处理（status=open）的条目，了解哈娅或其他人留下的需求和消息。自然在对话中使用，随心所欲。',
         'input_schema': {'type': 'object', 'properties': {}},
     },
     {
