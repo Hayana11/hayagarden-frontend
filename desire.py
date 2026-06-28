@@ -1,6 +1,6 @@
 """
-费佳驱动系统 v1 — 7维驱动条 + Longing系统
-纯函数 + SQLite状态持久化，无网络IO
+费佳驱动系统 v2 — 7维驱动条 + Longing系统 + 执念联动
+idle 缓动曲线（指数饱和）+ 乘性回落 satisfy
 """
 
 import math
@@ -12,40 +12,42 @@ DB_PATH = os.environ.get('MEMORIES_DB', '/opt/frontend/memories.db')
 
 DRIVE_KEYS = ['curiosity', 'reflection', 'duty', 'social', 'fatigue', 'libido', 'stress']
 
-GROWTH_RATE = {
-    'curiosity':  0.050,
+IDLE_RATE = {
+    'curiosity':  0.055,
     'reflection': 0.040,
-    'duty':       0.080,
-    'social':     0.030,
-    'libido':     0.050,
-    'stress':     0.020,
+    'duty':       0.085,
+    'social':     0.032,
+    'libido':     0.052,
+    'stress':     0.022,
     'fatigue':    0.030,
 }
 
-TRIGGER_THRESHOLD = 0.35
-FATIGUE_GATE      = 0.72
-FATIGUE_COST      = 0.08
+TRIGGER_THRESHOLD    = 0.35
+FATIGUE_GATE         = 0.72
+FATIGUE_COST         = 0.08
+FIXATION_DRIVE_BOOST = 0.35   # 执念强度 × 此系数叠加到 score
 
-DISCHARGE = {
-    'curiosity':  0.45,
-    'reflection': 0.40,
-    'duty':       0.50,
-    'social':     0.40,
-    'libido':     0.60,
-    'stress':     0.50,
-    'fatigue':    0.0,
+# 做完某行为后乘性回落（drive × ratio）；attachment 非本表 key，遇到直接跳过
+ACTION_SATISFY = {
+    'co_read':    {'reflection': 0.45, 'curiosity':  0.85},
+    'github':     {'curiosity':  0.50},
+    'web_search': {'curiosity':  0.48},
+    'web_browse': {'social':     0.48, 'curiosity':  0.82},
+    'none':       {'duty':       0.80},          # 碎语：attachment 不在本表
+    'tease':      {'libido':     0.55},          # attachment 不在本表
+    'vent':       {'stress':     0.45},          # attachment 不在本表
 }
 
 LONGING_TAU = 18.0   # 基础特征时间（小时）
 LONGING_MAX = 0.85
 
 WANT_ACTION = {
-    'duty':       'message',
-    'libido':     'message',
-    'stress':     'message',
-    'curiosity':  'explore',
-    'reflection': 'explore',
-    'social':     'explore',
+    'duty':       'none',        # 碎语
+    'libido':     'tease',
+    'stress':     'vent',
+    'curiosity':  'web_search',
+    'reflection': 'co_read',
+    'social':     'web_browse',
 }
 
 DRIVE_HINT = {
@@ -116,12 +118,21 @@ ensure_table()
 
 # ─── Pure computation functions ────────────────────────────
 
+def _ease_drive(base: float, rate: float, t_hours: float) -> float:
+    """指数饱和曲线：趋近 1.0 时增速自然递减，不会线性堆满。"""
+    return round(min(1.0, 1.0 - (1.0 - base) * math.exp(-rate * t_hours)), 4)
+
+
+def _get_fixation_boosts() -> dict:
+    """执念强度加成（执念系统上线前返回全零）。"""
+    return {k: 0.0 for k in DRIVE_KEYS}
+
+
 def _compute_natural_growth(stored: dict, t_hours: float) -> dict:
     result = {}
     for key in DRIVE_KEYS:
-        base    = float(stored.get(key, 0.1))
-        natural = GROWTH_RATE.get(key, 0.0) * t_hours
-        result[key] = round(min(1.0, base + natural), 4)
+        base = float(stored.get(key, 0.1))
+        result[key] = _ease_drive(base, IDLE_RATE.get(key, 0.0), t_hours)
     return result
 
 
@@ -164,8 +175,12 @@ def _pick_intent_pure(drives: dict) -> dict:
     if drives.get('fatigue', 0) >= FATIGUE_GATE:
         return {'fired': None, 'action': 'none', 'hint': '太累了，歇着。', 'blocked': True}
 
-    candidates = {k: drives[k] for k in DRIVE_KEYS
-                  if k != 'fatigue' and drives.get(k, 0) >= TRIGGER_THRESHOLD}
+    boosts = _get_fixation_boosts()
+    scores = {
+        k: drives.get(k, 0.0) + FIXATION_DRIVE_BOOST * boosts.get(k, 0.0)
+        for k in DRIVE_KEYS if k != 'fatigue'
+    }
+    candidates = {k: s for k, s in scores.items() if s >= TRIGGER_THRESHOLD}
     if not candidates:
         return {'fired': None, 'action': 'none', 'hint': '', 'blocked': False}
 
@@ -175,15 +190,16 @@ def _pick_intent_pure(drives: dict) -> dict:
         'action':  WANT_ACTION.get(top_key, 'none'),
         'hint':    DRIVE_HINT.get(top_key, ''),
         'blocked': False,
+        'score':   round(candidates[top_key], 4),
     }
 
 
-def _apply_discharge(drives: dict, action: str, fired_key: str = None) -> dict:
+def _apply_satisfy(drives: dict, action: str) -> dict:
+    """乘性回落：做完 action 后各维度 × ratio，fatigue 微升。"""
     d = dict(drives)
-    if action == 'none':
-        return d
-    if fired_key and fired_key in DISCHARGE and fired_key != 'fatigue':
-        d[fired_key] = round(max(0.0, d[fired_key] - DISCHARGE[fired_key]), 4)
+    for key, ratio in ACTION_SATISFY.get(action, {}).items():
+        if key in d:
+            d[key] = round(max(0.0, d[key] * ratio), 4)
     d['fatigue'] = round(min(1.0, d.get('fatigue', 0.0) + FATIGUE_COST), 4)
     return d
 
@@ -235,13 +251,10 @@ def calibrate_va(V: float, A: float):
 
 
 def satisfy(action: str, fired_key: str = None):
-    """心跳行为结束后调用：discharge对应维度。"""
-    current = get_drive()
-    if fired_key is None:
-        candidates = {k: current[k] for k in DRIVE_KEYS if k != 'fatigue'}
-        fired_key  = max(candidates, key=lambda k: candidates[k]) if candidates else None
-    discharged = _apply_discharge(current, action, fired_key)
-    _flush(discharged)
+    """行为结束后调用：乘性回落 + fatigue 微升。fired_key 已弃用，保留签名兼容。"""
+    current   = get_drive()
+    satisfied = _apply_satisfy(current, action)
+    _flush(satisfied)
 
 
 def touch_hayana():
@@ -292,7 +305,7 @@ def get_wake_snippet() -> str:
     drives      = get_drive()
     L, phase, t = get_longing()
 
-    lines = ['## 内在驱动（费佳驱动 v1）']
+    lines = ['## 内在驱动（费佳驱动 v2）']
     if drives.get('fatigue', 0) >= FATIGUE_GATE:
         lines.append(f'疲劳 {drives["fatigue"]:.2f} — 超过阈值，今天歇着，不触发行为。')
     else:
