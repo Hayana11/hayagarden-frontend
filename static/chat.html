@@ -205,6 +205,24 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:14px;heigh
 .bubble.drift{background:linear-gradient(135deg,rgba(212,165,116,.12),rgba(124,106,138,.08));border:1px solid rgba(212,165,116,.25);border-radius:16px 16px 16px 4px;padding:10px 14px;font-size:var(--msg-font);line-height:1.7;word-break:break-all;color:var(--text);}
 .bubble.drift.sent{border-radius:16px 16px 4px 16px;}
 
+/* ── Code blocks ── */
+.code-block{background:#1e1c1b;border-radius:10px;margin:8px 0;overflow:hidden;}
+.code-block-hd{display:flex;align-items:center;justify-content:space-between;padding:5px 11px;background:#252220;font-size:11px;color:#7a6e6e;}
+.code-block-lang{font-family:'SF Mono','Fira Code',Menlo,monospace;letter-spacing:.4px;text-transform:lowercase;}
+.code-copy-btn{border:none;background:none;color:#7a6e6e;cursor:pointer;font-size:11px;padding:2px 7px;border-radius:5px;font-family:inherit;}
+.code-copy-btn:hover{background:rgba(255,255,255,.08);color:#bbb;}
+pre.code-pre{margin:0;padding:10px 12px;overflow-x:auto;font-size:12px;line-height:1.65;font-family:'SF Mono','Fira Code',Menlo,monospace;color:#c8c0b8;white-space:pre;}
+.diff-add{color:#7ec694;background:rgba(126,198,148,.12);display:block;}
+.diff-del{color:#e06c75;background:rgba(224,108,117,.12);display:block;}
+.diff-hunk{color:#61afef;display:block;}
+.diff-meta{color:#888;display:block;}
+.diff-ctx{display:block;}
+/* ── Download menu ── */
+.msg-actions{position:relative;}
+.dl-menu{position:absolute;bottom:calc(100% + 4px);right:0;background:var(--card);border:1px solid var(--border);border-radius:10px;padding:4px;box-shadow:0 4px 20px rgba(0,0,0,.12);z-index:50;min-width:88px;display:none;}
+.dl-menu.show{display:block;}
+.dl-item{display:flex;align-items:center;gap:6px;width:100%;text-align:left;padding:7px 12px;font-size:12px;border:none;background:none;color:var(--text);cursor:pointer;border-radius:7px;white-space:nowrap;font-family:inherit;}
+.dl-item:hover,.dl-item:active{background:var(--primary-bg);}
 /* ── Dark mode ── */
 html[data-theme=dark]{--bg:#161312;--card:#211d1c;--text:#e8e2dc;--muted:#9a8d8d;--primary:#a392b5;--primary-bg:#2c2733;--primary-light:rgba(163,146,181,.13);--amber:#d4a574;--amber-bg:#352a1d;--amber-text:#3a2402;--border:#332d2b;}
 html[data-theme=dark] .hd,html[data-theme=dark] .inp-area,html[data-theme=dark] .bnav{background:rgba(26,22,21,.97);}
@@ -365,6 +383,7 @@ html[data-theme=dark] .ni{color:#6a5f5f;}
   <div class="sheet">
     <button class="sheet-btn" onclick="sheetCopy()"><i class="ti ti-copy"></i>复制</button>
     <button class="sheet-btn" onclick="sheetMemory()"><i class="ti ti-heart"></i>收藏到回忆</button>
+    <button class="sheet-btn" onclick="sheetExport('md')"><i class="ti ti-download"></i>导出为文件</button>
     <button class="sheet-btn sheet-danger" onclick="sheetDelete()"><i class="ti ti-trash"></i>删除</button>
     <button class="sheet-btn sheet-cancel" onclick="closeSheet()">取消</button>
   </div>
@@ -520,13 +539,94 @@ function isFy(a){ return ['fyodor','claude','assistant'].includes(String(a).toLo
 function escHtml(s){
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\n/g,'<br>');
 }
+function escCode(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+function renderCodeBlock(lang, code){
+  var isDiff = lang==='diff' || (!lang && /^[\-\+@]{1,3}/.test(code.replace(/^\s+/,'')));
+  var id = 'cb'+(Math.random()*1e9|0).toString(36);
+  var hd = '<div class="code-block-hd"><span class="code-block-lang">'+escCode(lang||'code')+'</span>'+
+    '<button class="code-copy-btn" onclick="copyCb(\''+id+'\',event)">复制</button></div>';
+  if(isDiff){
+    var lhtml = code.replace(/\r/g,'').split('\n').map(function(l){
+      if(l[0]==='+'&&l.slice(0,3)!=='+++') return '<span class="diff-add">'+escCode(l)+'</span>';
+      if(l[0]==='-'&&l.slice(0,3)!=='---') return '<span class="diff-del">'+escCode(l)+'</span>';
+      if(l[0]==='@') return '<span class="diff-hunk">'+escCode(l)+'</span>';
+      if(l.slice(0,3)==='---'||l.slice(0,3)==='+++') return '<span class="diff-meta">'+escCode(l)+'</span>';
+      return '<span class="diff-ctx">'+escCode(l)+'</span>';
+    }).join('\n');
+    return '<div class="code-block">'+hd+'<pre class="code-pre" id="'+id+'" data-raw="'+escCode(code)+'">'+lhtml+'</pre></div>';
+  }
+  return '<div class="code-block">'+hd+'<pre class="code-pre" id="'+id+'" data-raw="'+escCode(code)+'">'+escCode(code)+'</pre></div>';
+}
+
+function copyCb(id, e){
+  if(e) e.stopPropagation();
+  var el = document.getElementById(id);
+  if(!el) return;
+  var text = el.dataset.raw || el.textContent || '';
+  try{ navigator.clipboard.writeText(text); }catch(_){
+    var ta=document.createElement('textarea');ta.value=text;document.body.appendChild(ta);ta.select();document.execCommand('copy');ta.remove();
+  }
+  showToast('已复制代码');
+}
+
 function renderContent(s, isFyodor){
   if(isFyodor && /<(div|details|summary|span)\b[^>]*style\s*=/i.test(s)){
-    // 把 HTML 块之外的纯文本换行转为 <br>
-    // 用一个简单策略：按 HTML 标签拆分，非标签部分的 \n 转 <br>
     return s.replace(/(^[^<]+|>[^<]*(?=<|$))/g, function(m){ return m.replace(/\n/g,'<br>'); });
   }
-  return escHtml(s);
+  var result='', lastIdx=0;
+  var re=/```(\w*)\r?\n?([\s\S]*?)```/g, m;
+  while((m=re.exec(s))!==null){
+    var before=s.slice(lastIdx,m.index);
+    if(before) result+=escHtml(before);
+    result+=renderCodeBlock((m[1]||'').trim(), m[2]);
+    lastIdx=m.index+m[0].length;
+  }
+  var after=s.slice(lastIdx);
+  if(after) result+=escHtml(after);
+  return result;
+}
+
+var dlMenuActive=null;
+function showDlMenu(btn, mid){
+  if(dlMenuActive){dlMenuActive.remove();dlMenuActive=null;}
+  var menu=document.createElement('div');
+  menu.className='dl-menu show';
+  menu.innerHTML=
+    '<button class="dl-item" onclick="downloadMsg('+mid+',\'txt\')">📄 .txt</button>'+
+    '<button class="dl-item" onclick="downloadMsg('+mid+',\'md\')">📝 .md</button>'+
+    '<button class="dl-item" onclick="downloadMsg('+mid+',\'html\')">🌐 .html</button>';
+  btn.closest('.msg-actions').appendChild(menu);
+  dlMenuActive=menu;
+  setTimeout(function(){
+    document.addEventListener('click',function once(){menu.remove();if(dlMenuActive===menu)dlMenuActive=null;document.removeEventListener('click',once);});
+  },0);
+}
+
+function downloadMsg(mid, fmt){
+  if(dlMenuActive){dlMenuActive.remove();dlMenuActive=null;}
+  var msg=null;
+  (window.curMsgList||[]).forEach(function(m){if(m.id==mid)msg=m;});
+  if(!msg)return;
+  var content=msg.content||'';
+  var dt=(msg.created_at||'').slice(0,10)||new Date().toISOString().slice(0,10);
+  var filename='fyodor-'+dt, blob;
+  if(fmt==='txt'){
+    blob=new Blob([content],{type:'text/plain;charset=utf-8'});filename+='.txt';
+  }else if(fmt==='md'){
+    blob=new Blob([content],{type:'text/markdown;charset=utf-8'});filename+='.md';
+  }else{
+    var body=escCode(content).replace(/\n/g,'<br>');
+    var full='<!DOCTYPE html>\n<html lang="zh"><head><meta charset="UTF-8"><title>Fyodor · '+escCode(dt)+'</title>'+
+      '<style>body{font-family:-apple-system,sans-serif;max-width:680px;margin:40px auto;padding:0 24px;line-height:1.8;color:#2a2020;background:#f8f8f6;}'+
+      'pre{background:#1e1c1b;color:#c8c0b8;padding:14px 16px;border-radius:8px;overflow-x:auto;font-size:13px;}</style></head>'+
+      '<body><p>'+body+'</p></body></html>';
+    blob=new Blob([full],{type:'text/html;charset=utf-8'});filename+='.html';
+  }
+  var url=URL.createObjectURL(blob);
+  var a=document.createElement('a');a.href=url;a.download=filename;a.click();
+  setTimeout(function(){URL.revokeObjectURL(url);},1000);
+  showToast('已下载 '+filename);
 }
 function fmtTime(dt){
   if(!dt)return'';
@@ -677,7 +777,7 @@ function buildHtml(list) {
       var regenBtn = (i === lastAiIdx)
         ? '<button class="mac-btn" title="重新生成" onclick="doRegen('+m.id+')"><i class="ti ti-refresh"></i></button>'
         : '';
-      actHtml = '<div class="msg-actions">'+regenBtn+'<button class="mac-btn" title="复制" onclick="copyBubble(this)"><i class="ti ti-copy"></i></button></div>';
+      actHtml = '<div class="msg-actions">'+regenBtn+'<button class="mac-btn" title="复制" onclick="copyBubble(this)"><i class="ti ti-copy"></i></button><button class="mac-btn" title="下载" onclick="showDlMenu(this,'+m.id+')"><i class="ti ti-download"></i></button></div>';
       html +=
         '<div class="msg-row '+side+'" data-idx="'+i+'" data-mid="'+m.id+'">' +
           '<div class="bwrap">' +
@@ -1264,6 +1364,11 @@ async function sheetMemory(){
       body:JSON.stringify({type:'MEMORY',content:sheetMsg.content,author:isFy(sheetMsg.author)?'fyodor':'user'})});
     showToast('已收藏到回忆 \u2661');
   }catch(e){ showToast('收藏失败'); }
+  closeSheet();
+}
+function sheetExport(fmt){
+  if(!sheetMsg||!sheetMsg.id){closeSheet();return;}
+  downloadMsg(sheetMsg.id, fmt||'md');
   closeSheet();
 }
 async function sheetDelete(){
