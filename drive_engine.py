@@ -15,26 +15,36 @@ import os
 
 DB_PATH = os.environ.get('MEMORIES_DB', '/opt/frontend/memories.db')
 
-# ── 自然积累速率（每小时） ─────────────────────────────────────
-GROWTH_RATE = {
-    'attachment': 0.070,   # 想念积累较快
-    'curiosity':  0.050,   # 好奇心缓慢增长
-    'reflection': 0.040,   # 沉淀需求
-    'social':     0.030,   # 想看世界
-    'duty':       0.080,   # 记挂的事越来越紧迫
-    'libido':     0.050,   # 欲望自然积累
-    'stress':     0.020,   # 基础压力低
-    'fatigue':    0.008,   # 缓慢疲劳（自然回落抵消大部分）
+# ── 指数渐近积累参数（解析解，对任意 t_hours 精确） ─────────────
+# val(t) = cap - (cap - base) * exp(-k * t)
+# base < cap → 涨向 cap（需求自然积累）；base > cap → 降向 cap（超限回落）
+DRIVE_CAP = {
+    'attachment': 0.75,
+    'curiosity':  0.70,
+    'reflection': 0.60,
+    'social':     0.55,
+    'duty':       0.75,
+    'libido':     0.65,
+    'stress':     0.55,
 }
-
-# ── 情绪/欲望联动放大（每小时额外增量） ──────────────────────────
-# 读取 emotion_engine 状态后再乘以下面系数
-EMOTION_BOOST = {
-    'attachment': ('longing',    0.20),   # 思念 → attachment 额外增
-    'libido':     ('desire_p',   0.15),   # P高 → libido 额外增
-    'stress':     ('na',         0.12),   # NA高 → stress 额外增
-    # fatigue 不走 EMOTION_BOOST，改用指数解析解（见 get_drive）
+DRIVE_GROWTH_K = {
+    'attachment': 0.08,   # 半衰期 ~9h
+    'curiosity':  0.06,   # ~12h
+    'reflection': 0.05,   # ~14h
+    'social':     0.04,   # ~17h
+    'duty':       0.08,   # ~9h
+    'libido':     0.06,   # ~12h
+    'stress':     0.04,   # ~17h
 }
+# 情绪联动提升 cap（非线性增量，而是提高天花板）
+CAP_BOOST = {
+    'attachment': ('longing',   0.15),   # 思念越深 cap 越高（最高 0.90）
+    'libido':     ('desire_p',  0.20),   # P高 → cap 提高（最高 0.85）
+    'stress':     ('na',        0.15),   # NA高 → cap 提高（最高 0.70）
+}
+# fatigue 参数（指数回归到平衡点，语义不同于积累）
+FATIGUE_EQ = 0.35
+FATIGUE_K  = 0.05   # 半衰期 ~14h
 
 # ── 触发阈值 & 满足后 discharge 量 ────────────────────────────
 TRIGGER_THRESHOLD = 0.35   # drive超过此值才考虑触发行为
@@ -174,25 +184,22 @@ def get_drive() -> dict:
     result = {}
     for key in DRIVE_KEYS:
         base = float(stored.get(key, 0.1))
-        natural = GROWTH_RATE.get(key, 0.0) * t_hours
-
-        # 情绪联动额外增量
-        boost = 0.0
-        if key in EMOTION_BOOST:
-            factor_key, coef = EMOTION_BOOST[key]
-            boost = factors.get(factor_key, 0.0) * coef * t_hours
 
         if key == 'fatigue':
-            # 指数向平衡点回归（一阶系统，解析解，对任意 t_hours 精确）
-            # eq = 0.50 是无外力时的稳定点，k=0.05/h 半衰期约 14h
-            _fat_eq = 0.50
-            _fat_k  = 0.05
-            _fat_new = _fat_eq + (base - _fat_eq) * math.exp(-_fat_k * t_hours)
-            # NA 高时平衡点微升（最多+0.08）
-            _na_adj = factors.get('na_inv_pa', 0.5) * 0.003 * t_hours
-            result[key] = round(min(1.0, max(0.0, _fat_new + _na_adj)), 4)
+            eq = FATIGUE_EQ
+            k  = FATIGUE_K
+            val = eq + (base - eq) * math.exp(-k * t_hours)
+            na_adj = factors.get('na', 0.2) * 0.06
+            val += na_adj
+            result[key] = round(min(1.0, max(0.0, val)), 4)
         else:
-            result[key] = round(min(1.0, base + natural + boost), 4)
+            cap = DRIVE_CAP.get(key, 0.65)
+            gk  = DRIVE_GROWTH_K.get(key, 0.05)
+            if key in CAP_BOOST:
+                fk, coef = CAP_BOOST[key]
+                cap = min(0.92, cap + factors.get(fk, 0.0) * coef)
+            val = cap - (cap - base) * math.exp(-gk * t_hours)
+            result[key] = round(min(1.0, max(0.0, val)), 4)
 
     return result
 

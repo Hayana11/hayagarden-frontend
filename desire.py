@@ -22,6 +22,16 @@ IDLE_RATE = {
     'fatigue':    0.030,
 }
 
+DRIVE_CAP = {
+    'curiosity':  0.70,
+    'reflection': 0.60,
+    'duty':       0.75,
+    'social':     0.55,
+    'libido':     0.65,
+    'stress':     0.55,
+    'fatigue':    0.45,
+}
+
 TRIGGER_THRESHOLD    = 0.35
 FATIGUE_GATE         = 0.72
 FATIGUE_COST         = 0.08
@@ -132,7 +142,10 @@ def _compute_natural_growth(stored: dict, t_hours: float) -> dict:
     result = {}
     for key in DRIVE_KEYS:
         base = float(stored.get(key, 0.1))
-        result[key] = _ease_drive(base, IDLE_RATE.get(key, 0.0), t_hours)
+        cap  = DRIVE_CAP.get(key, 0.65)
+        rate = IDLE_RATE.get(key, 0.05)
+        val  = cap - (cap - base) * math.exp(-rate * t_hours)
+        result[key] = round(min(1.0, max(0.0, val)), 4)
     return result
 
 
