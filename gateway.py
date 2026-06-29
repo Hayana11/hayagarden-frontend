@@ -1598,31 +1598,42 @@ def workspace_chat():
 
     key = ''
     api_url = API_URL
+    ws_model = MODEL  # fallback to gateway MODEL
     try:
         for ln in open('/opt/frontend/.env'):
             ln = ln.strip()
             if ln.startswith('ANTHROPIC_API_KEY='): key = ln.split('=',1)[1]
             if ln.startswith('API_URL='): api_url = ln.split('=',1)[1] or api_url
+            if ln.startswith('WS_MODEL='): ws_model = ln.split('=',1)[1] or ws_model
     except Exception: pass
 
+    # flatten system to string for workspace (avoid cache-control blocks that some relays reject)
+    if isinstance(system, list):
+        sys_str = '\n'.join(s.get('text','') if isinstance(s,dict) else str(s) for s in system)
+    else:
+        sys_str = str(system)
+    sys_str = sys_str[:5000]  # relay 502s on very long system prompts
     payload = _j.dumps({
-        'model': MODEL, 'max_tokens': 2000,
-        'system': system if isinstance(system, str) else [{'type':'text','text':str(s)} if isinstance(s,str) else s for s in system],
+        'model': ws_model, 'max_tokens': 2000,
+        'system': sys_str,
         'messages': msgs,
-        'anthropic-beta': 'prompt-caching-2024-07-31'
     }).encode()
 
     try:
         req = _ur.Request(api_url, data=payload, headers={
             'Content-Type': 'application/json', 'x-api-key': key,
             'anthropic-version': '2023-06-01',
-            'anthropic-beta': 'prompt-caching-2024-07-31'
         })
-        with _ur.urlopen(req, timeout=60) as resp:
+        with _ur.urlopen(req, timeout=30) as resp:
             rd = _j.loads(resp.read())
         reply = ''.join(b.get('text','') for b in rd.get('content',[]) if b.get('type')=='text').strip()
         return jsonify({'reply': reply})
+    except urllib.error.HTTPError as _he:
+        _body = _he.read().decode('utf-8','replace')[:300]
+        app.logger.error(f'[ws_chat] HTTP {_he.code}: {_body}')
+        return jsonify({'error': f'HTTP {_he.code}: {_body}', 'reply': f'请求失败 {_he.code}'})
     except Exception as e:
+        app.logger.error(f'[ws_chat] {type(e).__name__}: {e}')
         return jsonify({'error': str(e), 'reply': '请求失败: '+str(e)})
 
 @app.route('/chat', methods=['POST'])
