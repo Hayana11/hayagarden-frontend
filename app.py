@@ -2444,6 +2444,70 @@ def brain_emotion_state():
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e)}), 500
 
+
+@app.route('/api/think/summarize', methods=['POST'])
+def summarize_think():
+    import urllib.request as _ur, json as _j, re as _re
+    data = request.get_json() or {}
+    thinking = (data.get('thinking') or '').strip()
+    if not thinking:
+        return jsonify({'summary': ''})
+    key = ''
+    api_url = 'https://api2.68886868.xyz/v1/messages'
+    try:
+        for ln in open('/opt/frontend/.env'):
+            ln = ln.strip()
+            if ln.startswith('ANTHROPIC_API_KEY='): key = ln.split('=',1)[1]
+            if ln.startswith('API_URL='): api_url = ln.split('=',1)[1] or api_url
+    except Exception: pass
+    model = 'claude-opus-4-6'
+    try:
+        m2 = _re.search(r"^MODEL\s*=\s*['\"]([^'\"]+)['\"]", open('/opt/frontend/gateway.py').read(), _re.MULTILINE)
+        if m2: model = m2.group(1)
+    except Exception: pass
+    _pp = [
+        "以下是一段内心独白，用一到两句中文，为这段思考做一个标题式的总结，",
+        "捕捉这段思考里最浓烈的情感状态。\n",
+        "语言简练、诗意、有力度，用具体的动词和感官词汇呈现情感本身的温度和质地，",
+        "让读的人脑子里能出现一个画面。当思考中有对她身体的渴望、占有、色情的念头和冲动时，",
+        "总结也要诚实地带着同等浓度的情欲，不把欲望包装成抒情。",
+        "句子节奏可长可短，禁止直白的情绪词堆砌，禁止口语化表达。\n",
+        "以感受或内心动作开头，第一人称视角但省略主语（我）。",
+        "用陈述语气或动词短语，不加引号，句号结尾，不超过20字。\n\n",
+    ]
+    prompt = "".join(_pp) + "内心独白：\n" + thinking[:2000]
+    payload = _j.dumps({'model': model, 'max_tokens': 80,
+        'messages': [{'role': 'user', 'content': prompt}]}).encode()
+    try:
+        req = _ur.Request(api_url, data=payload, headers={
+            'Content-Type': 'application/json', 'x-api-key': key,
+            'anthropic-version': '2023-06-01'})
+        with _ur.urlopen(req, timeout=15) as resp:
+            rd = _j.loads(resp.read())
+        summary = ''.join(b.get('text','') for b in rd.get('content',[]) if b.get('type')=='text').strip()
+        return jsonify({'summary': summary or ''})
+    except Exception as e:
+        return jsonify({'summary': '', 'error': str(e)})
+
+
+@app.route('/api/chat/think_summary', methods=['POST'])
+def save_think_summary():
+    data = request.get_json() or {}
+    msg_id = data.get('msg_id')
+    summary = (data.get('summary') or '').strip()
+    if not summary:
+        return jsonify({'ok': False})
+    conn = get_db()
+    try:
+        if msg_id:
+            conn.execute("UPDATE chat_messages SET thinking_summary=? WHERE id=?", (summary, msg_id))
+        else:
+            conn.execute("UPDATE chat_messages SET thinking_summary=? WHERE author IN ('fyodor','assistant','claude') ORDER BY id DESC LIMIT 1", (summary,))
+        conn.commit()
+    finally:
+        conn.close()
+    return jsonify({'ok': True})
+
 @app.route('/api/brain/drive_state', methods=['GET'])
 def brain_drive_state():
     try:
