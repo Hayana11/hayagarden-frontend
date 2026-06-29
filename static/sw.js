@@ -1,4 +1,4 @@
-const CACHE = 'home-v19';
+const CACHE = 'home-v20';
 const PRECACHE = ['/dash', '/chat', '/calendar', '/read', '/board', '/manifest.json', '/icon-192.png', '/icon-512.png'];
 
 self.addEventListener('install', e => {
