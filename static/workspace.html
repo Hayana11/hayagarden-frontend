@@ -29,15 +29,17 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
 .hd-btn{border:none;background:none;cursor:pointer;color:var(--muted);font-size:13px;padding:5px 9px;border-radius:8px;display:flex;align-items:center;gap:5px;transition:background .15s,color .15s;white-space:nowrap;}
 .hd-btn:hover{background:var(--primary-bg);color:var(--primary);}
 .hd-btn i{font-size:15px;}
-/* model pill in header */
-.model-pill{position:relative;}
-.model-pill-btn{display:flex;align-items:center;gap:5px;padding:0 10px;height:30px;border-radius:15px;border:1px solid var(--border);background:var(--card);cursor:pointer;font-size:11px;font-family:inherit;color:var(--muted);transition:all .15s;}
-.model-pill-btn:hover{border-color:var(--primary);color:var(--primary);}
-.model-dot{width:6px;height:6px;border-radius:50%;background:var(--primary);}
-.model-sheet{display:none;position:absolute;top:calc(100% + 6px);right:0;background:var(--card);border:1px solid var(--border);border-radius:12px;padding:6px;box-shadow:0 8px 24px rgba(43,38,30,.12);z-index:100;min-width:170px;}
-.model-sheet.show{display:block;}
-.model-opt{display:flex;align-items:center;gap:8px;width:100%;padding:8px 11px;border:none;background:none;font-size:13px;font-family:inherit;color:var(--text);cursor:pointer;border-radius:8px;text-align:left;}
-.model-opt:hover{background:var(--primary-bg);}
+/* api panel (照抄chat页) */
+.hd-panel{display:none;position:absolute;top:calc(var(--header) + 2px);z-index:200;}
+.hd-panel.show{display:block;}
+#aa-panel{right:4px;width:240px;background:var(--card);border:1px solid var(--border);border-radius:14px;padding:16px 18px;box-shadow:0 8px 24px rgba(0,0,0,.09);}
+.aa-label{font-size:11px;color:var(--muted);margin-bottom:8px;letter-spacing:.3px;text-transform:uppercase;}
+.aa-row{display:flex;align-items:center;gap:8px;margin-bottom:6px;}
+input[type=range]{flex:1;height:4px;appearance:none;-webkit-appearance:none;background:var(--border);border-radius:2px;outline:none;cursor:pointer;}
+input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:14px;height:14px;border-radius:50%;background:var(--primary);cursor:pointer;}
+.aa-divider{border:none;border-top:1px solid var(--border);margin:12px 0;}
+.model-opt{display:flex;align-items:center;gap:8px;width:100%;padding:9px 12px;border:none;background:none;font-size:13px;font-family:inherit;color:var(--text);cursor:pointer;border-radius:9px;text-align:left;}
+.model-opt:hover,.model-opt:active{background:var(--primary-bg);}
 .model-opt.selected{color:var(--primary);}
 .mo-dot{width:6px;height:6px;border-radius:50%;flex-shrink:0;}
 
@@ -122,15 +124,22 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
   <button class="hd-btn" onclick="execCmd('systemctl restart frontend-gw','重启 gw')"><i class="ti ti-refresh"></i>重启GW</button>
   <button class="hd-btn" onclick="showGitLog()"><i class="ti ti-git-commit"></i>Git</button>
   <div class="hd-sep"></div>
-  <div class="model-pill" id="model-pill">
-    <div class="model-sheet" id="model-sheet">
-      <button class="model-opt" data-model="claude-opus-4-6" onclick="selectModel(this)"><span class="mo-dot" style="background:#7c6a8a"></span>Opus 4.6</button>
-      <button class="model-opt" data-model="claude-sonnet-4-6" onclick="selectModel(this)"><span class="mo-dot" style="background:#6a8a7c"></span>Sonnet 4.6</button>
-      <button class="model-opt" data-model="claude-haiku-4-5-20251001" onclick="selectModel(this)"><span class="mo-dot" style="background:#8a7c6a"></span>Haiku 4.5</button>
+  <button class="hd-btn" id="aa-btn" onclick="toggleAaPanel()" style="font-family:Georgia,serif;font-weight:500;letter-spacing:.3px;">Aa</button>
+
+  <!-- api panel -->
+  <div id="aa-panel" class="hd-panel">
+    <div class="aa-label">模型</div>
+    <button class="model-opt" data-model="claude-opus-4-6" onclick="selectModel(this)"><span class="mo-dot" style="background:#7c6a8a"></span>Opus 4.6</button>
+    <button class="model-opt" data-model="claude-sonnet-4-6" onclick="selectModel(this)"><span class="mo-dot" style="background:#6a8a7c"></span>Sonnet 4.6</button>
+    <button class="model-opt" data-model="claude-haiku-4-5-20251001" onclick="selectModel(this)"><span class="mo-dot" style="background:#8a7c6a"></span>Haiku 4.5</button>
+    <hr class="aa-divider">
+    <div class="aa-label">字体大小</div>
+    <div class="aa-row">
+      <span style="font-size:11px;color:var(--muted)">A</span>
+      <input type="range" id="font-slider" min="11" max="17" value="13" oninput="setWsFontSize(this.value)">
+      <span style="font-size:16px;color:var(--muted)">A</span>
+      <span id="aa-size" style="font-size:11px;color:var(--primary);min-width:28px;text-align:right">13px</span>
     </div>
-    <button class="model-pill-btn" onclick="toggleModelSheet()">
-      <span class="model-dot"></span><span id="model-label">Opus</span>
-    </button>
   </div>
 </div>
 
@@ -211,33 +220,33 @@ function showToast(msg, dur) {
   setTimeout(function(){ t.classList.remove('show'); }, dur||2000);
 }
 
-// ── model ──
+// ── model & aa panel ──
 async function initModel() {
-  try {
-    var r = await fetch('/api/config/model');
-    var d = await r.json();
-    curModel = d.model || curModel;
-  } catch(e) {}
+  try { var r=await fetch('/api/config/model'); var d=await r.json(); curModel=d.model||curModel; } catch(e){}
   updateModelUI();
 }
 function updateModelUI() {
-  document.getElementById('model-label').textContent = MODEL_LABELS[curModel] || curModel.split('-')[1] || curModel;
-  document.querySelectorAll('.model-opt').forEach(function(b){ b.classList.toggle('selected', b.dataset.model === curModel); });
+  document.querySelectorAll('.model-opt').forEach(function(b){ b.classList.toggle('selected', b.dataset.model===curModel); });
 }
-function toggleModelSheet() { document.getElementById('model-sheet').classList.toggle('show'); }
+function toggleAaPanel() {
+  var p=document.getElementById('aa-panel'); p.classList.toggle('show');
+}
 async function selectModel(btn) {
-  var m = btn.dataset.model;
-  document.getElementById('model-sheet').classList.remove('show');
-  if(m === curModel) return;
+  var m=btn.dataset.model;
+  if(m===curModel){ showToast('已是当前模型'); return; }
   try {
-    var r = await fetch('/api/config/model', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({model:m})});
-    var d = await r.json();
-    if(d.model){ curModel = d.model; updateModelUI(); showToast('已切换到 ' + (MODEL_LABELS[d.model]||d.model)); }
-  } catch(e) { showToast('切换失败'); }
+    var r=await fetch('/api/config/model',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model:m})});
+    var d=await r.json();
+    if(d.model){ curModel=d.model; updateModelUI(); showToast('已切换到 '+(MODEL_LABELS[d.model]||d.model)); }
+  } catch(e){ showToast('切换失败'); }
+}
+function setWsFontSize(v) {
+  document.getElementById('chat-msgs').style.fontSize = v+'px';
+  document.getElementById('aa-size').textContent = v+'px';
 }
 document.addEventListener('click', function(e){
-  var mp = document.getElementById('model-pill');
-  if(!mp.contains(e.target)) document.getElementById('model-sheet').classList.remove('show');
+  var p=document.getElementById('aa-panel'), b=document.getElementById('aa-btn');
+  if(p&&p.classList.contains('show')&&!p.contains(e.target)&&e.target!==b) p.classList.remove('show');
 });
 
 // ── status ──
