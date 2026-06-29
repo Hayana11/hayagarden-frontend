@@ -340,6 +340,40 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:14px;heigh
 <script>
 // ── state ──
 var curFile = null, curContent = '', pendingWrite = null;
+var FILE_NOTES = {
+  'gateway.py':     'API网关 · 人设/记忆/工具注入 · stream处理',
+  'app.py':         'Flask主服务 · 5050端口 · 路由/DB/接口',
+  'auto_diary.py':  '自动日记 · 定时写入ombre-brain',
+  'bot_config.py':  'Discord bot配置',
+  'desire.py':      '欲望/驱动维度计算引擎',
+  'drive_engine.py':'驱动状态 · 8维变量 · 心跳推送',
+  'emotion_engine.py':'情绪引擎 · 交互评分 · 情感状态',
+  'init_db.py':     '数据库初始化脚本',
+  'memories.db':    'SQLite数据库 · 消息/记忆/驱动状态',
+  'persona.md':     '费佳人设文档（当前已空，人设在gateway）',
+  'chat.html':      '主聊天页面 · 所有前端JS内联在此',
+  'chat.css':       '聊天页样式（已大部分内联）',
+  'chat-msg.js':    '⚠ 未被加载 · 逻辑已迁移至chat.html内联',
+  'chat-stream.js': '⚠ 未被加载 · 逻辑已迁移至chat.html内联',
+  'chat-core.js':   '⚠ 未被加载 · 逻辑已迁移至chat.html内联',
+  'chat-drift.js':  '漂流瓶功能',
+  'index.html':     '首页 · 导航到chat',
+  'dash.html':      '仪表盘 · 驱动状态可视化',
+  'api-test.html':  'API设置 · relay/key/模型管理',
+  'board.html':     '留言板 · 三实例互通',
+  'calendar.html':  '日历页',
+  'workspace.html': '费佳工作台（就是这里）',
+  'aipanel.html':   'AI协作面板（旧版工作台）',
+  'white-night.html':'白夜首页',
+  'letters.html':   '书信功能',
+  'long-term.html': '长期记忆查看',
+  'classified.html':'机密文件页',
+  'recent.html':    '最近消息',
+  'sw.js':          'Service Worker · 缓存版本号在此',
+  'smart-quote.js': '智能引号替换',
+  'period.js':      '生理周期跟踪',
+  '.env':           '环境变量 · API_KEY/URL/端口 · ⚠不要提交git',
+};
 var chatHistory = [];
 var curModel = 'claude-opus-4-6';
 var MODEL_LABELS = {'claude-opus-4-6':'Opus','claude-sonnet-4-6':'Sonnet','claude-haiku-4-5-20251001':'Haiku'};
@@ -422,7 +456,8 @@ function renderTree(nodes, depth) {
     } else {
       var ext = n.name.split('.').pop();
       var icon = {py:'ti-brand-python',js:'ti-brand-javascript',html:'ti-brand-html5',css:'ti-palette',md:'ti-markdown',json:'ti-braces',sh:'ti-terminal',env:'ti-lock',nginx:'ti-server'}[ext] || 'ti-file';
-      return '<div class="tree-node" onclick="openFile(\''+escAttr(n.path)+'\',this)" style="padding-left:'+(14+depth*12)+'px"><i class="ti '+icon+'"></i>'+escHtml(n.name)+'</div>';
+      var fnote = FILE_NOTES[n.name] ? '<div style="font-size:9.5px;color:var(--muted);opacity:.65;margin-top:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:190px">'+escHtml(FILE_NOTES[n.name])+'</div>' : '';
+      return '<div class="tree-node" onclick="openFile(\''+escAttr(n.path)+'\',this)" style="padding-left:'+(14+depth*12)+'px;flex-direction:column;align-items:flex-start;gap:1px"><div style="display:flex;align-items:center;gap:5px"><i class="ti '+icon+'"></i>'+escHtml(n.name)+'</div>'+fnote+'</div>';
     }
   }).join('');
 }
