@@ -100,5 +100,53 @@ def ws_status():
     r3 = subprocess.run(['git', '-C', '/opt/frontend', 'status', '--short'], capture_output=True, text=True)
     return jsonify({'services': svcs, 'last_commit': r2.stdout.strip(), 'git_dirty': r3.stdout.strip()})
 
+
+ENV_PATH = '/opt/frontend/.env'
+
+def _read_env():
+    d = {}
+    try:
+        for ln in open(ENV_PATH):
+            ln = ln.strip()
+            if '=' in ln and not ln.startswith('#'):
+                k, v = ln.split('=', 1)
+                d[k] = v
+    except Exception:
+        pass
+    return d
+
+def _write_env_key(key, value):
+    try:
+        lines = open(ENV_PATH).readlines()
+        found = False
+        new = []
+        for ln in lines:
+            if ln.startswith(key + '='):
+                new.append(f'{key}={value}\n'); found = True
+            else:
+                new.append(ln)
+        if not found:
+            new.append(f'{key}={value}\n')
+        open(ENV_PATH, 'w').writelines(new)
+        return True
+    except Exception:
+        return False
+
+@app.route('/api/ws/model', methods=['GET'])
+def ws_get_model():
+    env = _read_env()
+    model = env.get('WS_MODEL') or env.get('MODEL') or 'claude-opus-4-6'
+    return jsonify({'model': model})
+
+@app.route('/api/ws/model', methods=['POST'])
+def ws_set_model():
+    data = request.get_json() or {}
+    new_model = (data.get('model') or '').strip()
+    if not new_model:
+        return jsonify({'error': 'empty'}), 400
+    if _write_env_key('WS_MODEL', new_model):
+        return jsonify({'ok': True, 'model': new_model})
+    return jsonify({'error': 'write failed'}), 500
+
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5053, debug=False)

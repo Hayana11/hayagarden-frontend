@@ -307,7 +307,11 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:14px;heigh
 
     <!-- chat -->
     <div class="chat-panel">
-      <div class="chat-msgs" id="chat-msgs"></div>
+      <div style="display:flex;align-items:center;justify-content:space-between;padding:6px 14px 0;flex-shrink:0;">
+      <span style="font-size:10px;color:var(--muted);letter-spacing:.5px;">CHAT</span>
+      <button onclick="clearWsHistory()" style="border:none;background:none;font-size:10px;color:var(--muted);cursor:pointer;padding:2px 6px;border-radius:6px;" title="清除历史">清除</button>
+    </div>
+    <div class="chat-msgs" id="chat-msgs"></div>
       <div id="ctx-tag-wrap"></div>
       <div class="chat-inp-row">
         <textarea class="chat-inp" id="chat-inp" placeholder="发指令给费佳…" rows="1"
@@ -376,6 +380,29 @@ var FILE_NOTES = {
   '.env':           '环境变量 · API_KEY/URL/端口 · ⚠不要提交git',
 };
 var chatHistory = [];
+var WS_HISTORY_KEY = 'ws_chat_history';
+var WS_MAX_MSGS = 40;
+
+function saveChatHistory() {
+  try {
+    localStorage.setItem(WS_HISTORY_KEY, JSON.stringify(chatHistory.slice(-WS_MAX_MSGS)));
+  } catch(e) {}
+}
+
+function loadChatHistory() {
+  try {
+    var saved = localStorage.getItem(WS_HISTORY_KEY);
+    if(saved) {
+      chatHistory = JSON.parse(saved) || [];
+      // 重新渲染历史消息
+      chatHistory.forEach(function(m) {
+        if(m.role === 'user') appendMsg('ha', m.content);
+        else if(m.role === 'assistant') appendMsg('fy', m.content);
+      });
+      if(chatHistory.length) appendSys('— 已恢复 ' + chatHistory.length + ' 条历史 —');
+    }
+  } catch(e) { chatHistory = []; }
+}
 var curModel = 'claude-opus-4-6';
 var MODEL_LABELS = {'claude-opus-4-6':'Opus','claude-sonnet-4-6':'Sonnet','claude-haiku-4-5-20251001':'Haiku'};
 
@@ -388,7 +415,7 @@ function showToast(msg, dur) {
 
 // ── model & aa panel ──
 async function initModel() {
-  try { var r=await fetch('/api/config/model'); var d=await r.json(); curModel=d.model||curModel; } catch(e){}
+  try { var r=await fetch('/api/ws/model'); var d=await r.json(); curModel=d.model||curModel; } catch(e){}
   updateModelUI();
 }
 function updateModelUI() {
@@ -401,9 +428,9 @@ async function selectModel(btn) {
   var m=btn.dataset.model;
   if(m===curModel){ showToast('已是当前模型'); return; }
   try {
-    var r=await fetch('/api/config/model',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model:m})});
+    var r=await fetch('/api/ws/model',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model:m})});
     var d=await r.json();
-    if(d.model){ curModel=d.model; updateModelUI(); showToast('已切换到 '+(MODEL_LABELS[d.model]||d.model)); }
+    if(d.ok){ curModel=m; updateModelUI(); showToast('工作台模型已切换'); }
   } catch(e){ showToast('切换失败'); }
 }
 function setWsFontSize(v) {
@@ -585,7 +612,8 @@ async function sendChat() {
   var contextMsg = msg;
   if(curFile) contextMsg = '[当前文件: '+curFile+']\n\n' + msg;
 
-  chatHistory.push({role:'user', content: contextMsg});
+  chatHistory.push({role:'user', content: msg});
+  saveChatHistory();
 
   var sendBtn = document.getElementById('chat-send');
   sendBtn.disabled = true;
@@ -609,6 +637,7 @@ async function sendChatDirect(msg, contextMsg) {
     var reply = d.reply || d.error || '无响应';
     appendMsg('fy', reply);
     chatHistory.push({role:'assistant', content:reply});
+    saveChatHistory();
     var writeMatch = reply.match(/```write:([^\n]+)\n([\s\S]*?)```/);
     if(writeMatch){ proposedWrite(writeMatch[1].trim(), writeMatch[2]); }
   } catch(e) { appendSys('对话失败: ' + e.message); }
@@ -631,6 +660,7 @@ loadStatus();
 initModel();
 setInterval(loadStatus, 30000);
 
+loadChatHistory();
 appendSys('工作台就绪。打开文件后可以直接发指令。');
 // ── API Panel ──────────────────────────────────────────
 function openApiPanel(){
@@ -725,7 +755,7 @@ async function apDelRelay(id){
 var apCurModel='';
 async function apLoadModelStatus(){
   try{
-    var r=await fetch('/api/config/model'); var d=await r.json();
+    var r=await fetch('/api/ws/model'); var d=await r.json();
     apCurModel=d.model||''; 
     document.getElementById('ap-cur-model').textContent=apCurModel;
     document.getElementById('ap-model-inp').value=apCurModel;
@@ -739,12 +769,12 @@ function apStartModelEdit(){document.getElementById('ap-model-edit').style.displ
 function apCancelModelEdit(){document.getElementById('ap-model-edit').style.display='none';document.getElementById('ap-model-display').style.display='flex';}
 async function apSaveModel(){
   var v=document.getElementById('ap-model-inp').value.trim(); if(!v) return;
-  var r=await fetch('/api/config/model',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model:v})});
+  var r=await fetch('/api/ws/model',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model:v})});
   if(r.ok){apCurModel=v;document.getElementById('ap-cur-model').textContent=v;apCancelModelEdit();apLoadModelStatus();showToast('模型已更新');}
   else showToast('保存失败');
 }
 async function apSwitchModel(m){
-  var r=await fetch('/api/config/model',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model:m})});
+  var r=await fetch('/api/ws/model',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model:m})});
   if(r.ok){apCurModel=m;document.getElementById('ap-cur-model').textContent=m;document.getElementById('ap-model-inp').value=m;apLoadModelStatus();showToast('已切换到 '+m);}
   else showToast('切换失败');
 }
@@ -806,6 +836,13 @@ document.addEventListener('click', function(e){
   var btn = e.target.closest && e.target.closest('.ap-sm');
   if(btn) apSwitchModel(btn.dataset.mid);
 });
+function clearWsHistory() {
+  if(!confirm('清除工作台聊天记录？')) return;
+  chatHistory = [];
+  try { localStorage.removeItem(WS_HISTORY_KEY); } catch(e) {}
+  document.getElementById('chat-msgs').innerHTML = '';
+  appendSys('历史已清除。');
+}
 </script>
 </body>
 </html>
