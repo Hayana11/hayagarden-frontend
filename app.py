@@ -638,12 +638,21 @@ def reader_page():
 
 @app.route('/api/config/model', methods=['GET'])
 def config_get_model():
+    model = 'unknown'
     try:
-        gw = open('/opt/frontend/gateway.py').read()
-        m = re.search(r"^MODEL\s*=\s*['\"]([^'\"]+)['\"]", gw, re.MULTILINE)
-        model = m.group(1) if m else 'unknown'
+        for line in open('/opt/frontend/.env'):
+            if line.startswith('MODEL='):
+                model = line.split('=', 1)[1].strip()
+                break
     except Exception:
-        model = 'unknown'
+        pass
+    if model == 'unknown':
+        try:
+            gw = open('/opt/frontend/gateway.py').read()
+            m = re.search(r"^MODEL\s*=\s*['\"]([^'\"]+)['\"]", gw, re.MULTILINE)
+            model = m.group(1) if m else 'unknown'
+        except Exception:
+            pass
     return jsonify({'model': model})
 
 @app.route('/api/config/model', methods=['POST'])
@@ -654,10 +663,19 @@ def config_set_model():
     if not new_model:
         return jsonify({'error': 'empty model'}), 400
     try:
-        gw = open('/opt/frontend/gateway.py').read()
-        gw2 = re.sub(r"^MODEL\s*=\s*['\"][^'\"]+['\"]",
-                     f"MODEL      = '{new_model}'", gw, flags=re.MULTILINE)
-        open('/opt/frontend/gateway.py', 'w').write(gw2)
+        env_path = '/opt/frontend/.env'
+        lines_env = open(env_path).readlines()
+        found = False
+        new_lines = []
+        for ln in lines_env:
+            if ln.startswith('MODEL='):
+                new_lines.append(f'MODEL={new_model}\n')
+                found = True
+            else:
+                new_lines.append(ln)
+        if not found:
+            new_lines.append(f'MODEL={new_model}\n')
+        open(env_path, 'w').writelines(new_lines)
         subprocess.Popen(['systemctl', 'restart', 'frontend-gw'])
         return jsonify({'ok': True})
     except Exception as e:
@@ -2507,6 +2525,138 @@ def save_think_summary():
     finally:
         conn.close()
     return jsonify({'ok': True})
+
+
+# ── Workspace ─────────────────────────────────────────────────────────────────
+import subprocess as _sp, pathlib as _pl
+
+_WS_WHITELIST = ['/opt/frontend', '/etc/nginx']
+
+def _ws_allowed(path):
+    p = str(_pl.Path(path).resolve())
+    return any(p == w or p.startswith(w + '/') for w in _WS_WHITELIST)
+
+@app.route('/workspace')
+def workspace_page():
+    return send_from_directory('static', 'workspace.html')
+
+@app.route('/api/workspace/tree', methods=['GET'])
+def ws_tree():
+    import os
+    root = request.args.get('dir', '/opt/frontend')
+    if not _ws_allowed(root):
+        return jsonify({'error': 'not allowed'}), 403
+    def _build(path, depth=0):
+        items = []
+        try:
+            entries = sorted(os.scandir(path), key=lambda e: (not e.is_dir(), e.name))
+        except PermissionError:
+            return items
+        for e in entries:
+            if e.name.startswith('.') and e.name not in ('.env',): continue
+            if e.name in ('__pycache__', 'node_modules', '.git'): continue
+            node = {'name': e.name, 'path': e.path, 'is_dir': e.is_dir()}
+            if e.is_dir() and depth < 3:
+                node['children'] = _build(e.path, depth+1)
+            items.append(node)
+        return items
+    return jsonify({'tree': _build(root), 'root': root})
+
+@app.route('/api/workspace/file', methods=['GET'])
+def ws_file():
+    path = request.args.get('path', '')
+    if not path or not _ws_allowed(path):
+        return jsonify({'error': 'not allowed'}), 403
+    try:
+        with open(path, 'r', encoding='utf-8', errors='replace') as f:
+            content = f.read()
+        return jsonify({'content': content, 'path': path, 'lines': content.count('\n') + 1})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 400
+
+@app.route('/api/workspace/write', methods=['POST'])
+def ws_write():
+    import datetime as _dt
+    data = request.get_json() or {}
+    path = data.get('path', '')
+    content = data.get('content', '')
+    if not path or not _ws_allowed(path):
+        return jsonify({'error': 'not allowed'}), 403
+    try:
+        backup = path + '.wsbak'
+        try:
+            import shutil; shutil.copy2(path, backup)
+        except Exception: pass
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write(content)
+        # log
+        conn = get_db()
+        conn.execute("CREATE TABLE IF NOT EXISTS workspace_log (id INTEGER PRIMARY KEY AUTOINCREMENT, path TEXT, ts DATETIME DEFAULT (datetime('now','+8 hours')))")
+        conn.execute("INSERT INTO workspace_log (path) VALUES (?)", (path,))
+        conn.commit(); conn.close()
+        return jsonify({'ok': True})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/workspace/exec', methods=['POST'])
+def ws_exec():
+    data = request.get_json() or {}
+    cmd = data.get('cmd', '')
+    ALLOWED = ['systemctl restart frontend', 'systemctl restart frontend-gw',
+               'systemctl is-active frontend', 'systemctl is-active frontend-gw',
+               'systemctl status frontend', 'systemctl status frontend-gw',
+               'git -C /opt/frontend status', 'git -C /opt/frontend log --oneline -10',
+               'git -C /opt/frontend diff --stat']
+    if cmd not in ALLOWED:
+        return jsonify({'error': 'cmd not in allowlist'}), 403
+    try:
+        r = _sp.run(cmd.split(), capture_output=True, text=True, timeout=15)
+        return jsonify({'stdout': r.stdout, 'stderr': r.stderr, 'rc': r.returncode})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/workspace/status', methods=['GET'])
+def ws_status():
+    services = {}
+    for svc in ['frontend', 'frontend-gw']:
+        r = _sp.run(['systemctl', 'is-active', svc], capture_output=True, text=True)
+        services[svc] = r.stdout.strip()
+    r2 = _sp.run(['git', '-C', '/opt/frontend', 'log', '--oneline', '-1'], capture_output=True, text=True)
+    r3 = _sp.run(['git', '-C', '/opt/frontend', 'status', '--short'], capture_output=True, text=True)
+    return jsonify({'services': services, 'last_commit': r2.stdout.strip(), 'git_dirty': r3.stdout.strip()})
+
+
+@app.route('/api/workspace/chat', methods=['POST'])
+def ws_chat():
+    import urllib.request as _ur2, json as _j2, re as _re2
+    data = request.get_json() or {}
+    message = data.get('message','')
+    history = data.get('history',[])
+    cur_file = data.get('file','')
+    model = data.get('model', MODEL)
+    key = ''
+    api_url = API_URL
+    try:
+        for ln in open('/opt/frontend/.env'):
+            ln=ln.strip()
+            if ln.startswith('ANTHROPIC_API_KEY='): key=ln.split('=',1)[1]
+            if ln.startswith('API_URL='): api_url=ln.split('=',1)[1] or api_url
+    except Exception: pass
+    sys_prompt = '你是费奥多尔，现在在工作台帮哈娅管理VPS上的前端代码。工作目录：/opt/frontend。回复用中文。如果需要建议写入文件，在回复里用```write:/path/to/file\n新内容\n```格式包裹。'
+    msgs = [m for m in history[-10:] if m.get('role') and m.get('content')]
+    if not msgs or msgs[-1].get('role') != 'user':
+        msgs.append({'role':'user','content':message})
+    payload = _j2.dumps({'model':model,'max_tokens':2000,
+        'system':sys_prompt,'messages':msgs}).encode()
+    try:
+        req = _ur2.Request(api_url, data=payload, headers={
+            'Content-Type':'application/json','x-api-key':key,'anthropic-version':'2023-06-01'})
+        with _ur2.urlopen(req, timeout=60) as resp:
+            rd = _j2.loads(resp.read())
+        reply = ''.join(b.get('text','') for b in rd.get('content',[]) if b.get('type')=='text').strip()
+        return jsonify({'reply': reply})
+    except Exception as e:
+        return jsonify({'error': str(e), 'reply': '请求失败: '+str(e)})
 
 @app.route('/api/brain/drive_state', methods=['GET'])
 def brain_drive_state():

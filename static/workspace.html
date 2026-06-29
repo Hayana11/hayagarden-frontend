@@ -1,0 +1,485 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>费佳工作台</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@latest/dist/tabler-icons.min.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<style>
+*{box-sizing:border-box;margin:0;padding:0;}
+:root{
+  --bg:#F5F3EE;--card:#fff;--border:#EDE9E0;--text:#1A1815;--muted:#9A958B;
+  --primary:#7c6a8a;--primary-bg:rgba(124,106,138,.08);--primary-light:rgba(124,106,138,.12);
+  --amber:#e8c97a;--green:#6a8a7c;--red:#c97a7a;
+  --sidebar:260px;--header:52px;
+}
+body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;height:100dvh;display:flex;flex-direction:column;overflow:hidden;}
+
+/* ── header ── */
+.hd{height:var(--header);background:rgba(245,243,238,.97);border-bottom:1px solid var(--border);display:flex;align-items:center;gap:10px;padding:0 16px;flex-shrink:0;backdrop-filter:blur(10px);}
+.hd-title{font-size:15px;font-weight:600;color:var(--text);letter-spacing:.3px;}
+.hd-title span{color:var(--primary);}
+.hd-sep{flex:1;}
+.status-dot{width:7px;height:7px;border-radius:50%;display:inline-block;margin-right:4px;}
+.status-tag{display:flex;align-items:center;font-size:11px;color:var(--muted);padding:4px 9px;border-radius:10px;background:var(--primary-bg);gap:3px;cursor:default;}
+.status-tag.ok .status-dot{background:#6aaa82;}
+.status-tag.err .status-dot{background:var(--red);}
+.hd-btn{border:none;background:none;cursor:pointer;color:var(--muted);font-size:13px;padding:5px 9px;border-radius:8px;display:flex;align-items:center;gap:5px;transition:background .15s,color .15s;white-space:nowrap;}
+.hd-btn:hover{background:var(--primary-bg);color:var(--primary);}
+.hd-btn i{font-size:15px;}
+/* model pill in header */
+.model-pill{position:relative;}
+.model-pill-btn{display:flex;align-items:center;gap:5px;padding:0 10px;height:30px;border-radius:15px;border:1px solid var(--border);background:var(--card);cursor:pointer;font-size:11px;font-family:inherit;color:var(--muted);transition:all .15s;}
+.model-pill-btn:hover{border-color:var(--primary);color:var(--primary);}
+.model-dot{width:6px;height:6px;border-radius:50%;background:var(--primary);}
+.model-sheet{display:none;position:absolute;top:calc(100% + 6px);right:0;background:var(--card);border:1px solid var(--border);border-radius:12px;padding:6px;box-shadow:0 8px 24px rgba(43,38,30,.12);z-index:100;min-width:170px;}
+.model-sheet.show{display:block;}
+.model-opt{display:flex;align-items:center;gap:8px;width:100%;padding:8px 11px;border:none;background:none;font-size:13px;font-family:inherit;color:var(--text);cursor:pointer;border-radius:8px;text-align:left;}
+.model-opt:hover{background:var(--primary-bg);}
+.model-opt.selected{color:var(--primary);}
+.mo-dot{width:6px;height:6px;border-radius:50%;flex-shrink:0;}
+
+/* ── body ── */
+.body{flex:1;display:flex;overflow:hidden;}
+
+/* ── sidebar ── */
+.sidebar{width:var(--sidebar);border-right:1px solid var(--border);display:flex;flex-direction:column;overflow:hidden;background:var(--card);flex-shrink:0;}
+.sidebar-hd{padding:10px 14px 6px;font-size:10px;letter-spacing:.8px;color:var(--muted);text-transform:uppercase;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;}
+.sidebar-hd button{border:none;background:none;cursor:pointer;color:var(--muted);font-size:13px;padding:2px;}
+.sidebar-hd button:hover{color:var(--primary);}
+.tree{flex:1;overflow-y:auto;padding:6px 0;}
+.tree-node{display:flex;align-items:center;gap:5px;padding:4px 14px;cursor:pointer;font-size:12.5px;color:var(--text);border-left:2px solid transparent;transition:background .12s;}
+.tree-node:hover{background:var(--primary-bg);}
+.tree-node.active{background:var(--primary-bg);border-left-color:var(--primary);color:var(--primary);}
+.tree-node i{font-size:13px;color:var(--muted);flex-shrink:0;}
+.tree-node.active i{color:var(--primary);}
+.tree-children{padding-left:14px;}
+/* git status */
+.git-status{border-top:1px solid var(--border);padding:8px 14px;font-size:11px;color:var(--muted);line-height:1.6;max-height:100px;overflow-y:auto;}
+.git-status .commit{font-size:10px;opacity:.7;margin-bottom:3px;}
+.git-dirty-line{display:flex;align-items:center;gap:4px;}
+.git-dirty-line .mod{color:#c9a46a;font-weight:600;}
+.git-dirty-line .new{color:#6a9ac9;font-weight:600;}
+
+/* ── main ── */
+.main{flex:1;display:flex;flex-direction:column;overflow:hidden;}
+.file-bar{height:36px;border-bottom:1px solid var(--border);display:flex;align-items:center;padding:0 14px;gap:8px;font-size:12px;color:var(--muted);flex-shrink:0;background:rgba(245,243,238,.6);}
+.file-bar .path{color:var(--text);font-family:monospace;font-size:11.5px;}
+.file-bar .lines{opacity:.6;}
+.editor{flex:1;overflow:auto;}
+.editor pre{margin:0;padding:14px 18px;min-height:100%;font-size:12.5px;line-height:1.65;background:#1e2227 !important;border-radius:0;}
+.editor code{font-family:'JetBrains Mono','Fira Code','Courier New',monospace !important;}
+.empty-state{display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;gap:10px;color:var(--muted);}
+.empty-state i{font-size:36px;opacity:.3;}
+.empty-state p{font-size:13px;opacity:.5;}
+
+/* ── chat panel ── */
+.chat-panel{height:260px;border-top:1px solid var(--border);display:flex;flex-direction:column;flex-shrink:0;}
+.chat-msgs{flex:1;overflow-y:auto;padding:10px 16px;display:flex;flex-direction:column;gap:8px;}
+.chat-msg{font-size:13px;line-height:1.65;}
+.chat-msg.fy{color:var(--text);}
+.chat-msg.ha{align-self:flex-end;background:var(--amber);color:#5a3e1b;padding:7px 12px;border-radius:14px 14px 3px 14px;max-width:70%;}
+.chat-msg.sys{color:var(--muted);font-size:11px;font-style:italic;}
+.chat-inp-row{display:flex;align-items:center;gap:8px;padding:8px 12px;border-top:1px solid var(--border);background:rgba(245,243,238,.8);}
+.chat-inp{flex:1;border:1px solid var(--border);border-radius:12px;padding:7px 12px;font-size:13px;font-family:inherit;background:var(--card);color:var(--text);outline:none;resize:none;line-height:1.5;max-height:80px;overflow-y:auto;}
+.chat-inp:focus{border-color:var(--primary);}
+.chat-send{width:34px;height:34px;border-radius:50%;border:none;background:var(--primary);color:#fff;cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:15px;flex-shrink:0;}
+.chat-send:disabled{opacity:.4;}
+.ctx-tag{display:inline-flex;align-items:center;gap:4px;background:var(--primary-bg);color:var(--primary);border-radius:6px;padding:2px 7px;font-size:10.5px;margin:0 12px 4px;}
+
+/* ── diff modal ── */
+.modal-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.4);z-index:200;align-items:center;justify-content:center;}
+.modal-overlay.show{display:flex;}
+.modal{background:var(--card);border-radius:16px;width:min(680px,95vw);max-height:80dvh;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 20px 60px rgba(0,0,0,.2);}
+.modal-hd{padding:14px 18px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:8px;}
+.modal-hd h3{font-size:14px;flex:1;}
+.modal-body{flex:1;overflow:auto;padding:14px;}
+.diff-view{font-family:monospace;font-size:12px;line-height:1.7;white-space:pre-wrap;word-break:break-all;}
+.diff-add{background:rgba(106,170,130,.15);color:#2a6a3a;}
+.diff-del{background:rgba(201,122,122,.15);color:#8a2a2a;}
+.modal-foot{padding:12px 18px;border-top:1px solid var(--border);display:flex;gap:8px;justify-content:flex-end;}
+.btn{padding:7px 16px;border-radius:10px;border:none;font-size:13px;font-family:inherit;cursor:pointer;transition:opacity .15s;}
+.btn-primary{background:var(--primary);color:#fff;}
+.btn-ghost{background:var(--primary-bg);color:var(--primary);}
+.btn:hover{opacity:.85;}
+
+/* toast */
+.toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:#1e2227;color:#fff;padding:8px 18px;border-radius:20px;font-size:13px;z-index:300;opacity:0;transition:opacity .2s;pointer-events:none;}
+.toast.show{opacity:1;}
+</style>
+</head>
+<body>
+
+<!-- header -->
+<div class="hd">
+  <a href="/" style="color:var(--muted);text-decoration:none;display:flex;align-items:center;"><i class="ti ti-arrow-left" style="font-size:16px"></i></a>
+  <div class="hd-title">费佳<span>工作台</span></div>
+  <div id="svc-frontend" class="status-tag"><span class="status-dot"></span>frontend</div>
+  <div id="svc-gw" class="status-tag"><span class="status-dot"></span>gw</div>
+  <button class="hd-btn" onclick="execCmd('systemctl restart frontend','重启 frontend')"><i class="ti ti-refresh"></i>重启</button>
+  <button class="hd-btn" onclick="execCmd('systemctl restart frontend-gw','重启 gw')"><i class="ti ti-refresh"></i>重启GW</button>
+  <button class="hd-btn" onclick="showGitLog()"><i class="ti ti-git-commit"></i>Git</button>
+  <div class="hd-sep"></div>
+  <div class="model-pill" id="model-pill">
+    <div class="model-sheet" id="model-sheet">
+      <button class="model-opt" data-model="claude-opus-4-6" onclick="selectModel(this)"><span class="mo-dot" style="background:#7c6a8a"></span>Opus 4.6</button>
+      <button class="model-opt" data-model="claude-sonnet-4-6" onclick="selectModel(this)"><span class="mo-dot" style="background:#6a8a7c"></span>Sonnet 4.6</button>
+      <button class="model-opt" data-model="claude-haiku-4-5-20251001" onclick="selectModel(this)"><span class="mo-dot" style="background:#8a7c6a"></span>Haiku 4.5</button>
+    </div>
+    <button class="model-pill-btn" onclick="toggleModelSheet()">
+      <span class="model-dot"></span><span id="model-label">Opus</span>
+    </button>
+  </div>
+</div>
+
+<!-- body -->
+<div class="body">
+  <!-- sidebar -->
+  <div class="sidebar">
+    <div class="sidebar-hd">
+      <span>文件树</span>
+      <button onclick="loadTree()" title="刷新"><i class="ti ti-refresh"></i></button>
+    </div>
+    <div class="tree" id="tree">
+      <div style="padding:20px;text-align:center;color:var(--muted);font-size:12px">加载中…</div>
+    </div>
+    <div class="git-status" id="git-status"></div>
+  </div>
+
+  <!-- main -->
+  <div class="main">
+    <div class="file-bar" id="file-bar">
+      <i class="ti ti-file-code" style="opacity:.4"></i>
+      <span class="path" id="file-path">未打开文件</span>
+      <span class="hd-sep"></span>
+      <span class="lines" id="file-lines"></span>
+      <button class="hd-btn" id="write-btn" onclick="showWriteModal()" style="display:none"><i class="ti ti-pencil"></i>写入</button>
+    </div>
+    <div class="editor" id="editor">
+      <div class="empty-state">
+        <i class="ti ti-folder-open"></i>
+        <p>从左侧选择文件</p>
+      </div>
+    </div>
+
+    <!-- chat -->
+    <div class="chat-panel">
+      <div class="chat-msgs" id="chat-msgs"></div>
+      <div id="ctx-tag-wrap"></div>
+      <div class="chat-inp-row">
+        <textarea class="chat-inp" id="chat-inp" placeholder="发指令给费佳…" rows="1"
+          oninput="resizeInp(this)" onkeydown="onChatEnter(event)"></textarea>
+        <button class="chat-send" id="chat-send" onclick="sendChat()"><i class="ti ti-send"></i></button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- diff modal -->
+<div class="modal-overlay" id="diff-modal">
+  <div class="modal">
+    <div class="modal-hd">
+      <i class="ti ti-file-diff" style="color:var(--primary)"></i>
+      <h3 id="diff-title">确认写入</h3>
+      <button onclick="closeModal()" style="border:none;background:none;cursor:pointer;color:var(--muted);font-size:18px">×</button>
+    </div>
+    <div class="modal-body">
+      <div class="diff-view" id="diff-view"></div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn btn-ghost" onclick="closeModal()">取消</button>
+      <button class="btn btn-primary" onclick="confirmWrite()">确认写入</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+// ── state ──
+var curFile = null, curContent = '', pendingWrite = null;
+var chatHistory = [];
+var curModel = 'claude-opus-4-6';
+var MODEL_LABELS = {'claude-opus-4-6':'Opus','claude-sonnet-4-6':'Sonnet','claude-haiku-4-5-20251001':'Haiku'};
+
+// ── toast ──
+function showToast(msg, dur) {
+  var t = document.getElementById('toast');
+  t.textContent = msg; t.classList.add('show');
+  setTimeout(function(){ t.classList.remove('show'); }, dur||2000);
+}
+
+// ── model ──
+async function initModel() {
+  try {
+    var r = await fetch('/api/config/model');
+    var d = await r.json();
+    curModel = d.model || curModel;
+  } catch(e) {}
+  updateModelUI();
+}
+function updateModelUI() {
+  document.getElementById('model-label').textContent = MODEL_LABELS[curModel] || curModel.split('-')[1] || curModel;
+  document.querySelectorAll('.model-opt').forEach(function(b){ b.classList.toggle('selected', b.dataset.model === curModel); });
+}
+function toggleModelSheet() { document.getElementById('model-sheet').classList.toggle('show'); }
+async function selectModel(btn) {
+  var m = btn.dataset.model;
+  document.getElementById('model-sheet').classList.remove('show');
+  if(m === curModel) return;
+  try {
+    var r = await fetch('/api/config/model', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({model:m})});
+    var d = await r.json();
+    if(d.model){ curModel = d.model; updateModelUI(); showToast('已切换到 ' + (MODEL_LABELS[d.model]||d.model)); }
+  } catch(e) { showToast('切换失败'); }
+}
+document.addEventListener('click', function(e){
+  var mp = document.getElementById('model-pill');
+  if(!mp.contains(e.target)) document.getElementById('model-sheet').classList.remove('show');
+});
+
+// ── status ──
+async function loadStatus() {
+  try {
+    var r = await fetch('/api/workspace/status');
+    var d = await r.json();
+    ['frontend','frontend-gw'].forEach(function(svc){
+      var el = document.getElementById(svc==='frontend'?'svc-frontend':'svc-gw');
+      var ok = d.services[svc] === 'active';
+      el.classList.toggle('ok', ok); el.classList.toggle('err', !ok);
+    });
+    var gs = document.getElementById('git-status');
+    gs.innerHTML = '<div class="commit">'+escHtml(d.last_commit)+'</div>';
+    if(d.git_dirty){
+      d.git_dirty.split('\n').forEach(function(ln){
+        var flag = ln.slice(0,2).trim();
+        var cls = flag==='M'?'mod':flag==='??'?'new':'';
+        gs.innerHTML += '<div class="git-dirty-line"><span class="'+cls+'">'+escHtml(flag)+'</span> '+escHtml(ln.slice(3))+'</div>';
+      });
+    }
+  } catch(e) {}
+}
+
+// ── file tree ──
+async function loadTree() {
+  var el = document.getElementById('tree');
+  el.innerHTML = '<div style="padding:20px;text-align:center;color:var(--muted);font-size:12px">加载中…</div>';
+  try {
+    var r = await fetch('/api/workspace/tree?dir=/opt/frontend');
+    var d = await r.json();
+    el.innerHTML = renderTree(d.tree);
+  } catch(e) { el.innerHTML = '<div style="padding:14px;color:var(--red);font-size:12px">加载失败</div>'; }
+}
+
+function renderTree(nodes, depth) {
+  depth = depth || 0;
+  return nodes.map(function(n){
+    if(n.is_dir){
+      var childrenHtml = n.children && n.children.length ? '<div class="tree-children" id="ch_'+btoa(n.path).replace(/=/g,'')+'" style="display:none">'+renderTree(n.children, depth+1)+'</div>' : '';
+      return '<div class="tree-node" onclick="toggleDir(this,\''+escAttr(n.path)+'\')" style="padding-left:'+(14+depth*12)+'px"><i class="ti ti-folder"></i>'+escHtml(n.name)+'</div>'+childrenHtml;
+    } else {
+      var ext = n.name.split('.').pop();
+      var icon = {py:'ti-brand-python',js:'ti-brand-javascript',html:'ti-brand-html5',css:'ti-palette',md:'ti-markdown',json:'ti-braces',sh:'ti-terminal',env:'ti-lock',nginx:'ti-server'}[ext] || 'ti-file';
+      return '<div class="tree-node" onclick="openFile(\''+escAttr(n.path)+'\',this)" style="padding-left:'+(14+depth*12)+'px"><i class="ti '+icon+'"></i>'+escHtml(n.name)+'</div>';
+    }
+  }).join('');
+}
+
+function toggleDir(el, path) {
+  var key = 'ch_'+btoa(path).replace(/=/g,'');
+  var ch = document.getElementById(key);
+  if(!ch) return;
+  var open = ch.style.display !== 'none';
+  ch.style.display = open ? 'none' : 'block';
+  el.querySelector('i').className = 'ti ' + (open ? 'ti-folder' : 'ti-folder-open');
+}
+
+async function openFile(path, el) {
+  document.querySelectorAll('.tree-node').forEach(function(n){ n.classList.remove('active'); });
+  el.classList.add('active');
+  document.getElementById('file-path').textContent = path;
+  document.getElementById('file-lines').textContent = '';
+  document.getElementById('editor').innerHTML = '<div style="padding:20px;color:var(--muted);font-size:12px">加载中…</div>';
+  try {
+    var r = await fetch('/api/workspace/file?path='+encodeURIComponent(path));
+    var d = await r.json();
+    if(d.error){ document.getElementById('editor').innerHTML = '<div style="padding:14px;color:var(--red);font-size:12px">'+escHtml(d.error)+'</div>'; return; }
+    curFile = path; curContent = d.content;
+    document.getElementById('file-lines').textContent = d.lines + ' 行';
+    document.getElementById('write-btn').style.display = '';
+    var ext = path.split('.').pop();
+    var langMap = {py:'python',js:'javascript',html:'html',css:'css',md:'markdown',json:'json',sh:'bash',nginx:'nginx'};
+    var lang = langMap[ext] || 'plaintext';
+    var pre = document.createElement('pre');
+    var code = document.createElement('code');
+    code.className = 'language-' + lang;
+    code.textContent = d.content;
+    pre.appendChild(code);
+    document.getElementById('editor').innerHTML = '';
+    document.getElementById('editor').appendChild(pre);
+    hljs.highlightElement(code);
+    updateCtxTag();
+  } catch(e) { showToast('打开失败'); }
+}
+
+function updateCtxTag() {
+  var wrap = document.getElementById('ctx-tag-wrap');
+  if(curFile) wrap.innerHTML = '<div class="ctx-tag"><i class="ti ti-file" style="font-size:10px"></i>'+escHtml(curFile.split('/').pop())+'</div>';
+  else wrap.innerHTML = '';
+}
+
+// ── exec ──
+async function execCmd(cmd, label) {
+  appendSys('执行: ' + (label||cmd) + '…');
+  try {
+    var r = await fetch('/api/workspace/exec', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({cmd:cmd})});
+    var d = await r.json();
+    if(d.error){ appendSys('✗ ' + d.error); return; }
+    var out = (d.stdout||'').trim() || (d.stderr||'').trim() || 'done';
+    appendSys(out);
+    loadStatus();
+  } catch(e) { appendSys('请求失败'); }
+}
+
+async function showGitLog() {
+  var r = await fetch('/api/workspace/exec', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({cmd:'git -C /opt/frontend log --oneline -10'})});
+  var d = await r.json();
+  appendSys((d.stdout||'').trim());
+}
+
+// ── diff & write ──
+function showWriteModal() {
+  if(!curFile){ showToast('没有打开的文件'); return; }
+  showToast('需要先让费佳生成新内容');
+}
+
+function proposedWrite(path, newContent) {
+  pendingWrite = {path:path, content:newContent};
+  document.getElementById('diff-title').textContent = '写入: ' + path.split('/').pop();
+  var lines = computeDiff(curContent, newContent);
+  document.getElementById('diff-view').innerHTML = lines.join('');
+  document.getElementById('diff-modal').classList.add('show');
+}
+
+function computeDiff(oldStr, newStr) {
+  var oldLines = oldStr.split('\n'), newLines = newStr.split('\n');
+  var result = [];
+  var maxLen = Math.max(oldLines.length, newLines.length);
+  for(var i=0;i<maxLen;i++){
+    var o = oldLines[i], n = newLines[i];
+    if(o===undefined){ result.push('<div class="diff-add">+ '+escHtml(n)+'</div>'); }
+    else if(n===undefined){ result.push('<div class="diff-del">- '+escHtml(o)+'</div>'); }
+    else if(o!==n){ result.push('<div class="diff-del">- '+escHtml(o)+'</div><div class="diff-add">+ '+escHtml(n)+'</div>'); }
+    else { result.push('<div>  '+escHtml(o)+'</div>'); }
+  }
+  return result;
+}
+
+async function confirmWrite() {
+  if(!pendingWrite){ closeModal(); return; }
+  try {
+    var r = await fetch('/api/workspace/write', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(pendingWrite)});
+    var d = await r.json();
+    if(d.ok){ showToast('写入成功'); curContent = pendingWrite.content; closeModal(); pendingWrite=null; }
+    else showToast('写入失败: ' + (d.error||''));
+  } catch(e) { showToast('写入失败'); }
+}
+
+function closeModal() { document.getElementById('diff-modal').classList.remove('show'); }
+
+// ── chat ──
+function appendMsg(role, text) {
+  var el = document.createElement('div');
+  el.className = 'chat-msg ' + role;
+  el.textContent = text;
+  var msgs = document.getElementById('chat-msgs');
+  msgs.appendChild(el);
+  msgs.scrollTop = msgs.scrollHeight;
+}
+function appendSys(text) { appendMsg('sys', text); }
+
+async function sendChat() {
+  var inp = document.getElementById('chat-inp');
+  var msg = inp.value.trim(); if(!msg) return;
+  inp.value = ''; resizeInp(inp);
+  appendMsg('ha', msg);
+
+  var contextMsg = msg;
+  if(curFile) contextMsg = '[当前文件: '+curFile+']\n\n' + msg;
+
+  chatHistory.push({role:'user', content: contextMsg});
+
+  var sendBtn = document.getElementById('chat-send');
+  sendBtn.disabled = true;
+
+  try {
+    var sysPrompt = '你是费奥多尔，现在在工作台帮哈娅管理VPS上的前端代码。当前工作目录：/opt/frontend。';
+    if(curFile && curContent) sysPrompt += '\n\n当前打开的文件：' + curFile + '\n```\n' + curContent.slice(0,8000) + '\n```';
+
+    var r = await fetch('/api/config/model'); var md = await r.json(); curModel = md.model || curModel;
+
+    var resp = await fetch('/api/think/summarize', { // reuse the proxy pattern
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({_ws_chat:true, messages: chatHistory, system: sysPrompt, model: curModel})
+    });
+
+    // fallback to direct call
+    var reply = '';
+    if(!resp.ok) throw new Error('proxy failed');
+    var data = await resp.json();
+    if(data._ws_reply){ reply = data._ws_reply; }
+    else throw new Error('no reply');
+
+    appendMsg('fy', reply);
+    chatHistory.push({role:'assistant', content:reply});
+
+    // check if reply contains a file write proposal
+    var writeMatch = reply.match(/```write:([^\n]+)\n([\s\S]*?)```/);
+    if(writeMatch){ proposedWrite(writeMatch[1].trim(), writeMatch[2]); }
+
+  } catch(e) {
+    // direct chat via workspace endpoint
+    await sendChatDirect(msg, contextMsg);
+  } finally {
+    sendBtn.disabled = false;
+  }
+}
+
+async function sendChatDirect(msg, contextMsg) {
+  try {
+    var r = await fetch('/api/workspace/chat', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({message: contextMsg, history: chatHistory, file: curFile, model: curModel})
+    });
+    var d = await r.json();
+    var reply = d.reply || d.error || '无响应';
+    appendMsg('fy', reply);
+    chatHistory.push({role:'assistant', content:reply});
+    var writeMatch = reply.match(/```write:([^\n]+)\n([\s\S]*?)```/);
+    if(writeMatch){ proposedWrite(writeMatch[1].trim(), writeMatch[2]); }
+  } catch(e) { appendSys('对话失败: ' + e.message); }
+}
+
+function onChatEnter(e) {
+  if(e.key==='Enter'&&!e.shiftKey){ e.preventDefault(); sendChat(); }
+}
+function resizeInp(el) {
+  el.style.height='auto'; el.style.height=Math.min(el.scrollHeight,80)+'px';
+}
+
+// ── utils ──
+function escHtml(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function escAttr(s){ return String(s).replace(/'/g,"\\'").replace(/"/g,'&quot;'); }
+
+// ── init ──
+loadTree();
+loadStatus();
+initModel();
+setInterval(loadStatus, 30000);
+
+appendSys('工作台就绪。打开文件后可以直接发指令。');
+</script>
+</body>
+</html>
