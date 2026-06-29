@@ -978,7 +978,7 @@ async function send(){
         if(capturedThink&&capturedThink.trim()){
           (async function(){
             try{
-              var ac=new AbortController(); var tid=setTimeout(function(){ac.abort();},12000);
+              var ac=new AbortController(); var tid=setTimeout(function(){ac.abort();},28000);
               var sumResp=await fetch('/api/think/summarize',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({thinking:capturedThink.slice(0,3000)}),signal:ac.signal});
               clearTimeout(tid);
               var sumData=await sumResp.json(); var summary=(sumData.summary||'').trim();
