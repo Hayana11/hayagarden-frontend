@@ -110,6 +110,67 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:14px;heigh
 /* toast */
 .toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:#1e2227;color:#fff;padding:8px 18px;border-radius:20px;font-size:13px;z-index:300;opacity:0;transition:opacity .2s;pointer-events:none;}
 .toast.show{opacity:1;}
+
+.api-drawer-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.3);z-index:300;}
+.api-drawer-overlay.show{display:block;}
+.api-drawer{position:fixed;top:0;right:-440px;width:420px;max-width:96vw;height:100dvh;background:linear-gradient(160deg,#fdf8ef 0%,#f7f0e4 100%);border-left:1px solid var(--border);z-index:301;display:flex;flex-direction:column;transition:right .25s cubic-bezier(.4,0,.2,1);overflow:hidden;box-shadow:-8px 0 32px rgba(43,38,30,.1);}
+.api-drawer.show{right:0;}
+.api-drawer-hd{flex-shrink:0;display:flex;align-items:center;gap:8px;padding:13px 15px;border-bottom:1px solid rgba(210,185,155,.2);background:rgba(253,248,239,.9);}
+.api-drawer-hd h3{flex:1;font-size:14px;font-weight:700;color:#3a2e28;text-align:center;}
+.api-drawer-close{border:none;background:none;cursor:pointer;color:#9a8a7a;font-size:19px;display:flex;padding:3px;}
+.api-drawer-body{flex:1;overflow-y:auto;padding:13px 13px 36px;}
+.api-drawer-body::-webkit-scrollbar{width:3px;}
+.api-drawer-body::-webkit-scrollbar-thumb{background:rgba(210,185,155,.35);border-radius:2px;}
+.ap-card{background:rgba(255,255,255,.65);border:1px solid rgba(255,255,255,.9);border-radius:13px;backdrop-filter:blur(8px);padding:13px;margin-bottom:11px;}
+.ap-card-hd{display:flex;align-items:center;justify-content:space-between;margin-bottom:9px;}
+.ap-card-title{font-size:10px;letter-spacing:2px;color:#b8a090;text-transform:uppercase;}
+.ap-card-action{background:none;border:1px solid rgba(210,185,155,.3);color:#9a8a7a;font-size:11px;padding:3px 9px;border-radius:14px;cursor:pointer;font-family:inherit;}
+.ap-card-action:hover{border-color:#d4a574;color:#d4a574;}
+.ap-kv{display:flex;justify-content:space-between;align-items:center;padding:4px 0;border-bottom:1px solid rgba(210,185,155,.12);}
+.ap-kv:last-child{border-bottom:none;}
+.ap-kv-key{font-size:11px;color:#9a8a7a;}
+.ap-kv-val{font-size:12px;color:#3a2e28;font-weight:500;font-family:monospace;}
+.ap-model-row{display:flex;align-items:center;gap:8px;}
+.ap-model-name{font-size:13px;color:#3a2e28;font-weight:600;flex:1;font-family:monospace;}
+.ap-pencil{background:none;border:none;color:#b8a090;font-size:15px;cursor:pointer;padding:2px;display:flex;}
+.ap-pencil:hover{color:#d4a574;}
+.ap-edit-row{display:flex;gap:5px;margin-top:6px;}
+.ap-inp{flex:1;padding:6px 9px;border-radius:8px;border:1.5px solid #d4a574;background:rgba(255,255,255,.75);font-size:12px;font-family:monospace;color:#3a2e28;outline:none;}
+.ap-save{padding:6px 11px;border:none;border-radius:8px;background:rgba(212,165,116,.85);color:#fff;font-size:11px;cursor:pointer;}
+.ap-cancel{padding:6px 9px;border:1px solid rgba(210,185,155,.3);border-radius:8px;background:rgba(255,255,255,.6);color:#9a8a7a;font-size:11px;cursor:pointer;}
+.ap-model-item{display:flex;align-items:center;gap:7px;padding:6px 0;border-bottom:1px solid rgba(210,185,155,.12);}
+.ap-model-item:last-child{border-bottom:none;}
+.ap-mi-dot{width:6px;height:6px;border-radius:50%;flex-shrink:0;}
+.ap-mi-name{flex:1;font-size:11px;font-family:monospace;color:#3a2e28;line-height:1.35;}
+.ap-switch{font-size:11px;padding:3px 8px;border-radius:11px;border:1px solid rgba(124,106,138,.25);background:rgba(124,106,138,.08);color:#5a4a6a;cursor:pointer;font-family:inherit;white-space:nowrap;}
+.ap-switch:hover{background:#7c6a8a;color:#fff;}
+.ap-prov-row{display:flex;gap:6px;}
+.ap-prov-opt{flex:1;padding:9px;border-radius:10px;border:1.5px solid rgba(210,185,155,.3);background:rgba(255,255,255,.6);cursor:pointer;transition:all .15s;}
+.ap-prov-opt.act{border-color:#7c6a8a;background:rgba(124,106,138,.08);}
+.ap-prov-name{font-size:12px;font-weight:600;color:#3a2e28;margin-bottom:2px;}
+.ap-prov-opt.act .ap-prov-name{color:#5a4a6a;}
+.ap-prov-desc{font-size:10px;color:#b8a090;line-height:1.4;}
+.ap-relay-item{display:flex;align-items:center;gap:6px;padding:6px 0;border-bottom:1px solid rgba(210,185,155,.12);}
+.ap-relay-item:last-child{border-bottom:none;}
+.ap-relay-info{flex:1;min-width:0;}
+.ap-relay-name{font-size:12px;color:#3a2e28;font-weight:500;}
+.ap-relay-url{font-size:10px;color:#b8a090;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.ap-relay-active{font-size:10px;color:#5a4a6a;background:rgba(124,106,138,.08);padding:2px 7px;border-radius:7px;flex-shrink:0;}
+.ap-del{background:none;border:none;color:#b8a090;font-size:13px;cursor:pointer;padding:3px;}
+.ap-del:hover{color:#c07070;}
+.ap-mo{display:none;position:absolute;inset:0;background:rgba(0,0,0,.22);z-index:10;align-items:flex-end;}
+.ap-mo.show{display:flex;}
+.ap-mb{background:rgba(255,255,255,.98);border-radius:15px 15px 0 0;padding:16px 15px 26px;width:100%;}
+.ap-mb h4{font-size:13px;font-weight:700;color:#3a2e28;margin-bottom:9px;}
+.ap-mb input{width:100%;padding:8px 10px;border-radius:8px;border:1px solid rgba(210,185,155,.3);background:rgba(255,255,255,.7);font-size:12px;font-family:monospace;color:#3a2e28;outline:none;margin-bottom:7px;}
+.ap-mb-note{font-size:10px;color:#b8a090;margin-bottom:9px;line-height:1.5;}
+.ap-mb-row{display:flex;gap:6px;}
+.ap-mb-cancel{flex:1;padding:8px;border:1px solid rgba(210,185,155,.3);border-radius:8px;background:rgba(255,255,255,.7);color:#9a8a7a;font-size:12px;cursor:pointer;}
+.ap-mb-send{flex:1;padding:8px;border:none;border-radius:8px;background:rgba(212,165,116,.85);color:#fff;font-size:12px;cursor:pointer;}
+.ap-conn-badge{display:flex;align-items:center;gap:5px;}
+.ap-conn-dot{width:6px;height:6px;border-radius:50%;background:#aaa;flex-shrink:0;transition:background .3s;}
+.ap-conn-dot.ok{background:#52a06e;}
+.ap-conn-dot.err{background:#c07070;}
 </style>
 </head>
 <body>
@@ -124,23 +185,93 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:14px;heigh
   <button class="hd-btn" onclick="execCmd('systemctl restart frontend-gw','重启 gw')"><i class="ti ti-refresh"></i>重启GW</button>
   <button class="hd-btn" onclick="showGitLog()"><i class="ti ti-git-commit"></i>Git</button>
   <div class="hd-sep"></div>
-  <button class="hd-btn" id="aa-btn" onclick="toggleAaPanel()" style="font-family:Georgia,serif;font-weight:500;letter-spacing:.3px;">Aa</button>
+  <button class="hd-btn" onclick="openApiPanel()">
+    <span class="model-dot" id="model-dot-hd" style="background:var(--primary)"></span><span id="model-label-hd">Opus</span><i class="ti ti-settings" style="font-size:12px;opacity:.5;margin-left:2px"></i>
+  </button>
+</div>
 
-  <!-- api panel -->
-  <div id="aa-panel" class="hd-panel">
-    <div class="aa-label">模型</div>
-    <button class="model-opt" data-model="claude-opus-4-6" onclick="selectModel(this)"><span class="mo-dot" style="background:#7c6a8a"></span>Opus 4.6</button>
-    <button class="model-opt" data-model="claude-sonnet-4-6" onclick="selectModel(this)"><span class="mo-dot" style="background:#6a8a7c"></span>Sonnet 4.6</button>
-    <button class="model-opt" data-model="claude-haiku-4-5-20251001" onclick="selectModel(this)"><span class="mo-dot" style="background:#8a7c6a"></span>Haiku 4.5</button>
-    <hr class="aa-divider">
-    <div class="aa-label">字体大小</div>
-    <div class="aa-row">
-      <span style="font-size:11px;color:var(--muted)">A</span>
-      <input type="range" id="font-slider" min="11" max="17" value="13" oninput="setWsFontSize(this.value)">
-      <span style="font-size:16px;color:var(--muted)">A</span>
-      <span id="aa-size" style="font-size:11px;color:var(--primary);min-width:28px;text-align:right">13px</span>
-    </div>
+<!-- API 设置抽屉 -->
+<div class="api-drawer-overlay" id="api-drawer-overlay" onclick="closeApiPanel()"></div>
+<div class="api-drawer" id="api-drawer">
+  <div class="api-drawer-hd">
+    <div class="ap-conn-badge"><div class="ap-conn-dot" id="ap-conn-dot"></div><span id="ap-conn-txt" style="color:#9a8a7a;font-size:12px">检测中</span></div>
+    <h3 style="text-align:center">API 设置</h3>
+    <button class="api-drawer-close" onclick="closeApiPanel()"><i class="ti ti-x"></i></button>
   </div>
+  <div class="api-drawer-body">
+
+    <!-- Provider -->
+    <div class="ap-card">
+      <div class="ap-card-hd"><div class="ap-card-title">provider</div><button class="ap-card-action" onclick="apOpenTokenMo()">订阅 token</button></div>
+      <div class="ap-prov-row">
+        <div class="ap-prov-opt" id="ap-prov-api_relay" onclick="apSetProvider('api_relay')"><div class="ap-prov-name">中转 API</div><div class="ap-prov-desc">中转站代理<br>按 token 计费</div></div>
+        <div class="ap-prov-opt" id="ap-prov-claude_code" onclick="apSetProvider('claude_code')"><div class="ap-prov-name">订阅 Claude Code</div><div class="ap-prov-desc">官方原生<br>固定月费</div></div>
+      </div>
+      <div id="ap-prov-note" style="font-size:10.5px;color:#b8a090;margin-top:7px;"></div>
+    </div>
+
+    <!-- Key -->
+    <div class="ap-card">
+      <div class="ap-card-hd"><div class="ap-card-title">current key</div><button class="ap-card-action" onclick="apOpenKeyMo()">更换</button></div>
+      <div class="ap-kv"><span class="ap-kv-key">key</span><span class="ap-kv-val" id="ap-k-key">—</span></div>
+      <div class="ap-kv"><span class="ap-kv-key">来源</span><span class="ap-kv-val" id="ap-k-src" style="color:#b8a090">—</span></div>
+      <div class="ap-kv"><span class="ap-kv-key">今日消息</span><span class="ap-kv-val" id="ap-k-msgs">—</span></div>
+      <div class="ap-kv"><span class="ap-kv-key">响应延迟</span><span class="ap-kv-val" id="ap-k-lat">—</span></div>
+    </div>
+
+    <!-- Relay -->
+    <div class="ap-card">
+      <div class="ap-card-hd"><div class="ap-card-title">relay / 中转站</div><button class="ap-card-action" onclick="apOpenRelayAdd()">添加预设</button></div>
+      <div id="ap-relay-list"><div style="color:#b8a090;font-size:12px;text-align:center;padding:6px">加载中…</div></div>
+      <div id="ap-relay-status" style="font-size:11px;color:#52a06e;margin-top:5px;min-height:14px;"></div>
+    </div>
+
+    <!-- Model -->
+    <div class="ap-card">
+      <div class="ap-card-hd"><div class="ap-card-title">current model</div></div>
+      <div class="ap-model-row" id="ap-model-display">
+        <span class="ap-model-name" id="ap-cur-model">—</span>
+        <button class="ap-pencil" onclick="apStartModelEdit()"><i class="ti ti-pencil"></i></button>
+      </div>
+      <div class="ap-edit-row" id="ap-model-edit" style="display:none">
+        <input class="ap-inp" id="ap-model-inp" placeholder="输入模型名…">
+        <button class="ap-save" onclick="apSaveModel()">保存</button>
+        <button class="ap-cancel" onclick="apCancelModelEdit()">取消</button>
+      </div>
+    </div>
+
+    <!-- Available models -->
+    <div class="ap-card">
+      <div class="ap-card-hd"><div class="ap-card-title">available models</div><button class="ap-card-action" onclick="apLoadModels()">刷新</button></div>
+      <div id="ap-models-list"><div style="color:#b8a090;font-size:12px;text-align:center;padding:6px">加载中…</div></div>
+      <div style="border-top:.5px solid rgba(210,185,155,.2);margin-top:8px;padding-top:8px;">
+        <div style="font-size:10px;color:#b8a090;letter-spacing:.3px;margin-bottom:6px;">常用预设</div>
+        <div id="ap-preset-models"></div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- inner modals -->
+  <div class="ap-mo" id="ap-key-mo"><div class="ap-mb">
+    <h4>更换 API Key</h4>
+    <div class="ap-mb-note">新 key 将写入 .env 并重启网关。</div>
+    <input id="ap-key-inp" type="password" placeholder="sk-ant-…">
+    <div class="ap-mb-row"><button class="ap-mb-cancel" onclick="apCloseKeyMo()">取消</button><button class="ap-mb-send" onclick="apSubmitKey()">保存重启</button></div>
+  </div></div>
+  <div class="ap-mo" id="ap-token-mo"><div class="ap-mb">
+    <h4>填入订阅 token</h4>
+    <div class="ap-mb-note">运行 <b>claude setup-token</b> 获取 token，粘贴到这里。</div>
+    <input id="ap-token-inp" type="password" placeholder="sk-ant-oat01-…">
+    <div class="ap-mb-row"><button class="ap-mb-cancel" onclick="apCloseTokenMo()">取消</button><button class="ap-mb-send" onclick="apSubmitToken()">保存重启</button></div>
+  </div></div>
+  <div class="ap-mo" id="ap-relay-mo"><div class="ap-mb">
+    <h4>添加中转站预设</h4>
+    <input id="ap-relay-name" placeholder="名称">
+    <input id="ap-relay-url" placeholder="https://api.example.com/v1/messages">
+    <input id="ap-relay-key" type="password" placeholder="API Key（可留空）">
+    <div class="ap-mb-row"><button class="ap-mb-cancel" onclick="apCloseRelayAdd()">取消</button><button class="ap-mb-send" onclick="apSubmitRelayAdd()">保存</button></div>
+  </div></div>
 </div>
 
 <!-- body -->
@@ -489,6 +620,180 @@ initModel();
 setInterval(loadStatus, 30000);
 
 appendSys('工作台就绪。打开文件后可以直接发指令。');
+// ── API Panel ──────────────────────────────────────────
+function openApiPanel(){
+  document.getElementById('api-drawer').classList.add('show');
+  document.getElementById('api-drawer-overlay').classList.add('show');
+  apInit();
+}
+function closeApiPanel(){
+  document.getElementById('api-drawer').classList.remove('show');
+  document.getElementById('api-drawer-overlay').classList.remove('show');
+}
+
+var _apInit=false;
+function apInit(){
+  if(_apInit) return; _apInit=true;
+  apLoadProvider(); apLoadKeyStatus(); apLoadRelayPresets(); apLoadModelStatus(); apPing(); apLoadModels();
+}
+
+var AP_PRESET_MODELS=[
+  {id:'claude-opus-4-6',label:'Opus 4.6',color:'#7c6a8a'},
+  {id:'claude-sonnet-4-6',label:'Sonnet 4.6',color:'#3a7ad4'},
+  {id:'claude-haiku-4-5-20251001',label:'Haiku 4.5',color:'#0a8a5c'},
+];
+
+function escAp(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
+
+async function apPing(){
+  var dot=document.getElementById('ap-conn-dot'),txt=document.getElementById('ap-conn-txt');
+  var t0=Date.now();
+  try{
+    var r=await fetch('/api/config/key-status'); if(!r.ok) throw 0;
+    dot.className='ap-conn-dot ok'; txt.textContent='connected · '+(Date.now()-t0)+'ms';
+    document.getElementById('ap-k-lat').textContent=(Date.now()-t0)+' ms';
+  }catch(e){ dot.className='ap-conn-dot err'; txt.textContent='error'; }
+}
+
+var apCurProvider='api_relay', apCcSet=false;
+async function apLoadProvider(){
+  try{
+    var r=await fetch('/api/config/provider'); var d=await r.json();
+    apCurProvider=d.provider||'api_relay'; apCcSet=!!d.cc_token_set; apRenderProvider();
+  }catch(e){}
+}
+function apRenderProvider(){
+  document.getElementById('ap-prov-api_relay').classList.toggle('act',apCurProvider==='api_relay');
+  document.getElementById('ap-prov-claude_code').classList.toggle('act',apCurProvider==='claude_code');
+  var notes={api_relay:'当前走中转 API：支持工具调用与记忆注入。',claude_code:'当前走订阅 Claude Code：官方原生，固定月费。暂不支持工具调用。'};
+  document.getElementById('ap-prov-note').textContent=apCcSet?notes[apCurProvider]:(apCurProvider==='claude_code'?'⚠️ 尚未填入订阅 token。':notes.api_relay+'（订阅模式需先填 token）');
+}
+async function apSetProvider(p){
+  if(p===apCurProvider) return;
+  if(p==='claude_code'&&!apCcSet){showToast('请先填入订阅 token');apOpenTokenMo();return;}
+  var r=await fetch('/api/config/provider',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({provider:p})});
+  if(r.ok){apCurProvider=p;apRenderProvider();showToast('已切换，网关重启中');}
+  else showToast('切换失败');
+}
+
+async function apLoadKeyStatus(){
+  try{
+    var r=await fetch('/api/config/key-status'); var d=await r.json();
+    document.getElementById('ap-k-key').textContent=d.masked_key||'—';
+    document.getElementById('ap-k-src').textContent=d.source||'—';
+    document.getElementById('ap-k-msgs').textContent=d.today_msgs+' 条';
+  }catch(e){}
+}
+
+async function apLoadRelayPresets(){
+  var el=document.getElementById('ap-relay-list');
+  try{
+    var r=await fetch('/api/config/relay-presets'); var d=await r.json();
+    if(!d.presets||!d.presets.length){el.innerHTML='<div style="color:#b8a090;font-size:12px;padding:6px 0;">暂无预设</div>';return;}
+    el.innerHTML=d.presets.map(function(p){
+      var act=p.active?'<span class="ap-relay-active">使用中</span>':'<button class="ap-switch" onclick="apActivateRelay('+p.id+')">切换</button>';
+      return '<div class="ap-relay-item"><div class="ap-relay-info"><div class="ap-relay-name">'+escAp(p.name)+'</div><div class="ap-relay-url">'+escAp(p.url)+'</div></div>'+act+'<button class="ap-del" onclick="apDelRelay('+p.id+')"><i class="ti ti-trash"></i></button></div>';
+    }).join('');
+  }catch(e){el.innerHTML='<div style="color:#c07070;font-size:12px;">加载失败</div>';}
+}
+
+async function apActivateRelay(id){
+  var st=document.getElementById('ap-relay-status');
+  st.style.color='#52a06e'; st.textContent='切换中…';
+  var r=await fetch('/api/config/relay-presets/'+id+'/activate',{method:'POST'});
+  var d=await r.json();
+  if(d.ok){apLoadRelayPresets();setTimeout(function(){apLoadKeyStatus();apLoadModels();st.textContent='';},3000);showToast('已切换，网关重启中');}
+  else{st.style.color='#c07070';st.textContent='切换失败: '+(d.error||'');}
+}
+async function apDelRelay(id){
+  var r=await fetch('/api/config/relay-presets/'+id,{method:'DELETE'});
+  if(r.ok){apLoadRelayPresets();showToast('已删除');}
+}
+
+var apCurModel='';
+async function apLoadModelStatus(){
+  try{
+    var r=await fetch('/api/config/model'); var d=await r.json();
+    apCurModel=d.model||''; 
+    document.getElementById('ap-cur-model').textContent=apCurModel;
+    document.getElementById('ap-model-inp').value=apCurModel;
+    // update header label too
+    var label=apCurModel.includes('opus')?'Opus':apCurModel.includes('sonnet')?'Sonnet':apCurModel.includes('haiku')?'Haiku':apCurModel.split('-')[1]||apCurModel;
+    document.getElementById('model-label-hd').textContent=label;
+    apRenderPresetModels();
+  }catch(e){}
+}
+function apStartModelEdit(){document.getElementById('ap-model-edit').style.display='flex';document.getElementById('ap-model-display').style.display='none';}
+function apCancelModelEdit(){document.getElementById('ap-model-edit').style.display='none';document.getElementById('ap-model-display').style.display='flex';}
+async function apSaveModel(){
+  var v=document.getElementById('ap-model-inp').value.trim(); if(!v) return;
+  var r=await fetch('/api/config/model',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model:v})});
+  if(r.ok){apCurModel=v;document.getElementById('ap-cur-model').textContent=v;apCancelModelEdit();apLoadModelStatus();showToast('模型已更新');}
+  else showToast('保存失败');
+}
+async function apSwitchModel(m){
+  var r=await fetch('/api/config/model',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model:m})});
+  if(r.ok){apCurModel=m;document.getElementById('ap-cur-model').textContent=m;document.getElementById('ap-model-inp').value=m;apLoadModelStatus();showToast('已切换到 '+m);}
+  else showToast('切换失败');
+}
+
+function apRenderPresetModels(){
+  var el=document.getElementById('ap-preset-models'); if(!el) return;
+  el.innerHTML=AP_PRESET_MODELS.map(function(p){
+    var act=p.id===apCurModel;
+    var switchBtn = act ? '<span style="font-size:10px;color:#5a4a6a;background:rgba(124,106,138,.08);padding:2px 7px;border-radius:7px;">使用中</span>' : '<button class="ap-switch ap-sm" data-mid="'+escAp(p.id)+'">切换</button>';
+    return '<div class="ap-model-item"><div class="ap-mi-dot" style="background:'+p.color+(act?'':'66')+'"></div><div class="ap-mi-name">'+escAp(p.label)+'<span style="font-size:9.5px;color:#b8a090;margin-left:4px">'+escAp(p.id)+'</span></div>'+switchBtn+'</div>';
+  }).join('');
+}
+
+async function apLoadModels(){
+  var el=document.getElementById('ap-models-list'); if(!el) return;
+  el.innerHTML='<div style="color:#b8a090;font-size:12px;text-align:center;padding:6px">加载中…</div>';
+  try{
+    var r=await fetch('/api/config/models'); var d=await r.json();
+    if(!d.ok||!d.models||!d.models.length){el.innerHTML='<div style="color:#b8a090;font-size:11px;padding:6px">中转站未返回模型列表</div>';return;}
+    el.innerHTML=d.models.map(function(m){
+      var act=m===apCurModel;
+      var sw2 = act ? '<span style="font-size:10px;color:#5a4a6a;background:rgba(124,106,138,.08);padding:2px 7px;border-radius:7px;">使用中</span>' : '<button class="ap-switch ap-sm" data-mid="'+escAp(m)+'">切换</button>';
+      return '<div class="ap-model-item"><div class="ap-mi-dot" style="background:'+(act?'#7c6a8a':'#52a06e')+'"></div><div class="ap-mi-name">'+escAp(m)+'</div>'+sw2+'</div>';
+    }).join('');
+  }catch(e){el.innerHTML='<div style="color:#c07070;font-size:11px;padding:6px">获取失败</div>';}
+}
+
+// key modal
+function apOpenKeyMo(){document.getElementById('ap-key-mo').classList.add('show');}
+function apCloseKeyMo(){document.getElementById('ap-key-mo').classList.remove('show');}
+async function apSubmitKey(){
+  var k=document.getElementById('ap-key-inp').value.trim(); if(!k) return;
+  var r=await fetch('/api/config/key',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({key:k})});
+  if(r.ok){apCloseKeyMo();showToast('Key 已更新');setTimeout(apLoadKeyStatus,3000);}else showToast('保存失败');
+}
+// token modal
+function apOpenTokenMo(){document.getElementById('ap-token-mo').classList.add('show');}
+function apCloseTokenMo(){document.getElementById('ap-token-mo').classList.remove('show');}
+async function apSubmitToken(){
+  var t=document.getElementById('ap-token-inp').value.trim(); if(!t) return;
+  var r=await fetch('/api/config/cc-token',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token:t})});
+  if(r.ok){apCcSet=true;apCloseTokenMo();apRenderProvider();showToast('token 已保存');}else showToast('保存失败');
+}
+// relay modal
+function apOpenRelayAdd(){document.getElementById('ap-relay-mo').classList.add('show');}
+function apCloseRelayAdd(){document.getElementById('ap-relay-mo').classList.remove('show');}
+async function apSubmitRelayAdd(){
+  var name=document.getElementById('ap-relay-name').value.trim();
+  var url=document.getElementById('ap-relay-url').value.trim();
+  var key=document.getElementById('ap-relay-key').value.trim();
+  if(!name||!url){showToast('请填写名称和地址');return;}
+  var r=await fetch('/api/config/relay-presets',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name,url:url,key:key})});
+  var d=await r.json();
+  if(d.ok){apCloseRelayAdd();apLoadRelayPresets();showToast('已添加');}else showToast('保存失败');
+}
+
+// event delegation for dynamic model switch buttons
+document.addEventListener('click', function(e){
+  var btn = e.target.closest && e.target.closest('.ap-sm');
+  if(btn) apSwitchModel(btn.dataset.mid);
+});
 </script>
 </body>
 </html>
