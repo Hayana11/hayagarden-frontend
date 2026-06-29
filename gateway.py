@@ -1556,6 +1556,75 @@ def agent_loop(system, messages, max_rounds=5):
     joined = re.sub(r'```tool_result\s.*?```\s*', '', joined, flags=re.DOTALL).strip()
     return joined, ''.join(think_parts)
 
+
+@app.route('/workspace/chat', methods=['POST'])
+def workspace_chat():
+    """工作台专用对话：注入完整人设+记忆，但不写入chat_messages，保持工作台独立。"""
+    import urllib.request as _ur, json as _j
+    data = request.get_json() or {}
+    message  = (data.get('message') or '').strip()
+    history  = data.get('history') or []
+    file_ctx = (data.get('file_context') or '').strip()
+    if not message:
+        return jsonify({'error': 'empty message'}), 400
+
+    # 完整人设system
+    system = build_system()
+    # 注入file context到system末尾
+    if file_ctx:
+        ws_sys = '\n\n[工作台模式] 当前打开的文件：\n```\n' + file_ctx[:6000] + '\n```\n如需修改文件，在回复中用```write:/path/to/file\n内容\n```格式包裹。'
+        if isinstance(system, list):
+            system = system + [{'type':'text','text':ws_sys}]
+        else:
+            system = str(system) + ws_sys
+
+    # 从记忆中breath（复用现有逻辑）
+    try:
+        from server import breath as _breath
+        import asyncio as _aio
+        loop = _aio.new_event_loop()
+        loop.run_until_complete(_aio.wait_for(_breath(), timeout=4))
+        loop.close()
+    except Exception:
+        pass
+
+    # build messages from history + current
+    msgs = []
+    for h in history[-8:]:
+        if h.get('role') and h.get('content'):
+            msgs.append({'role': h['role'], 'content': h['content']})
+    if not msgs or msgs[-1]['role'] != 'user':
+        msgs.append({'role': 'user', 'content': message})
+
+    key = ''
+    api_url = API_URL
+    try:
+        for ln in open('/opt/frontend/.env'):
+            ln = ln.strip()
+            if ln.startswith('ANTHROPIC_API_KEY='): key = ln.split('=',1)[1]
+            if ln.startswith('API_URL='): api_url = ln.split('=',1)[1] or api_url
+    except Exception: pass
+
+    payload = _j.dumps({
+        'model': MODEL, 'max_tokens': 2000,
+        'system': system if isinstance(system, str) else [{'type':'text','text':str(s)} if isinstance(s,str) else s for s in system],
+        'messages': msgs,
+        'anthropic-beta': 'prompt-caching-2024-07-31'
+    }).encode()
+
+    try:
+        req = _ur.Request(api_url, data=payload, headers={
+            'Content-Type': 'application/json', 'x-api-key': key,
+            'anthropic-version': '2023-06-01',
+            'anthropic-beta': 'prompt-caching-2024-07-31'
+        })
+        with _ur.urlopen(req, timeout=60) as resp:
+            rd = _j.loads(resp.read())
+        reply = ''.join(b.get('text','') for b in rd.get('content',[]) if b.get('type')=='text').strip()
+        return jsonify({'reply': reply})
+    except Exception as e:
+        return jsonify({'error': str(e), 'reply': '请求失败: '+str(e)})
+
 @app.route('/chat', methods=['POST'])
 def chat():
     _uc = ((request.get_json() or {}).get('content') or '').strip()

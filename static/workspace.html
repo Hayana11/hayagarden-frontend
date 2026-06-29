@@ -555,33 +555,9 @@ async function sendChat() {
   sendBtn.disabled = true;
 
   try {
-    var sysPrompt = '你是费奥多尔，现在在工作台帮哈娅管理VPS上的前端代码。当前工作目录：/opt/frontend。';
-    if(curFile && curContent) sysPrompt += '\n\n当前打开的文件：' + curFile + '\n```\n' + curContent.slice(0,8000) + '\n```';
-
-    var r = await fetch('/api/config/model'); var md = await r.json(); curModel = md.model || curModel;
-
-    var resp = await fetch('/api/think/summarize', { // reuse the proxy pattern
-      method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({_ws_chat:true, messages: chatHistory, system: sysPrompt, model: curModel})
-    });
-
-    // fallback to direct call
-    var reply = '';
-    if(!resp.ok) throw new Error('proxy failed');
-    var data = await resp.json();
-    if(data._ws_reply){ reply = data._ws_reply; }
-    else throw new Error('no reply');
-
-    appendMsg('fy', reply);
-    chatHistory.push({role:'assistant', content:reply});
-
-    // check if reply contains a file write proposal
-    var writeMatch = reply.match(/```write:([^\n]+)\n([\s\S]*?)```/);
-    if(writeMatch){ proposedWrite(writeMatch[1].trim(), writeMatch[2]); }
-
+    await sendChatDirect(msg, msg);
   } catch(e) {
-    // direct chat via workspace endpoint
-    await sendChatDirect(msg, contextMsg);
+    appendSys('发送失败: ' + e.message);
   } finally {
     sendBtn.disabled = false;
   }
@@ -589,9 +565,9 @@ async function sendChat() {
 
 async function sendChatDirect(msg, contextMsg) {
   try {
-    var r = await fetch('/api/workspace/chat', {
+    var r = await fetch('/api/gw/workspace/chat', {
       method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({message: contextMsg, history: chatHistory, file: curFile, model: curModel})
+      body: JSON.stringify({message: msg, history: chatHistory, file_context: (curFile&&curContent)?curFile+'\n'+curContent.slice(0,6000):''})
     });
     var d = await r.json();
     var reply = d.reply || d.error || '无响应';
