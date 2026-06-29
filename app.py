@@ -1332,9 +1332,9 @@ def get_relay_presets():
     except Exception:
         pass
     conn = get_db()
-    rows = conn.execute('SELECT * FROM relay_presets ORDER BY created_at').fetchall()
+    rows = conn.execute('SELECT id,name,url,key,default_model,created_at FROM relay_presets ORDER BY created_at').fetchall()
     conn.close()
-    presets = [{'id': r['id'], 'name': r['name'], 'url': r['url'], 'active': r['url'] == active_url} for r in rows]
+    presets = [{'id': r['id'], 'name': r['name'], 'url': r['url'], 'active': r['url'] == active_url, 'default_model': r['default_model'] or ''} for r in rows]
     return jsonify({'ok': True, 'presets': presets, 'active_url': active_url})
 
 @app.route('/api/config/relay-presets', methods=['POST'])
@@ -1347,7 +1347,7 @@ def add_relay_preset():
     if not name or not url:
         return jsonify({'error': 'name and url required'}), 400
     conn = get_db()
-    cur = conn.execute('INSERT INTO relay_presets (name, url, key) VALUES (?,?,?)', (name, url, key))
+    cur = conn.execute('INSERT INTO relay_presets (name, url, key, default_model) VALUES (?,?,?,?)', (name, url, key, (data.get('default_model') or '').strip()))
     conn.commit()
     preset_id = cur.lastrowid
     conn.close()
@@ -1384,9 +1384,15 @@ def activate_relay_preset(preset_id):
                 env = re.sub(r'^ANTHROPIC_API_KEY=.*$', f'ANTHROPIC_API_KEY={new_key}', env, flags=re.MULTILINE)
             else:
                 env = env.rstrip() + f'\nANTHROPIC_API_KEY={new_key}\n'
+        new_model = (row['default_model'] or '').strip()
+        if new_model:
+            if 'MODEL=' in env:
+                env = re.sub(r'^MODEL=.*$', f'MODEL={new_model}', env, flags=re.MULTILINE)
+            else:
+                env = env.rstrip() + f'\nMODEL={new_model}\n'
         open('/opt/frontend/.env', 'w').write(env)
         _sp.Popen(['systemctl', 'restart', 'frontend-gw'])
-        return jsonify({'ok': True})
+        return jsonify({'ok': True, 'model_switched': (row['default_model'] or '').strip() or None})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 

@@ -275,6 +275,7 @@ body{background:linear-gradient(160deg,var(--bg1) 0%,var(--bg2) 100%);background
     <input id="relay-name-inp" placeholder="名称（如：金瓜瓜 / 备用站）" autocomplete="off">
     <input id="relay-url-inp" class="url" placeholder="https://api.example.com/v1/messages" autocomplete="off">
     <input id="relay-key-inp" type="password" placeholder="API Key（可留空，保持当前 Key）">
+    <input id="relay-model-inp" placeholder="默认模型（可留空，如 [Kiro] claude-opus-4-6-thinking [不补]）" style="font-size:11px">
     <div class="mb-row">
       <button class="mb-cancel" onclick="closeRelayAdd()">取消</button>
       <button class="mb-send" onclick="submitRelayAdd()">保存</button>
@@ -394,10 +395,12 @@ async function loadRelayPresets() {
       var actionEl = p.active
         ? '<span class="preset-active">使用中</span>'
         : '<button class="mi-switch" onclick="activatePreset(' + p.id + ')">切换</button>';
+      var modelHint = p.default_model ? '<div class="preset-url" style="color:#7c6a8a;opacity:.7">⚡ ' + escH(p.default_model.slice(0,30)) + '</div>' : '';
       return '<div class="preset-item">'
         + '<div class="preset-info">'
         + '<div class="preset-name">' + escH(p.name) + '</div>'
         + '<div class="preset-url">' + escH(p.url) + '</div>'
+        + modelHint
         + '</div>'
         + actionEl
         + '<button class="preset-del" onclick="deletePreset(' + p.id + ')" title="删除"><i class="ti ti-trash"></i></button>'
@@ -413,6 +416,7 @@ function openRelayAdd() {
   document.getElementById('relay-name-inp').value = '';
   document.getElementById('relay-url-inp').value = '';
   document.getElementById('relay-key-inp').value = '';
+  document.getElementById('relay-model-inp').value = '';
   setTimeout(function(){ document.getElementById('relay-name-inp').focus(); }, 100);
 }
 function closeRelayAdd() { document.getElementById('relay-add-mo').classList.remove('show'); }
@@ -422,9 +426,10 @@ async function submitRelayAdd() {
   var url = document.getElementById('relay-url-inp').value.trim();
   var key = document.getElementById('relay-key-inp').value.trim();
   if (!name || !url) { toast('请填写名称和地址'); return; }
+  var model = document.getElementById('relay-model-inp').value.trim();
   var r = await fetch('/api/config/relay-presets', {
     method: 'POST', headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({name: name, url: url, key: key})
+    body: JSON.stringify({name: name, url: url, key: key, default_model: model})
   });
   var d = await r.json();
   if (d.ok) { closeRelayAdd(); toast('已添加'); loadRelayPresets(); }
@@ -445,7 +450,9 @@ async function activatePreset(id) {
         loadModels();
         st.textContent = '';
       }, 3000);
-      toast('已切换，网关重启中');
+      var ms = d.model_switched ? '已切换到 ' + d.model_switched.slice(0,20) + ' · 网关重启中' : '已切换，网关重启中';
+      toast(ms);
+      if(d.model_switched){ currentModel=d.model_switched; document.getElementById('cur-model-name').textContent=d.model_switched; renderPresetModels(); }
     } else {
       st.className = 'relay-status err';
       st.textContent = '切换失败: ' + (d.error || 'unknown');

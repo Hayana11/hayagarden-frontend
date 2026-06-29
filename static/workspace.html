@@ -270,6 +270,7 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:14px;heigh
     <input id="ap-relay-name" placeholder="名称">
     <input id="ap-relay-url" placeholder="https://api.example.com/v1/messages">
     <input id="ap-relay-key" type="password" placeholder="API Key（可留空）">
+    <input id="ap-relay-model" placeholder="默认模型（可留空）" style="font-size:11px">
     <div class="ap-mb-row"><button class="ap-mb-cancel" onclick="apCloseRelayAdd()">取消</button><button class="ap-mb-send" onclick="apSubmitRelayAdd()">保存</button></div>
   </div></div>
 </div>
@@ -703,7 +704,7 @@ async function apLoadRelayPresets(){
     if(!d.presets||!d.presets.length){el.innerHTML='<div style="color:#b8a090;font-size:12px;padding:6px 0;">暂无预设</div>';return;}
     el.innerHTML=d.presets.map(function(p){
       var act=p.active?'<span class="ap-relay-active">使用中</span>':'<button class="ap-switch" onclick="apActivateRelay('+p.id+')">切换</button>';
-      return '<div class="ap-relay-item"><div class="ap-relay-info"><div class="ap-relay-name">'+escAp(p.name)+'</div><div class="ap-relay-url">'+escAp(p.url)+'</div></div>'+act+'<button class="ap-del" onclick="apDelRelay('+p.id+')"><i class="ti ti-trash"></i></button></div>';
+      return '<div class="ap-relay-item"><div class="ap-relay-info"><div class="ap-relay-name">'+escAp(p.name)+'</div><div class="ap-relay-url">'+escAp(p.url)+(p.default_model?'<div style="font-size:9.5px;color:#7c6a8a;opacity:.8">⚡ '+escAp((p.default_model||'').slice(0,25))+'</div>':'')+'</div></div>'+act+'<button class="ap-del" onclick="apDelRelay('+p.id+')"><i class="ti ti-trash"></i></button></div>';
     }).join('');
   }catch(e){el.innerHTML='<div style="color:#c07070;font-size:12px;">加载失败</div>';}
 }
@@ -713,7 +714,7 @@ async function apActivateRelay(id){
   st.style.color='#52a06e'; st.textContent='切换中…';
   var r=await fetch('/api/config/relay-presets/'+id+'/activate',{method:'POST'});
   var d=await r.json();
-  if(d.ok){apLoadRelayPresets();setTimeout(function(){apLoadKeyStatus();apLoadModels();st.textContent='';},3000);showToast('已切换，网关重启中');}
+  if(d.ok){apLoadRelayPresets();setTimeout(function(){apLoadKeyStatus();apLoadModels();st.textContent='';},3000);showToast(d.model_switched?'切换到 '+d.model_switched.slice(0,18)+' · 重启中':'已切换，网关重启中'); if(d.model_switched){apCurModel=d.model_switched;document.getElementById('ap-cur-model').textContent=d.model_switched;}}
   else{st.style.color='#c07070';st.textContent='切换失败: '+(d.error||'');}
 }
 async function apDelRelay(id){
@@ -795,7 +796,7 @@ async function apSubmitRelayAdd(){
   var url=document.getElementById('ap-relay-url').value.trim();
   var key=document.getElementById('ap-relay-key').value.trim();
   if(!name||!url){showToast('请填写名称和地址');return;}
-  var r=await fetch('/api/config/relay-presets',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name,url:url,key:key})});
+  var r=await fetch('/api/config/relay-presets',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name,url:url,key:key,default_model:(document.getElementById("ap-relay-model")||{}).value||""})});
   var d=await r.json();
   if(d.ok){apCloseRelayAdd();apLoadRelayPresets();showToast('已添加');}else showToast('保存失败');
 }
