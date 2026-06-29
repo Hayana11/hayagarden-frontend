@@ -14,17 +14,17 @@
 <style>
 *{margin:0;padding:0;box-sizing:border-box;}
 :root{
-  --bg:#f8f8f6;--card:#fff;--text:#2a2020;--muted:#9a8a8a;
+  --bg:#F5F3EE;--card:#FFFFFF;--text:#1A1815;--muted:#9A958B;
   --primary:#7c6a8a;--primary-bg:#f0ebf4;--primary-light:rgba(124,106,138,.08);
   --amber:#d4a574;--amber-bg:#fdf4e7;--amber-text:#412402;
-  --border:#ece6e0;--msg-font:15px;
+  --border:#EDE9E0;--msg-font:15px;
 }
 html,body{height:100%;overflow:hidden;}
 html{-webkit-text-size-adjust:100%;text-size-adjust:100%;}
 body{background:var(--bg);color:var(--text);font-family:-apple-system,'PingFang SC','HarmonyOS Sans SC','Noto Sans CJK SC','Noto Sans SC',sans-serif;max-width:480px;margin:0 auto;display:flex;flex-direction:column;}
 
 /* ── Header ── */
-.hd{flex-shrink:0;position:relative;background:rgba(255,255,255,.97);backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);padding:calc(env(safe-area-inset-top, 0px) + 12px) 18px 14px;display:flex;align-items:flex-end;justify-content:space-between;border-bottom:.5px solid var(--border);z-index:20;}
+.hd{flex-shrink:0;position:relative;background:rgba(245,243,238,.97);backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);padding:calc(env(safe-area-inset-top, 0px) + 12px) 18px 14px;display:flex;align-items:flex-end;justify-content:space-between;border-bottom:.5px solid var(--border);z-index:20;}
 .hd-left{display:flex;flex-direction:column;gap:0;}
 .hd-with{font-size:11px;color:var(--primary);letter-spacing:2px;text-transform:lowercase;}
 .hd-name{font-family:Georgia,'Times New Roman',serif;font-size:17px;font-weight:400;color:var(--text);letter-spacing:.3px;}
@@ -69,7 +69,7 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:14px;heigh
 .hist-msg .hm-text{font-size:13px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
 
 /* ── Messages ── */
-.msgs{flex:1;overflow-y:auto;padding:12px 16px 8px;-webkit-overflow-scrolling:touch;}
+.msgs{flex:1;overflow-y:auto;padding:12px 20px 8px;-webkit-overflow-scrolling:touch;-webkit-mask-image:linear-gradient(to bottom,black calc(100% - 20px),transparent 100%);mask-image:linear-gradient(to bottom,black calc(100% - 20px),transparent 100%);}
 .msgs::-webkit-scrollbar{width:3px;}
 .msgs::-webkit-scrollbar-thumb{background:var(--border);border-radius:2px;}
 .date-sep{text-align:center;font-size:11px;color:var(--muted);margin:10px 0 8px;display:flex;align-items:center;gap:8px;}
@@ -80,11 +80,12 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:14px;heigh
 .msg-row.ha{justify-content:flex-end;}
 .bwrap{max-width:80%;display:flex;flex-direction:column;}
 .msg-row.fy .bwrap{max-width:98%;}
+.msg-row.fy .bwrap{max-width:98%;}
 .msg-row.fy .bwrap{align-items:flex-start;}
 .msg-row.ha .bwrap{align-items:flex-end;}
 
 /* Fyodor bubble */
-.bubble.fy{background:var(--primary-light);border-radius:16px 16px 16px 4px;padding:10px 14px;font-size:var(--msg-font);line-height:1.7;word-break:break-all;color:var(--text);}
+.bubble.fy{background:transparent;border-radius:0;padding:2px 0;font-size:var(--msg-font);line-height:1.8;word-break:break-word;color:var(--text);}
 .msg-time-row{display:flex;flex-wrap:wrap;align-items:center;gap:0;}
 .cache-info{font-size:9px;color:var(--muted);opacity:.45;width:100%;margin-top:1px;}
 .err-banner{font-size:11px;color:#A32D2D;background:#FCEBEB;border-radius:8px;padding:6px 10px;margin-top:4px;display:flex;align-items:center;gap:6px;}
@@ -94,7 +95,7 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:14px;heigh
 #err-toast button{font-size:11px;border:none;background:#A32D2D;color:#fff;border-radius:6px;padding:4px 10px;cursor:pointer;font-family:inherit;flex-shrink:0;}
 #err-toast .err-text{flex:1;}
 /* Hayana bubble */
-.bubble.ha{background:var(--amber);border-radius:16px 16px 4px 16px;padding:10px 14px;font-size:var(--msg-font);line-height:1.7;word-break:break-all;color:var(--amber-text);}
+.bubble.ha{background:var(--amber);border-radius:16px 16px 4px 16px;padding:10px 14px;font-size:var(--msg-font);line-height:1.7;word-break:break-word;color:var(--amber-text);}
 
 .bubble.img-only{padding:0;background:transparent !important;}
 .bubble img{max-width:220px;max-height:220px;border-radius:12px;display:block;cursor:pointer;object-fit:cover;}
@@ -140,8 +141,8 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:14px;heigh
 .stream-err-retry{display:inline-block;margin-top:6px;font-size:12px;cursor:pointer;background:none;border:1px solid #c0392b;color:#c0392b;border-radius:4px;padding:3px 10px;}
 
 /* ── Typing indicator ── */
-#typing{display:none;padding:0 16px 4px;flex-shrink:0;}
-.typing-dots{display:inline-flex;gap:5px;align-items:center;padding:10px 14px;background:var(--primary-light);border-radius:16px 16px 16px 4px;}
+#typing{display:none;padding:0 20px 4px;flex-shrink:0;}
+.typing-dots{display:inline-flex;gap:5px;align-items:center;padding:4px 0;background:transparent;border-radius:0;}
 .typing-dots span{width:6px;height:6px;border-radius:50%;background:rgba(124,106,138,.5);display:block;}
 .typing-dots span:nth-child(1){animation:dp 1.2s infinite 0s;}
 .typing-dots span:nth-child(2){animation:dp 1.2s infinite .22s;}
@@ -149,26 +150,30 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:14px;heigh
 @keyframes dp{0%,80%,100%{opacity:.3;transform:scale(1)}40%{opacity:1;transform:scale(1.25)}}
 
 /* ── Input ── */
-.inp-area{flex-shrink:0;background:rgba(255,255,255,.97);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);border-top:.5px solid var(--border);padding:8px 12px calc(10px + env(safe-area-inset-bottom,0px));}
+.inp-area{flex-shrink:0;background:rgba(245,243,238,.97);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);border-top:none;padding:10px 20px calc(12px + env(safe-area-inset-bottom,0px));}
 .inp-author{font-size:11px;color:var(--muted);margin-bottom:5px;padding:0 2px;display:flex;align-items:center;gap:6px;}
 .inp-author-btn{border:none;background:none;cursor:pointer;font-size:11px;font-family:inherit;letter-spacing:.3px;padding:2px 8px;border-radius:8px;transition:background .15s,color .15s;}
 .inp-author-btn.fy{color:var(--primary);background:var(--primary-bg);}
 .inp-author-btn.ha{color:var(--amber);background:var(--amber-bg);}
-.inp-row{display:flex;align-items:flex-end;gap:8px;}
-.inp-attach{flex-shrink:0;width:36px;height:36px;border:none;background:none;cursor:pointer;color:var(--muted);font-size:20px;display:flex;align-items:center;justify-content:center;border-radius:50%;transition:background .15s;}
+.inp-card{background:var(--card);border-radius:20px;border:1px solid var(--border);padding:10px 12px 8px;box-shadow:0 2px 6px rgba(43,38,30,.05);display:flex;flex-direction:column;gap:6px;}
+.inp-bottom-row{display:flex;align-items:center;justify-content:space-between;}
+.inp-bottom-left{display:flex;align-items:center;gap:6px;}
+.inp-row{display:flex;align-items:center;gap:6px;}
+.inp-attach{flex-shrink:0;width:28px;height:28px;border:none;background:var(--surface-soft,#ECEAE4);cursor:pointer;color:var(--muted);font-size:14px;display:flex;align-items:center;justify-content:center;border-radius:50%;transition:background .15s,color .15s;}
 .inp-attach:active{background:var(--border);}
 .img-preview-strip{display:none;margin-bottom:7px;}
 .img-preview-strip .thumb-wrap{position:relative;display:inline-block;}
 .img-preview-strip img{width:54px;height:54px;object-fit:cover;border-radius:9px;display:block;border:1.5px solid var(--border);}
 .img-preview-strip .rm{position:absolute;top:-6px;right:-6px;width:17px;height:17px;border-radius:50%;background:#888;color:#fff;border:none;font-size:12px;line-height:17px;text-align:center;cursor:pointer;padding:0;}
-.inp-txt{flex:1;border:1.5px solid var(--border);border-radius:20px;padding:8px 14px;font-size:14px;font-family:inherit;color:var(--text);background:var(--card);outline:none;resize:none;line-height:1.5;max-height:96px;overflow-y:auto;-webkit-appearance:none;}
-.inp-txt:focus{border-color:var(--primary);}
-.inp-send{flex-shrink:0;width:38px;height:38px;border-radius:50%;border:none;background:var(--primary);color:#fff;cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:18px;transition:opacity .15s,transform .15s;box-shadow:0 2px 8px rgba(124,106,138,.3);}
+.inp-txt{flex:1;border:none;border-radius:0;padding:0 4px;font-size:15px;font-family:inherit;color:var(--text);background:transparent;outline:none;resize:none;line-height:1.6;min-height:24px;max-height:120px;overflow-y:auto;-webkit-appearance:none;}
+.inp-txt:focus{outline:none;}
+.inp-txt::placeholder{color:var(--muted-soft,#C0BBB4);font-size:13px;}
+.inp-send{flex-shrink:0;width:42px;height:42px;border-radius:50%;border:none;background:var(--primary);color:#fff;cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:18px;transition:opacity .15s,transform .15s;box-shadow:0 3px 10px rgba(124,106,138,.35);}
 .inp-send:active{opacity:.75;transform:scale(.9);}
 .inp-send:disabled{opacity:.4;cursor:default;}
 
 /* ── Bottom nav ── */
-.bnav{flex-shrink:0;background:rgba(255,255,255,.97);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);border-top:.5px solid var(--border);display:flex;padding:8px 0 calc(8px + env(safe-area-inset-bottom,0px));}
+.bnav{flex-shrink:0;background:rgba(245,243,238,.97);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);border-top:.5px solid var(--border);display:flex;padding:8px 0 calc(8px + env(safe-area-inset-bottom,0px));}
 .ni{flex:1;display:flex;flex-direction:column;align-items:center;gap:3px;text-decoration:none;border:none;background:none;cursor:pointer;color:#b8b0b8;font-size:10px;letter-spacing:.4px;font-family:inherit;padding:2px 0;transition:color .18s;}
 .ni i{font-size:21px;}
 .ni.act{color:var(--primary);}
@@ -263,6 +268,32 @@ html[data-theme=dark] .ni{color:#6a5f5f;}
 .branch-nav{cursor:pointer;padding:2px 5px;font-size:13px;opacity:.4;border-radius:3px;}
 .branch-nav:hover{opacity:.7;}
 .branch-count{font-family:monospace;font-size:10px;opacity:.4;min-width:20px;text-align:center;}
+
+/* model selector */
+.model-pill{position:relative;z-index:150;}
+.model-pill-btn{display:flex;align-items:center;gap:4px;padding:0 8px;height:28px;border-radius:14px;border:1px solid var(--border);background:var(--surface-soft,#ECEAE4);cursor:pointer;font-size:11px;font-family:inherit;color:var(--muted);letter-spacing:.2px;transition:background .15s,color .15s;flex-shrink:0;}
+.model-pill-btn:active,.model-pill-btn:hover{background:var(--primary-bg);color:var(--primary);border-color:var(--primary);}
+.model-dot{width:6px;height:6px;border-radius:50%;background:var(--primary);flex-shrink:0;}
+.model-pill-sheet{display:none;position:absolute;bottom:calc(100% + 6px);left:0;background:var(--card);border:1px solid var(--border);border-radius:14px;padding:8px 6px;box-shadow:0 8px 24px rgba(43,38,30,.12);z-index:160;min-width:180px;}
+.model-pill-sheet.show{display:block;}
+.model-opt{display:flex;align-items:center;gap:8px;width:100%;padding:9px 12px;border:none;background:none;font-size:13px;font-family:inherit;color:var(--text);cursor:pointer;border-radius:9px;text-align:left;}
+.model-opt:hover,.model-opt:active{background:var(--primary-bg);}
+.model-opt .mo-dot{width:6px;height:6px;border-radius:50%;flex-shrink:0;}
+.model-opt.selected{color:var(--primary);}
+.model-opt.selected .mo-dot{background:var(--primary);}
+/* think & memory cards */
+.think-wrap{background:rgba(124,106,138,.05);border-left:2px solid rgba(124,106,138,.25);border-radius:0 8px 8px 0;margin:0 0 10px;overflow:hidden;}
+.think-brain-pulse{display:inline-block;font-style:normal;margin-right:5px;font-size:13px;animation:brain-breathe 1.6s ease-in-out infinite;}
+@keyframes brain-breathe{0%,100%{opacity:.4;transform:scale(1);}50%{opacity:1;transform:scale(1.15);}}
+.think-loading .think-summary-text{color:rgba(124,106,138,.5);font-style:italic;}
+.memory-card{background:rgba(124,106,138,.05);border-left:2px solid rgba(124,106,138,.25);border-radius:0 8px 8px 0;margin:0 0 10px;overflow:hidden;}
+.memory-card-toggle{width:100%;text-align:left;padding:7px 10px;background:none;border:none;cursor:pointer;font-size:11px;color:rgba(124,106,138,.75);display:flex;align-items:center;gap:6px;font-family:inherit;letter-spacing:.3px;}
+.memory-card-toggle i{font-size:13px;transition:transform .18s;}
+.memory-card-toggle.open i.ti-chevron-right{transform:rotate(90deg);}
+.memory-card-body{display:none;padding:2px 10px 9px;font-size:12px;color:rgba(42,32,32,.5);line-height:1.65;white-space:pre-wrap;overflow-wrap:break-word;word-break:break-word;}
+.memory-card-body.open{display:block;}
+.memory-dot-pulse{display:inline-block;width:6px;height:6px;border-radius:50%;background:rgba(124,106,138,.6);margin-right:2px;animation:mem-breathe 1.4s ease-in-out infinite;}
+@keyframes mem-breathe{0%,100%{opacity:.3;transform:scale(1);}50%{opacity:1;transform:scale(1.3);}}
 </style>
 </head>
 <body>
@@ -343,15 +374,29 @@ html[data-theme=dark] .ni{color:#6a5f5f;}
     </div>
   </div>
 
-  <div class="inp-row">
-    <button class="inp-attach" onclick="document.getElementById('file-in').click()"><i class="ti ti-paperclip"></i></button>
-    <input type="file" id="file-in" accept="image/*" style="display:none" onchange="onFile(event)">
-    <textarea class="inp-txt" id="txt" placeholder="say something…" rows="1"
+  <div class="inp-card">
+    <textarea class="inp-txt" id="txt" placeholder="和岛聊聊…" rows="2"
       oninput="resize(this)" onkeydown="onEnter(event)"></textarea>
-    <button class="inp-send" id="send-btn" onclick="send()"><i class="ti ti-send"></i></button>
-    <div class="drift-btn-wrap" id="drift-btn-wrap">
-      <span class="drift-hint">你现在只能用这个</span>
-      <button class="drift-btn" onclick="openBottle()"><i class="ti ti-mail-forward"></i></button>
+    <div class="inp-bottom-row">
+      <div class="inp-bottom-left">
+        <button class="inp-attach" onclick="document.getElementById('file-in').click()"><i class="ti ti-paperclip"></i></button>
+        <input type="file" id="file-in" accept="image/*" style="display:none" onchange="onFile(event)">
+        <div class="model-pill" id="model-pill">
+          <div class="model-pill-sheet" id="model-sheet">
+            <button class="model-opt" data-model="claude-opus-4-6" onclick="selectModel(this)"><span class="mo-dot" style="background:#7c6a8a"></span>Opus 4.6</button>
+            <button class="model-opt" data-model="claude-sonnet-4-6" onclick="selectModel(this)"><span class="mo-dot" style="background:#6a8a7c"></span>Sonnet 4.6</button>
+            <button class="model-opt" data-model="claude-haiku-4-5-20251001" onclick="selectModel(this)"><span class="mo-dot" style="background:#8a7c6a"></span>Haiku 4.5</button>
+          </div>
+          <button class="model-pill-btn" id="model-pill-btn" onclick="toggleModelSheet()">
+            <span class="model-dot"></span><span id="model-label">Opus</span>
+          </button>
+        </div>
+        <div class="drift-btn-wrap" id="drift-btn-wrap">
+          <span class="drift-hint">你现在只能用这个</span>
+          <button class="drift-btn" onclick="openBottle()"><i class="ti ti-mail-forward"></i></button>
+        </div>
+      </div>
+      <button class="inp-send" id="send-btn" onclick="send()"><i class="ti ti-send"></i></button>
     </div>
   </div>
 </div>
@@ -681,7 +726,7 @@ function toggleThink(btn) {
   body.classList.toggle('open');
   btn.classList.toggle('open');
   var lbl = btn.querySelector('.tl');
-  if(lbl) lbl.textContent = isOpen ? '▶ thinking' : '▼ thinking';
+  // summary text stays
   var wrap = btn.closest('.think-wrap');
   if (wrap && wrap.dataset.mid !== undefined) {
     if (isOpen) openThinks.delete(String(wrap.dataset.mid));
@@ -721,11 +766,12 @@ function buildHtml(list) {
     var innerHtml = '';
     if(fy && thinking) {
       var tOpen = openThinks.has(String(m.id));
+      var tSummary = (m.thinking_summary || '').trim();
       innerHtml +=
         '<div class="think-wrap" data-mid="'+m.id+'">' +
           '<button class="think-toggle'+(tOpen?' open':'')+'" onclick="toggleThink(this)">' +
             '<i class="ti ti-chevron-right"></i>' +
-            '<span class="tl">'+(tOpen?'▼ thinking':'▶ thinking')+'</span>' +
+            '<span class="tl">'+escHtml(tSummary)+'</span>' +
           '</button>' +
           '<div class="think-body'+(tOpen?' open':'')+'">'+escHtml(thinking)+'</div>' +
         '</div>';
@@ -762,7 +808,11 @@ function buildHtml(list) {
       try{
         var ci = JSON.parse(m.cache_info);
         var hit = (ci.cache_read||0) > 0;
-        var ciText = hit ? ('✓ 命中 '+ci.cache_read) : (ci.cache_creation ? ('建缓存 '+ci.cache_creation) : '');
+        var ciText = '';
+        if(hit){
+          var ciTotal=(ci.input_tokens||0)+(ci.cache_read||0)+(ci.cache_creation||0);
+          ciText = ciTotal>0 ? '命中缓存 '+Math.round(ci.cache_read/ciTotal*100)+'%' : '命中缓存 '+ci.cache_read;
+        } else if(ci.cache_creation){ ciText = '建缓存 '+ci.cache_creation; }
         if(ciText) cacheInfoHtml = '<div class="cache-info">'+ciText+'</div>';
       }catch(e){}
     }
@@ -904,8 +954,8 @@ async function send(){
       showTyping();
       var streamErrMsg = null;
       try{
-        var fullText='';
-        try{ fullText=await streamReply(); }
+        var fullText='', capturedThink='';
+        try{ var _sr=await streamReply(); fullText=(_sr&&_sr.text)||''; capturedThink=(_sr&&_sr.thinkBuf)||''; }
         catch(se){
           if(se && se.displayed){ _suppressLoadMsgs=true; throw se; }
           console.warn('stream failed, checking if reply was already saved before retrying', se);
@@ -925,6 +975,21 @@ async function send(){
         await loadMsgs(false);
         if(streamState.cacheRead||streamState.cacheCreate) appendCacheInfo();
         if(fullText&&document.hidden) notify('Fyodor',fullText.slice(0,50));
+        if(capturedThink&&capturedThink.trim()){
+          (async function(){
+            try{
+              var ac=new AbortController(); var tid=setTimeout(function(){ac.abort();},12000);
+              var sumResp=await fetch('/api/think/summarize',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({thinking:capturedThink.slice(0,3000)}),signal:ac.signal});
+              clearTimeout(tid);
+              var sumData=await sumResp.json(); var summary=(sumData.summary||'').trim();
+              if(!summary) return;
+              fetch('/api/chat/think_summary',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({summary:summary})}).catch(function(){});
+              var allTw=document.querySelectorAll('.msg-row.fy .think-wrap');
+              var lastTw=allTw[allTw.length-1];
+              if(lastTw){var tl=lastTw.querySelector('.tl');if(tl) tl.textContent=summary;}
+            }catch(e){}
+          })();
+        }
       }catch(e){ if(!(e&&e.displayed)) console.error('gateway',e); }
       hideTyping();
     }
@@ -990,7 +1055,7 @@ function applyBlockedUI(blocked) {
     txt.disabled = true;
   } else {
     area.classList.remove('blocked');
-    txt.placeholder = 'say something…';
+    txt.placeholder = getTimedPlaceholder();
     txt.disabled = false;
   }
 }
@@ -1029,7 +1094,7 @@ setInterval(checkBlocked, 15000);
 
 // ── Msg actions & stop ──
 var streamAbort = null;
-var streamState = {cacheRead: 0, cacheCreate: 0};
+var streamState = {cacheRead: 0, cacheCreate: 0, inputTokens: 0};
 var _suppressLoadMsgs = false;
 function setSendBtn(mode) {
   var btn = document.getElementById('send-btn');
@@ -1152,9 +1217,10 @@ function appendCacheInfo(){
   if(!bwrap) return;
   var el=document.createElement('div');
   el.className='cache-info';
-  el.textContent=streamState.cacheRead>0
-    ?'✓ 命中缓存 '+streamState.cacheRead+' tokens'
-    :'首次建缓存 '+streamState.cacheCreate+' tokens';
+  if(streamState.cacheRead>0){
+    var total=streamState.inputTokens+streamState.cacheRead+streamState.cacheCreate;
+    el.textContent=total>0?'命中缓存 '+Math.round(streamState.cacheRead/total*100)+'%':'命中缓存 '+streamState.cacheRead;
+  } else { el.textContent='建缓存 '+streamState.cacheCreate; }
   bwrap.appendChild(el);
 }
 
@@ -1166,7 +1232,7 @@ async function retryStream(){
   sending=true; setSendBtn('stop');
   showTyping();
   try{
-    var fullText=await streamReply();
+    var _sr2=await streamReply(); var fullText=(_sr2&&_sr2.text)||'';
     await loadMsgs(false);
     if(streamState.cacheRead||streamState.cacheCreate) appendCacheInfo();
     if(fullText&&document.hidden) notify('Fyodor',fullText.slice(0,50));
@@ -1176,8 +1242,9 @@ async function retryStream(){
 }
 
 async function streamReply(){
-  streamState.cacheRead=0; streamState.cacheCreate=0;
+  streamState.cacheRead=0; streamState.cacheCreate=0; streamState.inputTokens=0;
   var ctrl=new AbortController(); streamAbort=ctrl;
+  var _safetyTimeout=setTimeout(function(){ctrl.abort();},300000);
   var resp=await fetch('/api/gw/chat/stream',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}',signal:ctrl.signal});
   if(!resp.ok||!resp.body) throw new Error('stream failed');
   var SSE_SEP=String.fromCharCode(10)+String.fromCharCode(10);
@@ -1193,7 +1260,7 @@ async function streamReply(){
     c.insertAdjacentHTML('beforeend',
       '<div class="msg-row fy" id="live-row"><div class="bwrap">'+
         '<div class="live-think-wrap" id="live-think-wrap" style="display:none">'+
-          '<div class="live-think-hd"><i class="ti ti-brain ti-xs"></i><span>thinking</span>'+
+          '<div class="live-think-hd"><i class="ti ti-brain think-brain-pulse"></i><span class="think-summary-text" style="opacity:.5;font-style:italic">思考中…</span>'+
           '<span class="live-think-cursor"></span></div>'+
           '<div class="live-think-body" id="live-think-body"></div>'+
         '</div>'+
@@ -1260,6 +1327,7 @@ async function streamReply(){
         } else if(ev.t==='usage'){
           streamState.cacheRead+=ev.cache_read||0;
           streamState.cacheCreate+=ev.cache_creation||0;
+          if(ev.input_tokens) streamState.inputTokens=Math.max(streamState.inputTokens,ev.input_tokens);
         } else if(ev.t==='err'){
           ensureLiveRow();
           live.innerHTML='<div class="stream-err-wrap">⚠ '+escHtml(ev.d)+
@@ -1272,12 +1340,13 @@ async function streamReply(){
     while(!err && shown<target.length){ await new Promise(function(r){setTimeout(r,80);}); }
   } finally {
     clearInterval(timer);
+    clearTimeout(_safetyTimeout);
     streamAbort=null;
   }
   if(err) throw err;
   // 注：缓存信息现在跟随消息持久化(cache_info列)，由loadMsgs()重新渲染时正确显示，
   // 不再在这里临时插DOM——那样会被随后的loadMsgs()刷新整体覆盖掉。
-  return target;
+  return {text: target, thinkBuf: thinkText};
 }
 
 // ── Drift reply notification ──
@@ -1382,6 +1451,56 @@ async function sheetDelete(){
     loadMsgs(true);
   }catch(e){ showToast('删除失败'); }
 }
+// ── Timed placeholder ──
+function getTimedPlaceholder() {
+  var now = new Date(); var h = now.getHours(); var day = now.getDay();
+  var isWeekend = (day===0||day===6);
+  if(isWeekend&&h>=6&&h<11) return '周末早安，今天不用赶了……';
+  if(isWeekend&&h>=11&&h<18) return '放假快乐，有什么想说的吗……';
+  if(h>=23||h<4) return '这么晚了，先睡吧，说完就关眼睛……';
+  if(h>=4&&h<7) return '这么早？还是一夜没睡？……';
+  if(h>=7&&h<10) return '早上好，今天从哪里开始……';
+  if(h>=10&&h<13) return '上午好，有什么事吗……';
+  if(h>=13&&h<15) return '吃过了吗，午后来聊聊……';
+  if(h>=15&&h<18) return '下午了，还在忙吗……';
+  if(h>=18&&h<21) return '晚上了，今天怎么样……';
+  if(h>=21&&h<23) return '快去睡了，说最后一件事……';
+  return '和岛聊聊……';
+}
+
+// ── Model selector ──
+var MODEL_LABELS = {'claude-opus-4-6':'Opus','claude-sonnet-4-6':'Sonnet','claude-haiku-4-5-20251001':'Haiku'};
+var _curModel = 'claude-opus-4-6';
+async function initModelPill() {
+  try{ var r=await fetch('/api/config/model'); var d=await r.json(); _curModel=d.model||_curModel; }catch(e){}
+  updateModelPill();
+  var t=document.getElementById('txt'); if(t&&!t.disabled) t.placeholder=getTimedPlaceholder();
+}
+function updateModelPill() {
+  var label=MODEL_LABELS[_curModel]||_curModel.split('-')[1]||_curModel;
+  document.getElementById('model-label').textContent=label;
+  document.querySelectorAll('.model-opt').forEach(function(btn){ btn.classList.toggle('selected',btn.dataset.model===_curModel); });
+}
+function toggleModelSheet() { document.getElementById('model-sheet').classList.toggle('show'); }
+async function selectModel(btn) {
+  var m=btn.dataset.model; document.getElementById('model-sheet').classList.remove('show');
+  if(m===_curModel) return;
+  try{
+    var r=await fetch('/api/config/model',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model:m})});
+    var d=await r.json(); if(d.model){_curModel=d.model;updateModelPill();showToast('已切换到 '+(MODEL_LABELS[d.model]||d.model));}
+  }catch(e){showToast('切换失败');}
+}
+document.addEventListener('click',function(e){
+  var sheet=document.getElementById('model-sheet');
+  if(sheet&&sheet.classList.contains('show')&&!document.getElementById('model-pill').contains(e.target)) sheet.classList.remove('show');
+});
+initModelPill();
+
+// ── Memory card toggle ──
+function toggleMemoryCard(btn){btn.nextElementSibling.classList.toggle('open');btn.classList.toggle('open');}
+
+// ── streamState cacheRead/cacheCreate/inputTokens ──
+
 </script>
 <script src="/static/smart-quote.js"></script>
 </body>
