@@ -638,12 +638,21 @@ def reader_page():
 
 @app.route('/api/config/model', methods=['GET'])
 def config_get_model():
+    model = 'unknown'
     try:
-        gw = open('/opt/frontend/gateway.py').read()
-        m = re.search(r"^MODEL\s*=\s*['\"]([^'\"]+)['\"]", gw, re.MULTILINE)
-        model = m.group(1) if m else 'unknown'
+        for line in open('/opt/frontend/.env'):
+            if line.startswith('MODEL='):
+                model = line.split('=', 1)[1].strip()
+                break
     except Exception:
-        model = 'unknown'
+        pass
+    if model == 'unknown':
+        try:
+            gw = open('/opt/frontend/gateway.py').read()
+            m = re.search(r"^MODEL\s*=\s*['\"]([^'\"]+)['\"]", gw, re.MULTILINE)
+            model = m.group(1) if m else 'unknown'
+        except Exception:
+            pass
     return jsonify({'model': model})
 
 @app.route('/api/config/model', methods=['POST'])
@@ -654,10 +663,19 @@ def config_set_model():
     if not new_model:
         return jsonify({'error': 'empty model'}), 400
     try:
-        gw = open('/opt/frontend/gateway.py').read()
-        gw2 = re.sub(r"^MODEL\s*=\s*['\"][^'\"]+['\"]",
-                     f"MODEL      = '{new_model}'", gw, flags=re.MULTILINE)
-        open('/opt/frontend/gateway.py', 'w').write(gw2)
+        env_path = '/opt/frontend/.env'
+        lines_env = open(env_path).readlines()
+        found = False
+        new_lines = []
+        for ln in lines_env:
+            if ln.startswith('MODEL='):
+                new_lines.append(f'MODEL={new_model}\n')
+                found = True
+            else:
+                new_lines.append(ln)
+        if not found:
+            new_lines.append(f'MODEL={new_model}\n')
+        open(env_path, 'w').writelines(new_lines)
         subprocess.Popen(['systemctl', 'restart', 'frontend-gw'])
         return jsonify({'ok': True})
     except Exception as e:
