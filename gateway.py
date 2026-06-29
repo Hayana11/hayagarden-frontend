@@ -32,7 +32,7 @@ def _warmup_ombre_brain():
 _warmup_ombre_brain()
 STATIC_DIR = '/opt/frontend/static'
 API_URL    = 'https://gua.guagua.uk/v1/messages'
-MODEL      = 'claude-opus-4-6'
+MODEL      = '[Kiro] claude-opus-4-6-thinking [不补]'
 
 API_KEY = ''
 GW_PROVIDER = 'api_relay'
@@ -2033,9 +2033,10 @@ WAKE_TOOLS = [
 ]
 
 def _wake_agent_loop(system, messages, max_rounds=4, tools=None):
-    """轻量 agent loop：无 thinking，仅 search_memories 工具。"""
+    """Agent loop：允许工具调用和自由思考，最后追加一轮强制结构化输出。"""
     msgs = list(messages)
     text_parts = []
+    last_blocks = []
     if tools is None:
         tools = WAKE_TOOLS
     for _ in range(max_rounds):
@@ -2058,6 +2059,7 @@ def _wake_agent_loop(system, messages, max_rounds=4, tools=None):
         with urllib.request.urlopen(req, timeout=90) as resp:
             result = json.loads(resp.read())
         blocks = result.get('content', [])
+        last_blocks = blocks
         for b in blocks:
             if b.get('type') == 'text':
                 text_parts.append(b.get('text', ''))
@@ -2070,6 +2072,38 @@ def _wake_agent_loop(system, messages, max_rounds=4, tools=None):
              'content': run_tool(t.get('name', ''), t.get('input') or {}, caller='fyodor_api')}
             for t in tool_uses
         ]})
+    # 强制结构化输出轮：追加一轮要求严格格式，无工具
+    try:
+        if last_blocks:
+            msgs.append({'role': 'assistant', 'content': last_blocks})
+        msgs.append({'role': 'user', 'content': (
+            '现在请只输出以下三行，不要其他任何内容：\n'
+            'THOUGHTS: <用一句话写下此刻真实的内心感受>\n'
+            'ACTION: <从 none / message / diary / explore 中选一个>\n'
+            'CONTENT: <若 ACTION=message 则写消息内容（不超过80字）；其他情况留空>'
+        )})
+        fmt_payload = {
+            'model': MODEL,
+            'max_tokens': 512,
+            'system': system,
+            'messages': msgs,
+        }
+        fmt_req = urllib.request.Request(
+            API_URL,
+            data=json.dumps(fmt_payload).encode(),
+            headers={
+                'Content-Type': 'application/json',
+                'x-api-key': API_KEY,
+                'anthropic-version': '2023-06-01',
+            }
+        )
+        with urllib.request.urlopen(fmt_req, timeout=60) as fmt_resp:
+            fmt_result = json.loads(fmt_resp.read())
+        for b in fmt_result.get('content', []):
+            if b.get('type') == 'text':
+                text_parts.append(b.get('text', ''))
+    except Exception:
+        pass
     return NL.join(t for t in text_parts if t).strip()
 
 _THOUGHT_PLACEHOLDERS = {
