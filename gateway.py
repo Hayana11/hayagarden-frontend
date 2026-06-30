@@ -797,57 +797,15 @@ def _strip_tool_blocks(messages):
     return clean
 
 def api_call(system, messages):
-    payload = {
-        'model': MODEL,
+    from relay.manager import relay as _relay
+    return _relay.call({
         'max_tokens': 16000,
         'thinking': {'type': 'enabled', 'budget_tokens': 10000},
         'tools': TOOLS,
         'system': system,
         'messages': messages,
         'metadata': {'user_id': 'hayana-fyodor-stable'},
-    }
-    headers_full = {
-        'Content-Type': 'application/json',
-        'x-api-key': API_KEY,
-        'anthropic-version': '2023-06-01',
-        'anthropic-beta': 'prompt-caching-2024-07-31',
-    }
-    req = urllib.request.Request(API_URL, data=json.dumps(payload).encode(), headers=headers_full)
-    try:
-        with urllib.request.urlopen(req, timeout=120) as resp:
-            return json.loads(resp.read())
-    except urllib.error.HTTPError as _e:
-        if _e.code not in (400, 422):
-            raise
-        # 降级1：去掉 tools，保留 thinking（中转站不支持工具调用）
-        payload_no_tools = {
-            'model': MODEL,
-            'max_tokens': 16000,
-            'thinking': {'type': 'enabled', 'budget_tokens': 10000},
-            'system': system,
-            'messages': _strip_tool_blocks(messages),
-        }
-        req2 = urllib.request.Request(
-            API_URL, data=json.dumps(payload_no_tools).encode(),
-            headers={'Content-Type': 'application/json', 'x-api-key': API_KEY, 'anthropic-version': '2023-06-01'}
-        )
-        try:
-            with urllib.request.urlopen(req2, timeout=120) as resp2:
-                return json.loads(resp2.read())
-        except urllib.error.HTTPError as _e2:
-            if _e2.code not in (400, 422):
-                raise
-        # 降级2：连 thinking 也去掉（中转站完全不支持扩展功能）
-        payload_bare = {
-            'model': MODEL, 'max_tokens': 16000,
-            'system': system, 'messages': _strip_tool_blocks(messages),
-        }
-        req3 = urllib.request.Request(
-            API_URL, data=json.dumps(payload_bare).encode(),
-            headers={'Content-Type': 'application/json', 'x-api-key': API_KEY, 'anthropic-version': '2023-06-01'}
-        )
-        with urllib.request.urlopen(req3, timeout=120) as resp3:
-            return json.loads(resp3.read())
+    }, timeout=120)
 
 
 NL = chr(10)
@@ -1349,13 +1307,8 @@ def messages_to_text(messages, describe_last_n_images=2):
                                     'content': [img_block_data, {'type': 'text', 'text': '用一两句简短的中文描述这张图片的内容，客观描述即可，不要加任何评论或猜测意图。'}]
                                 }],
                             }
-                            req = urllib.request.Request(
-                                API_URL,
-                                data=json.dumps(payload).encode(),
-                                headers={'Content-Type': 'application/json', 'x-api-key': API_KEY, 'anthropic-version': '2023-06-01'}
-                            )
-                            with urllib.request.urlopen(req, timeout=15) as resp:
-                                result = json.loads(resp.read())
+                            from relay.manager import relay as _img_relay
+                            result = _img_relay.call(payload, timeout=15)
                             desc = ''.join(b.get('text', '') for b in result.get('content', []) if b.get('type') == 'text').strip()
                         except Exception:
                             desc = None
@@ -1606,36 +1559,19 @@ def workspace_chat():
     if not msgs or msgs[-1]['role'] != 'user':
         msgs.append({'role': 'user', 'content': message})
 
-    key = ''
-    api_url = API_URL
-    ws_model = MODEL  # fallback to gateway MODEL
-    try:
-        for ln in open('/opt/frontend/.env'):
-            ln = ln.strip()
-            if ln.startswith('ANTHROPIC_API_KEY='): key = ln.split('=',1)[1]
-            if ln.startswith('API_URL='): api_url = ln.split('=',1)[1] or api_url
-            if ln.startswith('WS_MODEL='): ws_model = ln.split('=',1)[1] or ws_model
-    except Exception: pass
-
-    # flatten system to string for workspace (avoid cache-control blocks that some relays reject)
+    # flatten system to string（adapter 的 max_system_len 也会截断，这里只做兜底）
     if isinstance(system, list):
         sys_str = '\n'.join(s.get('text','') if isinstance(s,dict) else str(s) for s in system)
     else:
         sys_str = str(system)
-    sys_str = sys_str[:5000]  # relay 502s on very long system prompts
-    payload = _j.dumps({
-        'model': ws_model, 'max_tokens': 2000,
-        'system': sys_str,
-        'messages': msgs,
-    }).encode()
 
     try:
-        req = _ur.Request(api_url, data=payload, headers={
-            'Content-Type': 'application/json', 'x-api-key': key,
-            'anthropic-version': '2023-06-01',
-        })
-        with _ur.urlopen(req, timeout=30) as resp:
-            rd = _j.loads(resp.read())
+        from relay.manager import relay as _ws2_relay
+        rd = _ws2_relay.call({
+            'max_tokens': 2000,
+            'system': sys_str,
+            'messages': msgs,
+        }, timeout=30, use_ws_model=True)
         reply = ''.join(b.get('text','') for b in rd.get('content',[]) if b.get('type')=='text').strip()
         return jsonify({'reply': reply})
     except urllib.error.HTTPError as _he:
@@ -1809,8 +1745,7 @@ def chat_stream():
                 system   = build_system()
                 messages = build_messages()
                 think_acc, text_acc, tool_calls_acc = [], [], []
-                _stream_use_tools = True
-                _stream_use_think = True
+                from relay.manager import relay as _chat_relay
                 for _round in range(5):
                     payload = {
                         'model': MODEL,
@@ -1818,58 +1753,12 @@ def chat_stream():
                         'stream': True,
                         'system': system,
                         'messages': messages,
+                        'thinking': {'type': 'enabled', 'budget_tokens': 10000},
+                        'tools': TOOLS,
+                        'metadata': {'user_id': 'hayana-fyodor-stable'},
                     }
-                    if _stream_use_think:
-                        payload['thinking'] = {'type': 'enabled', 'budget_tokens': 10000}
-                    if _stream_use_tools:
-                        payload['tools'] = TOOLS
-                        payload['metadata'] = {'user_id': 'hayana-fyodor-stable'}
-                    _hdrs = {
-                        'Content-Type': 'application/json',
-                        'x-api-key': API_KEY,
-                        'anthropic-version': '2023-06-01',
-                        'anthropic-beta': 'prompt-caching-2024-07-31',
-                    }
-                    req = urllib.request.Request(API_URL, data=json.dumps(payload).encode(), headers=_hdrs)
-                    # 中转站不支持 tools/thinking 时自动降级（最多两步）
-                    try:
-                        resp = urllib.request.urlopen(req, timeout=300)
-                    except urllib.error.HTTPError as _relay_e:
-                        if _relay_e.code not in (400, 422) or _round != 0:
-                            raise
-                        if _stream_use_tools:
-                            # 降级1：去掉 tools，保留 thinking
-                            _stream_use_tools = False
-                            payload_1 = {
-                                'model': MODEL, 'max_tokens': 16000, 'stream': True,
-                                'system': system, 'messages': _strip_tool_blocks(messages),
-                                'thinking': {'type': 'enabled', 'budget_tokens': 10000},
-                            }
-                            _hdrs_1 = {'Content-Type': 'application/json', 'x-api-key': API_KEY, 'anthropic-version': '2023-06-01'}
-                            req1 = urllib.request.Request(API_URL, data=json.dumps(payload_1).encode(), headers=_hdrs_1)
-                            try:
-                                resp = urllib.request.urlopen(req1, timeout=300)
-                            except urllib.error.HTTPError as _relay_e2:
-                                if _relay_e2.code not in (400, 422):
-                                    raise
-                                # 降级2：连 thinking 也去掉
-                                _stream_use_think = False
-                                payload_2 = {
-                                    'model': MODEL, 'max_tokens': 16000, 'stream': True,
-                                    'system': system, 'messages': _strip_tool_blocks(messages),
-                                }
-                                req2 = urllib.request.Request(API_URL, data=json.dumps(payload_2).encode(), headers=_hdrs_1)
-                                resp = urllib.request.urlopen(req2, timeout=300)
-                        else:
-                            # tools 已关，只去掉 thinking
-                            _stream_use_think = False
-                            payload_2 = {
-                                'model': MODEL, 'max_tokens': 16000, 'stream': True,
-                                'system': system, 'messages': _strip_tool_blocks(messages),
-                            }
-                            _hdrs_1 = {'Content-Type': 'application/json', 'x-api-key': API_KEY, 'anthropic-version': '2023-06-01'}
-                            req2 = urllib.request.Request(API_URL, data=json.dumps(payload_2).encode(), headers=_hdrs_1)
-                            resp = urllib.request.urlopen(req2, timeout=300)
+                    # relay adapter 自动根据 relay 能力裁剪 thinking/cache/tools
+                    resp = _chat_relay.call_stream(payload, timeout=300)
                     blocks, cur, stop_reason = [], None, None
                     for raw in resp:
                         line = raw.decode('utf-8', 'ignore').strip()
@@ -2137,17 +2026,8 @@ def _wake_agent_loop(system, messages, max_rounds=4, tools=None):
             'system': system,
             'messages': msgs,
         }
-        req = urllib.request.Request(
-            API_URL,
-            data=json.dumps(payload, ensure_ascii=False).encode('utf-8'),
-            headers={
-                'Content-Type': 'application/json',
-                'x-api-key': API_KEY,
-                'anthropic-version': '2023-06-01',
-            }
-        )
-        with urllib.request.urlopen(req, timeout=90) as resp:
-                result = json.loads(resp.read())
+        from relay.manager import relay as _wake_relay
+        result = _wake_relay.call(payload, timeout=90)
         blocks = result.get('content', [])
         last_blocks = blocks
         for b in blocks:
@@ -2178,17 +2058,8 @@ def _wake_agent_loop(system, messages, max_rounds=4, tools=None):
             'system': system,
             'messages': msgs,
         }
-        fmt_req = urllib.request.Request(
-            API_URL,
-            data=json.dumps(fmt_payload, ensure_ascii=False).encode('utf-8'),
-            headers={
-                'Content-Type': 'application/json',
-                'x-api-key': API_KEY,
-                'anthropic-version': '2023-06-01',
-            }
-        )
-        with urllib.request.urlopen(fmt_req, timeout=60) as fmt_resp:
-            fmt_result = json.loads(fmt_resp.read())
+        from relay.manager import relay as _fmt_relay
+        fmt_result = _fmt_relay.call(fmt_payload, timeout=60)
         for b in fmt_result.get('content', []):
             if b.get('type') == 'text':
                 text_parts.append(b.get('text', ''))
@@ -2467,17 +2338,8 @@ def test_send():
             'system': system,
             'messages': [{'role': 'user', 'content': message}],
         }
-        req = urllib.request.Request(
-            API_URL,
-            data=json.dumps(payload).encode(),
-            headers={
-                'Content-Type': 'application/json',
-                'x-api-key': API_KEY,
-                'anthropic-version': '2023-06-01',
-            }
-        )
-        with urllib.request.urlopen(req, timeout=120) as resp:
-            result = json.loads(resp.read())
+        from relay.manager import relay as _ws_relay
+        result = _ws_relay.call(payload, timeout=120)
         latency_ms = int((_time.time() - t0) * 1000)
         blocks = result.get('content', [])
         text  = NL.join(b.get('text', '') for b in blocks if b.get('type') == 'text').strip()
@@ -2516,14 +2378,9 @@ def api_summarize():
                 'system': _diary_sys,
                 'messages': [{'role': 'user', 'content': prompt_text}],
             }
-            _diary_req = urllib.request.Request(
-                API_URL,
-                data=json.dumps(_diary_payload).encode(),
-                headers={'Content-Type': 'application/json', 'x-api-key': API_KEY, 'anthropic-version': '2023-06-01'}
-            )
             try:
-                with urllib.request.urlopen(_diary_req, timeout=60) as _r:
-                    _res = json.loads(_r.read())
+                from relay.manager import relay as _diary_relay
+                _res = _diary_relay.call(_diary_payload, timeout=60)
                 text = ((_res.get('content') or [{}])[0]).get('text', '') or ''
             except urllib.error.HTTPError as _he:
                 if _he.code in (401, 403, 503):

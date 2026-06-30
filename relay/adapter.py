@@ -4,13 +4,38 @@ gateway 不需要关心 relay 差异，全部交给 adapter。
 """
 import copy
 
+
+def _strip_msg_blocks(messages: list, drop_types: set) -> list:
+    """去掉 messages 里指定类型的 content blocks，空内容的消息整条跳过。"""
+    clean = []
+    for msg in messages:
+        c = msg.get("content")
+        if isinstance(c, list):
+            c2 = [b for b in c if not (isinstance(b, dict) and b.get("type") in drop_types)]
+            if not c2:
+                continue
+            clean.append({**msg, "content": c2})
+        else:
+            clean.append(msg)
+    return clean
+
+
 def adapt_request(payload: dict, headers: dict, caps: dict) -> tuple:
+    """
+    输入：完整的请求 payload 和 headers
+    输出：根据 relay 能力裁剪后的 payload 和 headers
+    """
     payload = copy.deepcopy(payload)
     headers = dict(headers)
 
     # ── thinking ──
     if not caps.get("thinking", True):
         payload.pop("thinking", None)
+        # messages 里的 thinking blocks 也要去掉（assistant turn 里会有）
+        if "messages" in payload:
+            payload["messages"] = _strip_msg_blocks(
+                payload["messages"], {"thinking"}
+            )
 
     # ── cache ──
     if not caps.get("cache", True):
@@ -36,6 +61,10 @@ def adapt_request(payload: dict, headers: dict, caps: dict) -> tuple:
     if not caps.get("tools", True):
         payload.pop("tools", None)
         payload.pop("tool_choice", None)
+        if "messages" in payload:
+            payload["messages"] = _strip_msg_blocks(
+                payload["messages"], {"tool_use", "tool_result"}
+            )
 
     # ── beta header ──
     beta = caps.get("beta_header")
