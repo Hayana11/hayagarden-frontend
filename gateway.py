@@ -668,6 +668,16 @@ def _blocks_to_str(blocks):
     if isinstance(blocks, str):
         return blocks
     return '\n'.join(b.get('text', '') for b in blocks if isinstance(b, dict) and b.get('type') == 'text')
+
+def build_wake_system():
+    """Wake 专用的 system 构建：直接返回纯字符串，不走 cache-control blocks 路径。
+    和 build_system() 解耦，避免 blocks 列表 += 字符串的类型陷阱。"""
+    result = build_system(wake=True)
+    if isinstance(result, str):
+        return result
+    if isinstance(result, list):
+        return _blocks_to_str(result)
+    return str(result)
 def img_block(url, max_dim=1568):
     """
     读图片转base64 block。会先压缩到Claude API推荐的最大边长(1568px)以内，
@@ -2290,7 +2300,7 @@ def wake_decide():
         except Exception:
             pass
 
-    system = _blocks_to_str(build_system(wake=True))
+    system = build_wake_system()
     try:
         import importlib as _il, bot_config as _bconf
         _il.reload(_bconf)
