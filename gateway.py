@@ -2129,7 +2129,7 @@ def _wake_agent_loop(system, messages, max_rounds=4, tools=None):
         }
         req = urllib.request.Request(
             API_URL,
-            data=json.dumps(payload).encode(),
+            data=json.dumps(payload, ensure_ascii=False).encode('utf-8'),
             headers={
                 'Content-Type': 'application/json',
                 'x-api-key': API_KEY,
@@ -2137,7 +2137,7 @@ def _wake_agent_loop(system, messages, max_rounds=4, tools=None):
             }
         )
         with urllib.request.urlopen(req, timeout=90) as resp:
-            result = json.loads(resp.read())
+                result = json.loads(resp.read())
         blocks = result.get('content', [])
         last_blocks = blocks
         for b in blocks:
@@ -2170,7 +2170,7 @@ def _wake_agent_loop(system, messages, max_rounds=4, tools=None):
         }
         fmt_req = urllib.request.Request(
             API_URL,
-            data=json.dumps(fmt_payload).encode(),
+            data=json.dumps(fmt_payload, ensure_ascii=False).encode('utf-8'),
             headers={
                 'Content-Type': 'application/json',
                 'x-api-key': API_KEY,
@@ -2290,7 +2290,7 @@ def wake_decide():
         except Exception:
             pass
 
-    system = build_system(wake=True)
+    system = _blocks_to_str(build_system(wake=True))
     try:
         import importlib as _il, bot_config as _bconf
         _il.reload(_bconf)
