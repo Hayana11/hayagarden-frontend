@@ -74,10 +74,19 @@ def main():
         persona = ''
 
     # ── 3. gateway 服务 ───────────────────────────────────────────
-    try:
+    # token_refresh.py 也在 0 * * * * 运行，偶尔会重启 frontend-gw；
+    # gunicorn 需要 ~8s 才能绑好端口，所以首次失败后等 12s 重试一次。
+    import time as _time
+    def _check_gateway():
         req = urllib.request.Request('http://127.0.0.1:5051/api/debug/provider')
         with urllib.request.urlopen(req, timeout=5) as r:
-            gw = json.loads(r.read())
+            return json.loads(r.read())
+    try:
+        try:
+            gw = _check_gateway()
+        except Exception:
+            _time.sleep(12)
+            gw = _check_gateway()
         if not gw.get('API_KEY_set'):
             errors.append('gateway: API_KEY 未设置')
         if gw.get('gen_busy'):

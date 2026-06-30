@@ -2067,47 +2067,10 @@ def _wake_agent_loop(system, messages, max_rounds=4, tools=None):
         pass
     return NL.join(t for t in text_parts if t).strip()
 
-_THOUGHT_PLACEHOLDERS = {
-    '你的内心想法（这段不会给哈娅看）',
-    '此刻的内心——她还醒着，你在想什么',
-    '一句话关于这个梦的内在感受',
-    '一句话内心感受',
-}
-
 def _parse_wake_response(text):
-    """从 AI 输出中提取 THOUGHTS / ACTION / CONTENT。
-    agent loop 多轮拼接时只取最后一组完整输出；过滤抄写prompt字段说明的占位符；
-    content 里若仍混有格式标记，视为解析污染，不发送/不存储。"""
-    import re as _re
-    thoughts = ''
-    action   = 'none'
-    c_text   = ''
-
-    blocks = list(_re.finditer(r'THOUGHTS:', text))
-    search_text = text[blocks[-1].start():] if blocks else text
-
-    m = _re.search(r'THOUGHTS:\s*(.+?)(?=\nACTION:|$)', search_text, _re.DOTALL)
-    if m:
-        thoughts = m.group(1).strip()
-    m = _re.search(r'ACTION:\s*(\S+)', search_text)
-    if m:
-        action = m.group(1).strip().lower()
-        if action == 'send':
-            action = 'message'
-        elif action not in ('none', 'message', 'diary', 'explore'):
-            action = 'none'
-    m = _re.search(r'CONTENT:\s*(.+)', search_text, _re.DOTALL)
-    if m:
-        c_text = m.group(1).strip()
-
-    if thoughts in _THOUGHT_PLACEHOLDERS:
-        thoughts = ''
-
-    _dirty_markers = ('THOUGHTS:', 'ACTION:', 'CONTENT:', '<thinking', '</thinking')
-    if any(mk in c_text for mk in _dirty_markers):
-        action = 'none'
-
-    return thoughts, action, c_text
+    """从 AI 输出中提取 THOUGHTS / ACTION / CONTENT。委托给 wake.parser。"""
+    from wake.parser import parse_response as _parse
+    return _parse(text)
 
 @app.route('/wake', methods=['POST'])
 def wake_decide():
@@ -2172,78 +2135,26 @@ def wake_decide():
             pass
 
     system = build_wake_system()
-    try:
-        import importlib as _il, bot_config as _bconf
-        _il.reload(_bconf)
-        if mode == 'ritual':
-            if ritual_type == 'solstice':
-                _wake_tpl = _bconf.RITUAL_SOLSTICE_PROMPT
-            elif ritual_type == 'birthday':
-                _wake_tpl = _bconf.RITUAL_BIRTHDAY_PROMPT
-            else:
-                _wake_tpl = _bconf.WAKE_DECISION_PROMPT
-        elif mode == 'nightwatch':
-            _wake_tpl = _bconf.NIGHTWATCH_DECISION_PROMPT
-        elif mode == 'dream':
-            _wake_tpl = getattr(_bconf, 'DREAM_PROMPT', '')
-        elif mode == 'summarize':
-            _wake_tpl = getattr(_bconf, 'SUMMARIZE_PROMPT', '')
-        else:
-            _wake_tpl = _bconf.WAKE_DECISION_PROMPT
-    except Exception:
-        _wake_tpl = "[wake] {time} t2={t2_hours}h t={t_hours}h\nTHOUGHTS: ...\nACTION: none\nCONTENT: ..."
-    if mode == 'ritual':
-        system += _wake_tpl
-    elif mode == 'nightwatch':
-        system += _wake_tpl.format(
-            time=now.strftime('%Y-%m-%d %H:%M'),
-            activity_desc=activity_desc,
-        )
-    elif mode == 'dream':
-        dream_tone = data.get('dream_tone', 'drifting')
-        dream_primer = data.get('dream_primer', '')
-        dream_tone_desc = data.get('dream_tone_desc', '')
-        system += _wake_tpl.format(
-            time=now.strftime('%Y-%m-%d %H:%M'),
-            dream_tone=dream_tone,
-            dream_primer=dream_primer,
-            dream_tone_desc=dream_tone_desc,
-        )
-    elif mode == 'summarize':
-        system += _wake_tpl.format(
-            summary_date=data.get('summary_date', ''),
-            dialogue=data.get('dialogue', ''),
-        )
-    else:
-        _fmt_str = _wake_tpl.format(
-            time=now.strftime('%Y-%m-%d %H:%M'),
-            t2_hours=f'{t2_hours:.1f}',
-            t_hours=f'{t_hours:.1f}',
-        )
-        # 如果是self_trigger触发，在prompt开头加上note作为上下文
-        _self_note = data.get('self_trigger_note', '').strip()
-        if _self_note:
-            _fmt_str = '[自定义提醒触发] 你之前给自己设的备注：' + _self_note + '\n\n' + _fmt_str
-        system += _fmt_str
-
-    # 注入八维驱动条（所有 wake 模式通用，dream/summarize 除外）
-    if mode not in ('dream', 'summarize'):
-        try:
-            import drive_engine as _de
-            _drive_snip = _de.get_wake_snippet()
-            if _drive_snip:
-                system += '\n\n' + _drive_snip
-        except Exception:
-            pass
-    # 注入费佳驱动 v1（7维 + Longing）
-    if mode not in ('dream', 'summarize') and (DESIRE_DRIVEN == '1' or LONGING_ENABLED == '1'):
-        try:
-            import desire as _des_snip
-            _dv1_snip = _des_snip.get_wake_snippet()
-            if _dv1_snip:
-                system += '\n\n' + _dv1_snip
-        except Exception:
-            pass
+    from wake.builder import build_prompt_suffix, inject_snippets
+    _wake_ctx = {
+        'time': now.strftime('%Y-%m-%d %H:%M'),
+        't2_hours': f'{t2_hours:.1f}',
+        't_hours': f'{t_hours:.1f}',
+        'ritual_type': ritual_type,
+        'activity_desc': activity_desc,
+        'dream_tone': data.get('dream_tone', 'drifting'),
+        'dream_primer': data.get('dream_primer', ''),
+        'dream_tone_desc': data.get('dream_tone_desc', ''),
+        'summary_date': data.get('summary_date', ''),
+        'dialogue': data.get('dialogue', ''),
+        'self_trigger_note': data.get('self_trigger_note', ''),
+    }
+    system += build_prompt_suffix(mode, _wake_ctx)
+    system = inject_snippets(
+        system, mode,
+        desire_driven=(DESIRE_DRIVEN == '1'),
+        longing_enabled=(LONGING_ENABLED == '1'),
+    )
 
     if mode == 'ritual':
         trigger = f'[仪式:{ritual_type}]'
@@ -2268,43 +2179,13 @@ def wake_decide():
 
     thoughts, action, c_text = _parse_wake_response(raw_text)
 
-    # 记录 wake_log
-    conn = get_db()
-    conn.execute(
-        "INSERT INTO wake_log (thoughts, action, content, consumed, woke_at) VALUES (?,?,?,0,datetime('now','+8 hours'))",
-        (thoughts, action, c_text)
+    # action 执行：写 wake_log / chat_messages / diary / discharge drive
+    from wake.executor import execute as _wake_exec
+    _wake_exec(
+        action, thoughts, c_text, mode,
+        get_db_fn=get_db,
+        desire_driven=(DESIRE_DRIVEN == '1'),
     )
-    conn.commit()
-
-    if action == 'message' and c_text and mode not in ('summarize', 'dream'):
-        conn.execute(
-            "INSERT INTO chat_messages (author, content, thinking) VALUES ('fyodor',?,?)",
-            (c_text, thoughts)
-        )
-        conn.commit()
-    elif action == 'diary' and c_text and mode != 'summarize':
-        conn.execute(
-            "INSERT INTO posts (type, content, layer, author, processed) VALUES ('DIARY',?,'recent','fyodor',0)",
-            (c_text,)
-        )
-        conn.commit()
-
-    conn.close()
-
-    # wake 行为结束 → discharge 对应 drive 维度
-    if mode not in ('dream', 'summarize'):
-        try:
-            import drive_engine as _de
-            _de.discharge_by_action(action, thoughts)
-        except Exception:
-            pass
-    # 费佳驱动 v1 → satisfy
-    if mode not in ('dream', 'summarize') and DESIRE_DRIVEN == '1':
-        try:
-            import desire as _des_sat
-            _des_sat.satisfy(action)
-        except Exception:
-            pass
 
     return jsonify({'ok': True, 'action': action, 'content': c_text})
 
