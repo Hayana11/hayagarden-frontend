@@ -20,6 +20,30 @@ def _strip_msg_blocks(messages: list, drop_types: set) -> list:
     return clean
 
 
+def _replace_image_blocks(messages: list) -> list:
+    """vision=False 时，把图片块换成一句占位文字，而不是像 _strip_msg_blocks
+    那样整条删掉——直接删掉的话，哈娅发过图这件事在对话历史里会完全消失，
+    模型没法合理回应（比如接不上"你看这张图"这句话）。"""
+    out = []
+    for msg in messages:
+        c = msg.get("content")
+        if isinstance(c, list):
+            c2 = []
+            for b in c:
+                if isinstance(b, dict) and b.get("type") == "image":
+                    c2.append({
+                        "type": "text",
+                        "text": "[图片：当前对话模型看不了图，内容已省略。"
+                                "如果哈娅提到图里的东西，直接问她图里是什么。]",
+                    })
+                else:
+                    c2.append(b)
+            out.append({**msg, "content": c2})
+        else:
+            out.append(msg)
+    return out
+
+
 def adapt_request(payload: dict, headers: dict, caps: dict) -> tuple:
     """
     输入：完整的请求 payload 和 headers
@@ -65,6 +89,11 @@ def adapt_request(payload: dict, headers: dict, caps: dict) -> tuple:
             payload["messages"] = _strip_msg_blocks(
                 payload["messages"], {"tool_use", "tool_result"}
             )
+
+    # ── vision ──
+    if not caps.get("vision", True):
+        if "messages" in payload:
+            payload["messages"] = _replace_image_blocks(payload["messages"])
 
     # ── beta header ──
     beta = caps.get("beta_header")

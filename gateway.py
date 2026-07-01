@@ -425,6 +425,14 @@ TOOLS = [
         }, 'required': ['path']},
     },
     {
+        'name': 'search_files',
+        'description': '在后端代码/前端页面里搜关键词（类似 grep），返回匹配的文件路径、行号、内容片段。想知道"这个变量/函数在哪些地方被用到"时用这个，比一个个文件翻快得多。搜索范围限定 /opt/frontend/，自动跳过 .env、数据库、备份、图片等文件。',
+        'input_schema': {'type': 'object', 'properties': {
+            'keyword':      {'type': 'string', 'description': '要搜索的关键词或代码片段'},
+            'file_pattern': {'type': 'string', 'description': '限定文件类型，如 "*.py" 或 "*.html"，不传则搜所有代码/文本文件'},
+        }, 'required': ['keyword']},
+    },
+    {
         'name': 'read_frontend_file',
         'description': '读取前端静态文件内容（仅限 /opt/frontend/static/ 下的 .html .css .js 文件）。用于查看当前前端代码，发现问题后配合 write_frontend_file 修复。',
         'input_schema': {'type': 'object', 'properties': {
@@ -819,6 +827,31 @@ def run_tool(name, args, caller='fyodor_cc'):
             else:
                 header = '# ' + p + '  (' + str(len(lines)) + ' lines)\n'
             return header + ''.join(lines)
+        if name == 'search_files':
+            import subprocess as _sp
+            keyword = (args.get('keyword') or '').strip()
+            if not keyword:
+                return '错误：keyword 不能为空'
+            file_pattern = (args.get('file_pattern') or '').strip()
+            cmd = ['grep', '-rn', '-I']
+            for d in ('backups', '.git', '__pycache__', 'node_modules', 'static/uploads'):
+                cmd.append('--exclude-dir=' + d)
+            for fpat in ('.env', '*.db', '*.db-journal', '*.jpg', '*.jpeg', '*.png', '*.pyc'):
+                cmd.append('--exclude=' + fpat)
+            if file_pattern:
+                cmd.append('--include=' + file_pattern)
+            cmd += [keyword, '/opt/frontend/']
+            try:
+                result = _sp.run(cmd, capture_output=True, text=True, timeout=10)
+                out = result.stdout.strip()
+                if not out:
+                    return f'没有找到包含 "{keyword}" 的内容'
+                lines = out.split('\n')
+                if len(lines) > 50:
+                    lines = lines[:50] + [f'...（还有更多结果，只显示前 50 条，缩小 keyword 或加 file_pattern 再搜）']
+                return '\n'.join(lines)
+            except Exception as e:
+                return f'搜索失败: {e}'
         if name == 'read_frontend_file':
             import os as _os
             p = args.get('path', '')
@@ -935,14 +968,16 @@ def messages_to_text(messages, describe_last_n_images=2):
                     img_block_data = next((b for b in c if isinstance(b, dict) and b.get('type') == 'image'), None)
                     desc = None
                     if img_block_data:
-                        # img_block已经是base64 block了，这里直接复用already-fetched data走一次性Haiku调用
+                        # img_block已经是base64 block了，这里直接复用already-fetched data走一次性调用。
+                        # 不硬编码具体模型名——之前写死 claude-haiku-4-5-20251001，
+                        # 在当前中转站上根本没有这个模型，一直 503 静默失败。
+                        # 不传 model 交给 relay.manager 用当前实际生效的主模型。
                         try:
                             payload = {
-                                'model': 'claude-haiku-4-5-20251001',
                                 'max_tokens': 200,
                                 'messages': [{
                                     'role': 'user',
-                                    'content': [img_block_data, {'type': 'text', 'text': '用一两句简短的中文描述这张图片的内容，客观描述即可，不要加任何评论或猜测意图。'}]
+                                    'content': [img_block_data, {'type': 'text', 'text': '客观描述这张图片的内容，一两句中文即可，不要加任何评论或猜测意图。如果图片里有清晰可读的文字（截图、文档、菜单、路牌、聊天记录等），把文字内容准确转录出来，不要只说"图里有文字"这种笼统的话。'}]
                                 }],
                             }
                             from relay.manager import relay as _img_relay
@@ -2052,6 +2087,22 @@ def debug_provider():
         'ACTIVE_RELAY': config_store.get('ACTIVE_RELAY', ''),
         'gen_busy': _gen_busy,
     })
+
+
+@app.route('/api/debug/wake_check', methods=['GET'])
+def debug_wake_check():
+    """Health-check endpoint: call build_wake_system() inside the running process
+    (jieba already warm) and return ok/len. Used by wake_health.py step 4."""
+    try:
+        from chat.system_builder import build_wake_system
+        result = build_wake_system()
+        if not isinstance(result, str):
+            return jsonify({'ok': False, 'error': f'NOT_STR:{type(result)}'}), 500
+        if len(result) < 100:
+            return jsonify({'ok': False, 'error': f'TOO_SHORT:{len(result)}'}), 500
+        return jsonify({'ok': True, 'len': len(result)})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
 
 
 if __name__ == '__main__':

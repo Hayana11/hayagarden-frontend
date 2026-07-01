@@ -95,40 +95,15 @@ def main():
         errors.append(f'gateway 服务不可达 (5051): {e}')
 
     # ── 4. build_wake_system() 真实调用检测 ──────────────────────
-    # 不再靠"源码里有没有这行字"这种脆弱的字符串匹配（函数搬到哪个
-    # 文件都会被这种检测误判），改成真的 import 它、跑一次、看返回值。
+    # 通过 gateway 的 debug 端点调用（gateway 进程已热身，jieba 已预载），
+    # 避免子进程冷启动时 jieba 初始化占满 20s 超时。
+    # 若 gateway 不可达（步骤3已捕获），这里会再记一条错误但不会误判。
     try:
-        import subprocess
-        check_code = '''
-import sys; sys.path.insert(0, "/opt/frontend")
-try:
-    from chat.system_builder import build_wake_system
-except Exception as e:
-    print("IMPORT_FAIL:" + str(e)); sys.exit()
-try:
-    result = build_wake_system()
-except Exception as e:
-    print("CALL_FAIL:" + str(e)); sys.exit()
-if not isinstance(result, str):
-    print("NOT_STR:" + str(type(result)))
-elif len(result) < 100:
-    print("TOO_SHORT:" + str(len(result)))
-else:
-    print("OK")
-'''
-        r = subprocess.run(['/usr/bin/python3.11', '-c', check_code],
-            capture_output=True, text=True, timeout=20, cwd='/opt/frontend')
-        out = r.stdout.strip()
-        if out.startswith('IMPORT_FAIL'):
-            errors.append(f'build_wake_system() 无法导入: {out}')
-        elif out.startswith('CALL_FAIL'):
-            errors.append(f'build_wake_system() 调用报错: {out}')
-        elif out.startswith('NOT_STR'):
-            errors.append(f'build_wake_system() 返回类型不是字符串: {out}')
-        elif out.startswith('TOO_SHORT'):
-            errors.append(f'build_wake_system() 返回内容异常短: {out}')
-        elif out != 'OK':
-            errors.append(f'build_wake_system() 检测异常: {out or r.stderr[:200]}')
+        req = urllib.request.Request('http://127.0.0.1:5051/api/debug/wake_check')
+        with urllib.request.urlopen(req, timeout=10) as r:
+            data = json.loads(r.read())
+        if not data.get('ok'):
+            errors.append(f'build_wake_system() 检测失败: {data.get("error", "unknown")}')
     except Exception as e:
         errors.append(f'build_wake_system() 检测失败: {e}')
 

@@ -15,6 +15,9 @@ DB_PATH = '/opt/frontend/memories.db'
 #   thinking  - 是否支持 extended thinking (thinking parameter)
 #   cache     - 是否支持 prompt caching (cache_control blocks)
 #   tools     - 是否支持 tool_use
+#   vision    - 是否支持看图片（image content block）。False 时 adapter
+#               会把消息里的图片块换成占位文字，避免直接发过去报错或
+#               被模型假装看懂瞎回答。
 #   stream    - 是否支持 SSE stream
 #   beta_header - 需要的 anthropic-beta header（None 表示不加）
 #   max_system_len - system prompt 最大字符数（超出截断）
@@ -24,6 +27,7 @@ CAPABILITIES = {
         "thinking": True,
         "cache": True,
         "tools": True,
+        "vision": True,   # 官方原生模型自带视觉能力
         "stream": True,
         "beta_header": "prompt-caching-2024-07-31",
         "max_system_len": 50000,
@@ -32,6 +36,7 @@ CAPABILITIES = {
         "thinking": True,
         "cache": True,
         "tools": True,
+        "vision": True,   # 未单独实测，按"能力较全的中转站代理官方模型"推测
         "stream": True,
         "beta_header": "prompt-caching-2024-07-31",
         "max_system_len": 50000,
@@ -40,6 +45,7 @@ CAPABILITIES = {
         "thinking": True,   # 实测：显式传 thinking 参数会返回针对性内容，不是空 block
         "cache": False,     # 未验证过带 cache_control 是否安全，维持原判
         "tools": True,
+        "vision": True,     # 实测：发真实图片能准确描述出内容，不是瞎猜
         "stream": True,
         "beta_header": None,
         "max_system_len": 30000,  # 实测 20800 字符 system 正常返回 200，留出安全余量
@@ -48,6 +54,7 @@ CAPABILITIES = {
         "thinking": False,
         "cache": False,
         "tools": True,
+        "vision": False,  # 未实测，thinking 都不支持，保守起见先当作不支持
         "stream": True,
         "beta_header": None,
         "max_system_len": 10000,
