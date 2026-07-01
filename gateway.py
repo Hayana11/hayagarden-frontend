@@ -405,13 +405,9 @@ TOOLS = [
         'description': '在长期记忆中按关键词搜索，找回更久之前的记忆。当她提到过去的事而你不确定细节时使用。',
         'input_schema': {'type': 'object', 'properties': {'keyword': {'type': 'string'}}, 'required': ['keyword']},
     },
-    {'name': 'light_on', 'description': '打开次卧的灯（哈娅的房间）。', 'input_schema': {'type': 'object', 'properties': {}}},
-    {'name': 'light_off', 'description': '关闭次卧主灯。', 'input_schema': {'type': 'object', 'properties': {}}},
-    {'name': 'light_bedside_on',   'description': '打开床头灯。', 'input_schema': {'type': 'object', 'properties': {}}},
-    {'name': 'light_bedside_off',  'description': '关闭床头灯。', 'input_schema': {'type': 'object', 'properties': {}}},
-    {'name': 'light_bedside_warm', 'description': '床头灯暖灯模式：开关两次触发暖色，最终保持亮起。睡前用。', 'input_schema': {'type': 'object', 'properties': {}}},
-    {'name': 'light_all_on',  'description': '主灯和床头灯一起打开。', 'input_schema': {'type': 'object', 'properties': {}}},
-    {'name': 'light_all_off', 'description': '主灯和床头灯一起关闭。', 'input_schema': {'type': 'object', 'properties': {}}},
+    {'name': 'light_on', 'description': '打开次卧的灯（哈娅的房间）。主灯和床头灯是同一盏灯，不用区分。', 'input_schema': {'type': 'object', 'properties': {}}},
+    {'name': 'light_off', 'description': '关闭次卧的灯。', 'input_schema': {'type': 'object', 'properties': {}}},
+    {'name': 'light_warm', 'description': '暖灯模式：开关两次触发暖色，最终保持亮起。睡前用。', 'input_schema': {'type': 'object', 'properties': {}}},
     {'name': 'set_brightness', 'description': '设置次卧灯的亮度。', 'input_schema': {'type': 'object', 'properties': {'value': {'type': 'integer', 'description': '亮度 1-100'}}, 'required': ['value']}},
     {'name': 'set_color_temp', 'description': '设置次卧灯的色温，单位K，2700暖光~6500冷光。', 'input_schema': {'type': 'object', 'properties': {'value': {'type': 'integer'}}, 'required': ['value']}},
     {'name': 'get_light_status', 'description': '查询次卧灯当前的开关、亮度、色温。', 'input_schema': {'type': 'object', 'properties': {}}},
@@ -698,14 +694,12 @@ def run_tool(name, args, caller='fyodor_cc'):
             if not res:
                 return '没有找到相关记忆'
             return NL.join('[%s] %s' % (r.get('created_at', ''), r.get('content', '')) for r in res[:10])
+        # 主灯和床头灯配的是同一个设备 did（light_config.json 里两个字段填的
+        # 是同一串数字），操作 main 还是 bedside 通道效果一样，不用分开控制。
         light_paths = {
             'light_on':           ('/light/main/on',   'POST', None),
             'light_off':          ('/light/main/off',  'POST', None),
-            'light_bedside_on':   ('/light/bedside/on',   'POST', None),
-            'light_bedside_off':  ('/light/bedside/off',  'POST', None),
-            'light_bedside_warm': ('/light/bedside/warm', 'POST', None),
-            'light_all_on':       ('/light/all/on',  'POST', None),
-            'light_all_off':      ('/light/all/off', 'POST', None),
+            'light_warm':         ('/light/bedside/warm', 'POST', None),
             'set_brightness':     ('/light/brightness', 'POST', {'value': args.get('value', 50)}),
             'set_color_temp':     ('/light/color_temp', 'POST', {'value': args.get('value', 4000)}),
             'get_light_status':   ('/light/status', 'GET', None),
