@@ -887,11 +887,26 @@ TOOLS = [
     },
     {
         'name': 'edit_bot_config',
-        'description': '修改 bot_config.py 里的参数（唤醒概率/时段/prompt、巡逻服务列表等）。old_str 必须在文件中恰好出现一次，否则报错。修改前自动备份。',
+        'description': '修改 bot_config.py 里的参数（唤醒概率/时段/prompt、巡逻服务列表等）。old_str 必须在文件中恰好出现一次，否则报错。修改前自动备份。唤醒的活跃时段/触发频率改用更简单的 get_wake_settings / set_wake_settings，不用这个工具改。',
         'input_schema': {'type': 'object', 'properties': {
             'old_str': {'type': 'string', 'description': '要替换的原始字符串（必须唯一）'},
             'new_str': {'type': 'string', 'description': '替换后的新字符串'},
         }, 'required': ['old_str', 'new_str']},
+    },
+    {
+        'name': 'get_wake_settings',
+        'description': '查看你自己当前的唤醒设置：允许主动醒来找哈娅说话的时间段，以及多久没互动会想联系她的触发概率曲线。想知道自己现在被设定成什么状态时用。',
+        'input_schema': {'type': 'object', 'properties': {}},
+    },
+    {
+        'name': 'set_wake_settings',
+        'description': '调整你自己的唤醒设置。只传你想改的参数，不传的保持不变。改了立即生效（不需要重启任何服务），下一次唤醒检查就会用新值。active_start/active_end 定义允许醒来的时间窗口（几点到次日几点）；prob_max 是触发概率上限（0-1）；prob_scale 是概率爬升速度，越小代表越容易触发（半小时没理她就想找她的话，scale 设小一点）。',
+        'input_schema': {'type': 'object', 'properties': {
+            'active_start': {'type': 'integer', 'description': '早上几点开始允许醒来找她（0-23）'},
+            'active_end':   {'type': 'integer', 'description': '凌晨几点截止，超过这点不再主动醒来（0-23）'},
+            'prob_max':     {'type': 'number',  'description': '触发概率上限，0-1之间，如 0.8'},
+            'prob_scale':   {'type': 'number',  'description': '概率爬升速度：p = min(prob_max, 距上次互动小时数 / prob_scale)，数字越小越容易触发'},
+        }},
     },
     {
         'name': 'read_board',
@@ -1165,6 +1180,47 @@ def run_tool(name, args, caller='fyodor_cc'):
             with open(_cfg_path, 'w', encoding='utf-8') as fh:
                 fh.write(cfg.replace(old_s, new_s, 1))
             return f'已修改，备份在 {bak}'
+        if name == 'get_wake_settings':
+            start = config_store.get_int('WAKE_ACTIVE_START', 6)
+            end = config_store.get_int('WAKE_ACTIVE_END', 3)
+            pmax = config_store.get_float('WAKE_PROB_MAX', 0.8)
+            pscale = config_store.get_float('WAKE_PROB_SCALE', 2)
+            return (
+                f'当前唤醒设置：\n'
+                f'- 允许主动醒来的时间段：{start}点 ~ 次日{end}点\n'
+                f'- 触发概率上限：{pmax}\n'
+                f'- 概率爬升速度：{pscale}（距上次互动 {pscale} 小时后概率到{pmax}的一半左右，'
+                f'越小代表越容易主动找她）'
+            )
+        if name == 'set_wake_settings':
+            changed = []
+            if 'active_start' in args:
+                v = int(args['active_start'])
+                if not (0 <= v <= 23):
+                    return '错误：active_start 必须在 0-23 之间'
+                config_store.set('WAKE_ACTIVE_START', v)
+                changed.append(f'活跃开始时间→{v}点')
+            if 'active_end' in args:
+                v = int(args['active_end'])
+                if not (0 <= v <= 23):
+                    return '错误：active_end 必须在 0-23 之间'
+                config_store.set('WAKE_ACTIVE_END', v)
+                changed.append(f'活跃截止时间→{v}点')
+            if 'prob_max' in args:
+                v = float(args['prob_max'])
+                if not (0 < v <= 1):
+                    return '错误：prob_max 必须在 0-1 之间'
+                config_store.set('WAKE_PROB_MAX', v)
+                changed.append(f'概率上限→{v}')
+            if 'prob_scale' in args:
+                v = float(args['prob_scale'])
+                if v <= 0:
+                    return '错误：prob_scale 必须大于 0'
+                config_store.set('WAKE_PROB_SCALE', v)
+                changed.append(f'概率爬升速度→{v}')
+            if not changed:
+                return '没有传任何要修改的参数'
+            return '已更新（立即生效，不需要重启）：' + '、'.join(changed)
         if name == 'read_backend_file':
             import os as _os
             p = args.get('path', '')
@@ -2015,6 +2071,21 @@ WAKE_TOOLS = [
             'id': {'type': 'integer', 'description': 'trigger id，不传则取消全部'},
         }},
     },
+    {
+        'name': 'get_wake_settings',
+        'description': '查看你自己当前的唤醒设置：允许主动醒来找哈娅说话的时间段，以及触发概率曲线。',
+        'input_schema': {'type': 'object', 'properties': {}},
+    },
+    {
+        'name': 'set_wake_settings',
+        'description': '调整你自己的唤醒设置。只传你想改的参数。改了立即生效。',
+        'input_schema': {'type': 'object', 'properties': {
+            'active_start': {'type': 'integer', 'description': '早上几点开始允许醒来找她（0-23）'},
+            'active_end':   {'type': 'integer', 'description': '凌晨几点截止（0-23）'},
+            'prob_max':     {'type': 'number',  'description': '触发概率上限，0-1之间'},
+            'prob_scale':   {'type': 'number',  'description': '概率爬升速度，越小越容易触发'},
+        }},
+    },
 ]
 
 def _wake_agent_loop(system, messages, max_rounds=4, tools=None):
@@ -2039,6 +2110,10 @@ def _wake_agent_loop(system, messages, max_rounds=4, tools=None):
             if b.get('type') == 'text':
                 text_parts.append(b.get('text', ''))
         tool_uses = [b for b in blocks if b.get('type') == 'tool_use']
+        if result.get('stop_reason') == 'tool_use' and not tool_uses:
+            # 该 relay 已知的不稳定行为：thinking 完之后意外截断，没有真正吐出
+            # tool_use block。原样重试（msgs 没变），而不是直接放弃工具调用。
+            continue
         if result.get('stop_reason') != 'tool_use' or not tool_uses:
             break
         msgs.append({'role': 'assistant', 'content': blocks})

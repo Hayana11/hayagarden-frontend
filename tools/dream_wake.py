@@ -14,9 +14,16 @@ LOG_FILE = '/var/log/dream_wake.log'
 if '/opt/frontend' not in sys.path:
     sys.path.insert(0, '/opt/frontend')
 from bot_config import (
-    WAKE_ACTIVE_START, WAKE_ACTIVE_END, WAKE_PROB_MAX, WAKE_PROB_SCALE,
     NIGHTWATCH_START, NIGHTWATCH_END, NIGHTWATCH_PROB, NIGHTWATCH_ACTIVITY_WINDOW,
 )
+# 唤醒时段/概率：以前是 bot_config.py 里的静态常量，只能靠 edit_bot_config
+# 改源码字符串来调；现在改成从 config_store 读，费佳可以用 set_wake_settings
+# 工具直接调，改了下次这个脚本被 cron 拉起时立即生效（本来就是每次全新进程）。
+import config_store as _wcfg
+WAKE_ACTIVE_START = _wcfg.get_int('WAKE_ACTIVE_START', 6)
+WAKE_ACTIVE_END   = _wcfg.get_int('WAKE_ACTIVE_END', 3)
+WAKE_PROB_MAX     = _wcfg.get_float('WAKE_PROB_MAX', 0.8)
+WAKE_PROB_SCALE   = _wcfg.get_float('WAKE_PROB_SCALE', 2)
 DREAMING_START = 3   # 凌晨3点后才做梦
 DREAMING_END   = 5
 

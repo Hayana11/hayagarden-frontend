@@ -37,12 +37,12 @@ CAPABILITIES = {
         "max_system_len": 50000,
     },
     "68886868": {
-        "thinking": False,
-        "cache": False,
+        "thinking": True,   # 实测：显式传 thinking 参数会返回针对性内容，不是空 block
+        "cache": False,     # 未验证过带 cache_control 是否安全，维持原判
         "tools": True,
         "stream": True,
         "beta_header": None,
-        "max_system_len": 8000,
+        "max_system_len": 30000,  # 实测 20800 字符 system 正常返回 200，留出安全余量
     },
     "treegpt": {
         "thinking": False,

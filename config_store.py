@@ -103,6 +103,13 @@ def get_int(key, default=0):
         return default
 
 
+def get_float(key, default=0.0):
+    try:
+        return float(get(key, str(default)))
+    except Exception:
+        return default
+
+
 def exists(key):
     try:
         conn = sqlite3.connect(DB_PATH, timeout=3)
