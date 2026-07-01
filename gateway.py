@@ -793,7 +793,10 @@ def run_tool(name, args, caller='fyodor_cc'):
             if board_tag and board_tag['tag'] != '闲聊':
                 _mark_done = args.get('done', True)
                 if _mark_done:
-                    _bc.execute("UPDATE board SET status='done' WHERE id=?", (_bid,))
+                    _bc.execute(
+                        "UPDATE board SET status='done', resolved_at=datetime('now','+8 hours') WHERE id=?",
+                        (_bid,)
+                    )
                     _bc.commit(); _bc.close()
                     return f'已回复到留言板 #{_bid}，并标记为已处理'
             _bc.commit(); _bc.close()

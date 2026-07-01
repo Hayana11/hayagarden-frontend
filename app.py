@@ -1747,11 +1747,22 @@ def post_board_reply(bid):
     if not content:
         return jsonify({'error': 'content required'}), 400
     mentions = (data.get('mentions') or '').strip()
+    # done 没传时默认 None（不动 status），传了才按值处理——
+    # 之前这个参数一直被忽略，回复时想顺手标记已处理的调用全部没生效。
+    done_in = data.get('done')
     conn = get_db()
     conn.execute(
         "INSERT INTO board_replies (board_id,author,content,mentions) VALUES (?,?,?,?)",
         (bid, author, content, mentions)
     )
+    if done_in is not None:
+        if done_in:
+            conn.execute(
+                "UPDATE board SET status='done', resolved_at=datetime('now','+8 hours') WHERE id=?",
+                (bid,)
+            )
+        else:
+            conn.execute("UPDATE board SET status='open', resolved_at=NULL WHERE id=?", (bid,))
     conn.commit(); conn.close()
 
     # 回复里@fyodor_cc → 同样立刻触发
