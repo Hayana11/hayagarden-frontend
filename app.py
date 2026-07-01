@@ -1318,6 +1318,12 @@ def _init_relay_presets_table():
         key TEXT,
         created_at DATETIME DEFAULT (datetime('now','+8 hours'))
     )''')
+    # 幂等补列：default_model / capabilities 可能是历史上手动 ALTER 加的
+    cols = {r[1] for r in conn.execute('PRAGMA table_info(relay_presets)').fetchall()}
+    if 'default_model' not in cols:
+        conn.execute("ALTER TABLE relay_presets ADD COLUMN default_model TEXT DEFAULT ''")
+    if 'capabilities' not in cols:
+        conn.execute("ALTER TABLE relay_presets ADD COLUMN capabilities TEXT DEFAULT ''")
     conn.commit()
     conn.close()
 
@@ -1332,9 +1338,26 @@ def get_relay_presets():
     except Exception:
         pass
     conn = get_db()
-    rows = conn.execute('SELECT id,name,url,key,default_model,created_at FROM relay_presets ORDER BY created_at').fetchall()
+    rows = conn.execute('SELECT id,name,url,key,default_model,capabilities,created_at FROM relay_presets ORDER BY created_at').fetchall()
     conn.close()
-    presets = [{'id': r['id'], 'name': r['name'], 'url': r['url'], 'active': r['url'] == active_url, 'default_model': r['default_model'] or ''} for r in rows]
+    from relay.capabilities import get_caps as _get_caps
+    presets = []
+    for r in rows:
+        caps_raw = (r['capabilities'] or '').strip()
+        if caps_raw:
+            try:
+                caps = json.loads(caps_raw)
+            except Exception:
+                caps = _get_caps(r['url'])
+        else:
+            # 未手动设置过 → 按 URL 自动检测，作为展示用默认值（不写库）
+            caps = _get_caps(r['url'])
+        presets.append({
+            'id': r['id'], 'name': r['name'], 'url': r['url'],
+            'active': r['url'] == active_url,
+            'default_model': r['default_model'] or '',
+            'capabilities': caps,
+        })
     return jsonify({'ok': True, 'presets': presets, 'active_url': active_url})
 
 @app.route('/api/config/relay-presets', methods=['POST'])
@@ -1346,8 +1369,20 @@ def add_relay_preset():
     key = (data.get('key') or '').strip()
     if not name or not url:
         return jsonify({'error': 'name and url required'}), 400
+    caps_in = data.get('capabilities')
+    if isinstance(caps_in, dict):
+        caps_json = json.dumps({
+            'thinking': bool(caps_in.get('thinking', True)),
+            'cache': bool(caps_in.get('cache', True)),
+            'tools': bool(caps_in.get('tools', True)),
+        })
+    else:
+        caps_json = ''  # 未提供 → 前端展示时按 URL 自动检测
     conn = get_db()
-    cur = conn.execute('INSERT INTO relay_presets (name, url, key, default_model) VALUES (?,?,?,?)', (name, url, key, (data.get('default_model') or '').strip()))
+    cur = conn.execute(
+        'INSERT INTO relay_presets (name, url, key, default_model, capabilities) VALUES (?,?,?,?,?)',
+        (name, url, key, (data.get('default_model') or '').strip(), caps_json)
+    )
     conn.commit()
     preset_id = cur.lastrowid
     conn.close()

@@ -121,6 +121,14 @@ body{background:linear-gradient(160deg,var(--bg1) 0%,var(--bg2) 100%);background
 .preset-active{font-size:10px;color:var(--primary);background:var(--primary-bg);padding:2px 8px;border-radius:8px;flex-shrink:0;white-space:nowrap;}
 .preset-del{background:none;border:none;color:var(--hint);font-size:15px;cursor:pointer;padding:4px 3px;display:flex;flex-shrink:0;transition:color .15s;}
 .preset-del:hover{color:#c07070;}
+.preset-caps{display:flex;gap:6px;margin-top:4px;flex-wrap:wrap;}
+.cap-tag{font-size:9px;padding:1px 6px;border-radius:6px;white-space:nowrap;}
+.cap-tag.on{color:var(--green);background:var(--green-bg);}
+.cap-tag.off{color:var(--hint);background:var(--tag-off);text-decoration:line-through;opacity:.65;}
+.cap-toggles{display:flex;gap:8px;margin-bottom:10px;}
+.cap-toggle{flex:1;display:flex;align-items:center;justify-content:center;gap:5px;font-size:11px;padding:8px 4px;border-radius:10px;border:1px solid var(--tag-off-b);background:rgba(255,255,255,.5);cursor:pointer;transition:all .15s;color:var(--muted);user-select:none;}
+.cap-toggle.on{border-color:var(--green);background:var(--green-bg);color:var(--green);}
+.cap-toggle input{display:none;}
 .relay-status{font-size:11px;color:var(--green);margin-top:6px;min-height:16px;}
 .relay-status.err{color:#c07070;}
 </style>
@@ -276,6 +284,17 @@ body{background:linear-gradient(160deg,var(--bg1) 0%,var(--bg2) 100%);background
     <input id="relay-url-inp" class="url" placeholder="https://api.example.com/v1/messages" autocomplete="off">
     <input id="relay-key-inp" type="password" placeholder="API Key（可留空，保持当前 Key）">
     <input id="relay-model-inp" placeholder="默认模型（可留空，如 [Kiro] claude-opus-4-6-thinking [不补]）" style="font-size:11px">
+    <div class="cap-toggles">
+      <label class="cap-toggle on" id="cap-toggle-thinking" onclick="toggleCap(event,'thinking')">
+        <input type="checkbox" id="cap-thinking" checked> Thinking
+      </label>
+      <label class="cap-toggle on" id="cap-toggle-cache" onclick="toggleCap(event,'cache')">
+        <input type="checkbox" id="cap-cache" checked> Cache
+      </label>
+      <label class="cap-toggle on" id="cap-toggle-tools" onclick="toggleCap(event,'tools')">
+        <input type="checkbox" id="cap-tools" checked> Tools
+      </label>
+    </div>
     <div class="mb-row">
       <button class="mb-cancel" onclick="closeRelayAdd()">取消</button>
       <button class="mb-send" onclick="submitRelayAdd()">保存</button>
@@ -396,11 +415,20 @@ async function loadRelayPresets() {
         ? '<span class="preset-active">使用中</span>'
         : '<button class="mi-switch" onclick="activatePreset(' + p.id + ')">切换</button>';
       var modelHint = p.default_model ? '<div class="preset-url" style="color:#7c6a8a;opacity:.7">⚡ ' + escH(p.default_model.slice(0,30)) + '</div>' : '';
+      var caps = p.capabilities || {};
+      var capsHint = '<div class="preset-caps">'
+        + ['thinking','cache','tools'].map(function(k){
+            var on = !!caps[k];
+            var label = k === 'thinking' ? 'Thinking' : (k === 'cache' ? 'Cache' : 'Tools');
+            return '<span class="cap-tag ' + (on ? 'on' : 'off') + '">' + (on ? '✓' : '✗') + ' ' + label + '</span>';
+          }).join('')
+        + '</div>';
       return '<div class="preset-item">'
         + '<div class="preset-info">'
         + '<div class="preset-name">' + escH(p.name) + '</div>'
         + '<div class="preset-url">' + escH(p.url) + '</div>'
         + modelHint
+        + capsHint
         + '</div>'
         + actionEl
         + '<button class="preset-del" onclick="deletePreset(' + p.id + ')" title="删除"><i class="ti ti-trash"></i></button>'
@@ -417,9 +445,20 @@ function openRelayAdd() {
   document.getElementById('relay-url-inp').value = '';
   document.getElementById('relay-key-inp').value = '';
   document.getElementById('relay-model-inp').value = '';
+  ['thinking','cache','tools'].forEach(function(k){
+    document.getElementById('cap-'+k).checked = true;
+    document.getElementById('cap-toggle-'+k).classList.add('on');
+  });
   setTimeout(function(){ document.getElementById('relay-name-inp').focus(); }, 100);
 }
 function closeRelayAdd() { document.getElementById('relay-add-mo').classList.remove('show'); }
+
+function toggleCap(ev, key) {
+  ev.preventDefault();
+  var cb = document.getElementById('cap-' + key);
+  cb.checked = !cb.checked;
+  document.getElementById('cap-toggle-' + key).classList.toggle('on', cb.checked);
+}
 
 async function submitRelayAdd() {
   var name = document.getElementById('relay-name-inp').value.trim();
@@ -427,9 +466,14 @@ async function submitRelayAdd() {
   var key = document.getElementById('relay-key-inp').value.trim();
   if (!name || !url) { toast('请填写名称和地址'); return; }
   var model = document.getElementById('relay-model-inp').value.trim();
+  var caps = {
+    thinking: document.getElementById('cap-thinking').checked,
+    cache: document.getElementById('cap-cache').checked,
+    tools: document.getElementById('cap-tools').checked,
+  };
   var r = await fetch('/api/config/relay-presets', {
     method: 'POST', headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({name: name, url: url, key: key, default_model: model})
+    body: JSON.stringify({name: name, url: url, key: key, default_model: model, capabilities: caps})
   });
   var d = await r.json();
   if (d.ok) { closeRelayAdd(); toast('已添加'); loadRelayPresets(); }
