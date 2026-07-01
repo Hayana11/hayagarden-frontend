@@ -19,6 +19,63 @@ def get_db():
     conn.row_factory = sqlite3.Row
     return conn
 
+
+# ── Artifact（费佳生成的 HTML/Markdown/Word 产物）────────────────
+@app.route('/api/artifacts/<int:aid>', methods=['GET'])
+def artifact_meta(aid):
+    import artifact_store
+    meta = artifact_store.get(aid)
+    if not meta:
+        return jsonify({'error': 'not found'}), 404
+    return jsonify({
+        'id': meta['id'], 'type': meta['type'], 'title': meta['title'],
+        'size': meta['size'], 'created_at': meta['created_at'],
+    })
+
+@app.route('/api/artifacts/<int:aid>/preview', methods=['GET'])
+def artifact_preview(aid):
+    import artifact_store
+    from flask import Response
+    meta, content = artifact_store.read_content(aid)
+    if not meta or content is None:
+        return jsonify({'error': 'not found'}), 404
+    if meta['type'] == 'html':
+        return Response(content, mimetype='text/html')
+    if meta['type'] == 'markdown':
+        import markdown as _md
+        html_body = _md.markdown(content.decode('utf-8'), extensions=['fenced_code', 'tables'])
+        page = (
+            '<!DOCTYPE html><html><head><meta charset="utf-8">'
+            '<meta name="viewport" content="width=device-width,initial-scale=1">'
+            '<title>' + meta['title'].replace('<', '').replace('>', '') + '</title>'
+            '<style>body{font-family:-apple-system,"PingFang SC",sans-serif;max-width:720px;'
+            'margin:40px auto;padding:0 20px;line-height:1.7;color:#2a2020}'
+            'h1,h2,h3{color:#5a4a6a}pre{background:#f5f0e8;padding:12px;border-radius:8px;overflow-x:auto}'
+            'code{background:#f5f0e8;padding:1px 5px;border-radius:4px}'
+            'table{border-collapse:collapse}td,th{border:1px solid #ddd;padding:6px 10px}</style>'
+            '</head><body>' + html_body + '</body></html>'
+        )
+        return Response(page, mimetype='text/html')
+    return jsonify({'error': 'docx 不支持在线预览，直接下载查看',
+                     'download_url': '/api/artifacts/%d/download' % aid}), 400
+
+@app.route('/api/artifacts/<int:aid>/download', methods=['GET'])
+def artifact_download(aid):
+    import artifact_store
+    import urllib.parse as _up
+    from flask import Response
+    meta, content = artifact_store.read_content(aid)
+    if not meta or content is None:
+        return jsonify({'error': 'not found'}), 404
+    ext = artifact_store.EXT_BY_TYPE[meta['type']]
+    safe_title = re.sub(r'[^\w\u4e00-\u9fff-]', '_', meta['title'])[:60] or 'artifact'
+    fname = safe_title + '.' + ext
+    mime = artifact_store.MIME_BY_TYPE[meta['type']]
+    resp = Response(content, mimetype=mime)
+    resp.headers['Content-Disposition'] = "attachment; filename*=UTF-8''" + _up.quote(fname)
+    return resp
+
+
 @app.route('/')
 def index():
     from flask import redirect

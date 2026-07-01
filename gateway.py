@@ -549,6 +549,30 @@ TOOLS = [
             'id': {'type': 'integer', 'description': 'trigger id，不传则取消全部'},
         }},
     },
+    {
+        'name': 'create_html',
+        'description': '生成一个独立的 HTML 网页给哈娅看（网页小样/demo/可视化，不是改前端网站本体）。传完整 HTML，会存成一份可以直接打开预览的产物，单独一张卡片展示在聊天里。',
+        'input_schema': {'type': 'object', 'properties': {
+            'title':   {'type': 'string', 'description': '给这个网页起个标题'},
+            'content': {'type': 'string', 'description': '完整的 HTML 内容'},
+        }, 'required': ['title', 'content']},
+    },
+    {
+        'name': 'create_markdown',
+        'description': '生成一份独立的 Markdown 文档给哈娅看/下载。',
+        'input_schema': {'type': 'object', 'properties': {
+            'title':   {'type': 'string', 'description': '文档标题'},
+            'content': {'type': 'string', 'description': 'Markdown 格式的内容'},
+        }, 'required': ['title', 'content']},
+    },
+    {
+        'name': 'create_document',
+        'description': '生成一份 Word 文档（.docx）给哈娅下载。用 Markdown 语法写内容（# 标题、## 小标题、- 列表这些），会自动转换成 Word 格式，不用管 docx 本身的细节。',
+        'input_schema': {'type': 'object', 'properties': {
+            'title':   {'type': 'string', 'description': '文档标题'},
+            'content': {'type': 'string', 'description': 'Markdown 格式的内容，会转换成 Word 文档'},
+        }, 'required': ['title', 'content']},
+    },
 ]
 
 LIGHT_DAEMON_URL = 'http://127.0.0.1:5052'
@@ -886,6 +910,18 @@ def run_tool(name, args, caller='fyodor_cc'):
                 return '\n'.join(lines)
             except Exception as e:
                 return f'搜索失败: {e}'
+        if name in ('create_html', 'create_markdown', 'create_document'):
+            import artifact_store as _artifact_store
+            atype = {'create_html': 'html', 'create_markdown': 'markdown', 'create_document': 'docx'}[name]
+            title = (args.get('title') or '未命名').strip()
+            content = args.get('content') or ''
+            if not content.strip():
+                return '错误：content 不能为空'
+            try:
+                meta = _artifact_store.save(atype, title, content)
+                return json.dumps({'artifact': meta}, ensure_ascii=False)
+            except Exception as e:
+                return f'生成失败: {e}'
         if name == 'read_frontend_file':
             import os as _os
             p = args.get('path', '')
@@ -1542,6 +1578,13 @@ def chat_stream():
                             added, removed = _diff_line_counts(old_content, new_content)
                             if added or removed:
                                 tc_item['diff'] = {'file': file_path, 'added': added, 'removed': removed}
+                        if tname in ('create_html', 'create_markdown', 'create_document') and tc_item['success']:
+                            try:
+                                parsed = json.loads(result_str)
+                                if isinstance(parsed, dict) and 'artifact' in parsed:
+                                    tc_item['artifact'] = parsed['artifact']
+                            except Exception:
+                                pass
                         tool_calls_acc.append(tc_item)
                         yield 'data: ' + json.dumps({'t': 'tool_call', 'd': tc_item}) + SSE_END
                         results.append({'type': 'tool_result', 'tool_use_id': tu.get('id'),

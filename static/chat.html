@@ -138,6 +138,14 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:14px;heigh
 .tpill-toggle.open>i.ti-chevron-right{transform:rotate(90deg);}
 .tpill-toggle>i:not(.ti-chevron-right){font-size:15px;color:rgba(212,165,116,.85);flex-shrink:0;}
 .tpill-kw{color:rgba(212,165,116,.95);font-weight:500;}
+/* Artifact card（费佳生成的 HTML/Markdown/Word 产物） */
+.artifact-card{background:var(--card);border:1px solid rgba(212,165,116,.28);border-radius:12px;margin:0 -2px 8px;padding:11px 12px;display:flex;align-items:center;gap:10px;}
+.artifact-icon{width:34px;height:34px;border-radius:9px;background:rgba(212,165,116,.14);color:rgba(212,165,116,.95);display:flex;align-items:center;justify-content:center;font-size:16px;flex-shrink:0;}
+.artifact-info{flex:1;min-width:0;}
+.artifact-title{font-size:13px;font-weight:600;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.artifact-meta{font-size:10.5px;color:var(--muted);margin-top:1px;}
+.artifact-action{flex-shrink:0;font-size:11.5px;padding:6px 12px;border-radius:9px;background:rgba(212,165,116,.14);color:rgba(212,165,116,.95);border:none;cursor:pointer;font-family:inherit;text-decoration:none;display:inline-block;}
+.artifact-action:hover{background:rgba(212,165,116,.24);}
 
 /* Tool Session card（一次回复里所有工具调用的汇总卡片） */
 .tsess{background:rgba(212,165,116,.05);border-left:2px solid rgba(212,165,116,.35);border-radius:0 8px 8px 0;margin:0 0 8px;overflow:hidden;}
@@ -873,12 +881,42 @@ function buildToolPillHtml(tc){
     '<div class="tool-card-body">'+argsHtml+resultHtml+'</div>'+
   '</div>';
 }
+var ARTIFACT_TYPE_LABEL = {html:'HTML 页面', markdown:'Markdown 文档', docx:'Word 文档'};
+var ARTIFACT_TYPE_ICON = {html:'\ud83c\udf10', markdown:'\ud83d\udcdd', docx:'\ud83d\udcc4'};
+function fmtArtifactSize(bytes){
+  bytes = bytes || 0;
+  if(bytes < 1024) return bytes + ' B';
+  if(bytes < 1024*1024) return (bytes/1024).toFixed(1) + ' KB';
+  return (bytes/1024/1024).toFixed(1) + ' MB';
+}
+function buildArtifactCardHtml(tc){
+  var a = tc.artifact || {};
+  var typeLabel = ARTIFACT_TYPE_LABEL[a.type] || a.type || '文件';
+  var icon = ARTIFACT_TYPE_ICON[a.type] || '\ud83d\udcc4';
+  var isPreviewable = (a.type === 'html' || a.type === 'markdown');
+  var actionHtml = isPreviewable
+    ? '<a class="artifact-action" href="/api/artifacts/'+a.id+'/preview" target="_blank" rel="noopener">打开</a>'
+    : '<a class="artifact-action" href="/api/artifacts/'+a.id+'/download">下载</a>';
+  return '<div class="artifact-card">'+
+    '<div class="artifact-icon">'+icon+'</div>'+
+    '<div class="artifact-info">'+
+      '<div class="artifact-title">'+escHtml(a.title||'未命名')+'</div>'+
+      '<div class="artifact-meta">'+escHtml(typeLabel)+' &middot; '+fmtArtifactSize(a.size)+'</div>'+
+    '</div>'+
+    actionHtml+
+  '</div>';
+}
 function buildToolCallsHtml(tcs, opts){
   opts = opts || {};
-  var codeTcs = [], simpleTcs = [];
-  tcs.forEach(function(tc){ (CODE_TOOLS[tc.name] ? codeTcs : simpleTcs).push(tc); });
+  var codeTcs = [], simpleTcs = [], artifactTcs = [];
+  tcs.forEach(function(tc){
+    if(tc.artifact) artifactTcs.push(tc);
+    else if(CODE_TOOLS[tc.name]) codeTcs.push(tc);
+    else simpleTcs.push(tc);
+  });
   var html = simpleTcs.map(buildToolPillHtml).join('');
   if(codeTcs.length) html += buildToolSessionHtml(codeTcs, opts);
+  html += artifactTcs.map(buildArtifactCardHtml).join('');
   return html;
 }
 function toggleToolCard(btn) {
