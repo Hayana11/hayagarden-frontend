@@ -557,6 +557,46 @@ TOOLS = [
 
 LIGHT_DAEMON_URL = 'http://127.0.0.1:5052'
 
+# 写文件类工具的路径参数名：None 表示固定路径（工具本身只操作一个文件）
+_WRITE_TOOL_PATH_ARG = {
+    'write_frontend_file': 'path',
+    'str_replace_frontend_file': 'path',
+    'edit_bot_config': None,
+}
+_WRITE_TOOL_FIXED_PATH = {
+    'edit_bot_config': '/opt/frontend/bot_config.py',
+}
+
+def _write_tool_file_path(tool_name, args):
+    """写文件类工具这次调用实际改的是哪个文件，用于算前后 diff。不是写文件类工具返回 None。"""
+    if tool_name not in _WRITE_TOOL_PATH_ARG:
+        return None
+    arg_name = _WRITE_TOOL_PATH_ARG[tool_name]
+    if arg_name is None:
+        return _WRITE_TOOL_FIXED_PATH.get(tool_name)
+    return args.get(arg_name) or None
+
+def _read_file_safe(path):
+    try:
+        with open(path, 'r', encoding='utf-8') as fh:
+            return fh.read()
+    except Exception:
+        return ''
+
+def _diff_line_counts(old_text, new_text):
+    """粗略的增删行数统计，给 Tool Session 卡片里"文件名 +N -M"这种标签用。"""
+    import difflib
+    diff = difflib.unified_diff(old_text.splitlines(), new_text.splitlines(), lineterm='')
+    added = removed = 0
+    for line in diff:
+        if line.startswith('+++') or line.startswith('---'):
+            continue
+        if line.startswith('+'):
+            added += 1
+        elif line.startswith('-'):
+            removed += 1
+    return added, removed
+
 def run_tool(name, args, caller='fyodor_cc'):
     try:
         if name == 'get_activity_summary':
@@ -1492,13 +1532,22 @@ def chat_stream():
                     messages.append({'role': 'assistant', 'content': blocks})
                     results = []
                     for tu in tool_uses:
-                        result_str = run_tool(tu.get('name', ''), tu.get('input') or {})
+                        tname = tu.get('name', '')
+                        targs = tu.get('input') or {}
+                        file_path = _write_tool_file_path(tname, targs)
+                        old_content = _read_file_safe(file_path) if file_path else None
+                        result_str = run_tool(tname, targs)
                         tc_item = {
-                            'name': tu.get('name', ''),
-                            'args': tu.get('input') or {},
+                            'name': tname,
+                            'args': targs,
                             'result': result_str,
                             'success': not result_str.startswith('工具执行失败'),
                         }
+                        if file_path and old_content is not None and tc_item['success']:
+                            new_content = _read_file_safe(file_path)
+                            added, removed = _diff_line_counts(old_content, new_content)
+                            if added or removed:
+                                tc_item['diff'] = {'file': file_path, 'added': added, 'removed': removed}
                         tool_calls_acc.append(tc_item)
                         yield 'data: ' + json.dumps({'t': 'tool_call', 'd': tc_item}) + SSE_END
                         results.append({'type': 'tool_result', 'tool_use_id': tu.get('id'),

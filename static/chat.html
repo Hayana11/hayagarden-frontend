@@ -132,6 +132,35 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:14px;heigh
 .tool-card-body{display:none;padding:2px 10px 9px;font-size:12px;color:rgba(42,32,32,.52);line-height:1.65;word-break:break-all;white-space:pre-wrap;}
 .tool-card-body.open{display:block;}
 
+/* Tool Session card（一次回复里所有工具调用的汇总卡片） */
+.tsess{background:var(--card);border:1px solid rgba(212,165,116,.22);border-radius:14px;margin:0 -2px 8px;overflow:hidden;}
+html[data-theme=dark] .tsess{background:rgba(255,255,255,.04);border-color:rgba(212,165,116,.18);}
+.tsess-hd{display:flex;align-items:center;gap:10px;padding:11px 12px;cursor:pointer;}
+.tsess-check{width:26px;height:26px;border-radius:50%;display:flex;align-items:center;justify-content:center;flex-shrink:0;background:rgba(120,170,120,.15);color:#5a9a5a;font-size:14px;}
+.tsess.running .tsess-check{background:rgba(212,165,116,.15);color:rgba(212,165,116,.9);}
+.tsess.failed .tsess-check{background:rgba(200,100,90,.15);color:#c0645a;}
+.tsess-title{font-size:13px;font-weight:600;color:var(--text);flex:1;}
+.tsess-sub{font-size:11px;color:var(--muted);margin-top:1px;}
+.tsess-expand{color:var(--muted);font-size:15px;transition:transform .18s;flex-shrink:0;}
+.tsess.open .tsess-expand{transform:rotate(180deg);}
+.tsess-term-wrap{display:none;}
+.tsess.open .tsess-term-wrap{display:block;}
+.tsess-term-hd{display:flex;align-items:center;justify-content:space-between;padding:6px 12px;font-size:11px;color:var(--muted);}
+.tsess-term{background:#1c1a17;border-radius:10px;margin:0 10px 8px;padding:9px 11px;font-family:ui-monospace,'SF Mono',Menlo,monospace;font-size:11.5px;line-height:1.75;max-height:260px;overflow-y:auto;}
+.tsess-term-line{color:rgba(232,226,220,.82);white-space:pre-wrap;word-break:break-all;}
+.tsess-term-line.cmd{color:rgba(212,165,116,.85);}
+.tsess-term-line.ok::before{content:'✓ ';color:#6fae6f;}
+.tsess-term-line.fail::before{content:'✗ ';color:#c0645a;}
+.tsess-files{display:flex;flex-wrap:wrap;gap:6px;padding:2px 10px 9px;}
+.tsess-file-chip{display:inline-flex;align-items:center;gap:4px;background:rgba(212,165,116,.08);border-radius:8px;padding:3px 8px;font-size:11px;color:var(--muted);}
+.tsess-file-chip .fp{color:#6fae6f;}
+.tsess-file-chip .fm{color:#c0645a;}
+.tsess-bar-wrap{padding:0 12px 10px;display:flex;align-items:center;gap:8px;}
+.tsess-bar{flex:1;height:4px;border-radius:2px;background:rgba(212,165,116,.12);overflow:hidden;}
+.tsess-bar-fill{height:100%;background:#6fae6f;border-radius:2px;transition:width .25s;}
+.tsess.running .tsess-bar-fill{background:rgba(212,165,116,.7);}
+.tsess-bar-txt{font-size:10.5px;color:var(--muted);white-space:nowrap;}
+
 /* Empty / loading */
 .empty-tip{text-align:center;color:var(--muted);padding:60px 20px;font-size:13px;line-height:2.4;}
 
@@ -697,8 +726,94 @@ var TOOL_LABELS = {
   get_light_status:'查灯状态',save_memory:'存入记忆',search_memories:'搜索记忆',
   light_main_on:'开主灯',light_main_off:'关主灯',light_bedside_on:'开床头灯',
   light_bedside_off:'关床头灯',light_all_on:'全部开灯',light_all_off:'全部关灯',
-  light_bedside_warm:'暖灯模式'
+  light_bedside_warm:'暖灯模式',
+  read_backend_file:'读后端代码',read_frontend_file:'读前端文件',
+  write_frontend_file:'写前端文件',str_replace_frontend_file:'改前端文件',
+  check_page_render:'检查页面',read_bot_config:'读取配置',edit_bot_config:'改配置',
+  search_files:'搜索代码',read_board:'读留言板',post_to_board:'发留言板',
+  reply_to_board:'回复留言板',block_user:'拉黑开关',get_activity_summary:'查活动记录',
+  log_period_event:'记录经期',set_self_trigger:'设定提醒',cancel_self_trigger:'取消提醒',
+  get_wake_settings:'查唤醒设置',set_wake_settings:'改唤醒设置'
 };
+var TOOL_FILE_ARG = {
+  read_backend_file:'path', read_frontend_file:'path',
+  write_frontend_file:'path', str_replace_frontend_file:'path'
+};
+function toolTermLineHtml(tc){
+  var ok = tc.success !== false;
+  var cls = ok ? 'ok' : 'fail';
+  var pathArg = TOOL_FILE_ARG[tc.name];
+  var text;
+  if(pathArg && tc.args && tc.args[pathArg]){
+    text = tc.args[pathArg];
+  } else {
+    var label = TOOL_LABELS[tc.name] || tc.name;
+    var argStr = '';
+    if(tc.args && Object.keys(tc.args).length){
+      var kv = Object.keys(tc.args).map(function(k){
+        var v = tc.args[k]; var vs = (typeof v==='string') ? v : JSON.stringify(v);
+        return vs.length>40 ? vs.slice(0,40)+'…' : vs;
+      }).join(', ');
+      argStr = ' '+kv;
+    }
+    text = label + argStr;
+    cls += ' cmd';
+  }
+  return '<div class="tsess-term-line '+cls+'">'+escHtml(text)+'</div>';
+}
+function buildToolSessionHtml(tcs, opts){
+  opts = opts || {};
+  var running = !!opts.running;
+  var total = tcs.length;
+  var failedCount = tcs.filter(function(t){ return t.success===false; }).length;
+  var statusCls = running ? 'running' : (failedCount>0 ? 'failed' : '');
+  var openCls = opts.open ? ' open' : '';
+  var statusTxt = running ? '进行中' : (failedCount>0 ? (failedCount+' 个失败') : '完成');
+  var checkIcon = running ? '<i class="ti ti-loader-2"></i>' : (failedCount>0 ? '<i class="ti ti-x"></i>' : '<i class="ti ti-check"></i>');
+
+  var fileMap = {}, fileOrder = [];
+  tcs.forEach(function(tc){
+    if(tc.diff && tc.diff.file){
+      var short = tc.diff.file.split('/').pop();
+      if(!fileMap[short]) { fileMap[short] = {added:0, removed:0}; fileOrder.push(short); }
+      fileMap[short].added += tc.diff.added||0;
+      fileMap[short].removed += tc.diff.removed||0;
+    }
+  });
+
+  var termLines = tcs.map(toolTermLineHtml).join('');
+  var filesHtml = fileOrder.length ? (
+    '<div class="tsess-files">' + fileOrder.map(function(short){
+      var d = fileMap[short];
+      return '<span class="tsess-file-chip"><i class="ti ti-file-text"></i> '+escHtml(short)+
+        (d.added?' <span class="fp">+'+d.added+'</span>':'')+
+        (d.removed?' <span class="fm">-'+d.removed+'</span>':'')+
+        '</span>';
+    }).join('') + '</div>'
+  ) : '';
+
+  var pct = running ? Math.min(90, total*6) : 100;
+
+  return '<div class="tsess '+statusCls+openCls+'">' +
+    '<div class="tsess-hd" onclick="toggleToolSession(this)">' +
+      '<div class="tsess-check">'+checkIcon+'</div>' +
+      '<div style="flex:1"><div class="tsess-title">'+total+' 个操作 · '+statusTxt+'</div></div>' +
+      '<i class="ti ti-chevron-down tsess-expand"></i>' +
+    '</div>' +
+    '<div class="tsess-term-wrap">' +
+      '<div class="tsess-term-hd"><span>终端</span><span>'+statusTxt+'</span></div>' +
+      '<div class="tsess-term">'+termLines+'</div>' +
+      filesHtml +
+    '</div>' +
+    '<div class="tsess-bar-wrap">' +
+      '<div class="tsess-bar"><div class="tsess-bar-fill" style="width:'+pct+'%"></div></div>' +
+      '<div class="tsess-bar-txt">'+statusTxt+' · '+total+' 个操作</div>' +
+    '</div>' +
+  '</div>';
+}
+function toggleToolSession(hd){
+  hd.closest('.tsess').classList.toggle('open');
+}
 function toggleToolCard(btn) {
   btn.nextElementSibling.classList.toggle('open');
   btn.classList.toggle('open');
@@ -779,7 +894,7 @@ function buildHtml(list) {
     if(fy && m.tool_calls) {
       var tcs = [];
       try { tcs = JSON.parse(m.tool_calls); } catch(e) {}
-      tcs.forEach(function(tc) { innerHtml += buildToolCardHtml(tc); });
+      if(tcs.length) innerHtml += buildToolSessionHtml(tcs, {});
     }
     if(hasImg) innerHtml += '<img src="'+escHtml(m.image_url)+'" loading="lazy" onclick="openLb(\''+escHtml(m.image_url)+'\')">';
     // 过滤掉content里意外写入的工具调用JSON片段（如{"name":"user_time_v0","input":{}}）
@@ -1251,7 +1366,7 @@ async function streamReply(){
   var reader=resp.body.getReader(), decoder=new TextDecoder();
   var buf='', target='', shown=0, err=null;
   var live=null, liveThinkWrap=null, liveThinkBody=null, liveTools=null;
-  var thinkText='', cacheInfo=null;
+  var thinkText='', cacheInfo=null, liveToolCalls=[];
   var c=document.getElementById('msgs');
 
   function ensureLiveRow(){
@@ -1312,12 +1427,9 @@ async function streamReply(){
           ensureLiveRow();
           if(liveThinkWrap && !liveThinkWrap.classList.contains('done'))
             liveThinkWrap.classList.add('done');
-          var tc=ev.d;
-          var card=document.createElement('div'); card.className='live-tool-card';
-          var res=tc.result?String(tc.result).replace(/</g,'&lt;').slice(0,100):'…';
-          card.innerHTML='<div class="live-tool-name">⚙ '+escHtml(tc.name||'tool')+'</div>'+
-            '<div class="live-tool-result">'+res+'</div>';
-          liveTools.appendChild(card);
+          liveToolCalls.push(ev.d);
+          var wasOpen = liveTools.querySelector('.tsess.open') != null;
+          liveTools.innerHTML = buildToolSessionHtml(liveToolCalls, {running:true, open:wasOpen});
           var atB=c.scrollHeight-c.scrollTop-c.clientHeight<120;
           if(atB) c.scrollTop=c.scrollHeight;
         } else if(ev.t==='text'){
