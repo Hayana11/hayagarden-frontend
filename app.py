@@ -6,16 +6,13 @@ app = Flask(__name__, static_folder='static')
 DB_PATH = '/opt/frontend/memories.db'
 UPLOAD_DIR = '/opt/frontend/static/uploads'
 
-API_KEY = ''
 BOARD_TOKEN_FYODOR = ''
 for line in open('/opt/frontend/.env'):
     k, _, v = line.partition('=')
     k = k.strip(); v = v.strip()
-    if k == 'ANTHROPIC_API_KEY': API_KEY = v
-    elif k == 'BOARD_TOKEN_FYODOR': BOARD_TOKEN_FYODOR = v
-
-API_URL = 'https://api.treegpt.cc/v1/messages'
-MODEL = 'claude-opus-4-6'
+    if k == 'BOARD_TOKEN_FYODOR': BOARD_TOKEN_FYODOR = v
+# API_URL/API_KEY/MODEL 不再是这里的冻结常量：谁要发请求，
+# 就 new 一个 relay.manager.RelayManager()，永远拿实时值。
 
 def get_db():
     conn = sqlite3.connect(DB_PATH)
@@ -234,12 +231,11 @@ def chat_reply():
         persona = '你是费奥多尔，一个渊博冷静却深情的人。'
     now = datetime.datetime.utcnow()+datetime.timedelta(hours=8)
     system = f"{persona}\n\n当前时间：{now.strftime('%Y-%m-%d %H:%M')}"
-    resp = req.post(API_URL,
-        headers={'Content-Type':'application/json','x-api-key':API_KEY,'anthropic-version':'2023-06-01'},
-        json={'model':MODEL,'max_tokens':1024,'system':system,'messages':messages},
-        timeout=120)
-    result = resp.json()
-    text = ''.join(b.get('text','') for b in result.get('content',[]) if b.get('type')=='text')
+    from relay.manager import RelayManager
+    from chat.response_parser import extract_text
+    rm = RelayManager()
+    result = rm.call({'max_tokens':1024,'system':system,'messages':messages}, timeout=120)
+    text = extract_text(result)
     if not text:
         return jsonify({"error":"empty response"}),500
     conn = get_db()
@@ -327,12 +323,12 @@ def drift_check():
             now_dt = datetime.datetime.utcnow() + datetime.timedelta(hours=8)
             system = (persona + "\n\n当前时间：" + now_dt.strftime('%Y-%m-%d %H:%M') +
                       "\n\n哈娅给你写了一封漂流瓶。请以费奥多尔的口吻回复，简短有温度。")
-            resp = req.post(API_URL,
-                headers={'Content-Type':'application/json','x-api-key':API_KEY,'anthropic-version':'2023-06-01'},
-                json={'model':MODEL,'max_tokens':512,'system':system,
-                      'messages':[{'role':'user','content':b['content']}]},
-                timeout=60)
-            text = ''.join(x.get('text','') for x in resp.json().get('content',[]) if x.get('type')=='text')
+            from relay.manager import RelayManager
+            from chat.response_parser import extract_text
+            rm = RelayManager()
+            result = rm.call({'max_tokens':512,'system':system,
+                      'messages':[{'role':'user','content':b['content']}]}, timeout=60)
+            text = extract_text(result)
             conn.execute("UPDATE drift_bottles SET status='found', reply=? WHERE id=?", (text, b['id']))
             conn.commit()
             results.append({'id': b['id'], 'ok': True})
@@ -657,13 +653,9 @@ def config_set_model():
 @app.route('/api/config/key-status', methods=['GET'])
 def config_key_status():
     import datetime as _dt
-    key = ''
-    try:
-        for line in open('/opt/frontend/.env'):
-            if line.startswith('ANTHROPIC_API_KEY='):
-                key = line.split('=', 1)[1].strip()
-    except Exception:
-        pass
+    from relay.manager import RelayManager
+    rm = RelayManager()
+    key = rm.api_key
     masked = (key[:8] + '···' + key[-4:]) if len(key) > 12 else '***'
     today = (_dt.datetime.utcnow() + _dt.timedelta(hours=8)).strftime('%Y-%m-%d')
     conn = get_db()
@@ -672,29 +664,31 @@ def config_key_status():
         (today + ' 00:00:00', today + ' 23:59:59')
     ).fetchone()
     conn.close()
-    _api_url_src = 'treegpt.cc'
-    try:
-        for _ln in open('/opt/frontend/.env'):
-            if _ln.startswith('API_URL='):
-                _api_url_src = _ln.split('=',1)[1].strip() or _api_url_src
-    except Exception:
-        pass
+    # 实际生效的 relay（跟随 ACTIVE_RELAY，不是死读 .env）
     return jsonify({'masked_key': masked, 'today_msgs': row[0] if row else 0,
-                    'source': _api_url_src, 'raw_len': len(key)})
+                    'source': rm.api_url, 'raw_len': len(key)})
 
 @app.route('/api/config/key', methods=['POST'])
 def config_set_key():
-    import subprocess
     data = request.get_json()
     new_key = (data.get('key') or '').strip()
     if not new_key:
         return jsonify({'error': 'empty key'}), 400
     try:
-        env = open('/opt/frontend/.env').read()
-        env2 = re.sub(r'^ANTHROPIC_API_KEY=.*$',
-                      f'ANTHROPIC_API_KEY={new_key}', env, flags=re.MULTILINE)
-        open('/opt/frontend/.env', 'w').write(env2)
-        subprocess.Popen(['systemctl', 'restart', 'frontend-gw'])
+        active_relay_id = config_store.get('ACTIVE_RELAY', '')
+        if active_relay_id:
+            # 当前在用某个预设，改它的 key（改 .env 不会生效，relay.manager 优先读预设）
+            conn = get_db()
+            conn.execute('UPDATE relay_presets SET key=? WHERE id=?', (new_key, active_relay_id))
+            conn.commit()
+            conn.close()
+        else:
+            # 还没选过预设，走部署期默认值
+            env = open('/opt/frontend/.env').read()
+            env2 = re.sub(r'^ANTHROPIC_API_KEY=.*$',
+                          f'ANTHROPIC_API_KEY={new_key}', env, flags=re.MULTILINE)
+            open('/opt/frontend/.env', 'w').write(env2)
+        # 不需要重启：relay.manager 每次请求都重新读，立即生效
         return jsonify({'ok': True})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -702,48 +696,23 @@ def config_set_key():
 
 @app.route('/api/config/test-send', methods=['POST'])
 def config_test_send():
-    import urllib.request as _ur, urllib.error as _ue, json as _j
+    import urllib.error as _ue
     data = request.get_json()
     msg = (data.get('message') or '').strip()
     if not msg:
         return jsonify({'error': 'empty'}), 400
-    key = ''
     try:
-        for line in open('/opt/frontend/.env'):
-            if line.startswith('ANTHROPIC_API_KEY='):
-                key = line.split('=', 1)[1].strip()
-    except Exception:
-        pass
-    try:
-        gw = open('/opt/frontend/gateway.py').read()
-        import re as _re
-        m = _re.search(r"^MODEL\s*=\s*['\"]([^'\"]+)['\"]", gw, _re.MULTILINE)
-        model = m.group(1) if m else 'claude-opus-4-6'
-    except Exception:
-        model = 'claude-opus-4-6'
-    payload = _j.dumps({
-        'model': model, 'max_tokens': 512,
-        'messages': [{'role': 'user', 'content': msg}]
-    }).encode()
-    _api_url_ts = 'https://api.treegpt.cc/v1/messages'
-    try:
-        for _ln2 in open('/opt/frontend/.env'):
-            if _ln2.startswith('API_URL='):
-                _api_url_ts = _ln2.split('=',1)[1].strip() or _api_url_ts
-    except Exception:
-        pass
-    req = _ur.Request(
-        _api_url_ts, data=payload,
-        headers={'Content-Type': 'application/json',
-                 'x-api-key': key, 'anthropic-version': '2023-06-01'}
-    )
-    try:
-        with _ur.urlopen(req, timeout=60) as resp:
-            result = _j.loads(resp.read())
-        text = ''.join(b.get('text','') for b in result.get('content',[]) if b.get('type')=='text')
-        usage = result.get('usage',{})
-        tokens = usage.get('input_tokens',0) + usage.get('output_tokens',0)
-        return jsonify({'text': text, 'tokens': tokens, 'model': model})
+        from relay.manager import RelayManager
+        from chat.response_parser import extract_text
+        rm = RelayManager()
+        result = rm.call({
+            'max_tokens': 512,
+            'messages': [{'role': 'user', 'content': msg}],
+        }, timeout=60)
+        text = extract_text(result)
+        usage = result.get('usage', {})
+        tokens = usage.get('input_tokens', 0) + usage.get('output_tokens', 0)
+        return jsonify({'text': text, 'tokens': tokens, 'model': rm.model})
     except _ue.HTTPError as e:
         body = e.read().decode(errors='replace')
         return jsonify({'error': f'HTTP {e.code}: {body[:200]}'}), 502
@@ -1194,7 +1163,9 @@ def brain_diary_proxy():
 
 @app.route('/api/config/relay', methods=['POST'])
 def config_relay():
-    import subprocess as _sp
+    """直接指定一个不在预设列表里的 url/key（老接口，保留兼容）。
+    清空 ACTIVE_RELAY 让 relay.manager 回退到这里写的部署期默认值，
+    不然预设机制会覆盖掉这里改的东西，改了不生效。"""
     data = request.get_json() or {}
     new_url = (data.get('url') or '').strip()
     new_key = (data.get('key') or '').strip()
@@ -1202,7 +1173,6 @@ def config_relay():
         return jsonify({'error': 'url required'}), 400
     try:
         env = open('/opt/frontend/.env').read()
-        # ensure API_URL line exists; upsert it
         if 'API_URL=' in env:
             env = re.sub(r'^API_URL=.*$', f'API_URL={new_url}', env, flags=re.MULTILINE)
         else:
@@ -1213,7 +1183,7 @@ def config_relay():
             else:
                 env = env.rstrip() + f'\nANTHROPIC_API_KEY={new_key}\n'
         open('/opt/frontend/.env', 'w').write(env)
-        _sp.Popen(['systemctl', 'restart', 'frontend-gw'])
+        config_store.set('ACTIVE_RELAY', '')  # 回退到 .env 默认值，不然预设覆盖这次改动
         return jsonify({'ok': True})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -1221,15 +1191,9 @@ def config_relay():
 @app.route('/api/config/models', methods=['GET'])
 def config_models():
     import urllib.request as _ur, urllib.error as _ue, json as _j
-    api_url = ''; key = ''
-    try:
-        for line in open('/opt/frontend/.env'):
-            if line.startswith('API_URL='):
-                api_url = line.split('=',1)[1].strip()
-            elif line.startswith('ANTHROPIC_API_KEY='):
-                key = line.split('=',1)[1].strip()
-    except Exception:
-        pass
+    from relay.manager import RelayManager
+    rm = RelayManager()
+    api_url, key = rm.api_url, rm.api_key
     if not api_url:
         return jsonify({'error': 'API_URL not set'}), 400
     # Derive models URL: replace /messages at end with /models, or replace path
@@ -2469,21 +2433,10 @@ def brain_emotion_state():
 
 @app.route('/api/think/summarize', methods=['POST'])
 def summarize_think():
-    import urllib.request as _ur, json as _j
     data = request.get_json() or {}
     thinking = (data.get('thinking') or '').strip()
     if not thinking:
         return jsonify({'summary': ''})
-    key = ''
-    api_url = 'https://api2.68886868.xyz/v1/messages'
-    model = 'claude-opus-4-6'
-    try:
-        for ln in open('/opt/frontend/.env'):
-            ln = ln.strip()
-            if ln.startswith('ANTHROPIC_API_KEY='): key = ln.split('=',1)[1]
-            elif ln.startswith('API_URL='): api_url = ln.split('=',1)[1] or api_url
-            elif ln.startswith('MODEL='): model = ln.split('=',1)[1] or model
-    except Exception: pass
     _pp = [
         "以下是一段内心独白，用一到两句中文，为这段思考做一个标题式的总结，",
         "捕捉这段思考里最浓烈的情感状态。\n",
@@ -2495,19 +2448,16 @@ def summarize_think():
         "用陈述语气或动词短语，不加引号，句号结尾，不超过20字。\n\n",
     ]
     prompt = "".join(_pp) + "内心独白：\n" + thinking[:2000]
-    payload = _j.dumps({
-        'model': model,
-        'max_tokens': 2100,
-        'thinking': {'type': 'enabled', 'budget_tokens': 2000},
-        'messages': [{'role': 'user', 'content': prompt}]
-    }).encode()
     try:
-        req = _ur.Request(api_url, data=payload, headers={
-            'Content-Type': 'application/json', 'x-api-key': key,
-            'anthropic-version': '2023-06-01'})
-        with _ur.urlopen(req, timeout=25) as resp:
-            rd = _j.loads(resp.read())
-        summary = ''.join(b.get('text','') for b in rd.get('content',[]) if b.get('type')=='text').strip()
+        from relay.manager import RelayManager
+        from chat.response_parser import extract_text
+        rm = RelayManager()
+        rd = rm.call({
+            'max_tokens': 2100,
+            'thinking': {'type': 'enabled', 'budget_tokens': 2000},
+            'messages': [{'role': 'user', 'content': prompt}],
+        }, timeout=25)
+        summary = extract_text(rd)
         return jsonify({'summary': summary or ''})
     except Exception as e:
         return jsonify({'summary': '', 'error': str(e)})
@@ -2632,32 +2582,24 @@ def ws_status():
 
 @app.route('/api/workspace/chat', methods=['POST'])
 def ws_chat():
-    import urllib.request as _ur2, json as _j2, re as _re2
     data = request.get_json() or {}
     message = data.get('message','')
     history = data.get('history',[])
     cur_file = data.get('file','')
-    model = data.get('model', MODEL)
-    key = ''
-    api_url = API_URL
-    try:
-        for ln in open('/opt/frontend/.env'):
-            ln=ln.strip()
-            if ln.startswith('ANTHROPIC_API_KEY='): key=ln.split('=',1)[1]
-            if ln.startswith('API_URL='): api_url=ln.split('=',1)[1] or api_url
-    except Exception: pass
+    custom_model = (data.get('model') or '').strip()
     sys_prompt = '你是费奥多尔，现在在工作台帮哈娅管理VPS上的前端代码。工作目录：/opt/frontend。回复用中文。如果需要建议写入文件，在回复里用```write:/path/to/file\n新内容\n```格式包裹。'
     msgs = [m for m in history[-10:] if m.get('role') and m.get('content')]
     if not msgs or msgs[-1].get('role') != 'user':
         msgs.append({'role':'user','content':message})
-    payload = _j2.dumps({'model':model,'max_tokens':2000,
-        'system':sys_prompt,'messages':msgs}).encode()
     try:
-        req = _ur2.Request(api_url, data=payload, headers={
-            'Content-Type':'application/json','x-api-key':key,'anthropic-version':'2023-06-01'})
-        with _ur2.urlopen(req, timeout=60) as resp:
-            rd = _j2.loads(resp.read())
-        reply = ''.join(b.get('text','') for b in rd.get('content',[]) if b.get('type')=='text').strip()
+        from relay.manager import RelayManager
+        from chat.response_parser import extract_text
+        rm = RelayManager()
+        payload = {'max_tokens':2000, 'system':sys_prompt, 'messages':msgs}
+        if custom_model:
+            payload['model'] = custom_model
+        rd = rm.call(payload, timeout=60)
+        reply = extract_text(rd)
         return jsonify({'reply': reply})
     except Exception as e:
         return jsonify({'error': str(e), 'reply': '请求失败: '+str(e)})
