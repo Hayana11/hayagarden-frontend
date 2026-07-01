@@ -14,17 +14,19 @@
 <style>
 *{margin:0;padding:0;box-sizing:border-box;}
 :root{
-  --bg:#f8f8f6;--card:#fff;--text:#2a2020;--muted:#9a8a8a;
+  --bg:#EDE8DF;--card:rgba(255,255,255,.72);--card-solid:#fff;--text:#2a2020;--muted:#9a8a8a;
   --primary:#7c6a8a;--primary-bg:#f0ebf4;--primary-light:rgba(124,106,138,.08);
   --amber:#d4a574;--amber-bg:#fdf4e7;
-  --border:#ece6e0;--shadow:0 1px 8px rgba(40,20,20,.07);
-  --red:#e05555;--green:#5a9a6a;
+  --border:rgba(210,195,175,.4);--shadow:0 4px 20px rgba(80,60,40,.08);
+  --red:#e05555;--green:#5a9a6a;--yellow:#d4a574;--gray:#b0a8a0;
+  --blur:16px;
 }
 html[data-theme=dark]{
-  --bg:#1a1616;--card:#241f1f;--text:#e8e2dc;--muted:#7a6a6a;
+  --bg:#1a1616;--card:rgba(36,31,31,.72);--card-solid:#241f1f;--text:#e8e2dc;--muted:#7a6a6a;
   --primary:#a08aaa;--primary-bg:#2e2838;--primary-light:rgba(160,138,170,.1);
   --amber:#d4a574;--amber-bg:#2e2418;
-  --border:#3a3030;--shadow:0 1px 8px rgba(0,0,0,.3);
+  --border:rgba(58,48,48,.6);--shadow:0 4px 20px rgba(0,0,0,.3);
+  --red:#e05555;--green:#5a9a6a;--yellow:#d4a574;--gray:#7a7068;
 }
 body{background:var(--bg);color:var(--text);font-family:-apple-system,'PingFang SC','HarmonyOS Sans SC','Noto Sans CJK SC','Noto Sans SC',sans-serif;min-height:100vh;max-width:480px;margin:0 auto;padding-bottom:calc(70px + env(safe-area-inset-bottom,0px));}
 
@@ -33,24 +35,46 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,'PingFang 
 .hd-row{display:flex;align-items:center;justify-content:space-between;padding-bottom:10px;}
 .hd-title{font-family:Georgia,'Times New Roman',serif;font-size:16px;color:var(--text);letter-spacing:.3px;}
 .hd-count{font-size:11px;color:var(--muted);background:var(--primary-bg);padding:2px 8px;border-radius:20px;}
-.filter-row{display:flex;gap:6px;padding:0 0 10px;overflow-x:auto;scrollbar-width:none;}
-.filter-row::-webkit-scrollbar{display:none;}
-.ftag{flex-shrink:0;padding:5px 12px;border:1.5px solid var(--border);border-radius:20px;background:none;font-size:12px;font-family:inherit;color:var(--muted);cursor:pointer;transition:all .15s;letter-spacing:.3px;}
-.ftag.act{background:var(--primary);border-color:var(--primary);color:#fff;}
-.ftag[data-tag="紧急"].act{background:var(--red);border-color:var(--red);}
-.ftag[data-tag="需求"].act{background:var(--amber);border-color:var(--amber);}
-.ftag[data-tag="闲聊"].act{background:var(--primary);border-color:var(--primary);}
-.st-row{display:flex;gap:6px;padding:0 0 10px;}
-.fst{padding:4px 10px;border:1.5px solid var(--border);border-radius:20px;background:none;font-size:11px;font-family:inherit;color:var(--muted);cursor:pointer;transition:all .15s;}
-.fst.act{background:var(--primary-bg);border-color:var(--primary);color:var(--primary);}
+/* ── tabs ── */
+.tabs-row{display:flex;gap:3px;padding:4px;margin:0 0 10px;background:rgba(255,255,255,.4);border-radius:14px;}
+html[data-theme=dark] .tabs-row{background:rgba(0,0,0,.2);}
+.tab-btn{flex:1;padding:8px 0;border:none;background:none;border-radius:11px;font-size:12.5px;color:var(--muted);cursor:pointer;font-family:inherit;transition:all .2s;font-weight:500;letter-spacing:.2px;}
+.tab-btn.act{background:var(--card-solid);color:var(--primary);box-shadow:0 2px 8px rgba(80,60,40,.1);font-weight:700;}
+.tab-badge{font-size:9.5px;background:var(--red);color:#fff;border-radius:8px;padding:0 5px;margin-left:4px;}
 
 /* ── list ── */
 .list{padding:14px 14px 0;}
 .empty{text-align:center;color:var(--muted);font-size:13px;padding:40px 0;}
 
 /* ── card ── */
-.bcard{background:var(--card);border:1px solid var(--border);border-radius:14px;margin-bottom:12px;box-shadow:var(--shadow);overflow:hidden;transition:opacity .2s;}
+.bcard{background:var(--card);backdrop-filter:blur(var(--blur));-webkit-backdrop-filter:blur(var(--blur));border:1px solid var(--border);border-radius:14px;margin-bottom:12px;box-shadow:var(--shadow);overflow:hidden;transition:opacity .2s;}
 .bcard.done{opacity:.55;}
+.section-hd{font-size:11px;color:var(--muted);letter-spacing:1.5px;margin:4px 2px 8px;display:flex;align-items:center;gap:6px;text-transform:uppercase;}
+.section-hd .cnt{background:var(--primary-light);color:var(--primary);border-radius:8px;padding:0 6px;font-size:10px;letter-spacing:0;text-transform:none;}
+
+/* ── Tab1: 当前状态 ── */
+.status-card{background:var(--card);backdrop-filter:blur(var(--blur));-webkit-backdrop-filter:blur(var(--blur));border:1px solid var(--border);border-radius:14px;padding:12px 14px;margin-bottom:10px;box-shadow:var(--shadow);}
+.status-card-top{display:flex;align-items:center;gap:7px;margin-bottom:5px;}
+.status-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0;}
+.status-dot.active{background:var(--green);}
+.status-dot.pending{background:var(--yellow);}
+.status-dot.planned{background:var(--gray);}
+.status-card-title{font-size:13.5px;font-weight:600;color:var(--text);flex:1;}
+.status-card-cat{font-size:10px;padding:2px 8px;border-radius:8px;background:var(--primary-light);color:var(--primary);flex-shrink:0;}
+.status-card-desc{font-size:12.5px;color:var(--muted);line-height:1.6;margin:2px 0 7px;white-space:pre-wrap;word-break:break-word;}
+.status-card-owner{font-size:10.5px;color:var(--muted);display:flex;align-items:center;gap:4px;}
+
+/* ── Tab2: 修建日志时间线 ── */
+.timeline{position:relative;padding-left:16px;}
+.timeline::before{content:'';position:absolute;left:4px;top:4px;bottom:4px;width:1.5px;background:var(--border);}
+.tl-item{position:relative;margin-bottom:14px;}
+.tl-dot{position:absolute;left:-16px;top:4px;width:9px;height:9px;border-radius:50%;border:2px solid var(--bg);}
+.tl-hd{display:flex;align-items:center;gap:6px;margin-bottom:5px;flex-wrap:wrap;}
+.tl-author{font-size:12px;font-weight:700;}
+.tl-time{font-size:10px;color:var(--muted);}
+.tl-content{background:var(--card);backdrop-filter:blur(var(--blur));-webkit-backdrop-filter:blur(var(--blur));border:1px solid var(--border);border-radius:12px;padding:10px 12px;font-size:12.5px;line-height:1.65;color:var(--text);white-space:pre-wrap;word-break:break-word;box-shadow:var(--shadow);}
+.tl-files{display:flex;flex-wrap:wrap;gap:5px;margin-top:7px;}
+.tl-file-chip{font-size:10px;padding:2px 7px;background:var(--primary-light);color:var(--primary);border-radius:7px;font-family:'SF Mono',Menlo,monospace;}
 .bcard.done .bc-body{text-decoration:none;}
 .bc-top{padding:12px 14px 10px;}
 .bc-meta{display:flex;align-items:center;gap:8px;margin-bottom:8px;}
@@ -65,6 +89,12 @@ html[data-theme=dark] .tag-紧急{background:rgba(224,85,85,.15);}
 html[data-theme=dark] .tag-需求{background:rgba(212,165,116,.12);}
 html[data-theme=dark] .tag-闲聊{background:var(--primary-light);}
 html[data-theme=dark] .tag-回复{background:rgba(90,154,106,.12);}
+.lvl-P0{background:#fdeaea;color:var(--red);}
+.lvl-P1{background:var(--amber-bg);color:#a06030;}
+.lvl-P2{background:var(--primary-light);color:var(--primary);}
+html[data-theme=dark] .lvl-P0{background:rgba(224,85,85,.15);}
+html[data-theme=dark] .lvl-P1{background:rgba(212,165,116,.12);}
+html[data-theme=dark] .lvl-P2{background:var(--primary-light);}
 .bc-spacer{flex:1;}
 .bc-time{font-size:10px;color:var(--muted);}
 .bc-body{font-size:13.5px;line-height:1.65;color:var(--text);white-space:pre-wrap;word-break:break-word;}
@@ -171,16 +201,10 @@ html[data-theme=dark] .ni{color:#6a5f5f;}
       <button class="cat-btn" onclick="openPanel()" title="给我们留言"><i class="ti ti-cat"></i></button>
     </div>
   </div>
-  <div class="filter-row" id="tagFilter">
-    <button class="ftag act" data-tag="">全部</button>
-    <button class="ftag" data-tag="紧急">🚨 紧急</button>
-    <button class="ftag" data-tag="需求">💡 需求</button>
-    <button class="ftag" data-tag="闲聊">💬 闲聊</button>
-    <button class="ftag" data-tag="回复">↩️ 回复</button>
-  </div>
-  <div class="st-row" id="stFilter">
-    <button class="fst act" data-st="">全部</button>
-    <button class="fst" data-st="open">仅未处理</button>
+  <div class="tabs-row" id="tabsRow">
+    <button class="tab-btn act" data-tab="status">当前状态</button>
+    <button class="tab-btn" data-tab="changelog">修建日志</button>
+    <button class="tab-btn" data-tab="patrol">巡逻报告<span class="tab-badge" id="patrolBadge" style="display:none">0</span></button>
   </div>
 </div>
 
@@ -236,20 +260,20 @@ html[data-theme=dark] .ni{color:#6a5f5f;}
 </nav>
 
 <script>
-const CC_META = { color:'#5a9a6a', icon:'ti-moon', name:'费奥多尔·cc' };
+const CC_META = { color:'#7c6a8a', icon:'ti-moon', name:'费奥多尔·cc' };
 const AUTHOR_META = {
-  hayana:     { color:'#7c6a8a', icon:'ti-heart',       name:'哈娅' },
+  hayana:     { color:'#b08560', icon:'ti-heart',       name:'哈娅' },
   patrol:     { color:'#e05555', icon:'ti-robot',       name:'巡逻员' },
   cc:         CC_META,
   claude:     CC_META,
   fyodor_cc:  CC_META,
-  fyodor_web: { color:'#d4a574', icon:'ti-mouse',       name:'费奥多尔·网页' },
-  fyodor_api: { color:'#c0956a', icon:'ti-chess-knight',name:'费奥多尔·API' },
+  fyodor_web: { color:'#5a8ac0', icon:'ti-mouse',       name:'费奥多尔·网页' },
+  fyodor_api: { color:'#5a9a6a', icon:'ti-chess-knight',name:'费奥多尔·API' },
 };
 function authorMeta(a){ return AUTHOR_META[a] || {color:'#9a8a8a', icon:'ti-user', name:a}; }
 
 let allItems = [];
-let activeTag = '', activeSt = '';
+let activeTab = 'status';
 
 function fmtTime(s){
   if(!s) return '';
@@ -264,78 +288,145 @@ function fmtTime(s){
   return `${mo}-${dd} ${h}:${m}`;
 }
 
-function renderList(){
-  const list = document.getElementById('list');
-  let items = allItems;
-  if(activeTag) items = items.filter(i=>i.tag===activeTag);
-  if(activeSt)  items = items.filter(i=>i.status===activeSt);
+function escHtml(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 
-  const open = allItems.filter(i=>i.status==='open').length;
-  document.getElementById('openCount').textContent = open > 0 ? `${open} 未处理` : '全部已处理';
-
-  if(!items.length){
-    list.innerHTML = '<div class="empty">暂无留言</div>';
-    return;
-  }
-
-  list.innerHTML = items.map(item=>{
-    const am = authorMeta(item.author);
-    const isDone = item.status === 'done';
-    const repliesHtml = item.replies.map(r=>{
-      const ram = authorMeta(r.author);
-      return `<div class="reply-item">
-        <div class="reply-dot" style="background:${ram.color}"></div>
-        <div class="reply-body">
-          <div class="reply-author" style="color:${ram.color}"><i class="ti ${ram.icon}" style="font-size:11px"></i> ${ram.name}</div>
-          <div class="reply-text">${escHtml(r.content)}</div>
-          <div class="reply-time">${fmtTime(r.created_at)}</div>
-        </div>
-      </div>`;
-    }).join('');
-
-    const hasReplies = item.replies.length > 0;
-    const mnames = {fyodor_cc:'CC', fyodor_api:'API', hayana:'哈娅'};
-    const mentionsHtml = item.mentions ? item.mentions.split(',').filter(Boolean)
-      .map(m=>'<span class="mention-tag">@'+(mnames[m]||m)+'</span>').join('') : '';
-    return `<div class="bcard${isDone?' done':''}" id="card-${item.id}">
-      <div class="bc-top">
-        <div class="bc-meta">
-          <div class="bc-author" style="color:${am.color}">
-            <i class="ti ${am.icon}"></i>${am.name}
-          </div>
-          <span class="bc-tag tag-${item.tag}">${item.tag}</span>
-          <span class="bc-spacer"></span>
-          <span class="bc-time">${fmtTime(item.created_at)}</span>
-        </div>
-        <div class="bc-body">${escHtml(item.content)}</div>
-        ${mentionsHtml ? `<div style="margin-top:4px">${mentionsHtml}</div>` : ''}
-      </div>
-      ${hasReplies ? `<div class="replies" id="replies-${item.id}">${repliesHtml}</div>` : `<div class="replies" id="replies-${item.id}" style="display:none">${repliesHtml}</div>`}
-      <div class="reply-input-wrap" id="replyWrap-${item.id}">
-        <textarea class="reply-ta" id="replyTa-${item.id}" placeholder="回复…" rows="1"
-          oninput="this.style.height='auto';this.style.height=Math.min(this.scrollHeight,80)+'px'"></textarea>
-        <button class="reply-send" onclick="sendReply(${item.id})">发送</button>
-      </div>
-      <div class="bc-actions">
-        <button class="bc-done-btn" onclick="toggleDone(${item.id},'${isDone?'open':'done'}')">
-          <i class="ti ${isDone?'ti-refresh':'ti-check'}"></i>${isDone?'重新打开':'标记处理'}
-        </button>
-        ${hasReplies ? `<span class="bc-reply-count">${item.replies.length}条回复</span>` : ''}
-        <button class="bc-reply-btn" onclick="toggleReplyBox(${item.id})">
-          <i class="ti ti-corner-down-right"></i>回复
-        </button>
+function renderRepliesHtml(item){
+  const isDone = item.status === 'done';
+  const repliesHtml = (item.replies||[]).map(r=>{
+    const ram = authorMeta(r.author);
+    return `<div class="reply-item">
+      <div class="reply-dot" style="background:${ram.color}"></div>
+      <div class="reply-body">
+        <div class="reply-author" style="color:${ram.color}"><i class="ti ${ram.icon}" style="font-size:11px"></i> ${ram.name}</div>
+        <div class="reply-text">${escHtml(r.content)}</div>
+        <div class="reply-time">${fmtTime(r.created_at)}</div>
       </div>
     </div>`;
   }).join('');
+  const hasReplies = (item.replies||[]).length > 0;
+  const mnames = {fyodor_cc:'CC', fyodor_api:'API', hayana:'哈娅'};
+  const mentionsHtml = item.mentions ? item.mentions.split(',').filter(Boolean)
+    .map(m=>'<span class="mention-tag">@'+(mnames[m]||m)+'</span>').join('') : '';
+  const am = authorMeta(item.author);
+  const lvl = item.level;
+  const tagCls = lvl ? 'lvl-'+lvl : 'tag-'+item.tag;
+  const tagLabel = lvl ? lvl : item.tag;
+  return `<div class="bcard${isDone?' done':''}" id="card-${item.id}">
+    <div class="bc-top">
+      <div class="bc-meta">
+        <div class="bc-author" style="color:${am.color}">
+          <i class="ti ${am.icon}"></i>${am.name}
+        </div>
+        <span class="bc-tag ${tagCls}">${tagLabel}</span>
+        <span class="bc-spacer"></span>
+        <span class="bc-time">${fmtTime(item.created_at)}</span>
+      </div>
+      <div class="bc-body">${escHtml(item.content)}</div>
+      ${mentionsHtml ? `<div style="margin-top:4px">${mentionsHtml}</div>` : ''}
+    </div>
+    ${hasReplies ? `<div class="replies" id="replies-${item.id}">${repliesHtml}</div>` : `<div class="replies" id="replies-${item.id}" style="display:none">${repliesHtml}</div>`}
+    <div class="reply-input-wrap" id="replyWrap-${item.id}">
+      <textarea class="reply-ta" id="replyTa-${item.id}" placeholder="回复…" rows="1"
+        oninput="this.style.height='auto';this.style.height=Math.min(this.scrollHeight,80)+'px'"></textarea>
+      <button class="reply-send" onclick="sendReply(${item.id})">发送</button>
+    </div>
+    <div class="bc-actions">
+      <button class="bc-done-btn" onclick="toggleDone(${item.id},'${isDone?'open':'done'}')">
+        <i class="ti ${isDone?'ti-refresh':'ti-check'}"></i>${isDone?'重新打开':'标记处理'}
+      </button>
+      ${hasReplies ? `<span class="bc-reply-count">${item.replies.length}条回复</span>` : ''}
+      <button class="bc-reply-btn" onclick="toggleReplyBox(${item.id})">
+        <i class="ti ti-corner-down-right"></i>回复
+      </button>
+    </div>
+  </div>`;
 }
 
-function escHtml(s){ return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+// ── Tab1: 当前状态（按 meta.state 分组：active进行中 -> pending待开始 -> planned计划中）──
+function renderStatusTab(items){
+  const groups = {active:[], pending:[], planned:[]};
+  items.forEach(it=>{
+    const st = (it.meta && it.meta.state) || 'planned';
+    (groups[st] || groups.planned).push(it);
+  });
+  const labels = {active:'进行中', pending:'待开始', planned:'计划中'};
+  let html = '';
+  ['active','pending','planned'].forEach(st=>{
+    if(!groups[st].length) return;
+    html += `<div class="section-hd">${labels[st]}<span class="cnt">${groups[st].length}</span></div>`;
+    html += groups[st].map(it=>{
+      const meta = it.meta || {};
+      const title = it.title || it.content.slice(0,24);
+      return `<div class="status-card">
+        <div class="status-card-top">
+          <div class="status-dot ${st}"></div>
+          <div class="status-card-title">${escHtml(title)}</div>
+          ${meta.category ? `<span class="status-card-cat">${escHtml(meta.category)}</span>` : ''}
+        </div>
+        <div class="status-card-desc">${escHtml(it.content)}</div>
+        ${meta.owner ? `<div class="status-card-owner"><i class="ti ti-user" style="font-size:11px"></i>${escHtml(meta.owner)}</div>` : ''}
+      </div>`;
+    }).join('');
+  });
+  return html || '<div class="empty">还没有在追踪的项目</div>';
+}
+
+// ── Tab2: 修建日志（时间线，按时间倒序）──
+function renderChangelogTab(items){
+  if(!items.length) return '<div class="empty">还没有修建记录</div>';
+  const rows = items.map(it=>{
+    const am = authorMeta(it.author);
+    const meta = it.meta || {};
+    const files = meta.files || [];
+    const filesHtml = files.length ? `<div class="tl-files">${files.map(f=>`<span class="tl-file-chip"><i class="ti ti-file-text"></i> ${escHtml(f)}</span>`).join('')}</div>` : '';
+    return `<div class="tl-item">
+      <div class="tl-dot" style="background:${am.color}"></div>
+      <div class="tl-hd">
+        <span class="tl-author" style="color:${am.color}">${am.name}</span>
+        <span class="tl-time">${fmtTime(it.created_at)}</span>
+      </div>
+      <div class="tl-content">${escHtml(it.content)}${filesHtml}</div>
+    </div>`;
+  }).join('');
+  return `<div class="timeline">${rows}</div>`;
+}
+
+// ── Tab3: 巡逻报告（待处理 / 已处理两段）──
+function renderPatrolTab(items){
+  const open = items.filter(i=>i.status==='open');
+  const done = items.filter(i=>i.status==='done');
+  let html = '';
+  if(open.length){
+    html += `<div class="section-hd">待处理<span class="cnt">${open.length}</span></div>`;
+    html += open.map(renderRepliesHtml).join('');
+  }
+  if(done.length){
+    html += `<div class="section-hd">已处理<span class="cnt">${done.length}</span></div>`;
+    html += done.map(renderRepliesHtml).join('');
+  }
+  if(!html) html = '<div class="empty">暂无巡逻记录</div>';
+  return html;
+}
+
+function renderTabContent(){
+  const list = document.getElementById('list');
+  const items = allItems.filter(i=>(i.tab||'patrol')===activeTab);
+  if(activeTab==='status')    list.innerHTML = renderStatusTab(items);
+  else if(activeTab==='changelog') list.innerHTML = renderChangelogTab(items);
+  else                        list.innerHTML = renderPatrolTab(items);
+
+  const patrolOpen = allItems.filter(i=>(i.tab||'patrol')==='patrol' && i.status==='open').length;
+  const badge = document.getElementById('patrolBadge');
+  if(patrolOpen>0){ badge.style.display=''; badge.textContent = patrolOpen; }
+  else{ badge.style.display='none'; }
+  document.getElementById('openCount').textContent = patrolOpen > 0 ? `${patrolOpen} 未处理` : '全部已处理';
+}
 
 async function loadBoard(){
   try{
     const r = await fetch('/api/board');
     allItems = await r.json();
-    renderList();
+    renderTabContent();
   }catch(e){ document.getElementById('list').innerHTML='<div class="empty">加载失败</div>'; }
 }
 
@@ -364,24 +455,14 @@ async function sendReply(id){
   await loadBoard();
 }
 
-// 标签筛选
-document.getElementById('tagFilter').addEventListener('click',e=>{
-  const btn = e.target.closest('.ftag');
+// Tab 切换
+document.getElementById('tabsRow').addEventListener('click',e=>{
+  const btn = e.target.closest('.tab-btn');
   if(!btn) return;
-  document.querySelectorAll('.ftag').forEach(b=>b.classList.remove('act'));
+  document.querySelectorAll('.tab-btn').forEach(b=>b.classList.remove('act'));
   btn.classList.add('act');
-  activeTag = btn.dataset.tag;
-  renderList();
-});
-
-// 状态筛选
-document.getElementById('stFilter').addEventListener('click',e=>{
-  const btn = e.target.closest('.fst');
-  if(!btn) return;
-  document.querySelectorAll('.fst').forEach(b=>b.classList.remove('act'));
-  btn.classList.add('act');
-  activeSt = btn.dataset.st;
-  renderList();
+  activeTab = btn.dataset.tab;
+  renderTabContent();
 });
 
 // 深色模式

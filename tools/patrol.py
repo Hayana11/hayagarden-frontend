@@ -94,7 +94,7 @@ def run_patrol():
     if down_svcs:
         msg = f'[巡逻 {now}] 服务宕机：{", ".join(down_svcs)}'
         conn.execute(
-            "INSERT INTO board (author,tag,content,status) VALUES ('patrol','紧急',?,'open')",
+            "INSERT INTO board (author,tag,content,status,tab) VALUES ('patrol','紧急',?,'open','patrol')",
             (msg,)
         )
 
@@ -103,7 +103,7 @@ def run_patrol():
         critical = '\n'.join(l for l in analysis.splitlines() if '❌' in l)
         msg = f'[巡逻发现严重问题 {now}]\n{critical}'
         conn.execute(
-            "INSERT INTO board (author,tag,content,status) VALUES ('patrol','紧急',?,'open')",
+            "INSERT INTO board (author,tag,content,status,tab) VALUES ('patrol','紧急',?,'open','patrol')",
             (msg,)
         )
 
@@ -111,7 +111,7 @@ def run_patrol():
     elif '⚠️' in analysis:
         warn = '\n'.join(l for l in analysis.splitlines() if '⚠️' in l)
         conn.execute(
-            "INSERT INTO board (author,tag,content,status) VALUES ('patrol','需求',?,'open')",
+            "INSERT INTO board (author,tag,content,status,tab) VALUES ('patrol','需求',?,'open','patrol')",
             (f'[巡逻 {now}] {warn}',)
         )
 
@@ -175,7 +175,7 @@ def run_code_review():
     tag = '紧急' if has_error else '需求'
     status_str = 'open' if has_error else 'done'
     conn2.execute(
-        "INSERT INTO board (author,tag,content,status,mentions) VALUES ('patrol',?,?,?,?)",
+        "INSERT INTO board (author,tag,content,status,mentions,tab) VALUES ('patrol',?,?,?,?,'patrol')",
         (tag, report, status_str, 'fyodor_web' if has_error else '')
     )
     conn2.commit()

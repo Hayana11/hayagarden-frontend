@@ -1678,6 +1678,10 @@ def get_board():
             "SELECT * FROM board_replies WHERE board_id=? ORDER BY created_at ASC", (row['id'],)
         ).fetchall()
         item = dict(row); item['replies'] = [dict(r) for r in replies]
+        try:
+            item['meta'] = json.loads(item.get('meta') or '{}')
+        except Exception:
+            item['meta'] = {}
         result.append(item)
     conn.close()
     return jsonify(result)
@@ -1700,10 +1704,22 @@ def post_board():
     if category not in ('给活儿', '播报'):
         category = '给活儿'
     mentions = (data.get('mentions') or '').strip()
+    tab   = (data.get('tab') or 'patrol').strip()
+    if tab not in ('patrol', 'changelog', 'status'):
+        tab = 'patrol'
+    title = (data.get('title') or '').strip()
+    meta_in = data.get('meta')
+    if isinstance(meta_in, dict):
+        meta = json.dumps(meta_in, ensure_ascii=False)
+    elif isinstance(meta_in, str) and meta_in.strip():
+        meta = meta_in  # 已经是 JSON 字符串，原样存
+    else:
+        meta = '{}'
     conn = get_db()
     cur = conn.execute(
-        "INSERT INTO board (author,tag,content,status,level,category,mentions) VALUES (?,?,?,'open',?,?,?)",
-        (author, tag, content, level, category, mentions)
+        "INSERT INTO board (author,tag,content,status,level,category,mentions,tab,title,meta) "
+        "VALUES (?,?,?,'open',?,?,?,?,?,?)",
+        (author, tag, content, level, category, mentions, tab, title, meta)
     )
     conn.commit(); new_id = cur.lastrowid; conn.close()
 
@@ -1758,7 +1774,13 @@ def update_board_status(bid):
     if status not in ('open', 'done'):
         return jsonify({'error': 'invalid status'}), 400
     conn = get_db()
-    conn.execute("UPDATE board SET status=? WHERE id=?", (status, bid))
+    if status == 'done':
+        conn.execute(
+            "UPDATE board SET status=?, resolved_at=datetime('now','+8 hours') WHERE id=?",
+            (status, bid)
+        )
+    else:
+        conn.execute("UPDATE board SET status=?, resolved_at=NULL WHERE id=?", (status, bid))
     conn.commit(); conn.close()
     return jsonify({'ok': True})
 

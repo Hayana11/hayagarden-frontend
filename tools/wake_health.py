@@ -31,7 +31,8 @@ def post_alert(msg, token):
     try:
         body = json.dumps({
             'author': 'fyodor_cc', 'tag': '紧急', 'token': token,
-            'level': 'P0', 'category': '给活儿',
+            'level': 'P0', 'category': '给活儿', 'tab': 'patrol',
+            'meta': {'priority': 'P0'},
             'content': f'[wake健康检测失败 {datetime.datetime.now().strftime("%H:%M")}]\n{msg}\n→ 请检查 /opt/frontend/gateway.py 和 bot_config.py',
         }).encode()
         req = urllib.request.Request(BOARD_URL, data=body,
