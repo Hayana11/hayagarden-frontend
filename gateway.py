@@ -31,32 +31,39 @@ def _warmup_ombre_brain():
 
 _warmup_ombre_brain()
 STATIC_DIR = '/opt/frontend/static'
-API_URL    = 'https://gua.guagua.uk/v1/messages'
-MODEL      = '[Kiro] claude-opus-4-6-thinking [不补]'
 
+import config_store
+
+# API_URL/API_KEY/CC_TOKEN：部署配置，.env 兜底（真正生效的值由 relay.manager
+# 按 ACTIVE_RELAY 动态解析，这里仅供 /api/debug/provider 展示部署期默认值）。
+# MODEL/GW_PROVIDER/DESIRE_DRIVEN/LONGING_ENABLED：运行时配置，不再读一次就冻结，
+# 每次使用都通过 config_store 现查（内部自带 .env 迁移期兜底），改了立即生效，
+# 不需要重启 gateway 进程。
+API_URL = 'https://gua.guagua.uk/v1/messages'
 API_KEY = ''
-GW_PROVIDER = 'api_relay'
 CC_TOKEN = ''
-DESIRE_DRIVEN = '0'
-LONGING_ENABLED = '1'
 try:
     for line in open('/opt/frontend/.env'):
         if line.startswith('ANTHROPIC_API_KEY='):
             API_KEY = line.split('=', 1)[1].strip()
         elif line.startswith('API_URL='):
             API_URL = line.split('=', 1)[1].strip() or API_URL
-        elif line.startswith('MODEL='):
-            MODEL = line.split('=', 1)[1].strip() or MODEL
-        elif line.startswith('GW_PROVIDER='):
-            GW_PROVIDER = line.split('=', 1)[1].strip() or 'api_relay'
         elif line.startswith('CLAUDE_CODE_OAUTH_TOKEN='):
             CC_TOKEN = line.split('=', 1)[1].strip()
-        elif line.startswith('DESIRE_DRIVEN='):
-            DESIRE_DRIVEN = line.split('=', 1)[1].strip() or '0'
-        elif line.startswith('LONGING_ENABLED='):
-            LONGING_ENABLED = line.split('=', 1)[1].strip() or '1'
 except Exception:
     pass
+
+def _get_model():
+    return config_store.get('MODEL')
+
+def _get_provider():
+    return config_store.get('GW_PROVIDER', 'api_relay')
+
+def _get_desire_driven():
+    return config_store.get_bool('DESIRE_DRIVEN', False)
+
+def _get_longing_enabled():
+    return config_store.get_bool('LONGING_ENABLED', True)
 
 def get_db():
     conn = sqlite3.connect(DB_PATH)
@@ -342,7 +349,7 @@ def build_system(wake=False):
     except Exception:
         pass
     # Longing系统隐性注入（对话时）
-    if LONGING_ENABLED == '1':
+    if _get_longing_enabled():
         try:
             import desire as _des_bp3
             _longing_hint = _des_bp3.get_longing_system_hint()
@@ -1490,7 +1497,7 @@ def claude_code_call(system, messages):
     return _cc_save_markers(text), thinking
 
 def generate_reply(system, messages):
-    if GW_PROVIDER == 'claude_code':
+    if _get_provider() == 'claude_code':
         return claude_code_call(system, messages)
     return agent_loop(system, messages)
 
@@ -1654,7 +1661,7 @@ def chat():
 @app.route('/chat/stream', methods=['POST'])
 def chat_stream():
     from flask import Response, stream_with_context
-    if GW_PROVIDER == 'claude_code':
+    if _get_provider() == 'claude_code':
         def gen_cc():
             _released = [False]
             try:
@@ -1748,7 +1755,6 @@ def chat_stream():
                 from relay.manager import relay as _chat_relay
                 for _round in range(5):
                     payload = {
-                        'model': MODEL,
                         'max_tokens': 16000,
                         'stream': True,
                         'system': system,
@@ -2020,7 +2026,6 @@ def _wake_agent_loop(system, messages, max_rounds=4, tools=None):
         tools = WAKE_TOOLS
     for _ in range(max_rounds):
         payload = {
-            'model': MODEL,
             'max_tokens': 2048,
             'tools': tools,
             'system': system,
@@ -2053,7 +2058,6 @@ def _wake_agent_loop(system, messages, max_rounds=4, tools=None):
             'CONTENT: <若 ACTION=message 则写消息内容（不超过80字）；其他情况留空>'
         )})
         fmt_payload = {
-            'model': MODEL,
             'max_tokens': 512,
             'system': system,
             'messages': msgs,
@@ -2123,7 +2127,7 @@ def wake_decide():
             pass
 
     # 心跳开始：V/A校准费佳驱动条
-    if DESIRE_DRIVEN == '1':
+    if _get_desire_driven():
         try:
             import desire as _des_wake, emotion_engine as _ee_wake
             _es_wake = _ee_wake.get_state()
@@ -2152,8 +2156,8 @@ def wake_decide():
     system += build_prompt_suffix(mode, _wake_ctx)
     system = inject_snippets(
         system, mode,
-        desire_driven=(DESIRE_DRIVEN == '1'),
-        longing_enabled=(LONGING_ENABLED == '1'),
+        desire_driven=_get_desire_driven(),
+        longing_enabled=_get_longing_enabled(),
     )
 
     if mode == 'ritual':
@@ -2184,7 +2188,7 @@ def wake_decide():
     _wake_exec(
         action, thoughts, c_text, mode,
         get_db_fn=get_db,
-        desire_driven=(DESIRE_DRIVEN == '1'),
+        desire_driven=_get_desire_driven(),
     )
 
     return jsonify({'ok': True, 'action': action, 'content': c_text})
@@ -2203,7 +2207,7 @@ def test_send():
             system = build_system()
         else:
             system = '你是一个 AI 助手，请如实回答。'
-        if GW_PROVIDER == 'claude_code':
+        if _get_provider() == 'claude_code':
             text, think = claude_code_call(system, [{'role': 'user', 'content': message}])
             latency_ms = int((_time.time() - t0) * 1000)
             return jsonify({
@@ -2213,7 +2217,6 @@ def test_send():
                 'provider': 'claude_code',
             })
         payload = {
-            'model': MODEL,
             'max_tokens': 4096,
             'thinking': {'type': 'enabled', 'budget_tokens': 5000},
             'system': system,
@@ -2250,12 +2253,12 @@ def api_summarize():
     if not prompt_text:
         return jsonify({'error': 'prompt required'}), 400
     try:
-        if GW_PROVIDER == 'claude_code':
+        if _get_provider() == 'claude_code':
             text, _ = claude_code_call('你是费奥多尔，在写日记。', [{'role': 'user', 'content': prompt_text}])
         else:
             _diary_sys = '你是费奥多尔。直接用第一人称写这天的日记，120字以内，第一个字就是日记内容本身。不要写标题，不要写前缀。'
             _diary_payload = {
-                'model': MODEL, 'max_tokens': 500,
+                'max_tokens': 500,
                 'system': _diary_sys,
                 'messages': [{'role': 'user', 'content': prompt_text}],
             }
@@ -2390,11 +2393,15 @@ def brain_diary():
 
 @app.route('/api/debug/provider', methods=['GET'])
 def debug_provider():
+    from relay.manager import relay as _dbg_relay
+    _dbg_relay._reload_env()
     return jsonify({
-        'GW_PROVIDER': GW_PROVIDER,
+        'GW_PROVIDER': _get_provider(),
         'CC_TOKEN_set': bool(CC_TOKEN),
-        'API_KEY_set': bool(API_KEY),
-        'API_URL': API_URL,
+        'API_KEY_set': bool(_dbg_relay.api_key),
+        'API_URL': _dbg_relay.api_url,
+        'MODEL': _dbg_relay.model,
+        'ACTIVE_RELAY': config_store.get('ACTIVE_RELAY', ''),
         'gen_busy': _gen_busy,
     })
 

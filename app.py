@@ -1,5 +1,6 @@
 import os, re, json, sqlite3, datetime, base64, uuid, threading
 from flask import Flask, request, jsonify, send_from_directory
+import config_store
 
 app = Flask(__name__, static_folder='static')
 DB_PATH = '/opt/frontend/memories.db'
@@ -638,45 +639,17 @@ def reader_page():
 
 @app.route('/api/config/model', methods=['GET'])
 def config_get_model():
-    model = 'unknown'
-    try:
-        for line in open('/opt/frontend/.env'):
-            if line.startswith('MODEL='):
-                model = line.split('=', 1)[1].strip()
-                break
-    except Exception:
-        pass
-    if model == 'unknown':
-        try:
-            gw = open('/opt/frontend/gateway.py').read()
-            m = re.search(r"^MODEL\s*=\s*['\"]([^'\"]+)['\"]", gw, re.MULTILINE)
-            model = m.group(1) if m else 'unknown'
-        except Exception:
-            pass
+    model = config_store.get('MODEL') or 'unknown'
     return jsonify({'model': model})
 
 @app.route('/api/config/model', methods=['POST'])
 def config_set_model():
-    import subprocess
     data = request.get_json()
     new_model = (data.get('model') or '').strip()
     if not new_model:
         return jsonify({'error': 'empty model'}), 400
     try:
-        env_path = '/opt/frontend/.env'
-        lines_env = open(env_path).readlines()
-        found = False
-        new_lines = []
-        for ln in lines_env:
-            if ln.startswith('MODEL='):
-                new_lines.append(f'MODEL={new_model}\n')
-                found = True
-            else:
-                new_lines.append(ln)
-        if not found:
-            new_lines.append(f'MODEL={new_model}\n')
-        open(env_path, 'w').writelines(new_lines)
-        subprocess.Popen(['systemctl', 'restart', 'frontend-gw'])
+        config_store.set('MODEL', new_model)
         return jsonify({'ok': True})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -866,12 +839,11 @@ def _env_set(key, value):
 
 @app.route('/api/config/provider', methods=['GET'])
 def config_get_provider():
-    provider, has_token = 'api_relay', False
+    provider = config_store.get('GW_PROVIDER', 'api_relay')
+    has_token = False
     try:
         for line in open('/opt/frontend/.env'):
-            if line.startswith('GW_PROVIDER='):
-                provider = line.split('=', 1)[1].strip() or 'api_relay'
-            elif line.startswith('CLAUDE_CODE_OAUTH_TOKEN='):
+            if line.startswith('CLAUDE_CODE_OAUTH_TOKEN='):
                 has_token = bool(line.split('=', 1)[1].strip())
     except Exception:
         pass
@@ -879,14 +851,12 @@ def config_get_provider():
 
 @app.route('/api/config/provider', methods=['POST'])
 def config_set_provider():
-    import subprocess
     data = request.get_json() or {}
     provider = (data.get('provider') or '').strip()
     if provider not in ('api_relay', 'claude_code'):
         return jsonify({'error': 'provider must be api_relay or claude_code'}), 400
     try:
-        _env_set('GW_PROVIDER', provider)
-        subprocess.Popen(['systemctl', 'restart', 'frontend-gw'])
+        config_store.set('GW_PROVIDER', provider)
         return jsonify({'ok': True, 'provider': provider})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -1330,13 +1300,17 @@ def _init_relay_presets_table():
 @app.route('/api/config/relay-presets', methods=['GET'])
 def get_relay_presets():
     _init_relay_presets_table()
+    # 判断"使用中"：ACTIVE_RELAY（runtime_config，存 preset id）优先；
+    # 还没设置过 ACTIVE_RELAY 时（迁移期）回退按 .env 的 API_URL 匹配。
+    active_relay_id = config_store.get('ACTIVE_RELAY', '')
     active_url = ''
-    try:
-        for line in open('/opt/frontend/.env'):
-            if line.startswith('API_URL='):
-                active_url = line.split('=', 1)[1].strip()
-    except Exception:
-        pass
+    if not active_relay_id:
+        try:
+            for line in open('/opt/frontend/.env'):
+                if line.startswith('API_URL='):
+                    active_url = line.split('=', 1)[1].strip()
+        except Exception:
+            pass
     conn = get_db()
     rows = conn.execute('SELECT id,name,url,key,default_model,capabilities,created_at FROM relay_presets ORDER BY created_at').fetchall()
     conn.close()
@@ -1352,9 +1326,13 @@ def get_relay_presets():
         else:
             # 未手动设置过 → 按 URL 自动检测，作为展示用默认值（不写库）
             caps = _get_caps(r['url'])
+        if active_relay_id:
+            is_active = str(r['id']) == str(active_relay_id)
+        else:
+            is_active = r['url'] == active_url
         presets.append({
             'id': r['id'], 'name': r['name'], 'url': r['url'],
-            'active': r['url'] == active_url,
+            'active': is_active,
             'default_model': r['default_model'] or '',
             'capabilities': caps,
         })
@@ -1399,35 +1377,20 @@ def delete_relay_preset(preset_id):
 
 @app.route('/api/config/relay-presets/<int:preset_id>/activate', methods=['POST'])
 def activate_relay_preset(preset_id):
-    import subprocess as _sp
     _init_relay_presets_table()
     conn = get_db()
     row = conn.execute('SELECT * FROM relay_presets WHERE id=?', (preset_id,)).fetchone()
     conn.close()
     if not row:
         return jsonify({'error': 'not found'}), 404
-    new_url = row['url']
-    new_key = row['key'] or ''
     try:
-        env = open('/opt/frontend/.env').read()
-        if 'API_URL=' in env:
-            env = re.sub(r'^API_URL=.*$', f'API_URL={new_url}', env, flags=re.MULTILINE)
-        else:
-            env = env.rstrip() + f'\nAPI_URL={new_url}\n'
-        if new_key:
-            if 'ANTHROPIC_API_KEY=' in env:
-                env = re.sub(r'^ANTHROPIC_API_KEY=.*$', f'ANTHROPIC_API_KEY={new_key}', env, flags=re.MULTILINE)
-            else:
-                env = env.rstrip() + f'\nANTHROPIC_API_KEY={new_key}\n'
+        # ACTIVE_RELAY 存 relay_presets.id，url/key 由 relay.manager 按这个 id 实时查表
+        config_store.set('ACTIVE_RELAY', str(preset_id))
         new_model = (row['default_model'] or '').strip()
         if new_model:
-            if 'MODEL=' in env:
-                env = re.sub(r'^MODEL=.*$', f'MODEL={new_model}', env, flags=re.MULTILINE)
-            else:
-                env = env.rstrip() + f'\nMODEL={new_model}\n'
-        open('/opt/frontend/.env', 'w').write(env)
-        _sp.Popen(['systemctl', 'restart', 'frontend-gw'])
-        return jsonify({'ok': True, 'model_switched': (row['default_model'] or '').strip() or None})
+            config_store.set('MODEL', new_model)
+        # 不写 .env，不重启进程——下一次请求 relay.manager 就会读到新配置
+        return jsonify({'ok': True, 'model_switched': new_model or None})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
