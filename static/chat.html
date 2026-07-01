@@ -131,35 +131,44 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:14px;heigh
 .tool-card-toggle.open i.ti-chevron-right{transform:rotate(90deg);}
 .tool-card-body{display:none;padding:2px 10px 9px;font-size:12px;color:rgba(42,32,32,.52);line-height:1.65;word-break:break-all;white-space:pre-wrap;}
 .tool-card-body.open{display:block;}
+/* Simple tool pill（日常工具调用：开灯/存记忆/发留言板这种，一行一条） */
+.tool-pill{background:var(--card);border:1px solid rgba(212,165,116,.28);border-radius:12px;margin:0 -2px 8px;overflow:hidden;}
+.tpill-toggle{width:100%;text-align:left;padding:9px 12px;background:none;border:none;cursor:pointer;font-size:12.5px;color:var(--text);display:flex;align-items:center;gap:7px;font-family:inherit;}
+.tpill-toggle>i.ti-chevron-right{font-size:12px;color:var(--muted);transition:transform .18s;flex-shrink:0;}
+.tpill-toggle.open>i.ti-chevron-right{transform:rotate(90deg);}
+.tpill-toggle>i:not(.ti-chevron-right){font-size:15px;color:rgba(212,165,116,.85);flex-shrink:0;}
+.tpill-kw{color:rgba(212,165,116,.95);font-weight:500;}
 
 /* Tool Session card（一次回复里所有工具调用的汇总卡片） */
-.tsess{background:var(--card);border:1px solid rgba(212,165,116,.22);border-radius:14px;margin:0 -2px 8px;overflow:hidden;}
-html[data-theme=dark] .tsess{background:rgba(255,255,255,.04);border-color:rgba(212,165,116,.18);}
-.tsess-hd{display:flex;align-items:center;gap:10px;padding:11px 12px;cursor:pointer;}
-.tsess-check{width:26px;height:26px;border-radius:50%;display:flex;align-items:center;justify-content:center;flex-shrink:0;background:rgba(120,170,120,.15);color:#5a9a5a;font-size:14px;}
-.tsess.running .tsess-check{background:rgba(212,165,116,.15);color:rgba(212,165,116,.9);}
-.tsess.failed .tsess-check{background:rgba(200,100,90,.15);color:#c0645a;}
-.tsess-title{font-size:13px;font-weight:600;color:var(--text);flex:1;}
+.tsess{background:rgba(212,165,116,.05);border-left:2px solid rgba(212,165,116,.35);border-radius:0 8px 8px 0;margin:0 0 8px;overflow:hidden;}
+html[data-theme=dark] .tsess{background:rgba(212,165,116,.04);border-left-color:rgba(212,165,116,.3);}
+.tsess-hd{display:flex;align-items:center;gap:6px;padding:7px 10px;cursor:pointer;}
+.tsess-check{display:flex;align-items:center;justify-content:center;flex-shrink:0;color:rgba(212,165,116,.7);font-size:12px;}
+.tsess.running .tsess-check{color:rgba(212,165,116,.9);}
+.tsess.failed .tsess-check{color:#c0645a;}
+.tsess-title{font-size:11px;font-weight:400;color:var(--muted);flex:1;letter-spacing:.2px;}
 .tsess-sub{font-size:11px;color:var(--muted);margin-top:1px;}
-.tsess-expand{color:var(--muted);font-size:15px;transition:transform .18s;flex-shrink:0;}
+.tsess-expand{color:var(--muted);font-size:13px;transition:transform .18s;flex-shrink:0;opacity:.5;}
 .tsess.open .tsess-expand{transform:rotate(180deg);}
 .tsess-term-wrap{display:none;}
 .tsess.open .tsess-term-wrap{display:block;}
-.tsess-term-hd{display:flex;align-items:center;justify-content:space-between;padding:6px 12px;font-size:11px;color:var(--muted);}
-.tsess-term{background:#1c1a17;border-radius:10px;margin:0 10px 8px;padding:9px 11px;font-family:ui-monospace,'SF Mono',Menlo,monospace;font-size:11.5px;line-height:1.75;max-height:260px;overflow-y:auto;}
-.tsess-term-line{color:rgba(232,226,220,.82);white-space:pre-wrap;word-break:break-all;}
-.tsess-term-line.cmd{color:rgba(212,165,116,.85);}
-.tsess-term-line.ok::before{content:'✓ ';color:#6fae6f;}
+.tsess-term-hd{display:flex;align-items:center;justify-content:space-between;padding:4px 10px;font-size:10px;color:var(--muted);opacity:.6;}
+.tsess-term{background:#1c1a17;border-radius:8px;margin:0 8px 6px;padding:8px 10px;font-family:ui-monospace,'SF Mono',Menlo,monospace;font-size:11px;line-height:1.7;max-height:220px;overflow-y:auto;}
+.tsess-term-line{color:rgba(232,226,220,.78);white-space:pre-wrap;word-break:break-all;}
+.tsess-term-line.cmd{color:rgba(212,165,116,.8);}
+.tsess-term-line.ok::before{content:'✓ ';color:rgba(212,165,116,.8);}
 .tsess-term-line.fail::before{content:'✗ ';color:#c0645a;}
-.tsess-files{display:flex;flex-wrap:wrap;gap:6px;padding:2px 10px 9px;}
-.tsess-file-chip{display:inline-flex;align-items:center;gap:4px;background:rgba(212,165,116,.08);border-radius:8px;padding:3px 8px;font-size:11px;color:var(--muted);}
-.tsess-file-chip .fp{color:#6fae6f;}
+.tsess-files{display:flex;flex-wrap:wrap;gap:5px;padding:2px 10px 7px;}
+.tsess-file-chip{display:inline-flex;align-items:center;gap:4px;background:rgba(212,165,116,.08);border-radius:6px;padding:2px 7px;font-size:10px;color:var(--muted);}
+.tsess-file-chip .fp{color:rgba(212,165,116,.8);}
 .tsess-file-chip .fm{color:#c0645a;}
-.tsess-bar-wrap{padding:0 12px 10px;display:flex;align-items:center;gap:8px;}
-.tsess-bar{flex:1;height:4px;border-radius:2px;background:rgba(212,165,116,.12);overflow:hidden;}
-.tsess-bar-fill{height:100%;background:#6fae6f;border-radius:2px;transition:width .25s;}
-.tsess.running .tsess-bar-fill{background:rgba(212,165,116,.7);}
-.tsess-bar-txt{font-size:10.5px;color:var(--muted);white-space:nowrap;}
+.tsess-bar-wrap{padding:0 10px 7px;display:flex;align-items:center;gap:6px;}
+.tsess-bar{flex:1;height:2px;border-radius:1px;background:rgba(212,165,116,.1);overflow:hidden;}
+.tsess-bar-fill{height:100%;background:rgba(212,165,116,.5);border-radius:1px;transition:width .25s;}
+.tsess.running .tsess-bar-fill{background:rgba(212,165,116,.7);animation:tsess-pulse 1.5s ease-in-out infinite;}
+@keyframes tsess-pulse{0%,100%{opacity:.5}50%{opacity:1}}
+.tsess-bar-txt{font-size:10px;color:var(--muted);white-space:nowrap;opacity:.6;}
+.tsess:not(.running):not(.open) .tsess-bar-wrap{display:none;}
 
 /* Empty / loading */
 .empty-tip{text-align:center;color:var(--muted);padding:60px 20px;font-size:13px;line-height:2.4;}
@@ -769,7 +778,7 @@ function buildToolSessionHtml(tcs, opts){
   var statusCls = running ? 'running' : (failedCount>0 ? 'failed' : '');
   var openCls = opts.open ? ' open' : '';
   var statusTxt = running ? '进行中' : (failedCount>0 ? (failedCount+' 个失败') : '完成');
-  var checkIcon = running ? '<i class="ti ti-loader-2"></i>' : (failedCount>0 ? '<i class="ti ti-x"></i>' : '<i class="ti ti-check"></i>');
+  var checkIcon = running ? '<i class="ti ti-loader-2" style="font-size:12px"></i>' : (failedCount>0 ? '<i class="ti ti-x" style="font-size:11px"></i>' : '<i class="ti ti-check" style="font-size:11px"></i>');
 
   var fileMap = {}, fileOrder = [];
   tcs.forEach(function(tc){
@@ -793,6 +802,11 @@ function buildToolSessionHtml(tcs, opts){
   ) : '';
 
   var pct = running ? Math.min(90, total*6) : 100;
+  var barSection = running ?
+    '<div class="tsess-bar-wrap">' +
+      '<div class="tsess-bar"><div class="tsess-bar-fill" style="width:'+pct+'%"></div></div>' +
+      '<div class="tsess-bar-txt">'+statusTxt+'</div>' +
+    '</div>' : '';
 
   return '<div class="tsess '+statusCls+openCls+'">' +
     '<div class="tsess-hd" onclick="toggleToolSession(this)">' +
@@ -801,18 +815,73 @@ function buildToolSessionHtml(tcs, opts){
       '<i class="ti ti-chevron-down tsess-expand"></i>' +
     '</div>' +
     '<div class="tsess-term-wrap">' +
-      '<div class="tsess-term-hd"><span>终端</span><span>'+statusTxt+'</span></div>' +
+      '<div class="tsess-term-hd"><span>终端</span></div>' +
       '<div class="tsess-term">'+termLines+'</div>' +
       filesHtml +
     '</div>' +
-    '<div class="tsess-bar-wrap">' +
-      '<div class="tsess-bar"><div class="tsess-bar-fill" style="width:'+pct+'%"></div></div>' +
-      '<div class="tsess-bar-txt">'+statusTxt+' · '+total+' 个操作</div>' +
-    '</div>' +
+    barSection +
   '</div>';
 }
 function toggleToolSession(hd){
   hd.closest('.tsess').classList.toggle('open');
+}
+// 涉及"改代码/读代码/搜代码"这种一次会调用很多步骤的工具，走黑框汇总卡片。
+// 其余日常交互类工具（开灯、存记忆、发留言板……）保持一行一条的简单展示。
+var CODE_TOOLS = {
+  read_backend_file:1, read_frontend_file:1, write_frontend_file:1,
+  str_replace_frontend_file:1, check_page_render:1, read_bot_config:1,
+  edit_bot_config:1, search_files:1
+};
+var TOOL_ICONS = {
+  save_memory:'book', search_memories:'book',
+  read_board:'clipboard-list', post_to_board:'clipboard-list', reply_to_board:'clipboard-list',
+  block_user:'user', get_activity_summary:'clock',
+  log_period_event:'calendar', set_self_trigger:'clock', cancel_self_trigger:'clock',
+  get_wake_settings:'moon', set_wake_settings:'moon'
+};
+function toolIcon(name){
+  if(name && name.indexOf('light')===0) return 'sun';
+  return TOOL_ICONS[name] || 'tool';
+}
+function toolKeywords(tc){
+  var a = tc.args||{};
+  switch(tc.name){
+    case 'search_memories': return (a.keyword||'').split(/\s+/).filter(Boolean);
+    case 'save_memory': return a.content ? [a.content.slice(0,24)] : [];
+    case 'post_to_board': case 'reply_to_board': return a.content ? [a.content.slice(0,24)] : [];
+    case 'set_brightness': return a.value!=null ? [a.value+'%'] : [];
+    case 'set_color_temp': return a.value!=null ? [a.value+'K'] : [];
+    case 'log_period_event': return a.event_type ? [a.event_type] : [];
+    case 'set_self_trigger': return a.minutes!=null ? [a.minutes+'分钟后'] : [];
+    case 'get_activity_summary': return [(a.hours||6)+'小时内'];
+    default: return [];
+  }
+}
+function buildToolPillHtml(tc){
+  var label = TOOL_LABELS[tc.name] || tc.name;
+  var icon = toolIcon(tc.name);
+  var status = tc.success===false ? ' · 失败' : '';
+  var kws = toolKeywords(tc);
+  var kwHtml = kws.length ? ' <span class="tpill-kw">'+kws.map(escHtml).join(' ')+'</span>' : '';
+  var hasArgs = tc.args && Object.keys(tc.args).length>0;
+  var argsHtml = hasArgs ? '<div style="opacity:.65;margin-bottom:4px">参数: '+escHtml(JSON.stringify(tc.args))+'</div>' : '';
+  var resultHtml = '<div>结果: '+escHtml(String(tc.result||'').slice(0,400))+'</div>';
+  return '<div class="tool-pill">'+
+    '<button class="tpill-toggle" onclick="toggleToolCard(this)">'+
+      '<i class="ti ti-chevron-right"></i>'+
+      '<i class="ti ti-'+icon+'"></i>'+
+      '<span>'+escHtml(label)+' ·'+kwHtml+escHtml(status)+'</span>'+
+    '</button>'+
+    '<div class="tool-card-body">'+argsHtml+resultHtml+'</div>'+
+  '</div>';
+}
+function buildToolCallsHtml(tcs, opts){
+  opts = opts || {};
+  var codeTcs = [], simpleTcs = [];
+  tcs.forEach(function(tc){ (CODE_TOOLS[tc.name] ? codeTcs : simpleTcs).push(tc); });
+  var html = simpleTcs.map(buildToolPillHtml).join('');
+  if(codeTcs.length) html += buildToolSessionHtml(codeTcs, opts);
+  return html;
 }
 function toggleToolCard(btn) {
   btn.nextElementSibling.classList.toggle('open');
@@ -894,7 +963,7 @@ function buildHtml(list) {
     if(fy && m.tool_calls) {
       var tcs = [];
       try { tcs = JSON.parse(m.tool_calls); } catch(e) {}
-      if(tcs.length) innerHtml += buildToolSessionHtml(tcs, {});
+      if(tcs.length) innerHtml += buildToolCallsHtml(tcs, {});
     }
     if(hasImg) innerHtml += '<img src="'+escHtml(m.image_url)+'" loading="lazy" onclick="openLb(\''+escHtml(m.image_url)+'\')">';
     // 过滤掉content里意外写入的工具调用JSON片段（如{"name":"user_time_v0","input":{}}）
@@ -1429,7 +1498,7 @@ async function streamReply(){
             liveThinkWrap.classList.add('done');
           liveToolCalls.push(ev.d);
           var wasOpen = liveTools.querySelector('.tsess.open') != null;
-          liveTools.innerHTML = buildToolSessionHtml(liveToolCalls, {running:true, open:wasOpen});
+          liveTools.innerHTML = buildToolCallsHtml(liveToolCalls, {running:true, open:wasOpen});
           var atB=c.scrollHeight-c.scrollTop-c.clientHeight<120;
           if(atB) c.scrollTop=c.scrollHeight;
         } else if(ev.t==='text'){
