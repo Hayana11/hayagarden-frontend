@@ -1491,7 +1491,10 @@ async function streamReply(){
   streamState.cacheRead=0; streamState.cacheCreate=0; streamState.inputTokens=0;
   window._earlyThinkSummary=null;
   var ctrl=new AbortController(); streamAbort=ctrl;
-  var _safetyTimeout=setTimeout(function(){ctrl.abort();},300000);
+  // 空闲超时：有事件就续命，只有真死掉的连接才被掐（原来固定5分钟，生成长HTML必超）
+  var _safetyTimeout=null;
+  function _armSafety(){ clearTimeout(_safetyTimeout); _safetyTimeout=setTimeout(function(){ctrl.abort();},150000); }
+  _armSafety();
   var resp=await fetch('/api/gw/chat/stream',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}',signal:ctrl.signal});
   if(!resp.ok||!resp.body) throw new Error('stream failed');
   var SSE_SEP=String.fromCharCode(10)+String.fromCharCode(10);
@@ -1585,6 +1588,7 @@ async function streamReply(){
         throw re;
       }
       if(chunk.done) break;
+      _armSafety();
       buf+=decoder.decode(chunk.value,{stream:true});
       var parts=buf.split(SSE_SEP); buf=parts.pop();
       for(var i=0;i<parts.length;i++){
@@ -1598,6 +1602,19 @@ async function streamReply(){
           liveThinkBody.textContent=thinkText;
           var atB=c.scrollHeight-c.scrollTop-c.clientHeight<120;
           if(atB) c.scrollTop=c.scrollHeight;
+        } else if(ev.t==='tool_progress'){
+          ensureLiveRow();
+          finishLiveThink();
+          var pd=ev.d||{};
+          var ptxt='正在生成 '+(TOOL_LABELS[pd.name]||pd.name||'内容')+' · '+((pd.chars||0)/1024).toFixed(1)+' KB…';
+          var pl=document.getElementById('tool-progress-line');
+          if(!pl){
+            liveTools.insertAdjacentHTML('beforeend','<div class="trace-summary-line" id="tool-progress-line"><i class="ti ti-loader-2 tool-spin"></i> <span></span></div>');
+            pl=document.getElementById('tool-progress-line');
+          }
+          pl.querySelector('span').textContent=ptxt;
+          var atB2=c.scrollHeight-c.scrollTop-c.clientHeight<120;
+          if(atB2) c.scrollTop=c.scrollHeight;
         } else if(ev.t==='tool_use'){
           ensureLiveRow();
           finishLiveThink();

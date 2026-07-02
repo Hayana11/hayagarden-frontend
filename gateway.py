@@ -59,6 +59,19 @@ def _get_model():
 def _get_provider():
     return config_store.get('GW_PROVIDER', 'api_relay')
 
+def _slim_args(args, limit=300):
+    """SSE 事件里的工具参数瘦身：大字符串（如整页 HTML）截断，存库仍是完整版。"""
+    if not isinstance(args, dict):
+        return args
+    out = {}
+    for k, v in args.items():
+        if isinstance(v, str) and len(v) > limit:
+            out[k] = v[:limit] + '…[共%d字符]' % len(v)
+        else:
+            out[k] = v
+    return out
+
+
 def _model_supports_thinking():
     """当前模型是否支持 extended thinking（查 models.json 策展表）。
     不在表里的模型按支持处理——维持旧行为，不惩罚未收录的模型。"""
@@ -1589,11 +1602,31 @@ def chat_stream():
             # 持有锁，必须在 finally 里释放（含 GeneratorExit / 客户端断开场景）
             text, thinking = None, None
             _released = [False]
+            _persisted = [False]
             cache_read_total, cache_create_total = 0, 0
+            think_acc, text_acc, tool_calls_acc = [], [], []
+
+            def _clean_text(raw):
+                t = re.sub(r'```tool_use\s.*?```\s*', '', raw, flags=re.DOTALL).strip()
+                return re.sub(r'```tool_result\s.*?```\s*', '', t, flags=re.DOTALL).strip()
+
+            def _persist(p_text, p_thinking):
+                if not p_text or _persisted[0]:
+                    return
+                _ci = (json.dumps({'cache_read': cache_read_total, 'cache_creation': cache_create_total})
+                       if (cache_read_total or cache_create_total) else '')
+                conn = get_db()
+                conn.execute(
+                    "INSERT INTO chat_messages (author, content, thinking, tool_calls, cache_info) VALUES ('assistant', ?, ?, ?, ?)",
+                    (p_text, p_thinking, json.dumps(tool_calls_acc, ensure_ascii=False) if tool_calls_acc else '', _ci)
+                )
+                conn.commit()
+                conn.close()
+                _persisted[0] = True
+                _write_session_memo(_uc, p_text)
             try:
                 system   = build_system()
                 messages = build_messages()
-                think_acc, text_acc, tool_calls_acc = [], [], []
                 from relay.manager import relay as _chat_relay
                 _thinking_ok = _model_supports_thinking()
                 for _round in range(5):
@@ -1648,11 +1681,18 @@ def chat_stream():
                                 text_acc.append(s)
                                 yield 'data: ' + json.dumps({'t': 'text', 'd': s}) + SSE_END
                             elif dt == 'input_json_delta':
-                                if cur is not None: cur['_json'] = cur.get('_json', '') + d.get('partial_json', '')
+                                if cur is not None:
+                                    cur['_json'] = cur.get('_json', '') + d.get('partial_json', '')
+                                    # 大参数（如 create_html 的整页内容）生成期间前端原本零事件，
+                                    # 空窗超时会断连；每 2KB 推一次进度，顺便让哈娅看见在长
+                                    if len(cur['_json']) - cur.get('_prog', 0) >= 2048:
+                                        cur['_prog'] = len(cur['_json'])
+                                        yield 'data: ' + json.dumps({'t': 'tool_progress', 'd': {'name': cur.get('name', ''), 'chars': cur['_prog']}}) + SSE_END
                             elif dt == 'signature_delta':
                                 if cur is not None: cur['signature'] = cur.get('signature', '') + d.get('signature', '')
                         elif et == 'content_block_stop':
                             if cur is not None:
+                                cur.pop('_prog', None)
                                 if cur.get('type') == 'tool_use':
                                     try:
                                         cur['input'] = json.loads(cur.pop('_json') or '{}')
@@ -1672,7 +1712,7 @@ def chat_stream():
                     for tu in tool_uses:
                         tname = tu.get('name', '')
                         targs = tu.get('input') or {}
-                        yield 'data: ' + json.dumps({'t': 'tool_use', 'd': {'name': tname, 'args': targs}, 'idx': len(tool_calls_acc)}) + SSE_END
+                        yield 'data: ' + json.dumps({'t': 'tool_use', 'd': {'name': tname, 'args': _slim_args(targs)}, 'idx': len(tool_calls_acc)}) + SSE_END
                         file_path = _write_tool_file_path(tname, targs)
                         old_content = _read_file_safe(file_path) if file_path else None
                         result_str = run_tool(tname, targs)
@@ -1695,32 +1735,28 @@ def chat_stream():
                             except Exception:
                                 pass
                         tool_calls_acc.append(tc_item)
-                        yield 'data: ' + json.dumps({'t': 'tool_result', 'd': tc_item, 'idx': len(tool_calls_acc) - 1}) + SSE_END
+                        _slim_item = {**tc_item, 'args': _slim_args(tc_item.get('args')),
+                                      'result': str(tc_item.get('result') or '')[:2000]}
+                        yield 'data: ' + json.dumps({'t': 'tool_result', 'd': _slim_item, 'idx': len(tool_calls_acc) - 1}) + SSE_END
                         # 旧版缓存前端只认 tool_call；dup=1 让新前端跳过防止重复渲染
-                        yield 'data: ' + json.dumps({'t': 'tool_call', 'd': tc_item, 'dup': 1}) + SSE_END
+                        yield 'data: ' + json.dumps({'t': 'tool_call', 'd': _slim_item, 'dup': 1}) + SSE_END
                         results.append({'type': 'tool_result', 'tool_use_id': tu.get('id'),
                                         'content': result_str})
                     messages.append({'role': 'user', 'content': results})
                     text_acc.append(NL)
-                text     = ''.join(text_acc).strip()
-                # 过滤掉模型可能在text里叙述的tool markdown代码块
-                text = re.sub(r'```tool_use\s.*?```\s*', '', text, flags=re.DOTALL).strip()
-                text = re.sub(r'```tool_result\s.*?```\s*', '', text, flags=re.DOTALL).strip()
+                text     = _clean_text(''.join(text_acc))
                 thinking = ''.join(think_acc)
-                _cache_info_json = (
-                    json.dumps({'cache_read': cache_read_total, 'cache_creation': cache_create_total})
-                    if (cache_read_total or cache_create_total) else ''
-                )
-                if text:
-                    conn = get_db()
-                    conn.execute(
-                        "INSERT INTO chat_messages (author, content, thinking, tool_calls, cache_info) VALUES ('assistant', ?, ?, ?, ?)",
-                        (text, thinking, json.dumps(tool_calls_acc, ensure_ascii=False) if tool_calls_acc else '', _cache_info_json)
-                    )
-                    conn.commit()
-                    conn.close()
-                    _write_session_memo(_uc, text)
+                _persist(text, thinking)
             finally:
+                # 断流救援：客户端断开(GeneratorExit)或中途异常时，已生成的内容不能凭空消失
+                if not _persisted[0]:
+                    try:
+                        _rt = _clean_text(''.join(text_acc)) if text_acc else ''
+                        if _rt:
+                            _persist(_rt, ''.join(think_acc))
+                            text, thinking = _rt, ''.join(think_acc)
+                    except Exception:
+                        pass
                 _released[0] = True
                 _gen_release((text, thinking) if text else None)
             if tool_calls_acc and not thinking:
