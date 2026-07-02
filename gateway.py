@@ -1397,6 +1397,59 @@ def chat():
         return jsonify({'error': str(e)}), 500
 
 
+TRACE_SUMMARY_MODEL = os.getenv('TRACE_SUMMARY_MODEL', '[按量3] deepseek-v3.2')
+TRACE_SUMMARY_PROMPT = (
+    '你是一个摘要工具。你的唯一任务是输出一句不超过15字的中文概括。'
+    '动词短语开头，写出目的而非动作本身，不要引号，不要出现"调用"/"执行"。'
+    '禁止：不要回复对话，不要加emoji，不要说"我理解"/"让我"/"好的"，不要输出任何非摘要内容。'
+    '风格参考："排查侧边栏渲染异常"、"调亮卧室灯光"。只输出摘要本身。'
+)
+
+
+def _summarize_traces_sync(tool_calls, timeout=10):
+    """整串工具调用 → 一句人话总摘要。走 relay 便宜模型，失败静默返回 ''。
+    仅在本轮没有 thinking 时由调用方触发（有 thinking 时思考流本身就是摘要）。"""
+    parts = []
+    for tc in tool_calls:
+        try:
+            args_str = json.dumps(tc.get('args') or {}, ensure_ascii=False)
+        except Exception:
+            args_str = str(tc.get('args') or '')
+        parts.append('工具: %s\n输入: %s\n输出: %s' % (
+            tc.get('name', 'tool'), args_str[:200], str(tc.get('result') or '')[:300]))
+    if not parts:
+        return ''
+    payload = json.dumps({
+        'model': TRACE_SUMMARY_MODEL, 'max_tokens': 100,
+        'system': TRACE_SUMMARY_PROMPT,
+        'messages': [{'role': 'user', 'content': '\n---\n'.join(parts)}],
+    }, ensure_ascii=False).encode('utf-8')
+    req = urllib.request.Request(API_URL, data=payload, headers={
+        'x-api-key': API_KEY, 'anthropic-version': '2023-06-01',
+        'content-type': 'application/json'})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode())
+        text = ''.join(b.get('text', '') for b in data.get('content', [])
+                       if b.get('type') == 'text').strip().strip('"「」\'')
+        low = text.lower()
+        if not text or len(text) > 40 or any(
+                k in low for k in ('error', 'permission', 'not logged', '抱歉', '对不起')):
+            return ''
+        return text
+    except Exception:
+        return ''
+
+
+# ── SSE 事件约定（chatnest 六事件语义，家里 t/d 信封拼写）────────────
+#   t=think          思考流增量        d=文本
+#   t=text           正文增量          d=文本
+#   t=tool_use       工具开始执行      d={name,args}         idx=轨迹下标
+#   t=tool_result    工具执行完成      d=tc_item(含result等) idx=轨迹下标
+#   t=trace_summary  整串工具一句摘要  d=文本（仅无thinking时生成）
+#   t=done / t=err   结束 / 错误
+#   （t=usage/notice 为家里自有辅助事件）
+# 所有 provider（relay / claude_code / 未来 agent_sdk）统一发这套。
 @app.route('/chat/stream', methods=['POST'])
 def chat_stream():
     from flask import Response, stream_with_context
@@ -1567,6 +1620,7 @@ def chat_stream():
                     for tu in tool_uses:
                         tname = tu.get('name', '')
                         targs = tu.get('input') or {}
+                        yield 'data: ' + json.dumps({'t': 'tool_use', 'd': {'name': tname, 'args': targs}, 'idx': len(tool_calls_acc)}) + SSE_END
                         file_path = _write_tool_file_path(tname, targs)
                         old_content = _read_file_safe(file_path) if file_path else None
                         result_str = run_tool(tname, targs)
@@ -1589,7 +1643,7 @@ def chat_stream():
                             except Exception:
                                 pass
                         tool_calls_acc.append(tc_item)
-                        yield 'data: ' + json.dumps({'t': 'tool_call', 'd': tc_item}) + SSE_END
+                        yield 'data: ' + json.dumps({'t': 'tool_result', 'd': tc_item, 'idx': len(tool_calls_acc) - 1}) + SSE_END
                         results.append({'type': 'tool_result', 'tool_use_id': tu.get('id'),
                                         'content': result_str})
                     messages.append({'role': 'user', 'content': results})
@@ -1615,6 +1669,10 @@ def chat_stream():
             finally:
                 _released[0] = True
                 _gen_release((text, thinking) if text else None)
+            if tool_calls_acc and not thinking:
+                _ts = _summarize_traces_sync(tool_calls_acc)
+                if _ts:
+                    yield 'data: ' + json.dumps({'t': 'trace_summary', 'd': _ts}) + SSE_END
             if cache_read_total or cache_create_total:
                 yield 'data: ' + json.dumps({'t': 'usage', 'cache_read': cache_read_total, 'cache_creation': cache_create_total}) + SSE_END
             yield 'data: ' + json.dumps({'t': 'done', 'ok': bool(text)}) + SSE_END

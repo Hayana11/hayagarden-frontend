@@ -166,6 +166,12 @@ html[data-theme=dark] .tsess{background:rgba(212,165,116,.04);border-left-color:
 .tsess-term-line.cmd{color:rgba(212,165,116,.8);}
 .tsess-term-line.ok::before{content:'✓ ';color:rgba(212,165,116,.8);}
 .tsess-term-line.fail::before{content:'✗ ';color:#c0645a;}
+.tsess-term-line.run::before{content:'⟳ ';color:rgba(212,165,116,.9);display:inline-block;}
+@keyframes tool-spin-kf{to{transform:rotate(360deg)}}
+.tool-spin{display:inline-block;animation:tool-spin-kf 1s linear infinite;}
+.tool-pill.running .tpill-toggle span{opacity:.75;}
+.trace-summary-line{margin:4px 0 2px;font-size:12.5px;color:var(--ink-soft,#8a8177);opacity:.85;display:flex;align-items:center;gap:5px;}
+.trace-summary-line .ti{font-size:13px;opacity:.7;}
 .tsess-files{display:flex;flex-wrap:wrap;gap:5px;padding:2px 10px 7px;}
 .tsess-file-chip{display:inline-flex;align-items:center;gap:4px;background:rgba(212,165,116,.08);border-radius:6px;padding:2px 7px;font-size:10px;color:var(--muted);}
 .tsess-file-chip .fp{color:rgba(212,165,116,.8);}
@@ -756,7 +762,7 @@ var TOOL_FILE_ARG = {
 };
 function toolTermLineHtml(tc){
   var ok = tc.success !== false;
-  var cls = ok ? 'ok' : 'fail';
+  var cls = tc.running ? 'run' : (ok ? 'ok' : 'fail');
   var pathArg = TOOL_FILE_ARG[tc.name];
   var text;
   if(pathArg && tc.args && tc.args[pathArg]){
@@ -865,17 +871,17 @@ function toolKeywords(tc){
 }
 function buildToolPillHtml(tc){
   var label = TOOL_LABELS[tc.name] || tc.name;
-  var icon = toolIcon(tc.name);
-  var status = tc.success===false ? ' · 失败' : '';
+  var icon = tc.running ? 'loader-2' : toolIcon(tc.name);
+  var status = tc.running ? ' · 运行中' : (tc.success===false ? ' · 失败' : '');
   var kws = toolKeywords(tc);
   var kwHtml = kws.length ? ' <span class="tpill-kw">'+kws.map(escHtml).join(' ')+'</span>' : '';
   var hasArgs = tc.args && Object.keys(tc.args).length>0;
   var argsHtml = hasArgs ? '<div style="opacity:.65;margin-bottom:4px">参数: '+escHtml(JSON.stringify(tc.args))+'</div>' : '';
-  var resultHtml = '<div>结果: '+escHtml(String(tc.result||'').slice(0,400))+'</div>';
-  return '<div class="tool-pill">'+
+  var resultHtml = '<div>'+(tc.running ? '执行中…' : '结果: '+escHtml(String(tc.result||'').slice(0,400)))+'</div>';
+  return '<div class="tool-pill'+(tc.running?' running':'')+'">'+
     '<button class="tpill-toggle" onclick="toggleToolCard(this)">'+
       '<i class="ti ti-chevron-right"></i>'+
-      '<i class="ti ti-'+icon+'"></i>'+
+      '<i class="ti ti-'+icon+(tc.running?' tool-spin':'')+'"></i>'+
       '<span>'+escHtml(label)+' ·'+kwHtml+escHtml(status)+'</span>'+
     '</button>'+
     '<div class="tool-card-body">'+argsHtml+resultHtml+'</div>'+
@@ -1493,6 +1499,14 @@ async function streamReply(){
     liveTools=document.getElementById('live-tools');
   }
 
+  function renderLiveTools(running){
+    if(!liveTools) return;
+    var wasOpen = liveTools.querySelector('.tsess.open') != null;
+    liveTools.innerHTML = buildToolCallsHtml(liveToolCalls, {running:!!running, open:wasOpen});
+    var atB=c.scrollHeight-c.scrollTop-c.clientHeight<120;
+    if(atB) c.scrollTop=c.scrollHeight;
+  }
+
   var timer=setInterval(function(){
     if(shown>=target.length) return;
     if(/<(div|details|summary|span)\b[^>]*style\s*=/i.test(target)){
@@ -1528,15 +1542,28 @@ async function streamReply(){
           liveThinkBody.textContent=thinkText;
           var atB=c.scrollHeight-c.scrollTop-c.clientHeight<120;
           if(atB) c.scrollTop=c.scrollHeight;
+        } else if(ev.t==='tool_use'){
+          ensureLiveRow();
+          if(liveThinkWrap && !liveThinkWrap.classList.contains('done'))
+            liveThinkWrap.classList.add('done');
+          var d=ev.d||{};
+          liveToolCalls.push({name:d.name, args:d.args, running:true});
+          renderLiveTools(true);
+        } else if(ev.t==='tool_result'){
+          var ti=(ev.idx!==undefined && ev.idx>=0 && ev.idx<liveToolCalls.length)?ev.idx:liveToolCalls.length-1;
+          if(ti>=0 && ev.d) liveToolCalls[ti]=ev.d;
+          renderLiveTools(liveToolCalls.some(function(t){return t.running;}));
+        } else if(ev.t==='trace_summary'){
+          if(liveTools && ev.d)
+            liveTools.insertAdjacentHTML('beforeend',
+              '<div class="trace-summary-line"><i class="ti ti-route"></i> '+escHtml(ev.d)+'</div>');
         } else if(ev.t==='tool_call'){
+          // 兼容旧gateway：单事件=完成态
           ensureLiveRow();
           if(liveThinkWrap && !liveThinkWrap.classList.contains('done'))
             liveThinkWrap.classList.add('done');
           liveToolCalls.push(ev.d);
-          var wasOpen = liveTools.querySelector('.tsess.open') != null;
-          liveTools.innerHTML = buildToolCallsHtml(liveToolCalls, {running:true, open:wasOpen});
-          var atB=c.scrollHeight-c.scrollTop-c.clientHeight<120;
-          if(atB) c.scrollTop=c.scrollHeight;
+          renderLiveTools(true);
         } else if(ev.t==='text'){
           if(liveThinkWrap && !liveThinkWrap.classList.contains('done'))
             liveThinkWrap.classList.add('done');
