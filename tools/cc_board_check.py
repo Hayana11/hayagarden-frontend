@@ -14,8 +14,10 @@ from urllib.error import URLError
 BOARD_API        = 'http://localhost:5050/api/board?status=open'
 STATE_FILE       = '/var/log/cc_board_seen_id'
 CHAT_STATE_FILE  = '/var/log/cc_board_chat_seen'
+FAIL_COUNT_FILE  = '/var/log/cc_board_fail_counts'
 CLAUDE_BIN       = '/usr/bin/claude'
 TRIGGER_TAGS     = {'紧急', '需求'}
+MAX_TASK_FAILS   = 2   # CC 处理同一条目连续失败 N 次后放弃并补占位回复，防止无限重试烧额度
 AI_AUTHORS       = {'fyodor_api', 'fyodor_web'}  # fyodor_cc 是 CC 自己，不在列，防自触发
 CHAT_TRIGGER_PROB = 0.55   # 55% 概率接嘴，保留随机感
 DB_PATH           = '/opt/frontend/memories.db'
@@ -68,6 +70,36 @@ def fetch_board():
         return None
 
 
+def load_fail_counts():
+    try:
+        with open(FAIL_COUNT_FILE) as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def save_fail_counts(d):
+    with open(FAIL_COUNT_FILE, 'w') as f:
+        json.dump(d, f)
+
+
+def post_giveup_reply(item, board_token):
+    """失败超限后补一条 fyodor_cc 占位回复：既在板上留痕，又消除触发条件（不再重试）。"""
+    from urllib.request import Request
+    body = json.dumps({
+        'author': 'fyodor_cc', 'token': board_token,
+        'content': f'CC 自动处理连续失败 {MAX_TASK_FAILS} 次（超时或额度受限），已停止自动重试。'
+                   '需要的话人工看一下，或把任务拆小重新发帖。',
+    }, ensure_ascii=False).encode('utf-8')
+    req = Request(f'http://localhost:5050/api/board/{item["id"]}/reply',
+                  data=body, headers={'Content-Type': 'application/json'})
+    try:
+        urlopen(req, timeout=10)
+        print(f'[cc_board_check] gave up on board#{item["id"]} after {MAX_TASK_FAILS} fails, posted placeholder reply')
+    except Exception as e:
+        print(f'[cc_board_check] giveup reply failed for #{item["id"]}: {e}', file=sys.stderr)
+
+
 def trigger_task(new_trigger, board_token):
     """唤醒 CC 处理紧急/需求条目"""
     lines = []
@@ -84,15 +116,19 @@ def trigger_task(new_trigger, board_token):
     )
 
     print(f'[cc_board_check] triggering CC for {len(new_trigger)} task item(s): {[it["id"] for it in new_trigger]}')
-    subprocess.run(
-        [CLAUDE_BIN, '-p', prompt,
-         '--allowedTools', 'Bash,Read,Edit,Write,Glob,Grep',
-         '--add-dir', '/opt/frontend'],
-        timeout=300,
-        check=False,
-        cwd='/opt/frontend',
-        env={**os.environ, 'HOME': '/root'}
-    )
+    try:
+        subprocess.run(
+            [CLAUDE_BIN, '-p', prompt,
+             '--allowedTools', 'Bash,Read,Edit,Write,Glob,Grep',
+             '--add-dir', '/opt/frontend'],
+            timeout=300,
+            check=False,
+            cwd='/opt/frontend',
+            env={**os.environ, 'HOME': '/root'}
+        )
+    except subprocess.TimeoutExpired:
+        # 超时不能炸掉脚本，否则后面的失败计数/占位回复逻辑全部跳过
+        print('[cc_board_check] CC task run timed out (300s)', file=sys.stderr)
 
 
 def trigger_chat_reply(item, board_token):
@@ -113,14 +149,17 @@ def trigger_chat_reply(item, board_token):
     )
 
     print(f'[cc_board_check] triggering chat reply for board#{item["id"]}')
-    subprocess.run(
-        [CLAUDE_BIN, '-p', prompt,
-         '--allowedTools', 'Bash'],
-        timeout=120,
-        check=False,
-        cwd='/opt/frontend',
-        env={**os.environ, 'HOME': '/root'}
-    )
+    try:
+        subprocess.run(
+            [CLAUDE_BIN, '-p', prompt,
+             '--allowedTools', 'Bash'],
+            timeout=120,
+            check=False,
+            cwd='/opt/frontend',
+            env={**os.environ, 'HOME': '/root'}
+        )
+    except subprocess.TimeoutExpired:
+        print('[cc_board_check] CC chat reply timed out (120s)', file=sys.stderr)
 
 
 
@@ -174,13 +213,18 @@ def main():
             return True   # 没@任何人，旧逻辑，CC来处理
         return 'fyodor_cc' in mentions.split(',')
 
-    new_trigger = [
+    fail_counts = load_fail_counts()
+
+    task_items = [
         it for it in items
         if it.get('tag') in TRIGGER_TAGS
         and it.get('status') == 'open'
         and not any(r.get('author') == 'fyodor_cc' for r in it.get('replies', []))
         and _cc_should_handle(it)
     ]
+    # 失败降级：连续失败超限的条目不再唤醒 CC，补占位回复后彻底退出重试循环
+    new_trigger = [it for it in task_items if fail_counts.get(str(it['id']), 0) < MAX_TASK_FAILS]
+    exhausted   = [it for it in task_items if fail_counts.get(str(it['id']), 0) >= MAX_TASK_FAILS]
 
     # seen_id只用于防止无限重复处理——只在真正处理完之后才推进
     if max_id > seen_id:
@@ -213,8 +257,27 @@ def main():
     # 随机过滤后触发
     board_token = _load_board_token()
 
+    for it in exhausted:
+        post_giveup_reply(it, board_token)
+        fail_counts.pop(str(it['id']), None)  # 占位回复已消除触发条件，计数不再需要
+    if exhausted:
+        save_fail_counts(fail_counts)
+
     if new_trigger:
         trigger_task(new_trigger, board_token)
+        # 复查板子：CC 跑完后条目仍没有 fyodor_cc 回复 = 本轮失败，计数+1
+        after = fetch_board()
+        after_items = (after if isinstance(after, list) else (after or {}).get('items', [])) or []
+        replied_ids = {it['id'] for it in after_items
+                       if any(r.get('author') == 'fyodor_cc' for r in it.get('replies', []))}
+        for it in new_trigger:
+            bid = str(it['id'])
+            if it['id'] in replied_ids:
+                fail_counts.pop(bid, None)
+            else:
+                fail_counts[bid] = fail_counts.get(bid, 0) + 1
+                print(f'[cc_board_check] board#{it["id"]} not replied after CC run, fail_count={fail_counts[bid]}')
+        save_fail_counts(fail_counts)
 
     for it in chat_to_reply:
         if random.random() < CHAT_TRIGGER_PROB:

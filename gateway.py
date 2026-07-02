@@ -59,6 +59,32 @@ def _get_model():
 def _get_provider():
     return config_store.get('GW_PROVIDER', 'api_relay')
 
+def _slim_args(args, limit=300):
+    """SSE 事件里的工具参数瘦身：大字符串（如整页 HTML）截断，存库仍是完整版。"""
+    if not isinstance(args, dict):
+        return args
+    out = {}
+    for k, v in args.items():
+        if isinstance(v, str) and len(v) > limit:
+            out[k] = v[:limit] + '…[共%d字符]' % len(v)
+        else:
+            out[k] = v
+    return out
+
+
+def _model_supports_thinking():
+    """当前模型是否支持 extended thinking（查 models.json 策展表）。
+    不在表里的模型按支持处理——维持旧行为，不惩罚未收录的模型。"""
+    model = config_store.get('MODEL') or ''
+    try:
+        with open('/opt/frontend/models.json') as f:
+            for m in json.load(f):
+                if m.get('id') == model:
+                    return m.get('thinking', 'extended') != 'none'
+    except Exception:
+        pass
+    return True
+
 def _get_desire_driven():
     return config_store.get_bool('DESIRE_DRIVEN', False)
 
@@ -380,14 +406,16 @@ def _strip_tool_blocks(messages):
 
 def api_call(system, messages):
     from relay.manager import relay as _relay
-    return _relay.call({
+    payload = {
         'max_tokens': 16000,
-        'thinking': {'type': 'enabled', 'budget_tokens': 10000},
         'tools': TOOLS,
         'system': system,
         'messages': messages,
         'metadata': {'user_id': 'hayana-fyodor-stable'},
-    }, timeout=120)
+    }
+    if _model_supports_thinking():
+        payload['thinking'] = {'type': 'enabled', 'budget_tokens': 10000}
+    return _relay.call(payload, timeout=120)
 
 
 NL = chr(10)
@@ -408,9 +436,10 @@ TOOLS = [
     {'name': 'light_on', 'description': '打开次卧的灯（哈娅的房间）。主灯和床头灯是同一盏灯，不用区分。', 'input_schema': {'type': 'object', 'properties': {}}},
     {'name': 'light_off', 'description': '关闭次卧的灯。', 'input_schema': {'type': 'object', 'properties': {}}},
     {'name': 'light_warm', 'description': '暖灯模式：开关两次触发暖色，最终保持亮起。睡前用。', 'input_schema': {'type': 'object', 'properties': {}}},
-    {'name': 'set_brightness', 'description': '设置次卧灯的亮度。', 'input_schema': {'type': 'object', 'properties': {'value': {'type': 'integer', 'description': '亮度 1-100'}}, 'required': ['value']}},
-    {'name': 'set_color_temp', 'description': '设置次卧灯的色温，单位K，2700暖光~6500冷光。', 'input_schema': {'type': 'object', 'properties': {'value': {'type': 'integer'}}, 'required': ['value']}},
-    {'name': 'get_light_status', 'description': '查询次卧灯当前的开关、亮度、色温。', 'input_schema': {'type': 'object', 'properties': {}}},
+    {'name': 'light_neutral', 'description': '中性光模式：日常用的自然白光。', 'input_schema': {'type': 'object', 'properties': {}}},
+    {'name': 'set_brightness', 'description': '【暂不可用】现在的灯不支持调亮度，只支持暖光(light_warm)/中性光(light_neutral)两档。哈娅想调亮度时告诉她这个限制。等新台灯到货后此工具恢复。', 'input_schema': {'type': 'object', 'properties': {'value': {'type': 'integer', 'description': '亮度 1-100'}}, 'required': ['value']}},
+    {'name': 'set_color_temp', 'description': '【暂不可用】现在的灯不支持调色温，只支持暖光(light_warm)/中性光(light_neutral)两档。哈娅想调色温时告诉她这个限制。等新台灯到货后此工具恢复。', 'input_schema': {'type': 'object', 'properties': {'value': {'type': 'integer'}}, 'required': ['value']}},
+    {'name': 'get_light_status', 'description': '查询次卧灯当前的开关状态。（亮度/色温字段是旧协议残留，当前的灯只有暖光/中性光两档）', 'input_schema': {'type': 'object', 'properties': {}}},
     {
         'name': 'read_backend_file',
         'description': '读取后端 Python 源码（只读）。可以读 /opt/frontend/*.py 和 /opt/frontend/tools/*.py，但不能读 .env 等配置文件，也不能修改任何文件。start_line/end_line 可选，用于只看大文件的某一段（从1开始）。',
@@ -724,6 +753,7 @@ def run_tool(name, args, caller='fyodor_cc'):
             'light_on':           ('/light/main/on',   'POST', None),
             'light_off':          ('/light/main/off',  'POST', None),
             'light_warm':         ('/light/bedside/warm', 'POST', None),
+            'light_neutral':      ('/light/bedside/neutral', 'POST', None),
             'set_brightness':     ('/light/brightness', 'POST', {'value': args.get('value', 50)}),
             'set_color_temp':     ('/light/color_temp', 'POST', {'value': args.get('value', 4000)}),
             'get_light_status':   ('/light/status', 'GET', None),
@@ -1406,8 +1436,40 @@ TRACE_SUMMARY_PROMPT = (
 )
 
 
+TOOL_CAPTION_PROMPT = (
+    '你是一个摘要工具。你的唯一任务是把一次工具调用概括成一句不超过12字的中文。'
+    '动词短语开头，写目的和结果而非动作本身，不要引号，不要出现"调用"/"执行"/"工具"。'
+    '失败的调用要说出失败。风格参考："翻了3个前端文件"、"灯已切到暖光"、"没找到相关记忆"。只输出摘要本身。'
+)
+_caption_sem = threading.Semaphore(2)  # caption 高频调用，限并发防打爆 relay
+
+
+def _llm_one_liner(system_prompt, user_text, timeout=10, max_len=40):
+    """轻量一句话生成：走 relay 便宜模型，失败/输出可疑时静默返回 ''。"""
+    payload = json.dumps({
+        'model': TRACE_SUMMARY_MODEL, 'max_tokens': 100,
+        'system': system_prompt,
+        'messages': [{'role': 'user', 'content': user_text}],
+    }, ensure_ascii=False).encode('utf-8')
+    req = urllib.request.Request(API_URL, data=payload, headers={
+        'x-api-key': API_KEY, 'anthropic-version': '2023-06-01',
+        'content-type': 'application/json'})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode())
+        text = ''.join(b.get('text', '') for b in data.get('content', [])
+                       if b.get('type') == 'text').strip().strip('"「」\'')
+        low = text.lower()
+        if not text or len(text) > max_len or any(
+                k in low for k in ('error', 'permission', 'not logged', '抱歉', '对不起')):
+            return ''
+        return text
+    except Exception:
+        return ''
+
+
 def _summarize_traces_sync(tool_calls, timeout=10):
-    """整串工具调用 → 一句人话总摘要。走 relay 便宜模型，失败静默返回 ''。
+    """整串工具调用 → 一句人话总摘要。
     仅在本轮没有 thinking 时由调用方触发（有 thinking 时思考流本身就是摘要）。"""
     parts = []
     for tc in tool_calls:
@@ -1419,26 +1481,27 @@ def _summarize_traces_sync(tool_calls, timeout=10):
             tc.get('name', 'tool'), args_str[:200], str(tc.get('result') or '')[:300]))
     if not parts:
         return ''
-    payload = json.dumps({
-        'model': TRACE_SUMMARY_MODEL, 'max_tokens': 100,
-        'system': TRACE_SUMMARY_PROMPT,
-        'messages': [{'role': 'user', 'content': '\n---\n'.join(parts)}],
-    }, ensure_ascii=False).encode('utf-8')
-    req = urllib.request.Request(API_URL, data=payload, headers={
-        'x-api-key': API_KEY, 'anthropic-version': '2023-06-01',
-        'content-type': 'application/json'})
+    return _llm_one_liner(TRACE_SUMMARY_PROMPT, '\n---\n'.join(parts), timeout=timeout)
+
+
+@app.route('/tool-caption', methods=['POST'])
+def api_tool_caption():
+    """单个工具调用 → 一句人话标注。前端在无 thinking 的轮次逐工具调用。"""
+    data = request.get_json() or {}
+    name = (data.get('tool_name') or '').strip()
+    if not name:
+        return jsonify({'caption': ''})
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            data = json.loads(resp.read().decode())
-        text = ''.join(b.get('text', '') for b in data.get('content', [])
-                       if b.get('type') == 'text').strip().strip('"「」\'')
-        low = text.lower()
-        if not text or len(text) > 40 or any(
-                k in low for k in ('error', 'permission', 'not logged', '抱歉', '对不起')):
-            return ''
-        return text
+        args_str = json.dumps(data.get('tool_input') or {}, ensure_ascii=False)[:200]
     except Exception:
-        return ''
+        args_str = str(data.get('tool_input') or '')[:200]
+    out = str(data.get('tool_output') or '')[:400]
+    ok = data.get('success', True)
+    user_text = '工具: %s\n输入: %s\n输出: %s\n结果: %s' % (
+        name, args_str, out, '成功' if ok else '失败')
+    with _caption_sem:
+        cap = _llm_one_liner(TOOL_CAPTION_PROMPT, user_text, timeout=8, max_len=24)
+    return jsonify({'caption': cap})
 
 
 # ── SSE 事件约定（chatnest 六事件语义，家里 t/d 信封拼写）────────────
@@ -1539,22 +1602,44 @@ def chat_stream():
             # 持有锁，必须在 finally 里释放（含 GeneratorExit / 客户端断开场景）
             text, thinking = None, None
             _released = [False]
+            _persisted = [False]
             cache_read_total, cache_create_total = 0, 0
+            think_acc, text_acc, tool_calls_acc = [], [], []
+
+            def _clean_text(raw):
+                t = re.sub(r'```tool_use\s.*?```\s*', '', raw, flags=re.DOTALL).strip()
+                return re.sub(r'```tool_result\s.*?```\s*', '', t, flags=re.DOTALL).strip()
+
+            def _persist(p_text, p_thinking):
+                if not p_text or _persisted[0]:
+                    return
+                _ci = (json.dumps({'cache_read': cache_read_total, 'cache_creation': cache_create_total})
+                       if (cache_read_total or cache_create_total) else '')
+                conn = get_db()
+                conn.execute(
+                    "INSERT INTO chat_messages (author, content, thinking, tool_calls, cache_info) VALUES ('assistant', ?, ?, ?, ?)",
+                    (p_text, p_thinking, json.dumps(tool_calls_acc, ensure_ascii=False) if tool_calls_acc else '', _ci)
+                )
+                conn.commit()
+                conn.close()
+                _persisted[0] = True
+                _write_session_memo(_uc, p_text)
             try:
                 system   = build_system()
                 messages = build_messages()
-                think_acc, text_acc, tool_calls_acc = [], [], []
                 from relay.manager import relay as _chat_relay
+                _thinking_ok = _model_supports_thinking()
                 for _round in range(5):
                     payload = {
                         'max_tokens': 16000,
                         'stream': True,
                         'system': system,
                         'messages': messages,
-                        'thinking': {'type': 'enabled', 'budget_tokens': 10000},
                         'tools': TOOLS,
                         'metadata': {'user_id': 'hayana-fyodor-stable'},
                     }
+                    if _thinking_ok:
+                        payload['thinking'] = {'type': 'enabled', 'budget_tokens': 10000}
                     # relay adapter 自动根据 relay 能力裁剪 thinking/cache/tools
                     resp = _chat_relay.call_stream(payload, timeout=300)
                     blocks, cur, stop_reason = [], None, None
@@ -1596,11 +1681,18 @@ def chat_stream():
                                 text_acc.append(s)
                                 yield 'data: ' + json.dumps({'t': 'text', 'd': s}) + SSE_END
                             elif dt == 'input_json_delta':
-                                if cur is not None: cur['_json'] = cur.get('_json', '') + d.get('partial_json', '')
+                                if cur is not None:
+                                    cur['_json'] = cur.get('_json', '') + d.get('partial_json', '')
+                                    # 大参数（如 create_html 的整页内容）生成期间前端原本零事件，
+                                    # 空窗超时会断连；每 2KB 推一次进度，顺便让哈娅看见在长
+                                    if len(cur['_json']) - cur.get('_prog', 0) >= 2048:
+                                        cur['_prog'] = len(cur['_json'])
+                                        yield 'data: ' + json.dumps({'t': 'tool_progress', 'd': {'name': cur.get('name', ''), 'chars': cur['_prog']}}) + SSE_END
                             elif dt == 'signature_delta':
                                 if cur is not None: cur['signature'] = cur.get('signature', '') + d.get('signature', '')
                         elif et == 'content_block_stop':
                             if cur is not None:
+                                cur.pop('_prog', None)
                                 if cur.get('type') == 'tool_use':
                                     try:
                                         cur['input'] = json.loads(cur.pop('_json') or '{}')
@@ -1620,7 +1712,7 @@ def chat_stream():
                     for tu in tool_uses:
                         tname = tu.get('name', '')
                         targs = tu.get('input') or {}
-                        yield 'data: ' + json.dumps({'t': 'tool_use', 'd': {'name': tname, 'args': targs}, 'idx': len(tool_calls_acc)}) + SSE_END
+                        yield 'data: ' + json.dumps({'t': 'tool_use', 'd': {'name': tname, 'args': _slim_args(targs)}, 'idx': len(tool_calls_acc)}) + SSE_END
                         file_path = _write_tool_file_path(tname, targs)
                         old_content = _read_file_safe(file_path) if file_path else None
                         result_str = run_tool(tname, targs)
@@ -1643,30 +1735,28 @@ def chat_stream():
                             except Exception:
                                 pass
                         tool_calls_acc.append(tc_item)
-                        yield 'data: ' + json.dumps({'t': 'tool_result', 'd': tc_item, 'idx': len(tool_calls_acc) - 1}) + SSE_END
+                        _slim_item = {**tc_item, 'args': _slim_args(tc_item.get('args')),
+                                      'result': str(tc_item.get('result') or '')[:2000]}
+                        yield 'data: ' + json.dumps({'t': 'tool_result', 'd': _slim_item, 'idx': len(tool_calls_acc) - 1}) + SSE_END
+                        # 旧版缓存前端只认 tool_call；dup=1 让新前端跳过防止重复渲染
+                        yield 'data: ' + json.dumps({'t': 'tool_call', 'd': _slim_item, 'dup': 1}) + SSE_END
                         results.append({'type': 'tool_result', 'tool_use_id': tu.get('id'),
                                         'content': result_str})
                     messages.append({'role': 'user', 'content': results})
                     text_acc.append(NL)
-                text     = ''.join(text_acc).strip()
-                # 过滤掉模型可能在text里叙述的tool markdown代码块
-                text = re.sub(r'```tool_use\s.*?```\s*', '', text, flags=re.DOTALL).strip()
-                text = re.sub(r'```tool_result\s.*?```\s*', '', text, flags=re.DOTALL).strip()
+                text     = _clean_text(''.join(text_acc))
                 thinking = ''.join(think_acc)
-                _cache_info_json = (
-                    json.dumps({'cache_read': cache_read_total, 'cache_creation': cache_create_total})
-                    if (cache_read_total or cache_create_total) else ''
-                )
-                if text:
-                    conn = get_db()
-                    conn.execute(
-                        "INSERT INTO chat_messages (author, content, thinking, tool_calls, cache_info) VALUES ('assistant', ?, ?, ?, ?)",
-                        (text, thinking, json.dumps(tool_calls_acc, ensure_ascii=False) if tool_calls_acc else '', _cache_info_json)
-                    )
-                    conn.commit()
-                    conn.close()
-                    _write_session_memo(_uc, text)
+                _persist(text, thinking)
             finally:
+                # 断流救援：客户端断开(GeneratorExit)或中途异常时，已生成的内容不能凭空消失
+                if not _persisted[0]:
+                    try:
+                        _rt = _clean_text(''.join(text_acc)) if text_acc else ''
+                        if _rt:
+                            _persist(_rt, ''.join(think_acc))
+                            text, thinking = _rt, ''.join(think_acc)
+                    except Exception:
+                        pass
                 _released[0] = True
                 _gen_release((text, thinking) if text else None)
             if tool_calls_acc and not thinking:
