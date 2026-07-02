@@ -29,43 +29,52 @@ def _ombre_handoff_sync():
     """
     Call handoff() for new window continuity.
     Returns compact self_anchor + portraits + recent continuity.
+
+    Uses daemon thread + Event so the 5s wall-clock timeout is enforced even
+    when the worker is blocked on a non-cancellable import (e.g. jieba loading
+    during gateway cold-start). ThreadPoolExecutor.shutdown(wait=True) would
+    block indefinitely in that case.
     """
-    import concurrent.futures as _cf
+    import threading as _th
+
+    result_holder = [None]
+    done = _th.Event()
 
     def _worker():
-        import asyncio as _aio, sys as _sys, logging as _log
-        _log.getLogger('ombre_brain').setLevel(_log.WARNING)
-        _sys.path.insert(0, '/opt/ombre-brain')
-        from server import handoff as _handoff
-        loop = _aio.new_event_loop()
-        _aio.set_event_loop(loop)
         try:
-            return loop.run_until_complete(
-                _aio.wait_for(_handoff(), timeout=3.0)
-            )
-        except _aio.TimeoutError:
-            return None
-        except Exception:
-            return None
-        finally:
+            import asyncio as _aio, sys as _sys, logging as _log
+            _log.getLogger('ombre_brain').setLevel(_log.WARNING)
+            _sys.path.insert(0, '/opt/ombre-brain')
+            from server import handoff as _handoff
+            loop = _aio.new_event_loop()
+            _aio.set_event_loop(loop)
             try:
-                pending = _aio.all_tasks(loop)
-                for t in pending:
-                    t.cancel()
-                if pending:
-                    loop.run_until_complete(
-                        _aio.gather(*pending, return_exceptions=True)
-                    )
+                result_holder[0] = loop.run_until_complete(
+                    _aio.wait_for(_handoff(), timeout=3.0)
+                )
             except Exception:
                 pass
-            loop.close()
+            finally:
+                try:
+                    pending = _aio.all_tasks(loop)
+                    for t in pending:
+                        t.cancel()
+                    if pending:
+                        loop.run_until_complete(
+                            _aio.gather(*pending, return_exceptions=True)
+                        )
+                except Exception:
+                    pass
+                loop.close()
+        except Exception:
+            pass
+        finally:
+            done.set()
 
-    try:
-        with _cf.ThreadPoolExecutor(max_workers=1) as ex:
-            future = ex.submit(_worker)
-            return future.result(timeout=4.0)
-    except Exception:
-        return None
+    t = _th.Thread(target=_worker, daemon=True)
+    t.start()
+    done.wait(timeout=5.0)
+    return result_holder[0]
 
 
 def build_system(wake=False):

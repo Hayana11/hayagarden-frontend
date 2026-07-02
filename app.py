@@ -1699,6 +1699,21 @@ def get_board():
 
 @app.route('/api/board', methods=['POST'])
 def post_board():
+    # ── 留言板写入说明（给新窗口的费佳看）──────────────────────────────
+    # 留言板现在是三板块运维面板，写入时指定 tab 字段：
+    #
+    #   tab='patrol'    → 巡逻报告（P0/P1警报，cc处理后标done）
+    #   tab='changelog' → 修建日志（谁改了什么、为什么、改了哪些文件）
+    #   tab='status'    → 当前状态（正在做的功能，参考meta.state）
+    #
+    # meta 字段（JSON对象，不是字符串）：
+    #   patrol:    {"priority": "P0"}
+    #   changelog: {"type": "fix|feature|refactor", "files": ["gateway.py"]}
+    #   status:    {"state": "active|pending|planned|done", "owner": "cc", "category": "前端"}
+    #
+    # title 字段：一句话标题，列表页显示用（不填则截取content前30字）
+    # status 字段：'open'（未处理）/ 'done'（已处理）
+    # ────────────────────────────────────────────────────────────────────
     data = request.get_json() or {}
     author  = (data.get('author') or 'hayana').strip()
     if author == 'fyodor':
@@ -2699,7 +2714,7 @@ def ws_chat():
         payload = {'max_tokens':2000, 'system':sys_prompt, 'messages':msgs}
         if custom_model:
             payload['model'] = custom_model
-        rd = rm.call(payload, timeout=60)
+        rd = rm.call(payload, timeout=120)
         reply = extract_text(rd)
         return jsonify({'reply': reply})
     except Exception as e:

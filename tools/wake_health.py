@@ -101,7 +101,7 @@ def main():
     # 若 gateway 不可达（步骤3已捕获），这里会再记一条错误但不会误判。
     try:
         req = urllib.request.Request('http://127.0.0.1:5051/api/debug/wake_check')
-        with urllib.request.urlopen(req, timeout=10) as r:
+        with urllib.request.urlopen(req, timeout=35) as r:
             data = json.loads(r.read())
         if not data.get('ok'):
             errors.append(f'build_wake_system() 检测失败: {data.get("error", "unknown")}')
