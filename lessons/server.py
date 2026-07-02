@@ -3,7 +3,7 @@ import sqlite3, json, os
 from mcp.server.fastmcp import FastMCP
 import httpx
 
-mcp = FastMCP("learn-from-mistakes")
+mcp = FastMCP("learn-from-mistakes", host="127.0.0.1", port=5055)
 DB = "/opt/frontend/memories.db"
 API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 LESSON_MODEL = os.environ.get("LESSON_MODEL", "claude-haiku-4-5-20251001")
@@ -160,4 +160,4 @@ async def validate_edit(description: str) -> str:
 
 if __name__ == "__main__":
     init()
-    mcp.run(transport="streamable-http", host="127.0.0.1", port=5055)
+    mcp.run(transport="streamable-http")
