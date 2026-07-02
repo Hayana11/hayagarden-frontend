@@ -1644,6 +1644,8 @@ def chat_stream():
                                 pass
                         tool_calls_acc.append(tc_item)
                         yield 'data: ' + json.dumps({'t': 'tool_result', 'd': tc_item, 'idx': len(tool_calls_acc) - 1}) + SSE_END
+                        # 旧版缓存前端只认 tool_call；dup=1 让新前端跳过防止重复渲染
+                        yield 'data: ' + json.dumps({'t': 'tool_call', 'd': tc_item, 'dup': 1}) + SSE_END
                         results.append({'type': 'tool_result', 'tool_use_id': tu.get('id'),
                                         'content': result_str})
                     messages.append({'role': 'user', 'content': results})

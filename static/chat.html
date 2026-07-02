@@ -1558,6 +1558,7 @@ async function streamReply(){
             liveTools.insertAdjacentHTML('beforeend',
               '<div class="trace-summary-line"><i class="ti ti-route"></i> '+escHtml(ev.d)+'</div>');
         } else if(ev.t==='tool_call'){
+          if(ev.dup) continue; // gateway 为旧缓存前端补发的副本，新前端已渲染过
           // 兼容旧gateway：单事件=完成态
           ensureLiveRow();
           if(liveThinkWrap && !liveThinkWrap.classList.contains('done'))
