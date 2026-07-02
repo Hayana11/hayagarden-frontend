@@ -119,7 +119,16 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:14px;heigh
 @keyframes twblink{0%,100%{opacity:1;}50%{opacity:0;}}
 .live-think-body{padding:0 10px 9px;font-size:12px;color:rgba(42,32,32,.52);line-height:1.65;white-space:pre-wrap;word-break:break-all;max-height:160px;overflow-y:auto;}
 .live-think-wrap.done .live-think-cursor{display:none;}
-.live-think-wrap.done .live-think-hd{color:rgba(124,106,138,.4);}
+.live-think-wrap.done .live-think-hd{color:rgba(124,106,138,.55);}
+/* Phase 2: 思考结束后收拢成轨迹行，点击可重新展开 */
+.live-think-wrap.done{background:rgba(124,106,138,.04);border-left-color:rgba(124,106,138,.18);}
+.live-think-wrap.done .live-think-hd{cursor:pointer;padding:7px 10px;}
+.live-think-wrap.done .live-think-body{display:none;}
+.live-think-wrap.done.expanded .live-think-body{display:block;}
+.live-think-wrap.done .think-brain-pulse{animation:none;}
+.lt-chevron{display:none;margin-left:auto;font-size:12px;opacity:.55;transition:transform .18s;}
+.live-think-wrap.done .lt-chevron{display:inline-block;}
+.live-think-wrap.done.expanded .lt-chevron{transform:rotate(90deg);}
 /* Live tool card (streaming) */
 .live-tool-card{background:rgba(212,165,116,.07);border-left:2px solid rgba(212,165,116,.4);border-radius:0 10px 10px 0;padding:7px 10px;margin:0 0 8px;font-size:11px;color:rgba(212,165,116,.9);}
 .live-tool-name{font-weight:600;font-size:12px;margin-bottom:2px;}
@@ -745,7 +754,7 @@ function dayLabel(dt){
 
 // Tool call cards
 var TOOL_LABELS = {
-  light_on:'开灯',light_off:'关灯',light_warm:'暖灯模式',set_brightness:'调亮度',
+  light_on:'开灯',light_off:'关灯',light_warm:'暖灯模式',light_neutral:'中性光',set_brightness:'调亮度',
   set_color_temp:'调色温',get_light_status:'查灯状态',
   save_memory:'存入记忆',search_memories:'搜索记忆',
   read_backend_file:'读后端代码',read_frontend_file:'读前端文件',
@@ -944,6 +953,12 @@ function buildToolCardHtml(tc) {
     '</div>';
 }
 
+// Live thinking trace-row: collapsed after done, click to re-expand
+function toggleLiveThink(hd){
+  var w = hd.closest('.live-think-wrap');
+  if(w && w.classList.contains('done')) w.classList.toggle('expanded');
+}
+
 // Thinking toggle
 var openThinks = new Set();
 function toggleThink(btn) {
@@ -992,7 +1007,7 @@ function buildHtml(list) {
     var innerHtml = '';
     if(fy && thinking) {
       var tOpen = openThinks.has(String(m.id));
-      var tSummary = (m.thinking_summary || '').trim();
+      var tSummary = (m.thinking_summary || '').trim() || ('思考了 '+thinking.length+' 字');
       innerHtml +=
         '<div class="think-wrap" data-mid="'+m.id+'">' +
           '<button class="think-toggle'+(tOpen?' open':'')+'" onclick="toggleThink(this)">' +
@@ -1486,8 +1501,8 @@ async function streamReply(){
     c.insertAdjacentHTML('beforeend',
       '<div class="msg-row fy" id="live-row"><div class="bwrap">'+
         '<div class="live-think-wrap" id="live-think-wrap" style="display:none">'+
-          '<div class="live-think-hd"><i class="ti ti-brain think-brain-pulse"></i><span class="think-summary-text" style="opacity:.5;font-style:italic">思考中…</span>'+
-          '<span class="live-think-cursor"></span></div>'+
+          '<div class="live-think-hd" onclick="toggleLiveThink(this)"><i class="ti ti-brain think-brain-pulse"></i><span class="think-summary-text" style="opacity:.5;font-style:italic">思考中…</span>'+
+          '<span class="live-think-cursor"></span><i class="ti ti-chevron-right lt-chevron"></i></div>'+
           '<div class="live-think-body" id="live-think-body"></div>'+
         '</div>'+
         '<div id="live-tools"></div>'+
@@ -1505,6 +1520,16 @@ async function streamReply(){
     liveTools.innerHTML = buildToolCallsHtml(liveToolCalls, {running:!!running, open:wasOpen});
     var atB=c.scrollHeight-c.scrollTop-c.clientHeight<120;
     if(atB) c.scrollTop=c.scrollHeight;
+  }
+
+  function finishLiveThink(){
+    if(!liveThinkWrap || liveThinkWrap.classList.contains('done')) return;
+    liveThinkWrap.classList.add('done');
+    var st=liveThinkWrap.querySelector('.think-summary-text');
+    if(st && thinkText){
+      st.style.opacity=''; st.style.fontStyle='';
+      st.textContent='思考了 '+thinkText.length+' 字';
+    }
   }
 
   var timer=setInterval(function(){
@@ -1544,8 +1569,7 @@ async function streamReply(){
           if(atB) c.scrollTop=c.scrollHeight;
         } else if(ev.t==='tool_use'){
           ensureLiveRow();
-          if(liveThinkWrap && !liveThinkWrap.classList.contains('done'))
-            liveThinkWrap.classList.add('done');
+          finishLiveThink();
           var d=ev.d||{};
           liveToolCalls.push({name:d.name, args:d.args, running:true});
           renderLiveTools(true);
@@ -1561,13 +1585,11 @@ async function streamReply(){
           if(ev.dup) continue; // gateway 为旧缓存前端补发的副本，新前端已渲染过
           // 兼容旧gateway：单事件=完成态
           ensureLiveRow();
-          if(liveThinkWrap && !liveThinkWrap.classList.contains('done'))
-            liveThinkWrap.classList.add('done');
+          finishLiveThink();
           liveToolCalls.push(ev.d);
           renderLiveTools(true);
         } else if(ev.t==='text'){
-          if(liveThinkWrap && !liveThinkWrap.classList.contains('done'))
-            liveThinkWrap.classList.add('done');
+          finishLiveThink();
           target+=ev.d;
         } else if(ev.t==='usage'){
           streamState.cacheRead+=ev.cache_read||0;
