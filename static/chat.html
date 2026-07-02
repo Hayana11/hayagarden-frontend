@@ -883,7 +883,8 @@ function buildToolPillHtml(tc){
   var icon = tc.running ? 'loader-2' : toolIcon(tc.name);
   var status = tc.running ? ' · 运行中' : (tc.success===false ? ' · 失败' : '');
   var kws = toolKeywords(tc);
-  var kwHtml = kws.length ? ' <span class="tpill-kw">'+kws.map(escHtml).join(' ')+'</span>' : '';
+  var kwHtml = tc.caption ? ' <span class="tpill-kw">'+escHtml(tc.caption)+'</span>'
+             : (kws.length ? ' <span class="tpill-kw">'+kws.map(escHtml).join(' ')+'</span>' : '');
   var hasArgs = tc.args && Object.keys(tc.args).length>0;
   var argsHtml = hasArgs ? '<div style="opacity:.65;margin-bottom:4px">参数: '+escHtml(JSON.stringify(tc.args))+'</div>' : '';
   var resultHtml = '<div>'+(tc.running ? '执行中…' : '结果: '+escHtml(String(tc.result||'').slice(0,400)))+'</div>';
@@ -1219,10 +1220,15 @@ async function send(){
         if(capturedThink&&capturedThink.trim()){
           (async function(){
             try{
-              var ac=new AbortController(); var tid=setTimeout(function(){ac.abort();},28000);
-              var sumResp=await fetch('/api/think/summarize',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({thinking:capturedThink.slice(0,3000)}),signal:ac.signal});
-              clearTimeout(tid);
-              var sumData=await sumResp.json(); var summary=(sumData.summary||'').trim();
+              // 阶段3：思考结束时已抢先生成过摘要，直接复用，不再二次调用
+              var summary=null;
+              if(window._earlyThinkSummary){ try{ summary=await window._earlyThinkSummary; }catch(e){} }
+              if(!summary){
+                var ac=new AbortController(); var tid=setTimeout(function(){ac.abort();},28000);
+                var sumResp=await fetch('/api/think/summarize',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({thinking:capturedThink.slice(0,3000)}),signal:ac.signal});
+                clearTimeout(tid);
+                var sumData=await sumResp.json(); summary=(sumData.summary||'').trim();
+              }
               if(!summary) return;
               fetch('/api/chat/think_summary',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({summary:summary})}).catch(function(){});
               var allTw=document.querySelectorAll('.msg-row.fy .think-wrap');
@@ -1484,6 +1490,7 @@ async function retryStream(){
 
 async function streamReply(){
   streamState.cacheRead=0; streamState.cacheCreate=0; streamState.inputTokens=0;
+  window._earlyThinkSummary=null;
   var ctrl=new AbortController(); streamAbort=ctrl;
   var _safetyTimeout=setTimeout(function(){ctrl.abort();},300000);
   var resp=await fetch('/api/gw/chat/stream',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}',signal:ctrl.signal});
@@ -1522,6 +1529,20 @@ async function streamReply(){
     if(atB) c.scrollTop=c.scrollHeight;
   }
 
+  function maybeFetchToolCaption(idx){
+    if(thinkText) return; // 有思考的轮次不请求 caption——思考流本身就是最好的摘要（省钱）
+    var tc=liveToolCalls[idx];
+    if(!tc || tc.running || CODE_TOOLS[tc.name] || tc.caption) return; // 代码工具的 tsess 终端行已有路径信息
+    fetch('/api/gw/tool-caption',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({tool_name:tc.name,tool_input:tc.args||{},tool_output:String(tc.result||'').slice(0,400),success:tc.success!==false})})
+    .then(function(r){return r.ok?r.json():null;})
+    .then(function(j){
+      if(!j||!j.caption) return;
+      tc.caption=j.caption;
+      renderLiveTools(liveToolCalls.some(function(t){return t.running;}));
+    }).catch(function(){});
+  }
+
   function finishLiveThink(){
     if(!liveThinkWrap || liveThinkWrap.classList.contains('done')) return;
     liveThinkWrap.classList.add('done');
@@ -1529,6 +1550,17 @@ async function streamReply(){
     if(st && thinkText){
       st.style.opacity=''; st.style.fontStyle='';
       st.textContent='思考了 '+thinkText.length+' 字';
+      // 思考一结束就抢先生成摘要（正文还在流），结果同时缓存给流结束后的存库逻辑
+      window._earlyThinkSummary = (async function(){
+        try{
+          var ac=new AbortController(); var tid=setTimeout(function(){ac.abort();},28000);
+          var r=await fetch('/api/think/summarize',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({thinking:thinkText.slice(0,3000)}),signal:ac.signal});
+          clearTimeout(tid);
+          var d=await r.json(); var s=(d.summary||'').trim();
+          if(s && s.length<=40 && st){ st.textContent=s; }
+          return s||null;
+        }catch(e){ return null; }
+      })();
     }
   }
 
@@ -1577,6 +1609,7 @@ async function streamReply(){
           var ti=(ev.idx!==undefined && ev.idx>=0 && ev.idx<liveToolCalls.length)?ev.idx:liveToolCalls.length-1;
           if(ti>=0 && ev.d) liveToolCalls[ti]=ev.d;
           renderLiveTools(liveToolCalls.some(function(t){return t.running;}));
+          maybeFetchToolCaption(ti);
         } else if(ev.t==='trace_summary'){
           if(liveTools && ev.d)
             liveTools.insertAdjacentHTML('beforeend',

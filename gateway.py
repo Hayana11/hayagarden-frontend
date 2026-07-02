@@ -1408,8 +1408,40 @@ TRACE_SUMMARY_PROMPT = (
 )
 
 
+TOOL_CAPTION_PROMPT = (
+    '你是一个摘要工具。你的唯一任务是把一次工具调用概括成一句不超过12字的中文。'
+    '动词短语开头，写目的和结果而非动作本身，不要引号，不要出现"调用"/"执行"/"工具"。'
+    '失败的调用要说出失败。风格参考："翻了3个前端文件"、"灯已切到暖光"、"没找到相关记忆"。只输出摘要本身。'
+)
+_caption_sem = threading.Semaphore(2)  # caption 高频调用，限并发防打爆 relay
+
+
+def _llm_one_liner(system_prompt, user_text, timeout=10, max_len=40):
+    """轻量一句话生成：走 relay 便宜模型，失败/输出可疑时静默返回 ''。"""
+    payload = json.dumps({
+        'model': TRACE_SUMMARY_MODEL, 'max_tokens': 100,
+        'system': system_prompt,
+        'messages': [{'role': 'user', 'content': user_text}],
+    }, ensure_ascii=False).encode('utf-8')
+    req = urllib.request.Request(API_URL, data=payload, headers={
+        'x-api-key': API_KEY, 'anthropic-version': '2023-06-01',
+        'content-type': 'application/json'})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode())
+        text = ''.join(b.get('text', '') for b in data.get('content', [])
+                       if b.get('type') == 'text').strip().strip('"「」\'')
+        low = text.lower()
+        if not text or len(text) > max_len or any(
+                k in low for k in ('error', 'permission', 'not logged', '抱歉', '对不起')):
+            return ''
+        return text
+    except Exception:
+        return ''
+
+
 def _summarize_traces_sync(tool_calls, timeout=10):
-    """整串工具调用 → 一句人话总摘要。走 relay 便宜模型，失败静默返回 ''。
+    """整串工具调用 → 一句人话总摘要。
     仅在本轮没有 thinking 时由调用方触发（有 thinking 时思考流本身就是摘要）。"""
     parts = []
     for tc in tool_calls:
@@ -1421,26 +1453,27 @@ def _summarize_traces_sync(tool_calls, timeout=10):
             tc.get('name', 'tool'), args_str[:200], str(tc.get('result') or '')[:300]))
     if not parts:
         return ''
-    payload = json.dumps({
-        'model': TRACE_SUMMARY_MODEL, 'max_tokens': 100,
-        'system': TRACE_SUMMARY_PROMPT,
-        'messages': [{'role': 'user', 'content': '\n---\n'.join(parts)}],
-    }, ensure_ascii=False).encode('utf-8')
-    req = urllib.request.Request(API_URL, data=payload, headers={
-        'x-api-key': API_KEY, 'anthropic-version': '2023-06-01',
-        'content-type': 'application/json'})
+    return _llm_one_liner(TRACE_SUMMARY_PROMPT, '\n---\n'.join(parts), timeout=timeout)
+
+
+@app.route('/tool-caption', methods=['POST'])
+def api_tool_caption():
+    """单个工具调用 → 一句人话标注。前端在无 thinking 的轮次逐工具调用。"""
+    data = request.get_json() or {}
+    name = (data.get('tool_name') or '').strip()
+    if not name:
+        return jsonify({'caption': ''})
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            data = json.loads(resp.read().decode())
-        text = ''.join(b.get('text', '') for b in data.get('content', [])
-                       if b.get('type') == 'text').strip().strip('"「」\'')
-        low = text.lower()
-        if not text or len(text) > 40 or any(
-                k in low for k in ('error', 'permission', 'not logged', '抱歉', '对不起')):
-            return ''
-        return text
+        args_str = json.dumps(data.get('tool_input') or {}, ensure_ascii=False)[:200]
     except Exception:
-        return ''
+        args_str = str(data.get('tool_input') or '')[:200]
+    out = str(data.get('tool_output') or '')[:400]
+    ok = data.get('success', True)
+    user_text = '工具: %s\n输入: %s\n输出: %s\n结果: %s' % (
+        name, args_str, out, '成功' if ok else '失败')
+    with _caption_sem:
+        cap = _llm_one_liner(TOOL_CAPTION_PROMPT, user_text, timeout=8, max_len=24)
+    return jsonify({'caption': cap})
 
 
 # ── SSE 事件约定（chatnest 六事件语义，家里 t/d 信封拼写）────────────
