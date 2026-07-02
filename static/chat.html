@@ -341,6 +341,9 @@ html[data-theme=dark] .ni{color:#6a5f5f;}
 .model-opt:hover,.model-opt:active{background:var(--primary-bg);}
 .model-opt .mo-dot{width:6px;height:6px;border-radius:50%;flex-shrink:0;}
 .model-opt.selected{color:var(--primary);}
+.model-opt .mo-desc{display:block;flex-basis:100%;font-size:10.5px;color:var(--muted);margin:1px 0 0 14px;letter-spacing:.2px;}
+.model-opt{flex-wrap:wrap;}
+.model-more-toggle{color:var(--muted);font-size:11.5px;border-top:1px solid var(--border);border-radius:0;margin-top:4px;padding-top:8px;}
 .model-opt.selected .mo-dot{background:var(--primary);}
 /* think & memory cards */
 .think-wrap{background:rgba(124,106,138,.05);border-left:2px solid rgba(124,106,138,.25);border-radius:0 8px 8px 0;margin:0 0 10px;overflow:hidden;}
@@ -443,11 +446,7 @@ html[data-theme=dark] .ni{color:#6a5f5f;}
         <button class="inp-attach" onclick="document.getElementById('file-in').click()"><i class="ti ti-paperclip"></i></button>
         <input type="file" id="file-in" accept="image/*" style="display:none" onchange="onFile(event)">
         <div class="model-pill" id="model-pill">
-          <div class="model-pill-sheet" id="model-sheet">
-            <button class="model-opt" data-model="claude-opus-4-6" onclick="selectModel(this)"><span class="mo-dot" style="background:#7c6a8a"></span>Opus 4.6</button>
-            <button class="model-opt" data-model="claude-sonnet-4-6" onclick="selectModel(this)"><span class="mo-dot" style="background:#6a8a7c"></span>Sonnet 4.6</button>
-            <button class="model-opt" data-model="claude-haiku-4-5-20251001" onclick="selectModel(this)"><span class="mo-dot" style="background:#8a7c6a"></span>Haiku 4.5</button>
-          </div>
+          <div class="model-pill-sheet" id="model-sheet"></div>
           <button class="model-pill-btn" id="model-pill-btn" onclick="toggleModelSheet()">
             <span class="model-dot"></span><span id="model-label">Opus</span>
           </button>
@@ -1769,17 +1768,42 @@ function getTimedPlaceholder() {
 }
 
 // ── Model selector ──
-var MODEL_LABELS = {'claude-opus-4-6':'Opus','claude-sonnet-4-6':'Sonnet','claude-haiku-4-5-20251001':'Haiku'};
-var _curModel = 'claude-opus-4-6';
+var _modelCatalog = [];
+var _curModel = '';
+function _modelMeta(id){ return _modelCatalog.find(function(m){return m.id===id;}) || null; }
+function _modelLabel(id){ var m=_modelMeta(id); return m ? m.label : (id.replace(/\[[^\]]*\]/g,'').trim() || id); }
 async function initModelPill() {
-  try{ var r=await fetch('/api/config/model'); var d=await r.json(); _curModel=d.model||_curModel; }catch(e){}
+  try{
+    var r=await fetch('/api/config/model-catalog'); var d=await r.json();
+    _modelCatalog=d.models||[]; _curModel=d.current||'';
+  }catch(e){}
+  renderModelSheet(false);
   updateModelPill();
   var t=document.getElementById('txt'); if(t&&!t.disabled) t.placeholder=getTimedPlaceholder();
 }
+function renderModelSheet(showMore){
+  var sheet=document.getElementById('model-sheet');
+  var primary=_modelCatalog.filter(function(m){return m.primary;});
+  var more=_modelCatalog.filter(function(m){return !m.primary;});
+  // 当前模型不在任何列表时（手动设过奇怪值），插到顶部让它可见可选
+  if(_curModel && !_modelMeta(_curModel))
+    primary=[{id:_curModel,label:_modelLabel(_curModel),desc:'（不在清单中）',thinking:'extended',dot:'#999'}].concat(primary);
+  function opt(m){
+    return '<button class="model-opt'+(m.id===_curModel?' selected':'')+'" data-model="'+escHtml(m.id)+'" onclick="selectModel(this)">'+
+      '<span class="mo-dot" style="background:'+escHtml(m.dot||'#8a8177')+'"></span>'+escHtml(m.label)+
+      (m.thinking==='extended'?' <i class="ti ti-brain" style="font-size:11px;opacity:.5"></i>':'')+
+      (m.desc?'<span class="mo-desc">'+escHtml(m.desc)+'</span>':'')+
+    '</button>';
+  }
+  var html=primary.map(opt).join('');
+  if(more.length){
+    html+='<button class="model-opt model-more-toggle" onclick="event.stopPropagation();renderModelSheet('+(!showMore)+')"><i class="ti ti-chevron-'+(showMore?'up':'down')+'"></i>更多模型'+(showMore?'':' ('+more.length+')')+'</button>';
+    if(showMore) html+=more.map(opt).join('');
+  }
+  sheet.innerHTML=html;
+}
 function updateModelPill() {
-  var label=MODEL_LABELS[_curModel]||_curModel.split('-')[1]||_curModel;
-  document.getElementById('model-label').textContent=label;
-  document.querySelectorAll('.model-opt').forEach(function(btn){ btn.classList.toggle('selected',btn.dataset.model===_curModel); });
+  document.getElementById('model-label').textContent=_modelLabel(_curModel)||'模型';
 }
 function toggleModelSheet() { document.getElementById('model-sheet').classList.toggle('show'); }
 async function selectModel(btn) {
@@ -1787,7 +1811,8 @@ async function selectModel(btn) {
   if(m===_curModel) return;
   try{
     var r=await fetch('/api/config/model',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model:m})});
-    var d=await r.json(); if(d.model){_curModel=d.model;updateModelPill();showToast('已切换到 '+(MODEL_LABELS[d.model]||d.model));}
+    var d=await r.json();
+    if(d.model||d.ok){_curModel=d.model||m;renderModelSheet(false);updateModelPill();showToast('已切换到 '+_modelLabel(_curModel));}
   }catch(e){showToast('切换失败');}
 }
 document.addEventListener('click',function(e){

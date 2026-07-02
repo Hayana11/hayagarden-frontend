@@ -59,6 +59,19 @@ def _get_model():
 def _get_provider():
     return config_store.get('GW_PROVIDER', 'api_relay')
 
+def _model_supports_thinking():
+    """当前模型是否支持 extended thinking（查 models.json 策展表）。
+    不在表里的模型按支持处理——维持旧行为，不惩罚未收录的模型。"""
+    model = config_store.get('MODEL') or ''
+    try:
+        with open('/opt/frontend/models.json') as f:
+            for m in json.load(f):
+                if m.get('id') == model:
+                    return m.get('thinking', 'extended') != 'none'
+    except Exception:
+        pass
+    return True
+
 def _get_desire_driven():
     return config_store.get_bool('DESIRE_DRIVEN', False)
 
@@ -380,14 +393,16 @@ def _strip_tool_blocks(messages):
 
 def api_call(system, messages):
     from relay.manager import relay as _relay
-    return _relay.call({
+    payload = {
         'max_tokens': 16000,
-        'thinking': {'type': 'enabled', 'budget_tokens': 10000},
         'tools': TOOLS,
         'system': system,
         'messages': messages,
         'metadata': {'user_id': 'hayana-fyodor-stable'},
-    }, timeout=120)
+    }
+    if _model_supports_thinking():
+        payload['thinking'] = {'type': 'enabled', 'budget_tokens': 10000}
+    return _relay.call(payload, timeout=120)
 
 
 NL = chr(10)
@@ -1580,16 +1595,18 @@ def chat_stream():
                 messages = build_messages()
                 think_acc, text_acc, tool_calls_acc = [], [], []
                 from relay.manager import relay as _chat_relay
+                _thinking_ok = _model_supports_thinking()
                 for _round in range(5):
                     payload = {
                         'max_tokens': 16000,
                         'stream': True,
                         'system': system,
                         'messages': messages,
-                        'thinking': {'type': 'enabled', 'budget_tokens': 10000},
                         'tools': TOOLS,
                         'metadata': {'user_id': 'hayana-fyodor-stable'},
                     }
+                    if _thinking_ok:
+                        payload['thinking'] = {'type': 'enabled', 'budget_tokens': 10000}
                     # relay adapter 自动根据 relay 能力裁剪 thinking/cache/tools
                     resp = _chat_relay.call_stream(payload, timeout=300)
                     blocks, cur, stop_reason = [], None, None

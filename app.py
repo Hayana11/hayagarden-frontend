@@ -703,9 +703,20 @@ def config_set_model():
         return jsonify({'error': 'empty model'}), 400
     try:
         config_store.set('MODEL', new_model)
-        return jsonify({'ok': True})
+        return jsonify({'ok': True, 'model': new_model})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+
+@app.route('/api/config/model-catalog', methods=['GET'])
+def config_model_catalog():
+    """策展过的模型清单（models.json）+ 当前生效模型。
+    id 是 relay 的真实模型名；thinking 字段（extended/none）决定 gateway 是否传 thinking 参数。"""
+    try:
+        with open('/opt/frontend/models.json') as f:
+            catalog = json.load(f)
+    except Exception:
+        catalog = []
+    return jsonify({'models': catalog, 'current': config_store.get('MODEL') or ''})
 
 @app.route('/api/config/key-status', methods=['GET'])
 def config_key_status():

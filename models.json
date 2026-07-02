@@ -1,0 +1,8 @@
+[
+  {"id": "[Kiro] claude-opus-4-6-thinking [不补]", "label": "Opus 4.6 思考", "desc": "主力：深度思考+工具", "thinking": "extended", "primary": true,  "dot": "#7c6a8a"},
+  {"id": "[Kiro] claude-opus-4-8 [不补]",          "label": "Opus 4.8",      "desc": "新一代，直接回答",   "thinking": "none",     "primary": true,  "dot": "#8a6a7c"},
+  {"id": "[Kiro次] claude-opus-4-6 [不补]",        "label": "Opus 4.6 直答", "desc": "同主力但不思考，更快", "thinking": "none",   "primary": true,  "dot": "#6a8a7c"},
+  {"id": "[Kiro] claude-sonnet-5-thinking [不补]", "label": "Sonnet 5 思考", "desc": "实测响应很慢，慎用",  "thinking": "extended", "primary": false, "dot": "#8a7c6a"},
+  {"id": "[三方1][次] claude-opus-4-5 [不补]",     "label": "Opus 4.5",      "desc": "备用通道",           "thinking": "none",     "primary": false, "dot": "#7c8a6a"},
+  {"id": "[按量3] deepseek-v3.2",                  "label": "DeepSeek 3.2",  "desc": "极快极便宜，摘要同款", "thinking": "none",   "primary": false, "dot": "#6a7c8a"}
+]
