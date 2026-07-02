@@ -6,6 +6,7 @@ import httpx
 mcp = FastMCP("learn-from-mistakes", host="127.0.0.1", port=5055)
 DB = "/opt/frontend/memories.db"
 API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+API_URL = os.environ.get("ANTHROPIC_API_URL", "https://api.anthropic.com/v1/messages")
 LESSON_MODEL = os.environ.get("LESSON_MODEL", "claude-haiku-4-5-20251001")
 
 def db():
@@ -43,12 +44,19 @@ def init():
 async def claude(prompt: str) -> str:
     async with httpx.AsyncClient(timeout=30) as client:
         r = await client.post(
-            "https://api.anthropic.com/v1/messages",
+            API_URL,
             headers={"x-api-key": API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json"},
             json={"model": LESSON_MODEL, "max_tokens": 400,
                   "messages": [{"role": "user", "content": prompt}]}
         )
         return r.json()["content"][0]["text"]
+
+def parse_json(text: str) -> dict:
+    t = text.strip()
+    if t.startswith("```"):
+        t = t.split("\n", 1)[1] if "\n" in t else t
+        t = t.rsplit("```", 1)[0]
+    return json.loads(t.strip())
 
 def quick_match(description: str, lessons) -> list:
     words = set(description.lower().replace(',', ' ').split())
@@ -64,7 +72,7 @@ async def record_evidence(description: str, context: str = "", author: str = "cc
     """记录一次错误，自动提炼候选教训"""
     prompt = f'从错误提炼教训，只回复JSON：{{"title":"标题15字内","description":"说明60字内","tags":"tag1,tag2"}}\n错误：{description}\n上下文：{context}'
     try:
-        data = json.loads((await claude(prompt)).strip())
+        data = parse_json(await claude(prompt))
     except:
         data = {"title": "待提炼", "description": description[:60], "tags": "未分类"}
     c = db()
@@ -153,7 +161,7 @@ async def validate_edit(description: str) -> str:
     ls = "\n".join(f"- {l['title']}：{l['description']}" for l in candidates)
     prompt = f'判断改动是否违反教训，只回复JSON：{{"hits":[],"warning":"无命中则空字符串"}}\n改动：{description}\n教训：\n{ls}'
     try:
-        data = json.loads((await claude(prompt)).strip())
+        data = parse_json(await claude(prompt))
         return f"⚠️ {data['warning']}\n命中：{', '.join(data['hits'])}" if data.get("warning") else "✓ 未命中。"
     except:
         return "✓ 检查完成。"

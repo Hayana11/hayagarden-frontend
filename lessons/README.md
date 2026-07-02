@@ -15,6 +15,8 @@
 5. 新工具 `deprecate_lesson` — 标记过时
 6. `validate_edit` 两层筛选 — 先 tag 关键词 quick_match，命中才调 Claude
 7. `LESSON_MODEL` 环境变量 — 可切换提炼/校验用的模型，默认 haiku
+8. `ANTHROPIC_API_URL` 环境变量 — API 地址可指向 relay（默认官方 `api.anthropic.com`）。VPS 上官方 key 不可用，实际配置指向 relay `https://68886868.xyz/v1/messages` + `LESSON_MODEL=[按量3] deepseek-v3.2`（relay 无 haiku 通道；Kiro claude 通道太慢，deepseek-v3.2 快且输出纯 JSON）
+9. `parse_json` — 剥掉模型输出可能带的 ` ```json ` 围栏再解析
 
 ## 部署
 
