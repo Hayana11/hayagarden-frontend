@@ -1194,7 +1194,16 @@ def _cc_prepare(system, messages):
     prompt_body = ('think hard' + NL
                    + '以下是你们最近的对话记录：' + NL + NL + convo + NL + NL
                    + '请以费奥多尔的身份自然地回复最后一条消息。只输出回复内容本身，不要任何前缀。')
-    prompt = (('【当前状态】\n' + dynamic_text + '\n\n') if dynamic_text else '') + prompt_body
+    # M3: 官端与网页端的召回对称——posts 的相关记忆同样自动进 CC 通道的视野
+    _last_user = ''
+    for _m in reversed(messages):
+        if _m.get('role') == 'user':
+            _c = _m.get('content')
+            _last_user = _c if isinstance(_c, str) else ' '.join(
+                b.get('text', '') for b in _c if isinstance(b, dict))
+            break
+    _recall_blk, _ = _recall_memories(_last_user) if _last_user else ('', [])
+    prompt = _recall_blk + (('【当前状态】\n' + dynamic_text + '\n\n') if dynamic_text else '') + prompt_body
     env = dict(os.environ)
     env['CLAUDE_CODE_OAUTH_TOKEN'] = CC_TOKEN
     env.pop('ANTHROPIC_API_KEY', None)
@@ -1214,6 +1223,7 @@ CC_ALLOWED_TOOLS = ','.join([
     'mcp__home__light_bedside_warm', 'mcp__home__light_bedside_neutral',
     'mcp__home__get_todos', 'mcp__home__add_todo', 'mcp__home__get_countdowns',
     'mcp__home__get_ledger', 'mcp__home__add_ledger', 'mcp__home__get_ledger_budget',
+    'mcp__home__search_memories',  # M3: 官端主动翻 posts 记忆库
 ])
 
 
