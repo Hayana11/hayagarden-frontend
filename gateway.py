@@ -59,6 +59,42 @@ def _get_model():
 def _get_provider():
     return config_store.get('GW_PROVIDER', 'api_relay')
 
+def _recall_memories(user_msg, limit=3):
+    """自动记忆召回：jieba 分词用户消息，78 条量级全扫打分（零索引——体量不配吃索引）。
+    词重叠为基础分（<2 不注入防噪声），pinned/importance 加权，60 天半衰期时间衰减。
+    注入到最后一条 user 消息前而非 system——system 是缓存的，每条消息都变会打爆缓存。"""
+    try:
+        import jieba
+        words = set(w for w in jieba.cut(user_msg) if len(w.strip()) >= 2)
+        if not words:
+            return ''
+        conn = get_db()
+        rows = conn.execute("SELECT type, content, pinned, importance, created_at FROM posts").fetchall()
+        conn.close()
+        now = datetime.datetime.utcnow() + datetime.timedelta(hours=8)
+        scored = []
+        for r in rows:
+            c = r['content'] or ''
+            base = sum(1 for w in words if w in c)
+            if base < 2:
+                continue
+            try:
+                age_days = max(0, (now - datetime.datetime.strptime(str(r['created_at'])[:19], '%Y-%m-%d %H:%M:%S')).days)
+            except Exception:
+                age_days = 0
+            score = base * (0.5 ** (age_days / 60.0)) + (2 if r['pinned'] else 0) + (r['importance'] or 0) * 0.5
+            scored.append((score, r['type'], c, str(r['created_at'])[:10]))
+        if not scored:
+            return ''
+        scored.sort(key=lambda x: -x[0])
+        parts = ['[%s %s] %s' % (t, d, c[:300]) for _, t, c, d in scored[:limit]]
+        return ('<recalled-memory>\n以下是自动检索到的相关记忆片段，按相关度排序。'
+                '可能与这次对话相关，参考着用；不相关就忽略。不要向哈娅提及这个标签本身。\n\n'
+                + '\n---\n'.join(parts) + '\n</recalled-memory>\n\n')
+    except Exception:
+        return ''
+
+
 def _slim_args(args, limit=300):
     """SSE 事件里的工具参数瘦身：大字符串（如整页 HTML）截断，存库仍是完整版。"""
     if not isinstance(args, dict):
@@ -1627,6 +1663,16 @@ def chat_stream():
             try:
                 system   = build_system()
                 messages = build_messages()
+                _recall = _recall_memories(_uc) if _uc else ''
+                if _recall and messages:
+                    for _mi in range(len(messages) - 1, -1, -1):
+                        if messages[_mi].get('role') == 'user':
+                            _mc = messages[_mi].get('content')
+                            if isinstance(_mc, str):
+                                messages[_mi]['content'] = _recall + _mc
+                            elif isinstance(_mc, list):
+                                messages[_mi]['content'] = [{'type': 'text', 'text': _recall}] + _mc
+                            break
                 from relay.manager import relay as _chat_relay
                 _thinking_ok = _model_supports_thinking()
                 for _round in range(5):
