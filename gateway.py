@@ -59,6 +59,44 @@ def _get_model():
 def _get_provider():
     return config_store.get('GW_PROVIDER', 'api_relay')
 
+def _recall_memories(user_msg, limit=3):
+    """自动记忆召回：jieba 分词用户消息，78 条量级全扫打分（零索引——体量不配吃索引）。
+    词重叠为基础分（<2 不注入防噪声），pinned/importance 加权，60 天半衰期时间衰减。
+    注入到最后一条 user 消息前而非 system——system 是缓存的，每条消息都变会打爆缓存。"""
+    try:
+        import jieba
+        words = set(w for w in jieba.cut(user_msg) if len(w.strip()) >= 2)
+        if not words:
+            return ''
+        conn = get_db()
+        rows = conn.execute("SELECT type, content, pinned, importance, created_at FROM posts").fetchall()
+        conn.close()
+        now = datetime.datetime.utcnow() + datetime.timedelta(hours=8)
+        scored = []
+        for r in rows:
+            c = r['content'] or ''
+            base = sum(1 for w in words if w in c)
+            if base < 2:
+                continue
+            try:
+                age_days = max(0, (now - datetime.datetime.strptime(str(r['created_at'])[:19], '%Y-%m-%d %H:%M:%S')).days)
+            except Exception:
+                age_days = 0
+            score = base * (0.5 ** (age_days / 60.0)) + (2 if r['pinned'] else 0) + (r['importance'] or 0) * 0.5
+            scored.append((score, r['type'], c, str(r['created_at'])[:10]))
+        if not scored:
+            return '', []
+        scored.sort(key=lambda x: -x[0])
+        parts = ['[%s %s] %s' % (t, d, c[:300]) for _, t, c, d in scored[:limit]]
+        items = [{'type': t, 'date': d, 'preview': c[:80]} for _, t, c, d in scored[:limit]]
+        block = ('<recalled-memory>\n以下是自动检索到的相关记忆片段，按相关度排序。'
+                 '可能与这次对话相关，参考着用；不相关就忽略。不要向哈娅提及这个标签本身。\n\n'
+                 + '\n---\n'.join(parts) + '\n</recalled-memory>\n\n')
+        return block, items
+    except Exception:
+        return '', []
+
+
 def _slim_args(args, limit=300):
     """SSE 事件里的工具参数瘦身：大字符串（如整页 HTML）截断，存库仍是完整版。"""
     if not isinstance(args, dict):
@@ -102,7 +140,8 @@ _gen_cond = threading.Condition()
 _gen_busy = False
 _gen_busy_since = 0.0   # epoch seconds when lock was last acquired
 _gen_last_result = None
-_GEN_ZOMBIE_TTL = 90    # seconds before a held lock is treated as zombie
+_GEN_ZOMBIE_TTL = 320   # 对齐 relay 超时(300s)。原 90s 比正常长生成还短，
+                        # 慢模型跑到一半锁被当僵尸踢掉→双生成并行→"还没回复完"怪象
 
 def _gen_acquire_or_wait(wait_timeout=15):
     """返回 ('own', None) 表示本次调用应自己生成；
@@ -134,6 +173,16 @@ def _gen_release(result):
         _gen_last_result = result
         _gen_busy = False
         _gen_cond.notify_all()
+
+
+@app.route('/chat/cancel', methods=['POST'])
+def chat_cancel():
+    """前端点停止后调用：立刻释放生成锁，让下一条消息马上能发。
+    旧 generator 卡在 relay 阻塞读里，要到下一个 yield 才会死（GeneratorExit），
+    不主动放锁的话新消息要白等 15 秒然后被拒。旧 gen 死时 finally 里的
+    _gen_release 幂等，重复释放无害；断流救援照常保住已生成内容。"""
+    _gen_release(None)
+    return jsonify({'ok': True})
 
 
 def _ombre_breath_sync():
@@ -1146,12 +1195,34 @@ def _cc_prepare(system, messages):
 
 CC_STREAM_TIMEOUT = 360  # seconds; kills hung process
 
+# 阶段5 v0：CC 通道可用的 MCP 工具白名单。
+# 内置 bash/file 仍全禁（--tools ''）；home 的 exec_vps 绝不放行；
+# set_brightness/set_color_temp 硬件不支持不放。codebase 自带白名单+禁改保护。
+CC_ALLOWED_TOOLS = ','.join([
+    # brain 只放渐变脑核心——它的灯/待办是坏的副本（实测灯控调用失败），家务一律走 home
+    'mcp__brain__breath', 'mcp__brain__grow', 'mcp__brain__hold',
+    'mcp__brain__pulse', 'mcp__brain__trace',
+    'mcp__codebase',
+    'mcp__home__light_on', 'mcp__home__light_off', 'mcp__home__get_light_status',
+    'mcp__home__light_bedside_warm', 'mcp__home__light_bedside_neutral',
+    'mcp__home__get_todos', 'mcp__home__add_todo', 'mcp__home__get_countdowns',
+    'mcp__home__get_ledger', 'mcp__home__add_ledger', 'mcp__home__get_ledger_budget',
+])
+
+
+def _strip_mcp_prefix(name):
+    """mcp__home__light_on → light_on（前端 TOOL_LABELS 认识家里的名字）"""
+    parts = (name or '').split('__')
+    return parts[2] if len(parts) >= 3 and parts[0] == 'mcp' else name
+
+
 def _cc_stream_gen(full_system, prompt, env):
     """
-    Generator: yields ('think', chunk) and ('text', chunk) as they arrive,
-    then ('done', (full_text, full_thinking)) when the process finishes.
+    Generator: yields ('think', chunk), ('text', chunk), ('tool_use', d),
+    ('tool_result', d) as they arrive, then ('done', (...)) at the end.
     Raises RuntimeError on CLI error or timeout.
-    --tools '' keeps all agent tools disabled (no bash/file access).
+    --tools '' keeps built-in agent tools disabled (no bash/file access);
+    MCP tools are whitelisted via CC_ALLOWED_TOOLS.
     """
     import subprocess, threading
     proc = subprocess.Popen(
@@ -1162,8 +1233,9 @@ def _cc_stream_gen(full_system, prompt, env):
          '--system-prompt', full_system,
          '--max-turns', '5',
          '--tools', '',
-         '--mcp-config', CC_CWD + '/brain-mcp.json',
+         '--mcp-config', CC_CWD + '/cc-tools.json',
          '--strict-mcp-config',
+         '--allowedTools', CC_ALLOWED_TOOLS,
          '--exclude-dynamic-system-prompt-sections'],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         text=True, bufsize=1, cwd=CC_CWD, env=env,
@@ -1214,6 +1286,21 @@ def _cc_stream_gen(full_system, prompt, env):
                         cache_read_total = max(cache_read_total, u.get('cache_read_input_tokens', 0) or 0)
                     if u.get('cache_creation_input_tokens'):
                         cache_create_total = max(cache_create_total, u.get('cache_creation_input_tokens', 0) or 0)
+            elif t == 'assistant':
+                for b in ((d.get('message') or {}).get('content') or []):
+                    if isinstance(b, dict) and b.get('type') == 'tool_use':
+                        yield ('tool_use', {'id': b.get('id'),
+                                            'name': _strip_mcp_prefix(b.get('name', '')),
+                                            'args': b.get('input') or {}})
+            elif t == 'user':
+                for b in ((d.get('message') or {}).get('content') or []):
+                    if isinstance(b, dict) and b.get('type') == 'tool_result':
+                        rc = b.get('content')
+                        if isinstance(rc, list):
+                            rc = ''.join(x.get('text', '') for x in rc if isinstance(x, dict))
+                        yield ('tool_result', {'tool_use_id': b.get('tool_use_id'),
+                                               'result': str(rc or '')[:2000],
+                                               'is_error': bool(b.get('is_error'))})
             elif t == 'result':
                 if d.get('is_error'):
                     is_err = str(d.get('result', ''))[:300]
@@ -1546,11 +1633,25 @@ def chat_stream():
                     system   = build_system()
                     messages = build_messages()
                     full_system, prompt, env = _cc_prepare(system, messages)
+                    cc_tool_calls = []
                     for evt, payload in _cc_stream_gen(full_system, prompt, env):
                         if evt == 'text':
                             yield 'data: ' + json.dumps({'t': 'text', 'd': payload}) + SSE_END
                         elif evt == 'think':
                             yield 'data: ' + json.dumps({'t': 'think', 'd': payload}) + SSE_END
+                        elif evt == 'tool_use':
+                            cc_tool_calls.append({'id': payload.get('id'), 'name': payload.get('name'),
+                                                  'args': payload.get('args'), 'result': '', 'success': True})
+                            yield 'data: ' + json.dumps({'t': 'tool_use', 'd': {'name': payload.get('name'), 'args': _slim_args(payload.get('args'))}, 'idx': len(cc_tool_calls) - 1}, ensure_ascii=False) + SSE_END
+                        elif evt == 'tool_result':
+                            _ti = next((i for i in range(len(cc_tool_calls) - 1, -1, -1)
+                                        if cc_tool_calls[i].get('id') == payload.get('tool_use_id')), len(cc_tool_calls) - 1)
+                            if _ti >= 0:
+                                cc_tool_calls[_ti]['result'] = payload.get('result', '')
+                                cc_tool_calls[_ti]['success'] = not payload.get('is_error')
+                                _slim = {**cc_tool_calls[_ti], 'args': _slim_args(cc_tool_calls[_ti].get('args'))}
+                                yield 'data: ' + json.dumps({'t': 'tool_result', 'd': _slim, 'idx': _ti}, ensure_ascii=False) + SSE_END
+                                yield 'data: ' + json.dumps({'t': 'tool_call', 'd': _slim, 'dup': 1}, ensure_ascii=False) + SSE_END
                         elif evt == 'done':
                             raw_text, thinking, cc_cache_read, cc_cache_create = payload
                             text = _cc_save_markers(raw_text)
@@ -1561,8 +1662,8 @@ def chat_stream():
                         )
                         conn = get_db()
                         conn.execute(
-                            "INSERT INTO chat_messages (author, content, thinking, cache_info) VALUES ('assistant', ?, ?, ?)",
-                            (text, thinking, _cache_info_json)
+                            "INSERT INTO chat_messages (author, content, thinking, tool_calls, cache_info) VALUES ('assistant', ?, ?, ?, ?)",
+                            (text, thinking, json.dumps([{k: v for k, v in tc.items() if k != 'id'} for tc in cc_tool_calls], ensure_ascii=False) if cc_tool_calls else '', _cache_info_json)
                         )
                         conn.commit()
                         conn.close()
@@ -1627,6 +1728,17 @@ def chat_stream():
             try:
                 system   = build_system()
                 messages = build_messages()
+                _recall, _recall_items = _recall_memories(_uc) if _uc else ('', [])
+                if _recall and messages:
+                    for _mi in range(len(messages) - 1, -1, -1):
+                        if messages[_mi].get('role') == 'user':
+                            _mc = messages[_mi].get('content')
+                            if isinstance(_mc, str):
+                                messages[_mi]['content'] = _recall + _mc
+                            elif isinstance(_mc, list):
+                                messages[_mi]['content'] = [{'type': 'text', 'text': _recall}] + _mc
+                            break
+                    yield 'data: ' + json.dumps({'t': 'memory_recall', 'd': {'count': len(_recall_items), 'items': _recall_items}}, ensure_ascii=False) + SSE_END
                 from relay.manager import relay as _chat_relay
                 _thinking_ok = _model_supports_thinking()
                 for _round in range(5):

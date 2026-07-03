@@ -4,6 +4,7 @@ const express                            = require('express');
 const { McpServer }                      = require('@modelcontextprotocol/sdk/server/mcp.js');
 const { StreamableHTTPServerTransport }  = require('@modelcontextprotocol/sdk/server/streamableHttp.js');
 const { execSync }                       = require('child_process');
+const { randomUUID }                     = require('crypto');
 const { z }                              = require('zod');
 
 function buildServer() {
@@ -139,14 +140,46 @@ function buildServer() {
 const app = express();
 app.use(express.json());
 
-// Stateless streamable-http: new transport + server per request, no sessions, no auth
+// Session-mode streamable-http（SDK 标准写法）。
+// 旧的 stateless 模式对"不带 initialize 的请求"不是拒绝而是无限挂起——
+// CC 等 MCP 客户端等不到响应就断 socket（"socket closed unexpectedly"），
+// claude.ai 侧的频繁断线重连也是同一个病。
+const sessions = {}; // sessionId -> { server, transport }
+
 app.all('/mcp', async (req, res) => {
-  const server    = buildServer();
-  const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
-  await server.connect(transport);
   try {
-    await transport.handleRequest(req, res, req.body);
-    res.on('close', () => { transport.close(); server.close(); });
+    const sid = req.headers['mcp-session-id'];
+    if (sid && sessions[sid]) {
+      await sessions[sid].transport.handleRequest(req, res, req.body);
+      return;
+    }
+    const isInit = req.body && (
+      req.body.method === 'initialize' ||
+      (Array.isArray(req.body) && req.body.some(m => m && m.method === 'initialize'))
+    );
+    if (isInit) {
+      const server = buildServer();
+      const transport = new StreamableHTTPServerTransport({
+        sessionIdGenerator: () => randomUUID(),
+        onsessioninitialized: (id) => { sessions[id] = { server, transport }; },
+      });
+      transport.onclose = () => {
+        if (transport.sessionId && sessions[transport.sessionId]) {
+          delete sessions[transport.sessionId];
+          try { server.close(); } catch (e) {}
+        }
+      };
+      await server.connect(transport);
+      await transport.handleRequest(req, res, req.body);
+      return;
+    }
+    // 无 session 又不是 initialize：按规范回 404——客户端收到 404 才知道要重新 initialize
+    // （400 会让客户端以为连接还健康，攥着死 session 无限重试）
+    res.status(404).json({
+      jsonrpc: '2.0',
+      error: { code: -32001, message: 'Session not found — reinitialize' },
+      id: (req.body && req.body.id) != null ? req.body.id : null,
+    });
   } catch (err) {
     console.error('MCP request error:', err);
     if (!res.headersSent) {
@@ -156,8 +189,6 @@ app.all('/mcp', async (req, res) => {
         id: null,
       });
     }
-    transport.close();
-    server.close();
   }
 });
 
