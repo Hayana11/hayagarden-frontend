@@ -1199,7 +1199,10 @@ CC_STREAM_TIMEOUT = 360  # seconds; kills hung process
 # 内置 bash/file 仍全禁（--tools ''）；home 的 exec_vps 绝不放行；
 # set_brightness/set_color_temp 硬件不支持不放。codebase 自带白名单+禁改保护。
 CC_ALLOWED_TOOLS = ','.join([
-    'mcp__brain', 'mcp__codebase',
+    # brain 只放渐变脑核心——它的灯/待办是坏的副本（实测灯控调用失败），家务一律走 home
+    'mcp__brain__breath', 'mcp__brain__grow', 'mcp__brain__hold',
+    'mcp__brain__pulse', 'mcp__brain__trace',
+    'mcp__codebase',
     'mcp__home__light_on', 'mcp__home__light_off', 'mcp__home__get_light_status',
     'mcp__home__light_bedside_warm', 'mcp__home__light_bedside_neutral',
     'mcp__home__get_todos', 'mcp__home__add_todo', 'mcp__home__get_countdowns',
