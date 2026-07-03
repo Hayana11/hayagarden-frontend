@@ -1,0 +1,7 @@
+{
+  "mcpServers": {
+    "brain":    {"type": "http", "url": "http://127.0.0.1:8000/mcp"},
+    "home":     {"type": "http", "url": "http://127.0.0.1:3100/mcp"},
+    "codebase": {"type": "http", "url": "http://127.0.0.1:5056/mcp"}
+  }
+}
