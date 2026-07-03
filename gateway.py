@@ -85,14 +85,16 @@ def _recall_memories(user_msg, limit=3):
             score = base * (0.5 ** (age_days / 60.0)) + (2 if r['pinned'] else 0) + (r['importance'] or 0) * 0.5
             scored.append((score, r['type'], c, str(r['created_at'])[:10]))
         if not scored:
-            return ''
+            return '', []
         scored.sort(key=lambda x: -x[0])
         parts = ['[%s %s] %s' % (t, d, c[:300]) for _, t, c, d in scored[:limit]]
-        return ('<recalled-memory>\n以下是自动检索到的相关记忆片段，按相关度排序。'
-                '可能与这次对话相关，参考着用；不相关就忽略。不要向哈娅提及这个标签本身。\n\n'
-                + '\n---\n'.join(parts) + '\n</recalled-memory>\n\n')
+        items = [{'type': t, 'date': d, 'preview': c[:80]} for _, t, c, d in scored[:limit]]
+        block = ('<recalled-memory>\n以下是自动检索到的相关记忆片段，按相关度排序。'
+                 '可能与这次对话相关，参考着用；不相关就忽略。不要向哈娅提及这个标签本身。\n\n'
+                 + '\n---\n'.join(parts) + '\n</recalled-memory>\n\n')
+        return block, items
     except Exception:
-        return ''
+        return '', []
 
 
 def _slim_args(args, limit=300):
@@ -138,7 +140,8 @@ _gen_cond = threading.Condition()
 _gen_busy = False
 _gen_busy_since = 0.0   # epoch seconds when lock was last acquired
 _gen_last_result = None
-_GEN_ZOMBIE_TTL = 90    # seconds before a held lock is treated as zombie
+_GEN_ZOMBIE_TTL = 320   # 对齐 relay 超时(300s)。原 90s 比正常长生成还短，
+                        # 慢模型跑到一半锁被当僵尸踢掉→双生成并行→"还没回复完"怪象
 
 def _gen_acquire_or_wait(wait_timeout=15):
     """返回 ('own', None) 表示本次调用应自己生成；
@@ -170,6 +173,16 @@ def _gen_release(result):
         _gen_last_result = result
         _gen_busy = False
         _gen_cond.notify_all()
+
+
+@app.route('/chat/cancel', methods=['POST'])
+def chat_cancel():
+    """前端点停止后调用：立刻释放生成锁，让下一条消息马上能发。
+    旧 generator 卡在 relay 阻塞读里，要到下一个 yield 才会死（GeneratorExit），
+    不主动放锁的话新消息要白等 15 秒然后被拒。旧 gen 死时 finally 里的
+    _gen_release 幂等，重复释放无害；断流救援照常保住已生成内容。"""
+    _gen_release(None)
+    return jsonify({'ok': True})
 
 
 def _ombre_breath_sync():
@@ -1663,7 +1676,7 @@ def chat_stream():
             try:
                 system   = build_system()
                 messages = build_messages()
-                _recall = _recall_memories(_uc) if _uc else ''
+                _recall, _recall_items = _recall_memories(_uc) if _uc else ('', [])
                 if _recall and messages:
                     for _mi in range(len(messages) - 1, -1, -1):
                         if messages[_mi].get('role') == 'user':
@@ -1673,6 +1686,7 @@ def chat_stream():
                             elif isinstance(_mc, list):
                                 messages[_mi]['content'] = [{'type': 'text', 'text': _recall}] + _mc
                             break
+                    yield 'data: ' + json.dumps({'t': 'memory_recall', 'd': {'count': len(_recall_items), 'items': _recall_items}}, ensure_ascii=False) + SSE_END
                 from relay.manager import relay as _chat_relay
                 _thinking_ok = _model_supports_thinking()
                 for _round in range(5):
