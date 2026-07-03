@@ -69,7 +69,8 @@ def _recall_memories(user_msg, limit=3):
         if not words:
             return ''
         conn = get_db()
-        rows = conn.execute("SELECT type, content, pinned, importance, created_at FROM posts").fetchall()
+        rows = conn.execute("SELECT id, type, content, pinned, importance, recall_count, created_at "
+                            "FROM posts WHERE resolved=0").fetchall()
         conn.close()
         now = datetime.datetime.utcnow() + datetime.timedelta(hours=8)
         scored = []
@@ -82,13 +83,21 @@ def _recall_memories(user_msg, limit=3):
                 age_days = max(0, (now - datetime.datetime.strptime(str(r['created_at'])[:19], '%Y-%m-%d %H:%M:%S')).days)
             except Exception:
                 age_days = 0
-            score = base * (0.5 ** (age_days / 60.0)) + (2 if r['pinned'] else 0) + (r['importance'] or 0) * 0.5
-            scored.append((score, r['type'], c, str(r['created_at'])[:10]))
+            # 时间衰减 × 词重叠 + 置顶/重要度 + 召回加热（被想起过的更容易再被想起，封顶防滚雪球）
+            score = (base * (0.5 ** (age_days / 60.0)) + (2 if r['pinned'] else 0)
+                     + (r['importance'] or 0) * 0.5 + min(r['recall_count'] or 0, 5) * 0.3)
+            scored.append((score, r['id'], r['type'], c, str(r['created_at'])[:10]))
         if not scored:
             return '', []
         scored.sort(key=lambda x: -x[0])
-        parts = ['[%s %s] %s' % (t, d, c[:300]) for _, t, c, d in scored[:limit]]
-        items = [{'type': t, 'date': d, 'preview': c[:80]} for _, t, c, d in scored[:limit]]
+        top = scored[:limit]
+        try:
+            import memory_tool as _mt
+            _mt.touch_memories([s[1] for s in top])  # 召回加热：这几条真的进了 prompt
+        except Exception:
+            pass
+        parts = ['[%s %s] %s' % (t, d, c[:300]) for _, _, t, c, d in top]
+        items = [{'type': t, 'date': d, 'preview': c[:80]} for _, _, t, c, d in top]
         block = ('<recalled-memory>\n以下是自动检索到的相关记忆片段，按相关度排序。'
                  '可能与这次对话相关，参考着用；不相关就忽略。不要向哈娅提及这个标签本身。\n\n'
                  + '\n---\n'.join(parts) + '\n</recalled-memory>\n\n')
@@ -783,10 +792,8 @@ def run_tool(name, args, caller='fyodor_cc'):
             content = args.get('content', '')
             tags = args.get('tags', '').strip().lower()
             layer = tags if tags in ('core', 'long-term') else 'recent'
-            _c = get_db()
-            _c.execute("INSERT INTO posts (type, author, content, layer) VALUES ('MEMORY','fyodor',?,?)",
-                       (content, layer))
-            _c.commit(); _c.close()
+            import memory_tool as _mt
+            _mt.save_memory(content, type='MEMORY', author='fyodor', layer=layer, tags=tags)
             # 同时写入ombre-brain（渐变脑），尽力而为，失败不影响主流程
             _ombre_hold_sync(content, tags=tags or 'recent', importance=5)
             return '已存入记忆'
