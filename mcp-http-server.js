@@ -173,10 +173,11 @@ app.all('/mcp', async (req, res) => {
       await transport.handleRequest(req, res, req.body);
       return;
     }
-    // 无 session 又不是 initialize：立即拒绝，绝不挂起
-    res.status(400).json({
+    // 无 session 又不是 initialize：按规范回 404——客户端收到 404 才知道要重新 initialize
+    // （400 会让客户端以为连接还健康，攥着死 session 无限重试）
+    res.status(404).json({
       jsonrpc: '2.0',
-      error: { code: -32000, message: 'No valid session — send initialize first' },
+      error: { code: -32001, message: 'Session not found — reinitialize' },
       id: (req.body && req.body.id) != null ? req.body.id : null,
     });
   } catch (err) {
