@@ -42,6 +42,7 @@ import config_store
 API_URL = 'https://gua.guagua.uk/v1/messages'
 API_KEY = ''
 CC_TOKEN = ''
+TAVILY_KEY = ''
 try:
     for line in open('/opt/frontend/.env'):
         if line.startswith('ANTHROPIC_API_KEY='):
@@ -50,6 +51,8 @@ try:
             API_URL = line.split('=', 1)[1].strip() or API_URL
         elif line.startswith('CLAUDE_CODE_OAUTH_TOKEN='):
             CC_TOKEN = line.split('=', 1)[1].strip()
+        elif line.startswith('TAVILY_API_KEY='):
+            TAVILY_KEY = line.split('=', 1)[1].strip()
 except Exception:
     pass
 
@@ -715,7 +718,7 @@ def _web_search(query, max_results=5):
     query = (query or '').strip()
     if not query:
         return '搜索词为空'
-    tav = os.environ.get('TAVILY_API_KEY', '').strip()
+    tav = (TAVILY_KEY or os.environ.get('TAVILY_API_KEY', '')).strip()
     if tav:
         try:
             payload = json.dumps({'api_key': tav, 'query': query, 'max_results': max_results,
