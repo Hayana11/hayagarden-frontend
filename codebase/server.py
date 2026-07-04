@@ -2,7 +2,7 @@
 """Codebase MCP — 项目意识：检索/补丁/git只读/架构自述，改动自动过教训库。
 设计要点：无索引（rg 现查现算，15k 行毫秒级）；patch 用 str_replace 语义而非 diff；
 语法校验不过自动回滚；白名单继承 workspace（/opt/frontend + /etc/nginx）。"""
-import ast, difflib, json, os, pathlib, re, sqlite3, subprocess, shutil
+import ast, difflib, json, os, pathlib, re, sqlite3, subprocess, shutil, tempfile, urllib.request
 from mcp.server.fastmcp import FastMCP
 
 mcp = FastMCP("codebase", host="127.0.0.1", port=5056)
@@ -42,10 +42,16 @@ def _syntax_check(p: pathlib.Path, content: str) -> str:
                 if not blocks:
                     return ''
                 js = '\n;\n'.join(blocks)
-            r = subprocess.run(['node', '--check', '/dev/stdin'], input=js.encode(),
-                               capture_output=True, timeout=15)
+            # node --check /dev/stdin 在 systemd 环境下读不到管道（实战教训），必须走临时文件
+            with tempfile.NamedTemporaryFile('w', suffix='.js', delete=False) as tf:
+                tf.write(js)
+                tmp = tf.name
+            try:
+                r = subprocess.run(['node', '--check', tmp], capture_output=True, timeout=15)
+            finally:
+                os.unlink(tmp)
             if r.returncode != 0:
-                return r.stderr.decode()[:500]
+                return r.stderr.decode().replace(tmp, p.name)[:500]
         elif p.suffix == '.json':
             json.loads(content)
     except Exception as e:
@@ -192,6 +198,89 @@ def git_view(action: str = 'status', target: str = '') -> str:
     r = subprocess.run(cmd, capture_output=True, timeout=15)
     out = r.stdout.decode('utf-8', 'ignore')[:4000]
     return out or '(无输出——工作区干净或无差异)'
+
+
+def _llm(prompt: str, timeout: int = 40) -> str:
+    """轻量 LLM 综合（relay deepseek，与 lessons/gateway 同款配置来源）。失败返回 ''。"""
+    api_url = api_key = ''
+    try:
+        for line in open('/opt/frontend/.env'):
+            if line.startswith('ANTHROPIC_API_KEY='):
+                api_key = line.split('=', 1)[1].strip()
+            elif line.startswith('API_URL='):
+                api_url = line.split('=', 1)[1].strip()
+        payload = json.dumps({
+            'model': os.environ.get('EXPLAIN_MODEL', '[按量3] deepseek-v3.2'),
+            'max_tokens': 900,
+            'messages': [{'role': 'user', 'content': prompt}],
+        }, ensure_ascii=False).encode('utf-8')
+        req = urllib.request.Request(api_url, data=payload, headers={
+            'x-api-key': api_key, 'anthropic-version': '2023-06-01',
+            'content-type': 'application/json'})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode())
+        return ''.join(b.get('text', '') for b in data.get('content', [])
+                       if b.get('type') == 'text').strip()
+    except Exception:
+        return ''
+
+
+@mcp.tool()
+def explain_history(keyword: str, question: str = '') -> str:
+    """回答「这段代码为什么长这样」：聚合三个 AI 手上没有的来源——git 提交历史(log -S)、
+    留言板讨论、教训库——LLM 综合成来龙去脉叙事，并附原始证据供核查。
+    keyword 用代码里的真实标识（函数名/配置键/文件名效果最好）。"""
+    like = f'%{keyword}%'
+    ev = []
+    try:
+        g1 = subprocess.run(['git', '-C', PROJECT, 'log', '-S', keyword,
+                             '--date=short', '--pretty=%h %ad %s', '-12'],
+                            capture_output=True, timeout=25).stdout.decode('utf-8', 'ignore').strip()
+        g2 = subprocess.run(['git', '-C', PROJECT, 'log', '--grep', keyword,
+                             '--date=short', '--pretty=%h %ad %s', '-8'],
+                            capture_output=True, timeout=25).stdout.decode('utf-8', 'ignore').strip()
+        git_ev = '\n'.join(dict.fromkeys((g1 + '\n' + g2).splitlines()))  # 去重保序
+        if git_ev.strip():
+            ev.append('【git 提交（动过这个词的改动）】\n' + git_ev)
+    except Exception:
+        pass
+    try:
+        conn = sqlite3.connect(DB, timeout=3)
+        conn.row_factory = sqlite3.Row
+        brows = conn.execute(
+            "SELECT id, author, title, substr(content,1,200) AS c, created_at FROM board "
+            "WHERE content LIKE ? OR title LIKE ? ORDER BY id DESC LIMIT 5", (like, like)).fetchall()
+        rrows = conn.execute(
+            "SELECT board_id, author, substr(content,1,200) AS c, created_at FROM board_replies "
+            "WHERE content LIKE ? ORDER BY id DESC LIMIT 8", (like,)).fetchall()
+        lrows = conn.execute(
+            "SELECT title, description, reason FROM lessons WHERE status='active' AND "
+            "(title LIKE ? OR description LIKE ? OR tags LIKE ?) LIMIT 5", (like, like, like)).fetchall()
+        conn.close()
+        if brows or rrows:
+            lines = ['#%s [%s] %s %s' % (r['id'], r['author'], (r['title'] or '')[:30], r['c'])
+                     for r in brows]
+            lines += ['#%s回复 [%s] %s' % (r['board_id'], r['author'], r['c']) for r in rrows]
+            ev.append('【留言板讨论】\n' + '\n'.join(lines))
+        if lrows:
+            ev.append('【教训库】\n' + '\n'.join(
+                '「%s」%s%s' % (r['title'], r['description'],
+                               ('（原因：%s）' % r['reason']) if r['reason'] else '')
+                for r in lrows))
+    except Exception:
+        pass
+    if not ev:
+        return f'git 历史、留言板、教训库里都没有「{keyword}」的记录——可能用词不对，换个代码里的真实标识试试。'
+    evidence = '\n\n'.join(ev)
+    prompt = (
+        '你在为一个家庭项目做代码考古。根据以下三类证据（git提交、留言板讨论、教训库），'
+        '回答关于「%s」的来龙去脉：它为什么被这样设计、经历过哪些关键变化、踩过什么坑。'
+        '中文回答，按时间线组织，引用具体日期和提交。证据不足的部分直接说不知道，绝不编造。%s\n\n%s'
+        % (keyword, ('\n补充问题：' + question) if question else '', evidence[:6000]))
+    answer = _llm(prompt)
+    if not answer:
+        return '（LLM 综合失败，以下是原始证据）\n\n' + evidence[:3000]
+    return answer + '\n\n──── 原始证据 ────\n' + evidence[:2500]
 
 
 @mcp.tool()

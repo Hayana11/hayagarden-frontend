@@ -40,6 +40,23 @@ function buildServer() {
     }
   }
 
+  // M3: 官端(CC)对 posts 记忆库的视野——网页端有 system 注入,官端靠这个工具主动翻
+  server.tool(
+    'search_memories',
+    { keyword: z.string().describe('搜索关键词'), },
+    async ({ keyword }) => {
+      try {
+        const r = await fetch('http://127.0.0.1:5050/api/posts?search='
+          + encodeURIComponent(keyword) + '&limit=8');
+        const d = await r.json();
+        const items = (d.posts || []).map(p =>
+          `[#${p.id} ${p.type} ${(p.created_at || '').slice(0, 10)}${p.pinned ? ' 📌' : ''}] ${(p.content || '').slice(0, 220)}`);
+        return { content: [{ type: 'text', text: items.join('\n---\n') || '没有找到相关记忆' }] };
+      } catch (e) {
+        return { content: [{ type: 'text', text: 'Error: ' + e.message }] };
+      }
+    });
+
   server.tool('light_on',  {}, () => callLight('/light/on',  'POST'));
   server.tool('light_off', {}, () => callLight('/light/off', 'POST'));
   server.tool('get_light_status', {}, () => callLight('/light/status', 'GET'));

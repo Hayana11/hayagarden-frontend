@@ -247,13 +247,11 @@ def generate_dream():
             "INSERT INTO dream_pool (content, valence, arousal, tone, created_at) VALUES (?,?,?,?,?)",
             (dream_text, avg_v, avg_a, tone, now_str)
         )
-        # 同步写入 posts，供白夜"梦"tab 显示
-        conn.execute(
-            "INSERT INTO posts (type, content, author, layer, created_at) VALUES ('DREAM', ?, 'fyodor', 'recent', ?)",
-            (dream_text, now_str)
-        )
         conn.commit()
         conn.close()
+        # 同步写入 posts（经统一写入口），供白夜"梦"tab 显示
+        import memory_tool
+        memory_tool.save_memory(dream_text, type='DREAM', layer='recent', created_at=now_str)
         _log(f"dream stored in pool+posts: {dream_text[:60]}")
         return True
     except Exception as e:

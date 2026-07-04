@@ -114,15 +114,10 @@ def _fallback_summary(day_str, messages):
     return result
 
 def _save_summary(day_str, summary_text):
-    """把日摘要存入 posts"""
-    conn = _db()
-    conn.execute(
-        "INSERT INTO posts (type, content, author, layer, created_at) "
-        "VALUES ('DAILY_SUMMARY', ?, 'fyodor', 'long-term', ?)",
-        (summary_text, day_str + ' 23:59:59')
-    )
-    conn.commit()
-    conn.close()
+    """把日摘要存入 posts（经统一写入口）"""
+    import memory_tool
+    memory_tool.save_memory(summary_text, type='DAILY_SUMMARY', layer='long-term',
+                            created_at=day_str + ' 23:59:59')
 
 def run():
     days = _days_needing_summary()

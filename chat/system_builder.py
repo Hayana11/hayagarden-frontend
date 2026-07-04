@@ -87,10 +87,10 @@ def build_system(wake=False):
     bp2_parts = []
     conn = get_db()
     lt_mems = conn.execute(
-        "SELECT content FROM posts WHERE layer='long-term' ORDER BY id DESC LIMIT 3"
+        "SELECT content FROM posts WHERE layer='long-term' AND resolved=0 ORDER BY id DESC LIMIT 3"
     ).fetchall()
     diaries = conn.execute(
-        "SELECT content FROM posts WHERE type='DIARY' ORDER BY id DESC LIMIT 2"
+        "SELECT content FROM posts WHERE type='DIARY' AND resolved=0 ORDER BY id DESC LIMIT 2"
     ).fetchall()
     conn.close()
     if lt_mems:
@@ -229,12 +229,22 @@ def build_system(wake=False):
         _sc = get_db()
         _summaries = _sc.execute(
             "SELECT date(created_at) as day, content FROM posts "
-            "WHERE type='DAILY_SUMMARY' ORDER BY created_at DESC LIMIT 5"
+            "WHERE type='DAILY_SUMMARY' AND resolved=0 ORDER BY created_at DESC LIMIT 5"
         ).fetchall()
         _sc.close()
         if _summaries:
             _slines = [f"[{s['day']}] {s['content'][:200]}" for s in _summaries]
             parts.append('\n## 过去几天的记录\n' + '\n'.join(_slines))
+        # 日历套娃：更早的时间给周总结（memory_cycle 每周压缩产出），近详远略
+        _weeks = _sc2 = None
+        _sc2 = get_db()
+        _weeks = _sc2.execute(
+            "SELECT content FROM posts WHERE type='WEEKLY_SUMMARY' AND resolved=0 "
+            "ORDER BY created_at DESC LIMIT 2").fetchall()
+        _sc2.close()
+        if _weeks:
+            parts.append('\n## 更早的几周\n' + '\n'.join(
+                '- ' + w['content'][:250] for w in reversed(_weeks)))
     except Exception:
         pass
 
@@ -243,6 +253,7 @@ def build_system(wake=False):
         _mc2 = get_db()
         _memos = _mc2.execute(
             """SELECT content FROM posts WHERE type='MEMORY' AND tags LIKE '%memo%'
+               AND resolved=0
                AND created_at >= datetime('now','+8 hours','-24 hours')
                ORDER BY id DESC LIMIT 4"""
         ).fetchall()

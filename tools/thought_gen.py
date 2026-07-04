@@ -144,13 +144,8 @@ def generate():
         return None
 
 def save(text):
-    conn = _db()
-    conn.execute(
-        "INSERT INTO posts (type, content, author, layer) VALUES ('THOUGHT', ?, 'fyodor', 'recent')",
-        (text,)
-    )
-    conn.commit()
-    conn.close()
+    import memory_tool
+    memory_tool.save_memory(text, type='THOUGHT', layer='recent')
 
 if __name__ == '__main__':
     result = generate()

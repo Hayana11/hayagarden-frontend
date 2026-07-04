@@ -152,12 +152,11 @@ def create_post():
         if not content:
             return jsonify({"error":"content looks like an unterminated <thinking> block, nothing to save"}), 400
     tags = data.get('tags','')
-    conn = get_db()
-    cur = conn.execute("INSERT INTO posts (type,content,author,tags) VALUES (?,?,?,?)",
-        (data.get('type','MEMORY'), content, data.get('author','user'), tags))
-    conn.commit()
-    conn.close()
-    return jsonify({"ok":True,"id":cur.lastrowid})
+    from tools import memory_tool
+    new_id = memory_tool.save_memory(
+        content, type=data.get('type','MEMORY'), author=data.get('author','user'),
+        layer=data.get('layer','recent'), tags=tags)
+    return jsonify({"ok":True,"id":new_id})
 
 @app.route('/api/posts/<int:pid>', methods=['DELETE'])
 def delete_post(pid):
