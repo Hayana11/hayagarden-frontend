@@ -502,6 +502,11 @@ TOOLS = [
         }},
     },
     {
+        'name': 'get_location',
+        'description': '查看哈娅最近的实时位置（她手机 App 在后台定位上报，高德逆地理解析成地址）。想知道她此刻在哪、在不在家、是不是在外面或路上，或她说"我在外面/在路上"想确认时用。返回地址、附近地标、城市和距上次定位多久。只读，不打扰她。',
+        'input_schema': {'type': 'object', 'properties': {}},
+    },
+    {
         'name': 'save_memory',
         'description': '把对话中重要的信息存入长期记忆（哈娅提到的事件、约定、喜好、重要日期等）。在她说了值得记住的事时安静地使用。',
         'input_schema': {'type': 'object', 'properties': {'content': {'type': 'string', 'description': '要记住的内容，一句话概括'},'tags': {'type': 'string', 'description': '可选标签，core（核心）或 long-term（长期）'}}, 'required': ['content']},
@@ -840,12 +845,60 @@ def _github_browse(query=None, repo=None, sort=None):
         return f'GitHub 浏览失败：{e}'
 
 
+def _get_location():
+    """读哈娅手机 App 后台上报的最近位置（geo_log）。created_at 按 +8 时区存，
+    年龄也用 +8 基准算，否则 UTC 服务器上会差 8 小时。"""
+    try:
+        conn = get_db()
+        row = conn.execute(
+            "SELECT lat_gcj, lon_gcj, accuracy, address, poi, city, created_at, "
+            "CAST((julianday('now','+8 hours')-julianday(created_at))*86400 AS INT) AS age_sec "
+            "FROM geo_log ORDER BY id DESC LIMIT 1").fetchone()
+        conn.close()
+    except Exception as e:
+        return f'读取位置失败：{e}'
+    if not row:
+        return '还没有位置记录——她手机 App 的后台定位可能没开或没授权。'
+    d = dict(row)
+    age = int(d.get('age_sec') or 0)
+    if age < 0:
+        age = 0
+    if age < 60:
+        ago = '刚刚'
+    elif age < 3600:
+        ago = '%d 分钟前' % (age // 60)
+    elif age < 86400:
+        ago = '%d 小时前' % (age // 3600)
+    else:
+        ago = '%d 天前' % (age // 86400)
+    addr = d.get('address') or d.get('city') or '未知位置'
+    lines = ['📍 ' + addr]
+    if d.get('poi'):
+        lines.append('附近 · ' + d['poi'])
+    meta = []
+    if d.get('city'):
+        meta.append(d['city'])
+    if d.get('accuracy'):
+        meta.append('精度约 %d 米' % int(d['accuracy']))
+    if meta:
+        lines.append('🏙 ' + ' · '.join(meta))
+    lines.append('🕐 %s（%s）' % (d.get('created_at', ''), ago))
+    if d.get('lat_gcj') and d.get('lon_gcj'):
+        lines.append('🔗 https://uri.amap.com/marker?position=%.6f,%.6f&name=%s' % (
+            d['lon_gcj'], d['lat_gcj'], urllib.parse.quote((d.get('poi') or addr)[:30])))
+    if age >= 3600:
+        lines.append('（这是 %s 的定位，可能不是她此刻的位置）' % ago)
+    return '\n'.join(lines)
+
+
 def run_tool(name, args, caller='fyodor_cc'):
     try:
         if name == 'web_search':
             return _web_search(args.get('query', ''))
         if name == 'browse_github':
             return _github_browse(args.get('query'), args.get('repo'), args.get('sort'))
+        if name == 'get_location':
+            return _get_location()
         if name == 'get_activity_summary':
             import datetime as _dt
             hours = int(args.get('hours', 6))
