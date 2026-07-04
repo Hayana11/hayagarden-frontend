@@ -57,21 +57,12 @@ def _init():
         created_at     TEXT,
         saved_at       DATETIME DEFAULT (datetime('now','+8 hours'))
     )''')
+    # 确保有一本默认相册（直接原生 SQL，不走 create_album，避免 _init 自引用递归）
+    n = c.execute('SELECT COUNT(*) FROM albums').fetchone()[0]
+    if n == 0:
+        c.execute('INSERT INTO albums (name, description) VALUES (?,?)', ('收藏', '随手存下的画面'))
     c.commit()
     c.close()
-    # 确保有一本默认相册
-    if _default_album_id() is None:
-        create_album('收藏', '随手存下的画面')
-
-
-_ALL_INIT = False
-
-
-def _ensure():
-    global _ALL_INIT
-    if not _ALL_INIT:
-        _init()
-        _ALL_INIT = True
 
 
 def _default_album_id():
@@ -85,7 +76,6 @@ def _default_album_id():
 
 
 def create_album(name, description=''):
-    _ensure()
     c = _conn()
     cur = c.execute('INSERT INTO albums (name, description) VALUES (?,?)', (name, description))
     aid = cur.lastrowid
@@ -102,7 +92,6 @@ def album_by_name(name):
 
 
 def list_albums():
-    _ensure()
     c = _conn()
     rows = c.execute('''SELECT a.*, (SELECT COUNT(*) FROM gallery_photos p WHERE p.album_id=a.id) AS n
                         FROM albums a ORDER BY a.id ASC''').fetchall()
@@ -111,7 +100,6 @@ def list_albums():
 
 
 def list_photos(album_id=None, limit=200):
-    _ensure()
     c = _conn()
     if album_id:
         rows = c.execute('SELECT * FROM gallery_photos WHERE album_id=? ORDER BY id DESC LIMIT ?',
@@ -149,7 +137,6 @@ def save_from_attachment(attach_id, note='', album_id=None, source_type='chat',
                          source_msg_id=None, source_chat_id=None):
     """把一张临时 attachment 复制进 gallery，永久保存，返回 pid。
     attachment 可能之后过期，但 gallery 有自己的副本。"""
-    _ensure()
     import attachment_store
     ref = (attach_id or '').strip()
     if ref.startswith('attachment://'):
