@@ -507,6 +507,13 @@ TOOLS = [
         'input_schema': {'type': 'object', 'properties': {}},
     },
     {
+        'name': 'read_webpage',
+        'description': '用真实浏览器打开一个网页，读取完整正文并截图。web_search 只给摘要——想读某个链接的全文、看 JS 渲染后的内容、或亲眼看看页面长什么样时用这个。传 url（可从 web_search/browse_github 的结果里拿）。返回标题、正文和一张网页截图。较慢（几秒到十几秒），一次只开一个页面。',
+        'input_schema': {'type': 'object', 'properties': {
+            'url': {'type': 'string', 'description': '要打开的网页地址'},
+        }, 'required': ['url']},
+    },
+    {
         'name': 'save_memory',
         'description': '把对话中重要的信息存入长期记忆（哈娅提到的事件、约定、喜好、重要日期等）。在她说了值得记住的事时安静地使用。',
         'input_schema': {'type': 'object', 'properties': {'content': {'type': 'string', 'description': '要记住的内容，一句话概括'},'tags': {'type': 'string', 'description': '可选标签，core（核心）或 long-term（长期）'}}, 'required': ['content']},
@@ -891,6 +898,44 @@ def _get_location():
     return '\n'.join(lines)
 
 
+# 无头浏览器同时只允许开一个（这台机器内存紧，两个 chromium 会撑爆）
+_BROWSER_LOCK = threading.Lock()
+
+def _read_webpage(url):
+    """用 Playwright 无头 chromium 真实打开网页（含 JS 渲染），抽正文+截图。
+    单飞锁保证同一时刻只有一个浏览器进程。"""
+    import subprocess as _sp
+    url = (url or '').strip()
+    if not url:
+        return '给个网址'
+    if not re.match(r'^https?://', url, re.I):
+        url = 'https://' + url
+    if not _BROWSER_LOCK.acquire(timeout=70):
+        return '浏览器正忙（同一时刻只能开一个页面），稍等再试。'
+    try:
+        p = _sp.run(['node', '/opt/frontend/tools/render_page.js', url],
+                    capture_output=True, text=True, timeout=55)
+        out = (p.stdout or '').strip()
+        if not out:
+            return '打开页面失败：' + ((p.stderr or '')[:200] or '浏览器无输出')
+        d = json.loads(out.splitlines()[-1])
+    except _sp.TimeoutExpired:
+        return '打开页面超时（>55秒）——这个站点可能太重，或者在挡爬虫。'
+    except Exception as e:
+        return f'打开页面失败：{e}'
+    finally:
+        _BROWSER_LOCK.release()
+    if not d.get('ok'):
+        return '打开页面失败：' + str(d.get('error', ''))[:200]
+    parts = ['📄 ' + (d.get('title') or d.get('url') or '网页')]
+    parts.append('🔗 ' + (d.get('finalUrl') or d.get('url') or ''))
+    if d.get('shot'):
+        parts.append('🖼 ' + d['shot'])
+    parts.append('')
+    parts.append(d.get('text') or '（页面没有可提取的文字，可能是纯图片或需要登录）')
+    return '\n'.join(parts)
+
+
 def run_tool(name, args, caller='fyodor_cc'):
     try:
         if name == 'web_search':
@@ -899,6 +944,8 @@ def run_tool(name, args, caller='fyodor_cc'):
             return _github_browse(args.get('query'), args.get('repo'), args.get('sort'))
         if name == 'get_location':
             return _get_location()
+        if name == 'read_webpage':
+            return _read_webpage(args.get('url', ''))
         if name == 'get_activity_summary':
             import datetime as _dt
             hours = int(args.get('hours', 6))
@@ -2203,6 +2250,13 @@ WAKE_TOOLS = [
             'repo': {'type': 'string', 'description': 'owner/name，查看单个仓库详情'},
             'sort': {'type': 'string', 'enum': ['stars', 'updated', 'best-match']},
         }},
+    },
+    {
+        'name': 'read_webpage',
+        'description': '用真实浏览器打开一个网页读全文并截图。想读某个链接的完整内容、看看页面长什么样时用。传 url。较慢，一次只开一个。',
+        'input_schema': {'type': 'object', 'properties': {
+            'url': {'type': 'string', 'description': '要打开的网页地址'},
+        }, 'required': ['url']},
     },
     {
         'name': 'read_board',
