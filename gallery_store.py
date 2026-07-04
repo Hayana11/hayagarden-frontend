@@ -65,6 +65,7 @@ def _init():
         ('importance', 'INTEGER DEFAULT 0'),
         ('mem_id',     'INTEGER'),             # 关联的统一记忆(posts) id
         ('embedding',  'TEXT'),                # json 向量，第2b步再填
+        ('last_sent_at', 'TEXT'),              # 上次被主动想起/发出的时间（第3步·避免反复发同一张）
     ]:
         try:
             c.execute('ALTER TABLE gallery_photos ADD COLUMN %s %s' % (col, ddl))
@@ -205,6 +206,52 @@ def set_meaning(pid, summary=None, emotion=None, keywords=None, importance=None,
     c.commit()
     c.close()
     return True
+
+
+def count_photos():
+    try:
+        c = _conn()
+        n = c.execute('SELECT COUNT(*) FROM gallery_photos').fetchone()[0]
+        c.close()
+        return n
+    except Exception:
+        return 0
+
+
+def pick_for_recall(keyword=None, emotion=None):
+    """第3步·主动回忆：挑一张"值得突然想起"的照片。
+    偏好：有意义(summary)、importance 高、最近没发过；可按关键词/情绪过滤。
+    在前几名里加权随机，避免每次都是同一张。返回 dict 或 None。"""
+    import random
+    c = _conn()
+    rows = c.execute("SELECT * FROM gallery_photos WHERE summary IS NOT NULL AND summary != ''").fetchall()
+    c.close()
+    cands = [dict(r) for r in rows]
+    if not cands:
+        return None
+    kw = (keyword or '').strip()
+    emo = (emotion or '').strip()
+    if kw:
+        cands = [p for p in cands if kw in (p.get('summary') or '') or kw in (p.get('keywords') or '') or kw in (p.get('note') or '')] or cands
+    if emo:
+        cands = [p for p in cands if emo in (p.get('emotion') or '')] or cands
+
+    def score(p):
+        s = (p.get('importance') or 0)
+        if not p.get('last_sent_at'):
+            s += 40          # 从没发过的加分
+        return s
+    cands.sort(key=score, reverse=True)
+    top = cands[:5]
+    weights = [score(p) + 1 for p in top]
+    return random.choices(top, weights=weights, k=1)[0]
+
+
+def mark_sent(pid):
+    c = _conn()
+    c.execute("UPDATE gallery_photos SET last_sent_at=? WHERE pid=?", (_now(), pid))
+    c.commit()
+    c.close()
 
 
 def search_photos(q, limit=60):

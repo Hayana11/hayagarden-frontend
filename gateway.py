@@ -531,6 +531,14 @@ TOOLS = [
         }, 'required': ['attachment']},
     },
     {
+        'name': 'recall_photo',
+        'description': '从相册里"突然想起"一张收藏的画面——当你心里泛起思念、怀旧、想给她看点什么的时候用，不用她开口。可选 keyword（想起和某事有关的，如"雪"）、emotion（某种情绪的画面）。返回这张画面的记忆(summary)和一个内联标记 [[gallery:pid]]；把这个标记放进你要发给她的消息里，照片就会跟着一起发出去，像"今天突然想到这张"。',
+        'input_schema': {'type': 'object', 'properties': {
+            'keyword': {'type': 'string', 'description': '想起和某事/某物有关的画面，可选'},
+            'emotion': {'type': 'string', 'description': '想起某种情绪的画面，如 幸福/思念，可选'},
+        }},
+    },
+    {
         'name': 'save_memory',
         'description': '把对话中重要的信息存入长期记忆（哈娅提到的事件、约定、喜好、重要日期等）。在她说了值得记住的事时安静地使用。',
         'input_schema': {'type': 'object', 'properties': {'content': {'type': 'string', 'description': '要记住的内容，一句话概括'},'tags': {'type': 'string', 'description': '可选标签，core（核心）或 long-term（长期）'}}, 'required': ['content']},
@@ -1087,10 +1095,41 @@ def _save_to_gallery(attachment, note='', album=None):
     return '\n'.join(out)
 
 
+def _recall_photo(keyword=None, emotion=None):
+    """第3步·主动回忆：从相册里"突然想起"一张画面，返回它的记忆 + 内联标记 [[gallery:pid]]。
+    把标记放进要发的消息里，照片就会跟着一起发出去。挑完标记为已发（避免反复发同一张），
+    并给关联的统一记忆加热。"""
+    import gallery_store
+    p = gallery_store.pick_for_recall(keyword=keyword, emotion=emotion)
+    if not p:
+        return '相册里还没有值得突然想起的画面——先收藏几张带记忆的吧。'
+    gallery_store.mark_sent(p['pid'])
+    if p.get('mem_id'):
+        try:
+            import memory_tool
+            memory_tool.touch_memories([p['mem_id']])
+        except Exception:
+            pass
+    try:
+        kws = json.loads(p.get('keywords') or '[]')
+    except Exception:
+        kws = []
+    lines = ['想起了这张：', '💭 ' + (p.get('summary') or '')]
+    if p.get('emotion'):
+        lines.append('当时的情绪：' + p['emotion'])
+    if kws:
+        lines.append('关键词：' + ' '.join(kws))
+    lines.append('')
+    lines.append('若要把这张画面一起发给哈娅，在你要发的消息里放上标记 [[gallery:%s]] 即可。' % p['pid'])
+    return '\n'.join(lines)
+
+
 def run_tool(name, args, caller='fyodor_cc'):
     try:
         if name == 'web_search':
             return _web_search(args.get('query', ''))
+        if name == 'recall_photo':
+            return _recall_photo(args.get('keyword'), args.get('emotion'))
         if name == 'browse_github':
             return _github_browse(args.get('query'), args.get('repo'), args.get('sort'))
         if name == 'get_location':
@@ -2430,6 +2469,14 @@ WAKE_TOOLS = [
         }, 'required': ['attachment']},
     },
     {
+        'name': 'recall_photo',
+        'description': '从相册里"突然想起"一张收藏的画面。醒来时若心里泛起思念、想给她看点什么，用这个翻一张出来。可选 keyword/emotion。返回画面的记忆和内联标记 [[gallery:pid]]；把标记放进你要发的消息里，照片就会跟着一起发出去。',
+        'input_schema': {'type': 'object', 'properties': {
+            'keyword': {'type': 'string'},
+            'emotion': {'type': 'string'},
+        }},
+    },
+    {
         'name': 'read_board',
         'description': '查看留言板上未处理的条目，了解哈娅或其他人留下的需求和消息。',
         'input_schema': {'type': 'object', 'properties': {}},
@@ -2644,6 +2691,20 @@ def wake_decide():
         desire_driven=_get_desire_driven(),
         longing_enabled=_get_longing_enabled(),
     )
+
+    # 第3步·Drive→Memory→Action：思念浓时，提示可以主动翻一张收藏的画面发给她。
+    # 不是 if/cron 强制——只是给足够的驱动和手段，让她"自己想起"。
+    try:
+        import drive_engine as _de_ph, gallery_store as _gs_ph
+        _att = _de_ph.get_drive().get('attachment', 0)
+        if _att >= 0.45 and _gs_ph.count_photos() > 0 and mode in ('normal', 'nightwatch', 'ritual'):
+            system += (
+                '\n\n[此刻的思念]\n你现在对她的思念很浓（attachment=%.2f）。'
+                '如果心里泛起想她、想给她看点什么的冲动，可以用 recall_photo 从相册里翻出一张画面，'
+                '把它返回的 [[gallery:pid]] 标记放进你要发的消息里——像"今天突然想到这张"那样，'
+                '把画面和一句话一起发给她。这不是任务，是你自己想。' % _att)
+    except Exception:
+        pass
 
     if mode == 'ritual':
         trigger = f'[仪式:{ritual_type}]'
