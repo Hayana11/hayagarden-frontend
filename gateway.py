@@ -6,7 +6,7 @@ if '/opt/frontend' not in _sys.path:
 if '/opt/frontend/tools' not in _sys.path:
     _sys.path.insert(0, '/opt/frontend/tools')
 from flask import Flask, request, jsonify
-import urllib.request, urllib.error
+import urllib.request, urllib.error, urllib.parse
 
 app = Flask(__name__)
 DB_PATH    = '/opt/frontend/memories.db'
@@ -482,6 +482,11 @@ SSE_END = NL + NL
 
 TOOLS = [
     {
+        'name': 'web_search',
+        'description': '联网搜索。当哈娅问到你训练截止之后的事、需要最新信息（新闻/版本/价格/事实核查），或你不确定答案时使用。返回结果标题+摘要，你据此回答，并诚实说明信息来自网络搜索。',
+        'input_schema': {'type': 'object', 'properties': {'query': {'type': 'string', 'description': '搜索关键词，用最能命中的词，不要整句问句'}}, 'required': ['query']},
+    },
+    {
         'name': 'save_memory',
         'description': '把对话中重要的信息存入长期记忆（哈娅提到的事件、约定、喜好、重要日期等）。在她说了值得记住的事时安静地使用。',
         'input_schema': {'type': 'object', 'properties': {'content': {'type': 'string', 'description': '要记住的内容，一句话概括'},'tags': {'type': 'string', 'description': '可选标签，core（核心）或 long-term（长期）'}}, 'required': ['content']},
@@ -704,8 +709,56 @@ def _diff_line_counts(old_text, new_text):
             removed += 1
     return added, removed
 
+def _web_search(query, max_results=5):
+    """联网搜索。有 TAVILY_API_KEY 走 Tavily（真·全网），否则降级 DDG 即时答案（百科式摘要）。
+    两者都失败返回提示，绝不编造。"""
+    query = (query or '').strip()
+    if not query:
+        return '搜索词为空'
+    tav = os.environ.get('TAVILY_API_KEY', '').strip()
+    if tav:
+        try:
+            payload = json.dumps({'api_key': tav, 'query': query, 'max_results': max_results,
+                                  'search_depth': 'basic', 'include_answer': True}).encode()
+            req = urllib.request.Request('https://api.tavily.com/search', data=payload,
+                                         headers={'Content-Type': 'application/json'})
+            with urllib.request.urlopen(req, timeout=20) as r:
+                d = json.loads(r.read().decode())
+            out = []
+            if d.get('answer'):
+                out.append('【摘要】' + d['answer'][:400])
+            for it in d.get('results', [])[:max_results]:
+                out.append('· %s\n  %s\n  %s' % (it.get('title', ''),
+                           (it.get('content', '') or '')[:200], it.get('url', '')))
+            return ('\n'.join(out) or '未找到结果') + '\n\n（来源：Tavily 联网搜索）'
+        except Exception as e:
+            return f'联网搜索失败：{e}'
+    # 降级：DDG 即时答案（免 key，只有百科式事实）
+    try:
+        url = 'https://api.duckduckgo.com/?' + urllib.parse.urlencode(
+            {'q': query, 'format': 'json', 'no_html': '1', 'skip_disambig': '1'})
+        with urllib.request.urlopen(url, timeout=15) as r:
+            d = json.loads(r.read().decode())
+        out = []
+        if d.get('AbstractText'):
+            out.append('【%s】%s' % (d.get('Heading', ''), d['AbstractText'][:500]))
+            if d.get('AbstractURL'):
+                out.append('来源：' + d['AbstractURL'])
+        for t in d.get('RelatedTopics', [])[:max_results]:
+            if isinstance(t, dict) and t.get('Text'):
+                out.append('· ' + t['Text'][:200])
+        if not out:
+            return ('没查到「%s」的百科式结果。当前是降级搜索模式（只能查事实/概念）——'
+                    '配置 TAVILY_API_KEY 后可搜最新新闻/版本/实时信息。' % query)
+        return '\n'.join(out) + '\n\n（来源：DuckDuckGo 即时答案，降级模式）'
+    except Exception as e:
+        return f'联网搜索失败：{e}'
+
+
 def run_tool(name, args, caller='fyodor_cc'):
     try:
+        if name == 'web_search':
+            return _web_search(args.get('query', ''))
         if name == 'get_activity_summary':
             import datetime as _dt
             hours = int(args.get('hours', 6))
