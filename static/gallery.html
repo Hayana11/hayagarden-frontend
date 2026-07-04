@@ -21,8 +21,15 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,'PingFang 
 .gsearch{width:100%;margin-top:9px;padding:8px 12px;border:1px solid var(--border);border-radius:12px;background:var(--card);font-size:13px;color:var(--text);font-family:inherit;outline:none;}
 .gsearch:focus{border-color:rgba(212,165,116,.5);}
 .ph .emo{position:absolute;top:6px;left:6px;background:rgba(212,165,116,.92);color:#fff;font-size:10px;padding:2px 7px;border-radius:9px;}
+.ph .star{position:absolute;bottom:6px;right:6px;color:#ffd75e;font-size:15px;text-shadow:0 1px 3px rgba(0,0,0,.5);}
+.alb.add{color:var(--amber);border-style:dashed;}
 .lb-kw{display:flex;gap:5px;flex-wrap:wrap;justify-content:center;margin-top:8px;}
 .lb-kw span{font-size:11px;color:#d4a574;background:rgba(212,165,116,.16);padding:2px 9px;border-radius:9px;}
+.lb-acts{display:flex;gap:8px;margin-top:16px;flex-wrap:wrap;justify-content:center;}
+.lb-act{display:flex;align-items:center;gap:5px;font-size:12.5px;color:#eee;background:rgba(255,255,255,.12);border:none;padding:8px 14px;border-radius:20px;cursor:pointer;font-family:inherit;}
+.lb-act.on{background:rgba(212,165,116,.85);color:#fff;}
+.lb-act.del{color:#ff9b8f;}
+.lb-act .ti{font-size:15px;}
 .albums{display:flex;gap:7px;overflow-x:auto;padding:10px 16px 6px;flex-shrink:0;-webkit-overflow-scrolling:touch;}
 .albums::-webkit-scrollbar{display:none;}
 .alb{flex-shrink:0;font-size:12.5px;padding:6px 13px;border-radius:14px;border:1px solid var(--border);background:var(--card);color:var(--muted);cursor:pointer;white-space:nowrap;font-family:inherit;transition:all .15s;}
@@ -65,6 +72,12 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,'PingFang 
   <div class="lb-note" id="lb-note"></div>
   <div class="lb-kw" id="lb-kw"></div>
   <div class="lb-meta" id="lb-meta"></div>
+  <div class="lb-acts" onclick="event.stopPropagation()">
+    <button class="lb-act" id="lb-fav" onclick="lbToggleFav()"><i class="ti ti-star"></i><span>收藏</span></button>
+    <button class="lb-act" onclick="lbEditNote()"><i class="ti ti-pencil"></i>备注</button>
+    <button class="lb-act" onclick="lbMove()"><i class="ti ti-folder"></i>移动</button>
+    <button class="lb-act del" onclick="lbDelete()"><i class="ti ti-trash"></i>删除</button>
+  </div>
 </div>
 
 <nav class="bnav">
@@ -78,6 +91,7 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,'PingFang 
 <script>
 var SRC_ICON = {chat:'ti-message-2', screenshot_chat:'ti-message-2', read_webpage:'ti-browser', upload:'ti-upload'};
 var curAlbum = null, albums = [], photosCache = [], searchQ = '', searchTimer = null;
+var favMode = false, lbPid = null;
 
 function esc(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 
@@ -87,16 +101,20 @@ async function loadAlbums(){
     albums = d.albums || [];
   }catch(e){ albums = []; }
   var total = albums.reduce(function(a,b){ return a + (b.n||0); }, 0);
-  var html = '<button class="alb'+(curAlbum===null?' on':'')+'" onclick="pick(null)">全部<span class="n">'+total+'</span></button>';
+  var allOn = (curAlbum===null && !favMode);
+  var html = '<button class="alb'+(allOn?' on':'')+'" onclick="pick(null)">全部<span class="n">'+total+'</span></button>';
+  html += '<button class="alb'+(favMode?' on':'')+'" onclick="pickFav()">⭐ 收藏</button>';
   albums.forEach(function(a){
-    html += '<button class="alb'+(curAlbum===a.id?' on':'')+'" onclick="pick('+a.id+')">'+esc(a.name)+'<span class="n">'+(a.n||0)+'</span></button>';
+    html += '<button class="alb'+((curAlbum===a.id&&!favMode)?' on':'')+'" onclick="pick('+a.id+')">'+esc(a.name)+'<span class="n">'+(a.n||0)+'</span></button>';
   });
+  html += '<button class="alb add" onclick="newAlbum()">＋ 新建</button>';
   document.getElementById('albums').innerHTML = html;
 }
 
 async function loadPhotos(){
   var url;
   if(searchQ){ url = '/api/gallery/photos?q=' + encodeURIComponent(searchQ); }
+  else if(favMode){ url = '/api/gallery/photos?favorite=1'; }
   else{ url = '/api/gallery/photos' + (curAlbum!==null ? '?album_id='+curAlbum : ''); }
   var grid = document.getElementById('grid');
   try{
@@ -117,6 +135,7 @@ async function loadPhotos(){
     return '<div class="ph" onclick="openLb(\''+p.pid+'\')">'+
       '<img src="/api/gallery/photo/'+p.pid+'" alt="" loading="lazy">'+
       '<div class="src"><i class="ti '+ic+'"></i></div>'+
+      (p.favorite ? '<div class="star">★</div>' : '')+
       (p.emotion ? '<div class="emo">'+esc(p.emotion)+'</div>' : '')+
       (cap ? '<div class="note">'+esc(cap)+'</div>' : '')+
     '</div>';
@@ -129,9 +148,18 @@ function onSearch(v){
   searchTimer = setTimeout(loadPhotos, 250);
 }
 
-function pick(id){ searchQ=''; document.getElementById('gsearch').value=''; curAlbum = id; loadAlbums(); loadPhotos(); }
+function pick(id){ searchQ=''; document.getElementById('gsearch').value=''; favMode=false; curAlbum = id; loadAlbums(); loadPhotos(); }
+function pickFav(){ searchQ=''; document.getElementById('gsearch').value=''; favMode=true; curAlbum=null; loadAlbums(); loadPhotos(); }
+
+async function newAlbum(){
+  var name = (prompt('新建相册，取个名字（如 她 / 我们 / 雪）') || '').trim();
+  if(!name) return;
+  await fetch('/api/gallery/album', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({name:name})});
+  await loadAlbums();
+}
 
 function openLb(pid){
+  lbPid = pid;
   var p = photosCache.find(function(x){ return x.pid===pid; });
   document.getElementById('lb-img').src = '/api/gallery/photo/'+pid;
   document.getElementById('lb-note').textContent = p ? (p.summary || p.note || '') : '';
@@ -140,7 +168,52 @@ function openLb(pid){
   var meta = p ? (p.saved_at||'').slice(0,16) : '';
   if(p && p.emotion) meta = p.emotion + ' · ' + meta;
   document.getElementById('lb-meta').textContent = meta;
+  var favBtn = document.getElementById('lb-fav');
+  var isFav = p && p.favorite;
+  favBtn.classList.toggle('on', !!isFav);
+  favBtn.querySelector('span').textContent = isFav ? '已收藏' : '收藏';
   document.getElementById('lb').classList.add('on');
+}
+
+async function lbToggleFav(){
+  if(!lbPid) return;
+  var r = await fetch('/api/gallery/photo/'+lbPid+'/favorite', {method:'POST'});
+  var d = await r.json();
+  var favBtn = document.getElementById('lb-fav');
+  favBtn.classList.toggle('on', d.favorite===1);
+  favBtn.querySelector('span').textContent = d.favorite===1 ? '已收藏' : '收藏';
+  var p = photosCache.find(function(x){ return x.pid===lbPid; });
+  if(p) p.favorite = d.favorite;
+  loadPhotos();
+}
+async function lbEditNote(){
+  if(!lbPid) return;
+  var p = photosCache.find(function(x){ return x.pid===lbPid; });
+  var cur = (p && p.note) || '';
+  var note = prompt('给这张画面写句备注', cur);
+  if(note===null) return;
+  await fetch('/api/gallery/photo/'+lbPid+'/update', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({note:note})});
+  if(p) p.note = note;
+  document.getElementById('lb-note').textContent = note || (p && p.summary) || '';
+  loadPhotos();
+}
+async function lbMove(){
+  if(!lbPid) return;
+  var name = (prompt('移动到哪本相册？（输入相册名，不存在会新建）') || '').trim();
+  if(!name) return;
+  var ar = await fetch('/api/gallery/album', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({name:name})});
+  var ad = await ar.json();
+  if(!ad.album_id) return;
+  await fetch('/api/gallery/photo/'+lbPid+'/update', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({album_id:ad.album_id})});
+  document.getElementById('lb').classList.remove('on');
+  await loadAlbums(); loadPhotos();
+}
+async function lbDelete(){
+  if(!lbPid) return;
+  if(!confirm('删除这张画面？（相册和它的照片记忆都会一起删掉，不可恢复）')) return;
+  await fetch('/api/gallery/photo/'+lbPid+'/delete', {method:'POST'});
+  document.getElementById('lb').classList.remove('on');
+  await loadAlbums(); loadPhotos();
 }
 function closeLb(e, force){
   if(force || e.target.id==='lb' || (e.target.classList && e.target.classList.contains('lb-close'))){

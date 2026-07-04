@@ -1583,8 +1583,11 @@ def gallery_albums():
 def gallery_photos_list():
     album_id = request.args.get('album_id', type=int)
     q = (request.args.get('q') or '').strip()
+    fav = request.args.get('favorite') in ('1', 'true')
     if q:
         photos = gallery_store.search_photos(q, limit=120)
+    elif fav:
+        photos = gallery_store.list_photos(favorite_only=True, limit=300)
     else:
         photos = gallery_store.list_photos(album_id=album_id, limit=300)
     import json as _json
@@ -1601,6 +1604,45 @@ def gallery_photos_list():
             'summary': p.get('summary') or '', 'emotion': p.get('emotion') or '',
             'keywords': _kw(p), 'importance': p.get('importance') or 0} for p in photos]
     return jsonify({'photos': out})
+
+# ── Gallery 收藏层：打理照片（星标/改备注/移动/删除/新建相册）────────
+@app.route('/api/gallery/photo/<pid>/favorite', methods=['POST'])
+def gallery_favorite(pid):
+    v = gallery_store.toggle_favorite(pid)
+    if v is None:
+        abort(404)
+    return jsonify({'ok': True, 'favorite': v})
+
+@app.route('/api/gallery/photo/<pid>/update', methods=['POST'])
+def gallery_update(pid):
+    d = request.get_json() or {}
+    note = d.get('note')
+    album_id = d.get('album_id')
+    gallery_store.update_photo(pid, note=note,
+                               album_id=int(album_id) if album_id else None)
+    return jsonify({'ok': True})
+
+@app.route('/api/gallery/photo/<pid>/delete', methods=['POST'])
+def gallery_delete(pid):
+    mem_id = gallery_store.delete_photo(pid)
+    # 顺手清掉关联的统一记忆(posts, type=PHOTO)——照片没了，那条记忆的画面也没了
+    if mem_id:
+        try:
+            conn = get_db()
+            conn.execute("DELETE FROM posts WHERE id=? AND type='PHOTO'", (mem_id,))
+            conn.commit(); conn.close()
+        except Exception:
+            pass
+    return jsonify({'ok': True})
+
+@app.route('/api/gallery/album', methods=['POST'])
+def gallery_create_album():
+    d = request.get_json() or {}
+    name = (d.get('name') or '').strip()
+    if not name:
+        return jsonify({'ok': False, 'error': 'name required'}), 400
+    aid = gallery_store.album_by_name(name) or gallery_store.create_album(name, d.get('description', ''))
+    return jsonify({'ok': True, 'album_id': aid})
 
 
 if __name__ == '__main__':

@@ -113,15 +113,70 @@ def list_albums():
     return [dict(r) for r in rows]
 
 
-def list_photos(album_id=None, limit=200):
+def list_photos(album_id=None, limit=200, favorite_only=False):
     c = _conn()
-    if album_id:
-        rows = c.execute('SELECT * FROM gallery_photos WHERE album_id=? ORDER BY id DESC LIMIT ?',
-                         (album_id, limit)).fetchall()
-    else:
-        rows = c.execute('SELECT * FROM gallery_photos ORDER BY id DESC LIMIT ?', (limit,)).fetchall()
+    where, params = [], []
+    if favorite_only:
+        where.append('favorite=1')
+    elif album_id:
+        where.append('album_id=?'); params.append(album_id)
+    sql = 'SELECT * FROM gallery_photos'
+    if where:
+        sql += ' WHERE ' + ' AND '.join(where)
+    sql += ' ORDER BY id DESC LIMIT ?'
+    params.append(limit)
+    rows = c.execute(sql, params).fetchall()
     c.close()
     return [dict(r) for r in rows]
+
+
+def toggle_favorite(pid):
+    """切换收藏(星标)。返回切换后的值(0/1)，pid 不存在返回 None。"""
+    c = _conn()
+    row = c.execute('SELECT favorite FROM gallery_photos WHERE pid=?', (pid,)).fetchone()
+    if not row:
+        c.close()
+        return None
+    nv = 0 if row['favorite'] else 1
+    c.execute('UPDATE gallery_photos SET favorite=? WHERE pid=?', (nv, pid))
+    c.commit()
+    c.close()
+    return nv
+
+
+def update_photo(pid, note=None, album_id=None):
+    """改备注 / 移动相册。只更新传了的字段。"""
+    sets, vals = [], []
+    if note is not None:
+        sets.append('note=?'); vals.append(note)
+    if album_id is not None:
+        sets.append('album_id=?'); vals.append(album_id)
+    if not sets:
+        return False
+    vals.append(pid)
+    c = _conn()
+    c.execute('UPDATE gallery_photos SET %s WHERE pid=?' % ','.join(sets), vals)
+    c.commit()
+    c.close()
+    return True
+
+
+def delete_photo(pid):
+    """删除照片：删文件 + 删行。返回关联的 mem_id（调用方负责清理统一记忆），无则 None。"""
+    c = _conn()
+    row = c.execute('SELECT storage_key, mem_id FROM gallery_photos WHERE pid=?', (pid,)).fetchone()
+    if not row:
+        c.close()
+        return None
+    mem_id = row['mem_id']
+    try:
+        os.remove(os.path.join(GALLERY_DIR, row['storage_key']))
+    except OSError:
+        pass
+    c.execute('DELETE FROM gallery_photos WHERE pid=?', (pid,))
+    c.commit()
+    c.close()
+    return mem_id
 
 
 def get(pid):
