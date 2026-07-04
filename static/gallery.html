@@ -18,6 +18,11 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,'PingFang 
 .hd{flex-shrink:0;background:rgba(245,243,238,.97);backdrop-filter:blur(10px);padding:calc(env(safe-area-inset-top,0px) + 14px) 18px 10px;border-bottom:.5px solid var(--border);}
 .hd-title{font-family:Georgia,serif;font-size:20px;color:var(--text);letter-spacing:.5px;}
 .hd-sub{font-size:11px;color:var(--muted);margin-top:2px;}
+.gsearch{width:100%;margin-top:9px;padding:8px 12px;border:1px solid var(--border);border-radius:12px;background:var(--card);font-size:13px;color:var(--text);font-family:inherit;outline:none;}
+.gsearch:focus{border-color:rgba(212,165,116,.5);}
+.ph .emo{position:absolute;top:6px;left:6px;background:rgba(212,165,116,.92);color:#fff;font-size:10px;padding:2px 7px;border-radius:9px;}
+.lb-kw{display:flex;gap:5px;flex-wrap:wrap;justify-content:center;margin-top:8px;}
+.lb-kw span{font-size:11px;color:#d4a574;background:rgba(212,165,116,.16);padding:2px 9px;border-radius:9px;}
 .albums{display:flex;gap:7px;overflow-x:auto;padding:10px 16px 6px;flex-shrink:0;-webkit-overflow-scrolling:touch;}
 .albums::-webkit-scrollbar{display:none;}
 .alb{flex-shrink:0;font-size:12.5px;padding:6px 13px;border-radius:14px;border:1px solid var(--border);background:var(--card);color:var(--muted);cursor:pointer;white-space:nowrap;font-family:inherit;transition:all .15s;}
@@ -48,6 +53,8 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,'PingFang 
 <div class="hd">
   <div class="hd-title">Gallery</div>
   <div class="hd-sub" id="hd-sub">收藏的画面</div>
+  <input class="gsearch" id="gsearch" type="text" placeholder="搜回忆… 雪 / 向日葵 / 她笑了"
+         oninput="onSearch(this.value)">
 </div>
 <div class="albums" id="albums"></div>
 <div class="grid" id="grid"><div class="empty">加载中…</div></div>
@@ -56,6 +63,7 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,'PingFang 
   <button class="lb-close" onclick="closeLb(event,true)">×</button>
   <img id="lb-img" src="" alt="">
   <div class="lb-note" id="lb-note"></div>
+  <div class="lb-kw" id="lb-kw"></div>
   <div class="lb-meta" id="lb-meta"></div>
 </div>
 
@@ -69,7 +77,7 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,'PingFang 
 
 <script>
 var SRC_ICON = {chat:'ti-message-2', screenshot_chat:'ti-message-2', read_webpage:'ti-browser', upload:'ti-upload'};
-var curAlbum = null, albums = [], photosCache = [];
+var curAlbum = null, albums = [], photosCache = [], searchQ = '', searchTimer = null;
 
 function esc(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 
@@ -87,35 +95,51 @@ async function loadAlbums(){
 }
 
 async function loadPhotos(){
-  var url = '/api/gallery/photos' + (curAlbum!==null ? '?album_id='+curAlbum : '');
+  var url;
+  if(searchQ){ url = '/api/gallery/photos?q=' + encodeURIComponent(searchQ); }
+  else{ url = '/api/gallery/photos' + (curAlbum!==null ? '?album_id='+curAlbum : ''); }
   var grid = document.getElementById('grid');
   try{
     var r = await fetch(url); var d = await r.json();
     photosCache = d.photos || [];
   }catch(e){ photosCache = []; }
   if(!photosCache.length){
-    grid.innerHTML = '<div class="empty"><i class="ti ti-photo-off"></i>还没有收藏的画面<br>在聊天里让费佳把喜欢的截图存进来</div>';
-    document.getElementById('hd-sub').textContent = '收藏的画面';
+    grid.innerHTML = searchQ
+      ? '<div class="empty"><i class="ti ti-mood-search"></i>没找到「'+esc(searchQ)+'」相关的回忆</div>'
+      : '<div class="empty"><i class="ti ti-photo-off"></i>还没有收藏的画面<br>在聊天里让费佳把喜欢的截图存进来</div>';
+    document.getElementById('hd-sub').textContent = searchQ ? '搜索：'+esc(searchQ) : '收藏的画面';
     return;
   }
-  document.getElementById('hd-sub').textContent = photosCache.length + ' 张画面';
+  document.getElementById('hd-sub').textContent = (searchQ ? '搜到 ' : '') + photosCache.length + ' 张画面';
   grid.innerHTML = photosCache.map(function(p){
     var ic = SRC_ICON[p.source_type] || 'ti-photo';
+    var cap = p.summary || p.note || '';
     return '<div class="ph" onclick="openLb(\''+p.pid+'\')">'+
       '<img src="/api/gallery/photo/'+p.pid+'" alt="" loading="lazy">'+
       '<div class="src"><i class="ti '+ic+'"></i></div>'+
-      (p.note ? '<div class="note">'+esc(p.note)+'</div>' : '')+
+      (p.emotion ? '<div class="emo">'+esc(p.emotion)+'</div>' : '')+
+      (cap ? '<div class="note">'+esc(cap)+'</div>' : '')+
     '</div>';
   }).join('');
 }
 
-function pick(id){ curAlbum = id; loadAlbums(); loadPhotos(); }
+function onSearch(v){
+  searchQ = (v||'').trim();
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(loadPhotos, 250);
+}
+
+function pick(id){ searchQ=''; document.getElementById('gsearch').value=''; curAlbum = id; loadAlbums(); loadPhotos(); }
 
 function openLb(pid){
   var p = photosCache.find(function(x){ return x.pid===pid; });
   document.getElementById('lb-img').src = '/api/gallery/photo/'+pid;
-  document.getElementById('lb-note').textContent = p && p.note ? p.note : '';
-  document.getElementById('lb-meta').textContent = p ? ((p.saved_at||'').slice(0,16)) : '';
+  document.getElementById('lb-note').textContent = p ? (p.summary || p.note || '') : '';
+  var kws = (p && p.keywords) || [];
+  document.getElementById('lb-kw').innerHTML = kws.map(function(k){ return '<span>'+esc(k)+'</span>'; }).join('');
+  var meta = p ? (p.saved_at||'').slice(0,16) : '';
+  if(p && p.emotion) meta = p.emotion + ' · ' + meta;
+  document.getElementById('lb-meta').textContent = meta;
   document.getElementById('lb').classList.add('on');
 }
 function closeLb(e, force){

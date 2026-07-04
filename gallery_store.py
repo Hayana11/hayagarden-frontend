@@ -57,6 +57,19 @@ def _init():
         created_at     TEXT,
         saved_at       DATETIME DEFAULT (datetime('now','+8 hours'))
     )''')
+    # 第2步·照片记忆的意义字段（gallery.db 是本模块自己的库，安全 ALTER）
+    for col, ddl in [
+        ('summary',    "TEXT DEFAULT ''"),
+        ('emotion',    "TEXT DEFAULT ''"),
+        ('keywords',   "TEXT DEFAULT '[]'"),   # json 数组
+        ('importance', 'INTEGER DEFAULT 0'),
+        ('mem_id',     'INTEGER'),             # 关联的统一记忆(posts) id
+        ('embedding',  'TEXT'),                # json 向量，第2b步再填
+    ]:
+        try:
+            c.execute('ALTER TABLE gallery_photos ADD COLUMN %s %s' % (col, ddl))
+        except sqlite3.OperationalError:
+            pass  # 列已存在
     # 确保有一本默认相册（直接原生 SQL，不走 create_album，避免 _init 自引用递归）
     n = c.execute('SELECT COUNT(*) FROM albums').fetchone()[0]
     if n == 0:
@@ -165,6 +178,47 @@ def save_from_attachment(attach_id, note='', album_id=None, source_type='chat',
     c.commit()
     c.close()
     return pid
+
+
+def set_meaning(pid, summary=None, emotion=None, keywords=None, importance=None,
+                mem_id=None, embedding=None):
+    """写入照片的"意义"（第2步·照片记忆）。只更新传了的字段。keywords/embedding 传 list。"""
+    import json as _json
+    sets, vals = [], []
+    if summary is not None:
+        sets.append('summary=?'); vals.append(summary)
+    if emotion is not None:
+        sets.append('emotion=?'); vals.append(emotion)
+    if keywords is not None:
+        sets.append('keywords=?'); vals.append(_json.dumps(keywords, ensure_ascii=False))
+    if importance is not None:
+        sets.append('importance=?'); vals.append(int(importance))
+    if mem_id is not None:
+        sets.append('mem_id=?'); vals.append(int(mem_id))
+    if embedding is not None:
+        sets.append('embedding=?'); vals.append(_json.dumps(embedding))
+    if not sets:
+        return False
+    vals.append(pid)
+    c = _conn()
+    c.execute('UPDATE gallery_photos SET %s WHERE pid=?' % ','.join(sets), vals)
+    c.commit()
+    c.close()
+    return True
+
+
+def search_photos(q, limit=60):
+    """按关键词搜照片（note/summary/keywords 里 LIKE）。第2b步再加 embedding 语义搜。"""
+    q = (q or '').strip()
+    if not q:
+        return list_photos(limit=limit)
+    like = '%' + q + '%'
+    c = _conn()
+    rows = c.execute(
+        'SELECT * FROM gallery_photos WHERE note LIKE ? OR summary LIKE ? OR keywords LIKE ? '
+        'ORDER BY id DESC LIMIT ?', (like, like, like, limit)).fetchall()
+    c.close()
+    return [dict(r) for r in rows]
 
 
 _init()

@@ -996,6 +996,52 @@ def _screenshot_chat(viewpoint='fyodor'):
     return '📸 聊天截图 · %s\n🖼 %s' % (who, ref)
 
 
+def _gen_photo_meaning(note=''):
+    """看着刚收藏的画面 + 最近对话，生成 {summary, emotion, keywords, importance}。
+    走轻量 ws 模型；失败返回 None（照片照存，只是暂时没意义）。不用 OCR——意义来自上下文。"""
+    try:
+        conn = get_db()
+        rows = conn.execute(
+            "SELECT author, content FROM chat_messages ORDER BY id DESC LIMIT 8").fetchall()
+        conn.close()
+    except Exception:
+        rows = []
+    ctx = []
+    for r in reversed(rows):
+        who = '哈娅' if str(r['author']).lower() in ('hayana', 'haya', 'user') else '费佳'
+        c = (r['content'] or '').strip().replace('\n', ' ')
+        if c:
+            ctx.append('%s：%s' % (who, c[:120]))
+    ctx_str = '\n'.join(ctx) or '（没有最近对话）'
+    sys_p = ('你是费奥多尔。你刚把一张画面收进相册。根据备注和最近的对话，为它生成一条"记忆"。'
+             '严格只输出 JSON，不要多余文字：'
+             '{"summary":"一句话概括这张画面对应的时刻，第一人称、温度克制",'
+             '"emotion":"一个词的情绪，如 幸福/思念/心疼/平静/情欲",'
+             '"keywords":["3到6个检索关键词，如 雪 冬天 横滨"],'
+             '"importance":0到100的整数，越珍贵越高}')
+    user_p = '备注：%s\n\n最近的对话：\n%s' % (note or '（无）', ctx_str)
+    try:
+        from relay.manager import relay as _r
+        rd = _r.call({'max_tokens': 400, 'system': sys_p,
+                      'messages': [{'role': 'user', 'content': user_p}]},
+                     timeout=25, use_ws_model=True)
+        from chat.response_parser import extract_text as _et
+        raw = _et(rd) or ''
+        m = re.search(r'\{.*\}', raw, re.S)
+        if not m:
+            return None
+        d = json.loads(m.group(0))
+        kws = d.get('keywords') or []
+        if isinstance(kws, str):
+            kws = [k.strip() for k in re.split(r'[,，\s]+', kws) if k.strip()]
+        return {'summary': str(d.get('summary', '')).strip()[:200],
+                'emotion': str(d.get('emotion', '')).strip()[:10],
+                'keywords': [str(k).strip()[:16] for k in kws if str(k).strip()][:6],
+                'importance': max(0, min(100, int(d.get('importance', 50) or 50)))}
+    except Exception:
+        return None
+
+
 def _save_to_gallery(attachment, note='', album=None):
     """把一张临时 attachment（screenshot_chat/read_webpage 返回的 attachment://id）
     永久收藏进相册，返回 gallery://<pid>。"""
@@ -1013,8 +1059,32 @@ def _save_to_gallery(attachment, note='', album=None):
     if not pid:
         return '收藏失败：这张图可能已经过期了（临时图只留最近 30 张 / 7 天）。趁新鲜再截一张吧。'
     where = ('《%s》相册' % album) if album else '默认相册'
-    line = '📸 已收藏进%s' % where
-    return '%s\n🖼 gallery://%s%s' % (line, pid, ('\n📝 ' + note) if note else '')
+    out = ['📸 已收藏进%s' % where, '🖼 gallery://%s' % pid]
+    if note:
+        out.append('📝 ' + note)
+    # 第2步·照片记忆：生成意义，写进统一记忆(posts, type=PHOTO)，并回填到 gallery 行
+    meaning = _gen_photo_meaning(note=note or '')
+    if meaning and meaning.get('summary'):
+        try:
+            import memory_tool, gallery_store
+            tag_str = ('gallery:%s ' % pid) + ' '.join(meaning.get('keywords', []))
+            if meaning.get('emotion'):
+                tag_str += ' ' + meaning['emotion']
+            mem_id = memory_tool.save_memory(
+                content=meaning['summary'], type='PHOTO', author='fyodor',
+                layer='long-term', tags=tag_str.strip(),
+                importance=meaning.get('importance', 50))
+            gallery_store.set_meaning(
+                pid, summary=meaning['summary'], emotion=meaning.get('emotion', ''),
+                keywords=meaning.get('keywords', []), importance=meaning.get('importance', 50),
+                mem_id=mem_id)
+            line = '💭 ' + meaning['summary']
+            if meaning.get('emotion'):
+                line += '（%s）' % meaning['emotion']
+            out.append(line)
+        except Exception:
+            pass
+    return '\n'.join(out)
 
 
 def run_tool(name, args, caller='fyodor_cc'):

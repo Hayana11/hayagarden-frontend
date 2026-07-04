@@ -1582,12 +1582,24 @@ def gallery_albums():
 @app.route('/api/gallery/photos', methods=['GET'])
 def gallery_photos_list():
     album_id = request.args.get('album_id', type=int)
-    photos = gallery_store.list_photos(album_id=album_id, limit=300)
+    q = (request.args.get('q') or '').strip()
+    if q:
+        photos = gallery_store.search_photos(q, limit=120)
+    else:
+        photos = gallery_store.list_photos(album_id=album_id, limit=300)
+    import json as _json
+    def _kw(p):
+        try:
+            return _json.loads(p.get('keywords') or '[]')
+        except Exception:
+            return []
     # 只对外暴露需要的字段（不暴露 storage_key 物理路径）
     out = [{'pid': p['pid'], 'album_id': p['album_id'], 'note': p['note'],
             'width': p['width'], 'height': p['height'], 'favorite': p['favorite'],
             'created_at': p['created_at'], 'saved_at': p['saved_at'],
-            'source_type': p['source_type']} for p in photos]
+            'source_type': p['source_type'],
+            'summary': p.get('summary') or '', 'emotion': p.get('emotion') or '',
+            'keywords': _kw(p), 'importance': p.get('importance') or 0} for p in photos]
     return jsonify({'photos': out})
 
 
