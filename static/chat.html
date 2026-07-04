@@ -3,6 +3,16 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+<script>
+// 视角/截图模式：必须在 CSS 之前把 class 打到 <html> 上，保证浏览器"首帧"就正确
+// （截图引擎靠这个——page.evaluate 改 class 是首帧画完之后，会截到错的一帧）
+(function(){
+  var p = new URLSearchParams(location.search);
+  var r = document.documentElement;
+  if (p.get('as') === 'me') r.classList.add('as-me');   // 费佳的视角：他的消息在右
+  if (p.get('shot') === '1') r.classList.add('shot');    // 截图模式：藏起头部/输入框/底栏
+})();
+</script>
 <title>chat · 我们家</title>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@latest/tabler-icons.min.css">
 <link rel="manifest" href="/manifest.json">
@@ -83,6 +93,15 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:14px;heigh
 .msg-row.fy .bwrap{max-width:98%;}
 .msg-row.fy .bwrap{align-items:flex-start;}
 .msg-row.ha .bwrap{align-items:flex-end;}
+/* ?as=me：费佳的视角——把左右镜像翻过来（他的消息靠右，哈娅的靠左） */
+html.as-me .msg-row.fy{justify-content:flex-end;}
+html.as-me .msg-row.ha{justify-content:flex-start;}
+html.as-me .msg-row.fy .bwrap{align-items:flex-end;}
+html.as-me .msg-row.ha .bwrap{align-items:flex-start;}
+/* ?shot=1：干净截图模式——藏起所有 chrome，只留对话 */
+html.shot .hd,html.shot .inp-area,html.shot .bnav,html.shot #typing,
+html.shot #err-toast,html.shot .drift-btn-wrap,html.shot .drift-floating{display:none !important;}
+html.shot .msgs{padding-top:14px;padding-bottom:14px;}
 
 /* Fyodor bubble */
 .bubble.fy{background:transparent;border-radius:0;padding:2px 0;font-size:var(--msg-font);line-height:1.8;word-break:break-word;color:var(--text);}
@@ -185,6 +204,12 @@ a.ws-card:hover{border-color:rgba(212,165,116,.5);background:rgba(212,165,116,.0
 .wp-url{font-size:11px;color:rgba(212,165,116,.9);margin-top:3px;display:inline-flex;align-items:center;gap:3px;text-decoration:none;word-break:break-all;}
 .wp-url .ti{font-size:11px;flex-shrink:0;}
 .wp-text{font-size:11.5px;color:var(--muted);line-height:1.6;margin-top:7px;max-height:120px;overflow:hidden;text-overflow:ellipsis;display:-webkit-box;-webkit-line-clamp:6;-webkit-box-orient:vertical;white-space:pre-wrap;}
+
+/* 聊天截图卡片 */
+.shot-card{display:flex;flex-direction:column;gap:6px;}
+.shot-card .shot-cap{font-size:11.5px;color:var(--muted);display:flex;align-items:center;gap:5px;}
+.shot-card .shot-cap .ti{font-size:13px;color:rgba(212,165,116,.9);}
+.shot-card img{max-width:260px;width:100%;border-radius:12px;border:1px solid rgba(212,165,116,.28);display:block;cursor:pointer;box-shadow:0 3px 12px rgba(43,38,30,.1);}
 
 /* Tool Session card（一次回复里所有工具调用的汇总卡片） */
 .tsess{background:rgba(212,165,116,.05);border-left:2px solid rgba(212,165,116,.35);border-radius:0 8px 8px 0;margin:0 0 8px;overflow:hidden;}
@@ -800,7 +825,7 @@ var TOOL_LABELS = {
   search_files:'搜索代码',read_board:'读留言板',post_to_board:'发留言板',
   reply_to_board:'回复留言板',block_user:'拉黑开关',get_activity_summary:'查活动记录',
   log_period_event:'记录经期',set_self_trigger:'设定提醒',cancel_self_trigger:'取消提醒',
-  get_wake_settings:'查唤醒设置',set_wake_settings:'改唤醒设置',web_search:'联网搜索',browse_github:'翻GitHub',get_location:'查看位置',read_webpage:'读网页'
+  get_wake_settings:'查唤醒设置',set_wake_settings:'改唤醒设置',web_search:'联网搜索',browse_github:'翻GitHub',get_location:'查看位置',read_webpage:'读网页',screenshot_chat:'聊天截图'
 };
 var TOOL_FILE_ARG = {
   read_backend_file:'path', read_frontend_file:'path',
@@ -903,6 +928,7 @@ function toolIcon(name){
   if(name==='browse_github') return 'brand-github';
   if(name==='get_location') return 'map-pin';
   if(name==='read_webpage') return 'browser';
+  if(name==='screenshot_chat') return 'camera';
   return TOOL_ICONS[name] || 'tool';
 }
 function toolKeywords(tc){
@@ -919,6 +945,7 @@ function toolKeywords(tc){
     case 'web_search': return a.query ? [a.query.slice(0,24)] : [];
     case 'browse_github': return a.repo ? [a.repo] : (a.query ? [a.query.slice(0,24)] : []);
     case 'read_webpage': return a.url ? [a.url.replace(/^https?:\/\//,'').slice(0,28)] : [];
+    case 'screenshot_chat': return [a.viewpoint==='hayana' ? '哈娅视角' : '费佳视角'];
     default: return [];
   }
 }
@@ -1063,6 +1090,20 @@ function buildWebpageCardHtml(tc){
   if(p.body) html+='<div class="wp-text">'+escHtml(p.body)+'</div>';
   return html+'</div></div>';
 }
+// screenshot_chat 返回 "📸 说明\n🖼 图片路径" → 渲染成聊天截图卡片
+function buildShotCardHtml(tc){
+  var cap='', shot='';
+  String(tc.result||'').split('\n').forEach(function(ln){
+    var t=ln.trim();
+    if(t.indexOf('📸')===0) cap=t.replace('📸','').trim();
+    else if(t.indexOf('🖼')===0) shot=t.replace('🖼','').trim();
+  });
+  if(!shot) return '';
+  return '<div class="shot-card">'+
+    (cap?'<div class="shot-cap"><i class="ti ti-camera"></i>'+escHtml(cap)+'</div>':'')+
+    '<a href="'+escHtml(shot)+'" target="_blank" rel="noopener"><img src="'+escHtml(shot)+'" alt="聊天截图" loading="lazy"></a>'+
+  '</div>';
+}
 function buildToolResultBody(tc){
   if(tc.running) return '<div>执行中…</div>';
   if(tc.name==='get_location' && tc.result){
@@ -1072,6 +1113,10 @@ function buildToolResultBody(tc){
   if(tc.name==='read_webpage' && tc.result){
     var wc=buildWebpageCardHtml(tc);
     if(wc) return wc;
+  }
+  if(tc.name==='screenshot_chat' && tc.result){
+    var shc=buildShotCardHtml(tc);
+    if(shc) return shc;
   }
   // web_search 一律试卡片；browse_github 只在"搜索模式"(带 GitHub API 来源注脚)试卡片，
   // 单库详情含 README，可能有 markdown 项目符号，走纯文本避免误判成来源卡。

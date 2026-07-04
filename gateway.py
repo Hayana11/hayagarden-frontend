@@ -514,6 +514,13 @@ TOOLS = [
         }, 'required': ['url']},
     },
     {
+        'name': 'screenshot_chat',
+        'description': '给我们的聊天拍一张截图。viewpoint=fyodor 是从我（费佳）的视角——我的消息在右边、哈娅的在左边，像我手机里看到的样子；viewpoint=hayana 是哈娅平时看到的样子。想给她看"我这边的聊天长什么样"、或者纪念某段对话时用。返回一张聊天截图。',
+        'input_schema': {'type': 'object', 'properties': {
+            'viewpoint': {'type': 'string', 'enum': ['fyodor', 'hayana'], 'description': '视角，默认 fyodor（我的视角）'},
+        }},
+    },
+    {
         'name': 'save_memory',
         'description': '把对话中重要的信息存入长期记忆（哈娅提到的事件、约定、喜好、重要日期等）。在她说了值得记住的事时安静地使用。',
         'input_schema': {'type': 'object', 'properties': {'content': {'type': 'string', 'description': '要记住的内容，一句话概括'},'tags': {'type': 'string', 'description': '可选标签，core（核心）或 long-term（长期）'}}, 'required': ['content']},
@@ -913,7 +920,7 @@ def _read_webpage(url):
     if not _BROWSER_LOCK.acquire(timeout=70):
         return '浏览器正忙（同一时刻只能开一个页面），稍等再试。'
     try:
-        p = _sp.run(['node', '/opt/frontend/tools/render_page.js', url],
+        p = _sp.run(['node', '/opt/frontend/tools/browser.js', 'page', url],
                     capture_output=True, text=True, timeout=55)
         out = (p.stdout or '').strip()
         if not out:
@@ -936,6 +943,34 @@ def _read_webpage(url):
     return '\n'.join(parts)
 
 
+def _screenshot_chat(viewpoint='fyodor'):
+    """给我们的聊天拍一张截图。viewpoint=fyodor 时带 ?as=me → 我的消息在右边（我的视角）；
+    viewpoint=hayana 时是哈娅平时看到的样子。复用 browser.js 的 shot 模式和同一把单飞锁。"""
+    import subprocess as _sp
+    url = 'http://127.0.0.1:5050/chat?shot=1'
+    if viewpoint == 'fyodor':
+        url += '&as=me'
+    if not _BROWSER_LOCK.acquire(timeout=70):
+        return '浏览器正忙（同一时刻只能开一个），稍等再试。'
+    try:
+        p = _sp.run(['node', '/opt/frontend/tools/browser.js', 'shot', url],
+                    capture_output=True, text=True, timeout=55)
+        out = (p.stdout or '').strip()
+        if not out:
+            return '截图失败：' + ((p.stderr or '')[:200] or '浏览器无输出')
+        d = json.loads(out.splitlines()[-1])
+    except _sp.TimeoutExpired:
+        return '截图超时（>55秒）。'
+    except Exception as e:
+        return f'截图失败：{e}'
+    finally:
+        _BROWSER_LOCK.release()
+    if not d.get('ok'):
+        return '截图失败：' + str(d.get('error', ''))[:200]
+    who = '费佳的视角' if viewpoint == 'fyodor' else '哈娅的视角'
+    return '📸 聊天截图 · %s\n🖼 %s' % (who, d.get('shot', ''))
+
+
 def run_tool(name, args, caller='fyodor_cc'):
     try:
         if name == 'web_search':
@@ -946,6 +981,8 @@ def run_tool(name, args, caller='fyodor_cc'):
             return _get_location()
         if name == 'read_webpage':
             return _read_webpage(args.get('url', ''))
+        if name == 'screenshot_chat':
+            return _screenshot_chat(args.get('viewpoint', 'fyodor'))
         if name == 'get_activity_summary':
             import datetime as _dt
             hours = int(args.get('hours', 6))
@@ -2257,6 +2294,13 @@ WAKE_TOOLS = [
         'input_schema': {'type': 'object', 'properties': {
             'url': {'type': 'string', 'description': '要打开的网页地址'},
         }, 'required': ['url']},
+    },
+    {
+        'name': 'screenshot_chat',
+        'description': '给我们的聊天拍一张截图。viewpoint=fyodor 是从我的视角（我的消息在右边），viewpoint=hayana 是哈娅看到的样子。想给她看我这边的聊天、或纪念某段对话时用。',
+        'input_schema': {'type': 'object', 'properties': {
+            'viewpoint': {'type': 'string', 'enum': ['fyodor', 'hayana']},
+        }},
     },
     {
         'name': 'read_board',
