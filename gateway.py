@@ -33,6 +33,7 @@ _warmup_ombre_brain()
 STATIC_DIR = '/opt/frontend/static'
 
 import config_store
+import attachment_store
 
 # API_URL/API_KEY/CC_TOKEN：部署配置，.env 兜底（真正生效的值由 relay.manager
 # 按 ACTIVE_RELAY 动态解析，这里仅供 /api/debug/provider 展示部署期默认值）。
@@ -908,6 +909,17 @@ def _get_location():
 # 无头浏览器同时只允许开一个（这台机器内存紧，两个 chromium 会撑爆）
 _BROWSER_LOCK = threading.Lock()
 
+def _register_shot(path):
+    """把 browser.js 生成的截图文件纳入 attachment 管理，返回 attachment://<id>。
+    失败返回 None（图丢了但文字结果仍可用）。"""
+    if not path:
+        return None
+    try:
+        aid = attachment_store.save(path, kind='image', mime='image/png')
+        return 'attachment://' + aid
+    except Exception:
+        return None
+
 def _read_webpage(url):
     """用 Playwright 无头 chromium 真实打开网页（含 JS 渲染），抽正文+截图。
     单飞锁保证同一时刻只有一个浏览器进程。"""
@@ -936,8 +948,9 @@ def _read_webpage(url):
         return '打开页面失败：' + str(d.get('error', ''))[:200]
     parts = ['📄 ' + (d.get('title') or d.get('url') or '网页')]
     parts.append('🔗 ' + (d.get('finalUrl') or d.get('url') or ''))
-    if d.get('shot'):
-        parts.append('🖼 ' + d['shot'])
+    ref = _register_shot(d.get('shot'))
+    if ref:
+        parts.append('🖼 ' + ref)
     parts.append('')
     parts.append(d.get('text') or '（页面没有可提取的文字，可能是纯图片或需要登录）')
     return '\n'.join(parts)
@@ -968,7 +981,10 @@ def _screenshot_chat(viewpoint='fyodor'):
     if not d.get('ok'):
         return '截图失败：' + str(d.get('error', ''))[:200]
     who = '费佳的视角' if viewpoint == 'fyodor' else '哈娅的视角'
-    return '📸 聊天截图 · %s\n🖼 %s' % (who, d.get('shot', ''))
+    ref = _register_shot(d.get('shot'))
+    if not ref:
+        return '截图存档失败（文件没能纳入 attachment）。'
+    return '📸 聊天截图 · %s\n🖼 %s' % (who, ref)
 
 
 def run_tool(name, args, caller='fyodor_cc'):

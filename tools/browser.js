@@ -10,7 +10,9 @@ const fs = require('fs');
 
 const mode = process.argv[2];
 const url = process.argv[3];
-const SHOT_DIR = '/opt/frontend/static/uploads/shots';
+// 截图写进 attachments 目录（不在 static 里）。gateway 收到绝对路径后经
+// attachment_store 登记、改名为 <id>，返回 attachment://<id> 给前端。
+const SHOT_DIR = '/opt/frontend/attachments';
 const LAUNCH_ARGS = ['--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage', '--single-process',
                      '--no-zygote', '--disable-extensions', '--disable-background-networking', '--mute-audio'];
 
@@ -51,7 +53,7 @@ async function run() {
       const title = await page.title();
       await page.screenshot({ path: shotPath });            // viewport 截图（手机比例）
       await browser.close();
-      out({ ok: true, mode, title, url, shot: '/static/uploads/shots/' + fname });
+      out({ ok: true, mode, title, url, shot: shotPath });  // 绝对路径，交给 gateway 登记
       return;
     }
 
@@ -64,7 +66,7 @@ async function run() {
     const finalUrl = page.url();
     await browser.close();
     out({ ok: true, mode, status: resp ? resp.status() : 0, title, url, finalUrl,
-          text: text.slice(0, 4000), shot: '/static/uploads/shots/' + fname });
+          text: text.slice(0, 4000), shot: shotPath });   // 绝对路径，交给 gateway 登记
   } catch (e) {
     try { await browser.close(); } catch (_) {}
     out({ ok: false, error: String((e && e.message) || e) });

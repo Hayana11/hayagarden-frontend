@@ -1,6 +1,7 @@
 import os, re, json, sqlite3, datetime, base64, uuid, threading
-from flask import Flask, request, jsonify, send_from_directory
+from flask import Flask, request, jsonify, send_from_directory, abort
 import config_store
+import attachment_store
 
 app = Flask(__name__, static_folder='static')
 DB_PATH = '/opt/frontend/memories.db'
@@ -1548,6 +1549,16 @@ def geo_latest():
     conn.close()
     if not row: return jsonify({'ok':False,'error':'no data'})
     return jsonify({'ok':True,**dict(row)})
+
+
+# ── 附件间接层：attachment://<id> 的唯一取图入口 ──────────────
+@app.route('/api/attachments/<aid>', methods=['GET'])
+def get_attachment(aid):
+    a = attachment_store.get(aid)
+    if not a:
+        abort(404)  # 不存在或已过期（生命周期删掉了）——优雅 404
+    return send_from_directory(attachment_store.ATTACH_DIR, a['filename'],
+                               mimetype=a.get('mime') or 'image/png')
 
 
 if __name__ == '__main__':

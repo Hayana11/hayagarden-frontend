@@ -1083,14 +1083,19 @@ function buildWebpageCardHtml(tc){
   var p=parseWebpage(tc.result);
   if(!p.title && !p.url && !p.body) return '';
   var html='<div class="wp-card">';
-  if(p.shot) html+='<a href="'+escHtml(p.shot)+'" target="_blank" rel="noopener"><img class="wp-shot" src="'+escHtml(p.shot)+'" alt="网页截图" loading="lazy"></a>';
+  if(p.shot){ var wsrc=resolveAttach(p.shot); html+='<a href="'+escHtml(wsrc)+'" target="_blank" rel="noopener"><img class="wp-shot" src="'+escHtml(wsrc)+'" alt="网页截图" loading="lazy"></a>'; }
   html+='<div class="wp-body">';
   if(p.title) html+='<div class="wp-title">'+escHtml(p.title)+'</div>';
   if(p.url) html+='<a class="wp-url" href="'+escHtml(p.url)+'" target="_blank" rel="noopener"><i class="ti ti-external-link"></i>'+escHtml(p.url.replace(/^https?:\/\//,''))+'</a>';
   if(p.body) html+='<div class="wp-text">'+escHtml(p.body)+'</div>';
   return html+'</div></div>';
 }
-// screenshot_chat 返回 "📸 说明\n🖼 图片路径" → 渲染成聊天截图卡片
+// 把 attachment://<id> 解析成真实取图 URL（间接层：id 是句柄，客户端自己去取）
+function resolveAttach(u){
+  u = String(u||'');
+  return u.indexOf('attachment://')===0 ? '/api/attachments/'+u.slice(13) : u;
+}
+// screenshot_chat 返回 "📸 说明\n🖼 attachment://id" → 渲染成聊天截图卡片
 function buildShotCardHtml(tc){
   var cap='', shot='';
   String(tc.result||'').split('\n').forEach(function(ln){
@@ -1099,9 +1104,10 @@ function buildShotCardHtml(tc){
     else if(t.indexOf('🖼')===0) shot=t.replace('🖼','').trim();
   });
   if(!shot) return '';
+  var src=resolveAttach(shot);
   return '<div class="shot-card">'+
     (cap?'<div class="shot-cap"><i class="ti ti-camera"></i>'+escHtml(cap)+'</div>':'')+
-    '<a href="'+escHtml(shot)+'" target="_blank" rel="noopener"><img src="'+escHtml(shot)+'" alt="聊天截图" loading="lazy"></a>'+
+    '<a href="'+escHtml(src)+'" target="_blank" rel="noopener"><img src="'+escHtml(src)+'" alt="聊天截图" loading="lazy"></a>'+
   '</div>';
 }
 function buildToolResultBody(tc){
