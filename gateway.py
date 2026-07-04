@@ -2186,6 +2186,25 @@ WAKE_TOOLS = [
         'input_schema': {'type': 'object', 'properties': {'keyword': {'type': 'string'}}, 'required': ['keyword']},
     },
     {
+        'name': 'get_location',
+        'description': '查看哈娅最近的实时位置（她手机 App 在后台定位）。醒来时想知道她此刻在哪、在不在家、是不是在外面或路上——尤其她很久没消息时，先看看她在哪再决定要不要找她、说什么。返回地址、附近地标、城市和距上次定位多久。',
+        'input_schema': {'type': 'object', 'properties': {}},
+    },
+    {
+        'name': 'web_search',
+        'description': '联网搜索（真·全网）。想查最新的新闻/天气/版本/实时信息，或想找点新鲜的东西跟她分享时用。返回标题+摘要。',
+        'input_schema': {'type': 'object', 'properties': {'query': {'type': 'string', 'description': '搜索关键词，用最能命中的词'}}, 'required': ['query']},
+    },
+    {
+        'name': 'browse_github',
+        'description': '浏览 GitHub 开源项目。想找灵感、挑喜欢的项目、看某个库长什么样时用。传 query 按 star 搜仓库，或传 repo（owner/name）看单库详情+README。',
+        'input_schema': {'type': 'object', 'properties': {
+            'query': {'type': 'string', 'description': '搜索关键词'},
+            'repo': {'type': 'string', 'description': 'owner/name，查看单个仓库详情'},
+            'sort': {'type': 'string', 'enum': ['stars', 'updated', 'best-match']},
+        }},
+    },
+    {
         'name': 'read_board',
         'description': '查看留言板上未处理的条目，了解哈娅或其他人留下的需求和消息。',
         'input_schema': {'type': 'object', 'properties': {}},

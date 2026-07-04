@@ -918,13 +918,13 @@ def _init_monitor_tables():
     conn.execute("""CREATE TABLE IF NOT EXISTS bugs (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         content TEXT NOT NULL,
-        created_at TEXT DEFAULT (datetime('now','localtime')),
+        created_at TEXT DEFAULT (datetime('now','+8 hours')),
         resolved INTEGER DEFAULT 0
     )""")
     conn.execute("""CREATE TABLE IF NOT EXISTS fixes (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         content TEXT NOT NULL,
-        created_at TEXT DEFAULT (datetime('now','localtime'))
+        created_at TEXT DEFAULT (datetime('now','+8 hours'))
     )""")
     conn.commit()
     conn.close()
@@ -1038,7 +1038,7 @@ def _init_period_tables():
         date TEXT NOT NULL,
         type TEXT NOT NULL,
         note TEXT DEFAULT '',
-        created_at TEXT DEFAULT (datetime('now','localtime'))
+        created_at TEXT DEFAULT (datetime('now','+8 hours'))
     )""")
     conn.commit()
     conn.close()
@@ -1560,7 +1560,7 @@ def _init_dream_tables():
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         type TEXT NOT NULL,
         value TEXT,
-        created_at TIMESTAMP DEFAULT (datetime('now','localtime'))
+        created_at TIMESTAMP DEFAULT (datetime('now','+8 hours'))
     )""")
     conn.commit()
     conn.close()
@@ -1624,7 +1624,7 @@ def _init_wake_tables():
     conn = get_db()
     conn.execute("""CREATE TABLE IF NOT EXISTS wake_log (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        woke_at TIMESTAMP DEFAULT (datetime('now','localtime')),
+        woke_at TIMESTAMP DEFAULT (datetime('now','+8 hours')),
         thoughts TEXT,
         action TEXT,
         content TEXT,
