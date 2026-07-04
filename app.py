@@ -2,6 +2,7 @@ import os, re, json, sqlite3, datetime, base64, uuid, threading
 from flask import Flask, request, jsonify, send_from_directory, abort
 import config_store
 import attachment_store
+import gallery_store
 
 app = Flask(__name__, static_folder='static')
 DB_PATH = '/opt/frontend/memories.db'
@@ -1559,6 +1560,35 @@ def get_attachment(aid):
         abort(404)  # 不存在或已过期（生命周期删掉了）——优雅 404
     return send_from_directory(attachment_store.ATTACH_DIR, a['filename'],
                                mimetype=a.get('mime') or 'image/png')
+
+
+# ── Gallery（收藏相册）─────────────────────────────────────────
+@app.route('/gallery')
+def gallery_page():
+    return send_from_directory('/opt/frontend/static', 'gallery.html')
+
+@app.route('/api/gallery/photo/<pid>', methods=['GET'])
+def gallery_photo(pid):
+    p = gallery_store.get(pid)
+    if not p:
+        abort(404)
+    return send_from_directory(gallery_store.GALLERY_DIR, p['storage_key'],
+                               mimetype=p.get('mime') or 'image/png')
+
+@app.route('/api/gallery/albums', methods=['GET'])
+def gallery_albums():
+    return jsonify({'albums': gallery_store.list_albums()})
+
+@app.route('/api/gallery/photos', methods=['GET'])
+def gallery_photos_list():
+    album_id = request.args.get('album_id', type=int)
+    photos = gallery_store.list_photos(album_id=album_id, limit=300)
+    # 只对外暴露需要的字段（不暴露 storage_key 物理路径）
+    out = [{'pid': p['pid'], 'album_id': p['album_id'], 'note': p['note'],
+            'width': p['width'], 'height': p['height'], 'favorite': p['favorite'],
+            'created_at': p['created_at'], 'saved_at': p['saved_at'],
+            'source_type': p['source_type']} for p in photos]
+    return jsonify({'photos': out})
 
 
 if __name__ == '__main__':

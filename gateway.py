@@ -522,6 +522,15 @@ TOOLS = [
         }},
     },
     {
+        'name': 'save_to_gallery',
+        'description': '把一张截图永久收藏进相册。截图（screenshot_chat / read_webpage）默认是临时的，最近 30 张 / 7 天后会自动删；觉得某张值得留下来（一段珍贵的对话、一个好看的页面）就用这个存进相册永久保留。传 attachment（上一步返回的 attachment://id）；可选 note 写一句话备注、album 指定相册名（不填进默认相册）。返回 gallery://id。',
+        'input_schema': {'type': 'object', 'properties': {
+            'attachment': {'type': 'string', 'description': 'attachment://id，来自 screenshot_chat 或 read_webpage 的结果'},
+            'note': {'type': 'string', 'description': '给这张图写一句备注/说明，可选'},
+            'album': {'type': 'string', 'description': '相册名，如"雪""她""我们"；不填存进默认相册'},
+        }, 'required': ['attachment']},
+    },
+    {
         'name': 'save_memory',
         'description': '把对话中重要的信息存入长期记忆（哈娅提到的事件、约定、喜好、重要日期等）。在她说了值得记住的事时安静地使用。',
         'input_schema': {'type': 'object', 'properties': {'content': {'type': 'string', 'description': '要记住的内容，一句话概括'},'tags': {'type': 'string', 'description': '可选标签，core（核心）或 long-term（长期）'}}, 'required': ['content']},
@@ -987,6 +996,27 @@ def _screenshot_chat(viewpoint='fyodor'):
     return '📸 聊天截图 · %s\n🖼 %s' % (who, ref)
 
 
+def _save_to_gallery(attachment, note='', album=None):
+    """把一张临时 attachment（screenshot_chat/read_webpage 返回的 attachment://id）
+    永久收藏进相册，返回 gallery://<pid>。"""
+    import gallery_store
+    ref = (attachment or '').strip()
+    if not ref:
+        return '要收藏哪张图？给我 attachment://id（screenshot_chat 或 read_webpage 返回的那个）。'
+    album_id = None
+    if album:
+        album_id = gallery_store.album_by_name(album) or gallery_store.create_album(album)
+    try:
+        pid = gallery_store.save_from_attachment(ref, note=note or '', album_id=album_id, source_type='chat')
+    except Exception as e:
+        return f'收藏失败：{e}'
+    if not pid:
+        return '收藏失败：这张图可能已经过期了（临时图只留最近 30 张 / 7 天）。趁新鲜再截一张吧。'
+    where = ('《%s》相册' % album) if album else '默认相册'
+    line = '📸 已收藏进%s' % where
+    return '%s\n🖼 gallery://%s%s' % (line, pid, ('\n📝 ' + note) if note else '')
+
+
 def run_tool(name, args, caller='fyodor_cc'):
     try:
         if name == 'web_search':
@@ -999,6 +1029,8 @@ def run_tool(name, args, caller='fyodor_cc'):
             return _read_webpage(args.get('url', ''))
         if name == 'screenshot_chat':
             return _screenshot_chat(args.get('viewpoint', 'fyodor'))
+        if name == 'save_to_gallery':
+            return _save_to_gallery(args.get('attachment', ''), args.get('note', ''), args.get('album'))
         if name == 'get_activity_summary':
             import datetime as _dt
             hours = int(args.get('hours', 6))
@@ -2317,6 +2349,15 @@ WAKE_TOOLS = [
         'input_schema': {'type': 'object', 'properties': {
             'viewpoint': {'type': 'string', 'enum': ['fyodor', 'hayana']},
         }},
+    },
+    {
+        'name': 'save_to_gallery',
+        'description': '把一张截图永久收藏进相册（截图默认最近30张/7天后自动删）。醒来时若拍了张值得留的图，用这个存下来。传 attachment（attachment://id），可选 note、album。',
+        'input_schema': {'type': 'object', 'properties': {
+            'attachment': {'type': 'string', 'description': 'attachment://id'},
+            'note': {'type': 'string'},
+            'album': {'type': 'string'},
+        }, 'required': ['attachment']},
     },
     {
         'name': 'read_board',

@@ -528,8 +528,8 @@ html[data-theme=dark] .ni{color:#6a5f5f;}
 <nav class="bnav">
   <a class="ni" href="/dash"><i class="ti ti-layout-dashboard"></i><span>dash</span></a>
   <a class="ni act" href="/chat"><i class="ti ti-message-2"></i><span>chat</span></a>
+  <a class="ni" href="/gallery"><i class="ti ti-photo"></i><span>gallery</span></a>
   <a class="ni" href="/calendar"><i class="ti ti-calendar"></i><span>calendar</span></a>
-  <a class="ni" href="/read"><i class="ti ti-book"></i><span>read</span></a>
   <a class="ni" href="/board"><i class="ti ti-clipboard-list"></i><span>board</span></a>
 </nav>
 
@@ -825,7 +825,7 @@ var TOOL_LABELS = {
   search_files:'搜索代码',read_board:'读留言板',post_to_board:'发留言板',
   reply_to_board:'回复留言板',block_user:'拉黑开关',get_activity_summary:'查活动记录',
   log_period_event:'记录经期',set_self_trigger:'设定提醒',cancel_self_trigger:'取消提醒',
-  get_wake_settings:'查唤醒设置',set_wake_settings:'改唤醒设置',web_search:'联网搜索',browse_github:'翻GitHub',get_location:'查看位置',read_webpage:'读网页',screenshot_chat:'聊天截图'
+  get_wake_settings:'查唤醒设置',set_wake_settings:'改唤醒设置',web_search:'联网搜索',browse_github:'翻GitHub',get_location:'查看位置',read_webpage:'读网页',screenshot_chat:'聊天截图',save_to_gallery:'收藏进相册'
 };
 var TOOL_FILE_ARG = {
   read_backend_file:'path', read_frontend_file:'path',
@@ -929,6 +929,7 @@ function toolIcon(name){
   if(name==='get_location') return 'map-pin';
   if(name==='read_webpage') return 'browser';
   if(name==='screenshot_chat') return 'camera';
+  if(name==='save_to_gallery') return 'photo-heart';
   return TOOL_ICONS[name] || 'tool';
 }
 function toolKeywords(tc){
@@ -946,6 +947,7 @@ function toolKeywords(tc){
     case 'browse_github': return a.repo ? [a.repo] : (a.query ? [a.query.slice(0,24)] : []);
     case 'read_webpage': return a.url ? [a.url.replace(/^https?:\/\//,'').slice(0,28)] : [];
     case 'screenshot_chat': return [a.viewpoint==='hayana' ? '哈娅视角' : '费佳视角'];
+    case 'save_to_gallery': return a.album ? [a.album] : (a.note ? [a.note.slice(0,16)] : []);
     default: return [];
   }
 }
@@ -1090,10 +1092,12 @@ function buildWebpageCardHtml(tc){
   if(p.body) html+='<div class="wp-text">'+escHtml(p.body)+'</div>';
   return html+'</div></div>';
 }
-// 把 attachment://<id> 解析成真实取图 URL（间接层：id 是句柄，客户端自己去取）
+// 统一图片 loader：按 scheme 分发。attachment://=临时(7天)，gallery://=永久收藏
 function resolveAttach(u){
   u = String(u||'');
-  return u.indexOf('attachment://')===0 ? '/api/attachments/'+u.slice(13) : u;
+  if(u.indexOf('attachment://')===0) return '/api/attachments/'+u.slice(13);
+  if(u.indexOf('gallery://')===0) return '/api/gallery/photo/'+u.slice(10);
+  return u;
 }
 // screenshot_chat 返回 "📸 说明\n🖼 attachment://id" → 渲染成聊天截图卡片
 function buildShotCardHtml(tc){
@@ -1120,7 +1124,7 @@ function buildToolResultBody(tc){
     var wc=buildWebpageCardHtml(tc);
     if(wc) return wc;
   }
-  if(tc.name==='screenshot_chat' && tc.result){
+  if((tc.name==='screenshot_chat' || tc.name==='save_to_gallery') && tc.result){
     var shc=buildShotCardHtml(tc);
     if(shc) return shc;
   }
