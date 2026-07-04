@@ -781,7 +781,7 @@ var TOOL_LABELS = {
   search_files:'搜索代码',read_board:'读留言板',post_to_board:'发留言板',
   reply_to_board:'回复留言板',block_user:'拉黑开关',get_activity_summary:'查活动记录',
   log_period_event:'记录经期',set_self_trigger:'设定提醒',cancel_self_trigger:'取消提醒',
-  get_wake_settings:'查唤醒设置',set_wake_settings:'改唤醒设置',web_search:'联网搜索'
+  get_wake_settings:'查唤醒设置',set_wake_settings:'改唤醒设置',web_search:'联网搜索',browse_github:'翻GitHub'
 };
 var TOOL_FILE_ARG = {
   read_backend_file:'path', read_frontend_file:'path',
@@ -881,6 +881,7 @@ var TOOL_ICONS = {
 function toolIcon(name){
   if(name && name.indexOf('light')===0) return 'sun';
   if(name==='web_search') return 'world-search';
+  if(name==='browse_github') return 'brand-github';
   return TOOL_ICONS[name] || 'tool';
 }
 function toolKeywords(tc){
@@ -895,6 +896,7 @@ function toolKeywords(tc){
     case 'set_self_trigger': return a.minutes!=null ? [a.minutes+'分钟后'] : [];
     case 'get_activity_summary': return [(a.hours||6)+'小时内'];
     case 'web_search': return a.query ? [a.query.slice(0,24)] : [];
+    case 'browse_github': return a.repo ? [a.repo] : (a.query ? [a.query.slice(0,24)] : []);
     default: return [];
   }
 }
@@ -992,11 +994,16 @@ function buildSearchCardsHtml(tc){
 }
 function buildToolResultBody(tc){
   if(tc.running) return '<div>执行中…</div>';
-  if(tc.name==='web_search' && tc.result){
+  // web_search 一律试卡片；browse_github 只在"搜索模式"(带 GitHub API 来源注脚)试卡片，
+  // 单库详情含 README，可能有 markdown 项目符号，走纯文本避免误判成来源卡。
+  var res = String(tc.result||'');
+  var wantCards = (tc.name==='web_search') ||
+    (tc.name==='browse_github' && res.indexOf('（来源：GitHub API）')>=0);
+  if(wantCards && tc.result){
     var sc = buildSearchCardsHtml(tc);
     if(sc) return sc;
   }
-  return '<div>结果: '+escHtml(String(tc.result||'').slice(0,400))+'</div>';
+  return '<div>结果: '+escHtml(res.slice(0,400))+'</div>';
 }
 function buildToolCallsHtml(tcs, opts){
   opts = opts || {};

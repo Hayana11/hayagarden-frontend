@@ -43,6 +43,7 @@ API_URL = 'https://gua.guagua.uk/v1/messages'
 API_KEY = ''
 CC_TOKEN = ''
 TAVILY_KEY = ''
+GITHUB_TOKEN = ''
 try:
     for line in open('/opt/frontend/.env'):
         if line.startswith('ANTHROPIC_API_KEY='):
@@ -53,6 +54,8 @@ try:
             CC_TOKEN = line.split('=', 1)[1].strip()
         elif line.startswith('TAVILY_API_KEY='):
             TAVILY_KEY = line.split('=', 1)[1].strip()
+        elif line.startswith('GITHUB_TOKEN='):
+            GITHUB_TOKEN = line.split('=', 1)[1].strip()
 except Exception:
     pass
 
@@ -490,6 +493,15 @@ TOOLS = [
         'input_schema': {'type': 'object', 'properties': {'query': {'type': 'string', 'description': '搜索关键词，用最能命中的词，不要整句问句'}}, 'required': ['query']},
     },
     {
+        'name': 'browse_github',
+        'description': '浏览 GitHub 开源项目。想找灵感、挑喜欢的项目、看某个库长什么样时用。两种用法：① 传 query 按 star 搜仓库（如 "llm memory system"、"topic:mcp"）；② 传 repo（owner/name 形式，如 "anthropics/anthropic-sdk-python"）看单个仓库的简介/star/语言/最近更新和 README 摘要。',
+        'input_schema': {'type': 'object', 'properties': {
+            'query': {'type': 'string', 'description': '搜索关键词，用最能命中的英文词'},
+            'repo': {'type': 'string', 'description': 'owner/name，查看单个仓库详情+README'},
+            'sort': {'type': 'string', 'enum': ['stars', 'updated', 'best-match'], 'description': '搜索排序，默认 stars'},
+        }},
+    },
+    {
         'name': 'save_memory',
         'description': '把对话中重要的信息存入长期记忆（哈娅提到的事件、约定、喜好、重要日期等）。在她说了值得记住的事时安静地使用。',
         'input_schema': {'type': 'object', 'properties': {'content': {'type': 'string', 'description': '要记住的内容，一句话概括'},'tags': {'type': 'string', 'description': '可选标签，core（核心）或 long-term（长期）'}}, 'required': ['content']},
@@ -758,10 +770,82 @@ def _web_search(query, max_results=5):
         return f'联网搜索失败：{e}'
 
 
+def _github_browse(query=None, repo=None, sort=None):
+    """浏览 GitHub。传 repo 看单库详情+README，否则按 query 搜仓库。
+    搜索结果用与 _web_search 相同的 ·标题/缩进摘要/缩进URL 定式，前端能复用来源卡片。"""
+    hdr = {'Accept': 'application/vnd.github+json', 'User-Agent': 'hayagarden-bot',
+           'X-GitHub-Api-Version': '2022-11-28'}
+    tok = (GITHUB_TOKEN or '').strip()
+    if tok:
+        hdr['Authorization'] = 'Bearer ' + tok
+
+    def _get(url):
+        req = urllib.request.Request(url, headers=hdr)
+        with urllib.request.urlopen(req, timeout=20) as r:
+            return json.loads(r.read().decode())
+
+    try:
+        if repo:
+            repo = repo.strip().strip('/')
+            d = _get('https://api.github.com/repos/' + urllib.parse.quote(repo))
+            out = ['📦 %s  ⭐%s  %s' % (d.get('full_name', repo),
+                   d.get('stargazers_count', 0), d.get('language') or '')]
+            if d.get('description'):
+                out.append(d['description'])
+            out.append('🔗 ' + (d.get('html_url') or ''))
+            out.append('更新 %s · forks %s · open issues %s' % (
+                (d.get('pushed_at') or '')[:10], d.get('forks_count', 0),
+                d.get('open_issues_count', 0)))
+            topics = d.get('topics') or []
+            if topics:
+                out.append('标签: ' + ', '.join(topics[:8]))
+            try:
+                rd = _get('https://api.github.com/repos/' + urllib.parse.quote(repo) + '/readme')
+                content = base64.b64decode(rd.get('content', '')).decode('utf-8', 'ignore')
+                content = re.sub(r'\n{3,}', '\n\n', content).strip()
+                out.append('\n--- README ---\n' + content[:1500])
+            except Exception:
+                out.append('（没读到 README）')
+            return '\n'.join(out)
+
+        q = (query or '').strip()
+        if not q:
+            return '给个搜索词，或用 repo=owner/name 看具体仓库'
+        s = sort if sort in ('stars', 'updated') else None
+        url = 'https://api.github.com/search/repositories?per_page=6&q=' + urllib.parse.quote(q)
+        if s:
+            url += '&sort=' + s
+        d = _get(url)
+        items = d.get('items') or []
+        if not items:
+            return '没搜到「%s」相关的仓库' % q
+        out = ['GitHub 共 %s 个结果，按%s排（前 %d）：' % (
+            d.get('total_count', 0), {'stars': 'star', 'updated': '更新时间'}.get(s, '相关度'),
+            len(items[:6]))]
+        for it in items[:6]:
+            out.append('· %s  ⭐%s  %s\n  %s\n  %s' % (
+                it.get('full_name', ''), it.get('stargazers_count', 0),
+                it.get('language') or '', (it.get('description') or '（无简介）')[:140],
+                it.get('html_url', '')))
+        return '\n'.join(out) + '\n\n（来源：GitHub API）'
+    except urllib.error.HTTPError as e:
+        if e.code == 403:
+            return 'GitHub 限流了（未登录约 60 次/时、搜索 10 次/分）。歇会儿再翻，或配置 GITHUB_TOKEN 提额。'
+        if e.code == 404:
+            return '找不到仓库「%s」，检查下 owner/name 拼写。' % repo
+        if e.code == 422:
+            return '搜索词 GitHub 不认：%s' % q
+        return 'GitHub 请求失败：HTTP %s' % e.code
+    except Exception as e:
+        return f'GitHub 浏览失败：{e}'
+
+
 def run_tool(name, args, caller='fyodor_cc'):
     try:
         if name == 'web_search':
             return _web_search(args.get('query', ''))
+        if name == 'browse_github':
+            return _github_browse(args.get('query'), args.get('repo'), args.get('sort'))
         if name == 'get_activity_summary':
             import datetime as _dt
             hours = int(args.get('hours', 6))
