@@ -50,25 +50,32 @@ function setStatus(o){ try{ fs.writeFileSync(STATUS, JSON.stringify({...o, ts: D
     await page.screenshot({ path: QR_PUB });
     setStatus({ state: 'waiting', qr: '/static/uploads/taobao_qr.png' });
 
-    // 轮询登录（最多 ~130s）
+    // 轮询登录（最多 ~240s，给足扫码+手机确认的时间）
     let ok = false;
-    for (let i = 0; i < 52; i++) {
+    for (let i = 0; i < 96; i++) {
       await page.waitForTimeout(2500);
       if (await loggedIn() || !page.url().includes('login.taobao.com')) { ok = true; break; }
     }
+    // 诊断：留一张最终页面截图（私有，仅供排查是否撞风控），并记下 cookie 名和 url
+    let cookieNames = [];
+    try { cookieNames = (await ctx.cookies()).map(c => c.name); } catch(e){}
+    try { await page.screenshot({ path: PRIVATE + '/tb_final.png' }); } catch(e){}
+    const finalUrl = page.url();
     if (ok) {
       await page.waitForTimeout(1500);
       await ctx.storageState({ path: STATEFILE });
       try { fs.chmodSync(STATEFILE, 0o600); } catch(e){}
       try { fs.unlinkSync(QR_PUB); } catch(e){}       // 登录后删掉公开的二维码
-      setStatus({ state: 'ok', url: page.url() });
-      await ctx.close();
-      console.log(JSON.stringify({ ok: true, url: page.url() }));
+      setStatus({ state: 'ok', url: finalUrl, cookies: cookieNames.length });
+      try { await ctx.close(); } catch(e){}
+      console.log(JSON.stringify({ ok: true, url: finalUrl }));
+      process.exit(0);
     } else {
       try { fs.unlinkSync(QR_PUB); } catch(e){}
-      setStatus({ state: 'expired' });
-      await ctx.close();
-      console.log(JSON.stringify({ ok: false, reason: 'timeout/expired' }));
+      setStatus({ state: 'expired', url: finalUrl, cookieNames: cookieNames });
+      try { await ctx.close(); } catch(e){}
+      console.log(JSON.stringify({ ok: false, reason: 'timeout/expired', url: finalUrl }));
+      process.exit(0);
     }
   } catch (e) {
     setStatus({ state: 'error', error: String(e.message || e) });
