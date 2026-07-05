@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>文档库</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@latest/tabler-icons.min.css">
+<style>
+:root{--bg:#FAF6F1;--card:#fff;--text:#2a2020;--muted:#9a8a8a;--border:#EDE9E0;--amber:rgba(212,165,116,.95);--amber-bg:rgba(212,165,116,.14);}
+*{box-sizing:border-box;}
+html,body{margin:0;height:100%;}
+body{background:var(--bg);color:var(--text);font-family:-apple-system,'PingFang SC','HarmonyOS Sans SC','Noto Sans CJK SC','Noto Sans SC',sans-serif;max-width:480px;margin:0 auto;display:flex;flex-direction:column;min-height:100%;padding-bottom:80px;}
+.hd{display:flex;align-items:center;padding:14px 16px 10px;position:sticky;top:0;background:var(--bg);z-index:5;}
+.back{background:none;border:none;color:var(--muted);font-size:20px;cursor:pointer;padding:4px 8px 4px 0;display:flex;}
+.hd-title{font-family:Georgia,'Times New Roman',serif;font-size:18px;font-weight:700;flex:1;}
+.hd-btn{background:none;border:1px solid var(--border);color:var(--muted);font-size:12px;padding:5px 12px;border-radius:9px;cursor:pointer;font-family:inherit;}
+.hd-btn.on{color:var(--amber);border-color:var(--amber);}
+.list{padding:4px 12px;}
+.empty{color:var(--muted);text-align:center;padding:50px 0;font-size:13px;}
+.fcard{background:var(--card);border:1px solid var(--border);border-radius:12px;margin-bottom:9px;padding:11px 12px;display:flex;align-items:center;cursor:pointer;}
+.fcheck{width:20px;height:20px;border:2px solid var(--border);border-radius:50%;margin-right:10px;flex-shrink:0;display:none;align-items:center;justify-content:center;color:#fff;font-size:12px;}
+.manage .fcheck{display:flex;}
+.fcard.sel .fcheck{background:var(--amber);border-color:var(--amber);}
+.ficon{width:36px;height:36px;border-radius:9px;background:var(--amber-bg);color:var(--amber);display:flex;align-items:center;justify-content:center;font-size:17px;flex-shrink:0;margin-right:10px;}
+.finfo{flex:1;min-width:0;}
+.fname{font-size:13.5px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.fmeta{font-size:10.5px;color:var(--muted);margin-top:2px;}
+.delbar{position:fixed;left:0;right:0;bottom:0;max-width:480px;margin:0 auto;background:var(--card);border-top:1px solid var(--border);padding:12px 16px;display:none;align-items:center;justify-content:space-between;}
+.delbar.show{display:flex;}
+.delbar .cnt{font-size:13px;color:var(--muted);}
+.delbar .del{background:#c0645a;color:#fff;border:none;padding:8px 18px;border-radius:9px;font-size:13px;cursor:pointer;font-family:inherit;}
+.delbar .del:disabled{opacity:.4;cursor:default;}
+.ov{position:fixed;inset:0;background:rgba(0,0,0,.55);display:none;z-index:20;}
+.ov.show{display:flex;flex-direction:column;}
+.ov-hd{display:flex;align-items:center;padding:12px 14px;background:var(--card);}
+.ov-hd .t{flex:1;font-size:14px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.ov-hd .x{background:none;border:none;font-size:22px;color:var(--muted);cursor:pointer;}
+.ov-body{flex:1;background:#fff;overflow:auto;}
+.ov-body iframe{width:100%;height:100%;border:none;}
+.ov-body pre{margin:0;padding:16px;white-space:pre-wrap;word-break:break-word;font-size:13px;line-height:1.6;font-family:ui-monospace,Menlo,Consolas,monospace;color:var(--text);}
+</style>
+</head>
+<body>
+<div class="hd">
+  <button class="back" onclick="location.href='/chat'"><i class="ti ti-chevron-left"></i></button>
+  <div class="hd-title">文档库</div>
+  <button class="hd-btn" id="mng" onclick="toggleManage()">管理</button>
+</div>
+<div class="list" id="list"><div class="empty">加载中…</div></div>
+<div class="delbar" id="delbar">
+  <span class="cnt" id="cnt">已选 0</span>
+  <button class="del" id="delbtn" onclick="delSelected()" disabled>删除</button>
+</div>
+<div class="ov" id="ov">
+  <div class="ov-hd"><span class="t" id="ovt"></span><button class="x" onclick="closeOv()">×</button></div>
+  <div class="ov-body" id="ovb"></div>
+</div>
+<script>
+var FILES=[], manage=false, sel={};
+function esc(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+function fmtTime(dt){var s=String(dt||'');return s.slice(0,16).replace('T',' ');}
+function extOf(name){var p=String(name||'').split('.');return p.length>1?p[p.length-1].toLowerCase():'';}
+function load(){
+  fetch('/api/files/list').then(function(r){return r.json();}).then(function(d){
+    FILES=(d&&d.files)||[]; render();
+  }).catch(function(){document.getElementById('list').innerHTML='<div class="empty">加载失败</div>';});
+}
+function render(){
+  var box=document.getElementById('list');
+  if(!FILES.length){box.innerHTML='<div class="empty">还没有文件</div>';box.className='list';return;}
+  box.className='list'+(manage?' manage':'');
+  var html='';
+  FILES.forEach(function(f){
+    var ext=extOf(f.file_name||f.file_url);
+    var who=(String(f.author).toLowerCase()==='hayana')?'哈娅':'费佳';
+    var selCls=sel[f.id]?' sel':'';
+    html+='<div class="fcard'+selCls+'" data-id="'+f.id+'" onclick="onCard('+f.id+')">'+
+      '<div class="fcheck"><i class="ti ti-check"></i></div>'+
+      '<div class="ficon"><i class="ti ti-file-text"></i></div>'+
+      '<div class="finfo"><div class="fname">'+esc(f.file_name||'文件')+'</div>'+
+        '<div class="fmeta">'+esc((ext?ext.toUpperCase()+' · ':'')+who+' · '+fmtTime(f.created_at))+'</div></div>'+
+    '</div>';
+  });
+  box.innerHTML=html;
+}
+function toggleManage(){
+  manage=!manage; sel={};
+  document.getElementById('mng').className='hd-btn'+(manage?' on':'');
+  document.getElementById('mng').textContent=manage?'完成':'管理';
+  updateBar(); render();
+}
+function onCard(id){
+  if(manage){
+    if(sel[id]) delete sel[id]; else sel[id]=true;
+    updateBar(); render();
+  } else {
+    var f=null; FILES.forEach(function(x){if(x.id===id)f=x;});
+    if(f) preview(f);
+  }
+}
+function updateBar(){
+  var n=Object.keys(sel).length;
+  document.getElementById('delbar').className='delbar'+(manage?' show':'');
+  document.getElementById('cnt').textContent='已选 '+n;
+  document.getElementById('delbtn').disabled=(n===0);
+}
+function delSelected(){
+  var ids=Object.keys(sel).map(function(x){return parseInt(x,10);});
+  if(!ids.length) return;
+  if(!confirm('删除选中的 '+ids.length+' 个文件？（聊天记录保留，只删文件本身）')) return;
+  fetch('/api/files/delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ids:ids})})
+    .then(function(r){return r.json();}).then(function(){ sel={}; manage=false; toggleManageReset(); load(); });
+}
+function toggleManageReset(){
+  document.getElementById('mng').className='hd-btn';
+  document.getElementById('mng').textContent='管理';
+  updateBar();
+}
+function preview(f){
+  var ext=extOf(f.file_name||f.file_url);
+  document.getElementById('ovt').textContent=f.file_name||'文件';
+  var body=document.getElementById('ovb'); body.innerHTML='<pre>加载中…</pre>';
+  document.getElementById('ov').className='ov show';
+  fetch(f.file_url).then(function(r){return r.text();}).then(function(txt){
+    if(ext==='html'||ext==='htm'){
+      var ifr=document.createElement('iframe');
+      ifr.setAttribute('sandbox','allow-scripts');
+      body.innerHTML=''; body.appendChild(ifr); ifr.srcdoc=txt;
+    } else if(ext==='md'){
+      var ifr2=document.createElement('iframe');
+      ifr2.setAttribute('sandbox','');
+      body.innerHTML=''; body.appendChild(ifr2); ifr2.srcdoc=mdRender(txt);
+    } else {
+      body.innerHTML='<pre>'+esc(txt)+'</pre>';
+    }
+  }).catch(function(){ body.innerHTML='<pre>预览失败</pre>'; });
+}
+function closeOv(){ document.getElementById('ov').className='ov'; document.getElementById('ovb').innerHTML=''; }
+// 60 行极简 md 渲染器（标题/粗斜体/代码块/列表/引用/链接）
+function mdRender(md){
+  var lines=String(md).replace(/\r/g,'').split('\n');
+  var out=[], inCode=false, inList=false;
+  function inline(t){
+    t=esc(t);
+    t=t.replace(/`([^`]+)`/g,'<code>$1</code>');
+    t=t.replace(/\*\*([^*]+)\*\*/g,'<b>$1</b>');
+    t=t.replace(/\*([^*]+)\*/g,'<i>$1</i>');
+    t=t.replace(/\[([^\]]+)\]\((https?:[^)]+)\)/g,'<a href="$2" target="_blank" rel="noopener">$1</a>');
+    return t;
+  }
+  for(var i=0;i<lines.length;i++){
+    var l=lines[i];
+    if(/^```/.test(l)){ if(inCode){out.push('</pre>');inCode=false;} else {if(inList){out.push('</ul>');inList=false;}out.push('<pre class="cb">');inCode=true;} continue; }
+    if(inCode){ out.push(esc(l)); continue; }
+    var mh=l.match(/^(#{1,4})\s+(.*)$/);
+    if(mh){ if(inList){out.push('</ul>');inList=false;} var lv=mh[1].length; out.push('<h'+lv+'>'+inline(mh[2])+'</h'+lv+'>'); continue; }
+    var ml=l.match(/^\s*[-*]\s+(.*)$/);
+    if(ml){ if(!inList){out.push('<ul>');inList=true;} out.push('<li>'+inline(ml[1])+'</li>'); continue; }
+    if(inList){out.push('</ul>');inList=false;}
+    var mq=l.match(/^>\s?(.*)$/);
+    if(mq){ out.push('<blockquote>'+inline(mq[1])+'</blockquote>'); continue; }
+    if(l.trim()===''){ out.push('<br>'); continue; }
+    out.push('<p>'+inline(l)+'</p>');
+  }
+  if(inCode)out.push('</pre>'); if(inList)out.push('</ul>');
+  var css='<style>body{font-family:-apple-system,"PingFang SC","Noto Sans SC",sans-serif;padding:16px;line-height:1.7;color:#2a2020;max-width:100%;}h1,h2,h3,h4{color:#5a4a6a;}pre.cb{background:#f5f0e8;padding:12px;border-radius:8px;overflow-x:auto;}code{background:#f5f0e8;padding:1px 5px;border-radius:4px;}blockquote{border-left:3px solid #d4a574;margin:8px 0;padding:2px 12px;color:#7a6a6a;}a{color:#b07d4a;}p{margin:6px 0;}</style>';
+  return css+out.join('\n');
+}
+load();
+</script>
+</body>
+</html>
