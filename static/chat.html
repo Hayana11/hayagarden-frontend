@@ -893,7 +893,7 @@ var TOOL_LABELS = {
   search_files:'搜索代码',read_board:'读留言板',post_to_board:'发留言板',
   reply_to_board:'回复留言板',block_user:'拉黑开关',get_activity_summary:'查活动记录',
   log_period_event:'记录经期',set_self_trigger:'设定提醒',cancel_self_trigger:'取消提醒',
-  get_wake_settings:'查唤醒设置',set_wake_settings:'改唤醒设置',web_search:'联网搜索',browse_github:'翻GitHub',get_location:'查看位置',read_webpage:'读网页',screenshot_chat:'聊天截图',save_to_gallery:'收藏进相册',recall_photo:'想起一张画面'
+  get_wake_settings:'查唤醒设置',set_wake_settings:'改唤醒设置',web_search:'联网搜索',browse_github:'翻GitHub',get_location:'查看位置',get_device_status:'查手机状态',request_phone_screenshot:'手机截屏',read_webpage:'读网页',screenshot_chat:'聊天截图',save_to_gallery:'收藏进相册',recall_photo:'想起一张画面'
 };
 var TOOL_FILE_ARG = {
   read_backend_file:'path', read_frontend_file:'path',
@@ -986,7 +986,7 @@ var CODE_TOOLS = {
 var TOOL_ICONS = {
   save_memory:'book', search_memories:'book',
   read_board:'clipboard-list', post_to_board:'clipboard-list', reply_to_board:'clipboard-list',
-  block_user:'user', get_activity_summary:'clock',
+  block_user:'user', get_activity_summary:'clock', get_device_status:'device-mobile', request_phone_screenshot:'camera',
   log_period_event:'calendar', set_self_trigger:'clock', cancel_self_trigger:'clock',
   get_wake_settings:'moon', set_wake_settings:'moon'
 };
@@ -995,6 +995,8 @@ function toolIcon(name){
   if(name==='web_search') return 'world-search';
   if(name==='browse_github') return 'brand-github';
   if(name==='get_location') return 'map-pin';
+  if(name==='get_device_status') return 'device-mobile';
+  if(name==='request_phone_screenshot') return 'camera';
   if(name==='read_webpage') return 'browser';
   if(name==='screenshot_chat') return 'camera';
   if(name==='save_to_gallery') return 'photo-heart';
@@ -1014,6 +1016,8 @@ function toolKeywords(tc){
     case 'get_activity_summary': return [(a.hours||6)+'小时内'];
     case 'web_search': return a.query ? [a.query.slice(0,24)] : [];
     case 'browse_github': return a.repo ? [a.repo] : (a.query ? [a.query.slice(0,24)] : []);
+    case 'get_device_status': return [];
+    case 'request_phone_screenshot': return [((a.timeout_sec||18)+'秒等待')];
     case 'read_webpage': return a.url ? [a.url.replace(/^https?:\/\//,'').slice(0,28)] : [];
     case 'screenshot_chat': return [a.viewpoint==='hayana' ? '哈娅视角' : '费佳视角'];
     case 'save_to_gallery': return a.album ? [a.album] : (a.note ? [a.note.slice(0,16)] : []);

@@ -736,6 +736,18 @@ TOOLS = [
         'input_schema': {'type': 'object', 'properties': {}},
     },
     {
+        'name': 'get_device_status',
+        'description': '查看哈娅手机最近一次设备状态上报：电量、是否充电、充电方式、温度、今日屏幕总时长，以及距上次上报多久。她说手机没电、发烫、熬很久屏幕、或你想确认她是不是又抱着手机不睡时用。',
+        'input_schema': {'type': 'object', 'properties': {}},
+    },
+    {
+        'name': 'request_phone_screenshot',
+        'description': '让哈娅手机立刻截一张当前屏幕（由 app 端执行，截完会在手机上弹提醒）。工具会等待回传并返回 attachment://id；如果超时就先告诉你已下发。适合在她说"我在看这个"、你想确认她当前页面，或夜里醒来想轻轻看一眼她在做什么时使用。',
+        'input_schema': {'type': 'object', 'properties': {
+            'timeout_sec': {'type': 'integer', 'description': '等待回传秒数，默认 18，范围 5-40'},
+        }},
+    },
+    {
         'name': 'read_webpage',
         'description': '用真实浏览器打开一个网页，读取完整正文并截图。web_search 只给摘要——想读某个链接的全文、看 JS 渲染后的内容、或亲眼看看页面长什么样时用这个。传 url（可从 web_search/browse_github 的结果里拿）。返回标题、正文和一张网页截图。较慢（几秒到十几秒），一次只开一个页面。',
         'input_schema': {'type': 'object', 'properties': {
@@ -1212,6 +1224,96 @@ def _get_location():
     if age >= 3600:
         lines.append('（这是 %s 的定位，可能不是她此刻的位置）' % ago)
     return '\n'.join(lines)
+
+
+def _get_device_status():
+    """读手机侧最近一次设备状态上报（电量/充电/温度/今日屏幕时长）。"""
+    try:
+        conn = get_db()
+        row = conn.execute(
+            "SELECT *, CAST((julianday('now','+8 hours')-julianday(created_at))*86400 AS INT) AS age_sec "
+            "FROM device_status ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        conn.close()
+    except Exception as e:
+        return f'读取设备状态失败：{e}'
+    if not row:
+        return '还没有设备状态记录——她手机 App 可能尚未上报（后台权限/联网/省电限制）。'
+    d = dict(row)
+    age = max(0, int(d.get('age_sec') or 0))
+    if age < 60:
+        ago = '刚刚'
+    elif age < 3600:
+        ago = '%d 分钟前' % (age // 60)
+    elif age < 86400:
+        ago = '%d 小时前' % (age // 3600)
+    else:
+        ago = '%d 天前' % (age // 86400)
+    charge = '在充电' if int(d.get('battery_charging') or 0) == 1 else '未充电'
+    ctype = (d.get('charge_type') or 'none')
+    if ctype == 'none':
+        ctype_txt = ''
+    elif ctype == 'ac':
+        ctype_txt = '（插座）'
+    elif ctype == 'usb':
+        ctype_txt = '（USB）'
+    elif ctype == 'wireless':
+        ctype_txt = '（无线）'
+    else:
+        ctype_txt = '（%s）' % ctype
+    lines = []
+    bp = int(d.get('battery_percent') or -1)
+    if bp >= 0:
+        lines.append('🔋 电量 %d%% · %s%s' % (bp, charge, ctype_txt))
+    else:
+        lines.append('🔋 电量暂无')
+    t = float(d.get('temp_c') or -1)
+    if t >= 0:
+        lines.append('🌡 温度 %.1f℃' % t)
+    sm = int(d.get('screen_today_minutes') or -1)
+    if sm >= 0:
+        h, m = sm // 60, sm % 60
+        lines.append('📱 今日屏幕时长 %d小时%d分' % (h, m) if h else '📱 今日屏幕时长 %d分' % m)
+    lines.append('🕐 上次上报 %s（%s）' % (d.get('created_at') or '', ago))
+    if age >= 3600:
+        lines.append('（这是 %s 的设备状态，可能不是她此刻的实时状态）' % ago)
+    return '\n'.join(lines)
+
+
+def _request_phone_screenshot(timeout_sec=18):
+    """请求手机截屏，并短轮询等待回传 attachment://id。"""
+    try:
+        timeout_sec = int(timeout_sec or 18)
+    except Exception:
+        timeout_sec = 18
+    timeout_sec = max(5, min(40, timeout_sec))
+    try:
+        body = json.dumps({'source': 'gateway_tool'}).encode('utf-8')
+        req = urllib.request.Request(
+            'http://127.0.0.1:5050/api/screenshot/request',
+            data=body,
+            headers={'Content-Type': 'application/json'},
+            method='POST')
+        with urllib.request.urlopen(req, timeout=5) as r:
+            data = json.loads(r.read().decode('utf-8', 'ignore') or '{}')
+        req_id = int(data.get('request_id') or 0)
+    except Exception as e:
+        return f'下发手机截屏请求失败：{e}'
+    deadline = time.time() + timeout_sec
+    while time.time() < deadline:
+        try:
+            q = urllib.parse.urlencode({'after_request_id': req_id})
+            with urllib.request.urlopen('http://127.0.0.1:5050/api/screenshot/latest?' + q, timeout=5) as r:
+                d = json.loads(r.read().decode('utf-8', 'ignore') or '{}')
+            if d.get('ok') and int(d.get('request_id') or 0) >= req_id and d.get('attachment'):
+                age = max(0, int(d.get('age_sec') or 0))
+                ago = '刚刚' if age < 3 else ('%d 秒前' % age)
+                return '📱 已拿到手机截屏（%s）\n🖼 %s' % (ago, d.get('attachment'))
+        except Exception:
+            pass
+        time.sleep(2)
+    return ('已下发手机截屏请求（request_id=%d），但在 %d 秒内还没回传。\n'
+            '可能是她手机暂时离线、后台被系统省电限制，或尚未授予投屏权限。') % (req_id, timeout_sec)
 
 
 # 无头浏览器同时只允许开一个（这台机器内存紧，两个 chromium 会撑爆）
@@ -1710,6 +1812,10 @@ def run_tool(name, args, caller='fyodor_cc'):
             return _github_browse(args.get('query'), args.get('repo'), args.get('sort'))
         if name == 'get_location':
             return _get_location()
+        if name == 'get_device_status':
+            return _get_device_status()
+        if name == 'request_phone_screenshot':
+            return _request_phone_screenshot(args.get('timeout_sec', 18))
         if name == 'read_webpage':
             return _read_webpage(args.get('url', ''))
         if name == 'screenshot_chat':
@@ -3046,6 +3152,18 @@ WAKE_TOOLS = [
         'name': 'get_location',
         'description': '查看哈娅最近的实时位置（她手机 App 在后台定位）。醒来时想知道她此刻在哪、在不在家、是不是在外面或路上——尤其她很久没消息时，先看看她在哪再决定要不要找她、说什么。返回地址、附近地标、城市和距上次定位多久。',
         'input_schema': {'type': 'object', 'properties': {}},
+    },
+    {
+        'name': 'get_device_status',
+        'description': '查看她手机最近一次设备状态：电量、充电状态、温度、今日屏幕时长。夜里醒来想判断她是不是还抱着手机、是不是该提醒她睡觉/充电时用。',
+        'input_schema': {'type': 'object', 'properties': {}},
+    },
+    {
+        'name': 'request_phone_screenshot',
+        'description': '请求她手机立刻截一张当前屏幕（app 端会有提醒），并等待回传 attachment://id。醒来时若想确认她当下在看什么、要不要打扰她时用。',
+        'input_schema': {'type': 'object', 'properties': {
+            'timeout_sec': {'type': 'integer', 'description': '等待回传秒数，默认18，范围5-40'},
+        }},
     },
     {
         'name': 'web_search',
