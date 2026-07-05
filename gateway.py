@@ -693,6 +693,25 @@ TOOLS = [
         }},
     },
     {
+        'name': 'read_book',
+        'description': '翻开你和哈娅正在一起读的那本书，看这一章的正文，以及她和你在这一章留下的痕迹（谁划了线、谁写了批注）。想陪她读、想知道她读到哪/在哪句停留、或准备在某处留一句话之前，先用这个翻开看看。不传参数就翻到当前在读的那一章。正文会带 §段号，方便你随后 annotate_book 定位。只读，不打扰她的进度。',
+        'input_schema': {'type': 'object', 'properties': {
+            'book_id': {'type': 'string', 'description': '书 id，不传用当前在读的书'},
+            'chunk_id': {'type': 'string', 'description': '章节 id，不传用上次读到的那一章'},
+        }},
+    },
+    {
+        'name': 'annotate_book',
+        'description': '在你和哈娅共读的书里，用你的颜色（紫色）在某句原文上划线或写批注——像在她划过的句子旁边留下你的痕迹。quote 必须是正文里真实存在的一小段（前端靠它把高亮锚到那行字上，先用 read_book 看正文再挑句子）。kind=highlight 只划线，kind=note（或填了 note）会留一张批注卡。她翻到那一页就能看见你的紫色痕迹。',
+        'input_schema': {'type': 'object', 'properties': {
+            'quote': {'type': 'string', 'description': '要留痕的原文片段，必须是正文里真实存在的一小段'},
+            'note': {'type': 'string', 'description': '想对这句话说的话，可选；填了就是批注卡'},
+            'paragraph_idx': {'type': 'integer', 'description': '这句话所在的段号（read_book 正文里 §后面的数字）'},
+            'kind': {'type': 'string', 'enum': ['highlight', 'note'], 'description': '划线还是批注，默认按有没有 note 自动判断'},
+            'book_id': {'type': 'string'}, 'chunk_id': {'type': 'string'},
+        }, 'required': ['quote']},
+    },
+    {
         'name': 'issue_command',
         'description': ('给哈娅下一个带倒计时的任务，会以浮窗形式跳出来、数字实时倒数。'
                         '合适的时机：她说要去做某件事（读书/洗澡/喝水/运动/睡觉），你可以顺手给她定个时长把她按下去；'
@@ -2949,6 +2968,23 @@ WAKE_TOOLS = [
             'keyword': {'type': 'string'},
             'emotion': {'type': 'string'},
         }},
+    },
+    {
+        'name': 'read_book',
+        'description': '翻开你和哈娅在读的书，看这一章的正文和你俩留下的痕迹。醒来想她时可以翻翻你们在读的书。不传参数翻到当前章，正文带 §段号供 annotate_book 定位。',
+        'input_schema': {'type': 'object', 'properties': {
+            'book_id': {'type': 'string'}, 'chunk_id': {'type': 'string'},
+        }},
+    },
+    {
+        'name': 'annotate_book',
+        'description': '在共读的书里用你的紫色在某句原文上划线或写批注，像在她读过的地方留一句悄悄话。quote 必须是正文里真实存在的一小段（先 read_book 看正文）。她翻到那页就会看见。',
+        'input_schema': {'type': 'object', 'properties': {
+            'quote': {'type': 'string'}, 'note': {'type': 'string'},
+            'paragraph_idx': {'type': 'integer'},
+            'kind': {'type': 'string', 'enum': ['highlight', 'note']},
+            'book_id': {'type': 'string'}, 'chunk_id': {'type': 'string'},
+        }, 'required': ['quote']},
     },
     {
         'name': 'issue_command',
