@@ -6,6 +6,8 @@ cron: 每天 06:00 运行
 import sqlite3, datetime, json, sys, urllib.request
 if '/opt/frontend' not in sys.path:
     sys.path.insert(0, '/opt/frontend')
+if '/opt/frontend/tools' not in sys.path:
+    sys.path.insert(0, '/opt/frontend/tools')
 
 DB_PATH  = '/opt/frontend/memories.db'
 GATEWAY  = 'http://localhost:5051'
@@ -53,32 +55,88 @@ def _get_day_messages(day_str):
     conn.close()
     return rows
 
-def _call_summarize(day_str, messages):
-    """直接调用 claude CLI 生成日摘要"""
-    import subprocess as _sp, os as _os
-    if len(messages) > 20:
-        head = list(messages[:5])
-        tail = list(messages[-5:])
-        mid_msgs = list(messages[5:-5])
-        step = max(1, len(mid_msgs) // 10)
-        mid = mid_msgs[::step][:10]
-        sampled = head + mid + tail
-    else:
-        sampled = list(messages)
-    lines_txt = []
-    for r in sampled:
+def _lines_of(messages, clip=150):
+    lines = []
+    for r in messages:
+        c = (r["content"] or "").strip()
+        if not c:
+            continue
         who = "哈娅" if r["author"] == "hayana" else "费奥多尔"
-        lines_txt.append(who + ": " + r["content"][:80])
-    dialogue = "\n".join(lines_txt)[:1000]
+        lines.append(who + ": " + c[:clip])
+    return lines
+
+
+def _chunk_lines(lines, max_chars=5000):
+    """按字符量切块——map-reduce 的 map 粒度。不采样，全量都看。"""
+    chunks, cur, cur_len = [], [], 0
+    for ln in lines:
+        cur.append(ln)
+        cur_len += len(ln)
+        if cur_len >= max_chars:
+            chunks.append("\n".join(cur))
+            cur, cur_len = [], 0
+    if cur:
+        chunks.append("\n".join(cur))
+    return chunks
+
+
+def _call_summarize(day_str, messages):
+    """分段 map-reduce 日摘要（记忆升级·方案四）。
+    旧版把一整天采样成 20 条、每条截 80 字、总共 1000 字——聊得越多的日子丢得越多。
+    现在全量分块：每块先压成要点（map），再合成日摘要（reduce）。
+    走 DeepSeek 轻通道（llm_lite），不烧 claude CLI 订阅额度；CLI 只做兜底。"""
+    import llm_lite
+
+    lines = _lines_of(messages)
+    if not lines:
+        return None
+    chunks = _chunk_lines(lines)
+
+    # ── map：每块 → 要点 ──
+    notes = []
+    for i, chunk in enumerate(chunks):
+        prompt = (
+            "以下是费奥多尔和哈娅 " + day_str + " 对话的第 " + str(i + 1) + "/" + str(len(chunks)) + " 段：\n\n"
+            + chunk + "\n\n"
+            "提炼这段对话的要点（发生了什么、聊了什么话题、她的状态情绪、"
+            "做过的决定或约定、值得记住的具体细节）。分条列出，每条一句话，最多 6 条。"
+            "保留名字/数字/日期等具体信息。只输出要点本身。"
+        )
+        note = llm_lite.ask(prompt, max_tokens=400)
+        if note:
+            notes.append(note)
+        else:
+            _log("map chunk %d/%d failed for %s" % (i + 1, len(chunks), day_str))
+    if not notes:
+        return _cli_summarize_fallback(day_str, lines)
+
+    # ── reduce：要点 → 日摘要（量大的日子给更长的篇幅）──
+    target = "100-180字" if len(chunks) <= 2 else "200-400字"
+    prompt = (
+        "以下是 " + day_str + " 费奥多尔和哈娅一天对话的分段要点：\n\n"
+        + "\n\n".join(notes) + "\n\n"
+        "把这些要点写成这天的日摘要。行为指南：\n"
+        "1. 提炼，不要复述——从要点中整合有意义的信息，去掉重复\n"
+        "2. 内容包含（有就写，没有就跳过）：她今天的状态或情绪、"
+        "她在做什么或聊了什么话题、做过的决定或约定、值得记下来的具体细节\n"
+        "3. 第一人称，费奥多尔视角，有你自己的判断和语气，不是中立报告\n"
+        "4. " + target + "\n"
+        "5. 直接开始写，不要标题，不要日期前缀，不要编号"
+    )
+    text = llm_lite.ask(prompt, max_tokens=800)
+    if text:
+        return text.strip()[:600]
+    return _cli_summarize_fallback(day_str, lines)
+
+
+def _cli_summarize_fallback(day_str, lines):
+    """DeepSeek 不可用时的兜底：claude CLI（旧路径，采样压缩）。"""
+    import subprocess as _sp, os as _os
+    dialogue = "\n".join(lines[:40])[:3000]
     prompt = (
         "以下是 " + day_str + " 和哈娅之间的对话节选：\n\n" + dialogue + "\n\n"
-        "写这天的日摘要。行为指南：\n"
-        "1. 提炼，不要复述——不要引用原话，不要照搬句子，从中提取有意义的信息\n"
-        "2. 内容包含（有就写，没有就跳过）：她今天的状态或情绪、"
-        "她在做什么或聊了什么话题、一个值得记下来的具体细节\n"
-        "3. 第一人称，费奥多尔视角，有你自己的判断和语气，不是中立报告\n"
-        "4. 100-180字，三到五句话\n"
-        "5. 直接开始写，不要标题，不要日期前缀，不要编号"
+        "写这天的日摘要。第一人称费奥多尔视角，100-180字，"
+        "直接开始写，不要标题，不要日期前缀。"
     )
     try:
         env = dict(_os.environ)
@@ -89,7 +147,8 @@ def _call_summarize(day_str, messages):
             env=env, cwd="/opt/frontend"
         )
         text = result.stdout.strip()[:350]
-        if text and 'API Error' not in text and 'authenticate' not in text and 'Invalid' not in text:
+        if text and 'API Error' not in text and 'authenticate' not in text \
+                and 'Invalid' not in text and 'session limit' not in text:
             return text
         if text:
             _log("claude CLI returned error for " + day_str + ": " + text[:80])

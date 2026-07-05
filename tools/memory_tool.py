@@ -65,20 +65,22 @@ def get_recent_memories(limit=20):
 
 def search_memories(keyword, active_only=False):
     """多词检索：空格/逗号分隔的词先 AND，无结果退化为 OR 按命中数排序。
+    tags 参与匹配（tag_enricher 写入的联想词 assoc:… 由此生效——"海边"搜得到"沙滩"）。
     主动搜索默认包含已退役记忆（active_only=False）——历史该搜得到；自动注入路径传 True。"""
     words = [w for w in keyword.replace('，', ' ').replace(',', ' ').split() if w]
     if not words:
         return []
     resolved_cond = ' AND resolved=0' if active_only else ''
     conn = _db()
+    hay = "(content || ' ' || COALESCE(tags,''))"
     params = tuple('%' + w + '%' for w in words)
-    cond_and = ' AND '.join(['content LIKE ?'] * len(words))
+    cond_and = ' AND '.join([hay + ' LIKE ?'] * len(words))
     rows = conn.execute(
         f"SELECT * FROM posts WHERE {cond_and}{resolved_cond} ORDER BY pinned DESC, id DESC LIMIT 20",
         params).fetchall()
     if not rows and len(words) > 1:
-        cond_or = ' OR '.join(['content LIKE ?'] * len(words))
-        hits = '+'.join(['(content LIKE ?)'] * len(words))
+        cond_or = ' OR '.join([hay + ' LIKE ?'] * len(words))
+        hits = '+'.join(['(' + hay + ' LIKE ?)'] * len(words))
         rows = conn.execute(
             f"SELECT *, ({hits}) AS _hits FROM posts WHERE ({cond_or}){resolved_cond} "
             f"ORDER BY _hits DESC, pinned DESC, id DESC LIMIT 20",
