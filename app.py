@@ -3,6 +3,7 @@ from flask import Flask, request, jsonify, send_from_directory, abort
 import config_store
 import attachment_store
 import gallery_store
+import command_store
 
 app = Flask(__name__, static_folder='static')
 DB_PATH = '/opt/frontend/memories.db'
@@ -1643,6 +1644,27 @@ def gallery_create_album():
         return jsonify({'ok': False, 'error': 'name required'}), 400
     aid = gallery_store.album_by_name(name) or gallery_store.create_album(name, d.get('description', ''))
     return jsonify({'ok': True, 'album_id': aid})
+
+
+# ── 倒计时任务浮窗 ─────────────────────────────────────────────
+@app.route('/api/commands/pending', methods=['GET'])
+def commands_pending():
+    return jsonify({'commands': command_store.list_pending()})
+
+@app.route('/api/commands/<int:cid>/started', methods=['POST'])
+def command_started(cid):
+    command_store.mark_started(cid)
+    return jsonify({'ok': True})
+
+@app.route('/api/commands/<int:cid>/done', methods=['POST'])
+def command_done(cid):
+    r = command_store.mark_done(cid)
+    return jsonify({'ok': True, **(r or {})})
+
+@app.route('/api/commands/<int:cid>/cancel', methods=['POST'])
+def command_cancel(cid):
+    command_store.mark_canceled(cid)
+    return jsonify({'ok': True})
 
 
 if __name__ == '__main__':

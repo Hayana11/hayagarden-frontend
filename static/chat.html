@@ -213,6 +213,27 @@ a.ws-card:hover{border-color:rgba(212,165,116,.5);background:rgba(212,165,116,.0
 /* 内联相册照片（费佳"突然想起"随消息发来的画面） */
 .gallery-inline{display:block;margin:8px 0 2px;}
 .gallery-inline img{max-width:240px;width:100%;border-radius:14px;border:1px solid rgba(212,165,116,.3);box-shadow:0 4px 16px rgba(43,38,30,.14);display:block;}
+/* 倒计时任务浮窗（费佳给你下的任务） */
+.cmd-float{position:fixed;right:10px;bottom:150px;z-index:60;}
+.cmd-card{background:var(--card);border:1px solid rgba(212,165,116,.4);border-radius:16px;box-shadow:0 8px 28px rgba(43,38,30,.18);padding:12px 14px;width:212px;transition:background .5s,border-color .5s;}
+.cmd-card.over{background:#fff3e6;border-color:#e6a35c;}
+.cmd-top{display:flex;align-items:center;gap:7px;}
+.cmd-icon{font-size:16px;color:var(--amber);flex-shrink:0;}
+.cmd-card.over .cmd-icon{color:#c9702e;}
+.cmd-title{flex:1;font-size:13px;font-weight:600;color:var(--text);line-height:1.3;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.cmd-queue{font-size:10px;color:var(--muted);background:rgba(212,165,116,.16);border-radius:8px;padding:1px 6px;flex-shrink:0;}
+.cmd-sub{font-size:10.5px;color:var(--muted);margin-top:3px;}
+.cmd-time{font-size:31px;font-weight:600;color:var(--text);font-variant-numeric:tabular-nums;letter-spacing:.5px;margin:5px 0 7px;line-height:1;}
+.cmd-card.over .cmd-time{color:#c9702e;}
+.cmd-bar{height:4px;background:rgba(212,165,116,.16);border-radius:3px;overflow:hidden;}
+.cmd-barfill{height:100%;background:var(--amber);border-radius:3px;transform-origin:left;transform:scaleX(0);}
+.cmd-card.over .cmd-barfill{background:#e6a35c;}
+.cmd-acts{display:flex;gap:8px;margin-top:11px;}
+.cmd-done{flex:1;border:none;background:var(--amber);color:#fff;font-size:12.5px;font-weight:600;padding:8px 0;border-radius:10px;cursor:pointer;font-family:inherit;}
+.cmd-cancel{position:relative;overflow:hidden;border:1px solid var(--border);background:none;color:var(--muted);font-size:11.5px;padding:8px 11px;border-radius:10px;cursor:pointer;font-family:inherit;user-select:none;-webkit-user-select:none;touch-action:none;}
+.cmd-cancel-fill{position:absolute;inset:0;background:rgba(201,112,46,.2);transform-origin:left;transform:scaleX(0);}
+.cmd-cancel.holding .cmd-cancel-fill{transform:scaleX(1);transition:transform 1.1s linear;}
+.cmd-cancel>span:last-child{position:relative;}
 
 /* Tool Session card（一次回复里所有工具调用的汇总卡片） */
 .tsess{background:rgba(212,165,116,.05);border-left:2px solid rgba(212,165,116,.35);border-radius:0 8px 8px 0;margin:0 0 8px;overflow:hidden;}
@@ -528,6 +549,24 @@ html[data-theme=dark] .ni{color:#6a5f5f;}
 </div>
 
 <!-- Nav -->
+<!-- 倒计时任务浮窗 -->
+<div class="cmd-float" id="cmd-float" style="display:none">
+  <div class="cmd-card" id="cmd-card">
+    <div class="cmd-top">
+      <i class="ti ti-hourglass-high cmd-icon"></i>
+      <div class="cmd-title" id="cmd-title"></div>
+      <div class="cmd-queue" id="cmd-queue" style="display:none"></div>
+    </div>
+    <div class="cmd-sub" id="cmd-sub"></div>
+    <div class="cmd-time" id="cmd-time">--:--</div>
+    <div class="cmd-bar"><div class="cmd-barfill" id="cmd-barfill"></div></div>
+    <div class="cmd-acts">
+      <button class="cmd-done" onclick="cmdDone()">完成</button>
+      <button class="cmd-cancel" id="cmd-cancelbtn"><span class="cmd-cancel-fill"></span><span>长按取消</span></button>
+    </div>
+  </div>
+</div>
+
 <nav class="bnav">
   <a class="ni" href="/dash"><i class="ti ti-layout-dashboard"></i><span>dash</span></a>
   <a class="ni act" href="/chat"><i class="ti ti-message-2"></i><span>chat</span></a>
@@ -1480,6 +1519,64 @@ function closeLb(){ document.getElementById('lb').classList.remove('show'); }
 
 loadMsgs(true);
 setInterval(function(){ if(!window.historyMode) loadMsgs(false); }, 8000);
+
+// ── 倒计时任务浮窗 ─────────────────────────────────────────────
+var cmdList=[], cmdCur=null, cmdRaf=null, cmdStartedLocal={};
+function cmdFmt(ms){var s=Math.max(0,Math.round(ms/1000));var m=Math.floor(s/60),ss=s%60;return (m<10?'0':'')+m+':'+(ss<10?'0':'')+ss;}
+async function cmdPoll(){
+  try{ var r=await fetch('/api/commands/pending'); var d=await r.json(); cmdList=d.commands||[]; }
+  catch(e){ return; }
+  cmdRender();
+}
+function cmdRender(){
+  var f=document.getElementById('cmd-float'); if(!f) return;
+  if(!cmdList.length){ cmdCur=null; f.style.display='none'; return; }
+  var c=cmdList[0];  // 最早未完成的先做，其余排队
+  if(c.started_at) c._startMs=c.started_at;
+  else if(cmdStartedLocal[c.id]) c._startMs=cmdStartedLocal[c.id];
+  else { c._startMs=Date.now(); cmdStartedLocal[c.id]=c._startMs; fetch('/api/commands/'+c.id+'/started',{method:'POST'}).catch(function(){}); }
+  cmdCur=c;
+  f.style.display='block';
+  document.getElementById('cmd-title').textContent=c.title;
+  var q=document.getElementById('cmd-queue');
+  if(cmdList.length>1){ q.style.display='block'; q.textContent='+'+(cmdList.length-1); } else q.style.display='none';
+  var st=new Date(c._startMs);
+  document.getElementById('cmd-sub').textContent=('0'+st.getHours()).slice(-2)+':'+('0'+st.getMinutes()).slice(-2)+' 开始';
+  if(!cmdRaf) cmdTick();
+}
+function cmdTick(){
+  cmdRaf=requestAnimationFrame(cmdTick);
+  if(!cmdCur){ cmdRaf=null; return; }
+  var el=Date.now()-cmdCur._startMs;
+  var card=document.getElementById('cmd-card'), t=document.getElementById('cmd-time'), bf=document.getElementById('cmd-barfill');
+  var cd=cmdCur.countdown_seconds;
+  if(cd){
+    var total=cd*1000, remain=total-el;
+    if(remain>=0){ card.classList.remove('over'); t.textContent=cmdFmt(remain); bf.style.transform='scaleX('+Math.min(1,el/total)+')'; }
+    else{ card.classList.add('over'); t.textContent='+'+cmdFmt(-remain); bf.style.transform='scaleX(1)'; }
+  } else { card.classList.remove('over'); t.textContent=cmdFmt(el); bf.style.transform='scaleX(0)'; }
+}
+async function cmdDone(){
+  if(!cmdCur) return; var id=cmdCur.id;
+  cmdList=cmdList.filter(function(x){return x.id!==id;});
+  cmdRender();
+  fetch('/api/commands/'+id+'/done',{method:'POST'}).catch(function(){});
+}
+async function cmdCancel(){
+  if(!cmdCur) return; var id=cmdCur.id;
+  cmdList=cmdList.filter(function(x){return x.id!==id;});
+  cmdRender();
+  fetch('/api/commands/'+id+'/cancel',{method:'POST'}).catch(function(){});
+}
+(function(){
+  var btn=document.getElementById('cmd-cancelbtn'); if(!btn) return;
+  var timer=null;
+  function start(e){ e.preventDefault(); btn.classList.add('holding'); timer=setTimeout(function(){ btn.classList.remove('holding'); timer=null; cmdCancel(); },1100); }
+  function end(){ if(timer){clearTimeout(timer);timer=null;} btn.classList.remove('holding'); }
+  btn.addEventListener('pointerdown',start); btn.addEventListener('pointerup',end);
+  btn.addEventListener('pointerleave',end); btn.addEventListener('pointercancel',end);
+})();
+cmdPoll(); setInterval(cmdPoll,4000);
 document.getElementById('msgs').addEventListener('scroll', function(){
   var c = this;
   if(window.historyMode && c.scrollHeight - c.scrollTop - c.clientHeight < 120){

@@ -539,6 +539,18 @@ TOOLS = [
         }},
     },
     {
+        'name': 'issue_command',
+        'description': ('给哈娅下一个带倒计时的任务，会以浮窗形式跳出来、数字实时倒数。'
+                        '合适的时机：她说要去做某件事（读书/洗澡/喝水/运动/睡觉），你可以顺手给她定个时长把她按下去；'
+                        '或者你看她聊了半天还在拖、该做的事没做，主动推一个逼她动。'
+                        'countdown_seconds 是倒计时秒数（如 25 分钟=1500），不传则只计时不倒数。'
+                        '这不是提醒，是你在管她——她取消了你会知道，做慢了你也会知道。'),
+        'input_schema': {'type': 'object', 'properties': {
+            'title': {'type': 'string', 'description': '任务标题，如"安静读 25 分钟""去喝水"'},
+            'countdown_seconds': {'type': 'integer', 'description': '倒计时秒数，不传=只计时'},
+        }, 'required': ['title']},
+    },
+    {
         'name': 'save_memory',
         'description': '把对话中重要的信息存入长期记忆（哈娅提到的事件、约定、喜好、重要日期等）。在她说了值得记住的事时安静地使用。',
         'input_schema': {'type': 'object', 'properties': {'content': {'type': 'string', 'description': '要记住的内容，一句话概括'},'tags': {'type': 'string', 'description': '可选标签，core（核心）或 long-term（长期）'}}, 'required': ['content']},
@@ -1124,12 +1136,30 @@ def _recall_photo(keyword=None, emotion=None):
     return '\n'.join(lines)
 
 
+def _issue_command(title, countdown_seconds=None, caller='fyodor'):
+    """给哈娅下一个带倒计时的任务，浮窗会跳出来。"""
+    import command_store
+    title = (title or '').strip()
+    if not title:
+        return '要下什么任务？给个标题。'
+    cid = command_store.issue(title, countdown_seconds, created_by=caller)
+    if not cid:
+        return '下任务失败。'
+    if countdown_seconds:
+        m, s = divmod(int(countdown_seconds), 60)
+        t = ('%d分%d秒' % (m, s)) if m else ('%d秒' % s)
+        return '⏳ 已给她下任务：「%s」· %s（浮窗已亮，数字在跳）' % (title, t)
+    return '⏳ 已给她下任务：「%s」（只计时，不倒数）' % title
+
+
 def run_tool(name, args, caller='fyodor_cc'):
     try:
         if name == 'web_search':
             return _web_search(args.get('query', ''))
         if name == 'recall_photo':
             return _recall_photo(args.get('keyword'), args.get('emotion'))
+        if name == 'issue_command':
+            return _issue_command(args.get('title', ''), args.get('countdown_seconds'), caller=caller)
         if name == 'browse_github':
             return _github_browse(args.get('query'), args.get('repo'), args.get('sort'))
         if name == 'get_location':
@@ -2475,6 +2505,15 @@ WAKE_TOOLS = [
             'keyword': {'type': 'string'},
             'emotion': {'type': 'string'},
         }},
+    },
+    {
+        'name': 'issue_command',
+        'description': ('给哈娅下一个带倒计时的任务，浮窗会跳出来倒数。醒来时若看她该睡了/该起了/一直在拖，'
+                        '主动推一个把她按住。countdown_seconds 是倒计时秒数，不传=只计时。她取消/超时你都会知道。'),
+        'input_schema': {'type': 'object', 'properties': {
+            'title': {'type': 'string'},
+            'countdown_seconds': {'type': 'integer'},
+        }, 'required': ['title']},
     },
     {
         'name': 'read_board',
