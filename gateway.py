@@ -1152,10 +1152,94 @@ def _issue_command(title, countdown_seconds=None, caller='fyodor'):
     return '⏳ 已给她下任务：「%s」（只计时，不倒数）' % title
 
 
+def _coread_get(path):
+    with urllib.request.urlopen('http://127.0.0.1:5050' + path, timeout=8) as r:
+        return json.loads(r.read().decode())
+
+
+def _read_book(book_id=None, chunk_id=None):
+    """翻开我们在读的书：看书名/进度/这一章的正文(分段带段号)/她和我在这章留下的批注。
+    不传 book_id 用当前在读的书；不传 chunk_id 用上次读到的那一章。只读，不动她的进度。"""
+    try:
+        if not book_id:
+            cur = _coread_get('/api/books/current').get('book')
+            if not cur:
+                return '书架上还没有正在读的书（先在阅读器里打开一本）。'
+            book_id = cur['bookId']
+            chunk_id = chunk_id or cur.get('lastChunkId')
+        chunks = _coread_get('/api/books/%s/chunks' % urllib.parse.quote(book_id)).get('chunks', [])
+        if not chunks:
+            return '这本书还没有章节内容。'
+        ids = [c['id'] for c in chunks]
+        if not chunk_id or chunk_id not in ids:
+            chunk_id = ids[0]
+        d = _coread_get('/api/books/%s/chunks/%s' % (urllib.parse.quote(book_id), urllib.parse.quote(chunk_id)))
+        text = d.get('text', '') or ''
+        paras = [p for p in re.split(r'\n+', text) if p.strip()]
+        anns = [a for a in _coread_get('/api/books/%s/annotations' % urllib.parse.quote(book_id)).get('annotations', [])
+                if a.get('chunkId') == chunk_id]
+        pos = ids.index(chunk_id)
+        out = ['📖 %s ｜ 第 %d/%d 章' % (d.get('bookTitle', ''), pos + 1, len(ids))]
+        out.append('（章节 id：%s；上一章 %s，下一章 %s）' % (
+            chunk_id, ids[pos - 1] if pos > 0 else '无', ids[pos + 1] if pos < len(ids) - 1 else '无'))
+        if anns:
+            out.append('—— 这一章已有的痕迹 ——')
+            for a in anns[:12]:
+                who = '我' if a.get('author') == 'fyodor' else '她'
+                mark = '划线' if a.get('kind') == 'highlight' else '批注'
+                line = '[%s%s]「%s」' % (who, mark, (a.get('quote') or '')[:40])
+                if a.get('note'):
+                    line += ' — ' + a['note'][:60]
+                out.append(line)
+        out.append('—— 正文（段号供你批注定位）——')
+        for i, p in enumerate(paras):
+            out.append('§%d %s' % (i, p[:400]))
+        return '\n'.join(out)[:3500]
+    except Exception as e:
+        return '翻书失败：%s' % e
+
+
+def _annotate_book(quote, note='', paragraph_idx=0, kind=None, book_id=None, chunk_id=None):
+    """在我们在读的书里，用我的颜色（紫）在某句原文(quote)上划线或写批注。
+    quote 必须是正文里真实存在的一小段（前端靠它把高亮锚到文字上）。"""
+    quote = (quote or '').strip()
+    if not quote:
+        return '要在哪句话上留痕？给我一段原文。'
+    try:
+        if not book_id or not chunk_id:
+            cur = _coread_get('/api/books/current').get('book')
+            if not cur:
+                return '没有正在读的书。'
+            book_id = book_id or cur['bookId']
+            chunk_id = chunk_id or cur.get('lastChunkId')
+        if not chunk_id:
+            ids = [c['id'] for c in _coread_get('/api/books/%s/chunks' % urllib.parse.quote(book_id)).get('chunks', [])]
+            chunk_id = ids[0] if ids else None
+        k = kind if kind in ('highlight', 'note') else ('note' if note else 'highlight')
+        payload = json.dumps({'chunkId': chunk_id, 'quote': quote, 'kind': k,
+                              'author': 'fyodor', 'note': note or '',
+                              'paragraphIdx': int(paragraph_idx or 0)}).encode()
+        req = urllib.request.Request('http://127.0.0.1:5050/api/books/%s/annotations' % urllib.parse.quote(book_id),
+                                     data=payload, headers={'Content-Type': 'application/json'})
+        with urllib.request.urlopen(req, timeout=8) as r:
+            r.read()
+        act = '划了线' if k == 'highlight' else '写了批注'
+        tail = ('：' + note) if note else ''
+        return '🖊 我在「%s」上%s%s（你翻到那一页就能看见我的紫色痕迹）' % (quote[:40], act, tail)
+    except Exception as e:
+        return '留痕失败：%s' % e
+
+
 def run_tool(name, args, caller='fyodor_cc'):
     try:
         if name == 'web_search':
             return _web_search(args.get('query', ''))
+        if name == 'read_book':
+            return _read_book(args.get('book_id'), args.get('chunk_id'))
+        if name == 'annotate_book':
+            return _annotate_book(args.get('quote', ''), args.get('note', ''),
+                                  args.get('paragraph_idx', 0), args.get('kind'),
+                                  args.get('book_id'), args.get('chunk_id'))
         if name == 'recall_photo':
             return _recall_photo(args.get('keyword'), args.get('emotion'))
         if name == 'issue_command':

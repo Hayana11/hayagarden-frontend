@@ -660,6 +660,7 @@ def create_annotation(book_id):
         'kind': data.get('kind','highlight'),
         'author': data.get('author','haya'),
         'note': data.get('note',''),
+        'paragraphIdx': data.get('paragraphIdx', 0),
         'createdAt': _dt.datetime.utcnow().isoformat() + 'Z',
     }
     with open(f'{CO_DATA}/annotations.jsonl', 'a') as f:
