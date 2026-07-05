@@ -383,15 +383,80 @@ def img_block(url, max_dim=1568):
             data = base64.standard_b64encode(f.read()).decode()
         return {'type': 'image', 'source': {'type': 'base64', 'media_type': mime, 'data': data}}
 
+# 外部/大返回工具：结果注入历史时给更大的截断额度（默认8000字符），
+# 其余本地工具给较小额度（默认2000）。两档都可用 config_store 旋钮在线调：
+# TOOL_INJECT_MAX / TOOL_INJECT_MAX_MCP。
+_LARGE_RETURN_TOOLS = {
+    'web_search', 'browse_github', 'read_webpage', 'get_activity_summary',
+}
+
+def _format_tool_history(tool_calls_json):
+    """把某条 assistant 消息存的 tool_calls JSON 压成一段可读文本，注入回对话历史，
+    让模型下一轮还记得上一轮工具查到了什么。
+
+    背景：build_messages 过去只带 content，assistant 存在 tool_calls 列里的工具
+    结果完全没进下一轮上下文 —— 模型这轮查到、下轮就'失忆'。这里按工具类型分档
+    截断后注入（外部大返回工具额度更大，且不小于当轮 SSE 展示用的 slim 2000）。"""
+    try:
+        import config_store as _cfg
+        cap_small = _cfg.get_int('TOOL_INJECT_MAX', 2000)
+        cap_large = _cfg.get_int('TOOL_INJECT_MAX_MCP', 8000)
+    except Exception:
+        cap_small, cap_large = 2000, 8000
+    try:
+        calls = json.loads(tool_calls_json)
+    except Exception:
+        return ''
+    if not isinstance(calls, list) or not calls:
+        return ''
+    lines = ['[上一轮我调用的工具与结果]']
+    for tc in calls:
+        if not isinstance(tc, dict):
+            continue
+        name = tc.get('name', 'tool')
+        try:
+            args_str = json.dumps(tc.get('args') or {}, ensure_ascii=False)
+        except Exception:
+            args_str = str(tc.get('args') or '')
+        if len(args_str) > 300:
+            args_str = args_str[:300] + '…'
+        cap = cap_large if name in _LARGE_RETURN_TOOLS else cap_small
+        result = str(tc.get('result') or '')
+        if len(result) > cap:
+            result = result[:cap] + '…(已截断)'
+        ok = '' if tc.get('success', True) else '（失败）'
+        lines.append('· %s%s %s\n  → %s' % (name, ok, args_str, result))
+    return '\n'.join(lines)
+
+
+# 选择器：AI 在正文里输出 [choices]A|B|C[/choices]，保存时抽出存进 choices 列。
+# 用标签而非 tool call：沿用已有机制（贴纸/语音同思路），不打断流式、不多一轮 API 往返。
+_CHOICES_RE = re.compile(r'\[choices\](.*?)\[/choices\]', re.DOTALL)
+
+def _extract_choices(text):
+    """从正文抽出第一组 [choices]…[/choices] 选项，返回 (去标签后的正文, [选项...])。"""
+    if not text or '[choices]' not in text:
+        return text, []
+    found = []
+    def _repl(m):
+        opts = [o.strip() for o in m.group(1).split('|') if o.strip()]
+        if opts:
+            found.append(opts)
+        return ''
+    clean = _CHOICES_RE.sub(_repl, text).strip()
+    return clean, (found[0] if found else [])
+
+
 def build_messages():
     conn = get_db()
     # 今天的所有对话 + 昨天最后5条（保持连续性），总不超过60条
     rows = list(reversed(conn.execute(
-        "SELECT author, content, image_url, created_at FROM chat_messages "
+        "SELECT author, content, image_url, created_at, tool_calls, file_url, file_name FROM chat_messages "
         "WHERE date(created_at) >= date('now', '+8 hours', '-1 day') "
         "ORDER BY id DESC LIMIT 60"
     ).fetchall()))
     conn.close()
+    _total = len(rows)
 
     # 图片大小限制：base64编码后的图片payload很容易让请求体爆炸到几十MB，
     # 拖垮上传时间甚至触发中转站的请求体大小限制，表现为"一直转圈/卡死"。
@@ -432,6 +497,27 @@ def build_messages():
                 blocks.append({'type': 'text', 'text': '[一张较早发送的图片，内容已不在上下文中]'})
         if r['content']:
             blocks.append({'type': 'text', 'text': note + r['content']})
+        # 用户发的文件：抄图片的降级策略——最近 6 条注入全文，更早只留标记（content 里的 [文件:x]）
+        _fu = r['file_url'] if ('file_url' in r.keys()) else ''
+        if _fu and not is_ai and _ri >= _total - 6 and _fu.startswith('/static/'):
+            try:
+                _fp = os.path.realpath(STATIC_DIR + _fu[7:])  # /static/... → 磁盘路径，realpath 除掉 ../
+                if _fp.startswith(os.path.realpath(STATIC_DIR)) and os.path.exists(_fp):
+                    with open(_fp, 'r', encoding='utf-8', errors='replace') as _ff:
+                        _body = _ff.read()
+                    if len(_body) > 30000:
+                        _body = _body[:30000] + '\n...(文件过长已截断)'
+                    blocks.append({'type': 'text', 'text': '[用户发来文件: %s]\n```\n%s\n```' % (r['file_name'] or '附件', _body)})
+            except Exception:
+                pass
+        # AI 消息：把上一轮工具调用与结果也注入回去，否则模型下轮会失忆
+        if is_ai:
+            try:
+                _th = _format_tool_history(r['tool_calls']) if r['tool_calls'] else ''
+            except Exception:
+                _th = ''
+            if _th:
+                blocks.append({'type': 'text', 'text': _th})
         if not blocks:
             continue
 
@@ -449,6 +535,27 @@ def build_messages():
                 msgs[-1]['content'] = prev + content
         else:
             msgs.append({'role': role, 'content': content})
+
+    # 滚动摘要：当实时窗口被封顶（取满 60 条，说明有更早的内容滞出了），
+    # 把 tools/rolling_summary.py 后台生成的“连续性摘要”注入到开头，补上窗口外那段记忆。
+    if len(rows) >= 60:
+        try:
+            _rc = get_db()
+            _rsrow = _rc.execute('SELECT summary FROM rolling_summary WHERE id=1').fetchone()
+            _rc.close()
+            _rsum = (_rsrow['summary'] if _rsrow else '') or ''
+        except Exception:
+            _rsum = ''
+        if _rsum.strip():
+            _pre = '[更早对话的连续性摘要（滞出当前窗口的部分）]\n' + _rsum.strip()
+            if msgs and msgs[0]['role'] == 'user':
+                _c0 = msgs[0]['content']
+                if isinstance(_c0, str):
+                    msgs[0]['content'] = _pre + '\n\n' + _c0
+                else:
+                    msgs[0]['content'] = [{'type': 'text', 'text': _pre}] + _c0
+            else:
+                msgs.insert(0, {'role': 'user', 'content': _pre})
 
     if not msgs or msgs[0]['role'] == 'assistant':
         msgs.insert(0, {'role': 'user', 'content': '...'})
@@ -520,6 +627,33 @@ TOOLS = [
         'input_schema': {'type': 'object', 'properties': {
             'viewpoint': {'type': 'string', 'enum': ['fyodor', 'hayana'], 'description': '视角，默认 fyodor（我的视角）'},
         }},
+    },
+    {
+        'name': 'shop_browse',
+        'description': (
+            '用已登录淘宝的浏览器打开一个购物页面（搜索结果/商品详情/购物车），读取正文并截图；'
+            '如果页面里出现支付宝收银台链接（cashier.alipay.com）会一并抽取出来，'
+            '那是唯一能推给哈娅去扫脸付款的链接。'
+            '想搜商品就传淘宝搜索结果页 URL（如 https://s.taobao.com/search?q=关键词），'
+            '想看某个商品就传商品链接，想看购物车就传 https://cart.taobao.com/cart.htm。'
+            '这是半自动流程：你负责逐个看、挑、走到付款页，'
+            '真正的钱只有哈娅在支付宝 App 里扫脸才会动。'
+            '比较慢（可能达分钟级，这台机器资源有限），一次只能开一个页面。'
+            '如果 need_login 返回 true，说明登录态失效了，需要重新导入。'
+        ),
+        'input_schema': {'type': 'object', 'properties': {
+            'url': {'type': 'string', 'description': '要打开的淘宝/天猫页面地址'},
+            'site': {'type': 'string', 'description': '登录态站点名，默认 taobao'},
+        }, 'required': ['url']},
+    },
+    {
+        'name': 'shop_act',
+        'description': '带登录态打开一个商品/购物车页面后，按顺序执行一组点击填写动作，最后同样返回正文截图和发现的支付宝收银台链接。 actions 是一个列表，每项可以是 click_text、click_selector、fill_selector加value、wait_ms 四种之一，推荐优先用 click_text 按可见文字点击。每一步失败不会中断整个流程，失败记录会跟结果一起返回。谨慎：点到提交订单类的按钮会在她账号里生成一笔真实的待付款订单记录，不花钱但会留痕迹，做这一步前最好先跟她说一声。',
+        'input_schema': {'type': 'object', 'properties': {
+            'url': {'type': 'string', 'description': '商品或购物车页面地址'},
+            'actions': {'type': 'array', 'description': '要按顺序执行的动作列表', 'items': {'type': 'object'}},
+            'site': {'type': 'string', 'description': '登录态站点名，默认 taobao'},
+        }, 'required': ['url', 'actions']},
     },
     {
         'name': 'save_to_gallery',
@@ -1016,6 +1150,112 @@ def _screenshot_chat(viewpoint='fyodor'):
     return '📸 聊天截图 · %s\n🖼 %s' % (who, ref)
 
 
+def _shop_browse(url, site='taobao'):
+    """带登录态打开一个购物页面（调 tools/shop_browser.js），抽取正文 + 截图 + 支付宝收银台链接。
+    与 read_webpage/screenshot_chat 共用同一把 _BROWSER_LOCK（这台机器内存紧，同时只能跑一个 chromium）。
+    超时预算比 read_webpage 宽（淘宝页面重，这台 1 核/1G 内存的机器很慢）。"""
+    import subprocess as _sp
+    url = (url or '').strip()
+    if not url:
+        return '给个购物页面地址'
+    if not re.match(r'^https?://', url, re.I):
+        url = 'https://' + url
+    site = re.sub(r'[^a-z0-9_-]', '', (site or 'taobao').lower()) or 'taobao'
+    if not _BROWSER_LOCK.acquire(timeout=100):
+        return '浏览器正忙（同一时刻只能开一个），稍等再试。'
+    try:
+        p = _sp.run(['node', '/opt/frontend/tools/shop_browser.js', 'browse', site, url],
+                    capture_output=True, text=True, timeout=110)
+        out = (p.stdout or '').strip()
+        if not out:
+            return '打开购物页面失败：' + ((p.stderr or '')[:200] or '浏览器无输出')
+        d = json.loads(out.splitlines()[-1])
+    except _sp.TimeoutExpired:
+        return '打开购物页面超时（>110秒）——这台机器资源有限，有时候需要重试。'
+    except Exception as e:
+        return f'打开购物页面失败：{e}'
+    finally:
+        _BROWSER_LOCK.release()
+    if not d.get('ok'):
+        return '打开购物页面失败：' + str(d.get('error', ''))[:200]
+    parts = []
+    if d.get('need_login'):
+        parts.append('⚠️ 登录态失效了，这页被踢回了登录页——需要重新导入 cookie。')
+    parts.append('🛒 ' + (d.get('finalUrl') or d.get('url') or ''))
+    cashier_links = d.get('cashier_links') or []
+    if cashier_links:
+        parts.append('💰 发现支付宝收银台链接（可以推给哈娅扫脸付款）：')
+        for link in cashier_links[:3]:
+            parts.append('  ' + link)
+    ref = _register_shot(d.get('shot'))
+    if ref:
+        parts.append('🖼 ' + ref)
+    parts.append('')
+    parts.append((d.get('text') or '')[:2500] or '（没抽到文字，可能需要登录或页面是纯图片）')
+    return '\n'.join(parts)
+
+
+def _shop_act(url, actions, site='taobao'):
+    """打开页面后按序执行一组点击/填写动作（调 tools/shop_browser.js act），同样返回正文+截图+cashier 链接。
+    actions 写入临时文件传给 node 脚本（避免命令行参数里带中文/引号的转义问题），用完即删。"""
+    import subprocess as _sp
+    import tempfile as _tmp
+    url = (url or '').strip()
+    if not url:
+        return '给个商品或购物车页面地址'
+    if not re.match(r'^https?://', url, re.I):
+        url = 'https://' + url
+    site = re.sub(r'[^a-z0-9_-]', '', (site or 'taobao').lower()) or 'taobao'
+    if not isinstance(actions, list) or not actions:
+        return '给一组动作（比如 [{"click_text": "加入购物车"}]）'
+    actions_file = None
+    if not _BROWSER_LOCK.acquire(timeout=100):
+        return '浏览器正忙（同一时刻只能开一个），稍等再试。'
+    try:
+        with _tmp.NamedTemporaryFile('w', suffix='.json', delete=False, dir='/tmp') as tf:
+            json.dump(actions, tf, ensure_ascii=False)
+            actions_file = tf.name
+        p = _sp.run(['node', '/opt/frontend/tools/shop_browser.js', 'act', site, url, actions_file],
+                    capture_output=True, text=True, timeout=120)
+        out = (p.stdout or '').strip()
+        if not out:
+            return '执行失败：' + ((p.stderr or '')[:200] or '浏览器无输出')
+        d = json.loads(out.splitlines()[-1])
+    except _sp.TimeoutExpired:
+        return '执行超时（>120秒）——这台机器资源有限，有时候需要重试。'
+    except Exception as e:
+        return f'执行失败：{e}'
+    finally:
+        _BROWSER_LOCK.release()
+        if actions_file:
+            try:
+                os.remove(actions_file)
+            except OSError:
+                pass
+    if not d.get('ok'):
+        return '执行失败：' + str(d.get('error', ''))[:200]
+    parts = []
+    if d.get('need_login'):
+        parts.append('⚠️ 登录态失效了，需要重新导入 cookie。')
+    step_errors = d.get('step_errors') or []
+    if step_errors:
+        parts.append('⚠️ %d 个动作没成功（页面结构可能不一样）：' % len(step_errors))
+        for se in step_errors[:3]:
+            parts.append('  · ' + json.dumps(se.get('action'), ensure_ascii=False) + ' → ' + se.get('error', ''))
+    parts.append('🛒 ' + (d.get('finalUrl') or url))
+    cashier_links = d.get('cashier_links') or []
+    if cashier_links:
+        parts.append('💰 发现支付宝收银台链接（可以推给哈娅扫脸付款）：')
+        for link in cashier_links[:3]:
+            parts.append('  ' + link)
+    ref = _register_shot(d.get('shot'))
+    if ref:
+        parts.append('🖼 ' + ref)
+    parts.append('')
+    parts.append((d.get('text') or '')[:2500] or '（没抽到文字）')
+    return '\n'.join(parts)
+
+
 def _gen_photo_meaning(note=''):
     """看着刚收藏的画面 + 最近对话，生成 {summary, emotion, keywords, importance}。
     走轻量 ws 模型；失败返回 None（照片照存，只是暂时没意义）。不用 OCR——意义来自上下文。"""
@@ -1152,10 +1392,94 @@ def _issue_command(title, countdown_seconds=None, caller='fyodor'):
     return '⏳ 已给她下任务：「%s」（只计时，不倒数）' % title
 
 
+def _coread_get(path):
+    with urllib.request.urlopen('http://127.0.0.1:5050' + path, timeout=8) as r:
+        return json.loads(r.read().decode())
+
+
+def _read_book(book_id=None, chunk_id=None):
+    """翻开我们在读的书：看书名/进度/这一章的正文(分段带段号)/她和我在这章留下的批注。
+    不传 book_id 用当前在读的书；不传 chunk_id 用上次读到的那一章。只读，不动她的进度。"""
+    try:
+        if not book_id:
+            cur = _coread_get('/api/books/current').get('book')
+            if not cur:
+                return '书架上还没有正在读的书（先在阅读器里打开一本）。'
+            book_id = cur['bookId']
+            chunk_id = chunk_id or cur.get('lastChunkId')
+        chunks = _coread_get('/api/books/%s/chunks' % urllib.parse.quote(book_id)).get('chunks', [])
+        if not chunks:
+            return '这本书还没有章节内容。'
+        ids = [c['id'] for c in chunks]
+        if not chunk_id or chunk_id not in ids:
+            chunk_id = ids[0]
+        d = _coread_get('/api/books/%s/chunks/%s' % (urllib.parse.quote(book_id), urllib.parse.quote(chunk_id)))
+        text = d.get('text', '') or ''
+        paras = [p for p in re.split(r'\n+', text) if p.strip()]
+        anns = [a for a in _coread_get('/api/books/%s/annotations' % urllib.parse.quote(book_id)).get('annotations', [])
+                if a.get('chunkId') == chunk_id]
+        pos = ids.index(chunk_id)
+        out = ['📖 %s ｜ 第 %d/%d 章' % (d.get('bookTitle', ''), pos + 1, len(ids))]
+        out.append('（章节 id：%s；上一章 %s，下一章 %s）' % (
+            chunk_id, ids[pos - 1] if pos > 0 else '无', ids[pos + 1] if pos < len(ids) - 1 else '无'))
+        if anns:
+            out.append('—— 这一章已有的痕迹 ——')
+            for a in anns[:12]:
+                who = '我' if a.get('author') == 'fyodor' else '她'
+                mark = '划线' if a.get('kind') == 'highlight' else '批注'
+                line = '[%s%s]「%s」' % (who, mark, (a.get('quote') or '')[:40])
+                if a.get('note'):
+                    line += ' — ' + a['note'][:60]
+                out.append(line)
+        out.append('—— 正文（段号供你批注定位）——')
+        for i, p in enumerate(paras):
+            out.append('§%d %s' % (i, p[:400]))
+        return '\n'.join(out)[:3500]
+    except Exception as e:
+        return '翻书失败：%s' % e
+
+
+def _annotate_book(quote, note='', paragraph_idx=0, kind=None, book_id=None, chunk_id=None):
+    """在我们在读的书里，用我的颜色（紫）在某句原文(quote)上划线或写批注。
+    quote 必须是正文里真实存在的一小段（前端靠它把高亮锚到文字上）。"""
+    quote = (quote or '').strip()
+    if not quote:
+        return '要在哪句话上留痕？给我一段原文。'
+    try:
+        if not book_id or not chunk_id:
+            cur = _coread_get('/api/books/current').get('book')
+            if not cur:
+                return '没有正在读的书。'
+            book_id = book_id or cur['bookId']
+            chunk_id = chunk_id or cur.get('lastChunkId')
+        if not chunk_id:
+            ids = [c['id'] for c in _coread_get('/api/books/%s/chunks' % urllib.parse.quote(book_id)).get('chunks', [])]
+            chunk_id = ids[0] if ids else None
+        k = kind if kind in ('highlight', 'note') else ('note' if note else 'highlight')
+        payload = json.dumps({'chunkId': chunk_id, 'quote': quote, 'kind': k,
+                              'author': 'fyodor', 'note': note or '',
+                              'paragraphIdx': int(paragraph_idx or 0)}).encode()
+        req = urllib.request.Request('http://127.0.0.1:5050/api/books/%s/annotations' % urllib.parse.quote(book_id),
+                                     data=payload, headers={'Content-Type': 'application/json'})
+        with urllib.request.urlopen(req, timeout=8) as r:
+            r.read()
+        act = '划了线' if k == 'highlight' else '写了批注'
+        tail = ('：' + note) if note else ''
+        return '🖊 我在「%s」上%s%s（你翻到那一页就能看见我的紫色痕迹）' % (quote[:40], act, tail)
+    except Exception as e:
+        return '留痕失败：%s' % e
+
+
 def run_tool(name, args, caller='fyodor_cc'):
     try:
         if name == 'web_search':
             return _web_search(args.get('query', ''))
+        if name == 'read_book':
+            return _read_book(args.get('book_id'), args.get('chunk_id'))
+        if name == 'annotate_book':
+            return _annotate_book(args.get('quote', ''), args.get('note', ''),
+                                  args.get('paragraph_idx', 0), args.get('kind'),
+                                  args.get('book_id'), args.get('chunk_id'))
         if name == 'recall_photo':
             return _recall_photo(args.get('keyword'), args.get('emotion'))
         if name == 'issue_command':
@@ -1168,6 +1492,10 @@ def run_tool(name, args, caller='fyodor_cc'):
             return _read_webpage(args.get('url', ''))
         if name == 'screenshot_chat':
             return _screenshot_chat(args.get('viewpoint', 'fyodor'))
+        if name == 'shop_browse':
+            return _shop_browse(args.get('url', ''), args.get('site', 'taobao'))
+        if name == 'shop_act':
+            return _shop_act(args.get('url', ''), args.get('actions') or [], args.get('site', 'taobao'))
         if name == 'save_to_gallery':
             return _save_to_gallery(args.get('attachment', ''), args.get('note', ''), args.get('album'))
         if name == 'get_activity_summary':
@@ -2141,14 +2469,18 @@ def chat_stream():
                             json.dumps({'cache_read': cc_cache_read, 'cache_creation': cc_cache_create})
                             if (cc_cache_read or cc_cache_create) else ''
                         )
+                        _cc_text, _cc_choices = _extract_choices(text)
+                        if _cc_choices and not _cc_text:
+                            _cc_text = '[选项: ' + ' / '.join(_cc_choices) + ']'
                         conn = get_db()
                         conn.execute(
-                            "INSERT INTO chat_messages (author, content, thinking, tool_calls, cache_info) VALUES ('assistant', ?, ?, ?, ?)",
-                            (text, thinking, json.dumps([{k: v for k, v in tc.items() if k != 'id'} for tc in cc_tool_calls], ensure_ascii=False) if cc_tool_calls else '', _cache_info_json)
+                            "INSERT INTO chat_messages (author, content, thinking, tool_calls, cache_info, choices) VALUES ('assistant', ?, ?, ?, ?, ?)",
+                            (_cc_text, thinking, json.dumps([{k: v for k, v in tc.items() if k != 'id'} for tc in cc_tool_calls], ensure_ascii=False) if cc_tool_calls else '', _cache_info_json,
+                             json.dumps(_cc_choices, ensure_ascii=False) if _cc_choices else '')
                         )
                         conn.commit()
                         conn.close()
-                        _write_session_memo(_uc, text)
+                        _write_session_memo(_uc, _cc_text)
                         try:
                             import emotion_engine as _ee
                             _ee.score_async((_uc + chr(10) + text)[:2000])
@@ -2197,15 +2529,20 @@ def chat_stream():
                     return
                 _ci = (json.dumps({'cache_read': cache_read_total, 'cache_creation': cache_create_total})
                        if (cache_read_total or cache_create_total) else '')
+                # 抽出选择器标签：正文去掉 [choices]…，choices 列存 JSON 数组
+                _pc, _choices = _extract_choices(p_text)
+                if _choices and not _pc:
+                    _pc = '[选项: ' + ' / '.join(_choices) + ']'  # 不存空 content，Claude API 拒绝空消息
                 conn = get_db()
                 conn.execute(
-                    "INSERT INTO chat_messages (author, content, thinking, tool_calls, cache_info) VALUES ('assistant', ?, ?, ?, ?)",
-                    (p_text, p_thinking, json.dumps(tool_calls_acc, ensure_ascii=False) if tool_calls_acc else '', _ci)
+                    "INSERT INTO chat_messages (author, content, thinking, tool_calls, cache_info, choices) VALUES ('assistant', ?, ?, ?, ?, ?)",
+                    (_pc, p_thinking, json.dumps(tool_calls_acc, ensure_ascii=False) if tool_calls_acc else '', _ci,
+                     json.dumps(_choices, ensure_ascii=False) if _choices else '')
                 )
                 conn.commit()
                 conn.close()
                 _persisted[0] = True
-                _write_session_memo(_uc, p_text)
+                _write_session_memo(_uc, _pc)
             try:
                 system   = build_system()
                 messages = build_messages()
@@ -2397,8 +2734,12 @@ def chat_stream():
                     _dt = ((_dres.get('choices') or [{}])[0]).get('message', {}).get('content', '') or ''
                     if _dt:
                         yield 'data: ' + json.dumps({'t': 'text', 'd': _dt}) + SSE_END
+                        _dt_clean, _dt_choices = _extract_choices(_dt)
+                        if _dt_choices and not _dt_clean:
+                            _dt_clean = '[选项: ' + ' / '.join(_dt_choices) + ']'
                         _dbc = get_db()
-                        _dbc.execute("INSERT INTO chat_messages (author,content) VALUES ('assistant',?)", (_dt,))
+                        _dbc.execute("INSERT INTO chat_messages (author,content,choices) VALUES ('assistant',?,?)",
+                                     (_dt_clean, json.dumps(_dt_choices, ensure_ascii=False) if _dt_choices else ''))
                         _dbc.commit()
                         _dbc.close()
                     yield 'data: ' + json.dumps({'t': 'done', 'ok': bool(_dt)}) + SSE_END

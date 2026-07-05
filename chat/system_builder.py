@@ -453,6 +453,17 @@ def build_system(wake=False):
 
     # ── 组装 system blocks（prompt caching 格式）────────────────
     # BP1/BP2 挂 cache_control，前缀稳定时命中缓存；BP3 纯动态不挂标
+    # 能力说明：文件卡片 + 选择器（标签驱动，与语音同机制）
+    parts.append(
+        '\n## 你可以发文件和选择器\n'
+        '- 发文件：把“成品”性质的内容（完整 HTML 页面、Markdown 长文）用工具 '
+        'create_html / create_markdown / create_document 生成，会渲染成可预览/下载的卡片；'
+        '凡是成品都走文件，不要把整页代码/长文直接贴在气泡里刷屏。\n'
+        '- 选择器：需要她从几个选项里点一下就能回答时，在正文里写 '
+        '[choices]选项A|选项B|选项C[/choices]（竖线分隔），渲染成一组可点按钮。'
+        '自己判断时机，别滥用；纯聊天不需要。一条回复最多一组选择器。'
+    )
+
     system_blocks = [
         {'type': 'text', 'text': bp1_text, 'cache_control': {'type': 'ephemeral'}},
     ]
