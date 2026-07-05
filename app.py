@@ -1,6 +1,9 @@
 import os, re, json, sqlite3, datetime, base64, uuid, threading
-from flask import Flask, request, jsonify, send_from_directory
+from flask import Flask, request, jsonify, send_from_directory, abort
 import config_store
+import attachment_store
+import gallery_store
+import command_store
 
 app = Flask(__name__, static_folder='static')
 DB_PATH = '/opt/frontend/memories.db'
@@ -107,6 +110,25 @@ def sw():
     resp.headers['Service-Worker-Allowed'] = '/'
     resp.headers['Cache-Control'] = 'no-cache'
     return resp
+
+@app.route('/api/client-error', methods=['POST'])
+def client_error():
+    # 前端 window.onerror 上报（app 内 WebView 开不了 DevTools，靠这个看页面真实报错）
+    try:
+        data = request.get_json(force=True, silent=True) or {}
+        entry = json.dumps({
+            'ts': datetime.datetime.now().isoformat(timespec='seconds'),
+            'page': str(data.get('page', ''))[:200],
+            'msg': str(data.get('msg', ''))[:500],
+            'src': str(data.get('src', ''))[:200],
+            'line': data.get('line'), 'col': data.get('col'),
+            'ua': request.headers.get('User-Agent', '')[:200],
+        }, ensure_ascii=False)
+        with open('/opt/frontend/client_errors.log', 'a') as f:
+            f.write(entry + '\n')
+    except Exception:
+        pass
+    return jsonify({'ok': True})
 
 @app.route('/icon-<size>.png')
 def icon(size):
@@ -918,13 +940,13 @@ def _init_monitor_tables():
     conn.execute("""CREATE TABLE IF NOT EXISTS bugs (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         content TEXT NOT NULL,
-        created_at TEXT DEFAULT (datetime('now','localtime')),
+        created_at TEXT DEFAULT (datetime('now','+8 hours')),
         resolved INTEGER DEFAULT 0
     )""")
     conn.execute("""CREATE TABLE IF NOT EXISTS fixes (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         content TEXT NOT NULL,
-        created_at TEXT DEFAULT (datetime('now','localtime'))
+        created_at TEXT DEFAULT (datetime('now','+8 hours'))
     )""")
     conn.commit()
     conn.close()
@@ -1038,7 +1060,7 @@ def _init_period_tables():
         date TEXT NOT NULL,
         type TEXT NOT NULL,
         note TEXT DEFAULT '',
-        created_at TEXT DEFAULT (datetime('now','localtime'))
+        created_at TEXT DEFAULT (datetime('now','+8 hours'))
     )""")
     conn.commit()
     conn.close()
@@ -1550,6 +1572,120 @@ def geo_latest():
     return jsonify({'ok':True,**dict(row)})
 
 
+# ── 附件间接层：attachment://<id> 的唯一取图入口 ──────────────
+@app.route('/api/attachments/<aid>', methods=['GET'])
+def get_attachment(aid):
+    a = attachment_store.get(aid)
+    if not a:
+        abort(404)  # 不存在或已过期（生命周期删掉了）——优雅 404
+    return send_from_directory(attachment_store.ATTACH_DIR, a['filename'],
+                               mimetype=a.get('mime') or 'image/png')
+
+
+# ── Gallery（收藏相册）─────────────────────────────────────────
+@app.route('/gallery')
+def gallery_page():
+    return send_from_directory('/opt/frontend/static', 'gallery.html')
+
+@app.route('/api/gallery/photo/<pid>', methods=['GET'])
+def gallery_photo(pid):
+    p = gallery_store.get(pid)
+    if not p:
+        abort(404)
+    return send_from_directory(gallery_store.GALLERY_DIR, p['storage_key'],
+                               mimetype=p.get('mime') or 'image/png')
+
+@app.route('/api/gallery/albums', methods=['GET'])
+def gallery_albums():
+    return jsonify({'albums': gallery_store.list_albums()})
+
+@app.route('/api/gallery/photos', methods=['GET'])
+def gallery_photos_list():
+    album_id = request.args.get('album_id', type=int)
+    q = (request.args.get('q') or '').strip()
+    fav = request.args.get('favorite') in ('1', 'true')
+    if q:
+        photos = gallery_store.search_photos(q, limit=120)
+    elif fav:
+        photos = gallery_store.list_photos(favorite_only=True, limit=300)
+    else:
+        photos = gallery_store.list_photos(album_id=album_id, limit=300)
+    import json as _json
+    def _kw(p):
+        try:
+            return _json.loads(p.get('keywords') or '[]')
+        except Exception:
+            return []
+    # 只对外暴露需要的字段（不暴露 storage_key 物理路径）
+    out = [{'pid': p['pid'], 'album_id': p['album_id'], 'note': p['note'],
+            'width': p['width'], 'height': p['height'], 'favorite': p['favorite'],
+            'created_at': p['created_at'], 'saved_at': p['saved_at'],
+            'source_type': p['source_type'],
+            'summary': p.get('summary') or '', 'emotion': p.get('emotion') or '',
+            'keywords': _kw(p), 'importance': p.get('importance') or 0} for p in photos]
+    return jsonify({'photos': out})
+
+# ── Gallery 收藏层：打理照片（星标/改备注/移动/删除/新建相册）────────
+@app.route('/api/gallery/photo/<pid>/favorite', methods=['POST'])
+def gallery_favorite(pid):
+    v = gallery_store.toggle_favorite(pid)
+    if v is None:
+        abort(404)
+    return jsonify({'ok': True, 'favorite': v})
+
+@app.route('/api/gallery/photo/<pid>/update', methods=['POST'])
+def gallery_update(pid):
+    d = request.get_json() or {}
+    note = d.get('note')
+    album_id = d.get('album_id')
+    gallery_store.update_photo(pid, note=note,
+                               album_id=int(album_id) if album_id else None)
+    return jsonify({'ok': True})
+
+@app.route('/api/gallery/photo/<pid>/delete', methods=['POST'])
+def gallery_delete(pid):
+    mem_id = gallery_store.delete_photo(pid)
+    # 顺手清掉关联的统一记忆(posts, type=PHOTO)——照片没了，那条记忆的画面也没了
+    if mem_id:
+        try:
+            conn = get_db()
+            conn.execute("DELETE FROM posts WHERE id=? AND type='PHOTO'", (mem_id,))
+            conn.commit(); conn.close()
+        except Exception:
+            pass
+    return jsonify({'ok': True})
+
+@app.route('/api/gallery/album', methods=['POST'])
+def gallery_create_album():
+    d = request.get_json() or {}
+    name = (d.get('name') or '').strip()
+    if not name:
+        return jsonify({'ok': False, 'error': 'name required'}), 400
+    aid = gallery_store.album_by_name(name) or gallery_store.create_album(name, d.get('description', ''))
+    return jsonify({'ok': True, 'album_id': aid})
+
+
+# ── 倒计时任务浮窗 ─────────────────────────────────────────────
+@app.route('/api/commands/pending', methods=['GET'])
+def commands_pending():
+    return jsonify({'commands': command_store.list_pending()})
+
+@app.route('/api/commands/<int:cid>/started', methods=['POST'])
+def command_started(cid):
+    command_store.mark_started(cid)
+    return jsonify({'ok': True})
+
+@app.route('/api/commands/<int:cid>/done', methods=['POST'])
+def command_done(cid):
+    r = command_store.mark_done(cid)
+    return jsonify({'ok': True, **(r or {})})
+
+@app.route('/api/commands/<int:cid>/cancel', methods=['POST'])
+def command_cancel(cid):
+    command_store.mark_canceled(cid)
+    return jsonify({'ok': True})
+
+
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5050, debug=False)
 
@@ -1560,7 +1696,7 @@ def _init_dream_tables():
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         type TEXT NOT NULL,
         value TEXT,
-        created_at TIMESTAMP DEFAULT (datetime('now','localtime'))
+        created_at TIMESTAMP DEFAULT (datetime('now','+8 hours'))
     )""")
     conn.commit()
     conn.close()
@@ -1624,7 +1760,7 @@ def _init_wake_tables():
     conn = get_db()
     conn.execute("""CREATE TABLE IF NOT EXISTS wake_log (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        woke_at TIMESTAMP DEFAULT (datetime('now','localtime')),
+        woke_at TIMESTAMP DEFAULT (datetime('now','+8 hours')),
         thoughts TEXT,
         action TEXT,
         content TEXT,

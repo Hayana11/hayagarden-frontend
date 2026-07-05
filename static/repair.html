@@ -295,7 +295,7 @@ async function send() {
       })
     });
     const d = await resp.json();
-    const reply = d.choices?.[0]?.message?.content || '维修工暂时没有回应。';
+    const reply = (d.choices && d.choices[0] && d.choices[0].message && d.choices[0].message.content) || '维修工暂时没有回应。';
     hideTyping();
     history.push({role:'assistant', content: reply});
     addMsg('ai', reply);

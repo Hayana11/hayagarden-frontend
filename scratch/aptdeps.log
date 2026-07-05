@@ -1,0 +1,3 @@
+E: Could not get lock /var/lib/dpkg/lock-frontend. It is held by process 1186655 (apt-get)
+E: Unable to acquire the dpkg frontend lock (/var/lib/dpkg/lock-frontend), is another process using it?
+DONE_RC=100

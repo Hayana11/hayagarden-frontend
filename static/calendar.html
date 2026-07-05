@@ -2,6 +2,8 @@
 <html lang="zh">
 <head>
 <meta charset="UTF-8">
+<script>/* app内WebView没法开DevTools：把页面JS报错（含后续script的语法错误）上报到服务器 client_errors.log */
+window.onerror=function(m,s,l,c){try{var x=new XMLHttpRequest();x.open('POST','/api/client-error',true);x.setRequestHeader('Content-Type','application/json');x.send(JSON.stringify({page:location.pathname,msg:String(m),src:String(s||''),line:l||0,col:c||0}));}catch(e){}};</script>
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <title>calendar · 我们家</title>
 <link rel="manifest" href="/manifest.json">

@@ -438,6 +438,19 @@ def build_system(wake=False):
     except Exception:
         pass
 
+    # ── 任务完成反馈回流（只在聊天回复时，不在 wake 时；读完即清，只回流一次）──
+    if not wake:
+        try:
+            import command_store
+            _fb = command_store.drain_feedback()
+            if _fb:
+                parts.append(
+                    '\n## 任务完成反馈\n' + '\n'.join('- ' + _l for _l in _fb)
+                    + '\n（这是浮窗自己记录回传的，不是她手动告诉你的。她这次开口了，'
+                      '你可以顺嘴提一句——用时、快慢、有没有取消，按你的性子说，别像报数据。）')
+        except Exception:
+            pass
+
     # ── 组装 system blocks（prompt caching 格式）────────────────
     # BP1/BP2 挂 cache_control，前缀稳定时命中缓存；BP3 纯动态不挂标
     system_blocks = [

@@ -71,7 +71,7 @@ def _ask_deepseek(api_key, user_content):
 
 def run_patrol():
     api_key = _load_key()
-    now     = (datetime.now() + timedelta(hours=8)).strftime('%Y-%m-%d %H:%M')  # 标题用北京时间，跟created_at一致
+    now     = (datetime.utcnow() + timedelta(hours=8)).strftime('%Y-%m-%d %H:%M')  # 标题用北京时间，跟created_at一致
 
     # ── 1. 服务健康检查（直接判断，不依赖 AI）──────────────
     svc_status  = _check_services()
@@ -122,7 +122,7 @@ def run_patrol():
 def run_code_review():
     """CC改完代码后调用：检查语法、接口、关键表结构，结果写留言板。"""
     api_key = _load_key()
-    now = (datetime.now() + timedelta(hours=8)).strftime('%Y-%m-%d %H:%M')
+    now = (datetime.utcnow() + timedelta(hours=8)).strftime('%Y-%m-%d %H:%M')
 
     checks = []
 

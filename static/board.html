@@ -2,6 +2,8 @@
 <html lang="zh">
 <head>
 <meta charset="UTF-8">
+<script>/* app内WebView没法开DevTools：把页面JS报错（含后续script的语法错误）上报到服务器 client_errors.log */
+window.onerror=function(m,s,l,c){try{var x=new XMLHttpRequest();x.open('POST','/api/client-error',true);x.setRequestHeader('Content-Type','application/json');x.send(JSON.stringify({page:location.pathname,msg:String(m),src:String(s||''),line:l||0,col:c||0}));}catch(e){}};</script>
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <title>留言板 · 我们家</title>
 <link rel="manifest" href="/manifest.json">
@@ -442,13 +444,14 @@ function toggleReplyBox(id){
   wrap.classList.toggle('show', !isShow);
   if(!isShow) {
     repliesEl.style.display = '';
-    document.getElementById(`replyTa-${id}`)?.focus();
+    const rta = document.getElementById(`replyTa-${id}`);
+    if(rta) rta.focus();
   }
 }
 
 async function sendReply(id){
   const ta = document.getElementById(`replyTa-${id}`);
-  const content = (ta?.value||'').trim();
+  const content = ((ta && ta.value)||'').trim();
   if(!content) return;
   await fetch(`/api/board/${id}/reply`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({author:'hayana',content})});
   ta.value=''; ta.style.height='auto';
