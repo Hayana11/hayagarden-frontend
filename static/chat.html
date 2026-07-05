@@ -174,6 +174,79 @@ html.shot .msgs{padding-top:14px;padding-bottom:14px;}
 .artifact-meta{font-size:10.5px;color:var(--muted);margin-top:1px;}
 .artifact-action{flex-shrink:0;font-size:11.5px;padding:6px 12px;border-radius:9px;background:rgba(212,165,116,.14);color:rgba(212,165,116,.95);border:none;cursor:pointer;font-family:inherit;text-decoration:none;display:inline-block;}
 .artifact-action:hover{background:rgba(212,165,116,.24);}
+/* 选择器按钮组（choices 有值时渲染）——不用 flex gap（Chrome78 不支持），靠 margin */
+.choices-wrap{margin:4px 0 2px;}
+.choice-btn{display:block;width:100%;text-align:left;margin-bottom:6px;padding:9px 13px;border:1px solid rgba(212,165,116,.35);border-radius:11px;background:var(--card);color:var(--text);font-size:13.5px;font-family:inherit;cursor:pointer;transition:background .15s,border-color .15s;}
+.choice-btn:last-child{margin-bottom:0;}
+.choice-btn:hover{background:rgba(212,165,116,.12);}
+.choice-btn.chosen{background:rgba(212,165,116,.22);border-color:rgba(212,165,116,.7);font-weight:600;}
+.choice-btn.disabled{opacity:.55;cursor:default;}
+/* 待发送文件预览条 */
+.doc-preview-strip{display:none;padding:6px 12px 0;}
+.doc-chip{display:inline-flex;align-items:center;background:rgba(212,165,116,.12);border-radius:9px;padding:5px 10px;font-size:12px;color:var(--text);max-width:100%;}
+.doc-chip i{color:rgba(212,165,116,.9);margin-right:5px;}
+.doc-chip .dname{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:200px;}
+.doc-chip .rm{margin-left:8px;border:none;background:none;color:var(--muted);cursor:pointer;font-size:15px;line-height:1;}
+
+/* 联网搜索来源卡片 */
+.ws-answer{font-size:12.5px;line-height:1.6;color:var(--text);background:rgba(212,165,116,.08);border-radius:9px;padding:8px 10px;margin-bottom:8px;}
+.ws-cards{display:flex;flex-direction:column;gap:6px;}
+.ws-card{display:block;text-decoration:none;background:var(--card);border:1px solid rgba(212,165,116,.22);border-radius:10px;padding:8px 10px;color:inherit;transition:border-color .15s,background .15s;}
+a.ws-card:hover{border-color:rgba(212,165,116,.5);background:rgba(212,165,116,.06);}
+.ws-card-title{font-size:12.5px;font-weight:600;color:var(--text);line-height:1.4;overflow:hidden;text-overflow:ellipsis;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;}
+.ws-card-snip{font-size:11px;color:var(--muted);line-height:1.5;margin-top:3px;overflow:hidden;text-overflow:ellipsis;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;}
+.ws-card-host{font-size:10.5px;color:rgba(212,165,116,.9);margin-top:4px;display:flex;align-items:center;gap:3px;}
+.ws-card-host .ti{font-size:11px;}
+.ws-src-note{font-size:10px;color:var(--muted);opacity:.6;margin-top:6px;text-align:right;}
+
+/* 位置卡片（高德逆地理） */
+.loc-card{background:var(--card);border:1px solid rgba(212,165,116,.28);border-radius:12px;padding:11px 12px;}
+.loc-head{display:flex;align-items:center;gap:6px;font-size:13px;font-weight:600;color:var(--text);line-height:1.4;}
+.loc-head .ti{font-size:15px;color:rgba(212,165,116,.95);flex-shrink:0;}
+.loc-poi{font-size:12px;color:var(--muted);margin-top:4px;line-height:1.5;}
+.loc-meta{font-size:11px;color:var(--muted);opacity:.85;margin-top:4px;}
+.loc-open{display:inline-flex;align-items:center;gap:4px;margin-top:9px;font-size:11.5px;padding:6px 11px;border-radius:9px;background:rgba(212,165,116,.14);color:rgba(212,165,116,.95);text-decoration:none;}
+.loc-open:hover{background:rgba(212,165,116,.24);}
+.loc-open .ti{font-size:12px;}
+
+/* 网页阅读卡片（Playwright 截图+正文） */
+.wp-card{background:var(--card);border:1px solid rgba(212,165,116,.28);border-radius:12px;overflow:hidden;}
+.wp-shot{display:block;width:100%;max-height:220px;object-fit:cover;object-position:top;background:rgba(212,165,116,.06);border-bottom:1px solid rgba(212,165,116,.18);}
+.wp-body{padding:10px 12px;}
+.wp-title{font-size:13px;font-weight:600;color:var(--text);line-height:1.4;}
+.wp-url{font-size:11px;color:rgba(212,165,116,.9);margin-top:3px;display:inline-flex;align-items:center;gap:3px;text-decoration:none;word-break:break-all;}
+.wp-url .ti{font-size:11px;flex-shrink:0;}
+.wp-text{font-size:11.5px;color:var(--muted);line-height:1.6;margin-top:7px;max-height:120px;overflow:hidden;text-overflow:ellipsis;display:-webkit-box;-webkit-line-clamp:6;-webkit-box-orient:vertical;white-space:pre-wrap;}
+
+/* 聊天截图卡片 */
+.shot-card{display:flex;flex-direction:column;gap:6px;}
+.shot-card .shot-cap{font-size:11.5px;color:var(--muted);display:flex;align-items:center;gap:5px;}
+.shot-card .shot-cap .ti{font-size:13px;color:rgba(212,165,116,.9);}
+.shot-card img{max-width:260px;width:100%;border-radius:12px;border:1px solid rgba(212,165,116,.28);display:block;cursor:pointer;box-shadow:0 3px 12px rgba(43,38,30,.1);}
+/* 内联相册照片（费佳"突然想起"随消息发来的画面） */
+.gallery-inline{display:block;margin:8px 0 2px;}
+.gallery-inline img{max-width:240px;width:100%;border-radius:14px;border:1px solid rgba(212,165,116,.3);box-shadow:0 4px 16px rgba(43,38,30,.14);display:block;}
+/* 倒计时任务浮窗（费佳给你下的任务） */
+.cmd-float{position:fixed;right:10px;bottom:150px;z-index:60;}
+.cmd-card{background:var(--card);border:1px solid rgba(212,165,116,.4);border-radius:16px;box-shadow:0 8px 28px rgba(43,38,30,.18);padding:12px 14px;width:212px;transition:background .5s,border-color .5s;}
+.cmd-card.over{background:#fff3e6;border-color:#e6a35c;}
+.cmd-top{display:flex;align-items:center;gap:7px;}
+.cmd-icon{font-size:16px;color:var(--amber);flex-shrink:0;}
+.cmd-card.over .cmd-icon{color:#c9702e;}
+.cmd-title{flex:1;font-size:13px;font-weight:600;color:var(--text);line-height:1.3;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.cmd-queue{font-size:10px;color:var(--muted);background:rgba(212,165,116,.16);border-radius:8px;padding:1px 6px;flex-shrink:0;}
+.cmd-sub{font-size:10.5px;color:var(--muted);margin-top:3px;}
+.cmd-time{font-size:31px;font-weight:600;color:var(--text);font-variant-numeric:tabular-nums;letter-spacing:.5px;margin:5px 0 7px;line-height:1;}
+.cmd-card.over .cmd-time{color:#c9702e;}
+.cmd-bar{height:4px;background:rgba(212,165,116,.16);border-radius:3px;overflow:hidden;}
+.cmd-barfill{height:100%;background:var(--amber);border-radius:3px;transform-origin:left;transform:scaleX(0);}
+.cmd-card.over .cmd-barfill{background:#e6a35c;}
+.cmd-acts{display:flex;gap:8px;margin-top:11px;}
+.cmd-done{flex:1;border:none;background:var(--amber);color:#fff;font-size:12.5px;font-weight:600;padding:8px 0;border-radius:10px;cursor:pointer;font-family:inherit;}
+.cmd-cancel{position:relative;overflow:hidden;border:1px solid var(--border);background:none;color:var(--muted);font-size:11.5px;padding:8px 11px;border-radius:10px;cursor:pointer;font-family:inherit;user-select:none;-webkit-user-select:none;touch-action:none;}
+.cmd-cancel-fill{position:absolute;inset:0;background:rgba(201,112,46,.2);transform-origin:left;transform:scaleX(0);}
+.cmd-cancel.holding .cmd-cancel-fill{transform:scaleX(1);transition:transform 1.1s linear;}
+.cmd-cancel>span:last-child{position:relative;}
 
 /* 联网搜索来源卡片 */
 .ws-answer{font-size:12.5px;line-height:1.6;color:var(--text);background:rgba(212,165,116,.08);border-radius:9px;padding:8px 10px;margin-bottom:8px;}
@@ -524,6 +597,9 @@ html[data-theme=dark] .ni{color:#6a5f5f;}
       <button class="rm" onclick="removeImg()">×</button>
     </div>
   </div>
+  <div class="doc-preview-strip" id="doc-strip">
+    <span class="doc-chip"><i class="ti ti-file-text"></i><span class="dname" id="doc-name"></span><button class="rm" onclick="removeDoc()">×</button></span>
+  </div>
 
   <div class="inp-card">
     <textarea class="inp-txt" id="txt" placeholder="和岛聊聊…" rows="2"
@@ -532,6 +608,8 @@ html[data-theme=dark] .ni{color:#6a5f5f;}
       <div class="inp-bottom-left">
         <button class="inp-attach" onclick="document.getElementById('file-in').click()"><i class="ti ti-paperclip"></i></button>
         <input type="file" id="file-in" accept="image/*" style="display:none" onchange="onFile(event)">
+        <button class="inp-attach" title="发文件" onclick="document.getElementById('doc-in').click()"><i class="ti ti-file-text"></i></button>
+        <input type="file" id="doc-in" accept=".md,.txt,.html,.htm,.py,.js,.json,.csv,.css,.xml,.yaml,.yml,.log,.ini,.sh" style="display:none" onchange="onDoc(event)">
         <div class="model-pill" id="model-pill">
           <div class="model-pill-sheet" id="model-sheet"></div>
           <button class="model-pill-btn" id="model-pill-btn" onclick="toggleModelSheet()">
@@ -571,6 +649,7 @@ html[data-theme=dark] .ni{color:#6a5f5f;}
   <a class="ni" href="/dash"><i class="ti ti-layout-dashboard"></i><span>dash</span></a>
   <a class="ni act" href="/chat"><i class="ti ti-message-2"></i><span>chat</span></a>
   <a class="ni" href="/gallery"><i class="ti ti-photo"></i><span>gallery</span></a>
+  <a class="ni" href="/files"><i class="ti ti-files"></i><span>files</span></a>
   <a class="ni" href="/calendar"><i class="ti ti-calendar"></i><span>calendar</span></a>
   <a class="ni" href="/board"><i class="ti ti-clipboard-list"></i><span>board</span></a>
 </nav>
@@ -750,6 +829,7 @@ function escHtml(s){
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\n/g,'<br>');
 }
 function escCode(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function escAttr(s){ return String(s).replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 
 function renderCodeBlock(lang, code){
   var isDiff = lang==='diff' || (!lang && /^[\-\+@]{1,3}/.test(code.replace(/^\s+/,'')));
@@ -1190,6 +1270,45 @@ function buildToolResultBody(tc){
   }
   return '<div>结果: '+escHtml(res.slice(0,400))+'</div>';
 }
+// 文件卡片（用户发来的文件，file_url 有值）——复用 artifact-card 视觉，html/md 可预览、其余下载
+function buildFileCardHtml(m){
+  var name = m.file_name || (m.file_url||'').split('/').pop() || '文件';
+  var ext = (name.split('.').pop()||'').toLowerCase();
+  var previewable = (ext==='html'||ext==='htm'||ext==='md'||ext==='txt');
+  var action = previewable
+    ? '<a class="artifact-action" href="'+escAttr(m.file_url)+'" target="_blank" rel="noopener">打开</a>'
+    : '<a class="artifact-action" href="'+escAttr(m.file_url)+'" download>下载</a>';
+  return '<div class="artifact-card">'+
+    '<div class="artifact-icon"><i class="ti ti-file-text"></i></div>'+
+    '<div class="artifact-info">'+
+      '<div class="artifact-title">'+escHtml(name)+'</div>'+
+      '<div class="artifact-meta">'+escHtml(ext?ext.toUpperCase()+' 文件':'文件')+'</div>'+
+    '</div>'+action+'</div>';
+}
+// 选择器按钮组（choices 有值）。可点性：这组选项之后没有任何用户消息 = 还没回答过
+function buildChoicesHtml(m, list){
+  var opts=[];
+  try { opts = JSON.parse(m.choices); } catch(e) {}
+  if(!opts || !opts.length) return '';
+  var answered = list.some(function(mm){ return mm.id>m.id && !isFy(mm.author); });
+  var clickable = !answered;
+  var html='<div class="choices-wrap">';
+  opts.forEach(function(o){
+    var cls='choice-btn'+(clickable?'':' disabled');
+    var oc = clickable ? ' onclick="chooseOption(this,\''+escAttr(String(o).replace(/\\/g,'\\\\').replace(/'/g,"\\'"))+'\')"' : '';
+    html+='<button class="'+cls+'"'+oc+'>'+escHtml(o)+'</button>';
+  });
+  return html+'</div>';
+}
+function chooseOption(btn, text){
+  if(sending||blockedState) return;
+  var wrap=btn.parentNode;
+  var bs=wrap.querySelectorAll('.choice-btn');
+  for(var i=0;i<bs.length;i++){ bs[i].classList.add('disabled'); bs[i].onclick=null; }
+  btn.classList.add('chosen');
+  document.getElementById('txt').value=text;
+  send();
+}
 function buildToolCallsHtml(tcs, opts){
   opts = opts || {};
   var codeTcs = [], simpleTcs = [], artifactTcs = [];
@@ -1312,7 +1431,10 @@ function buildHtml(list) {
       }
       return out.trim();
     })(m.content||'');
-    if(hasTxt && displayContent) innerHtml += (hasImg?'<div class="img-then-text">':'')+renderContent(displayContent, fy)+(hasImg?'</div>':''  );
+    var _isFileMarker = !!m.file_url && /^\[文件[:：]/.test(displayContent);
+    if(hasTxt && displayContent && !_isFileMarker) innerHtml += (hasImg?'<div class="img-then-text">':'')+renderContent(displayContent, fy)+(hasImg?'</div>':''  );
+    if(m.file_url) innerHtml += buildFileCardHtml(m);
+    if(fy && m.choices) innerHtml += buildChoicesHtml(m, list);
     var cacheInfoHtml = '';
     if(fy && m.cache_info){
       try{
@@ -1407,6 +1529,22 @@ function removeImg(){
   document.getElementById('thumb').src='';
 }
 
+// 文件（非图片）预选
+var pendingDoc=null;
+function onDoc(e){
+  var f=e.target.files[0]; if(!f){ return; }
+  if(f.size > 2*1024*1024){ showToast('文件超过 2MB'); e.target.value=''; return; }
+  pendingDoc=f;
+  document.getElementById('doc-name').textContent=f.name;
+  document.getElementById('doc-strip').style.display='block';
+  e.target.value='';
+}
+function removeDoc(){
+  pendingDoc=null;
+  document.getElementById('doc-strip').style.display='none';
+  document.getElementById('doc-name').textContent='';
+}
+
 function resize(el){ el.style.height='auto'; el.style.height=Math.min(el.scrollHeight,96)+'px'; }
 function onEnter(e){ if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send();} }
 
@@ -1442,7 +1580,7 @@ function hideTyping(){ document.getElementById('typing').style.display='none'; }
 async function send(){
   if(sending||blockedState)return;
   var txt=document.getElementById('txt').value.trim();
-  if(!txt&&!pendingFile)return;
+  if(!txt&&!pendingFile&&!pendingDoc)return;
   hideErrToast();
   lastUserMsgText = txt;
   sending=true;
@@ -1452,10 +1590,19 @@ async function send(){
   fd.append('author',curAuthor);
   if(txt) fd.append('content',txt);
   if(pendingFile) fd.append('image',pendingFile);
+  var docToSend=pendingDoc;
   document.getElementById('txt').value='';
   document.getElementById('txt').style.height='auto';
   removeImg();
+  removeDoc();
   try{
+    if(docToSend){
+      var dfd=new FormData(); dfd.append('file',docToSend);
+      var ur=await fetch('/api/chat/upload_file',{method:'POST',body:dfd});
+      var ud=await ur.json();
+      if(ud&&ud.ok){ fd.append('file_url',ud.file_url); fd.append('file_name',ud.file_name); }
+      else { showErrToast((ud&&ud.error)||'文件上传失败'); sending=false; setSendBtn('send'); return; }
+    }
     await fetch('/api/chat/send',{method:'POST',body:fd});
     await loadMsgs(false);
     if(fromHayana){

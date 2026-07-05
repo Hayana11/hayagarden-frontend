@@ -180,12 +180,22 @@ def run_nightwatch(now):
         _log(f"nightwatch error: {e}")
 
 def run_self_triggers():
-    """检查并触发到期的self_trigger——优先级最高，不受时段/概率限制。"""
+    """检查并触发到期的self_trigger——优先级最高，不受时段/概率限制。
+
+    用原子 claim 接口（一步 UPDATE consumed=1 RETURNING）领取到期触发器，
+    再逐个触发 /wake。这样每分钟 cron 与 30 分钟 cron 即使同时跑也不会重复触发（
+    先标消费再发，而不是发完再标，彻底去掉旧的 pending→发→cancel 的竞态窗口）。"""
     try:
-        with urllib.request.urlopen('http://localhost:5050/api/self_triggers/pending', timeout=5) as r:
+        req = urllib.request.Request(
+            'http://localhost:5050/api/self_triggers/claim',
+            data=b'{}',
+            headers={'Content-Type': 'application/json'},
+            method='POST'
+        )
+        with urllib.request.urlopen(req, timeout=5) as r:
             triggers = json.loads(r.read())
     except Exception as e:
-        _log(f"self_trigger fetch error: {e}")
+        _log(f"self_trigger claim error: {e}")
         return False
 
     if not triggers:
@@ -201,17 +211,6 @@ def run_self_triggers():
             _log(f"self_trigger result: {result.get('action')}")
         except Exception as e:
             _log(f"self_trigger wake error: {e}")
-        # 无论成功与否都标记消费，避免重复触发
-        try:
-            req = urllib.request.Request(
-                'http://localhost:5050/api/self_triggers/cancel',
-                data=json.dumps({'id': tid}).encode(),
-                headers={'Content-Type': 'application/json'},
-                method='POST'
-            )
-            urllib.request.urlopen(req, timeout=5)
-        except Exception:
-            pass
 
     return True  # 本轮已处理self_trigger，跳过普通唤醒
 
@@ -257,4 +256,9 @@ def run():
         _log(f"wake error: {e}")
 
 if __name__ == '__main__':
-    run()
+    # selftrig 模式：只跑自定义触发器，供每分钟 cron 高频调用，让闹钟到点即触发
+    # （不跑做梦/夜巡/概率唤醒那些重逻辑）。其余按原来的 30 分钟 run()。
+    if len(sys.argv) > 1 and sys.argv[1] == 'selftrig':
+        run_self_triggers()
+    else:
+        run()

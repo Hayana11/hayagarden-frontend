@@ -359,7 +359,7 @@ function renderSidebar(){
   }
   list.innerHTML=allItems.map(item=>{
     const lvl=levelBadge(item.level);
-    const total=(item.replies?.length||0)+1;
+    const total=((item.replies&&item.replies.length)||0)+1;
     const isActive=item.id===selectedId;
     const kindLabel=KIND_LABELS[item.kind]||item.kind||'任务';
     return `<div class="task-row${isActive?' active':''}" onclick="selectTask(${item.id});closeDrawer()">

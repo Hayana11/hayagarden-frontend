@@ -22,6 +22,31 @@ def get_db():
     conn.row_factory = sqlite3.Row
     return conn
 
+# ── 文件收发：chat_messages 新增 file_url/file_name/choices 三列 ──────────
+# 延续“哪个字段有值就是哪种气泡”的老规矩（image_url 有值=图片）：
+#   file_url 有值=文件卡片，choices 有值(JSON 数组)=选择器按钮组。
+# 幂等 migration，跑几次都安全。
+FILES_DIR = '/opt/frontend/static/uploads/files'
+ALLOWED_FILE_EXT = {'.md', '.txt', '.html', '.htm', '.py', '.js', '.json',
+                    '.csv', '.css', '.xml', '.yaml', '.yml', '.log', '.ini', '.sh'}
+MAX_FILE_BYTES = 2 * 1024 * 1024  # 2MB
+
+def _migrate_chat_columns():
+    conn = get_db()
+    cols = [r[1] for r in conn.execute('PRAGMA table_info(chat_messages)')]
+    ddl = {
+        'file_url':  "ALTER TABLE chat_messages ADD COLUMN file_url TEXT DEFAULT ''",
+        'file_name': "ALTER TABLE chat_messages ADD COLUMN file_name TEXT DEFAULT ''",
+        'choices':   "ALTER TABLE chat_messages ADD COLUMN choices TEXT DEFAULT ''",
+    }
+    for col, stmt in ddl.items():
+        if col not in cols:
+            conn.execute(stmt)
+    conn.commit()
+    conn.close()
+
+_migrate_chat_columns()
+
 
 # ── Artifact（费佳生成的 HTML/Markdown/Word 产物）────────────────
 @app.route('/api/artifacts/<int:aid>', methods=['GET'])
@@ -221,6 +246,107 @@ def upload_image():
     f.save(os.path.join(UPLOAD_DIR, fname))
     return jsonify({"ok":True,"url":f"/static/uploads/{fname}"})
 
+@app.route('/api/chat/upload_file', methods=['POST'])
+def upload_file():
+    """用户发文本类文件（与图片上传分开，图片走压缩管线、文件不需要）。
+    三道防御：扩展名白名单 + 2MB 上限 + 文件名安全化后加随机前缀存储。"""
+    if 'file' not in request.files:
+        return jsonify({"error": "no file"}), 400
+    f = request.files['file']
+    orig = os.path.basename(f.filename or 'file')
+    ext = os.path.splitext(orig)[1].lower()
+    if ext not in ALLOWED_FILE_EXT:
+        return jsonify({"error": "不支持的文件类型（只收文本类）"}), 400
+    data = f.read()
+    if len(data) > MAX_FILE_BYTES:
+        return jsonify({"error": "文件超过 2MB"}), 400
+    safe = re.sub(r'[^\w\u4e00-\u9fff.\-]', '_', orig)
+    fname = f"{uuid.uuid4().hex[:8]}_{safe}"
+    os.makedirs(FILES_DIR, exist_ok=True)
+    with open(os.path.join(FILES_DIR, fname), 'wb') as out:
+        out.write(data)
+    return jsonify({"ok": True, "file_url": f"/static/uploads/files/{fname}", "file_name": safe})
+
+@app.route('/files')
+def files_page():
+    return send_from_directory('/opt/frontend/static', 'files.html')
+
+@app.route('/api/shop/import_state', methods=['POST'])
+def shop_import_state():
+    """导入购物登录态（storageState/cookie）到 private/shop_state/<site>.json。
+
+    登录态需要真实浏览器扫码/短信验证才能拿到（走在另一台有显示器的机器上），
+    拿到后需要推过来给 headless 的 VPS 用。用一次性 nonce 鉴权（nonce 写在
+    /tmp/shop_import_nonce，用完即删），避免把长期密钥挠在代码里。登录态敏感，
+    只写固定目录、site 名安全化后作文件名。"""
+    import os as _os
+    NONCE_FILE = '/tmp/shop_import_nonce'
+    data = request.get_json(silent=True) or {}
+    nonce = (data.get('nonce') or '').strip()
+    try:
+        real = open(NONCE_FILE).read().strip()
+    except Exception:
+        return jsonify({'error': 'no active import window'}), 403
+    if not nonce or nonce != real:
+        return jsonify({'error': 'bad nonce'}), 403
+    site = re.sub(r'[^a-z0-9_-]', '', (data.get('site') or '').lower()) or 'taobao'
+    state = data.get('state')
+    if not isinstance(state, dict) or 'cookies' not in state:
+        return jsonify({'error': 'state must be an object with cookies'}), 400
+    d = '/opt/frontend/private/shop_state'
+    _os.makedirs(d, exist_ok=True)
+    with open(_os.path.join(d, site + '.json'), 'w') as f:
+        json.dump(state, f, ensure_ascii=False)
+    try:
+        _os.remove(NONCE_FILE)  # 一次性，用完作废
+    except OSError:
+        pass
+    return jsonify({'ok': True, 'site': site, 'cookies': len(state.get('cookies') or [])})
+
+@app.route('/api/files/list', methods=['GET'])
+def files_list():
+    """文档库：查消息表而非扫目录——天然带作者/时间/会话归属，且无孤儿索引。"""
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT id, author, file_name, file_url, created_at, session_id FROM chat_messages "
+        "WHERE file_url != '' ORDER BY id DESC LIMIT 200"
+    ).fetchall()
+    conn.close()
+    return jsonify({'files': [dict(r) for r in rows]})
+
+@app.route('/api/files/delete', methods=['POST'])
+def files_delete():
+    """删物理文件 + 清空消息的 file 字段（消息本体保留，只是不再是文件卡片）。
+    删物理文件防路径穿越：realpath 后再校验前缀，即使 DB 被塞恶意 url 也删不出 FILES_DIR。"""
+    data = request.get_json() or {}
+    ids = data.get('ids') or []
+    if not isinstance(ids, list) or not ids:
+        return jsonify({'error': 'ids required'}), 400
+    ids = ids[:50]
+    conn = get_db()
+    deleted = 0
+    for mid in ids:
+        try:
+            mid = int(mid)
+        except (ValueError, TypeError):
+            continue
+        row = conn.execute('SELECT file_url FROM chat_messages WHERE id=?', (mid,)).fetchone()
+        if not row or not row['file_url']:
+            continue
+        url = row['file_url']
+        if url.startswith('/static/uploads/files/'):
+            p = os.path.realpath('/opt/frontend' + url)
+            if p.startswith(os.path.realpath(FILES_DIR)) and os.path.exists(p):
+                try:
+                    os.remove(p)
+                except OSError:
+                    pass
+        conn.execute("UPDATE chat_messages SET file_url='', file_name='' WHERE id=?", (mid,))
+        deleted += 1
+    conn.commit()
+    conn.close()
+    return jsonify({'ok': True, 'deleted': deleted})
+
 @app.route('/api/chat/messages', methods=['GET'])
 def get_chat_messages():
     limit = request.args.get('limit', 50, type=int)
@@ -242,15 +368,20 @@ def get_chat_messages():
 @app.route('/api/chat/send', methods=['POST'])
 def send_chat():
     ct = request.content_type or ''
+    file_url = file_name = ''
     if 'application/json' in ct:
         data = request.get_json()
         author    = data.get('author', 'user')
         content   = data.get('content', '').strip()
         image_url = data.get('image_url', '')
+        file_url  = (data.get('file_url') or '').strip()
+        file_name = (data.get('file_name') or '').strip()
     else:
         author  = request.form.get('author', 'user')
         content = request.form.get('content', '').strip()
         image_url = ''
+        file_url  = (request.form.get('file_url') or '').strip()
+        file_name = (request.form.get('file_name') or '').strip()
         if 'image' in request.files:
             f = request.files['image']
             ext   = os.path.splitext(f.filename)[1].lower() or '.jpg'
@@ -258,11 +389,14 @@ def send_chat():
             os.makedirs(UPLOAD_DIR, exist_ok=True)
             f.save(os.path.join(UPLOAD_DIR, fname))
             image_url = f"/static/uploads/{fname}"
-    if not content and not image_url:
+    if not content and not image_url and not file_url:
         return jsonify({"error":"empty"}), 400
+    # 文件消息的 content 给个可读标记，历史回放给模型时能看懂自己发过什么
+    if file_url and not content:
+        content = '[文件:%s]' % (file_name or '附件')
     conn = get_db()
-    conn.execute("INSERT INTO chat_messages (author,content,image_url) VALUES (?,?,?)",
-        (author, content, image_url))
+    conn.execute("INSERT INTO chat_messages (author,content,image_url,file_url,file_name) VALUES (?,?,?,?,?)",
+        (author, content, image_url, file_url, file_name))
     conn.commit()
     conn.close()
     return jsonify({"ok": True})
@@ -2252,6 +2386,21 @@ def get_pending_triggers():
         "WHERE consumed=0 AND trigger_at <= datetime('now','+8 hours') "
         "ORDER BY trigger_at ASC"
     ).fetchall()
+    conn.close()
+    return jsonify([dict(r) for r in rows])
+
+@app.route('/api/self_triggers/claim', methods=['POST'])
+def claim_self_triggers():
+    """原子领取到期触发器：一步把到期且未消费的 trigger 标为 consumed 并返回。
+    供每分钟的 dream_wake.py selftrig 高频调用——RETURNING 保证即使多个进程
+    （每分钟 cron 与 30 分钟 cron 撞车）同时抢，也只有一个能拿到、不会重复触发。"""
+    conn = get_db()
+    rows = conn.execute(
+        "UPDATE self_triggers SET consumed=1 "
+        "WHERE consumed=0 AND trigger_at <= datetime('now','+8 hours') "
+        "RETURNING id, trigger_at, note"
+    ).fetchall()
+    conn.commit()
     conn.close()
     return jsonify([dict(r) for r in rows])
 
