@@ -86,6 +86,10 @@ def build_system(wake=False):
     # ── BP2 · 相对稳定记忆（几小时~一天变一次，缓存断点2）───────
     bp2_parts = []
     conn = get_db()
+    facts = conn.execute(
+        "SELECT content FROM posts WHERE type='FACT' AND resolved=0 "
+        "ORDER BY importance DESC, id DESC LIMIT 15"
+    ).fetchall()
     lt_mems = conn.execute(
         "SELECT content FROM posts WHERE layer='long-term' AND resolved=0 ORDER BY id DESC LIMIT 3"
     ).fetchall()
@@ -93,6 +97,12 @@ def build_system(wake=False):
         "SELECT content FROM posts WHERE type='DIARY' AND resolved=0 ORDER BY id DESC LIMIT 2"
     ).fetchall()
     conn.close()
+    if facts:
+        # fact_extractor 每晚抽取的长期事实（约定/纪念日/偏好），不参与遗忘、天天在场
+        bp2_parts.append('\n## 长期事实（这些不会随时间淡忘）')
+        for f in reversed(facts):
+            c = f['content']
+            bp2_parts.append('- ' + (c[:100] + '…' if len(c) > 100 else c))
     if lt_mems:
         bp2_parts.append('\n## 你们之间的记忆')
         for m in reversed(lt_mems):

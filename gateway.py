@@ -67,45 +67,125 @@ def _get_model():
 def _get_provider():
     return config_store.get('GW_PROVIDER', 'api_relay')
 
-def _recall_memories(user_msg, limit=3):
-    """自动记忆召回：jieba 分词用户消息，78 条量级全扫打分（零索引——体量不配吃索引）。
-    词重叠为基础分（<2 不注入防噪声），pinned/importance 加权，60 天半衰期时间衰减。
+def _ombre_recall_search(query, limit=2, timeout=4.0):
+    """联邦召回的渐变脑分支：直接调 bucket_mgr.search（跳过 breath 的 dehydrate——
+    那是一次 LLM 调用，热路径吃不起）。独立线程+事件循环，超时安静放弃。
+    返回 [(name, content_clip)]。"""
+    import concurrent.futures as _cf
+
+    def _worker():
+        import asyncio as _aio, sys as _sys, logging as _log
+        _log.getLogger('ombre_brain').setLevel(_log.WARNING)
+        _sys.path.insert(0, '/opt/ombre-brain')
+        from server import bucket_mgr as _bm
+        loop = _aio.new_event_loop()
+        _aio.set_event_loop(loop)
+        try:
+            matches = loop.run_until_complete(
+                _aio.wait_for(_bm.search(query, limit=limit), timeout=timeout))
+            out = []
+            for b in matches or []:
+                meta = b.get('metadata', {})
+                name = meta.get('name', '') or '记忆桶'
+                content = (b.get('content') or '').strip()
+                if content:
+                    out.append((name, content[:300]))
+                    try:
+                        loop.run_until_complete(_bm.touch(b['id']))
+                    except Exception:
+                        pass
+            return out
+        except Exception:
+            return []
+        finally:
+            try:
+                pending = _aio.all_tasks(loop)
+                for t in pending:
+                    t.cancel()
+                if pending:
+                    loop.run_until_complete(_aio.gather(*pending, return_exceptions=True))
+            except Exception:
+                pass
+            loop.close()
+
+    try:
+        with _cf.ThreadPoolExecutor(max_workers=1) as ex:
+            return ex.submit(_worker).result(timeout=timeout + 1.0) or []
+    except Exception:
+        return []
+
+
+def _recall_memories(user_msg, limit=None):
+    """自动联想召回（记忆升级·方案一）：三路联邦——
+    ① posts 全扫：jieba 分词做词重叠，正文 + tags 一起算（tags 里有 tag_enricher
+       写入的联想词 assoc:…，"海边"由此想起"沙滩"）；
+    ② 渐变脑桶：bucket_mgr.search 模糊检索（跨库联想，以前只有 posts 一路）；
+    ③ 向量（可选）：EMBED_ENABLED 打开且 memory_vectors 有货时，语义相似度并入打分。
+    词重叠为基础分（<2 且无向量分不注入防噪声），pinned/importance 加权，60 天半衰期。
     注入到最后一条 user 消息前而非 system——system 是缓存的，每条消息都变会打爆缓存。"""
     try:
+        if limit is None:
+            limit = config_store.get_int('RECALL_MAX_ITEMS', 3)
         import jieba
         words = set(w for w in jieba.cut(user_msg) if len(w.strip()) >= 2)
         if not words:
-            return ''
+            return '', []
+
+        # ③ 向量分支（未配置时 similar_posts 返回 []，零开销）
+        vec_scores = {}
+        try:
+            import sys as _sys
+            if '/opt/frontend/tools' not in _sys.path:
+                _sys.path.insert(0, '/opt/frontend/tools')
+            import embedding_tool as _emb
+            vec_scores = dict(_emb.similar_posts(user_msg, top_k=8))
+        except Exception:
+            vec_scores = {}
+
+        # ① posts 全扫（正文 + tags 参与词重叠）
         conn = get_db()
-        rows = conn.execute("SELECT id, type, content, pinned, importance, recall_count, created_at "
+        rows = conn.execute("SELECT id, type, content, tags, pinned, importance, recall_count, created_at "
                             "FROM posts WHERE resolved=0").fetchall()
         conn.close()
         now = datetime.datetime.utcnow() + datetime.timedelta(hours=8)
         scored = []
         for r in rows:
             c = r['content'] or ''
-            base = sum(1 for w in words if w in c)
-            if base < 2:
+            haystack = c + ' ' + (r['tags'] or '')
+            base = sum(1 for w in words if w in haystack)
+            vboost = vec_scores.get(r['id'], 0.0) * 6  # 余弦 0.35~0.8 → 2~5 分量级
+            if base < 2 and vboost <= 0:
                 continue
             try:
                 age_days = max(0, (now - datetime.datetime.strptime(str(r['created_at'])[:19], '%Y-%m-%d %H:%M:%S')).days)
             except Exception:
                 age_days = 0
-            # 时间衰减 × 词重叠 + 置顶/重要度 + 召回加热（被想起过的更容易再被想起，封顶防滚雪球）
-            score = (base * (0.5 ** (age_days / 60.0)) + (2 if r['pinned'] else 0)
+            # 时间衰减 × 词重叠 + 向量语义分 + 置顶/重要度 + 召回加热（封顶防滚雪球）
+            score = (base * (0.5 ** (age_days / 60.0)) + vboost + (2 if r['pinned'] else 0)
                      + (r['importance'] or 0) * 0.5 + min(r['recall_count'] or 0, 5) * 0.3)
             scored.append((score, r['id'], r['type'], c, str(r['created_at'])[:10]))
-        if not scored:
-            return '', []
         scored.sort(key=lambda x: -x[0])
         top = scored[:limit]
-        try:
-            import memory_tool as _mt
-            _mt.touch_memories([s[1] for s in top])  # 召回加热：这几条真的进了 prompt
-        except Exception:
-            pass
+
+        # ② 渐变脑分支（可关：RECALL_OMBRE=false）
+        ombre_hits = []
+        if config_store.get_bool('RECALL_OMBRE', True):
+            _q = ' '.join(list(words)[:8])
+            ombre_hits = _ombre_recall_search(_q, limit=2)
+
+        if not top and not ombre_hits:
+            return '', []
+        if top:
+            try:
+                import memory_tool as _mt
+                _mt.touch_memories([s[1] for s in top])  # 召回加热：这几条真的进了 prompt
+            except Exception:
+                pass
         parts = ['[%s %s] %s' % (t, d, c[:300]) for _, _, t, c, d in top]
         items = [{'type': t, 'date': d, 'preview': c[:80]} for _, _, t, c, d in top]
+        for name, content in ombre_hits:
+            parts.append('[渐变脑·%s] %s' % (name, content))
+            items.append({'type': 'OMBRE', 'date': '', 'preview': (name + ' ' + content)[:80]})
         block = ('<recalled-memory>\n以下是自动检索到的相关记忆片段，按相关度排序。'
                  '可能与这次对话相关，参考着用；不相关就忽略。不要向哈娅提及这个标签本身。\n\n'
                  + '\n---\n'.join(parts) + '\n</recalled-memory>\n\n')
