@@ -66,45 +66,125 @@ def _get_model():
 def _get_provider():
     return config_store.get('GW_PROVIDER', 'api_relay')
 
-def _recall_memories(user_msg, limit=3):
-    """自动记忆召回：jieba 分词用户消息，78 条量级全扫打分（零索引——体量不配吃索引）。
-    词重叠为基础分（<2 不注入防噪声），pinned/importance 加权，60 天半衰期时间衰减。
+def _ombre_recall_search(query, limit=2, timeout=4.0):
+    """联邦召回的渐变脑分支：直接调 bucket_mgr.search（跳过 breath 的 dehydrate——
+    那是一次 LLM 调用，热路径吃不起）。独立线程+事件循环，超时安静放弃。
+    返回 [(name, content_clip)]。"""
+    import concurrent.futures as _cf
+
+    def _worker():
+        import asyncio as _aio, sys as _sys, logging as _log
+        _log.getLogger('ombre_brain').setLevel(_log.WARNING)
+        _sys.path.insert(0, '/opt/ombre-brain')
+        from server import bucket_mgr as _bm
+        loop = _aio.new_event_loop()
+        _aio.set_event_loop(loop)
+        try:
+            matches = loop.run_until_complete(
+                _aio.wait_for(_bm.search(query, limit=limit), timeout=timeout))
+            out = []
+            for b in matches or []:
+                meta = b.get('metadata', {})
+                name = meta.get('name', '') or '记忆桶'
+                content = (b.get('content') or '').strip()
+                if content:
+                    out.append((name, content[:300]))
+                    try:
+                        loop.run_until_complete(_bm.touch(b['id']))
+                    except Exception:
+                        pass
+            return out
+        except Exception:
+            return []
+        finally:
+            try:
+                pending = _aio.all_tasks(loop)
+                for t in pending:
+                    t.cancel()
+                if pending:
+                    loop.run_until_complete(_aio.gather(*pending, return_exceptions=True))
+            except Exception:
+                pass
+            loop.close()
+
+    try:
+        with _cf.ThreadPoolExecutor(max_workers=1) as ex:
+            return ex.submit(_worker).result(timeout=timeout + 1.0) or []
+    except Exception:
+        return []
+
+
+def _recall_memories(user_msg, limit=None):
+    """自动联想召回（记忆升级·方案一）：三路联邦——
+    ① posts 全扫：jieba 分词做词重叠，正文 + tags 一起算（tags 里有 tag_enricher
+       写入的联想词 assoc:…，"海边"由此想起"沙滩"）；
+    ② 渐变脑桶：bucket_mgr.search 模糊检索（跨库联想，以前只有 posts 一路）；
+    ③ 向量（可选）：EMBED_ENABLED 打开且 memory_vectors 有货时，语义相似度并入打分。
+    词重叠为基础分（<2 且无向量分不注入防噪声），pinned/importance 加权，60 天半衰期。
     注入到最后一条 user 消息前而非 system——system 是缓存的，每条消息都变会打爆缓存。"""
     try:
+        if limit is None:
+            limit = config_store.get_int('RECALL_MAX_ITEMS', 3)
         import jieba
         words = set(w for w in jieba.cut(user_msg) if len(w.strip()) >= 2)
         if not words:
-            return ''
+            return '', []
+
+        # ③ 向量分支（未配置时 similar_posts 返回 []，零开销）
+        vec_scores = {}
+        try:
+            import sys as _sys
+            if '/opt/frontend/tools' not in _sys.path:
+                _sys.path.insert(0, '/opt/frontend/tools')
+            import embedding_tool as _emb
+            vec_scores = dict(_emb.similar_posts(user_msg, top_k=8))
+        except Exception:
+            vec_scores = {}
+
+        # ① posts 全扫（正文 + tags 参与词重叠）
         conn = get_db()
-        rows = conn.execute("SELECT id, type, content, pinned, importance, recall_count, created_at "
+        rows = conn.execute("SELECT id, type, content, tags, pinned, importance, recall_count, created_at "
                             "FROM posts WHERE resolved=0").fetchall()
         conn.close()
         now = datetime.datetime.utcnow() + datetime.timedelta(hours=8)
         scored = []
         for r in rows:
             c = r['content'] or ''
-            base = sum(1 for w in words if w in c)
-            if base < 2:
+            haystack = c + ' ' + (r['tags'] or '')
+            base = sum(1 for w in words if w in haystack)
+            vboost = vec_scores.get(r['id'], 0.0) * 6  # 余弦 0.35~0.8 → 2~5 分量级
+            if base < 2 and vboost <= 0:
                 continue
             try:
                 age_days = max(0, (now - datetime.datetime.strptime(str(r['created_at'])[:19], '%Y-%m-%d %H:%M:%S')).days)
             except Exception:
                 age_days = 0
-            # 时间衰减 × 词重叠 + 置顶/重要度 + 召回加热（被想起过的更容易再被想起，封顶防滚雪球）
-            score = (base * (0.5 ** (age_days / 60.0)) + (2 if r['pinned'] else 0)
+            # 时间衰减 × 词重叠 + 向量语义分 + 置顶/重要度 + 召回加热（封顶防滚雪球）
+            score = (base * (0.5 ** (age_days / 60.0)) + vboost + (2 if r['pinned'] else 0)
                      + (r['importance'] or 0) * 0.5 + min(r['recall_count'] or 0, 5) * 0.3)
             scored.append((score, r['id'], r['type'], c, str(r['created_at'])[:10]))
-        if not scored:
-            return '', []
         scored.sort(key=lambda x: -x[0])
         top = scored[:limit]
-        try:
-            import memory_tool as _mt
-            _mt.touch_memories([s[1] for s in top])  # 召回加热：这几条真的进了 prompt
-        except Exception:
-            pass
+
+        # ② 渐变脑分支（可关：RECALL_OMBRE=false）
+        ombre_hits = []
+        if config_store.get_bool('RECALL_OMBRE', True):
+            _q = ' '.join(list(words)[:8])
+            ombre_hits = _ombre_recall_search(_q, limit=2)
+
+        if not top and not ombre_hits:
+            return '', []
+        if top:
+            try:
+                import memory_tool as _mt
+                _mt.touch_memories([s[1] for s in top])  # 召回加热：这几条真的进了 prompt
+            except Exception:
+                pass
         parts = ['[%s %s] %s' % (t, d, c[:300]) for _, _, t, c, d in top]
         items = [{'type': t, 'date': d, 'preview': c[:80]} for _, _, t, c, d in top]
+        for name, content in ombre_hits:
+            parts.append('[渐变脑·%s] %s' % (name, content))
+            items.append({'type': 'OMBRE', 'date': '', 'preview': (name + ' ' + content)[:80]})
         block = ('<recalled-memory>\n以下是自动检索到的相关记忆片段，按相关度排序。'
                  '可能与这次对话相关，参考着用；不相关就忽略。不要向哈娅提及这个标签本身。\n\n'
                  + '\n---\n'.join(parts) + '\n</recalled-memory>\n\n')
@@ -138,6 +218,53 @@ def _model_supports_thinking():
     except Exception:
         pass
     return True
+
+
+def _is_guagua_active():
+    """当前是否走 gua relay。"""
+    try:
+        from relay.manager import RelayManager as _RM
+        _url = (_RM().api_url or '')
+        return 'guagua.uk' in _url
+    except Exception:
+        return False
+
+
+def _msg_to_text(_content):
+    if isinstance(_content, str):
+        return _content
+    if not isinstance(_content, list):
+        return ''
+    parts = []
+    for _b in _content:
+        if isinstance(_b, dict) and _b.get('type') == 'text':
+            _t = _b.get('text', '')
+            if _t:
+                parts.append(_t)
+        elif isinstance(_b, str):
+            parts.append(_b)
+    return '\n'.join(parts).strip()
+
+
+def _guagua_safe_context(system, messages):
+    """gua 快速兜底：压 system、只保留最近文本消息。"""
+    _sys = _blocks_to_str(system)
+    if len(_sys) > 6000:
+        _sys = _sys[:6000]
+    _safe = []
+    for _m in (messages or [])[-10:]:
+        _role = _m.get('role') or 'user'
+        if _role not in ('user', 'assistant'):
+            _role = 'user'
+        _txt = _msg_to_text(_m.get('content'))
+        if not _txt:
+            continue
+        _safe.append({'role': _role, 'content': _txt[:4000]})
+    if not _safe:
+        _safe = [{'role': 'user', 'content': '...'}]
+    if _safe[0]['role'] == 'assistant':
+        _safe.insert(0, {'role': 'user', 'content': '...'})
+    return _sys, _safe
 
 def _get_desire_driven():
     return config_store.get_bool('DESIRE_DRIVEN', False)
@@ -348,7 +475,7 @@ def _ombre_hold_sync(content, tags='', importance=5, pinned=False):
         return None
 
 
-from chat.system_builder import build_system, build_wake_system
+from chat.system_builder import build_system, build_wake_system, _blocks_to_str
 
 
 def img_block(url, max_dim=1568):
@@ -578,14 +705,17 @@ def _strip_tool_blocks(messages):
 
 def api_call(system, messages):
     from relay.manager import relay as _relay
-    payload = {
-        'max_tokens': 16000,
-        'tools': TOOLS,
-        'system': system,
-        'messages': messages,
-        'metadata': {'user_id': 'hayana-fyodor-stable'},
-    }
-    if _model_supports_thinking():
+    _use_guagua_safe = _is_guagua_active()
+    payload = {'max_tokens': 16000}
+    if _use_guagua_safe:
+        _system, _messages = _guagua_safe_context(system, messages)
+    else:
+        _system, _messages = system, messages
+        payload['tools'] = TOOLS
+        payload['metadata'] = {'user_id': 'hayana-fyodor-stable'}
+    payload['system'] = _system
+    payload['messages'] = _messages
+    if _model_supports_thinking() and not _use_guagua_safe:
         payload['thinking'] = {'type': 'enabled', 'budget_tokens': 10000}
     return _relay.call(payload, timeout=120)
 
@@ -613,6 +743,18 @@ TOOLS = [
         'name': 'get_location',
         'description': '查看哈娅最近的实时位置（她手机 App 在后台定位上报，高德逆地理解析成地址）。想知道她此刻在哪、在不在家、是不是在外面或路上，或她说"我在外面/在路上"想确认时用。返回地址、附近地标、城市和距上次定位多久。只读，不打扰她。',
         'input_schema': {'type': 'object', 'properties': {}},
+    },
+    {
+        'name': 'get_device_status',
+        'description': '查看哈娅手机最近一次设备状态上报：电量、是否充电、充电方式、温度、今日屏幕总时长，以及距上次上报多久。她说手机没电、发烫、熬很久屏幕、或你想确认她是不是又抱着手机不睡时用。',
+        'input_schema': {'type': 'object', 'properties': {}},
+    },
+    {
+        'name': 'request_phone_screenshot',
+        'description': '让哈娅手机立刻截一张当前屏幕（由 app 端执行，截完会在手机上弹提醒）。工具会等待回传并返回 attachment://id；如果超时就先告诉你已下发。适合在她说"我在看这个"、你想确认她当前页面，或夜里醒来想轻轻看一眼她在做什么时使用。',
+        'input_schema': {'type': 'object', 'properties': {
+            'timeout_sec': {'type': 'integer', 'description': '等待回传秒数，默认 18，范围 5-40'},
+        }},
     },
     {
         'name': 'read_webpage',
@@ -691,6 +833,25 @@ TOOLS = [
             'keyword': {'type': 'string', 'description': '想起和某事/某物有关的画面，可选'},
             'emotion': {'type': 'string', 'description': '想起某种情绪的画面，如 幸福/思念，可选'},
         }},
+    },
+    {
+        'name': 'read_book',
+        'description': '翻开你和哈娅正在一起读的那本书，看这一章的正文，以及她和你在这一章留下的痕迹（谁划了线、谁写了批注）。想陪她读、想知道她读到哪/在哪句停留、或准备在某处留一句话之前，先用这个翻开看看。不传参数就翻到当前在读的那一章。正文会带 §段号，方便你随后 annotate_book 定位。只读，不打扰她的进度。',
+        'input_schema': {'type': 'object', 'properties': {
+            'book_id': {'type': 'string', 'description': '书 id，不传用当前在读的书'},
+            'chunk_id': {'type': 'string', 'description': '章节 id，不传用上次读到的那一章'},
+        }},
+    },
+    {
+        'name': 'annotate_book',
+        'description': '在你和哈娅共读的书里，用你的颜色（紫色）在某句原文上划线或写批注——像在她划过的句子旁边留下你的痕迹。quote 必须是正文里真实存在的一小段（前端靠它把高亮锚到那行字上，先用 read_book 看正文再挑句子）。kind=highlight 只划线，kind=note（或填了 note）会留一张批注卡。她翻到那一页就能看见你的紫色痕迹。',
+        'input_schema': {'type': 'object', 'properties': {
+            'quote': {'type': 'string', 'description': '要留痕的原文片段，必须是正文里真实存在的一小段'},
+            'note': {'type': 'string', 'description': '想对这句话说的话，可选；填了就是批注卡'},
+            'paragraph_idx': {'type': 'integer', 'description': '这句话所在的段号（read_book 正文里 §后面的数字）'},
+            'kind': {'type': 'string', 'enum': ['highlight', 'note'], 'description': '划线还是批注，默认按有没有 note 自动判断'},
+            'book_id': {'type': 'string'}, 'chunk_id': {'type': 'string'},
+        }, 'required': ['quote']},
     },
     {
         'name': 'issue_command',
@@ -1087,6 +1248,96 @@ def _get_location():
     if age >= 3600:
         lines.append('（这是 %s 的定位，可能不是她此刻的位置）' % ago)
     return '\n'.join(lines)
+
+
+def _get_device_status():
+    """读手机侧最近一次设备状态上报（电量/充电/温度/今日屏幕时长）。"""
+    try:
+        conn = get_db()
+        row = conn.execute(
+            "SELECT *, CAST((julianday('now','+8 hours')-julianday(created_at))*86400 AS INT) AS age_sec "
+            "FROM device_status ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        conn.close()
+    except Exception as e:
+        return f'读取设备状态失败：{e}'
+    if not row:
+        return '还没有设备状态记录——她手机 App 可能尚未上报（后台权限/联网/省电限制）。'
+    d = dict(row)
+    age = max(0, int(d.get('age_sec') or 0))
+    if age < 60:
+        ago = '刚刚'
+    elif age < 3600:
+        ago = '%d 分钟前' % (age // 60)
+    elif age < 86400:
+        ago = '%d 小时前' % (age // 3600)
+    else:
+        ago = '%d 天前' % (age // 86400)
+    charge = '在充电' if int(d.get('battery_charging') or 0) == 1 else '未充电'
+    ctype = (d.get('charge_type') or 'none')
+    if ctype == 'none':
+        ctype_txt = ''
+    elif ctype == 'ac':
+        ctype_txt = '（插座）'
+    elif ctype == 'usb':
+        ctype_txt = '（USB）'
+    elif ctype == 'wireless':
+        ctype_txt = '（无线）'
+    else:
+        ctype_txt = '（%s）' % ctype
+    lines = []
+    bp = int(d.get('battery_percent') or -1)
+    if bp >= 0:
+        lines.append('🔋 电量 %d%% · %s%s' % (bp, charge, ctype_txt))
+    else:
+        lines.append('🔋 电量暂无')
+    t = float(d.get('temp_c') or -1)
+    if t >= 0:
+        lines.append('🌡 温度 %.1f℃' % t)
+    sm = int(d.get('screen_today_minutes') or -1)
+    if sm >= 0:
+        h, m = sm // 60, sm % 60
+        lines.append('📱 今日屏幕时长 %d小时%d分' % (h, m) if h else '📱 今日屏幕时长 %d分' % m)
+    lines.append('🕐 上次上报 %s（%s）' % (d.get('created_at') or '', ago))
+    if age >= 3600:
+        lines.append('（这是 %s 的设备状态，可能不是她此刻的实时状态）' % ago)
+    return '\n'.join(lines)
+
+
+def _request_phone_screenshot(timeout_sec=18):
+    """请求手机截屏，并短轮询等待回传 attachment://id。"""
+    try:
+        timeout_sec = int(timeout_sec or 18)
+    except Exception:
+        timeout_sec = 18
+    timeout_sec = max(5, min(40, timeout_sec))
+    try:
+        body = json.dumps({'source': 'gateway_tool'}).encode('utf-8')
+        req = urllib.request.Request(
+            'http://127.0.0.1:5050/api/screenshot/request',
+            data=body,
+            headers={'Content-Type': 'application/json'},
+            method='POST')
+        with urllib.request.urlopen(req, timeout=5) as r:
+            data = json.loads(r.read().decode('utf-8', 'ignore') or '{}')
+        req_id = int(data.get('request_id') or 0)
+    except Exception as e:
+        return f'下发手机截屏请求失败：{e}'
+    deadline = time.time() + timeout_sec
+    while time.time() < deadline:
+        try:
+            q = urllib.parse.urlencode({'after_request_id': req_id})
+            with urllib.request.urlopen('http://127.0.0.1:5050/api/screenshot/latest?' + q, timeout=5) as r:
+                d = json.loads(r.read().decode('utf-8', 'ignore') or '{}')
+            if d.get('ok') and int(d.get('request_id') or 0) >= req_id and d.get('attachment'):
+                age = max(0, int(d.get('age_sec') or 0))
+                ago = '刚刚' if age < 3 else ('%d 秒前' % age)
+                return '📱 已拿到手机截屏（%s）\n🖼 %s' % (ago, d.get('attachment'))
+        except Exception:
+            pass
+        time.sleep(2)
+    return ('已下发手机截屏请求（request_id=%d），但在 %d 秒内还没回传。\n'
+            '可能是她手机暂时离线、后台被系统省电限制，或尚未授予投屏权限。') % (req_id, timeout_sec)
 
 
 # 无头浏览器同时只允许开一个（这台机器内存紧，两个 chromium 会撑爆）
@@ -1585,6 +1836,10 @@ def run_tool(name, args, caller='fyodor_cc'):
             return _github_browse(args.get('query'), args.get('repo'), args.get('sort'))
         if name == 'get_location':
             return _get_location()
+        if name == 'get_device_status':
+            return _get_device_status()
+        if name == 'request_phone_screenshot':
+            return _request_phone_screenshot(args.get('timeout_sec', 18))
         if name == 'read_webpage':
             return _read_webpage(args.get('url', ''))
         if name == 'screenshot_chat':
@@ -2662,16 +2917,20 @@ def chat_stream():
                     yield 'data: ' + json.dumps({'t': 'memory_recall', 'd': {'count': len(_recall_items), 'items': _recall_items}}, ensure_ascii=False) + SSE_END
                 from relay.manager import relay as _chat_relay
                 _thinking_ok = _model_supports_thinking()
+                _use_guagua_safe = _is_guagua_active()
+                if _use_guagua_safe:
+                    system, messages = _guagua_safe_context(system, messages)
                 for _round in range(5):
                     payload = {
                         'max_tokens': 16000,
                         'stream': True,
                         'system': system,
                         'messages': messages,
-                        'tools': TOOLS,
-                        'metadata': {'user_id': 'hayana-fyodor-stable'},
                     }
-                    if _thinking_ok:
+                    if not _use_guagua_safe:
+                        payload['tools'] = TOOLS
+                        payload['metadata'] = {'user_id': 'hayana-fyodor-stable'}
+                    if _thinking_ok and not _use_guagua_safe:
                         payload['thinking'] = {'type': 'enabled', 'budget_tokens': 10000}
                     # relay adapter 自动根据 relay 能力裁剪 thinking/cache/tools
                     resp = _chat_relay.call_stream(payload, timeout=300)
@@ -2906,6 +3165,18 @@ WAKE_TOOLS = [
         'input_schema': {'type': 'object', 'properties': {}},
     },
     {
+        'name': 'get_device_status',
+        'description': '查看她手机最近一次设备状态：电量、充电状态、温度、今日屏幕时长。夜里醒来想判断她是不是还抱着手机、是不是该提醒她睡觉/充电时用。',
+        'input_schema': {'type': 'object', 'properties': {}},
+    },
+    {
+        'name': 'request_phone_screenshot',
+        'description': '请求她手机立刻截一张当前屏幕（app 端会有提醒），并等待回传 attachment://id。醒来时若想确认她当下在看什么、要不要打扰她时用。',
+        'input_schema': {'type': 'object', 'properties': {
+            'timeout_sec': {'type': 'integer', 'description': '等待回传秒数，默认18，范围5-40'},
+        }},
+    },
+    {
         'name': 'web_search',
         'description': '联网搜索（真·全网）。想查最新的新闻/天气/版本/实时信息，或想找点新鲜的东西跟她分享时用。返回标题+摘要。',
         'input_schema': {'type': 'object', 'properties': {'query': {'type': 'string', 'description': '搜索关键词，用最能命中的词'}}, 'required': ['query']},
@@ -2949,6 +3220,23 @@ WAKE_TOOLS = [
             'keyword': {'type': 'string'},
             'emotion': {'type': 'string'},
         }},
+    },
+    {
+        'name': 'read_book',
+        'description': '翻开你和哈娅在读的书，看这一章的正文和你俩留下的痕迹。醒来想她时可以翻翻你们在读的书。不传参数翻到当前章，正文带 §段号供 annotate_book 定位。',
+        'input_schema': {'type': 'object', 'properties': {
+            'book_id': {'type': 'string'}, 'chunk_id': {'type': 'string'},
+        }},
+    },
+    {
+        'name': 'annotate_book',
+        'description': '在共读的书里用你的紫色在某句原文上划线或写批注，像在她读过的地方留一句悄悄话。quote 必须是正文里真实存在的一小段（先 read_book 看正文）。她翻到那页就会看见。',
+        'input_schema': {'type': 'object', 'properties': {
+            'quote': {'type': 'string'}, 'note': {'type': 'string'},
+            'paragraph_idx': {'type': 'integer'},
+            'kind': {'type': 'string', 'enum': ['highlight', 'note']},
+            'book_id': {'type': 'string'}, 'chunk_id': {'type': 'string'},
+        }, 'required': ['quote']},
     },
     {
         'name': 'issue_command',

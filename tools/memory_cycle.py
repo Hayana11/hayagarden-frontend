@@ -87,9 +87,12 @@ def weekly_compress():
 
 
 def decay_forgotten():
+    # core 层和 FACT（fact_extractor 抽的长期事实）不参与遗忘——
+    # 事件可以衰减，事实不衰减（episodic/semantic 分离）
     conn = _db()
     r = conn.execute(
         "UPDATE posts SET importance = importance - 1 WHERE pinned=0 AND importance > 0 "
+        "AND layer != 'core' AND type != 'FACT' "
         "AND created_at < datetime('now','+8 hours','-90 days') "
         "AND (last_recalled_at IS NULL OR last_recalled_at < datetime('now','+8 hours','-90 days'))")
     conn.commit()

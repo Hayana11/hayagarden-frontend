@@ -1,7 +1,7 @@
 # 家的架构（love-style.xyz）
 
 > Codebase MCP 的 describe_project() 返回本文档。改架构时同步改这里——这份文档过期比没有更糟。
-> 最后更新：2026-07-02（Codebase MCP v1 上线时）
+> 最后更新：2026-07-05（记忆升级：联邦召回/联想标签/长期事实/map-reduce 日摘要/向量脚手架）
 
 ## 服务拓扑
 
@@ -73,10 +73,31 @@ GitHub（Hayana11/hayagarden-frontend，main）↔ VPS /opt/frontend 工作区�
 
 ## 数据库主要表（memories.db）
 
-chat_messages（含 thinking/thinking_summary/tool_calls/cache_info/**file_url/file_name/choices**）、board + board_replies、runtime_config、relay_presets、lessons + lesson_candidates、artifacts、wake_log、dream_events、drift_bottles、**rolling_summary**（单行滚动摘要，id=1）。
+chat_messages（含 thinking/thinking_summary/tool_calls/cache_info/**file_url/file_name/choices**）、board + board_replies、runtime_config、relay_presets、lessons + lesson_candidates、artifacts、wake_log、dream_events、drift_bottles、**rolling_summary**（单行滚动摘要，id=1）、**memory_vectors**（post_id→embedding BLOB，向量检索用）。
+
+## 记忆系统（2026-07-05 升级）
+
+- **自动联想召回**（gateway `_recall_memories`，注入最后一条 user 消息前）：三路联邦——
+  ① posts 全扫（jieba 词重叠，正文+tags 一起算）；② 渐变脑 `bucket_mgr.search`（跳过
+  dehydrate 的 LLM 调用，热路径直取原文）；③ 向量余弦（EMBED_ENABLED 时）。
+  旋钮：`RECALL_MAX_ITEMS`（默认3）、`RECALL_OMBRE`（默认true）。
+- **联想标签** `tools/tag_enricher.py`（每6小时）：DeepSeek 给记忆生成同义词/关联概念，
+  追加进 tags 的 `assoc:词1|词2` 段；`search_memories` 和召回都搜 tags——字面不同也能想起。
+- **长期事实** `tools/fact_extractor.py`（每晚05:40）：从前一天对话抽取约定/纪念日/偏好等
+  稳定事实，存 `posts(type='FACT', layer='core')`。不参与 memory_cycle 降权（episodic/semantic
+  分离），system_builder 注入 BP2「长期事实」段（15条）。
+- **向量检索脚手架**（方案二A，配置即用）：`tools/embedding_tool.py`（OpenAI 兼容
+  /embeddings，纯 python 余弦）+ `tools/vector_indexer.py`（每小时增量索引）+
+  `memory_vectors` 表（`tools/migrate_memory_vectors.py` 建，备份先行）。
+  旋钮：`EMBED_ENABLED`/`EMBED_API_URL`/`EMBED_API_KEY`/`EMBED_MODEL`。
+  未配置时零开销；Mac mini 到货后指向本地 Ollama/LM Studio 的 embeddings 端点即点亮。
+- **共享轻 LLM 助手** `tools/llm_lite.py`：DeepSeek 直连，cron 专用（热路径禁用）。
 
 ## 长上下文与清理（cron）
 
+- **日摘要** `tools/summarizer.py`（每天 06:00）：map-reduce 分段——全量对话按 5000 字切块，
+  每块 DeepSeek 压要点（map），再合成日摘要（reduce），量大的日子给 200-400 字。
+  不再采样丢内容；claude CLI 只做 DeepSeek 不可用时的兜底。
 - **滚动对话摘要** `tools/rolling_summary.py`（每 15 分钟）：build_messages 的实时窗口封顶 60 条；同一天聊得很长时，早于窗口又不够格进日摘要（summarizer.py 只管过去的天）的那段会丢。本脚本把“比窗口早、但在 HORIZON_DAYS 内”的历史用 DeepSeek 压成一段，存 rolling_summary；build_messages 在 len(rows)>=60 时注入到开头。生成走后台，不占对话热路径。
 - **用户文件清理** `tools/file_cleaner.py`（每晚 03:30）：① 孤儿文件（磁盘上无任何 chat_messages.file_url 引用，且超 GRACE 分钟）直接删；② 总占用超 CAP_MB 时从最老开始删物理文件 + 清空对应消息的 file 字段（消息保留）。图片附件另有 attachment_store 的 30张/7天自清。
 
