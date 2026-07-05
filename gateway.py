@@ -219,6 +219,53 @@ def _model_supports_thinking():
         pass
     return True
 
+
+def _is_guagua_active():
+    """当前是否走 gua relay。"""
+    try:
+        from relay.manager import RelayManager as _RM
+        _url = (_RM().api_url or '')
+        return 'guagua.uk' in _url
+    except Exception:
+        return False
+
+
+def _msg_to_text(_content):
+    if isinstance(_content, str):
+        return _content
+    if not isinstance(_content, list):
+        return ''
+    parts = []
+    for _b in _content:
+        if isinstance(_b, dict) and _b.get('type') == 'text':
+            _t = _b.get('text', '')
+            if _t:
+                parts.append(_t)
+        elif isinstance(_b, str):
+            parts.append(_b)
+    return '\n'.join(parts).strip()
+
+
+def _guagua_safe_context(system, messages):
+    """gua 快速兜底：压 system、只保留最近文本消息。"""
+    _sys = _blocks_to_str(system)
+    if len(_sys) > 6000:
+        _sys = _sys[:6000]
+    _safe = []
+    for _m in (messages or [])[-10:]:
+        _role = _m.get('role') or 'user'
+        if _role not in ('user', 'assistant'):
+            _role = 'user'
+        _txt = _msg_to_text(_m.get('content'))
+        if not _txt:
+            continue
+        _safe.append({'role': _role, 'content': _txt[:4000]})
+    if not _safe:
+        _safe = [{'role': 'user', 'content': '...'}]
+    if _safe[0]['role'] == 'assistant':
+        _safe.insert(0, {'role': 'user', 'content': '...'})
+    return _sys, _safe
+
 def _get_desire_driven():
     return config_store.get_bool('DESIRE_DRIVEN', False)
 
@@ -428,7 +475,7 @@ def _ombre_hold_sync(content, tags='', importance=5, pinned=False):
         return None
 
 
-from chat.system_builder import build_system, build_wake_system
+from chat.system_builder import build_system, build_wake_system, _blocks_to_str
 
 
 def img_block(url, max_dim=1568):
@@ -658,14 +705,17 @@ def _strip_tool_blocks(messages):
 
 def api_call(system, messages):
     from relay.manager import relay as _relay
-    payload = {
-        'max_tokens': 16000,
-        'tools': TOOLS,
-        'system': system,
-        'messages': messages,
-        'metadata': {'user_id': 'hayana-fyodor-stable'},
-    }
-    if _model_supports_thinking():
+    _use_guagua_safe = _is_guagua_active()
+    payload = {'max_tokens': 16000}
+    if _use_guagua_safe:
+        _system, _messages = _guagua_safe_context(system, messages)
+    else:
+        _system, _messages = system, messages
+        payload['tools'] = TOOLS
+        payload['metadata'] = {'user_id': 'hayana-fyodor-stable'}
+    payload['system'] = _system
+    payload['messages'] = _messages
+    if _model_supports_thinking() and not _use_guagua_safe:
         payload['thinking'] = {'type': 'enabled', 'budget_tokens': 10000}
     return _relay.call(payload, timeout=120)
 
@@ -2867,16 +2917,20 @@ def chat_stream():
                     yield 'data: ' + json.dumps({'t': 'memory_recall', 'd': {'count': len(_recall_items), 'items': _recall_items}}, ensure_ascii=False) + SSE_END
                 from relay.manager import relay as _chat_relay
                 _thinking_ok = _model_supports_thinking()
+                _use_guagua_safe = _is_guagua_active()
+                if _use_guagua_safe:
+                    system, messages = _guagua_safe_context(system, messages)
                 for _round in range(5):
                     payload = {
                         'max_tokens': 16000,
                         'stream': True,
                         'system': system,
                         'messages': messages,
-                        'tools': TOOLS,
-                        'metadata': {'user_id': 'hayana-fyodor-stable'},
                     }
-                    if _thinking_ok:
+                    if not _use_guagua_safe:
+                        payload['tools'] = TOOLS
+                        payload['metadata'] = {'user_id': 'hayana-fyodor-stable'}
+                    if _thinking_ok and not _use_guagua_safe:
                         payload['thinking'] = {'type': 'enabled', 'budget_tokens': 10000}
                     # relay adapter 自动根据 relay 能力裁剪 thinking/cache/tools
                     resp = _chat_relay.call_stream(payload, timeout=300)
