@@ -647,6 +647,15 @@ TOOLS = [
         }, 'required': ['url']},
     },
     {
+        'name': 'shop_act',
+        'description': '带登录态打开一个商品/购物车页面后，按顺序执行一组点击填写动作，最后同样返回正文截图和发现的支付宝收银台链接。 actions 是一个列表，每项可以是 click_text、click_selector、fill_selector加value、wait_ms 四种之一，推荐优先用 click_text 按可见文字点击。每一步失败不会中断整个流程，失败记录会跟结果一起返回。谨慎：点到提交订单类的按钮会在她账号里生成一笔真实的待付款订单记录，不花钱但会留痕迹，做这一步前最好先跟她说一声。',
+        'input_schema': {'type': 'object', 'properties': {
+            'url': {'type': 'string', 'description': '商品或购物车页面地址'},
+            'actions': {'type': 'array', 'description': '要按顺序执行的动作列表', 'items': {'type': 'object'}},
+            'site': {'type': 'string', 'description': '登录态站点名，默认 taobao'},
+        }, 'required': ['url', 'actions']},
+    },
+    {
         'name': 'save_to_gallery',
         'description': '把一张截图永久收藏进相册。截图（screenshot_chat / read_webpage）默认是临时的，最近 30 张 / 7 天后会自动删；觉得某张值得留下来（一段珍贵的对话、一个好看的页面）就用这个存进相册永久保留。传 attachment（上一步返回的 attachment://id）；可选 note 写一句话备注、album 指定相册名（不填进默认相册）。返回 gallery://id。',
         'input_schema': {'type': 'object', 'properties': {
@@ -1186,6 +1195,67 @@ def _shop_browse(url, site='taobao'):
     return '\n'.join(parts)
 
 
+def _shop_act(url, actions, site='taobao'):
+    """打开页面后按序执行一组点击/填写动作（调 tools/shop_browser.js act），同样返回正文+截图+cashier 链接。
+    actions 写入临时文件传给 node 脚本（避免命令行参数里带中文/引号的转义问题），用完即删。"""
+    import subprocess as _sp
+    import tempfile as _tmp
+    url = (url or '').strip()
+    if not url:
+        return '给个商品或购物车页面地址'
+    if not re.match(r'^https?://', url, re.I):
+        url = 'https://' + url
+    site = re.sub(r'[^a-z0-9_-]', '', (site or 'taobao').lower()) or 'taobao'
+    if not isinstance(actions, list) or not actions:
+        return '给一组动作（比如 [{"click_text": "加入购物车"}]）'
+    actions_file = None
+    if not _BROWSER_LOCK.acquire(timeout=100):
+        return '浏览器正忙（同一时刻只能开一个），稍等再试。'
+    try:
+        with _tmp.NamedTemporaryFile('w', suffix='.json', delete=False, dir='/tmp') as tf:
+            json.dump(actions, tf, ensure_ascii=False)
+            actions_file = tf.name
+        p = _sp.run(['node', '/opt/frontend/tools/shop_browser.js', 'act', site, url, actions_file],
+                    capture_output=True, text=True, timeout=120)
+        out = (p.stdout or '').strip()
+        if not out:
+            return '执行失败：' + ((p.stderr or '')[:200] or '浏览器无输出')
+        d = json.loads(out.splitlines()[-1])
+    except _sp.TimeoutExpired:
+        return '执行超时（>120秒）——这台机器资源有限，有时候需要重试。'
+    except Exception as e:
+        return f'执行失败：{e}'
+    finally:
+        _BROWSER_LOCK.release()
+        if actions_file:
+            try:
+                os.remove(actions_file)
+            except OSError:
+                pass
+    if not d.get('ok'):
+        return '执行失败：' + str(d.get('error', ''))[:200]
+    parts = []
+    if d.get('need_login'):
+        parts.append('⚠️ 登录态失效了，需要重新导入 cookie。')
+    step_errors = d.get('step_errors') or []
+    if step_errors:
+        parts.append('⚠️ %d 个动作没成功（页面结构可能不一样）：' % len(step_errors))
+        for se in step_errors[:3]:
+            parts.append('  · ' + json.dumps(se.get('action'), ensure_ascii=False) + ' → ' + se.get('error', ''))
+    parts.append('🛒 ' + (d.get('finalUrl') or url))
+    cashier_links = d.get('cashier_links') or []
+    if cashier_links:
+        parts.append('💰 发现支付宝收银台链接（可以推给哈娅扫脸付款）：')
+        for link in cashier_links[:3]:
+            parts.append('  ' + link)
+    ref = _register_shot(d.get('shot'))
+    if ref:
+        parts.append('🖼 ' + ref)
+    parts.append('')
+    parts.append((d.get('text') or '')[:2500] or '（没抽到文字）')
+    return '\n'.join(parts)
+
+
 def _gen_photo_meaning(note=''):
     """看着刚收藏的画面 + 最近对话，生成 {summary, emotion, keywords, importance}。
     走轻量 ws 模型；失败返回 None（照片照存，只是暂时没意义）。不用 OCR——意义来自上下文。"""
@@ -1424,6 +1494,8 @@ def run_tool(name, args, caller='fyodor_cc'):
             return _screenshot_chat(args.get('viewpoint', 'fyodor'))
         if name == 'shop_browse':
             return _shop_browse(args.get('url', ''), args.get('site', 'taobao'))
+        if name == 'shop_act':
+            return _shop_act(args.get('url', ''), args.get('actions') or [], args.get('site', 'taobao'))
         if name == 'save_to_gallery':
             return _save_to_gallery(args.get('attachment', ''), args.get('note', ''), args.get('album'))
         if name == 'get_activity_summary':
