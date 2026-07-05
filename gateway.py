@@ -656,6 +656,26 @@ TOOLS = [
         }, 'required': ['url', 'actions']},
     },
     {
+        'name': 'shop_checkout',
+        'description': '只走购物车结算链路（不做搜索）：进入购物车后执行勾选/全选→结算→提交订单，返回页面正文截图和支付宝收银台链接。真正付款仍需哈娅在支付宝里手动确认。可选 item_keywords（字符串数组）只勾选匹配商品名的商品；不传则默认全选。',
+        'input_schema': {'type': 'object', 'properties': {
+            'site': {'type': 'string', 'description': '登录态站点名，默认 taobao'},
+            'item_keywords': {'type': 'array', 'description': '可选：只结算这些关键词命中的商品', 'items': {'type': 'string'}},
+        }},
+    },
+    {
+        'name': 'shop_login_start',
+        'description': '在常驻淘宝浏览器里打开扫码登录页并返回二维码截图。你用手机淘宝扫一扫登录一次，后续这台浏览器会保持该登录态。',
+        'input_schema': {'type': 'object', 'properties': {
+            'site': {'type': 'string', 'description': '站点名，默认 taobao'},
+        }},
+    },
+    {
+        'name': 'shop_login_status',
+        'description': '查询扫码登录进度：是否还在登录页、是否已登录成功。若还没成功会返回最新二维码截图。',
+        'input_schema': {'type': 'object', 'properties': {}},
+    },
+    {
         'name': 'save_to_gallery',
         'description': '把一张截图永久收藏进相册。截图（screenshot_chat / read_webpage）默认是临时的，最近 30 张 / 7 天后会自动删；觉得某张值得留下来（一段珍贵的对话、一个好看的页面）就用这个存进相册永久保留。传 attachment（上一步返回的 attachment://id）；可选 note 写一句话备注、album 指定相册名（不填进默认相册）。返回 gallery://id。',
         'input_schema': {'type': 'object', 'properties': {
@@ -1150,10 +1170,53 @@ def _screenshot_chat(viewpoint='fyodor'):
     return '📸 聊天截图 · %s\n🖼 %s' % (who, ref)
 
 
+def _shop_daemon_call(endpoint, payload, timeout_s=120):
+    """调用本机常驻 shop daemon（127.0.0.1:8787）。返回 JSON 字典；异常抛出。"""
+    import urllib.request as _rq
+    import urllib.error as _re
+    base = (config_store.get('SHOP_DAEMON_URL', 'http://127.0.0.1:8787') or 'http://127.0.0.1:8787').rstrip('/')
+    data = json.dumps(payload or {}, ensure_ascii=False).encode('utf-8')
+    req = _rq.Request(base + endpoint, data=data, method='POST', headers={'Content-Type': 'application/json; charset=utf-8'})
+    try:
+        with _rq.urlopen(req, timeout=max(5, int(timeout_s))) as r:
+            raw = r.read().decode('utf-8', 'replace')
+            return json.loads(raw or '{}')
+    except _re.HTTPError as e:
+        try:
+            body = e.read().decode('utf-8', 'replace')
+        except Exception:
+            body = ''
+        raise RuntimeError('HTTP %s %s' % (e.code, (body or '')[:200]))
+
+
+def _shop_format_result(d, default_url=''):
+    if not d.get('ok'):
+        return '打开购物页面失败：' + str(d.get('error', ''))[:200]
+    parts = []
+    if d.get('need_login'):
+        parts.append('⚠️ 当前是游客态（搜索常会被风控静默拦截）。建议优先走购物车结算链路。')
+    parts.append('🛒 ' + (d.get('finalUrl') or d.get('url') or default_url or ''))
+    cashier_links = d.get('cashier_links') or []
+    if cashier_links:
+        parts.append('💰 发现支付宝收银台链接（可以推给哈娅扫脸付款）：')
+        for link in cashier_links[:3]:
+            parts.append('  ' + link)
+    ref = _register_shot(d.get('shot'))
+    if ref:
+        parts.append('🖼 ' + ref)
+    parts.append('')
+    parts.append((d.get('text') or '')[:2500] or '（没抽到文字，可能需要登录或页面是纯图片）')
+    step_errors = d.get('step_errors') or []
+    if step_errors:
+        parts.append('')
+        parts.append('⚠️ %d 个动作没成功（页面结构可能变了）：' % len(step_errors))
+        for se in step_errors[:3]:
+            parts.append('  · ' + json.dumps(se.get('action'), ensure_ascii=False) + ' → ' + se.get('error', ''))
+    return '\n'.join(parts)
+
+
 def _shop_browse(url, site='taobao'):
-    """带登录态打开一个购物页面（调 tools/shop_browser.js），抽取正文 + 截图 + 支付宝收银台链接。
-    与 read_webpage/screenshot_chat 共用同一把 _BROWSER_LOCK（这台机器内存紧，同时只能跑一个 chromium）。
-    超时预算比 read_webpage 宽（淘宝页面重，这台 1 核/1G 内存的机器很慢）。"""
+    """常驻 Profile 浏览一个购物页（优先 daemon；失败时回退旧 one-shot 脚本）。"""
     import subprocess as _sp
     url = (url or '').strip()
     if not url:
@@ -1161,6 +1224,16 @@ def _shop_browse(url, site='taobao'):
     if not re.match(r'^https?://', url, re.I):
         url = 'https://' + url
     site = re.sub(r'[^a-z0-9_-]', '', (site or 'taobao').lower()) or 'taobao'
+    timeout_s = config_store.get_int('SHOP_BROWSE_TIMEOUT', 130)
+
+    # 首选：daemon（常驻 profile，保持 cookie/历史/收藏）
+    try:
+        d = _shop_daemon_call('/browse', {'site': site, 'url': url}, timeout_s=timeout_s)
+        return _shop_format_result(d, default_url=url)
+    except Exception:
+        pass
+
+    # 回退：旧 one-shot 实现（避免 daemon 未启动时完全不可用）
     if not _BROWSER_LOCK.acquire(timeout=100):
         return '浏览器正忙（同一时刻只能开一个），稍等再试。'
     try:
@@ -1176,28 +1249,11 @@ def _shop_browse(url, site='taobao'):
         return f'打开购物页面失败：{e}'
     finally:
         _BROWSER_LOCK.release()
-    if not d.get('ok'):
-        return '打开购物页面失败：' + str(d.get('error', ''))[:200]
-    parts = []
-    if d.get('need_login'):
-        parts.append('⚠️ 登录态失效了，这页被踢回了登录页——需要重新导入 cookie。')
-    parts.append('🛒 ' + (d.get('finalUrl') or d.get('url') or ''))
-    cashier_links = d.get('cashier_links') or []
-    if cashier_links:
-        parts.append('💰 发现支付宝收银台链接（可以推给哈娅扫脸付款）：')
-        for link in cashier_links[:3]:
-            parts.append('  ' + link)
-    ref = _register_shot(d.get('shot'))
-    if ref:
-        parts.append('🖼 ' + ref)
-    parts.append('')
-    parts.append((d.get('text') or '')[:2500] or '（没抽到文字，可能需要登录或页面是纯图片）')
-    return '\n'.join(parts)
+    return _shop_format_result(d, default_url=url)
 
 
 def _shop_act(url, actions, site='taobao'):
-    """打开页面后按序执行一组点击/填写动作（调 tools/shop_browser.js act），同样返回正文+截图+cashier 链接。
-    actions 写入临时文件传给 node 脚本（避免命令行参数里带中文/引号的转义问题），用完即删。"""
+    """常驻 Profile 执行动作（优先 daemon；失败时回退旧 one-shot 脚本）。"""
     import subprocess as _sp
     import tempfile as _tmp
     url = (url or '').strip()
@@ -1208,6 +1264,15 @@ def _shop_act(url, actions, site='taobao'):
     site = re.sub(r'[^a-z0-9_-]', '', (site or 'taobao').lower()) or 'taobao'
     if not isinstance(actions, list) or not actions:
         return '给一组动作（比如 [{"click_text": "加入购物车"}]）'
+    timeout_s = config_store.get_int('SHOP_ACT_TIMEOUT', 140)
+
+    try:
+        d = _shop_daemon_call('/act', {'site': site, 'url': url, 'actions': actions}, timeout_s=timeout_s)
+        return _shop_format_result(d, default_url=url)
+    except Exception:
+        pass
+
+    # 回退旧逻辑
     actions_file = None
     if not _BROWSER_LOCK.acquire(timeout=100):
         return '浏览器正忙（同一时刻只能开一个），稍等再试。'
@@ -1232,29 +1297,61 @@ def _shop_act(url, actions, site='taobao'):
                 os.remove(actions_file)
             except OSError:
                 pass
+    return _shop_format_result(d, default_url=url)
+
+
+def _shop_checkout(site='taobao', item_keywords=None):
+    """只走购物车结算链路：全选/勾选 → 结算 → 提交订单。"""
+    site = re.sub(r'[^a-z0-9_-]', '', (site or 'taobao').lower()) or 'taobao'
+    timeout_s = config_store.get_int('SHOP_CHECKOUT_TIMEOUT', 160)
+    payload = {'site': site}
+    if isinstance(item_keywords, list) and item_keywords:
+        payload['item_keywords'] = [str(x) for x in item_keywords if str(x).strip()]
+    try:
+        d = _shop_daemon_call('/checkout', payload, timeout_s=timeout_s)
+        return _shop_format_result(d, default_url='https://cart.taobao.com/cart.htm')
+    except Exception as e:
+        return '购物车结算链路执行失败：' + str(e)[:200]
+
+
+
+
+def _shop_login_start(site='taobao'):
+    site = re.sub(r'[^a-z0-9_-]', '', (site or 'taobao').lower()) or 'taobao'
+    timeout_s = config_store.get_int('SHOP_LOGIN_START_TIMEOUT', 80)
+    try:
+        d = _shop_daemon_call('/login_start', {'site': site}, timeout_s=timeout_s)
+    except Exception as e:
+        return '打开扫码登录页失败：' + str(e)[:200]
     if not d.get('ok'):
-        return '执行失败：' + str(d.get('error', ''))[:200]
-    parts = []
-    if d.get('need_login'):
-        parts.append('⚠️ 登录态失效了，需要重新导入 cookie。')
-    step_errors = d.get('step_errors') or []
-    if step_errors:
-        parts.append('⚠️ %d 个动作没成功（页面结构可能不一样）：' % len(step_errors))
-        for se in step_errors[:3]:
-            parts.append('  · ' + json.dumps(se.get('action'), ensure_ascii=False) + ' → ' + se.get('error', ''))
-    parts.append('🛒 ' + (d.get('finalUrl') or url))
-    cashier_links = d.get('cashier_links') or []
-    if cashier_links:
-        parts.append('💰 发现支付宝收银台链接（可以推给哈娅扫脸付款）：')
-        for link in cashier_links[:3]:
-            parts.append('  ' + link)
+        return '打开扫码登录页失败：' + str(d.get('error', ''))[:200]
+    parts = ['🔐 淘宝扫码登录已打开（常驻浏览器）', '🌐 ' + (d.get('url') or '')]
     ref = _register_shot(d.get('shot'))
     if ref:
         parts.append('🖼 ' + ref)
-    parts.append('')
-    parts.append((d.get('text') or '')[:2500] or '（没抽到文字）')
+    parts.append('请用手机淘宝扫一扫上面的二维码；扫完后调用 shop_login_status 看是否成功。')
     return '\n'.join(parts)
 
+
+def _shop_login_status():
+    import urllib.request as _rq
+    base = (config_store.get('SHOP_DAEMON_URL', 'http://127.0.0.1:8787') or 'http://127.0.0.1:8787').rstrip('/')
+    try:
+        with _rq.urlopen(base + '/login_status', timeout=30) as r:
+            d = json.loads((r.read() or b'{}').decode('utf-8', 'replace'))
+    except Exception as e:
+        return '查询登录状态失败：' + str(e)[:200]
+    if not d.get('ok'):
+        return '查询登录状态失败：' + str(d.get('error', ''))[:200]
+    if not d.get('active'):
+        return '当前没有进行中的扫码登录（先调用 shop_login_start）。'
+    if d.get('done') and d.get('logged_in'):
+        return '✅ 扫码登录成功（常驻浏览器身份已建立）。现在可以优先走购物车结算链路。\n🌐 ' + (d.get('finalUrl') or '')
+    parts = ['⌛ 还在等待扫码确认', '🌐 ' + (d.get('finalUrl') or '')]
+    ref = _register_shot(d.get('shot'))
+    if ref:
+        parts.append('🖼 ' + ref)
+    return '\n'.join(parts)
 
 def _gen_photo_meaning(note=''):
     """看着刚收藏的画面 + 最近对话，生成 {summary, emotion, keywords, importance}。
@@ -1496,6 +1593,12 @@ def run_tool(name, args, caller='fyodor_cc'):
             return _shop_browse(args.get('url', ''), args.get('site', 'taobao'))
         if name == 'shop_act':
             return _shop_act(args.get('url', ''), args.get('actions') or [], args.get('site', 'taobao'))
+        if name == 'shop_checkout':
+            return _shop_checkout(args.get('site', 'taobao'), args.get('item_keywords') or [])
+        if name == 'shop_login_start':
+            return _shop_login_start(args.get('site', 'taobao'))
+        if name == 'shop_login_status':
+            return _shop_login_status()
         if name == 'save_to_gallery':
             return _save_to_gallery(args.get('attachment', ''), args.get('note', ''), args.get('album'))
         if name == 'get_activity_summary':
