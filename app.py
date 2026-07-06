@@ -1129,6 +1129,20 @@ def repair_key():
     except: pass
     return jsonify({'key': key})
 
+@app.route('/api/repair/chat', methods=['POST'])
+def repair_chat_api():
+    data = request.get_json() or {}
+    message = (data.get('message') or '').strip()
+    history = data.get('history') or []
+    if not message:
+        return jsonify({'error': 'empty message'}), 400
+    try:
+        from tools.repair_agent import repair_chat
+        reply, tool_log = repair_chat(message, history)
+        return jsonify({'reply': reply, 'tools': tool_log})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
 @app.route('/api/repair/status')
 def repair_status():
     import socket
@@ -1137,7 +1151,12 @@ def repair_status():
             s = socket.create_connection(('127.0.0.1', p), timeout=1)
             s.close(); return True
         except: return False
-    return jsonify({'port_5050': port_open(5050), 'port_5051': port_open(5051), 'port_8000': port_open(8000)})
+    return jsonify({
+        'port_5050': port_open(5050),
+        'port_5051': port_open(5051),
+        'port_5056': port_open(5056),
+        'port_8000': port_open(8000),
+    })
 
 
 # ── EPUB upload & import ──
