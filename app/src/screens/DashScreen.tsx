@@ -8,7 +8,6 @@ import { useTodos } from '../hooks/useTodos';
 import { useHeatmap } from '../hooks/useHeatmap';
 import { useMemorySummary } from '../hooks/useMemorySummary';
 import { useUsage } from '../hooks/useUsage';
-import { useBook } from '../hooks/useBook';
 import { useLedger } from '../hooks/useLedger';
 import { usePeriod } from '../hooks/usePeriod';
 import { weatherDesc } from '../lib/weather';
@@ -27,7 +26,6 @@ export function DashScreen() {
   const { todos, toggle } = useTodos();
   const memory = useMemorySummary();
   const usage = useUsage(now);
-  const book = useBook();
   const ledger = useLedger(now);
   const period = usePeriod();
 
@@ -63,8 +61,8 @@ export function DashScreen() {
   const spendHint = ledger
     ? `剩余 ${formatCurrency(budget - spent)} · 本月还有 ${new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate() - now.getDate()} 天`
     : '';
-
-  const bookPct = book ? Math.round((book.page / book.totalPages) * 100) : 0;
+  const activeTodos = todos.filter((t) => !t.done).length;
+  const recentItems = memory?.sections.find((s) => s.key === 'recent')?.items.slice(0, 4) ?? [];
 
   const { daysLeft: periodDaysLeft, phase: periodPhase } = period
     ? derivePeriod(period, now)
@@ -258,11 +256,17 @@ export function DashScreen() {
           <span style={{ fontSize: 11, color: 'var(--color-text-faint)', marginTop: 'auto' }}>距下次 {periodDaysLeft} 天</span>
         </div>
         <Card style={{ padding: '16px 16px 12px', overflow: 'hidden' }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
-            <span style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 24, fontWeight: 600, letterSpacing: 1 }}>To-do</span>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <i className="ti ti-checkbox" style={{ fontSize: 24, color: '#8FAEC9' }} />
+              <span style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 24, fontWeight: 600, letterSpacing: 1 }}>To-do</span>
+            </div>
             <span style={{ fontFamily: "'Bodoni Moda',serif", fontSize: 11, letterSpacing: 1, color: 'var(--color-text-faint)' }}>
               {doneCount} / {todos.length}
             </span>
+          </div>
+          <div style={{ fontFamily: "'Bodoni Moda',serif", fontSize: 11, color: 'var(--color-text-faint)', marginTop: 2 }}>
+            {activeTodos} active · AI only
           </div>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 2, marginTop: 8 }}>
             {todos.map((t) => (
@@ -332,7 +336,7 @@ export function DashScreen() {
         </svg>
         <div style={{ flex: 1 }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <span style={{ fontSize: 15, fontWeight: 600, letterSpacing: 2 }}>记账 · 本月支出</span>
+            <span style={{ fontSize: 13, fontWeight: 600, letterSpacing: 1.5 }}>记账 · 本月支出</span>
             <span style={{ color: '#9DB5A6', fontSize: 18 }}>›</span>
           </div>
           <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 20, marginTop: 3 }}>
@@ -342,40 +346,28 @@ export function DashScreen() {
         </div>
       </div>
 
-      {/* reading (clickable) */}
-      <Card onClick={() => navigate('/reading')} style={{ padding: 16 }}>
+      {/* recent timeline style block */}
+      <Card onClick={() => navigate('/memory')} style={{ padding: 16 }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <span style={{ fontSize: 16, fontWeight: 600, letterSpacing: 2 }}>共读</span>
+          <span style={{ fontSize: 16, fontWeight: 600, letterSpacing: 2 }}>Recent</span>
           <span style={{ color: 'var(--color-text-fainter)', fontSize: 18 }}>›</span>
         </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginTop: 10 }}>
-          <div
-            style={{
-              width: 46,
-              height: 64,
-              borderRadius: 8,
-              background: '#F1E4DF',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              flexShrink: 0,
-            }}
-          >
-            <span style={{ fontFamily: "'Bodoni Moda',serif", fontStyle: 'italic', fontSize: 18, color: 'var(--color-rose)' }}>K</span>
-          </div>
-          <div style={{ flex: 1, minWidth: 0 }}>
-            <div style={{ fontSize: 16, fontWeight: 600 }}>{book?.title ?? '—'}</div>
-            <div style={{ fontSize: 12, color: 'var(--color-text-faint)', marginTop: 3 }}>
-              {book ? `${book.author} · ${book.volumeLabel}` : ''}
-            </div>
-            <div style={{ height: 8, borderRadius: 4, background: '#F3E7E3', marginTop: 12, overflow: 'hidden' }}>
-              <div style={{ height: '100%', borderRadius: 4, background: 'var(--color-rose)', width: `${bookPct}%` }} />
-            </div>
-            <div style={{ display: 'flex', justifyContent: 'space-between', fontFamily: "'Bodoni Moda',serif", fontSize: 12, color: 'var(--color-text-faint)', marginTop: 6 }}>
-              <span>{book ? `p.${book.page} / ${book.totalPages}` : ''}</span>
-              <span>{bookPct}%</span>
-            </div>
-          </div>
+        <div style={{ marginTop: 10, display: 'flex', flexDirection: 'column', gap: 9 }}>
+          {recentItems.length === 0 ? (
+            <div style={{ fontSize: 12, color: 'var(--color-text-faint)' }}>暂无近期记录</div>
+          ) : (
+            recentItems.map((item, idx) => (
+              <div key={`${item.date}-${idx}`} style={{ display: 'grid', gridTemplateColumns: '14px 1fr', gap: 10, minWidth: 0 }}>
+                <div style={{ display: 'flex', justifyContent: 'center' }}>
+                  <span style={{ width: 8, height: 8, borderRadius: '50%', border: '2px solid #D2CBBE', marginTop: 5, flexShrink: 0 }} />
+                </div>
+                <div style={{ minWidth: 0 }}>
+                  <div style={{ fontSize: 15, lineHeight: 1.4, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{item.text}</div>
+                  <div style={{ fontFamily: "'Bodoni Moda',serif", fontSize: 11, color: 'var(--color-text-faint)', marginTop: 2 }}>{item.date}</div>
+                </div>
+              </div>
+            ))
+          )}
         </div>
       </Card>
 
