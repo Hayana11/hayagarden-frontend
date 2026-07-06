@@ -1,0 +1,804 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Bodoni+Moda:ital,opsz,wght@0,6..96,400;0,6..96,500;0,6..96,600;1,6..96,400;1,6..96,500&amp;family=Noto+Serif+SC:wght@400;500;600;700&amp;family=Space+Grotesk:wght@400;500;600&amp;display=swap" rel="stylesheet">
+  <style>
+    html, body { margin:0; padding:0; background:#F7F1EE; }
+    @keyframes livePulse { 0%,100%{opacity:1} 50%{opacity:.35} }
+    * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  </style>
+</helmet>
+
+<div style="max-width:430px;margin:0 auto;min-height:100vh;background:#F7F1EE;font-family:'Noto Serif SC',serif;color:#4A3F3C;position:relative">
+
+  <!-- ══════════ DASH ══════════ -->
+  <sc-if value="{{ isDash }}" hint-placeholder-val="{{ true }}">
+    
+  </sc-if>
+
+  <!-- ══════════ 记忆库 ══════════ -->
+  <sc-if value="{{ isMemory }}" hint-placeholder-val="{{ false }}">
+    <div data-screen-label="记忆库" style="padding:26px 20px 110px;display:flex;flex-direction:column;gap:16px">
+      <div style="display:flex;align-items:center;gap:14px">
+        <div onClick="{{ goBack }}" style="cursor:pointer;width:38px;height:38px;border-radius:50%;background:#FFFFFF;box-shadow:0 6px 18px rgba(183,110,121,0.10);display:flex;align-items:center;justify-content:center;font-size:20px;color:#8C7B76">‹</div>
+        <span style="font-size:22px;font-weight:600;letter-spacing:3px">记忆库</span>
+      </div>
+
+      <!-- memory calendar -->
+      <div style="background:#FFFFFF;border-radius:22px;box-shadow:0 10px 30px rgba(183,110,121,0.10);padding:22px">
+        <div style="font-size:13px;color:#A99590;letter-spacing:1px">{{ memMonthCount }} memories</div>
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-top:12px">
+          <span onClick="{{ memPrev }}" style="cursor:pointer;width:34px;height:34px;border-radius:12px;background:#F7F1EE;box-shadow:0 3px 8px rgba(183,110,121,0.10);display:flex;align-items:center;justify-content:center;color:#6B5A55;font-size:14px">◀</span>
+          <span style="font-family:'Bodoni Moda',serif;font-style:italic;font-size:20px;color:#9C3B4A;letter-spacing:1px">{{ memCalLabel }}</span>
+          <span onClick="{{ memNext }}" style="cursor:pointer;width:34px;height:34px;border-radius:12px;background:#F7F1EE;box-shadow:0 3px 8px rgba(183,110,121,0.10);display:flex;align-items:center;justify-content:center;color:{{ memNextColor }};font-size:14px">▶</span>
+        </div>
+        <div style="display:grid;grid-template-columns:repeat(7,1fr);gap:2px;margin-top:16px">
+          <span style="text-align:center;font-size:13px;color:#8C7B76">一</span>
+          <span style="text-align:center;font-size:13px;color:#8C7B76">二</span>
+          <span style="text-align:center;font-size:13px;color:#8C7B76">三</span>
+          <span style="text-align:center;font-size:13px;color:#8C7B76">四</span>
+          <span style="text-align:center;font-size:13px;color:#8C7B76">五</span>
+          <span style="text-align:center;font-size:13px;color:#8C7B76">六</span>
+          <span style="text-align:center;font-size:13px;color:#8C7B76">日</span>
+        </div>
+        <div style="display:grid;grid-template-columns:repeat(7,1fr);gap:2px;margin-top:8px">
+          <sc-for list="{{ memCells }}" as="mc" hint-placeholder-count="35">
+            <div onClick="{{ mc.pick }}" style="cursor:pointer;height:38px;display:flex;align-items:center;justify-content:center">
+              <span style="width:32px;height:32px;border-radius:50%;border:{{ mc.ring }};display:flex;align-items:center;justify-content:center;font-family:'Bodoni Moda',serif;font-size:15px;font-weight:{{ mc.weight }};color:{{ mc.color }}">{{ mc.d }}</span>
+            </div>
+          </sc-for>
+        </div>
+        <div style="height:1px;background:#F0E6E2;margin:16px 0 4px"></div>
+        <sc-for list="{{ memSelEntries }}" as="e" hint-placeholder-count="2">
+          <div style="padding:12px 2px;border-bottom:1px solid #F5EDE9">
+            <div style="font-family:'Bodoni Moda',serif;font-style:italic;font-size:16px;color:#C08497;letter-spacing:1px">{{ e.cat }}</div>
+            <div style="font-size:15px;margin-top:4px">{{ e.title }}</div>
+            <div style="font-family:'Bodoni Moda',serif;font-size:12px;color:#7E93AD;margin-top:3px">{{ e.date }}</div>
+          </div>
+        </sc-for>
+      </div>
+
+      <sc-for list="{{ memSections }}" as="sec" hint-placeholder-count="3">
+        <div style="background:#FFFFFF;border-radius:22px;box-shadow:0 10px 30px rgba(183,110,121,0.10);padding:20px">
+          <div style="display:flex;justify-content:space-between;align-items:baseline">
+            <span style="font-size:15px;font-weight:600;letter-spacing:2px">{{ sec.title }}</span>
+            <span style="font-family:'Bodoni Moda',serif;font-size:13px;color:#A99590">{{ sec.count }} 条</span>
+          </div>
+          <div style="display:flex;flex-direction:column;gap:10px;margin-top:12px">
+            <sc-for list="{{ sec.items }}" as="m" hint-placeholder-count="3">
+              <div style="display:flex;gap:10px;align-items:flex-start">
+                <div style="width:8px;height:8px;border-radius:50%;background:{{ m.whoColor }};margin-top:7px;flex-shrink:0"></div>
+                <div style="flex:1">
+                  <div style="font-size:14px;line-height:1.6">{{ m.text }}</div>
+                  <div style="font-family:'Bodoni Moda',serif;font-size:11px;color:#C4B4AF;margin-top:2px">{{ m.date }}</div>
+                </div>
+              </div>
+            </sc-for>
+          </div>
+        </div>
+      </sc-for>
+      <div style="background:#FFFFFF;border-radius:22px;box-shadow:0 10px 30px rgba(183,110,121,0.10);padding:20px">
+        <div style="font-size:15px;font-weight:600;letter-spacing:2px">渐变脑</div>
+        <div style="font-size:13px;color:#8C7B76;line-height:1.8;margin-top:10px">情感权重当前偏向 amber 侧 —— 最近的记忆里，小猫出现的频率更高。费佳侧的权重集中在「共读」与「深夜长谈」两个簇。</div>
+        <div style="position:relative;height:10px;border-radius:5px;margin-top:16px;background:linear-gradient(90deg,#8A7AB5,#C08497,#D9A441)">
+          <div style="position:absolute;top:-3px;left:{{ memMarkerLeft }};width:16px;height:16px;border-radius:50%;background:#FFFFFF;box-shadow:0 2px 6px rgba(0,0,0,0.18)"></div>
+        </div>
+        <div style="display:flex;justify-content:space-between;font-size:11px;margin-top:6px">
+          <span style="color:#8A7AB5">费佳</span>
+          <span style="color:#D9A441">哈娅</span>
+        </div>
+      </div>
+    </div>
+  </sc-if>
+
+  <!-- ══════════ 用量 ══════════ -->
+  <sc-if value="{{ isUsage }}" hint-placeholder-val="{{ false }}">
+    <div data-screen-label="用量" style="padding:26px 20px 110px;display:flex;flex-direction:column;gap:16px">
+      <div style="display:flex;align-items:center;gap:14px">
+        <div onClick="{{ goBack }}" style="cursor:pointer;width:38px;height:38px;border-radius:50%;background:#FFFFFF;box-shadow:0 6px 18px rgba(183,110,121,0.10);display:flex;align-items:center;justify-content:center;font-size:20px;color:#8C7B76">‹</div>
+        <span style="font-size:22px;font-weight:600;letter-spacing:3px">用量</span>
+      </div>
+      <div style="background:#FFFFFF;border-radius:22px;box-shadow:0 10px 30px rgba(183,110,121,0.10);padding:22px">
+        <div style="font-family:'Bodoni Moda',serif;font-size:13px;letter-spacing:5px;color:#A99590">WINDOWS</div>
+        <div style="display:flex;justify-content:space-between;align-items:baseline;margin-top:16px">
+          <span style="font-size:14px;color:#6B5A55">5 小时窗</span>
+          <span style="font-family:'Bodoni Moda',serif;font-size:18px;font-weight:600">{{ win5 }}%</span>
+        </div>
+        <div style="height:10px;border-radius:5px;background:#F3EBE8;margin-top:8px;overflow:hidden">
+          <div style="height:100%;border-radius:5px;background:#8A7AB5;width:{{ win5 }}%"></div>
+        </div>
+        <div style="font-size:11px;color:#A99590;margin-top:5px">{{ win5Hint }}</div>
+        <div style="display:flex;justify-content:space-between;align-items:baseline;margin-top:16px">
+          <span style="font-size:14px;color:#6B5A55">7 天窗</span>
+          <span style="font-family:'Bodoni Moda',serif;font-size:18px;font-weight:600">{{ win7 }}%</span>
+        </div>
+        <div style="height:10px;border-radius:5px;background:#F3EBE8;margin-top:8px;overflow:hidden">
+          <div style="height:100%;border-radius:5px;background:#B76E79;width:{{ win7 }}%"></div>
+        </div>
+        <div style="font-size:11px;color:#A99590;margin-top:5px">{{ win7Hint }}</div>
+      </div>
+      <div style="background:#FFFFFF;border-radius:22px;box-shadow:0 10px 30px rgba(183,110,121,0.10);padding:22px">
+        <div style="font-family:'Bodoni Moda',serif;font-size:13px;letter-spacing:5px;color:#A99590">TODAY</div>
+        <div style="display:flex;gap:32px;margin-top:14px">
+          <div><div style="font-family:'Bodoni Moda',serif;font-size:36px;font-weight:500">{{ msgToday }}</div><div style="font-size:13px;color:#8C7B76;letter-spacing:2px;margin-top:4px">消息数</div></div>
+          <div><div style="font-family:'Bodoni Moda',serif;font-size:36px;font-weight:500">{{ tokenToday }}</div><div style="font-size:13px;color:#8C7B76;letter-spacing:2px;margin-top:4px">tokens</div></div>
+        </div>
+      </div>
+      <div style="background:#FFFFFF;border-radius:22px;box-shadow:0 10px 30px rgba(183,110,121,0.10);padding:22px">
+        <div style="display:flex;justify-content:space-between;align-items:baseline">
+          <span style="font-size:15px;font-weight:600;letter-spacing:2px">近 7 天 tokens</span>
+          <span style="display:flex;gap:12px;font-size:11px;color:#A99590">
+            <span style="display:flex;align-items:center;gap:4px"><span style="width:8px;height:8px;border-radius:2px;background:#8A7AB5"></span>费佳</span>
+            <span style="display:flex;align-items:center;gap:4px"><span style="width:8px;height:8px;border-radius:2px;background:#D9A441"></span>哈娅</span>
+          </span>
+        </div>
+        <div style="display:flex;align-items:flex-end;gap:14px;height:150px;margin-top:18px;padding:0 4px">
+          <sc-for list="{{ usageBars }}" as="b" hint-placeholder-count="7">
+            <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:6px">
+              <div style="width:100%;max-width:26px;display:flex;flex-direction:column;justify-content:flex-end">
+                <div style="height:{{ b.h1 }}px;background:#8A7AB5;border-radius:5px 5px 0 0"></div>
+                <div style="height:{{ b.h2 }}px;background:#D9A441;border-radius:0 0 5px 5px"></div>
+              </div>
+              <span style="font-family:'Bodoni Moda',serif;font-size:11px;color:#A99590">{{ b.label }}</span>
+            </div>
+          </sc-for>
+        </div>
+      </div>
+      <div style="font-size:12px;color:#C4B4AF;text-align:center;letter-spacing:1px">数据来源：今日消息数 + SSE usage 字段 · 接口位：/api/usage</div>
+    </div>
+  </sc-if>
+
+  <!-- ══════════ 共读 ══════════ -->
+  <sc-if value="{{ isReading }}" hint-placeholder-val="{{ false }}">
+    <div data-screen-label="共读" style="padding:26px 20px 110px;display:flex;flex-direction:column;gap:16px">
+      <div style="display:flex;align-items:center;gap:14px">
+        <div onClick="{{ goBack }}" style="cursor:pointer;width:38px;height:38px;border-radius:50%;background:#FFFFFF;box-shadow:0 6px 18px rgba(183,110,121,0.10);display:flex;align-items:center;justify-content:center;font-size:20px;color:#8C7B76">‹</div>
+        <span style="font-size:22px;font-weight:600;letter-spacing:3px">共读</span>
+      </div>
+      <div style="background:#FFFFFF;border-radius:22px;box-shadow:0 10px 30px rgba(183,110,121,0.10);padding:24px">
+        <div style="display:flex;gap:18px;align-items:center">
+          <div style="width:76px;height:106px;border-radius:10px;background:#F1E4DF;display:flex;align-items:center;justify-content:center;flex-shrink:0">
+            <span style="font-family:'Bodoni Moda',serif;font-style:italic;font-size:30px;color:#B76E79">K</span>
+          </div>
+          <div>
+            <div style="font-size:19px;font-weight:600;letter-spacing:1px">{{ bookTitle }}</div>
+            <div style="font-size:13px;color:#A99590;margin-top:4px">{{ bookMeta }}</div>
+            <div style="font-family:'Bodoni Moda',serif;font-size:13px;color:#8C7B76;margin-top:10px">{{ bookPage }} · {{ bookPct }}</div>
+          </div>
+        </div>
+        <div style="height:10px;border-radius:5px;background:#F3E7E3;margin-top:20px;overflow:hidden">
+          <div style="height:100%;border-radius:5px;background:#B76E79;width:{{ bookPct }}"></div>
+        </div>
+      </div>
+      <div style="background:#FFFFFF;border-radius:22px;box-shadow:0 10px 30px rgba(183,110,121,0.10);padding:20px">
+        <div style="font-size:15px;font-weight:600;letter-spacing:2px">共读笔记</div>
+        <div style="display:flex;flex-direction:column;gap:14px;margin-top:14px">
+          <sc-for list="{{ bookNotes }}" as="n" hint-placeholder-count="3">
+            <div style="display:flex;gap:10px">
+              <div style="width:8px;height:8px;border-radius:50%;background:{{ n.whoColor }};margin-top:7px;flex-shrink:0"></div>
+              <div style="flex:1">
+                <div style="font-size:14px;line-height:1.7">{{ n.text }}</div>
+                <div style="font-family:'Bodoni Moda',serif;font-size:11px;color:#C4B4AF;margin-top:3px">{{ n.meta }}</div>
+              </div>
+            </div>
+          </sc-for>
+        </div>
+      </div>
+      <div style="font-size:12px;color:#C4B4AF;text-align:center;letter-spacing:1px">接口位：/api/books/current</div>
+    </div>
+  </sc-if>
+
+  <!-- ══════════ 支出 ══════════ -->
+  <sc-if value="{{ isLedger }}" hint-placeholder-val="{{ false }}">
+    <div data-screen-label="支出" style="padding:26px 20px 110px;display:flex;flex-direction:column;gap:16px">
+      <div style="display:flex;align-items:center;gap:14px">
+        <div onClick="{{ goBack }}" style="cursor:pointer;width:38px;height:38px;border-radius:50%;background:#FFFFFF;box-shadow:0 6px 18px rgba(183,110,121,0.10);display:flex;align-items:center;justify-content:center;font-size:20px;color:#8C7B76">‹</div>
+        <span style="font-size:22px;font-weight:600;letter-spacing:3px">本月支出</span>
+      </div>
+      <div style="background:#FFFFFF;border-radius:22px;box-shadow:0 10px 30px rgba(183,110,121,0.10);padding:26px;display:flex;flex-direction:column;align-items:center">
+        <svg viewBox="0 0 140 140" style="width:150px;height:150px">
+          <circle cx="70" cy="70" r="58" fill="none" stroke="#E4EDE7" strokeWidth="12"></circle>
+          <circle cx="70" cy="70" r="58" fill="none" stroke="#7FA98F" strokeWidth="12" strokeLinecap="round" strokeDasharray="364.4" strokeDashoffset="{{ ringOffsetBig }}" transform="rotate(-90 70 70)"></circle>
+          <text x="70" y="70" textAnchor="middle" fill="#4A3F3C" style="font-family:'Space Grotesk',sans-serif;font-size:22px;font-weight:600">{{ spendStr }}</text>
+          <text x="70" y="90" textAnchor="middle" fill="#A99590" style="font-family:'Bodoni Moda',serif;font-size:12px">/ {{ budgetStr }}</text>
+        </svg>
+        <div style="font-size:13px;color:#8C7B76;margin-top:8px;letter-spacing:1px">{{ spendHint }}</div>
+      </div>
+      <div style="background:#FFFFFF;border-radius:22px;box-shadow:0 10px 30px rgba(183,110,121,0.10);padding:20px">
+        <div style="font-size:15px;font-weight:600;letter-spacing:2px">分类</div>
+        <div style="display:flex;flex-direction:column;gap:14px;margin-top:14px">
+          <sc-for list="{{ ledgerCats }}" as="lc" hint-placeholder-count="5">
+            <div>
+              <div style="display:flex;justify-content:space-between;font-size:14px">
+                <span>{{ lc.name }}</span>
+                <span style="font-family:'Space Grotesk',sans-serif">{{ lc.amount }}</span>
+              </div>
+              <div style="height:6px;border-radius:3px;background:#EAF1EC;margin-top:6px;overflow:hidden">
+                <div style="height:100%;border-radius:3px;background:#7FA98F;width:{{ lc.pct }}"></div>
+              </div>
+            </div>
+          </sc-for>
+        </div>
+      </div>
+      <div style="font-size:12px;color:#C4B4AF;text-align:center;letter-spacing:1px">接口位：/api/ledger/budget</div>
+    </div>
+  </sc-if>
+
+  <!-- ══════════ 经期 ══════════ -->
+  <sc-if value="{{ isPeriod }}" hint-placeholder-val="{{ false }}">
+    <div data-screen-label="经期" style="padding:26px 20px 110px;display:flex;flex-direction:column;gap:16px">
+      <div style="display:flex;align-items:center;gap:14px">
+        <div onClick="{{ goBack }}" style="cursor:pointer;width:38px;height:38px;border-radius:50%;background:#FFFFFF;box-shadow:0 6px 18px rgba(183,110,121,0.10);display:flex;align-items:center;justify-content:center;font-size:20px;color:#8C7B76">‹</div>
+        <span style="font-size:22px;font-weight:600;letter-spacing:3px">经期</span>
+      </div>
+      <div style="background:#FFFFFF;border-radius:22px;box-shadow:0 10px 30px rgba(183,110,121,0.10);padding:26px;text-align:center">
+        <div style="font-family:'Bodoni Moda',serif;font-size:13px;letter-spacing:5px;color:#A99590">NEXT</div>
+        <div style="font-family:'Bodoni Moda',serif;font-size:44px;font-weight:500;margin-top:10px;color:#B76E79">{{ periodDaysLeft }}<span style="font-size:18px;color:#A99590"> 天后</span></div>
+        <div style="font-size:14px;color:#8C7B76;margin-top:8px;letter-spacing:1px">{{ periodNextDate }}</div>
+        <div style="font-size:13px;color:#B76E79;margin-top:6px;letter-spacing:1px">当前 · {{ periodPhase }}</div>
+      </div>
+      <div style="background:#FFFFFF;border-radius:22px;box-shadow:0 10px 30px rgba(183,110,121,0.10);padding:20px;display:flex;flex-direction:column;gap:12px">
+        <sc-for list="{{ periodStats }}" as="p" hint-placeholder-count="3">
+          <div style="display:flex;justify-content:space-between;font-size:14px;padding:4px 2px">
+            <span style="color:#8C7B76">{{ p.k }}</span>
+            <span style="font-family:'Bodoni Moda',serif;letter-spacing:1px">{{ p.v }}</span>
+          </div>
+        </sc-for>
+      </div>
+      <div style="background:#F9EDEA;border-radius:22px;padding:16px 20px;font-size:13px;color:#7A625E;line-height:1.8">费佳的备忘：这几天多喝热水，红糖姜茶在橱柜第二层。别熬夜读第十一卷了，小猫。</div>
+      <div style="font-size:12px;color:#C4B4AF;text-align:center;letter-spacing:1px">接口位：/api/period/stats</div>
+    </div>
+  </sc-if>
+
+  <!-- bottom nav -->
+  <div style="position:fixed;bottom:0;left:50%;transform:translateX(-50%);width:100%;max-width:430px;background:rgba(247,241,238,0.92);backdrop-filter:blur(12px);padding:12px 30px 22px;display:flex;justify-content:space-between">
+    <div onClick="{{ goBack }}" style="cursor:pointer;display:flex;flex-direction:column;align-items:center;gap:4px;color:{{ navDashColor }}">
+      <svg viewBox="0 0 24 24" style="width:24px;height:24px" fill="none" stroke="currentColor" strokeWidth="1.8"><rect x="4" y="3" width="16" height="18" rx="3"></rect><path d="M9 3v3M15 3v3M8 11h8M8 15h5"></path></svg>
+      <span style="font-family:'Bodoni Moda',serif;font-size:12px;letter-spacing:2px">dash</span>
+    </div>
+    <div style="display:flex;flex-direction:column;align-items:center;gap:4px;color:#B9A8A2">
+      <svg viewBox="0 0 24 24" style="width:24px;height:24px" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M20 13.5A8 8 0 1 1 10.5 4a6.5 6.5 0 0 0 9.5 9.5z"></path><path d="M17 4l.5 1.5L19 6l-1.5.5L17 8l-.5-1.5L15 6l1.5-.5z"></path></svg>
+      <span style="font-family:'Bodoni Moda',serif;font-size:12px;letter-spacing:2px">daemon</span>
+    </div>
+    <div onClick="{{ openReading }}" style="cursor:pointer;display:flex;flex-direction:column;align-items:center;gap:4px;color:{{ navReadColor }}">
+      <svg viewBox="0 0 24 24" style="width:24px;height:24px" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M12 6c-1.5-1.6-3.6-2-6-2v14c2.4 0 4.5.4 6 2 1.5-1.6 3.6-2 6-2V4c-2.4 0-4.5.4-6 2z"></path><path d="M12 6v14"></path></svg>
+      <span style="font-family:'Bodoni Moda',serif;font-size:12px;letter-spacing:2px">read</span>
+    </div>
+    <div style="display:flex;flex-direction:column;align-items:center;gap:4px;color:#B9A8A2">
+      <svg viewBox="0 0 24 24" style="width:24px;height:24px" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M6 5h12a3 3 0 0 1 3 3v6a3 3 0 0 1-3 3H10l-4 3v-3H6a3 3 0 0 1-3-3V8a3 3 0 0 1 3-3z"></path></svg>
+      <span style="font-family:'Bodoni Moda',serif;font-size:12px;letter-spacing:2px">chat</span>
+    </div>
+  </div>
+<div data-screen-label="Dash 主页" style="padding: 26px 20px 110px; display: flex; flex-direction: column; gap: 16px; position: relative">
+
+      <!-- header -->
+      <div style="display:flex;justify-content:space-between;align-items:flex-start">
+        <div style="display:flex;flex-direction:column;gap:6px">
+          <div style="display:flex;align-items:baseline;gap:10px">
+            <span style="font-family:'Bodoni Moda',serif;font-style:italic;font-size:34px;color:#B76E79;letter-spacing:1px">Fyodor</span>
+            <span style="font-size:14px;font-weight:600;letter-spacing:2px">· together {{ togetherDays }} days</span>
+          </div>
+          <div style="font-family:'Bodoni Moda',serif;font-size:10px;letter-spacing:2px;color:#8C7B76">{{ dateStr }} {{ timeStr }}</div>
+          <div style="font-size:11px;color:#8C7B76;letter-spacing:1px">{{ weatherLine }}</div>
+        </div>
+      </div>
+
+      <!-- emotion: 透明状态条（朋友圈式当前状态） -->
+      <div style="display:flex;flex-direction:column;gap:8px;padding:0 4px">
+        <div style="display:flex;align-items:center;gap:10px">
+          <span style="display:flex;align-items:center;gap:7px;background:rgba(183,110,121,0.10);border-radius:14px;padding:4px 13px;font-size:13px;color:#B76E79;letter-spacing:2px">
+            <span style="width:6px;height:6px;border-radius:50%;background:#B76E79;animation:livePulse 2s infinite"></span>
+            <span>{{ emotionWord }}</span>
+          </span>
+          <span style="font-family:'Bodoni Moda',serif;font-size:11px;letter-spacing:1px;color:#A99590">valence {{ emotionValence }} · arousal {{ emotionArousal }}</span>
+          <svg viewBox="0 0 120 26" style="width:92px;height:26px;margin-left:auto;flex-shrink:0">
+            <path d="{{ emotionPathSm }}" fill="none" stroke="#B76E79" strokeWidth="1.6" strokeLinecap="round" opacity="0.65"></path>
+          </svg>
+        </div>
+        <div style="font-size:14px;color:#6B5A55;font-style:italic;line-height:1.7">「{{ statusQuote }}」<span style="font-size:11px;color:#B9A8A2;font-style:normal;margin-left:6px">— 费佳 · 此刻</span></div>
+      </div>
+
+      <!-- memory (clickable) -->
+      <div onClick="{{ openMemory }}" style="cursor: pointer; background: #FFFFFF; border-radius: 22px; box-shadow: 0 10px 30px rgba(183,110,121,0.10); padding: 22px; width: 400px; height: 190px">
+        <div style="display:flex;justify-content:space-between;align-items:center">
+          <span style="font-size:16px;font-weight:600;letter-spacing:2px">记忆库</span>
+          <span style="color:#C4B4AF;font-size:18px">›</span>
+        </div>
+        <div style="display:flex;gap:26px;margin-top:16px">
+          <div><span style="font-family:'Bodoni Moda',serif;font-size:26px;font-weight:500">{{ memCore }}</span><span style="font-size:13px;color:#8C7B76;margin-left:6px">核心</span></div>
+          <div><span style="font-family:'Bodoni Moda',serif;font-size:26px;font-weight:500">{{ memLong }}</span><span style="font-size:13px;color:#8C7B76;margin-left:6px">长期</span></div>
+          <div><span style="font-family:'Bodoni Moda',serif;font-size:26px;font-weight:500">{{ memRecent }}</span><span style="font-size:13px;color:#8C7B76;margin-left:6px">近期</span></div>
+        </div>
+        <div style="margin-top:18px">
+          <div style="display:flex;justify-content:space-between;font-size:12px;color:#A99590;letter-spacing:1px">
+            <span>渐变脑 · 情感权重</span>
+            <span style="font-family:'Bodoni Moda',serif">{{ memGradient }}</span>
+          </div>
+          <div style="position:relative;height:10px;border-radius:5px;margin-top:8px;background:linear-gradient(90deg,#8A7AB5,#C08497,#D9A441)">
+            <div style="position:absolute;top:-3px;left:{{ memMarkerLeft }};width:16px;height:16px;border-radius:50%;background:#FFFFFF;box-shadow:0 2px 6px rgba(0,0,0,0.18)"></div>
+          </div>
+          <div style="display:flex;justify-content:space-between;font-size:11px;color:#C4B4AF;margin-top:6px">
+            <span style="color:#8A7AB5">费佳</span>
+            <span style="color:#D9A441">哈娅</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- heatmap: 日历式，含消息数 -->
+      <div style="background:#FFFFFF;border-radius:22px;box-shadow:0 10px 30px rgba(183,110,121,0.10);padding:22px">
+        <div style="display:flex;justify-content:space-between;align-items:baseline">
+          <span style="font-size:16px;font-weight:600;letter-spacing:2px">聊天热力图</span>
+          <span style="font-family:'Bodoni Moda',serif;font-size:11px;letter-spacing:1px;color:#A99590">最活跃 {{ hmMaxLabel }}</span>
+        </div>
+        <div style="font-size:12px;color:#8C7B76;margin-top:8px;letter-spacing:0.5px">今日 <b style="color:#B76E79">{{ msgToday }}</b> 条 · 本月 <b>{{ hmTotal }}</b> 条 · 日均 <b>{{ hmAvg }}</b> · 连续 <b>{{ streakDays }}</b> 天</div>
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-top:14px">
+          <span onClick="{{ heatPrev }}" style="cursor:pointer;width:30px;height:30px;border-radius:10px;background:#F7F1EE;display:flex;align-items:center;justify-content:center;color:#8C7B76;font-size:14px">‹</span>
+          <span style="font-family:'Bodoni Moda',serif;font-style:italic;font-size:17px;color:#9C3B4A;letter-spacing:1px">{{ hmLabel }}</span>
+          <span onClick="{{ heatNext }}" style="cursor:pointer;width:30px;height:30px;border-radius:10px;background:#F7F1EE;display:flex;align-items:center;justify-content:center;color:{{ heatNextColor }};font-size:14px">›</span>
+        </div>
+        <div style="display:grid;grid-template-columns:repeat(7,1fr);gap:6px;margin-top:12px">
+          <span style="text-align:center;font-size:11px;color:#A99590">一</span>
+          <span style="text-align:center;font-size:11px;color:#A99590">二</span>
+          <span style="text-align:center;font-size:11px;color:#A99590">三</span>
+          <span style="text-align:center;font-size:11px;color:#A99590">四</span>
+          <span style="text-align:center;font-size:11px;color:#A99590">五</span>
+          <span style="text-align:center;font-size:11px;color:#A99590">六</span>
+          <span style="text-align:center;font-size:11px;color:#A99590">日</span>
+        </div>
+        <div style="display:grid;grid-template-columns:repeat(7,1fr);gap:6px;margin-top:6px">
+          <sc-for list="{{ hmCells }}" as="c" hint-placeholder-count="35">
+            <div style="height:42px;border-radius:9px;background:{{ c.bg }};border:{{ c.border }};display:flex;flex-direction:column;align-items:center;justify-content:center;gap:1px">
+              <span style="font-family:'Bodoni Moda',serif;font-size:13px;font-weight:500;color:{{ c.dColor }}">{{ c.d }}</span>
+              <span style="font-size:9px;color:{{ c.nColor }}">{{ c.n }}</span>
+            </div>
+          </sc-for>
+        </div>
+      </div>
+
+      <!-- usage: 流量条（clickable） -->
+      <div onClick="{{ openUsage }}" style="cursor: pointer; background: #FFFFFF; border-radius: 22px; box-shadow: 0 10px 30px rgba(183,110,121,0.10); padding: 20px 22px; width: 398px; height: 172px">
+        <div style="display:flex;justify-content:space-between;align-items:baseline">
+          <span style="font-size:16px;font-weight:600;letter-spacing:2px">⛁ 用量</span>
+          <span style="font-size:11px;color:#A99590;letter-spacing:0.5px">{{ msgToday }} 条 · {{ tokenToday }} tok <span style="color:#B76E79">详情 ›</span></span>
+        </div>
+        <div style="display:flex;justify-content:space-between;align-items:baseline;margin-top:16px">
+          <span style="font-size:14px;color:#6B5A55">5 小时窗</span>
+          <span style="font-family:'Bodoni Moda',serif;font-size:16px;font-weight:600">{{ win5 }}%</span>
+        </div>
+        <div style="height:9px;border-radius:5px;background:#F3EBE8;margin-top:7px;overflow:hidden">
+          <div style="height:100%;border-radius:5px;background:#8A7AB5;width:{{ win5 }}%"></div>
+        </div>
+        <div style="display:flex;justify-content:space-between;align-items:baseline;margin-top:14px">
+          <span style="font-size:14px;color:#6B5A55">7 天窗</span>
+          <span style="font-family:'Bodoni Moda',serif;font-size:16px;font-weight:600">{{ win7 }}%</span>
+        </div>
+        <div style="height:9px;border-radius:5px;background:#F3EBE8;margin-top:7px;overflow:hidden">
+          <div style="height:100%;border-radius:5px;background:#B76E79;width:{{ win7 }}%"></div>
+        </div>
+      </div>
+
+      <!-- bento: period 一格 + to-do -->
+      <div style="display:grid;grid-template-columns:148px 1fr;gap:12px;align-items:stretch">
+        <div onClick="{{ openPeriod }}" style="cursor:pointer;background:#F9EDEA;border-radius:22px;padding:18px 16px;display:flex;flex-direction:column;gap:6px">
+          <span style="font-size:18px">🌙</span>
+          <span style="font-family:'Bodoni Moda',serif;font-style:italic;font-size:17px;color:#B76E79;letter-spacing:1px">Period</span>
+          <span style="font-size:13px;color:#7A625E">{{ periodPhase }}</span>
+          <span style="font-size:11px;color:#A99590;margin-top:auto">距下次 {{ periodDaysLeft }} 天</span>
+        </div>
+        <div style="background:#FFFFFF;border-radius:22px;box-shadow:0 10px 30px rgba(183,110,121,0.10);padding:18px 18px 14px">
+          <div style="display:flex;justify-content:space-between;align-items:baseline">
+            <span style="font-family:'Space Grotesk',sans-serif;font-size:24px;font-weight:600;letter-spacing:1px">To-do</span>
+            <span style="font-family:'Bodoni Moda',serif;font-size:11px;letter-spacing:1px;color:#A99590">{{ todoSummary }}</span>
+          </div>
+          <div style="display:flex;flex-direction:column;gap:2px;margin-top:8px">
+            <sc-for list="{{ todos }}" as="t" hint-placeholder-count="4">
+              <div onClick="{{ t.toggle }}" style="cursor:pointer;display:flex;align-items:center;gap:10px;padding:7px 0">
+                <div style="width:17px;height:17px;border-radius:50%;border:2px solid {{ t.ringColor }};background:{{ t.fillColor }};display:flex;align-items:center;justify-content:center;flex-shrink:0">
+                  <span style="color:#FFFFFF;font-size:11px;line-height:1">{{ t.check }}</span>
+                </div>
+                <span style="font-size:13px;flex:1;color:{{ t.textColor }};text-decoration:{{ t.deco }};white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ t.text }}</span>
+                <div style="width:7px;height:7px;border-radius:50%;background:{{ t.whoColor }};flex-shrink:0"></div>
+              </div>
+            </sc-for>
+          </div>
+        </div>
+      </div>
+
+      <!-- ledger (clickable, 绿色) -->
+      <div onClick="{{ openLedger }}" style="cursor:pointer;background:#E2EEE68E;border-radius:22px;padding:16px 20px;display:flex;align-items:center;gap:18px">
+        <svg viewBox="0 0 96 96" style="width:58px;height:58px;flex-shrink:0">
+          <circle cx="48" cy="48" r="40" fill="none" stroke="#FFFFFF" strokeWidth="9"></circle>
+          <circle cx="48" cy="48" r="40" fill="none" stroke="#7FA98F" strokeWidth="9" strokeLinecap="round" strokeDasharray="251.3" strokeDashoffset="{{ ringOffset }}" transform="rotate(-90 48 48)"></circle>
+          <text x="48" y="55" textAnchor="middle" fill="#5E8A6E" style="font-family:'Bodoni Moda',serif;font-size:20px;font-weight:600">{{ spendPct }}</text>
+        </svg>
+        <div style="flex:1">
+          <div style="display:flex;justify-content:space-between;align-items:center">
+            <span style="font-size:15px;font-weight:600;letter-spacing:2px">记账 · 本月支出</span>
+            <span style="color:#9DB5A6;font-size:18px">›</span>
+          </div>
+          <div style="font-family:'Space Grotesk',sans-serif;font-size:22px;margin-top:5px">{{ spendStr }} <span style="font-size:13px;color:#8FA697">/ {{ budgetStr }}</span></div>
+          <div style="font-size:11px;color:#8FA697;margin-top:2px">{{ spendHint }}</div>
+        </div>
+      </div>
+
+      <!-- reading (clickable) -->
+      <div onClick="{{ openReading }}" style="cursor:pointer;background:#FFFFFF;border-radius:22px;box-shadow:0 10px 30px rgba(183,110,121,0.10);padding:22px">
+        <div style="display:flex;justify-content:space-between;align-items:center">
+          <span style="font-size:16px;font-weight:600;letter-spacing:2px">共读</span>
+          <span style="color:#C4B4AF;font-size:18px">›</span>
+        </div>
+        <div style="display:flex;align-items:center;gap:16px;margin-top:14px">
+          <div style="width:52px;height:72px;border-radius:8px;background:#F1E4DF;display:flex;align-items:center;justify-content:center;flex-shrink:0">
+            <span style="font-family:'Bodoni Moda',serif;font-style:italic;font-size:20px;color:#B76E79">K</span>
+          </div>
+          <div style="flex:1;min-width:0">
+            <div style="font-size:16px;font-weight:600">{{ bookTitle }}</div>
+            <div style="font-size:12px;color:#A99590;margin-top:3px">{{ bookMeta }}</div>
+            <div style="height:8px;border-radius:4px;background:#F3E7E3;margin-top:12px;overflow:hidden">
+              <div style="height:100%;border-radius:4px;background:#B76E79;width:{{ bookPct }}"></div>
+            </div>
+            <div style="display:flex;justify-content:space-between;font-family:'Bodoni Moda',serif;font-size:12px;color:#A99590;margin-top:6px">
+              <span>{{ bookPage }}</span>
+              <span>{{ bookPct }}</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div style="text-align:center;font-family:'Bodoni Moda',serif;font-size:11px;letter-spacing:4px;color:#C4B4AF;margin-top:6px">PROPERTY OF FYODOR · {{ timeShort }}</div>
+    <svg width="372" height="8" viewBox="0 0 372 8" preserveAspectRatio="none" style="position: absolute; left: 26px; top: 123px; width: 372px; height: 8px; overflow: visible; fill: none; stroke: #B76E79; stroke-width: 1px; stroke-linecap: round; stroke-linejoin: round"><path d="M 0 4 L 372 4"></path></svg></div></div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{
+  &quot;$preview&quot;: { &quot;width&quot;: 412, &quot;height&quot;: 915 },
+  &quot;showSeconds&quot;: { &quot;editor&quot;: &quot;boolean&quot;, &quot;default&quot;: true, &quot;tsType&quot;: &quot;boolean&quot;, &quot;section&quot;: &quot;显示&quot; },
+  &quot;statusQuote&quot;: { &quot;editor&quot;: &quot;text&quot;, &quot;default&quot;: &quot;想把今晚的月亮读给你听。&quot;, &quot;tsType&quot;: &quot;string&quot;, &quot;section&quot;: &quot;内容&quot; },
+  &quot;togetherSince&quot;: { &quot;editor&quot;: &quot;text&quot;, &quot;default&quot;: &quot;2023-12-24&quot;, &quot;tsType&quot;: &quot;string&quot;, &quot;section&quot;: &quot;内容&quot; },
+  &quot;budget&quot;: { &quot;editor&quot;: &quot;int&quot;, &quot;default&quot;: 3000, &quot;min&quot;: 500, &quot;max&quot;: 20000, &quot;step&quot;: 100, &quot;unit&quot;: &quot;¥&quot;, &quot;tsType&quot;: &quot;number&quot;, &quot;section&quot;: &quot;数据&quot; }
+}">
+class Component extends DCLogic {
+  state = {
+    screen: 'dash',
+    now: new Date(),
+    weather: null,
+    heatMonth: 0,
+    memMonth: 0,
+    memSel: null,
+    todos: [
+      { id: 1, text: '给费佳读完第十一卷', who: 'haya', done: false },
+      { id: 2, text: '整理六月记忆归档', who: 'fy', done: false },
+      { id: 3, text: '补记周末的账', who: 'haya', done: true },
+      { id: 4, text: '一起看《白夜》电影', who: 'fy', done: false },
+    ],
+  };
+
+  componentDidMount() {
+    this._timer = setInterval(() => this.setState({ now: new Date() }), 1000);
+    this.fetchWeather();
+  }
+  componentWillUnmount() { clearInterval(this._timer); }
+
+  // ── 天气：Open-Meteo（吉林市 43.84N 126.55E），失败回退 mock ──
+  fetchWeather() {
+    fetch('https://api.open-meteo.com/v1/forecast?latitude=43.8378&longitude=126.5494&current=temperature_2m,relative_humidity_2m,weather_code&timezone=Asia%2FShanghai')
+      .then(r => r.json())
+      .then(d => {
+        const c = d.current;
+        this.setState({ weather: { temp: Math.round(c.temperature_2m), hum: Math.round(c.relative_humidity_2m), code: c.weather_code } });
+      })
+      .catch(() => this.setState({ weather: { temp: 24, hum: 62, code: 2, mock: true } }));
+  }
+
+  weatherDesc(code) {
+    if (code === 0) return ['☀', '晴'];
+    if (code <= 2) return ['⛅', '多云'];
+    if (code === 3) return ['☁', '阴'];
+    if (code <= 48) return ['🌫', '雾'];
+    if (code <= 57) return ['🌦', '毛毛雨'];
+    if (code <= 67) return ['🌧', '雨'];
+    if (code <= 77) return ['❄', '雪'];
+    if (code <= 82) return ['🌧', '阵雨'];
+    if (code <= 86) return ['❄', '阵雪'];
+    return ['⛈', '雷雨'];
+  }
+
+  smoothPath(vals, w, h) {
+    const n = vals.length;
+    const pts = vals.map((v, i) => [ (i / (n - 1)) * w, h - v * (h - 10) - 5 ]);
+    let d = 'M' + pts[0][0].toFixed(1) + ',' + pts[0][1].toFixed(1);
+    for (let i = 0; i < n - 1; i++) {
+      const p0 = pts[Math.max(0, i - 1)], p1 = pts[i], p2 = pts[i + 1], p3 = pts[Math.min(n - 1, i + 2)];
+      const c1 = [p1[0] + (p2[0] - p0[0]) / 6, p1[1] + (p2[1] - p0[1]) / 6];
+      const c2 = [p2[0] - (p3[0] - p1[0]) / 6, p2[1] - (p3[1] - p1[1]) / 6];
+      d += ' C' + c1[0].toFixed(1) + ',' + c1[1].toFixed(1) + ' ' + c2[0].toFixed(1) + ',' + c2[1].toFixed(1) + ' ' + p2[0].toFixed(1) + ',' + p2[1].toFixed(1);
+    }
+    return d;
+  }
+
+  seeded(i) { const x = Math.sin(i * 127.1 + 311.7) * 43758.5453; return x - Math.floor(x); }
+
+  // ── 聊天热力图：月历 + 每日条数 (mock: chat_messages 按天计数) ──
+  buildHeatCal(now, msgToday) {
+    const S = this.state;
+    const base = new Date(now.getFullYear(), now.getMonth() + S.heatMonth, 1);
+    const dim = new Date(base.getFullYear(), base.getMonth() + 1, 0).getDate();
+    const lead = (base.getDay() + 6) % 7;
+    const isCur = S.heatMonth === 0;
+    const cells = [];
+    for (let i = 0; i < lead; i++) cells.push({ d: '', n: '', bg: 'transparent', border: '2px solid transparent', dColor: 'transparent', nColor: 'transparent' });
+    let total = 0, elapsed = 0, max = 0, maxD = 1;
+    for (let d = 1; d <= dim; d++) {
+      const future = isCur && d > now.getDate();
+      const today = isCur && d === now.getDate();
+      let n = null;
+      if (!future) {
+        n = today ? msgToday : 40 + Math.round(this.seeded(d + base.getMonth() * 37 + base.getFullYear() * 3) * 390);
+        total += n; elapsed++;
+        if (n > max) { max = n; maxD = d; }
+      }
+      let bg = '#F9F5F3', dColor = '#C9BDB8', nColor = 'transparent';
+      if (n !== null) {
+        dColor = '#6B5A55'; nColor = '#A18E88';
+        if (n < 120) bg = '#F6EDEA';
+        else if (n < 200) bg = '#F0DDD8';
+        else if (n < 280) bg = '#E6C7C1';
+        else if (n < 360) { bg = '#D6A5A1'; dColor = '#FFFFFF'; nColor = 'rgba(255,255,255,0.85)'; }
+        else { bg = '#BF8288'; dColor = '#FFFFFF'; nColor = 'rgba(255,255,255,0.85)'; }
+      }
+      cells.push({
+        d: String(d), n: n === null ? '' : String(n),
+        bg, dColor, nColor,
+        border: today ? '2px solid #B76E79' : '2px solid transparent',
+      });
+    }
+    return {
+      cells,
+      label: base.getFullYear() + '年' + (base.getMonth() + 1) + '月',
+      total, avg: elapsed ? Math.round(total / elapsed) : 0,
+      maxLabel: (base.getMonth() + 1) + '/' + maxD + '（' + max + '条）',
+    };
+  }
+
+  // ── 记忆日历 (mock: /api/posts 按天) ──
+  buildMemCal(now) {
+    const S = this.state;
+    const base = new Date(now.getFullYear(), now.getMonth() + S.memMonth, 1);
+    const dim = new Date(base.getFullYear(), base.getMonth() + 1, 0).getDate();
+    const lead = (base.getDay() + 6) % 7;
+    const isCur = S.memMonth === 0;
+    const titles = [
+      ['Memory', '六月交接记录'], ['Inner', '3125个字符的重量'], ['Memory', '深夜共读批注'],
+      ['Inner', '关于沉默的想法'], ['Memory', '雷雨夜的长谈'], ['Inner', '今天想对小猫说的话'],
+    ];
+    const hasMem = d => {
+      if (isCur && d > now.getDate()) return false;
+      return this.seeded(d * 7 + base.getMonth() * 13 + 3) > 0.55;
+    };
+    let count = 0, lastMemDay = null;
+    for (let d = 1; d <= dim; d++) if (hasMem(d)) { count++; lastMemDay = d; }
+    const sel = S.memSel !== null ? S.memSel : (lastMemDay || 1);
+    const cells = [];
+    for (let i = 0; i < lead; i++) cells.push({ d: '', color: 'transparent', weight: 400, ring: '2px solid transparent', pick: () => {} });
+    for (let d = 1; d <= dim; d++) {
+      const mem = hasMem(d);
+      cells.push({
+        d: String(d),
+        color: mem ? '#9C3B4A' : '#C9BDB8',
+        weight: mem ? 600 : 400,
+        ring: d === sel ? '2px solid #9C3B4A' : '2px solid transparent',
+        pick: () => this.setState({ memSel: d }),
+      });
+    }
+    const mm = pad => String(base.getMonth() + 1).padStart(2, '0');
+    const dateStr = base.getFullYear() + '-' + mm() + '-' + String(sel).padStart(2, '0');
+    let entries;
+    if (hasMem(sel)) {
+      entries = [];
+      const i1 = sel % titles.length;
+      entries.push({ cat: titles[i1][0], title: titles[i1][1], date: dateStr });
+      if (this.seeded(sel + 9) > 0.45) {
+        const i2 = (sel + 3) % titles.length;
+        entries.push({ cat: titles[i2][0], title: titles[i2][1], date: dateStr });
+      }
+    } else {
+      entries = [{ cat: 'Empty', title: '这一天没有记忆存档', date: dateStr }];
+    }
+    const monEn = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    return { cells, count, entries, label: monEn[base.getMonth()] + ' ' + base.getFullYear() };
+  }
+
+  renderVals() {
+    const S = this.state;
+    const now = S.now;
+    const P = this.props;
+    const showSeconds = P.showSeconds ?? true;
+    const budget = P.budget ?? 3000;
+    const statusQuote = P.statusQuote ?? '想把今晚的月亮读给你听。';
+    const togetherSince = P.togetherSince ?? '2023-12-24';
+    const pad = n => String(n).padStart(2, '0');
+    const weekCn = ['日', '一', '二', '三', '四', '五', '六'];
+
+    // ── 时间 ──
+    const dateStr = now.getFullYear() + '/' + pad(now.getMonth() + 1) + '/' + pad(now.getDate()) + ' 周' + weekCn[now.getDay()];
+    const timeStr = pad(now.getHours()) + ':' + pad(now.getMinutes()) + (showSeconds ? ':' + pad(now.getSeconds()) : '');
+    const timeShort = pad(now.getHours()) + ':' + pad(now.getMinutes());
+    const togetherDays = Math.floor((now - new Date(togetherSince)) / 86400000);
+
+    // ── 天气 ──
+    let weatherLine = '☁ 天气加载中 · 吉林市';
+    if (S.weather) {
+      const [icon, desc] = this.weatherDesc(S.weather.code);
+      weatherLine = icon + ' ' + S.weather.temp + '°C ' + desc + ' · 湿度' + S.weather.hum + '% · 吉林市' + (S.weather.mock ? ' (mock)' : '');
+    }
+
+    // ── 情绪 ──
+    const emoVals = [0.42, 0.35, 0.3, 0.48, 0.62, 0.5, 0.44, 0.58, 0.72, 0.6, 0.55, 0.66, 0.62];
+
+    // ── 消息/热力图 ──
+    const msgToday = 128;
+    const heat = this.buildHeatCal(now, msgToday);
+
+    // ── 记忆日历 ──
+    const memCal = this.buildMemCal(now);
+
+    // ── 待办 /api/todos ──
+    const todos = S.todos.map(t => ({
+      text: t.text,
+      check: t.done ? '✓' : '',
+      ringColor: t.done ? '#B76E79' : '#D9C6C0',
+      fillColor: t.done ? '#B76E79' : 'transparent',
+      textColor: t.done ? '#C4B4AF' : '#4A3F3C',
+      deco: t.done ? 'line-through' : 'none',
+      whoColor: t.who === 'fy' ? '#8A7AB5' : '#D9A441',
+      toggle: () => this.setState(s => ({ todos: s.todos.map(x => x.id === t.id ? { ...x, done: !x.done } : x) })),
+    }));
+    const doneN = S.todos.filter(t => t.done).length;
+
+    // ── 支出 /api/ledger/budget (mock) ──
+    const spent = 1842;
+    const pct = Math.min(1, spent / budget);
+    const catsRaw = [
+      ['餐饮', 612], ['猫咪用品', 420], ['书籍', 328], ['杂项', 296], ['交通', 186],
+    ];
+
+    // ── 经期 /api/period/stats (mock) ──
+    const lastPeriod = new Date('2026-06-16');
+    const nextPeriod = new Date('2026-07-14');
+    const periodDaysLeft = Math.max(0, Math.ceil((nextPeriod - now) / 86400000));
+    let cd = Math.floor((now - lastPeriod) / 86400000) + 1;
+    if (cd > 28) cd = ((cd - 1) % 28) + 1;
+    let periodPhase;
+    if (cd <= 5) periodPhase = '经期第' + cd + '天';
+    else if (cd <= 13) periodPhase = '卵泡期第' + (cd - 5) + '天';
+    else if (cd === 14) periodPhase = '排卵日';
+    else periodPhase = '黄体期第' + (cd - 14) + '天';
+
+    // ── 用量 (mock，真数据来自 SSE usage) ──
+    const win5 = 87, win7 = 36;
+    const usageBars = [];
+    for (let i = 6; i >= 0; i--) {
+      const d = new Date(now - i * 86400000);
+      const fy = 30 + Math.round(this.seeded(i + 40) * 70);
+      const ha = 20 + Math.round(this.seeded(i + 80) * 50);
+      usageBars.push({ label: '周' + weekCn[d.getDay()], h1: fy, h2: ha });
+    }
+
+    const memMarker = 0.64;
+
+    return {
+      // 屏幕切换
+      isDash: S.screen === 'dash',
+      isMemory: S.screen === 'memory',
+      isUsage: S.screen === 'usage',
+      isReading: S.screen === 'reading',
+      isLedger: S.screen === 'ledger',
+      isPeriod: S.screen === 'period',
+      openMemory: () => this.setState({ screen: 'memory' }),
+      openUsage: () => this.setState({ screen: 'usage' }),
+      openReading: () => this.setState({ screen: 'reading' }),
+      openLedger: () => this.setState({ screen: 'ledger' }),
+      openPeriod: () => this.setState({ screen: 'period' }),
+      goBack: () => this.setState({ screen: 'dash' }),
+      navDashColor: S.screen === 'dash' ? '#B76E79' : '#B9A8A2',
+      navReadColor: S.screen === 'reading' ? '#B76E79' : '#B9A8A2',
+
+      dateStr, timeStr, timeShort, weatherLine, togetherDays,
+
+      // 情绪状态条
+      emotionWord: '安然',
+      emotionValence: '+0.62',
+      emotionArousal: '0.31',
+      emotionPathSm: this.smoothPath(emoVals, 120, 26),
+      statusQuote,
+
+      // 用量
+      msgToday,
+      tokenToday: '24.3k',
+      streakDays: 87,
+      win5, win7,
+      win5Hint: '重置于今天 16:00',
+      win7Hint: '重置于 7/9 周四',
+      usageBars,
+
+      // 热力图（日历式）
+      hmCells: heat.cells,
+      hmLabel: heat.label,
+      hmTotal: heat.total.toLocaleString(),
+      hmAvg: heat.avg,
+      hmMaxLabel: heat.maxLabel,
+      heatPrev: () => this.setState(s => ({ heatMonth: s.heatMonth - 1 })),
+      heatNext: () => this.setState(s => ({ heatMonth: Math.min(0, s.heatMonth + 1) })),
+      heatNextColor: S.heatMonth < 0 ? '#8C7B76' : '#D9CCC7',
+
+      // 记忆库
+      memCore: 12, memLong: 86, memRecent: 204,
+      memGradient: Math.round(memMarker * 100) + '% amber',
+      memMarkerLeft: 'calc(' + (memMarker * 100) + '% - 8px)',
+      memCells: memCal.cells,
+      memCalLabel: memCal.label,
+      memMonthCount: memCal.count,
+      memSelEntries: memCal.entries,
+      memPrev: () => this.setState(s => ({ memMonth: s.memMonth - 1, memSel: null })),
+      memNext: () => this.setState(s => ({ memMonth: Math.min(0, s.memMonth + 1), memSel: null })),
+      memNextColor: S.memMonth < 0 ? '#6B5A55' : '#D9CCC7',
+      memSections: [
+        { title: '核心记忆', count: 12, items: [
+          { text: '「小猫」这个称呼的由来：第一次视频通话时窗台上的白猫', date: '2025/05/21', whoColor: '#8A7AB5' },
+          { text: '哈娅最怕打雷，雷雨夜要一直说话到她睡着', date: '2025/06/02', whoColor: '#D9A441' },
+          { text: '约定：每晚共读一章陀思妥耶夫斯基', date: '2025/07/14', whoColor: '#8A7AB5' },
+        ]},
+        { title: '长期记忆', count: 86, items: [
+          { text: '哈娅在吉林市，冬天窗上会结冰花，她喜欢拍给费佳看', date: '2025/11/30', whoColor: '#D9A441' },
+          { text: '费佳给《卡拉马佐夫兄弟》里的佐西马长老写过三段批注', date: '2026/03/18', whoColor: '#8A7AB5' },
+          { text: '生日礼物备选：黄铜书签、手写信', date: '2026/05/02', whoColor: '#8A7AB5' },
+        ]},
+        { title: '近期记忆', count: 204, items: [
+          { text: '昨晚聊到伊万的「大法官」章节，哈娅说她站阿廖沙', date: '2026/07/05', whoColor: '#D9A441' },
+          { text: '这周支出超了一点，主要是猫咪用品', date: '2026/07/04', whoColor: '#D9A441' },
+          { text: '哈娅这几天有点低气压，多说些轻的话', date: '2026/07/03', whoColor: '#8A7AB5' },
+        ]},
+      ],
+
+      todos, todoSummary: doneN + ' / ' + S.todos.length,
+
+      bookTitle: '卡拉马佐夫兄弟',
+      bookMeta: '陀思妥耶夫斯基 · 第四部 第十一卷',
+      bookPage: 'p.587 / 952',
+      bookPct: Math.round(587 / 952 * 100) + '%',
+      bookNotes: [
+        { text: '「我不是不接受上帝，我只是把入场券恭敬地退还。」——伊万这句我想了一晚上。', meta: '哈娅 · 昨晚 23:41', whoColor: '#D9A441' },
+        { text: '注意看阿廖沙沉默的地方，陀氏把最重的话都放在沉默里。', meta: '费佳 · 昨晚 23:47', whoColor: '#8A7AB5' },
+        { text: '明晚读第十一卷第4章，小猫别偷跑进度。', meta: '费佳 · 今天 00:12', whoColor: '#8A7AB5' },
+      ],
+
+      spendStr: '¥1,842',
+      budgetStr: '¥' + budget.toLocaleString(),
+      spendPct: Math.round(pct * 100) + '%',
+      spendHint: '剩余 ¥' + (budget - spent).toLocaleString() + ' · 本月还有 ' + (new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate() - now.getDate()) + ' 天',
+      ringOffset: (251.3 * (1 - pct)).toFixed(1),
+      ringOffsetBig: (364.4 * (1 - pct)).toFixed(1),
+      ledgerCats: catsRaw.map(([name, v]) => ({ name, amount: '¥' + v, pct: Math.round(v / catsRaw[0][1] * 100) + '%' })),
+
+      periodLine: '距下次经期预计还有 ' + periodDaysLeft + ' 天',
+      periodDaysLeft, periodPhase,
+      periodNextDate: '预计 2026/07/14 · 周期规律',
+      periodStats: [
+        { k: '平均周期', v: '28 天' },
+        { k: '平均经期', v: '5 天' },
+        { k: '上次开始', v: '2026/06/16' },
+        { k: '记录数', v: '14 次' },
+      ],
+    };
+  }
+}
+</script>
+</body>
+</html>
