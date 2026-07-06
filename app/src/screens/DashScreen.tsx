@@ -233,7 +233,7 @@ export function DashScreen() {
       </Card>
 
       {/* usage: traffic-light bars (clickable) */}
-      <Card onClick={() => navigate('/usage')} style={{ padding: '20px 22px' }}>
+      <Card onClick={() => navigate('/usage')} style={{ padding: '18px 18px', width: '86%', margin: '0 auto' }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
           <span style={{ fontSize: 16, fontWeight: 600, letterSpacing: 2 }}>⛁ 用量</span>
           <span style={{ fontSize: 11, color: 'var(--color-text-faint)', letterSpacing: 0.5 }}>
