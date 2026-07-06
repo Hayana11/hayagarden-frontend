@@ -87,7 +87,7 @@ def inject_snippets(system: str, mode: str,
                     desire_driven: bool = False,
                     longing_enabled: bool = False) -> str:
     """
-    向 system 注入 drive_engine 和 desire snippets（dream/summarize 模式跳过）。
+    向 system 注入 drive_engine、desire snippets、以及欲望账本房间（dream/summarize 模式跳过）。
     """
     if mode in ('dream', 'summarize'):
         return system
@@ -108,5 +108,65 @@ def inject_snippets(system: str, mode: str,
                 system += '\n\n' + snip
         except Exception:
             pass
+
+    # ── 欲望账本房间注入（normal/nightwatch 模式） ──────────────
+    try:
+        from config_store import get_config
+        if not get_config('desire_ledger_enabled', False):
+            return system
+    except Exception:
+        return system
+
+    try:
+        import desire_ledger as _dl
+        import json
+        from app import get_db
+
+        # 取房间候选
+        desires = _dl.surface(limit=6)
+        if not desires:
+            return system
+
+        # 记录到 wake_log 的 surfaced_desire_ids
+        try:
+            conn = get_db()
+            # 最新的 wake_log（未落账状态，最后一条）
+            last_wake = conn.execute("""
+                SELECT id FROM wake_log ORDER BY woke_at DESC LIMIT 1
+            """).fetchone()
+            if last_wake:
+                desire_ids = [d['id'] for d in desires]
+                conn.execute("""
+                    UPDATE wake_log SET surfaced_desire_ids = ? WHERE id = ?
+                """, (json.dumps(desire_ids), last_wake['id']))
+                conn.commit()
+            conn.close()
+        except Exception:
+            pass
+
+        # 生成房间文本（纯文本版本）
+        projects = [d for d in desires if d['track'] == '项目']
+        others = [d for d in desires if d['track'] != '项目']
+
+        room_parts = ['[你的房间]']
+
+        if projects:
+            room_parts.append('桌上钉着的（项目）：')
+            for p in projects:
+                state = p.get('state', '进行中')
+                room_parts.append(f"· 「{p['text']}」——进度：{state}（碰过{p.get('surfaced_count', 0)}次）")
+
+        if others:
+            room_parts.append('最近浮上来的：')
+            for o in others:
+                room_parts.append(f"· 「{o['text']}」——碰过{o.get('surfaced_count', 0)}次")
+
+        room_parts.append('（挑哪件做、还是什么都不做，都是你的事。想记进度用 desire_act，想放下或改写用 desire_reflect。）')
+
+        room_text = '\n'.join(room_parts)
+        system += '\n\n' + room_text
+    except Exception as e:
+        # 故障隔离：房间渲染失败不影响唤醒
+        pass
 
     return system

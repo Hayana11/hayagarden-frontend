@@ -1989,6 +1989,47 @@ def run_tool(name, args, caller='fyodor_cc'):
                 headers={'Content-Type': 'application/json', 'X-Admin': 'true'})
             with urllib.request.urlopen(req, timeout=10) as r:
                 return r.read().decode()
+        # ── 欲望账本五件套 ──────────────────────────
+        if name == 'desire_add':
+            import desire_ledger
+            result = desire_ledger.desire_add(
+                text=args.get('text', ''),
+                why_mine=args.get('why_mine'),
+                track=args.get('track', '持续'),
+                grew_from=args.get('grew_from'),
+                kind=args.get('kind'),
+            )
+            return json.dumps(result, ensure_ascii=False, default=str)
+        if name == 'desire_list':
+            import desire_ledger
+            result = desire_ledger.desire_list(
+                include_archived=args.get('include_archived', False)
+            )
+            return json.dumps(result, ensure_ascii=False, default=str)
+        if name == 'desire_act':
+            import desire_ledger
+            result = desire_ledger.desire_act(
+                desire_id=args.get('id', ''),
+                note=args.get('note', ''),
+                done=args.get('done', False)
+            )
+            return json.dumps(result, ensure_ascii=False, default=str)
+        if name == 'desire_reflect':
+            import desire_ledger
+            result = desire_ledger.desire_reflect(
+                desire_id=args.get('id', ''),
+                action=args.get('action', ''),
+                text=args.get('text'),
+                new_track=args.get('new_track'),
+                days=args.get('days')
+            )
+            return json.dumps(result, ensure_ascii=False, default=str)
+        if name == 'desire_history':
+            import desire_ledger
+            result = desire_ledger.desire_history(
+                desire_id=args.get('id', '')
+            )
+            return json.dumps(result, ensure_ascii=False, default=str)
         return '未知工具: ' + name
     except Exception as e:
         return '工具执行失败: ' + str(e)
@@ -3028,6 +3069,51 @@ WAKE_TOOLS = [
             'prob_max':     {'type': 'number',  'description': '触发概率上限，0-1之间'},
             'prob_scale':   {'type': 'number',  'description': '概率爬升速度，越小越容易触发'},
         }},
+    },
+    {
+        'name': 'desire_add',
+        'description': '开一条新欲望——想要的、决定去做的事，不是该做的任务。会记入你的欲望账本，房间里会开始浮这条。想写进来的时候用：为什么这是你的、大概什么类型（标签）、是不是从某条长出来的。',
+        'input_schema': {'type': 'object', 'properties': {
+            'text': {'type': 'string', 'description': '欲望的内容（你自己的话）'},
+            'why_mine': {'type': 'string', 'description': '为什么这是我的（防止任务混进来）'},
+            'track': {'type': 'string', 'enum': ['持续', '一次', '项目'], 'description': '形状：持续的喜好、一次性想做、长期项目'},
+            'grew_from': {'type': 'string', 'description': '如果这条是从另一条长出来的，填那条的 id'},
+            'kind': {'type': 'string', 'description': '标签，逗号分隔（可选）'},
+        }, 'required': ['text']},
+    },
+    {
+        'name': 'desire_list',
+        'description': '翻一遍你的欲望账本。看全部活跃的、或包括已放下的旧账。每条能看到：碰过几次、上次的足迹、长自谁、长出了谁。',
+        'input_schema': {'type': 'object', 'properties': {
+            'include_archived': {'type': 'boolean', 'description': '是否包括已放下/改写/转化的旧账，默认false'},
+        }},
+    },
+    {
+        'name': 'desire_act',
+        'description': '碰一下想要的事，记一句足迹。写下这次的进度或感受、收获。会看到之前走过的步数。做完了、这条该结束了就传 done=true。',
+        'input_schema': {'type': 'object', 'properties': {
+            'id': {'type': 'string', 'description': '欲望的 id'},
+            'note': {'type': 'string', 'description': '这次的足迹一句话'},
+            'done': {'type': 'boolean', 'description': '是否标记为做完（仅项目/一次能用）'},
+        }, 'required': ['id', 'note']},
+    },
+    {
+        'name': 'desire_reflect',
+        'description': '照镜子：放下、改写、反思、或先歇几天。不是"做完"而是"转化"——长成别的就改写，长出下一条就加新的。',
+        'input_schema': {'type': 'object', 'properties': {
+            'id': {'type': 'string', 'description': '欲望的 id'},
+            'action': {'type': 'string', 'enum': ['release', 'rewrite', 'note', 'snooze'], 'description': '放下/改写/反思/歇几天'},
+            'text': {'type': 'string', 'description': 'rewrite时新的正文、note时反思内容'},
+            'new_track': {'type': 'string', 'description': 'rewrite时可选地改 track'},
+            'days': {'type': 'integer', 'description': 'snooze时歇几天'},
+        }, 'required': ['id', 'action']},
+    },
+    {
+        'name': 'desire_history',
+        'description': '看一条欲望的完整时间线。看它从哪来、走过了哪些步子、是在长还是在原地转。',
+        'input_schema': {'type': 'object', 'properties': {
+            'id': {'type': 'string', 'description': '欲望的 id'},
+        }, 'required': ['id']},
     },
 ]
 

@@ -47,6 +47,11 @@ def _migrate_chat_columns():
 
 _migrate_chat_columns()
 
+# ── 欲望账本（年轮系统 stage A）────────────────────────────
+# 初始化 desire_ledger 和 desire_ledger_notes 表；给 wake_log 加 surfaced_desire_ids 列
+import desire_ledger
+desire_ledger.init_tables()
+
 
 # ── Artifact（费佳生成的 HTML/Markdown/Word 产物）────────────────
 @app.route('/api/artifacts/<int:aid>', methods=['GET'])
