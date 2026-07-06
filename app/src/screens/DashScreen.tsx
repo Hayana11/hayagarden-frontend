@@ -233,7 +233,7 @@ export function DashScreen() {
       </Card>
 
       {/* usage: traffic-light bars (clickable) */}
-      <Card onClick={() => navigate('/usage')} style={{ padding: '18px 18px', width: '86%', margin: '0 auto' }}>
+      <Card onClick={() => navigate('/usage')} style={{ padding: '14px 18px' }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
           <span style={{ fontSize: 16, fontWeight: 600, letterSpacing: 2 }}>⛁ 用量</span>
           <span style={{ fontSize: 11, color: 'var(--color-text-faint)', letterSpacing: 0.5 }}>
@@ -257,7 +257,7 @@ export function DashScreen() {
           <span style={{ fontSize: 13, color: '#7A625E' }}>{periodPhase}</span>
           <span style={{ fontSize: 11, color: 'var(--color-text-faint)', marginTop: 'auto' }}>距下次 {periodDaysLeft} 天</span>
         </div>
-        <Card style={{ padding: '18px 18px 14px' }}>
+        <Card style={{ padding: '16px 16px 12px', overflow: 'hidden' }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
             <span style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 24, fontWeight: 600, letterSpacing: 1 }}>To-do</span>
             <span style={{ fontFamily: "'Bodoni Moda',serif", fontSize: 11, letterSpacing: 1, color: 'var(--color-text-faint)' }}>
@@ -269,7 +269,7 @@ export function DashScreen() {
               <div
                 key={t.id}
                 onClick={() => toggle(t.id)}
-                style={{ cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 10, padding: '7px 0' }}
+                style={{ cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 10, padding: '7px 0', minWidth: 0 }}
               >
                 <div
                   style={{
@@ -290,6 +290,7 @@ export function DashScreen() {
                   style={{
                     fontSize: 13,
                     flex: 1,
+                    minWidth: 0,
                     color: t.done ? 'var(--color-text-fainter)' : 'var(--color-text)',
                     textDecoration: t.done ? 'line-through' : 'none',
                     whiteSpace: 'nowrap',
@@ -309,9 +310,9 @@ export function DashScreen() {
       {/* ledger (clickable, green) */}
       <div
         onClick={() => navigate('/ledger')}
-        style={{ cursor: 'pointer', background: '#E2EEE68E', borderRadius: 22, padding: '16px 20px', display: 'flex', alignItems: 'center', gap: 18 }}
+        style={{ cursor: 'pointer', background: '#E2EEE68E', borderRadius: 22, padding: '12px 16px', display: 'flex', alignItems: 'center', gap: 14 }}
       >
-        <svg viewBox="0 0 96 96" style={{ width: 58, height: 58, flexShrink: 0 }}>
+        <svg viewBox="0 0 96 96" style={{ width: 50, height: 50, flexShrink: 0 }}>
           <circle cx={48} cy={48} r={40} fill="none" stroke="#FFFFFF" strokeWidth={9} />
           <circle
             cx={48}
@@ -325,7 +326,7 @@ export function DashScreen() {
             strokeDashoffset={ringOffset}
             transform="rotate(-90 48 48)"
           />
-          <text x={48} y={55} textAnchor="middle" fill="var(--color-green-deep)" style={{ fontFamily: "'Bodoni Moda',serif", fontSize: 20, fontWeight: 600 }}>
+          <text x={48} y={55} textAnchor="middle" fill="var(--color-green-deep)" style={{ fontFamily: "'Bodoni Moda',serif", fontSize: 18, fontWeight: 600 }}>
             {ledger ? `${Math.round(pct * 100)}%` : '—'}
           </text>
         </svg>
@@ -334,7 +335,7 @@ export function DashScreen() {
             <span style={{ fontSize: 15, fontWeight: 600, letterSpacing: 2 }}>记账 · 本月支出</span>
             <span style={{ color: '#9DB5A6', fontSize: 18 }}>›</span>
           </div>
-          <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 22, marginTop: 5 }}>
+          <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 20, marginTop: 3 }}>
             {formatCurrency(spent)} <span style={{ fontSize: 13, color: 'var(--color-green-soft)' }}>/ {formatCurrency(budget)}</span>
           </div>
           <div style={{ fontSize: 11, color: 'var(--color-green-soft)', marginTop: 2 }}>{spendHint}</div>
@@ -342,16 +343,16 @@ export function DashScreen() {
       </div>
 
       {/* reading (clickable) */}
-      <Card onClick={() => navigate('/reading')} style={{ padding: 22 }}>
+      <Card onClick={() => navigate('/reading')} style={{ padding: 16 }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <span style={{ fontSize: 16, fontWeight: 600, letterSpacing: 2 }}>共读</span>
           <span style={{ color: 'var(--color-text-fainter)', fontSize: 18 }}>›</span>
         </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 16, marginTop: 14 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginTop: 10 }}>
           <div
             style={{
-              width: 52,
-              height: 72,
+              width: 46,
+              height: 64,
               borderRadius: 8,
               background: '#F1E4DF',
               display: 'flex',
@@ -360,7 +361,7 @@ export function DashScreen() {
               flexShrink: 0,
             }}
           >
-            <span style={{ fontFamily: "'Bodoni Moda',serif", fontStyle: 'italic', fontSize: 20, color: 'var(--color-rose)' }}>K</span>
+            <span style={{ fontFamily: "'Bodoni Moda',serif", fontStyle: 'italic', fontSize: 18, color: 'var(--color-rose)' }}>K</span>
           </div>
           <div style={{ flex: 1, minWidth: 0 }}>
             <div style={{ fontSize: 16, fontWeight: 600 }}>{book?.title ?? '—'}</div>

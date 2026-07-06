@@ -1,3 +1,5 @@
+import { useLocation } from 'react-router-dom';
+
 type NavKey = 'dash' | 'chat' | 'read' | 'board';
 
 const ITEMS: { key: NavKey; href: string; icon: string; label: string }[] = [
@@ -8,7 +10,8 @@ const ITEMS: { key: NavKey; href: string; icon: string; label: string }[] = [
 ];
 
 export function BottomNav() {
-  const active: NavKey = 'dash';
+  const location = useLocation();
+  const active: NavKey = location.pathname === '/reading' ? 'read' : 'dash';
 
   return (
     <nav className="bnav" aria-label="主导航">
