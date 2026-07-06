@@ -5,9 +5,18 @@ import { useUsage } from '../hooks/useUsage';
 import { WEEK_CN_SUN_FIRST } from '../lib/format';
 import { formatResetHint, formatTokens } from '../lib/formatDisplay';
 
+function scaleUsageBars(bars: { fy: number; haya: number }[], maxPx: number) {
+  const peak = Math.max(...bars.map((b) => b.fy + b.haya), 1);
+  return bars.map((b) => ({
+    fy: Math.max(2, Math.round((b.fy / peak) * maxPx)),
+    haya: Math.max(2, Math.round((b.haya / peak) * maxPx)),
+  }));
+}
+
 export function UsageScreen() {
   const now = new Date();
   const usage = useUsage(now);
+  const scaledBars = scaleUsageBars(usage?.bars ?? [], 110);
 
   return (
     <ScreenLayout>
@@ -59,14 +68,15 @@ export function UsageScreen() {
             </span>
           </span>
         </div>
-        <div style={{ display: 'flex', alignItems: 'flex-end', gap: 14, height: 150, marginTop: 18, padding: '0 4px' }}>
-          {(usage?.bars ?? []).map((b) => {
+        <div style={{ display: 'flex', alignItems: 'flex-end', gap: 14, height: 140, marginTop: 18, padding: '0 4px', overflow: 'hidden' }}>
+          {(usage?.bars ?? []).map((b, i) => {
             const label = `周${WEEK_CN_SUN_FIRST[new Date(b.date).getDay()]}`;
+            const bar = scaledBars[i] ?? { fy: 0, haya: 0 };
             return (
-              <div key={b.date} style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 6 }}>
-                <div style={{ width: '100%', maxWidth: 26, display: 'flex', flexDirection: 'column', justifyContent: 'flex-end' }}>
-                  <div style={{ height: b.fy, background: 'var(--color-violet)', borderRadius: '5px 5px 0 0' }} />
-                  <div style={{ height: b.haya, background: 'var(--color-amber)', borderRadius: '0 0 5px 5px' }} />
+              <div key={b.date} style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 6, minWidth: 0 }}>
+                <div style={{ width: '100%', maxWidth: 26, height: 110, display: 'flex', flexDirection: 'column', justifyContent: 'flex-end' }}>
+                  <div style={{ height: bar.fy, background: 'var(--color-violet)', borderRadius: '5px 5px 0 0' }} />
+                  <div style={{ height: bar.haya, background: 'var(--color-amber)', borderRadius: '0 0 5px 5px' }} />
                 </div>
                 <span style={{ fontFamily: "'Bodoni Moda',serif", fontSize: 11, color: 'var(--color-text-faint)' }}>{label}</span>
               </div>
