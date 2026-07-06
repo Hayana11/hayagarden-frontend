@@ -9,7 +9,6 @@
 |------|------|---------|------|------|
 | 主站 | 5050 | frontend.service | app.py | 页面路由、聊天记录 API、留言板、日历、漂流瓶、artifacts、配置 API |
 | AI 网关 | 5051 | frontend-gw.service (gunicorn gthread×4) | gateway.py | 聊天流式管线、工具执行、wake、日记、摘要 |
-| 白夜工作台 | 5052 | frontend-workspace.service | workspace_server.py | 独立模型配置的代码工作台（文件白名单读写） |
 | 灯守护 | 内部 | — | tools/mijia_daemon.py | 米家灯 HTTP 桥（/light/main/*、/light/bedside/warm|neutral） |
 | 教训库 MCP | 5055 | lessons-mcp.service | /opt/lessons/server.py | record→审核→promote→validate_edit 两层筛选 |
 | Codebase MCP | 5056 | codebase-mcp.service | /opt/codebase/server.py | 代码检索/补丁/git 只读/架构自述（本文档） |

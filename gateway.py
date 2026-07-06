@@ -2549,69 +2549,6 @@ def agent_loop(system, messages, max_rounds=5):
     return joined, ''.join(think_parts)
 
 
-@app.route('/workspace/chat', methods=['POST'])
-def workspace_chat():
-    """工作台专用对话：注入完整人设+记忆，但不写入chat_messages，保持工作台独立。"""
-    import urllib.request as _ur, json as _j
-    data = request.get_json() or {}
-    message  = (data.get('message') or '').strip()
-    history  = data.get('history') or []
-    file_ctx = (data.get('file_context') or '').strip()
-    if not message:
-        return jsonify({'error': 'empty message'}), 400
-
-    # 完整人设system
-    system = build_system()
-    # 注入file context到system末尾
-    if file_ctx:
-        ws_sys = '\n\n[工作台模式] 当前打开的文件：\n```\n' + file_ctx[:6000] + '\n```\n如需修改文件，在回复中用```write:/path/to/file\n内容\n```格式包裹。'
-        if isinstance(system, list):
-            system = system + [{'type':'text','text':ws_sys}]
-        else:
-            system = str(system) + ws_sys
-
-    # 从记忆中breath（复用现有逻辑）
-    try:
-        from server import breath as _breath
-        import asyncio as _aio
-        loop = _aio.new_event_loop()
-        loop.run_until_complete(_aio.wait_for(_breath(), timeout=4))
-        loop.close()
-    except Exception:
-        pass
-
-    # build messages from history + current
-    msgs = []
-    for h in history[-8:]:
-        if h.get('role') and h.get('content'):
-            msgs.append({'role': h['role'], 'content': h['content']})
-    if not msgs or msgs[-1]['role'] != 'user':
-        msgs.append({'role': 'user', 'content': message})
-
-    # flatten system to string（adapter 的 max_system_len 也会截断，这里只做兜底）
-    if isinstance(system, list):
-        sys_str = '\n'.join(s.get('text','') if isinstance(s,dict) else str(s) for s in system)
-    else:
-        sys_str = str(system)
-
-    try:
-        from relay.manager import relay as _ws2_relay
-        rd = _ws2_relay.call({
-            'max_tokens': 2000,
-            'system': sys_str,
-            'messages': msgs,
-        }, timeout=30, use_ws_model=True)
-        from chat.response_parser import extract_text as _extract_text2
-        reply = _extract_text2(rd)
-        return jsonify({'reply': reply})
-    except urllib.error.HTTPError as _he:
-        _body = _he.read().decode('utf-8','replace')[:300]
-        app.logger.error(f'[ws_chat] HTTP {_he.code}: {_body}')
-        return jsonify({'error': f'HTTP {_he.code}: {_body}', 'reply': f'请求失败 {_he.code}'})
-    except Exception as e:
-        app.logger.error(f'[ws_chat] {type(e).__name__}: {e}')
-        return jsonify({'error': str(e), 'reply': '请求失败: '+str(e)})
-
 @app.route('/chat', methods=['POST'])
 def chat():
     _uc = ((request.get_json() or {}).get('content') or '').strip()
