@@ -34,6 +34,7 @@ STATIC_DIR = '/opt/frontend/static'
 
 import config_store
 import attachment_store
+import tool_drawers
 
 # API_URL/API_KEY/CC_TOKEN：部署配置，.env 兜底（真正生效的值由 relay.manager
 # 按 ACTIVE_RELAY 动态解析，这里仅供 /api/debug/provider 展示部署期默认值）。
@@ -199,6 +200,30 @@ def chat_cancel():
     _gen_release 幂等，重复释放无害；断流救援照常保住已生成内容。"""
     _gen_release(None)
     return jsonify({'ok': True})
+
+
+@app.route('/drawers/preview', methods=['GET'])
+def drawers_preview():
+    """调试用：看某句话会开哪些抽屉。GET /api/gw/drawers/preview?text=开灯"""
+    text = (request.args.get('text') or '').strip()
+    selected, info = tool_drawers.select_tools(text, TOOLS)
+    return jsonify({
+        'ok': True,
+        'enabled': tool_drawers.enabled(),
+        'text': text,
+        'info': info,
+        'tool_names': [t['name'] for t in selected],
+        'drawers': {did: d['label'] for did, d in tool_drawers.DRAWERS.items()},
+    })
+
+
+@app.route('/drawers/config', methods=['POST'])
+def drawers_config():
+    """开关抽屉路由：POST /api/gw/drawers/config {"enabled": true|false}"""
+    data = request.get_json() or {}
+    if 'enabled' in data:
+        config_store.set('TOOL_DRAWERS_ENABLED', '1' if data['enabled'] else '0')
+    return jsonify({'ok': True, 'enabled': tool_drawers.enabled()})
 
 
 def _ombre_breath_sync():
@@ -884,6 +909,10 @@ TOOLS = [
         }, 'required': ['title', 'content']},
     },
 ]
+
+# 抽屉定义与 TOOLS 的一致性校验（只打警告，不影响启动）
+for _dw in tool_drawers.validate(TOOLS):
+    print(_dw, flush=True)
 
 LIGHT_DAEMON_URL = 'http://127.0.0.1:5052'
 
@@ -2662,13 +2691,15 @@ def chat_stream():
                     yield 'data: ' + json.dumps({'t': 'memory_recall', 'd': {'count': len(_recall_items), 'items': _recall_items}}, ensure_ascii=False) + SSE_END
                 from relay.manager import relay as _chat_relay
                 _thinking_ok = _model_supports_thinking()
+                # 工具抽屉路由：默认关闭（TOOL_DRAWERS_ENABLED=0 时原样全量）
+                _turn_tools, _ = tool_drawers.select_tools_from_messages(messages, TOOLS)
                 for _round in range(5):
                     payload = {
                         'max_tokens': 16000,
                         'stream': True,
                         'system': system,
                         'messages': messages,
-                        'tools': TOOLS,
+                        'tools': _turn_tools,
                         'metadata': {'user_id': 'hayana-fyodor-stable'},
                     }
                     if _thinking_ok:
