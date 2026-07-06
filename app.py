@@ -52,6 +52,13 @@ _migrate_chat_columns()
 import desire_ledger
 desire_ledger.init_tables()
 
+# ── 镜子证据卡（年轮系统 stage B）──────────────────────────
+# 初始化 evidence_cards 表（Stage B，代码可先写）
+try:
+    desire_ledger.init_evidence_cards_table()
+except Exception:
+    pass  # Stage B 表未准备或初始化失败，不阻塞启动
+
 
 # ── Artifact（费佳生成的 HTML/Markdown/Word 产物）────────────────
 @app.route('/api/artifacts/<int:aid>', methods=['GET'])

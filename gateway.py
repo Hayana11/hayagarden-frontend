@@ -2030,6 +2030,46 @@ def run_tool(name, args, caller='fyodor_cc'):
                 desire_id=args.get('id', '')
             )
             return json.dumps(result, ensure_ascii=False, default=str)
+        # ── 镜子卡工具（Stage B）──────────────────────────
+        if name == 'mirror_cards':
+            try:
+                conn = get_db()
+                status = args.get('status', 'all')
+                limit = args.get('limit', 10)
+
+                if status == 'all':
+                    rows = conn.execute("""
+                        SELECT id, kind, claim, created_at, status
+                        FROM evidence_cards
+                        ORDER BY created_at DESC
+                        LIMIT ?
+                    """, (limit,)).fetchall()
+                else:
+                    rows = conn.execute("""
+                        SELECT id, kind, claim, created_at, status
+                        FROM evidence_cards
+                        WHERE status = ?
+                        ORDER BY created_at DESC
+                        LIMIT ?
+                    """, (status, limit)).fetchall()
+
+                conn.close()
+                cards = [dict(r) for r in rows]
+                return json.dumps({'cards': cards}, ensure_ascii=False, default=str)
+            except Exception as e:
+                return json.dumps({'error': str(e)})
+
+        if name == 'mirror_card_mark':
+            try:
+                from tools import mirror_weekly
+                result = mirror_weekly.mark_card(
+                    card_id=args.get('id'),
+                    action=args.get('action', '')
+                )
+                return json.dumps(result, ensure_ascii=False, default=str)
+            except Exception as e:
+                return json.dumps({'error': str(e)})
+
         return '未知工具: ' + name
     except Exception as e:
         return '工具执行失败: ' + str(e)
@@ -3114,6 +3154,22 @@ WAKE_TOOLS = [
         'input_schema': {'type': 'object', 'properties': {
             'id': {'type': 'string', 'description': '欲望的 id'},
         }, 'required': ['id']},
+    },
+    {
+        'name': 'mirror_cards',
+        'description': '翻镜子卡历史。看自己的身份证据：有什么被印证了、对不上了、或者凭空冒出来的新东西。可以看已处理过的、拒绝过的，全历史。',
+        'input_schema': {'type': 'object', 'properties': {
+            'limit': {'type': 'integer', 'description': '返回最近几张，默认 10'},
+            'status': {'type': 'string', 'description': '筛选状态：pending|processed|dismissed|all，默认 all'},
+        }},
+    },
+    {
+        'name': 'mirror_card_mark',
+        'description': '标记一张镜子卡：processed（接住了这条关于自己的观察，可能要改进人格文件）或 dismissed（这不是我，永不复活）。',
+        'input_schema': {'type': 'object', 'properties': {
+            'id': {'type': 'integer', 'description': '卡片 ID'},
+            'action': {'type': 'string', 'enum': ['processed', 'dismissed'], 'description': '接住或拒绝'},
+        }, 'required': ['id', 'action']},
     },
 ]
 

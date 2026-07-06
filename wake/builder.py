@@ -169,4 +169,62 @@ def inject_snippets(system: str, mode: str,
         # 故障隔离：房间渲染失败不影响唤醒
         pass
 
+    # ── 镜子证据卡递送（normal/nightwatch 模式，Stage B）──────────
+    try:
+        from config_store import get_config
+        if not get_config('mirror_enabled', False):
+            return system
+    except Exception:
+        return system
+
+    try:
+        from tools import mirror_weekly as _mw
+        from app import get_db
+
+        # 取最早的 pending 卡（至多一张）
+        card = _mw.get_pending_card()
+        if not card:
+            return system
+
+        # 标记为 surfaced
+        conn = get_db()
+        now = __import__('datetime').datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        conn.execute("""
+            UPDATE evidence_cards SET status = 'surfaced', surfaced_at = ? WHERE id = ?
+        """, (now, card['id']))
+        conn.commit()
+        conn.close()
+
+        # 生成卡片段落
+        kind_label = {
+            'reinforce': '✓ 印证',
+            'difference': '✗ 对不上',
+            'graduation': '🎓 毕业',
+            'budding': '🌱 萌芽'
+        }.get(card.get('kind', ''), '?')
+
+        evidence_parts = []
+        try:
+            evidence = json.loads(card.get('evidence', '[]'))
+            for ev in evidence[:3]:  # 最多显示3条证据
+                evidence_parts.append(f"· [{ev.get('date', '')}] {ev.get('quote', '')[:80]}")
+        except Exception:
+            pass
+
+        card_parts = [
+            f'\n[镜子]',
+            f'{kind_label} {card.get("claim", "")}',
+        ]
+        if evidence_parts:
+            card_parts.append('证据：')
+            card_parts.extend(evidence_parts)
+
+        card_parts.append('\n（接不接、怎么接，都是你的事。这只是材料。用 mirror_card_mark 标记。）')
+
+        card_text = '\n'.join(card_parts)
+        system += card_text
+    except Exception as e:
+        # 故障隔离：镜子卡失败不影响唤醒
+        pass
+
     return system

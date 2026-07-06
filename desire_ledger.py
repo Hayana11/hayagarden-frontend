@@ -441,3 +441,45 @@ def surface(limit: int = 6) -> List[Dict[str, Any]]:
         import traceback
         print(f"[desire_ledger.surface] error: {e}\n{traceback.format_exc()}")
         return []
+
+# ── Stage B: 镜子证据卡表初始化 ──────────────────────────────
+def init_evidence_cards_table():
+    """幂等初始化 evidence_cards 表（Stage B）"""
+    conn = get_db()
+    
+    existing = [r[0] for r in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='evidence_cards'"
+    ).fetchall()]
+    
+    if 'evidence_cards' not in existing:
+        conn.execute("""
+            CREATE TABLE evidence_cards (
+                id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                kind             TEXT NOT NULL,
+                claim            TEXT NOT NULL,
+                evidence         TEXT NOT NULL DEFAULT '[]',
+                target_anchor    TEXT,
+                provenance       TEXT NOT NULL DEFAULT '{}',
+                first_seen_at    TEXT NOT NULL,
+                last_seen_at     TEXT NOT NULL,
+                recur_count      INTEGER NOT NULL DEFAULT 1,
+                ready_to_propose INTEGER NOT NULL DEFAULT 0,
+                dedup_key        TEXT NOT NULL,
+                status           TEXT NOT NULL DEFAULT 'pending',
+                surfaced_at      TEXT,
+                model            TEXT,
+                created_at       TEXT NOT NULL,
+                updated_at       TEXT NOT NULL
+            )
+        """)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_ec_dedup 
+            ON evidence_cards(dedup_key, status)
+        """)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_ec_status 
+            ON evidence_cards(status, surfaced_at)
+        """)
+    
+    conn.commit()
+    conn.close()
