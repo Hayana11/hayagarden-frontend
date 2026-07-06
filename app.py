@@ -350,20 +350,66 @@ def files_delete():
 @app.route('/api/chat/messages', methods=['GET'])
 def get_chat_messages():
     limit = request.args.get('limit', 50, type=int)
-    limit = min(max(limit, 1), 1000)
+    limit = min(max(limit, 1), 200)
     around = request.args.get('around', None, type=int)
+    before = request.args.get('before', None, type=int)
+    after = request.args.get('after', None, type=int)
     conn = get_db()
+    has_more_before = False
+    has_more_after = False
     if around:
         half = limit // 2
-        rows = conn.execute(
+        start_id = max(1, around - half)
+        rows = list(conn.execute(
             "SELECT * FROM chat_messages WHERE id >= ? ORDER BY id ASC LIMIT ?",
-            (max(1, around - half), limit)
-        ).fetchall()
+            (start_id, limit)
+        ).fetchall())
+        if rows:
+            first_id = rows[0]['id']
+            last_id = rows[-1]['id']
+            has_more_before = conn.execute(
+                "SELECT 1 FROM chat_messages WHERE id < ? LIMIT 1",
+                (first_id,)
+            ).fetchone() is not None
+            has_more_after = conn.execute(
+                "SELECT 1 FROM chat_messages WHERE id > ? LIMIT 1",
+                (last_id,)
+            ).fetchone() is not None
+    elif before:
+        rows_desc = list(conn.execute(
+            "SELECT * FROM chat_messages WHERE id < ? ORDER BY id DESC LIMIT ?",
+            (before, limit + 1)
+        ).fetchall())
+        has_more_before = len(rows_desc) > limit
+        rows_desc = rows_desc[:limit]
+        rows = list(reversed(rows_desc))
+        has_more_after = True
+    elif after:
+        rows = list(conn.execute(
+            "SELECT * FROM chat_messages WHERE id > ? ORDER BY id ASC LIMIT ?",
+            (after, limit + 1)
+        ).fetchall())
+        has_more_after = len(rows) > limit
+        rows = rows[:limit]
+        if rows:
+            has_more_before = conn.execute(
+                "SELECT 1 FROM chat_messages WHERE id < ? LIMIT 1",
+                (rows[0]['id'],)
+            ).fetchone() is not None
     else:
-        rows = conn.execute("SELECT * FROM chat_messages ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+        rows = list(conn.execute(
+            "SELECT * FROM chat_messages ORDER BY id DESC LIMIT ?",
+            (limit + 1,)
+        ).fetchall())
+        has_more_before = len(rows) > limit
+        rows = rows[:limit]
         rows = list(reversed(rows))
     conn.close()
-    return jsonify({"messages":[dict(r) for r in rows]})
+    return jsonify({
+        "messages": [dict(r) for r in rows],
+        "has_more_before": bool(has_more_before),
+        "has_more_after": bool(has_more_after),
+    })
 
 @app.route('/api/chat/send', methods=['POST'])
 def send_chat():

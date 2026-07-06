@@ -643,6 +643,18 @@ var curAuthor = 'hayana';
 var pendingFile = null;
 var sending = false;
 var allHist = [];
+var allMsgs = [];
+var oldestLoadedId = 0;
+var newestLoadedId = 0;
+var hasMoreBefore = true;
+var hasMoreAfter = false;
+var loadingOlder = false;
+var loadingNewer = false;
+var pollInFlight = false;
+var driftCache = [];
+var driftCacheAt = 0;
+var topLoadHint = '';
+window.historyMode = false;
 var editingMsgId = null; // 正在编辑的消息id，编辑期间暂停轮询刷新，避免重新渲染把编辑框闪掉
 
 // Font size
@@ -695,49 +707,7 @@ function closeHistory() {
 }
 function jumpToMsg(id) {
   closeHistory();
-  // 等面板关闭后再找元素
-  setTimeout(function() {
-    var rows = document.querySelectorAll('#msgs .msg-row');
-    var target = null;
-    for(var i=0;i<rows.length;i++){
-      var idx = parseInt(rows[i].getAttribute('data-idx'));
-      if(window.curMsgList && window.curMsgList[idx] && window.curMsgList[idx].id == id){
-        target = rows[i]; break;
-      }
-    }
-    if(target){
-      target.scrollIntoView({behavior:'smooth',block:'center'});
-      target.style.transition='background .3s';
-      target.style.background='var(--primary-bg)';
-      setTimeout(function(){target.style.background='';},1800);
-    } else {
-      // 消息不在当前列表，按around加载该消息附近200条
-      window.historyMode = true;
-      fetch('/api/chat/messages?around='+id+'&limit=200')
-        .then(function(r){return r.json();})
-        .then(function(d){
-          var list = d.messages||[];
-          var c = document.getElementById('msgs');
-          window.curMsgList = list;
-          c.innerHTML = buildHtml(list);
-          // 加载完再跳转
-          setTimeout(function(){
-            var rows2 = document.querySelectorAll('#msgs .msg-row');
-            for(var j=0;j<rows2.length;j++){
-              var idx2 = parseInt(rows2[j].getAttribute('data-idx'));
-              if(window.curMsgList[idx2] && window.curMsgList[idx2].id == id){
-                rows2[j].scrollIntoView({behavior:'smooth',block:'center'});
-                rows2[j].style.transition='background .3s';
-                rows2[j].style.background='var(--primary-bg)';
-                setTimeout(function(){rows2[j].style.background='';},1800);
-                break;
-              }
-            }
-          },100);
-        })
-        .catch(function(){ showToast('加载失败'); });
-    }
-  }, 200);
+  setTimeout(function(){ loadAroundAndFocus(id); }, 200);
 }
 function filterHist(q) {
   if (!q.trim()) { renderHist(allHist); return; }
@@ -1326,8 +1296,11 @@ function toggleThink(btn) {
 // Build message HTML
 function buildHtml(list) {
   window.curMsgList = list;
-  if(!list.length) return '<div class="empty-tip">no messages yet<br>say the first thing</div>';
   var html='', lastDay='';
+  if(topLoadHint){
+    html += '<div class="date-sep">'+escHtml(topLoadHint)+'</div>';
+  }
+  if(!list.length) return html + '<div class="empty-tip">no messages yet<br>say the first thing</div>';
   var lastAiIdx = -1;
   for(var j=list.length-1; j>=0; j--){ if(isFy(list[j].author)){lastAiIdx=j; break;} }
   list.forEach(function(m,i){
@@ -1441,29 +1414,220 @@ function buildHtml(list) {
   return html;
 }
 
+function setTopHint(text){
+  topLoadHint = text || '';
+}
+
+function _toNum(v){
+  var n = Number(v);
+  return Number.isFinite(n) ? n : 0;
+}
+
+function _refreshRangeFlags(meta){
+  meta = meta || {};
+  if(typeof meta.has_more_before === 'boolean') hasMoreBefore = meta.has_more_before;
+  if(typeof meta.has_more_after === 'boolean') hasMoreAfter = meta.has_more_after;
+}
+
+function _syncCursorFromAllMsgs(){
+  oldestLoadedId = allMsgs.length ? _toNum(allMsgs[0].id) : 0;
+  newestLoadedId = allMsgs.length ? _toNum(allMsgs[allMsgs.length - 1].id) : 0;
+}
+
+function _mergeMsgs(base, incoming, mode){
+  base = base || [];
+  incoming = incoming || [];
+  if(!incoming.length) return base.slice();
+  var seen = {};
+  base.forEach(function(m){ if(_toNum(m.id)) seen[_toNum(m.id)] = 1; });
+  var fresh = incoming.filter(function(m){ var id=_toNum(m.id); return id && !seen[id]; });
+  if(!fresh.length) return base.slice();
+  var out = (mode === 'prepend') ? fresh.concat(base) : base.concat(fresh);
+  out.sort(function(a,b){ return _toNum(a.id) - _toNum(b.id); });
+  return out;
+}
+
+function _composeListWithDrift(baseList){
+  var list = (baseList || []).slice();
+  if(!list.length || !driftCache.length) return list;
+  var minTs = String(list[0].created_at || '');
+  var maxTs = String(list[list.length - 1].created_at || '');
+  driftCache.forEach(function(b){
+    var t1 = String(b.created_at || '');
+    if(t1 >= minTs && t1 <= maxTs){
+      list.push({author:'hayana',content:b.content,created_at:b.created_at,drift:'sent'});
+    }
+    if(b.status === 'found' && b.reply){
+      var t2 = String(b.found_at || '');
+      if(t2 >= minTs && t2 <= maxTs){
+        list.push({author:'fyodor',content:b.reply,created_at:b.found_at,drift:'reply'});
+      }
+    }
+  });
+  list.sort(function(a,b){
+    var ta = String(a.created_at || '');
+    var tb = String(b.created_at || '');
+    if(ta !== tb) return ta.localeCompare(tb);
+    return _toNum(a.id) - _toNum(b.id);
+  });
+  return list;
+}
+
+async function refreshDrift(force){
+  var now = Date.now();
+  if(!force && now - driftCacheAt < 8000) return;
+  try{
+    var rb = await fetch('/api/drift/bottles');
+    var db = await rb.json();
+    driftCache = db.bottles || [];
+    driftCacheAt = now;
+    notifyNewDriftReplies(driftCache);
+  }catch(e){}
+}
+
+function _driftSig(){
+  return JSON.stringify((driftCache||[]).map(function(b){
+    return [b.id, b.status, b.found_at || '', b.reply || ''];
+  }));
+}
+
+function _highlightRowByMsgId(id){
+  var rows = document.querySelectorAll('#msgs .msg-row');
+  for(var i=0;i<rows.length;i++){
+    var idx = parseInt(rows[i].getAttribute('data-idx'));
+    if(window.curMsgList && window.curMsgList[idx] && window.curMsgList[idx].id == id){
+      rows[i].scrollIntoView({behavior:'smooth',block:'center'});
+      rows[i].style.transition='background .3s';
+      rows[i].style.background='var(--primary-bg)';
+      setTimeout((function(el){ return function(){ el.style.background=''; }; })(rows[i]), 1800);
+      return true;
+    }
+  }
+  return false;
+}
+
+async function renderFromState(opts){
+  opts = opts || {};
+  if(editingMsgId !== null) return;
+  var c = document.getElementById('msgs');
+  var oldHeight = c.scrollHeight;
+  var oldTop = c.scrollTop;
+  var wasAtBottom = oldHeight - oldTop - c.clientHeight < 80;
+  var renderList = _composeListWithDrift(allMsgs);
+  c.innerHTML = buildHtml(renderList);
+  if(opts.preservePrepend){
+    c.scrollTop = oldTop + (c.scrollHeight - oldHeight);
+  } else if(typeof opts.keepTop === 'number'){
+    c.scrollTop = opts.keepTop;
+  } else if(opts.scrollToBottom || wasAtBottom){
+    c.scrollTop = c.scrollHeight;
+  }
+}
+
+async function loadInitialWindow(scrollToBottom){
+  var r = await fetch('/api/chat/messages?limit=100');
+  var d = await r.json();
+  allMsgs = d.messages || [];
+  _syncCursorFromAllMsgs();
+  _refreshRangeFlags(d);
+  window.historyMode = false;
+  setTopHint(hasMoreBefore ? '' : '———— 已经是最早消息 ————');
+  await refreshDrift(true);
+  await renderFromState({scrollToBottom: scrollToBottom !== false});
+}
+
+async function pollNewMessages(){
+  if(streamAbort || pollInFlight || window.historyMode) return;
+  if(editingMsgId !== null) return;
+  pollInFlight = true;
+  try{
+    if(!newestLoadedId){
+      await loadInitialWindow(true);
+      return;
+    }
+    var prevDriftSig = _driftSig();
+    var r = await fetch('/api/chat/messages?after=' + newestLoadedId + '&limit=100');
+    var d = await r.json();
+    var incoming = d.messages || [];
+    await refreshDrift(true);
+    var driftChanged = _driftSig() !== prevDriftSig;
+    if(incoming.length){
+      allMsgs = _mergeMsgs(allMsgs, incoming, 'append');
+      _syncCursorFromAllMsgs();
+      _refreshRangeFlags(d);
+      setTopHint(hasMoreBefore ? '' : '———— 已经是最早消息 ————');
+      await renderFromState({});
+    }else if(driftChanged){
+      await renderFromState({keepTop: document.getElementById('msgs').scrollTop});
+    }
+  }finally{
+    pollInFlight = false;
+  }
+}
+
+async function loadOlderMessages(){
+  if(loadingOlder || !hasMoreBefore || !oldestLoadedId) return;
+  loadingOlder = true;
+  setTopHint('正在加载更早的消息…');
+  await renderFromState({keepTop: document.getElementById('msgs').scrollTop});
+  try{
+    var r = await fetch('/api/chat/messages?before=' + oldestLoadedId + '&limit=100');
+    var d = await r.json();
+    var incoming = d.messages || [];
+    allMsgs = _mergeMsgs(allMsgs, incoming, 'prepend');
+    _syncCursorFromAllMsgs();
+    _refreshRangeFlags(d);
+    setTopHint(hasMoreBefore ? '' : '———— 已经是最早消息 ————');
+    await renderFromState({preservePrepend:true});
+  }finally{
+    loadingOlder = false;
+  }
+}
+
+async function loadNewerMessagesInHistory(){
+  if(loadingNewer || !hasMoreAfter || !newestLoadedId) return;
+  loadingNewer = true;
+  try{
+    var c = document.getElementById('msgs');
+    var keepTop = c.scrollTop;
+    var r = await fetch('/api/chat/messages?after=' + newestLoadedId + '&limit=100');
+    var d = await r.json();
+    var incoming = d.messages || [];
+    allMsgs = _mergeMsgs(allMsgs, incoming, 'append');
+    _syncCursorFromAllMsgs();
+    _refreshRangeFlags(d);
+    await renderFromState({keepTop: keepTop});
+  }finally{
+    loadingNewer = false;
+  }
+}
+
+async function loadAroundAndFocus(id){
+  try{
+    var r = await fetch('/api/chat/messages?around=' + id + '&limit=200');
+    var d = await r.json();
+    allMsgs = d.messages || [];
+    _syncCursorFromAllMsgs();
+    _refreshRangeFlags(d);
+    window.historyMode = true;
+    setTopHint(hasMoreBefore ? '' : '———— 已经是最早消息 ————');
+    await refreshDrift(true);
+    await renderFromState({keepTop: 0});
+    setTimeout(function(){ _highlightRowByMsgId(id); }, 100);
+  }catch(e){
+    showToast('加载失败');
+  }
+}
+
 async function loadMsgs(isInit){
-  if(!isInit && streamAbort) return;
-  if(editingMsgId !== null) return; // 编辑中跳过重渲染，防止闪一下退出编辑
+  if(editingMsgId !== null) return;
   if(!isInit && _suppressLoadMsgs){ _suppressLoadMsgs=false; return; }
   try{
-    var r=await fetch('/api/chat/messages');
-    var d=await r.json();
-    var list=d.messages||[];
-    try{
-      var rb=await fetch('/api/drift/bottles');
-      var db=await rb.json();
-      (db.bottles||[]).forEach(function(b){
-        list.push({author:'hayana',content:b.content,created_at:b.created_at,drift:'sent'});
-        if(b.status==='found'&&b.reply) list.push({author:'fyodor',content:b.reply,created_at:b.found_at,drift:'reply'});
-      });
-      list.sort(function(a,b){return String(a.created_at).localeCompare(String(b.created_at));});
-      notifyNewDriftReplies(db.bottles||[]);
-    }catch(e){}
-    if(editingMsgId !== null) return; // 拉取期间用户开始编辑了，丢弃这次结果，不要打断编辑
-    var c=document.getElementById('msgs');
-    var wasAtBottom=c.scrollHeight-c.scrollTop-c.clientHeight<80;
-    c.innerHTML=buildHtml(list);
-    if(isInit||wasAtBottom) c.scrollTop=c.scrollHeight;
+    if(isInit){
+      await loadInitialWindow(true);
+    }else{
+      await pollNewMessages();
+    }
   }catch(e){
     if(isInit) document.getElementById('msgs').innerHTML='<div class="empty-tip">load failed</div>';
   }
@@ -1686,16 +1850,23 @@ async function cmdCancel(){
 cmdPoll(); setInterval(cmdPoll,4000);
 document.getElementById('msgs').addEventListener('scroll', function(){
   var c = this;
+  if(c.scrollTop < 100){
+    loadOlderMessages();
+  }
   if(window.historyMode && c.scrollHeight - c.scrollTop - c.clientHeight < 120){
-    window.historyMode = false;
-    loadMsgs(false);
+    if(hasMoreAfter){
+      loadNewerMessagesInHistory();
+    }else{
+      window.historyMode = false;
+      loadInitialWindow(true);
+    }
   }
 });
 
 // 切回前台时立刻刷新一次——即使之前的streamReply因为切走而连接断开，
 // 后端现在会在生成完成时就把回复写库，这里能马上把它捞出来显示
 document.addEventListener('visibilitychange', function(){
-  if(!document.hidden) loadMsgs(true);
+  if(!document.hidden) loadInitialWindow(true);
 });
 
 var swReg=null;
