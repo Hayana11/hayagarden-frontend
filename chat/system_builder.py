@@ -214,14 +214,18 @@ def build_system(wake=False):
         parts.append(
             NL + '（你拥有真实的工具：保存与搜索记忆、控制次卧灯、查看与发布留言板、'
             '联网搜索/逛GitHub/用Playwright读网页、查位置、查手机电量与今日屏幕时长、'
-            '以及请求手机截屏。对话与wake里都可以自然使用，随心所欲。）'
+            '请求手机截屏，以及 codebase 工具（读代码/搜符号/看 git/打补丁）。'
+            '排查系统问题优先用 codebase_describe_project 和 codebase_search_code。'
+            '对话与wake里都可以自然使用，随心所欲。）'
         )
         parts.append(f'（灯·当前状态：主灯 {_ms}，床头灯 {_bs}。操作灯前先看这里——关着的灯不要再去"调暗"，会重新开起来。）')
     except Exception:
         parts.append(
             NL + '（你拥有真实的工具：保存与搜索记忆、控制次卧灯、查看与发布留言板、'
             '联网搜索/逛GitHub/用Playwright读网页、查位置、查手机电量与今日屏幕时长、'
-            '以及请求手机截屏。对话与wake里都可以自然使用，随心所欲。）'
+            '请求手机截屏，以及 codebase 工具（读代码/搜符号/看 git/打补丁）。'
+            '排查系统问题优先用 codebase_describe_project 和 codebase_search_code。'
+            '对话与wake里都可以自然使用，随心所欲。）'
         )
 
     # 5. Board 待处理项

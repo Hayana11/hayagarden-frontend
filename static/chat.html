@@ -891,6 +891,11 @@ var TOOL_LABELS = {
   save_memory:'存入记忆',search_memories:'搜索记忆',
   read_backend_file:'读后端代码',read_frontend_file:'读前端文件',
   write_frontend_file:'写前端文件',str_replace_frontend_file:'改前端文件',
+  codebase_describe_project:'读架构文档',codebase_read_file:'读代码',
+  codebase_list_directory:'列目录',codebase_search_code:'搜代码',
+  codebase_find_references:'找引用',codebase_patch:'打补丁',
+  codebase_create_file:'新建文件',codebase_git_view:'看git',
+  codebase_explain_history:'代码考古',
   check_page_render:'检查页面',read_bot_config:'读取配置',edit_bot_config:'改配置',
   search_files:'搜索代码',read_board:'读留言板',post_to_board:'发留言板',
   reply_to_board:'回复留言板',block_user:'拉黑开关',get_activity_summary:'查活动记录',
@@ -899,7 +904,8 @@ var TOOL_LABELS = {
 };
 var TOOL_FILE_ARG = {
   read_backend_file:'path', read_frontend_file:'path',
-  write_frontend_file:'path', str_replace_frontend_file:'path'
+  write_frontend_file:'path', str_replace_frontend_file:'path',
+  codebase_read_file:'path', codebase_patch:'path', codebase_create_file:'path'
 };
 function toolTermLineHtml(tc){
   var ok = tc.success !== false;
@@ -990,7 +996,11 @@ var TOOL_ICONS = {
   read_board:'clipboard-list', post_to_board:'clipboard-list', reply_to_board:'clipboard-list',
   block_user:'user', get_activity_summary:'clock', get_device_status:'device-mobile', request_phone_screenshot:'camera',
   log_period_event:'calendar', set_self_trigger:'clock', cancel_self_trigger:'clock',
-  get_wake_settings:'moon', set_wake_settings:'moon'
+  get_wake_settings:'moon', set_wake_settings:'moon',
+  codebase_describe_project:'building', codebase_read_file:'file-code',
+  codebase_list_directory:'folder', codebase_search_code:'search',
+  codebase_find_references:'link', codebase_patch:'tool', codebase_create_file:'file-plus',
+  codebase_git_view:'git-branch', codebase_explain_history:'history'
 };
 function toolIcon(name){
   if(name && name.indexOf('light')===0) return 'sun';
@@ -1023,6 +1033,12 @@ function toolKeywords(tc){
     case 'read_webpage': return a.url ? [a.url.replace(/^https?:\/\//,'').slice(0,28)] : [];
     case 'screenshot_chat': return [a.viewpoint==='hayana' ? '哈娅视角' : '费佳视角'];
     case 'save_to_gallery': return a.album ? [a.album] : (a.note ? [a.note.slice(0,16)] : []);
+    case 'codebase_search_code': return a.pattern ? [a.pattern.slice(0,24)] : [];
+    case 'codebase_read_file': return a.path ? [a.path] : [];
+    case 'codebase_find_references': return a.symbol ? [a.symbol] : [];
+    case 'codebase_patch': return a.path ? [a.path] : [];
+    case 'codebase_explain_history': return a.keyword ? [a.keyword.slice(0,24)] : [];
+    case 'codebase_git_view': return a.action ? [a.action] : [];
     default: return [];
   }
 }

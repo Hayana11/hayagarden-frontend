@@ -7,6 +7,7 @@ if '/opt/frontend/tools' not in _sys.path:
     _sys.path.insert(0, '/opt/frontend/tools')
 from flask import Flask, request, jsonify
 import urllib.request, urllib.error, urllib.parse
+from codebase.client import CODEBASE_TOOLS, CODEBASE_READ_TOOLS, run_codebase_tool
 
 app = Flask(__name__)
 DB_PATH    = '/opt/frontend/memories.db'
@@ -515,6 +516,8 @@ def img_block(url, max_dim=1568):
 # TOOL_INJECT_MAX / TOOL_INJECT_MAX_MCP。
 _LARGE_RETURN_TOOLS = {
     'web_search', 'browse_github', 'read_webpage', 'get_activity_summary',
+    'codebase_describe_project', 'codebase_read_file', 'codebase_search_code',
+    'codebase_find_references', 'codebase_explain_history', 'codebase_git_view',
 }
 
 def _format_tool_history(tool_calls_json):
@@ -1042,9 +1045,9 @@ TOOLS = [
         'input_schema': {'type': 'object', 'properties': {
             'title':   {'type': 'string', 'description': '文档标题'},
             'content': {'type': 'string', 'description': 'Markdown 格式的内容，会转换成 Word 文档'},
-        }, 'required': ['title', 'content']},
+        },         'required': ['title', 'content']},
     },
-]
+] + CODEBASE_TOOLS
 
 LIGHT_DAEMON_URL = 'http://127.0.0.1:5052'
 
@@ -1053,6 +1056,7 @@ _WRITE_TOOL_PATH_ARG = {
     'write_frontend_file': 'path',
     'str_replace_frontend_file': 'path',
     'edit_bot_config': None,
+    'codebase_patch': 'path',
 }
 _WRITE_TOOL_FIXED_PATH = {
     'edit_bot_config': '/opt/frontend/bot_config.py',
@@ -1065,7 +1069,10 @@ def _write_tool_file_path(tool_name, args):
     arg_name = _WRITE_TOOL_PATH_ARG[tool_name]
     if arg_name is None:
         return _WRITE_TOOL_FIXED_PATH.get(tool_name)
-    return args.get(arg_name) or None
+    p = args.get(arg_name) or None
+    if p and tool_name == 'codebase_patch' and not str(p).startswith('/'):
+        p = '/opt/frontend/' + str(p).lstrip('/')
+    return p
 
 def _read_file_safe(path):
     try:
@@ -2244,6 +2251,8 @@ def run_tool(name, args, caller='fyodor_cc'):
                 headers={'Content-Type': 'application/json', 'X-Admin': 'true'})
             with urllib.request.urlopen(req, timeout=10) as r:
                 return r.read().decode()
+        if name.startswith('codebase_'):
+            return run_codebase_tool(name, args)
         return '未知工具: ' + name
     except Exception as e:
         return '工具执行失败: ' + str(e)
@@ -3254,7 +3263,7 @@ WAKE_TOOLS = [
             'prob_scale':   {'type': 'number',  'description': '概率爬升速度，越小越容易触发'},
         }},
     },
-]
+] + CODEBASE_READ_TOOLS
 
 def _wake_agent_loop(system, messages, max_rounds=4, tools=None):
     """Agent loop：允许工具调用和自由思考，最后追加一轮强制结构化输出。"""
