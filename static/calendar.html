@@ -50,18 +50,54 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,'PingFang 
 .cal-day:not(:empty):hover{background:var(--primary-bg);}
 .cal-day.today{background:var(--primary);color:#fff;font-weight:700;}
 .cal-day.sat,.cal-day.sun{color:var(--amber);}
-.cd-list{display:grid;grid-template-columns:1fr 1fr;gap:10px;}
-.cd-card{background:var(--primary-bg);border-radius:12px;padding:14px 12px;text-align:center;}
-.cd-em{font-size:18px;}
-.cd-days{font-size:24px;font-weight:800;color:var(--primary);line-height:1.1;margin:2px 0;}
-.cd-title{font-size:11px;color:var(--muted);}
-.cd-add{display:block;width:100%;margin-top:10px;padding:10px;border-radius:10px;border:1.5px dashed var(--border);background:transparent;color:var(--muted);font-size:13px;cursor:pointer;font-family:inherit;}
-.cd-add:hover{border-color:var(--primary);color:var(--primary);}
+.cd-list{display:flex;gap:8px;overflow-x:auto;padding:2px 2px 6px;scrollbar-width:none;-webkit-overflow-scrolling:touch;}
+.cd-list::-webkit-scrollbar{display:none;}
+.cd-card{position:relative;flex:0 0 auto;min-width:84px;max-width:120px;background:var(--primary-bg);border-radius:12px;padding:10px 14px 9px;text-align:center;}
+.cd-em{font-size:15px;line-height:1;}
+.cd-days{font-size:20px;font-weight:800;color:var(--primary);line-height:1.15;margin:3px 0 1px;}
+.cd-days small{font-size:10px;font-weight:500;color:var(--muted);margin-left:1px;}
+.cd-title{font-size:10.5px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.cd-del{position:absolute;top:-1px;right:-1px;width:20px;height:20px;border:none;border-radius:50%;background:none;color:var(--muted);opacity:.4;font-size:11px;cursor:pointer;display:none;align-items:center;justify-content:center;padding:0;}
+.cd-list.editing .cd-del{display:flex;}
+.cd-list.editing .cd-card{background:var(--amber-bg);}
+.cd-add-mini{flex:0 0 auto;width:64px;border-radius:12px;border:1.5px dashed var(--border);background:transparent;color:var(--muted);font-size:18px;cursor:pointer;font-family:inherit;display:flex;align-items:center;justify-content:center;}
+.cd-add-mini:active{border-color:var(--primary);color:var(--primary);}
+.cd-manage{border:none;background:none;color:var(--muted);font-size:11px;cursor:pointer;font-family:inherit;padding:2px 4px;margin-left:auto;}
+.cd-manage.act{color:var(--red);}
 .pd-heart{position:absolute;bottom:1px;right:2px;font-size:8px;color:var(--amber);line-height:1;}
 .ps-row{display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:.5px solid var(--border);}
 .ps-row:last-child{border-bottom:none;}
 .ps-label{font-size:12px;color:var(--muted);}
 .ps-val{font-size:13px;font-weight:600;color:var(--text);}
+/* ── cycle hero 周期预测卡 ── */
+.cycle-hero{background:linear-gradient(135deg,var(--primary-bg),#fdf0f0);border-radius:14px;padding:16px 16px 14px;margin-bottom:12px;}
+.ch-label{font-size:11px;letter-spacing:1.5px;color:var(--muted);margin-bottom:4px;}
+.ch-main{font-size:22px;font-weight:800;color:var(--text);line-height:1.2;}
+.ch-main .ch-accent{color:var(--primary);}
+.ch-main.late{color:var(--red);}
+.ch-sub{font-size:12px;color:var(--muted);margin-top:4px;}
+.ch-bar{height:7px;background:rgba(124,106,138,.15);border-radius:4px;overflow:hidden;margin-top:12px;}
+.ch-fill{height:100%;border-radius:4px;background:var(--primary);transition:width .5s ease;}
+.ch-fill.late{background:var(--red);}
+.ch-bar-labels{display:flex;justify-content:space-between;font-size:10px;color:var(--muted);margin-top:5px;}
+.ps-mini{display:flex;flex-wrap:wrap;gap:6px 14px;font-size:11.5px;color:var(--muted);}
+.ps-mini b{color:var(--text);font-weight:600;}
+/* ── todo 分组 ── */
+.todo-group-hd{font-size:10.5px;letter-spacing:1.5px;color:var(--muted);text-transform:uppercase;margin:12px 0 2px;display:flex;align-items:center;gap:5px;}
+.todo-group-hd:first-child{margin-top:0;}
+.todo-group-hd.overdue{color:var(--red);}
+.todo-group-hd.today-g{color:var(--primary);}
+.todo-done-toggle{border:none;background:none;color:var(--muted);font-size:11.5px;cursor:pointer;font-family:inherit;padding:8px 0 2px;display:flex;align-items:center;gap:4px;width:100%;}
+.todo-done-toggle i{font-size:13px;transition:transform .18s;}
+.todo-done-toggle.open i{transform:rotate(90deg);}
+/* ── ledger 统计折叠 ── */
+.ledger-stats-toggle{display:flex;align-items:center;gap:6px;width:100%;border:none;background:var(--primary-light);border-radius:10px;padding:10px 12px;font-size:12.5px;color:var(--primary);cursor:pointer;font-family:inherit;margin-bottom:12px;}
+.ledger-stats-toggle i.chev{margin-left:auto;transition:transform .18s;font-size:14px;}
+.ledger-stats-toggle.open i.chev{transform:rotate(90deg);}
+.ledger-stats-body{display:none;}
+.ledger-stats-body.show{display:block;}
+.ledger-day-hd{font-size:10.5px;color:var(--muted);letter-spacing:1px;margin:10px 0 2px;padding-bottom:3px;border-bottom:.5px solid var(--border);}
+.ledger-day-hd:first-child{margin-top:0;}
 .pd-btns{display:flex;gap:10px;margin-top:14px;}
 .pd-btn{flex:1;padding:11px;border-radius:11px;border:none;font-size:13px;cursor:pointer;font-family:inherit;font-weight:500;transition:opacity .15s;}
 .pd-btn:active{opacity:.7;}
@@ -225,9 +261,8 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,'PingFang 
   <div class="hd-cal"><h1>calendar</h1><div class="sub">dates &amp; plans</div></div>
 
   <div class="section">
-    <h2><span class="dot"></span>countdowns</h2>
-    <div class="cd-list" id="cd-list"><div style="grid-column:1/-1;text-align:center;color:var(--muted);font-size:13px;padding:12px 0;">loading…</div></div>
-    <button class="cd-add" onclick="openCD()">+ add countdown</button>
+    <h2><span class="dot"></span>countdowns<button class="cd-manage" id="cd-manage-btn" onclick="toggleCDManage()">管理</button></h2>
+    <div class="cd-list" id="cd-list"><div style="text-align:center;color:var(--muted);font-size:13px;padding:12px 0;width:100%;">loading…</div></div>
   </div>
 
   <div class="section">
@@ -290,10 +325,13 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,'PingFang 
       <div class="ledger-sum-item"><div class="ledger-sum-label">收入</div><div class="ledger-sum-val inc">¥0</div></div>
       <div class="ledger-sum-item"><div class="ledger-sum-label">结余</div><div class="ledger-sum-val bal">¥0</div></div>
     </div>
-    <div id="ledger-compare"></div>
-    <div id="ledger-trend"></div>
     <div id="ledger-budget"></div>
-    <div id="ledger-pie"></div>
+    <button class="ledger-stats-toggle" id="ledger-stats-toggle" onclick="toggleLedgerStats()"><i class="ti ti-chart-pie"></i>本月统计<i class="ti ti-chevron-right chev"></i></button>
+    <div class="ledger-stats-body" id="ledger-stats-body">
+      <div id="ledger-compare"></div>
+      <div id="ledger-trend" class="ledger-trend"></div>
+      <div id="ledger-pie"></div>
+    </div>
     <div id="ledger-list"><div class="empty-hint">loading…</div></div>
     <button class="ledger-add" onclick="openLedgerModal()">+ 记一笔</button>
   </div>
@@ -495,7 +533,33 @@ function pickCDDate(ds){cdSelectedDate=ds;var p=ds.split('-');var btn=document.g
 function resetCDDate(){cdSelectedDate=null;document.getElementById('cd-date-btn').classList.remove('set');document.getElementById('cd-date-label').textContent='选择日期';}
 document.getElementById('cddpmo').addEventListener('click',function(e){if(e.target===this)closeCDPicker();});
 
-async function loadCD(){try{var r=await fetch('/api/countdowns');var d=await r.json();var cds=d.countdowns||[];var c=document.getElementById('cd-list');if(!cds.length){c.innerHTML='<div style="grid-column:1/-1;text-align:center;color:var(--muted);font-size:13px;padding:12px 0;">no countdowns yet</div>';return;}c.innerHTML=cds.map(function(cd){return'<div class="cd-card"><div class="cd-em">'+(cd.emoji||'📅')+'</div><div class="cd-days">'+cd.days+'</div><div class="cd-title">'+escHtml(cd.title)+'</div></div>';}).join('');}catch(e){}}
+var cdManaging=false;
+async function loadCD(){
+  try{
+    var r=await fetch('/api/countdowns');var d=await r.json();var cds=d.countdowns||[];
+    var c=document.getElementById('cd-list');
+    var addBtn='<button class="cd-add-mini" onclick="openCD()" title="添加">+</button>';
+    if(!cds.length){c.innerHTML=addBtn;return;}
+    c.innerHTML=cds.map(function(cd){
+      return '<div class="cd-card">'
+        +'<button class="cd-del" onclick="deleteCD('+cd.id+')" title="删除"><i class="ti ti-x"></i></button>'
+        +'<div class="cd-em">'+(cd.emoji||'📅')+'</div>'
+        +'<div class="cd-days">'+cd.days+'<small>'+(cd.type==='countup'?'天了':'天后')+'</small></div>'
+        +'<div class="cd-title">'+escHtml(cd.title)+'</div></div>';
+    }).join('')+addBtn;
+    c.classList.toggle('editing',cdManaging);
+  }catch(e){}
+}
+function toggleCDManage(){
+  cdManaging=!cdManaging;
+  document.getElementById('cd-list').classList.toggle('editing',cdManaging);
+  var b=document.getElementById('cd-manage-btn');
+  b.classList.toggle('act',cdManaging);
+  b.textContent=cdManaging?'完成':'管理';
+}
+async function deleteCD(id){
+  try{await fetch('/api/countdowns/'+id,{method:'DELETE'});await loadCD();}catch(e){}
+}
 function openCD(){document.getElementById('cdmo').classList.add('show');}
 function closeCD(){document.getElementById('cdmo').classList.remove('show');}
 document.getElementById('cdmo').addEventListener('click',function(e){if(e.target===this)closeCD();});
@@ -527,20 +591,45 @@ function fmtDue(due){
   var parts = due.split('-'); var label = parseInt(parts[1])+'月'+parseInt(parts[2])+'日';
   return '<span class="'+cls+'">'+label+'</span>';
 }
+var todoDoneOpen = false;
+function todoItemHtml(t){
+  var am = todoAuthorMeta(t.author);
+  var authorHtml = am ? '<i class="ti '+am.icon+'" style="color:'+am.color+';font-size:12px" title="'+t.author+'"></i>' : '';
+  var dueHtml = fmtDue(t.due_date);
+  var meta = (dueHtml||authorHtml) ? '<div class="todo-meta">'+(dueHtml||'')+authorHtml+'</div>' : '';
+  return '<div class="todo-item'+(t.done?' done':'') +'" id="ti-'+t.id+'">'
+    +'<div class="todo-cb'+(t.done?' checked':'')+'" onclick="toggleTodo('+t.id+')"></div>'
+    +'<div class="todo-body"><div class="todo-text">'+escHtml(t.content)+'</div>'+meta+'</div>'
+    +'<button class="todo-del" onclick="deleteTodo('+t.id+')" title="删除"><i class="ti ti-x"></i></button>'
+    +'</div>';
+}
 function renderTodos(){
   var el = document.getElementById('todo-list');
-  if(!todos.length){ el.innerHTML = '<div class="empty-hint">还没有待办</div>'; return; }
-  el.innerHTML = todos.map(function(t){
-    var am = todoAuthorMeta(t.author);
-    var authorHtml = am ? '<i class="ti '+am.icon+'" style="color:'+am.color+';font-size:12px" title="'+t.author+'"></i>' : '';
-    var dueHtml = fmtDue(t.due_date);
-    var meta = (dueHtml||authorHtml) ? '<div class="todo-meta">'+(dueHtml||'')+authorHtml+'</div>' : '';
-    return '<div class="todo-item'+(t.done?' done':'') +'" id="ti-'+t.id+'">'
-      +'<div class="todo-cb'+(t.done?' checked':'')+'" onclick="toggleTodo('+t.id+')"></div>'
-      +'<div class="todo-body"><div class="todo-text">'+escHtml(t.content)+'</div>'+meta+'</div>'
-      +'<button class="todo-del" onclick="deleteTodo('+t.id+')" title="删除"><i class="ti ti-x"></i></button>'
-      +'</div>';
-  }).join('');
+  if(!todos.length){ el.innerHTML = '<div class="empty-hint">还没有待办</div>'; renderCal(); return; }
+  var t = new Date(); var ds = t.getFullYear()+'-'+pad2(t.getMonth()+1)+'-'+pad2(t.getDate());
+  var overdue=[], today=[], upcoming=[], nodate=[], done=[];
+  todos.forEach(function(td){
+    if(td.done){ done.push(td); }
+    else if(!td.due_date){ nodate.push(td); }
+    else if(td.due_date < ds){ overdue.push(td); }
+    else if(td.due_date === ds){ today.push(td); }
+    else{ upcoming.push(td); }
+  });
+  var html = '';
+  function group(cls, label, arr){
+    if(!arr.length) return;
+    html += '<div class="todo-group-hd '+cls+'">'+label+'</div>' + arr.map(todoItemHtml).join('');
+  }
+  group('overdue', '已过期 · '+overdue.length, overdue);
+  group('today-g', '今天', today);
+  group('', '接下来', upcoming);
+  group('', '没定日期', nodate);
+  if(done.length){
+    html += '<button class="todo-done-toggle'+(todoDoneOpen?' open':'')+'" onclick="todoDoneOpen=!todoDoneOpen;renderTodos()">'
+      +'<i class="ti ti-chevron-right"></i>已完成 '+done.length+'</button>';
+    if(todoDoneOpen) html += done.map(todoItemHtml).join('');
+  }
+  el.innerHTML = html || '<div class="empty-hint">还没有待办</div>';
   renderCal();
 }
 async function loadTodos(){
@@ -646,6 +735,12 @@ var ledgerYear, ledgerMonth;
 var ledgerType = 'exp';
 
 function ledgerMonthStr(){ return ledgerYear+'-'+pad2(ledgerMonth+1); }
+var ledgerStatsOpen = false;
+function toggleLedgerStats(){
+  ledgerStatsOpen = !ledgerStatsOpen;
+  document.getElementById('ledger-stats-body').classList.toggle('show', ledgerStatsOpen);
+  document.getElementById('ledger-stats-toggle').classList.toggle('open', ledgerStatsOpen);
+}
 function updateLedgerMonthTitle(){
   document.getElementById('ledger-month-title').textContent = ledgerYear+'年'+(ledgerMonth+1)+'月';
 }
@@ -784,16 +879,29 @@ async function loadLedger(){
     renderPie(records.filter(function(r){ return r.amount<0; }));
     var el = document.getElementById('ledger-list');
     if(!records.length){ el.innerHTML='<div class="empty-hint">本月还没有记录</div>'; return; }
-    el.innerHTML = records.map(function(rec){
-      var isExp = rec.amount < 0;
-      var dayPart = (rec.date||'').slice(5);
-      return '<div class="ledger-row">'
-        +'<span class="ledger-date">'+escHtml(dayPart)+'</span>'
-        +(rec.category?'<span class="ledger-cat">'+escHtml(rec.category)+'</span>':'')
-        +'<span class="ledger-note">'+(rec.note?escHtml(rec.note):'')+'</span>'
-        +'<span class="ledger-amt '+(isExp?'exp':'inc')+'">'+(isExp?'-':'+')+Math.abs(rec.amount).toFixed(2)+'</span>'
-        +'<button class="ledger-del" onclick="deleteLedger('+rec.id+')" title="删除"><i class="ti ti-x"></i></button>'
-        +'</div>';
+    // 按日期分组，日期只在组头出现一次
+    var byDay = {};
+    var dayOrder = [];
+    records.forEach(function(rec){
+      var d = rec.date || '';
+      if(!byDay[d]){ byDay[d]=[]; dayOrder.push(d); }
+      byDay[d].push(rec);
+    });
+    var WD=['日','一','二','三','四','五','六'];
+    el.innerHTML = dayOrder.map(function(d){
+      var wd = d ? WD[new Date(d+'T00:00:00').getDay()] : '';
+      var dayTotal = byDay[d].reduce(function(s,r){ return s+(r.amount<0?r.amount:0); },0);
+      var hd = '<div class="ledger-day-hd">'+(+d.slice(5,7))+'月'+(+d.slice(8))+'日 周'+wd
+        +(dayTotal<0?' · 支出 ¥'+Math.abs(dayTotal).toFixed(0):'')+'</div>';
+      return hd + byDay[d].map(function(rec){
+        var isExp = rec.amount < 0;
+        return '<div class="ledger-row">'
+          +(rec.category?'<span class="ledger-cat">'+escHtml(rec.category)+'</span>':'')
+          +'<span class="ledger-note">'+(rec.note?escHtml(rec.note):'')+'</span>'
+          +'<span class="ledger-amt '+(isExp?'exp':'inc')+'">'+(isExp?'-':'+')+Math.abs(rec.amount).toFixed(2)+'</span>'
+          +'<button class="ledger-del" onclick="deleteLedger('+rec.id+')" title="删除"><i class="ti ti-x"></i></button>'
+          +'</div>';
+      }).join('');
     }).join('');
   }catch(e){ document.getElementById('ledger-list').innerHTML='<div class="empty-hint">加载失败</div>'; }
 }
