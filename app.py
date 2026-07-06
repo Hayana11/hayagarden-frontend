@@ -247,6 +247,14 @@ def add_countdown():
     conn.close()
     return jsonify({"ok":True})
 
+@app.route('/api/countdowns/<int:cid>', methods=['DELETE'])
+def delete_countdown(cid):
+    conn = get_db()
+    conn.execute("DELETE FROM countdowns WHERE id=?", (cid,))
+    conn.commit()
+    conn.close()
+    return jsonify({"ok": True})
+
 @app.route('/api/upload', methods=['POST'])
 def upload_image():
     if 'file' not in request.files:
@@ -1244,36 +1252,107 @@ def delete_period_record(rid):
 
 @app.route('/api/period/stats', methods=['GET'])
 def period_stats():
+    """周期统计 v2：episode 聚合。
+    兼容两种记录格式：
+      - 网页端每日打点 type='period'（一次经期=连续多条）
+      - 工具端 type='start'/'end'（费佳的 log_period_event）
+    旧算法把最后一条打点日当"经期开始日"，预测整体后移，且不算经期时长。"""
     from datetime import datetime as _dt, timedelta as _td
     conn = get_db()
     rows = conn.execute(
-        "SELECT date FROM period_records WHERE type='period' ORDER BY date"
+        "SELECT date, type FROM period_records "
+        "WHERE type IN ('period','start','end') ORDER BY date, id"
     ).fetchall()
     conn.close()
-    dates = [r['date'] for r in rows]
-    if not dates:
+
+    def _p(s):
+        return _dt.strptime(s, '%Y-%m-%d')
+
+    # ── 聚合成 episodes: [(start_dt, end_dt)] ──
+    # 1) 每日打点：日期差 ≤2 天归同一段（容忍漏记一天）
+    daily = sorted({r['date'] for r in rows if r['type'] == 'period'})
+    episodes = []
+    for ds in daily:
+        d = _p(ds)
+        if episodes and (d - episodes[-1][1]).days <= 2:
+            episodes[-1][1] = d
+        else:
+            episodes.append([d, d])
+    # 2) start/end 对：start 配其后 10 天内最近的 end；没有 end 用默认 5 天
+    marks = [(r['date'], r['type']) for r in rows if r['type'] in ('start', 'end')]
+    i = 0
+    while i < len(marks):
+        if marks[i][1] == 'start':
+            s = _p(marks[i][0])
+            e = None
+            if i + 1 < len(marks) and marks[i+1][1] == 'end':
+                cand = _p(marks[i+1][0])
+                if 0 <= (cand - s).days <= 10:
+                    e = cand
+                    i += 1
+            episodes.append([s, e or s + _td(days=4)])
+        i += 1
+    # 3) 合并重叠/相邻段
+    episodes.sort(key=lambda ep: ep[0])
+    merged = []
+    for ep in episodes:
+        if merged and (ep[0] - merged[-1][1]).days <= 2:
+            merged[-1][1] = max(merged[-1][1], ep[1])
+        else:
+            merged.append(ep)
+    episodes = merged
+
+    if not episodes:
         return jsonify({'last_period': None, 'cycle_length': None,
-                        'next_period': None, 'ovulation': None})
-    last = dates[-1]
+                        'period_length': None, 'next_period': None,
+                        'days_until': None, 'cycle_day': None,
+                        'ovulation': None, 'period_days': [],
+                        'predicted_days': []})
+
+    # ── 周期长度：相邻段开始日间隔的均值（18~45 天有效）──
     cycle_length = 28
-    if len(dates) >= 2:
-        diffs = []
-        for i in range(1, len(dates)):
-            d1 = _dt.strptime(dates[i-1], '%Y-%m-%d')
-            d2 = _dt.strptime(dates[i], '%Y-%m-%d')
-            diff = (d2 - d1).days
-            if 18 <= diff <= 45:
-                diffs.append(diff)
-        if diffs:
-            cycle_length = round(sum(diffs) / len(diffs))
-    last_dt  = _dt.strptime(last, '%Y-%m-%d')
-    next_dt  = last_dt + _td(days=cycle_length)
-    ovul_dt  = next_dt - _td(days=14)
+    diffs = [(episodes[k][0] - episodes[k-1][0]).days for k in range(1, len(episodes))]
+    diffs = [d for d in diffs if 18 <= d <= 45]
+    if diffs:
+        cycle_length = round(sum(diffs) / len(diffs))
+
+    # ── 经期时长：各段天数均值（1~10 天有效），默认 5 ──
+    durs = [(ep[1] - ep[0]).days + 1 for ep in episodes]
+    durs = [d for d in durs if 1 <= d <= 10]
+    period_length = round(sum(durs) / len(durs)) if durs else 5
+
+    last_start = episodes[-1][0]
+    next_dt = last_start + _td(days=cycle_length)
+    today = _dt((_n := _dt.utcnow() + _td(hours=8)).year, _n.month, _n.day)
+    # 预测日已过 → 顺延到下一个周期（days_until 用未顺延值，负数=已推迟）
+    days_until = (next_dt - today).days
+    while next_dt + _td(days=period_length) < today:
+        next_dt += _td(days=cycle_length)
+    ovul_dt = next_dt - _td(days=14)
+    cycle_day = (today - last_start).days + 1 if today >= last_start else None
+
+    # 实际经期日（近 120 天）+ 预测经期日，直接供日历渲染
+    cutoff = today - _td(days=120)
+    period_days = []
+    for ep in episodes:
+        d = ep[0]
+        while d <= ep[1]:
+            if d >= cutoff:
+                period_days.append(d.strftime('%Y-%m-%d'))
+            d += _td(days=1)
+    predicted_days = [(next_dt + _td(days=k)).strftime('%Y-%m-%d')
+                      for k in range(period_length)]
+
     return jsonify({
-        'last_period':   last,
-        'cycle_length':  cycle_length,
-        'next_period':   next_dt.strftime('%Y-%m-%d'),
-        'ovulation':     ovul_dt.strftime('%Y-%m-%d'),
+        'last_period':    last_start.strftime('%Y-%m-%d'),
+        'cycle_length':   cycle_length,
+        'period_length':  period_length,
+        'next_period':    next_dt.strftime('%Y-%m-%d'),
+        'days_until':     days_until,
+        'cycle_day':      cycle_day,
+        'ovulation':      ovul_dt.strftime('%Y-%m-%d'),
+        'period_days':    period_days,
+        'predicted_days': predicted_days,
     })
 
 

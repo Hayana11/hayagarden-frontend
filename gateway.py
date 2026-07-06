@@ -845,6 +845,19 @@ TOOLS = [
         }, 'required': ['event_type']},
     },
     {
+        'name': 'todo_add',
+        'description': '往家里日历页的待办清单写一条。聊天中提到要办的事（她说"记一下""提醒我"，或你自己答应她要做的事），直接写进去，日历页会显示是你写的。',
+        'input_schema': {'type': 'object', 'properties': {
+            'content': {'type': 'string', 'description': '待办内容，简短一句'},
+            'due_date': {'type': 'string', 'description': '截止日期 YYYY-MM-DD，可不填'},
+        }, 'required': ['content']},
+    },
+    {
+        'name': 'todo_list',
+        'description': '查看家里待办清单上还没完成的事。想知道她（或你自己）之前记了什么、有没有快到期的事时用。',
+        'input_schema': {'type': 'object', 'properties': {}},
+    },
+    {
         'name': 'set_self_trigger',
         'description': '给自己设定时提醒：X分钟后主动联系哈娅。对话里承诺"一会儿提醒你"时使用。',
         'input_schema': {'type': 'object', 'properties': {
@@ -1631,6 +1644,38 @@ def run_tool(name, args, caller='fyodor_cc'):
                 lines.append('总计：' + '、'.join(
                     f'{app} {int(d)}分钟' for app, d in sorted(totals.items(), key=lambda x: -x[1]) if d >= 1
                 ))
+            return NL.join(lines)
+
+        if name == 'todo_add':
+            content = (args.get('content') or '').strip()
+            if not content:
+                return '待办内容不能为空'
+            due = (args.get('due_date') or '').strip() or None
+            # 网页聊天端记为 fyodor_web，唤醒端记为 fyodor_api（日历页按作者显示图标）
+            author = 'fyodor_api' if caller == 'fyodor_api' else 'fyodor_web'
+            _tc = get_db()
+            _tc.execute('INSERT INTO todos (content, due_date, author) VALUES (?,?,?)',
+                        (content, due, author))
+            _tc.commit()
+            _tc.close()
+            return f'已写入待办：{content}' + (f'（{due}）' if due else '')
+
+        if name == 'todo_list':
+            _tc = get_db()
+            rows = _tc.execute(
+                'SELECT id, content, due_date, author, done FROM todos '
+                'WHERE done=0 ORDER BY '
+                "CASE WHEN due_date IS NULL OR due_date='' THEN 1 ELSE 0 END, "
+                'due_date ASC, id ASC LIMIT 30'
+            ).fetchall()
+            _tc.close()
+            if not rows:
+                return '待办清单是空的'
+            lines = ['未完成的待办：']
+            for r in rows:
+                due = f"（{r['due_date']}）" if r['due_date'] else ''
+                who = f" [{r['author']}]" if r['author'] else ''
+                lines.append(f"  #{r['id']} {r['content']}{due}{who}")
             return NL.join(lines)
 
         if name == 'log_period_event':
@@ -3079,6 +3124,19 @@ WAKE_TOOLS = [
             'date': {'type': 'string', 'description': '日期YYYY-MM-DD，不填用今天'},
             'note': {'type': 'string', 'description': '备注如"量很少""有痛经"，可不填'},
         }, 'required': ['event_type']},
+    },
+    {
+        'name': 'todo_add',
+        'description': '往家里日历页的待办清单写一条。醒来时想起有该办的事、或想给她留个提醒，直接写进去。',
+        'input_schema': {'type': 'object', 'properties': {
+            'content': {'type': 'string', 'description': '待办内容，简短一句'},
+            'due_date': {'type': 'string', 'description': '截止日期 YYYY-MM-DD，可不填'},
+        }, 'required': ['content']},
+    },
+    {
+        'name': 'todo_list',
+        'description': '查看家里待办清单上还没完成的事。',
+        'input_schema': {'type': 'object', 'properties': {}},
     },
     {
         'name': 'set_self_trigger',
