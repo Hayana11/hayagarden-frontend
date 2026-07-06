@@ -86,6 +86,10 @@ def build_system(wake=False):
     # ── BP2 · 相对稳定记忆（几小时~一天变一次，缓存断点2）───────
     bp2_parts = []
     conn = get_db()
+    facts = conn.execute(
+        "SELECT content FROM posts WHERE type='FACT' AND resolved=0 "
+        "ORDER BY importance DESC, id DESC LIMIT 15"
+    ).fetchall()
     lt_mems = conn.execute(
         "SELECT content FROM posts WHERE layer='long-term' AND resolved=0 ORDER BY id DESC LIMIT 3"
     ).fetchall()
@@ -93,6 +97,12 @@ def build_system(wake=False):
         "SELECT content FROM posts WHERE type='DIARY' AND resolved=0 ORDER BY id DESC LIMIT 2"
     ).fetchall()
     conn.close()
+    if facts:
+        # fact_extractor 每晚抽取的长期事实（约定/纪念日/偏好），不参与遗忘、天天在场
+        bp2_parts.append('\n## 长期事实（这些不会随时间淡忘）')
+        for f in reversed(facts):
+            c = f['content']
+            bp2_parts.append('- ' + (c[:100] + '…' if len(c) > 100 else c))
     if lt_mems:
         bp2_parts.append('\n## 你们之间的记忆')
         for m in reversed(lt_mems):
@@ -201,10 +211,18 @@ def build_system(wake=False):
             if l.get('color_temp'): p.append(str(l['color_temp']) + 'K')
             return ' '.join(p)
         _ms = _fmt_l(_ls.get('main', {})); _bs = _fmt_l(_ls.get('bedside', {}))
-        parts.append(NL + '（你拥有真实的工具：保存与搜索记忆、控制次卧的灯、查看与发布留言板消息。自然在对话中使用，随心所欲。）')
+        parts.append(
+            NL + '（你拥有真实的工具：保存与搜索记忆、控制次卧灯、查看与发布留言板、'
+            '联网搜索/逛GitHub/用Playwright读网页、查位置、查手机电量与今日屏幕时长、'
+            '以及请求手机截屏。对话与wake里都可以自然使用，随心所欲。）'
+        )
         parts.append(f'（灯·当前状态：主灯 {_ms}，床头灯 {_bs}。操作灯前先看这里——关着的灯不要再去"调暗"，会重新开起来。）')
     except Exception:
-        parts.append(NL + '（你拥有真实的工具：保存与搜索记忆、控制次卧的灯、查看与发布留言板消息。自然在对话中使用，随心所欲。）')
+        parts.append(
+            NL + '（你拥有真实的工具：保存与搜索记忆、控制次卧灯、查看与发布留言板、'
+            '联网搜索/逛GitHub/用Playwright读网页、查位置、查手机电量与今日屏幕时长、'
+            '以及请求手机截屏。对话与wake里都可以自然使用，随心所欲。）'
+        )
 
     # 5. Board 待处理项
     try:
