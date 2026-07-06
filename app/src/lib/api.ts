@@ -51,7 +51,7 @@ export function fetchTodos(): Promise<Todo[]> {
 export function toggleTodo(id: Todo['id'], done: boolean): Promise<Todo | undefined> {
   return http
     .patch<{ id: number | string; content?: string; done?: number | boolean; author?: string | null }>(`/api/todos/${id}`, { done })
-    .then((r) => ({ id: r.id, text: r.content ?? '', done: Boolean(r.done), who: r.author === 'haya' ? 'haya' : 'fy' }))
+    .then((r) => ({ id: r.id, text: r.content ?? '', done: Boolean(r.done), who: (r.author === 'haya' ? 'haya' : 'fy') as 'haya' | 'fy' }))
     .catch(() => undefined);
 }
 

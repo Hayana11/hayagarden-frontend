@@ -252,8 +252,11 @@ def add_countdown():
 @app.route('/api/posts/summary', methods=['GET'])
 def posts_summary():
     conn = get_db()
+    post_cols = {r[1] for r in conn.execute("PRAGMA table_info(posts)").fetchall()}
+    layer_expr = "layer" if "layer" in post_cols else "'recent'"
+    author_expr = "author" if "author" in post_cols else "''"
     rows = conn.execute(
-        "SELECT id, content, author, layer, created_at FROM posts ORDER BY id DESC LIMIT 600"
+        f"SELECT id, content, {author_expr} as author, {layer_expr} as layer, created_at FROM posts ORDER BY id DESC LIMIT 600"
     ).fetchall()
     conn.close()
 
