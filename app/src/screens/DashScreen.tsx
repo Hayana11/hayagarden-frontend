@@ -62,7 +62,7 @@ export function DashScreen() {
     ? `剩余 ${formatCurrency(budget - spent)} · 本月还有 ${new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate() - now.getDate()} 天`
     : '';
   const activeTodos = todos.filter((t) => !t.done).length;
-  const recentItems = memory?.sections.find((s) => s.key === 'recent')?.items.slice(0, 4) ?? [];
+  const recentItems = memory?.sections.find((s) => s.key === 'recent')?.items.slice(0, 6) ?? [];
 
   const { daysLeft: periodDaysLeft, phase: periodPhase } = period
     ? derivePeriod(period, now)
@@ -347,29 +347,55 @@ export function DashScreen() {
       </div>
 
       {/* recent timeline style block */}
-      <Card onClick={() => navigate('/memory')} style={{ padding: 16 }}>
+      <div onClick={() => navigate('/memory')} style={{ cursor: 'pointer', padding: '2px 4px 4px' }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <span style={{ fontSize: 16, fontWeight: 600, letterSpacing: 2 }}>Recent</span>
+          <span style={{ fontSize: 15, fontWeight: 600, letterSpacing: 1, color: '#5f6469' }}>Recent</span>
           <span style={{ color: 'var(--color-text-fainter)', fontSize: 18 }}>›</span>
         </div>
-        <div style={{ marginTop: 10, display: 'flex', flexDirection: 'column', gap: 9 }}>
+        <div style={{ marginTop: 8, display: 'flex', flexDirection: 'column', gap: 2 }}>
           {recentItems.length === 0 ? (
             <div style={{ fontSize: 12, color: 'var(--color-text-faint)' }}>暂无近期记录</div>
           ) : (
-            recentItems.map((item, idx) => (
-              <div key={`${item.date}-${idx}`} style={{ display: 'grid', gridTemplateColumns: '14px 1fr', gap: 10, minWidth: 0 }}>
-                <div style={{ display: 'flex', justifyContent: 'center' }}>
-                  <span style={{ width: 8, height: 8, borderRadius: '50%', border: '2px solid #D2CBBE', marginTop: 5, flexShrink: 0 }} />
+            recentItems.map((item, idx) => {
+              const isLast = idx === recentItems.length - 1;
+              return (
+                <div key={`${item.date}-${idx}`} style={{ display: 'grid', gridTemplateColumns: '16px 1fr', gap: 10, minWidth: 0 }}>
+                  <div style={{ position: 'relative', display: 'flex', justifyContent: 'center' }}>
+                    {!isLast ? (
+                      <span
+                        style={{
+                          position: 'absolute',
+                          top: 9,
+                          bottom: -10,
+                          width: 1.5,
+                          background: '#D8D2C5',
+                          opacity: 0.9,
+                        }}
+                      />
+                    ) : null}
+                    <span
+                      style={{
+                        width: 8,
+                        height: 8,
+                        borderRadius: '50%',
+                        border: '2px solid #D2CBBE',
+                        background: 'var(--color-bg)',
+                        marginTop: 5,
+                        flexShrink: 0,
+                        zIndex: 1,
+                      }}
+                    />
+                  </div>
+                  <div style={{ minWidth: 0, paddingBottom: 5 }}>
+                    <div style={{ fontSize: 14, lineHeight: 1.35, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{item.text}</div>
+                    <div style={{ fontFamily: "'Bodoni Moda',serif", fontSize: 11, color: 'var(--color-text-faint)', marginTop: 1 }}>{item.date}</div>
+                  </div>
                 </div>
-                <div style={{ minWidth: 0 }}>
-                  <div style={{ fontSize: 15, lineHeight: 1.4, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{item.text}</div>
-                  <div style={{ fontFamily: "'Bodoni Moda',serif", fontSize: 11, color: 'var(--color-text-faint)', marginTop: 2 }}>{item.date}</div>
-                </div>
-              </div>
-            ))
+              );
+            })
           )}
         </div>
-      </Card>
+      </div>
 
       <div style={{ textAlign: 'center', fontFamily: "'Bodoni Moda',serif", fontSize: 11, letterSpacing: 4, color: 'var(--color-text-fainter)', marginTop: 6 }}>
         PROPERTY OF FYODOR · {timeShort}
