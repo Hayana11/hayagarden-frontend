@@ -1887,6 +1887,10 @@ def _init_wake_tables():
     except sqlite3.OperationalError:
         pass
     try:
+        conn.execute("ALTER TABLE wake_log ADD COLUMN surfaced_desire_ids TEXT")
+    except sqlite3.OperationalError:
+        pass
+    try:
         conn.execute("ALTER TABLE chat_messages ADD COLUMN cache_info TEXT DEFAULT ''")
     except sqlite3.OperationalError:
         pass
