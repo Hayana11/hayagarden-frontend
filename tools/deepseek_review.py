@@ -6,13 +6,11 @@
 用法：
   python3 deepseek_review.py "一段方案说明或diff"
   git diff | python3 deepseek_review.py
-  python3 deepseek_review.py --panel-id 5 "方案说明"   # 顺手把结果回贴到 AI协作面板
 """
-import sys, os, re, json, argparse, requests
+import sys, re, argparse, requests
 
 DEEPSEEK_URL = 'https://api.deepseek.com/chat/completions'
 MODEL        = 'deepseek-reasoner'
-REPLY_URL    = 'http://127.0.0.1:5050/api/aipanel/{}/reply'
 
 LEVEL_RE = re.compile(r'\[(P0|P1|P2)\]')
 
@@ -25,15 +23,13 @@ SYSTEM_PROMPT = (
 
 
 def _load_env():
-    ds_key, token = '', ''
+    ds_key = ''
     for line in open('/opt/frontend/.env'):
         k, _, v = line.partition('=')
         k, v = k.strip(), v.strip()
         if k == 'DEEPSEEK_API_KEY':
             ds_key = v
-        elif k == 'BOARD_TOKEN_FYODOR':
-            token = v
-    return ds_key, token
+    return ds_key
 
 
 def review(content, ds_key):
@@ -57,19 +53,9 @@ def review(content, ds_key):
     return text, level
 
 
-def post_to_panel(panel_id, text, level, token):
-    r = requests.post(
-        REPLY_URL.format(panel_id),
-        json={'author': 'fyodor_deepseek', 'token': token, 'content': text, 'level': level},
-        timeout=10
-    )
-    r.raise_for_status()
-
-
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('content', nargs='?', help='要评审的内容，留空则从 stdin 读取')
-    ap.add_argument('--panel-id', type=int, help='评审完顺手回贴到 AI协作面板的条目id')
     args = ap.parse_args()
 
     content = args.content
@@ -80,32 +66,13 @@ def main():
         print('没有给内容，退出', file=sys.stderr)
         sys.exit(1)
 
-    ds_key, token = _load_env()
+    ds_key = _load_env()
     if not ds_key:
         print('未配置 DEEPSEEK_API_KEY', file=sys.stderr)
         sys.exit(1)
 
     text, level = review(content, ds_key)
     print(f'[{level}] {text}')
-
-    if args.panel_id:
-        if not token:
-            print('未配置 BOARD_TOKEN_FYODOR，跳过回贴面板', file=sys.stderr)
-            return
-        post_to_panel(args.panel_id, text, level, token)
-        print(f'\n已回贴到 /aipanel #{args.panel_id}', file=sys.stderr)
-        # ALL_CLEAR → auto-resolve the task
-        if 'all_clear' in text.lower() or 'all clear' in text.lower():
-            try:
-                import requests as _req
-                _req.post(
-                    f'http://127.0.0.1:5050/api/aipanel/{args.panel_id}/status',
-                    json={'status': 'resolved'},
-                    timeout=5
-                )
-                print(f'[deepseek] ALL_CLEAR detected → status set to resolved', file=sys.stderr)
-            except Exception as _e:
-                print(f'[deepseek] status update failed: {_e}', file=sys.stderr)
 
 
 if __name__ == '__main__':

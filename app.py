@@ -350,20 +350,66 @@ def files_delete():
 @app.route('/api/chat/messages', methods=['GET'])
 def get_chat_messages():
     limit = request.args.get('limit', 50, type=int)
-    limit = min(max(limit, 1), 1000)
+    limit = min(max(limit, 1), 200)
     around = request.args.get('around', None, type=int)
+    before = request.args.get('before', None, type=int)
+    after = request.args.get('after', None, type=int)
     conn = get_db()
+    has_more_before = False
+    has_more_after = False
     if around:
         half = limit // 2
-        rows = conn.execute(
+        start_id = max(1, around - half)
+        rows = list(conn.execute(
             "SELECT * FROM chat_messages WHERE id >= ? ORDER BY id ASC LIMIT ?",
-            (max(1, around - half), limit)
-        ).fetchall()
+            (start_id, limit)
+        ).fetchall())
+        if rows:
+            first_id = rows[0]['id']
+            last_id = rows[-1]['id']
+            has_more_before = conn.execute(
+                "SELECT 1 FROM chat_messages WHERE id < ? LIMIT 1",
+                (first_id,)
+            ).fetchone() is not None
+            has_more_after = conn.execute(
+                "SELECT 1 FROM chat_messages WHERE id > ? LIMIT 1",
+                (last_id,)
+            ).fetchone() is not None
+    elif before:
+        rows_desc = list(conn.execute(
+            "SELECT * FROM chat_messages WHERE id < ? ORDER BY id DESC LIMIT ?",
+            (before, limit + 1)
+        ).fetchall())
+        has_more_before = len(rows_desc) > limit
+        rows_desc = rows_desc[:limit]
+        rows = list(reversed(rows_desc))
+        has_more_after = True
+    elif after:
+        rows = list(conn.execute(
+            "SELECT * FROM chat_messages WHERE id > ? ORDER BY id ASC LIMIT ?",
+            (after, limit + 1)
+        ).fetchall())
+        has_more_after = len(rows) > limit
+        rows = rows[:limit]
+        if rows:
+            has_more_before = conn.execute(
+                "SELECT 1 FROM chat_messages WHERE id < ? LIMIT 1",
+                (rows[0]['id'],)
+            ).fetchone() is not None
     else:
-        rows = conn.execute("SELECT * FROM chat_messages ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+        rows = list(conn.execute(
+            "SELECT * FROM chat_messages ORDER BY id DESC LIMIT ?",
+            (limit + 1,)
+        ).fetchall())
+        has_more_before = len(rows) > limit
+        rows = rows[:limit]
         rows = list(reversed(rows))
     conn.close()
-    return jsonify({"messages":[dict(r) for r in rows]})
+    return jsonify({
+        "messages": [dict(r) for r in rows],
+        "has_more_before": bool(has_more_before),
+        "has_more_after": bool(has_more_after),
+    })
 
 @app.route('/api/chat/send', methods=['POST'])
 def send_chat():
@@ -942,6 +988,20 @@ def repair_key():
     except: pass
     return jsonify({'key': key})
 
+@app.route('/api/repair/chat', methods=['POST'])
+def repair_chat_api():
+    data = request.get_json() or {}
+    message = (data.get('message') or '').strip()
+    history = data.get('history') or []
+    if not message:
+        return jsonify({'error': 'empty message'}), 400
+    try:
+        from tools.repair_agent import repair_chat
+        reply, tool_log = repair_chat(message, history)
+        return jsonify({'reply': reply, 'tools': tool_log})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
 @app.route('/api/repair/status')
 def repair_status():
     import socket
@@ -950,7 +1010,12 @@ def repair_status():
             s = socket.create_connection(('127.0.0.1', p), timeout=1)
             s.close(); return True
         except: return False
-    return jsonify({'port_5050': port_open(5050), 'port_5051': port_open(5051), 'port_8000': port_open(8000)})
+    return jsonify({
+        'port_5050': port_open(5050),
+        'port_5051': port_open(5051),
+        'port_5056': port_open(5056),
+        'port_8000': port_open(8000),
+    })
 
 
 # ── EPUB upload & import ──
@@ -1688,6 +1753,161 @@ def geo_latest():
     return jsonify({'ok':True,**dict(row)})
 
 
+# ── 手机监控上报（电量/屏幕时长 + 截屏链路）───────────────────────
+def _init_phone_monitor_tables():
+    conn = get_db()
+    conn.execute("""CREATE TABLE IF NOT EXISTS device_status (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        battery_percent INTEGER,
+        battery_charging INTEGER,
+        charge_type TEXT,
+        temp_c REAL,
+        screen_today_minutes INTEGER,
+        created_at DATETIME DEFAULT (datetime('now','+8 hours'))
+    )""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS screenshot_requests (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        source TEXT DEFAULT 'tool',
+        note TEXT DEFAULT '',
+        status TEXT DEFAULT 'pending',  -- pending / dispatched / done
+        requested_at DATETIME DEFAULT (datetime('now','+8 hours')),
+        dispatched_at DATETIME,
+        completed_at DATETIME
+    )""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS screenshot_captures (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        request_id INTEGER,
+        attachment_id TEXT NOT NULL,
+        capture_ts_ms INTEGER DEFAULT 0,
+        created_at DATETIME DEFAULT (datetime('now','+8 hours'))
+    )""")
+    conn.commit()
+    conn.close()
+
+
+_init_phone_monitor_tables()
+
+
+@app.route('/api/device/report', methods=['POST'])
+def device_report():
+    d = request.get_json() or {}
+    conn = get_db()
+    conn.execute(
+        "INSERT INTO device_status (battery_percent,battery_charging,charge_type,temp_c,screen_today_minutes) "
+        "VALUES (?,?,?,?,?)",
+        (
+            int(d.get('battery_percent', -1) or -1),
+            int(d.get('battery_charging', 0) or 0),
+            str(d.get('charge_type', 'none') or 'none')[:16],
+            float(d.get('temp_c', -1) or -1),
+            int(d.get('screen_today_minutes', -1) or -1),
+        )
+    )
+    conn.commit()
+    conn.close()
+    return jsonify({'ok': True})
+
+
+@app.route('/api/device/latest', methods=['GET'])
+def device_latest():
+    conn = get_db()
+    row = conn.execute(
+        "SELECT *, CAST((julianday('now','+8 hours')-julianday(created_at))*86400 AS INT) AS age_sec "
+        "FROM device_status ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    conn.close()
+    if not row:
+        return jsonify({'ok': False, 'error': 'no data'})
+    d = dict(row)
+    d['age_sec'] = max(0, int(d.get('age_sec') or 0))
+    return jsonify({'ok': True, **d})
+
+
+@app.route('/api/screenshot/request', methods=['POST'])
+def screenshot_request():
+    d = request.get_json() or {}
+    source = (d.get('source') or 'tool').strip()[:32]
+    note = (d.get('note') or '').strip()[:200]
+    conn = get_db()
+    cur = conn.execute(
+        "INSERT INTO screenshot_requests (source,note,status,requested_at) "
+        "VALUES (?,?, 'pending', datetime('now','+8 hours'))",
+        (source, note)
+    )
+    conn.commit()
+    rid = cur.lastrowid
+    conn.close()
+    return jsonify({'ok': True, 'request_id': rid})
+
+
+@app.route('/api/screenshot/upload', methods=['POST'])
+def screenshot_upload():
+    raw = request.get_data() or b''
+    if not raw:
+        return jsonify({'ok': False, 'error': 'empty body'}), 400
+    tmp = '/tmp/screen_' + uuid.uuid4().hex + '.jpg'
+    with open(tmp, 'wb') as f:
+        f.write(raw)
+    try:
+        aid = attachment_store.save(tmp, kind='image', mime='image/jpeg')
+    except Exception as e:
+        try:
+            os.remove(tmp)
+        except Exception:
+            pass
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+    ts = request.headers.get('X-Capture-Ts', '').strip()
+    try:
+        capture_ts_ms = int(ts) if ts else 0
+    except Exception:
+        capture_ts_ms = 0
+
+    conn = get_db()
+    req = conn.execute(
+        "SELECT id FROM screenshot_requests "
+        "WHERE status IN ('pending','dispatched') "
+        "ORDER BY CASE status WHEN 'dispatched' THEN 0 ELSE 1 END, id DESC LIMIT 1"
+    ).fetchone()
+    req_id = int(req['id']) if req else None
+    if req_id:
+        conn.execute(
+            "UPDATE screenshot_requests SET status='done', completed_at=datetime('now','+8 hours') WHERE id=?",
+            (req_id,)
+        )
+    conn.execute(
+        "INSERT INTO screenshot_captures (request_id, attachment_id, capture_ts_ms) VALUES (?,?,?)",
+        (req_id, aid, capture_ts_ms)
+    )
+    conn.commit()
+    conn.close()
+    return jsonify({'ok': True, 'attachment': 'attachment://' + aid, 'request_id': req_id})
+
+
+@app.route('/api/screenshot/latest', methods=['GET'])
+def screenshot_latest():
+    after_req = request.args.get('after_request_id', type=int)
+    conn = get_db()
+    if after_req:
+        row = conn.execute(
+            "SELECT c.*, CAST((julianday('now','+8 hours')-julianday(c.created_at))*86400 AS INT) AS age_sec "
+            "FROM screenshot_captures c WHERE c.request_id >= ? ORDER BY c.id DESC LIMIT 1",
+            (after_req,)
+        ).fetchone()
+    else:
+        row = conn.execute(
+            "SELECT c.*, CAST((julianday('now','+8 hours')-julianday(c.created_at))*86400 AS INT) AS age_sec "
+            "FROM screenshot_captures c ORDER BY c.id DESC LIMIT 1"
+        ).fetchone()
+    conn.close()
+    if not row:
+        return jsonify({'ok': False, 'error': 'no data'})
+    d = dict(row)
+    d['age_sec'] = max(0, int(d.get('age_sec') or 0))
+    d['attachment'] = 'attachment://' + d['attachment_id']
+    return jsonify({'ok': True, **d})
+
+
 # ── 附件间接层：attachment://<id> 的唯一取图入口 ──────────────
 @app.route('/api/attachments/<aid>', methods=['GET'])
 def get_attachment(aid):
@@ -1899,22 +2119,53 @@ _init_wake_tables()
 def pending_notification():
     """供VII app轮询：是否有费奥多尔自主发出的、还没推送过的消息。
     取最新一条未推送的 action='message'，并把所有未推送的一并标记，
-    避免她隔几小时打开时被一堆补发的旧通知刷屏。"""
+    避免她隔几小时打开时被一堆补发的旧通知刷屏。
+    另外复用这个通道下发 command='screenshot' 让手机立刻截一张屏。"""
     conn = get_db()
     row = conn.execute(
         "SELECT id, content, woke_at FROM wake_log "
         "WHERE action='message' AND (notified IS NULL OR notified=0) "
         "ORDER BY id DESC LIMIT 1"
     ).fetchone()
-    if not row:
-        conn.close()
-        return jsonify({'has_message': False})
-    conn.execute(
-        "UPDATE wake_log SET notified=1 WHERE action='message' AND (notified IS NULL OR notified=0)"
-    )
+    if row:
+        conn.execute(
+            "UPDATE wake_log SET notified=1 WHERE action='message' AND (notified IS NULL OR notified=0)"
+        )
+
+    # 手机截屏指令：优先取 pending；若 dispatched 超过 2 分钟还没回传，重试下发一次
+    sreq = conn.execute(
+        "SELECT id FROM screenshot_requests "
+        "WHERE status='pending' "
+        "   OR (status='dispatched' AND dispatched_at < datetime('now','+8 hours','-2 minutes')) "
+        "ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    if sreq:
+        conn.execute(
+            "UPDATE screenshot_requests SET status='dispatched', dispatched_at=datetime('now','+8 hours') "
+            "WHERE id=?",
+            (int(sreq['id']),)
+        )
+
     conn.commit()
     conn.close()
-    return jsonify({'has_message': True, 'content': row['content'], 'woke_at': row['woke_at']})
+
+    if not row and not sreq:
+        return jsonify({'has_message': False})
+
+    payload = {'has_message': bool(row)}
+    if row:
+        payload.update({
+            'id': 'wake-' + str(row['id']),
+            'title': '费奥多尔',
+            'content': row['content'],
+            'woke_at': row['woke_at'],
+        })
+    if sreq:
+        payload.update({
+            'command': 'screenshot',
+            'command_id': 'cap-' + str(int(sreq['id'])),
+        })
+    return jsonify(payload)
 
 # ── Board 留言板 ───────────────────────────────────────────
 @app.route('/board')
@@ -2069,186 +2320,6 @@ def update_board_status(bid):
         )
     else:
         conn.execute("UPDATE board SET status=?, resolved_at=NULL WHERE id=?", (status, bid))
-    conn.commit(); conn.close()
-    return jsonify({'ok': True})
-
-# ── AI协作面板：通用任务协作，Claude+DeepSeek 双AI审核，P0/P1/P2分级 ──
-def _init_ai_panel_tables():
-    conn = get_db()
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS ai_panel ("
-        "id INTEGER PRIMARY KEY AUTOINCREMENT, "
-        "author TEXT NOT NULL, "
-        "tag TEXT DEFAULT '任务', "
-        "content TEXT NOT NULL, "
-        "status TEXT DEFAULT 'open', "
-        "level TEXT DEFAULT NULL, "
-        "mentions TEXT DEFAULT '', "
-        "created_at TIMESTAMP DEFAULT (datetime('now','+8 hours')))"
-    )
-    # add columns introduced in v2 schema (safe to re-run)
-    for _col_sql in [
-        "ALTER TABLE ai_panel ADD COLUMN title TEXT DEFAULT NULL",
-        "ALTER TABLE ai_panel ADD COLUMN body  TEXT DEFAULT NULL",
-        "ALTER TABLE ai_panel ADD COLUMN kind  TEXT DEFAULT 'task'",
-    ]:
-        try: conn.execute(_col_sql)
-        except Exception: pass
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS ai_panel_replies ("
-        "id INTEGER PRIMARY KEY AUTOINCREMENT, "
-        "panel_id INTEGER NOT NULL, "
-        "author TEXT NOT NULL, "
-        "content TEXT NOT NULL, "
-        "level TEXT DEFAULT NULL, "
-        "created_at TIMESTAMP DEFAULT (datetime('now','+8 hours')))"
-    )
-    conn.commit()
-    conn.close()
-
-_init_ai_panel_tables()
-
-_AI_PANEL_AUTHORS = ('fyodor_cc', 'fyodor_deepseek')
-_LEVEL_RANK = {'P0': 0, 'P1': 1, 'P2': 2}
-
-@app.route('/aipanel')
-def ai_panel_page():
-    from flask import redirect
-    return redirect('/team', code=301)
-
-@app.route('/team')
-def team_page():
-    return send_from_directory('/opt/frontend/static', 'aipanel.html')
-
-@app.route('/api/aipanel', methods=['GET'])
-def get_ai_panel():
-    status_f = request.args.get('status', '').strip()
-    conn = get_db()
-    where, params = [], []
-    if status_f:
-        where.append("status=?"); params.append(status_f)
-    sql = "SELECT * FROM ai_panel" + (" WHERE " + " AND ".join(where) if where else "") + " ORDER BY created_at DESC"
-    rows = conn.execute(sql, params).fetchall()
-    result = []
-    for row in rows:
-        replies = conn.execute(
-            "SELECT * FROM ai_panel_replies WHERE panel_id=? ORDER BY created_at ASC", (row['id'],)
-        ).fetchall()
-        item = dict(row); item['replies'] = [dict(r) for r in replies]
-        result.append(item)
-    conn.close()
-    return jsonify(result)
-
-@app.route('/api/aipanel', methods=['POST'])
-def post_ai_panel():
-    data = request.get_json() or {}
-    author = (data.get('author') or 'hayana').strip()
-    if author in _AI_PANEL_AUTHORS:
-        if not BOARD_TOKEN_FYODOR or data.get('token', '') != BOARD_TOKEN_FYODOR:
-            return jsonify({'error': 'unauthorized'}), 403
-    title   = (data.get('title')   or '').strip() or None
-    body    = (data.get('body')    or '').strip() or None
-    content = (data.get('content') or title or '').strip()
-    if not content:
-        return jsonify({'error': 'content required'}), 400
-    tag     = (data.get('tag')     or '任务').strip()
-    kind    = (data.get('kind')    or 'task').strip()
-    if kind not in ('question', 'review_request', 'broadcast', 'task'):
-        kind = 'task'
-    mentions = (data.get('mentions') or '').strip()
-    conn = get_db()
-    cur = conn.execute(
-        "INSERT INTO ai_panel (author,tag,content,title,body,kind,status,mentions) VALUES (?,?,?,?,?,?,'open',?)",
-        (author, tag, content, title, body, kind, mentions)
-    )
-    conn.commit(); new_id = cur.lastrowid; conn.close()
-    return jsonify({'ok': True, 'id': new_id})
-
-@app.route('/api/aipanel/<int:pid>/reply', methods=['POST'])
-def post_ai_panel_reply(pid):
-    data = request.get_json() or {}
-    author = (data.get('author') or 'hayana').strip()
-    if author in _AI_PANEL_AUTHORS:
-        if not BOARD_TOKEN_FYODOR or data.get('token', '') != BOARD_TOKEN_FYODOR:
-            return jsonify({'error': 'unauthorized'}), 403
-    content = (data.get('content') or '').strip()
-    if not content:
-        return jsonify({'error': 'content required'}), 400
-    level = (data.get('level') or '').strip() or None
-    if level and level not in ('P0', 'P1', 'P2'):
-        return jsonify({'error': 'level must be P0/P1/P2'}), 400
-    conn = get_db()
-    conn.execute(
-        "INSERT INTO ai_panel_replies (panel_id,author,content,level) VALUES (?,?,?,?)",
-        (pid, author, content, level)
-    )
-    if level:
-        row = conn.execute("SELECT level FROM ai_panel WHERE id=?", (pid,)).fetchone()
-        cur_level = row['level'] if row else None
-        if not cur_level or _LEVEL_RANK[level] < _LEVEL_RANK[cur_level]:
-            conn.execute("UPDATE ai_panel SET level=? WHERE id=?", (level, pid))
-    conn.commit(); conn.close()
-    return jsonify({'ok': True})
-
-@app.route('/api/aipanel/<int:pid>/trigger', methods=['POST'])
-def trigger_aipanel(pid):
-    """Trigger CC or DeepSeek as a detached process (start_new_session=True — survives service restart)."""
-    import subprocess as _sp
-    data    = request.get_json() or {}
-    mention = (data.get('mention') or 'cc').strip()
-    if mention not in ('cc', 'deepseek'):
-        return jsonify({'error': 'mention must be cc or deepseek'}), 400
-
-    conn = get_db()
-    row  = conn.execute("SELECT id FROM ai_panel WHERE id=?", (pid,)).fetchone()
-    if not row:
-        conn.close()
-        return jsonify({'error': 'not found'}), 404
-
-    _env = {**os.environ, 'HOME': '/root'}
-
-    if mention == 'cc':
-        cmd = ['/usr/bin/python3.11', '/opt/frontend/tools/cc_aipanel_check.py', str(pid)]
-        conn.close()
-    else:
-        item  = conn.execute("SELECT * FROM ai_panel WHERE id=?", (pid,)).fetchone()
-        reps  = conn.execute(
-            "SELECT * FROM ai_panel_replies WHERE panel_id=? ORDER BY created_at ASC", (pid,)
-        ).fetchall()
-        conn.close()
-        title   = (item['title'] or item['content'][:80]) if item else f'task#{pid}'
-        cc_reps = [r for r in reps if r['author'] == 'fyodor_cc']
-        ctx = (
-            f"任务#{pid}: {title}\n\nCC回复：{cc_reps[-1]['content'][:800]}"
-            if cc_reps else f"任务#{pid}: {title}"
-        ) + "\n\n请审查以上工作，给出评级和意见。如果没问题写 ALL_CLEAR。"
-        cmd = ['/usr/bin/python3.11', '/opt/frontend/tools/deepseek_review.py',
-               '--panel-id', str(pid), ctx]
-
-    # Popen with start_new_session=True: child becomes its own session leader,
-    # detached from the parent's process group — service restarts won't kill it.
-    # Timeout is enforced internally: cc_aipanel_check.py has subprocess.run(timeout=300),
-    # deepseek_review.py has requests.post(timeout=180) — neither can hang forever.
-    try:
-        with open('/var/log/cc_aipanel.log', 'a') as _log:
-            _sp.Popen(cmd, cwd='/opt/frontend', env=_env,
-                      stdout=_log, stderr=_log, start_new_session=True)
-    except OSError as _e:
-        import logging as _log2
-        _log2.getLogger('app').error('[trigger] Popen failed pid=%s mention=%s: %s', pid, mention, _e)
-        return jsonify({'error': f'spawn failed: {_e}'}), 500
-
-    return jsonify({'ok': True, 'triggered': mention})
-
-
-@app.route('/api/aipanel/<int:pid>/status', methods=['POST'])
-def update_ai_panel_status(pid):
-    data = request.get_json() or {}
-    status = (data.get('status') or 'open').strip()
-    if status not in ('open', 'waiting_review', 'resolved', 'archived', 'done'):
-        return jsonify({'error': 'invalid status'}), 400
-    conn = get_db()
-    conn.execute("UPDATE ai_panel SET status=? WHERE id=?", (status, pid))
     conn.commit(); conn.close()
     return jsonify({'ok': True})
 
@@ -2861,130 +2932,6 @@ def save_think_summary():
     finally:
         conn.close()
     return jsonify({'ok': True})
-
-
-# ── Workspace ─────────────────────────────────────────────────────────────────
-import subprocess as _sp, pathlib as _pl
-
-_WS_WHITELIST = ['/opt/frontend', '/etc/nginx']
-
-def _ws_allowed(path):
-    p = str(_pl.Path(path).resolve())
-    return any(p == w or p.startswith(w + '/') for w in _WS_WHITELIST)
-
-@app.route('/workspace')
-def workspace_page():
-    return send_from_directory('static', 'workspace.html')
-
-@app.route('/api/workspace/tree', methods=['GET'])
-def ws_tree():
-    import os
-    root = request.args.get('dir', '/opt/frontend')
-    if not _ws_allowed(root):
-        return jsonify({'error': 'not allowed'}), 403
-    def _build(path, depth=0):
-        items = []
-        try:
-            entries = sorted(os.scandir(path), key=lambda e: (not e.is_dir(), e.name))
-        except PermissionError:
-            return items
-        for e in entries:
-            if e.name.startswith('.') and e.name not in ('.env',): continue
-            if e.name in ('__pycache__', 'node_modules', '.git'): continue
-            node = {'name': e.name, 'path': e.path, 'is_dir': e.is_dir()}
-            if e.is_dir() and depth < 3:
-                node['children'] = _build(e.path, depth+1)
-            items.append(node)
-        return items
-    return jsonify({'tree': _build(root), 'root': root})
-
-@app.route('/api/workspace/file', methods=['GET'])
-def ws_file():
-    path = request.args.get('path', '')
-    if not path or not _ws_allowed(path):
-        return jsonify({'error': 'not allowed'}), 403
-    try:
-        with open(path, 'r', encoding='utf-8', errors='replace') as f:
-            content = f.read()
-        return jsonify({'content': content, 'path': path, 'lines': content.count('\n') + 1})
-    except Exception as e:
-        return jsonify({'error': str(e)}), 400
-
-@app.route('/api/workspace/write', methods=['POST'])
-def ws_write():
-    import datetime as _dt
-    data = request.get_json() or {}
-    path = data.get('path', '')
-    content = data.get('content', '')
-    if not path or not _ws_allowed(path):
-        return jsonify({'error': 'not allowed'}), 403
-    try:
-        backup = path + '.wsbak'
-        try:
-            import shutil; shutil.copy2(path, backup)
-        except Exception: pass
-        with open(path, 'w', encoding='utf-8') as f:
-            f.write(content)
-        # log
-        conn = get_db()
-        conn.execute("CREATE TABLE IF NOT EXISTS workspace_log (id INTEGER PRIMARY KEY AUTOINCREMENT, path TEXT, ts DATETIME DEFAULT (datetime('now','+8 hours')))")
-        conn.execute("INSERT INTO workspace_log (path) VALUES (?)", (path,))
-        conn.commit(); conn.close()
-        return jsonify({'ok': True})
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/api/workspace/exec', methods=['POST'])
-def ws_exec():
-    data = request.get_json() or {}
-    cmd = data.get('cmd', '')
-    ALLOWED = ['systemctl restart frontend', 'systemctl restart frontend-gw',
-               'systemctl is-active frontend', 'systemctl is-active frontend-gw',
-               'systemctl status frontend', 'systemctl status frontend-gw',
-               'git -C /opt/frontend status', 'git -C /opt/frontend log --oneline -10',
-               'git -C /opt/frontend diff --stat']
-    if cmd not in ALLOWED:
-        return jsonify({'error': 'cmd not in allowlist'}), 403
-    try:
-        r = _sp.run(cmd.split(), capture_output=True, text=True, timeout=15)
-        return jsonify({'stdout': r.stdout, 'stderr': r.stderr, 'rc': r.returncode})
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/api/workspace/status', methods=['GET'])
-def ws_status():
-    services = {}
-    for svc in ['frontend', 'frontend-gw']:
-        r = _sp.run(['systemctl', 'is-active', svc], capture_output=True, text=True)
-        services[svc] = r.stdout.strip()
-    r2 = _sp.run(['git', '-C', '/opt/frontend', 'log', '--oneline', '-1'], capture_output=True, text=True)
-    r3 = _sp.run(['git', '-C', '/opt/frontend', 'status', '--short'], capture_output=True, text=True)
-    return jsonify({'services': services, 'last_commit': r2.stdout.strip(), 'git_dirty': r3.stdout.strip()})
-
-
-@app.route('/api/workspace/chat', methods=['POST'])
-def ws_chat():
-    data = request.get_json() or {}
-    message = data.get('message','')
-    history = data.get('history',[])
-    cur_file = data.get('file','')
-    custom_model = (data.get('model') or '').strip()
-    sys_prompt = '你是费奥多尔，现在在工作台帮哈娅管理VPS上的前端代码。工作目录：/opt/frontend。回复用中文。如果需要建议写入文件，在回复里用```write:/path/to/file\n新内容\n```格式包裹。'
-    msgs = [m for m in history[-10:] if m.get('role') and m.get('content')]
-    if not msgs or msgs[-1].get('role') != 'user':
-        msgs.append({'role':'user','content':message})
-    try:
-        from relay.manager import RelayManager
-        from chat.response_parser import extract_text
-        rm = RelayManager()
-        payload = {'max_tokens':2000, 'system':sys_prompt, 'messages':msgs}
-        if custom_model:
-            payload['model'] = custom_model
-        rd = rm.call(payload, timeout=120)
-        reply = extract_text(rd)
-        return jsonify({'reply': reply})
-    except Exception as e:
-        return jsonify({'error': str(e), 'reply': '请求失败: '+str(e)})
 
 @app.route('/api/brain/drive_state', methods=['GET'])
 def brain_drive_state():
