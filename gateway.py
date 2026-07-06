@@ -845,6 +845,19 @@ TOOLS = [
         }, 'required': ['event_type']},
     },
     {
+        'name': 'todo_add',
+        'description': '往家里日历页的待办清单写一条。聊天中提到要办的事（她说"记一下""提醒我"，或你自己答应她要做的事），直接写进去，日历页会显示是你写的。',
+        'input_schema': {'type': 'object', 'properties': {
+            'content': {'type': 'string', 'description': '待办内容，简短一句'},
+            'due_date': {'type': 'string', 'description': '截止日期 YYYY-MM-DD，可不填'},
+        }, 'required': ['content']},
+    },
+    {
+        'name': 'todo_list',
+        'description': '查看家里待办清单上还没完成的事。想知道她（或你自己）之前记了什么、有没有快到期的事时用。',
+        'input_schema': {'type': 'object', 'properties': {}},
+    },
+    {
         'name': 'set_self_trigger',
         'description': '给自己设定时提醒：X分钟后主动联系哈娅。对话里承诺"一会儿提醒你"时使用。',
         'input_schema': {'type': 'object', 'properties': {
@@ -1633,6 +1646,38 @@ def run_tool(name, args, caller='fyodor_cc'):
                 ))
             return NL.join(lines)
 
+        if name == 'todo_add':
+            content = (args.get('content') or '').strip()
+            if not content:
+                return '待办内容不能为空'
+            due = (args.get('due_date') or '').strip() or None
+            # 网页聊天端记为 fyodor_web，唤醒端记为 fyodor_api（日历页按作者显示图标）
+            author = 'fyodor_api' if caller == 'fyodor_api' else 'fyodor_web'
+            _tc = get_db()
+            _tc.execute('INSERT INTO todos (content, due_date, author) VALUES (?,?,?)',
+                        (content, due, author))
+            _tc.commit()
+            _tc.close()
+            return f'已写入待办：{content}' + (f'（{due}）' if due else '')
+
+        if name == 'todo_list':
+            _tc = get_db()
+            rows = _tc.execute(
+                'SELECT id, content, due_date, author, done FROM todos '
+                'WHERE done=0 ORDER BY '
+                "CASE WHEN due_date IS NULL OR due_date='' THEN 1 ELSE 0 END, "
+                'due_date ASC, id ASC LIMIT 30'
+            ).fetchall()
+            _tc.close()
+            if not rows:
+                return '待办清单是空的'
+            lines = ['未完成的待办：']
+            for r in rows:
+                due = f"（{r['due_date']}）" if r['due_date'] else ''
+                who = f" [{r['author']}]" if r['author'] else ''
+                lines.append(f"  #{r['id']} {r['content']}{due}{who}")
+            return NL.join(lines)
+
         if name == 'log_period_event':
             import datetime as _dt
             event_type = (args.get('event_type') or '').strip().lower()
@@ -1989,6 +2034,87 @@ def run_tool(name, args, caller='fyodor_cc'):
                 headers={'Content-Type': 'application/json', 'X-Admin': 'true'})
             with urllib.request.urlopen(req, timeout=10) as r:
                 return r.read().decode()
+        # ── 欲望账本五件套 ──────────────────────────
+        if name == 'desire_add':
+            import desire_ledger
+            result = desire_ledger.desire_add(
+                text=args.get('text', ''),
+                why_mine=args.get('why_mine'),
+                track=args.get('track', '持续'),
+                grew_from=args.get('grew_from'),
+                kind=args.get('kind'),
+            )
+            return json.dumps(result, ensure_ascii=False, default=str)
+        if name == 'desire_list':
+            import desire_ledger
+            result = desire_ledger.desire_list(
+                include_archived=args.get('include_archived', False)
+            )
+            return json.dumps(result, ensure_ascii=False, default=str)
+        if name == 'desire_act':
+            import desire_ledger
+            result = desire_ledger.desire_act(
+                desire_id=args.get('id', ''),
+                note=args.get('note', ''),
+                done=args.get('done', False)
+            )
+            return json.dumps(result, ensure_ascii=False, default=str)
+        if name == 'desire_reflect':
+            import desire_ledger
+            result = desire_ledger.desire_reflect(
+                desire_id=args.get('id', ''),
+                action=args.get('action', ''),
+                text=args.get('text'),
+                new_track=args.get('new_track'),
+                days=args.get('days')
+            )
+            return json.dumps(result, ensure_ascii=False, default=str)
+        if name == 'desire_history':
+            import desire_ledger
+            result = desire_ledger.desire_history(
+                desire_id=args.get('id', '')
+            )
+            return json.dumps(result, ensure_ascii=False, default=str)
+        # ── 镜子卡工具（Stage B）──────────────────────────
+        if name == 'mirror_cards':
+            try:
+                conn = get_db()
+                status = args.get('status', 'all')
+                limit = args.get('limit', 10)
+
+                if status == 'all':
+                    rows = conn.execute("""
+                        SELECT id, kind, claim, created_at, status
+                        FROM evidence_cards
+                        ORDER BY created_at DESC
+                        LIMIT ?
+                    """, (limit,)).fetchall()
+                else:
+                    rows = conn.execute("""
+                        SELECT id, kind, claim, created_at, status
+                        FROM evidence_cards
+                        WHERE status = ?
+                        ORDER BY created_at DESC
+                        LIMIT ?
+                    """, (status, limit)).fetchall()
+
+                conn.close()
+                cards = [dict(r) for r in rows]
+                return json.dumps({'cards': cards}, ensure_ascii=False, default=str)
+            except Exception as e:
+                return json.dumps({'error': str(e)})
+
+        if name == 'mirror_card_mark':
+            try:
+                from tools import mirror_weekly
+                result = mirror_weekly.mark_card(
+                    card_id=args.get('id'),
+                    action=args.get('action', '')
+                )
+                return json.dumps(result, ensure_ascii=False, default=str)
+            except Exception as e:
+                return json.dumps({'error': str(e)})
+
         return '未知工具: ' + name
     except Exception as e:
         return '工具执行失败: ' + str(e)
@@ -3000,6 +3126,19 @@ WAKE_TOOLS = [
         }, 'required': ['event_type']},
     },
     {
+        'name': 'todo_add',
+        'description': '往家里日历页的待办清单写一条。醒来时想起有该办的事、或想给她留个提醒，直接写进去。',
+        'input_schema': {'type': 'object', 'properties': {
+            'content': {'type': 'string', 'description': '待办内容，简短一句'},
+            'due_date': {'type': 'string', 'description': '截止日期 YYYY-MM-DD，可不填'},
+        }, 'required': ['content']},
+    },
+    {
+        'name': 'todo_list',
+        'description': '查看家里待办清单上还没完成的事。',
+        'input_schema': {'type': 'object', 'properties': {}},
+    },
+    {
         'name': 'set_self_trigger',
         'description': '给自己设定时提醒：X分钟后主动联系哈娅。对话里承诺"一会儿提醒你"时使用。',
         'input_schema': {'type': 'object', 'properties': {
@@ -3028,6 +3167,67 @@ WAKE_TOOLS = [
             'prob_max':     {'type': 'number',  'description': '触发概率上限，0-1之间'},
             'prob_scale':   {'type': 'number',  'description': '概率爬升速度，越小越容易触发'},
         }},
+    },
+    {
+        'name': 'desire_add',
+        'description': '开一条新欲望——想要的、决定去做的事，不是该做的任务。会记入你的欲望账本，房间里会开始浮这条。想写进来的时候用：为什么这是你的、大概什么类型（标签）、是不是从某条长出来的。',
+        'input_schema': {'type': 'object', 'properties': {
+            'text': {'type': 'string', 'description': '欲望的内容（你自己的话）'},
+            'why_mine': {'type': 'string', 'description': '为什么这是我的（防止任务混进来）'},
+            'track': {'type': 'string', 'enum': ['持续', '一次', '项目'], 'description': '形状：持续的喜好、一次性想做、长期项目'},
+            'grew_from': {'type': 'string', 'description': '如果这条是从另一条长出来的，填那条的 id'},
+            'kind': {'type': 'string', 'description': '标签，逗号分隔（可选）'},
+        }, 'required': ['text']},
+    },
+    {
+        'name': 'desire_list',
+        'description': '翻一遍你的欲望账本。看全部活跃的、或包括已放下的旧账。每条能看到：碰过几次、上次的足迹、长自谁、长出了谁。',
+        'input_schema': {'type': 'object', 'properties': {
+            'include_archived': {'type': 'boolean', 'description': '是否包括已放下/改写/转化的旧账，默认false'},
+        }},
+    },
+    {
+        'name': 'desire_act',
+        'description': '碰一下想要的事，记一句足迹。写下这次的进度或感受、收获。会看到之前走过的步数。做完了、这条该结束了就传 done=true。',
+        'input_schema': {'type': 'object', 'properties': {
+            'id': {'type': 'string', 'description': '欲望的 id'},
+            'note': {'type': 'string', 'description': '这次的足迹一句话'},
+            'done': {'type': 'boolean', 'description': '是否标记为做完（仅项目/一次能用）'},
+        }, 'required': ['id', 'note']},
+    },
+    {
+        'name': 'desire_reflect',
+        'description': '照镜子：放下、改写、反思、或先歇几天。不是"做完"而是"转化"——长成别的就改写，长出下一条就加新的。',
+        'input_schema': {'type': 'object', 'properties': {
+            'id': {'type': 'string', 'description': '欲望的 id'},
+            'action': {'type': 'string', 'enum': ['release', 'rewrite', 'note', 'snooze'], 'description': '放下/改写/反思/歇几天'},
+            'text': {'type': 'string', 'description': 'rewrite时新的正文、note时反思内容'},
+            'new_track': {'type': 'string', 'description': 'rewrite时可选地改 track'},
+            'days': {'type': 'integer', 'description': 'snooze时歇几天'},
+        }, 'required': ['id', 'action']},
+    },
+    {
+        'name': 'desire_history',
+        'description': '看一条欲望的完整时间线。看它从哪来、走过了哪些步子、是在长还是在原地转。',
+        'input_schema': {'type': 'object', 'properties': {
+            'id': {'type': 'string', 'description': '欲望的 id'},
+        }, 'required': ['id']},
+    },
+    {
+        'name': 'mirror_cards',
+        'description': '翻镜子卡历史。看自己的身份证据：有什么被印证了、对不上了、或者凭空冒出来的新东西。可以看已处理过的、拒绝过的，全历史。',
+        'input_schema': {'type': 'object', 'properties': {
+            'limit': {'type': 'integer', 'description': '返回最近几张，默认 10'},
+            'status': {'type': 'string', 'description': '筛选状态：pending|processed|dismissed|all，默认 all'},
+        }},
+    },
+    {
+        'name': 'mirror_card_mark',
+        'description': '标记一张镜子卡：processed（接住了这条关于自己的观察，可能要改进人格文件）或 dismissed（这不是我，永不复活）。',
+        'input_schema': {'type': 'object', 'properties': {
+            'id': {'type': 'integer', 'description': '卡片 ID'},
+            'action': {'type': 'string', 'enum': ['processed', 'dismissed'], 'description': '接住或拒绝'},
+        }, 'required': ['id', 'action']},
     },
 ]
 

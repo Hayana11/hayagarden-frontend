@@ -34,14 +34,19 @@
       if (r.type === 'period') periodDates.add(r.date);
       else if (r.type === 'sex') sexDates.add(r.date);
     });
+    // 后端聚合的实际经期日（含费佳 start/end 记录展开的段），比每日打点更全
+    (stats.period_days || []).forEach(function (d) { periodDates.add(d); });
 
     var predDates = new Set();
     var ovulDate = null;
     var fertileDates = new Set();
 
-    if (stats.next_period) {
+    if (stats.predicted_days && stats.predicted_days.length) {
+      stats.predicted_days.forEach(function (d) { predDates.add(d); });
+    } else if (stats.next_period) {
       var np = new Date(stats.next_period + 'T00:00:00');
-      for (var i = 0; i < 5; i++) {
+      var n = stats.period_length || 5;
+      for (var i = 0; i < n; i++) {
         var pd = new Date(np);
         pd.setDate(np.getDate() + i);
         predDates.add(pd.getFullYear() + '-' + pad(pd.getMonth() + 1) + '-' + pad(pd.getDate()));
@@ -84,22 +89,54 @@
     });
   }
 
+  function fmtMD(ds) {
+    if (!ds) return '';
+    var p = ds.split('-');
+    return (+p[1]) + '月' + (+p[2]) + '日';
+  }
+
   function renderPeriodStats(stats) {
     var el = document.getElementById('period-stats');
     if (!el) return;
-    var rows = [];
-    if (stats.last_period) rows.push({ label: '上次经期', val: stats.last_period });
-    if (stats.cycle_length) rows.push({ label: '平均周期', val: stats.cycle_length + ' 天' });
-    if (stats.next_period) rows.push({ label: '下次预测', val: stats.next_period });
-    if (stats.ovulation) rows.push({ label: '排卵日预测', val: stats.ovulation });
-    if (!rows.length) {
+    if (!stats.last_period) {
       el.innerHTML = '<div class="empty-hint">暂无数据，先记录第一次经期吧</div>';
       return;
     }
-    el.innerHTML = rows.map(function (r) {
-      return '<div class="ps-row"><span class="ps-label">' + r.label +
-             '</span><span class="ps-val">' + r.val + '</span></div>';
-    }).join('');
+
+    // ── hero：下次预测大字 + 周期进度条 ──
+    var hero = '';
+    if (stats.next_period) {
+      var du = stats.days_until;
+      var main, sub, late = du != null && du < 0;
+      if (late) {
+        main = '已推迟 <span class="ch-accent">' + Math.abs(du) + '</span> 天';
+        sub = '原预计 ' + fmtMD(stats.next_period) + ' · 通常持续 ' + (stats.period_length || 5) + ' 天';
+      } else if (du === 0) {
+        main = '预计<span class="ch-accent">今天</span>来';
+        sub = '通常持续 ' + (stats.period_length || 5) + ' 天';
+      } else {
+        main = '下次 <span class="ch-accent">' + fmtMD(stats.next_period) + '</span>';
+        sub = '还有 ' + du + ' 天 · 预计持续 ' + (stats.period_length || 5) + ' 天';
+      }
+      var bar = '';
+      if (stats.cycle_day && stats.cycle_length) {
+        var pct = Math.min(stats.cycle_day / stats.cycle_length * 100, 100);
+        bar = '<div class="ch-bar"><div class="ch-fill' + (late ? ' late' : '') + '" style="width:' + pct + '%"></div></div>'
+          + '<div class="ch-bar-labels"><span>周期第 ' + stats.cycle_day + ' 天</span><span>' + stats.cycle_length + ' 天/周期</span></div>';
+      }
+      hero = '<div class="cycle-hero"><div class="ch-label">CYCLE</div>'
+        + '<div class="ch-main' + (late ? ' late' : '') + '">' + main + '</div>'
+        + '<div class="ch-sub">' + sub + '</div>' + bar + '</div>';
+    }
+
+    // ── 小字统计行 ──
+    var mini = [];
+    if (stats.last_period) mini.push('上次 <b>' + fmtMD(stats.last_period) + '</b>');
+    if (stats.cycle_length) mini.push('平均周期 <b>' + stats.cycle_length + '天</b>');
+    if (stats.ovulation) mini.push('排卵日 <b>' + fmtMD(stats.ovulation) + '</b>');
+    var miniHtml = mini.length ? '<div class="ps-mini">' + mini.map(function(m){return '<span>'+m+'</span>';}).join('') + '</div>' : '';
+
+    el.innerHTML = hero + miniHtml;
   }
 
   async function openDayModal(dateStr) {
@@ -118,8 +155,9 @@
       el.innerHTML = '<div class="empty-hint">当天暂无记录</div>';
       return;
     }
+    var LABELS = { period: '🩸 经期', sex: '♥ 爱爱', start: '🩸 经期开始', end: '🩸 经期结束' };
     el.innerHTML = recs.map(function (r) {
-      var label = r.type === 'period' ? '🩸 经期' : '♥ 爱爱';
+      var label = LABELS[r.type] || r.type;
       if (r.note) label += ' · ' + r.note;
       return '<div class="dm-rec"><span>' + label + '</span>' +
              '<button class="dm-del" onclick="dmDelete(' + r.id + ')">删除</button></div>';
