@@ -1,7 +1,12 @@
 import os
 import sqlite3
+import sys
 import tempfile
 import unittest
+
+ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if ROOT not in sys.path:
+    sys.path.insert(0, ROOT)
 
 
 class DesireLedgerTests(unittest.TestCase):
