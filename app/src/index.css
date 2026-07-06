@@ -1,0 +1,58 @@
+:root {
+  --color-bg: #F7F1EE;
+  --color-card: #FFFFFF;
+  --color-text: #4A3F3C;
+  --color-text-soft: #6B5A55;
+  --color-text-mute: #8C7B76;
+  --color-text-faint: #A99590;
+  --color-text-fainter: #C4B4AF;
+  --color-rose: #B76E79;
+  --color-rose-deep: #9C3B4A;
+  --color-rose-pink: #C08497;
+  --color-violet: #8A7AB5;
+  --color-amber: #D9A441;
+  --color-green: #7FA98F;
+  --color-green-deep: #5E8A6E;
+  --color-green-soft: #8FA697;
+  --color-track: #F3EBE8;
+  --color-nav-inactive: #B9A8A2;
+  --radius-card: 22px;
+  --shadow-card: 0 10px 30px rgba(183,110,121,0.10);
+  --shadow-fab: 0 6px 18px rgba(183,110,121,0.10);
+  --font-serif-cn: 'Noto Serif SC', serif;
+  --font-serif-display: 'Bodoni Moda', serif;
+  --font-mono: 'Space Grotesk', sans-serif;
+}
+
+html, body {
+  margin: 0;
+  padding: 0;
+  background: var(--color-bg);
+}
+
+#root {
+  min-height: 100vh;
+}
+
+* {
+  box-sizing: border-box;
+  -webkit-tap-highlight-color: transparent;
+}
+
+body {
+  font-family: var(--font-serif-cn);
+  color: var(--color-text);
+}
+
+button {
+  font-family: inherit;
+  color: inherit;
+  background: none;
+  border: none;
+  padding: 0;
+}
+
+@keyframes livePulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: .35; }
+}
