@@ -145,10 +145,26 @@ def _get_desire_driven():
 def _get_longing_enabled():
     return config_store.get_bool('LONGING_ENABLED', True)
 
+def _get_desire_ledger_enabled():
+    return config_store.get_bool('DESIRE_LEDGER_ENABLED', False)
+
 def get_db():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
+
+def _init_yearring_tables():
+    try:
+        import desire_ledger as _dl
+        _conn = get_db()
+        try:
+            _dl.ensure_schema(_conn)
+        finally:
+            _conn.close()
+    except Exception:
+        pass
+
+_init_yearring_tables()
 
 # 防止同一轮对话被并发触发两次生成（例如前端在网络超时/切后台后误判"没收到回复"而发起的
 # fallback 调用，跟后端仍在跑的原始请求撞在一起）——后来者直接等前者结果，不再起第二次生成。
@@ -1846,6 +1862,21 @@ def run_tool(name, args, caller='fyodor_cc'):
             if not changed:
                 return '没有传任何要修改的参数'
             return '已更新（立即生效，不需要重启）：' + '、'.join(changed)
+        if name == 'desire_add':
+            import desire_ledger as _dl
+            return _dl.tool_desire_add(args)
+        if name == 'desire_list':
+            import desire_ledger as _dl
+            return _dl.tool_desire_list(args)
+        if name == 'desire_act':
+            import desire_ledger as _dl
+            return _dl.tool_desire_act(args)
+        if name == 'desire_reflect':
+            import desire_ledger as _dl
+            return _dl.tool_desire_reflect(args)
+        if name == 'desire_history':
+            import desire_ledger as _dl
+            return _dl.tool_desire_history(args)
         if name == 'read_backend_file':
             import os as _os
             p = args.get('path', '')
@@ -3029,6 +3060,52 @@ WAKE_TOOLS = [
             'prob_scale':   {'type': 'number',  'description': '概率爬升速度，越小越容易触发'},
         }},
     },
+    {
+        'name': 'desire_add',
+        'description': '把一条新的欲望记进账本。写的是“我想要的”，不是“我该做的”（todo 别放这）。可选 why_mine/track/grew_from/kind。',
+        'input_schema': {'type': 'object', 'properties': {
+            'text': {'type': 'string', 'description': '欲望本体，用你自己的话写'},
+            'why_mine': {'type': 'string', 'description': '为什么这是我的（可选）'},
+            'track': {'type': 'string', 'description': '持续 / 一次 / 项目，默认持续'},
+            'grew_from': {'type': 'string', 'description': '从哪条长出来（父id，可选）'},
+            'kind': {'type': 'string', 'description': '标签，可选'},
+            'visibility': {'type': 'string', 'description': 'shared / surprise / private（默认shared）'},
+        }, 'required': ['text']},
+    },
+    {
+        'name': 'desire_list',
+        'description': '翻欲望账本，看看每条碰过几次、上次脚印、来路和分叉。',
+        'input_schema': {'type': 'object', 'properties': {
+            'include_archived': {'type': 'boolean', 'description': '是否包含已完成/放下/改写的条目'},
+        }},
+    },
+    {
+        'name': 'desire_act',
+        'description': '碰一下某条欲望并留一句足迹。会回显这条你走过的最近步骤，防止重走旧路。',
+        'input_schema': {'type': 'object', 'properties': {
+            'id': {'type': 'string', 'description': '欲望id'},
+            'note': {'type': 'string', 'description': '这次做到哪了，用一句话写'},
+            'done': {'type': 'boolean', 'description': '项目/一次型可传 true 收针'},
+        }, 'required': ['id', 'note']},
+    },
+    {
+        'name': 'desire_reflect',
+        'description': '照镜子处理一条欲望：release 放下、rewrite 改写、note 留反思、snooze 歇几天。',
+        'input_schema': {'type': 'object', 'properties': {
+            'id': {'type': 'string', 'description': '欲望id'},
+            'action': {'type': 'string', 'enum': ['release', 'rewrite', 'note', 'snooze']},
+            'text': {'type': 'string', 'description': 'rewrite/note 时的文本'},
+            'new_track': {'type': 'string', 'description': 'rewrite 时可改 track'},
+            'days': {'type': 'integer', 'description': 'snooze 时歇几天'},
+        }, 'required': ['id', 'action']},
+    },
+    {
+        'name': 'desire_history',
+        'description': '看一条欲望的完整足迹时间线，判断自己是在长还是在原地打转。',
+        'input_schema': {'type': 'object', 'properties': {
+            'id': {'type': 'string', 'description': '欲望id'},
+        }, 'required': ['id']},
+    },
 ]
 
 def _wake_agent_loop(system, messages, max_rounds=4, tools=None):
@@ -3174,6 +3251,21 @@ def wake_decide():
         desire_driven=_get_desire_driven(),
         longing_enabled=_get_longing_enabled(),
     )
+    surfaced_desire_ids = []
+    if _get_desire_ledger_enabled() and mode in ('normal', 'nightwatch'):
+        try:
+            import desire_ledger as _dl
+            _lc = get_db()
+            try:
+                _surfaced = _dl.surface(_lc, limit=6, bump=False)
+            finally:
+                _lc.close()
+            surfaced_desire_ids = [str(d.get('id', '')).strip() for d in _surfaced if d.get('id')]
+            _room_snip = _dl.render_room_snippet(_surfaced)
+            if _room_snip:
+                system += '\n\n' + _room_snip
+        except Exception:
+            pass
 
     # 第3步·Drive→Memory→Action：思念浓时，提示可以主动翻一张收藏的画面发给她。
     # 不是 if/cron 强制——只是给足够的驱动和手段，让她"自己想起"。
@@ -3202,7 +3294,8 @@ def wake_decide():
     msgs = [{'role': 'user', 'content': trigger}]
     if mode in ('dream', 'summarize', 'ritual'):
         # 做梦/摘要/仪式模式：不挂留言板写权限，避免梦境内容被当作"新话题"发到board
-        _wake_tools = [t for t in WAKE_TOOLS if t['name'] not in ('post_to_board', 'reply_to_board')]
+        _blocked = ('post_to_board', 'reply_to_board', 'desire_add', 'desire_list', 'desire_act', 'desire_reflect', 'desire_history')
+        _wake_tools = [t for t in WAKE_TOOLS if t['name'] not in _blocked]
     else:
         _wake_tools = WAKE_TOOLS
     try:
@@ -3218,6 +3311,8 @@ def wake_decide():
         action, thoughts, c_text, mode,
         get_db_fn=get_db,
         desire_driven=_get_desire_driven(),
+        surfaced_desire_ids=surfaced_desire_ids,
+        desire_ledger_enabled=_get_desire_ledger_enabled(),
     )
 
     return jsonify({'ok': True, 'action': action, 'content': c_text})
