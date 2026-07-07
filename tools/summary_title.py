@@ -14,14 +14,32 @@ TITLE_SUFFIX = '···'
 ROW_CHAR_BUDGET = 15    # title(full len) + preview(visible chars) ≈ budget
 PREVIEW_MIN = 4
 
-TITLE_PROMPT = """以下是一段日记，用一句中文，为这段日记做一个标题式的总结，捕捉这段思考里最主要的事件或最浓烈的情感状态。
+TITLE_PROMPT = """你是记忆库的标题标注员。为每条记忆写一个「索引标题」——像 Notion 数据库里给一行起的名字，让人一眼知道这条记的是什么事。
 
-语言简练、诗意、有力度，用具体的动词和感官词汇呈现情感本身的温度和质地，让读的人脑子里能出现一个画面。当思考中有对她身体的渴望、占有、色情的念头和冲动时，总结也要诚实地带着同等浓度的情欲，不把欲望包装成抒情。禁止直白的情绪词堆砌，要口语化表达。
+要求：
+- 2到12个字，尽量短
+- 写「什么事 / 什么物 / 什么计划」，不要抒情、不要隐喻、不要感官描写、不要情欲暗示
+- 用平实的日常中文，可以是名词短语或简短动宾结构
+- 优先提取：购物/物品/计划、猫咪相关事件、共读、技术、健康与经期、约定、生活琐事
+- 产品名可保留英文或常见写法（如 Mac、Mac Mini）
+- 禁止：诗化、煽情、第一人称内心独白、把正文换个说法复述
+- 只输出标题本身，不要引号、不要句号
 
-以感受或内心动作开头，第一人称视角但省略主语"我"。用陈述语气或动词短语，不超过12字。
+示例：
+正文：哈娅计划等淘宝大促时购买 Mac Mini M4。
+标题：mac购买计划
 
-日记：
-{content}"""
+正文：瓦楞纸的，小猫闻了三分钟，然后睡在了包装盒上。
+标题：新猫抓板到货
+
+正文：在毯子上踩了整整五分钟。哈娅一动不敢动，拍了一段很糊的视频。
+标题：第一次主动踩奶
+
+正文：红糖姜茶在橱柜第二层。这几天让小猫早点睡，别熬夜读第十一卷。
+标题：经期备忘
+
+正文：{content}
+标题："""
 
 API_KEY = ''
 try:
@@ -98,8 +116,8 @@ def _ask_deepseek(content):
     prompt = TITLE_PROMPT.format(content=(content or '')[:800])
     body = json.dumps({
         'model': MODEL,
-        'max_tokens': 48,
-        'temperature': 0.7,
+        'max_tokens': 32,
+        'temperature': 0.25,
         'messages': [{'role': 'user', 'content': prompt}],
     }).encode()
     request = urllib.request.Request(
@@ -115,6 +133,8 @@ def _ask_deepseek(content):
         with urllib.request.urlopen(request, timeout=60) as resp:
             data = json.load(resp)
         text = (data.get('choices', [{}])[0].get('message', {}).get('content') or '').strip()
+        # Model may echo "标题：xxx" — strip label if present
+        text = re.sub(r'^标题[：:]\s*', '', text).strip()
         text = _normalize_title(text)
         time.sleep(0.4)
         return text or None
