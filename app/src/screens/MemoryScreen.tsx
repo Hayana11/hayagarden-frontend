@@ -1,7 +1,8 @@
-import type { CSSProperties } from 'react';
-import { useEffect, useState } from 'react';
+import type { CSSProperties, PointerEvent as ReactPointerEvent } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { BackHeader } from '../components/BackHeader';
 import { Card, ScreenLayout } from '../components/Card';
+import { DragScrollRow } from '../components/DragScrollRow';
 import { useMemoryLibrary } from '../hooks/useMemoryLibrary';
 import { dateKey, seeded } from '../lib/format';
 import {
@@ -29,8 +30,7 @@ const VIEW_TABS: { key: ViewMode; icon: string; label: string }[] = [
   { key: 'topic', icon: '🏷', label: '主题' },
   { key: 'star', icon: '🌌', label: '星图' },
 ];
-const STATE_LABELS: [StateFilter, string][] = [
-  ['all', '全部'],
+const STATE_LABELS: [Exclude<StateFilter, 'all'>, string][] = [
   ['core', '核心'],
   ['long', '长期'],
   ['short', '短期'],
@@ -70,6 +70,12 @@ export function MemoryScreen() {
   const [observeValue, setObserveValue] = useState<string | null>(null);
   const [replayPct, setReplayPct] = useState(100);
   const [rippleId, setRippleId] = useState<number | null>(null);
+  const [starPan, setStarPan] = useState({ x: 0, y: 0 });
+  const starGestureRef = useRef<
+    | { kind: 'pending'; x: number; y: number; ox: number; oy: number; starId?: number }
+    | { kind: 'pan'; x: number; y: number; ox: number; oy: number }
+    | null
+  >(null);
 
   useEffect(() => {
     const onResize = () => setIsDesktop(window.innerWidth >= 900);
@@ -77,6 +83,13 @@ export function MemoryScreen() {
     window.addEventListener('resize', onResize);
     return () => window.removeEventListener('resize', onResize);
   }, []);
+
+  useEffect(() => {
+    if (view !== 'star') {
+      setStarPan({ x: 0, y: 0 });
+      setZoom(1);
+    }
+  }, [view]);
 
   if (!library) {
     return (
@@ -89,11 +102,16 @@ export function MemoryScreen() {
   const { topics, entries } = library;
   const topicByKey = new Map(topics.map((t) => [t.key, t]));
 
-  const chipOk = (m: MemoryEntry) => chips.every((c) => (c.type === 'tag' ? m.tags.includes(c.value) : m.who === c.value));
+  const whoChips = chips.filter((c) => c.type === 'who');
+  const tagChips = chips.filter((c) => c.type === 'tag');
+  const whoOk = (m: MemoryEntry) => whoChips.every((c) => m.who === c.value);
+  const tagOk = (m: MemoryEntry) => tagChips.every((c) => m.tags.includes(c.value));
   const stateOk = (m: MemoryEntry) => fState === 'all' || memoryState(m.weight) === fState;
   const topicOk = (m: MemoryEntry) => fTopic === 'all' || m.topics.includes(fTopic);
-  const chipFiltered = entries.filter(chipOk);
-  const filtered = entries.filter((m) => chipOk(m) && stateOk(m) && topicOk(m));
+  const facetScope = (m: MemoryEntry) => stateOk(m) && topicOk(m) && whoOk(m);
+  const filtered = entries.filter((m) => facetScope(m) && tagOk(m));
+  const stateCountOk = (m: MemoryEntry) => topicOk(m) && whoOk(m) && tagOk(m);
+  const topicCountOk = (m: MemoryEntry) => stateOk(m) && whoOk(m) && tagOk(m);
 
   function pushFrame(frame: DrawerFrame) {
     setStack((s) => [...s, frame]);
@@ -192,8 +210,8 @@ export function MemoryScreen() {
     key,
     label,
     active: fState === key,
-    n: chipFiltered.filter((m) => topicOk(m) && (key === 'all' || memoryState(m.weight) === key)).length,
-    pick: () => setFState(key),
+    n: entries.filter((m) => stateCountOk(m) && memoryState(m.weight) === key).length,
+    pick: () => setFState((cur) => (cur === key ? 'all' : key)),
   }));
 
   const topicOrder = topics
@@ -202,34 +220,41 @@ export function MemoryScreen() {
     .sort((a, b) => b.total - a.total)
     .map((x) => x.topic);
 
-  const topicTabs = [
-    {
-      key: 'all',
-      label: '全部',
-      emoji: null as string | null,
-      active: fTopic === 'all',
-      n: chipFiltered.filter(stateOk).length,
-      pick: () => setFTopic('all'),
-    },
-    ...topicOrder.map((t) => ({
-      key: t.key,
-      label: t.name,
-      emoji: t.emoji as string | null,
-      active: fTopic === t.key,
-      n: chipFiltered.filter((m) => stateOk(m) && m.topics.includes(t.key)).length,
-      pick: () => setFTopic((cur) => (cur === t.key ? 'all' : t.key)),
-    })),
-  ];
+  const topicTabs = topicOrder.map((t) => ({
+    key: t.key,
+    label: t.name,
+    emoji: t.emoji as string | null,
+    active: fTopic === t.key,
+    n: entries.filter((m) => topicCountOk(m) && m.topics.includes(t.key)).length,
+    pick: () => setFTopic((cur) => (cur === t.key ? 'all' : t.key)),
+  }));
 
-  let tagRow: { label: string; color: string; bg: string; border: string; bold: boolean; pick: () => void }[] = [];
-  if (fTopic !== 'all') {
-    const tagsForTopic = [...new Set(entries.filter((m) => m.topics.includes(fTopic)).flatMap((m) => m.tags))];
-    tagRow = tagsForTopic.map((t) => {
-      const col = tagColor(t);
-      const active = chips.some((c) => c.type === 'tag' && c.value === t);
-      return { label: t, color: col.color, bg: active ? col.bg : '#FFFFFF', border: active ? col.color : '#EFE3DE', bold: active, pick: () => toggleTag(t) };
+  const tagFreq = new Map<string, number>();
+  entries.filter(facetScope).forEach((m) => {
+    m.tags.forEach((tag) => tagFreq.set(tag, (tagFreq.get(tag) ?? 0) + 1));
+  });
+  tagChips.forEach((c) => {
+    if (!tagFreq.has(c.value)) tagFreq.set(c.value, 0);
+  });
+  const tagRow = [...tagFreq.entries()]
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0], 'zh-CN'))
+    .slice(0, 16)
+    .map(([label, n]) => {
+      const col = tagColor(label);
+      const active = tagChips.some((c) => c.value === label);
+      const stale = n === 0;
+      return {
+        label,
+        n,
+        color: stale && !active ? '#C4B4AF' : col.color,
+        bg: active ? col.bg : '#FFFFFF',
+        border: active ? col.color : '#EFE3DE',
+        bold: active,
+        stale,
+        pick: () => toggleTag(label),
+      };
     });
-  }
+  const showTagRow = tagRow.length > 0;
 
   // ── 月相（时间线） ──
   const sortedFiltered = [...filtered].sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0));
@@ -283,9 +308,9 @@ export function MemoryScreen() {
       rows: sortedMems.map((m) => ({
         ...weightDot(m.weight),
         time: m.time,
-        title: m.title,
+        title: m.summaryTitle ?? m.title,
         titleColor: titleColor(m.weight),
-        preview: m.preview,
+        preview: (m.content || '').replace(/\s+/g, ' ').trim(),
         pick: () => pushFrame({ type: 'mem', id: m.id }),
       })),
       pick: () => pushFrame({ type: 'day', date }),
@@ -450,6 +475,41 @@ export function MemoryScreen() {
   const zoomIn = () => setZoom((z) => Math.min(2.5, +(z + 0.25).toFixed(2)));
   const zoomOut = () => setZoom((z) => Math.max(1, +(z - 0.25).toFixed(2)));
 
+  function onStarPointerDown(e: ReactPointerEvent<HTMLDivElement>) {
+    const starNode = (e.target as HTMLElement).closest('[data-star-node]');
+    const starId = starNode ? Number((starNode as HTMLElement).dataset.starId) : undefined;
+    starGestureRef.current = { kind: 'pending', x: e.clientX, y: e.clientY, ox: starPan.x, oy: starPan.y, starId };
+    (e.currentTarget as HTMLDivElement).setPointerCapture(e.pointerId);
+  }
+
+  function onStarPointerMove(e: ReactPointerEvent<HTMLDivElement>) {
+    const g = starGestureRef.current;
+    if (!g) return;
+    const dx = e.clientX - g.x;
+    const dy = e.clientY - g.y;
+    if (g.kind === 'pending') {
+      if (Math.abs(dx) + Math.abs(dy) < 8) return;
+      starGestureRef.current = { kind: 'pan', x: g.x, y: g.y, ox: g.ox, oy: g.oy };
+    }
+    const pan = starGestureRef.current;
+    if (pan?.kind === 'pan') {
+      setStarPan({ x: pan.ox + (e.clientX - pan.x), y: pan.oy + (e.clientY - pan.y) });
+    }
+  }
+
+  function onStarPointerUp(e: ReactPointerEvent<HTMLDivElement>) {
+    const g = starGestureRef.current;
+    if (g?.kind === 'pending' && g.starId) {
+      starClick(g.starId);
+    }
+    starGestureRef.current = null;
+    try {
+      (e.currentTarget as HTMLDivElement).releasePointerCapture(e.pointerId);
+    } catch {
+      /* already released */
+    }
+  }
+
   // ── drawer ──
   const drawerFrame = stack[stack.length - 1] ?? null;
 
@@ -541,11 +601,34 @@ export function MemoryScreen() {
                     >
                       <span style={{ width: r.size, height: r.size, borderRadius: '50%', background: r.bg, border: r.border, flexShrink: 0 }} />
                       <span style={{ fontFamily: "'Bodoni Moda',serif", fontSize: 11, color: '#A99590', flexShrink: 0, width: 36 }}>{r.time}</span>
-                      <span style={{ fontSize: 13, fontWeight: 600, color: r.titleColor, flexShrink: 0, maxWidth: '44%', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                      <span
+                        style={{
+                          fontSize: 13,
+                          fontWeight: 600,
+                          color: r.titleColor,
+                          flexShrink: 0,
+                          maxWidth: '44%',
+                          whiteSpace: 'nowrap',
+                          overflow: 'hidden',
+                          textOverflow: 'ellipsis',
+                        }}
+                      >
                         {r.title}
                       </span>
                       <span style={{ fontSize: 12, color: '#D9CCC7', flexShrink: 0 }}>·</span>
-                      <span style={{ fontSize: 12, color: '#8C7B76', flex: 1, minWidth: 0, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{r.preview}</span>
+                      <span
+                        style={{
+                          fontSize: 12,
+                          color: '#8C7B76',
+                          flex: 1,
+                          minWidth: 0,
+                          whiteSpace: 'nowrap',
+                          overflow: 'hidden',
+                          textOverflow: 'ellipsis',
+                        }}
+                      >
+                        {r.preview}
+                      </span>
                     </div>
                   ))}
                 </div>
@@ -592,14 +675,20 @@ export function MemoryScreen() {
   function renderStarView() {
     return (
       <div>
-        <div style={{ position: 'relative', background: 'radial-gradient(circle at 62% 28%, #46394E 0%, #2E2733 70%)', borderRadius: 22, boxShadow: '0 10px 30px rgba(183,110,121,0.10)', height: 460, overflow: 'hidden' }}>
-          <div style={{ position: 'absolute', inset: 0, transform: `scale(${zoom})`, transformOrigin: '50% 50%', transition: 'transform 0.2s' }}>
-            <svg viewBox="0 0 100 100" preserveAspectRatio="none" style={{ position: 'absolute', inset: 0, width: '100%', height: '100%' }}>
+        <div
+          style={{ position: 'relative', background: 'radial-gradient(circle at 62% 28%, #46394E 0%, #2E2733 70%)', borderRadius: 22, boxShadow: '0 10px 30px rgba(183,110,121,0.10)', height: 460, overflow: 'hidden', cursor: 'grab', touchAction: 'none' }}
+          onPointerDown={onStarPointerDown}
+          onPointerMove={onStarPointerMove}
+          onPointerUp={onStarPointerUp}
+          onPointerCancel={onStarPointerUp}
+        >
+          <div style={{ position: 'absolute', inset: 0, transform: `translate(${starPan.x}px, ${starPan.y}px) scale(${zoom})`, transformOrigin: '50% 50%' }}>
+            <svg viewBox="0 0 100 100" preserveAspectRatio="none" style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', pointerEvents: 'none' }}>
               <path d={constellationPaths.join('')} stroke="rgba(255,255,255,0.16)" strokeWidth={1} fill="none" vectorEffect="non-scaling-stroke" />
               <path d={linkPaths.join('')} stroke="rgba(233,194,117,0.4)" strokeWidth={1} strokeDasharray="3 4" fill="none" vectorEffect="non-scaling-stroke" />
             </svg>
             {bgStars.map((b, i) => (
-              <div key={i} style={{ position: 'absolute', left: `${b.x}%`, top: `${b.y}%`, width: 2, height: 2, borderRadius: '50%', background: '#FFFFFF', opacity: b.o }} />
+              <div key={i} style={{ position: 'absolute', left: `${b.x}%`, top: `${b.y}%`, width: 2, height: 2, borderRadius: '50%', background: '#FFFFFF', opacity: b.o, pointerEvents: 'none' }} />
             ))}
             {stars.map((s) => {
               const related = rippleCenter
@@ -615,7 +704,8 @@ export function MemoryScreen() {
               return (
                 <div
                   key={s.id}
-                  onClick={() => starClick(s.id)}
+                  data-star-node
+                  data-star-id={s.id}
                   title={s.tip}
                   style={{
                     position: 'absolute',
@@ -627,7 +717,7 @@ export function MemoryScreen() {
                     background: s.c,
                     boxShadow: glow,
                     transform: 'translate(-50%,-50%)',
-                    cursor: 'pointer',
+                    pointerEvents: 'auto',
                     opacity,
                     transition: 'opacity 0.35s ease',
                   }}
@@ -643,7 +733,10 @@ export function MemoryScreen() {
 
           {/* 聚焦指示 */}
           {observing && (
-            <div style={{ position: 'absolute', top: 14, left: 14, zIndex: 5, display: 'flex', alignItems: 'center', gap: 6, background: 'rgba(233,194,117,0.16)', border: '1px solid rgba(233,194,117,0.4)', borderRadius: 999, padding: '5px 10px' }}>
+            <div
+              onPointerDown={(e) => e.stopPropagation()}
+              style={{ position: 'absolute', top: 14, left: 14, zIndex: 5, display: 'flex', alignItems: 'center', gap: 6, background: 'rgba(233,194,117,0.16)', border: '1px solid rgba(233,194,117,0.4)', borderRadius: 999, padding: '5px 10px' }}
+            >
               <span style={{ fontSize: 11, color: '#E9C275', letterSpacing: 1 }}>🔭 {observeLabel}</span>
               <span
                 onClick={clearObserve}
@@ -661,10 +754,11 @@ export function MemoryScreen() {
                 setTelescopeOpen(false);
                 setTelescopeStep('menu');
               }}
+              onPointerDown={(e) => e.stopPropagation()}
               style={{ position: 'absolute', inset: 0, zIndex: 4 }}
             />
           )}
-          <div style={{ position: 'absolute', top: 14, right: 14, zIndex: 5 }}>
+          <div onPointerDown={(e) => e.stopPropagation()} style={{ position: 'absolute', top: 14, right: 14, zIndex: 5 }}>
             <div
               onClick={() => {
                 setTelescopeOpen((v) => !v);
@@ -759,14 +853,21 @@ export function MemoryScreen() {
 
           {/* 时间回放 */}
           {starDates.length >= 2 && (
-            <div style={{ position: 'absolute', left: 14, right: 14, bottom: 54, display: 'flex', alignItems: 'center', gap: 10, background: 'rgba(46,39,51,0.55)', border: '1px solid rgba(255,255,255,0.10)', borderRadius: 999, padding: '6px 14px', backdropFilter: 'blur(4px)' }}>
+            <div
+              onPointerDown={(e) => e.stopPropagation()}
+              style={{ position: 'absolute', left: 14, right: 14, bottom: 54, display: 'flex', alignItems: 'center', gap: 10, background: 'rgba(46,39,51,0.55)', border: '1px solid rgba(255,255,255,0.10)', borderRadius: 999, padding: '6px 14px', backdropFilter: 'blur(4px)' }}
+            >
               <span style={{ fontSize: 12, flexShrink: 0 }}>🕐</span>
               <input type="range" min={0} max={100} step={1} value={replayPct} onChange={(e) => setReplayPct(parseInt(e.target.value, 10))} style={{ flex: 1, height: 3 }} />
               <span style={{ fontFamily: "'Bodoni Moda',serif", fontSize: 12, color: 'rgba(255,255,255,0.75)', width: 44, textAlign: 'right', flexShrink: 0 }}>{replayYearLabel}</span>
             </div>
           )}
 
-          <div style={{ position: 'absolute', left: 14, right: 14, bottom: 12, display: 'flex', alignItems: 'center', gap: 10, background: 'rgba(46,39,51,0.72)', border: '1px solid rgba(255,255,255,0.12)', borderRadius: 999, padding: '7px 14px', backdropFilter: 'blur(4px)' }}>
+          <div
+            onPointerDown={(e) => e.stopPropagation()}
+            style={{ position: 'absolute', left: 14, right: 14, bottom: 12, display: 'flex', alignItems: 'center', gap: 10, background: 'rgba(46,39,51,0.72)', border: '1px solid rgba(255,255,255,0.12)', borderRadius: 999, padding: '7px 14px', backdropFilter: 'blur(4px)' }}
+          >
+
             <span onClick={zoomOut} style={{ cursor: 'pointer', width: 22, height: 22, borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'rgba(255,255,255,0.75)', fontSize: 15, flexShrink: 0, border: '1px solid rgba(255,255,255,0.2)' }}>
               −
             </span>
@@ -969,7 +1070,7 @@ export function MemoryScreen() {
     const links = m.links.map((lid) => entries.find((x) => x.id === lid)).filter((x): x is MemoryEntry => Boolean(x));
     return (
       <>
-        <div style={{ fontSize: 21, fontWeight: 600, lineHeight: 1.6 }}>{m.summaryTitle}</div>
+        <div style={{ fontSize: 21, fontWeight: 600, lineHeight: 1.6 }}>{m.summaryTitle ?? m.title}</div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 10, flexWrap: 'wrap' }}>
           <span style={{ fontFamily: "'Bodoni Moda',serif", fontSize: 12, color: '#8C7B76', letterSpacing: 1 }}>
             {formatDateDot(m.date)} · {weekdayCN(m.date)} · {m.time}
@@ -1142,6 +1243,7 @@ export function MemoryScreen() {
   }
 
   return (
+    <div style={{ zoom: 1.07 }}>
     <ScreenLayout>
       <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
         <BackHeader title="记忆库" />
@@ -1159,7 +1261,8 @@ export function MemoryScreen() {
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             placeholder="搜索内容、标签、人物、主题…"
-            style={{ flex: 1, border: 'none', background: 'transparent', outline: 'none', fontFamily: "'Noto Serif SC',serif", fontSize: 15, color: 'var(--color-text)', minWidth: 0 }}
+            className="memory-search-input"
+            style={{ flex: 1, border: 'none', background: 'transparent', outline: 'none', fontFamily: "'Noto Serif SC',serif", fontSize: 15, color: '#4A3F3C', minWidth: 0 }}
           />
           {q.length > 0 && (
             <span
@@ -1229,46 +1332,65 @@ export function MemoryScreen() {
 
       {/* unified filter console */}
       <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: -4 }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, overflowX: 'auto', padding: 2 }}>
-          <span style={{ flexShrink: 0, fontFamily: "'Bodoni Moda',serif", fontSize: 10, letterSpacing: 3, color: '#B9A8A2', width: 34 }}>状态</span>
+        <DragScrollRow
+          label={
+            <span style={{ flexShrink: 0, fontFamily: "'Bodoni Moda',serif", fontSize: 10, letterSpacing: 3, color: '#B9A8A2', width: 34 }}>状态</span>
+          }
+        >
           {stateTabs.map((t) => (
-            <span
+            <button
               key={t.key}
+              type="button"
+              data-filter-pill
+              onPointerDown={(e) => e.stopPropagation()}
               onClick={t.pick}
-              style={{ cursor: 'pointer', flexShrink: 0, display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, letterSpacing: 1, borderRadius: 999, padding: '5px 13px', background: t.active ? 'rgba(183,110,121,0.12)' : '#FFFFFF', color: t.active ? '#9C3B4A' : '#8C7B76', border: `1px solid ${t.active ? 'rgba(183,110,121,0.4)' : '#EFE3DE'}`, fontWeight: t.active ? 600 : 400 }}
+              style={{ cursor: 'pointer', flexShrink: 0, display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, letterSpacing: 1, borderRadius: 999, padding: '6px 14px', background: t.active ? 'rgba(183,110,121,0.12)' : '#FFFFFF', color: t.active ? '#9C3B4A' : '#8C7B76', border: `1px solid ${t.active ? 'rgba(183,110,121,0.4)' : '#EFE3DE'}`, fontWeight: t.active ? 600 : 400 }}
             >
               <span>{t.label}</span>
               <span style={{ fontFamily: "'Bodoni Moda',serif", fontSize: 11, opacity: 0.75 }}>{t.n}</span>
-            </span>
+            </button>
           ))}
-        </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, overflowX: 'auto', padding: 2 }}>
-          <span style={{ flexShrink: 0, fontFamily: "'Bodoni Moda',serif", fontSize: 10, letterSpacing: 3, color: '#B9A8A2', width: 34 }}>主题</span>
+        </DragScrollRow>
+        <DragScrollRow
+          label={
+            <span style={{ flexShrink: 0, fontFamily: "'Bodoni Moda',serif", fontSize: 10, letterSpacing: 3, color: '#B9A8A2', width: 34 }}>主题</span>
+          }
+        >
           {topicTabs.map((t) => (
-            <span
+            <button
               key={t.key}
+              type="button"
+              data-filter-pill
+              onPointerDown={(e) => e.stopPropagation()}
               onClick={t.pick}
-              style={{ cursor: 'pointer', flexShrink: 0, display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, letterSpacing: 1, borderRadius: 999, padding: '5px 13px', background: t.active ? 'rgba(183,110,121,0.12)' : '#FFFFFF', color: t.active ? '#9C3B4A' : '#8C7B76', border: `1px solid ${t.active ? 'rgba(183,110,121,0.4)' : '#EFE3DE'}`, fontWeight: t.active ? 600 : 400 }}
+              style={{ cursor: 'pointer', flexShrink: 0, display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, letterSpacing: 1, borderRadius: 999, padding: '6px 14px', background: t.active ? 'rgba(183,110,121,0.12)' : '#FFFFFF', color: t.active ? '#9C3B4A' : '#8C7B76', border: `1px solid ${t.active ? 'rgba(183,110,121,0.4)' : '#EFE3DE'}`, fontWeight: t.active ? 600 : 400 }}
             >
               {t.emoji && <span style={{ fontSize: 12 }}>{t.emoji}</span>}
               <span>{t.label}</span>
               <span style={{ fontFamily: "'Bodoni Moda',serif", fontSize: 11, opacity: 0.75 }}>{t.n}</span>
-            </span>
+            </button>
           ))}
-        </div>
-        {tagRow.length > 0 && (
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, overflowX: 'auto', padding: 2 }}>
-            <span style={{ flexShrink: 0, fontFamily: "'Bodoni Moda',serif", fontSize: 10, letterSpacing: 3, color: '#B9A8A2', width: 34 }}>标签</span>
+        </DragScrollRow>
+        {showTagRow && (
+          <DragScrollRow
+            label={
+              <span style={{ flexShrink: 0, fontFamily: "'Bodoni Moda',serif", fontSize: 10, letterSpacing: 3, color: '#B9A8A2', width: 34 }}>标签</span>
+            }
+          >
             {tagRow.map((t) => (
-              <span
+              <button
                 key={t.label}
+                type="button"
+                data-filter-pill
+                onPointerDown={(e) => e.stopPropagation()}
                 onClick={t.pick}
-                style={{ cursor: 'pointer', flexShrink: 0, fontSize: 11, letterSpacing: 1, borderRadius: 10, padding: '4px 11px', background: t.bg, color: t.color, border: `1px solid ${t.border}`, fontWeight: t.bold ? 600 : 400 }}
+                style={{ cursor: 'pointer', flexShrink: 0, display: 'flex', alignItems: 'center', gap: 5, fontSize: 11, letterSpacing: 1, borderRadius: 10, padding: '4px 11px', background: t.bg, color: t.color, border: `1px solid ${t.border}`, fontWeight: t.bold ? 600 : 400, opacity: t.stale && !t.bold ? 0.5 : 1 }}
               >
-                #{t.label}
-              </span>
+                <span>#{t.label}</span>
+                <span style={{ fontFamily: "'Bodoni Moda',serif", fontSize: 10, opacity: 0.75 }}>{t.n}</span>
+              </button>
             ))}
-          </div>
+          </DragScrollRow>
         )}
       </div>
 
@@ -1278,6 +1400,7 @@ export function MemoryScreen() {
 
       {renderDrawer()}
     </ScreenLayout>
+    </div>
   );
 }
 
