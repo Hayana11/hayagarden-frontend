@@ -312,6 +312,15 @@ def posts_calendar():
     days = [{'day': d, 'hasMemory': by_day.get(d, 0) > 0} for d in range(1, dim + 1)]
     return jsonify({'count': sum(by_day.values()), 'days': days})
 
+@app.route('/api/memories/library', methods=['GET'])
+def memories_library():
+    from tools import memory_library
+    conn = get_db()
+    try:
+        return jsonify(memory_library.build_memory_library(conn))
+    finally:
+        conn.close()
+
 @app.route('/api/posts/calendar/day', methods=['GET'])
 def posts_calendar_day():
     date_str = (request.args.get('date') or '').strip()

@@ -2,6 +2,7 @@ import type { CSSProperties } from 'react';
 import { useEffect, useState } from 'react';
 import { BackHeader } from '../components/BackHeader';
 import { Card, ScreenLayout } from '../components/Card';
+import { DragScrollRow } from '../components/DragScrollRow';
 import { useMemoryLibrary } from '../hooks/useMemoryLibrary';
 import { dateKey, seeded } from '../lib/format';
 import {
@@ -990,8 +991,11 @@ export function MemoryScreen() {
 
       {/* unified filter console */}
       <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: -4 }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, overflowX: 'auto', padding: 2 }}>
-          <span style={{ flexShrink: 0, fontFamily: "'Bodoni Moda',serif", fontSize: 10, letterSpacing: 3, color: '#B9A8A2', width: 34 }}>状态</span>
+        <DragScrollRow
+          label={
+            <span style={{ flexShrink: 0, fontFamily: "'Bodoni Moda',serif", fontSize: 10, letterSpacing: 3, color: '#B9A8A2', width: 34 }}>状态</span>
+          }
+        >
           {stateTabs.map((t) => (
             <span
               key={t.key}
@@ -1002,9 +1006,12 @@ export function MemoryScreen() {
               <span style={{ fontFamily: "'Bodoni Moda',serif", fontSize: 11, opacity: 0.75 }}>{t.n}</span>
             </span>
           ))}
-        </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, overflowX: 'auto', padding: 2 }}>
-          <span style={{ flexShrink: 0, fontFamily: "'Bodoni Moda',serif", fontSize: 10, letterSpacing: 3, color: '#B9A8A2', width: 34 }}>主题</span>
+        </DragScrollRow>
+        <DragScrollRow
+          label={
+            <span style={{ flexShrink: 0, fontFamily: "'Bodoni Moda',serif", fontSize: 10, letterSpacing: 3, color: '#B9A8A2', width: 34 }}>主题</span>
+          }
+        >
           {topicTabs.map((t) => (
             <span
               key={t.key}
@@ -1016,10 +1023,13 @@ export function MemoryScreen() {
               <span style={{ fontFamily: "'Bodoni Moda',serif", fontSize: 11, opacity: 0.75 }}>{t.n}</span>
             </span>
           ))}
-        </div>
+        </DragScrollRow>
         {tagRow.length > 0 && (
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, overflowX: 'auto', padding: 2 }}>
-            <span style={{ flexShrink: 0, fontFamily: "'Bodoni Moda',serif", fontSize: 10, letterSpacing: 3, color: '#B9A8A2', width: 34 }}>标签</span>
+          <DragScrollRow
+            label={
+              <span style={{ flexShrink: 0, fontFamily: "'Bodoni Moda',serif", fontSize: 10, letterSpacing: 3, color: '#B9A8A2', width: 34 }}>标签</span>
+            }
+          >
             {tagRow.map((t) => (
               <span
                 key={t.label}
@@ -1029,7 +1039,7 @@ export function MemoryScreen() {
                 #{t.label}
               </span>
             ))}
-          </div>
+          </DragScrollRow>
         )}
       </div>
 

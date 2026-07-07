@@ -59,6 +59,29 @@ button {
   50% { opacity: .35; }
 }
 
+.drag-scroll-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  overflow-x: auto;
+  padding: 2px;
+  flex: 1;
+  min-width: 0;
+  cursor: grab;
+  user-select: none;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.drag-scroll-row::-webkit-scrollbar {
+  display: none;
+}
+
+.drag-scroll-row:active {
+  cursor: grabbing;
+}
+
 /* Unified bottom nav — matches legacy static pages */
 .bnav {
   position: fixed;
