@@ -183,6 +183,18 @@ function stripThinking(s){
   s = s.replace(/<thinking>[\s\S]*$/,'');
   return s.trim();
 }
+function escHtml(s){
+  return String(s==null?'':s)
+    .replace(/&/g,'&amp;')
+    .replace(/</g,'&lt;')
+    .replace(/>/g,'&gt;')
+    .replace(/"/g,'&quot;')
+    .replace(/'/g,'&#39;');
+}
+function dreamTitle(s){
+  const t = String(s||'').replace(/\s+/g,' ').trim();
+  return t.length > 26 ? (t.slice(0,26)+'…') : (t || '无题');
+}
 
 function switchTab(name, ev){
   document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
@@ -210,8 +222,8 @@ async function loadEmotions(){
     }
     container.innerHTML = data.items.map(item => `
       <div class="emotion-card">
-        <div class="time">${item.time}${item.domain ? ' · ' + item.domain : ''}</div>
-        ${item.emotion ? `<span class="emotion-chip ec-${item.emotion}">${item.emotion}</span>` : ''}
+        <div class="time">${escHtml(item.time)}${item.domain ? ' · ' + escHtml(item.domain) : ''}</div>
+        ${item.emotion ? `<span class="emotion-chip ec-${escHtml(item.emotion)}">${escHtml(item.emotion)}</span>` : ''}
         <div class="mood">
           <div class="val">
             <div class="val-label">情感 Valence</div>
@@ -224,7 +236,7 @@ async function loadEmotions(){
             <small>${(item.arousal*100).toFixed(0)}%</small>
           </div>
         </div>
-        ${item.note ? `<div class="emotion-note">${item.note}</div>` : ''}
+        ${item.note ? `<div class="emotion-note">${escHtml(item.note)}</div>` : ''}
       </div>
     `).join('');
   }catch(e){
@@ -244,15 +256,15 @@ async function loadDreams(){
     }
     container.innerHTML = data.items.map(dream => `
       <div class="dream-card">
-        <div class="dream-date">${dream.date}</div>
-        <div class="dream-title"><i class="ti ti-moon"></i>${dream.title}</div>
-        <div class="dream-content">${stripThinking(dream.content) || "（这条记录没有可显示的内容）"}</div>
-        ${dream.emotion ? `<div class="dream-emotion">情绪：${dream.emotion}</div>` : ''}
+        <div class="dream-date">${escHtml(dream.date)}</div>
+        <div class="dream-title"><i class="ti ti-moon"></i>${dreamTitle(dream.title)}</div>
+        <div class="dream-content">${escHtml(stripThinking(dream.content) || "（这条记录没有可显示的内容）")}</div>
+        ${dream.emotion ? `<div class="dream-emotion">情绪：${escHtml(dream.emotion)}</div>` : ''}
       </div>
     `).join('');
   }catch(e){
     console.error(e);
-    document.getElementById('dreams-list').innerHTL = '<div class="empty">加载失败</div>';
+    document.getElementById('dreams-list').innerHTML = '<div class="empty">加载失败</div>';
   }
 }
 
@@ -267,8 +279,8 @@ async function loadThoughts(){
     }
     container.innerHTML = data.items.map(t => `
       <div class="thought-card">
-        <div class="thought-time">${t.time}</div>
-        <div class="thought-content">${stripThinking(t.content) || "（这条记录没有可显示的内容）"}</div>
+        <div class="thought-time">${escHtml(t.time)}</div>
+        <div class="thought-content">${escHtml(stripThinking(t.content) || "（这条记录没有可显示的内容）")}</div>
       </div>
     `).join('');
   }catch(e){
@@ -288,8 +300,8 @@ async function loadDiary(){
     }
     container.innerHTML = data.items.map(d => `
       <div class="thought-card">
-        <div class="thought-time">${d.date}</div>
-        <div class="thought-content" style="white-space:pre-wrap">${stripThinking(d.content) || "（这条记录没有可显示的内容）"}</div>
+        <div class="thought-time">${escHtml(d.date)}</div>
+        <div class="thought-content" style="white-space:pre-wrap">${escHtml(stripThinking(d.content) || "（这条记录没有可显示的内容）")}</div>
       </div>
     `).join('');
   }catch(e){

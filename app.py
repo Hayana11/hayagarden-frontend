@@ -1,5 +1,5 @@
 import os, re, json, sqlite3, datetime, base64, uuid, threading
-from flask import Flask, request, jsonify, send_from_directory, abort
+from flask import Flask, request, jsonify, send_from_directory, abort, Response, stream_with_context
 import config_store
 import attachment_store
 import gallery_store
@@ -8,6 +8,7 @@ import command_store
 app = Flask(__name__, static_folder='static')
 DB_PATH = '/opt/frontend/memories.db'
 UPLOAD_DIR = '/opt/frontend/static/uploads'
+APP_DIST_DIR = '/opt/frontend/app/dist'
 
 BOARD_TOKEN_FYODOR = ''
 for line in open('/opt/frontend/.env'):
@@ -111,7 +112,20 @@ def index():
 
 @app.route('/dash')
 def dash():
+    # Prefer the new React build when deployed; fallback to legacy static dash.
+    if os.path.exists(os.path.join(APP_DIST_DIR, 'index.html')):
+        return send_from_directory(APP_DIST_DIR, 'index.html')
     return send_from_directory('/opt/frontend/static', 'dash.html')
+
+@app.route('/dash/<path:subpath>')
+def dash_subpath(subpath):
+    if not os.path.exists(os.path.join(APP_DIST_DIR, 'index.html')):
+        return send_from_directory('/opt/frontend/static', 'dash.html')
+    asset_path = os.path.join(APP_DIST_DIR, subpath)
+    if os.path.isfile(asset_path):
+        return send_from_directory(APP_DIST_DIR, subpath)
+    # React Router fallback
+    return send_from_directory(APP_DIST_DIR, 'index.html')
 
 @app.route('/chat')
 def chat():
@@ -234,6 +248,179 @@ def add_countdown():
     conn.commit()
     conn.close()
     return jsonify({"ok":True})
+
+@app.route('/api/posts/summary', methods=['GET'])
+def posts_summary():
+    conn = get_db()
+    post_cols = {r[1] for r in conn.execute("PRAGMA table_info(posts)").fetchall()}
+    layer_expr = "layer" if "layer" in post_cols else "'recent'"
+    author_expr = "author" if "author" in post_cols else "''"
+    rows = conn.execute(
+        f"SELECT id, content, {author_expr} as author, {layer_expr} as layer, created_at FROM posts ORDER BY id DESC LIMIT 600"
+    ).fetchall()
+    conn.close()
+
+    core_items, long_items, recent_items = [], [], []
+    for r in rows:
+        layer = (r['layer'] or 'recent').strip()
+        item = {
+            'text': (r['content'] or '').strip()[:120],
+            'date': (r['created_at'] or '').split(' ')[0].replace('-', '/'),
+            'who': 'haya' if (r['author'] or '').strip() == 'haya' else 'fy',
+        }
+        if layer == 'core':
+            core_items.append(item)
+        elif layer in ('long', 'long-term'):
+            long_items.append(item)
+        else:
+            recent_items.append(item)
+
+    fy_count = sum(1 for r in rows if (r['author'] or '').strip() != 'haya')
+    haya_count = max(0, len(rows) - fy_count)
+    total = max(1, fy_count + haya_count)
+    gradient = round(haya_count / total, 3)
+    return jsonify({
+        'core': len(core_items),
+        'long': len(long_items),
+        'recent': len(recent_items),
+        'gradient': gradient,
+        'sections': [
+            {'key': 'core', 'title': '核心记忆', 'count': len(core_items), 'items': core_items[:3]},
+            {'key': 'long', 'title': '长期记忆', 'count': len(long_items), 'items': long_items[:3]},
+            {'key': 'recent', 'title': '近期记忆', 'count': len(recent_items), 'items': recent_items[:3]},
+        ],
+    })
+
+@app.route('/api/posts/calendar', methods=['GET'])
+def posts_calendar():
+    month = (request.args.get('month') or '').strip()
+    if not re.match(r'^\d{4}-\d{2}$', month):
+        month = (datetime.datetime.utcnow() + datetime.timedelta(hours=8)).strftime('%Y-%m')
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT substr(created_at,1,10) as day FROM posts WHERE created_at LIKE ?",
+        (month + '%',)
+    ).fetchall()
+    conn.close()
+    by_day = {}
+    for r in rows:
+        day = (r['day'] or '')[-2:]
+        if day.isdigit():
+            by_day[int(day)] = by_day.get(int(day), 0) + 1
+    year, mon = int(month[:4]), int(month[5:7])
+    dim = (datetime.date(year + (mon == 12), 1 if mon == 12 else mon + 1, 1) - datetime.timedelta(days=1)).day
+    days = [{'day': d, 'hasMemory': by_day.get(d, 0) > 0} for d in range(1, dim + 1)]
+    return jsonify({'count': sum(by_day.values()), 'days': days})
+
+@app.route('/api/memories/library', methods=['GET'])
+def memories_library():
+    from tools import memory_library
+    conn = get_db()
+    try:
+        return jsonify(memory_library.build_memory_library(conn))
+    finally:
+        conn.close()
+
+@app.route('/api/posts/calendar/day', methods=['GET'])
+def posts_calendar_day():
+    date_str = (request.args.get('date') or '').strip()
+    if not re.match(r'^\d{4}-\d{2}-\d{2}$', date_str):
+        return jsonify({'entries': []})
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT content, type, created_at FROM posts WHERE substr(created_at,1,10)=? ORDER BY id DESC LIMIT 12",
+        (date_str,)
+    ).fetchall()
+    conn.close()
+    entries = []
+    for r in rows:
+        entries.append({
+            'cat': (r['type'] or 'Memory').title(),
+            'title': (r['content'] or '').strip()[:140] or '未命名记录',
+            'date': date_str,
+        })
+    return jsonify({'entries': entries})
+
+@app.route('/api/messages/heatmap', methods=['GET'])
+def messages_heatmap():
+    month = (request.args.get('month') or '').strip()
+    now_cn = datetime.datetime.utcnow() + datetime.timedelta(hours=8)
+    if not re.match(r'^\d{4}-\d{2}$', month):
+        month = now_cn.strftime('%Y-%m')
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT substr(created_at,1,10) as day, count(*) as cnt FROM chat_messages WHERE created_at LIKE ? GROUP BY substr(created_at,1,10)",
+        (month + '%',)
+    ).fetchall()
+    conn.close()
+    days = []
+    today_count = 0
+    for r in rows:
+        dstr = (r['day'] or '')
+        if len(dstr) >= 10 and dstr[-2:].isdigit():
+            day = int(dstr[-2:])
+            cnt = int(r['cnt'] or 0)
+            days.append({'day': day, 'count': cnt})
+            if dstr == now_cn.strftime('%Y-%m-%d'):
+                today_count = cnt
+    days.sort(key=lambda x: x['day'])
+    # Placeholder streak: count continuous non-zero days from latest backward.
+    streak = 0
+    if days:
+        day_map = {d['day']: d['count'] for d in days}
+        cur_day = max(day_map)
+        while cur_day > 0 and day_map.get(cur_day, 0) > 0:
+            streak += 1
+            cur_day -= 1
+    return jsonify({'days': days, 'todayCount': today_count, 'streakDays': streak})
+
+@app.route('/api/usage/summary', methods=['GET'])
+def usage_summary():
+    now_cn = datetime.datetime.utcnow() + datetime.timedelta(hours=8)
+    today = now_cn.strftime('%Y-%m-%d')
+    conn = get_db()
+    row = conn.execute(
+        "SELECT count(*) as c FROM chat_messages WHERE created_at >= ? AND created_at < ?",
+        (today + ' 00:00:00', today + ' 23:59:59')
+    ).fetchone()
+    week_rows = conn.execute(
+        "SELECT substr(created_at,1,10) as day, count(*) as c FROM chat_messages "
+        "WHERE created_at >= datetime('now','+8 hours','-6 day') GROUP BY substr(created_at,1,10) ORDER BY day"
+    ).fetchall()
+    conn.close()
+    msg_today = int((row['c'] if row else 0) or 0)
+    token_today = msg_today * 180  # placeholder estimate until real token aggregation is available
+    bars = []
+    for r in week_rows:
+        c = int(r['c'] or 0)
+        bars.append({
+            'date': r['day'],
+            'fy': int(c * 0.55 * 2),
+            'haya': int(c * 0.45 * 2),
+        })
+    # Ensure 7 bars (placeholder padding) so chart layout stays stable.
+    by_day = {b['date']: b for b in bars}
+    padded = []
+    for i in range(6, -1, -1):
+        d = (now_cn - datetime.timedelta(days=i)).strftime('%Y-%m-%d')
+        padded.append(by_day.get(d, {'date': d, 'fy': 0, 'haya': 0}))
+    return jsonify({
+        'win5Pct': min(100, max(0, msg_today * 2)),
+        'win5ResetAt': (now_cn + datetime.timedelta(hours=5)).isoformat(),
+        'win7Pct': min(100, max(0, int(sum((b['fy'] + b['haya']) for b in padded) / 10))),
+        'win7ResetAt': (now_cn + datetime.timedelta(days=7)).isoformat(),
+        'msgToday': msg_today,
+        'tokenToday': token_today,
+        'bars': padded,
+    })
+
+@app.route('/api/usage/stream', methods=['GET'])
+def usage_stream():
+    def generate():
+        payload = usage_summary().get_json() or {}
+        yield 'data: ' + json.dumps(payload, ensure_ascii=False) + '\n\n'
+    return Response(stream_with_context(generate()), mimetype='text/event-stream',
+                    headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
 
 @app.route('/api/upload', methods=['POST'])
 def upload_image():
@@ -1617,6 +1804,20 @@ def toggle_todo(tid):
     conn.execute('UPDATE todos SET done = 1 - done WHERE id=?', (tid,))
     conn.commit(); conn.close()
     return jsonify({'ok': True})
+
+@app.route('/api/todos/<int:tid>', methods=['PATCH'])
+def patch_todo(tid):
+    data = request.get_json() or {}
+    done = data.get('done')
+    if done is None:
+        return jsonify({'error': 'done required'}), 400
+    conn = get_db()
+    conn.execute('UPDATE todos SET done=? WHERE id=?', (1 if bool(done) else 0, tid))
+    row = conn.execute('SELECT * FROM todos WHERE id=?', (tid,)).fetchone()
+    conn.commit(); conn.close()
+    if not row:
+        return jsonify({'error': 'not found'}), 404
+    return jsonify(dict(row))
 
 @app.route('/api/todos/<int:tid>', methods=['DELETE'])
 def delete_todo(tid):
