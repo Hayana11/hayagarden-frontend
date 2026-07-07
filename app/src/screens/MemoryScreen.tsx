@@ -1011,7 +1011,20 @@ export function MemoryScreen() {
                 >
                   {m.summaryTitle}
                 </span>
-                <div style={{ fontSize: 12, color: '#B9A8A2', lineHeight: 1.7, marginTop: 2, whiteSpace: 'nowrap', overflow: 'hidden' }}>{m.preview}</div>
+                <div
+                  style={{
+                    fontSize: 12,
+                    color: '#B9A8A2',
+                    lineHeight: 1.7,
+                    marginTop: 2,
+                    whiteSpace: 'nowrap',
+                    overflow: 'hidden',
+                    WebkitMaskImage: 'linear-gradient(to right, #000 75%, transparent 100%)',
+                    maskImage: 'linear-gradient(to right, #000 75%, transparent 100%)',
+                  }}
+                >
+                  {(m.content || '').replace(/\s+/g, ' ').trim()}
+                </div>
               </div>
             </div>
           ))}
