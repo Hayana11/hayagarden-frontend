@@ -13,6 +13,8 @@ export function BottomNav() {
   const location = useLocation();
   const active: NavKey = location.pathname === '/reading' ? 'read' : 'dash';
 
+  if (location.pathname.startsWith('/memory')) return null;
+
   return (
     <nav className="bnav" aria-label="主导航">
       <div className="bnav-inner">

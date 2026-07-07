@@ -133,9 +133,6 @@ export function MemoryScreen() {
   function addWhoChip(who: string) {
     setChips((s) => (s.some((c) => c.type === 'who' && c.value === who) ? s : [...s, { type: 'who', value: who }]));
   }
-  function removeChip(index: number) {
-    setChips((s) => s.filter((_, i) => i !== index));
-  }
   function clearFilters() {
     setChips([]);
     setFState('all');
@@ -198,12 +195,6 @@ export function MemoryScreen() {
     if (tagHits.length || whoHits.length) suggestGroups.push({ label: '标签与人物', items: [...tagHits, ...whoHits] });
   }
   const suggestEmpty = q.length > 0 && suggestGroups.length === 0;
-
-  // ── active filter chips ──
-  const chipItems = chips.map((c, i) => {
-    const col = c.type === 'tag' ? tagColor(c.value) : { color: '#8A7AB5', bg: 'rgba(138,122,181,0.13)' };
-    return { label: (c.type === 'tag' ? '#' : '@') + c.value, color: col.color, bg: col.bg, remove: () => removeChip(i) };
-  });
 
   // ── unified filter console ──
   const stateTabs = STATE_LABELS.map(([key, label]) => ({
@@ -599,7 +590,9 @@ export function MemoryScreen() {
                       }}
                       style={{ cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 8, padding: '7px 0' }}
                     >
-                      <span style={{ width: r.size, height: r.size, borderRadius: '50%', background: r.bg, border: r.border, flexShrink: 0 }} />
+                      <span style={{ width: 16, height: 16, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+                        <span style={{ width: r.size, height: r.size, borderRadius: '50%', background: r.bg, border: r.border, flexShrink: 0 }} />
+                      </span>
                       <span style={{ fontFamily: "'Bodoni Moda',serif", fontSize: 11, color: '#A99590', flexShrink: 0, width: 36 }}>{r.time}</span>
                       <span
                         style={{
@@ -934,6 +927,7 @@ export function MemoryScreen() {
                 </div>
                 <div
                   onClick={() => pushFrame({ type: 'mem', id: m.id })}
+                  className="card-hover"
                   style={{ cursor: 'pointer', flex: 1, minWidth: 0, margin: '0 0 14px 8px', background: '#FFFFFF', borderRadius: 16, boxShadow: '0 6px 18px rgba(183,110,121,0.08)', padding: '14px 16px' }}
                 >
                   <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
@@ -1125,7 +1119,7 @@ export function MemoryScreen() {
             <SectionDivider label={`同日其他记忆 · ${same.length}`} marginTop={22} />
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginTop: 10 }}>
               {same.map((sm) => (
-                <div key={sm.id} onClick={() => pushFrame({ type: 'mem', id: sm.id })} style={{ cursor: 'pointer', background: '#FFFFFF', borderRadius: 14, boxShadow: '0 6px 18px rgba(183,110,121,0.07)', padding: 12 }}>
+                <div key={sm.id} onClick={() => pushFrame({ type: 'mem', id: sm.id })} className="card-hover" style={{ cursor: 'pointer', background: '#FFFFFF', borderRadius: 14, boxShadow: '0 6px 18px rgba(183,110,121,0.07)', padding: 12 }}>
                   <div style={{ fontFamily: "'Bodoni Moda',serif", fontSize: 10, color: '#A99590' }}>{sm.time}</div>
                   <div
                     style={{
@@ -1155,7 +1149,7 @@ export function MemoryScreen() {
             <SectionDivider label="可能关联 · 语义相似" marginTop={22} />
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginTop: 10 }}>
               {links.map((lk, i) => (
-                <div key={lk.id} onClick={() => pushFrame({ type: 'mem', id: lk.id })} style={{ cursor: 'pointer', background: '#FAF2EF', borderRadius: 14, padding: 12 }}>
+                <div key={lk.id} onClick={() => pushFrame({ type: 'mem', id: lk.id })} className="card-hover" style={{ cursor: 'pointer', background: '#FAF2EF', borderRadius: 14, padding: 12 }}>
                   <div style={{ display: 'flex', justifyContent: 'space-between', fontFamily: "'Bodoni Moda',serif", fontSize: 10, color: '#A99590' }}>
                     <span>{formatDateDot(lk.date)}</span>
                     <span style={{ color: '#8A7AB5' }}>{92 - i * 7}%</span>
@@ -1295,23 +1289,6 @@ export function MemoryScreen() {
           </Card>
         )}
       </div>
-
-      {/* filter chips */}
-      {chipItems.length > 0 && (
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: -4 }}>
-          {chipItems.map((c, i) => (
-            <span key={i} style={{ display: 'flex', alignItems: 'center', gap: 6, background: c.bg, borderRadius: 999, padding: '4px 8px 4px 12px', fontSize: 12, color: c.color, letterSpacing: 1 }}>
-              <span>{c.label}</span>
-              <span
-                onClick={c.remove}
-                style={{ cursor: 'pointer', width: 16, height: 16, borderRadius: '50%', background: 'rgba(74,63,60,0.08)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 10 }}
-              >
-                ×
-              </span>
-            </span>
-          ))}
-        </div>
-      )}
 
       {/* view switch */}
       <Card style={{ display: 'flex', gap: 4, borderRadius: 18, padding: 5, boxShadow: '0 6px 18px rgba(183,110,121,0.08)' }}>

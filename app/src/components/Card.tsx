@@ -12,6 +12,7 @@ export function Card({
   return (
     <div
       onClick={onClick}
+      className={onClick ? 'card-hover' : undefined}
       style={{
         background: '#FFFFFF',
         borderRadius: 22,
