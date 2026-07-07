@@ -39,6 +39,19 @@ const STATE_LABELS: [StateFilter, string][] = [
 const MONTH_LABEL = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
 const MONTH_CN = ['一月', '二月', '三月', '四月', '五月', '六月', '七月', '八月', '九月', '十月', '十一月', '十二月'];
 
+type ObserveMode = 'none' | 'weight' | 'topic' | 'who' | 'recent';
+type TelescopeStep = 'menu' | 'topic' | 'who' | 'year';
+const TELESCOPE_ITEMS: { key: 'weight' | 'topic' | 'who' | 'year' | 'recent'; icon: string; label: string }[] = [
+  { key: 'weight', icon: '🌕', label: '高亮重要记忆' },
+  { key: 'topic', icon: '🏷', label: '高亮某个主题' },
+  { key: 'who', icon: '🧑', label: '高亮某个人' },
+  { key: 'year', icon: '📅', label: '回到某一年' },
+  { key: 'recent', icon: '✨', label: '查看最近新增' },
+];
+function toTs(dateStr: string): number {
+  return new Date(dateStr).getTime();
+}
+
 export function MemoryScreen() {
   const library = useMemoryLibrary();
   const now = new Date();
@@ -51,6 +64,12 @@ export function MemoryScreen() {
   const [fState, setFState] = useState<StateFilter>('all');
   const [fTopic, setFTopic] = useState<string>('all');
   const [zoom, setZoom] = useState(1);
+  const [telescopeOpen, setTelescopeOpen] = useState(false);
+  const [telescopeStep, setTelescopeStep] = useState<TelescopeStep>('menu');
+  const [observeMode, setObserveMode] = useState<ObserveMode>('none');
+  const [observeValue, setObserveValue] = useState<string | null>(null);
+  const [replayPct, setReplayPct] = useState(100);
+  const [rippleId, setRippleId] = useState<number | null>(null);
 
   useEffect(() => {
     const onResize = () => setIsDesktop(window.innerWidth >= 900);
@@ -305,21 +324,86 @@ export function MemoryScreen() {
       };
     });
 
+  // ── 星图观测台：时间回放 + 聚焦 ──
+  const starDates = filtered.map((m) => m.date).filter(Boolean).sort();
+  const minTs = starDates.length ? toTs(starDates[0]) : 0;
+  const maxTs = starDates.length ? toTs(starDates[starDates.length - 1]) : 0;
+  const replayTs = minTs + (replayPct / 100) * (maxTs - minTs);
+  const replayActive = replayPct < 100 && maxTs > minTs;
+  const starEntries = replayActive ? filtered.filter((m) => toTs(m.date) <= replayTs) : filtered;
+  const replayYearLabel = replayActive ? new Date(replayTs).getFullYear().toString() : '现在';
+  const yearsAvailable = [...new Set(filtered.map((m) => m.date.slice(0, 4)))].sort();
+
+  function isObserved(m: MemoryEntry): boolean {
+    if (observeMode === 'weight') return m.weight >= 4;
+    if (observeMode === 'topic') return observeValue ? m.topics.includes(observeValue) : true;
+    if (observeMode === 'who') return observeValue ? m.who === observeValue : true;
+    if (observeMode === 'recent') return (now.getTime() - toTs(m.date)) / 86400000 <= 14;
+    return true;
+  }
+  const observing = observeMode !== 'none';
+  const observeLabel =
+    observeMode === 'weight'
+      ? '重要记忆'
+      : observeMode === 'topic'
+        ? (topicByKey.get(observeValue ?? '')?.name ?? '主题')
+        : observeMode === 'who'
+          ? (observeValue ?? '')
+          : observeMode === 'recent'
+            ? '最近新增'
+            : '';
+
+  function clearObserve() {
+    setObserveMode('none');
+    setObserveValue(null);
+  }
+  function pickObserve(mode: 'topic' | 'who', value: string) {
+    setObserveMode(mode);
+    setObserveValue(value);
+    setTelescopeOpen(false);
+    setTelescopeStep('menu');
+  }
+  function jumpToYear(year: string) {
+    const endOfYear = toTs(`${year}-12-31`);
+    const pct = maxTs > minTs ? Math.max(0, Math.min(100, ((endOfYear - minTs) / (maxTs - minTs)) * 100)) : 100;
+    setReplayPct(pct);
+    setTelescopeOpen(false);
+    setTelescopeStep('menu');
+  }
+  function handleTelescopePick(key: 'weight' | 'topic' | 'who' | 'year' | 'recent') {
+    if (key === 'weight' || key === 'recent') {
+      setObserveMode(key);
+      setObserveValue(null);
+      setTelescopeOpen(false);
+      setTelescopeStep('menu');
+    } else {
+      setTelescopeStep(key);
+    }
+  }
+  function starClick(id: number) {
+    setRippleId(id);
+    window.setTimeout(() => {
+      pushFrame({ type: 'mem', id });
+      setRippleId(null);
+    }, 380);
+  }
+
   // ── 星图 ──
-  const activeTopics = topics.filter((t) => filtered.some((m) => m.topics[0] === t.key));
+  const activeTopics = topics.filter((t) => starEntries.some((m) => m.topics[0] === t.key));
   const topicLayout = new Map<string, { x: number; y: number; color: string }>();
   activeTopics.forEach((t, i) => {
     const angle = (i / Math.max(1, activeTopics.length)) * Math.PI * 2 - Math.PI / 2;
     topicLayout.set(t.key, { x: 50 + Math.cos(angle) * 28, y: 50 + Math.sin(angle) * 26, color: constellationColor(i) });
   });
   const starPos = new Map<number, { x: number; y: number }>();
-  const stars: { x: number; y: number; s: number; c: string; glow: string; tip: string; pick: () => void }[] = [];
+  type StarPoint = { id: number; x: number; y: number; s: number; c: string; big: boolean; tip: string; topicKey: string; links: number[]; observed: boolean };
+  const stars: StarPoint[] = [];
   const constellationPaths: string[] = [];
   const starLabels: { x: number; y: number; name: string }[] = [];
   const starLegend: { color: string; name: string }[] = [];
   activeTopics.forEach((t) => {
     const layout = topicLayout.get(t.key)!;
-    const members = filtered.filter((m) => m.topics[0] === t.key).sort((a, b) => (a.date < b.date ? -1 : 1));
+    const members = starEntries.filter((m) => m.topics[0] === t.key).sort((a, b) => (a.date < b.date ? -1 : 1));
     let prev: { x: number; y: number } | null = null;
     members.forEach((m, i) => {
       const angle = i * 2.4 + seeded(m.id) * 0.8;
@@ -328,13 +412,16 @@ export function MemoryScreen() {
       const y = Math.max(10, Math.min(88, layout.y + Math.sin(angle) * radius * 0.9));
       starPos.set(m.id, { x, y });
       stars.push({
+        id: m.id,
         x: +x.toFixed(1),
         y: +y.toFixed(1),
         s: +(4 + m.weight * 1.8).toFixed(1),
         c: layout.color,
-        glow: m.weight === 5 ? '0 0 12px rgba(233,194,117,0.95), 0 0 4px rgba(255,255,255,0.7)' : m.weight >= 4 ? '0 0 6px rgba(255,255,255,0.45)' : 'none',
+        big: m.weight === 5,
         tip: `${m.summaryTitle}（权重 ${m.weight}）`,
-        pick: () => pushFrame({ type: 'mem', id: m.id }),
+        topicKey: t.key,
+        links: m.links,
+        observed: isObserved(m),
       });
       if (prev) constellationPaths.push(`M${prev.x.toFixed(1)} ${prev.y.toFixed(1)}L${x.toFixed(1)} ${y.toFixed(1)}`);
       prev = { x, y };
@@ -345,7 +432,7 @@ export function MemoryScreen() {
     }
   });
   const linkPaths: string[] = [];
-  filtered.forEach((m) =>
+  starEntries.forEach((m) =>
     m.links.forEach((id) => {
       if (m.id < id && starPos.has(m.id) && starPos.has(id)) {
         const a = starPos.get(m.id)!;
@@ -354,6 +441,7 @@ export function MemoryScreen() {
       }
     }),
   );
+  const rippleCenter = rippleId !== null ? (stars.find((s) => s.id === rippleId) ?? null) : null;
   const bgStars = Array.from({ length: 26 }, (_, i) => ({
     x: +(seeded(i) * 96 + 2).toFixed(1),
     y: +(seeded(i + 50) * 94 + 3).toFixed(1),
@@ -513,20 +601,171 @@ export function MemoryScreen() {
             {bgStars.map((b, i) => (
               <div key={i} style={{ position: 'absolute', left: `${b.x}%`, top: `${b.y}%`, width: 2, height: 2, borderRadius: '50%', background: '#FFFFFF', opacity: b.o }} />
             ))}
-            {stars.map((s, i) => (
-              <div
-                key={i}
-                onClick={s.pick}
-                title={s.tip}
-                style={{ position: 'absolute', left: `${s.x}%`, top: `${s.y}%`, width: s.s, height: s.s, borderRadius: '50%', background: s.c, boxShadow: s.glow, transform: 'translate(-50%,-50%)', cursor: 'pointer' }}
-              />
-            ))}
+            {stars.map((s) => {
+              const related = rippleCenter
+                ? s.id === rippleCenter.id || s.topicKey === rippleCenter.topicKey || rippleCenter.links.includes(s.id) || s.links.includes(rippleCenter.id)
+                : false;
+              const opacity = rippleCenter ? (related ? 1 : 0.12) : observing ? (s.observed ? 1 : 0.3) : 1;
+              const glow =
+                rippleCenter && s.id === rippleCenter.id
+                  ? '0 0 16px rgba(255,255,255,0.9), 0 0 26px rgba(233,194,117,0.8)'
+                  : s.big
+                    ? '0 0 12px rgba(233,194,117,0.95), 0 0 4px rgba(255,255,255,0.7)'
+                    : 'none';
+              return (
+                <div
+                  key={s.id}
+                  onClick={() => starClick(s.id)}
+                  title={s.tip}
+                  style={{
+                    position: 'absolute',
+                    left: `${s.x}%`,
+                    top: `${s.y}%`,
+                    width: s.s,
+                    height: s.s,
+                    borderRadius: '50%',
+                    background: s.c,
+                    boxShadow: glow,
+                    transform: 'translate(-50%,-50%)',
+                    cursor: 'pointer',
+                    opacity,
+                    transition: 'opacity 0.35s ease',
+                  }}
+                />
+              );
+            })}
             {starLabels.map((l, i) => (
               <div key={i} style={{ position: 'absolute', left: `${l.x}%`, top: `${l.y}%`, transform: 'translate(-50%,-50%)', fontSize: 11, letterSpacing: 4, color: 'rgba(255,255,255,0.4)', pointerEvents: 'none', whiteSpace: 'nowrap' }}>
                 {l.name}
               </div>
             ))}
           </div>
+
+          {/* 聚焦指示 */}
+          {observing && (
+            <div style={{ position: 'absolute', top: 14, left: 14, zIndex: 5, display: 'flex', alignItems: 'center', gap: 6, background: 'rgba(233,194,117,0.16)', border: '1px solid rgba(233,194,117,0.4)', borderRadius: 999, padding: '5px 10px' }}>
+              <span style={{ fontSize: 11, color: '#E9C275', letterSpacing: 1 }}>🔭 {observeLabel}</span>
+              <span
+                onClick={clearObserve}
+                style={{ cursor: 'pointer', width: 15, height: 15, borderRadius: '50%', background: 'rgba(255,255,255,0.14)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 10, color: 'rgba(255,255,255,0.75)' }}
+              >
+                ×
+              </span>
+            </div>
+          )}
+
+          {/* 望远镜：观测台 */}
+          {telescopeOpen && (
+            <div
+              onClick={() => {
+                setTelescopeOpen(false);
+                setTelescopeStep('menu');
+              }}
+              style={{ position: 'absolute', inset: 0, zIndex: 4 }}
+            />
+          )}
+          <div style={{ position: 'absolute', top: 14, right: 14, zIndex: 5 }}>
+            <div
+              onClick={() => {
+                setTelescopeOpen((v) => !v);
+                setTelescopeStep('menu');
+              }}
+              style={{
+                cursor: 'pointer',
+                width: 36,
+                height: 36,
+                borderRadius: '50%',
+                background: telescopeOpen ? 'rgba(233,194,117,0.85)' : 'rgba(46,39,51,0.72)',
+                border: '1px solid rgba(255,255,255,0.18)',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                fontSize: 17,
+                boxShadow: '0 4px 14px rgba(0,0,0,0.25)',
+              }}
+            >
+              🔭
+            </div>
+            {telescopeOpen && (
+              <div
+                style={{
+                  position: 'absolute',
+                  top: 44,
+                  right: 0,
+                  width: 190,
+                  background: 'rgba(38,32,42,0.95)',
+                  border: '1px solid rgba(255,255,255,0.14)',
+                  borderRadius: 16,
+                  padding: 8,
+                  boxShadow: '0 14px 34px rgba(0,0,0,0.35)',
+                  backdropFilter: 'blur(6px)',
+                }}
+              >
+                {telescopeStep === 'menu' &&
+                  TELESCOPE_ITEMS.map((it) => (
+                    <div
+                      key={it.key}
+                      onClick={() => handleTelescopePick(it.key)}
+                      style={{ cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 9, padding: '9px 10px', borderRadius: 10, fontSize: 13, color: 'rgba(255,255,255,0.88)' }}
+                    >
+                      <span style={{ fontSize: 14 }}>{it.icon}</span>
+                      <span>{it.label}</span>
+                    </div>
+                  ))}
+                {telescopeStep === 'topic' && (
+                  <>
+                    <div onClick={() => setTelescopeStep('menu')} style={{ cursor: 'pointer', fontSize: 12, color: 'rgba(255,255,255,0.5)', padding: '4px 10px 8px' }}>
+                      ‹ 返回
+                    </div>
+                    {topicOrder.map((t) => (
+                      <div
+                        key={t.key}
+                        onClick={() => pickObserve('topic', t.key)}
+                        style={{ cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 9, padding: '8px 10px', borderRadius: 10, fontSize: 13, color: 'rgba(255,255,255,0.88)' }}
+                      >
+                        <span>{t.emoji}</span>
+                        <span>{t.name}</span>
+                      </div>
+                    ))}
+                  </>
+                )}
+                {telescopeStep === 'who' && (
+                  <>
+                    <div onClick={() => setTelescopeStep('menu')} style={{ cursor: 'pointer', fontSize: 12, color: 'rgba(255,255,255,0.5)', padding: '4px 10px 8px' }}>
+                      ‹ 返回
+                    </div>
+                    {['费佳', '哈娅'].map((w) => (
+                      <div key={w} onClick={() => pickObserve('who', w)} style={{ cursor: 'pointer', padding: '8px 10px', borderRadius: 10, fontSize: 13, color: 'rgba(255,255,255,0.88)' }}>
+                        {w}
+                      </div>
+                    ))}
+                  </>
+                )}
+                {telescopeStep === 'year' && (
+                  <>
+                    <div onClick={() => setTelescopeStep('menu')} style={{ cursor: 'pointer', fontSize: 12, color: 'rgba(255,255,255,0.5)', padding: '4px 10px 8px' }}>
+                      ‹ 返回
+                    </div>
+                    {yearsAvailable.map((y) => (
+                      <div key={y} onClick={() => jumpToYear(y)} style={{ cursor: 'pointer', padding: '8px 10px', borderRadius: 10, fontSize: 13, color: 'rgba(255,255,255,0.88)' }}>
+                        {y} 年
+                      </div>
+                    ))}
+                  </>
+                )}
+              </div>
+            )}
+          </div>
+
+          {/* 时间回放 */}
+          {starDates.length >= 2 && (
+            <div style={{ position: 'absolute', left: 14, right: 14, bottom: 54, display: 'flex', alignItems: 'center', gap: 10, background: 'rgba(46,39,51,0.55)', border: '1px solid rgba(255,255,255,0.10)', borderRadius: 999, padding: '6px 14px', backdropFilter: 'blur(4px)' }}>
+              <span style={{ fontSize: 12, flexShrink: 0 }}>🕐</span>
+              <input type="range" min={0} max={100} step={1} value={replayPct} onChange={(e) => setReplayPct(parseInt(e.target.value, 10))} style={{ flex: 1, height: 3 }} />
+              <span style={{ fontFamily: "'Bodoni Moda',serif", fontSize: 12, color: 'rgba(255,255,255,0.75)', width: 44, textAlign: 'right', flexShrink: 0 }}>{replayYearLabel}</span>
+            </div>
+          )}
+
           <div style={{ position: 'absolute', left: 14, right: 14, bottom: 12, display: 'flex', alignItems: 'center', gap: 10, background: 'rgba(46,39,51,0.72)', border: '1px solid rgba(255,255,255,0.12)', borderRadius: 999, padding: '7px 14px', backdropFilter: 'blur(4px)' }}>
             <span onClick={zoomOut} style={{ cursor: 'pointer', width: 22, height: 22, borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'rgba(255,255,255,0.75)', fontSize: 15, flexShrink: 0, border: '1px solid rgba(255,255,255,0.2)' }}>
               −
@@ -546,7 +785,7 @@ export function MemoryScreen() {
             </span>
           ))}
         </div>
-        <div style={{ textAlign: 'center', fontSize: 11, color: '#C4B4AF', marginTop: 8, letterSpacing: 1 }}>星点大小 = 权重 · 连线 = 关联 · 点击星点查看记忆</div>
+        <div style={{ textAlign: 'center', fontSize: 11, color: '#C4B4AF', marginTop: 8, letterSpacing: 1 }}>星点大小 = 权重 · 连线 = 关联 · 点击星点查看记忆 · 🔭 右上角开启观测</div>
       </div>
     );
   }
