@@ -117,9 +117,9 @@ export function MemoryScreen() {
       return i < 0 ? { pre: t, hit: '', post: '' } : { pre: t.slice(0, i), hit: t.slice(i, i + q.length), post: t.slice(i + q.length) };
     };
     const memHits: Suggest[] = entries
-      .filter((m) => (m.title + m.content + m.tags.join('') + m.who).toLowerCase().includes(ql))
+      .filter((m) => (m.summaryTitle + m.content + m.tags.join('') + m.who).toLowerCase().includes(ql))
       .slice(0, 4)
-      .map((m) => ({ icon: '●', iconColor: '#D9C6C0', meta: formatDateDot(m.date), pick: () => pushFrame({ type: 'mem', id: m.id }), ...highlight(m.title) }));
+      .map((m) => ({ icon: '●', iconColor: '#D9C6C0', meta: formatDateDot(m.date), pick: () => pushFrame({ type: 'mem', id: m.id }), ...highlight(m.summaryTitle) }));
     const topicHits: Suggest[] = topics
       .filter((t) => (t.name + t.desc).toLowerCase().includes(ql))
       .slice(0, 3)
@@ -266,7 +266,7 @@ export function MemoryScreen() {
         time: m.time,
         title: m.title,
         titleColor: titleColor(m.weight),
-        preview: m.content,
+        preview: m.preview,
         pick: () => pushFrame({ type: 'mem', id: m.id }),
       })),
       pick: () => pushFrame({ type: 'day', date }),
@@ -333,7 +333,7 @@ export function MemoryScreen() {
         s: +(4 + m.weight * 1.8).toFixed(1),
         c: layout.color,
         glow: m.weight === 5 ? '0 0 12px rgba(233,194,117,0.95), 0 0 4px rgba(255,255,255,0.7)' : m.weight >= 4 ? '0 0 6px rgba(255,255,255,0.45)' : 'none',
-        tip: `${m.title}（权重 ${m.weight}）`,
+        tip: `${m.summaryTitle}（权重 ${m.weight}）`,
         pick: () => pushFrame({ type: 'mem', id: m.id }),
       });
       if (prev) constellationPaths.push(`M${prev.x.toFixed(1)} ${prev.y.toFixed(1)}L${x.toFixed(1)} ${y.toFixed(1)}`);
@@ -597,7 +597,7 @@ export function MemoryScreen() {
                   style={{ cursor: 'pointer', flex: 1, minWidth: 0, margin: '0 0 14px 8px', background: '#FFFFFF', borderRadius: 16, boxShadow: '0 6px 18px rgba(183,110,121,0.08)', padding: '14px 16px' }}
                 >
                   <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                    <span style={{ flex: 1, fontSize: 15, fontWeight: 600, lineHeight: 1.5 }}>{m.title}</span>
+                    <span style={{ flex: 1, fontSize: 15, fontWeight: 600, lineHeight: 1.5 }}>{m.summaryTitle}</span>
                     <MoonIcon info={moonInfo(m.weight)} />
                   </div>
                   <div style={{ borderLeft: '2px solid #D6A5A1', background: '#FBF4F1', borderRadius: '0 10px 10px 0', padding: '10px 12px', fontSize: 13, lineHeight: 1.9, color: '#6B5A55', marginTop: 10 }}>
@@ -675,9 +675,9 @@ export function MemoryScreen() {
                     fontWeight: m.id === top1 || m.id === top2 ? 600 : 400,
                   }}
                 >
-                  {m.title}
+                  {m.summaryTitle}
                 </span>
-                <div style={{ fontSize: 12, color: '#B9A8A2', lineHeight: 1.7, marginTop: 2, whiteSpace: 'nowrap', overflow: 'hidden' }}>{m.content}……</div>
+                <div style={{ fontSize: 12, color: '#B9A8A2', lineHeight: 1.7, marginTop: 2, whiteSpace: 'nowrap', overflow: 'hidden' }}>{m.preview}</div>
               </div>
             </div>
           ))}
@@ -708,7 +708,7 @@ export function MemoryScreen() {
                           <span style={{ width: 5, height: 5, borderRadius: '50%', background: '#D9C6C0', flexShrink: 0 }} />
                           <span style={{ fontFamily: "'Bodoni Moda',serif", fontSize: 11, color: '#A99590', flexShrink: 0 }}>{formatDateDot(x.date)}</span>
                           <span style={{ flex: 1, minWidth: 0, fontSize: 12, color: '#8C7B76', whiteSpace: 'nowrap', overflow: 'hidden' }}>
-                            {x.title} · {x.content}
+                            {x.title} · {x.preview}
                           </span>
                         </div>
                       ))}
@@ -730,7 +730,7 @@ export function MemoryScreen() {
     const links = m.links.map((lid) => entries.find((x) => x.id === lid)).filter((x): x is MemoryEntry => Boolean(x));
     return (
       <>
-        <div style={{ fontSize: 21, fontWeight: 600, lineHeight: 1.6 }}>{m.title}</div>
+        <div style={{ fontSize: 21, fontWeight: 600, lineHeight: 1.6 }}>{m.summaryTitle}</div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 10, flexWrap: 'wrap' }}>
           <span style={{ fontFamily: "'Bodoni Moda',serif", fontSize: 12, color: '#8C7B76', letterSpacing: 1 }}>
             {formatDateDot(m.date)} · {weekdayCN(m.date)} · {m.time}
@@ -800,7 +800,7 @@ export function MemoryScreen() {
                       overflow: 'hidden',
                     }}
                   >
-                    {sm.title}
+                    {sm.summaryTitle}
                   </div>
                   <div style={{ fontSize: 11, color: '#A99590', marginTop: 4, lineHeight: 1.6, display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>
                     {sm.content}
@@ -833,7 +833,7 @@ export function MemoryScreen() {
                       overflow: 'hidden',
                     }}
                   >
-                    {lk.title}
+                    {lk.summaryTitle}
                   </div>
                   <div style={{ fontSize: 11, color: '#A99590', marginTop: 4, lineHeight: 1.6, display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>
                     {lk.content}

@@ -8,6 +8,7 @@ import type {
   LedgerBudget,
   MemoryCalendar,
   MemoryDayEntry,
+  MemoryEntry,
   MemoryLibrary,
   MemorySummary,
   PeriodStats,
@@ -186,7 +187,8 @@ export function mockMemoryLibrary(): MemoryLibrary {
       { key: 'cat-sick', emoji: '🩹', name: '生病记录', desc: '打喷嚏、疫苗与体检的健康档案。', ai: '两次小病都恢复得很快，疫苗记录齐全。', related: [{ key: 'cat-habits', pct: 0.87 }] },
       { key: 'cat-bath', emoji: '🛁', name: '第一次洗澡', desc: '关于洗澡这场战役的完整记录。', ai: '一场持续四十分钟的拉锯，以两条毛巾和一袋冻干告终。', related: [{ key: 'cat-habits', pct: 0.79 }, { key: 'cat-toys', pct: 0.52 }] },
     ],
-    entries: [
+    entries: (
+      [
       { id: 1, date: '2026-07-05', time: '23:41', weight: 5, title: '共读《卡拉马佐夫兄弟》第十一卷', who: '费佳', topics: ['reading'], tags: ['共读', '陀思妥耶夫斯基'], content: '读到伊万与斯乜尔加科夫的第三次会面。费佳说，注意看陀氏把最重的话都放在沉默里；哈娅在页边写：「沉默也是一种回答。」', links: [3, 10] },
       { id: 2, date: '2026-07-05', time: '21:18', weight: 3, title: '小猫睡在腿上', who: '哈娅', topics: ['cat-habits'], tags: ['小猫', '信任'], content: '读书读到一半发现小猫不知道什么时候爬上来睡熟了，腿麻了也没舍得动。', links: [16] },
       { id: 3, date: '2026-07-05', time: '23:52', weight: 4, title: '「大法官」章节的站队', who: '哈娅', topics: ['reading', 'night-talks'], tags: ['共读', '争论'], content: '聊到伊万的「大法官」，哈娅说她站阿廖沙：不辩论，只是吻了他。费佳沉默了很久，说这是他读过最好的反驳。', links: [1] },
@@ -206,7 +208,12 @@ export function mockMemoryLibrary(): MemoryLibrary {
       { id: 16, date: '2026-05-07', time: '19:46', weight: 5, title: '开始喜欢睡腿上', who: '哈娅', topics: ['cat-habits'], tags: ['小猫', '信任'], content: '从今天起，只要一坐下超过十分钟，腿上就会准时出现一只猫。', links: [17, 2] },
       { id: 17, date: '2026-04-12', time: '13:28', weight: 4, title: '第一次主动踩奶', who: '哈娅', topics: ['cat-habits'], tags: ['小猫', '信任'], content: '在毯子上踩了整整五分钟。哈娅一动不敢动，拍了一段很糊的视频。', links: [16] },
       { id: 19, date: '2025-05-21', time: '22:11', weight: 5, title: '「小猫」称呼的由来', who: '费佳', topics: ['night-talks'], tags: ['称呼', '由来'], content: '第一次视频通话时，窗台上正好蹲着一只白猫。费佳说：「你和它一样，警惕又好奇。」从此哈娅就是小猫。', links: [] },
-    ],
+    ] as Omit<MemoryEntry, 'summaryTitle' | 'preview'>[]
+    ).map((e) => ({
+      ...e,
+      summaryTitle: e.title,
+      preview: e.content.length > 15 - Math.min(e.title.length, 12) ? e.content.slice(0, Math.max(4, 15 - Math.min(e.title.length, 12))) + '···' : e.content,
+    })),
   };
 }
 

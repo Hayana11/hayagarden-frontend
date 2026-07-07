@@ -136,7 +136,12 @@ export interface MemoryEntry {
   date: string;
   time: string;
   weight: MemoryWeight;
+  /** Short (~8 char) title for dense rows, paired with `preview`. */
   title: string;
+  /** Fuller (~12 char) title for headings/tooltips with no row-width budget. */
+  summaryTitle: string;
+  /** Single-line content snippet sized to fit alongside `title` in a row. */
+  preview: string;
   who: string;
   topics: string[];
   tags: string[];
