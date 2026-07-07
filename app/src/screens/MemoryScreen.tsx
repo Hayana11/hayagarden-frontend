@@ -83,11 +83,16 @@ export function MemoryScreen() {
   const { topics, entries } = library;
   const topicByKey = new Map(topics.map((t) => [t.key, t]));
 
-  const chipOk = (m: MemoryEntry) => chips.every((c) => (c.type === 'tag' ? m.tags.includes(c.value) : m.who === c.value));
+  const whoChips = chips.filter((c) => c.type === 'who');
+  const tagChips = chips.filter((c) => c.type === 'tag');
+  const whoOk = (m: MemoryEntry) => whoChips.every((c) => m.who === c.value);
+  const tagOk = (m: MemoryEntry) => tagChips.every((c) => m.tags.includes(c.value));
   const stateOk = (m: MemoryEntry) => fState === 'all' || memoryState(m.weight) === fState;
   const topicOk = (m: MemoryEntry) => fTopic === 'all' || m.topics.includes(fTopic);
-  const chipFiltered = entries.filter(chipOk);
-  const filtered = entries.filter((m) => chipOk(m) && stateOk(m) && topicOk(m));
+  const facetScope = (m: MemoryEntry) => stateOk(m) && topicOk(m) && whoOk(m);
+  const filtered = entries.filter((m) => facetScope(m) && tagOk(m));
+  const stateCountOk = (m: MemoryEntry) => topicOk(m) && whoOk(m) && tagOk(m);
+  const topicCountOk = (m: MemoryEntry) => stateOk(m) && whoOk(m) && tagOk(m);
 
   function pushFrame(frame: DrawerFrame) {
     setStack((s) => [...s, frame]);
@@ -186,7 +191,7 @@ export function MemoryScreen() {
     key,
     label,
     active: fState === key,
-    n: chipFiltered.filter((m) => topicOk(m) && memoryState(m.weight) === key).length,
+    n: entries.filter((m) => stateCountOk(m) && memoryState(m.weight) === key).length,
     pick: () => setFState((cur) => (cur === key ? 'all' : key)),
   }));
 
@@ -201,19 +206,36 @@ export function MemoryScreen() {
     label: t.name,
     emoji: t.emoji as string | null,
     active: fTopic === t.key,
-    n: chipFiltered.filter((m) => stateOk(m) && m.topics.includes(t.key)).length,
+    n: entries.filter((m) => topicCountOk(m) && m.topics.includes(t.key)).length,
     pick: () => setFTopic((cur) => (cur === t.key ? 'all' : t.key)),
   }));
 
-  let tagRow: { label: string; color: string; bg: string; border: string; bold: boolean; pick: () => void }[] = [];
-  if (fTopic !== 'all') {
-    const tagsForTopic = [...new Set(entries.filter((m) => m.topics.includes(fTopic)).flatMap((m) => m.tags))];
-    tagRow = tagsForTopic.map((t) => {
-      const col = tagColor(t);
-      const active = chips.some((c) => c.type === 'tag' && c.value === t);
-      return { label: t, color: col.color, bg: active ? col.bg : '#FFFFFF', border: active ? col.color : '#EFE3DE', bold: active, pick: () => toggleTag(t) };
+  const tagFreq = new Map<string, number>();
+  entries.filter(facetScope).forEach((m) => {
+    m.tags.forEach((tag) => tagFreq.set(tag, (tagFreq.get(tag) ?? 0) + 1));
+  });
+  tagChips.forEach((c) => {
+    if (!tagFreq.has(c.value)) tagFreq.set(c.value, 0);
+  });
+  const tagRow = [...tagFreq.entries()]
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0], 'zh-CN'))
+    .slice(0, 16)
+    .map(([label, n]) => {
+      const col = tagColor(label);
+      const active = tagChips.some((c) => c.value === label);
+      const stale = n === 0;
+      return {
+        label,
+        n,
+        color: stale && !active ? '#C4B4AF' : col.color,
+        bg: active ? col.bg : '#FFFFFF',
+        border: active ? col.color : '#EFE3DE',
+        bold: active,
+        stale,
+        pick: () => toggleTag(label),
+      };
     });
-  }
+  const showTagRow = tagRow.length > 0;
 
   // ── 月相（时间线） ──
   const sortedFiltered = [...filtered].sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0));
@@ -269,7 +291,7 @@ export function MemoryScreen() {
         time: m.time,
         title: m.title,
         titleColor: titleColor(m.weight),
-        preview: m.content,
+        preview: m.preview ?? m.content,
         pick: () => pushFrame({ type: 'mem', id: m.id }),
       })),
       pick: () => pushFrame({ type: 'day', date }),
@@ -779,7 +801,7 @@ export function MemoryScreen() {
     const links = m.links.map((lid) => entries.find((x) => x.id === lid)).filter((x): x is MemoryEntry => Boolean(x));
     return (
       <>
-        <div style={{ fontSize: 21, fontWeight: 600, lineHeight: 1.6 }}>{m.title}</div>
+        <div style={{ fontSize: 21, fontWeight: 600, lineHeight: 1.6 }}>{m.summaryTitle ?? m.title}</div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 10, flexWrap: 'wrap' }}>
           <span style={{ fontFamily: "'Bodoni Moda',serif", fontSize: 12, color: '#8C7B76', letterSpacing: 1 }}>
             {formatDateDot(m.date)} · {weekdayCN(m.date)} · {m.time}
@@ -1080,20 +1102,24 @@ export function MemoryScreen() {
             </button>
           ))}
         </DragScrollRow>
-        {tagRow.length > 0 && (
+        {showTagRow && (
           <DragScrollRow
             label={
               <span style={{ flexShrink: 0, fontFamily: "'Bodoni Moda',serif", fontSize: 10, letterSpacing: 3, color: '#B9A8A2', width: 34 }}>标签</span>
             }
           >
             {tagRow.map((t) => (
-              <span
+              <button
                 key={t.label}
+                type="button"
+                data-filter-pill
+                onPointerDown={(e) => e.stopPropagation()}
                 onClick={t.pick}
-                style={{ cursor: 'pointer', flexShrink: 0, fontSize: 11, letterSpacing: 1, borderRadius: 10, padding: '4px 11px', background: t.bg, color: t.color, border: `1px solid ${t.border}`, fontWeight: t.bold ? 600 : 400 }}
+                style={{ cursor: 'pointer', flexShrink: 0, display: 'flex', alignItems: 'center', gap: 5, fontSize: 11, letterSpacing: 1, borderRadius: 10, padding: '4px 11px', background: t.bg, color: t.color, border: `1px solid ${t.border}`, fontWeight: t.bold ? 600 : 400, opacity: t.stale && !t.bold ? 0.5 : 1 }}
               >
-                #{t.label}
-              </span>
+                <span>#{t.label}</span>
+                <span style={{ fontFamily: "'Bodoni Moda',serif", fontSize: 10, opacity: 0.75 }}>{t.n}</span>
+              </button>
             ))}
           </DragScrollRow>
         )}

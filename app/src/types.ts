@@ -136,7 +136,12 @@ export interface MemoryEntry {
   date: string;
   time: string;
   weight: MemoryWeight;
+  /** Truncated list title (8 chars + ....) */
   title: string;
+  /** Full summary title for detail drawer */
+  summaryTitle?: string;
+  /** Truncated content preview for timeline rows */
+  preview?: string;
   who: string;
   topics: string[];
   tags: string[];

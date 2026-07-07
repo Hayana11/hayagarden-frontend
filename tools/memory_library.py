@@ -2,6 +2,8 @@
 import re
 from collections import defaultdict
 
+from tools import summary_title
+
 LIBRARY_TYPES = ('MEMORY', 'DIARY', 'FACT', 'THOUGHT', 'DREAM', 'DAILY_SUMMARY')
 
 # Optional emoji/name hints — unknown tags and types still get dynamic topics.
@@ -117,8 +119,10 @@ def _ai_blurb(name, entries):
 
 def build_memory_library(conn, limit=500):
     placeholders = ','.join('?' * len(LIBRARY_TYPES))
+    post_cols = {r[1] for r in conn.execute("PRAGMA table_info(posts)").fetchall()}
+    summary_expr = 'summary_title' if 'summary_title' in post_cols else "'' AS summary_title"
     rows = conn.execute(
-        f"""SELECT id, type, content, author, created_at, pinned, tags, layer, importance
+        f"""SELECT id, type, content, author, created_at, pinned, tags, layer, importance, {summary_expr}
             FROM posts
             WHERE type IN ({placeholders}) AND COALESCE(resolved, 0) = 0
             ORDER BY created_at DESC, id DESC
@@ -143,12 +147,15 @@ def build_memory_library(conn, limit=500):
             topic_labels.setdefault(topic_key, TYPE_HINTS.get(ptype, TYPE_HINTS['MEMORY'])['name'])
             topic_types.setdefault(topic_key, ptype)
 
+        titles = summary_title.entry_titles(row['content'], row['summary_title'])
         entry = {
             'id': int(row['id']),
             'date': date_part or created[:10],
             'time': (time_part or '00:00')[:5],
             'weight': _post_weight(row),
-            'title': _title_from_content(row['content']),
+            'title': titles['title'],
+            'summaryTitle': titles['summaryTitle'],
+            'preview': titles['preview'],
             'who': _author_who(row['author']),
             'topics': [topic_key],
             'tags': tags[:8],

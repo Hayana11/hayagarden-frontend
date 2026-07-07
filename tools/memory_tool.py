@@ -7,6 +7,8 @@
   recall_count / last_recalled_at: 召回加热（被真正注入 prompt 才算召回）
 """
 import sqlite3
+from tools import summary_title
+
 DB_PATH = '/opt/frontend/memories.db'
 
 VALID_LAYERS = ('core', 'long-term', 'recent')
@@ -27,16 +29,31 @@ def save_memory(content, type='MEMORY', author='fyodor', layer='recent',
     if layer not in VALID_LAYERS:
         layer = 'recent'
     conn = _db()
+    post_cols = {r[1] for r in conn.execute("PRAGMA table_info(posts)").fetchall()}
+    has_summary_title = 'summary_title' in post_cols
+    gen_title = summary_title.generate_summary_title(content)
     if created_at:
-        cur = conn.execute(
-            "INSERT INTO posts (type, content, author, layer, tags, importance, pinned, created_at) "
-            "VALUES (?,?,?,?,?,?,?,?)",
-            (type, content, author, layer, tags, int(importance), int(pinned), created_at))
+        if has_summary_title:
+            cur = conn.execute(
+                "INSERT INTO posts (type, content, author, layer, tags, importance, pinned, created_at, summary_title) "
+                "VALUES (?,?,?,?,?,?,?,?,?)",
+                (type, content, author, layer, tags, int(importance), int(pinned), created_at, gen_title))
+        else:
+            cur = conn.execute(
+                "INSERT INTO posts (type, content, author, layer, tags, importance, pinned, created_at) "
+                "VALUES (?,?,?,?,?,?,?,?)",
+                (type, content, author, layer, tags, int(importance), int(pinned), created_at))
     else:
-        cur = conn.execute(
-            "INSERT INTO posts (type, content, author, layer, tags, importance, pinned) "
-            "VALUES (?,?,?,?,?,?,?)",
-            (type, content, author, layer, tags, int(importance), int(pinned)))
+        if has_summary_title:
+            cur = conn.execute(
+                "INSERT INTO posts (type, content, author, layer, tags, importance, pinned, summary_title) "
+                "VALUES (?,?,?,?,?,?,?,?)",
+                (type, content, author, layer, tags, int(importance), int(pinned), gen_title))
+        else:
+            cur = conn.execute(
+                "INSERT INTO posts (type, content, author, layer, tags, importance, pinned) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (type, content, author, layer, tags, int(importance), int(pinned)))
     conn.commit()
     new_id = cur.lastrowid
     conn.close()
