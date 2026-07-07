@@ -514,11 +514,11 @@ export function MemoryScreen() {
                     >
                       <span style={{ width: r.size, height: r.size, borderRadius: '50%', background: r.bg, border: r.border, flexShrink: 0 }} />
                       <span style={{ fontFamily: "'Bodoni Moda',serif", fontSize: 11, color: '#A99590', flexShrink: 0, width: 36 }}>{r.time}</span>
-                      <span style={{ fontSize: 13, fontWeight: 600, color: r.titleColor, flexShrink: 0, maxWidth: '44%', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                      <span style={{ fontSize: 13, fontWeight: 600, color: r.titleColor, flexShrink: 0, whiteSpace: 'nowrap' }}>
                         {r.title}
                       </span>
                       <span style={{ fontSize: 12, color: '#D9CCC7', flexShrink: 0 }}>·</span>
-                      <span style={{ fontSize: 12, color: '#8C7B76', flex: 1, minWidth: 0, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{r.preview}</span>
+                      <span style={{ fontSize: 12, color: '#8C7B76', flex: 1, minWidth: 0, whiteSpace: 'nowrap' }}>{r.preview}</span>
                     </div>
                   ))}
                 </div>
