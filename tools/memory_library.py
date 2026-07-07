@@ -183,11 +183,18 @@ def build_memory_library(conn, limit=500):
     for e in entries:
         by_topic[e['topics'][0]].append(e)
 
+    # Each entry belongs to exactly one topic (topics = [topic_key]), so two
+    # different topics' entry-id sets are always disjoint — an overlap
+    # computed on ids can never be positive. Use shared tags across each
+    # topic's entries instead, which is the signal that actually exists.
+    topic_tagsets = {k: {tag for e in group for tag in e['tags']} for k, group in by_topic.items()}
+
     topics = []
     for key, group in sorted(by_topic.items(), key=lambda kv: (-len(kv[1]), kv[0])):
         meta = _topic_meta(key, topic_labels.get(key), topic_types.get(key))
+        my_tags = topic_tagsets[key]
         others = sorted(
-            ((k, len(set(g['id'] for g in by_topic[k]) & set(x['id'] for x in group))) for k in by_topic if k != key),
+            ((k, len(my_tags & topic_tagsets[k])) for k in by_topic if k != key),
             key=lambda x: x[1],
             reverse=True,
         )
