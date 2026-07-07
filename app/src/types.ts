@@ -112,3 +112,40 @@ export interface WeatherNow {
   code: number;
   mock?: boolean;
 }
+
+/** 1 = 新月 (passing mention) .. 5 = 满月 (core memory). */
+export type MemoryWeight = 1 | 2 | 3 | 4 | 5;
+
+export interface MemoryTopicRelation {
+  key: string;
+  pct: number;
+}
+
+export interface MemoryTopic {
+  key: string;
+  emoji: string;
+  name: string;
+  desc: string;
+  /** Short AI-generated reflection shown at the top of the topic detail view. */
+  ai: string;
+  related: MemoryTopicRelation[];
+}
+
+export interface MemoryEntry {
+  id: number;
+  date: string;
+  time: string;
+  weight: MemoryWeight;
+  title: string;
+  who: string;
+  topics: string[];
+  tags: string[];
+  content: string;
+  /** Ids of other entries this one is semantically linked to. */
+  links: number[];
+}
+
+export interface MemoryLibrary {
+  topics: MemoryTopic[];
+  entries: MemoryEntry[];
+}

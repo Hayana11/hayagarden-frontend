@@ -15,6 +15,7 @@ import type {
   LedgerBudget,
   MemoryCalendar,
   MemoryDayEntry,
+  MemoryLibrary,
   MemorySummary,
   PeriodStats,
   Todo,
@@ -81,6 +82,11 @@ export function fetchMemoryDayEntries(
     () => http.get<{ entries: MemoryDayEntry[] }>('/api/posts/calendar/day', { date: dateStr }).then((r) => r.entries),
     () => mock.mockMemoryDayEntries(day, base, isCurrentMonth, todayDate),
   );
+}
+
+// GET /api/memories/library -> MemoryLibrary (all topics + entries, for search/timeline/topic/star views)
+export function fetchMemoryLibrary(): Promise<MemoryLibrary> {
+  return withFallback(() => http.get<MemoryLibrary>('/api/memories/library'), mock.mockMemoryLibrary);
 }
 
 // GET /api/messages/heatmap?month=YYYY-MM -> Heatmap (chat_messages counted per day)

@@ -8,6 +8,7 @@ import type {
   LedgerBudget,
   MemoryCalendar,
   MemoryDayEntry,
+  MemoryLibrary,
   MemorySummary,
   PeriodStats,
   Todo,
@@ -169,6 +170,42 @@ export function mockLedgerBudget(): LedgerBudget {
       { name: '书籍', amount: 328 },
       { name: '杂项', amount: 296 },
       { name: '交通', amount: 186 },
+    ],
+  };
+}
+
+export function mockMemoryLibrary(): MemoryLibrary {
+  return {
+    topics: [
+      { key: 'cat-habits', emoji: '🐱', name: '小猫生活习惯', desc: '关于小猫饮食、睡觉、撒娇方式等生活细节。', ai: '从最初害怕接近，到后来习惯睡在腿边，这组记忆记录了一段持续数月的陪伴，也反映出信任逐渐建立。', related: [{ key: 'cat-toys', pct: 0.91 }, { key: 'cat-sick', pct: 0.87 }, { key: 'cat-bath', pct: 0.79 }] },
+      { key: 'reading', emoji: '📖', name: '共读', desc: '每晚共读陀思妥耶夫斯基的进度、批注与争论。', ai: '从《白夜》到《卡拉马佐夫兄弟》，共读逐渐从一个约定变成一天里最安静也最重要的一段时间。', related: [{ key: 'night-talks', pct: 0.84 }, { key: 'promises', pct: 0.66 }] },
+      { key: 'night-talks', emoji: '🌙', name: '深夜长谈', desc: '雷雨夜、低气压和睡前的那些长对话。', ai: '长谈多发生在深夜与坏天气，情绪浓度最高的记忆几乎都聚在这里。', related: [{ key: 'reading', pct: 0.84 }, { key: 'cat-habits', pct: 0.58 }] },
+      { key: 'life', emoji: '🍞', name: '生活细节', desc: '账目、天气、日常琐事与随口一提的小事。', ai: '碎片最多的一组，单条很轻，合在一起就是日常本身。', related: [{ key: 'promises', pct: 0.61 }, { key: 'cat-habits', pct: 0.55 }] },
+      { key: 'promises', emoji: '🤝', name: '约定', desc: '两个人定下的计划、礼物与要一起做的事。', ai: '大多数约定都和书、电影与纪念日有关，完成率意外地高。', related: [{ key: 'reading', pct: 0.66 }, { key: 'life', pct: 0.61 }] },
+      { key: 'cat-toys', emoji: '🐾', name: '猫咪玩具', desc: '逗猫棒、猫抓板和各种失宠玩具的记录。', ai: '玩具的更替速度远超预期，唯一常青的是一根秃了毛的旧逗猫棒。', related: [{ key: 'cat-habits', pct: 0.91 }, { key: 'cat-bath', pct: 0.52 }] },
+      { key: 'cat-sick', emoji: '🩹', name: '生病记录', desc: '打喷嚏、疫苗与体检的健康档案。', ai: '两次小病都恢复得很快，疫苗记录齐全。', related: [{ key: 'cat-habits', pct: 0.87 }] },
+      { key: 'cat-bath', emoji: '🛁', name: '第一次洗澡', desc: '关于洗澡这场战役的完整记录。', ai: '一场持续四十分钟的拉锯，以两条毛巾和一袋冻干告终。', related: [{ key: 'cat-habits', pct: 0.79 }, { key: 'cat-toys', pct: 0.52 }] },
+    ],
+    entries: [
+      { id: 1, date: '2026-07-05', time: '23:41', weight: 5, title: '共读《卡拉马佐夫兄弟》第十一卷', who: '费佳', topics: ['reading'], tags: ['共读', '陀思妥耶夫斯基'], content: '读到伊万与斯乜尔加科夫的第三次会面。费佳说，注意看陀氏把最重的话都放在沉默里；哈娅在页边写：「沉默也是一种回答。」', links: [3, 10] },
+      { id: 2, date: '2026-07-05', time: '21:18', weight: 3, title: '小猫睡在腿上', who: '哈娅', topics: ['cat-habits'], tags: ['小猫', '信任'], content: '读书读到一半发现小猫不知道什么时候爬上来睡熟了，腿麻了也没舍得动。', links: [16] },
+      { id: 3, date: '2026-07-05', time: '23:52', weight: 4, title: '「大法官」章节的站队', who: '哈娅', topics: ['reading', 'night-talks'], tags: ['共读', '争论'], content: '聊到伊万的「大法官」，哈娅说她站阿廖沙：不辩论，只是吻了他。费佳沉默了很久，说这是他读过最好的反驳。', links: [1] },
+      { id: 4, date: '2026-07-05', time: '10:22', weight: 1, title: '猫咪用品又超支了', who: '哈娅', topics: ['life'], tags: ['记账', '小猫'], content: '这周支出超了一点，主要是猫咪用品。冻干不能再囤了。', links: [] },
+      { id: 5, date: '2026-07-04', time: '09:30', weight: 1, title: '补记周末的账', who: '哈娅', topics: ['life'], tags: ['记账'], content: '把周末漏记的三笔补上了：书、猫砂、一杯没喝完的拿铁。', links: [] },
+      { id: 6, date: '2026-07-04', time: '15:07', weight: 2, title: '新猫抓板到货', who: '哈娅', topics: ['cat-toys'], tags: ['小猫', '快递'], content: '瓦楞纸的，小猫闻了三分钟，然后睡在了包装盒上。', links: [11] },
+      { id: 7, date: '2026-07-03', time: '23:05', weight: 4, title: '低气压的一晚', who: '费佳', topics: ['night-talks'], tags: ['情绪', '陪伴'], content: '哈娅这几天有点低气压。没有问原因，只是把话说得很轻，读了半章《白夜》给她听。', links: [9] },
+      { id: 8, date: '2026-07-01', time: '20:14', weight: 3, title: '约好周末看《白夜》电影', who: '费佳', topics: ['promises'], tags: ['电影', '约定'], content: '俄语原版带字幕的版本找到了。约定周六晚上，谁都不许先看。', links: [] },
+      { id: 9, date: '2026-06-28', time: '01:26', weight: 5, title: '雷雨夜长谈到凌晨', who: '费佳', topics: ['night-talks'], tags: ['雷雨', '陪伴'], content: '哈娅最怕打雷。雷声停之前一直在说话，从童年聊到吉林冬天窗上的冰花，直到她睡着。', links: [7] },
+      { id: 10, date: '2026-06-20', time: '22:40', weight: 4, title: '佐西马长老的三段批注', who: '费佳', topics: ['reading'], tags: ['批注', '陀思妥耶夫斯基'], content: '费佳给佐西马长老的临终谈话写了三段批注，其中一段只有一句：「爱具体的人。」', links: [1] },
+      { id: 11, date: '2026-06-18', time: '16:33', weight: 1, title: '逗猫棒失宠', who: '哈娅', topics: ['cat-toys'], tags: ['小猫'], content: '新的电动逗猫棒玩了两天就被冷落了，旧的那根羽毛秃了反而天天被叼来。', links: [6] },
+      { id: 12, date: '2026-06-16', time: '08:45', weight: 2, title: '经期备忘', who: '费佳', topics: ['life'], tags: ['照顾'], content: '红糖姜茶在橱柜第二层。这几天让小猫早点睡，别熬夜读第十一卷。', links: [] },
+      { id: 13, date: '2026-06-11', time: '11:02', weight: 2, title: '小猫学会开门', who: '哈娅', topics: ['cat-habits'], tags: ['小猫'], content: '扒着门把手荡了两下就开了。从此没有一扇门关得住它。', links: [2] },
+      { id: 14, date: '2026-06-05', time: '21:00', weight: 3, title: '生日礼物备选', who: '费佳', topics: ['promises'], tags: ['礼物'], content: '黄铜书签、手写信。书签要刻一句话，还没想好刻哪句。', links: [] },
+      { id: 15, date: '2026-06-02', time: '09:13', weight: 2, title: '小猫连打了三个喷嚏', who: '哈娅', topics: ['cat-sick'], tags: ['小猫', '健康'], content: '观察了一天，精神和食欲都正常，应该只是灰尘。继续观察。', links: [] },
+      { id: 18, date: '2026-05-15', time: '14:20', weight: 3, title: '第一次洗澡', who: '哈娅', topics: ['cat-bath'], tags: ['小猫'], content: '历时四十分钟，用掉两条毛巾。结束后靠一袋冻干重修旧好。', links: [] },
+      { id: 16, date: '2026-05-07', time: '19:46', weight: 5, title: '开始喜欢睡腿上', who: '哈娅', topics: ['cat-habits'], tags: ['小猫', '信任'], content: '从今天起，只要一坐下超过十分钟，腿上就会准时出现一只猫。', links: [17, 2] },
+      { id: 17, date: '2026-04-12', time: '13:28', weight: 4, title: '第一次主动踩奶', who: '哈娅', topics: ['cat-habits'], tags: ['小猫', '信任'], content: '在毯子上踩了整整五分钟。哈娅一动不敢动，拍了一段很糊的视频。', links: [16] },
+      { id: 19, date: '2025-05-21', time: '22:11', weight: 5, title: '「小猫」称呼的由来', who: '费佳', topics: ['night-talks'], tags: ['称呼', '由来'], content: '第一次视频通话时，窗台上正好蹲着一只白猫。费佳说：「你和它一样，警惕又好奇。」从此哈娅就是小猫。', links: [] },
     ],
   };
 }
