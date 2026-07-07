@@ -1,21 +1,32 @@
 """Build MemoryLibrary JSON for the React memory screen from posts table."""
 import re
-from collections import Counter, defaultdict
+from collections import defaultdict
 
 LIBRARY_TYPES = ('MEMORY', 'DIARY', 'FACT', 'THOUGHT', 'DREAM', 'DAILY_SUMMARY')
 
-TOPIC_CATALOG = {
-    '日常': {'key': 'life', 'emoji': '🍞', 'name': '日常', 'desc': '账目、天气、日常琐事与随口一提的小事。'},
-    '情绪': {'key': 'emotion', 'emoji': '🌙', 'name': '情绪与陪伴', 'desc': '心情、低气压、亲密对话与彼此照护。'},
-    '技术': {'key': 'tech', 'emoji': '⚙️', 'name': '技术', 'desc': '系统、代码、工具链与调试记录。'},
-    'fact': {'key': 'facts', 'emoji': '📌', 'name': '长期事实', 'desc': '稳定的人物偏好与生活事实。'},
-    '色色': {'key': 'intimate', 'emoji': '💝', 'name': '亲密', 'desc': '亲密互动与身体相关的私密记忆。'},
-    'DIARY': {'key': 'diary', 'emoji': '📓', 'name': '日记', 'desc': '按日写下的生活记录。'},
-    'DREAM': {'key': 'dream', 'emoji': '🌙', 'name': '梦境', 'desc': '睡梦、潜意识与夜间的画面。'},
-    'THOUGHT': {'key': 'thought', 'emoji': '💭', 'name': '想法', 'desc': '零散思绪与灵感碎片。'},
-    'DAILY_SUMMARY': {'key': 'summary', 'emoji': '📅', 'name': '日摘要', 'desc': '系统自动整理的一天回顾。'},
-    'MEMORY': {'key': 'memory', 'emoji': '✨', 'name': '记忆', 'desc': '被明确存入记忆库的内容。'},
+# Optional emoji/name hints — unknown tags and types still get dynamic topics.
+TAG_HINTS = {
+    '日常': {'emoji': '🍞', 'name': '日常', 'desc': '账目、天气、日常琐事与随口一提的小事。'},
+    '情绪': {'emoji': '🌙', 'name': '情绪与陪伴', 'desc': '心情、低气压、亲密对话与彼此照护。'},
+    '技术': {'emoji': '⚙️', 'name': '技术', 'desc': '系统、代码、工具链与调试记录。'},
+    'fact': {'emoji': '📌', 'name': '长期事实', 'desc': '稳定的人物偏好与生活事实。'},
+    '色色': {'emoji': '💝', 'name': '亲密', 'desc': '亲密互动与身体相关的私密记忆。'},
 }
+
+TYPE_HINTS = {
+    'MEMORY': {'emoji': '✨', 'name': '记忆', 'desc': '被明确存入记忆库的内容。'},
+    'DIARY': {'emoji': '📓', 'name': '日记', 'desc': '按日写下的生活记录。'},
+    'DREAM': {'emoji': '🌙', 'name': '梦境', 'desc': '睡梦、潜意识与夜间的画面。'},
+    'THOUGHT': {'emoji': '💭', 'name': '想法', 'desc': '零散思绪与灵感碎片。'},
+    'DAILY_SUMMARY': {'emoji': '📅', 'name': '日摘要', 'desc': '系统自动整理的一天回顾。'},
+    'FACT': {'emoji': '📌', 'name': '长期事实', 'desc': '稳定的人物偏好与生活事实。'},
+}
+
+FALLBACK_EMOJIS = ['🏷', '✨', '📎', '🌿', '🔖', '💫', '🪴', '📎']
+
+
+def _slug(text):
+    return re.sub(r'[^\w\u4e00-\u9fff-]+', '-', (text or '').strip()).strip('-').lower() or 'misc'
 
 
 def _parse_tags(tags_raw):
@@ -71,24 +82,23 @@ def _post_weight(row):
 
 def _topic_key_for_row(row, tags):
     if tags:
-        first = tags[0]
-        meta = TOPIC_CATALOG.get(first)
-        if meta:
-            return meta['key']
-        slug = re.sub(r'[^\w\u4e00-\u9fff-]+', '-', first).strip('-').lower() or 'misc'
-        return f'tag-{slug}'
+        return f'tag-{_slug(tags[0])}'
     ptype = (row['type'] or 'MEMORY').strip()
-    return TOPIC_CATALOG.get(ptype, TOPIC_CATALOG['MEMORY'])['key']
+    return f'type-{_slug(ptype)}'
 
 
-def _topic_meta(key, label_hint=None):
-    for meta in TOPIC_CATALOG.values():
-        if meta['key'] == key:
-            return dict(meta)
-    name = label_hint or key.replace('tag-', '').replace('-', ' ')
+def _topic_meta(key, label_hint=None, ptype=None):
+    if label_hint and label_hint in TAG_HINTS:
+        hint = TAG_HINTS[label_hint]
+        return {'key': key, 'emoji': hint['emoji'], 'name': hint['name'], 'desc': hint['desc']}
+    if ptype and ptype in TYPE_HINTS:
+        hint = TYPE_HINTS[ptype]
+        return {'key': key, 'emoji': hint['emoji'], 'name': hint['name'], 'desc': hint['desc']}
+    name = label_hint or key.replace('tag-', '').replace('type-', '').replace('-', ' ')
+    emoji_idx = sum(ord(c) for c in key) % len(FALLBACK_EMOJIS)
     return {
         'key': key,
-        'emoji': '🏷',
+        'emoji': FALLBACK_EMOJIS[emoji_idx],
         'name': name,
         'desc': f'与「{name}」相关的记忆集合。',
     }
@@ -118,17 +128,20 @@ def build_memory_library(conn, limit=500):
 
     entries = []
     topic_labels = {}
+    topic_types = {}
     assoc_by_id = {}
 
     for row in rows:
         tags, assocs = _parse_tags(row['tags'])
         created = (row['created_at'] or '').strip()
         date_part, _, time_part = created.partition(' ')
+        ptype = (row['type'] or 'MEMORY').strip()
         topic_key = _topic_key_for_row(row, tags)
         if tags:
             topic_labels.setdefault(topic_key, tags[0])
-        elif row['type']:
-            topic_labels.setdefault(topic_key, row['type'])
+        else:
+            topic_labels.setdefault(topic_key, TYPE_HINTS.get(ptype, TYPE_HINTS['MEMORY'])['name'])
+            topic_types.setdefault(topic_key, ptype)
 
         entry = {
             'id': int(row['id']),
@@ -145,8 +158,7 @@ def build_memory_library(conn, limit=500):
         entries.append(entry)
         assoc_by_id[entry['id']] = set(assocs)
 
-    # Semantic links via shared assoc words
-    for i, a in enumerate(entries):
+    for a in entries:
         shared = []
         a_assocs = assoc_by_id.get(a['id'], set())
         if not a_assocs:
@@ -160,14 +172,13 @@ def build_memory_library(conn, limit=500):
         shared.sort(key=lambda x: x[1], reverse=True)
         a['links'] = [sid for sid, _ in shared[:4]]
 
-    # Topics aggregate
     by_topic = defaultdict(list)
     for e in entries:
         by_topic[e['topics'][0]].append(e)
 
     topics = []
     for key, group in sorted(by_topic.items(), key=lambda kv: (-len(kv[1]), kv[0])):
-        meta = _topic_meta(key, topic_labels.get(key))
+        meta = _topic_meta(key, topic_labels.get(key), topic_types.get(key))
         others = sorted(
             ((k, len(set(g['id'] for g in by_topic[k]) & set(x['id'] for x in group))) for k in by_topic if k != key),
             key=lambda x: x[1],

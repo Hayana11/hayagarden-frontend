@@ -1,5 +1,5 @@
-import type { CSSProperties } from 'react';
-import { useEffect, useState } from 'react';
+import type { CSSProperties, PointerEvent as ReactPointerEvent } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { BackHeader } from '../components/BackHeader';
 import { Card, ScreenLayout } from '../components/Card';
 import { DragScrollRow } from '../components/DragScrollRow';
@@ -30,8 +30,7 @@ const VIEW_TABS: { key: ViewMode; icon: string; label: string }[] = [
   { key: 'topic', icon: '🏷', label: '主题' },
   { key: 'star', icon: '🌌', label: '星图' },
 ];
-const STATE_LABELS: [StateFilter, string][] = [
-  ['all', '全部'],
+const STATE_LABELS: [Exclude<StateFilter, 'all'>, string][] = [
   ['core', '核心'],
   ['long', '长期'],
   ['short', '短期'],
@@ -52,6 +51,12 @@ export function MemoryScreen() {
   const [fState, setFState] = useState<StateFilter>('all');
   const [fTopic, setFTopic] = useState<string>('all');
   const [zoom, setZoom] = useState(1);
+  const [starPan, setStarPan] = useState({ x: 0, y: 0 });
+  const starGestureRef = useRef<
+    | { kind: 'pending'; x: number; y: number; ox: number; oy: number; starId?: number }
+    | { kind: 'pan'; x: number; y: number; ox: number; oy: number }
+    | null
+  >(null);
 
   useEffect(() => {
     const onResize = () => setIsDesktop(window.innerWidth >= 900);
@@ -59,6 +64,13 @@ export function MemoryScreen() {
     window.addEventListener('resize', onResize);
     return () => window.removeEventListener('resize', onResize);
   }, []);
+
+  useEffect(() => {
+    if (view !== 'star') {
+      setStarPan({ x: 0, y: 0 });
+      setZoom(1);
+    }
+  }, [view]);
 
   if (!library) {
     return (
@@ -174,8 +186,8 @@ export function MemoryScreen() {
     key,
     label,
     active: fState === key,
-    n: chipFiltered.filter((m) => topicOk(m) && (key === 'all' || memoryState(m.weight) === key)).length,
-    pick: () => setFState(key),
+    n: chipFiltered.filter((m) => topicOk(m) && memoryState(m.weight) === key).length,
+    pick: () => setFState((cur) => (cur === key ? 'all' : key)),
   }));
 
   const topicOrder = topics
@@ -184,24 +196,14 @@ export function MemoryScreen() {
     .sort((a, b) => b.total - a.total)
     .map((x) => x.topic);
 
-  const topicTabs = [
-    {
-      key: 'all',
-      label: '全部',
-      emoji: null as string | null,
-      active: fTopic === 'all',
-      n: chipFiltered.filter(stateOk).length,
-      pick: () => setFTopic('all'),
-    },
-    ...topicOrder.map((t) => ({
-      key: t.key,
-      label: t.name,
-      emoji: t.emoji as string | null,
-      active: fTopic === t.key,
-      n: chipFiltered.filter((m) => stateOk(m) && m.topics.includes(t.key)).length,
-      pick: () => setFTopic((cur) => (cur === t.key ? 'all' : t.key)),
-    })),
-  ];
+  const topicTabs = topicOrder.map((t) => ({
+    key: t.key,
+    label: t.name,
+    emoji: t.emoji as string | null,
+    active: fTopic === t.key,
+    n: chipFiltered.filter((m) => stateOk(m) && m.topics.includes(t.key)).length,
+    pick: () => setFTopic((cur) => (cur === t.key ? 'all' : t.key)),
+  }));
 
   let tagRow: { label: string; color: string; bg: string; border: string; bold: boolean; pick: () => void }[] = [];
   if (fTopic !== 'all') {
@@ -314,7 +316,7 @@ export function MemoryScreen() {
     topicLayout.set(t.key, { x: 50 + Math.cos(angle) * 28, y: 50 + Math.sin(angle) * 26, color: constellationColor(i) });
   });
   const starPos = new Map<number, { x: number; y: number }>();
-  const stars: { x: number; y: number; s: number; c: string; glow: string; tip: string; pick: () => void }[] = [];
+  const stars: { id: number; x: number; y: number; s: number; c: string; glow: string; tip: string; pick: () => void }[] = [];
   const constellationPaths: string[] = [];
   const starLabels: { x: number; y: number; name: string }[] = [];
   const starLegend: { color: string; name: string }[] = [];
@@ -329,6 +331,7 @@ export function MemoryScreen() {
       const y = Math.max(10, Math.min(88, layout.y + Math.sin(angle) * radius * 0.9));
       starPos.set(m.id, { x, y });
       stars.push({
+        id: m.id,
         x: +x.toFixed(1),
         y: +y.toFixed(1),
         s: +(4 + m.weight * 1.8).toFixed(1),
@@ -362,6 +365,41 @@ export function MemoryScreen() {
   }));
   const zoomIn = () => setZoom((z) => Math.min(2.5, +(z + 0.25).toFixed(2)));
   const zoomOut = () => setZoom((z) => Math.max(1, +(z - 0.25).toFixed(2)));
+
+  function onStarPointerDown(e: ReactPointerEvent<HTMLDivElement>) {
+    const starNode = (e.target as HTMLElement).closest('[data-star-node]');
+    const starId = starNode ? Number((starNode as HTMLElement).dataset.starId) : undefined;
+    starGestureRef.current = { kind: 'pending', x: e.clientX, y: e.clientY, ox: starPan.x, oy: starPan.y, starId };
+    (e.currentTarget as HTMLDivElement).setPointerCapture(e.pointerId);
+  }
+
+  function onStarPointerMove(e: ReactPointerEvent<HTMLDivElement>) {
+    const g = starGestureRef.current;
+    if (!g) return;
+    const dx = e.clientX - g.x;
+    const dy = e.clientY - g.y;
+    if (g.kind === 'pending') {
+      if (Math.abs(dx) + Math.abs(dy) < 8) return;
+      starGestureRef.current = { kind: 'pan', x: g.x, y: g.y, ox: g.ox, oy: g.oy };
+    }
+    const pan = starGestureRef.current;
+    if (pan?.kind === 'pan') {
+      setStarPan({ x: pan.ox + (e.clientX - pan.x), y: pan.oy + (e.clientY - pan.y) });
+    }
+  }
+
+  function onStarPointerUp(e: ReactPointerEvent<HTMLDivElement>) {
+    const g = starGestureRef.current;
+    if (g?.kind === 'pending' && g.starId) {
+      pushFrame({ type: 'mem', id: g.starId });
+    }
+    starGestureRef.current = null;
+    try {
+      (e.currentTarget as HTMLDivElement).releasePointerCapture(e.pointerId);
+    } catch {
+      /* already released */
+    }
+  }
 
   // ── drawer ──
   const drawerFrame = stack[stack.length - 1] ?? null;
@@ -505,21 +543,28 @@ export function MemoryScreen() {
   function renderStarView() {
     return (
       <div>
-        <div style={{ position: 'relative', background: 'radial-gradient(circle at 62% 28%, #46394E 0%, #2E2733 70%)', borderRadius: 22, boxShadow: '0 10px 30px rgba(183,110,121,0.10)', height: 460, overflow: 'hidden' }}>
-          <div style={{ position: 'absolute', inset: 0, transform: `scale(${zoom})`, transformOrigin: '50% 50%', transition: 'transform 0.2s' }}>
-            <svg viewBox="0 0 100 100" preserveAspectRatio="none" style={{ position: 'absolute', inset: 0, width: '100%', height: '100%' }}>
+        <div
+          style={{ position: 'relative', background: 'radial-gradient(circle at 62% 28%, #46394E 0%, #2E2733 70%)', borderRadius: 22, boxShadow: '0 10px 30px rgba(183,110,121,0.10)', height: 460, overflow: 'hidden', cursor: 'grab', touchAction: 'none' }}
+          onPointerDown={onStarPointerDown}
+          onPointerMove={onStarPointerMove}
+          onPointerUp={onStarPointerUp}
+          onPointerCancel={onStarPointerUp}
+        >
+          <div style={{ position: 'absolute', inset: 0, transform: `translate(${starPan.x}px, ${starPan.y}px) scale(${zoom})`, transformOrigin: '50% 50%' }}>
+            <svg viewBox="0 0 100 100" preserveAspectRatio="none" style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', pointerEvents: 'none' }}>
               <path d={constellationPaths.join('')} stroke="rgba(255,255,255,0.16)" strokeWidth={1} fill="none" vectorEffect="non-scaling-stroke" />
               <path d={linkPaths.join('')} stroke="rgba(233,194,117,0.4)" strokeWidth={1} strokeDasharray="3 4" fill="none" vectorEffect="non-scaling-stroke" />
             </svg>
             {bgStars.map((b, i) => (
-              <div key={i} style={{ position: 'absolute', left: `${b.x}%`, top: `${b.y}%`, width: 2, height: 2, borderRadius: '50%', background: '#FFFFFF', opacity: b.o }} />
+              <div key={i} style={{ position: 'absolute', left: `${b.x}%`, top: `${b.y}%`, width: 2, height: 2, borderRadius: '50%', background: '#FFFFFF', opacity: b.o, pointerEvents: 'none' }} />
             ))}
             {stars.map((s, i) => (
               <div
                 key={i}
-                onClick={s.pick}
+                data-star-node
+                data-star-id={s.id}
                 title={s.tip}
-                style={{ position: 'absolute', left: `${s.x}%`, top: `${s.y}%`, width: s.s, height: s.s, borderRadius: '50%', background: s.c, boxShadow: s.glow, transform: 'translate(-50%,-50%)', cursor: 'pointer' }}
+                style={{ position: 'absolute', left: `${s.x}%`, top: `${s.y}%`, width: s.s, height: s.s, borderRadius: '50%', background: s.c, boxShadow: s.glow, transform: 'translate(-50%,-50%)', pointerEvents: 'auto' }}
               />
             ))}
             {starLabels.map((l, i) => (
@@ -528,7 +573,10 @@ export function MemoryScreen() {
               </div>
             ))}
           </div>
-          <div style={{ position: 'absolute', left: 14, right: 14, bottom: 12, display: 'flex', alignItems: 'center', gap: 10, background: 'rgba(46,39,51,0.72)', border: '1px solid rgba(255,255,255,0.12)', borderRadius: 999, padding: '7px 14px', backdropFilter: 'blur(4px)' }}>
+          <div
+            onPointerDown={(e) => e.stopPropagation()}
+            style={{ position: 'absolute', left: 14, right: 14, bottom: 12, display: 'flex', alignItems: 'center', gap: 10, background: 'rgba(46,39,51,0.72)', border: '1px solid rgba(255,255,255,0.12)', borderRadius: 999, padding: '7px 14px', backdropFilter: 'blur(4px)' }}
+          >
             <span onClick={zoomOut} style={{ cursor: 'pointer', width: 22, height: 22, borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'rgba(255,255,255,0.75)', fontSize: 15, flexShrink: 0, border: '1px solid rgba(255,255,255,0.2)' }}>
               −
             </span>
@@ -904,6 +952,7 @@ export function MemoryScreen() {
   }
 
   return (
+    <div style={{ zoom: 1.07 }}>
     <ScreenLayout>
       <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
         <BackHeader title="记忆库" />
@@ -921,7 +970,8 @@ export function MemoryScreen() {
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             placeholder="搜索内容、标签、人物、主题…"
-            style={{ flex: 1, border: 'none', background: 'transparent', outline: 'none', fontFamily: "'Noto Serif SC',serif", fontSize: 15, color: 'var(--color-text)', minWidth: 0 }}
+            className="memory-search-input"
+            style={{ flex: 1, border: 'none', background: 'transparent', outline: 'none', fontFamily: "'Noto Serif SC',serif", fontSize: 15, color: '#4A3F3C', minWidth: 0 }}
           />
           {q.length > 0 && (
             <span
@@ -997,14 +1047,17 @@ export function MemoryScreen() {
           }
         >
           {stateTabs.map((t) => (
-            <span
+            <button
               key={t.key}
+              type="button"
+              data-filter-pill
+              onPointerDown={(e) => e.stopPropagation()}
               onClick={t.pick}
-              style={{ cursor: 'pointer', flexShrink: 0, display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, letterSpacing: 1, borderRadius: 999, padding: '5px 13px', background: t.active ? 'rgba(183,110,121,0.12)' : '#FFFFFF', color: t.active ? '#9C3B4A' : '#8C7B76', border: `1px solid ${t.active ? 'rgba(183,110,121,0.4)' : '#EFE3DE'}`, fontWeight: t.active ? 600 : 400 }}
+              style={{ cursor: 'pointer', flexShrink: 0, display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, letterSpacing: 1, borderRadius: 999, padding: '6px 14px', background: t.active ? 'rgba(183,110,121,0.12)' : '#FFFFFF', color: t.active ? '#9C3B4A' : '#8C7B76', border: `1px solid ${t.active ? 'rgba(183,110,121,0.4)' : '#EFE3DE'}`, fontWeight: t.active ? 600 : 400 }}
             >
               <span>{t.label}</span>
               <span style={{ fontFamily: "'Bodoni Moda',serif", fontSize: 11, opacity: 0.75 }}>{t.n}</span>
-            </span>
+            </button>
           ))}
         </DragScrollRow>
         <DragScrollRow
@@ -1013,15 +1066,18 @@ export function MemoryScreen() {
           }
         >
           {topicTabs.map((t) => (
-            <span
+            <button
               key={t.key}
+              type="button"
+              data-filter-pill
+              onPointerDown={(e) => e.stopPropagation()}
               onClick={t.pick}
-              style={{ cursor: 'pointer', flexShrink: 0, display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, letterSpacing: 1, borderRadius: 999, padding: '5px 13px', background: t.active ? 'rgba(183,110,121,0.12)' : '#FFFFFF', color: t.active ? '#9C3B4A' : '#8C7B76', border: `1px solid ${t.active ? 'rgba(183,110,121,0.4)' : '#EFE3DE'}`, fontWeight: t.active ? 600 : 400 }}
+              style={{ cursor: 'pointer', flexShrink: 0, display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, letterSpacing: 1, borderRadius: 999, padding: '6px 14px', background: t.active ? 'rgba(183,110,121,0.12)' : '#FFFFFF', color: t.active ? '#9C3B4A' : '#8C7B76', border: `1px solid ${t.active ? 'rgba(183,110,121,0.4)' : '#EFE3DE'}`, fontWeight: t.active ? 600 : 400 }}
             >
               {t.emoji && <span style={{ fontSize: 12 }}>{t.emoji}</span>}
               <span>{t.label}</span>
               <span style={{ fontFamily: "'Bodoni Moda',serif", fontSize: 11, opacity: 0.75 }}>{t.n}</span>
-            </span>
+            </button>
           ))}
         </DragScrollRow>
         {tagRow.length > 0 && (
@@ -1049,6 +1105,7 @@ export function MemoryScreen() {
 
       {renderDrawer()}
     </ScreenLayout>
+    </div>
   );
 }
 

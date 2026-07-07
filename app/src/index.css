@@ -82,6 +82,10 @@ button {
   cursor: grabbing;
 }
 
+.memory-search-input::placeholder {
+  color: rgba(74, 63, 60, 0.38);
+}
+
 /* Unified bottom nav — matches legacy static pages */
 .bnav {
   position: fixed;

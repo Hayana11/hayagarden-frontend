@@ -1,5 +1,7 @@
 import { useRef, type CSSProperties, type PointerEvent, type ReactNode } from 'react';
 
+const DRAG_THRESHOLD = 10;
+
 interface DragScrollRowProps {
   label: ReactNode;
   children: ReactNode;
@@ -8,35 +10,38 @@ interface DragScrollRowProps {
 
 export function DragScrollRow({ label, children, style }: DragScrollRowProps) {
   const trackRef = useRef<HTMLDivElement>(null);
-  const dragRef = useRef<{ x: number; left: number; moved: boolean } | null>(null);
+  const dragRef = useRef<{ x: number; left: number; moved: boolean; pointerId: number } | null>(null);
 
   function onPointerDown(e: PointerEvent<HTMLDivElement>) {
     if (!trackRef.current || e.button !== 0) return;
-    dragRef.current = { x: e.clientX, left: trackRef.current.scrollLeft, moved: false };
-    trackRef.current.setPointerCapture(e.pointerId);
+    const target = e.target as HTMLElement;
+    if (target.closest('[data-filter-pill]')) return;
+    dragRef.current = { x: e.clientX, left: trackRef.current.scrollLeft, moved: false, pointerId: e.pointerId };
   }
 
   function onPointerMove(e: PointerEvent<HTMLDivElement>) {
     const drag = dragRef.current;
-    if (!drag || !trackRef.current) return;
+    if (!drag || !trackRef.current || e.pointerId !== drag.pointerId) return;
     const dx = e.clientX - drag.x;
-    if (Math.abs(dx) > 4) drag.moved = true;
+    if (!drag.moved) {
+      if (Math.abs(dx) < DRAG_THRESHOLD) return;
+      drag.moved = true;
+      trackRef.current.setPointerCapture(e.pointerId);
+    }
     trackRef.current.scrollLeft = drag.left - dx;
   }
 
   function endDrag(e: PointerEvent<HTMLDivElement>) {
-    if (!trackRef.current) return;
-    trackRef.current.releasePointerCapture(e.pointerId);
-    const moved = dragRef.current?.moved ?? false;
-    dragRef.current = null;
-    if (moved) {
-      const blockClick = (ev: Event) => {
-        ev.preventDefault();
-        ev.stopPropagation();
-        trackRef.current?.removeEventListener('click', blockClick, true);
-      };
-      trackRef.current.addEventListener('click', blockClick, true);
+    const drag = dragRef.current;
+    if (!drag || e.pointerId !== drag.pointerId) return;
+    if (drag.moved && trackRef.current) {
+      try {
+        trackRef.current.releasePointerCapture(e.pointerId);
+      } catch {
+        /* already released */
+      }
     }
+    dragRef.current = null;
   }
 
   return (
