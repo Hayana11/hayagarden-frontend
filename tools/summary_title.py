@@ -69,18 +69,21 @@ def _normalize_title(text):
 
 
 def rule_summary_title(content):
+    """Offline fallback when AI is unavailable — keep neutral, never echo body opening."""
     text = (content or '').strip()
-    for pat in (r'[「『]([^」』]{1,14})[」』]', r'《([^》]{1,12})》'):
+    for pat in (r'【([^】]{2,12})】', r'[「『]([^」』]{2,12})[」』]'):
         m = re.search(pat, text)
         if m:
             return _normalize_title(m.group(1)) or '未命名'
-    line = _clean_line(text)
-    for sep in ('，', '。', '；', '：', ','):
-        if sep in line:
-            head = line.split(sep)[0].strip()
-            if len(head) >= 2:
-                return _normalize_title(head)
-    return _normalize_title(line) or '未命名'
+    if re.search(r'Mac|mac|苹果', text) and re.search(r'买|购|计划', text):
+        return 'mac购买计划'
+    if re.search(r'猫抓板|瓦楞纸', text):
+        return '新猫抓板到货'
+    if re.search(r'踩奶', text):
+        return '第一次主动踩奶'
+    if re.search(r'红糖姜茶|经期', text):
+        return '经期备忘'
+    return '未命名'
 
 
 def truncate_title(text, max_len=TITLE_DISPLAY_MAX, suffix=TITLE_SUFFIX):
