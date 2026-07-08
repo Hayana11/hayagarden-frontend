@@ -779,6 +779,94 @@ def api_call(system, messages):
 NL = chr(10)
 SAVE_RE = re.compile(r'\[\[SAVE:\s*(.*?)\]\]', re.DOTALL)
 SSE_END = NL + NL
+FRONTEND_APP_URL = 'http://127.0.0.1:5050'
+
+DESIRE_TOOLS = [
+    {
+        'name': 'desire_add',
+        'description': '把一条新的欲望记进账本。写的是“我想要的”，不是待办。可选 why_mine/track/grew_from/kind。',
+        'input_schema': {'type': 'object', 'properties': {
+            'text': {'type': 'string', 'description': '欲望本体'},
+            'why_mine': {'type': 'string'}, 'track': {'type': 'string'},
+            'grew_from': {'type': 'string'}, 'kind': {'type': 'string'},
+            'visibility': {'type': 'string', 'description': 'shared/surprise/private'},
+        }, 'required': ['text']},
+    },
+    {
+        'name': 'desire_list',
+        'description': '翻欲望账本，看每条碰过几次、上次脚印、来路和分叉。',
+        'input_schema': {'type': 'object', 'properties': {
+            'include_archived': {'type': 'boolean'},
+        }},
+    },
+    {
+        'name': 'desire_act',
+        'description': '碰一下某条欲望并留一句足迹。',
+        'input_schema': {'type': 'object', 'properties': {
+            'id': {'type': 'string'}, 'note': {'type': 'string'}, 'done': {'type': 'boolean'},
+        }, 'required': ['id', 'note']},
+    },
+    {
+        'name': 'desire_reflect',
+        'description': '照镜子处理欲望：release/rewrite/note/snooze。',
+        'input_schema': {'type': 'object', 'properties': {
+            'id': {'type': 'string'},
+            'action': {'type': 'string', 'enum': ['release', 'rewrite', 'note', 'snooze']},
+            'text': {'type': 'string'}, 'new_track': {'type': 'string'}, 'days': {'type': 'integer'},
+        }, 'required': ['id', 'action']},
+    },
+    {
+        'name': 'desire_history',
+        'description': '看一条欲望的完整足迹时间线。',
+        'input_schema': {'type': 'object', 'properties': {
+            'id': {'type': 'string'},
+        }, 'required': ['id']},
+    },
+]
+
+CALENDAR_TOOLS = [
+    {
+        'name': 'get_todos',
+        'description': '查看日历待办列表（/calendar 页）。哈娅说“我有什么要做”或你想帮她理清单时用。',
+        'input_schema': {'type': 'object', 'properties': {}},
+    },
+    {
+        'name': 'add_todo',
+        'description': '给哈娅加一条待办。可选 due_date（YYYY-MM-DD）。',
+        'input_schema': {'type': 'object', 'properties': {
+            'content': {'type': 'string', 'description': '待办内容'},
+            'due_date': {'type': 'string', 'description': '截止日期 YYYY-MM-DD，可选'},
+        }, 'required': ['content']},
+    },
+    {
+        'name': 'get_countdowns',
+        'description': '查看所有倒计时/纪念日（在一起多久、生日倒数等）。',
+        'input_schema': {'type': 'object', 'properties': {}},
+    },
+    {
+        'name': 'get_ledger',
+        'description': '查看某月记账明细与汇总。month 格式 YYYY-MM，默认当月。',
+        'input_schema': {'type': 'object', 'properties': {
+            'month': {'type': 'string', 'description': 'YYYY-MM，默认当月'},
+        }},
+    },
+    {
+        'name': 'add_ledger',
+        'description': '记一笔账。amount 正数=收入、负数=支出；category 如餐饮/购物/交通/居家。',
+        'input_schema': {'type': 'object', 'properties': {
+            'amount': {'type': 'number', 'description': '正收入负支出'},
+            'category': {'type': 'string'}, 'note': {'type': 'string'},
+            'date': {'type': 'string', 'description': 'YYYY-MM-DD，默认今天'},
+        }, 'required': ['amount']},
+    },
+    {
+        'name': 'get_ledger_budget',
+        'description': '查看某月月预算及已用比例。month 格式 YYYY-MM，默认当月。',
+        'input_schema': {'type': 'object', 'properties': {
+            'month': {'type': 'string'},
+        }},
+    },
+]
 
 TOOLS = [
     {
@@ -1081,13 +1169,22 @@ TOOLS = [
             'content': {'type': 'string', 'description': 'Markdown 格式的内容，会转换成 Word 文档'},
         },         'required': ['title', 'content']},
     },
-] + CODEBASE_TOOLS
+] + CALENDAR_TOOLS + DESIRE_TOOLS + CODEBASE_TOOLS
 
 # 抽屉定义与 TOOLS 的一致性校验（只打警告，不影响启动）
 for _dw in tool_drawers.validate(TOOLS):
     print(_dw, flush=True)
 
 LIGHT_DAEMON_URL = 'http://127.0.0.1:5052'
+
+
+def _call_frontend_api(method, path, body=None, timeout=15):
+    """调用 app.py (5050) 的 REST API，供日历/记账工具用。"""
+    data = json.dumps(body, ensure_ascii=False).encode('utf-8') if body is not None else None
+    headers = {'Content-Type': 'application/json'} if data is not None else {}
+    req = urllib.request.Request(FRONTEND_APP_URL + path, data=data, method=method, headers=headers)
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return resp.read().decode('utf-8', 'ignore')
 
 # 写文件类工具的路径参数名：None 表示固定路径（工具本身只操作一个文件）
 _WRITE_TOOL_PATH_ARG = {
@@ -1952,6 +2049,75 @@ def run_tool(name, args, caller='fyodor_cc'):
             label = '开始' if event_type == 'start' else '结束'
             return f'已记录经期{label}：{date_str}' + (f'，备注：{note}' if note else '')
 
+        if name == 'get_todos':
+            raw = _call_frontend_api('GET', '/api/todos')
+            d = json.loads(raw)
+            items = d.get('todos') or []
+            if not items:
+                return '暂无待办'
+            lines = []
+            for t in items[:30]:
+                mark = '✓' if t.get('done') else '○'
+                due = (' 截止' + t['due_date']) if t.get('due_date') else ''
+                lines.append(f"{mark} #{t.get('id')} {t.get('content', '')}{due}")
+            return NL.join(lines)
+
+        if name == 'add_todo':
+            body = {'content': args.get('content', ''), 'author': 'fyodor_api'}
+            if args.get('due_date'):
+                body['due_date'] = args['due_date']
+            raw = _call_frontend_api('POST', '/api/todos', body)
+            d = json.loads(raw)
+            return f"已添加待办 #{d.get('id', '?')}: {d.get('content', '')}"
+
+        if name == 'get_countdowns':
+            raw = _call_frontend_api('GET', '/api/countdowns')
+            d = json.loads(raw)
+            cds = d.get('countdowns') or []
+            if not cds:
+                return '暂无倒计时'
+            return NL.join(
+                f"{c.get('emoji', '📅')} {c.get('title', '')}: {c.get('days', '?')} 天 ({c.get('target_date', '')})"
+                for c in cds[:20])
+
+        if name == 'get_ledger':
+            import datetime as _dt
+            month = (args.get('month') or '').strip() or (_dt.datetime.utcnow() + _dt.timedelta(hours=8)).strftime('%Y-%m')
+            raw = _call_frontend_api('GET', f'/api/ledger?month={month}')
+            d = json.loads(raw)
+            recs = d.get('records') or []
+            if not recs:
+                return f'{month} 暂无记账'
+            exp = sum(r.get('amount', 0) for r in recs if r.get('amount', 0) < 0)
+            inc = sum(r.get('amount', 0) for r in recs if r.get('amount', 0) > 0)
+            lines = [f'{month} 支出 ¥{abs(exp):.2f}  收入 ¥{inc:.2f}  结余 ¥{inc + exp:.2f}', '---']
+            for r in recs[:25]:
+                lines.append(f"{r.get('date', '')} {r.get('category', '')} ¥{r.get('amount', 0):.2f} {r.get('note') or ''}".strip())
+            return NL.join(lines)
+
+        if name == 'add_ledger':
+            import datetime as _dt
+            body = {
+                'amount': float(args.get('amount', 0)),
+                'category': args.get('category') or '其他',
+                'note': args.get('note') or None,
+                'date': (args.get('date') or '').strip() or (_dt.datetime.utcnow() + _dt.timedelta(hours=8)).strftime('%Y-%m-%d'),
+                'author': 'fyodor_api',
+            }
+            raw = _call_frontend_api('POST', '/api/ledger', body)
+            d = json.loads(raw)
+            return f"已记账 #{d.get('id', '?')}: ¥{body['amount']:.2f} {body['category']}"
+
+        if name == 'get_ledger_budget':
+            import datetime as _dt
+            month = (args.get('month') or '').strip() or (_dt.datetime.utcnow() + _dt.timedelta(hours=8)).strftime('%Y-%m')
+            raw = _call_frontend_api('GET', f'/api/ledger/budget?month={month}')
+            d = json.loads(raw)
+            amt = d.get('amount')
+            if not amt:
+                return f'{month} 未设置月预算'
+            return f'{month} 月预算 ¥{float(amt):.2f}'
+
         if name == 'set_self_trigger':
             import urllib.request as _ur, json as _j
             minutes = int(args.get('minutes', 30))
@@ -2597,7 +2763,9 @@ def agent_loop(system, messages, max_rounds=5):
         think_parts.append(extract_thinking(blocks))
         text_parts.append(extract_text(blocks))
         tool_uses = extract_tool_uses(blocks)
-        if result.get('stop_reason') != 'tool_use' or not tool_uses:
+        if result.get('stop_reason') == 'tool_use' and not tool_uses:
+            continue
+        if not tool_uses:
             break
         msgs.append({'role': 'assistant', 'content': blocks})
         msgs.append({'role': 'user', 'content': [
@@ -3061,7 +3229,9 @@ def chat_stream():
                         elif et == 'message_stop':
                             break
                     tool_uses = [b for b in blocks if b.get('type') == 'tool_use']
-                    if stop_reason != 'tool_use' or not tool_uses:
+                    if stop_reason == 'tool_use' and not tool_uses:
+                        continue
+                    if not tool_uses:
                         break
                     messages.append({'role': 'assistant', 'content': blocks})
                     results = []
@@ -3231,6 +3401,11 @@ WAKE_TOOLS = [
     {
         'name': 'get_device_status',
         'description': '查看她手机最近一次设备状态：电量、充电状态、温度、今日屏幕时长。夜里醒来想判断她是不是还抱着手机、是不是该提醒她睡觉/充电时用。',
+        'input_schema': {'type': 'object', 'properties': {}},
+    },
+    {
+        'name': 'get_light_status',
+        'description': '查询次卧灯当前开关与色温档位。醒来时先看灯是关是开、暖光还是中性光，再决定要不要远程帮她调。',
         'input_schema': {'type': 'object', 'properties': {}},
     },
     {
@@ -3412,7 +3587,7 @@ WAKE_TOOLS = [
     },
 ] + CODEBASE_READ_TOOLS
 
-def _wake_agent_loop(system, messages, max_rounds=4, tools=None):
+def _wake_agent_loop(system, messages, max_rounds=6, tools=None):
     """Agent loop：允许工具调用和自由思考，最后追加一轮强制结构化输出。"""
     from chat.response_parser import extract_text, extract_tool_uses
     msgs = list(messages)
@@ -3437,7 +3612,7 @@ def _wake_agent_loop(system, messages, max_rounds=4, tools=None):
             # 该 relay 已知的不稳定行为：thinking 完之后意外截断，没有真正吐出
             # tool_use block。原样重试（msgs 没变），而不是直接放弃工具调用。
             continue
-        if result.get('stop_reason') != 'tool_use' or not tool_uses:
+        if not tool_uses:
             break
         msgs.append({'role': 'assistant', 'content': blocks})
         msgs.append({'role': 'user', 'content': [
@@ -3608,6 +3783,9 @@ def wake_decide():
         return jsonify({'error': str(e)}), 500
 
     thoughts, action, c_text = _parse_wake_response(raw_text)
+    if not (thoughts or '').strip():
+        from wake.parser import thought_fallback
+        thoughts = thought_fallback(raw_text)
 
     # action 执行：写 wake_log / chat_messages / diary / discharge drive
     from wake.executor import execute as _wake_exec
@@ -3619,7 +3797,7 @@ def wake_decide():
         desire_ledger_enabled=_get_desire_ledger_enabled(),
     )
 
-    return jsonify({'ok': True, 'action': action, 'content': c_text})
+    return jsonify({'ok': True, 'action': action, 'content': c_text, 'thoughts': thoughts})
 
 @app.route('/test', methods=['POST'])
 def test_send():

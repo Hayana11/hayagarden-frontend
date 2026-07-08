@@ -55,3 +55,19 @@ def parse_response(text: str) -> tuple:
         action = 'none'
 
     return thoughts, action, c_text
+
+
+def thought_fallback(text: str) -> str:
+    """结构化解析失败时，从原始输出里 salvage 一段可读的内心独白。"""
+    if not (text or '').strip():
+        return ''
+    blocks = list(_re.finditer(r'THOUGHTS:', text))
+    search_text = text[blocks[-1].start():] if blocks else text
+    m = _re.search(r'THOUGHTS:\s*(.+?)(?=\nACTION:|$)', search_text, _re.DOTALL)
+    if m and m.group(1).strip():
+        return m.group(1).strip()[:500]
+    # 去掉格式行后取首段
+    cleaned = _re.sub(r'(?m)^(ACTION|CONTENT):\s*.*$', '', search_text).strip()
+    if len(cleaned) > 20:
+        return cleaned[:500]
+    return text.strip()[:300]
