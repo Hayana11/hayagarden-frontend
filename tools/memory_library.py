@@ -82,14 +82,14 @@ def _post_weight(row):
         return 5
     if layer == 'core' and importance >= 9:
         return 5
+    if ptype in ('FACT', 'DAILY_SUMMARY'):
+        return 3
     if layer in ('long', 'long-term'):
         return 4
     if layer == 'core':
         return 4
     if importance >= 8:
         return 4
-    if ptype in ('FACT', 'DAILY_SUMMARY'):
-        return 3
     if ptype in ('DIARY', 'MEMORY', 'THOUGHT', 'DREAM'):
         return 3 if importance >= 5 else 2
     if importance >= 2:
