@@ -2320,6 +2320,7 @@ async function streamReply(){
     clearInterval(timer);
     clearTimeout(_safetyTimeout);
     streamAbort=null;
+    if(thinkText&&liveThinkWrap&&!liveThinkWrap.classList.contains('done')) finishLiveThink();
     if(streamAborted&&!streamCompleted) releaseGenLock(true);
   }
   if(err) throw err;
