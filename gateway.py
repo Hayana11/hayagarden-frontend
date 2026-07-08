@@ -1374,8 +1374,9 @@ def _get_location():
         ago = '%d 天前' % (age // 86400)
     addr = d.get('address') or d.get('city') or '未知位置'
     lines = ['📍 ' + addr]
-    if d.get('poi'):
-        lines.append('附近 · ' + d['poi'])
+    poi = (d.get('poi') or '').strip()
+    if poi and poi != addr and poi not in addr:
+        lines.append('附近 · ' + poi)
     meta = []
     if d.get('city'):
         meta.append(d['city'])
