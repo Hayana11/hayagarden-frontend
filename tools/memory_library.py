@@ -65,19 +65,31 @@ def _title_from_content(content):
 
 
 def _post_weight(row):
+    """Map DB fields → UI weight 1–5 (inbox / short / long / core).
+
+    Target distribution: core ≪ long ≤ short ≈ inbox.
+    - 5 core: pinned, or layer=core with importance≥9, or importance≥10
+    - 4 long: long-term layer, FACT, DAILY_SUMMARY, soft-core (layer=core imp<9)
+    - 2–3 short: diary / chat memory / thought / dream (recent, normal importance)
+    - 1 inbox: unprocessed fragments (importance 0, not typed content)
+    """
     layer = (row['layer'] or 'recent').strip()
     importance = int(row['importance'] or 0)
     pinned = int(row['pinned'] or 0)
-    if pinned:
+    ptype = (row['type'] or 'MEMORY').strip()
+
+    if pinned or importance >= 10:
         return 5
-    if layer == 'core':
+    if layer == 'core' and importance >= 9:
         return 5
-    if layer in ('long', 'long-term'):
-        return 5 if importance >= 6 else 4
-    if importance >= 6:
+    if layer in ('long', 'long-term') or ptype in ('FACT', 'DAILY_SUMMARY'):
         return 4
-    if importance >= 4:
-        return 3
+    if layer == 'core':
+        return 4
+    if importance >= 8:
+        return 4
+    if ptype in ('DIARY', 'MEMORY', 'THOUGHT', 'DREAM'):
+        return 3 if importance >= 5 else 2
     if importance >= 2:
         return 2
     return 1

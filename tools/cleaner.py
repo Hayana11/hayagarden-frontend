@@ -293,9 +293,9 @@ def process_and_sync():
             tags_list  = [t.strip() for t in str(tags_raw).split(',') if t.strip() in valid_tags]
             tags_str   = ','.join(tags_list) if tags_list else '日常'
 
-            if importance >= 8:
+            if importance >= 9:
                 layer = 'core';    promoted_core += 1
-            elif importance >= 5:
+            elif importance >= 6:
                 layer = 'long-term'; promoted_long += 1
             else:
                 layer = 'recent'
