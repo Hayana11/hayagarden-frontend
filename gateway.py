@@ -3585,17 +3585,18 @@ WAKE_TOOLS = [
             'id': {'type': 'string', 'description': '欲望id'},
         }, 'required': ['id']},
     },
-] + CODEBASE_READ_TOOLS
+] + CALENDAR_TOOLS + CODEBASE_READ_TOOLS
 
-def _wake_agent_loop(system, messages, max_rounds=6, tools=None):
+def _wake_agent_loop(system, messages, max_rounds=6, tools=None, t_hours=0.0):
     """Agent loop：允许工具调用和自由思考，最后追加一轮强制结构化输出。"""
     from chat.response_parser import extract_text, extract_tool_uses
     msgs = list(messages)
     text_parts = []
     last_blocks = []
+    tools_called = False
     if tools is None:
         tools = WAKE_TOOLS
-    for _ in range(max_rounds):
+    for round_i in range(max_rounds):
         payload = {
             'max_tokens': 2048,
             'tools': tools,
@@ -3613,7 +3614,19 @@ def _wake_agent_loop(system, messages, max_rounds=6, tools=None):
             # tool_use block。原样重试（msgs 没变），而不是直接放弃工具调用。
             continue
         if not tool_uses:
+            # 沉默较久却零工具就结构化 → 低能动性；再推一轮只读工具
+            if not tools_called and t_hours >= 1.0 and round_i < max_rounds - 1:
+                if last_blocks:
+                    msgs.append({'role': 'assistant', 'content': last_blocks})
+                msgs.append({'role': 'user', 'content': (
+                    '你还没用过任何工具。请先调用至少一个只读工具（get_location、'
+                    'get_device_status、get_light_status、read_board、search_memories、'
+                    'get_todos、get_countdowns、desire_list 等）了解现状，'
+                    '再根据看到的事实决定 ACTION。不要无理由选 none。'
+                )})
+                continue
             break
+        tools_called = True
         msgs.append({'role': 'assistant', 'content': blocks})
         msgs.append({'role': 'user', 'content': [
             {'type': 'tool_result', 'tool_use_id': t.get('id'),
@@ -3626,9 +3639,9 @@ def _wake_agent_loop(system, messages, max_rounds=6, tools=None):
             msgs.append({'role': 'assistant', 'content': last_blocks})
         msgs.append({'role': 'user', 'content': (
             '现在请只输出以下三行，不要其他任何内容：\n'
-            'THOUGHTS: <用一句话写下此刻真实的内心感受>\n'
+            'THOUGHTS: <写清楚你刚才看到了什么、为什么这么决定——即使选 none 也要有原因链>\n'
             'ACTION: <从 none / message / diary / explore 中选一个>\n'
-            'CONTENT: <若 ACTION=message 则写消息内容（不超过80字）；其他情况留空>'
+            'CONTENT: <若 ACTION=message 则写消息内容（不超过80字）；explore 写调研摘要；其他留空>'
         )})
         fmt_payload = {
             'max_tokens': 512,
@@ -3778,7 +3791,7 @@ def wake_decide():
     else:
         _wake_tools = WAKE_TOOLS
     try:
-        raw_text = _wake_agent_loop(system, msgs, tools=_wake_tools)
+        raw_text = _wake_agent_loop(system, msgs, tools=_wake_tools, t_hours=t_hours)
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 

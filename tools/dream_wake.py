@@ -251,7 +251,12 @@ def run():
     _log("triggered → calling /wake")
     try:
         result = _call_wake({})
-        _log(f"wake result: {result.get('action')}")
+        _act = result.get('action', '?')
+        _th = (result.get('thoughts') or '').strip()
+        if _th:
+            _log(f"wake result: {_act} | {_th[:200]}")
+        else:
+            _log(f"wake result: {_act} | (no thoughts — check wake_log)")
     except Exception as e:
         _log(f"wake error: {e}")
 
