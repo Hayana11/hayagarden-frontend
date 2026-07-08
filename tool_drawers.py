@@ -60,7 +60,17 @@ DRAWERS = {
     },
     'life': {
         'label': '生活状态',
-        'tools': ['get_activity_summary', 'log_period_event', 'get_location'],
+        'tools': ['get_activity_summary', 'log_period_event', 'get_location',
+                  'get_device_status', 'request_phone_screenshot'],
+    },
+    'calendar': {
+        'label': '日历记账',
+        'tools': ['get_todos', 'add_todo', 'get_countdowns',
+                  'get_ledger', 'add_ledger', 'get_ledger_budget'],
+    },
+    'desire': {
+        'label': '欲望账本',
+        'tools': ['desire_add', 'desire_list', 'desire_act', 'desire_reflect', 'desire_history'],
     },
     'triggers': {
         'label': '自我触发',
@@ -87,7 +97,8 @@ FORCE_RULES = [
     (re.compile(r'购物|淘宝|下单|购物车|结[账帐]|买.{0,6}(东西|个|件|点)|店里'), ['shopping']),
     (re.compile(r'照片|图片|相册|截图|拍的|存图'), ['gallery']),
     (re.compile(r'代码|文件|前端|后端|页面|部署|修(一下|个|复)|bug|报错', re.I), ['code']),
-    (re.compile(r'人设|bot_config|唤醒(设置|概率|频率)|wake', re.I), ['self_config']),
+    (re.compile(r'待办|todo|记账|账本|预算|倒计时|calendar|ledger', re.I), ['calendar']),
+    (re.compile(r'欲望|desire|想要|心愿', re.I), ['desire']),
     (re.compile(r'留言板|板子上|发(个)?帖|board', re.I), ['board']),
     (re.compile(r'在干嘛|在做什么|活动|屏幕|例假|月经|经期|姨妈|位置|在哪'), ['life']),
     (re.compile(r'提醒我|闹钟|定时|叫我|到点'), ['triggers']),
