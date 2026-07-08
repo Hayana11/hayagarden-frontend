@@ -3,69 +3,15 @@ import re
 from collections import defaultdict
 
 from tools import summary_title
-from tools.memory_tool import is_near_duplicate, normalize_content, _recall_promote_threshold
+from tools.memory_tier import compute_display_weight
+from tools.memory_tool import is_near_duplicate, normalize_content
 
 LIBRARY_TYPES = ('MEMORY', 'DIARY', 'FACT', 'THOUGHT', 'DREAM', 'DAILY_SUMMARY')
 
-# 被召回注入 prompt 达到此次数 → 展示为「长期」（可用 config_store 覆盖）
-RECALL_PROMOTE_LONG = 3
-
-
-def _row_int(row, key, default=0):
-    try:
-        if key not in row.keys():
-            return default
-        v = row[key]
-        return default if v is None else int(v)
-    except Exception:
-        return default
-
 
 def _post_weight(row):
-    """Map DB → UI weight 1–5，对应：未消化 / 短期 / 长期 / 核心。
-
-    核心：两人不变的事实（FACT、偏好/约定）+ 感情浓度深的对话（layer=core / 高 importance+情绪）
-    长期：印象深刻的事；或 recall_count ≥ RECALL_PROMOTE_LONG（被经常想起）
-    短期：已消化、分量不重的随手记（晚饭、买了裙子）
-    未消化：processed=0 尚未夜巡打分，或已打分但 importance≤2 的碎屑
-    """
-    processed = _row_int(row, 'processed', 0)
-    importance = _row_int(row, 'importance', 0)
-    recall = _row_int(row, 'recall_count', 0)
-    pinned = _row_int(row, 'pinned', 0)
-    layer = (row['layer'] or 'recent').strip()
-    ptype = (row['type'] or 'MEMORY').strip()
-    tags = (row['tags'] or '').lower()
-
-    if pinned:
-        return 5
-
-    if not processed:
-        return 1
-
-    if importance <= 2 and ptype not in ('FACT',) and recall < RECALL_PROMOTE_LONG:
-        if layer not in ('core', 'long-term'):
-            return 1
-
-    if ptype == 'FACT' and importance >= 7:
-        return 5
-    if layer == 'core' and importance >= 8:
-        return 5
-    if importance >= 9:
-        return 5
-    if importance >= 8 and ('情绪' in tags or '色色' in tags):
-        return 5
-
-    if recall >= _recall_promote_threshold():
-        return 4
-    if layer in ('long', 'long-term'):
-        return 4
-    if importance >= 6:
-        return 4
-    if ptype == 'DAILY_SUMMARY':
-        return 4
-
-    return 2
+    """Map DB → UI weight 1–5；语义见 tools/memory_tier.py。"""
+    return compute_display_weight(row)
 
 
 TAG_HINTS = {

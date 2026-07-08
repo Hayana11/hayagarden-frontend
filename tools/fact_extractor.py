@@ -20,6 +20,7 @@ sys.path.insert(0, '/opt/frontend')
 import llm_lite
 import memory_tool
 from memory_tool import is_near_duplicate, normalize_content
+from memory_tier import is_ephemeral_note, has_stable_couple_fact
 
 DB = '/opt/frontend/memories.db'
 MAX_FACTS_PER_DAY = 6
@@ -107,14 +108,18 @@ def extract(day, dry_run=False):
     for f in facts:
         if len(f) < 8:
             continue
+        if is_ephemeral_note(f):
+            _log('skip ephemeral (not FACT): %s' % f[:60])
+            continue
         fn = normalize_content(f)
         if any(is_near_duplicate(fn, normalize_content(k)) for k in known):
             continue
         known.append(f)
+        imp = 8 if has_stable_couple_fact(f) else 7
         _log('FACT: %s' % f)
         if not dry_run:
             memory_tool.save_memory(f, type='FACT', layer='core',
-                                    tags='fact,auto', importance=7, processed=1)
+                                    tags='fact,auto', importance=imp, processed=1)
         saved += 1
         if saved >= MAX_FACTS_PER_DAY:
             break
