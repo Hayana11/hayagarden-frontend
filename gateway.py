@@ -336,12 +336,24 @@ def _gen_release(result):
         _gen_cond.notify_all()
 
 
+@app.route('/chat/lock', methods=['GET'])
+def chat_lock_status():
+    """调试：当前全局生成锁是否被占用（单 worker 内存锁）。"""
+    with _gen_cond:
+        age = round(time.time() - _gen_busy_since, 1) if _gen_busy else 0
+        return jsonify({'busy': _gen_busy, 'age_sec': age, 'has_result': _gen_last_result is not None})
+
 @app.route('/chat/cancel', methods=['POST'])
 def chat_cancel():
-    """前端点停止后调用：立刻释放生成锁，让下一条消息马上能发。
-    旧 generator 卡在 relay 阻塞读里，要到下一个 yield 才会死（GeneratorExit），
-    不主动放锁的话新消息要白等 15 秒然后被拒。旧 gen 死时 finally 里的
-    _gen_release 幂等，重复释放无害；断流救援照常保住已生成内容。"""
+    """释放生成锁。force=true 时无条件释放（停止按钮/用户 abort）；
+    否则跳过 age<8s 的新锁，避免上一轮 stream 的延迟 cancel 误杀新一轮。"""
+    data = request.get_json(silent=True) or {}
+    force = bool(data.get('force'))
+    with _gen_cond:
+        if _gen_busy and not force:
+            age = time.time() - _gen_busy_since
+            if age < 8.0:
+                return jsonify({'ok': True, 'skipped': True, 'age_sec': round(age, 1)})
     _gen_release(None)
     return jsonify({'ok': True})
 

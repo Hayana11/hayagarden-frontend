@@ -1695,13 +1695,12 @@ function retryLastMessage(){
   hideErrToast();
   if(!lastUserMsgText) return;
   document.getElementById('txt').value = lastUserMsgText;
-  send();
+  sendMsg();
 }
 function hideTyping(){ document.getElementById('typing').style.display='none'; }
 
 async function send(){
   if(sending||blockedState)return;
-  await recoverChatState(true);
   var txt=document.getElementById('txt').value.trim();
   if(!txt&&!pendingFile&&!pendingDoc)return;
   hideErrToast();
@@ -1788,7 +1787,6 @@ function openLb(src){ document.getElementById('lb-img').src=src; document.getEle
 function closeLb(){ document.getElementById('lb').classList.remove('show'); }
 
 loadMsgs(true);
-recoverChatState(false);
 setInterval(function(){ if(!window.historyMode) loadMsgs(false); }, 8000);
 
 // ── 倒计时任务浮窗 ─────────────────────────────────────────────
@@ -1866,9 +1864,8 @@ document.getElementById('msgs').addEventListener('scroll', function(){
 // 切回前台时立刻刷新一次——即使之前的streamReply因为切走而连接断开，
 // 后端现在会在生成完成时就把回复写库，这里能马上把它捞出来显示
 document.addEventListener('visibilitychange', function(){
-  if(!document.hidden){ loadInitialWindow(true); recoverChatState(false); }
+  if(!document.hidden) loadInitialWindow(true);
 });
-window.addEventListener('pageshow', function(){ recoverChatState(false); });
 
 var swReg=null;
 async function notify(title,body){
@@ -1955,21 +1952,12 @@ function releaseGenLock(force){
     body:JSON.stringify({force:!!force}),
   }).catch(function(){});
 }
-async function recoverChatState(aggressive){
+async function clearStaleGenLock(){
   try{
     var r=await fetch('/api/gw/chat/lock');
     var d=await r.json();
-    var maxAge=aggressive?12:20;
-    if(d.busy&&d.age_sec>maxAge) releaseGenLock(true);
-    if(sending&&!streamAbort){
-      sending=false;
-      setSendBtn('send');
-      hideTyping();
-    }
+    if(d.busy&&d.age_sec>45) releaseGenLock(true);
   }catch(e){}
-}
-async function clearStaleGenLock(){
-  await recoverChatState(true);
 }
 function setSendBtn(mode) {
   var btn = document.getElementById('send-btn');
@@ -2303,7 +2291,6 @@ async function streamReply(){
           if(ev.input_tokens) streamState.inputTokens=Math.max(streamState.inputTokens,ev.input_tokens);
         } else if(ev.t==='err'){
           ensureLiveRow();
-          if(/仍在生成|generating/i.test(String(ev.d||''))) releaseGenLock(true);
           live.innerHTML='<div class="stream-err-wrap">⚠ '+escHtml(ev.d)+
             '<br><button class="stream-err-retry" onclick="retryStream()">重试</button></div>';
           err=new Error(ev.d); err.displayed=true;
