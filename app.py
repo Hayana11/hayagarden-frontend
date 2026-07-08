@@ -1898,52 +1898,35 @@ def geo_report():
     lat_wgs = data.get('lat')
     lon_wgs = data.get('lon')
     accuracy = data.get('accuracy', 0)
+    coord_type = (data.get('coord_type') or data.get('crs') or '').strip().lower() or None
+    if coord_type in ('gcj', 'gcj02', 'amap'):
+        coord_type = 'gcj02'
+    elif coord_type in ('wgs', 'wgs84', 'gps'):
+        coord_type = 'wgs84'
     if not lat_wgs or not lon_wgs:
         return jsonify({'error': 'missing lat/lon'}), 400
-    import math
-    def _wgs2gcj(lat, lon):
-        a, ee = 6378245.0, 0.00669342162296594323
-        if lon < 72.004 or lon > 137.8347 or lat < 0.8293 or lat > 55.8271:
-            return lat, lon
-        dlat = -100+2*lon+3*lat+0.2*lat*lat+0.1*lon*lat+0.2*math.sqrt(abs(lon))
-        dlat += (20*math.sin(6*lon*math.pi)+20*math.sin(2*lon*math.pi))*2/3
-        dlat += (20*math.sin(lat*math.pi)+40*math.sin(lat/3*math.pi))*2/3
-        dlat += (160*math.sin(lat/12*math.pi)+320*math.sin(lat*math.pi/30))*2/3
-        dlon = 300+lon+2*lat+0.1*lon*lon+0.1*lon*lat+0.1*math.sqrt(abs(lon))
-        dlon += (20*math.sin(6*lon*math.pi)+20*math.sin(2*lon*math.pi))*2/3
-        dlon += (20*math.sin(lon*math.pi)+40*math.sin(lon/3*math.pi))*2/3
-        dlon += (150*math.sin(lon/12*math.pi)+300*math.sin(lon/30*math.pi))*2/3
-        radlat = lat/180*math.pi
-        magic = 1-ee*math.sin(radlat)**2
-        dlat = dlat*180/(a*(1-ee)/(magic**1.5)*math.pi)
-        dlon = dlon*180/(a/math.sqrt(magic)*math.cos(radlat)*math.pi)
-        return lat+dlat, lon+dlon
-    lat_gcj, lon_gcj = _wgs2gcj(float(lat_wgs), float(lon_wgs))
-    amap_key = ''
-    try:
-        for line in open('/opt/frontend/.env'):
-            if line.startswith('AMAP_KEY='): amap_key = line.split('=',1)[1].strip()
-    except Exception: pass
-    address, poi, city = '', '', ''
-    if amap_key:
-        try:
-            import urllib.request as _ur, json as _j
-            url = ('https://restapi.amap.com/v3/geocode/regeo?key='+amap_key
-                   +'&location='+f'{lon_gcj:.6f},{lat_gcj:.6f}'+'&extensions=all&radius=500')
-            with _ur.urlopen(url, timeout=8) as _r: geo = _j.loads(_r.read())
-            if geo.get('status')=='1':
-                ac = geo['regeocode'].get('addressComponent',{})
-                city = ac.get('city') or ac.get('province','')
-                address = geo['regeocode'].get('formatted_address','')
-                pois = geo['regeocode'].get('pois',[])
-                if pois:
-                    poi = sorted(pois,key=lambda x:float(x.get('distance',9999)))[0].get('name','')
-        except Exception: pass
+    import sys
+    if '/opt/frontend' not in sys.path:
+        sys.path.insert(0, '/opt/frontend')
+    from tools.geo_utils import resolve_location
+    loc = resolve_location(lat_wgs, lon_wgs, coord_type=coord_type)
     conn = get_db()
-    conn.execute('INSERT INTO geo_log (lat_wgs,lon_wgs,lat_gcj,lon_gcj,accuracy,address,poi,city) VALUES (?,?,?,?,?,?,?,?)',
-        (float(lat_wgs),float(lon_wgs),lat_gcj,lon_gcj,float(accuracy),address,poi,city))
-    conn.commit(); conn.close()
-    return jsonify({'ok':True,'address':address,'poi':poi,'city':city})
+    conn.execute(
+        'INSERT INTO geo_log (lat_wgs,lon_wgs,lat_gcj,lon_gcj,accuracy,address,poi,city) VALUES (?,?,?,?,?,?,?,?)',
+        (
+            loc['lat_wgs'], loc['lon_wgs'], loc['lat_gcj'], loc['lon_gcj'],
+            float(accuracy), loc['address'], loc['poi'], loc['city'],
+        ),
+    )
+    conn.commit()
+    conn.close()
+    return jsonify({
+        'ok': True,
+        'address': loc['address'],
+        'poi': loc['poi'],
+        'city': loc['city'],
+        'coord_src': loc.get('coord_src'),
+    })
 
 @app.route('/api/geo/latest', methods=['GET'])
 def geo_latest():
