@@ -23,7 +23,7 @@ _DEFAULT_HOME = {
     'lon': 126.577663,
     'label': '东昌花园',
     'detail': '解放东路12号楼',
-    'radius_m': 700.0,
+    'radius_m': 500.0,
 }
 
 
