@@ -1344,75 +1344,85 @@ export function MemoryScreen() {
 
       {/* search + active filters */}
       <div style={{ position: 'relative', zIndex: 40 }}>
-        <Card style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', borderRadius: 999, padding: '10px 16px', boxShadow: 'inset 0 2px 6px rgba(183,110,121,0.08), 0 6px 18px rgba(183,110,121,0.08)' }}>
+        <Card style={{ display: 'flex', alignItems: 'center', gap: 8, borderRadius: 999, padding: '8px 10px 8px 14px', boxShadow: 'inset 0 2px 6px rgba(183,110,121,0.08), 0 6px 18px rgba(183,110,121,0.08)' }}>
           <svg viewBox="0 0 24 24" style={{ width: 17, height: 17, flexShrink: 0 }} fill="none" stroke="#B9A8A2" strokeWidth={2} strokeLinecap="round">
             <circle cx={11} cy={11} r={7} />
             <path d="M20 20l-3.5-3.5" />
           </svg>
-          {activeStateLabel && (
-            <span
-              onClick={() => setFState('all')}
-              style={{ cursor: 'pointer', flexShrink: 0, display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 11, letterSpacing: 1, borderRadius: 999, padding: '4px 10px', background: 'rgba(183,110,121,0.12)', color: '#9C3B4A', border: '1px solid rgba(183,110,121,0.35)' }}
-            >
-              {activeStateLabel}
-              <span style={{ fontSize: 12, opacity: 0.7 }}>×</span>
-            </span>
-          )}
-          {activeTopicMeta && (
-            <span
-              onClick={() => setFTopic('all')}
-              style={{ cursor: 'pointer', flexShrink: 0, display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 11, letterSpacing: 1, borderRadius: 999, padding: '4px 10px', background: 'rgba(183,110,121,0.12)', color: '#9C3B4A', border: '1px solid rgba(183,110,121,0.35)' }}
-            >
-              {activeTopicMeta.emoji} {activeTopicMeta.name}
-              <span style={{ fontSize: 12, opacity: 0.7 }}>×</span>
-            </span>
-          )}
-          {tagChips.map((c) => {
-            const col = tagColor(c.value);
-            return (
+          <div className="memory-search-chips" style={{ flex: 1, minWidth: 0, display: 'flex', alignItems: 'center', gap: 6, overflowX: 'auto', flexWrap: 'nowrap' }}>
+            {activeStateLabel && (
               <span
-                key={`tag-${c.value}`}
-                onClick={() => removeTag(c.value)}
-                style={{ cursor: 'pointer', flexShrink: 0, display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 11, letterSpacing: 1, borderRadius: 10, padding: '4px 10px', background: col.bg, color: col.color, border: `1px solid ${col.color}`, fontWeight: 600 }}
+                onClick={() => setFState('all')}
+                style={{ cursor: 'pointer', flexShrink: 0, display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 11, letterSpacing: 1, borderRadius: 999, padding: '4px 10px', background: 'rgba(183,110,121,0.12)', color: '#9C3B4A', border: '1px solid rgba(183,110,121,0.35)' }}
               >
-                #{c.value}
+                {activeStateLabel}
+                <span style={{ fontSize: 12, opacity: 0.7 }}>×</span>
+              </span>
+            )}
+            {activeTopicMeta && (
+              <span
+                onClick={() => setFTopic('all')}
+                style={{ cursor: 'pointer', flexShrink: 0, display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 11, letterSpacing: 1, borderRadius: 999, padding: '4px 10px', background: 'rgba(183,110,121,0.12)', color: '#9C3B4A', border: '1px solid rgba(183,110,121,0.35)' }}
+              >
+                {activeTopicMeta.emoji} {activeTopicMeta.name}
+                <span style={{ fontSize: 12, opacity: 0.7 }}>×</span>
+              </span>
+            )}
+            {tagChips.map((c) => {
+              const col = tagColor(c.value);
+              return (
+                <span
+                  key={`tag-${c.value}`}
+                  onClick={() => removeTag(c.value)}
+                  style={{ cursor: 'pointer', flexShrink: 0, display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 11, letterSpacing: 1, borderRadius: 10, padding: '4px 10px', background: col.bg, color: col.color, border: `1px solid ${col.color}`, fontWeight: 600 }}
+                >
+                  #{c.value}
+                  <span style={{ fontSize: 12, opacity: 0.75 }}>×</span>
+                </span>
+              );
+            })}
+            {whoChips.map((c) => (
+              <span
+                key={`who-${c.value}`}
+                onClick={() => removeWho(c.value)}
+                style={{ cursor: 'pointer', flexShrink: 0, display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 11, letterSpacing: 1, borderRadius: 999, padding: '4px 10px', background: '#F3EBFF', color: '#7A6A9A', border: '1px solid rgba(122,106,154,0.35)' }}
+              >
+                {c.value}
                 <span style={{ fontSize: 12, opacity: 0.75 }}>×</span>
               </span>
-            );
-          })}
-          {whoChips.map((c) => (
-            <span
-              key={`who-${c.value}`}
-              onClick={() => removeWho(c.value)}
-              style={{ cursor: 'pointer', flexShrink: 0, display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 11, letterSpacing: 1, borderRadius: 999, padding: '4px 10px', background: '#F3EBFF', color: '#7A6A9A', border: '1px solid rgba(122,106,154,0.35)' }}
-            >
-              {c.value}
-              <span style={{ fontSize: 12, opacity: 0.75 }}>×</span>
-            </span>
-          ))}
-          <input
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            placeholder={hasFacetFilters ? '继续搜索…' : '搜索内容、标签、人物、主题…'}
-            className="memory-search-input"
-            style={{ flex: '1 1 120px', border: 'none', background: 'transparent', outline: 'none', fontFamily: "'Noto Serif SC',serif", fontSize: 15, color: '#4A3F3C', minWidth: 88 }}
-          />
-          {hasFacetFilters && (
-            <span
-              onClick={clearFilters}
-              style={{ cursor: 'pointer', flexShrink: 0, fontSize: 11, letterSpacing: 1, color: '#B76E79', padding: '4px 2px', whiteSpace: 'nowrap' }}
-            >
-              清除筛选
-            </span>
-          )}
-          {q.length > 0 && (
-            <span
-              onClick={() => setQuery('')}
-              style={{ cursor: 'pointer', width: 20, height: 20, borderRadius: '50%', background: '#F3EBE8', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 12, color: '#A99590', flexShrink: 0 }}
-            >
-              ×
-            </span>
-          )}
+            ))}
+            <input
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder={hasFacetFilters ? '继续搜索…' : '搜索内容、标签、人物、主题…'}
+              className="memory-search-input"
+              style={{ flex: '1 0 72px', width: '100%', border: 'none', background: 'transparent', outline: 'none', fontFamily: "'Noto Serif SC',serif", fontSize: 15, color: '#4A3F3C', minWidth: 72 }}
+            />
+          </div>
+          <div style={{ flexShrink: 0, display: 'flex', alignItems: 'center', gap: 2, marginLeft: 2 }}>
+            {hasFacetFilters && (
+              <button
+                type="button"
+                title="清除筛选"
+                aria-label="清除筛选"
+                onClick={clearFilters}
+                style={{ cursor: 'pointer', width: 28, height: 28, border: 'none', background: 'transparent', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 0, flexShrink: 0 }}
+              >
+                <FilterTrashIcon />
+              </button>
+            )}
+            {q.length > 0 && (
+              <button
+                type="button"
+                title="清除搜索"
+                aria-label="清除搜索"
+                onClick={() => setQuery('')}
+                style={{ cursor: 'pointer', width: 28, height: 28, borderRadius: '50%', background: '#F3EBE8', border: 'none', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 14, color: '#A99590', flexShrink: 0, padding: 0, lineHeight: 1 }}
+              >
+                ×
+              </button>
+            )}
+          </div>
         </Card>
         {showSuggest && (
           <Card style={{ position: 'absolute', top: 'calc(100% + 8px)', left: 0, right: 0, padding: '10px 8px', maxHeight: 340, overflowY: 'auto', boxShadow: '0 14px 40px rgba(183,110,121,0.18)' }}>
@@ -1525,6 +1535,18 @@ export function MemoryScreen() {
       {renderDrawer()}
     </ScreenLayout>
     </div>
+  );
+}
+
+function FilterTrashIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width={17} height={17} fill="none" stroke="#B76E79" strokeWidth={1.75} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d="M4 7h16" />
+      <path d="M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" />
+      <path d="M6 7l1 13a1 1 0 0 0 1 .93h8a1 1 0 0 0 1-.93L18 7" />
+      <path d="M10 11v5" />
+      <path d="M14 11v5" />
+    </svg>
   );
 }
 

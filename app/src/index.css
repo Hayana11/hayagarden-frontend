@@ -86,6 +86,15 @@ button {
   color: rgba(74, 63, 60, 0.38);
 }
 
+.memory-search-chips {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.memory-search-chips::-webkit-scrollbar {
+  display: none;
+}
+
 /* Unified bottom nav — matches legacy static pages */
 .bnav {
   position: fixed;
