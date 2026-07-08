@@ -38,6 +38,22 @@ const STATE_LABELS: [Exclude<StateFilter, 'all'>, string][] = [
 ];
 const MONTH_LABEL = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
 const MONTH_CN = ['一月', '二月', '三月', '四月', '五月', '六月', '七月', '八月', '九月', '十月', '十一月', '十二月'];
+const STAR_ZOOM_MIN = 0.65;
+const STAR_ZOOM_MAX = 2.5;
+
+function clampStarZoom(z: number) {
+  return Math.min(STAR_ZOOM_MAX, Math.max(STAR_ZOOM_MIN, +z.toFixed(2)));
+}
+
+function pointerDist(a: { x: number; y: number }, b: { x: number; y: number }) {
+  return Math.hypot(a.x - b.x, a.y - b.y);
+}
+
+type StarPointer = { x: number; y: number };
+type StarGesture =
+  | { kind: 'pending'; x: number; y: number; ox: number; oy: number; starId?: number }
+  | { kind: 'pan'; x: number; y: number; ox: number; oy: number }
+  | { kind: 'pinch'; startDist: number; startZoom: number; startPan: { x: number; y: number }; startMid: StarPointer; moved: boolean };
 
 type ObserveMode = 'none' | 'weight' | 'topic' | 'who' | 'recent';
 type TelescopeStep = 'menu' | 'topic' | 'who' | 'year';
@@ -71,11 +87,17 @@ export function MemoryScreen() {
   const [replayPct, setReplayPct] = useState(100);
   const [rippleId, setRippleId] = useState<number | null>(null);
   const [starPan, setStarPan] = useState({ x: 0, y: 0 });
-  const starGestureRef = useRef<
-    | { kind: 'pending'; x: number; y: number; ox: number; oy: number; starId?: number }
-    | { kind: 'pan'; x: number; y: number; ox: number; oy: number }
-    | null
-  >(null);
+  const starGestureRef = useRef<StarGesture | null>(null);
+  const starPointersRef = useRef(new Map<number, StarPointer>());
+  const zoomRef = useRef(1);
+  const starPanRef = useRef({ x: 0, y: 0 });
+
+  useEffect(() => {
+    zoomRef.current = zoom;
+  }, [zoom]);
+  useEffect(() => {
+    starPanRef.current = starPan;
+  }, [starPan]);
 
   useEffect(() => {
     const onResize = () => setIsDesktop(window.innerWidth >= 900);
@@ -130,14 +152,24 @@ export function MemoryScreen() {
         : [...s, { type: 'tag', value: tag }],
     );
   }
+  function removeTag(tag: string) {
+    setChips((s) => s.filter((c) => !(c.type === 'tag' && c.value === tag)));
+  }
   function addWhoChip(who: string) {
     setChips((s) => (s.some((c) => c.type === 'who' && c.value === who) ? s : [...s, { type: 'who', value: who }]));
+  }
+  function removeWho(who: string) {
+    setChips((s) => s.filter((c) => !(c.type === 'who' && c.value === who)));
   }
   function clearFilters() {
     setChips([]);
     setFState('all');
     setFTopic('all');
   }
+
+  const hasFacetFilters = fState !== 'all' || fTopic !== 'all' || chips.length > 0;
+  const activeStateLabel = fState !== 'all' ? STATE_LABELS.find(([k]) => k === fState)?.[1] : null;
+  const activeTopicMeta = fTopic !== 'all' ? topicByKey.get(fTopic) : null;
 
   // ── search suggestions ──
   const q = query.trim();
@@ -463,19 +495,60 @@ export function MemoryScreen() {
     y: +(seeded(i + 50) * 94 + 3).toFixed(1),
     o: +(0.08 + seeded(i + 90) * 0.28).toFixed(2),
   }));
-  const zoomIn = () => setZoom((z) => Math.min(2.5, +(z + 0.25).toFixed(2)));
-  const zoomOut = () => setZoom((z) => Math.max(1, +(z - 0.25).toFixed(2)));
+  const zoomIn = () => setZoom((z) => clampStarZoom(z + 0.25));
+  const zoomOut = () => setZoom((z) => clampStarZoom(z - 0.25));
+
+  function beginStarPinch() {
+    const pts = [...starPointersRef.current.values()].slice(0, 2);
+    if (pts.length < 2) return;
+    const dist = Math.max(pointerDist(pts[0], pts[1]), 24);
+    starGestureRef.current = {
+      kind: 'pinch',
+      startDist: dist,
+      startZoom: zoomRef.current,
+      startPan: { ...starPanRef.current },
+      startMid: { x: (pts[0].x + pts[1].x) / 2, y: (pts[0].y + pts[1].y) / 2 },
+      moved: false,
+    };
+  }
 
   function onStarPointerDown(e: ReactPointerEvent<HTMLDivElement>) {
+    starPointersRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    (e.currentTarget as HTMLDivElement).setPointerCapture(e.pointerId);
+    if (starPointersRef.current.size >= 2) {
+      beginStarPinch();
+      return;
+    }
     const starNode = (e.target as HTMLElement).closest('[data-star-node]');
     const starId = starNode ? Number((starNode as HTMLElement).dataset.starId) : undefined;
     starGestureRef.current = { kind: 'pending', x: e.clientX, y: e.clientY, ox: starPan.x, oy: starPan.y, starId };
-    (e.currentTarget as HTMLDivElement).setPointerCapture(e.pointerId);
   }
 
   function onStarPointerMove(e: ReactPointerEvent<HTMLDivElement>) {
+    if (!starPointersRef.current.has(e.pointerId)) return;
+    starPointersRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+
+    if (starPointersRef.current.size >= 2) {
+      if (starGestureRef.current?.kind !== 'pinch') beginStarPinch();
+      const pinch = starGestureRef.current;
+      if (pinch?.kind !== 'pinch') return;
+      const pts = [...starPointersRef.current.values()].slice(0, 2);
+      const dist = Math.max(pointerDist(pts[0], pts[1]), 24);
+      const mid = { x: (pts[0].x + pts[1].x) / 2, y: (pts[0].y + pts[1].y) / 2 };
+      const scale = dist / pinch.startDist;
+      if (Math.abs(scale - 1) > 0.02 || Math.hypot(mid.x - pinch.startMid.x, mid.y - pinch.startMid.y) > 6) {
+        pinch.moved = true;
+      }
+      setZoom(clampStarZoom(pinch.startZoom * scale));
+      setStarPan({
+        x: pinch.startPan.x + (mid.x - pinch.startMid.x),
+        y: pinch.startPan.y + (mid.y - pinch.startMid.y),
+      });
+      return;
+    }
+
     const g = starGestureRef.current;
-    if (!g) return;
+    if (!g || g.kind === 'pinch') return;
     const dx = e.clientX - g.x;
     const dy = e.clientY - g.y;
     if (g.kind === 'pending') {
@@ -490,15 +563,27 @@ export function MemoryScreen() {
 
   function onStarPointerUp(e: ReactPointerEvent<HTMLDivElement>) {
     const g = starGestureRef.current;
-    if (g?.kind === 'pending' && g.starId) {
-      starClick(g.starId);
-    }
-    starGestureRef.current = null;
+    starPointersRef.current.delete(e.pointerId);
     try {
       (e.currentTarget as HTMLDivElement).releasePointerCapture(e.pointerId);
     } catch {
       /* already released */
     }
+
+    if (starPointersRef.current.size >= 2) {
+      beginStarPinch();
+      return;
+    }
+
+    if (starPointersRef.current.size === 1) {
+      starGestureRef.current = null;
+      return;
+    }
+
+    if (g?.kind === 'pending' && g.starId !== undefined && !Number.isNaN(g.starId)) {
+      starClick(g.starId);
+    }
+    starGestureRef.current = null;
   }
 
   // ── drawer ──
@@ -864,7 +949,7 @@ export function MemoryScreen() {
             <span onClick={zoomOut} style={{ cursor: 'pointer', width: 22, height: 22, borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'rgba(255,255,255,0.75)', fontSize: 15, flexShrink: 0, border: '1px solid rgba(255,255,255,0.2)' }}>
               −
             </span>
-            <input type="range" min={1} max={2.5} step={0.1} value={zoom} onChange={(e) => setZoom(parseFloat(e.target.value))} style={{ flex: 1, height: 3 }} />
+            <input type="range" min={STAR_ZOOM_MIN} max={STAR_ZOOM_MAX} step={0.1} value={zoom} onChange={(e) => setZoom(clampStarZoom(parseFloat(e.target.value)))} style={{ flex: 1, height: 3 }} />
             <span onClick={zoomIn} style={{ cursor: 'pointer', width: 22, height: 22, borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'rgba(255,255,255,0.75)', fontSize: 13, flexShrink: 0, border: '1px solid rgba(255,255,255,0.2)' }}>
               ＋
             </span>
@@ -1257,20 +1342,69 @@ export function MemoryScreen() {
         <span style={{ marginLeft: 'auto', fontFamily: "'Bodoni Moda',serif", fontSize: 12, letterSpacing: 2, color: 'var(--color-text-faint)' }}>{entries.length} memories</span>
       </div>
 
-      {/* search */}
+      {/* search + active filters */}
       <div style={{ position: 'relative', zIndex: 40 }}>
-        <Card style={{ display: 'flex', alignItems: 'center', gap: 10, borderRadius: 999, padding: '12px 18px', boxShadow: 'inset 0 2px 6px rgba(183,110,121,0.08), 0 6px 18px rgba(183,110,121,0.08)' }}>
+        <Card style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', borderRadius: 999, padding: '10px 16px', boxShadow: 'inset 0 2px 6px rgba(183,110,121,0.08), 0 6px 18px rgba(183,110,121,0.08)' }}>
           <svg viewBox="0 0 24 24" style={{ width: 17, height: 17, flexShrink: 0 }} fill="none" stroke="#B9A8A2" strokeWidth={2} strokeLinecap="round">
             <circle cx={11} cy={11} r={7} />
             <path d="M20 20l-3.5-3.5" />
           </svg>
+          {activeStateLabel && (
+            <span
+              onClick={() => setFState('all')}
+              style={{ cursor: 'pointer', flexShrink: 0, display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 11, letterSpacing: 1, borderRadius: 999, padding: '4px 10px', background: 'rgba(183,110,121,0.12)', color: '#9C3B4A', border: '1px solid rgba(183,110,121,0.35)' }}
+            >
+              {activeStateLabel}
+              <span style={{ fontSize: 12, opacity: 0.7 }}>×</span>
+            </span>
+          )}
+          {activeTopicMeta && (
+            <span
+              onClick={() => setFTopic('all')}
+              style={{ cursor: 'pointer', flexShrink: 0, display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 11, letterSpacing: 1, borderRadius: 999, padding: '4px 10px', background: 'rgba(183,110,121,0.12)', color: '#9C3B4A', border: '1px solid rgba(183,110,121,0.35)' }}
+            >
+              {activeTopicMeta.emoji} {activeTopicMeta.name}
+              <span style={{ fontSize: 12, opacity: 0.7 }}>×</span>
+            </span>
+          )}
+          {tagChips.map((c) => {
+            const col = tagColor(c.value);
+            return (
+              <span
+                key={`tag-${c.value}`}
+                onClick={() => removeTag(c.value)}
+                style={{ cursor: 'pointer', flexShrink: 0, display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 11, letterSpacing: 1, borderRadius: 10, padding: '4px 10px', background: col.bg, color: col.color, border: `1px solid ${col.color}`, fontWeight: 600 }}
+              >
+                #{c.value}
+                <span style={{ fontSize: 12, opacity: 0.75 }}>×</span>
+              </span>
+            );
+          })}
+          {whoChips.map((c) => (
+            <span
+              key={`who-${c.value}`}
+              onClick={() => removeWho(c.value)}
+              style={{ cursor: 'pointer', flexShrink: 0, display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 11, letterSpacing: 1, borderRadius: 999, padding: '4px 10px', background: '#F3EBFF', color: '#7A6A9A', border: '1px solid rgba(122,106,154,0.35)' }}
+            >
+              {c.value}
+              <span style={{ fontSize: 12, opacity: 0.75 }}>×</span>
+            </span>
+          ))}
           <input
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder="搜索内容、标签、人物、主题…"
+            placeholder={hasFacetFilters ? '继续搜索…' : '搜索内容、标签、人物、主题…'}
             className="memory-search-input"
-            style={{ flex: 1, border: 'none', background: 'transparent', outline: 'none', fontFamily: "'Noto Serif SC',serif", fontSize: 15, color: '#4A3F3C', minWidth: 0 }}
+            style={{ flex: '1 1 120px', border: 'none', background: 'transparent', outline: 'none', fontFamily: "'Noto Serif SC',serif", fontSize: 15, color: '#4A3F3C', minWidth: 88 }}
           />
+          {hasFacetFilters && (
+            <span
+              onClick={clearFilters}
+              style={{ cursor: 'pointer', flexShrink: 0, fontSize: 11, letterSpacing: 1, color: '#B76E79', padding: '4px 2px', whiteSpace: 'nowrap' }}
+            >
+              清除筛选
+            </span>
+          )}
           {q.length > 0 && (
             <span
               onClick={() => setQuery('')}
