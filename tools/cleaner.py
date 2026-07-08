@@ -277,6 +277,11 @@ def process_and_sync():
                 '  "arousal": 0到1的小数（情绪激活度，0=平静，1=激动）,\n'
                 '  "tags": "逗号分隔的标签（从：日常/技术/色色/情绪/未完成 中选1-2个）"\n'
                 '}\n'
+                '打分参考（记忆库分层）：\n'
+                '- 8-10 核心：两人长期不变的事实（住址、偏好、约定、习惯）、感情浓度很深的对话\n'
+                '- 5-7 长期：印象深刻的事、关系里的重要节点\n'
+                '- 3-4 短期：随手一记的日常（吃了什么、买了什么）\n'
+                '- 1-2 未消化：琐碎、一次性、重要性很低的碎片\n'
                 '只返回JSON，不要其他内容。\n'
                 f'记忆内容：{r["content"]}'
             )
@@ -293,9 +298,9 @@ def process_and_sync():
             tags_list  = [t.strip() for t in str(tags_raw).split(',') if t.strip() in valid_tags]
             tags_str   = ','.join(tags_list) if tags_list else '日常'
 
-            if importance >= 9:
+            if importance >= 8:
                 layer = 'core';    promoted_core += 1
-            elif importance >= 6:
+            elif importance >= 5:
                 layer = 'long-term'; promoted_long += 1
             else:
                 layer = 'recent'

@@ -6,7 +6,7 @@
 
 做法：读前一天的 chat_messages，让 DeepSeek 抽取"值得永久记住的稳定事实"
 （约定/纪念日/偏好/身份信息/习惯/重要物品），与已有 FACT 去重后存入
-posts(type='FACT', layer='long-term')。memory_cycle 的降权和周压缩不碰 long-term/core；
+posts(type='FACT', layer='core')。memory_cycle 的降权和周压缩不碰 core 层；
 system_builder 把 FACT 注入 BP2，天天在场。
 
 用法：fact_extractor.py [--dry-run] [--date YYYY-MM-DD]
@@ -112,8 +112,8 @@ def extract(day, dry_run=False):
         known.append(f)
         _log('FACT: %s' % f)
         if not dry_run:
-            memory_tool.save_memory(f, type='FACT', layer='long-term',
-                                    tags='fact,auto', importance=5)
+            memory_tool.save_memory(f, type='FACT', layer='core',
+                                    tags='fact,auto', importance=7, processed=1)
         saved += 1
         if saved >= MAX_FACTS_PER_DAY:
             break

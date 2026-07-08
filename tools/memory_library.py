@@ -3,11 +3,71 @@ import re
 from collections import defaultdict
 
 from tools import summary_title
-from tools.memory_tool import is_near_duplicate, normalize_content
+from tools.memory_tool import is_near_duplicate, normalize_content, _recall_promote_threshold
 
 LIBRARY_TYPES = ('MEMORY', 'DIARY', 'FACT', 'THOUGHT', 'DREAM', 'DAILY_SUMMARY')
 
-# Optional emoji/name hints — unknown tags and types still get dynamic topics.
+# 被召回注入 prompt 达到此次数 → 展示为「长期」（可用 config_store 覆盖）
+RECALL_PROMOTE_LONG = 3
+
+
+def _row_int(row, key, default=0):
+    try:
+        if key not in row.keys():
+            return default
+        v = row[key]
+        return default if v is None else int(v)
+    except Exception:
+        return default
+
+
+def _post_weight(row):
+    """Map DB → UI weight 1–5，对应：未消化 / 短期 / 长期 / 核心。
+
+    核心：两人不变的事实（FACT、偏好/约定）+ 感情浓度深的对话（layer=core / 高 importance+情绪）
+    长期：印象深刻的事；或 recall_count ≥ RECALL_PROMOTE_LONG（被经常想起）
+    短期：已消化、分量不重的随手记（晚饭、买了裙子）
+    未消化：processed=0 尚未夜巡打分，或已打分但 importance≤2 的碎屑
+    """
+    processed = _row_int(row, 'processed', 0)
+    importance = _row_int(row, 'importance', 0)
+    recall = _row_int(row, 'recall_count', 0)
+    pinned = _row_int(row, 'pinned', 0)
+    layer = (row['layer'] or 'recent').strip()
+    ptype = (row['type'] or 'MEMORY').strip()
+    tags = (row['tags'] or '').lower()
+
+    if pinned:
+        return 5
+
+    if not processed:
+        return 1
+
+    if importance <= 2 and ptype not in ('FACT',) and recall < RECALL_PROMOTE_LONG:
+        if layer not in ('core', 'long-term'):
+            return 1
+
+    if ptype == 'FACT':
+        return 5
+    if layer == 'core' and importance >= 6:
+        return 5
+    if importance >= 9:
+        return 5
+    if importance >= 8 and ('情绪' in tags or '色色' in tags):
+        return 5
+
+    if recall >= _recall_promote_threshold():
+        return 4
+    if layer in ('long', 'long-term'):
+        return 4
+    if importance >= 6:
+        return 4
+    if ptype == 'DAILY_SUMMARY':
+        return 4
+
+    return 2
+
+
 TAG_HINTS = {
     '日常': {'emoji': '🍞', 'name': '日常', 'desc': '账目、天气、日常琐事与随口一提的小事。'},
     '情绪': {'emoji': '🌙', 'name': '情绪与陪伴', 'desc': '心情、低气压、亲密对话与彼此照护。'},
@@ -64,39 +124,6 @@ def _title_from_content(content):
     return line or '未命名记忆'
 
 
-def _post_weight(row):
-    """Map DB fields → UI weight 1–5 (inbox / short / long / core).
-
-    Target distribution: core ≪ long ≤ short ≈ inbox.
-    - 5 core: pinned, or layer=core with importance≥9, or importance≥10
-    - 4 long: long-term layer, FACT, DAILY_SUMMARY, soft-core (layer=core imp<9)
-    - 2–3 short: diary / chat memory / thought / dream (recent, normal importance)
-    - 1 inbox: unprocessed fragments (importance 0, not typed content)
-    """
-    layer = (row['layer'] or 'recent').strip()
-    importance = int(row['importance'] or 0)
-    pinned = int(row['pinned'] or 0)
-    ptype = (row['type'] or 'MEMORY').strip()
-
-    if pinned or importance >= 10:
-        return 5
-    if layer == 'core' and importance >= 9:
-        return 5
-    if ptype in ('FACT', 'DAILY_SUMMARY'):
-        return 3
-    if layer in ('long', 'long-term'):
-        return 4
-    if layer == 'core':
-        return 4
-    if importance >= 8:
-        return 4
-    if ptype in ('DIARY', 'MEMORY', 'THOUGHT', 'DREAM'):
-        return 3 if importance >= 5 else 2
-    if importance >= 2:
-        return 2
-    return 1
-
-
 def _topic_key_for_row(row, tags):
     if tags:
         return f'tag-{_slug(tags[0])}'
@@ -149,8 +176,11 @@ def build_memory_library(conn, limit=500):
     placeholders = ','.join('?' * len(LIBRARY_TYPES))
     post_cols = {r[1] for r in conn.execute("PRAGMA table_info(posts)").fetchall()}
     summary_expr = 'summary_title' if 'summary_title' in post_cols else "'' AS summary_title"
+    proc_expr = 'COALESCE(processed, 0) AS processed' if 'processed' in post_cols else '1 AS processed'
+    recall_expr = 'COALESCE(recall_count, 0) AS recall_count' if 'recall_count' in post_cols else '0 AS recall_count'
     rows = conn.execute(
-        f"""SELECT id, type, content, author, created_at, pinned, tags, layer, importance, {summary_expr}
+        f"""SELECT id, type, content, author, created_at, pinned, tags, layer, importance,
+                   {summary_expr}, {proc_expr}, {recall_expr}
             FROM posts
             WHERE type IN ({placeholders}) AND COALESCE(resolved, 0) = 0
             ORDER BY created_at DESC, id DESC

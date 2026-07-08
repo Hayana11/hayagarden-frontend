@@ -12,6 +12,7 @@ from tools import summary_title
 DB_PATH = '/opt/frontend/memories.db'
 
 VALID_LAYERS = ('core', 'long-term', 'recent')
+RECALL_PROMOTE_LONG = 3
 _DEDUP_TYPES = frozenset(('FACT', 'MEMORY', 'DIARY', 'THOUGHT', 'DAILY_SUMMARY'))
 
 
@@ -77,13 +78,20 @@ def _db():
 
 
 def save_memory(content, type='MEMORY', author='fyodor', layer='recent',
-                tags='', importance=0, pinned=0, created_at=None):
-    """统一写入口。created_at 传 None 用表默认（东八现在）。返回新 id。"""
+                tags='', importance=0, pinned=0, created_at=None, processed=None):
+    """统一写入口。created_at 传 None 用表默认（东八现在）。返回新 id。
+
+    processed=None → 默认 0（待夜巡判定）；FACT 抽取等可传 1。
+    """
     content = (content or '').strip()
     if not content:
         return None
     if layer not in VALID_LAYERS:
         layer = 'recent'
+    if processed is None:
+        processed = 1 if type == 'FACT' else 0
+    else:
+        processed = int(processed)
     conn = _db()
     dup_id = find_duplicate_id(conn, content, type)
     if dup_id is not None:
@@ -91,44 +99,59 @@ def save_memory(content, type='MEMORY', author='fyodor', layer='recent',
         return dup_id
     post_cols = {r[1] for r in conn.execute("PRAGMA table_info(posts)").fetchall()}
     has_summary_title = 'summary_title' in post_cols
+    has_processed = 'processed' in post_cols
     gen_title = summary_title.generate_summary_title(content)
+    cols = ['type', 'content', 'author', 'layer', 'tags', 'importance', 'pinned']
+    vals = [type, content, author, layer, tags, int(importance), int(pinned)]
+    if has_processed:
+        cols.append('processed')
+        vals.append(processed)
     if created_at:
-        if has_summary_title:
-            cur = conn.execute(
-                "INSERT INTO posts (type, content, author, layer, tags, importance, pinned, created_at, summary_title) "
-                "VALUES (?,?,?,?,?,?,?,?,?)",
-                (type, content, author, layer, tags, int(importance), int(pinned), created_at, gen_title))
-        else:
-            cur = conn.execute(
-                "INSERT INTO posts (type, content, author, layer, tags, importance, pinned, created_at) "
-                "VALUES (?,?,?,?,?,?,?,?)",
-                (type, content, author, layer, tags, int(importance), int(pinned), created_at))
-    else:
-        if has_summary_title:
-            cur = conn.execute(
-                "INSERT INTO posts (type, content, author, layer, tags, importance, pinned, summary_title) "
-                "VALUES (?,?,?,?,?,?,?,?)",
-                (type, content, author, layer, tags, int(importance), int(pinned), gen_title))
-        else:
-            cur = conn.execute(
-                "INSERT INTO posts (type, content, author, layer, tags, importance, pinned) "
-                "VALUES (?,?,?,?,?,?,?)",
-                (type, content, author, layer, tags, int(importance), int(pinned)))
+        cols.append('created_at')
+        vals.append(created_at)
+    if has_summary_title:
+        cols.append('summary_title')
+        vals.append(gen_title)
+    placeholders = ','.join('?' * len(cols))
+    cur = conn.execute(
+        f"INSERT INTO posts ({','.join(cols)}) VALUES ({placeholders})",
+        vals,
+    )
     conn.commit()
     new_id = cur.lastrowid
     conn.close()
     return new_id
 
 
+def _recall_promote_threshold():
+    try:
+        import config_store as cs
+        return cs.get_int('RECALL_PROMOTE_LONG', RECALL_PROMOTE_LONG)
+    except Exception:
+        return RECALL_PROMOTE_LONG
+
+
 def touch_memories(ids):
     """召回加热：这些记忆刚被注入了 prompt。kiwi-mem 的定义——被写进上下文才算真的被想起。"""
     if not ids:
         return
+    threshold = _recall_promote_threshold()
     conn = _db()
     conn.executemany(
         "UPDATE posts SET recall_count = COALESCE(recall_count,0) + 1, "
         "last_recalled_at = datetime('now','+8 hours') WHERE id = ?",
         [(i,) for i in ids])
+    for mid in ids:
+        row = conn.execute(
+            "SELECT recall_count, layer FROM posts WHERE id=?", (mid,)).fetchone()
+        if not row:
+            continue
+        rc = int(row['recall_count'] or 0)
+        layer = (row['layer'] or 'recent').strip()
+        if rc >= threshold and layer == 'recent':
+            conn.execute(
+                "UPDATE posts SET layer='long-term' WHERE id=? AND layer='recent'",
+                (mid,))
     conn.commit()
     conn.close()
 
