@@ -47,9 +47,9 @@ def _post_weight(row):
         if layer not in ('core', 'long-term'):
             return 1
 
-    if ptype == 'FACT':
+    if ptype == 'FACT' and importance >= 7:
         return 5
-    if layer == 'core' and importance >= 6:
+    if layer == 'core' and importance >= 8:
         return 5
     if importance >= 9:
         return 5
