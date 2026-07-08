@@ -3,6 +3,7 @@ import re
 from collections import defaultdict
 
 from tools import summary_title
+from tools.memory_tool import is_near_duplicate, normalize_content
 
 LIBRARY_TYPES = ('MEMORY', 'DIARY', 'FACT', 'THOUGHT', 'DREAM', 'DAILY_SUMMARY')
 
@@ -117,6 +118,19 @@ def _ai_blurb(name, entries):
     return f'{span}共 {len(entries)} 条记忆' + (f'，其中 {core_n} 条是核心级。' if core_n else '。')
 
 
+def _dedupe_entries(entries):
+    """展示层折叠语义重复项，保留较新的一条（entries 已按时间倒序）。"""
+    kept, norms = [], []
+    for e in entries:
+        norm = normalize_content(e.get('content', ''))
+        if norm and any(is_near_duplicate(norm, n) for n in norms):
+            continue
+        kept.append(e)
+        if norm:
+            norms.append(norm)
+    return kept
+
+
 def build_memory_library(conn, limit=500):
     placeholders = ','.join('?' * len(LIBRARY_TYPES))
     post_cols = {r[1] for r in conn.execute("PRAGMA table_info(posts)").fetchall()}
@@ -164,6 +178,9 @@ def build_memory_library(conn, limit=500):
         }
         entries.append(entry)
         assoc_by_id[entry['id']] = set(assocs)
+
+    entries = _dedupe_entries(entries)
+    assoc_by_id = {e['id']: assoc_by_id.get(e['id'], set()) for e in entries}
 
     for a in entries:
         shared = []
