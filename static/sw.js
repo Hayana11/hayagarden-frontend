@@ -1,5 +1,5 @@
-const CACHE = 'home-v40';
-const PRECACHE = ['/dash', '/chat', '/gallery', '/calendar', '/read', '/board', '/manifest.json', '/icon-192.png', '/icon-512.png'];
+const CACHE = 'home-v44';
+const PRECACHE = ['/chat', '/gallery', '/calendar', '/read', '/board', '/manifest.json', '/icon-192.png', '/icon-512.png'];
 
 self.addEventListener('install', e => {
   e.waitUntil(
@@ -22,7 +22,8 @@ self.addEventListener('fetch', e => {
     e.request.mode === 'navigate' ||
     e.request.method !== 'GET' ||
     url.pathname.startsWith('/api') ||
-    url.pathname.startsWith('/mcp')
+    url.pathname.startsWith('/mcp') ||
+    url.pathname.startsWith('/dash')
   ) {
     return;
   }

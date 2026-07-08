@@ -46,6 +46,9 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,'PingFang 
 .msg-ai{background:var(--card);border:.5px solid var(--border);align-self:flex-start;}
 .msg-ai pre{background:var(--code-bg);border-radius:8px;padding:10px 12px;margin:8px 0;font-size:12px;overflow-x:auto;white-space:pre-wrap;word-break:break-all;font-family:'SF Mono','Fira Code',monospace;}
 .msg-ai code{background:var(--code-bg);padding:1px 5px;border-radius:4px;font-size:12px;font-family:'SF Mono','Fira Code',monospace;}
+.tool-log{margin-top:8px;border-top:.5px dashed var(--border);padding-top:8px;}
+.tool-item{font-size:11px;color:var(--muted);margin:4px 0;line-height:1.4;}
+.tool-item b{color:var(--primary);font-weight:600;}
 .copy-btn{display:inline-flex;align-items:center;gap:4px;font-size:11px;color:var(--primary);border:1px solid var(--primary-bg);background:var(--primary-bg);border-radius:6px;padding:3px 8px;cursor:pointer;margin-top:4px;}
 .copy-btn:hover{background:var(--primary);color:#fff;}
 
@@ -74,7 +77,7 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,'PingFang 
 <div class="hd">
   <button class="hd-back" onclick="history.back()"><i class="ti ti-arrow-left"></i></button>
   <span class="hd-title">维修工</span>
-  <span class="hd-sub">DeepSeek · 不花cc额度</span>
+  <span class="hd-sub">DeepSeek · codebase</span>
 </div>
 
 <div class="body" id="body">
@@ -88,13 +91,14 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,'PingFang 
     <div id="status-list">
       <div class="status-row"><span class="status-name">frontend (5050)</span><span class="status-badge badge-checking" id="s-5050">检查中</span></div>
       <div class="status-row"><span class="status-name">frontend-gw (5051)</span><span class="status-badge badge-checking" id="s-5051">检查中</span></div>
+      <div class="status-row"><span class="status-name">codebase-mcp (5056)</span><span class="status-badge badge-checking" id="s-5056">检查中</span></div>
       <div class="status-row"><span class="status-name">ombre-brain (8000)</span><span class="status-badge badge-checking" id="s-8000">检查中</span></div>
     </div>
   </div>
 
   <!-- 对话区 -->
   <div class="chat-area" id="chat">
-    <div class="msg msg-sys">描述故障现象，维修工给出可执行命令</div>
+    <div class="msg msg-sys">描述故障现象，维修工会读代码、搜符号并给出可执行命令</div>
   </div>
 
   <!-- 快捷问题 -->
@@ -118,74 +122,19 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,'PingFang 
 </div>
 
 <script>
-const SYSTEM_CTX = `你是一个专门维修 love-style.xyz 服务器的维修工。以下是这个系统的完整信息：
-
-【系统架构】
-- VPS: Vultr Tokyo, Ubuntu 24
-- 主域名: love-style.xyz (HTTPS, Nginx反向代理)
-- Python 3.11, Node.js 20
-
-【关键服务】
-- frontend (systemd服务): gunicorn跑 /opt/frontend/app.py, 端口5050
-  - 路由: /chat, /api/chat/send, /api/chat/reply, /api/brain/* 等
-- frontend-gw (systemd服务): gunicorn跑 /opt/frontend/gateway.py, 端口5051
-  - 路由: /chat/stream (聊天主路由), /api/gw/*
-  - Nginx: /api/gw/ → 5051, 其余 → 5050
-- ombre-brain: Python服务端口8000, 路径/opt/ombre-brain/
-- discord-mcp: Node服务端口3101
-
-【关键文件】
-- /opt/frontend/app.py (主后端)
-- /opt/frontend/gateway.py (AI网关，聊天流式回复)
-- /opt/frontend/.env (API key, MODEL, GW_PROVIDER等配置)
-- /opt/frontend/static/ (前端文件)
-- /opt/frontend/memories.db (SQLite数据库)
-- /opt/frontend/prompts/persona.md (人格设定)
-
-【.env关键字段】
-ANTHROPIC_API_KEY, API_URL, MODEL, GW_PROVIDER(api_relay或claude_code), CLAUDE_CODE_OAUTH_TOKEN, DEEPSEEK_API_KEY
-
-【常见故障和解法】
-1. 前端不回复/generation lock卡住
-   现象: 发消息没反应，或返回"上一轮回复仍在生成中"
-   解法: systemctl restart frontend-gw && sleep 2 && systemctl is-active frontend-gw
-
-2. 服务crash-loop / orphan进程
-   现象: systemctl is-active显示failed，但端口还有响应
-   诊断: systemctl status frontend-gw | head -20
-   清理: fuser -k 5051/tcp && systemctl restart frontend-gw
-
-3. API 401/403 (认证失败)
-   原因: .env里的API_KEY或CLAUDE_CODE_OAUTH_TOKEN过期
-   诊断: curl -s http://localhost:5051/status | python3 -m json.tool
-   解法: 更新.env里对应的key，然后 systemctl restart frontend-gw
-
-4. API 503 / model_not_found
-   原因: .env里MODEL名称错误，或中转平台不支持该model
-   解法: 编辑/opt/frontend/.env，改MODEL=claude-sonnet-4-6，重启frontend-gw
-
-5. 数据库查最近消息
-   sqlite3 /opt/frontend/memories.db "SELECT id,author,substr(content,1,100) FROM chat_messages ORDER BY id DESC LIMIT 5;"
-
-6. 语法检查
-   Python: python3 -c "import ast; ast.parse(open('/opt/frontend/gateway.py').read()); print('ok')"
-   JS: node --check /opt/frontend/static/chat-ui.js
-
-【重要规则】
-- 改完Python文件一定要ast.parse验证语法
-- 改完JS文件一定要node --check验证
-- 改完systemd服务的文件一定要restart并确认is-active是active
-- /opt/frontend是git仓库，重要改动记得git add && git commit
-
-你的任务：根据用户描述的故障现象，给出诊断判断和具体可执行的命令。
-命令用代码块包裹，每条命令单独一个代码块，方便用户复制。
-语言简洁，直接给结论和命令，不要废话。`;
-
 let history = [];
 let checking = false;
 
+const TOOL_LABELS = {
+  codebase_describe_project:'读架构', codebase_read_file:'读文件',
+  codebase_list_directory:'列目录', codebase_search_code:'搜代码',
+  codebase_find_references:'找引用', codebase_patch:'打补丁',
+  codebase_create_file:'新建文件', codebase_git_view:'git',
+  codebase_explain_history:'考古'
+};
+
 async function checkStatus() {
-  ['5050','5051','8000'].forEach(p => {
+  ['5050','5051','5056','8000'].forEach(p => {
     const el = document.getElementById('s-' + p);
     el.textContent = '检查中';
     el.className = 'status-badge badge-checking';
@@ -194,7 +143,7 @@ async function checkStatus() {
     const r = await fetch('/api/repair/status', {method:'GET'});
     if(r.ok) {
       const d = await r.json();
-      ['5050','5051','8000'].forEach(p => {
+      ['5050','5051','5056','8000'].forEach(p => {
         const el = document.getElementById('s-' + p);
         const ok = d['port_' + p];
         el.textContent = ok ? '正常' : '异常';
@@ -202,7 +151,7 @@ async function checkStatus() {
       });
     }
   } catch(e) {
-    ['5050','5051','8000'].forEach(p => {
+    ['5050','5051','5056','8000'].forEach(p => {
       const el = document.getElementById('s-' + p);
       el.textContent = '无法检查';
       el.className = 'status-badge badge-err';
@@ -215,7 +164,7 @@ function quickAsk(text) {
   send();
 }
 
-function addMsg(role, text) {
+function addMsg(role, text, tools) {
   const chat = document.getElementById('chat');
   const div = document.createElement('div');
   if(role === 'user') {
@@ -223,11 +172,25 @@ function addMsg(role, text) {
     div.textContent = text;
   } else {
     div.className = 'msg msg-ai';
-    div.innerHTML = formatAI(text);
+    div.innerHTML = formatAI(text) + formatTools(tools);
   }
   chat.appendChild(div);
   div.scrollIntoView({behavior:'smooth',block:'end'});
   return div;
+}
+
+function formatTools(tools) {
+  if(!tools || !tools.length) return '';
+  const items = tools.map(function(t){
+    const label = TOOL_LABELS[t.name] || t.name;
+    const hint = (t.args && (t.args.path || t.args.pattern || t.args.symbol || t.args.keyword)) || '';
+    return '<div class="tool-item"><b>' + label + '</b>' + (hint ? ' · ' + esc(hint) : '') + '</div>';
+  }).join('');
+  return '<div class="tool-log">用了 ' + tools.length + ' 个工具' + items + '</div>';
+}
+
+function esc(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 }
 
 function formatAI(text) {
@@ -285,20 +248,20 @@ async function send() {
   showTyping();
 
   try {
-    const resp = await fetch('https://api.deepseek.com/v1/chat/completions', {
+    const resp = await fetch('/api/repair/chat', {
       method: 'POST',
-      headers: {'Content-Type':'application/json', 'Authorization':'Bearer ' + await getKey()},
-      body: JSON.stringify({
-        model: 'deepseek-chat',
-        max_tokens: 800,
-        messages: [{role:'system', content: SYSTEM_CTX}, ...history]
-      })
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({message: text, history: history.slice(0, -1)})
     });
     const d = await resp.json();
-    const reply = (d.choices && d.choices[0] && d.choices[0].message && d.choices[0].message.content) || '维修工暂时没有回应。';
     hideTyping();
-    history.push({role:'assistant', content: reply});
-    addMsg('ai', reply);
+    if(!resp.ok) {
+      addMsg('ai', '维修工出错：' + (d.error || resp.status));
+    } else {
+      const reply = d.reply || '维修工暂时没有回应。';
+      history.push({role:'assistant', content: reply});
+      addMsg('ai', reply, d.tools || []);
+    }
   } catch(e) {
     hideTyping();
     addMsg('ai', '连接失败：' + e.message);
@@ -306,14 +269,6 @@ async function send() {
 
   checking = false;
   document.getElementById('send-btn').disabled = false;
-}
-
-async function getKey() {
-  try {
-    const r = await fetch('/api/repair/key');
-    const d = await r.json();
-    return d.key || '';
-  } catch(e) { return ''; }
 }
 
 checkStatus();

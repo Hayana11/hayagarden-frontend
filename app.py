@@ -537,20 +537,66 @@ def files_delete():
 @app.route('/api/chat/messages', methods=['GET'])
 def get_chat_messages():
     limit = request.args.get('limit', 50, type=int)
-    limit = min(max(limit, 1), 1000)
+    limit = min(max(limit, 1), 200)
     around = request.args.get('around', None, type=int)
+    before = request.args.get('before', None, type=int)
+    after = request.args.get('after', None, type=int)
     conn = get_db()
+    has_more_before = False
+    has_more_after = False
     if around:
         half = limit // 2
-        rows = conn.execute(
+        start_id = max(1, around - half)
+        rows = list(conn.execute(
             "SELECT * FROM chat_messages WHERE id >= ? ORDER BY id ASC LIMIT ?",
-            (max(1, around - half), limit)
-        ).fetchall()
+            (start_id, limit)
+        ).fetchall())
+        if rows:
+            first_id = rows[0]['id']
+            last_id = rows[-1]['id']
+            has_more_before = conn.execute(
+                "SELECT 1 FROM chat_messages WHERE id < ? LIMIT 1",
+                (first_id,)
+            ).fetchone() is not None
+            has_more_after = conn.execute(
+                "SELECT 1 FROM chat_messages WHERE id > ? LIMIT 1",
+                (last_id,)
+            ).fetchone() is not None
+    elif before:
+        rows_desc = list(conn.execute(
+            "SELECT * FROM chat_messages WHERE id < ? ORDER BY id DESC LIMIT ?",
+            (before, limit + 1)
+        ).fetchall())
+        has_more_before = len(rows_desc) > limit
+        rows_desc = rows_desc[:limit]
+        rows = list(reversed(rows_desc))
+        has_more_after = True
+    elif after:
+        rows = list(conn.execute(
+            "SELECT * FROM chat_messages WHERE id > ? ORDER BY id ASC LIMIT ?",
+            (after, limit + 1)
+        ).fetchall())
+        has_more_after = len(rows) > limit
+        rows = rows[:limit]
+        if rows:
+            has_more_before = conn.execute(
+                "SELECT 1 FROM chat_messages WHERE id < ? LIMIT 1",
+                (rows[0]['id'],)
+            ).fetchone() is not None
     else:
-        rows = conn.execute("SELECT * FROM chat_messages ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+        rows = list(conn.execute(
+            "SELECT * FROM chat_messages ORDER BY id DESC LIMIT ?",
+            (limit + 1,)
+        ).fetchall())
+        has_more_before = len(rows) > limit
+        rows = rows[:limit]
         rows = list(reversed(rows))
     conn.close()
-    return jsonify({"messages":[dict(r) for r in rows]})
+    return jsonify({
+        "messages": [dict(r) for r in rows],
+        "has_more_before": bool(has_more_before),
+        "has_more_after": bool(has_more_after),
+    })
 
 @app.route('/api/chat/send', methods=['POST'])
 def send_chat():
@@ -1129,6 +1175,20 @@ def repair_key():
     except: pass
     return jsonify({'key': key})
 
+@app.route('/api/repair/chat', methods=['POST'])
+def repair_chat_api():
+    data = request.get_json() or {}
+    message = (data.get('message') or '').strip()
+    history = data.get('history') or []
+    if not message:
+        return jsonify({'error': 'empty message'}), 400
+    try:
+        from tools.repair_agent import repair_chat
+        reply, tool_log = repair_chat(message, history)
+        return jsonify({'reply': reply, 'tools': tool_log})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
 @app.route('/api/repair/status')
 def repair_status():
     import socket
@@ -1137,7 +1197,12 @@ def repair_status():
             s = socket.create_connection(('127.0.0.1', p), timeout=1)
             s.close(); return True
         except: return False
-    return jsonify({'port_5050': port_open(5050), 'port_5051': port_open(5051), 'port_8000': port_open(8000)})
+    return jsonify({
+        'port_5050': port_open(5050),
+        'port_5051': port_open(5051),
+        'port_5056': port_open(5056),
+        'port_8000': port_open(8000),
+    })
 
 
 # ── EPUB upload & import ──
@@ -1889,6 +1954,161 @@ def geo_latest():
     return jsonify({'ok':True,**dict(row)})
 
 
+# ── 手机监控上报（电量/屏幕时长 + 截屏链路）───────────────────────
+def _init_phone_monitor_tables():
+    conn = get_db()
+    conn.execute("""CREATE TABLE IF NOT EXISTS device_status (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        battery_percent INTEGER,
+        battery_charging INTEGER,
+        charge_type TEXT,
+        temp_c REAL,
+        screen_today_minutes INTEGER,
+        created_at DATETIME DEFAULT (datetime('now','+8 hours'))
+    )""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS screenshot_requests (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        source TEXT DEFAULT 'tool',
+        note TEXT DEFAULT '',
+        status TEXT DEFAULT 'pending',  -- pending / dispatched / done
+        requested_at DATETIME DEFAULT (datetime('now','+8 hours')),
+        dispatched_at DATETIME,
+        completed_at DATETIME
+    )""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS screenshot_captures (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        request_id INTEGER,
+        attachment_id TEXT NOT NULL,
+        capture_ts_ms INTEGER DEFAULT 0,
+        created_at DATETIME DEFAULT (datetime('now','+8 hours'))
+    )""")
+    conn.commit()
+    conn.close()
+
+
+_init_phone_monitor_tables()
+
+
+@app.route('/api/device/report', methods=['POST'])
+def device_report():
+    d = request.get_json() or {}
+    conn = get_db()
+    conn.execute(
+        "INSERT INTO device_status (battery_percent,battery_charging,charge_type,temp_c,screen_today_minutes) "
+        "VALUES (?,?,?,?,?)",
+        (
+            int(d.get('battery_percent', -1) or -1),
+            int(d.get('battery_charging', 0) or 0),
+            str(d.get('charge_type', 'none') or 'none')[:16],
+            float(d.get('temp_c', -1) or -1),
+            int(d.get('screen_today_minutes', -1) or -1),
+        )
+    )
+    conn.commit()
+    conn.close()
+    return jsonify({'ok': True})
+
+
+@app.route('/api/device/latest', methods=['GET'])
+def device_latest():
+    conn = get_db()
+    row = conn.execute(
+        "SELECT *, CAST((julianday('now','+8 hours')-julianday(created_at))*86400 AS INT) AS age_sec "
+        "FROM device_status ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    conn.close()
+    if not row:
+        return jsonify({'ok': False, 'error': 'no data'})
+    d = dict(row)
+    d['age_sec'] = max(0, int(d.get('age_sec') or 0))
+    return jsonify({'ok': True, **d})
+
+
+@app.route('/api/screenshot/request', methods=['POST'])
+def screenshot_request():
+    d = request.get_json() or {}
+    source = (d.get('source') or 'tool').strip()[:32]
+    note = (d.get('note') or '').strip()[:200]
+    conn = get_db()
+    cur = conn.execute(
+        "INSERT INTO screenshot_requests (source,note,status,requested_at) "
+        "VALUES (?,?, 'pending', datetime('now','+8 hours'))",
+        (source, note)
+    )
+    conn.commit()
+    rid = cur.lastrowid
+    conn.close()
+    return jsonify({'ok': True, 'request_id': rid})
+
+
+@app.route('/api/screenshot/upload', methods=['POST'])
+def screenshot_upload():
+    raw = request.get_data() or b''
+    if not raw:
+        return jsonify({'ok': False, 'error': 'empty body'}), 400
+    tmp = '/tmp/screen_' + uuid.uuid4().hex + '.jpg'
+    with open(tmp, 'wb') as f:
+        f.write(raw)
+    try:
+        aid = attachment_store.save(tmp, kind='image', mime='image/jpeg')
+    except Exception as e:
+        try:
+            os.remove(tmp)
+        except Exception:
+            pass
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+    ts = request.headers.get('X-Capture-Ts', '').strip()
+    try:
+        capture_ts_ms = int(ts) if ts else 0
+    except Exception:
+        capture_ts_ms = 0
+
+    conn = get_db()
+    req = conn.execute(
+        "SELECT id FROM screenshot_requests "
+        "WHERE status IN ('pending','dispatched') "
+        "ORDER BY CASE status WHEN 'dispatched' THEN 0 ELSE 1 END, id DESC LIMIT 1"
+    ).fetchone()
+    req_id = int(req['id']) if req else None
+    if req_id:
+        conn.execute(
+            "UPDATE screenshot_requests SET status='done', completed_at=datetime('now','+8 hours') WHERE id=?",
+            (req_id,)
+        )
+    conn.execute(
+        "INSERT INTO screenshot_captures (request_id, attachment_id, capture_ts_ms) VALUES (?,?,?)",
+        (req_id, aid, capture_ts_ms)
+    )
+    conn.commit()
+    conn.close()
+    return jsonify({'ok': True, 'attachment': 'attachment://' + aid, 'request_id': req_id})
+
+
+@app.route('/api/screenshot/latest', methods=['GET'])
+def screenshot_latest():
+    after_req = request.args.get('after_request_id', type=int)
+    conn = get_db()
+    if after_req:
+        row = conn.execute(
+            "SELECT c.*, CAST((julianday('now','+8 hours')-julianday(c.created_at))*86400 AS INT) AS age_sec "
+            "FROM screenshot_captures c WHERE c.request_id >= ? ORDER BY c.id DESC LIMIT 1",
+            (after_req,)
+        ).fetchone()
+    else:
+        row = conn.execute(
+            "SELECT c.*, CAST((julianday('now','+8 hours')-julianday(c.created_at))*86400 AS INT) AS age_sec "
+            "FROM screenshot_captures c ORDER BY c.id DESC LIMIT 1"
+        ).fetchone()
+    conn.close()
+    if not row:
+        return jsonify({'ok': False, 'error': 'no data'})
+    d = dict(row)
+    d['age_sec'] = max(0, int(d.get('age_sec') or 0))
+    d['attachment'] = 'attachment://' + d['attachment_id']
+    return jsonify({'ok': True, **d})
+
+
 # ── 附件间接层：attachment://<id> 的唯一取图入口 ──────────────
 @app.route('/api/attachments/<aid>', methods=['GET'])
 def get_attachment(aid):
@@ -2104,22 +2324,53 @@ _init_wake_tables()
 def pending_notification():
     """供VII app轮询：是否有费奥多尔自主发出的、还没推送过的消息。
     取最新一条未推送的 action='message'，并把所有未推送的一并标记，
-    避免她隔几小时打开时被一堆补发的旧通知刷屏。"""
+    避免她隔几小时打开时被一堆补发的旧通知刷屏。
+    另外复用这个通道下发 command='screenshot' 让手机立刻截一张屏。"""
     conn = get_db()
     row = conn.execute(
         "SELECT id, content, woke_at FROM wake_log "
         "WHERE action='message' AND (notified IS NULL OR notified=0) "
         "ORDER BY id DESC LIMIT 1"
     ).fetchone()
-    if not row:
-        conn.close()
-        return jsonify({'has_message': False})
-    conn.execute(
-        "UPDATE wake_log SET notified=1 WHERE action='message' AND (notified IS NULL OR notified=0)"
-    )
+    if row:
+        conn.execute(
+            "UPDATE wake_log SET notified=1 WHERE action='message' AND (notified IS NULL OR notified=0)"
+        )
+
+    # 手机截屏指令：优先取 pending；若 dispatched 超过 2 分钟还没回传，重试下发一次
+    sreq = conn.execute(
+        "SELECT id FROM screenshot_requests "
+        "WHERE status='pending' "
+        "   OR (status='dispatched' AND dispatched_at < datetime('now','+8 hours','-2 minutes')) "
+        "ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    if sreq:
+        conn.execute(
+            "UPDATE screenshot_requests SET status='dispatched', dispatched_at=datetime('now','+8 hours') "
+            "WHERE id=?",
+            (int(sreq['id']),)
+        )
+
     conn.commit()
     conn.close()
-    return jsonify({'has_message': True, 'content': row['content'], 'woke_at': row['woke_at']})
+
+    if not row and not sreq:
+        return jsonify({'has_message': False})
+
+    payload = {'has_message': bool(row)}
+    if row:
+        payload.update({
+            'id': 'wake-' + str(row['id']),
+            'title': '费奥多尔',
+            'content': row['content'],
+            'woke_at': row['woke_at'],
+        })
+    if sreq:
+        payload.update({
+            'command': 'screenshot',
+            'command_id': 'cap-' + str(int(sreq['id'])),
+        })
+    return jsonify(payload)
 
 # ── Board 留言板 ───────────────────────────────────────────
 @app.route('/board')
