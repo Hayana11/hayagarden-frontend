@@ -44,6 +44,24 @@ def _replace_image_blocks(messages: list) -> list:
     return out
 
 
+def _upgrade_system_cache_ttl(payload: dict, ttl: str) -> None:
+    """Upgrade explicit system cache breakpoints to a longer TTL.
+
+    Mixed TTL rule: longer-lived breakpoints must appear before shorter ones.
+    Our system blocks precede message rolling BP4, so system=1h + messages=5m
+    is valid on providers that truly support 1h cache writes.
+    """
+    sys = payload.get("system")
+    if not isinstance(sys, list):
+        return
+    for block in sys:
+        if not isinstance(block, dict):
+            continue
+        cc = block.get("cache_control")
+        if isinstance(cc, dict) and cc.get("type") == "ephemeral":
+            cc["ttl"] = ttl
+
+
 def adapt_request(payload: dict, headers: dict, caps: dict) -> tuple:
     """
     输入：完整的请求 payload 和 headers
@@ -80,6 +98,9 @@ def adapt_request(payload: dict, headers: dict, caps: dict) -> tuple:
                 for block in content:
                     if isinstance(block, dict):
                         block.pop("cache_control", None)
+
+    elif caps.get("cache_1h"):
+        _upgrade_system_cache_ttl(payload, "1h")
 
     # ── tools ──
     if not caps.get("tools", True):

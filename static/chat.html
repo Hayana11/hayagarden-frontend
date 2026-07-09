@@ -1401,6 +1401,8 @@ function buildCacheInfoHtmlFromData(ci){
   ci = ci || {};
   var read = Number(ci.cache_read||0);
   var created = Number(ci.cache_creation||0);
+  var created5m = Number(ci.cache_creation_5m||0);
+  var created1h = Number(ci.cache_creation_1h||0);
   var input = Number(ci.input_tokens||0);
   var output = Number(ci.output_tokens||0);
   var elapsed = Number(ci.elapsed_sec||0);
@@ -1416,7 +1418,11 @@ function buildCacheInfoHtmlFromData(ci){
     var pct = promptTotal>0 ? Math.round(read/promptTotal*100) : 0;
     pieces.push('<span class="ci-item ci-hit" title="从服务端 prompt cache 读回的 token">缓存命中 '+pct+'% ('+fmtTok(read)+')</span>');
   } else if(created>0){
-    pieces.push('<span class="ci-item ci-build" title="本轮写入服务端 prompt cache，下一轮可能命中">建缓存 '+fmtTok(created)+'</span>');
+    var buildParts = [];
+    if(created1h>0) buildParts.push('1h '+fmtTok(created1h));
+    if(created5m>0) buildParts.push('5m '+fmtTok(created5m));
+    if(!buildParts.length) buildParts.push(fmtTok(created));
+    pieces.push('<span class="ci-item ci-build" title="本轮写入服务端 prompt cache，下一轮可能命中">建缓存 '+buildParts.join(' / ')+'</span>');
   } else if(ci.cache_supported===true){
     pieces.push('<span class="ci-item ci-miss" title="支持缓存，但本轮未读回缓存">缓存未命中</span>');
   }
@@ -2073,7 +2079,7 @@ setInterval(checkBlocked, 15000);
 
 // ── Msg actions & stop ──
 var streamAbort = null;
-var streamState = {cacheRead: 0, cacheCreate: 0, inputTokens: 0, outputTokens: 0, elapsedSec: 0, cacheSupported: null};
+var streamState = {cacheRead: 0, cacheCreate: 0, cacheCreate5m: 0, cacheCreate1h: 0, inputTokens: 0, outputTokens: 0, elapsedSec: 0, cacheSupported: null};
 var _suppressLoadMsgs = false;
 function releaseGenLock(force){
   fetch('/api/gw/chat/cancel',{
@@ -2236,6 +2242,8 @@ function appendCacheInfo(){
   var html = buildCacheInfoHtmlFromData({
     cache_read: streamState.cacheRead,
     cache_creation: streamState.cacheCreate,
+    cache_creation_5m: streamState.cacheCreate5m,
+    cache_creation_1h: streamState.cacheCreate1h,
     input_tokens: streamState.inputTokens,
     output_tokens: streamState.outputTokens,
     elapsed_sec: streamState.elapsedSec,
@@ -2289,7 +2297,7 @@ async function retryStream(){
 }
 
 async function streamReply(){
-  streamState.cacheRead=0; streamState.cacheCreate=0; streamState.inputTokens=0; streamState.outputTokens=0; streamState.elapsedSec=0; streamState.cacheSupported=null;
+  streamState.cacheRead=0; streamState.cacheCreate=0; streamState.cacheCreate5m=0; streamState.cacheCreate1h=0; streamState.inputTokens=0; streamState.outputTokens=0; streamState.elapsedSec=0; streamState.cacheSupported=null;
   window._earlyThinkSummary=null;
   await clearStaleGenLock();
   var ctrl=new AbortController(); streamAbort=ctrl;
@@ -2479,6 +2487,8 @@ async function streamReply(){
         } else if(ev.t==='usage'){
           streamState.cacheRead+=ev.cache_read||0;
           streamState.cacheCreate+=ev.cache_creation||0;
+          streamState.cacheCreate5m+=ev.cache_creation_5m||0;
+          streamState.cacheCreate1h+=ev.cache_creation_1h||0;
           if(ev.input_tokens) streamState.inputTokens=Math.max(streamState.inputTokens,ev.input_tokens);
           if(ev.output_tokens) streamState.outputTokens=Math.max(streamState.outputTokens,ev.output_tokens);
           if(ev.elapsed_sec) streamState.elapsedSec=Math.max(streamState.elapsedSec,ev.elapsed_sec);

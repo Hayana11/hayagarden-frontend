@@ -3480,6 +3480,7 @@ def chat_stream():
             _released = [False]
             _persisted = [False]
             cache_read_total, cache_create_total, input_tokens_total, output_tokens_total = 0, 0, 0, 0
+            cache_create_5m_total, cache_create_1h_total = 0, 0
             cache_supported = None
             stream_started_at = time.monotonic()
             think_acc, text_acc, tool_calls_acc = [], [], []
@@ -3494,6 +3495,8 @@ def chat_stream():
                 _ci_payload = {
                     'cache_read': cache_read_total,
                     'cache_creation': cache_create_total,
+                    'cache_creation_5m': cache_create_5m_total,
+                    'cache_creation_1h': cache_create_1h_total,
                     'input_tokens': input_tokens_total,
                     'output_tokens': output_tokens_total,
                     'elapsed_sec': round(max(0.0, time.monotonic() - stream_started_at), 3),
@@ -3566,6 +3569,9 @@ def chat_stream():
                             _u = (ev.get('message') or {}).get('usage') or {}
                             cache_read_total  += _u.get('cache_read_input_tokens', 0) or 0
                             cache_create_total += _u.get('cache_creation_input_tokens', 0) or 0
+                            _cc = _u.get('cache_creation') or {}
+                            cache_create_5m_total += _cc.get('ephemeral_5m_input_tokens', 0) or 0
+                            cache_create_1h_total += _cc.get('ephemeral_1h_input_tokens', 0) or 0
                             input_tokens_total = max(input_tokens_total, _u.get('input_tokens', 0) or 0)
                             output_tokens_total = max(output_tokens_total, _u.get('output_tokens', 0) or 0)
                         elif et == 'content_block_start':
@@ -3617,6 +3623,9 @@ def chat_stream():
                             if _du:
                                 cache_read_total += _du.get('cache_read_input_tokens', 0) or 0
                                 cache_create_total += _du.get('cache_creation_input_tokens', 0) or 0
+                                _dcc = _du.get('cache_creation') or {}
+                                cache_create_5m_total += _dcc.get('ephemeral_5m_input_tokens', 0) or 0
+                                cache_create_1h_total += _dcc.get('ephemeral_1h_input_tokens', 0) or 0
                                 input_tokens_total = max(input_tokens_total, _du.get('input_tokens', 0) or 0)
                                 output_tokens_total = max(output_tokens_total, _du.get('output_tokens', 0) or 0)
                             stop_reason = (ev.get('delta', {}) or {}).get('stop_reason') or stop_reason
@@ -3685,7 +3694,7 @@ def chat_stream():
                     yield 'data: ' + json.dumps({'t': 'trace_summary', 'd': _ts}) + SSE_END
             if cache_supported is not None or cache_read_total or cache_create_total or input_tokens_total or output_tokens_total:
                 _elapsed_sec = round(max(0.0, time.monotonic() - stream_started_at), 3)
-                yield 'data: ' + json.dumps({'t': 'usage', 'cache_read': cache_read_total, 'cache_creation': cache_create_total, 'input_tokens': input_tokens_total, 'output_tokens': output_tokens_total, 'elapsed_sec': _elapsed_sec, 'cache_supported': cache_supported}) + SSE_END
+                yield 'data: ' + json.dumps({'t': 'usage', 'cache_read': cache_read_total, 'cache_creation': cache_create_total, 'cache_creation_5m': cache_create_5m_total, 'cache_creation_1h': cache_create_1h_total, 'input_tokens': input_tokens_total, 'output_tokens': output_tokens_total, 'elapsed_sec': _elapsed_sec, 'cache_supported': cache_supported}) + SSE_END
             yield 'data: ' + json.dumps({'t': 'done', 'ok': bool(text)}) + SSE_END
         except urllib.error.HTTPError as e:
             _ecode = e.code

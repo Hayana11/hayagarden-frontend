@@ -26,6 +26,7 @@ CAPABILITIES = {
     "official": {
         "thinking": True,
         "cache": True,
+        "cache_1h": True,
         "tools": True,
         "vision": True,   # 官方原生模型自带视觉能力
         "stream": True,
@@ -35,6 +36,7 @@ CAPABILITIES = {
     "guagua": {
         "thinking": True,
         "cache": True,
+        "cache_1h": False, # 未复测 1h；先按 5m，避免把余额打在高价写入上
         "tools": True,
         "vision": True,   # 未单独实测，按"能力较全的中转站代理官方模型"推测
         "stream": True,
@@ -44,6 +46,7 @@ CAPABILITIES = {
     "68886868": {
         "thinking": True,   # 实测：显式传 thinking 参数会返回针对性内容，不是空 block
         "cache": False,     # 未验证过带 cache_control 是否安全，维持原判
+        "cache_1h": False,
         "tools": True,
         "vision": True,     # 实测：发真实图片能准确描述出内容，不是瞎猜
         "stream": True,
@@ -53,6 +56,7 @@ CAPABILITIES = {
     "treegpt": {
         "thinking": True,   # 实测：1024+ budget 可返回原生 thinking block
         "cache": True,      # 实测：cache_control + metadata.user_id 可读回 cache_read_input_tokens
+        "cache_1h": False,  # 实测 ttl=1h 仍写入 ephemeral_5m，tree 当前不支持真 1h
         "tools": True,
         "vision": False,  # 未实测图片；先保守关闭，避免假装看图
         "stream": True,
