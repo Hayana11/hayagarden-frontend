@@ -312,7 +312,12 @@ html[data-theme=dark] .tsess{background:rgba(212,165,116,.04);border-left-color:
 .empty-tip{text-align:center;color:var(--muted);padding:60px 20px;font-size:13px;line-height:2.4;}
 
 /* ── Cache info & stream error ── */
-.cache-info{font-size:11px;color:#aaa;margin-top:4px;padding:0 4px;}
+.cache-info{display:flex;align-items:center;gap:7px;flex-wrap:wrap;font-size:10.5px;color:var(--muted);opacity:.68;width:100%;margin-top:3px;padding:0 4px;}
+.cache-info .ci-item{display:inline-flex;align-items:center;gap:3px;white-space:nowrap;}
+.cache-info .ci-hit{color:rgba(86,150,112,.95);}
+.cache-info .ci-build{color:rgba(170,128,72,.95);}
+.cache-info .ci-miss{color:rgba(145,120,160,.9);}
+.cache-info .ci-off{opacity:.72;}
 .stream-err-wrap{padding:10px 14px;color:#c0392b;}
 .stream-err-retry{display:inline-block;margin-top:6px;font-size:12px;cursor:pointer;background:none;border:1px solid #c0392b;color:#c0392b;border-radius:4px;padding:3px 10px;}
 
@@ -1384,6 +1389,40 @@ function toggleThink(btn) {
   }
 }
 
+
+function fmtTok(n){
+  n = Number(n||0);
+  if(!isFinite(n) || n<=0) return '0';
+  if(n >= 1000000) return (n/1000000).toFixed(1).replace(/\.0$/,'') + 'M';
+  if(n >= 1000) return (n/1000).toFixed(1).replace(/\.0$/,'') + 'K';
+  return String(Math.round(n));
+}
+function buildCacheInfoHtmlFromData(ci){
+  ci = ci || {};
+  var read = Number(ci.cache_read||0);
+  var created = Number(ci.cache_creation||0);
+  var input = Number(ci.input_tokens||0);
+  var output = Number(ci.output_tokens||0);
+  var elapsed = Number(ci.elapsed_sec||0);
+  var promptTotal = input + read + created;
+  var pieces = [];
+  if(promptTotal>0) pieces.push('<span class="ci-item" title="本轮输入 token，含缓存读回/写入部分">⇧ '+fmtTok(promptTotal)+' tokens</span>');
+  if(output>0) pieces.push('<span class="ci-item" title="本轮输出 token">⇩ '+fmtTok(output)+' tokens</span>');
+  if(output>0 && elapsed>0) pieces.push('<span class="ci-item" title="输出速度">ϟ '+(output/elapsed).toFixed(1)+' tok/s</span>');
+  if(elapsed>0) pieces.push('<span class="ci-item" title="本轮生成耗时">◷ '+elapsed.toFixed(elapsed<10?1:0)+'s</span>');
+  if(ci.cache_supported===false){
+    pieces.push('<span class="ci-item ci-off" title="当前中转站未稳定返回服务端 prompt cache">无服务端缓存</span>');
+  } else if(read>0){
+    var pct = promptTotal>0 ? Math.round(read/promptTotal*100) : 0;
+    pieces.push('<span class="ci-item ci-hit" title="从服务端 prompt cache 读回的 token">缓存命中 '+pct+'% ('+fmtTok(read)+')</span>');
+  } else if(created>0){
+    pieces.push('<span class="ci-item ci-build" title="本轮写入服务端 prompt cache，下一轮可能命中">建缓存 '+fmtTok(created)+'</span>');
+  } else if(ci.cache_supported===true){
+    pieces.push('<span class="ci-item ci-miss" title="支持缓存，但本轮未读回缓存">缓存未命中</span>');
+  }
+  return pieces.length ? '<div class="cache-info">'+pieces.join(' · ')+'</div>' : '';
+}
+
 // Build message HTML
 function buildHtml(list) {
   window.curMsgList = list;
@@ -1463,16 +1502,7 @@ function buildHtml(list) {
     if(fy && m.cache_info){
       try{
         var ci = JSON.parse(m.cache_info);
-        var hit = (ci.cache_read||0) > 0;
-        var ciText = '';
-        if(ci.cache_supported===false){
-          ciText = '无服务端缓存';
-        } else if(hit){
-          var ciTotal=(ci.input_tokens||0)+(ci.cache_read||0)+(ci.cache_creation||0);
-          ciText = ciTotal>0 ? '命中缓存 '+Math.round(ci.cache_read/ciTotal*100)+'%' : '命中缓存 '+ci.cache_read;
-        } else if(ci.cache_creation){ ciText = '建缓存 '+ci.cache_creation; }
-        else if(ci.cache_supported===true){ ciText = '缓存未命中'; }
-        if(ciText) cacheInfoHtml = '<div class="cache-info">'+ciText+'</div>';
+        cacheInfoHtml = buildCacheInfoHtmlFromData(ci);
       }catch(e){}
     }
 
@@ -2043,7 +2073,7 @@ setInterval(checkBlocked, 15000);
 
 // ── Msg actions & stop ──
 var streamAbort = null;
-var streamState = {cacheRead: 0, cacheCreate: 0, inputTokens: 0, cacheSupported: null};
+var streamState = {cacheRead: 0, cacheCreate: 0, inputTokens: 0, outputTokens: 0, elapsedSec: 0, cacheSupported: null};
 var _suppressLoadMsgs = false;
 function releaseGenLock(force){
   fetch('/api/gw/chat/cancel',{
@@ -2203,17 +2233,15 @@ function appendCacheInfo(){
   if(!rows.length) return;
   var bwrap=rows[rows.length-1].querySelector('.bwrap');
   if(!bwrap) return;
-  var el=document.createElement('div');
-  el.className='cache-info';
-  if(streamState.cacheSupported===false){
-    el.textContent='无服务端缓存';
-  } else if(streamState.cacheRead>0){
-    var total=streamState.inputTokens+streamState.cacheRead+streamState.cacheCreate;
-    el.textContent=total>0?'命中缓存 '+Math.round(streamState.cacheRead/total*100)+'%':'命中缓存 '+streamState.cacheRead;
-  } else if(streamState.cacheCreate>0){ el.textContent='建缓存 '+streamState.cacheCreate; }
-  else if(streamState.cacheSupported===true){ el.textContent='缓存未命中'; }
-  else { el.textContent='缓存状态未知'; }
-  bwrap.appendChild(el);
+  var html = buildCacheInfoHtmlFromData({
+    cache_read: streamState.cacheRead,
+    cache_creation: streamState.cacheCreate,
+    input_tokens: streamState.inputTokens,
+    output_tokens: streamState.outputTokens,
+    elapsed_sec: streamState.elapsedSec,
+    cache_supported: streamState.cacheSupported
+  });
+  if(html) bwrap.insertAdjacentHTML('beforeend', html);
 }
 
 var _wsJobPollTimer=null;
@@ -2261,7 +2289,7 @@ async function retryStream(){
 }
 
 async function streamReply(){
-  streamState.cacheRead=0; streamState.cacheCreate=0; streamState.inputTokens=0; streamState.cacheSupported=null;
+  streamState.cacheRead=0; streamState.cacheCreate=0; streamState.inputTokens=0; streamState.outputTokens=0; streamState.elapsedSec=0; streamState.cacheSupported=null;
   window._earlyThinkSummary=null;
   await clearStaleGenLock();
   var ctrl=new AbortController(); streamAbort=ctrl;
@@ -2452,6 +2480,8 @@ async function streamReply(){
           streamState.cacheRead+=ev.cache_read||0;
           streamState.cacheCreate+=ev.cache_creation||0;
           if(ev.input_tokens) streamState.inputTokens=Math.max(streamState.inputTokens,ev.input_tokens);
+          if(ev.output_tokens) streamState.outputTokens=Math.max(streamState.outputTokens,ev.output_tokens);
+          if(ev.elapsed_sec) streamState.elapsedSec=Math.max(streamState.elapsedSec,ev.elapsed_sec);
           if(ev.cache_supported!==undefined) streamState.cacheSupported=ev.cache_supported;
         } else if(ev.t==='err'){
           ensureLiveRow();

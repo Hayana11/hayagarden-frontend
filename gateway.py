@@ -3479,8 +3479,9 @@ def chat_stream():
             text, thinking = None, None
             _released = [False]
             _persisted = [False]
-            cache_read_total, cache_create_total, input_tokens_total = 0, 0, 0
+            cache_read_total, cache_create_total, input_tokens_total, output_tokens_total = 0, 0, 0, 0
             cache_supported = None
+            stream_started_at = time.monotonic()
             think_acc, text_acc, tool_calls_acc = [], [], []
 
             def _clean_text(raw):
@@ -3494,6 +3495,8 @@ def chat_stream():
                     'cache_read': cache_read_total,
                     'cache_creation': cache_create_total,
                     'input_tokens': input_tokens_total,
+                    'output_tokens': output_tokens_total,
+                    'elapsed_sec': round(max(0.0, time.monotonic() - stream_started_at), 3),
                     'cache_supported': cache_supported,
                 }
                 _ci = json.dumps(_ci_payload, ensure_ascii=False) if (cache_supported is not None or cache_read_total or cache_create_total or input_tokens_total) else ''
@@ -3564,6 +3567,7 @@ def chat_stream():
                             cache_read_total  += _u.get('cache_read_input_tokens', 0) or 0
                             cache_create_total += _u.get('cache_creation_input_tokens', 0) or 0
                             input_tokens_total = max(input_tokens_total, _u.get('input_tokens', 0) or 0)
+                            output_tokens_total = max(output_tokens_total, _u.get('output_tokens', 0) or 0)
                         elif et == 'content_block_start':
                             cb  = ev.get('content_block', {}) or {}
                             cur = {'type': cb.get('type')}
@@ -3614,6 +3618,7 @@ def chat_stream():
                                 cache_read_total += _du.get('cache_read_input_tokens', 0) or 0
                                 cache_create_total += _du.get('cache_creation_input_tokens', 0) or 0
                                 input_tokens_total = max(input_tokens_total, _du.get('input_tokens', 0) or 0)
+                                output_tokens_total = max(output_tokens_total, _du.get('output_tokens', 0) or 0)
                             stop_reason = (ev.get('delta', {}) or {}).get('stop_reason') or stop_reason
                         elif et == 'message_stop':
                             break
@@ -3678,8 +3683,9 @@ def chat_stream():
                 _ts = _summarize_traces_sync(tool_calls_acc)
                 if _ts:
                     yield 'data: ' + json.dumps({'t': 'trace_summary', 'd': _ts}) + SSE_END
-            if cache_supported is not None or cache_read_total or cache_create_total or input_tokens_total:
-                yield 'data: ' + json.dumps({'t': 'usage', 'cache_read': cache_read_total, 'cache_creation': cache_create_total, 'input_tokens': input_tokens_total, 'cache_supported': cache_supported}) + SSE_END
+            if cache_supported is not None or cache_read_total or cache_create_total or input_tokens_total or output_tokens_total:
+                _elapsed_sec = round(max(0.0, time.monotonic() - stream_started_at), 3)
+                yield 'data: ' + json.dumps({'t': 'usage', 'cache_read': cache_read_total, 'cache_creation': cache_create_total, 'input_tokens': input_tokens_total, 'output_tokens': output_tokens_total, 'elapsed_sec': _elapsed_sec, 'cache_supported': cache_supported}) + SSE_END
             yield 'data: ' + json.dumps({'t': 'done', 'ok': bool(text)}) + SSE_END
         except urllib.error.HTTPError as e:
             _ecode = e.code
