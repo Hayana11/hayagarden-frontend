@@ -66,7 +66,8 @@ chat.html send()
 | `/opt/workspace/.jobs/` | 预留（PR 2 ws_job） |
 
 - **模块**：`tools/workspace_agent.py`（文件工具分发）、`tools/workspace_executor.py`（shell，默认 `EXEC_ENABLED=0`）、`tools/relay_sanitize.py`（relay 出站脱敏，接在 `adapt_request()` 之后）。
-- **部署**：`sudo ./scripts/prepare-workspace-sandbox.sh` 创建目录和 `wsandbox` 用户；`systemctl restart frontend-gw`。
+- **部署**：`sudo ./scripts/prepare-workspace-sandbox.sh` 创建目录和 `wsandbox` 用户（`workspace` 组，目录 2770 setgid，文件 660）；`systemctl restart frontend-gw`。
+- **安全**：`EXEC_ENABLED=0` 时 `shell_exec` 与 `ws_diff` 的 git 模式均禁用；git 模式启用时使用 `--no-ext-diff --no-pager` 且忽略全局 git 配置，防 external diff 旁路。
 - **与 workspace_server.py 分离**：白夜工作台（5052/5053）仍是人工运维面板，不承载 agent 主循环；沙箱工具不指向 `/opt/frontend` 生产代码。
 - **脱敏范围**：仅覆盖 `relay.manager` 主聊天/wake/workspace_chat 出站；`gateway._llm_one_liner`、DeepSeek fallback、`tools/repair_agent.py` 等直连 LLM 不在 PR 1 范围。
 - **tools/cc_board_check.py**：cron 夜巡（东八 02:00-08:00 每半小时），board 紧急/需求帖唤醒 CC；失败2次自动补占位回复退出重试（fail_counts 在 /var/log/cc_board_fail_counts）。

@@ -79,7 +79,7 @@ def _spill_to_disk(cmd: str, stdout: str, stderr: str) -> str:
     path = os.path.join(_OUTPUTS_DIR, f"{stamp}-{uuid.uuid4().hex[:6]}.log")
     with open(path, "w", encoding="utf-8", errors="replace") as fh:
         fh.write(f"$ {cmd}\n\n===== STDOUT =====\n{stdout}\n\n===== STDERR =====\n{stderr}\n")
-    os.chmod(path, 0o644)
+    os.chmod(path, 0o660)
     return path
 
 

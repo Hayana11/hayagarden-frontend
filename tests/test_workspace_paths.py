@@ -67,6 +67,12 @@ class WorkspacePathTests(unittest.TestCase):
         result = ex.run_exec("echo hi")
         self.assertIn("exec_disabled", result)
 
+    def test_ws_diff_git_mode_disabled_by_default(self):
+        projects = self.root / "projects"
+        projects.mkdir(parents=True, exist_ok=True)
+        result = self.wa._ws_diff({"path": "projects"})
+        self.assertIn("git_diff_disabled", result)
+
 
 if __name__ == "__main__":
     unittest.main()

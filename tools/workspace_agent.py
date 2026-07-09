@@ -269,14 +269,38 @@ print(json.dumps({'ok': True, 'applied': len(edits), 'files': written}, ensure_a
 _WS_DIFF_CODE = r'''
 import difflib
 import json
+import os
 import subprocess
 from pathlib import Path
 args = json.loads(__import__('sys').stdin.read() or '{}')
 max_chars = int(args.get('max_chars') or 20000)
+git_diff_enabled = bool(args.get('git_diff_enabled', False))
 def cap(text):
     if len(text) > max_chars:
         return text[:max_chars] + '\n... [diff capped, narrow the path]', True
     return text, False
+GIT_SAFE_ENV = {
+    'HOME': os.environ.get('HOME', '/tmp'),
+    'PATH': '/usr/bin:/bin',
+    'GIT_CONFIG_GLOBAL': '/dev/null',
+    'GIT_CONFIG_SYSTEM': '/dev/null',
+    'GIT_TERMINAL_PROMPT': '0',
+}
+GIT_SAFE_PREFIX = [
+    'git',
+    '-c', 'diff.external=',
+    '-c', 'core.pager=cat',
+    '-c', 'pager.diff=false',
+    '-c', 'interactive.diffFilter=',
+]
+def git_run(argv, cwd):
+    return subprocess.run(
+        GIT_SAFE_PREFIX + argv,
+        cwd=cwd,
+        env=GIT_SAFE_ENV,
+        capture_output=True,
+        text=True,
+    )
 a = args.get('a')
 b = args.get('b')
 path = args.get('path')
@@ -294,17 +318,21 @@ if a and b:
                       'truncated': tr}, ensure_ascii=False))
     raise SystemExit(0)
 if path:
+    if not git_diff_enabled:
+        print(json.dumps({'error': 'git_diff_disabled',
+                          'detail': 'git diff is disabled while EXEC_ENABLED=0; use a+b two-file compare instead'},
+                         ensure_ascii=False))
+        raise SystemExit(0)
     p = Path(path)
     base = p if p.is_dir() else p.parent
-    top = subprocess.run(['git', '-C', str(base), 'rev-parse', '--show-toplevel'],
-                         capture_output=True, text=True)
+    top = git_run(['-C', str(base), 'rev-parse', '--show-toplevel'], cwd=str(base))
     if top.returncode != 0:
         print(json.dumps({'error': 'not_a_git_repo', 'path': str(base)}, ensure_ascii=False))
         raise SystemExit(0)
-    stat = subprocess.run(['git', '-C', str(base), 'diff', '--stat', '--', str(p)],
-                          capture_output=True, text=True)
-    full = subprocess.run(['git', '-C', str(base), 'diff', '--', str(p)],
-                          capture_output=True, text=True)
+    stat = git_run(['-C', str(base), 'diff', '--no-ext-diff', '--no-pager', '--stat', '--', str(p)],
+                   cwd=str(base))
+    full = git_run(['-C', str(base), 'diff', '--no-ext-diff', '--no-pager', '--', str(p)],
+                   cwd=str(base))
     d, tr = cap(full.stdout)
     print(json.dumps({'ok': True, 'mode': 'git', 'repo': top.stdout.strip(),
                       'stat': stat.stdout, 'diff': d or '(clean)',
@@ -465,6 +493,7 @@ def _ws_patch(arguments: dict[str, Any]) -> str:
 def _ws_diff(arguments: dict[str, Any]) -> str:
     payload: dict[str, Any] = {
         "max_chars": _coerce_int(arguments.get("max_chars"), 20000, 2000, 60000),
+        "git_diff_enabled": workspace_executor.EXEC_ENABLED,
     }
     try:
         if arguments.get("a") or arguments.get("b"):
@@ -472,9 +501,15 @@ def _ws_diff(arguments: dict[str, Any]) -> str:
             payload["b"] = str(workspace_path(arguments.get("b")))
         else:
             raw = str(arguments.get("path") or "").strip()
-            payload["path"] = str(
-                WORKSPACE_ROOT if raw in ("", ".") else workspace_path(raw)
-            )
+            if raw in ("", "."):
+                payload["path"] = str(WORKSPACE_ROOT)
+            else:
+                payload["path"] = str(workspace_path(raw))
+            if not workspace_executor.EXEC_ENABLED:
+                return _json({
+                    "error": "git_diff_disabled",
+                    "detail": "git diff is disabled while EXEC_ENABLED=0; use a+b two-file compare instead",
+                })
     except Exception as exc:
         return _json({"error": type(exc).__name__, "detail": str(exc)[:300]})
     return _json(_run_workspace_python(_WS_DIFF_CODE, payload))
@@ -573,7 +608,7 @@ WORKSPACE_TOOL_DEFS = [
     },
     {
         "name": "ws_diff",
-        "description": "查看 diff：传 a+b 比较两个文件，或传 path 看 git 未提交变更。",
+        "description": "查看 diff：传 a+b 比较两个文件（始终可用）；传 path 看 git 未提交变更（仅 EXEC_ENABLED=1 时可用）。",
         "input_schema": {
             "type": "object",
             "properties": {

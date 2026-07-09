@@ -47,7 +47,12 @@ DRAWERS = {
     'code': {
         'label': '代码/文件',
         'tools': ['read_backend_file', 'search_files', 'read_frontend_file',
-                  'write_frontend_file', 'str_replace_frontend_file', 'check_page_render'],
+                  'write_frontend_file', 'str_replace_frontend_file', 'check_page_render',
+                  'shell_exec', 'ws_ls', 'ws_read', 'ws_write', 'ws_edit', 'ws_patch', 'ws_diff'],
+    },
+    'workspace': {
+        'label': '沙箱工作区',
+        'tools': ['shell_exec', 'ws_ls', 'ws_read', 'ws_write', 'ws_edit', 'ws_patch', 'ws_diff'],
     },
     'self_config': {
         'label': '自我配置',
@@ -96,7 +101,8 @@ FORCE_RULES = [
     (re.compile(r'搜一?下|搜索|查一?[下查]|最新|新闻|github|仓库|开源', re.I), ['web']),
     (re.compile(r'购物|淘宝|下单|购物车|结[账帐]|买.{0,6}(东西|个|件|点)|店里'), ['shopping']),
     (re.compile(r'照片|图片|相册|截图|拍的|存图'), ['gallery']),
-    (re.compile(r'代码|文件|前端|后端|页面|部署|修(一下|个|复)|bug|报错', re.I), ['code']),
+    (re.compile(r'代码|文件|前端|后端|页面|部署|修(一下|个|复)|bug|报错', re.I), ['code', 'workspace']),
+    (re.compile(r'沙箱|工作区|workspace|跑脚本|写脚本|执行命令|终端|ws_', re.I), ['workspace']),
     (re.compile(r'待办|todo|记账|账本|预算|倒计时|calendar|ledger', re.I), ['calendar']),
     (re.compile(r'欲望|desire|想要|心愿', re.I), ['desire']),
     (re.compile(r'留言板|板子上|发(个)?帖|board', re.I), ['board']),
