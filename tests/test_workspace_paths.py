@@ -13,18 +13,31 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 
-def _sandboxize_workspace(root: Path) -> bool:
-    """Match prepare-workspace-sandbox.sh perms when wsandbox exists."""
+def _sandbox_ids() -> tuple[int, int] | None:
     try:
         import grp
         import pwd
-        uid = pwd.getpwnam("wsandbox").pw_uid
-        gid = grp.getgrnam("workspace").gr_gid
+        return pwd.getpwnam("wsandbox").pw_uid, grp.getgrnam("workspace").gr_gid
     except KeyError:
+        return None
+
+
+def _sandboxize_path(path: Path, *, is_dir: bool = True) -> bool:
+    """Match prepare-workspace-sandbox.sh perms when wsandbox exists."""
+    ids = _sandbox_ids()
+    if ids is None:
         return False
-    shutil.chown(root, uid, gid)
-    os.chmod(root, stat.S_IRWXU | stat.S_IRWXG | stat.S_ISGID)
+    uid, gid = ids
+    if is_dir:
+        path.mkdir(parents=True, exist_ok=True)
+    shutil.chown(path, uid, gid)
+    mode = stat.S_IRWXU | stat.S_IRWXG | stat.S_ISGID if is_dir else stat.S_IRUSR | stat.S_IWUSR | stat.S_IRGRP | stat.S_IWGRP
+    os.chmod(path, mode)
     return True
+
+
+def _sandboxize_workspace(root: Path) -> bool:
+    return _sandboxize_path(root, is_dir=True)
 
 
 class WorkspacePathTests(unittest.TestCase):
@@ -75,12 +88,10 @@ class WorkspacePathTests(unittest.TestCase):
     def test_write_and_read_roundtrip(self):
         if not self._sandbox_ready:
             self.skipTest("wsandbox/workspace not present (VPS-only integration test)")
-        projects = self.root / "projects"
-        projects.mkdir(parents=True, exist_ok=True)
-        target = projects / "hello.txt"
+        # Let _ws_write create projects/ inside the wsandbox subprocess (umask 007).
         write_result = self.wa._ws_write({"path": "projects/hello.txt", "content": "hi"})
         self.assertIn('"ok": true', write_result.lower())
-        read_result = self.wa._ws_read({"path": str(target)})
+        read_result = self.wa._ws_read({"path": "projects/hello.txt"})
         self.assertIn("hi", read_result)
 
     def test_exec_group_defaults_to_workspace(self):
