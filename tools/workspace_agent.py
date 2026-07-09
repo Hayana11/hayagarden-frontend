@@ -340,9 +340,9 @@ if path:
         print(json.dumps({'error': 'not_a_git_repo', 'path': str(base),
                           'detail': (top.stderr or '')[:300]}, ensure_ascii=False))
         raise SystemExit(0)
-    stat = git_run(['-C', str(base), 'diff', '--no-ext-diff', '--stat', '--', str(p)],
+    stat = git_run(['-C', str(base), 'diff', '--no-ext-diff', '--no-textconv', '--stat', '--', str(p)],
                    cwd=str(base))
-    full = git_run(['-C', str(base), 'diff', '--no-ext-diff', '--', str(p)],
+    full = git_run(['-C', str(base), 'diff', '--no-ext-diff', '--no-textconv', '--', str(p)],
                    cwd=str(base))
     if not git_ok(stat, allow_diff=True) or not git_ok(full, allow_diff=True):
         err = (stat.stderr or '') + (full.stderr or '')
