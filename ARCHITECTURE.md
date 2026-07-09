@@ -62,7 +62,7 @@ chat.html send()
 | `/opt/workspace/projects/` | 源码、脚本、venv |
 | `/opt/workspace/artifacts/tool_outputs/` | shell 长输出落盘 |
 | `/opt/workspace/apps/` | 预留（PR 4 workspace_app） |
-| `/opt/workspace/tools/` | 预留（PR 3 自造工具） |
+| `/opt/workspace/tools/` | 自定义沙箱工具 registry + `.sh`（PR 3） |
 | `/opt/workspace/.jobs/` | 预留（PR 2 ws_job） |
 
 - **模块**：`tools/workspace_agent.py`（文件工具分发）、`tools/workspace_executor.py`（shell，默认 `EXEC_ENABLED=0`）、`tools/relay_sanitize.py`（relay 出站脱敏，接在 `adapt_request()` 之后）。
@@ -77,6 +77,15 @@ chat.html send()
 - **回程**：job 完成 → hook 写入 `chat_messages`（assistant + tool_calls）+ 入队 SSE；`/chat/stream` 开头与 `GET /workspace/job-events` drain 投递 `workspace_job` + `notice dup=1`。**不占用 `_gen_busy` 开新生成**
 - **前端**：`chat.html` 处理 `notice`/`workspace_job`、Job 卡样式；`sw.js` CACHE → `home-v52`
 - **多 worker**：`.jobs/.notify.lock` 防重复通知；待投递 SSE 写入 `.jobs/events/pending.jsonl`（`umask 007` + 2770/660 + `wsandbox:workspace` chown，文件锁原子 drain）
+
+### PR 3：自定义工具 + mcp 发现信封（2026-07-09）
+
+- **模块**：`tools/workspace_registry.py`（`register_workspace_tool` / `list` / `delete`、`mcp_search` / `mcp_load` / `mcp_call`）
+- **持久化**：`/opt/workspace/tools/registry.json` + `/opt/workspace/tools/<name>.sh`（750，`wsandbox:workspace`）
+- **工具数组纪律**：仅 `mcp_search` / `mcp_load` / `mcp_call` 常驻；管理工具与非 resident 自定义工具经 `mcp_search('workspace')` 发现；`resident=true` 才并入 `get_workspace_tool_defs()`
+- **系统提示**：`chat/system_builder.py` 注入静态 `<tools_note>`（缓存友好）
+- **未做**：`workspace_app`（PR 4）、`schedule_reminder`、secrets `[KEY_n]` 注入自定义脚本
+
 - **tools/cc_board_check.py**：cron 夜巡（东八 02:00-08:00 每半小时），board 紧急/需求帖唤醒 CC；失败2次自动补占位回复退出重试（fail_counts 在 /var/log/cc_board_fail_counts）。
 
 ## 部署流
