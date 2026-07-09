@@ -92,7 +92,10 @@ chat.html send()
 
 - **模块**：`tools/workspace_apps.py`（`workspace_app` list/status/start/stop/restart、autostart）
 - **路径**：`/opt/workspace/apps/<id>/manifest.json` + 代码；`.runtime.json` / `.runtime.log` 记录进程
-- **代理**：`GET/POST … /api/gw/workspace/apps/<id>/proxy/<path>` → `127.0.0.1:$PORT`（仅 loopback）
+- **代理**：`GET/POST … /api/gw/workspace/apps/<id>/proxy/<path>` → **仅 verified running** 时转发到 gateway 启动时记录的 `upstream`（非 manifest 单独声明）
+- **runtime 安全**：`.jobs/app_runtime/<id>.json` 由 gateway 以 **640** 写入（wsandbox 不可篡改）；校验 pid uid/cwd/pgid/port/upstream + `runtime_nonce`
+- **并发**：per-app `.lock` 保护 start/stop/autostart
+- **upstream**：仅 `http://` loopback（PR4 不支持 https）
 - **门控**：start/stop/restart 与 `shell_exec` 相同，需 `EXEC_ENABLED=1`；list/status 始终可用
 - **manifest**：`{id,name,port,entry,start,health?,autostart?}`；`start` 支持 `${PORT}`/`${APP_DIR}`/`${WORKSPACE}`
 - **前端**：`workspace_app` 工具标签；`sw.js` CACHE → `home-v54`

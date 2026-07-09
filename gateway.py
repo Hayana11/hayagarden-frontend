@@ -11,7 +11,7 @@ from codebase.client import CODEBASE_TOOLS, CODEBASE_READ_TOOLS, run_codebase_to
 from tools import workspace_agent
 from tools import workspace_jobs
 from tools import workspace_apps
-from tools.workspace_apps import WorkspaceAppError, load_manifest, upstream_base, proxy_target
+from tools.workspace_apps import WorkspaceAppError, verified_proxy_upstream, proxy_target
 
 app = Flask(__name__)
 DB_PATH    = '/opt/frontend/memories.db'
@@ -3499,8 +3499,7 @@ def workspace_app_proxy(app_id, path):
     import http.client
     from flask import Response, stream_with_context
     try:
-        manifest = load_manifest(app_id)
-        upstream = upstream_base(manifest)
+        upstream = verified_proxy_upstream(app_id)
     except WorkspaceAppError as exc:
         return jsonify({'error': exc.code, 'detail': exc.detail}), exc.status_code
 

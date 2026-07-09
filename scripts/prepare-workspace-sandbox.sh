@@ -13,7 +13,8 @@ mkdir -p \
   "${WORKSPACE_ROOT}/artifacts/tool_outputs" \
   "${WORKSPACE_ROOT}/apps" \
   "${WORKSPACE_ROOT}/tools" \
-  "${WORKSPACE_ROOT}/.jobs/events"
+  "${WORKSPACE_ROOT}/.jobs/events" \
+  "${WORKSPACE_ROOT}/.jobs/app_runtime"
 
 if ! getent group "${WORKSPACE_GROUP}" >/dev/null; then
   echo "==> Creating workspace group ${WORKSPACE_GROUP}"
@@ -45,6 +46,7 @@ find "${WORKSPACE_ROOT}" -type f -exec chmod 660 {} + 2>/dev/null || true
 chmod 2770 "${WORKSPACE_ROOT}"
 chmod 2770 "${WORKSPACE_ROOT}/.jobs" || true
 chmod 2770 "${WORKSPACE_ROOT}/.jobs/events" || true
+chmod 2770 "${WORKSPACE_ROOT}/.jobs/app_runtime" || true
 if [ ! -f "${WORKSPACE_ROOT}/tools/registry.json" ]; then
   echo '{}' > "${WORKSPACE_ROOT}/tools/registry.json"
   chown "${SANDBOX_USER}:${WORKSPACE_GROUP}" "${WORKSPACE_ROOT}/tools/registry.json" 2>/dev/null || true

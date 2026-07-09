@@ -115,6 +115,34 @@ class WorkspaceAppsTests(unittest.TestCase):
         with self.assertRaises(self.wa.WorkspaceAppError):
             self.wa.upstream_base(self.wa.load_manifest("remote"))
 
+    def test_https_upstream_rejected(self):
+        self._write_manifest("tls", port=24002, upstream="https://127.0.0.1:24002")
+        with self.assertRaises(self.wa.WorkspaceAppError):
+            self.wa.upstream_base(self.wa.load_manifest("tls"))
+
+    def test_tampered_app_dir_runtime_ignored(self):
+        if not self._sandbox_ready:
+            self.skipTest("wsandbox/workspace not present (VPS-only integration test)")
+        self._write_manifest("tamper")
+        fake = self.wa.app_dir("tamper") / ".runtime.json"
+        fake.write_text(json.dumps({
+            "owner": "gateway",
+            "runtime_nonce": "deadbeef",
+            "id": "tamper",
+            "pid": 1,
+            "pgid": 1,
+            "port": 24003,
+            "upstream": "http://127.0.0.1:24003",
+        }), encoding="utf-8")
+        result = json.loads(self.wa.workspace_app({"action": "status", "id": "tamper"}))
+        self.assertFalse(result["status"].get("running"))
+
+    def test_proxy_requires_verified_running(self):
+        self._write_manifest("nope")
+        with self.assertRaises(self.wa.WorkspaceAppError) as ctx:
+            self.wa.verified_proxy_upstream("nope")
+        self.assertEqual(ctx.exception.code, "app_not_running")
+
     def test_agent_includes_workspace_app(self):
         names = {t["name"] for t in self.agent.get_workspace_tool_defs()}
         self.assertIn("workspace_app", names)
