@@ -483,7 +483,8 @@ def build_system(wake=False):
             pass
 
     # ── 组装 system blocks（prompt caching 格式）────────────────
-    # BP1/BP2 挂 cache_control，前缀稳定时命中缓存；BP3 纯动态不挂标
+    # 只给真正稳定的块挂 cache_control。长期事实/日记会随对话写入而变化，
+    # 放在无断点块里，避免每轮把后面的长前缀全部打成新缓存。
     # 能力说明：文件卡片 + 选择器（标签驱动，与语音同机制）
     parts.append(
         '\n## 你可以发文件和选择器\n'
@@ -511,7 +512,6 @@ def build_system(wake=False):
         system_blocks.append({
             'type': 'text',
             'text': '\n'.join(bp2_parts),
-            'cache_control': {'type': 'ephemeral'},
         })
     if parts:
         system_blocks.append({'type': 'text', 'text': '\n'.join(parts)})

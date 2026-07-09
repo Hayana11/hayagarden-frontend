@@ -3556,6 +3556,10 @@ def chat_stream():
                     # relay adapter 自动根据 relay 能力裁剪 thinking/cache/tools
                     resp = _chat_relay.call_stream(payload, timeout=300)
                     blocks, cur, stop_reason = [], None, None
+                    round_cache_read = 0
+                    round_cache_create = 0
+                    round_cache_create_5m = 0
+                    round_cache_create_1h = 0
                     for raw in resp:
                         line = raw.decode('utf-8', 'ignore').strip()
                         if not line.startswith('data:'):
@@ -3567,11 +3571,11 @@ def chat_stream():
                         et = ev.get('type')
                         if et == 'message_start':
                             _u = (ev.get('message') or {}).get('usage') or {}
-                            cache_read_total  += _u.get('cache_read_input_tokens', 0) or 0
-                            cache_create_total += _u.get('cache_creation_input_tokens', 0) or 0
+                            round_cache_read = max(round_cache_read, _u.get('cache_read_input_tokens', 0) or 0)
+                            round_cache_create = max(round_cache_create, _u.get('cache_creation_input_tokens', 0) or 0)
                             _cc = _u.get('cache_creation') or {}
-                            cache_create_5m_total += _cc.get('ephemeral_5m_input_tokens', 0) or 0
-                            cache_create_1h_total += _cc.get('ephemeral_1h_input_tokens', 0) or 0
+                            round_cache_create_5m = max(round_cache_create_5m, _cc.get('ephemeral_5m_input_tokens', 0) or 0)
+                            round_cache_create_1h = max(round_cache_create_1h, _cc.get('ephemeral_1h_input_tokens', 0) or 0)
                             input_tokens_total = max(input_tokens_total, _u.get('input_tokens', 0) or 0)
                             output_tokens_total = max(output_tokens_total, _u.get('output_tokens', 0) or 0)
                         elif et == 'content_block_start':
@@ -3621,16 +3625,20 @@ def chat_stream():
                         elif et == 'message_delta':
                             _du = ev.get('usage') or {}
                             if _du:
-                                cache_read_total += _du.get('cache_read_input_tokens', 0) or 0
-                                cache_create_total += _du.get('cache_creation_input_tokens', 0) or 0
+                                round_cache_read = max(round_cache_read, _du.get('cache_read_input_tokens', 0) or 0)
+                                round_cache_create = max(round_cache_create, _du.get('cache_creation_input_tokens', 0) or 0)
                                 _dcc = _du.get('cache_creation') or {}
-                                cache_create_5m_total += _dcc.get('ephemeral_5m_input_tokens', 0) or 0
-                                cache_create_1h_total += _dcc.get('ephemeral_1h_input_tokens', 0) or 0
+                                round_cache_create_5m = max(round_cache_create_5m, _dcc.get('ephemeral_5m_input_tokens', 0) or 0)
+                                round_cache_create_1h = max(round_cache_create_1h, _dcc.get('ephemeral_1h_input_tokens', 0) or 0)
                                 input_tokens_total = max(input_tokens_total, _du.get('input_tokens', 0) or 0)
                                 output_tokens_total = max(output_tokens_total, _du.get('output_tokens', 0) or 0)
                             stop_reason = (ev.get('delta', {}) or {}).get('stop_reason') or stop_reason
                         elif et == 'message_stop':
                             break
+                    cache_read_total += round_cache_read
+                    cache_create_total += round_cache_create
+                    cache_create_5m_total += round_cache_create_5m
+                    cache_create_1h_total += round_cache_create_1h
                     tool_uses = [b for b in blocks if b.get('type') == 'tool_use']
                     if stop_reason == 'tool_use' and not tool_uses:
                         continue
