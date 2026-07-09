@@ -323,8 +323,14 @@ html[data-theme=dark] .tsess{background:rgba(212,165,116,.04);border-left-color:
 
 /* ── Typing indicator ── */
 #typing{display:none;padding:0 20px 4px;flex-shrink:0;}
-.typing-dots{display:inline-flex;gap:5px;align-items:center;padding:4px 0;background:transparent;border-radius:0;}
+.typing-line{display:flex;align-items:center;gap:9px;min-height:18px;}
+.typing-dots{display:inline-flex;gap:5px;align-items:center;padding:4px 0;background:transparent;border-radius:0;flex:0 0 auto;}
 .typing-dots span{width:6px;height:6px;border-radius:50%;background:rgba(124,106,138,.5);display:block;}
+.send-status{font-size:12px;line-height:1.25;color:rgba(86,72,96,.68);white-space:nowrap;}
+.send-status.status-sending{color:rgba(126,92,145,.82);}
+.send-status.status-working{color:rgba(86,72,96,.72);}
+.send-status.status-tools{color:rgba(94,124,96,.88);}
+.send-status.status-error{color:#c0392b;}
 .typing-dots span:nth-child(1){animation:dp 1.2s infinite 0s;}
 .typing-dots span:nth-child(2){animation:dp 1.2s infinite .22s;}
 .typing-dots span:nth-child(3){animation:dp 1.2s infinite .44s;}
@@ -543,7 +549,10 @@ html[data-theme=dark] .ni{color:#6a5f5f;}
   <div class="msg-row fy" style="margin-bottom:8px;">
     <div class="bwrap">
       <div class="bubble fy" style="padding:10px 14px;">
-        <div class="typing-dots"><span></span><span></span><span></span></div>
+        <div class="typing-line">
+          <div class="typing-dots"><span></span><span></span><span></span></div>
+          <div id="send-status" class="send-status">正在生成…</div>
+        </div>
       </div>
     </div>
   </div>
@@ -1802,7 +1811,29 @@ function removeDoc(){
 function resize(el){ el.style.height='auto'; el.style.height=Math.min(el.scrollHeight,96)+'px'; }
 function onEnter(e){ if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send();} }
 
-function showTyping(){ document.getElementById('typing').style.display='block'; var c=document.getElementById('msgs'); c.scrollTop=c.scrollHeight; }
+function setSendStatus(text, kind){
+  var el=document.getElementById('send-status');
+  if(!el) return;
+  el.textContent=text||'';
+  el.className='send-status'+(kind?(' status-'+kind):'');
+}
+function clearSendStatus(){ setSendStatus('', ''); }
+function showTyping(label, kind){
+  if(label!==undefined) setSendStatus(label, kind||'working');
+  else {
+    var el=document.getElementById('send-status');
+    if(el && !el.textContent) setSendStatus('正在生成…','working');
+  }
+  document.getElementById('typing').style.display='block';
+  var c=document.getElementById('msgs'); c.scrollTop=c.scrollHeight;
+}
+function flashSendStatus(text, kind){
+  showTyping(text, kind||'working');
+  setTimeout(function(){
+    var el=document.getElementById('send-status');
+    if(el && el.textContent===text) hideTyping();
+  }, 2600);
+}
 
 var lastUserMsgText = '';
 function humanizeError(raw){
@@ -1829,7 +1860,7 @@ function retryLastMessage(){
   document.getElementById('txt').value = lastUserMsgText;
   send();
 }
-function hideTyping(){ document.getElementById('typing').style.display='none'; }
+function hideTyping(){ document.getElementById('typing').style.display='none'; clearSendStatus(); }
 
 async function send(){
   if(sending||blockedState)return;
@@ -1840,6 +1871,7 @@ async function send(){
   lastUserMsgText = txt;
   sending=true;
   setSendBtn('stop');
+  showTyping('正在发送…','sending');
   var fromHayana=(curAuthor==='hayana');
   var fd=new FormData();
   fd.append('author',curAuthor);
@@ -1856,14 +1888,16 @@ async function send(){
       var ur=await fetch('/api/chat/upload_file',{method:'POST',body:dfd});
       var ud=await ur.json();
       if(ud&&ud.ok){ fd.append('file_url',ud.file_url); fd.append('file_name',ud.file_name); }
-      else { showErrToast((ud&&ud.error)||'文件上传失败'); sending=false; setSendBtn('send'); return; }
+      else { showErrToast((ud&&ud.error)||'文件上传失败'); flashSendStatus('发送失败','error'); sending=false; setSendBtn('send'); return; }
     }
-    await fetch('/api/chat/send',{method:'POST',body:fd});
+    var sendResp=await fetch('/api/chat/send',{method:'POST',body:fd});
+    if(!sendResp.ok) throw new Error('发送失败：HTTP '+sendResp.status);
+    setSendStatus('已发送 · 等待回复…','sending');
     await loadMsgs(false);
     if(fromHayana){
       var baseId=0;
       (window.curMsgList||[]).forEach(function(m){ if(typeof m.id==='number'&&m.id>baseId) baseId=m.id; });
-      showTyping();
+      showTyping('正在连接回复…','working');
       var streamErrMsg = null;
       try{
         var fullText='', capturedThink='';
@@ -1910,7 +1944,7 @@ async function send(){
       }catch(e){ if(!(e&&e.displayed)) console.error('gateway',e); }
       hideTyping();
     }
-  }catch(e){ console.error('send',e); showErrToast(e&&e.message); }
+  }catch(e){ console.error('send',e); showErrToast(e&&e.message); flashSendStatus('发送失败','error'); }
   sending=false;
   setSendBtn('send');
   document.getElementById('txt').focus();
@@ -2194,7 +2228,7 @@ async function doRegen(msgId) {
       headers:{'Content-Type':'application/json'}, body:JSON.stringify({msg_id:msgId})});
     var pd = await prep.json();
     if(!pd.ok){ sending=false; setSendBtn('send'); return; }
-    showTyping();
+    showTyping('正在重新生成…','working');
     try {
       await streamReply();
       await fetch('/api/chat/regen/finalize', {method:'POST',
@@ -2214,7 +2248,7 @@ async function doEdit(msgId, newContent) {
     await fetch('/api/chat/edit', {method:'POST',
       headers:{'Content-Type':'application/json'}, body:JSON.stringify({msg_id:msgId, content:newContent})});
     await loadMsgs(false);
-    showTyping();
+    showTyping('正在生成编辑后的回复…','working');
     try { await streamReply(); } catch(e) { console.error('doEdit stream failed',e); }
     hideTyping();
     await loadMsgs(false);
@@ -2285,7 +2319,7 @@ async function retryStream(){
   _suppressLoadMsgs=false;
   if(sending) return;
   sending=true; setSendBtn('stop');
-  showTyping();
+  showTyping('正在重试回复…','working');
   try{
     var _sr2=await streamReply(); var fullText=(_sr2&&_sr2.text)||'';
     await loadMsgs(false);
@@ -2308,6 +2342,7 @@ async function streamReply(){
     _safetyTimeout=setTimeout(function(){ctrl.abort();}, ms||150000);
   }
   _armSafety();
+  setSendStatus('正在等待模型…','working');
   var resp=await fetch('/api/gw/chat/stream',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}',signal:ctrl.signal});
   if(!resp.ok||!resp.body) throw new Error('stream failed');
   var SSE_SEP=String.fromCharCode(10)+String.fromCharCode(10);
@@ -2412,6 +2447,7 @@ async function streamReply(){
         if(line.indexOf('data:')!==0) continue;
         var ev; try{ ev=JSON.parse(line.slice(5)); }catch(e){ continue; }
         if(ev.t==='memory_recall'){
+          setSendStatus('正在整理记忆…','working');
           ensureLiveRow();
           var md=ev.d||{};
           if(md.count){
@@ -2427,6 +2463,7 @@ async function streamReply(){
               '</div>';
           }
         } else if(ev.t==='think'){
+          setSendStatus('正在思考…','working');
           ensureLiveRow();
           thinkText+=ev.d;
           liveThinkWrap.style.display='';
@@ -2434,6 +2471,7 @@ async function streamReply(){
           var atB=c.scrollHeight-c.scrollTop-c.clientHeight<120;
           if(atB) c.scrollTop=c.scrollHeight;
         } else if(ev.t==='tool_progress'){
+          setSendStatus('正在使用工具…','tools');
           ensureLiveRow();
           finishLiveThink();
           _armSafety(300000);
@@ -2448,6 +2486,7 @@ async function streamReply(){
           var atB2=c.scrollHeight-c.scrollTop-c.clientHeight<120;
           if(atB2) c.scrollTop=c.scrollHeight;
         } else if(ev.t==='tool_use'){
+          setSendStatus('正在调用工具…','tools');
           ensureLiveRow();
           finishLiveThink();
           _armSafety(300000);
@@ -2455,6 +2494,7 @@ async function streamReply(){
           liveToolCalls.push({name:d.name, args:d.args, running:true});
           renderLiveTools(true);
         } else if(ev.t==='tool_result'){
+          setSendStatus('工具完成 · 继续生成…','tools');
           _armSafety(300000);
           var ti=(ev.idx!==undefined && ev.idx>=0 && ev.idx<liveToolCalls.length)?ev.idx:liveToolCalls.length-1;
           if(ti>=0 && ev.d) liveToolCalls[ti]=ev.d;
@@ -2471,10 +2511,12 @@ async function streamReply(){
         } else if(ev.t==='workspace_job'){
           handleWorkspaceJobSse(ev);
         } else if(ev.t==='trace_summary'){
+          setSendStatus('正在整理工具结果…','tools');
           if(liveTools && ev.d)
             liveTools.insertAdjacentHTML('beforeend',
               '<div class="trace-summary-line"><i class="ti ti-route"></i> '+escHtml(ev.d)+'</div>');
         } else if(ev.t==='tool_call'){
+          setSendStatus('正在记录工具调用…','tools');
           if(ev.dup) continue; // gateway 为旧缓存前端补发的副本，新前端已渲染过
           // 兼容旧gateway：单事件=完成态
           ensureLiveRow();
@@ -2482,6 +2524,7 @@ async function streamReply(){
           liveToolCalls.push(ev.d);
           renderLiveTools(true);
         } else if(ev.t==='text'){
+          setSendStatus('正在生成回复…','working');
           finishLiveThink();
           target+=ev.d;
         } else if(ev.t==='usage'){
@@ -2494,12 +2537,14 @@ async function streamReply(){
           if(ev.elapsed_sec) streamState.elapsedSec=Math.max(streamState.elapsedSec,ev.elapsed_sec);
           if(ev.cache_supported!==undefined) streamState.cacheSupported=ev.cache_supported;
         } else if(ev.t==='err'){
+          setSendStatus('生成失败','error');
           ensureLiveRow();
           if(/仍在生成|generating/i.test(String(ev.d||''))) releaseGenLock(true);
           live.innerHTML='<div class="stream-err-wrap">⚠ '+escHtml(ev.d)+
             '<br><button class="stream-err-retry" onclick="retryStream()">重试</button></div>';
           err=new Error(ev.d); err.displayed=true;
         } else if(ev.t==='done'){
+          setSendStatus('回复完成','working');
           streamCompleted=true;
         }
       }
