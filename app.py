@@ -1060,10 +1060,27 @@ def reader_page():
 
 # ── API config routes ──
 
+def _active_relay_id():
+    return (config_store.get('ACTIVE_RELAY', '') or '').strip()
+
+
+def _effective_relay_model():
+    active_id = _active_relay_id()
+    if active_id:
+        try:
+            conn = get_db()
+            row = conn.execute('SELECT default_model FROM relay_presets WHERE id=?', (active_id,)).fetchone()
+            conn.close()
+            if row and (row['default_model'] or '').strip():
+                return row['default_model'].strip()
+        except Exception:
+            pass
+    return config_store.get('MODEL') or 'unknown'
+
+
 @app.route('/api/config/model', methods=['GET'])
 def config_get_model():
-    model = config_store.get('MODEL') or 'unknown'
-    return jsonify({'model': model})
+    return jsonify({'model': _effective_relay_model(), 'global_model': config_store.get('MODEL') or ''})
 
 @app.route('/api/config/model', methods=['POST'])
 def config_set_model():
@@ -1072,8 +1089,15 @@ def config_set_model():
     if not new_model:
         return jsonify({'error': 'empty model'}), 400
     try:
+        active_id = _active_relay_id()
+        if active_id:
+            conn = get_db()
+            conn.execute('UPDATE relay_presets SET default_model=? WHERE id=?', (new_model, active_id))
+            conn.commit()
+            conn.close()
+            return jsonify({'ok': True, 'model': new_model, 'scope': 'active_relay'})
         config_store.set('MODEL', new_model)
-        return jsonify({'ok': True, 'model': new_model})
+        return jsonify({'ok': True, 'model': new_model, 'scope': 'global'})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
@@ -1086,7 +1110,7 @@ def config_model_catalog():
             catalog = json.load(f)
     except Exception:
         catalog = []
-    return jsonify({'models': catalog, 'current': config_store.get('MODEL') or ''})
+    return jsonify({'models': catalog, 'current': _effective_relay_model() or ''})
 
 @app.route('/api/config/key-status', methods=['GET'])
 def config_key_status():
@@ -1854,9 +1878,7 @@ def activate_relay_preset(preset_id):
         # ACTIVE_RELAY 存 relay_presets.id，url/key 由 relay.manager 按这个 id 实时查表
         config_store.set('ACTIVE_RELAY', str(preset_id))
         new_model = (row['default_model'] or '').strip()
-        if new_model:
-            config_store.set('MODEL', new_model)
-        # 不写 .env，不重启进程——下一次请求 relay.manager 就会读到新配置
+        # 不写 .env，不重启进程；模型也跟随 preset，不再污染全局 MODEL。
         return jsonify({'ok': True, 'model_switched': new_model or None})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
