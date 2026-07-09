@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import re
+import shlex
 import shutil
 import subprocess
 from contextlib import contextmanager
@@ -341,26 +342,9 @@ def register_workspace_tool(arguments: dict[str, Any]) -> str:
 
     _ensure_tools_dir()
     script_path = _TOOLS_DIR / f"{name}.sh"
-    body = script
-    if not body.startswith("#!"):
-        body = "#!/bin/bash\nset -euo pipefail\n" + body + "\n"
-    old_umask = os.umask(0o007)
-    try:
-        script_path.write_text(body, encoding="utf-8")
-    finally:
-        os.umask(old_umask)
-    try:
-        os.chmod(script_path, 0o750)
-        shutil.chown(
-            script_path,
-            user=workspace_executor.EXEC_USER,
-            group=workspace_executor.EXEC_GROUP,
-        )
-    except Exception:
-        logger.warning("failed to chown workspace tool %s", script_path, exc_info=True)
-
     resident = bool(arguments.get("resident", False))
     with _with_registry_lock():
+        _write_tool_script(script_path, script)
         tools = _read_registry_file()
         tools[name] = {
             "description": description,
@@ -421,10 +405,34 @@ def delete_workspace_tool(arguments: dict[str, Any]) -> str:
     return _json({"ok": True, "deleted": True, "name": name, "script_deleted": script_deleted})
 
 
+def _write_tool_script(script_path: Path, script: str) -> None:
+    """Atomically write tool script under registry lock (tmp + rename)."""
+    body = script
+    if not body.startswith("#!"):
+        body = "#!/bin/bash\nset -euo pipefail\n" + body + "\n"
+    tmp_path = script_path.with_name(script_path.name + ".tmp")
+    old_umask = os.umask(0o007)
+    try:
+        tmp_path.write_text(body, encoding="utf-8")
+        os.chmod(tmp_path, 0o750)
+        try:
+            shutil.chown(
+                tmp_path,
+                user=workspace_executor.EXEC_USER,
+                group=workspace_executor.EXEC_GROUP,
+            )
+        except Exception:
+            logger.warning("failed to chown workspace tool %s", tmp_path, exc_info=True)
+        tmp_path.replace(script_path)
+    finally:
+        os.umask(old_umask)
+
+
 def _run_script(script_path: Path, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
     """Run tool script as wsandbox when available; else current user (dev/CI)."""
+    quoted = shlex.quote(str(script_path))
     kwargs: dict[str, Any] = {
-        "args": ["/bin/bash", str(script_path)],
+        "args": ["/bin/bash", "-lc", f"umask 007; exec {quoted}"],
         "cwd": workspace_executor.EXEC_CWD,
         "env": env,
         "text": True,

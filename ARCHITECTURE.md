@@ -82,7 +82,8 @@ chat.html send()
 
 - **模块**：`tools/workspace_registry.py`（`register_workspace_tool` / `list` / `delete`、`mcp_search` / `mcp_load` / `mcp_call`）
 - **持久化**：`/opt/workspace/tools/registry.json` + `/opt/workspace/tools/<name>.sh`（750，`wsandbox:workspace`）；`registry.json` 读写持 `.registry.lock`（多 worker 原子更新）
-- **执行门控**：自定义工具脚本与 `shell_exec`/`ws_job` 相同，`EXEC_ENABLED=0` 时 `execute_workspace_tool` 返回 `exec_disabled`；register/list/delete 不受限
+- **执行门控**：自定义工具脚本与 `shell_exec`/`ws_job` 相同，`EXEC_ENABLED=0` 时 `execute_workspace_tool` 返回 `exec_disabled`；执行时 `umask 007`（与 PR1 660 口径一致）；register/list/delete 不受限
+- **注册原子性**：脚本 tmp+rename 与 `registry.json` RMW 同在 `.registry.lock` 内
 - **工具数组纪律**：仅 `mcp_search` / `mcp_load` / `mcp_call` 常驻；管理工具与非 resident 自定义工具经 `mcp_search('workspace')` 发现；`resident=true` 才并入 `get_workspace_tool_defs()`
 - **系统提示**：`chat/system_builder.py` 注入静态 `<tools_note>`（缓存友好）
 - **未做**：`workspace_app`（PR 4）、`schedule_reminder`、secrets `[KEY_n]` 注入自定义脚本

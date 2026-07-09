@@ -148,6 +148,23 @@ class WorkspaceRegistryTests(unittest.TestCase):
         result = json.loads(wr.execute_workspace_tool("blocked_tool", {}))
         self.assertEqual(result.get("error"), "exec_disabled")
 
+    def test_custom_tool_output_file_mode(self):
+        if not self._sandbox_ready:
+            self.skipTest("wsandbox/workspace not present (VPS-only integration test)")
+        projects = Path(self.tmpdir.name) / "projects"
+        _sandboxize_path(projects, is_dir=True)
+        self.wr.register_workspace_tool({
+            "name": "write_probe",
+            "description": "write probe file",
+            "script": "mkdir -p projects/umask_probe && echo probe > projects/umask_probe/out.txt",
+        })
+        result = json.loads(self.wr.execute_workspace_tool("write_probe", {}))
+        self.assertEqual(result.get("exit_code"), 0)
+        out = projects / "umask_probe" / "out.txt"
+        self.assertTrue(out.exists())
+        mode = out.stat().st_mode & 0o777
+        self.assertEqual(mode, 0o660, f"expected 660 group-only file, got {oct(mode)}")
+
     def test_mcp_call_register_via_mgmt(self):
         result = json.loads(self.wr.mcp_call({
             "server": "workspace",
