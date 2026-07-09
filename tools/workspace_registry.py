@@ -10,12 +10,14 @@ merge into get_workspace_tool_defs() at request time.
 from __future__ import annotations
 
 import copy
+import fcntl
 import json
 import logging
 import os
 import re
 import shutil
 import subprocess
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -27,6 +29,7 @@ logger = logging.getLogger(__name__)
 _WORKSPACE_ROOT = Path(workspace_executor.EXEC_CWD).resolve()
 _TOOLS_DIR = _WORKSPACE_ROOT / "tools"
 _REGISTRY_FILE = _TOOLS_DIR / "registry.json"
+_REGISTRY_LOCK_FILE = _TOOLS_DIR / ".registry.lock"
 _NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]{1,48}$")
 
 RESERVED_TOOL_NAMES = {
@@ -213,8 +216,27 @@ def _ensure_tools_dir() -> None:
     _harden_path(_TOOLS_DIR, is_dir=True)
 
 
-def load_registry() -> dict[str, dict[str, Any]]:
+@contextmanager
+def _with_registry_lock():
+    """Cross-worker file lock for registry.json read-modify-write."""
     _ensure_tools_dir()
+    old_umask = os.umask(0o007)
+    try:
+        lock_fh = open(_REGISTRY_LOCK_FILE, "w", encoding="utf-8")
+    finally:
+        os.umask(old_umask)
+    _harden_path(_REGISTRY_LOCK_FILE, is_dir=False)
+    try:
+        fcntl.flock(lock_fh.fileno(), fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            fcntl.flock(lock_fh.fileno(), fcntl.LOCK_UN)
+        finally:
+            lock_fh.close()
+
+
+def _read_registry_file() -> dict[str, dict[str, Any]]:
     if not _REGISTRY_FILE.exists():
         return {}
     try:
@@ -225,14 +247,25 @@ def load_registry() -> dict[str, dict[str, Any]]:
         return {}
 
 
-def save_registry(tools: dict[str, dict[str, Any]]) -> None:
-    _ensure_tools_dir()
+def _write_registry_file(tools: dict[str, dict[str, Any]]) -> None:
     old_umask = os.umask(0o007)
     try:
         _REGISTRY_FILE.write_text(_json(tools) + "\n", encoding="utf-8")
     finally:
         os.umask(old_umask)
     _harden_path(_REGISTRY_FILE, is_dir=False)
+
+
+def load_registry() -> dict[str, dict[str, Any]]:
+    _ensure_tools_dir()
+    with _with_registry_lock():
+        return _read_registry_file()
+
+
+def save_registry(tools: dict[str, dict[str, Any]]) -> None:
+    _ensure_tools_dir()
+    with _with_registry_lock():
+        _write_registry_file(tools)
 
 
 def _workspace_tool_schema(meta: dict[str, Any]) -> dict[str, Any]:
@@ -327,16 +360,17 @@ def register_workspace_tool(arguments: dict[str, Any]) -> str:
         logger.warning("failed to chown workspace tool %s", script_path, exc_info=True)
 
     resident = bool(arguments.get("resident", False))
-    tools = load_registry()
-    tools[name] = {
-        "description": description,
-        "parameters": parameters,
-        "script_path": str(script_path),
-        "resident": resident,
-        "created_at": tools.get(name, {}).get("created_at") or _iso(_now()),
-        "updated_at": _iso(_now()),
-    }
-    save_registry(tools)
+    with _with_registry_lock():
+        tools = _read_registry_file()
+        tools[name] = {
+            "description": description,
+            "parameters": parameters,
+            "script_path": str(script_path),
+            "resident": resident,
+            "created_at": tools.get(name, {}).get("created_at") or _iso(_now()),
+            "updated_at": _iso(_now()),
+        }
+        _write_registry_file(tools)
     if resident:
         return _json({
             "ok": True,
@@ -363,26 +397,27 @@ def delete_workspace_tool(arguments: dict[str, Any]) -> str:
     if name in RESERVED_TOOL_NAMES:
         return _json({"error": "reserved_name", "name": name})
 
-    tools = load_registry()
-    meta = tools.pop(name, None)
-    if meta is None:
-        save_registry(tools)
-        return _json({"ok": True, "deleted": False, "name": name, "detail": "tool was not registered"})
+    with _with_registry_lock():
+        tools = _read_registry_file()
+        meta = tools.pop(name, None)
+        if meta is None:
+            _write_registry_file(tools)
+            return _json({"ok": True, "deleted": False, "name": name, "detail": "tool was not registered"})
 
-    script_deleted = False
-    script_path = Path(str(meta.get("script_path") or ""))
-    if delete_script and str(script_path):
-        try:
-            script_path.resolve().relative_to(_TOOLS_DIR.resolve())
-            if script_path.exists():
-                script_path.unlink()
-                script_deleted = True
-        except Exception as exc:
-            tools[name] = meta
-            save_registry(tools)
-            return _json({"error": "delete_script_failed", "detail": str(exc)[:300]})
+        script_deleted = False
+        script_path = Path(str(meta.get("script_path") or ""))
+        if delete_script and str(script_path):
+            try:
+                script_path.resolve().relative_to(_TOOLS_DIR.resolve())
+                if script_path.exists():
+                    script_path.unlink()
+                    script_deleted = True
+            except Exception as exc:
+                tools[name] = meta
+                _write_registry_file(tools)
+                return _json({"error": "delete_script_failed", "detail": str(exc)[:300]})
 
-    save_registry(tools)
+        _write_registry_file(tools)
     return _json({"ok": True, "deleted": True, "name": name, "script_deleted": script_deleted})
 
 
@@ -415,6 +450,13 @@ def execute_workspace_tool(tool_name: str, arguments: dict[str, Any]) -> str | N
     meta = tools.get(tool_name)
     if not isinstance(meta, dict):
         return None
+
+    if not workspace_executor.EXEC_ENABLED:
+        return _json({
+            "error": "exec_disabled",
+            "detail": "custom tool execution is not enabled (set EXEC_ENABLED=1)",
+        })
+
     script_path = Path(str(meta.get("script_path") or ""))
     try:
         script_path.resolve().relative_to(_TOOLS_DIR.resolve())

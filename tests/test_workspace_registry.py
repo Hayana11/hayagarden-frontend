@@ -2,6 +2,8 @@
 
 import json
 import os
+import stat
+import shutil
 import sys
 import tempfile
 import unittest
@@ -12,11 +14,36 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 
+def _sandbox_ids() -> tuple[int, int] | None:
+    try:
+        import grp
+        import pwd
+        return pwd.getpwnam("wsandbox").pw_uid, grp.getgrnam("workspace").gr_gid
+    except KeyError:
+        return None
+
+
+def _sandboxize_path(path: Path, *, is_dir: bool = True) -> bool:
+    ids = _sandbox_ids()
+    if ids is None:
+        return False
+    uid, gid = ids
+    if is_dir:
+        path.mkdir(parents=True, exist_ok=True)
+    shutil.chown(path, uid, gid)
+    mode = stat.S_IRWXU | stat.S_IRWXG | stat.S_ISGID if is_dir else stat.S_IRUSR | stat.S_IWUSR | stat.S_IRGRP | stat.S_IWGRP
+    os.chmod(path, mode)
+    return True
+
+
 class WorkspaceRegistryTests(unittest.TestCase):
     def setUp(self):
         self.tmpdir = tempfile.TemporaryDirectory()
-        os.environ["EXEC_CWD"] = self.tmpdir.name
-        os.environ["WORKSPACE_ROOT"] = self.tmpdir.name
+        root = Path(self.tmpdir.name)
+        self._sandbox_ready = _sandboxize_path(root, is_dir=True)
+        os.environ["EXEC_CWD"] = str(root)
+        os.environ["WORKSPACE_ROOT"] = str(root)
+        os.environ["EXEC_ENABLED"] = "1"
         import importlib
         import tools.workspace_executor as ex
         import tools.workspace_registry as wr
@@ -26,6 +53,7 @@ class WorkspaceRegistryTests(unittest.TestCase):
         self.wa = importlib.reload(wa)
 
     def tearDown(self):
+        os.environ.pop("EXEC_ENABLED", None)
         self.tmpdir.cleanup()
 
     def test_reserved_name_rejected(self):
@@ -90,6 +118,8 @@ class WorkspaceRegistryTests(unittest.TestCase):
         self.assertIn("delete_workspace_tool", names)
 
     def test_mcp_call_executes_custom_tool(self):
+        if not self._sandbox_ready:
+            self.skipTest("wsandbox/workspace not present (VPS-only integration test)")
         self.wr.register_workspace_tool({
             "name": "echo_args",
             "description": "echo json",
@@ -102,6 +132,21 @@ class WorkspaceRegistryTests(unittest.TestCase):
         }, inner_dispatch=self.wa._dispatch_mgmt_or_custom))
         self.assertEqual(result.get("exit_code"), 0)
         self.assertIn("pr3-ok", result.get("stdout", ""))
+
+    def test_execute_disabled_when_exec_off(self):
+        self.wr.register_workspace_tool({
+            "name": "blocked_tool",
+            "description": "should not run",
+            "script": 'echo "SHOULD_NOT_RUN"',
+        })
+        os.environ["EXEC_ENABLED"] = "0"
+        import importlib
+        import tools.workspace_executor as ex
+        import tools.workspace_registry as wr
+        importlib.reload(ex)
+        importlib.reload(wr)
+        result = json.loads(wr.execute_workspace_tool("blocked_tool", {}))
+        self.assertEqual(result.get("error"), "exec_disabled")
 
     def test_mcp_call_register_via_mgmt(self):
         result = json.loads(self.wr.mcp_call({

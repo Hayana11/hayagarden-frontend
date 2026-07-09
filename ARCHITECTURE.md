@@ -81,7 +81,8 @@ chat.html send()
 ### PR 3：自定义工具 + mcp 发现信封（2026-07-09）
 
 - **模块**：`tools/workspace_registry.py`（`register_workspace_tool` / `list` / `delete`、`mcp_search` / `mcp_load` / `mcp_call`）
-- **持久化**：`/opt/workspace/tools/registry.json` + `/opt/workspace/tools/<name>.sh`（750，`wsandbox:workspace`）
+- **持久化**：`/opt/workspace/tools/registry.json` + `/opt/workspace/tools/<name>.sh`（750，`wsandbox:workspace`）；`registry.json` 读写持 `.registry.lock`（多 worker 原子更新）
+- **执行门控**：自定义工具脚本与 `shell_exec`/`ws_job` 相同，`EXEC_ENABLED=0` 时 `execute_workspace_tool` 返回 `exec_disabled`；register/list/delete 不受限
 - **工具数组纪律**：仅 `mcp_search` / `mcp_load` / `mcp_call` 常驻；管理工具与非 resident 自定义工具经 `mcp_search('workspace')` 发现；`resident=true` 才并入 `get_workspace_tool_defs()`
 - **系统提示**：`chat/system_builder.py` 注入静态 `<tools_note>`（缓存友好）
 - **未做**：`workspace_app`（PR 4）、`schedule_reminder`、secrets `[KEY_n]` 注入自定义脚本
