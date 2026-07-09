@@ -1161,6 +1161,45 @@ def config_test_send():
 def api_test_page():
     return send_from_directory('/opt/frontend/static', 'api-test.html')
 
+def _gw_json_request(method, path, body=None, timeout=5):
+    """Call frontend-gw (5051) from app.py for repair utilities."""
+    import json as _json
+    import urllib.error
+    import urllib.request
+    url = 'http://127.0.0.1:5051' + path
+    data = _json.dumps(body).encode('utf-8') if body is not None else None
+    headers = {'Content-Type': 'application/json'} if data is not None else {}
+    req = urllib.request.Request(url, data=data, method=method, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read().decode('utf-8', 'ignore')
+            return _json.loads(raw) if raw else {}
+    except urllib.error.HTTPError as exc:
+        raw = exc.read().decode('utf-8', 'ignore')
+        try:
+            return _json.loads(raw) if raw else {'error': exc.code}
+        except Exception:
+            return {'error': raw or str(exc)}
+    except Exception as exc:
+        return {'error': str(exc)}
+
+
+def _gw_gen_lock_status():
+    data = _gw_json_request('GET', '/chat/lock')
+    if isinstance(data, dict) and 'busy' in data:
+        return data
+    return {'busy': None, 'age_sec': 0, 'error': data.get('error', 'unreachable')}
+
+
+def _gw_unlock_gen_lock(rounds=4):
+    """Force-release gen lock; repeat for multi-worker gunicorn."""
+    last = {}
+    for _ in range(max(1, int(rounds))):
+        last = _gw_json_request('POST', '/chat/cancel', {'force': True})
+    lock = _gw_gen_lock_status()
+    return {'cancel': last, 'lock': lock, 'ok': not lock.get('busy')}
+
+
 @app.route('/repair')
 def repair_page():
     return send_from_directory('/opt/frontend/static', 'repair.html')
@@ -1202,7 +1241,14 @@ def repair_status():
         'port_5051': port_open(5051),
         'port_5056': port_open(5056),
         'port_8000': port_open(8000),
+        'gen_lock': _gw_gen_lock_status(),
     })
+
+
+@app.route('/api/repair/unlock-gen', methods=['POST'])
+def repair_unlock_gen():
+    """Force-release chat generation lock (multi-worker safe-ish)."""
+    return jsonify(_gw_unlock_gen_lock())
 
 
 # ── EPUB upload & import ──

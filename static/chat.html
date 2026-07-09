@@ -1840,6 +1840,7 @@ function closeLb(){ document.getElementById('lb').classList.remove('show'); }
 
 loadMsgs(true);
 recoverChatState(false);
+applyGenRecoverFromUrl();
 setInterval(function(){ if(!window.historyMode) loadMsgs(false); }, 8000);
 
 // ── 倒计时任务浮窗 ─────────────────────────────────────────────
@@ -2021,6 +2022,19 @@ async function recoverChatState(aggressive){
 }
 async function clearStaleGenLock(){
   await recoverChatState(true);
+}
+function applyGenRecoverFromUrl(){
+  try{
+    var u=new URL(location.href);
+    if(u.searchParams.get('gen_recover')!=='1') return;
+    u.searchParams.delete('gen_recover');
+    history.replaceState(null,'',u.pathname+(u.search||'')+u.hash);
+    releaseGenLock(true);
+    sending=false;
+    setSendBtn('send');
+    hideTyping();
+    if(typeof loadMsgs==='function') loadMsgs(true);
+  }catch(e){}
 }
 function setSendBtn(mode) {
   var btn = document.getElementById('send-btn');

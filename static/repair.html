@@ -35,8 +35,22 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,'PingFang 
 .badge-ok{background:var(--green-bg);color:var(--green);}
 .badge-err{background:var(--red-bg);color:var(--red);}
 .badge-checking{background:var(--primary-bg);color:var(--primary);}
+.badge-warn{background:#fff6e8;color:#b07a20;}
 .refresh-btn{border:none;background:none;color:var(--muted);font-size:13px;cursor:pointer;padding:2px 6px;border-radius:6px;}
 .refresh-btn:hover{color:var(--primary);}
+
+/* 生成锁急救 */
+.fix-card{background:linear-gradient(135deg,#fff9f0,#fff);border:1px solid #f0dfc8;border-radius:14px;padding:14px 16px;margin-bottom:12px;}
+.fix-title{font-size:13px;font-weight:600;color:#8a5a18;margin-bottom:6px;display:flex;align-items:center;gap:6px;}
+.fix-desc{font-size:12px;color:var(--muted);line-height:1.5;margin-bottom:12px;}
+.fix-actions{display:flex;gap:8px;flex-wrap:wrap;}
+.fix-btn{font-size:12px;padding:8px 12px;border-radius:10px;border:none;cursor:pointer;font-weight:500;}
+.fix-btn-primary{background:#b07a20;color:#fff;}
+.fix-btn-primary:hover{background:#9a6818;}
+.fix-btn-secondary{background:var(--card);color:var(--text);border:1px solid var(--border);}
+.fix-btn-secondary:hover{border-color:#b07a20;color:#8a5a18;}
+.fix-btn:disabled{opacity:.5;cursor:not-allowed;}
+.fix-result{font-size:11px;color:var(--muted);margin-top:10px;min-height:16px;}
 
 /* 对话区 */
 .chat-area{flex:1;display:flex;flex-direction:column;gap:10px;margin-bottom:12px;}
@@ -93,7 +107,19 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,'PingFang 
       <div class="status-row"><span class="status-name">frontend-gw (5051)</span><span class="status-badge badge-checking" id="s-5051">检查中</span></div>
       <div class="status-row"><span class="status-name">codebase-mcp (5056)</span><span class="status-badge badge-checking" id="s-5056">检查中</span></div>
       <div class="status-row"><span class="status-name">ombre-brain (8000)</span><span class="status-badge badge-checking" id="s-8000">检查中</span></div>
+      <div class="status-row"><span class="status-name">聊天生成锁</span><span class="status-badge badge-checking" id="s-genlock">检查中</span></div>
     </div>
+  </div>
+
+  <!-- 生成锁急救 -->
+  <div class="fix-card">
+    <div class="fix-title"><i class="ti ti-lock-open"></i> 聊天卡在「仍在生成」？</div>
+    <div class="fix-desc">多半是 gateway 的 generation lock 没释放，或聊天页 <code>sending</code> 状态卡住。点下面按钮强制解锁并刷新聊天。</div>
+    <div class="fix-actions">
+      <button class="fix-btn fix-btn-primary" id="unlock-go-btn" onclick="unlockGenLock(true)"><i class="ti ti-refresh"></i> 解锁并打开聊天</button>
+      <button class="fix-btn fix-btn-secondary" id="unlock-btn" onclick="unlockGenLock(false)">仅解锁</button>
+    </div>
+    <div class="fix-result" id="fix-result"></div>
   </div>
 
   <!-- 对话区 -->
@@ -139,6 +165,11 @@ async function checkStatus() {
     el.textContent = '检查中';
     el.className = 'status-badge badge-checking';
   });
+  const lockEl = document.getElementById('s-genlock');
+  if (lockEl) {
+    lockEl.textContent = '检查中';
+    lockEl.className = 'status-badge badge-checking';
+  }
   try {
     const r = await fetch('/api/repair/status', {method:'GET'});
     if(r.ok) {
@@ -149,6 +180,7 @@ async function checkStatus() {
         el.textContent = ok ? '正常' : '异常';
         el.className = 'status-badge ' + (ok ? 'badge-ok' : 'badge-err');
       });
+      updateGenLockBadge(d.gen_lock || {});
     }
   } catch(e) {
     ['5050','5051','5056','8000'].forEach(p => {
@@ -156,6 +188,63 @@ async function checkStatus() {
       el.textContent = '无法检查';
       el.className = 'status-badge badge-err';
     });
+    if (lockEl) {
+      lockEl.textContent = '无法检查';
+      lockEl.className = 'status-badge badge-err';
+    }
+  }
+}
+
+function updateGenLockBadge(lock) {
+  const el = document.getElementById('s-genlock');
+  if (!el) return;
+  if (lock.error || lock.busy === null) {
+    el.textContent = '不可达';
+    el.className = 'status-badge badge-err';
+    return;
+  }
+  if (lock.busy) {
+    const age = typeof lock.age_sec === 'number' ? lock.age_sec : 0;
+    el.textContent = '占用 ' + age + 's';
+    el.className = 'status-badge badge-warn';
+    return;
+  }
+  el.textContent = '空闲';
+  el.className = 'status-badge badge-ok';
+}
+
+function setUnlockBusy(busy) {
+  const a = document.getElementById('unlock-btn');
+  const b = document.getElementById('unlock-go-btn');
+  if (a) a.disabled = busy;
+  if (b) b.disabled = busy;
+}
+
+async function unlockGenLock(goChat) {
+  const out = document.getElementById('fix-result');
+  setUnlockBusy(true);
+  if (out) out.textContent = '正在释放生成锁（多 worker 轮询）…';
+  try {
+    const r = await fetch('/api/repair/unlock-gen', {method:'POST'});
+    const d = await r.json();
+    const lock = d.lock || {};
+    updateGenLockBadge(lock);
+    if (!r.ok) {
+      if (out) out.textContent = '解锁请求失败：' + (d.error || r.status);
+      return;
+    }
+    if (lock.busy) {
+      if (out) out.textContent = '仍有 worker 显示占用（' + (lock.age_sec || '?') + 's）。可再点一次，或重启 frontend-gw。';
+      return;
+    }
+    if (out) out.textContent = '已解锁。' + (goChat ? ' 正在打开聊天并刷新…' : ' 可回到聊天页发送新消息。');
+    if (goChat) {
+      setTimeout(function(){ location.href = '/?gen_recover=1'; }, 400);
+    }
+  } catch (e) {
+    if (out) out.textContent = '连接失败：' + e.message;
+  } finally {
+    setUnlockBusy(false);
   }
 }
 
