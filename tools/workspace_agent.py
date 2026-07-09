@@ -1,8 +1,7 @@
 """
 workspace_agent.py — sandbox file tools for /opt/workspace (PR 1).
 
-Exposes shell_exec + ws_* tools to gateway.py. All paths are confined to
-WORKSPACE_ROOT. Does not include ws_job, workspace_app, or custom tool registry.
+Exposes shell_exec + ws_* + ws_job tools to gateway.py.
 """
 
 from __future__ import annotations
@@ -17,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from tools import workspace_executor
+from tools import workspace_jobs
 
 WORKSPACE_ROOT = Path(
     os.environ.get("WORKSPACE_ROOT", "/opt/workspace")
@@ -637,6 +637,32 @@ WORKSPACE_TOOL_DEFS = [
             },
         },
     },
+    {
+        "name": "ws_job",
+        "description": (
+            "后台任务：action=start 启动长命令并立刻返回 job id；action=status/tail/list/stop 查询或控制。"
+            "默认 notify=true，完成后会推送通知到聊天（不占用生成锁）。需要 EXEC_ENABLED=1。"
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["start", "status", "tail", "list", "stop"],
+                    "description": "操作类型，默认 status",
+                },
+                "cmd": {"type": "string", "description": "action=start 时的 shell 命令"},
+                "name": {"type": "string", "description": "可选任务标签"},
+                "id": {"type": "string", "description": "job id（status/tail/stop）"},
+                "lines": {"type": "integer", "description": "tail 行数，默认 80"},
+                "notify": {
+                    "type": "boolean",
+                    "description": "start 时完成后是否通知，默认 true",
+                },
+            },
+            "required": ["action"],
+        },
+    },
 ]
 
 WORKSPACE_TOOL_NAMES = {t["name"] for t in WORKSPACE_TOOL_DEFS}
@@ -646,11 +672,13 @@ def is_workspace_tool(name: str) -> bool:
     return name in WORKSPACE_TOOL_NAMES
 
 
-def call_tool(name: str, args: dict, caller: str = "fyodor_cc") -> str:
+def call_tool(name: str, args: dict, caller: str = "fyodor_cc", conversation_id: str = "") -> str:
     del caller
     args = args or {}
     if name == "shell_exec":
         return workspace_executor.run_exec(str(args.get("cmd") or ""), args.get("secrets"))
+    if name == "ws_job":
+        return workspace_jobs.ws_job(args, conversation_id=conversation_id)
     if name == "ws_ls":
         return _ws_ls(args)
     if name == "ws_read":

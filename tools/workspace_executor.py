@@ -126,6 +126,10 @@ def _blocked_reason(cmd: str) -> str | None:
     return None
 
 
+def blocked_reason(cmd: str) -> str | None:
+    return _blocked_reason(cmd)
+
+
 def run_exec(cmd: str, secrets: object | None = None) -> str:
     """Run one shell command in the sandbox, return JSON for the model."""
     del secrets  # PR 1: no [KEY_n] round-trip into subprocess env

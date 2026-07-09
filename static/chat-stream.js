@@ -103,7 +103,11 @@ async function streamReply(){
         } else if(ev.t==='text'){
           ensureTextNode();
           textBuf+=ev.d;
-        } else if(ev.t==='notice'){ showToast(ev.d); } else if(ev.t==='err'){ err=new Error(ev.d); }
+        } else if(ev.t==='notice'){ showToast(ev.d); }
+        else if(ev.t==='workspace_job'){
+          var jd=ev.d||{};
+          showToast((jd.preview||jd.job_id||'后台任务')+': '+(jd.status||'finished'));
+        } else if(ev.t==='err'){ err=new Error(ev.d); }
       }
       if(err) break;
     }
