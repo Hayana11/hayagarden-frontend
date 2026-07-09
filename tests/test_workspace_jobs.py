@@ -2,6 +2,7 @@
 
 import json
 import os
+import stat
 import sys
 import tempfile
 import unittest
@@ -51,9 +52,13 @@ class WorkspaceJobsTests(unittest.TestCase):
     def test_pending_events_persist_on_disk(self):
         self.wj.queue_event({"type": "job_finished", "meta": {"job_id": "job_disk"}})
         pending = Path(self.tmpdir.name) / ".jobs" / "events" / "pending.jsonl"
+        events_dir = pending.parent
         self.assertTrue(pending.exists())
         text = pending.read_text(encoding="utf-8")
         self.assertIn("job_disk", text)
+        mode = events_dir.stat().st_mode & 0o7777
+        self.assertEqual(mode & 0o770, 0o770)
+        self.assertTrue(mode & stat.S_ISGID)
         events = self.wj.drain_pending_events()
         self.assertEqual(len(events), 1)
         self.assertEqual(pending.read_text(encoding="utf-8"), "")

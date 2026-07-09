@@ -13,7 +13,7 @@ mkdir -p \
   "${WORKSPACE_ROOT}/artifacts/tool_outputs" \
   "${WORKSPACE_ROOT}/apps" \
   "${WORKSPACE_ROOT}/tools" \
-  "${WORKSPACE_ROOT}/.jobs"
+  "${WORKSPACE_ROOT}/.jobs/events"
 
 if ! getent group "${WORKSPACE_GROUP}" >/dev/null; then
   echo "==> Creating workspace group ${WORKSPACE_GROUP}"
@@ -44,6 +44,7 @@ find "${WORKSPACE_ROOT}" -type d -exec chmod 2770 {} +
 find "${WORKSPACE_ROOT}" -type f -exec chmod 660 {} + 2>/dev/null || true
 chmod 2770 "${WORKSPACE_ROOT}"
 chmod 2770 "${WORKSPACE_ROOT}/.jobs" || true
+chmod 2770 "${WORKSPACE_ROOT}/.jobs/events" || true
 
 # Tighten default umask for sandbox user (group-only writes)
 if [ -f "/home/${SANDBOX_USER}/.profile" ]; then

@@ -76,7 +76,7 @@ chat.html send()
 - **模块**：`tools/workspace_jobs.py`（`ws_job` start/status/tail/list/stop、10s sweep、`set_event_hook`）
 - **回程**：job 完成 → hook 写入 `chat_messages`（assistant + tool_calls）+ 入队 SSE；`/chat/stream` 开头与 `GET /workspace/job-events` drain 投递 `workspace_job` + `notice dup=1`。**不占用 `_gen_busy` 开新生成**
 - **前端**：`chat.html` 处理 `notice`/`workspace_job`、Job 卡样式；`sw.js` CACHE → `home-v52`
-- **多 worker**：`.jobs/.notify.lock` 防重复通知；待投递 SSE 事件写入 **`.jobs/events/pending.jsonl`**（文件锁原子 drain），任意 worker 的 `/chat/stream` 或 `/workspace/job-events` 均可取到
+- **多 worker**：`.jobs/.notify.lock` 防重复通知；待投递 SSE 写入 `.jobs/events/pending.jsonl`（`umask 007` + 2770/660 + `wsandbox:workspace` chown，文件锁原子 drain）
 - **tools/cc_board_check.py**：cron 夜巡（东八 02:00-08:00 每半小时），board 紧急/需求帖唤醒 CC；失败2次自动补占位回复退出重试（fail_counts 在 /var/log/cc_board_fail_counts）。
 
 ## 部署流

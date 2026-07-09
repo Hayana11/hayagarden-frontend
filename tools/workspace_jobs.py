@@ -55,11 +55,45 @@ def set_event_hook(hook: Callable[[dict[str, Any]], None] | None) -> None:
     _event_hook = hook
 
 
+def _harden_workspace_path(path: Path, *, is_dir: bool | None = None) -> None:
+    """Apply PR1 group-only permissions (2770 dir / 660 file, wsandbox:workspace)."""
+    import shutil
+    if is_dir is None:
+        is_dir = path.is_dir() or not path.exists()
+    mode = 0o2770 if is_dir else 0o660
+    try:
+        if is_dir:
+            path.mkdir(parents=True, exist_ok=True)
+        if path.exists():
+            os.chmod(path, mode)
+            shutil.chown(
+                path,
+                user=workspace_executor.EXEC_USER,
+                group=workspace_executor.EXEC_GROUP,
+            )
+    except Exception:
+        logger.warning("failed to harden sandbox path %s", path, exc_info=True)
+
+
+def _ensure_events_dir() -> None:
+    old_umask = os.umask(0o007)
+    try:
+        EVENTS_DIR.mkdir(parents=True, exist_ok=True)
+    finally:
+        os.umask(old_umask)
+    _harden_workspace_path(EVENTS_DIR, is_dir=True)
+
+
 @contextmanager
 def _with_events_lock():
     """Cross-worker file lock for pending SSE event queue."""
-    EVENTS_DIR.mkdir(parents=True, exist_ok=True)
-    lock_fh = open(EVENTS_LOCK_FILE, "w", encoding="utf-8")
+    _ensure_events_dir()
+    old_umask = os.umask(0o007)
+    try:
+        lock_fh = open(EVENTS_LOCK_FILE, "w", encoding="utf-8")
+    finally:
+        os.umask(old_umask)
+    _harden_workspace_path(EVENTS_LOCK_FILE, is_dir=False)
     try:
         fcntl.flock(lock_fh.fileno(), fcntl.LOCK_EX)
         yield
@@ -74,9 +108,13 @@ def queue_event(event: dict[str, Any]) -> None:
     """Append a pending delivery event to shared .jobs/events/pending.jsonl."""
     line = _json(event)
     with _with_events_lock():
-        EVENTS_DIR.mkdir(parents=True, exist_ok=True)
-        with PENDING_EVENTS_FILE.open("a", encoding="utf-8") as fh:
-            fh.write(line + "\n")
+        old_umask = os.umask(0o007)
+        try:
+            with PENDING_EVENTS_FILE.open("a", encoding="utf-8") as fh:
+                fh.write(line + "\n")
+        finally:
+            os.umask(old_umask)
+        _harden_workspace_path(PENDING_EVENTS_FILE, is_dir=False)
 
 
 def drain_pending_events() -> list[dict[str, Any]]:
@@ -112,13 +150,13 @@ def _emit_event(event: dict[str, Any]) -> None:
 
 
 def _ensure_jobs_dir() -> None:
-    JOBS_DIR.mkdir(parents=True, exist_ok=True)
+    old_umask = os.umask(0o007)
     try:
-        import shutil
-        shutil.chown(JOBS_DIR, user=workspace_executor.EXEC_USER,
-                     group=workspace_executor.EXEC_GROUP)
-    except Exception:
-        logger.warning("failed to chown jobs dir %s", JOBS_DIR, exc_info=True)
+        JOBS_DIR.mkdir(parents=True, exist_ok=True)
+    finally:
+        os.umask(old_umask)
+    _harden_workspace_path(JOBS_DIR, is_dir=True)
+    _ensure_events_dir()
 
 
 def _job_paths(job_id: str) -> tuple[Path, Path, Path]:
