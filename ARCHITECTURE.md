@@ -33,7 +33,7 @@ chat.html send()
 
 ### SSE 六事件约定（家里 t/d 信封，chatnest 语义）
 `think` / `text` / `tool_use`(执行前,含idx) / `tool_result`(执行后) / `trace_summary`(无思考时) / `done`+`err`；
-辅助：`usage`、`notice`、`tool_progress`(大参数生成进度)、`tool_call`(dup=1,旧前端兼容)。
+辅助：`usage`、`notice`、`workspace_job`（后台任务完成）、`tool_progress`(大参数生成进度)、`tool_call`(dup=1,旧前端兼容)。
 所有 provider（api_relay / claude_code / 未来 agent_sdk）统一发这套。协议注释在 gateway.py /chat/stream 上方。
 
 ## 配置真源
@@ -70,6 +70,13 @@ chat.html send()
 - **安全**：`EXEC_ENABLED=0` 时 `shell_exec` 与 `ws_diff` 的 git 模式均禁用；git 模式启用时使用 `--no-pager`、`--no-ext-diff`、`--no-textconv` 且忽略 global/system git 配置。子进程 `group=EXEC_GROUP`（默认 `workspace`）。
 - **与 workspace_server.py 分离**：白夜工作台（5052/5053）仍是人工运维面板，不承载 agent 主循环；沙箱工具不指向 `/opt/frontend` 生产代码。
 - **脱敏范围**：仅覆盖 `relay.manager` 主聊天/wake/workspace_chat 出站；`gateway._llm_one_liner`、DeepSeek fallback、`tools/repair_agent.py` 等直连 LLM 不在 PR 1 范围。
+
+### PR 2：ws_job 后台任务（2026-07-09）
+
+- **模块**：`tools/workspace_jobs.py`（`ws_job` start/status/tail/list/stop、10s sweep、`set_event_hook`）
+- **回程**：job 完成 → hook 写入 `chat_messages`（assistant + tool_calls）+ 入队 SSE；`/chat/stream` 开头与 `GET /workspace/job-events` drain 投递 `workspace_job` + `notice dup=1`。**不占用 `_gen_busy` 开新生成**
+- **前端**：`chat.html` 处理 `notice`/`workspace_job`、Job 卡样式；`sw.js` CACHE → `home-v52`
+- **多 worker**：`.jobs/.notify.lock` 防重复通知；待投递 SSE 写入 `.jobs/events/pending.jsonl`（`umask 007` + 2770/660 + `wsandbox:workspace` chown，文件锁原子 drain）
 - **tools/cc_board_check.py**：cron 夜巡（东八 02:00-08:00 每半小时），board 紧急/需求帖唤醒 CC；失败2次自动补占位回复退出重试（fail_counts 在 /var/log/cc_board_fail_counts）。
 
 ## 部署流

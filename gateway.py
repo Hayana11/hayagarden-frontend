@@ -9,9 +9,11 @@ from flask import Flask, request, jsonify
 import urllib.request, urllib.error, urllib.parse
 from codebase.client import CODEBASE_TOOLS, CODEBASE_READ_TOOLS, run_codebase_tool
 from tools import workspace_agent
+from tools import workspace_jobs
 
 app = Flask(__name__)
 DB_PATH    = '/opt/frontend/memories.db'
+_tool_ctx = threading.local()
 
 def _warmup_ombre_brain():
     """
@@ -32,6 +34,62 @@ def _warmup_ombre_brain():
     threading.Thread(target=_do_warmup, daemon=True).start()
 
 _warmup_ombre_brain()
+
+
+def _workspace_job_event_hook(event):
+    """Job 完成：入队 SSE/轮询事件，并写入 chat_messages（不触发新生成）。"""
+    workspace_jobs.queue_event(event)
+    if event.get('type') != 'job_finished':
+        return
+    try:
+        meta = event.get('meta') or {}
+        tc = [{
+            'name': 'ws_job',
+            'args': {'action': 'status', 'id': meta.get('job_id')},
+            'result': json.dumps({
+                'ok': True,
+                'job': meta,
+                'log_tail': event.get('log_tail', ''),
+            }, ensure_ascii=False),
+            'success': meta.get('status') == 'succeeded',
+            'job': meta,
+        }]
+        conn = sqlite3.connect(DB_PATH, timeout=5)
+        conn.execute(
+            "INSERT INTO chat_messages (author, content, tool_calls) VALUES ('assistant', ?, ?)",
+            (event.get('content', ''), json.dumps(tc, ensure_ascii=False)),
+        )
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+
+def _workspace_job_sse_payloads():
+    for ev in workspace_jobs.drain_pending_events():
+        if ev.get('type') != 'job_finished':
+            continue
+        meta = ev.get('meta') or {}
+        yield {
+            't': 'workspace_job',
+            'd': {
+                'job_id': meta.get('job_id'),
+                'status': meta.get('status'),
+                'preview': ev.get('preview', ''),
+                'log_tail': ev.get('log_tail', ''),
+                'exit_code': meta.get('exit_code'),
+            },
+        }
+        preview = ev.get('preview') or meta.get('job_id') or '后台任务'
+        yield {'t': 'notice', 'd': f'后台任务完成：{preview}', 'dup': 1}
+
+
+def _init_workspace_jobs():
+    workspace_jobs.set_event_hook(_workspace_job_event_hook)
+    workspace_jobs.start_sweep_thread()
+
+
+_init_workspace_jobs()
 STATIC_DIR = '/opt/frontend/static'
 
 import config_store
@@ -2473,7 +2531,8 @@ def run_tool(name, args, caller='fyodor_cc'):
             with urllib.request.urlopen(req, timeout=10) as r:
                 return r.read().decode()
         if workspace_agent.is_workspace_tool(name):
-            return workspace_agent.call_tool(name, args, caller=caller)
+            _cid = getattr(_tool_ctx, 'conversation_id', '') or 'default'
+            return workspace_agent.call_tool(name, args, caller=caller, conversation_id=_cid)
         if name.startswith('codebase_'):
             return run_codebase_tool(name, args)
         return '未知工具: ' + name
@@ -2999,7 +3058,7 @@ def api_tool_caption():
 #   t=tool_result    工具执行完成      d=tc_item(含result等) idx=轨迹下标
 #   t=trace_summary  整串工具一句摘要  d=文本（仅无thinking时生成）
 #   t=done / t=err   结束 / 错误
-#   （t=usage/notice 为家里自有辅助事件）
+#   （t=usage/notice/workspace_job 为家里自有辅助事件）
 # 所有 provider（relay / claude_code / 未来 agent_sdk）统一发这套。
 @app.route('/chat/stream', methods=['POST'])
 def chat_stream():
@@ -3105,6 +3164,9 @@ def chat_stream():
                     yield 'data: ' + json.dumps({'t': 'text', 'd': text}) + SSE_END
                 yield 'data: ' + json.dumps({'t': 'done', 'ok': bool(text)}) + SSE_END
                 return
+            _tool_ctx.conversation_id = 'hayana-chat'
+            for _jev in _workspace_job_sse_payloads():
+                yield 'data: ' + json.dumps(_jev, ensure_ascii=False) + SSE_END
             # 持有锁，必须在 finally 里释放（含 GeneratorExit / 客户端断开场景）
             text, thinking = None, None
             _released = [False]
@@ -3353,6 +3415,15 @@ def chat_stream():
             yield 'data: ' + json.dumps({'t': 'err', 'd': str(e)}) + SSE_END
     return Response(stream_with_context(generate()), mimetype='text/event-stream',
                     headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
+
+
+@app.route('/workspace/job-events', methods=['GET'])
+def workspace_job_events():
+    """轮询待投递的 workspace job 完成事件（与 /chat/stream 开头 drain 共用队列）。"""
+    events = []
+    for payload in _workspace_job_sse_payloads():
+        events.append(payload)
+    return jsonify({'events': events})
 
 
 @app.route('/push', methods=['POST'])

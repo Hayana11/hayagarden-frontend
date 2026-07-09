@@ -168,6 +168,14 @@ html.shot .msgs{padding-top:14px;padding-bottom:14px;}
 .tpill-kw{color:rgba(212,165,116,.95);font-weight:500;}
 /* Artifact card（费佳生成的 HTML/Markdown/Word 产物） */
 .artifact-card{background:var(--card);border:1px solid rgba(212,165,116,.28);border-radius:12px;margin:0 -2px 8px;padding:11px 12px;display:flex;align-items:center;gap:10px;}
+.job-card{background:var(--card);border:1px solid rgba(120,140,180,.25);border-radius:10px;margin:6px 0;padding:10px 12px;font-size:12.5px;}
+.job-card.ok{border-color:rgba(90,160,110,.35);}
+.job-card.fail{border-color:rgba(200,90,90,.35);}
+.job-card.run{border-color:rgba(120,140,180,.35);}
+.job-card-hd{display:flex;align-items:center;gap:6px;font-weight:600;margin-bottom:4px;}
+.job-card-st{opacity:.7;font-weight:500;}
+.job-card-id{opacity:.65;font-size:11px;margin-bottom:4px;}
+.job-card-log{margin:0;max-height:140px;overflow:auto;font-size:11px;white-space:pre-wrap;opacity:.85;background:rgba(0,0,0,.04);padding:6px 8px;border-radius:6px;}
 .artifact-icon{width:34px;height:34px;border-radius:9px;background:rgba(212,165,116,.14);color:rgba(212,165,116,.95);display:flex;align-items:center;justify-content:center;font-size:16px;flex-shrink:0;}
 .artifact-info{flex:1;min-width:0;}
 .artifact-title{font-size:13px;font-weight:600;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
@@ -870,7 +878,9 @@ var TOOL_LABELS = {
   log_period_event:'记录经期',set_self_trigger:'设定提醒',cancel_self_trigger:'取消提醒',
   get_wake_settings:'查唤醒设置',set_wake_settings:'改唤醒设置',web_search:'联网搜索',browse_github:'翻GitHub',get_location:'查看位置',get_device_status:'查手机状态',request_phone_screenshot:'手机截屏',read_webpage:'读网页',screenshot_chat:'聊天截图',save_to_gallery:'收藏进相册',recall_photo:'想起一张画面',
   get_todos:'看待办',add_todo:'加待办',get_countdowns:'看倒计时',get_ledger:'查记账',add_ledger:'记一笔',get_ledger_budget:'查月预算',
-  desire_add:'记欲望',desire_list:'翻欲望账本',desire_act:'碰欲望',desire_reflect:'照镜子',desire_history:'欲望足迹',issue_command:'倒计时任务'
+  desire_add:'记欲望',desire_list:'翻欲望账本',desire_act:'碰欲望',desire_reflect:'照镜子',desire_history:'欲望足迹',issue_command:'倒计时任务',
+  shell_exec:'沙箱命令',ws_job:'后台任务',ws_ls:'列沙箱目录',ws_read:'读沙箱文件',ws_write:'写沙箱文件',
+  ws_edit:'改沙箱文件',ws_patch:'批量改沙箱',ws_diff:'沙箱 diff'
 };
 var TOOL_FILE_ARG = {
   read_backend_file:'path', read_frontend_file:'path',
@@ -959,7 +969,9 @@ function toggleToolSession(hd){
 var CODE_TOOLS = {
   read_backend_file:1, read_frontend_file:1, write_frontend_file:1,
   str_replace_frontend_file:1, check_page_render:1, read_bot_config:1,
-  edit_bot_config:1, search_files:1
+  edit_bot_config:1, search_files:1,
+  codebase_read_file:1, codebase_patch:1, codebase_create_file:1, codebase_search_code:1,
+  shell_exec:1, ws_job:1, ws_read:1, ws_write:1, ws_edit:1, ws_patch:1, ws_diff:1
 };
 var TOOL_ICONS = {
   save_memory:'book', search_memories:'book',
@@ -1009,6 +1021,10 @@ function toolKeywords(tc){
     case 'codebase_patch': return a.path ? [a.path] : [];
     case 'codebase_explain_history': return a.keyword ? [a.keyword.slice(0,24)] : [];
     case 'codebase_git_view': return a.action ? [a.action] : [];
+    case 'ws_job': return a.action ? [a.action] : (a.id ? [a.id] : []);
+    case 'shell_exec': return a.cmd ? [String(a.cmd).slice(0,28)] : [];
+    case 'ws_read': case 'ws_write': case 'ws_edit': case 'ws_patch': case 'ws_diff':
+      return a.path ? [a.path] : (a.id ? [a.id] : []);
     default: return [];
   }
 }
@@ -1175,8 +1191,33 @@ function buildShotCardHtml(tc){
     '<a href="'+escHtml(src)+'" target="_blank" rel="noopener"><img src="'+escHtml(src)+'" alt="聊天截图" loading="lazy"></a>'+
   '</div>';
 }
+function buildWsJobCardHtml(tc){
+  var data = {};
+  try { data = JSON.parse(tc.result||'{}'); } catch(e) {}
+  if(tc.job) data = {ok:true, job:tc.job, log_tail:tc.log_tail||''};
+  var job = data.job || (data.ok && tc.args && tc.args.id ? {id:tc.args.id, status:'started'} : null);
+  if(!job && data.id) job = {id:data.id, status:data.status||'started'};
+  if(!job) return '';
+  var st = job.status || 'unknown';
+  var stCls = (st==='succeeded'||st==='started'||st==='running') ? 'ok' : (st==='failed' ? 'fail' : 'run');
+  var log = data.log || data.log_tail || '';
+  if(!log && tc.result && tc.name==='ws_job' && String(tc.result).indexOf('"log"')>=0){
+    try{ log = JSON.parse(tc.result).log||''; }catch(e){}
+  }
+  return '<div class="job-card '+stCls+'">'+
+    '<div class="job-card-hd"><i class="ti ti-terminal-2"></i> '+
+    escHtml(job.name||job.id||'后台任务')+
+    ' <span class="job-card-st">'+escHtml(st)+'</span></div>'+
+    (job.id?'<div class="job-card-id">'+escHtml(job.id)+'</div>':'')+
+    (log?'<pre class="job-card-log">'+escHtml(log.slice(-1200))+'</pre>':'')+
+  '</div>';
+}
 function buildToolResultBody(tc){
   if(tc.running) return '<div>执行中…</div>';
+  if(tc.name==='ws_job' && tc.result){
+    var jc = buildWsJobCardHtml(tc);
+    if(jc) return jc;
+  }
   if(tc.name==='get_location' && tc.result){
     var lc=buildLocationCardHtml(tc);
     if(lc) return lc;
@@ -2104,6 +2145,33 @@ function appendCacheInfo(){
   bwrap.appendChild(el);
 }
 
+var _wsJobPollTimer=null;
+function handleWorkspaceJobSse(ev){
+  if(!ev) return;
+  if(ev.t==='notice' && ev.d) showToast(ev.d);
+  if(ev.t==='workspace_job'){
+    var jd=ev.d||{};
+    var msg=(jd.preview||jd.job_id||'后台任务')+': '+(jd.status||'finished');
+    showToast(msg);
+    var lt=document.getElementById('live-tools');
+    if(lt && jd.log_tail){
+      lt.insertAdjacentHTML('beforeend',
+        '<div class="trace-summary-line"><i class="ti ti-terminal-2"></i> '+escHtml(msg)+'</div>');
+    }
+  }
+}
+function armWsJobPoll(){
+  if(_wsJobPollTimer) return;
+  _wsJobPollTimer=setInterval(async function(){
+    try{
+      var r=await fetch('/api/gw/workspace/job-events');
+      if(!r.ok) return;
+      var j=await r.json();
+      (j.events||[]).forEach(handleWorkspaceJobSse);
+    }catch(e){}
+  }, 8000);
+}
+
 async function retryStream(){
   var liveRow=document.getElementById('live-row');
   if(liveRow) liveRow.remove();
@@ -2285,6 +2353,16 @@ async function streamReply(){
           if(ti>=0 && ev.d) liveToolCalls[ti]=ev.d;
           renderLiveTools(liveToolCalls.some(function(t){return t.running;}));
           maybeFetchToolCaption(ti);
+          if(ti>=0 && ev.d && ev.d.name==='ws_job'){
+            try{
+              var jr=JSON.parse(ev.d.result||'{}');
+              if(jr.id && (jr.status==='started' || jr.ok)) armWsJobPoll();
+            }catch(e){}
+          }
+        } else if(ev.t==='notice'){
+          if(ev.d) showToast(ev.d);
+        } else if(ev.t==='workspace_job'){
+          handleWorkspaceJobSse(ev);
         } else if(ev.t==='trace_summary'){
           if(liveTools && ev.d)
             liveTools.insertAdjacentHTML('beforeend',

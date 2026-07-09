@@ -48,11 +48,11 @@ DRAWERS = {
         'label': '代码/文件',
         'tools': ['read_backend_file', 'search_files', 'read_frontend_file',
                   'write_frontend_file', 'str_replace_frontend_file', 'check_page_render',
-                  'shell_exec', 'ws_ls', 'ws_read', 'ws_write', 'ws_edit', 'ws_patch', 'ws_diff'],
+                  'shell_exec', 'ws_job', 'ws_ls', 'ws_read', 'ws_write', 'ws_edit', 'ws_patch', 'ws_diff'],
     },
     'workspace': {
         'label': '沙箱工作区',
-        'tools': ['shell_exec', 'ws_ls', 'ws_read', 'ws_write', 'ws_edit', 'ws_patch', 'ws_diff'],
+        'tools': ['shell_exec', 'ws_job', 'ws_ls', 'ws_read', 'ws_write', 'ws_edit', 'ws_patch', 'ws_diff'],
     },
     'self_config': {
         'label': '自我配置',
