@@ -67,6 +67,8 @@ TOOLS_NOTE = (
     "对话涉及这些能力时先 mcp_search，别在未搜索前说做不到。\n"
     "注册/列出/删除自定义工具：mcp_load server=workspace 看 schema，再用 mcp_call 调用。\n"
     "新工具默认 resident=false（不进工具列表，保持 prompt cache 稳定）；仅高频工具设 resident=true。\n"
+    "实时 UI 应用：在 /opt/workspace/apps/<id>/ 写 manifest.json 与代码，"
+    "用 workspace_app start；用户打开 /api/gw/workspace/apps/<id>/proxy/ 。\n"
     "</tools_note>"
 )
 

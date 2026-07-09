@@ -882,7 +882,8 @@ var TOOL_LABELS = {
   shell_exec:'沙箱命令',ws_job:'后台任务',ws_ls:'列沙箱目录',ws_read:'读沙箱文件',ws_write:'写沙箱文件',
   ws_edit:'改沙箱文件',ws_patch:'批量改沙箱',ws_diff:'沙箱 diff',
   mcp_search:'搜工具服务',mcp_load:'加载工具模式',mcp_call:'调用发现工具',
-  register_workspace_tool:'注册沙箱工具',list_workspace_tools:'列沙箱工具',delete_workspace_tool:'删沙箱工具'
+  register_workspace_tool:'注册沙箱工具',list_workspace_tools:'列沙箱工具',delete_workspace_tool:'删沙箱工具',
+  workspace_app:'沙箱应用'
 };
 var TOOL_FILE_ARG = {
   read_backend_file:'path', read_frontend_file:'path',
@@ -1029,6 +1030,7 @@ function toolKeywords(tc){
     case 'mcp_load': return a.server ? [a.server] : [];
     case 'mcp_call': return a.tool ? [a.tool] : [];
     case 'register_workspace_tool': return a.name ? [a.name] : [];
+    case 'workspace_app': return a.action ? [a.action, a.id || ''].filter(Boolean).slice(0, 2) : [];
     case 'ws_read': case 'ws_write': case 'ws_edit': case 'ws_patch': case 'ws_diff':
       return a.path ? [a.path] : (a.id ? [a.id] : []);
     default: return [];

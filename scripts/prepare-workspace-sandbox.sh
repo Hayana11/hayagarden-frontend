@@ -13,7 +13,8 @@ mkdir -p \
   "${WORKSPACE_ROOT}/artifacts/tool_outputs" \
   "${WORKSPACE_ROOT}/apps" \
   "${WORKSPACE_ROOT}/tools" \
-  "${WORKSPACE_ROOT}/.jobs/events"
+  "${WORKSPACE_ROOT}/.jobs/events" \
+  "${WORKSPACE_ROOT}/.jobs/app_runtime"
 
 if ! getent group "${WORKSPACE_GROUP}" >/dev/null; then
   echo "==> Creating workspace group ${WORKSPACE_GROUP}"
@@ -62,10 +63,22 @@ else
   chown "${SANDBOX_USER}:${WORKSPACE_GROUP}" "/home/${SANDBOX_USER}/.profile"
 fi
 
+# Gateway-owned app runtime — wsandbox must NOT write/delete runtime or lock files here.
+APP_RUNTIME_DIR="${WORKSPACE_ROOT}/.jobs/app_runtime"
+mkdir -p "${APP_RUNTIME_DIR}"
+if [ -n "${GATEWAY_USER}" ] && id "${GATEWAY_USER}" &>/dev/null; then
+  chown -R "${GATEWAY_USER}:${GATEWAY_USER}" "${APP_RUNTIME_DIR}"
+else
+  chown -R root:root "${APP_RUNTIME_DIR}"
+fi
+chmod 0750 "${APP_RUNTIME_DIR}"
+find "${APP_RUNTIME_DIR}" -type f \( -name '*.json' -o -name '*.lock' \) -exec chmod 640 {} + 2>/dev/null || true
+
 echo "==> Workspace sandbox ready"
 echo "    root:  ${WORKSPACE_ROOT} (2770, setgid)"
 echo "    user:  ${SANDBOX_USER}"
 echo "    group: ${WORKSPACE_GROUP}"
 echo "    gateway: ${GATEWAY_USER:-<not detected>}"
+echo "    app_runtime: ${APP_RUNTIME_DIR} (0750 gateway-owned, not wsandbox-writable)"
 echo "    EXEC_GROUP=${WORKSPACE_GROUP} (subprocess group=EXEC_GROUP)"
 echo "    EXEC_ENABLED defaults to 0 (shell_exec + git-mode ws_diff disabled)"
