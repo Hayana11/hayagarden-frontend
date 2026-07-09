@@ -14,6 +14,7 @@ import urllib.request
 import urllib.error
 from relay.capabilities import get_caps
 from relay.adapter import adapt_request
+from tools.relay_sanitize import sanitize_payload
 
 DB_PATH = '/opt/frontend/memories.db'
 
@@ -87,6 +88,7 @@ class RelayManager:
 
         caps = self.caps
         payload, headers = adapt_request(payload, headers, caps)
+        payload = sanitize_payload(payload)
 
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         req = urllib.request.Request(self.api_url, data=data, headers=headers)
@@ -113,6 +115,7 @@ class RelayManager:
 
         caps = self.caps
         payload, headers = adapt_request(payload, headers, caps)
+        payload = sanitize_payload(payload)
 
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         req = urllib.request.Request(self.api_url, data=data, headers=headers)

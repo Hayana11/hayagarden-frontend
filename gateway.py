@@ -8,6 +8,7 @@ if '/opt/frontend/tools' not in _sys.path:
 from flask import Flask, request, jsonify
 import urllib.request, urllib.error, urllib.parse
 from codebase.client import CODEBASE_TOOLS, CODEBASE_READ_TOOLS, run_codebase_tool
+from tools import workspace_agent
 
 app = Flask(__name__)
 DB_PATH    = '/opt/frontend/memories.db'
@@ -1169,7 +1170,7 @@ TOOLS = [
             'content': {'type': 'string', 'description': 'Markdown 格式的内容，会转换成 Word 文档'},
         },         'required': ['title', 'content']},
     },
-] + CALENDAR_TOOLS + DESIRE_TOOLS + CODEBASE_TOOLS
+] + workspace_agent.WORKSPACE_TOOL_DEFS + CALENDAR_TOOLS + DESIRE_TOOLS + CODEBASE_TOOLS
 
 # 抽屉定义与 TOOLS 的一致性校验（只打警告，不影响启动）
 for _dw in tool_drawers.validate(TOOLS):
@@ -2471,6 +2472,8 @@ def run_tool(name, args, caller='fyodor_cc'):
                 headers={'Content-Type': 'application/json', 'X-Admin': 'true'})
             with urllib.request.urlopen(req, timeout=10) as r:
                 return r.read().decode()
+        if workspace_agent.is_workspace_tool(name):
+            return workspace_agent.call_tool(name, args, caller=caller)
         if name.startswith('codebase_'):
             return run_codebase_tool(name, args)
         return '未知工具: ' + name

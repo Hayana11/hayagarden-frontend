@@ -48,10 +48,27 @@ chat.html send()
 
 ## 关键模块
 
-- **relay/**：manager（当前 relay 状态）、adapter（thinking/cache/tools/vision 按能力裁剪）、capabilities（URL 特征静态表 + DB 手动覆盖）。
+- **relay/**：manager（当前 relay 状态）、adapter（thinking/cache/tools/vision 按能力裁剪）、capabilities（URL 特征静态表 + DB 手动覆盖）、**relay_sanitize**（出站 payload 脱敏：API key/Bearer/.env 路径/陌生 IP → 占位符）。
 - **chat/**：system_builder（build_system/build_wake_system，含 ombre handoff 线程化超时）、response_parser。
-- **gateway.py 内**：TOOLS（29+工具定义）、run_tool（分发：灯走 mijia HTTP、记忆走 ombre、板子走 5050 API、文件走白名单）、_summarize_traces_sync/_llm_one_liner/_tool_caption（deepseek 轻摘要）、_cc_stream_gen（claude_code provider：跑 claude CLI 订阅）。
+- **gateway.py 内**：TOOLS（29+工具定义）、run_tool（分发：灯走 mijia HTTP、记忆走 ombre、板子走 5050 API、文件走白名单、**沙箱 ws_* 走 /opt/workspace**）、_summarize_traces_sync/_llm_one_liner/_tool_caption（deepseek 轻摘要）、_cc_stream_gen（claude_code provider：跑 claude CLI 订阅）。
 - **artifacts**：create_html/create_markdown/create_document 工具 → artifacts 表 → 独立卡片渲染。
+
+## Workspace 沙箱（2026-07-09，PR 1）
+
+主聊天通过 gateway `TOOLS` 暴露 7 个沙箱工具（`shell_exec` + `ws_*`），读写范围严格限制在 `/opt/workspace`：
+
+| 路径 | 用途 |
+|------|------|
+| `/opt/workspace/projects/` | 源码、脚本、venv |
+| `/opt/workspace/artifacts/tool_outputs/` | shell 长输出落盘 |
+| `/opt/workspace/apps/` | 预留（PR 4 workspace_app） |
+| `/opt/workspace/tools/` | 预留（PR 3 自造工具） |
+| `/opt/workspace/.jobs/` | 预留（PR 2 ws_job） |
+
+- **模块**：`tools/workspace_agent.py`（文件工具分发）、`tools/workspace_executor.py`（shell，默认 `EXEC_ENABLED=0`）、`tools/relay_sanitize.py`（relay 出站脱敏，接在 `adapt_request()` 之后）。
+- **部署**：`sudo ./scripts/prepare-workspace-sandbox.sh` 创建目录和 `wsandbox` 用户；`systemctl restart frontend-gw`。
+- **与 workspace_server.py 分离**：白夜工作台（5052/5053）仍是人工运维面板，不承载 agent 主循环；沙箱工具不指向 `/opt/frontend` 生产代码。
+- **脱敏范围**：仅覆盖 `relay.manager` 主聊天/wake/workspace_chat 出站；`gateway._llm_one_liner`、DeepSeek fallback、`tools/repair_agent.py` 等直连 LLM 不在 PR 1 范围。
 - **tools/cc_board_check.py**：cron 夜巡（东八 02:00-08:00 每半小时），board 紧急/需求帖唤醒 CC；失败2次自动补占位回复退出重试（fail_counts 在 /var/log/cc_board_fail_counts）。
 
 ## 部署流
