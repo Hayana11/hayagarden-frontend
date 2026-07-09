@@ -1,0 +1,13 @@
+# Python runtime deps for the Flask backend (app.py port 5050, gateway.py port 5051).
+# Installed system-wide in the Cloud VM so `python3 -m gunicorn app:app` works without a venv.
+flask
+gunicorn
+httpx
+requests
+qrcode
+python-frontmatter
+Pillow
+mcp
+# Optional (graceful-degrade if missing):
+#   jieba        -> gateway warmup / ombre-brain memory recall
+#   mijiaAPI     -> mijia light daemon (tools/mijia_daemon.py)
