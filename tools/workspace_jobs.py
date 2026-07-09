@@ -18,6 +18,7 @@ import threading
 import time
 import uuid
 from collections import deque
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -27,10 +28,11 @@ from tools import workspace_executor
 logger = logging.getLogger(__name__)
 
 JOBS_DIR = Path(workspace_executor.EXEC_CWD) / ".jobs"
+EVENTS_DIR = JOBS_DIR / "events"
+PENDING_EVENTS_FILE = EVENTS_DIR / "pending.jsonl"
+EVENTS_LOCK_FILE = EVENTS_DIR / ".events.lock"
 _JOB_ID_RE = re.compile(r"^job_[a-f0-9]{12}$")
 
-_pending_events: list[dict[str, Any]] = []
-_pending_lock = threading.Lock()
 _event_hook: Callable[[dict[str, Any]], None] | None = None
 _sweep_started = False
 _sweep_lock = threading.Lock()
@@ -53,15 +55,46 @@ def set_event_hook(hook: Callable[[dict[str, Any]], None] | None) -> None:
     _event_hook = hook
 
 
+@contextmanager
+def _with_events_lock():
+    """Cross-worker file lock for pending SSE event queue."""
+    EVENTS_DIR.mkdir(parents=True, exist_ok=True)
+    lock_fh = open(EVENTS_LOCK_FILE, "w", encoding="utf-8")
+    try:
+        fcntl.flock(lock_fh.fileno(), fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            fcntl.flock(lock_fh.fileno(), fcntl.LOCK_UN)
+        finally:
+            lock_fh.close()
+
+
 def queue_event(event: dict[str, Any]) -> None:
-    with _pending_lock:
-        _pending_events.append(event)
+    """Append a pending delivery event to shared .jobs/events/pending.jsonl."""
+    line = _json(event)
+    with _with_events_lock():
+        EVENTS_DIR.mkdir(parents=True, exist_ok=True)
+        with PENDING_EVENTS_FILE.open("a", encoding="utf-8") as fh:
+            fh.write(line + "\n")
 
 
 def drain_pending_events() -> list[dict[str, Any]]:
-    with _pending_lock:
-        events = list(_pending_events)
-        _pending_events.clear()
+    """Atomically read and clear all pending delivery events (any worker)."""
+    with _with_events_lock():
+        if not PENDING_EVENTS_FILE.exists():
+            return []
+        raw = PENDING_EVENTS_FILE.read_text(encoding="utf-8")
+        PENDING_EVENTS_FILE.write_text("", encoding="utf-8")
+    events: list[dict[str, Any]] = []
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            events.append(json.loads(line))
+        except Exception:
+            logger.warning("skipped corrupt pending event line: %s", line[:200])
     return events
 
 

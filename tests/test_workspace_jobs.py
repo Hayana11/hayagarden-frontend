@@ -5,6 +5,7 @@ import os
 import sys
 import tempfile
 import unittest
+from pathlib import Path
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if ROOT not in sys.path:
@@ -46,6 +47,16 @@ class WorkspaceJobsTests(unittest.TestCase):
         events = self.wj.drain_pending_events()
         self.assertEqual(len(events), 1)
         self.assertEqual(self.wj.drain_pending_events(), [])
+
+    def test_pending_events_persist_on_disk(self):
+        self.wj.queue_event({"type": "job_finished", "meta": {"job_id": "job_disk"}})
+        pending = Path(self.tmpdir.name) / ".jobs" / "events" / "pending.jsonl"
+        self.assertTrue(pending.exists())
+        text = pending.read_text(encoding="utf-8")
+        self.assertIn("job_disk", text)
+        events = self.wj.drain_pending_events()
+        self.assertEqual(len(events), 1)
+        self.assertEqual(pending.read_text(encoding="utf-8"), "")
 
 
 if __name__ == "__main__":
