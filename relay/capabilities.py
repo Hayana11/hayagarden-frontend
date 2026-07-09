@@ -51,13 +51,13 @@ CAPABILITIES = {
         "max_system_len": 30000,  # 实测 20800 字符 system 正常返回 200，留出安全余量
     },
     "treegpt": {
-        "thinking": False,
+        "thinking": True,   # 实测：1024+ budget 可返回原生 thinking block
         "cache": False,
         "tools": True,
-        "vision": False,  # 未实测，thinking 都不支持，保守起见先当作不支持
+        "vision": False,  # 未实测图片；先保守关闭，避免假装看图
         "stream": True,
         "beta_header": None,
-        "max_system_len": 10000,
+        "max_system_len": 30000,  # 实测 2.1 万字符 system + 工具可正常返回
     },
 }
 
