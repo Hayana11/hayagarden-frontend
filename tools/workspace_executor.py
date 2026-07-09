@@ -16,6 +16,7 @@ import uuid
 
 EXEC_ENABLED = os.environ.get("EXEC_ENABLED", "0") == "1"
 EXEC_USER = os.environ.get("EXEC_USER", "wsandbox")
+EXEC_GROUP = os.environ.get("EXEC_GROUP", "workspace")
 EXEC_CWD = os.environ.get("EXEC_CWD", "/opt/workspace")
 EXEC_TIMEOUT = int(os.environ.get("EXEC_TIMEOUT", "300"))
 
@@ -150,10 +151,10 @@ def run_exec(cmd: str, secrets: object | None = None) -> str:
 
     try:
         proc = subprocess.run(
-            ["/bin/bash", "-lc", cmd],
+            ["/bin/bash", "-lc", f"umask 007; {cmd}"],
             cwd=EXEC_CWD,
             user=EXEC_USER,
-            group=EXEC_USER,
+            group=EXEC_GROUP,
             extra_groups=[],
             env=EXEC_ENV,
             text=True,

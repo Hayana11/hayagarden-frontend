@@ -25,6 +25,7 @@ if ! id "${SANDBOX_USER}" &>/dev/null; then
   useradd --system --home "/home/${SANDBOX_USER}" --shell /bin/bash \
     --gid "${WORKSPACE_GROUP}" "${SANDBOX_USER}" || true
 else
+  usermod -g "${WORKSPACE_GROUP}" "${SANDBOX_USER}" 2>/dev/null || true
   usermod -aG "${WORKSPACE_GROUP}" "${SANDBOX_USER}" 2>/dev/null || true
 fi
 
@@ -60,4 +61,5 @@ echo "    root:  ${WORKSPACE_ROOT} (2770, setgid)"
 echo "    user:  ${SANDBOX_USER}"
 echo "    group: ${WORKSPACE_GROUP}"
 echo "    gateway: ${GATEWAY_USER:-<not detected>}"
+echo "    EXEC_GROUP=${WORKSPACE_GROUP} (subprocess group=EXEC_GROUP)"
 echo "    EXEC_ENABLED defaults to 0 (shell_exec + git-mode ws_diff disabled)"

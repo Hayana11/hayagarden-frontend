@@ -62,6 +62,11 @@ class WorkspacePathTests(unittest.TestCase):
         read_result = self.wa._ws_read({"path": str(target)})
         self.assertIn("hi", read_result)
 
+    def test_exec_group_defaults_to_workspace(self):
+        import tools.workspace_executor as ex
+        self.assertEqual(ex.EXEC_GROUP, "workspace")
+        self.assertNotEqual(ex.EXEC_GROUP, ex.EXEC_USER)
+
     def test_shell_exec_disabled_by_default(self):
         import tools.workspace_executor as ex
         result = ex.run_exec("echo hi")

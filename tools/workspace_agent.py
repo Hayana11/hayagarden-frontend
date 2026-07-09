@@ -96,7 +96,9 @@ print(json.dumps({
 
 _WS_WRITE_CODE = r'''
 import json
+import os
 from pathlib import Path
+os.umask(0o007)
 args = json.loads(__import__('sys').stdin.read() or '{}')
 path = Path(args['path'])
 content = args.get('content') or ''
@@ -120,7 +122,9 @@ print(json.dumps({
 
 _WS_EDIT_CODE = r'''
 import json
+import os
 from pathlib import Path
+os.umask(0o007)
 args = json.loads(__import__('sys').stdin.read() or '{}')
 path = Path(args['path'])
 old = args.get('old')
@@ -215,7 +219,9 @@ print(json.dumps({'ok': True, 'path': str(root), 'tree': '\n'.join(out),
 _WS_PATCH_CODE = r'''
 import hashlib
 import json
+import os
 from pathlib import Path
+os.umask(0o007)
 args = json.loads(__import__('sys').stdin.read() or '{}')
 edits = args.get('edits') or []
 contents = {}
@@ -287,7 +293,7 @@ GIT_SAFE_ENV = {
     'GIT_TERMINAL_PROMPT': '0',
 }
 GIT_SAFE_PREFIX = [
-    'git',
+    'git', '--no-pager',
     '-c', 'diff.external=',
     '-c', 'core.pager=cat',
     '-c', 'pager.diff=false',
@@ -301,6 +307,10 @@ def git_run(argv, cwd):
         capture_output=True,
         text=True,
     )
+def git_ok(proc, allow_diff=False):
+    if allow_diff:
+        return proc.returncode in (0, 1)
+    return proc.returncode == 0
 a = args.get('a')
 b = args.get('b')
 path = args.get('path')
@@ -326,13 +336,21 @@ if path:
     p = Path(path)
     base = p if p.is_dir() else p.parent
     top = git_run(['-C', str(base), 'rev-parse', '--show-toplevel'], cwd=str(base))
-    if top.returncode != 0:
-        print(json.dumps({'error': 'not_a_git_repo', 'path': str(base)}, ensure_ascii=False))
+    if not git_ok(top):
+        print(json.dumps({'error': 'not_a_git_repo', 'path': str(base),
+                          'detail': (top.stderr or '')[:300]}, ensure_ascii=False))
         raise SystemExit(0)
-    stat = git_run(['-C', str(base), 'diff', '--no-ext-diff', '--no-pager', '--stat', '--', str(p)],
+    stat = git_run(['-C', str(base), 'diff', '--no-ext-diff', '--stat', '--', str(p)],
                    cwd=str(base))
-    full = git_run(['-C', str(base), 'diff', '--no-ext-diff', '--no-pager', '--', str(p)],
+    full = git_run(['-C', str(base), 'diff', '--no-ext-diff', '--', str(p)],
                    cwd=str(base))
+    if not git_ok(stat, allow_diff=True) or not git_ok(full, allow_diff=True):
+        err = (stat.stderr or '') + (full.stderr or '')
+        print(json.dumps({'error': 'git_diff_failed',
+                          'stat_exit': stat.returncode,
+                          'full_exit': full.returncode,
+                          'detail': err[:500]}, ensure_ascii=False))
+        raise SystemExit(0)
     d, tr = cap(full.stdout)
     print(json.dumps({'ok': True, 'mode': 'git', 'repo': top.stdout.strip(),
                       'stat': stat.stdout, 'diff': d or '(clean)',
@@ -379,7 +397,7 @@ def _run_workspace_python(code: str, payload: dict[str, Any], *, timeout: int = 
             input=_json(payload),
             cwd=str(WORKSPACE_ROOT),
             user=workspace_executor.EXEC_USER,
-            group=workspace_executor.EXEC_USER,
+            group=workspace_executor.EXEC_GROUP,
             extra_groups=[],
             env=workspace_executor.EXEC_ENV,
             text=True,
