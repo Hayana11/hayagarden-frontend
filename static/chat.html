@@ -1465,10 +1465,13 @@ function buildHtml(list) {
         var ci = JSON.parse(m.cache_info);
         var hit = (ci.cache_read||0) > 0;
         var ciText = '';
-        if(hit){
+        if(ci.cache_supported===false){
+          ciText = '无服务端缓存';
+        } else if(hit){
           var ciTotal=(ci.input_tokens||0)+(ci.cache_read||0)+(ci.cache_creation||0);
           ciText = ciTotal>0 ? '命中缓存 '+Math.round(ci.cache_read/ciTotal*100)+'%' : '命中缓存 '+ci.cache_read;
         } else if(ci.cache_creation){ ciText = '建缓存 '+ci.cache_creation; }
+        else if(ci.cache_supported===true){ ciText = '缓存未命中'; }
         if(ciText) cacheInfoHtml = '<div class="cache-info">'+ciText+'</div>';
       }catch(e){}
     }
@@ -1846,7 +1849,7 @@ async function send(){
           }
         }
         await loadMsgs(false);
-        if(streamState.cacheRead||streamState.cacheCreate) appendCacheInfo();
+        if(streamState.cacheRead||streamState.cacheCreate||streamState.cacheSupported!==null) appendCacheInfo();
         if(fullText&&document.hidden) notify('Fyodor',fullText.slice(0,50));
         if(capturedThink&&capturedThink.trim()){
           (async function(){
@@ -2040,7 +2043,7 @@ setInterval(checkBlocked, 15000);
 
 // ── Msg actions & stop ──
 var streamAbort = null;
-var streamState = {cacheRead: 0, cacheCreate: 0, inputTokens: 0};
+var streamState = {cacheRead: 0, cacheCreate: 0, inputTokens: 0, cacheSupported: null};
 var _suppressLoadMsgs = false;
 function releaseGenLock(force){
   fetch('/api/gw/chat/cancel',{
@@ -2163,7 +2166,7 @@ async function doRegen(msgId) {
     } catch(e) { console.error('regen stream failed',e); }
     hideTyping();
     await loadMsgs(false);
-    if(streamState.cacheRead||streamState.cacheCreate) appendCacheInfo();
+    if(streamState.cacheRead||streamState.cacheCreate||streamState.cacheSupported!==null) appendCacheInfo();
   } catch(e) { console.error('doRegen',e); }
   sending = false; setSendBtn('send');
 }
@@ -2179,7 +2182,7 @@ async function doEdit(msgId, newContent) {
     try { await streamReply(); } catch(e) { console.error('doEdit stream failed',e); }
     hideTyping();
     await loadMsgs(false);
-    if(streamState.cacheRead||streamState.cacheCreate) appendCacheInfo();
+    if(streamState.cacheRead||streamState.cacheCreate||streamState.cacheSupported!==null) appendCacheInfo();
   } catch(e) { console.error('doEdit',e); }
   sending = false; setSendBtn('send');
 }
@@ -2202,10 +2205,14 @@ function appendCacheInfo(){
   if(!bwrap) return;
   var el=document.createElement('div');
   el.className='cache-info';
-  if(streamState.cacheRead>0){
+  if(streamState.cacheSupported===false){
+    el.textContent='无服务端缓存';
+  } else if(streamState.cacheRead>0){
     var total=streamState.inputTokens+streamState.cacheRead+streamState.cacheCreate;
     el.textContent=total>0?'命中缓存 '+Math.round(streamState.cacheRead/total*100)+'%':'命中缓存 '+streamState.cacheRead;
-  } else { el.textContent='建缓存 '+streamState.cacheCreate; }
+  } else if(streamState.cacheCreate>0){ el.textContent='建缓存 '+streamState.cacheCreate; }
+  else if(streamState.cacheSupported===true){ el.textContent='缓存未命中'; }
+  else { el.textContent='缓存状态未知'; }
   bwrap.appendChild(el);
 }
 
@@ -2246,7 +2253,7 @@ async function retryStream(){
   try{
     var _sr2=await streamReply(); var fullText=(_sr2&&_sr2.text)||'';
     await loadMsgs(false);
-    if(streamState.cacheRead||streamState.cacheCreate) appendCacheInfo();
+    if(streamState.cacheRead||streamState.cacheCreate||streamState.cacheSupported!==null) appendCacheInfo();
     if(fullText&&document.hidden) notify('Fyodor',fullText.slice(0,50));
   }catch(e){ if(!(e&&e.displayed)) console.error('retryStream',e); }
   hideTyping();
@@ -2254,7 +2261,7 @@ async function retryStream(){
 }
 
 async function streamReply(){
-  streamState.cacheRead=0; streamState.cacheCreate=0; streamState.inputTokens=0;
+  streamState.cacheRead=0; streamState.cacheCreate=0; streamState.inputTokens=0; streamState.cacheSupported=null;
   window._earlyThinkSummary=null;
   await clearStaleGenLock();
   var ctrl=new AbortController(); streamAbort=ctrl;
@@ -2445,6 +2452,7 @@ async function streamReply(){
           streamState.cacheRead+=ev.cache_read||0;
           streamState.cacheCreate+=ev.cache_creation||0;
           if(ev.input_tokens) streamState.inputTokens=Math.max(streamState.inputTokens,ev.input_tokens);
+          if(ev.cache_supported!==undefined) streamState.cacheSupported=ev.cache_supported;
         } else if(ev.t==='err'){
           ensureLiveRow();
           if(/仍在生成|generating/i.test(String(ev.d||''))) releaseGenLock(true);

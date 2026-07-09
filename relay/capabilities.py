@@ -52,7 +52,7 @@ CAPABILITIES = {
     },
     "treegpt": {
         "thinking": True,   # 实测：1024+ budget 可返回原生 thinking block
-        "cache": False,
+        "cache": True,      # 实测：cache_control + metadata.user_id 可读回 cache_read_input_tokens
         "tools": True,
         "vision": False,  # 未实测图片；先保守关闭，避免假装看图
         "stream": True,

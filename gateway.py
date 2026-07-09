@@ -817,6 +817,40 @@ def build_messages():
 
     return msgs
 
+
+def _add_cache_control_to_content(content):
+    """Attach a cache breakpoint to the last text block in a user message.
+
+    Anthropic prompt cache is prefix-based; placing this on the penultimate
+    user turn lets the provider cache everything before the current request.
+    Relays without cache support strip this in relay.adapter.
+    """
+    marker = {'type': 'ephemeral'}
+    if isinstance(content, str):
+        return [{'type': 'text', 'text': content, 'cache_control': marker}]
+    if isinstance(content, list):
+        out = [dict(b) if isinstance(b, dict) else b for b in content]
+        for i in range(len(out) - 1, -1, -1):
+            b = out[i]
+            if isinstance(b, dict) and b.get('type') == 'text' and b.get('text'):
+                b['cache_control'] = marker
+                return out
+    return content
+
+
+def _apply_rolling_cache_control(messages):
+    """BP4 rolling cache: mark the user turn before the current user turn."""
+    if not isinstance(messages, list):
+        return messages
+    user_idxs = [i for i, m in enumerate(messages) if isinstance(m, dict) and m.get('role') == 'user']
+    if len(user_idxs) < 2:
+        return messages
+    idx = user_idxs[-2]
+    msg = dict(messages[idx])
+    msg['content'] = _add_cache_control_to_content(msg.get('content', ''))
+    messages[idx] = msg
+    return messages
+
 def _strip_tool_blocks(messages):
     """去掉 messages 历史中的 thinking/tool_use/tool_result blocks（relay 不认识这些类型）。"""
     clean = []
@@ -838,7 +872,7 @@ def api_call(system, messages):
     if _use_guagua_safe:
         _system, _messages = _guagua_safe_context(system, messages)
     else:
-        _system, _messages = system, messages
+        _system, _messages = system, _apply_rolling_cache_control(messages)
         payload['tools'] = get_tools()
         payload['metadata'] = {'user_id': 'hayana-fyodor-stable'}
     payload['system'] = _system
@@ -3445,7 +3479,8 @@ def chat_stream():
             text, thinking = None, None
             _released = [False]
             _persisted = [False]
-            cache_read_total, cache_create_total = 0, 0
+            cache_read_total, cache_create_total, input_tokens_total = 0, 0, 0
+            cache_supported = None
             think_acc, text_acc, tool_calls_acc = [], [], []
 
             def _clean_text(raw):
@@ -3455,8 +3490,13 @@ def chat_stream():
             def _persist(p_text, p_thinking):
                 if not p_text or _persisted[0]:
                     return
-                _ci = (json.dumps({'cache_read': cache_read_total, 'cache_creation': cache_create_total})
-                       if (cache_read_total or cache_create_total) else '')
+                _ci_payload = {
+                    'cache_read': cache_read_total,
+                    'cache_creation': cache_create_total,
+                    'input_tokens': input_tokens_total,
+                    'cache_supported': cache_supported,
+                }
+                _ci = json.dumps(_ci_payload, ensure_ascii=False) if (cache_supported is not None or cache_read_total or cache_create_total or input_tokens_total) else ''
                 # 抽出选择器标签：正文去掉 [choices]…，choices 列存 JSON 数组
                 _pc, _choices = _extract_choices(p_text)
                 if _choices and not _pc:
@@ -3486,8 +3526,11 @@ def chat_stream():
                             break
                     yield 'data: ' + json.dumps({'t': 'memory_recall', 'd': {'count': len(_recall_items), 'items': _recall_items}}, ensure_ascii=False) + SSE_END
                 from relay.manager import relay as _chat_relay
+                cache_supported = bool((_chat_relay.caps or {}).get('cache'))
                 _thinking_ok = _model_supports_thinking()
-                _use_guagua_safe = _is_guagua_active()
+                _use_guagua_safe = _is_guagua_active() and os.environ.get('GUAGUA_SAFE_MODE') == '1'
+                if not _use_guagua_safe:
+                    messages = _apply_rolling_cache_control(messages)
                 if _use_guagua_safe:
                     system, messages = _guagua_safe_context(system, messages)
                 # 工具抽屉路由：默认关闭（TOOL_DRAWERS_ENABLED=0 时原样全量）
@@ -3520,6 +3563,7 @@ def chat_stream():
                             _u = (ev.get('message') or {}).get('usage') or {}
                             cache_read_total  += _u.get('cache_read_input_tokens', 0) or 0
                             cache_create_total += _u.get('cache_creation_input_tokens', 0) or 0
+                            input_tokens_total = max(input_tokens_total, _u.get('input_tokens', 0) or 0)
                         elif et == 'content_block_start':
                             cb  = ev.get('content_block', {}) or {}
                             cur = {'type': cb.get('type')}
@@ -3565,6 +3609,11 @@ def chat_stream():
                                 blocks.append(cur)
                                 cur = None
                         elif et == 'message_delta':
+                            _du = ev.get('usage') or {}
+                            if _du:
+                                cache_read_total += _du.get('cache_read_input_tokens', 0) or 0
+                                cache_create_total += _du.get('cache_creation_input_tokens', 0) or 0
+                                input_tokens_total = max(input_tokens_total, _du.get('input_tokens', 0) or 0)
                             stop_reason = (ev.get('delta', {}) or {}).get('stop_reason') or stop_reason
                         elif et == 'message_stop':
                             break
@@ -3629,8 +3678,8 @@ def chat_stream():
                 _ts = _summarize_traces_sync(tool_calls_acc)
                 if _ts:
                     yield 'data: ' + json.dumps({'t': 'trace_summary', 'd': _ts}) + SSE_END
-            if cache_read_total or cache_create_total:
-                yield 'data: ' + json.dumps({'t': 'usage', 'cache_read': cache_read_total, 'cache_creation': cache_create_total}) + SSE_END
+            if cache_supported is not None or cache_read_total or cache_create_total or input_tokens_total:
+                yield 'data: ' + json.dumps({'t': 'usage', 'cache_read': cache_read_total, 'cache_creation': cache_create_total, 'input_tokens': input_tokens_total, 'cache_supported': cache_supported}) + SSE_END
             yield 'data: ' + json.dumps({'t': 'done', 'ok': bool(text)}) + SSE_END
         except urllib.error.HTTPError as e:
             _ecode = e.code
