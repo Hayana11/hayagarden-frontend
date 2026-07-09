@@ -421,7 +421,7 @@ def chat_cancel():
 def drawers_preview():
     """调试用：看某句话会开哪些抽屉。GET /api/gw/drawers/preview?text=开灯"""
     text = (request.args.get('text') or '').strip()
-    selected, info = tool_drawers.select_tools(text, TOOLS)
+    selected, info = tool_drawers.select_tools(text, get_tools())
     return jsonify({
         'ok': True,
         'enabled': tool_drawers.enabled(),
@@ -630,6 +630,7 @@ _LARGE_RETURN_TOOLS = {
     'web_search', 'browse_github', 'read_webpage', 'get_activity_summary',
     'codebase_describe_project', 'codebase_read_file', 'codebase_search_code',
     'codebase_find_references', 'codebase_explain_history', 'codebase_git_view',
+    'mcp_load',
 }
 
 def _format_tool_history(tool_calls_json):
@@ -826,7 +827,7 @@ def api_call(system, messages):
         _system, _messages = _guagua_safe_context(system, messages)
     else:
         _system, _messages = system, messages
-        payload['tools'] = TOOLS
+        payload['tools'] = get_tools()
         payload['metadata'] = {'user_id': 'hayana-fyodor-stable'}
     payload['system'] = _system
     payload['messages'] = _messages
@@ -927,7 +928,7 @@ CALENDAR_TOOLS = [
     },
 ]
 
-TOOLS = [
+_BASE_TOOLS = [
     {
         'name': 'web_search',
         'description': '联网搜索。当哈娅问到你训练截止之后的事、需要最新信息（新闻/版本/价格/事实核查），或你不确定答案时使用。返回结果标题+摘要，你据此回答，并诚实说明信息来自网络搜索。',
@@ -1228,7 +1229,15 @@ TOOLS = [
             'content': {'type': 'string', 'description': 'Markdown 格式的内容，会转换成 Word 文档'},
         },         'required': ['title', 'content']},
     },
-] + workspace_agent.WORKSPACE_TOOL_DEFS + CALENDAR_TOOLS + DESIRE_TOOLS + CODEBASE_TOOLS
+] + CALENDAR_TOOLS + DESIRE_TOOLS + CODEBASE_TOOLS
+
+
+def get_tools():
+    """Gateway tool list: base + workspace (incl. mcp_* + resident custom)."""
+    return _BASE_TOOLS + workspace_agent.get_workspace_tool_defs()
+
+
+TOOLS = get_tools()
 
 # 抽屉定义与 TOOLS 的一致性校验（只打警告，不影响启动）
 for _dw in tool_drawers.validate(TOOLS):
@@ -3217,7 +3226,7 @@ def chat_stream():
                 if _use_guagua_safe:
                     system, messages = _guagua_safe_context(system, messages)
                 # 工具抽屉路由：默认关闭（TOOL_DRAWERS_ENABLED=0 时原样全量）
-                _turn_tools, _ = tool_drawers.select_tools_from_messages(messages, TOOLS)
+                _turn_tools, _ = tool_drawers.select_tools_from_messages(messages, get_tools())
                 for _round in range(5):
                     payload = {
                         'max_tokens': 16000,

@@ -489,6 +489,15 @@ def build_system(wake=False):
     system_blocks = [
         {'type': 'text', 'text': bp1_text, 'cache_control': {'type': 'ephemeral'}},
     ]
+    try:
+        from tools.workspace_registry import TOOLS_NOTE
+        system_blocks.append({
+            'type': 'text',
+            'text': TOOLS_NOTE,
+            'cache_control': {'type': 'ephemeral'},
+        })
+    except Exception:
+        pass
     if bp2_parts:
         system_blocks.append({
             'type': 'text',

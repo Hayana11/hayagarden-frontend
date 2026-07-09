@@ -880,7 +880,9 @@ var TOOL_LABELS = {
   get_todos:'看待办',add_todo:'加待办',get_countdowns:'看倒计时',get_ledger:'查记账',add_ledger:'记一笔',get_ledger_budget:'查月预算',
   desire_add:'记欲望',desire_list:'翻欲望账本',desire_act:'碰欲望',desire_reflect:'照镜子',desire_history:'欲望足迹',issue_command:'倒计时任务',
   shell_exec:'沙箱命令',ws_job:'后台任务',ws_ls:'列沙箱目录',ws_read:'读沙箱文件',ws_write:'写沙箱文件',
-  ws_edit:'改沙箱文件',ws_patch:'批量改沙箱',ws_diff:'沙箱 diff'
+  ws_edit:'改沙箱文件',ws_patch:'批量改沙箱',ws_diff:'沙箱 diff',
+  mcp_search:'搜工具服务',mcp_load:'加载工具模式',mcp_call:'调用发现工具',
+  register_workspace_tool:'注册沙箱工具',list_workspace_tools:'列沙箱工具',delete_workspace_tool:'删沙箱工具'
 };
 var TOOL_FILE_ARG = {
   read_backend_file:'path', read_frontend_file:'path',
@@ -1023,6 +1025,10 @@ function toolKeywords(tc){
     case 'codebase_git_view': return a.action ? [a.action] : [];
     case 'ws_job': return a.action ? [a.action] : (a.id ? [a.id] : []);
     case 'shell_exec': return a.cmd ? [String(a.cmd).slice(0,28)] : [];
+    case 'mcp_search': return a.query ? [String(a.query).slice(0,24)] : [];
+    case 'mcp_load': return a.server ? [a.server] : [];
+    case 'mcp_call': return a.tool ? [a.tool] : [];
+    case 'register_workspace_tool': return a.name ? [a.name] : [];
     case 'ws_read': case 'ws_write': case 'ws_edit': case 'ws_patch': case 'ws_diff':
       return a.path ? [a.path] : (a.id ? [a.id] : []);
     default: return [];

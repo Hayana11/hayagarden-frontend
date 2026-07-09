@@ -17,6 +17,7 @@ from typing import Any
 
 from tools import workspace_executor
 from tools import workspace_jobs
+from tools import workspace_registry
 
 WORKSPACE_ROOT = Path(
     os.environ.get("WORKSPACE_ROOT", "/opt/workspace")
@@ -668,8 +669,37 @@ WORKSPACE_TOOL_DEFS = [
 WORKSPACE_TOOL_NAMES = {t["name"] for t in WORKSPACE_TOOL_DEFS}
 
 
+def get_workspace_tool_defs() -> list[dict[str, Any]]:
+    """Static ws_* tools + mcp envelope + resident custom tools (re-read each call)."""
+    return (
+        list(WORKSPACE_TOOL_DEFS)
+        + list(workspace_registry.META_TOOL_DEFS)
+        + workspace_registry.build_resident_tool_defs()
+    )
+
+
 def is_workspace_tool(name: str) -> bool:
-    return name in WORKSPACE_TOOL_NAMES
+    if name in WORKSPACE_TOOL_NAMES:
+        return True
+    if name in workspace_registry.META_TOOL_NAMES:
+        return True
+    if name in workspace_registry.MGMT_TOOL_NAMES:
+        return True
+    return workspace_registry.is_registered_tool(name)
+
+
+def _dispatch_mgmt_or_custom(name: str, args: dict[str, Any]) -> str:
+    if name == "register_workspace_tool":
+        return workspace_registry.register_workspace_tool(args)
+    if name == "list_workspace_tools":
+        return workspace_registry.list_workspace_tools()
+    if name == "delete_workspace_tool":
+        return workspace_registry.delete_workspace_tool(args)
+    if workspace_registry.is_registered_tool(name):
+        result = workspace_registry.execute_workspace_tool(name, args)
+        if result is not None:
+            return result
+    return _json({"error": "unknown_workspace_tool", "name": name})
 
 
 def call_tool(name: str, args: dict, caller: str = "fyodor_cc", conversation_id: str = "") -> str:
@@ -679,6 +709,20 @@ def call_tool(name: str, args: dict, caller: str = "fyodor_cc", conversation_id:
         return workspace_executor.run_exec(str(args.get("cmd") or ""), args.get("secrets"))
     if name == "ws_job":
         return workspace_jobs.ws_job(args, conversation_id=conversation_id)
+    if name == "mcp_search":
+        return workspace_registry.mcp_search(args)
+    if name == "mcp_load":
+        return workspace_registry.mcp_load(args)
+    if name == "mcp_call":
+        return workspace_registry.mcp_call(
+            args,
+            conversation_id=conversation_id,
+            inner_dispatch=_dispatch_mgmt_or_custom,
+        )
+    if name in workspace_registry.MGMT_TOOL_NAMES:
+        return _dispatch_mgmt_or_custom(name, args)
+    if workspace_registry.is_registered_tool(name):
+        return _dispatch_mgmt_or_custom(name, args)
     if name == "ws_ls":
         return _ws_ls(args)
     if name == "ws_read":

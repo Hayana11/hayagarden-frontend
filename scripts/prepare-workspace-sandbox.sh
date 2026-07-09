@@ -45,6 +45,11 @@ find "${WORKSPACE_ROOT}" -type f -exec chmod 660 {} + 2>/dev/null || true
 chmod 2770 "${WORKSPACE_ROOT}"
 chmod 2770 "${WORKSPACE_ROOT}/.jobs" || true
 chmod 2770 "${WORKSPACE_ROOT}/.jobs/events" || true
+if [ ! -f "${WORKSPACE_ROOT}/tools/registry.json" ]; then
+  echo '{}' > "${WORKSPACE_ROOT}/tools/registry.json"
+  chown "${SANDBOX_USER}:${WORKSPACE_GROUP}" "${WORKSPACE_ROOT}/tools/registry.json" 2>/dev/null || true
+  chmod 660 "${WORKSPACE_ROOT}/tools/registry.json" 2>/dev/null || true
+fi
 
 # Tighten default umask for sandbox user (group-only writes)
 if [ -f "/home/${SANDBOX_USER}/.profile" ]; then
