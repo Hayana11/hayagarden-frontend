@@ -63,6 +63,34 @@ def _sandbox_uid() -> int | None:
         return None
 
 
+def _gateway_runtime_ids() -> tuple[int, int]:
+    """Runtime dir/files belong to the gateway service user, never wsandbox."""
+    env_user = (os.environ.get("GATEWAY_RUNTIME_USER") or os.environ.get("GATEWAY_USER") or "").strip()
+    if env_user:
+        try:
+            import pwd
+            pw = pwd.getpwnam(env_user)
+            return pw.pw_uid, pw.pw_gid
+        except (KeyError, ImportError):
+            pass
+    return os.getuid(), os.getgid()
+
+
+def _runtime_file_trusted(path: Path) -> bool:
+    """Reject runtime/lock files created or replaced by wsandbox."""
+    if not path.is_file():
+        return False
+    try:
+        st = path.stat()
+    except OSError:
+        return False
+    sandbox_uid = _sandbox_uid()
+    if sandbox_uid is not None and st.st_uid == sandbox_uid:
+        return False
+    gateway_uid, _ = _gateway_runtime_ids()
+    return st.st_uid == gateway_uid
+
+
 def _harden_path(path: Path, *, is_dir: bool | None = None) -> None:
     if is_dir is None:
         is_dir = path.is_dir() or not path.exists()
@@ -91,20 +119,27 @@ def ensure_apps_dir() -> None:
 
 
 def ensure_runtime_dir() -> None:
+    """Gateway-only writable dir (0750). Not wsandbox:workspace 2770."""
     old_umask = os.umask(0o077)
     try:
         RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
     finally:
         os.umask(old_umask)
+    uid, gid = _gateway_runtime_ids()
     try:
-        os.chmod(RUNTIME_DIR, 0o2770)
-        shutil.chown(
-            RUNTIME_DIR,
-            user=workspace_executor.EXEC_USER,
-            group=workspace_executor.EXEC_GROUP,
-        )
+        os.chmod(RUNTIME_DIR, 0o750)
+        os.chown(RUNTIME_DIR, uid, gid)
     except Exception:
-        logger.warning("failed to harden runtime dir %s", RUNTIME_DIR, exc_info=True)
+        logger.warning("failed to secure runtime dir %s", RUNTIME_DIR, exc_info=True)
+
+
+def _harden_gateway_runtime_file(path: Path) -> None:
+    uid, gid = _gateway_runtime_ids()
+    try:
+        os.chmod(path, 0o640)
+        os.chown(path, uid, gid)
+    except Exception:
+        logger.warning("failed to harden gateway runtime file %s", path, exc_info=True)
 
 
 def validate_app_id(app_id: str) -> str:
@@ -150,10 +185,7 @@ def _with_app_lock(app_id: str):
         lock_fh = open(runtime_lock_path(app_id), "w", encoding="utf-8")
     finally:
         os.umask(old_umask)
-    try:
-        os.chmod(runtime_lock_path(app_id), 0o640)
-    except Exception:
-        pass
+    _harden_gateway_runtime_file(runtime_lock_path(app_id))
     try:
         fcntl.flock(lock_fh.fileno(), fcntl.LOCK_EX)
         yield
@@ -183,7 +215,7 @@ def _write_secure_runtime(path: Path, data: dict[str, Any]) -> None:
     old_umask = os.umask(0o077)
     try:
         tmp_path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        os.chmod(tmp_path, 0o640)
+        _harden_gateway_runtime_file(tmp_path)
         tmp_path.replace(path)
     finally:
         os.umask(old_umask)
@@ -204,7 +236,7 @@ def load_manifest(app_id: str) -> dict[str, Any]:
 
 def read_runtime(app_id: str) -> dict[str, Any]:
     path = runtime_path(app_id)
-    if not path.is_file():
+    if not _runtime_file_trusted(path):
         return {}
     try:
         return _read_json(path)
@@ -311,6 +343,8 @@ def _proc_cwd(pid: int) -> str | None:
 
 def _verify_runtime(runtime: dict[str, Any], app_id: str) -> bool:
     """Accept only gateway-written runtime with a live wsandbox process in app dir."""
+    if not _runtime_file_trusted(runtime_path(app_id)):
+        return False
     if not runtime:
         return False
     if runtime.get("owner") != _RUNTIME_OWNER:

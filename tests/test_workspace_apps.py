@@ -143,7 +143,35 @@ class WorkspaceAppsTests(unittest.TestCase):
             self.wa.verified_proxy_upstream("nope")
         self.assertEqual(ctx.exception.code, "app_not_running")
 
-    def test_agent_includes_workspace_app(self):
+    def test_runtime_dir_gateway_owned(self):
+        self.wa.ensure_runtime_dir()
+        st = self.wa.RUNTIME_DIR.stat()
+        sandbox_uid = self.wa._sandbox_uid()
+        if sandbox_uid is not None:
+            self.assertNotEqual(st.st_uid, sandbox_uid)
+        self.assertEqual(st.st_mode & 0o777, 0o750)
+        gateway_uid, _ = self.wa._gateway_runtime_ids()
+        self.assertEqual(st.st_uid, gateway_uid)
+
+    def test_wsandbox_created_runtime_file_untrusted(self):
+        if not self._sandbox_ready:
+            self.skipTest("wsandbox/workspace not present (VPS-only integration test)")
+        self.wa.ensure_runtime_dir()
+        forged = self.wa.runtime_path("forged")
+        forged.write_text(json.dumps({
+            "owner": "gateway",
+            "runtime_nonce": "fakefakefakefake",
+            "id": "forged",
+            "pid": os.getpid(),
+            "pgid": os.getpid(),
+            "port": 24099,
+            "upstream": "http://127.0.0.1:24099",
+        }), encoding="utf-8")
+        ids = _sandbox_ids()
+        assert ids is not None
+        os.chown(forged, ids[0], ids[1])
+        self.assertFalse(self.wa._runtime_file_trusted(forged))
+        self.assertEqual(self.wa.read_runtime("forged"), {})
         names = {t["name"] for t in self.agent.get_workspace_tool_defs()}
         self.assertIn("workspace_app", names)
 
