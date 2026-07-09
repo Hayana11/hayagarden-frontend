@@ -18,6 +18,7 @@ from typing import Any
 from tools import workspace_executor
 from tools import workspace_jobs
 from tools import workspace_registry
+from tools import workspace_apps
 
 WORKSPACE_ROOT = Path(
     os.environ.get("WORKSPACE_ROOT", "/opt/workspace")
@@ -664,6 +665,30 @@ WORKSPACE_TOOL_DEFS = [
             "required": ["action"],
         },
     },
+    {
+        "name": "workspace_app",
+        "description": (
+            "管理 /opt/workspace/apps/ 下的实时网页应用（manifest.json + 本地 loopback 服务）。"
+            "用 ws_write/ws_patch 写好代码和 manifest 后，action=start 启动；"
+            "用户通过 proxy_url（/api/gw/workspace/apps/<id>/proxy/）访问。"
+            "start/stop/restart 需要 EXEC_ENABLED=1；失败时用 ws_read 看 log_path。"
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["list", "status", "start", "stop", "restart"],
+                    "description": "操作类型，默认 list",
+                },
+                "id": {"type": "string", "description": "app 目录名（除 list 外必填）"},
+                "force": {
+                    "type": "boolean",
+                    "description": "stop/restart 时 SIGKILL，默认 false",
+                },
+            },
+        },
+    },
 ]
 
 WORKSPACE_TOOL_NAMES = {t["name"] for t in WORKSPACE_TOOL_DEFS}
@@ -709,6 +734,8 @@ def call_tool(name: str, args: dict, caller: str = "fyodor_cc", conversation_id:
         return workspace_executor.run_exec(str(args.get("cmd") or ""), args.get("secrets"))
     if name == "ws_job":
         return workspace_jobs.ws_job(args, conversation_id=conversation_id)
+    if name == "workspace_app":
+        return workspace_apps.workspace_app(args)
     if name == "mcp_search":
         return workspace_registry.mcp_search(args)
     if name == "mcp_load":

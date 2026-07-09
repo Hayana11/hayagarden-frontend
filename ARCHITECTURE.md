@@ -61,7 +61,7 @@ chat.html send()
 |------|------|
 | `/opt/workspace/projects/` | 源码、脚本、venv |
 | `/opt/workspace/artifacts/tool_outputs/` | shell 长输出落盘 |
-| `/opt/workspace/apps/` | 预留（PR 4 workspace_app） |
+| `/opt/workspace/apps/` | 实时网页应用 manifest + loopback 服务（PR 4 `workspace_app`） |
 | `/opt/workspace/tools/` | 自定义沙箱工具 registry + `.sh`（PR 3） |
 | `/opt/workspace/.jobs/` | 预留（PR 2 ws_job） |
 
@@ -86,7 +86,16 @@ chat.html send()
 - **注册原子性**：脚本 tmp+rename 与 `registry.json` RMW 同在 `.registry.lock` 内
 - **工具数组纪律**：仅 `mcp_search` / `mcp_load` / `mcp_call` 常驻；管理工具与非 resident 自定义工具经 `mcp_search('workspace')` 发现；`resident=true` 才并入 `get_workspace_tool_defs()`
 - **系统提示**：`chat/system_builder.py` 注入静态 `<tools_note>`（缓存友好）
-- **未做**：`workspace_app`（PR 4）、`schedule_reminder`、secrets `[KEY_n]` 注入自定义脚本
+- **未做**：`schedule_reminder`、secrets `[KEY_n]` 注入自定义脚本
+
+### PR 4：workspace_app 实时应用（2026-07-09）
+
+- **模块**：`tools/workspace_apps.py`（`workspace_app` list/status/start/stop/restart、autostart）
+- **路径**：`/opt/workspace/apps/<id>/manifest.json` + 代码；`.runtime.json` / `.runtime.log` 记录进程
+- **代理**：`GET/POST … /api/gw/workspace/apps/<id>/proxy/<path>` → `127.0.0.1:$PORT`（仅 loopback）
+- **门控**：start/stop/restart 与 `shell_exec` 相同，需 `EXEC_ENABLED=1`；list/status 始终可用
+- **manifest**：`{id,name,port,entry,start,health?,autostart?}`；`start` 支持 `${PORT}`/`${APP_DIR}`/`${WORKSPACE}`
+- **前端**：`workspace_app` 工具标签；`sw.js` CACHE → `home-v54`
 
 - **tools/cc_board_check.py**：cron 夜巡（东八 02:00-08:00 每半小时），board 紧急/需求帖唤醒 CC；失败2次自动补占位回复退出重试（fail_counts 在 /var/log/cc_board_fail_counts）。
 
