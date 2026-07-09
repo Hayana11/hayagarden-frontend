@@ -176,6 +176,13 @@ html.shot .msgs{padding-top:14px;padding-bottom:14px;}
 .job-card-st{opacity:.7;font-weight:500;}
 .job-card-id{opacity:.65;font-size:11px;margin-bottom:4px;}
 .job-card-log{margin:0;max-height:140px;overflow:auto;font-size:11px;white-space:pre-wrap;opacity:.85;background:rgba(0,0,0,.04);padding:6px 8px;border-radius:6px;}
+.app-card{background:var(--card);border:1px solid rgba(90,150,180,.28);border-radius:10px;margin:6px 0;padding:10px 12px;font-size:12.5px;}
+.app-card-hd{display:flex;align-items:center;gap:7px;font-weight:600;margin-bottom:4px;color:var(--text);}
+.app-card-meta{color:var(--muted);font-size:11px;margin-bottom:8px;word-break:break-all;}
+.app-card-action{display:inline-flex;align-items:center;gap:5px;text-decoration:none;border:1px solid rgba(90,150,180,.35);background:rgba(90,150,180,.12);color:var(--text);border-radius:8px;padding:6px 10px;font-size:11.5px;}
+.app-card-action:hover{background:rgba(90,150,180,.2);}
+.inline-workspace-link{display:inline-flex;align-items:center;gap:3px;color:rgba(64,120,155,.95);text-decoration:none;border-bottom:1px solid rgba(64,120,155,.35);}
+.inline-workspace-link:hover{border-bottom-color:rgba(64,120,155,.75);}
 .artifact-icon{width:34px;height:34px;border-radius:9px;background:rgba(212,165,116,.14);color:rgba(212,165,116,.95);display:flex;align-items:center;justify-content:center;font-size:16px;flex-shrink:0;}
 .artifact-info{flex:1;min-width:0;}
 .artifact-title{font-size:13px;font-weight:600;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
@@ -784,6 +791,14 @@ function injectGalleryTokens(html){
            '<img src="'+url+'" alt="收藏的画面" loading="lazy"></a>';
   });
 }
+
+function linkWorkspaceUrls(html){
+  return String(html).replace(/(https?:\/\/[^\s<"]*\/api\/gw\/workspace\/apps\/[^\s<"]+|\/api\/gw\/workspace\/apps\/[A-Za-z0-9_-]+\/proxy\/[^\s<"]*)/g, function(url){
+    var tail = '';
+    while(/[，。,.!！?？)）\]】]$/.test(url)){ tail = url.slice(-1) + tail; url = url.slice(0,-1); }
+    return '<a class="inline-workspace-link" href="'+escAttr(url)+'" target="_blank" rel="noopener"><i class="ti ti-external-link"></i>'+escHtml(url)+'</a>'+escHtml(tail);
+  });
+}
 function renderContent(s, isFyodor){
   if(isFyodor && /<(div|details|summary|span)\b[^>]*style\s*=/i.test(s)){
     return injectGalleryTokens(s.replace(/(^[^<]+|>[^<]*(?=<|$))/g, function(m){ return m.replace(/\n/g,'<br>'); }));
@@ -792,12 +807,12 @@ function renderContent(s, isFyodor){
   var re=/```(\w*)\r?\n?([\s\S]*?)```/g, m;
   while((m=re.exec(s))!==null){
     var before=s.slice(lastIdx,m.index);
-    if(before) result+=escHtml(before);
+    if(before) result+=linkWorkspaceUrls(escHtml(before));
     result+=renderCodeBlock((m[1]||'').trim(), m[2]);
     lastIdx=m.index+m[0].length;
   }
   var after=s.slice(lastIdx);
-  if(after) result+=escHtml(after);
+  if(after) result+=linkWorkspaceUrls(escHtml(after));
   return injectGalleryTokens(result);
 }
 
@@ -974,7 +989,8 @@ var CODE_TOOLS = {
   str_replace_frontend_file:1, check_page_render:1, read_bot_config:1,
   edit_bot_config:1, search_files:1,
   codebase_read_file:1, codebase_patch:1, codebase_create_file:1, codebase_search_code:1,
-  shell_exec:1, ws_job:1, ws_read:1, ws_write:1, ws_edit:1, ws_patch:1, ws_diff:1
+  shell_exec:1, ws_job:1, ws_read:1, ws_write:1, ws_edit:1, ws_patch:1, ws_diff:1,
+  workspace_app:1, mcp_search:1, mcp_load:1, mcp_call:1
 };
 var TOOL_ICONS = {
   save_memory:'book', search_memories:'book',
@@ -1220,11 +1236,37 @@ function buildWsJobCardHtml(tc){
     (log?'<pre class="job-card-log">'+escHtml(log.slice(-1200))+'</pre>':'')+
   '</div>';
 }
+
+function buildWorkspaceAppCardHtml(tc){
+  var data = {};
+  try { data = JSON.parse(tc.result||'{}'); } catch(e) {}
+  var st = data.status || data.app || data;
+  if(!st || typeof st !== 'object') return '';
+  var id = st.id || (tc.args && tc.args.id) || '';
+  var name = st.name || id || '沙箱应用';
+  var url = st.proxy_url || (st.runtime && st.runtime.proxy_url) || data.proxy_url || '';
+  var running = st.running || st.runtime_status === 'running' || (st.runtime && st.runtime.status === 'running');
+  if(!url && id) url = '/api/gw/workspace/apps/'+encodeURIComponent(id)+'/proxy/';
+  if(!id && !url) return '';
+  var meta = [];
+  if(id) meta.push(id);
+  if(st.port) meta.push(':'+st.port);
+  meta.push(running ? 'running' : (st.runtime_status || 'stopped'));
+  return '<div class="app-card">'+
+    '<div class="app-card-hd"><i class="ti ti-browser"></i><span>'+escHtml(name)+'</span></div>'+
+    '<div class="app-card-meta">'+escHtml(meta.filter(Boolean).join(' · '))+'</div>'+
+    (url ? '<a class="app-card-action" href="'+escAttr(url)+'" target="_blank" rel="noopener"><i class="ti ti-external-link"></i>打开应用</a>' : '')+
+  '</div>';
+}
 function buildToolResultBody(tc){
   if(tc.running) return '<div>执行中…</div>';
   if(tc.name==='ws_job' && tc.result){
     var jc = buildWsJobCardHtml(tc);
     if(jc) return jc;
+  }
+  if(tc.name==='workspace_app' && tc.result){
+    var ac = buildWorkspaceAppCardHtml(tc);
+    if(ac) return ac;
   }
   if(tc.name==='get_location' && tc.result){
     var lc=buildLocationCardHtml(tc);
