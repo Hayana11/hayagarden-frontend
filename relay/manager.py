@@ -28,10 +28,10 @@ def _lookup_active_relay():
         return None
     try:
         conn = sqlite3.connect(DB_PATH, timeout=3)
-        row = conn.execute('SELECT url, key FROM relay_presets WHERE id=?', (active_id,)).fetchone()
+        row = conn.execute('SELECT url, key, default_model FROM relay_presets WHERE id=?', (active_id,)).fetchone()
         conn.close()
         if row and row[0]:
-            return {'url': row[0], 'key': row[1] or ''}
+            return {'url': row[0], 'key': row[1] or '', 'default_model': row[2] or ''}
     except Exception:
         pass
     return None
@@ -64,7 +64,8 @@ class RelayManager:
             self.api_url = active['url'] or self.api_url
             self.api_key = active['key'] or self.api_key
 
-        self.model = _cfg.get('MODEL')
+        global_model = _cfg.get('MODEL')
+        self.model = (active or {}).get('default_model') or global_model
         self.ws_model = _cfg.get('WS_MODEL')
 
     @property

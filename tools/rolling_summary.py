@@ -1,15 +1,15 @@
 #!/usr/bin/env python3.11
 """滚动对话摘要——每 15 分钟跑（cron）。
 
-解决的问题：build_messages 的实时窗口封顶 60 条。当今天聊得很长（动辄上百条），
+解决的问题：build_messages 的实时窗口按块裁剪。当今天聊得很长（动辄上百条），
 早于最近 60 条的那部分会直接滞出上下文——而 summarizer.py 只给*过去的天*做日摘要，
 所以同一天的长会话里，开头那段既不在窗口、也没日摘要，彻底丢。
 
 本脚本把“比实时窗口早、但在 HORIZON_DAYS 内”的那段历史压成一段滚动摘要，
-存进 rolling_summary 表；build_messages 在窗口被封顶（len==LIVE_N）时把它注入到开头。
+存进 rolling_summary 表；build_messages 只在块状裁剪真的发生时把它注入到开头。
 生成走后台 cron + 便宜的 DeepSeek，不占对话热路径。
 
-旋钮（config_store）：ROLLING_LIVE_N / ROLLING_HORIZON_DAYS / ROLLING_MAX_CHARS。
+旋钮（config_store）：ROLLING_LIVE_N / ROLLING_WINDOW_BLOCK / ROLLING_HORIZON_DAYS / ROLLING_MAX_CHARS。
 """
 import os, sys, sqlite3, datetime, json, re, time
 import urllib.request as _req
@@ -83,22 +83,40 @@ def _sample(rows, cap=60):
 
 def run():
     live_n  = _cfg.get_int('ROLLING_LIVE_N', 60)
+    block_n = _cfg.get_int('ROLLING_WINDOW_BLOCK', 20)
     horizon = _cfg.get_int('ROLLING_HORIZON_DAYS', 3)
     maxchar = _cfg.get_int('ROLLING_MAX_CHARS', 700)
     conn = _db()
     _ensure_table(conn)
 
-    # 实时窗口边界：第 live_n 新的消息 id（比它旧的就是会滞出窗口的）
-    boundary = conn.execute(
-        'SELECT id FROM chat_messages ORDER BY id DESC LIMIT 1 OFFSET ?',
-        (live_n - 1,)
-    ).fetchone()
-    if not boundary:
-        # 消息不足 live_n 条，窗口能装下全部，无需摘要；清空旧摘要
+    where = "date(created_at) >= date('now', '+8 hours', '-1 day')"
+    available = conn.execute(
+        'SELECT COUNT(*) FROM chat_messages WHERE ' + where
+    ).fetchone()[0] or 0
+    limit = available
+    if available > live_n:
+        limit = live_n + ((available - live_n) % max(1, block_n))
+    if limit <= 0:
+        limit = live_n
+
+    if available <= limit:
+        # 当前块还没发生裁剪，窗口能装下全部实时消息；不需要头部摘要。
         conn.execute("UPDATE rolling_summary SET summary='', up_to_id=0, msg_count=0, "
                      "updated_at=datetime('now','+8 hours') WHERE id=1")
         conn.commit(); conn.close()
-        _log('fewer than %d messages, cleared' % live_n)
+        _log('no cropped messages (available=%d limit=%d), cleared' % (available, limit))
+        return
+
+    # 实时窗口边界：第 limit 新的消息 id（比它旧的才是真正滞出窗口的）。
+    boundary = conn.execute(
+        'SELECT id FROM chat_messages WHERE ' + where + ' ORDER BY id DESC LIMIT 1 OFFSET ?',
+        (limit - 1,)
+    ).fetchone()
+    if not boundary:
+        conn.execute("UPDATE rolling_summary SET summary='', up_to_id=0, msg_count=0, "
+                     "updated_at=datetime('now','+8 hours') WHERE id=1")
+        conn.commit(); conn.close()
+        _log('no boundary (available=%d limit=%d), cleared' % (available, limit))
         return
     boundary_id = boundary['id']
 
@@ -118,6 +136,13 @@ def run():
                          "VALUES (1,'',?,0,datetime('now','+8 hours'))", (boundary_id,))
         conn.commit(); conn.close()
         _log('no pre-window messages within horizon')
+        return
+
+    up_to = rows[-1]['id']
+    current = conn.execute('SELECT summary, up_to_id, msg_count FROM rolling_summary WHERE id=1').fetchone()
+    if current and (current['summary'] or '').strip() and current['up_to_id'] == up_to:
+        conn.close()
+        _log('unchanged cropped boundary (up_to id=%d), skip' % up_to)
         return
 
     sampled = _sample(rows)
@@ -146,7 +171,6 @@ def run():
         conn.close()
         return
 
-    up_to = rows[-1]['id']
     conn.execute(
         "INSERT INTO rolling_summary (id, summary, up_to_id, msg_count, updated_at) "
         "VALUES (1, ?, ?, ?, datetime('now','+8 hours')) "

@@ -704,11 +704,26 @@ def _extract_choices(text):
 
 def build_messages():
     conn = get_db()
-    # 今天的所有对话 + 昨天最后5条（保持连续性），总不超过60条
+    # 今天的所有对话 + 昨天最后5条（保持连续性）。历史窗口按块裁剪：
+    # 60 条以后先继续增长到 79 条，攒满 20 条再一次裁掉一块。这样
+    # 缓存前缀不会因为每来一条新消息就从开头滑动一次。
+    _where = "date(created_at) >= date('now', '+8 hours', '-1 day')"
+    _window_base, _window_block = 60, 20
+    try:
+        _available = conn.execute(
+            "SELECT COUNT(*) FROM chat_messages WHERE " + _where
+        ).fetchone()[0] or 0
+    except Exception:
+        _available = _window_base
+    _limit = _available
+    if _available > _window_base:
+        _limit = _window_base + ((_available - _window_base) % _window_block)
+    if _limit <= 0:
+        _limit = _window_base
     rows = list(reversed(conn.execute(
         "SELECT author, content, image_url, created_at, tool_calls, file_url, file_name FROM chat_messages "
-        "WHERE date(created_at) >= date('now', '+8 hours', '-1 day') "
-        "ORDER BY id DESC LIMIT 60"
+        "WHERE " + _where + " ORDER BY id DESC LIMIT ?",
+        (_limit,),
     ).fetchall()))
     conn.close()
     _total = len(rows)
@@ -791,9 +806,9 @@ def build_messages():
         else:
             msgs.append({'role': role, 'content': content})
 
-    # 滚动摘要：当实时窗口被封顶（取满 60 条，说明有更早的内容滞出了），
-    # 把 tools/rolling_summary.py 后台生成的“连续性摘要”注入到开头，补上窗口外那段记忆。
-    if len(rows) >= 60:
+    # 滚动摘要：只有发生块状裁剪时才注入。增长期(61~79条)窗口里
+    # 仍保留全部实时消息，不注入摘要，避免重复内容和缓存头部抖动。
+    if _available > _limit:
         try:
             _rc = get_db()
             _rsrow = _rc.execute('SELECT summary FROM rolling_summary WHERE id=1').fetchone()
@@ -817,6 +832,66 @@ def build_messages():
 
     return msgs
 
+
+def _add_cache_control_to_content(content):
+    """Attach a cache breakpoint to the last text block in a user message.
+
+    Anthropic prompt cache is prefix-based; placing this on the penultimate
+    user turn lets the provider cache everything before the current request.
+    Relays without cache support strip this in relay.adapter.
+    """
+    marker = {'type': 'ephemeral'}
+    if isinstance(content, str):
+        return [{'type': 'text', 'text': content, 'cache_control': marker}]
+    if isinstance(content, list):
+        out = [dict(b) if isinstance(b, dict) else b for b in content]
+        for i in range(len(out) - 1, -1, -1):
+            b = out[i]
+            if isinstance(b, dict) and b.get('type') == 'text' and b.get('text'):
+                b['cache_control'] = marker
+                return out
+        for i in range(len(out) - 1, -1, -1):
+            b = out[i]
+            if isinstance(b, dict):
+                b['cache_control'] = marker
+                return out
+    return content
+
+
+def _apply_rolling_cache_control(messages):
+    """BP4 rolling cache: mark the user turn before the current user turn."""
+    if not isinstance(messages, list):
+        return messages
+    user_idxs = [i for i, m in enumerate(messages) if isinstance(m, dict) and m.get('role') == 'user']
+    if len(user_idxs) < 2:
+        return messages
+    idx = user_idxs[-2]
+    msg = dict(messages[idx])
+    msg['content'] = _add_cache_control_to_content(msg.get('content', ''))
+    messages[idx] = msg
+    return messages
+
+
+def _prepend_context_to_last_user(messages, context):
+    """Place volatile context after the history cache breakpoint."""
+    context = (context or '').strip()
+    if not context or not isinstance(messages, list):
+        return messages
+    for i in range(len(messages) - 1, -1, -1):
+        if messages[i].get('role') != 'user':
+            continue
+        msg = dict(messages[i])
+        content = msg.get('content')
+        if isinstance(content, str):
+            msg['content'] = context + '\n\n' + content
+        elif isinstance(content, list):
+            msg['content'] = [{'type': 'text', 'text': context}] + list(content)
+        else:
+            msg['content'] = context
+        messages[i] = msg
+        break
+    return messages
+
 def _strip_tool_blocks(messages):
     """去掉 messages 历史中的 thinking/tool_use/tool_result blocks（relay 不认识这些类型）。"""
     clean = []
@@ -838,7 +913,7 @@ def api_call(system, messages):
     if _use_guagua_safe:
         _system, _messages = _guagua_safe_context(system, messages)
     else:
-        _system, _messages = system, messages
+        _system, _messages = system, _apply_rolling_cache_control(messages)
         payload['tools'] = get_tools()
         payload['metadata'] = {'user_id': 'hayana-fyodor-stable'}
     payload['system'] = _system
@@ -3445,7 +3520,10 @@ def chat_stream():
             text, thinking = None, None
             _released = [False]
             _persisted = [False]
-            cache_read_total, cache_create_total = 0, 0
+            cache_read_total, cache_create_total, input_tokens_total, output_tokens_total = 0, 0, 0, 0
+            cache_create_5m_total, cache_create_1h_total = 0, 0
+            cache_supported = None
+            stream_started_at = time.monotonic()
             think_acc, text_acc, tool_calls_acc = [], [], []
 
             def _clean_text(raw):
@@ -3455,8 +3533,17 @@ def chat_stream():
             def _persist(p_text, p_thinking):
                 if not p_text or _persisted[0]:
                     return
-                _ci = (json.dumps({'cache_read': cache_read_total, 'cache_creation': cache_create_total})
-                       if (cache_read_total or cache_create_total) else '')
+                _ci_payload = {
+                    'cache_read': cache_read_total,
+                    'cache_creation': cache_create_total,
+                    'cache_creation_5m': cache_create_5m_total,
+                    'cache_creation_1h': cache_create_1h_total,
+                    'input_tokens': input_tokens_total,
+                    'output_tokens': output_tokens_total,
+                    'elapsed_sec': round(max(0.0, time.monotonic() - stream_started_at), 3),
+                    'cache_supported': cache_supported,
+                }
+                _ci = json.dumps(_ci_payload, ensure_ascii=False) if (cache_supported is not None or cache_read_total or cache_create_total or input_tokens_total) else ''
                 # 抽出选择器标签：正文去掉 [choices]…，choices 列存 JSON 数组
                 _pc, _choices = _extract_choices(p_text)
                 if _choices and not _pc:
@@ -3472,22 +3559,20 @@ def chat_stream():
                 _persisted[0] = True
                 _write_session_memo(_uc, _pc)
             try:
-                system   = build_system()
+                system, dynamic_context = build_system(split_dynamic=True)
                 messages = build_messages()
                 _recall, _recall_items = _recall_memories(_uc) if _uc else ('', [])
-                if _recall and messages:
-                    for _mi in range(len(messages) - 1, -1, -1):
-                        if messages[_mi].get('role') == 'user':
-                            _mc = messages[_mi].get('content')
-                            if isinstance(_mc, str):
-                                messages[_mi]['content'] = _recall + _mc
-                            elif isinstance(_mc, list):
-                                messages[_mi]['content'] = [{'type': 'text', 'text': _recall}] + _mc
-                            break
+                if _recall:
                     yield 'data: ' + json.dumps({'t': 'memory_recall', 'd': {'count': len(_recall_items), 'items': _recall_items}}, ensure_ascii=False) + SSE_END
                 from relay.manager import relay as _chat_relay
+                cache_supported = bool((_chat_relay.caps or {}).get('cache'))
                 _thinking_ok = _model_supports_thinking()
-                _use_guagua_safe = _is_guagua_active()
+                _use_guagua_safe = _is_guagua_active() and os.environ.get('GUAGUA_SAFE_MODE') == '1'
+                if not _use_guagua_safe:
+                    messages = _apply_rolling_cache_control(messages)
+                volatile_context = '\n\n'.join(p for p in (dynamic_context, _recall) if p and p.strip())
+                if volatile_context:
+                    messages = _prepend_context_to_last_user(messages, volatile_context)
                 if _use_guagua_safe:
                     system, messages = _guagua_safe_context(system, messages)
                 # 工具抽屉路由：默认关闭（TOOL_DRAWERS_ENABLED=0 时原样全量）
@@ -3507,6 +3592,10 @@ def chat_stream():
                     # relay adapter 自动根据 relay 能力裁剪 thinking/cache/tools
                     resp = _chat_relay.call_stream(payload, timeout=300)
                     blocks, cur, stop_reason = [], None, None
+                    round_cache_read = 0
+                    round_cache_create = 0
+                    round_cache_create_5m = 0
+                    round_cache_create_1h = 0
                     for raw in resp:
                         line = raw.decode('utf-8', 'ignore').strip()
                         if not line.startswith('data:'):
@@ -3518,8 +3607,13 @@ def chat_stream():
                         et = ev.get('type')
                         if et == 'message_start':
                             _u = (ev.get('message') or {}).get('usage') or {}
-                            cache_read_total  += _u.get('cache_read_input_tokens', 0) or 0
-                            cache_create_total += _u.get('cache_creation_input_tokens', 0) or 0
+                            round_cache_read = max(round_cache_read, _u.get('cache_read_input_tokens', 0) or 0)
+                            round_cache_create = max(round_cache_create, _u.get('cache_creation_input_tokens', 0) or 0)
+                            _cc = _u.get('cache_creation') or {}
+                            round_cache_create_5m = max(round_cache_create_5m, _cc.get('ephemeral_5m_input_tokens', 0) or 0)
+                            round_cache_create_1h = max(round_cache_create_1h, _cc.get('ephemeral_1h_input_tokens', 0) or 0)
+                            input_tokens_total = max(input_tokens_total, _u.get('input_tokens', 0) or 0)
+                            output_tokens_total = max(output_tokens_total, _u.get('output_tokens', 0) or 0)
                         elif et == 'content_block_start':
                             cb  = ev.get('content_block', {}) or {}
                             cur = {'type': cb.get('type')}
@@ -3565,9 +3659,22 @@ def chat_stream():
                                 blocks.append(cur)
                                 cur = None
                         elif et == 'message_delta':
+                            _du = ev.get('usage') or {}
+                            if _du:
+                                round_cache_read = max(round_cache_read, _du.get('cache_read_input_tokens', 0) or 0)
+                                round_cache_create = max(round_cache_create, _du.get('cache_creation_input_tokens', 0) or 0)
+                                _dcc = _du.get('cache_creation') or {}
+                                round_cache_create_5m = max(round_cache_create_5m, _dcc.get('ephemeral_5m_input_tokens', 0) or 0)
+                                round_cache_create_1h = max(round_cache_create_1h, _dcc.get('ephemeral_1h_input_tokens', 0) or 0)
+                                input_tokens_total = max(input_tokens_total, _du.get('input_tokens', 0) or 0)
+                                output_tokens_total = max(output_tokens_total, _du.get('output_tokens', 0) or 0)
                             stop_reason = (ev.get('delta', {}) or {}).get('stop_reason') or stop_reason
                         elif et == 'message_stop':
                             break
+                    cache_read_total += round_cache_read
+                    cache_create_total += round_cache_create
+                    cache_create_5m_total += round_cache_create_5m
+                    cache_create_1h_total += round_cache_create_1h
                     tool_uses = [b for b in blocks if b.get('type') == 'tool_use']
                     if stop_reason == 'tool_use' and not tool_uses:
                         continue
@@ -3629,8 +3736,9 @@ def chat_stream():
                 _ts = _summarize_traces_sync(tool_calls_acc)
                 if _ts:
                     yield 'data: ' + json.dumps({'t': 'trace_summary', 'd': _ts}) + SSE_END
-            if cache_read_total or cache_create_total:
-                yield 'data: ' + json.dumps({'t': 'usage', 'cache_read': cache_read_total, 'cache_creation': cache_create_total}) + SSE_END
+            if cache_supported is not None or cache_read_total or cache_create_total or input_tokens_total or output_tokens_total:
+                _elapsed_sec = round(max(0.0, time.monotonic() - stream_started_at), 3)
+                yield 'data: ' + json.dumps({'t': 'usage', 'cache_read': cache_read_total, 'cache_creation': cache_create_total, 'cache_creation_5m': cache_create_5m_total, 'cache_creation_1h': cache_create_1h_total, 'input_tokens': input_tokens_total, 'output_tokens': output_tokens_total, 'elapsed_sec': _elapsed_sec, 'cache_supported': cache_supported}) + SSE_END
             yield 'data: ' + json.dumps({'t': 'done', 'ok': bool(text)}) + SSE_END
         except urllib.error.HTTPError as e:
             _ecode = e.code

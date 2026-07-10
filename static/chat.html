@@ -176,6 +176,13 @@ html.shot .msgs{padding-top:14px;padding-bottom:14px;}
 .job-card-st{opacity:.7;font-weight:500;}
 .job-card-id{opacity:.65;font-size:11px;margin-bottom:4px;}
 .job-card-log{margin:0;max-height:140px;overflow:auto;font-size:11px;white-space:pre-wrap;opacity:.85;background:rgba(0,0,0,.04);padding:6px 8px;border-radius:6px;}
+.app-card{background:var(--card);border:1px solid rgba(90,150,180,.28);border-radius:10px;margin:6px 0;padding:10px 12px;font-size:12.5px;}
+.app-card-hd{display:flex;align-items:center;gap:7px;font-weight:600;margin-bottom:4px;color:var(--text);}
+.app-card-meta{color:var(--muted);font-size:11px;margin-bottom:8px;word-break:break-all;}
+.app-card-action{display:inline-flex;align-items:center;gap:5px;text-decoration:none;border:1px solid rgba(90,150,180,.35);background:rgba(90,150,180,.12);color:var(--text);border-radius:8px;padding:6px 10px;font-size:11.5px;}
+.app-card-action:hover{background:rgba(90,150,180,.2);}
+.inline-workspace-link{display:inline-flex;align-items:center;gap:3px;color:rgba(64,120,155,.95);text-decoration:none;border-bottom:1px solid rgba(64,120,155,.35);}
+.inline-workspace-link:hover{border-bottom-color:rgba(64,120,155,.75);}
 .artifact-icon{width:34px;height:34px;border-radius:9px;background:rgba(212,165,116,.14);color:rgba(212,165,116,.95);display:flex;align-items:center;justify-content:center;font-size:16px;flex-shrink:0;}
 .artifact-info{flex:1;min-width:0;}
 .artifact-title{font-size:13px;font-weight:600;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
@@ -305,14 +312,25 @@ html[data-theme=dark] .tsess{background:rgba(212,165,116,.04);border-left-color:
 .empty-tip{text-align:center;color:var(--muted);padding:60px 20px;font-size:13px;line-height:2.4;}
 
 /* ── Cache info & stream error ── */
-.cache-info{font-size:11px;color:#aaa;margin-top:4px;padding:0 4px;}
+.cache-info{display:flex;align-items:center;gap:7px;flex-wrap:wrap;font-size:10.5px;color:var(--muted);opacity:.68;width:100%;margin-top:3px;padding:0 4px;}
+.cache-info .ci-item{display:inline-flex;align-items:center;gap:3px;white-space:nowrap;}
+.cache-info .ci-hit{color:rgba(86,150,112,.95);}
+.cache-info .ci-build{color:rgba(170,128,72,.95);}
+.cache-info .ci-miss{color:rgba(145,120,160,.9);}
+.cache-info .ci-off{opacity:.72;}
 .stream-err-wrap{padding:10px 14px;color:#c0392b;}
 .stream-err-retry{display:inline-block;margin-top:6px;font-size:12px;cursor:pointer;background:none;border:1px solid #c0392b;color:#c0392b;border-radius:4px;padding:3px 10px;}
 
 /* ── Typing indicator ── */
 #typing{display:none;padding:0 20px 4px;flex-shrink:0;}
-.typing-dots{display:inline-flex;gap:5px;align-items:center;padding:4px 0;background:transparent;border-radius:0;}
+.typing-line{display:flex;align-items:center;gap:9px;min-height:18px;}
+.typing-dots{display:inline-flex;gap:5px;align-items:center;padding:4px 0;background:transparent;border-radius:0;flex:0 0 auto;}
 .typing-dots span{width:6px;height:6px;border-radius:50%;background:rgba(124,106,138,.5);display:block;}
+.send-status{font-size:12px;line-height:1.25;color:rgba(86,72,96,.68);white-space:nowrap;}
+.send-status.status-sending{color:rgba(126,92,145,.82);}
+.send-status.status-working{color:rgba(86,72,96,.72);}
+.send-status.status-tools{color:rgba(94,124,96,.88);}
+.send-status.status-error{color:#c0392b;}
 .typing-dots span:nth-child(1){animation:dp 1.2s infinite 0s;}
 .typing-dots span:nth-child(2){animation:dp 1.2s infinite .22s;}
 .typing-dots span:nth-child(3){animation:dp 1.2s infinite .44s;}
@@ -531,7 +549,10 @@ html[data-theme=dark] .ni{color:#6a5f5f;}
   <div class="msg-row fy" style="margin-bottom:8px;">
     <div class="bwrap">
       <div class="bubble fy" style="padding:10px 14px;">
-        <div class="typing-dots"><span></span><span></span><span></span></div>
+        <div class="typing-line">
+          <div class="typing-dots"><span></span><span></span><span></span></div>
+          <div id="send-status" class="send-status">正在生成…</div>
+        </div>
       </div>
     </div>
   </div>
@@ -784,6 +805,14 @@ function injectGalleryTokens(html){
            '<img src="'+url+'" alt="收藏的画面" loading="lazy"></a>';
   });
 }
+
+function linkWorkspaceUrls(html){
+  return String(html).replace(/(https?:\/\/[^\s<"]*\/api\/gw\/workspace\/apps\/[^\s<"]+|\/api\/gw\/workspace\/apps\/[A-Za-z0-9_-]+\/proxy\/[^\s<"]*)/g, function(url){
+    var tail = '';
+    while(/[，。,.!！?？)）\]】]$/.test(url)){ tail = url.slice(-1) + tail; url = url.slice(0,-1); }
+    return '<a class="inline-workspace-link" href="'+escAttr(url)+'" target="_blank" rel="noopener"><i class="ti ti-external-link"></i>'+escHtml(url)+'</a>'+escHtml(tail);
+  });
+}
 function renderContent(s, isFyodor){
   if(isFyodor && /<(div|details|summary|span)\b[^>]*style\s*=/i.test(s)){
     return injectGalleryTokens(s.replace(/(^[^<]+|>[^<]*(?=<|$))/g, function(m){ return m.replace(/\n/g,'<br>'); }));
@@ -792,12 +821,12 @@ function renderContent(s, isFyodor){
   var re=/```(\w*)\r?\n?([\s\S]*?)```/g, m;
   while((m=re.exec(s))!==null){
     var before=s.slice(lastIdx,m.index);
-    if(before) result+=escHtml(before);
+    if(before) result+=linkWorkspaceUrls(escHtml(before));
     result+=renderCodeBlock((m[1]||'').trim(), m[2]);
     lastIdx=m.index+m[0].length;
   }
   var after=s.slice(lastIdx);
-  if(after) result+=escHtml(after);
+  if(after) result+=linkWorkspaceUrls(escHtml(after));
   return injectGalleryTokens(result);
 }
 
@@ -974,7 +1003,8 @@ var CODE_TOOLS = {
   str_replace_frontend_file:1, check_page_render:1, read_bot_config:1,
   edit_bot_config:1, search_files:1,
   codebase_read_file:1, codebase_patch:1, codebase_create_file:1, codebase_search_code:1,
-  shell_exec:1, ws_job:1, ws_read:1, ws_write:1, ws_edit:1, ws_patch:1, ws_diff:1
+  shell_exec:1, ws_job:1, ws_read:1, ws_write:1, ws_edit:1, ws_patch:1, ws_diff:1,
+  workspace_app:1, mcp_search:1, mcp_load:1, mcp_call:1
 };
 var TOOL_ICONS = {
   save_memory:'book', search_memories:'book',
@@ -1220,11 +1250,37 @@ function buildWsJobCardHtml(tc){
     (log?'<pre class="job-card-log">'+escHtml(log.slice(-1200))+'</pre>':'')+
   '</div>';
 }
+
+function buildWorkspaceAppCardHtml(tc){
+  var data = {};
+  try { data = JSON.parse(tc.result||'{}'); } catch(e) {}
+  var st = data.status || data.app || data;
+  if(!st || typeof st !== 'object') return '';
+  var id = st.id || (tc.args && tc.args.id) || '';
+  var name = st.name || id || '沙箱应用';
+  var url = st.proxy_url || (st.runtime && st.runtime.proxy_url) || data.proxy_url || '';
+  var running = st.running || st.runtime_status === 'running' || (st.runtime && st.runtime.status === 'running');
+  if(!url && id) url = '/api/gw/workspace/apps/'+encodeURIComponent(id)+'/proxy/';
+  if(!id && !url) return '';
+  var meta = [];
+  if(id) meta.push(id);
+  if(st.port) meta.push(':'+st.port);
+  meta.push(running ? 'running' : (st.runtime_status || 'stopped'));
+  return '<div class="app-card">'+
+    '<div class="app-card-hd"><i class="ti ti-browser"></i><span>'+escHtml(name)+'</span></div>'+
+    '<div class="app-card-meta">'+escHtml(meta.filter(Boolean).join(' · '))+'</div>'+
+    (url ? '<a class="app-card-action" href="'+escAttr(url)+'" target="_blank" rel="noopener"><i class="ti ti-external-link"></i>打开应用</a>' : '')+
+  '</div>';
+}
 function buildToolResultBody(tc){
   if(tc.running) return '<div>执行中…</div>';
   if(tc.name==='ws_job' && tc.result){
     var jc = buildWsJobCardHtml(tc);
     if(jc) return jc;
+  }
+  if(tc.name==='workspace_app' && tc.result){
+    var ac = buildWorkspaceAppCardHtml(tc);
+    if(ac) return ac;
   }
   if(tc.name==='get_location' && tc.result){
     var lc=buildLocationCardHtml(tc);
@@ -1342,6 +1398,54 @@ function toggleThink(btn) {
   }
 }
 
+
+function fmtTok(n){
+  n = Number(n||0);
+  if(!isFinite(n) || n<=0) return '0';
+  if(n >= 1000000) return (n/1000000).toFixed(1).replace(/\.0$/,'') + 'M';
+  if(n >= 1000) return (n/1000).toFixed(1).replace(/\.0$/,'') + 'K';
+  return String(Math.round(n));
+}
+function buildCacheInfoHtmlFromData(ci){
+  ci = ci || {};
+  var read = Number(ci.cache_read||0);
+  var created = Number(ci.cache_creation||0);
+  var created5m = Number(ci.cache_creation_5m||0);
+  var created1h = Number(ci.cache_creation_1h||0);
+  var input = Number(ci.input_tokens||0);
+  var output = Number(ci.output_tokens||0);
+  var elapsed = Number(ci.elapsed_sec||0);
+  var promptTotal = input + read + created;
+  var activePromptTotal = input + read;
+  var pieces = [];
+  if(promptTotal>0) pieces.push('<span class="ci-item" title="本轮输入 token，含缓存读回/写入部分">⇧ '+fmtTok(promptTotal)+' tokens</span>');
+  if(output>0) pieces.push('<span class="ci-item" title="本轮输出 token">⇩ '+fmtTok(output)+' tokens</span>');
+  if(output>0 && elapsed>0) pieces.push('<span class="ci-item" title="输出速度">ϟ '+(output/elapsed).toFixed(1)+' tok/s</span>');
+  if(elapsed>0) pieces.push('<span class="ci-item" title="本轮生成耗时">◷ '+elapsed.toFixed(elapsed<10?1:0)+'s</span>');
+  if(ci.cache_supported===false){
+    pieces.push('<span class="ci-item ci-off" title="当前中转站未稳定返回服务端 prompt cache">无服务端缓存</span>');
+  } else if(read>0){
+    var pct = activePromptTotal>0 ? Math.round(read/activePromptTotal*100) : 0;
+    pieces.push('<span class="ci-item ci-hit" title="从服务端 prompt cache 读回的 token；百分比不把本轮新建缓存计入分母">缓存读回 '+pct+'% ('+fmtTok(read)+')</span>');
+    if(created>0){
+      var hitBuildParts = [];
+      if(created1h>0) hitBuildParts.push('1h '+fmtTok(created1h));
+      if(created5m>0) hitBuildParts.push('5m '+fmtTok(created5m));
+      if(!hitBuildParts.length) hitBuildParts.push(fmtTok(created));
+      pieces.push('<span class="ci-item ci-build" title="本轮同时写入服务端 prompt cache，下一轮可能命中">新建 '+hitBuildParts.join(' / ')+'</span>');
+    }
+  } else if(created>0){
+    var buildParts = [];
+    if(created1h>0) buildParts.push('1h '+fmtTok(created1h));
+    if(created5m>0) buildParts.push('5m '+fmtTok(created5m));
+    if(!buildParts.length) buildParts.push(fmtTok(created));
+    pieces.push('<span class="ci-item ci-build" title="本轮写入服务端 prompt cache，下一轮可能命中">建缓存 '+buildParts.join(' / ')+'</span>');
+  } else if(ci.cache_supported===true){
+    pieces.push('<span class="ci-item ci-miss" title="支持缓存，但本轮未读回缓存">缓存未命中</span>');
+  }
+  return pieces.length ? '<div class="cache-info">'+pieces.join(' · ')+'</div>' : '';
+}
+
 // Build message HTML
 function buildHtml(list) {
   window.curMsgList = list;
@@ -1421,13 +1525,7 @@ function buildHtml(list) {
     if(fy && m.cache_info){
       try{
         var ci = JSON.parse(m.cache_info);
-        var hit = (ci.cache_read||0) > 0;
-        var ciText = '';
-        if(hit){
-          var ciTotal=(ci.input_tokens||0)+(ci.cache_read||0)+(ci.cache_creation||0);
-          ciText = ciTotal>0 ? '命中缓存 '+Math.round(ci.cache_read/ciTotal*100)+'%' : '命中缓存 '+ci.cache_read;
-        } else if(ci.cache_creation){ ciText = '建缓存 '+ci.cache_creation; }
-        if(ciText) cacheInfoHtml = '<div class="cache-info">'+ciText+'</div>';
+        cacheInfoHtml = buildCacheInfoHtmlFromData(ci);
       }catch(e){}
     }
 
@@ -1721,7 +1819,29 @@ function removeDoc(){
 function resize(el){ el.style.height='auto'; el.style.height=Math.min(el.scrollHeight,96)+'px'; }
 function onEnter(e){ if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send();} }
 
-function showTyping(){ document.getElementById('typing').style.display='block'; var c=document.getElementById('msgs'); c.scrollTop=c.scrollHeight; }
+function setSendStatus(text, kind){
+  var el=document.getElementById('send-status');
+  if(!el) return;
+  el.textContent=text||'';
+  el.className='send-status'+(kind?(' status-'+kind):'');
+}
+function clearSendStatus(){ setSendStatus('', ''); }
+function showTyping(label, kind){
+  if(label!==undefined) setSendStatus(label, kind||'working');
+  else {
+    var el=document.getElementById('send-status');
+    if(el && !el.textContent) setSendStatus('正在生成…','working');
+  }
+  document.getElementById('typing').style.display='block';
+  var c=document.getElementById('msgs'); c.scrollTop=c.scrollHeight;
+}
+function flashSendStatus(text, kind){
+  showTyping(text, kind||'working');
+  setTimeout(function(){
+    var el=document.getElementById('send-status');
+    if(el && el.textContent===text) hideTyping();
+  }, 2600);
+}
 
 var lastUserMsgText = '';
 function humanizeError(raw){
@@ -1748,7 +1868,7 @@ function retryLastMessage(){
   document.getElementById('txt').value = lastUserMsgText;
   send();
 }
-function hideTyping(){ document.getElementById('typing').style.display='none'; }
+function hideTyping(){ document.getElementById('typing').style.display='none'; clearSendStatus(); }
 
 async function send(){
   if(sending||blockedState)return;
@@ -1759,6 +1879,7 @@ async function send(){
   lastUserMsgText = txt;
   sending=true;
   setSendBtn('stop');
+  showTyping('正在发送…','sending');
   var fromHayana=(curAuthor==='hayana');
   var fd=new FormData();
   fd.append('author',curAuthor);
@@ -1775,14 +1896,16 @@ async function send(){
       var ur=await fetch('/api/chat/upload_file',{method:'POST',body:dfd});
       var ud=await ur.json();
       if(ud&&ud.ok){ fd.append('file_url',ud.file_url); fd.append('file_name',ud.file_name); }
-      else { showErrToast((ud&&ud.error)||'文件上传失败'); sending=false; setSendBtn('send'); return; }
+      else { showErrToast((ud&&ud.error)||'文件上传失败'); flashSendStatus('发送失败','error'); sending=false; setSendBtn('send'); return; }
     }
-    await fetch('/api/chat/send',{method:'POST',body:fd});
+    var sendResp=await fetch('/api/chat/send',{method:'POST',body:fd});
+    if(!sendResp.ok) throw new Error('发送失败：HTTP '+sendResp.status);
+    setSendStatus('已发送 · 等待回复…','sending');
     await loadMsgs(false);
     if(fromHayana){
       var baseId=0;
       (window.curMsgList||[]).forEach(function(m){ if(typeof m.id==='number'&&m.id>baseId) baseId=m.id; });
-      showTyping();
+      showTyping('正在连接回复…','working');
       var streamErrMsg = null;
       try{
         var fullText='', capturedThink='';
@@ -1804,7 +1927,7 @@ async function send(){
           }
         }
         await loadMsgs(false);
-        if(streamState.cacheRead||streamState.cacheCreate) appendCacheInfo();
+        if(streamState.cacheRead||streamState.cacheCreate||streamState.cacheSupported!==null) appendCacheInfo();
         if(fullText&&document.hidden) notify('Fyodor',fullText.slice(0,50));
         if(capturedThink&&capturedThink.trim()){
           (async function(){
@@ -1829,7 +1952,7 @@ async function send(){
       }catch(e){ if(!(e&&e.displayed)) console.error('gateway',e); }
       hideTyping();
     }
-  }catch(e){ console.error('send',e); showErrToast(e&&e.message); }
+  }catch(e){ console.error('send',e); showErrToast(e&&e.message); flashSendStatus('发送失败','error'); }
   sending=false;
   setSendBtn('send');
   document.getElementById('txt').focus();
@@ -1998,7 +2121,7 @@ setInterval(checkBlocked, 15000);
 
 // ── Msg actions & stop ──
 var streamAbort = null;
-var streamState = {cacheRead: 0, cacheCreate: 0, inputTokens: 0};
+var streamState = {cacheRead: 0, cacheCreate: 0, cacheCreate5m: 0, cacheCreate1h: 0, inputTokens: 0, outputTokens: 0, elapsedSec: 0, cacheSupported: null};
 var _suppressLoadMsgs = false;
 function releaseGenLock(force){
   fetch('/api/gw/chat/cancel',{
@@ -2113,7 +2236,7 @@ async function doRegen(msgId) {
       headers:{'Content-Type':'application/json'}, body:JSON.stringify({msg_id:msgId})});
     var pd = await prep.json();
     if(!pd.ok){ sending=false; setSendBtn('send'); return; }
-    showTyping();
+    showTyping('正在重新生成…','working');
     try {
       await streamReply();
       await fetch('/api/chat/regen/finalize', {method:'POST',
@@ -2121,7 +2244,7 @@ async function doRegen(msgId) {
     } catch(e) { console.error('regen stream failed',e); }
     hideTyping();
     await loadMsgs(false);
-    if(streamState.cacheRead||streamState.cacheCreate) appendCacheInfo();
+    if(streamState.cacheRead||streamState.cacheCreate||streamState.cacheSupported!==null) appendCacheInfo();
   } catch(e) { console.error('doRegen',e); }
   sending = false; setSendBtn('send');
 }
@@ -2133,11 +2256,11 @@ async function doEdit(msgId, newContent) {
     await fetch('/api/chat/edit', {method:'POST',
       headers:{'Content-Type':'application/json'}, body:JSON.stringify({msg_id:msgId, content:newContent})});
     await loadMsgs(false);
-    showTyping();
+    showTyping('正在生成编辑后的回复…','working');
     try { await streamReply(); } catch(e) { console.error('doEdit stream failed',e); }
     hideTyping();
     await loadMsgs(false);
-    if(streamState.cacheRead||streamState.cacheCreate) appendCacheInfo();
+    if(streamState.cacheRead||streamState.cacheCreate||streamState.cacheSupported!==null) appendCacheInfo();
   } catch(e) { console.error('doEdit',e); }
   sending = false; setSendBtn('send');
 }
@@ -2158,13 +2281,17 @@ function appendCacheInfo(){
   if(!rows.length) return;
   var bwrap=rows[rows.length-1].querySelector('.bwrap');
   if(!bwrap) return;
-  var el=document.createElement('div');
-  el.className='cache-info';
-  if(streamState.cacheRead>0){
-    var total=streamState.inputTokens+streamState.cacheRead+streamState.cacheCreate;
-    el.textContent=total>0?'命中缓存 '+Math.round(streamState.cacheRead/total*100)+'%':'命中缓存 '+streamState.cacheRead;
-  } else { el.textContent='建缓存 '+streamState.cacheCreate; }
-  bwrap.appendChild(el);
+  var html = buildCacheInfoHtmlFromData({
+    cache_read: streamState.cacheRead,
+    cache_creation: streamState.cacheCreate,
+    cache_creation_5m: streamState.cacheCreate5m,
+    cache_creation_1h: streamState.cacheCreate1h,
+    input_tokens: streamState.inputTokens,
+    output_tokens: streamState.outputTokens,
+    elapsed_sec: streamState.elapsedSec,
+    cache_supported: streamState.cacheSupported
+  });
+  if(html) bwrap.insertAdjacentHTML('beforeend', html);
 }
 
 var _wsJobPollTimer=null;
@@ -2200,11 +2327,11 @@ async function retryStream(){
   _suppressLoadMsgs=false;
   if(sending) return;
   sending=true; setSendBtn('stop');
-  showTyping();
+  showTyping('正在重试回复…','working');
   try{
     var _sr2=await streamReply(); var fullText=(_sr2&&_sr2.text)||'';
     await loadMsgs(false);
-    if(streamState.cacheRead||streamState.cacheCreate) appendCacheInfo();
+    if(streamState.cacheRead||streamState.cacheCreate||streamState.cacheSupported!==null) appendCacheInfo();
     if(fullText&&document.hidden) notify('Fyodor',fullText.slice(0,50));
   }catch(e){ if(!(e&&e.displayed)) console.error('retryStream',e); }
   hideTyping();
@@ -2212,7 +2339,7 @@ async function retryStream(){
 }
 
 async function streamReply(){
-  streamState.cacheRead=0; streamState.cacheCreate=0; streamState.inputTokens=0;
+  streamState.cacheRead=0; streamState.cacheCreate=0; streamState.cacheCreate5m=0; streamState.cacheCreate1h=0; streamState.inputTokens=0; streamState.outputTokens=0; streamState.elapsedSec=0; streamState.cacheSupported=null;
   window._earlyThinkSummary=null;
   await clearStaleGenLock();
   var ctrl=new AbortController(); streamAbort=ctrl;
@@ -2223,6 +2350,7 @@ async function streamReply(){
     _safetyTimeout=setTimeout(function(){ctrl.abort();}, ms||150000);
   }
   _armSafety();
+  setSendStatus('正在等待模型…','working');
   var resp=await fetch('/api/gw/chat/stream',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}',signal:ctrl.signal});
   if(!resp.ok||!resp.body) throw new Error('stream failed');
   var SSE_SEP=String.fromCharCode(10)+String.fromCharCode(10);
@@ -2327,6 +2455,7 @@ async function streamReply(){
         if(line.indexOf('data:')!==0) continue;
         var ev; try{ ev=JSON.parse(line.slice(5)); }catch(e){ continue; }
         if(ev.t==='memory_recall'){
+          setSendStatus('正在整理记忆…','working');
           ensureLiveRow();
           var md=ev.d||{};
           if(md.count){
@@ -2342,6 +2471,7 @@ async function streamReply(){
               '</div>';
           }
         } else if(ev.t==='think'){
+          setSendStatus('正在思考…','working');
           ensureLiveRow();
           thinkText+=ev.d;
           liveThinkWrap.style.display='';
@@ -2349,6 +2479,7 @@ async function streamReply(){
           var atB=c.scrollHeight-c.scrollTop-c.clientHeight<120;
           if(atB) c.scrollTop=c.scrollHeight;
         } else if(ev.t==='tool_progress'){
+          setSendStatus('正在使用工具…','tools');
           ensureLiveRow();
           finishLiveThink();
           _armSafety(300000);
@@ -2363,6 +2494,7 @@ async function streamReply(){
           var atB2=c.scrollHeight-c.scrollTop-c.clientHeight<120;
           if(atB2) c.scrollTop=c.scrollHeight;
         } else if(ev.t==='tool_use'){
+          setSendStatus('正在调用工具…','tools');
           ensureLiveRow();
           finishLiveThink();
           _armSafety(300000);
@@ -2370,6 +2502,7 @@ async function streamReply(){
           liveToolCalls.push({name:d.name, args:d.args, running:true});
           renderLiveTools(true);
         } else if(ev.t==='tool_result'){
+          setSendStatus('工具完成 · 继续生成…','tools');
           _armSafety(300000);
           var ti=(ev.idx!==undefined && ev.idx>=0 && ev.idx<liveToolCalls.length)?ev.idx:liveToolCalls.length-1;
           if(ti>=0 && ev.d) liveToolCalls[ti]=ev.d;
@@ -2386,10 +2519,12 @@ async function streamReply(){
         } else if(ev.t==='workspace_job'){
           handleWorkspaceJobSse(ev);
         } else if(ev.t==='trace_summary'){
+          setSendStatus('正在整理工具结果…','tools');
           if(liveTools && ev.d)
             liveTools.insertAdjacentHTML('beforeend',
               '<div class="trace-summary-line"><i class="ti ti-route"></i> '+escHtml(ev.d)+'</div>');
         } else if(ev.t==='tool_call'){
+          setSendStatus('正在记录工具调用…','tools');
           if(ev.dup) continue; // gateway 为旧缓存前端补发的副本，新前端已渲染过
           // 兼容旧gateway：单事件=完成态
           ensureLiveRow();
@@ -2397,19 +2532,27 @@ async function streamReply(){
           liveToolCalls.push(ev.d);
           renderLiveTools(true);
         } else if(ev.t==='text'){
+          setSendStatus('正在生成回复…','working');
           finishLiveThink();
           target+=ev.d;
         } else if(ev.t==='usage'){
           streamState.cacheRead+=ev.cache_read||0;
           streamState.cacheCreate+=ev.cache_creation||0;
+          streamState.cacheCreate5m+=ev.cache_creation_5m||0;
+          streamState.cacheCreate1h+=ev.cache_creation_1h||0;
           if(ev.input_tokens) streamState.inputTokens=Math.max(streamState.inputTokens,ev.input_tokens);
+          if(ev.output_tokens) streamState.outputTokens=Math.max(streamState.outputTokens,ev.output_tokens);
+          if(ev.elapsed_sec) streamState.elapsedSec=Math.max(streamState.elapsedSec,ev.elapsed_sec);
+          if(ev.cache_supported!==undefined) streamState.cacheSupported=ev.cache_supported;
         } else if(ev.t==='err'){
+          setSendStatus('生成失败','error');
           ensureLiveRow();
           if(/仍在生成|generating/i.test(String(ev.d||''))) releaseGenLock(true);
           live.innerHTML='<div class="stream-err-wrap">⚠ '+escHtml(ev.d)+
             '<br><button class="stream-err-retry" onclick="retryStream()">重试</button></div>';
           err=new Error(ev.d); err.displayed=true;
         } else if(ev.t==='done'){
+          setSendStatus('回复完成','working');
           streamCompleted=true;
         }
       }
