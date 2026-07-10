@@ -992,12 +992,15 @@ _BASE_TOOLS = [
         'name': 'pocket_goto',
         'description': (
             '在哈娅手机的 Pocket WebView 里打开一个网址（她的登录态 + 住宅 IP）。'
+            '手机端会立刻返回 loading（导航已发出，不等页面真正加载完）。'
+            '本工具默认再等待约 2.5 秒让页面稳定后再返回；慢站可调大 timeout_ms，'
+            '或返回后再隔一会儿调 pocket_html，否则可能读到上一页。'
             '适合小红书收藏、微博主页等 read_webpage 会撞登录墙/风控的页面。'
             '限制：Pocket 依赖手机亮屏，锁屏断线；离线返回 phone_not_connected，可降级 read_webpage。'
         ),
         'input_schema': {'type': 'object', 'properties': {
             'url': {'type': 'string', 'description': '要打开的网页地址'},
-            'timeout_ms': {'type': 'integer', 'description': '等待加载超时毫秒，默认 30000，最大 120000'},
+            'timeout_ms': {'type': 'integer', 'description': '导航发出后额外等待页面稳定的毫秒数，默认 2500，最大 30000（不是等加载完成的超时）'},
         }, 'required': ['url']},
     },
     {
@@ -2185,16 +2188,22 @@ def _pocket_status():
     return 'phone_not_connected：手机浏览器离线（上次 %s）。Pocket 依赖亮屏，锁屏后会断线。' % seen
 
 
-def _pocket_goto(url, timeout_ms=30000):
+def _pocket_goto(url, settle_ms=2500):
     url = (url or '').strip()
     if not url:
         return '给个网址'
     if not re.match(r'^https?://', url, re.I):
         url = 'https://' + url
-    res = _pocket_cmd('goto', timeout_ms=timeout_ms, url=url)
+    res = _pocket_cmd('goto', timeout_ms=15000, url=url)
     if isinstance(res, str) and (res.startswith('phone_not_connected') or res.startswith('pocket_')):
         return res
-    return '📱 已在手机 Pocket 打开\n🔗 %s\n→ %s' % (url, res)
+    wait = max(0, min(int(settle_ms if settle_ms is not None else 2500), 30000))
+    if wait and str(res or '').lower().startswith('load'):
+        time.sleep(wait / 1000.0)
+    parts = ['📱 已在手机 Pocket 打开', '🔗 ' + url, '→ ' + str(res)]
+    if wait:
+        parts.append('（已等待 %d ms 让页面稳定，可接 pocket_html；慢站可加大 timeout_ms）' % wait)
+    return '\n'.join(parts)
 
 
 def _pocket_js(js, timeout_ms=30000):
@@ -2288,7 +2297,7 @@ def run_tool(name, args, caller='fyodor_cc'):
         if name == 'pocket_status':
             return _pocket_status()
         if name == 'pocket_goto':
-            return _pocket_goto(args.get('url', ''), args.get('timeout_ms', 30000))
+            return _pocket_goto(args.get('url', ''), args.get('timeout_ms', 2500))
         if name == 'pocket_js':
             return _pocket_js(args.get('js', ''), args.get('timeout_ms', 30000))
         if name == 'pocket_html':
