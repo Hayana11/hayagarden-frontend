@@ -704,11 +704,26 @@ def _extract_choices(text):
 
 def build_messages():
     conn = get_db()
-    # 今天的所有对话 + 昨天最后5条（保持连续性），总不超过60条
+    # 今天的所有对话 + 昨天最后5条（保持连续性）。历史窗口按块裁剪：
+    # 60 条以后先继续增长到 79 条，攒满 20 条再一次裁掉一块。这样
+    # 缓存前缀不会因为每来一条新消息就从开头滑动一次。
+    _where = "date(created_at) >= date('now', '+8 hours', '-1 day')"
+    _window_base, _window_block = 60, 20
+    try:
+        _available = conn.execute(
+            "SELECT COUNT(*) FROM chat_messages WHERE " + _where
+        ).fetchone()[0] or 0
+    except Exception:
+        _available = _window_base
+    _limit = _available
+    if _available > _window_base:
+        _limit = _window_base + ((_available - _window_base) % _window_block)
+    if _limit <= 0:
+        _limit = _window_base
     rows = list(reversed(conn.execute(
         "SELECT author, content, image_url, created_at, tool_calls, file_url, file_name FROM chat_messages "
-        "WHERE date(created_at) >= date('now', '+8 hours', '-1 day') "
-        "ORDER BY id DESC LIMIT 60"
+        "WHERE " + _where + " ORDER BY id DESC LIMIT ?",
+        (_limit,),
     ).fetchall()))
     conn.close()
     _total = len(rows)
