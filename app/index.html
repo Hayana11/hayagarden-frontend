@@ -9,6 +9,26 @@
     <link href="https://fonts.googleapis.com/css2?family=Bodoni+Moda:ital,opsz,wght@0,6..96,400;0,6..96,500;0,6..96,600;1,6..96,400;1,6..96,500&family=Noto+Serif+SC:wght@400;500;600;700&family=Space+Grotesk:wght@400;500;600&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@latest/tabler-icons.min.css">
     <title>Fyodor · Dash</title>
+    <script>
+      (function(){
+        function send(kind,msg,src,line,col){
+          try{
+            var x=new XMLHttpRequest();
+            x.open('POST','/api/client-error',true);
+            x.setRequestHeader('Content-Type','application/json');
+            x.send(JSON.stringify({page:location.pathname,kind:kind,msg:String(msg),src:String(src||''),line:line||0,col:col||0}));
+          }catch(e){}
+        }
+        window.onerror=function(m,s,l,c){send('error',m,s,l,c)};
+        window.addEventListener('unhandledrejection',function(e){send('promise',e.reason&&e.reason.message?e.reason.message:e.reason,'',0,0)});
+        window.addEventListener('error',function(e){
+          var t=e.target;
+          if(t&&t!==window&&(t.src||t.href)) send('resource','resource load failed',t.src||t.href,0,0);
+        },true);
+        window.__dashProbe=function(stage){send('probe',stage,'',0,0)};
+        window.__dashProbe('html loaded');
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>
