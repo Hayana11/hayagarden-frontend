@@ -1,0 +1,14 @@
+# 加进 /etc/nginx/conf.d/frontend.conf 的 server { } 块
+# /pocket/cmd 和 /pocket/status 只给本机 gateway 用，nginx 照样反代但外网一般走 WSS；
+# 若需限制 /pocket/cmd 仅 localhost，可在 server 块外加一层 internal 或 allow 127.0.0.1。
+
+location /pocket/ {
+    proxy_pass http://127.0.0.1:3897;
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_read_timeout 300s;
+    proxy_send_timeout 300s;
+}
