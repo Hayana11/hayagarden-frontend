@@ -806,9 +806,9 @@ def build_messages():
         else:
             msgs.append({'role': role, 'content': content})
 
-    # 滚动摘要：当实时窗口被封顶（取满 60 条，说明有更早的内容滞出了），
-    # 把 tools/rolling_summary.py 后台生成的“连续性摘要”注入到开头，补上窗口外那段记忆。
-    if len(rows) >= 60:
+    # 滚动摘要：只有发生块状裁剪时才注入。增长期(61~79条)窗口里
+    # 仍保留全部实时消息，不注入摘要，避免重复内容和缓存头部抖动。
+    if _available > _limit:
         try:
             _rc = get_db()
             _rsrow = _rc.execute('SELECT summary FROM rolling_summary WHERE id=1').fetchone()
