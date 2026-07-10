@@ -1416,6 +1416,7 @@ function buildCacheInfoHtmlFromData(ci){
   var output = Number(ci.output_tokens||0);
   var elapsed = Number(ci.elapsed_sec||0);
   var promptTotal = input + read + created;
+  var activePromptTotal = input + read;
   var pieces = [];
   if(promptTotal>0) pieces.push('<span class="ci-item" title="本轮输入 token，含缓存读回/写入部分">⇧ '+fmtTok(promptTotal)+' tokens</span>');
   if(output>0) pieces.push('<span class="ci-item" title="本轮输出 token">⇩ '+fmtTok(output)+' tokens</span>');
@@ -1424,8 +1425,15 @@ function buildCacheInfoHtmlFromData(ci){
   if(ci.cache_supported===false){
     pieces.push('<span class="ci-item ci-off" title="当前中转站未稳定返回服务端 prompt cache">无服务端缓存</span>');
   } else if(read>0){
-    var pct = promptTotal>0 ? Math.round(read/promptTotal*100) : 0;
-    pieces.push('<span class="ci-item ci-hit" title="从服务端 prompt cache 读回的 token">缓存命中 '+pct+'% ('+fmtTok(read)+')</span>');
+    var pct = activePromptTotal>0 ? Math.round(read/activePromptTotal*100) : 0;
+    pieces.push('<span class="ci-item ci-hit" title="从服务端 prompt cache 读回的 token；百分比不把本轮新建缓存计入分母">缓存读回 '+pct+'% ('+fmtTok(read)+')</span>');
+    if(created>0){
+      var hitBuildParts = [];
+      if(created1h>0) hitBuildParts.push('1h '+fmtTok(created1h));
+      if(created5m>0) hitBuildParts.push('5m '+fmtTok(created5m));
+      if(!hitBuildParts.length) hitBuildParts.push(fmtTok(created));
+      pieces.push('<span class="ci-item ci-build" title="本轮同时写入服务端 prompt cache，下一轮可能命中">新建 '+hitBuildParts.join(' / ')+'</span>');
+    }
   } else if(created>0){
     var buildParts = [];
     if(created1h>0) buildParts.push('1h '+fmtTok(created1h));
