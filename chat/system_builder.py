@@ -77,7 +77,7 @@ def _ombre_handoff_sync():
     return result_holder[0]
 
 
-def build_system(wake=False):
+def build_system(wake=False, split_dynamic=False):
     from gateway import get_db  # 延迟 import，打破循环依赖（build_system 被调用时 gateway 早已加载完毕）
 
     # ── BP1 · Persona（永不变，缓存断点1）────────────────────
@@ -483,10 +483,9 @@ def build_system(wake=False):
             pass
 
     # ── 组装 system blocks（prompt caching 格式）────────────────
-    # 只给真正稳定的块挂 cache_control。长期事实/日记会随对话写入而变化，
-    # 放在无断点块里，避免每轮把后面的长前缀全部打成新缓存。
-    # 能力说明：文件卡片 + 选择器（标签驱动，与语音同机制）
-    parts.append(
+    # split_dynamic=True 用于 API 主聊天：system 只保留稳定块；BP2/BP3
+    # 作为动态上下文放进最后一条 user message，避免污染历史缓存前缀。
+    stable_note = (
         '\n## 你可以发文件和选择器\n'
         '- 发文件：把“成品”性质的内容（完整 HTML 页面、Markdown 长文）用工具 '
         'create_html / create_markdown / create_document 生成，会渲染成可预览/下载的卡片；'
@@ -495,27 +494,27 @@ def build_system(wake=False):
         '[choices]选项A|选项B|选项C[/choices]（竖线分隔），渲染成一组可点按钮。'
         '自己判断时机，别滥用；纯聊天不需要。一条回复最多一组选择器。'
     )
+    try:
+        from tools.workspace_registry import TOOLS_NOTE
+        stable_note = TOOLS_NOTE + stable_note
+    except Exception:
+        pass
 
     system_blocks = [
         {'type': 'text', 'text': bp1_text, 'cache_control': {'type': 'ephemeral'}},
+        {'type': 'text', 'text': stable_note, 'cache_control': {'type': 'ephemeral'}},
     ]
-    try:
-        from tools.workspace_registry import TOOLS_NOTE
-        system_blocks.append({
-            'type': 'text',
-            'text': TOOLS_NOTE,
-            'cache_control': {'type': 'ephemeral'},
-        })
-    except Exception:
-        pass
+    dynamic_parts = []
     if bp2_parts:
-        system_blocks.append({
-            'type': 'text',
-            'text': '\n'.join(bp2_parts),
-        })
+        dynamic_parts.append('\n'.join(bp2_parts))
     if parts:
-        system_blocks.append({'type': 'text', 'text': '\n'.join(parts)})
+        dynamic_parts.append('\n'.join(parts))
+    dynamic_context = '\n\n'.join(p for p in dynamic_parts if p and p.strip())
 
+    if split_dynamic:
+        return system_blocks, dynamic_context
+    if dynamic_context:
+        system_blocks.append({'type': 'text', 'text': dynamic_context})
     return system_blocks
 
 

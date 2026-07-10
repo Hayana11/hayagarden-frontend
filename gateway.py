@@ -851,6 +851,27 @@ def _apply_rolling_cache_control(messages):
     messages[idx] = msg
     return messages
 
+
+def _prepend_context_to_last_user(messages, context):
+    """Place volatile context after the history cache breakpoint."""
+    context = (context or '').strip()
+    if not context or not isinstance(messages, list):
+        return messages
+    for i in range(len(messages) - 1, -1, -1):
+        if messages[i].get('role') != 'user':
+            continue
+        msg = dict(messages[i])
+        content = msg.get('content')
+        if isinstance(content, str):
+            msg['content'] = context + '\n\n' + content
+        elif isinstance(content, list):
+            msg['content'] = [{'type': 'text', 'text': context}] + list(content)
+        else:
+            msg['content'] = context
+        messages[i] = msg
+        break
+    return messages
+
 def _strip_tool_blocks(messages):
     """去掉 messages 历史中的 thinking/tool_use/tool_result blocks（relay 不认识这些类型）。"""
     clean = []
@@ -3518,18 +3539,10 @@ def chat_stream():
                 _persisted[0] = True
                 _write_session_memo(_uc, _pc)
             try:
-                system   = build_system()
+                system, dynamic_context = build_system(split_dynamic=True)
                 messages = build_messages()
                 _recall, _recall_items = _recall_memories(_uc) if _uc else ('', [])
-                if _recall and messages:
-                    for _mi in range(len(messages) - 1, -1, -1):
-                        if messages[_mi].get('role') == 'user':
-                            _mc = messages[_mi].get('content')
-                            if isinstance(_mc, str):
-                                messages[_mi]['content'] = _recall + _mc
-                            elif isinstance(_mc, list):
-                                messages[_mi]['content'] = [{'type': 'text', 'text': _recall}] + _mc
-                            break
+                if _recall:
                     yield 'data: ' + json.dumps({'t': 'memory_recall', 'd': {'count': len(_recall_items), 'items': _recall_items}}, ensure_ascii=False) + SSE_END
                 from relay.manager import relay as _chat_relay
                 cache_supported = bool((_chat_relay.caps or {}).get('cache'))
@@ -3537,6 +3550,9 @@ def chat_stream():
                 _use_guagua_safe = _is_guagua_active() and os.environ.get('GUAGUA_SAFE_MODE') == '1'
                 if not _use_guagua_safe:
                     messages = _apply_rolling_cache_control(messages)
+                volatile_context = '\n\n'.join(p for p in (dynamic_context, _recall) if p and p.strip())
+                if volatile_context:
+                    messages = _prepend_context_to_last_user(messages, volatile_context)
                 if _use_guagua_safe:
                     system, messages = _guagua_safe_context(system, messages)
                 # 工具抽屉路由：默认关闭（TOOL_DRAWERS_ENABLED=0 时原样全量）
