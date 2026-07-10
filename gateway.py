@@ -639,7 +639,7 @@ def img_block(url, max_dim=1568):
 # 其余本地工具给较小额度（默认2000）。两档都可用 config_store 旋钮在线调：
 # TOOL_INJECT_MAX / TOOL_INJECT_MAX_MCP。
 _LARGE_RETURN_TOOLS = {
-    'web_search', 'browse_github', 'read_webpage', 'get_activity_summary',
+    'web_search', 'browse_github', 'read_webpage', 'pocket_html', 'get_activity_summary',
     'codebase_describe_project', 'codebase_read_file', 'codebase_search_code',
     'codebase_find_references', 'codebase_explain_history', 'codebase_git_view',
     'mcp_load',
@@ -978,6 +978,65 @@ _BASE_TOOLS = [
         'input_schema': {'type': 'object', 'properties': {
             'url': {'type': 'string', 'description': '要打开的网页地址'},
         }, 'required': ['url']},
+    },
+    {
+        'name': 'pocket_status',
+        'description': (
+            '查看哈娅手机 Pocket 浏览器是否在线（专用 WebView + 她的住宅 IP + 登录态）。'
+            '想用小红书/微博/收藏页等需要她账号的站点前，先查一眼；离线就别假装能用。'
+            '限制：Pocket 当前依赖手机亮屏，锁屏后会断线；离线时其它 pocket_* 工具会返回 phone_not_connected。'
+        ),
+        'input_schema': {'type': 'object', 'properties': {}},
+    },
+    {
+        'name': 'pocket_goto',
+        'description': (
+            '在哈娅手机的 Pocket WebView 里打开一个网址（她的登录态 + 住宅 IP）。'
+            '手机端会立刻返回 loading（导航已发出，不等页面真正加载完）。'
+            '本工具默认再等待约 2.5 秒让页面稳定后再返回；慢站可调大 timeout_ms，'
+            '或返回后再隔一会儿调 pocket_html，否则可能读到上一页。'
+            '适合小红书收藏、微博主页等 read_webpage 会撞登录墙/风控的页面。'
+            '限制：Pocket 依赖手机亮屏，锁屏断线；离线返回 phone_not_connected，可降级 read_webpage。'
+        ),
+        'input_schema': {'type': 'object', 'properties': {
+            'url': {'type': 'string', 'description': '要打开的网页地址'},
+            'timeout_ms': {'type': 'integer', 'description': '导航发出后额外等待页面稳定的毫秒数，默认 2500，最大 30000（不是等加载完成的超时）'},
+        }, 'required': ['url']},
+    },
+    {
+        'name': 'pocket_js',
+        'description': (
+            '在哈娅手机当前 Pocket 页面里执行一段 JavaScript，返回 evaluate 结果。'
+            '适合读 DOM、点按钮前的探测等。'
+            '【红线】涉及发布、下单、支付、私信、提交表单等会改变账号状态或花钱的动作，必须先问哈娅，她同意后才能执行。'
+            '限制：Pocket 依赖手机亮屏，锁屏断线；离线返回 phone_not_connected。'
+        ),
+        'input_schema': {'type': 'object', 'properties': {
+            'js': {'type': 'string', 'description': '要执行的 JavaScript 代码'},
+            'timeout_ms': {'type': 'integer', 'description': '超时毫秒，默认 30000，最大 120000'},
+        }, 'required': ['js']},
+    },
+    {
+        'name': 'pocket_html',
+        'description': (
+            '读取哈娅手机 Pocket WebView 当前页面的正文（从 HTML 提取文字，最长 30K 字符）。'
+            'goto 打开页面后用这个读内容。'
+            '限制：Pocket 依赖手机亮屏，锁屏断线；离线返回 phone_not_connected。'
+        ),
+        'input_schema': {'type': 'object', 'properties': {
+            'timeout_ms': {'type': 'integer', 'description': '超时毫秒，默认 30000，最大 120000'},
+        }},
+    },
+    {
+        'name': 'pocket_screenshot',
+        'description': (
+            '截取哈娅手机 Pocket WebView 当前画面，返回 attachment://id 图片卡片。'
+            '适合确认页面长什么样、或给她看「你手机上现在是这样」。'
+            '限制：Pocket 依赖手机亮屏；纯后台可能截到旧画面。锁屏断线时返回 phone_not_connected。'
+        ),
+        'input_schema': {'type': 'object', 'properties': {
+            'timeout_ms': {'type': 'integer', 'description': '超时毫秒，默认 30000，最大 120000'},
+        }},
     },
     {
         'name': 'screenshot_chat',
@@ -2010,6 +2069,176 @@ def _read_book(book_id=None, chunk_id=None):
         return '翻书失败：%s' % e
 
 
+POCKET_BASE = 'http://127.0.0.1:3897'
+POCKET_OFFLINE = (
+    'phone_not_connected：哈娅的手机浏览器未在线。'
+    'Pocket 当前依赖手机亮屏，锁屏后会断线。可改用 read_webpage 等机房浏览器降级。'
+)
+_POCKET_TOKEN_CACHE = ''
+
+
+def _pocket_token():
+    """Bearer token：环境变量 POCKET_TOKEN 优先，否则读 /opt/pocket/.env。"""
+    global _POCKET_TOKEN_CACHE
+    tok = (os.environ.get('POCKET_TOKEN') or '').strip()
+    if tok:
+        return tok
+    if _POCKET_TOKEN_CACHE:
+        return _POCKET_TOKEN_CACHE
+    try:
+        for line in open('/opt/pocket/.env'):
+            if line.startswith('POCKET_TOKEN='):
+                _POCKET_TOKEN_CACHE = line.split('=', 1)[1].strip().strip('"').strip("'")
+                return _POCKET_TOKEN_CACHE
+    except Exception:
+        pass
+    return ''
+
+
+def _pocket_request(method, path, body=None, timeout=35):
+    """调用本机 pocket-relay。返回 (payload_dict, error_str)；error 非空时 payload 为 None。"""
+    tok = _pocket_token()
+    if not tok:
+        return None, 'pocket_misconfigured：未配置 POCKET_TOKEN（/opt/pocket/.env 或环境变量）'
+    headers = {'Authorization': 'Bearer ' + tok}
+    data = None
+    if body is not None:
+        headers['Content-Type'] = 'application/json'
+        data = json.dumps(body, ensure_ascii=False).encode('utf-8')
+    req = urllib.request.Request(POCKET_BASE + path, data=data, method=method, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return json.loads(r.read().decode('utf-8', 'ignore') or '{}'), None
+    except urllib.error.HTTPError as e:
+        try:
+            payload = json.loads(e.read().decode('utf-8', 'ignore') or '{}')
+        except Exception:
+            payload = {}
+        if e.code == 503 or payload.get('error') == 'phone not connected':
+            return None, POCKET_OFFLINE
+        if e.code == 401:
+            return None, 'pocket_auth_failed：POCKET_TOKEN 鉴权失败'
+        err = payload.get('error') or str(e)
+        return None, 'pocket_http_%d：%s' % (e.code, str(err)[:120])
+    except Exception as e:
+        return None, 'pocket_unreachable：无法连接 pocket-relay（127.0.0.1:3897），%s' % str(e)[:120]
+
+
+def _pocket_cmd(action, timeout_ms=30000, **fields):
+    """POST /pocket/cmd，统一处理离线/失败。"""
+    timeout_ms = max(1000, min(int(timeout_ms or 30000), 120000))
+    http_timeout = min(timeout_ms / 1000.0 + 5, 125)
+    payload = {'action': action, 'timeout_ms': timeout_ms, **fields}
+    d, err = _pocket_request('POST', '/pocket/cmd', payload, timeout=http_timeout)
+    if err:
+        return err
+    if not d.get('ok'):
+        return 'pocket_error：' + str(d.get('error') or 'unknown')[:200]
+    return d.get('result')
+
+
+def _pocket_html_to_text(html):
+    """从 HTML 粗提正文，供 pocket_html 截断注入。"""
+    if not html:
+        return ''
+    import html as _html
+    s = re.sub(r'(?is)<(script|style|noscript)[^>]*>.*?</\1>', ' ', html)
+    s = re.sub(r'(?is)<br\s*/?>', '\n', s)
+    s = re.sub(r'(?is)</(p|div|h\d|li|tr|section|article)>', '\n', s)
+    s = re.sub(r'<[^>]+>', ' ', s)
+    s = _html.unescape(s)
+    s = re.sub(r'[ \t\f\v]+', ' ', s)
+    s = re.sub(r'\n{3,}', '\n\n', s)
+    return s.strip()
+
+
+def _pocket_register_shot_from_b64(data_url):
+    """screenshot 的 data:image/png;base64,... → attachment://id。"""
+    if not data_url:
+        return None
+    m = re.match(r'^data:image/[^;]+;base64,(.+)$', str(data_url), re.I | re.S)
+    b64 = m.group(1) if m else str(data_url)
+    try:
+        raw = base64.standard_b64decode(b64)
+    except Exception:
+        return None
+    import tempfile as _tmp
+    fd, path = _tmp.mkstemp(suffix='.png')
+    os.close(fd)
+    try:
+        with open(path, 'wb') as f:
+            f.write(raw)
+        return _register_shot(path)
+    except Exception:
+        try:
+            os.unlink(path)
+        except Exception:
+            pass
+        return None
+
+
+def _pocket_status():
+    d, err = _pocket_request('GET', '/pocket/status', timeout=8)
+    if err:
+        return err
+    if d.get('phone_connected'):
+        seen = d.get('last_seen') or '未知'
+        return '📱 手机浏览器：在线（last_seen %s）' % seen
+    seen = d.get('last_seen') or '无'
+    return 'phone_not_connected：手机浏览器离线（上次 %s）。Pocket 依赖亮屏，锁屏后会断线。' % seen
+
+
+def _pocket_goto(url, settle_ms=2500):
+    url = (url or '').strip()
+    if not url:
+        return '给个网址'
+    if not re.match(r'^https?://', url, re.I):
+        url = 'https://' + url
+    res = _pocket_cmd('goto', timeout_ms=15000, url=url)
+    if isinstance(res, str) and (res.startswith('phone_not_connected') or res.startswith('pocket_')):
+        return res
+    wait = max(0, min(int(settle_ms if settle_ms is not None else 2500), 30000))
+    if wait and str(res or '').lower().startswith('load'):
+        time.sleep(wait / 1000.0)
+    parts = ['📱 已在手机 Pocket 打开', '🔗 ' + url, '→ ' + str(res)]
+    if wait:
+        parts.append('（已等待 %d ms 让页面稳定，可接 pocket_html；慢站可加大 timeout_ms）' % wait)
+    return '\n'.join(parts)
+
+
+def _pocket_js(js, timeout_ms=30000):
+    js = (js or '').strip()
+    if not js:
+        return '给一段 JavaScript'
+    res = _pocket_cmd('js', timeout_ms=timeout_ms, js=js)
+    if isinstance(res, str) and (res.startswith('phone_not_connected') or res.startswith('pocket_')):
+        return res
+    text = str(res) if res is not None else '（无返回值）'
+    if len(text) > 8000:
+        text = text[:8000] + '…(已截断)'
+    return '📱 JS 结果：\n' + text
+
+
+def _pocket_html(timeout_ms=30000):
+    res = _pocket_cmd('html', timeout_ms=timeout_ms)
+    if isinstance(res, str) and (res.startswith('phone_not_connected') or res.startswith('pocket_')):
+        return res
+    text = _pocket_html_to_text(str(res or ''))
+    if len(text) > 30000:
+        text = text[:30000] + '\n...(正文过长已截断)'
+    return '📱 手机页面正文：\n' + (text or '（页面没有可提取的文字）')
+
+
+def _pocket_screenshot(timeout_ms=30000):
+    res = _pocket_cmd('screenshot', timeout_ms=timeout_ms)
+    if isinstance(res, str) and (res.startswith('phone_not_connected') or res.startswith('pocket_')):
+        return res
+    ref = _pocket_register_shot_from_b64(res)
+    if not ref:
+        return 'pocket_error：截图存档失败（base64 无效或 attachment 写入失败）'
+    return '📱 手机 Pocket 截图\n🖼 %s' % ref
+
+
 def _annotate_book(quote, note='', paragraph_idx=0, kind=None, book_id=None, chunk_id=None):
     """在我们在读的书里，用我的颜色（紫）在某句原文(quote)上划线或写批注。
     quote 必须是正文里真实存在的一小段（前端靠它把高亮锚到文字上）。"""
@@ -2065,6 +2294,16 @@ def run_tool(name, args, caller='fyodor_cc'):
             return _request_phone_screenshot(args.get('timeout_sec', 18))
         if name == 'read_webpage':
             return _read_webpage(args.get('url', ''))
+        if name == 'pocket_status':
+            return _pocket_status()
+        if name == 'pocket_goto':
+            return _pocket_goto(args.get('url', ''), args.get('timeout_ms', 2500))
+        if name == 'pocket_js':
+            return _pocket_js(args.get('js', ''), args.get('timeout_ms', 30000))
+        if name == 'pocket_html':
+            return _pocket_html(args.get('timeout_ms', 30000))
+        if name == 'pocket_screenshot':
+            return _pocket_screenshot(args.get('timeout_ms', 30000))
         if name == 'screenshot_chat':
             return _screenshot_chat(args.get('viewpoint', 'fyodor'))
         if name == 'shop_browse':
