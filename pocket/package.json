@@ -1,0 +1,15 @@
+{
+  "name": "pocket-relay",
+  "version": "1.0.0",
+  "description": "pocket-relay for HayaGarden (protocol-compatible, self-maintained)",
+  "type": "module",
+  "scripts": {
+    "start": "node server/server.mjs",
+    "fake-phone": "node examples/fake-phone.mjs"
+  },
+  "license": "GPL-3.0-or-later",
+  "dependencies": {
+    "dotenv": "^16.4.7",
+    "ws": "^8.18.0"
+  }
+}

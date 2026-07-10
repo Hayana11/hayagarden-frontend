@@ -1,0 +1,13 @@
+# 加进 /etc/nginx/conf.d/frontend.conf 的 server { } 块
+# 只暴露 WebSocket 握手端点；health/status/cmd 仅 gateway 走 127.0.0.1:3897
+
+location = /pocket/ws {
+    proxy_pass http://127.0.0.1:3897;
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+    proxy_set_header Host $host;
+    proxy_set_header Authorization $http_authorization;
+    proxy_read_timeout 300s;
+    proxy_send_timeout 300s;
+}

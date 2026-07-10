@@ -1,0 +1,17 @@
+[Unit]
+Description=Pocket Browser Relay (phone WebView bridge)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/pocket
+EnvironmentFile=/opt/pocket/.env
+ExecStart=/usr/bin/node server/server.mjs
+Restart=always
+RestartSec=3
+
+# 安全：只绑 localhost，公网入口走 nginx /pocket/ws
+# POCKET_HOST=127.0.0.1 POCKET_PORT=3897 写在 .env 里
+
+[Install]
+WantedBy=multi-user.target

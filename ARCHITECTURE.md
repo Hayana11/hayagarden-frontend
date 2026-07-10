@@ -13,9 +13,10 @@
 | 灯守护 | 内部 | — | tools/mijia_daemon.py | 米家灯 HTTP 桥（/light/main/*、/light/bedside/warm|neutral） |
 | 教训库 MCP | 5055 | lessons-mcp.service | /opt/lessons/server.py | record→审核→promote→validate_edit 两层筛选 |
 | Codebase MCP | 5056 | codebase-mcp.service | /opt/codebase/server.py | 代码检索/补丁/git 只读/架构自述（本文档） |
+| Pocket 中继 | 3897 | pocket-relay.service | /opt/pocket/server/server.mjs | 手机 WebView 远程调试桥（WS 公网 + HTTP 仅 localhost） |
 | 渐变脑 | — | — | /opt/ombre-brain | 长期记忆、handoff、memo |
 
-nginx（/etc/nginx/conf.d/frontend.conf）：`/api/gw/`→5051（read_timeout 320s，buffering off）、`/lessons-mcp/`→5055、`/codebase-mcp/`→5056、`/mcp`、`/discord-mcp`、`/ombre/`。
+nginx（/etc/nginx/conf.d/frontend.conf）：`/api/gw/`→5051（read_timeout 320s，buffering off）、`/lessons-mcp/`→5055、`/codebase-mcp/`→5056、`location = /pocket/ws`→3897（仅此 WS 出公网）、`/mcp`、`/discord-mcp`、`/ombre/`。
 
 ## 请求管线（聊天一轮的生命周期）
 
