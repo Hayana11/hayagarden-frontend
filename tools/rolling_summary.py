@@ -140,9 +140,9 @@ def run():
 
     up_to = rows[-1]['id']
     current = conn.execute('SELECT summary, up_to_id, msg_count FROM rolling_summary WHERE id=1').fetchone()
-    if current and (current['summary'] or '').strip() and current['up_to_id'] == up_to and current['msg_count'] == len(rows):
+    if current and (current['summary'] or '').strip() and current['up_to_id'] == up_to:
         conn.close()
-        _log('unchanged cropped range (up_to id=%d, msgs=%d), skip' % (up_to, len(rows)))
+        _log('unchanged cropped boundary (up_to id=%d), skip' % up_to)
         return
 
     sampled = _sample(rows)

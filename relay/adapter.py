@@ -31,11 +31,14 @@ def _replace_image_blocks(messages: list) -> list:
             c2 = []
             for b in c:
                 if isinstance(b, dict) and b.get("type") == "image":
-                    c2.append({
+                    repl = {
                         "type": "text",
                         "text": "[图片：当前对话模型看不了图，内容已省略。"
                                 "如果哈娅提到图里的东西，直接问她图里是什么。]",
-                    })
+                    }
+                    if "cache_control" in b:
+                        repl["cache_control"] = b["cache_control"]
+                    c2.append(repl)
                 else:
                     c2.append(b)
             out.append({**msg, "content": c2})
