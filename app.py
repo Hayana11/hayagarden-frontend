@@ -49,6 +49,28 @@ def _migrate_chat_columns():
 _migrate_chat_columns()
 
 
+
+@app.route('/api/client-error', methods=['POST'])
+def client_error_log():
+    """Tiny WebView error sink for pages where DevTools are unavailable."""
+    try:
+        data = request.get_json(silent=True) or {}
+        row = {
+            'ts': datetime.datetime.now().isoformat(timespec='seconds'),
+            'page': str(data.get('page', ''))[:200],
+            'msg': str(data.get('msg', ''))[:1000],
+            'src': str(data.get('src', ''))[:300],
+            'line': data.get('line', 0),
+            'col': data.get('col', 0),
+            'ua': str(request.headers.get('User-Agent', ''))[:300],
+        }
+        with open('/opt/frontend/client_errors.log', 'a', encoding='utf-8') as f:
+            f.write(json.dumps(row, ensure_ascii=False) + '\n')
+    except Exception:
+        pass
+    return jsonify({'ok': True})
+
+
 # ── Artifact（费佳生成的 HTML/Markdown/Word 产物）────────────────
 @app.route('/api/artifacts/<int:aid>', methods=['GET'])
 def artifact_meta(aid):
@@ -134,6 +156,10 @@ def chat():
 @app.route('/calendar')
 def calendar():
     return send_from_directory('/opt/frontend/static', 'calendar.html')
+
+@app.route('/pocket-settings.html')
+def pocket_settings_page():
+    return send_from_directory('/opt/frontend/static', 'pocket-settings.html')
 
 @app.route('/letters')
 def letters():
