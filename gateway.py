@@ -850,6 +850,11 @@ def _add_cache_control_to_content(content):
             if isinstance(b, dict) and b.get('type') == 'text' and b.get('text'):
                 b['cache_control'] = marker
                 return out
+        for i in range(len(out) - 1, -1, -1):
+            b = out[i]
+            if isinstance(b, dict):
+                b['cache_control'] = marker
+                return out
     return content
 
 
