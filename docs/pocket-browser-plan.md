@@ -1,7 +1,7 @@
 # Pocket-Browser 接入 HayaGarden 方案
 
-> 上游参考：[Shitsuten/pocket-browser](https://github.com/Shitsuten/pocket-browser)  
-> Server 已 vendored 到本仓库 `pocket/`，协议与上游兼容，无需改服务端。
+> 上游参考：[Shitsuten/pocket-browser](https://github.com/Shitsuten/pocket-browser)（协议兼容，自维护 relay）  
+> Server 在 `pocket/server/server.mjs`，WS 鉴权走 `Authorization: Bearer`，与上游 `?token=` 不同。
 
 ## 一、为什么要接（一句话版）
 
@@ -19,15 +19,15 @@ pocket-relay（VPS，Node，只绑 localhost）
 你手机上的壳 App（WebView + OkHttp PocketClient）
 ```
 
-关键决策：**`/pocket/cmd` 不暴露公网**。控制端只有 gateway 自己（同机 localhost），nginx 只反代 `/pocket/ws` 给手机连。token 存 VPS `/opt/pocket/.env` 和手机 App 两处，公网面只剩一个带 token 的 WS 端点。
+关键决策：**`health`/`status`/`cmd` 不出公网**，gateway 只走 `127.0.0.1:3897`；nginx **仅** `location = /pocket/ws` 给手机连。HTTP/WS 统一 `Authorization: Bearer` 鉴权。
 
 ## 三、分期落地
 
 ### P0 · 通道跑通（纯部署）
 
 - VPS：`sudo ./scripts/deploy-pocket.sh`（从 `/opt/frontend` 同步 `pocket/` → `/opt/pocket`，装依赖，起 `pocket-relay.service`）
-- nginx：把 `deploy/nginx-pocket.snippet` 加进 `/etc/nginx/conf.d/frontend.conf`，`nginx -t && systemctl reload nginx`
-- 验收：`GET /pocket/status` 看到手机在线，`fake-phone` + `goto` + `screenshot` 手动跑通
+- nginx：把 `deploy/nginx-pocket.snippet`（`location = /pocket/ws`）加进 frontend.conf；**不要**用 `location /pocket/` 前缀
+- 验收：本机 `fake-phone` + `goto`/`js`/`html`/`screenshot` 四指令跑通
 
 ### P1 · 安卓壳 App（Kotlin，约 200 行）
 

@@ -1,11 +1,10 @@
-// pocket-browser · server
-// 手机 app 里的 WebView 当 executor，通过 WebSocket 连上来注册；
-// 控制端通过 HTTP 下指令，指令转发给手机执行，结果原路返回。
+// pocket-relay · HayaGarden 自维护中继（协议兼容 pocket-browser）
+// 手机 WebView 经 WebSocket 注册；gateway 经 localhost HTTP 下指令。
 //
 // 环境变量：
-// POCKET_TOKEN 必填，握手与鉴权用的密钥
+// POCKET_TOKEN 必填，HTTP/WS 统一 Bearer 鉴权
 // POCKET_PORT 可选，默认 3897
-// POCKET_HOST 可选，默认 127.0.0.1（配合 nginx 反代用；直接暴露公网请自行评估风险）
+// POCKET_HOST 可选，默认 127.0.0.1（nginx 只反代 /pocket/ws；health/status/cmd 不出公网）
 
 import http from "http";
 import crypto from "crypto";
@@ -73,10 +72,14 @@ const server = http.createServer(async (req, res) => {
   res.end('{"error":"not found"}');
 });
 
+function bearerToken(header) {
+  const m = (header || "").match(/^Bearer\s+(.+)$/i);
+  return m ? m[1] : "";
+}
+
 const wss = new WebSocketServer({ server, path: "/pocket/ws" });
 wss.on("connection", (ws, req) => {
-  const url = new URL(req.url, "http://x");
-  if (url.searchParams.get("token") !== TOKEN) return ws.close(4001, "bad token");
+  if (bearerToken(req.headers.authorization) !== TOKEN) return ws.close(4001, "bad token");
 
   // 新手机顶掉旧连接
   if (phone) { try { phone.close(4002, "replaced"); } catch {} }

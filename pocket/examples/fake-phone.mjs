@@ -12,7 +12,9 @@ const TOKEN = process.env.POCKET_TOKEN;
 const BASE = process.argv[2] || "ws://localhost:3897";
 if (!TOKEN) { console.error("请设置 POCKET_TOKEN"); process.exit(1); }
 
-const ws = new WebSocket(`${BASE}/pocket/ws?token=${TOKEN}`);
+const ws = new WebSocket(`${BASE}/pocket/ws`, {
+  headers: { Authorization: `Bearer ${TOKEN}` },
+});
 
 ws.on("open", () => console.log("[fake-phone] connected"));
 ws.on("message", (data) => {

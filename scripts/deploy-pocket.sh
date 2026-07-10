@@ -59,11 +59,12 @@ if ! systemctl is-active --quiet "${SERVICE_NAME}"; then
 fi
 echo "[pocket] ${SERVICE_NAME} 已运行"
 
-if [[ -f "${NGINX_CONF}" ]] && ! grep -q 'location /pocket/' "${NGINX_CONF}"; then
-  echo "[pocket] nginx 尚未配置 /pocket/，请把 deploy/nginx-pocket.snippet 内容加进 ${NGINX_CONF}"
+if [[ -f "${NGINX_CONF}" ]] && ! grep -q 'location = /pocket/ws' "${NGINX_CONF}"; then
+  echo "[pocket] nginx 尚未配置 location = /pocket/ws，请把 deploy/nginx-pocket.snippet 加进 ${NGINX_CONF}"
+  echo "      若曾配过 location /pocket/ 前缀块，请删掉（会把 status/cmd 暴露公网）"
   echo "      然后：sudo nginx -t && sudo systemctl reload nginx"
 else
-  echo "[pocket] nginx 已有 /pocket/ 或配置文件不存在，跳过"
+  echo "[pocket] nginx 已有 location = /pocket/ws 或配置文件不存在，跳过"
 fi
 
 echo ""

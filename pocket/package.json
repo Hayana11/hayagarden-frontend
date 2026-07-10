@@ -1,7 +1,7 @@
 {
   "name": "pocket-relay",
   "version": "1.0.0",
-  "description": "pocket-browser relay server for HayaGarden (vendored from Shitsuten/pocket-browser)",
+  "description": "pocket-relay for HayaGarden (protocol-compatible, self-maintained)",
   "type": "module",
   "scripts": {
     "start": "node server/server.mjs",

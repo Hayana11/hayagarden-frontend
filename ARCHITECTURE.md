@@ -16,7 +16,7 @@
 | Pocket 中继 | 3897 | pocket-relay.service | /opt/pocket/server/server.mjs | 手机 WebView 远程调试桥（WS 公网 + HTTP 仅 localhost） |
 | 渐变脑 | — | — | /opt/ombre-brain | 长期记忆、handoff、memo |
 
-nginx（/etc/nginx/conf.d/frontend.conf）：`/api/gw/`→5051（read_timeout 320s，buffering off）、`/lessons-mcp/`→5055、`/codebase-mcp/`→5056、`/pocket/`→3897（WebSocket Upgrade）、`/mcp`、`/discord-mcp`、`/ombre/`。
+nginx（/etc/nginx/conf.d/frontend.conf）：`/api/gw/`→5051（read_timeout 320s，buffering off）、`/lessons-mcp/`→5055、`/codebase-mcp/`→5056、`location = /pocket/ws`→3897（仅此 WS 出公网）、`/mcp`、`/discord-mcp`、`/ombre/`。
 
 ## 请求管线（聊天一轮的生命周期）
 
