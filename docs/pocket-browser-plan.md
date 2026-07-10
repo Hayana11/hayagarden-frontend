@@ -43,13 +43,21 @@ pocket-relay（VPS，Node，只绑 localhost）
 1. **截图物理限制**：安卓 WebView 在 App 完全退到后台时会暂停渲染，`goto`/`js`/`html` 都正常，但 `screenshot` 可能截到暂停前的旧画面。日常最稳的形态是「手机充电亮屏、或 App 挂在分屏/画中画时，费奥多尔的眼睛全功能；纯后台时他能读页面、不保证看得见画面」。真想要纯后台截图有个悬浮窗保活的进阶玩法（要授悬浮窗权限），可以留到 P3。
 2. **登录态要在这个 App 里养**：专用 Pocket WebView 的 cookie 与 Chrome/小红书 App 互不相通，第一次得在壳里把常用网站登录一遍（goto 打开后用户可在主界面外静默进行；登录态留在专用 WebView）。
 
-### P2 · 接进费奥多尔的工具链
+### P2 · 接进费奥多尔的工具链（已实现）
 
-- 在 **gateway.py** 写 5 个**常驻**原生工具：`pocket_status` / `pocket_goto` / `pocket_js` / `pocket_html` / `pocket_screenshot`（转发 `127.0.0.1:3897`）
-- `pocket_screenshot`：base64 落 **attachment_store**，工具返回 `attachment://id` 走现有图片卡片管线（不进 `static/`）
-- `pocket_html`：正文提取 + **30K** 截断（照用户文件注入规矩）
-- `pocket_js` 工具描述写死：**发布/下单/支付/私信必须先问哈娅**
-- `tool_drawers.py` 分组里登记五件套（抽屉关着也先登记，以后开不乱）
+- **gateway.py** 五件套**常驻**工具：`pocket_status` / `pocket_goto` / `pocket_js` / `pocket_html` / `pocket_screenshot`
+- 全部转发 `http://127.0.0.1:3897`，Bearer 读 `/opt/pocket/.env` 的 `POCKET_TOKEN` 或环境变量
+- 手机离线时返回清晰错误 **`phone_not_connected`**，不假装可用
+- `pocket_html`：正文提取 + **30K** 截断
+- `pocket_screenshot`：base64 → `attachment_store`，返回 `attachment://id`
+- `pocket_js` 描述写死：**发布/下单/支付/私信必须先问哈娅**
+- `tool_drawers.py` 已登记 `pocket` 抽屉（不做动态增删）
+
+**运行限制（写进工具描述）**
+
+> Pocket 当前依赖手机亮屏。锁屏后会断线；工具调用应在离线时返回友好错误，不要假装可用。
+
+**P1 真机验收（已通过）**：前台 + 亮屏后台 `status/ping/goto/js/html/screenshot` 全通；锁屏断线暂不作为阻塞项。
 
 ### P3 · 动态上下文
 
@@ -64,6 +72,7 @@ pocket-relay（VPS，Node，只绑 localhost）
 
 | 疼痛度 | 风险 | 说明 |
 |--------|------|------|
+| 中 | 锁屏断线 | Pocket 依赖亮屏；锁屏后 WS 断开，工具返回 phone_not_connected |
 | 中 | 安卓后台 WebView 暂停渲染 | 见 P1 截图限制；前台/分屏最稳 |
 | 中 | 登录态隔离 | 壳 App 内单独登录常用站，一次性成本 |
 | 高 | 外站不可触达原生桥 | Pocket 专用 WebView 不注入 ElpisNative；主 WebView 不承接 pocket goto |
