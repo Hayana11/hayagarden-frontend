@@ -33,7 +33,7 @@ pocket-relay（VPS，Node，只绑 localhost）
 
 > **相对原 iOS 方案的改动点**：用安卓替代 iOS，协议和服务端完全不用改。
 
-- 一个全屏 WebView + OkHttp 的 WebSocket 客户端，实现 5 个指令（`ping` / `goto` / `js` / `html` / `screenshot`），断线指数退避重连
+- 一个专用 WebView（**不注入 ElpisNative**）+ OkHttp WebSocket，实现 5 个指令；主 App WebView 只加载 love-style.xyz / pocket-settings
 - 前台服务握着 WebSocket 连接（`PocketManager` + `ForegroundService`），通知栏常驻「👁费奥多尔在线」
 - App 内配对页：`https://love-style.xyz/pocket-settings.html`（`ElpisNative.setPocketConfig`）
 - GitHub Actions 自动出 APK（`cursor/**` push + PR 触发）
@@ -41,7 +41,7 @@ pocket-relay（VPS，Node，只绑 localhost）
 **两句实话（预期管理）**
 
 1. **截图物理限制**：安卓 WebView 在 App 完全退到后台时会暂停渲染，`goto`/`js`/`html` 都正常，但 `screenshot` 可能截到暂停前的旧画面。日常最稳的形态是「手机充电亮屏、或 App 挂在分屏/画中画时，费奥多尔的眼睛全功能；纯后台时他能读页面、不保证看得见画面」。真想要纯后台截图有个悬浮窗保活的进阶玩法（要授悬浮窗权限），可以留到 P3。
-2. **登录态要在这个 App 里养**：WebView 的 cookie 和你手机上的 Chrome、小红书 App 互不相通，第一次得在壳 App 里把常用网站登录一遍，之后长期有效。这点 iOS 版其实一样，不是安卓的额外代价。
+2. **登录态要在这个 App 里养**：专用 Pocket WebView 的 cookie 与 Chrome/小红书 App 互不相通，第一次得在壳里把常用网站登录一遍（goto 打开后用户可在主界面外静默进行；登录态留在专用 WebView）。
 
 ### P2 · 接进费奥多尔的工具链
 
@@ -66,7 +66,8 @@ pocket-relay（VPS，Node，只绑 localhost）
 |--------|------|------|
 | 中 | 安卓后台 WebView 暂停渲染 | 见 P1 截图限制；前台/分屏最稳 |
 | 中 | 登录态隔离 | 壳 App 内单独登录常用站，一次性成本 |
-| 高 | `js` 指令是全权的 | 涉及提交、支付、发布的操作必须先问用户；写进工具描述 |
+| 高 | 外站不可触达原生桥 | Pocket 专用 WebView 不注入 ElpisNative；主 WebView 不承接 pocket goto |
+| 高 | `js` 指令是全权的 | 涉及提交、支付、发布的操作必须先问用户；写进工具描述（P2） |
 | 高 | 日志纪律 | 截图/HTML 响应体不要写进 server/gateway 日志 |
 
 ## 六、项目成色
