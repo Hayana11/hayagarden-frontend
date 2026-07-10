@@ -59,9 +59,12 @@ pocket-relay（VPS，Node，只绑 localhost）
 
 **P1 真机验收（已通过）**：前台 + 亮屏后台 `status/ping/goto/js/html/screenshot` 全通；锁屏断线暂不作为阻塞项。
 
-### P3 · 动态上下文
+### P3 · 动态上下文（已实现）
 
-- 在缓存断点**之后**的动态区加一行：`手机浏览器：在线/离线 + last_seen`（来自 `/pocket/status`），零缓存代价
+- 在 **BP3 动态区**（`chat/system_builder.py`，缓存断点之后）每轮注入一行：
+  `手机浏览器：在线/离线 + last_seen`（来自本机 `GET /pocket/status`）
+- relay 未部署/不可达时静默跳过，不污染 prompt
+- 工具仍**常驻**（不动态增删）；离线时靠这行提示 + `phone_not_connected` 双重降级
 
 ## 四、和缓存改造的两个交互点
 

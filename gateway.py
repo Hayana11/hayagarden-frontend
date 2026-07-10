@@ -2188,6 +2188,20 @@ def _pocket_status():
     return 'phone_not_connected：手机浏览器离线（上次 %s）。Pocket 依赖亮屏，锁屏后会断线。' % seen
 
 
+def _pocket_bp3_snippet():
+    """BP3 动态区一行：手机浏览器在线/离线 + last_seen。relay 不可用时返回空串。"""
+    d, err = _pocket_request('GET', '/pocket/status', timeout=3)
+    if err:
+        return ''
+    seen = d.get('last_seen') or '未知'
+    if d.get('phone_connected'):
+        return '（手机浏览器：在线，last_seen %s）' % seen
+    return (
+        '（手机浏览器：离线，last_seen %s。'
+        'Pocket 依赖手机亮屏，锁屏后会断线；离线时 pocket_* 不可用，可降级 read_webpage。）'
+    ) % seen
+
+
 def _pocket_goto(url, settle_ms=2500):
     url = (url or '').strip()
     if not url:

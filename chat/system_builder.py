@@ -213,7 +213,7 @@ def build_system(wake=False):
         _ms = _fmt_l(_ls.get('main', {})); _bs = _fmt_l(_ls.get('bedside', {}))
         parts.append(
             NL + '（你拥有真实的工具：保存与搜索记忆、控制次卧灯、查看与发布留言板、'
-            '联网搜索/逛GitHub/用Playwright读网页、查位置、查手机电量与今日屏幕时长、'
+            '联网搜索/逛GitHub/用Playwright读网页、手机 Pocket 浏览器（pocket_*）、查位置、查手机电量与今日屏幕时长、'
             '请求手机截屏，以及 codebase 工具（读代码/搜符号/看 git/打补丁）。'
             '排查系统问题优先用 codebase_describe_project 和 codebase_search_code。'
             '对话与wake里都可以自然使用，随心所欲。）'
@@ -222,11 +222,20 @@ def build_system(wake=False):
     except Exception:
         parts.append(
             NL + '（你拥有真实的工具：保存与搜索记忆、控制次卧灯、查看与发布留言板、'
-            '联网搜索/逛GitHub/用Playwright读网页、查位置、查手机电量与今日屏幕时长、'
+            '联网搜索/逛GitHub/用Playwright读网页、手机 Pocket 浏览器（pocket_*）、查位置、查手机电量与今日屏幕时长、'
             '请求手机截屏，以及 codebase 工具（读代码/搜符号/看 git/打补丁）。'
             '排查系统问题优先用 codebase_describe_project 和 codebase_search_code。'
             '对话与wake里都可以自然使用，随心所欲。）'
         )
+
+    # 4b. Pocket 手机浏览器在线状态（BP3 动态，不污染缓存）
+    try:
+        from gateway import _pocket_bp3_snippet
+        _pocket_line = _pocket_bp3_snippet()
+        if _pocket_line:
+            parts.append(_pocket_line)
+    except Exception:
+        pass
 
     # 5. Board 待处理项
     try:
