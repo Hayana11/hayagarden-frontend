@@ -59,6 +59,12 @@ if ! systemctl is-active --quiet "${SERVICE_NAME}"; then
 fi
 echo "[pocket] ${SERVICE_NAME} 已运行"
 
+if [[ -f "${NGINX_CONF}" ]] && grep -qE 'location[[:space:]]+/pocket/[[:space:]]*\{' "${NGINX_CONF}"; then
+  echo "[pocket] FATAL: 发现旧的 location /pocket/ 前缀块，会把 status/cmd 暴露公网"
+  echo "      请删掉该块，只保留 deploy/nginx-pocket.snippet 里的 location = /pocket/ws"
+  exit 1
+fi
+
 if [[ -f "${NGINX_CONF}" ]] && ! grep -q 'location = /pocket/ws' "${NGINX_CONF}"; then
   echo "[pocket] nginx 尚未配置 location = /pocket/ws，请把 deploy/nginx-pocket.snippet 加进 ${NGINX_CONF}"
   echo "      若曾配过 location /pocket/ 前缀块，请删掉（会把 status/cmd 暴露公网）"
@@ -70,7 +76,7 @@ fi
 echo ""
 echo "验收（本机，token 从 ${POCKET_ROOT}/.env 读取）："
 echo "  source ${POCKET_ROOT}/.env"
-echo "  curl -s http://127.0.0.1:3897/pocket/health"
+echo "  curl -s http://127.0.0.1:3897/pocket/health -H \"Authorization: Bearer \$POCKET_TOKEN\""
 echo "  curl -s http://127.0.0.1:3897/pocket/status -H \"Authorization: Bearer \$POCKET_TOKEN\""
 echo "  cd ${POCKET_ROOT} && POCKET_TOKEN=\$POCKET_TOKEN npm run fake-phone -- ws://127.0.0.1:3897"
 echo "  curl -s -X POST http://127.0.0.1:3897/pocket/cmd -H \"Authorization: Bearer \$POCKET_TOKEN\" -H 'Content-Type: application/json' -d '{\"action\":\"ping\"}'"

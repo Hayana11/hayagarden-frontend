@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Pocket 配对</title>
+<style>
+body{margin:0;padding:20px;font-family:-apple-system,BlinkMacSystemFont,sans-serif;background:#faf6f1;color:#3d2f2a}
+h1{font-size:1.1rem;font-weight:600;margin:0 0 12px}
+label{display:block;font-size:.85rem;margin:12px 0 4px;color:#7a655e}
+input{width:100%;box-sizing:border-box;padding:10px;border:1px solid #e0d5cc;border-radius:8px;font-size:.95rem}
+button{margin-top:16px;width:100%;padding:12px;border:0;border-radius:8px;background:#6b4f4a;color:#fff;font-size:1rem}
+#status{margin-top:16px;padding:12px;border-radius:8px;background:#fff;font-size:.85rem;white-space:pre-wrap;word-break:break-all}
+.warn{font-size:.8rem;color:#9a7b72;margin-top:8px;line-height:1.4}
+</style>
+</head>
+<body>
+<h1>👁 费奥多尔之眼 · Pocket 配对</h1>
+<p class="warn">在 VPS 部署 pocket-relay 后，把 <code>/opt/pocket/.env</code> 里的 <code>POCKET_TOKEN</code> 填到下面。保存后 App 会自动重连。</p>
+<label for="token">POCKET_TOKEN</label>
+<input id="token" type="password" autocomplete="off" placeholder="与 VPS 相同的一串密钥">
+<label for="ws">WebSocket 地址（可选）</label>
+<input id="ws" type="text" value="wss://love-style.xyz/pocket/ws">
+<button type="button" id="save">保存并重连</button>
+<div id="status">检测环境中…</div>
+<script>
+(function () {
+  var statusEl = document.getElementById('status');
+  var tokenEl = document.getElementById('token');
+  var wsEl = document.getElementById('ws');
+
+  function showStatus(text) {
+    statusEl.textContent = text;
+  }
+
+  function refresh() {
+    if (!window.ElpisNative) {
+      showStatus('请在 Elpis App 内打开此页（浏览器里没有 ElpisNative 桥）。');
+      return;
+    }
+    try {
+      showStatus(window.ElpisNative.getPocketStatus());
+    } catch (e) {
+      showStatus('读取状态失败: ' + e.message);
+    }
+  }
+
+  document.getElementById('save').onclick = function () {
+    if (!window.ElpisNative) {
+      showStatus('请在 Elpis App 内打开。');
+      return;
+    }
+    var t = tokenEl.value.replace(/^\s+|\s+$/g, '');
+    if (!t) {
+      showStatus('请填写 POCKET_TOKEN');
+      return;
+    }
+    try {
+      var ws = wsEl.value.replace(/^\s+|\s+$/g, '');
+      showStatus(window.ElpisNative.setPocketConfig(t, ws));
+    } catch (e) {
+      showStatus('保存失败: ' + e.message);
+    }
+  };
+
+  refresh();
+})();
+</script>
+</body>
+</html>

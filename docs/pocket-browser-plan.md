@@ -34,8 +34,9 @@ pocket-relay（VPS，Node，只绑 localhost）
 > **相对原 iOS 方案的改动点**：用安卓替代 iOS，协议和服务端完全不用改。
 
 - 一个全屏 WebView + OkHttp 的 WebSocket 客户端，实现 5 个指令（`ping` / `goto` / `js` / `html` / `screenshot`），断线指数退避重连
-- 前台服务握着 WebSocket 连接，通知栏常驻一条（比如「👁费奥多尔在线」），App 加进电池优化白名单，连接就能稳定活着
-- 工程在 [HayaGarden](https://github.com/Hayana11/HayaGarden) 仓库，GitHub Actions 自动出 APK——改代码推上去、等两分钟、下载安装，全程无本地环境
+- 前台服务握着 WebSocket 连接（`PocketManager` + `ForegroundService`），通知栏常驻「👁费奥多尔在线」
+- App 内配对页：`https://love-style.xyz/pocket-settings.html`（`ElpisNative.setPocketConfig`）
+- GitHub Actions 自动出 APK（`cursor/**` push + PR 触发）
 
 **两句实话（预期管理）**
 
@@ -44,14 +45,20 @@ pocket-relay（VPS，Node，只绑 localhost）
 
 ### P2 · 接进费奥多尔的工具链
 
-- 在 home MCP server 里加 5 个工具：`pocket_status` / `pocket_goto` / `pocket_js` / `pocket_html` / `pocket_screenshot`，实现就是转发 `localhost:3897`
-- `screenshot` 返回的 base64 存进 `static/`，走现有图片卡片管线
-- `html` 结果过一遍正文提取 + 截断（30K 上限，照用户文件注入的现成规矩）
+- 在 **gateway.py** 写 5 个**常驻**原生工具：`pocket_status` / `pocket_goto` / `pocket_js` / `pocket_html` / `pocket_screenshot`（转发 `127.0.0.1:3897`）
+- `pocket_screenshot`：base64 落 **attachment_store**，工具返回 `attachment://id` 走现有图片卡片管线（不进 `static/`）
+- `pocket_html`：正文提取 + **30K** 截断（照用户文件注入规矩）
+- `pocket_js` 工具描述写死：**发布/下单/支付/私信必须先问哈娅**
+- `tool_drawers.py` 分组里登记五件套（抽屉关着也先登记，以后开不乱）
+
+### P3 · 动态上下文
+
+- 在缓存断点**之后**的动态区加一行：`手机浏览器：在线/离线 + last_seen`（来自 `/pocket/status`），零缓存代价
 
 ## 四、和缓存改造的两个交互点
 
 1. **加工具的那一刻会有一次性全量 miss**——tools 数组排在整个缓存前缀最前面，变一次、全毁一次。这是一次性成本。但**千万别做成「手机在线才注册工具、离线就摘掉」的动态注册**——那等于把工具抽屉的病又请回来。正确做法：5 个工具**常驻**，手机离线时调用返回「手机不在线」的友好错误，让费奥多尔自己降级回 Playwright。
-2. 如果想让他**开口前就知道**手机在不在线，把 `/pocket/status` 的结果加一行进动态上下文——动态区在最后一条 user 消息里，天生就是给这种易变状态准备的。
+2. 如果想让他**开口前就知道**手机在不在线，见 **P3** 动态上下文（`last_seen` 来自本机 `/pocket/status`）。
 
 ## 五、诚实的风险
 

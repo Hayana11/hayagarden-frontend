@@ -24,19 +24,24 @@ let phone = null; // 当前手机连接（只保留最新一个）
 let phoneLastSeen = null;
 const pending = new Map(); // id -> { resolve, timer }
 
+function bearerToken(header) {
+  const m = (header || "").match(/^Bearer\s+(.+)$/i);
+  return m ? m[1] : "";
+}
+
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, "http://x");
-  const auth = (req.headers.authorization || "").replace("Bearer ", "");
-
-  // 健康检查不需要鉴权
-  if (url.pathname === "/pocket/health") {
-    res.writeHead(200, { "Content-Type": "application/json" });
-    return res.end(JSON.stringify({ ok: true, phone: !!phone, last_seen: phoneLastSeen }));
-  }
+  const auth = bearerToken(req.headers.authorization);
 
   if (auth !== TOKEN) {
     res.writeHead(401);
     return res.end('{"error":"bad token"}');
+  }
+
+  // 健康检查：需 Bearer，不泄露未鉴权状态
+  if (url.pathname === "/pocket/health") {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    return res.end(JSON.stringify({ ok: true }));
   }
 
   // 手机在不在线
@@ -71,11 +76,6 @@ const server = http.createServer(async (req, res) => {
   res.writeHead(404);
   res.end('{"error":"not found"}');
 });
-
-function bearerToken(header) {
-  const m = (header || "").match(/^Bearer\s+(.+)$/i);
-  return m ? m[1] : "";
-}
 
 const wss = new WebSocketServer({ server, path: "/pocket/ws" });
 wss.on("connection", (ws, req) => {
