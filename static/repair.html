@@ -52,6 +52,17 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,'PingFang 
 .fix-btn:disabled{opacity:.5;cursor:not-allowed;}
 .fix-result{font-size:11px;color:var(--muted);margin-top:10px;min-height:16px;}
 
+
+/* 真机临时打开网址 */
+.url-row{display:flex;gap:8px;align-items:center;margin-top:10px;}
+.url-input{flex:1;border:1.5px solid var(--border);border-radius:12px;padding:9px 11px;font-size:13px;font-family:inherit;outline:none;background:var(--card);color:var(--text);min-width:0;}
+.url-input:focus{border-color:#b07a20;}
+.url-open-btn{height:38px;border:none;border-radius:12px;background:#b07a20;color:#fff;font-size:12px;font-weight:600;padding:0 13px;cursor:pointer;white-space:nowrap;}
+.url-open-btn:hover{background:#9a6818;}
+.url-chips{display:flex;gap:6px;flex-wrap:wrap;margin-top:10px;}
+.url-chip{border:1px solid #f0dfc8;background:#fff;color:#8a5a18;border-radius:999px;padding:5px 9px;font-size:11px;cursor:pointer;}
+.url-chip:hover{background:#fff6e8;}
+
 /* 对话区 */
 .chat-area{flex:1;display:flex;flex-direction:column;gap:10px;margin-bottom:12px;}
 .msg{border-radius:14px;padding:11px 14px;font-size:14px;line-height:1.6;max-width:100%;}
@@ -120,6 +131,23 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,'PingFang 
       <button class="fix-btn fix-btn-secondary" id="unlock-btn" onclick="unlockGenLock(false)">仅解锁</button>
     </div>
     <div class="fix-result" id="fix-result"></div>
+  </div>
+
+  <!-- 真机临时打开网址 -->
+  <div class="fix-card" id="url-open-card">
+    <div class="fix-title"><i class="ti ti-external-link"></i> 真机临时打开网址</div>
+    <div class="fix-desc">给 App 真机测试用：在下面填网址，当前 WebView 会直接跳转。测试完 Pocket/重构壳后可以删掉这块。</div>
+    <div class="url-row">
+      <input class="url-input" id="url-open-input" type="url" inputmode="url" autocapitalize="off" autocomplete="off" spellcheck="false" value="https://love-style.xyz/dash" placeholder="https://example.com">
+      <button class="url-open-btn" type="button" onclick="openTestUrl()"><i class="ti ti-arrow-up-right"></i> 打开</button>
+    </div>
+    <div class="url-chips">
+      <button class="url-chip" type="button" onclick="openPresetUrl('https://love-style.xyz/dash')">dash</button>
+      <button class="url-chip" type="button" onclick="openPresetUrl('https://love-style.xyz/chat')">chat</button>
+      <button class="url-chip" type="button" onclick="openPresetUrl('https://love-style.xyz/pocket-settings.html')">pocket 配对</button>
+      <button class="url-chip" type="button" onclick="openPresetUrl('https://example.com')">example</button>
+    </div>
+    <div class="fix-result" id="url-open-result"></div>
   </div>
 
   <!-- 对话区 -->
@@ -193,6 +221,38 @@ async function checkStatus() {
       lockEl.className = 'status-badge badge-err';
     }
   }
+}
+
+
+function normalizeTestUrl(raw) {
+  var url = String(raw || '').replace(/^\s+|\s+$/g, '');
+  if (!url) return '';
+  if (!/^https?:\/\//i.test(url)) url = 'https://' + url;
+  return url;
+}
+
+function openTestUrl() {
+  var input = document.getElementById('url-open-input');
+  var out = document.getElementById('url-open-result');
+  var url = normalizeTestUrl(input && input.value);
+  if (!url) {
+    if (out) out.textContent = '先填一个网址。';
+    return;
+  }
+  var isPocketSettings = /\/pocket-settings\.html(?:[?#].*)?$/i.test(url);
+  if (!isPocketSettings && window.ElpisNative && typeof window.ElpisNative.openPocketBrowser === 'function') {
+    if (out) out.textContent = '正在用 Pocket 专用浏览器打开：' + url;
+    window.ElpisNative.openPocketBrowser(url);
+    return;
+  }
+  if (out) out.textContent = isPocketSettings ? '正在打开配对页：' + url : '正在打开：' + url;
+  setTimeout(function(){ location.href = url; }, 80);
+}
+
+function openPresetUrl(url) {
+  var input = document.getElementById('url-open-input');
+  if (input) input.value = url;
+  openTestUrl();
 }
 
 function updateGenLockBadge(lock) {
