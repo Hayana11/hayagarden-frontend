@@ -49,3 +49,24 @@ recovered onto a branch and merged into `main`.
 Runtime data such as `.env`, `memories.db`, credentials, uploads, and
 backups must remain ignored or live outside the repository. They are backed
 up separately and are never committed by the deploy script.
+
+
+## Runtime data migration
+
+Runtime state is not source code. The following paths are ignored and preserved
+outside Git during deployment:
+
+- `attachments.db` and `attachments/`
+- `client_errors.log`
+- `static/uploads/`
+- `memories.db.bak*`
+
+Before switching commits, the deploy script runs the regular backup, copies
+these paths to a timestamped `/opt/backups/frontend/predeploy-runtime-*`
+directory, removes the tracked copies for checkout, and restores the live
+contents immediately afterward. Rollback performs the same preservation cycle.
+
+For the first migration from a production-only commit, divergence is accepted
+only when the exact current SHA appears in the target commit's audited
+`deploy/recovered-production-shas.txt`. There is no free-form bypass flag.
+After that first switch, normal ancestry checks apply again.

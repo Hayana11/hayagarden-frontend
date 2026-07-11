@@ -6,7 +6,7 @@
 - 位置：`/opt/backups/frontend/frontend-<日期时间>.tar.gz`
 - 保留：最近 30 天
 - 日志：`/var/log/frontend-backup.log`
-- 内容：memories.db（sqlite 一致性快照）、.env、.mijia_auth、prompts/、static/uploads/、co-reading 全部书籍与批注数据
+- 内容：memories.db / attachments.db（sqlite 一致性快照）、.env、.mijia_auth、prompts/、attachments/、client_errors.log、static/uploads/、co-reading 全部书籍与批注数据
 
 ## 手动备份
 ```bash
@@ -22,11 +22,14 @@ cd /tmp && mkdir restore && tar -xzf /opt/backups/frontend/frontend-最新.tar.g
 systemctl stop frontend frontend-gw co-reading
 
 # 3. 恢复文件
-cp /tmp/restore/memories.db   /opt/frontend/memories.db
+cp /tmp/restore/memories.db    /opt/frontend/memories.db
+cp /tmp/restore/attachments.db /opt/frontend/attachments.db 2>/dev/null || true
 cp /tmp/restore/.env          /opt/frontend/.env
 cp /tmp/restore/.mijia_auth   /opt/frontend/.mijia_auth
 cp -r /tmp/restore/prompts/*  /opt/frontend/prompts/
-cp -r /tmp/restore/uploads/*  /opt/frontend/static/uploads/ 2>/dev/null
+cp -r /tmp/restore/uploads/*    /opt/frontend/static/uploads/ 2>/dev/null
+cp -r /tmp/restore/attachments/* /opt/frontend/attachments/ 2>/dev/null
+cp /tmp/restore/client_errors.log /opt/frontend/client_errors.log 2>/dev/null || true
 cp -r /tmp/restore/co-reading-data/* /opt/co-reading/data/
 
 # 4. 重启

@@ -13,3 +13,10 @@ mcp-http.log
 .discord-session-id
 .claude/
 private/
+
+# Runtime state: backed up separately, never deploy from Git
+attachments.db
+attachments/
+client_errors.log
+static/uploads/
+memories.db.bak*

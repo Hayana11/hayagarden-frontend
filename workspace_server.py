@@ -73,6 +73,7 @@ def ws_write():
 
 ALLOWED_CMDS = [
     'systemctl restart frontend', 'systemctl restart frontend-gw',
+    'systemctl reload frontend', 'systemctl reload frontend-gw',
     'systemctl is-active frontend', 'systemctl is-active frontend-gw',
     'systemctl status frontend', 'systemctl status frontend-gw',
     'git -C /opt/frontend status', 'git -C /opt/frontend log --oneline -10',

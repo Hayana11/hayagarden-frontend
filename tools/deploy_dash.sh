@@ -10,8 +10,8 @@ NODE_ENV=development npm ci --ignore-scripts
 echo "[dash] building production bundle..."
 npm run build
 
-echo "[dash] restarting frontend.service..."
-sudo systemctl restart frontend.service
+echo "[dash] reloading frontend.service (zero-downtime graceful reload)..."
+sudo systemctl reload frontend.service
 
 if [[ -f /opt/frontend/app/dist/index.html ]]; then
   echo "[dash] deployed: /opt/frontend/app/dist/index.html"

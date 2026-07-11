@@ -9,8 +9,10 @@ import { LedgerScreen } from './screens/LedgerScreen';
 import { PeriodScreen } from './screens/PeriodScreen';
 
 export default function App() {
+  const basename = window.location.pathname.startsWith('/dash') ? '/dash' : undefined;
+
   return (
-    <BrowserRouter basename="/dash">
+    <BrowserRouter basename={basename}>
       <AppShell>
         <Routes>
           <Route path="/" element={<DashScreen />} />
