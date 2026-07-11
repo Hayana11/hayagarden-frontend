@@ -182,6 +182,10 @@ class ContextContinuityTests(unittest.TestCase):
             deploy_source,
         )
         self.assertIn("Production-only commits:", deploy_source)
+        self.assertIn("deploy/recovered-production-shas.txt", deploy_source)
+        self.assertIn("snapshot_runtime", deploy_source)
+        self.assertIn("restore_runtime", deploy_source)
+        self.assertIn("':(exclude)attachments.db'", deploy_source)
 
 
 if __name__ == "__main__":
