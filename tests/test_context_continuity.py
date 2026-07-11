@@ -155,6 +155,10 @@ class ContextContinuityTests(unittest.TestCase):
         app_source = open(
             os.path.join(ROOT, "app.py"), encoding="utf-8"
         ).read()
+        deploy_source = open(
+            os.path.join(ROOT, "scripts", "deploy-frontend.sh"),
+            encoding="utf-8",
+        ).read()
 
         self.assertNotIn(
             "UPDATE wake_log SET consumed=1 WHERE consumed=0", gateway
@@ -162,12 +166,17 @@ class ContextContinuityTests(unittest.TestCase):
         self.assertGreaterEqual(
             gateway.count("build_system_with_wake_claim("), 3
         )
+        self.assertGreaterEqual(
+            gateway.count("is_pending_user_turn("), 3
+        )
         self.assertIn(
             "format_tool_history as _format_tool_history", gateway
         )
         self.assertNotIn("str(rc or '')[:2000]", gateway)
         self.assertIn("user_message_id", frontend)
         self.assertIn('"message_id": message_id', app_source)
+        self.assertIn("for attempt in 1 2 3 4 5", deploy_source)
+        self.assertIn("retrying in 3s", deploy_source)
 
 
 if __name__ == "__main__":
