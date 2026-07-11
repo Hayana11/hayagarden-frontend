@@ -628,11 +628,13 @@ def send_chat():
     if file_url and not content:
         content = '[文件:%s]' % (file_name or '附件')
     conn = get_db()
-    conn.execute("INSERT INTO chat_messages (author,content,image_url,file_url,file_name) VALUES (?,?,?,?,?)",
+    cur = conn.execute("INSERT INTO chat_messages (author,content,image_url,file_url,file_name) VALUES (?,?,?,?,?)",
         (author, content, image_url, file_url, file_name))
+    message_id = cur.lastrowid
     conn.commit()
     conn.close()
-    return jsonify({"ok": True})
+    # gateway uses this id to claim wake context only after a successful reply.
+    return jsonify({"ok": True, "message_id": message_id})
 
 @app.route('/api/chat/reply', methods=['POST'])
 def chat_reply():
