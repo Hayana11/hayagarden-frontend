@@ -3215,7 +3215,8 @@ def workspace_chat():
 
 @app.route('/chat', methods=['POST'])
 def chat():
-    _uc = ((request.get_json() or {}).get('content') or '').strip()
+    _turn_data = request.get_json() or {}
+    _uc = (_turn_data.get('content') or '').strip()
     if _uc:
         _c = get_db(); _c.execute("INSERT INTO chat_messages (author,content) VALUES ('hayana',?)", (_uc,)); _c.commit(); _c.close()
         try:
@@ -3250,8 +3251,11 @@ def chat():
             return jsonify({'ok': True, 'content': text, 'thinking': thinking_text})
         text, thinking_text = None, None
         try:
+            _is_user_turn = bool(_uc) or is_pending_user_turn(
+                get_db, _turn_data.get('user_message_id')
+            )
             system, _wake_claim_ids = build_system_with_wake_claim(
-                build_system, get_db, user_turn=bool(_uc)
+                build_system, get_db, user_turn=_is_user_turn
             )
             messages = build_messages()
 
