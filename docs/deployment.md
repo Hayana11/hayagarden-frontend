@@ -23,6 +23,7 @@ sudo scripts/deploy-frontend.sh <full-origin-main-sha>
 The script refuses to proceed when:
 
 - the production worktree contains tracked or untracked changes;
+- production `HEAD` contains commits that are not ancestors of the target;
 - the supplied SHA is no longer the fetched `origin/main` SHA;
 - compilation or context-continuity tests fail;
 - another deployment is in progress.
@@ -41,7 +42,9 @@ The deployed SHA is written to
 Stop. Do not clean, reset, or overwrite it. Create a recovery branch and
 commit the changes first, then compare that branch with GitHub. The dirty
 worktree is evidence that production contains source code not yet preserved
-in version control.
+in version control. A clean worktree can still contain production-only
+commits; the ancestry guard prints them and refuses deployment until they are
+recovered onto a branch and merged into `main`.
 
 Runtime data such as `.env`, `memories.db`, credentials, uploads, and
 backups must remain ignored or live outside the repository. They are backed
