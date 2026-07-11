@@ -3,6 +3,12 @@ import { createRoot } from 'react-dom/client'
 import './index.css'
 import App from './App.tsx'
 
+declare global {
+  interface Window {
+    __dashProbe?: (message: string) => void
+  }
+}
+
 window.__dashProbe?.('module loaded')
 
 window.__dashProbe?.('render called')
