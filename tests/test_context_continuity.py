@@ -1,4 +1,5 @@
 """Regression tests for wake and tool-result context continuity."""
+import importlib.util
 import json
 import os
 import sqlite3
@@ -10,12 +11,17 @@ ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
-from chat.context_continuity import (
-    build_system_with_wake_claim,
-    consume_wake_ids,
-    format_tool_history,
-    is_pending_user_turn,
+_SPEC = importlib.util.spec_from_file_location(
+    "context_continuity_under_test",
+    os.path.join(ROOT, "chat", "context_continuity.py"),
 )
+_CONTEXT = importlib.util.module_from_spec(_SPEC)
+_SPEC.loader.exec_module(_CONTEXT)
+
+build_system_with_wake_claim = _CONTEXT.build_system_with_wake_claim
+consume_wake_ids = _CONTEXT.consume_wake_ids
+format_tool_history = _CONTEXT.format_tool_history
+is_pending_user_turn = _CONTEXT.is_pending_user_turn
 
 
 class ContextContinuityTests(unittest.TestCase):
