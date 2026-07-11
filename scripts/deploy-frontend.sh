@@ -66,10 +66,28 @@ trap rollback ERR
 
 git checkout --detach "$target_sha"
 systemctl restart "${SERVICES[@]}"
-for service in "${SERVICES[@]}"; do
-  systemctl is-active --quiet "$service"
+health_ok=0
+for attempt in 1 2 3 4 5; do
+  services_ok=1
+  for service in "${SERVICES[@]}"; do
+    if ! systemctl is-active --quiet "$service"; then
+      services_ok=0
+    fi
+  done
+  if [[ "$services_ok" -eq 1 ]] && curl --fail --silent --show-error --max-time 20 \
+      http://127.0.0.1:5051/api/debug/wake_check >/dev/null; then
+    health_ok=1
+    break
+  fi
+  if [[ "$attempt" -lt 5 ]]; then
+    echo "Health check attempt $attempt/5 failed; retrying in 3s..." >&2
+    sleep 3
+  fi
 done
-curl --fail --silent --show-error --max-time 20   http://127.0.0.1:5051/api/debug/wake_check >/dev/null
+if [[ "$health_ok" -ne 1 ]]; then
+  echo "Health check failed after 5 attempts." >&2
+  false
+fi
 
 mkdir -p "$STATE_DIR"
 printf '%s\n' "$target_sha" > "$STATE_DIR/DEPLOYED_SHA"
