@@ -601,6 +601,12 @@ def _ombre_hold_sync(content, tags='', importance=5, pinned=False):
 
 
 from chat.system_builder import build_system, build_wake_system, _blocks_to_str
+from chat.context_continuity import (
+    build_system_with_wake_claim,
+    consume_wake_ids,
+    format_tool_history as _format_tool_history,
+    is_pending_user_turn,
+)
 
 
 def img_block(url, max_dim=1568):
@@ -635,54 +641,7 @@ def img_block(url, max_dim=1568):
             data = base64.standard_b64encode(f.read()).decode()
         return {'type': 'image', 'source': {'type': 'base64', 'media_type': mime, 'data': data}}
 
-# 外部/大返回工具：结果注入历史时给更大的截断额度（默认8000字符），
-# 其余本地工具给较小额度（默认2000）。两档都可用 config_store 旋钮在线调：
-# TOOL_INJECT_MAX / TOOL_INJECT_MAX_MCP。
-_LARGE_RETURN_TOOLS = {
-    'web_search', 'browse_github', 'read_webpage', 'pocket_html', 'get_activity_summary',
-    'codebase_describe_project', 'codebase_read_file', 'codebase_search_code',
-    'codebase_find_references', 'codebase_explain_history', 'codebase_git_view',
-    'mcp_load',
-}
-
-def _format_tool_history(tool_calls_json):
-    """把某条 assistant 消息存的 tool_calls JSON 压成一段可读文本，注入回对话历史，
-    让模型下一轮还记得上一轮工具查到了什么。
-
-    背景：build_messages 过去只带 content，assistant 存在 tool_calls 列里的工具
-    结果完全没进下一轮上下文 —— 模型这轮查到、下轮就'失忆'。这里按工具类型分档
-    截断后注入（外部大返回工具额度更大，且不小于当轮 SSE 展示用的 slim 2000）。"""
-    try:
-        import config_store as _cfg
-        cap_small = _cfg.get_int('TOOL_INJECT_MAX', 2000)
-        cap_large = _cfg.get_int('TOOL_INJECT_MAX_MCP', 8000)
-    except Exception:
-        cap_small, cap_large = 2000, 8000
-    try:
-        calls = json.loads(tool_calls_json)
-    except Exception:
-        return ''
-    if not isinstance(calls, list) or not calls:
-        return ''
-    lines = ['[上一轮我调用的工具与结果]']
-    for tc in calls:
-        if not isinstance(tc, dict):
-            continue
-        name = tc.get('name', 'tool')
-        try:
-            args_str = json.dumps(tc.get('args') or {}, ensure_ascii=False)
-        except Exception:
-            args_str = str(tc.get('args') or '')
-        if len(args_str) > 300:
-            args_str = args_str[:300] + '…'
-        cap = cap_large if name in _LARGE_RETURN_TOOLS else cap_small
-        result = str(tc.get('result') or '')
-        if len(result) > cap:
-            result = result[:cap] + '…(已截断)'
-        ok = '' if tc.get('success', True) else '（失败）'
-        lines.append('· %s%s %s\n  → %s' % (name, ok, args_str, result))
-    return '\n'.join(lines)
-
+# 工具结果的跨轮格式化放在 chat.context_continuity，便于独立回归测试。
 
 # 选择器：AI 在正文里输出 [choices]A|B|C[/choices]，保存时抽出存进 choices 列。
 # 用标签而非 tool call：沿用已有机制（贴纸/语音同思路），不打断流式、不多一轮 API 往返。
@@ -3106,7 +3065,7 @@ def _cc_stream_gen(full_system, prompt, env):
                         if isinstance(rc, list):
                             rc = ''.join(x.get('text', '') for x in rc if isinstance(x, dict))
                         yield ('tool_result', {'tool_use_id': b.get('tool_use_id'),
-                                               'result': str(rc or '')[:2000],
+                                               'result': str(rc or ''),
                                                'is_error': bool(b.get('is_error'))})
             elif t == 'result':
                 if d.get('is_error'):
@@ -3256,9 +3215,10 @@ def workspace_chat():
 
 @app.route('/chat', methods=['POST'])
 def chat():
-    _uc = ((request.get_json() or {}).get('content') or '').strip()
+    _turn_data = request.get_json() or {}
+    _uc = (_turn_data.get('content') or '').strip()
     if _uc:
-        _c = get_db(); _c.execute("INSERT INTO chat_messages (author,content) VALUES ('hayana',?)", (_uc,)); _c.execute("UPDATE wake_log SET consumed=1 WHERE consumed=0"); _c.commit(); _c.close()
+        _c = get_db(); _c.execute("INSERT INTO chat_messages (author,content) VALUES ('hayana',?)", (_uc,)); _c.commit(); _c.close()
         try:
             import emotion_engine as _ee; _ee.touch_interaction()
         except Exception:
@@ -3291,7 +3251,12 @@ def chat():
             return jsonify({'ok': True, 'content': text, 'thinking': thinking_text})
         text, thinking_text = None, None
         try:
-            system   = build_system()
+            _is_user_turn = bool(_uc) or is_pending_user_turn(
+                get_db, _turn_data.get('user_message_id')
+            )
+            system, _wake_claim_ids = build_system_with_wake_claim(
+                build_system, get_db, user_turn=_is_user_turn
+            )
             messages = build_messages()
 
             text, thinking_text = generate_reply(system, messages)
@@ -3305,6 +3270,7 @@ def chat():
             )
             conn.commit()
             conn.close()
+            consume_wake_ids(get_db, _wake_claim_ids)
             # 异步情绪评分（不阻塞响应）
             try:
                 import emotion_engine as _ee
@@ -3416,9 +3382,10 @@ def chat_stream():
         def gen_cc():
             _released = [False]
             try:
-                _uc = ((request.get_json() or {}).get('content') or '').strip()
+                _turn_data = request.get_json() or {}
+                _uc = (_turn_data.get('content') or '').strip()
                 if _uc:
-                    _c = get_db(); _c.execute("INSERT INTO chat_messages (author,content) VALUES ('hayana',?)", (_uc,)); _c.execute("UPDATE wake_log SET consumed=1 WHERE consumed=0"); _c.commit(); _c.close()
+                    _c = get_db(); _c.execute("INSERT INTO chat_messages (author,content) VALUES ('hayana',?)", (_uc,)); _c.commit(); _c.close()
                     try:
                         import emotion_engine as _ee_s
                         _ee_s.touch_interaction()
@@ -3438,8 +3405,13 @@ def chat_stream():
                     return
                 text, thinking = None, None
                 cc_cache_read, cc_cache_create = 0, 0
+                _is_user_turn = bool(_uc) or is_pending_user_turn(
+                    get_db, _turn_data.get('user_message_id')
+                )
                 try:
-                    system   = build_system()
+                    system, _wake_claim_ids = build_system_with_wake_claim(
+                        build_system, get_db, user_turn=_is_user_turn
+                    )
                     messages = build_messages()
                     full_system, prompt, env = _cc_prepare(system, messages)
                     cc_tool_calls = []
@@ -3458,7 +3430,11 @@ def chat_stream():
                             if _ti >= 0:
                                 cc_tool_calls[_ti]['result'] = payload.get('result', '')
                                 cc_tool_calls[_ti]['success'] = not payload.get('is_error')
-                                _slim = {**cc_tool_calls[_ti], 'args': _slim_args(cc_tool_calls[_ti].get('args'))}
+                                _slim = {
+                                    **cc_tool_calls[_ti],
+                                    'args': _slim_args(cc_tool_calls[_ti].get('args')),
+                                    'result': str(cc_tool_calls[_ti].get('result') or '')[:2000],
+                                }
                                 yield 'data: ' + json.dumps({'t': 'tool_result', 'd': _slim, 'idx': _ti}, ensure_ascii=False) + SSE_END
                                 yield 'data: ' + json.dumps({'t': 'tool_call', 'd': _slim, 'dup': 1}, ensure_ascii=False) + SSE_END
                         elif evt == 'done':
@@ -3480,6 +3456,7 @@ def chat_stream():
                         )
                         conn.commit()
                         conn.close()
+                        consume_wake_ids(get_db, _wake_claim_ids)
                         _write_session_memo(_uc, _cc_text)
                         try:
                             import emotion_engine as _ee
@@ -3501,9 +3478,10 @@ def chat_stream():
                         headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
     def generate():
         try:
-            _uc = ((request.get_json() or {}).get('content') or '').strip()
+            _turn_data = request.get_json() or {}
+            _uc = (_turn_data.get('content') or '').strip()
             if _uc:
-                _c = get_db(); _c.execute("INSERT INTO chat_messages (author,content) VALUES ('hayana',?)", (_uc,)); _c.execute("UPDATE wake_log SET consumed=1 WHERE consumed=0"); _c.commit(); _c.close()
+                _c = get_db(); _c.execute("INSERT INTO chat_messages (author,content) VALUES ('hayana',?)", (_uc,)); _c.commit(); _c.close()
             mode, reused = _gen_acquire_or_wait()
             if mode == 'reused':
                 text, thinking = reused
@@ -3524,6 +3502,10 @@ def chat_stream():
             cache_create_5m_total, cache_create_1h_total = 0, 0
             cache_supported = None
             stream_started_at = time.monotonic()
+            _is_user_turn = bool(_uc) or is_pending_user_turn(
+                get_db, _turn_data.get('user_message_id')
+            )
+            _wake_claim_ids = []
             think_acc, text_acc, tool_calls_acc = [], [], []
 
             def _clean_text(raw):
@@ -3556,10 +3538,13 @@ def chat_stream():
                 )
                 conn.commit()
                 conn.close()
+                consume_wake_ids(get_db, _wake_claim_ids)
                 _persisted[0] = True
                 _write_session_memo(_uc, _pc)
             try:
-                system, dynamic_context = build_system(split_dynamic=True)
+                (system, dynamic_context), _wake_claim_ids = build_system_with_wake_claim(
+                    build_system, get_db, user_turn=_is_user_turn, split_dynamic=True
+                )
                 messages = build_messages()
                 _recall, _recall_items = _recall_memories(_uc) if _uc else ('', [])
                 if _recall:

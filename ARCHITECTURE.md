@@ -105,8 +105,11 @@ chat.html send()
 
 ## 部署流
 
-GitHub（Hayana11/hayagarden-frontend，main）↔ VPS /opt/frontend 工作区。
-每日 auto backup 自动 commit+push。CC/费佳改动：分支推 GitHub → VPS `git fetch + git checkout FETCH_HEAD -- <files>` → systemctl restart。
+GitHub（Hayana11/hayagarden-frontend，main）是代码唯一真源；VPS `/opt/frontend` 只运行已合并的明确 commit。
+所有改动必须先走分支 + PR，并通过 Context continuity guard。生产部署只能运行
+`sudo scripts/deploy-frontend.sh <origin-main-sha>`；脚本遇到脏工作区会拒绝覆盖，
+在临时 worktree 验证后整体切换 commit，健康检查失败会回滚。详细流程见
+`docs/deployment.md`。备份只备份运行时数据，不自动收编或提交生产代码。
 
 ## 家规（project rules——改代码前必读）
 
@@ -118,7 +121,9 @@ GitHub（Hayana11/hayagarden-frontend，main）↔ VPS /opt/frontend 工作区�
 6. **relay 调 LLM**：官方 api.anthropic.com 在这台机器上 401，必须走 API_URL（教训#3）；模型名带通道前缀。
 7. **改代码前调 lessons 的 validate_edit**（Codebase MCP 的 patch 工具自动做 quick_match）。
 8. **服务改动 ALL_CLEAR 前至少确认一次 systemctl status**（Board Protocol）。
-9. git push 只推自己的分支；VPS 上不直接 commit（auto backup 会收编工作区改动）。
+9. git push 只推自己的分支；VPS 上不编辑或 commit 生产代码。
+10. **禁用按文件覆盖部署**——不得执行 `git checkout FETCH_HEAD -- <files>`；只允许安全部署脚本整体切换已验证的 `origin/main` SHA。
+11. 生产工作区一旦变脏必须先停下并建恢复分支，禁止 reset/clean/checkout 覆盖。
 
 ## 数据库主要表（memories.db）
 

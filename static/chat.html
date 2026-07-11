@@ -1844,6 +1844,8 @@ function flashSendStatus(text, kind){
 }
 
 var lastUserMsgText = '';
+// Kept until gateway confirms a completed reply; retries reuse the same turn id.
+var pendingGwUserMessageId = null;
 function humanizeError(raw){
   var s = String(raw||'');
   if(/timed out|timeout|超时/i.test(s)) return '⚠ 上游响应超时，请重试';
@@ -1900,6 +1902,8 @@ async function send(){
     }
     var sendResp=await fetch('/api/chat/send',{method:'POST',body:fd});
     if(!sendResp.ok) throw new Error('发送失败：HTTP '+sendResp.status);
+    var sendData=await sendResp.json();
+    pendingGwUserMessageId=sendData.message_id||null;
     setSendStatus('已发送 · 等待回复…','sending');
     await loadMsgs(false);
     if(fromHayana){
@@ -1917,7 +1921,8 @@ async function send(){
           var hasNewReply=(window.curMsgList||[]).some(function(m){ return typeof m.id==='number'&&m.id>baseId&&isFy(m.author); });
           if(!hasNewReply){
             try{
-              var gr=await fetch('/api/gw/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({})});
+              var fallbackBody=pendingGwUserMessageId?{user_message_id:pendingGwUserMessageId}:{};
+              var gr=await fetch('/api/gw/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(fallbackBody)});
               var gd=await gr.json();
               if(gd.error){ streamErrMsg = gd.error; fullText=''; }
               else { fullText=gd.content||''; streamErrMsg=null; }
@@ -2351,7 +2356,8 @@ async function streamReply(){
   }
   _armSafety();
   setSendStatus('正在等待模型…','working');
-  var resp=await fetch('/api/gw/chat/stream',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}',signal:ctrl.signal});
+  var turnBody=pendingGwUserMessageId?{user_message_id:pendingGwUserMessageId}:{};
+  var resp=await fetch('/api/gw/chat/stream',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(turnBody),signal:ctrl.signal});
   if(!resp.ok||!resp.body) throw new Error('stream failed');
   var SSE_SEP=String.fromCharCode(10)+String.fromCharCode(10);
   var reader=resp.body.getReader(), decoder=new TextDecoder();
@@ -2565,6 +2571,7 @@ async function streamReply(){
     streamAbort=null;
     if(thinkText&&liveThinkWrap&&!liveThinkWrap.classList.contains('done')) finishLiveThink();
     if(streamAborted&&!streamCompleted) releaseGenLock(true);
+    if(streamCompleted) pendingGwUserMessageId=null;
   }
   if(err) throw err;
   // 注：缓存信息现在跟随消息持久化(cache_info列)，由loadMsgs()重新渲染时正确显示，

@@ -1,0 +1,21 @@
+name: Context continuity guard
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  continuity:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Compile context paths
+        run: python -m py_compile app.py gateway.py chat/context_continuity.py
+      - name: Run continuity regressions
+        run: python -m unittest discover -s tests -p 'test_context_continuity.py'
+      - name: Validate deploy guard
+        run: bash -n scripts/deploy-frontend.sh
