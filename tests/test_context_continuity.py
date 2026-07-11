@@ -177,6 +177,11 @@ class ContextContinuityTests(unittest.TestCase):
         self.assertIn('"message_id": message_id', app_source)
         self.assertIn("for attempt in 1 2 3 4 5", deploy_source)
         self.assertIn("retrying in 3s", deploy_source)
+        self.assertIn(
+            'git merge-base --is-ancestor "$current_sha" "$target_sha"',
+            deploy_source,
+        )
+        self.assertIn("Production-only commits:", deploy_source)
 
 
 if __name__ == "__main__":
