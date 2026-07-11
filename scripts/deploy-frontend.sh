@@ -41,6 +41,11 @@ current_sha="$(git rev-parse --verify HEAD^{commit})"
 if [[ -n "$EXPECTED_SHA" && "$EXPECTED_SHA" != "$target_sha" ]]; then
   fail "origin/main moved: expected $EXPECTED_SHA but fetched $target_sha"
 fi
+if ! git merge-base --is-ancestor "$current_sha" "$target_sha"; then
+  echo "Production-only commits:" >&2
+  git log --oneline "$target_sha..$current_sha" >&2 || true
+  fail "production HEAD is not contained in origin/main. Recover those commits on a branch before deploying."
+fi
 
 staging="$(mktemp -d /tmp/hayagarden-release.XXXXXX)"
 cleanup() {
