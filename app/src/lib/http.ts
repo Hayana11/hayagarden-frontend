@@ -29,6 +29,7 @@ export const http = {
   patch: <T>(path: string, body: unknown) => request<T>(path, { method: 'PATCH', body: JSON.stringify(body) }),
   post: <T>(path: string, body?: unknown) =>
     request<T>(path, { method: 'POST', body: body !== undefined ? JSON.stringify(body) : undefined }),
+  put: <T>(path: string, body: unknown) => request<T>(path, { method: 'PUT', body: JSON.stringify(body) }),
 };
 
 export function sseUrl(path: string): string {

@@ -106,6 +106,29 @@ export interface PeriodStats {
   nextPredicted: string;
 }
 
+export type PeriodFlow = '少量' | '中等' | '多';
+export type PeriodPain = '无' | '轻微' | '明显' | '严重';
+
+/** One day's tracked record; every field optional (only what was logged). */
+export interface PeriodDayRecord {
+  came?: boolean;
+  flow?: PeriodFlow;
+  pain?: PeriodPain;
+  states?: string[];
+  extras?: string[];
+  sex?: boolean;
+  note?: string;
+}
+
+/** 'YYYY-MM-DD' -> record */
+export type PeriodDays = Record<string, PeriodDayRecord>;
+
+export interface PeriodSettings {
+  cycleLength: number;
+  periodLength: number;
+  lastStart: string;
+}
+
 export interface WeatherNow {
   temp: number;
   hum: number;

@@ -11,6 +11,8 @@ import type {
   MemoryEntry,
   MemoryLibrary,
   MemorySummary,
+  PeriodDays,
+  PeriodSettings,
   PeriodStats,
   Todo,
   UsageBar,
@@ -225,4 +227,26 @@ export function mockPeriodStats(): PeriodStats {
     recordsCount: 14,
     nextPredicted: '2026-07-14',
   };
+}
+
+export function mockPeriodSettings(): PeriodSettings {
+  return { cycleLength: 28, periodLength: 5, lastStart: '2026-06-16' };
+}
+
+/** Seeded flow days off mockPeriodSettings' lastStart, plus a few state/sex days. */
+export function mockPeriodDays(): PeriodDays {
+  const flows = ['中等', '多', '中等', '少量', '少量'] as const;
+  const pains = ['轻微', '明显', '轻微', '无', '无'] as const;
+  const days: PeriodDays = {};
+  const start = new Date(2026, 5, 16);
+  for (let i = 0; i < 5; i++) {
+    const d = new Date(start);
+    d.setDate(d.getDate() + i);
+    const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    days[key] = { came: true, flow: flows[i], pain: pains[i], ...(flows[i] === '多' ? { extras: ['血块'] } : {}) };
+  }
+  days['2026-07-05'] = { came: false, states: ['困'] };
+  days['2026-07-06'] = { came: false, sex: true };
+  days['2026-07-08'] = { came: false, states: ['情绪敏感', '想吃甜'], note: '突然很想吃提拉米苏' };
+  return days;
 }

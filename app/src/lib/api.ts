@@ -17,6 +17,9 @@ import type {
   MemoryDayEntry,
   MemoryLibrary,
   MemorySummary,
+  PeriodDayRecord,
+  PeriodDays,
+  PeriodSettings,
   PeriodStats,
   Todo,
   UsageSummary,
@@ -155,6 +158,57 @@ export function fetchLedgerBudget(now: Date): Promise<LedgerBudget> {
       categories,
     };
   }, mock.mockLedgerBudget);
+}
+
+// GET /api/period/days?month=YYYY-MM -> { days: { 'YYYY-MM-DD': PeriodDayRecord } }
+// Fetched without a month filter so predictions/averages can look across months.
+export function fetchPeriodDays(): Promise<PeriodDays> {
+  return withFallback(
+    () => http.get<{ days: PeriodDays }>('/api/period/days').then((r) => r.days || {}),
+    mock.mockPeriodDays,
+  );
+}
+
+// PUT /api/period/day  body: { date, record } — upsert one day's record.
+// Backend mirrors came/sex into the legacy period_records table.
+export function savePeriodDay(date: string, record: PeriodDayRecord): Promise<boolean> {
+  return http
+    .put<{ ok: boolean }>('/api/period/day', { date, record })
+    .then((r) => Boolean(r.ok))
+    .catch(() => false);
+}
+
+// GET /api/period/settings -> { cycle_length, period_length, last_start }
+export function fetchPeriodSettings(): Promise<PeriodSettings> {
+  return withFallback(
+    async () => {
+      const [settings, stats] = await Promise.all([
+        http.get<{ cycle_length: number | null; period_length: number | null; last_start: string | null }>('/api/period/settings'),
+        http
+          .get<{ last_period: string | null; cycle_length: number | null }>('/api/period/stats')
+          .catch(() => ({ last_period: null, cycle_length: null })),
+      ]);
+      const fallback = mock.mockPeriodSettings();
+      return {
+        cycleLength: settings.cycle_length ?? stats.cycle_length ?? fallback.cycleLength,
+        periodLength: settings.period_length ?? fallback.periodLength,
+        lastStart: settings.last_start ?? stats.last_period ?? fallback.lastStart,
+      };
+    },
+    mock.mockPeriodSettings,
+  );
+}
+
+// PUT /api/period/settings  body: { cycle_length?, period_length?, last_start? }
+export function savePeriodSettings(s: PeriodSettings): Promise<boolean> {
+  return http
+    .put<{ cycle_length: number | null }>('/api/period/settings', {
+      cycle_length: s.cycleLength,
+      period_length: s.periodLength,
+      last_start: s.lastStart,
+    })
+    .then(() => true)
+    .catch(() => false);
 }
 
 // GET /api/period/stats -> PeriodStats
