@@ -9,10 +9,11 @@ import { LedgerScreen } from './screens/LedgerScreen';
 import { PeriodScreen } from './screens/PeriodScreen';
 import { ChatScreen } from './screens/ChatScreen';
 import { SettingsScreen } from './screens/SettingsScreen';
+import { GroupChatScreen } from './screens/GroupChatScreen';
 
 function Shell() {
   const location = useLocation();
-  const fullscreen = location.pathname === '/chat' || location.pathname === '/settings';
+  const fullscreen = location.pathname === '/chat' || location.pathname === '/settings' || location.pathname === '/group-chat';
   return (
     <AppShell>
       <Routes>
@@ -24,6 +25,7 @@ function Shell() {
         <Route path="/period" element={<PeriodScreen />} />
         <Route path="/chat" element={<ChatScreen />} />
         <Route path="/settings" element={<SettingsScreen />} />
+        <Route path="/group-chat" element={<GroupChatScreen />} />
       </Routes>
       {!fullscreen && <BottomNav />}
     </AppShell>

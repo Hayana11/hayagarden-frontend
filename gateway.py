@@ -1,4 +1,4 @@
-import os, re, sqlite3, json, base64, mimetypes, datetime, threading, time, sys as _sys
+import os, re, sqlite3, json, base64, mimetypes, datetime, threading, time, sys as _sys, random, shutil
 if '/opt/frontend' not in _sys.path:
     _sys.path.insert(0, '/opt/frontend')
 if '/opt/frontend' not in _sys.path:
@@ -107,6 +107,9 @@ STATIC_DIR = '/opt/frontend/static'
 import config_store
 import attachment_store
 import tool_drawers
+import group_chat_store
+
+group_chat_store.ensure_schema(DB_PATH)
 
 # API_URL/API_KEY/CC_TOKEN：部署配置，.env 兜底（真正生效的值由 relay.manager
 # 按 ACTIVE_RELAY 动态解析，这里仅供 /api/debug/provider 展示部署期默认值）。
@@ -3375,6 +3378,168 @@ def api_tool_caption():
 #   t=done / t=err   结束 / 错误
 #   （t=usage/notice/workspace_job 为家里自有辅助事件）
 # 所有 provider（relay / claude_code / 未来 agent_sdk）统一发这套。
+_GROUP_CHAT_LOCK = threading.Lock()
+
+
+def _group_chat_agent_status(agent):
+    if agent == 'claude':
+        ready = bool(CC_TOKEN and shutil.which('claude'))
+        return {
+            'ready': ready,
+            'detail': '可以回复' if ready else '暖色线路尚未就绪',
+        }
+    return {
+        # Installing a CLI alone is not enough: the Codex runner and auth path
+        # still need to be implemented before this may become true.
+        'ready': False,
+        'installed': bool(shutil.which('codex')),
+        'detail': '蓝色线路尚未接入',
+    }
+
+
+def _group_chat_context(room, agent):
+    system = build_system()
+    if isinstance(system, list):
+        blocks = [
+            block.get('text', '') for block in system
+            if isinstance(block, dict) and block.get('text')
+        ]
+        persona = '\n\n'.join(blocks)
+    else:
+        persona = str(system or '')
+
+    messages, _ = group_chat_store.list_messages(
+        room, limit=60, db_path=DB_PATH
+    )
+    labels = {'user': '小猫', 'claude': '暖色气泡', 'codex': '蓝色气泡'}
+    timeline = '\n'.join(
+        '%s：%s' % (labels.get(row['author'], '系统'), row['content'])
+        for row in messages
+    )
+    room_note = (
+        '这是三个人共同在场的群聊。你能看见另一条 AI 线路的发言，也可以自然接它的话。'
+        if room == 'group' else
+        '这是你和小猫单独聊天的房间，其他 AI 不在场。'
+    )
+    identity_note = (
+        '你此刻通过暖色气泡发言。' if agent == 'claude'
+        else '你此刻通过蓝色气泡发言。'
+    )
+    rules = (
+        '\n\n【独立聊天室规则】\n'
+        + room_note + identity_note
+        + '两条 AI 线路使用同一份人设，但保留各自独立的上下文和气泡颜色。'
+        + '不要自称 Claude、Codex、一号或二号，不要在正文前添加姓名、角色名或颜色前缀。'
+        + '只输出此刻自然想说的话；可以回应小猫，也可以回应群聊里另一条线路。'
+    )
+    prompt = (
+        'think hard\n以下是这个独立聊天室按时间排列的最近消息：\n\n'
+        + (timeline or '（聊天室还没有消息）')
+        + '\n\n请根据最后一条消息和群聊语境自然回复。只输出回复正文。'
+    )
+    env = dict(os.environ)
+    env['CLAUDE_CODE_OAUTH_TOKEN'] = CC_TOKEN
+    env.pop('ANTHROPIC_API_KEY', None)
+    os.makedirs(CC_CWD, exist_ok=True)
+    return persona + rules, prompt, env
+
+
+def _group_chat_sse(payload):
+    return 'data: ' + json.dumps(payload, ensure_ascii=False) + SSE_END
+
+
+@app.route('/group-chat/stream', methods=['POST'])
+def group_chat_stream():
+    from flask import Response, stream_with_context
+
+    turn = request.get_json(silent=True) or {}
+    room = (turn.get('room') or 'group').strip().lower()
+    if room not in group_chat_store.VALID_ROOMS:
+        return jsonify({'error': 'invalid room'}), 400
+
+    requested = turn.get('targets')
+    if room == 'claude':
+        targets = ['claude']
+    elif room == 'codex':
+        targets = ['codex']
+    elif isinstance(requested, list):
+        targets = [a for a in requested if a in ('claude', 'codex')]
+        targets = list(dict.fromkeys(targets))
+    else:
+        targets = ['claude', 'codex']
+    if room == 'group' and len(targets) > 1:
+        random.shuffle(targets)
+
+    user_message_id = turn.get('user_message_id')
+    if user_message_id is not None:
+        try:
+            source = group_chat_store.get_message(
+                int(user_message_id), db_path=DB_PATH
+            )
+        except (TypeError, ValueError):
+            source = None
+        if not source or source['room'] != room or source['author'] != 'user':
+            return jsonify({'error': 'invalid user_message_id'}), 400
+
+    def generate():
+        if not targets:
+            yield _group_chat_sse({'t': 'err', 'd': '没有选中回复线路'})
+            return
+        if not _GROUP_CHAT_LOCK.acquire(blocking=False):
+            yield _group_chat_sse({'t': 'err', 'd': '群聊正在回复，请等这一轮结束'})
+            return
+        replied = False
+        try:
+            for agent in targets:
+                status = _group_chat_agent_status(agent)
+                if not status['ready']:
+                    yield _group_chat_sse({
+                        't': 'agent_status', 'agent': agent, **status
+                    })
+                    continue
+
+                yield _group_chat_sse({'t': 'agent_start', 'agent': agent})
+                raw_text = ''
+                thinking = ''
+                try:
+                    full_system, prompt, env = _group_chat_context(room, agent)
+                    for event, data in _cc_stream_gen(full_system, prompt, env):
+                        if event in ('text', 'think'):
+                            yield _group_chat_sse({
+                                't': event, 'agent': agent, 'd': data
+                            })
+                        elif event == 'done':
+                            raw_text, thinking = data[0], data[1]
+                    text = _cc_save_markers(raw_text)
+                    if not text:
+                        raise RuntimeError('没有收到回复正文')
+                    message = group_chat_store.add_message(
+                        room,
+                        agent,
+                        text,
+                        thinking=thinking,
+                        meta=json.dumps({'provider': 'claude_code'}, ensure_ascii=False),
+                        db_path=DB_PATH,
+                    )
+                    replied = True
+                    yield _group_chat_sse({
+                        't': 'agent_done', 'agent': agent, 'message': message
+                    })
+                except Exception as exc:
+                    yield _group_chat_sse({
+                        't': 'agent_error', 'agent': agent, 'd': str(exc)
+                    })
+            yield _group_chat_sse({'t': 'done', 'ok': replied})
+        finally:
+            _GROUP_CHAT_LOCK.release()
+
+    return Response(
+        stream_with_context(generate()),
+        mimetype='text/event-stream',
+        headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'},
+    )
+
+
 @app.route('/chat/stream', methods=['POST'])
 def chat_stream():
     from flask import Response, stream_with_context
