@@ -180,7 +180,7 @@ export function MomentsScreen() {
   };
 
   return (
-    <div className="hide-scrollbar" style={{ ...(vars as CSSProperties), width: '100%', maxWidth: 480, margin: '0 auto', height: '100dvh', overflowY: 'auto', background: 'var(--bg)', color: 'var(--ink)', fontFamily: SERIF, transition: 'background .3s,color .3s' }}>
+    <div className="hide-scrollbar dash-fullscreen-page moments-root" style={{ ...(vars as CSSProperties), background: 'var(--bg)', color: 'var(--ink)', fontFamily: SERIF, transition: 'background .3s,color .3s' }}>
       <div style={{ width: '100%', minHeight: '100%', background: 'var(--bg)' }}>
         {/* ── cover (换封面锁定) ── */}
         <div onClick={showLocked} style={{ position: 'relative', height: 200, cursor: 'pointer' }} title={LOCKED}>

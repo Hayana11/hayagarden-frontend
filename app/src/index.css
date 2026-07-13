@@ -38,6 +38,32 @@ html, body {
   min-height: 100vh;
 }
 
+html.dash-fullscreen,
+html.dash-fullscreen body,
+html.dash-fullscreen #root {
+  height: 100%;
+  min-height: 100%;
+  overflow: hidden;
+}
+
+/* Fullscreen dash pages — pin to viewport like legacy /chat (height:100%, not 100dvh) */
+.dash-fullscreen-page {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  width: 100%;
+  max-width: 480px;
+  margin-left: auto;
+  margin-right: auto;
+  overflow: hidden;
+}
+
+.dash-fullscreen-page.moments-root {
+  overflow-y: auto;
+}
+
 * {
   box-sizing: border-box;
   -webkit-tap-highlight-color: transparent;

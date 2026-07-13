@@ -729,16 +729,11 @@ export function ChatScreen() {
 
   return (
     <div
-      className="chat-root"
+      className="chat-root dash-fullscreen-page"
       style={{
         ...(vars as CSSProperties),
-        width: '100%',
-        maxWidth: 480,
-        margin: '0 auto',
-        height: '100dvh',
         display: 'flex',
         flexDirection: 'column',
-        overflow: 'hidden',
         background: 'var(--bg)',
         color: 'var(--ink)',
         fontFamily: SERIF,
