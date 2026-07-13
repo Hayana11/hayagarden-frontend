@@ -10,10 +10,11 @@ import { PeriodScreen } from './screens/PeriodScreen';
 import { ChatScreen } from './screens/ChatScreen';
 import { SettingsScreen } from './screens/SettingsScreen';
 import { GroupChatScreen } from './screens/GroupChatScreen';
+import { MomentsScreen } from './screens/MomentsScreen';
 
 function Shell() {
   const location = useLocation();
-  const fullscreen = location.pathname === '/chat' || location.pathname === '/settings' || location.pathname === '/group-chat';
+  const fullscreen = location.pathname === '/chat' || location.pathname === '/settings' || location.pathname === '/group-chat' || location.pathname === '/moments';
   return (
     <AppShell>
       <Routes>
@@ -26,6 +27,7 @@ function Shell() {
         <Route path="/chat" element={<ChatScreen />} />
         <Route path="/settings" element={<SettingsScreen />} />
         <Route path="/group-chat" element={<GroupChatScreen />} />
+        <Route path="/moments" element={<MomentsScreen />} />
       </Routes>
       {!fullscreen && <BottomNav />}
     </AppShell>

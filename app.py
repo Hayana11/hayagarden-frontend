@@ -1932,6 +1932,19 @@ def brain_diary_proxy():
         return jsonify({'ok': False, 'error': str(e)}), 500
 
 
+@app.route('/api/tools/drawers', methods=['GET'])
+def tools_drawers():
+    """\u53ea\u8bfb\u5730\u66b4\u9732 tool_drawers.DRAWERS \u4f9b\u524d\u7aef\u5c55\u793a\u2014\u2014\u4e0d\u63d0\u4f9b\u6309\u5de5\u5177\u5f00\u5173\u7684\u5199\u63a5\u53e3\uff0c
+    \u90a3\u4e2a\u6982\u5ff5\u76ee\u524d\u4e0d\u5b58\u5728\uff08\u53ea\u6709 TOOL_DRAWERS_ENABLED \u8fd9\u4e00\u4e2a\u5168\u5c40\u5f00\u5173\uff09\u3002"""
+    import tool_drawers
+    enabled = config_store.get('TOOL_DRAWERS_ENABLED', '0') == '1'
+    drawers = [
+        {'id': drawer_id, 'label': info['label'], 'tools': info['tools']}
+        for drawer_id, info in tool_drawers.DRAWERS.items()
+    ]
+    return jsonify({'ok': True, 'enabled': enabled, 'drawers': drawers})
+
+
 @app.route('/api/config/relay', methods=['POST'])
 def config_relay():
     """直接指定一个不在预设列表里的 url/key（老接口，保留兼容）。
