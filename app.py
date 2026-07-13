@@ -5,6 +5,7 @@ import attachment_store
 import gallery_store
 import command_store
 import group_chat_store
+import codex_app_server
 
 app = Flask(__name__, static_folder='static')
 DB_PATH = '/opt/frontend/memories.db'
@@ -647,7 +648,7 @@ def group_chat_status():
     claude_ready = bool(shutil.which('claude') and _group_chat_secret_present(
         'CLAUDE_CODE_OAUTH_TOKEN'
     ))
-    codex_installed = bool(shutil.which('codex'))
+    codex_status = codex_app_server.runtime_status()
     return jsonify({
         'agents': {
             'claude': {
@@ -656,12 +657,11 @@ def group_chat_status():
                 'detail': '可以回复' if claude_ready else '暖色线路尚未就绪',
             },
             'codex': {
-                # The Codex runner is intentionally not implemented yet.  Merely
-                # finding a binary must not make the UI pretend the line works.
-                'ready': False,
-                'installed': codex_installed,
+                'ready': codex_status['ready'],
+                'installed': codex_status['installed'],
+                'authenticated': codex_status['authenticated'],
                 'color': 'blue',
-                'detail': '蓝色线路尚未接入',
+                'detail': codex_status['detail'],
             },
         }
     })
