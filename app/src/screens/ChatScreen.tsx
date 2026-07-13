@@ -863,7 +863,7 @@ export function ChatScreen() {
       </div>
 
       {/* ══ message stream ══ */}
-      <div ref={scrollRef} style={{ flex: 1, overflowY: 'auto', position: 'relative' }}>
+      <div ref={scrollRef} className="hide-scrollbar" style={{ flex: 1, overflowY: 'auto', position: 'relative' }}>
         <div style={{ maxWidth: 430, margin: '0 auto', padding: '20px 16px 26px', display: 'flex', flexDirection: 'column', gap: 20 }}>
           {hasMoreBefore && (
             <div onClick={loadEarlier} style={{ cursor: 'pointer', textAlign: 'center', fontSize: 12, color: 'var(--faint)', padding: '6px 0', letterSpacing: 2 }}>

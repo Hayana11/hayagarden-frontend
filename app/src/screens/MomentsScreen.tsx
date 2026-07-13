@@ -180,7 +180,7 @@ export function MomentsScreen() {
   };
 
   return (
-    <div style={{ ...(vars as CSSProperties), height: '100dvh', overflowY: 'auto', background: 'var(--bg)', color: 'var(--ink)', fontFamily: SERIF, transition: 'background .3s,color .3s' }}>
+    <div className="hide-scrollbar" style={{ ...(vars as CSSProperties), height: '100dvh', overflowY: 'auto', background: 'var(--bg)', color: 'var(--ink)', fontFamily: SERIF, transition: 'background .3s,color .3s' }}>
       <div style={{ maxWidth: 430, margin: '0 auto', minHeight: '100%', background: 'var(--bg)' }}>
         {/* ── cover (换封面锁定) ── */}
         <div onClick={showLocked} style={{ position: 'relative', height: 200, cursor: 'pointer' }} title={LOCKED}>

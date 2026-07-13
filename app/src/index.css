@@ -126,6 +126,15 @@ button {
   display: none;
 }
 
+.hide-scrollbar {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.hide-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+
 /* ── Fyodor Config handoff ── */
 .config-root { min-height: 100vh; background: #F7F1EE; color: #4A3F3C; }
 .config-screen { max-width: 430px; margin: 0 auto; padding: 26px 20px 60px; display: flex; flex-direction: column; gap: 16px; }
