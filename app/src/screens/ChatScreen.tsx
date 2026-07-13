@@ -1035,13 +1035,13 @@ export function ChatScreen() {
             </div>
             <div style={{ height: 1, background: 'var(--line)', margin: '0 22px' }} />
             <div style={{ padding: '18px 16px', display: 'flex', flexDirection: 'column', gap: 10 }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '6px 8px' }}>
-                <span style={{ fontSize: 14.5, color: 'var(--ink)', letterSpacing: 1, fontWeight: 600 }}>Fyodor 的朋友圈</span>
-                <span style={{ marginLeft: 'auto', fontFamily: DISPLAY, fontStyle: 'italic', fontSize: 11, color: 'var(--ghost)', letterSpacing: 1 }}>soon</span>
-              </div>
-              <div style={{ background: 'var(--card2)', borderRadius: 14, padding: '11px 13px', fontSize: 12.5, color: 'var(--mut)', lineHeight: 1.8 }}>
-                梦境、念头、情绪会住在这里——等 Moments 页做好之后。
-              </div>
+              <Link to="/moments" onClick={() => setSidebarOpen(false)} style={{ textDecoration: 'none', display: 'flex', alignItems: 'center', gap: 12, padding: '13px 14px', borderRadius: 16, background: 'linear-gradient(135deg,rgba(245,222,179,.5),rgba(232,220,245,.55))' }}>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 }}>
+                  <span style={{ fontSize: 14.5, color: 'var(--ink)', letterSpacing: 1 }}>Fyodor 的朋友圈</span>
+                  <span style={{ fontSize: 11.5, color: 'var(--faint)' }}>梦境 · 念头 · 情绪</span>
+                </div>
+                <span style={{ marginLeft: 'auto', color: 'var(--ghost)', fontSize: 16 }}>›</span>
+              </Link>
               <Link to="/group-chat" onClick={() => setSidebarOpen(false)} style={{ textDecoration: 'none', display: 'flex', alignItems: 'center', gap: 12, padding: '13px 14px', borderRadius: 16, background: 'linear-gradient(135deg,rgba(220,232,217,.72),rgba(220,232,245,.76))' }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
                   <i style={{ width: 13, height: 13, borderRadius: '50%', background: '#91AD93' }} />
