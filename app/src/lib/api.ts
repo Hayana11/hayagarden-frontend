@@ -164,6 +164,125 @@ export function fetchLedgerBudget(now: Date): Promise<LedgerBudget> {
   }, mock.mockLedgerBudget);
 }
 
+// ── Chat (Fyodor Chat page) ──
+import { rowToMsg, type ChatMessageRow, type ChatMsg } from './chat';
+
+export interface ChatPage {
+  messages: ChatMsg[];
+  hasMoreBefore: boolean;
+  hasMoreAfter: boolean;
+}
+
+// GET /api/chat/messages?limit=&before=&after= -> { messages, has_more_before, has_more_after }
+export function fetchChatMessages(opts: { limit?: number; before?: number; after?: number } = {}): Promise<ChatPage> {
+  return http
+    .get<{ messages: ChatMessageRow[]; has_more_before: boolean; has_more_after: boolean }>('/api/chat/messages', {
+      limit: opts.limit ?? 80,
+      before: opts.before,
+      after: opts.after,
+    })
+    .then((r) => ({
+      messages: (r.messages || []).map(rowToMsg),
+      hasMoreBefore: Boolean(r.has_more_before),
+      hasMoreAfter: Boolean(r.has_more_after),
+    }))
+    .catch(() => ({ messages: [], hasMoreBefore: false, hasMoreAfter: false }));
+}
+
+// POST /api/chat/send -> { ok, message_id }. Images go as multipart (backend
+// compresses); text files are pre-uploaded via uploadChatFile then referenced.
+export function sendChatMessage(
+  content: string,
+  extra: { fileUrl?: string; fileName?: string; imageFile?: File } = {},
+): Promise<number | null> {
+  if (extra.imageFile) {
+    const fd = new FormData();
+    fd.append('author', 'hayana');
+    fd.append('content', content);
+    fd.append('image', extra.imageFile);
+    return fetch('/api/chat/send', { method: 'POST', body: fd })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((r) => (r?.ok ? (r.message_id ?? null) : null))
+      .catch(() => null);
+  }
+  return http
+    .post<{ ok: boolean; message_id?: number }>('/api/chat/send', {
+      author: 'hayana',
+      content,
+      file_url: extra.fileUrl || '',
+      file_name: extra.fileName || '',
+    })
+    .then((r) => (r.ok ? (r.message_id ?? null) : null))
+    .catch(() => null);
+}
+
+// POST /api/chat/upload_file (multipart) -> { file_url, file_name } — text files ≤2MB
+export function uploadChatFile(file: File): Promise<{ fileUrl: string; fileName: string } | null> {
+  const fd = new FormData();
+  fd.append('file', file);
+  return fetch('/api/chat/upload_file', { method: 'POST', body: fd })
+    .then((r) => r.json())
+    .then((r) => (r?.ok ? { fileUrl: r.file_url, fileName: r.file_name } : null))
+    .catch(() => null);
+}
+
+// POST /api/chat/edit — archives the tail as an edit branch, truncates after msg
+export function editChatMessage(msgId: number, content: string): Promise<boolean> {
+  return http
+    .post<{ ok: boolean }>('/api/chat/edit', { msg_id: msgId, content })
+    .then((r) => Boolean(r.ok))
+    .catch(() => false);
+}
+
+// POST /api/chat/branch/switch -> { branch_idx, total }
+export function switchChatBranch(msgId: number, direction: 1 | -1): Promise<{ branchIdx: number; total: number } | null> {
+  return http
+    .post<{ ok: boolean; branch_idx: number; total: number }>('/api/chat/branch/switch', { msg_id: msgId, direction })
+    .then((r) => (r.ok ? { branchIdx: r.branch_idx, total: r.total } : null))
+    .catch(() => null);
+}
+
+// POST /api/chat/regen/prepare -> { old_branches } (deletes the assistant row)
+export function regenPrepare(msgId: number): Promise<unknown[] | null> {
+  return http
+    .post<{ ok: boolean; old_branches: unknown[] }>('/api/chat/regen/prepare', { msg_id: msgId })
+    .then((r) => (r.ok ? r.old_branches : null))
+    .catch(() => null);
+}
+
+// POST /api/chat/regen/finalize — stitches old branches onto the fresh reply
+export function regenFinalize(oldBranches: unknown[]): Promise<{ branchIdx: number; total: number } | null> {
+  return http
+    .post<{ ok: boolean; branch_idx: number; total: number }>('/api/chat/regen/finalize', { old_branches: oldBranches })
+    .then((r) => (r.ok ? { branchIdx: r.branch_idx, total: r.total } : null))
+    .catch(() => null);
+}
+
+export interface ModelCatalogEntry {
+  id: string;
+  label?: string;
+  desc?: string;
+  thinking?: string;
+  primary?: boolean;
+  dot?: string;
+}
+
+// GET /api/config/model-catalog -> { models, current }
+export function fetchModelCatalog(): Promise<{ models: ModelCatalogEntry[]; current: string }> {
+  return http
+    .get<{ models: ModelCatalogEntry[]; current: string }>('/api/config/model-catalog')
+    .then((r) => ({ models: r.models || [], current: r.current || '' }))
+    .catch(() => ({ models: [], current: '' }));
+}
+
+// POST /api/config/model
+export function setChatModel(model: string): Promise<boolean> {
+  return http
+    .post<{ ok: boolean }>('/api/config/model', { model })
+    .then((r) => Boolean(r.ok))
+    .catch(() => false);
+}
+
 export interface LedgerEntryDraft {
   date: string;
   amount: number;
