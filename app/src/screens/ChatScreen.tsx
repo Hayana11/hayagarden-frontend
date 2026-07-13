@@ -5,6 +5,7 @@
 // Mounted at /dash/chat, parallel to the legacy /chat page.
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import { Link } from 'react-router-dom';
+import { BottomNav } from '../components/BottomNav';
 import {
   editChatMessage,
   fetchChatMessages,
@@ -1078,6 +1079,8 @@ export function ChatScreen() {
           <div style={{ background: 'rgba(58,42,40,0.92)', color: '#F7EDEA', fontSize: 13, letterSpacing: 1, padding: '10px 20px', borderRadius: 999, boxShadow: '0 10px 30px rgba(0,0,0,0.25)', animation: 'chatFadeIn .2s ease' }}>{toast}</div>
         </div>
       )}
+
+      <BottomNav embedded />
     </div>
   );
 }

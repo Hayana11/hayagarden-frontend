@@ -370,3 +370,19 @@ button {
 .ni.act {
   color: var(--color-primary);
 }
+
+/* Chat page — inline bottom nav (matches legacy /chat) */
+.bnav-embedded {
+  flex-shrink: 0;
+  display: flex;
+  background: rgba(245, 243, 238, 0.97);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  border-top: 0.5px solid var(--line, var(--color-border));
+  padding: 8px 0 calc(8px + env(safe-area-inset-bottom, 0px));
+}
+
+.bnav-embedded .ni {
+  color: #b8b0b8;
+  padding: 2px 0;
+}
