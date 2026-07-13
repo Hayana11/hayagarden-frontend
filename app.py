@@ -1,9 +1,10 @@
-import os, re, json, sqlite3, datetime, base64, uuid, threading
+import os, re, json, sqlite3, datetime, base64, uuid, threading, shutil
 from flask import Flask, request, jsonify, send_from_directory, abort, Response, stream_with_context
 import config_store
 import attachment_store
 import gallery_store
 import command_store
+import group_chat_store
 
 app = Flask(__name__, static_folder='static')
 DB_PATH = '/opt/frontend/memories.db'
@@ -47,6 +48,7 @@ def _migrate_chat_columns():
     conn.close()
 
 _migrate_chat_columns()
+group_chat_store.ensure_schema(DB_PATH)
 
 
 
@@ -623,6 +625,91 @@ def get_chat_messages():
         "has_more_before": bool(has_more_before),
         "has_more_after": bool(has_more_after),
     })
+
+
+def _group_chat_secret_present(name):
+    """Check whether a secret exists without ever returning its value."""
+    if (os.environ.get(name) or '').strip():
+        return True
+    try:
+        with open('/opt/frontend/.env', encoding='utf-8') as env_file:
+            for raw_line in env_file:
+                key, sep, value = raw_line.partition('=')
+                if sep and key.strip() == name and value.strip():
+                    return True
+    except OSError:
+        pass
+    return False
+
+
+@app.route('/api/group-chat/status', methods=['GET'])
+def group_chat_status():
+    claude_ready = bool(shutil.which('claude') and _group_chat_secret_present(
+        'CLAUDE_CODE_OAUTH_TOKEN'
+    ))
+    codex_installed = bool(shutil.which('codex'))
+    return jsonify({
+        'agents': {
+            'claude': {
+                'ready': claude_ready,
+                'color': 'sage',
+                'detail': '可以回复' if claude_ready else '暖色线路尚未就绪',
+            },
+            'codex': {
+                # The Codex runner is intentionally not implemented yet.  Merely
+                # finding a binary must not make the UI pretend the line works.
+                'ready': False,
+                'installed': codex_installed,
+                'color': 'blue',
+                'detail': '蓝色线路尚未接入',
+            },
+        }
+    })
+
+
+@app.route('/api/group-chat/messages', methods=['GET'])
+def group_chat_messages():
+    try:
+        room = request.args.get('room', 'group')
+        limit = request.args.get('limit', 120, type=int)
+        before = request.args.get('before', None, type=int)
+        messages, has_more = group_chat_store.list_messages(
+            room, limit=limit, before=before, db_path=DB_PATH
+        )
+        return jsonify({'messages': messages, 'has_more_before': has_more})
+    except (TypeError, ValueError) as exc:
+        return jsonify({'error': str(exc)}), 400
+
+
+@app.route('/api/group-chat/send', methods=['POST'])
+def group_chat_send():
+    data = request.get_json(silent=True) or {}
+    content = (data.get('content') or '').strip()
+    if not content:
+        return jsonify({'error': 'content required'}), 400
+    if len(content) > 12000:
+        return jsonify({'error': 'message too long'}), 400
+    try:
+        message = group_chat_store.add_message(
+            data.get('room', 'group'), 'user', content, db_path=DB_PATH
+        )
+        return jsonify({'ok': True, 'message': message})
+    except ValueError as exc:
+        return jsonify({'error': str(exc)}), 400
+
+
+@app.route('/api/group-chat/clear', methods=['POST'])
+def group_chat_clear():
+    data = request.get_json(silent=True) or {}
+    if data.get('confirm') is not True:
+        return jsonify({'error': 'confirm required'}), 400
+    try:
+        deleted = group_chat_store.clear_room(
+            data.get('room', 'group'), db_path=DB_PATH
+        )
+        return jsonify({'ok': True, 'deleted': deleted})
+    except ValueError as exc:
+        return jsonify({'error': str(exc)}), 400
 
 @app.route('/api/chat/send', methods=['POST'])
 def send_chat():
