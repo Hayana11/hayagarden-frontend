@@ -61,6 +61,35 @@ button {
   50% { opacity: .35; }
 }
 
+/* ── Fyodor Chat page ── */
+@keyframes chatSpin { to { transform: rotate(360deg); } }
+@keyframes chatBlink { 50% { opacity: 0; } }
+@keyframes chatFadeIn { from { opacity: 0; } to { opacity: 1; } }
+@keyframes chatBreathe { 0%, 100% { opacity: .35; transform: scale(.9); } 50% { opacity: 1; transform: scale(1.08); } }
+@keyframes chatDropIn { from { transform: translateY(-8px); opacity: 0; } to { transform: none; opacity: 1; } }
+@keyframes chatSheetUp { from { transform: translateY(60px); opacity: 0; } to { transform: none; opacity: 1; } }
+@keyframes chatSlideInL { from { transform: translateX(-40px); opacity: 0; } to { transform: none; opacity: 1; } }
+@keyframes chatFlash { 0% { background: var(--rosebg); } 100% { background: transparent; } }
+
+.chat-msg .chat-msg-acts {
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity .18s ease;
+}
+.chat-msg:hover .chat-msg-acts,
+.chat-msg:focus-within .chat-msg-acts {
+  opacity: 1;
+  pointer-events: auto;
+}
+@media (hover: none) {
+  .chat-msg .chat-msg-acts { opacity: .55; pointer-events: auto; }
+}
+.chat-flash { animation: chatFlash 1.8s ease; }
+
+@media (prefers-reduced-motion: reduce) {
+  .chat-root * { animation: none !important; transition: none !important; }
+}
+
 .drag-scroll-row {
   display: flex;
   align-items: center;
