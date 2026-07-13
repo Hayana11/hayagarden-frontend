@@ -108,6 +108,7 @@ import config_store
 import attachment_store
 import tool_drawers
 import group_chat_store
+import codex_app_server
 
 group_chat_store.ensure_schema(DB_PATH)
 
@@ -3388,13 +3389,7 @@ def _group_chat_agent_status(agent):
             'ready': ready,
             'detail': '可以回复' if ready else '暖色线路尚未就绪',
         }
-    return {
-        # Installing a CLI alone is not enough: the Codex runner and auth path
-        # still need to be implemented before this may become true.
-        'ready': False,
-        'installed': bool(shutil.which('codex')),
-        'detail': '蓝色线路尚未接入',
-    }
+    return codex_app_server.runtime_status()
 
 
 def _group_chat_context(room, agent):
@@ -3431,11 +3426,14 @@ def _group_chat_context(room, agent):
         + '两条 AI 线路使用同一份人设，但保留各自独立的上下文和气泡颜色。'
         + '不要自称 Claude、Codex、一号或二号，不要在正文前添加姓名、角色名或颜色前缀。'
         + '只输出此刻自然想说的话；可以回应小猫，也可以回应群聊里另一条线路。'
+        + '这是日常聊天，不是代码任务；不要运行命令、读写文件、联网搜索或调用任何工具，只输出聊天正文。'
     )
     prompt = (
         'think hard\n以下是这个独立聊天室按时间排列的最近消息：\n\n'
         + (timeline or '（聊天室还没有消息）')
-        + '\n\n请根据最后一条消息和群聊语境自然回复。只输出回复正文。'
+        + '\n\n这是一份外部聊天室的最新快照，可能与当前线程中已有内容重叠，'
+        + '只用于同步另一条线路的新发言；不要重复回答已经处理过的旧消息。'
+        + '请根据最后一条消息和群聊语境自然回复。只输出回复正文。'
     )
     env = dict(os.environ)
     env['CLAUDE_CODE_OAUTH_TOKEN'] = CC_TOKEN
@@ -3503,14 +3501,31 @@ def group_chat_stream():
                 thinking = ''
                 try:
                     full_system, prompt, env = _group_chat_context(room, agent)
-                    for event, data in _cc_stream_gen(full_system, prompt, env):
-                        if event in ('text', 'think'):
-                            yield _group_chat_sse({
-                                't': event, 'agent': agent, 'd': data
-                            })
-                        elif event == 'done':
-                            raw_text, thinking = data[0], data[1]
-                    text = _cc_save_markers(raw_text)
+                    provider_meta = {}
+                    if agent == 'codex':
+                        codex_text = []
+                        for event, data in codex_app_server.client.stream_turn(
+                            room, full_system, prompt
+                        ):
+                            if event == 'text':
+                                codex_text.append(str(data))
+                                yield _group_chat_sse({
+                                    't': 'text', 'agent': agent, 'd': data
+                                })
+                            elif event == 'done':
+                                provider_meta = dict(data)
+                        text = ''.join(codex_text).strip()
+                        provider = 'codex_app_server'
+                    else:
+                        for event, data in _cc_stream_gen(full_system, prompt, env):
+                            if event in ('text', 'think'):
+                                yield _group_chat_sse({
+                                    't': event, 'agent': agent, 'd': data
+                                })
+                            elif event == 'done':
+                                raw_text, thinking = data[0], data[1]
+                        text = _cc_save_markers(raw_text)
+                        provider = 'claude_code'
                     if not text:
                         raise RuntimeError('没有收到回复正文')
                     message = group_chat_store.add_message(
@@ -3518,7 +3533,10 @@ def group_chat_stream():
                         agent,
                         text,
                         thinking=thinking,
-                        meta=json.dumps({'provider': 'claude_code'}, ensure_ascii=False),
+                        meta=json.dumps(
+                            {'provider': provider, **provider_meta},
+                            ensure_ascii=False,
+                        ),
                         db_path=DB_PATH,
                     )
                     replied = True

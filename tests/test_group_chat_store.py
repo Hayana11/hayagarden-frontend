@@ -69,12 +69,44 @@ class GroupChatStoreTests(unittest.TestCase):
     def test_clear_only_deletes_selected_room(self):
         group_chat_store.add_message('group', 'user', 'one', db_path=self.db_path)
         group_chat_store.add_message('codex', 'user', 'two', db_path=self.db_path)
+        group_chat_store.save_thread_binding(
+            'group', 'codex', 'thread-group', db_path=self.db_path
+        )
+        group_chat_store.save_thread_binding(
+            'codex', 'codex', 'thread-private', db_path=self.db_path
+        )
 
         self.assertEqual(group_chat_store.clear_room('group', self.db_path), 1)
         group_rows, _ = group_chat_store.list_messages('group', db_path=self.db_path)
         codex_rows, _ = group_chat_store.list_messages('codex', db_path=self.db_path)
         self.assertEqual(group_rows, [])
         self.assertEqual(len(codex_rows), 1)
+        self.assertIsNone(group_chat_store.get_thread_binding(
+            'group', 'codex', db_path=self.db_path
+        ))
+        self.assertEqual(
+            group_chat_store.get_thread_binding(
+                'codex', 'codex', db_path=self.db_path
+            )['thread_id'],
+            'thread-private',
+        )
+
+    def test_thread_binding_is_upserted_per_room_and_agent(self):
+        first = group_chat_store.save_thread_binding(
+            'group', 'codex', 'thread-one', db_path=self.db_path
+        )
+        second = group_chat_store.save_thread_binding(
+            'group', 'codex', 'thread-two', db_path=self.db_path
+        )
+
+        self.assertEqual(first['thread_id'], 'thread-one')
+        self.assertEqual(second['thread_id'], 'thread-two')
+        self.assertTrue(group_chat_store.delete_thread_binding(
+            'group', 'codex', db_path=self.db_path
+        ))
+        self.assertFalse(group_chat_store.delete_thread_binding(
+            'group', 'codex', db_path=self.db_path
+        ))
 
 
 if __name__ == '__main__':

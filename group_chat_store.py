@@ -46,6 +46,13 @@ def ensure_schema(db_path: str | None = None) -> None:
             );
             CREATE INDEX IF NOT EXISTS idx_group_chat_room_id
                 ON group_chat_messages(room, id);
+            CREATE TABLE IF NOT EXISTS group_chat_threads (
+                room TEXT NOT NULL,
+                agent TEXT NOT NULL,
+                thread_id TEXT NOT NULL,
+                updated_at TEXT NOT NULL DEFAULT (datetime('now', '+8 hours')),
+                PRIMARY KEY (room, agent)
+            );
             """
         )
         conn.commit()
@@ -129,7 +136,77 @@ def clear_room(room: str, db_path: str | None = None) -> int:
     conn = _connect(db_path)
     try:
         cur = conn.execute("DELETE FROM group_chat_messages WHERE room=?", (room,))
+        conn.execute("DELETE FROM group_chat_threads WHERE room=?", (room,))
         conn.commit()
         return int(cur.rowcount or 0)
+    finally:
+        conn.close()
+
+
+def get_thread_binding(
+    room: str,
+    agent: str,
+    *,
+    db_path: str | None = None,
+) -> dict | None:
+    room = _validate(room, VALID_ROOMS, "room")
+    agent = _validate(agent, {"claude", "codex"}, "agent")
+    conn = _connect(db_path)
+    try:
+        row = conn.execute(
+            "SELECT * FROM group_chat_threads WHERE room=? AND agent=?",
+            (room, agent),
+        ).fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()
+
+
+def save_thread_binding(
+    room: str,
+    agent: str,
+    thread_id: str,
+    *,
+    db_path: str | None = None,
+) -> dict:
+    room = _validate(room, VALID_ROOMS, "room")
+    agent = _validate(agent, {"claude", "codex"}, "agent")
+    thread_id = (thread_id or "").strip()
+    if not thread_id:
+        raise ValueError("thread id is empty")
+    conn = _connect(db_path)
+    try:
+        conn.execute(
+            "INSERT INTO group_chat_threads (room, agent, thread_id) VALUES (?, ?, ?) "
+            "ON CONFLICT(room, agent) DO UPDATE SET "
+            "thread_id=excluded.thread_id, updated_at=datetime('now', '+8 hours')",
+            (room, agent, thread_id),
+        )
+        row = conn.execute(
+            "SELECT * FROM group_chat_threads WHERE room=? AND agent=?",
+            (room, agent),
+        ).fetchone()
+        conn.commit()
+        return dict(row)
+    finally:
+        conn.close()
+
+
+def delete_thread_binding(
+    room: str,
+    agent: str,
+    *,
+    db_path: str | None = None,
+) -> bool:
+    room = _validate(room, VALID_ROOMS, "room")
+    agent = _validate(agent, {"claude", "codex"}, "agent")
+    conn = _connect(db_path)
+    try:
+        cur = conn.execute(
+            "DELETE FROM group_chat_threads WHERE room=? AND agent=?",
+            (room, agent),
+        )
+        conn.commit()
+        return bool(cur.rowcount)
     finally:
         conn.close()
