@@ -34,10 +34,10 @@ function Shell() {
   if (fullscreen) return routes;
 
   return (
-    <AppShell>
-      {routes}
+    <>
+      <AppShell>{routes}</AppShell>
       <BottomNav />
-    </AppShell>
+    </>
   );
 }
 

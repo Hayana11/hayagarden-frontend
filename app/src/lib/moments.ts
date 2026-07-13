@@ -241,3 +241,24 @@ export function moodWordTone(valence: number): 'up' | 'down' | 'level' {
   if (valence <= -0.15) return 'down';
   return 'level';
 }
+
+export async function fetchMomentsCover(): Promise<string | null> {
+  try {
+    const r = await http.get<{ ok: boolean; url: string | null }>('/api/moments/cover');
+    return r.ok && r.url ? r.url : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function uploadMomentsCover(file: File): Promise<string | null> {
+  const fd = new FormData();
+  fd.append('file', file);
+  try {
+    const r = await fetch('/api/moments/cover', { method: 'POST', body: fd });
+    const j = await r.json();
+    return r.ok && j.ok && j.url ? j.url : null;
+  } catch {
+    return null;
+  }
+}

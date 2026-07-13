@@ -337,11 +337,11 @@ button {
   margin: 0 auto;
   width: 100%;
   display: flex;
-  background: rgba(255, 255, 255, 0.97);
+  background: rgba(245, 243, 238, 0.97);
   backdrop-filter: blur(14px);
   -webkit-backdrop-filter: blur(14px);
-  border-top: 1px solid var(--color-border);
-  padding: 7px 0 calc(7px + env(safe-area-inset-bottom, 0px));
+  border-top: 0.5px solid var(--color-border);
+  padding: 8px 0 calc(8px + env(safe-area-inset-bottom, 0px));
 }
 
 .ni {
@@ -354,11 +354,11 @@ button {
   border: none;
   background: none;
   cursor: pointer;
-  color: #b0a0aa;
+  color: #b8b0b8;
   font-size: 10px;
   letter-spacing: 0.4px;
   font-family: inherit;
-  padding: 4px 0;
+  padding: 2px 0;
   min-width: 0;
 }
 
@@ -383,6 +383,5 @@ button {
 }
 
 .bnav-embedded .ni {
-  color: #b8b0b8;
   padding: 2px 0;
 }
