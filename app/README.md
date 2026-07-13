@@ -1,6 +1,6 @@
 # Fyodor · Dash
 
-Web implementation of the `Dash.dc.html` prototype from `../project` — a personal dashboard shell for the Android chat app (embedded via WebView), covering Dash / 记忆库 / 用量 / 共读 / 支出 / 经期.
+Web implementation of the `Dash.dc.html` prototype from `../project` — a personal dashboard shell for the Android chat app (embedded via WebView), covering Dash / 聊天 / 记忆库 / 用量 / 共读 / 支出 / 经期 / 系统配置.
 
 ## Running
 
@@ -14,7 +14,7 @@ npm run build    # typecheck + production build
 
 The app calls the backend with **relative paths** (`/api/...`) so it works unmodified when served same-origin with the API in production (`https://love-style.xyz`). Set `VITE_API_BASE_URL` in `.env.local` only if you need to point dev at a different host. No auth is sent.
 
-Every endpoint's shape is a **best guess** inferred from the original design's mock data — there was no real API spec available when this was built. They're all defined in one place, `src/lib/api.ts`, so correcting field names against the real backend is a single-file change. If a call fails (backend not up yet, wrong shape, etc.) it falls back to the deterministic mock in `src/lib/mock.ts` so the UI stays usable — mirroring how the original prototype's weather widget already handled the free Open-Meteo API.
+Most dashboard endpoint shapes are defined in `src/lib/api.ts`; system configuration contracts live in `src/lib/systemConfig.ts`. Dashboard data may fall back to deterministic mocks when the backend is unavailable. System configuration deliberately does not: it reports a partial-load warning so a missing production setting can never look saved when it is not.
 
 Endpoints referenced:
 
@@ -28,6 +28,9 @@ Endpoints referenced:
 | `GET /api/books/current` | 共读 progress + notes |
 | `GET /api/ledger/budget` | 本月支出 ring + categories |
 | `GET /api/period/stats` | 经期 countdown + stats (phase/days-left are derived client-side in `src/lib/period.ts`) |
+| `/api/config/provider`, `/api/config/key-status` | active chat provider and masked connection status |
+| `/api/config/relay-presets`, `/api/config/models`, `/api/config/model-catalog` | relay and model management |
+| `POST /api/gw/test` | provider connectivity test, with optional persona/memory injection |
 
 Weather is fetched directly from Open-Meteo client-side (Jilin City coords), exactly as in the original design — no backend involved.
 

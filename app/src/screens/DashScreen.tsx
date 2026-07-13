@@ -71,7 +71,7 @@ export function DashScreen() {
   return (
     <div style={{ padding: '26px 20px 110px', display: 'flex', flexDirection: 'column', gap: 16, position: 'relative' }}>
       {/* header */}
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12 }}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
           <div style={{ display: 'flex', alignItems: 'baseline', gap: 10 }}>
             <span style={{ fontFamily: "'Bodoni Moda',serif", fontStyle: 'italic', fontSize: 34, color: 'var(--color-rose)', letterSpacing: 1 }}>
@@ -84,6 +84,26 @@ export function DashScreen() {
           </div>
           <div style={{ fontSize: 11, color: 'var(--color-text-mute)', letterSpacing: 1 }}>{weatherLine}</div>
         </div>
+        <button
+          type="button"
+          onClick={() => navigate('/settings')}
+          aria-label="打开系统配置"
+          style={{
+            width: 40,
+            height: 40,
+            borderRadius: '50%',
+            background: '#fff',
+            boxShadow: 'var(--shadow-fab)',
+            display: 'grid',
+            placeItems: 'center',
+            flexShrink: 0,
+            cursor: 'pointer',
+            color: 'var(--color-primary)',
+            fontSize: 19,
+          }}
+        >
+          <i className="ti ti-settings" />
+        </button>
       </div>
 
       {/* emotion status strip */}
