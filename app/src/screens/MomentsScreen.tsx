@@ -180,8 +180,8 @@ export function MomentsScreen() {
   };
 
   return (
-    <div className="hide-scrollbar" style={{ ...(vars as CSSProperties), height: '100dvh', overflowY: 'auto', background: 'var(--bg)', color: 'var(--ink)', fontFamily: SERIF, transition: 'background .3s,color .3s' }}>
-      <div style={{ maxWidth: 430, margin: '0 auto', minHeight: '100%', background: 'var(--bg)' }}>
+    <div className="hide-scrollbar" style={{ ...(vars as CSSProperties), width: '100%', maxWidth: 480, margin: '0 auto', height: '100dvh', overflowY: 'auto', background: 'var(--bg)', color: 'var(--ink)', fontFamily: SERIF, transition: 'background .3s,color .3s' }}>
+      <div style={{ width: '100%', minHeight: '100%', background: 'var(--bg)' }}>
         {/* ── cover (换封面锁定) ── */}
         <div onClick={showLocked} style={{ position: 'relative', height: 200, cursor: 'pointer' }} title={LOCKED}>
           <div style={{ position: 'absolute', inset: 0, background: 'linear-gradient(150deg,#3E2E30,#211A18 55%,#4A3226)' }} />
@@ -271,7 +271,7 @@ export function MomentsScreen() {
                       </div>
                       <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 7 }}>
                         <KindTag kind={f.kind} />
-                        <span style={{ fontSize: 13.5, lineHeight: 1.9, color: 'var(--ink)' }}>{f.content}</span>
+                        <span style={{ fontSize: 13.5, lineHeight: 1.9, color: 'var(--ink)', overflowWrap: 'break-word', wordBreak: 'break-word' }}>{f.content}</span>
                         <LockedSocialRow onLocked={showLocked} dense />
                       </div>
                     </div>
@@ -295,7 +295,7 @@ export function MomentsScreen() {
                         <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--ink2)' }}>{f.dateLabel || '今天'} {f.timeLabel}</span>
                         <span style={{ marginLeft: 'auto' }}><KindTag kind={f.kind} /></span>
                       </div>
-                      <span style={{ fontSize: 14.5, lineHeight: 1.9, color: 'var(--ink)' }}>{f.content}</span>
+                      <span style={{ fontSize: 14.5, lineHeight: 1.9, color: 'var(--ink)', overflowWrap: 'break-word', wordBreak: 'break-word' }}>{f.content}</span>
                       <div style={{ borderTop: '1px solid var(--line)', paddingTop: 10, display: 'flex', justifyContent: 'flex-end' }}>
                         <LockedSocialRow onLocked={showLocked} />
                       </div>
