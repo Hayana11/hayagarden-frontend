@@ -6,6 +6,8 @@ import type {
   BookCurrent,
   Heatmap,
   LedgerBudget,
+  LedgerEntry,
+  LedgerTrendPoint,
   MemoryCalendar,
   MemoryDayEntry,
   MemoryEntry,
@@ -227,6 +229,44 @@ export function mockPeriodStats(): PeriodStats {
     recordsCount: 14,
     nextPredicted: '2026-07-14',
   };
+}
+
+/** Demo entries from the Ledger.dc.html prototype (dates around 2026-07-10). */
+export function mockLedgerEntries(): LedgerEntry[] {
+  return [
+    { id: 1, date: '2026-07-10', catId: 'food', title: '小面和冰豆花', amount: -68, who: 'fy', reason: '想吃', note: '雨后走回家，顺路买的', mem: '雨停以后，我们绕路去买了豆花。' },
+    { id: 2, date: '2026-07-10', catId: 'book', title: '共读书单补货', amount: -126, who: 'both', reason: '共读', read: '《夜航西飞》 · 第 3 章' },
+    { id: 3, date: '2026-07-09', catId: 'income', title: '项目款到账', amount: 3200, who: 'haya', reason: '收入', later: '买了猫砂、书、周五晚饭' },
+    { id: 4, date: '2026-07-09', catId: 'cat', title: '猫砂十升装', amount: -89, who: 'both', reason: '猫咪需要' },
+    { id: 5, date: '2026-07-08', catId: 'home', title: '新的小台灯', amount: -159, who: 'fy', reason: '突然心动', note: '放在读书角，暖光，晚上读书不刺眼' },
+    { id: 6, date: '2026-07-08', catId: 'transit', title: '地铁通勤充值', amount: -100, who: 'haya', reason: '必需' },
+    { id: 7, date: '2026-07-07', catId: 'food', title: '楼下早餐一周', amount: -138, who: 'both', reason: '必需' },
+    { id: 8, date: '2026-07-06', catId: 'food', title: '周末火锅补账', amount: -212, who: 'both', reason: '想吃' },
+    { id: 9, date: '2026-07-05', catId: 'cat', title: '猫罐头囤货', amount: -230, who: 'both', reason: '猫咪需要', note: '鸡肉味的这次买对了' },
+    { id: 10, date: '2026-07-05', catId: 'gift', title: '给妈妈的茶叶', amount: -168, who: 'haya', reason: '纪念' },
+    { id: 11, date: '2026-07-04', catId: 'food', title: '一周买菜', amount: -486, who: 'both', reason: '必需' },
+    { id: 12, date: '2026-07-03', catId: 'book', title: '《夜航西飞》纸质版', amount: -56, who: 'fy', reason: '共读', read: '《夜航西飞》 · 扉页' },
+    { id: 13, date: '2026-07-02', catId: 'med', title: '感冒药和维C', amount: -74, who: 'haya', reason: '必需' },
+    { id: 14, date: '2026-07-01', catId: 'home', title: '七月的花', amount: -45.5, who: 'both', reason: '纪念', mem: '桔梗开了一周，比预想久。' },
+    { id: 15, date: '2026-06-28', catId: 'food', title: '纪念日晚餐', amount: -388, who: 'both', reason: '纪念', mem: '六月末的长谈，聊到停电。' },
+    { id: 16, date: '2026-06-15', catId: 'book', title: '二手书市三本', amount: -94, who: 'fy', reason: '共读' },
+    { id: 17, date: '2026-06-12', catId: 'cat', title: '体检疫苗', amount: -420, who: 'both', reason: '猫咪需要' },
+    { id: 18, date: '2026-06-08', catId: 'food', title: '买菜两周', amount: -512, who: 'both', reason: '必需' },
+    { id: 19, date: '2026-06-05', catId: 'income', title: '稿费', amount: 1800, who: 'fy', reason: '收入' },
+  ];
+}
+
+export function mockLedgerTrend(now: Date): LedgerTrendPoint[] {
+  const vals = [1180, 1520, 1310, 1745, 1414, 1690];
+  const out: LedgerTrendPoint[] = [];
+  for (let i = 5; i >= 0; i--) {
+    const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+    out.push({
+      month: `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`,
+      expense: vals[5 - i],
+    });
+  }
+  return out;
 }
 
 export function mockPeriodSettings(): PeriodSettings {

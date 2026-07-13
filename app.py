@@ -2935,6 +2935,12 @@ def _init_ledger_table():
         'author TEXT, '
         "created_at DATETIME DEFAULT (datetime('now','+8 hours')))"
     )
+    # meta：账本页的扩展字段（who/reason/note/mem/read/later），JSON。
+    # 旧读者 SELECT * 时多一列不受影响。
+    try:
+        conn.execute('ALTER TABLE ledger ADD COLUMN meta TEXT')
+    except sqlite3.OperationalError:
+        pass  # 列已存在
     conn.commit()
     conn.close()
 
@@ -3171,6 +3177,15 @@ def get_ledger():
         }
     })
 
+_LEDGER_META_KEYS = {'who', 'reason', 'note', 'mem', 'read', 'later'}
+
+def _clean_ledger_meta(meta):
+    if not isinstance(meta, dict):
+        return None
+    cleaned = {k: v for k, v in meta.items()
+               if k in _LEDGER_META_KEYS and isinstance(v, str) and v.strip()}
+    return json.dumps(cleaned, ensure_ascii=False) if cleaned else None
+
 @app.route('/api/ledger', methods=['POST'])
 def add_ledger():
     data     = request.get_json() or {}
@@ -3185,11 +3200,36 @@ def add_ledger():
     note     = (data.get('note')     or '').strip() or None
     date     = (data.get('date')     or '').strip() or None
     author   = (data.get('author')   or '').strip() or None
+    meta     = _clean_ledger_meta(data.get('meta'))
     conn = get_db()
-    conn.execute(
-        'INSERT INTO ledger (amount, category, note, date, author) VALUES (?,?,?,?,?)',
-        (amount, category, note, date, author)
+    cur = conn.execute(
+        'INSERT INTO ledger (amount, category, note, date, author, meta) VALUES (?,?,?,?,?,?)',
+        (amount, category, note, date, author, meta)
     )
+    conn.commit(); conn.close()
+    return jsonify({'ok': True, 'id': cur.lastrowid})
+
+@app.route('/api/ledger/<int:lid>', methods=['PATCH'])
+def update_ledger(lid):
+    data = request.get_json() or {}
+    sets, vals = [], []
+    if 'amount' in data:
+        try:
+            vals.append(float(data['amount'])); sets.append('amount=?')
+        except (ValueError, TypeError):
+            return jsonify({'error': 'invalid amount'}), 400
+    for col in ('category', 'note', 'date', 'author'):
+        if col in data:
+            sets.append(f'{col}=?')
+            vals.append((data[col] or '').strip() or None)
+    if 'meta' in data:
+        sets.append('meta=?')
+        vals.append(_clean_ledger_meta(data['meta']))
+    if not sets:
+        return jsonify({'error': 'nothing to update'}), 400
+    vals.append(lid)
+    conn = get_db()
+    conn.execute(f"UPDATE ledger SET {','.join(sets)} WHERE id=?", vals)
     conn.commit(); conn.close()
     return jsonify({'ok': True})
 

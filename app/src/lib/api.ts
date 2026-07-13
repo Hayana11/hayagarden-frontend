@@ -9,10 +9,14 @@
 import { http } from './http';
 import { monthKey } from './format';
 import * as mock from './mock';
+import { entryToPayload, rowToEntry } from './ledger';
 import type {
   BookCurrent,
   Heatmap,
   LedgerBudget,
+  LedgerEntry,
+  LedgerTrendPoint,
+  LedgerWho,
   MemoryCalendar,
   MemoryDayEntry,
   MemoryLibrary,
@@ -158,6 +162,78 @@ export function fetchLedgerBudget(now: Date): Promise<LedgerBudget> {
       categories,
     };
   }, mock.mockLedgerBudget);
+}
+
+export interface LedgerEntryDraft {
+  date: string;
+  amount: number;
+  catId: string;
+  title: string;
+  who: LedgerWho;
+  reason: string;
+  note?: string;
+  mem?: string;
+  read?: string;
+  later?: string;
+}
+
+// GET /api/ledger?month=YYYY-MM -> rows with the JSON meta column, mapped to LedgerEntry
+export function fetchLedgerEntries(month: string): Promise<LedgerEntry[]> {
+  return withFallback(
+    () =>
+      http
+        .get<{ records: Array<Parameters<typeof rowToEntry>[0]> }>('/api/ledger', { month })
+        .then((r) => (r.records || []).map(rowToEntry)),
+    () => mock.mockLedgerEntries().filter((e) => e.date.startsWith(month)),
+  );
+}
+
+// POST /api/ledger -> { ok, id }
+export function addLedgerEntry(draft: LedgerEntryDraft): Promise<number | null> {
+  return http
+    .post<{ ok: boolean; id?: number }>('/api/ledger', entryToPayload(draft))
+    .then((r) => (r.ok ? (r.id ?? null) : null))
+    .catch(() => null);
+}
+
+// PATCH /api/ledger/:id
+export function updateLedgerEntry(id: number, draft: LedgerEntryDraft): Promise<boolean> {
+  return http
+    .patch<{ ok: boolean }>(`/api/ledger/${id}`, entryToPayload(draft))
+    .then((r) => Boolean(r.ok))
+    .catch(() => false);
+}
+
+// DELETE /api/ledger/:id
+export function deleteLedgerEntry(id: number): Promise<boolean> {
+  return http
+    .del<{ ok: boolean }>(`/api/ledger/${id}`)
+    .then((r) => Boolean(r.ok))
+    .catch(() => false);
+}
+
+// GET /api/ledger/trend -> last six months' expenses
+export function fetchLedgerTrend(now: Date): Promise<LedgerTrendPoint[]> {
+  return withFallback(
+    () => http.get<Array<{ month: string; expense: number }>>('/api/ledger/trend'),
+    () => mock.mockLedgerTrend(now),
+  );
+}
+
+// GET /api/ledger/budget?month= -> { amount } (null when unset)
+export function fetchLedgerBudgetAmount(month: string): Promise<number | null> {
+  return withFallback(
+    () => http.get<{ amount: number | null }>('/api/ledger/budget', { month }).then((r) => r.amount),
+    () => 3000,
+  );
+}
+
+// POST /api/ledger/budget
+export function setLedgerBudgetAmount(month: string, amount: number): Promise<boolean> {
+  return http
+    .post<{ ok: boolean }>('/api/ledger/budget', { month, amount })
+    .then((r) => Boolean(r.ok))
+    .catch(() => false);
 }
 
 // GET /api/period/days?month=YYYY-MM -> { days: { 'YYYY-MM-DD': PeriodDayRecord } }
