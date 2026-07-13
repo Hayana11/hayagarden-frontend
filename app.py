@@ -1528,6 +1528,15 @@ def _init_period_tables():
         note TEXT DEFAULT '',
         created_at TEXT DEFAULT (datetime('now','+8 hours'))
     )""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS period_days (
+        date TEXT PRIMARY KEY,
+        data TEXT NOT NULL DEFAULT '{}',
+        updated_at TEXT DEFAULT (datetime('now','+8 hours'))
+    )""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS period_settings (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+    )""")
     conn.commit()
     conn.close()
 
@@ -1613,6 +1622,110 @@ def period_stats():
         'next_period':   next_dt.strftime('%Y-%m-%d'),
         'ovulation':     ovul_dt.strftime('%Y-%m-%d'),
     })
+
+
+# 每日详细记录：{came, flow, pain, states[], extras[], sex, note}
+# 写入时同步维护 period_records（came→type='period'，sex→type='sex'），
+# 这样 /api/period/stats 和其他读 period_records 的端不受影响。
+@app.route('/api/period/days', methods=['GET'])
+def get_period_days():
+    month = (request.args.get('month') or '').strip()  # YYYY-MM
+    conn = get_db()
+    if month:
+        rows = conn.execute(
+            "SELECT date,data FROM period_days WHERE date LIKE ? ORDER BY date",
+            (month + '%',)
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT date,data FROM period_days ORDER BY date DESC LIMIT 400"
+        ).fetchall()
+    conn.close()
+    days = {}
+    for r in rows:
+        try:
+            days[r['date']] = json.loads(r['data'])
+        except (ValueError, TypeError):
+            continue
+    return jsonify({'days': days})
+
+
+def _sync_period_record(conn, date, rtype, present):
+    exists = conn.execute(
+        "SELECT id FROM period_records WHERE date=? AND type=?", (date, rtype)
+    ).fetchone()
+    if present and not exists:
+        conn.execute("INSERT INTO period_records (date,type) VALUES (?,?)", (date, rtype))
+    elif not present and exists:
+        conn.execute("DELETE FROM period_records WHERE date=? AND type=?", (date, rtype))
+
+
+@app.route('/api/period/day', methods=['PUT', 'POST'])
+def put_period_day():
+    data = request.get_json() or {}
+    date = (data.get('date') or '').strip()
+    record = data.get('record')
+    if not date or not isinstance(record, dict):
+        return jsonify({'error': 'invalid'}), 400
+    allowed = {'came', 'flow', 'pain', 'states', 'extras', 'sex', 'note'}
+    record = {k: v for k, v in record.items() if k in allowed and v is not None}
+    conn = get_db()
+    if record:
+        conn.execute(
+            """INSERT INTO period_days (date,data,updated_at)
+               VALUES (?,?,datetime('now','+8 hours'))
+               ON CONFLICT(date) DO UPDATE SET
+                 data=excluded.data, updated_at=excluded.updated_at""",
+            (date, json.dumps(record, ensure_ascii=False))
+        )
+    else:
+        conn.execute("DELETE FROM period_days WHERE date=?", (date,))
+    _sync_period_record(conn, date, 'period', record.get('came') is True)
+    _sync_period_record(conn, date, 'sex', record.get('sex') is True)
+    conn.commit()
+    conn.close()
+    return jsonify({'ok': True, 'date': date, 'record': record})
+
+
+@app.route('/api/period/settings', methods=['GET'])
+def get_period_settings():
+    conn = get_db()
+    rows = conn.execute("SELECT key,value FROM period_settings").fetchall()
+    conn.close()
+    kv = {r['key']: r['value'] for r in rows}
+    def _int(k):
+        try:
+            return int(kv[k])
+        except (KeyError, ValueError):
+            return None
+    return jsonify({
+        'cycle_length':  _int('cycle_length'),
+        'period_length': _int('period_length'),
+        'last_start':    kv.get('last_start') or None,
+    })
+
+
+@app.route('/api/period/settings', methods=['PUT', 'POST'])
+def put_period_settings():
+    data = request.get_json() or {}
+    conn = get_db()
+    for key, lo, hi in (('cycle_length', 21, 40), ('period_length', 2, 10)):
+        v = data.get(key)
+        if isinstance(v, (int, float)) and lo <= int(v) <= hi:
+            conn.execute(
+                "INSERT INTO period_settings (key,value) VALUES (?,?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (key, str(int(v)))
+            )
+    ls = (data.get('last_start') or '').strip() if isinstance(data.get('last_start'), str) else ''
+    if ls:
+        conn.execute(
+            "INSERT INTO period_settings (key,value) VALUES ('last_start',?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (ls,)
+        )
+    conn.commit()
+    conn.close()
+    return get_period_settings()
 
 
 
@@ -2822,6 +2935,12 @@ def _init_ledger_table():
         'author TEXT, '
         "created_at DATETIME DEFAULT (datetime('now','+8 hours')))"
     )
+    # meta：账本页的扩展字段（who/reason/note/mem/read/later），JSON。
+    # 旧读者 SELECT * 时多一列不受影响。
+    try:
+        conn.execute('ALTER TABLE ledger ADD COLUMN meta TEXT')
+    except sqlite3.OperationalError:
+        pass  # 列已存在
     conn.commit()
     conn.close()
 
@@ -3058,6 +3177,15 @@ def get_ledger():
         }
     })
 
+_LEDGER_META_KEYS = {'who', 'reason', 'note', 'mem', 'read', 'later'}
+
+def _clean_ledger_meta(meta):
+    if not isinstance(meta, dict):
+        return None
+    cleaned = {k: v for k, v in meta.items()
+               if k in _LEDGER_META_KEYS and isinstance(v, str) and v.strip()}
+    return json.dumps(cleaned, ensure_ascii=False) if cleaned else None
+
 @app.route('/api/ledger', methods=['POST'])
 def add_ledger():
     data     = request.get_json() or {}
@@ -3072,11 +3200,36 @@ def add_ledger():
     note     = (data.get('note')     or '').strip() or None
     date     = (data.get('date')     or '').strip() or None
     author   = (data.get('author')   or '').strip() or None
+    meta     = _clean_ledger_meta(data.get('meta'))
     conn = get_db()
-    conn.execute(
-        'INSERT INTO ledger (amount, category, note, date, author) VALUES (?,?,?,?,?)',
-        (amount, category, note, date, author)
+    cur = conn.execute(
+        'INSERT INTO ledger (amount, category, note, date, author, meta) VALUES (?,?,?,?,?,?)',
+        (amount, category, note, date, author, meta)
     )
+    conn.commit(); conn.close()
+    return jsonify({'ok': True, 'id': cur.lastrowid})
+
+@app.route('/api/ledger/<int:lid>', methods=['PATCH'])
+def update_ledger(lid):
+    data = request.get_json() or {}
+    sets, vals = [], []
+    if 'amount' in data:
+        try:
+            vals.append(float(data['amount'])); sets.append('amount=?')
+        except (ValueError, TypeError):
+            return jsonify({'error': 'invalid amount'}), 400
+    for col in ('category', 'note', 'date', 'author'):
+        if col in data:
+            sets.append(f'{col}=?')
+            vals.append((data[col] or '').strip() or None)
+    if 'meta' in data:
+        sets.append('meta=?')
+        vals.append(_clean_ledger_meta(data['meta']))
+    if not sets:
+        return jsonify({'error': 'nothing to update'}), 400
+    vals.append(lid)
+    conn = get_db()
+    conn.execute(f"UPDATE ledger SET {','.join(sets)} WHERE id=?", vals)
     conn.commit(); conn.close()
     return jsonify({'ok': True})
 

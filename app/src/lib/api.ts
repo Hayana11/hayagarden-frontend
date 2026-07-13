@@ -9,14 +9,21 @@
 import { http } from './http';
 import { monthKey } from './format';
 import * as mock from './mock';
+import { entryToPayload, rowToEntry } from './ledger';
 import type {
   BookCurrent,
   Heatmap,
   LedgerBudget,
+  LedgerEntry,
+  LedgerTrendPoint,
+  LedgerWho,
   MemoryCalendar,
   MemoryDayEntry,
   MemoryLibrary,
   MemorySummary,
+  PeriodDayRecord,
+  PeriodDays,
+  PeriodSettings,
   PeriodStats,
   Todo,
   UsageSummary,
@@ -155,6 +162,129 @@ export function fetchLedgerBudget(now: Date): Promise<LedgerBudget> {
       categories,
     };
   }, mock.mockLedgerBudget);
+}
+
+export interface LedgerEntryDraft {
+  date: string;
+  amount: number;
+  catId: string;
+  title: string;
+  who: LedgerWho;
+  reason: string;
+  note?: string;
+  mem?: string;
+  read?: string;
+  later?: string;
+}
+
+// GET /api/ledger?month=YYYY-MM -> rows with the JSON meta column, mapped to LedgerEntry
+export function fetchLedgerEntries(month: string): Promise<LedgerEntry[]> {
+  return withFallback(
+    () =>
+      http
+        .get<{ records: Array<Parameters<typeof rowToEntry>[0]> }>('/api/ledger', { month })
+        .then((r) => (r.records || []).map(rowToEntry)),
+    () => mock.mockLedgerEntries().filter((e) => e.date.startsWith(month)),
+  );
+}
+
+// POST /api/ledger -> { ok, id }
+export function addLedgerEntry(draft: LedgerEntryDraft): Promise<number | null> {
+  return http
+    .post<{ ok: boolean; id?: number }>('/api/ledger', entryToPayload(draft))
+    .then((r) => (r.ok ? (r.id ?? null) : null))
+    .catch(() => null);
+}
+
+// PATCH /api/ledger/:id
+export function updateLedgerEntry(id: number, draft: LedgerEntryDraft): Promise<boolean> {
+  return http
+    .patch<{ ok: boolean }>(`/api/ledger/${id}`, entryToPayload(draft))
+    .then((r) => Boolean(r.ok))
+    .catch(() => false);
+}
+
+// DELETE /api/ledger/:id
+export function deleteLedgerEntry(id: number): Promise<boolean> {
+  return http
+    .del<{ ok: boolean }>(`/api/ledger/${id}`)
+    .then((r) => Boolean(r.ok))
+    .catch(() => false);
+}
+
+// GET /api/ledger/trend -> last six months' expenses
+export function fetchLedgerTrend(now: Date): Promise<LedgerTrendPoint[]> {
+  return withFallback(
+    () => http.get<Array<{ month: string; expense: number }>>('/api/ledger/trend'),
+    () => mock.mockLedgerTrend(now),
+  );
+}
+
+// GET /api/ledger/budget?month= -> { amount } (null when unset)
+export function fetchLedgerBudgetAmount(month: string): Promise<number | null> {
+  return withFallback(
+    () => http.get<{ amount: number | null }>('/api/ledger/budget', { month }).then((r) => r.amount),
+    () => 3000,
+  );
+}
+
+// POST /api/ledger/budget
+export function setLedgerBudgetAmount(month: string, amount: number): Promise<boolean> {
+  return http
+    .post<{ ok: boolean }>('/api/ledger/budget', { month, amount })
+    .then((r) => Boolean(r.ok))
+    .catch(() => false);
+}
+
+// GET /api/period/days?month=YYYY-MM -> { days: { 'YYYY-MM-DD': PeriodDayRecord } }
+// Fetched without a month filter so predictions/averages can look across months.
+export function fetchPeriodDays(): Promise<PeriodDays> {
+  return withFallback(
+    () => http.get<{ days: PeriodDays }>('/api/period/days').then((r) => r.days || {}),
+    mock.mockPeriodDays,
+  );
+}
+
+// PUT /api/period/day  body: { date, record } — upsert one day's record.
+// Backend mirrors came/sex into the legacy period_records table.
+export function savePeriodDay(date: string, record: PeriodDayRecord): Promise<boolean> {
+  return http
+    .put<{ ok: boolean }>('/api/period/day', { date, record })
+    .then((r) => Boolean(r.ok))
+    .catch(() => false);
+}
+
+// GET /api/period/settings -> { cycle_length, period_length, last_start }
+export function fetchPeriodSettings(): Promise<PeriodSettings> {
+  return withFallback(
+    async () => {
+      const [settings, stats] = await Promise.all([
+        http.get<{ cycle_length: number | null; period_length: number | null; last_start: string | null }>('/api/period/settings'),
+        http
+          .get<{ last_period: string | null; cycle_length: number | null }>('/api/period/stats')
+          .catch(() => ({ last_period: null, cycle_length: null })),
+      ]);
+      const fallback = mock.mockPeriodSettings();
+      return {
+        cycleLength: settings.cycle_length ?? stats.cycle_length ?? fallback.cycleLength,
+        periodLength: settings.period_length ?? fallback.periodLength,
+        lastStart: settings.last_start ?? stats.last_period ?? fallback.lastStart,
+      };
+    },
+    mock.mockPeriodSettings,
+  );
+}
+
+// PUT /api/period/settings  body: { cycle_length?, period_length?, last_start? }
+export function savePeriodSettings(s: PeriodSettings): Promise<boolean> {
+  return http
+    .put<{ cycle_length: number | null }>('/api/period/settings', {
+      cycle_length: s.cycleLength,
+      period_length: s.periodLength,
+      last_start: s.lastStart,
+    })
+    .then(() => true)
+    .catch(() => false);
 }
 
 // GET /api/period/stats -> PeriodStats
