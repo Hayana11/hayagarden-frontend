@@ -5,6 +5,31 @@ const BASE_URL = import.meta.env.VITE_API_BASE_URL ?? '';
 
 type Params = Record<string, string | number | undefined>;
 
+export class HttpError extends Error {
+  readonly status: number;
+  readonly detail: string;
+
+  constructor(status: number, detail: string, message: string) {
+    super(message);
+    this.name = 'HttpError';
+    this.status = status;
+    this.detail = detail;
+  }
+}
+
+function describeErrorPayload(payload: unknown): string {
+  if (!payload || typeof payload !== 'object') return '';
+  const record = payload as Record<string, unknown>;
+  const values = [record.error, record.detail]
+    .map((value) => {
+      if (typeof value === 'string') return value.trim();
+      if (value === undefined || value === null) return '';
+      try { return JSON.stringify(value); } catch { return String(value); }
+    })
+    .filter(Boolean);
+  return [...new Set(values)].join(' · ');
+}
+
 function buildUrl(path: string, params?: Params): string {
   if (!params) return `${BASE_URL}${path}`;
   const qs = Object.entries(params)
@@ -19,7 +44,12 @@ async function request<T>(path: string, init?: RequestInit, params?: Params): Pr
     headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
     ...init,
   });
-  if (!res.ok) throw new Error(`${init?.method ?? 'GET'} ${path} failed: ${res.status}`);
+  if (!res.ok) {
+    let detail = '';
+    try { detail = describeErrorPayload(await res.json()); } catch { /* non-JSON error body */ }
+    const summary = `${init?.method ?? 'GET'} ${path} failed: ${res.status}`;
+    throw new HttpError(res.status, detail, detail ? `${summary} · ${detail}` : summary);
+  }
   if (res.status === 204) return undefined as T;
   return (await res.json()) as T;
 }

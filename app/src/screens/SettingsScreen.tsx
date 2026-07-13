@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { HttpError } from '../lib/http';
 import {
   activateRelayEndpoint,
   createRelayEndpoint,
@@ -45,12 +46,18 @@ function shortDate(value: string): string {
   return `${Number(value.slice(5, 7))}-${Number(value.slice(8, 10))}`;
 }
 
+async function getKeyStatusWithHostRtt(): Promise<{ status: KeyStatus; hostRttMs: number }> {
+  const started = performance.now();
+  const status = await getKeyStatus();
+  return { status, hostRttMs: Math.round(performance.now() - started) };
+}
+
 export function SettingsScreen() {
   const navigate = useNavigate();
   const [provider, setProvider] = useState<'api_relay' | 'claude_code'>('api_relay');
   const [ccTokenSet, setCcTokenSet] = useState(false);
   const [keyStatus, setKeyStatus] = useState<KeyStatus | null>(null);
-  const [latency, setLatency] = useState<number | null>(null);
+  const [hostRtt, setHostRtt] = useState<number | null>(null);
   const [relays, setRelays] = useState<RelayEndpoint[]>([]);
   const [catalog, setCatalog] = useState<ConfigModel[]>([]);
   const [availableModels, setAvailableModels] = useState<string[]>([]);
@@ -82,10 +89,9 @@ export function SettingsScreen() {
   const loadAll = useCallback(async () => {
     setBusy('load');
     setWarning('');
-    const pingStart = performance.now();
     const results = await Promise.allSettled([
       getProviderConfig(),
-      getKeyStatus(),
+      getKeyStatusWithHostRtt(),
       getRelayEndpoints(),
       getModelCatalog(),
       getAvailableModels(),
@@ -98,8 +104,8 @@ export function SettingsScreen() {
       setCcTokenSet(providerResult.value.ccTokenSet);
     }
     if (keyResult.status === 'fulfilled') {
-      setKeyStatus(keyResult.value);
-      setLatency(Math.round(performance.now() - pingStart));
+      setKeyStatus(keyResult.value.status);
+      setHostRtt(keyResult.value.hostRttMs);
     }
     if (relayResult.status === 'fulfilled') setRelays(relayResult.value);
     if (catalogResult.status === 'fulfilled') {
@@ -136,6 +142,14 @@ export function SettingsScreen() {
     return [...byId.values()].filter((model) => !query || model.id.toLowerCase().includes(query) || model.label.toLowerCase().includes(query));
   }, [availableModels, catalog, modelFilter]);
 
+  const activeRelayModels = useMemo(() => {
+    const catalogById = new Map(catalog.map((model) => [model.id, model]));
+    const query = relayFilter.trim().toLowerCase();
+    return availableModels
+      .map((id) => catalogById.get(id) || { id, label: id, description: '', thinking: 'unknown', primary: false, dot: '#7A9B6D' })
+      .filter((model) => !query || model.id.toLowerCase().includes(query) || model.label.toLowerCase().includes(query));
+  }, [availableModels, catalog, relayFilter]);
+
   const switchToClaude = async () => {
     if (!ccTokenSet) { showToast('Claude Code token 尚未在 VPS 配置'); return; }
     setBusy('provider');
@@ -154,9 +168,9 @@ export function SettingsScreen() {
       setProvider('api_relay');
       setRelays(await getRelayEndpoints());
       if (result.model) setCurrentModel(result.model);
-      const started = performance.now();
-      setKeyStatus(await getKeyStatus());
-      setLatency(Math.round(performance.now() - started));
+      const keyCheck = await getKeyStatusWithHostRtt();
+      setKeyStatus(keyCheck.status);
+      setHostRtt(keyCheck.hostRttMs);
       setAvailableModels(await getAvailableModels().catch(() => []));
       showToast(`已切换：${relay.name}`);
     } catch { showToast('中转站切换失败'); } finally { setBusy(''); }
@@ -228,7 +242,12 @@ export function SettingsScreen() {
         text: result.content || result.error || '（空响应）',
         error: Boolean(result.error && !result.content),
       });
-    } catch { setTestResult({ meta: '连接失败', thinking: '', text: '模型测试请求失败，请检查当前调用配置。', error: true }); } finally { setBusy(''); }
+    } catch (error) {
+      const detail = error instanceof HttpError && error.detail
+        ? error.detail
+        : '模型测试请求失败，请检查当前调用配置。';
+      setTestResult({ meta: '连接失败', thinking: '', text: detail, error: true });
+    } finally { setBusy(''); }
   };
 
   return (
@@ -247,9 +266,9 @@ export function SettingsScreen() {
           <dl>
             <div><dt>端点</dt><dd>{currentEndpointName}</dd></div>
             <div><dt>模型</dt><dd>{currentModel || '—'}</dd></div>
-            <div><dt>响应延迟</dt><dd className="latency">{latency === null ? '—' : `${latency} ms`}</dd></div>
+            <div><dt>主站往返</dt><dd className="latency">{hostRtt === null ? '—' : `${hostRtt} ms`}</dd></div>
           </dl>
-          <p>聊天与下方「模型测试」均走此配置 · 在端点或模型池点「切换」</p>
+          <p>主站往返仅测网页到 VPS，不代表中转站延迟 · 聊天与下方「模型测试」均走此配置</p>
         </section>
 
         <SectionLabel>USAGE · 用量统计</SectionLabel>
@@ -282,7 +301,7 @@ export function SettingsScreen() {
           </button>
           <div className="config-endpoint-row"><CapabilityChips caps={{ thinking: true, cache: true, tools: false }} />{provider === 'claude_code' ? <span className="config-current-badge">使用中</span> : <button type="button" onClick={() => void switchToClaude()} disabled={Boolean(busy)}>切换</button>}</div>
           <div className="config-quota"><div><span>5 小时窗 <b>已用 {usage?.win5Pct ?? 0}%</b></span><i><em style={{ width: `${usage?.win5Pct ?? 0}%` }} /></i></div><div><span>周额度 <b>已用 {usage?.win7Pct ?? 0}%</b></span><i><em className="rose" style={{ width: `${usage?.win7Pct ?? 0}%` }} /></i></div></div>
-          <div className="config-effort"><span>Effort</span><div><button type="button">LOW</button><button type="button" className="active">MED</button><button type="button">HIGH</button></div></div>
+          <div className="config-effort"><span>Effort</span><div><button type="button" disabled>LOW</button><button type="button" disabled>MED</button><button type="button" disabled>HIGH</button></div><small>后端尚未接入</small></div>
           {officialExpanded && <div className="config-endpoint-expanded"><div className="config-expanded-title"><strong>订阅配置</strong><span>凭据仅在 VPS 终端管理</span></div><div className="config-model-chips">{catalog.slice(0, 6).map((model) => <span key={model.id}>{model.label}</span>)}</div><div className="config-key-row"><span>OAUTH TOKEN</span><b>{ccTokenSet ? '已配置 · 不回传网页' : '未设置'}</b></div></div>}
         </section>
 
@@ -294,23 +313,23 @@ export function SettingsScreen() {
 
         {relays.map((relay, index) => {
           const expanded = expandedRelay === relay.id;
-          const relayModels = relay.active ? unifiedModels.filter((model) => !relayFilter.trim() || model.id.toLowerCase().includes(relayFilter.toLowerCase())) : [];
+          const relayModels = relay.active ? activeRelayModels : [];
           const isCurrent = provider === 'api_relay' && relay.active;
           return <section className={`config-card config-endpoint${isCurrent ? ' current' : ''}`} key={relay.id}>
             <button className="config-endpoint-summary" type="button" onClick={() => { setExpandedRelay(expanded ? null : relay.id); setConfirmDelete(null); setRelayFilter(''); }}>
               <i className={relay.active ? 'online' : 'saved'} />
               <span><strong>{relay.name} {index < 5 && <small className="config-role">{index === 0 ? '主' : `备${index}`}</small>}</strong><small>{relay.url}</small></span>
-              <em>{relay.active ? `${latency ?? '—'} ms` : '已保存'}<small>{relay.defaultModel || '未指定默认模型'}</small></em>
+              <em>{relay.active ? '已激活' : '已保存'}<small>{relay.defaultModel || '未指定默认模型'}</small></em>
               <b className={expanded ? 'open' : ''}>▾</b>
             </button>
             <div className="config-endpoint-row"><CapabilityChips caps={relay.capabilities} />{isCurrent ? <span className="config-current-badge">使用中</span> : <button type="button" onClick={() => void switchRelay(relay)} disabled={Boolean(busy)}>切换</button>}</div>
             {expanded && <div className="config-endpoint-expanded">
-              <div className="config-expanded-title"><strong>模型 · {relay.active ? relayModels.length : '切换后拉取'}</strong><span>{relay.active ? '当前端点实时列表' : '未激活端点不主动请求'}</span></div>
+              <div className="config-expanded-title"><strong>模型 · {relay.active ? relayModels.length : '切换后拉取'}</strong><span>{relay.active ? '当前端点返回列表' : '未激活端点不主动请求'}</span></div>
               {relay.active && <input value={relayFilter} onChange={(event) => setRelayFilter(event.target.value)} placeholder="筛选模型…" />}
               <div className="config-model-chips">{relay.active ? relayModels.slice(0, 24).map((model) => <span key={model.id}>{model.label}</span>) : <span>切换到此端点后可拉取模型</span>}</div>
               <div className="config-key-row"><span>API KEY</span><b>{relay.active ? keyStatus?.maskedKey || '—' : '已保存 · 不回传网页'}</b></div>
-              <div className="config-endpoint-actions"><button type="button" onClick={() => relay.active ? void loadAll() : showToast('请先切换到该端点再测速')}>测速</button><button type="button" onClick={() => relay.active ? void refreshModels() : showToast('请先切换到该端点再拉取模型')}>拉取模型</button><button type="button" className="danger" onClick={() => void deleteRelay(relay)}>{confirmDelete === relay.id ? '确认删除？' : '删除'}</button></div>
-              <div className="config-priority"><span>启用</span><button type="button" className="on" onClick={() => showToast('端点启停后端尚未接入')}><i /></button><em>优先级待 failover 接入</em><button type="button" disabled>↑</button><button type="button" disabled>↓</button></div>
+              <div className="config-endpoint-actions"><button type="button" onClick={() => relay.active ? void loadAll() : showToast('请先切换到该端点再刷新状态')}>刷新状态</button><button type="button" onClick={() => relay.active ? void refreshModels() : showToast('请先切换到该端点再拉取模型')}>拉取模型</button><button type="button" className="danger" onClick={() => void deleteRelay(relay)}>{confirmDelete === relay.id ? '确认删除？' : '删除'}</button></div>
+              <div className="config-priority"><span>启用</span><button type="button" className="locked-switch" aria-disabled="true" onClick={() => showToast('端点启停后端尚未接入')}><i /></button><em>启停与优先级后端尚未接入</em><button type="button" disabled>↑</button><button type="button" disabled>↓</button></div>
             </div>}
           </section>;
         })}

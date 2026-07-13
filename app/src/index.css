@@ -202,6 +202,8 @@ button {
 .config-effort > div { flex: 1; display: flex; gap: 2px; padding: 3px; border-radius: 999px; background: #F6EFEC; }
 .config-effort button { flex: 1; padding: 6px 0; border-radius: 999px; color: #8C7B76; font: 11px var(--font-mono); letter-spacing: 1.5px; }
 .config-effort button.active { background: #fff; color: #9C3B4A; box-shadow: 0 3px 8px rgba(183,110,121,.15); }
+.config-effort button:disabled { color: #C4B4AF; cursor: not-allowed; opacity: .72; }
+.config-effort > small { color: #C4B4AF; font-size: 10px; white-space: nowrap; }
 .config-endpoint-expanded { margin-top: 15px; padding-top: 14px; border-top: 1px solid #F0E6E2; }
 .config-expanded-title { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; }
 .config-expanded-title strong { font-size: 13px; letter-spacing: 1px; }
@@ -220,6 +222,8 @@ button {
 .config-priority > button.on i { position: absolute; top: 2px; left: 21px; width: 19px; height: 19px; border-radius: 50%; background: #fff; box-shadow: 0 1px 4px rgba(0,0,0,.2); }
 .config-priority em { margin-left: auto; color: #C4B4AF; font-size: 10px; font-style: normal; }
 .config-priority > button:not(.on) { width: 28px; height: 28px; border-radius: 10px; background: #F6EFEC; color: #DCC9C2; }
+.config-priority > button.locked-switch { width: 42px; height: 23px; padding: 0; border-radius: 999px; background: #E4D8D3; position: relative; flex-shrink: 0; cursor: pointer; }
+.config-priority > button.locked-switch i { position: absolute; top: 2px; left: 2px; width: 19px; height: 19px; border-radius: 50%; background: #fff; box-shadow: 0 1px 4px rgba(0,0,0,.16); }
 .config-failover { display: flex; align-items: center; gap: 14px; padding: 16px 20px; }
 .config-failover > div { flex: 1; display: flex; flex-direction: column; gap: 3px; }
 .config-failover strong { font-size: 14.5px; letter-spacing: 1px; }
