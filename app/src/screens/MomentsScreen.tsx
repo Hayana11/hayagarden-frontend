@@ -2,14 +2,14 @@
 // data (念头/日摘要/梦境 from posts, mood from emotion_state, per-memory V/A
 // points from ombre-brain frontmatter, gallery photos, tool drawers).
 //
-// Features with no backend yet (cover upload, like/dislike/comment+repost,
+// Features with no backend yet (like/dislike/comment+repost,
 // mood history chart, manual mood correction, per-tool toggles) stay
 // visible as locked placeholders — matching the系统配置 page's pattern of
 // showing the real control disabled with an honest "后端尚未接入" note and
 // a toast on click, rather than either faking success or hiding the UI.
-import { useCallback, useEffect, useMemo, useState, type CSSProperties } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type CSSProperties } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { fetchMomentsData, galleryPhotoUrl, moodWordTone, type EmotionMemoryPoint, type FeedEntry, type GalleryPhoto, type MomentsData } from '../lib/moments';
+import { fetchMomentsCover, fetchMomentsData, galleryPhotoUrl, moodWordTone, uploadMomentsCover, type EmotionMemoryPoint, type FeedEntry, type GalleryPhoto, type MomentsData } from '../lib/moments';
 
 const SETTINGS_KEY = 'fyodor-chat-settings';
 const SERIF = "'Noto Serif SC', serif";
@@ -121,6 +121,9 @@ export function MomentsScreen() {
   const [moodRange, setMoodRange] = useState<'7' | '30'>('7');
   const [drawerOpen, setDrawerOpen] = useState<Record<string, boolean>>({});
   const [toast, setToast] = useState('');
+  const [coverUrl, setCoverUrl] = useState<string | null>(null);
+  const [coverUploading, setCoverUploading] = useState(false);
+  const coverInputRef = useRef<HTMLInputElement>(null);
 
   const effTheme = theme === 'auto' ? (sysDark ? 'dark' : 'light') : theme;
   const vars = effTheme === 'dark' ? DARK_VARS : LIGHT_VARS;
@@ -135,6 +138,31 @@ export function MomentsScreen() {
     const onMq = () => setSysDark(mq.matches);
     mq.addEventListener?.('change', onMq);
     return () => mq.removeEventListener?.('change', onMq);
+  }, []);
+
+  useEffect(() => {
+    void fetchMomentsCover().then(setCoverUrl);
+  }, []);
+
+  const pickCover = useCallback(() => {
+    if (!coverUploading) coverInputRef.current?.click();
+  }, [coverUploading]);
+
+  const onCoverFile = useCallback(async (e: ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+    setCoverUploading(true);
+    const url = await uploadMomentsCover(file);
+    setCoverUploading(false);
+    if (url) {
+      setCoverUrl(`${url}?t=${Date.now()}`);
+      setToast('封面已更新');
+      window.setTimeout(() => setToast((t) => (t === '封面已更新' ? '' : t)), 2200);
+    } else {
+      setToast('封面上传失败');
+      window.setTimeout(() => setToast((t) => (t === '封面上传失败' ? '' : t)), 2200);
+    }
   }, []);
 
   const toggleTheme = () => {
@@ -182,9 +210,13 @@ export function MomentsScreen() {
   return (
     <div className="hide-scrollbar" style={{ ...(vars as CSSProperties), width: '100%', maxWidth: 480, margin: '0 auto', height: '100dvh', overflowY: 'auto', background: 'var(--bg)', color: 'var(--ink)', fontFamily: SERIF, transition: 'background .3s,color .3s' }}>
       <div style={{ width: '100%', minHeight: '100%', background: 'var(--bg)' }}>
-        {/* ── cover (换封面锁定) ── */}
-        <div onClick={showLocked} style={{ position: 'relative', height: 200, cursor: 'pointer' }} title={LOCKED}>
-          <div style={{ position: 'absolute', inset: 0, background: 'linear-gradient(150deg,#3E2E30,#211A18 55%,#4A3226)' }} />
+        {/* ── cover ── */}
+        <input ref={coverInputRef} type="file" accept="image/*" style={{ display: 'none' }} onChange={(e) => void onCoverFile(e)} />
+        <div onClick={pickCover} style={{ position: 'relative', height: 200, cursor: coverUploading ? 'wait' : 'pointer' }} title="点击更换封面">
+          {coverUrl && (
+            <img src={coverUrl} alt="" style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'cover' }} />
+          )}
+          <div style={{ position: 'absolute', inset: 0, background: coverUrl ? 'linear-gradient(150deg,rgba(30,18,16,0.12),rgba(30,18,16,0.55))' : 'linear-gradient(150deg,#3E2E30,#211A18 55%,#4A3226)' }} />
           <div style={{ position: 'absolute', left: 0, right: 0, bottom: 0, height: 70, background: 'linear-gradient(transparent,rgba(30,18,16,0.38))' }} />
           <div onClick={(e) => { e.stopPropagation(); navigate('/chat'); }} style={{ ...iconBtn, position: 'absolute', top: 12, left: 12, zIndex: 2 }}>
             <svg viewBox="0 0 24 24" width={17} height={17} fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round"><path d="M15 18l-6-6 6-6" /></svg>
@@ -198,7 +230,7 @@ export function MomentsScreen() {
           </div>
           <div style={{ position: 'absolute', bottom: 10, right: 14, zIndex: 2, display: 'flex', alignItems: 'center', gap: 5, color: 'rgba(247,237,234,0.55)', fontSize: 10.5, letterSpacing: 1 }}>
             <svg viewBox="0 0 24 24" width={12} height={12} fill="none" stroke="currentColor" strokeWidth={1.7} strokeLinecap="round" strokeLinejoin="round"><rect x={3} y={3} width={18} height={18} rx={3} /><circle cx={9} cy={9} r={2} /><path d="M21 15l-5-5-9 9" /></svg>
-            换封面
+            {coverUploading ? '上传中…' : '换封面'}
           </div>
         </div>
 
