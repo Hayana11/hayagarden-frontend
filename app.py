@@ -1636,17 +1636,33 @@ def get_period_days():
             "SELECT date,data FROM period_days WHERE date LIKE ? ORDER BY date",
             (month + '%',)
         ).fetchall()
+        legacy = conn.execute(
+            "SELECT date,type FROM period_records WHERE date LIKE ?", (month + '%',)
+        ).fetchall()
     else:
         rows = conn.execute(
             "SELECT date,data FROM period_days ORDER BY date DESC LIMIT 400"
         ).fetchall()
+        legacy = conn.execute(
+            "SELECT date,type FROM period_records ORDER BY date DESC LIMIT 400"
+        ).fetchall()
     conn.close()
+    # 旧表记录先铺底（'period'/'start' 视为经期日，'sex' 为亲密），
+    # 这样新页面能看到历史数据；period_days 里的记录覆盖同一天。
     days = {}
+    for r in legacy:
+        d = days.setdefault(r['date'], {})
+        if r['type'] in ('period', 'start'):
+            d['came'] = True
+        elif r['type'] == 'sex':
+            d['sex'] = True
     for r in rows:
         try:
-            days[r['date']] = json.loads(r['data'])
+            rec = json.loads(r['data'])
         except (ValueError, TypeError):
             continue
+        if isinstance(rec, dict):
+            days[r['date']] = rec
     return jsonify({'days': days})
 
 
