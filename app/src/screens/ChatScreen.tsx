@@ -1041,6 +1041,13 @@ export function ChatScreen() {
               <div style={{ background: 'var(--card2)', borderRadius: 14, padding: '11px 13px', fontSize: 12.5, color: 'var(--mut)', lineHeight: 1.8 }}>
                 梦境、念头、情绪会住在这里——等 Moments 页做好之后。
               </div>
+              <a href="/dash/settings" style={{ textDecoration: 'none', display: 'flex', alignItems: 'center', gap: 12, padding: '13px 14px', borderRadius: 16, background: 'var(--card2)' }}>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 }}>
+                  <span style={{ fontSize: 14.5, color: 'var(--ink)', letterSpacing: 1 }}>系统配置</span>
+                  <span style={{ fontSize: 11.5, color: 'var(--faint)' }}>用量统计 · API 端点管理 · Profile</span>
+                </div>
+                <span style={{ marginLeft: 'auto', color: 'var(--ghost)', fontSize: 16 }}>›</span>
+              </a>
               <a href="/chat" style={{ textDecoration: 'none', display: 'flex', alignItems: 'center', gap: 10, padding: '13px 14px', borderRadius: 16, background: 'var(--card2)' }}>
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 }}>
                   <span style={{ fontSize: 14.5, color: 'var(--ink)', letterSpacing: 1 }}>回旧聊天页</span>
