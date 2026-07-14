@@ -251,7 +251,7 @@ export function SettingsScreen() {
   };
 
   return (
-    <div className="config-root">
+    <div className="config-root dash-fullscreen-page">
       <main className="config-screen">
         <header className="config-header">
           <button type="button" onClick={() => navigate('/chat')}>‹</button>
