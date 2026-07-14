@@ -179,7 +179,7 @@ export function GroupChatScreen() {
   return (
     <main className="gc-page">
       <header className="gc-header">
-        <button type="button" className="gc-icon-button" onClick={() => navigate('/chat')} aria-label="返回聊天">‹</button>
+        <button type="button" className="gc-icon-button" onClick={() => navigate('/contacts')} aria-label="返回通讯录">‹</button>
         <div className="gc-title">
           <strong>同一个人，两种颜色</strong>
           <span><StatusDot agent="claude" status={status.agents.claude} /><StatusDot agent="codex" status={status.agents.codex} /></span>
