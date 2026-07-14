@@ -23,9 +23,7 @@ fail() {
 command -v git >/dev/null || fail "git is missing"
 command -v flock >/dev/null || fail "flock is missing"
 command -v curl >/dev/null || fail "curl is missing"
-command -v npm >/dev/null || fail "npm is missing"
 [[ -x "$PYTHON" ]] || fail "python runtime not found: $PYTHON"
-[[ -d "$ROOT/app/node_modules" ]] || fail "frontend dependencies are missing: $ROOT/app/node_modules"
 "$PYTHON" -c 'from cryptography.fernet import Fernet' \
   || fail "python cryptography package is missing"
 
@@ -60,6 +58,16 @@ if ! git merge-base --is-ancestor "$current_sha" "$target_sha"; then
   echo "Using audited one-time recovery acknowledgement for $current_sha"
 fi
 
+# Backend-only releases keep the already-verified dashboard. Any app/ change (including the
+# lockfile) gets a clean install and build from the target worktree.
+build_dashboard=1
+if [[ -f "$ROOT/app/dist/index.html" ]] && git diff --quiet "$current_sha" "$target_sha" -- app; then
+  build_dashboard=0
+fi
+if [[ "$build_dashboard" -eq 1 ]]; then
+  command -v npm >/dev/null || fail "npm is required because app/ changed"
+fi
+
 if [[ ! -f "$VAULT_KEY_FILE" ]]; then
   mkdir -p "$(dirname "$VAULT_KEY_FILE")"
   chmod 700 "$(dirname "$VAULT_KEY_FILE")"
@@ -76,18 +84,20 @@ cleanup() {
 trap cleanup EXIT
 
 git worktree add --detach "$staging" "$target_sha"
-ln -s "$ROOT/app/node_modules" "$staging/app/node_modules"
 (
   cd "$staging"
-  "$PYTHON" -m py_compile app.py gateway.py chat/context_continuity.py relay/credential_vault.py relay/channel_intelligence.py
+  "$PYTHON" -m py_compile app.py gateway.py chat/context_continuity.py account_balance_routes.py relay/credential_vault.py relay/channel_intelligence.py
   "$PYTHON" -m unittest discover -s tests -p 'test_context_continuity.py'
-  "$PYTHON" -m unittest tests.test_channel_intelligence tests.test_credential_vault
+  "$PYTHON" -m unittest tests.test_channel_intelligence tests.test_credential_vault tests.test_account_balance_routes
   bash -n scripts/deploy-frontend.sh
 )
-(
-  cd "$staging/app"
-  npm run build
-)
+if [[ "$build_dashboard" -eq 1 ]]; then
+  (
+    cd "$staging/app"
+    npm ci --include=dev --no-audit --no-fund --prefer-offline
+    npm run build
+  )
+fi
 
 runtime_backup="/opt/backups/frontend/predeploy-runtime-$(date +%Y%m%d-%H%M%S)"
 snapshot_runtime() {
@@ -102,6 +112,7 @@ snapshot_runtime() {
   shopt -u nullglob
 }
 install_dashboard() {
+  [[ "$build_dashboard" -eq 1 ]] || return 0
   rm -rf "$ROOT/app/dist.deploy-new"
   cp -a "$staging/app/dist" "$ROOT/app/dist.deploy-new"
   rm -rf "$ROOT/app/dist"
