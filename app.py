@@ -2053,9 +2053,24 @@ def _init_relay_presets_table():
     conn.commit()
     conn.close()
 
+
+def _init_relay_account_credentials_table():
+    _init_relay_presets_table()
+    conn = get_db()
+    conn.execute('''CREATE TABLE IF NOT EXISTS relay_account_credentials (
+        preset_id INTEGER PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        credential_kind TEXT NOT NULL,
+        secret_ciphertext TEXT NOT NULL,
+        created_at DATETIME DEFAULT (datetime('now','+8 hours')),
+        updated_at DATETIME DEFAULT (datetime('now','+8 hours'))
+    )''')
+    conn.commit()
+    conn.close()
+
 @app.route('/api/config/relay-presets', methods=['GET'])
 def get_relay_presets():
-    _init_relay_presets_table()
+    _init_relay_account_credentials_table()
     # 判断"使用中"：ACTIVE_RELAY（runtime_config，存 preset id）优先；
     # 还没设置过 ACTIVE_RELAY 时（迁移期）回退按 .env 的 API_URL 匹配。
     active_relay_id = config_store.get('ACTIVE_RELAY', '')
@@ -2068,7 +2083,14 @@ def get_relay_presets():
         except Exception:
             pass
     conn = get_db()
-    rows = conn.execute('SELECT id,name,url,key,default_model,capabilities,status_url,created_at FROM relay_presets ORDER BY created_at').fetchall()
+    rows = conn.execute('''
+        SELECT r.id,r.name,r.url,r.key,r.default_model,r.capabilities,r.status_url,r.created_at,
+               CASE WHEN c.preset_id IS NULL THEN 0 ELSE 1 END AS account_balance_configured,
+               COALESCE(c.credential_kind, '') AS account_credential_kind
+        FROM relay_presets r
+        LEFT JOIN relay_account_credentials c ON c.preset_id=r.id
+        ORDER BY r.created_at
+    ''').fetchall()
     conn.close()
     from relay.capabilities import get_caps as _get_caps
     presets = []
@@ -2092,6 +2114,8 @@ def get_relay_presets():
             'default_model': r['default_model'] or '',
             'capabilities': caps,
             'status_url': r['status_url'] or '',
+            'account_balance_configured': bool(r['account_balance_configured']),
+            'account_credential_kind': r['account_credential_kind'] or '',
         })
     return jsonify({'ok': True, 'presets': presets, 'active_url': active_url})
 
@@ -2160,7 +2184,7 @@ def inspect_relay_preset(preset_id):
 
 @app.route('/api/config/relay-presets/<int:preset_id>/balance', methods=['GET'])
 def get_relay_preset_balance(preset_id):
-    """Query the saved API key's NewAPI quota without returning the key."""
+    """Query the saved API key's NewAPI limit without returning the key."""
     _init_relay_presets_table()
     conn = get_db()
     row = conn.execute(
@@ -2185,10 +2209,116 @@ def get_relay_preset_balance(preset_id):
     except Exception as exc:
         return jsonify({'ok': False, 'error': str(exc)}), 500
 
+
+@app.route('/api/config/relay-presets/<int:preset_id>/account-credentials', methods=['PUT'])
+def save_relay_preset_account_credentials(preset_id):
+    """Encrypt and save one relay's revocable console credential without returning it."""
+    if request.content_length and request.content_length > 8192:
+        return jsonify({'ok': False, 'error': '请求内容过大'}), 413
+    _init_relay_account_credentials_table()
+    conn = get_db()
+    relay_exists = conn.execute('SELECT 1 FROM relay_presets WHERE id=?', (preset_id,)).fetchone()
+    conn.close()
+    if not relay_exists:
+        return jsonify({'error': 'not found'}), 404
+
+    data = request.get_json(silent=True) or {}
+    user_id = str(data.get('user_id') or '').strip()
+    credential_kind = str(data.get('credential_kind') or '').strip()
+    credential_secret = str(data.get('credential_secret') or '')
+    from relay.channel_intelligence import ChannelInspectionError, normalize_console_credential
+    from relay.credential_vault import CredentialVaultError, encrypt_secret
+    try:
+        normalized_kind, normalized_secret = normalize_console_credential(
+            credential_kind,
+            credential_secret,
+        )
+        if not re.fullmatch(r'[1-9]\d{0,18}', user_id):
+            raise ChannelInspectionError('New-Api-User 必须是数字用户 ID')
+        ciphertext = encrypt_secret(normalized_secret)
+        conn = get_db()
+        conn.execute('''
+            INSERT INTO relay_account_credentials
+                (preset_id,user_id,credential_kind,secret_ciphertext)
+            VALUES (?,?,?,?)
+            ON CONFLICT(preset_id) DO UPDATE SET
+                user_id=excluded.user_id,
+                credential_kind=excluded.credential_kind,
+                secret_ciphertext=excluded.secret_ciphertext,
+                updated_at=datetime('now','+8 hours')
+        ''', (preset_id, user_id, normalized_kind, ciphertext))
+        conn.commit()
+        conn.close()
+        return jsonify({'ok': True, 'configured': True, 'credential_kind': normalized_kind})
+    except ChannelInspectionError as exc:
+        return jsonify({'ok': False, 'error': str(exc)}), 400
+    except CredentialVaultError as exc:
+        return jsonify({'ok': False, 'error': str(exc)}), 503
+    except Exception:
+        return jsonify({'ok': False, 'error': '控制台凭据保存失败'}), 500
+
+
+@app.route('/api/config/relay-presets/<int:preset_id>/account-credentials', methods=['DELETE'])
+def delete_relay_preset_account_credentials(preset_id):
+    _init_relay_account_credentials_table()
+    conn = get_db()
+    conn.execute('DELETE FROM relay_account_credentials WHERE preset_id=?', (preset_id,))
+    conn.commit()
+    conn.close()
+    return jsonify({'ok': True, 'configured': False})
+
+
+@app.route('/api/config/relay-presets/<int:preset_id>/account-balance', methods=['GET'])
+def get_relay_preset_account_balance(preset_id):
+    """Decrypt one saved console credential in memory and query the relay account balance."""
+    _init_relay_account_credentials_table()
+    conn = get_db()
+    row = conn.execute(
+        '''
+        SELECT r.id,r.name,r.url,c.user_id,c.credential_kind,c.secret_ciphertext
+        FROM relay_presets r
+        LEFT JOIN relay_account_credentials c ON c.preset_id=r.id
+        WHERE r.id=?
+        ''',
+        (preset_id,),
+    ).fetchone()
+    conn.close()
+    if not row:
+        return jsonify({'error': 'not found'}), 404
+    if not row['secret_ciphertext']:
+        return jsonify({'ok': True, 'balance': {
+            'supported': False,
+            'error': 'missing_credentials',
+            'source': '',
+        }})
+
+    from relay.channel_intelligence import ChannelInspectionError, query_channel_account_balance
+    from relay.credential_vault import CredentialVaultError, decrypt_secret
+    try:
+        credential_secret = decrypt_secret(row['secret_ciphertext'])
+        balance = query_channel_account_balance(
+            {
+                'id': row['id'],
+                'name': row['name'],
+                'base_url': row['url'],
+            },
+            credential_kind=row['credential_kind'],
+            credential_secret=credential_secret,
+            user_id=row['user_id'],
+        )
+        return jsonify({'ok': True, 'balance': balance})
+    except ChannelInspectionError as exc:
+        return jsonify({'ok': False, 'error': str(exc)}), 502
+    except CredentialVaultError as exc:
+        return jsonify({'ok': False, 'error': str(exc)}), 503
+    except Exception:
+        return jsonify({'ok': False, 'error': '账户余额查询失败'}), 500
+
 @app.route('/api/config/relay-presets/<int:preset_id>', methods=['DELETE'])
 def delete_relay_preset(preset_id):
-    _init_relay_presets_table()
+    _init_relay_account_credentials_table()
     conn = get_db()
+    conn.execute('DELETE FROM relay_account_credentials WHERE preset_id=?', (preset_id,))
     conn.execute('DELETE FROM relay_presets WHERE id=?', (preset_id,))
     conn.commit()
     conn.close()

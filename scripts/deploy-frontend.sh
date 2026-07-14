@@ -11,6 +11,7 @@ PYTHON="${PYTHON_BIN:-/usr/bin/python3.11}"
 SERVICES=(frontend frontend-gw)
 LOCK_FILE="/var/lock/hayagarden-frontend-deploy.lock"
 STATE_DIR="/var/lib/hayagarden"
+VAULT_KEY_FILE="${HAYAGARDEN_RELAY_VAULT_KEY_FILE:-/etc/hayagarden/relay-credentials.key}"
 
 fail() {
   echo "DEPLOY REFUSED: $*" >&2
@@ -22,7 +23,11 @@ fail() {
 command -v git >/dev/null || fail "git is missing"
 command -v flock >/dev/null || fail "flock is missing"
 command -v curl >/dev/null || fail "curl is missing"
+command -v npm >/dev/null || fail "npm is missing"
 [[ -x "$PYTHON" ]] || fail "python runtime not found: $PYTHON"
+[[ -d "$ROOT/app/node_modules" ]] || fail "frontend dependencies are missing: $ROOT/app/node_modules"
+"$PYTHON" -c 'from cryptography.fernet import Fernet' \
+  || fail "python cryptography package is missing"
 
 exec 9>"$LOCK_FILE"
 flock -n 9 || fail "another deployment is already running"
@@ -55,6 +60,14 @@ if ! git merge-base --is-ancestor "$current_sha" "$target_sha"; then
   echo "Using audited one-time recovery acknowledgement for $current_sha"
 fi
 
+if [[ ! -f "$VAULT_KEY_FILE" ]]; then
+  mkdir -p "$(dirname "$VAULT_KEY_FILE")"
+  chmod 700 "$(dirname "$VAULT_KEY_FILE")"
+  umask 077
+  "$PYTHON" -c 'from cryptography.fernet import Fernet; import pathlib,sys; pathlib.Path(sys.argv[1]).write_bytes(Fernet.generate_key() + b"\n")' "$VAULT_KEY_FILE"
+fi
+chmod 600 "$VAULT_KEY_FILE"
+
 staging="$(mktemp -d /tmp/hayagarden-release.XXXXXX)"
 cleanup() {
   git worktree remove --force "$staging" >/dev/null 2>&1 || true
@@ -63,23 +76,40 @@ cleanup() {
 trap cleanup EXIT
 
 git worktree add --detach "$staging" "$target_sha"
+ln -s "$ROOT/app/node_modules" "$staging/app/node_modules"
 (
   cd "$staging"
-  "$PYTHON" -m py_compile app.py gateway.py chat/context_continuity.py
+  "$PYTHON" -m py_compile app.py gateway.py chat/context_continuity.py relay/credential_vault.py relay/channel_intelligence.py
   "$PYTHON" -m unittest discover -s tests -p 'test_context_continuity.py'
+  "$PYTHON" -m unittest tests.test_channel_intelligence tests.test_credential_vault
   bash -n scripts/deploy-frontend.sh
+)
+(
+  cd "$staging/app"
+  npm run build
 )
 
 runtime_backup="/opt/backups/frontend/predeploy-runtime-$(date +%Y%m%d-%H%M%S)"
 snapshot_runtime() {
-  mkdir -p "$runtime_backup/static"
+  mkdir -p "$runtime_backup/static" "$runtime_backup/app"
   [[ ! -f "$ROOT/attachments.db" ]] || cp -a "$ROOT/attachments.db" "$runtime_backup/"
   [[ ! -d "$ROOT/attachments" ]] || cp -a "$ROOT/attachments" "$runtime_backup/"
   [[ ! -f "$ROOT/client_errors.log" ]] || cp -a "$ROOT/client_errors.log" "$runtime_backup/"
   [[ ! -d "$ROOT/static/uploads" ]] || cp -a "$ROOT/static/uploads" "$runtime_backup/static/"
+  [[ ! -d "$ROOT/app/dist" ]] || cp -a "$ROOT/app/dist" "$runtime_backup/app/"
   shopt -s nullglob
   for path in "$ROOT"/memories.db.bak*; do cp -a "$path" "$runtime_backup/"; done
   shopt -u nullglob
+}
+install_dashboard() {
+  rm -rf "$ROOT/app/dist.deploy-new"
+  cp -a "$staging/app/dist" "$ROOT/app/dist.deploy-new"
+  rm -rf "$ROOT/app/dist"
+  mv "$ROOT/app/dist.deploy-new" "$ROOT/app/dist"
+}
+restore_dashboard() {
+  rm -rf "$ROOT/app/dist" "$ROOT/app/dist.deploy-new"
+  [[ ! -d "$runtime_backup/app/dist" ]] || cp -a "$runtime_backup/app/dist" "$ROOT/app/dist"
 }
 clear_runtime_for_checkout() {
   rm -f "$ROOT/attachments.db" "$ROOT/client_errors.log"
@@ -111,6 +141,7 @@ rollback() {
   clear_runtime_for_checkout
   git checkout --detach -f "$current_sha"
   restore_runtime
+  restore_dashboard
   systemctl restart "${SERVICES[@]}"
 }
 trap rollback ERR
@@ -118,6 +149,7 @@ trap rollback ERR
 clear_runtime_for_checkout
 git checkout --detach -f "$target_sha"
 restore_runtime
+install_dashboard
 systemctl restart "${SERVICES[@]}"
 health_ok=0
 for attempt in 1 2 3 4 5; do

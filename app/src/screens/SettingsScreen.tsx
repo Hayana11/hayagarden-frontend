@@ -4,6 +4,7 @@ import { HttpError } from '../lib/http';
 import { getGroupStatus, type AgentStatus } from '../lib/groupChat';
 import {
   activateRelayEndpoint,
+  clearRelayAccountCredentials,
   createRelayEndpoint,
   getAvailableModels,
   getConfigUsageSummary,
@@ -11,11 +12,13 @@ import {
   getKeyStatus,
   getModelCatalog,
   getProviderConfig,
+  getRelayAccountBalance,
   getRelayBalance,
   getRelayEndpoints,
   getRelayIntelligence,
   removeRelayEndpoint,
   runPlayground,
+  saveRelayAccountCredentials,
   updateCurrentModel,
   updateProvider,
   type ConfigModel,
@@ -24,6 +27,7 @@ import {
   type EndpointCapabilities,
   type KeyStatus,
   type RelayBalance,
+  type RelayAccountBalance,
   type RelayDraft,
   type RelayEndpoint,
   type RelayIntelligence,
@@ -63,6 +67,14 @@ function balanceErrorText(error: RelayBalance['error']): string {
   return '余额接口暂时不可用';
 }
 
+function accountBalanceErrorText(error: RelayAccountBalance['error']): string {
+  if (error === 'missing_credentials') return '还没有配置后台账户凭据';
+  if (error === 'unauthorized') return 'Session Cookie 或用户 ID 已失效';
+  if (error === 'unsupported') return '这个中转站不支持控制台余额接口';
+  if (error === 'invalid_response') return '控制台返回了无法识别的余额格式';
+  return '控制台余额暂时不可用';
+}
+
 async function getKeyStatusWithHostRtt(): Promise<{ status: KeyStatus; hostRttMs: number }> {
   const started = performance.now();
   const status = await getKeyStatus();
@@ -89,6 +101,12 @@ export function SettingsScreen() {
   const [relayFilter, setRelayFilter] = useState('');
   const [relayInsights, setRelayInsights] = useState<Record<number, RelayIntelligence>>({});
   const [relayBalances, setRelayBalances] = useState<Record<number, RelayBalance>>({});
+  const [relayAccountBalances, setRelayAccountBalances] = useState<Record<number, RelayAccountBalance>>({});
+  const [accountAuthRelay, setAccountAuthRelay] = useState<number | null>(null);
+  const [accountUserId, setAccountUserId] = useState('');
+  const [accountCredentialKind, setAccountCredentialKind] = useState<'access_token' | 'session_cookie'>('access_token');
+  const [accountCredentialSecret, setAccountCredentialSecret] = useState('');
+  const [confirmCredentialClear, setConfirmCredentialClear] = useState<number | null>(null);
   const [modelFilter, setModelFilter] = useState('');
   const [busy, setBusy] = useState('');
   const [warning, setWarning] = useState('');
@@ -128,7 +146,22 @@ export function SettingsScreen() {
       setKeyStatus(keyResult.value.status);
       setHostRtt(keyResult.value.hostRttMs);
     }
-    if (relayResult.status === 'fulfilled') setRelays(relayResult.value);
+    if (relayResult.status === 'fulfilled') {
+      setRelays(relayResult.value);
+      const configured = relayResult.value.filter((relay) => relay.accountBalanceConfigured);
+      void Promise.allSettled(configured.map(async (relay) => ({
+        id: relay.id,
+        balance: await getRelayAccountBalance(relay.id),
+      }))).then((balanceResults) => {
+        setRelayAccountBalances((current) => {
+          const next = { ...current };
+          for (const result of balanceResults) {
+            if (result.status === 'fulfilled') next[result.value.id] = result.value.balance;
+          }
+          return next;
+        });
+      });
+    }
     if (catalogResult.status === 'fulfilled') {
       setCatalog(catalogResult.value.models);
       setCurrentModel(catalogResult.value.current);
@@ -235,11 +268,86 @@ export function SettingsScreen() {
     try {
       const balance = await getRelayBalance(relay.id);
       setRelayBalances((items) => ({ ...items, [relay.id]: balance }));
-      showToast(balance.supported ? `已读取 ${relay.name} 的余额` : balanceErrorText(balance.error));
+      showToast(balance.supported ? `已读取 ${relay.name} 的密钥限额` : balanceErrorText(balance.error));
     } catch (error) {
       const detail = error instanceof HttpError && error.detail ? error.detail : '余额查询失败';
       showToast(detail);
     } finally { setBusy(''); }
+  };
+
+  const queryRelayAccountBalance = async (relay: RelayEndpoint) => {
+    if (!relay.accountBalanceConfigured) {
+      setAccountAuthRelay(relay.id);
+      setAccountCredentialKind('access_token');
+      setAccountCredentialSecret('');
+      return;
+    }
+    setBusy(`account-balance:${relay.id}`);
+    try {
+      const balance = await getRelayAccountBalance(relay.id);
+      setRelayAccountBalances((items) => ({ ...items, [relay.id]: balance }));
+      if (balance.supported) {
+        showToast(`已刷新 ${relay.name} 的账户余额`);
+      } else {
+        showToast(accountBalanceErrorText(balance.error));
+      }
+    } catch (error) {
+      const detail = error instanceof HttpError && error.detail ? error.detail : '账户余额查询失败';
+      showToast(detail);
+    } finally { setBusy(''); }
+  };
+
+  const saveAccountCredentials = async (relay: RelayEndpoint) => {
+    const userId = accountUserId.trim();
+    const secret = accountCredentialSecret.trim();
+    if (!/^\d+$/.test(userId) || !secret) {
+      showToast('请填写数字用户 ID 和控制台凭据');
+      return;
+    }
+    setAccountCredentialSecret('');
+    setBusy(`account-credentials:${relay.id}`);
+    let saved = false;
+    try {
+      await saveRelayAccountCredentials(relay.id, userId, accountCredentialKind, secret);
+      saved = true;
+      setRelays((items) => items.map((item) => item.id === relay.id ? {
+        ...item,
+        accountBalanceConfigured: true,
+        accountCredentialKind,
+      } : item));
+      setAccountAuthRelay(null);
+      setConfirmCredentialClear(null);
+      const balance = await getRelayAccountBalance(relay.id);
+      setRelayAccountBalances((items) => ({ ...items, [relay.id]: balance }));
+      showToast(balance.supported ? `${relay.name} 的后台保险箱已配置` : accountBalanceErrorText(balance.error));
+    } catch (error) {
+      const fallback = saved ? '凭据已保存，但余额暂时读取失败' : '后台凭据保存失败';
+      const detail = error instanceof HttpError && error.detail ? error.detail : fallback;
+      showToast(detail);
+    } finally { setBusy(''); }
+  };
+
+  const clearAccountCredentials = async (relay: RelayEndpoint) => {
+    if (confirmCredentialClear !== relay.id) {
+      setConfirmCredentialClear(relay.id);
+      return;
+    }
+    setBusy(`clear-account-credentials:${relay.id}`);
+    try {
+      await clearRelayAccountCredentials(relay.id);
+      setRelays((items) => items.map((item) => item.id === relay.id ? {
+        ...item,
+        accountBalanceConfigured: false,
+        accountCredentialKind: '',
+      } : item));
+      setRelayAccountBalances((items) => {
+        const next = { ...items };
+        delete next[relay.id];
+        return next;
+      });
+      setConfirmCredentialClear(null);
+      showToast(`${relay.name} 的后台凭据已清除`);
+    } catch { showToast('后台凭据清除失败'); } finally { setBusy(''); }
   };
 
   const deleteRelay = async (relay: RelayEndpoint) => {
@@ -378,11 +486,12 @@ export function SettingsScreen() {
           const relayModels = relay.active ? activeRelayModels : [];
           const insight = relayInsights[relay.id];
           const balance = relayBalances[relay.id];
+          const accountBalance = relayAccountBalances[relay.id];
           const query = relayFilter.trim().toLowerCase();
           const inspectedModels = (insight?.modelOptions || []).filter((model) => !query || model.id.toLowerCase().includes(query) || model.name?.toLowerCase().includes(query));
           const isCurrent = provider === 'api_relay' && relay.active;
           return <section className={`config-card config-endpoint${isCurrent ? ' current' : ''}`} key={relay.id}>
-            <button className="config-endpoint-summary" type="button" onClick={() => { setExpandedRelay(expanded ? null : relay.id); setConfirmDelete(null); setRelayFilter(''); }}>
+            <button className="config-endpoint-summary" type="button" onClick={() => { setExpandedRelay(expanded ? null : relay.id); setConfirmDelete(null); setConfirmCredentialClear(null); setRelayFilter(''); setAccountAuthRelay(null); setAccountUserId(''); setAccountCredentialSecret(''); }}>
               <i className={relay.active ? 'online' : 'saved'} />
               <span><strong>{relay.name} {index < 5 && <small className="config-role">{index === 0 ? '主' : `备${index}`}</small>}</strong><small>{relay.url}</small></span>
               <em>{relay.active ? '已激活' : '已保存'}<small>{relay.defaultModel || '未指定默认模型'}</small></em>
@@ -390,13 +499,27 @@ export function SettingsScreen() {
             </button>
             <div className="config-endpoint-row"><CapabilityChips caps={relay.capabilities} />{isCurrent ? <span className="config-current-badge">使用中</span> : <button type="button" onClick={() => void switchRelay(relay)} disabled={Boolean(busy)}>切换</button>}</div>
             {expanded && <div className="config-endpoint-expanded">
+              {accountBalance && <div className={`config-balance config-account-balance${accountBalance.supported ? '' : ' unavailable'}`}>
+                {accountBalance.supported ? <>
+                  <div><span>控制台账户余额</span><strong>{fmtUsd(accountBalance.remainingUsd)}</strong></div>
+                  <dl><div><dt>当前余额</dt><dd>{fmtUsd(accountBalance.remainingUsd)}</dd></div><div><dt>累计已用</dt><dd>{fmtUsd(accountBalance.usedUsd)}</dd></div><div><dt>历史合计</dt><dd>{fmtUsd(accountBalance.totalUsd)}</dd></div></dl>
+                  <small>后台保险箱：{relay.accountCredentialKind === 'access_token' ? '控制台访问令牌' : 'Session Cookie'} · 已加密保存</small>
+                </> : <><span>账户余额暂不可查</span><strong>{accountBalanceErrorText(accountBalance.error)}</strong></>}
+              </div>}
               {balance && <div className={`config-balance${balance.supported ? '' : ' unavailable'}`}>
                 {balance.supported ? <>
-                  <div><span>剩余额度</span><strong>{balance.unlimited ? '无限' : fmtUsd(balance.totalAvailableUsd)}</strong></div>
-                  <dl><div><dt>总额度</dt><dd>{balance.unlimited ? '无限' : fmtUsd(balance.totalGrantedUsd)}</dd></div><div><dt>已使用</dt><dd>{fmtUsd(balance.totalUsedUsd)}</dd></div><div><dt>有效期</dt><dd>{balance.expiresAt ? new Date(balance.expiresAt * 1000).toLocaleDateString('zh-CN') : '永不过期'}</dd></div></dl>
-                  {balance.name && <small>令牌：{balance.name}</small>}
-                </> : <><span>余额暂不可查</span><strong>{balanceErrorText(balance.error)}</strong></>}
+                  <div><span>API Key 限额</span><strong>{balance.unlimited ? '密钥不限额' : fmtUsd(balance.totalAvailableUsd)}</strong></div>
+                  <dl><div><dt>密钥总限额</dt><dd>{balance.unlimited ? '不限额' : fmtUsd(balance.totalGrantedUsd)}</dd></div><div><dt>密钥已使用</dt><dd>{fmtUsd(balance.totalUsedUsd)}</dd></div><div><dt>有效期</dt><dd>{balance.expiresAt ? new Date(balance.expiresAt * 1000).toLocaleDateString('zh-CN') : '永不过期'}</dd></div></dl>
+                  <small>{balance.unlimited ? '这里只代表 API Key 没有单独上限，不代表控制台账户余额无限' : ''}{balance.name ? `${balance.unlimited ? ' · ' : ''}令牌：${balance.name}` : ''}</small>
+                </> : <><span>密钥限额暂不可查</span><strong>{balanceErrorText(balance.error)}</strong></>}
               </div>}
+              {accountAuthRelay === relay.id && <form className="config-account-auth" onSubmit={(event) => { event.preventDefault(); void saveAccountCredentials(relay); }}>
+                <strong>{relay.accountBalanceConfigured ? '更新后台账户凭据' : '配置后台账户保险箱'}</strong>
+                <p>凭据会加密保存；网页以后只能看到“已配置”，不能取回原文。访问令牌可单独撤销，比登录 Cookie 更适合长期使用。</p>
+                <div className="config-credential-kind"><button type="button" className={accountCredentialKind === 'access_token' ? 'active' : ''} onClick={() => { setAccountCredentialKind('access_token'); setAccountCredentialSecret(''); }}>访问令牌 · 推荐</button><button type="button" className={accountCredentialKind === 'session_cookie' ? 'active' : ''} onClick={() => { setAccountCredentialKind('session_cookie'); setAccountCredentialSecret(''); }}>Session Cookie · 兼容</button></div>
+                <div className="config-account-fields"><label>用户 ID<input inputMode="numeric" autoComplete="off" value={accountUserId} onChange={(event) => setAccountUserId(event.target.value)} placeholder="New-Api-User" /></label><label>{accountCredentialKind === 'access_token' ? '控制台访问令牌' : 'Session Cookie'}<input type="password" autoComplete="new-password" value={accountCredentialSecret} onChange={(event) => setAccountCredentialSecret(event.target.value)} placeholder={accountCredentialKind === 'access_token' ? '访问令牌' : 'session=…'} /></label></div>
+                <footer><button type="submit" disabled={busy === `account-credentials:${relay.id}`}>{busy === `account-credentials:${relay.id}` ? '加密保存中…' : '加密保存并查询'}</button><button type="button" onClick={() => { setAccountAuthRelay(null); setAccountCredentialSecret(''); }}>取消</button></footer>
+              </form>}
               <div className="config-expanded-title"><strong>模型 · {insight ? insight.modelOptions.length : relay.active ? relayModels.length : '尚未读取'}</strong><span>{insight ? '已单独读取此端点' : relay.active ? '当前端点返回列表' : '点“价格与状态”即可读取'}</span></div>
               {(insight || relay.active) && <input value={relayFilter} onChange={(event) => setRelayFilter(event.target.value)} placeholder="筛选模型…" />}
               {!insight && <div className="config-model-chips">{relay.active ? relayModels.slice(0, 24).map((model) => <span key={model.id}>{model.label}</span>) : <span>无需切换，点下方按钮即可检查</span>}</div>}
@@ -422,7 +545,7 @@ export function SettingsScreen() {
               </div>}
               <div className="config-key-row"><span>API KEY</span><b>{relay.active ? keyStatus?.maskedKey || '—' : '已保存 · 不回传网页'}</b></div>
               {relay.statusUrl && <div className="config-key-row"><span>状态页</span><b>{relay.statusUrl}</b></div>}
-              <div className="config-endpoint-actions"><button type="button" onClick={() => void queryRelayBalance(relay)} disabled={busy === `balance:${relay.id}`}>{busy === `balance:${relay.id}` ? '查询中…' : balance ? '刷新余额' : '查询余额'}</button><button type="button" onClick={() => void inspectRelay(relay)} disabled={busy === `inspect:${relay.id}`}>{busy === `inspect:${relay.id}` ? '读取中…' : insight ? '刷新价格与状态' : '价格与状态'}</button><button type="button" onClick={() => relay.active ? void refreshModels() : showToast('价格与状态可以直接读取；普通模型池需先切换')}>拉取模型</button><button type="button" className="danger" onClick={() => void deleteRelay(relay)}>{confirmDelete === relay.id ? '确认删除？' : '删除'}</button></div>
+              <div className="config-endpoint-actions"><button type="button" onClick={() => relay.accountBalanceConfigured ? void queryRelayAccountBalance(relay) : (() => { setAccountAuthRelay(relay.id); setAccountUserId(''); setAccountCredentialKind('access_token'); setAccountCredentialSecret(''); })()} disabled={busy === `account-balance:${relay.id}`}>{busy === `account-balance:${relay.id}` ? '刷新中…' : relay.accountBalanceConfigured ? '刷新账户余额' : '设置账户余额'}</button>{relay.accountBalanceConfigured && <button type="button" onClick={() => { setAccountAuthRelay(accountAuthRelay === relay.id ? null : relay.id); setAccountUserId(''); setAccountCredentialKind(relay.accountCredentialKind || 'access_token'); setAccountCredentialSecret(''); }}>{accountAuthRelay === relay.id ? '收起凭据设置' : '更新账户凭据'}</button>}{relay.accountBalanceConfigured && <button type="button" className="danger" onClick={() => void clearAccountCredentials(relay)} disabled={busy === `clear-account-credentials:${relay.id}`}>{confirmCredentialClear === relay.id ? '确认清除凭据？' : '清除账户凭据'}</button>}<button type="button" onClick={() => void queryRelayBalance(relay)} disabled={busy === `balance:${relay.id}`}>{busy === `balance:${relay.id}` ? '查询中…' : balance ? '刷新密钥限额' : '查密钥限额'}</button><button type="button" onClick={() => void inspectRelay(relay)} disabled={busy === `inspect:${relay.id}`}>{busy === `inspect:${relay.id}` ? '读取中…' : insight ? '刷新价格与状态' : '价格与状态'}</button><button type="button" onClick={() => relay.active ? void refreshModels() : showToast('价格与状态可以直接读取；普通模型池需先切换')}>拉取模型</button><button type="button" className="danger" onClick={() => void deleteRelay(relay)}>{confirmDelete === relay.id ? '确认删除？' : '删除'}</button></div>
               <div className="config-priority"><span>启用</span><button type="button" className="locked-switch" aria-disabled="true" onClick={() => showToast('端点启停后端尚未接入')}><i /></button><em>启停与优先级后端尚未接入</em><button type="button" disabled>↑</button><button type="button" disabled>↓</button></div>
             </div>}
           </section>;

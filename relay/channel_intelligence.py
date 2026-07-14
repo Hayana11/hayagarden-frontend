@@ -14,6 +14,7 @@ client and does not need another web process.
 
 from __future__ import annotations
 
+from http.cookies import SimpleCookie
 from decimal import Decimal, InvalidOperation
 import hashlib
 import json
@@ -644,6 +645,113 @@ def query_channel_balance(channel: dict, *, request_json: Callable = _request_js
         "total_granted_usd": granted_usd,
         "total_used_usd": used_usd,
         "total_available_usd": available_usd,
+    }
+
+
+def _session_cookie_header(value: str) -> str:
+    """Keep only NewAPI's session cookie so unrelated browser cookies are never forwarded."""
+    raw = str(value or "").strip()
+    if not raw or len(raw) > 4096 or "\r" in raw or "\n" in raw:
+        raise ChannelInspectionError("Session Cookie 格式不正确")
+
+    parsed = SimpleCookie()
+    try:
+        parsed.load(raw)
+    except Exception:
+        parsed = SimpleCookie()
+    if "session" in parsed:
+        session = parsed["session"].value.strip()
+    elif ";" not in raw:
+        session = raw.removeprefix("session=").strip()
+    else:
+        session = ""
+    if not session:
+        raise ChannelInspectionError("没有找到 session Cookie")
+    return f"session={session}"
+
+
+def normalize_console_credential(kind: str, secret: str) -> tuple[str, str]:
+    normalized_kind = str(kind or "").strip().lower()
+    raw = str(secret or "").strip()
+    if normalized_kind == "access_token":
+        if raw.lower().startswith("bearer "):
+            raw = raw[7:].strip()
+        if not 8 <= len(raw) <= 4096 or any(char.isspace() for char in raw):
+            raise ChannelInspectionError("控制台访问令牌格式不正确")
+        return normalized_kind, raw
+    if normalized_kind == "session_cookie":
+        return normalized_kind, _session_cookie_header(raw)
+    raise ChannelInspectionError("不支持的控制台凭据类型")
+
+
+def query_channel_account_balance(
+    channel: dict,
+    *,
+    credential_kind: str,
+    credential_secret: str,
+    user_id: str,
+    request_json: Callable = _request_json,
+) -> dict:
+    """Query NewAPI account quota without serializing console credentials.
+
+    The caller owns credential storage. This function only forwards the normalized secret for
+    one upstream request and never includes it in the result or an exception message.
+    """
+    api_url = str(channel.get("base_url") or "").strip()
+    source = f"{origin_from_url(api_url)}/api/user/self"
+    normalized_user_id = str(user_id or "").strip()
+    if not re.fullmatch(r"[1-9]\d{0,18}", normalized_user_id):
+        raise ChannelInspectionError("New-Api-User 必须是数字用户 ID")
+    normalized_kind, normalized_secret = normalize_console_credential(
+        credential_kind,
+        credential_secret,
+    )
+    headers = {"New-Api-User": normalized_user_id}
+    if normalized_kind == "access_token":
+        headers["Authorization"] = normalized_secret
+    else:
+        headers["Cookie"] = normalized_secret
+
+    data, error = request_json(
+        "GET",
+        source,
+        headers=headers,
+        timeout=10,
+    )
+    if error:
+        status = error.get("status")
+        if status in (401, 403):
+            reason = "unauthorized"
+        elif status == 404:
+            reason = "unsupported"
+        else:
+            reason = "unavailable"
+        return {"supported": False, "error": reason, "source": source}
+
+    if isinstance(data, dict) and data.get("success") is False:
+        return {"supported": False, "error": "unauthorized", "source": source}
+
+    payload = data.get("data") if isinstance(data, dict) else None
+    if not isinstance(payload, dict):
+        return {"supported": False, "error": "invalid_response", "source": source}
+
+    remaining_quota, remaining_usd = _quota_amount(payload.get("quota"))
+    used_quota, used_usd = _quota_amount(payload.get("used_quota"))
+    if remaining_quota is None:
+        return {"supported": False, "error": "invalid_response", "source": source}
+    total_quota = remaining_quota + (used_quota or 0)
+    total_usd = remaining_usd + (used_usd or 0)
+    return {
+        "supported": True,
+        "error": None,
+        "source": source,
+        "credential_kind": normalized_kind,
+        "remaining_quota": remaining_quota,
+        "used_quota": used_quota,
+        "total_quota": total_quota,
+        "remaining_usd": remaining_usd,
+        "used_usd": used_usd,
+        "total_usd": total_usd,
     }
 
 

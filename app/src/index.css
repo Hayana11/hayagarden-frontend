@@ -280,6 +280,21 @@ button {
 .config-balance.unavailable { display: flex; align-items: center; justify-content: space-between; gap: 12px; background: #F6EFEC; }
 .config-balance.unavailable span { color: #A28F89; font-size: 10.5px; }
 .config-balance.unavailable strong { color: #7E6C67; font-size: 11px; text-align: right; }
+.config-account-balance { background: linear-gradient(135deg, rgba(206,164,111,.16), rgba(246,239,236,.72)); }
+.config-account-balance > div:first-child span { color: #A47743; }
+.config-account-balance > div:first-child strong { color: #8B633A; }
+.config-account-auth { margin: 0 0 13px; padding: 14px; border: 1px solid #EADDD7; border-radius: 16px; background: #FFFBF9; }
+.config-account-auth > strong { color: #675752; font: 14px var(--font-serif-display); }
+.config-account-auth > p { margin: 5px 0 11px; color: #A28F89; font-size: 10px; line-height: 1.55; }
+.config-account-fields { display: grid; grid-template-columns: minmax(90px,.55fr) minmax(0,1.45fr); gap: 8px; }
+.config-account-auth label { color: #8D7A74; font-size: 10px; }
+.config-account-auth input { width: 100%; margin-top: 5px; padding: 9px 10px; border: 0; border-radius: 10px; outline: none; background: #F6EFEC; color: #4A3F3C; font: 11px var(--font-mono); }
+.config-credential-kind { display: flex; gap: 7px; margin-bottom: 10px; }
+.config-credential-kind button { flex: 1; padding: 7px 8px; border-radius: 10px; background: #F6EFEC; color: #9A8781; font-size: 10px; cursor: pointer; }
+.config-credential-kind button.active { background: #E4EEDF; color: #59735C; box-shadow: inset 0 0 0 1px rgba(111,155,114,.18); }
+.config-account-auth footer { display: flex; gap: 8px; margin-top: 10px; }
+.config-account-auth button { padding: 7px 12px; border-radius: 999px; background: #EEE3DE; color: #6B5A55; font-size: 11px; cursor: pointer; }
+.config-account-auth button[type="submit"] { background: #8EAA89; color: #fff; }
 .config-intel { margin-top: 11px; }
 .config-intel-summary { display: flex; flex-wrap: wrap; gap: 7px; }
 .config-intel-summary span { display: inline-flex; align-items: center; gap: 5px; padding: 5px 9px; border-radius: 999px; background: #F6EFEC; color: #786762; font-size: 10.5px; }
@@ -366,6 +381,7 @@ button {
   .config-back-chat { padding-left: 12px; padding-right: 12px; }
   .config-endpoint-summary > em small { max-width: 92px; }
   .config-preset-list button > span { flex-direction: column; align-items: flex-start; gap: 1px; }
+  .config-account-fields { grid-template-columns: 1fr; }
 }
 @media (prefers-reduced-motion: reduce) {
   .config-root *, .config-root *::before, .config-root *::after { animation: none !important; transition: none !important; }

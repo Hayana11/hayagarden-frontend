@@ -26,6 +26,8 @@ export interface RelayEndpoint {
   active: boolean;
   defaultModel: string;
   statusUrl: string;
+  accountBalanceConfigured: boolean;
+  accountCredentialKind: 'access_token' | 'session_cookie' | '';
   capabilities: EndpointCapabilities;
 }
 
@@ -80,6 +82,16 @@ export interface RelayBalance {
   totalGrantedUsd: number | null;
   totalUsedUsd: number | null;
   totalAvailableUsd: number | null;
+}
+
+export interface RelayAccountBalance {
+  supported: boolean;
+  error: 'missing_credentials' | 'unauthorized' | 'unsupported' | 'unavailable' | 'invalid_response' | '';
+  source: string;
+  credentialKind: 'access_token' | 'session_cookie' | '';
+  remainingUsd: number | null;
+  usedUsd: number | null;
+  totalUsd: number | null;
 }
 
 export interface ConfigModel {
@@ -143,6 +155,8 @@ export async function getRelayEndpoints(): Promise<RelayEndpoint[]> {
       active?: boolean;
       default_model?: string;
       status_url?: string;
+      account_balance_configured?: boolean;
+      account_credential_kind?: 'access_token' | 'session_cookie' | '';
       capabilities?: Partial<EndpointCapabilities>;
     }>;
   }>('/api/config/relay-presets');
@@ -154,6 +168,8 @@ export async function getRelayEndpoints(): Promise<RelayEndpoint[]> {
     active: Boolean(endpoint.active),
     defaultModel: endpoint.default_model || '',
     statusUrl: endpoint.status_url || '',
+    accountBalanceConfigured: Boolean(endpoint.account_balance_configured),
+    accountCredentialKind: endpoint.account_credential_kind || '',
     capabilities: {
       thinking: endpoint.capabilities?.thinking !== false,
       cache: endpoint.capabilities?.cache !== false,
@@ -223,6 +239,47 @@ export async function getRelayBalance(id: number): Promise<RelayBalance> {
     totalUsedUsd: balance.total_used_usd ?? null,
     totalAvailableUsd: balance.total_available_usd ?? null,
   };
+}
+
+export async function getRelayAccountBalance(id: number): Promise<RelayAccountBalance> {
+  const data = await http.get<{
+    balance?: {
+      supported?: boolean;
+      error?: RelayAccountBalance['error'];
+      source?: string;
+      credential_kind?: 'access_token' | 'session_cookie';
+      remaining_usd?: number | null;
+      used_usd?: number | null;
+      total_usd?: number | null;
+    };
+  }>(`/api/config/relay-presets/${id}/account-balance`);
+  const balance = data.balance || {};
+  return {
+    supported: Boolean(balance.supported),
+    error: balance.error || '',
+    source: balance.source || '',
+    credentialKind: balance.credential_kind || '',
+    remainingUsd: balance.remaining_usd ?? null,
+    usedUsd: balance.used_usd ?? null,
+    totalUsd: balance.total_usd ?? null,
+  };
+}
+
+export async function saveRelayAccountCredentials(
+  id: number,
+  userId: string,
+  credentialKind: 'access_token' | 'session_cookie',
+  credentialSecret: string,
+): Promise<void> {
+  await http.put(`/api/config/relay-presets/${id}/account-credentials`, {
+    user_id: userId,
+    credential_kind: credentialKind,
+    credential_secret: credentialSecret,
+  });
+}
+
+export async function clearRelayAccountCredentials(id: number): Promise<void> {
+  await http.del(`/api/config/relay-presets/${id}/account-credentials`);
 }
 
 export async function activateRelayEndpoint(id: number): Promise<{ model: string }> {
