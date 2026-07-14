@@ -443,6 +443,107 @@ def usage_summary():
         'bars': padded,
     })
 
+
+def _usage_daily_from_messages(days: int):
+    now_cn = datetime.datetime.utcnow() + datetime.timedelta(hours=8)
+    start_day = (now_cn - datetime.timedelta(days=days - 1)).strftime('%Y-%m-%d')
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT substr(created_at,1,10) as day, count(*) as cnt FROM chat_messages "
+        "WHERE substr(created_at,1,10) >= ? GROUP BY substr(created_at,1,10)",
+        (start_day,),
+    ).fetchall()
+    conn.close()
+    counts = {r['day']: int(r['cnt'] or 0) for r in rows if r['day']}
+    day_rows = []
+    for offset in range(days):
+        day = (now_cn - datetime.timedelta(days=days - offset - 1)).strftime('%Y-%m-%d')
+        count = counts.get(day, 0)
+        day_rows.append({'date': day, 'count': count, 'cost': None})
+    total_count = sum(item['count'] for item in day_rows)
+    return {
+        'ok': True,
+        'mode': 'requests',
+        'days': day_rows,
+        'relays': [],
+        'total_cost': None,
+        'total_count': total_count,
+    }
+
+
+@app.route('/api/usage/daily-cost', methods=['GET'])
+def usage_daily_cost():
+    """Daily usage calendar: relay console costs when credentials exist, else chat request counts."""
+    days = min(max(request.args.get('days', 30, type=int), 1), 90)
+    _init_relay_account_credentials_table()
+    conn = get_db()
+    rows = conn.execute('''
+        SELECT r.id, r.name, r.url, c.user_id, c.credential_kind, c.secret_ciphertext
+        FROM relay_presets r
+        INNER JOIN relay_account_credentials c ON c.preset_id = r.id
+        WHERE c.secret_ciphertext IS NOT NULL AND c.secret_ciphertext != ''
+    ''').fetchall()
+    conn.close()
+    if not rows:
+        return jsonify(_usage_daily_from_messages(days))
+
+    from relay.channel_intelligence import query_channel_daily_costs
+    from relay.credential_vault import decrypt_secret
+
+    merged = {}
+    relay_totals = []
+    for row in rows:
+        try:
+            secret = decrypt_secret(row['secret_ciphertext'])
+            result = query_channel_daily_costs(
+                {'id': row['id'], 'name': row['name'], 'base_url': row['url']},
+                credential_kind=row['credential_kind'],
+                credential_secret=secret,
+                user_id=row['user_id'],
+                days=days,
+            )
+            if not result.get('supported'):
+                continue
+            relay_total = 0.0
+            for item in result.get('days') or []:
+                bucket = merged.setdefault(item['date'], {'cost': 0.0, 'count': 0})
+                bucket['cost'] += float(item.get('cost') or 0)
+                bucket['count'] += int(item.get('count') or 0)
+                relay_total += float(item.get('cost') or 0)
+            relay_totals.append({
+                'id': row['id'],
+                'name': row['name'],
+                'total_cost': round(relay_total, 2),
+            })
+        except Exception:
+            continue
+
+    if not merged:
+        return jsonify(_usage_daily_from_messages(days))
+
+    now_cn = datetime.datetime.utcnow() + datetime.timedelta(hours=8)
+    day_rows = []
+    total_cost = 0.0
+    total_count = 0
+    for offset in range(days):
+        day = (now_cn - datetime.timedelta(days=days - offset - 1)).strftime('%Y-%m-%d')
+        bucket = merged.get(day, {'cost': 0.0, 'count': 0})
+        cost = round(float(bucket['cost']), 2)
+        count = int(bucket['count'])
+        total_cost += cost
+        total_count += count
+        day_rows.append({'date': day, 'cost': cost, 'count': count})
+
+    return jsonify({
+        'ok': True,
+        'mode': 'cost',
+        'days': day_rows,
+        'relays': relay_totals,
+        'total_cost': round(total_cost, 2),
+        'total_count': total_count,
+    })
+
+
 @app.route('/api/usage/stream', methods=['GET'])
 def usage_stream():
     def generate():

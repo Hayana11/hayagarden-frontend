@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from http.cookies import SimpleCookie
 from decimal import Decimal, InvalidOperation
+import datetime
 import hashlib
 import json
 import re
@@ -684,6 +685,101 @@ def normalize_console_credential(kind: str, secret: str) -> tuple[str, str]:
     raise ChannelInspectionError("不支持的控制台凭据类型")
 
 
+def _console_auth_headers(credential_kind: str, credential_secret: str, user_id: str) -> tuple[str, dict]:
+    normalized_kind, normalized_secret = normalize_console_credential(credential_kind, credential_secret)
+    normalized_user_id = str(user_id or "").strip()
+    if not re.fullmatch(r"[1-9]\d{0,18}", normalized_user_id):
+        raise ChannelInspectionError("New-Api-User 必须是数字用户 ID")
+    headers = {"New-Api-User": normalized_user_id}
+    if normalized_kind == "access_token":
+        headers["Authorization"] = normalized_secret
+    else:
+        headers["Cookie"] = normalized_secret
+    return normalized_kind, headers
+
+
+def query_channel_daily_costs(
+    channel: dict,
+    *,
+    credential_kind: str,
+    credential_secret: str,
+    user_id: str,
+    days: int = 30,
+    request_json: Callable = _request_json,
+) -> dict:
+    """Aggregate per-day consumption costs from NewAPI /api/data/self."""
+    days = min(max(int(days), 1), 90)
+    tz = datetime.timezone(datetime.timedelta(hours=8))
+    today = datetime.datetime.now(tz).replace(hour=0, minute=0, second=0, microsecond=0)
+    start_day = today - datetime.timedelta(days=days - 1)
+    end_ts = int((today + datetime.timedelta(days=1) - datetime.timedelta(seconds=1)).timestamp())
+    start_ts = int(start_day.timestamp())
+
+    origin = origin_from_url(str(channel.get("base_url") or ""))
+    source = f"{origin}/api/data/self"
+    _, headers = _console_auth_headers(credential_kind, credential_secret, user_id)
+    data, error = request_json(
+        "GET",
+        f"{source}?start_timestamp={start_ts}&end_timestamp={end_ts}",
+        headers=headers,
+        timeout=15,
+    )
+    if error:
+        status = error.get("status")
+        if status in (401, 403):
+            reason = "unauthorized"
+        elif status == 404:
+            reason = "unsupported"
+        else:
+            reason = "unavailable"
+        return {"supported": False, "error": reason, "source": source, "days": []}
+
+    if isinstance(data, dict) and data.get("success") is False:
+        return {"supported": False, "error": "unauthorized", "source": source, "days": []}
+
+    rows = data.get("data") if isinstance(data, dict) else data
+    if not isinstance(rows, list):
+        return {"supported": False, "error": "invalid_response", "source": source, "days": []}
+
+    per_day: dict[str, dict[str, float | int]] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        try:
+            ts = int(row.get("created_at") or 0)
+        except (TypeError, ValueError):
+            continue
+        if ts <= 0:
+            continue
+        day = datetime.datetime.fromtimestamp(ts, tz=tz).strftime("%Y-%m-%d")
+        bucket = per_day.setdefault(day, {"cost": 0.0, "count": 0})
+        quota = _decimal(row.get("quota"))
+        if quota is not None:
+            bucket["cost"] = float(bucket["cost"]) + float(quota / _QUOTA_PER_USD)
+        bucket["count"] = int(bucket["count"]) + int(row.get("count") or 0)
+
+    day_rows = []
+    total_cost = 0.0
+    total_count = 0
+    for offset in range(days):
+        day = (start_day + datetime.timedelta(days=offset)).strftime("%Y-%m-%d")
+        bucket = per_day.get(day, {"cost": 0.0, "count": 0})
+        cost = round(float(bucket["cost"]), 2)
+        count = int(bucket["count"])
+        total_cost += cost
+        total_count += count
+        day_rows.append({"date": day, "cost": cost, "count": count})
+
+    return {
+        "supported": True,
+        "error": None,
+        "source": source,
+        "days": day_rows,
+        "total_cost": round(total_cost, 2),
+        "total_count": total_count,
+    }
+
+
 def query_channel_account_balance(
     channel: dict,
     *,
@@ -702,15 +798,7 @@ def query_channel_account_balance(
     normalized_user_id = str(user_id or "").strip()
     if not re.fullmatch(r"[1-9]\d{0,18}", normalized_user_id):
         raise ChannelInspectionError("New-Api-User 必须是数字用户 ID")
-    normalized_kind, normalized_secret = normalize_console_credential(
-        credential_kind,
-        credential_secret,
-    )
-    headers = {"New-Api-User": normalized_user_id}
-    if normalized_kind == "access_token":
-        headers["Authorization"] = normalized_secret
-    else:
-        headers["Cookie"] = normalized_secret
+    normalized_kind, headers = _console_auth_headers(credential_kind, credential_secret, user_id)
 
     data, error = request_json(
         "GET",
