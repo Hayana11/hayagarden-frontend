@@ -139,7 +139,9 @@ def index():
 def dash():
     # Prefer the new React build when deployed; fallback to legacy static dash.
     if os.path.exists(os.path.join(APP_DIST_DIR, 'index.html')):
-        return send_from_directory(APP_DIST_DIR, 'index.html')
+        resp = send_from_directory(APP_DIST_DIR, 'index.html')
+        resp.headers['Cache-Control'] = 'no-store, must-revalidate'
+        return resp
     return send_from_directory('/opt/frontend/static', 'dash.html')
 
 @app.route('/dash/<path:subpath>')
@@ -150,7 +152,9 @@ def dash_subpath(subpath):
     if os.path.isfile(asset_path):
         return send_from_directory(APP_DIST_DIR, subpath)
     # React Router fallback
-    return send_from_directory(APP_DIST_DIR, 'index.html')
+    resp = send_from_directory(APP_DIST_DIR, 'index.html')
+    resp.headers['Cache-Control'] = 'no-store, must-revalidate'
+    return resp
 
 @app.route('/chat')
 def chat():
