@@ -9,7 +9,7 @@
 // a toast on click, rather than either faking success or hiding the UI.
 import { useCallback, useEffect, useMemo, useState, type CSSProperties } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { fetchMomentsData, galleryPhotoUrl, moodWordTone, type EmotionMemoryPoint, type FeedEntry, type GalleryPhoto, type MomentsData } from '../lib/moments';
+import { fetchMomentsData, galleryPhotoUrl, moodWordTone, type EmotionMemoryPoint, type FeedEntry, type GalleryPhoto, type MomentsData, type MoodState } from '../lib/moments';
 
 const SETTINGS_KEY = 'fyodor-chat-settings';
 const SERIF = "'Noto Serif SC', serif";
@@ -35,13 +35,42 @@ const DARK_VARS: Record<string, string> = {
 };
 
 type Tab = 'home' | 'album' | 'posts' | 'dream' | 'mood' | 'tools';
-const NAV_TABS: Array<{ id: Tab; label: string }> = [
-  { id: 'album', label: '相册' },
-  { id: 'posts', label: '说说' },
-  { id: 'dream', label: '梦境' },
-  { id: 'mood', label: '情绪' },
-  { id: 'tools', label: '工具' },
+type NavIconKind = 'album' | 'posts' | 'dream' | 'mood' | 'tools';
+const NAV_TABS: Array<{ id: Tab; label: string; icon: NavIconKind }> = [
+  { id: 'album', label: '相册', icon: 'album' },
+  { id: 'posts', label: '说说', icon: 'posts' },
+  { id: 'dream', label: '梦境', icon: 'dream' },
+  { id: 'mood', label: '情绪', icon: 'mood' },
+  { id: 'tools', label: '工具', icon: 'tools' },
 ];
+
+function NavIcon({ kind }: { kind: NavIconKind }) {
+  const common = { viewBox: '0 0 24 24', width: 20, height: 20, fill: 'none', stroke: 'currentColor', strokeWidth: 1.6, strokeLinecap: 'round' as const, strokeLinejoin: 'round' as const };
+  if (kind === 'album') return <svg {...common}><rect x={3} y={3} width={18} height={18} rx={3} /><circle cx={9} cy={9} r={2} /><path d="M21 15l-5-5-9 9" /></svg>;
+  if (kind === 'posts') return <svg {...common}><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" /></svg>;
+  if (kind === 'dream') return <svg {...common}><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" /></svg>;
+  if (kind === 'mood') return <svg {...common}><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z" /></svg>;
+  return <svg {...common}><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z" /></svg>;
+}
+
+type MoodIconKind = 'cloud' | 'sun' | 'zap' | 'heart' | 'moon';
+
+function moodIconKind(mood: MoodState): MoodIconKind {
+  if (mood.longing >= 0.6) return 'heart';
+  if (mood.arousal >= 0.6 && mood.valence <= 0) return 'zap';
+  if (mood.valence >= 0.15) return 'sun';
+  if (mood.valence <= -0.15) return 'cloud';
+  return 'moon';
+}
+
+function MoodIcon({ kind }: { kind: MoodIconKind }) {
+  const common = { viewBox: '0 0 24 24', width: 11, height: 11, fill: 'none', stroke: 'currentColor', strokeWidth: 1.8, strokeLinecap: 'round' as const, strokeLinejoin: 'round' as const };
+  if (kind === 'cloud') return <svg {...common}><path d="M17.5 19a4.5 4.5 0 0 0 0-9h-1.1A7 7 0 1 0 6 18.7" /></svg>;
+  if (kind === 'sun') return <svg {...common}><circle cx={12} cy={12} r={4} /><path d="M12 2v2" /><path d="M12 20v2" /><path d="M4.93 4.93l1.41 1.41" /><path d="M17.66 17.66l1.41 1.41" /><path d="M2 12h2" /><path d="M20 12h2" /></svg>;
+  if (kind === 'zap') return <svg {...common}><path d="M13 2L3 14h7l-1 8 10-12h-7l1-8z" /></svg>;
+  if (kind === 'heart') return <svg {...common}><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z" /></svg>;
+  return <svg {...common}><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" /></svg>;
+}
 
 function loadTheme(): 'light' | 'dark' | 'auto' {
   try {
@@ -92,9 +121,6 @@ function LockedSocialRow({ onLocked, dense }: { onLocked: () => void; dense?: bo
       <div onClick={onLocked} style={iconStyle} title={LOCKED}>
         <svg viewBox="0 0 24 24" width={size} height={size} fill="none" stroke="currentColor" strokeWidth={1.7} strokeLinecap="round" strokeLinejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" /></svg>
         <span style={{ fontFamily: DISPLAY, fontSize: 11.5 }}>0</span>
-      </div>
-      <div onClick={onLocked} style={iconStyle} title={LOCKED}>
-        <svg viewBox="0 0 24 24" width={size} height={size} fill="none" stroke="currentColor" strokeWidth={1.7} strokeLinecap="round" strokeLinejoin="round"><path d="M17 2l4 4-4 4" /><path d="M3 11V9a4 4 0 0 1 4-4h14" /><path d="M7 22l-4-4 4-4" /><path d="M21 13v2a4 4 0 0 1-4 4H3" /></svg>
       </div>
     </div>
   );
@@ -183,7 +209,7 @@ export function MomentsScreen() {
     <div className="hide-scrollbar dash-fullscreen-page dash-scroll-page" style={{ ...(vars as CSSProperties), background: 'var(--bg)', color: 'var(--ink)', fontFamily: SERIF, transition: 'background .3s,color .3s' }}>
       <div style={{ width: '100%', background: 'var(--bg)' }}>
         {/* ── cover (换封面锁定) ── */}
-        <div onClick={showLocked} style={{ position: 'relative', height: 200, cursor: 'pointer' }} title={LOCKED}>
+        <div onClick={showLocked} style={{ position: 'relative', height: 248, cursor: 'pointer' }} title={LOCKED}>
           <div style={{ position: 'absolute', inset: 0, background: 'linear-gradient(150deg,#3E2E30,#211A18 55%,#4A3226)' }} />
           <div style={{ position: 'absolute', left: 0, right: 0, bottom: 0, height: 70, background: 'linear-gradient(transparent,rgba(30,18,16,0.38))' }} />
           <div onClick={(e) => { e.stopPropagation(); navigate('/chat'); }} style={{ ...iconBtn, position: 'absolute', top: 12, left: 12, zIndex: 2 }}>
@@ -203,12 +229,14 @@ export function MomentsScreen() {
         </div>
 
         {/* ── profile header ── */}
-        <div style={{ background: 'rgba(255,255,255,0.97)', boxShadow: '0 6px 18px var(--shadow)' }}>
+        <div style={{ background: 'var(--card)', boxShadow: '0 6px 18px var(--shadow)', transition: 'background .3s' }}>
           <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'flex-end', gap: 14, padding: '12px 18px 14px' }}>
             <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 4, paddingTop: 8, minWidth: 0 }}>
               <span style={{ fontFamily: DISPLAY, fontSize: 21, fontWeight: 600, letterSpacing: 1.5, color: 'var(--ink)' }}>Fyodor</span>
               <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                <span style={{ width: 8, height: 8, borderRadius: '50%', background: moodColor, flexShrink: 0 }} />
+                <span style={{ width: 18, height: 18, borderRadius: '50%', background: data?.mood ? 'var(--rosebg)' : 'var(--card2)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: data?.mood ? 'var(--rose)' : 'var(--ghost)', flexShrink: 0, animation: data?.mood ? 'chatBreathe 3s ease-in-out infinite' : 'none' }}>
+                  {data?.mood && <MoodIcon kind={moodIconKind(data.mood)} />}
+                </span>
                 <span style={{ fontSize: 11.5, color: 'var(--ghost)', letterSpacing: 0.5 }}>
                   {data?.mood ? `此刻：${data.mood.moodWord}` : phase === 'loading' ? '情绪读取中…' : '情绪暂时读不到'}
                 </span>
@@ -220,7 +248,8 @@ export function MomentsScreen() {
           </div>
           <div style={{ display: 'flex', borderTop: '1px solid var(--line)', padding: '4px 2px 6px' }}>
             {NAV_TABS.map((n) => (
-              <div key={n.id} onClick={() => pickTab(n.id)} style={{ flex: 1, cursor: 'pointer', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4, padding: '9px 0 7px', color: tab === n.id ? 'var(--deep)' : 'var(--faint)' }}>
+              <div key={n.id} onClick={() => pickTab(n.id)} style={{ flex: 1, cursor: 'pointer', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4, padding: '9px 0 7px', color: tab === n.id ? 'var(--deep)' : 'var(--faint)', transition: 'color .2s' }}>
+                <NavIcon kind={n.icon} />
                 <span style={{ fontSize: 11.5, letterSpacing: 2 }}>{n.label}</span>
               </div>
             ))}
