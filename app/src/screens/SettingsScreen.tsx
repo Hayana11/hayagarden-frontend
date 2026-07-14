@@ -252,7 +252,7 @@ export function SettingsScreen() {
 
   return (
     <div className="config-root dash-fullscreen-page">
-      <main className="config-screen">
+      <main className="config-screen hide-scrollbar">
         <header className="config-header">
           <button type="button" onClick={() => navigate('/chat')}>‹</button>
           <h1>系统配置</h1>
