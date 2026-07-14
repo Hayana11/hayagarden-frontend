@@ -88,6 +88,52 @@ function KindTag({ kind }: { kind: FeedEntry['kind'] }) {
   return <span style={{ fontSize: 10.5, padding: '3px 10px', borderRadius: 999, background: bg, color, letterSpacing: 1 }}>{label}</span>;
 }
 
+function feedDateKey(entry: FeedEntry): string {
+  return entry.sortKey.slice(0, 10);
+}
+
+function DateRail({ sortKey, visible }: { sortKey: string; visible: boolean }) {
+  if (!visible) return <div style={{ width: 54, flexShrink: 0 }} />;
+
+  const [year, month, day] = sortKey.slice(0, 10).split('-').map(Number);
+  const date = new Date(year, month - 1, day);
+  const today = new Date();
+  today.setHours(12, 0, 0, 0);
+  const yesterday = new Date(today);
+  yesterday.setDate(yesterday.getDate() - 1);
+
+  const sameDay = (a: Date, b: Date) =>
+    a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
+
+  let primary: string;
+  let secondary: string | null = null;
+  let primarySize = 34;
+
+  if (sameDay(date, today)) {
+    primary = '今天';
+    primarySize = 24;
+  } else if (sameDay(date, yesterday)) {
+    primary = '昨天';
+    primarySize = 22;
+  } else {
+    primary = String(day);
+    secondary = `${month}月`;
+  }
+
+  return (
+    <div style={{ width: 54, flexShrink: 0, display: 'flex', flexDirection: 'column', alignItems: 'flex-start', paddingTop: 1 }}>
+      <span style={{ fontFamily: DISPLAY, fontSize: primarySize, fontWeight: 600, lineHeight: 1, color: 'var(--mut)', letterSpacing: 0.5 }}>
+        {primary}
+      </span>
+      {secondary && (
+        <span style={{ fontFamily: DISPLAY, fontSize: 11, color: 'var(--ghost)', marginTop: 4, letterSpacing: 0.5 }}>
+          {secondary}
+        </span>
+      )}
+    </div>
+  );
+}
+
 function EmptyState({ title, hint }: { title: string; hint: string }) {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8, padding: '54px 24px', textAlign: 'center' }}>
@@ -292,22 +338,24 @@ export function MomentsScreen() {
                   {data.feed.length === 0 && <EmptyState title="这里还没有念头" hint="费佳想到什么、做了什么梦、写了什么日摘要，都会自己出现在这里。" />}
                   {data.feed.map((f, i) => (
                     <div key={i} style={{ display: 'flex', gap: 12 }}>
-                      <div style={{ width: 52, flexShrink: 0, display: 'flex', flexDirection: 'column', alignItems: 'flex-start', paddingTop: 2 }}>
-                        {(i === 0 || data.feed[i - 1].dateLabel !== f.dateLabel) && (
-                          <span style={{ fontFamily: DISPLAY, fontSize: 12, color: 'var(--ghost)' }}>{f.dateLabel || '今天'}</span>
-                        )}
-                        {f.timeLabel && <span style={{ fontFamily: DISPLAY, fontSize: 10.5, color: 'var(--ghost)' }}>{f.timeLabel}</span>}
-                      </div>
-                      <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 7 }}>
-                        <KindTag kind={f.kind} />
+                      <DateRail sortKey={f.sortKey} visible={i === 0 || feedDateKey(f) !== feedDateKey(data.feed[i - 1])} />
+                      <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 8 }}>
                         <span style={{ fontSize: 13.5, lineHeight: 1.9, color: 'var(--ink)', overflowWrap: 'break-word', wordBreak: 'break-word' }}>{f.content}</span>
-                        <LockedSocialRow onLocked={showLocked} dense />
+                        <div><KindTag kind={f.kind} /></div>
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
+                          <LockedSocialRow onLocked={showLocked} dense />
+                          {f.timeLabel ? (
+                            <span style={{ fontFamily: DISPLAY, fontSize: 11, color: 'var(--ghost)', flexShrink: 0, letterSpacing: 0.5 }}>
+                              {f.timeLabel}
+                            </span>
+                          ) : null}
+                        </div>
                       </div>
                     </div>
                   ))}
                   {data.feed.length > 0 && (
-                    <div onClick={showLocked} style={{ cursor: 'pointer', textAlign: 'center', padding: '14px 0 0', fontFamily: DISPLAY, fontStyle: 'italic', fontSize: 11.5, letterSpacing: 2, color: 'var(--ghost)' }}>
-                      + 转发一段聊天记录
+                    <div style={{ textAlign: 'center', padding: '18px 0 4px', fontFamily: DISPLAY, fontStyle: 'italic', fontSize: 11.5, letterSpacing: 2, color: 'var(--ghost)' }}>
+                      — 流到这里就停了 —
                     </div>
                   )}
                 </div>
@@ -321,12 +369,17 @@ export function MomentsScreen() {
                     <div key={i} style={{ background: 'var(--card)', borderRadius: 18, boxShadow: '0 8px 20px var(--shadow)', padding: '15px 16px', display: 'flex', flexDirection: 'column', gap: 11 }}>
                       <div style={{ display: 'flex', alignItems: 'baseline', gap: 10 }}>
                         <span style={{ fontSize: 15, fontWeight: 700, color: 'var(--deep)', letterSpacing: 1 }}>Fyodor</span>
-                        <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--ink2)' }}>{f.dateLabel || '今天'} {f.timeLabel}</span>
-                        <span style={{ marginLeft: 'auto' }}><KindTag kind={f.kind} /></span>
+                        <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--ink2)' }}>{f.dateLabel || '今天'}</span>
                       </div>
                       <span style={{ fontSize: 14.5, lineHeight: 1.9, color: 'var(--ink)', overflowWrap: 'break-word', wordBreak: 'break-word' }}>{f.content}</span>
-                      <div style={{ borderTop: '1px solid var(--line)', paddingTop: 10, display: 'flex', justifyContent: 'flex-end' }}>
+                      <div><KindTag kind={f.kind} /></div>
+                      <div style={{ borderTop: '1px solid var(--line)', paddingTop: 10, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
                         <LockedSocialRow onLocked={showLocked} />
+                        {f.timeLabel ? (
+                          <span style={{ fontFamily: DISPLAY, fontSize: 11.5, color: 'var(--ghost)', flexShrink: 0, letterSpacing: 0.5 }}>
+                            {f.timeLabel}
+                          </span>
+                        ) : null}
                       </div>
                     </div>
                   ))}
