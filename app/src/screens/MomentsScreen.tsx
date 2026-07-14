@@ -72,59 +72,64 @@ function MoodIcon({ kind }: { kind: MoodIconKind }) {
   return <svg {...common}><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" /></svg>;
 }
 
-// Dream cards read background/color from the dream's own text — this is
-// exactly the "根据内容变化背景" behaviour from the design source, done as
-// a client-side keyword classifier since the backend's `emotion` field for
-// dreams is hardcoded to '朦胧' today and carries no real per-dream variety.
+// Dream cards read background/color from the dream's own text — the
+// "根据内容变化背景" behaviour from the design source. The design's own
+// scene set (rain/sea/night/warm/uneasy/neutral) plus base/glow colors are
+// reproduced exactly from its <script data-dc-script> block; snow/abyss are
+// an extra pair added on top, in the same base+glow+texture structure, to
+// cover Siberia/violence imagery the original six don't touch. Classified
+// by keyword since the backend's `emotion` field for dreams is hardcoded to
+// '朦胧' today and carries no real per-dream scene/V/A/trace data — see the
+// note rendered under the tab header.
 interface DreamScene {
   label: string;
   base: string;
   glow: string;
-  titleC: string;
-  textC: string;
-  ghostC: string;
-  chipBg: string;
-  chipC: string;
 }
 
 const DREAM_SCENES: Record<string, DreamScene> = {
-  mist: {
-    label: '朦胧', base: 'linear-gradient(165deg,#3A3448,#191521)',
-    glow: 'radial-gradient(circle at 28% 20%, rgba(201,191,224,0.4), transparent 60%)',
-    titleC: '#C9BFE0', textC: 'rgba(240,230,220,0.82)', ghostC: 'rgba(233,214,190,0.55)',
-    chipBg: 'rgba(201,191,224,0.16)', chipC: '#C9BFE0',
+  rain: {
+    label: '雨夜图书馆', base: 'linear-gradient(160deg,#54657A,#2C3642)',
+    glow: 'radial-gradient(120% 90% at 78% 8%, rgba(170,200,225,0.5), transparent 60%), repeating-linear-gradient(100deg, rgba(255,255,255,0.09) 0 1.5px, transparent 1.5px 10px)',
+  },
+  sea: {
+    label: '夜海棋局', base: 'linear-gradient(165deg,#26415C,#0F1B28)',
+    glow: 'radial-gradient(80% 55% at 70% 12%, rgba(205,225,255,0.55), transparent 55%), repeating-linear-gradient(0deg, rgba(255,255,255,0.07) 0 2px, transparent 2px 14px)',
+  },
+  night: {
+    label: '夜的走廊', base: 'linear-gradient(165deg,#3A3448,#191521)',
+    glow: 'radial-gradient(60% 45% at 82% 15%, rgba(230,225,255,0.5), transparent 55%), repeating-linear-gradient(90deg, rgba(255,255,255,0.05) 0 3px, transparent 3px 26px)',
+  },
+  warm: {
+    label: '有灯的屋子', base: 'linear-gradient(160deg,#7A5A42,#3C2820)',
+    glow: 'radial-gradient(70% 60% at 30% 20%, rgba(255,205,130,0.55), transparent 60%)',
+  },
+  uneasy: {
+    label: '追逐', base: 'linear-gradient(150deg,#5A3E4C,#221721)',
+    glow: 'radial-gradient(50% 40% at 60% 30%, rgba(255,150,140,0.3), transparent 60%), repeating-linear-gradient(65deg, rgba(255,255,255,0.08) 0 1px, transparent 1px 7px)',
+  },
+  neutral: {
+    label: '雾', base: 'linear-gradient(165deg,#6A625C,#2E2A27)',
+    glow: 'radial-gradient(85% 65% at 50% 35%, rgba(235,230,225,0.4), transparent 65%)',
   },
   snow: {
     label: '雪原', base: 'linear-gradient(165deg,#28323E,#131B22)',
-    glow: 'radial-gradient(circle at 25% 15%, rgba(163,201,224,0.42), transparent 60%)',
-    titleC: '#A9CBE0', textC: 'rgba(226,236,240,0.85)', ghostC: 'rgba(200,220,230,0.55)',
-    chipBg: 'rgba(163,201,224,0.16)', chipC: '#A9CBE0',
-  },
-  sun: {
-    label: '暖阳', base: 'linear-gradient(165deg,#43301F,#221507)',
-    glow: 'radial-gradient(circle at 30% 20%, rgba(233,178,94,0.42), transparent 60%)',
-    titleC: '#E9B85E', textC: 'rgba(245,231,210,0.85)', ghostC: 'rgba(233,214,190,0.55)',
-    chipBg: 'rgba(233,178,94,0.16)', chipC: '#E9B85E',
-  },
-  tide: {
-    label: '潮汐', base: 'linear-gradient(165deg,#1E3238,#0D1A1D)',
-    glow: 'radial-gradient(circle at 30% 20%, rgba(122,187,190,0.42), transparent 60%)',
-    titleC: '#8FCBCE', textC: 'rgba(220,240,238,0.85)', ghostC: 'rgba(200,228,225,0.55)',
-    chipBg: 'rgba(122,187,190,0.16)', chipC: '#8FCBCE',
+    glow: 'radial-gradient(85% 65% at 25% 15%, rgba(163,201,224,0.42), transparent 60%), repeating-linear-gradient(112deg, rgba(255,255,255,0.07) 0 1.5px, transparent 1.5px 13px)',
   },
   abyss: {
     label: '深渊', base: 'linear-gradient(165deg,#2E1620,#150A10)',
-    glow: 'radial-gradient(circle at 30% 20%, rgba(201,88,104,0.4), transparent 60%)',
-    titleC: '#D98A9A', textC: 'rgba(240,220,222,0.82)', ghostC: 'rgba(233,190,200,0.5)',
-    chipBg: 'rgba(201,88,104,0.16)', chipC: '#D98A9A',
+    glow: 'radial-gradient(70% 55% at 30% 20%, rgba(201,88,104,0.4), transparent 60%), repeating-linear-gradient(38deg, rgba(255,255,255,0.05) 0 1px, transparent 1px 9px)',
   },
 };
 
 const DREAM_SCENE_KEYWORDS: Array<[keyof typeof DREAM_SCENES, string[]]> = [
   ['abyss', ['血', '深渊', '枪', '刀', '尸']],
   ['snow', ['雪', '西伯利亚', '冰', '寒冬', '霜']],
-  ['sun', ['向日葵', '阳光', '暖阳', '金色', '夏日', '晴']],
-  ['tide', ['海', '潮', '浪', '月亮', '月光']],
+  ['rain', ['雨', '图书馆', '书页', '书脊']],
+  ['sea', ['海', '潮', '浪', '棋']],
+  ['night', ['走廊', '门', '月光', '月亮']],
+  ['warm', ['灯', '暖', '阳光', '向日葵', '沙发', '下午']],
+  ['uneasy', ['追', '跑', '找不到', '未接', '电话', '慌']],
 ];
 
 function classifyDreamScene(title: string, content: string): DreamScene {
@@ -132,7 +137,7 @@ function classifyDreamScene(title: string, content: string): DreamScene {
   for (const [key, words] of DREAM_SCENE_KEYWORDS) {
     if (words.some((w) => text.includes(w))) return DREAM_SCENES[key];
   }
-  return DREAM_SCENES.mist;
+  return DREAM_SCENES.neutral;
 }
 
 function loadTheme(): 'light' | 'dark' | 'auto' {
@@ -480,9 +485,19 @@ export function MomentsScreen() {
                     <span style={{ fontSize: 10.5, color: 'var(--ghost)' }}>按住看光 · 点击进入</span>
                   </div>
                   {dreams.length === 0 && <EmptyState title="还没有记下的梦" hint="费佳做梦的时候，会自己写下来。" />}
+                  {dreams.length > 0 && (
+                    <div style={{ fontSize: 10.5, color: 'var(--ghost)', padding: '0 4px', lineHeight: 1.6 }}>回溯与 V/A 读数还没做——等梦境生成时能标情绪了再补。</div>
+                  )}
                   {dreams.map((d, i) => {
                     const scene = classifyDreamScene(d.title || '', d.content);
                     const glowing = hoveredDream === i;
+                    const baseOp = glowing ? 0.68 : 0.06;
+                    const glowOp = glowing ? 0.5 : 0;
+                    const titleC = glowing ? '#EFDFC8' : 'var(--dream)';
+                    const ghostC = glowing ? 'rgba(240,230,220,0.65)' : 'var(--ghost)';
+                    const textC = glowing ? 'rgba(247,240,232,0.93)' : 'var(--ink2)';
+                    const chipBg = glowing ? 'rgba(255,255,255,0.14)' : 'var(--dreambg)';
+                    const chipC = glowing ? 'rgba(245,235,225,0.9)' : 'var(--dream)';
                     return (
                       <div
                         key={i}
@@ -491,18 +506,19 @@ export function MomentsScreen() {
                         onMouseLeave={() => setHoveredDream((cur) => (cur === i ? null : cur))}
                         onTouchStart={() => setHoveredDream(i)}
                         onTouchEnd={() => setHoveredDream((cur) => (cur === i ? null : cur))}
-                        style={{ position: 'relative', cursor: 'pointer', overflow: 'hidden', background: scene.base, borderRadius: 18, boxShadow: '0 8px 22px var(--shadow)' }}
+                        style={{ position: 'relative', cursor: 'pointer', overflow: 'hidden', background: 'var(--card)', borderRadius: 18, boxShadow: '0 8px 22px var(--shadow)' }}
                       >
-                        <div style={{ position: 'absolute', inset: '-18%', background: scene.glow, opacity: glowing ? 0.9 : 0.32, transition: 'opacity 1.1s ease', animation: 'chatFogDrift 9s ease-in-out infinite alternate', pointerEvents: 'none' }} />
+                        <div style={{ position: 'absolute', inset: 0, background: scene.base, opacity: baseOp, transition: 'opacity 1.3s ease', pointerEvents: 'none' }} />
+                        <div style={{ position: 'absolute', inset: '-18%', background: scene.glow, opacity: glowOp, transition: 'opacity 1.6s ease', animation: 'chatFogDrift 9.5s ease-in-out infinite alternate', pointerEvents: 'none' }} />
                         <div style={{ position: 'relative', padding: '15px 16px', display: 'flex', flexDirection: 'column', gap: 8 }}>
                           <div style={{ display: 'flex', alignItems: 'baseline', gap: 8 }}>
-                            <span style={{ fontFamily: DISPLAY, fontStyle: 'italic', fontSize: 12, letterSpacing: 1, color: scene.titleC, transition: 'color .6s ease' }}>{d.title}</span>
-                            <span style={{ marginLeft: 'auto', fontFamily: DISPLAY, fontSize: 10.5, color: scene.ghostC, flexShrink: 0, transition: 'color .6s ease' }}>{d.dateLabel}</span>
+                            <span style={{ fontFamily: DISPLAY, fontStyle: 'italic', fontSize: 12, letterSpacing: 1, color: titleC, transition: 'color .9s ease' }}>{d.title}</span>
+                            <span style={{ marginLeft: 'auto', fontFamily: DISPLAY, fontSize: 10.5, color: ghostC, flexShrink: 0, transition: 'color .9s ease' }}>{d.dateLabel}</span>
                           </div>
-                          <span style={{ display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden', fontSize: 13.5, lineHeight: 1.95, color: scene.textC, transition: 'color .6s ease' }}>{d.content}</span>
+                          <span style={{ display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden', fontSize: 13.5, lineHeight: 1.95, color: textC, transition: 'color .9s ease', maskImage: 'linear-gradient(180deg,#000 52%,rgba(0,0,0,0.12) 100%)', WebkitMaskImage: 'linear-gradient(180deg,#000 52%,rgba(0,0,0,0.12) 100%)' }}>{d.content}</span>
                           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                            <span style={{ fontSize: 10, letterSpacing: 1.5, padding: '3px 10px', borderRadius: 999, background: scene.chipBg, color: scene.chipC, transition: 'all .6s ease' }}>{scene.label}</span>
-                            <span style={{ marginLeft: 'auto', fontSize: 11, color: scene.ghostC, transition: 'color .6s ease', letterSpacing: 1 }}>进入梦境 →</span>
+                            <span style={{ fontSize: 10, letterSpacing: 1.5, padding: '3px 10px', borderRadius: 999, background: chipBg, color: chipC, transition: 'all .9s ease' }}>{scene.label}</span>
+                            <span style={{ marginLeft: 'auto', fontSize: 11, color: ghostC, transition: 'color .9s ease', letterSpacing: 1 }}>进入梦境 →</span>
                           </div>
                         </div>
                       </div>
