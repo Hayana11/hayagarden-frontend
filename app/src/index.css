@@ -111,6 +111,7 @@ button {
 @keyframes chatSheetUp { from { transform: translateY(60px); opacity: 0; } to { transform: none; opacity: 1; } }
 @keyframes chatSlideInL { from { transform: translateX(-40px); opacity: 0; } to { transform: none; opacity: 1; } }
 @keyframes chatFlash { 0% { background: var(--rosebg); } 100% { background: transparent; } }
+@keyframes chatFogDrift { from { transform: translateX(-6%); } to { transform: translateX(6%); } }
 
 .chat-msg .chat-msg-acts {
   opacity: 0;
