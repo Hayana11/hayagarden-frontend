@@ -14,6 +14,7 @@ inspect_channel = channel_intelligence.inspect_channel
 models_url_from_api_url = channel_intelligence.models_url_from_api_url
 origin_from_url = channel_intelligence.origin_from_url
 query_channel_balance = channel_intelligence.query_channel_balance
+query_channel_account_balance = channel_intelligence.query_channel_account_balance
 
 
 class ChannelIntelligenceTests(unittest.TestCase):
@@ -141,6 +142,66 @@ class ChannelIntelligenceTests(unittest.TestCase):
         )
         self.assertFalse(result["supported"])
         self.assertEqual(result["error"], "unsupported")
+
+    def test_queries_newapi_account_balance_with_revocable_access_token(self):
+        seen = {}
+
+        def fake_request(method, url, **kwargs):
+            seen.update({"method": method, "url": url, "headers": kwargs.get("headers")})
+            return {
+                "success": True,
+                "data": {
+                    "quota": 10_000_000,
+                    "used_quota": 2_000_000,
+                },
+            }, None
+
+        result = query_channel_account_balance(
+            {"base_url": "https://relay.example.com/v1/messages"},
+            credential_kind="access_token",
+            credential_secret="console-access-token",
+            user_id="27",
+            request_json=fake_request,
+        )
+
+        self.assertTrue(result["supported"])
+        self.assertEqual(result["remaining_usd"], 20.0)
+        self.assertEqual(result["used_usd"], 4.0)
+        self.assertEqual(result["total_usd"], 24.0)
+        self.assertEqual(seen["url"], "https://relay.example.com/api/user/self")
+        self.assertEqual(seen["headers"]["Authorization"], "console-access-token")
+        self.assertEqual(seen["headers"]["New-Api-User"], "27")
+        self.assertNotIn("console-access-token", repr(result))
+
+    def test_account_balance_keeps_only_session_cookie_for_compatibility(self):
+        seen = {}
+
+        def fake_request(method, url, **kwargs):
+            seen.update(kwargs)
+            return {"success": True, "data": {"quota": 500_000, "used_quota": 0}}, None
+
+        result = query_channel_account_balance(
+            {"base_url": "https://relay.example.com/v1"},
+            credential_kind="session_cookie",
+            credential_secret="session=console-secret; theme=dark",
+            user_id="27",
+            request_json=fake_request,
+        )
+
+        self.assertTrue(result["supported"])
+        self.assertEqual(seen["headers"]["Cookie"], "session=console-secret")
+        self.assertNotIn("theme", seen["headers"]["Cookie"])
+        self.assertNotIn("console-secret", repr(result))
+
+    def test_account_balance_rejects_invalid_user_id_before_request(self):
+        with self.assertRaises(channel_intelligence.ChannelInspectionError):
+            query_channel_account_balance(
+                {"base_url": "https://relay.example.com/v1"},
+                credential_kind="session_cookie",
+                credential_secret="session=console-secret",
+                user_id="not-a-number",
+                request_json=lambda *args, **kwargs: self.fail("request must not run"),
+            )
 
 
 if __name__ == "__main__":
