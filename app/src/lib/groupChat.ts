@@ -12,6 +12,8 @@ export interface GroupMessage {
   thinking: string;
   meta: string;
   created_at: string;
+  file_url?: string;
+  file_name?: string;
 }
 
 export interface AgentStatus {
@@ -25,6 +27,17 @@ export interface GroupStatus {
   agents: Record<GroupAgent, AgentStatus>;
 }
 
+export function enrichGroupMessage(message: GroupMessage): GroupMessage {
+  if (!message.meta) return message;
+  try {
+    const parsed = JSON.parse(message.meta) as { file_url?: string; file_name?: string };
+    if (parsed.file_url) {
+      return { ...message, file_url: parsed.file_url, file_name: parsed.file_name || '' };
+    }
+  } catch { /* non-JSON meta */ }
+  return message;
+}
+
 export const getGroupStatus = () =>
   http.get<GroupStatus>('/api/group-chat/status');
 
@@ -32,13 +45,25 @@ export const getGroupMessages = (room: GroupRoom) =>
   http.get<{ messages: GroupMessage[]; has_more_before: boolean }>(
     '/api/group-chat/messages',
     { room, limit: 120 },
-  );
+  ).then((result) => ({
+    ...result,
+    messages: result.messages.map(enrichGroupMessage),
+  }));
 
-export const sendGroupMessage = (room: GroupRoom, content: string) =>
+export const sendGroupMessage = (
+  room: GroupRoom,
+  content: string,
+  extra?: { fileUrl?: string; fileName?: string },
+) =>
   http.post<{ ok: boolean; message: GroupMessage }>('/api/group-chat/send', {
     room,
     content,
-  });
+    file_url: extra?.fileUrl || '',
+    file_name: extra?.fileName || '',
+  }).then((result) => ({
+    ...result,
+    message: enrichGroupMessage(result.message),
+  }));
 
 export const clearGroupRoom = (room: GroupRoom) =>
   http.post<{ ok: boolean; deleted: number }>('/api/group-chat/clear', {

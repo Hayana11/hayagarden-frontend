@@ -2,7 +2,8 @@
 // Codex's own window, and the group room, plus a 游戏室 module that's an
 // honest locked placeholder (no backend for 谁是卧底/飞行棋 exists yet).
 import { useEffect, useState, type CSSProperties } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import { Link } from 'react-router-dom';
+import { BottomNav } from '../components/BottomNav';
 import { getGroupStatus, type AgentStatus } from '../lib/groupChat';
 
 const SETTINGS_KEY = 'fyodor-chat-settings';
@@ -69,7 +70,6 @@ function GameCard({ title, hint, onLocked }: { title: string; hint: string; onLo
 }
 
 export function ContactsScreen() {
-  const navigate = useNavigate();
   const [settings, setSettings] = useState<Settings>(loadSettings);
   const [sysDark, setSysDark] = useState(() => window.matchMedia?.('(prefers-color-scheme: dark)').matches ?? false);
   const [codexStatus, setCodexStatus] = useState<AgentStatus>(EMPTY_CODEX);
@@ -111,9 +111,8 @@ export function ContactsScreen() {
         background: 'var(--bg)', color: 'var(--ink)', fontFamily: SERIF, transition: 'background .3s,color .3s',
       }}
     >
-      <div style={{ flexShrink: 0, background: 'var(--card)', boxShadow: '0 6px 18px var(--shadow)' }}>
+      <div style={{ flexShrink: 0, background: 'rgba(255,255,255,0.97)', boxShadow: '0 6px 18px var(--shadow)' }}>
         <div style={{ maxWidth: 430, margin: '0 auto', display: 'flex', alignItems: 'center', gap: 10, padding: '14px 16px 12px' }}>
-          <button type="button" onClick={() => navigate('/')} aria-label="返回" style={{ cursor: 'pointer', border: 'none', background: 'transparent', width: 34, height: 34, borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--mut)', fontSize: 20 }}>‹</button>
           <span style={{ fontFamily: DISPLAY, fontSize: 18, fontWeight: 600, letterSpacing: 2, color: 'var(--ink)' }}>通讯录</span>
           <button type="button" onClick={() => patchSettings({ theme: effTheme === 'dark' ? 'light' : 'dark' })} aria-label="切换主题" style={{ marginLeft: 'auto', cursor: 'pointer', border: 'none', background: 'transparent', width: 34, height: 34, borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--mut)' }}>
             {effTheme === 'light' ? (
@@ -126,7 +125,7 @@ export function ContactsScreen() {
       </div>
 
       <div className="hide-scrollbar" style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
-        <div style={{ maxWidth: 430, margin: '0 auto', padding: '20px 16px 40px', display: 'flex', flexDirection: 'column', gap: 26 }}>
+        <div style={{ maxWidth: 430, margin: '0 auto', padding: '20px 16px 24px', display: 'flex', flexDirection: 'column', gap: 26 }}>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
             <div style={{ fontFamily: DISPLAY, fontSize: 11, letterSpacing: 3, color: 'var(--ghost)', padding: '0 2px' }}>聊天 · CHAT</div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
@@ -170,6 +169,8 @@ export function ContactsScreen() {
           </div>
         </div>
       </div>
+
+      <BottomNav embedded />
 
       {toast && (
         <div style={{ position: 'fixed', left: 0, right: 0, bottom: 28, zIndex: 80, display: 'flex', justifyContent: 'center', pointerEvents: 'none' }}>
