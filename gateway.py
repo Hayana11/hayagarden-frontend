@@ -2985,6 +2985,57 @@ CC_ALLOWED_TOOLS = ','.join([
 # 混进常驻会话的上下文里语义上是错的。group-chat 的 claude 房间同理，暂不接入。
 _CC_RESIDENT = cc_resident.ResidentSession(CC_CWD, CC_ALLOWED_TOOLS, CC_CWD + '/cc-tools.json')
 
+# 跨窗口记忆：私聊(/chat)和群聊的暖色房间是"同一个人"，记忆该是通的，
+# 但要让模型自己知道此刻在哪个窗口说话（system prompt 里的窗口说明负责这个）。
+# 这里只做"最近发生了什么"的单向快照注入——不追加进对方那个窗口自己的正式历史，
+# 只是让这一轮看得到，防止"毫不知情"的割裂感。today 边界跟 build_messages() 一致。
+_CROSS_SURFACE_WINDOW_SQL = "date(created_at) >= date('now', '+8 hours', '-1 day')"
+
+
+def _cross_surface_recap_from_group_chat(limit=8):
+    try:
+        conn = get_db()
+        rows = conn.execute(
+            "SELECT room, author, content, created_at FROM group_chat_messages "
+            "WHERE room IN ('claude','group') AND author != 'system' AND " + _CROSS_SURFACE_WINDOW_SQL +
+            " ORDER BY id DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        conn.close()
+    except Exception:
+        return ''
+    if not rows:
+        return ''
+    labels = {'user': '哈娅', 'claude': '你（暖色气泡）', 'codex': 'Codex（蓝色气泡）'}
+    lines = []
+    for r in reversed(rows):
+        room_label = '群聊' if r['room'] == 'group' else '群聊里的暖色单聊房'
+        lines.append('[%s·%s] %s：%s' % (room_label, (r['created_at'] or '')[-8:-3],
+                                         labels.get(r['author'], r['author']), (r['content'] or '')[:200]))
+    return ('【刚才在群聊窗口发生的事，供你参考——她随时可能提起，别表现得毫不知情】\n'
+            + NL.join(lines) + NL + NL)
+
+
+def _cross_surface_recap_from_solo_chat(limit=8):
+    try:
+        conn = get_db()
+        rows = conn.execute(
+            "SELECT author, content, created_at FROM chat_messages WHERE " + _CROSS_SURFACE_WINDOW_SQL +
+            " ORDER BY id DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        conn.close()
+    except Exception:
+        return ''
+    if not rows:
+        return ''
+    lines = []
+    for r in reversed(rows):
+        who = '你（私聊窗口）' if r['author'] in ('fyodor', 'claude', 'assistant') else '哈娅'
+        lines.append('[%s] %s：%s' % ((r['created_at'] or '')[-8:-3], who, (r['content'] or '')[:200]))
+    return ('【刚才在私聊窗口发生的事，供你参考——她随时可能提起，别表现得毫不知情】\n'
+            + NL.join(lines) + NL + NL)
+
 
 def _cc_resident_stream_gen(system, messages):
     """常驻版 _cc_prepare + _cc_stream_gen 合体：只在每次真正respawn（冷启动）时
@@ -3001,7 +3052,10 @@ def _cc_resident_stream_gen(system, messages):
         + '在回复正文的最后另起一行，写一个或多个 [[SAVE: 内容]] 标记，'
         + '用一句话概括要保存的内容。这些标记会被自动处理，不会显示给哈娅。'
         + '正文本身不要提及"我已记录"之类的话。'
-        + NL + NL + '每一轮都请以费奥多尔的身份自然地回复哈娅最新的消息，只输出回复内容本身，不要任何前缀。')
+        + NL + NL + '每一轮都请以费奥多尔的身份自然地回复哈娅最新的消息，只输出回复内容本身，不要任何前缀。'
+        + NL + NL + '【此刻你在哪里】你现在在私聊窗口——只有你和哈娅两个人，Codex 不在场。'
+        + '这和群聊房间是同一个你，记忆是共通的：如果她在群聊里提过的事，你不该表现得毫不知情；'
+        + '但语气和场合要分清楚——私聊窗口没有第三方在场的顾虑，群聊时说话要考虑到 Codex 也能看见。')
 
     if isinstance(system, list) and system:
         first = system[0]
@@ -3023,7 +3077,9 @@ def _cc_resident_stream_gen(system, messages):
     last_text = last_content if isinstance(last_content, str) else ' '.join(
         b.get('text', '') for b in last_content if isinstance(b, dict))
     recall_blk, _ = _recall_memories(last_text) if last_text else ('', [])
-    dynamic_prefix = recall_blk + (('【当前状态】\n' + dynamic_text + '\n\n') if dynamic_text else '')
+    dynamic_prefix = (recall_blk
+                       + _cross_surface_recap_from_group_chat()
+                       + (('【当前状态】\n' + dynamic_text + '\n\n') if dynamic_text else ''))
 
     env = dict(os.environ)
     env['CLAUDE_CODE_OAUTH_TOKEN'] = CC_TOKEN
@@ -3488,7 +3544,9 @@ def _group_chat_context(room, agent):
         '这是你和小猫单独聊天的房间，其他 AI 不在场。'
     )
     identity_note = (
-        '你此刻通过暖色气泡发言。' if agent == 'claude'
+        '你此刻通过暖色气泡发言，这和她私聊窗口（/chat）里的你是同一个人，记忆是通的——'
+        '私聊里发生的事，不该在这里表现得毫不知情，但注意场合：私聊没有第三方在场的顾虑，'
+        '这里 Codex 也能看见，别把只该在私聊说的话搬过来。' if agent == 'claude'
         else '你此刻通过蓝色气泡发言。'
     )
     rules = (
@@ -3499,8 +3557,10 @@ def _group_chat_context(room, agent):
         + '只输出此刻自然想说的话；可以回应小猫，也可以回应群聊里另一条线路。'
         + '这是日常聊天，不是代码任务；不要运行命令、读写文件、联网搜索或调用任何工具，只输出聊天正文。'
     )
+    cross_recap = _cross_surface_recap_from_solo_chat() if agent == 'claude' else ''
     prompt = (
-        'think hard\n以下是这个独立聊天室按时间排列的最近消息：\n\n'
+        'think hard\n' + cross_recap
+        + '以下是这个独立聊天室按时间排列的最近消息：\n\n'
         + (timeline or '（聊天室还没有消息）')
         + '\n\n这是一份外部聊天室的最新快照，可能与当前线程中已有内容重叠，'
         + '只用于同步另一条线路的新发言；不要重复回答已经处理过的旧消息。'
