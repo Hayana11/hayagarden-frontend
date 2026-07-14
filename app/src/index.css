@@ -268,6 +268,34 @@ button {
 .config-endpoint-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
 .config-endpoint-actions button { padding: 7px 14px; border-radius: 999px; background: #F6EFEC; color: #6B5A55; font-size: 12.5px; letter-spacing: 1px; cursor: pointer; }
 .config-endpoint-actions button.danger { background: rgba(194,84,80,.08); color: #C25450; }
+.config-balance { margin-bottom: 13px; padding: 14px; border-radius: 16px; background: linear-gradient(135deg, rgba(111,155,114,.13), rgba(246,239,236,.72)); }
+.config-balance > div:first-child { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.config-balance > div:first-child span { color: #7F9D7D; font-size: 11px; letter-spacing: 1px; }
+.config-balance > div:first-child strong { color: #4F7454; font: 22px var(--font-serif-display); }
+.config-balance dl { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 8px; margin: 12px 0 0; }
+.config-balance dl div { min-width: 0; }
+.config-balance dt { color: #A28F89; font-size: 9.5px; }
+.config-balance dd { margin: 3px 0 0; color: #675752; font: 11px var(--font-mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.config-balance > small { display: block; margin-top: 9px; color: #A28F89; font-size: 9.5px; }
+.config-balance.unavailable { display: flex; align-items: center; justify-content: space-between; gap: 12px; background: #F6EFEC; }
+.config-balance.unavailable span { color: #A28F89; font-size: 10.5px; }
+.config-balance.unavailable strong { color: #7E6C67; font-size: 11px; text-align: right; }
+.config-intel { margin-top: 11px; }
+.config-intel-summary { display: flex; flex-wrap: wrap; gap: 7px; }
+.config-intel-summary span { display: inline-flex; align-items: center; gap: 5px; padding: 5px 9px; border-radius: 999px; background: #F6EFEC; color: #786762; font-size: 10.5px; }
+.config-intel-summary i, .config-intel-model > i { width: 7px; height: 7px; border-radius: 50%; background: #D5C9C5; }
+.config-intel-summary i.ok, .config-intel-model > i.online { background: #6F9B72; box-shadow: 0 0 0 3px rgba(111,155,114,.12); }
+.config-intel-summary i.unknown, .config-intel-model > i.unknown { background: #D1A45E; }
+.config-intel-model > i.offline { background: #C25450; box-shadow: 0 0 0 3px rgba(194,84,80,.1); }
+.config-intel-models { display: grid; gap: 6px; max-height: 330px; margin-top: 9px; overflow-y: auto; }
+.config-intel-model { display: grid; grid-template-columns: 8px minmax(0,1fr) auto; align-items: center; gap: 9px; padding: 9px 10px; border: 1px solid #F0E6E2; border-radius: 12px; background: rgba(255,255,255,.58); }
+.config-intel-model span { min-width: 0; }
+.config-intel-model strong, .config-intel-model small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.config-intel-model strong { color: #554945; font: 11.5px var(--font-mono); }
+.config-intel-model small { margin-top: 2px; color: #A28F89; font-size: 9.5px; }
+.config-intel-model em { color: #87736D; font-size: 10.5px; font-style: normal; text-align: right; }
+.config-intel-model em small { margin-top: 1px; }
+.config-intel-models > p, .config-intel-note { margin: 9px 2px 0; color: #A99590; font-size: 10.5px; line-height: 1.6; }
 .config-priority { display: flex; align-items: center; gap: 8px; margin-top: 15px; color: #8C7B76; font-size: 12.5px; }
 .config-priority > button.on { width: 42px; height: 23px; padding: 0; border-radius: 999px; background: #B76E79; position: relative; }
 .config-priority > button.on i { position: absolute; top: 2px; left: 21px; width: 19px; height: 19px; border-radius: 50%; background: #fff; box-shadow: 0 1px 4px rgba(0,0,0,.2); }

@@ -2048,6 +2048,8 @@ def _init_relay_presets_table():
         conn.execute("ALTER TABLE relay_presets ADD COLUMN default_model TEXT DEFAULT ''")
     if 'capabilities' not in cols:
         conn.execute("ALTER TABLE relay_presets ADD COLUMN capabilities TEXT DEFAULT ''")
+    if 'status_url' not in cols:
+        conn.execute("ALTER TABLE relay_presets ADD COLUMN status_url TEXT DEFAULT ''")
     conn.commit()
     conn.close()
 
@@ -2066,7 +2068,7 @@ def get_relay_presets():
         except Exception:
             pass
     conn = get_db()
-    rows = conn.execute('SELECT id,name,url,key,default_model,capabilities,created_at FROM relay_presets ORDER BY created_at').fetchall()
+    rows = conn.execute('SELECT id,name,url,key,default_model,capabilities,status_url,created_at FROM relay_presets ORDER BY created_at').fetchall()
     conn.close()
     from relay.capabilities import get_caps as _get_caps
     presets = []
@@ -2089,6 +2091,7 @@ def get_relay_presets():
             'active': is_active,
             'default_model': r['default_model'] or '',
             'capabilities': caps,
+            'status_url': r['status_url'] or '',
         })
     return jsonify({'ok': True, 'presets': presets, 'active_url': active_url})
 
@@ -2112,13 +2115,75 @@ def add_relay_preset():
         caps_json = ''  # 未提供 → 前端展示时按 URL 自动检测
     conn = get_db()
     cur = conn.execute(
-        'INSERT INTO relay_presets (name, url, key, default_model, capabilities) VALUES (?,?,?,?,?)',
-        (name, url, key, (data.get('default_model') or '').strip(), caps_json)
+        'INSERT INTO relay_presets (name, url, key, default_model, capabilities, status_url) VALUES (?,?,?,?,?,?)',
+        (name, url, key, (data.get('default_model') or '').strip(), caps_json,
+         (data.get('status_url') or '').strip())
     )
     conn.commit()
     preset_id = cur.lastrowid
     conn.close()
     return jsonify({'ok': True, 'id': preset_id})
+
+
+@app.route('/api/config/relay-presets/<int:preset_id>/intelligence', methods=['GET'])
+def inspect_relay_preset(preset_id):
+    """Return model, pricing and health metadata without returning the API key."""
+    _init_relay_presets_table()
+    conn = get_db()
+    row = conn.execute(
+        'SELECT id,name,url,key,status_url FROM relay_presets WHERE id=?',
+        (preset_id,),
+    ).fetchone()
+    conn.close()
+    if not row:
+        return jsonify({'error': 'not found'}), 404
+
+    from relay.channel_intelligence import ChannelInspectionError, inspect_channel
+    try:
+        result = inspect_channel(
+            {
+                'id': row['id'],
+                'name': row['name'],
+                'base_url': row['url'],
+                'api_key': row['key'] or '',
+                'status_url': row['status_url'] or '',
+            },
+            include_status=request.args.get('status', '1') != '0',
+            force=request.args.get('refresh', '0') == '1',
+        )
+        return jsonify(result)
+    except ChannelInspectionError as exc:
+        return jsonify({'ok': False, 'error': str(exc)}), 502
+    except Exception as exc:
+        return jsonify({'ok': False, 'error': str(exc)}), 500
+
+
+@app.route('/api/config/relay-presets/<int:preset_id>/balance', methods=['GET'])
+def get_relay_preset_balance(preset_id):
+    """Query the saved API key's NewAPI quota without returning the key."""
+    _init_relay_presets_table()
+    conn = get_db()
+    row = conn.execute(
+        'SELECT id,name,url,key FROM relay_presets WHERE id=?',
+        (preset_id,),
+    ).fetchone()
+    conn.close()
+    if not row:
+        return jsonify({'error': 'not found'}), 404
+
+    from relay.channel_intelligence import ChannelInspectionError, query_channel_balance
+    try:
+        balance = query_channel_balance({
+            'id': row['id'],
+            'name': row['name'],
+            'base_url': row['url'],
+            'api_key': row['key'] or '',
+        })
+        return jsonify({'ok': True, 'balance': balance})
+    except ChannelInspectionError as exc:
+        return jsonify({'ok': False, 'error': str(exc)}), 502
+    except Exception as exc:
+        return jsonify({'ok': False, 'error': str(exc)}), 500
 
 @app.route('/api/config/relay-presets/<int:preset_id>', methods=['DELETE'])
 def delete_relay_preset(preset_id):
