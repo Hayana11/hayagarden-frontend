@@ -34,8 +34,10 @@ After switching the whole checkout to the exact commit, it restarts
 health endpoint. A failed health check rolls the checkout and services back
 to the previous commit.
 
-The dashboard is built from the target commit in the temporary worktree and
-installed together with the Python services. The deploy also creates the
+When `app/` changed (including its lockfile), the dashboard gets a clean
+`npm ci` and build inside the target commit's temporary worktree, then is
+installed together with the Python services. Backend-only releases reuse the
+current verified dashboard and therefore do not require npm. The deploy also creates the
 relay credential-vault key at `/etc/hayagarden/relay-credentials.key` with
 mode `600` when it does not already exist. This key is deliberately outside
 the repository, database, and regular backup archive: database-only leaks
