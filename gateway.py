@@ -109,6 +109,7 @@ import attachment_store
 import tool_drawers
 import group_chat_store
 import codex_app_server
+import cc_resident
 
 group_chat_store.ensure_schema(DB_PATH)
 
@@ -2979,6 +2980,76 @@ CC_ALLOWED_TOOLS = ','.join([
     'mcp__home__search_memories',  # M3: 官端主动翻 posts 记忆库
 ])
 
+# 常驻进程：只服务 /chat（Fyodor 独聊）的真实多轮对话。日记生成等一次性调用
+# 仍走下面的 claude_code_call()/_cc_stream_gen 一次性管道——那些不是"轮对话"，
+# 混进常驻会话的上下文里语义上是错的。group-chat 的 claude 房间同理，暂不接入。
+_CC_RESIDENT = cc_resident.ResidentSession(CC_CWD, CC_ALLOWED_TOOLS, CC_CWD + '/cc-tools.json')
+
+
+def _cc_resident_stream_gen(system, messages):
+    """常驻版 _cc_prepare + _cc_stream_gen 合体：只在每次真正respawn（冷启动）时
+    把当天完整对话历史发一次，之后每轮只发新增内容——命中缓存，不再逐轮重发历史。
+    yield 的事件形状和 _cc_stream_gen 完全一致，chat_stream() 的消费循环不用改。"""
+    if not CC_TOKEN:
+        raise RuntimeError('未配置订阅 token，请先在 api 设置页填入')
+    if not messages or messages[-1].get('role') != 'user':
+        raise RuntimeError('resident: 最后一条消息不是待回复的用户轮')
+    os.makedirs(CC_CWD, exist_ok=True)
+
+    save_instr = (NL + NL
+        + '【记忆存储】当你认为对话中出现了值得长期记住的信息时，'
+        + '在回复正文的最后另起一行，写一个或多个 [[SAVE: 内容]] 标记，'
+        + '用一句话概括要保存的内容。这些标记会被自动处理，不会显示给哈娅。'
+        + '正文本身不要提及"我已记录"之类的话。'
+        + NL + NL + '每一轮都请以费奥多尔的身份自然地回复哈娅最新的消息，只输出回复内容本身，不要任何前缀。')
+
+    if isinstance(system, list) and system:
+        first = system[0]
+        static_text = first.get('text', '') if isinstance(first, dict) else ''
+        dynamic_text = '\n'.join(
+            b.get('text', '') for b in system[1:]
+            if isinstance(b, dict) and b.get('text')
+        )
+    elif isinstance(system, list):
+        static_text = ''
+        dynamic_text = ''
+    else:
+        static_text = system or ''
+        dynamic_text = ''
+
+    full_system = static_text + save_instr
+
+    last_content = messages[-1].get('content')
+    last_text = last_content if isinstance(last_content, str) else ' '.join(
+        b.get('text', '') for b in last_content if isinstance(b, dict))
+    recall_blk, _ = _recall_memories(last_text) if last_text else ('', [])
+    dynamic_prefix = recall_blk + (('【当前状态】\n' + dynamic_text + '\n\n') if dynamic_text else '')
+
+    env = dict(os.environ)
+    env['CLAUDE_CODE_OAUTH_TOKEN'] = CC_TOKEN
+    env.pop('ANTHROPIC_API_KEY', None)
+
+    is_cold = _CC_RESIDENT.ensure_alive(full_system, env)
+
+    if is_cold:
+        # 冷启动（刚 respawn，进程里还没有任何历史）：把当天完整对话补一次，
+        # 跟旧的一次性管道完全一样的内容，只是这是"唯一一次"，不是每轮都发。
+        convo = messages_to_text(messages)
+        content = (dynamic_prefix
+                   + '以下是你们今天到目前为止的对话记录：' + NL + NL + convo + NL + NL
+                   + '请回复最后一条消息。')
+    else:
+        # 热身状态：进程自己已经有完整上下文，只需要发这一轮新增的内容。
+        if isinstance(last_content, str):
+            content = dynamic_prefix + last_content if dynamic_prefix else last_content
+        elif dynamic_prefix:
+            content = [{'type': 'text', 'text': dynamic_prefix}] + list(last_content)
+        else:
+            content = last_content
+
+    for evt, payload in _CC_RESIDENT.send_turn(content):
+        yield evt, payload
+
 
 def _strip_mcp_prefix(name):
     """mcp__home__light_on → light_on（前端 TOOL_LABELS 认识家里的名字）"""
@@ -3596,9 +3667,8 @@ def chat_stream():
                         build_system, get_db, user_turn=_is_user_turn
                     )
                     messages = build_messages()
-                    full_system, prompt, env = _cc_prepare(system, messages)
                     cc_tool_calls = []
-                    for evt, payload in _cc_stream_gen(full_system, prompt, env):
+                    for evt, payload in _cc_resident_stream_gen(system, messages):
                         if evt == 'text':
                             yield 'data: ' + json.dumps({'t': 'text', 'd': payload}) + SSE_END
                         elif evt == 'think':
