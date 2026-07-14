@@ -15,6 +15,7 @@ models_url_from_api_url = channel_intelligence.models_url_from_api_url
 origin_from_url = channel_intelligence.origin_from_url
 query_channel_balance = channel_intelligence.query_channel_balance
 query_channel_account_balance = channel_intelligence.query_channel_account_balance
+query_channel_daily_costs = channel_intelligence.query_channel_daily_costs
 
 
 class ChannelIntelligenceTests(unittest.TestCase):
@@ -202,6 +203,41 @@ class ChannelIntelligenceTests(unittest.TestCase):
                 user_id="not-a-number",
                 request_json=lambda *args, **kwargs: self.fail("request must not run"),
             )
+
+    def test_daily_costs_aggregate_quota_by_day(self):
+        import datetime
+        seen = {}
+        tz = datetime.timezone(datetime.timedelta(hours=8))
+        today = datetime.datetime.now(tz).replace(hour=12, minute=0, second=0, microsecond=0)
+        yesterday = today - datetime.timedelta(days=1)
+
+        def fake_request(method, url, **kwargs):
+            seen["url"] = url
+            seen["headers"] = kwargs.get("headers") or {}
+            return {
+                "success": True,
+                "data": [
+                    {"created_at": int(yesterday.timestamp()), "quota": 500_000, "count": 10},
+                    {"created_at": int(yesterday.timestamp()), "quota": 250_000, "count": 5},
+                    {"created_at": int(today.timestamp()), "quota": 100_000, "count": 2},
+                ],
+            }, None
+
+        result = query_channel_daily_costs(
+            {"base_url": "https://relay.example.com/v1"},
+            credential_kind="access_token",
+            credential_secret="console-access-token",
+            user_id="27",
+            days=2,
+            request_json=fake_request,
+        )
+
+        self.assertTrue(result["supported"])
+        self.assertEqual(result["total_cost"], 1.7)
+        self.assertEqual(result["days"][-1]["cost"], 0.2)
+        self.assertEqual(result["days"][-1]["count"], 2)
+        self.assertIn("/api/data/self", seen["url"])
+        self.assertEqual(seen["headers"]["New-Api-User"], "27")
 
 
 if __name__ == "__main__":

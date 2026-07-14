@@ -24,6 +24,7 @@ import {
   type ConfigModel,
   type ConfigUsageSummary,
   type DailyUsage,
+  type DailyUsageResult,
   type EndpointCapabilities,
   type KeyStatus,
   type RelayBalance,
@@ -81,6 +82,26 @@ async function getKeyStatusWithHostRtt(): Promise<{ status: KeyStatus; hostRttMs
   return { status, hostRttMs: Math.round(performance.now() - started) };
 }
 
+function fmtCost(value: number): string {
+  if (value <= 0) return '¥0';
+  if (value >= 100) return `¥${value.toFixed(1)}`;
+  return `¥${value.toFixed(1)}`;
+}
+
+function dailyMetric(item: DailyUsage, mode: DailyUsageResult['mode']): number {
+  if (mode === 'cost') return item.cost ?? 0;
+  return item.count;
+}
+
+function costTier(value: number, max: number): number {
+  if (value <= 0 || max <= 0) return 0;
+  const ratio = value / max;
+  if (ratio < 0.18) return 1;
+  if (ratio < 0.4) return 2;
+  if (ratio < 0.68) return 3;
+  return 4;
+}
+
 export function SettingsScreen() {
   const navigate = useNavigate();
   const [provider, setProvider] = useState<'api_relay' | 'claude_code'>('api_relay');
@@ -93,7 +114,13 @@ export function SettingsScreen() {
   const [availableModels, setAvailableModels] = useState<string[]>([]);
   const [currentModel, setCurrentModel] = useState('');
   const [usage, setUsage] = useState<ConfigUsageSummary | null>(null);
-  const [daily, setDaily] = useState<DailyUsage[]>([]);
+  const [dailyUsage, setDailyUsage] = useState<DailyUsageResult>({
+    mode: 'requests',
+    days: [],
+    relays: [],
+    totalCost: null,
+    totalCount: 0,
+  });
   const [range, setRange] = useState<7 | 30>(30);
   const [selectedDay, setSelectedDay] = useState('');
   const [officialExpanded, setOfficialExpanded] = useState(false);
@@ -169,8 +196,8 @@ export function SettingsScreen() {
     if (availableResult.status === 'fulfilled') setAvailableModels(availableResult.value);
     if (usageResult.status === 'fulfilled') setUsage(usageResult.value);
     if (dailyResult.status === 'fulfilled') {
-      setDaily(dailyResult.value);
-      setSelectedDay((current) => current || dailyResult.value.at(-1)?.date || '');
+      setDailyUsage(dailyResult.value);
+      setSelectedDay((current) => current || dailyResult.value.days.at(-1)?.date || '');
     }
     if (groupStatusResult.status === 'fulfilled') setCodexStatus(groupStatusResult.value.agents.codex);
     if (results.some((result) => result.status === 'rejected')) setWarning('部分实时数据暂时不可用，已保留成功读取的配置。');
@@ -182,10 +209,12 @@ export function SettingsScreen() {
   const activeRelay = relays.find((relay) => relay.active) || null;
   const currentEndpointName = provider === 'claude_code' ? 'Claude Code 订阅' : activeRelay?.name || '未选择中转站';
   const currentReady = provider === 'claude_code' ? ccTokenSet : Boolean(activeRelay && keyStatus);
+  const daily = dailyUsage.days;
+  const dailyMode = dailyUsage.mode;
   const shownDaily = range === 7 ? daily.slice(-7) : daily;
   const selectedUsage = shownDaily.find((item) => item.date === selectedDay) || shownDaily.at(-1);
-  const maxDaily = Math.max(1, ...shownDaily.map((item) => item.count));
-  const totalRequests = shownDaily.reduce((sum, item) => sum + item.count, 0);
+  const maxDaily = Math.max(1, ...shownDaily.map((item) => dailyMetric(item, dailyMode)));
+  const totalRequests = dailyMode === 'cost' ? dailyUsage.totalCount : shownDaily.reduce((sum, item) => sum + item.count, 0);
 
   const unifiedModels = useMemo(() => {
     const byId = new Map<string, ConfigModel>();
@@ -429,22 +458,68 @@ export function SettingsScreen() {
 
         <SectionLabel>USAGE · 用量统计</SectionLabel>
         <section className="config-card config-usage">
-          <div className="config-card-heading"><h2>用量日历</h2><span>按天 · 对话请求</span></div>
+          <div className="config-card-heading"><h2>用量日历</h2><span>{dailyMode === 'cost' ? '按天 · 消费金额' : '按天 · 对话请求'}</span></div>
           <div className="config-segmented">
             <button type="button" className={range === 7 ? 'active' : ''} onClick={() => { setRange(7); setSelectedDay(daily.at(-1)?.date || ''); }}>一周</button>
             <button type="button" className={range === 30 ? 'active' : ''} onClick={() => { setRange(30); setSelectedDay(daily.at(-1)?.date || ''); }}>一个月</button>
           </div>
           {range === 7 ? (
             <div className="config-week-bars">
-              {shownDaily.map((item) => <button type="button" key={item.date} onClick={() => setSelectedDay(item.date)}><span>{item.count}</span><i className={selectedUsage?.date === item.date ? 'selected' : ''} style={{ height: `${Math.max(8, Math.round((item.count / maxDaily) * 118))}px` }} /><small>{shortDate(item.date)}</small></button>)}
+              {shownDaily.map((item) => {
+                const metric = dailyMetric(item, dailyMode);
+                const label = dailyMode === 'cost' ? fmtCost(metric) : String(metric);
+                return (
+                  <button type="button" key={item.date} onClick={() => setSelectedDay(item.date)}>
+                    <span>{label}</span>
+                    <i className={selectedUsage?.date === item.date ? 'selected' : ''} style={{ height: `${Math.max(8, Math.round((metric / maxDaily) * 118))}px` }} />
+                    <small>{shortDate(item.date)}</small>
+                  </button>
+                );
+              })}
             </div>
           ) : (
             <div className="config-month-grid">
-              {shownDaily.map((item) => <button type="button" key={item.date} onClick={() => setSelectedDay(item.date)}><span className={selectedUsage?.date === item.date ? 'selected' : ''}><i style={{ height: `${Math.max(5, Math.round((item.count / maxDaily) * 100))}%` }} /><em>{item.count}</em></span><small>{shortDate(item.date)}</small></button>)}
+              {shownDaily.map((item) => {
+                const metric = dailyMetric(item, dailyMode);
+                const label = dailyMode === 'cost' ? fmtCost(metric) : String(metric);
+                const tier = dailyMode === 'cost' ? costTier(metric, maxDaily) : 0;
+                return (
+                  <button type="button" key={item.date} onClick={() => setSelectedDay(item.date)}>
+                    <span className={`${selectedUsage?.date === item.date ? 'selected' : ''}${tier ? ` cost-tier-${tier}` : ''}`}>
+                      {dailyMode === 'cost'
+                        ? <em>{label}</em>
+                        : <><i style={{ height: `${Math.max(5, Math.round((metric / maxDaily) * 100))}%` }} /><em>{label}</em></>}
+                    </span>
+                    <small>{shortDate(item.date)}</small>
+                  </button>
+                );
+              })}
             </div>
           )}
-          <div className="config-day-detail">{selectedUsage ? `${shortDate(selectedUsage.date)} · ${selectedUsage.count} 次请求` : '暂无用量数据'}</div>
-          <div className="config-usage-summary"><span>合计 <b>{totalRequests}</b> 次请求</span><span>今日 <b>{usage?.todayMessages ?? 0}</b> 条消息</span><span>约 <b>{fmtTokens(usage?.todayTokens ?? 0)}</b> token</span></div>
+          <div className="config-day-detail">
+            {selectedUsage
+              ? dailyMode === 'cost'
+                ? `${shortDate(selectedUsage.date)} · ${fmtCost(selectedUsage.cost ?? 0)} · ${selectedUsage.count} 次请求`
+                : `${shortDate(selectedUsage.date)} · ${selectedUsage.count} 次请求`
+              : '暂无用量数据'}
+          </div>
+          <div className="config-usage-summary">
+            {dailyMode === 'cost' ? (
+              <>
+                <span>合计 <b>{fmtCost(dailyUsage.totalCost ?? 0)}</b></span>
+                {dailyUsage.relays.map((relay) => (
+                  <span key={relay.id}>{relay.name} <b>{fmtCost(relay.totalCost)}</b></span>
+                ))}
+                <span>今日 <b>{usage?.todayMessages ?? 0}</b> 条消息</span>
+              </>
+            ) : (
+              <>
+                <span>合计 <b>{totalRequests}</b> 次请求</span>
+                <span>今日 <b>{usage?.todayMessages ?? 0}</b> 条消息</span>
+                <span>约 <b>{fmtTokens(usage?.todayTokens ?? 0)}</b> token</span>
+              </>
+            )}
+          </div>
         </section>
 
         <SectionLabel>OFFICIAL · 官方端点</SectionLabel>

@@ -113,6 +113,21 @@ export interface ConfigUsageSummary {
 export interface DailyUsage {
   date: string;
   count: number;
+  cost: number | null;
+}
+
+export interface DailyUsageRelayTotal {
+  id: number;
+  name: string;
+  totalCost: number;
+}
+
+export interface DailyUsageResult {
+  mode: 'cost' | 'requests';
+  days: DailyUsage[];
+  relays: DailyUsageRelayTotal[];
+  totalCost: number | null;
+  totalCount: number;
 }
 
 export interface PlaygroundResult {
@@ -345,34 +360,30 @@ export async function getConfigUsageSummary(): Promise<ConfigUsageSummary> {
   };
 }
 
-function monthKey(date: Date): string {
-  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
-}
+export async function getDailyUsage(days: number): Promise<DailyUsageResult> {
+  const data = await http.get<{
+    mode?: 'cost' | 'requests';
+    days?: Array<{ date?: string; count?: number; cost?: number | null }>;
+    relays?: Array<{ id?: number; name?: string; total_cost?: number }>;
+    total_cost?: number | null;
+    total_count?: number;
+  }>('/api/usage/daily-cost', { days });
 
-function isoDate(date: Date): string {
-  return `${monthKey(date)}-${String(date.getDate()).padStart(2, '0')}`;
-}
-
-export async function getDailyUsage(days: number): Promise<DailyUsage[]> {
-  const dates = Array.from({ length: days }, (_, index) => {
-    const date = new Date();
-    date.setHours(12, 0, 0, 0);
-    date.setDate(date.getDate() - (days - index - 1));
-    return date;
-  });
-  const months = [...new Set(dates.map(monthKey))];
-  const responses = await Promise.all(months.map(async (month) => {
-    const data = await http.get<{ days?: Array<{ day?: number; count?: number }> }>('/api/messages/heatmap', { month });
-    return [month, data.days || []] as const;
-  }));
-  const counts = new Map<string, number>();
-  for (const [month, rows] of responses) {
-    for (const row of rows) {
-      if (!row.day) continue;
-      counts.set(`${month}-${String(row.day).padStart(2, '0')}`, Number(row.count || 0));
-    }
-  }
-  return dates.map((date) => ({ date: isoDate(date), count: counts.get(isoDate(date)) || 0 }));
+  return {
+    mode: data.mode === 'cost' ? 'cost' : 'requests',
+    days: (data.days || []).map((row) => ({
+      date: row.date || '',
+      count: Number(row.count || 0),
+      cost: row.cost == null ? null : Number(row.cost),
+    })),
+    relays: (data.relays || []).map((relay) => ({
+      id: Number(relay.id || 0),
+      name: relay.name || '',
+      totalCost: Number(relay.total_cost || 0),
+    })),
+    totalCost: data.total_cost == null ? null : Number(data.total_cost),
+    totalCount: Number(data.total_count || 0),
+  };
 }
 
 export async function runPlayground(message: string, injectMemory: boolean): Promise<PlaygroundResult> {
