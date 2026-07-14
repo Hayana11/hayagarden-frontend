@@ -25,6 +25,7 @@ export interface RelayEndpoint {
   url: string;
   active: boolean;
   defaultModel: string;
+  statusUrl: string;
   capabilities: EndpointCapabilities;
 }
 
@@ -33,7 +34,52 @@ export interface RelayDraft {
   url: string;
   key: string;
   defaultModel: string;
+  statusUrl: string;
   capabilities: EndpointCapabilities;
+}
+
+export interface RelayModelHealth {
+  name: string;
+  group: string;
+  status: number | null;
+  time: string;
+  message: string;
+  ping: number | null;
+}
+
+export interface RelayModelInsight {
+  id: string;
+  name?: string;
+  route?: string;
+  groups?: string[];
+  group?: string;
+  group_ratio?: string | number;
+  base_price?: string;
+  price?: string;
+  status?: RelayModelHealth;
+}
+
+export interface RelayIntelligence {
+  models: string[];
+  modelOptions: RelayModelInsight[];
+  statusSummary: RelayModelHealth[];
+  pricingRequiresAuth: boolean;
+  pricingSource: string;
+  statusSource: string;
+  cached: boolean;
+  sourceProject: string;
+}
+
+export interface RelayBalance {
+  supported: boolean;
+  error: 'missing_key' | 'unauthorized' | 'unsupported' | 'unavailable' | 'invalid_response' | '';
+  source: string;
+  name: string;
+  unlimited: boolean;
+  expiresAt: number;
+  totalGrantedUsd: number | null;
+  totalUsedUsd: number | null;
+  totalAvailableUsd: number | null;
 }
 
 export interface ConfigModel {
@@ -96,6 +142,7 @@ export async function getRelayEndpoints(): Promise<RelayEndpoint[]> {
       url?: string;
       active?: boolean;
       default_model?: string;
+      status_url?: string;
       capabilities?: Partial<EndpointCapabilities>;
     }>;
   }>('/api/config/relay-presets');
@@ -106,6 +153,7 @@ export async function getRelayEndpoints(): Promise<RelayEndpoint[]> {
     url: endpoint.url || '',
     active: Boolean(endpoint.active),
     defaultModel: endpoint.default_model || '',
+    statusUrl: endpoint.status_url || '',
     capabilities: {
       thinking: endpoint.capabilities?.thinking !== false,
       cache: endpoint.capabilities?.cache !== false,
@@ -120,8 +168,61 @@ export async function createRelayEndpoint(draft: RelayDraft): Promise<void> {
     url: draft.url,
     key: draft.key,
     default_model: draft.defaultModel,
+    status_url: draft.statusUrl,
     capabilities: draft.capabilities,
   });
+}
+
+export async function getRelayIntelligence(id: number, refresh = false): Promise<RelayIntelligence> {
+  const query = refresh ? '?refresh=1' : '';
+  const data = await http.get<{
+    models?: string[];
+    model_options?: RelayModelInsight[];
+    status_summary?: RelayModelHealth[];
+    pricing_requires_auth?: boolean;
+    pricing_source?: string | null;
+    status_source?: string | null;
+    cached?: boolean;
+    source_project?: string;
+  }>(`/api/config/relay-presets/${id}/intelligence${query}`);
+  return {
+    models: data.models || [],
+    modelOptions: data.model_options || [],
+    statusSummary: data.status_summary || [],
+    pricingRequiresAuth: Boolean(data.pricing_requires_auth),
+    pricingSource: data.pricing_source || '',
+    statusSource: data.status_source || '',
+    cached: Boolean(data.cached),
+    sourceProject: data.source_project || '',
+  };
+}
+
+export async function getRelayBalance(id: number): Promise<RelayBalance> {
+  const data = await http.get<{
+    balance?: {
+      supported?: boolean;
+      error?: RelayBalance['error'];
+      source?: string;
+      name?: string;
+      unlimited?: boolean;
+      expires_at?: number;
+      total_granted_usd?: number | null;
+      total_used_usd?: number | null;
+      total_available_usd?: number | null;
+    };
+  }>(`/api/config/relay-presets/${id}/balance`);
+  const balance = data.balance || {};
+  return {
+    supported: Boolean(balance.supported),
+    error: balance.error || '',
+    source: balance.source || '',
+    name: balance.name || '',
+    unlimited: Boolean(balance.unlimited),
+    expiresAt: Number(balance.expires_at || 0),
+    totalGrantedUsd: balance.total_granted_usd ?? null,
+    totalUsedUsd: balance.total_used_usd ?? null,
+    totalAvailableUsd: balance.total_available_usd ?? null,
+  };
 }
 
 export async function activateRelayEndpoint(id: number): Promise<{ model: string }> {

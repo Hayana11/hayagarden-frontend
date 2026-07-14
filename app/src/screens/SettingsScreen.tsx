@@ -11,7 +11,9 @@ import {
   getKeyStatus,
   getModelCatalog,
   getProviderConfig,
+  getRelayBalance,
   getRelayEndpoints,
+  getRelayIntelligence,
   removeRelayEndpoint,
   runPlayground,
   updateCurrentModel,
@@ -21,12 +23,14 @@ import {
   type DailyUsage,
   type EndpointCapabilities,
   type KeyStatus,
+  type RelayBalance,
   type RelayDraft,
   type RelayEndpoint,
+  type RelayIntelligence,
 } from '../lib/systemConfig';
 
 const EMPTY_CAPS: EndpointCapabilities = { thinking: true, cache: true, tools: true };
-const EMPTY_RELAY: RelayDraft = { name: '', url: '', key: '', defaultModel: '', capabilities: EMPTY_CAPS };
+const EMPTY_RELAY: RelayDraft = { name: '', url: '', key: '', defaultModel: '', statusUrl: '', capabilities: EMPTY_CAPS };
 
 function SectionLabel({ children, aside }: { children: React.ReactNode; aside?: React.ReactNode }) {
   return <div className="config-section-label"><span>{children}</span>{aside}</div>;
@@ -45,6 +49,18 @@ function fmtTokens(value: number): string {
 
 function shortDate(value: string): string {
   return `${Number(value.slice(5, 7))}-${Number(value.slice(8, 10))}`;
+}
+
+function fmtUsd(value: number | null): string {
+  return value === null ? '—' : `$${value.toFixed(value >= 100 ? 1 : 2)}`;
+}
+
+function balanceErrorText(error: RelayBalance['error']): string {
+  if (error === 'missing_key') return '没有保存 API Key';
+  if (error === 'unauthorized') return 'Key 无效或没有查询权限';
+  if (error === 'unsupported') return '这个中转站不支持令牌余额接口';
+  if (error === 'invalid_response') return '站点返回了无法识别的余额格式';
+  return '余额接口暂时不可用';
 }
 
 async function getKeyStatusWithHostRtt(): Promise<{ status: KeyStatus; hostRttMs: number }> {
@@ -71,6 +87,8 @@ export function SettingsScreen() {
   const [officialExpanded, setOfficialExpanded] = useState(false);
   const [expandedRelay, setExpandedRelay] = useState<number | null>(null);
   const [relayFilter, setRelayFilter] = useState('');
+  const [relayInsights, setRelayInsights] = useState<Record<number, RelayIntelligence>>({});
+  const [relayBalances, setRelayBalances] = useState<Record<number, RelayBalance>>({});
   const [modelFilter, setModelFilter] = useState('');
   const [busy, setBusy] = useState('');
   const [warning, setWarning] = useState('');
@@ -198,6 +216,32 @@ export function SettingsScreen() {
     } catch { showToast('当前中转站没有返回模型列表'); } finally { setBusy(''); }
   };
 
+  const inspectRelay = async (relay: RelayEndpoint) => {
+    setBusy(`inspect:${relay.id}`);
+    try {
+      const insight = await getRelayIntelligence(relay.id, true);
+      setRelayInsights((items) => ({ ...items, [relay.id]: insight }));
+      showToast(`已读取 ${relay.name} 的价格与状态`);
+    } catch (error) {
+      const detail = error instanceof HttpError && error.detail
+        ? error.detail
+        : '读取失败，请检查中转站地址、密钥或状态页地址';
+      showToast(detail);
+    } finally { setBusy(''); }
+  };
+
+  const queryRelayBalance = async (relay: RelayEndpoint) => {
+    setBusy(`balance:${relay.id}`);
+    try {
+      const balance = await getRelayBalance(relay.id);
+      setRelayBalances((items) => ({ ...items, [relay.id]: balance }));
+      showToast(balance.supported ? `已读取 ${relay.name} 的余额` : balanceErrorText(balance.error));
+    } catch (error) {
+      const detail = error instanceof HttpError && error.detail ? error.detail : '余额查询失败';
+      showToast(detail);
+    } finally { setBusy(''); }
+  };
+
   const deleteRelay = async (relay: RelayEndpoint) => {
     if (relay.active) { showToast('正在使用的中转站不能删除'); return; }
     if (confirmDelete !== relay.id) { setConfirmDelete(relay.id); return; }
@@ -224,7 +268,7 @@ export function SettingsScreen() {
     if (!relayDraft.name.trim() || !relayDraft.url.trim()) { setSheetResult({ ok: false, text: '名称与 Base URL 为必填' }); return; }
     setBusy('save-relay');
     try {
-      await createRelayEndpoint({ ...relayDraft, name: relayDraft.name.trim(), url: relayDraft.url.trim(), key: relayDraft.key.trim(), defaultModel: relayDraft.defaultModel.trim() });
+      await createRelayEndpoint({ ...relayDraft, name: relayDraft.name.trim(), url: relayDraft.url.trim(), key: relayDraft.key.trim(), defaultModel: relayDraft.defaultModel.trim(), statusUrl: relayDraft.statusUrl.trim() });
       setRelays(await getRelayEndpoints());
       setSheetOpen(false);
       setRelayDraft(EMPTY_RELAY);
@@ -332,6 +376,10 @@ export function SettingsScreen() {
         {relays.map((relay, index) => {
           const expanded = expandedRelay === relay.id;
           const relayModels = relay.active ? activeRelayModels : [];
+          const insight = relayInsights[relay.id];
+          const balance = relayBalances[relay.id];
+          const query = relayFilter.trim().toLowerCase();
+          const inspectedModels = (insight?.modelOptions || []).filter((model) => !query || model.id.toLowerCase().includes(query) || model.name?.toLowerCase().includes(query));
           const isCurrent = provider === 'api_relay' && relay.active;
           return <section className={`config-card config-endpoint${isCurrent ? ' current' : ''}`} key={relay.id}>
             <button className="config-endpoint-summary" type="button" onClick={() => { setExpandedRelay(expanded ? null : relay.id); setConfirmDelete(null); setRelayFilter(''); }}>
@@ -342,11 +390,39 @@ export function SettingsScreen() {
             </button>
             <div className="config-endpoint-row"><CapabilityChips caps={relay.capabilities} />{isCurrent ? <span className="config-current-badge">使用中</span> : <button type="button" onClick={() => void switchRelay(relay)} disabled={Boolean(busy)}>切换</button>}</div>
             {expanded && <div className="config-endpoint-expanded">
-              <div className="config-expanded-title"><strong>模型 · {relay.active ? relayModels.length : '切换后拉取'}</strong><span>{relay.active ? '当前端点返回列表' : '未激活端点不主动请求'}</span></div>
-              {relay.active && <input value={relayFilter} onChange={(event) => setRelayFilter(event.target.value)} placeholder="筛选模型…" />}
-              <div className="config-model-chips">{relay.active ? relayModels.slice(0, 24).map((model) => <span key={model.id}>{model.label}</span>) : <span>切换到此端点后可拉取模型</span>}</div>
+              {balance && <div className={`config-balance${balance.supported ? '' : ' unavailable'}`}>
+                {balance.supported ? <>
+                  <div><span>剩余额度</span><strong>{balance.unlimited ? '无限' : fmtUsd(balance.totalAvailableUsd)}</strong></div>
+                  <dl><div><dt>总额度</dt><dd>{balance.unlimited ? '无限' : fmtUsd(balance.totalGrantedUsd)}</dd></div><div><dt>已使用</dt><dd>{fmtUsd(balance.totalUsedUsd)}</dd></div><div><dt>有效期</dt><dd>{balance.expiresAt ? new Date(balance.expiresAt * 1000).toLocaleDateString('zh-CN') : '永不过期'}</dd></div></dl>
+                  {balance.name && <small>令牌：{balance.name}</small>}
+                </> : <><span>余额暂不可查</span><strong>{balanceErrorText(balance.error)}</strong></>}
+              </div>}
+              <div className="config-expanded-title"><strong>模型 · {insight ? insight.modelOptions.length : relay.active ? relayModels.length : '尚未读取'}</strong><span>{insight ? '已单独读取此端点' : relay.active ? '当前端点返回列表' : '点“价格与状态”即可读取'}</span></div>
+              {(insight || relay.active) && <input value={relayFilter} onChange={(event) => setRelayFilter(event.target.value)} placeholder="筛选模型…" />}
+              {!insight && <div className="config-model-chips">{relay.active ? relayModels.slice(0, 24).map((model) => <span key={model.id}>{model.label}</span>) : <span>无需切换，点下方按钮即可检查</span>}</div>}
+              {insight && <div className="config-intel">
+                <div className="config-intel-summary">
+                  <span><i className="ok" />{insight.modelOptions.length} 个模型</span>
+                  <span><i className={insight.statusSource ? 'ok' : 'unknown'} />{insight.statusSource ? '已找到状态页' : '暂无状态源'}</span>
+                  <span><i className={insight.pricingSource && !insight.pricingRequiresAuth ? 'ok' : 'unknown'} />{insight.pricingRequiresAuth ? '价格页需登录' : insight.pricingSource ? '已读取价格' : '暂无价格源'}</span>
+                </div>
+                <div className="config-intel-models">
+                  {inspectedModels.slice(0, 30).map((model) => {
+                    const state = model.status?.status === 1 ? 'online' : model.status?.status === 0 ? 'offline' : 'unknown';
+                    const stateLabel = state === 'online' ? '正常' : state === 'offline' ? '异常' : '未监控';
+                    return <div className="config-intel-model" key={model.id}>
+                      <i className={state} />
+                      <span><strong>{model.name || model.id}</strong><small>{model.group || model.route || '默认分组'}{model.price ? ` · ${model.price}` : ' · 未公开价格'}</small></span>
+                      <em>{stateLabel}{model.status?.message ? <small>{model.status.message}</small> : model.status?.ping != null ? <small>{model.status.ping} ms</small> : null}</em>
+                    </div>;
+                  })}
+                  {!inspectedModels.length && <p>没有匹配的模型</p>}
+                </div>
+                <p className="config-intel-note">状态只做精确模型名匹配，不会把相似名字误判成同一个模型。{insight.cached ? ' · 使用一分钟缓存' : ''}</p>
+              </div>}
               <div className="config-key-row"><span>API KEY</span><b>{relay.active ? keyStatus?.maskedKey || '—' : '已保存 · 不回传网页'}</b></div>
-              <div className="config-endpoint-actions"><button type="button" onClick={() => relay.active ? void loadAll() : showToast('请先切换到该端点再刷新状态')}>刷新状态</button><button type="button" onClick={() => relay.active ? void refreshModels() : showToast('请先切换到该端点再拉取模型')}>拉取模型</button><button type="button" className="danger" onClick={() => void deleteRelay(relay)}>{confirmDelete === relay.id ? '确认删除？' : '删除'}</button></div>
+              {relay.statusUrl && <div className="config-key-row"><span>状态页</span><b>{relay.statusUrl}</b></div>}
+              <div className="config-endpoint-actions"><button type="button" onClick={() => void queryRelayBalance(relay)} disabled={busy === `balance:${relay.id}`}>{busy === `balance:${relay.id}` ? '查询中…' : balance ? '刷新余额' : '查询余额'}</button><button type="button" onClick={() => void inspectRelay(relay)} disabled={busy === `inspect:${relay.id}`}>{busy === `inspect:${relay.id}` ? '读取中…' : insight ? '刷新价格与状态' : '价格与状态'}</button><button type="button" onClick={() => relay.active ? void refreshModels() : showToast('价格与状态可以直接读取；普通模型池需先切换')}>拉取模型</button><button type="button" className="danger" onClick={() => void deleteRelay(relay)}>{confirmDelete === relay.id ? '确认删除？' : '删除'}</button></div>
               <div className="config-priority"><span>启用</span><button type="button" className="locked-switch" aria-disabled="true" onClick={() => showToast('端点启停后端尚未接入')}><i /></button><em>启停与优先级后端尚未接入</em><button type="button" disabled>↑</button><button type="button" disabled>↓</button></div>
             </div>}
           </section>;
@@ -376,7 +452,7 @@ export function SettingsScreen() {
         <div className="config-api-note">实时接口：usage · provider · relay presets · model catalog · gateway test</div>
       </main>
 
-      {sheetOpen && <div className="config-sheet-wrap" role="dialog" aria-modal="true" aria-label="添加中转站"><button type="button" className="config-sheet-backdrop" onClick={() => setSheetOpen(false)} /><div className="config-sheet"><i /><h2>添加中转站</h2><label>名称<input value={relayDraft.name} onChange={(event) => setRelayDraft((draft) => ({ ...draft, name: event.target.value }))} placeholder="例如：OpenRouter" /></label><label>Base URL<input value={relayDraft.url} onChange={(event) => setRelayDraft((draft) => ({ ...draft, url: event.target.value }))} placeholder="https://…/v1/messages" /></label><label>API Key（可选）<input type="password" value={relayDraft.key} onChange={(event) => setRelayDraft((draft) => ({ ...draft, key: event.target.value }))} placeholder="sk-…" /></label><label>默认模型（可选）<input value={relayDraft.defaultModel} onChange={(event) => setRelayDraft((draft) => ({ ...draft, defaultModel: event.target.value }))} placeholder="model id" /></label>{sheetResult && <p className={sheetResult.ok ? 'ok' : 'bad'}>{sheetResult.text}</p>}<div><button type="button" onClick={validateRelayDraft}>测试连接</button><button type="button" onClick={() => void saveRelay()} disabled={busy === 'save-relay'}>{busy === 'save-relay' ? '保存中…' : '保存'}</button></div></div></div>}
+      {sheetOpen && <div className="config-sheet-wrap" role="dialog" aria-modal="true" aria-label="添加中转站"><button type="button" className="config-sheet-backdrop" onClick={() => setSheetOpen(false)} /><div className="config-sheet"><i /><h2>添加中转站</h2><label>名称<input value={relayDraft.name} onChange={(event) => setRelayDraft((draft) => ({ ...draft, name: event.target.value }))} placeholder="例如：OpenRouter" /></label><label>Base URL<input value={relayDraft.url} onChange={(event) => setRelayDraft((draft) => ({ ...draft, url: event.target.value }))} placeholder="https://…/v1/messages" /></label><label>API Key（可选）<input type="password" value={relayDraft.key} onChange={(event) => setRelayDraft((draft) => ({ ...draft, key: event.target.value }))} placeholder="sk-…" /></label><label>状态页地址（可选）<input value={relayDraft.statusUrl} onChange={(event) => setRelayDraft((draft) => ({ ...draft, statusUrl: event.target.value }))} placeholder="Uptime Kuma 或模型监控页" /></label><label>默认模型（可选）<input value={relayDraft.defaultModel} onChange={(event) => setRelayDraft((draft) => ({ ...draft, defaultModel: event.target.value }))} placeholder="model id" /></label>{sheetResult && <p className={sheetResult.ok ? 'ok' : 'bad'}>{sheetResult.text}</p>}<div><button type="button" onClick={validateRelayDraft}>测试连接</button><button type="button" onClick={() => void saveRelay()} disabled={busy === 'save-relay'}>{busy === 'save-relay' ? '保存中…' : '保存'}</button></div></div></div>}
       {toast && <div className="config-toast">{toast}</div>}
     </div>
   );
