@@ -93,15 +93,6 @@ function dailyMetric(item: DailyUsage, mode: DailyUsageResult['mode']): number {
   return item.count;
 }
 
-function costTier(value: number, max: number): number {
-  if (value <= 0 || max <= 0) return 0;
-  const ratio = value / max;
-  if (ratio < 0.18) return 1;
-  if (ratio < 0.4) return 2;
-  if (ratio < 0.68) return 3;
-  return 4;
-}
-
 export function SettingsScreen() {
   const navigate = useNavigate();
   const [provider, setProvider] = useState<'api_relay' | 'claude_code'>('api_relay');
@@ -482,13 +473,11 @@ export function SettingsScreen() {
               {shownDaily.map((item) => {
                 const metric = dailyMetric(item, dailyMode);
                 const label = dailyMode === 'cost' ? fmtCost(metric) : String(metric);
-                const tier = dailyMode === 'cost' ? costTier(metric, maxDaily) : 0;
                 return (
                   <button type="button" key={item.date} onClick={() => setSelectedDay(item.date)}>
-                    <span className={`${selectedUsage?.date === item.date ? 'selected' : ''}${tier ? ` cost-tier-${tier}` : ''}`}>
-                      {dailyMode === 'cost'
-                        ? <em>{label}</em>
-                        : <><i style={{ height: `${Math.max(5, Math.round((metric / maxDaily) * 100))}%` }} /><em>{label}</em></>}
+                    <span className={selectedUsage?.date === item.date ? 'selected' : ''}>
+                      <i style={{ height: `${Math.max(5, Math.round((metric / maxDaily) * 100))}%` }} />
+                      <em>{label}</em>
                     </span>
                     <small>{shortDate(item.date)}</small>
                   </button>
