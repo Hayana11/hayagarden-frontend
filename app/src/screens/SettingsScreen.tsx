@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, Link } from 'react-router-dom';
 import { HttpError } from '../lib/http';
+import { getGroupStatus, type AgentStatus } from '../lib/groupChat';
 import {
   activateRelayEndpoint,
   createRelayEndpoint,
@@ -56,6 +57,7 @@ export function SettingsScreen() {
   const navigate = useNavigate();
   const [provider, setProvider] = useState<'api_relay' | 'claude_code'>('api_relay');
   const [ccTokenSet, setCcTokenSet] = useState(false);
+  const [codexStatus, setCodexStatus] = useState<AgentStatus | null>(null);
   const [keyStatus, setKeyStatus] = useState<KeyStatus | null>(null);
   const [hostRtt, setHostRtt] = useState<number | null>(null);
   const [relays, setRelays] = useState<RelayEndpoint[]>([]);
@@ -97,8 +99,9 @@ export function SettingsScreen() {
       getAvailableModels(),
       getConfigUsageSummary(),
       getDailyUsage(30),
+      getGroupStatus(),
     ]);
-    const [providerResult, keyResult, relayResult, catalogResult, availableResult, usageResult, dailyResult] = results;
+    const [providerResult, keyResult, relayResult, catalogResult, availableResult, usageResult, dailyResult, groupStatusResult] = results;
     if (providerResult.status === 'fulfilled') {
       setProvider(providerResult.value.provider);
       setCcTokenSet(providerResult.value.ccTokenSet);
@@ -118,6 +121,7 @@ export function SettingsScreen() {
       setDaily(dailyResult.value);
       setSelectedDay((current) => current || dailyResult.value.at(-1)?.date || '');
     }
+    if (groupStatusResult.status === 'fulfilled') setCodexStatus(groupStatusResult.value.agents.codex);
     if (results.some((result) => result.status === 'rejected')) setWarning('部分实时数据暂时不可用，已保留成功读取的配置。');
     setBusy('');
   }, []);
@@ -303,6 +307,20 @@ export function SettingsScreen() {
           <div className="config-quota"><div><span>5 小时窗 <b>已用 {usage?.win5Pct ?? 0}%</b></span><i><em style={{ width: `${usage?.win5Pct ?? 0}%` }} /></i></div><div><span>周额度 <b>已用 {usage?.win7Pct ?? 0}%</b></span><i><em className="rose" style={{ width: `${usage?.win7Pct ?? 0}%` }} /></i></div></div>
           <div className="config-effort"><span>Effort</span><div><button type="button" disabled>LOW</button><button type="button" disabled>MED</button><button type="button" disabled>HIGH</button></div><small>后端尚未接入</small></div>
           {officialExpanded && <div className="config-endpoint-expanded"><div className="config-expanded-title"><strong>订阅配置</strong><span>凭据仅在 VPS 终端管理</span></div><div className="config-model-chips">{catalog.slice(0, 6).map((model) => <span key={model.id}>{model.label}</span>)}</div><div className="config-key-row"><span>OAUTH TOKEN</span><b>{ccTokenSet ? '已配置 · 不回传网页' : '未设置'}</b></div></div>}
+        </section>
+
+        <section className="config-card config-endpoint">
+          <div className="config-endpoint-summary" style={{ cursor: 'default' }}>
+            <i className={codexStatus?.ready ? 'online' : 'offline'} />
+            <span><strong>Codex 官方订阅</strong><small>本地 CLI · 群聊蓝色线路</small></span>
+            <em>{codexStatus === null ? '读取中…' : codexStatus.ready ? '已连接' : codexStatus.installed ? '未登录' : '未安装'}<small>{codexStatus?.detail || ''}</small></em>
+          </div>
+          <div className="config-endpoint-row">
+            <small>不接入 Fyodor 的官方端点切换 · 只服务群聊里的蓝色线路</small>
+            {codexStatus?.ready
+              ? <Link to="/codex-chat" className="config-current-badge" style={{ textDecoration: 'none' }}>去聊天</Link>
+              : <button type="button" disabled>{codexStatus?.installed ? '等待登录' : '未安装'}</button>}
+          </div>
         </section>
 
         <SectionLabel aside={<span>{relays.length} 个预设</span>}>RELAYS · 中转站</SectionLabel>

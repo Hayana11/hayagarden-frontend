@@ -17,7 +17,7 @@ function navItems() {
   const dash = inDashApp();
   return (['dash', 'chat', 'read', 'board'] as const).map((key) => ({
     key,
-    href: key === 'dash' ? '/dash' : key === 'chat' ? (dash ? '/dash/chat' : '/chat') : `/${key === 'read' ? 'read' : 'board'}`,
+    href: key === 'dash' ? '/dash' : key === 'chat' ? (dash ? '/dash/contacts' : '/contacts') : `/${key === 'read' ? 'read' : 'board'}`,
     icon: ICONS[key],
     label: key,
   }));

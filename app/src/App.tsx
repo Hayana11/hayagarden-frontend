@@ -12,10 +12,14 @@ import { ChatScreen } from './screens/ChatScreen';
 import { SettingsScreen } from './screens/SettingsScreen';
 import { GroupChatScreen } from './screens/GroupChatScreen';
 import { MomentsScreen } from './screens/MomentsScreen';
+import { ContactsScreen } from './screens/ContactsScreen';
+import { CodexChatScreen } from './screens/CodexChatScreen';
+
+const FULLSCREEN_PATHS = new Set(['/chat', '/settings', '/group-chat', '/moments', '/contacts', '/codex-chat']);
 
 function Shell() {
   const location = useLocation();
-  const fullscreen = location.pathname === '/chat' || location.pathname === '/settings' || location.pathname === '/group-chat' || location.pathname === '/moments';
+  const fullscreen = FULLSCREEN_PATHS.has(location.pathname);
 
   useEffect(() => {
     document.documentElement.classList.toggle('dash-fullscreen', fullscreen);
@@ -34,6 +38,8 @@ function Shell() {
       <Route path="/settings" element={<SettingsScreen />} />
       <Route path="/group-chat" element={<GroupChatScreen />} />
       <Route path="/moments" element={<MomentsScreen />} />
+      <Route path="/contacts" element={<ContactsScreen />} />
+      <Route path="/codex-chat" element={<CodexChatScreen />} />
     </Routes>
   );
 
