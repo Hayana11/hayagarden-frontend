@@ -180,8 +180,8 @@ export function MomentsScreen() {
   };
 
   return (
-    <div className="hide-scrollbar" style={{ ...(vars as CSSProperties), width: '100%', maxWidth: 480, margin: '0 auto', height: '100dvh', overflowY: 'auto', background: 'var(--bg)', color: 'var(--ink)', fontFamily: SERIF, transition: 'background .3s,color .3s' }}>
-      <div style={{ width: '100%', minHeight: '100%', background: 'var(--bg)' }}>
+    <div className="hide-scrollbar dash-fullscreen-page dash-scroll-page" style={{ ...(vars as CSSProperties), background: 'var(--bg)', color: 'var(--ink)', fontFamily: SERIF, transition: 'background .3s,color .3s' }}>
+      <div style={{ width: '100%', background: 'var(--bg)' }}>
         {/* ── cover (换封面锁定) ── */}
         <div onClick={showLocked} style={{ position: 'relative', height: 200, cursor: 'pointer' }} title={LOCKED}>
           <div style={{ position: 'absolute', inset: 0, background: 'linear-gradient(150deg,#3E2E30,#211A18 55%,#4A3226)' }} />
@@ -203,7 +203,7 @@ export function MomentsScreen() {
         </div>
 
         {/* ── profile header ── */}
-        <div style={{ background: 'var(--card)', boxShadow: '0 6px 18px var(--shadow)' }}>
+        <div style={{ background: 'rgba(255,255,255,0.97)', boxShadow: '0 6px 18px var(--shadow)' }}>
           <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'flex-end', gap: 14, padding: '12px 18px 14px' }}>
             <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 4, paddingTop: 8, minWidth: 0 }}>
               <span style={{ fontFamily: DISPLAY, fontSize: 21, fontWeight: 600, letterSpacing: 1.5, color: 'var(--ink)' }}>Fyodor</span>

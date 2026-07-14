@@ -729,16 +729,11 @@ export function ChatScreen() {
 
   return (
     <div
-      className="chat-root"
+      className="chat-root dash-fullscreen-page"
       style={{
         ...(vars as CSSProperties),
-        width: '100%',
-        maxWidth: 480,
-        margin: '0 auto',
-        height: '100dvh',
         display: 'flex',
         flexDirection: 'column',
-        overflow: 'hidden',
         background: 'var(--bg)',
         color: 'var(--ink)',
         fontFamily: SERIF,
@@ -748,7 +743,7 @@ export function ChatScreen() {
     >
       {/* ══ top nav ══ */}
       <div style={{ flexShrink: 0, position: 'relative', zIndex: 40 }}>
-        <div style={{ background: 'var(--card)', boxShadow: '0 6px 18px var(--shadow)', position: 'relative', zIndex: 3, transition: 'background .3s' }}>
+        <div style={{ background: 'rgba(255,255,255,0.97)', boxShadow: '0 6px 18px var(--shadow)', position: 'relative', zIndex: 3 }}>
           <div style={{ maxWidth: 430, margin: '0 auto', display: 'flex', alignItems: 'center', gap: 10, padding: '10px 12px 9px' }}>
             <div onClick={() => setSidebarOpen(true)} style={{ cursor: 'pointer', width: 38, height: 38, borderRadius: '50%', background: 'linear-gradient(135deg,#B76E79,#9C3B4A)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, boxShadow: '0 6px 14px var(--shadow2)' }}>
               <span style={{ fontFamily: DISPLAY, fontStyle: 'italic', fontSize: 17, color: '#F7F1EE' }}>Θ</span>

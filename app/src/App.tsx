@@ -1,3 +1,4 @@
+import { useEffect } from 'react';
 import { BrowserRouter, Routes, Route, useLocation } from 'react-router-dom';
 import { AppShell } from './components/AppShell';
 import { BottomNav } from './components/BottomNav';
@@ -15,6 +16,11 @@ import { MomentsScreen } from './screens/MomentsScreen';
 function Shell() {
   const location = useLocation();
   const fullscreen = location.pathname === '/chat' || location.pathname === '/settings' || location.pathname === '/group-chat' || location.pathname === '/moments';
+
+  useEffect(() => {
+    document.documentElement.classList.toggle('dash-fullscreen', fullscreen);
+    return () => document.documentElement.classList.remove('dash-fullscreen');
+  }, [fullscreen]);
 
   const routes = (
     <Routes>
