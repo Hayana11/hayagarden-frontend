@@ -683,15 +683,21 @@ def group_chat_messages():
 
 @app.route('/api/group-chat/send', methods=['POST'])
 def group_chat_send():
+    import json as _json
     data = request.get_json(silent=True) or {}
     content = (data.get('content') or '').strip()
-    if not content:
+    file_url = (data.get('file_url') or '').strip()
+    file_name = (data.get('file_name') or '').strip()
+    if not content and not file_url:
         return jsonify({'error': 'content required'}), 400
+    if file_url and not content:
+        content = '[文件:%s]' % (file_name or '附件')
     if len(content) > 12000:
         return jsonify({'error': 'message too long'}), 400
+    meta = _json.dumps({'file_url': file_url, 'file_name': file_name}, ensure_ascii=False) if file_url else ''
     try:
         message = group_chat_store.add_message(
-            data.get('room', 'group'), 'user', content, db_path=DB_PATH
+            data.get('room', 'group'), 'user', content, meta=meta, db_path=DB_PATH
         )
         return jsonify({'ok': True, 'message': message})
     except ValueError as exc:

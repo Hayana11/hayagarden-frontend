@@ -24,7 +24,7 @@ function navItems() {
 }
 
 function activeKey(pathname: string): NavKey {
-  if (pathname === '/chat') return 'chat';
+  if (pathname === '/chat' || pathname === '/contacts') return 'chat';
   if (pathname === '/reading') return 'read';
   return 'dash';
 }
