@@ -1,10 +1,13 @@
 import datetime as dt
+import http.server
 import json
 import os
 from pathlib import Path
 import sqlite3
 import tempfile
+import threading
 import unittest
+from unittest import mock
 
 from flask import Flask
 
@@ -215,6 +218,237 @@ class ContextUsageCollectorTests(unittest.TestCase):
             self.assertEqual(sessions[0]["latest_context_tokens"], 1000)
             self.assertEqual(limit["kind"], "weekly")
             self.assertTrue(limit["exhausted"])
+
+
+class OAuthCredentialReadingTests(unittest.TestCase):
+    def test_read_claude_oauth_token_nested_shape(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "creds.json"
+            path.write_text(json.dumps({"claudeAiOauth": {"accessToken": "secret-token"}}), encoding="utf-8")
+            before_text = path.read_text(encoding="utf-8")
+            before_mtime = path.stat().st_mtime
+
+            token = collector.read_claude_oauth_token(path)
+
+            self.assertEqual(token, "secret-token")
+            # Reading credentials must never modify or refresh them.
+            self.assertEqual(path.read_text(encoding="utf-8"), before_text)
+            self.assertEqual(path.stat().st_mtime, before_mtime)
+
+    def test_read_claude_oauth_token_flat_shape(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "creds.json"
+            path.write_text(json.dumps({"accessToken": "flat-token"}), encoding="utf-8")
+            self.assertEqual(collector.read_claude_oauth_token(path), "flat-token")
+
+    def test_read_claude_oauth_token_missing_file_returns_none(self):
+        self.assertIsNone(collector.read_claude_oauth_token(Path("/nonexistent/creds.json")))
+
+    def test_read_codex_oauth_nested_shape(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "auth.json"
+            path.write_text(
+                json.dumps({"tokens": {"access_token": "codex-token", "account_id": "acct-1"}}),
+                encoding="utf-8",
+            )
+            before_mtime = path.stat().st_mtime
+
+            result = collector.read_codex_oauth(path)
+
+            self.assertEqual(result, ("codex-token", "acct-1"))
+            self.assertEqual(path.stat().st_mtime, before_mtime)
+
+    def test_read_codex_oauth_missing_token_returns_none(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "auth.json"
+            path.write_text(json.dumps({"tokens": {}}), encoding="utf-8")
+            self.assertIsNone(collector.read_codex_oauth(path))
+
+
+class OfficialUsageParsingTests(unittest.TestCase):
+    def test_fetch_claude_official_usage_parses_utilization(self):
+        with mock.patch.object(collector, "_http_get_json", return_value={
+            "five_hour": {"utilization": 23, "resets_at": "2026-07-15T18:00:00Z"},
+            "seven_day": {"utilization": 70, "resets_at": "2026-07-20T00:00:00Z"},
+        }):
+            result = collector.fetch_claude_official_usage("fake-token")
+        self.assertEqual(result["five_hour"]["used_percentage"], 23)
+        self.assertEqual(result["five_hour"]["remaining_percentage"], 77)
+        self.assertEqual(result["seven_day"]["used_percentage"], 70)
+        self.assertEqual(result["seven_day"]["remaining_percentage"], 30)
+
+    def test_fetch_claude_official_usage_returns_none_when_fields_missing(self):
+        with mock.patch.object(collector, "_http_get_json", return_value={"unrelated": True}):
+            self.assertIsNone(collector.fetch_claude_official_usage("fake-token"))
+
+    def test_fetch_claude_official_usage_falls_back_on_http_failure(self):
+        with mock.patch.object(collector, "_http_get_json", return_value=None):
+            self.assertIsNone(collector.fetch_claude_official_usage("fake-token"))
+
+    def test_fetch_codex_official_usage_parses_rate_limit(self):
+        with mock.patch.object(collector, "_http_get_json", return_value={
+            "rate_limit": {
+                "primary_window": {"used_percent": 18, "reset_at": 1784098800},
+                "secondary_window": {"used_percent": 42, "reset_at": 1784520000},
+            },
+        }):
+            result = collector.fetch_codex_official_usage("fake-token", "acct-1")
+        self.assertEqual(result["five_hour"]["used_percentage"], 18)
+        self.assertEqual(result["five_hour"]["remaining_percentage"], 82)
+        self.assertEqual(result["seven_day"]["used_percentage"], 42)
+        self.assertEqual(result["seven_day"]["remaining_percentage"], 58)
+
+    def test_fetch_codex_official_usage_returns_none_on_http_failure(self):
+        with mock.patch.object(collector, "_http_get_json", return_value=None):
+            self.assertIsNone(collector.fetch_codex_official_usage("fake-token", ""))
+
+
+class OfficialUsageFallbackTests(unittest.TestCase):
+    def test_collect_codex_default_signature_never_touches_network(self):
+        with mock.patch.object(collector, "_http_get_json", side_effect=AssertionError("network should not be called")):
+            with tempfile.TemporaryDirectory() as temp:
+                agent = collector.collect_codex(Path(temp))
+        self.assertEqual(agent["quota_source"], "unavailable")
+
+    def test_collect_codex_uses_official_source_when_available(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            auth_path = root / "auth.json"
+            auth_path.write_text(
+                json.dumps({"tokens": {"access_token": "tok", "account_id": "acct"}}), encoding="utf-8",
+            )
+            with mock.patch.object(collector, "fetch_codex_official_usage", return_value={
+                "five_hour": {"used_percentage": 18, "remaining_percentage": 82},
+                "seven_day": {"used_percentage": 42, "remaining_percentage": 58},
+                "updated_at": "2026-07-15T06:00:00Z",
+            }):
+                agent = collector.collect_codex(root / "sessions", auth_path, use_official=True)
+        self.assertEqual(agent["quota_source"], "codex_oauth_usage")
+        self.assertEqual(agent["quota"]["five_hour"]["used_percentage"], 18)
+
+    def test_collect_codex_falls_back_to_local_when_official_fetch_fails(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            sessions_dir = root / "sessions"
+            sessions_dir.mkdir()
+            session = sessions_dir / "session.jsonl"
+            session.write_text(json.dumps({
+                "type": "event_msg",
+                "timestamp": "2026-07-15T06:00:00Z",
+                "payload": {
+                    "type": "token_count",
+                    "info": {"last_token_usage": {"input_tokens": 10}},
+                    "rate_limits": {"primary": {"used_percent": 5}},
+                },
+            }) + "\n", encoding="utf-8")
+            auth_path = root / "auth.json"
+            auth_path.write_text(json.dumps({"tokens": {"access_token": "tok"}}), encoding="utf-8")
+
+            with mock.patch.object(collector, "fetch_codex_official_usage", return_value=None):
+                agent = collector.collect_codex(sessions_dir, auth_path, use_official=True)
+        self.assertEqual(agent["quota_source"], "codex_session_jsonl")
+        self.assertEqual(agent["quota"]["five_hour"]["used_percentage"], 5)
+
+    def test_collect_claude_uses_official_source_when_available(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            creds = root / "creds.json"
+            creds.write_text(json.dumps({"claudeAiOauth": {"accessToken": "tok"}}), encoding="utf-8")
+            with mock.patch.object(collector, "fetch_claude_official_usage", return_value={
+                "five_hour": {"used_percentage": 23, "remaining_percentage": 77},
+                "seven_day": {"used_percentage": 70, "remaining_percentage": 30},
+                "updated_at": "2026-07-15T06:00:00Z",
+            }):
+                agent = collector.collect_claude(root / "projects", "UTC", creds, use_official=True)
+        self.assertEqual(agent["quota_source"], "claude_oauth_usage")
+        self.assertEqual(agent["quota"]["five_hour"]["used_percentage"], 23)
+        self.assertEqual(agent["quota"]["seven_day"]["used_percentage"], 70)
+
+    def test_collect_claude_no_official_usage_flag_skips_network_and_ccusage_mock(self):
+        with mock.patch.object(collector, "fetch_claude_official_usage", side_effect=AssertionError("should not be called")), \
+             mock.patch.object(collector, "read_ccusage_block", return_value=None):
+            with tempfile.TemporaryDirectory() as temp:
+                agent = collector.collect_claude(Path(temp), "UTC", use_official=False)
+        self.assertNotEqual(agent["quota_source"], "claude_oauth_usage")
+
+
+class OfficialUsageToggleTests(unittest.TestCase):
+    def test_cli_flag_disables_official_usage(self):
+        args = collector.parse_args(["--no-official-usage"])
+        self.assertFalse(collector.official_usage_enabled(args))
+
+    def test_env_var_disables_official_usage(self):
+        args = collector.parse_args([])
+        with mock.patch.dict(os.environ, {"CONTEXT_USAGE_OFFICIAL": "0"}):
+            self.assertFalse(collector.official_usage_enabled(args))
+
+    def test_enabled_by_default(self):
+        args = collector.parse_args([])
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("CONTEXT_USAGE_OFFICIAL", None)
+            self.assertTrue(collector.official_usage_enabled(args))
+
+
+class RedirectDoesNotLeakAuthorizationTests(unittest.TestCase):
+    """Regression test for the cross-host redirect credential leak.
+
+    Reproduces the reported issue exactly: an origin server on 127.0.0.1
+    redirects to a different hostname (localhost). The fix must refuse to
+    follow the redirect at all, so the second server must never see the
+    request (and therefore never see the Authorization header).
+    """
+
+    def test_redirect_is_refused_and_authorization_is_never_replayed(self):
+        captured_auth = []
+
+        class CaptureHandler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                captured_auth.append(self.headers.get("Authorization"))
+                body = b'{"five_hour": {"utilization": 99}}'
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, format, *args):
+                pass
+
+        capture_server = http.server.HTTPServer(("127.0.0.1", 0), CaptureHandler)
+        capture_thread = threading.Thread(target=capture_server.serve_forever, daemon=True)
+        capture_thread.start()
+        capture_port = capture_server.server_address[1]
+
+        class RedirectHandler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(302)
+                self.send_header("Location", f"http://localhost:{capture_port}/usage")
+                self.end_headers()
+
+            def log_message(self, format, *args):
+                pass
+
+        origin_server = http.server.HTTPServer(("127.0.0.1", 0), RedirectHandler)
+        origin_thread = threading.Thread(target=origin_server.serve_forever, daemon=True)
+        origin_thread.start()
+        origin_port = origin_server.server_address[1]
+
+        try:
+            result = collector._http_get_json(
+                f"http://127.0.0.1:{origin_port}/usage",
+                headers={"Authorization": "Bearer top-secret"},
+                timeout=5,
+            )
+        finally:
+            origin_server.shutdown()
+            capture_server.shutdown()
+            origin_thread.join()
+            capture_thread.join()
+            origin_server.server_close()
+            capture_server.server_close()
+
+        self.assertIsNone(result)
+        self.assertEqual(captured_auth, [])
 
 
 if __name__ == "__main__":
