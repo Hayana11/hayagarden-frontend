@@ -138,11 +138,20 @@ def _read_json_file(path: Path) -> dict[str, Any] | None:
 
 
 def read_claude_oauth_token(path: Path) -> str | None:
-    """Read the access token Claude Code's own CLI already stores locally.
+    """Get the access token Claude Code's own CLI already holds.
 
-    We only ever read this file, never write to it — token refresh stays the
-    CLI's own responsibility so this collector can't corrupt a live login.
+    Prefers CLAUDE_CODE_OAUTH_TOKEN (a long-lived token from `claude
+    setup-token`, ~1 year validity) when set — this is the token to use on a
+    machine that never runs Claude Code interactively, since the normal
+    credentials file only gets refreshed by an interactive/long-running CLI
+    session and a bare `-p` invocation does not renew it. Falls back to
+    reading the short-lived token from the credentials file, which stays
+    fresh as long as something on this machine is using the CLI normally.
+    Either way we only ever read — never write to or refresh — local state.
     """
+    env_token = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN", "").strip()
+    if env_token:
+        return env_token
     data = _read_json_file(path)
     if not data:
         return None
