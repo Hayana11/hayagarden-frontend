@@ -177,6 +177,33 @@ button {
   display: none;
 }
 
+/* ── Shared usage surfaces ── */
+.usage-card-switch { flex-shrink: 0; padding: 6px 11px; border: 1px solid #E7DAD5; border-radius: 999px; background: rgba(255,255,255,.72); color: #8C7B76; font-size: 10.5px; letter-spacing: .5px; cursor: pointer; transition: color .25s ease, border-color .25s ease, transform .2s ease; }
+.usage-card-switch:active { transform: scale(.96); }
+.usage-page-intro { display: flex; flex-direction: column; gap: 4px; padding: 0 4px 2px; }
+.usage-page-intro > span { font: 11px var(--font-serif-display); letter-spacing: 3px; color: #B9A8A2; }
+.usage-page-intro > small { color: #A99590; font-size: 11.5px; line-height: 1.5; }
+.usage-agent-heading { display: flex; align-items: center; gap: 11px; min-width: 0; }
+.usage-agent-dot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; transition: background-color .35s ease; }
+.usage-agent-heading > div { display: flex; flex: 1; min-width: 0; flex-direction: column; gap: 3px; }
+.usage-agent-heading strong { font-size: 16px; letter-spacing: 1px; }
+.usage-agent-heading small { color: #A99590; font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.usage-agent-heading > em { padding: 4px 9px; border-radius: 999px; background: #F6EFEC; color: #B9A8A2; font-size: 10.5px; font-style: normal; white-space: nowrap; }
+.usage-agent-heading > em.ready { background: rgba(122,155,109,.1); color: #6F9368; }
+.usage-limit-alert { display: flex; flex-direction: column; gap: 3px; margin-top: 14px; padding: 10px 12px; border-radius: 13px; background: rgba(194,84,80,.08); color: #A64A47; }
+.usage-limit-alert strong { font-size: 12px; letter-spacing: .5px; }
+.usage-limit-alert span { color: #B76E79; font-size: 10.5px; line-height: 1.45; }
+.usage-agent-empty { display: flex; min-height: 92px; margin-top: 15px; border-radius: 16px; background: #F8F3F1; align-items: center; justify-content: center; flex-direction: column; gap: 6px; color: #8C7B76; }
+.usage-agent-empty > span { font-size: 13px; letter-spacing: 1px; }
+.usage-agent-empty > small { color: #B9A8A2; font-size: 10.5px; }
+.usage-agent-meta { display: flex; justify-content: space-between; gap: 10px; margin-top: 15px; padding-top: 11px; border-top: 1px solid #F1E8E4; color: #B9A8A2; font: 10px var(--font-mono); }
+.usage-agent-meta span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.usage-agent-updated { margin-top: 4px; color: #C4B4AF; font: 9.5px var(--font-mono); text-align: right; }
+
+@media (prefers-reduced-motion: reduce) {
+  .usage-card-switch, .usage-agent-dot { transition: none; }
+}
+
 /* ── Fyodor Config handoff ── */
 .config-root:not(.dash-fullscreen-page) { min-height: 100vh; background: #F7F1EE; color: #4A3F3C; }
 .config-root.dash-fullscreen-page { background: #F7F1EE; color: #4A3F3C; }
@@ -189,6 +216,7 @@ button {
 .config-card { background: #fff; border-radius: 22px; box-shadow: 0 10px 30px rgba(183,110,121,.1); padding: 18px 20px; }
 .config-section-label { display: flex; justify-content: space-between; align-items: baseline; padding: 10px 4px 0; font: 11px var(--font-serif-display); letter-spacing: 3px; color: #B9A8A2; }
 .config-section-label > span:last-child:not(:first-child) { letter-spacing: 0; color: #A99590; }
+.config-section-link { padding: 5px 10px; border-radius: 999px; background: rgba(183,110,121,.09); color: #9C3B4A; font: 11px var(--font-serif-cn); letter-spacing: .5px; text-decoration: none; white-space: nowrap; }
 .config-card-kicker { display: flex; justify-content: space-between; align-items: center; gap: 10px; font: 10px var(--font-serif-display); letter-spacing: 3px; color: #B9A8A2; }
 .config-card-kicker > span:last-child { display: flex; align-items: center; gap: 6px; font-family: var(--font-serif-cn); font-size: 11.5px; letter-spacing: 0; }
 .config-card-kicker > span:last-child i { width: 7px; height: 7px; border-radius: 50%; background: currentColor; animation: livePulse 2s infinite; }
@@ -243,12 +271,6 @@ button {
 .config-cap-chips .off { background: #F6EFEC; color: #C4B4AF; }
 .config-endpoint-row > button, .config-current-badge { margin-left: auto; padding: 5px 13px; border: 1px solid #E4D4CC; border-radius: 999px; color: #8C7B76; font-size: 11.5px; letter-spacing: 1px; cursor: pointer; white-space: nowrap; }
 .config-current-badge { border: 0; background: rgba(183,110,121,.12); color: #9C3B4A; }
-.config-quota { display: flex; flex-direction: column; gap: 10px; margin-top: 14px; }
-.config-quota > div > span { display: flex; justify-content: space-between; color: #8C7B76; font-size: 12px; }
-.config-quota b { color: #8A7AB5; font: 400 12px var(--font-mono); }
-.config-quota > div > i { display: block; height: 8px; margin-top: 6px; overflow: hidden; border-radius: 4px; background: #F3EBE8; }
-.config-quota > div > i > em { display: block; height: 100%; border-radius: 4px; background: #8A7AB5; }
-.config-quota > div > i > em.rose { background: #B76E79; }
 .config-effort { display: flex; align-items: center; gap: 12px; margin-top: 14px; }
 .config-effort > span { color: #8C7B76; font-size: 12.5px; letter-spacing: 1px; }
 .config-effort > div { flex: 1; display: flex; gap: 2px; padding: 3px; border-radius: 999px; background: #F6EFEC; }

@@ -11,21 +11,18 @@ export function useUsage(now: Date): UsageSummary | null {
 
   useEffect(() => {
     let alive = true;
-    fetchUsageSummary(nowRef.current).then((u) => {
-      if (alive) setUsage(u);
-    });
+    const refresh = () => {
+      fetchUsageSummary(nowRef.current).then((u) => {
+        if (alive) setUsage(u);
+      });
+    };
+    refresh();
+    const timer = window.setInterval(refresh, 15_000);
 
     try {
       const es = new EventSource(sseUrl(USAGE_STREAM_PATH));
       sourceRef.current = es;
-      es.onmessage = (ev) => {
-        try {
-          const patch = JSON.parse(ev.data) as Partial<UsageSummary>;
-          setUsage((prev) => (prev ? { ...prev, ...patch } : (patch as UsageSummary)));
-        } catch {
-          // ignore malformed frame
-        }
-      };
+      es.onmessage = refresh;
       es.onerror = () => es.close();
     } catch {
       // SSE unavailable in this environment; the polled summary above still applies
@@ -33,6 +30,7 @@ export function useUsage(now: Date): UsageSummary | null {
 
     return () => {
       alive = false;
+      window.clearInterval(timer);
       sourceRef.current?.close();
     };
   }, []);
