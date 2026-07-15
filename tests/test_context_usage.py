@@ -182,9 +182,20 @@ class ContextUsageCollectorTests(unittest.TestCase):
             "totalTokens": 22000,
             "models": ["claude-opus-4-1"],
         }, now=now)
-        self.assertEqual(window["remaining_percentage"], 60)
-        self.assertEqual(window["used_percentage"], 40)
-        self.assertEqual(window["remaining_basis"], "time_window")
+        self.assertNotIn("remaining_percentage", window)
+        self.assertNotIn("used_percentage", window)
+        self.assertEqual(window["remaining_minutes"], 180)
+        self.assertEqual(window["remaining_basis"], "time_until_reset")
+        self.assertEqual(window["total_tokens"], 22000)
+        self.assertEqual(window["projected_total_tokens"], 44000)
+
+        almost_finished = collector.claude_window({
+            "startTime": "2026-07-15T04:00:00Z",
+            "endTime": "2026-07-15T09:00:00Z",
+            "totalTokens": 22000,
+        }, now=dt.datetime(2026, 7, 15, 8, 0, tzinfo=dt.timezone.utc))
+        self.assertEqual(almost_finished["remaining_minutes"], 60)
+        self.assertNotIn("used_percentage", almost_finished)
 
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

@@ -75,6 +75,8 @@ curl -s https://love-style.xyz/api/context-usage
 - `codex_session_jsonl`：Codex 最近 session 的 `token_count.rate_limits`。
 - `unavailable`：对应来源暂时没有可读数据。
 
+`ccusage_blocks` 的 `remainingMinutes` 表示距离 block 重置还有多久，不代表订阅额度剩余多少。采集器会保留 token、倒计时与重置时间，但不会据此伪造 Claude 的“已用百分比”；没有真实限额来源时，前端百分比显示为 `—`。
+
 ## 4. 安全边界
 
 - 不要把 `CONTEXT_USAGE_REPORT_TOKEN` 提交到 Git、截图或聊天记录。

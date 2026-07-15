@@ -251,23 +251,28 @@ def claude_window(block: dict[str, Any], now: dt.datetime | None = None) -> dict
         end = dt.datetime.fromisoformat(end_text.replace("Z", "+00:00")) if end_text else start + dt.timedelta(hours=5)
     except ValueError:
         start, end = now, now + dt.timedelta(hours=5)
-    window_minutes = max(1, round((end - start).total_seconds() / 60))
     projection = block.get("projection") if isinstance(block.get("projection"), dict) else {}
     remaining = integer(projection.get("remainingMinutes"))
     if remaining is None:
         remaining = max(0, round((end - now).total_seconds() / 60))
-    remaining_pct = min(100.0, max(0.0, remaining / window_minutes * 100))
     result: dict[str, Any] = {
-        "remaining_basis": "time_window",
+        # ccusage exposes time remaining in the active block, not the user's
+        # subscription quota remaining. Keep it only as reset metadata; using
+        # elapsed time as a quota percentage would be semantically false.
+        "remaining_basis": "time_until_reset",
         "remaining_minutes": remaining,
-        "remaining_percentage": round(remaining_pct, 4),
-        "used_percentage": round(100 - remaining_pct, 4),
         "resets_at": end.isoformat().replace("+00:00", "Z"),
     }
-    for source, target in (("totalTokens", "total_tokens"), ("projectedTotalTokens", "projected_total_tokens")):
-        value = integer(block.get(source) if source in block else projection.get(source))
-        if value is not None:
-            result[target] = value
+    total_tokens = integer(block.get("totalTokens"))
+    if total_tokens is not None:
+        result["total_tokens"] = total_tokens
+    projected_tokens = integer(
+        block.get("projectedTotalTokens")
+        if "projectedTotalTokens" in block
+        else projection.get("projectedTotalTokens", projection.get("totalTokens"))
+    )
+    if projected_tokens is not None:
+        result["projected_total_tokens"] = projected_tokens
     models = block.get("models")
     if isinstance(models, list):
         result["models"] = [str(model)[:80] for model in models[:8]]
