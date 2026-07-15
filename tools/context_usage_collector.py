@@ -30,6 +30,15 @@ RATE_LIMIT_MARKERS = (
     '"status":429',
 )
 
+# Unofficial, reverse-engineered account usage endpoints. These are the same
+# endpoints the Claude Code CLI and Codex CLI call to render their own quota
+# bars, so we read them the same way instead of estimating usage from local
+# session files. Anthropic/OpenAI have not published these as stable public
+# API and may change or remove them without notice; treat failures here as
+# "no data" and fall back to local-file estimation rather than raising.
+CLAUDE_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
+CODEX_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage"
+
 
 def utc_now_iso() -> str:
     return dt.datetime.now(dt.timezone.utc).isoformat().replace("+00:00", "Z")
@@ -119,6 +128,110 @@ def usage_tokens(value: Any) -> int | None:
     return sum(found) if found else None
 
 
+def _read_json_file(path: Path) -> dict[str, Any] | None:
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def read_claude_oauth_token(path: Path) -> str | None:
+    """Read the access token Claude Code's own CLI already stores locally.
+
+    We only ever read this file, never write to it — token refresh stays the
+    CLI's own responsibility so this collector can't corrupt a live login.
+    """
+    data = _read_json_file(path)
+    if not data:
+        return None
+    oauth = data.get("claudeAiOauth") if isinstance(data.get("claudeAiOauth"), dict) else data
+    token = oauth.get("accessToken") or oauth.get("access_token")
+    return str(token) if token else None
+
+
+def read_codex_oauth(path: Path) -> tuple[str, str] | None:
+    """Read the access token + account id Codex's own CLI already stores locally."""
+    data = _read_json_file(path)
+    if not data:
+        return None
+    tokens = data.get("tokens") if isinstance(data.get("tokens"), dict) else data
+    token = tokens.get("access_token") or tokens.get("accessToken")
+    if not token:
+        return None
+    account_id = tokens.get("account_id") or tokens.get("accountId") or data.get("account_id") or ""
+    return str(token), str(account_id)
+
+
+def _http_get_json(url: str, headers: dict[str, str], timeout: int = 6) -> dict[str, Any] | None:
+    request = urllib.request.Request(url, method="GET", headers=headers)
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            if response.status != 200:
+                return None
+            payload = json.loads(response.read().decode("utf-8"))
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError, ValueError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _official_window(section: Any, percent_key: str) -> dict[str, Any]:
+    section = section if isinstance(section, dict) else {}
+    used = numeric(section.get(percent_key))
+    result: dict[str, Any] = {}
+    if used is not None:
+        used = min(100.0, max(0.0, used))
+        result["used_percentage"] = round(used, 4)
+        result["remaining_percentage"] = round(100 - used, 4)
+    reset = iso_time(section.get("resets_at") or section.get("reset_at"))
+    if reset:
+        result["resets_at"] = reset
+    return result
+
+
+def fetch_claude_official_usage(token: str) -> dict[str, Any] | None:
+    """Call the same account-usage endpoint the Claude Code CLI itself reads.
+
+    This is unofficial/reverse-engineered, not a published stable API — treat
+    any failure as "no data" and let the caller fall back to local estimation.
+    """
+    payload = _http_get_json(
+        CLAUDE_USAGE_URL,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "anthropic-beta": "oauth-2025-04-20",
+            "User-Agent": "claude-cli",
+        },
+    )
+    if not payload:
+        return None
+    five_hour = _official_window(payload.get("five_hour"), "utilization")
+    seven_day = _official_window(payload.get("seven_day"), "utilization")
+    if not five_hour and not seven_day:
+        return None
+    return {"five_hour": five_hour, "seven_day": seven_day, "updated_at": utc_now_iso()}
+
+
+def fetch_codex_official_usage(token: str, account_id: str) -> dict[str, Any] | None:
+    """Call the same account-usage endpoint the Codex CLI itself reads.
+
+    Same caveat as fetch_claude_official_usage: unofficial endpoint, fail soft.
+    """
+    headers = {"Authorization": f"Bearer {token}"}
+    if account_id:
+        headers["chatgpt-account-id"] = account_id
+    payload = _http_get_json(CODEX_USAGE_URL, headers=headers)
+    if not payload:
+        return None
+    rate_limit = payload.get("rate_limit") if isinstance(payload.get("rate_limit"), dict) else {}
+    five_hour = _official_window(rate_limit.get("primary_window"), "used_percent")
+    seven_day = _official_window(rate_limit.get("secondary_window"), "used_percent")
+    if not five_hour and not seven_day:
+        return None
+    return {"five_hour": five_hour, "seven_day": seven_day, "updated_at": utc_now_iso()}
+
+
 def codex_window(raw: Any) -> dict[str, Any]:
     raw = raw if isinstance(raw, dict) else {}
     used = numeric(raw.get("used_percent", raw.get("used_percentage")))
@@ -133,7 +246,20 @@ def codex_window(raw: Any) -> dict[str, Any]:
     return result
 
 
-def collect_codex(sessions_dir: Path, file_limit: int = 8) -> dict[str, Any]:
+def default_codex_auth_path() -> Path:
+    return Path(os.environ.get("CODEX_AUTH_PATH", "~/.codex/auth.json")).expanduser()
+
+
+def default_claude_credentials_path() -> Path:
+    return Path(os.environ.get("CLAUDE_CREDENTIALS_PATH", "~/.claude/.credentials.json")).expanduser()
+
+
+def collect_codex(
+    sessions_dir: Path,
+    auth_path: Path | None = None,
+    use_official: bool = False,
+    file_limit: int = 8,
+) -> dict[str, Any]:
     quota: dict[str, Any] | None = None
     active_sessions: list[dict[str, Any]] = []
     for path in recent_jsonl(sessions_dir, file_limit):
@@ -181,10 +307,25 @@ def collect_codex(sessions_dir: Path, file_limit: int = 8) -> dict[str, Any]:
                 break
         if newest_session:
             active_sessions.append(newest_session)
+
+    source = "codex_session_jsonl" if quota else "unavailable"
+    if use_official:
+        creds = read_codex_oauth(auth_path or default_codex_auth_path())
+        if creds:
+            official = fetch_codex_official_usage(*creds)
+            if official:
+                # Keep token/context counters from the local session scan —
+                # the official endpoint only reports quota %, not context size.
+                for key in ("latest_tokens", "total_tokens", "context_window_tokens"):
+                    if quota and key in quota:
+                        official[key] = quota[key]
+                quota = official
+                source = "codex_oauth_usage"
+
     return {
         "id": "codex",
         "name": "Codex",
-        "quota_source": "codex_session_jsonl" if quota else "unavailable",
+        "quota_source": source,
         "quota": quota or {"five_hour": {}, "seven_day": {}, "updated_at": utc_now_iso()},
         "active_sessions": active_sessions[:6],
     }
@@ -328,29 +469,58 @@ def scan_claude_projects(projects_dir: Path, file_limit: int = 8) -> tuple[list[
     return sessions[:6], newest_limit
 
 
-def collect_claude(projects_dir: Path, timezone: str) -> dict[str, Any]:
-    block = read_ccusage_block(timezone)
+def collect_claude(
+    projects_dir: Path,
+    timezone: str,
+    credentials_path: Path | None = None,
+    use_official: bool = False,
+) -> dict[str, Any]:
     sessions, effective_limit = scan_claude_projects(projects_dir)
-    quota: dict[str, Any] = {
-        "five_hour": claude_window(block) if block else {},
-        "seven_day": {},
-        "updated_at": utc_now_iso(),
-    }
+
+    official = None
+    if use_official:
+        token = read_claude_oauth_token(credentials_path or default_claude_credentials_path())
+        if token:
+            official = fetch_claude_official_usage(token)
+
+    if official:
+        quota = official
+        source = "claude_oauth_usage"
+    else:
+        block = read_ccusage_block(timezone)
+        quota = {
+            "five_hour": claude_window(block) if block else {},
+            "seven_day": {},
+            "updated_at": utc_now_iso(),
+        }
+        source = "ccusage_blocks" if block else "claude_project_jsonl" if effective_limit else "unavailable"
+
     if effective_limit:
         quota["effective_limit"] = effective_limit
+
     return {
         "id": "claude",
         "name": "Claude Code",
-        "quota_source": "ccusage_blocks" if block else "claude_project_jsonl" if effective_limit else "unavailable",
+        "quota_source": source,
         "quota": quota,
         "active_sessions": sessions,
     }
 
 
-def collect_snapshot(codex_dir: Path, claude_dir: Path, timezone: str) -> dict[str, Any]:
+def collect_snapshot(
+    codex_dir: Path,
+    claude_dir: Path,
+    timezone: str,
+    claude_credentials: Path | None = None,
+    codex_auth: Path | None = None,
+    use_official: bool = False,
+) -> dict[str, Any]:
     return {
         "generated_at": utc_now_iso(),
-        "agents": [collect_claude(claude_dir, timezone), collect_codex(codex_dir)],
+        "agents": [
+            collect_claude(claude_dir, timezone, claude_credentials, use_official),
+            collect_codex(codex_dir, codex_auth, use_official),
+        ],
     }
 
 
@@ -376,15 +546,45 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--token", default=os.environ.get("CONTEXT_USAGE_REPORT_TOKEN", ""))
     parser.add_argument("--codex-dir", type=Path, default=Path(os.environ.get("CODEX_SESSIONS_DIR", "~/.codex/sessions")).expanduser())
     parser.add_argument("--claude-dir", type=Path, default=Path(os.environ.get("CLAUDE_PROJECTS_DIR", "~/.claude/projects")).expanduser())
+    parser.add_argument(
+        "--claude-credentials",
+        type=Path,
+        default=Path(os.environ.get("CLAUDE_CREDENTIALS_PATH", "~/.claude/.credentials.json")).expanduser(),
+        help="local Claude Code OAuth credentials file (read-only; never modified)",
+    )
+    parser.add_argument(
+        "--codex-auth",
+        type=Path,
+        default=Path(os.environ.get("CODEX_AUTH_PATH", "~/.codex/auth.json")).expanduser(),
+        help="local Codex OAuth credentials file (read-only; never modified)",
+    )
     parser.add_argument("--timezone", default=os.environ.get("CONTEXT_USAGE_TIMEZONE", "Asia/Shanghai"))
     parser.add_argument("--watch", action="store_true", help="keep reporting until interrupted")
     parser.add_argument("--interval", type=int, default=int(os.environ.get("CONTEXT_USAGE_INTERVAL", "60")))
     parser.add_argument("--print", action="store_true", dest="print_only", help="print the redacted snapshot without POSTing")
+    parser.add_argument(
+        "--no-official-usage",
+        action="store_true",
+        help="skip the unofficial Claude/Codex account-usage endpoints and only estimate from local files",
+    )
     return parser.parse_args(argv)
 
 
+def official_usage_enabled(args: argparse.Namespace) -> bool:
+    if args.no_official_usage:
+        return False
+    return os.environ.get("CONTEXT_USAGE_OFFICIAL", "1") != "0"
+
+
 def run_once(args: argparse.Namespace) -> None:
-    snapshot = collect_snapshot(args.codex_dir, args.claude_dir, args.timezone)
+    snapshot = collect_snapshot(
+        args.codex_dir,
+        args.claude_dir,
+        args.timezone,
+        args.claude_credentials,
+        args.codex_auth,
+        official_usage_enabled(args),
+    )
     if args.print_only:
         print(json.dumps(snapshot, ensure_ascii=False, indent=2))
         return
