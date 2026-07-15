@@ -164,10 +164,26 @@ def read_codex_oauth(path: Path) -> tuple[str, str] | None:
     return str(token), str(account_id)
 
 
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Refuse every redirect.
+
+    urllib's default handler follows 30x responses and replays the original
+    Authorization header at the new Location, even across hosts. These usage
+    calls carry a live OAuth token, so any redirect must be treated as a
+    failure (fall back to local estimation) rather than followed.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: ARG002
+        return None
+
+
+_NO_REDIRECT_OPENER = urllib.request.build_opener(_NoRedirectHandler)
+
+
 def _http_get_json(url: str, headers: dict[str, str], timeout: int = 6) -> dict[str, Any] | None:
     request = urllib.request.Request(url, method="GET", headers=headers)
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with _NO_REDIRECT_OPENER.open(request, timeout=timeout) as response:
             if response.status != 200:
                 return None
             payload = json.loads(response.read().decode("utf-8"))
