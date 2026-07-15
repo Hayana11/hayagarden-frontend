@@ -32,7 +32,7 @@ CONTEXT_USAGE_REPORT_TOKEN=<上一步生成的随机值>
 - Codex：`~/.codex/sessions`
 - Claude Code：`~/.claude/projects`
 - Claude 5 小时 block：`npx -y ccusage@latest blocks --active --json --offline --recent`（仅在下面的官方额度接口不可用时才会用到）
-- Claude 官方账号用量：`~/.claude/.credentials.json` 里的 `accessToken`
+- Claude 官方账号用量：`~/.claude/.credentials.json` 里的 `accessToken`，或环境变量 `CLAUDE_CODE_OAUTH_TOKEN`（优先）——后者是 `claude setup-token` 生成的长效 token，见第 4.1 节
 - Codex 官方账号用量：`~/.codex/auth.json` 里的 `access_token` / `account_id`
 
 PowerShell 示例：
@@ -82,10 +82,34 @@ Claude/Codex 客户端自己登录后，会用同一个已登录的 OAuth token 
 方案 | 做法 | 优点 | 限制
 --- | --- | --- | ---
 家里电脑常开 | Windows 任务计划程序 / PM2 / NSSM 常驻采集器 | 最容易读到本机 Codex 和 Claude Code 文件，也是官方用量接口需要的登录态所在 | 电脑睡眠就没有新数据
-VPS + 远程同步 | 电脑定时把脱敏快照 POST 到 VPS；手机只访问 VPS | 手机随时能看最近快照 | VPS 本身读不到电脑本地 CLI 文件，也没有登录态
+VPS 自建登录 | 直接在 VPS 上装并登录 Claude Code / Codex CLI，采集器也跑在这台 VPS 上 | 不依赖家里电脑开关机，手机随时能看最新数据 | 需要单独处理 VPS 上的登录续期（见下）；账号多了一个常驻登录设备
 远程桌面机器 | 把 Codex/Claude Code 都跑在一台云桌面或小主机上 | 最稳定，采集器和 CLI、登录态都在同一机器 | 需要长期运行环境
 
-推荐：如果目标是"手机随时看"，采集器必须和 Codex/Claude Code 的本地数据（以及登录态）在同一台机器上运行；App 后端只接收脱敏快照。
+推荐：如果目标是"手机随时看"，采集器必须和 Codex/Claude Code 的本地数据（以及登录态）在同一台机器上运行——这台机器不一定是你家里的电脑，VPS/云主机自己装一份 CLI 也可以，App 后端只接收脱敏快照。
+
+### 4.1 VPS 自建登录时的 token 续期
+
+`claude` CLI 的正常终端会话里，token 会话大约 8 小时一次自动续期。但采集器不是正常终端会话——如果 VPS 上只靠 cron 定时跑非交互的 `claude -p ...`，续期不会触发，跑几个小时后 token 就会过期，`claude_oauth_usage` 又会退回 `unavailable`。两种解法都支持：
+
+**方案一（推荐）：`claude setup-token` 换长效 token。**
+
+```bash
+claude setup-token
+```
+
+交互授权一次，拿到一个约一年有效期的长效 token，之后不再依赖自动续期。把它导出为环境变量：
+
+```bash
+export CLAUDE_CODE_OAUTH_TOKEN=<setup-token 给出的值>
+```
+
+采集器读取账号 token 时会**优先**用这个环境变量，完全不去碰 `~/.claude/.credentials.json`，也就不受"非交互调用不续期"这个限制影响。写进采集器的启动环境（systemd unit 的 `Environment=`、PM2 的 `env` 字段，或者 shell profile）即可长期生效。
+
+**方案二：VPS 上保留一个常驻交互终端。**
+
+用 `tmux`/`screen` 开一个窗口跑着 `claude`（哪怕不主动对话），它的正常会话续期逻辑会持续回写 `~/.claude/.credentials.json`；采集器的 `-p` 管道每次读到的都是这个终端刚续过的有效 token。这个方案不需要额外的环境变量配置，但要保证那个终端会话本身不会被意外关掉。
+
+两种方案都行，方案一更省心（一次授权、一年不用管），方案二贴近"模拟一台一直有人用的电脑"。Codex 目前没有对应的长效 token 导出方式，仍然依赖 `~/.codex/auth.json` 的正常续期，需要类似方案二的常驻会话来保活。
 
 ## 5. 验收
 

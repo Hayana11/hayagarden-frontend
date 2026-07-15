@@ -244,6 +244,30 @@ class OAuthCredentialReadingTests(unittest.TestCase):
     def test_read_claude_oauth_token_missing_file_returns_none(self):
         self.assertIsNone(collector.read_claude_oauth_token(Path("/nonexistent/creds.json")))
 
+    def test_read_claude_oauth_token_prefers_setup_token_env_var(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "creds.json"
+            path.write_text(json.dumps({"claudeAiOauth": {"accessToken": "file-token"}}), encoding="utf-8")
+            before_text = path.read_text(encoding="utf-8")
+            before_mtime = path.stat().st_mtime
+
+            with mock.patch.dict(os.environ, {"CLAUDE_CODE_OAUTH_TOKEN": "setup-token-value"}):
+                token = collector.read_claude_oauth_token(path)
+
+            self.assertEqual(token, "setup-token-value")
+            # The env var path must not touch the credentials file at all.
+            self.assertEqual(path.read_text(encoding="utf-8"), before_text)
+            self.assertEqual(path.stat().st_mtime, before_mtime)
+
+    def test_read_claude_oauth_token_falls_back_to_file_when_env_var_unset(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "creds.json"
+            path.write_text(json.dumps({"claudeAiOauth": {"accessToken": "file-token"}}), encoding="utf-8")
+            with mock.patch.dict(os.environ, {}, clear=False):
+                os.environ.pop("CLAUDE_CODE_OAUTH_TOKEN", None)
+                token = collector.read_claude_oauth_token(path)
+            self.assertEqual(token, "file-token")
+
     def test_read_codex_oauth_nested_shape(self):
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / "auth.json"
