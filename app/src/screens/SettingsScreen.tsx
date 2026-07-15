@@ -7,8 +7,6 @@ import {
   clearRelayAccountCredentials,
   createRelayEndpoint,
   getAvailableModels,
-  getConfigUsageSummary,
-  getDailyUsage,
   getKeyStatus,
   getModelCatalog,
   getProviderConfig,
@@ -22,9 +20,6 @@ import {
   updateCurrentModel,
   updateProvider,
   type ConfigModel,
-  type ConfigUsageSummary,
-  type DailyUsage,
-  type DailyUsageResult,
   type EndpointCapabilities,
   type KeyStatus,
   type RelayBalance,
@@ -50,10 +45,6 @@ function fmtTokens(value: number): string {
   if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
   if (value >= 1000) return `${(value / 1000).toFixed(1)}K`;
   return String(value);
-}
-
-function shortDate(value: string): string {
-  return `${Number(value.slice(5, 7))}-${Number(value.slice(8, 10))}`;
 }
 
 function fmtUsd(value: number | null): string {
@@ -82,17 +73,6 @@ async function getKeyStatusWithHostRtt(): Promise<{ status: KeyStatus; hostRttMs
   return { status, hostRttMs: Math.round(performance.now() - started) };
 }
 
-function fmtCost(value: number): string {
-  if (value <= 0) return '¥0';
-  if (value >= 100) return `¥${value.toFixed(1)}`;
-  return `¥${value.toFixed(2)}`;
-}
-
-function dailyMetric(item: DailyUsage, mode: DailyUsageResult['mode']): number {
-  if (mode === 'cost') return item.cost ?? 0;
-  return item.count;
-}
-
 export function SettingsScreen() {
   const navigate = useNavigate();
   const [provider, setProvider] = useState<'api_relay' | 'claude_code'>('api_relay');
@@ -104,16 +84,6 @@ export function SettingsScreen() {
   const [catalog, setCatalog] = useState<ConfigModel[]>([]);
   const [availableModels, setAvailableModels] = useState<string[]>([]);
   const [currentModel, setCurrentModel] = useState('');
-  const [usage, setUsage] = useState<ConfigUsageSummary | null>(null);
-  const [dailyUsage, setDailyUsage] = useState<DailyUsageResult>({
-    mode: 'requests',
-    days: [],
-    relays: [],
-    totalCost: null,
-    totalCount: 0,
-  });
-  const [range, setRange] = useState<7 | 30>(30);
-  const [selectedDay, setSelectedDay] = useState('');
   const [officialExpanded, setOfficialExpanded] = useState(false);
   const [expandedRelay, setExpandedRelay] = useState<number | null>(null);
   const [relayFilter, setRelayFilter] = useState('');
@@ -151,11 +121,9 @@ export function SettingsScreen() {
       getRelayEndpoints(),
       getModelCatalog(),
       getAvailableModels(),
-      getConfigUsageSummary(),
-      getDailyUsage(30),
       getGroupStatus(),
     ]);
-    const [providerResult, keyResult, relayResult, catalogResult, availableResult, usageResult, dailyResult, groupStatusResult] = results;
+    const [providerResult, keyResult, relayResult, catalogResult, availableResult, groupStatusResult] = results;
     if (providerResult.status === 'fulfilled') {
       setProvider(providerResult.value.provider);
       setCcTokenSet(providerResult.value.ccTokenSet);
@@ -185,11 +153,6 @@ export function SettingsScreen() {
       setCurrentModel(catalogResult.value.current);
     }
     if (availableResult.status === 'fulfilled') setAvailableModels(availableResult.value);
-    if (usageResult.status === 'fulfilled') setUsage(usageResult.value);
-    if (dailyResult.status === 'fulfilled') {
-      setDailyUsage(dailyResult.value);
-      setSelectedDay((current) => current || dailyResult.value.days.at(-1)?.date || '');
-    }
     if (groupStatusResult.status === 'fulfilled') setCodexStatus(groupStatusResult.value.agents.codex);
     if (results.some((result) => result.status === 'rejected')) setWarning('部分实时数据暂时不可用，已保留成功读取的配置。');
     setBusy('');
@@ -200,18 +163,6 @@ export function SettingsScreen() {
   const activeRelay = relays.find((relay) => relay.active) || null;
   const currentEndpointName = provider === 'claude_code' ? 'Claude Code 订阅' : activeRelay?.name || '未选择中转站';
   const currentReady = provider === 'claude_code' ? ccTokenSet : Boolean(activeRelay && keyStatus);
-  const daily = dailyUsage.days;
-  const dailyMode = dailyUsage.mode;
-  const shownDaily = range === 7 ? daily.slice(-7) : daily;
-  const selectedUsage = shownDaily.find((item) => item.date === selectedDay) || shownDaily.at(-1);
-  const maxDaily = Math.max(1, ...shownDaily.map((item) => dailyMetric(item, dailyMode)));
-  const totalRequests = shownDaily.reduce((sum, item) => sum + item.count, 0);
-
-  function dailyCellLabel(item: DailyUsage): string {
-    if (dailyMode === 'cost' && item.cost != null) return fmtCost(item.cost);
-    return String(item.count);
-  }
-
   const unifiedModels = useMemo(() => {
     const byId = new Map<string, ConfigModel>();
     for (const model of catalog) byId.set(model.id, model);
@@ -452,49 +403,7 @@ export function SettingsScreen() {
           <p>主站往返仅测网页到 VPS，不代表中转站延迟 · 聊天与下方「模型测试」均走此配置</p>
         </section>
 
-        <SectionLabel>USAGE · 用量统计</SectionLabel>
-        <section className="config-card config-usage">
-          <div className="config-card-heading"><h2>用量日历</h2><span>按天 · 对话请求</span></div>
-          <div className="config-segmented">
-            <button type="button" className={range === 7 ? 'active' : ''} onClick={() => { setRange(7); setSelectedDay(daily.at(-1)?.date || ''); }}>一周</button>
-            <button type="button" className={range === 30 ? 'active' : ''} onClick={() => { setRange(30); setSelectedDay(daily.at(-1)?.date || ''); }}>一个月</button>
-          </div>
-          {range === 7 ? (
-            <div className="config-week-bars">
-              {shownDaily.map((item) => {
-                const metric = dailyMetric(item, dailyMode);
-                const label = dailyCellLabel(item);
-                return (
-                  <button type="button" key={item.date} onClick={() => setSelectedDay(item.date)}>
-                    <span>{label}</span>
-                    <i className={selectedUsage?.date === item.date ? 'selected' : ''} style={{ height: `${Math.max(8, Math.round((metric / maxDaily) * 118))}px` }} />
-                    <small>{shortDate(item.date)}</small>
-                  </button>
-                );
-              })}
-            </div>
-          ) : (
-            <div className="config-month-grid">
-              {shownDaily.map((item) => {
-                const metric = dailyMetric(item, dailyMode);
-                const label = dailyCellLabel(item);
-                return (
-                  <button type="button" key={item.date} onClick={() => setSelectedDay(item.date)}>
-                    <span className={selectedUsage?.date === item.date ? 'selected' : ''}>
-                      <i style={{ height: `${Math.max(5, Math.round((metric / maxDaily) * 100))}%` }} />
-                      <em>{label}</em>
-                    </span>
-                    <small>{shortDate(item.date)}</small>
-                  </button>
-                );
-              })}
-            </div>
-          )}
-          <div className="config-day-detail">{selectedUsage ? `${shortDate(selectedUsage.date)} · ${selectedUsage.count} 次请求` : '暂无用量数据'}</div>
-          <div className="config-usage-summary"><span>合计 <b>{totalRequests}</b> 次请求</span><span>今日 <b>{usage?.todayMessages ?? 0}</b> 条消息</span><span>约 <b>{fmtTokens(usage?.todayTokens ?? 0)}</b> token</span></div>
-        </section>
-
-        <SectionLabel>OFFICIAL · 官方端点</SectionLabel>
+        <SectionLabel aside={<Link to="/usage" className="config-section-link">额度与日历 ›</Link>}>OFFICIAL · 官方端点</SectionLabel>
         <section className={`config-card config-endpoint${provider === 'claude_code' ? ' current' : ''}`}>
           <button className="config-endpoint-summary" type="button" onClick={() => setOfficialExpanded((value) => !value)}>
             <i className={ccTokenSet ? 'online' : 'offline'} />
@@ -503,7 +412,6 @@ export function SettingsScreen() {
             <b className={officialExpanded ? 'open' : ''}>▾</b>
           </button>
           <div className="config-endpoint-row"><CapabilityChips caps={{ thinking: true, cache: true, tools: false }} />{provider === 'claude_code' ? <span className="config-current-badge">使用中</span> : <button type="button" onClick={() => void switchToClaude()} disabled={Boolean(busy)}>切换</button>}</div>
-          <div className="config-quota"><div><span>5 小时窗 <b>已用 {usage?.win5Pct ?? 0}%</b></span><i><em style={{ width: `${usage?.win5Pct ?? 0}%` }} /></i></div><div><span>周额度 <b>已用 {usage?.win7Pct ?? 0}%</b></span><i><em className="rose" style={{ width: `${usage?.win7Pct ?? 0}%` }} /></i></div></div>
           <div className="config-effort"><span>Effort</span><div><button type="button" disabled>LOW</button><button type="button" disabled>MED</button><button type="button" disabled>HIGH</button></div><small>后端尚未接入</small></div>
           {officialExpanded && <div className="config-endpoint-expanded"><div className="config-expanded-title"><strong>订阅配置</strong><span>凭据仅在 VPS 终端管理</span></div><div className="config-model-chips">{catalog.slice(0, 6).map((model) => <span key={model.id}>{model.label}</span>)}</div><div className="config-key-row"><span>OAUTH TOKEN</span><b>{ccTokenSet ? '已配置 · 不回传网页' : '未设置'}</b></div></div>}
         </section>

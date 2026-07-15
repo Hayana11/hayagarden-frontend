@@ -26,6 +26,9 @@ import type {
   PeriodSettings,
   PeriodStats,
   Todo,
+  AgentUsageSummary,
+  UsageAgentId,
+  UsageBar,
   UsageSummary,
 } from '../types';
 
@@ -104,9 +107,156 @@ export function fetchHeatmap(base: Date, isCurrentMonth: boolean, todayDate: num
   );
 }
 
-// GET /api/usage/summary -> UsageSummary (today msg count is real already; tokens come from SSE `usage` field)
-export function fetchUsageSummary(now: Date): Promise<UsageSummary> {
-  return withFallback(() => http.get<UsageSummary>('/api/usage/summary'), () => mock.mockUsageSummary(now));
+interface LegacyUsageSummary {
+  win5Pct: number;
+  win5ResetAt: string;
+  win7Pct: number;
+  win7ResetAt: string;
+  msgToday: number;
+  tokenToday: number;
+  bars: UsageBar[];
+}
+
+interface RawQuotaWindow {
+  used_percent?: number | null;
+  used_percentage?: number | null;
+  remaining_percentage?: number | null;
+  remaining_minutes?: number | null;
+  resets_at?: string | null;
+}
+
+interface RawUsageAgent {
+  id?: string;
+  name?: string;
+  quota_source?: string;
+  quota?: {
+    five_hour?: RawQuotaWindow;
+    seven_day?: RawQuotaWindow;
+    updated_at?: string;
+    latest_tokens?: number;
+    context_window_tokens?: number;
+    effective_limit?: {
+      kind?: string;
+      exhausted?: boolean;
+      reset_text?: string;
+      observed_at?: string;
+    };
+  };
+  active_sessions?: Array<{
+    latest_context_tokens?: number;
+    context_window_tokens?: number;
+  }>;
+}
+
+interface ContextUsageSnapshot {
+  generated_at?: string;
+  agents?: RawUsageAgent[];
+}
+
+function clampPct(value: number): number {
+  return Math.min(100, Math.max(0, value));
+}
+
+function usedPct(window: RawQuotaWindow | undefined): number | null {
+  if (!window) return null;
+  const direct = window.used_percentage ?? window.used_percent;
+  if (typeof direct === 'number' && Number.isFinite(direct)) return clampPct(direct);
+  if (typeof window.remaining_percentage === 'number' && Number.isFinite(window.remaining_percentage)) {
+    return clampPct(100 - window.remaining_percentage);
+  }
+  return null;
+}
+
+function emptyAgent(id: UsageAgentId): AgentUsageSummary {
+  return {
+    id,
+    name: id === 'claude' ? 'Claude Code' : 'Codex',
+    available: false,
+    source: 'unavailable',
+    updatedAt: '',
+    contextTokens: null,
+    contextWindowTokens: null,
+    effectiveLimit: null,
+    fiveHour: { usedPct: null, resetAt: '', remainingMinutes: null },
+    sevenDay: { usedPct: null, resetAt: '', remainingMinutes: null },
+  };
+}
+
+function normalizeAgent(id: UsageAgentId, raw: RawUsageAgent, generatedAt: string): AgentUsageSummary {
+  const quota = raw.quota || {};
+  const active = raw.active_sessions?.[0];
+  const fiveHourPct = usedPct(quota.five_hour);
+  const sevenDayPct = usedPct(quota.seven_day);
+  const source = raw.quota_source || 'unavailable';
+  return {
+    id,
+    name: raw.name || (id === 'claude' ? 'Claude Code' : 'Codex'),
+    available: source !== 'unavailable' || fiveHourPct !== null || sevenDayPct !== null,
+    source,
+    updatedAt: quota.updated_at || generatedAt,
+    contextTokens: active?.latest_context_tokens ?? quota.latest_tokens ?? null,
+    contextWindowTokens: active?.context_window_tokens ?? quota.context_window_tokens ?? null,
+    effectiveLimit: quota.effective_limit ? {
+      kind: quota.effective_limit.kind || 'rate_limit',
+      exhausted: Boolean(quota.effective_limit.exhausted),
+      resetText: quota.effective_limit.reset_text || '',
+      observedAt: quota.effective_limit.observed_at || '',
+    } : null,
+    fiveHour: {
+      usedPct: fiveHourPct,
+      resetAt: quota.five_hour?.resets_at || '',
+      remainingMinutes: quota.five_hour?.remaining_minutes ?? null,
+    },
+    sevenDay: {
+      usedPct: sevenDayPct,
+      resetAt: quota.seven_day?.resets_at || '',
+      remainingMinutes: quota.seven_day?.remaining_minutes ?? null,
+    },
+  };
+}
+
+function legacyClaude(base: LegacyUsageSummary): AgentUsageSummary {
+  return {
+    ...emptyAgent('claude'),
+    available: true,
+    source: 'claude_legacy_usage',
+    updatedAt: new Date().toISOString(),
+    fiveHour: { usedPct: base.win5Pct, resetAt: base.win5ResetAt, remainingMinutes: null },
+    sevenDay: { usedPct: base.win7Pct, resetAt: base.win7ResetAt, remainingMinutes: null },
+  };
+}
+
+// Combines the existing app-activity summary with independently sourced
+// Claude Code and Codex quota snapshots. Missing agent data stays unavailable.
+export async function fetchUsageSummary(now: Date): Promise<UsageSummary> {
+  let base: LegacyUsageSummary;
+  try {
+    base = await http.get<LegacyUsageSummary>('/api/usage/summary');
+  } catch {
+    return mock.mockUsageSummary(now);
+  }
+
+  let snapshot: ContextUsageSnapshot | null = null;
+  try {
+    snapshot = await http.get<ContextUsageSnapshot>('/api/context-usage');
+  } catch {
+    // The collector endpoint can be deployed after the UI. Claude keeps its
+    // existing source; Codex explicitly remains unavailable in the meantime.
+  }
+
+  const rawClaude = snapshot?.agents?.find((agent) => agent.id === 'claude');
+  const rawCodex = snapshot?.agents?.find((agent) => agent.id === 'codex');
+  return {
+    ...base,
+    agents: {
+      claude: rawClaude
+        ? normalizeAgent('claude', rawClaude, snapshot?.generated_at || '')
+        : snapshot
+          ? emptyAgent('claude')
+          : legacyClaude(base),
+      codex: rawCodex ? normalizeAgent('codex', rawCodex, snapshot?.generated_at || '') : emptyAgent('codex'),
+    },
+  };
 }
 
 // SSE stream carrying live usage updates, path used by useUsage() via EventSource directly.

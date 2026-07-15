@@ -62,6 +62,32 @@ export interface UsageBar {
   haya: number;
 }
 
+export type UsageAgentId = 'claude' | 'codex';
+
+export interface UsageQuotaWindow {
+  usedPct: number | null;
+  resetAt: string;
+  remainingMinutes: number | null;
+}
+
+export interface AgentUsageSummary {
+  id: UsageAgentId;
+  name: string;
+  available: boolean;
+  source: string;
+  updatedAt: string;
+  contextTokens: number | null;
+  contextWindowTokens: number | null;
+  effectiveLimit: {
+    kind: string;
+    exhausted: boolean;
+    resetText: string;
+    observedAt: string;
+  } | null;
+  fiveHour: UsageQuotaWindow;
+  sevenDay: UsageQuotaWindow;
+}
+
 export interface UsageSummary {
   win5Pct: number;
   win5ResetAt: string;
@@ -70,6 +96,7 @@ export interface UsageSummary {
   msgToday: number;
   tokenToday: number;
   bars: UsageBar[];
+  agents: Record<UsageAgentId, AgentUsageSummary>;
 }
 
 export interface BookNote {

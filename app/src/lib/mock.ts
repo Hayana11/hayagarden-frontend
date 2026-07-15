@@ -147,6 +147,32 @@ export function mockUsageSummary(now: Date): UsageSummary {
     msgToday: 128,
     tokenToday: 24300,
     bars,
+    agents: {
+      claude: {
+        id: 'claude',
+        name: 'Claude Code',
+        available: false,
+        source: 'unavailable',
+        updatedAt: '',
+        contextTokens: null,
+        contextWindowTokens: null,
+        effectiveLimit: null,
+        fiveHour: { usedPct: null, resetAt: '', remainingMinutes: null },
+        sevenDay: { usedPct: null, resetAt: '', remainingMinutes: null },
+      },
+      codex: {
+        id: 'codex',
+        name: 'Codex',
+        available: false,
+        source: 'unavailable',
+        updatedAt: '',
+        contextTokens: null,
+        contextWindowTokens: null,
+        effectiveLimit: null,
+        fiveHour: { usedPct: null, resetAt: '', remainingMinutes: null },
+        sevenDay: { usedPct: null, resetAt: '', remainingMinutes: null },
+      },
+    },
   };
 }
 

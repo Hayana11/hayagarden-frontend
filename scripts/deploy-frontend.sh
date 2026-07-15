@@ -86,9 +86,10 @@ trap cleanup EXIT
 git worktree add --detach "$staging" "$target_sha"
 (
   cd "$staging"
-  "$PYTHON" -m py_compile app.py gateway.py chat/context_continuity.py account_balance_routes.py relay/credential_vault.py relay/channel_intelligence.py
+  "$PYTHON" -m py_compile app.py gateway.py chat/context_continuity.py account_balance_routes.py context_usage_routes.py context_usage_store.py tools/context_usage_collector.py relay/credential_vault.py relay/channel_intelligence.py
   "$PYTHON" -m unittest discover -s tests -p 'test_context_continuity.py'
   "$PYTHON" -m unittest tests.test_channel_intelligence tests.test_credential_vault tests.test_account_balance_routes
+  "$PYTHON" -m unittest tests.test_context_usage
   bash -n scripts/deploy-frontend.sh
 )
 if [[ "$build_dashboard" -eq 1 ]]; then

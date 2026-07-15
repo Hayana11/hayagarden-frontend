@@ -1,3 +1,4 @@
+import { useState, type MouseEvent } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Card } from '../components/Card';
 import { GradientBrainBar, GradientBrainLabels } from '../components/GradientBrainBar';
@@ -16,11 +17,19 @@ import { buildHeatmapCells, heatmapStats } from '../lib/heatmapCells';
 import { formatCurrency, formatTokens } from '../lib/formatDisplay';
 import { derivePeriod } from '../lib/period';
 import { CONFIG } from '../config';
+import type { UsageAgentId } from '../types';
 
 const EMOTION_VALS = [0.42, 0.35, 0.3, 0.48, 0.62, 0.5, 0.44, 0.58, 0.72, 0.6, 0.55, 0.66, 0.62];
 
 export function DashScreen() {
   const navigate = useNavigate();
+  const [usageAgentId, setUsageAgentId] = useState<UsageAgentId>(() => {
+    try {
+      return window.localStorage.getItem('haya.usage-agent') === 'codex' ? 'codex' : 'claude';
+    } catch {
+      return 'claude';
+    }
+  });
   const now = useClock(CONFIG.showSeconds ? 1000 : 60000);
   const weather = useWeather();
   const { todos, toggle } = useTodos();
@@ -51,8 +60,19 @@ export function DashScreen() {
 
   const doneCount = todos.filter((t) => t.done).length;
 
-  const win5 = usage?.win5Pct ?? 0;
-  const win7 = usage?.win7Pct ?? 0;
+  const selectedAgentUsage = usage?.agents[usageAgentId];
+  const win5 = selectedAgentUsage?.fiveHour.usedPct ?? null;
+  const win7 = selectedAgentUsage?.sevenDay.usedPct ?? null;
+  const usageColors = usageAgentId === 'claude'
+    ? { primary: '#8A7AB5', secondary: '#B76E79' }
+    : { primary: '#6F94C6', secondary: '#55A19B' };
+
+  const toggleUsageAgent = (event: MouseEvent<HTMLButtonElement>) => {
+    event.stopPropagation();
+    const next: UsageAgentId = usageAgentId === 'claude' ? 'codex' : 'claude';
+    setUsageAgentId(next);
+    try { window.localStorage.setItem('haya.usage-agent', next); } catch { /* private mode */ }
+  };
 
   const spent = ledger?.spent ?? 0;
   const budget = ledger?.budget ?? CONFIG.fallbackBudget;
@@ -232,14 +252,19 @@ export function DashScreen() {
 
       {/* usage: traffic-light bars (clickable) */}
       <Card onClick={() => navigate('/usage')} style={{ padding: '14px 18px' }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
-          <span style={{ fontSize: 16, fontWeight: 600, letterSpacing: 2 }}>⛁ 用量</span>
-          <span style={{ fontSize: 11, color: 'var(--color-text-faint)', letterSpacing: 0.5 }}>
-            {msgToday} 条 · {formatTokens(usage?.tokenToday ?? 0)} tok <span style={{ color: 'var(--color-rose)' }}>详情 ›</span>
-          </span>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 10 }}>
+          <div style={{ minWidth: 0 }}>
+            <div style={{ fontSize: 16, fontWeight: 600, letterSpacing: 2 }}>⛁ {usageAgentId === 'claude' ? 'Claude' : 'GPT'} 用量</div>
+            <div style={{ fontSize: 10.5, color: 'var(--color-text-faint)', marginTop: 2, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+              {selectedAgentUsage?.available ? selectedAgentUsage.name : '暂无可读数据'} · {msgToday} 条 · {formatTokens(usage?.tokenToday ?? 0)} tok
+            </div>
+          </div>
+          <button type="button" className="usage-card-switch" onClick={toggleUsageAgent} aria-label={`切换到${usageAgentId === 'claude' ? 'GPT' : 'Claude'}额度`}>
+            切换 {usageAgentId === 'claude' ? 'GPT' : 'Claude'}
+          </button>
         </div>
-        <UsageWindowBar label="5 小时窗" pct={win5} color="var(--color-violet)" />
-        <UsageWindowBar label="7 天窗" pct={win7} color="var(--color-rose)" />
+        <UsageWindowBar label="5 小时窗 · 已用" pct={win5} color={usageColors.primary} hint={selectedAgentUsage?.available ? undefined : '暂无可读数据'} />
+        <UsageWindowBar label={`${usageAgentId === 'claude' ? '周额度' : '7 天窗'} · 已用`} pct={win7} color={usageColors.secondary} />
       </Card>
 
       {/* bento: period tile + to-do */}

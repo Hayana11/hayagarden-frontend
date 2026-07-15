@@ -6,17 +6,21 @@ import gallery_store
 import command_store
 import group_chat_store
 import codex_app_server
+import context_usage_store
+from context_usage_routes import create_context_usage_blueprint
 
 app = Flask(__name__, static_folder='static')
 DB_PATH = '/opt/frontend/memories.db'
 UPLOAD_DIR = '/opt/frontend/static/uploads'
 APP_DIST_DIR = '/opt/frontend/app/dist'
 
-BOARD_TOKEN_FYODOR = ''
+BOARD_TOKEN_FYODOR = os.environ.get('BOARD_TOKEN_FYODOR', '')
+CONTEXT_USAGE_REPORT_TOKEN = os.environ.get('CONTEXT_USAGE_REPORT_TOKEN', '')
 for line in open('/opt/frontend/.env'):
     k, _, v = line.partition('=')
     k = k.strip(); v = v.strip()
     if k == 'BOARD_TOKEN_FYODOR': BOARD_TOKEN_FYODOR = v
+    if k == 'CONTEXT_USAGE_REPORT_TOKEN': CONTEXT_USAGE_REPORT_TOKEN = v
 # API_URL/API_KEY/MODEL 不再是这里的冻结常量：谁要发请求，
 # 就 new 一个 relay.manager.RelayManager()，永远拿实时值。
 
@@ -50,6 +54,11 @@ def _migrate_chat_columns():
 
 _migrate_chat_columns()
 group_chat_store.ensure_schema(DB_PATH)
+context_usage_store.ensure_schema(DB_PATH)
+app.register_blueprint(create_context_usage_blueprint(
+    db_path=DB_PATH,
+    report_token_getter=lambda: CONTEXT_USAGE_REPORT_TOKEN,
+))
 
 
 
