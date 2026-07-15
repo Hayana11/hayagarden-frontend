@@ -29,6 +29,8 @@ function dailyMetric(item: DailyUsage, mode: DailyUsageResult['mode']): number {
 
 function sourceLabel(source: string): string {
   if (source === 'claude_legacy_usage') return 'Claude 原有数据';
+  if (source === 'claude_oauth_usage') return 'Claude 官方账号额度';
+  if (source === 'codex_oauth_usage') return 'Codex 官方账号额度';
   if (source === 'ccusage_blocks') return 'ccusage active block';
   if (source === 'codex_session_jsonl') return 'Codex session';
   if (source === 'unavailable') return '尚未接入';
