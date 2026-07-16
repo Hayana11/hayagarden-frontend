@@ -97,6 +97,28 @@ def set(key, value):
     conn.close()
 
 
+def mutate(key, default, mutator):
+    """在同一连接里 BEGIN IMMEDIATE 后读-改-写，避免并发丢更新。"""
+    conn = sqlite3.connect(DB_PATH, timeout=3)
+    try:
+        conn.execute('BEGIN IMMEDIATE')
+        row = conn.execute('SELECT value FROM runtime_config WHERE key=?', (key,)).fetchone()
+        current = row[0] if row is not None else default
+        new_value = mutator(current)
+        conn.execute(
+            "INSERT INTO runtime_config (key, value, updated_at) VALUES (?,?,datetime('now','+8 hours')) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
+            (key, str(new_value)),
+        )
+        conn.commit()
+        return new_value
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
 def get_bool(key, default=False):
     v = get(key, '1' if default else '0')
     return str(v).strip() == '1'

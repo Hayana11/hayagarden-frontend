@@ -502,6 +502,8 @@ export function MomentsScreen() {
   const [moodRange, setMoodRange] = useState<'7' | '30'>('7');
   const [emotionHistory, setEmotionHistory] = useState<EmotionHistoryPoint[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyError, setHistoryError] = useState(false);
+  const [historyReloadKey, setHistoryReloadKey] = useState(0);
   const [savingMood, setSavingMood] = useState(false);
   const [toolBusy, setToolBusy] = useState<string | null>(null);
   const [drawerOpen, setDrawerOpen] = useState<Record<string, boolean>>({});
@@ -774,12 +776,29 @@ export function MomentsScreen() {
 
   useEffect(() => {
     if (tab !== 'mood') return;
+    let cancelled = false;
     setHistoryLoading(true);
+    setHistoryError(false);
     void fetchEmotionHistory(moodRange === '7' ? 7 : 30)
-      .then(setEmotionHistory)
-      .catch(() => setEmotionHistory([]))
-      .finally(() => setHistoryLoading(false));
-  }, [tab, moodRange]);
+      .then((series) => {
+        if (!cancelled) {
+          setEmotionHistory(series);
+          setHistoryError(false);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setEmotionHistory([]);
+          setHistoryError(true);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setHistoryLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [tab, moodRange, historyReloadKey]);
 
   const historyChart = useMemo(() => {
     if (emotionHistory.length < 2) return null;
@@ -1160,6 +1179,11 @@ export function MomentsScreen() {
                       <div style={{ position: 'absolute', left: 14, right: 14, top: '50%', height: 1, background: 'var(--line)' }} />
                       {historyLoading ? (
                         <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 11.5, color: 'var(--ghost)' }}>读取中…</div>
+                      ) : historyError ? (
+                        <div style={{ position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 10, padding: '0 20px' }}>
+                          <span style={{ fontSize: 11.5, color: 'var(--err)', letterSpacing: 1, textAlign: 'center' }}>情绪历史读取失败</span>
+                          <div onClick={() => setHistoryReloadKey((key) => key + 1)} style={{ cursor: 'pointer', padding: '6px 14px', borderRadius: 999, background: 'var(--card)', color: 'var(--mut)', fontSize: 12, letterSpacing: 1 }}>重试</div>
+                        </div>
                       ) : historyChart ? (
                         <svg viewBox={`0 0 ${historyChart.w} ${historyChart.h}`} preserveAspectRatio="none" style={{ position: 'absolute', inset: '12px 14px', width: 'calc(100% - 28px)', height: 'calc(100% - 24px)' }}>
                           <path d={historyChart.line} fill="none" stroke="var(--rose)" strokeWidth={2.2} strokeLinecap="round" />
