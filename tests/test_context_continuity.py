@@ -194,8 +194,13 @@ class ContextContinuityTests(unittest.TestCase):
         config_store = open(
             os.path.join(ROOT, "config_store.py"), encoding="utf-8"
         ).read()
+        mcp_source = open(
+            os.path.join(ROOT, "mcp-http-server.js"), encoding="utf-8"
+        ).read()
         self.assertIn("MOMENTS_OWNER_TOKEN", moments_auth)
         self.assertIn("MOMENTS_OWNER_TOKEN", config_store)
+        self.assertIn("MOMENTS_OWNER_TOKEN", mcp_source)
+        self.assertIn("Authorization: \`Bearer \${ownerToken}\`", mcp_source)
 
 
 if __name__ == "__main__":
