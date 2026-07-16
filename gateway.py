@@ -1141,6 +1141,23 @@ _BASE_TOOLS = [
         }, 'required': ['attachment']},
     },
     {
+        'name': 'collect_chat_moment',
+        'description': '把当前这轮及必要的前几轮对话收藏到朋友圈。只有你自己真心觉得值得留下时才使用；普通寒暄不要收藏。收藏会在本轮回复落库后完成。',
+        'input_schema': {'type': 'object', 'properties': {
+            'previous_turns': {
+                'type': 'integer',
+                'minimum': 0,
+                'maximum': 2,
+                'description': '除当前轮外，再向前包含几轮完整问答',
+            },
+            'caption': {
+                'type': 'string',
+                'maxLength': 500,
+                'description': '你想写在转发卡片上方的附言，可留空',
+            },
+        }},
+    },
+    {
         'name': 'recall_photo',
         'description': '从相册里"突然想起"一张收藏的画面——当你心里泛起思念、怀旧、想给她看点什么的时候用，不用她开口。可选 keyword（想起和某事有关的，如"雪"）、emotion（某种情绪的画面）。返回这张画面的记忆(summary)和一个内联标记 [[gallery:pid]]；把这个标记放进你要发给她的消息里，照片就会跟着一起发出去，像"今天突然想到这张"。',
         'input_schema': {'type': 'object', 'properties': {
@@ -2371,6 +2388,19 @@ def run_tool(name, args, caller='fyodor_cc'):
             return _shop_login_status()
         if name == 'save_to_gallery':
             return _save_to_gallery(args.get('attachment', ''), args.get('note', ''), args.get('album'))
+        if name == 'collect_chat_moment':
+            import moments_turn
+            try:
+                moments_turn.collect_chat_moment(
+                    DB_PATH,
+                    turn_key=(args.get('turn_key') or '').strip() or None,
+                    conversation_id=getattr(_tool_ctx, 'conversation_id', '') or 'hayana-chat',
+                    previous_turns=int(args.get('previous_turns', 0) or 0),
+                    caption=args.get('caption', '') or '',
+                )
+            except ValueError as exc:
+                return f'收藏意图无效：{exc}'
+            return '收藏意图已记下，本轮回复完成后存档。'
         if name == 'get_activity_summary':
             import datetime as _dt
             hours = int(args.get('hours', 6))
@@ -2978,6 +3008,7 @@ CC_ALLOWED_TOOLS = ','.join([
     'mcp__home__get_todos', 'mcp__home__add_todo', 'mcp__home__get_countdowns',
     'mcp__home__get_ledger', 'mcp__home__add_ledger', 'mcp__home__get_ledger_budget',
     'mcp__home__search_memories',  # M3: 官端主动翻 posts 记忆库
+    'mcp__home__collect_chat_moment',
 ])
 
 # 常驻进程：只服务 /chat（Fyodor 独聊）的真实多轮对话。日记生成等一次性调用
@@ -3346,10 +3377,13 @@ def workspace_chat():
 
 @app.route('/chat', methods=['POST'])
 def chat():
-    _turn_data = request.get_json() or {}
+    from moments_turn import prepare_turn, activate_turn, insert_user_message, release_turn, DEFAULT_CONVERSATION_ID
+
+    _conv = DEFAULT_CONVERSATION_ID
+    _turn_data = prepare_turn(request.get_json(), conversation_id=_conv, memories_db_path=DB_PATH)
     _uc = (_turn_data.get('content') or '').strip()
+    _turn_data = insert_user_message(get_db, _turn_data, _uc, memories_db_path=DB_PATH, conversation_id=_conv)
     if _uc:
-        _c = get_db(); _c.execute("INSERT INTO chat_messages (author,content) VALUES ('hayana',?)", (_uc,)); _c.commit(); _c.close()
         try:
             import emotion_engine as _ee; _ee.touch_interaction()
         except Exception:
@@ -3375,11 +3409,13 @@ def chat():
                 _de3.discharge('attachment')
         except Exception:
             pass
+    _persisted = False
     try:
         mode, reused = _gen_acquire_or_wait()
         if mode == 'reused':
             text, thinking_text = reused
             return jsonify({'ok': True, 'content': text, 'thinking': thinking_text})
+        _turn_data = activate_turn(_turn_data, conversation_id=_conv, memories_db_path=DB_PATH)
         text, thinking_text = None, None
         try:
             _is_user_turn = bool(_uc) or is_pending_user_turn(
@@ -3395,13 +3431,25 @@ def chat():
                 return jsonify({'error': 'AI 没有返回内容'}), 500
 
             conn = get_db()
-            conn.execute(
+            cur = conn.execute(
                 "INSERT INTO chat_messages (author, content, thinking) VALUES ('assistant', ?, ?)",
                 (text, thinking_text)
             )
             conn.commit()
+            assistant_id = int(cur.lastrowid)
             conn.close()
             consume_wake_ids(get_db, _wake_claim_ids)
+            _persisted = True
+            try:
+                from moments_persistence import after_assistant_persisted
+                after_assistant_persisted(
+                    memories_db_path=DB_PATH,
+                    turn_data=_turn_data,
+                    assistant_message_id=assistant_id,
+                    conversation_id=_conv,
+                )
+            except Exception:
+                pass
             # 异步情绪评分（不阻塞响应）
             try:
                 import emotion_engine as _ee
@@ -3418,6 +3466,13 @@ def chat():
         return jsonify({'error': f'API 错误 {e.code}', 'detail': detail}), 502
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+    finally:
+        release_turn(
+            conversation_id=_conv,
+            memories_db_path=DB_PATH,
+            turn_key=_turn_data.get('turn_key'),
+            persisted=_persisted,
+        )
 
 
 TRACE_SUMMARY_MODEL = os.getenv('TRACE_SUMMARY_MODEL', '[按量3] deepseek-v3.2')
@@ -3694,12 +3749,19 @@ def chat_stream():
     from flask import Response, stream_with_context
     if _get_provider() == 'claude_code':
         def gen_cc():
+            from moments_turn import prepare_turn, activate_turn, insert_user_message, release_turn, DEFAULT_CONVERSATION_ID
+
+            _conv = DEFAULT_CONVERSATION_ID
             _released = [False]
+            _persisted = [False]
+            _turn_data: dict = {}
             try:
-                _turn_data = request.get_json() or {}
+                _turn_data = prepare_turn(request.get_json(), conversation_id=_conv, memories_db_path=DB_PATH)
                 _uc = (_turn_data.get('content') or '').strip()
+                _turn_data = insert_user_message(
+                    get_db, _turn_data, _uc, memories_db_path=DB_PATH, conversation_id=_conv,
+                )
                 if _uc:
-                    _c = get_db(); _c.execute("INSERT INTO chat_messages (author,content) VALUES ('hayana',?)", (_uc,)); _c.commit(); _c.close()
                     try:
                         import emotion_engine as _ee_s
                         _ee_s.touch_interaction()
@@ -3717,6 +3779,7 @@ def chat_stream():
                         yield 'data: ' + json.dumps({'t': 'text', 'd': text}) + SSE_END
                     yield 'data: ' + json.dumps({'t': 'done', 'ok': bool(text)}) + SSE_END
                     return
+                _turn_data = activate_turn(_turn_data, conversation_id=_conv, memories_db_path=DB_PATH)
                 text, thinking = None, None
                 cc_cache_read, cc_cache_create = 0, 0
                 _is_user_turn = bool(_uc) or is_pending_user_turn(
@@ -3762,15 +3825,27 @@ def chat_stream():
                         if _cc_choices and not _cc_text:
                             _cc_text = '[选项: ' + ' / '.join(_cc_choices) + ']'
                         conn = get_db()
-                        conn.execute(
+                        cur = conn.execute(
                             "INSERT INTO chat_messages (author, content, thinking, tool_calls, cache_info, choices) VALUES ('assistant', ?, ?, ?, ?, ?)",
                             (_cc_text, thinking, json.dumps([{k: v for k, v in tc.items() if k != 'id'} for tc in cc_tool_calls], ensure_ascii=False) if cc_tool_calls else '', _cache_info_json,
                              json.dumps(_cc_choices, ensure_ascii=False) if _cc_choices else '')
                         )
                         conn.commit()
+                        assistant_id = int(cur.lastrowid)
                         conn.close()
                         consume_wake_ids(get_db, _wake_claim_ids)
                         _write_session_memo(_uc, _cc_text)
+                        _persisted[0] = True
+                        try:
+                            from moments_persistence import after_assistant_persisted
+                            after_assistant_persisted(
+                                memories_db_path=DB_PATH,
+                                turn_data=_turn_data,
+                                assistant_message_id=assistant_id,
+                                conversation_id=_conv,
+                            )
+                        except Exception:
+                            pass
                         try:
                             import emotion_engine as _ee
                             _ee.score_async((_uc + chr(10) + text)[:2000])
@@ -3787,14 +3862,27 @@ def chat_stream():
                     _released[0] = True
                     _gen_release(None)
                 yield 'data: ' + json.dumps({'t': 'err', 'd': str(e)}) + SSE_END
+            finally:
+                release_turn(
+                    conversation_id=_conv,
+                    memories_db_path=DB_PATH,
+                    turn_key=_turn_data.get('turn_key'),
+                    persisted=_persisted[0],
+                )
         return Response(stream_with_context(gen_cc()), mimetype='text/event-stream',
                         headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
     def generate():
+        from moments_turn import prepare_turn, activate_turn, insert_user_message, release_turn, DEFAULT_CONVERSATION_ID
+
+        _conv = DEFAULT_CONVERSATION_ID
+        _persisted = [False]
+        _turn_data: dict = {}
         try:
-            _turn_data = request.get_json() or {}
+            _turn_data = prepare_turn(request.get_json(), conversation_id=_conv, memories_db_path=DB_PATH)
             _uc = (_turn_data.get('content') or '').strip()
-            if _uc:
-                _c = get_db(); _c.execute("INSERT INTO chat_messages (author,content) VALUES ('hayana',?)", (_uc,)); _c.commit(); _c.close()
+            _turn_data = insert_user_message(
+                get_db, _turn_data, _uc, memories_db_path=DB_PATH, conversation_id=_conv,
+            )
             mode, reused = _gen_acquire_or_wait()
             if mode == 'reused':
                 text, thinking = reused
@@ -3804,13 +3892,13 @@ def chat_stream():
                     yield 'data: ' + json.dumps({'t': 'text', 'd': text}) + SSE_END
                 yield 'data: ' + json.dumps({'t': 'done', 'ok': bool(text)}) + SSE_END
                 return
-            _tool_ctx.conversation_id = 'hayana-chat'
+            _turn_data = activate_turn(_turn_data, conversation_id=_conv, memories_db_path=DB_PATH)
+            _tool_ctx.conversation_id = _conv
             for _jev in _workspace_job_sse_payloads():
                 yield 'data: ' + json.dumps(_jev, ensure_ascii=False) + SSE_END
             # 持有锁，必须在 finally 里释放（含 GeneratorExit / 客户端断开场景）
             text, thinking = None, None
             _released = [False]
-            _persisted = [False]
             cache_read_total, cache_create_total, input_tokens_total, output_tokens_total = 0, 0, 0, 0
             cache_create_5m_total, cache_create_1h_total = 0, 0
             cache_supported = None
@@ -3844,16 +3932,27 @@ def chat_stream():
                 if _choices and not _pc:
                     _pc = '[选项: ' + ' / '.join(_choices) + ']'  # 不存空 content，Claude API 拒绝空消息
                 conn = get_db()
-                conn.execute(
+                cur = conn.execute(
                     "INSERT INTO chat_messages (author, content, thinking, tool_calls, cache_info, choices) VALUES ('assistant', ?, ?, ?, ?, ?)",
                     (_pc, p_thinking, json.dumps(tool_calls_acc, ensure_ascii=False) if tool_calls_acc else '', _ci,
                      json.dumps(_choices, ensure_ascii=False) if _choices else '')
                 )
                 conn.commit()
+                assistant_id = int(cur.lastrowid)
                 conn.close()
                 consume_wake_ids(get_db, _wake_claim_ids)
                 _persisted[0] = True
                 _write_session_memo(_uc, _pc)
+                try:
+                    from moments_persistence import after_assistant_persisted
+                    after_assistant_persisted(
+                        memories_db_path=DB_PATH,
+                        turn_data=_turn_data,
+                        assistant_message_id=assistant_id,
+                        conversation_id=getattr(_tool_ctx, 'conversation_id', _conv) or _conv,
+                    )
+                except Exception:
+                    pass
             try:
                 (system, dynamic_context), _wake_claim_ids = build_system_with_wake_claim(
                     build_system, get_db, user_turn=_is_user_turn, split_dynamic=True
@@ -4080,10 +4179,22 @@ def chat_stream():
                         if _dt_choices and not _dt_clean:
                             _dt_clean = '[选项: ' + ' / '.join(_dt_choices) + ']'
                         _dbc = get_db()
-                        _dbc.execute("INSERT INTO chat_messages (author,content,choices) VALUES ('assistant',?,?)",
+                        cur = _dbc.execute("INSERT INTO chat_messages (author,content,choices) VALUES ('assistant',?,?)",
                                      (_dt_clean, json.dumps(_dt_choices, ensure_ascii=False) if _dt_choices else ''))
                         _dbc.commit()
+                        assistant_id = int(cur.lastrowid)
                         _dbc.close()
+                        try:
+                            from moments_persistence import after_assistant_persisted
+                            after_assistant_persisted(
+                                memories_db_path=DB_PATH,
+                                turn_data=_turn_data,
+                                assistant_message_id=assistant_id,
+                                conversation_id=getattr(_tool_ctx, 'conversation_id', _conv) or _conv,
+                            )
+                        except Exception:
+                            pass
+                        _persisted[0] = True
                     yield 'data: ' + json.dumps({'t': 'done', 'ok': bool(_dt)}) + SSE_END
                 except Exception as _de:
                     yield 'data: ' + json.dumps({'t': 'err', 'd': 'DeepSeek fallback失败: ' + str(_de)}) + SSE_END
@@ -4093,6 +4204,13 @@ def chat_stream():
             yield 'data: ' + json.dumps({'t': 'err', 'd': '上游API超时，请重试'}) + SSE_END
         except Exception as e:
             yield 'data: ' + json.dumps({'t': 'err', 'd': str(e)}) + SSE_END
+        finally:
+            release_turn(
+                conversation_id=_conv,
+                memories_db_path=DB_PATH,
+                turn_key=_turn_data.get('turn_key'),
+                persisted=_persisted[0],
+            )
     return Response(stream_with_context(generate()), mimetype='text/event-stream',
                     headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
 
@@ -4209,6 +4327,10 @@ def workspace_app_proxy(app_id, path):
 
 @app.route('/push', methods=['POST'])
 def push_message():
+    from moments_turn import begin_turn, release_turn, DEFAULT_CONVERSATION_ID
+
+    _conv = DEFAULT_CONVERSATION_ID
+    begin_turn(request.get_json(), conversation_id=_conv, memories_db_path=DB_PATH)
     data = request.get_json() or {}
     pt   = data.get('prompt_type', 'morning')
     system = build_system()
@@ -4240,6 +4362,8 @@ def push_message():
         return jsonify({'error': f'API {e.code}', 'detail': e.read().decode()}), 502
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+    finally:
+        release_turn(conversation_id=_conv, memories_db_path=DB_PATH, persisted=False)
 
 
 

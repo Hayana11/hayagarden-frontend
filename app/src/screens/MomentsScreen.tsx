@@ -9,7 +9,7 @@
 // a toast on click, rather than either faking success or hiding the UI.
 import { useCallback, useEffect, useMemo, useState, type CSSProperties } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { fetchMomentsData, fetchMomentsFeed, galleryPhotoUrl, moodWordTone, type DreamEntry, type EmotionMemoryPoint, type FeedEntry, type GalleryPhoto, type MomentsData, type MoodState } from '../lib/moments';
+import { fetchMomentsData, fetchMomentsFeed, galleryPhotoUrl, moodWordTone, type DreamEntry, type EmotionMemoryPoint, type FeedEntry, type FeedType, type GalleryPhoto, type MomentsData, type MoodState } from '../lib/moments';
 
 const SETTINGS_KEY = 'fyodor-chat-settings';
 const SERIF = "'Noto Serif SC', serif";
@@ -149,11 +149,83 @@ function loadTheme(): 'light' | 'dark' | 'auto' {
   }
 }
 
+function kindTagStyle(entry: FeedEntry): { label: string; color: string; bg: string } {
+  if (entry.brewing) return { label: '酝酿中', color: 'var(--gold)', bg: 'rgba(217,164,65,0.12)' };
+  if (entry.kind === 'repost') return { label: '转发', color: 'var(--deep)', bg: 'var(--rosebg)' };
+  if (entry.kind === 'gallery') return { label: entry.tags[0] || '相册', color: 'var(--rose)', bg: 'var(--rosebg)' };
+  return { label: entry.tags[0] || '念头', color: 'var(--rose)', bg: 'var(--rosebg)' };
+}
+
 function KindTag({ entry }: { entry: FeedEntry }) {
-  const label = entry.brewing ? '酝酿中' : entry.tags[0] || '念头';
-  const color = 'var(--rose)';
-  const bg = 'var(--rosebg)';
+  const { label, color, bg } = kindTagStyle(entry);
   return <span style={{ fontSize: 10.5, padding: '3px 10px', borderRadius: 999, background: bg, color, letterSpacing: 1 }}>{label}</span>;
+}
+
+function RepostCard({ entry }: { entry: FeedEntry }) {
+  const messages = entry.repost?.messages || [];
+  const sourceLabel = entry.repost?.sourceLabel || '';
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+      {entry.content ? (
+        <span style={{ fontSize: 13.5, lineHeight: 1.9, color: 'var(--ink)', overflowWrap: 'break-word', wordBreak: 'break-word' }}>{entry.content}</span>
+      ) : null}
+      <div style={{ borderRadius: 16, background: 'var(--card2)', padding: '12px 13px', display: 'flex', flexDirection: 'column', gap: 10 }}>
+        {sourceLabel ? (
+          <span style={{ fontFamily: DISPLAY, fontSize: 10.5, color: 'var(--ghost)', letterSpacing: 1 }}>{sourceLabel} · 聊天记录</span>
+        ) : (
+          <span style={{ fontFamily: DISPLAY, fontSize: 10.5, color: 'var(--ghost)', letterSpacing: 1 }}>聊天记录</span>
+        )}
+        {messages.map((m) => (
+          <div key={m.messageId} style={{ display: 'flex', flexDirection: 'column', gap: 4, alignItems: m.role === 'haya' ? 'flex-start' : 'flex-end' }}>
+            <span style={{ fontSize: 10, color: 'var(--faint)', letterSpacing: 1 }}>{m.role === 'haya' ? 'Haya' : 'Fyodor'}</span>
+            <div style={{
+              maxWidth: '92%',
+              padding: '8px 11px',
+              borderRadius: m.role === 'haya' ? '14px 14px 14px 4px' : '14px 14px 4px 14px',
+              background: m.role === 'haya' ? 'var(--bubble)' : 'var(--rosebg)',
+              color: 'var(--ink)',
+              fontSize: 13,
+              lineHeight: 1.75,
+              overflowWrap: 'break-word',
+              wordBreak: 'break-word',
+            }}>
+              {m.text || (m.attachment ? `[${m.attachment.kind === 'image' ? '图片' : '附件'}]` : '')}
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function GalleryFeedMedia({ entry, onOpen }: { entry: FeedEntry; onOpen?: () => void }) {
+  const media = entry.media[0];
+  if (!media) {
+    return entry.content ? (
+      <span style={{ fontSize: 13.5, lineHeight: 1.9, color: 'var(--ink)', overflowWrap: 'break-word', wordBreak: 'break-word' }}>{entry.content}</span>
+    ) : null;
+  }
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+      {entry.content ? (
+        <span style={{ fontSize: 13.5, lineHeight: 1.9, color: 'var(--ink)', overflowWrap: 'break-word', wordBreak: 'break-word' }}>{entry.content}</span>
+      ) : null}
+      <div
+        onClick={onOpen}
+        style={{ cursor: onOpen ? 'zoom-in' : 'default', borderRadius: 16, overflow: 'hidden', background: 'var(--card2)', boxShadow: '0 6px 16px var(--shadow)' }}
+      >
+        <img src={media.url} alt={media.note || '相册'} style={{ width: '100%', display: 'block', objectFit: 'cover', maxHeight: 320 }} loading="lazy" />
+      </div>
+    </div>
+  );
+}
+
+function FeedEntryBody({ entry, onGalleryOpen }: { entry: FeedEntry; onGalleryOpen?: () => void }) {
+  if (entry.kind === 'repost') return <RepostCard entry={entry} />;
+  if (entry.kind === 'gallery') return <GalleryFeedMedia entry={entry} onOpen={onGalleryOpen} />;
+  return (
+    <span style={{ fontSize: 13.5, lineHeight: 1.9, color: 'var(--ink)', overflowWrap: 'break-word', wordBreak: 'break-word' }}>{entry.content}</span>
+  );
 }
 
 function DateRail({ dateLabel, visible }: { dateLabel: string; visible: boolean }) {
@@ -264,6 +336,13 @@ export function MomentsScreen() {
   const [feedLoadingMore, setFeedLoadingMore] = useState(false);
   const [feedFailed, setFeedFailed] = useState(false);
   const [feedReloading, setFeedReloading] = useState(false);
+  const [postsItems, setPostsItems] = useState<FeedEntry[]>([]);
+  const [postsCursor, setPostsCursor] = useState<string | null>(null);
+  const [postsHasMore, setPostsHasMore] = useState(false);
+  const [postsLoadingMore, setPostsLoadingMore] = useState(false);
+  const [postsFailed, setPostsFailed] = useState(false);
+  const [postsReloading, setPostsReloading] = useState(false);
+  const [postsLoaded, setPostsLoaded] = useState(false);
   const [lightbox, setLightbox] = useState<GalleryPhoto | null>(null);
   const [dreamOpen, setDreamOpen] = useState<DreamEntry | null>(null);
   const [hoveredDream, setHoveredDream] = useState<number | null>(null);
@@ -298,12 +377,22 @@ export function MomentsScreen() {
     }
   };
 
+  const mergeFeedPage = useCallback((current: FeedEntry[], pageItems: FeedEntry[]) => {
+    const seen = new Set(current.map((item) => item.itemKey));
+    const merged = [...current];
+    for (const item of pageItems) {
+      if (!seen.has(item.itemKey)) merged.push(item);
+    }
+    return merged;
+  }, []);
+
   const load = useCallback(async () => {
     setPhase('loading');
     setFeedFailed(false);
+    setPostsLoaded(false);
     const [auxResult, feedResult] = await Promise.allSettled([
       fetchMomentsData(),
-      fetchMomentsFeed(),
+      fetchMomentsFeed(undefined, 20, 'all'),
     ]);
 
     if (auxResult.status === 'fulfilled') {
@@ -324,6 +413,11 @@ export function MomentsScreen() {
       setFeedFailed(true);
     }
 
+    setPostsItems([]);
+    setPostsCursor(null);
+    setPostsHasMore(false);
+    setPostsFailed(false);
+
     const aux = auxResult.status === 'fulfilled' ? auxResult.value : null;
     const feedOk = feedResult.status === 'fulfilled';
     const totallyEmpty = !feedOk
@@ -331,11 +425,31 @@ export function MomentsScreen() {
     setPhase(totallyEmpty ? 'failed' : 'ready');
   }, []);
 
-  const reloadFeed = useCallback(async () => {
+  const reloadFeed = useCallback(async (feedType: FeedType = 'all') => {
+    if (feedType === 'posts') {
+      setPostsReloading(true);
+      setPostsFailed(false);
+      try {
+        const page = await fetchMomentsFeed(undefined, 20, 'posts');
+        setPostsItems(page.items);
+        setPostsCursor(page.nextCursor);
+        setPostsHasMore(page.hasMore);
+        setPostsLoaded(true);
+      } catch {
+        setPostsItems([]);
+        setPostsCursor(null);
+        setPostsHasMore(false);
+        setPostsFailed(true);
+      } finally {
+        setPostsReloading(false);
+      }
+      return;
+    }
+
     setFeedReloading(true);
     setFeedFailed(false);
     try {
-      const page = await fetchMomentsFeed();
+      const page = await fetchMomentsFeed(undefined, 20, 'all');
       setFeedItems(page.items);
       setFeedCursor(page.nextCursor);
       setFeedHasMore(page.hasMore);
@@ -349,19 +463,34 @@ export function MomentsScreen() {
     }
   }, []);
 
-  const loadMore = useCallback(async () => {
+  const loadPostsFeed = useCallback(async () => {
+    if (postsLoaded || postsReloading) return;
+    await reloadFeed('posts');
+  }, [postsLoaded, postsReloading, reloadFeed]);
+
+  const loadMore = useCallback(async (feedType: FeedType = 'all') => {
+    if (feedType === 'posts') {
+      if (!postsHasMore || postsLoadingMore || !postsCursor) return;
+      setPostsLoadingMore(true);
+      try {
+        const page = await fetchMomentsFeed(postsCursor, 20, 'posts');
+        setPostsItems((current) => mergeFeedPage(current, page.items));
+        setPostsCursor(page.nextCursor);
+        setPostsHasMore(page.hasMore);
+      } catch {
+        setToast('加载更多失败了，稍后再试。');
+        window.setTimeout(() => setToast(''), 2200);
+      } finally {
+        setPostsLoadingMore(false);
+      }
+      return;
+    }
+
     if (!feedHasMore || feedLoadingMore || !feedCursor) return;
     setFeedLoadingMore(true);
     try {
-      const page = await fetchMomentsFeed(feedCursor);
-      setFeedItems((current) => {
-        const seen = new Set(current.map((item) => item.itemKey));
-        const merged = [...current];
-        for (const item of page.items) {
-          if (!seen.has(item.itemKey)) merged.push(item);
-        }
-        return merged;
-      });
+      const page = await fetchMomentsFeed(feedCursor, 20, 'all');
+      setFeedItems((current) => mergeFeedPage(current, page.items));
       setFeedCursor(page.nextCursor);
       setFeedHasMore(page.hasMore);
     } catch {
@@ -370,11 +499,17 @@ export function MomentsScreen() {
     } finally {
       setFeedLoadingMore(false);
     }
-  }, [feedCursor, feedHasMore, feedLoadingMore]);
+  }, [feedCursor, feedHasMore, feedLoadingMore, mergeFeedPage, postsCursor, postsHasMore, postsLoadingMore]);
 
   useEffect(() => {
     void load();
   }, [load]);
+
+  useEffect(() => {
+    if (tab === 'posts' && phase === 'ready') {
+      void loadPostsFeed();
+    }
+  }, [tab, phase, loadPostsFeed]);
 
   const pickTab = (id: Tab) => {
     setTab((cur) => (cur === id ? 'home' : id));
@@ -383,8 +518,23 @@ export function MomentsScreen() {
     setMoodSel(null);
   };
 
+  const openGalleryFromFeed = useCallback((entry: FeedEntry) => {
+    const media = entry.media[0];
+    if (!media) return;
+    setLightbox({
+      pid: media.pid,
+      note: media.note,
+      width: media.width,
+      height: media.height,
+      favorite: false,
+      time: entry.createdAt || '',
+      summary: media.note,
+      emotion: '',
+      keywords: entry.tags,
+    });
+  }, []);
+
   const dreams = useMemo(() => data?.dreams || [], [data]);
-  const postsFeed = useMemo(() => feedItems, [feedItems]);
 
   const moodColor = data?.mood
     ? moodWordTone(data.mood.valence) === 'up' ? 'var(--rose)' : moodWordTone(data.mood.valence) === 'down' ? 'var(--err)' : 'var(--gold)'
@@ -499,7 +649,7 @@ export function MomentsScreen() {
                     <div key={f.itemKey} style={{ display: 'flex', gap: 12 }}>
                       <DateRail dateLabel={f.dateLabel} visible={i === 0 || f.dateLabel !== feedItems[i - 1].dateLabel} />
                       <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 8 }}>
-                        <span style={{ fontSize: 13.5, lineHeight: 1.9, color: 'var(--ink)', overflowWrap: 'break-word', wordBreak: 'break-word' }}>{f.content}</span>
+                        <FeedEntryBody entry={f} onGalleryOpen={f.kind === 'gallery' ? () => openGalleryFromFeed(f) : undefined} />
                         <div><KindTag entry={f} /></div>
                         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
                           <LockedSocialRow onLocked={showLocked} dense />
@@ -531,15 +681,23 @@ export function MomentsScreen() {
               {/* ── 说说 ── */}
               {tab === 'posts' && (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-                  {feedFailed && postsFeed.length === 0 && (
+                  {postsFailed && postsItems.length === 0 && (
                     <EmptyState
                       title="说说暂时读不到"
-                      hint="可以只重试念头流。"
-                      onRetry={feedReloading ? undefined : () => void reloadFeed()}
+                      hint="可以只重试说说流。"
+                      onRetry={postsReloading ? undefined : () => void reloadFeed('posts')}
                     />
                   )}
-                  {!feedFailed && postsFeed.length === 0 && <EmptyState title="还没有说说" hint="念头写好之后会显示在这里。" />}
-                  {postsFeed.map((f) => (
+                  {postsReloading && postsItems.length === 0 && (
+                    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 10, padding: '24px 20px' }}>
+                      <span style={{ width: 22, height: 22, borderRadius: '50%', border: '2.5px solid var(--rosebg)', borderTopColor: 'var(--rose)', animation: 'chatSpin .8s linear infinite' }} />
+                      <span style={{ fontSize: 12, color: 'var(--faint)', letterSpacing: 2 }}>正在读取说说…</span>
+                    </div>
+                  )}
+                  {!postsFailed && !postsReloading && postsItems.length === 0 && postsLoaded && (
+                    <EmptyState title="还没有说说" hint="念头或聊天记录被收藏后，会显示在这里。" />
+                  )}
+                  {postsItems.map((f) => (
                     <div key={f.itemKey} style={{ background: 'var(--card)', borderRadius: 18, boxShadow: '0 8px 20px var(--shadow)', padding: '15px 16px', display: 'flex', flexDirection: 'column', gap: 11 }}>
                       <div style={{ display: 'flex', alignItems: 'baseline', gap: 10 }}>
                         <span style={{ fontSize: 15, fontWeight: 700, color: 'var(--deep)', letterSpacing: 1 }}>Fyodor</span>
@@ -547,7 +705,7 @@ export function MomentsScreen() {
                           <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--ink2)' }}>{f.dateLabel}</span>
                         ) : null}
                       </div>
-                      <span style={{ fontSize: 14.5, lineHeight: 1.9, color: 'var(--ink)', overflowWrap: 'break-word', wordBreak: 'break-word' }}>{f.content}</span>
+                      <FeedEntryBody entry={f} />
                       <div><KindTag entry={f} /></div>
                       <div style={{ borderTop: '1px solid var(--line)', paddingTop: 10, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
                         <LockedSocialRow onLocked={showLocked} />
@@ -559,9 +717,14 @@ export function MomentsScreen() {
                       </div>
                     </div>
                   ))}
-                  <div onClick={showLocked} style={{ cursor: 'pointer', padding: 16, border: '1.5px dashed var(--ghost)', borderRadius: 18, color: 'var(--rose)', fontSize: 13.5, letterSpacing: 2, textAlign: 'center' }}>
-                    ＋ 转发一段聊天记录
-                  </div>
+                  {postsItems.length > 0 && postsHasMore && (
+                    <div
+                      onClick={() => void loadMore('posts')}
+                      style={{ textAlign: 'center', padding: '10px 0 4px', fontFamily: DISPLAY, fontSize: 12, letterSpacing: 2, color: postsLoadingMore ? 'var(--ghost)' : 'var(--rose)', cursor: postsLoadingMore ? 'default' : 'pointer' }}
+                    >
+                      {postsLoadingMore ? '正在继续读取…' : '加载更多'}
+                    </div>
+                  )}
                 </div>
               )}
 

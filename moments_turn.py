@@ -1,0 +1,235 @@
+"""Shared per-request chat turn lifecycle for moments chat-collection intents."""
+
+from __future__ import annotations
+
+import secrets
+import sqlite3
+from datetime import datetime, timedelta, timezone
+from typing import Any, Callable
+
+import moments_intent
+
+DEFAULT_CONVERSATION_ID = 'hayana-chat'
+_SHANGHAI = timezone(timedelta(hours=8))
+
+
+def _conn(db_path: str) -> sqlite3.Connection:
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def _now_str() -> str:
+    return datetime.now(_SHANGHAI).strftime('%Y-%m-%d %H:%M:%S')
+
+
+def ensure_turn_schema(memories_db_path: str) -> None:
+    conn = sqlite3.connect(memories_db_path)
+    try:
+        conn.execute(
+            '''CREATE TABLE IF NOT EXISTS moments_active_turn (
+                conversation_id TEXT PRIMARY KEY,
+                turn_key TEXT NOT NULL UNIQUE,
+                user_message_id INTEGER,
+                started_at TEXT NOT NULL
+            )'''
+        )
+        conn.execute(
+            '''CREATE TABLE IF NOT EXISTS moments_pending_intent (
+                turn_key TEXT PRIMARY KEY,
+                previous_turns INTEGER NOT NULL,
+                caption TEXT NOT NULL DEFAULT ''
+            )'''
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_active_turn(memories_db_path: str, conversation_id: str) -> dict[str, Any] | None:
+    key = (conversation_id or DEFAULT_CONVERSATION_ID).strip() or DEFAULT_CONVERSATION_ID
+    conn = _conn(memories_db_path)
+    try:
+        row = conn.execute(
+            'SELECT conversation_id, turn_key, user_message_id, started_at '
+            'FROM moments_active_turn WHERE conversation_id=?',
+            (key,),
+        ).fetchone()
+    finally:
+        conn.close()
+    if not row:
+        return None
+    return {
+        'conversation_id': row['conversation_id'],
+        'turn_key': row['turn_key'],
+        'user_message_id': row['user_message_id'],
+        'started_at': row['started_at'],
+    }
+
+
+def prepare_turn(
+    turn_data: dict[str, Any] | None = None,
+    *,
+    conversation_id: str = DEFAULT_CONVERSATION_ID,
+    memories_db_path: str | None = None,
+) -> dict[str, Any]:
+    del conversation_id, memories_db_path
+    data = dict(turn_data or {})
+    data['turn_key'] = secrets.token_hex(16)
+    return data
+
+
+def activate_turn(
+    turn_data: dict[str, Any],
+    *,
+    conversation_id: str = DEFAULT_CONVERSATION_ID,
+    memories_db_path: str,
+) -> dict[str, Any]:
+    conv = (conversation_id or DEFAULT_CONVERSATION_ID).strip() or DEFAULT_CONVERSATION_ID
+    data = dict(turn_data)
+    turn_key = (data.get('turn_key') or '').strip()
+    if not turn_key:
+        raise ValueError('turn_key required')
+
+    conn = _conn(memories_db_path)
+    try:
+        old = conn.execute(
+            'SELECT turn_key FROM moments_active_turn WHERE conversation_id=?',
+            (conv,),
+        ).fetchone()
+        if old:
+            moments_intent.clear_pending(memories_db_path, old['turn_key'])
+        conn.execute('DELETE FROM moments_active_turn WHERE conversation_id=?', (conv,))
+        conn.execute(
+            '''INSERT INTO moments_active_turn
+               (conversation_id, turn_key, user_message_id, started_at)
+               VALUES (?, ?, ?, ?)''',
+            (conv, turn_key, data.get('user_message_id'), _now_str()),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return data
+
+
+def begin_turn(
+    turn_data: dict[str, Any] | None = None,
+    *,
+    conversation_id: str = DEFAULT_CONVERSATION_ID,
+    memories_db_path: str,
+) -> dict[str, Any]:
+    data = prepare_turn(
+        turn_data,
+        conversation_id=conversation_id,
+        memories_db_path=memories_db_path,
+    )
+    return activate_turn(
+        data,
+        conversation_id=conversation_id,
+        memories_db_path=memories_db_path,
+    )
+
+
+def sync_user_message_id(
+    memories_db_path: str,
+    *,
+    conversation_id: str,
+    turn_key: str,
+    user_message_id: int,
+) -> None:
+    conv = (conversation_id or DEFAULT_CONVERSATION_ID).strip() or DEFAULT_CONVERSATION_ID
+    conn = _conn(memories_db_path)
+    try:
+        conn.execute(
+            'UPDATE moments_active_turn SET user_message_id=? '
+            'WHERE conversation_id=? AND turn_key=?',
+            (int(user_message_id), conv, turn_key),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def insert_user_message(
+    get_db_fn: Callable[[], Any],
+    turn_data: dict[str, Any],
+    content: str,
+    *,
+    memories_db_path: str,
+    conversation_id: str = DEFAULT_CONVERSATION_ID,
+) -> dict[str, Any]:
+    turn_data = dict(turn_data)
+    text = (content or '').strip()
+    if not text:
+        return turn_data
+    conn = get_db_fn()
+    try:
+        cur = conn.execute(
+            "INSERT INTO chat_messages (author,content) VALUES ('hayana',?)",
+            (text,),
+        )
+        conn.commit()
+        user_id = int(cur.lastrowid)
+        turn_data['user_message_id'] = user_id
+    finally:
+        conn.close()
+    turn_key = turn_data.get('turn_key')
+    if turn_key:
+        sync_user_message_id(
+            memories_db_path,
+            conversation_id=conversation_id,
+            turn_key=str(turn_key),
+            user_message_id=int(turn_data['user_message_id']),
+        )
+    return turn_data
+
+
+def release_turn(
+    *,
+    conversation_id: str = DEFAULT_CONVERSATION_ID,
+    memories_db_path: str,
+    turn_key: str | None = None,
+    persisted: bool = False,
+) -> None:
+    conv = (conversation_id or DEFAULT_CONVERSATION_ID).strip() or DEFAULT_CONVERSATION_ID
+    active = get_active_turn(memories_db_path, conv)
+    key = (turn_key or (active or {}).get('turn_key') or '').strip()
+    if not key:
+        return
+    if not persisted:
+        moments_intent.clear_pending(memories_db_path, key)
+    conn = _conn(memories_db_path)
+    try:
+        conn.execute(
+            'DELETE FROM moments_active_turn WHERE conversation_id=? AND turn_key=?',
+            (conv, key),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def collect_chat_moment(
+    memories_db_path: str,
+    *,
+    turn_key: str | None = None,
+    conversation_id: str = DEFAULT_CONVERSATION_ID,
+    previous_turns: int = 0,
+    caption: str = '',
+) -> None:
+    conv = (conversation_id or DEFAULT_CONVERSATION_ID).strip() or DEFAULT_CONVERSATION_ID
+    key = (turn_key or '').strip()
+    if not key:
+        active = get_active_turn(memories_db_path, conv)
+        if not active:
+            raise ValueError('no active turn')
+        key = active['turn_key']
+    active = get_active_turn(memories_db_path, conv)
+    if not active or active['turn_key'] != key:
+        raise ValueError('turn_key does not match active turn')
+    moments_intent.set_pending(
+        memories_db_path,
+        key,
+        previous_turns=previous_turns,
+        caption=caption,
+    )
