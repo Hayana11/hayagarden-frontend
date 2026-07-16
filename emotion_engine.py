@@ -445,6 +445,18 @@ def score_and_update(conversation_excerpt: str):
     conn.commit()
     conn.close()
 
+    try:
+        import emotion_history
+        emotion_history.append_snapshot(
+            round(final_v, 4),
+            round(final_a, 4),
+            mood_word,
+            db_path=DB_PATH,
+            source='score',
+        )
+    except Exception:
+        pass
+
 
 def score_async(conversation_excerpt: str):
     t = threading.Thread(

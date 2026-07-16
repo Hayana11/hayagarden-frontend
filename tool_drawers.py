@@ -14,6 +14,7 @@ v1 策略（保守，宁可多给不误伤）：
   - TOOL_DRAWERS_ENABLED: '1' 启用，默认 '0'（完全不改变现有行为）
   - TOOL_DRAWERS_LOG:     '1' 时每轮在 stdout 打一行选择结果（默认开）
 """
+import json
 import re
 
 import config_store
@@ -100,6 +101,9 @@ DRAWERS = {
 # 常开抽屉：不管命中什么，这些始终对模型可见
 CORE_DRAWERS = ['memory']
 
+DISABLED_TOOLS_KEY = 'TOOL_DISABLED'
+DISABLED_DRAWERS_KEY = 'TOOL_DRAWER_DISABLED'
+
 # ── Force Rules ─────────────────────────────────────────────
 # (正则, [抽屉id])。按序全部匹配（不短路），命中即并入。
 FORCE_RULES = [
@@ -141,6 +145,131 @@ def enabled():
     return config_store.get_bool('TOOL_DRAWERS_ENABLED', False)
 
 
+def _load_name_set(key: str) -> set[str]:
+    raw = (config_store.get(key, '') or '').strip()
+    return _parse_name_set(raw)
+
+
+def _parse_name_set(raw: str) -> set[str]:
+    if not raw:
+        return set()
+    try:
+        parsed = json.loads(raw)
+        if isinstance(parsed, list):
+            return {str(name).strip() for name in parsed if str(name).strip()}
+    except Exception:
+        pass
+    return {part.strip() for part in raw.split(',') if part.strip()}
+
+
+def _mutate_name_set(key: str, mutator) -> set[str]:
+    def apply(raw: str) -> str:
+        updated = mutator(set(_parse_name_set(raw)))
+        return json.dumps(sorted(updated))
+
+    new_raw = config_store.mutate(key, '', apply)
+    return _parse_name_set(new_raw)
+
+
+def get_disabled_tools() -> set[str]:
+    return _load_name_set(DISABLED_TOOLS_KEY)
+
+
+def get_disabled_drawers() -> set[str]:
+    return _load_name_set(DISABLED_DRAWERS_KEY)
+
+
+def set_tool_enabled(tool_name: str, enabled_flag: bool) -> set[str]:
+    clean = (tool_name or '').strip()
+    if not clean:
+        raise ValueError('tool required')
+
+    def mutate(names: set[str]) -> set[str]:
+        if enabled_flag:
+            names.discard(clean)
+        else:
+            names.add(clean)
+        return names
+
+    return _mutate_name_set(DISABLED_TOOLS_KEY, mutate)
+
+
+def set_drawer_enabled(drawer_id: str, enabled_flag: bool) -> set[str]:
+    clean = (drawer_id or '').strip()
+    if clean not in DRAWERS:
+        raise ValueError('unknown drawer')
+
+    def mutate(names: set[str]) -> set[str]:
+        if enabled_flag:
+            names.discard(clean)
+        else:
+            names.add(clean)
+        return names
+
+    return _mutate_name_set(DISABLED_DRAWERS_KEY, mutate)
+
+
+def is_tool_enabled_in_drawer(
+    tool_name: str,
+    drawer_id: str,
+    *,
+    disabled_tools: set[str] | None = None,
+    disabled_drawers: set[str] | None = None,
+) -> bool:
+    clean = (tool_name or '').strip()
+    if not clean:
+        return False
+    tools = disabled_tools if disabled_tools is not None else get_disabled_tools()
+    drawers = disabled_drawers if disabled_drawers is not None else get_disabled_drawers()
+    if clean in tools:
+        return False
+    return drawer_id not in drawers
+
+
+def drawer_enabled(drawer_id: str, *, disabled_drawers: set[str] | None = None) -> bool:
+    drawers = disabled_drawers if disabled_drawers is not None else get_disabled_drawers()
+    return drawer_id not in drawers
+
+
+def _apply_disabled_tools(all_tools, allowed_names: set[str] | None = None):
+    disabled_tools = get_disabled_tools()
+    selected = []
+    for tool in all_tools:
+        name = (tool.get('name') or '').strip()
+        if not name or name in disabled_tools:
+            continue
+        if allowed_names is not None and name not in allowed_names:
+            continue
+        selected.append(tool)
+    return selected
+
+
+def serialize_drawers() -> list[dict]:
+    disabled_tools = get_disabled_tools()
+    disabled_drawers = get_disabled_drawers()
+    payload = []
+    for drawer_id, info in DRAWERS.items():
+        drawer_on = drawer_enabled(drawer_id, disabled_drawers=disabled_drawers)
+        payload.append({
+            'id': drawer_id,
+            'label': info['label'],
+            'enabled': drawer_on,
+            'tools': [
+                {
+                    'name': name,
+                    'enabled': is_tool_enabled_in_drawer(
+                        name,
+                        drawer_id,
+                        disabled_tools=disabled_tools,
+                        disabled_drawers=disabled_drawers,
+                    ),
+                }
+                for name in info['tools']
+            ],
+        })
+    return payload
+
+
 def extract_user_text(messages):
     """从 build_messages() 的结果里取最后一条 user 文本，用于路由。"""
     for m in reversed(messages or []):
@@ -173,26 +302,47 @@ def match_drawers(user_text):
 def select_tools(user_text, all_tools):
     """
     返回 (tools, info)。
-    未启用、或没命中任何规则 → 原样返回全量（行为不变）。
-    命中 → 常开抽屉 + 命中抽屉的工具并集（保持 all_tools 原顺序）。
+    个体工具禁用始终生效；抽屉级禁用只在路由命中对应抽屉时生效。
     """
+    total = len(all_tools)
     if not enabled():
-        return all_tools, {'enabled': False, 'mode': 'off',
-                           'tools': len(all_tools), 'total': len(all_tools)}
+        selected = _apply_disabled_tools(all_tools)
+        return selected, {
+            'enabled': False,
+            'mode': 'off',
+            'tools': len(selected),
+            'total': total,
+        }
+
     hit = match_drawers(user_text)
     if not hit:
-        return all_tools, {'enabled': True, 'mode': 'fallback_all', 'drawers': [],
-                           'tools': len(all_tools), 'total': len(all_tools)}
+        selected = _apply_disabled_tools(all_tools)
+        return selected, {
+            'enabled': True,
+            'mode': 'fallback_all',
+            'drawers': [],
+            'tools': len(selected),
+            'total': total,
+        }
+
+    disabled_drawers = get_disabled_drawers()
     opened = list(CORE_DRAWERS)
     for did in hit:
         if did not in opened:
             opened.append(did)
     allowed = set()
     for did in opened:
+        if did in disabled_drawers:
+            continue
         allowed.update(DRAWERS[did]['tools'])
-    selected = [t for t in all_tools if t.get('name') in allowed]
-    info = {'enabled': True, 'mode': 'routed', 'drawers': opened,
-            'tools': len(selected), 'total': len(all_tools)}
+    selected = _apply_disabled_tools(all_tools, allowed)
+    info = {
+        'enabled': True,
+        'mode': 'routed',
+        'drawers': opened,
+        'tools': len(selected),
+        'total': total,
+    }
     if config_store.get_bool('TOOL_DRAWERS_LOG', True):
         print(f"[drawers] {info['mode']} drawers={opened} "
               f"tools={info['tools']}/{info['total']} text={user_text[:40]!r}", flush=True)

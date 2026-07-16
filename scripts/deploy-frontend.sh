@@ -28,6 +28,8 @@ command -v curl >/dev/null || fail "curl is missing"
   || fail "python cryptography package is missing"
 "$PYTHON" -c 'from PIL import Image' \
   || fail "python Pillow package is missing (pip install -r requirements.txt)"
+"$PYTHON" -c 'import frontmatter' \
+  || fail "python frontmatter package is missing (pip install -r requirements.txt)"
 test -f "$ROOT/requirements.txt" || fail "requirements.txt is missing"
 
 exec 9>"$LOCK_FILE"

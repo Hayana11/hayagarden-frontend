@@ -187,6 +187,7 @@ class ContextContinuityTests(unittest.TestCase):
         self.assertIn("restore_runtime", deploy_source)
         self.assertIn("':(exclude)attachments.db'", deploy_source)
         self.assertIn("from PIL import Image", deploy_source)
+        self.assertIn("import frontmatter", deploy_source)
         self.assertIn("requirements.txt", deploy_source)
         moments_auth = open(
             os.path.join(ROOT, "moments_auth.py"), encoding="utf-8"
