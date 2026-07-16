@@ -200,7 +200,7 @@ class ContextContinuityTests(unittest.TestCase):
         self.assertIn("MOMENTS_OWNER_TOKEN", moments_auth)
         self.assertIn("MOMENTS_OWNER_TOKEN", config_store)
         self.assertIn("MOMENTS_OWNER_TOKEN", mcp_source)
-        self.assertIn("Authorization: \`Bearer \${ownerToken}\`", mcp_source)
+        self.assertIn("Authorization: `Bearer ${ownerToken}`", mcp_source)
 
 
 if __name__ == "__main__":
