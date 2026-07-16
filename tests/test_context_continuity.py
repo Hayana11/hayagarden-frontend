@@ -188,9 +188,14 @@ class ContextContinuityTests(unittest.TestCase):
         self.assertIn("':(exclude)attachments.db'", deploy_source)
         self.assertIn("from PIL import Image", deploy_source)
         self.assertIn("requirements.txt", deploy_source)
-        self.assertIn("MOMENTS_OWNER_TOKEN", open(
-            os.path.join(ROOT, "requirements.txt"), encoding="utf-8"
-        ).read())
+        moments_auth = open(
+            os.path.join(ROOT, "moments_auth.py"), encoding="utf-8"
+        ).read()
+        config_store = open(
+            os.path.join(ROOT, "config_store.py"), encoding="utf-8"
+        ).read()
+        self.assertIn("MOMENTS_OWNER_TOKEN", moments_auth)
+        self.assertIn("MOMENTS_OWNER_TOKEN", config_store)
 
 
 if __name__ == "__main__":

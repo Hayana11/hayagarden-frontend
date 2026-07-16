@@ -254,7 +254,7 @@ def create_post():
 
 @app.route('/api/posts/<int:pid>', methods=['DELETE'])
 def delete_post(pid):
-    deleted = moments_store.delete_thought_post(pid, memories_db_path=DB_PATH)
+    deleted = moments_store.delete_post(pid, memories_db_path=DB_PATH)
     if not deleted:
         return jsonify({'error': 'not found'}), 404
     return jsonify({'ok': True})

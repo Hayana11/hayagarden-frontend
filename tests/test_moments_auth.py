@@ -56,7 +56,33 @@ class MomentsAuthTests(unittest.TestCase):
         client = app.test_client()
         response = client.post('/api/moments/session', json={'token': 'test-owner-token'})
         self.assertEqual(response.status_code, 200)
-        self.assertIn('moments_owner', response.headers.get('Set-Cookie', ''))
+        cookie_header = response.headers.get('Set-Cookie', '')
+        self.assertIn('moments_owner', cookie_header)
+        self.assertIn('Secure', cookie_header)
+
+    def test_apply_owner_cookie_always_secure(self):
+        app = Flask(__name__)
+        with app.test_request_context('/'):
+            from flask import jsonify
+            resp = jsonify({'ok': True})
+            apply_owner_cookie(resp)
+            cookie_header = resp.headers.get('Set-Cookie', '')
+            self.assertIn('Secure', cookie_header)
+            self.assertIn('HttpOnly', cookie_header)
+            self.assertIn('SameSite=Lax', cookie_header)
+
+    def test_session_cookie_secure_behind_http_proxy(self):
+        """nginx 未传 X-Forwarded-Proto 时 request.is_secure 为 False，Cookie 仍须 Secure。"""
+        app = Flask(__name__)
+        app.register_blueprint(create_moments_blueprint(memories_db_path=':memory:'))
+        client = app.test_client()
+        response = client.post(
+            '/api/moments/session',
+            json={'token': 'test-owner-token'},
+            environ_overrides={'wsgi.url_scheme': 'http'},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('Secure', response.headers.get('Set-Cookie', ''))
 
     def test_write_routes_require_owner(self):
         app = Flask(__name__)

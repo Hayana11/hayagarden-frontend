@@ -80,7 +80,8 @@ def require_owner(request: Request) -> None:
         raise OwnerAuthError('unauthorized', 401)
 
 
-def apply_owner_cookie(response: Response, *, secure: bool) -> None:
+def apply_owner_cookie(response: Response) -> None:
+    """Set the owner session cookie. Always Secure (HTTPS-only)."""
     token = _get_owner_token()
     if not token:
         return
@@ -89,7 +90,7 @@ def apply_owner_cookie(response: Response, *, secure: bool) -> None:
         owner_session_digest(token),
         max_age=COOKIE_MAX_AGE,
         httponly=True,
-        secure=secure,
+        secure=True,
         samesite='Lax',
         path='/',
     )

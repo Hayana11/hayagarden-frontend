@@ -48,7 +48,7 @@ def create_moments_blueprint(
         if not verify_owner_token(token):
             return _owner_error_response(OwnerAuthError('unauthorized', 401))
         resp = jsonify({'ok': True, 'authenticated': True})
-        apply_owner_cookie(resp, secure=request.is_secure)
+        apply_owner_cookie(resp)
         return resp
 
     @blueprint.route('/api/moments/feed', methods=['GET'])

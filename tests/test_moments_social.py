@@ -313,7 +313,7 @@ class MomentsSocialTests(unittest.TestCase):
         moments_social.toggle_reaction(key, 'like', memories_db_path=self.db_path)
         moments_social.add_comment(key, '批注', memories_db_path=self.db_path)
 
-        deleted = moments_store.delete_thought_post(thought_id, memories_db_path=self.db_path)
+        deleted = moments_store.delete_post(thought_id, memories_db_path=self.db_path)
         self.assertTrue(deleted)
         self.assertEqual(self._reaction_count(key), 0)
         conn = sqlite3.connect(self.db_path)
@@ -325,6 +325,33 @@ class MomentsSocialTests(unittest.TestCase):
         finally:
             conn.close()
         self.assertEqual(comments, 0)
+
+    def test_delete_memory_post_without_social_cleanup(self):
+        conn = sqlite3.connect(self.db_path)
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS posts ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "type TEXT NOT NULL, "
+            "content TEXT NOT NULL, "
+            "author TEXT DEFAULT 'fyodor', "
+            "created_at TEXT"
+            ")"
+        )
+        conn.execute(
+            "INSERT INTO posts (type, content, created_at) VALUES ('MEMORY', '核心记忆', '2026-07-16 09:00:00')"
+        )
+        memory_id = conn.execute('SELECT last_insert_rowid()').fetchone()[0]
+        conn.commit()
+        conn.close()
+
+        deleted = moments_store.delete_post(memory_id, memories_db_path=self.db_path)
+        self.assertTrue(deleted)
+        conn = sqlite3.connect(self.db_path)
+        try:
+            row = conn.execute('SELECT 1 FROM posts WHERE id=?', (memory_id,)).fetchone()
+        finally:
+            conn.close()
+        self.assertIsNone(row)
 
     def test_delete_gallery_item_clears_social(self):
         self._insert_gallery('pic-del')
