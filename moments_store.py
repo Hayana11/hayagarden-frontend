@@ -152,6 +152,9 @@ def _db_created_at(value: str | None) -> str | None:
     return dt.strftime('%Y-%m-%d %H:%M:%S')
 
 
+_INVALID_CREATED_AT_SQL = 'datetime(created_at) IS NULL'
+_INVALID_SORT_SQL = f'CASE WHEN {_INVALID_CREATED_AT_SQL} THEN 1 ELSE 0 END'
+
 
 def _fetch_thought_rows(
     conn: sqlite3.Connection,
@@ -178,22 +181,20 @@ def _fetch_thought_rows(
         cursor_db_time = _db_created_at(cursor_published_at)
         if cursor_db_time:
             where.append(
-                '(datetime(created_at) < datetime(?) '
-                'OR (created_at = ? AND id < ?) '
-                'OR created_at IS NULL OR created_at = ?)'
+                f'(datetime(created_at) < datetime(?) '
+                f'OR (created_at = ? AND id < ?) '
+                f'OR {_INVALID_CREATED_AT_SQL})'
             )
-            params.extend([cursor_db_time, cursor_db_time, cursor_id, ''])
+            params.extend([cursor_db_time, cursor_db_time, cursor_id])
         else:
-            # Cursor is on a null/empty-date row: only continue within that tier.
-            where.append('((created_at IS NULL OR created_at = ?) AND id < ?)')
-            params.extend(['', cursor_id])
+            where.append(f'({_INVALID_CREATED_AT_SQL} AND id < ?)')
+            params.append(cursor_id)
 
     sql = (
         f"SELECT {', '.join(cols)} FROM posts WHERE {' AND '.join(where)} "
-        'ORDER BY CASE WHEN created_at IS NULL OR created_at = ? THEN 1 ELSE 0 END, '
-        'datetime(created_at) DESC, id DESC LIMIT ?'
+        f'ORDER BY {_INVALID_SORT_SQL}, datetime(created_at) DESC, id DESC LIMIT ?'
     )
-    params.extend(['', limit])
+    params.append(limit)
     rows = conn.execute(sql, params).fetchall()
     return [_thought_item(row, has_processed) for row in rows]
 

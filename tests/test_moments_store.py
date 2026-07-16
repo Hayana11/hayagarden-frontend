@@ -140,6 +140,70 @@ class MomentsStoreTests(unittest.TestCase):
         self.assertEqual([item['item_key'] for item in second['items']], ['thought:2', 'thought:1'])
         self.assertFalse(second['has_more'])
 
+    def test_invalid_date_string_pagination_does_not_skip(self):
+        for index in range(5):
+            self._insert_thought(f'脏日期 {index}', 'not-a-date')
+
+        first = moments_store.get_feed(memories_db_path=self.db_path, limit=2)
+        second = moments_store.get_feed(
+            memories_db_path=self.db_path,
+            limit=2,
+            cursor=first['next_cursor'],
+        )
+        third = moments_store.get_feed(
+            memories_db_path=self.db_path,
+            limit=2,
+            cursor=second['next_cursor'],
+        )
+
+        self.assertEqual([item['item_key'] for item in first['items']], ['thought:5', 'thought:4'])
+        self.assertTrue(first['has_more'])
+        self.assertIsNone(first['items'][0]['created_at'])
+
+        self.assertEqual([item['item_key'] for item in second['items']], ['thought:3', 'thought:2'])
+        self.assertTrue(second['has_more'])
+
+        self.assertEqual([item['item_key'] for item in third['items']], ['thought:1'])
+        self.assertFalse(third['has_more'])
+
+    def test_whitespace_created_at_pagination_does_not_skip(self):
+        for index in range(3):
+            self._insert_thought(f'空格日期 {index}', '   ')
+
+        first = moments_store.get_feed(memories_db_path=self.db_path, limit=2)
+        second = moments_store.get_feed(
+            memories_db_path=self.db_path,
+            limit=2,
+            cursor=first['next_cursor'],
+        )
+        self.assertEqual([item['item_key'] for item in first['items']], ['thought:3', 'thought:2'])
+        self.assertEqual([item['item_key'] for item in second['items']], ['thought:1'])
+        self.assertFalse(second['has_more'])
+
+    def test_valid_dates_then_invalid_dates_paginate_across_tiers(self):
+        self._insert_thought('脏 1', 'not-a-date')
+        self._insert_thought('正常 1', '2026-07-16 01:00:00')
+        self._insert_thought('正常 2', '2026-07-16 02:00:00')
+        self._insert_thought('脏 2', 'not-a-date')
+        self._insert_thought('脏 3', 'not-a-date')
+
+        first = moments_store.get_feed(memories_db_path=self.db_path, limit=2)
+        second = moments_store.get_feed(
+            memories_db_path=self.db_path,
+            limit=2,
+            cursor=first['next_cursor'],
+        )
+        third = moments_store.get_feed(
+            memories_db_path=self.db_path,
+            limit=2,
+            cursor=second['next_cursor'],
+        )
+
+        self.assertEqual([item['item_key'] for item in first['items']], ['thought:3', 'thought:2'])
+        self.assertEqual([item['item_key'] for item in second['items']], ['thought:5', 'thought:4'])
+        self.assertEqual([item['item_key'] for item in third['items']], ['thought:1'])
+        self.assertFalse(third['has_more'])
+
 
 if __name__ == '__main__':
     unittest.main()
