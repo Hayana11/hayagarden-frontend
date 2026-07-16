@@ -204,6 +204,51 @@ class MomentsStoreTests(unittest.TestCase):
         self.assertEqual([item['item_key'] for item in third['items']], ['thought:1'])
         self.assertFalse(third['has_more'])
 
+    def _assert_same_timestamp_paginates_by_id(self, timestamps):
+        for index, timestamp in enumerate(timestamps):
+            self._insert_thought(f'同一时刻 {index}', timestamp)
+
+        keys = []
+        cursor = None
+        while True:
+            page = moments_store.get_feed(
+                memories_db_path=self.db_path,
+                limit=2,
+                cursor=cursor,
+            )
+            keys.extend(item['item_key'] for item in page['items'])
+            if not page['has_more']:
+                break
+            cursor = page['next_cursor']
+
+        expected = [f'thought:{item_id}' for item_id in range(len(timestamps), 0, -1)]
+        self.assertEqual(keys, expected)
+
+    def test_same_beijing_db_timestamp_paginates_by_id(self):
+        self._assert_same_timestamp_paginates_by_id([
+            '2026-07-16 09:00:00',
+        ] * 5)
+
+    def test_same_shanghai_iso_timestamp_paginates_by_id(self):
+        self._assert_same_timestamp_paginates_by_id([
+            '2026-07-16T09:00:00+08:00',
+        ] * 5)
+
+    def test_same_utc_iso_timestamp_paginates_by_id(self):
+        self._assert_same_timestamp_paginates_by_id([
+            '2026-07-16T01:00:00Z',
+        ] * 5)
+
+    def test_mixed_timestamp_formats_for_same_instant_paginate_by_id(self):
+        self._assert_same_timestamp_paginates_by_id([
+            '2026-07-16 09:00:00',
+            '2026-07-16T09:00:00+08:00',
+            '2026-07-16T01:00:00Z',
+            '2026-07-16 09:00:00',
+            '2026-07-16T09:00:00+08:00',
+            '2026-07-16T01:00:00Z',
+        ])
+
 
 if __name__ == '__main__':
     unittest.main()

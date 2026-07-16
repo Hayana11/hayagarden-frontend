@@ -152,7 +152,15 @@ def _db_created_at(value: str | None) -> str | None:
     return dt.strftime('%Y-%m-%d %H:%M:%S')
 
 
-_INVALID_CREATED_AT_SQL = 'datetime(created_at) IS NULL'
+_CREATED_AT_KEY_SQL = (
+    "CASE "
+    "WHEN datetime(created_at) IS NULL THEN NULL "
+    "WHEN created_at GLOB '*Z' "
+    "OR created_at GLOB '*[+-][0-9][0-9]:[0-9][0-9]' "
+    "THEN datetime(created_at, '+8 hours') "
+    "ELSE datetime(created_at) END"
+)
+_INVALID_CREATED_AT_SQL = f'({_CREATED_AT_KEY_SQL}) IS NULL'
 _INVALID_SORT_SQL = f'CASE WHEN {_INVALID_CREATED_AT_SQL} THEN 1 ELSE 0 END'
 
 
@@ -181,8 +189,8 @@ def _fetch_thought_rows(
         cursor_db_time = _db_created_at(cursor_published_at)
         if cursor_db_time:
             where.append(
-                f'(datetime(created_at) < datetime(?) '
-                f'OR (created_at = ? AND id < ?) '
+                f'(({_CREATED_AT_KEY_SQL}) < datetime(?) '
+                f'OR (({_CREATED_AT_KEY_SQL}) = datetime(?) AND id < ?) '
                 f'OR {_INVALID_CREATED_AT_SQL})'
             )
             params.extend([cursor_db_time, cursor_db_time, cursor_id])
@@ -192,7 +200,7 @@ def _fetch_thought_rows(
 
     sql = (
         f"SELECT {', '.join(cols)} FROM posts WHERE {' AND '.join(where)} "
-        f'ORDER BY {_INVALID_SORT_SQL}, datetime(created_at) DESC, id DESC LIMIT ?'
+        f'ORDER BY {_INVALID_SORT_SQL}, ({_CREATED_AT_KEY_SQL}) DESC, id DESC LIMIT ?'
     )
     params.append(limit)
     rows = conn.execute(sql, params).fetchall()
