@@ -26,22 +26,22 @@ _FYODOR_AUTHORS = {'fyodor', 'assistant', 'claude'}
 _LOG = logging.getLogger(__name__)
 _SNAPSHOT_VERSION = 1
 
-_CREATED_AT_KEY_SQL = (
-    "CASE "
-    "WHEN datetime(created_at) IS NULL THEN NULL "
-    "WHEN created_at GLOB '*Z' "
-    "OR created_at GLOB '*[+-][0-9][0-9]:[0-9][0-9]' "
-    "THEN datetime(created_at, '+8 hours') "
-    "ELSE datetime(created_at) END"
-)
+def _time_key_sql(column_expr: str) -> str:
+    return (
+        'CASE '
+        f'WHEN datetime({column_expr}) IS NULL THEN NULL '
+        f"WHEN {column_expr} GLOB '*Z' "
+        f"OR {column_expr} GLOB '*[+-][0-9][0-9]:[0-9][0-9]' "
+        f"THEN datetime({column_expr}, '+8 hours') "
+        f'ELSE datetime({column_expr}) END'
+    )
+
+
+_CREATED_AT_KEY_SQL = _time_key_sql('created_at')
 _INVALID_CREATED_AT_SQL = f'({_CREATED_AT_KEY_SQL}) IS NULL'
 _INVALID_SORT_SQL = f'CASE WHEN {_INVALID_CREATED_AT_SQL} THEN 1 ELSE 0 END'
 
-_GALLERY_TIME_SQL = (
-    'CASE '
-    'WHEN datetime(COALESCE(saved_at, created_at)) IS NULL THEN NULL '
-    'ELSE datetime(COALESCE(saved_at, created_at)) END'
-)
+_GALLERY_TIME_SQL = _time_key_sql('COALESCE(saved_at, created_at)')
 _INVALID_GALLERY_TIME_SQL = f'({_GALLERY_TIME_SQL}) IS NULL'
 _INVALID_GALLERY_SORT_SQL = f'CASE WHEN {_INVALID_GALLERY_TIME_SQL} THEN 1 ELSE 0 END'
 

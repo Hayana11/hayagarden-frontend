@@ -1,3 +1,4 @@
+import contextlib
 import os
 import sqlite3
 import tempfile
@@ -59,7 +60,7 @@ class MomentsPersistenceTests(unittest.TestCase):
             assistant_message_id=int(assistant_id),
         )
 
-        with sqlite3.connect(self.db_path) as count_conn:
+        with contextlib.closing(sqlite3.connect(self.db_path)) as count_conn:
             count = count_conn.execute(
                 'SELECT COUNT(*) FROM moment_chat_collections'
             ).fetchone()[0]
@@ -135,6 +136,28 @@ class MomentsPersistenceTests(unittest.TestCase):
         pending = moments_intent.pop_pending(self.db_path, turn['turn_key'])
         self.assertIsNotNone(pending)
         self.assertEqual(pending.caption, 'via active turn')
+
+    def test_waiting_request_does_not_steal_active_turn(self):
+        turn_a = moments_turn.prepare_turn({}, conversation_id='hayana-chat', memories_db_path=self.db_path)
+        turn_b = moments_turn.prepare_turn({}, conversation_id='hayana-chat', memories_db_path=self.db_path)
+
+        moments_turn.activate_turn(turn_a, conversation_id='hayana-chat', memories_db_path=self.db_path)
+
+        moments_turn.collect_chat_moment(
+            self.db_path,
+            conversation_id='hayana-chat',
+            previous_turns=0,
+            caption='belongs to A',
+        )
+
+        pending_a = moments_intent.pop_pending(self.db_path, turn_a['turn_key'])
+        pending_b = moments_intent.pop_pending(self.db_path, turn_b['turn_key'])
+        self.assertIsNotNone(pending_a)
+        self.assertIsNone(pending_b)
+        self.assertEqual(pending_a.caption, 'belongs to A')
+
+        active = moments_turn.get_active_turn(self.db_path, 'hayana-chat')
+        self.assertEqual(active['turn_key'], turn_a['turn_key'])
 
 
 if __name__ == '__main__':

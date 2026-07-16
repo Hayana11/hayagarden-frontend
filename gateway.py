@@ -3377,10 +3377,10 @@ def workspace_chat():
 
 @app.route('/chat', methods=['POST'])
 def chat():
-    from moments_turn import begin_turn, insert_user_message, release_turn, DEFAULT_CONVERSATION_ID
+    from moments_turn import prepare_turn, activate_turn, insert_user_message, release_turn, DEFAULT_CONVERSATION_ID
 
     _conv = DEFAULT_CONVERSATION_ID
-    _turn_data = begin_turn(request.get_json(), conversation_id=_conv, memories_db_path=DB_PATH)
+    _turn_data = prepare_turn(request.get_json(), conversation_id=_conv, memories_db_path=DB_PATH)
     _uc = (_turn_data.get('content') or '').strip()
     _turn_data = insert_user_message(get_db, _turn_data, _uc, memories_db_path=DB_PATH, conversation_id=_conv)
     if _uc:
@@ -3415,6 +3415,7 @@ def chat():
         if mode == 'reused':
             text, thinking_text = reused
             return jsonify({'ok': True, 'content': text, 'thinking': thinking_text})
+        _turn_data = activate_turn(_turn_data, conversation_id=_conv, memories_db_path=DB_PATH)
         text, thinking_text = None, None
         try:
             _is_user_turn = bool(_uc) or is_pending_user_turn(
@@ -3748,14 +3749,14 @@ def chat_stream():
     from flask import Response, stream_with_context
     if _get_provider() == 'claude_code':
         def gen_cc():
-            from moments_turn import begin_turn, insert_user_message, release_turn, DEFAULT_CONVERSATION_ID
+            from moments_turn import prepare_turn, activate_turn, insert_user_message, release_turn, DEFAULT_CONVERSATION_ID
 
             _conv = DEFAULT_CONVERSATION_ID
             _released = [False]
             _persisted = [False]
             _turn_data: dict = {}
             try:
-                _turn_data = begin_turn(request.get_json(), conversation_id=_conv, memories_db_path=DB_PATH)
+                _turn_data = prepare_turn(request.get_json(), conversation_id=_conv, memories_db_path=DB_PATH)
                 _uc = (_turn_data.get('content') or '').strip()
                 _turn_data = insert_user_message(
                     get_db, _turn_data, _uc, memories_db_path=DB_PATH, conversation_id=_conv,
@@ -3778,6 +3779,7 @@ def chat_stream():
                         yield 'data: ' + json.dumps({'t': 'text', 'd': text}) + SSE_END
                     yield 'data: ' + json.dumps({'t': 'done', 'ok': bool(text)}) + SSE_END
                     return
+                _turn_data = activate_turn(_turn_data, conversation_id=_conv, memories_db_path=DB_PATH)
                 text, thinking = None, None
                 cc_cache_read, cc_cache_create = 0, 0
                 _is_user_turn = bool(_uc) or is_pending_user_turn(
@@ -3870,13 +3872,13 @@ def chat_stream():
         return Response(stream_with_context(gen_cc()), mimetype='text/event-stream',
                         headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
     def generate():
-        from moments_turn import begin_turn, insert_user_message, release_turn, DEFAULT_CONVERSATION_ID
+        from moments_turn import prepare_turn, activate_turn, insert_user_message, release_turn, DEFAULT_CONVERSATION_ID
 
         _conv = DEFAULT_CONVERSATION_ID
         _persisted = [False]
         _turn_data: dict = {}
         try:
-            _turn_data = begin_turn(request.get_json(), conversation_id=_conv, memories_db_path=DB_PATH)
+            _turn_data = prepare_turn(request.get_json(), conversation_id=_conv, memories_db_path=DB_PATH)
             _uc = (_turn_data.get('content') or '').strip()
             _turn_data = insert_user_message(
                 get_db, _turn_data, _uc, memories_db_path=DB_PATH, conversation_id=_conv,
@@ -3890,6 +3892,7 @@ def chat_stream():
                     yield 'data: ' + json.dumps({'t': 'text', 'd': text}) + SSE_END
                 yield 'data: ' + json.dumps({'t': 'done', 'ok': bool(text)}) + SSE_END
                 return
+            _turn_data = activate_turn(_turn_data, conversation_id=_conv, memories_db_path=DB_PATH)
             _tool_ctx.conversation_id = _conv
             for _jev in _workspace_job_sse_payloads():
                 yield 'data: ' + json.dumps(_jev, ensure_ascii=False) + SSE_END

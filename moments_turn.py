@@ -67,16 +67,29 @@ def get_active_turn(memories_db_path: str, conversation_id: str) -> dict[str, An
     }
 
 
-def begin_turn(
+def prepare_turn(
     turn_data: dict[str, Any] | None = None,
+    *,
+    conversation_id: str = DEFAULT_CONVERSATION_ID,
+    memories_db_path: str | None = None,
+) -> dict[str, Any]:
+    del conversation_id, memories_db_path
+    data = dict(turn_data or {})
+    data['turn_key'] = secrets.token_hex(16)
+    return data
+
+
+def activate_turn(
+    turn_data: dict[str, Any],
     *,
     conversation_id: str = DEFAULT_CONVERSATION_ID,
     memories_db_path: str,
 ) -> dict[str, Any]:
     conv = (conversation_id or DEFAULT_CONVERSATION_ID).strip() or DEFAULT_CONVERSATION_ID
-    turn_key = secrets.token_hex(16)
-    data = dict(turn_data or {})
-    data['turn_key'] = turn_key
+    data = dict(turn_data)
+    turn_key = (data.get('turn_key') or '').strip()
+    if not turn_key:
+        raise ValueError('turn_key required')
 
     conn = _conn(memories_db_path)
     try:
@@ -97,6 +110,24 @@ def begin_turn(
     finally:
         conn.close()
     return data
+
+
+def begin_turn(
+    turn_data: dict[str, Any] | None = None,
+    *,
+    conversation_id: str = DEFAULT_CONVERSATION_ID,
+    memories_db_path: str,
+) -> dict[str, Any]:
+    data = prepare_turn(
+        turn_data,
+        conversation_id=conversation_id,
+        memories_db_path=memories_db_path,
+    )
+    return activate_turn(
+        data,
+        conversation_id=conversation_id,
+        memories_db_path=memories_db_path,
+    )
 
 
 def sync_user_message_id(

@@ -504,6 +504,30 @@ class MomentsStoreTests(unittest.TestCase):
         self.assertEqual(item['media'][0]['pid'], 'pic-c')
         self.assertIn('/api/gallery/photo/pic-c', item['media'][0]['url'])
 
+    def test_gallery_iso_timestamp_paginates_without_repeat(self):
+        iso_ts = '2026-07-16T09:00:00+08:00'
+        for index in range(1, 5):
+            self._insert_gallery(f'pic-{index}', note=f'图 {index}', saved_at=iso_ts)
+
+        first = moments_store.get_feed(
+            memories_db_path=self.db_path,
+            gallery_db_path=self.gallery_db_path,
+            limit=2,
+            feed_type='gallery',
+        )
+        second = moments_store.get_feed(
+            memories_db_path=self.db_path,
+            gallery_db_path=self.gallery_db_path,
+            limit=2,
+            cursor=first['next_cursor'],
+            feed_type='gallery',
+        )
+
+        self.assertEqual([item['item_key'] for item in first['items']], ['gallery:pic-4', 'gallery:pic-3'])
+        self.assertEqual([item['item_key'] for item in second['items']], ['gallery:pic-2', 'gallery:pic-1'])
+        self.assertTrue(first['has_more'])
+        self.assertFalse(second['has_more'])
+
 
 if __name__ == '__main__':
     unittest.main()
