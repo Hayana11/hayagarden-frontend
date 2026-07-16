@@ -69,9 +69,20 @@ class MomentsRouteTests(unittest.TestCase):
             'turn_key': turn['turn_key'],
             'previous_turns': 0,
             'caption': '测试',
-        })
+        }, headers=OWNER_HEADERS)
         self.assertEqual(response.status_code, 200)
         self.assertTrue(response.get_json()['ok'])
+
+    def test_collect_intent_requires_owner(self):
+        response = self.client.post(
+            '/api/moments/collect-intent',
+            json={'previous_turns': 0, 'caption': '未授权注入'},
+        )
+        self.assertEqual(response.status_code, 401)
+
+    def test_delete_chat_collection_requires_owner(self):
+        response = self.client.delete('/api/moments/chat-collections/1')
+        self.assertEqual(response.status_code, 401)
 
     def test_react_route_requires_owner(self):
         response = self.client.post(
