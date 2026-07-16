@@ -74,18 +74,31 @@ interface ToolDrawersResponse {
   error?: string;
 }
 
+interface RepostWireMessage {
+  message_id: number;
+  role: 'haya' | 'fyodor';
+  text: string;
+  created_at: string | null;
+  attachment?: { kind: string; url?: string; name?: string };
+}
+
 interface FeedWireItem {
   item_key: string;
   post_id: number | null;
   collection_id: number | null;
   gallery_pid: string | null;
-  kind: 'thought';
+  kind: 'thought' | 'repost' | 'gallery';
   author: string;
   content: string;
   title: string | null;
   tags: string[];
   brewing: boolean;
   created_at: string | null;
+  media: Array<{ pid: string; url: string; width: number | null; height: number | null; note?: string }>;
+  repost: {
+    source_label: string;
+    messages: RepostWireMessage[];
+  } | null;
   social: {
     likes: number;
     dislikes: number;
@@ -103,7 +116,23 @@ interface FeedWireResponse {
 
 // ── frontend-facing types ──
 
-export type FeedKind = 'thought';
+export type FeedKind = 'thought' | 'repost' | 'gallery';
+
+export interface RepostMessage {
+  messageId: number;
+  role: 'haya' | 'fyodor';
+  text: string;
+  createdAt: string | null;
+  attachment?: { kind: string; url?: string; name?: string };
+}
+
+export interface FeedMedia {
+  pid: string;
+  url: string;
+  width: number | null;
+  height: number | null;
+  note: string;
+}
 
 export interface FeedSocial {
   likes: number;
@@ -115,13 +144,17 @@ export interface FeedSocial {
 export interface FeedEntry {
   itemKey: string;
   kind: FeedKind;
-  postId: number;
+  postId: number | null;
+  collectionId: number | null;
+  galleryPid: string | null;
   author: string;
   content: string;
   createdAt: string | null;
   tags: string[];
   brewing: boolean;
   social: FeedSocial;
+  media: FeedMedia[];
+  repost: { sourceLabel: string; messages: RepostMessage[] } | null;
   dateLabel: string;
   timeLabel: string;
 }
@@ -250,7 +283,9 @@ function mapFeedItem(item: FeedWireItem): FeedEntry {
   return {
     itemKey: item.item_key,
     kind: item.kind,
-    postId: item.post_id || 0,
+    postId: item.post_id,
+    collectionId: item.collection_id,
+    galleryPid: item.gallery_pid,
     author: item.author,
     content: item.content,
     createdAt: item.created_at,
@@ -262,6 +297,25 @@ function mapFeedItem(item: FeedWireItem): FeedEntry {
       comments: item.social?.comments ?? 0,
       myReaction: item.social?.my_reaction ?? null,
     },
+    media: (item.media || []).map((m) => ({
+      pid: m.pid,
+      url: m.url,
+      width: m.width,
+      height: m.height,
+      note: m.note || '',
+    })),
+    repost: item.repost
+      ? {
+          sourceLabel: item.repost.source_label || '',
+          messages: (item.repost.messages || []).map((m) => ({
+            messageId: m.message_id,
+            role: m.role,
+            text: m.text,
+            createdAt: m.created_at,
+            attachment: m.attachment,
+          })),
+        }
+      : null,
     dateLabel: labels.dateLabel,
     timeLabel: labels.timeLabel,
   };
@@ -277,11 +331,17 @@ async function safe<T>(label: string, fn: () => Promise<T>, failed: string[]): P
   }
 }
 
-export async function fetchMomentsFeed(cursor?: string, limit = 20): Promise<MomentsFeedPage> {
+export type FeedType = 'all' | 'posts';
+
+export async function fetchMomentsFeed(
+  cursor?: string,
+  limit = 20,
+  feedType: FeedType = 'all',
+): Promise<MomentsFeedPage> {
   const response = await http.get<FeedWireResponse>('/api/moments/feed', {
     cursor,
     limit,
-    type: 'all',
+    type: feedType,
   });
   if (response.error) {
     throw new Error(response.error);

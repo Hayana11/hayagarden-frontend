@@ -34,4 +34,22 @@ def create_moments_blueprint(
         except ValueError as exc:
             return jsonify({'error': str(exc)}), 400
 
+    @blueprint.route('/api/moments/chat-collections/<int:collection_id>', methods=['GET'])
+    def get_chat_collection(collection_id: int):
+        item = moments_store.get_chat_collection(
+            collection_id, memories_db_path=memories_db_path
+        )
+        if not item:
+            return jsonify({'error': 'not found'}), 404
+        return jsonify(item)
+
+    @blueprint.route('/api/moments/chat-collections/<int:collection_id>', methods=['DELETE'])
+    def delete_chat_collection(collection_id: int):
+        deleted = moments_store.delete_chat_collection(
+            collection_id, memories_db_path=memories_db_path
+        )
+        if not deleted:
+            return jsonify({'error': 'not found'}), 404
+        return jsonify({'deleted': True})
+
     return blueprint

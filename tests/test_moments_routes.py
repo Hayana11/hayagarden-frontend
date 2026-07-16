@@ -6,6 +6,7 @@ import unittest
 from flask import Flask
 
 from moments_routes import create_moments_blueprint
+import moments_store
 
 
 class MomentsRouteTests(unittest.TestCase):
@@ -27,6 +28,7 @@ class MomentsRouteTests(unittest.TestCase):
         )
         conn.commit()
         conn.close()
+        moments_store.ensure_schema(self.db_path)
 
         app = Flask(__name__)
         app.register_blueprint(create_moments_blueprint(memories_db_path=self.db_path))
@@ -42,6 +44,13 @@ class MomentsRouteTests(unittest.TestCase):
         self.assertEqual(len(payload['items']), 1)
         self.assertEqual(payload['items'][0]['kind'], 'thought')
         self.assertEqual(payload['items'][0]['item_key'], 'thought:1')
+
+    def test_posts_feed_type_route(self):
+        response = self.client.get('/api/moments/feed?limit=10&type=posts')
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(len(payload['items']), 1)
+        self.assertEqual(payload['items'][0]['kind'], 'thought')
 
     def test_invalid_limit_returns_400(self):
         response = self.client.get('/api/moments/feed?limit=0')
