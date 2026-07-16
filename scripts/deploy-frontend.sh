@@ -26,6 +26,8 @@ command -v curl >/dev/null || fail "curl is missing"
 [[ -x "$PYTHON" ]] || fail "python runtime not found: $PYTHON"
 "$PYTHON" -c 'from cryptography.fernet import Fernet' \
   || fail "python cryptography package is missing"
+"$PYTHON" -c 'from PIL import Image' \
+  || fail "python Pillow package is missing (pip install -r requirements.txt)"
 
 exec 9>"$LOCK_FILE"
 flock -n 9 || fail "another deployment is already running"

@@ -764,20 +764,22 @@ def get_chat_collection(collection_id: int, *, memories_db_path: str) -> dict[st
 
 
 def delete_chat_collection(collection_id: int, *, memories_db_path: str) -> bool:
+    item_key = f'chat-collection:{int(collection_id)}'
     conn = _conn(memories_db_path)
     try:
+        conn.execute('BEGIN IMMEDIATE')
         cur = conn.execute(
             'DELETE FROM moment_chat_collections WHERE id=?',
             (int(collection_id),),
         )
-        conn.commit()
         deleted = cur.rowcount > 0
+        if deleted:
+            conn.execute('DELETE FROM moment_reactions WHERE item_key=?', (item_key,))
+            conn.execute('DELETE FROM moment_comments WHERE item_key=?', (item_key,))
+        conn.commit()
+        return deleted
+    except Exception:
+        conn.rollback()
+        raise
     finally:
         conn.close()
-    if deleted:
-        from moments_social import delete_social_for_item
-        delete_social_for_item(
-            f'chat-collection:{int(collection_id)}',
-            memories_db_path=memories_db_path,
-        )
-    return deleted

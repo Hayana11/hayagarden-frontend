@@ -2812,8 +2812,6 @@ def moments_cover_upload():
         data = moments_cover.encode_cover_image(raw)
     except ValueError as exc:
         return jsonify({'ok': False, 'error': str(exc)}), 400
-    except RuntimeError as exc:
-        return jsonify({'ok': False, 'error': str(exc)}), 500
     os.makedirs(UPLOAD_DIR, exist_ok=True)
     ext = moments_cover.output_extension()
     fname = f'moments_cover_{uuid.uuid4().hex[:10]}{ext}'

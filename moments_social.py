@@ -59,6 +59,74 @@ def _validate_item_key(item_key: str) -> str:
     return key
 
 
+def _thought_exists_on_conn(conn: sqlite3.Connection, thought_id: int) -> bool:
+    table = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='posts'"
+    ).fetchone()
+    if not table:
+        return False
+    row = conn.execute(
+        "SELECT 1 FROM posts WHERE id=? AND type='THOUGHT'",
+        (int(thought_id),),
+    ).fetchone()
+    return row is not None
+
+
+def _chat_collection_exists_on_conn(conn: sqlite3.Connection, collection_id: int) -> bool:
+    row = conn.execute(
+        'SELECT 1 FROM moment_chat_collections WHERE id=?',
+        (int(collection_id),),
+    ).fetchone()
+    return row is not None
+
+
+def _gallery_exists_on_conn(
+    conn: sqlite3.Connection,
+    pid: str,
+    *,
+    gallery_db_path: str | None,
+) -> bool:
+    if not gallery_db_path:
+        return False
+    conn.execute('ATTACH DATABASE ? AS gallery_db', (gallery_db_path,))
+    row = conn.execute(
+        'SELECT 1 FROM gallery_db.gallery_photos WHERE pid=?',
+        (pid,),
+    ).fetchone()
+    return row is not None
+
+
+def _detach_gallery_db(conn: sqlite3.Connection) -> None:
+    try:
+        conn.execute('DETACH DATABASE gallery_db')
+    except sqlite3.OperationalError:
+        pass
+
+
+def _assert_item_exists_on_conn(
+    conn: sqlite3.Connection,
+    item_key: str,
+    *,
+    gallery_db_path: str | None = None,
+) -> str:
+    key = _validate_item_key(item_key)
+    kind, ref = parse_item_key(key)
+    if kind == 'thought':
+        if not _thought_exists_on_conn(conn, int(ref)):
+            raise LookupError('item not found')
+        return key
+    if kind == 'chat-collection':
+        if not _chat_collection_exists_on_conn(conn, int(ref)):
+            raise LookupError('item not found')
+        return key
+    if kind == 'gallery':
+        if not _gallery_exists_on_conn(conn, ref, gallery_db_path=gallery_db_path):
+            _detach_gallery_db(conn)
+            raise LookupError('item not found')
+        return key
+    raise LookupError('item not found')
+
+
 def item_exists(
     item_key: str,
     *,
@@ -230,11 +298,7 @@ def toggle_reaction(
     gallery_db_path: str | None = None,
     reactor: str = _DEFAULT_REACTOR,
 ) -> dict[str, Any]:
-    key = require_item_exists(
-        item_key,
-        memories_db_path=memories_db_path,
-        gallery_db_path=gallery_db_path,
-    )
+    key = _validate_item_key(item_key)
     kind = (reaction or '').strip().lower()
     if kind not in {'like', 'dislike'}:
         raise ValueError('reaction must be like or dislike')
@@ -243,6 +307,7 @@ def toggle_reaction(
     conn = _conn(memories_db_path)
     try:
         conn.execute('BEGIN IMMEDIATE')
+        _assert_item_exists_on_conn(conn, key, gallery_db_path=gallery_db_path)
         current = conn.execute(
             'SELECT reaction FROM moment_reactions WHERE item_key=? AND reactor=?',
             (key, actor),
@@ -266,6 +331,7 @@ def toggle_reaction(
         conn.rollback()
         raise
     finally:
+        _detach_gallery_db(conn)
         conn.close()
     return get_item_social(key, memories_db_path=memories_db_path, reactor=actor)
 
@@ -312,11 +378,7 @@ def add_comment(
     gallery_db_path: str | None = None,
     author: str = _DEFAULT_REACTOR,
 ) -> dict[str, Any]:
-    key = require_item_exists(
-        item_key,
-        memories_db_path=memories_db_path,
-        gallery_db_path=gallery_db_path,
-    )
+    key = _validate_item_key(item_key)
     text = (content or '').strip()
     if not text:
         raise ValueError('content required')
@@ -326,17 +388,23 @@ def add_comment(
 
     conn = _conn(memories_db_path)
     try:
+        conn.execute('BEGIN IMMEDIATE')
+        _assert_item_exists_on_conn(conn, key, gallery_db_path=gallery_db_path)
         cur = conn.execute(
             'INSERT INTO moment_comments (item_key, author, content, created_at) VALUES (?, ?, ?, ?)',
             (key, actor, text, _now_str()),
         )
-        conn.commit()
         comment_id = int(cur.lastrowid)
         row = conn.execute(
             'SELECT id, author, content, created_at FROM moment_comments WHERE id=?',
             (comment_id,),
         ).fetchone()
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
     finally:
+        _detach_gallery_db(conn)
         conn.close()
     if not row:
         raise RuntimeError('comment insert failed')

@@ -186,6 +186,10 @@ class ContextContinuityTests(unittest.TestCase):
         self.assertIn("snapshot_runtime", deploy_source)
         self.assertIn("restore_runtime", deploy_source)
         self.assertIn("':(exclude)attachments.db'", deploy_source)
+        self.assertIn("from PIL import Image", deploy_source)
+        self.assertIn("requirements.txt", open(
+            os.path.join(ROOT, "requirements.txt"), encoding="utf-8"
+        ).read())
 
 
 if __name__ == "__main__":

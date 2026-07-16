@@ -5,7 +5,11 @@ from __future__ import annotations
 import io
 from typing import BinaryIO
 
+from PIL import Image
+
 MAX_BYTES = 8 * 1024 * 1024
+MAX_PIXELS = 20_000_000
+MAX_DIMENSION = 8192
 _OUTPUT_EXT = '.jpg'
 
 
@@ -27,17 +31,23 @@ def read_bounded(stream: BinaryIO, max_bytes: int = MAX_BYTES) -> bytes:
     return data
 
 
+def _validate_image_dimensions(width: int, height: int) -> None:
+    if width <= 0 or height <= 0:
+        raise ValueError('invalid image dimensions')
+    if width > MAX_DIMENSION or height > MAX_DIMENSION:
+        raise ValueError('image dimensions too large')
+    if width * height > MAX_PIXELS:
+        raise ValueError('image resolution too large')
+
+
 def encode_cover_image(data: bytes) -> bytes:
     try:
-        from PIL import Image
-    except ImportError as exc:
-        raise RuntimeError('Pillow is required for cover upload') from exc
-
-    try:
         with Image.open(io.BytesIO(data)) as img:
+            _validate_image_dimensions(*img.size)
             img.load()
             if getattr(img, 'is_animated', False):
                 img.seek(0)
+                _validate_image_dimensions(*img.size)
             if img.mode in ('RGBA', 'LA'):
                 background = Image.new('RGB', img.size, (255, 255, 255))
                 background.paste(img, mask=img.split()[-1])
@@ -54,6 +64,8 @@ def encode_cover_image(data: bytes) -> bytes:
             buf = io.BytesIO()
             rgb.save(buf, format='JPEG', quality=88, optimize=True)
             encoded = buf.getvalue()
+    except ValueError:
+        raise
     except Exception as exc:
         raise ValueError('invalid image') from exc
 

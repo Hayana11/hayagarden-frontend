@@ -5,6 +5,8 @@ import tempfile
 import threading
 import unittest
 
+from PIL import Image
+
 import moments_cover
 import moments_social
 import moments_store
@@ -221,6 +223,79 @@ class MomentsSocialTests(unittest.TestCase):
         self.assertEqual(social['likes'], 0)
         self.assertEqual(social['comments'], 0)
 
+    def _reaction_count(self, item_key: str) -> int:
+        conn = sqlite3.connect(self.db_path)
+        try:
+            return int(conn.execute(
+                'SELECT COUNT(*) FROM moment_reactions WHERE item_key=?',
+                (item_key,),
+            ).fetchone()[0])
+        finally:
+            conn.close()
+
+    def test_delete_race_does_not_leave_orphan_reactions(self):
+        conn = sqlite3.connect(self.db_path)
+        conn.execute(
+            "CREATE TABLE chat_messages ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "session_id INTEGER NOT NULL DEFAULT 1, "
+            "author TEXT NOT NULL, "
+            "content TEXT, "
+            "created_at TEXT, "
+            "image_url TEXT, "
+            "file_url TEXT, "
+            "file_name TEXT"
+            ")"
+        )
+        conn.commit()
+        conn.close()
+
+        for round_idx in range(30):
+            conn = sqlite3.connect(self.db_path)
+            conn.execute(
+                "INSERT INTO chat_messages (author, content) VALUES ('hayana', ?)",
+                (f'A-{round_idx}',),
+            )
+            user_id = conn.execute('SELECT last_insert_rowid()').fetchone()[0]
+            conn.execute(
+                "INSERT INTO chat_messages (author, content) VALUES ('fyodor', ?)",
+                (f'B-{round_idx}',),
+            )
+            assistant_id = conn.execute('SELECT last_insert_rowid()').fetchone()[0]
+            conn.commit()
+            conn.close()
+
+            collection_id = moments_store.finalize_pending_chat_collection(
+                memories_db_path=self.db_path,
+                user_message_id=user_id,
+                assistant_message_id=assistant_id,
+                previous_turns=0,
+                caption=f'收藏 {round_idx}',
+            )
+            key = f'chat-collection:{collection_id}'
+            barrier = threading.Barrier(2)
+
+            def delete_worker(cid=collection_id):
+                barrier.wait()
+                moments_store.delete_chat_collection(cid, memories_db_path=self.db_path)
+
+            def react_worker(item_key=key):
+                barrier.wait()
+                try:
+                    moments_social.toggle_reaction(item_key, 'like', memories_db_path=self.db_path)
+                except LookupError:
+                    pass
+
+            threads = [
+                threading.Thread(target=delete_worker),
+                threading.Thread(target=react_worker),
+            ]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+            self.assertEqual(self._reaction_count(key), 0)
+
 
 class MomentsCoverTests(unittest.TestCase):
     def test_rejects_non_image_bytes(self):
@@ -233,14 +308,16 @@ class MomentsCoverTests(unittest.TestCase):
             moments_cover.read_bounded(stream)
 
     def test_encodes_valid_png(self):
-        try:
-            from PIL import Image
-        except ImportError:
-            self.skipTest('Pillow not installed')
         buf = io.BytesIO()
         Image.new('RGB', (8, 8), color=(120, 80, 60)).save(buf, format='PNG')
         encoded = moments_cover.encode_cover_image(buf.getvalue())
         self.assertTrue(encoded.startswith(b'\xff\xd8'))
+
+    def test_rejects_decompression_bomb_dimensions(self):
+        buf = io.BytesIO()
+        Image.new('RGB', (5000, 5000), color=(10, 20, 30)).save(buf, format='PNG', optimize=True)
+        with self.assertRaises(ValueError):
+            moments_cover.encode_cover_image(buf.getvalue())
 
 
 if __name__ == '__main__':

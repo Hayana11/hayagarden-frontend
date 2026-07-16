@@ -1,0 +1,4 @@
+# Python runtime dependencies for app.py / gateway.py on the VPS.
+# Install: python3 -m pip install -r requirements.txt
+Pillow>=10.4.0,<13
+cryptography>=42.0.0
