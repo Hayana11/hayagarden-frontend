@@ -152,6 +152,7 @@ def _db_created_at(value: str | None) -> str | None:
     return dt.strftime('%Y-%m-%d %H:%M:%S')
 
 
+
 def _fetch_thought_rows(
     conn: sqlite3.Connection,
     *,
@@ -177,12 +178,15 @@ def _fetch_thought_rows(
         cursor_db_time = _db_created_at(cursor_published_at)
         if cursor_db_time:
             where.append(
-                '(created_at < ? OR (created_at = ? AND id < ?) OR created_at IS NULL OR created_at = ?)'
+                '(datetime(created_at) < datetime(?) '
+                'OR (created_at = ? AND id < ?) '
+                'OR created_at IS NULL OR created_at = ?)'
             )
             params.extend([cursor_db_time, cursor_db_time, cursor_id, ''])
         else:
-            where.append('(id < ? OR created_at IS NULL OR created_at = ?)')
-            params.extend([cursor_id, ''])
+            # Cursor is on a null/empty-date row: only continue within that tier.
+            where.append('((created_at IS NULL OR created_at = ?) AND id < ?)')
+            params.extend(['', cursor_id])
 
     sql = (
         f"SELECT {', '.join(cols)} FROM posts WHERE {' AND '.join(where)} "

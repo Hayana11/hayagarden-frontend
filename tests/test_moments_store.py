@@ -32,11 +32,18 @@ class MomentsStoreTests(unittest.TestCase):
 
     def _insert_thought(self, content, created_at, *, processed=1, tags=''):
         conn = sqlite3.connect(self.db_path)
-        conn.execute(
-            "INSERT INTO posts (type, content, author, created_at, processed, tags) "
-            "VALUES ('THOUGHT', ?, 'fyodor', ?, ?, ?)",
-            (content, created_at, processed, tags),
-        )
+        if created_at is None:
+            conn.execute(
+                "INSERT INTO posts (type, content, author, processed, tags) "
+                "VALUES ('THOUGHT', ?, 'fyodor', ?, ?)",
+                (content, processed, tags),
+            )
+        else:
+            conn.execute(
+                "INSERT INTO posts (type, content, author, created_at, processed, tags) "
+                "VALUES ('THOUGHT', ?, 'fyodor', ?, ?, ?)",
+                (content, created_at, processed, tags),
+            )
         conn.commit()
         conn.close()
 
@@ -89,6 +96,49 @@ class MomentsStoreTests(unittest.TestCase):
         self.assertAlmostEqual(normalize_valence(0.5), 0.0)
         self.assertAlmostEqual(normalize_valence(0.8), 0.6)
         self.assertAlmostEqual(normalize_valence(0.2, scale='bipolar'), 0.2)
+
+    def test_null_created_at_pagination_does_not_repeat(self):
+        for index in range(8):
+            self._insert_thought(f'空时间 {index}', None)
+
+        first = moments_store.get_feed(memories_db_path=self.db_path, limit=3)
+        self.assertEqual([item['item_key'] for item in first['items']], [
+            'thought:8', 'thought:7', 'thought:6',
+        ])
+        self.assertIsNone(first['items'][0]['created_at'])
+        self.assertTrue(first['has_more'])
+
+        second = moments_store.get_feed(
+            memories_db_path=self.db_path,
+            limit=3,
+            cursor=first['next_cursor'],
+        )
+        self.assertEqual([item['item_key'] for item in second['items']], [
+            'thought:5', 'thought:4', 'thought:3',
+        ])
+        self.assertTrue(second['has_more'])
+
+        third = moments_store.get_feed(
+            memories_db_path=self.db_path,
+            limit=3,
+            cursor=second['next_cursor'],
+        )
+        self.assertEqual([item['item_key'] for item in third['items']], ['thought:2', 'thought:1'])
+        self.assertFalse(third['has_more'])
+
+    def test_empty_string_created_at_pagination_does_not_repeat(self):
+        for index in range(4):
+            self._insert_thought(f'空字符串 {index}', '')
+
+        first = moments_store.get_feed(memories_db_path=self.db_path, limit=2)
+        second = moments_store.get_feed(
+            memories_db_path=self.db_path,
+            limit=2,
+            cursor=first['next_cursor'],
+        )
+        self.assertEqual([item['item_key'] for item in first['items']], ['thought:4', 'thought:3'])
+        self.assertEqual([item['item_key'] for item in second['items']], ['thought:2', 'thought:1'])
+        self.assertFalse(second['has_more'])
 
 
 if __name__ == '__main__':
