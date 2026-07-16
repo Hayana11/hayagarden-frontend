@@ -32,7 +32,7 @@ class EmotionMemoriesTests(unittest.TestCase):
         self.assertEqual(items[0]['path'], self.path)
         self.assertAlmostEqual(items[0]['valence'], -0.6, places=2)
 
-    def test_update_memory_point_writes_bipolar(self):
+    def test_update_memory_point_keeps_ombre_storage_unipolar(self):
         dumps_calls = []
 
         class FakeFM:
@@ -50,9 +50,10 @@ class EmotionMemoriesTests(unittest.TestCase):
 
         with mock.patch.object(emotion_memories, 'BUCKET_DIR', self.bucket):
             with mock.patch.dict('sys.modules', {'frontmatter': FakeFM}):
-                updated = emotion_memories.update_memory_point(self.path, 0.25, 0.55)
-        self.assertEqual(updated['valence'], 0.25)
-        self.assertEqual(dumps_calls[0]['valence_scale'], 'bipolar')
+                updated = emotion_memories.update_memory_point(self.path, -0.6, 0.55)
+        self.assertEqual(updated['valence'], -0.6)
+        self.assertAlmostEqual(dumps_calls[0]['valence'], 0.2, places=3)
+        self.assertEqual(dumps_calls[0]['valence_scale'], 'unipolar')
 
     def test_update_rejects_path_outside_bucket(self):
         with mock.patch.object(emotion_memories, 'BUCKET_DIR', self.bucket):

@@ -82,12 +82,15 @@ def update_memory_point(path: str, valence: float, arousal: float) -> dict:
 
     safe_path = _safe_bucket_path(path)
     bipolar_v = max(-1.0, min(1.0, float(valence)))
+    # ombre-brain still consumes bucket valence as unipolar [0, 1]. Keep its
+    # on-disk contract stable while exposing bipolar values through this API.
+    stored_v = (bipolar_v + 1.0) / 2.0
     arousal_v = max(0.0, min(1.0, float(arousal)))
 
     post = fm.load(safe_path)
-    post.metadata['valence'] = round(bipolar_v, 3)
+    post.metadata['valence'] = round(stored_v, 3)
     post.metadata['arousal'] = round(arousal_v, 3)
-    post.metadata['valence_scale'] = 'bipolar'
+    post.metadata['valence_scale'] = 'unipolar'
     with open(safe_path, 'w', encoding='utf-8') as handle:
         handle.write(fm.dumps(post))
 
