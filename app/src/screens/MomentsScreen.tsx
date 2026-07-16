@@ -9,7 +9,7 @@
 // a toast on click, rather than either faking success or hiding the UI.
 import { useCallback, useEffect, useMemo, useState, type CSSProperties } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { fetchMomentsData, galleryPhotoUrl, moodWordTone, type EmotionMemoryPoint, type FeedEntry, type GalleryPhoto, type MomentsData, type MoodState } from '../lib/moments';
+import { fetchMomentsData, fetchMomentsFeed, galleryPhotoUrl, moodWordTone, type DreamEntry, type EmotionMemoryPoint, type FeedEntry, type GalleryPhoto, type MomentsData, type MoodState } from '../lib/moments';
 
 const SETTINGS_KEY = 'fyodor-chat-settings';
 const SERIF = "'Noto Serif SC', serif";
@@ -149,43 +149,43 @@ function loadTheme(): 'light' | 'dark' | 'auto' {
   }
 }
 
-function KindTag({ kind }: { kind: FeedEntry['kind'] }) {
-  const label = kind === 'thought' ? '念头' : kind === 'diary' ? '日摘要' : '梦境';
-  const color = kind === 'dream' ? 'var(--dream)' : 'var(--rose)';
-  const bg = kind === 'dream' ? 'var(--dreambg)' : 'var(--rosebg)';
+function KindTag({ entry }: { entry: FeedEntry }) {
+  const label = entry.brewing ? '酝酿中' : entry.tags[0] || '念头';
+  const color = 'var(--rose)';
+  const bg = 'var(--rosebg)';
   return <span style={{ fontSize: 10.5, padding: '3px 10px', borderRadius: 999, background: bg, color, letterSpacing: 1 }}>{label}</span>;
 }
 
-function feedDateKey(entry: FeedEntry): string {
-  return entry.sortKey.slice(0, 10);
-}
-
-function DateRail({ sortKey, visible }: { sortKey: string; visible: boolean }) {
+function DateRail({ dateLabel, visible }: { dateLabel: string; visible: boolean }) {
   if (!visible) return <div style={{ width: 54, flexShrink: 0 }} />;
 
-  const [year, month, day] = sortKey.slice(0, 10).split('-').map(Number);
-  const date = new Date(year, month - 1, day);
-  const today = new Date();
-  today.setHours(12, 0, 0, 0);
-  const yesterday = new Date(today);
-  yesterday.setDate(yesterday.getDate() - 1);
-
-  const sameDay = (a: Date, b: Date) =>
-    a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
+  if (!dateLabel) {
+    return (
+      <div style={{ width: 54, flexShrink: 0, display: 'flex', flexDirection: 'column', alignItems: 'flex-start', paddingTop: 1 }}>
+        <span style={{ fontFamily: DISPLAY, fontSize: 20, fontWeight: 600, lineHeight: 1, color: 'var(--ghost)', letterSpacing: 0.5 }}>—</span>
+      </div>
+    );
+  }
 
   let primary: string;
   let secondary: string | null = null;
   let primarySize = 34;
 
-  if (sameDay(date, today)) {
+  if (dateLabel === '今天') {
     primary = '今天';
     primarySize = 24;
-  } else if (sameDay(date, yesterday)) {
+  } else if (dateLabel === '昨天') {
     primary = '昨天';
     primarySize = 22;
   } else {
-    primary = String(day);
-    secondary = `${month}月`;
+    const match = dateLabel.match(/^(\d+)月(\d+)日$/);
+    if (match) {
+      primary = match[2];
+      secondary = `${match[1]}月`;
+    } else {
+      primary = dateLabel;
+      primarySize = 24;
+    }
   }
 
   return (
@@ -202,7 +202,7 @@ function DateRail({ sortKey, visible }: { sortKey: string; visible: boolean }) {
   );
 }
 
-function EmptyState({ title, hint }: { title: string; hint: string }) {
+function EmptyState({ title, hint, onRetry }: { title: string; hint: string; onRetry?: () => void }) {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8, padding: '54px 24px', textAlign: 'center' }}>
       <div style={{ width: 62, height: 62, borderRadius: '50%', background: 'var(--card2)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
@@ -214,6 +214,9 @@ function EmptyState({ title, hint }: { title: string; hint: string }) {
       </div>
       <span style={{ fontSize: 14, color: 'var(--ink2)', letterSpacing: 1 }}>{title}</span>
       {hint && <span style={{ fontSize: 12, color: 'var(--faint)', lineHeight: 1.8, maxWidth: 260 }}>{hint}</span>}
+      {onRetry && (
+        <div onClick={onRetry} style={{ cursor: 'pointer', marginTop: 8, padding: '10px 26px', borderRadius: 999, background: 'var(--deep)', color: '#FBF3F0', fontSize: 13, letterSpacing: 2, boxShadow: '0 8px 20px var(--shadow2)' }}>重试</div>
+      )}
     </div>
   );
 }
@@ -255,8 +258,14 @@ export function MomentsScreen() {
   const [tab, setTab] = useState<Tab>('home');
   const [phase, setPhase] = useState<'loading' | 'ready' | 'failed'>('loading');
   const [data, setData] = useState<MomentsData | null>(null);
+  const [feedItems, setFeedItems] = useState<FeedEntry[]>([]);
+  const [feedCursor, setFeedCursor] = useState<string | null>(null);
+  const [feedHasMore, setFeedHasMore] = useState(false);
+  const [feedLoadingMore, setFeedLoadingMore] = useState(false);
+  const [feedFailed, setFeedFailed] = useState(false);
+  const [feedReloading, setFeedReloading] = useState(false);
   const [lightbox, setLightbox] = useState<GalleryPhoto | null>(null);
-  const [dreamOpen, setDreamOpen] = useState<FeedEntry | null>(null);
+  const [dreamOpen, setDreamOpen] = useState<DreamEntry | null>(null);
   const [hoveredDream, setHoveredDream] = useState<number | null>(null);
   const [moodSel, setMoodSel] = useState<EmotionMemoryPoint | null>(null);
   const [moodRange, setMoodRange] = useState<'7' | '30'>('7');
@@ -291,11 +300,77 @@ export function MomentsScreen() {
 
   const load = useCallback(async () => {
     setPhase('loading');
-    const result = await fetchMomentsData();
-    setData(result);
-    const totallyEmpty = result.feed.length === 0 && result.gallery.length === 0 && !result.mood && result.drawers.length === 0;
-    setPhase(totallyEmpty && result.failedSources.length > 0 ? 'failed' : 'ready');
+    setFeedFailed(false);
+    const [auxResult, feedResult] = await Promise.allSettled([
+      fetchMomentsData(),
+      fetchMomentsFeed(),
+    ]);
+
+    if (auxResult.status === 'fulfilled') {
+      setData(auxResult.value);
+    } else {
+      setData(null);
+    }
+
+    if (feedResult.status === 'fulfilled') {
+      setFeedItems(feedResult.value.items);
+      setFeedCursor(feedResult.value.nextCursor);
+      setFeedHasMore(feedResult.value.hasMore);
+      setFeedFailed(false);
+    } else {
+      setFeedItems([]);
+      setFeedCursor(null);
+      setFeedHasMore(false);
+      setFeedFailed(true);
+    }
+
+    const aux = auxResult.status === 'fulfilled' ? auxResult.value : null;
+    const feedOk = feedResult.status === 'fulfilled';
+    const totallyEmpty = !feedOk
+      && (!aux || (aux.dreams.length === 0 && aux.gallery.length === 0 && !aux.mood && aux.drawers.length === 0));
+    setPhase(totallyEmpty ? 'failed' : 'ready');
   }, []);
+
+  const reloadFeed = useCallback(async () => {
+    setFeedReloading(true);
+    setFeedFailed(false);
+    try {
+      const page = await fetchMomentsFeed();
+      setFeedItems(page.items);
+      setFeedCursor(page.nextCursor);
+      setFeedHasMore(page.hasMore);
+    } catch {
+      setFeedItems([]);
+      setFeedCursor(null);
+      setFeedHasMore(false);
+      setFeedFailed(true);
+    } finally {
+      setFeedReloading(false);
+    }
+  }, []);
+
+  const loadMore = useCallback(async () => {
+    if (!feedHasMore || feedLoadingMore || !feedCursor) return;
+    setFeedLoadingMore(true);
+    try {
+      const page = await fetchMomentsFeed(feedCursor);
+      setFeedItems((current) => {
+        const seen = new Set(current.map((item) => item.itemKey));
+        const merged = [...current];
+        for (const item of page.items) {
+          if (!seen.has(item.itemKey)) merged.push(item);
+        }
+        return merged;
+      });
+      setFeedCursor(page.nextCursor);
+      setFeedHasMore(page.hasMore);
+    } catch {
+      setToast('加载更多失败了，稍后再试。');
+      window.setTimeout(() => setToast(''), 2200);
+    } finally {
+      setFeedLoadingMore(false);
+    }
+  }, [feedCursor, feedHasMore, feedLoadingMore]);
 
   useEffect(() => {
     void load();
@@ -308,8 +383,8 @@ export function MomentsScreen() {
     setMoodSel(null);
   };
 
-  const dreams = useMemo(() => (data?.feed || []).filter((f) => f.kind === 'dream'), [data]);
-  const postsFeed = useMemo(() => (data?.feed || []).filter((f) => f.kind !== 'dream'), [data]);
+  const dreams = useMemo(() => data?.dreams || [], [data]);
+  const postsFeed = useMemo(() => feedItems, [feedItems]);
 
   const moodColor = data?.mood
     ? moodWordTone(data.mood.valence) === 'up' ? 'var(--rose)' : moodWordTone(data.mood.valence) === 'down' ? 'var(--err)' : 'var(--gold)'
@@ -393,9 +468,9 @@ export function MomentsScreen() {
             </div>
           )}
 
-          {phase === 'ready' && data && (
+          {phase === 'ready' && (
             <>
-              {data.failedSources.length > 0 && (
+              {data && data.failedSources.length > 0 && (
                 <div style={{ marginBottom: 14, padding: '10px 13px', borderRadius: 14, background: 'rgba(217,164,65,.11)', color: '#9a742e', fontSize: 11, lineHeight: 1.6 }}>
                   部分实时数据暂时不可用（{data.failedSources.join('、')}），已显示成功读取的部分。
                 </div>
@@ -404,13 +479,28 @@ export function MomentsScreen() {
               {/* ── 主页：混合时间线 ── */}
               {tab === 'home' && (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 22 }}>
-                  {data.feed.length === 0 && <EmptyState title="这里还没有念头" hint="费佳想到什么、做了什么梦、写了什么日摘要，都会自己出现在这里。" />}
-                  {data.feed.map((f, i) => (
-                    <div key={i} style={{ display: 'flex', gap: 12 }}>
-                      <DateRail sortKey={f.sortKey} visible={i === 0 || feedDateKey(f) !== feedDateKey(data.feed[i - 1])} />
+                  {feedFailed && feedItems.length === 0 && (
+                    <EmptyState
+                      title="时间线暂时读不到"
+                      hint="后端没有应答。可以只重试念头流，其他内容不受影响。"
+                      onRetry={feedReloading ? undefined : () => void reloadFeed()}
+                    />
+                  )}
+                  {feedReloading && feedItems.length === 0 && (
+                    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 10, padding: '24px 20px' }}>
+                      <span style={{ width: 22, height: 22, borderRadius: '50%', border: '2.5px solid var(--rosebg)', borderTopColor: 'var(--rose)', animation: 'chatSpin .8s linear infinite' }} />
+                      <span style={{ fontSize: 12, color: 'var(--faint)', letterSpacing: 2 }}>正在重新打捞念头…</span>
+                    </div>
+                  )}
+                  {!feedFailed && !feedReloading && feedItems.length === 0 && (
+                    <EmptyState title="这里还没有念头" hint="费佳想到什么，会自己出现在这里。" />
+                  )}
+                  {feedItems.map((f, i) => (
+                    <div key={f.itemKey} style={{ display: 'flex', gap: 12 }}>
+                      <DateRail dateLabel={f.dateLabel} visible={i === 0 || f.dateLabel !== feedItems[i - 1].dateLabel} />
                       <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 8 }}>
                         <span style={{ fontSize: 13.5, lineHeight: 1.9, color: 'var(--ink)', overflowWrap: 'break-word', wordBreak: 'break-word' }}>{f.content}</span>
-                        <div><KindTag kind={f.kind} /></div>
+                        <div><KindTag entry={f} /></div>
                         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
                           <LockedSocialRow onLocked={showLocked} dense />
                           {f.timeLabel ? (
@@ -422,7 +512,15 @@ export function MomentsScreen() {
                       </div>
                     </div>
                   ))}
-                  {data.feed.length > 0 && (
+                  {feedItems.length > 0 && feedHasMore && (
+                    <div
+                      onClick={() => void loadMore()}
+                      style={{ textAlign: 'center', padding: '10px 0 4px', fontFamily: DISPLAY, fontSize: 12, letterSpacing: 2, color: feedLoadingMore ? 'var(--ghost)' : 'var(--rose)', cursor: feedLoadingMore ? 'default' : 'pointer' }}
+                    >
+                      {feedLoadingMore ? '正在继续打捞…' : '加载更多'}
+                    </div>
+                  )}
+                  {feedItems.length > 0 && !feedHasMore && (
                     <div style={{ textAlign: 'center', padding: '18px 0 4px', fontFamily: DISPLAY, fontStyle: 'italic', fontSize: 11.5, letterSpacing: 2, color: 'var(--ghost)' }}>
                       — 流到这里就停了 —
                     </div>
@@ -433,15 +531,24 @@ export function MomentsScreen() {
               {/* ── 说说 ── */}
               {tab === 'posts' && (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-                  {postsFeed.length === 0 && <EmptyState title="还没有说说" hint="念头和日摘要写好之后会显示在这里。" />}
-                  {postsFeed.map((f, i) => (
-                    <div key={i} style={{ background: 'var(--card)', borderRadius: 18, boxShadow: '0 8px 20px var(--shadow)', padding: '15px 16px', display: 'flex', flexDirection: 'column', gap: 11 }}>
+                  {feedFailed && postsFeed.length === 0 && (
+                    <EmptyState
+                      title="说说暂时读不到"
+                      hint="可以只重试念头流。"
+                      onRetry={feedReloading ? undefined : () => void reloadFeed()}
+                    />
+                  )}
+                  {!feedFailed && postsFeed.length === 0 && <EmptyState title="还没有说说" hint="念头写好之后会显示在这里。" />}
+                  {postsFeed.map((f) => (
+                    <div key={f.itemKey} style={{ background: 'var(--card)', borderRadius: 18, boxShadow: '0 8px 20px var(--shadow)', padding: '15px 16px', display: 'flex', flexDirection: 'column', gap: 11 }}>
                       <div style={{ display: 'flex', alignItems: 'baseline', gap: 10 }}>
                         <span style={{ fontSize: 15, fontWeight: 700, color: 'var(--deep)', letterSpacing: 1 }}>Fyodor</span>
-                        <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--ink2)' }}>{f.dateLabel || '今天'}</span>
+                        {f.dateLabel ? (
+                          <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--ink2)' }}>{f.dateLabel}</span>
+                        ) : null}
                       </div>
                       <span style={{ fontSize: 14.5, lineHeight: 1.9, color: 'var(--ink)', overflowWrap: 'break-word', wordBreak: 'break-word' }}>{f.content}</span>
-                      <div><KindTag kind={f.kind} /></div>
+                      <div><KindTag entry={f} /></div>
                       <div style={{ borderTop: '1px solid var(--line)', paddingTop: 10, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
                         <LockedSocialRow onLocked={showLocked} />
                         {f.timeLabel ? (
@@ -460,11 +567,11 @@ export function MomentsScreen() {
 
               {/* ── 相册 ── */}
               {tab === 'album' && (
-                data.gallery.length === 0 ? (
+                (data?.gallery || []).length === 0 ? (
                   <EmptyState title="还没有存进相册的照片" hint="费佳觉得画面值得留下时，会把它们收进这里。" />
                 ) : (
                   <div style={{ columns: 2, columnGap: 10 }}>
-                    {data.gallery.map((g) => (
+                    {(data?.gallery || []).map((g) => (
                       <div key={g.pid} onClick={() => setLightbox(g)} style={{ cursor: 'zoom-in', breakInside: 'avoid', marginBottom: 10, borderRadius: 16, overflow: 'hidden', background: 'var(--card)', boxShadow: '0 8px 20px var(--shadow)' }}>
                         <img src={galleryPhotoUrl(g.pid)} alt={g.note} style={{ width: '100%', display: 'block', objectFit: 'cover' }} loading="lazy" />
                         <div style={{ padding: '9px 12px', display: 'flex', alignItems: 'center', gap: 6 }}>
@@ -488,9 +595,9 @@ export function MomentsScreen() {
                   {dreams.length > 0 && (
                     <div style={{ fontSize: 10.5, color: 'var(--ghost)', padding: '0 4px', lineHeight: 1.6 }}>回溯与 V/A 读数还没做——等梦境生成时能标情绪了再补。</div>
                   )}
-                  {dreams.map((d, i) => {
+                  {dreams.map((d) => {
                     const scene = classifyDreamScene(d.title || '', d.content);
-                    const glowing = hoveredDream === i;
+                    const glowing = hoveredDream === d.id;
                     const baseOp = glowing ? 0.68 : 0.06;
                     const glowOp = glowing ? 0.5 : 0;
                     const titleC = glowing ? '#EFDFC8' : 'var(--dream)';
@@ -500,12 +607,12 @@ export function MomentsScreen() {
                     const chipC = glowing ? 'rgba(245,235,225,0.9)' : 'var(--dream)';
                     return (
                       <div
-                        key={i}
+                        key={d.id}
                         onClick={() => setDreamOpen(d)}
-                        onMouseEnter={() => setHoveredDream(i)}
-                        onMouseLeave={() => setHoveredDream((cur) => (cur === i ? null : cur))}
-                        onTouchStart={() => setHoveredDream(i)}
-                        onTouchEnd={() => setHoveredDream((cur) => (cur === i ? null : cur))}
+                        onMouseEnter={() => setHoveredDream(d.id)}
+                        onMouseLeave={() => setHoveredDream((cur) => (cur === d.id ? null : cur))}
+                        onTouchStart={() => setHoveredDream(d.id)}
+                        onTouchEnd={() => setHoveredDream((cur) => (cur === d.id ? null : cur))}
                         style={{ position: 'relative', cursor: 'pointer', overflow: 'hidden', background: 'var(--card)', borderRadius: 18, boxShadow: '0 8px 22px var(--shadow)' }}
                       >
                         <div style={{ position: 'absolute', inset: 0, background: scene.base, opacity: baseOp, transition: 'opacity 1.3s ease', pointerEvents: 'none' }} />
@@ -531,7 +638,7 @@ export function MomentsScreen() {
               {tab === 'mood' && (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
                   <div style={{ background: 'var(--card)', borderRadius: 20, padding: 18, boxShadow: '0 6px 16px var(--shadow)', display: 'flex', alignItems: 'center', gap: 18 }}>
-                    {data.mood ? (
+                    {data?.mood ? (
                       <>
                         <div style={{ position: 'relative', width: 74, height: 74, flexShrink: 0 }}>
                           <div style={{ position: 'absolute', inset: 4, borderRadius: '50%', background: `radial-gradient(circle at 32% 28%, rgba(255,242,238,0.92), ${moodColor} 74%)`, boxShadow: 'inset -8px -10px 18px rgba(0,0,0,0.16),inset 6px 8px 16px rgba(255,255,255,0.4)' }} />
@@ -573,7 +680,7 @@ export function MomentsScreen() {
                       <span style={{ fontSize: 14, fontWeight: 600, letterSpacing: 1.5, color: 'var(--ink)' }}>触发过情绪的记忆</span>
                       <span style={{ fontFamily: DISPLAY, fontSize: 10, letterSpacing: 1.5, color: 'var(--ghost)' }}>VALENCE × AROUSAL</span>
                     </div>
-                    {data.emotionMemories.length === 0 ? (
+                    {(data?.emotionMemories || []).length === 0 ? (
                       <div style={{ padding: '20px 4px', fontSize: 12.5, color: 'var(--faint)', lineHeight: 1.8 }}>还没有关联出情绪读数的记忆。</div>
                     ) : (
                       <div style={{ position: 'relative', aspectRatio: '1/1', background: 'var(--card2)', borderRadius: 16, marginTop: 14 }}>
@@ -581,7 +688,7 @@ export function MomentsScreen() {
                         <div style={{ position: 'absolute', top: 0, bottom: 0, left: '50%', width: 1, background: 'var(--line)' }} />
                         <span style={{ position: 'absolute', bottom: 10, left: 12, fontSize: 10.5, color: 'var(--ghost)' }}>← 不愉悦</span>
                         <span style={{ position: 'absolute', bottom: 10, right: 12, fontSize: 10.5, color: 'var(--ghost)' }}>愉悦 →</span>
-                        {data.emotionMemories.map((p, i) => {
+                        {(data?.emotionMemories || []).map((p, i) => {
                           const x = Math.min(96, Math.max(4, ((p.valence + 1) / 2) * 100));
                           const y = Math.min(96, Math.max(4, (1 - p.arousal) * 100));
                           const on = moodSel === p;
@@ -591,7 +698,7 @@ export function MomentsScreen() {
                             </div>
                           );
                         })}
-                        {data.mood && (
+                        {data?.mood && (
                           <div style={{ position: 'absolute', left: `${Math.min(96, Math.max(4, ((data.mood.valence + 1) / 2) * 100))}%`, top: `${Math.min(96, Math.max(4, (1 - data.mood.arousal) * 100))}%`, transform: 'translate(-50%,-50%)', width: 14, height: 14, borderRadius: '50%', background: moodColor, outline: '2px solid var(--card)', boxShadow: '0 0 0 2px var(--rose)' }} />
                         )}
                       </div>
@@ -634,13 +741,13 @@ export function MomentsScreen() {
               {/* ── 工具 ── */}
               {tab === 'tools' && (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-                  <div style={{ padding: '10px 13px', borderRadius: 14, background: data.drawersEnabled ? 'rgba(122,155,109,0.10)' : 'var(--card2)', color: data.drawersEnabled ? 'var(--ok)' : 'var(--faint)', fontSize: 12, letterSpacing: 1 }}>
-                    抽屉模式：{data.drawersEnabled ? '已启用（按上下文关键词只给相关工具）' : '未启用（每轮给全量工具）'}
+                  <div style={{ padding: '10px 13px', borderRadius: 14, background: data?.drawersEnabled ? 'rgba(122,155,109,0.10)' : 'var(--card2)', color: data?.drawersEnabled ? 'var(--ok)' : 'var(--faint)', fontSize: 12, letterSpacing: 1 }}>
+                    抽屉模式：{data?.drawersEnabled ? '已启用（按上下文关键词只给相关工具）' : '未启用（每轮给全量工具）'}
                   </div>
-                  {data.drawers.length === 0 ? (
+                  {(data?.drawers || []).length === 0 ? (
                     <EmptyState title="工具列表暂时读不到" hint="" />
                   ) : (
-                    data.drawers.map((tg) => {
+                    (data?.drawers || []).map((tg) => {
                       const open = Boolean(drawerOpen[tg.id]);
                       return (
                         <div key={tg.id} style={{ background: 'var(--card)', borderRadius: 16, boxShadow: '0 6px 16px var(--shadow)', overflow: 'hidden' }}>
