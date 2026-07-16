@@ -69,7 +69,9 @@ def ensure_schema(memories_db_path: str, gallery_db_path: str | None = None) -> 
             )'''
         )
         from moments_turn import ensure_turn_schema
+        from moments_social import ensure_schema as ensure_social_schema
         ensure_turn_schema(memories_db_path)
+        ensure_social_schema(memories_db_path)
         conn.commit()
     finally:
         conn.close()
@@ -737,6 +739,9 @@ def get_feed(
         last = page[-1]
         next_cursor = encode_cursor(last.get('created_at'), last['item_key'])
 
+    from moments_social import attach_social_to_items
+    page = attach_social_to_items(page, memories_db_path=memories_db_path)
+
     return {
         'items': page,
         'next_cursor': next_cursor,
@@ -759,13 +764,102 @@ def get_chat_collection(collection_id: int, *, memories_db_path: str) -> dict[st
 
 
 def delete_chat_collection(collection_id: int, *, memories_db_path: str) -> bool:
+    item_key = f'chat-collection:{int(collection_id)}'
     conn = _conn(memories_db_path)
     try:
+        conn.execute('BEGIN IMMEDIATE')
         cur = conn.execute(
             'DELETE FROM moment_chat_collections WHERE id=?',
             (int(collection_id),),
         )
+        deleted = cur.rowcount > 0
+        if deleted:
+            conn.execute('DELETE FROM moment_reactions WHERE item_key=?', (item_key,))
+            conn.execute('DELETE FROM moment_comments WHERE item_key=?', (item_key,))
         conn.commit()
-        return cur.rowcount > 0
+        return deleted
+    except Exception:
+        conn.rollback()
+        raise
     finally:
         conn.close()
+
+
+def delete_post(post_id: int, *, memories_db_path: str) -> bool:
+    conn = _conn(memories_db_path)
+    try:
+        conn.execute('BEGIN IMMEDIATE')
+        row = conn.execute(
+            'SELECT type FROM posts WHERE id=?',
+            (int(post_id),),
+        ).fetchone()
+        if not row:
+            conn.rollback()
+            return False
+        post_type = (row['type'] or '').strip()
+        conn.execute('DELETE FROM posts WHERE id=?', (int(post_id),))
+        if post_type == 'THOUGHT':
+            item_key = f'thought:{int(post_id)}'
+            conn.execute('DELETE FROM moment_reactions WHERE item_key=?', (item_key,))
+            conn.execute('DELETE FROM moment_comments WHERE item_key=?', (item_key,))
+        conn.commit()
+        return True
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def delete_thought_post(post_id: int, *, memories_db_path: str) -> bool:
+    """Backward-compatible alias; deletes any post type."""
+    return delete_post(post_id, memories_db_path=memories_db_path)
+
+
+def delete_gallery_item_with_social(
+    pid: str,
+    *,
+    memories_db_path: str,
+    gallery_db_path: str,
+) -> tuple[bool, str | None, int | None]:
+    clean_pid = (pid or '').strip()
+    if not clean_pid:
+        return False, None, None
+    item_key = f'gallery:{clean_pid}'
+    conn = _conn(memories_db_path)
+    storage_key: str | None = None
+    mem_id: int | None = None
+    try:
+        conn.execute('BEGIN IMMEDIATE')
+        conn.execute('ATTACH DATABASE ? AS gallery_db', (gallery_db_path,))
+        row = conn.execute(
+            'SELECT storage_key, mem_id FROM gallery_db.gallery_photos WHERE pid=?',
+            (clean_pid,),
+        ).fetchone()
+        if not row:
+            conn.rollback()
+            try:
+                conn.execute('DETACH DATABASE gallery_db')
+            except sqlite3.OperationalError:
+                pass
+            return False, None, None
+        storage_key = row['storage_key']
+        mem_id = row['mem_id']
+        conn.execute('DELETE FROM gallery_db.gallery_photos WHERE pid=?', (clean_pid,))
+        conn.execute('DELETE FROM moment_reactions WHERE item_key=?', (item_key,))
+        conn.execute('DELETE FROM moment_comments WHERE item_key=?', (item_key,))
+        conn.commit()
+        try:
+            conn.execute('DETACH DATABASE gallery_db')
+        except sqlite3.OperationalError:
+            pass
+    except Exception:
+        conn.rollback()
+        try:
+            conn.execute('DETACH DATABASE gallery_db')
+        except sqlite3.OperationalError:
+            pass
+        raise
+    finally:
+        conn.close()
+    return True, storage_key, mem_id

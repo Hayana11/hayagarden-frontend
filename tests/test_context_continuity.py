@@ -186,6 +186,21 @@ class ContextContinuityTests(unittest.TestCase):
         self.assertIn("snapshot_runtime", deploy_source)
         self.assertIn("restore_runtime", deploy_source)
         self.assertIn("':(exclude)attachments.db'", deploy_source)
+        self.assertIn("from PIL import Image", deploy_source)
+        self.assertIn("requirements.txt", deploy_source)
+        moments_auth = open(
+            os.path.join(ROOT, "moments_auth.py"), encoding="utf-8"
+        ).read()
+        config_store = open(
+            os.path.join(ROOT, "config_store.py"), encoding="utf-8"
+        ).read()
+        mcp_source = open(
+            os.path.join(ROOT, "mcp-http-server.js"), encoding="utf-8"
+        ).read()
+        self.assertIn("MOMENTS_OWNER_TOKEN", moments_auth)
+        self.assertIn("MOMENTS_OWNER_TOKEN", config_store)
+        self.assertIn("MOMENTS_OWNER_TOKEN", mcp_source)
+        self.assertIn("Authorization: `Bearer ${ownerToken}`", mcp_source)
 
 
 if __name__ == "__main__":

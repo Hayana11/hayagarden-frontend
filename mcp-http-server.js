@@ -5,7 +5,29 @@ const { McpServer }                      = require('@modelcontextprotocol/sdk/se
 const { StreamableHTTPServerTransport }  = require('@modelcontextprotocol/sdk/server/streamableHttp.js');
 const { execSync }                       = require('child_process');
 const { randomUUID }                     = require('crypto');
+const { readFileSync }                    = require('fs');
 const { z }                              = require('zod');
+
+function momentsOwnerToken() {
+  const direct = (process.env.MOMENTS_OWNER_TOKEN || '').trim();
+  if (direct) return direct;
+
+  try {
+    const lines = readFileSync('/opt/frontend/.env', 'utf8').split(/\r?\n/);
+    for (const rawLine of lines) {
+      const match = rawLine.trim().match(/^MOMENTS_OWNER_TOKEN\s*=\s*(.*)$/);
+      if (!match) continue;
+      let value = match[1].trim();
+      const quoted = (value.startsWith('"') && value.endsWith('"'))
+        || (value.startsWith("'") && value.endsWith("'"));
+      if (quoted) value = value.slice(1, -1);
+      return value;
+    }
+  } catch (_error) {
+    // The tool returns a configuration error below when the secret is unavailable.
+  }
+  return '';
+}
 
 function buildServer() {
   const server = new McpServer({ name: 'home-mcp', version: '1.0.0' });
@@ -83,11 +105,11 @@ function buildServer() {
       return { content: [{ type: 'text', text: 'Error: ' + e.message }] };
     }
   }
-  async function postFrontend(path, bodyObj) {
+  async function postFrontend(path, bodyObj, extraHeaders = {}) {
     try {
       const r   = await fetch(FRONTEND + path, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...extraHeaders },
         body: JSON.stringify(bodyObj),
       });
       const txt = await r.text();
@@ -159,13 +181,23 @@ function buildServer() {
       previous_turns: z.number().int().min(0).max(2).optional().describe('除当前轮外再向前包含几轮完整问答'),
       caption: z.string().max(500).optional().describe('转发卡片附言，可留空'),
     },
-    ({ turn_key, previous_turns, caption }) =>
-      postFrontend('/api/moments/collect-intent', {
+    ({ turn_key, previous_turns, caption }) => {
+      const ownerToken = momentsOwnerToken();
+      if (!ownerToken) {
+        return {
+          content: [{
+            type: 'text',
+            text: 'Error: MOMENTS_OWNER_TOKEN is not configured for home-mcp',
+          }],
+        };
+      }
+      return postFrontend('/api/moments/collect-intent', {
         turn_key: turn_key || null,
         conversation_id: 'hayana-chat',
         previous_turns: previous_turns ?? 0,
         caption: caption ?? '',
-      })
+      }, { Authorization: `Bearer ${ownerToken}` });
+    }
   );
 
   return server;

@@ -8,6 +8,8 @@ import group_chat_store
 import codex_app_server
 import context_usage_store
 import moments_store
+import moments_cover
+from moments_auth import OwnerAuthError, require_owner
 from context_usage_routes import create_context_usage_blueprint
 from moments_routes import create_moments_blueprint
 from valence_scale import normalize_arousal, normalize_valence
@@ -252,11 +254,10 @@ def create_post():
 
 @app.route('/api/posts/<int:pid>', methods=['DELETE'])
 def delete_post(pid):
-    conn = get_db()
-    conn.execute("DELETE FROM posts WHERE id=?",(pid,))
-    conn.commit()
-    conn.close()
-    return jsonify({"ok":True})
+    deleted = moments_store.delete_post(pid, memories_db_path=DB_PATH)
+    if not deleted:
+        return jsonify({'error': 'not found'}), 404
+    return jsonify({'ok': True})
 
 @app.route('/api/letters', methods=['GET'])
 def get_letters():
@@ -2751,13 +2752,24 @@ def gallery_update(pid):
 
 @app.route('/api/gallery/photo/<pid>/delete', methods=['POST'])
 def gallery_delete(pid):
-    mem_id = gallery_store.delete_photo(pid)
-    # 顺手清掉关联的统一记忆(posts, type=PHOTO)——照片没了，那条记忆的画面也没了
+    deleted, storage_key, mem_id = moments_store.delete_gallery_item_with_social(
+        pid,
+        memories_db_path=DB_PATH,
+        gallery_db_path=gallery_store.DB_PATH,
+    )
+    if not deleted:
+        return jsonify({'ok': False, 'error': 'not found'}), 404
+    if storage_key:
+        try:
+            os.remove(os.path.join(gallery_store.GALLERY_DIR, storage_key))
+        except OSError:
+            pass
     if mem_id:
         try:
             conn = get_db()
             conn.execute("DELETE FROM posts WHERE id=? AND type='PHOTO'", (mem_id,))
-            conn.commit(); conn.close()
+            conn.commit()
+            conn.close()
         except Exception:
             pass
     return jsonify({'ok': True})
@@ -2770,6 +2782,71 @@ def gallery_create_album():
         return jsonify({'ok': False, 'error': 'name required'}), 400
     aid = gallery_store.album_by_name(name) or gallery_store.create_album(name, d.get('description', ''))
     return jsonify({'ok': True, 'album_id': aid})
+
+
+# ── Moments 朋友圈封面 ─────────────────────────────────────────
+MOMENTS_COVER_META = os.path.join(UPLOAD_DIR, 'moments_cover.meta.json')
+
+
+def _moments_cover_read_meta():
+    try:
+        with open(MOMENTS_COVER_META, encoding='utf-8') as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _moments_cover_url():
+    meta = _moments_cover_read_meta()
+    fname = (meta.get('file') or '').strip()
+    if not fname:
+        return None
+    path = os.path.join(UPLOAD_DIR, fname)
+    if not os.path.isfile(path):
+        return None
+    return f'/static/uploads/{fname}'
+
+
+@app.route('/api/moments/cover', methods=['GET'])
+def moments_cover_get():
+    url = _moments_cover_url()
+    return jsonify({'ok': True, 'url': url})
+
+
+@app.route('/api/moments/cover', methods=['POST'])
+def moments_cover_upload():
+    try:
+        require_owner(request)
+    except OwnerAuthError as exc:
+        resp = jsonify({'ok': False, 'error': exc.message})
+        resp.status_code = exc.status_code
+        if exc.status_code == 401:
+            resp.headers['WWW-Authenticate'] = 'Bearer'
+        return resp
+    if 'file' not in request.files:
+        return jsonify({'ok': False, 'error': 'no file'}), 400
+    f = request.files['file']
+    try:
+        raw = moments_cover.read_bounded(f.stream)
+        data = moments_cover.encode_cover_image(raw)
+    except ValueError as exc:
+        return jsonify({'ok': False, 'error': str(exc)}), 400
+    os.makedirs(UPLOAD_DIR, exist_ok=True)
+    ext = moments_cover.output_extension()
+    fname = f'moments_cover_{uuid.uuid4().hex[:10]}{ext}'
+    with open(os.path.join(UPLOAD_DIR, fname), 'wb') as out:
+        out.write(data)
+    old = _moments_cover_read_meta().get('file')
+    meta = {'file': fname, 'updated_at': datetime.datetime.utcnow().isoformat() + 'Z'}
+    with open(MOMENTS_COVER_META, 'w', encoding='utf-8') as out:
+        json.dump(meta, out, ensure_ascii=False)
+    if old and old != fname:
+        try:
+            os.remove(os.path.join(UPLOAD_DIR, old))
+        except OSError:
+            pass
+    url = f'/static/uploads/{fname}'
+    return jsonify({'ok': True, 'url': url})
 
 
 # ── 倒计时任务浮窗 ─────────────────────────────────────────────

@@ -2,15 +2,23 @@ import os
 import sqlite3
 import tempfile
 import unittest
+from unittest import mock
 
 from flask import Flask
 
 from moments_routes import create_moments_blueprint
 import moments_store
 
+OWNER_HEADERS = {'Authorization': 'Bearer test-owner-token'}
+
 
 class MomentsRouteTests(unittest.TestCase):
     def setUp(self):
+        self._env = mock.patch.dict(os.environ, {'MOMENTS_OWNER_TOKEN': 'test-owner-token'}, clear=False)
+        self._env.start()
+        import moments_auth
+        moments_auth._get_owner_token = moments_auth.owner_token_getter()
+
         handle, self.db_path = tempfile.mkstemp(suffix='.db')
         os.close(handle)
         conn = sqlite3.connect(self.db_path)
@@ -35,6 +43,7 @@ class MomentsRouteTests(unittest.TestCase):
         self.client = app.test_client()
 
     def tearDown(self):
+        self._env.stop()
         os.unlink(self.db_path)
 
     def test_feed_route_returns_items(self):
@@ -60,9 +69,75 @@ class MomentsRouteTests(unittest.TestCase):
             'turn_key': turn['turn_key'],
             'previous_turns': 0,
             'caption': '测试',
-        })
+        }, headers=OWNER_HEADERS)
         self.assertEqual(response.status_code, 200)
         self.assertTrue(response.get_json()['ok'])
+
+    def test_collect_intent_requires_owner(self):
+        response = self.client.post(
+            '/api/moments/collect-intent',
+            json={'previous_turns': 0, 'caption': '未授权注入'},
+        )
+        self.assertEqual(response.status_code, 401)
+
+    def test_delete_chat_collection_requires_owner(self):
+        response = self.client.delete('/api/moments/chat-collections/1')
+        self.assertEqual(response.status_code, 401)
+
+    def test_react_route_requires_owner(self):
+        response = self.client.post(
+            '/api/moments/react',
+            json={'item_key': 'thought:1', 'reaction': 'like'},
+        )
+        self.assertEqual(response.status_code, 401)
+
+    def test_react_route_toggles_like(self):
+        response = self.client.post(
+            '/api/moments/react',
+            json={'item_key': 'thought:1', 'reaction': 'like'},
+            headers=OWNER_HEADERS,
+        )
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertTrue(payload['ok'])
+        self.assertEqual(payload['social']['likes'], 1)
+
+        response = self.client.post(
+            '/api/moments/react',
+            json={'item_key': 'thought:1', 'reaction': 'like'},
+            headers=OWNER_HEADERS,
+        )
+        self.assertEqual(response.get_json()['social']['likes'], 0)
+
+    def test_comments_route_create_and_list(self):
+        create = self.client.post(
+            '/api/moments/comments',
+            json={'item_key': 'thought:1', 'content': '好'},
+            headers=OWNER_HEADERS,
+        )
+        self.assertEqual(create.status_code, 200)
+        self.assertEqual(create.get_json()['social']['comments'], 1)
+
+        listing = self.client.get('/api/moments/comments?item_key=thought:1')
+        self.assertEqual(listing.status_code, 200)
+        self.assertEqual(len(listing.get_json()['items']), 1)
+        self.assertEqual(listing.get_json()['items'][0]['content'], '好')
+
+    def test_react_missing_item_returns_404(self):
+        response = self.client.post(
+            '/api/moments/react',
+            json={'item_key': 'thought:999999', 'reaction': 'like'},
+            headers=OWNER_HEADERS,
+        )
+        self.assertEqual(response.status_code, 404)
+
+    def test_comment_missing_item_returns_404(self):
+        response = self.client.post(
+            '/api/moments/comments',
+            json={'item_key': 'thought:999999', 'content': '不存在'},
+            headers=OWNER_HEADERS,
+        )
+        self.assertEqual(response.status_code, 404)
 
     def test_invalid_limit_returns_400(self):
         response = self.client.get('/api/moments/feed?limit=0')
