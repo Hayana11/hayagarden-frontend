@@ -53,19 +53,81 @@ def ensure_schema(memories_db_path: str) -> None:
         conn.close()
 
 
-def _empty_social() -> dict[str, Any]:
-    return {
-        'likes': 0,
-        'dislikes': 0,
-        'comments': 0,
-        'my_reaction': None,
-    }
-
-
 def _validate_item_key(item_key: str) -> str:
     key = (item_key or '').strip()
     parse_item_key(key)
     return key
+
+
+def item_exists(
+    item_key: str,
+    *,
+    memories_db_path: str,
+    gallery_db_path: str | None = None,
+) -> bool:
+    key = _validate_item_key(item_key)
+    kind, ref = parse_item_key(key)
+    if kind == 'thought':
+        conn = _conn(memories_db_path)
+        try:
+            table = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='posts'"
+            ).fetchone()
+            if not table:
+                return False
+            row = conn.execute(
+                "SELECT 1 FROM posts WHERE id=? AND type='THOUGHT'",
+                (int(ref),),
+            ).fetchone()
+        finally:
+            conn.close()
+        return row is not None
+    if kind == 'chat-collection':
+        conn = _conn(memories_db_path)
+        try:
+            row = conn.execute(
+                'SELECT 1 FROM moment_chat_collections WHERE id=?',
+                (int(ref),),
+            ).fetchone()
+        finally:
+            conn.close()
+        return row is not None
+    if kind == 'gallery':
+        if not gallery_db_path:
+            return False
+        conn = _conn(gallery_db_path)
+        try:
+            row = conn.execute(
+                'SELECT 1 FROM gallery_photos WHERE pid=?',
+                (ref,),
+            ).fetchone()
+        finally:
+            conn.close()
+        return row is not None
+    return False
+
+
+def require_item_exists(
+    item_key: str,
+    *,
+    memories_db_path: str,
+    gallery_db_path: str | None = None,
+) -> str:
+    key = _validate_item_key(item_key)
+    if not item_exists(key, memories_db_path=memories_db_path, gallery_db_path=gallery_db_path):
+        raise LookupError('item not found')
+    return key
+
+
+def delete_social_for_item(item_key: str, *, memories_db_path: str) -> None:
+    key = _validate_item_key(item_key)
+    conn = _conn(memories_db_path)
+    try:
+        conn.execute('DELETE FROM moment_reactions WHERE item_key=?', (key,))
+        conn.execute('DELETE FROM moment_comments WHERE item_key=?', (key,))
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def get_item_social(
@@ -165,9 +227,14 @@ def toggle_reaction(
     reaction: str,
     *,
     memories_db_path: str,
+    gallery_db_path: str | None = None,
     reactor: str = _DEFAULT_REACTOR,
 ) -> dict[str, Any]:
-    key = _validate_item_key(item_key)
+    key = require_item_exists(
+        item_key,
+        memories_db_path=memories_db_path,
+        gallery_db_path=gallery_db_path,
+    )
     kind = (reaction or '').strip().lower()
     if kind not in {'like', 'dislike'}:
         raise ValueError('reaction must be like or dislike')
@@ -175,6 +242,7 @@ def toggle_reaction(
 
     conn = _conn(memories_db_path)
     try:
+        conn.execute('BEGIN IMMEDIATE')
         current = conn.execute(
             'SELECT reaction FROM moment_reactions WHERE item_key=? AND reactor=?',
             (key, actor),
@@ -194,6 +262,9 @@ def toggle_reaction(
                 (key, actor, kind, _now_str()),
             )
         conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
     finally:
         conn.close()
     return get_item_social(key, memories_db_path=memories_db_path, reactor=actor)
@@ -203,9 +274,14 @@ def list_comments(
     item_key: str,
     *,
     memories_db_path: str,
+    gallery_db_path: str | None = None,
     limit: int = 50,
 ) -> list[dict[str, Any]]:
-    key = _validate_item_key(item_key)
+    key = require_item_exists(
+        item_key,
+        memories_db_path=memories_db_path,
+        gallery_db_path=gallery_db_path,
+    )
     if limit < 1 or limit > 100:
         raise ValueError('limit must be between 1 and 100')
     conn = _conn(memories_db_path)
@@ -233,9 +309,14 @@ def add_comment(
     content: str,
     *,
     memories_db_path: str,
+    gallery_db_path: str | None = None,
     author: str = _DEFAULT_REACTOR,
 ) -> dict[str, Any]:
-    key = _validate_item_key(item_key)
+    key = require_item_exists(
+        item_key,
+        memories_db_path=memories_db_path,
+        gallery_db_path=gallery_db_path,
+    )
     text = (content or '').strip()
     if not text:
         raise ValueError('content required')

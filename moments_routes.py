@@ -65,8 +65,11 @@ def create_moments_blueprint(
                 item_key,
                 reaction,
                 memories_db_path=memories_db_path,
+                gallery_db_path=gallery_db_path,
             )
             return jsonify({'ok': True, 'social': social})
+        except LookupError as exc:
+            return jsonify({'error': str(exc)}), 404
         except ValueError as exc:
             return jsonify({'error': str(exc)}), 400
 
@@ -83,9 +86,12 @@ def create_moments_blueprint(
             comments = moments_social.list_comments(
                 item_key,
                 memories_db_path=memories_db_path,
+                gallery_db_path=gallery_db_path,
                 limit=limit,
             )
             return jsonify({'items': comments})
+        except LookupError as exc:
+            return jsonify({'error': str(exc)}), 404
         except ValueError as exc:
             return jsonify({'error': str(exc)}), 400
 
@@ -101,8 +107,11 @@ def create_moments_blueprint(
                 item_key,
                 content,
                 memories_db_path=memories_db_path,
+                gallery_db_path=gallery_db_path,
             )
             return jsonify({'ok': True, **result})
+        except LookupError as exc:
+            return jsonify({'error': str(exc)}), 404
         except ValueError as exc:
             return jsonify({'error': str(exc)}), 400
 

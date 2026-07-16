@@ -771,6 +771,13 @@ def delete_chat_collection(collection_id: int, *, memories_db_path: str) -> bool
             (int(collection_id),),
         )
         conn.commit()
-        return cur.rowcount > 0
+        deleted = cur.rowcount > 0
     finally:
         conn.close()
+    if deleted:
+        from moments_social import delete_social_for_item
+        delete_social_for_item(
+            f'chat-collection:{int(collection_id)}',
+            memories_db_path=memories_db_path,
+        )
+    return deleted

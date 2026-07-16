@@ -93,6 +93,20 @@ class MomentsRouteTests(unittest.TestCase):
         self.assertEqual(len(listing.get_json()['items']), 1)
         self.assertEqual(listing.get_json()['items'][0]['content'], '好')
 
+    def test_react_missing_item_returns_404(self):
+        response = self.client.post(
+            '/api/moments/react',
+            json={'item_key': 'thought:999999', 'reaction': 'like'},
+        )
+        self.assertEqual(response.status_code, 404)
+
+    def test_comment_missing_item_returns_404(self):
+        response = self.client.post(
+            '/api/moments/comments',
+            json={'item_key': 'thought:999999', 'content': '不存在'},
+        )
+        self.assertEqual(response.status_code, 404)
+
     def test_invalid_limit_returns_400(self):
         response = self.client.get('/api/moments/feed?limit=0')
         self.assertEqual(response.status_code, 400)

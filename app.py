@@ -8,6 +8,7 @@ import group_chat_store
 import codex_app_server
 import context_usage_store
 import moments_store
+import moments_cover
 from context_usage_routes import create_context_usage_blueprint
 from moments_routes import create_moments_blueprint
 from valence_scale import normalize_arousal, normalize_valence
@@ -2774,8 +2775,6 @@ def gallery_create_album():
 
 # ── Moments 朋友圈封面 ─────────────────────────────────────────
 MOMENTS_COVER_META = os.path.join(UPLOAD_DIR, 'moments_cover.meta.json')
-MOMENTS_COVER_EXTS = {'.jpg', '.jpeg', '.png', '.webp', '.gif'}
-MOMENTS_COVER_MAX_BYTES = 8 * 1024 * 1024
 
 
 def _moments_cover_read_meta():
@@ -2808,13 +2807,15 @@ def moments_cover_upload():
     if 'file' not in request.files:
         return jsonify({'ok': False, 'error': 'no file'}), 400
     f = request.files['file']
-    ext = os.path.splitext(f.filename or '')[1].lower() or '.jpg'
-    if ext not in MOMENTS_COVER_EXTS:
-        return jsonify({'ok': False, 'error': '只支持 jpg/png/webp/gif'}), 400
-    data = f.read()
-    if len(data) > MOMENTS_COVER_MAX_BYTES:
-        return jsonify({'ok': False, 'error': '图片超过 8MB'}), 400
+    try:
+        raw = moments_cover.read_bounded(f.stream)
+        data = moments_cover.encode_cover_image(raw)
+    except ValueError as exc:
+        return jsonify({'ok': False, 'error': str(exc)}), 400
+    except RuntimeError as exc:
+        return jsonify({'ok': False, 'error': str(exc)}), 500
     os.makedirs(UPLOAD_DIR, exist_ok=True)
+    ext = moments_cover.output_extension()
     fname = f'moments_cover_{uuid.uuid4().hex[:10]}{ext}'
     with open(os.path.join(UPLOAD_DIR, fname), 'wb') as out:
         out.write(data)
