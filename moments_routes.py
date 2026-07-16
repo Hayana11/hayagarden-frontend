@@ -82,6 +82,10 @@ def create_moments_blueprint(
 
     @blueprint.route('/api/moments/chat-collections/<int:collection_id>', methods=['DELETE'])
     def delete_chat_collection(collection_id: int):
+        try:
+            require_owner(request)
+        except OwnerAuthError as exc:
+            return _owner_error_response(exc)
         deleted = moments_store.delete_chat_collection(
             collection_id, memories_db_path=memories_db_path
         )
@@ -161,6 +165,10 @@ def create_moments_blueprint(
 
     @blueprint.route('/api/moments/collect-intent', methods=['POST'])
     def collect_intent():
+        try:
+            require_owner(request)
+        except OwnerAuthError as exc:
+            return _owner_error_response(exc)
         payload = request.get_json() or {}
         turn_key = (payload.get('turn_key') or '').strip() or None
         conversation_id = (payload.get('conversation_id') or 'hayana-chat').strip() or 'hayana-chat'
