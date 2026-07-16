@@ -2,15 +2,23 @@ import os
 import sqlite3
 import tempfile
 import unittest
+from unittest import mock
 
 from flask import Flask
 
 from moments_routes import create_moments_blueprint
 import moments_store
 
+OWNER_HEADERS = {'Authorization': 'Bearer test-owner-token'}
+
 
 class MomentsRouteTests(unittest.TestCase):
     def setUp(self):
+        self._env = mock.patch.dict(os.environ, {'MOMENTS_OWNER_TOKEN': 'test-owner-token'}, clear=False)
+        self._env.start()
+        import moments_auth
+        moments_auth._get_owner_token = moments_auth.owner_token_getter()
+
         handle, self.db_path = tempfile.mkstemp(suffix='.db')
         os.close(handle)
         conn = sqlite3.connect(self.db_path)
@@ -35,6 +43,7 @@ class MomentsRouteTests(unittest.TestCase):
         self.client = app.test_client()
 
     def tearDown(self):
+        self._env.stop()
         os.unlink(self.db_path)
 
     def test_feed_route_returns_items(self):
@@ -64,10 +73,18 @@ class MomentsRouteTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertTrue(response.get_json()['ok'])
 
+    def test_react_route_requires_owner(self):
+        response = self.client.post(
+            '/api/moments/react',
+            json={'item_key': 'thought:1', 'reaction': 'like'},
+        )
+        self.assertEqual(response.status_code, 401)
+
     def test_react_route_toggles_like(self):
         response = self.client.post(
             '/api/moments/react',
             json={'item_key': 'thought:1', 'reaction': 'like'},
+            headers=OWNER_HEADERS,
         )
         self.assertEqual(response.status_code, 200)
         payload = response.get_json()
@@ -77,6 +94,7 @@ class MomentsRouteTests(unittest.TestCase):
         response = self.client.post(
             '/api/moments/react',
             json={'item_key': 'thought:1', 'reaction': 'like'},
+            headers=OWNER_HEADERS,
         )
         self.assertEqual(response.get_json()['social']['likes'], 0)
 
@@ -84,6 +102,7 @@ class MomentsRouteTests(unittest.TestCase):
         create = self.client.post(
             '/api/moments/comments',
             json={'item_key': 'thought:1', 'content': '好'},
+            headers=OWNER_HEADERS,
         )
         self.assertEqual(create.status_code, 200)
         self.assertEqual(create.get_json()['social']['comments'], 1)
@@ -97,6 +116,7 @@ class MomentsRouteTests(unittest.TestCase):
         response = self.client.post(
             '/api/moments/react',
             json={'item_key': 'thought:999999', 'reaction': 'like'},
+            headers=OWNER_HEADERS,
         )
         self.assertEqual(response.status_code, 404)
 
@@ -104,6 +124,7 @@ class MomentsRouteTests(unittest.TestCase):
         response = self.client.post(
             '/api/moments/comments',
             json={'item_key': 'thought:999999', 'content': '不存在'},
+            headers=OWNER_HEADERS,
         )
         self.assertEqual(response.status_code, 404)
 

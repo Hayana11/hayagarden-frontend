@@ -451,13 +451,33 @@ export async function fetchMomentsCover(): Promise<string | null> {
 export async function uploadMomentsCover(file: File): Promise<string | null> {
   const fd = new FormData();
   fd.append('file', file);
+  const base = import.meta.env.VITE_API_BASE_URL ?? '';
   try {
-    const r = await fetch('/api/moments/cover', { method: 'POST', body: fd });
+    const r = await fetch(`${base}/api/moments/cover`, { method: 'POST', body: fd, credentials: 'include' });
     const j = await r.json();
     return r.ok && j.ok && j.url ? j.url : null;
   } catch {
     return null;
   }
+}
+
+export interface MomentsOwnerStatus {
+  configured: boolean;
+  authenticated: boolean;
+}
+
+export async function fetchMomentsOwnerStatus(): Promise<MomentsOwnerStatus> {
+  const response = await http.get<{ ok: boolean; configured: boolean; authenticated: boolean }>(
+    '/api/moments/session',
+  );
+  return {
+    configured: Boolean(response.configured),
+    authenticated: Boolean(response.authenticated),
+  };
+}
+
+export async function establishMomentsSession(token: string): Promise<void> {
+  await http.post('/api/moments/session', { token });
 }
 
 export interface MomentComment {

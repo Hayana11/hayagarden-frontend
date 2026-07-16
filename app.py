@@ -9,6 +9,7 @@ import codex_app_server
 import context_usage_store
 import moments_store
 import moments_cover
+from moments_auth import OwnerAuthError, require_owner
 from context_usage_routes import create_context_usage_blueprint
 from moments_routes import create_moments_blueprint
 from valence_scale import normalize_arousal, normalize_valence
@@ -253,11 +254,10 @@ def create_post():
 
 @app.route('/api/posts/<int:pid>', methods=['DELETE'])
 def delete_post(pid):
-    conn = get_db()
-    conn.execute("DELETE FROM posts WHERE id=?",(pid,))
-    conn.commit()
-    conn.close()
-    return jsonify({"ok":True})
+    deleted = moments_store.delete_thought_post(pid, memories_db_path=DB_PATH)
+    if not deleted:
+        return jsonify({'error': 'not found'}), 404
+    return jsonify({'ok': True})
 
 @app.route('/api/letters', methods=['GET'])
 def get_letters():
@@ -2752,13 +2752,24 @@ def gallery_update(pid):
 
 @app.route('/api/gallery/photo/<pid>/delete', methods=['POST'])
 def gallery_delete(pid):
-    mem_id = gallery_store.delete_photo(pid)
-    # 顺手清掉关联的统一记忆(posts, type=PHOTO)——照片没了，那条记忆的画面也没了
+    deleted, storage_key, mem_id = moments_store.delete_gallery_item_with_social(
+        pid,
+        memories_db_path=DB_PATH,
+        gallery_db_path=gallery_store.DB_PATH,
+    )
+    if not deleted:
+        return jsonify({'ok': False, 'error': 'not found'}), 404
+    if storage_key:
+        try:
+            os.remove(os.path.join(gallery_store.GALLERY_DIR, storage_key))
+        except OSError:
+            pass
     if mem_id:
         try:
             conn = get_db()
             conn.execute("DELETE FROM posts WHERE id=? AND type='PHOTO'", (mem_id,))
-            conn.commit(); conn.close()
+            conn.commit()
+            conn.close()
         except Exception:
             pass
     return jsonify({'ok': True})
@@ -2804,6 +2815,14 @@ def moments_cover_get():
 
 @app.route('/api/moments/cover', methods=['POST'])
 def moments_cover_upload():
+    try:
+        require_owner(request)
+    except OwnerAuthError as exc:
+        resp = jsonify({'ok': False, 'error': exc.message})
+        resp.status_code = exc.status_code
+        if exc.status_code == 401:
+            resp.headers['WWW-Authenticate'] = 'Bearer'
+        return resp
     if 'file' not in request.files:
         return jsonify({'ok': False, 'error': 'no file'}), 400
     f = request.files['file']

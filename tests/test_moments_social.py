@@ -4,6 +4,7 @@ import sqlite3
 import tempfile
 import threading
 import unittest
+from unittest import mock
 
 from PIL import Image
 
@@ -11,9 +12,16 @@ import moments_cover
 import moments_social
 import moments_store
 
+OWNER_ENV = {'MOMENTS_OWNER_TOKEN': 'test-owner-token'}
+
 
 class MomentsSocialTests(unittest.TestCase):
     def setUp(self):
+        self._env = mock.patch.dict(os.environ, OWNER_ENV, clear=False)
+        self._env.start()
+        import moments_auth
+        moments_auth._get_owner_token = moments_auth.owner_token_getter()
+
         handle, self.db_path = tempfile.mkstemp(suffix='.db')
         os.close(handle)
         moments_store.ensure_schema(self.db_path)
@@ -30,13 +38,16 @@ class MomentsSocialTests(unittest.TestCase):
             "width INTEGER, "
             "height INTEGER, "
             "saved_at TEXT, "
-            "created_at TEXT"
+            "created_at TEXT, "
+            "storage_key TEXT, "
+            "mem_id INTEGER"
             ")"
         )
         gconn.commit()
         gconn.close()
 
     def tearDown(self):
+        self._env.stop()
         os.unlink(self.db_path)
         os.unlink(self.gallery_db_path)
 
@@ -66,12 +77,12 @@ class MomentsSocialTests(unittest.TestCase):
         conn.close()
         return int(thought_id)
 
-    def _insert_gallery(self, pid):
+    def _insert_gallery(self, pid, *, storage_key=None):
         conn = sqlite3.connect(self.gallery_db_path)
         conn.execute(
-            "INSERT INTO gallery_photos (pid, note, summary, keywords, width, height, saved_at, created_at) "
-            "VALUES (?, '图', '图', '[]', 100, 100, '2026-07-16 09:00:00', '2026-07-16 09:00:00')",
-            (pid,),
+            "INSERT INTO gallery_photos (pid, note, summary, keywords, width, height, saved_at, created_at, storage_key, mem_id) "
+            "VALUES (?, '图', '图', '[]', 100, 100, '2026-07-16 09:00:00', '2026-07-16 09:00:00', ?, NULL)",
+            (pid, storage_key or f'{pid}.jpg'),
         )
         conn.commit()
         conn.close()
@@ -283,6 +294,82 @@ class MomentsSocialTests(unittest.TestCase):
                 barrier.wait()
                 try:
                     moments_social.toggle_reaction(item_key, 'like', memories_db_path=self.db_path)
+                except LookupError:
+                    pass
+
+            threads = [
+                threading.Thread(target=delete_worker),
+                threading.Thread(target=react_worker),
+            ]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+            self.assertEqual(self._reaction_count(key), 0)
+
+    def test_delete_thought_post_clears_social(self):
+        thought_id = self._insert_thought()
+        key = f'thought:{thought_id}'
+        moments_social.toggle_reaction(key, 'like', memories_db_path=self.db_path)
+        moments_social.add_comment(key, '批注', memories_db_path=self.db_path)
+
+        deleted = moments_store.delete_thought_post(thought_id, memories_db_path=self.db_path)
+        self.assertTrue(deleted)
+        self.assertEqual(self._reaction_count(key), 0)
+        conn = sqlite3.connect(self.db_path)
+        try:
+            comments = conn.execute(
+                'SELECT COUNT(*) FROM moment_comments WHERE item_key=?',
+                (key,),
+            ).fetchone()[0]
+        finally:
+            conn.close()
+        self.assertEqual(comments, 0)
+
+    def test_delete_gallery_item_clears_social(self):
+        self._insert_gallery('pic-del')
+        key = 'gallery:pic-del'
+        moments_social.toggle_reaction(
+            key,
+            'like',
+            memories_db_path=self.db_path,
+            gallery_db_path=self.gallery_db_path,
+        )
+
+        deleted, storage_key, mem_id = moments_store.delete_gallery_item_with_social(
+            'pic-del',
+            memories_db_path=self.db_path,
+            gallery_db_path=self.gallery_db_path,
+        )
+        self.assertTrue(deleted)
+        self.assertEqual(storage_key, 'pic-del.jpg')
+        self.assertIsNone(mem_id)
+        self.assertEqual(self._reaction_count(key), 0)
+
+    def test_delete_gallery_race_does_not_leave_orphan_reactions(self):
+        for round_idx in range(20):
+            pid = f'pic-race-{round_idx}'
+            self._insert_gallery(pid)
+            key = f'gallery:{pid}'
+            barrier = threading.Barrier(2)
+
+            def delete_worker(photo_id=pid):
+                barrier.wait()
+                moments_store.delete_gallery_item_with_social(
+                    photo_id,
+                    memories_db_path=self.db_path,
+                    gallery_db_path=self.gallery_db_path,
+                )
+
+            def react_worker(item_key=key):
+                barrier.wait()
+                try:
+                    moments_social.toggle_reaction(
+                        item_key,
+                        'like',
+                        memories_db_path=self.db_path,
+                        gallery_db_path=self.gallery_db_path,
+                    )
                 except LookupError:
                     pass
 

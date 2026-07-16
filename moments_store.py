@@ -783,3 +783,76 @@ def delete_chat_collection(collection_id: int, *, memories_db_path: str) -> bool
         raise
     finally:
         conn.close()
+
+
+def delete_thought_post(post_id: int, *, memories_db_path: str) -> bool:
+    item_key = f'thought:{int(post_id)}'
+    conn = _conn(memories_db_path)
+    try:
+        conn.execute('BEGIN IMMEDIATE')
+        row = conn.execute(
+            "SELECT 1 FROM posts WHERE id=? AND type='THOUGHT'",
+            (int(post_id),),
+        ).fetchone()
+        if not row:
+            conn.rollback()
+            return False
+        conn.execute('DELETE FROM posts WHERE id=?', (int(post_id),))
+        conn.execute('DELETE FROM moment_reactions WHERE item_key=?', (item_key,))
+        conn.execute('DELETE FROM moment_comments WHERE item_key=?', (item_key,))
+        conn.commit()
+        return True
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def delete_gallery_item_with_social(
+    pid: str,
+    *,
+    memories_db_path: str,
+    gallery_db_path: str,
+) -> tuple[bool, str | None, int | None]:
+    clean_pid = (pid or '').strip()
+    if not clean_pid:
+        return False, None, None
+    item_key = f'gallery:{clean_pid}'
+    conn = _conn(memories_db_path)
+    storage_key: str | None = None
+    mem_id: int | None = None
+    try:
+        conn.execute('BEGIN IMMEDIATE')
+        conn.execute('ATTACH DATABASE ? AS gallery_db', (gallery_db_path,))
+        row = conn.execute(
+            'SELECT storage_key, mem_id FROM gallery_db.gallery_photos WHERE pid=?',
+            (clean_pid,),
+        ).fetchone()
+        if not row:
+            conn.rollback()
+            try:
+                conn.execute('DETACH DATABASE gallery_db')
+            except sqlite3.OperationalError:
+                pass
+            return False, None, None
+        storage_key = row['storage_key']
+        mem_id = row['mem_id']
+        conn.execute('DELETE FROM gallery_db.gallery_photos WHERE pid=?', (clean_pid,))
+        conn.execute('DELETE FROM moment_reactions WHERE item_key=?', (item_key,))
+        conn.execute('DELETE FROM moment_comments WHERE item_key=?', (item_key,))
+        conn.commit()
+        try:
+            conn.execute('DETACH DATABASE gallery_db')
+        except sqlite3.OperationalError:
+            pass
+    except Exception:
+        conn.rollback()
+        try:
+            conn.execute('DETACH DATABASE gallery_db')
+        except sqlite3.OperationalError:
+            pass
+        raise
+    finally:
+        conn.close()
+    return True, storage_key, mem_id

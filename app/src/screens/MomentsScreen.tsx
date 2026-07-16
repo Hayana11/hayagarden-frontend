@@ -10,10 +10,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type CSSProperties } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
+  establishMomentsSession,
   fetchMomentComments,
   fetchMomentsCover,
   fetchMomentsData,
   fetchMomentsFeed,
+  fetchMomentsOwnerStatus,
   galleryPhotoUrl,
   moodWordTone,
   postMomentComment,
@@ -27,8 +29,10 @@ import {
   type GalleryPhoto,
   type MomentComment,
   type MomentsData,
+  type MomentsOwnerStatus,
   type MoodState,
 } from '../lib/moments';
+import { HttpError } from '../lib/http';
 
 const SETTINGS_KEY = 'fyodor-chat-settings';
 const SERIF = "'Noto Serif SC', serif";
@@ -319,12 +323,14 @@ function SocialRow({
   dense,
   onSocialChange,
   onToast,
+  onAuthRequired,
 }: {
   itemKey: string;
   social: FeedSocial;
   dense?: boolean;
   onSocialChange: (itemKey: string, social: FeedSocial) => void;
   onToast: (msg: string) => void;
+  onAuthRequired: () => void;
 }) {
   const [busy, setBusy] = useState(false);
   const [commentsOpen, setCommentsOpen] = useState(false);
@@ -349,8 +355,13 @@ function SocialRow({
     try {
       const updated = await reactToMoment(itemKey, reaction);
       onSocialChange(itemKey, updated);
-    } catch {
-      onToast('操作失败，请稍后再试');
+    } catch (err) {
+      if (err instanceof HttpError && err.status === 401) {
+        onAuthRequired();
+        onToast('需要主人授权后才能互动');
+      } else {
+        onToast('操作失败，请稍后再试');
+      }
     } finally {
       setBusy(false);
     }
@@ -388,8 +399,13 @@ function SocialRow({
       setCommentDraft('');
       setComments((prev) => [comment, ...prev]);
       onSocialChange(itemKey, updated);
-    } catch {
-      onToast('评论发送失败');
+    } catch (err) {
+      if (err instanceof HttpError && err.status === 401) {
+        onAuthRequired();
+        onToast('需要主人授权后才能评论');
+      } else {
+        onToast('评论发送失败');
+      }
     } finally {
       setCommentBusy(false);
     }
@@ -490,6 +506,10 @@ export function MomentsScreen() {
   const [coverUrl, setCoverUrl] = useState<string | null>(null);
   const [coverUploading, setCoverUploading] = useState(false);
   const coverInputRef = useRef<HTMLInputElement>(null);
+  const [ownerStatus, setOwnerStatus] = useState<MomentsOwnerStatus>({ configured: false, authenticated: false });
+  const [unlockOpen, setUnlockOpen] = useState(false);
+  const [unlockDraft, setUnlockDraft] = useState('');
+  const [unlockBusy, setUnlockBusy] = useState(false);
 
   const effTheme = theme === 'auto' ? (sysDark ? 'dark' : 'light') : theme;
   const vars = effTheme === 'dark' ? DARK_VARS : LIGHT_VARS;
@@ -519,9 +539,39 @@ export function MomentsScreen() {
     void fetchMomentsCover().then(setCoverUrl);
   }, []);
 
+  useEffect(() => {
+    void fetchMomentsOwnerStatus().then(setOwnerStatus).catch(() => {});
+  }, []);
+
+  const requestOwnerUnlock = useCallback(() => {
+    setUnlockOpen(true);
+  }, []);
+
+  const submitOwnerUnlock = useCallback(async () => {
+    const token = unlockDraft.trim();
+    if (!token || unlockBusy) return;
+    setUnlockBusy(true);
+    try {
+      await establishMomentsSession(token);
+      setOwnerStatus({ configured: true, authenticated: true });
+      setUnlockOpen(false);
+      setUnlockDraft('');
+      flashToast('已授权，可以互动了');
+    } catch {
+      flashToast('授权失败，请检查口令');
+    } finally {
+      setUnlockBusy(false);
+    }
+  }, [flashToast, unlockBusy, unlockDraft]);
+
   const pickCover = useCallback(() => {
+    if (!ownerStatus.authenticated) {
+      requestOwnerUnlock();
+      flashToast('更换封面需要主人授权');
+      return;
+    }
     if (!coverUploading) coverInputRef.current?.click();
-  }, [coverUploading]);
+  }, [coverUploading, flashToast, ownerStatus.authenticated, requestOwnerUnlock]);
 
   const onCoverFile = useCallback(async (e: ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -828,7 +878,7 @@ export function MomentsScreen() {
                         <FeedEntryBody entry={f} onGalleryOpen={f.kind === 'gallery' ? () => openGalleryFromFeed(f) : undefined} />
                         <div><KindTag entry={f} /></div>
                         <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 10 }}>
-                          <SocialRow itemKey={f.itemKey} social={f.social} dense onSocialChange={patchFeedSocial} onToast={flashToast} />
+                          <SocialRow itemKey={f.itemKey} social={f.social} dense onSocialChange={patchFeedSocial} onToast={flashToast} onAuthRequired={requestOwnerUnlock} />
                           {f.timeLabel ? (
                             <span style={{ fontFamily: DISPLAY, fontSize: 11, color: 'var(--ghost)', flexShrink: 0, letterSpacing: 0.5 }}>
                               {f.timeLabel}
@@ -884,7 +934,7 @@ export function MomentsScreen() {
                       <FeedEntryBody entry={f} />
                       <div><KindTag entry={f} /></div>
                       <div style={{ borderTop: '1px solid var(--line)', paddingTop: 10, display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 10 }}>
-                        <SocialRow itemKey={f.itemKey} social={f.social} onSocialChange={patchFeedSocial} onToast={flashToast} />
+                        <SocialRow itemKey={f.itemKey} social={f.social} onSocialChange={patchFeedSocial} onToast={flashToast} onAuthRequired={requestOwnerUnlock} />
                         {f.timeLabel ? (
                           <span style={{ fontFamily: DISPLAY, fontSize: 11.5, color: 'var(--ghost)', flexShrink: 0, letterSpacing: 0.5 }}>
                             {f.timeLabel}
@@ -1151,6 +1201,34 @@ export function MomentsScreen() {
           <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4 }}>
             <span style={{ fontSize: 13, color: 'rgba(247,237,234,0.9)', letterSpacing: 1 }}>{lightbox.note || lightbox.summary || '未命名'}</span>
             <span style={{ fontFamily: DISPLAY, fontSize: 11, color: 'rgba(247,237,234,0.5)' }}>{lightbox.time} · 点击任意处关闭</span>
+          </div>
+        </div>
+      )}
+
+      {/* ── owner unlock ── */}
+      {unlockOpen && (
+        <div onClick={() => setUnlockOpen(false)} style={{ position: 'fixed', inset: 0, zIndex: 95, background: 'rgba(24,16,14,0.55)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24 }}>
+          <div onClick={(e) => e.stopPropagation()} style={{ width: '100%', maxWidth: 360, background: 'var(--card)', borderRadius: 18, padding: '18px 18px 16px', boxShadow: '0 20px 50px var(--shadow2)', display: 'flex', flexDirection: 'column', gap: 12 }}>
+            <span style={{ fontSize: 15, fontWeight: 700, color: 'var(--ink)' }}>主人授权</span>
+            <span style={{ fontSize: 12.5, lineHeight: 1.7, color: 'var(--ink2)' }}>更换封面、点赞和评论需要输入服务端配置的口令。口令只用于换取 HttpOnly 会话，不会写进前端代码。</span>
+            <input
+              type="password"
+              value={unlockDraft}
+              onChange={(e) => setUnlockDraft(e.target.value)}
+              placeholder="输入 MOMENTS_OWNER_TOKEN"
+              autoComplete="off"
+              style={{ border: '1px solid var(--line)', borderRadius: 12, padding: '10px 12px', background: 'var(--card2)', color: 'var(--ink)', fontSize: 13, outline: 'none' }}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  e.preventDefault();
+                  void submitOwnerUnlock();
+                }
+              }}
+            />
+            <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end' }}>
+              <div onClick={() => setUnlockOpen(false)} style={{ cursor: 'pointer', padding: '8px 14px', borderRadius: 999, color: 'var(--ghost)', fontSize: 12.5 }}>取消</div>
+              <div onClick={() => void submitOwnerUnlock()} style={{ cursor: unlockBusy ? 'default' : 'pointer', padding: '8px 16px', borderRadius: 999, background: 'var(--deep)', color: '#FBF3F0', fontSize: 12.5, opacity: unlockBusy ? 0.6 : 1 }}>{unlockBusy ? '验证中…' : '授权'}</div>
+            </div>
           </div>
         </div>
       )}

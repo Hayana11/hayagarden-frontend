@@ -187,7 +187,8 @@ class ContextContinuityTests(unittest.TestCase):
         self.assertIn("restore_runtime", deploy_source)
         self.assertIn("':(exclude)attachments.db'", deploy_source)
         self.assertIn("from PIL import Image", deploy_source)
-        self.assertIn("requirements.txt", open(
+        self.assertIn("requirements.txt", deploy_source)
+        self.assertIn("MOMENTS_OWNER_TOKEN", open(
             os.path.join(ROOT, "requirements.txt"), encoding="utf-8"
         ).read())
 

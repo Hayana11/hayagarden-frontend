@@ -41,6 +41,7 @@ function buildUrl(path: string, params?: Params): string {
 
 async function request<T>(path: string, init?: RequestInit, params?: Params): Promise<T> {
   const res = await fetch(buildUrl(path, params), {
+    credentials: 'include',
     headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
     ...init,
   });
