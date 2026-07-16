@@ -68,6 +68,8 @@ def ensure_schema(memories_db_path: str, gallery_db_path: str | None = None) -> 
                 collected_at TEXT NOT NULL
             )'''
         )
+        from moments_turn import ensure_turn_schema
+        ensure_turn_schema(memories_db_path)
         conn.commit()
     finally:
         conn.close()
@@ -182,32 +184,63 @@ def _brewing_from_row(row: sqlite3.Row, has_processed: bool) -> bool:
     return int(row['processed'] or 0) == 0
 
 
-def _feed_sort_key(published_at: str | None, item_key: str) -> str:
-    if published_at:
-        return f'V{published_at}\0{item_key}'
-    return f'U{item_key}'
+_KIND_RANK = {
+    'gallery': 0,
+    'chat-collection': 1,
+    'thought': 2,
+}
+
+
+def _tiebreak_parts(item_key: str) -> tuple[int, int | str]:
+    kind, ref = parse_item_key(item_key)
+    rank = _KIND_RANK[kind]
+    if kind in ('thought', 'chat-collection'):
+        return rank, int(ref)
+    return rank, ref
+
+
+def _feed_sort_key(published_at: str | None, item_key: str) -> tuple[int, str, int, int | str]:
+    rank, tie = _tiebreak_parts(item_key)
+    tier = 1 if published_at else 0
+    return (tier, published_at or '', rank, tie)
 
 
 def _cross_source_cursor_clause(
     *,
     time_sql: str,
-    item_key_sql: str,
+    source_rank: int,
+    tiebreak_sql: str,
+    tiebreak_type: str,
     invalid_sql: str,
     cursor_published_at: str | None,
     cursor_item_key: str | None,
 ) -> tuple[str, list[Any]]:
     if not cursor_item_key:
         return '', []
+    cursor_rank, cursor_tie = _tiebreak_parts(cursor_item_key)
+    if tiebreak_type == 'int':
+        cursor_tie_value = int(cursor_tie) if cursor_rank == source_rank else (
+            2**62 if cursor_rank < source_rank else -1
+        )
+        tie_cmp = f'CAST({tiebreak_sql} AS INTEGER) < ?'
+    else:
+        cursor_tie_value = cursor_tie
+        tie_cmp = f'{tiebreak_sql} < ?'
+
+    same_time = f'((? < ?) OR (? = ? AND {tie_cmp}))'
+    same_time_params: list[Any] = [source_rank, cursor_rank, source_rank, cursor_rank, cursor_tie_value]
+
     cursor_db = _db_created_at(cursor_published_at)
     if cursor_db:
         clause = (
             f'(({time_sql}) < datetime(?) '
-            f'OR (({time_sql}) = datetime(?) AND {item_key_sql} < ?) '
+            f'OR (({time_sql}) = datetime(?) AND {same_time}) '
             f'OR {invalid_sql})'
         )
-        return clause, [cursor_db, cursor_db, cursor_item_key]
-    clause = f'({invalid_sql} AND {item_key_sql} < ?)'
-    return clause, [cursor_item_key]
+        return clause, [cursor_db, cursor_db, *same_time_params]
+
+    clause = f'({invalid_sql} AND {same_time})'
+    return clause, same_time_params
 
 
 def _normalize_role(author: str | None) -> str | None:
@@ -519,7 +552,9 @@ def _fetch_thought_rows(
     where = ["type='THOUGHT'"]
     cursor_clause, cursor_params = _cross_source_cursor_clause(
         time_sql=_CREATED_AT_KEY_SQL,
-        item_key_sql="'thought:' || id",
+        source_rank=_KIND_RANK['thought'],
+        tiebreak_sql='id',
+        tiebreak_type='int',
         invalid_sql=_INVALID_CREATED_AT_SQL,
         cursor_published_at=cursor_published_at,
         cursor_item_key=cursor_item_key,
@@ -548,7 +583,9 @@ def _fetch_repost_rows(
     where: list[str] = []
     cursor_clause, cursor_params = _cross_source_cursor_clause(
         time_sql=_REPOST_TIME_SQL,
-        item_key_sql="'chat-collection:' || id",
+        source_rank=_KIND_RANK['chat-collection'],
+        tiebreak_sql='id',
+        tiebreak_type='int',
         invalid_sql=_INVALID_REPOST_TIME_SQL,
         cursor_published_at=cursor_published_at,
         cursor_item_key=cursor_item_key,
@@ -582,7 +619,9 @@ def _fetch_gallery_rows(
         where: list[str] = []
         cursor_clause, cursor_params = _cross_source_cursor_clause(
             time_sql=_GALLERY_TIME_SQL,
-            item_key_sql="'gallery:' || pid",
+            source_rank=_KIND_RANK['gallery'],
+            tiebreak_sql='pid',
+            tiebreak_type='text',
             invalid_sql=_INVALID_GALLERY_TIME_SQL,
             cursor_published_at=cursor_published_at,
             cursor_item_key=cursor_item_key,

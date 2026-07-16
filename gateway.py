@@ -2389,10 +2389,12 @@ def run_tool(name, args, caller='fyodor_cc'):
         if name == 'save_to_gallery':
             return _save_to_gallery(args.get('attachment', ''), args.get('note', ''), args.get('album'))
         if name == 'collect_chat_moment':
-            import moments_intent
+            import moments_turn
             try:
-                moments_intent.set_pending(
-                    getattr(_tool_ctx, 'conversation_id', '') or 'hayana-chat',
+                moments_turn.collect_chat_moment(
+                    DB_PATH,
+                    turn_key=(args.get('turn_key') or '').strip() or None,
+                    conversation_id=getattr(_tool_ctx, 'conversation_id', '') or 'hayana-chat',
                     previous_turns=int(args.get('previous_turns', 0) or 0),
                     caption=args.get('caption', '') or '',
                 )
@@ -3006,6 +3008,7 @@ CC_ALLOWED_TOOLS = ','.join([
     'mcp__home__get_todos', 'mcp__home__add_todo', 'mcp__home__get_countdowns',
     'mcp__home__get_ledger', 'mcp__home__add_ledger', 'mcp__home__get_ledger_budget',
     'mcp__home__search_memories',  # M3: 官端主动翻 posts 记忆库
+    'mcp__home__collect_chat_moment',
 ])
 
 # 常驻进程：只服务 /chat（Fyodor 独聊）的真实多轮对话。日记生成等一次性调用
@@ -3377,9 +3380,9 @@ def chat():
     from moments_turn import begin_turn, insert_user_message, release_turn, DEFAULT_CONVERSATION_ID
 
     _conv = DEFAULT_CONVERSATION_ID
-    _turn_data = begin_turn(request.get_json(), conversation_id=_conv)
+    _turn_data = begin_turn(request.get_json(), conversation_id=_conv, memories_db_path=DB_PATH)
     _uc = (_turn_data.get('content') or '').strip()
-    _turn_data = insert_user_message(get_db, _turn_data, _uc)
+    _turn_data = insert_user_message(get_db, _turn_data, _uc, memories_db_path=DB_PATH, conversation_id=_conv)
     if _uc:
         try:
             import emotion_engine as _ee; _ee.touch_interaction()
@@ -3463,7 +3466,12 @@ def chat():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
     finally:
-        release_turn(conversation_id=_conv, persisted=_persisted)
+        release_turn(
+            conversation_id=_conv,
+            memories_db_path=DB_PATH,
+            turn_key=_turn_data.get('turn_key'),
+            persisted=_persisted,
+        )
 
 
 TRACE_SUMMARY_MODEL = os.getenv('TRACE_SUMMARY_MODEL', '[按量3] deepseek-v3.2')
@@ -3745,10 +3753,13 @@ def chat_stream():
             _conv = DEFAULT_CONVERSATION_ID
             _released = [False]
             _persisted = [False]
+            _turn_data: dict = {}
             try:
-                _turn_data = begin_turn(request.get_json(), conversation_id=_conv)
+                _turn_data = begin_turn(request.get_json(), conversation_id=_conv, memories_db_path=DB_PATH)
                 _uc = (_turn_data.get('content') or '').strip()
-                _turn_data = insert_user_message(get_db, _turn_data, _uc)
+                _turn_data = insert_user_message(
+                    get_db, _turn_data, _uc, memories_db_path=DB_PATH, conversation_id=_conv,
+                )
                 if _uc:
                     try:
                         import emotion_engine as _ee_s
@@ -3841,7 +3852,6 @@ def chat_stream():
                 finally:
                     _released[0] = True
                     _gen_release((text, thinking) if text else None)
-                    release_turn(conversation_id=_conv, persisted=_persisted[0])
                 if cc_cache_read or cc_cache_create:
                     yield 'data: ' + json.dumps({'t': 'usage', 'cache_read': cc_cache_read, 'cache_creation': cc_cache_create}) + SSE_END
                 yield 'data: ' + json.dumps({'t': 'done', 'ok': bool(text)}) + SSE_END
@@ -3851,7 +3861,12 @@ def chat_stream():
                     _gen_release(None)
                 yield 'data: ' + json.dumps({'t': 'err', 'd': str(e)}) + SSE_END
             finally:
-                release_turn(conversation_id=_conv, persisted=_persisted[0])
+                release_turn(
+                    conversation_id=_conv,
+                    memories_db_path=DB_PATH,
+                    turn_key=_turn_data.get('turn_key'),
+                    persisted=_persisted[0],
+                )
         return Response(stream_with_context(gen_cc()), mimetype='text/event-stream',
                         headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
     def generate():
@@ -3859,10 +3874,13 @@ def chat_stream():
 
         _conv = DEFAULT_CONVERSATION_ID
         _persisted = [False]
+        _turn_data: dict = {}
         try:
-            _turn_data = begin_turn(request.get_json(), conversation_id=_conv)
+            _turn_data = begin_turn(request.get_json(), conversation_id=_conv, memories_db_path=DB_PATH)
             _uc = (_turn_data.get('content') or '').strip()
-            _turn_data = insert_user_message(get_db, _turn_data, _uc)
+            _turn_data = insert_user_message(
+                get_db, _turn_data, _uc, memories_db_path=DB_PATH, conversation_id=_conv,
+            )
             mode, reused = _gen_acquire_or_wait()
             if mode == 'reused':
                 text, thinking = reused
@@ -4108,10 +4126,6 @@ def chat_stream():
                         pass
                 _released[0] = True
                 _gen_release((text, thinking) if text else None)
-                release_turn(
-                    conversation_id=getattr(_tool_ctx, 'conversation_id', _conv) or _conv,
-                    persisted=_persisted[0],
-                )
             if tool_calls_acc and not thinking:
                 _ts = _summarize_traces_sync(tool_calls_acc)
                 if _ts:
@@ -4188,7 +4202,12 @@ def chat_stream():
         except Exception as e:
             yield 'data: ' + json.dumps({'t': 'err', 'd': str(e)}) + SSE_END
         finally:
-            release_turn(conversation_id=_conv, persisted=_persisted[0])
+            release_turn(
+                conversation_id=_conv,
+                memories_db_path=DB_PATH,
+                turn_key=_turn_data.get('turn_key'),
+                persisted=_persisted[0],
+            )
     return Response(stream_with_context(generate()), mimetype='text/event-stream',
                     headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
 
@@ -4308,7 +4327,7 @@ def push_message():
     from moments_turn import begin_turn, release_turn, DEFAULT_CONVERSATION_ID
 
     _conv = DEFAULT_CONVERSATION_ID
-    begin_turn(request.get_json(), conversation_id=_conv)
+    begin_turn(request.get_json(), conversation_id=_conv, memories_db_path=DB_PATH)
     data = request.get_json() or {}
     pt   = data.get('prompt_type', 'morning')
     system = build_system()
@@ -4341,7 +4360,7 @@ def push_message():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
     finally:
-        release_turn(conversation_id=_conv, persisted=False)
+        release_turn(conversation_id=_conv, memories_db_path=DB_PATH, persisted=False)
 
 
 

@@ -95,6 +95,75 @@ class MomentsStoreTests(unittest.TestCase):
             cursor = page['next_cursor']
         return keys
 
+    def _assert_paginated_keys(self, expected_keys, *, feed_type='all', limit=2):
+        seen: list[str] = []
+        cursor = None
+        while True:
+            page = moments_store.get_feed(
+                memories_db_path=self.db_path,
+                gallery_db_path=self.gallery_db_path,
+                limit=limit,
+                cursor=cursor,
+                feed_type=feed_type,
+            )
+            page_keys = [item['item_key'] for item in page['items']]
+            for key in page_keys:
+                self.assertNotIn(key, seen)
+                seen.append(key)
+            if not page['has_more']:
+                break
+            cursor = page['next_cursor']
+            self.assertIsNotNone(cursor)
+        self.assertEqual(seen, expected_keys)
+
+    def test_same_timestamp_thoughts_paginate_all_ids(self):
+        for index in range(1, 13):
+            self._insert_thought(f'同时间 {index}', '2026-07-16 09:00:00')
+        expected = [f'thought:{index}' for index in range(12, 0, -1)]
+        self._assert_paginated_keys(expected, feed_type='thought', limit=2)
+
+    def test_same_timestamp_reposts_paginate_all_ids(self):
+        for index in range(1, 13):
+            user_id = self._insert_chat('hayana', f'u{index}', f'2026-07-16 09:00:{index:02d}')
+            assistant_id = self._insert_chat('fyodor', f'a{index}', f'2026-07-16 09:01:{index:02d}')
+            conn = sqlite3.connect(self.db_path)
+            conn.execute(
+                '''INSERT INTO moment_chat_collections
+                   (session_id, source_start_id, source_end_id, source_fingerprint,
+                    caption, snapshot_json, collector, collected_at)
+                   VALUES (1, ?, ?, ?, ?, ?, 'fyodor', ?)''',
+                (
+                    user_id,
+                    assistant_id,
+                    f'fp-{index}',
+                    f'caption {index}',
+                    '{"version":1,"messages":[{"message_id":1,"role":"haya","text":"hi","created_at":null},{"message_id":2,"role":"fyodor","text":"ok","created_at":null}]}',
+                    '2026-07-16 09:00:00',
+                ),
+            )
+            conn.commit()
+            conn.close()
+        expected = [f'chat-collection:{index}' for index in range(12, 0, -1)]
+        self._assert_paginated_keys(expected, feed_type='posts', limit=2)
+
+    def test_same_timestamp_mixed_sources_paginate_without_gaps(self):
+        self._insert_thought('念头 1', '2026-07-16 09:00:00')
+        self._insert_thought('念头 2', '2026-07-16 09:00:00')
+        self._insert_gallery('pic-z', note='图', saved_at='2026-07-16 09:00:00')
+        user_id = self._insert_chat('hayana', '你好', '2026-07-16 09:00:00')
+        assistant_id = self._insert_chat('fyodor', '嗯', '2026-07-16 09:01:00')
+        moments_store.finalize_pending_chat_collection(
+            memories_db_path=self.db_path,
+            user_message_id=user_id,
+            assistant_message_id=assistant_id,
+            previous_turns=0,
+            caption='转发',
+        )
+        keys = self._collect_all_keys(feed_type='all', limit=2)
+        self.assertEqual(len(keys), 4)
+        self.assertEqual(len(set(keys)), 4)
+        self.assertEqual(set(keys), {'thought:2', 'thought:1', 'gallery:pic-z', 'chat-collection:1'})
+
     def test_feed_returns_iso_timestamps_and_item_keys(self):
         self._insert_thought('昨天的念头', '2026-07-15 23:59:00')
         self._insert_thought('今天的念头', '2026-07-16 09:15:00')

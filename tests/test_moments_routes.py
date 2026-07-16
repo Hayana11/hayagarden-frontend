@@ -52,6 +52,18 @@ class MomentsRouteTests(unittest.TestCase):
         self.assertEqual(len(payload['items']), 1)
         self.assertEqual(payload['items'][0]['kind'], 'thought')
 
+    def test_collect_intent_route(self):
+        import moments_turn
+        moments_turn.ensure_turn_schema(self.db_path)
+        turn = moments_turn.begin_turn({}, conversation_id='hayana-chat', memories_db_path=self.db_path)
+        response = self.client.post('/api/moments/collect-intent', json={
+            'turn_key': turn['turn_key'],
+            'previous_turns': 0,
+            'caption': '测试',
+        })
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.get_json()['ok'])
+
     def test_invalid_limit_returns_400(self):
         response = self.client.get('/api/moments/feed?limit=0')
         self.assertEqual(response.status_code, 400)

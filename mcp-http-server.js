@@ -151,6 +151,23 @@ function buildServer() {
     () => callFrontend('/api/countdowns')
   );
 
+  // ── Moments: 聊天收藏到朋友圈 ─────────────────────────────
+  server.tool(
+    'collect_chat_moment',
+    {
+      turn_key: z.string().optional().describe('本轮 turn_key；省略时自动绑定当前活跃轮次'),
+      previous_turns: z.number().int().min(0).max(2).optional().describe('除当前轮外再向前包含几轮完整问答'),
+      caption: z.string().max(500).optional().describe('转发卡片附言，可留空'),
+    },
+    ({ turn_key, previous_turns, caption }) =>
+      postFrontend('/api/moments/collect-intent', {
+        turn_key: turn_key || null,
+        conversation_id: 'hayana-chat',
+        previous_turns: previous_turns ?? 0,
+        caption: caption ?? '',
+      })
+  );
+
   return server;
 }
 

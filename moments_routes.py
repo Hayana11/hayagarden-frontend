@@ -52,4 +52,27 @@ def create_moments_blueprint(
             return jsonify({'error': 'not found'}), 404
         return jsonify({'deleted': True})
 
+    @blueprint.route('/api/moments/collect-intent', methods=['POST'])
+    def collect_intent():
+        payload = request.get_json() or {}
+        turn_key = (payload.get('turn_key') or '').strip() or None
+        conversation_id = (payload.get('conversation_id') or 'hayana-chat').strip() or 'hayana-chat'
+        try:
+            previous_turns = int(payload.get('previous_turns', 0) or 0)
+        except (TypeError, ValueError):
+            return jsonify({'error': 'invalid previous_turns'}), 400
+        caption = payload.get('caption', '') or ''
+        try:
+            import moments_turn
+            moments_turn.collect_chat_moment(
+                memories_db_path,
+                turn_key=turn_key,
+                conversation_id=conversation_id,
+                previous_turns=previous_turns,
+                caption=caption,
+            )
+            return jsonify({'ok': True})
+        except ValueError as exc:
+            return jsonify({'error': str(exc)}), 400
+
     return blueprint
