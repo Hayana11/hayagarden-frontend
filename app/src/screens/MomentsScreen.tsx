@@ -9,7 +9,7 @@
 // a toast on click, rather than either faking success or hiding the UI.
 import { useCallback, useEffect, useMemo, useState, type CSSProperties } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { fetchMomentsData, galleryPhotoUrl, moodWordTone, type EmotionMemoryPoint, type FeedEntry, type GalleryPhoto, type MomentsData, type MoodState } from '../lib/moments';
+import { fetchMomentsData, fetchMomentsFeed, feedDateKey, galleryPhotoUrl, moodWordTone, type DreamEntry, type EmotionMemoryPoint, type FeedEntry, type GalleryPhoto, type MomentsData, type MoodState } from '../lib/moments';
 
 const SETTINGS_KEY = 'fyodor-chat-settings';
 const SERIF = "'Noto Serif SC', serif";
@@ -149,21 +149,17 @@ function loadTheme(): 'light' | 'dark' | 'auto' {
   }
 }
 
-function KindTag({ kind }: { kind: FeedEntry['kind'] }) {
-  const label = kind === 'thought' ? '念头' : kind === 'diary' ? '日摘要' : '梦境';
-  const color = kind === 'dream' ? 'var(--dream)' : 'var(--rose)';
-  const bg = kind === 'dream' ? 'var(--dreambg)' : 'var(--rosebg)';
+function KindTag({ entry }: { entry: FeedEntry }) {
+  const label = entry.brewing ? '酝酿中' : entry.tags[0] || '念头';
+  const color = 'var(--rose)';
+  const bg = 'var(--rosebg)';
   return <span style={{ fontSize: 10.5, padding: '3px 10px', borderRadius: 999, background: bg, color, letterSpacing: 1 }}>{label}</span>;
 }
 
-function feedDateKey(entry: FeedEntry): string {
-  return entry.sortKey.slice(0, 10);
-}
-
-function DateRail({ sortKey, visible }: { sortKey: string; visible: boolean }) {
+function DateRail({ dateIso, visible }: { dateIso: string; visible: boolean }) {
   if (!visible) return <div style={{ width: 54, flexShrink: 0 }} />;
 
-  const [year, month, day] = sortKey.slice(0, 10).split('-').map(Number);
+  const [year, month, day] = (dateIso || '1970-01-01').slice(0, 10).split('-').map(Number);
   const date = new Date(year, month - 1, day);
   const today = new Date();
   today.setHours(12, 0, 0, 0);
@@ -255,8 +251,13 @@ export function MomentsScreen() {
   const [tab, setTab] = useState<Tab>('home');
   const [phase, setPhase] = useState<'loading' | 'ready' | 'failed'>('loading');
   const [data, setData] = useState<MomentsData | null>(null);
+  const [feedItems, setFeedItems] = useState<FeedEntry[]>([]);
+  const [feedCursor, setFeedCursor] = useState<string | null>(null);
+  const [feedHasMore, setFeedHasMore] = useState(false);
+  const [feedLoadingMore, setFeedLoadingMore] = useState(false);
+  const [feedFailed, setFeedFailed] = useState(false);
   const [lightbox, setLightbox] = useState<GalleryPhoto | null>(null);
-  const [dreamOpen, setDreamOpen] = useState<FeedEntry | null>(null);
+  const [dreamOpen, setDreamOpen] = useState<DreamEntry | null>(null);
   const [hoveredDream, setHoveredDream] = useState<number | null>(null);
   const [moodSel, setMoodSel] = useState<EmotionMemoryPoint | null>(null);
   const [moodRange, setMoodRange] = useState<'7' | '30'>('7');
@@ -291,11 +292,59 @@ export function MomentsScreen() {
 
   const load = useCallback(async () => {
     setPhase('loading');
-    const result = await fetchMomentsData();
-    setData(result);
-    const totallyEmpty = result.feed.length === 0 && result.gallery.length === 0 && !result.mood && result.drawers.length === 0;
-    setPhase(totallyEmpty && result.failedSources.length > 0 ? 'failed' : 'ready');
+    setFeedFailed(false);
+    const [auxResult, feedResult] = await Promise.allSettled([
+      fetchMomentsData(),
+      fetchMomentsFeed(),
+    ]);
+
+    if (auxResult.status === 'fulfilled') {
+      setData(auxResult.value);
+    } else {
+      setData(null);
+    }
+
+    if (feedResult.status === 'fulfilled') {
+      setFeedItems(feedResult.value.items);
+      setFeedCursor(feedResult.value.nextCursor);
+      setFeedHasMore(feedResult.value.hasMore);
+      setFeedFailed(false);
+    } else {
+      setFeedItems([]);
+      setFeedCursor(null);
+      setFeedHasMore(false);
+      setFeedFailed(true);
+    }
+
+    const aux = auxResult.status === 'fulfilled' ? auxResult.value : null;
+    const feedOk = feedResult.status === 'fulfilled';
+    const totallyEmpty = !feedOk
+      && (!aux || (aux.dreams.length === 0 && aux.gallery.length === 0 && !aux.mood && aux.drawers.length === 0));
+    setPhase(totallyEmpty ? 'failed' : 'ready');
   }, []);
+
+  const loadMore = useCallback(async () => {
+    if (!feedHasMore || feedLoadingMore || !feedCursor) return;
+    setFeedLoadingMore(true);
+    try {
+      const page = await fetchMomentsFeed(feedCursor);
+      setFeedItems((current) => {
+        const seen = new Set(current.map((item) => item.itemKey));
+        const merged = [...current];
+        for (const item of page.items) {
+          if (!seen.has(item.itemKey)) merged.push(item);
+        }
+        return merged;
+      });
+      setFeedCursor(page.nextCursor);
+      setFeedHasMore(page.hasMore);
+    } catch {
+      setToast('加载更多失败了，稍后再试。');
+      window.setTimeout(() => setToast(''), 2200);
+    } finally {
+      setFeedLoadingMore(false);
+    }
+  }, [feedCursor, feedHasMore, feedLoadingMore]);
 
   useEffect(() => {
     void load();
@@ -308,8 +357,8 @@ export function MomentsScreen() {
     setMoodSel(null);
   };
 
-  const dreams = useMemo(() => (data?.feed || []).filter((f) => f.kind === 'dream'), [data]);
-  const postsFeed = useMemo(() => (data?.feed || []).filter((f) => f.kind !== 'dream'), [data]);
+  const dreams = useMemo(() => data?.dreams || [], [data]);
+  const postsFeed = useMemo(() => feedItems, [feedItems]);
 
   const moodColor = data?.mood
     ? moodWordTone(data.mood.valence) === 'up' ? 'var(--rose)' : moodWordTone(data.mood.valence) === 'down' ? 'var(--err)' : 'var(--gold)'
@@ -404,13 +453,16 @@ export function MomentsScreen() {
               {/* ── 主页：混合时间线 ── */}
               {tab === 'home' && (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 22 }}>
-                  {data.feed.length === 0 && <EmptyState title="这里还没有念头" hint="费佳想到什么、做了什么梦、写了什么日摘要，都会自己出现在这里。" />}
-                  {data.feed.map((f, i) => (
-                    <div key={i} style={{ display: 'flex', gap: 12 }}>
-                      <DateRail sortKey={f.sortKey} visible={i === 0 || feedDateKey(f) !== feedDateKey(data.feed[i - 1])} />
+                  {feedFailed && feedItems.length === 0 && (
+                    <EmptyState title="时间线暂时读不到" hint="后端没有应答。重试后应该能重新看到念头。" />
+                  )}
+                  {!feedFailed && feedItems.length === 0 && <EmptyState title="这里还没有念头" hint="费佳想到什么，会自己出现在这里。" />}
+                  {feedItems.map((f, i) => (
+                    <div key={f.itemKey} style={{ display: 'flex', gap: 12 }}>
+                      <DateRail dateIso={f.createdAt || ''} visible={i === 0 || feedDateKey(f) !== feedDateKey(feedItems[i - 1])} />
                       <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 8 }}>
                         <span style={{ fontSize: 13.5, lineHeight: 1.9, color: 'var(--ink)', overflowWrap: 'break-word', wordBreak: 'break-word' }}>{f.content}</span>
-                        <div><KindTag kind={f.kind} /></div>
+                        <div><KindTag entry={f} /></div>
                         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
                           <LockedSocialRow onLocked={showLocked} dense />
                           {f.timeLabel ? (
@@ -422,7 +474,15 @@ export function MomentsScreen() {
                       </div>
                     </div>
                   ))}
-                  {data.feed.length > 0 && (
+                  {feedItems.length > 0 && feedHasMore && (
+                    <div
+                      onClick={() => void loadMore()}
+                      style={{ textAlign: 'center', padding: '10px 0 4px', fontFamily: DISPLAY, fontSize: 12, letterSpacing: 2, color: feedLoadingMore ? 'var(--ghost)' : 'var(--rose)', cursor: feedLoadingMore ? 'default' : 'pointer' }}
+                    >
+                      {feedLoadingMore ? '正在继续打捞…' : '加载更多'}
+                    </div>
+                  )}
+                  {feedItems.length > 0 && !feedHasMore && (
                     <div style={{ textAlign: 'center', padding: '18px 0 4px', fontFamily: DISPLAY, fontStyle: 'italic', fontSize: 11.5, letterSpacing: 2, color: 'var(--ghost)' }}>
                       — 流到这里就停了 —
                     </div>
@@ -433,15 +493,15 @@ export function MomentsScreen() {
               {/* ── 说说 ── */}
               {tab === 'posts' && (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-                  {postsFeed.length === 0 && <EmptyState title="还没有说说" hint="念头和日摘要写好之后会显示在这里。" />}
-                  {postsFeed.map((f, i) => (
-                    <div key={i} style={{ background: 'var(--card)', borderRadius: 18, boxShadow: '0 8px 20px var(--shadow)', padding: '15px 16px', display: 'flex', flexDirection: 'column', gap: 11 }}>
+                  {postsFeed.length === 0 && <EmptyState title="还没有说说" hint="念头写好之后会显示在这里。" />}
+                  {postsFeed.map((f) => (
+                    <div key={f.itemKey} style={{ background: 'var(--card)', borderRadius: 18, boxShadow: '0 8px 20px var(--shadow)', padding: '15px 16px', display: 'flex', flexDirection: 'column', gap: 11 }}>
                       <div style={{ display: 'flex', alignItems: 'baseline', gap: 10 }}>
                         <span style={{ fontSize: 15, fontWeight: 700, color: 'var(--deep)', letterSpacing: 1 }}>Fyodor</span>
                         <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--ink2)' }}>{f.dateLabel || '今天'}</span>
                       </div>
                       <span style={{ fontSize: 14.5, lineHeight: 1.9, color: 'var(--ink)', overflowWrap: 'break-word', wordBreak: 'break-word' }}>{f.content}</span>
-                      <div><KindTag kind={f.kind} /></div>
+                      <div><KindTag entry={f} /></div>
                       <div style={{ borderTop: '1px solid var(--line)', paddingTop: 10, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
                         <LockedSocialRow onLocked={showLocked} />
                         {f.timeLabel ? (
@@ -488,9 +548,9 @@ export function MomentsScreen() {
                   {dreams.length > 0 && (
                     <div style={{ fontSize: 10.5, color: 'var(--ghost)', padding: '0 4px', lineHeight: 1.6 }}>回溯与 V/A 读数还没做——等梦境生成时能标情绪了再补。</div>
                   )}
-                  {dreams.map((d, i) => {
+                  {dreams.map((d) => {
                     const scene = classifyDreamScene(d.title || '', d.content);
-                    const glowing = hoveredDream === i;
+                    const glowing = hoveredDream === d.id;
                     const baseOp = glowing ? 0.68 : 0.06;
                     const glowOp = glowing ? 0.5 : 0;
                     const titleC = glowing ? '#EFDFC8' : 'var(--dream)';
@@ -500,12 +560,12 @@ export function MomentsScreen() {
                     const chipC = glowing ? 'rgba(245,235,225,0.9)' : 'var(--dream)';
                     return (
                       <div
-                        key={i}
+                        key={d.id}
                         onClick={() => setDreamOpen(d)}
-                        onMouseEnter={() => setHoveredDream(i)}
-                        onMouseLeave={() => setHoveredDream((cur) => (cur === i ? null : cur))}
-                        onTouchStart={() => setHoveredDream(i)}
-                        onTouchEnd={() => setHoveredDream((cur) => (cur === i ? null : cur))}
+                        onMouseEnter={() => setHoveredDream(d.id)}
+                        onMouseLeave={() => setHoveredDream((cur) => (cur === d.id ? null : cur))}
+                        onTouchStart={() => setHoveredDream(d.id)}
+                        onTouchEnd={() => setHoveredDream((cur) => (cur === d.id ? null : cur))}
                         style={{ position: 'relative', cursor: 'pointer', overflow: 'hidden', background: 'var(--card)', borderRadius: 18, boxShadow: '0 8px 22px var(--shadow)' }}
                       >
                         <div style={{ position: 'absolute', inset: 0, background: scene.base, opacity: baseOp, transition: 'opacity 1.3s ease', pointerEvents: 'none' }} />

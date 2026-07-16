@@ -4,6 +4,8 @@
 // a failed fetch surfaces an honest error state instead of fake data.
 import { http } from './http';
 
+const SHANGHAI_TZ = 'Asia/Shanghai';
+
 // ── raw wire shapes ──
 
 interface BrainItemsResponse<T> {
@@ -12,30 +14,24 @@ interface BrainItemsResponse<T> {
   error?: string;
 }
 
-interface ThoughtRow {
-  time: string; // 'HH:MM'
-  content: string;
-}
-
 interface DreamRow {
-  date: string; // 'YYYY-MM-DD'
+  id: number;
+  author: string;
+  created_at: string | null;
+  date: string;
   title: string;
   content: string;
-  emotion: string; // hardcoded '朦胧' server-side today
-}
-
-interface DiaryRow {
-  date: string; // 'YYYY-MM-DD'
-  content: string;
+  emotion: string;
 }
 
 interface EmotionMemoryRow {
-  time: string; // 'YYYY-MM-DD'
+  time: string;
   valence: number;
   arousal: number;
   emotion: string;
   note: string;
   domain: string;
+  scale?: string;
 }
 
 interface EmotionStateResponse {
@@ -78,18 +74,72 @@ interface ToolDrawersResponse {
   error?: string;
 }
 
+interface FeedWireItem {
+  item_key: string;
+  post_id: number | null;
+  collection_id: number | null;
+  gallery_pid: string | null;
+  kind: 'thought';
+  author: string;
+  content: string;
+  title: string | null;
+  tags: string[];
+  brewing: boolean;
+  created_at: string | null;
+  social: {
+    likes: number;
+    dislikes: number;
+    comments: number;
+    my_reaction: 'like' | 'dislike' | null;
+  };
+}
+
+interface FeedWireResponse {
+  items: FeedWireItem[];
+  next_cursor: string | null;
+  has_more: boolean;
+  error?: string;
+}
+
 // ── frontend-facing types ──
 
-export type FeedKind = 'thought' | 'diary' | 'dream';
+export type FeedKind = 'thought';
+
+export interface FeedSocial {
+  likes: number;
+  dislikes: number;
+  comments: number;
+  myReaction: 'like' | 'dislike' | null;
+}
 
 export interface FeedEntry {
+  itemKey: string;
   kind: FeedKind;
-  /** sortable ISO-ish key: 'YYYY-MM-DD HH:MM' or 'YYYY-MM-DD' */
-  sortKey: string;
+  postId: number;
+  author: string;
+  content: string;
+  createdAt: string | null;
+  tags: string[];
+  brewing: boolean;
+  social: FeedSocial;
   dateLabel: string;
   timeLabel: string;
+}
+
+export interface DreamEntry {
+  id: number;
+  author: string;
+  createdAt: string | null;
+  dateLabel: string;
+  title: string;
   content: string;
-  title?: string;
+  emotion: string;
+}
+
+export interface MomentsFeedPage {
+  items: FeedEntry[];
+  nextCursor: string | null;
+  hasMore: boolean;
 }
 
 export interface EmotionMemoryPoint {
@@ -128,18 +178,93 @@ export interface ToolDrawer {
 }
 
 export interface MomentsData {
-  feed: FeedEntry[];
+  dreams: DreamEntry[];
   gallery: GalleryPhoto[];
   mood: MoodState | null;
   emotionMemories: EmotionMemoryPoint[];
   drawers: ToolDrawer[];
   drawersEnabled: boolean;
-  /** endpoints that failed to load, for an honest partial-failure notice */
   failedSources: string[];
 }
 
-function shortTime(hhmm: string | undefined): string {
-  return (hhmm || '').slice(0, 5);
+function shanghaiDateParts(iso: string | null): { year: number; month: number; day: number; hour: number; minute: number } | null {
+  if (!iso) return null;
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return null;
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: SHANGHAI_TZ,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  }).formatToParts(date);
+  const read = (type: string) => Number(parts.find((part) => part.type === type)?.value || '0');
+  return {
+    year: read('year'),
+    month: read('month'),
+    day: read('day'),
+    hour: read('hour'),
+    minute: read('minute'),
+  };
+}
+
+function shanghaiTodayParts(): { year: number; month: number; day: number } {
+  const parts = shanghaiDateParts(new Date().toISOString());
+  return parts || { year: 1970, month: 1, day: 1 };
+}
+
+export function formatFeedLabels(createdAt: string | null): { dateLabel: string; timeLabel: string } {
+  const parts = shanghaiDateParts(createdAt);
+  if (!parts) return { dateLabel: '', timeLabel: '' };
+
+  const today = shanghaiTodayParts();
+  const yesterday = new Date(Date.UTC(today.year, today.month - 1, today.day));
+  yesterday.setUTCDate(yesterday.getUTCDate() - 1);
+
+  const sameDay = (a: { year: number; month: number; day: number }, b: { year: number; month: number; day: number }) =>
+    a.year === b.year && a.month === b.month && a.day === b.day;
+
+  let dateLabel: string;
+  if (sameDay(parts, today)) {
+    dateLabel = '今天';
+  } else if (
+    sameDay(parts, {
+      year: yesterday.getUTCFullYear(),
+      month: yesterday.getUTCMonth() + 1,
+      day: yesterday.getUTCDate(),
+    })
+  ) {
+    dateLabel = '昨天';
+  } else {
+    dateLabel = `${parts.month}月${parts.day}日`;
+  }
+
+  const timeLabel = `${String(parts.hour).padStart(2, '0')}:${String(parts.minute).padStart(2, '0')}`;
+  return { dateLabel, timeLabel };
+}
+
+function mapFeedItem(item: FeedWireItem): FeedEntry {
+  const labels = formatFeedLabels(item.created_at);
+  return {
+    itemKey: item.item_key,
+    kind: item.kind,
+    postId: item.post_id || 0,
+    author: item.author,
+    content: item.content,
+    createdAt: item.created_at,
+    tags: item.tags || [],
+    brewing: Boolean(item.brewing),
+    social: {
+      likes: item.social?.likes ?? 0,
+      dislikes: item.social?.dislikes ?? 0,
+      comments: item.social?.comments ?? 0,
+      myReaction: item.social?.my_reaction ?? null,
+    },
+    dateLabel: labels.dateLabel,
+    timeLabel: labels.timeLabel,
+  };
 }
 
 async function safe<T>(label: string, fn: () => Promise<T>, failed: string[]): Promise<T | null> {
@@ -152,43 +277,48 @@ async function safe<T>(label: string, fn: () => Promise<T>, failed: string[]): P
   }
 }
 
+export async function fetchMomentsFeed(cursor?: string, limit = 20): Promise<MomentsFeedPage> {
+  const response = await http.get<FeedWireResponse>('/api/moments/feed', {
+    cursor,
+    limit,
+    type: 'all',
+  });
+  if (response.error) {
+    throw new Error(response.error);
+  }
+  return {
+    items: (response.items || []).map(mapFeedItem),
+    nextCursor: response.next_cursor,
+    hasMore: Boolean(response.has_more),
+  };
+}
+
 export async function fetchMomentsData(): Promise<MomentsData> {
   const failed: string[] = [];
 
-  const [thoughts, dreams, diary, moodRes, emoMemRes, galleryRes, drawersRes] = await Promise.all([
-    safe('thoughts', () => http.get<BrainItemsResponse<ThoughtRow>>('/api/brain/thoughts'), failed),
+  const [dreams, moodRes, emoMemRes, galleryRes, drawersRes] = await Promise.all([
     safe('dreams', () => http.get<BrainItemsResponse<DreamRow>>('/api/brain/dreams'), failed),
-    safe('diary', () => http.get<BrainItemsResponse<DiaryRow>>('/api/brain/diary'), failed),
     safe('mood', () => http.get<EmotionStateResponse>('/api/brain/emotion_state'), failed),
     safe('emotion memories', () => http.get<BrainItemsResponse<EmotionMemoryRow>>('/api/brain/emotions'), failed),
     safe('gallery', () => http.get<{ photos: GalleryPhotoRow[] }>('/api/gallery/photos'), failed),
     safe('tool drawers', () => http.get<ToolDrawersResponse>('/api/tools/drawers'), failed),
   ]);
 
-  const feed: FeedEntry[] = [];
-  if (thoughts?.ok) {
-    for (const t of thoughts.items || []) {
-      if (!t.content) continue;
-      const today = new Date().toISOString().slice(0, 10);
-      feed.push({ kind: 'thought', sortKey: `${today} ${shortTime(t.time)}`, dateLabel: '', timeLabel: shortTime(t.time), content: t.content });
-    }
-  } else if (thoughts && !thoughts.ok) failed.push('thoughts');
-
-  if (dreams?.ok) {
-    for (const d of dreams.items || []) {
-      if (!d.content) continue;
-      feed.push({ kind: 'dream', sortKey: `${d.date} 00:00`, dateLabel: d.date, timeLabel: '', content: d.content, title: d.title });
-    }
-  } else if (dreams && !dreams.ok) failed.push('dreams');
-
-  if (diary?.ok) {
-    for (const d of diary.items || []) {
-      if (!d.content) continue;
-      feed.push({ kind: 'diary', sortKey: `${d.date} 00:00`, dateLabel: d.date, timeLabel: '', content: d.content });
-    }
-  } else if (diary && !diary.ok) failed.push('diary');
-
-  feed.sort((a, b) => (a.sortKey < b.sortKey ? 1 : a.sortKey > b.sortKey ? -1 : 0));
+  const dreamEntries: DreamEntry[] = dreams?.ok
+    ? (dreams.items || []).map((d) => {
+        const labels = formatFeedLabels(d.created_at);
+        return {
+          id: d.id,
+          author: d.author,
+          createdAt: d.created_at,
+          dateLabel: labels.dateLabel || d.date,
+          title: d.title,
+          content: d.content,
+          emotion: d.emotion,
+        };
+      })
+    : [];
+  if (dreams && !dreams.ok) failed.push('dreams');
 
   const mood: MoodState | null = moodRes?.ok && moodRes.current
     ? {
@@ -202,7 +332,14 @@ export async function fetchMomentsData(): Promise<MomentsData> {
   if (moodRes && !moodRes.ok) failed.push('mood');
 
   const emotionMemories: EmotionMemoryPoint[] = emoMemRes?.ok
-    ? (emoMemRes.items || []).map((r) => ({ time: r.time, valence: r.valence, arousal: r.arousal, emotion: r.emotion, note: r.note, domain: r.domain }))
+    ? (emoMemRes.items || []).map((r) => ({
+        time: r.time,
+        valence: r.valence,
+        arousal: r.arousal,
+        emotion: r.emotion,
+        note: r.note,
+        domain: r.domain,
+      }))
     : [];
   if (emoMemRes && !emoMemRes.ok) failed.push('emotion memories');
 
@@ -222,7 +359,7 @@ export async function fetchMomentsData(): Promise<MomentsData> {
   if (drawersRes && !drawersRes.ok) failed.push('tool drawers');
 
   return {
-    feed,
+    dreams: dreamEntries,
     gallery,
     mood,
     emotionMemories,
@@ -240,4 +377,8 @@ export function moodWordTone(valence: number): 'up' | 'down' | 'level' {
   if (valence >= 0.15) return 'up';
   if (valence <= -0.15) return 'down';
   return 'level';
+}
+
+export function feedDateKey(entry: FeedEntry): string {
+  return entry.createdAt?.slice(0, 10) || '';
 }

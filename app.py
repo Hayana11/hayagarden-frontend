@@ -7,7 +7,10 @@ import command_store
 import group_chat_store
 import codex_app_server
 import context_usage_store
+import moments_store
 from context_usage_routes import create_context_usage_blueprint
+from moments_routes import create_moments_blueprint
+from valence_scale import normalize_arousal, normalize_valence
 
 app = Flask(__name__, static_folder='static')
 DB_PATH = '/opt/frontend/memories.db'
@@ -55,9 +58,14 @@ def _migrate_chat_columns():
 _migrate_chat_columns()
 group_chat_store.ensure_schema(DB_PATH)
 context_usage_store.ensure_schema(DB_PATH)
+moments_store.ensure_schema(DB_PATH, gallery_store.DB_PATH)
 app.register_blueprint(create_context_usage_blueprint(
     db_path=DB_PATH,
     report_token_getter=lambda: CONTEXT_USAGE_REPORT_TOKEN,
+))
+app.register_blueprint(create_moments_blueprint(
+    memories_db_path=DB_PATH,
+    gallery_db_path=gallery_store.DB_PATH,
 ))
 
 
@@ -1961,14 +1969,22 @@ def brain_emotions_proxy():
         return jsonify({'ok': False, 'error': 'frontmatter not installed'}), 500
 
     def _emotion_label(v, a):
-        if v >= 0.65 and a >= 0.60: return '喜悦'
-        if v >= 0.65 and a >= 0.40: return '愉悦'
-        if v >= 0.65:                return '平静'
-        if v >= 0.45 and a >= 0.65: return '兴奋'
-        if v >= 0.45 and a < 0.35:  return '松弛'
-        if v < 0.35  and a >= 0.60: return '焦虑'
-        if v < 0.35  and a >= 0.35: return '沉重'
-        if v < 0.35:                 return '低落'
+        if v >= 0.3 and a >= 0.60:
+            return '喜悦'
+        if v >= 0.3 and a >= 0.40:
+            return '愉悦'
+        if v >= 0.3:
+            return '平静'
+        if v >= -0.1 and a >= 0.65:
+            return '兴奋'
+        if v >= -0.1 and a < 0.35:
+            return '松弛'
+        if v < -0.3 and a >= 0.60:
+            return '焦虑'
+        if v < -0.3 and a >= 0.35:
+            return '沉重'
+        if v < -0.3:
+            return '低落'
         return '迷离'
 
     try:
@@ -1982,7 +1998,11 @@ def brain_emotions_proxy():
                 _a = _meta.get('arousal')
                 if _v is None or _a is None:
                     continue
-                _fv, _fa = float(_v), float(_a)
+                _fv = float(_v)
+                _fa = float(_a)
+                _scale = _meta.get('valence_scale')
+                _fv = normalize_valence(_fv, scale=_scale)
+                _fa = normalize_arousal(_fa)
                 _note = (_post.content or '').replace('[[', '').replace(']]', '').strip()[:80]
                 items.append({
                     'time': (_meta.get('last_active') or _meta.get('created', ''))[:10],
@@ -1991,6 +2011,7 @@ def brain_emotions_proxy():
                     'emotion': _emotion_label(_fv, _fa),
                     'note': _note,
                     'domain': '、'.join(_meta.get('domain', [])),
+                    'scale': 'bipolar',
                 })
             except Exception:
                 continue
@@ -2004,13 +2025,22 @@ def brain_dreams_proxy():
     try:
         conn = get_db()
         rows = conn.execute(
-            "SELECT content, created_at FROM posts WHERE type='DREAM' ORDER BY id DESC LIMIT 10"
+            "SELECT id, author, content, created_at FROM posts WHERE type='DREAM' ORDER BY id DESC LIMIT 10"
         ).fetchall()
         conn.close()
-        items = [{'date': r['created_at'][:10] if r['created_at'] else '-',
-                  'title': (r['content'][:40] + '...') if r['content'] else '无题',
-                  'content': (r['content'] or ''),
-                  'emotion': '朦胧'} for r in rows]
+        items = []
+        for r in rows:
+            created_at = moments_store.to_iso8601_shanghai(r['created_at'])
+            content = r['content'] or ''
+            items.append({
+                'id': int(r['id']),
+                'author': (r['author'] or 'fyodor').strip() or 'fyodor',
+                'created_at': created_at,
+                'date': created_at[:10] if created_at else '-',
+                'title': (content[:40] + '...') if len(content) > 40 else (content or '无题'),
+                'content': content,
+                'emotion': '朦胧',
+            })
         return jsonify({'ok': True, 'items': items})
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e)}), 500
@@ -2020,11 +2050,19 @@ def brain_thoughts_proxy():
     try:
         conn = get_db()
         rows = conn.execute(
-            "SELECT content, created_at FROM posts WHERE type='THOUGHT' ORDER BY id DESC LIMIT 10"
+            "SELECT id, author, content, created_at FROM posts WHERE type='THOUGHT' ORDER BY id DESC LIMIT 10"
         ).fetchall()
         conn.close()
-        items = [{'time': r['created_at'][11:16] if r['created_at'] else '-',
-                  'content': (r['content'] or '')} for r in rows if r['content']]
+        items = []
+        for r in rows:
+            created_at = moments_store.to_iso8601_shanghai(r['created_at'])
+            items.append({
+                'id': int(r['id']),
+                'author': (r['author'] or 'fyodor').strip() or 'fyodor',
+                'created_at': created_at,
+                'time': created_at[11:16] if created_at else '-',
+                'content': (r['content'] or ''),
+            })
         return jsonify({'ok': True, 'items': items})
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e)}), 500
@@ -2035,7 +2073,7 @@ def brain_diary_proxy():
     try:
         conn = get_db()
         rows = conn.execute(
-            "SELECT content, created_at FROM posts WHERE type='DAILY_SUMMARY' "
+            "SELECT id, author, content, created_at FROM posts WHERE type='DAILY_SUMMARY' "
             "ORDER BY created_at DESC LIMIT 14"
         ).fetchall()
         conn.close()
@@ -2046,7 +2084,14 @@ def brain_diary_proxy():
             if not c or c in seen:
                 continue
             seen.add(c)
-            items.append({'date': r['created_at'][:10] if r['created_at'] else '\u2014', 'content': c})
+            created_at = moments_store.to_iso8601_shanghai(r['created_at'])
+            items.append({
+                'id': int(r['id']),
+                'author': (r['author'] or 'fyodor').strip() or 'fyodor',
+                'created_at': created_at,
+                'date': created_at[:10] if created_at else '\u2014',
+                'content': c,
+            })
         return jsonify({'ok': True, 'items': items})
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e)}), 500
