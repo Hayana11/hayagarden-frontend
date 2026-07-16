@@ -1,16 +1,12 @@
 // Fyodor Moments — implements Fyodor Moments.dc.html against real backend
 // data (念头/日摘要/梦境 from posts, mood from emotion_state, per-memory V/A
 // points from ombre-brain frontmatter, gallery photos, tool drawers).
-//
-// Features with no backend yet (mood history chart, manual mood correction,
-// per-tool toggles) stay visible as locked placeholders — matching the系统配置
-// page's pattern of showing the real control disabled with an honest
-// "后端尚未接入" note and a toast on click, rather than either faking success
-// or hiding the UI.
 import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type CSSProperties } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { smoothPath } from '../lib/format';
 import {
   establishMomentsSession,
+  fetchEmotionHistory,
   fetchMomentComments,
   fetchMomentsCover,
   fetchMomentsData,
@@ -18,10 +14,13 @@ import {
   fetchMomentsOwnerStatus,
   galleryPhotoUrl,
   moodWordTone,
+  patchToolDrawer,
   postMomentComment,
   reactToMoment,
+  updateEmotionMemory,
   uploadMomentsCover,
   type DreamEntry,
+  type EmotionHistoryPoint,
   type EmotionMemoryPoint,
   type FeedEntry,
   type FeedSocial,
@@ -38,7 +37,6 @@ const SETTINGS_KEY = 'fyodor-chat-settings';
 const SERIF = "'Noto Serif SC', serif";
 const DISPLAY = "'Bodoni Moda', serif";
 const MONO = 'ui-monospace, Menlo, monospace';
-const LOCKED = '这个功能还没有接入后端，先留在这里。';
 
 const LIGHT_VARS: Record<string, string> = {
   '--bg': '#F7F1EE', '--card': '#FFFFFF', '--card2': '#F6EFEC', '--bubble': '#F0DFDB',
@@ -468,9 +466,9 @@ function SocialRow({
   );
 }
 
-function LockToggle({ on, disabled = true, onClick }: { on: boolean; disabled?: boolean; onClick: () => void }) {
+function LockToggle({ on, disabled = false, onClick }: { on: boolean; disabled?: boolean; onClick: () => void }) {
   return (
-    <div onClick={onClick} style={{ cursor: 'pointer', width: 30, height: 18, borderRadius: 999, padding: 2, background: on ? 'var(--rose)' : 'var(--line)', opacity: disabled ? 0.55 : 1, transition: 'background .2s', flexShrink: 0 }} title={LOCKED}>
+    <div onClick={disabled ? undefined : onClick} style={{ cursor: disabled ? 'not-allowed' : 'pointer', width: 30, height: 18, borderRadius: 999, padding: 2, background: on ? 'var(--rose)' : 'var(--line)', opacity: disabled ? 0.55 : 1, transition: 'background .2s', flexShrink: 0 }}>
       <div style={{ width: 14, height: 14, borderRadius: '50%', background: '#fff', boxShadow: '0 2px 5px rgba(0,0,0,0.2)', transition: 'transform .2s', transform: `translateX(${on ? 12 : 0}px)` }} />
     </div>
   );
@@ -500,7 +498,12 @@ export function MomentsScreen() {
   const [dreamOpen, setDreamOpen] = useState<DreamEntry | null>(null);
   const [hoveredDream, setHoveredDream] = useState<number | null>(null);
   const [moodSel, setMoodSel] = useState<EmotionMemoryPoint | null>(null);
+  const [moodDraft, setMoodDraft] = useState<{ valence: number; arousal: number } | null>(null);
   const [moodRange, setMoodRange] = useState<'7' | '30'>('7');
+  const [emotionHistory, setEmotionHistory] = useState<EmotionHistoryPoint[]>([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [savingMood, setSavingMood] = useState(false);
+  const [toolBusy, setToolBusy] = useState<string | null>(null);
   const [drawerOpen, setDrawerOpen] = useState<Record<string, boolean>>({});
   const [toast, setToast] = useState('');
   const [coverUrl, setCoverUrl] = useState<string | null>(null);
@@ -518,10 +521,6 @@ export function MomentsScreen() {
     setToast(msg);
     window.setTimeout(() => setToast((t) => (t === msg ? '' : t)), 2200);
   }, []);
-
-  const showLocked = useCallback(() => {
-    flashToast(LOCKED);
-  }, [flashToast]);
 
   const patchFeedSocial = useCallback((itemKey: string, social: FeedSocial) => {
     setFeedItems((items) => items.map((f) => (f.itemKey === itemKey ? { ...f, social } : f)));
@@ -546,6 +545,13 @@ export function MomentsScreen() {
   const requestOwnerUnlock = useCallback(() => {
     setUnlockOpen(true);
   }, []);
+
+  const ensureOwner = useCallback(() => {
+    if (ownerStatus.authenticated) return true;
+    requestOwnerUnlock();
+    flashToast('需要主人授权');
+    return false;
+  }, [flashToast, ownerStatus.authenticated, requestOwnerUnlock]);
 
   const submitOwnerUnlock = useCallback(async () => {
     const token = unlockDraft.trim();
@@ -757,6 +763,98 @@ export function MomentsScreen() {
   }, []);
 
   const dreams = useMemo(() => data?.dreams || [], [data]);
+
+  useEffect(() => {
+    if (moodSel) {
+      setMoodDraft({ valence: moodSel.valence, arousal: moodSel.arousal });
+    } else {
+      setMoodDraft(null);
+    }
+  }, [moodSel]);
+
+  useEffect(() => {
+    if (tab !== 'mood') return;
+    setHistoryLoading(true);
+    void fetchEmotionHistory(moodRange === '7' ? 7 : 30)
+      .then(setEmotionHistory)
+      .catch(() => setEmotionHistory([]))
+      .finally(() => setHistoryLoading(false));
+  }, [tab, moodRange]);
+
+  const historyChart = useMemo(() => {
+    if (emotionHistory.length < 2) return null;
+    const vals = emotionHistory.map((point) => (point.valence + 1) / 2);
+    const w = 280;
+    const h = 86;
+    const line = smoothPath(vals, w, h);
+    const last = emotionHistory[emotionHistory.length - 1];
+    return { line, w, h, last };
+  }, [emotionHistory]);
+
+  const saveMoodCorrection = useCallback(async () => {
+    if (!moodSel?.path || !moodDraft || savingMood) return;
+    if (!ensureOwner()) return;
+    setSavingMood(true);
+    try {
+      const updated = await updateEmotionMemory(moodSel.path, moodDraft.valence, moodDraft.arousal);
+      setData((prev) => (
+        prev
+          ? {
+              ...prev,
+              emotionMemories: prev.emotionMemories.map((point) => (
+                point.path === updated.path ? updated : point
+              )),
+            }
+          : prev
+      ));
+      setMoodSel(updated);
+      flashToast('情绪修正已保存');
+    } catch (err) {
+      if (err instanceof HttpError && err.status === 401) requestOwnerUnlock();
+      flashToast('保存失败');
+    } finally {
+      setSavingMood(false);
+    }
+  }, [ensureOwner, flashToast, moodDraft, moodSel, requestOwnerUnlock, savingMood]);
+
+  const resetMoodDraft = useCallback(() => {
+    if (!moodSel) return;
+    setMoodDraft({ valence: moodSel.valence, arousal: moodSel.arousal });
+  }, [moodSel]);
+
+  const toggleDrawerEnabled = useCallback(async (drawerId: string, enabled: boolean) => {
+    if (toolBusy) return;
+    if (!ensureOwner()) return;
+    const key = `drawer:${drawerId}`;
+    setToolBusy(key);
+    try {
+      const result = await patchToolDrawer({ drawerId, enabled });
+      setData((prev) => (prev ? { ...prev, drawers: result.drawers, drawersEnabled: result.drawersEnabled } : prev));
+      flashToast(enabled ? '抽屉已启用' : '抽屉已关闭');
+    } catch (err) {
+      if (err instanceof HttpError && err.status === 401) requestOwnerUnlock();
+      flashToast('更新失败');
+    } finally {
+      setToolBusy(null);
+    }
+  }, [ensureOwner, flashToast, requestOwnerUnlock, toolBusy]);
+
+  const toggleToolEnabled = useCallback(async (tool: string, enabled: boolean) => {
+    if (toolBusy) return;
+    if (!ensureOwner()) return;
+    const key = `tool:${tool}`;
+    setToolBusy(key);
+    try {
+      const result = await patchToolDrawer({ tool, enabled });
+      setData((prev) => (prev ? { ...prev, drawers: result.drawers, drawersEnabled: result.drawersEnabled } : prev));
+      flashToast(enabled ? '工具已启用' : '工具已关闭');
+    } catch (err) {
+      if (err instanceof HttpError && err.status === 401) requestOwnerUnlock();
+      flashToast('更新失败');
+    } finally {
+      setToolBusy(null);
+    }
+  }, [ensureOwner, flashToast, requestOwnerUnlock, toolBusy]);
 
   const moodColor = data?.mood
     ? moodWordTone(data.mood.valence) === 'up' ? 'var(--rose)' : moodWordTone(data.mood.valence) === 'down' ? 'var(--err)' : 'var(--gold)'
@@ -1046,7 +1144,7 @@ export function MomentsScreen() {
                     )}
                   </div>
 
-                  {/* 情绪时间线：锁定占位，没有连续历史数据 */}
+                  {/* 情绪时间线 */}
                   <div style={{ background: 'var(--card)', borderRadius: 20, padding: 16, boxShadow: '0 6px 16px var(--shadow)' }}>
                     <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
                       <span style={{ fontSize: 14, fontWeight: 600, letterSpacing: 1.5, color: 'var(--ink)' }}>情绪时间线</span>
@@ -1058,9 +1156,24 @@ export function MomentsScreen() {
                         ))}
                       </div>
                     </div>
-                    <div style={{ position: 'relative', height: 110, marginTop: 14, borderRadius: 14, background: 'var(--card2)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                    <div style={{ position: 'relative', height: 110, marginTop: 14, borderRadius: 14, background: 'var(--card2)', overflow: 'hidden' }}>
                       <div style={{ position: 'absolute', left: 14, right: 14, top: '50%', height: 1, background: 'var(--line)' }} />
-                      <span style={{ fontSize: 11.5, color: 'var(--ghost)', letterSpacing: 1, textAlign: 'center', padding: '0 20px' }}>还没有连续的情绪记录<br />后端还没有把每天的读数存下来</span>
+                      {historyLoading ? (
+                        <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 11.5, color: 'var(--ghost)' }}>读取中…</div>
+                      ) : historyChart ? (
+                        <svg viewBox={`0 0 ${historyChart.w} ${historyChart.h}`} preserveAspectRatio="none" style={{ position: 'absolute', inset: '12px 14px', width: 'calc(100% - 28px)', height: 'calc(100% - 24px)' }}>
+                          <path d={historyChart.line} fill="none" stroke="var(--rose)" strokeWidth={2.2} strokeLinecap="round" />
+                        </svg>
+                      ) : (
+                        <span style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 11.5, color: 'var(--ghost)', letterSpacing: 1, textAlign: 'center', padding: '0 20px' }}>
+                          还没有连续的情绪记录<br />对话评分后会自动积累
+                        </span>
+                      )}
+                      {historyChart?.last && (
+                        <span style={{ position: 'absolute', right: 12, bottom: 8, fontFamily: DISPLAY, fontSize: 10, color: 'var(--ghost)' }}>
+                          最近 {historyChart.last.day} · V {historyChart.last.valence >= 0 ? '+' : ''}{historyChart.last.valence.toFixed(2)}
+                        </span>
+                      )}
                     </div>
                   </div>
 
@@ -1102,24 +1215,45 @@ export function MomentsScreen() {
                         </div>
                         <span style={{ fontSize: 12, color: 'var(--ink2)', lineHeight: 1.8 }}>{moodSel.note}</span>
 
-                        {/* 修正这一刻的情绪：锁定占位，没有写回接口 */}
-                        <div style={{ borderTop: '1px dashed var(--line)', marginTop: 2, paddingTop: 10, display: 'flex', flexDirection: 'column', gap: 10 }}>
-                          <span style={{ fontSize: 11.5, color: 'var(--ghost)', letterSpacing: 1 }}>修正这一刻的情绪 · 尚未接入</span>
-                          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                            <span style={{ fontSize: 11.5, color: 'var(--mut)', width: 50, flexShrink: 0 }}>V 愉悦</span>
-                            <input type="range" min={-1} max={1} step={0.01} value={moodSel.valence} disabled style={{ flex: 1, accentColor: 'var(--rose)', opacity: 0.5, cursor: 'not-allowed' }} onChange={showLocked} onClick={showLocked} />
-                            <span style={{ fontFamily: DISPLAY, fontSize: 11.5, color: 'var(--rose)', width: 40, textAlign: 'right', flexShrink: 0 }}>{moodSel.valence >= 0 ? '+' : ''}{moodSel.valence.toFixed(2)}</span>
+                        {moodDraft && (
+                          <div style={{ borderTop: '1px dashed var(--line)', marginTop: 2, paddingTop: 10, display: 'flex', flexDirection: 'column', gap: 10 }}>
+                            <span style={{ fontSize: 11.5, color: 'var(--ghost)', letterSpacing: 1 }}>
+                              修正这一刻的情绪{moodSel.path ? '' : ' · 该点缺少可写回路径'}
+                            </span>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                              <span style={{ fontSize: 11.5, color: 'var(--mut)', width: 50, flexShrink: 0 }}>V 愉悦</span>
+                              <input
+                                type="range"
+                                min={-1}
+                                max={1}
+                                step={0.01}
+                                value={moodDraft.valence}
+                                disabled={!moodSel.path || savingMood}
+                                style={{ flex: 1, accentColor: 'var(--rose)', opacity: moodSel.path ? 1 : 0.5, cursor: moodSel.path ? 'pointer' : 'not-allowed' }}
+                                onChange={(e) => setMoodDraft((draft) => draft ? { ...draft, valence: Number(e.target.value) } : draft)}
+                              />
+                              <span style={{ fontFamily: DISPLAY, fontSize: 11.5, color: 'var(--rose)', width: 40, textAlign: 'right', flexShrink: 0 }}>{moodDraft.valence >= 0 ? '+' : ''}{moodDraft.valence.toFixed(2)}</span>
+                            </div>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                              <span style={{ fontSize: 11.5, color: 'var(--mut)', width: 50, flexShrink: 0 }}>A 唤醒</span>
+                              <input
+                                type="range"
+                                min={0}
+                                max={1}
+                                step={0.01}
+                                value={moodDraft.arousal}
+                                disabled={!moodSel.path || savingMood}
+                                style={{ flex: 1, accentColor: 'var(--gold)', opacity: moodSel.path ? 1 : 0.5, cursor: moodSel.path ? 'pointer' : 'not-allowed' }}
+                                onChange={(e) => setMoodDraft((draft) => draft ? { ...draft, arousal: Number(e.target.value) } : draft)}
+                              />
+                              <span style={{ fontFamily: DISPLAY, fontSize: 11.5, color: 'var(--gold)', width: 40, textAlign: 'right', flexShrink: 0 }}>{moodDraft.arousal.toFixed(2)}</span>
+                            </div>
+                            <div style={{ display: 'flex', gap: 8 }}>
+                              <div onClick={resetMoodDraft} style={{ cursor: moodSel.path ? 'pointer' : 'not-allowed', flex: 1, textAlign: 'center', padding: '9px 0', borderRadius: 999, background: 'var(--card)', color: 'var(--mut)', fontSize: 12.5, letterSpacing: 1 }}>还原</div>
+                              <div onClick={() => void saveMoodCorrection()} style={{ cursor: moodSel.path && !savingMood ? 'pointer' : 'not-allowed', flex: 1, textAlign: 'center', padding: '9px 0', borderRadius: 999, background: moodSel.path ? 'var(--rosebg)' : 'var(--card)', color: moodSel.path ? 'var(--deep)' : 'var(--ghost)', fontSize: 12.5, letterSpacing: 1 }}>{savingMood ? '保存中…' : '保存修正'}</div>
+                            </div>
                           </div>
-                          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                            <span style={{ fontSize: 11.5, color: 'var(--mut)', width: 50, flexShrink: 0 }}>A 唤醒</span>
-                            <input type="range" min={0} max={1} step={0.01} value={moodSel.arousal} disabled style={{ flex: 1, accentColor: 'var(--gold)', opacity: 0.5, cursor: 'not-allowed' }} onChange={showLocked} onClick={showLocked} />
-                            <span style={{ fontFamily: DISPLAY, fontSize: 11.5, color: 'var(--gold)', width: 40, textAlign: 'right', flexShrink: 0 }}>{moodSel.arousal.toFixed(2)}</span>
-                          </div>
-                          <div style={{ display: 'flex', gap: 8 }}>
-                            <div onClick={showLocked} style={{ cursor: 'pointer', flex: 1, textAlign: 'center', padding: '9px 0', borderRadius: 999, background: 'var(--card)', color: 'var(--ghost)', fontSize: 12.5, letterSpacing: 1 }}>还原</div>
-                            <div onClick={showLocked} style={{ cursor: 'pointer', flex: 1, textAlign: 'center', padding: '9px 0', borderRadius: 999, background: 'var(--card)', color: 'var(--ghost)', fontSize: 12.5, letterSpacing: 1 }}>保存修正</div>
-                          </div>
-                        </div>
+                        )}
                       </div>
                     )}
                     <span style={{ display: 'block', fontSize: 11, color: 'var(--ghost)', marginTop: 10, lineHeight: 1.7 }}>点击一个点可以看到它关联的记忆。</span>
@@ -1149,14 +1283,22 @@ export function MomentsScreen() {
                               </svg>
                             </div>
                             <span style={{ fontSize: 10.5, color: 'var(--ghost)' }}>全部启用</span>
-                            <LockToggle on onClick={showLocked} />
+                            <LockToggle
+                              on={tg.enabled}
+                              disabled={Boolean(toolBusy)}
+                              onClick={() => void toggleDrawerEnabled(tg.id, !tg.enabled)}
+                            />
                           </div>
                           {open && (
                             <div style={{ padding: '0 15px 14px', display: 'flex', flexDirection: 'column', gap: 8 }}>
                               {tg.tools.map((t) => (
-                                <div key={t} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '7px 10px', borderRadius: 10, background: 'var(--card2)' }}>
-                                  <span style={{ fontFamily: MONO, fontSize: 11, color: 'var(--ink2)', flex: 1, minWidth: 0, wordBreak: 'break-all' }}>{t}</span>
-                                  <LockToggle on onClick={showLocked} />
+                                <div key={t.name} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '7px 10px', borderRadius: 10, background: 'var(--card2)' }}>
+                                  <span style={{ fontFamily: MONO, fontSize: 11, color: t.enabled ? 'var(--ink2)' : 'var(--ghost)', flex: 1, minWidth: 0, wordBreak: 'break-all' }}>{t.name}</span>
+                                  <LockToggle
+                                    on={t.enabled}
+                                    disabled={Boolean(toolBusy)}
+                                    onClick={() => void toggleToolEnabled(t.name, !t.enabled)}
+                                  />
                                 </div>
                               ))}
                             </div>
@@ -1165,7 +1307,7 @@ export function MomentsScreen() {
                       );
                     })
                   )}
-                  <span style={{ fontSize: 11, color: 'var(--ghost)', padding: '2px 4px', lineHeight: 1.8 }}>按工具单独开关还没有接入后端——这些开关目前只是占位，点了会提示。</span>
+                  <span style={{ fontSize: 11, color: 'var(--ghost)', padding: '2px 4px', lineHeight: 1.8 }}>关闭的工具不会进入抽屉路由；需要主人授权后修改。</span>
                 </div>
               )}
             </>
@@ -1210,7 +1352,7 @@ export function MomentsScreen() {
         <div onClick={() => setUnlockOpen(false)} style={{ position: 'fixed', inset: 0, zIndex: 95, background: 'rgba(24,16,14,0.55)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24 }}>
           <div onClick={(e) => e.stopPropagation()} style={{ width: '100%', maxWidth: 360, background: 'var(--card)', borderRadius: 18, padding: '18px 18px 16px', boxShadow: '0 20px 50px var(--shadow2)', display: 'flex', flexDirection: 'column', gap: 12 }}>
             <span style={{ fontSize: 15, fontWeight: 700, color: 'var(--ink)' }}>主人授权</span>
-            <span style={{ fontSize: 12.5, lineHeight: 1.7, color: 'var(--ink2)' }}>更换封面、点赞和评论需要输入服务端配置的口令。口令只用于换取 HttpOnly 会话，不会写进前端代码。</span>
+            <span style={{ fontSize: 12.5, lineHeight: 1.7, color: 'var(--ink2)' }}>更换封面、点赞评论、情绪修正和工具开关需要输入服务端配置的口令。口令只用于换取 HttpOnly 会话，不会写进前端代码。</span>
             <input
               type="password"
               value={unlockDraft}

@@ -1961,65 +1961,61 @@ def put_period_settings():
 
 
 
-@app.route('/api/brain/emotions', methods=['GET'])
+@app.route('/api/brain/emotions', methods=['GET', 'PATCH'])
 def brain_emotions_proxy():
-    import glob as _glob
-    try:
-        import frontmatter as _fm
-    except ImportError:
-        return jsonify({'ok': False, 'error': 'frontmatter not installed'}), 500
+    if request.method == 'PATCH':
+        try:
+            require_owner(request)
+        except OwnerAuthError as exc:
+            resp = jsonify({'ok': False, 'error': exc.message})
+            resp.status_code = exc.status_code
+            if exc.status_code == 401:
+                resp.headers['WWW-Authenticate'] = 'Bearer'
+            return resp
+        payload = request.get_json() or {}
+        path = (payload.get('path') or '').strip()
+        if not path:
+            return jsonify({'ok': False, 'error': 'path required'}), 400
+        try:
+            valence = float(payload.get('valence'))
+            arousal = float(payload.get('arousal'))
+        except (TypeError, ValueError):
+            return jsonify({'ok': False, 'error': 'invalid valence or arousal'}), 400
+        try:
+            import emotion_memories as _em
+            item = _em.update_memory_point(path, valence, arousal)
+            return jsonify({'ok': True, 'item': item})
+        except ValueError as exc:
+            return jsonify({'ok': False, 'error': str(exc)}), 400
+        except RuntimeError as exc:
+            return jsonify({'ok': False, 'error': str(exc)}), 500
+        except Exception as exc:
+            return jsonify({'ok': False, 'error': str(exc)}), 500
 
-    def _emotion_label(v, a):
-        if v >= 0.3 and a >= 0.60:
-            return '喜悦'
-        if v >= 0.3 and a >= 0.40:
-            return '愉悦'
-        if v >= 0.3:
-            return '平静'
-        if v >= -0.1 and a >= 0.65:
-            return '兴奋'
-        if v >= -0.1 and a < 0.35:
-            return '松弛'
-        if v < -0.3 and a >= 0.60:
-            return '焦虑'
-        if v < -0.3 and a >= 0.35:
-            return '沉重'
-        if v < -0.3:
-            return '低落'
-        return '迷离'
-
     try:
-        bucket_dir = '/opt/ombre-brain/buckets/dynamic'
-        items = []
-        for _path in _glob.glob(f'{bucket_dir}/**/*.md', recursive=True):
-            try:
-                _post = _fm.load(_path)
-                _meta = _post.metadata
-                _v = _meta.get('valence')
-                _a = _meta.get('arousal')
-                if _v is None or _a is None:
-                    continue
-                _fv = float(_v)
-                _fa = float(_a)
-                _scale = _meta.get('valence_scale')
-                _fv = normalize_valence(_fv, scale=_scale)
-                _fa = normalize_arousal(_fa)
-                _note = (_post.content or '').replace('[[', '').replace(']]', '').strip()[:80]
-                items.append({
-                    'time': (_meta.get('last_active') or _meta.get('created', ''))[:10],
-                    'valence': round(_fv, 2),
-                    'arousal': round(_fa, 2),
-                    'emotion': _emotion_label(_fv, _fa),
-                    'note': _note,
-                    'domain': '、'.join(_meta.get('domain', [])),
-                    'scale': 'bipolar',
-                })
-            except Exception:
-                continue
-        items.sort(key=lambda x: x['time'], reverse=True)
-        return jsonify({'ok': True, 'items': items[:15]})
-    except Exception as e:
-        return jsonify({'ok': False, 'error': str(e)}), 500
+        import emotion_memories as _em
+        items = _em.list_memory_points(limit=15)
+        return jsonify({'ok': True, 'items': items})
+    except RuntimeError as exc:
+        return jsonify({'ok': False, 'error': str(exc)}), 500
+    except Exception as exc:
+        return jsonify({'ok': False, 'error': str(exc)}), 500
+
+@app.route('/api/brain/emotion_history', methods=['GET'])
+def brain_emotion_history():
+    try:
+        days = int(request.args.get('days', 7))
+    except (TypeError, ValueError):
+        return jsonify({'ok': False, 'error': 'invalid days'}), 400
+    if days not in (7, 30):
+        days = 7 if days < 30 else 30
+    try:
+        import emotion_history as _eh
+        series = _eh.fetch_series(days, db_path=DB_PATH)
+        return jsonify({'ok': True, 'days': days, 'series': series})
+    except Exception as exc:
+        return jsonify({'ok': False, 'error': str(exc)}), 500
+
 
 @app.route('/api/brain/dreams', methods=['GET'])
 def brain_dreams_proxy():
@@ -2098,17 +2094,39 @@ def brain_diary_proxy():
         return jsonify({'ok': False, 'error': str(e)}), 500
 
 
-@app.route('/api/tools/drawers', methods=['GET'])
+@app.route('/api/tools/drawers', methods=['GET', 'PATCH'])
 def tools_drawers():
-    """\u53ea\u8bfb\u5730\u66b4\u9732 tool_drawers.DRAWERS \u4f9b\u524d\u7aef\u5c55\u793a\u2014\u2014\u4e0d\u63d0\u4f9b\u6309\u5de5\u5177\u5f00\u5173\u7684\u5199\u63a5\u53e3\uff0c
-    \u90a3\u4e2a\u6982\u5ff5\u76ee\u524d\u4e0d\u5b58\u5728\uff08\u53ea\u6709 TOOL_DRAWERS_ENABLED \u8fd9\u4e00\u4e2a\u5168\u5c40\u5f00\u5173\uff09\u3002"""
     import tool_drawers
+    if request.method == 'PATCH':
+        try:
+            require_owner(request)
+        except OwnerAuthError as exc:
+            resp = jsonify({'ok': False, 'error': exc.message})
+            resp.status_code = exc.status_code
+            if exc.status_code == 401:
+                resp.headers['WWW-Authenticate'] = 'Bearer'
+            return resp
+        payload = request.get_json() or {}
+        enabled_flag = payload.get('enabled')
+        if not isinstance(enabled_flag, bool):
+            return jsonify({'ok': False, 'error': 'enabled must be boolean'}), 400
+        try:
+            if payload.get('tool'):
+                tool_drawers.set_tool_enabled(str(payload['tool']), enabled_flag)
+            elif payload.get('drawer_id'):
+                tool_drawers.set_drawer_enabled(str(payload['drawer_id']), enabled_flag)
+            else:
+                return jsonify({'ok': False, 'error': 'tool or drawer_id required'}), 400
+        except ValueError as exc:
+            return jsonify({'ok': False, 'error': str(exc)}), 400
+        return jsonify({
+            'ok': True,
+            'enabled': config_store.get('TOOL_DRAWERS_ENABLED', '0') == '1',
+            'drawers': tool_drawers.serialize_drawers(),
+        })
+
     enabled = config_store.get('TOOL_DRAWERS_ENABLED', '0') == '1'
-    drawers = [
-        {'id': drawer_id, 'label': info['label'], 'tools': info['tools']}
-        for drawer_id, info in tool_drawers.DRAWERS.items()
-    ]
-    return jsonify({'ok': True, 'enabled': enabled, 'drawers': drawers})
+    return jsonify({'ok': True, 'enabled': enabled, 'drawers': tool_drawers.serialize_drawers()})
 
 
 @app.route('/api/config/relay', methods=['POST'])
@@ -3943,8 +3961,8 @@ def brain_emotion_state():
         return jsonify({'ok': True, 'current': {
             'pa': state.get('pa', 0.5),
             'na': state.get('na', 0.2),
-            'valence': state.get('valence', 0.6),
-            'arousal': state.get('arousal', 0.3),
+            'valence': round(normalize_valence(state.get('valence', 0.6), scale='unipolar'), 3),
+            'arousal': round(normalize_arousal(state.get('arousal', 0.3)), 3),
             'mood_word': state.get('mood_word', ''),
             'longing': round(longing, 3),
             'updated_at': state.get('updated_at', ''),

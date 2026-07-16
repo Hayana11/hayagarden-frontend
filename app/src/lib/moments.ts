@@ -25,6 +25,7 @@ interface DreamRow {
 }
 
 interface EmotionMemoryRow {
+  path?: string;
   time: string;
   valence: number;
   arousal: number;
@@ -32,6 +33,21 @@ interface EmotionMemoryRow {
   note: string;
   domain: string;
   scale?: string;
+}
+
+interface EmotionHistoryRow {
+  day: string;
+  valence: number;
+  arousal: number;
+  mood_word: string;
+  samples: number;
+}
+
+interface EmotionHistoryResponse {
+  ok: boolean;
+  days: number;
+  series: EmotionHistoryRow[];
+  error?: string;
 }
 
 interface EmotionStateResponse {
@@ -67,10 +83,22 @@ interface GalleryPhotoRow {
   importance: number;
 }
 
+interface ToolDrawerToolRow {
+  name: string;
+  enabled: boolean;
+}
+
+interface ToolDrawerRow {
+  id: string;
+  label: string;
+  enabled: boolean;
+  tools: ToolDrawerToolRow[];
+}
+
 interface ToolDrawersResponse {
   ok: boolean;
   enabled: boolean;
-  drawers: Array<{ id: string; label: string; tools: string[] }>;
+  drawers: ToolDrawerRow[];
   error?: string;
 }
 
@@ -176,12 +204,21 @@ export interface MomentsFeedPage {
 }
 
 export interface EmotionMemoryPoint {
+  path?: string;
   time: string;
   valence: number;
   arousal: number;
   emotion: string;
   note: string;
   domain: string;
+}
+
+export interface EmotionHistoryPoint {
+  day: string;
+  valence: number;
+  arousal: number;
+  moodWord: string;
+  samples: number;
 }
 
 export interface MoodState {
@@ -204,10 +241,16 @@ export interface GalleryPhoto {
   keywords: string[];
 }
 
+export interface ToolDrawerTool {
+  name: string;
+  enabled: boolean;
+}
+
 export interface ToolDrawer {
   id: string;
   label: string;
-  tools: string[];
+  enabled: boolean;
+  tools: ToolDrawerTool[];
 }
 
 export interface MomentsData {
@@ -393,6 +436,7 @@ export async function fetchMomentsData(): Promise<MomentsData> {
 
   const emotionMemories: EmotionMemoryPoint[] = emoMemRes?.ok
     ? (emoMemRes.items || []).map((r) => ({
+        path: r.path,
         time: r.time,
         valence: r.valence,
         arousal: r.arousal,
@@ -415,7 +459,17 @@ export async function fetchMomentsData(): Promise<MomentsData> {
     keywords: p.keywords || [],
   }));
 
-  const drawers: ToolDrawer[] = drawersRes?.ok ? drawersRes.drawers : [];
+  const drawers: ToolDrawer[] = drawersRes?.ok
+    ? (drawersRes.drawers || []).map((d) => ({
+        id: d.id,
+        label: d.label,
+        enabled: Boolean(d.enabled),
+        tools: (d.tools || []).map((t) => ({
+          name: t.name,
+          enabled: Boolean(t.enabled),
+        })),
+      }))
+    : [];
   if (drawersRes && !drawersRes.ok) failed.push('tool drawers');
 
   return {
@@ -426,6 +480,69 @@ export async function fetchMomentsData(): Promise<MomentsData> {
     drawers,
     drawersEnabled: Boolean(drawersRes?.enabled),
     failedSources: failed,
+  };
+}
+
+export async function fetchEmotionHistory(days: 7 | 30 = 7): Promise<EmotionHistoryPoint[]> {
+  const response = await http.get<EmotionHistoryResponse>('/api/brain/emotion_history', { days });
+  if (!response.ok) {
+    throw new Error(response.error || 'emotion history failed');
+  }
+  return (response.series || []).map((row) => ({
+    day: row.day,
+    valence: row.valence,
+    arousal: row.arousal,
+    moodWord: row.mood_word || '',
+    samples: row.samples,
+  }));
+}
+
+export async function updateEmotionMemory(
+  path: string,
+  valence: number,
+  arousal: number,
+): Promise<EmotionMemoryPoint> {
+  const response = await http.patch<{
+    ok: boolean;
+    item?: EmotionMemoryRow;
+    error?: string;
+  }>('/api/brain/emotions', { path, valence, arousal });
+  if (!response.ok || !response.item) {
+    throw new Error(response.error || 'emotion update failed');
+  }
+  const item = response.item;
+  return {
+    path: item.path,
+    time: item.time,
+    valence: item.valence,
+    arousal: item.arousal,
+    emotion: item.emotion,
+    note: item.note,
+    domain: item.domain,
+  };
+}
+
+export async function patchToolDrawer(
+  payload: { drawerId: string; enabled: boolean } | { tool: string; enabled: boolean },
+): Promise<{ drawers: ToolDrawer[]; drawersEnabled: boolean }> {
+  const body = 'drawerId' in payload
+    ? { drawer_id: payload.drawerId, enabled: payload.enabled }
+    : { tool: payload.tool, enabled: payload.enabled };
+  const response = await http.patch<ToolDrawersResponse>('/api/tools/drawers', body);
+  if (!response.ok) {
+    throw new Error(response.error || 'tool drawer update failed');
+  }
+  return {
+    drawersEnabled: Boolean(response.enabled),
+    drawers: (response.drawers || []).map((d) => ({
+      id: d.id,
+      label: d.label,
+      enabled: Boolean(d.enabled),
+      tools: (d.tools || []).map((t) => ({
+        name: t.name,
+        enabled: Boolean(t.enabled),
+      })),
+    })),
   };
 }
 

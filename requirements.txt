@@ -2,3 +2,4 @@
 # Install: python3 -m pip install -r requirements.txt
 Pillow>=10.4.0,<13
 cryptography>=42.0.0
+python-frontmatter>=1.1.0,<2
