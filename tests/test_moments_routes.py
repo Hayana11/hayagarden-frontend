@@ -64,6 +64,35 @@ class MomentsRouteTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertTrue(response.get_json()['ok'])
 
+    def test_react_route_toggles_like(self):
+        response = self.client.post(
+            '/api/moments/react',
+            json={'item_key': 'thought:1', 'reaction': 'like'},
+        )
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertTrue(payload['ok'])
+        self.assertEqual(payload['social']['likes'], 1)
+
+        response = self.client.post(
+            '/api/moments/react',
+            json={'item_key': 'thought:1', 'reaction': 'like'},
+        )
+        self.assertEqual(response.get_json()['social']['likes'], 0)
+
+    def test_comments_route_create_and_list(self):
+        create = self.client.post(
+            '/api/moments/comments',
+            json={'item_key': 'thought:1', 'content': '好'},
+        )
+        self.assertEqual(create.status_code, 200)
+        self.assertEqual(create.get_json()['social']['comments'], 1)
+
+        listing = self.client.get('/api/moments/comments?item_key=thought:1')
+        self.assertEqual(listing.status_code, 200)
+        self.assertEqual(len(listing.get_json()['items']), 1)
+        self.assertEqual(listing.get_json()['items'][0]['content'], '好')
+
     def test_invalid_limit_returns_400(self):
         response = self.client.get('/api/moments/feed?limit=0')
         self.assertEqual(response.status_code, 400)

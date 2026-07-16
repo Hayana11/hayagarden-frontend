@@ -69,7 +69,9 @@ def ensure_schema(memories_db_path: str, gallery_db_path: str | None = None) -> 
             )'''
         )
         from moments_turn import ensure_turn_schema
+        from moments_social import ensure_schema as ensure_social_schema
         ensure_turn_schema(memories_db_path)
+        ensure_social_schema(memories_db_path)
         conn.commit()
     finally:
         conn.close()
@@ -736,6 +738,9 @@ def get_feed(
     if has_more and page:
         last = page[-1]
         next_cursor = encode_cursor(last.get('created_at'), last['item_key'])
+
+    from moments_social import attach_social_to_items
+    page = attach_social_to_items(page, memories_db_path=memories_db_path)
 
     return {
         'items': page,

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from flask import Blueprint, jsonify, request
 
+import moments_social
 import moments_store
 
 
@@ -51,6 +52,59 @@ def create_moments_blueprint(
         if not deleted:
             return jsonify({'error': 'not found'}), 404
         return jsonify({'deleted': True})
+
+    @blueprint.route('/api/moments/react', methods=['POST'])
+    def moments_react():
+        payload = request.get_json() or {}
+        item_key = (payload.get('item_key') or '').strip()
+        reaction = (payload.get('reaction') or '').strip().lower()
+        if not item_key:
+            return jsonify({'error': 'item_key required'}), 400
+        try:
+            social = moments_social.toggle_reaction(
+                item_key,
+                reaction,
+                memories_db_path=memories_db_path,
+            )
+            return jsonify({'ok': True, 'social': social})
+        except ValueError as exc:
+            return jsonify({'error': str(exc)}), 400
+
+    @blueprint.route('/api/moments/comments', methods=['GET'])
+    def moments_comments_list():
+        item_key = (request.args.get('item_key') or '').strip()
+        if not item_key:
+            return jsonify({'error': 'item_key required'}), 400
+        try:
+            limit = int(request.args.get('limit', 50))
+        except (TypeError, ValueError):
+            return jsonify({'error': 'invalid limit'}), 400
+        try:
+            comments = moments_social.list_comments(
+                item_key,
+                memories_db_path=memories_db_path,
+                limit=limit,
+            )
+            return jsonify({'items': comments})
+        except ValueError as exc:
+            return jsonify({'error': str(exc)}), 400
+
+    @blueprint.route('/api/moments/comments', methods=['POST'])
+    def moments_comments_create():
+        payload = request.get_json() or {}
+        item_key = (payload.get('item_key') or '').strip()
+        content = payload.get('content', '') or ''
+        if not item_key:
+            return jsonify({'error': 'item_key required'}), 400
+        try:
+            result = moments_social.add_comment(
+                item_key,
+                content,
+                memories_db_path=memories_db_path,
+            )
+            return jsonify({'ok': True, **result})
+        except ValueError as exc:
+            return jsonify({'error': str(exc)}), 400
 
     @blueprint.route('/api/moments/collect-intent', methods=['POST'])
     def collect_intent():

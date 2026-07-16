@@ -439,6 +439,89 @@ export function moodWordTone(valence: number): 'up' | 'down' | 'level' {
   return 'level';
 }
 
+export async function fetchMomentsCover(): Promise<string | null> {
+  try {
+    const r = await http.get<{ ok: boolean; url: string | null }>('/api/moments/cover');
+    return r.ok && r.url ? r.url : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function uploadMomentsCover(file: File): Promise<string | null> {
+  const fd = new FormData();
+  fd.append('file', file);
+  try {
+    const r = await fetch('/api/moments/cover', { method: 'POST', body: fd });
+    const j = await r.json();
+    return r.ok && j.ok && j.url ? j.url : null;
+  } catch {
+    return null;
+  }
+}
+
+export interface MomentComment {
+  id: number;
+  author: string;
+  content: string;
+  createdAt: string | null;
+}
+
+export async function reactToMoment(itemKey: string, reaction: 'like' | 'dislike'): Promise<FeedSocial> {
+  const response = await http.post<{ ok: boolean; social: FeedWireItem['social']; error?: string }>(
+    '/api/moments/react',
+    { item_key: itemKey, reaction },
+  );
+  if (!response.social) {
+    throw new Error(response.error || 'react failed');
+  }
+  return {
+    likes: response.social.likes ?? 0,
+    dislikes: response.social.dislikes ?? 0,
+    comments: response.social.comments ?? 0,
+    myReaction: response.social.my_reaction ?? null,
+  };
+}
+
+export async function fetchMomentComments(itemKey: string): Promise<MomentComment[]> {
+  const response = await http.get<{ items: Array<{ id: number; author: string; content: string; created_at: string | null }> }>(
+    '/api/moments/comments',
+    { item_key: itemKey },
+  );
+  return (response.items || []).map((c) => ({
+    id: c.id,
+    author: c.author,
+    content: c.content,
+    createdAt: c.created_at,
+  }));
+}
+
+export async function postMomentComment(itemKey: string, content: string): Promise<{ comment: MomentComment; social: FeedSocial }> {
+  const response = await http.post<{
+    ok: boolean;
+    comment: { id: number; author: string; content: string; created_at: string | null };
+    social: FeedWireItem['social'];
+    error?: string;
+  }>('/api/moments/comments', { item_key: itemKey, content });
+  if (!response.comment || !response.social) {
+    throw new Error(response.error || 'comment failed');
+  }
+  return {
+    comment: {
+      id: response.comment.id,
+      author: response.comment.author,
+      content: response.comment.content,
+      createdAt: response.comment.created_at,
+    },
+    social: {
+      likes: response.social.likes ?? 0,
+      dislikes: response.social.dislikes ?? 0,
+      comments: response.social.comments ?? 0,
+      myReaction: response.social.my_reaction ?? null,
+    },
+  };
+}
+
 export function feedDateKey(entry: FeedEntry): string {
   return entry.createdAt?.slice(0, 10) || '';
 }

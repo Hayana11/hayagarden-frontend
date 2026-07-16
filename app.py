@@ -2772,6 +2772,65 @@ def gallery_create_album():
     return jsonify({'ok': True, 'album_id': aid})
 
 
+# ── Moments 朋友圈封面 ─────────────────────────────────────────
+MOMENTS_COVER_META = os.path.join(UPLOAD_DIR, 'moments_cover.meta.json')
+MOMENTS_COVER_EXTS = {'.jpg', '.jpeg', '.png', '.webp', '.gif'}
+MOMENTS_COVER_MAX_BYTES = 8 * 1024 * 1024
+
+
+def _moments_cover_read_meta():
+    try:
+        with open(MOMENTS_COVER_META, encoding='utf-8') as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _moments_cover_url():
+    meta = _moments_cover_read_meta()
+    fname = (meta.get('file') or '').strip()
+    if not fname:
+        return None
+    path = os.path.join(UPLOAD_DIR, fname)
+    if not os.path.isfile(path):
+        return None
+    return f'/static/uploads/{fname}'
+
+
+@app.route('/api/moments/cover', methods=['GET'])
+def moments_cover_get():
+    url = _moments_cover_url()
+    return jsonify({'ok': True, 'url': url})
+
+
+@app.route('/api/moments/cover', methods=['POST'])
+def moments_cover_upload():
+    if 'file' not in request.files:
+        return jsonify({'ok': False, 'error': 'no file'}), 400
+    f = request.files['file']
+    ext = os.path.splitext(f.filename or '')[1].lower() or '.jpg'
+    if ext not in MOMENTS_COVER_EXTS:
+        return jsonify({'ok': False, 'error': '只支持 jpg/png/webp/gif'}), 400
+    data = f.read()
+    if len(data) > MOMENTS_COVER_MAX_BYTES:
+        return jsonify({'ok': False, 'error': '图片超过 8MB'}), 400
+    os.makedirs(UPLOAD_DIR, exist_ok=True)
+    fname = f'moments_cover_{uuid.uuid4().hex[:10]}{ext}'
+    with open(os.path.join(UPLOAD_DIR, fname), 'wb') as out:
+        out.write(data)
+    old = _moments_cover_read_meta().get('file')
+    meta = {'file': fname, 'updated_at': datetime.datetime.utcnow().isoformat() + 'Z'}
+    with open(MOMENTS_COVER_META, 'w', encoding='utf-8') as out:
+        json.dump(meta, out, ensure_ascii=False)
+    if old and old != fname:
+        try:
+            os.remove(os.path.join(UPLOAD_DIR, old))
+        except OSError:
+            pass
+    url = f'/static/uploads/{fname}'
+    return jsonify({'ok': True, 'url': url})
+
+
 # ── 倒计时任务浮窗 ─────────────────────────────────────────────
 @app.route('/api/commands/pending', methods=['GET'])
 def commands_pending():

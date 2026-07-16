@@ -2,14 +2,33 @@
 // data (念头/日摘要/梦境 from posts, mood from emotion_state, per-memory V/A
 // points from ombre-brain frontmatter, gallery photos, tool drawers).
 //
-// Features with no backend yet (cover upload, like/dislike/comment+repost,
-// mood history chart, manual mood correction, per-tool toggles) stay
-// visible as locked placeholders — matching the系统配置 page's pattern of
-// showing the real control disabled with an honest "后端尚未接入" note and
-// a toast on click, rather than either faking success or hiding the UI.
-import { useCallback, useEffect, useMemo, useState, type CSSProperties } from 'react';
+// Features with no backend yet (mood history chart, manual mood correction,
+// per-tool toggles) stay visible as locked placeholders — matching the系统配置
+// page's pattern of showing the real control disabled with an honest
+// "后端尚未接入" note and a toast on click, rather than either faking success
+// or hiding the UI.
+import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type CSSProperties } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { fetchMomentsData, fetchMomentsFeed, galleryPhotoUrl, moodWordTone, type DreamEntry, type EmotionMemoryPoint, type FeedEntry, type FeedType, type GalleryPhoto, type MomentsData, type MoodState } from '../lib/moments';
+import {
+  fetchMomentComments,
+  fetchMomentsCover,
+  fetchMomentsData,
+  fetchMomentsFeed,
+  galleryPhotoUrl,
+  moodWordTone,
+  postMomentComment,
+  reactToMoment,
+  uploadMomentsCover,
+  type DreamEntry,
+  type EmotionMemoryPoint,
+  type FeedEntry,
+  type FeedSocial,
+  type FeedType,
+  type GalleryPhoto,
+  type MomentComment,
+  type MomentsData,
+  type MoodState,
+} from '../lib/moments';
 
 const SETTINGS_KEY = 'fyodor-chat-settings';
 const SERIF = "'Noto Serif SC', serif";
@@ -293,24 +312,142 @@ function EmptyState({ title, hint, onRetry }: { title: string; hint: string; onR
   );
 }
 
-// ── locked social row (like/dislike/comment/repost — no backend yet) ──
-function LockedSocialRow({ onLocked, dense }: { onLocked: () => void; dense?: boolean }) {
-  const iconStyle: CSSProperties = { cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 5, color: 'var(--ghost)' };
+// ── social row (like / dislike / comment) ──
+function SocialRow({
+  itemKey,
+  social,
+  dense,
+  onSocialChange,
+  onToast,
+}: {
+  itemKey: string;
+  social: FeedSocial;
+  dense?: boolean;
+  onSocialChange: (itemKey: string, social: FeedSocial) => void;
+  onToast: (msg: string) => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [commentsOpen, setCommentsOpen] = useState(false);
+  const [comments, setComments] = useState<MomentComment[]>([]);
+  const [commentDraft, setCommentDraft] = useState('');
+  const [commentsLoading, setCommentsLoading] = useState(false);
+  const [commentBusy, setCommentBusy] = useState(false);
+
+  const iconStyle = (active: boolean): CSSProperties => ({
+    cursor: busy ? 'default' : 'pointer',
+    display: 'flex',
+    alignItems: 'center',
+    gap: 5,
+    color: active ? 'var(--rose)' : 'var(--ghost)',
+    opacity: busy ? 0.6 : 1,
+  });
   const size = dense ? 13 : 14;
+
+  const handleReact = async (reaction: 'like' | 'dislike') => {
+    if (busy) return;
+    setBusy(true);
+    try {
+      const updated = await reactToMoment(itemKey, reaction);
+      onSocialChange(itemKey, updated);
+    } catch {
+      onToast('操作失败，请稍后再试');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const loadComments = async () => {
+    setCommentsLoading(true);
+    try {
+      const items = await fetchMomentComments(itemKey);
+      setComments(items);
+    } catch {
+      onToast('评论读取失败');
+    } finally {
+      setCommentsLoading(false);
+    }
+  };
+
+  const toggleComments = async () => {
+    if (commentsOpen) {
+      setCommentsOpen(false);
+      return;
+    }
+    setCommentsOpen(true);
+    if (comments.length === 0) {
+      await loadComments();
+    }
+  };
+
+  const submitComment = async () => {
+    const text = commentDraft.trim();
+    if (!text || commentBusy) return;
+    setCommentBusy(true);
+    try {
+      const { comment, social: updated } = await postMomentComment(itemKey, text);
+      setCommentDraft('');
+      setComments((prev) => [comment, ...prev]);
+      onSocialChange(itemKey, updated);
+    } catch {
+      onToast('评论发送失败');
+    } finally {
+      setCommentBusy(false);
+    }
+  };
+
   return (
-    <div style={{ display: 'flex', alignItems: 'center', gap: dense ? 14 : 18, padding: dense ? '0 2px' : undefined }}>
-      <div onClick={onLocked} style={iconStyle} title={LOCKED}>
-        <svg viewBox="0 0 24 24" width={size} height={size} fill="none" stroke="currentColor" strokeWidth={1.7} strokeLinecap="round" strokeLinejoin="round"><path d="M7 10v12H4a1 1 0 0 1-1-1V11a1 1 0 0 1 1-1h3zm0 0l4.5-7a2.4 2.4 0 0 1 2.4 2.4V9h5a2 2 0 0 1 2 2.3l-1.2 8A2 2 0 0 1 17.7 21H7" /></svg>
-        <span style={{ fontFamily: DISPLAY, fontSize: 11.5 }}>0</span>
+    <div style={{ flex: 1, minWidth: 0 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: dense ? 14 : 18, padding: dense ? '0 2px' : undefined }}>
+        <div onClick={() => void handleReact('like')} style={iconStyle(social.myReaction === 'like')} title="赞">
+          <svg viewBox="0 0 24 24" width={size} height={size} fill={social.myReaction === 'like' ? 'currentColor' : 'none'} stroke="currentColor" strokeWidth={1.7} strokeLinecap="round" strokeLinejoin="round"><path d="M7 10v12H4a1 1 0 0 1-1-1V11a1 1 0 0 1 1-1h3zm0 0l4.5-7a2.4 2.4 0 0 1 2.4 2.4V9h5a2 2 0 0 1 2 2.3l-1.2 8A2 2 0 0 1 17.7 21H7" /></svg>
+          <span style={{ fontFamily: DISPLAY, fontSize: 11.5 }}>{social.likes}</span>
+        </div>
+        <div onClick={() => void handleReact('dislike')} style={iconStyle(social.myReaction === 'dislike')} title="踩">
+          <svg viewBox="0 0 24 24" width={size} height={size} fill={social.myReaction === 'dislike' ? 'currentColor' : 'none'} stroke="currentColor" strokeWidth={1.7} strokeLinecap="round" strokeLinejoin="round" style={{ transform: 'rotate(180deg)' }}><path d="M7 10v12H4a1 1 0 0 1-1-1V11a1 1 0 0 1 1-1h3zm0 0l4.5-7a2.4 2.4 0 0 1 2.4 2.4V9h5a2 2 0 0 1 2 2.3l-1.2 8A2 2 0 0 1 17.7 21H7" /></svg>
+          <span style={{ fontFamily: DISPLAY, fontSize: 11.5 }}>{social.dislikes}</span>
+        </div>
+        <div onClick={() => void toggleComments()} style={iconStyle(commentsOpen)} title="评论">
+          <svg viewBox="0 0 24 24" width={size} height={size} fill="none" stroke="currentColor" strokeWidth={1.7} strokeLinecap="round" strokeLinejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" /></svg>
+          <span style={{ fontFamily: DISPLAY, fontSize: 11.5 }}>{social.comments}</span>
+        </div>
       </div>
-      <div onClick={onLocked} style={iconStyle} title={LOCKED}>
-        <svg viewBox="0 0 24 24" width={size} height={size} fill="none" stroke="currentColor" strokeWidth={1.7} strokeLinecap="round" strokeLinejoin="round" style={{ transform: 'rotate(180deg)' }}><path d="M7 10v12H4a1 1 0 0 1-1-1V11a1 1 0 0 1 1-1h3zm0 0l4.5-7a2.4 2.4 0 0 1 2.4 2.4V9h5a2 2 0 0 1 2 2.3l-1.2 8A2 2 0 0 1 17.7 21H7" /></svg>
-        <span style={{ fontFamily: DISPLAY, fontSize: 11.5 }}>0</span>
-      </div>
-      <div onClick={onLocked} style={iconStyle} title={LOCKED}>
-        <svg viewBox="0 0 24 24" width={size} height={size} fill="none" stroke="currentColor" strokeWidth={1.7} strokeLinecap="round" strokeLinejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" /></svg>
-        <span style={{ fontFamily: DISPLAY, fontSize: 11.5 }}>0</span>
-      </div>
+      {commentsOpen && (
+        <div style={{ marginTop: dense ? 8 : 10, padding: '10px 12px', borderRadius: 12, background: 'var(--card2)', display: 'flex', flexDirection: 'column', gap: 8 }}>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <input
+              value={commentDraft}
+              onChange={(e) => setCommentDraft(e.target.value)}
+              placeholder="写一句评论…"
+              maxLength={500}
+              style={{ flex: 1, border: '1px solid var(--line)', borderRadius: 999, padding: '8px 12px', background: 'var(--card)', color: 'var(--ink)', fontSize: 12.5, outline: 'none' }}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  e.preventDefault();
+                  void submitComment();
+                }
+              }}
+            />
+            <div
+              onClick={() => void submitComment()}
+              style={{ cursor: commentBusy ? 'default' : 'pointer', padding: '8px 14px', borderRadius: 999, background: 'var(--deep)', color: '#FBF3F0', fontSize: 12, letterSpacing: 1, opacity: commentBusy ? 0.6 : 1, flexShrink: 0 }}
+            >
+              发送
+            </div>
+          </div>
+          {commentsLoading ? (
+            <span style={{ fontSize: 11.5, color: 'var(--ghost)' }}>读取评论中…</span>
+          ) : comments.length === 0 ? (
+            <span style={{ fontSize: 11.5, color: 'var(--ghost)' }}>还没有评论</span>
+          ) : (
+            comments.map((c) => (
+              <div key={c.id} style={{ fontSize: 12.5, lineHeight: 1.55, color: 'var(--ink2)' }}>
+                <span style={{ color: 'var(--deep)', marginRight: 6 }}>{c.author === 'haya' ? '哈娅' : c.author}</span>
+                {c.content}
+              </div>
+            ))
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -350,13 +487,25 @@ export function MomentsScreen() {
   const [moodRange, setMoodRange] = useState<'7' | '30'>('7');
   const [drawerOpen, setDrawerOpen] = useState<Record<string, boolean>>({});
   const [toast, setToast] = useState('');
+  const [coverUrl, setCoverUrl] = useState<string | null>(null);
+  const [coverUploading, setCoverUploading] = useState(false);
+  const coverInputRef = useRef<HTMLInputElement>(null);
 
   const effTheme = theme === 'auto' ? (sysDark ? 'dark' : 'light') : theme;
   const vars = effTheme === 'dark' ? DARK_VARS : LIGHT_VARS;
 
+  const flashToast = useCallback((msg: string) => {
+    setToast(msg);
+    window.setTimeout(() => setToast((t) => (t === msg ? '' : t)), 2200);
+  }, []);
+
   const showLocked = useCallback(() => {
-    setToast(LOCKED);
-    window.setTimeout(() => setToast((t) => (t === LOCKED ? '' : t)), 2200);
+    flashToast(LOCKED);
+  }, [flashToast]);
+
+  const patchFeedSocial = useCallback((itemKey: string, social: FeedSocial) => {
+    setFeedItems((items) => items.map((f) => (f.itemKey === itemKey ? { ...f, social } : f)));
+    setPostsItems((items) => items.map((f) => (f.itemKey === itemKey ? { ...f, social } : f)));
   }, []);
 
   useEffect(() => {
@@ -365,6 +514,29 @@ export function MomentsScreen() {
     mq.addEventListener?.('change', onMq);
     return () => mq.removeEventListener?.('change', onMq);
   }, []);
+
+  useEffect(() => {
+    void fetchMomentsCover().then(setCoverUrl);
+  }, []);
+
+  const pickCover = useCallback(() => {
+    if (!coverUploading) coverInputRef.current?.click();
+  }, [coverUploading]);
+
+  const onCoverFile = useCallback(async (e: ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+    setCoverUploading(true);
+    const url = await uploadMomentsCover(file);
+    setCoverUploading(false);
+    if (url) {
+      setCoverUrl(`${url}?t=${Date.now()}`);
+      flashToast('封面已更新');
+    } else {
+      flashToast('封面上传失败');
+    }
+  }, [flashToast]);
 
   const toggleTheme = () => {
     const next = effTheme === 'dark' ? 'light' : 'dark';
@@ -548,9 +720,13 @@ export function MomentsScreen() {
   return (
     <div className="hide-scrollbar dash-fullscreen-page dash-scroll-page" style={{ ...(vars as CSSProperties), background: 'var(--bg)', color: 'var(--ink)', fontFamily: SERIF, transition: 'background .3s,color .3s' }}>
       <div style={{ width: '100%', background: 'var(--bg)' }}>
-        {/* ── cover (换封面锁定) ── */}
-        <div onClick={showLocked} style={{ position: 'relative', height: 248, cursor: 'pointer' }} title={LOCKED}>
-          <div style={{ position: 'absolute', inset: 0, background: 'linear-gradient(150deg,#3E2E30,#211A18 55%,#4A3226)' }} />
+        {/* ── cover ── */}
+        <input ref={coverInputRef} type="file" accept="image/*" style={{ display: 'none' }} onChange={(e) => void onCoverFile(e)} />
+        <div onClick={pickCover} style={{ position: 'relative', height: 248, cursor: coverUploading ? 'wait' : 'pointer' }} title="点击更换封面">
+          {coverUrl && (
+            <img src={coverUrl} alt="" style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'cover' }} />
+          )}
+          <div style={{ position: 'absolute', inset: 0, background: coverUrl ? 'linear-gradient(150deg,rgba(30,18,16,0.12),rgba(30,18,16,0.55))' : 'linear-gradient(150deg,#3E2E30,#211A18 55%,#4A3226)' }} />
           <div style={{ position: 'absolute', left: 0, right: 0, bottom: 0, height: 70, background: 'linear-gradient(transparent,rgba(30,18,16,0.38))' }} />
           <div onClick={(e) => { e.stopPropagation(); navigate('/chat'); }} style={{ ...iconBtn, position: 'absolute', top: 12, left: 12, zIndex: 2 }}>
             <svg viewBox="0 0 24 24" width={17} height={17} fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round"><path d="M15 18l-6-6 6-6" /></svg>
@@ -564,7 +740,7 @@ export function MomentsScreen() {
           </div>
           <div style={{ position: 'absolute', bottom: 10, right: 14, zIndex: 2, display: 'flex', alignItems: 'center', gap: 5, color: 'rgba(247,237,234,0.55)', fontSize: 10.5, letterSpacing: 1 }}>
             <svg viewBox="0 0 24 24" width={12} height={12} fill="none" stroke="currentColor" strokeWidth={1.7} strokeLinecap="round" strokeLinejoin="round"><rect x={3} y={3} width={18} height={18} rx={3} /><circle cx={9} cy={9} r={2} /><path d="M21 15l-5-5-9 9" /></svg>
-            换封面
+            {coverUploading ? '上传中…' : '换封面'}
           </div>
         </div>
 
@@ -651,8 +827,8 @@ export function MomentsScreen() {
                       <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 8 }}>
                         <FeedEntryBody entry={f} onGalleryOpen={f.kind === 'gallery' ? () => openGalleryFromFeed(f) : undefined} />
                         <div><KindTag entry={f} /></div>
-                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
-                          <LockedSocialRow onLocked={showLocked} dense />
+                        <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 10 }}>
+                          <SocialRow itemKey={f.itemKey} social={f.social} dense onSocialChange={patchFeedSocial} onToast={flashToast} />
                           {f.timeLabel ? (
                             <span style={{ fontFamily: DISPLAY, fontSize: 11, color: 'var(--ghost)', flexShrink: 0, letterSpacing: 0.5 }}>
                               {f.timeLabel}
@@ -707,8 +883,8 @@ export function MomentsScreen() {
                       </div>
                       <FeedEntryBody entry={f} />
                       <div><KindTag entry={f} /></div>
-                      <div style={{ borderTop: '1px solid var(--line)', paddingTop: 10, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
-                        <LockedSocialRow onLocked={showLocked} />
+                      <div style={{ borderTop: '1px solid var(--line)', paddingTop: 10, display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 10 }}>
+                        <SocialRow itemKey={f.itemKey} social={f.social} onSocialChange={patchFeedSocial} onToast={flashToast} />
                         {f.timeLabel ? (
                           <span style={{ fontFamily: DISPLAY, fontSize: 11.5, color: 'var(--ghost)', flexShrink: 0, letterSpacing: 0.5 }}>
                             {f.timeLabel}
