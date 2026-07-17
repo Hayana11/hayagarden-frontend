@@ -532,9 +532,8 @@ def usage_daily_cost():
     seen_accounts = set()
     for row in rows:
         try:
-            origin = origin_from_url(row['url'])
-            account_key = (origin, str(row['user_id'] or ''))
-            if account_key in seen_accounts:
+            account_key = str(row['user_id'] or '').strip()
+            if not account_key or account_key in seen_accounts:
                 continue
             secret = decrypt_secret(row['secret_ciphertext'])
             result = query_channel_daily_costs(
@@ -549,11 +548,13 @@ def usage_daily_cost():
             seen_accounts.add(account_key)
             relay_total = 0.0
             today_cost = 0.0
+            daily_costs = {}
             for item in result.get('days') or []:
                 bucket = merged.setdefault(item['date'], {'cost': 0.0, 'count': 0})
                 bucket['cost'] += float(item.get('cost') or 0)
                 bucket['count'] += int(item.get('count') or 0)
                 relay_total += float(item.get('cost') or 0)
+                daily_costs[item['date']] = round(float(item.get('cost') or 0), 2)
                 if item.get('date') == today_str:
                     today_cost = float(item.get('cost') or 0)
             relay_totals.append({
@@ -561,6 +562,7 @@ def usage_daily_cost():
                 'name': row['name'],
                 'total_cost': round(relay_total, 2),
                 'today_cost': round(today_cost, 2),
+                'daily_costs': daily_costs,
             })
         except Exception:
             continue
