@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import sqlite3
 import threading
 import time
 from typing import Callable
@@ -21,7 +20,6 @@ _PRICING_CACHE: dict[str, tuple[float, list[dict]]] = {}
 _GROUP_RATIO_CACHE: dict[str, float] = {}
 _CACHE_LOCK = threading.Lock()
 _PRICING_TTL = 300
-DB_PATH = "/opt/frontend/memories.db"
 
 
 def estimate_quota(
