@@ -151,7 +151,13 @@ def run_dreaming(now):
         if recent_dream:
             _log(f"dream: already has recent dream in past 2 hours")
             return
-        
+
+        # 第四批：最简概率门——偶发无梦。现有睡眠/时段/去重条件全部保留。
+        # 前置观测：累积 20~30 场正常梦且一二批指标稳定后再合入生产更稳妥。
+        if random.random() < 0.2:
+            _log("dream: probabilistic skip (no dream tonight)")
+            return
+
         _log(f"dream: sleep {sleep_duration:.0f}min, generating")
         from dream_generator import generate_dream
         generate_dream()
