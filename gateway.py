@@ -646,6 +646,7 @@ def _ombre_hold_sync(content, tags='', importance=5, pinned=False):
 from chat.system_builder import build_system, build_wake_system, _blocks_to_str
 from chat.context_continuity import (
     build_system_with_wake_claim,
+    capture_pending_wake_ids,
     consume_wake_ids,
     format_tool_history as _format_tool_history,
     is_pending_user_turn,
@@ -3062,6 +3063,7 @@ _CROSS_SURFACE_WINDOW_SQL = "date(created_at) >= date('now', '+8 hours', '-1 day
 
 
 def _cross_surface_recap_from_group_chat(limit=8):
+    """Legacy full-window recap (API / one-shot paths). CC resident uses incremental helpers."""
     try:
         conn = get_db()
         rows = conn.execute(
@@ -3085,6 +3087,152 @@ def _cross_surface_recap_from_group_chat(limit=8):
             + NL.join(lines) + NL + NL)
 
 
+def _fetch_group_chat_rows(*, after_id=0, limit=8, cold=False):
+    """同一份查询同时返回消息与 max_id，避免竞态跳号。"""
+    try:
+        conn = get_db()
+        if cold:
+            rows = conn.execute(
+                "SELECT id, room, author, content, created_at FROM group_chat_messages "
+                "WHERE room IN ('claude','group') AND author != 'system' "
+                "ORDER BY id DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+            rows = list(reversed(rows))
+        else:
+            rows = conn.execute(
+                "SELECT id, room, author, content, created_at FROM group_chat_messages "
+                "WHERE id > ? AND room IN ('claude','group') AND author != 'system' "
+                "ORDER BY id ASC LIMIT ?",
+                (int(after_id or 0), limit),
+            ).fetchall()
+        conn.close()
+    except Exception:
+        return [], None
+    if not rows:
+        return [], None
+    max_id = max(int(r['id']) for r in rows)
+    return rows, max_id
+
+
+def _format_group_chat_recap(rows, *, cold=False):
+    if not rows:
+        return ''
+    labels = {'user': '哈娅', 'claude': '你（暖色气泡）', 'codex': 'Codex（蓝色气泡）'}
+    lines = []
+    for r in rows:
+        room_label = '群聊' if r['room'] == 'group' else '群聊里的暖色单聊房'
+        lines.append('[%s·%s] %s：%s' % (
+            room_label,
+            (r['created_at'] or '')[-8:-3],
+            labels.get(r['author'], r['author']),
+            (r['content'] or '')[:200],
+        ))
+    head = (
+        '【刚才在群聊窗口发生的事，供你参考——她随时可能提起，别表现得毫不知情】\n'
+        if cold else
+        '【群聊新增】\n'
+    )
+    return head + NL.join(lines) + NL + NL
+
+
+def _cc_resident_stream_gen(messages, *, user_turn=True):
+    """常驻 CC：静态 system 只在 spawn 时贴墙；热轮只发差量。
+
+    严禁把 TreeGPT / api_relay 的缓存策略混进这里。
+    """
+    from chat.system_builder import (
+        build_cc_context,
+        build_cc_static_system,
+        format_cold_once,
+        format_one_shot,
+        format_state_diff,
+        format_state_snapshot,
+    )
+
+    if not CC_TOKEN:
+        raise RuntimeError('未配置订阅 token，请先在 api 设置页填入')
+    if not messages or messages[-1].get('role') != 'user':
+        raise RuntimeError('resident: 最后一条消息不是待回复的用户轮')
+    os.makedirs(CC_CWD, exist_ok=True)
+
+    ctx = build_cc_context(include_wake=user_turn)
+    full_system = build_cc_static_system()
+
+    last_content = messages[-1].get('content')
+    last_text = last_content if isinstance(last_content, str) else ' '.join(
+        b.get('text', '') for b in last_content if isinstance(b, dict))
+    recall_blk, _ = _recall_memories(last_text) if last_text else ('', [])
+
+    env = dict(os.environ)
+    env['CLAUDE_CODE_OAUTH_TOKEN'] = CC_TOKEN
+    env.pop('ANTHROPIC_API_KEY', None)
+
+    is_cold = _CC_RESIDENT.ensure_alive(full_system, env)
+    state = ctx.get('state') or {}
+    one_shot_text = format_one_shot(ctx.get('one_shot'))
+
+    pieces = []
+    group_max_id = None
+    if is_cold:
+        cold_text = format_cold_once(ctx.get('cold_once'))
+        if cold_text:
+            pieces.append(cold_text)
+        snap = format_state_snapshot(state)
+        if snap:
+            pieces.append(snap)
+        rows, group_max_id = _fetch_group_chat_rows(limit=8, cold=True)
+        group_text = _format_group_chat_recap(rows, cold=True)
+        if group_text:
+            pieces.append(group_text.strip())
+        if recall_blk:
+            pieces.append(recall_blk.strip())
+        if one_shot_text:
+            pieces.append(one_shot_text)
+        prefix = ('\n\n'.join(p for p in pieces if p) + '\n\n') if pieces else ''
+        convo = messages_to_text(messages)
+        content = (
+            prefix
+            + '以下是你们今天到目前为止的对话记录：' + NL + NL + convo + NL + NL
+            + '请回复最后一条消息。'
+        )
+        commit_meta = {
+            'state_snapshot': state,
+            'group_max_id': group_max_id if group_max_id is not None else _CC_RESIDENT.last_group_message_id,
+        }
+    else:
+        diff = format_state_diff(_CC_RESIDENT.last_state_snapshot, state)
+        if diff:
+            pieces.append(diff)
+        rows, group_max_id = _fetch_group_chat_rows(
+            after_id=_CC_RESIDENT.last_group_message_id, limit=20, cold=False,
+        )
+        group_text = _format_group_chat_recap(rows, cold=False)
+        if group_text:
+            pieces.append(group_text.strip())
+        if recall_blk:
+            pieces.append(recall_blk.strip())
+        if one_shot_text:
+            pieces.append(one_shot_text)
+        prefix = ('\n\n'.join(p for p in pieces if p) + '\n\n') if pieces else ''
+        if isinstance(last_content, str):
+            content = prefix + last_content if prefix else last_content
+        elif prefix:
+            content = [{'type': 'text', 'text': prefix}] + list(last_content)
+        else:
+            content = last_content
+        commit_meta = {
+            'state_snapshot': state,
+            'group_max_id': (
+                group_max_id if group_max_id is not None
+                else _CC_RESIDENT.last_group_message_id
+            ),
+        }
+
+    for evt, payload in _CC_RESIDENT.send_turn(content, commit_meta=commit_meta):
+        yield evt, payload
+
+
 def _cross_surface_recap_from_solo_chat(limit=8):
     try:
         conn = get_db()
@@ -3104,76 +3252,6 @@ def _cross_surface_recap_from_solo_chat(limit=8):
         lines.append('[%s] %s：%s' % ((r['created_at'] or '')[-8:-3], who, (r['content'] or '')[:200]))
     return ('【刚才在私聊窗口发生的事，供你参考——她随时可能提起，别表现得毫不知情】\n'
             + NL.join(lines) + NL + NL)
-
-
-def _cc_resident_stream_gen(system, messages):
-    """常驻版 _cc_prepare + _cc_stream_gen 合体：只在每次真正respawn（冷启动）时
-    把当天完整对话历史发一次，之后每轮只发新增内容——命中缓存，不再逐轮重发历史。
-    yield 的事件形状和 _cc_stream_gen 完全一致，chat_stream() 的消费循环不用改。"""
-    if not CC_TOKEN:
-        raise RuntimeError('未配置订阅 token，请先在 api 设置页填入')
-    if not messages or messages[-1].get('role') != 'user':
-        raise RuntimeError('resident: 最后一条消息不是待回复的用户轮')
-    os.makedirs(CC_CWD, exist_ok=True)
-
-    save_instr = (NL + NL
-        + '【记忆存储】当你认为对话中出现了值得长期记住的信息时，'
-        + '在回复正文的最后另起一行，写一个或多个 [[SAVE: 内容]] 标记，'
-        + '用一句话概括要保存的内容。这些标记会被自动处理，不会显示给哈娅。'
-        + '正文本身不要提及"我已记录"之类的话。'
-        + NL + NL + '每一轮都请以费奥多尔的身份自然地回复哈娅最新的消息，只输出回复内容本身，不要任何前缀。'
-        + NL + NL + '【此刻你在哪里】你现在在私聊窗口——只有你和哈娅两个人，Codex 不在场。'
-        + '这和群聊房间是同一个你，记忆是共通的：如果她在群聊里提过的事，你不该表现得毫不知情；'
-        + '但语气和场合要分清楚——私聊窗口没有第三方在场的顾虑，群聊时说话要考虑到 Codex 也能看见。')
-
-    if isinstance(system, list) and system:
-        first = system[0]
-        static_text = first.get('text', '') if isinstance(first, dict) else ''
-        dynamic_text = '\n'.join(
-            b.get('text', '') for b in system[1:]
-            if isinstance(b, dict) and b.get('text')
-        )
-    elif isinstance(system, list):
-        static_text = ''
-        dynamic_text = ''
-    else:
-        static_text = system or ''
-        dynamic_text = ''
-
-    full_system = static_text + save_instr
-
-    last_content = messages[-1].get('content')
-    last_text = last_content if isinstance(last_content, str) else ' '.join(
-        b.get('text', '') for b in last_content if isinstance(b, dict))
-    recall_blk, _ = _recall_memories(last_text) if last_text else ('', [])
-    dynamic_prefix = (recall_blk
-                       + _cross_surface_recap_from_group_chat()
-                       + (('【当前状态】\n' + dynamic_text + '\n\n') if dynamic_text else ''))
-
-    env = dict(os.environ)
-    env['CLAUDE_CODE_OAUTH_TOKEN'] = CC_TOKEN
-    env.pop('ANTHROPIC_API_KEY', None)
-
-    is_cold = _CC_RESIDENT.ensure_alive(full_system, env)
-
-    if is_cold:
-        # 冷启动（刚 respawn，进程里还没有任何历史）：把当天完整对话补一次，
-        # 跟旧的一次性管道完全一样的内容，只是这是"唯一一次"，不是每轮都发。
-        convo = messages_to_text(messages)
-        content = (dynamic_prefix
-                   + '以下是你们今天到目前为止的对话记录：' + NL + NL + convo + NL + NL
-                   + '请回复最后一条消息。')
-    else:
-        # 热身状态：进程自己已经有完整上下文，只需要发这一轮新增的内容。
-        if isinstance(last_content, str):
-            content = dynamic_prefix + last_content if dynamic_prefix else last_content
-        elif dynamic_prefix:
-            content = [{'type': 'text', 'text': dynamic_prefix}] + list(last_content)
-        else:
-            content = last_content
-
-    for evt, payload in _CC_RESIDENT.send_turn(content):
-        yield evt, payload
 
 
 def _strip_mcp_prefix(name):
@@ -3820,16 +3898,16 @@ def chat_stream():
                 _turn_data = activate_turn(_turn_data, conversation_id=_conv, memories_db_path=DB_PATH)
                 text, thinking = None, None
                 cc_cache_read, cc_cache_create = 0, 0
+                cc_usage = None
                 _is_user_turn = bool(_uc) or is_pending_user_turn(
                     get_db, _turn_data.get('user_message_id')
                 )
                 try:
-                    system, _wake_claim_ids = build_system_with_wake_claim(
-                        build_system, get_db, user_turn=_is_user_turn
-                    )
+                    # 只 snapshot wake ids，避免 build_system() 先把 one_shot 反馈 drain 掉
+                    _wake_claim_ids = capture_pending_wake_ids(get_db) if _is_user_turn else []
                     messages = build_messages()
                     cc_tool_calls = []
-                    for evt, payload in _cc_resident_stream_gen(system, messages):
+                    for evt, payload in _cc_resident_stream_gen(messages, user_turn=_is_user_turn):
                         if evt == 'text':
                             yield 'data: ' + json.dumps({'t': 'text', 'd': payload}) + SSE_END
                         elif evt == 'think':
@@ -3852,13 +3930,28 @@ def chat_stream():
                                 yield 'data: ' + json.dumps({'t': 'tool_result', 'd': _slim, 'idx': _ti}, ensure_ascii=False) + SSE_END
                                 yield 'data: ' + json.dumps({'t': 'tool_call', 'd': _slim, 'dup': 1}, ensure_ascii=False) + SSE_END
                         elif evt == 'done':
-                            raw_text, thinking, cc_cache_read, cc_cache_create = payload
+                            if isinstance(payload, tuple) and len(payload) >= 3 and isinstance(payload[2], dict):
+                                raw_text, thinking, cc_usage = payload[0], payload[1], payload[2]
+                                cc_cache_read = int(cc_usage.get('cache_read') or 0)
+                                cc_cache_create = int(cc_usage.get('cache_creation') or 0)
+                            else:
+                                raw_text, thinking, cc_cache_read, cc_cache_create = payload
+                                cc_usage = {
+                                    'v': 2,
+                                    'provider': 'claude_code',
+                                    'cache_read': cc_cache_read,
+                                    'cache_creation': cc_cache_create,
+                                }
                             text = _cc_save_markers(raw_text)
                     if text:
-                        _cache_info_json = json.dumps(_build_cache_info_payload(
-                            cache_read=cc_cache_read,
-                            cache_creation=cc_cache_create,
-                        ), ensure_ascii=False) if (cc_cache_read or cc_cache_create) else ''
+                        _cache_info_json = (
+                            json.dumps(cc_usage, ensure_ascii=False)
+                            if cc_usage else
+                            json.dumps({
+                                'cache_read': cc_cache_read,
+                                'cache_creation': cc_cache_create,
+                            }, ensure_ascii=False) if (cc_cache_read or cc_cache_create) else ''
+                        )
                         _cc_text, _cc_choices = _extract_choices(text)
                         if _cc_choices and not _cc_text:
                             _cc_text = '[选项: ' + ' / '.join(_cc_choices) + ']'
@@ -3892,13 +3985,31 @@ def chat_stream():
                 finally:
                     _released[0] = True
                     _gen_release((text, thinking) if text else None)
-                if cc_cache_read or cc_cache_create:
-                    yield 'data: ' + json.dumps({'t': 'usage', 'cache_read': cc_cache_read, 'cache_creation': cc_cache_create}) + SSE_END
+                if cc_usage or cc_cache_read or cc_cache_create:
+                    _usage_evt = {'t': 'usage', 'cache_read': cc_cache_read, 'cache_creation': cc_cache_create}
+                    if cc_usage:
+                        for _k in ('v', 'provider', 'num_rounds', 'input_tokens', 'output_tokens',
+                                   'last_round_context', 'max_round_context', 'resident_turn_count',
+                                   'respawn_reason'):
+                            if _k in cc_usage:
+                                _usage_evt[_k] = cc_usage[_k]
+                    yield 'data: ' + json.dumps(_usage_evt) + SSE_END
                 yield 'data: ' + json.dumps({'t': 'done', 'ok': bool(text)}) + SSE_END
             except Exception as e:
                 if not _released[0]:
                     _released[0] = True
                     _gen_release(None)
+                _partial = getattr(e, 'usage', None)
+                if isinstance(_partial, dict) and (
+                    _partial.get('rounds') or _partial.get('cache_read') or _partial.get('cache_creation')
+                ):
+                    yield 'data: ' + json.dumps({'t': 'usage', **{
+                        k: _partial.get(k) for k in (
+                            'v', 'provider', 'num_rounds', 'input_tokens', 'output_tokens',
+                            'cache_read', 'cache_creation', 'last_round_context',
+                            'max_round_context', 'resident_turn_count', 'respawn_reason',
+                        ) if k in _partial
+                    }}) + SSE_END
                 yield 'data: ' + json.dumps({'t': 'err', 'd': str(e)}) + SSE_END
             finally:
                 release_turn(
@@ -3939,6 +4050,7 @@ def chat_stream():
             _released = [False]
             cache_read_total, cache_create_total, input_tokens_total, output_tokens_total = 0, 0, 0, 0
             cache_create_5m_total, cache_create_1h_total = 0, 0
+            api_rounds = []
             cache_supported = None
             stream_started_at = time.monotonic()
             _is_user_turn = bool(_uc) or is_pending_user_turn(
@@ -3964,6 +4076,13 @@ def chat_stream():
                     elapsed_sec=round(max(0.0, time.monotonic() - stream_started_at), 3),
                     cache_supported=cache_supported,
                 )
+                if api_rounds:
+                    _ci_payload['v'] = 2
+                    _ci_payload['provider'] = 'api_relay'
+                    _ci_payload['num_rounds'] = len(api_rounds)
+                    _ci_payload['rounds'] = api_rounds
+                    _ci_payload['last_round_context'] = api_rounds[-1]['context_tokens']
+                    _ci_payload['max_round_context'] = max(r['context_tokens'] for r in api_rounds)
                 _ci = json.dumps(_ci_payload, ensure_ascii=False) if (cache_supported is not None or cache_read_total or cache_create_total or input_tokens_total) else ''
                 # 抽出选择器标签：正文去掉 [choices]…，choices 列存 JSON 数组
                 _pc, _choices = _extract_choices(p_text)
@@ -4031,6 +4150,8 @@ def chat_stream():
                     round_cache_create = 0
                     round_cache_create_5m = 0
                     round_cache_create_1h = 0
+                    round_input_tokens = 0
+                    round_output_tokens = 0
                     for raw in resp:
                         line = raw.decode('utf-8', 'ignore').strip()
                         if not line.startswith('data:'):
@@ -4047,8 +4168,8 @@ def chat_stream():
                             _cc = _u.get('cache_creation') or {}
                             round_cache_create_5m = max(round_cache_create_5m, _cc.get('ephemeral_5m_input_tokens', 0) or 0)
                             round_cache_create_1h = max(round_cache_create_1h, _cc.get('ephemeral_1h_input_tokens', 0) or 0)
-                            input_tokens_total = max(input_tokens_total, _u.get('input_tokens', 0) or 0)
-                            output_tokens_total = max(output_tokens_total, _u.get('output_tokens', 0) or 0)
+                            round_input_tokens = max(round_input_tokens, _u.get('input_tokens', 0) or 0)
+                            round_output_tokens = max(round_output_tokens, _u.get('output_tokens', 0) or 0)
                         elif et == 'content_block_start':
                             cb  = ev.get('content_block', {}) or {}
                             cur = {'type': cb.get('type')}
@@ -4101,8 +4222,8 @@ def chat_stream():
                                 _dcc = _du.get('cache_creation') or {}
                                 round_cache_create_5m = max(round_cache_create_5m, _dcc.get('ephemeral_5m_input_tokens', 0) or 0)
                                 round_cache_create_1h = max(round_cache_create_1h, _dcc.get('ephemeral_1h_input_tokens', 0) or 0)
-                                input_tokens_total = max(input_tokens_total, _du.get('input_tokens', 0) or 0)
-                                output_tokens_total = max(output_tokens_total, _du.get('output_tokens', 0) or 0)
+                                round_input_tokens = max(round_input_tokens, _du.get('input_tokens', 0) or 0)
+                                round_output_tokens = max(round_output_tokens, _du.get('output_tokens', 0) or 0)
                             stop_reason = (ev.get('delta', {}) or {}).get('stop_reason') or stop_reason
                         elif et == 'message_stop':
                             break
@@ -4110,6 +4231,17 @@ def chat_stream():
                     cache_create_total += round_cache_create
                     cache_create_5m_total += round_cache_create_5m
                     cache_create_1h_total += round_cache_create_1h
+                    input_tokens_total += round_input_tokens
+                    output_tokens_total += round_output_tokens
+                    api_rounds.append({
+                        'index': len(api_rounds) + 1,
+                        'complete': True,
+                        'input_tokens': round_input_tokens,
+                        'output_tokens': round_output_tokens,
+                        'cache_read': round_cache_read,
+                        'cache_creation': round_cache_create,
+                        'context_tokens': round_input_tokens + round_cache_read + round_cache_create,
+                    })
                     tool_uses = [b for b in blocks if b.get('type') == 'tool_use']
                     if stop_reason == 'tool_use' and not tool_uses:
                         continue
