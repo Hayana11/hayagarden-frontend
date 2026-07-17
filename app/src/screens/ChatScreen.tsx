@@ -31,6 +31,7 @@ import type { ReactElement } from 'react';
 
 const SETTINGS_KEY = 'fyodor-chat-settings';
 const FONT_SIZES = [13.5, 14.5, 16, 17.5, 19];
+const INPUT_FONT_SIZE = FONT_SIZES[0];
 const SERIF = "'Noto Serif SC', serif";
 const DISPLAY = "'Bodoni Moda', serif";
 const MONO = 'ui-monospace, Menlo, monospace';
@@ -851,7 +852,7 @@ export function ChatScreen() {
                     <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
                       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
                         <div style={sectionCaption}>字号 · TEXT SIZE</div>
-                        <span style={{ fontFamily: DISPLAY, fontSize: 12, color: 'var(--rose)' }}>{['XS', 'S', 'M', 'L', 'XL'][settings.fontStep]}</span>
+                        <span style={{ fontFamily: DISPLAY, fontSize: 12, color: 'var(--rose)' }}>{FONT_SIZES[settings.fontStep]}px</span>
                       </div>
                       <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
                         <span style={{ fontSize: 12, color: 'var(--ghost)' }}>字</span>
@@ -992,7 +993,7 @@ export function ChatScreen() {
               }}
               rows={1}
               placeholder={sending ? 'Fyodor 正在回复…' : placeholder}
-              style={{ width: '100%', border: 'none', background: 'transparent', fontSize: '1em', lineHeight: 1.6, color: 'var(--ink)', resize: 'none', maxHeight: 120, padding: '4px 8px 8px', display: 'block', overflowY: 'auto', fontFamily: SERIF, outline: 'none' }}
+              style={{ width: '100%', border: 'none', background: 'transparent', fontSize: INPUT_FONT_SIZE, lineHeight: 1.6, color: 'var(--ink)', resize: 'none', maxHeight: 120, padding: '4px 8px 8px', display: 'block', overflowY: 'auto', fontFamily: SERIF, outline: 'none' }}
             />
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 2 }}>
               <div onClick={() => setAttachMenuOpen(!attachMenuOpen)} style={{ cursor: 'pointer', width: 38, height: 38, borderRadius: '50%', background: 'var(--card2)', color: 'var(--mut)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
