@@ -120,6 +120,7 @@ export interface DailyUsageRelayTotal {
   id: number;
   name: string;
   totalCost: number;
+  todayCost: number;
 }
 
 export interface DailyUsageResult {
@@ -128,6 +129,7 @@ export interface DailyUsageResult {
   relays: DailyUsageRelayTotal[];
   totalCost: number | null;
   totalCount: number;
+  monthMessages: number;
 }
 
 export interface PlaygroundResult {
@@ -364,9 +366,10 @@ export async function getDailyUsage(days: number): Promise<DailyUsageResult> {
   const data = await http.get<{
     mode?: 'cost' | 'requests';
     days?: Array<{ date?: string; count?: number; cost?: number | null }>;
-    relays?: Array<{ id?: number; name?: string; total_cost?: number }>;
+    relays?: Array<{ id?: number; name?: string; total_cost?: number; today_cost?: number }>;
     total_cost?: number | null;
     total_count?: number;
+    month_messages?: number;
   }>('/api/usage/daily-cost', { days });
 
   return {
@@ -380,9 +383,11 @@ export async function getDailyUsage(days: number): Promise<DailyUsageResult> {
       id: Number(relay.id || 0),
       name: relay.name || '',
       totalCost: Number(relay.total_cost || 0),
+      todayCost: Number(relay.today_cost || 0),
     })),
     totalCost: data.total_cost == null ? null : Number(data.total_cost),
     totalCount: Number(data.total_count || 0),
+    monthMessages: Number(data.month_messages || 0),
   };
 }
 

@@ -219,6 +219,8 @@ interface SseEvent {
   cache_read?: number;
   cache_creation?: number;
   cache_supported?: boolean | null;
+  cost_usd?: number;
+  cost_estimated?: boolean;
 }
 
 /**

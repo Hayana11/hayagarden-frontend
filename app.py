@@ -466,6 +466,18 @@ def usage_summary():
     })
 
 
+def _month_message_count():
+    now_cn = datetime.datetime.utcnow() + datetime.timedelta(hours=8)
+    month_prefix = now_cn.strftime('%Y-%m')
+    conn = get_db()
+    row = conn.execute(
+        "SELECT count(*) as c FROM chat_messages WHERE substr(created_at,1,7)=?",
+        (month_prefix,),
+    ).fetchone()
+    conn.close()
+    return int((row['c'] if row else 0) or 0)
+
+
 def _usage_daily_from_messages(days: int):
     now_cn = datetime.datetime.utcnow() + datetime.timedelta(hours=8)
     start_day = (now_cn - datetime.timedelta(days=days - 1)).strftime('%Y-%m-%d')
@@ -490,6 +502,7 @@ def _usage_daily_from_messages(days: int):
         'relays': [],
         'total_cost': None,
         'total_count': total_count,
+        'month_messages': _month_message_count(),
     }
 
 
@@ -509,13 +522,20 @@ def usage_daily_cost():
     if not rows:
         return jsonify(_usage_daily_from_messages(days))
 
-    from relay.channel_intelligence import query_channel_daily_costs
+    from relay.channel_intelligence import origin_from_url, query_channel_daily_costs
     from relay.credential_vault import decrypt_secret
 
+    now_cn = datetime.datetime.utcnow() + datetime.timedelta(hours=8)
+    today_str = now_cn.strftime('%Y-%m-%d')
     merged = {}
     relay_totals = []
+    seen_accounts = set()
     for row in rows:
         try:
+            origin = origin_from_url(row['url'])
+            account_key = (origin, str(row['user_id'] or ''))
+            if account_key in seen_accounts:
+                continue
             secret = decrypt_secret(row['secret_ciphertext'])
             result = query_channel_daily_costs(
                 {'id': row['id'], 'name': row['name'], 'base_url': row['url']},
@@ -526,16 +546,21 @@ def usage_daily_cost():
             )
             if not result.get('supported'):
                 continue
+            seen_accounts.add(account_key)
             relay_total = 0.0
+            today_cost = 0.0
             for item in result.get('days') or []:
                 bucket = merged.setdefault(item['date'], {'cost': 0.0, 'count': 0})
                 bucket['cost'] += float(item.get('cost') or 0)
                 bucket['count'] += int(item.get('count') or 0)
                 relay_total += float(item.get('cost') or 0)
+                if item.get('date') == today_str:
+                    today_cost = float(item.get('cost') or 0)
             relay_totals.append({
                 'id': row['id'],
                 'name': row['name'],
                 'total_cost': round(relay_total, 2),
+                'today_cost': round(today_cost, 2),
             })
         except Exception:
             continue
@@ -563,6 +588,7 @@ def usage_daily_cost():
         'relays': relay_totals,
         'total_cost': round(total_cost, 2),
         'total_count': total_count,
+        'month_messages': _month_message_count(),
     })
 
 
