@@ -93,15 +93,12 @@ function MoodIcon({ kind }: { kind: MoodIconKind }) {
   return <svg {...common}><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" /></svg>;
 }
 
-// Dream cards read background/color from the dream's own text — the
-// "根据内容变化背景" behaviour from the design source. The design's own
-// scene set (rain/sea/night/warm/uneasy/neutral) plus base/glow colors are
-// reproduced exactly from its <script data-dc-script> block; snow/abyss are
-// an extra pair added on top, in the same base+glow+texture structure, to
-// cover Siberia/violence imagery the original six don't touch. Classified
-// by keyword since the backend's `emotion` field for dreams is hardcoded to
-// '朦胧' today and carries no real per-dream scene/V/A/trace data — see the
-// note rendered under the tab header.
+// Dream cards: scene background from tone/V/A, refined by imagery keywords.
+// Priority (highest wins):
+//   1. Concrete imagery keywords (blood/snow/rain/…) — visual anchor in the text
+//   2. Backend tone (vivid/warm/anxious/heavy/drifting)
+//   3. Russell V/A quadrant when tone is missing
+//   4. neutral (雾)
 interface DreamScene {
   label: string;
   base: string;
@@ -153,11 +150,35 @@ const DREAM_SCENE_KEYWORDS: Array<[keyof typeof DREAM_SCENES, string[]]> = [
   ['uneasy', ['追', '跑', '找不到', '未接', '电话', '慌']],
 ];
 
-function classifyDreamScene(title: string, content: string): DreamScene {
-  const text = `${title} ${content}`;
+const TONE_SCENE: Record<string, keyof typeof DREAM_SCENES> = {
+  warm: 'warm',
+  anxious: 'uneasy',
+  heavy: 'night',
+  vivid: 'sea',
+  drifting: 'neutral',
+};
+
+function classifyDreamScene(dream: Pick<DreamEntry, 'title' | 'content' | 'tone' | 'valence' | 'arousal'>): DreamScene {
+  const text = `${dream.title} ${dream.content}`;
+
+  // 1. Imagery keywords override tone — keeps visual texture tied to nouns in the dream.
   for (const [key, words] of DREAM_SCENE_KEYWORDS) {
     if (words.some((w) => text.includes(w))) return DREAM_SCENES[key];
   }
+
+  // 2. Backend tone from dream_generator / dream_pool.
+  const toneKey = TONE_SCENE[dream.tone];
+  if (toneKey) return DREAM_SCENES[toneKey];
+
+  // 3. Bipolar V/A fallback (API normalizes to [-1,1] / [0,1]).
+  const v = (dream.valence + 1) / 2;
+  const a = dream.arousal;
+  if (v >= 0.6 && a >= 0.6) return DREAM_SCENES.sea;
+  if (v >= 0.6 && a < 0.6) return DREAM_SCENES.warm;
+  if (v < 0.4 && a >= 0.6) return DREAM_SCENES.uneasy;
+  if (v < 0.4 && a < 0.6) return DREAM_SCENES.night;
+
+  // 4. Default
   return DREAM_SCENES.neutral;
 }
 
@@ -1098,11 +1119,8 @@ export function MomentsScreen() {
                     <span style={{ fontSize: 10.5, color: 'var(--ghost)' }}>按住看光 · 点击进入</span>
                   </div>
                   {dreams.length === 0 && <EmptyState title="还没有记下的梦" hint="费佳做梦的时候，会自己写下来。" />}
-                  {dreams.length > 0 && (
-                    <div style={{ fontSize: 10.5, color: 'var(--ghost)', padding: '0 4px', lineHeight: 1.6 }}>回溯与 V/A 读数还没做——等梦境生成时能标情绪了再补。</div>
-                  )}
                   {dreams.map((d) => {
-                    const scene = classifyDreamScene(d.title || '', d.content);
+                    const scene = classifyDreamScene(d);
                     const glowing = hoveredDream === d.id;
                     const baseOp = glowing ? 0.68 : 0.06;
                     const glowOp = glowing ? 0.5 : 0;
@@ -1129,8 +1147,9 @@ export function MomentsScreen() {
                             <span style={{ marginLeft: 'auto', fontFamily: DISPLAY, fontSize: 10.5, color: ghostC, flexShrink: 0, transition: 'color .9s ease' }}>{d.dateLabel}</span>
                           </div>
                           <span style={{ display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden', fontSize: 13.5, lineHeight: 1.95, color: textC, transition: 'color .9s ease', maskImage: 'linear-gradient(180deg,#000 52%,rgba(0,0,0,0.12) 100%)', WebkitMaskImage: 'linear-gradient(180deg,#000 52%,rgba(0,0,0,0.12) 100%)' }}>{d.content}</span>
-                          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
                             <span style={{ fontSize: 10, letterSpacing: 1.5, padding: '3px 10px', borderRadius: 999, background: chipBg, color: chipC, transition: 'all .9s ease' }}>{scene.label}</span>
+                            <span style={{ fontSize: 10, letterSpacing: 1.5, padding: '3px 10px', borderRadius: 999, background: glowing ? 'rgba(255,255,255,0.1)' : 'var(--card2)', color: glowing ? 'rgba(245,235,225,0.88)' : 'var(--mut)', transition: 'all .9s ease' }}>{d.emotion}</span>
                             <span style={{ marginLeft: 'auto', fontSize: 11, color: ghostC, transition: 'color .9s ease', letterSpacing: 1 }}>进入梦境 →</span>
                           </div>
                         </div>
@@ -1341,17 +1360,22 @@ export function MomentsScreen() {
 
       {/* ── dream detail ── */}
       {dreamOpen && (() => {
-        const scene = classifyDreamScene(dreamOpen.title || '', dreamOpen.content);
+        const scene = classifyDreamScene(dreamOpen);
         return (
           <div onClick={() => setDreamOpen(null)} style={{ position: 'fixed', inset: 0, zIndex: 80, background: 'rgba(14,9,7,0.72)', backdropFilter: 'blur(4px)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 22 }}>
             <div className="hide-scrollbar" onClick={(e) => e.stopPropagation()} style={{ position: 'relative', width: '100%', maxWidth: 392, maxHeight: '80vh', overflowY: 'auto', borderRadius: 22, background: 'linear-gradient(172deg,#2E241D,#171009)', boxShadow: '0 40px 100px rgba(0,0,0,0.6)' }}>
               <div style={{ position: 'absolute', inset: 0, background: scene.glow, opacity: 0.16, pointerEvents: 'none' }} />
               <div style={{ position: 'relative', padding: '24px 24px 22px', display: 'flex', flexDirection: 'column', gap: 12 }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
                   <span style={{ fontSize: 10, letterSpacing: 1.5, padding: '3px 10px', borderRadius: 999, background: 'rgba(223,178,94,0.14)', color: '#D9B87E' }}>{scene.label}</span>
-                  <span style={{ marginLeft: 'auto', fontFamily: DISPLAY, fontSize: 10.5, color: 'rgba(233,214,190,0.55)' }}>{dreamOpen.dateLabel}</span>
+                  <span style={{ fontSize: 10, letterSpacing: 1.5, padding: '3px 10px', borderRadius: 999, background: 'rgba(201,138,147,0.16)', color: '#E8B4BC' }}>{dreamOpen.emotion}</span>
+                  <span style={{ fontFamily: DISPLAY, fontSize: 10.5, color: 'rgba(233,214,190,0.55)', marginLeft: 'auto' }}>{dreamOpen.dateLabel}</span>
                 </div>
                 <span style={{ fontFamily: DISPLAY, fontStyle: 'italic', fontSize: 16, letterSpacing: 1, color: '#E8D3B0', lineHeight: 1.5 }}>{dreamOpen.title}</span>
+                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                  <span style={{ fontFamily: DISPLAY, fontSize: 10.5, color: '#D9B87E', background: 'rgba(223,178,94,0.12)', borderRadius: 999, padding: '3px 10px' }}>V {dreamOpen.valence >= 0 ? '+' : ''}{dreamOpen.valence.toFixed(2)}</span>
+                  <span style={{ fontFamily: DISPLAY, fontSize: 10.5, color: '#C9A0B8', background: 'rgba(201,138,147,0.14)', borderRadius: 999, padding: '3px 10px' }}>A {dreamOpen.arousal.toFixed(2)}</span>
+                </div>
                 <span style={{ fontSize: 14, lineHeight: 2.05, color: '#EFE2D3' }}>{dreamOpen.content}</span>
                 <div onClick={() => setDreamOpen(null)} style={{ cursor: 'pointer', alignSelf: 'flex-end', padding: '8px 20px', borderRadius: 999, border: '1px solid rgba(233,214,190,0.35)', color: '#E8D3B0', fontSize: 12, letterSpacing: 2 }}>离开梦境</div>
               </div>

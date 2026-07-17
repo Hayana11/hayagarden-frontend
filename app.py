@@ -2020,24 +2020,15 @@ def brain_emotion_history():
 @app.route('/api/brain/dreams', methods=['GET'])
 def brain_dreams_proxy():
     try:
+        from tools.dream_meta import fetch_dream_items
+
         conn = get_db()
-        rows = conn.execute(
-            "SELECT id, author, content, created_at FROM posts WHERE type='DREAM' ORDER BY id DESC LIMIT 10"
-        ).fetchall()
+        items = fetch_dream_items(conn, limit=10, include_id=True)
         conn.close()
-        items = []
-        for r in rows:
-            created_at = moments_store.to_iso8601_shanghai(r['created_at'])
-            content = r['content'] or ''
-            items.append({
-                'id': int(r['id']),
-                'author': (r['author'] or 'fyodor').strip() or 'fyodor',
-                'created_at': created_at,
-                'date': created_at[:10] if created_at else '-',
-                'title': (content[:40] + '...') if len(content) > 40 else (content or '无题'),
-                'content': content,
-                'emotion': '朦胧',
-            })
+        for item in items:
+            item['created_at'] = moments_store.to_iso8601_shanghai(item.get('created_at'))
+            if item.get('created_at'):
+                item['date'] = item['created_at'][:10]
         return jsonify({'ok': True, 'items': items})
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e)}), 500

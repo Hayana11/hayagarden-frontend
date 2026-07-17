@@ -22,6 +22,9 @@ interface DreamRow {
   title: string;
   content: string;
   emotion: string;
+  tone: string;
+  valence: number;
+  arousal: number;
 }
 
 interface EmotionMemoryRow {
@@ -195,6 +198,9 @@ export interface DreamEntry {
   title: string;
   content: string;
   emotion: string;
+  tone: string;
+  valence: number;
+  arousal: number;
 }
 
 export interface MomentsFeedPage {
@@ -418,6 +424,9 @@ export async function fetchMomentsData(): Promise<MomentsData> {
           title: d.title,
           content: d.content,
           emotion: d.emotion,
+          tone: d.tone || 'drifting',
+          valence: d.valence ?? 0,
+          arousal: d.arousal ?? 0.5,
         };
       })
     : [];
