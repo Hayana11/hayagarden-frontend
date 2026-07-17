@@ -120,12 +120,30 @@ def build_dream_api_item(row: dict, pool_row: dict | None = None, *, include_id:
     return item
 
 
-def fetch_dream_items(conn: sqlite3.Connection, limit: int = 10, *, include_id: bool = True) -> list[dict]:
-    rows = conn.execute(
-        "SELECT id, author, content, created_at, valence, arousal, tags, summary_title "
-        "FROM posts WHERE type='DREAM' ORDER BY id DESC LIMIT ?",
-        (limit,),
-    ).fetchall()
+def fetch_dream_page(
+    conn: sqlite3.Connection,
+    limit: int = 20,
+    before: int | None = None,
+    *,
+    include_id: bool = True,
+) -> dict:
+    """按 id 倒序分页。before = 上一页最后一条的 posts.id（不含）。"""
+    limit = max(1, min(int(limit or 20), 50))
+    if before is not None:
+        rows = conn.execute(
+            "SELECT id, author, content, created_at, valence, arousal, tags, summary_title "
+            "FROM posts WHERE type='DREAM' AND id < ? ORDER BY id DESC LIMIT ?",
+            (int(before), limit + 1),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT id, author, content, created_at, valence, arousal, tags, summary_title "
+            "FROM posts WHERE type='DREAM' ORDER BY id DESC LIMIT ?",
+            (limit + 1,),
+        ).fetchall()
+
+    has_more = len(rows) > limit
+    rows = rows[:limit]
     items: list[dict] = []
     seen: set[str] = set()
     for row in rows:
@@ -136,4 +154,29 @@ def fetch_dream_items(conn: sqlite3.Connection, limit: int = 10, *, include_id: 
         seen.add(content)
         pool_row = _pool_row_for_post(conn, content, data.get('created_at'))
         items.append(build_dream_api_item(data, pool_row, include_id=include_id))
-    return items
+
+    next_before = None
+    if has_more and rows:
+        next_before = int(rows[-1]['id'])
+    elif items and include_id:
+        # 去重后不足一页但库里可能还有更旧的：用最后一条 id 继续探
+        last_id = items[-1].get('id')
+        if last_id is not None:
+            older = conn.execute(
+                "SELECT 1 FROM posts WHERE type='DREAM' AND id < ? LIMIT 1",
+                (int(last_id),),
+            ).fetchone()
+            if older:
+                has_more = True
+                next_before = int(last_id)
+
+    return {
+        'items': items,
+        'has_more': bool(has_more and next_before is not None),
+        'next_before': next_before,
+    }
+
+
+def fetch_dream_items(conn: sqlite3.Connection, limit: int = 10, *, include_id: bool = True) -> list[dict]:
+    """兼容旧调用：只要 items 列表。"""
+    return fetch_dream_page(conn, limit=limit, before=None, include_id=include_id)['items']

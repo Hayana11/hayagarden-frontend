@@ -11,6 +11,8 @@ const SHANGHAI_TZ = 'Asia/Shanghai';
 interface BrainItemsResponse<T> {
   ok: boolean;
   items?: T[];
+  has_more?: boolean;
+  next_before?: number | null;
   error?: string;
 }
 
@@ -261,6 +263,8 @@ export interface ToolDrawer {
 
 export interface MomentsData {
   dreams: DreamEntry[];
+  dreamsHasMore: boolean;
+  dreamsNextBefore: number | null;
   gallery: GalleryPhoto[];
   mood: MoodState | null;
   emotionMemories: EmotionMemoryPoint[];
@@ -382,6 +386,43 @@ async function safe<T>(label: string, fn: () => Promise<T>, failed: string[]): P
 
 export type FeedType = 'all' | 'posts';
 
+export interface DreamsPage {
+  items: DreamEntry[];
+  nextBefore: number | null;
+  hasMore: boolean;
+}
+
+function mapDreamRow(d: DreamRow): DreamEntry {
+  const labels = formatFeedLabels(d.created_at);
+  return {
+    id: d.id,
+    author: d.author,
+    createdAt: d.created_at,
+    dateLabel: labels.dateLabel || d.date,
+    title: d.title,
+    content: d.content,
+    emotion: d.emotion,
+    tone: d.tone || 'drifting',
+    valence: d.valence ?? 0,
+    arousal: d.arousal ?? 0.5,
+  };
+}
+
+export async function fetchDreamsPage(before?: number, limit = 20): Promise<DreamsPage> {
+  const response = await http.get<BrainItemsResponse<DreamRow>>('/api/brain/dreams', {
+    limit,
+    before,
+  });
+  if (!response.ok) {
+    throw new Error(response.error || 'dreams fetch failed');
+  }
+  return {
+    items: (response.items || []).map(mapDreamRow),
+    nextBefore: response.next_before ?? null,
+    hasMore: Boolean(response.has_more),
+  };
+}
+
 export async function fetchMomentsFeed(
   cursor?: string,
   limit = 20,
@@ -405,32 +446,15 @@ export async function fetchMomentsFeed(
 export async function fetchMomentsData(): Promise<MomentsData> {
   const failed: string[] = [];
 
-  const [dreams, moodRes, emoMemRes, galleryRes, drawersRes] = await Promise.all([
-    safe('dreams', () => http.get<BrainItemsResponse<DreamRow>>('/api/brain/dreams'), failed),
+  const [dreamsPage, moodRes, emoMemRes, galleryRes, drawersRes] = await Promise.all([
+    safe('dreams', () => fetchDreamsPage(undefined, 20), failed),
     safe('mood', () => http.get<EmotionStateResponse>('/api/brain/emotion_state'), failed),
     safe('emotion memories', () => http.get<BrainItemsResponse<EmotionMemoryRow>>('/api/brain/emotions'), failed),
     safe('gallery', () => http.get<{ photos: GalleryPhotoRow[] }>('/api/gallery/photos'), failed),
     safe('tool drawers', () => http.get<ToolDrawersResponse>('/api/tools/drawers'), failed),
   ]);
 
-  const dreamEntries: DreamEntry[] = dreams?.ok
-    ? (dreams.items || []).map((d) => {
-        const labels = formatFeedLabels(d.created_at);
-        return {
-          id: d.id,
-          author: d.author,
-          createdAt: d.created_at,
-          dateLabel: labels.dateLabel || d.date,
-          title: d.title,
-          content: d.content,
-          emotion: d.emotion,
-          tone: d.tone || 'drifting',
-          valence: d.valence ?? 0,
-          arousal: d.arousal ?? 0.5,
-        };
-      })
-    : [];
-  if (dreams && !dreams.ok) failed.push('dreams');
+  const dreamEntries: DreamEntry[] = dreamsPage?.items || [];
 
   const mood: MoodState | null = moodRes?.ok && moodRes.current
     ? {
@@ -483,6 +507,8 @@ export async function fetchMomentsData(): Promise<MomentsData> {
 
   return {
     dreams: dreamEntries,
+    dreamsHasMore: Boolean(dreamsPage?.hasMore),
+    dreamsNextBefore: dreamsPage?.nextBefore ?? null,
     gallery,
     mood,
     emotionMemories,

@@ -74,6 +74,51 @@ class DreamMetaTests(unittest.TestCase):
         self.assertEqual(items[0]['tone'], 'vivid')
         self.assertEqual(items[0]['emotion'], '鲜活')
 
+    def test_fetch_dream_page_cursor(self):
+        from tools.dream_meta import fetch_dream_page
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / 'memories.db'
+            conn = sqlite3.connect(db_path)
+            conn.row_factory = sqlite3.Row
+            conn.executescript(
+                """
+                CREATE TABLE posts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    type TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    author TEXT DEFAULT 'fyodor',
+                    created_at TEXT,
+                    valence REAL DEFAULT 0,
+                    arousal REAL DEFAULT 0,
+                    tags TEXT DEFAULT '',
+                    summary_title TEXT
+                );
+                CREATE TABLE dream_pool (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    content TEXT, valence REAL, arousal REAL, tone TEXT, created_at TEXT
+                );
+                """
+            )
+            for i in range(5):
+                conn.execute(
+                    "INSERT INTO posts (type, content, created_at, summary_title) VALUES ('DREAM', ?, ?, ?)",
+                    (f'梦境正文{i}足够长', f'2026-07-1{i} 03:00:00', f'题{i}'),
+                )
+            conn.commit()
+            page1 = fetch_dream_page(conn, limit=2, before=None)
+            self.assertEqual(len(page1['items']), 2)
+            self.assertTrue(page1['has_more'])
+            self.assertIsNotNone(page1['next_before'])
+            page2 = fetch_dream_page(conn, limit=2, before=page1['next_before'])
+            self.assertEqual(len(page2['items']), 2)
+            ids1 = {it['id'] for it in page1['items']}
+            ids2 = {it['id'] for it in page2['items']}
+            self.assertFalse(ids1 & ids2)
+            page3 = fetch_dream_page(conn, limit=2, before=page2['next_before'])
+            self.assertEqual(len(page3['items']), 1)
+            self.assertFalse(page3['has_more'])
+            conn.close()
+
     def test_build_item_uses_rule_title_when_missing(self):
         item = build_dream_api_item({
             'id': 9,
