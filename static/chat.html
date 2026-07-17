@@ -318,6 +318,9 @@ html[data-theme=dark] .tsess{background:rgba(212,165,116,.04);border-left-color:
 .cache-info .ci-build{color:rgba(170,128,72,.95);}
 .cache-info .ci-miss{color:rgba(145,120,160,.9);}
 .cache-info .ci-off{opacity:.72;}
+.cache-info .ci-cost{color:rgba(170,108,88,.92);font-variant-numeric:tabular-nums;}
+.cache-info .ci-cost{color:rgba(170,108,88,.92);font-variant-numeric:tabular-nums;}
+.cache-info .ci-cost{color:rgba(170,108,88,.92);font-variant-numeric:tabular-nums;}
 .stream-err-wrap{padding:10px 14px;color:#c0392b;}
 .stream-err-retry{display:inline-block;margin-top:6px;font-size:12px;cursor:pointer;background:none;border:1px solid #c0392b;color:#c0392b;border-radius:4px;padding:3px 10px;}
 
@@ -1406,6 +1409,13 @@ function fmtTok(n){
   if(n >= 1000) return (n/1000).toFixed(1).replace(/\.0$/,'') + 'K';
   return String(Math.round(n));
 }
+function fmtCost(usd, estimated){
+  var n = Number(usd||0);
+  if(!isFinite(n) || n<=0) return '';
+  var text = n >= 1 ? n.toFixed(2) : n >= 0.01 ? n.toFixed(2) : n.toFixed(3);
+  var title = estimated ? '按费率估算，可能与账单略有偏差' : '按中转站账单 quota 换算';
+  return '<span class="ci-item ci-cost" title="'+title+'">'+(estimated?'≈':'')+'$'+text+'</span>';
+}
 function buildCacheInfoHtmlFromData(ci){
   ci = ci || {};
   var read = Number(ci.cache_read||0);
@@ -1443,6 +1453,8 @@ function buildCacheInfoHtmlFromData(ci){
   } else if(ci.cache_supported===true){
     pieces.push('<span class="ci-item ci-miss" title="支持缓存，但本轮未读回缓存">缓存未命中</span>');
   }
+  var costHtml = fmtCost(ci.cost_usd, ci.cost_estimated);
+  if(costHtml) pieces.push(costHtml);
   return pieces.length ? '<div class="cache-info">'+pieces.join(' · ')+'</div>' : '';
 }
 
@@ -2126,7 +2138,7 @@ setInterval(checkBlocked, 15000);
 
 // ── Msg actions & stop ──
 var streamAbort = null;
-var streamState = {cacheRead: 0, cacheCreate: 0, cacheCreate5m: 0, cacheCreate1h: 0, inputTokens: 0, outputTokens: 0, elapsedSec: 0, cacheSupported: null};
+var streamState = {cacheRead: 0, cacheCreate: 0, cacheCreate5m: 0, cacheCreate1h: 0, inputTokens: 0, outputTokens: 0, elapsedSec: 0, cacheSupported: null, costUsd: 0, costEstimated: false};
 var _suppressLoadMsgs = false;
 function releaseGenLock(force){
   fetch('/api/gw/chat/cancel',{
@@ -2294,7 +2306,9 @@ function appendCacheInfo(){
     input_tokens: streamState.inputTokens,
     output_tokens: streamState.outputTokens,
     elapsed_sec: streamState.elapsedSec,
-    cache_supported: streamState.cacheSupported
+    cache_supported: streamState.cacheSupported,
+    cost_usd: streamState.costUsd,
+    cost_estimated: streamState.costEstimated
   });
   if(html) bwrap.insertAdjacentHTML('beforeend', html);
 }
@@ -2344,7 +2358,7 @@ async function retryStream(){
 }
 
 async function streamReply(){
-  streamState.cacheRead=0; streamState.cacheCreate=0; streamState.cacheCreate5m=0; streamState.cacheCreate1h=0; streamState.inputTokens=0; streamState.outputTokens=0; streamState.elapsedSec=0; streamState.cacheSupported=null;
+  streamState.cacheRead=0; streamState.cacheCreate=0; streamState.cacheCreate5m=0; streamState.cacheCreate1h=0; streamState.inputTokens=0; streamState.outputTokens=0; streamState.elapsedSec=0; streamState.cacheSupported=null; streamState.costUsd=0; streamState.costEstimated=false;
   window._earlyThinkSummary=null;
   await clearStaleGenLock();
   var ctrl=new AbortController(); streamAbort=ctrl;
@@ -2550,6 +2564,8 @@ async function streamReply(){
           if(ev.output_tokens) streamState.outputTokens=Math.max(streamState.outputTokens,ev.output_tokens);
           if(ev.elapsed_sec) streamState.elapsedSec=Math.max(streamState.elapsedSec,ev.elapsed_sec);
           if(ev.cache_supported!==undefined) streamState.cacheSupported=ev.cache_supported;
+          if(ev.cost_usd) streamState.costUsd=Number(ev.cost_usd)||0;
+          if(ev.cost_estimated!==undefined) streamState.costEstimated=!!ev.cost_estimated;
         } else if(ev.t==='err'){
           setSendStatus('生成失败','error');
           ensureLiveRow();
