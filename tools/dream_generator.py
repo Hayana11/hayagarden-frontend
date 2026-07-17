@@ -8,6 +8,7 @@ Layer 3: 推断基调 (情感坐标 → 梦的温度) → 调用 /wake 生成诗
 import sqlite3, datetime, random, os, sys, json
 import frontmatter as fm
 import urllib.request
+import urllib.error
 
 if '/opt/frontend' not in sys.path:
     sys.path.insert(0, '/opt/frontend')
@@ -186,8 +187,17 @@ def _call_wake_for_dream(tone, primer):
         with urllib.request.urlopen(req, timeout=120) as resp:
             data = json.loads(resp.read().decode())
             return (data.get('content') or data.get('text', '')).strip()
+    except urllib.error.HTTPError as e:
+        # urllib 把 4xx/5xx 抛成 HTTPError，str(e) 只有状态码，没有响应体。
+        # 网关会把真正的错误写进 body，读出来才知道到底哪里断了。
+        try:
+            body = e.read().decode('utf-8', 'replace')[:500]
+        except Exception:
+            body = ''
+        _log(f"wake call failed: HTTP {e.code} {e.reason} body={body}")
+        return None
     except Exception as e:
-        _log(f"wake call failed: {e}")
+        _log(f"wake call failed: {type(e).__name__}: {e}")
         return None
 
 def _fallback_dream(tone, merged, db_frags):
