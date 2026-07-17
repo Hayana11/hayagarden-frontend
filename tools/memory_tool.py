@@ -21,7 +21,8 @@ def _db():
 
 
 def save_memory(content, type='MEMORY', author='fyodor', layer='recent',
-                tags='', importance=0, pinned=0, created_at=None):
+                tags='', importance=0, pinned=0, created_at=None,
+                valence=None, arousal=None):
     """统一写入口。created_at 传 None 用表默认（东八现在）。返回新 id。"""
     content = (content or '').strip()
     if not content:
@@ -31,29 +32,27 @@ def save_memory(content, type='MEMORY', author='fyodor', layer='recent',
     conn = _db()
     post_cols = {r[1] for r in conn.execute("PRAGMA table_info(posts)").fetchall()}
     has_summary_title = 'summary_title' in post_cols
+    has_valence = 'valence' in post_cols
     gen_title = summary_title.generate_summary_title(content)
+    cols = ['type', 'content', 'author', 'layer', 'tags', 'importance', 'pinned']
+    vals = [type, content, author, layer, tags, int(importance), int(pinned)]
     if created_at:
-        if has_summary_title:
-            cur = conn.execute(
-                "INSERT INTO posts (type, content, author, layer, tags, importance, pinned, created_at, summary_title) "
-                "VALUES (?,?,?,?,?,?,?,?,?)",
-                (type, content, author, layer, tags, int(importance), int(pinned), created_at, gen_title))
-        else:
-            cur = conn.execute(
-                "INSERT INTO posts (type, content, author, layer, tags, importance, pinned, created_at) "
-                "VALUES (?,?,?,?,?,?,?,?)",
-                (type, content, author, layer, tags, int(importance), int(pinned), created_at))
-    else:
-        if has_summary_title:
-            cur = conn.execute(
-                "INSERT INTO posts (type, content, author, layer, tags, importance, pinned, summary_title) "
-                "VALUES (?,?,?,?,?,?,?,?)",
-                (type, content, author, layer, tags, int(importance), int(pinned), gen_title))
-        else:
-            cur = conn.execute(
-                "INSERT INTO posts (type, content, author, layer, tags, importance, pinned) "
-                "VALUES (?,?,?,?,?,?,?)",
-                (type, content, author, layer, tags, int(importance), int(pinned)))
+        cols.append('created_at')
+        vals.append(created_at)
+    if has_summary_title:
+        cols.append('summary_title')
+        vals.append(gen_title)
+    if has_valence and valence is not None:
+        cols.append('valence')
+        vals.append(round(float(valence), 4))
+    if has_valence and arousal is not None:
+        cols.append('arousal')
+        vals.append(round(float(arousal), 4))
+    placeholders = ','.join('?' for _ in cols)
+    cur = conn.execute(
+        f"INSERT INTO posts ({', '.join(cols)}) VALUES ({placeholders})",
+        vals,
+    )
     conn.commit()
     new_id = cur.lastrowid
     conn.close()

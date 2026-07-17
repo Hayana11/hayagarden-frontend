@@ -4939,24 +4939,11 @@ def brain_emotions():
 def brain_dreams():
     """梦 - 返回存储的梦"""
     try:
+        from tools.dream_meta import fetch_dream_items
+
         conn = get_db()
-        rows = conn.execute(
-            "SELECT content, created_at FROM posts WHERE type='DREAM' ORDER BY id DESC LIMIT 10"
-        ).fetchall()
+        items = fetch_dream_items(conn, limit=10, include_id=False)
         conn.close()
-        items = []
-        seen = set()
-        for r in rows:
-            c = (r['content'] or '').strip()
-            if not c or c in seen:
-                continue
-            seen.add(c)
-            items.append({
-                'date': r['created_at'][:10] if r['created_at'] else '—',
-                'title': (c[:40] + '...') if c else '无题',
-                'content': c,
-                'emotion': '朦胧'
-            })
         return jsonify({'ok': True, 'items': items})
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e)}), 500
