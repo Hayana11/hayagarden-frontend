@@ -8,6 +8,7 @@ import {
   establishMomentsSession,
   fetchEmotionHistory,
   fetchMomentComments,
+  fetchDreamsPage,
   fetchMomentsCover,
   fetchMomentsData,
   fetchMomentsFeed,
@@ -515,6 +516,11 @@ export function MomentsScreen() {
   const [postsFailed, setPostsFailed] = useState(false);
   const [postsReloading, setPostsReloading] = useState(false);
   const [postsLoaded, setPostsLoaded] = useState(false);
+  const [dreams, setDreams] = useState<DreamEntry[]>([]);
+  const [dreamsNextBefore, setDreamsNextBefore] = useState<number | null>(null);
+  const [dreamsHasMore, setDreamsHasMore] = useState(false);
+  const [dreamsLoadingMore, setDreamsLoadingMore] = useState(false);
+  const dreamSentinelRef = useRef<HTMLDivElement | null>(null);
   const [lightbox, setLightbox] = useState<GalleryPhoto | null>(null);
   const [dreamOpen, setDreamOpen] = useState<DreamEntry | null>(null);
   const [hoveredDream, setHoveredDream] = useState<number | null>(null);
@@ -648,8 +654,14 @@ export function MomentsScreen() {
 
     if (auxResult.status === 'fulfilled') {
       setData(auxResult.value);
+      setDreams(auxResult.value.dreams);
+      setDreamsHasMore(auxResult.value.dreamsHasMore);
+      setDreamsNextBefore(auxResult.value.dreamsNextBefore);
     } else {
       setData(null);
+      setDreams([]);
+      setDreamsHasMore(false);
+      setDreamsNextBefore(null);
     }
 
     if (feedResult.status === 'fulfilled') {
@@ -752,6 +764,45 @@ export function MomentsScreen() {
     }
   }, [feedCursor, feedHasMore, feedLoadingMore, mergeFeedPage, postsCursor, postsHasMore, postsLoadingMore]);
 
+  const loadMoreDreams = useCallback(async () => {
+    if (!dreamsHasMore || dreamsLoadingMore || dreamsNextBefore == null) return;
+    setDreamsLoadingMore(true);
+    try {
+      const page = await fetchDreamsPage(dreamsNextBefore, 20);
+      setDreams((current) => {
+        const seen = new Set(current.map((d) => d.id));
+        const merged = [...current];
+        for (const item of page.items) {
+          if (!seen.has(item.id)) merged.push(item);
+        }
+        return merged;
+      });
+      setDreamsNextBefore(page.nextBefore);
+      setDreamsHasMore(page.hasMore);
+    } catch {
+      setToast('梦境加载更多失败了，稍后再试。');
+      window.setTimeout(() => setToast(''), 2200);
+    } finally {
+      setDreamsLoadingMore(false);
+    }
+  }, [dreamsHasMore, dreamsLoadingMore, dreamsNextBefore]);
+
+  useEffect(() => {
+    if (tab !== 'dream' || !dreamsHasMore) return;
+    const node = dreamSentinelRef.current;
+    if (!node) return;
+    const io = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((e) => e.isIntersecting)) {
+          void loadMoreDreams();
+        }
+      },
+      { root: null, rootMargin: '160px', threshold: 0 },
+    );
+    io.observe(node);
+    return () => io.disconnect();
+  }, [tab, dreamsHasMore, loadMoreDreams, dreams.length]);
+
   useEffect(() => {
     void load();
   }, [load]);
@@ -784,8 +835,6 @@ export function MomentsScreen() {
       keywords: entry.tags,
     });
   }, []);
-
-  const dreams = useMemo(() => data?.dreams || [], [data]);
 
   useEffect(() => {
     if (moodSel) {
@@ -1156,6 +1205,15 @@ export function MomentsScreen() {
                       </div>
                     );
                   })}
+                  {dreamsHasMore && (
+                    <div
+                      ref={dreamSentinelRef}
+                      onClick={() => void loadMoreDreams()}
+                      style={{ textAlign: 'center', padding: '10px 0 4px', fontFamily: DISPLAY, fontSize: 12, letterSpacing: 2, color: dreamsLoadingMore ? 'var(--ghost)' : 'var(--dream)', cursor: dreamsLoadingMore ? 'default' : 'pointer' }}
+                    >
+                      {dreamsLoadingMore ? '梦还在继续涌上来…' : '下滑加载更多 · 或点这里'}
+                    </div>
+                  )}
                 </div>
               )}
 

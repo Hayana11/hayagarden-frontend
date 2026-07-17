@@ -245,70 +245,180 @@ async function loadEmotions(){
   }
 }
 
-async function loadDreams(){
-  try{
-    const r = await fetch('/api/brain/dreams');
-    const data = await r.json();
-    const container = document.getElementById('dreams-list');
-    if(!data.items || data.items.length===0){
-      container.innerHTML = '<div class="empty"><i class="ti ti-mood-smile"></i><p>还没有做过梦</p></div>';
-      return;
-    }
-    container.innerHTML = data.items.map(dream => `
+let _dreamBefore = null;
+let _dreamHasMore = false;
+let _dreamLoading = false;
+
+function dreamCardHtml(dream){
+  return `
       <div class="dream-card">
         <div class="dream-date">${escHtml(dream.date)}</div>
         <div class="dream-title"><i class="ti ti-moon"></i>${dreamTitle(dream.title)}</div>
         <div class="dream-content">${escHtml(stripThinking(dream.content) || "（这条记录没有可显示的内容）")}</div>
         ${dream.emotion ? `<div class="dream-emotion">情绪：${escHtml(dream.emotion)}</div>` : ''}
       </div>
-    `).join('');
-  }catch(e){
-    console.error(e);
-    document.getElementById('dreams-list').innerHTML = '<div class="empty">加载失败</div>';
+    `;
+}
+
+function ensureDreamSentinel(container){
+  let el = document.getElementById('dreams-sentinel');
+  if(!el){
+    el = document.createElement('div');
+    el.id = 'dreams-sentinel';
+    el.className = 'empty';
+    el.style.padding = '18px 20px';
+    el.style.cursor = 'pointer';
+    el.onclick = () => loadDreams(true);
+    container.appendChild(el);
+  }
+  el.style.display = _dreamHasMore ? 'block' : 'none';
+  el.innerHTML = _dreamLoading
+    ? '<p>梦还在继续涌上来…</p>'
+    : (_dreamHasMore ? '<p>下滑加载更多 · 或点这里</p>' : '');
+  if(_dreamHasMore && !el._io){
+    el._io = new IntersectionObserver((entries) => {
+      if(entries.some(e => e.isIntersecting)) loadDreams(true);
+    }, {rootMargin: '160px'});
+    el._io.observe(el);
   }
 }
 
-async function loadThoughts(){
+async function loadDreams(more=false){
+  if(_dreamLoading) return;
+  if(more && !_dreamHasMore) return;
+  const container = document.getElementById('dreams-list');
+  if(!more){
+    _dreamBefore = null;
+    _dreamHasMore = false;
+    container.innerHTML = '<div class="loading">加载中…</div>';
+  }
+  _dreamLoading = true;
+  ensureDreamSentinel(container);
   try{
-    const r = await fetch('/api/brain/thoughts');
+    const qs = new URLSearchParams({limit: '20'});
+    if(more && _dreamBefore != null) qs.set('before', String(_dreamBefore));
+    const r = await fetch('/api/brain/dreams?' + qs.toString());
     const data = await r.json();
-    const container = document.getElementById('thoughts-list');
-    if(!data.items || data.items.length===0){
-      container.innerHTML = '<div class="empty"><i class="ti ti-brain"></i><p>暂无深夜想法</p></div>';
-      return;
+    const items = data.items || [];
+    if(!more){
+      if(!items.length){
+        container.innerHTML = '<div class="empty"><i class="ti ti-mood-smile"></i><p>还没有做过梦</p></div>';
+        _dreamHasMore = false;
+        return;
+      }
+      container.innerHTML = items.map(dreamCardHtml).join('');
+    }else if(items.length){
+      const sentinel = document.getElementById('dreams-sentinel');
+      const html = items.map(dreamCardHtml).join('');
+      if(sentinel) sentinel.insertAdjacentHTML('beforebegin', html);
+      else container.insertAdjacentHTML('beforeend', html);
     }
-    container.innerHTML = data.items.map(t => `
+    _dreamHasMore = Boolean(data.has_more);
+    _dreamBefore = data.next_before ?? null;
+    ensureDreamSentinel(container);
+  }catch(e){
+    console.error(e);
+    if(!more) container.innerHTML = '<div class="empty">加载失败</div>';
+  }finally{
+    _dreamLoading = false;
+    ensureDreamSentinel(container);
+  }
+}
+
+function makePagedLoader({key, endpoint, containerId, emptyHtml, renderItem}){
+  const state = {before: null, hasMore: false, loading: false};
+  function sentinelId(){ return key + '-sentinel'; }
+  function ensureSentinel(container, loadMore){
+    let el = document.getElementById(sentinelId());
+    if(!el){
+      el = document.createElement('div');
+      el.id = sentinelId();
+      el.className = 'empty';
+      el.style.padding = '18px 20px';
+      el.style.cursor = 'pointer';
+      el.onclick = () => loadMore(true);
+      container.appendChild(el);
+    }
+    el.style.display = state.hasMore ? 'block' : 'none';
+    el.innerHTML = state.loading
+      ? '<p>继续读取…</p>'
+      : (state.hasMore ? '<p>下滑加载更多 · 或点这里</p>' : '');
+    if(state.hasMore && !el._io){
+      el._io = new IntersectionObserver((entries) => {
+        if(entries.some(e => e.isIntersecting)) loadMore(true);
+      }, {rootMargin: '160px'});
+      el._io.observe(el);
+    }
+  }
+  async function load(more=false){
+    if(state.loading) return;
+    if(more && !state.hasMore) return;
+    const container = document.getElementById(containerId);
+    if(!more){
+      state.before = null;
+      state.hasMore = false;
+      container.innerHTML = '<div class="loading">加载中…</div>';
+    }
+    state.loading = true;
+    ensureSentinel(container, load);
+    try{
+      const qs = new URLSearchParams({limit: '20'});
+      if(more && state.before != null) qs.set('before', String(state.before));
+      const r = await fetch(endpoint + '?' + qs.toString());
+      const data = await r.json();
+      const items = data.items || [];
+      if(!more){
+        if(!items.length){
+          container.innerHTML = emptyHtml;
+          state.hasMore = false;
+          return;
+        }
+        container.innerHTML = items.map(renderItem).join('');
+      }else if(items.length){
+        const sentinel = document.getElementById(sentinelId());
+        const html = items.map(renderItem).join('');
+        if(sentinel) sentinel.insertAdjacentHTML('beforebegin', html);
+        else container.insertAdjacentHTML('beforeend', html);
+      }
+      state.hasMore = Boolean(data.has_more);
+      state.before = data.next_before ?? null;
+      ensureSentinel(container, load);
+    }catch(e){
+      console.error(e);
+      if(!more) container.innerHTML = '<div class="empty">加载失败</div>';
+    }finally{
+      state.loading = false;
+      ensureSentinel(container, load);
+    }
+  }
+  return load;
+}
+
+const loadThoughts = makePagedLoader({
+  key: 'thoughts',
+  endpoint: '/api/brain/thoughts',
+  containerId: 'thoughts-list',
+  emptyHtml: '<div class="empty"><i class="ti ti-brain"></i><p>暂无深夜想法</p></div>',
+  renderItem: (t) => `
       <div class="thought-card">
         <div class="thought-time">${escHtml(t.time)}</div>
         <div class="thought-content">${escHtml(stripThinking(t.content) || "（这条记录没有可显示的内容）")}</div>
       </div>
-    `).join('');
-  }catch(e){
-    console.error(e);
-    document.getElementById('thoughts-list').innerHTML = '<div class="empty">加载失败</div>';
-  }
-}
+    `,
+});
 
-async function loadDiary(){
-  try{
-    const r = await fetch('/api/brain/diary');
-    const data = await r.json();
-    const container = document.getElementById('diary-list');
-    if(!data.items || data.items.length===0){
-      container.innerHTML = '<div class="empty"><i class="ti ti-notebook"></i><p>暂无日记</p></div>';
-      return;
-    }
-    container.innerHTML = data.items.map(d => `
+const loadDiary = makePagedLoader({
+  key: 'diary',
+  endpoint: '/api/brain/diary',
+  containerId: 'diary-list',
+  emptyHtml: '<div class="empty"><i class="ti ti-notebook"></i><p>暂无日记</p></div>',
+  renderItem: (d) => `
       <div class="thought-card">
         <div class="thought-time">${escHtml(d.date)}</div>
         <div class="thought-content" style="white-space:pre-wrap">${escHtml(stripThinking(d.content) || "（这条记录没有可显示的内容）")}</div>
       </div>
-    `).join('');
-  }catch(e){
-    console.error(e);
-    document.getElementById('diary-list').innerHTML = '<div class="empty">加载失败</div>';
-  }
-}
+    `,
+});
 
 window.addEventListener('load', () => loadEmotions());
 

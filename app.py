@@ -2020,27 +2020,91 @@ def brain_emotion_history():
 @app.route('/api/brain/dreams', methods=['GET'])
 def brain_dreams_proxy():
     try:
-        from tools.dream_meta import fetch_dream_items
+        from tools.dream_meta import fetch_dream_page
+
+        try:
+            limit = int(request.args.get('limit', 20))
+        except (TypeError, ValueError):
+            limit = 20
+        before_raw = request.args.get('before')
+        before = None
+        if before_raw not in (None, ''):
+            try:
+                before = int(before_raw)
+            except (TypeError, ValueError):
+                return jsonify({'ok': False, 'error': 'invalid before'}), 400
 
         conn = get_db()
-        items = fetch_dream_items(conn, limit=10, include_id=True)
+        page = fetch_dream_page(conn, limit=limit, before=before, include_id=True)
         conn.close()
-        for item in items:
+        for item in page['items']:
             item['created_at'] = moments_store.to_iso8601_shanghai(item.get('created_at'))
             if item.get('created_at'):
                 item['date'] = item['created_at'][:10]
-        return jsonify({'ok': True, 'items': items})
+        return jsonify({
+            'ok': True,
+            'items': page['items'],
+            'has_more': page['has_more'],
+            'next_before': page['next_before'],
+        })
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e)}), 500
+
+def _brain_posts_page(type_name: str, *, limit_default=20, limit_max=50, order_by='id'):
+    """通用 posts 分页：limit + before(id)。返回 (items_rows, has_more, next_before)。"""
+    try:
+        limit = int(request.args.get('limit', limit_default))
+    except (TypeError, ValueError):
+        limit = limit_default
+    limit = max(1, min(limit, limit_max))
+    before_raw = request.args.get('before')
+    before = None
+    if before_raw not in (None, ''):
+        try:
+            before = int(before_raw)
+        except (TypeError, ValueError):
+            return None, None, None, 'invalid before'
+    conn = get_db()
+    if order_by == 'created_at':
+        if before is not None:
+            # before = 上一页最后一条 id（仍用 id 游标，避免同秒歧义）
+            rows = conn.execute(
+                f"SELECT id, author, content, created_at FROM posts "
+                f"WHERE type=? AND id < ? ORDER BY created_at DESC, id DESC LIMIT ?",
+                (type_name, before, limit + 1),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                f"SELECT id, author, content, created_at FROM posts "
+                f"WHERE type=? ORDER BY created_at DESC, id DESC LIMIT ?",
+                (type_name, limit + 1),
+            ).fetchall()
+    else:
+        if before is not None:
+            rows = conn.execute(
+                "SELECT id, author, content, created_at FROM posts "
+                "WHERE type=? AND id < ? ORDER BY id DESC LIMIT ?",
+                (type_name, before, limit + 1),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT id, author, content, created_at FROM posts "
+                "WHERE type=? ORDER BY id DESC LIMIT ?",
+                (type_name, limit + 1),
+            ).fetchall()
+    conn.close()
+    has_more = len(rows) > limit
+    rows = rows[:limit]
+    next_before = int(rows[-1]['id']) if has_more and rows else None
+    return rows, has_more, next_before, None
+
 
 @app.route('/api/brain/thoughts', methods=['GET'])
 def brain_thoughts_proxy():
     try:
-        conn = get_db()
-        rows = conn.execute(
-            "SELECT id, author, content, created_at FROM posts WHERE type='THOUGHT' ORDER BY id DESC LIMIT 10"
-        ).fetchall()
-        conn.close()
+        rows, has_more, next_before, err = _brain_posts_page('THOUGHT', limit_default=20)
+        if err:
+            return jsonify({'ok': False, 'error': err}), 400
         items = []
         for r in rows:
             created_at = moments_store.to_iso8601_shanghai(r['created_at'])
@@ -2051,7 +2115,12 @@ def brain_thoughts_proxy():
                 'time': created_at[11:16] if created_at else '-',
                 'content': (r['content'] or ''),
             })
-        return jsonify({'ok': True, 'items': items})
+        return jsonify({
+            'ok': True,
+            'items': items,
+            'has_more': bool(has_more and next_before is not None),
+            'next_before': next_before,
+        })
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e)}), 500
 
@@ -2059,12 +2128,11 @@ def brain_thoughts_proxy():
 @app.route('/api/brain/diary', methods=['GET'])
 def brain_diary_proxy():
     try:
-        conn = get_db()
-        rows = conn.execute(
-            "SELECT id, author, content, created_at FROM posts WHERE type='DAILY_SUMMARY' "
-            "ORDER BY created_at DESC LIMIT 14"
-        ).fetchall()
-        conn.close()
+        rows, has_more, next_before, err = _brain_posts_page(
+            'DAILY_SUMMARY', limit_default=20, order_by='created_at',
+        )
+        if err:
+            return jsonify({'ok': False, 'error': err}), 400
         items = []
         seen = set()
         for r in rows:
@@ -2080,7 +2148,12 @@ def brain_diary_proxy():
                 'date': created_at[:10] if created_at else '\u2014',
                 'content': c,
             })
-        return jsonify({'ok': True, 'items': items})
+        return jsonify({
+            'ok': True,
+            'items': items,
+            'has_more': bool(has_more and next_before is not None),
+            'next_before': next_before,
+        })
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e)}), 500
 
