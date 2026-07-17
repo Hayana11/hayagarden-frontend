@@ -69,7 +69,7 @@ EXPLANATION_PATTERNS = [
 ]
 
 FAILURE_HINTS = {
-    'too_short': '正文过短，请写满300字以上的具体梦境',
+    'too_short': '正文过短，请写具体梦境（可分段，最多1000字）',
     'explanatory_closure': '不要在结尾解释梦的含义或“明白了什么”',
     'reality_anchor': '不要出现今天/白天/我们聊到/最近/现实中/微信/小红书等现实锚点',
     'primer_copy': '不要原样照抄素材碎片，请改写成梦的感官与动作',
