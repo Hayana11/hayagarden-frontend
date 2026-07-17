@@ -37,7 +37,17 @@ DREAM_TRAITS = {
     'causal_reverse': (0.20, '一处因果倒置：结果先于原因发生'),
     'unresolved_ending': (0.65, '结尾不解释、不收束，允许记不清'),
     'missing_center': (0.30, '最重要的现实人物以缺席、物体或声音替代'),
+    # 第二批：梦化算子（并入同一概率框架，上限仍 3）
+    'condensation': (0.25, '把两个材料熔成一个东西'),
+    'literal_metaphor': (0.25, '把一个抽象说法当成字面事实来写'),
+    'scale_distortion': (0.15, '一个物体的尺寸明显不对'),
+    'role_exchange': (0.15, '主客关系颠倒：本该被我做的事，反过来对我做'),
 }
+
+HUMAN_SYMBOLS = [
+    '一扇打不开的门', '知道回程的鸟',
+    '留在椅背上的外套', '电话里的呼吸',
+]
 
 REALITY_ANCHOR_PATTERNS = [
     r'今天(?:我们|她|和她)',
@@ -342,7 +352,7 @@ def _strip_time_markers(text):
 
 
 def _decontextualize_v1(text):
-    """第一批：实体替换 + 概率抹时间。不做「人→符号」。"""
+    """轨道A 基础：实体替换 + 概率抹时间。"""
     if not text:
         return ''
     for k, v in _ENTITY_REPLACE.items():
@@ -351,6 +361,21 @@ def _decontextualize_v1(text):
         text = _strip_time_markers(text)
     return re.sub(r'\s+', ' ', text).strip()
 
+
+def _second_person_to_symbol(text, symbol):
+    """把第二人称/她 的局部出现替换为符号物（保守：最多一处）。"""
+    for token in ('她', '你'):
+        if token in text:
+            return text.replace(token, symbol, 1)
+    return text
+
+
+def _decontextualize(text):
+    """双轨A：v1 + 0.45 概率人→符号。"""
+    text = _decontextualize_v1(text)
+    if text and random.random() < 0.45:
+        text = _second_person_to_symbol(text, random.choice(HUMAN_SYMBOLS))
+    return text
 
 def _pick_traits():
     picked = [k for k, (p, _) in DREAM_TRAITS.items() if random.random() < p]
@@ -382,7 +407,8 @@ TONE_PROMPTS = {
 }
 
 
-def _build_primer(tone, materials, traits, places=None, objects=None, actions=None):
+def _build_primer(tone, materials, traits, places=None, objects=None, actions=None,
+                  shards=None):
     """只含材料、不含解释。不出现姓名/日期/domain/应用名/事件结论标签。"""
     parts = [f'基调：{TONE_PROMPTS.get(tone, TONE_PROMPTS["drifting"])}']
     if places:
@@ -398,17 +424,87 @@ def _build_primer(tone, materials, traits, places=None, objects=None, actions=No
 
     frag_texts = []
     for f in materials.get('fragments') or []:
-        cleaned = _decontextualize_v1((f.get('content') or '')[:120])
+        cleaned = _decontextualize((f.get('content') or '')[:120])
         if cleaned:
             frag_texts.append(cleaned)
     if frag_texts:
         parts.append('碎片：' + ' / '.join(frag_texts))
+
+    if shards:
+        quoted = ' / '.join(f'“{s}”' for s in shards)
+        parts.append(f'碎片残渣：{quoted}')
 
     trait_lines = [DREAM_TRAITS[k][1] for k in traits if k in DREAM_TRAITS]
     if trait_lines:
         parts.append('本场特征：' + '；'.join(trait_lines))
 
     return '\n'.join(parts)
+
+
+def _latents_mod():
+    try:
+        import dream_latents as dl
+        return dl
+    except ImportError:
+        from tools import dream_latents as dl
+        return dl
+
+
+def _enrich_with_latents(conn, materials):
+    """synthetic 概率注入 + 旧母题回流到场所/物体/动作/感官。"""
+    dl = _latents_mod()
+    dl.ensure_table(conn)
+    dl.seed_synthetic_if_empty(conn)
+
+    synthetic_count = random.choices([0, 1, 2, 3], weights=[0.10, 0.35, 0.40, 0.15])[0]
+    synth = dl.pick_synthetic(conn, synthetic_count)
+    materials['source_mix']['synthetic'] = len(synth)
+
+    motif_count = random.choices([0, 1, 2], weights=[0.55, 0.35, 0.10])[0]
+    motifs = dl.pick_motifs(conn, motif_count)
+    materials['source_mix']['old_motif'] = len(motifs)
+
+    places, objects, actions = [], [], []
+    sensory = list(materials.get('sensory') or [])
+    used_ids = []
+
+    for item in list(synth) + list(motifs):
+        typ = item.get('type')
+        content = (item.get('content') or '').strip()
+        if not content:
+            continue
+        if item.get('id') is not None:
+            used_ids.append(item['id'])
+        if typ == 'place':
+            places.append(content)
+        elif typ == 'object':
+            objects.append(content)
+        elif typ == 'action':
+            actions.append(content)
+        elif typ == 'sensation':
+            sensory.append(content)
+        elif typ in ('figure', 'phrase'):
+            # 并入碎片侧，避免单独标签解释
+            materials.setdefault('fragments', []).append({
+                'source_id': -(100000 + int(item.get('id') or 0)),
+                'source': 'latent',
+                'content': content,
+                'valence': float(item.get('valence') or 0.5),
+                'arousal': float(item.get('arousal') or 0.4),
+                'importance': 5,
+                'recall_count': 0,
+                'resolved': 0,
+            })
+
+    materials['sensory'] = sensory
+    shards = dl.extract_shards(materials.get('fragments') or [], max_shards=2)
+    return {
+        'places': places,
+        'objects': objects,
+        'actions': actions,
+        'shards': shards,
+        'used_latent_ids': used_ids,
+    }
 
 
 # ── 严重失败检测 ───────────────────────────────────────────
@@ -483,14 +579,43 @@ def _call_wake_for_dream(tone, primer, extra=None):
         return None
 
 
-def _fallback_dream(tone, *_args):
-    """静态词库 fallback（第二批接 latents）。"""
-    a, b = random.sample(FALLBACK_PLACES, 2)
+def _fallback_dream(tone, conn=None, *_args):
+    """优先 latents 旧母题，静态词库退为冷启动兜底。"""
+    places = list(FALLBACK_PLACES)
+    objects = list(FALLBACK_OBJECTS)
+    actions = list(FALLBACK_ACTIONS)
+    sensations = list(FALLBACK_SENSATIONS)
+    used_ids = []
+    if conn is not None:
+        try:
+            dl = _latents_mod()
+            dl.ensure_table(conn)
+            rows = dl.get_fallback_latents(conn, limit=5)
+            for r in rows:
+                content = (r.get('content') or '').strip()
+                if not content:
+                    continue
+                typ = r.get('type')
+                if typ == 'place':
+                    places.append(content)
+                elif typ == 'object':
+                    objects.append(content)
+                elif typ == 'action':
+                    actions.append(content)
+                elif typ == 'sensation':
+                    sensations.append(content)
+                if r.get('id') is not None:
+                    used_ids.append(r['id'])
+            if used_ids:
+                dl.mark_used(conn, used_ids)
+        except Exception as e:
+            _log(f'fallback latents skipped: {e}')
+    a, b = random.sample(places, 2) if len(places) >= 2 else (places[0], places[0])
     return (
-        f'我站在{a}，手里拿着{random.choice(FALLBACK_OBJECTS)}。'
-        f'它一直在{random.choice(FALLBACK_ACTIONS)}，但周围的人似乎听不见。'
+        f'我站在{a}，手里拿着{random.choice(objects)}。'
+        f'它一直在{random.choice(actions)}，但周围的人似乎听不见。'
         f'门打开以后不是房间，而是{b}。'
-        f'我忽然记不起自己为什么有这双手，只记得{random.choice(FALLBACK_SENSATIONS)}。'
+        f'我忽然记不起自己为什么有这双手，只记得{random.choice(sensations)}。'
         f'后来发生了一件很重要的事，醒来只剩一处空白。'
     )
 
@@ -498,14 +623,27 @@ def _fallback_dream(tone, *_args):
 # ── 主函数 ──────────────────────────────────────────────────
 
 def generate_dream():
-    _log('dream generation started (v3 fragment-plan)')
+    _log('dream generation started (v3 fragment-plan + latents)')
     conn = _db()
     ensure_dream_pool_metadata(conn)
 
     materials = _gather_materials(conn)
+    latent_bits = {'places': [], 'objects': [], 'actions': [],
+                   'shards': [], 'used_latent_ids': []}
+    try:
+        latent_bits = _enrich_with_latents(conn, materials)
+    except Exception as e:
+        _log(f'latents enrich skipped: {e}')
+
     tone = _infer_tone(materials['avg_v'], materials['avg_a'])
     traits = _pick_traits()
-    primer = _build_primer(tone, materials, traits)
+    primer = _build_primer(
+        tone, materials, traits,
+        places=latent_bits.get('places'),
+        objects=latent_bits.get('objects'),
+        actions=latent_bits.get('actions'),
+        shards=latent_bits.get('shards'),
+    )
     _log(
         f"mix={materials['source_mix']} tone={tone} traits={traits} "
         f'primer_len={len(primer)}'
@@ -517,7 +655,7 @@ def generate_dream():
 
     dream_text = _call_wake_for_dream(tone, primer)
     if not dream_text:
-        dream_text = _fallback_dream(tone)
+        dream_text = _fallback_dream(tone, conn)
         used_fallback = True
         _log('using fallback dream text (wake unavailable)')
     else:
@@ -538,6 +676,14 @@ def generate_dream():
                 _log('regen recovered')
         else:
             _log('got AI-generated dream text')
+
+    # 标记本场用过的母题
+    try:
+        used_ids = latent_bits.get('used_latent_ids') or []
+        if used_ids:
+            _latents_mod().mark_used(conn, used_ids)
+    except Exception as e:
+        _log(f'mark latents used failed: {e}')
 
     metadata = {
         'prompt_version': PROMPT_VERSION,
@@ -577,7 +723,26 @@ def generate_dream():
                 'VALUES (?,?,?,?,?)',
                 (dream_text, avg_v, avg_a, tone, now_str),
             )
+        dream_row_id = conn.execute('SELECT last_insert_rowid()').fetchone()[0]
         conn.commit()
+
+        # 意象回流：fallback 权重 0.2 防回路
+        try:
+            dl = _latents_mod()
+            dl.ensure_table(conn)
+            items = dl.extract_dream_latents(dream_text, max_items=3)
+            origin = 'fallback_dream' if used_fallback else 'dream'
+            weight = dl.MOTIF_EXTRACTION_WEIGHT.get(
+                'fallback_dream' if used_fallback else 'normal_dream', 1.0
+            )
+            added = dl.insert_latents(
+                conn, items, origin=origin, source_id=dream_row_id,
+                valence=avg_v, arousal=avg_a, weight=weight,
+            )
+            _log(f'latents reflux: origin={origin} candidates={len(items)} added={added}')
+        except Exception as e:
+            _log(f'latents reflux skipped: {e}')
+
         conn.close()
 
         import memory_tool

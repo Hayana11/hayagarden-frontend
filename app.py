@@ -2898,6 +2898,19 @@ def _init_dream_tables():
             conn.execute('ALTER TABLE dream_pool ADD COLUMN metadata TEXT')
     except Exception:
         pass
+    # 私人梦史：潜梦库（幂等）
+    conn.execute("""CREATE TABLE IF NOT EXISTS dream_latents (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        type TEXT,
+        content TEXT,
+        origin TEXT,
+        source_id INTEGER,
+        valence REAL,
+        arousal REAL,
+        recurrence INTEGER DEFAULT 0,
+        last_used_at TEXT,
+        created_at TEXT DEFAULT (datetime('now', '+8 hours'))
+    )""")
     conn.commit()
     conn.close()
 
