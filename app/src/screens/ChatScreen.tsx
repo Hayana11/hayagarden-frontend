@@ -23,6 +23,7 @@ import {
   chatPlaceholder,
   fmtTokens,
   fetchChatGatewayOnline,
+  forceUnlockChatGenLock,
   streamChatReply,
   type ChatMsg,
   type ChatToolCall,
@@ -103,6 +104,7 @@ const IC = {
   clock: 'M12 7v5l3 2',
   edit: 'M17 3a2.85 2.85 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z',
   redo: 'M3 12a9 9 0 1 0 3-6.7|M3 4v5h5',
+  refresh: 'M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8|M21 3v5h-5',
   up: 'M12 19V5|M5 12l7-7 7 7',
   down: 'M12 5v14|M19 12l-7 7-7-7',
   plus: 'M12 5v14|M5 12h14',
@@ -154,6 +156,7 @@ export function ChatScreen() {
   const [flashId, setFlashId] = useState<number | null>(null);
   const [liked, setLiked] = useState<Record<number, 1 | -1>>({});
   const [endpointOnline, setEndpointOnline] = useState<boolean | null>(null);
+  const [refreshing, setRefreshing] = useState(false);
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const taRef = useRef<HTMLTextAreaElement>(null);
@@ -205,6 +208,28 @@ export function ChatScreen() {
     setHasMoreBefore(page.hasMoreBefore);
     if (toBottom) scrollBottom();
   }, [scrollBottom]);
+
+  const refreshChat = useCallback(async () => {
+    if (refreshing) return;
+    setRefreshing(true);
+    setNavOpen(null);
+    abortRef.current?.abort();
+    abortRef.current = null;
+    liveRef.current = null;
+    setLive(null);
+    setSending(false);
+    try {
+      const unlock = await forceUnlockChatGenLock();
+      await refetchLatest();
+      const online = await fetchChatGatewayOnline();
+      setEndpointOnline(online);
+      if (unlock.ok && !unlock.busy) showToast('已刷新');
+      else if (unlock.busy) showToast('锁仍占用，消息已刷新');
+      else showToast('已刷新（解锁请求失败）');
+    } finally {
+      setRefreshing(false);
+    }
+  }, [refreshing, refetchLatest, showToast]);
 
   // initial load + catalog
   useEffect(() => {
@@ -805,6 +830,15 @@ export function ChatScreen() {
                   <circle cx={12} cy={12} r={9} />
                   <path d={IC.clock} />
                 </svg>
+              </div>
+              <div
+                onClick={() => { void refreshChat(); }}
+                title="刷新并解锁"
+                style={{ ...iconBtn, opacity: refreshing ? 0.55 : 1, cursor: refreshing ? 'default' : 'pointer' }}
+              >
+                <span style={{ display: 'flex', animation: refreshing ? 'chatSpin .8s linear infinite' : undefined }}>
+                  <Svg d={IC.refresh} />
+                </span>
               </div>
             </div>
           </div>

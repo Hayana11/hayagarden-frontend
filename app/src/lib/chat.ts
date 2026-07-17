@@ -272,3 +272,19 @@ export async function fetchChatGatewayOnline(): Promise<boolean> {
     return false;
   }
 }
+
+/** Force-release stuck generation lock (multi-worker safe via repair API). */
+export async function forceUnlockChatGenLock(): Promise<{ ok: boolean; busy: boolean | null }> {
+  try {
+    const resp = await fetch(sseUrl('/api/repair/unlock-gen'), {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+    });
+    if (!resp.ok) return { ok: false, busy: null };
+    const data = (await resp.json()) as { ok?: boolean; lock?: { busy?: boolean | null } };
+    return { ok: data.ok === true, busy: data.lock?.busy ?? null };
+  } catch {
+    return { ok: false, busy: null };
+  }
+}
