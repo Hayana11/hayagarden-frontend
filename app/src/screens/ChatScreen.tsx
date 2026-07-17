@@ -22,6 +22,7 @@ import {
   cacheLabel,
   chatPlaceholder,
   fmtTokens,
+  fetchChatGatewayOnline,
   streamChatReply,
   type ChatMsg,
   type ChatToolCall,
@@ -151,6 +152,7 @@ export function ChatScreen() {
   const [toast, setToast] = useState<string | null>(null);
   const [flashId, setFlashId] = useState<number | null>(null);
   const [liked, setLiked] = useState<Record<number, 1 | -1>>({});
+  const [endpointOnline, setEndpointOnline] = useState<boolean | null>(null);
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const taRef = useRef<HTMLTextAreaElement>(null);
@@ -223,6 +225,18 @@ export function ChatScreen() {
       mq.removeEventListener?.('change', onMq);
       window.removeEventListener('resize', onRs);
     };
+  }, []);
+
+  // gateway reachability — breathing status under the name
+  useEffect(() => {
+    let cancelled = false;
+    const check = async () => {
+      const online = await fetchChatGatewayOnline();
+      if (!cancelled) setEndpointOnline(online);
+    };
+    void check();
+    const iv = setInterval(() => { void check(); }, 20000);
+    return () => { cancelled = true; clearInterval(iv); };
   }, []);
 
   // poll for new messages (e.g. wake messages from the api-side) when idle
@@ -749,11 +763,24 @@ export function ChatScreen() {
               <span style={{ fontFamily: DISPLAY, fontStyle: 'italic', fontSize: 17, color: '#F7F1EE' }}>Θ</span>
             </div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 1, minWidth: 0, flexShrink: 1 }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
-                <span style={{ fontFamily: DISPLAY, fontSize: 17, fontWeight: 600, letterSpacing: 1, color: 'var(--ink)' }}>Fyodor</span>
-                <span style={{ width: 6, height: 6, borderRadius: '50%', background: 'var(--ok)', flexShrink: 0 }} />
+              <span style={{ fontFamily: DISPLAY, fontSize: 17, fontWeight: 600, letterSpacing: 1, color: 'var(--ink)' }}>Fyodor</span>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 5, minWidth: 0 }}>
+                <span
+                  style={{
+                    width: 6,
+                    height: 6,
+                    borderRadius: '50%',
+                    flexShrink: 0,
+                    background: endpointOnline === false ? 'var(--err)' : endpointOnline ? 'var(--ok)' : 'var(--ghost)',
+                    animation: endpointOnline ? 'chatBreathe 2.2s ease-in-out infinite' : undefined,
+                  }}
+                />
+                {endpointOnline !== null && (
+                  <span style={{ fontFamily: DISPLAY, fontStyle: 'italic', fontSize: 10.5, letterSpacing: 1, color: 'var(--faint)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                    {endpointOnline ? 'always here' : 'away for now'}
+                  </span>
+                )}
               </div>
-              <span style={{ fontFamily: DISPLAY, fontStyle: 'italic', fontSize: 10.5, letterSpacing: 1, color: 'var(--faint)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>Θεόδωρος</span>
             </div>
             <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 1, flexShrink: 0 }}>
               <div onClick={() => setNavOpen(navOpen === 'wrench' ? null : 'wrench')} style={{ ...iconBtn, background: navOpen === 'wrench' ? 'var(--rosebg)' : 'transparent' }}>

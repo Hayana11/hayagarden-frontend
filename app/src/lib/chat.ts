@@ -260,3 +260,15 @@ export function chatPlaceholder(date: Date): string {
   if (h < 18) return pick(['下午好。有什么要我搭把手的？', '说吧，我在听。', '此刻在想什么？']);
   return pick(['晚上好。今天过得如何？', '夜里适合说真话。', '把今天讲给我听。']);
 }
+
+/** Lightweight probe: gateway chat lock endpoint reachable and responding. */
+export async function fetchChatGatewayOnline(): Promise<boolean> {
+  try {
+    const resp = await fetch(sseUrl('/api/gw/chat/lock'), { credentials: 'include' });
+    if (!resp.ok) return false;
+    const data = (await resp.json()) as { busy?: boolean; error?: string };
+    return typeof data.busy === 'boolean' && !data.error;
+  } catch {
+    return false;
+  }
+}
