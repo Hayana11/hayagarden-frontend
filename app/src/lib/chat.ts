@@ -34,6 +34,8 @@ export interface ChatUsage {
   cacheRead: number;
   cacheCreation: number;
   cacheSupported: boolean | null;
+  costUsd?: number;
+  costEstimated?: boolean;
 }
 
 export interface ChatMsg {
@@ -145,6 +147,8 @@ export function rowToMsg(row: ChatMessageRow): ChatMsg {
         cacheRead: Number(rawCache.cache_read ?? rawCache.cacheRead ?? 0),
         cacheCreation: Number(rawCache.cache_creation ?? rawCache.cacheCreation ?? 0),
         cacheSupported: (rawCache.cache_supported ?? rawCache.cacheSupported ?? null) as boolean | null,
+        costUsd: Number(rawCache.cost_usd ?? rawCache.costUsd ?? 0) || undefined,
+        costEstimated: Boolean(rawCache.cost_estimated ?? rawCache.costEstimated),
       }
     : null;
   return {
@@ -168,6 +172,13 @@ export function rowToMsg(row: ChatMessageRow): ChatMsg {
 
 export function fmtTokens(n: number): string {
   return n >= 1000 ? `${(n / 1000).toFixed(1)}K` : String(n);
+}
+
+export function fmtCostUsd(usd?: number, estimated?: boolean): string {
+  const n = Number(usd || 0);
+  if (!Number.isFinite(n) || n <= 0) return '';
+  const text = n >= 1 || n >= 0.01 ? n.toFixed(2) : n.toFixed(3);
+  return `${estimated ? '≈' : ''}$${text}`;
 }
 
 export function cacheLabel(u: Partial<ChatUsage> | null): string {
@@ -208,6 +219,8 @@ interface SseEvent {
   cache_read?: number;
   cache_creation?: number;
   cache_supported?: boolean | null;
+  cost_usd?: number;
+  cost_estimated?: boolean;
 }
 
 /**
@@ -275,6 +288,8 @@ export async function streamChatReply(userMessageId: number | null, handlers: St
               cacheRead: ev.cache_read || 0,
               cacheCreation: ev.cache_creation || 0,
               cacheSupported: ev.cache_supported ?? null,
+              costUsd: Number(ev.cost_usd || 0) || undefined,
+              costEstimated: Boolean(ev.cost_estimated),
             });
             break;
           case 'notice':

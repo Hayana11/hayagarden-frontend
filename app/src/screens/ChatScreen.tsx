@@ -24,6 +24,7 @@ import {
   cacheLabel,
   chatPlaceholder,
   fmtArtifactSize,
+  fmtCostUsd,
   fmtTokens,
   fetchChatGatewayOnline,
   forceUnlockChatGenLock,
@@ -773,6 +774,14 @@ export function ChatScreen() {
                   <>
                     <span>·</span>
                     <span>{cache}</span>
+                  </>
+                )}
+                {Boolean(usage.costUsd) && (
+                  <>
+                    <span>·</span>
+                    <span style={{ color: 'rgba(170,108,88,.92)', fontFamily: DISPLAY }} title={usage.costEstimated ? '按费率估算' : '按账单换算'}>
+                      {fmtCostUsd(usage.costUsd, usage.costEstimated)}
+                    </span>
                   </>
                 )}
               </div>

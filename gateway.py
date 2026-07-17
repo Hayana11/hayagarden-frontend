@@ -144,6 +144,44 @@ def _get_model():
 def _get_provider():
     return config_store.get('GW_PROVIDER', 'api_relay')
 
+def _build_cache_info_payload(
+    *,
+    cache_read=0,
+    cache_creation=0,
+    cache_creation_5m=0,
+    cache_creation_1h=0,
+    input_tokens=0,
+    output_tokens=0,
+    elapsed_sec=0,
+    cache_supported=None,
+    model=None,
+):
+    payload = {
+        'cache_read': cache_read,
+        'cache_creation': cache_creation,
+        'cache_creation_5m': cache_creation_5m,
+        'cache_creation_1h': cache_creation_1h,
+        'input_tokens': input_tokens,
+        'output_tokens': output_tokens,
+        'elapsed_sec': elapsed_sec,
+        'cache_supported': cache_supported,
+    }
+    if not (cache_supported is not None or cache_read or cache_creation or input_tokens or output_tokens):
+        return payload
+    try:
+        from relay.manager import relay as _relay
+        from relay.usage_cost import enrich_cache_info
+        _relay._reload_env()
+        enrich_cache_info(
+            payload,
+            api_url=_relay.api_url,
+            api_key=_relay.api_key,
+            model=model or _relay.model,
+        )
+    except Exception:
+        pass
+    return payload
+
 def _ombre_recall_search(query, limit=2, timeout=4.0):
     """联邦召回的渐变脑分支：直接调 bucket_mgr.search（跳过 breath 的 dehydrate——
     那是一次 LLM 调用，热路径吃不起）。独立线程+事件循环，超时安静放弃。
@@ -3817,10 +3855,10 @@ def chat_stream():
                             raw_text, thinking, cc_cache_read, cc_cache_create = payload
                             text = _cc_save_markers(raw_text)
                     if text:
-                        _cache_info_json = (
-                            json.dumps({'cache_read': cc_cache_read, 'cache_creation': cc_cache_create})
-                            if (cc_cache_read or cc_cache_create) else ''
-                        )
+                        _cache_info_json = json.dumps(_build_cache_info_payload(
+                            cache_read=cc_cache_read,
+                            cache_creation=cc_cache_create,
+                        ), ensure_ascii=False) if (cc_cache_read or cc_cache_create) else ''
                         _cc_text, _cc_choices = _extract_choices(text)
                         if _cc_choices and not _cc_text:
                             _cc_text = '[选项: ' + ' / '.join(_cc_choices) + ']'
@@ -3916,16 +3954,16 @@ def chat_stream():
             def _persist(p_text, p_thinking):
                 if not p_text or _persisted[0]:
                     return
-                _ci_payload = {
-                    'cache_read': cache_read_total,
-                    'cache_creation': cache_create_total,
-                    'cache_creation_5m': cache_create_5m_total,
-                    'cache_creation_1h': cache_create_1h_total,
-                    'input_tokens': input_tokens_total,
-                    'output_tokens': output_tokens_total,
-                    'elapsed_sec': round(max(0.0, time.monotonic() - stream_started_at), 3),
-                    'cache_supported': cache_supported,
-                }
+                _ci_payload = _build_cache_info_payload(
+                    cache_read=cache_read_total,
+                    cache_creation=cache_create_total,
+                    cache_creation_5m=cache_create_5m_total,
+                    cache_creation_1h=cache_create_1h_total,
+                    input_tokens=input_tokens_total,
+                    output_tokens=output_tokens_total,
+                    elapsed_sec=round(max(0.0, time.monotonic() - stream_started_at), 3),
+                    cache_supported=cache_supported,
+                )
                 _ci = json.dumps(_ci_payload, ensure_ascii=False) if (cache_supported is not None or cache_read_total or cache_create_total or input_tokens_total) else ''
                 # 抽出选择器标签：正文去掉 [choices]…，choices 列存 JSON 数组
                 _pc, _choices = _extract_choices(p_text)
@@ -4135,7 +4173,17 @@ def chat_stream():
                     yield 'data: ' + json.dumps({'t': 'trace_summary', 'd': _ts}) + SSE_END
             if cache_supported is not None or cache_read_total or cache_create_total or input_tokens_total or output_tokens_total:
                 _elapsed_sec = round(max(0.0, time.monotonic() - stream_started_at), 3)
-                yield 'data: ' + json.dumps({'t': 'usage', 'cache_read': cache_read_total, 'cache_creation': cache_create_total, 'cache_creation_5m': cache_create_5m_total, 'cache_creation_1h': cache_create_1h_total, 'input_tokens': input_tokens_total, 'output_tokens': output_tokens_total, 'elapsed_sec': _elapsed_sec, 'cache_supported': cache_supported}) + SSE_END
+                _usage_payload = _build_cache_info_payload(
+                    cache_read=cache_read_total,
+                    cache_creation=cache_create_total,
+                    cache_creation_5m=cache_create_5m_total,
+                    cache_creation_1h=cache_create_1h_total,
+                    input_tokens=input_tokens_total,
+                    output_tokens=output_tokens_total,
+                    elapsed_sec=_elapsed_sec,
+                    cache_supported=cache_supported,
+                )
+                yield 'data: ' + json.dumps({'t': 'usage', **_usage_payload}, default=str) + SSE_END
             yield 'data: ' + json.dumps({'t': 'done', 'ok': bool(text)}) + SSE_END
         except urllib.error.HTTPError as e:
             _ecode = e.code

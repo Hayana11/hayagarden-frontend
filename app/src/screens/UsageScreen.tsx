@@ -22,6 +22,15 @@ function fmtCost(value: number): string {
   return `¥${value.toFixed(2)}`;
 }
 
+function relaySpendLabel(
+  relays: DailyUsageResult['relays'],
+  field: 'todayCost' | 'totalCost',
+  emptyLabel: string,
+): string {
+  if (!relays.length) return emptyLabel;
+  return relays.map((relay) => `${relay.name} ${fmtCost(relay[field])}`).join(' · ');
+}
+
 function dailyMetric(item: DailyUsage, mode: DailyUsageResult['mode']): number {
   if (mode === 'cost') return item.cost ?? 0;
   return item.count;
@@ -120,6 +129,7 @@ export function UsageScreen() {
     relays: [],
     totalCost: null,
     totalCount: 0,
+    monthMessages: 0,
   });
   const [range, setRange] = useState<7 | 30>(30);
   const [selectedDay, setSelectedDay] = useState('');
@@ -144,6 +154,8 @@ export function UsageScreen() {
   const selectedUsage = shownDaily.find((item) => item.date === selectedDay) || shownDaily.at(-1);
   const maxDaily = Math.max(1, ...shownDaily.map((item) => dailyMetric(item, dailyMode)));
   const totalRequests = shownDaily.reduce((sum, item) => sum + item.count, 0);
+  const relayTodayLabel = relaySpendLabel(dailyUsage.relays, 'todayCost', '按天 · 对话请求');
+  const relayMonthLabel = relaySpendLabel(dailyUsage.relays, 'totalCost', '暂无中转账单');
 
   function dailyCellLabel(item: DailyUsage): string {
     if (dailyMode === 'cost' && item.cost != null) return fmtCost(item.cost);
@@ -183,7 +195,7 @@ export function UsageScreen() {
       </Card>
 
       <Card style={{ padding: 22 }}>
-        <div className="config-card-heading"><h2>用量日历</h2><span>按天 · 对话请求</span></div>
+        <div className="config-card-heading"><h2>用量日历</h2><span className="usage-relay-aside">{relayTodayLabel}</span></div>
         <div className="config-segmented">
           <button type="button" className={range === 7 ? 'active' : ''} onClick={() => { setRange(7); setSelectedDay(daily.at(-1)?.date || ''); }}>一周</button>
           <button type="button" className={range === 30 ? 'active' : ''} onClick={() => { setRange(30); setSelectedDay(daily.at(-1)?.date || ''); }}>一个月</button>
@@ -204,7 +216,11 @@ export function UsageScreen() {
           </div>
         )}
         <div className="config-day-detail">{selectedUsage ? `${shortDate(selectedUsage.date)} · ${selectedUsage.count} 次请求` : '暂无用量数据'}</div>
-        <div className="config-usage-summary"><span>合计 <b>{totalRequests}</b> 次请求</span><span>今日 <b>{usage?.msgToday ?? 0}</b> 条消息</span><span>约 <b>{formatTokens(usage?.tokenToday ?? 0)}</b> token</span></div>
+        <div className="config-usage-summary">
+          <span>合计 <b>{totalRequests}</b> 次请求</span>
+          <span>本月 <b>{dailyUsage.monthMessages}</b> 条消息</span>
+          <span>{relayMonthLabel}</span>
+        </div>
       </Card>
 
       <div style={{ fontSize: 12, color: 'var(--color-text-fainter)', textAlign: 'center', letterSpacing: 1 }}>
