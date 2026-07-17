@@ -10,6 +10,13 @@ export function isFyAuthor(a: string | null | undefined): boolean {
   return ['fyodor', 'assistant', 'claude'].includes((a || '').toLowerCase());
 }
 
+export interface ChatArtifact {
+  id: number;
+  type: string;
+  title: string;
+  size?: number;
+}
+
 export interface ChatToolCall {
   name: string;
   args?: unknown;
@@ -17,6 +24,7 @@ export interface ChatToolCall {
   success?: boolean;
   caption?: string;
   running?: boolean;
+  artifact?: ChatArtifact;
 }
 
 export interface ChatUsage {
@@ -41,6 +49,7 @@ export interface ChatMsg {
   imageUrl: string;
   fileUrl: string;
   fileName: string;
+  choices: string[];
   /** HH:MM, local */
   ts: string;
   /** YYYY-MM-DD for date separators */
@@ -60,7 +69,58 @@ export interface ChatMessageRow {
   image_url?: string | null;
   file_url?: string | null;
   file_name?: string | null;
+  choices?: string | null;
   created_at?: string | null;
+}
+
+export function normalizeToolCall(tc: ChatToolCall): ChatToolCall {
+  if (tc.artifact?.id) return tc;
+  const name = tc.name || '';
+  if (name.startsWith('create_') && typeof tc.result === 'string') {
+    try {
+      const parsed = JSON.parse(tc.result) as { artifact?: ChatArtifact };
+      if (parsed?.artifact?.id) return { ...tc, artifact: parsed.artifact };
+    } catch {
+      // ignore malformed tool JSON
+    }
+  }
+  return tc;
+}
+
+const ARTIFACT_TYPE_LABEL: Record<string, string> = {
+  html: 'HTML 页面',
+  markdown: 'Markdown 文档',
+  docx: 'Word 文档',
+};
+
+const ARTIFACT_TYPE_ICON: Record<string, string> = {
+  html: '🌐',
+  markdown: '📝',
+  docx: '📄',
+};
+
+export function artifactTypeLabel(type: string | undefined): string {
+  return ARTIFACT_TYPE_LABEL[type || ''] || type || '文件';
+}
+
+export function artifactTypeIcon(type: string | undefined): string {
+  return ARTIFACT_TYPE_ICON[type || ''] || '📄';
+}
+
+export function fmtArtifactSize(bytes: number | undefined): string {
+  const n = bytes || 0;
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / 1024 / 1024).toFixed(1)} MB`;
+}
+
+export function isChoicesAnswered(msgId: number, messages: ChatMsg[]): boolean {
+  const idx = messages.findIndex((m) => m.id === msgId);
+  if (idx < 0) return true;
+  for (let i = idx + 1; i < messages.length; i += 1) {
+    if (messages[i].role === 'user') return true;
+  }
+  return false;
 }
 
 function parseJson<T>(raw: string | null | undefined, fallback: T): T {
@@ -93,13 +153,14 @@ export function rowToMsg(row: ChatMessageRow): ChatMsg {
     text: row.content || '',
     thinking: row.thinking || '',
     thinkingSummary: row.thinking_summary || '',
-    toolCalls: parseJson<ChatToolCall[]>(row.tool_calls, []),
+    toolCalls: parseJson<ChatToolCall[]>(row.tool_calls, []).map(normalizeToolCall),
     cacheInfo,
     branchIdx: row.branch_idx || 0,
     branchTotal: branches.length,
     imageUrl: row.image_url || '',
     fileUrl: row.file_url || '',
     fileName: row.file_name || '',
+    choices: parseJson<string[]>(row.choices, []),
     ts: created.length >= 16 ? created.slice(11, 16) : '',
     dateKey: created.slice(0, 10),
   };

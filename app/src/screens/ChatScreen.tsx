@@ -19,12 +19,17 @@ import {
   type ModelCatalogEntry,
 } from '../lib/api';
 import {
+  artifactTypeIcon,
+  artifactTypeLabel,
   cacheLabel,
   chatPlaceholder,
+  fmtArtifactSize,
   fmtTokens,
   fetchChatGatewayOnline,
   forceUnlockChatGenLock,
   guessChatErrorHint,
+  isChoicesAnswered,
+  normalizeToolCall,
   streamChatReply,
   type ChatMsg,
   type ChatToolCall,
@@ -159,6 +164,7 @@ export function ChatScreen() {
   const [endpointOnline, setEndpointOnline] = useState<boolean | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [chatError, setChatError] = useState<{ message: string; hint: string } | null>(null);
+  const [pickedChoices, setPickedChoices] = useState<Record<number, string>>({});
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const taRef = useRef<HTMLTextAreaElement>(null);
@@ -323,7 +329,7 @@ export function ChatScreen() {
           onToolResult: (idx, tc) =>
             updateLive((l) => {
               const tools = [...l.tools];
-              tools[idx] = { ...tools[idx], ...tc, running: false };
+              tools[idx] = normalizeToolCall({ ...tools[idx], ...tc, running: false });
               return { ...l, tools };
             }),
           onNotice: (s) => showToast(s),
@@ -343,12 +349,12 @@ export function ChatScreen() {
     [scrollBottom, showToast, updateLive],
   );
 
-  const send = useCallback(async () => {
-    const text = input.trim();
+  const send = useCallback(async (overrideText?: string) => {
+    const text = (overrideText ?? input).trim();
     if ((!text && !pendingFile && !pendingImage) || sending) return;
     setSending(true);
     setChatError(null);
-    setInput('');
+    if (!overrideText) setInput('');
     if (taRef.current) taRef.current.style.height = 'auto';
     const extra = pendingImage ? { imageFile: pendingImage } : pendingFile ? { fileUrl: pendingFile.fileUrl, fileName: pendingFile.fileName } : {};
     setPendingFile(null);
@@ -356,7 +362,7 @@ export function ChatScreen() {
     const messageId = await sendChatMessage(text, extra);
     if (messageId === null) {
       showToast('发送失败');
-      setInput(text);
+      if (!overrideText) setInput(text);
       setSending(false);
       return;
     }
@@ -366,6 +372,12 @@ export function ChatScreen() {
     setSending(false);
     taRef.current?.focus();
   }, [input, pendingFile, pendingImage, sending, refetchLatest, runStream, showToast]);
+
+  const chooseOption = useCallback(async (text: string, msgId: number) => {
+    if (sending || isChoicesAnswered(msgId, msgs)) return;
+    setPickedChoices((prev) => ({ ...prev, [msgId]: text }));
+    await send(text);
+  }, [msgs, send, sending]);
 
   const redo = useCallback(
     async (msgId: number) => {
@@ -392,6 +404,7 @@ export function ChatScreen() {
       const content = editText.trim();
       if (!content || sending) return;
       setSending(true);
+      setChatError(null);
       setEditingId(null);
       const ok = await editChatMessage(msgId, content);
       if (!ok) {
@@ -516,6 +529,67 @@ export function ChatScreen() {
           <div style={{ borderRadius: 14, background: 'var(--card2)', padding: '14px 16px', fontSize: '0.88em', lineHeight: 1.95, color: 'var(--mut)', whiteSpace: 'pre-wrap', animation: 'chatFadeIn .2s ease' }}>
             {m.thinking}
           </div>
+        )}
+      </div>
+    );
+  }
+
+  function renderArtifactCard(key: string, tc: ChatToolCall) {
+    const art = tc.artifact!;
+    const previewable = art.type === 'html' || art.type === 'markdown';
+    const href = previewable
+      ? `/api/artifacts/${encodeURIComponent(String(art.id))}/preview`
+      : `/api/artifacts/${encodeURIComponent(String(art.id))}/download`;
+    return (
+      <div key={key} className="chat-artifact-card">
+        <div className="chat-artifact-icon">{artifactTypeIcon(art.type)}</div>
+        <div className="chat-artifact-body">
+          <div className="chat-artifact-title">{art.title || '未命名'}</div>
+          <div className="chat-artifact-meta">
+            {artifactTypeLabel(art.type)}
+            {art.size ? ` · ${fmtArtifactSize(art.size)}` : ''}
+          </div>
+        </div>
+        <a className="chat-artifact-action" href={href} target="_blank" rel="noopener noreferrer">
+          {previewable ? '打开' : '下载'}
+        </a>
+      </div>
+    );
+  }
+
+  function renderChoices(m: ChatMsg) {
+    if (!m.choices?.length) return null;
+    const answered = isChoicesAnswered(m.id, msgs);
+    const picked = pickedChoices[m.id];
+    return (
+      <div className="chat-choices">
+        {m.choices.map((opt, i) => {
+          const isPicked = picked === opt;
+          const disabled = answered || (Boolean(picked) && !isPicked);
+          return (
+            <button
+              key={`${m.id}-choice-${i}`}
+              type="button"
+              className={`chat-choice-btn${isPicked ? ' picked' : ''}${disabled ? ' disabled' : ''}`}
+              disabled={disabled || sending}
+              onClick={() => chooseOption(opt, m.id)}
+            >
+              {opt}
+            </button>
+          );
+        })}
+      </div>
+    );
+  }
+
+  function renderToolItems(keyPrefix: string, tools: ChatToolCall[]) {
+    if (!tools.length) return null;
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+        {tools.map((tc, i) =>
+          tc.artifact
+            ? renderArtifactCard(`${keyPrefix}-artifact-${i}`, tc)
+            : renderToolCard(`${keyPrefix}-tool-${i}`, tc),
         )}
       </div>
     );
@@ -647,9 +721,10 @@ export function ChatScreen() {
     return (
       <div id={`msg-${m.id}`} className={`chat-msg${flashId === m.id ? ' chat-flash' : ''}`} style={{ display: 'flex', flexDirection: 'column', gap: 12, borderRadius: 16 }}>
         {renderThinkBlock(m)}
-        {m.toolCalls.length > 0 && <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>{m.toolCalls.map((tc, i) => renderToolCard(`${m.id}-${i}`, tc))}</div>}
+        {renderToolItems(String(m.id), m.toolCalls)}
         {m.imageUrl && <img src={m.imageUrl} alt="" style={{ maxWidth: 240, borderRadius: 14 }} />}
         {m.text && renderParas(m.text)}
+        {renderChoices(m)}
         <div style={{ display: 'flex', flexDirection: 'column', gap: 7 }}>
           <span style={{ fontFamily: DISPLAY, fontSize: 11, color: 'var(--ghost)', letterSpacing: 1, padding: '0 2px' }}>{m.ts}</span>
           <div style={{ display: 'flex', alignItems: 'center', gap: 2, flexWrap: 'wrap' }}>
@@ -750,7 +825,7 @@ export function ChatScreen() {
             )}
           </>
         )}
-        {l.tools.length > 0 && <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>{l.tools.map((tc, i) => renderToolCard(`live-${i}`, tc))}</div>}
+        {renderToolItems('live', l.tools)}
         {l.phase === 'text' ? renderParas(l.text, true) : !l.thinking && !l.tools.length ? (
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, color: 'var(--faint)', fontSize: 13 }}>
             <span style={{ width: 13, height: 13, borderRadius: '50%', border: '2px solid var(--rosebg)', borderTopColor: 'var(--rose)', animation: 'chatSpin .8s linear infinite' }} />
@@ -1070,7 +1145,7 @@ export function ChatScreen() {
                 </svg>
               </div>
               <div
-                onClick={canSend ? send : undefined}
+                onClick={() => { if (canSend) void send(); }}
                 style={{ marginLeft: 'auto', width: 42, height: 42, flexShrink: 0, borderRadius: '50%', background: canSend ? 'var(--deep)' : 'var(--card2)', color: canSend ? '#FBF3F0' : 'var(--ghost)', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: canSend ? 'pointer' : 'default', boxShadow: canSend ? '0 8px 20px var(--shadow2)' : 'none', transition: 'background .15s ease' }}
               >
                 {sending ? <span style={{ width: 15, height: 15, borderRadius: '50%', border: '2px solid var(--rosebg)', borderTopColor: 'var(--rose)', animation: 'chatSpin .8s linear infinite' }} /> : <Svg d={IC.up} size={17} sw={2} />}
@@ -1161,7 +1236,7 @@ export function ChatScreen() {
               <a href="/chat" style={{ textDecoration: 'none', display: 'flex', alignItems: 'center', gap: 10, padding: '13px 14px', borderRadius: 16, background: 'var(--card2)' }}>
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 }}>
                   <span style={{ fontSize: 14.5, color: 'var(--ink)', letterSpacing: 1 }}>回旧聊天页</span>
-                  <span style={{ fontSize: 11.5, color: 'var(--faint)' }}>artifact 卡、选择器这些还在老家</span>
+                  <span style={{ fontSize: 11.5, color: 'var(--faint)' }}>完整历史、漂流瓶等高级功能</span>
                 </div>
                 <span style={{ marginLeft: 'auto', color: 'var(--ghost)', fontSize: 16 }}>›</span>
               </a>
