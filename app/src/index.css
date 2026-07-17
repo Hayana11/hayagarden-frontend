@@ -128,6 +128,78 @@ button {
 }
 .chat-flash { animation: chatFlash 1.8s ease; }
 
+.chat-artifact-card {
+  background: var(--card);
+  border: 1px solid rgba(217, 164, 65, 0.28);
+  border-radius: 12px;
+  padding: 11px 12px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.chat-artifact-icon {
+  width: 34px;
+  height: 34px;
+  border-radius: 9px;
+  background: rgba(217, 164, 65, 0.14);
+  color: var(--gold);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 16px;
+  flex-shrink: 0;
+}
+.chat-artifact-body { flex: 1; min-width: 0; }
+.chat-artifact-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.chat-artifact-meta {
+  font-size: 10.5px;
+  color: var(--faint);
+  margin-top: 1px;
+}
+.chat-artifact-action {
+  flex-shrink: 0;
+  font-size: 11.5px;
+  padding: 6px 12px;
+  border-radius: 9px;
+  background: rgba(217, 164, 65, 0.14);
+  color: var(--gold);
+  text-decoration: none;
+  display: inline-block;
+  transition: background 0.15s;
+}
+.chat-artifact-action:hover { background: rgba(217, 164, 65, 0.24); }
+
+.chat-choices { margin: 4px 0 2px; }
+.chat-choice-btn {
+  display: block;
+  width: 100%;
+  text-align: left;
+  margin-bottom: 6px;
+  padding: 9px 13px;
+  border: 1px solid rgba(217, 164, 65, 0.35);
+  border-radius: 11px;
+  background: var(--card);
+  color: var(--ink);
+  font-size: 13.5px;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+.chat-choice-btn:last-child { margin-bottom: 0; }
+.chat-choice-btn:hover:not(.disabled) { background: rgba(217, 164, 65, 0.12); }
+.chat-choice-btn.picked {
+  background: rgba(217, 164, 65, 0.22);
+  border-color: rgba(217, 164, 65, 0.7);
+  font-weight: 600;
+}
+.chat-choice-btn.disabled { opacity: 0.55; cursor: default; }
+
 @media (prefers-reduced-motion: reduce) {
   .chat-root * { animation: none !important; transition: none !important; }
 }

@@ -19,9 +19,17 @@ import {
   type ModelCatalogEntry,
 } from '../lib/api';
 import {
+  artifactTypeIcon,
+  artifactTypeLabel,
   cacheLabel,
   chatPlaceholder,
+  fmtArtifactSize,
   fmtTokens,
+  fetchChatGatewayOnline,
+  forceUnlockChatGenLock,
+  guessChatErrorHint,
+  isChoicesAnswered,
+  normalizeToolCall,
   streamChatReply,
   type ChatMsg,
   type ChatToolCall,
@@ -30,6 +38,7 @@ import type { ReactElement } from 'react';
 
 const SETTINGS_KEY = 'fyodor-chat-settings';
 const FONT_SIZES = [13.5, 14.5, 16, 17.5, 19];
+const INPUT_FONT_SIZE = FONT_SIZES[0];
 const SERIF = "'Noto Serif SC', serif";
 const DISPLAY = "'Bodoni Moda', serif";
 const MONO = 'ui-monospace, Menlo, monospace';
@@ -101,6 +110,7 @@ const IC = {
   clock: 'M12 7v5l3 2',
   edit: 'M17 3a2.85 2.85 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z',
   redo: 'M3 12a9 9 0 1 0 3-6.7|M3 4v5h5',
+  refresh: 'M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8|M21 3v5h-5',
   up: 'M12 19V5|M5 12l7-7 7 7',
   down: 'M12 5v14|M19 12l-7 7-7-7',
   plus: 'M12 5v14|M5 12h14',
@@ -151,6 +161,10 @@ export function ChatScreen() {
   const [toast, setToast] = useState<string | null>(null);
   const [flashId, setFlashId] = useState<number | null>(null);
   const [liked, setLiked] = useState<Record<number, 1 | -1>>({});
+  const [endpointOnline, setEndpointOnline] = useState<boolean | null>(null);
+  const [refreshing, setRefreshing] = useState(false);
+  const [chatError, setChatError] = useState<{ message: string; hint: string } | null>(null);
+  const [pickedChoices, setPickedChoices] = useState<Record<number, string>>({});
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const taRef = useRef<HTMLTextAreaElement>(null);
@@ -203,6 +217,29 @@ export function ChatScreen() {
     if (toBottom) scrollBottom();
   }, [scrollBottom]);
 
+  const refreshChat = useCallback(async () => {
+    if (refreshing) return;
+    setRefreshing(true);
+    setNavOpen(null);
+    setChatError(null);
+    abortRef.current?.abort();
+    abortRef.current = null;
+    liveRef.current = null;
+    setLive(null);
+    setSending(false);
+    try {
+      const unlock = await forceUnlockChatGenLock();
+      await refetchLatest();
+      const online = await fetchChatGatewayOnline();
+      setEndpointOnline(online);
+      if (unlock.ok && !unlock.busy) showToast('已刷新');
+      else if (unlock.busy) showToast('锁仍占用，消息已刷新');
+      else showToast('已刷新（解锁请求失败）');
+    } finally {
+      setRefreshing(false);
+    }
+  }, [refreshing, refetchLatest, showToast]);
+
   // initial load + catalog
   useEffect(() => {
     refetchLatest();
@@ -223,6 +260,18 @@ export function ChatScreen() {
       mq.removeEventListener?.('change', onMq);
       window.removeEventListener('resize', onRs);
     };
+  }, []);
+
+  // gateway reachability — breathing status under the name
+  useEffect(() => {
+    let cancelled = false;
+    const check = async () => {
+      const online = await fetchChatGatewayOnline();
+      if (!cancelled) setEndpointOnline(online);
+    };
+    void check();
+    const iv = setInterval(() => { void check(); }, 20000);
+    return () => { cancelled = true; clearInterval(iv); };
   }, []);
 
   // poll for new messages (e.g. wake messages from the api-side) when idle
@@ -280,7 +329,7 @@ export function ChatScreen() {
           onToolResult: (idx, tc) =>
             updateLive((l) => {
               const tools = [...l.tools];
-              tools[idx] = { ...tools[idx], ...tc, running: false };
+              tools[idx] = normalizeToolCall({ ...tools[idx], ...tc, running: false });
               return { ...l, tools };
             }),
           onNotice: (s) => showToast(s),
@@ -289,17 +338,23 @@ export function ChatScreen() {
       );
       liveRef.current = null;
       setLive(null);
-      if (!res.ok && res.error) showToast(res.error);
+      if (!res.ok && res.error) {
+        if (!ctrl.signal.aborted) {
+          setChatError({ message: res.error, hint: guessChatErrorHint(res.error) });
+          scrollBottom(true);
+        }
+      }
       return res.ok;
     },
     [scrollBottom, showToast, updateLive],
   );
 
-  const send = useCallback(async () => {
-    const text = input.trim();
+  const send = useCallback(async (overrideText?: string) => {
+    const text = (overrideText ?? input).trim();
     if ((!text && !pendingFile && !pendingImage) || sending) return;
     setSending(true);
-    setInput('');
+    setChatError(null);
+    if (!overrideText) setInput('');
     if (taRef.current) taRef.current.style.height = 'auto';
     const extra = pendingImage ? { imageFile: pendingImage } : pendingFile ? { fileUrl: pendingFile.fileUrl, fileName: pendingFile.fileName } : {};
     setPendingFile(null);
@@ -307,7 +362,7 @@ export function ChatScreen() {
     const messageId = await sendChatMessage(text, extra);
     if (messageId === null) {
       showToast('发送失败');
-      setInput(text);
+      if (!overrideText) setInput(text);
       setSending(false);
       return;
     }
@@ -318,10 +373,17 @@ export function ChatScreen() {
     taRef.current?.focus();
   }, [input, pendingFile, pendingImage, sending, refetchLatest, runStream, showToast]);
 
+  const chooseOption = useCallback(async (text: string, msgId: number) => {
+    if (sending || isChoicesAnswered(msgId, msgs)) return;
+    setPickedChoices((prev) => ({ ...prev, [msgId]: text }));
+    await send(text);
+  }, [msgs, send, sending]);
+
   const redo = useCallback(
     async (msgId: number) => {
       if (sending) return;
       setSending(true);
+      setChatError(null);
       const old = await regenPrepare(msgId);
       if (old === null) {
         showToast('重答准备失败');
@@ -342,6 +404,7 @@ export function ChatScreen() {
       const content = editText.trim();
       if (!content || sending) return;
       setSending(true);
+      setChatError(null);
       setEditingId(null);
       const ok = await editChatMessage(msgId, content);
       if (!ok) {
@@ -466,6 +529,67 @@ export function ChatScreen() {
           <div style={{ borderRadius: 14, background: 'var(--card2)', padding: '14px 16px', fontSize: '0.88em', lineHeight: 1.95, color: 'var(--mut)', whiteSpace: 'pre-wrap', animation: 'chatFadeIn .2s ease' }}>
             {m.thinking}
           </div>
+        )}
+      </div>
+    );
+  }
+
+  function renderArtifactCard(key: string, tc: ChatToolCall) {
+    const art = tc.artifact!;
+    const previewable = art.type === 'html' || art.type === 'markdown';
+    const href = previewable
+      ? `/api/artifacts/${encodeURIComponent(String(art.id))}/preview`
+      : `/api/artifacts/${encodeURIComponent(String(art.id))}/download`;
+    return (
+      <div key={key} className="chat-artifact-card">
+        <div className="chat-artifact-icon">{artifactTypeIcon(art.type)}</div>
+        <div className="chat-artifact-body">
+          <div className="chat-artifact-title">{art.title || '未命名'}</div>
+          <div className="chat-artifact-meta">
+            {artifactTypeLabel(art.type)}
+            {art.size ? ` · ${fmtArtifactSize(art.size)}` : ''}
+          </div>
+        </div>
+        <a className="chat-artifact-action" href={href} target="_blank" rel="noopener noreferrer">
+          {previewable ? '打开' : '下载'}
+        </a>
+      </div>
+    );
+  }
+
+  function renderChoices(m: ChatMsg) {
+    if (!m.choices?.length) return null;
+    const answered = isChoicesAnswered(m.id, msgs);
+    const picked = pickedChoices[m.id];
+    return (
+      <div className="chat-choices">
+        {m.choices.map((opt, i) => {
+          const isPicked = picked === opt;
+          const disabled = answered || (Boolean(picked) && !isPicked);
+          return (
+            <button
+              key={`${m.id}-choice-${i}`}
+              type="button"
+              className={`chat-choice-btn${isPicked ? ' picked' : ''}${disabled ? ' disabled' : ''}`}
+              disabled={disabled || sending}
+              onClick={() => chooseOption(opt, m.id)}
+            >
+              {opt}
+            </button>
+          );
+        })}
+      </div>
+    );
+  }
+
+  function renderToolItems(keyPrefix: string, tools: ChatToolCall[]) {
+    if (!tools.length) return null;
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+        {tools.map((tc, i) =>
+          tc.artifact
+            ? renderArtifactCard(`${keyPrefix}-artifact-${i}`, tc)
+            : renderToolCard(`${keyPrefix}-tool-${i}`, tc),
         )}
       </div>
     );
@@ -597,9 +721,10 @@ export function ChatScreen() {
     return (
       <div id={`msg-${m.id}`} className={`chat-msg${flashId === m.id ? ' chat-flash' : ''}`} style={{ display: 'flex', flexDirection: 'column', gap: 12, borderRadius: 16 }}>
         {renderThinkBlock(m)}
-        {m.toolCalls.length > 0 && <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>{m.toolCalls.map((tc, i) => renderToolCard(`${m.id}-${i}`, tc))}</div>}
+        {renderToolItems(String(m.id), m.toolCalls)}
         {m.imageUrl && <img src={m.imageUrl} alt="" style={{ maxWidth: 240, borderRadius: 14 }} />}
         {m.text && renderParas(m.text)}
+        {renderChoices(m)}
         <div style={{ display: 'flex', flexDirection: 'column', gap: 7 }}>
           <span style={{ fontFamily: DISPLAY, fontSize: 11, color: 'var(--ghost)', letterSpacing: 1, padding: '0 2px' }}>{m.ts}</span>
           <div style={{ display: 'flex', alignItems: 'center', gap: 2, flexWrap: 'wrap' }}>
@@ -700,7 +825,7 @@ export function ChatScreen() {
             )}
           </>
         )}
-        {l.tools.length > 0 && <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>{l.tools.map((tc, i) => renderToolCard(`live-${i}`, tc))}</div>}
+        {renderToolItems('live', l.tools)}
         {l.phase === 'text' ? renderParas(l.text, true) : !l.thinking && !l.tools.length ? (
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, color: 'var(--faint)', fontSize: 13 }}>
             <span style={{ width: 13, height: 13, borderRadius: '50%', border: '2px solid var(--rosebg)', borderTopColor: 'var(--rose)', animation: 'chatSpin .8s linear infinite' }} />
@@ -749,11 +874,24 @@ export function ChatScreen() {
               <span style={{ fontFamily: DISPLAY, fontStyle: 'italic', fontSize: 17, color: '#F7F1EE' }}>Θ</span>
             </div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 1, minWidth: 0, flexShrink: 1 }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
-                <span style={{ fontFamily: DISPLAY, fontSize: 17, fontWeight: 600, letterSpacing: 1, color: 'var(--ink)' }}>Fyodor</span>
-                <span style={{ width: 6, height: 6, borderRadius: '50%', background: 'var(--ok)', flexShrink: 0 }} />
+              <span style={{ fontFamily: DISPLAY, fontSize: 17, fontWeight: 600, letterSpacing: 1, color: 'var(--ink)' }}>Fyodor</span>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 5, minWidth: 0 }}>
+                <span
+                  style={{
+                    width: 6,
+                    height: 6,
+                    borderRadius: '50%',
+                    flexShrink: 0,
+                    background: endpointOnline === false ? 'var(--err)' : endpointOnline ? 'var(--ok)' : 'var(--ghost)',
+                    animation: endpointOnline ? 'chatBreathe 2.2s ease-in-out infinite' : undefined,
+                  }}
+                />
+                {endpointOnline !== null && (
+                  <span style={{ fontFamily: DISPLAY, fontStyle: 'italic', fontSize: 10.5, letterSpacing: 1, color: 'var(--faint)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                    {endpointOnline ? 'always here' : 'away for now'}
+                  </span>
+                )}
               </div>
-              <span style={{ fontFamily: DISPLAY, fontStyle: 'italic', fontSize: 10.5, letterSpacing: 1, color: 'var(--faint)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>Θεόδωρος</span>
             </div>
             <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 1, flexShrink: 0 }}>
               <div onClick={() => setNavOpen(navOpen === 'wrench' ? null : 'wrench')} style={{ ...iconBtn, background: navOpen === 'wrench' ? 'var(--rosebg)' : 'transparent' }}>
@@ -777,6 +915,15 @@ export function ChatScreen() {
                   <circle cx={12} cy={12} r={9} />
                   <path d={IC.clock} />
                 </svg>
+              </div>
+              <div
+                onClick={() => { void refreshChat(); }}
+                title="刷新并解锁"
+                style={{ ...iconBtn, opacity: refreshing ? 0.55 : 1, cursor: refreshing ? 'default' : 'pointer' }}
+              >
+                <span style={{ display: 'flex', animation: refreshing ? 'chatSpin .8s linear infinite' : undefined }}>
+                  <Svg d={IC.refresh} />
+                </span>
               </div>
             </div>
           </div>
@@ -824,7 +971,7 @@ export function ChatScreen() {
                     <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
                       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
                         <div style={sectionCaption}>字号 · TEXT SIZE</div>
-                        <span style={{ fontFamily: DISPLAY, fontSize: 12, color: 'var(--rose)' }}>{['XS', 'S', 'M', 'L', 'XL'][settings.fontStep]}</span>
+                        <span style={{ fontFamily: DISPLAY, fontSize: 12, color: 'var(--rose)' }}>{FONT_SIZES[settings.fontStep]}px</span>
                       </div>
                       <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
                         <span style={{ fontSize: 12, color: 'var(--ghost)' }}>字</span>
@@ -871,6 +1018,26 @@ export function ChatScreen() {
           )}
           {rendered}
           {live && renderLive(live)}
+          {chatError && (
+            <div style={{ display: 'flex', justifyContent: 'center', padding: '6px 4px 2px' }}>
+              <div style={{
+                maxWidth: 360,
+                width: '100%',
+                background: 'rgba(58,42,40,0.92)',
+                color: '#F7EDEA',
+                borderRadius: 18,
+                padding: '14px 16px',
+                boxShadow: '0 10px 30px rgba(0,0,0,0.18)',
+                display: 'flex',
+                flexDirection: 'column',
+                gap: 8,
+                textAlign: 'center',
+              }}>
+                <span style={{ fontSize: 13, lineHeight: 1.65, letterSpacing: 0.3 }}>{chatError.message}</span>
+                <span style={{ fontSize: 11.5, lineHeight: 1.6, color: 'rgba(247,237,234,0.72)' }}>{chatError.hint}</span>
+              </div>
+            </div>
+          )}
         </div>
       </div>
 
@@ -965,7 +1132,7 @@ export function ChatScreen() {
               }}
               rows={1}
               placeholder={sending ? 'Fyodor 正在回复…' : placeholder}
-              style={{ width: '100%', border: 'none', background: 'transparent', fontSize: '1em', lineHeight: 1.6, color: 'var(--ink)', resize: 'none', maxHeight: 120, padding: '4px 8px 8px', display: 'block', overflowY: 'auto', fontFamily: SERIF, outline: 'none' }}
+              style={{ width: '100%', border: 'none', background: 'transparent', fontSize: INPUT_FONT_SIZE, lineHeight: 1.6, color: 'var(--ink)', resize: 'none', maxHeight: 120, padding: '4px 8px 8px', display: 'block', overflowY: 'auto', fontFamily: SERIF, outline: 'none' }}
             />
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 2 }}>
               <div onClick={() => setAttachMenuOpen(!attachMenuOpen)} style={{ cursor: 'pointer', width: 38, height: 38, borderRadius: '50%', background: 'var(--card2)', color: 'var(--mut)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
@@ -978,7 +1145,7 @@ export function ChatScreen() {
                 </svg>
               </div>
               <div
-                onClick={canSend ? send : undefined}
+                onClick={() => { if (canSend) void send(); }}
                 style={{ marginLeft: 'auto', width: 42, height: 42, flexShrink: 0, borderRadius: '50%', background: canSend ? 'var(--deep)' : 'var(--card2)', color: canSend ? '#FBF3F0' : 'var(--ghost)', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: canSend ? 'pointer' : 'default', boxShadow: canSend ? '0 8px 20px var(--shadow2)' : 'none', transition: 'background .15s ease' }}
               >
                 {sending ? <span style={{ width: 15, height: 15, borderRadius: '50%', border: '2px solid var(--rosebg)', borderTopColor: 'var(--rose)', animation: 'chatSpin .8s linear infinite' }} /> : <Svg d={IC.up} size={17} sw={2} />}
@@ -1069,7 +1236,7 @@ export function ChatScreen() {
               <a href="/chat" style={{ textDecoration: 'none', display: 'flex', alignItems: 'center', gap: 10, padding: '13px 14px', borderRadius: 16, background: 'var(--card2)' }}>
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 }}>
                   <span style={{ fontSize: 14.5, color: 'var(--ink)', letterSpacing: 1 }}>回旧聊天页</span>
-                  <span style={{ fontSize: 11.5, color: 'var(--faint)' }}>artifact 卡、选择器这些还在老家</span>
+                  <span style={{ fontSize: 11.5, color: 'var(--faint)' }}>完整历史、漂流瓶等高级功能</span>
                 </div>
                 <span style={{ marginLeft: 'auto', color: 'var(--ghost)', fontSize: 16 }}>›</span>
               </a>
