@@ -228,13 +228,19 @@ def _pick_pricing(channel: dict, model_id: str, rows: list[dict]) -> dict | None
     _, clean_id = _route_and_model(model_id)
     matches = [
         row for row in rows
-        if row["raw_name"] == model_id or row["model"] in (model_id, clean_id)
+        if row["raw_name"] == model_id
+        or row["model"] in (model_id, clean_id)
+        or _norm(row["model"]) in {_norm(model_id), _norm(clean_id)}
     ]
     if not matches:
         return None
 
     def score(row: dict) -> int:
         value = 10 if row["raw_name"] == model_id else 0
+        if row["model"] in (model_id, clean_id):
+            value += 6
+        elif _norm(row["model"]) in {_norm(model_id), _norm(clean_id)}:
+            value += 4
         if row.get("route") and any(_loose_match(label, row["route"]) for label in _labels(channel)):
             value += 4
         if any(_loose_match(label, group) for label in _labels(channel) for group in row.get("groups", [])):
@@ -354,6 +360,28 @@ def _remaining(deadline: float, cap: float) -> float | None:
     return None if value <= 0 else max(0.25, min(cap, value))
 
 
+def _guess_status_origins(api_origin: str) -> list[str]:
+    """Guess Uptime Kuma hosts from a NewAPI relay origin.
+
+    Many relays put the public status page on ``status.<domain>`` while the API
+    lives on ``api.`` / ``api2.`` / the apex domain itself.
+    """
+    parsed = urlparse(api_origin)
+    host = (parsed.netloc or "").lower()
+    parts = [part for part in host.split(".") if part]
+    if len(parts) < 2:
+        return []
+    guesses: list[str] = []
+    first = parts[0]
+    api_prefixes = {"api", "api2", "www", "newapi", "gateway", "relay", "openai"}
+    if len(parts) >= 3 and (first in api_prefixes or first.startswith("api")):
+        guesses.append(f"{parsed.scheme}://status.{'.'.join(parts[1:])}")
+    # apex / bare domain: https://68886868.xyz → https://status.68886868.xyz
+    registrable = ".".join(parts[-2:])
+    guesses.append(f"{parsed.scheme}://status.{registrable}")
+    return list(dict.fromkeys(guesses))
+
+
 def _uptime_kuma_status(
     channel: dict,
     origin: str,
@@ -371,12 +399,15 @@ def _uptime_kuma_status(
                 except ChannelInspectionError:
                     continue
 
-    parsed = urlparse(origin)
     origins = [origin]
-    if not channel.get("status_url"):
-        parts = parsed.netloc.split(".")
-        if len(parts) >= 3 and parts[0] in ("api", "www", "newapi"):
-            origins.append(f"{parsed.scheme}://status.{'.'.join(parts[1:])}")
+    if channel.get("status_url"):
+        try:
+            origins.append(origin_from_url(str(channel["status_url"])))
+        except ChannelInspectionError:
+            pass
+    else:
+        origins.extend(_guess_status_origins(origin))
+    origins = list(dict.fromkeys(origins))
     for candidate_origin in origins:
         for slug in ("api", "tree", "status", "main"):
             candidates.append((
@@ -558,13 +589,21 @@ def _status_summary(channel: dict, origin: str, request_json: Callable) -> tuple
         return [], None
 
 
-def _cache_key(channel: dict, include_status: bool) -> str:
+def _cache_key(
+    channel: dict,
+    include_status: bool,
+    *,
+    console_user_id: str | None = None,
+    console_credential_kind: str | None = None,
+) -> str:
     payload = json.dumps({
         "id": channel.get("id"),
         "name": channel.get("name"),
         "url": channel.get("base_url"),
         "status": channel.get("status_url"),
         "key_hash": hashlib.sha256(str(channel.get("api_key") or "").encode()).hexdigest(),
+        "console_user_id": str(console_user_id or ""),
+        "console_credential_kind": str(console_credential_kind or ""),
         "include_status": include_status,
     }, sort_keys=True, ensure_ascii=False)
     return hashlib.sha256(payload.encode()).hexdigest()
@@ -843,18 +882,35 @@ def query_channel_account_balance(
     }
 
 
+def _pricing_unauthorized(data) -> bool:
+    return isinstance(data, dict) and data.get("success") is False
+
+
 def inspect_channel(
     channel: dict,
     *,
     include_status: bool = True,
     force: bool = False,
     request_json: Callable = _request_json,
+    console_credential_kind: str | None = None,
+    console_credential_secret: str | None = None,
+    console_user_id: str | None = None,
 ) -> dict:
-    """Return safe model, price and status metadata for one saved relay."""
+    """Return safe model, price and status metadata for one saved relay.
+
+    When a revocable NewAPI console credential is provided, ``/api/pricing`` is
+    retried with that login after an anonymous 401/403. Credentials are never
+    included in the returned payload.
+    """
     api_url = str(channel.get("base_url") or "").strip()
     api_key = str(channel.get("api_key") or "")
     origin = origin_from_url(api_url)
-    cache_key = _cache_key(channel, include_status)
+    cache_key = _cache_key(
+        channel,
+        include_status,
+        console_user_id=console_user_id,
+        console_credential_kind=console_credential_kind,
+    )
     if not force:
         with _CACHE_LOCK:
             cached = _CACHE.get(cache_key)
@@ -863,10 +919,37 @@ def inspect_channel(
                 result["cached"] = True
                 return result
 
+    console_headers = None
+    if console_credential_kind and console_credential_secret and console_user_id:
+        _, console_headers = _console_auth_headers(
+            console_credential_kind,
+            console_credential_secret,
+            console_user_id,
+        )
+
     pricing_url = f"{origin}/api/pricing"
     pricing_data, pricing_error = request_json("GET", pricing_url, timeout=5)
+    pricing_requires_auth = bool(
+        (pricing_error and pricing_error.get("auth_required"))
+        or _pricing_unauthorized(pricing_data)
+    )
+    if pricing_requires_auth and console_headers:
+        authed_data, authed_error = request_json(
+            "GET", pricing_url, headers=console_headers, timeout=5,
+        )
+        if authed_data is not None and not _pricing_unauthorized(authed_data):
+            pricing_data, pricing_error = authed_data, None
+            pricing_requires_auth = False
+        elif authed_error and authed_error.get("auth_required"):
+            pricing_data, pricing_error = None, authed_error
+            pricing_requires_auth = True
+        elif _pricing_unauthorized(authed_data):
+            pricing_data, pricing_error = None, {"auth_required": True}
+            pricing_requires_auth = True
+    elif _pricing_unauthorized(pricing_data):
+        pricing_data = None
+
     pricing_rows = _pricing_rows(channel, pricing_data)
-    pricing_requires_auth = bool(pricing_error and pricing_error.get("auth_required"))
 
     headers = {
         "Authorization": f"Bearer {api_key}",

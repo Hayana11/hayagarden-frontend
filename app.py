@@ -2395,9 +2395,16 @@ def add_relay_preset():
 def inspect_relay_preset(preset_id):
     """Return model, pricing and health metadata without returning the API key."""
     _init_relay_presets_table()
+    _init_relay_account_credentials_table()
     conn = get_db()
     row = conn.execute(
-        'SELECT id,name,url,key,status_url FROM relay_presets WHERE id=?',
+        '''
+        SELECT r.id,r.name,r.url,r.key,r.status_url,
+               c.user_id,c.credential_kind,c.secret_ciphertext
+        FROM relay_presets r
+        LEFT JOIN relay_account_credentials c ON c.preset_id=r.id
+        WHERE r.id=?
+        ''',
         (preset_id,),
     ).fetchone()
     conn.close()
@@ -2405,6 +2412,18 @@ def inspect_relay_preset(preset_id):
         return jsonify({'error': 'not found'}), 404
 
     from relay.channel_intelligence import ChannelInspectionError, inspect_channel
+    console_kwargs = {}
+    if row['secret_ciphertext']:
+        try:
+            from relay.credential_vault import CredentialVaultError, decrypt_secret
+            console_kwargs = {
+                'console_credential_kind': row['credential_kind'] or '',
+                'console_credential_secret': decrypt_secret(row['secret_ciphertext']),
+                'console_user_id': row['user_id'] or '',
+            }
+        except CredentialVaultError:
+            # 凭据损坏时仍可匿名拉模型/状态，只是价格可能显示需登录
+            console_kwargs = {}
     try:
         result = inspect_channel(
             {
@@ -2416,6 +2435,7 @@ def inspect_relay_preset(preset_id):
             },
             include_status=request.args.get('status', '1') != '0',
             force=request.args.get('refresh', '0') == '1',
+            **console_kwargs,
         )
         return jsonify(result)
     except ChannelInspectionError as exc:
