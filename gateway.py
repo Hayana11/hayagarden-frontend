@@ -4567,9 +4567,16 @@ WAKE_TOOLS = [
     },
 ] + CALENDAR_TOOLS + CODEBASE_READ_TOOLS
 
-def _wake_agent_loop(system, messages, max_rounds=6, tools=None, t_hours=0.0):
-    """Agent loop：允许工具调用和自由思考，最后追加一轮强制结构化输出。"""
+def _wake_agent_loop(system, messages, max_rounds=6, tools=None, t_hours=0.0, mode='normal'):
+    """Agent loop：允许工具调用和自由思考，最后追加一轮强制结构化输出。
+
+    生成型模式（dream / summarize）例外：它们的模板已经规定了自己的输出格式
+    （ACTION: send + 完整正文），既不需要工具，也不能被日常决策模式那套
+    "从 none/message/diary/explore 选一个、CONTENT 不超过80字" 的强制轮改写。
+    对这些模式跳过工具催促轮和强制结构化轮，直接返回模型的自由输出。
+    """
     from chat.response_parser import extract_text, extract_tool_uses
+    generative = mode in ('dream', 'summarize')
     msgs = list(messages)
     text_parts = []
     last_blocks = []
@@ -4595,7 +4602,8 @@ def _wake_agent_loop(system, messages, max_rounds=6, tools=None, t_hours=0.0):
             continue
         if not tool_uses:
             # 沉默较久却零工具就结构化 → 低能动性；再推一轮只读工具
-            if not tools_called and t_hours >= 1.0 and round_i < max_rounds - 1:
+            # 生成型模式不催促工具：做梦/摘要本就不查现状，催促只会把模型带偏。
+            if not generative and not tools_called and t_hours >= 1.0 and round_i < max_rounds - 1:
                 if last_blocks:
                     msgs.append({'role': 'assistant', 'content': last_blocks})
                 msgs.append({'role': 'user', 'content': (
@@ -4613,26 +4621,30 @@ def _wake_agent_loop(system, messages, max_rounds=6, tools=None, t_hours=0.0):
              'content': run_tool(t.get('name', ''), t.get('input') or {}, caller='fyodor_api')}
             for t in tool_uses
         ]})
-    # 强制结构化输出轮：追加一轮要求严格格式，无工具
-    try:
-        if last_blocks:
-            msgs.append({'role': 'assistant', 'content': last_blocks})
-        msgs.append({'role': 'user', 'content': (
-            '现在请只输出以下三行，不要其他任何内容：\n'
-            'THOUGHTS: <写清楚你刚才看到了什么、为什么这么决定——即使选 none 也要有原因链>\n'
-            'ACTION: <从 none / message / diary / explore 中选一个>\n'
-            'CONTENT: <若 ACTION=message 则写消息内容（不超过80字）；explore 写调研摘要；其他留空>'
-        )})
-        fmt_payload = {
-            'max_tokens': 512,
-            'system': system,
-            'messages': msgs,
-        }
-        from relay.manager import relay as _fmt_relay
-        fmt_result = _fmt_relay.call(fmt_payload, timeout=60)
-        text_parts.append(extract_text(fmt_result))
-    except Exception:
-        pass
+    # 强制结构化输出轮：追加一轮要求严格格式，无工具。
+    # 仅对日常决策类模式生效；生成型模式（dream/summarize）已按自己的模板
+    # 输出好了（ACTION: send + 完整正文），这一轮会把它改写成 4 选 1、CONTENT
+    # 不超过80字的日常格式，反而毁掉梦境，所以跳过。
+    if not generative:
+        try:
+            if last_blocks:
+                msgs.append({'role': 'assistant', 'content': last_blocks})
+            msgs.append({'role': 'user', 'content': (
+                '现在请只输出以下三行，不要其他任何内容：\n'
+                'THOUGHTS: <写清楚你刚才看到了什么、为什么这么决定——即使选 none 也要有原因链>\n'
+                'ACTION: <从 none / message / diary / explore 中选一个>\n'
+                'CONTENT: <若 ACTION=message 则写消息内容（不超过80字）；explore 写调研摘要；其他留空>'
+            )})
+            fmt_payload = {
+                'max_tokens': 512,
+                'system': system,
+                'messages': msgs,
+            }
+            from relay.manager import relay as _fmt_relay
+            fmt_result = _fmt_relay.call(fmt_payload, timeout=60)
+            text_parts.append(extract_text(fmt_result))
+        except Exception:
+            pass
     return NL.join(t for t in text_parts if t).strip()
 
 def _parse_wake_response(text):
@@ -4764,16 +4776,21 @@ def wake_decide():
     else:
         trigger = '[唤醒检查]'
     msgs = [{'role': 'user', 'content': trigger}]
-    if mode in ('dream', 'summarize', 'ritual'):
-        # 做梦/摘要/仪式模式：不挂留言板写权限，避免梦境内容被当作"新话题"发到board
+    if mode in ('dream', 'summarize'):
+        # 做梦/摘要是纯生成：不挂任何工具，模型按模板一次性写出正文即可。
+        _wake_tools = []
+    elif mode == 'ritual':
+        # 仪式模式：不挂留言板写权限，避免内容被当作"新话题"发到board
         _blocked = ('post_to_board', 'reply_to_board', 'desire_add', 'desire_list', 'desire_act', 'desire_reflect', 'desire_history')
         _wake_tools = [t for t in WAKE_TOOLS if t['name'] not in _blocked]
     else:
         _wake_tools = WAKE_TOOLS
     try:
-        raw_text = _wake_agent_loop(system, msgs, tools=_wake_tools, t_hours=t_hours)
+        raw_text = _wake_agent_loop(system, msgs, tools=_wake_tools, t_hours=t_hours, mode=mode)
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        import traceback as _tb
+        app.logger.error(f'[wake] mode={mode} {type(e).__name__}: {e}\n{_tb.format_exc()}')
+        return jsonify({'error': str(e), 'mode': mode}), 500
 
     thoughts, action, c_text = _parse_wake_response(raw_text)
     if not (thoughts or '').strip():
