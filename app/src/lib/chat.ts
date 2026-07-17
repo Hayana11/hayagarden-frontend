@@ -261,6 +261,37 @@ export function chatPlaceholder(date: Date): string {
   return pick(['晚上好。今天过得如何？', '夜里适合说真话。', '把今天讲给我听。']);
 }
 
+/** Human-readable guess for common chat stream failures. */
+export function guessChatErrorHint(error: string): string {
+  const e = error.toLowerCase();
+  if (e.includes('oauth') && (e.includes('expired') || e.includes('401'))) {
+    return 'Claude Code token 可能已过期，需要在 VPS 重新登录。';
+  }
+  if (e.includes('401') || e.includes('authenticate') || e.includes('unauthorized')) {
+    return '鉴权失败，API key 或 token 可能无效或已过期。';
+  }
+  if (e.includes('403')) return '没有权限访问当前端点。';
+  if (e.includes('429') || e.includes('rate limit') || e.includes('too many')) {
+    return '请求太频繁或额度用尽，稍后再试。';
+  }
+  if (e.includes('timeout') || e.includes('超时')) {
+    return '网关或模型响应超时，可以点右上角刷新再试。';
+  }
+  if (e.includes('503') || e.includes('502') || e.includes('unavailable')) {
+    return '上游服务暂时不可用。';
+  }
+  if (e.includes('busy') || e.includes('gen lock') || e.includes('正在生成')) {
+    return '上一轮生成可能卡住了，试试右上角刷新解锁。';
+  }
+  if (e.includes('claude code')) {
+    return 'Claude Code 订阅通道出错，检查 OAuth token 或切换中转站。';
+  }
+  if (e.includes('stream failed') || e.includes('流意外中断') || e.includes('连接超时')) {
+    return '连接中断，网络或网关可能不稳定。';
+  }
+  return '暂时无法完成回复，可以刷新或稍后重试。';
+}
+
 /** Lightweight probe: gateway chat lock endpoint reachable and responding. */
 export async function fetchChatGatewayOnline(): Promise<boolean> {
   try {

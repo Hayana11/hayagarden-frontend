@@ -24,6 +24,7 @@ import {
   fmtTokens,
   fetchChatGatewayOnline,
   forceUnlockChatGenLock,
+  guessChatErrorHint,
   streamChatReply,
   type ChatMsg,
   type ChatToolCall,
@@ -157,6 +158,7 @@ export function ChatScreen() {
   const [liked, setLiked] = useState<Record<number, 1 | -1>>({});
   const [endpointOnline, setEndpointOnline] = useState<boolean | null>(null);
   const [refreshing, setRefreshing] = useState(false);
+  const [chatError, setChatError] = useState<{ message: string; hint: string } | null>(null);
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const taRef = useRef<HTMLTextAreaElement>(null);
@@ -213,6 +215,7 @@ export function ChatScreen() {
     if (refreshing) return;
     setRefreshing(true);
     setNavOpen(null);
+    setChatError(null);
     abortRef.current?.abort();
     abortRef.current = null;
     liveRef.current = null;
@@ -329,7 +332,12 @@ export function ChatScreen() {
       );
       liveRef.current = null;
       setLive(null);
-      if (!res.ok && res.error) showToast(res.error);
+      if (!res.ok && res.error) {
+        if (!ctrl.signal.aborted) {
+          setChatError({ message: res.error, hint: guessChatErrorHint(res.error) });
+          scrollBottom(true);
+        }
+      }
       return res.ok;
     },
     [scrollBottom, showToast, updateLive],
@@ -339,6 +347,7 @@ export function ChatScreen() {
     const text = input.trim();
     if ((!text && !pendingFile && !pendingImage) || sending) return;
     setSending(true);
+    setChatError(null);
     setInput('');
     if (taRef.current) taRef.current.style.height = 'auto';
     const extra = pendingImage ? { imageFile: pendingImage } : pendingFile ? { fileUrl: pendingFile.fileUrl, fileName: pendingFile.fileName } : {};
@@ -362,6 +371,7 @@ export function ChatScreen() {
     async (msgId: number) => {
       if (sending) return;
       setSending(true);
+      setChatError(null);
       const old = await regenPrepare(msgId);
       if (old === null) {
         showToast('重答准备失败');
@@ -933,6 +943,26 @@ export function ChatScreen() {
           )}
           {rendered}
           {live && renderLive(live)}
+          {chatError && (
+            <div style={{ display: 'flex', justifyContent: 'center', padding: '6px 4px 2px' }}>
+              <div style={{
+                maxWidth: 360,
+                width: '100%',
+                background: 'rgba(58,42,40,0.92)',
+                color: '#F7EDEA',
+                borderRadius: 18,
+                padding: '14px 16px',
+                boxShadow: '0 10px 30px rgba(0,0,0,0.18)',
+                display: 'flex',
+                flexDirection: 'column',
+                gap: 8,
+                textAlign: 'center',
+              }}>
+                <span style={{ fontSize: 13, lineHeight: 1.65, letterSpacing: 0.3 }}>{chatError.message}</span>
+                <span style={{ fontSize: 11.5, lineHeight: 1.6, color: 'rgba(247,237,234,0.72)' }}>{chatError.hint}</span>
+              </div>
+            </div>
+          )}
         </div>
       </div>
 
