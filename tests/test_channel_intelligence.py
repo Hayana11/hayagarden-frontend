@@ -9,6 +9,7 @@ channel_intelligence = importlib.util.module_from_spec(SPEC)
 assert SPEC and SPEC.loader
 SPEC.loader.exec_module(channel_intelligence)
 
+_guess_status_origins = channel_intelligence._guess_status_origins
 _pick_status = channel_intelligence._pick_status
 inspect_channel = channel_intelligence.inspect_channel
 models_url_from_api_url = channel_intelligence.models_url_from_api_url
@@ -106,6 +107,101 @@ class ChannelIntelligenceTests(unittest.TestCase):
         )
         self.assertEqual(result["models"], ["gpt-5"])
         self.assertIsNone(result["status_source"])
+
+    def test_guesses_status_subdomain_for_api2_and_apex_hosts(self):
+        self.assertIn(
+            "https://status.68886868.xyz",
+            _guess_status_origins("https://api2.68886868.xyz"),
+        )
+        self.assertIn(
+            "https://status.68886868.xyz",
+            _guess_status_origins("https://68886868.xyz"),
+        )
+        self.assertIn(
+            "https://status.treegpt.cc",
+            _guess_status_origins("https://api.treegpt.cc"),
+        )
+
+    def test_retries_pricing_with_console_access_token_when_anonymous_auth_required(self):
+        calls = []
+
+        def fake_request(method, url, **kwargs):
+            headers = kwargs.get("headers") or {}
+            calls.append((url, headers))
+            if url.endswith("/api/pricing"):
+                if headers.get("New-Api-User") == "1834":
+                    return {
+                        "success": True,
+                        "data": [{
+                            "model_name": "claude-opus-4-6",
+                            "quota_type": 1,
+                            "model_price": 0.13,
+                            "enable_groups": ["vip"],
+                        }],
+                    }, None
+                return None, {"status": 401, "auth_required": True}
+            if url.endswith("/v1/models"):
+                return {"data": [{"id": "claude-opus-4-6"}]}, None
+            return None, {"status": 404}
+
+        result = inspect_channel(
+            {
+                "id": 2,
+                "name": "tree",
+                "base_url": "https://api.treegpt.cc/v1/messages",
+                "api_key": "sk-relay",
+            },
+            include_status=False,
+            force=True,
+            request_json=fake_request,
+            console_credential_kind="access_token",
+            console_credential_secret="console-access-token",
+            console_user_id="1834",
+        )
+
+        self.assertFalse(result["pricing_requires_auth"])
+        self.assertEqual(result["model_options"][0]["price"], "$0.13/次")
+        pricing_calls = [headers for url, headers in calls if url.endswith("/api/pricing")]
+        self.assertEqual(len(pricing_calls), 2)
+        self.assertNotIn("New-Api-User", pricing_calls[0])
+        self.assertEqual(pricing_calls[1]["Authorization"], "console-access-token")
+        self.assertEqual(pricing_calls[1]["New-Api-User"], "1834")
+        self.assertNotIn("console-access-token", repr(result))
+
+    def test_discovers_uptime_kuma_on_guessed_status_host(self):
+        def fake_request(method, url, **kwargs):
+            if url.endswith("/api/pricing"):
+                return {"data": []}, None
+            if url.endswith("/v1/models"):
+                return {"data": [{"id": "claude-opus-4-6"}]}, None
+            if url == "https://status.68886868.xyz/api/status-page/api":
+                return {
+                    "publicGroupList": [{
+                        "name": "Claude",
+                        "monitorList": [{"id": 1, "name": "claude-opus-4-6"}],
+                    }],
+                }, None
+            if url == "https://status.68886868.xyz/api/status-page/heartbeat/api":
+                return {
+                    "heartbeatList": {
+                        "1": [{"status": 1, "time": "2026-07-17", "msg": "", "ping": 42}],
+                    },
+                }, None
+            return None, {"status": 404}
+
+        result = inspect_channel(
+            {
+                "id": 5,
+                "name": "小鸡农场",
+                "base_url": "https://api2.68886868.xyz/v1/messages",
+                "api_key": "sk-relay",
+            },
+            include_status=True,
+            force=True,
+            request_json=fake_request,
+        )
+        self.assertEqual(result["status_source"], "https://status.68886868.xyz/status/api")
+        self.assertEqual(result["model_options"][0]["status"]["status"], 1)
 
     def test_queries_newapi_key_balance_and_converts_quota_to_usd(self):
         seen = {}
