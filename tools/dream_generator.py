@@ -53,7 +53,7 @@ REALITY_ANCHOR_PATTERNS = [
     r'今天(?:我们|她|和她)',
     r'白天(?:发生|聊|说)',
     r'我们(?:聊到|讨论|说好)',
-    r'最近',
+    r'最近(?:几天|一段时间|一直|总是|我们|她|老是)',
     r'现实中',
     r'微信',
     r'小红书',
@@ -322,8 +322,13 @@ def _gather_materials(conn):
     sensory = _collect_activity_sensory(conn, FRAGMENT_PLAN['activity_sensory'])
 
     frags = list(recent) + list(remote)
+    # 日记可能已在 recent（type 含 DIARY）里被抽到——按 source_id 去重，避免 primer 双份
     if diary_frag:
-        frags.append(diary_frag)
+        seen_ids = {f.get('source_id') for f in frags}
+        if diary_frag.get('source_id') in seen_ids:
+            diary_kind = None
+        else:
+            frags.append(diary_frag)
 
     source_mix = {
         'recent': len(recent),

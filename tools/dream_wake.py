@@ -152,9 +152,8 @@ def run_dreaming(now):
             _log(f"dream: already has recent dream in past 2 hours")
             return
 
-        # 第四批：最简概率门——偶发无梦。现有睡眠/时段/去重条件全部保留。
-        # 前置观测：累积 20~30 场正常梦且一二批指标稳定后再合入生产更稳妥。
-        if random.random() < 0.2:
+        # 第四批：整夜同一次掷骰（按日期种子），避免 cron 每 tick 重掷把 0.2 稀释成 0.2^n。
+        if random.Random(f"dream-{now:%Y-%m-%d}").random() < 0.2:
             _log("dream: probabilistic skip (no dream tonight)")
             return
 

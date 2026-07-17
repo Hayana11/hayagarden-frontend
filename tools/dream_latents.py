@@ -129,12 +129,17 @@ def pick_synthetic(conn: sqlite3.Connection, n: int) -> list[dict]:
 
 
 def get_fallback_latents(conn: sqlite3.Connection, limit=5) -> list[dict]:
-    """fallback 优先旧母题；冷却 7 天未用，recurrence 2~5 优先。"""
+    """fallback 带类型槽位只从 synthetic 取（类型为人工标注，可靠）。
+
+    梦回流项一律标 phrase，不能填「手里拿着…」这类类型槽；
+    冷却 7 天未用，recurrence 2~5 优先。
+    """
     rows = conn.execute(
         """
         SELECT id, type, content, recurrence
         FROM dream_latents
-        WHERE origin IN ('dream', 'synthetic')
+        WHERE origin='synthetic'
+          AND type IN ('place', 'object', 'action', 'sensation', 'figure')
           AND TRIM(COALESCE(content,'')) != ''
           AND (last_used_at IS NULL
                OR last_used_at < datetime('now', '-7 days'))
@@ -214,16 +219,13 @@ def pick_motifs(conn: sqlite3.Connection, n: int,
 
 
 def mark_used(conn: sqlite3.Connection, latent_ids: list[int]) -> None:
+    """只记 last_used_at（冷却用）。recurrence 只在梦中复现回流时 +1，不在「被提供进 primer」时动。"""
     if not latent_ids:
         return
     now = _now_str()
     for lid in latent_ids:
         conn.execute(
-            """
-            UPDATE dream_latents
-            SET last_used_at=?, recurrence=COALESCE(recurrence,0)+1
-            WHERE id=?
-            """,
+            'UPDATE dream_latents SET last_used_at=? WHERE id=?',
             (now, lid),
         )
     conn.commit()
@@ -273,7 +275,10 @@ _IMAGERY_SPLIT_RE = re.compile(r'[，。！？；、\n]+')
 
 
 def extract_dream_latents(dream_text: str, max_items=3) -> list[dict]:
-    """从梦正文粗抽 1~3 个意象（规则版，非 LLM）。"""
+    """从梦正文粗抽 1~3 个意象（规则版，非 LLM）。
+
+    一律标 phrase：规则抽取判不了词性，乱贴 object/place 会污染 fallback 类型槽。
+    """
     if not dream_text:
         return []
     parts = [p.strip() for p in _IMAGERY_SPLIT_RE.split(dream_text) if p.strip()]
@@ -285,14 +290,7 @@ def extract_dream_latents(dream_text: str, max_items=3) -> list[dict]:
         return []
     random.shuffle(candidates)
     picked = candidates[:max(1, min(max_items, len(candidates)))]
-    out = []
-    type_cycle = ['phrase', 'object', 'place', 'sensation', 'action', 'figure']
-    for i, content in enumerate(picked):
-        out.append({
-            'type': type_cycle[i % len(type_cycle)],
-            'content': content,
-        })
-    return out
+    return [{'type': 'phrase', 'content': c} for c in picked]
 
 
 def insert_latents(conn: sqlite3.Connection, items: list[dict],

@@ -81,20 +81,54 @@ class DreamLatentsTests(unittest.TestCase):
         self.assertEqual(added, 1)
         conn.close()
 
-    def test_get_fallback_latents(self):
+    def test_get_fallback_latents_typed_slots_only_synthetic(self):
         conn = self._conn()
         DL.insert_latents(
             conn,
             [{'type': 'place', 'content': '室内还在下雪的房间甲'}],
-            origin='dream',
+            origin='dream',  # 梦回流即使误标 place 也不进类型槽
+        )
+        DL.insert_latents(
+            conn,
+            [{'type': 'place', 'content': '没有出口的地下候车室乙'}],
+            origin='synthetic',
         )
         conn.execute(
             "UPDATE dream_latents SET recurrence=3, last_used_at=NULL"
         )
         conn.commit()
-        rows = DL.get_fallback_latents(conn, limit=3)
-        self.assertGreaterEqual(len(rows), 1)
+        rows = DL.get_fallback_latents(conn, limit=5)
+        self.assertTrue(rows)
+        self.assertTrue(all(r['content'] != '室内还在下雪的房间甲' for r in rows))
+        self.assertTrue(any(r['content'] == '没有出口的地下候车室乙' for r in rows))
         conn.close()
+
+    def test_mark_used_does_not_bump_recurrence(self):
+        conn = self._conn()
+        DL.insert_latents(
+            conn,
+            [{'type': 'phrase', 'content': '只该更新冷却时间的母题'}],
+            origin='dream',
+        )
+        lid = conn.execute(
+            "SELECT id FROM dream_latents WHERE content='只该更新冷却时间的母题'"
+        ).fetchone()['id']
+        before = conn.execute(
+            'SELECT recurrence FROM dream_latents WHERE id=?', (lid,)
+        ).fetchone()['recurrence']
+        DL.mark_used(conn, [lid])
+        after = conn.execute(
+            'SELECT recurrence, last_used_at FROM dream_latents WHERE id=?', (lid,)
+        ).fetchone()
+        self.assertEqual(after['recurrence'], before)
+        self.assertIsNotNone(after['last_used_at'])
+        conn.close()
+
+    def test_extract_dream_latents_all_phrase(self):
+        text = '走廊没有尽头。玻璃杯内部还在下雪。我把影子折好寄出。门后面还有门。'
+        items = DL.extract_dream_latents(text, max_items=3)
+        self.assertGreaterEqual(len(items), 1)
+        self.assertTrue(all(it['type'] == 'phrase' for it in items))
 
 
 if __name__ == '__main__':

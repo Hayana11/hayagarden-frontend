@@ -55,6 +55,12 @@ class DreamGeneratorV3Tests(unittest.TestCase):
         self.assertEqual(DG._severe_failure(expl, ''), 'explanatory_closure')
         anchored = '我们聊到那件事之后房间开始倾斜。' + pad
         self.assertEqual(DG._severe_failure(anchored, ''), 'reality_anchor')
+        # 「最近」空间义项不应误杀
+        nearest = '我走向离我最近的那扇门，把手冰得发疼。' + pad
+        self.assertIsNone(DG._severe_failure(nearest, ''))
+        # 时间义项仍要拦
+        recent_time = '最近几天她总是不在，房间开始倾斜。' + pad
+        self.assertEqual(DG._severe_failure(recent_time, ''), 'reality_anchor')
 
     def test_primer_copy_detects_long_verbatim(self):
         chunk = '口袋里持续的震动忽然变成了潮水声音啊'
@@ -121,6 +127,44 @@ class DreamGeneratorV3Tests(unittest.TestCase):
         self.assertEqual(materials['source_mix']['remote'], 0)
         self.assertEqual(materials['source_mix']['recent'], 3)
         self.assertEqual(materials['source_mix']['synthetic'], 0)
+
+    def test_diary_not_duplicated_when_already_in_recent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / 't.db'
+            conn = sqlite3.connect(db)
+            conn.row_factory = sqlite3.Row
+            conn.executescript(
+                """
+                CREATE TABLE posts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    type TEXT, content TEXT, valence REAL, arousal REAL,
+                    importance INTEGER, recall_count INTEGER, resolved INTEGER,
+                    last_recalled_at TEXT, created_at TEXT
+                );
+                CREATE TABLE dream_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    type TEXT, value TEXT, created_at TEXT
+                );
+                CREATE TABLE wake_log (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    thoughts TEXT
+                );
+                INSERT INTO posts (type, content, valence, arousal, importance,
+                    recall_count, resolved, created_at)
+                VALUES
+                ('DIARY', '同一篇日记不应出现两次', 0.5, 0.3, 9, 0, 0,
+                 datetime('now','+8 hours','-1 hours')),
+                ('MEMORY', '近记忆甲', 0.5, 0.3, 1, 0, 0,
+                 datetime('now','+8 hours','-1 days')),
+                ('MEMORY', '近记忆乙', 0.4, 0.7, 1, 0, 0,
+                 datetime('now','+8 hours','-2 days'));
+                """
+            )
+            with mock.patch.object(random, 'random', return_value=0.1):  # prefer diary
+                materials = DG._gather_materials(conn)
+            conn.close()
+        contents = [f['content'] for f in materials['fragments']]
+        self.assertEqual(contents.count('同一篇日记不应出现两次'), 1)
 
 
 if __name__ == '__main__':
