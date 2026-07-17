@@ -2891,6 +2891,13 @@ def _init_dream_tables():
         value TEXT,
         created_at TIMESTAMP DEFAULT (datetime('now','+8 hours'))
     )""")
+    # dream_pool 线上手建：只增列，不改既有列
+    try:
+        pool_cols = [r[1] for r in conn.execute('PRAGMA table_info(dream_pool)').fetchall()]
+        if pool_cols and 'metadata' not in pool_cols:
+            conn.execute('ALTER TABLE dream_pool ADD COLUMN metadata TEXT')
+    except Exception:
+        pass
     conn.commit()
     conn.close()
 

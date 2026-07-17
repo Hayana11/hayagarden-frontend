@@ -1,25 +1,107 @@
 #!/usr/bin/env python3.11
 """
-梦生成器 v2 — 三层记忆整合
-Layer 1: 采集碎片 (ombre-brain buckets + dream_events + diary)
-Layer 2: 融合相关 (按domain聚类，去重)
-Layer 3: 推断基调 (情感坐标 → 梦的温度) → 调用 /wake 生成诗意梦境
+梦生成器 v3 — 素材入口多样，特征概率出现，质量门只拦明确失败。
+
+Layer 1: 按 FRAGMENT_PLAN 取材（近期加权随机 / 远期 / 日记或思绪 / 活动感官）
+Layer 2: 保守去语境化 + primer 拼装（只含材料、不含解释）
+Layer 3: 基调推断 → /wake 生成 → 严重失败检测（最多重生一次）→ 入库
 """
-import sqlite3, datetime, random, os, sys, json
-import frontmatter as fm
-import urllib.request
-import urllib.error
+import sqlite3, datetime, random, os, sys, json, re
 
 if '/opt/frontend' not in sys.path:
     sys.path.insert(0, '/opt/frontend')
 
 DB_PATH    = '/opt/frontend/memories.db'
-BRAIN_DIR  = '/opt/ombre-brain/buckets/dynamic'
 GATEWAY    = 'http://localhost:5051'
 LOG_FILE   = '/var/log/dream_generator.log'
 
+PROMPT_VERSION = 'dream-v3'
+
+FRAGMENT_PLAN = {
+    'recent_memory': 2,   # 近3天，加权随机
+    'remote_memory': 2,   # 14~365天前，从 posts 取
+    'diary_or_wake': 1,   # 日记 或 wake_log 思绪，二选一
+    'activity_sensory': 1,  # dream_events → 感官线索
+}
+
+ACTIVITY_SENSORY_MAP = {
+    '微信': ['口袋里持续的震动', '一段没有发件人的语音'],
+    '小红书': ['翻不到底的一叠彩色卡片', '许多陌生人的午后'],
+    'default': ['屏幕的冷光', '滚动到一半停住的手指'],
+}
+
+DREAM_TRAITS = {
+    'spatial_shift': (0.55, '至少一次无过渡的空间切换'),
+    'identity_drift': (0.20, "某个人物或'我'的身份中途发生错误"),
+    'time_error': (0.30, '时间顺序或时代出现一处错误'),
+    'causal_reverse': (0.20, '一处因果倒置：结果先于原因发生'),
+    'unresolved_ending': (0.65, '结尾不解释、不收束，允许记不清'),
+    'missing_center': (0.30, '最重要的现实人物以缺席、物体或声音替代'),
+}
+
+REALITY_ANCHOR_PATTERNS = [
+    r'今天(?:我们|她|和她)',
+    r'白天(?:发生|聊|说)',
+    r'我们(?:聊到|讨论|说好)',
+    r'最近',
+    r'现实中',
+    r'微信',
+    r'小红书',
+]
+
+EXPLANATION_PATTERNS = [
+    r'我(?:终于|忽然|突然)?明白了',
+    r'原来(?:这一切|这就是|它是)',
+    r'这意味着',
+    r'我(?:终于|这才)?意识到',
+    r'我这才知道',
+    r'也许这就是',
+]
+
+FAILURE_HINTS = {
+    'too_short': '正文过短，请写满300字以上的具体梦境',
+    'explanatory_closure': '不要在结尾解释梦的含义或“明白了什么”',
+    'reality_anchor': '不要出现今天/白天/我们聊到/最近/现实中/微信/小红书等现实锚点',
+    'primer_copy': '不要原样照抄素材碎片，请改写成梦的感官与动作',
+}
+
+FALLBACK_PLACES = [
+    '没有出口的地下候车室', '室内还在下雪的房间',
+    '楼梯只向下却通向天空的塔', '所有座位都朝向窗外的教室',
+]
+FALLBACK_OBJECTS = [
+    '内部仍在下雪的玻璃杯', '一封装着影子的信',
+    '被反复抄写的夜晚', '停在半空的秒针',
+]
+FALLBACK_ACTIONS = [
+    '把日期从每张纸上撕掉', '把影子折好寄出',
+    '数一段没有尽头的电梯提示音', '给不存在的门上锁',
+]
+FALLBACK_SENSATIONS = [
+    '潮湿的铁锈味', '指尖发凉却出汗',
+    '远处持续的低鸣', '袖口突然变重',
+]
+
+_ENTITY_REPLACE = {
+    '哈娅': '她',
+    '哈雅娜': '她',
+    '费奥多尔': '我',
+    '费佳': '我',
+}
+
+_TIME_MARKER_RE = re.compile(
+    r'今天|昨天|前天|明天|后天|'
+    r'上午|下午|晚上|凌晨|中午|'
+    r'\d{1,2}月\d{1,2}日|'
+    r'\d{4}年\d{1,2}月|'
+    r'上周|这周|本周|下周|'
+    r'刚才|刚刚'
+)
+
+
 def _now():
     return datetime.datetime.utcnow() + datetime.timedelta(hours=8)
+
 
 def _log(msg):
     ts = _now().strftime('%Y-%m-%d %H:%M:%S')
@@ -31,134 +113,265 @@ def _log(msg):
     except Exception:
         pass
 
+
 def _db():
     c = sqlite3.connect(DB_PATH)
     c.row_factory = sqlite3.Row
     return c
 
-# ── Layer 1: 采集碎片 ──────────────────────────────────────────
-def _gather_brain_fragments(days=3):
-    """从 ombre-brain dynamic 桶里取最近 days 天的记忆碎片"""
-    cutoff = _now() - datetime.timedelta(days=days)
-    fragments = []
-    if not os.path.isdir(BRAIN_DIR):
-        return fragments
-    for domain_dir in os.listdir(BRAIN_DIR):
-        domain_path = os.path.join(BRAIN_DIR, domain_dir)
-        if not os.path.isdir(domain_path):
+
+def ensure_dream_pool_metadata(conn=None):
+    """幂等：dream_pool 加 metadata 列。cron 直调本脚本时不经过 app.py。"""
+    own = conn is None
+    if own:
+        conn = _db()
+    try:
+        cols = [r[1] for r in conn.execute('PRAGMA table_info(dream_pool)').fetchall()]
+        if not cols:
+            return False
+        if 'metadata' not in cols:
+            conn.execute('ALTER TABLE dream_pool ADD COLUMN metadata TEXT')
+            conn.commit()
+            _log('dream_pool: added metadata column')
+        return True
+    except Exception as e:
+        _log(f'ensure metadata failed: {e}')
+        return False
+    finally:
+        if own:
+            conn.close()
+
+
+# ── Layer 1: 取材 ──────────────────────────────────────────
+
+def _frag_weight(f):
+    importance = float(f.get('importance') or 5)
+    novelty = 1.0 - min(f.get('recall_count', 0) or 0, 10) / 10.0
+    valence = float(f['valence'] if f.get('valence') is not None else 0.5)
+    arousal = float(f['arousal'] if f.get('arousal') is not None else 0.3)
+    unresolved = 1.0 if (
+        (f.get('resolved') or 0) == 0 and (valence < 0.4 or arousal >= 0.6)
+    ) else 0.3
+    return (importance / 10.0) * 0.30 + unresolved * 0.25 \
+        + novelty * 0.25 + random.random() * 0.20
+
+
+def _weighted_sample(items, n):
+    if n <= 0 or not items:
+        return []
+    pool = list(items)
+    picked = []
+    for _ in range(min(n, len(pool))):
+        weights = [max(_frag_weight(f), 1e-6) for f in pool]
+        choice = random.choices(pool, weights=weights, k=1)[0]
+        picked.append(choice)
+        pool.remove(choice)
+    return picked
+
+
+def _row_to_frag(row, source='memory'):
+    return {
+        'source_id': row['id'],
+        'source': source,
+        'content': (row['content'] or '').strip(),
+        'valence': float(row['valence'] if row['valence'] is not None else 0.5),
+        'arousal': float(row['arousal'] if row['arousal'] is not None else 0.3),
+        'importance': int(row['importance'] if row['importance'] is not None else 5),
+        'recall_count': int(row['recall_count'] if row['recall_count'] is not None else 0),
+        'resolved': int(row['resolved'] if row['resolved'] is not None else 0),
+    }
+
+
+def _collect_recent_memories(conn, n=2):
+    rows = conn.execute(
+        """
+        SELECT id, content, valence, arousal, importance, recall_count, resolved
+        FROM posts
+        WHERE type IN ('MEMORY', 'DIARY')
+          AND created_at > datetime('now', '+8 hours', '-3 days')
+          AND TRIM(COALESCE(content, '')) != ''
+        ORDER BY id DESC
+        LIMIT ?
+        """,
+        (max(n * 8, 16),),
+    ).fetchall()
+    pool = [_row_to_frag(r, 'recent') for r in rows]
+    return _weighted_sample(pool, n)
+
+
+def _collect_remote_memories(conn, n=2):
+    """远期记忆：14~365天前，novelty/unresolved 用既有列代理。"""
+    if n <= 0:
+        return []
+    rows = conn.execute(
+        """
+        SELECT id, content, valence, arousal, importance, recall_count, resolved
+        FROM posts
+        WHERE type IN ('MEMORY', 'DIARY')
+          AND created_at < datetime('now', '+8 hours', '-14 days')
+          AND created_at > datetime('now', '+8 hours', '-365 days')
+          AND COALESCE(resolved, 0) = 0
+          AND TRIM(COALESCE(content, '')) != ''
+        ORDER BY COALESCE(recall_count, 0) ASC,
+                 COALESCE(last_recalled_at, created_at) ASC,
+                 RANDOM()
+        LIMIT ?
+        """,
+        (n * 4,),
+    ).fetchall()
+    pool = [_row_to_frag(r, 'remote') for r in rows]
+    random.shuffle(pool)
+    return pool[:n]
+
+
+def _collect_diary_or_wake(conn):
+    """日记或 wake_log 思绪，二选一，不同时塞。"""
+    prefer_diary = random.random() < 0.5
+    order = ('diary', 'wake') if prefer_diary else ('wake', 'diary')
+    for kind in order:
+        if kind == 'diary':
+            row = conn.execute(
+                """
+                SELECT id, content, valence, arousal, importance, recall_count, resolved
+                FROM posts
+                WHERE type='DIARY' AND TRIM(COALESCE(content,'')) != ''
+                ORDER BY id DESC LIMIT 1
+                """
+            ).fetchone()
+            if row:
+                frag = _row_to_frag(row, 'diary')
+                frag['content'] = frag['content'][:150]
+                return frag, 'diary'
+        else:
+            row = conn.execute(
+                """
+                SELECT id, thoughts AS content FROM wake_log
+                WHERE TRIM(COALESCE(thoughts,'')) != ''
+                ORDER BY id DESC LIMIT 1
+                """
+            ).fetchone()
+            if row and row['content']:
+                return {
+                    'source_id': -int(row['id']),
+                    'source': 'wake_log',
+                    'content': str(row['content']).strip()[:80],
+                    'valence': 0.5,
+                    'arousal': 0.4,
+                    'importance': 5,
+                    'recall_count': 0,
+                    'resolved': 0,
+                }, 'wake_log'
+    return None, None
+
+
+def _translate_activity(value):
+    text = value or ''
+    for app, clues in ACTIVITY_SENSORY_MAP.items():
+        if app == 'default':
             continue
-        for fname in os.listdir(domain_path):
-            if not fname.endswith('.md'):
-                continue
-            fpath = os.path.join(domain_path, fname)
-            try:
-                post = fm.load(fpath)
-                meta = post.metadata
-                last_active_str = meta.get('last_active', meta.get('created', ''))
-                last_active = datetime.datetime.fromisoformat(str(last_active_str))
-                if last_active < cutoff:
-                    continue
-                fragments.append({
-                    'domain': meta.get('domain', [domain_dir]),
-                    'valence': float(meta.get('valence', 0.5)),
-                    'arousal': float(meta.get('arousal', 0.3)),
-                    'importance': int(meta.get('importance', 5)),
-                    'name': meta.get('name', fname),
-                    'content': post.content.strip()[:120],
-                    'last_active': last_active,
-                })
-            except Exception:
-                continue
-    # 按重要度+recency排序
-    fragments.sort(key=lambda x: (x['importance'], x['last_active']), reverse=True)
-    return fragments[:6]
+        if app in text:
+            return random.choice(clues)
+    return random.choice(ACTIVITY_SENSORY_MAP['default'])
 
-def _gather_db_fragments():
-    """从 dream_events、wake_log、posts 取当天碎片"""
-    conn = _db()
-    today = _now().date()
-    result = {'events': [], 'thoughts': [], 'diary': None}
 
-    events = conn.execute(
-        "SELECT value FROM dream_events WHERE date(created_at) >= date('now','-2 days') ORDER BY id DESC LIMIT 4"
+def _collect_activity_sensory(conn, n=1):
+    if n <= 0:
+        return []
+    rows = conn.execute(
+        """
+        SELECT value FROM dream_events
+        WHERE date(created_at) >= date('now', '-2 days')
+        ORDER BY id DESC LIMIT 4
+        """
     ).fetchall()
-    result['events'] = [e['value'] for e in events]
+    if not rows:
+        return []
+    clues = []
+    seen = set()
+    for r in rows:
+        clue = _translate_activity(r['value'])
+        if clue in seen:
+            continue
+        seen.add(clue)
+        clues.append(clue)
+        if len(clues) >= n:
+            break
+    return clues
 
-    thoughts = conn.execute(
-        "SELECT thoughts FROM wake_log WHERE thoughts != '' ORDER BY id DESC LIMIT 2"
-    ).fetchall()
-    result['thoughts'] = [t['thoughts'][:80] for t in thoughts if t['thoughts']]
 
-    diary = conn.execute(
-        "SELECT content FROM posts WHERE type='DIARY' ORDER BY id DESC LIMIT 1"
-    ).fetchone()
-    if diary:
-        result['diary'] = diary['content'][:150]
+def _gather_materials(conn):
+    """按 FRAGMENT_PLAN 取材；远期不足时缺额回填 recent，不硬凑。"""
+    remote_n = FRAGMENT_PLAN['remote_memory']
+    recent_n = FRAGMENT_PLAN['recent_memory']
 
-    conn.close()
-    return result
+    remote = _collect_remote_memories(conn, remote_n)
+    shortfall = remote_n - len(remote)
+    recent = _collect_recent_memories(conn, recent_n + shortfall)
 
-# ── Layer 2: 融合相关 ──────────────────────────────────────────
-def _merge_by_domain(brain_frags):
-    """按 domain 聚类，把相同主题的碎片合并成一个意象"""
-    domain_map = {}
-    for frag in brain_frags:
-        domains = frag['domain'] if isinstance(frag['domain'], list) else [frag['domain']]
-        primary = domains[0] if domains else '未知'
-        if primary not in domain_map:
-            domain_map[primary] = {'contents': [], 'valence': [], 'arousal': []}
-        domain_map[primary]['contents'].append(frag['name'])
-        domain_map[primary]['valence'].append(frag['valence'])
-        domain_map[primary]['arousal'].append(frag['arousal'])
+    diary_frag, diary_kind = _collect_diary_or_wake(conn)
+    sensory = _collect_activity_sensory(conn, FRAGMENT_PLAN['activity_sensory'])
 
-    merged = []
-    for domain, data in domain_map.items():
-        avg_v = sum(data['valence']) / len(data['valence'])
-        avg_a = sum(data['arousal']) / len(data['arousal'])
-        merged.append({
-            'domain': domain,
-            'names': data['contents'],
-            'valence': avg_v,
-            'arousal': avg_a,
-        })
-    return merged
+    frags = list(recent) + list(remote)
+    if diary_frag:
+        frags.append(diary_frag)
 
-# ── Layer 3: 推断基调 ──────────────────────────────────────────
-def _infer_dream_tone(merged, db_frags):
-    """
-    综合所有碎片的情感坐标，推断梦的基调
-    返回 (tone, primer_text)
-    """
-    all_v = [m['valence'] for m in merged]
-    all_a = [m['arousal'] for m in merged]
-    if not all_v:
-        return 'calm', ''
+    source_mix = {
+        'recent': len(recent),
+        'remote': len(remote),
+        'diary': 1 if diary_kind == 'diary' else 0,
+        'wake_log': 1 if diary_kind == 'wake_log' else 0,
+        'synthetic': 0,
+        'old_motif': 0,
+    }
 
-    avg_v = sum(all_v) / len(all_v)
-    avg_a = sum(all_a) / len(all_a)
+    vals = [f['valence'] for f in frags] or [0.5]
+    arous = [f['arousal'] for f in frags] or [0.3]
+    return {
+        'fragments': frags,
+        'sensory': sensory,
+        'source_mix': source_mix,
+        'avg_v': sum(vals) / len(vals),
+        'avg_a': sum(arous) / len(arous),
+    }
 
-    # Russell 情感平面 → 基调
+
+# ── Layer 2: 去语境化 + primer ─────────────────────────────
+
+def _strip_time_markers(text):
+    return _TIME_MARKER_RE.sub('', text)
+
+
+def _decontextualize_v1(text):
+    """第一批：实体替换 + 概率抹时间。不做「人→符号」。"""
+    if not text:
+        return ''
+    for k, v in _ENTITY_REPLACE.items():
+        text = text.replace(k, v)
+    if random.random() < 0.65:
+        text = _strip_time_markers(text)
+    return re.sub(r'\s+', ' ', text).strip()
+
+
+def _pick_traits():
+    picked = [k for k, (p, _) in DREAM_TRAITS.items() if random.random() < p]
+    if len(picked) > 3:
+        picked = random.sample(picked, 3)
+    if not picked:
+        picked = ['unresolved_ending']
+    return picked
+
+
+def _infer_tone(avg_v, avg_a):
     if avg_v >= 0.6 and avg_a >= 0.6:
-        tone = 'vivid'      # 高效价高唤醒 → 鲜活激动
-    elif avg_v >= 0.6 and avg_a < 0.6:
-        tone = 'warm'       # 高效价低唤醒 → 温柔平静
-    elif avg_v < 0.4 and avg_a >= 0.6:
-        tone = 'anxious'    # 低效价高唤醒 → 焦虑紧张
-    elif avg_v < 0.4 and avg_a < 0.6:
-        tone = 'heavy'      # 低效价低唤醒 → 沉重压抑
-    else:
-        tone = 'drifting'   # 中间地带 → 漂浮迷离
+        return 'vivid'
+    if avg_v >= 0.6 and avg_a < 0.6:
+        return 'warm'
+    if avg_v < 0.4 and avg_a >= 0.6:
+        return 'anxious'
+    if avg_v < 0.4 and avg_a < 0.6:
+        return 'heavy'
+    return 'drifting'
 
-    # 拼出素材摘要给 AI
-    parts = []
-    for m in merged[:3]:
-        parts.append(f"[{m['domain']}] {', '.join(m['names'][:2])}")
-    if db_frags['events']:
-        parts.append("活动碎片：" + "、".join(db_frags['events'][:2]))
-    if db_frags['diary']:
-        parts.append("日记片段：" + db_frags['diary'][:60])
-
-    return tone, "\n".join(parts)
 
 TONE_PROMPTS = {
     'vivid':    '这是一个鲜活的梦，色彩浓烈，充满动感，情绪高涨。',
@@ -168,18 +381,89 @@ TONE_PROMPTS = {
     'drifting': '这是一个漂浮的梦，没有地面，也不需要地面，只是在某种温热的介质里悬浮。',
 }
 
-# ── 调用 /wake 生成梦境文字 ──────────────────────────────────
-def _call_wake_for_dream(tone, primer):
+
+def _build_primer(tone, materials, traits, places=None, objects=None, actions=None):
+    """只含材料、不含解释。不出现姓名/日期/domain/应用名/事件结论标签。"""
+    parts = [f'基调：{TONE_PROMPTS.get(tone, TONE_PROMPTS["drifting"])}']
+    if places:
+        parts.append('潜在场所：' + '、'.join(places))
+    if objects:
+        parts.append('潜在物体：' + '、'.join(objects))
+    if actions:
+        parts.append('潜在动作：' + '、'.join(actions))
+
+    sensory = list(materials.get('sensory') or [])
+    if sensory:
+        parts.append('潜在感官：' + '、'.join(sensory))
+
+    frag_texts = []
+    for f in materials.get('fragments') or []:
+        cleaned = _decontextualize_v1((f.get('content') or '')[:120])
+        if cleaned:
+            frag_texts.append(cleaned)
+    if frag_texts:
+        parts.append('碎片：' + ' / '.join(frag_texts))
+
+    trait_lines = [DREAM_TRAITS[k][1] for k in traits if k in DREAM_TRAITS]
+    if trait_lines:
+        parts.append('本场特征：' + '；'.join(trait_lines))
+
+    return '\n'.join(parts)
+
+
+# ── 严重失败检测 ───────────────────────────────────────────
+
+def _long_verbatim_overlap(dream_text, primer_text, min_len=18):
+    """连续子串照抄检测（不用 Jaccard）。"""
+    if not dream_text or not primer_text or len(primer_text) < min_len:
+        return False
+    # 只对「碎片」段做照抄检测，避免基调句误伤
+    probe = primer_text
+    if '碎片：' in primer_text:
+        probe = primer_text.split('碎片：', 1)[1]
+    probe = re.sub(r'\s+', '', probe)
+    hay = re.sub(r'\s+', '', dream_text)
+    if len(probe) < min_len:
+        return False
+    for i in range(0, len(probe) - min_len + 1):
+        chunk = probe[i:i + min_len]
+        if chunk and chunk in hay:
+            return True
+    return False
+
+
+def _severe_failure(dream_text, primer_text):
+    if not dream_text or len(dream_text) < 150:
+        return 'too_short'
+    tail = dream_text[-200:]
+    if any(re.search(p, tail) for p in EXPLANATION_PATTERNS):
+        return 'explanatory_closure'
+    if any(re.search(p, dream_text) for p in REALITY_ANCHOR_PATTERNS):
+        return 'reality_anchor'
+    if _long_verbatim_overlap(dream_text, primer_text, min_len=18):
+        return 'primer_copy'
+    return None
+
+
+# ── 调用 /wake + fallback ─────────────────────────────────
+
+def _call_wake_for_dream(tone, primer, extra=None):
+    import urllib.request
+    import urllib.error
+
     tone_desc = TONE_PROMPTS.get(tone, TONE_PROMPTS['drifting'])
+    primer_payload = primer
+    if extra:
+        primer_payload = f'{primer}\n\n{extra}'
     payload = json.dumps({
         'mode': 'dream',
         'dream_tone': tone,
-        'dream_primer': primer,
+        'dream_primer': primer_payload,
         'dream_tone_desc': tone_desc,
     }).encode()
     try:
         req = urllib.request.Request(
-            f"{GATEWAY}/wake",
+            f'{GATEWAY}/wake',
             data=payload,
             method='POST',
             headers={'Content-Type': 'application/json'},
@@ -188,78 +472,114 @@ def _call_wake_for_dream(tone, primer):
             data = json.loads(resp.read().decode())
             return (data.get('content') or data.get('text', '')).strip()
     except urllib.error.HTTPError as e:
-        # urllib 把 4xx/5xx 抛成 HTTPError，str(e) 只有状态码，没有响应体。
-        # 网关会把真正的错误写进 body，读出来才知道到底哪里断了。
         try:
             body = e.read().decode('utf-8', 'replace')[:500]
         except Exception:
             body = ''
-        _log(f"wake call failed: HTTP {e.code} {e.reason} body={body}")
+        _log(f'wake call failed: HTTP {e.code} {e.reason} body={body}')
         return None
     except Exception as e:
-        _log(f"wake call failed: {type(e).__name__}: {e}")
+        _log(f'wake call failed: {type(e).__name__}: {e}')
         return None
 
-def _fallback_dream(tone, merged, db_frags):
-    """API不可用时的降级诗意拼接"""
-    desc = TONE_PROMPTS.get(tone, '')
-    elements = []
-    for m in merged[:2]:
-        elements.append(f"关于{m['domain']}的{m['names'][0]}" if m['names'] else m['domain'])
-    if db_frags['events']:
-        elements.append(db_frags['events'][0])
-    return f"{desc}\n梦里有：" + "，还有".join(elements) if elements else desc
+
+def _fallback_dream(tone, *_args):
+    """静态词库 fallback（第二批接 latents）。"""
+    a, b = random.sample(FALLBACK_PLACES, 2)
+    return (
+        f'我站在{a}，手里拿着{random.choice(FALLBACK_OBJECTS)}。'
+        f'它一直在{random.choice(FALLBACK_ACTIONS)}，但周围的人似乎听不见。'
+        f'门打开以后不是房间，而是{b}。'
+        f'我忽然记不起自己为什么有这双手，只记得{random.choice(FALLBACK_SENSATIONS)}。'
+        f'后来发生了一件很重要的事，醒来只剩一处空白。'
+    )
+
 
 # ── 主函数 ──────────────────────────────────────────────────
+
 def generate_dream():
-    _log("dream generation started (v2 three-layer)")
+    _log('dream generation started (v3 fragment-plan)')
+    conn = _db()
+    ensure_dream_pool_metadata(conn)
 
-    # Layer 1
-    brain_frags = _gather_brain_fragments(days=3)
-    db_frags    = _gather_db_fragments()
-    _log(f"gathered {len(brain_frags)} brain frags, {len(db_frags['events'])} events")
+    materials = _gather_materials(conn)
+    tone = _infer_tone(materials['avg_v'], materials['avg_a'])
+    traits = _pick_traits()
+    primer = _build_primer(tone, materials, traits)
+    _log(
+        f"mix={materials['source_mix']} tone={tone} traits={traits} "
+        f'primer_len={len(primer)}'
+    )
 
-    # Layer 2
-    merged = _merge_by_domain(brain_frags)
-    _log(f"merged into {len(merged)} domain groups")
+    used_fallback = False
+    regenerated = False
+    failure_reason = None
 
-    # Layer 3
-    tone, primer = _infer_dream_tone(merged, db_frags)
-    _log(f"dream tone: {tone}")
-
-    # 生成梦境文字
     dream_text = _call_wake_for_dream(tone, primer)
     if not dream_text:
-        dream_text = _fallback_dream(tone, merged, db_frags)
-        _log("using fallback dream text")
+        dream_text = _fallback_dream(tone)
+        used_fallback = True
+        _log('using fallback dream text (wake unavailable)')
     else:
-        _log("got AI-generated dream text")
+        reason = _severe_failure(dream_text, primer)
+        if reason:
+            regenerated = True
+            hint = FAILURE_HINTS.get(reason, reason)
+            _log(f'severe failure: {reason}, regenerating once')
+            dream2 = _call_wake_for_dream(
+                tone, primer, extra=f'上一次生成失败：{hint}，请避免。'
+            )
+            if dream2:
+                dream_text = dream2
+            failure_reason = _severe_failure(dream_text, primer)
+            if failure_reason:
+                _log(f'still failing after regen: {failure_reason}; storing anyway')
+            else:
+                _log('regen recovered')
+        else:
+            _log('got AI-generated dream text')
 
-    # 存入 dream_pool（藏起来，等情感共鸣时才浮现）
+    metadata = {
+        'prompt_version': PROMPT_VERSION,
+        'source_mix': materials['source_mix'],
+        'traits': traits,
+        'fallback': used_fallback,
+        'regenerated': regenerated,
+        'failure_reason': failure_reason,
+        'primer': primer,
+    }
+
     try:
-        conn = _db()
-        now_str = (_now()).strftime('%Y-%m-%d %H:%M:%S')
-        # 最近2小时内已有相同梦则跳过
+        now_str = _now().strftime('%Y-%m-%d %H:%M:%S')
+        cutoff = (_now() - datetime.timedelta(hours=2)).strftime('%Y-%m-%d %H:%M:%S')
         existing = conn.execute(
-            "SELECT id FROM dream_pool WHERE content=? AND created_at > ?",
-            (dream_text, (_now() - __import__('datetime').timedelta(hours=2)).strftime('%Y-%m-%d %H:%M:%S'))
+            'SELECT id FROM dream_pool WHERE content=? AND created_at > ?',
+            (dream_text, cutoff),
         ).fetchone()
         if existing:
-            _log("duplicate dream skipped")
+            _log('duplicate dream skipped')
             conn.close()
             return False
-        # 计算平均情感坐标
-        all_v = [m['valence'] for m in merged] or [0.5]
-        all_a = [m['arousal'] for m in merged] or [0.5]
-        avg_v = sum(all_v) / len(all_v)
-        avg_a = sum(all_a) / len(all_a)
-        conn.execute(
-            "INSERT INTO dream_pool (content, valence, arousal, tone, created_at) VALUES (?,?,?,?,?)",
-            (dream_text, avg_v, avg_a, tone, now_str)
-        )
+
+        avg_v = materials['avg_v']
+        avg_a = materials['avg_a']
+        meta_json = json.dumps(metadata, ensure_ascii=False)
+        cols = [r[1] for r in conn.execute('PRAGMA table_info(dream_pool)').fetchall()]
+        if 'metadata' in cols:
+            conn.execute(
+                'INSERT INTO dream_pool (content, valence, arousal, tone, created_at, metadata) '
+                'VALUES (?,?,?,?,?,?)',
+                (dream_text, avg_v, avg_a, tone, now_str, meta_json),
+            )
+        else:
+            conn.execute(
+                'INSERT INTO dream_pool (content, valence, arousal, tone, created_at) '
+                'VALUES (?,?,?,?,?)',
+                (dream_text, avg_v, avg_a, tone, now_str),
+            )
         conn.commit()
         conn.close()
-        # 同步写入 posts（经统一写入口），供白夜"梦"tab 显示
+
         import memory_tool
         memory_tool.save_memory(
             dream_text,
@@ -270,11 +590,16 @@ def generate_dream():
             valence=avg_v,
             arousal=avg_a,
         )
-        _log(f"dream stored in pool+posts: {dream_text[:60]}")
+        _log(f'dream stored in pool+posts: {dream_text[:60]}')
         return True
     except Exception as e:
-        _log(f"dream store error: {e}")
+        _log(f'dream store error: {e}')
+        try:
+            conn.close()
+        except Exception:
+            pass
         return False
+
 
 if __name__ == '__main__':
     generate_dream()
