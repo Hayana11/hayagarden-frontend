@@ -151,7 +151,12 @@ def run_dreaming(now):
         if recent_dream:
             _log(f"dream: already has recent dream in past 2 hours")
             return
-        
+
+        # 第四批：整夜同一次掷骰（按日期种子），避免 cron 每 tick 重掷把 0.2 稀释成 0.2^n。
+        if random.Random(f"dream-{now:%Y-%m-%d}").random() < 0.2:
+            _log("dream: probabilistic skip (no dream tonight)")
+            return
+
         _log(f"dream: sleep {sleep_duration:.0f}min, generating")
         from dream_generator import generate_dream
         generate_dream()

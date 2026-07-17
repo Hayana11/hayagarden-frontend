@@ -2891,6 +2891,26 @@ def _init_dream_tables():
         value TEXT,
         created_at TIMESTAMP DEFAULT (datetime('now','+8 hours'))
     )""")
+    # dream_pool 线上手建：只增列，不改既有列
+    try:
+        pool_cols = [r[1] for r in conn.execute('PRAGMA table_info(dream_pool)').fetchall()]
+        if pool_cols and 'metadata' not in pool_cols:
+            conn.execute('ALTER TABLE dream_pool ADD COLUMN metadata TEXT')
+    except Exception:
+        pass
+    # 私人梦史：潜梦库（幂等）
+    conn.execute("""CREATE TABLE IF NOT EXISTS dream_latents (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        type TEXT,
+        content TEXT,
+        origin TEXT,
+        source_id INTEGER,
+        valence REAL,
+        arousal REAL,
+        recurrence INTEGER DEFAULT 0,
+        last_used_at TEXT,
+        created_at TEXT DEFAULT (datetime('now', '+8 hours'))
+    )""")
     conn.commit()
     conn.close()
 
