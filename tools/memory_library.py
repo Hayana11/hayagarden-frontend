@@ -3,10 +3,17 @@ import re
 from collections import defaultdict
 
 from tools import summary_title
+from tools.memory_tier import compute_display_weight
+from tools.memory_tool import is_near_duplicate, normalize_content
 
 LIBRARY_TYPES = ('MEMORY', 'DIARY', 'FACT', 'THOUGHT', 'DREAM', 'DAILY_SUMMARY')
 
-# Optional emoji/name hints — unknown tags and types still get dynamic topics.
+
+def _post_weight(row):
+    """Map DB → UI weight 1–5；语义见 tools/memory_tier.py。"""
+    return compute_display_weight(row)
+
+
 TAG_HINTS = {
     '日常': {'emoji': '🍞', 'name': '日常', 'desc': '账目、天气、日常琐事与随口一提的小事。'},
     '情绪': {'emoji': '🌙', 'name': '情绪与陪伴', 'desc': '心情、低气压、亲密对话与彼此照护。'},
@@ -63,25 +70,6 @@ def _title_from_content(content):
     return line or '未命名记忆'
 
 
-def _post_weight(row):
-    layer = (row['layer'] or 'recent').strip()
-    importance = int(row['importance'] or 0)
-    pinned = int(row['pinned'] or 0)
-    if pinned:
-        return 5
-    if layer == 'core':
-        return 5
-    if layer in ('long', 'long-term'):
-        return 5 if importance >= 6 else 4
-    if importance >= 6:
-        return 4
-    if importance >= 4:
-        return 3
-    if importance >= 2:
-        return 2
-    return 1
-
-
 def _topic_key_for_row(row, tags):
     if tags:
         return f'tag-{_slug(tags[0])}'
@@ -117,12 +105,28 @@ def _ai_blurb(name, entries):
     return f'{span}共 {len(entries)} 条记忆' + (f'，其中 {core_n} 条是核心级。' if core_n else '。')
 
 
+def _dedupe_entries(entries):
+    """展示层折叠语义重复项，保留较新的一条（entries 已按时间倒序）。"""
+    kept, norms = [], []
+    for e in entries:
+        norm = normalize_content(e.get('content', ''))
+        if norm and any(is_near_duplicate(norm, n) for n in norms):
+            continue
+        kept.append(e)
+        if norm:
+            norms.append(norm)
+    return kept
+
+
 def build_memory_library(conn, limit=500):
     placeholders = ','.join('?' * len(LIBRARY_TYPES))
     post_cols = {r[1] for r in conn.execute("PRAGMA table_info(posts)").fetchall()}
     summary_expr = 'summary_title' if 'summary_title' in post_cols else "'' AS summary_title"
+    proc_expr = 'COALESCE(processed, 0) AS processed' if 'processed' in post_cols else '1 AS processed'
+    recall_expr = 'COALESCE(recall_count, 0) AS recall_count' if 'recall_count' in post_cols else '0 AS recall_count'
     rows = conn.execute(
-        f"""SELECT id, type, content, author, created_at, pinned, tags, layer, importance, {summary_expr}
+        f"""SELECT id, type, content, author, created_at, pinned, tags, layer, importance,
+                   {summary_expr}, {proc_expr}, {recall_expr}
             FROM posts
             WHERE type IN ({placeholders}) AND COALESCE(resolved, 0) = 0
             ORDER BY created_at DESC, id DESC
@@ -164,6 +168,9 @@ def build_memory_library(conn, limit=500):
         }
         entries.append(entry)
         assoc_by_id[entry['id']] = set(assocs)
+
+    entries = _dedupe_entries(entries)
+    assoc_by_id = {e['id']: assoc_by_id.get(e['id'], set()) for e in entries}
 
     for a in entries:
         shared = []

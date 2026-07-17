@@ -34,7 +34,7 @@ const STATE_LABELS: [Exclude<StateFilter, 'all'>, string][] = [
   ['core', '核心'],
   ['long', '长期'],
   ['short', '短期'],
-  ['inbox', '待消化'],
+  ['inbox', '未消化'],
 ];
 const MONTH_LABEL = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
 const MONTH_CN = ['一月', '二月', '三月', '四月', '五月', '六月', '七月', '八月', '九月', '十月', '十一月', '十二月'];

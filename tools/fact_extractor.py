@@ -6,7 +6,7 @@
 
 做法：读前一天的 chat_messages，让 DeepSeek 抽取"值得永久记住的稳定事实"
 （约定/纪念日/偏好/身份信息/习惯/重要物品），与已有 FACT 去重后存入
-posts(type='FACT', layer='core')。memory_cycle 的降权和周压缩都不碰 core 层；
+posts(type='FACT', layer='core')。memory_cycle 的降权和周压缩不碰 core 层；
 system_builder 把 FACT 注入 BP2，天天在场。
 
 用法：fact_extractor.py [--dry-run] [--date YYYY-MM-DD]
@@ -19,6 +19,8 @@ sys.path.insert(0, '/opt/frontend/tools')
 sys.path.insert(0, '/opt/frontend')
 import llm_lite
 import memory_tool
+from memory_tool import is_near_duplicate, normalize_content
+from memory_tier import is_ephemeral_note, has_stable_couple_fact
 
 DB = '/opt/frontend/memories.db'
 MAX_FACTS_PER_DAY = 6
@@ -89,6 +91,7 @@ def extract(day, dry_run=False):
             '- 身份/环境信息（住址变化、新买的重要物品、工作变动等）\n'
             '- 长期习惯\n'
             '不要：当天的情绪、一次性的琐事、闲聊内容、对话过程本身。\n'
+            '不要：一次性事件（今天买了什么、收到快递、吃了什么）——那些是短期记忆，不是 FACT。\n'
             '每条事实一句话、自包含（单独读也能懂，含必要的时间/人名），15-60 字。\n'
             '以下事实已经记住了，语义重复的不要再输出：\n%s\n\n'
             '只返回 JSON 数组（每项一个字符串）；没有新事实就返回 []。\n\n'
@@ -105,13 +108,18 @@ def extract(day, dry_run=False):
     for f in facts:
         if len(f) < 8:
             continue
-        if any(f[:20] in k or k[:20] in f for k in known):
+        if is_ephemeral_note(f):
+            _log('skip ephemeral (not FACT): %s' % f[:60])
+            continue
+        fn = normalize_content(f)
+        if any(is_near_duplicate(fn, normalize_content(k)) for k in known):
             continue
         known.append(f)
+        imp = 8 if has_stable_couple_fact(f) else 7
         _log('FACT: %s' % f)
         if not dry_run:
             memory_tool.save_memory(f, type='FACT', layer='core',
-                                    tags='fact,auto', importance=8)
+                                    tags='fact,auto', importance=imp, processed=1)
         saved += 1
         if saved >= MAX_FACTS_PER_DAY:
             break

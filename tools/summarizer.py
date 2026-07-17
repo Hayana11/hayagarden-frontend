@@ -176,6 +176,7 @@ def _save_summary(day_str, summary_text):
     """把日摘要存入 posts（经统一写入口）"""
     import memory_tool
     memory_tool.save_memory(summary_text, type='DAILY_SUMMARY', layer='long-term',
+                            importance=5, processed=1,
                             created_at=day_str + ' 23:59:59')
 
 def run():
