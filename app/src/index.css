@@ -303,7 +303,7 @@ button {
 .config-card-heading { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; }
 .config-card-heading h2 { margin: 0; font-size: 16px; font-weight: 600; letter-spacing: 2px; }
 .config-card-heading > span { color: #A99590; font: 11px var(--font-serif-display); letter-spacing: 1px; }
-.usage-relay-aside { max-width: 58%; text-align: right; line-height: 1.45; white-space: normal; }
+.config-day-detail { margin-top: 14px; color: #9C3B4A; font-size: 12px; letter-spacing: .5px; line-height: 1.55; }
 .config-card-heading > button { padding: 6px 14px; border: 1px solid #E4D4CC; border-radius: 999px; color: #8C7B76; font-size: 12px; letter-spacing: 1px; cursor: pointer; }
 .config-segmented { display: flex; gap: 2px; margin-top: 14px; padding: 3px; border-radius: 999px; background: #F6EFEC; }
 .config-segmented button { flex: 1; padding: 7px 0; border-radius: 999px; color: #8C7B76; font-size: 12.5px; cursor: pointer; }

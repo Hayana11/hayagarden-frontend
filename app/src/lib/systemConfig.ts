@@ -121,6 +121,7 @@ export interface DailyUsageRelayTotal {
   name: string;
   totalCost: number;
   todayCost: number;
+  dailyCosts: Record<string, number>;
 }
 
 export interface DailyUsageResult {
@@ -366,7 +367,7 @@ export async function getDailyUsage(days: number): Promise<DailyUsageResult> {
   const data = await http.get<{
     mode?: 'cost' | 'requests';
     days?: Array<{ date?: string; count?: number; cost?: number | null }>;
-    relays?: Array<{ id?: number; name?: string; total_cost?: number; today_cost?: number }>;
+    relays?: Array<{ id?: number; name?: string; total_cost?: number; today_cost?: number; daily_costs?: Record<string, number> }>;
     total_cost?: number | null;
     total_count?: number;
     month_messages?: number;
@@ -384,6 +385,7 @@ export async function getDailyUsage(days: number): Promise<DailyUsageResult> {
       name: relay.name || '',
       totalCost: Number(relay.total_cost || 0),
       todayCost: Number(relay.today_cost || 0),
+      dailyCosts: relay.daily_costs && typeof relay.daily_costs === 'object' ? relay.daily_costs : {},
     })),
     totalCost: data.total_cost == null ? null : Number(data.total_cost),
     totalCount: Number(data.total_count || 0),
