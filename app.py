@@ -3132,7 +3132,8 @@ def _init_wake_tables():
         thoughts TEXT,
         action TEXT,
         content TEXT,
-        consumed INTEGER DEFAULT 0
+        consumed INTEGER DEFAULT 0,
+        cache_info TEXT DEFAULT ''
     )""")
     try:
         conn.execute("ALTER TABLE wake_log ADD COLUMN notified INTEGER DEFAULT 0")
@@ -3140,6 +3141,10 @@ def _init_wake_tables():
         pass
     try:
         conn.execute("ALTER TABLE wake_log ADD COLUMN surfaced_desire_ids TEXT")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        conn.execute("ALTER TABLE wake_log ADD COLUMN cache_info TEXT DEFAULT ''")
     except sqlite3.OperationalError:
         pass
     try:

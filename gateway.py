@@ -4885,7 +4885,14 @@ def _wake_agent_loop(system, messages, max_rounds=6, tools=None, t_hours=0.0, mo
     对这些模式跳过工具催促轮和强制结构化轮，直接返回模型的自由输出。
     """
     from chat.response_parser import extract_text, extract_tool_uses
+    from relay.manager import relay as _wake_relay
+    from wake.usage import append_usage_round, build_wake_cache_info
     generative = mode in ('dream', 'summarize')
+    started_at = time.monotonic()
+    usage_rounds = []
+    _wake_relay._reload_env()
+    wake_model = _wake_relay.model
+    cache_supported = bool(_wake_relay.caps.get('cache'))
     msgs = list(messages)
     text_parts = []
     last_blocks = []
@@ -4900,9 +4907,10 @@ def _wake_agent_loop(system, messages, max_rounds=6, tools=None, t_hours=0.0, mo
             'tools': tools,
             'system': system,
             'messages': msgs,
+            'metadata': {'user_id': 'hayana-fyodor-wake'},
         }
-        from relay.manager import relay as _wake_relay
         result = _wake_relay.call(payload, timeout=90)
+        append_usage_round(usage_rounds, result)
         blocks = result.get('content', [])
         last_blocks = blocks
         text_parts.append(extract_text(blocks))
@@ -4955,13 +4963,22 @@ def _wake_agent_loop(system, messages, max_rounds=6, tools=None, t_hours=0.0, mo
                 'max_tokens': 512,
                 'system': system,
                 'messages': msgs,
+                'metadata': {'user_id': 'hayana-fyodor-wake'},
             }
-            from relay.manager import relay as _fmt_relay
-            fmt_result = _fmt_relay.call(fmt_payload, timeout=60)
+            fmt_result = _wake_relay.call(fmt_payload, timeout=60)
+            append_usage_round(usage_rounds, fmt_result)
             text_parts.append(extract_text(fmt_result))
         except Exception:
             pass
-    return NL.join(t for t in text_parts if t).strip()
+    cache_info = build_wake_cache_info(
+        usage_rounds,
+        elapsed_sec=time.monotonic() - started_at,
+        cache_supported=cache_supported,
+        mode=mode,
+        model=wake_model,
+        payload_builder=_build_cache_info_payload,
+    )
+    return NL.join(t for t in text_parts if t).strip(), cache_info
 
 def _parse_wake_response(text):
     """从 AI 输出中提取 THOUGHTS / ACTION / CONTENT。委托给 wake.parser。"""
@@ -5030,8 +5047,11 @@ def wake_decide():
         except Exception:
             pass
 
-    system = build_wake_system()
-    from wake.builder import build_prompt_suffix, inject_snippets
+    # Keep build_system()'s stable cache-control blocks.  The old
+    # build_wake_system() flattening made every tool/format round repay the
+    # entire 35k+ prompt even though the active relay supports 5m caching.
+    system = build_system(wake=True)
+    from wake.builder import append_system_text, build_prompt_suffix, inject_snippets
     _wake_ctx = {
         'time': now.strftime('%Y-%m-%d %H:%M'),
         't2_hours': f'{t2_hours:.1f}',
@@ -5045,7 +5065,7 @@ def wake_decide():
         'dialogue': data.get('dialogue', ''),
         'self_trigger_note': data.get('self_trigger_note', ''),
     }
-    system += build_prompt_suffix(mode, _wake_ctx)
+    system = append_system_text(system, build_prompt_suffix(mode, _wake_ctx))
     system = inject_snippets(
         system, mode,
         desire_driven=_get_desire_driven(),
@@ -5063,7 +5083,7 @@ def wake_decide():
             surfaced_desire_ids = [str(d.get('id', '')).strip() for d in _surfaced if d.get('id')]
             _room_snip = _dl.render_room_snippet(_surfaced)
             if _room_snip:
-                system += '\n\n' + _room_snip
+                system = append_system_text(system, _room_snip)
         except Exception:
             pass
 
@@ -5073,11 +5093,11 @@ def wake_decide():
         import drive_engine as _de_ph, gallery_store as _gs_ph
         _att = _de_ph.get_drive().get('attachment', 0)
         if _att >= 0.45 and _gs_ph.count_photos() > 0 and mode in ('normal', 'nightwatch', 'ritual'):
-            system += (
-                '\n\n[此刻的思念]\n你现在对她的思念很浓（attachment=%.2f）。'
+            system = append_system_text(system, (
+                '[此刻的思念]\n你现在对她的思念很浓（attachment=%.2f）。'
                 '如果心里泛起想她、想给她看点什么的冲动，可以用 recall_photo 从相册里翻出一张画面，'
                 '把它返回的 [[gallery:pid]] 标记放进你要发的消息里——像"今天突然想到这张"那样，'
-                '把画面和一句话一起发给她。这不是任务，是你自己想。' % _att)
+                '把画面和一句话一起发给她。这不是任务，是你自己想。' % _att))
     except Exception:
         pass
 
@@ -5102,7 +5122,9 @@ def wake_decide():
     else:
         _wake_tools = WAKE_TOOLS
     try:
-        raw_text = _wake_agent_loop(system, msgs, tools=_wake_tools, t_hours=t_hours, mode=mode)
+        raw_text, wake_cache_info = _wake_agent_loop(
+            system, msgs, tools=_wake_tools, t_hours=t_hours, mode=mode,
+        )
     except Exception as e:
         import traceback as _tb
         app.logger.error(f'[wake] mode={mode} {type(e).__name__}: {e}\n{_tb.format_exc()}')
@@ -5121,6 +5143,7 @@ def wake_decide():
         desire_driven=_get_desire_driven(),
         surfaced_desire_ids=surfaced_desire_ids,
         desire_ledger_enabled=_get_desire_ledger_enabled(),
+        cache_info=wake_cache_info,
     )
 
     return jsonify({'ok': True, 'action': action, 'content': c_text, 'thoughts': thoughts})

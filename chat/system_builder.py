@@ -3,8 +3,8 @@ chat/system_builder.py — Prompt Builder（Request Pipeline 第一环）
 
 从 gateway.py 搬过来的 build_system()：把人设、记忆、当前状态、驱动条、
 留言板待办等十几个数据源拼成最终的 system prompt。normal 模式返回
-cache-control blocks 列表（省 token），wake 模式经 build_wake_system()
-展平成纯字符串（wake 走的中转站不支持 cache_control）。
+cache-control blocks 列表（省 token）。在线 wake relay 直接保留 blocks；
+build_wake_system() 仅保留给需要纯字符串的旧调用方与健康检查。
 
 不直接 import gateway（会循环依赖），需要 get_db() 等基础设施时在
 函数体内延迟 import。
@@ -534,8 +534,7 @@ def _blocks_to_str(blocks):
     return '\n'.join(b.get('text', '') for b in blocks if isinstance(b, dict) and b.get('type') == 'text')
 
 def build_wake_system():
-    """Wake 专用的 system 构建：直接返回纯字符串，不走 cache-control blocks 路径。
-    和 build_system() 解耦，避免 blocks 列表 += 字符串的类型陷阱。"""
+    """兼容旧调用方的纯字符串 wake system；在线 relay 不应使用此函数。"""
     result = build_system(wake=True)
     if isinstance(result, str):
         return result
