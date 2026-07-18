@@ -83,9 +83,20 @@ def build_prompt_suffix(mode: str, context: dict) -> str:
     return fmt_str
 
 
-def inject_snippets(system: str, mode: str,
+def append_system_text(system, text: str):
+    """Append uncached wake-only text without flattening cached system blocks."""
+    text = str(text or '').strip()
+    if not text:
+        return system
+    if isinstance(system, list):
+        return list(system) + [{'type': 'text', 'text': text}]
+    base = str(system or '').strip()
+    return base + ('\n\n' if base else '') + text
+
+
+def inject_snippets(system, mode: str,
                     desire_driven: bool = False,
-                    longing_enabled: bool = False) -> str:
+                    longing_enabled: bool = False):
     """
     向 system 注入 drive_engine 和 desire snippets（dream/summarize 模式跳过）。
     """
@@ -96,7 +107,7 @@ def inject_snippets(system: str, mode: str,
         import drive_engine as _de
         snip = _de.get_wake_snippet()
         if snip:
-            system += '\n\n' + snip
+            system = append_system_text(system, snip)
     except Exception:
         pass
 
@@ -105,7 +116,7 @@ def inject_snippets(system: str, mode: str,
             import desire as _des
             snip = _des.get_wake_snippet()
             if snip:
-                system += '\n\n' + snip
+                system = append_system_text(system, snip)
         except Exception:
             pass
 
