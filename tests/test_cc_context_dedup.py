@@ -5,9 +5,11 @@ from __future__ import annotations
 import datetime
 import io
 import json
+import os
 import sqlite3
 import sys
 import tempfile
+import types
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -15,6 +17,23 @@ from unittest import mock
 ROOT = str(Path(__file__).resolve().parents[1])
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
+
+# CI / 沙箱可能没有 /opt/frontend；在 import 生产模块前铺好路径与 stub。
+_OPT_FRONTEND = Path('/opt/frontend')
+try:
+    _OPT_FRONTEND.mkdir(parents=True, exist_ok=True)
+    for _name in ('memories.db', 'commands.db'):
+        sqlite3.connect(str(_OPT_FRONTEND / _name)).close()
+except OSError:
+    # 无写权限时 stub config_store，避免 import 期连不上硬编码 DB
+    if 'config_store' not in sys.modules:
+        _cs = types.ModuleType('config_store')
+        _cs.DB_PATH = ':memory:'
+        _cs.get = lambda key, default=None: default
+        _cs.get_bool = lambda key, default=False: bool(default)
+        _cs.get_int = lambda key, default=0: int(default)
+        _cs.set = lambda *a, **k: None
+        sys.modules['config_store'] = _cs
 
 from chat.system_builder import (
     _cc_collect_cold_once,
