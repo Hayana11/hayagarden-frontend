@@ -670,8 +670,13 @@ class ReportAggregateTests(unittest.TestCase):
         self.assertEqual(s["output_tokens"], 12042)
         self.assertEqual(s["cold_start_count"], 4)
         self.assertEqual(s["no_respawn_cache_miss_count"], 3)
+        self.assertEqual(s["normal_hot_turn_count"], 1)  # 仅 first_round.read>0 的双 round 热轮
+        self.assertEqual(s["unclassified_turn_count"], 18)  # read=0/create=0 filler
         self.assertEqual(s["suspected_cache_expiry_count"], 1)
         self.assertGreaterEqual(s["suspected_cache_expiry_unknown_count"], 1)
+        day = report["daily"][-1]
+        self.assertEqual(day["unclassified_turn_count"], 18)
+        self.assertEqual(day["normal_hot_turn_count"], 1)
 
         cold_sum = 19413 + 19212 + 19513 + 20387
         expected_share = cold_sum / 225622
@@ -1104,15 +1109,30 @@ class CreationClassificationTests(unittest.TestCase):
                     runtime=_fp(idle_seconds_before_turn=5, resident_generation=1),
                 )),
             },
+            {
+                "id": 4,
+                "created_at": "2026-07-18 10:03:00",
+                "cache_info": json.dumps(_usage(
+                    rounds=[{
+                        "index": 1, "complete": True, "input_tokens": 1, "output_tokens": 1,
+                        "cache_read": 0, "cache_creation": 0, "context_tokens": 1,
+                    }],
+                    respawn_reason=None,
+                    resident_turn_count=4,
+                    runtime=_fp(idle_seconds_before_turn=5, resident_generation=1),
+                )),
+            },
         ]
         report = obs.aggregate_cc_observability(rows, days=1, now=NOW)
         s = report["summary"]
         self.assertEqual(s["cold_start_count"], 1)
         self.assertEqual(s["no_respawn_cache_miss_count"], 1)
         self.assertEqual(s["normal_hot_turn_count"], 1)
+        self.assertEqual(s["unclassified_turn_count"], 1)
         self.assertEqual(s["cold_start_first_round_creation_sum"], 100)
         self.assertEqual(s["no_respawn_miss_first_round_creation_sum"], 40)
         self.assertEqual(s["normal_hot_first_round_creation_sum"], 5)
+        self.assertEqual(s["unclassified_first_round_creation_sum"], 0)
         self.assertEqual(s["later_rounds_creation_sum"], 27)  # 20 + 7
         self.assertEqual(s["cold_start_avg_first_round_creation"], 100.0)
         self.assertEqual(s["no_respawn_miss_avg_first_round_creation"], 40.0)
@@ -1124,11 +1144,48 @@ class CreationClassificationTests(unittest.TestCase):
         self.assertAlmostEqual(
             s["later_rounds_creation_share_of_total_creation"], 27 / total
         )
+        self.assertEqual(s["unclassified_first_round_creation_share_of_total_creation"], 0.0)
         self.assertEqual(s["respawns_by_reason"], {"idle": 1})
         day = report["daily"][-1]
         self.assertEqual(day["cold_start_first_round_creation_sum"], 100)
         self.assertEqual(day["later_rounds_creation_sum"], 27)
+        self.assertEqual(day["unclassified_turn_count"], 1)
         self.assertEqual(day["respawns_by_reason"], {"idle": 1})
+
+    def test_read_zero_create_zero_not_normal_hot(self):
+        usage = _usage(
+            rounds=[{
+                "index": 1, "complete": True,
+                "input_tokens": 1, "output_tokens": 1,
+                "cache_read": 0, "cache_creation": 0, "context_tokens": 1,
+            }],
+            respawn_reason=None,
+            resident_turn_count=3,
+            runtime=_fp(idle_seconds_before_turn=5),
+        )
+        self.assertFalse(obs.is_cold_start(usage))
+        self.assertFalse(obs.is_no_respawn_cache_miss(usage))
+        self.assertFalse(obs.is_normal_hot(usage))
+
+    def test_normal_hot_requires_read_gt_zero(self):
+        hot = _usage(
+            rounds=[{
+                "index": 1, "complete": True,
+                "input_tokens": 1, "output_tokens": 1,
+                "cache_read": 12, "cache_creation": 0, "context_tokens": 13,
+            }],
+            respawn_reason=None,
+            resident_turn_count=3,
+            runtime=_fp(idle_seconds_before_turn=5),
+        )
+        self.assertTrue(obs.is_normal_hot(hot))
+        no_rounds = _usage(
+            rounds=[],
+            respawn_reason=None,
+            resident_turn_count=3,
+            runtime=_fp(idle_seconds_before_turn=5),
+        )
+        self.assertFalse(obs.is_normal_hot(no_rounds))
 
 
 class ContentSnapshotGuardTests(unittest.TestCase):
@@ -1167,23 +1224,31 @@ class DaysClampTests(unittest.TestCase):
 
 
 class ProviderInterleaveExpiryTests(unittest.TestCase):
+    def _claude_hot(self, *, idle, generation=4, read=100, creation=0, turn=5):
+        return _usage(
+            rounds=[{
+                "index": 1, "complete": True,
+                "input_tokens": 1, "output_tokens": 1,
+                "cache_read": read, "cache_creation": creation,
+                "context_tokens": 1 + read + creation,
+            }],
+            respawn_reason=None,
+            resident_turn_count=turn,
+            runtime=_fp(idle_seconds_before_turn=idle, resident_generation=generation),
+        )
+
+    def _claude_miss(self, *, idle, generation=4, creation=59557, turn=6):
+        return self._claude_hot(
+            idle=idle, generation=generation, read=0, creation=creation, turn=turn,
+        )
+
     def test_other_provider_does_not_break_claude_fingerprint_chain(self):
         """Claude → api_relay → 同指纹长 idle Claude miss → expiry=true。"""
-        rt = _fp(idle_seconds_before_turn=10, resident_generation=4)
         rows = [
             {
                 "id": 1,
                 "created_at": "2026-07-18 10:00:00",
-                "cache_info": json.dumps(_usage(
-                    rounds=[{
-                        "index": 1, "complete": True,
-                        "input_tokens": 1, "output_tokens": 1,
-                        "cache_read": 100, "cache_creation": 0, "context_tokens": 101,
-                    }],
-                    respawn_reason=None,
-                    resident_turn_count=5,
-                    runtime=rt,
-                )),
+                "cache_info": json.dumps(self._claude_hot(idle=10)),
             },
             {
                 "id": 2,
@@ -1202,16 +1267,7 @@ class ProviderInterleaveExpiryTests(unittest.TestCase):
             {
                 "id": 3,
                 "created_at": "2026-07-18 12:00:00",
-                "cache_info": json.dumps(_usage(
-                    rounds=[{
-                        "index": 1, "complete": True,
-                        "input_tokens": 1, "output_tokens": 1,
-                        "cache_read": 0, "cache_creation": 59557, "context_tokens": 59558,
-                    }],
-                    respawn_reason=None,
-                    resident_turn_count=6,
-                    runtime=_fp(idle_seconds_before_turn=6900, resident_generation=4),
-                )),
+                "cache_info": json.dumps(self._claude_miss(idle=6900)),
             },
         ]
         report = obs.aggregate_cc_observability(rows, days=1, now=NOW)
@@ -1226,16 +1282,7 @@ class ProviderInterleaveExpiryTests(unittest.TestCase):
             {
                 "id": 1,
                 "created_at": "2026-07-18 10:00:00",
-                "cache_info": json.dumps(_usage(
-                    rounds=[{
-                        "index": 1, "complete": True,
-                        "input_tokens": 1, "output_tokens": 1,
-                        "cache_read": 100, "cache_creation": 0, "context_tokens": 101,
-                    }],
-                    respawn_reason=None,
-                    resident_turn_count=5,
-                    runtime=_fp(idle_seconds_before_turn=10, resident_generation=4),
-                )),
+                "cache_info": json.dumps(self._claude_hot(idle=10)),
             },
             {
                 "id": 2,
@@ -1245,20 +1292,57 @@ class ProviderInterleaveExpiryTests(unittest.TestCase):
             {
                 "id": 3,
                 "created_at": "2026-07-18 12:00:00",
-                "cache_info": json.dumps(_usage(
-                    rounds=[{
-                        "index": 1, "complete": True,
-                        "input_tokens": 1, "output_tokens": 1,
-                        "cache_read": 0, "cache_creation": 59557, "context_tokens": 59558,
-                    }],
-                    respawn_reason=None,
-                    resident_turn_count=6,
-                    runtime=_fp(idle_seconds_before_turn=6900, resident_generation=4),
-                )),
+                "cache_info": json.dumps(self._claude_miss(idle=6900)),
             },
         ]
         report = obs.aggregate_cc_observability(rows, days=1, now=NOW)
         self.assertEqual(report["coverage"]["ambiguous_legacy_rows"], 1)
+        self.assertEqual(report["summary"]["suspected_cache_expiry_count"], 0)
+        self.assertEqual(report["summary"]["suspected_cache_expiry_unknown_count"], 1)
+
+    def test_empty_cache_info_clears_fingerprint_chain(self):
+        rows = [
+            {
+                "id": 1,
+                "created_at": "2026-07-18 10:00:00",
+                "cache_info": json.dumps(self._claude_hot(idle=10)),
+            },
+            {
+                "id": 2,
+                "created_at": "2026-07-18 10:30:00",
+                "cache_info": "",
+            },
+            {
+                "id": 3,
+                "created_at": "2026-07-18 12:00:00",
+                "cache_info": json.dumps(self._claude_miss(idle=6900)),
+            },
+        ]
+        report = obs.aggregate_cc_observability(rows, days=1, now=NOW)
+        self.assertEqual(report["coverage"]["empty_cache_info_rows"], 1)
+        self.assertEqual(report["summary"]["suspected_cache_expiry_count"], 0)
+        self.assertEqual(report["summary"]["suspected_cache_expiry_unknown_count"], 1)
+
+    def test_invalid_json_clears_fingerprint_chain(self):
+        rows = [
+            {
+                "id": 1,
+                "created_at": "2026-07-18 10:00:00",
+                "cache_info": json.dumps(self._claude_hot(idle=10)),
+            },
+            {
+                "id": 2,
+                "created_at": "2026-07-18 10:30:00",
+                "cache_info": "{not-json",
+            },
+            {
+                "id": 3,
+                "created_at": "2026-07-18 12:00:00",
+                "cache_info": json.dumps(self._claude_miss(idle=6900)),
+            },
+        ]
+        report = obs.aggregate_cc_observability(rows, days=1, now=NOW)
+        self.assertEqual(report["coverage"]["invalid_json_rows"], 1)
         self.assertEqual(report["summary"]["suspected_cache_expiry_count"], 0)
         self.assertEqual(report["summary"]["suspected_cache_expiry_unknown_count"], 1)
 

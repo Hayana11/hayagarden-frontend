@@ -422,6 +422,16 @@ def is_no_respawn_cache_miss(usage: Mapping[str, Any], runtime: Optional[Mapping
     return int(fr.get("cache_read") or 0) == 0 and int(fr.get("cache_creation") or 0) > 0
 
 
+def is_normal_hot(usage: Mapping[str, Any], runtime: Optional[Mapping[str, Any]] = None) -> bool:
+    """严格：非 cold_start，且 first_round 存在且 cache_read > 0。"""
+    if is_cold_start(usage, runtime):
+        return False
+    fr = first_round(usage)
+    if not fr:
+        return False
+    return int(fr.get("cache_read") or 0) > 0
+
+
 _FINGERPRINT_KEYS = (
     "gateway_instance_id",
     "resident_generation",
@@ -579,14 +589,17 @@ def _empty_creation_fields() -> dict[str, Any]:
         "no_respawn_miss_avg_first_round_creation": None,
         "normal_hot_avg_first_round_creation": None,
         "normal_hot_turn_count": 0,
+        "unclassified_turn_count": 0,
         "cold_start_first_round_creation_sum": 0,
         "no_respawn_miss_first_round_creation_sum": 0,
         "normal_hot_first_round_creation_sum": 0,
+        "unclassified_first_round_creation_sum": 0,
         "later_rounds_creation_sum": 0,
         "cold_start_first_round_creation_share_of_total_creation": None,
         "cold_start_creation_share": None,  # 旧别名
         "no_respawn_miss_first_round_creation_share_of_total_creation": None,
         "normal_hot_first_round_creation_share_of_total_creation": None,
+        "unclassified_first_round_creation_share_of_total_creation": None,
         "later_rounds_creation_share_of_total_creation": None,
     }
 
@@ -654,6 +667,7 @@ def _finalize_creation_metrics(target: dict[str, Any], *, all_creation_sum: int)
     cold_sum = int(target.get("cold_start_first_round_creation_sum") or 0)
     miss_sum = int(target.get("no_respawn_miss_first_round_creation_sum") or 0)
     hot_sum = int(target.get("normal_hot_first_round_creation_sum") or 0)
+    uncl_sum = int(target.get("unclassified_first_round_creation_sum") or 0)
     later_sum = int(target.get("later_rounds_creation_sum") or 0)
     cold_n = int(target.get("cold_start_count") or 0)
     miss_n = int(target.get("no_respawn_cache_miss_count") or 0)
@@ -669,6 +683,9 @@ def _finalize_creation_metrics(target: dict[str, Any], *, all_creation_sum: int)
     )
     target["normal_hot_first_round_creation_share_of_total_creation"] = _share(
         hot_sum, all_creation_sum
+    )
+    target["unclassified_first_round_creation_share_of_total_creation"] = _share(
+        uncl_sum, all_creation_sum
     )
     target["later_rounds_creation_share_of_total_creation"] = _share(
         later_sum, all_creation_sum
@@ -782,9 +799,11 @@ def aggregate_cc_observability(
         kind, data = parse_cache_info_row(row.get("cache_info"))
         if kind == "invalid_json":
             coverage["invalid_json_rows"] += 1
+            prev_runtime = None
             continue
         if kind == "empty":
             coverage["empty_cache_info_rows"] += 1
+            prev_runtime = None
             continue
         if kind == "other_provider":
             # api_relay 等不触碰 Claude resident：只计 coverage，保留上一有效 Claude 指纹
@@ -857,6 +876,7 @@ def aggregate_cc_observability(
         later_creation = later_rounds_creation(usage)
         cold = is_cold_start(usage, runtime)
         miss = is_no_respawn_cache_miss(usage, runtime)
+        hot = is_normal_hot(usage, runtime)
         expiry = classify_suspected_cache_expiry(usage, prev_runtime=prev_runtime)
 
         for target in (summary, bucket):
@@ -878,11 +898,17 @@ def aggregate_cc_observability(
             bucket["no_respawn_cache_miss_count"] += 1
             summary["no_respawn_miss_first_round_creation_sum"] += fr_creation
             bucket["no_respawn_miss_first_round_creation_sum"] += fr_creation
-        else:
+        elif hot:
             summary["normal_hot_turn_count"] += 1
             bucket["normal_hot_turn_count"] += 1
             summary["normal_hot_first_round_creation_sum"] += fr_creation
             bucket["normal_hot_first_round_creation_sum"] += fr_creation
+        else:
+            # read=0/create=0、缺 first_round 等：不得进 normal_hot
+            summary["unclassified_turn_count"] += 1
+            bucket["unclassified_turn_count"] += 1
+            summary["unclassified_first_round_creation_sum"] += fr_creation
+            bucket["unclassified_first_round_creation_sum"] += fr_creation
 
         if expiry is True:
             summary["suspected_cache_expiry_count"] += 1
@@ -1008,13 +1034,15 @@ def format_report_text(report: Mapping[str, Any]) -> str:
             s.get("no_respawn_miss_avg_first_round_creation"),
             s.get("normal_hot_avg_first_round_creation"),
         ),
-        "  creation_sums: cold=%s miss=%s normal_hot=%s later=%s"
+        "  creation_sums: cold=%s miss=%s normal_hot=%s unclassified=%s later=%s"
         % (
             s.get("cold_start_first_round_creation_sum"),
             s.get("no_respawn_miss_first_round_creation_sum"),
             s.get("normal_hot_first_round_creation_sum"),
+            s.get("unclassified_first_round_creation_sum"),
             s.get("later_rounds_creation_sum"),
         ),
+        "  unclassified_turn_count=%s" % s.get("unclassified_turn_count"),
         "",
         "coverage:",
         "  candidates=%s valid_v2=%s other_provider=%s ambiguous_legacy=%s empty=%s invalid_json=%s"
