@@ -606,6 +606,7 @@ def _cc_collect_cold_once(get_db_fn):
         'long_term_memory': '',
         'handoff': '',
         'daily_weekly_summary': '',
+        'web_memo': '',
     }
     try:
         conn = get_db_fn()
@@ -668,7 +669,74 @@ def _cc_collect_cold_once(get_db_fn):
         cold['daily_weekly_summary'] = '\n\n'.join(chunks)
     except Exception:
         pass
+    try:
+        # 网页窗口 memo：冷启动一次注入，不每轮重抄
+        mc = get_db_fn()
+        memos = mc.execute(
+            """SELECT content FROM posts WHERE type='MEMORY' AND tags LIKE '%memo%'
+               AND resolved=0
+               AND created_at >= datetime('now','+8 hours','-24 hours')
+               ORDER BY id DESC LIMIT 4"""
+        ).fetchall()
+        mc.close()
+        if memos:
+            memo_lines = [m['content'] for m in reversed(memos)]
+            cold['web_memo'] = (
+                '## 最近的网页窗口对话摘要\n' + '\n'.join('- ' + line for line in memo_lines)
+            )
+    except Exception:
+        pass
     return cold
+
+
+def _cc_period_budget_reminders(conn, today):
+    """经期异常 + 预算预警（旧动态感知组件，归入 state.reminders）。"""
+    reminders = []
+    try:
+        prows = conn.execute(
+            "SELECT date FROM period_records WHERE type='period' ORDER BY date"
+        ).fetchall()
+        pdates = [r['date'] for r in prows]
+        if pdates:
+            last = pdates[-1]
+            cycle = 28
+            if len(pdates) >= 2:
+                diffs = []
+                for i in range(1, len(pdates)):
+                    d1 = datetime.datetime.strptime(pdates[i - 1], '%Y-%m-%d').date()
+                    d2 = datetime.datetime.strptime(pdates[i], '%Y-%m-%d').date()
+                    diff = (d2 - d1).days
+                    if 18 <= diff <= 45:
+                        diffs.append(diff)
+                if diffs:
+                    cycle = round(sum(diffs) / len(diffs))
+            last_dt = datetime.datetime.strptime(last, '%Y-%m-%d').date()
+            next_dt = last_dt + datetime.timedelta(days=cycle)
+            late_days = (today - next_dt).days
+            if late_days >= 3:
+                reminders.append(
+                    f'- 经期预测{next_dt.strftime("%Y-%m-%d")}该来，现已推迟{late_days}天，还没有新记录'
+                )
+    except Exception:
+        pass
+    try:
+        now_m = today.strftime('%Y-%m')
+        lrows = conn.execute(
+            "SELECT amount FROM ledger WHERE date LIKE ? AND amount<0", (now_m + '%',)
+        ).fetchall()
+        lbudget = conn.execute(
+            "SELECT amount FROM ledger_budget WHERE month=?", (now_m,)
+        ).fetchone()
+        if lbudget and lbudget['amount'] and lrows:
+            exp = abs(sum(r['amount'] for r in lrows))
+            pct = exp / lbudget['amount'] * 100
+            if pct >= 80:
+                reminders.append(
+                    f'- 本月预算已用{pct:.0f}%（¥{exp:.0f}/¥{lbudget["amount"]:.0f}）'
+                )
+    except Exception:
+        pass
+    return reminders
 
 
 def _cc_collect_state(get_db_fn):
@@ -681,6 +749,7 @@ def _cc_collect_state(get_db_fn):
         'todos': '',
         'ledger': '',
         'reminders': '',
+        'recent_activity': '',
     }
     try:
         import emotion_engine as _ee
@@ -766,8 +835,29 @@ def _cc_collect_state(get_db_fn):
     except Exception:
         pass
     try:
-        # 复用 build_system 里提醒逻辑的结果形状：只取提醒块
-        # 为稳定性，这里内联精简版（排序固定）
+        # recent dream_events → state（差量感知，不每轮整包重抄）
+        conn = get_db_fn()
+        events = conn.execute(
+            """SELECT type, value, created_at, duration_minutes FROM dream_events
+               WHERE created_at >= datetime('now','+8 hours','-6 hours')
+               ORDER BY created_at ASC"""
+        ).fetchall()
+        conn.close()
+        if events:
+            lines = []
+            for ev in events:
+                t = ev['created_at'][11:16]
+                v = ev['value'] or ev['type']
+                dur = ev['duration_minutes']
+                if dur and dur >= 1:
+                    dur_str = f'{int(dur)}分钟' if dur < 60 else f'{int(dur // 60)}小时{int(dur % 60)}分钟'
+                    lines.append(f'- {t} {v}（用了约{dur_str}）')
+                else:
+                    lines.append(f'- {t} {v}')
+            state['recent_activity'] = '## 哈娅最近的活动\n' + '\n'.join(lines)
+    except Exception:
+        pass
+    try:
         conn = get_db_fn()
         today = (datetime.datetime.utcnow() + datetime.timedelta(hours=8)).date()
         reminders = []
@@ -800,6 +890,7 @@ def _cc_collect_state(get_db_fn):
             delta = (target - today).days
             if 0 <= delta <= 3:
                 reminders.append(f'- 倒数日 {c["emoji"]}「{c["title"]}」还剩{delta}天')
+        reminders.extend(_cc_period_budget_reminders(conn, today))
         conn.close()
         if reminders:
             state['reminders'] = (
@@ -812,8 +903,60 @@ def _cc_collect_state(get_db_fn):
     return state
 
 
+def peek_dream_one_shot(get_db_fn):
+    """只读一条待浮现梦境，不标记 surfaced。返回 (text, dream_id)。"""
+    try:
+        import random as _rand
+        if _rand.random() >= 0.30:
+            return '', None
+        conn = get_db_fn()
+        dream = conn.execute(
+            "SELECT id, content, tone FROM dream_pool "
+            "WHERE surfaced=0 AND surface_count < 4 "
+            "ORDER BY created_at ASC LIMIT 1"
+        ).fetchone()
+        conn.close()
+        if not dream:
+            return '', None
+        text = (dream['content'] or '').strip()
+        if not text:
+            return '', None
+        return f'## 忽然想起来\n（一段梦，从某个夜里飘上来）\n{text}', int(dream['id'])
+    except Exception:
+        return '', None
+
+
+def consume_dream_one_shot(get_db_fn, dream_id):
+    """stdin.flush 成功后再标记梦境已浮现。"""
+    try:
+        dream_id = int(dream_id)
+    except (TypeError, ValueError):
+        return 0
+    if dream_id <= 0:
+        return 0
+    conn = get_db_fn()
+    try:
+        cur = conn.execute(
+            "UPDATE dream_pool SET surfaced=1, surface_count=surface_count+1, "
+            "content=NULL, surfaced_at=datetime('now','+8 hours') "
+            "WHERE id=? AND surfaced=0",
+            (dream_id,),
+        )
+        conn.commit()
+        return cur.rowcount
+    finally:
+        conn.close()
+
+
 def _cc_collect_one_shot(get_db_fn, *, include_wake=True):
-    one_shot = {'wake_feedback': '', 'task_feedback': ''}
+    """收集 transactional one-shot；feedback/dream 只 peek，flush 后再 consume。"""
+    one_shot = {
+        'wake_feedback': '',
+        'task_feedback': '',
+        'dream_flash': '',
+        'feedback_ids': [],
+        'dream_id': None,
+    }
     if include_wake:
         try:
             conn = get_db_fn()
@@ -840,37 +983,64 @@ def _cc_collect_one_shot(get_db_fn, *, include_wake=True):
             pass
     try:
         import command_store
-        fb = command_store.drain_feedback()
-        if fb:
+        fb_lines, fb_ids = command_store.peek_feedback()
+        if fb_lines:
             one_shot['task_feedback'] = (
-                '## 任务完成反馈\n' + '\n'.join('- ' + line for line in fb)
+                '## 任务完成反馈\n' + '\n'.join('- ' + line for line in fb_lines)
                 + '\n（这是浮窗自己记录回传的，不是她手动告诉你的。她这次开口了，'
                   '你可以顺嘴提一句——用时、快慢、有没有取消，按你的性子说，别像报数据。）'
             )
+            one_shot['feedback_ids'] = list(fb_ids)
     except Exception:
         pass
+    dream_text, dream_id = peek_dream_one_shot(get_db_fn)
+    if dream_text:
+        one_shot['dream_flash'] = dream_text
+        one_shot['dream_id'] = dream_id
     return one_shot
 
 
-def build_cc_context(*, include_wake=True):
+def build_cc_state():
+    """每轮构建的状态差量源。"""
+    from gateway import get_db
+    return _cc_collect_state(get_db)
+
+
+def build_cc_one_shot(*, include_wake=True):
+    """每轮构建的 transactional one-shot（peek only）。"""
+    from gateway import get_db
+    return _cc_collect_one_shot(get_db, include_wake=include_wake)
+
+
+def build_cc_cold_once():
+    """仅冷启动构建。"""
+    from gateway import get_db
+    return _cc_collect_cold_once(get_db)
+
+
+def build_cc_context(*, include_wake=True, include_cold=True):
     """CC resident 专用结构化上下文。
 
     static      — 仅 spawn 时进入 system
-    cold_once   — 仅冷启动注入
+    cold_once   — 仅冷启动注入（可由 include_cold=False 跳过）
     state       — 按组件差量注入
-    one_shot    — 本轮消费后不重复
+    one_shot    — 本轮 peek；flush 后 consume
     """
     from gateway import get_db
-    return {
+    out = {
         'static': {
             'persona': read_persona(),
             'stable_note': build_stable_note(),
             'save_instr': _CC_SAVE_INSTR,
         },
-        'cold_once': _cc_collect_cold_once(get_db),
         'state': _cc_collect_state(get_db),
         'one_shot': _cc_collect_one_shot(get_db, include_wake=include_wake),
     }
+    if include_cold:
+        out['cold_once'] = _cc_collect_cold_once(get_db)
+    else:
+        out['cold_once'] = {}
+    return out
 
 
 def format_state_diff(old_state, new_state):
@@ -893,6 +1063,7 @@ def format_state_diff(old_state, new_state):
             'todos': '留言板待办',
             'ledger': '记账',
             'reminders': '今日提醒',
+            'recent_activity': '最近活动',
         }.get(key, key)
         if before and not after:
             lines.append(f'- {label}：已清空')
@@ -923,7 +1094,14 @@ def format_cold_once(cold):
     return '\n\n'.join(chunks)
 
 
+_ONE_SHOT_TEXT_KEYS = ('wake_feedback', 'task_feedback', 'dream_flash')
+
+
 def format_one_shot(one_shot):
     one_shot = one_shot or {}
-    chunks = [v.strip() for v in one_shot.values() if v and str(v).strip()]
+    chunks = []
+    for key in _ONE_SHOT_TEXT_KEYS:
+        val = one_shot.get(key)
+        if val and str(val).strip():
+            chunks.append(str(val).strip())
     return '\n\n'.join(chunks)

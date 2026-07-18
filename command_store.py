@@ -122,18 +122,11 @@ def _fmt_dur(ms):
     return '%d秒' % sec
 
 
-def drain_feedback():
-    """取出待回流的反馈（完成/取消且未消费），标记为已消费，返回给 prompt 用的文本行列表。
-    读完即清（consumed=1），保证只回流一次。"""
-    c = _conn()
-    rows = c.execute(
-        'SELECT id, title, countdown_seconds, done_at, canceled, duration_ms, vs_countdown '
-        'FROM commands WHERE consumed=0 AND (done_at IS NOT NULL OR canceled=1) '
-        'ORDER BY id ASC').fetchall()
+def _format_feedback_rows(rows):
     lines = []
     ids = []
     for r in rows:
-        ids.append(r['id'])
+        ids.append(int(r['id']))
         if r['canceled']:
             lines.append('「%s」被她取消了' % r['title'])
             continue
@@ -145,8 +138,48 @@ def drain_feedback():
             lines.append('「%s」用时 %s（超时 %d 秒）' % (r['title'], dur, vs))
         else:
             lines.append('「%s」用时 %s（比预设快 %d 秒）' % (r['title'], dur, -vs))
-    if ids:
-        c.executemany('UPDATE commands SET consumed=1 WHERE id=?', [(i,) for i in ids])
-        c.commit()
+    return lines, ids
+
+
+def peek_feedback():
+    """只读待回流反馈，不标记消费。返回 (文本行列表, id 列表)。"""
+    c = _conn()
+    rows = c.execute(
+        'SELECT id, title, countdown_seconds, done_at, canceled, duration_ms, vs_countdown '
+        'FROM commands WHERE consumed=0 AND (done_at IS NOT NULL OR canceled=1) '
+        'ORDER BY id ASC').fetchall()
     c.close()
+    return _format_feedback_rows(rows)
+
+
+def consume_feedback(ids):
+    """flush 成功后再消费：把指定 id 标为已回流。返回实际更新行数。"""
+    clean = []
+    for value in ids or ():
+        try:
+            value = int(value)
+        except (TypeError, ValueError):
+            continue
+        if value > 0 and value not in clean:
+            clean.append(value)
+    if not clean:
+        return 0
+    c = _conn()
+    placeholders = ','.join('?' for _ in clean)
+    cur = c.execute(
+        'UPDATE commands SET consumed=1 '
+        'WHERE consumed=0 AND id IN (' + placeholders + ')',
+        clean,
+    )
+    c.commit()
+    n = cur.rowcount
+    c.close()
+    return n
+
+
+def drain_feedback():
+    """兼容旧路径：peek + 立即 consume。CC resident 路径请用 peek/consume。"""
+    lines, ids = peek_feedback()
+    if ids:
+        consume_feedback(ids)
     return lines

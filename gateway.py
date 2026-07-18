@@ -3088,7 +3088,12 @@ def _cross_surface_recap_from_group_chat(limit=8):
 
 
 def _fetch_group_chat_rows(*, after_id=0, limit=8, cold=False):
-    """同一份查询同时返回消息与 max_id，避免竞态跳号。"""
+    """同一份查询同时返回消息与 max_id，避免竞态跳号。
+
+    返回 (rows, max_id)：
+      - 查询成功且无行：([], 0)
+      - 查询失败：([], None)  — max_id is None 表示失败，不得当作已初始化
+    """
     try:
         conn = get_db()
         if cold:
@@ -3110,7 +3115,7 @@ def _fetch_group_chat_rows(*, after_id=0, limit=8, cold=False):
     except Exception:
         return [], None
     if not rows:
-        return [], None
+        return [], 0
     max_id = max(int(r['id']) for r in rows)
     return rows, max_id
 
@@ -3139,10 +3144,16 @@ def _format_group_chat_recap(rows, *, cold=False):
 def _cc_resident_stream_gen(messages, *, user_turn=True):
     """常驻 CC：静态 system 只在 spawn 时贴墙；热轮只发差量。
 
+    构建顺序：
+      1) ensure_alive 前只构建 static
+      2) 得知 is_cold 后，每轮构建 state / one-shot
+      3) 仅 is_cold 时构建 cold_once
     严禁把 TreeGPT / api_relay 的缓存策略混进这里。
     """
     from chat.system_builder import (
-        build_cc_context,
+        build_cc_cold_once,
+        build_cc_one_shot,
+        build_cc_state,
         build_cc_static_system,
         format_cold_once,
         format_one_shot,
@@ -3156,7 +3167,7 @@ def _cc_resident_stream_gen(messages, *, user_turn=True):
         raise RuntimeError('resident: 最后一条消息不是待回复的用户轮')
     os.makedirs(CC_CWD, exist_ok=True)
 
-    ctx = build_cc_context(include_wake=user_turn)
+    # 1) ensure_alive 前只构建 static
     full_system = build_cc_static_system()
 
     last_content = messages[-1].get('content')
@@ -3169,22 +3180,29 @@ def _cc_resident_stream_gen(messages, *, user_turn=True):
     env.pop('ANTHROPIC_API_KEY', None)
 
     is_cold = _CC_RESIDENT.ensure_alive(full_system, env)
-    state = ctx.get('state') or {}
-    one_shot_text = format_one_shot(ctx.get('one_shot'))
+
+    # 2) 每轮构建 state / one-shot；3) 仅冷启动构建 cold_once
+    state = build_cc_state()
+    one_shot = build_cc_one_shot(include_wake=user_turn)
+    one_shot_text = format_one_shot(one_shot)
+    cold_once = build_cc_cold_once() if is_cold else {}
 
     pieces = []
     group_max_id = None
+    group_cursor_ok = False
     if is_cold:
-        cold_text = format_cold_once(ctx.get('cold_once'))
+        cold_text = format_cold_once(cold_once)
         if cold_text:
             pieces.append(cold_text)
         snap = format_state_snapshot(state)
         if snap:
             pieces.append(snap)
         rows, group_max_id = _fetch_group_chat_rows(limit=8, cold=True)
-        group_text = _format_group_chat_recap(rows, cold=True)
-        if group_text:
-            pieces.append(group_text.strip())
+        if group_max_id is not None:
+            group_cursor_ok = True
+            group_text = _format_group_chat_recap(rows, cold=True)
+            if group_text:
+                pieces.append(group_text.strip())
         if recall_blk:
             pieces.append(recall_blk.strip())
         if one_shot_text:
@@ -3198,18 +3216,32 @@ def _cc_resident_stream_gen(messages, *, user_turn=True):
         )
         commit_meta = {
             'state_snapshot': state,
-            'group_max_id': group_max_id if group_max_id is not None else _CC_RESIDENT.last_group_message_id,
+            'feedback_ids': list(one_shot.get('feedback_ids') or []),
+            'dream_id': one_shot.get('dream_id'),
         }
+        if group_cursor_ok:
+            commit_meta['group_cursor_initialized'] = True
+            commit_meta['group_max_id'] = group_max_id
     else:
         diff = format_state_diff(_CC_RESIDENT.last_state_snapshot, state)
         if diff:
             pieces.append(diff)
-        rows, group_max_id = _fetch_group_chat_rows(
-            after_id=_CC_RESIDENT.last_group_message_id, limit=20, cold=False,
-        )
-        group_text = _format_group_chat_recap(rows, cold=False)
-        if group_text:
-            pieces.append(group_text.strip())
+        # 未初始化时不得退化成热查询 id>0（会读出远古 backlog）
+        if not _CC_RESIDENT.group_cursor_initialized:
+            rows, group_max_id = _fetch_group_chat_rows(limit=8, cold=True)
+            if group_max_id is not None:
+                group_cursor_ok = True
+                group_text = _format_group_chat_recap(rows, cold=True)
+                if group_text:
+                    pieces.append(group_text.strip())
+        else:
+            rows, group_max_id = _fetch_group_chat_rows(
+                after_id=_CC_RESIDENT.last_group_message_id, limit=20, cold=False,
+            )
+            if group_max_id is not None:
+                group_text = _format_group_chat_recap(rows, cold=False)
+                if group_text:
+                    pieces.append(group_text.strip())
         if recall_blk:
             pieces.append(recall_blk.strip())
         if one_shot_text:
@@ -3223,11 +3255,19 @@ def _cc_resident_stream_gen(messages, *, user_turn=True):
             content = last_content
         commit_meta = {
             'state_snapshot': state,
-            'group_max_id': (
-                group_max_id if group_max_id is not None
-                else _CC_RESIDENT.last_group_message_id
-            ),
+            'feedback_ids': list(one_shot.get('feedback_ids') or []),
+            'dream_id': one_shot.get('dream_id'),
         }
+        if group_cursor_ok:
+            commit_meta['group_cursor_initialized'] = True
+            commit_meta['group_max_id'] = group_max_id
+        elif (
+            _CC_RESIDENT.group_cursor_initialized
+            and rows
+            and group_max_id is not None
+        ):
+            # 热轮仅在有新增行时推进 cursor；空成功保持原 cursor
+            commit_meta['group_max_id'] = group_max_id
 
     for evt, payload in _CC_RESIDENT.send_turn(content, commit_meta=commit_meta):
         yield evt, payload

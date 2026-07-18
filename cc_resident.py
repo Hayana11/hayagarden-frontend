@@ -123,6 +123,7 @@ class ResidentSession:
         self._turns_since_respawn = 0
         self._last_state_snapshot = {}
         self._last_group_message_id = 0
+        self._group_cursor_initialized = False
 
     def _spawn(self, system_text, env, *, reason='process_dead'):
         self._kill(quiet=True)
@@ -212,19 +213,48 @@ class ResidentSession:
                 self._spawn(system_text, env, reason=reason)
             return self._cold
 
+    def _commit_transactional_one_shots(self, commit_meta):
+        """stdin.flush 成功后才消费 feedback / dream。"""
+        if not commit_meta:
+            return
+        feedback_ids = commit_meta.get('feedback_ids') or []
+        if feedback_ids:
+            try:
+                import command_store
+                command_store.consume_feedback(feedback_ids)
+            except Exception:
+                pass
+        dream_id = commit_meta.get('dream_id')
+        if dream_id:
+            try:
+                from chat.system_builder import consume_dream_one_shot
+                from gateway import get_db
+                consume_dream_one_shot(get_db, dream_id)
+            except Exception:
+                pass
+
     def _commit_sent_context(self, commit_meta):
         if not commit_meta:
             return
         if 'state_snapshot' in commit_meta:
             self._last_state_snapshot = copy.deepcopy(commit_meta['state_snapshot'] or {})
-        if commit_meta.get('group_max_id') is not None:
+        if commit_meta.get('group_cursor_initialized'):
+            self._group_cursor_initialized = True
+            if commit_meta.get('group_max_id') is not None:
+                self._last_group_message_id = int(commit_meta['group_max_id'])
+        elif (
+            self._group_cursor_initialized
+            and commit_meta.get('group_max_id') is not None
+        ):
             self._last_group_message_id = int(commit_meta['group_max_id'])
+        self._commit_transactional_one_shots(commit_meta)
 
     def send_turn(self, content, commit_meta=None):
         """Yield ('text'/'think'/'tool_use'/'tool_result'/'done', payload).
 
         done payload is (text, thinking, usage_dict).
-        Snapshots commit only after stdin write+flush succeeds.
+        Snapshots / one-shot consume only after stdin write+flush succeeds.
+        result.is_error 或流中断后 kill resident，保证下一轮冷启动。
         """
         proc = self._proc
         if proc is None or proc.poll() is not None:
@@ -430,6 +460,8 @@ class ResidentSession:
             self._kill(quiet=True)
             raise ResidentError('resident 进程在本轮回复完成前退出', usage=usage)
         if is_err:
+            # payload 已写入 resident：kill 强制下一轮冷启动，避免脏会话继续热轮
+            self._kill(quiet=True)
             raise ResidentError('claude code 返回错误: ' + is_err, usage=usage)
 
         self._cold = False
@@ -453,6 +485,10 @@ class ResidentSession:
     @property
     def last_group_message_id(self):
         return self._last_group_message_id
+
+    @property
+    def group_cursor_initialized(self):
+        return self._group_cursor_initialized
 
     @property
     def pending_respawn_reason(self):
