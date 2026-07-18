@@ -79,20 +79,26 @@ class UserProfileTests(unittest.TestCase):
         ctx = user_profile.build_profile_context(profile)
         self.assertIn('她喜欢巧克力', ctx)
 
-    def test_build_profile_context_skips_disabled(self):
+    def test_build_profile_context_name_and_preferences_only(self):
         ctx = user_profile.build_profile_context({
             'fullName': 'Hayana',
-            'nickname': '',
+            'nickname': '哈娅',
             'savedMemories': [
-                {'content': '启用记忆', 'enabled': True},
-                {'content': '禁用记忆', 'enabled': False},
+                {'content': '不应再注入', 'enabled': True},
             ],
-            'preferences': {'enabled': False, 'content': '不该出现'},
+            'preferences': {'enabled': True, 'content': '温柔一点'},
         })
         self.assertIn('Hayana', ctx)
-        self.assertIn('启用记忆', ctx)
-        self.assertNotIn('禁用记忆', ctx)
-        self.assertNotIn('不该出现', ctx)
+        self.assertIn('哈娅', ctx)
+        self.assertIn('温柔一点', ctx)
+        self.assertNotIn('不应再注入', ctx)
+
+        disabled = user_profile.build_profile_context({
+            'fullName': 'Hayana',
+            'preferences': {'enabled': False, 'content': '不该出现'},
+        })
+        self.assertIn('Hayana', disabled)
+        self.assertNotIn('不该出现', disabled)
 
 
 if __name__ == '__main__':

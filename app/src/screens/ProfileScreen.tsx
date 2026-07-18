@@ -1,14 +1,12 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type TouchEvent } from 'react';
+import { useCallback, useEffect, useMemo, useState, type CSSProperties } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { HttpError } from '../lib/http';
 import {
   blankProfile,
   cloneProfile,
   fetchProfile,
-  newMemory,
   normalizeProfile,
   saveProfile,
-  type SavedMemory,
   type UserProfile,
 } from '../lib/profile';
 import './ProfileScreen.css';
@@ -34,18 +32,10 @@ const DARK_VARS: Record<string, string> = {
   '--serif': SERIF, '--display': DISPLAY,
 };
 
-type Page = 'home' | 'memories' | 'preferences';
+type Page = 'home' | 'preferences';
 
 function profilesEqual(a: UserProfile, b: UserProfile): boolean {
   return JSON.stringify(normalizeProfile(a)) === JSON.stringify(normalizeProfile(b));
-}
-
-function BookmarkIcon() {
-  return (
-    <svg viewBox="0 0 24 24" width={22} height={22} fill="none" stroke="currentColor" strokeWidth={1.7} strokeLinecap="round" strokeLinejoin="round">
-      <path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z" />
-    </svg>
-  );
 }
 
 function PencilIcon() {
@@ -62,56 +52,6 @@ function BackChevron() {
     <svg viewBox="0 0 24 24" width={22} height={22} fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round">
       <path d="M15 18l-6-6 6-6" />
     </svg>
-  );
-}
-
-function MemoryRow({
-  memory,
-  onChange,
-  onDelete,
-}: {
-  memory: SavedMemory;
-  onChange: (content: string) => void;
-  onDelete: () => void;
-}) {
-  const [open, setOpen] = useState(false);
-  const startX = useRef(0);
-  const dragging = useRef(false);
-
-  const onTouchStart = (e: TouchEvent) => {
-    startX.current = e.touches[0]?.clientX ?? 0;
-    dragging.current = true;
-  };
-
-  const onTouchMove = (e: TouchEvent) => {
-    if (!dragging.current) return;
-    const dx = (e.touches[0]?.clientX ?? 0) - startX.current;
-    if (dx < -40) setOpen(true);
-    if (dx > 40) setOpen(false);
-  };
-
-  const onTouchEnd = () => {
-    dragging.current = false;
-  };
-
-  return (
-    <div className={`profile-memory-row${open ? ' open' : ''}`}>
-      <button type="button" className="profile-swipe-delete" onClick={onDelete}>删除</button>
-      <div
-        className="profile-memory-card"
-        onTouchStart={onTouchStart}
-        onTouchMove={onTouchMove}
-        onTouchEnd={onTouchEnd}
-      >
-        <textarea
-          className="profile-memory-textarea"
-          value={memory.content}
-          placeholder="写下一条长期事实…"
-          rows={2}
-          onChange={(e) => onChange(e.target.value)}
-        />
-      </div>
-    </div>
   );
 }
 
@@ -135,7 +75,6 @@ export function ProfileScreen() {
   const [toast, setToast] = useState('');
   const [saved, setSaved] = useState<UserProfile>(blankProfile());
   const [draft, setDraft] = useState<UserProfile>(blankProfile());
-  const [search, setSearch] = useState('');
 
   const dirty = useMemo(() => !profilesEqual(draft, saved), [draft, saved]);
 
@@ -170,7 +109,12 @@ export function ProfileScreen() {
     if (saving) return;
     setSaving(true);
     try {
-      const next = await saveProfile(draft);
+      // Preserve any existing savedMemories server-side values without exposing UI.
+      const payload = {
+        ...draft,
+        savedMemories: saved.savedMemories,
+      };
+      const next = await saveProfile(payload);
       setSaved(next);
       setDraft(cloneProfile(next));
       showToast('Profile 已保存');
@@ -180,10 +124,10 @@ export function ProfileScreen() {
     } finally {
       setSaving(false);
     }
-  }, [draft, saving, showToast]);
+  }, [draft, saved.savedMemories, saving, showToast]);
 
   const clearProfile = useCallback(async () => {
-    if (!window.confirm('确定清空 Profile？姓名、记忆和偏好都会被清除。')) return;
+    if (!window.confirm('确定清空 Profile？姓名和偏好都会被清除。')) return;
     const empty = blankProfile();
     setDraft(empty);
     setSaving(true);
@@ -200,23 +144,12 @@ export function ProfileScreen() {
     }
   }, [showToast]);
 
-  const memoriesNote = useMemo(() => {
-    const count = draft.savedMemories.filter((m) => m.content.trim()).length;
-    return count ? `${count} memories` : 'No memories';
-  }, [draft.savedMemories]);
-
   const preferencesNote = useMemo(() => {
     if (!draft.preferences.enabled) return 'Disabled';
     const text = draft.preferences.content.trim();
     if (!text) return 'No custom instructions';
     return text.length > 36 ? `${text.slice(0, 36)}…` : text;
   }, [draft.preferences]);
-
-  const filteredMemories = useMemo(() => {
-    const q = search.trim().toLowerCase();
-    if (!q) return draft.savedMemories;
-    return draft.savedMemories.filter((m) => m.content.toLowerCase().includes(q));
-  }, [draft.savedMemories, search]);
 
   const saveButton = (
     <button
@@ -244,7 +177,7 @@ export function ProfileScreen() {
             <div className="profile-title">Profile</div>
             {saveButton}
           </header>
-          <p className="profile-subtitle">保存你的名字、长期记忆和回复偏好。它们会自动加入每次对话请求。</p>
+          <p className="profile-subtitle">保存你的名字和回复偏好。它们会自动加入每次对话请求。</p>
 
           <section className="profile-section">
             <div className="profile-section-title">Name</div>
@@ -274,14 +207,6 @@ export function ProfileScreen() {
           </section>
 
           <section className="profile-section">
-            <button type="button" className="profile-nav-row" onClick={() => setPage('memories')}>
-              <span className="profile-nav-row-icon"><BookmarkIcon /></span>
-              <span className="profile-nav-row-title">
-                Saved memories
-                <span className="profile-nav-row-note">{memoriesNote}</span>
-              </span>
-              <span className="profile-nav-chevron">›</span>
-            </button>
             <button type="button" className="profile-nav-row" onClick={() => setPage('preferences')}>
               <span className="profile-nav-row-icon"><PencilIcon /></span>
               <span className="profile-nav-row-title">
@@ -294,73 +219,6 @@ export function ProfileScreen() {
 
           <div className="profile-footer-actions">
             <button type="button" className="profile-text-button" onClick={() => void clearProfile()}>Clear profile</button>
-          </div>
-        </div>
-      ) : page === 'memories' ? (
-        <div className="profile-page">
-          <header className="profile-header">
-            <button type="button" className="profile-back-button" aria-label="Back" onClick={() => { setPage('home'); setSearch(''); }}>
-              <BackChevron />
-            </button>
-            <div className="profile-title">Saved memories</div>
-            {saveButton}
-          </header>
-          <p className="profile-help-text">These are long-term facts about you.<br />Disabled memories are kept here but won&apos;t be included in context.</p>
-          <button
-            type="button"
-            className="profile-add-button"
-            onClick={() => {
-              patchDraft((p) => {
-                p.savedMemories = [newMemory(''), ...p.savedMemories];
-                return p;
-              });
-              setSearch('');
-            }}
-          >
-            ＋ Add memory
-          </button>
-          <div className="profile-memory-list" style={{ paddingBottom: 72 }}>
-            {filteredMemories.length === 0 ? (
-              <div className="profile-empty">{search.trim() ? '没有匹配的记忆' : '还没有保存记忆'}</div>
-            ) : (
-              filteredMemories.map((memory) => (
-                <MemoryRow
-                  key={memory.id}
-                  memory={memory}
-                  onChange={(content) => {
-                    patchDraft((p) => {
-                      p.savedMemories = p.savedMemories.map((item) => (
-                        item.id === memory.id
-                          ? { ...item, content, updatedAt: Date.now() }
-                          : item
-                      ));
-                      return p;
-                    });
-                  }}
-                  onDelete={() => {
-                    patchDraft((p) => {
-                      p.savedMemories = p.savedMemories.filter((item) => item.id !== memory.id);
-                      return p;
-                    });
-                  }}
-                />
-              ))
-            )}
-          </div>
-          <div className="profile-search-bar">
-            <div className="profile-search-bubble">
-              <input
-                className="profile-search-input"
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-                placeholder="Search"
-                autoComplete="off"
-                spellCheck={false}
-              />
-              {search ? (
-                <button type="button" className="profile-search-clear" aria-label="Clear" onClick={() => setSearch('')}>×</button>
-              ) : null}
-            </div>
           </div>
         </div>
       ) : (

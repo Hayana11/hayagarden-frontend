@@ -241,17 +241,4 @@ def build_profile_context(profile: dict[str, Any] | None = None) -> str:
         lines.append('### 回复偏好')
         lines.append(preference_text)
 
-    enabled_memories = [
-        item['content']
-        for item in profile.get('savedMemories', [])
-        if item.get('enabled', True) and item.get('content')
-    ]
-    if enabled_memories:
-        if lines:
-            lines.append('')
-        else:
-            lines.append('## 用户 Profile')
-        lines.append('### 长期记忆')
-        lines.extend(f'- {content}' for content in enabled_memories)
-
     return '\n'.join(lines).strip()
