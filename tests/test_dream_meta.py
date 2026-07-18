@@ -3,10 +3,21 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from tools.dream_meta import build_dream_api_item, fetch_dream_items, resolve_dream_fields
+from tools.dream_meta import (
+    build_dream_api_item,
+    fetch_dream_items,
+    resolve_dream_fields,
+    sanitize_dream_content,
+)
 
 
 class DreamMetaTests(unittest.TestCase):
+    def test_sanitize_strips_nbsp_entities(self):
+        cleaned = sanitize_dream_content('第一段。\n\n&nbsp;\n\n第二段。')
+        self.assertNotIn('&nbsp;', cleaned)
+        self.assertIn('第一段。', cleaned)
+        self.assertIn('第二段。', cleaned)
+
     def test_resolve_from_post_tags_and_va(self):
         row = {
             'summary_title': '雨夜图书馆',

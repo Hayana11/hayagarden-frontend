@@ -35,7 +35,7 @@ DREAM_TRAITS = {
     'identity_drift': (0.20, "某个人物或'我'的身份中途发生错误"),
     'time_error': (0.30, '时间顺序或时代出现一处错误'),
     'causal_reverse': (0.20, '一处因果倒置：结果先于原因发生'),
-    'unresolved_ending': (0.65, '结尾不解释、不收束，允许记不清'),
+    'unresolved_ending': (0.65, '用完整句子收住，但不解释含义；允许悬空，不要半句截断'),
     'missing_center': (0.30, '最重要的现实人物以缺席、物体或声音替代'),
     # 第二批：梦化算子（并入同一概率框架，上限仍 3）
     'condensation': (0.25, '把两个材料熔成一个东西'),
@@ -658,9 +658,11 @@ def generate_dream():
     regenerated = False
     failure_reason = None
 
-    dream_text = _call_wake_for_dream(tone, primer)
+    from tools.dream_meta import sanitize_dream_content
+
+    dream_text = sanitize_dream_content(_call_wake_for_dream(tone, primer) or '')
     if not dream_text:
-        dream_text = _fallback_dream(tone, conn)
+        dream_text = sanitize_dream_content(_fallback_dream(tone, conn))
         used_fallback = True
         _log('using fallback dream text (wake unavailable)')
     else:
@@ -669,9 +671,9 @@ def generate_dream():
             regenerated = True
             hint = FAILURE_HINTS.get(reason, reason)
             _log(f'severe failure: {reason}, regenerating once')
-            dream2 = _call_wake_for_dream(
+            dream2 = sanitize_dream_content(_call_wake_for_dream(
                 tone, primer, extra=f'上一次生成失败：{hint}，请避免。'
-            )
+            ) or '')
             if dream2:
                 dream_text = dream2
             failure_reason = _severe_failure(dream_text, primer)

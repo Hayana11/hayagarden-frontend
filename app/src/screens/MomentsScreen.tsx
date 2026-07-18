@@ -183,6 +183,18 @@ function classifyDreamScene(dream: Pick<DreamEntry, 'title' | 'content' | 'tone'
   return DREAM_SCENES.neutral;
 }
 
+/** Decode entity spacers and keep paragraph breaks for dream detail rendering. */
+function formatDreamBody(raw: string): string {
+  return (raw || '')
+    .replace(/&nbsp;/gi, '\n')
+    .replace(/&#160;/g, '\n')
+    .replace(/\u00a0/g, '\n')
+    .replace(/\r\n/g, '\n')
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
 function loadTheme(): 'light' | 'dark' | 'auto' {
   try {
     const s = JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}');
@@ -1419,6 +1431,7 @@ export function MomentsScreen() {
       {/* ── dream detail ── */}
       {dreamOpen && (() => {
         const scene = classifyDreamScene(dreamOpen);
+        const body = formatDreamBody(dreamOpen.content);
         return (
           <div onClick={() => setDreamOpen(null)} style={{ position: 'fixed', inset: 0, zIndex: 80, background: 'rgba(14,9,7,0.72)', backdropFilter: 'blur(4px)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 22 }}>
             <div className="hide-scrollbar" onClick={(e) => e.stopPropagation()} style={{ position: 'relative', width: '100%', maxWidth: 392, maxHeight: '80vh', overflowY: 'auto', borderRadius: 22, background: 'linear-gradient(172deg,#2E241D,#171009)', boxShadow: '0 40px 100px rgba(0,0,0,0.6)' }}>
@@ -1426,16 +1439,18 @@ export function MomentsScreen() {
               <div style={{ position: 'relative', padding: '24px 24px 22px', display: 'flex', flexDirection: 'column', gap: 12 }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
                   <span style={{ fontSize: 10, letterSpacing: 1.5, padding: '3px 10px', borderRadius: 999, background: 'rgba(223,178,94,0.14)', color: '#D9B87E' }}>{scene.label}</span>
-                  <span style={{ fontSize: 10, letterSpacing: 1.5, padding: '3px 10px', borderRadius: 999, background: 'rgba(201,138,147,0.16)', color: '#E8B4BC' }}>{dreamOpen.emotion}</span>
                   <span style={{ fontFamily: DISPLAY, fontSize: 10.5, color: 'rgba(233,214,190,0.55)', marginLeft: 'auto' }}>{dreamOpen.dateLabel}</span>
                 </div>
                 <span style={{ fontFamily: DISPLAY, fontStyle: 'italic', fontSize: 16, letterSpacing: 1, color: '#E8D3B0', lineHeight: 1.5 }}>{dreamOpen.title}</span>
-                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-                  <span style={{ fontFamily: DISPLAY, fontSize: 10.5, color: '#D9B87E', background: 'rgba(223,178,94,0.12)', borderRadius: 999, padding: '3px 10px' }}>V {dreamOpen.valence >= 0 ? '+' : ''}{dreamOpen.valence.toFixed(2)}</span>
-                  <span style={{ fontFamily: DISPLAY, fontSize: 10.5, color: '#C9A0B8', background: 'rgba(201,138,147,0.14)', borderRadius: 999, padding: '3px 10px' }}>A {dreamOpen.arousal.toFixed(2)}</span>
+                <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+                  <span style={{ fontFamily: DISPLAY, fontSize: 10.5, color: 'rgba(233,214,190,0.62)', letterSpacing: 1 }}>V {dreamOpen.valence >= 0 ? '+' : ''}{dreamOpen.valence.toFixed(2)}</span>
+                  <span style={{ fontFamily: DISPLAY, fontSize: 10.5, color: 'rgba(233,214,190,0.62)', letterSpacing: 1 }}>A {dreamOpen.arousal.toFixed(2)}</span>
                 </div>
-                <span style={{ fontSize: 14, lineHeight: 2.05, color: '#EFE2D3' }}>{dreamOpen.content}</span>
-                <div onClick={() => setDreamOpen(null)} style={{ cursor: 'pointer', alignSelf: 'flex-end', padding: '8px 20px', borderRadius: 999, border: '1px solid rgba(233,214,190,0.35)', color: '#E8D3B0', fontSize: 12, letterSpacing: 2 }}>离开梦境</div>
+                <div style={{ fontSize: 14, lineHeight: 2.05, color: '#EFE2D3', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{body}</div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 4 }}>
+                  <span style={{ fontSize: 12, letterSpacing: 2, color: 'rgba(232,180,188,0.88)', background: 'transparent' }}>{dreamOpen.emotion}</span>
+                  <div onClick={() => setDreamOpen(null)} style={{ cursor: 'pointer', marginLeft: 'auto', padding: '8px 20px', borderRadius: 999, border: '1px solid rgba(233,214,190,0.35)', color: '#E8D3B0', fontSize: 12, letterSpacing: 2 }}>离开梦境</div>
+                </div>
               </div>
             </div>
           </div>

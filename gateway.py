@@ -4810,8 +4810,10 @@ def _wake_agent_loop(system, messages, max_rounds=6, tools=None, t_hours=0.0, mo
     if tools is None:
         tools = WAKE_TOOLS
     for round_i in range(max_rounds):
+        # dream/summarize need longer completions; 2048 was enough for short
+        # wake replies but clipped longer dream bodies mid-thought.
         payload = {
-            'max_tokens': 2048,
+            'max_tokens': 4096 if generative else 2048,
             'tools': tools,
             'system': system,
             'messages': msgs,
@@ -4822,6 +4824,11 @@ def _wake_agent_loop(system, messages, max_rounds=6, tools=None, t_hours=0.0, mo
         last_blocks = blocks
         text_parts.append(extract_text(blocks))
         tool_uses = extract_tool_uses(blocks)
+        if generative and result.get('stop_reason') == 'max_tokens':
+            import logging as _log_mod
+            _log_mod.getLogger('gateway').warning(
+                '[wake] mode=%s stopped on max_tokens; body may be truncated', mode,
+            )
         if result.get('stop_reason') == 'tool_use' and not tool_uses:
             # 该 relay 已知的不稳定行为：thinking 完之后意外截断，没有真正吐出
             # tool_use block。原样重试（msgs 没变），而不是直接放弃工具调用。
