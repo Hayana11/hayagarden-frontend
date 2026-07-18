@@ -509,9 +509,9 @@ def _usage_daily_from_messages(days: int):
 @app.route('/api/usage/cc-observability', methods=['GET'])
 def usage_cc_observability():
     """只读 Claude Code Usage 行李透视日报（阶段 1A）。不改 daily-cost 语义。"""
-    days = min(max(request.args.get('days', 14, type=int), 1), 90)
+    from tools.cc_usage_observability import build_report_from_db, clamp_report_days
+    days = clamp_report_days(request.args.get('days', 14, type=int))
     try:
-        from tools.cc_usage_observability import build_report_from_db
         return jsonify(build_report_from_db(DB_PATH, days=days))
     except Exception as exc:
         return jsonify({'ok': False, 'error': str(exc)}), 500

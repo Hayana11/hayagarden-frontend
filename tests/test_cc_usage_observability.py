@@ -209,6 +209,12 @@ class CompatibilityTests(unittest.TestCase):
             {"v": 2, "provider": "api_relay", "cache_read": 99, "cache_creation": 1}
         )
         self.assertEqual(kind, "other_provider")
+        kind, _ = obs.parse_cache_info_row({"v": 2, "cache_read": 1})
+        self.assertEqual(kind, "ambiguous_legacy")
+        kind, _ = obs.parse_cache_info_row({"v": 2, "provider": "", "cache_read": 1})
+        self.assertEqual(kind, "ambiguous_legacy")
+        kind, _ = obs.parse_cache_info_row({"v": 2, "provider": None, "cache_read": 1})
+        self.assertEqual(kind, "ambiguous_legacy")
         norm = normalize_cache_info(
             {
                 "v": 2,
@@ -669,8 +675,18 @@ class ReportAggregateTests(unittest.TestCase):
 
         cold_sum = 19413 + 19212 + 19513 + 20387
         expected_share = cold_sum / 225622
-        self.assertAlmostEqual(s["cold_start_creation_share"], expected_share)
-        self.assertNotEqual(s["cold_start_creation_share"], 1.0)
+        self.assertAlmostEqual(
+            s["cold_start_first_round_creation_share_of_total_creation"], expected_share
+        )
+        self.assertEqual(
+            s["cold_start_creation_share"],
+            s["cold_start_first_round_creation_share_of_total_creation"],
+        )
+        self.assertNotEqual(s["cold_start_first_round_creation_share_of_total_creation"], 1.0)
+        self.assertEqual(s["cold_start_first_round_creation_sum"], cold_sum)
+        self.assertAlmostEqual(s["cold_start_avg_first_round_creation"], 19631.25)
+        self.assertIn("idle", s["respawns_by_reason"])
+        self.assertEqual(s["respawns_by_reason"]["idle"], 4)
 
         av = report["breakdown_averages"]["static_system_tokens_estimate"]
         self.assertIn("sample_count", av)
@@ -995,12 +1011,159 @@ class RealisticPercentileTests(unittest.TestCase):
             })
         report = obs.aggregate_cc_observability(rows, days=1, now=NOW)
         self.assertEqual(report["summary"]["median_last_round_context"], 48500.0)
-        # p90 of 10 points: index 0.9*(10-1)=8.1 → interpolate contexts[8] and [9]
-        expected_p90 = contexts[8] * 0.9 + contexts[9] * 0.1  # wait, check formula
-        # _percentile: k=(n-1)*p = 8.1, f=8, c=9, d0=sorted[8]*(9-8.1)+sorted[9]*(8.1-8)
+        # _percentile: k=(n-1)*p = 8.1, f=8, c=9
         expected_p90 = contexts[8] * (9 - 8.1) + contexts[9] * (8.1 - 8)
         self.assertAlmostEqual(report["summary"]["p90_last_round_context"], expected_p90)
         self.assertGreater(report["summary"]["median_last_round_context"], 1000)
+
+
+class EmptyCacheInfoCoverageTests(unittest.TestCase):
+    def test_null_and_empty_enter_candidate_denominator(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = str(Path(tmp) / "m.db")
+            conn = sqlite3.connect(db)
+            conn.execute(
+                "CREATE TABLE chat_messages ("
+                "id INTEGER PRIMARY KEY, author TEXT, content TEXT, "
+                "created_at TEXT, cache_info TEXT)"
+            )
+            rows = [
+                (1, "assistant", "a", "2026-07-18 10:00:00", None),
+                (2, "assistant", "b", "2026-07-18 10:01:00", ""),
+                (3, "assistant", "c", "2026-07-18 10:02:00", json.dumps({
+                    "v": 2, "provider": "claude_code", "num_rounds": 1,
+                    "input_tokens": 1, "output_tokens": 1,
+                    "cache_read": 0, "cache_creation": 10,
+                    "rounds": [{"index": 1, "input_tokens": 1, "output_tokens": 1,
+                                "cache_read": 0, "cache_creation": 10, "context_tokens": 11}],
+                    "context_breakdown": {"static_system_tokens_estimate": 1},
+                    "runtime": _fp(),
+                })),
+                (4, "assistant", "d", "2026-07-18 10:03:00", "{not-json"),
+            ]
+            conn.executemany(
+                "INSERT INTO chat_messages (id, author, content, created_at, cache_info) "
+                "VALUES (?,?,?,?,?)",
+                rows,
+            )
+            conn.commit()
+            conn.close()
+            report = obs.build_report_from_db(db, days=1, now=NOW)
+            cov = report["coverage"]
+            self.assertEqual(cov["total_candidate_rows"], 4)
+            self.assertEqual(cov["empty_cache_info_rows"], 2)
+            self.assertEqual(cov["invalid_json_rows"], 1)
+            self.assertEqual(cov["valid_v2_rows"], 1)
+            self.assertEqual(cov["all_candidate_coverage_denominator"], 4)
+            self.assertEqual(cov["all_candidate_coverage_pct"], 25.0)
+
+
+class CreationClassificationTests(unittest.TestCase):
+    def test_three_class_creation_and_later_rounds(self):
+        rows = [
+            {
+                "id": 1,
+                "created_at": "2026-07-18 10:00:00",
+                "cache_info": json.dumps(_usage(
+                    rounds=[
+                        {"index": 1, "complete": True, "input_tokens": 1, "output_tokens": 1,
+                         "cache_read": 0, "cache_creation": 100, "context_tokens": 101},
+                        {"index": 2, "complete": True, "input_tokens": 1, "output_tokens": 1,
+                         "cache_read": 50, "cache_creation": 20, "context_tokens": 71},
+                    ],
+                    respawn_reason="idle",
+                    resident_turn_count=1,
+                    runtime=_fp(resident_generation=1),
+                )),
+            },
+            {
+                "id": 2,
+                "created_at": "2026-07-18 10:01:00",
+                "cache_info": json.dumps(_usage(
+                    rounds=[{
+                        "index": 1, "complete": True, "input_tokens": 1, "output_tokens": 1,
+                        "cache_read": 0, "cache_creation": 40, "context_tokens": 41,
+                    }],
+                    respawn_reason=None,
+                    resident_turn_count=2,
+                    runtime=_fp(idle_seconds_before_turn=10, resident_generation=1),
+                )),
+            },
+            {
+                "id": 3,
+                "created_at": "2026-07-18 10:02:00",
+                "cache_info": json.dumps(_usage(
+                    rounds=[
+                        {"index": 1, "complete": True, "input_tokens": 1, "output_tokens": 1,
+                         "cache_read": 80, "cache_creation": 5, "context_tokens": 86},
+                        {"index": 2, "complete": True, "input_tokens": 1, "output_tokens": 1,
+                         "cache_read": 90, "cache_creation": 7, "context_tokens": 98},
+                    ],
+                    respawn_reason=None,
+                    resident_turn_count=3,
+                    runtime=_fp(idle_seconds_before_turn=5, resident_generation=1),
+                )),
+            },
+        ]
+        report = obs.aggregate_cc_observability(rows, days=1, now=NOW)
+        s = report["summary"]
+        self.assertEqual(s["cold_start_count"], 1)
+        self.assertEqual(s["no_respawn_cache_miss_count"], 1)
+        self.assertEqual(s["normal_hot_turn_count"], 1)
+        self.assertEqual(s["cold_start_first_round_creation_sum"], 100)
+        self.assertEqual(s["no_respawn_miss_first_round_creation_sum"], 40)
+        self.assertEqual(s["normal_hot_first_round_creation_sum"], 5)
+        self.assertEqual(s["later_rounds_creation_sum"], 27)  # 20 + 7
+        self.assertEqual(s["cold_start_avg_first_round_creation"], 100.0)
+        self.assertEqual(s["no_respawn_miss_avg_first_round_creation"], 40.0)
+        self.assertEqual(s["normal_hot_avg_first_round_creation"], 5.0)
+        total = 100 + 20 + 40 + 5 + 7
+        self.assertAlmostEqual(
+            s["cold_start_first_round_creation_share_of_total_creation"], 100 / total
+        )
+        self.assertAlmostEqual(
+            s["later_rounds_creation_share_of_total_creation"], 27 / total
+        )
+        self.assertEqual(s["respawns_by_reason"], {"idle": 1})
+        day = report["daily"][-1]
+        self.assertEqual(day["cold_start_first_round_creation_sum"], 100)
+        self.assertEqual(day["later_rounds_creation_sum"], 27)
+        self.assertEqual(day["respawns_by_reason"], {"idle": 1})
+
+
+class ContentSnapshotGuardTests(unittest.TestCase):
+    def test_list_content_inplace_mutation_detected(self):
+        content = [{"type": "text", "text": "hello"}]
+        snap = obs.snapshot_prompt_content(content)
+        self.assertTrue(obs.prompt_content_unchanged(snap, content))
+        content[0]["text"] = "MUTATED"
+        self.assertFalse(obs.prompt_content_unchanged(snap, content))
+        # 同对象赋值无法防原地修改
+        same_ref = content
+        self.assertTrue(same_ref is content)
+
+
+class CanonicalStaticBuilderTests(unittest.TestCase):
+    def test_parts_match_full_system_bytewise(self):
+        from chat.system_builder import build_cc_static_parts, build_cc_static_system
+        with mock.patch("chat.system_builder.read_persona", return_value="P"), \
+             mock.patch("chat.system_builder.build_stable_note", return_value="N"), \
+             mock.patch("chat.system_builder._CC_SAVE_INSTR", "S"):
+            parts = build_cc_static_parts()
+            full = build_cc_static_system()
+        self.assertEqual(parts["full_system"], full)
+        self.assertEqual(parts["full_system"], "P\n\nN\n\nS")
+        self.assertEqual(parts["persona"], "P")
+        self.assertEqual(parts["stable_note"], "N")
+        self.assertEqual(parts["save_instr"], "S")
+
+
+class DaysClampTests(unittest.TestCase):
+    def test_clamp_1_to_90(self):
+        self.assertEqual(obs.clamp_report_days(0), 1)
+        self.assertEqual(obs.clamp_report_days(14), 14)
+        self.assertEqual(obs.clamp_report_days(91), 90)
+        self.assertEqual(obs.clamp_report_days("x", default=14), 14)
 
 
 if __name__ == "__main__":

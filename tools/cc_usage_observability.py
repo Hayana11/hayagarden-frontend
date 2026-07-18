@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import math
@@ -12,6 +13,7 @@ import os
 import sqlite3
 import statistics
 import uuid
+from collections import Counter
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Iterable, Mapping, Optional, Sequence
 
@@ -481,9 +483,9 @@ def parse_cache_info_row(raw: Any) -> tuple[str, Optional[dict[str, Any]]]:
     """返回 (kind, parsed)。
 
     kind:
-      valid_v2         — provider=claude_code 的 Usage v2（唯一计入 Claude 日报总量）
-      other_provider   — 其他 provider（如 api_relay），跳过总量
-      ambiguous_legacy — 无 provider 的旧行，跳过 Claude 总量
+      valid_v2         — v2 + provider=claude_code（唯一计入 Claude 日报总量）
+      other_provider   — v2 + 非空其他 provider，或旧行带非 claude provider
+      ambiguous_legacy — v2 缺/空 provider，或无 provider 的旧行
       invalid_json / empty
     """
     if raw is None:
@@ -506,17 +508,87 @@ def parse_cache_info_row(raw: Any) -> tuple[str, Optional[dict[str, Any]]]:
     except (TypeError, ValueError):
         version_i = 1
     provider = data.get("provider")
+    provider_s = str(provider).strip() if provider is not None else ""
     if version_i >= 2:
-        if provider == "claude_code":
+        if provider_s == "claude_code":
             return "valid_v2", data
-        return "other_provider", data
-    # v1 / 无版本：无明确 claude_code provider 时视为来源不明
-    if provider == "claude_code":
-        # 极少数带 provider 的旧形状，仍不当作 v2 观测行
+        if provider_s:
+            return "other_provider", data
         return "ambiguous_legacy", data
-    if provider:
+    # v1 / 无版本
+    if provider_s == "claude_code":
+        return "ambiguous_legacy", data
+    if provider_s:
         return "other_provider", data
     return "ambiguous_legacy", data
+
+
+def snapshot_prompt_content(content: Any) -> Any:
+    """结构化 content 用 deepcopy；字符串直接复制。"""
+    if isinstance(content, str):
+        return content
+    return copy.deepcopy(content)
+
+
+def prompt_content_unchanged(snapshot: Any, content: Any) -> bool:
+    return snapshot == content
+
+
+def clamp_report_days(days: Any, default: int = 14) -> int:
+    try:
+        value = int(days)
+    except (TypeError, ValueError):
+        value = default
+    return min(max(value, 1), 90)
+
+
+def first_round_creation(usage: Mapping[str, Any]) -> int:
+    fr = first_round(usage)
+    if fr:
+        return int(fr.get("cache_creation") or 0)
+    return int((usage or {}).get("cache_creation") or 0)
+
+
+def later_rounds_creation(usage: Mapping[str, Any]) -> int:
+    rounds = list((usage or {}).get("rounds") or [])
+    if len(rounds) <= 1:
+        return 0
+    total = 0
+    for r in rounds[1:]:
+        if isinstance(r, dict):
+            total += int(r.get("cache_creation") or 0)
+    return total
+
+
+def _share(part: float, whole: float) -> Optional[float]:
+    if whole <= 0:
+        return None
+    return float(part) / float(whole)
+
+
+def _avg_or_none(total: float, count: int) -> Optional[float]:
+    if count <= 0:
+        return None
+    return float(total) / float(count)
+
+
+def _empty_creation_fields() -> dict[str, Any]:
+    return {
+        "respawns_by_reason": {},
+        "cold_start_avg_first_round_creation": None,
+        "no_respawn_miss_avg_first_round_creation": None,
+        "normal_hot_avg_first_round_creation": None,
+        "normal_hot_turn_count": 0,
+        "cold_start_first_round_creation_sum": 0,
+        "no_respawn_miss_first_round_creation_sum": 0,
+        "normal_hot_first_round_creation_sum": 0,
+        "later_rounds_creation_sum": 0,
+        "cold_start_first_round_creation_share_of_total_creation": None,
+        "cold_start_creation_share": None,  # 旧别名
+        "no_respawn_miss_first_round_creation_share_of_total_creation": None,
+        "normal_hot_first_round_creation_share_of_total_creation": None,
+        "later_rounds_creation_share_of_total_creation": None,
+    }
 
 
 def _percentile(sorted_vals: Sequence[float], p: float) -> Optional[float]:
@@ -578,6 +650,37 @@ COLD_ONLY_BREAKDOWN_AVG_KEYS = frozenset({
 })
 
 
+def _finalize_creation_metrics(target: dict[str, Any], *, all_creation_sum: int) -> None:
+    cold_sum = int(target.get("cold_start_first_round_creation_sum") or 0)
+    miss_sum = int(target.get("no_respawn_miss_first_round_creation_sum") or 0)
+    hot_sum = int(target.get("normal_hot_first_round_creation_sum") or 0)
+    later_sum = int(target.get("later_rounds_creation_sum") or 0)
+    cold_n = int(target.get("cold_start_count") or 0)
+    miss_n = int(target.get("no_respawn_cache_miss_count") or 0)
+    hot_n = int(target.get("normal_hot_turn_count") or 0)
+    target["cold_start_avg_first_round_creation"] = _avg_or_none(cold_sum, cold_n)
+    target["no_respawn_miss_avg_first_round_creation"] = _avg_or_none(miss_sum, miss_n)
+    target["normal_hot_avg_first_round_creation"] = _avg_or_none(hot_sum, hot_n)
+    share = _share(cold_sum, all_creation_sum)
+    target["cold_start_first_round_creation_share_of_total_creation"] = share
+    target["cold_start_creation_share"] = share  # 兼容旧别名
+    target["no_respawn_miss_first_round_creation_share_of_total_creation"] = _share(
+        miss_sum, all_creation_sum
+    )
+    target["normal_hot_first_round_creation_share_of_total_creation"] = _share(
+        hot_sum, all_creation_sum
+    )
+    target["later_rounds_creation_share_of_total_creation"] = _share(
+        later_sum, all_creation_sum
+    )
+    # respawns_by_reason 保持普通 dict（JSON 友好）
+    reasons = target.get("respawns_by_reason") or {}
+    if isinstance(reasons, Counter):
+        target["respawns_by_reason"] = dict(sorted(reasons.items()))
+    else:
+        target["respawns_by_reason"] = dict(sorted((reasons or {}).items()))
+
+
 def aggregate_cc_observability(
     rows: Sequence[Mapping[str, Any]],
     *,
@@ -586,7 +689,7 @@ def aggregate_cc_observability(
     timezone_name: str = TZ_NAME,
 ) -> dict[str, Any]:
     """纯函数聚合。rows 每项至少含 created_at / cache_info。"""
-    days = max(1, int(days))
+    days = clamp_report_days(days)
     now_cn = now or datetime.now(TZ_OFFSET)
     if now_cn.tzinfo is None:
         now_cn = now_cn.replace(tzinfo=TZ_OFFSET)
@@ -616,6 +719,9 @@ def aggregate_cc_observability(
             "no_respawn_cache_miss_count": 0,
             "suspected_cache_expiry_count": 0,
             "suspected_cache_expiry_unknown_count": 0,
+            **_empty_creation_fields(),
+            "respawns_by_reason": Counter(),
+            "_day_all_creation_sum": 0,
         }
 
     coverage = {
@@ -624,6 +730,7 @@ def aggregate_cc_observability(
         "other_provider_rows": 0,
         "ambiguous_legacy_rows": 0,
         "legacy_rows": 0,  # 兼容旧字段名 = ambiguous_legacy_rows
+        "empty_cache_info_rows": 0,
         "invalid_json_rows": 0,
         "rows_with_breakdown": 0,
         "rows_missing_breakdown": 0,
@@ -648,12 +755,12 @@ def aggregate_cc_observability(
         "median_last_round_context": None,
         "p90_last_round_context": None,
         "median_model_rounds": None,
-        "cold_start_creation_share": None,
+        **_empty_creation_fields(),
+        "respawns_by_reason": Counter(),
     }
 
     last_contexts: list[float] = []
     model_rounds_list: list[float] = []
-    cold_first_creation_sum = 0
     all_creation_sum = 0
     breakdown_buckets: dict[str, list[float]] = {k: [] for k in BREAKDOWN_AVG_KEYS}
 
@@ -677,16 +784,15 @@ def aggregate_cc_observability(
             coverage["invalid_json_rows"] += 1
             continue
         if kind == "empty":
+            coverage["empty_cache_info_rows"] += 1
             continue
         if kind == "other_provider":
             coverage["other_provider_rows"] += 1
-            # api_relay 等不得混入 Claude Code 日报总量
             prev_runtime = None
             continue
         if kind in ("ambiguous_legacy", "legacy"):
             coverage["ambiguous_legacy_rows"] += 1
             coverage["legacy_rows"] += 1
-            # 来源不明的旧行：不计入 Claude token 总量
             prev_runtime = None
             continue
 
@@ -736,35 +842,55 @@ def aggregate_cc_observability(
         if last_ctx is not None:
             last_contexts.append(float(last_ctx))
 
-        # creation 加权：所有 model rounds
+        turn_creation = 0
         if rounds:
             for r in rounds:
                 if isinstance(r, dict):
-                    all_creation_sum += int(r.get("cache_creation") or 0)
+                    turn_creation += int(r.get("cache_creation") or 0)
         else:
-            all_creation_sum += cc
+            turn_creation = cc
+        all_creation_sum += turn_creation
+        bucket["_day_all_creation_sum"] += turn_creation
 
+        fr_creation = first_round_creation(usage)
+        later_creation = later_rounds_creation(usage)
         cold = is_cold_start(usage, runtime)
         miss = is_no_respawn_cache_miss(usage, runtime)
         expiry = classify_suspected_cache_expiry(usage, prev_runtime=prev_runtime)
 
+        for target in (summary, bucket):
+            target["later_rounds_creation_sum"] += later_creation
+
         if cold:
             summary["cold_start_count"] += 1
             bucket["cold_start_count"] += 1
-            fr = first_round(usage)
-            if fr:
-                cold_first_creation_sum += int(fr.get("cache_creation") or 0)
-            elif cc:
-                cold_first_creation_sum += cc
-        if miss:
+            summary["cold_start_first_round_creation_sum"] += fr_creation
+            bucket["cold_start_first_round_creation_sum"] += fr_creation
+            reason = usage.get("respawn_reason")
+            if reason is None and isinstance(runtime, dict):
+                reason = runtime.get("respawn_reason")
+            reason_key = str(reason) if reason not in (None, "") else "unknown"
+            summary["respawns_by_reason"][reason_key] += 1
+            bucket["respawns_by_reason"][reason_key] += 1
+        elif miss:
             summary["no_respawn_cache_miss_count"] += 1
             bucket["no_respawn_cache_miss_count"] += 1
+            summary["no_respawn_miss_first_round_creation_sum"] += fr_creation
+            bucket["no_respawn_miss_first_round_creation_sum"] += fr_creation
+        else:
+            summary["normal_hot_turn_count"] += 1
+            bucket["normal_hot_turn_count"] += 1
+            summary["normal_hot_first_round_creation_sum"] += fr_creation
+            bucket["normal_hot_first_round_creation_sum"] += fr_creation
+
         if expiry is True:
             summary["suspected_cache_expiry_count"] += 1
             bucket["suspected_cache_expiry_count"] += 1
         elif expiry is None:
-            summary["suspected_cache_expiry_unknown_count"] += 1
-            bucket["suspected_cache_expiry_unknown_count"] += 1
+            # 仅对 miss 才可能 unknown；cold/normal 的 False 不计入
+            if miss:
+                summary["suspected_cache_expiry_unknown_count"] += 1
+                bucket["suspected_cache_expiry_unknown_count"] += 1
 
         prev_runtime = runtime or None
 
@@ -790,10 +916,14 @@ def aggregate_cc_observability(
     summary["median_last_round_context"] = _median(last_contexts)
     summary["p90_last_round_context"] = _percentile(last_contexts, 0.9)
     summary["median_model_rounds"] = _median(model_rounds_list)
-    if all_creation_sum > 0:
-        summary["cold_start_creation_share"] = float(cold_first_creation_sum) / float(all_creation_sum)
-    else:
-        summary["cold_start_creation_share"] = None
+    _finalize_creation_metrics(summary, all_creation_sum=all_creation_sum)
+
+    daily = []
+    for i in range(days):
+        bucket = daily_map[_day_key(i)]
+        day_creation = int(bucket.pop("_day_all_creation_sum", 0) or 0)
+        _finalize_creation_metrics(bucket, all_creation_sum=day_creation)
+        daily.append(bucket)
 
     breakdown_averages = {k: _avg_with_count(breakdown_buckets[k]) for k in BREAKDOWN_AVG_KEYS}
 
@@ -803,7 +933,7 @@ def aggregate_cc_observability(
         "start_date": start_date,
         "end_date": end_date,
         "summary": summary,
-        "daily": [daily_map[_day_key(i)] for i in range(days)],
+        "daily": daily,
         "breakdown_averages": breakdown_averages,
         "coverage": coverage,
         "limitations": list(LIMITATIONS),
@@ -816,8 +946,8 @@ def load_cache_info_rows(
     days: int = 14,
     now: Optional[datetime] = None,
 ) -> list[dict[str, Any]]:
-    """SQLite read-only 读取候选 assistant 行。"""
-    days = max(1, int(days))
+    """SQLite read-only 读取时间范围内全部 assistant 行（含空 cache_info）。"""
+    days = clamp_report_days(days)
     now_cn = now or datetime.now(TZ_OFFSET)
     if now_cn.tzinfo is None:
         now_cn = now_cn.replace(tzinfo=TZ_OFFSET)
@@ -831,7 +961,6 @@ def load_cache_info_rows(
         rows = conn.execute(
             "SELECT id, created_at, cache_info FROM chat_messages "
             "WHERE author='assistant' AND created_at >= ? "
-            "AND cache_info IS NOT NULL AND cache_info != '' "
             "ORDER BY created_at ASC, id ASC",
             (start,),
         ).fetchall()
@@ -846,6 +975,7 @@ def build_report_from_db(
     days: int = 14,
     now: Optional[datetime] = None,
 ) -> dict[str, Any]:
+    days = clamp_report_days(days)
     rows = load_cache_info_rows(db_path, days=days, now=now)
     return aggregate_cc_observability(rows, days=days, now=now)
 
@@ -868,15 +998,31 @@ def format_report_text(report: Mapping[str, Any]) -> str:
         % (s.get("suspected_cache_expiry_count"), s.get("suspected_cache_expiry_unknown_count")),
         "  median_last_round_context=%s p90=%s median_rounds=%s"
         % (s.get("median_last_round_context"), s.get("p90_last_round_context"), s.get("median_model_rounds")),
-        "  cold_start_creation_share=%s" % s.get("cold_start_creation_share"),
+        "  cold_start_first_round_creation_share_of_total_creation=%s"
+        % s.get("cold_start_first_round_creation_share_of_total_creation"),
+        "  respawns_by_reason=%s" % s.get("respawns_by_reason"),
+        "  creation_avgs: cold=%s miss=%s normal_hot=%s"
+        % (
+            s.get("cold_start_avg_first_round_creation"),
+            s.get("no_respawn_miss_avg_first_round_creation"),
+            s.get("normal_hot_avg_first_round_creation"),
+        ),
+        "  creation_sums: cold=%s miss=%s normal_hot=%s later=%s"
+        % (
+            s.get("cold_start_first_round_creation_sum"),
+            s.get("no_respawn_miss_first_round_creation_sum"),
+            s.get("normal_hot_first_round_creation_sum"),
+            s.get("later_rounds_creation_sum"),
+        ),
         "",
         "coverage:",
-        "  candidates=%s valid_v2=%s other_provider=%s ambiguous_legacy=%s invalid_json=%s"
+        "  candidates=%s valid_v2=%s other_provider=%s ambiguous_legacy=%s empty=%s invalid_json=%s"
         % (
             cov.get("total_candidate_rows"),
             cov.get("valid_v2_rows"),
             cov.get("other_provider_rows"),
             cov.get("ambiguous_legacy_rows"),
+            cov.get("empty_cache_info_rows"),
             cov.get("invalid_json_rows"),
         ),
         "  with_breakdown=%s missing=%s v2_coverage_pct=%s (denom=%s) all_candidate_coverage_pct=%s (denom=%s)"

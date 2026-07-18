@@ -584,10 +584,29 @@ def build_stable_note():
     return _CC_TOOLS_CAPABILITY + '\n' + note
 
 
+def build_cc_static_parts():
+    """CC static system 唯一权威入口：一次构建组件并拼出 full_system。
+
+    返回 dict：persona / stable_note / save_instr / full_system。
+    gateway 观测与 spawn 必须共用此结果，禁止在别处重拼。
+    """
+    persona = read_persona()
+    stable_note = build_stable_note()
+    save_instr = _CC_SAVE_INSTR
+    full_system = '\n\n'.join(
+        p for p in (persona, stable_note, save_instr) if p and str(p).strip()
+    )
+    return {
+        'persona': persona,
+        'stable_note': stable_note,
+        'save_instr': save_instr,
+        'full_system': full_system,
+    }
+
+
 def build_cc_static_system():
     """Resident 启动时一次性贴墙的静态 system（逐字稳定）。"""
-    parts = [read_persona(), build_stable_note(), _CC_SAVE_INSTR]
-    return '\n\n'.join(p for p in parts if p and str(p).strip())
+    return build_cc_static_parts()['full_system']
 
 
 def _fmt_light_status(light):

@@ -16,17 +16,22 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from tools.cc_usage_observability import build_report_from_db, format_report_text
+from tools.cc_usage_observability import (
+    build_report_from_db,
+    clamp_report_days,
+    format_report_text,
+)
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description='Claude Code usage observability report (read-only)')
     parser.add_argument('--db', default='/opt/frontend/memories.db')
-    parser.add_argument('--days', type=int, default=14)
+    parser.add_argument('--days', type=int, default=14, help='report window 1..90')
     parser.add_argument('--format', choices=('text', 'json'), default='text')
     args = parser.parse_args(argv)
 
-    report = build_report_from_db(args.db, days=max(1, int(args.days)))
+    days = clamp_report_days(args.days)
+    report = build_report_from_db(args.db, days=days)
     if args.format == 'json':
         print(json.dumps(report, ensure_ascii=False, indent=2))
     else:

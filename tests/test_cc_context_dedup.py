@@ -39,6 +39,7 @@ from chat.system_builder import (
     _cc_collect_cold_once,
     _cc_collect_one_shot,
     _cc_collect_state,
+    build_cc_static_parts,
     build_cc_static_system,
     build_stable_note,
     build_time_bucket,
@@ -109,10 +110,19 @@ class StableSystemTests(unittest.TestCase):
         with mock.patch('chat.system_builder.read_persona', return_value='PERSONA_FIXED'):
             first = build_cc_static_system()
             second = build_cc_static_system()
+            parts = build_cc_static_parts()
         self.assertEqual(first, second)
         self.assertIn('PERSONA_FIXED', first)
         self.assertIn('[[SAVE:', first)
         self.assertIn('私聊窗口', first)
+        self.assertEqual(parts['full_system'], first)
+        self.assertEqual(
+            parts['full_system'],
+            '\n\n'.join(
+                p for p in (parts['persona'], parts['stable_note'], parts['save_instr'])
+                if p and str(p).strip()
+            ),
+        )
 
 
 class StateDiffTests(unittest.TestCase):
@@ -723,9 +733,9 @@ class GroupQueryContractTests(unittest.TestCase):
                  'feedback_ids': [], 'dream_id': None,
              }), \
              mock.patch('chat.system_builder.build_cc_cold_once', return_value={}), \
-             mock.patch('chat.system_builder.read_persona', return_value='STATIC'), \
-             mock.patch('chat.system_builder.build_stable_note', return_value=''), \
-             mock.patch('chat.system_builder._CC_SAVE_INSTR', ''), \
+             mock.patch('chat.system_builder.build_cc_static_parts', return_value={
+                 'persona': 'STATIC', 'stable_note': '', 'save_instr': '', 'full_system': 'STATIC',
+             }), \
              mock.patch.object(gateway, '_fetch_group_chat_rows', side_effect=fetch):
             list(gateway._cc_resident_stream_gen(
                 [{'role': 'user', 'content': '你好'}],
@@ -786,9 +796,9 @@ class HotTurnContentTests(unittest.TestCase):
                  'feedback_ids': [], 'dream_id': None,
              }), \
              mock.patch('chat.system_builder.build_cc_cold_once') as cold_builder, \
-             mock.patch('chat.system_builder.read_persona', return_value='STATIC'), \
-             mock.patch('chat.system_builder.build_stable_note', return_value=''), \
-             mock.patch('chat.system_builder._CC_SAVE_INSTR', ''), \
+             mock.patch('chat.system_builder.build_cc_static_parts', return_value={
+                 'persona': 'STATIC', 'stable_note': '', 'save_instr': '', 'full_system': 'STATIC',
+             }), \
              mock.patch.object(gateway, '_fetch_group_chat_rows', return_value=([], 0)):
             list(gateway._cc_resident_stream_gen(
                 [{'role': 'user', 'content': '你好热轮'}],

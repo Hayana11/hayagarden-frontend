@@ -3151,16 +3151,14 @@ def _cc_resident_stream_gen(messages, *, user_turn=True):
     严禁把 TreeGPT / api_relay 的缓存策略混进这里。
     """
     from chat.system_builder import (
-        _CC_SAVE_INSTR,
         build_cc_cold_once,
         build_cc_one_shot,
         build_cc_state,
-        build_stable_note,
+        build_cc_static_parts,
         format_cold_once,
         format_one_shot,
         format_state_diff,
         format_state_snapshot,
-        read_persona,
     )
     from tools import cc_usage_observability as _cc_obs
 
@@ -3170,13 +3168,12 @@ def _cc_resident_stream_gen(messages, *, user_turn=True):
         raise RuntimeError('resident: 最后一条消息不是待回复的用户轮')
     os.makedirs(CC_CWD, exist_ok=True)
 
-    # 1) ensure_alive 前只构建 static：一次取得组件、同一批字符串拼接 full_system
-    persona_text = read_persona()
-    stable_note_text = build_stable_note()
-    save_instr_text = _CC_SAVE_INSTR
-    full_system = '\n\n'.join(
-        p for p in (persona_text, stable_note_text, save_instr_text) if p and str(p).strip()
-    )
+    # 1) ensure_alive 前只构建 static：唯一权威 helper，观测分项与 spawn 同批字符串
+    _static_parts = build_cc_static_parts()
+    persona_text = _static_parts['persona']
+    stable_note_text = _static_parts['stable_note']
+    save_instr_text = _static_parts['save_instr']
+    full_system = _static_parts['full_system']
 
     last_content = messages[-1].get('content')
     last_text = last_content if isinstance(last_content, str) else ' '.join(
@@ -3291,7 +3288,7 @@ def _cc_resident_stream_gen(messages, *, user_turn=True):
     # 组装现场测量：只读字符串副本；CC 路径 rolling_summary 未注入
     allowed_tool_count = len([x for x in (CC_ALLOWED_TOOLS or '').split(',') if x.strip()]) or None
     original_system = full_system
-    original_content = content
+    original_content = _cc_obs.snapshot_prompt_content(content)
     obs_breakdown = _cc_obs.build_context_breakdown(
         persona=persona_text,
         stable_note=stable_note_text,
@@ -3314,10 +3311,10 @@ def _cc_resident_stream_gen(messages, *, user_turn=True):
         allowed_tool_count=allowed_tool_count,
         is_cold=is_cold,
     )
-    # 回归：观测不得改变即将送入 resident 的字节
+    # 回归：观测不得改变即将送入 resident 的字节（list 用 deepcopy 快照）
     if original_system.encode('utf-8') != full_system.encode('utf-8'):
         raise RuntimeError('cc observability mutated system prompt')
-    if original_content != content:
+    if not _cc_obs.prompt_content_unchanged(original_content, content):
         raise RuntimeError('cc observability mutated content')
 
     for evt, payload in _CC_RESIDENT.send_turn(content, commit_meta=commit_meta):
