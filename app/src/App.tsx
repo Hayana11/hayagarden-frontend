@@ -14,8 +14,9 @@ import { GroupChatScreen } from './screens/GroupChatScreen';
 import { MomentsScreen } from './screens/MomentsScreen';
 import { ContactsScreen } from './screens/ContactsScreen';
 import { CodexChatScreen } from './screens/CodexChatScreen';
+import { ProfileScreen } from './screens/ProfileScreen';
 
-const FULLSCREEN_PATHS = new Set(['/chat', '/settings', '/group-chat', '/moments', '/contacts', '/codex-chat']);
+const FULLSCREEN_PATHS = new Set(['/chat', '/settings', '/group-chat', '/moments', '/contacts', '/codex-chat', '/profile']);
 
 function Shell() {
   const location = useLocation();
@@ -40,6 +41,7 @@ function Shell() {
       <Route path="/moments" element={<MomentsScreen />} />
       <Route path="/contacts" element={<ContactsScreen />} />
       <Route path="/codex-chat" element={<CodexChatScreen />} />
+      <Route path="/profile" element={<ProfileScreen />} />
     </Routes>
   );
 
