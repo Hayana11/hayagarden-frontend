@@ -39,6 +39,7 @@ from chat.system_builder import (
     _cc_collect_cold_once,
     _cc_collect_one_shot,
     _cc_collect_state,
+    build_cc_static_parts,
     build_cc_static_system,
     build_stable_note,
     build_time_bucket,
@@ -59,15 +60,23 @@ def _import_gateway():
     """gateway 在 import 时会拉 workspace 工具注册；CI/沙箱无 /opt/workspace。"""
     if 'gateway' in sys.modules:
         return sys.modules['gateway']
-    reg = mock.MagicMock()
-    reg.TOOLS_NOTE = ''
-    reg.build_resident_tool_defs.return_value = []
-    reg.load_registry.return_value = []
-    wa = mock.MagicMock()
-    wa.get_workspace_tool_defs.return_value = []
-    sys.modules.setdefault('tools.workspace_registry', reg)
-    sys.modules.setdefault('tools.workspace_agent', wa)
+    stubbed = []
+    if 'tools.workspace_registry' not in sys.modules:
+        reg = mock.MagicMock()
+        reg.TOOLS_NOTE = ''
+        reg.build_resident_tool_defs.return_value = []
+        reg.load_registry.return_value = []
+        sys.modules['tools.workspace_registry'] = reg
+        stubbed.append('tools.workspace_registry')
+    if 'tools.workspace_agent' not in sys.modules:
+        wa = mock.MagicMock()
+        wa.get_workspace_tool_defs.return_value = []
+        sys.modules['tools.workspace_agent'] = wa
+        stubbed.append('tools.workspace_agent')
     import gateway
+    # 清掉临时 stub，避免污染后续要 reload 真实模块的用例
+    for name in stubbed:
+        sys.modules.pop(name, None)
     return gateway
 
 
@@ -101,10 +110,19 @@ class StableSystemTests(unittest.TestCase):
         with mock.patch('chat.system_builder.read_persona', return_value='PERSONA_FIXED'):
             first = build_cc_static_system()
             second = build_cc_static_system()
+            parts = build_cc_static_parts()
         self.assertEqual(first, second)
         self.assertIn('PERSONA_FIXED', first)
         self.assertIn('[[SAVE:', first)
         self.assertIn('私聊窗口', first)
+        self.assertEqual(parts['full_system'], first)
+        self.assertEqual(
+            parts['full_system'],
+            '\n\n'.join(
+                p for p in (parts['persona'], parts['stable_note'], parts['save_instr'])
+                if p and str(p).strip()
+            ),
+        )
 
 
 class StateDiffTests(unittest.TestCase):
@@ -715,7 +733,9 @@ class GroupQueryContractTests(unittest.TestCase):
                  'feedback_ids': [], 'dream_id': None,
              }), \
              mock.patch('chat.system_builder.build_cc_cold_once', return_value={}), \
-             mock.patch('chat.system_builder.build_cc_static_system', return_value='STATIC'), \
+             mock.patch('chat.system_builder.build_cc_static_parts', return_value={
+                 'persona': 'STATIC', 'stable_note': '', 'save_instr': '', 'full_system': 'STATIC',
+             }), \
              mock.patch.object(gateway, '_fetch_group_chat_rows', side_effect=fetch):
             list(gateway._cc_resident_stream_gen(
                 [{'role': 'user', 'content': '你好'}],
@@ -776,7 +796,9 @@ class HotTurnContentTests(unittest.TestCase):
                  'feedback_ids': [], 'dream_id': None,
              }), \
              mock.patch('chat.system_builder.build_cc_cold_once') as cold_builder, \
-             mock.patch('chat.system_builder.build_cc_static_system', return_value='STATIC'), \
+             mock.patch('chat.system_builder.build_cc_static_parts', return_value={
+                 'persona': 'STATIC', 'stable_note': '', 'save_instr': '', 'full_system': 'STATIC',
+             }), \
              mock.patch.object(gateway, '_fetch_group_chat_rows', return_value=([], 0)):
             list(gateway._cc_resident_stream_gen(
                 [{'role': 'user', 'content': '你好热轮'}],
