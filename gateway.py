@@ -3155,7 +3155,6 @@ def _cc_resident_stream_gen(messages, *, user_turn=True):
         build_cc_cold_once,
         build_cc_one_shot,
         build_cc_state,
-        build_cc_static_system,
         build_stable_note,
         format_cold_once,
         format_one_shot,
@@ -3171,11 +3170,13 @@ def _cc_resident_stream_gen(messages, *, user_turn=True):
         raise RuntimeError('resident: 最后一条消息不是待回复的用户轮')
     os.makedirs(CC_CWD, exist_ok=True)
 
-    # 1) ensure_alive 前只构建 static；当场留下各段副本供观测（不在请求结束后重跑 builder）
+    # 1) ensure_alive 前只构建 static：一次取得组件、同一批字符串拼接 full_system
     persona_text = read_persona()
     stable_note_text = build_stable_note()
     save_instr_text = _CC_SAVE_INSTR
-    full_system = build_cc_static_system()
+    full_system = '\n\n'.join(
+        p for p in (persona_text, stable_note_text, save_instr_text) if p and str(p).strip()
+    )
 
     last_content = messages[-1].get('content')
     last_text = last_content if isinstance(last_content, str) else ' '.join(

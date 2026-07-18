@@ -723,7 +723,9 @@ class GroupQueryContractTests(unittest.TestCase):
                  'feedback_ids': [], 'dream_id': None,
              }), \
              mock.patch('chat.system_builder.build_cc_cold_once', return_value={}), \
-             mock.patch('chat.system_builder.build_cc_static_system', return_value='STATIC'), \
+             mock.patch('chat.system_builder.read_persona', return_value='STATIC'), \
+             mock.patch('chat.system_builder.build_stable_note', return_value=''), \
+             mock.patch('chat.system_builder._CC_SAVE_INSTR', ''), \
              mock.patch.object(gateway, '_fetch_group_chat_rows', side_effect=fetch):
             list(gateway._cc_resident_stream_gen(
                 [{'role': 'user', 'content': '你好'}],
@@ -784,7 +786,9 @@ class HotTurnContentTests(unittest.TestCase):
                  'feedback_ids': [], 'dream_id': None,
              }), \
              mock.patch('chat.system_builder.build_cc_cold_once') as cold_builder, \
-             mock.patch('chat.system_builder.build_cc_static_system', return_value='STATIC'), \
+             mock.patch('chat.system_builder.read_persona', return_value='STATIC'), \
+             mock.patch('chat.system_builder.build_stable_note', return_value=''), \
+             mock.patch('chat.system_builder._CC_SAVE_INSTR', ''), \
              mock.patch.object(gateway, '_fetch_group_chat_rows', return_value=([], 0)):
             list(gateway._cc_resident_stream_gen(
                 [{'role': 'user', 'content': '你好热轮'}],

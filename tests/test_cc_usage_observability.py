@@ -47,14 +47,15 @@ class FakeProc:
 
 
 def _fp(**overrides):
+    """完整运行时指纹。model/effort 默认给真实值；测 unknown 时显式传 null。"""
     base = {
         "gateway_instance_id": "gw-1",
         "resident_generation": 3,
         "static_system_sha256": "a" * 64,
         "mcp_config_sha256": "b" * 64,
         "allowed_tools_sha256": "c" * 64,
-        "model": None,
-        "effort": None,
+        "model": "claude-sonnet",
+        "effort": "high",
     }
     base.update(overrides)
     return base
@@ -161,6 +162,36 @@ class InstrumentationByteSafetyTests(unittest.TestCase):
         self.assertEqual(bd["estimation_method"], "heuristic_cjk1_ascii4_v1")
         self.assertEqual(bd["confidence"], "low")
 
+    def test_cold_user_message_not_double_counted(self):
+        """history_bootstrap 已含最后用户消息时，known_visible 不得再加一遍 user。"""
+        system = "STATIC_SYSTEM_TEXT"
+        user = "你好呀这是用户最后一句"
+        history = (
+            "以下是你们今天到目前为止的对话记录：\n\n"
+            "哈娅：更早的话\n费奥多尔：回复\n哈娅：" + user + "\n\n"
+            "请回复最后一条消息。"
+        )
+        content = "cold_once\n\n" + history
+        bd = obs.build_context_breakdown(
+            full_system=system,
+            cold_once_text="cold_once",
+            history_bootstrap_text=history,
+            user_text=user,
+            final_content=content,
+            is_cold=True,
+            first_round_context_tokens=50_000,
+        )
+        expected_known = (
+            obs.estimate_tokens_heuristic_cjk1_ascii4_v1(system)
+            + obs.estimate_tokens_heuristic_cjk1_ascii4_v1(content)
+        )
+        self.assertEqual(bd["known_visible_context_tokens_estimate"], expected_known)
+        # 分项仍记录 user，但不参与 known_visible 相加
+        self.assertGreater(bd["user_tokens_estimate"], 0)
+        # 若错误双计，known 会更大、unattributed 更小
+        wrong_double = expected_known + bd["user_tokens_estimate"]
+        self.assertLess(bd["known_visible_context_tokens_estimate"], wrong_double)
+
 
 class CompatibilityTests(unittest.TestCase):
     def test_v1_v2_empty_invalid(self):
@@ -168,12 +199,16 @@ class CompatibilityTests(unittest.TestCase):
         self.assertEqual(obs.parse_cache_info_row(None)[0], "empty")
         self.assertEqual(obs.parse_cache_info_row("{")[0], "invalid_json")
         kind, data = obs.parse_cache_info_row('{"cache_read":1,"cache_creation":2}')
-        self.assertEqual(kind, "legacy")
+        self.assertEqual(kind, "ambiguous_legacy")
         self.assertEqual(data["cache_read"], 1)
         kind, data = obs.parse_cache_info_row(
             {"v": 2, "provider": "claude_code", "num_rounds": 1, "rounds": []}
         )
         self.assertEqual(kind, "valid_v2")
+        kind, _ = obs.parse_cache_info_row(
+            {"v": 2, "provider": "api_relay", "cache_read": 99, "cache_creation": 1}
+        )
+        self.assertEqual(kind, "other_provider")
         norm = normalize_cache_info(
             {
                 "v": 2,
@@ -272,6 +307,8 @@ class ToolSchemaTests(unittest.TestCase):
         self.assertEqual(bd["tool_schema_measurement_status"], "unavailable")
         self.assertIsNone(bd["tool_count"])
         self.assertEqual(bd["allowed_tool_count"], 3)
+        # 未采集 tool result → null，不是 0
+        self.assertIsNone(bd["tool_result_tokens_estimate"])
         # 不得用工具名冒充 schema
         fake = obs.resolve_tool_schema(
             tool_schema_text="mcp__home__light_on",
@@ -287,6 +324,23 @@ class ToolSchemaTests(unittest.TestCase):
         )
         self.assertEqual(ok["tool_schema_measurement_status"], "available")
         self.assertIsInstance(ok["tool_schema_tokens_estimate"], int)
+
+    def test_tool_result_null_when_not_measured(self):
+        bd = obs.build_context_breakdown(
+            full_system="s",
+            final_content="hi",
+            tool_result_text="",
+            tool_result_measured=False,
+        )
+        self.assertIsNone(bd["tool_result_tokens_estimate"])
+        measured = obs.build_context_breakdown(
+            full_system="s",
+            final_content="hi",
+            tool_result_text="tool output here",
+            tool_result_measured=True,
+        )
+        self.assertIsInstance(measured["tool_result_tokens_estimate"], int)
+        self.assertGreater(measured["tool_result_tokens_estimate"], 0)
 
 
 class OneShotClassificationTests(unittest.TestCase):
@@ -331,6 +385,37 @@ class ExpiryFingerprintTests(unittest.TestCase):
             obs.classify_suspected_cache_expiry(usage, prev_runtime={"gateway_instance_id": "x"})
         )
 
+    def test_null_model_effort_unknown(self):
+        """生产传入 model=None/effort=None 时不得判 true。"""
+        rt = _fp(idle_seconds_before_turn=6900, model=None, effort=None)
+        usage = _usage(
+            rounds=[{
+                "index": 1, "complete": True,
+                "input_tokens": 1, "output_tokens": 1,
+                "cache_read": 0, "cache_creation": 59557, "context_tokens": 59558,
+            }],
+            respawn_reason=None,
+            resident_turn_count=8,
+            runtime=rt,
+        )
+        prev = _fp(model=None, effort=None)
+        self.assertIsNone(obs.classify_suspected_cache_expiry(usage, prev_runtime=prev))
+        # 仅 model null
+        rt2 = _fp(idle_seconds_before_turn=6900, model=None, effort="high")
+        usage2 = _usage(
+            rounds=[{
+                "index": 1, "complete": True,
+                "input_tokens": 1, "output_tokens": 1,
+                "cache_read": 0, "cache_creation": 1, "context_tokens": 2,
+            }],
+            respawn_reason=None,
+            resident_turn_count=8,
+            runtime=rt2,
+        )
+        self.assertIsNone(
+            obs.classify_suspected_cache_expiry(usage2, prev_runtime=_fp(model=None, effort="high"))
+        )
+
     def test_requires_same_resident_generation(self):
         rt = _fp(idle_seconds_before_turn=6900, resident_generation=3)
         usage = _usage(
@@ -372,7 +457,10 @@ class ExpiryFingerprintTests(unittest.TestCase):
 
 class ReportAggregateTests(unittest.TestCase):
     def _exact_fixture(self):
-        """匿名真实口径 fixture：26 turns / 27 rounds / 指定 totals。"""
+        """匿名真实口径 fixture：26 Claude turns / 27 rounds / 指定 totals。
+
+        另附 api_relay / ambiguous_legacy 行（不计 Claude 总量）。
+        """
         cold_creations = [19413, 19212, 19513, 20387]
         self.assertAlmostEqual(sum(cold_creations) / 4.0, 19631.25)
         rows = []
@@ -381,7 +469,6 @@ class ReportAggregateTests(unittest.TestCase):
         def add(usage):
             nonlocal n
             n += 1
-            # 单调时间戳，保证聚合时序与插入顺序一致
             rows.append({
                 "id": n,
                 "created_at": "2026-07-18 10:%02d:%02d" % ((n - 1) // 60, (n - 1) % 60),
@@ -400,12 +487,15 @@ class ReportAggregateTests(unittest.TestCase):
                 runtime=_fp(idle_seconds_before_turn=None, resident_generation=i + 1, is_cold=True),
                 breakdown={
                     "cold_once_tokens_estimate": 1200,
+                    "history_bootstrap_tokens_estimate": 800,
                     "static_system_tokens_estimate": 5000,
                     "unattributed_bootstrap_tokens_estimate": 80,
                     "known_visible_context_tokens_estimate": 6200,
                     "tool_schema_tokens_estimate": None,
+                    "tool_result_tokens_estimate": None,
                 },
             ))
+        # 短间隔 miss → expiry false
         add(_usage(
             rounds=[{
                 "index": 1, "complete": True,
@@ -415,8 +505,14 @@ class ReportAggregateTests(unittest.TestCase):
             respawn_reason=None,
             resident_turn_count=2,
             runtime=_fp(idle_seconds_before_turn=20, resident_generation=4, is_cold=False),
-            breakdown={"static_system_tokens_estimate": 5000},
+            breakdown={
+                "static_system_tokens_estimate": 5000,
+                "cold_once_tokens_estimate": 0,  # 生产热轮形状；聚合不得稀释冷启动平均
+                "history_bootstrap_tokens_estimate": 0,
+                "tool_result_tokens_estimate": None,
+            },
         ))
+        # 长 idle + 完整指纹 → expiry true
         add(_usage(
             rounds=[{
                 "index": 1, "complete": True,
@@ -426,23 +522,42 @@ class ReportAggregateTests(unittest.TestCase):
             respawn_reason=None,
             resident_turn_count=3,
             runtime=_fp(idle_seconds_before_turn=6900, resident_generation=4, is_cold=False),
-            breakdown={"static_system_tokens_estimate": 5000},
+            breakdown={
+                "static_system_tokens_estimate": 5000,
+                "cold_once_tokens_estimate": 0,
+                "history_bootstrap_tokens_estimate": 0,
+                "tool_result_tokens_estimate": None,
+            },
         ))
-        # legacy：无指纹 → expiry unknown
-        n += 1
-        rows.append({
-            "id": n,
-            "created_at": "2026-07-18 10:%02d:%02d" % ((n - 1) // 60, (n - 1) % 60),
-            "cache_info": json.dumps({
-                "cache_read": 10, "cache_creation": 5, "input_tokens": 1, "output_tokens": 2,
-            }),
-        })
+        # 长 idle 但 model/effort 缺失 → expiry unknown（仍计 Claude 总量）
+        add(_usage(
+            rounds=[{
+                "index": 1, "complete": True,
+                "input_tokens": 1, "output_tokens": 2,
+                "cache_read": 0, "cache_creation": 5, "context_tokens": 6,
+            }],
+            respawn_reason=None,
+            resident_turn_count=4,
+            runtime=_fp(
+                idle_seconds_before_turn=6900,
+                resident_generation=4,
+                is_cold=False,
+                model=None,
+                effort=None,
+            ),
+            breakdown={
+                "static_system_tokens_estimate": 5000,
+                "cold_once_tokens_estimate": 0,
+                "history_bootstrap_tokens_estimate": 0,
+                "tool_result_tokens_estimate": None,
+            },
+        ))
 
-        # accounted: turns=7 rounds=7 input=11 output=572 creation=178965 read=10
+        # accounted Claude: turns=7 rounds=7 input=11 output=572 creation=178965 read=0
         remain_input = 79 - 11
         remain_output = 12042 - 572
         remain_creation = 225622 - 178965
-        remain_read = 1076858 - 10
+        remain_read = 1076858
 
         in_a1, in_a2 = 1, 1
         out_a1, out_a2 = 100, 100
@@ -464,9 +579,16 @@ class ReportAggregateTests(unittest.TestCase):
                 },
             ],
             respawn_reason=None,
-            resident_turn_count=4,
+            resident_turn_count=5,
             runtime=_fp(idle_seconds_before_turn=5, resident_generation=4, is_cold=False),
-            breakdown={"static_system_tokens_estimate": 5000, "user_tokens_estimate": 4},
+            breakdown={
+                "static_system_tokens_estimate": 5000,
+                "user_tokens_estimate": 4,
+                "cold_once_tokens_estimate": 0,
+                "history_bootstrap_tokens_estimate": 0,
+                "tool_result_tokens_estimate": None,
+            },
+            last_round_context=in_a2 + r_a2,
         ))
         left_input = remain_input - (in_a1 + in_a2)
         left_output = remain_output - (out_a1 + out_a2)
@@ -487,10 +609,41 @@ class ReportAggregateTests(unittest.TestCase):
                     "context_tokens": inp,
                 }],
                 respawn_reason=None,
-                resident_turn_count=5 + i,
+                resident_turn_count=6 + i,
                 runtime=_fp(idle_seconds_before_turn=5, resident_generation=4, is_cold=False),
-                breakdown={"static_system_tokens_estimate": 5000, "user_tokens_estimate": 2},
+                breakdown={
+                    "static_system_tokens_estimate": 5000,
+                    "user_tokens_estimate": 2,
+                    "cold_once_tokens_estimate": 0,
+                    "history_bootstrap_tokens_estimate": 0,
+                    "tool_result_tokens_estimate": None,
+                },
             ))
+
+        # 污染行：不计 Claude 总量
+        n += 1
+        rows.append({
+            "id": n,
+            "created_at": "2026-07-18 11:00:00",
+            "cache_info": json.dumps({
+                "v": 2,
+                "provider": "api_relay",
+                "cache_read": 999999,
+                "cache_creation": 888888,
+                "input_tokens": 777,
+                "output_tokens": 666,
+                "num_rounds": 1,
+                "rounds": [{"cache_read": 999999, "cache_creation": 888888}],
+            }),
+        })
+        n += 1
+        rows.append({
+            "id": n,
+            "created_at": "2026-07-18 11:00:01",
+            "cache_info": json.dumps({
+                "cache_read": 10, "cache_creation": 5, "input_tokens": 1, "output_tokens": 2,
+            }),
+        })
         return rows
 
     def test_daily_pads_empty_dates_and_weighted_share(self):
@@ -510,14 +663,13 @@ class ReportAggregateTests(unittest.TestCase):
         self.assertEqual(s["cache_creation"], 225622)
         self.assertEqual(s["output_tokens"], 12042)
         self.assertEqual(s["cold_start_count"], 4)
-        self.assertEqual(s["no_respawn_cache_miss_count"], 2)
+        self.assertEqual(s["no_respawn_cache_miss_count"], 3)
         self.assertEqual(s["suspected_cache_expiry_count"], 1)
         self.assertGreaterEqual(s["suspected_cache_expiry_unknown_count"], 1)
 
         cold_sum = 19413 + 19212 + 19513 + 20387
         expected_share = cold_sum / 225622
         self.assertAlmostEqual(s["cold_start_creation_share"], expected_share)
-        # 禁止用每日百分比平均：只有一天有数据时仍是 token 加权总和
         self.assertNotEqual(s["cold_start_creation_share"], 1.0)
 
         av = report["breakdown_averages"]["static_system_tokens_estimate"]
@@ -525,16 +677,27 @@ class ReportAggregateTests(unittest.TestCase):
         self.assertGreater(av["sample_count"], 0)
         self.assertEqual(av["value"], 5000.0)
 
-        # null 不参与平均
+        # 冷启动专属字段不被热轮 0 稀释
+        cold_avg = report["breakdown_averages"]["cold_once_tokens_estimate"]
+        self.assertEqual(cold_avg["sample_count"], 4)
+        self.assertEqual(cold_avg["value"], 1200.0)
+
         tool_avg = report["breakdown_averages"]["tool_schema_tokens_estimate"]
         self.assertIsNone(tool_avg["value"])
         self.assertEqual(tool_avg["sample_count"], 0)
+        tool_res = report["breakdown_averages"]["tool_result_tokens_estimate"]
+        self.assertIsNone(tool_res["value"])
+        self.assertEqual(tool_res["sample_count"], 0)
 
         cov = report["coverage"]
-        self.assertEqual(cov["total_candidate_rows"], 26)
-        self.assertGreater(cov["valid_v2_rows"], 0)
-        self.assertEqual(cov["legacy_rows"], 1)
-        self.assertIn("breakdown_coverage_pct", cov)
+        self.assertEqual(cov["valid_v2_rows"], 26)
+        self.assertEqual(cov["other_provider_rows"], 1)
+        self.assertEqual(cov["ambiguous_legacy_rows"], 1)
+        self.assertEqual(cov["total_candidate_rows"], 28)
+        self.assertEqual(cov["v2_coverage_denominator"], 26)
+        self.assertEqual(cov["all_candidate_coverage_denominator"], 28)
+        self.assertEqual(cov["v2_coverage_pct"], 100.0)
+        self.assertLess(cov["all_candidate_coverage_pct"], 100.0)
 
     def test_api_cli_same_aggregate(self):
         rows = self._exact_fixture()
@@ -676,9 +839,168 @@ class RollingSummaryAbsentTests(unittest.TestCase):
             rolling_summary_text="很长的滚动摘要",
             rolling_summary_in_prompt=False,
             final_content="x",
+            is_cold=True,
         )
         self.assertEqual(bd["rolling_summary_tokens_estimate"], 0)
         self.assertIs(bd["rolling_summary_source_present"], False)
+
+
+class ProviderIsolationTests(unittest.TestCase):
+    def test_api_relay_not_in_claude_totals(self):
+        rows = [
+            {
+                "id": 1,
+                "created_at": "2026-07-18 10:00:00",
+                "cache_info": json.dumps({
+                    "v": 2,
+                    "provider": "claude_code",
+                    "num_rounds": 1,
+                    "input_tokens": 3,
+                    "output_tokens": 4,
+                    "cache_read": 10,
+                    "cache_creation": 20,
+                    "rounds": [{
+                        "index": 1, "input_tokens": 3, "output_tokens": 4,
+                        "cache_read": 10, "cache_creation": 20, "context_tokens": 33,
+                    }],
+                    "runtime": _fp(idle_seconds_before_turn=1),
+                }),
+            },
+            {
+                "id": 2,
+                "created_at": "2026-07-18 10:01:00",
+                "cache_info": json.dumps({
+                    "v": 2,
+                    "provider": "api_relay",
+                    "num_rounds": 1,
+                    "input_tokens": 1000,
+                    "output_tokens": 2000,
+                    "cache_read": 3000,
+                    "cache_creation": 4000,
+                    "rounds": [{"cache_read": 3000, "cache_creation": 4000}],
+                }),
+            },
+        ]
+        report = obs.aggregate_cc_observability(rows, days=1, now=NOW)
+        self.assertEqual(report["summary"]["total_user_turns"], 1)
+        self.assertEqual(report["summary"]["input_tokens"], 3)
+        self.assertEqual(report["summary"]["cache_creation"], 20)
+        self.assertEqual(report["coverage"]["other_provider_rows"], 1)
+        self.assertEqual(report["coverage"]["valid_v2_rows"], 1)
+
+    def test_ambiguous_legacy_not_in_claude_totals(self):
+        rows = [
+            {
+                "id": 1,
+                "created_at": "2026-07-18 10:00:00",
+                "cache_info": json.dumps({
+                    "v": 2,
+                    "provider": "claude_code",
+                    "num_rounds": 1,
+                    "input_tokens": 5,
+                    "output_tokens": 6,
+                    "cache_read": 7,
+                    "cache_creation": 8,
+                    "rounds": [{
+                        "index": 1, "input_tokens": 5, "output_tokens": 6,
+                        "cache_read": 7, "cache_creation": 8, "context_tokens": 20,
+                    }],
+                }),
+            },
+            {
+                "id": 2,
+                "created_at": "2026-07-18 10:01:00",
+                "cache_info": json.dumps({
+                    "cache_read": 999, "cache_creation": 888, "input_tokens": 77, "output_tokens": 66,
+                }),
+            },
+        ]
+        report = obs.aggregate_cc_observability(rows, days=1, now=NOW)
+        self.assertEqual(report["summary"]["total_user_turns"], 1)
+        self.assertEqual(report["summary"]["input_tokens"], 5)
+        self.assertEqual(report["summary"]["cache_read"], 7)
+        self.assertEqual(report["coverage"]["ambiguous_legacy_rows"], 1)
+
+
+class HotZeroDilutionTests(unittest.TestCase):
+    def test_hot_cold_once_zero_does_not_dilute(self):
+        rows = []
+        for i, cold_val in enumerate((1000, 2000)):
+            rows.append({
+                "id": i + 1,
+                "created_at": "2026-07-18 10:0%d:00" % i,
+                "cache_info": json.dumps(_usage(
+                    rounds=[{
+                        "index": 1, "complete": True,
+                        "input_tokens": 1, "output_tokens": 1,
+                        "cache_read": 0, "cache_creation": 100, "context_tokens": 101,
+                    }],
+                    respawn_reason="idle",
+                    resident_turn_count=1,
+                    runtime=_fp(resident_generation=i + 1),
+                    breakdown={
+                        "cold_once_tokens_estimate": cold_val,
+                        "history_bootstrap_tokens_estimate": 50,
+                        "static_system_tokens_estimate": 10,
+                    },
+                )),
+            })
+        # 热轮生产形状：cold_once=0
+        for i in range(8):
+            rows.append({
+                "id": 10 + i,
+                "created_at": "2026-07-18 11:%02d:00" % i,
+                "cache_info": json.dumps(_usage(
+                    rounds=[{
+                        "index": 1, "complete": True,
+                        "input_tokens": 1, "output_tokens": 1,
+                        "cache_read": 50, "cache_creation": 0, "context_tokens": 51,
+                    }],
+                    respawn_reason=None,
+                    resident_turn_count=2 + i,
+                    runtime=_fp(idle_seconds_before_turn=3, resident_generation=2),
+                    breakdown={
+                        "cold_once_tokens_estimate": 0,
+                        "history_bootstrap_tokens_estimate": 0,
+                        "static_system_tokens_estimate": 10,
+                    },
+                )),
+            })
+        report = obs.aggregate_cc_observability(rows, days=1, now=NOW)
+        cold_avg = report["breakdown_averages"]["cold_once_tokens_estimate"]
+        self.assertEqual(cold_avg["sample_count"], 2)
+        self.assertEqual(cold_avg["value"], 1500.0)
+
+
+class RealisticPercentileTests(unittest.TestCase):
+    def test_median_p90_from_realistic_last_round_context(self):
+        # 真实量级序列，避免被 filler context=4 掩盖逻辑错误
+        contexts = [12000, 18000, 25000, 32000, 45000, 52000, 61000, 78000, 90000, 110000]
+        rows = []
+        for i, ctx in enumerate(contexts):
+            rows.append({
+                "id": i + 1,
+                "created_at": "2026-07-18 12:%02d:00" % i,
+                "cache_info": json.dumps(_usage(
+                    rounds=[{
+                        "index": 1, "complete": True,
+                        "input_tokens": 2, "output_tokens": 20,
+                        "cache_read": ctx - 2, "cache_creation": 0, "context_tokens": ctx,
+                    }],
+                    respawn_reason=None,
+                    resident_turn_count=2,
+                    runtime=_fp(idle_seconds_before_turn=1),
+                    last_round_context=ctx,
+                )),
+            })
+        report = obs.aggregate_cc_observability(rows, days=1, now=NOW)
+        self.assertEqual(report["summary"]["median_last_round_context"], 48500.0)
+        # p90 of 10 points: index 0.9*(10-1)=8.1 → interpolate contexts[8] and [9]
+        expected_p90 = contexts[8] * 0.9 + contexts[9] * 0.1  # wait, check formula
+        # _percentile: k=(n-1)*p = 8.1, f=8, c=9, d0=sorted[8]*(9-8.1)+sorted[9]*(8.1-8)
+        expected_p90 = contexts[8] * (9 - 8.1) + contexts[9] * (8.1 - 8)
+        self.assertAlmostEqual(report["summary"]["p90_last_round_context"], expected_p90)
+        self.assertGreater(report["summary"]["median_last_round_context"], 1000)
 
 
 if __name__ == "__main__":
