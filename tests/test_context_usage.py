@@ -312,8 +312,16 @@ class OfficialUsageParsingTests(unittest.TestCase):
     def test_fetch_codex_official_usage_parses_rate_limit(self):
         with mock.patch.object(collector, "_http_get_json", return_value={
             "rate_limit": {
-                "primary_window": {"used_percent": 18, "reset_at": 1784098800},
-                "secondary_window": {"used_percent": 42, "reset_at": 1784520000},
+                "primary_window": {
+                    "used_percent": 18,
+                    "limit_window_seconds": 18000,
+                    "reset_at": 1784098800,
+                },
+                "secondary_window": {
+                    "used_percent": 42,
+                    "limit_window_seconds": 604800,
+                    "reset_at": 1784520000,
+                },
             },
         }):
             result = collector.fetch_codex_official_usage("fake-token", "acct-1")
@@ -321,6 +329,46 @@ class OfficialUsageParsingTests(unittest.TestCase):
         self.assertEqual(result["five_hour"]["remaining_percentage"], 82)
         self.assertEqual(result["seven_day"]["used_percentage"], 42)
         self.assertEqual(result["seven_day"]["remaining_percentage"], 58)
+
+    def test_fetch_codex_weekly_only_primary_maps_to_seven_day(self):
+        with mock.patch.object(collector, "_http_get_json", return_value={
+            "rate_limit": {
+                "primary_window": {
+                    "used_percent": 12,
+                    "limit_window_seconds": 604800,
+                    "reset_at": 1784520000,
+                },
+            },
+        }):
+            result = collector.fetch_codex_official_usage("fake-token", "acct-1")
+        self.assertEqual(result["five_hour"], {})
+        self.assertEqual(result["seven_day"]["used_percentage"], 12)
+
+    def test_rate_limit_detail_ignores_diary_like_lines(self):
+        diary = (
+            'resets 4pm (U\\n---\\n[DIARY 2026-06-11] ---\\n\\n今日无事可记。'
+            'weekly limit is mentioned in prose only'
+        )
+        self.assertIsNone(collector.rate_limit_detail(diary, "2026-07-18T03:52:06Z"))
+
+    def test_collect_claude_drops_jsonl_limit_when_official_available(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            creds = root / "creds.json"
+            creds.write_text(json.dumps({"accessToken": "tok"}), encoding="utf-8")
+            session = root / "session.jsonl"
+            session.write_text(json.dumps({
+                "timestamp": "2026-07-18T03:52:06Z",
+                "error": "Weekly limit reached; resets at 09:00",
+            }) + "\n", encoding="utf-8")
+            with mock.patch.object(collector, "fetch_claude_official_usage", return_value={
+                "five_hour": {"used_percentage": 10, "remaining_percentage": 90},
+                "seven_day": {"used_percentage": 20, "remaining_percentage": 80},
+                "updated_at": "2026-07-18T04:00:00Z",
+            }):
+                agent = collector.collect_claude(root, "UTC", creds, use_official=True)
+        self.assertEqual(agent["quota_source"], "claude_oauth_usage")
+        self.assertNotIn("effective_limit", agent["quota"])
 
     def test_fetch_codex_official_usage_returns_none_on_http_failure(self):
         with mock.patch.object(collector, "_http_get_json", return_value=None):

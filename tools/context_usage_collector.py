@@ -250,8 +250,7 @@ def fetch_codex_official_usage(token: str, account_id: str) -> dict[str, Any] | 
     if not payload:
         return None
     rate_limit = payload.get("rate_limit") if isinstance(payload.get("rate_limit"), dict) else {}
-    five_hour = _official_window(rate_limit.get("primary_window"), "used_percent")
-    seven_day = _official_window(rate_limit.get("secondary_window"), "used_percent")
+    five_hour, seven_day = parse_codex_rate_limit_windows(rate_limit)
     if not five_hour and not seven_day:
         return None
     return {"five_hour": five_hour, "seven_day": seven_day, "updated_at": utc_now_iso()}
@@ -265,10 +264,82 @@ def codex_window(raw: Any) -> dict[str, Any]:
         used = min(100.0, max(0.0, used))
         result["used_percentage"] = round(used, 4)
         result["remaining_percentage"] = round(100 - used, 4)
-    reset = iso_time(raw.get("resets_at"))
+    reset = iso_time(raw.get("resets_at") or raw.get("reset_at"))
     if reset:
         result["resets_at"] = reset
     return result
+
+
+def _codex_window_kind(section: dict[str, Any]) -> str | None:
+    """Classify Codex rate-limit slot by window length (seconds).
+
+    Official wham/usage uses ~18000 for 5h and ~604800 for 7d. Weekly-only
+    plans may expose only primary_window with the weekly duration.
+    """
+    secs = integer(section.get("limit_window_seconds"))
+    if secs is None:
+        return None
+    if secs <= 36 * 3600:
+        return "five_hour"
+    if secs >= 2 * 86400:
+        return "seven_day"
+    return None
+
+
+def _reset_horizon_seconds(window: dict[str, Any], now: dt.datetime | None = None) -> float | None:
+    now = now or dt.datetime.now(dt.timezone.utc)
+    reset = window.get("resets_at")
+    if not reset:
+        return None
+    try:
+        when = dt.datetime.fromisoformat(str(reset).replace("Z", "+00:00"))
+        return (when - now).total_seconds()
+    except ValueError:
+        return None
+
+
+def parse_codex_rate_limit_windows(rate_limit: dict[str, Any] | None) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Map Codex primary/secondary slots to five_hour / seven_day buckets."""
+    rate_limit = rate_limit if isinstance(rate_limit, dict) else {}
+    seen: set[int] = set()
+    slots: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    for key in ("primary_window", "primary", "secondary_window", "secondary"):
+        raw = rate_limit.get(key)
+        if not isinstance(raw, dict):
+            continue
+        ident = id(raw)
+        if ident in seen:
+            continue
+        seen.add(ident)
+        parsed = codex_window(raw)
+        if parsed:
+            slots.append((raw, parsed))
+
+    five_hour: dict[str, Any] = {}
+    seven_day: dict[str, Any] = {}
+    unclassified: list[dict[str, Any]] = []
+    for raw, parsed in slots:
+        kind = _codex_window_kind(raw)
+        if kind == "five_hour":
+            five_hour = parsed
+        elif kind == "seven_day":
+            seven_day = parsed
+        else:
+            unclassified.append(parsed)
+
+    for parsed in sorted(
+        unclassified,
+        key=lambda w: _reset_horizon_seconds(w) if _reset_horizon_seconds(w) is not None else 0,
+    ):
+        horizon = _reset_horizon_seconds(parsed)
+        if horizon is not None and horizon > 48 * 3600 and not seven_day:
+            seven_day = parsed
+        elif not five_hour:
+            five_hour = parsed
+        elif not seven_day:
+            seven_day = parsed
+
+    return five_hour, seven_day
 
 
 def default_codex_auth_path() -> Path:
@@ -314,9 +385,10 @@ def collect_codex(
                 }
             rate_limits = payload.get("rate_limits")
             if quota is None and isinstance(rate_limits, dict):
+                five_hour, seven_day = parse_codex_rate_limit_windows(rate_limits)
                 quota = {
-                    "five_hour": codex_window(rate_limits.get("primary")),
-                    "seven_day": codex_window(rate_limits.get("secondary")),
+                    "five_hour": five_hour,
+                    "seven_day": seven_day,
                     "updated_at": updated_at,
                 }
                 latest = usage_tokens(info.get("last_token_usage"))
@@ -446,15 +518,25 @@ def claude_window(block: dict[str, Any], now: dt.datetime | None = None) -> dict
 
 
 def rate_limit_detail(text: str, observed_at: str) -> dict[str, Any] | None:
+    if len(text) > 500:
+        return None
+    if "[DIARY" in text or "[THOUGHT" in text or "[[SAVE:" in text:
+        return None
     lowered = text.lower()
     if not any(marker in lowered for marker in RATE_LIMIT_MARKERS):
         return None
+    if '"is_error":true' not in lowered and '"type":"error"' not in lowered:
+        if not re.search(r'\b(429|rate limit|usage limit reached|limit reached)\b', lowered):
+            return None
     kind = "weekly" if "weekly" in lowered else "opus" if "opus" in lowered else "rate_limit"
     reset_match = re.search(r"(?:reset(?:s)?|try again)[^\n\r.]{0,180}", text, re.IGNORECASE)
+    reset_text = reset_match.group(0)[:200] if reset_match else ""
+    if len(reset_text) > 120 and ("\n" in reset_text or "---" in reset_text):
+        return None
     return {
         "kind": kind,
         "exhausted": True,
-        "reset_text": reset_match.group(0)[:200] if reset_match else "",
+        "reset_text": reset_text,
         "observed_at": observed_at,
     }
 
@@ -511,6 +593,7 @@ def collect_claude(
     if official:
         quota = official
         source = "claude_oauth_usage"
+        effective_limit = None
     else:
         block = read_ccusage_block(timezone)
         quota = {
@@ -519,6 +602,11 @@ def collect_claude(
             "updated_at": utc_now_iso(),
         }
         source = "ccusage_blocks" if block else "claude_project_jsonl" if effective_limit else "unavailable"
+
+    if effective_limit and sessions:
+        newest = max((s.get("updated_at") or "") for s in sessions)
+        if newest and newest > (effective_limit.get("observed_at") or ""):
+            effective_limit = None
 
     if effective_limit:
         quota["effective_limit"] = effective_limit
