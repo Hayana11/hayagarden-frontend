@@ -163,8 +163,11 @@ class ContextContinuityTests(unittest.TestCase):
         self.assertNotIn(
             "UPDATE wake_log SET consumed=1 WHERE consumed=0", gateway
         )
+        # API 路径仍用 build_system_with_wake_claim；CC resident 用 capture_pending_wake_ids
         self.assertGreaterEqual(
-            gateway.count("build_system_with_wake_claim("), 3
+            gateway.count("build_system_with_wake_claim(")
+            + gateway.count("capture_pending_wake_ids("),
+            3,
         )
         self.assertGreaterEqual(
             gateway.count("is_pending_user_turn("), 3

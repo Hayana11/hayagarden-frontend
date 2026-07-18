@@ -15,11 +15,27 @@ jobs:
           python-version: "3.11"
       - name: Install route test dependency
         run: python -m pip install Flask
+      - name: Prepare /opt/frontend for runtime modules
+        run: |
+          sudo mkdir -p /opt
+          # 生产代码硬编码 /opt/frontend；CI 里指到 checkout，避免 import 失败
+          if [ ! -e /opt/frontend ]; then
+            sudo ln -sfn "$GITHUB_WORKSPACE" /opt/frontend
+          fi
+          sudo mkdir -p /opt/workspace/tools
+          sudo chown -R "$USER" /opt/workspace
+          python - <<'PY'
+          import sqlite3
+          for name in ("memories.db", "commands.db"):
+              sqlite3.connect(f"/opt/frontend/{name}").close()
+          PY
       - name: Compile context paths
         run: python -m py_compile app.py gateway.py chat/context_continuity.py context_usage_routes.py context_usage_store.py tools/context_usage_collector.py
       - name: Run continuity regressions
         run: python -m unittest discover -s tests -p 'test_context_continuity.py'
       - name: Run context usage regressions
         run: python -m unittest tests.test_context_usage
+      - name: Run CC context dedup regressions
+        run: python -m unittest tests.test_cc_context_dedup
       - name: Validate deploy guard
         run: bash -n scripts/deploy-frontend.sh

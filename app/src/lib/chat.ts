@@ -139,18 +139,7 @@ export function rowToMsg(row: ChatMessageRow): ChatMsg {
   const created = row.created_at || '';
   const branches = parseJson<unknown[]>(row.branches, []);
   const rawCache = parseJson<Record<string, unknown>>(row.cache_info, {});
-  const cacheInfo: Partial<ChatUsage> | null = Object.keys(rawCache).length
-    ? {
-        inputTokens: Number(rawCache.input_tokens ?? rawCache.inputTokens ?? 0),
-        outputTokens: Number(rawCache.output_tokens ?? rawCache.outputTokens ?? 0),
-        elapsedSec: Number(rawCache.elapsed_sec ?? rawCache.elapsedSec ?? 0),
-        cacheRead: Number(rawCache.cache_read ?? rawCache.cacheRead ?? 0),
-        cacheCreation: Number(rawCache.cache_creation ?? rawCache.cacheCreation ?? 0),
-        cacheSupported: (rawCache.cache_supported ?? rawCache.cacheSupported ?? null) as boolean | null,
-        costUsd: Number(rawCache.cost_usd ?? rawCache.costUsd ?? 0) || undefined,
-        costEstimated: Boolean(rawCache.cost_estimated ?? rawCache.costEstimated),
-      }
-    : null;
+  const cacheInfo = normalizeCacheInfo(rawCache);
   return {
     id: row.id,
     role: isFyAuthor(row.author) ? 'assistant' : 'user',
@@ -183,11 +172,30 @@ export function fmtCostUsd(usd?: number, estimated?: boolean): string {
 
 export function cacheLabel(u: Partial<ChatUsage> | null): string {
   if (!u) return '';
-  if (u.cacheSupported === false) return '无服务端缓存';
   const read = u.cacheRead || 0;
-  const total = read + (u.inputTokens || 0) + (u.cacheCreation || 0);
-  if (!read || !total) return u.cacheCreation ? '缓存已写入' : '';
-  return `缓存命中 ${Math.round((read / total) * 100)}%`;
+  const created = u.cacheCreation || 0;
+  if (read > 0) return `缓存读回 ${fmtTokens(read)}`;
+  if (created > 0) return `建缓存 ${fmtTokens(created)}`;
+  if (u.cacheSupported === false) return '无服务端缓存';
+  if (u.cacheSupported === true) return '缓存未命中';
+  return '';
+}
+
+/** Accept legacy v1 and usage-v2 cache_info without throwing. */
+export function normalizeCacheInfo(raw: Record<string, unknown> | null | undefined): Partial<ChatUsage> | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const keys = Object.keys(raw);
+  if (!keys.length) return null;
+  return {
+    inputTokens: Number(raw.input_tokens ?? raw.inputTokens ?? 0),
+    outputTokens: Number(raw.output_tokens ?? raw.outputTokens ?? 0),
+    elapsedSec: Number(raw.elapsed_sec ?? raw.elapsedSec ?? 0),
+    cacheRead: Number(raw.cache_read ?? raw.cacheRead ?? 0),
+    cacheCreation: Number(raw.cache_creation ?? raw.cacheCreation ?? 0),
+    cacheSupported: (raw.cache_supported ?? raw.cacheSupported ?? null) as boolean | null,
+    costUsd: Number(raw.cost_usd ?? raw.costUsd ?? 0) || undefined,
+    costEstimated: Boolean(raw.cost_estimated ?? raw.costEstimated),
+  };
 }
 
 // ── SSE streaming ──
