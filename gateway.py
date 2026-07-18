@@ -3151,15 +3151,19 @@ def _cc_resident_stream_gen(messages, *, user_turn=True):
     严禁把 TreeGPT / api_relay 的缓存策略混进这里。
     """
     from chat.system_builder import (
+        _CC_SAVE_INSTR,
         build_cc_cold_once,
         build_cc_one_shot,
         build_cc_state,
         build_cc_static_system,
+        build_stable_note,
         format_cold_once,
         format_one_shot,
         format_state_diff,
         format_state_snapshot,
+        read_persona,
     )
+    from tools import cc_usage_observability as _cc_obs
 
     if not CC_TOKEN:
         raise RuntimeError('未配置订阅 token，请先在 api 设置页填入')
@@ -3167,7 +3171,10 @@ def _cc_resident_stream_gen(messages, *, user_turn=True):
         raise RuntimeError('resident: 最后一条消息不是待回复的用户轮')
     os.makedirs(CC_CWD, exist_ok=True)
 
-    # 1) ensure_alive 前只构建 static
+    # 1) ensure_alive 前只构建 static；当场留下各段副本供观测（不在请求结束后重跑 builder）
+    persona_text = read_persona()
+    stable_note_text = build_stable_note()
+    save_instr_text = _CC_SAVE_INSTR
     full_system = build_cc_static_system()
 
     last_content = messages[-1].get('content')
@@ -3190,30 +3197,38 @@ def _cc_resident_stream_gen(messages, *, user_turn=True):
     pieces = []
     group_max_id = None
     group_cursor_ok = False
+    cold_text = ''
+    state_text = ''
+    group_text = ''
+    state_mode = 'none'
+    history_bootstrap_text = ''
+    recall_text = recall_blk.strip() if recall_blk else ''
     if is_cold:
         cold_text = format_cold_once(cold_once)
         if cold_text:
             pieces.append(cold_text)
-        snap = format_state_snapshot(state)
-        if snap:
-            pieces.append(snap)
+        state_text = format_state_snapshot(state)
+        if state_text:
+            pieces.append(state_text)
+            state_mode = 'snapshot'
         rows, group_max_id = _fetch_group_chat_rows(limit=8, cold=True)
         if group_max_id is not None:
             group_cursor_ok = True
             group_text = _format_group_chat_recap(rows, cold=True)
             if group_text:
-                pieces.append(group_text.strip())
-        if recall_blk:
-            pieces.append(recall_blk.strip())
+                group_text = group_text.strip()
+                pieces.append(group_text)
+        if recall_text:
+            pieces.append(recall_text)
         if one_shot_text:
             pieces.append(one_shot_text)
         prefix = ('\n\n'.join(p for p in pieces if p) + '\n\n') if pieces else ''
         convo = messages_to_text(messages)
-        content = (
-            prefix
-            + '以下是你们今天到目前为止的对话记录：' + NL + NL + convo + NL + NL
+        history_bootstrap_text = (
+            '以下是你们今天到目前为止的对话记录：' + NL + NL + convo + NL + NL
             + '请回复最后一条消息。'
         )
+        content = prefix + history_bootstrap_text
         commit_meta = {
             'state_snapshot': state,
             'feedback_ids': list(one_shot.get('feedback_ids') or []),
@@ -3223,9 +3238,10 @@ def _cc_resident_stream_gen(messages, *, user_turn=True):
             commit_meta['group_cursor_initialized'] = True
             commit_meta['group_max_id'] = group_max_id
     else:
-        diff = format_state_diff(_CC_RESIDENT.last_state_snapshot, state)
-        if diff:
-            pieces.append(diff)
+        state_text = format_state_diff(_CC_RESIDENT.last_state_snapshot, state)
+        if state_text:
+            pieces.append(state_text)
+            state_mode = 'delta'
         # 未初始化时不得退化成热查询 id>0（会读出远古 backlog）
         if not _CC_RESIDENT.group_cursor_initialized:
             rows, group_max_id = _fetch_group_chat_rows(limit=8, cold=True)
@@ -3233,7 +3249,8 @@ def _cc_resident_stream_gen(messages, *, user_turn=True):
                 group_cursor_ok = True
                 group_text = _format_group_chat_recap(rows, cold=True)
                 if group_text:
-                    pieces.append(group_text.strip())
+                    group_text = group_text.strip()
+                    pieces.append(group_text)
         else:
             rows, group_max_id = _fetch_group_chat_rows(
                 after_id=_CC_RESIDENT.last_group_message_id, limit=20, cold=False,
@@ -3241,9 +3258,10 @@ def _cc_resident_stream_gen(messages, *, user_turn=True):
             if group_max_id is not None:
                 group_text = _format_group_chat_recap(rows, cold=False)
                 if group_text:
-                    pieces.append(group_text.strip())
-        if recall_blk:
-            pieces.append(recall_blk.strip())
+                    group_text = group_text.strip()
+                    pieces.append(group_text)
+        if recall_text:
+            pieces.append(recall_text)
         if one_shot_text:
             pieces.append(one_shot_text)
         prefix = ('\n\n'.join(p for p in pieces if p) + '\n\n') if pieces else ''
@@ -3269,7 +3287,74 @@ def _cc_resident_stream_gen(messages, *, user_turn=True):
             # 热轮仅在有新增行时推进 cursor；空成功保持原 cursor
             commit_meta['group_max_id'] = group_max_id
 
+    # 组装现场测量：只读字符串副本；CC 路径 rolling_summary 未注入
+    allowed_tool_count = len([x for x in (CC_ALLOWED_TOOLS or '').split(',') if x.strip()]) or None
+    original_system = full_system
+    original_content = content
+    obs_breakdown = _cc_obs.build_context_breakdown(
+        persona=persona_text,
+        stable_note=stable_note_text,
+        save_instr=save_instr_text,
+        full_system=full_system,
+        cold_once_text=cold_text or '',
+        history_bootstrap_text=history_bootstrap_text or '',
+        rolling_summary_text='',
+        rolling_summary_in_prompt=False,
+        state_text=state_text or '',
+        state_mode=state_mode,
+        memory_recall_text=recall_text or '',
+        group_delta_text=group_text or '',
+        one_shot_text=one_shot_text or '',
+        user_text=last_text or '',
+        final_content=content,
+        tool_schema_text=None,
+        tool_schema_source=None,
+        tool_count=None,
+        allowed_tool_count=allowed_tool_count,
+        is_cold=is_cold,
+    )
+    # 回归：观测不得改变即将送入 resident 的字节
+    if original_system.encode('utf-8') != full_system.encode('utf-8'):
+        raise RuntimeError('cc observability mutated system prompt')
+    if original_content != content:
+        raise RuntimeError('cc observability mutated content')
+
     for evt, payload in _CC_RESIDENT.send_turn(content, commit_meta=commit_meta):
+        if evt == 'done' and isinstance(payload, tuple) and len(payload) >= 3 and isinstance(payload[2], dict):
+            raw_text, thinking, usage = payload[0], payload[1], payload[2]
+            claims = payload[3] if len(payload) >= 4 else {}
+            try:
+                breakdown = _cc_obs.finalize_breakdown_with_usage(
+                    obs_breakdown, usage, is_cold=is_cold,
+                )
+                runtime = _cc_obs.build_runtime(
+                    resident_generation=int(usage.pop('_obs_resident_generation', _CC_RESIDENT.generation) or 0),
+                    resident_pid=usage.pop('_obs_resident_pid', _CC_RESIDENT.resident_pid),
+                    resident_turn_count=int(usage.get('resident_turn_count') or 0),
+                    respawn_reason=usage.get('respawn_reason'),
+                    idle_seconds_before_turn=usage.pop('_obs_idle_seconds_before_turn', None),
+                    is_cold=is_cold,
+                    static_system=full_system,
+                    mcp_config_path=_CC_RESIDENT.mcp_config_path,
+                    allowed_tools=_CC_RESIDENT.allowed_tools,
+                    tool_schema_sha256=None,
+                    claude_session_id=usage.pop('_obs_claude_session_id', _CC_RESIDENT.session_id),
+                    model=None,
+                    effort=None,
+                    claude_code_version=_cc_obs.detect_claude_code_version(),
+                )
+                for _k in list(usage.keys()):
+                    if str(_k).startswith('_obs_'):
+                        usage.pop(_k, None)
+                usage = _cc_obs.attach_observation(
+                    usage, context_breakdown=breakdown, runtime=runtime,
+                )
+            except Exception:
+                for _k in list(usage.keys()):
+                    if str(_k).startswith('_obs_'):
+                        usage.pop(_k, None)
+            yield evt, (raw_text, thinking, usage, claims)
+            continue
         yield evt, payload
 
 

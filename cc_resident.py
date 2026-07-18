@@ -90,6 +90,10 @@ def normalize_cache_info(raw):
         usage['v'] = 2
         usage['num_rounds'] = int(raw.get('num_rounds') or len(raw.get('rounds') or []) or 1)
         usage['rounds'] = list(raw.get('rounds') or [])
+        # 阶段 1A：成功回复可选观测字段（缺省保持缺失，不写成 0/false）
+        for key in ('observation_version', 'context_breakdown', 'runtime'):
+            if key in raw:
+                usage[key] = raw[key]
         return usage
     return empty_usage(
         v=1,
@@ -114,6 +118,7 @@ class ResidentSession:
         self._session_id = None
         self._cold = True
         self._last_used = 0.0
+        self._generation = 0
         self._lock = threading.Lock()
         self._reset_session_meta(respawn_reason=None)
 
@@ -151,6 +156,7 @@ class ResidentSession:
         self._system_text = system_text
         self._session_id = None
         self._cold = True
+        self._generation += 1
         self._reset_session_meta(respawn_reason=reason)
 
     def _kill(self, quiet=False):
@@ -239,6 +245,12 @@ class ResidentSession:
             'dream_id': meta.get('dream_id'),
         }
 
+    def peek_idle_seconds(self):
+        """在更新 _last_used 前计算 idle；从未成功用过时返回 None。"""
+        if not self._last_used:
+            return None
+        return max(0.0, time.time() - float(self._last_used))
+
     def send_turn(self, content, commit_meta=None):
         """Yield ('text'/'think'/'tool_use'/'tool_result'/'done', payload).
 
@@ -251,6 +263,8 @@ class ResidentSession:
         if proc is None or proc.poll() is not None:
             raise ResidentError('resident 进程不存在，需要先 ensure_alive')
 
+        # 必须在更新 _last_used 前计算（成功路径末尾才写 _last_used）
+        idle_seconds_before_turn = self.peek_idle_seconds()
         respawn_reason = self._pending_respawn_reason
         one_shot_claims = self._extract_one_shot_claims(commit_meta)
         payload = json.dumps({'type': 'user', 'message': {'role': 'user', 'content': content}}, ensure_ascii=False)
@@ -451,6 +465,11 @@ class ResidentSession:
             respawn_reason=respawn_reason,
             max_round_context=self._max_round_context,
         )
+        # 观测辅助字段：不改变既有 Usage v2 公开语义，供 gateway 组装 runtime
+        usage['_obs_idle_seconds_before_turn'] = idle_seconds_before_turn
+        usage['_obs_resident_generation'] = self._generation
+        usage['_obs_resident_pid'] = getattr(proc, 'pid', None)
+        usage['_obs_claude_session_id'] = self._session_id
 
         if timed_out[0]:
             raise ResidentError(
@@ -495,6 +514,31 @@ class ResidentSession:
     @property
     def pending_respawn_reason(self):
         return self._pending_respawn_reason
+
+    @property
+    def generation(self):
+        return self._generation
+
+    @property
+    def session_id(self):
+        return self._session_id
+
+    @property
+    def system_text(self):
+        return self._system_text
+
+    @property
+    def allowed_tools(self):
+        return self._allowed_tools
+
+    @property
+    def mcp_config_path(self):
+        return self._mcp_config_path
+
+    @property
+    def resident_pid(self):
+        proc = self._proc
+        return getattr(proc, 'pid', None) if proc is not None else None
 
     def shutdown(self):
         with self._lock:

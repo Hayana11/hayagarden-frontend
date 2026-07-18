@@ -59,15 +59,23 @@ def _import_gateway():
     """gateway 在 import 时会拉 workspace 工具注册；CI/沙箱无 /opt/workspace。"""
     if 'gateway' in sys.modules:
         return sys.modules['gateway']
-    reg = mock.MagicMock()
-    reg.TOOLS_NOTE = ''
-    reg.build_resident_tool_defs.return_value = []
-    reg.load_registry.return_value = []
-    wa = mock.MagicMock()
-    wa.get_workspace_tool_defs.return_value = []
-    sys.modules.setdefault('tools.workspace_registry', reg)
-    sys.modules.setdefault('tools.workspace_agent', wa)
+    stubbed = []
+    if 'tools.workspace_registry' not in sys.modules:
+        reg = mock.MagicMock()
+        reg.TOOLS_NOTE = ''
+        reg.build_resident_tool_defs.return_value = []
+        reg.load_registry.return_value = []
+        sys.modules['tools.workspace_registry'] = reg
+        stubbed.append('tools.workspace_registry')
+    if 'tools.workspace_agent' not in sys.modules:
+        wa = mock.MagicMock()
+        wa.get_workspace_tool_defs.return_value = []
+        sys.modules['tools.workspace_agent'] = wa
+        stubbed.append('tools.workspace_agent')
     import gateway
+    # 清掉临时 stub，避免污染后续要 reload 真实模块的用例
+    for name in stubbed:
+        sys.modules.pop(name, None)
     return gateway
 
 
