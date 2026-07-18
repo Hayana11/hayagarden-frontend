@@ -1,10 +1,23 @@
 """Resolve dream list rows: titles, tone, and bipolar V/A for the Moments API."""
 from __future__ import annotations
 
+import html
+import re
 import sqlite3
 
 from tools import summary_title
 from valence_scale import normalize_arousal, normalize_valence
+
+
+def sanitize_dream_content(text: str | None) -> str:
+    """Normalize dream body for display/storage: decode entities, keep paragraphs."""
+    cleaned = html.unescape(text or '')
+    cleaned = cleaned.replace('\xa0', '\n')
+    cleaned = re.sub(r'(?i)&nbsp;', '\n', cleaned)
+    cleaned = cleaned.replace('\r\n', '\n').replace('\r', '\n')
+    cleaned = re.sub(r'[ \t]+\n', '\n', cleaned)
+    cleaned = re.sub(r'\n{3,}', '\n\n', cleaned)
+    return cleaned.strip()
 
 VALID_TONES = frozenset({'vivid', 'warm', 'anxious', 'heavy', 'drifting'})
 
@@ -101,7 +114,7 @@ def resolve_dream_fields(row: dict, pool_row: dict | None = None) -> dict:
 
 
 def build_dream_api_item(row: dict, pool_row: dict | None = None, *, include_id: bool = True) -> dict:
-    content = (row.get('content') or '').strip()
+    content = sanitize_dream_content(row.get('content'))
     created_at = row.get('created_at')
     meta = resolve_dream_fields(row, pool_row)
     item = {
