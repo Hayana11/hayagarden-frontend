@@ -1162,6 +1162,29 @@ def save_persona():
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
 
+# ── User Profile (chatnest-compatible) ──
+
+@app.route('/api/profile', methods=['GET'])
+def get_user_profile():
+    import user_profile as _up
+    try:
+        return jsonify({"ok": True, "profile": _up.read_profile()})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+@app.route('/api/profile', methods=['PUT'])
+def put_user_profile():
+    import user_profile as _up
+    data = request.get_json(silent=True) or {}
+    payload = data.get('profile', data)
+    try:
+        profile = _up.write_profile(payload)
+        return jsonify({"ok": True, "profile": profile})
+    except ValueError as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
 # ── Posts PATCH (tags / resolved) ──
 
 @app.route('/api/posts/<int:pid>', methods=['PATCH'])

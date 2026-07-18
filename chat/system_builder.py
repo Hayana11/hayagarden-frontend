@@ -114,6 +114,15 @@ def build_system(wake=False, split_dynamic=False):
             c = d['content']
             bp2_parts.append(c[:400] + '…' if len(c) > 400 else c)
 
+    # User Profile（前端可编辑：姓名 / 偏好 / 长期记忆）
+    try:
+        import user_profile as _up
+        _profile_ctx = _up.build_profile_context()
+        if _profile_ctx:
+            bp2_parts.append('\n' + _profile_ctx)
+    except Exception:
+        pass
+
     # ── BP3 · 动态内容（每次都变，不挂缓存标）───────────────────
     parts = []
 

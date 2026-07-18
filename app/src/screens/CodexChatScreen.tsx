@@ -426,6 +426,13 @@ export function CodexChatScreen() {
                 </div>
                 <span style={{ marginLeft: 'auto', color: 'var(--ghost)', fontSize: 16 }}>›</span>
               </Link>
+              <Link to="/profile" onClick={() => setSidebarOpen(false)} style={{ textDecoration: 'none', display: 'flex', alignItems: 'center', gap: 12, padding: '13px 14px', borderRadius: 16, background: 'linear-gradient(135deg,rgba(92,138,192,.14),rgba(220,232,245,.55))' }}>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 }}>
+                  <span style={{ fontSize: 14.5, color: 'var(--ink)', letterSpacing: 1 }}>Profile</span>
+                  <span style={{ fontSize: 11.5, color: 'var(--faint)' }}>名字 · 回复偏好</span>
+                </div>
+                <span style={{ marginLeft: 'auto', color: 'var(--ghost)', fontSize: 16 }}>›</span>
+              </Link>
               <Link to="/settings" onClick={() => setSidebarOpen(false)} style={{ textDecoration: 'none', display: 'flex', alignItems: 'center', gap: 12, padding: '13px 14px', borderRadius: 16, background: 'var(--card2)' }}>
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 }}>
                   <span style={{ fontSize: 14.5, color: 'var(--ink)', letterSpacing: 1 }}>系统配置</span>
