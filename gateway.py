@@ -3939,6 +3939,7 @@ def chat_stream():
                 text, thinking = None, None
                 cc_cache_read, cc_cache_create = 0, 0
                 cc_usage = None
+                _cc_one_shot_claims = {}
                 _is_user_turn = bool(_uc) or is_pending_user_turn(
                     get_db, _turn_data.get('user_message_id')
                 )
@@ -3972,6 +3973,8 @@ def chat_stream():
                         elif evt == 'done':
                             if isinstance(payload, tuple) and len(payload) >= 3 and isinstance(payload[2], dict):
                                 raw_text, thinking, cc_usage = payload[0], payload[1], payload[2]
+                                if len(payload) >= 4 and isinstance(payload[3], dict):
+                                    _cc_one_shot_claims = payload[3]
                                 cc_cache_read = int(cc_usage.get('cache_read') or 0)
                                 cc_cache_create = int(cc_usage.get('cache_creation') or 0)
                             else:
@@ -4004,7 +4007,10 @@ def chat_stream():
                         conn.commit()
                         assistant_id = int(cur.lastrowid)
                         conn.close()
+                        # one-shot 与 wake 同级：仅 assistant 落库成功后消费
                         consume_wake_ids(get_db, _wake_claim_ids)
+                        from chat.system_builder import consume_cc_one_shot_claims
+                        consume_cc_one_shot_claims(get_db, _cc_one_shot_claims)
                         _write_session_memo(_uc, _cc_text)
                         _persisted[0] = True
                         try:

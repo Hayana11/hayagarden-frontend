@@ -927,7 +927,7 @@ def peek_dream_one_shot(get_db_fn):
 
 
 def consume_dream_one_shot(get_db_fn, dream_id):
-    """stdin.flush 成功后再标记梦境已浮现。"""
+    """assistant 落库成功后再标记梦境已浮现。"""
     try:
         dream_id = int(dream_id)
     except (TypeError, ValueError):
@@ -946,6 +946,24 @@ def consume_dream_one_shot(get_db_fn, dream_id):
         return cur.rowcount
     finally:
         conn.close()
+
+
+def consume_cc_one_shot_claims(get_db_fn, claims):
+    """assistant 落库成功后消费 feedback / dream（与 wake 同级）。"""
+    claims = claims or {}
+    feedback_ids = claims.get('feedback_ids') or []
+    if feedback_ids:
+        try:
+            import command_store
+            command_store.consume_feedback(feedback_ids)
+        except Exception:
+            pass
+    dream_id = claims.get('dream_id')
+    if dream_id:
+        try:
+            consume_dream_one_shot(get_db_fn, dream_id)
+        except Exception:
+            pass
 
 
 def _cc_collect_one_shot(get_db_fn, *, include_wake=True):

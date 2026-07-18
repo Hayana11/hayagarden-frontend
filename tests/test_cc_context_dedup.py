@@ -340,6 +340,8 @@ class ResidentCommitTests(unittest.TestCase):
 
 
 class FeedbackConsumeTests(unittest.TestCase):
+    """feedback / dream：flush 后不消费；仅 assistant 落库成功后消费。"""
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.db_path = str(Path(self.tmp.name) / 'commands.db')
@@ -372,11 +374,11 @@ class FeedbackConsumeTests(unittest.TestCase):
         self.assertEqual(still_ids, ids)
         self.assertTrue(still)
 
-    def test_flush_success_consumes(self):
+    def test_flush_success_eof_does_not_consume(self):
         lines, ids = self._cmd.peek_feedback()
         self.assertTrue(ids)
         sess = ResidentSession('/tmp', '', '/tmp/cc-tools.json')
-        # EOF after flush → error, but consume already happened
+        # flush 成功后 EOF → 报错；feedback 不得消费
         sess._proc = FakeProc([])
         sess._cold = False
         with self.assertRaises(ResidentError):
@@ -385,8 +387,190 @@ class FeedbackConsumeTests(unittest.TestCase):
                 'state_snapshot': {},
             }))
         still, still_ids = self._cmd.peek_feedback()
+        self.assertEqual(still_ids, ids)
+
+    def test_result_error_does_not_consume(self):
+        lines, ids = self._cmd.peek_feedback()
+        self.assertTrue(ids)
+        result_lines = [
+            json.dumps({
+                'type': 'result',
+                'is_error': True,
+                'result': 'boom',
+                'usage': {},
+            }),
+        ]
+        sess = ResidentSession('/tmp', '', '/tmp/cc-tools.json')
+        sess._proc = FakeProc(result_lines)
+        sess._cold = False
+        with self.assertRaises(ResidentError):
+            list(sess.send_turn('hi', commit_meta={
+                'feedback_ids': ids,
+                'state_snapshot': {},
+            }))
+        still, still_ids = self._cmd.peek_feedback()
+        self.assertEqual(still_ids, ids)
+
+    def test_done_returns_claims_without_consuming(self):
+        lines, ids = self._cmd.peek_feedback()
+        self.assertTrue(ids)
+        ok_lines = [
+            json.dumps({
+                'type': 'result',
+                'is_error': False,
+                'result': 'ok',
+                'usage': {},
+            }),
+        ]
+        sess = ResidentSession('/tmp', '', '/tmp/cc-tools.json')
+        sess._proc = FakeProc(ok_lines)
+        sess._cold = False
+        events = list(sess.send_turn('hi', commit_meta={
+            'feedback_ids': ids,
+            'dream_id': 7,
+            'state_snapshot': {},
+        }))
+        self.assertEqual(events[-1][0], 'done')
+        done = events[-1][1]
+        self.assertEqual(len(done), 4)
+        claims = done[3]
+        self.assertEqual(claims.get('feedback_ids'), ids)
+        self.assertEqual(claims.get('dream_id'), 7)
+        # usage / claims 分离：公开 usage 不含 feedback_ids
+        self.assertNotIn('feedback_ids', done[2])
+        still, still_ids = self._cmd.peek_feedback()
+        self.assertEqual(still_ids, ids)
+
+    def test_persist_success_consumes_feedback(self):
+        from chat.system_builder import consume_cc_one_shot_claims
+        lines, ids = self._cmd.peek_feedback()
+        self.assertTrue(ids)
+        # 模拟 gateway：模型成功 + DB 落库成功后才 consume
+        consume_cc_one_shot_claims(lambda: None, {'feedback_ids': ids, 'dream_id': None})
+        still, still_ids = self._cmd.peek_feedback()
         self.assertEqual(still_ids, [])
         self.assertEqual(still, [])
+
+    def test_persist_failure_does_not_consume(self):
+        """模型成功但 DB 持久化失败 → 不调用 consume（gateway 契约）。"""
+        lines, ids = self._cmd.peek_feedback()
+        self.assertTrue(ids)
+        # 未调用 consume_cc_one_shot_claims 即表示持久化失败路径
+        still, still_ids = self._cmd.peek_feedback()
+        self.assertEqual(still_ids, ids)
+
+
+class DreamConsumeTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.db_path = str(Path(self.tmp.name) / 'memories.db')
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        conn.execute(
+            """CREATE TABLE dream_pool (
+                id INTEGER PRIMARY KEY, content TEXT, tone TEXT,
+                surfaced INTEGER DEFAULT 0, surface_count INTEGER DEFAULT 0,
+                created_at TEXT, surfaced_at TEXT
+            )"""
+        )
+        conn.execute(
+            "INSERT INTO dream_pool (id, content, tone, surfaced, surface_count, created_at) "
+            "VALUES (1, '一段旧梦', 'soft', 0, 0, '2026-07-18 10:00:00')"
+        )
+        conn.commit()
+        conn.close()
+
+        def get_db():
+            c = sqlite3.connect(self.db_path)
+            c.row_factory = sqlite3.Row
+            return c
+
+        self.get_db = get_db
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _surfaced(self):
+        conn = self.get_db()
+        row = conn.execute('SELECT surfaced FROM dream_pool WHERE id=1').fetchone()
+        conn.close()
+        return int(row['surfaced'])
+
+    def test_eof_does_not_consume_dream(self):
+        from chat.system_builder import consume_dream_one_shot
+        sess = ResidentSession('/tmp', '', '/tmp/cc-tools.json')
+        sess._proc = FakeProc([])
+        sess._cold = False
+        with self.assertRaises(ResidentError):
+            list(sess.send_turn('hi', commit_meta={'dream_id': 1, 'state_snapshot': {}}))
+        self.assertEqual(self._surfaced(), 0)
+        # 显式证明 consume 才会标记
+        consume_dream_one_shot(self.get_db, 1)
+        self.assertEqual(self._surfaced(), 1)
+
+    def test_persist_success_consumes_dream(self):
+        from chat.system_builder import consume_cc_one_shot_claims
+        self.assertEqual(self._surfaced(), 0)
+        consume_cc_one_shot_claims(self.get_db, {'feedback_ids': [], 'dream_id': 1})
+        self.assertEqual(self._surfaced(), 1)
+
+
+class ClientDisconnectKillTests(unittest.TestCase):
+    def test_generator_close_kills_resident(self):
+        lines = [
+            json.dumps({
+                'type': 'stream_event',
+                'event': {
+                    'type': 'content_block_delta',
+                    'delta': {'type': 'text_delta', 'text': 'hello'},
+                },
+            }),
+            json.dumps({
+                'type': 'stream_event',
+                'event': {
+                    'type': 'content_block_delta',
+                    'delta': {'type': 'text_delta', 'text': ' world'},
+                },
+            }),
+            json.dumps({
+                'type': 'result',
+                'is_error': False,
+                'result': 'ok',
+                'usage': {},
+            }),
+        ]
+        sess = ResidentSession('/tmp', '', '/tmp/cc-tools.json')
+        fake = FakeProc(lines)
+        sess._proc = fake
+        sess._cold = False
+        gen = sess.send_turn('hi', commit_meta={'state_snapshot': {}})
+        evt, payload = next(gen)
+        self.assertEqual(evt, 'text')
+        self.assertEqual(payload, 'hello')
+        gen.close()
+        self.assertIsNone(sess._proc)
+
+
+
+class GatewayOneShotPersistWiringTests(unittest.TestCase):
+    """gateway CC 路径：assistant commit 之后才 consume feedback/dream。"""
+
+    def test_consume_follows_commit_in_source(self):
+        root = Path(__file__).resolve().parents[1]
+        source = (root / 'gateway.py').read_text(encoding='utf-8')
+        marker = "for evt, payload in _cc_resident_stream_gen"
+        idx = source.find(marker)
+        self.assertGreater(idx, 0)
+        chunk = source[idx:idx + 12000]
+        commit_at = chunk.find('conn.commit()')
+        wake_at = chunk.find('consume_wake_ids(')
+        oneshot_at = chunk.find('consume_cc_one_shot_claims(')
+        self.assertGreater(commit_at, 0)
+        self.assertGreater(wake_at, commit_at)
+        self.assertGreater(oneshot_at, commit_at)
+        cache_start = chunk.find('_cache_info_json')
+        self.assertGreater(cache_start, 0)
+        self.assertNotIn('feedback_ids', chunk[cache_start:commit_at])
 
 
 class ResidentRespawnTests(unittest.TestCase):

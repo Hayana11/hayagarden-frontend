@@ -2,7 +2,9 @@
 
 Cold start sends persona/history/full state once. Hot turns only send the new
 user message, recall, changed state components, and new group-chat rows.
-Snapshots commit only after stdin write+flush succeeds.
+State/group cursors commit after stdin write+flush. Feedback/dream claims are
+returned on done and consumed only after assistant DB persistence.
+Client disconnect (GeneratorExit) kills the resident to avoid stdout pollution.
 """
 from __future__ import annotations
 
@@ -213,27 +215,8 @@ class ResidentSession:
                 self._spawn(system_text, env, reason=reason)
             return self._cold
 
-    def _commit_transactional_one_shots(self, commit_meta):
-        """stdin.flush 成功后才消费 feedback / dream。"""
-        if not commit_meta:
-            return
-        feedback_ids = commit_meta.get('feedback_ids') or []
-        if feedback_ids:
-            try:
-                import command_store
-                command_store.consume_feedback(feedback_ids)
-            except Exception:
-                pass
-        dream_id = commit_meta.get('dream_id')
-        if dream_id:
-            try:
-                from chat.system_builder import consume_dream_one_shot
-                from gateway import get_db
-                consume_dream_one_shot(get_db, dream_id)
-            except Exception:
-                pass
-
     def _commit_sent_context(self, commit_meta):
+        """flush 后只提交仍存活 resident 内的游标；one-shot 不在这里消费。"""
         if not commit_meta:
             return
         if 'state_snapshot' in commit_meta:
@@ -247,20 +230,29 @@ class ResidentSession:
             and commit_meta.get('group_max_id') is not None
         ):
             self._last_group_message_id = int(commit_meta['group_max_id'])
-        self._commit_transactional_one_shots(commit_meta)
+
+    @staticmethod
+    def _extract_one_shot_claims(commit_meta):
+        meta = commit_meta or {}
+        return {
+            'feedback_ids': list(meta.get('feedback_ids') or []),
+            'dream_id': meta.get('dream_id'),
+        }
 
     def send_turn(self, content, commit_meta=None):
         """Yield ('text'/'think'/'tool_use'/'tool_result'/'done', payload).
 
-        done payload is (text, thinking, usage_dict).
-        Snapshots / one-shot consume only after stdin write+flush succeeds.
-        result.is_error 或流中断后 kill resident，保证下一轮冷启动。
+        done payload is (text, thinking, usage_dict, one_shot_claims).
+        Flush 后只提交 state/group cursor；feedback/dream claims 经 done 带回，
+        由 gateway 在 assistant 落库成功后再 consume。
+        result.is_error / EOF / GeneratorExit（客户端断开）后 kill resident。
         """
         proc = self._proc
         if proc is None or proc.poll() is not None:
             raise ResidentError('resident 进程不存在，需要先 ensure_alive')
 
         respawn_reason = self._pending_respawn_reason
+        one_shot_claims = self._extract_one_shot_claims(commit_meta)
         payload = json.dumps({'type': 'user', 'message': {'role': 'user', 'content': content}}, ensure_ascii=False)
         try:
             proc.stdin.write(payload + NL)
@@ -269,7 +261,7 @@ class ResidentSession:
             self._kill(quiet=True)
             raise ResidentError('resident 进程管道已断: ' + str(e))
 
-        # 信已塞进门缝：立刻记作已送达（即使后续流中断也不重复塞）
+        # 信已塞进门缝：立刻提交 resident 游标（即使后续流中断也不重复塞）
         self._commit_sent_context(commit_meta)
 
         timed_out = [False]
@@ -288,42 +280,96 @@ class ResidentSession:
         is_err = None
         saw_result = False
         try:
-            while True:
-                raw_line = proc.stdout.readline()
-                if raw_line == '':
-                    break
-                line = raw_line.strip()
-                if not line:
-                    continue
-                try:
-                    d = json.loads(line)
-                except Exception:
-                    continue
-                t = d.get('type')
-                if t == 'system' and d.get('subtype') == 'init':
-                    self._session_id = d.get('session_id') or self._session_id
-                elif t == 'stream_event':
-                    ev = d.get('event') or {}
-                    ev_type = ev.get('type')
-                    if ev_type == 'message_start':
-                        if current_round is not None:
-                            current_round['context_tokens'] = (
-                                int(current_round.get('input_tokens') or 0)
-                                + int(current_round.get('cache_read') or 0)
-                                + int(current_round.get('cache_creation') or 0)
-                            )
-                            current_round['complete'] = True
-                            rounds.append(current_round)
-                        current_round = {
-                            'index': len(rounds) + 1,
-                            'complete': False,
-                            'input_tokens': 0,
-                            'output_tokens': 0,
-                            'cache_read': 0,
-                            'cache_creation': 0,
-                            'context_tokens': 0,
-                        }
-                        u = (ev.get('message') or {}).get('usage') or {}
+            try:
+                while True:
+                    raw_line = proc.stdout.readline()
+                    if raw_line == '':
+                        break
+                    line = raw_line.strip()
+                    if not line:
+                        continue
+                    try:
+                        d = json.loads(line)
+                    except Exception:
+                        continue
+                    t = d.get('type')
+                    if t == 'system' and d.get('subtype') == 'init':
+                        self._session_id = d.get('session_id') or self._session_id
+                    elif t == 'stream_event':
+                        ev = d.get('event') or {}
+                        ev_type = ev.get('type')
+                        if ev_type == 'message_start':
+                            if current_round is not None:
+                                current_round['context_tokens'] = (
+                                    int(current_round.get('input_tokens') or 0)
+                                    + int(current_round.get('cache_read') or 0)
+                                    + int(current_round.get('cache_creation') or 0)
+                                )
+                                current_round['complete'] = True
+                                rounds.append(current_round)
+                            current_round = {
+                                'index': len(rounds) + 1,
+                                'complete': False,
+                                'input_tokens': 0,
+                                'output_tokens': 0,
+                                'cache_read': 0,
+                                'cache_creation': 0,
+                                'context_tokens': 0,
+                            }
+                            u = (ev.get('message') or {}).get('usage') or {}
+                            if u:
+                                current_round['input_tokens'] = max(
+                                    current_round['input_tokens'], int(u.get('input_tokens') or 0)
+                                )
+                                current_round['output_tokens'] = max(
+                                    current_round['output_tokens'], int(u.get('output_tokens') or 0)
+                                )
+                                current_round['cache_read'] = max(
+                                    current_round['cache_read'], int(u.get('cache_read_input_tokens') or 0)
+                                )
+                                current_round['cache_creation'] = max(
+                                    current_round['cache_creation'], int(u.get('cache_creation_input_tokens') or 0)
+                                )
+                        elif ev_type == 'message_delta':
+                            u = ev.get('usage') or {}
+                            if current_round is not None and u:
+                                current_round['input_tokens'] = max(
+                                    current_round['input_tokens'], int(u.get('input_tokens') or 0)
+                                )
+                                current_round['output_tokens'] = max(
+                                    current_round['output_tokens'], int(u.get('output_tokens') or 0)
+                                )
+                                current_round['cache_read'] = max(
+                                    current_round['cache_read'], int(u.get('cache_read_input_tokens') or 0)
+                                )
+                                current_round['cache_creation'] = max(
+                                    current_round['cache_creation'], int(u.get('cache_creation_input_tokens') or 0)
+                                )
+                        elif ev_type == 'content_block_delta':
+                            delta = ev.get('delta') or {}
+                            if delta.get('type') == 'text_delta':
+                                chunk = delta.get('text', '')
+                                if chunk:
+                                    text_acc.append(chunk)
+                                    yield ('text', chunk)
+                            elif delta.get('type') == 'thinking_delta':
+                                chunk = delta.get('thinking', '')
+                                if chunk:
+                                    think_acc.append(chunk)
+                                    yield ('think', chunk)
+                    elif t == 'assistant':
+                        msg = d.get('message') or {}
+                        u = msg.get('usage') or {}
+                        if current_round is None:
+                            current_round = {
+                                'index': len(rounds) + 1,
+                                'complete': False,
+                                'input_tokens': 0,
+                                'output_tokens': 0,
+                                'cache_read': 0,
+                                'cache_creation': 0,
+                                'context_tokens': 0,
+                            }
                         if u:
                             current_round['input_tokens'] = max(
                                 current_round['input_tokens'], int(u.get('input_tokens') or 0)
@@ -337,101 +383,56 @@ class ResidentSession:
                             current_round['cache_creation'] = max(
                                 current_round['cache_creation'], int(u.get('cache_creation_input_tokens') or 0)
                             )
-                    elif ev_type == 'message_delta':
-                        u = ev.get('usage') or {}
-                        if current_round is not None and u:
-                            current_round['input_tokens'] = max(
-                                current_round['input_tokens'], int(u.get('input_tokens') or 0)
+                        for b in (msg.get('content') or []):
+                            if isinstance(b, dict) and b.get('type') == 'tool_use':
+                                if current_round is not None and not current_round.get('complete'):
+                                    current_round['context_tokens'] = (
+                                        int(current_round.get('input_tokens') or 0)
+                                        + int(current_round.get('cache_read') or 0)
+                                        + int(current_round.get('cache_creation') or 0)
+                                    )
+                                    current_round['complete'] = True
+                                    rounds.append(current_round)
+                                    current_round = None
+                                yield ('tool_use', {
+                                    'id': b.get('id'),
+                                    'name': b.get('name', ''),
+                                    'args': b.get('input') or {},
+                                })
+                    elif t == 'user':
+                        for b in ((d.get('message') or {}).get('content') or []):
+                            if isinstance(b, dict) and b.get('type') == 'tool_result':
+                                rc = b.get('content')
+                                if isinstance(rc, list):
+                                    rc = ''.join(x.get('text', '') for x in rc if isinstance(x, dict))
+                                yield ('tool_result', {
+                                    'tool_use_id': b.get('tool_use_id'),
+                                    'result': str(rc or ''),
+                                    'is_error': bool(b.get('is_error')),
+                                })
+                    elif t == 'result':
+                        saw_result = True
+                        if d.get('is_error'):
+                            is_err = str(d.get('result', ''))[:300]
+                        # result.usage 只做校验/fallback，不覆盖已解析的 rounds
+                        if current_round is not None:
+                            current_round['context_tokens'] = (
+                                int(current_round.get('input_tokens') or 0)
+                                + int(current_round.get('cache_read') or 0)
+                                + int(current_round.get('cache_creation') or 0)
                             )
-                            current_round['output_tokens'] = max(
-                                current_round['output_tokens'], int(u.get('output_tokens') or 0)
-                            )
-                            current_round['cache_read'] = max(
-                                current_round['cache_read'], int(u.get('cache_read_input_tokens') or 0)
-                            )
-                            current_round['cache_creation'] = max(
-                                current_round['cache_creation'], int(u.get('cache_creation_input_tokens') or 0)
-                            )
-                    elif ev_type == 'content_block_delta':
-                        delta = ev.get('delta') or {}
-                        if delta.get('type') == 'text_delta':
-                            chunk = delta.get('text', '')
-                            if chunk:
-                                text_acc.append(chunk)
-                                yield ('text', chunk)
-                        elif delta.get('type') == 'thinking_delta':
-                            chunk = delta.get('thinking', '')
-                            if chunk:
-                                think_acc.append(chunk)
-                                yield ('think', chunk)
-                elif t == 'assistant':
-                    msg = d.get('message') or {}
-                    u = msg.get('usage') or {}
-                    if current_round is None:
-                        current_round = {
-                            'index': len(rounds) + 1,
-                            'complete': False,
-                            'input_tokens': 0,
-                            'output_tokens': 0,
-                            'cache_read': 0,
-                            'cache_creation': 0,
-                            'context_tokens': 0,
-                        }
-                    if u:
-                        current_round['input_tokens'] = max(
-                            current_round['input_tokens'], int(u.get('input_tokens') or 0)
-                        )
-                        current_round['output_tokens'] = max(
-                            current_round['output_tokens'], int(u.get('output_tokens') or 0)
-                        )
-                        current_round['cache_read'] = max(
-                            current_round['cache_read'], int(u.get('cache_read_input_tokens') or 0)
-                        )
-                        current_round['cache_creation'] = max(
-                            current_round['cache_creation'], int(u.get('cache_creation_input_tokens') or 0)
-                        )
-                    for b in (msg.get('content') or []):
-                        if isinstance(b, dict) and b.get('type') == 'tool_use':
-                            if current_round is not None and not current_round.get('complete'):
-                                current_round['context_tokens'] = (
-                                    int(current_round.get('input_tokens') or 0)
-                                    + int(current_round.get('cache_read') or 0)
-                                    + int(current_round.get('cache_creation') or 0)
-                                )
-                                current_round['complete'] = True
-                                rounds.append(current_round)
-                                current_round = None
-                            yield ('tool_use', {
-                                'id': b.get('id'),
-                                'name': b.get('name', ''),
-                                'args': b.get('input') or {},
-                            })
-                elif t == 'user':
-                    for b in ((d.get('message') or {}).get('content') or []):
-                        if isinstance(b, dict) and b.get('type') == 'tool_result':
-                            rc = b.get('content')
-                            if isinstance(rc, list):
-                                rc = ''.join(x.get('text', '') for x in rc if isinstance(x, dict))
-                            yield ('tool_result', {
-                                'tool_use_id': b.get('tool_use_id'),
-                                'result': str(rc or ''),
-                                'is_error': bool(b.get('is_error')),
-                            })
-                elif t == 'result':
-                    saw_result = True
-                    if d.get('is_error'):
-                        is_err = str(d.get('result', ''))[:300]
-                    # result.usage 只做校验/fallback，不覆盖已解析的 rounds
-                    if current_round is not None:
-                        current_round['context_tokens'] = (
-                            int(current_round.get('input_tokens') or 0)
-                            + int(current_round.get('cache_read') or 0)
-                            + int(current_round.get('cache_creation') or 0)
-                        )
-                        current_round['complete'] = not bool(d.get('is_error'))
-                        rounds.append(current_round)
-                        current_round = None
-                    break
+                            current_round['complete'] = not bool(d.get('is_error'))
+                            rounds.append(current_round)
+                            current_round = None
+                        break
+            except GeneratorExit:
+                # 客户端断开 SSE：必须 kill，否则残留 stdout 会污染下一轮
+                self._kill(quiet=True)
+                raise
+            except BaseException:
+                if self._proc is not None:
+                    self._kill(quiet=True)
+                raise
         finally:
             timer.cancel()
 
@@ -473,7 +474,8 @@ class ResidentSession:
         self._max_round_context = max(self._max_round_context, int(usage.get('max_round_context') or 0))
         usage['resident_turn_count'] = self._resident_turn_count
         usage['max_round_context'] = self._max_round_context
-        yield ('done', (''.join(text_acc).strip(), ''.join(think_acc), usage))
+        # claims 只经 done 内部回传，不得写入公开 cache_info
+        yield ('done', (''.join(text_acc).strip(), ''.join(think_acc), usage, one_shot_claims))
 
     def is_cold(self):
         return self._cold
