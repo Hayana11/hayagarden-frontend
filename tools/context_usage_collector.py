@@ -524,14 +524,30 @@ def json_from_output(output: str) -> Any:
 
 
 def ccusage_command(timezone: str) -> list[str]:
+    """Build ccusage argv.
+
+    systemd ``Environment=CCUSAGE_COMMAND=...`` cannot carry unquoted spaces, so
+    the unit often collapses to just ``/usr/bin/ccusage``. Treat a bare binary
+    as a prefix and append the standard ``blocks`` flags.
+    """
+    default_flags = [
+        "blocks", "--active", "--json", "--offline", "--recent",
+        "--timezone", timezone,
+    ]
     configured = os.environ.get("CCUSAGE_COMMAND", "").strip()
     if configured:
-        return shlex.split(configured, posix=os.name != "nt")
+        parts = shlex.split(configured, posix=os.name != "nt")
+        if parts and "blocks" not in parts:
+            return parts + default_flags
+        # Ensure timezone flag present when caller omitted it
+        if parts and "--timezone" not in parts:
+            parts = parts + ["--timezone", timezone]
+        return parts
+    binary = shutil.which("ccusage") or shutil.which("ccusage.cmd")
+    if binary:
+        return [binary] + default_flags
     runner = shutil.which("npx") or shutil.which("npx.cmd") or "npx"
-    return [
-        runner, "-y", "ccusage@latest", "blocks", "--active", "--json",
-        "--offline", "--recent", "--timezone", timezone,
-    ]
+    return [runner, "-y", "ccusage@latest"] + default_flags
 
 
 def read_ccusage_block(timezone: str, timeout: int = 45) -> dict[str, Any] | None:
