@@ -4,7 +4,8 @@ from collections import defaultdict
 
 from tools import summary_title
 
-LIBRARY_TYPES = ('MEMORY', 'DIARY', 'FACT', 'THOUGHT', 'DREAM', 'DAILY_SUMMARY')
+# Thoughts/dreams stay in posts for 朋友圈, but are not part of 记忆库.
+LIBRARY_TYPES = ('MEMORY', 'DIARY', 'FACT', 'DAILY_SUMMARY')
 
 # Optional emoji/name hints — unknown tags and types still get dynamic topics.
 TAG_HINTS = {
@@ -18,8 +19,6 @@ TAG_HINTS = {
 TYPE_HINTS = {
     'MEMORY': {'emoji': '✨', 'name': '记忆', 'desc': '被明确存入记忆库的内容。'},
     'DIARY': {'emoji': '📓', 'name': '日记', 'desc': '按日写下的生活记录。'},
-    'DREAM': {'emoji': '🌙', 'name': '梦境', 'desc': '睡梦、潜意识与夜间的画面。'},
-    'THOUGHT': {'emoji': '💭', 'name': '想法', 'desc': '零散思绪与灵感碎片。'},
     'DAILY_SUMMARY': {'emoji': '📅', 'name': '日摘要', 'desc': '系统自动整理的一天回顾。'},
     'FACT': {'emoji': '📌', 'name': '长期事实', 'desc': '稳定的人物偏好与生活事实。'},
 }
