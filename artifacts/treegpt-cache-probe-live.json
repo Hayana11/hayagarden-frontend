@@ -1,0 +1,56 @@
+{
+  "ts": "2026-07-18T04:15:19+00:00",
+  "status": "pass",
+  "provider": "api_relay",
+  "relay_url": "https://api.treegpt.cc/v1/messages",
+  "relay_id": "2",
+  "gw_provider_untouched": "claude_code",
+  "model": "claude-opus-4-6",
+  "prod_like": false,
+  "mode": "production_split_dynamic_no_tools",
+  "caps": {
+    "thinking": true,
+    "cache": true,
+    "cache_1h": false,
+    "tools": true,
+    "vision": false
+  },
+  "summary": {
+    "n_turns": 6,
+    "cold_cache_creation": 0,
+    "cold_cache_read": 16242,
+    "hot_cache_creation_median": 89,
+    "hot_cache_creation_mean": 90.4,
+    "hot_cache_creation_min": 0,
+    "hot_cache_creation_max": 208,
+    "hot_cache_read_median": 16268,
+    "all_cache_creation": [0, 0, 89, 208, 124, 31],
+    "all_cache_read": [16242, 16268, 16268, 16242, 16357, 16481]
+  },
+  "turns": [
+    {"turn": 1, "phase": "cold", "elapsed_sec": 5.209, "cache_read": 16242, "cache_creation": 0, "input_tokens": 3765, "output_tokens": 64},
+    {"turn": 2, "phase": "hot", "elapsed_sec": 7.888, "cache_read": 16268, "cache_creation": 0, "input_tokens": 5799, "output_tokens": 64},
+    {"turn": 3, "phase": "hot", "elapsed_sec": 3.235, "cache_read": 16268, "cache_creation": 89, "input_tokens": 5803, "output_tokens": 4},
+    {"turn": 4, "phase": "hot", "elapsed_sec": 3.584, "cache_read": 16242, "cache_creation": 208, "input_tokens": 5741, "output_tokens": 4},
+    {"turn": 5, "phase": "hot", "elapsed_sec": 3.977, "cache_read": 16357, "cache_creation": 124, "input_tokens": 5741, "output_tokens": 4},
+    {"turn": 6, "phase": "hot", "elapsed_sec": 3.411, "cache_read": 16481, "cache_creation": 31, "input_tokens": 5741, "output_tokens": 4}
+  ],
+  "historical_healthy_window": {
+    "source": "chat_messages id 3777-3785",
+    "when": "2026-07-17 23:06–23:15",
+    "hot_cache_creation_median": 0,
+    "hot_cache_read_median": 32965
+  },
+  "compare": {
+    "cc_before_median": 9771,
+    "cc_after_median": 214.5,
+    "treegpt_live_hot_median": 89,
+    "pass_threshold": 1000,
+    "passed": true
+  },
+  "notes": [
+    "充值后 opus 生产拼装侧路 6 轮完成；GW_PROVIDER 全程 claude_code。",
+    "冷启动 create=0 / read≈16k：命中既有 TreeGPT 前缀缓存（同 metadata.user_id）。",
+    "热轮 create 中位 89（min 0 / max 208），远低于 CC 修前 ~10k，也低于 CC 修后 ~214。"
+  ]
+}

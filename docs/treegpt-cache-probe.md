@@ -44,13 +44,29 @@ python3 scripts/treegpt_cache_probe.py --turns 6 --prod-like   # 带 tools + 小
 
 ## 启动日结果（2026-07-18）
 
-详见 `artifacts/treegpt-cache-probe-baseline.json`。
+详见 `artifacts/treegpt-cache-probe-baseline.json`（余额阻断记录）与 `artifacts/treegpt-cache-probe-live.json`（充值后重跑）。
 
-1. **生产拼装 live（opus）**：TreeGPT 余额约 **$0.05**，预扣需约 **$0.21** → `403 预扣费额度失败`。`GW_PROVIDER` 全程仍为 `claude_code`。
-2. **历史健康段（opus / split_dynamic）**：冷启动 create=32965；随后 4 热轮 create=**0** / read=32965（中位 0）。说明当前生产路径在余额充足时已经健康。
-3. **haiku 侧路试跑**：余额耗尽前仅 2 轮，且 create/read 模式异常（不像 opus 健康段）；**不能**当作生产结论。
+### 充值后 live（opus / split_dynamic / 无 tools）
 
-**下一步**：TreeGPT 充值后执行：
+| 轮次 | phase | cache_creation | cache_read |
+|------|-------|----------------|------------|
+| T1 | cold | 0 | 16242 |
+| T2 | hot | 0 | 16268 |
+| T3 | hot | 89 | 16268 |
+| T4 | hot | 208 | 16242 |
+| T5 | hot | 124 | 16357 |
+| T6 | hot | 31 | 16481 |
+
+- 热轮 `cache_creation` 中位 **89**（mean 90.4，max 208）→ **通过**（阈值 ≤1k）
+- `GW_PROVIDER` 全程 `claude_code`
+- 对照：CC 修前 ≈9771 / 修后 ≈214.5 / TreeGPT 历史健康段 0
+
+### 此前余额阻断
+
+1. **opus 首次 live**：余额约 $0.05 → 403。
+2. **历史健康段（msg 3777–3785）**：热轮 create 中位 0。
+
+重跑命令：
 
 ```bash
 cd /opt/frontend
