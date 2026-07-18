@@ -1,14 +1,6 @@
 import { useCallback, useEffect, useMemo, useState, type CSSProperties } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { HttpError } from '../lib/http';
-import {
-  blankProfile,
-  cloneProfile,
-  fetchProfile,
-  normalizeProfile,
-  saveProfile,
-  type UserProfile,
-} from '../lib/profile';
+import { HttpError, http } from '../lib/http';
 import './ProfileScreen.css';
 
 const SERIF = "'Noto Serif SC', serif";
@@ -32,28 +24,11 @@ const DARK_VARS: Record<string, string> = {
   '--serif': SERIF, '--display': DISPLAY,
 };
 
-type Page = 'home' | 'preferences';
-
-function profilesEqual(a: UserProfile, b: UserProfile): boolean {
-  return JSON.stringify(normalizeProfile(a)) === JSON.stringify(normalizeProfile(b));
-}
-
-function PencilIcon() {
-  return (
-    <svg viewBox="0 0 24 24" width={22} height={22} fill="none" stroke="currentColor" strokeWidth={1.7} strokeLinecap="round" strokeLinejoin="round">
-      <path d="M12 20h9" />
-      <path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z" />
-    </svg>
-  );
-}
-
-function BackChevron() {
-  return (
-    <svg viewBox="0 0 24 24" width={22} height={22} fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round">
-      <path d="M15 18l-6-6 6-6" />
-    </svg>
-  );
-}
+type PersonaResponse = {
+  ok?: boolean;
+  content?: string;
+  error?: string;
+};
 
 export function ProfileScreen() {
   const navigate = useNavigate();
@@ -69,28 +44,36 @@ export function ProfileScreen() {
   });
   const vars = theme === 'dark' ? DARK_VARS : LIGHT_VARS;
 
-  const [page, setPage] = useState<Page>('home');
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [toast, setToast] = useState('');
-  const [saved, setSaved] = useState<UserProfile>(blankProfile());
-  const [draft, setDraft] = useState<UserProfile>(blankProfile());
+  const [savedContent, setSavedContent] = useState('');
+  const [draftContent, setDraftContent] = useState('');
 
-  const dirty = useMemo(() => !profilesEqual(draft, saved), [draft, saved]);
+  const dirty = draftContent !== savedContent;
+  const characterCount = useMemo(() => Array.from(draftContent).length, [draftContent]);
+  const lineCount = useMemo(
+    () => draftContent ? draftContent.split(/\r?\n/).length : 0,
+    [draftContent],
+  );
 
   const showToast = useCallback((message: string) => {
     setToast(message);
-    window.setTimeout(() => setToast(''), 2200);
+    window.setTimeout(() => setToast(''), 2600);
   }, []);
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const profile = await fetchProfile();
-      setSaved(profile);
-      setDraft(cloneProfile(profile));
+      const data = await http.get<PersonaResponse>('/api/persona');
+      if (data.ok === false) throw new Error(data.error || '人设加载失败');
+      const content = typeof data.content === 'string' ? data.content : '';
+      setSavedContent(content);
+      setDraftContent(content);
     } catch (error) {
-      const detail = error instanceof HttpError && error.detail ? error.detail : 'Profile 加载失败';
+      const detail = error instanceof HttpError && error.detail
+        ? error.detail
+        : error instanceof Error ? error.message : '人设加载失败';
       showToast(detail);
     } finally {
       setLoading(false);
@@ -101,161 +84,113 @@ export function ProfileScreen() {
     void load();
   }, [load]);
 
-  const patchDraft = useCallback((updater: (prev: UserProfile) => UserProfile) => {
-    setDraft((prev) => updater(cloneProfile(prev)));
-  }, []);
+  useEffect(() => {
+    const warnBeforeLeave = (event: BeforeUnloadEvent) => {
+      if (!dirty) return;
+      event.preventDefault();
+      event.returnValue = '';
+    };
+    window.addEventListener('beforeunload', warnBeforeLeave);
+    return () => window.removeEventListener('beforeunload', warnBeforeLeave);
+  }, [dirty]);
+
+  const close = useCallback(() => {
+    if (dirty && !window.confirm('人设有尚未保存的修改，确定离开吗？')) return;
+    navigate('/chat');
+  }, [dirty, navigate]);
+
+  const reload = useCallback(() => {
+    if (dirty && !window.confirm('确定放弃尚未保存的修改，重新读取服务器人设吗？')) return;
+    void load();
+  }, [dirty, load]);
 
   const persist = useCallback(async () => {
-    if (saving) return;
+    if (saving || !dirty) return;
+    if (!draftContent.trim()) {
+      showToast('为了避免误操作，人设正文不能保存为空');
+      return;
+    }
     setSaving(true);
     try {
-      // Preserve any existing savedMemories server-side values without exposing UI.
-      const payload = {
-        ...draft,
-        savedMemories: saved.savedMemories,
-      };
-      const next = await saveProfile(payload);
-      setSaved(next);
-      setDraft(cloneProfile(next));
-      showToast('Profile 已保存');
+      const data = await http.post<PersonaResponse>('/api/persona', { content: draftContent });
+      if (data.ok === false) throw new Error(data.error || '保存失败');
+      setSavedContent(draftContent);
+      showToast('费佳人设已保存，聊天网关正在重启');
     } catch (error) {
-      const detail = error instanceof HttpError && error.detail ? error.detail : '保存失败';
+      const detail = error instanceof HttpError && error.detail
+        ? error.detail
+        : error instanceof Error ? error.message : '保存失败';
       showToast(detail);
     } finally {
       setSaving(false);
     }
-  }, [draft, saved.savedMemories, saving, showToast]);
-
-  const clearProfile = useCallback(async () => {
-    if (!window.confirm('确定清空 Profile？姓名和偏好都会被清除。')) return;
-    const empty = blankProfile();
-    setDraft(empty);
-    setSaving(true);
-    try {
-      const next = await saveProfile(empty);
-      setSaved(next);
-      setDraft(cloneProfile(next));
-      showToast('Profile 已清空');
-      setPage('home');
-    } catch {
-      showToast('清空失败');
-    } finally {
-      setSaving(false);
-    }
-  }, [showToast]);
-
-  const preferencesNote = useMemo(() => {
-    if (!draft.preferences.enabled) return 'Disabled';
-    const text = draft.preferences.content.trim();
-    if (!text) return 'No custom instructions';
-    return text.length > 36 ? `${text.slice(0, 36)}…` : text;
-  }, [draft.preferences]);
-
-  const saveButton = (
-    <button
-      type="button"
-      className="profile-save-button"
-      aria-label="Save profile"
-      disabled={!dirty || saving}
-      onClick={() => void persist()}
-    >
-      ✓
-    </button>
-  );
+  }, [dirty, draftContent, saving, showToast]);
 
   return (
-    <div
-      className="profile-root dash-fullscreen-page"
-      style={{ ...(vars as CSSProperties) }}
-    >
+    <div className="profile-root dash-fullscreen-page" style={{ ...(vars as CSSProperties) }}>
       {loading ? (
-        <div className="profile-loading">加载 Profile…</div>
-      ) : page === 'home' ? (
-        <div className="profile-page">
-          <header className="profile-header">
-            <button type="button" className="profile-round-button" aria-label="Close profile" onClick={() => navigate('/chat')}>×</button>
-            <div className="profile-title">Profile</div>
-            {saveButton}
-          </header>
-          <p className="profile-subtitle">保存你的名字和回复偏好。它们会自动加入每次对话请求。</p>
-
-          <section className="profile-section">
-            <div className="profile-section-title">Name</div>
-            <div className="profile-card">
-              <label className="profile-name-row">
-                <span className="profile-name-label">Full name</span>
-                <input
-                  className="profile-name-input"
-                  value={draft.fullName}
-                  placeholder="你的全名"
-                  autoComplete="off"
-                  onChange={(e) => patchDraft((p) => { p.fullName = e.target.value; return p; })}
-                />
-              </label>
-              <div className="profile-divider" />
-              <label className="profile-name-row">
-                <span className="profile-name-label">Nickname</span>
-                <input
-                  className="profile-name-input"
-                  value={draft.nickname}
-                  placeholder="助手怎么称呼你"
-                  autoComplete="off"
-                  onChange={(e) => patchDraft((p) => { p.nickname = e.target.value; return p; })}
-                />
-              </label>
-            </div>
-          </section>
-
-          <section className="profile-section">
-            <button type="button" className="profile-nav-row" onClick={() => setPage('preferences')}>
-              <span className="profile-nav-row-icon"><PencilIcon /></span>
-              <span className="profile-nav-row-title">
-                Preferences
-                <span className="profile-nav-row-note">{preferencesNote}</span>
-              </span>
-              <span className="profile-nav-chevron">›</span>
-            </button>
-          </section>
-
-          <div className="profile-footer-actions">
-            <button type="button" className="profile-text-button" onClick={() => void clearProfile()}>Clear profile</button>
-          </div>
-        </div>
+        <div className="profile-loading">正在读取费佳的人设…</div>
       ) : (
         <div className="profile-page">
           <header className="profile-header">
-            <button type="button" className="profile-back-button" aria-label="Back" onClick={() => setPage('home')}>
-              <BackChevron />
+            <button type="button" className="profile-round-button" aria-label="关闭费佳档案" onClick={close}>×</button>
+            <div className="profile-title">Fyodor Profile</div>
+            <button
+              type="button"
+              className="profile-save-button"
+              aria-label="保存费佳人设"
+              disabled={!dirty || saving}
+              onClick={() => void persist()}
+            >
+              {saving ? '…' : '✓'}
             </button>
-            <div className="profile-title">Preferences</div>
-            {saveButton}
           </header>
-          <div className="profile-preferences-card">
-            <div className="profile-card-top">
+
+          <section className="profile-hero">
+            <div className="profile-avatar" aria-hidden="true">Θ</div>
+            <div className="profile-hero-copy">
+              <div className="profile-hero-name">费奥多尔</div>
+              <div className="profile-hero-alias">Fyodor · 费佳</div>
+              <div className="profile-hero-tagline">他的身份、关系、语言与内在纹理，都住在下面这份人设里。</div>
+            </div>
+          </section>
+
+          <section className="profile-meta-grid" aria-label="人设信息">
+            <div className="profile-meta-card">
+              <strong>{characterCount.toLocaleString()}</strong>
+              <span>字符</span>
+            </div>
+            <div className="profile-meta-card">
+              <strong>{lineCount.toLocaleString()}</strong>
+              <span>行</span>
+            </div>
+            <div className="profile-meta-card">
+              <strong className="profile-live-dot">已接入</strong>
+              <span>聊天系统</span>
+            </div>
+          </section>
+
+          <section className="profile-section">
+            <div className="profile-persona-heading">
               <div>
-                <div className="profile-section-title">Enable preferences</div>
-                <div className="profile-help-text">When enabled, these instructions are included with every request.</div>
+                <div className="profile-section-title">费佳的完整人设</div>
+                <div className="profile-help-text">这里直接读取 VPS 上实际生效的 persona.md，不是另一份空白 Profile。</div>
               </div>
-              <button
-                type="button"
-                className={`profile-switch${draft.preferences.enabled ? ' on' : ''}`}
-                aria-label="Toggle preferences"
-                onClick={() => patchDraft((p) => {
-                  p.preferences.enabled = !p.preferences.enabled;
-                  return p;
-                })}
+              <button type="button" className="profile-reload-button" disabled={saving} onClick={reload}>重新读取</button>
+            </div>
+            <div className="profile-persona-card">
+              <textarea
+                className="profile-persona-editor"
+                value={draftContent}
+                spellCheck={false}
+                aria-label="费佳的完整人设正文"
+                onChange={(event) => setDraftContent(event.target.value)}
               />
             </div>
-            <div className="profile-divider" />
-            <textarea
-              className="profile-preferences-textarea"
-              value={draft.preferences.content}
-              placeholder="例如：用更亲近的语气回复；不要把日常聊天写成报告；重要事实要直接说。"
-              onChange={(e) => patchDraft((p) => {
-                p.preferences.content = e.target.value;
-                return p;
-              })}
-            />
+          </section>
+
+          <div className="profile-persona-note">
+            保存会立即写入 <code>persona.md</code> 并重启聊天网关。正在生成的回复可能被打断，已有聊天和记忆不会被修改。
           </div>
         </div>
       )}
