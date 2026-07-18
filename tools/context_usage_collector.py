@@ -42,7 +42,10 @@ CODEX_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage"
 # Claude oauth/usage is aggressively rate-limited (community note: refresh ≥10–15min).
 # Two VPS timers every 5 minutes will 429; cache last good official payload and reuse.
 OFFICIAL_CACHE_PATH = Path(
-    os.environ.get("CONTEXT_USAGE_OFFICIAL_CACHE", "/tmp/haya-context-usage-official.json")
+    os.environ.get(
+        "CONTEXT_USAGE_OFFICIAL_CACHE",
+        "/var/lib/haya-context-usage/official.json",
+    )
 )
 OFFICIAL_MIN_INTERVAL_SEC = int(os.environ.get("CONTEXT_USAGE_OFFICIAL_MIN_INTERVAL", "720"))
 
