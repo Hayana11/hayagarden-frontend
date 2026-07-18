@@ -291,10 +291,10 @@ class OAuthCredentialReadingTests(unittest.TestCase):
 
 class OfficialUsageParsingTests(unittest.TestCase):
     def test_fetch_claude_official_usage_parses_utilization(self):
-        with mock.patch.object(collector, "_http_get_json", return_value={
+        with mock.patch.object(collector, "_http_get_json_result", return_value=({
             "five_hour": {"utilization": 23, "resets_at": "2026-07-15T18:00:00Z"},
             "seven_day": {"utilization": 70, "resets_at": "2026-07-20T00:00:00Z"},
-        }):
+        }, 200)):
             result = collector.fetch_claude_official_usage("fake-token")
         self.assertEqual(result["five_hour"]["used_percentage"], 23)
         self.assertEqual(result["five_hour"]["remaining_percentage"], 77)
@@ -302,15 +302,19 @@ class OfficialUsageParsingTests(unittest.TestCase):
         self.assertEqual(result["seven_day"]["remaining_percentage"], 30)
 
     def test_fetch_claude_official_usage_returns_none_when_fields_missing(self):
-        with mock.patch.object(collector, "_http_get_json", return_value={"unrelated": True}):
+        with mock.patch.object(collector, "_http_get_json_result", return_value=({"unrelated": True}, 200)):
             self.assertIsNone(collector.fetch_claude_official_usage("fake-token"))
 
     def test_fetch_claude_official_usage_falls_back_on_http_failure(self):
-        with mock.patch.object(collector, "_http_get_json", return_value=None):
+        with mock.patch.object(collector, "_http_get_json_result", return_value=(None, None)):
+            self.assertIsNone(collector.fetch_claude_official_usage("fake-token"))
+
+    def test_fetch_claude_official_usage_returns_none_on_429(self):
+        with mock.patch.object(collector, "_http_get_json_result", return_value=(None, 429)):
             self.assertIsNone(collector.fetch_claude_official_usage("fake-token"))
 
     def test_fetch_codex_official_usage_parses_rate_limit(self):
-        with mock.patch.object(collector, "_http_get_json", return_value={
+        with mock.patch.object(collector, "_http_get_json_result", return_value=({
             "rate_limit": {
                 "primary_window": {
                     "used_percent": 18,
@@ -323,7 +327,7 @@ class OfficialUsageParsingTests(unittest.TestCase):
                     "reset_at": 1784520000,
                 },
             },
-        }):
+        }, 200)):
             result = collector.fetch_codex_official_usage("fake-token", "acct-1")
         self.assertEqual(result["five_hour"]["used_percentage"], 18)
         self.assertEqual(result["five_hour"]["remaining_percentage"], 82)
@@ -331,7 +335,7 @@ class OfficialUsageParsingTests(unittest.TestCase):
         self.assertEqual(result["seven_day"]["remaining_percentage"], 58)
 
     def test_fetch_codex_weekly_only_primary_maps_to_seven_day(self):
-        with mock.patch.object(collector, "_http_get_json", return_value={
+        with mock.patch.object(collector, "_http_get_json_result", return_value=({
             "rate_limit": {
                 "primary_window": {
                     "used_percent": 12,
@@ -339,7 +343,7 @@ class OfficialUsageParsingTests(unittest.TestCase):
                     "reset_at": 1784520000,
                 },
             },
-        }):
+        }, 200)):
             result = collector.fetch_codex_official_usage("fake-token", "acct-1")
         self.assertEqual(result["five_hour"], {})
         self.assertEqual(result["seven_day"]["used_percentage"], 12)
@@ -354,6 +358,7 @@ class OfficialUsageParsingTests(unittest.TestCase):
     def test_collect_claude_drops_jsonl_limit_when_official_available(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
+            cache = root / "official-cache.json"
             creds = root / "creds.json"
             creds.write_text(json.dumps({"accessToken": "tok"}), encoding="utf-8")
             session = root / "session.jsonl"
@@ -361,17 +366,47 @@ class OfficialUsageParsingTests(unittest.TestCase):
                 "timestamp": "2026-07-18T03:52:06Z",
                 "error": "Weekly limit reached; resets at 09:00",
             }) + "\n", encoding="utf-8")
-            with mock.patch.object(collector, "fetch_claude_official_usage", return_value={
-                "five_hour": {"used_percentage": 10, "remaining_percentage": 90},
-                "seven_day": {"used_percentage": 20, "remaining_percentage": 80},
-                "updated_at": "2026-07-18T04:00:00Z",
-            }):
-                agent = collector.collect_claude(root, "UTC", creds, use_official=True)
+            with mock.patch.object(collector, "OFFICIAL_CACHE_PATH", cache):
+                with mock.patch.object(collector, "fetch_claude_official_usage", return_value={
+                    "five_hour": {"used_percentage": 10, "remaining_percentage": 90},
+                    "seven_day": {"used_percentage": 20, "remaining_percentage": 80},
+                    "updated_at": "2026-07-18T04:00:00Z",
+                }):
+                    agent = collector.collect_claude(root, "UTC", creds, use_official=True)
         self.assertEqual(agent["quota_source"], "claude_oauth_usage")
         self.assertNotIn("effective_limit", agent["quota"])
 
+    def test_collect_claude_reuses_cache_on_429_instead_of_jsonl_exhausted(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            cache = root / "official-cache.json"
+            cache.write_text(json.dumps({
+                "claude": {
+                    "fetched_at": "2026-07-18T06:00:00Z",
+                    "quota": {
+                        "five_hour": {"used_percentage": 40, "remaining_percentage": 60},
+                        "seven_day": {"used_percentage": 55, "remaining_percentage": 45},
+                        "updated_at": "2026-07-18T06:00:00Z",
+                    },
+                },
+            }), encoding="utf-8")
+            session = root / "session.jsonl"
+            session.write_text(json.dumps({
+                "timestamp": "2026-07-18T07:00:00Z",
+                "error": "Weekly limit reached; resets at 09:00",
+            }) + "\n", encoding="utf-8")
+            creds = root / "creds.json"
+            creds.write_text(json.dumps({"accessToken": "tok"}), encoding="utf-8")
+            with mock.patch.object(collector, "OFFICIAL_CACHE_PATH", cache):
+                with mock.patch.object(collector, "OFFICIAL_MIN_INTERVAL_SEC", 0):
+                    with mock.patch.object(collector, "fetch_claude_official_usage", return_value=None):
+                        agent = collector.collect_claude(root, "UTC", creds, use_official=True)
+        self.assertEqual(agent["quota_source"], "claude_oauth_usage")
+        self.assertEqual(agent["quota"]["five_hour"]["used_percentage"], 40)
+        self.assertNotIn("effective_limit", agent["quota"])
+
     def test_fetch_codex_official_usage_returns_none_on_http_failure(self):
-        with mock.patch.object(collector, "_http_get_json", return_value=None):
+        with mock.patch.object(collector, "_http_get_json_result", return_value=(None, None)):
             self.assertIsNone(collector.fetch_codex_official_usage("fake-token", ""))
 
 
@@ -385,22 +420,25 @@ class OfficialUsageFallbackTests(unittest.TestCase):
     def test_collect_codex_uses_official_source_when_available(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
+            cache = root / "official-cache.json"
             auth_path = root / "auth.json"
             auth_path.write_text(
                 json.dumps({"tokens": {"access_token": "tok", "account_id": "acct"}}), encoding="utf-8",
             )
-            with mock.patch.object(collector, "fetch_codex_official_usage", return_value={
-                "five_hour": {"used_percentage": 18, "remaining_percentage": 82},
-                "seven_day": {"used_percentage": 42, "remaining_percentage": 58},
-                "updated_at": "2026-07-15T06:00:00Z",
-            }):
-                agent = collector.collect_codex(root / "sessions", auth_path, use_official=True)
+            with mock.patch.object(collector, "OFFICIAL_CACHE_PATH", cache):
+                with mock.patch.object(collector, "fetch_codex_official_usage", return_value={
+                    "five_hour": {"used_percentage": 18, "remaining_percentage": 82},
+                    "seven_day": {"used_percentage": 42, "remaining_percentage": 58},
+                    "updated_at": "2026-07-15T06:00:00Z",
+                }):
+                    agent = collector.collect_codex(root / "sessions", auth_path, use_official=True)
         self.assertEqual(agent["quota_source"], "codex_oauth_usage")
         self.assertEqual(agent["quota"]["five_hour"]["used_percentage"], 18)
 
     def test_collect_codex_falls_back_to_local_when_official_fetch_fails(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
+            cache = root / "official-cache.json"
             sessions_dir = root / "sessions"
             sessions_dir.mkdir()
             session = sessions_dir / "session.jsonl"
@@ -416,22 +454,25 @@ class OfficialUsageFallbackTests(unittest.TestCase):
             auth_path = root / "auth.json"
             auth_path.write_text(json.dumps({"tokens": {"access_token": "tok"}}), encoding="utf-8")
 
-            with mock.patch.object(collector, "fetch_codex_official_usage", return_value=None):
-                agent = collector.collect_codex(sessions_dir, auth_path, use_official=True)
+            with mock.patch.object(collector, "OFFICIAL_CACHE_PATH", cache):
+                with mock.patch.object(collector, "fetch_codex_official_usage", return_value=None):
+                    agent = collector.collect_codex(sessions_dir, auth_path, use_official=True)
         self.assertEqual(agent["quota_source"], "codex_session_jsonl")
         self.assertEqual(agent["quota"]["five_hour"]["used_percentage"], 5)
 
     def test_collect_claude_uses_official_source_when_available(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
+            cache = root / "official-cache.json"
             creds = root / "creds.json"
             creds.write_text(json.dumps({"claudeAiOauth": {"accessToken": "tok"}}), encoding="utf-8")
-            with mock.patch.object(collector, "fetch_claude_official_usage", return_value={
-                "five_hour": {"used_percentage": 23, "remaining_percentage": 77},
-                "seven_day": {"used_percentage": 70, "remaining_percentage": 30},
-                "updated_at": "2026-07-15T06:00:00Z",
-            }):
-                agent = collector.collect_claude(root / "projects", "UTC", creds, use_official=True)
+            with mock.patch.object(collector, "OFFICIAL_CACHE_PATH", cache):
+                with mock.patch.object(collector, "fetch_claude_official_usage", return_value={
+                    "five_hour": {"used_percentage": 23, "remaining_percentage": 77},
+                    "seven_day": {"used_percentage": 70, "remaining_percentage": 30},
+                    "updated_at": "2026-07-15T06:00:00Z",
+                }):
+                    agent = collector.collect_claude(root / "projects", "UTC", creds, use_official=True)
         self.assertEqual(agent["quota_source"], "claude_oauth_usage")
         self.assertEqual(agent["quota"]["five_hour"]["used_percentage"], 23)
         self.assertEqual(agent["quota"]["seven_day"]["used_percentage"], 70)

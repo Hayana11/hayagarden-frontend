@@ -67,11 +67,17 @@ Claude/Codex 客户端自己登录后，会用同一个已登录的 OAuth token 
 - Claude：`GET https://api.anthropic.com/api/oauth/usage`
 - Codex：`GET https://chatgpt.com/backend-api/wham/usage`
 
-拿到的 `five_hour` / `seven_day` 百分比就是官方客户端里显示的真实数字，比本地文件估算准确。采集器只**读取**本机已有的登录凭据文件（`~/.claude/.credentials.json`、`~/.codex/auth.json`），从不写回、从不刷新 token——token 过期由各自 CLI 自己处理，采集器这一轮读不到有效 token 时会直接标记 `unavailable` 或退回本地估算，不会尝试自己去刷新登录状态。
+拿到的 `five_hour` / `seven_day` 百分比就是官方客户端里显示的真实数字，比本地文件估算准确。字段约定与 [双子续杯](https://github.com/wgjuan2314/shuangzi-xubei) 一致：
+
+- Claude：`five_hour.utilization` / `seven_day.utilization`（已用%），剩余 = 100 − utilization
+- Codex：`rate_limit.primary_window` / `secondary_window` 的 `used_percent` + `limit_window_seconds`（18000≈5h，604800≈7d）。**周额度计划可能只有 primary，且秒数是 604800**——采集器按秒数归类，不会盲信 primary=5h。
+
+采集器只**读取**本机已有的登录凭据文件（`~/.claude/.credentials.json`、`~/.codex/auth.json`），从不写回、从不刷新 token——token 过期由各自 CLI 自己处理，采集器这一轮读不到有效 token 时会直接标记 `unavailable` 或退回本地估算，不会尝试自己去刷新登录状态。
 
 这两个接口**不是官方公开、承诺稳定的 API**，是社区从客户端自身请求里摘出来复用的。可能出现的情况：
 
 - 接口随时可能被下线、改字段、加限制，没有事先通知。
+- **Claude `oauth/usage` 很容易 429**（双子续杯建议 10–15 分钟刷新一次）。采集器默认最少间隔 12 分钟才打官方接口（`CONTEXT_USAGE_OFFICIAL_MIN_INTERVAL`，秒），失败时复用上次成功的百分比，**不会**退回 JSONL 误报的「额度已耗尽」。
 - 只在本机已经登录过对应 CLI、且凭据文件存在时才能读到；没有登录 = 自动退回旧的本地估算逻辑，行为和以前一样。
 - 请求只发生在采集器进程内，token 不会被写进日志、不会随快照一起上报给我们自己的后端——后端收到的永远只是百分比数字。
 
