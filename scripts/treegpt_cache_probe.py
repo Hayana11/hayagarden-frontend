@@ -141,12 +141,15 @@ def _parse_usage_from_sse(resp) -> dict:
 
 
 def _summarize(turns: list[dict]) -> dict:
-    creates = [int(t['cache_creation']) for t in turns]
-    reads = [int(t['cache_read']) for t in turns]
-    hot = turns[1:] if len(turns) > 1 else []
+    ok = [t for t in turns if 'cache_creation' in t and 'error' not in t]
+    creates = [int(t['cache_creation']) for t in ok]
+    reads = [int(t['cache_read']) for t in ok]
+    hot = ok[1:] if len(ok) > 1 else []
     hot_creates = [int(t['cache_creation']) for t in hot]
     return {
         'n_turns': len(turns),
+        'n_ok': len(ok),
+        'n_errors': sum(1 for t in turns if 'error' in t),
         'cold_cache_creation': creates[0] if creates else None,
         'cold_cache_read': reads[0] if reads else None,
         'hot_cache_creation_median': statistics.median(hot_creates) if hot_creates else None,
