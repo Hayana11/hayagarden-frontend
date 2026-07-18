@@ -42,6 +42,21 @@ python3 scripts/treegpt_cache_probe.py --turns 6 --prod-like   # 带 tools + 小
 
 探针通过标准（初版）：热轮中位 **≤ 1k**，且明显低于修前 CC 的 ~10k；理想为接近历史健康段的 **0**。
 
+## 启动日结果（2026-07-18）
+
+详见 `artifacts/treegpt-cache-probe-baseline.json`。
+
+1. **生产拼装 live（opus）**：TreeGPT 余额约 **$0.05**，预扣需约 **$0.21** → `403 预扣费额度失败`。`GW_PROVIDER` 全程仍为 `claude_code`。
+2. **历史健康段（opus / split_dynamic）**：冷启动 create=32965；随后 4 热轮 create=**0** / read=32965（中位 0）。说明当前生产路径在余额充足时已经健康。
+3. **haiku 侧路试跑**：余额耗尽前仅 2 轮，且 create/read 模式异常（不像 opus 健康段）；**不能**当作生产结论。
+
+**下一步**：TreeGPT 充值后执行：
+
+```bash
+cd /opt/frontend
+python3.11 scripts/treegpt_cache_probe.py --turns 6 --out artifacts/treegpt-cache-probe-live.json
+```
+
 ## 已知生产路径
 
 `gateway.py` api_relay 分支已：

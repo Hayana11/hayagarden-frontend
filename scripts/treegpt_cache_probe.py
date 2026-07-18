@@ -165,6 +165,7 @@ def run_probe(
     prod_like: bool = False,
     max_tokens: int = 64,
     user_id: str = 'hayana-fyodor-stable',
+    model: str | None = None,
 ) -> dict:
     from chat.system_builder import build_system
     from relay.manager import relay as chat_relay
@@ -177,6 +178,7 @@ def run_probe(
         warn = f'ACTIVE_RELAY url 不像 TreeGPT: {api_url}'
     else:
         warn = None
+    override_model = (model or '').strip() or None
 
     prompts = [
         f'探针T{i + 1}：请只回一个字「好」。不要调用工具。'
@@ -209,6 +211,8 @@ def run_probe(
             'messages': msgs,
             'metadata': {'user_id': user_id},
         }
+        if override_model:
+            payload['model'] = override_model
         if prod_like:
             try:
                 import gateway as gw
@@ -220,8 +224,26 @@ def run_probe(
                 payload['thinking'] = {'type': 'enabled', 'budget_tokens': 1024}
 
         t0 = time.monotonic()
-        resp = chat_relay.call_stream(payload, timeout=180)
-        usage = _parse_usage_from_sse(resp)
+        try:
+            resp = chat_relay.call_stream(payload, timeout=180)
+            usage = _parse_usage_from_sse(resp)
+        except Exception as e:
+            # 常见：TreeGPT 预扣费不足 → HTTP 403；把正文带进报告后中止
+            err_body = ''
+            if hasattr(e, 'read'):
+                try:
+                    err_body = e.read().decode('utf-8', 'ignore')[:800]
+                except Exception:
+                    err_body = ''
+            row = {
+                'turn': i + 1,
+                'phase': 'cold' if i == 0 else 'hot',
+                'error': f'{type(e).__name__}: {e}',
+                'error_body': err_body,
+            }
+            results.append(row)
+            print(json.dumps(row, ensure_ascii=False), flush=True)
+            break
         elapsed = round(time.monotonic() - t0, 3)
 
         assistant = usage.pop('assistant_text', '') or '好'
@@ -253,6 +275,7 @@ def run_probe(
         'caps': {k: caps.get(k) for k in ('thinking', 'cache', 'cache_1h', 'tools', 'vision')},
         'prod_like': prod_like,
         'max_tokens': max_tokens,
+        'model': override_model or chat_relay.model,
         'metadata_user_id': user_id,
         'warning': warn,
         'turns': results,
@@ -278,6 +301,7 @@ def main(argv=None):
     ap.add_argument('--turns', type=int, default=6)
     ap.add_argument('--prod-like', action='store_true', help='带 tools + 小 budget thinking')
     ap.add_argument('--max-tokens', type=int, default=64)
+    ap.add_argument('--model', type=str, default='', help='覆盖 ACTIVE_RELAY 默认模型（如余额不足时试 haiku）')
     ap.add_argument('--out', type=str, default='')
     args = ap.parse_args(argv)
 
@@ -285,6 +309,7 @@ def main(argv=None):
         turns=max(2, args.turns),
         prod_like=args.prod_like,
         max_tokens=args.max_tokens,
+        model=args.model or None,
     )
     summary = report['summary']
     print('--- summary ---', flush=True)
