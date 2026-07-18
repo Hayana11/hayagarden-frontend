@@ -787,12 +787,13 @@ def aggregate_cc_observability(
             coverage["empty_cache_info_rows"] += 1
             continue
         if kind == "other_provider":
+            # api_relay 等不触碰 Claude resident：只计 coverage，保留上一有效 Claude 指纹
             coverage["other_provider_rows"] += 1
-            prev_runtime = None
             continue
         if kind in ("ambiguous_legacy", "legacy"):
             coverage["ambiguous_legacy_rows"] += 1
             coverage["legacy_rows"] += 1
+            # 来源不明：保守清空，避免错误串联
             prev_runtime = None
             continue
 

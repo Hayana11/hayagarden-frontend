@@ -1166,5 +1166,102 @@ class DaysClampTests(unittest.TestCase):
         self.assertEqual(obs.clamp_report_days("x", default=14), 14)
 
 
+class ProviderInterleaveExpiryTests(unittest.TestCase):
+    def test_other_provider_does_not_break_claude_fingerprint_chain(self):
+        """Claude → api_relay → 同指纹长 idle Claude miss → expiry=true。"""
+        rt = _fp(idle_seconds_before_turn=10, resident_generation=4)
+        rows = [
+            {
+                "id": 1,
+                "created_at": "2026-07-18 10:00:00",
+                "cache_info": json.dumps(_usage(
+                    rounds=[{
+                        "index": 1, "complete": True,
+                        "input_tokens": 1, "output_tokens": 1,
+                        "cache_read": 100, "cache_creation": 0, "context_tokens": 101,
+                    }],
+                    respawn_reason=None,
+                    resident_turn_count=5,
+                    runtime=rt,
+                )),
+            },
+            {
+                "id": 2,
+                "created_at": "2026-07-18 10:30:00",
+                "cache_info": json.dumps({
+                    "v": 2,
+                    "provider": "api_relay",
+                    "num_rounds": 1,
+                    "input_tokens": 50,
+                    "output_tokens": 50,
+                    "cache_read": 0,
+                    "cache_creation": 999,
+                    "rounds": [{"cache_read": 0, "cache_creation": 999}],
+                }),
+            },
+            {
+                "id": 3,
+                "created_at": "2026-07-18 12:00:00",
+                "cache_info": json.dumps(_usage(
+                    rounds=[{
+                        "index": 1, "complete": True,
+                        "input_tokens": 1, "output_tokens": 1,
+                        "cache_read": 0, "cache_creation": 59557, "context_tokens": 59558,
+                    }],
+                    respawn_reason=None,
+                    resident_turn_count=6,
+                    runtime=_fp(idle_seconds_before_turn=6900, resident_generation=4),
+                )),
+            },
+        ]
+        report = obs.aggregate_cc_observability(rows, days=1, now=NOW)
+        self.assertEqual(report["coverage"]["other_provider_rows"], 1)
+        self.assertEqual(report["summary"]["total_user_turns"], 2)
+        self.assertEqual(report["summary"]["no_respawn_cache_miss_count"], 1)
+        self.assertEqual(report["summary"]["suspected_cache_expiry_count"], 1)
+        self.assertEqual(report["summary"]["suspected_cache_expiry_unknown_count"], 0)
+
+    def test_ambiguous_legacy_still_clears_fingerprint_chain(self):
+        rows = [
+            {
+                "id": 1,
+                "created_at": "2026-07-18 10:00:00",
+                "cache_info": json.dumps(_usage(
+                    rounds=[{
+                        "index": 1, "complete": True,
+                        "input_tokens": 1, "output_tokens": 1,
+                        "cache_read": 100, "cache_creation": 0, "context_tokens": 101,
+                    }],
+                    respawn_reason=None,
+                    resident_turn_count=5,
+                    runtime=_fp(idle_seconds_before_turn=10, resident_generation=4),
+                )),
+            },
+            {
+                "id": 2,
+                "created_at": "2026-07-18 10:30:00",
+                "cache_info": json.dumps({"cache_read": 1, "cache_creation": 2}),
+            },
+            {
+                "id": 3,
+                "created_at": "2026-07-18 12:00:00",
+                "cache_info": json.dumps(_usage(
+                    rounds=[{
+                        "index": 1, "complete": True,
+                        "input_tokens": 1, "output_tokens": 1,
+                        "cache_read": 0, "cache_creation": 59557, "context_tokens": 59558,
+                    }],
+                    respawn_reason=None,
+                    resident_turn_count=6,
+                    runtime=_fp(idle_seconds_before_turn=6900, resident_generation=4),
+                )),
+            },
+        ]
+        report = obs.aggregate_cc_observability(rows, days=1, now=NOW)
+        self.assertEqual(report["coverage"]["ambiguous_legacy_rows"], 1)
+        self.assertEqual(report["summary"]["suspected_cache_expiry_count"], 0)
+        self.assertEqual(report["summary"]["suspected_cache_expiry_unknown_count"], 1)
+
+
 if __name__ == "__main__":
     unittest.main()
