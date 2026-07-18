@@ -39,6 +39,16 @@ RATE_LIMIT_MARKERS = (
 CLAUDE_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 CODEX_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage"
 
+# Claude oauth/usage is aggressively rate-limited (community note: refresh ≥10–15min).
+# Two VPS timers every 5 minutes will 429; cache last good official payload and reuse.
+OFFICIAL_CACHE_PATH = Path(
+    os.environ.get(
+        "CONTEXT_USAGE_OFFICIAL_CACHE",
+        "/var/lib/haya-context-usage/official.json",
+    )
+)
+OFFICIAL_MIN_INTERVAL_SEC = int(os.environ.get("CONTEXT_USAGE_OFFICIAL_MIN_INTERVAL", "720"))
+
 
 def utc_now_iso() -> str:
     return dt.datetime.now(dt.timezone.utc).isoformat().replace("+00:00", "Z")
@@ -190,15 +200,26 @@ _NO_REDIRECT_OPENER = urllib.request.build_opener(_NoRedirectHandler)
 
 
 def _http_get_json(url: str, headers: dict[str, str], timeout: int = 6) -> dict[str, Any] | None:
+    payload, _status = _http_get_json_result(url, headers, timeout=timeout)
+    return payload
+
+
+def _http_get_json_result(
+    url: str, headers: dict[str, str], timeout: int = 6
+) -> tuple[dict[str, Any] | None, int | None]:
+    """GET JSON; return (payload, http_status). status is set on HTTPError too."""
     request = urllib.request.Request(url, method="GET", headers=headers)
     try:
         with _NO_REDIRECT_OPENER.open(request, timeout=timeout) as response:
-            if response.status != 200:
-                return None
+            status = int(response.status)
+            if status != 200:
+                return None, status
             payload = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        return None, int(exc.code)
     except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError, ValueError):
-        return None
-    return payload if isinstance(payload, dict) else None
+        return None, None
+    return (payload if isinstance(payload, dict) else None), 200
 
 
 def _official_window(section: Any, percent_key: str) -> dict[str, Any]:
@@ -215,13 +236,54 @@ def _official_window(section: Any, percent_key: str) -> dict[str, Any]:
     return result
 
 
+def _read_official_cache() -> dict[str, Any]:
+    data = _read_json_file(OFFICIAL_CACHE_PATH)
+    return data if isinstance(data, dict) else {}
+
+
+def _write_official_cache(cache: dict[str, Any]) -> None:
+    try:
+        OFFICIAL_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        OFFICIAL_CACHE_PATH.write_text(json.dumps(cache, ensure_ascii=False), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _cache_age_seconds(entry: dict[str, Any] | None) -> float | None:
+    if not isinstance(entry, dict):
+        return None
+    fetched = entry.get("fetched_at") or (entry.get("quota") or {}).get("updated_at")
+    if not fetched:
+        return None
+    try:
+        when = dt.datetime.fromisoformat(str(fetched).replace("Z", "+00:00"))
+        return max(0.0, (dt.datetime.now(dt.timezone.utc) - when).total_seconds())
+    except ValueError:
+        return None
+
+
+def _get_cached_official(agent: str) -> dict[str, Any] | None:
+    entry = _read_official_cache().get(agent)
+    if not isinstance(entry, dict):
+        return None
+    quota = entry.get("quota")
+    return quota if isinstance(quota, dict) and (quota.get("five_hour") or quota.get("seven_day")) else None
+
+
+def _store_cached_official(agent: str, quota: dict[str, Any]) -> None:
+    cache = _read_official_cache()
+    cache[agent] = {"fetched_at": utc_now_iso(), "quota": quota}
+    _write_official_cache(cache)
+
+
 def fetch_claude_official_usage(token: str) -> dict[str, Any] | None:
     """Call the same account-usage endpoint the Claude Code CLI itself reads.
 
-    This is unofficial/reverse-engineered, not a published stable API — treat
-    any failure as "no data" and let the caller fall back to local estimation.
+    Same endpoint as 双子续杯 / Claude Code Settings:
+    GET https://api.anthropic.com/api/oauth/usage → five_hour/seven_day.utilization.
+    Unofficial; 429 is common if polled too often — caller should reuse last good.
     """
-    payload = _http_get_json(
+    payload, status = _http_get_json_result(
         CLAUDE_USAGE_URL,
         headers={
             "Authorization": f"Bearer {token}",
@@ -229,7 +291,12 @@ def fetch_claude_official_usage(token: str) -> dict[str, Any] | None:
             "User-Agent": "claude-cli",
         },
     )
+    if status == 429:
+        return None  # caller uses cache; do not invent JSONL "exhausted"
     if not payload:
+        return None
+    # Reject error bodies that lack utilization fields (don't treat as 100% remaining)
+    if not isinstance(payload.get("five_hour"), dict) and not isinstance(payload.get("seven_day"), dict):
         return None
     five_hour = _official_window(payload.get("five_hour"), "utilization")
     seven_day = _official_window(payload.get("seven_day"), "utilization")
@@ -242,16 +309,18 @@ def fetch_codex_official_usage(token: str, account_id: str) -> dict[str, Any] | 
     """Call the same account-usage endpoint the Codex CLI itself reads.
 
     Same caveat as fetch_claude_official_usage: unofficial endpoint, fail soft.
+    Weekly-only plans expose primary_window with limit_window_seconds=604800.
     """
-    headers = {"Authorization": f"Bearer {token}"}
+    headers = {"Authorization": f"Bearer {token}", "User-Agent": "codex-cli"}
     if account_id:
         headers["chatgpt-account-id"] = account_id
-    payload = _http_get_json(CODEX_USAGE_URL, headers=headers)
-    if not payload:
+    payload, status = _http_get_json_result(CODEX_USAGE_URL, headers=headers)
+    if status == 429 or not payload:
         return None
     rate_limit = payload.get("rate_limit") if isinstance(payload.get("rate_limit"), dict) else {}
-    five_hour = _official_window(rate_limit.get("primary_window"), "used_percent")
-    seven_day = _official_window(rate_limit.get("secondary_window"), "used_percent")
+    if not rate_limit:
+        return None
+    five_hour, seven_day = parse_codex_rate_limit_windows(rate_limit)
     if not five_hour and not seven_day:
         return None
     return {"five_hour": five_hour, "seven_day": seven_day, "updated_at": utc_now_iso()}
@@ -265,10 +334,82 @@ def codex_window(raw: Any) -> dict[str, Any]:
         used = min(100.0, max(0.0, used))
         result["used_percentage"] = round(used, 4)
         result["remaining_percentage"] = round(100 - used, 4)
-    reset = iso_time(raw.get("resets_at"))
+    reset = iso_time(raw.get("resets_at") or raw.get("reset_at"))
     if reset:
         result["resets_at"] = reset
     return result
+
+
+def _codex_window_kind(section: dict[str, Any]) -> str | None:
+    """Classify Codex rate-limit slot by window length (seconds).
+
+    Official wham/usage uses ~18000 for 5h and ~604800 for 7d. Weekly-only
+    plans may expose only primary_window with the weekly duration.
+    """
+    secs = integer(section.get("limit_window_seconds"))
+    if secs is None:
+        return None
+    if secs <= 36 * 3600:
+        return "five_hour"
+    if secs >= 2 * 86400:
+        return "seven_day"
+    return None
+
+
+def _reset_horizon_seconds(window: dict[str, Any], now: dt.datetime | None = None) -> float | None:
+    now = now or dt.datetime.now(dt.timezone.utc)
+    reset = window.get("resets_at")
+    if not reset:
+        return None
+    try:
+        when = dt.datetime.fromisoformat(str(reset).replace("Z", "+00:00"))
+        return (when - now).total_seconds()
+    except ValueError:
+        return None
+
+
+def parse_codex_rate_limit_windows(rate_limit: dict[str, Any] | None) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Map Codex primary/secondary slots to five_hour / seven_day buckets."""
+    rate_limit = rate_limit if isinstance(rate_limit, dict) else {}
+    seen: set[int] = set()
+    slots: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    for key in ("primary_window", "primary", "secondary_window", "secondary"):
+        raw = rate_limit.get(key)
+        if not isinstance(raw, dict):
+            continue
+        ident = id(raw)
+        if ident in seen:
+            continue
+        seen.add(ident)
+        parsed = codex_window(raw)
+        if parsed:
+            slots.append((raw, parsed))
+
+    five_hour: dict[str, Any] = {}
+    seven_day: dict[str, Any] = {}
+    unclassified: list[dict[str, Any]] = []
+    for raw, parsed in slots:
+        kind = _codex_window_kind(raw)
+        if kind == "five_hour":
+            five_hour = parsed
+        elif kind == "seven_day":
+            seven_day = parsed
+        else:
+            unclassified.append(parsed)
+
+    for parsed in sorted(
+        unclassified,
+        key=lambda w: _reset_horizon_seconds(w) if _reset_horizon_seconds(w) is not None else 0,
+    ):
+        horizon = _reset_horizon_seconds(parsed)
+        if horizon is not None and horizon > 48 * 3600 and not seven_day:
+            seven_day = parsed
+        elif not five_hour:
+            five_hour = parsed
+        elif not seven_day:
+            seven_day = parsed
+
+    return five_hour, seven_day
 
 
 def default_codex_auth_path() -> Path:
@@ -314,9 +455,10 @@ def collect_codex(
                 }
             rate_limits = payload.get("rate_limits")
             if quota is None and isinstance(rate_limits, dict):
+                five_hour, seven_day = parse_codex_rate_limit_windows(rate_limits)
                 quota = {
-                    "five_hour": codex_window(rate_limits.get("primary")),
-                    "seven_day": codex_window(rate_limits.get("secondary")),
+                    "five_hour": five_hour,
+                    "seven_day": seven_day,
                     "updated_at": updated_at,
                 }
                 latest = usage_tokens(info.get("last_token_usage"))
@@ -335,17 +477,28 @@ def collect_codex(
 
     source = "codex_session_jsonl" if quota else "unavailable"
     if use_official:
-        creds = read_codex_oauth(auth_path or default_codex_auth_path())
-        if creds:
-            official = fetch_codex_official_usage(*creds)
+        cached = _get_cached_official("codex")
+        cache_age = _cache_age_seconds(_read_official_cache().get("codex"))
+        official = None
+        if cached and cache_age is not None and cache_age < OFFICIAL_MIN_INTERVAL_SEC:
+            official = cached
+        else:
+            creds = read_codex_oauth(auth_path or default_codex_auth_path())
+            if creds:
+                official = fetch_codex_official_usage(*creds)
             if official:
-                # Keep token/context counters from the local session scan —
-                # the official endpoint only reports quota %, not context size.
-                for key in ("latest_tokens", "total_tokens", "context_window_tokens"):
-                    if quota and key in quota:
-                        official[key] = quota[key]
-                quota = official
-                source = "codex_oauth_usage"
+                _store_cached_official("codex", official)
+            elif cached:
+                official = cached
+        if official:
+            # Keep token/context counters from the local session scan —
+            # the official endpoint only reports quota %, not context size.
+            merged = dict(official)
+            for key in ("latest_tokens", "total_tokens", "context_window_tokens"):
+                if quota and key in quota:
+                    merged[key] = quota[key]
+            quota = merged
+            source = "codex_oauth_usage"
 
     return {
         "id": "codex",
@@ -446,15 +599,25 @@ def claude_window(block: dict[str, Any], now: dt.datetime | None = None) -> dict
 
 
 def rate_limit_detail(text: str, observed_at: str) -> dict[str, Any] | None:
+    if len(text) > 500:
+        return None
+    if "[DIARY" in text or "[THOUGHT" in text or "[[SAVE:" in text:
+        return None
     lowered = text.lower()
     if not any(marker in lowered for marker in RATE_LIMIT_MARKERS):
         return None
+    if '"is_error":true' not in lowered and '"type":"error"' not in lowered:
+        if not re.search(r'\b(429|rate limit|usage limit reached|limit reached)\b', lowered):
+            return None
     kind = "weekly" if "weekly" in lowered else "opus" if "opus" in lowered else "rate_limit"
     reset_match = re.search(r"(?:reset(?:s)?|try again)[^\n\r.]{0,180}", text, re.IGNORECASE)
+    reset_text = reset_match.group(0)[:200] if reset_match else ""
+    if len(reset_text) > 120 and ("\n" in reset_text or "---" in reset_text):
+        return None
     return {
         "kind": kind,
         "exhausted": True,
-        "reset_text": reset_match.group(0)[:200] if reset_match else "",
+        "reset_text": reset_text,
         "observed_at": observed_at,
     }
 
@@ -503,14 +666,29 @@ def collect_claude(
     sessions, effective_limit = scan_claude_projects(projects_dir)
 
     official = None
+    source = "unavailable"
     if use_official:
-        token = read_claude_oauth_token(credentials_path or default_claude_credentials_path())
-        if token:
-            official = fetch_claude_official_usage(token)
+        cached = _get_cached_official("claude")
+        cache_age = _cache_age_seconds(_read_official_cache().get("claude"))
+        # Throttle: Claude oauth/usage 429s under ~5min dual timers (双子续杯: 10–15min).
+        if cached and cache_age is not None and cache_age < OFFICIAL_MIN_INTERVAL_SEC:
+            official = cached
+            source = "claude_oauth_usage"
+        else:
+            token = read_claude_oauth_token(credentials_path or default_claude_credentials_path())
+            if token:
+                official = fetch_claude_official_usage(token)
+            if official:
+                _store_cached_official("claude", official)
+                source = "claude_oauth_usage"
+            elif cached:
+                # 429 / transient failure: keep last good percentages, never JSONL false alarm
+                official = cached
+                source = "claude_oauth_usage"
 
     if official:
-        quota = official
-        source = "claude_oauth_usage"
+        quota = dict(official)
+        effective_limit = None
     else:
         block = read_ccusage_block(timezone)
         quota = {
@@ -520,6 +698,14 @@ def collect_claude(
         }
         source = "ccusage_blocks" if block else "claude_project_jsonl" if effective_limit else "unavailable"
 
+    if effective_limit and sessions:
+        newest = max((s.get("updated_at") or "") for s in sessions)
+        if newest and newest > (effective_limit.get("observed_at") or ""):
+            effective_limit = None
+
+    # JSONL "exhausted" is a last-resort hint only — never when we have % bars or recent chat.
+    if effective_limit and (quota.get("five_hour") or quota.get("seven_day")):
+        effective_limit = None
     if effective_limit:
         quota["effective_limit"] = effective_limit
 
