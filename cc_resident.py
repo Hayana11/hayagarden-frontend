@@ -131,6 +131,11 @@ class ResidentSession:
         self._last_state_snapshot = {}
         self._last_group_message_id = 0
         self._group_cursor_initialized = False
+        self._relationship_user_turn_count = 0
+        self._last_relationship_fingerprint = None
+        self._last_relationship_band = None
+        self._last_relationship_turn = 0
+        self._last_relationship_sent_at = None
 
     def _spawn(self, system_text, env, *, reason='process_dead'):
         self._kill(quiet=True)
@@ -225,6 +230,15 @@ class ResidentSession:
         """flush 后只提交仍存活 resident 内的游标；one-shot 不在这里消费。"""
         if not commit_meta:
             return
+        if commit_meta.get('relationship_user_turn'):
+            self._relationship_user_turn_count += 1
+        if 'relationship_fingerprint' in commit_meta:
+            self._last_relationship_fingerprint = commit_meta.get('relationship_fingerprint')
+            self._last_relationship_band = commit_meta.get('relationship_band')
+            self._last_relationship_turn = int(
+                commit_meta.get('relationship_turn', self._relationship_user_turn_count) or 0
+            )
+            self._last_relationship_sent_at = commit_meta.get('relationship_sent_at')
         if 'state_snapshot' in commit_meta:
             self._last_state_snapshot = copy.deepcopy(commit_meta['state_snapshot'] or {})
         if commit_meta.get('group_cursor_initialized'):
@@ -510,6 +524,26 @@ class ResidentSession:
     @property
     def group_cursor_initialized(self):
         return self._group_cursor_initialized
+
+    @property
+    def relationship_user_turn_count(self):
+        return self._relationship_user_turn_count
+
+    @property
+    def last_relationship_fingerprint(self):
+        return self._last_relationship_fingerprint
+
+    @property
+    def last_relationship_band(self):
+        return self._last_relationship_band
+
+    @property
+    def last_relationship_turn(self):
+        return self._last_relationship_turn
+
+    @property
+    def last_relationship_sent_at(self):
+        return self._last_relationship_sent_at
 
     @property
     def pending_respawn_reason(self):

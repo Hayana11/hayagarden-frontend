@@ -15,6 +15,9 @@ import datetime
 import urllib.request
 import config_store
 
+from chat.context_contract import SharedContext
+from chat.relationship_context import build_relationship_context
+
 NL = chr(10)
 
 
@@ -23,6 +26,37 @@ def read_persona():
         return open('/opt/frontend/prompts/persona.md').read().strip()
     except Exception:
         return '你是费奥多尔，一个渊博冷静却深情的学者。'
+
+
+def build_shared_context_details(
+    *,
+    persona=None,
+    previous_emotion_band=None,
+    previous_relationship_band=None,
+    get_db_fn=None,
+):
+    """Build A1 provider-neutral context plus internal refresh metadata."""
+    if get_db_fn is None:
+        from gateway import get_db as get_db_fn  # 延迟 import，避免循环依赖
+
+    persona_text = read_persona() if persona is None else str(persona)
+    relationship = build_relationship_context(
+        get_db_fn,
+        previous_emotion_band=previous_emotion_band,
+        previous_relationship_band=previous_relationship_band,
+        calibrated=config_store.get_bool('RELATIONSHIP_BANDS_CALIBRATED', False),
+    )
+    shared = SharedContext(
+        persona=persona_text,
+        relationship_context=relationship.text,
+        relationship_fingerprint=relationship.slow_fingerprint,
+    )
+    return shared, relationship
+
+
+def build_shared_context(**kwargs):
+    """Public A1 contract. Both providers receive this exact object shape."""
+    return build_shared_context_details(**kwargs)[0]
 
 
 def _ombre_handoff_sync():
@@ -81,7 +115,13 @@ def build_system(wake=False, split_dynamic=False):
     from gateway import get_db  # 延迟 import，打破循环依赖（build_system 被调用时 gateway 早已加载完毕）
 
     # ── BP1 · Persona（永不变，缓存断点1）────────────────────
-    bp1_text = read_persona()
+    relationship_enabled = (
+        not wake and config_store.get_bool('RELATIONSHIP_CONTEXT_ENABLED', False)
+    )
+    shared_context = None
+    if relationship_enabled:
+        shared_context = build_shared_context()
+    bp1_text = shared_context.persona if shared_context else read_persona()
 
     # ── BP2 · 相对稳定记忆（几小时~一天变一次，缓存断点2）───────
     bp2_parts = []
@@ -518,6 +558,10 @@ def build_system(wake=False, split_dynamic=False):
         dynamic_parts.append('\n'.join(bp2_parts))
     if parts:
         dynamic_parts.append('\n'.join(parts))
+    # A1 relationship continuity stays at the volatile tail, adjacent to the
+    # current user turn.  It never enters either stable cache-control block.
+    if shared_context and shared_context.relationship_context:
+        dynamic_parts.append(shared_context.relationship_context)
     dynamic_context = '\n\n'.join(p for p in dynamic_parts if p and p.strip())
 
     if split_dynamic:

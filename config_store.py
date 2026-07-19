@@ -5,36 +5,53 @@ config_store.py
 原则：
   - .env 只保留部署配置（API_URL/ANTHROPIC_API_KEY/CLAUDE_CODE_OAUTH_TOKEN/
     BOARD_TOKEN_FYODOR/CONTEXT_USAGE_REPORT_TOKEN/MOMENTS_OWNER_TOKEN/DISCORD_*/SECRET_KEY/PORT）
-  - 运行时配置（MODEL/WS_MODEL/GW_PROVIDER/DESIRE_DRIVEN/LONGING_ENABLED/
+  - 运行时配置（MODEL/WS_MODEL/provider 路由/DESIRE_DRIVEN/LONGING_ENABLED/
     ACTIVE_RELAY）全部走这里，改了立即生效，不依赖进程重启
   - get() 不做进程内缓存，每次直接查 DB
   - 迁移期兜底：DB 里还没设置过的 key，回退读一次 .env 里的同名旧值，
     确保刚上线时不会读到空值；一旦有人调用过 set()，DB 优先，.env 从此失效
 """
+import os
 import sqlite3
 
-DB_PATH  = '/opt/frontend/memories.db'
-ENV_PATH = '/opt/frontend/.env'
+DB_PATH = os.getenv('HAYAGARDEN_CONFIG_DB_PATH', '/opt/frontend/memories.db')
+ENV_PATH = os.getenv('HAYAGARDEN_ENV_PATH', '/opt/frontend/.env')
 
 # key -> 迁移期兜底读取的 .env 变量名（None 表示没有旧值可兜底）
 _ENV_FALLBACK_KEYS = {
     'MODEL':           'MODEL',
     'WS_MODEL':        'WS_MODEL',
     'GW_PROVIDER':     'GW_PROVIDER',
+    'CHAT_PROVIDER':   'CHAT_PROVIDER',
+    'WAKE_PROVIDER':   'WAKE_PROVIDER',
+    'BACKGROUND_PROVIDER': 'BACKGROUND_PROVIDER',
+    'FALLBACK_PROVIDER': 'FALLBACK_PROVIDER',
     'DESIRE_DRIVEN':   'DESIRE_DRIVEN',
     'LONGING_ENABLED': 'LONGING_ENABLED',
     'DESIRE_LEDGER_ENABLED': 'DESIRE_LEDGER_ENABLED',
     'MIRROR_ENABLED': 'MIRROR_ENABLED',
     'IDENTITY_GOVERNANCE_ENABLED': 'IDENTITY_GOVERNANCE_ENABLED',
+    'RELATIONSHIP_CONTEXT_ENABLED': 'RELATIONSHIP_CONTEXT_ENABLED',
+    'RELATIONSHIP_BANDS_CALIBRATED': 'RELATIONSHIP_BANDS_CALIBRATED',
+    'RELATIONSHIP_IDLE_REFRESH_SECONDS': 'RELATIONSHIP_IDLE_REFRESH_SECONDS',
 }
 
 _DEFAULTS = {
     'GW_PROVIDER':     'api_relay',
+    # CHAT_PROVIDER 留空时兼容读取 GW_PROVIDER；wake 在 B1 前应在线上显式设为 api_relay。
+    'CHAT_PROVIDER':   '',
+    'WAKE_PROVIDER':   'inherit',
+    'BACKGROUND_PROVIDER': 'api_relay',
+    'FALLBACK_PROVIDER': 'none',
     'DESIRE_DRIVEN':   '0',
     'LONGING_ENABLED': '1',
     'DESIRE_LEDGER_ENABLED': '0',
     'MIRROR_ENABLED': '0',
     'IDENTITY_GOVERNANCE_ENABLED': '0',
+    # A1 代码先安全落地；部署观察窗口由运行时配置显式开启。
+    'RELATIONSHIP_CONTEXT_ENABLED': '0',
+    'RELATIONSHIP_BANDS_CALIBRATED': '0',
+    'RELATIONSHIP_IDLE_REFRESH_SECONDS': '3600',
 }
 
 
