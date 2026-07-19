@@ -5455,6 +5455,20 @@ from monopoly_agents import (
 )
 from relay.manager import RelayManager as _RelayManager
 
+
+def _monopoly_relay_label():
+    """Return the configured relay preset name without exposing credentials."""
+    active_id = config_store.get('ACTIVE_RELAY', '')
+    if not active_id:
+        return ''
+    try:
+        conn = sqlite3.connect(DB_PATH, timeout=3)
+        row = conn.execute('SELECT name FROM relay_presets WHERE id=?', (active_id,)).fetchone()
+        conn.close()
+        return str(row[0] or '') if row else ''
+    except Exception:
+        return ''
+
 _monopoly_service = _MonopolyService(db_path=DB_PATH)
 _monopoly_scheduler = _MonopolyAgentScheduler(
     _monopoly_service,
@@ -5466,6 +5480,7 @@ _monopoly_scheduler = _MonopolyAgentScheduler(
         token_getter=lambda: CC_TOKEN,
         cwd=CC_CWD,
         allowed_tools=CC_ALLOWED_TOOLS,
+        relay_label_getter=_monopoly_relay_label,
     ),
     codex=_MonopolyCodexAdapter(codex_app_server.client),
 )

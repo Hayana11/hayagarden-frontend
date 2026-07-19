@@ -13,6 +13,7 @@ from typing import Callable
 from flask import Blueprint, Response, jsonify, request, stream_with_context
 
 import monopoly_store as store
+from moments_auth import OwnerAuthError, require_owner
 from monopoly_rooms import MonopolyService, RoomError, RoomStatus
 
 
@@ -80,9 +81,23 @@ def create_monopoly_blueprint(
     service: MonopolyService,
     *,
     notify_agents: Callable[[dict], None] | None = None,
+    owner_guard: Callable[[object], None] | None = None,
 ) -> Blueprint:
     bp = Blueprint("monopoly", __name__, url_prefix="/api/monopoly")
     notifier = notify_agents or GatewayAgentNotifier()
+    guard = owner_guard or require_owner
+
+    @bp.before_request
+    def require_monopoly_owner():
+        try:
+            guard(request)
+        except OwnerAuthError as exc:
+            response = jsonify({"ok": False, "code": "OWNER_AUTH_REQUIRED", "detail": exc.message})
+            response.status_code = exc.status_code
+            if exc.status_code == 401:
+                response.headers["WWW-Authenticate"] = "Bearer"
+            return response
+        return None
 
     @bp.post("/rooms")
     def create_room():
@@ -196,6 +211,7 @@ def create_monopoly_blueprint(
             return _error_response(exc)
         after = request.args.get("after", 0, type=int) or 0
         last_message_id = max((row["id"] for row in snapshot["messages"]), default=0)
+        initial_live_id = store.latest_live_event_id(room_id, service.db_path)
 
         @stream_with_context
         def generate():
@@ -204,14 +220,16 @@ def create_monopoly_blueprint(
             # and receive the exact persisted gap.
             event_seq = int(snapshot["room"]["event_seq"]) if after <= 0 else after
             message_id = last_message_id
+            live_id = initial_live_id
             yield _sse("room.snapshot", {"type": "room.snapshot", "data": snapshot}, event_id=event_seq)
             last_keepalive = time.monotonic()
             while True:
                 emitted = False
-                events, messages = store.poll_room_stream(
+                events, messages, live_events = store.poll_room_stream(
                     room_id,
                     after_seq=event_seq,
                     after_message_id=message_id,
+                    after_live_id=live_id,
                     db_path=service.db_path,
                 )
                 for event in events:
@@ -222,16 +240,6 @@ def create_monopoly_blueprint(
                     elif event["type"] == "pending":
                         envelope = {"type": "game.pending", "seq": event_seq, "data": event["payload"] or None}
                         name = "game.pending"
-                    elif event["type"] == "agent_status":
-                        envelope = {"type": "agent.status", "actor": event.get("actor"), "data": event["payload"]}
-                        name = "agent.status"
-                    elif event["type"] in {"chat_start", "chat_delta", "chat_done"}:
-                        name = event["type"].replace("_", ".")
-                        envelope = {
-                            "type": name,
-                            "actor": event.get("actor"),
-                            **event["payload"],
-                        }
                     elif event["type"] == "room_error":
                         envelope = {"type": "room.error", "data": event["payload"]}
                         name = "room.error"
@@ -239,6 +247,24 @@ def create_monopoly_blueprint(
                         envelope = {"type": "game.event", "seq": event_seq, "data": event}
                         name = "game.event"
                     yield _sse(name, envelope, event_id=event_seq)
+                    emitted = True
+                for event in live_events:
+                    live_id = event["id"]
+                    if event["type"] == "agent_status":
+                        envelope = {
+                            "type": "agent.status",
+                            "actor": event.get("actor"),
+                            "data": event["payload"],
+                        }
+                        name = "agent.status"
+                    else:
+                        name = event["type"].replace("_", ".")
+                        envelope = {
+                            "type": name,
+                            "actor": event.get("actor"),
+                            **event["payload"],
+                        }
+                    yield _sse(name, envelope, event_id=f"l{live_id}")
                     emitted = True
                 for message in messages:
                     message_id = message["id"]

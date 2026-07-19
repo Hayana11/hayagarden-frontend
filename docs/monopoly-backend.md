@@ -36,10 +36,11 @@ MONOPOLY_SAFE_WORD=404
 
 ## API 约定
 
+- `/api/monopoly/*` 全部复用 `moments_auth` 的 owner cookie/Bearer 鉴权；生产必须配置 `MOMENTS_OWNER_TOKEN`，未鉴权请求返回 401，未配置返回 503。
 - `POST /api/monopoly/rooms` 建房。
 - `POST /api/monopoly/rooms/:id/setup` 强制注入房间独立 `pair_code` 和 `setup_confirmed`，并先从 `/help` 读取当前 `rules_ack` 再调用 `/new_game`。`p1_name/p2_name` 会持久化为内部 actor 到真实引擎玩家名的映射。
 - `POST /api/monopoly/rooms/:id/actions` 的浏览器调用固定以 `haya` 身份执行；AI 动作只在 5051 内部调度器中产生。
-- `GET /api/monopoly/rooms/:id/stream?after=N` 是唯一公开 SSE；跨 worker 通过 SQLite 事件流恢复。
+- `GET /api/monopoly/rooms/:id/stream?after=N` 是唯一公开 SSE；跨 worker 通过 SQLite 恢复。游戏事件使用连续 `event_seq`，`chat.start/delta/done` 和 `agent.status` 走独立、限长的 live 队列，不参与乐观锁，也不进入 AI 的最近游戏事件。
 - 安全词默认是 `404`：整条消息精确为 `404`，或 JSON 显式带 `safeWord:true` 时，才会在通知 AI 前把房间切为 `paused`；包含“HTTP 404”的普通消息不会误触。
 
 前端遇到 HTTP/SSE `STALE_ROOM_STATE` 时只刷新快照，不重发。`ENGINE_VALIDATION`（400/422/428）已经写入 `room.error`；`roll` 超时由 `EngineClient` 先查 state，仅在回合标记未变化时补发一次。若回合已经推进但响应丢失，上游 `/state` 只有 `turn/status/board/positions/coins/laps`，无法重建本轮 `task/action_needed/settled`，后端会返回 `ROLL_OUTCOME_UNKNOWN`、清除可能过期的本地悬账并冻结房间，禁止自动 resume 或重掷。
@@ -48,7 +49,9 @@ MONOPOLY_SAFE_WORD=404
 
 即时动作的归属由后端把 `who/guesser` 强制改写为调用者自己的真实引擎名，浏览器不能替 CC 操作。上游源码明确允许 `buy_card` “踩商店格触发，或自己随时调”，`use_card/discard` 与身份事件也按本人手牌/身份校验，因此这些动作不额外强制“当前回合”；`swap/reroll_task` 仍由房间层限制为悬账所属玩家。
 
-SQLite 初始化时启用 WAL 与 30 秒 busy timeout；SSE 每 500ms 用一个短连接同时拉取事件和消息。生产 Gunicorn 必须使用 threaded worker，并给每个常驻 SSE 连接预留一个线程。
+SQLite 初始化时启用 WAL 与 30 秒 busy timeout；AI 文本 delta 最多约每 80ms 合并写入一次，SSE 每 500ms 用一个短连接同时拉取游戏事件、live 事件和消息。生产 Gunicorn 必须使用 threaded worker，并给每个常驻 SSE 连接预留一个线程。
+
+CC 的 provider 快照会把 `api.anthropic.com` 识别为 `official`，中转则读取当前 `relay_presets.name`（例如 `guagua`），Claude Code 单独标为 `claude_code`。瞬时网络异常只发 `agent.status`，不会改变棋盘；只有锚定命中的明确内容拒绝才会触发 swap，用尽后才 skip。CC 掷骰后若抽到自己的悬账，调度器额外开放一次有上限的 follow-up，让它演完并提交 `decide`，不会形成无限对话。
 
 ## 上线前冒烟
 

@@ -4,7 +4,7 @@ import tempfile
 import unittest
 
 from monopoly_engine import EngineClient, EngineReply, EngineUnavailable, EngineValidationError
-from monopoly_agents import MonopolyAgentScheduler, _REFUSAL_RE, _allowed_actions, _parse_output
+from monopoly_agents import CCAdapter, MonopolyAgentScheduler, _REFUSAL_RE, _allowed_actions, _parse_output
 from monopoly_rooms import MonopolyService, PassthroughTokenCipher, RoomError
 import monopoly_store as store
 
@@ -12,9 +12,10 @@ import monopoly_store as store
 class FakeEngine:
     def __init__(self):
         self.calls = []
-        self.current_state = {"turn": 1, "current_player": "p1", "coins": {"p1": 10, "p2": 10}}
+        self.current_state = {"turn": "哈娅", "coins": {"哈娅": 10, "CC": 10}}
         self.next_roll = {
-            "state": {"turn": 2, "current_player": "p2"},
+            "who": "哈娅",
+            "next_turn": "CC",
             "task": {"text": "task one"},
         }
 
@@ -35,7 +36,11 @@ class FakeEngine:
     def roll(self, game_id, body):
         self.calls.append(("roll", game_id, dict(body)))
         payload = self.next_roll
-        self.current_state = dict(payload.get("state") or payload)
+        nested = payload.get("state")
+        if isinstance(nested, dict):
+            self.current_state = dict(nested)
+        elif isinstance(payload.get("next_turn"), str):
+            self.current_state = {**self.current_state, "turn": payload["next_turn"]}
         return EngineReply(payload)
 
     def action(self, action, game_id, **params):
@@ -64,7 +69,7 @@ class MonopolyBackendTests(unittest.TestCase):
         seq = self.service.snapshot(self.room_id)["room"]["event_seq"]
         self.service.setup(
             self.room_id,
-            {"flavor": "medium", "p1_name": "p1", "p2_name": "p2"},
+            {"flavor": "medium", "p1_name": "哈娅", "p2_name": "CC"},
             expected_seq=seq,
         )
 
@@ -98,6 +103,23 @@ class MonopolyBackendTests(unittest.TestCase):
         finally:
             conn.close()
 
+    def test_live_typing_events_do_not_advance_game_event_seq(self):
+        before = self._seq()
+        live = store.append_live_event(
+            self.room_id, "chat_delta", "cc", {"delta": "hello"}, self.db_path
+        )
+        self.assertEqual(self._seq(), before)
+        events, messages, live_events = store.poll_room_stream(
+            self.room_id,
+            after_seq=before,
+            after_message_id=0,
+            after_live_id=live["id"] - 1,
+            db_path=self.db_path,
+        )
+        self.assertEqual(events, [])
+        self.assertTrue(isinstance(messages, list))
+        self.assertEqual([event["payload"]["delta"] for event in live_events], ["hello"])
+
     def test_lazy_decision_does_not_call_engine_until_next_roll(self):
         self.service.execute(self.room_id, {"action": "roll", "actor": "haya", "expected_seq": self._seq()})
         roll_calls = len([call for call in self.engine.calls if call[0] == "roll"])
@@ -111,7 +133,7 @@ class MonopolyBackendTests(unittest.TestCase):
         })
         self.assertEqual(len([call for call in self.engine.calls if call[0] == "roll"]), roll_calls)
 
-        self.engine.next_roll = {"state": {"turn": 3, "current_player": "p1"}, "tile_type": "normal"}
+        self.engine.next_roll = {"who": "CC", "next_turn": "哈娅", "tile_type": "normal"}
         self.service.execute(self.room_id, {"action": "roll", "actor": "cc", "expected_seq": self._seq()})
         self.assertEqual(
             [call for call in self.engine.calls if call[0] == "roll"][-1],
@@ -124,7 +146,7 @@ class MonopolyBackendTests(unittest.TestCase):
 
     def test_duel_pending_rejects_roll_until_winner_chosen(self):
         self.engine.next_roll = {
-            "state": {"turn": 2, "current_player": "p2"},
+            "who": "哈娅", "next_turn": "CC",
             "action_needed": "duel",
         }
         self.service.execute(self.room_id, {"action": "roll", "actor": "haya", "expected_seq": self._seq()})
@@ -135,11 +157,28 @@ class MonopolyBackendTests(unittest.TestCase):
             "action": "duel_result", "actor": "haya", "args": {"winner": "haya"},
             "expected_seq": self._seq(),
         })
-        self.engine.next_roll = {"state": {"turn": 3, "current_player": "p1"}}
+        self.engine.next_roll = {"who": "CC", "next_turn": "哈娅"}
         self.service.execute(self.room_id, {"action": "roll", "actor": "cc", "expected_seq": self._seq()})
         self.assertEqual(
             [call for call in self.engine.calls if call[0] == "roll"][-1][2],
-            {"duel_winner": "p1"},
+            {"duel_winner": "哈娅"},
+        )
+
+    def test_direct_roll_decision_maps_actor_duel_winner_to_engine_name(self):
+        self.engine.next_roll = {"who": "哈娅", "next_turn": "CC", "action_needed": "duel"}
+        self.service.execute(self.room_id, {
+            "action": "roll", "actor": "haya", "expected_seq": self._seq(),
+        })
+        self.engine.next_roll = {"who": "CC", "next_turn": "哈娅"}
+        self.service.execute(self.room_id, {
+            "action": "roll",
+            "actor": "cc",
+            "args": {"decision": {"duel_winner": "haya"}},
+            "expected_seq": self._seq(),
+        })
+        self.assertEqual(
+            [call for call in self.engine.calls if call[0] == "roll"][-1][2],
+            {"duel_winner": "哈娅"},
         )
 
     def test_stale_seq_is_rejected_before_engine_call(self):
@@ -210,7 +249,7 @@ class MonopolyBackendTests(unittest.TestCase):
     def test_unknown_timeout_result_freezes_instead_of_dropping_pending(self):
         def uncertain_roll(game_id, body):
             return EngineReply(
-                {"state": {"turn": "p2", "coins": {"p1": 9, "p2": 11}}},
+                {"state": {"turn": "CC", "coins": {"哈娅": 9, "CC": 11}}},
                 reconciled=True,
                 outcome_unknown=True,
             )
@@ -260,6 +299,12 @@ class MonopolyBackendTests(unittest.TestCase):
         self.assertEqual(snapshot["pending"]["actor"], "haya")
         actions = _allowed_actions(snapshot, "cc")
         self.assertNotIn("roll", {action["action"] for action in actions})
+        self.service.execute(self.room_id, {
+            "action": "decide", "actor": "haya", "args": {"task": "done"},
+            "expected_seq": self._seq(),
+        })
+        actions = _allowed_actions(self.service.snapshot(self.room_id), "cc")
+        self.assertIn("roll", {action["action"] for action in actions})
 
     def test_delete_uses_decrypted_engine_token(self):
         self.service.delete(self.room_id)
@@ -344,6 +389,165 @@ class AgentOutputTests(unittest.TestCase):
         self.assertIsNone(_REFUSAL_RE.search("我无法完成这个任务，换一张吧。"))
         self.assertIsNone(_REFUSAL_RE.search("这个政策限制很奇怪。"))
         self.assertIsNotNone(_REFUSAL_RE.search("抱歉，我不能协助这个请求。"))
+
+
+class MonopolyRouteAuthTests(unittest.TestCase):
+    def test_entire_blueprint_requires_owner_auth(self):
+        try:
+            from flask import Flask
+            from moments_auth import OwnerAuthError
+            from monopoly_routes import create_monopoly_blueprint
+        except ModuleNotFoundError as exc:
+            self.skipTest(f"Flask runtime unavailable: {exc}")
+        handle, db_path = tempfile.mkstemp(suffix=".db")
+        os.close(handle)
+        lock_dir = tempfile.mkdtemp(prefix="monopoly-auth-locks-")
+        try:
+            from monopoly_rooms import RoomLockRegistry
+
+            service = MonopolyService(
+                db_path=db_path,
+                engine=FakeEngine(),
+                cipher=PassthroughTokenCipher(),
+                locks=RoomLockRegistry(lock_dir),
+            )
+            app = Flask(__name__)
+
+            def reject(_request):
+                raise OwnerAuthError("unauthorized", 401)
+
+            app.register_blueprint(create_monopoly_blueprint(service, owner_guard=reject))
+            response = app.test_client().post("/api/monopoly/rooms", json={})
+            self.assertEqual(response.status_code, 401)
+            self.assertEqual(response.get_json()["code"], "OWNER_AUTH_REQUIRED")
+            self.assertEqual(response.headers["WWW-Authenticate"], "Bearer")
+        finally:
+            try:
+                os.unlink(db_path)
+            except OSError:
+                pass
+            if os.path.isdir(lock_dir):
+                for name in os.listdir(lock_dir):
+                    os.unlink(os.path.join(lock_dir, name))
+                os.rmdir(lock_dir)
+
+
+class CCAdapterSnapshotTests(unittest.TestCase):
+    @staticmethod
+    def _adapter(provider, relay, label=""):
+        return CCAdapter(
+            provider_getter=lambda: provider,
+            model_getter=lambda: "fallback-model",
+            relay_factory=lambda: relay,
+            token_getter=lambda: "token",
+            cwd=".",
+            allowed_tools="",
+            relay_label_getter=lambda: label,
+        )
+
+    def test_snapshot_distinguishes_official_relay_and_claude_code(self):
+        official_relay = type("Relay", (), {"api_url": "https://api.anthropic.com/v1/messages", "model": "opus"})()
+        snapshot = self._adapter("api_relay", official_relay).snapshot()
+        self.assertEqual(snapshot, {"kind": "official", "label": "Anthropic Official", "model": "opus"})
+
+        guagua = type("Relay", (), {"api_url": "https://relay.example/v1/messages", "model": "sonnet"})()
+        snapshot = self._adapter("api_relay", guagua, "guagua").snapshot()
+        self.assertEqual(snapshot, {"kind": "relay", "label": "guagua", "model": "sonnet"})
+
+        snapshot = self._adapter("claude_code", guagua).snapshot()
+        self.assertEqual(snapshot["kind"], "claude_code")
+
+
+class MonopolyAgentSchedulerTests(unittest.TestCase):
+    def setUp(self):
+        handle, self.db_path = tempfile.mkstemp(suffix=".db")
+        os.close(handle)
+        self.lock_dir = tempfile.mkdtemp(prefix="monopoly-agent-locks-")
+        self.engine = FakeEngine()
+        from monopoly_rooms import RoomLockRegistry
+
+        self.service = MonopolyService(
+            db_path=self.db_path,
+            engine=self.engine,
+            cipher=PassthroughTokenCipher(),
+            locks=RoomLockRegistry(self.lock_dir),
+        )
+        self.room_id = self.service.create_room()["room"]["id"]
+        self.service.setup(
+            self.room_id,
+            {"p1_name": "哈娅", "p2_name": "CC"},
+            expected_seq=self.service.snapshot(self.room_id)["room"]["event_seq"],
+        )
+        self.engine.next_roll = {"who": "哈娅", "next_turn": "CC", "tile_type": "normal"}
+        self.service.execute(self.room_id, {
+            "actor": "haya", "action": "roll",
+            "expected_seq": self.service.snapshot(self.room_id)["room"]["event_seq"],
+        })
+
+    def tearDown(self):
+        try:
+            os.unlink(self.db_path)
+        except OSError:
+            pass
+        for name in os.listdir(self.lock_dir):
+            os.unlink(os.path.join(self.lock_dir, name))
+        os.rmdir(self.lock_dir)
+
+    def _scheduler(self, cc):
+        codex = type("Codex", (), {"snapshot": lambda self: {}, "stream": lambda *args: iter(())})()
+        return MonopolyAgentScheduler(
+            self.service,
+            persona_builder=lambda: "",
+            cc=cc,
+            codex=codex,
+        )
+
+    def test_network_failure_never_swaps_skips_or_rolls(self):
+        class FailingCC:
+            @staticmethod
+            def snapshot():
+                return {"kind": "relay", "label": "guagua", "model": "sonnet"}
+
+            @staticmethod
+            def stream(*_args):
+                raise RuntimeError("temporary network failure")
+
+        before_calls = list(self.engine.calls)
+        self._scheduler(FailingCC())._generate_one(self.room_id, "cc", "turn", None)
+        self.assertEqual(self.engine.calls, before_calls)
+        live = store.poll_room_stream(
+            self.room_id,
+            after_seq=self.service.snapshot(self.room_id)["room"]["event_seq"],
+            after_message_id=0,
+            after_live_id=0,
+            db_path=self.db_path,
+        )[2]
+        self.assertTrue(any(event["type"] == "agent_status" for event in live))
+
+    def test_cc_roll_that_draws_own_task_gets_one_followup_turn(self):
+        outputs = iter([
+            '我来掷。\n[game_intent]{"action":"roll","args":{}}[/game_intent]',
+            '这张我做完。\n[game_intent]{"action":"decide","args":{"task":"done"}}[/game_intent]',
+        ])
+
+        class ScriptedCC:
+            @staticmethod
+            def snapshot():
+                return {"kind": "relay", "label": "guagua", "model": "sonnet"}
+
+            @staticmethod
+            def stream(*_args):
+                yield next(outputs)
+
+        self.engine.next_roll = {
+            "who": "CC", "next_turn": "哈娅", "task": {"text": "task for CC"}
+        }
+        self._scheduler(ScriptedCC())._generate_one(self.room_id, "cc", "turn", None)
+        snapshot = self.service.snapshot(self.room_id)
+        self.assertEqual(snapshot["pending"]["actor"], "cc")
+        self.assertEqual(snapshot["pending"]["chosen"], {"task": "done"})
+        cc_messages = [message for message in snapshot["messages"] if message["author"] == "cc"]
+        self.assertEqual(len(cc_messages), 2)
 
 
 if __name__ == "__main__":

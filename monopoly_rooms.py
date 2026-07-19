@@ -227,6 +227,18 @@ def _engine_who_for_actor(room: dict, actor: str) -> str:
     return actor
 
 
+def _normalize_duel_winner(room: dict, winner: object) -> str:
+    value = str(winner or "").strip()
+    if value in {"haya", "cc"}:
+        return _engine_who_for_actor(room, value)
+    engine_names = {
+        str(name) for name in (room.get("_engine_players") or {}).values() if name
+    }
+    if value in engine_names:
+        return value
+    raise RoomError("INVALID_DUEL_WINNER", "对决赢家只能是 haya 或 cc")
+
+
 def _pending_actor(payload: dict, room: dict, roller: str) -> str:
     candidates = [
         payload.get("actor"), payload.get("who"), payload.get("player"),
@@ -450,20 +462,29 @@ class MonopolyService:
 
     def _roll(self, room: dict, actor: str, args: dict) -> dict:
         pending = room.get("pending")
-        if room["status"] == RoomStatus.DUEL_PENDING.value and not (pending or {}).get("chosen"):
+        inline_decision = args.get("decision") if isinstance(args.get("decision"), dict) else {}
+        inline_winner = inline_decision.get("duel_winner") or args.get("duel_winner")
+        if (
+            room["status"] == RoomStatus.DUEL_PENDING.value
+            and not (pending or {}).get("chosen")
+            and not inline_winner
+        ):
             raise RoomError("DUEL_WINNER_REQUIRED", "必须先选出对决赢家")
         body: dict = {}
         if pending:
             selected = pending.get("chosen") or pending.get("default")
-            if not selected:
+            if not selected and not inline_winner:
                 raise RoomError("PENDING_DECISION_REQUIRED", "这笔悬账没有默认决定")
-            body.update(selected)
+            if selected:
+                body.update(selected)
         decision = args.get("decision")
         if isinstance(decision, dict):
             body.update(decision)
         for key in ("task", "toll", "super_action", "duel_winner", "guess", "swap_identity"):
             if key in args:
                 body[key] = args[key]
+        if "duel_winner" in body:
+            body["duel_winner"] = _normalize_duel_winner(room, body["duel_winner"])
         try:
             reply = self.engine.roll(room["game_id"], body)
         except EngineValidationError as exc:
@@ -853,7 +874,7 @@ class MonopolyService:
         if (
             room["status"] == RoomStatus.DUEL_PENDING.value
             and not (room.get("pending") or {}).get("chosen")
-            and action not in {"decide", "duel_result"}
+            and action not in {"roll", "decide", "duel_result"}
         ):
             raise RoomError("DUEL_WINNER_REQUIRED", "必须先选出对决赢家")
 

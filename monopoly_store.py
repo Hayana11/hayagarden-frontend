@@ -1,4 +1,4 @@
-"""SQLite persistence for monopoly rooms, ordered game events and messages."""
+"""SQLite persistence for monopoly rooms, game events, live events and messages."""
 
 from __future__ import annotations
 
@@ -75,6 +75,16 @@ def ensure_schema(db_path: str | None = None) -> None:
             );
             CREATE INDEX IF NOT EXISTS idx_monopoly_events_room_seq
                 ON monopoly_room_events(room_id, seq);
+            CREATE TABLE IF NOT EXISTS monopoly_room_live_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                room_id TEXT NOT NULL REFERENCES monopoly_rooms(id) ON DELETE CASCADE,
+                type TEXT NOT NULL,
+                actor TEXT,
+                payload TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT (datetime('now', '+8 hours'))
+            );
+            CREATE INDEX IF NOT EXISTS idx_monopoly_live_events_room_id
+                ON monopoly_room_live_events(room_id, id);
             CREATE TABLE IF NOT EXISTS monopoly_room_messages (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 room_id TEXT NOT NULL REFERENCES monopoly_rooms(id) ON DELETE CASCADE,
@@ -185,6 +195,57 @@ def event_dict(row: sqlite3.Row | dict) -> dict:
     return out
 
 
+def live_event_dict(row: sqlite3.Row | dict) -> dict:
+    out = dict(row)
+    out["payload"] = _json_load(out["payload"], {})
+    return out
+
+
+def append_live_event(
+    room_id: str,
+    event_type: str,
+    actor: str | None,
+    payload: dict,
+    db_path: str | None = None,
+) -> dict:
+    """Append an SSE-only event without advancing the game's optimistic-lock seq."""
+    with transaction(db_path) as conn:
+        cur = conn.execute(
+            "INSERT INTO monopoly_room_live_events (room_id, type, actor, payload) VALUES (?, ?, ?, ?)",
+            (room_id, event_type, actor, json.dumps(payload, ensure_ascii=False, separators=(",", ":"))),
+        )
+        saved = conn.execute(
+            "SELECT * FROM monopoly_room_live_events WHERE id=?", (cur.lastrowid,)
+        ).fetchone()
+        return live_event_dict(saved)
+
+
+def latest_live_event_id(room_id: str, db_path: str | None = None) -> int:
+    conn = _connect(db_path)
+    try:
+        row = conn.execute(
+            "SELECT COALESCE(MAX(id), 0) FROM monopoly_room_live_events WHERE room_id=?",
+            (room_id,),
+        ).fetchone()
+        return int(row[0]) if row else 0
+    finally:
+        conn.close()
+
+
+def prune_live_events(room_id: str, *, keep: int = 1000, db_path: str | None = None) -> None:
+    """Bound transient typing history; completed messages remain in their own table."""
+    with transaction(db_path) as conn:
+        cutoff = conn.execute(
+            "SELECT id FROM monopoly_room_live_events WHERE room_id=? ORDER BY id DESC LIMIT 1 OFFSET ?",
+            (room_id, max(int(keep), 1) - 1),
+        ).fetchone()
+        if cutoff:
+            conn.execute(
+                "DELETE FROM monopoly_room_live_events WHERE room_id=? AND id<?",
+                (room_id, int(cutoff[0])),
+            )
+
+
 def list_events(room_id: str, *, after: int = 0, limit: int = 500, db_path: str | None = None) -> list[dict]:
     conn = _connect(db_path)
     try:
@@ -254,11 +315,13 @@ def poll_room_stream(
     *,
     after_seq: int,
     after_message_id: int,
+    after_live_id: int = 0,
     event_limit: int = 500,
     message_limit: int = 120,
+    live_limit: int = 500,
     db_path: str | None = None,
-) -> tuple[list[dict], list[dict]]:
-    """Read both SSE queues from one short-lived SQLite connection."""
+) -> tuple[list[dict], list[dict], list[dict]]:
+    """Read the game, message and transient SSE queues with one connection."""
     conn = _connect(db_path)
     try:
         event_rows = conn.execute(
@@ -269,9 +332,14 @@ def poll_room_stream(
             "SELECT * FROM monopoly_room_messages WHERE room_id=? AND id>? ORDER BY id LIMIT ?",
             (room_id, max(int(after_message_id), 0), min(max(int(message_limit), 1), 300)),
         ).fetchall()
+        live_rows = conn.execute(
+            "SELECT * FROM monopoly_room_live_events WHERE room_id=? AND id>? ORDER BY id LIMIT ?",
+            (room_id, max(int(after_live_id), 0), min(max(int(live_limit), 1), 1000)),
+        ).fetchall()
         return (
             [event_dict(row) for row in event_rows],
             [message_dict(row) for row in message_rows],
+            [live_event_dict(row) for row in live_rows],
         )
     finally:
         conn.close()

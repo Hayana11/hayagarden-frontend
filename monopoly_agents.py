@@ -9,6 +9,7 @@ import re
 import threading
 import time
 from typing import Any, Callable, Iterable
+from urllib.parse import urlparse
 
 import cc_resident
 import monopoly_store as store
@@ -55,6 +56,10 @@ def _event(room_id: str, event_type: str, actor: str | None, payload: dict, db_p
         return store.append_event(conn, room_id, event_type, actor, payload)
 
 
+def _live_event(room_id: str, event_type: str, actor: str | None, payload: dict, db_path: str) -> dict:
+    return store.append_live_event(room_id, event_type, actor, payload, db_path)
+
+
 def _parse_output(raw: str) -> tuple[str, dict | None]:
     match = _INTENT_RE.search(raw or "")
     intent = None
@@ -86,9 +91,13 @@ def _allowed_actions(snapshot: dict, actor: str) -> list[dict]:
             "super": [{"super_action": "done"}, {"super_action": "buyout"}],
             "duel": [{"duel_winner": "haya"}, {"duel_winner": "cc"}],
         }
-        actions.append({"action": "roll", "decision": decisions.get(kind, [])})
+        actions.append({"action": "decide", "args": decisions.get(kind, [])})
         if kind in {"task", "truth"}:
             actions.append({"action": "swap"})
+    elif pending and pending.get("chosen") and room.get("active_actor") == actor:
+        # Do not auto-settle a human card before its owner has chosen.  Once
+        # the choice is saved, the next AI player may perform the lazy roll.
+        actions.append({"action": "roll"})
     elif not pending and room.get("active_actor") == actor:
         actions.append({"action": "roll"})
     actions.extend([
@@ -162,6 +171,7 @@ class CCAdapter:
         token_getter: Callable[[], str],
         cwd: str,
         allowed_tools: str,
+        relay_label_getter: Callable[[], str] | None = None,
     ):
         self.provider_getter = provider_getter
         self.model_getter = model_getter
@@ -169,6 +179,7 @@ class CCAdapter:
         self.token_getter = token_getter
         self.cwd = cwd
         self.allowed_tools = allowed_tools
+        self.relay_label_getter = relay_label_getter or (lambda: "")
         self._sessions: dict[str, cc_resident.ResidentSession] = {}
         self._lock = threading.Lock()
 
@@ -177,7 +188,12 @@ class CCAdapter:
         if provider == "claude_code":
             return {"kind": "claude_code", "label": "Claude Code", "model": self.model_getter() or "account default"}
         relay = self.relay_factory()
-        return {"kind": "relay", "label": "当前中转", "model": relay.model or self.model_getter() or ""}
+        host = (urlparse(str(getattr(relay, "api_url", "") or "")).hostname or "").lower()
+        official = provider in {"official", "api_official", "anthropic_official"} or host == "api.anthropic.com"
+        if official:
+            return {"kind": "official", "label": "Anthropic Official", "model": relay.model or self.model_getter() or ""}
+        label = (self.relay_label_getter() or "").strip() or host or "当前中转"
+        return {"kind": "relay", "label": label, "model": relay.model or self.model_getter() or ""}
 
     def stream(self, room_id: str, system: str, prompt: str) -> Iterable[str]:
         provider = self.provider_getter()
@@ -201,6 +217,9 @@ class CCAdapter:
                 if event == "text":
                     yield str(data)
             return
+
+        if provider not in {"api_relay", "official", "api_official", "anthropic_official"}:
+            raise RuntimeError(f"不支持的 CC provider：{provider}")
 
         relay = self.relay_factory()
         payload = {
@@ -281,7 +300,16 @@ class MonopolyAgentScheduler:
                 agent_state.pop("generating_since", None)
                 store.save_agent_state(room_id, agent_state, self.service.db_path)
 
-    def _generate_one(self, room_id: str, actor: str, reason: str, reply_to: int | None, *, retry_after_swap: bool = True) -> None:
+    def _generate_one(
+        self,
+        room_id: str,
+        actor: str,
+        reason: str,
+        reply_to: int | None,
+        *,
+        retry_after_swap: bool = True,
+        followup_budget: int = 1,
+    ) -> None:
         snapshot = self.service.snapshot(room_id)
         if snapshot["room"]["status"] == RoomStatus.PAUSED.value:
             return
@@ -290,9 +318,24 @@ class MonopolyAgentScheduler:
         system = static_persona + "\n\n" + system_rules
         if dynamic_persona:
             prompt = "【当前共享状态】\n" + dynamic_persona + "\n\n" + prompt
-        _event(room_id, "chat_start", actor, {"reason": reason}, self.service.db_path)
+        _live_event(room_id, "chat_start", actor, {"reason": reason}, self.service.db_path)
         chunks: list[str] = []
+        delta_buffer: list[str] = []
+        last_delta_flush = time.monotonic()
         provider_meta: dict = {}
+
+        def collect_delta(chunk: str, *, force: bool = False) -> None:
+            nonlocal last_delta_flush
+            if chunk:
+                chunks.append(chunk)
+                delta_buffer.append(chunk)
+            now = time.monotonic()
+            buffered = "".join(delta_buffer)
+            if buffered and (force or len(buffered) >= 256 or now - last_delta_flush >= 0.08):
+                _live_event(room_id, "chat_delta", actor, {"delta": buffered}, self.service.db_path)
+                delta_buffer.clear()
+                last_delta_flush = now
+
         try:
             if actor == "cc":
                 provider_meta = self.cc.snapshot()
@@ -308,29 +351,30 @@ class MonopolyAgentScheduler:
                 agent_state["cc_provider"] = current
                 store.save_agent_state(room_id, agent_state, self.service.db_path)
                 for chunk in self.cc.stream(room_id, system, prompt):
-                    chunks.append(chunk)
-                    _event(room_id, "chat_delta", actor, {"delta": chunk}, self.service.db_path)
+                    collect_delta(str(chunk))
             else:
                 state = store.get_agent_state(room_id, self.service.db_path)
                 thread_id = state.get("codex_thread_id")
                 provider_meta = self.codex.snapshot()
                 for event, data in self.codex.stream(thread_id, system, prompt):
                     if event == "text":
-                        chunk = str(data)
-                        chunks.append(chunk)
-                        _event(room_id, "chat_delta", actor, {"delta": chunk}, self.service.db_path)
+                        collect_delta(str(data))
                     elif event == "done":
                         state["codex_thread_id"] = data.get("thread_id")
                         store.save_agent_state(room_id, state, self.service.db_path)
+            collect_delta("", force=True)
             raw = "".join(chunks).strip()
             text, intent = _parse_output(raw)
             if not text:
                 raise RuntimeError("模型没有返回聊天正文")
             if actor == "cc" and _REFUSAL_RE.search(text):
-                _event(room_id, "chat_done", actor, {"discarded": True, "reason": "content_fallback"}, self.service.db_path)
+                _live_event(room_id, "chat_done", actor, {"discarded": True, "reason": "content_fallback"}, self.service.db_path)
                 swapped = self._cc_content_fallback(room_id, allow_swap=retry_after_swap)
                 if swapped and retry_after_swap:
-                    self._generate_one(room_id, actor, "turn", reply_to, retry_after_swap=False)
+                    self._generate_one(
+                        room_id, actor, "turn", reply_to,
+                        retry_after_swap=False, followup_budget=followup_budget,
+                    )
                 return
             saved = self.service.post_message(room_id, author=actor, content=text, reply_to=reply_to)
             message = saved["message"]
@@ -341,37 +385,53 @@ class MonopolyAgentScheduler:
                     "UPDATE monopoly_room_messages SET provider_meta=? WHERE id=?",
                     (json.dumps(provider_meta, ensure_ascii=False), message["id"]),
                 )
-            _event(room_id, "chat_done", actor, {"message_id": message["id"]}, self.service.db_path)
+            _live_event(room_id, "chat_done", actor, {"message_id": message["id"]}, self.service.db_path)
             if actor == "cc" and saved["snapshot"]["room"]["status"] != RoomStatus.PAUSED.value:
-                self._apply_cc_intent(room_id, intent)
+                needs_followup = self._apply_cc_intent(room_id, intent)
+                if needs_followup and followup_budget > 0:
+                    self._generate_one(
+                        room_id, actor, "turn", reply_to,
+                        retry_after_swap=retry_after_swap,
+                        followup_budget=followup_budget - 1,
+                    )
         except Exception as exc:
-            _event(room_id, "chat_done", actor, {"discarded": True, "reason": "generation_failed"}, self.service.db_path)
+            collect_delta("", force=True)
+            _live_event(room_id, "chat_done", actor, {"discarded": True, "reason": "generation_failed"}, self.service.db_path)
             if actor == "codex":
-                _event(room_id, "agent_status", actor, {
+                _live_event(room_id, "agent_status", actor, {
                     "ready": False, "detail": "等待官方线路登录",
                 }, self.service.db_path)
             if actor == "cc":
-                swapped = self._cc_content_fallback(room_id, allow_swap=retry_after_swap)
-                if swapped and retry_after_swap:
-                    self._generate_one(room_id, actor, "turn", reply_to, retry_after_swap=False)
+                _live_event(room_id, "agent_status", actor, {
+                    "ready": False, "detail": "CC 线路暂时不可用，可稍后重试",
+                }, self.service.db_path)
+        finally:
+            store.prune_live_events(room_id, db_path=self.service.db_path)
 
-    def _apply_cc_intent(self, room_id: str, intent: dict | None) -> None:
+    def _apply_cc_intent(self, room_id: str, intent: dict | None) -> bool:
         snapshot = self.service.snapshot(room_id)
         if snapshot["room"].get("active_actor") != "cc":
-            return
+            if not (snapshot.get("pending") or {}).get("actor") == "cc":
+                return False
         allowed = {item["action"] for item in _allowed_actions(snapshot, "cc")}
         action = str((intent or {}).get("action") or "")
-        if action not in allowed:
-            action = "roll" if "roll" in allowed else ""
-        if not action:
-            return
         args = (intent or {}).get("args") or {}
+        if action not in allowed:
+            if "decide" in allowed and snapshot.get("pending"):
+                action = "decide"
+                args = dict(snapshot["pending"].get("default") or {})
+            else:
+                action = "roll" if "roll" in allowed else ""
+        if not action:
+            return False
         if action == "roll" and isinstance((intent or {}).get("decision"), dict):
             args = {**args, "decision": intent["decision"]}
-        self.service.execute(room_id, {
+        result = self.service.execute(room_id, {
             "actor": "cc", "action": action, "args": args,
             "expected_seq": self.service.snapshot(room_id)["room"]["event_seq"],
         })
+        pending = result.get("pending") or {}
+        return action == "roll" and pending.get("actor") == "cc"
 
     def _cc_content_fallback(self, room_id: str, *, allow_swap: bool) -> bool:
         snapshot = self.service.snapshot(room_id)

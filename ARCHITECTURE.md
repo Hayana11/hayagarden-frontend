@@ -19,7 +19,7 @@
 
 nginx（/etc/nginx/conf.d/frontend.conf）：`/api/gw/`→5051（read_timeout 320s，buffering off）、`/lessons-mcp/`→5055、`/codebase-mcp/`→5056、`location = /pocket/ws`→3897（仅此 WS 出公网）、`/mcp`、`/discord-mcp`、`/ombre/`。
 
-大富翁公开 API 全部在主站 `/api/monopoly/rooms...`。`app.py` 通过带内部令牌的 localhost 请求触发 5051 上的 Agent 调度器；两个进程以 SQLite 事件流交接，浏览器只维持一条房间 SSE。`monopoly_rooms.py` 是唯一可以把结构化意图变成引擎 REST 调用的边界，AI 文本不能进入棋盘状态。
+大富翁公开 API 全部在主站 `/api/monopoly/rooms...`，整个 blueprint 复用 Moments owner cookie/Bearer 鉴权。`app.py` 通过带内部令牌的 localhost 请求触发 5051 上的 Agent 调度器；两个进程以 SQLite 交接，浏览器只维持一条房间 SSE。游戏事件使用连续 `event_seq`，聊天 delta/Agent 状态走不参与乐观锁的独立 live 队列。`monopoly_rooms.py` 是唯一可以把结构化意图变成引擎 REST 调用的边界，AI 文本不能进入棋盘状态。
 
 ## 请求管线（聊天一轮的生命周期）
 
