@@ -5444,6 +5444,49 @@ def debug_wake_check():
         return jsonify({'ok': False, 'error': str(e)}), 500
 
 
+# Monopoly agents live on the AI gateway while room truth/API live on 5050.
+# Both services share SQLite; the public SSE reads the persisted ordered stream.
+from monopoly_rooms import MonopolyService as _MonopolyService
+from monopoly_agents import (
+    CCAdapter as _MonopolyCCAdapter,
+    CodexAdapter as _MonopolyCodexAdapter,
+    MonopolyAgentScheduler as _MonopolyAgentScheduler,
+    create_monopoly_agent_blueprint as _create_monopoly_agent_blueprint,
+)
+from relay.manager import RelayManager as _RelayManager
+
+
+def _monopoly_relay_label():
+    """Return the configured relay preset name without exposing credentials."""
+    active_id = config_store.get('ACTIVE_RELAY', '')
+    if not active_id:
+        return ''
+    try:
+        conn = sqlite3.connect(DB_PATH, timeout=3)
+        row = conn.execute('SELECT name FROM relay_presets WHERE id=?', (active_id,)).fetchone()
+        conn.close()
+        return str(row[0] or '') if row else ''
+    except Exception:
+        return ''
+
+_monopoly_service = _MonopolyService(db_path=DB_PATH)
+_monopoly_scheduler = _MonopolyAgentScheduler(
+    _monopoly_service,
+    persona_builder=build_system,
+    cc=_MonopolyCCAdapter(
+        provider_getter=_get_provider,
+        model_getter=_get_model,
+        relay_factory=_RelayManager,
+        token_getter=lambda: CC_TOKEN,
+        cwd=CC_CWD,
+        allowed_tools=CC_ALLOWED_TOOLS,
+        relay_label_getter=_monopoly_relay_label,
+    ),
+    codex=_MonopolyCodexAdapter(codex_app_server.client),
+)
+app.register_blueprint(_create_monopoly_agent_blueprint(_monopoly_scheduler))
+
+
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5051, debug=False)
 

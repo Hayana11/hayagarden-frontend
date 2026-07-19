@@ -309,6 +309,110 @@ class CodexAppServer:
         )
         return thread_id
 
+    def _ensure_bound_thread_locked(self, thread_id: str | None, instructions: str) -> str:
+        """Resume/start a caller-owned thread without using group-chat storage.
+
+        Monopoly keeps its binding in its own room record, so game history and
+        the existing group-chat store remain strictly separate.
+        """
+        common = {
+            "cwd": self.cwd,
+            "approvalPolicy": "never",
+            "approvalsReviewer": "user",
+            "developerInstructions": instructions,
+            "sandbox": "read-only",
+            "personality": "friendly",
+        }
+        if thread_id:
+            try:
+                self._request_locked(
+                    "thread/resume", {"threadId": thread_id, **common}, timeout=30,
+                )
+                return thread_id
+            except CodexAppServerError:
+                pass
+        result = self._request_locked(
+            "thread/start",
+            {**common, "serviceName": "hayagarden_monopoly"},
+            timeout=30,
+        )
+        new_id = str((result.get("thread") or {}).get("id") or "")
+        if not new_id:
+            raise CodexAppServerError("Codex game thread did not return an id")
+        return new_id
+
+    def stream_bound_turn(
+        self,
+        thread_id: str | None,
+        instructions: str,
+        prompt: str,
+        *,
+        timeout: float = 360,
+    ) -> Iterator[tuple[str, object]]:
+        """Stream a turn whose thread binding is persisted by the caller."""
+        with self._lock:
+            try:
+                self._start_locked()
+                bound_id = self._ensure_bound_thread_locked(thread_id, instructions)
+                early: list[dict] = []
+                result = self._request_locked(
+                    "turn/start",
+                    {
+                        "threadId": bound_id,
+                        "input": [{"type": "text", "text": prompt}],
+                        "approvalPolicy": "never",
+                    },
+                    timeout=30,
+                    early_notifications=early,
+                )
+                turn_id = str((result.get("turn") or {}).get("id") or "")
+                if not turn_id:
+                    raise CodexAppServerError("Codex game turn did not return an id")
+                deadline = time.monotonic() + timeout
+                saw_delta = False
+                buffered = deque(early)
+                while True:
+                    message = buffered.popleft() if buffered else self._next_message_locked(deadline - time.monotonic())
+                    if self._answer_server_request_locked(message):
+                        continue
+                    method = message.get("method")
+                    params = message.get("params") or {}
+                    if params.get("threadId") not in (None, bound_id):
+                        continue
+                    if params.get("turnId") not in (None, turn_id):
+                        continue
+                    if method == "item/agentMessage/delta":
+                        delta = str(params.get("delta") or "")
+                        if delta:
+                            saw_delta = True
+                            yield "text", delta
+                    elif method == "item/completed" and not saw_delta:
+                        text = self._agent_text_from_item(params.get("item"))
+                        if text:
+                            saw_delta = True
+                            yield "text", text
+                    elif method == "turn/completed":
+                        turn = params.get("turn") or {}
+                        status = turn.get("status")
+                        if status != "completed":
+                            error = turn.get("error") or {}
+                            raise CodexAppServerError(error.get("message") or f"Codex turn status: {status}")
+                        if not saw_delta:
+                            for item in turn.get("items") or []:
+                                text = self._agent_text_from_item(item)
+                                if text:
+                                    saw_delta = True
+                                    yield "text", text
+                        yield "done", {"thread_id": bound_id, "turn_id": turn_id, "status": status}
+                        return
+                    elif method == "error":
+                        error = params.get("error") or params
+                        detail = error.get("message") if isinstance(error, dict) else str(error)
+                        raise CodexAppServerError("Codex game line error: " + detail)
+            except Exception:
+                self._stop_locked()
+                raise
+
     def stream_turn(
         self,
         room: str,

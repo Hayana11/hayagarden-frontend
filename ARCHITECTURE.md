@@ -9,6 +9,7 @@
 |------|------|---------|------|------|
 | 主站 | 5050 | frontend.service | app.py | 页面路由、聊天记录 API、留言板、日历、漂流瓶、artifacts、配置 API |
 | AI 网关 | 5051 | frontend-gw.service (gunicorn gthread×4) | gateway.py | 聊天流式管线、工具执行、wake、日记、摘要 |
+| 大富翁引擎 | 8069（仅 loopback） | spicy-monopoly.service | monopoly_api:app | 棋盘唯一真值、卡牌/身份/结算；不经过 MCP、不直接出公网 |
 | 白夜工作台 | 5052 | frontend-workspace.service | workspace_server.py | 独立模型配置的代码工作台（文件白名单读写） |
 | 灯守护 | 内部 | — | tools/mijia_daemon.py | 米家灯 HTTP 桥（/light/main/*、/light/bedside/warm|neutral） |
 | 教训库 MCP | 5055 | lessons-mcp.service | /opt/lessons/server.py | record→审核→promote→validate_edit 两层筛选 |
@@ -17,6 +18,8 @@
 | 渐变脑 | — | — | /opt/ombre-brain | 长期记忆、handoff、memo |
 
 nginx（/etc/nginx/conf.d/frontend.conf）：`/api/gw/`→5051（read_timeout 320s，buffering off）、`/lessons-mcp/`→5055、`/codebase-mcp/`→5056、`location = /pocket/ws`→3897（仅此 WS 出公网）、`/mcp`、`/discord-mcp`、`/ombre/`。
+
+大富翁公开 API 全部在主站 `/api/monopoly/rooms...`，整个 blueprint 复用 Moments owner cookie/Bearer 鉴权。`app.py` 通过带内部令牌的 localhost 请求触发 5051 上的 Agent 调度器；两个进程以 SQLite 交接，浏览器只维持一条房间 SSE。游戏事件使用连续 `event_seq`，聊天 delta/Agent 状态走不参与乐观锁的独立 live 队列。`monopoly_rooms.py` 是唯一可以把结构化意图变成引擎 REST 调用的边界，AI 文本不能进入棋盘状态。
 
 ## 请求管线（聊天一轮的生命周期）
 

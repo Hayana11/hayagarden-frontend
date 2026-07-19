@@ -80,6 +80,10 @@ if [[ ! -f "$VAULT_KEY_FILE" ]]; then
   "$PYTHON" -c 'from cryptography.fernet import Fernet; import pathlib,sys; pathlib.Path(sys.argv[1]).write_bytes(Fernet.generate_key() + b"\n")' "$VAULT_KEY_FILE"
 fi
 chmod 600 "$VAULT_KEY_FILE"
+if ! grep -q '^MONOPOLY_INTERNAL_TOKEN=.' "$ENV_FILE" 2>/dev/null; then
+  monopoly_internal_token="$("$PYTHON" -c 'import secrets; print(secrets.token_urlsafe(48))')"
+  printf '\nMONOPOLY_INTERNAL_TOKEN=%s\n' "$monopoly_internal_token" >>"$ENV_FILE"
+fi
 
 staging="$(mktemp -d /tmp/hayagarden-release.XXXXXX)"
 cleanup() {
@@ -91,11 +95,12 @@ trap cleanup EXIT
 git worktree add --detach "$staging" "$target_sha"
 (
   cd "$staging"
-  "$PYTHON" -m py_compile app.py gateway.py chat/context_continuity.py account_balance_routes.py context_usage_routes.py context_usage_store.py tools/context_usage_collector.py relay/credential_vault.py relay/channel_intelligence.py user_profile.py
+  "$PYTHON" -m py_compile app.py gateway.py monopoly_engine.py monopoly_store.py monopoly_rooms.py monopoly_routes.py monopoly_agents.py codex_app_server.py chat/context_continuity.py account_balance_routes.py context_usage_routes.py context_usage_store.py tools/context_usage_collector.py relay/credential_vault.py relay/channel_intelligence.py user_profile.py
   "$PYTHON" -m unittest discover -s tests -p 'test_context_continuity.py'
   "$PYTHON" -m unittest tests.test_channel_intelligence tests.test_credential_vault tests.test_account_balance_routes
   "$PYTHON" -m unittest tests.test_context_usage
   "$PYTHON" -m unittest tests.test_user_profile
+  "$PYTHON" -m unittest tests.test_monopoly_backend
   bash -n scripts/deploy-frontend.sh
 )
 if [[ "$build_dashboard" -eq 1 ]]; then
