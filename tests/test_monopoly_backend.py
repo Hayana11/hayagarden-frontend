@@ -166,6 +166,15 @@ class MonopolyBackendTests(unittest.TestCase):
         )
         self.assertEqual(result["snapshot"]["room"]["status"], "paused")
 
+    def test_resume_always_removes_paused_from_marker(self):
+        self.service.execute(self.room_id, {
+            "action": "roll", "actor": "haya", "expected_seq": self._seq(),
+        })
+        self.service.pause(self.room_id, expected_seq=self._seq())
+        resumed = self.service.resume(self.room_id, expected_seq=self._seq())
+        self.assertEqual(resumed["room"]["status"], "task_pending")
+        self.assertNotIn("paused_from", store.get_agent_state(self.room_id, self.db_path))
+
     def test_real_engine_player_names_map_back_to_fixed_actors(self):
         handle, db_path = tempfile.mkstemp(suffix=".db")
         os.close(handle)
