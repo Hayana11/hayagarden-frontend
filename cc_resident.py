@@ -133,6 +133,7 @@ class ResidentSession:
         self._group_cursor_initialized = False
         self._last_rel_fingerprint = None
         self._turns_since_rel_sent = 0
+        self._last_rel_mood = None
 
     def _spawn(self, system_text, env, *, reason='process_dead'):
         self._kill(quiet=True)
@@ -230,7 +231,10 @@ class ResidentSession:
         if commit_meta.get('rel_fingerprint'):
             self._last_rel_fingerprint = commit_meta['rel_fingerprint']
             self._turns_since_rel_sent = 0
+            if 'rel_mood' in commit_meta:
+                self._last_rel_mood = commit_meta.get('rel_mood')
         elif commit_meta.get('rel_tick'):
+            # Only successful user turns that skipped relationship advance the cadence.
             self._turns_since_rel_sent += 1
         if 'state_snapshot' in commit_meta:
             self._last_state_snapshot = copy.deepcopy(commit_meta['state_snapshot'] or {})
@@ -525,6 +529,10 @@ class ResidentSession:
     @property
     def turns_since_rel_sent(self):
         return self._turns_since_rel_sent
+
+    @property
+    def last_rel_mood(self):
+        return self._last_rel_mood
 
     @property
     def pending_respawn_reason(self):

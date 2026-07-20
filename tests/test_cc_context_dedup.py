@@ -846,6 +846,7 @@ class HotTurnContentTests(unittest.TestCase):
             group_cursor_initialized = True
             last_rel_fingerprint = 'rel-v2:old'
             turns_since_rel_sent = 1
+            last_rel_mood = '低唤醒|偏暖'
 
             def ensure_alive(self, system_text, env):
                 captured['system'] = system_text
@@ -862,6 +863,8 @@ class HotTurnContentTests(unittest.TestCase):
         relationship = RelationshipContextResult(
             text=relationship_text,
             fingerprint='rel-v2:new',
+            sources={'anchor': 'ok', 'daily': 'ok', 'mood': 'ok'},
+            mood_key='低唤醒|偏暖',
         )
         gateway = _import_gateway()
         with mock.patch.object(gateway, '_CC_RESIDENT', FakeResident()), \
@@ -901,9 +904,13 @@ class HotTurnContentTests(unittest.TestCase):
         self.assertLess(content.index(relationship_text), content.index('现在继续'))
         meta = captured['commit_meta']
         self.assertEqual(meta['rel_fingerprint'], 'rel-v2:new')
-        self.assertTrue(meta.get('rel_tick'))
+        self.assertEqual(meta.get('rel_mood'), '低唤醒|偏暖')
+        self.assertFalse(meta.get('rel_tick'))
         done_usage = events[-1][1][2]
         self.assertEqual(done_usage.get('rel_context'), 'sent')
+        self.assertEqual(done_usage.get('rel_sources'), {
+            'anchor': 'ok', 'daily': 'ok', 'mood': 'ok',
+        })
 
 
 class LegacyPerceptionClassificationTests(unittest.TestCase):
