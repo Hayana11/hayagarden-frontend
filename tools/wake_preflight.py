@@ -167,8 +167,13 @@ def _prompt_sizes() -> dict:
         from chat.system_builder import build_system
         from wake.builder import append_system_text, build_prompt_suffix
 
-        # Inspect sizes only — no model.
-        system = build_system(wake=True, include_relationship_context=True)
+        # Inspect sizes only — no model, and never consume dream_pool.
+        system = build_system(
+            wake=True,
+            include_relationship_context=True,
+            allow_side_effects=False,
+            capability_profile='cc_wake',
+        )
         stable = 0
         dynamic = 0
         a1 = 0

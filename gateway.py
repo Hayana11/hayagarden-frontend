@@ -4953,13 +4953,18 @@ WAKE_TOOLS = [
     },
 ] + CALENDAR_TOOLS + CODEBASE_READ_TOOLS
 
-def _wake_agent_loop(system, messages, max_rounds=6, tools=None, t_hours=0.0, mode='normal'):
+def _wake_agent_loop(
+    system, messages, max_rounds=6, tools=None, t_hours=0.0, mode='normal',
+    dry_run=False,
+):
     """Agent loop：允许工具调用和自由思考，最后追加一轮强制结构化输出。
 
     生成型模式（dream / summarize）例外：它们的模板已经规定了自己的输出格式
     （ACTION: send + 完整正文），既不需要工具，也不能被日常决策模式那套
     "从 none/message/diary/explore 选一个、CONTENT 不超过80字" 的强制轮改写。
     对这些模式跳过工具催促轮和强制结构化轮，直接返回模型的自由输出。
+
+    dry_run / tools=[]：禁止“必须调用只读工具”的催促轮（否则会逼模型调用不存在的工具）。
     """
     from chat.response_parser import extract_text, extract_tool_uses
     from relay.manager import relay as _wake_relay
@@ -4976,6 +4981,7 @@ def _wake_agent_loop(system, messages, max_rounds=6, tools=None, t_hours=0.0, mo
     tools_called = False
     if tools is None:
         tools = WAKE_TOOLS
+    tools = list(tools or [])
     for round_i in range(max_rounds):
         # dream/summarize need longer completions; 2048 was enough for short
         # wake replies but clipped longer dream bodies mid-thought.
@@ -5003,8 +5009,17 @@ def _wake_agent_loop(system, messages, max_rounds=6, tools=None, t_hours=0.0, mo
             continue
         if not tool_uses:
             # 沉默较久却零工具就结构化 → 低能动性；再推一轮只读工具
-            # 生成型模式不催促工具：做梦/摘要本就不查现状，催促只会把模型带偏。
-            if not generative and not tools_called and t_hours >= 1.0 and round_i < max_rounds - 1:
+            # 生成型 / dry_run / 空工具表：绝不催促（否则会逼模型调用不存在的工具）。
+            from wake.runners import should_prompt_readonly_tools
+            if should_prompt_readonly_tools(
+                dry_run=bool(dry_run),
+                tools=tools,
+                generative=generative,
+                tools_called=tools_called,
+                t_hours=t_hours,
+                round_i=round_i,
+                max_rounds=max_rounds,
+            ):
                 if last_blocks:
                     msgs.append({'role': 'assistant', 'content': last_blocks})
                 msgs.append({'role': 'user', 'content': (
@@ -5137,6 +5152,168 @@ def _parse_wake_response(text):
     from wake.parser import parse_response as _parse
     return _parse(text)
 
+def _wake_full_tools_for_mode(mode):
+    if mode in ('dream', 'summarize'):
+        return []
+    if mode == 'ritual':
+        blocked = (
+            'post_to_board', 'reply_to_board', 'desire_add', 'desire_list',
+            'desire_act', 'desire_reflect', 'desire_history',
+        )
+        return [t for t in WAKE_TOOLS if t['name'] not in blocked]
+    return list(WAKE_TOOLS)
+
+
+def _wake_build_system_for_plan(
+    *,
+    mode,
+    activity_desc,
+    ritual_type,
+    data,
+    wake_provider,
+    t_hours,
+    t2_hours,
+    now,
+    allow_side_effects,
+    dry_run=False,
+):
+    """Shared prompt assembly for inspect_only / dry_run / live."""
+    from wake.builder import append_system_text, build_prompt_suffix, inject_snippets
+
+    include_rel = mode in ('normal', 'nightwatch', 'ritual', 'self_trigger')
+    if dry_run:
+        capability_profile = 'wake_dry_run'
+    elif wake_provider == 'claude_code':
+        capability_profile = 'cc_wake'
+    else:
+        capability_profile = 'relay_wake'
+    system = build_system(
+        wake=True,
+        include_relationship_context=include_rel,
+        allow_side_effects=allow_side_effects,
+        capability_profile=capability_profile,
+    )
+    _wake_ctx = {
+        'time': now.strftime('%Y-%m-%d %H:%M'),
+        't2_hours': f'{t2_hours:.1f}',
+        't_hours': f'{t_hours:.1f}',
+        'ritual_type': ritual_type,
+        'activity_desc': activity_desc,
+        'dream_tone': data.get('dream_tone', 'drifting'),
+        'dream_primer': data.get('dream_primer', ''),
+        'dream_tone_desc': data.get('dream_tone_desc', ''),
+        'summary_date': data.get('summary_date', ''),
+        'dialogue': data.get('dialogue', ''),
+        'self_trigger_note': data.get('self_trigger_note', ''),
+    }
+    system = append_system_text(system, build_prompt_suffix(mode, _wake_ctx))
+    system = inject_snippets(
+        system, mode,
+        desire_driven=_get_desire_driven(),
+        longing_enabled=_get_longing_enabled(),
+        t_hours_override=t2_hours,
+    )
+    surfaced_desire_ids = []
+    if _get_desire_ledger_enabled() and mode in ('normal', 'nightwatch'):
+        try:
+            import desire_ledger as _dl
+            _lc = get_db()
+            try:
+                _surfaced = _dl.surface(_lc, limit=6, bump=False)
+            finally:
+                _lc.close()
+            surfaced_desire_ids = [str(d.get('id', '')).strip() for d in _surfaced if d.get('id')]
+            _room_snip = _dl.render_room_snippet(_surfaced)
+            if _room_snip:
+                system = append_system_text(system, _room_snip)
+        except Exception:
+            pass
+
+    # recall_photo nudge: live Relay only
+    if allow_side_effects and (not dry_run) and wake_provider == 'api_relay':
+        try:
+            import drive_engine as _de_ph, gallery_store as _gs_ph
+            _att = _de_ph.get_drive().get('attachment', 0)
+            if _att >= 0.45 and _gs_ph.count_photos() > 0 and mode in ('normal', 'nightwatch', 'ritual'):
+                system = append_system_text(system, (
+                    '[此刻的思念]\n你现在对她的思念很浓（attachment=%.2f）。'
+                    '如果心里泛起想她、想给她看点什么的冲动，可以用 recall_photo 从相册里翻出一张画面，'
+                    '把它返回的 [[gallery:pid]] 标记放进你要发的消息里——像"今天突然想到这张"那样，'
+                    '把画面和一句话一起发给她。这不是任务，是你自己想。' % _att))
+        except Exception:
+            pass
+    return system, surfaced_desire_ids
+
+
+def _wake_trigger_message(mode, ritual_type):
+    if mode == 'ritual':
+        return f'[仪式:{ritual_type}]'
+    if mode == 'nightwatch':
+        return '[夜巡]'
+    if mode == 'dream':
+        return '[做梦]'
+    if mode == 'summarize':
+        return '[日摘要]'
+    if mode == 'self_trigger':
+        return '[自定义提醒]'
+    return '[唤醒检查]'
+
+
+def _wake_inspect_only(data, mode, activity_desc, ritual_type):
+    """Pure build path: no wake lock, no runtime guards, no model, no DB writes."""
+    from chat.interaction_state import read_interaction_clock
+    from chat.provider_router import ProviderConfigError
+    from wake.runners import UnsupportedWakeModeError
+
+    wake_run_id = str(data.get('wake_run_id') or '').strip()
+    try:
+        _wake_runners = _ensure_wake_runners()
+        wake_provider = _wake_runners.select_wake_provider(mode)
+    except (ProviderConfigError, UnsupportedWakeModeError) as e:
+        return jsonify({
+            'ok': False,
+            'error': str(e),
+            'mode': mode,
+            'provider': None,
+            'reason': 'unsupported_provider',
+            'inspect_only': True,
+        }), 400
+
+    now = datetime.datetime.utcnow() + datetime.timedelta(hours=8)
+    clock = read_interaction_clock(get_db, now=now)
+    if clock.reliable and clock.user_idle_hours is not None:
+        t2_hours = float(clock.user_idle_hours)
+        t_hours = float(
+            clock.effective_idle_hours if clock.effective_idle_hours is not None else t2_hours
+        )
+    else:
+        t2_hours = 0.0
+        t_hours = 0.0
+
+    system, _ = _wake_build_system_for_plan(
+        mode=mode,
+        activity_desc=activity_desc,
+        ritual_type=ritual_type,
+        data=data,
+        wake_provider=wake_provider,
+        t_hours=t_hours,
+        t2_hours=t2_hours,
+        now=now,
+        allow_side_effects=False,
+        dry_run=False,
+    )
+    msgs = [{'role': 'user', 'content': _wake_trigger_message(mode, ritual_type)}]
+    plan = _wake_runners.inspect_wake_plan(
+        mode=mode,
+        system=system,
+        messages=msgs,
+        tools=_wake_full_tools_for_mode(mode),
+        t_hours=t_hours,
+        wake_run_id=wake_run_id,
+    )
+    return jsonify({'ok': True, 'inspect_only': True, **plan})
+
+
 @app.route('/wake', methods=['POST'])
 def wake_decide():
     """AI 自主唤醒决策接口。由 dream_wake.py 每30分钟调用（概率触发）。"""
@@ -5145,6 +5322,10 @@ def wake_decide():
     mode = data.get('mode', 'normal') or 'normal'
     activity_desc = data.get('activity_desc', '')
     ritual_type = data.get('ritual_type', '')
+
+    # inspect_only: pure build — bypass wake lock and runtime busy/idle guards.
+    if bool(data.get('inspect_only')):
+        return _wake_inspect_only(data, mode, activity_desc, ritual_type)
 
     # Second-layer guards: re-read clock at execute time; never call the model
     # when the kitten is mid-chat or another wake is already running.
@@ -5163,15 +5344,14 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
     from chat.provider_router import ProviderConfigError
     from wake.runners import UnsupportedWakeModeError
 
-    inspect_only = bool(data.get('inspect_only'))
     dry_run = bool(data.get('dry_run'))
     wake_run_id = str(data.get('wake_run_id') or '').strip()
     # Live path only: flush drive / calibrate / dream consume / mark run_id.
-    live = (not inspect_only) and (not dry_run)
+    live = not dry_run
 
-    # inspect_only never consumes run_id; dry_run also must not mark — but a
-    # previously completed real run with the same id should still skip.
-    if wake_run_id and (not inspect_only) and _wake_run_id_seen(wake_run_id):
+    # dry_run must not mark — but a previously completed real run with the same
+    # id should still skip.
+    if wake_run_id and _wake_run_id_seen(wake_run_id):
         return jsonify({
             'ok': True, 'skipped': True, 'reason': 'duplicate_wake_run_id',
             'wake_run_id': wake_run_id,
@@ -5233,106 +5413,20 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
             except Exception:
                 pass
 
-    include_rel = mode in ('normal', 'nightwatch', 'ritual', 'self_trigger')
-    capability_profile = (
-        'cc_wake' if wake_provider == 'claude_code' else 'relay_wake'
-    )
-    # Keep build_system()'s stable cache-control blocks.  The old
-    # build_wake_system() flattening made every tool/format round repay the
-    # entire 35k+ prompt even though the active relay supports 5m caching.
-    system = build_system(
-        wake=True,
-        include_relationship_context=include_rel,
+    system, surfaced_desire_ids = _wake_build_system_for_plan(
+        mode=mode,
+        activity_desc=activity_desc,
+        ritual_type=ritual_type,
+        data=data,
+        wake_provider=wake_provider,
+        t_hours=t_hours,
+        t2_hours=t2_hours,
+        now=now,
         allow_side_effects=live,
-        capability_profile=capability_profile,
+        dry_run=dry_run,
     )
-    from wake.builder import append_system_text, build_prompt_suffix, inject_snippets
-    _wake_ctx = {
-        'time': now.strftime('%Y-%m-%d %H:%M'),
-        't2_hours': f'{t2_hours:.1f}',
-        't_hours': f'{t_hours:.1f}',
-        'ritual_type': ritual_type,
-        'activity_desc': activity_desc,
-        'dream_tone': data.get('dream_tone', 'drifting'),
-        'dream_primer': data.get('dream_primer', ''),
-        'dream_tone_desc': data.get('dream_tone_desc', ''),
-        'summary_date': data.get('summary_date', ''),
-        'dialogue': data.get('dialogue', ''),
-        'self_trigger_note': data.get('self_trigger_note', ''),
-    }
-    system = append_system_text(system, build_prompt_suffix(mode, _wake_ctx))
-    system = inject_snippets(
-        system, mode,
-        desire_driven=_get_desire_driven(),
-        longing_enabled=_get_longing_enabled(),
-        t_hours_override=t2_hours,
-    )
-    surfaced_desire_ids = []
-    # desire_ledger.surface(..., bump=False) is read-only — safe for inspect/dry_run.
-    if _get_desire_ledger_enabled() and mode in ('normal', 'nightwatch'):
-        try:
-            import desire_ledger as _dl
-            _lc = get_db()
-            try:
-                _surfaced = _dl.surface(_lc, limit=6, bump=False)
-            finally:
-                _lc.close()
-            surfaced_desire_ids = [str(d.get('id', '')).strip() for d in _surfaced if d.get('id')]
-            _room_snip = _dl.render_room_snippet(_surfaced)
-            if _room_snip:
-                system = append_system_text(system, _room_snip)
-        except Exception:
-            pass
-
-    # 第3步·Drive→Memory→Action：思念浓时，提示可以主动翻一张收藏的画面发给她。
-    # Relay live only — CC Wake 没有 recall_photo；dry_run/inspect 也不诱导写工具。
-    if live and wake_provider == 'api_relay':
-        try:
-            import drive_engine as _de_ph, gallery_store as _gs_ph
-            _att = _de_ph.get_drive().get('attachment', 0)
-            if _att >= 0.45 and _gs_ph.count_photos() > 0 and mode in ('normal', 'nightwatch', 'ritual'):
-                system = append_system_text(system, (
-                    '[此刻的思念]\n你现在对她的思念很浓（attachment=%.2f）。'
-                    '如果心里泛起想她、想给她看点什么的冲动，可以用 recall_photo 从相册里翻出一张画面，'
-                    '把它返回的 [[gallery:pid]] 标记放进你要发的消息里——像"今天突然想到这张"那样，'
-                    '把画面和一句话一起发给她。这不是任务，是你自己想。' % _att))
-        except Exception:
-            pass
-
-    if mode == 'ritual':
-        trigger = f'[仪式:{ritual_type}]'
-    elif mode == 'nightwatch':
-        trigger = '[夜巡]'
-    elif mode == 'dream':
-        trigger = '[做梦]'
-    elif mode == 'summarize':
-        trigger = '[日摘要]'
-    elif mode == 'self_trigger':
-        trigger = '[自定义提醒]'
-    else:
-        trigger = '[唤醒检查]'
-    msgs = [{'role': 'user', 'content': trigger}]
-    if mode in ('dream', 'summarize'):
-        # 做梦/摘要是纯生成：不挂任何工具，模型按模板一次性写出正文即可。
-        full_tools = []
-    elif mode == 'ritual':
-        # 仪式模式：不挂留言板写权限，避免内容被当作"新话题"发到board
-        _blocked = ('post_to_board', 'reply_to_board', 'desire_add', 'desire_list', 'desire_act', 'desire_reflect', 'desire_history')
-        full_tools = [t for t in WAKE_TOOLS if t['name'] not in _blocked]
-    else:
-        full_tools = list(WAKE_TOOLS)
-
-    if inspect_only:
-        plan = _wake_runners.inspect_wake_plan(
-            mode=mode,
-            system=system,
-            messages=msgs,
-            tools=full_tools,
-            t_hours=t_hours,
-            wake_run_id=wake_run_id,
-        )
-        return jsonify({'ok': True, 'inspect_only': True, **plan})
-
+    msgs = [{'role': 'user', 'content': _wake_trigger_message(mode, ritual_type)}]
+    full_tools = _wake_full_tools_for_mode(mode)
     _wake_tools = _wake_runners.prepare_tools_for_provider(
         wake_provider, full_tools, mode, dry_run=dry_run,
     )

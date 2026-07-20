@@ -121,12 +121,17 @@ def build_system(
     capability_profile:
       None / 'relay' / 'relay_wake' → generic Relay tool brochure (current text)
       'cc_wake' → Wake·Claude Code tool surface only (see wake.cc_tools)
+      'wake_dry_run' / 'cc_wake_dry_run' / 'relay_wake_dry_run'
+        → dry-run brochure: no tools at all (do not inject normal tool lists)
     """
     from gateway import get_db  # 延迟 import，打破循环依赖（build_system 被调用时 gateway 早已加载完毕）
 
     profile = str(capability_profile or ('relay_wake' if wake else 'relay')).strip().lower()
     if profile in ('', 'default', 'api_relay'):
         profile = 'relay_wake' if wake else 'relay'
+    is_dry_run_profile = profile in (
+        'wake_dry_run', 'cc_wake_dry_run', 'relay_wake_dry_run', 'dry_run',
+    )
 
     # ── BP1 · Persona（永不变，缓存断点1）────────────────────
     # include_relationship_context:
@@ -275,13 +280,19 @@ def build_system(
         pass
 
     # 4. 工具能力说明 + 灯·实时状态
-    # CC Wake 必须只用一份准确说明书，绝不能再塞 Relay 通用工具册。
-    if profile == 'cc_wake':
+    # dry_run / CC Wake 各自只有一份说明书，绝不能混入互相矛盾的工具册。
+    if is_dry_run_profile:
+        try:
+            from wake.cc_tools import WAKE_DRY_RUN_CAPABILITY_TEXT
+            parts.append(NL + WAKE_DRY_RUN_CAPABILITY_TEXT)
+        except Exception:
+            parts.append(NL + '（Wake 演习模式：本轮无任何工具。）')
+    elif profile == 'cc_wake':
         try:
             from wake.cc_tools import CC_WAKE_CAPABILITY_TEXT
             parts.append(NL + CC_WAKE_CAPABILITY_TEXT)
         except Exception:
-            parts.append(NL + '（Wake·Claude Code：仅记忆搜索/灯/待办与记账/codebase；无留言板与联网。）')
+            parts.append(NL + '（Wake·Claude Code：仅记忆搜索/灯/待办与记账/codebase 只读；无留言板与联网。）')
     else:
         parts.append(
             NL + '（你拥有真实的工具：保存与搜索记忆、控制次卧灯、查看与发布留言板、'
@@ -306,8 +317,8 @@ def build_system(
         pass
 
     # 4b. Pocket 手机浏览器在线状态（BP3 动态，不污染缓存）
-    # CC Wake 无 Pocket MCP —— 不注入，避免暗示可用。
-    if profile != 'cc_wake':
+    # CC Wake / dry_run 无 Pocket —— 不注入，避免暗示可用。
+    if profile not in ('cc_wake',) and not is_dry_run_profile:
         try:
             from gateway import _pocket_bp3_snippet
             _pocket_line = _pocket_bp3_snippet()
@@ -566,7 +577,13 @@ def build_system(
     # ── 组装 system blocks（prompt caching 格式）────────────────
     # split_dynamic=True 用于 API 主聊天：system 只保留稳定块；BP2/BP3
     # 作为动态上下文放进最后一条 user message，避免污染历史缓存前缀。
-    if profile == 'cc_wake':
+    if is_dry_run_profile:
+        try:
+            from wake.cc_tools import WAKE_DRY_RUN_STABLE_NOTE
+            stable_note = WAKE_DRY_RUN_STABLE_NOTE
+        except Exception:
+            stable_note = '\n## Wake 演习说明\n本轮无工具。\n'
+    elif profile == 'cc_wake':
         try:
             from wake.cc_tools import CC_WAKE_STABLE_NOTE
             stable_note = CC_WAKE_STABLE_NOTE

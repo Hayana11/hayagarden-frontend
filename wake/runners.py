@@ -109,6 +109,30 @@ def prepare_tools_for_provider(
     return list(tools or [])
 
 
+def should_prompt_readonly_tools(
+    *,
+    dry_run: bool,
+    tools: list | None,
+    generative: bool,
+    tools_called: bool,
+    t_hours: float,
+    round_i: int,
+    max_rounds: int,
+) -> bool:
+    """Whether the Relay wake loop may append a "please call a tool" nudge.
+
+    dry_run or empty tools must never nudge — there is nothing callable.
+    """
+    return (
+        (not dry_run)
+        and bool(tools)
+        and (not generative)
+        and (not tools_called)
+        and float(t_hours or 0.0) >= 1.0
+        and round_i < max_rounds - 1
+    )
+
+
 def split_wake_system(system: object) -> tuple[str, str]:
     """Stable (cacheable) vs dynamic wake blocks for the CC resident system/prompt."""
     if isinstance(system, list):
@@ -167,6 +191,7 @@ class ApiRelayWakeRunner:
             tools=request.tools,
             t_hours=request.t_hours,
             mode=request.mode,
+            dry_run=bool(request.dry_run),
         )
         cache_info = dict(cache_info or {})
         cache_info['provider'] = 'api_relay'
