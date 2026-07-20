@@ -30,7 +30,7 @@ jobs:
               sqlite3.connect(f"/opt/frontend/{name}").close()
           PY
       - name: Compile context paths
-        run: python -m py_compile app.py gateway.py chat/context_continuity.py context_usage_routes.py context_usage_store.py tools/context_usage_collector.py
+        run: python -m py_compile app.py gateway.py cc_resident.py chat/system_builder.py chat/context_continuity.py context_usage_routes.py context_usage_store.py tools/context_usage_collector.py
       - name: Run continuity regressions
         run: python -m unittest discover -s tests -p 'test_context_continuity.py'
       - name: Run context usage regressions
@@ -39,5 +39,7 @@ jobs:
         run: python -m unittest tests.test_cc_context_dedup
       - name: Run Wake B1 runner regressions
         run: python -m unittest tests.test_wake_runners tests.test_wake_usage tests.test_provider_router
+      - name: Run Wake reply bridge regressions
+        run: python -m unittest tests.test_wake_reply_bridge
       - name: Validate deploy guard
         run: bash -n scripts/deploy-frontend.sh

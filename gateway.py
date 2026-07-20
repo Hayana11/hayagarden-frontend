@@ -3181,6 +3181,7 @@ def _cc_resident_stream_gen(messages, *, user_turn=True):
         build_cc_one_shot,
         build_cc_state,
         build_cc_static_parts,
+        finalize_cc_wake_one_shot,
         format_cold_once,
         format_one_shot,
         format_state_diff,
@@ -3248,15 +3249,16 @@ def _cc_resident_stream_gen(messages, *, user_turn=True):
     # 2) 每轮构建 state / one-shot；3) 仅冷启动构建 cold_once
     state = build_cc_state()
     one_shot = build_cc_one_shot(include_wake=user_turn)
-    # 冷启动完整 transcript 已含真实 assistant Wake 消息：不注入 bridge/background，
-    # 避免与历史重复。wake_ids 仍保留，供本轮快照消费（落库成功后）。
-    wake_reply_bridge = ''
+    # 冷启动：none/diary/explore 必须保留；message 仅在确认已出现于本轮
+    # transcript 时省略，避免与真实 assistant 历史重复。wake_ids 只含本轮
+    # 实际注入或确认可见的条目——不得因“理论上应该看见”而全量消费。
     if is_cold:
-        one_shot = dict(one_shot)
-        one_shot['wake_background'] = ''
-        one_shot['wake_reply_bridge'] = ''
-    else:
-        wake_reply_bridge = (one_shot.get('wake_reply_bridge') or '').strip()
+        one_shot = finalize_cc_wake_one_shot(
+            one_shot,
+            is_cold=True,
+            transcript_text=messages_to_text(messages),
+        )
+    wake_reply_bridge = (one_shot.get('wake_reply_bridge') or '').strip()
     one_shot_text = format_one_shot(one_shot)
     cold_once = build_cc_cold_once() if is_cold else {}
 
@@ -3293,6 +3295,9 @@ def _cc_resident_stream_gen(messages, *, user_turn=True):
         history_bootstrap_text = '以下是你们今天到目前为止的对话记录：' + NL + NL + convo
         if relationship_text:
             history_bootstrap_text += NL + NL + relationship_text
+        # 不在 transcript 中的最新 message：bridge 紧贴“请回复”
+        if wake_reply_bridge:
+            history_bootstrap_text += NL + NL + wake_reply_bridge
         history_bootstrap_text += NL + NL + '请回复最后一条消息。'
         content = prefix + history_bootstrap_text
         commit_meta = {

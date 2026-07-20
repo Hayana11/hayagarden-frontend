@@ -39,6 +39,7 @@ except OSError:
 from chat.system_builder import (  # noqa: E402
     WAKE_REPLY_BRIDGE_CONTENT_MAX,
     _cc_collect_one_shot,
+    finalize_cc_wake_one_shot,
     format_one_shot,
     format_wake_reply_bridge,
 )
@@ -129,17 +130,19 @@ class WakeOneShotSplitTests(unittest.TestCase):
 
         one_shot = _cc_collect_one_shot(self.get_db, include_wake=True)
         self.assertEqual(one_shot['wake_ids'], [1, 2, 3])
-        self.assertIn('手怎么样了？', one_shot['wake_background'])
-        self.assertIn('写了一点夜里的事', one_shot['wake_background'])
+        self.assertIn('写了一点夜里的事', one_shot['wake_nonmessage_background'])
+        self.assertIn('手怎么样了？', one_shot['wake_message_background'])
         self.assertIn('记得吃点东西。', one_shot['wake_reply_bridge'])
-        self.assertNotIn('记得吃点东西。', one_shot['wake_background'])
+        self.assertNotIn('记得吃点东西。', one_shot['wake_message_background'])
+        self.assertNotIn('记得吃点东西。', one_shot['wake_nonmessage_background'])
         self.assertIn('直接回复上面这句话', one_shot['wake_reply_bridge'])
-        self.assertNotIn('SECRET_THOUGHT', one_shot['wake_background'])
+        self.assertNotIn('SECRET_THOUGHT', one_shot['wake_nonmessage_background'])
         self.assertNotIn('SECRET_THOUGHT', one_shot['wake_reply_bridge'])
 
         text = format_one_shot(one_shot)
         self.assertIn('你醒着的时候', text)
         self.assertIn('手怎么样了？', text)
+        self.assertIn('写了一点夜里的事', text)
         self.assertNotIn('记得吃点东西。', text)
         self.assertNotIn('连续对话', text)
 
@@ -147,9 +150,10 @@ class WakeOneShotSplitTests(unittest.TestCase):
         self._insert(1, '2026-07-20 01:00:00', 'none', '她在睡')
         self._insert(2, '2026-07-20 02:00:00', 'explore', '查了点资料')
         one_shot = _cc_collect_one_shot(self.get_db, include_wake=True)
-        self.assertTrue(one_shot['wake_background'])
+        self.assertTrue(one_shot['wake_nonmessage_background'])
+        self.assertEqual(one_shot['wake_message_background'], '')
         self.assertEqual(one_shot['wake_reply_bridge'], '')
-        self.assertNotIn('直接回复', one_shot['wake_background'])
+        self.assertNotIn('直接回复', one_shot['wake_nonmessage_background'])
         self.assertNotIn('连续对话', format_one_shot(one_shot))
 
     def test_bridge_keeps_long_content_beyond_old_40_char_cap(self):
@@ -159,7 +163,6 @@ class WakeOneShotSplitTests(unittest.TestCase):
         self._insert(1, '2026-07-20 18:00:00', 'message', body)
         one_shot = _cc_collect_one_shot(self.get_db, include_wake=True)
         self.assertIn(body, one_shot['wake_reply_bridge'])
-        # 旧逻辑只留前 40 字；桥接必须保留完整正文
         self.assertGreater(
             one_shot['wake_reply_bridge'].index(body) + len(body),
             one_shot['wake_reply_bridge'].index(body) + 40,
@@ -168,14 +171,103 @@ class WakeOneShotSplitTests(unittest.TestCase):
     def test_bridge_clips_at_500_not_40(self):
         body = 'X' * 600
         bridge = format_wake_reply_bridge(body)
-        # full 600 should not appear; first 500 + ellipsis should
         self.assertNotIn('X' * 600, bridge)
         self.assertIn('X' * 500 + '…', bridge)
         self.assertIn('直接回复上面这句话', bridge)
 
 
+class ColdWakeVisibilityTests(unittest.TestCase):
+    def test_cold_keeps_nonmessage_and_consumes_only_after_visible(self):
+        hot = {
+            'wake_items': [
+                {
+                    'id': 11,
+                    'woke_at': '2026-07-20 01:00:00',
+                    'action': 'diary',
+                    'content': '夜里写了一篇日记',
+                },
+                {
+                    'id': 12,
+                    'woke_at': '2026-07-20 02:00:00',
+                    'action': 'none',
+                    'content': '决定不打扰',
+                },
+                {
+                    'id': 13,
+                    'woke_at': '2026-07-20 03:00:00',
+                    'action': 'explore',
+                    'content': '查了点东西',
+                },
+            ],
+        }
+        cold = finalize_cc_wake_one_shot(hot, is_cold=True, transcript_text='user: 早安')
+        self.assertIn('夜里写了一篇日记', cold['wake_nonmessage_background'])
+        self.assertIn('决定不打扰', cold['wake_nonmessage_background'])
+        self.assertIn('查了点东西', cold['wake_nonmessage_background'])
+        self.assertEqual(cold['wake_message_background'], '')
+        self.assertEqual(cold['wake_reply_bridge'], '')
+        self.assertEqual(cold['wake_ids'], [11, 12, 13])
+        text = format_one_shot(cold)
+        self.assertIn('夜里写了一篇日记', text)
+
+    def test_cold_message_outside_transcript_still_injected(self):
+        hot = {
+            'wake_items': [
+                {
+                    'id': 21,
+                    'woke_at': '2026-07-19 10:00:00',
+                    'action': 'message',
+                    'content': '这句被窗口裁掉了的旧关心',
+                },
+                {
+                    'id': 22,
+                    'woke_at': '2026-07-20 18:00:00',
+                    'action': 'message',
+                    'content': '手怎么样了？',
+                },
+            ],
+        }
+        # transcript 不含任何 pending Wake 正文
+        cold = finalize_cc_wake_one_shot(
+            hot, is_cold=True, transcript_text='user: 今天天气不错',
+        )
+        self.assertIn('这句被窗口裁掉了的旧关心', cold['wake_message_background'])
+        self.assertIn('手怎么样了？', cold['wake_reply_bridge'])
+        self.assertIn('直接回复上面这句话', cold['wake_reply_bridge'])
+        self.assertEqual(cold['wake_ids'], [21, 22])
+
+    def test_cold_message_in_transcript_omits_injection_but_still_consumable(self):
+        hot = {
+            'wake_items': [
+                {
+                    'id': 31,
+                    'woke_at': '2026-07-20 18:00:00',
+                    'action': 'message',
+                    'content': '手怎么样了？',
+                },
+                {
+                    'id': 32,
+                    'woke_at': '2026-07-20 19:00:00',
+                    'action': 'diary',
+                    'content': '夜里日记',
+                },
+            ],
+        }
+        cold = finalize_cc_wake_one_shot(
+            hot,
+            is_cold=True,
+            transcript_text='assistant: 手怎么样了？\nuser: 好多了',
+        )
+        self.assertEqual(cold['wake_reply_bridge'], '')
+        self.assertEqual(cold['wake_message_background'], '')
+        self.assertIn('夜里日记', cold['wake_nonmessage_background'])
+        # message 确认可见 + diary 注入 → 都可消费
+        self.assertEqual(cold['wake_ids'], [31, 32])
+
+
 class WakeReplyBridgeHotColdTests(unittest.TestCase):
-    def _stream(self, *, is_cold, one_shot, user_text='好多了', relationship_text=''):
+    def _stream(self, *, is_cold, one_shot, user_text='好多了', relationship_text='',
+                transcript_text='assistant: 手怎么样了？\nuser: 好多了'):
         gateway = _import_gateway()
         captured = {}
 
@@ -216,8 +308,7 @@ class WakeReplyBridgeHotColdTests(unittest.TestCase):
         }))
         stack.enter_context(mock.patch.object(gateway, '_fetch_group_chat_rows', return_value=([], 0)))
         stack.enter_context(mock.patch.object(
-            gateway, 'messages_to_text',
-            return_value='assistant: 手怎么样了？\nuser: 好多了',
+            gateway, 'messages_to_text', return_value=transcript_text,
         ))
         if relationship_text:
             from chat.relationship_context import RelationshipContextResult
@@ -253,9 +344,14 @@ class WakeReplyBridgeHotColdTests(unittest.TestCase):
     def test_hot_bridge_immediately_before_user_after_relationship(self):
         bridge = format_wake_reply_bridge('手怎么样了？')
         one_shot = {
-            'wake_background': '## 你醒着的时候\n- [18:00] 你写了篇日记：夜里',
+            'wake_nonmessage_background': '- [18:00] 你写了篇日记：夜里',
+            'wake_message_background': '',
             'wake_reply_bridge': bridge,
             'wake_ids': [1, 2],
+            'wake_items': [
+                {'id': 1, 'woke_at': '2026-07-20 18:00:00', 'action': 'diary', 'content': '夜里'},
+                {'id': 2, 'woke_at': '2026-07-20 19:00:00', 'action': 'message', 'content': '手怎么样了？'},
+            ],
             'task_feedback': '',
             'dream_flash': '',
             'feedback_ids': [],
@@ -272,30 +368,78 @@ class WakeReplyBridgeHotColdTests(unittest.TestCase):
         self.assertIn('直接回复上面这句话', content)
         self.assertLess(content.index(rel), content.index(bridge))
         self.assertLess(content.index(bridge), content.index('好多了'))
-        # background still in earlier one-shot block
         self.assertIn('你醒着的时候', content)
         self.assertLess(content.index('你醒着的时候'), content.index(rel))
         self.assertEqual(captured['commit_meta'].get('wake_ids'), [1, 2])
 
-    def test_cold_does_not_inject_bridge_or_wake_background(self):
-        bridge = format_wake_reply_bridge('手怎么样了？')
+    def test_cold_message_in_transcript_skips_bridge_keeps_diary(self):
         one_shot = {
-            'wake_background': '## 你醒着的时候\n- [18:00] 你主动发了条消息：手怎么样了？',
-            'wake_reply_bridge': bridge,
-            'wake_ids': [9],
+            'wake_nonmessage_background': '- [19:00] 你写了篇日记：夜里日记',
+            'wake_message_background': '',
+            'wake_reply_bridge': format_wake_reply_bridge('手怎么样了？'),
+            'wake_ids': [9, 10],
+            'wake_items': [
+                {
+                    'id': 9,
+                    'woke_at': '2026-07-20 18:00:00',
+                    'action': 'message',
+                    'content': '手怎么样了？',
+                },
+                {
+                    'id': 10,
+                    'woke_at': '2026-07-20 19:00:00',
+                    'action': 'diary',
+                    'content': '夜里日记',
+                },
+            ],
             'task_feedback': '',
             'dream_flash': '',
             'feedback_ids': [],
             'dream_id': None,
         }
-        captured = self._stream(is_cold=True, one_shot=one_shot, user_text='好多了')
+        captured = self._stream(
+            is_cold=True,
+            one_shot=one_shot,
+            user_text='好多了',
+            transcript_text='assistant: 手怎么样了？\nuser: 好多了',
+        )
         content = captured['content']
         self.assertNotIn('连续对话·紧邻上一句', content)
         self.assertNotIn('直接回复上面这句话', content)
-        self.assertNotIn('你醒着的时候', content)
-        # cold still relies on transcript assistant wake message
-        self.assertIn('手怎么样了？', content)
-        self.assertEqual(captured['commit_meta'].get('wake_ids'), [9])
+        self.assertIn('夜里日记', content)
+        self.assertIn('手怎么样了？', content)  # from transcript
+        self.assertEqual(captured['commit_meta'].get('wake_ids'), [9, 10])
+
+    def test_cold_message_outside_transcript_injects_bridge(self):
+        one_shot = {
+            'wake_nonmessage_background': '',
+            'wake_message_background': '',
+            'wake_reply_bridge': format_wake_reply_bridge('窗外那句旧关心'),
+            'wake_ids': [7],
+            'wake_items': [
+                {
+                    'id': 7,
+                    'woke_at': '2026-07-18 08:00:00',
+                    'action': 'message',
+                    'content': '窗外那句旧关心',
+                },
+            ],
+            'task_feedback': '',
+            'dream_flash': '',
+            'feedback_ids': [],
+            'dream_id': None,
+        }
+        captured = self._stream(
+            is_cold=True,
+            one_shot=one_shot,
+            user_text='嗨',
+            transcript_text='user: 嗨',
+        )
+        content = captured['content']
+        self.assertIn('连续对话·紧邻上一句', content)
+        self.assertIn('窗外那句旧关心', content)
+        self.assertIn('直接回复上面这句话', content)
+        self.assertEqual(captured['commit_meta'].get('wake_ids'), [7])
 
 
 class WakeConsumeSemanticsTests(unittest.TestCase):
@@ -321,6 +465,7 @@ class WakeConsumeSemanticsTests(unittest.TestCase):
             [
                 (1, '2026-07-20 18:00:00', 'message', '手怎么样了？'),
                 (2, '2026-07-20 21:00:00', 'message', '记得吃点东西。'),
+                (3, '2026-07-20 22:00:00', 'diary', '夜里日记'),
             ],
         )
         conn.commit()
@@ -337,18 +482,16 @@ class WakeConsumeSemanticsTests(unittest.TestCase):
     def test_failure_keeps_pending(self):
         from chat.context_continuity import capture_pending_wake_ids, consume_wake_ids
         claim = capture_pending_wake_ids(self.get_db)
-        self.assertEqual(claim, [1, 2])
-        # simulate flush/model/persist failure: do not consume
+        self.assertEqual(claim, [1, 2, 3])
         conn = self.get_db()
         states = dict(conn.execute('SELECT id, consumed FROM wake_log'))
         conn.close()
-        self.assertEqual(states, {1: 0, 2: 0})
-        # later success consumes only snapshot
+        self.assertEqual(states, {1: 0, 2: 0, 3: 0})
         consume_wake_ids(self.get_db, claim)
         conn = self.get_db()
         states = dict(conn.execute('SELECT id, consumed FROM wake_log'))
         conn.close()
-        self.assertEqual(states, {1: 1, 2: 1})
+        self.assertEqual(states, {1: 1, 2: 1, 3: 1})
 
     def test_consume_only_snapshot_ids(self):
         from chat.context_continuity import consume_wake_ids
@@ -358,6 +501,17 @@ class WakeConsumeSemanticsTests(unittest.TestCase):
         conn.close()
         self.assertEqual(states[1], 0)
         self.assertEqual(states[2], 1)
+        self.assertEqual(states[3], 0)
+
+    def test_cold_finalize_does_not_silently_drop_unseen_from_ids(self):
+        """未进入 transcript 的 message 仍必须留在 wake_ids，不得静默消失。"""
+        one_shot = _cc_collect_one_shot(self.get_db, include_wake=True)
+        cold = finalize_cc_wake_one_shot(
+            one_shot, is_cold=True, transcript_text='user: 无关内容',
+        )
+        self.assertEqual(set(cold['wake_ids']), {1, 2, 3})
+        self.assertTrue(cold['wake_reply_bridge'])
+        self.assertIn('夜里日记', cold['wake_nonmessage_background'])
 
 
 if __name__ == '__main__':
