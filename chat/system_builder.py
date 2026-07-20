@@ -31,8 +31,6 @@ def read_persona():
 def build_shared_context_details(
     *,
     persona=None,
-    previous_emotion_band=None,
-    previous_relationship_band=None,
     get_db_fn=None,
 ):
     """Build A1 provider-neutral context plus internal refresh metadata."""
@@ -40,16 +38,11 @@ def build_shared_context_details(
         from gateway import get_db as get_db_fn  # 延迟 import，避免循环依赖
 
     persona_text = read_persona() if persona is None else str(persona)
-    relationship = build_relationship_context(
-        get_db_fn,
-        previous_emotion_band=previous_emotion_band,
-        previous_relationship_band=previous_relationship_band,
-        calibrated=config_store.get_bool('RELATIONSHIP_BANDS_CALIBRATED', False),
-    )
+    relationship = build_relationship_context(get_db_fn)
     shared = SharedContext(
         persona=persona_text,
         relationship_context=relationship.text,
-        relationship_fingerprint=relationship.slow_fingerprint,
+        relationship_fingerprint=relationship.fingerprint,
     )
     return shared, relationship
 

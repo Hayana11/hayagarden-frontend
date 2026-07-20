@@ -3154,7 +3154,6 @@ def _cc_resident_stream_gen(messages, *, user_turn=True):
     from chat.system_builder import (
         build_cc_cold_once,
         build_cc_one_shot,
-        build_shared_context_details,
         build_cc_state,
         build_cc_static_parts,
         format_cold_once,
@@ -3162,7 +3161,11 @@ def _cc_resident_stream_gen(messages, *, user_turn=True):
         format_state_diff,
         format_state_snapshot,
     )
-    from chat.relationship_context import relationship_refresh_reason, split_band_key
+    from chat.relationship_context import (
+        build_relationship_context,
+        rel_context_status,
+        should_send_relationship,
+    )
     from tools import cc_usage_observability as _cc_obs
 
     if not CC_TOKEN:
@@ -3192,38 +3195,20 @@ def _cc_resident_stream_gen(messages, *, user_turn=True):
     )()
     is_cold = _CC_RESIDENT.ensure_alive(full_system, env)
 
-    relationship = None
     relationship_text = ''
-    relationship_reason = None
-    current_relationship_turn = getattr(
-        _CC_RESIDENT, 'relationship_user_turn_count', 0
-    ) + (
-        1 if user_turn else 0
-    )
+    rel_context_usage = None
+    relationship = None
     if config_store.get_bool('RELATIONSHIP_CONTEXT_ENABLED', False):
-        previous_emotion_band, previous_relationship_band = split_band_key(
-            getattr(_CC_RESIDENT, 'last_relationship_band', None)
-        )
-        shared_context, relationship = build_shared_context_details(
-            persona=persona_text,
-            previous_emotion_band=previous_emotion_band,
-            previous_relationship_band=previous_relationship_band,
-        )
-        relationship_reason = relationship_refresh_reason(
+        relationship = build_relationship_context(get_db)
+        send_rel = should_send_relationship(
             is_cold=is_cold,
-            current_fingerprint=shared_context.relationship_fingerprint,
-            current_band=relationship.band_key,
-            current_user_turn=current_relationship_turn,
-            last_fingerprint=getattr(_CC_RESIDENT, 'last_relationship_fingerprint', None),
-            last_band=getattr(_CC_RESIDENT, 'last_relationship_band', None),
-            last_turn=getattr(_CC_RESIDENT, 'last_relationship_turn', 0),
-            idle_seconds=idle_seconds_before_turn,
-            idle_refresh_seconds=float(config_store.get(
-                'RELATIONSHIP_IDLE_REFRESH_SECONDS', '3600'
-            ) or 3600),
+            rel_fp=relationship.fingerprint,
+            last_fp=getattr(_CC_RESIDENT, 'last_rel_fingerprint', None),
+            turns_since_rel_sent=getattr(_CC_RESIDENT, 'turns_since_rel_sent', 0),
         )
-        if relationship_reason:
-            relationship_text = shared_context.relationship_context.strip()
+        if relationship.text and send_rel:
+            relationship_text = relationship.text.strip()
+        rel_context_usage = rel_context_status(relationship.text, sent=bool(relationship_text))
 
     # 2) 每轮构建 state / one-shot；3) 仅冷启动构建 cold_once
     state = build_cc_state()
@@ -3331,15 +3316,10 @@ def _cc_resident_stream_gen(messages, *, user_turn=True):
     # Resident cursors advance only after stdin.flush() succeeds inside
     # ResidentSession.send_turn().  Failed sends therefore cannot suppress a
     # later relationship refresh.
-    commit_meta['relationship_user_turn'] = bool(user_turn)
-    if relationship is not None and relationship_reason:
-        commit_meta.update({
-            'relationship_fingerprint': relationship.slow_fingerprint,
-            'relationship_band': relationship.band_key,
-            'relationship_turn': current_relationship_turn,
-            'relationship_sent_at': time.time(),
-            'relationship_reason': relationship_reason,
-        })
+    if rel_context_usage is not None:
+        commit_meta['rel_tick'] = True
+        if relationship_text and relationship is not None:
+            commit_meta['rel_fingerprint'] = relationship.fingerprint
 
     # 组装现场测量：只读字符串副本；CC 路径 rolling_summary 未注入
     allowed_tool_count = len([x for x in (CC_ALLOWED_TOOLS or '').split(',') if x.strip()]) or None
@@ -3407,6 +3387,8 @@ def _cc_resident_stream_gen(messages, *, user_turn=True):
                 for _k in list(usage.keys()):
                     if str(_k).startswith('_obs_'):
                         usage.pop(_k, None)
+            if rel_context_usage is not None:
+                usage['rel_context'] = rel_context_usage
             yield evt, (raw_text, thinking, usage, claims)
             continue
         yield evt, payload

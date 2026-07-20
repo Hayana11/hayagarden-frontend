@@ -1,13 +1,11 @@
-"""A1 relationship continuity tests.  No model or network calls."""
+"""A1 relationship continuity tests — bucket file source, cursor cadence, empty alerts."""
 
 from __future__ import annotations
 
-import sqlite3
-import gc
 import os
+import sqlite3
 import sys
 import tempfile
-import types
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -22,17 +20,22 @@ os.environ.setdefault(
 )
 
 from chat.relationship_context import (
-    MAX_CONTEXT_CHARS,
     build_relationship_context,
-    classify_emotion_band,
-    relationship_refresh_reason,
+    rel_context_status,
+    should_send_relationship,
 )
-from chat.system_builder import build_shared_context_details
 
 
 class RelationshipFixture(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
+        self.bucket_dir = str(Path(self.tmp.name) / 'bucket')
+        Path(self.bucket_dir).mkdir()
+        anchor = Path(self.bucket_dir) / '01-anchor.md'
+        anchor.write_text(
+            '---\ntitle: anchor\n---\n我们是长期伴侣，彼此信任。',
+            encoding='utf-8',
+        )
         self.db_path = str(Path(self.tmp.name) / 'memories.db')
         conn = sqlite3.connect(self.db_path)
         conn.executescript(
@@ -42,44 +45,17 @@ class RelationshipFixture(unittest.TestCase):
                 layer TEXT, created_at TEXT,
                 resolved INTEGER DEFAULT 0, importance INTEGER DEFAULT 0
             );
-            CREATE TABLE chat_messages (
-                id INTEGER PRIMARY KEY, author TEXT, content TEXT
-            );
-            CREATE TABLE board (
-                id INTEGER PRIMARY KEY, content TEXT, status TEXT
-            );
-            CREATE TABLE todos (
-                id INTEGER PRIMARY KEY, content TEXT, due_date TEXT,
-                done INTEGER DEFAULT 0
-            );
-            CREATE TABLE emotion_state (
-                id INTEGER PRIMARY KEY, valence REAL, arousal REAL,
-                sternberg_i REAL
-            );
             INSERT INTO posts
                 (id, type, content, tags, layer, created_at, resolved, importance)
             VALUES
                 (1, 'DAILY_SUMMARY', '昨天确认先完成 provider parity。', '', '',
                  '2026-07-18 10:00:00', 0, 8);
-            INSERT INTO chat_messages VALUES
-                (1, 'user', '爸爸，我们继续处理 HayaGarden。'),
-                (2, 'assistant', '好。'),
-                (3, 'user', '小猫想先把关系上下文接好。');
-            INSERT INTO board VALUES
-                (10, '完成 A1 的本地测试', 'open');
-            INSERT INTO todos VALUES
-                (20, '审核部署前的开关', '2026-07-20', 0);
-            INSERT INTO emotion_state VALUES
-                (1, 0.52, 0.33, 0.61);
             """
         )
         conn.commit()
         conn.close()
 
     def tearDown(self):
-        # Some legacy build_system exception paths rely on connection GC.
-        # Force it here so Windows can remove the temporary SQLite file.
-        gc.collect()
         self.tmp.cleanup()
 
     def get_db(self):
@@ -87,145 +63,130 @@ class RelationshipFixture(unittest.TestCase):
         conn.row_factory = sqlite3.Row
         return conn
 
-    def update_emotion(self, valence, arousal, intimacy=0.61):
-        conn = self.get_db()
-        conn.execute(
-            'UPDATE emotion_state SET valence=?, arousal=?, sternberg_i=? WHERE id=1',
-            (valence, arousal, intimacy),
-        )
-        conn.commit()
-        conn.close()
 
-
-class RelationshipBuildTests(RelationshipFixture):
-    def test_raw_emotion_decimals_do_not_change_text_or_slow_fingerprint(self):
-        first = build_relationship_context(self.get_db, calibrated=False)
-        for valence, arousal in ((0.53, 0.34), (0.51, 0.35), (0.54, 0.32), (0.50, 0.36), (0.52, 0.31)):
-            self.update_emotion(valence, arousal)
-            current = build_relationship_context(
-                self.get_db,
-                previous_emotion_band=first.emotion_band,
-                previous_relationship_band=first.relationship_band,
-                calibrated=False,
-            )
-            self.assertEqual(current.emotion_band, first.emotion_band)
-            self.assertEqual(current.slow_fingerprint, first.slow_fingerprint)
+class RelationshipContextTests(RelationshipFixture):
+    def test_mood_jitter_within_quadrant_keeps_fingerprint_and_sends_once(self):
+        """象限内抖动 5 轮 → 指纹不变 → should_send 只在冷启动与第 4 轮刷新。"""
+        first = build_relationship_context(self.get_db, bucket_dir=self.bucket_dir)
+        fps = [first.fingerprint]
+        for valence, arousal in (
+            (0.53, 0.34), (0.51, 0.35), (0.54, 0.32), (0.50, 0.36), (0.52, 0.31),
+        ):
+            with mock.patch(
+                'chat.relationship_context._emotion_engine_scores',
+                return_value=(valence, arousal),
+            ):
+                current = build_relationship_context(self.get_db, bucket_dir=self.bucket_dir)
+            fps.append(current.fingerprint)
             self.assertEqual(current.text, first.text)
+        self.assertEqual(len(set(fps)), 1)
 
-    def test_slow_fact_change_changes_fingerprint(self):
-        first = build_relationship_context(self.get_db)
-        conn = self.get_db()
-        conn.execute("UPDATE board SET content='A1 已完成，等待审阅' WHERE id=10")
-        conn.commit()
-        conn.close()
-        second = build_relationship_context(self.get_db)
-        self.assertNotEqual(first.slow_fingerprint, second.slow_fingerprint)
-
-    def test_context_filters_behavior_meta_instructions_and_has_hard_limit(self):
-        conn = self.get_db()
-        conn.execute(
-            "INSERT INTO chat_messages VALUES (4, 'user', ?)",
-            ('你应该表现出偏爱。请表达得更主动。事实是今天在查 provider。' + '事实很长' * 120,),
-        )
-        conn.commit()
-        conn.close()
-        result = build_relationship_context(self.get_db)
-        self.assertLessEqual(len(result.text), MAX_CONTEXT_CHARS)
-        for banned in ('应该', '需要你', '回复要', '表达得', '安抚她', '表现出'):
-            self.assertNotIn(banned, result.text)
-        self.assertIn('provider', result.text)
-
-    def test_cc_and_relay_share_identical_contract_values(self):
-        cc, _ = build_shared_context_details(
-            persona='PERSONA', get_db_fn=self.get_db,
-        )
-        relay, _ = build_shared_context_details(
-            persona='PERSONA', get_db_fn=self.get_db,
-        )
-        self.assertEqual(cc.persona, relay.persona)
-        self.assertEqual(cc.relationship_context, relay.relationship_context)
-        self.assertEqual(cc.relationship_fingerprint, relay.relationship_fingerprint)
-
-    def test_relay_stable_cache_blocks_are_byte_identical_when_enabled(self):
-        from chat import system_builder
-
-        gateway_stub = types.ModuleType('gateway')
-        gateway_stub.get_db = self.get_db
-        with mock.patch.dict(sys.modules, {'gateway': gateway_stub}), \
-             mock.patch.object(system_builder, '_ombre_handoff_sync', return_value=''), \
-             mock.patch.object(system_builder, 'read_persona', return_value='PERSONA'):
-            with mock.patch.object(
-                system_builder.config_store, 'get_bool', return_value=False,
-            ):
-                disabled = system_builder.build_system()
-            with mock.patch.object(
-                system_builder.config_store, 'get_bool',
-                side_effect=lambda key, default=False: key == 'RELATIONSHIP_CONTEXT_ENABLED',
-            ):
-                enabled = system_builder.build_system()
-
-        self.assertEqual(disabled[:2], enabled[:2])
-        self.assertIn('【近期关系脉络】', enabled[-1]['text'])
-        self.assertNotIn('cache_control', enabled[-1])
-
-
-class RelationshipBandTests(unittest.TestCase):
-    def test_warm_band_uses_hysteresis(self):
-        entered = classify_emotion_band(0.66, 0.30, previous='neutral_low_arousal')
-        held = classify_emotion_band(0.60, 0.30, previous=entered)
-        exited = classify_emotion_band(0.57, 0.30, previous=held)
-        self.assertEqual(entered, 'warm_low_arousal')
-        self.assertEqual(held, 'warm_low_arousal')
-        self.assertEqual(exited, 'neutral_low_arousal')
-
-    def test_refresh_contract(self):
-        common = dict(
-            is_cold=False,
-            current_fingerprint='same',
-            current_band='neutral_low_arousal|task_focused',
-            last_fingerprint='same',
-            last_band='neutral_low_arousal|task_focused',
-            last_turn=1,
-            idle_seconds=10,
-            idle_refresh_seconds=3600,
-        )
-        for turn in (2, 3, 4):
-            self.assertIsNone(relationship_refresh_reason(
-                current_user_turn=turn, **common,
-            ))
-        self.assertEqual(
-            relationship_refresh_reason(current_user_turn=5, **common),
-            'periodic',
-        )
-        self.assertEqual(
-            relationship_refresh_reason(
-                current_user_turn=2, **{**common, 'current_fingerprint': 'changed'},
-            ),
-            'slow_fingerprint',
-        )
-        self.assertIsNone(relationship_refresh_reason(
-            current_user_turn=2,
-            **{**common, 'current_band': 'warm_low_arousal|task_focused'},
+        last_fp = first.fingerprint
+        self.assertTrue(should_send_relationship(
+            is_cold=True, rel_fp=last_fp, last_fp=None, turns_since_rel_sent=0,
         ))
-        self.assertEqual(
-            relationship_refresh_reason(
-                current_user_turn=3,
-                **{**common, 'current_band': 'warm_low_arousal|task_focused'},
-            ),
-            'band_change',
-        )
-        self.assertEqual(
-            relationship_refresh_reason(
-                current_user_turn=2, **{**common, 'idle_seconds': 4000},
-            ),
-            'idle_return',
-        )
-        self.assertEqual(
-            relationship_refresh_reason(
-                current_user_turn=1, **{**common, 'is_cold': True},
-            ),
-            'cold',
-        )
+        for turn in range(3):
+            self.assertFalse(should_send_relationship(
+                is_cold=False,
+                rel_fp=last_fp,
+                last_fp=last_fp,
+                turns_since_rel_sent=turn,
+            ))
+        self.assertTrue(should_send_relationship(
+            is_cold=False,
+            rel_fp=last_fp,
+            last_fp=last_fp,
+            turns_since_rel_sent=4,
+        ))
+
+    def test_fourth_turn_forces_refresh(self):
+        self.assertTrue(should_send_relationship(
+            is_cold=False,
+            rel_fp='rel-v2:abc',
+            last_fp='rel-v2:abc',
+            turns_since_rel_sent=4,
+        ))
+        self.assertFalse(should_send_relationship(
+            is_cold=False,
+            rel_fp='rel-v2:abc',
+            last_fp='rel-v2:abc',
+            turns_since_rel_sent=3,
+        ))
+
+    def test_bucket_read_failure_degrades_to_mood_only(self):
+        with mock.patch(
+            'chat.relationship_context._read_relationship_anchor',
+            return_value=('', None),
+        ), mock.patch(
+            'chat.relationship_context._latest_daily_summary_head',
+            return_value='',
+        ), mock.patch(
+            'chat.relationship_context._emotion_engine_scores',
+            return_value=(0.6, 0.6),
+        ):
+            result = build_relationship_context(self.get_db, bucket_dir=self.bucket_dir)
+        self.assertIn('当前基调：高唤醒、偏暖', result.text)
+        self.assertEqual(rel_context_status(result.text, sent=True), 'sent')
+        self.assertNotEqual(rel_context_status(result.text, sent=True), 'EMPTY')
+
+    def test_all_sources_empty_logs_warning_and_marks_empty(self):
+        with mock.patch(
+            'chat.relationship_context._read_relationship_anchor',
+            return_value=('', None),
+        ), mock.patch(
+            'chat.relationship_context._latest_daily_summary_head',
+            return_value='',
+        ), mock.patch(
+            'chat.relationship_context._quantized_mood',
+            return_value='',
+        ):
+            with self.assertLogs('relationship_context', level='WARNING') as logs:
+                result = build_relationship_context(self.get_db, bucket_dir=self.bucket_dir)
+        self.assertEqual(result.text, '')
+        self.assertEqual(rel_context_status(result.text, sent=False), 'EMPTY')
+        self.assertTrue(any('EMPTY' in line for line in logs.output))
+
+
+class RelationshipCursorTests(unittest.TestCase):
+    def test_respawn_resets_rel_cursor_and_flush_failure_does_not_commit(self):
+        from cc_resident import ResidentError, ResidentSession
+
+        class FakeProc:
+            def __init__(self):
+                self.stdin = self
+                self._code = None
+
+            def write(self, _):
+                raise BrokenPipeError('boom')
+
+            def flush(self):
+                pass
+
+            def poll(self):
+                return None
+
+        sess = ResidentSession('/tmp', '', '/tmp/cc-tools.json')
+        sess._last_rel_fingerprint = 'rel-v2:old'
+        sess._turns_since_rel_sent = 3
+        with mock.patch('subprocess.Popen', return_value=FakeProc()):
+            sess._spawn('STATIC', {}, reason='turn_limit')
+        self.assertIsNone(sess.last_rel_fingerprint)
+        self.assertEqual(sess.turns_since_rel_sent, 0)
+
+        sess._proc = FakeProc()
+        sess._cold = False
+        with self.assertRaises(ResidentError):
+            list(sess.send_turn('hi', commit_meta={
+                'rel_tick': True,
+                'rel_fingerprint': 'rel-v2:new',
+            }))
+        self.assertIsNone(sess.last_rel_fingerprint)
+        self.assertEqual(sess.turns_since_rel_sent, 0)
+
+        sess._proc = FakeProc()
+        with self.assertRaises(ResidentError):
+            list(sess.send_turn('hi', commit_meta={'rel_tick': True}))
+        self.assertEqual(sess.turns_since_rel_sent, 0)
 
 
 if __name__ == '__main__':
