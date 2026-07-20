@@ -3249,14 +3249,14 @@ def _cc_resident_stream_gen(messages, *, user_turn=True):
     # 2) 每轮构建 state / one-shot；3) 仅冷启动构建 cold_once
     state = build_cc_state()
     one_shot = build_cc_one_shot(include_wake=user_turn)
-    # 冷启动：none/diary/explore 必须保留；message 仅在确认已出现于本轮
-    # transcript 时省略，避免与真实 assistant 历史重复。wake_ids 只含本轮
-    # 实际注入或确认可见的条目——不得因“理论上应该看见”而全量消费。
+    # 冷启动：none/diary/explore 必须保留；message 仅在结构化 messages 的
+    # assistant 精确命中时省略。可见性检查零 I/O，不调用 messages_to_text
+    #（后者遇图片会走 Relay 描图）。正式 Prompt 再单独 messages_to_text 一次。
     if is_cold:
         one_shot = finalize_cc_wake_one_shot(
             one_shot,
             is_cold=True,
-            transcript_text=messages_to_text(messages),
+            messages=messages,
         )
     wake_reply_bridge = (one_shot.get('wake_reply_bridge') or '').strip()
     one_shot_text = format_one_shot(one_shot)
@@ -3291,11 +3291,12 @@ def _cc_resident_stream_gen(messages, *, user_turn=True):
         if one_shot_text:
             pieces.append(one_shot_text)
         prefix = ('\n\n'.join(p for p in pieces if p) + '\n\n') if pieces else ''
+        # 冷启动全程只在这里调用一次 messages_to_text（可能含图片 Relay 描图）
         convo = messages_to_text(messages)
         history_bootstrap_text = '以下是你们今天到目前为止的对话记录：' + NL + NL + convo
         if relationship_text:
             history_bootstrap_text += NL + NL + relationship_text
-        # 不在 transcript 中的最新 message：bridge 紧贴“请回复”
+        # 不在 assistant 历史中的最新 message：bridge 紧贴“请回复”
         if wake_reply_bridge:
             history_bootstrap_text += NL + NL + wake_reply_bridge
         history_bootstrap_text += NL + NL + '请回复最后一条消息。'

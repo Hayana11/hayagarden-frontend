@@ -1148,23 +1148,74 @@ def _format_wake_background_line(wake_row):
     return f'- [{wt}] {act}：{content}'
 
 
-def wake_message_visible_in_transcript(content, transcript_text):
-    """冷启动：仅当 message 正文确实出现在本轮 transcript 时才视为可见。"""
-    body = (content or '').strip()
-    if not body:
-        return False
-    return body in (transcript_text or '')
+def normalize_wake_message_text(text):
+    """Wake / assistant 正文规范化：仅 strip，不做模糊子串。"""
+    return (text or '').strip()
 
 
-def finalize_cc_wake_one_shot(one_shot, *, is_cold=False, transcript_text=''):
+def extract_assistant_message_texts(messages):
+    """从结构化 messages 提取 assistant 已有文本。纯函数：零 I/O、不描图、不调模型。"""
+    texts = []
+    for msg in messages or ():
+        if not isinstance(msg, dict) or msg.get('role') != 'assistant':
+            continue
+        content = msg.get('content')
+        if isinstance(content, str):
+            body = normalize_wake_message_text(content)
+            if body:
+                texts.append(body)
+            continue
+        if isinstance(content, list):
+            parts = []
+            for block in content:
+                if not isinstance(block, dict) or block.get('type') != 'text':
+                    continue
+                part = block.get('text') or ''
+                if part:
+                    parts.append(part)
+            body = normalize_wake_message_text('\n'.join(parts))
+            if body:
+                texts.append(body)
+    return texts
+
+
+def match_visible_wake_ids(wake_items, messages):
+    """冷启动：用 assistant 精确正文匹配 pending message Wake。
+
+    - 只看 role=assistant
+    - 规范化后精确相等，不做任意子串
+    - Counter：一条 assistant 消息最多确认一条重复正文的 Wake
+    """
+    from collections import Counter
+
+    available = Counter(extract_assistant_message_texts(messages))
+    visible = set()
+    for item in wake_items or ():
+        if (item.get('action') or '') != 'message':
+            continue
+        try:
+            wid = int(item['id'])
+        except (TypeError, ValueError, KeyError):
+            continue
+        body = normalize_wake_message_text(item.get('content'))
+        if not body:
+            continue
+        if available.get(body, 0) > 0:
+            available[body] -= 1
+            visible.add(wid)
+    return visible
+
+
+def finalize_cc_wake_one_shot(one_shot, *, is_cold=False, messages=None):
     """按热/冷轮可见性装配 Wake 文本，并收窄本轮可消费的 wake_ids。
 
     Hot：nonmessage + older message background + latest bridge；全部 ids 可消费。
     Cold：
       - none/diary/explore 必须保留注入
-      - message 仅在确认已存在于 transcript 时省略注入，但仍可消费
-      - 不在 transcript 中的 message 仍注入 background/bridge
+      - message 仅在结构化 messages 的 assistant 精确命中时省略注入，但仍可消费
+      - 不在 assistant 历史中的 message 仍注入 background/bridge
       - 只把本轮注入或确认可见的 ids 写入 wake_ids
+    可见性检查不调用 messages_to_text / Relay。
     """
     one_shot = dict(one_shot or {})
     items = list(one_shot.get('wake_items') or [])
@@ -1175,6 +1226,7 @@ def finalize_cc_wake_one_shot(one_shot, *, is_cold=False, transcript_text=''):
 
     message_items = [it for it in items if (it.get('action') or '') == 'message']
     bridge_id = int(message_items[-1]['id']) if message_items else None
+    visible_ids = match_visible_wake_ids(items, messages) if is_cold else set()
 
     for item in items:
         try:
@@ -1189,8 +1241,8 @@ def finalize_cc_wake_one_shot(one_shot, *, is_cold=False, transcript_text=''):
             consumable.append(wid)
             continue
 
-        if is_cold and wake_message_visible_in_transcript(content, transcript_text):
-            # 已在冷启动 transcript 中：省略重复注入，但仍算本轮可见 → 可消费
+        if is_cold and wid in visible_ids:
+            # assistant 历史已精确含此 Wake：省略重复注入，但仍算本轮可见 → 可消费
             consumable.append(wid)
             continue
 

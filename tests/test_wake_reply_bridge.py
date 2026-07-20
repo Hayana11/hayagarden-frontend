@@ -39,9 +39,11 @@ except OSError:
 from chat.system_builder import (  # noqa: E402
     WAKE_REPLY_BRIDGE_CONTENT_MAX,
     _cc_collect_one_shot,
+    extract_assistant_message_texts,
     finalize_cc_wake_one_shot,
     format_one_shot,
     format_wake_reply_bridge,
+    match_visible_wake_ids,
 )
 
 
@@ -200,7 +202,9 @@ class ColdWakeVisibilityTests(unittest.TestCase):
                 },
             ],
         }
-        cold = finalize_cc_wake_one_shot(hot, is_cold=True, transcript_text='user: 早安')
+        cold = finalize_cc_wake_one_shot(
+            hot, is_cold=True, messages=[{'role': 'user', 'content': '早安'}],
+        )
         self.assertIn('夜里写了一篇日记', cold['wake_nonmessage_background'])
         self.assertIn('决定不打扰', cold['wake_nonmessage_background'])
         self.assertIn('查了点东西', cold['wake_nonmessage_background'])
@@ -227,16 +231,17 @@ class ColdWakeVisibilityTests(unittest.TestCase):
                 },
             ],
         }
-        # transcript 不含任何 pending Wake 正文
         cold = finalize_cc_wake_one_shot(
-            hot, is_cold=True, transcript_text='user: 今天天气不错',
+            hot,
+            is_cold=True,
+            messages=[{'role': 'user', 'content': '今天天气不错'}],
         )
         self.assertIn('这句被窗口裁掉了的旧关心', cold['wake_message_background'])
         self.assertIn('手怎么样了？', cold['wake_reply_bridge'])
         self.assertIn('直接回复上面这句话', cold['wake_reply_bridge'])
         self.assertEqual(cold['wake_ids'], [21, 22])
 
-    def test_cold_message_in_transcript_omits_injection_but_still_consumable(self):
+    def test_cold_message_in_assistant_omits_injection_but_still_consumable(self):
         hot = {
             'wake_items': [
                 {
@@ -256,20 +261,95 @@ class ColdWakeVisibilityTests(unittest.TestCase):
         cold = finalize_cc_wake_one_shot(
             hot,
             is_cold=True,
-            transcript_text='assistant: 手怎么样了？\nuser: 好多了',
+            messages=[
+                {'role': 'assistant', 'content': '手怎么样了？'},
+                {'role': 'user', 'content': '好多了'},
+            ],
         )
         self.assertEqual(cold['wake_reply_bridge'], '')
         self.assertEqual(cold['wake_message_background'], '')
         self.assertIn('夜里日记', cold['wake_nonmessage_background'])
-        # message 确认可见 + diary 注入 → 都可消费
         self.assertEqual(cold['wake_ids'], [31, 32])
+
+    def test_user_same_text_does_not_count_as_wake_visible(self):
+        """用户说了与 Wake 相同的短句，不得误判 Wake 已在历史中。"""
+        hot = {
+            'wake_items': [
+                {
+                    'id': 41,
+                    'woke_at': '2026-07-20 18:00:00',
+                    'action': 'message',
+                    'content': '好多了',
+                },
+            ],
+        }
+        cold = finalize_cc_wake_one_shot(
+            hot,
+            is_cold=True,
+            messages=[{'role': 'user', 'content': '好多了'}],
+        )
+        self.assertIn('好多了', cold['wake_reply_bridge'])
+        self.assertIn('直接回复上面这句话', cold['wake_reply_bridge'])
+        self.assertEqual(cold['wake_ids'], [41])
+        self.assertEqual(
+            match_visible_wake_ids(hot['wake_items'], [{'role': 'user', 'content': '好多了'}]),
+            set(),
+        )
+
+    def test_duplicate_wake_bodies_consume_one_assistant_each(self):
+        items = [
+            {'id': 51, 'action': 'message', 'content': '早安'},
+            {'id': 52, 'action': 'message', 'content': '早安'},
+        ]
+        messages = [{'role': 'assistant', 'content': '早安'}]
+        visible = match_visible_wake_ids(items, messages)
+        self.assertEqual(visible, {51})
+        cold = finalize_cc_wake_one_shot(
+            {'wake_items': items}, is_cold=True, messages=messages,
+        )
+        # 第一条被 assistant 确认可见（省略）；第二条仍作 bridge
+        self.assertEqual(cold['wake_reply_bridge'].count('早安'), 1)
+        self.assertIn('直接回复上面这句话', cold['wake_reply_bridge'])
+        self.assertEqual(cold['wake_ids'], [51, 52])
+
+    def test_visibility_helper_is_pure_no_relay(self):
+        messages = [
+            {
+                'role': 'assistant',
+                'content': [
+                    {'type': 'image', 'source': {'type': 'base64', 'data': 'x'}},
+                    {'type': 'text', 'text': '手怎么样了？'},
+                ],
+            },
+            {'role': 'user', 'content': '好多了'},
+        ]
+        with mock.patch.dict('sys.modules', {'relay.manager': mock.MagicMock()}):
+            texts = extract_assistant_message_texts(messages)
+            visible = match_visible_wake_ids(
+                [{'id': 1, 'action': 'message', 'content': '手怎么样了？'}],
+                messages,
+            )
+        self.assertEqual(texts, ['手怎么样了？'])
+        self.assertEqual(visible, {1})
+        # 确保没有通过 messages_to_text 绕路
+        import chat.system_builder as sb
+        src = Path(sb.__file__).read_text(encoding='utf-8')
+        # match/extract 定义区内不应引用 messages_to_text / relay
+        start = src.index('def extract_assistant_message_texts')
+        end = src.index('def finalize_cc_wake_one_shot')
+        chunk = src[start:end]
+        self.assertNotIn('messages_to_text', chunk)
+        self.assertNotIn('relay', chunk)
+        self.assertNotIn('describe_image', chunk)
 
 
 class WakeReplyBridgeHotColdTests(unittest.TestCase):
-    def _stream(self, *, is_cold, one_shot, user_text='好多了', relationship_text='',
-                transcript_text='assistant: 手怎么样了？\nuser: 好多了'):
+    def _stream(self, *, is_cold, one_shot, messages=None, relationship_text='',
+                transcript_text=None):
         gateway = _import_gateway()
-        captured = {}
+        captured = {'m2t_calls': 0}
+        if messages is None:
+            messages = [{'role': 'user', 'content': '好多了'}]
 
         class FakeResident:
             last_state_snapshot = {}
@@ -294,6 +374,22 @@ class WakeReplyBridgeHotColdTests(unittest.TestCase):
                     'wake_ids': list((commit_meta or {}).get('wake_ids') or []),
                 }))
 
+        def fake_m2t(msgs, describe_last_n_images=2):
+            captured['m2t_calls'] += 1
+            if transcript_text is not None:
+                return transcript_text
+            lines = []
+            for m in msgs:
+                who = 'assistant' if m.get('role') == 'assistant' else 'user'
+                c = m.get('content')
+                if isinstance(c, list):
+                    c = ' '.join(
+                        b.get('text', '') for b in c
+                        if isinstance(b, dict) and b.get('type') == 'text'
+                    )
+                lines.append('%s: %s' % (who, c))
+            return '\n'.join(lines)
+
         stack = ExitStack()
         stack.enter_context(mock.patch.object(gateway, '_CC_RESIDENT', FakeResident()))
         stack.enter_context(mock.patch.object(gateway, 'CC_TOKEN', 'tok'))
@@ -307,9 +403,7 @@ class WakeReplyBridgeHotColdTests(unittest.TestCase):
             'full_system': 'STATIC',
         }))
         stack.enter_context(mock.patch.object(gateway, '_fetch_group_chat_rows', return_value=([], 0)))
-        stack.enter_context(mock.patch.object(
-            gateway, 'messages_to_text', return_value=transcript_text,
-        ))
+        stack.enter_context(mock.patch.object(gateway, 'messages_to_text', side_effect=fake_m2t))
         if relationship_text:
             from chat.relationship_context import RelationshipContextResult
             relationship = RelationshipContextResult(
@@ -335,10 +429,7 @@ class WakeReplyBridgeHotColdTests(unittest.TestCase):
                 gateway.config_store, 'get_bool', return_value=False,
             ))
         with stack:
-            list(gateway._cc_resident_stream_gen(
-                [{'role': 'user', 'content': user_text}],
-                user_turn=True,
-            ))
+            list(gateway._cc_resident_stream_gen(messages, user_turn=True))
         return captured
 
     def test_hot_bridge_immediately_before_user_after_relationship(self):
@@ -359,7 +450,9 @@ class WakeReplyBridgeHotColdTests(unittest.TestCase):
         }
         rel = '【近期关系脉络】\n当前基调：偏暖。'
         captured = self._stream(
-            is_cold=False, one_shot=one_shot, user_text='好多了',
+            is_cold=False,
+            one_shot=one_shot,
+            messages=[{'role': 'user', 'content': '好多了'}],
             relationship_text=rel,
         )
         content = captured['content']
@@ -371,6 +464,7 @@ class WakeReplyBridgeHotColdTests(unittest.TestCase):
         self.assertIn('你醒着的时候', content)
         self.assertLess(content.index('你醒着的时候'), content.index(rel))
         self.assertEqual(captured['commit_meta'].get('wake_ids'), [1, 2])
+        self.assertEqual(captured['m2t_calls'], 0)
 
     def test_cold_message_in_transcript_skips_bridge_keeps_diary(self):
         one_shot = {
@@ -400,15 +494,18 @@ class WakeReplyBridgeHotColdTests(unittest.TestCase):
         captured = self._stream(
             is_cold=True,
             one_shot=one_shot,
-            user_text='好多了',
-            transcript_text='assistant: 手怎么样了？\nuser: 好多了',
+            messages=[
+                {'role': 'assistant', 'content': '手怎么样了？'},
+                {'role': 'user', 'content': '好多了'},
+            ],
         )
         content = captured['content']
         self.assertNotIn('连续对话·紧邻上一句', content)
         self.assertNotIn('直接回复上面这句话', content)
         self.assertIn('夜里日记', content)
-        self.assertIn('手怎么样了？', content)  # from transcript
+        self.assertIn('手怎么样了？', content)  # from transcript via m2t
         self.assertEqual(captured['commit_meta'].get('wake_ids'), [9, 10])
+        self.assertEqual(captured['m2t_calls'], 1)
 
     def test_cold_message_outside_transcript_injects_bridge(self):
         one_shot = {
@@ -432,14 +529,44 @@ class WakeReplyBridgeHotColdTests(unittest.TestCase):
         captured = self._stream(
             is_cold=True,
             one_shot=one_shot,
-            user_text='嗨',
-            transcript_text='user: 嗨',
+            messages=[{'role': 'user', 'content': '嗨'}],
         )
         content = captured['content']
         self.assertIn('连续对话·紧邻上一句', content)
         self.assertIn('窗外那句旧关心', content)
         self.assertIn('直接回复上面这句话', content)
         self.assertEqual(captured['commit_meta'].get('wake_ids'), [7])
+        self.assertEqual(captured['m2t_calls'], 1)
+
+    def test_cold_user_same_text_keeps_bridge(self):
+        one_shot = {
+            'wake_nonmessage_background': '',
+            'wake_message_background': '',
+            'wake_reply_bridge': format_wake_reply_bridge('好多了'),
+            'wake_ids': [8],
+            'wake_items': [
+                {
+                    'id': 8,
+                    'woke_at': '2026-07-20 12:00:00',
+                    'action': 'message',
+                    'content': '好多了',
+                },
+            ],
+            'task_feedback': '',
+            'dream_flash': '',
+            'feedback_ids': [],
+            'dream_id': None,
+        }
+        captured = self._stream(
+            is_cold=True,
+            one_shot=one_shot,
+            messages=[{'role': 'user', 'content': '好多了'}],
+        )
+        content = captured['content']
+        self.assertIn('连续对话·紧邻上一句', content)
+        self.assertIn('直接回复上面这句话', content)
+        self.assertEqual(captured['commit_meta'].get('wake_ids'), [8])
+        self.assertEqual(captured['m2t_calls'], 1)
 
 
 class WakeConsumeSemanticsTests(unittest.TestCase):
@@ -504,10 +631,12 @@ class WakeConsumeSemanticsTests(unittest.TestCase):
         self.assertEqual(states[3], 0)
 
     def test_cold_finalize_does_not_silently_drop_unseen_from_ids(self):
-        """未进入 transcript 的 message 仍必须留在 wake_ids，不得静默消失。"""
+        """未进入 assistant 历史的 message 仍必须留在 wake_ids，不得静默消失。"""
         one_shot = _cc_collect_one_shot(self.get_db, include_wake=True)
         cold = finalize_cc_wake_one_shot(
-            one_shot, is_cold=True, transcript_text='user: 无关内容',
+            one_shot,
+            is_cold=True,
+            messages=[{'role': 'user', 'content': '无关内容'}],
         )
         self.assertEqual(set(cold['wake_ids']), {1, 2, 3})
         self.assertTrue(cold['wake_reply_bridge'])
