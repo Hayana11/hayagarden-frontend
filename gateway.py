@@ -5117,7 +5117,7 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
         except Exception:
             pass
 
-    include_rel = mode in ('normal', 'nightwatch', 'ritual')
+    include_rel = mode in ('normal', 'nightwatch', 'ritual', 'self_trigger')
     # Keep build_system()'s stable cache-control blocks.  The old
     # build_wake_system() flattening made every tool/format round repay the
     # entire 35k+ prompt even though the active relay supports 5m caching.
@@ -5184,6 +5184,8 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
         trigger = '[做梦]'
     elif mode == 'summarize':
         trigger = '[日摘要]'
+    elif mode == 'self_trigger':
+        trigger = '[自定义提醒]'
     else:
         trigger = '[唤醒检查]'
     msgs = [{'role': 'user', 'content': trigger}]

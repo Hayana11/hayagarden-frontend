@@ -917,6 +917,16 @@ def send_chat():
     message_id = cur.lastrowid
     conn.commit()
     conn.close()
+    # Production React path: app persists here, then gateway stream only gets
+    # user_message_id (empty content). Touch must happen on this commit —
+    # moments_turn.insert_user_message will not run again for the body.
+    # Text / image / file messages all count as real interaction.
+    if author not in ('fyodor', 'assistant', 'claude'):
+        try:
+            from chat.interaction_state import touch_user_interaction
+            touch_user_interaction(get_db)
+        except Exception:
+            pass
     # gateway uses this id to claim wake context only after a successful reply.
     return jsonify({"ok": True, "message_id": message_id})
 
@@ -3704,6 +3714,37 @@ def claim_self_triggers():
     conn.commit()
     conn.close()
     return jsonify([dict(r) for r in rows])
+
+
+@app.route('/api/self_triggers/release', methods=['POST'])
+def release_self_triggers():
+    """把已 claim 但未能执行的 trigger 恢复为 pending，供可靠 retry。
+
+    当 /wake 因 chat_generating / wake_in_progress 跳过时调用，避免闹钟自毁。
+    """
+    data = request.get_json() or {}
+    ids = data.get('ids') or []
+    if data.get('id') is not None:
+        ids = list(ids) + [data.get('id')]
+    clean = []
+    for raw in ids:
+        try:
+            clean.append(int(raw))
+        except (TypeError, ValueError):
+            continue
+    if not clean:
+        return jsonify({'ok': True, 'released': 0})
+    conn = get_db()
+    placeholders = ','.join('?' for _ in clean)
+    cur = conn.execute(
+        f"UPDATE self_triggers SET consumed=0 "
+        f"WHERE consumed=1 AND id IN ({placeholders})",
+        tuple(clean),
+    )
+    conn.commit()
+    released = cur.rowcount if cur.rowcount is not None else 0
+    conn.close()
+    return jsonify({'ok': True, 'released': released})
 
 
 @app.route('/api/ledger/trend', methods=['GET'])
