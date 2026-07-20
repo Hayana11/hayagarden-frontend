@@ -746,7 +746,8 @@ class GroupQueryContractTests(unittest.TestCase):
              mock.patch.object(gateway, '_recall_memories', return_value=('', [])), \
              mock.patch('chat.system_builder.build_cc_state', return_value={}), \
              mock.patch('chat.system_builder.build_cc_one_shot', return_value={
-                 'wake_feedback': '', 'task_feedback': '', 'dream_flash': '',
+                 'wake_background': '', 'wake_reply_bridge': '', 'wake_ids': [],
+                 'task_feedback': '', 'dream_flash': '',
                  'feedback_ids': [], 'dream_id': None,
              }), \
              mock.patch('chat.system_builder.build_cc_cold_once', return_value={}), \
@@ -809,7 +810,8 @@ class HotTurnContentTests(unittest.TestCase):
                  'time_bucket': '当前时间段：23:00 左右',
              }), \
              mock.patch('chat.system_builder.build_cc_one_shot', return_value={
-                 'wake_feedback': '', 'task_feedback': '', 'dream_flash': '',
+                 'wake_background': '', 'wake_reply_bridge': '', 'wake_ids': [],
+                 'task_feedback': '', 'dream_flash': '',
                  'feedback_ids': [], 'dream_id': None,
              }), \
              mock.patch('chat.system_builder.build_cc_cold_once') as cold_builder, \
@@ -885,7 +887,8 @@ class HotTurnContentTests(unittest.TestCase):
              ), \
              mock.patch('chat.system_builder.build_cc_state', return_value={}), \
              mock.patch('chat.system_builder.build_cc_one_shot', return_value={
-                 'wake_feedback': '', 'task_feedback': '', 'dream_flash': '',
+                 'wake_background': '', 'wake_reply_bridge': '', 'wake_ids': [],
+                 'task_feedback': '', 'dream_flash': '',
                  'feedback_ids': [], 'dream_id': None,
              }), \
              mock.patch('chat.system_builder.build_cc_cold_once', return_value={}), \

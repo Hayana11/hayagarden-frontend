@@ -3248,6 +3248,15 @@ def _cc_resident_stream_gen(messages, *, user_turn=True):
     # 2) 每轮构建 state / one-shot；3) 仅冷启动构建 cold_once
     state = build_cc_state()
     one_shot = build_cc_one_shot(include_wake=user_turn)
+    # 冷启动完整 transcript 已含真实 assistant Wake 消息：不注入 bridge/background，
+    # 避免与历史重复。wake_ids 仍保留，供本轮快照消费（落库成功后）。
+    wake_reply_bridge = ''
+    if is_cold:
+        one_shot = dict(one_shot)
+        one_shot['wake_background'] = ''
+        one_shot['wake_reply_bridge'] = ''
+    else:
+        wake_reply_bridge = (one_shot.get('wake_reply_bridge') or '').strip()
     one_shot_text = format_one_shot(one_shot)
     cold_once = build_cc_cold_once() if is_cold else {}
 
@@ -3290,6 +3299,7 @@ def _cc_resident_stream_gen(messages, *, user_turn=True):
             'state_snapshot': state,
             'feedback_ids': list(one_shot.get('feedback_ids') or []),
             'dream_id': one_shot.get('dream_id'),
+            'wake_ids': list(one_shot.get('wake_ids') or []),
         }
         if group_cursor_ok:
             commit_meta['group_cursor_initialized'] = True
@@ -3321,10 +3331,11 @@ def _cc_resident_stream_gen(messages, *, user_turn=True):
             pieces.append(recall_text)
         if one_shot_text:
             pieces.append(one_shot_text)
-        # The relationship block is the final dynamic block, immediately
-        # before the current user message.  It never enters the static system.
+        # 热轮固定尾部：relationship → wake_reply_bridge → current user
         if relationship_text:
             pieces.append(relationship_text)
+        if wake_reply_bridge:
+            pieces.append(wake_reply_bridge)
         prefix = ('\n\n'.join(p for p in pieces if p) + '\n\n') if pieces else ''
         if isinstance(last_content, str):
             content = prefix + last_content if prefix else last_content
@@ -3336,6 +3347,7 @@ def _cc_resident_stream_gen(messages, *, user_turn=True):
             'state_snapshot': state,
             'feedback_ids': list(one_shot.get('feedback_ids') or []),
             'dream_id': one_shot.get('dream_id'),
+            'wake_ids': list(one_shot.get('wake_ids') or []),
         }
         if group_cursor_ok:
             commit_meta['group_cursor_initialized'] = True
@@ -4151,8 +4163,13 @@ def chat_stream():
                         conn.commit()
                         assistant_id = int(cur.lastrowid)
                         conn.close()
-                        # one-shot 与 wake 同级：仅 assistant 落库成功后消费
-                        consume_wake_ids(get_db, _wake_claim_ids)
+                        # one-shot 与 wake 同级：仅 assistant 落库成功后消费。
+                        # 优先用本轮注入快照的 wake_ids（与 bridge/background 一致）。
+                        if 'wake_ids' in _cc_one_shot_claims:
+                            _consume_wake_ids = _cc_one_shot_claims.get('wake_ids') or []
+                        else:
+                            _consume_wake_ids = _wake_claim_ids
+                        consume_wake_ids(get_db, _consume_wake_ids)
                         from chat.system_builder import consume_cc_one_shot_claims
                         consume_cc_one_shot_claims(get_db, _cc_one_shot_claims)
                         _write_session_memo(_uc, _cc_text)
