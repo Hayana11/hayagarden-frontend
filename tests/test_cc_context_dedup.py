@@ -18,6 +18,11 @@ ROOT = str(Path(__file__).resolve().parents[1])
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
+os.environ.setdefault(
+    'HAYAGARDEN_CONFIG_DB_PATH',
+    str(Path(tempfile.gettempdir()) / 'hayagarden-test-runtime-config.db'),
+)
+
 # CI / 沙箱可能没有 /opt/frontend；在 import 生产模块前铺好路径与 stub。
 _OPT_FRONTEND = Path('/opt/frontend')
 try:
@@ -259,10 +264,17 @@ class ResidentCommitTests(unittest.TestCase):
                 'state_snapshot': {'lights': '开'},
                 'group_cursor_initialized': True,
                 'group_max_id': 105,
+                'relationship_user_turn': True,
+                'relationship_fingerprint': 'rel-v1:failed',
+                'relationship_band': 'neutral_low_arousal|task_focused',
+                'relationship_turn': 1,
+                'relationship_sent_at': 10.0,
             }))
         self.assertEqual(sess.last_state_snapshot, {})
         self.assertEqual(sess.last_group_message_id, 0)
         self.assertFalse(sess.group_cursor_initialized)
+        self.assertEqual(sess.relationship_user_turn_count, 0)
+        self.assertIsNone(sess.last_relationship_fingerprint)
 
     def test_commit_kept_when_stream_fails_after_flush(self):
         sess = self._session()
@@ -274,10 +286,23 @@ class ResidentCommitTests(unittest.TestCase):
                 'state_snapshot': {'lights': '开'},
                 'group_cursor_initialized': True,
                 'group_max_id': 105,
+                'relationship_user_turn': True,
+                'relationship_fingerprint': 'rel-v1:sent',
+                'relationship_band': 'warm_low_arousal|intimate_relaxed',
+                'relationship_turn': 1,
+                'relationship_sent_at': 20.0,
             }))
         self.assertEqual(sess.last_state_snapshot.get('lights'), '开')
         self.assertEqual(sess.last_group_message_id, 105)
         self.assertTrue(sess.group_cursor_initialized)
+        self.assertEqual(sess.relationship_user_turn_count, 1)
+        self.assertEqual(sess.last_relationship_fingerprint, 'rel-v1:sent')
+        self.assertEqual(
+            sess.last_relationship_band,
+            'warm_low_arousal|intimate_relaxed',
+        )
+        self.assertEqual(sess.last_relationship_turn, 1)
+        self.assertEqual(sess.last_relationship_sent_at, 20.0)
 
     def test_is_error_kills_resident(self):
         lines = [
@@ -616,12 +641,22 @@ class ResidentRespawnTests(unittest.TestCase):
         sess._last_group_message_id = 99
         sess._group_cursor_initialized = True
         sess._resident_turn_count = 9
+        sess._relationship_user_turn_count = 7
+        sess._last_relationship_fingerprint = 'rel-v1:old'
+        sess._last_relationship_band = 'warm_low_arousal|intimate_relaxed'
+        sess._last_relationship_turn = 6
+        sess._last_relationship_sent_at = 123.0
         with mock.patch('subprocess.Popen', return_value=FakeProc([])):
             sess._spawn('STATIC', {}, reason='turn_limit')
         self.assertEqual(sess.last_state_snapshot, {})
         self.assertEqual(sess.last_group_message_id, 0)
         self.assertFalse(sess.group_cursor_initialized)
         self.assertEqual(sess._resident_turn_count, 0)
+        self.assertEqual(sess.relationship_user_turn_count, 0)
+        self.assertIsNone(sess.last_relationship_fingerprint)
+        self.assertIsNone(sess.last_relationship_band)
+        self.assertEqual(sess.last_relationship_turn, 0)
+        self.assertIsNone(sess.last_relationship_sent_at)
         self.assertEqual(sess.pending_respawn_reason, 'turn_limit')
 
 
@@ -816,6 +851,89 @@ class HotTurnContentTests(unittest.TestCase):
         self.assertNotIn(cold_marker, content)
         self.assertNotIn('【当前状态】', content)
         self.assertIn('【状态更新】', content)
+
+    def test_relationship_is_dynamic_tail_and_static_system_is_unchanged(self):
+        from chat.context_contract import SharedContext
+        from chat.relationship_context import RelationshipContextResult
+
+        captured = {}
+        relationship_text = '【近期关系脉络】\n当前互动偏亲密放松。'
+
+        class FakeResident:
+            last_state_snapshot = {}
+            last_group_message_id = 0
+            group_cursor_initialized = True
+            relationship_user_turn_count = 1
+            last_relationship_fingerprint = 'rel-v1:old'
+            last_relationship_band = 'neutral_low_arousal|task_focused'
+            last_relationship_turn = 1
+
+            def ensure_alive(self, system_text, env):
+                captured['system'] = system_text
+                return False
+
+            def peek_idle_seconds(self):
+                return 30.0
+
+            def send_turn(self, content, commit_meta=None):
+                captured['content'] = content
+                captured['commit_meta'] = commit_meta
+                yield ('done', ('ok', '', empty_usage()))
+
+        shared = SharedContext(
+            persona='STATIC',
+            relationship_context=relationship_text,
+            relationship_fingerprint='rel-v1:new',
+        )
+        relationship = RelationshipContextResult(
+            text=relationship_text,
+            slow_fingerprint='rel-v1:new',
+            emotion_band='neutral_low_arousal',
+            relationship_band='intimate_relaxed',
+        )
+        gateway = _import_gateway()
+        with mock.patch.object(gateway, '_CC_RESIDENT', FakeResident()), \
+             mock.patch.object(gateway, 'CC_TOKEN', 'tok'), \
+             mock.patch.object(gateway, 'CC_CWD', tempfile.mkdtemp()), \
+             mock.patch.object(gateway, '_recall_memories', return_value=('', [])), \
+             mock.patch.object(
+                 gateway.config_store, 'get_bool',
+                 side_effect=lambda key, default=False: key == 'RELATIONSHIP_CONTEXT_ENABLED',
+             ), \
+             mock.patch.object(
+                 gateway.config_store, 'get',
+                 side_effect=lambda key, default=None: default,
+             ), \
+             mock.patch(
+                 'chat.system_builder.build_shared_context_details',
+                 return_value=(shared, relationship),
+             ), \
+             mock.patch('chat.system_builder.build_cc_state', return_value={}), \
+             mock.patch('chat.system_builder.build_cc_one_shot', return_value={
+                 'wake_feedback': '', 'task_feedback': '', 'dream_flash': '',
+                 'feedback_ids': [], 'dream_id': None,
+             }), \
+             mock.patch('chat.system_builder.build_cc_cold_once', return_value={}), \
+             mock.patch('chat.system_builder.build_cc_static_parts', return_value={
+                 'persona': 'STATIC', 'stable_note': '', 'save_instr': '',
+                 'full_system': 'STATIC',
+             }), \
+             mock.patch.object(gateway, '_fetch_group_chat_rows', return_value=([], 0)):
+            list(gateway._cc_resident_stream_gen(
+                [{'role': 'user', 'content': '现在继续'}], user_turn=True,
+            ))
+
+        self.assertEqual(captured['system'], 'STATIC')
+        content = captured['content']
+        self.assertIn(relationship_text, content)
+        self.assertLess(content.index(relationship_text), content.index('现在继续'))
+        meta = captured['commit_meta']
+        self.assertEqual(meta['relationship_fingerprint'], 'rel-v1:new')
+        self.assertEqual(
+            meta['relationship_band'],
+            'neutral_low_arousal|intimate_relaxed',
+        )
+        self.assertEqual(meta['relationship_turn'], 2)
 
 
 class LegacyPerceptionClassificationTests(unittest.TestCase):
