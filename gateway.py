@@ -451,6 +451,20 @@ def _gen_release(result):
         _gen_cond.notify_all()
 
 
+def _chat_is_generating() -> bool:
+    """True while the main chat generation lock is held (non-zombie)."""
+    with _gen_cond:
+        if not _gen_busy:
+            return False
+        if (time.time() - _gen_busy_since) > _GEN_ZOMBIE_TTL:
+            return False
+        return True
+
+
+_wake_exec_lock = threading.Lock()
+_wake_exec_busy = False
+
+
 @app.route('/chat/lock', methods=['GET'])
 def chat_lock_status():
     """调试：当前全局生成锁是否被占用（单 worker 内存锁）。"""
@@ -3675,30 +3689,13 @@ def chat():
     _turn_data = prepare_turn(request.get_json(), conversation_id=_conv, memories_db_path=DB_PATH)
     _uc = (_turn_data.get('content') or '').strip()
     _turn_data = insert_user_message(get_db, _turn_data, _uc, memories_db_path=DB_PATH, conversation_id=_conv)
+    # touch_user_interaction() runs inside insert_user_message after persist.
     if _uc:
-        try:
-            import emotion_engine as _ee; _ee.touch_interaction()
-        except Exception:
-            pass
-        try:
-            import desire as _des_chat
-            _des_chat.touch_hayana()
-        except Exception:
-            pass
         try:
             import emotion_engine as _ee2
             _d = _ee2.rule_score_desire(_uc)
             if _d['p_delta'] or _d['i_delta']:
                 _ee2.apply_desire_delta_async(_d['p_delta'], _d['i_delta'])
-        except Exception:
-            pass
-        try:
-            import drive_engine as _de2
-            _de2.rest()   # 她在线 → fatigue 缓解，attachment 微降
-            _de_d = _de2.get_drive()
-            if _de_d.get('attachment', 0) > 0.3:
-                import drive_engine as _de3
-                _de3.discharge('attachment')
         except Exception:
             pass
     _persisted = False
@@ -4053,10 +4050,10 @@ def chat_stream():
                 _turn_data = insert_user_message(
                     get_db, _turn_data, _uc, memories_db_path=DB_PATH, conversation_id=_conv,
                 )
+                # touch_user_interaction() runs inside insert_user_message after persist.
                 if _uc:
                     try:
                         import emotion_engine as _ee_s
-                        _ee_s.touch_interaction()
                         _d2 = _ee_s.rule_score_desire(_uc)
                         if _d2['p_delta'] or _d2['i_delta']:
                             _ee_s.apply_desire_delta_async(_d2['p_delta'], _d2['i_delta'])
@@ -4214,6 +4211,15 @@ def chat_stream():
             _turn_data = insert_user_message(
                 get_db, _turn_data, _uc, memories_db_path=DB_PATH, conversation_id=_conv,
             )
+            # touch_user_interaction() runs inside insert_user_message after persist.
+            if _uc:
+                try:
+                    import emotion_engine as _ee_r
+                    _d_r = _ee_r.rule_score_desire(_uc)
+                    if _d_r['p_delta'] or _d_r['i_delta']:
+                        _ee_r.apply_desire_delta_async(_d_r['p_delta'], _d_r['i_delta'])
+                except Exception:
+                    pass
             mode, reused = _gen_acquire_or_wait()
             if mode == 'reused':
                 text, thinking = reused
@@ -5048,6 +5054,40 @@ def _parse_wake_response(text):
 @app.route('/wake', methods=['POST'])
 def wake_decide():
     """AI 自主唤醒决策接口。由 dream_wake.py 每30分钟调用（概率触发）。"""
+    global _wake_exec_busy
+    data = request.get_json() or {}
+    mode = data.get('mode', 'normal') or 'normal'
+    activity_desc = data.get('activity_desc', '')
+    ritual_type = data.get('ritual_type', '')
+
+    # Second-layer guards: re-read clock at execute time; never call the model
+    # when the kitten is mid-chat or another wake is already running.
+    if not _wake_exec_lock.acquire(blocking=False):
+        return jsonify({'ok': True, 'skipped': True, 'reason': 'wake_in_progress'})
+    _wake_exec_busy = True
+    try:
+        return _wake_decide_locked(data, mode, activity_desc, ritual_type)
+    finally:
+        _wake_exec_busy = False
+        _wake_exec_lock.release()
+
+
+def _wake_decide_locked(data, mode, activity_desc, ritual_type):
+    from chat.interaction_state import read_interaction_clock, wake_guard_reason
+
+    now = datetime.datetime.utcnow() + datetime.timedelta(hours=8)
+    clock = read_interaction_clock(get_db, now=now)
+    min_idle = float(config_store.get_float('WAKE_MIN_IDLE_MINUTES', 30) or 30)
+    skip_reason = wake_guard_reason(
+        clock,
+        mode=mode,
+        min_idle_minutes=min_idle,
+        chat_busy=_chat_is_generating(),
+        wake_busy=False,  # held by caller lock
+    )
+    if skip_reason:
+        return jsonify({'ok': True, 'skipped': True, 'reason': skip_reason})
+
     # drive定期flush：把当前实时值写回DB（防止积累时间过长撞顶）
     try:
         import drive_engine as _de_flush
@@ -5055,45 +5095,15 @@ def wake_decide():
         _de_flush._flush(_cur)
     except Exception:
         pass
-    import re as _re, random as _random
-    data = request.get_json() or {}
-    mode = data.get('mode', 'normal')
-    activity_desc = data.get('activity_desc', '')
-    ritual_type = data.get('ritual_type', '')
-    now = datetime.datetime.utcnow() + datetime.timedelta(hours=8)
 
-    conn = get_db()
-    # 计算距离哈娅上次发消息的时间
-    last_user = conn.execute(
-        "SELECT created_at FROM chat_messages "
-        "WHERE author NOT IN ('fyodor','assistant','claude') "
-        "ORDER BY id DESC LIMIT 1"
-    ).fetchone()
-    # 计算距离上次有效互动（哈娅发消息 OR 费奥多尔 action=message 的 wake_log）
-    last_wake_msg = conn.execute(
-        "SELECT woke_at FROM wake_log WHERE action='message' ORDER BY id DESC LIMIT 1"
-    ).fetchone()
-    conn.close()
-
-    now_str = now.strftime('%Y-%m-%d %H:%M:%S')
-
-    t2_hours = 999.0
-    if last_user:
-        try:
-            lu_dt = datetime.datetime.strptime(last_user['created_at'], '%Y-%m-%d %H:%M:%S')
-            t2_hours = (now - lu_dt).total_seconds() / 3600
-        except Exception:
-            pass
-
-    # 上次有效互动 = 哈娅发消息 vs 费奥多尔 action=message，取较近的
-    t_hours = t2_hours
-    if last_wake_msg:
-        try:
-            lw_dt = datetime.datetime.strptime(last_wake_msg['woke_at'], '%Y-%m-%d %H:%M:%S')
-            lw_h = (now - lw_dt).total_seconds() / 3600
-            t_hours = min(t_hours, lw_h)
-        except Exception:
-            pass
+    # Authoritative idle: user_idle for longing / t2; effective for dice-era t.
+    # Non-normal modes may proceed without a reliable clock, but never invent 999h.
+    if clock.reliable and clock.user_idle_hours is not None:
+        t2_hours = float(clock.user_idle_hours)
+        t_hours = float(clock.effective_idle_hours if clock.effective_idle_hours is not None else t2_hours)
+    else:
+        t2_hours = 0.0
+        t_hours = 0.0
 
     # 心跳开始：V/A校准费佳驱动条
     if _get_desire_driven():
@@ -5107,10 +5117,14 @@ def wake_decide():
         except Exception:
             pass
 
+    include_rel = mode in ('normal', 'nightwatch', 'ritual')
     # Keep build_system()'s stable cache-control blocks.  The old
     # build_wake_system() flattening made every tool/format round repay the
     # entire 35k+ prompt even though the active relay supports 5m caching.
-    system = build_system(wake=True)
+    system = build_system(
+        wake=True,
+        include_relationship_context=include_rel,
+    )
     from wake.builder import append_system_text, build_prompt_suffix, inject_snippets
     _wake_ctx = {
         'time': now.strftime('%Y-%m-%d %H:%M'),
@@ -5130,6 +5144,7 @@ def wake_decide():
         system, mode,
         desire_driven=_get_desire_driven(),
         longing_enabled=_get_longing_enabled(),
+        t_hours_override=t2_hours,
     )
     surfaced_desire_ids = []
     if _get_desire_ledger_enabled() and mode in ('normal', 'nightwatch'):

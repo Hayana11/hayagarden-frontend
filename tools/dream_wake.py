@@ -55,32 +55,12 @@ def _in_nightwatch_hours(now):
     return NIGHTWATCH_START <= h < NIGHTWATCH_END
 
 def _calc_t_hours(now):
-    """计算距离"上次有效互动"的小时数"""
-    conn = _db()
-    last_user = conn.execute(
-        "SELECT created_at FROM chat_messages "
-        "WHERE author NOT IN ('fyodor','assistant','claude') "
-        "ORDER BY id DESC LIMIT 1"
-    ).fetchone()
-    last_wake_msg = conn.execute(
-        "SELECT woke_at FROM wake_log WHERE action='message' ORDER BY id DESC LIMIT 1"
-    ).fetchone()
-    conn.close()
-
-    t = 999.0
-    if last_user:
-        try:
-            lu_dt = datetime.datetime.strptime(last_user['created_at'], '%Y-%m-%d %H:%M:%S')
-            t = min(t, (now - lu_dt).total_seconds() / 3600)
-        except Exception:
-            pass
-    if last_wake_msg:
-        try:
-            lw_dt = datetime.datetime.strptime(last_wake_msg['woke_at'], '%Y-%m-%d %H:%M:%S')
-            t = min(t, (now - lw_dt).total_seconds() / 3600)
-        except Exception:
-            pass
-    return t
+    """Shared interaction clock — effective idle hours, or None if unreliable."""
+    from chat.interaction_state import read_interaction_clock
+    clock = read_interaction_clock(_db, now=now)
+    if not clock.reliable or clock.effective_idle_hours is None:
+        return None
+    return float(clock.effective_idle_hours)
 
 def _get_screen_off_minutes(now):
     """读取 /api/screen 写入的状态；若屏幕已关闭，返回关闭时长(分钟)，否则 None"""
@@ -247,6 +227,15 @@ def run():
         return
 
     t_hours = _calc_t_hours(now)
+    if t_hours is None:
+        _log("skip: clock_unreliable (fail closed)")
+        return
+
+    min_idle_min = float(_wcfg.get_float('WAKE_MIN_IDLE_MINUTES', 30) or 30)
+    if t_hours < (min_idle_min / 60.0):
+        _log(f"skip: recent_interaction T={t_hours:.3f}h < {min_idle_min:.0f}m")
+        return
+
     p = min(WAKE_PROB_MAX, t_hours / WAKE_PROB_SCALE)
     roll = random.random()
     _log(f"T={t_hours:.1f}h p={p:.2f} roll={roll:.2f}")
@@ -258,6 +247,9 @@ def run():
     _log("triggered → calling /wake")
     try:
         result = _call_wake({})
+        if result.get('skipped'):
+            _log(f"wake skipped: {result.get('reason')}")
+            return
         _act = result.get('action', '?')
         _th = (result.get('thoughts') or '').strip()
         if _th:

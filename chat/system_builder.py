@@ -104,13 +104,25 @@ def _ombre_handoff_sync():
     return result_holder[0]
 
 
-def build_system(wake=False, split_dynamic=False):
+def build_system(wake=False, split_dynamic=False, include_relationship_context=None):
     from gateway import get_db  # 延迟 import，打破循环依赖（build_system 被调用时 gateway 早已加载完毕）
 
     # ── BP1 · Persona（永不变，缓存断点1）────────────────────
-    relationship_enabled = (
-        not wake and config_store.get_bool('RELATIONSHIP_CONTEXT_ENABLED', False)
-    )
+    # include_relationship_context:
+    #   None  → 普通聊天默认开（受 RELATIONSHIP_CONTEXT_ENABLED）；wake 默认关，由调用方显式打开
+    #   True  → wake(normal/nightwatch/ritual) 可开，另受 WAKE_RELATIONSHIP_CONTEXT_ENABLED
+    #   False → 强制关闭（dream/summarize）
+    master_rel = config_store.get_bool('RELATIONSHIP_CONTEXT_ENABLED', False)
+    if include_relationship_context is None:
+        relationship_enabled = (not wake) and master_rel
+    elif not include_relationship_context:
+        relationship_enabled = False
+    elif wake:
+        relationship_enabled = master_rel and config_store.get_bool(
+            'WAKE_RELATIONSHIP_CONTEXT_ENABLED', True,
+        )
+    else:
+        relationship_enabled = master_rel
     shared_context = None
     if relationship_enabled:
         shared_context = build_shared_context()
@@ -572,7 +584,7 @@ def _blocks_to_str(blocks):
 
 def build_wake_system():
     """兼容旧调用方的纯字符串 wake system；在线 relay 不应使用此函数。"""
-    result = build_system(wake=True)
+    result = build_system(wake=True, include_relationship_context=True)
     if isinstance(result, str):
         return result
     if isinstance(result, list):

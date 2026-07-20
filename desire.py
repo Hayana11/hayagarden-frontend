@@ -281,8 +281,22 @@ def touch_hayana():
     conn.close()
 
 
-def get_longing() -> tuple:
-    """返回 (L, phase, t_hours)。"""
+def get_longing(t_hours_override=None) -> tuple:
+    """返回 (L, phase, t_hours)。
+
+    普通聊天可不传 override，继续读 desire_state.last_hayana_msg_time。
+    Wake 必须传入权威互动时钟算出的 user_idle_hours，避免旧字段停摆（如 335h）污染 prompt。
+    """
+    if t_hours_override is not None:
+        try:
+            t_hours = max(0.0, float(t_hours_override))
+        except (TypeError, ValueError):
+            t_hours = 0.0
+        # Recompute L from the override hours (same curve as _compute_longing).
+        L = LONGING_MAX * (1 - (1 + t_hours / LONGING_TAU) ** (-0.8))
+        L = round(min(L, 0.90), 3)
+        return L, _longing_phase(L), t_hours
+
     conn     = _db()
     row      = conn.execute("SELECT last_hayana_msg_time FROM desire_state WHERE id=1").fetchone()
     conn.close()
@@ -314,9 +328,9 @@ def _label(v):
     return None
 
 
-def get_wake_snippet() -> str:
+def get_wake_snippet(t_hours_override=None) -> str:
     drives      = get_drive()
-    L, phase, t = get_longing()
+    L, phase, t = get_longing(t_hours_override=t_hours_override)
 
     lines = ['## 内在驱动（费佳驱动 v2）']
     if drives.get('fatigue', 0) >= FATIGUE_GATE:

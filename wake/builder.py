@@ -96,9 +96,13 @@ def append_system_text(system, text: str):
 
 def inject_snippets(system, mode: str,
                     desire_driven: bool = False,
-                    longing_enabled: bool = False):
+                    longing_enabled: bool = False,
+                    t_hours_override=None):
     """
     向 system 注入 drive_engine 和 desire snippets（dream/summarize 模式跳过）。
+
+    t_hours_override: Wake 权威空闲小时数。传入后 Longing 不再读可能停摆的
+    desire_state.last_hayana_msg_time。
     """
     if mode in ('dream', 'summarize'):
         return system
@@ -114,7 +118,7 @@ def inject_snippets(system, mode: str,
     if desire_driven or longing_enabled:
         try:
             import desire as _des
-            snip = _des.get_wake_snippet()
+            snip = _des.get_wake_snippet(t_hours_override=t_hours_override)
             if snip:
                 system = append_system_text(system, snip)
         except Exception:
