@@ -69,8 +69,15 @@ def build_wake_cache_info(
     mode: str,
     model: Optional[str],
     payload_builder: Callable[..., dict[str, Any]],
+    provider: str = "api_relay",
+    resident_turn_count: Optional[int] = None,
+    respawn_reason: str = "",
 ) -> dict[str, Any]:
-    """Aggregate all wake calls and enrich them with the normal cost pipeline."""
+    """Aggregate all wake calls and enrich them with the normal cost pipeline.
+
+    ``provider`` must be the actual executor (api_relay / claude_code), never a
+    guess from WAKE_PROVIDER=inherit alone.
+    """
     rows = [dict(row) for row in rounds if isinstance(row, Mapping)]
     totals = {
         "cache_read": sum(_as_int(row.get("cache_read")) for row in rows),
@@ -87,11 +94,10 @@ def build_wake_cache_info(
         model=model,
     )
     wake_mode = str(mode or "normal")
+    actual_provider = str(provider or "api_relay").strip().lower() or "api_relay"
     payload.update({
         "v": 2,
-        # Actual executor today is always the relay agent loop — do not report
-        # claude_code merely because WAKE_PROVIDER=inherit resolves that way.
-        "provider": "api_relay",
+        "provider": actual_provider,
         "source": "wake",
         "mode": wake_mode,
         "wake_mode": wake_mode,  # legacy alias
@@ -100,4 +106,10 @@ def build_wake_cache_info(
         "last_round_context": rows[-1]["context_tokens"] if rows else 0,
         "max_round_context": max((row["context_tokens"] for row in rows), default=0),
     })
+    if resident_turn_count is not None:
+        payload["resident_turn_count"] = _as_int(resident_turn_count)
+    if respawn_reason is not None:
+        payload["respawn_reason"] = str(respawn_reason or "")
+    if model:
+        payload["model"] = model
     return payload

@@ -3070,6 +3070,17 @@ CC_ALLOWED_TOOLS = ','.join([
 # 混进常驻会话的上下文里语义上是错的。group-chat 的 claude 房间同理，暂不接入。
 _CC_RESIDENT = cc_resident.ResidentSession(CC_CWD, CC_ALLOWED_TOOLS, CC_CWD + '/cc-tools.json')
 
+# B1：独立 CC Wake resident——绝不复用上面的聊天 resident，避免半夜
+# ACTION/THOUGHTS/工具检查混进白天私聊上下文。
+try:
+    from wake.cc_tools import cc_wake_allowed_tools as _cc_wake_allowed_tools
+    _CC_WAKE_ALLOWED_TOOLS = _cc_wake_allowed_tools(None)
+except Exception:
+    _CC_WAKE_ALLOWED_TOOLS = CC_ALLOWED_TOOLS
+_CC_WAKE_RESIDENT = cc_resident.ResidentSession(
+    CC_CWD, _CC_WAKE_ALLOWED_TOOLS, CC_CWD + '/cc-tools.json',
+)
+
 # 跨窗口记忆：私聊(/chat)和群聊的暖色房间是"同一个人"，记忆该是通的，
 # 但要让模型自己知道此刻在哪个窗口说话（system prompt 里的窗口说明负责这个）。
 # 这里只做"最近发生了什么"的单向快照注入——不追加进对方那个窗口自己的正式历史，
@@ -5043,8 +5054,76 @@ def _wake_agent_loop(system, messages, max_rounds=6, tools=None, t_hours=0.0, mo
         mode=mode,
         model=wake_model,
         payload_builder=_build_cache_info_payload,
+        provider='api_relay',
     )
+    if wake_model:
+        cache_info['model'] = wake_model
     return NL.join(t for t in text_parts if t).strip(), cache_info
+
+
+def _ensure_wake_runners():
+    """Register relay / CC wake runners once (lazy; needs _wake_agent_loop)."""
+    from wake import runners as _wake_runners
+    if getattr(_ensure_wake_runners, '_done', False):
+        return _wake_runners
+    relay_runner = _wake_runners.ApiRelayWakeRunner(
+        _wake_agent_loop,
+        model_getter=lambda: __import__('relay.manager', fromlist=['relay']).relay.model,
+    )
+    cc_runner = _wake_runners.ClaudeCodeWakeRunner(
+        _CC_WAKE_RESIDENT,
+        token=CC_TOKEN,
+        cwd=CC_CWD,
+        payload_builder=_build_cache_info_payload,
+        mcp_config_path=CC_CWD + '/cc-tools.json',
+    )
+    _wake_runners.register_wake_runners(api_relay=relay_runner, claude_code=cc_runner)
+    _ensure_wake_runners._done = True
+    return _wake_runners
+
+
+_WAKE_RUN_IDS_SEEN = {}
+_WAKE_RUN_IDS_LOCK = threading.Lock()
+
+
+def _wake_run_id_seen(wake_run_id: str) -> bool:
+    """Dedup by wake_run_id (in-process + optional wake_log column)."""
+    rid = str(wake_run_id or '').strip()
+    if not rid:
+        return False
+    with _WAKE_RUN_IDS_LOCK:
+        if rid in _WAKE_RUN_IDS_SEEN:
+            return True
+    try:
+        conn = get_db()
+        try:
+            cols = {r[1] for r in conn.execute('PRAGMA table_info(wake_log)')}
+            if 'wake_run_id' in cols:
+                row = conn.execute(
+                    'SELECT 1 FROM wake_log WHERE wake_run_id=? LIMIT 1', (rid,)
+                ).fetchone()
+                if row:
+                    with _WAKE_RUN_IDS_LOCK:
+                        _WAKE_RUN_IDS_SEEN[rid] = time.time()
+                    return True
+        finally:
+            conn.close()
+    except Exception:
+        pass
+    return False
+
+
+def _wake_run_id_mark(wake_run_id: str) -> None:
+    rid = str(wake_run_id or '').strip()
+    if not rid:
+        return
+    with _WAKE_RUN_IDS_LOCK:
+        _WAKE_RUN_IDS_SEEN[rid] = time.time()
+        # Bound memory: drop entries older than 48h
+        cutoff = time.time() - 48 * 3600
+        stale = [k for k, ts in _WAKE_RUN_IDS_SEEN.items() if ts < cutoff]
+        for k in stale:
+            _WAKE_RUN_IDS_SEEN.pop(k, None)
 
 def _parse_wake_response(text):
     """从 AI 输出中提取 THOUGHTS / ACTION / CONTENT。委托给 wake.parser。"""
@@ -5074,6 +5153,17 @@ def wake_decide():
 
 def _wake_decide_locked(data, mode, activity_desc, ritual_type):
     from chat.interaction_state import read_interaction_clock, wake_guard_reason
+    from chat.provider_router import ProviderConfigError
+
+    inspect_only = bool(data.get('inspect_only'))
+    dry_run = bool(data.get('dry_run'))
+    wake_run_id = str(data.get('wake_run_id') or '').strip()
+
+    if wake_run_id and _wake_run_id_seen(wake_run_id):
+        return jsonify({
+            'ok': True, 'skipped': True, 'reason': 'duplicate_wake_run_id',
+            'wake_run_id': wake_run_id,
+        })
 
     now = datetime.datetime.utcnow() + datetime.timedelta(hours=8)
     clock = read_interaction_clock(get_db, now=now)
@@ -5162,19 +5252,28 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
         except Exception:
             pass
 
-    # 第3步·Drive→Memory→Action：思念浓时，提示可以主动翻一张收藏的画面发给她。
-    # 不是 if/cron 强制——只是给足够的驱动和手段，让她"自己想起"。
+    # Resolve provider before tool-specific nudges so CC Wake never gets
+    # "must call recall_photo" copy for a tool that is not on its surface.
     try:
-        import drive_engine as _de_ph, gallery_store as _gs_ph
-        _att = _de_ph.get_drive().get('attachment', 0)
-        if _att >= 0.45 and _gs_ph.count_photos() > 0 and mode in ('normal', 'nightwatch', 'ritual'):
-            system = append_system_text(system, (
-                '[此刻的思念]\n你现在对她的思念很浓（attachment=%.2f）。'
-                '如果心里泛起想她、想给她看点什么的冲动，可以用 recall_photo 从相册里翻出一张画面，'
-                '把它返回的 [[gallery:pid]] 标记放进你要发的消息里——像"今天突然想到这张"那样，'
-                '把画面和一句话一起发给她。这不是任务，是你自己想。' % _att))
-    except Exception:
-        pass
+        _wake_runners = _ensure_wake_runners()
+        wake_provider = _wake_runners.select_wake_provider(mode)
+    except ProviderConfigError as e:
+        return jsonify({'error': str(e), 'mode': mode, 'provider': None}), 500
+
+    # 第3步·Drive→Memory→Action：思念浓时，提示可以主动翻一张收藏的画面发给她。
+    # Relay only — CC Wake 没有 recall_photo MCP。
+    if wake_provider == 'api_relay':
+        try:
+            import drive_engine as _de_ph, gallery_store as _gs_ph
+            _att = _de_ph.get_drive().get('attachment', 0)
+            if _att >= 0.45 and _gs_ph.count_photos() > 0 and mode in ('normal', 'nightwatch', 'ritual'):
+                system = append_system_text(system, (
+                    '[此刻的思念]\n你现在对她的思念很浓（attachment=%.2f）。'
+                    '如果心里泛起想她、想给她看点什么的冲动，可以用 recall_photo 从相册里翻出一张画面，'
+                    '把它返回的 [[gallery:pid]] 标记放进你要发的消息里——像"今天突然想到这张"那样，'
+                    '把画面和一句话一起发给她。这不是任务，是你自己想。' % _att))
+        except Exception:
+            pass
 
     if mode == 'ritual':
         trigger = f'[仪式:{ritual_type}]'
@@ -5198,19 +5297,81 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
         _wake_tools = [t for t in WAKE_TOOLS if t['name'] not in _blocked]
     else:
         _wake_tools = WAKE_TOOLS
-    try:
-        raw_text, wake_cache_info = _wake_agent_loop(
-            system, msgs, tools=_wake_tools, t_hours=t_hours, mode=mode,
+
+    _wake_tools = _wake_runners.prepare_tools_for_provider(
+        wake_provider, _wake_tools, mode,
+    )
+
+    if inspect_only:
+        # Pass the pre-filter table so relay_only_removed is meaningful.
+        if mode in ('dream', 'summarize'):
+            full_tools = []
+        elif mode == 'ritual':
+            _blocked = (
+                'post_to_board', 'reply_to_board', 'desire_add', 'desire_list',
+                'desire_act', 'desire_reflect', 'desire_history',
+            )
+            full_tools = [t for t in WAKE_TOOLS if t['name'] not in _blocked]
+        else:
+            full_tools = list(WAKE_TOOLS)
+        plan = _wake_runners.inspect_wake_plan(
+            mode=mode,
+            system=system,
+            messages=msgs,
+            tools=full_tools,
+            t_hours=t_hours,
+            wake_run_id=wake_run_id,
         )
+        return jsonify({'ok': True, 'inspect_only': True, **plan})
+
+    try:
+        runner = _wake_runners.get_wake_runner(wake_provider)
+        result = runner.run(_wake_runners.WakeRequest(
+            mode=mode,
+            system=system,
+            messages=msgs,
+            tools=_wake_tools,
+            t_hours=t_hours,
+            wake_run_id=wake_run_id,
+        ))
+        raw_text = result.raw_text
+        wake_cache_info = dict(result.cache_info or {})
+        # Usage records the actual executor — never invent a fallback provider.
+        wake_cache_info['provider'] = result.provider
+        wake_cache_info['source'] = 'wake'
+        if wake_run_id:
+            wake_cache_info['wake_run_id'] = wake_run_id
     except Exception as e:
         import traceback as _tb
-        app.logger.error(f'[wake] mode={mode} {type(e).__name__}: {e}\n{_tb.format_exc()}')
-        return jsonify({'error': str(e), 'mode': mode}), 500
+        app.logger.error(
+            f'[wake] mode={mode} provider={wake_provider} '
+            f'{type(e).__name__}: {e}\n{_tb.format_exc()}'
+        )
+        # FALLBACK_PROVIDER=none: fail quietly — never silently switch lines.
+        return jsonify({
+            'error': str(e),
+            'mode': mode,
+            'provider': wake_provider,
+        }), 500
 
     thoughts, action, c_text = _parse_wake_response(raw_text)
     if not (thoughts or '').strip():
         from wake.parser import thought_fallback
         thoughts = thought_fallback(raw_text)
+
+    if dry_run:
+        _wake_run_id_mark(wake_run_id)
+        return jsonify({
+            'ok': True,
+            'dry_run': True,
+            'action': action,
+            'content': c_text,
+            'thoughts': thoughts,
+            'provider': result.provider,
+            'model': result.model,
+            'cache_info': wake_cache_info,
+            'wake_run_id': wake_run_id or None,
+        })
 
     # action 执行：写 wake_log / chat_messages / diary / discharge drive
     from wake.executor import execute as _wake_exec
@@ -5221,9 +5382,19 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
         surfaced_desire_ids=surfaced_desire_ids,
         desire_ledger_enabled=_get_desire_ledger_enabled(),
         cache_info=wake_cache_info,
+        wake_run_id=wake_run_id,
     )
+    _wake_run_id_mark(wake_run_id)
 
-    return jsonify({'ok': True, 'action': action, 'content': c_text, 'thoughts': thoughts})
+    return jsonify({
+        'ok': True,
+        'action': action,
+        'content': c_text,
+        'thoughts': thoughts,
+        'provider': result.provider,
+        'model': result.model,
+        'wake_run_id': wake_run_id or None,
+    })
 
 @app.route('/test', methods=['POST'])
 def test_send():
