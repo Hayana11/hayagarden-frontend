@@ -3161,6 +3161,17 @@ def _init_wake_tables():
     except sqlite3.OperationalError:
         pass
     try:
+        conn.execute("ALTER TABLE wake_log ADD COLUMN wake_run_id TEXT DEFAULT ''")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_wake_log_run_id "
+            "ON wake_log(wake_run_id) WHERE wake_run_id IS NOT NULL AND wake_run_id != ''"
+        )
+    except sqlite3.OperationalError:
+        pass
+    try:
         conn.execute("ALTER TABLE chat_messages ADD COLUMN cache_info TEXT DEFAULT ''")
     except sqlite3.OperationalError:
         pass

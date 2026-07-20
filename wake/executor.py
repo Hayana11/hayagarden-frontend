@@ -17,7 +17,8 @@ def execute(action: str, thoughts: str, content: str,
             desire_driven: bool = False,
             surfaced_desire_ids=None,
             desire_ledger_enabled: bool = False,
-            cache_info=None):
+            cache_info=None,
+            wake_run_id: str = ''):
     """
     action: 'none' | 'message' | 'diary' | 'explore'
     get_db_fn: callable，返回 sqlite3 connection（来自 gateway.get_db）
@@ -45,6 +46,11 @@ def execute(action: str, thoughts: str, content: str,
     if 'cache_info' in wake_columns:
         columns.append('cache_info')
         values.append(cache_info_json)
+        placeholders.append('?')
+    rid = str(wake_run_id or '').strip()
+    if rid and 'wake_run_id' in wake_columns:
+        columns.append('wake_run_id')
+        values.append(rid)
         placeholders.append('?')
     conn.execute(
         "INSERT INTO wake_log (%s) VALUES (%s)" % (

@@ -104,8 +104,34 @@ def _ombre_handoff_sync():
     return result_holder[0]
 
 
-def build_system(wake=False, split_dynamic=False, include_relationship_context=None):
+def build_system(
+    wake=False,
+    split_dynamic=False,
+    include_relationship_context=None,
+    allow_side_effects=True,
+    capability_profile=None,
+):
+    """Assemble system prompt blocks.
+
+    allow_side_effects:
+      True  → normal path (may consume dream_pool, drain one-shot feedback, …)
+      False → inspect_only / dry_run: read-only assembly, no DB writes / no
+              random dream surfacing
+
+    capability_profile:
+      None / 'relay' / 'relay_wake' → generic Relay tool brochure (current text)
+      'cc_wake' → Wake·Claude Code tool surface only (see wake.cc_tools)
+      'wake_dry_run' / 'cc_wake_dry_run' / 'relay_wake_dry_run'
+        → dry-run brochure: no tools at all (do not inject normal tool lists)
+    """
     from gateway import get_db  # 延迟 import，打破循环依赖（build_system 被调用时 gateway 早已加载完毕）
+
+    profile = str(capability_profile or ('relay_wake' if wake else 'relay')).strip().lower()
+    if profile in ('', 'default', 'api_relay'):
+        profile = 'relay_wake' if wake else 'relay'
+    is_dry_run_profile = profile in (
+        'wake_dry_run', 'cc_wake_dry_run', 'relay_wake_dry_run', 'dry_run',
+    )
 
     # ── BP1 · Persona（永不变，缓存断点1）────────────────────
     # include_relationship_context:
@@ -253,7 +279,28 @@ def build_system(wake=False, split_dynamic=False, include_relationship_context=N
     except Exception:
         pass
 
-    # 4. 灯·实时状态注入
+    # 4. 工具能力说明 + 灯·实时状态
+    # dry_run / CC Wake 各自只有一份说明书，绝不能混入互相矛盾的工具册。
+    if is_dry_run_profile:
+        try:
+            from wake.cc_tools import WAKE_DRY_RUN_CAPABILITY_TEXT
+            parts.append(NL + WAKE_DRY_RUN_CAPABILITY_TEXT)
+        except Exception:
+            parts.append(NL + '（Wake 演习模式：本轮无任何工具。）')
+    elif profile == 'cc_wake':
+        try:
+            from wake.cc_tools import CC_WAKE_CAPABILITY_TEXT
+            parts.append(NL + CC_WAKE_CAPABILITY_TEXT)
+        except Exception:
+            parts.append(NL + '（Wake·Claude Code：仅记忆搜索/灯/待办与记账/codebase 只读；无留言板与联网。）')
+    else:
+        parts.append(
+            NL + '（你拥有真实的工具：保存与搜索记忆、控制次卧灯、查看与发布留言板、'
+            '联网搜索/逛GitHub/用Playwright读网页、手机 Pocket 浏览器（pocket_*）、查位置、查手机电量与今日屏幕时长、'
+            '请求手机截屏，以及 codebase 工具（读代码/搜符号/看 git/打补丁）。'
+            '排查系统问题优先用 codebase_describe_project 和 codebase_search_code。'
+            '对话与wake里都可以自然使用，随心所欲。）'
+        )
     try:
         _lreq = urllib.request.Request('http://127.0.0.1:5052/light/status')
         with urllib.request.urlopen(_lreq, timeout=3) as _lr:
@@ -265,31 +312,20 @@ def build_system(wake=False, split_dynamic=False, include_relationship_context=N
             if l.get('color_temp'): p.append(str(l['color_temp']) + 'K')
             return ' '.join(p)
         _ms = _fmt_l(_ls.get('main', {})); _bs = _fmt_l(_ls.get('bedside', {}))
-        parts.append(
-            NL + '（你拥有真实的工具：保存与搜索记忆、控制次卧灯、查看与发布留言板、'
-            '联网搜索/逛GitHub/用Playwright读网页、手机 Pocket 浏览器（pocket_*）、查位置、查手机电量与今日屏幕时长、'
-            '请求手机截屏，以及 codebase 工具（读代码/搜符号/看 git/打补丁）。'
-            '排查系统问题优先用 codebase_describe_project 和 codebase_search_code。'
-            '对话与wake里都可以自然使用，随心所欲。）'
-        )
         parts.append(f'（灯·当前状态：主灯 {_ms}，床头灯 {_bs}。操作灯前先看这里——关着的灯不要再去"调暗"，会重新开起来。）')
     except Exception:
-        parts.append(
-            NL + '（你拥有真实的工具：保存与搜索记忆、控制次卧灯、查看与发布留言板、'
-            '联网搜索/逛GitHub/用Playwright读网页、手机 Pocket 浏览器（pocket_*）、查位置、查手机电量与今日屏幕时长、'
-            '请求手机截屏，以及 codebase 工具（读代码/搜符号/看 git/打补丁）。'
-            '排查系统问题优先用 codebase_describe_project 和 codebase_search_code。'
-            '对话与wake里都可以自然使用，随心所欲。）'
-        )
+        pass
 
     # 4b. Pocket 手机浏览器在线状态（BP3 动态，不污染缓存）
-    try:
-        from gateway import _pocket_bp3_snippet
-        _pocket_line = _pocket_bp3_snippet()
-        if _pocket_line:
-            parts.append(_pocket_line)
-    except Exception:
-        pass
+    # CC Wake / dry_run 无 Pocket —— 不注入，避免暗示可用。
+    if profile not in ('cc_wake',) and not is_dry_run_profile:
+        try:
+            from gateway import _pocket_bp3_snippet
+            _pocket_line = _pocket_bp3_snippet()
+            if _pocket_line:
+                parts.append(_pocket_line)
+        except Exception:
+            pass
 
     # 5. Board 待处理项
     try:
@@ -372,36 +408,38 @@ def build_system(wake=False, split_dynamic=False, include_relationship_context=N
             pass
 
     # 9. 梦境浮现（30%概率，情感共鸣门控）
-    try:
-        import random as _rand
-        if _rand.random() < 0.30:
-            _dc = get_db()
-            _dream = _dc.execute(
-                "SELECT id, content, tone FROM dream_pool "
-                "WHERE surfaced=0 AND surface_count < 4 "
-                "ORDER BY created_at ASC LIMIT 1"
-            ).fetchone()
-            if _dream:
-                _dc.execute(
-                    "UPDATE dream_pool SET surfaced=1, surface_count=surface_count+1, "
-                    "content=NULL, surfaced_at=datetime('now','+8 hours') WHERE id=?",
-                    (_dream['id'],)
-                )
-                _dc.commit()
-                _dream_text = _dream['content'] or ''
-                if _dream_text:
-                    parts.append(f'\n## 忽然想起来\n（一段梦，从某个夜里飘上来）\n{_dream_text}')
-            else:
-                _dc.execute("DELETE FROM dream_pool WHERE surface_count >= 4 AND surfaced=0")
-                _dc.commit()
-                _dc.execute(
-                    "UPDATE dream_pool SET surface_count=surface_count+1 "
-                    "WHERE surfaced=0 AND surface_count < 4"
-                )
-                _dc.commit()
-            _dc.close()
-    except Exception:
-        pass
+    # inspect_only / dry_run 必须跳过：否则“只看输入”也会吃掉一场梦。
+    if allow_side_effects:
+        try:
+            import random as _rand
+            if _rand.random() < 0.30:
+                _dc = get_db()
+                _dream = _dc.execute(
+                    "SELECT id, content, tone FROM dream_pool "
+                    "WHERE surfaced=0 AND surface_count < 4 "
+                    "ORDER BY created_at ASC LIMIT 1"
+                ).fetchone()
+                if _dream:
+                    _dc.execute(
+                        "UPDATE dream_pool SET surfaced=1, surface_count=surface_count+1, "
+                        "content=NULL, surfaced_at=datetime('now','+8 hours') WHERE id=?",
+                        (_dream['id'],)
+                    )
+                    _dc.commit()
+                    _dream_text = _dream['content'] or ''
+                    if _dream_text:
+                        parts.append(f'\n## 忽然想起来\n（一段梦，从某个夜里飘上来）\n{_dream_text}')
+                else:
+                    _dc.execute("DELETE FROM dream_pool WHERE surface_count >= 4 AND surfaced=0")
+                    _dc.commit()
+                    _dc.execute(
+                        "UPDATE dream_pool SET surface_count=surface_count+1 "
+                        "WHERE surfaced=0 AND surface_count < 4"
+                    )
+                    _dc.commit()
+                _dc.close()
+        except Exception:
+            pass
 
     # 10. 当前时间
     try:
@@ -539,20 +577,33 @@ def build_system(wake=False, split_dynamic=False, include_relationship_context=N
     # ── 组装 system blocks（prompt caching 格式）────────────────
     # split_dynamic=True 用于 API 主聊天：system 只保留稳定块；BP2/BP3
     # 作为动态上下文放进最后一条 user message，避免污染历史缓存前缀。
-    stable_note = (
-        '\n## 你可以发文件和选择器\n'
-        '- 发文件：把“成品”性质的内容（完整 HTML 页面、Markdown 长文）用工具 '
-        'create_html / create_markdown / create_document 生成，会渲染成可预览/下载的卡片；'
-        '凡是成品都走文件，不要把整页代码/长文直接贴在气泡里刷屏。\n'
-        '- 选择器：需要她从几个选项里点一下就能回答时，在正文里写 '
-        '[choices]选项A|选项B|选项C[/choices]（竖线分隔），渲染成一组可点按钮。'
-        '自己判断时机，别滥用；纯聊天不需要。一条回复最多一组选择器。'
-    )
-    try:
-        from tools.workspace_registry import TOOLS_NOTE
-        stable_note = TOOLS_NOTE + stable_note
-    except Exception:
-        pass
+    if is_dry_run_profile:
+        try:
+            from wake.cc_tools import WAKE_DRY_RUN_STABLE_NOTE
+            stable_note = WAKE_DRY_RUN_STABLE_NOTE
+        except Exception:
+            stable_note = '\n## Wake 演习说明\n本轮无工具。\n'
+    elif profile == 'cc_wake':
+        try:
+            from wake.cc_tools import CC_WAKE_STABLE_NOTE
+            stable_note = CC_WAKE_STABLE_NOTE
+        except Exception:
+            stable_note = '\n## Wake 说明\n工具权限以 Wake·Claude Code 工具面为准。\n'
+    else:
+        stable_note = (
+            '\n## 你可以发文件和选择器\n'
+            '- 发文件：把“成品”性质的内容（完整 HTML 页面、Markdown 长文）用工具 '
+            'create_html / create_markdown / create_document 生成，会渲染成可预览/下载的卡片；'
+            '凡是成品都走文件，不要把整页代码/长文直接贴在气泡里刷屏。\n'
+            '- 选择器：需要她从几个选项里点一下就能回答时，在正文里写 '
+            '[choices]选项A|选项B|选项C[/choices]（竖线分隔），渲染成一组可点按钮。'
+            '自己判断时机，别滥用；纯聊天不需要。一条回复最多一组选择器。'
+        )
+        try:
+            from tools.workspace_registry import TOOLS_NOTE
+            stable_note = TOOLS_NOTE + stable_note
+        except Exception:
+            pass
 
     system_blocks = [
         {'type': 'text', 'text': bp1_text, 'cache_control': {'type': 'ephemeral'}},
