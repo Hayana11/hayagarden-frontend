@@ -270,6 +270,19 @@ class RelationshipContextTests(RelationshipFixture):
         self.assertIn('首文件独白', result.text)
         self.assertIn('第二桶锚点', result.text)
 
+    def test_wikilink_brackets_stripped_from_bucket_text(self):
+        (Path(self.bucket_dir) / '01-anchor.md').write_text(
+            '[[哈娅]]和[[费奥多尔]]彼此信任。', encoding='utf-8',
+        )
+        with mock.patch(
+            'chat.relationship_context._emotion_engine_scores',
+            return_value=(0.5, 0.3, SOURCE_OK),
+        ):
+            result = build_relationship_context(self.get_db, bucket_dir=self.bucket_dir)
+        self.assertIn('哈娅和费奥多尔彼此信任', result.text)
+        self.assertNotIn('[[', result.text)
+        self.assertNotIn(']]', result.text)
+
     def test_content_hash_fingerprint_detects_same_size_edit(self):
         with mock.patch(
             'chat.relationship_context._emotion_engine_scores',

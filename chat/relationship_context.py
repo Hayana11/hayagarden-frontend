@@ -68,7 +68,8 @@ def _strip_frontmatter(text: str) -> str:
 
 
 def _clean_text(value, limit: int) -> str:
-    text = re.sub(r'\s+', ' ', str(value or '')).strip()
+    text = re.sub(r'\[\[|\]\]', '', str(value or ''))
+    text = re.sub(r'\s+', ' ', text).strip()
     if not text:
         return ''
     sentences = re.split(r'(?<=[。！？!?；;])\s*', text)
