@@ -188,10 +188,29 @@ function normalizeAgent(id: UsageAgentId, raw: RawUsageAgent, generatedAt: strin
   const fiveHourPct = usedPct(quota.five_hour);
   const sevenDayPct = usedPct(quota.seven_day);
   const source = raw.quota_source || 'unavailable';
+  const fiveHour = {
+    usedPct: fiveHourPct,
+    resetAt: quota.five_hour?.resets_at || '',
+    remainingMinutes: quota.five_hour?.remaining_minutes ?? null,
+  };
+  const sevenDay = {
+    usedPct: sevenDayPct,
+    resetAt: quota.seven_day?.resets_at || '',
+    remainingMinutes: quota.seven_day?.remaining_minutes ?? null,
+  };
+  // ccusage fallback may only have reset/remaining minutes (no %); still show the card.
+  const hasWindowMeta = Boolean(
+    fiveHourPct !== null
+    || sevenDayPct !== null
+    || fiveHour.resetAt
+    || sevenDay.resetAt
+    || fiveHour.remainingMinutes !== null
+    || sevenDay.remainingMinutes !== null,
+  );
   return {
     id,
     name: raw.name || (id === 'claude' ? 'Claude Code' : 'Codex'),
-    available: source !== 'unavailable' || fiveHourPct !== null || sevenDayPct !== null,
+    available: source !== 'unavailable' || hasWindowMeta,
     source,
     updatedAt: quota.updated_at || generatedAt,
     contextTokens: active?.latest_context_tokens ?? quota.latest_tokens ?? null,
@@ -202,16 +221,8 @@ function normalizeAgent(id: UsageAgentId, raw: RawUsageAgent, generatedAt: strin
       resetText: quota.effective_limit.reset_text || '',
       observedAt: quota.effective_limit.observed_at || '',
     } : null,
-    fiveHour: {
-      usedPct: fiveHourPct,
-      resetAt: quota.five_hour?.resets_at || '',
-      remainingMinutes: quota.five_hour?.remaining_minutes ?? null,
-    },
-    sevenDay: {
-      usedPct: sevenDayPct,
-      resetAt: quota.seven_day?.resets_at || '',
-      remainingMinutes: quota.seven_day?.remaining_minutes ?? null,
-    },
+    fiveHour,
+    sevenDay,
   };
 }
 

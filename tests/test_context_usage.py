@@ -176,6 +176,27 @@ class ContextUsageCollectorTests(unittest.TestCase):
             self.assertEqual(agent["active_sessions"][0]["latest_context_tokens"], 1200)
             self.assertEqual(agent["active_sessions"][0]["context_window_tokens"], 258400)
 
+    def test_ccusage_command_appends_flags_when_env_is_bare_binary(self):
+        with mock.patch.dict(os.environ, {"CCUSAGE_COMMAND": "/usr/bin/ccusage"}, clear=False):
+            cmd = collector.ccusage_command("Asia/Shanghai")
+        self.assertEqual(cmd[0], "/usr/bin/ccusage")
+        self.assertIn("blocks", cmd)
+        self.assertIn("--json", cmd)
+        self.assertIn("--timezone", cmd)
+        self.assertIn("Asia/Shanghai", cmd)
+
+    def test_ccusage_command_keeps_explicit_blocks_argv(self):
+        with mock.patch.dict(
+            os.environ,
+            {"CCUSAGE_COMMAND": "/usr/bin/ccusage blocks --active --json --timezone UTC"},
+            clear=False,
+        ):
+            cmd = collector.ccusage_command("Asia/Shanghai")
+        self.assertEqual(
+            cmd,
+            ["/usr/bin/ccusage", "blocks", "--active", "--json", "--timezone", "UTC"],
+        )
+
     def test_claude_block_and_project_parser(self):
         now = dt.datetime(2026, 7, 15, 5, 0, tzinfo=dt.timezone.utc)
         window = collector.claude_window({
