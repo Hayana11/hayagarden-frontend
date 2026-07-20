@@ -21,10 +21,15 @@ from wake.usage import build_wake_cache_info
 
 NL = chr(10)
 
-# Modes that stay on BACKGROUND_PROVIDER (usually api_relay) in B1.
+# Modes that stay on BACKGROUND_PROVIDER in B1 — api_relay only (scheme A).
 BACKGROUND_WAKE_MODES = frozenset(('dream', 'summarize'))
 # First-cut CC Wake modes.
 CC_WAKE_MODES = frozenset(('normal', 'nightwatch', 'ritual', 'self_trigger'))
+
+
+class UnsupportedWakeModeError(ValueError):
+    """Legal config that this B1 cut does not implement (fail at route time)."""
+    pass
 
 WAKE_CONTRACT = (
     '【自主唤醒合同】\n'
@@ -54,6 +59,7 @@ class WakeRequest:
     t_hours: float
     wake_run_id: str = ''
     max_rounds: int = 6
+    dry_run: bool = False
 
 
 @dataclass
@@ -69,14 +75,35 @@ class WakeRunner(Protocol):
 
 
 def select_wake_provider(mode: str) -> str:
-    """dream/summarize → BACKGROUND_PROVIDER; else → WAKE_PROVIDER (inherit ok)."""
+    """dream/summarize → BACKGROUND_PROVIDER (api_relay only in B1);
+    else → WAKE_PROVIDER (inherit ok).
+
+    Scheme A: BACKGROUND_PROVIDER=claude_code is a valid config_store value but
+    unsupported for dream/summarize here — raise at route/inspect time rather
+    than fail inside ClaudeCodeWakeRunner.
+    """
     mode = str(mode or 'normal')
     if mode in BACKGROUND_WAKE_MODES:
-        return resolve_provider('background')
+        provider = resolve_provider('background')
+        if provider != 'api_relay':
+            raise UnsupportedWakeModeError(
+                'dream/summarize 仅支持 BACKGROUND_PROVIDER=api_relay'
+                '（B1 未实现 CC BackgroundRunner），当前为 %s' % provider
+            )
+        return provider
     return resolve_provider('wake')
 
 
-def prepare_tools_for_provider(provider: str, tools: list, mode: str) -> list:
+def prepare_tools_for_provider(
+    provider: str,
+    tools: list,
+    mode: str,
+    *,
+    dry_run: bool = False,
+) -> list:
+    if dry_run:
+        # Safest dry_run contract: model may think, but no tool side effects.
+        return []
     if provider == 'claude_code' and mode in CC_WAKE_MODES:
         return filter_wake_tools_for_cc(tools)
     return list(tools or [])
@@ -182,8 +209,9 @@ class ClaudeCodeWakeRunner:
         if not self._token:
             raise RuntimeError('未配置订阅 token，无法使用 claude_code Wake')
         if request.mode not in CC_WAKE_MODES:
-            raise RuntimeError(
-                'claude_code Wake 暂不支持 mode=%s（请走 BACKGROUND_PROVIDER）'
+            raise UnsupportedWakeModeError(
+                'claude_code Wake 暂不支持 mode=%s；'
+                'dream/summarize 请保持 BACKGROUND_PROVIDER=api_relay'
                 % request.mode
             )
 
@@ -198,15 +226,23 @@ class ClaudeCodeWakeRunner:
         env['CLAUDE_CODE_OAUTH_TOKEN'] = self._token
         env.pop('ANTHROPIC_API_KEY', None)
 
-        # Keep allowlist aligned with the filtered tool table for this run.
-        allowed = cc_wake_allowed_tools(request.tools)
+        # dry_run: empty allowlist. Otherwise match filtered tool table.
+        if request.dry_run or not request.tools:
+            allowed = ''
+        else:
+            allowed = cc_wake_allowed_tools(request.tools)
         if getattr(self._resident, '_allowed_tools', None) != allowed:
+            # Tool allowlist change requires respawn (system_changed alone is not enough).
             self._resident._allowed_tools = allowed
+            if getattr(self._resident, '_system_text', None) is not None:
+                self._resident._system_text = None  # force ensure_alive to respawn
 
         self._resident.ensure_alive(full_system, env)
 
         tool_names = cc_wake_tool_names(request.tools)
-        nudge = cc_wake_nudge_text(request.t_hours, tool_names)
+        nudge = cc_wake_nudge_text(
+            request.t_hours, tool_names, dry_run=bool(request.dry_run),
+        )
         trigger = _messages_trigger(request.messages)
         pieces = [p for p in (dynamic.strip(), nudge, trigger) if p]
         content = (NL + NL).join(pieces)
@@ -290,13 +326,15 @@ def inspect_wake_plan(
 ) -> dict[str, Any]:
     """Build-only view for inspect_only — no model call."""
     provider = select_wake_provider(mode)
-    prepared = prepare_tools_for_provider(provider, tools, mode)
+    prepared = prepare_tools_for_provider(provider, tools, mode, dry_run=False)
     stable, dynamic = split_wake_system(system)
+    flat = (stable + NL + dynamic).lower()
     return {
         'provider': provider,
         'mode': mode,
         'wake_run_id': wake_run_id,
         't_hours': t_hours,
+        'capability_profile': 'cc_wake' if provider == 'claude_code' else 'relay_wake',
         'tool_names': [t.get('name') for t in prepared if t.get('name')],
         'relay_only_removed': (
             sorted({
@@ -313,4 +351,12 @@ def inspect_wake_plan(
             cc_wake_allowed_tools(prepared).split(',')
             if provider == 'claude_code' else []
         ),
+        # Sanity flags for reviewers / deploy checklist.
+        # Use Relay-brochure-unique phrases (not the CC "不可用：…" denylist).
+        'prompt_claims_relay_only_tools': any(
+            needle in flat for needle in (
+                '查看与发布留言板', '随心所欲', '请求手机截屏', '查位置',
+                'pocket 浏览器', 'pocket_*',
+            )
+        ) if provider == 'claude_code' else False,
     }

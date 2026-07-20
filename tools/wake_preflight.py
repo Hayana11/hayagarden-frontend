@@ -69,7 +69,8 @@ def _wake_stats(conn: sqlite3.Connection, days: int = 7) -> dict:
     where = "WHERE woke_at >= ?" if 'woke_at' in cols else ''
     params: tuple = (since,) if where else ()
 
-    total = conn.execute(
+    # One wake_log row = one completed Wake decision, not one model round.
+    completed_wake_runs = conn.execute(
         f'SELECT COUNT(*) FROM wake_log {where}', params
     ).fetchone()[0]
 
@@ -85,6 +86,8 @@ def _wake_stats(conn: sqlite3.Connection, days: int = 7) -> dict:
 
     message_sent = actions.get('message', 0)
     mode_dist: Counter = Counter()
+    successful_model_rounds = 0
+    rounds_known = 0
     if 'cache_info' in cols:
         for (raw,) in conn.execute(
             f'SELECT cache_info FROM wake_log {where}', params
@@ -94,6 +97,12 @@ def _wake_stats(conn: sqlite3.Connection, days: int = 7) -> dict:
                 info = json.loads(raw or '{}')
                 if isinstance(info, dict):
                     mode = str(info.get('mode') or info.get('wake_mode') or 'unknown')
+                    n_rounds = info.get('num_rounds')
+                    if n_rounds is None and isinstance(info.get('rounds'), list):
+                        n_rounds = len(info['rounds'])
+                    if n_rounds is not None:
+                        successful_model_rounds += max(0, int(n_rounds))
+                        rounds_known += 1
             except Exception:
                 pass
             mode_dist[mode] += 1
@@ -130,7 +139,13 @@ def _wake_stats(conn: sqlite3.Connection, days: int = 7) -> dict:
 
     return {
         'days': days,
-        'model_calls': int(total),
+        # wake_log row count — completed decisions, not raw model HTTP rounds.
+        'completed_wake_runs': int(completed_wake_runs),
+        # Σ cache_info.num_rounds when present (Relay multi-round / CC format nudge).
+        'successful_model_rounds': int(successful_model_rounds),
+        'successful_model_rounds_rows': int(rounds_known),
+        # Failed model runs never reach wake_log — cannot be counted here.
+        'failed_model_runs': 'unavailable',
         'messages_sent': int(message_sent),
         'action_counts': dict(actions),
         'mode_dist': dict(mode_dist),
@@ -243,7 +258,13 @@ def main(argv: list[str] | None = None) -> int:
     if stats.get('error'):
         print('  (无法读取 wake_log: %s)' % stats['error'])
     else:
-        print('  Wake 模型调用次数: %s' % stats.get('model_calls'))
+        print('  完成的 Wake 决策次数 (completed_wake_runs): %s' % stats.get('completed_wake_runs'))
+        print(
+            '  成功模型轮次合计 (successful_model_rounds from cache_info): %s'
+            '（来自 %s 行有 num_rounds 的记录）'
+            % (stats.get('successful_model_rounds'), stats.get('successful_model_rounds_rows'))
+        )
+        print('  失败模型调用 (failed_model_runs): %s（wake_log 无法统计）' % stats.get('failed_model_runs'))
         print('  真正发送消息次数: %s' % stats.get('messages_sent'))
         ac = stats.get('action_counts') or {}
         print(
