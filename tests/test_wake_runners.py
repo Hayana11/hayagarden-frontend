@@ -146,13 +146,18 @@ class WakeCcToolsTests(unittest.TestCase):
         self.assertNotIn('mcp__codebase', parts)  # bare server opens patch/create_file
         self.assertNotIn('mcp__codebase__patch', parts)
         self.assertNotIn('mcp__codebase__create_file', parts)
+        # explain_history calls Relay _llm() — must stay off the CC Wake surface.
+        self.assertNotIn('mcp__codebase__explain_history', parts)
         for mcp in CODEBASE_WRITE_MCP:
             self.assertNotIn(mcp, parts)
         for mcp in CODEBASE_READ_MCP:
             self.assertIn(mcp, parts)
         self.assertFalse(is_cc_wake_tool('codebase_patch'))
         self.assertFalse(is_cc_wake_tool('codebase_create_file'))
+        self.assertFalse(is_cc_wake_tool('codebase_explain_history'))
         self.assertTrue(is_cc_wake_tool('codebase_read_file'))
+        self.assertNotIn('explain_history', CC_WAKE_CAPABILITY_TEXT.split('不可用')[0])
+        self.assertIn('explain_history', CC_WAKE_CAPABILITY_TEXT)  # listed under 不可用
 
 
 class WakeRunnerContractTests(unittest.TestCase):

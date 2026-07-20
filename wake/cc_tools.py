@@ -29,6 +29,8 @@ WAKE_TO_CC_MCP = {
 CODEBASE_PREFIX = 'codebase_'
 
 # Per-tool MCP names (NOT bare mcp__codebase — that would include patch/create_file).
+# explain_history is intentionally omitted: it calls _llm() against Relay and
+# would hide a paid sub-call inside an otherwise CC Wake turn.
 CODEBASE_READ_MCP = (
     'mcp__codebase__describe_project',
     'mcp__codebase__read_file',
@@ -36,7 +38,6 @@ CODEBASE_READ_MCP = (
     'mcp__codebase__search_code',
     'mcp__codebase__find_references',
     'mcp__codebase__git_view',
-    'mcp__codebase__explain_history',
 )
 
 CODEBASE_WRITE_MCP = (
@@ -51,7 +52,6 @@ CODEBASE_READ_LOGICAL = frozenset((
     'codebase_search_code',
     'codebase_find_references',
     'codebase_git_view',
-    'codebase_explain_history',
 ))
 
 CC_WAKE_READONLY_LOGICAL = (
@@ -93,12 +93,12 @@ CC_WAKE_CAPABILITY_TEXT = (
     '只读可用：search_memories、get_light_status、get_todos、get_countdowns、'
     'get_ledger、get_ledger_budget、以及 codebase 只读工具'
     '（mcp__codebase__describe_project / read_file / list_directory / search_code / '
-    'find_references / git_view / explain_history）。\n'
+    'find_references / git_view）。\n'
     '可写可用：light_on、light_off、light_bedside_warm、light_bedside_neutral、'
     'add_todo、add_ledger。\n'
-    '不可用：codebase patch/create_file、位置、手机状态、留言板、联网搜索、GitHub、'
-    'Playwright 读网页、Pocket、截图、相册、desire 工具、self_trigger、wake_settings、'
-    '发文件/选择器。\n'
+    '不可用：codebase patch/create_file、codebase explain_history（内部会打中转站）、'
+    '位置、手机状态、留言板、联网搜索、GitHub、Playwright 读网页、Pocket、截图、相册、'
+    'desire 工具、self_trigger、wake_settings、发文件/选择器。\n'
     '没有的工具不要假装调用过；若其它段落与本段冲突，以本段为准。）'
 )
 
