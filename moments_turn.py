@@ -173,6 +173,12 @@ def insert_user_message(
         turn_data['user_message_id'] = user_id
     finally:
         conn.close()
+    # One shared touch after successful persist — covers CC/Relay/old /chat.
+    try:
+        from chat.interaction_state import touch_user_interaction
+        touch_user_interaction(get_db_fn)
+    except Exception:
+        pass
     turn_key = turn_data.get('turn_key')
     if turn_key:
         sync_user_message_id(

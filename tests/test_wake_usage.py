@@ -66,6 +66,8 @@ class WakeUsageTests(unittest.TestCase):
         self.assertEqual(seen["elapsed_sec"], 1.235)
         self.assertEqual(payload["provider"], "api_relay")
         self.assertEqual(payload["source"], "wake")
+        self.assertEqual(payload["mode"], "normal")
+        self.assertEqual(payload["wake_mode"], "normal")
         self.assertEqual(payload["num_rounds"], 2)
         self.assertEqual(payload["last_round_context"], 108)
         self.assertEqual(payload["max_round_context"], 110)
@@ -88,7 +90,9 @@ class WakeSystemCacheTests(unittest.TestCase):
 
     def test_injected_snippets_do_not_flatten_blocks(self):
         drive = types.SimpleNamespace(get_wake_snippet=lambda: "drive state")
-        desire = types.SimpleNamespace(get_wake_snippet=lambda: "desire state")
+        desire = types.SimpleNamespace(
+            get_wake_snippet=lambda t_hours_override=None: "desire state"
+        )
         base = [{
             "type": "text",
             "text": "stable",

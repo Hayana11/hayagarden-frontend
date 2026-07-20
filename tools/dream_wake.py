@@ -55,32 +55,12 @@ def _in_nightwatch_hours(now):
     return NIGHTWATCH_START <= h < NIGHTWATCH_END
 
 def _calc_t_hours(now):
-    """计算距离"上次有效互动"的小时数"""
-    conn = _db()
-    last_user = conn.execute(
-        "SELECT created_at FROM chat_messages "
-        "WHERE author NOT IN ('fyodor','assistant','claude') "
-        "ORDER BY id DESC LIMIT 1"
-    ).fetchone()
-    last_wake_msg = conn.execute(
-        "SELECT woke_at FROM wake_log WHERE action='message' ORDER BY id DESC LIMIT 1"
-    ).fetchone()
-    conn.close()
-
-    t = 999.0
-    if last_user:
-        try:
-            lu_dt = datetime.datetime.strptime(last_user['created_at'], '%Y-%m-%d %H:%M:%S')
-            t = min(t, (now - lu_dt).total_seconds() / 3600)
-        except Exception:
-            pass
-    if last_wake_msg:
-        try:
-            lw_dt = datetime.datetime.strptime(last_wake_msg['woke_at'], '%Y-%m-%d %H:%M:%S')
-            t = min(t, (now - lw_dt).total_seconds() / 3600)
-        except Exception:
-            pass
-    return t
+    """Shared interaction clock — effective idle hours, or None if unreliable."""
+    from chat.interaction_state import read_interaction_clock
+    clock = read_interaction_clock(_db, now=now)
+    if not clock.reliable or clock.effective_idle_hours is None:
+        return None
+    return float(clock.effective_idle_hours)
 
 def _get_screen_off_minutes(now):
     """读取 /api/screen 写入的状态；若屏幕已关闭，返回关闭时长(分钟)，否则 None"""
@@ -186,12 +166,34 @@ def run_nightwatch(now):
     except Exception as e:
         _log(f"nightwatch error: {e}")
 
+def _release_self_triggers(ids):
+    """Restore claimed triggers to pending when /wake cannot run yet."""
+    clean = [int(i) for i in ids if i is not None]
+    if not clean:
+        return
+    try:
+        payload = json.dumps({'ids': clean}).encode()
+        req = urllib.request.Request(
+            'http://localhost:5050/api/self_triggers/release',
+            data=payload,
+            headers={'Content-Type': 'application/json'},
+            method='POST',
+        )
+        with urllib.request.urlopen(req, timeout=5) as r:
+            body = json.loads(r.read())
+        _log(f"self_trigger released ids={clean} → {body.get('released')}")
+    except Exception as e:
+        _log(f"self_trigger release error ids={clean}: {e}")
+
+
 def run_self_triggers():
     """检查并触发到期的self_trigger——优先级最高，不受时段/概率限制。
 
     用原子 claim 接口（一步 UPDATE consumed=1 RETURNING）领取到期触发器，
-    再逐个触发 /wake。这样每分钟 cron 与 30 分钟 cron 即使同时跑也不会重复触发（
-    先标消费再发，而不是发完再标，彻底去掉旧的 pending→发→cancel 的竞态窗口）。"""
+    再以 mode=self_trigger 调 /wake（不受普通 30 分钟 idle 门槛）。
+    若因 chat_generating / wake_in_progress 跳过，必须 release 回 pending，
+    不得 claim 后静默丢失。
+    """
     try:
         req = urllib.request.Request(
             'http://localhost:5050/api/self_triggers/claim',
@@ -213,11 +215,21 @@ def run_self_triggers():
         note = t.get('note') or ''
         _log(f"self_trigger #{tid} fired: {note[:40]}")
         try:
-            # 带上note作为上下文触发一次 /wake
-            result = _call_wake({'mode': 'normal', 'self_trigger_note': note})
+            result = _call_wake({
+                'mode': 'self_trigger',
+                'self_trigger_id': tid,
+                'self_trigger_note': note,
+            })
+            if result.get('skipped'):
+                reason = result.get('reason') or 'skipped'
+                _log(f"self_trigger #{tid} skipped: {reason}")
+                if reason in ('chat_generating', 'wake_in_progress'):
+                    _release_self_triggers([tid])
+                continue
             _log(f"self_trigger result: {result.get('action')}")
         except Exception as e:
             _log(f"self_trigger wake error: {e}")
+            _release_self_triggers([tid])
 
     return True  # 本轮已处理self_trigger，跳过普通唤醒
 
@@ -247,6 +259,15 @@ def run():
         return
 
     t_hours = _calc_t_hours(now)
+    if t_hours is None:
+        _log("skip: clock_unreliable (fail closed)")
+        return
+
+    min_idle_min = float(_wcfg.get_float('WAKE_MIN_IDLE_MINUTES', 30) or 30)
+    if t_hours < (min_idle_min / 60.0):
+        _log(f"skip: recent_interaction T={t_hours:.3f}h < {min_idle_min:.0f}m")
+        return
+
     p = min(WAKE_PROB_MAX, t_hours / WAKE_PROB_SCALE)
     roll = random.random()
     _log(f"T={t_hours:.1f}h p={p:.2f} roll={roll:.2f}")
@@ -258,6 +279,9 @@ def run():
     _log("triggered → calling /wake")
     try:
         result = _call_wake({})
+        if result.get('skipped'):
+            _log(f"wake skipped: {result.get('reason')}")
+            return
         _act = result.get('action', '?')
         _th = (result.get('thoughts') or '').strip()
         if _th:

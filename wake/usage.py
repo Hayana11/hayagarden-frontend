@@ -86,11 +86,15 @@ def build_wake_cache_info(
         cache_supported=cache_supported,
         model=model,
     )
+    wake_mode = str(mode or "normal")
     payload.update({
         "v": 2,
+        # Actual executor today is always the relay agent loop — do not report
+        # claude_code merely because WAKE_PROVIDER=inherit resolves that way.
         "provider": "api_relay",
         "source": "wake",
-        "wake_mode": str(mode or "normal"),
+        "mode": wake_mode,
+        "wake_mode": wake_mode,  # legacy alias
         "num_rounds": len(rows),
         "rounds": rows,
         "last_round_context": rows[-1]["context_tokens"] if rows else 0,
