@@ -28,7 +28,12 @@ cp -r /var/lib/spicy-monopoly    "$TMP/spicy-monopoly-data" 2>/dev/null || true
 
 tar -czf "$BACKUP_DIR/frontend-$STAMP.tar.gz" -C "$TMP" .
 
-# 保留 30 天
-find "$BACKUP_DIR" -name 'frontend-*.tar.gz' -mtime +30 -delete
+# 锚点安全保留策略（见 tools/backup_retention.py 与 backup_anchors.txt）
+PYTHON="${PYTHON_BIN:-/usr/bin/python3.11}"
+if [[ -x "$PYTHON" ]]; then
+  "$PYTHON" "$(dirname "$0")/backup_retention.py" || true
+else
+  python3 "$(dirname "$0")/backup_retention.py" || true
+fi
 
 echo "backup ok: $BACKUP_DIR/frontend-$STAMP.tar.gz ($(du -h "$BACKUP_DIR/frontend-$STAMP.tar.gz" | cut -f1))"

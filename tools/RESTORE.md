@@ -4,7 +4,14 @@
 - 脚本：`/opt/frontend/tools/backup.sh`
 - 计划：每天北京时间 04:00（cron，UTC 20:00）
 - 位置：`/opt/backups/frontend/frontend-<日期时间>.tar.gz`
-- 保留：最近 30 天
+- 保留（`tools/backup_retention.py`，每次备份后自动执行）：
+  - 最近 3 次 `frontend-*.tar.gz` 全部保留
+  - 最近 7 天每天保留 1 份（取当天最新）
+  - 每月保留 1 份月末锚点
+  - `predeploy-runtime-*` 保留最近 3 份
+  - `tools/backup_anchors.txt` 中登记的锚点永不自动删除
+  - 手工目录（`moments-predeploy-*`、`pre-monopoly-*` 等）与 `.bak` 文件不扫描
+  - 根分区 ≥80% 时仅告警，不越过锚点追加删除
 - 日志：`/var/log/frontend-backup.log`
 - 内容：memories.db / attachments.db（sqlite 一致性快照）、.env、.mijia_auth、prompts/、attachments/、client_errors.log、static/uploads/、co-reading 全部书籍与批注数据
 
@@ -40,3 +47,5 @@ systemctl start frontend frontend-gw co-reading
 - 备份在仓库目录外（/opt/backups），不会进 git
 - 异地备份尚未配置：VPS 磁盘损坏时本地备份也会丢失。
   如需异地，可配 rclone 到网盘，在 backup.sh 末尾追加一行 `rclone copy` 即可
+- `frontend.env` / `.env` 与数据库备份若下载到本地，必须加密保存，勿贴进聊天
+- `/var/lib/snapd` 中除 `cache/` 外的体积是已安装 Snap 本体，不要动

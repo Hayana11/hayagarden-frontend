@@ -1,0 +1,5 @@
+# Protected backup anchors — never auto-deleted by backup_retention.py
+# One basename per line. Add new monthly / strategy anchors here after verification.
+frontend-20260630-200002.tar.gz
+frontend-20260713-160048.tar.gz
+predeploy-runtime-20260713-160048
