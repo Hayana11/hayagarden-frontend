@@ -353,12 +353,19 @@ class OneShotClassificationTests(unittest.TestCase):
     def test_wake_task_dream_in_one_shot(self):
         from chat.system_builder import format_one_shot
         text = format_one_shot({
-            "wake_feedback": "## 你醒着的时候\n巡夜",
+            "wake_nonmessage_background": "- [01:00] 巡夜",
+            "wake_message_background": "",
+            "wake_reply_bridge": "【连续对话·紧邻上一句】\n桥",
             "task_feedback": "## 任务结果\n完成",
             "dream_flash": "忽然想起来",
             "feedback_ids": [1],
             "dream_id": 2,
+            "wake_ids": [9],
         })
+        # bridge 不进 format_one_shot，由热轮单独紧贴用户消息
+        self.assertNotIn("连续对话", text)
+        self.assertNotIn("桥", text)
+        self.assertIn("巡夜", text)
         bd = obs.build_context_breakdown(
             full_system="s",
             one_shot_text=text,

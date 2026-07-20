@@ -254,6 +254,7 @@ class ResidentSession:
         return {
             'feedback_ids': list(meta.get('feedback_ids') or []),
             'dream_id': meta.get('dream_id'),
+            'wake_ids': list(meta.get('wake_ids') or []),
         }
 
     def peek_idle_seconds(self):

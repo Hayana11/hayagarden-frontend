@@ -1093,10 +1093,188 @@ def consume_cc_one_shot_claims(get_db_fn, claims):
             pass
 
 
+# Wake → Chat 连续对话桥：message 正文上限；不注入 THOUGHTS。
+WAKE_REPLY_BRIDGE_CONTENT_MAX = 500
+WAKE_BACKGROUND_CONTENT_MAX = 200
+
+
+def _clip_wake_content(text, limit):
+    text = (text or '').strip()
+    if not text:
+        return ''
+    if len(text) <= limit:
+        return text
+    return text[:limit] + '…'
+
+
+def format_wake_reply_bridge(content):
+    """把最新 message Wake 标成紧邻上一句的对话桥。"""
+    body = _clip_wake_content(content, WAKE_REPLY_BRIDGE_CONTENT_MAX)
+    if not body:
+        return ''
+    return (
+        '【连续对话·紧邻上一句】\n'
+        '你刚才通过自主 Wake 主动对她说：\n'
+        f'“{body}”\n'
+        '\n'
+        '她现在这条消息是在直接回复上面这句话。\n'
+        '请把它视为同一段连续对话自然接下去，'
+        '不要理解成她突然主动报备或另起了话题。'
+    )
+
+
+def _wake_row_get(wake_row, key, default=''):
+    if isinstance(wake_row, dict):
+        return wake_row.get(key, default)
+    try:
+        return wake_row[key]
+    except (KeyError, IndexError, TypeError):
+        return default
+
+
+def _format_wake_background_line(wake_row):
+    woke_at = _wake_row_get(wake_row, 'woke_at', '') or ''
+    wt = woke_at[11:16] if len(woke_at) >= 16 else woke_at
+    act = _wake_row_get(wake_row, 'action', '') or ''
+    content = _clip_wake_content(_wake_row_get(wake_row, 'content', ''), WAKE_BACKGROUND_CONTENT_MAX)
+    if act == 'none':
+        return f'- [{wt}] 你想了想，决定不打扰她。（原因：{content}）'
+    if act == 'message':
+        return f'- [{wt}] 你主动发了条消息：{content}'
+    if act == 'diary':
+        return f'- [{wt}] 你写了篇日记：{content}'
+    if act == 'explore':
+        return f'- [{wt}] 你自己想了会儿：{content}'
+    return f'- [{wt}] {act}：{content}'
+
+
+def normalize_wake_message_text(text):
+    """Wake / assistant 正文规范化：仅 strip，不做模糊子串。"""
+    return (text or '').strip()
+
+
+def extract_assistant_message_texts(messages):
+    """从结构化 messages 提取 assistant 已有文本。纯函数：零 I/O、不描图、不调模型。"""
+    texts = []
+    for msg in messages or ():
+        if not isinstance(msg, dict) or msg.get('role') != 'assistant':
+            continue
+        content = msg.get('content')
+        if isinstance(content, str):
+            body = normalize_wake_message_text(content)
+            if body:
+                texts.append(body)
+            continue
+        if isinstance(content, list):
+            parts = []
+            for block in content:
+                if not isinstance(block, dict) or block.get('type') != 'text':
+                    continue
+                part = block.get('text') or ''
+                if part:
+                    parts.append(part)
+            body = normalize_wake_message_text('\n'.join(parts))
+            if body:
+                texts.append(body)
+    return texts
+
+
+def match_visible_wake_ids(wake_items, messages):
+    """冷启动：用 assistant 精确正文匹配 pending message Wake。
+
+    - 只看 role=assistant
+    - 规范化后精确相等，不做任意子串
+    - Counter：一条 assistant 消息最多确认一条重复正文的 Wake
+    """
+    from collections import Counter
+
+    available = Counter(extract_assistant_message_texts(messages))
+    visible = set()
+    for item in wake_items or ():
+        if (item.get('action') or '') != 'message':
+            continue
+        try:
+            wid = int(item['id'])
+        except (TypeError, ValueError, KeyError):
+            continue
+        body = normalize_wake_message_text(item.get('content'))
+        if not body:
+            continue
+        if available.get(body, 0) > 0:
+            available[body] -= 1
+            visible.add(wid)
+    return visible
+
+
+def finalize_cc_wake_one_shot(one_shot, *, is_cold=False, messages=None):
+    """按热/冷轮可见性装配 Wake 文本，并收窄本轮可消费的 wake_ids。
+
+    Hot：nonmessage + older message background + latest bridge；全部 ids 可消费。
+    Cold：
+      - none/diary/explore 必须保留注入
+      - message 仅在结构化 messages 的 assistant 精确命中时省略注入，但仍可消费
+      - 不在 assistant 历史中的 message 仍注入 background/bridge
+      - 只把本轮注入或确认可见的 ids 写入 wake_ids
+    可见性检查不调用 messages_to_text / Relay。
+    """
+    one_shot = dict(one_shot or {})
+    items = list(one_shot.get('wake_items') or [])
+    nonmsg_lines = []
+    msg_bg_lines = []
+    bridge = ''
+    consumable = []
+
+    message_items = [it for it in items if (it.get('action') or '') == 'message']
+    bridge_id = int(message_items[-1]['id']) if message_items else None
+    visible_ids = match_visible_wake_ids(items, messages) if is_cold else set()
+
+    for item in items:
+        try:
+            wid = int(item['id'])
+        except (TypeError, ValueError, KeyError):
+            continue
+        act = item.get('action') or ''
+        content = item.get('content') or ''
+
+        if act != 'message':
+            nonmsg_lines.append(_format_wake_background_line(item))
+            consumable.append(wid)
+            continue
+
+        if is_cold and wid in visible_ids:
+            # assistant 历史已精确含此 Wake：省略重复注入，但仍算本轮可见 → 可消费
+            consumable.append(wid)
+            continue
+
+        if bridge_id is not None and wid == bridge_id:
+            bridge = format_wake_reply_bridge(content)
+        else:
+            msg_bg_lines.append(_format_wake_background_line(item))
+        consumable.append(wid)
+
+    one_shot['wake_nonmessage_background'] = '\n'.join(nonmsg_lines)
+    one_shot['wake_message_background'] = '\n'.join(msg_bg_lines)
+    one_shot['wake_reply_bridge'] = bridge
+    one_shot['wake_ids'] = consumable
+    return one_shot
+
+
 def _cc_collect_one_shot(get_db_fn, *, include_wake=True):
-    """收集 transactional one-shot；feedback/dream 只 peek，flush 后再 consume。"""
+    """收集 transactional one-shot；feedback/dream 只 peek，flush 后再 consume。
+
+    Wake 拆成：
+      wake_nonmessage_background — none/diary/explore
+      wake_message_background    — 较早 message
+      wake_reply_bridge          — 最新未消费 action=message
+    默认按热轮装配；冷启动由 gateway 再调 finalize_cc_wake_one_shot。
+    不注入 thoughts；消费仍在 assistant 落库成功后、且仅限本轮 wake_ids。
+    """
     one_shot = {
-        'wake_feedback': '',
+        'wake_nonmessage_background': '',
+        'wake_message_background': '',
+        'wake_reply_bridge': '',
+        'wake_ids': [],
+        'wake_items': [],
         'task_feedback': '',
         'dream_flash': '',
         'feedback_ids': [],
@@ -1106,24 +1284,19 @@ def _cc_collect_one_shot(get_db_fn, *, include_wake=True):
         try:
             conn = get_db_fn()
             wakes = conn.execute(
-                """SELECT woke_at, action, content, thoughts FROM wake_log
+                """SELECT id, woke_at, action, content FROM wake_log
                    WHERE consumed=0 ORDER BY id ASC"""
             ).fetchall()
             conn.close()
-            if wakes:
-                lines = []
-                for w in wakes:
-                    wt = w['woke_at'][11:16]
-                    act = w['action']
-                    if act == 'none':
-                        lines.append(f'- [{wt}] 你想了想，决定不打扰她。（原因：{(w["content"] or "")[:40]}）')
-                    elif act == 'message':
-                        lines.append(f'- [{wt}] 你主动发了条消息：{(w["content"] or "")[:40]}')
-                    elif act == 'diary':
-                        lines.append(f'- [{wt}] 你写了篇日记：{(w["content"] or "")[:40]}')
-                    elif act == 'explore':
-                        lines.append(f'- [{wt}] 你自己想了会儿：{(w["content"] or "")[:40]}')
-                one_shot['wake_feedback'] = '## 你醒着的时候\n' + '\n'.join(lines)
+            items = []
+            for w in wakes:
+                items.append({
+                    'id': int(w['id']),
+                    'woke_at': w['woke_at'] or '',
+                    'action': w['action'] or '',
+                    'content': w['content'] or '',
+                })
+            one_shot['wake_items'] = items
         except Exception:
             pass
     try:
@@ -1142,7 +1315,7 @@ def _cc_collect_one_shot(get_db_fn, *, include_wake=True):
     if dream_text:
         one_shot['dream_flash'] = dream_text
         one_shot['dream_id'] = dream_id
-    return one_shot
+    return finalize_cc_wake_one_shot(one_shot, is_cold=False)
 
 
 def build_cc_state():
@@ -1239,12 +1412,20 @@ def format_cold_once(cold):
     return '\n\n'.join(chunks)
 
 
-_ONE_SHOT_TEXT_KEYS = ('wake_feedback', 'task_feedback', 'dream_flash')
+# wake_reply_bridge 不进 format_one_shot：由 gateway 紧贴当前用户轮单独注入。
+_ONE_SHOT_TEXT_KEYS = ('task_feedback', 'dream_flash')
 
 
 def format_one_shot(one_shot):
     one_shot = one_shot or {}
     chunks = []
+    bg_parts = []
+    for key in ('wake_nonmessage_background', 'wake_message_background'):
+        val = (one_shot.get(key) or '').strip()
+        if val:
+            bg_parts.append(val)
+    if bg_parts:
+        chunks.append('## 你醒着的时候\n' + '\n'.join(bg_parts))
     for key in _ONE_SHOT_TEXT_KEYS:
         val = one_shot.get(key)
         if val and str(val).strip():

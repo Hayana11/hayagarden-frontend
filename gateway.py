@@ -3181,6 +3181,7 @@ def _cc_resident_stream_gen(messages, *, user_turn=True):
         build_cc_one_shot,
         build_cc_state,
         build_cc_static_parts,
+        finalize_cc_wake_one_shot,
         format_cold_once,
         format_one_shot,
         format_state_diff,
@@ -3248,6 +3249,16 @@ def _cc_resident_stream_gen(messages, *, user_turn=True):
     # 2) 每轮构建 state / one-shot；3) 仅冷启动构建 cold_once
     state = build_cc_state()
     one_shot = build_cc_one_shot(include_wake=user_turn)
+    # 冷启动：none/diary/explore 必须保留；message 仅在结构化 messages 的
+    # assistant 精确命中时省略。可见性检查零 I/O，不调用 messages_to_text
+    #（后者遇图片会走 Relay 描图）。正式 Prompt 再单独 messages_to_text 一次。
+    if is_cold:
+        one_shot = finalize_cc_wake_one_shot(
+            one_shot,
+            is_cold=True,
+            messages=messages,
+        )
+    wake_reply_bridge = (one_shot.get('wake_reply_bridge') or '').strip()
     one_shot_text = format_one_shot(one_shot)
     cold_once = build_cc_cold_once() if is_cold else {}
 
@@ -3280,16 +3291,21 @@ def _cc_resident_stream_gen(messages, *, user_turn=True):
         if one_shot_text:
             pieces.append(one_shot_text)
         prefix = ('\n\n'.join(p for p in pieces if p) + '\n\n') if pieces else ''
+        # 冷启动全程只在这里调用一次 messages_to_text（可能含图片 Relay 描图）
         convo = messages_to_text(messages)
         history_bootstrap_text = '以下是你们今天到目前为止的对话记录：' + NL + NL + convo
         if relationship_text:
             history_bootstrap_text += NL + NL + relationship_text
+        # 不在 assistant 历史中的最新 message：bridge 紧贴“请回复”
+        if wake_reply_bridge:
+            history_bootstrap_text += NL + NL + wake_reply_bridge
         history_bootstrap_text += NL + NL + '请回复最后一条消息。'
         content = prefix + history_bootstrap_text
         commit_meta = {
             'state_snapshot': state,
             'feedback_ids': list(one_shot.get('feedback_ids') or []),
             'dream_id': one_shot.get('dream_id'),
+            'wake_ids': list(one_shot.get('wake_ids') or []),
         }
         if group_cursor_ok:
             commit_meta['group_cursor_initialized'] = True
@@ -3321,10 +3337,11 @@ def _cc_resident_stream_gen(messages, *, user_turn=True):
             pieces.append(recall_text)
         if one_shot_text:
             pieces.append(one_shot_text)
-        # The relationship block is the final dynamic block, immediately
-        # before the current user message.  It never enters the static system.
+        # 热轮固定尾部：relationship → wake_reply_bridge → current user
         if relationship_text:
             pieces.append(relationship_text)
+        if wake_reply_bridge:
+            pieces.append(wake_reply_bridge)
         prefix = ('\n\n'.join(p for p in pieces if p) + '\n\n') if pieces else ''
         if isinstance(last_content, str):
             content = prefix + last_content if prefix else last_content
@@ -3336,6 +3353,7 @@ def _cc_resident_stream_gen(messages, *, user_turn=True):
             'state_snapshot': state,
             'feedback_ids': list(one_shot.get('feedback_ids') or []),
             'dream_id': one_shot.get('dream_id'),
+            'wake_ids': list(one_shot.get('wake_ids') or []),
         }
         if group_cursor_ok:
             commit_meta['group_cursor_initialized'] = True
@@ -4151,8 +4169,13 @@ def chat_stream():
                         conn.commit()
                         assistant_id = int(cur.lastrowid)
                         conn.close()
-                        # one-shot 与 wake 同级：仅 assistant 落库成功后消费
-                        consume_wake_ids(get_db, _wake_claim_ids)
+                        # one-shot 与 wake 同级：仅 assistant 落库成功后消费。
+                        # 优先用本轮注入快照的 wake_ids（与 bridge/background 一致）。
+                        if 'wake_ids' in _cc_one_shot_claims:
+                            _consume_wake_ids = _cc_one_shot_claims.get('wake_ids') or []
+                        else:
+                            _consume_wake_ids = _wake_claim_ids
+                        consume_wake_ids(get_db, _consume_wake_ids)
                         from chat.system_builder import consume_cc_one_shot_claims
                         consume_cc_one_shot_claims(get_db, _cc_one_shot_claims)
                         _write_session_memo(_uc, _cc_text)
