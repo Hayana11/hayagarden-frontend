@@ -85,12 +85,15 @@ def _content_hash(text: str) -> str:
 
 def _read_relationship_anchor(
     bucket_dir: str = RELATIONSHIP_BUCKET_DIR,
+    *,
+    total_limit: int = 250,
 ) -> tuple[str, Optional[str], str]:
     """Read all permanent relationship bucket markdown files (sorted by name).
 
-    Selection rule: every ``*.md`` under the directory is concatenated in
-    sorted filename order.  Fingerprint is a hash of the cleaned body so
-    same-second equal-length edits are still detected.
+    Selection rule: every ``*.md`` under the directory is included.  Each file
+    gets a fair share of ``total_limit`` chars
+    (``max(30, total_limit // n)``) so a long first file cannot starve later
+    buckets.  Fingerprint is a hash of the cleaned merged body.
     """
     try:
         if not os.path.isdir(bucket_dir):
@@ -100,12 +103,15 @@ def _read_relationship_anchor(
         if not files:
             _log(f'relationship anchor missing: no .md files in {bucket_dir}')
             return '', None, SOURCE_MISSING
-        bodies = []
+        per_file_limit = max(30, total_limit // len(files))
+        snippets = []
         for path in files:
             with open(path, encoding='utf-8') as fh:
-                bodies.append(_strip_frontmatter(fh.read()))
-        merged = '\n'.join(b for b in bodies if b.strip())
-        body = _clean_text(merged, 250)
+                raw = _strip_frontmatter(fh.read())
+            snippet = _clean_text(raw, per_file_limit)
+            if snippet:
+                snippets.append(snippet)
+        body = _clean_text('\n'.join(snippets), total_limit)
         if not body:
             _log('relationship anchor missing: bucket files empty after clean')
             return '', None, SOURCE_MISSING
@@ -270,7 +276,12 @@ def rel_context_status(
     sent: bool,
     sources: Optional[dict] = None,
 ) -> str:
-    """Usage marker: EMPTY | sent | degraded | skipped_unchanged."""
+    """Usage marker: EMPTY | sent | degraded | skipped_unchanged.
+
+    Observability note: ``daily=missing`` alone (fresh deploy / before the
+    first daily summary) marks a send as ``degraded``.  Treat a single
+    ``daily=missing`` as expected; escalate only if it persists across days.
+    """
     if not (text or '').strip():
         return 'EMPTY'
     degraded = any(status != SOURCE_OK for status in (sources or {}).values())

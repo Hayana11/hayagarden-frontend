@@ -254,6 +254,22 @@ class RelationshipContextTests(RelationshipFixture):
             result.text.index('我们是长期伴侣'),
         )
 
+    def test_long_first_file_does_not_starve_second_bucket(self):
+        """首文件超过 300 字时，第二份桶的锚点仍应进入上下文。"""
+        long_body = '首文件独白。' + ('很长的前情提要内容' * 40)
+        self.assertGreater(len(long_body), 300)
+        (Path(self.bucket_dir) / '00-long.md').write_text(long_body, encoding='utf-8')
+        (Path(self.bucket_dir) / '01-anchor.md').write_text(
+            '第二桶锚点：彼此信任的约定。', encoding='utf-8',
+        )
+        with mock.patch(
+            'chat.relationship_context._emotion_engine_scores',
+            return_value=(0.5, 0.3, SOURCE_OK),
+        ):
+            result = build_relationship_context(self.get_db, bucket_dir=self.bucket_dir)
+        self.assertIn('首文件独白', result.text)
+        self.assertIn('第二桶锚点', result.text)
+
     def test_content_hash_fingerprint_detects_same_size_edit(self):
         with mock.patch(
             'chat.relationship_context._emotion_engine_scores',
