@@ -11,6 +11,7 @@
   python3 tools/internal_state_shadow_admin.py drain-outbox
   python3 tools/internal_state_shadow_admin.py inspect-gap
   python3 tools/internal_state_shadow_admin.py ack-gap --message-id N --reason '...'
+  python3 tools/internal_state_shadow_admin.py ack-gap --incident-id N --message-id M --reason '...'
 
 环境：
   MEMORIES_DB                 默认 /opt/frontend/memories.db
@@ -53,12 +54,13 @@ def _cmd_prepare_schema(db_path: str) -> int:
             'internal_state_events': _table_exists(conn, 'internal_state_events'),
             'score_applied': shadow.score_proof_schema_ready(conn),
             'proof_health': _table_exists(conn, shadow.PROOF_HEALTH_TABLE),
+            'gap_incidents': _table_exists(conn, shadow.GAP_INCIDENTS_TABLE),
             'outbox': shadow.outbox_schema_ready(conn),
             'gap_ack': _table_exists(conn, shadow.GAP_ACK_TABLE),
             'proof_gap': shadow.has_unresolved_proof_gap(conn, db_path=path),
+            'unresolved_incidents': shadow.count_unresolved_gap_incidents(conn),
             'bootstrapped': False,
         }
-        # prepare-schema 绝不 bootstrap
         st = store.read_state(conn)
         ready['bootstrapped'] = st is not None
         print(json.dumps(ready, ensure_ascii=False, indent=2))
@@ -82,7 +84,6 @@ def _cmd_status(db_path: str) -> int:
     try:
         path = isv3.memories_db_path(db_path)
         proof = shadow.read_proof_health(conn)
-        side = shadow.read_proof_gap_sidecar(path)
         wm = None
         if shadow.score_proof_schema_ready(conn):
             try:
@@ -104,7 +105,8 @@ def _cmd_status(db_path: str) -> int:
             },
             'health': health.as_dict(),
             'proof_health': proof.as_dict(),
-            'proof_gap_sidecar': side,
+            'unresolved_incidents': shadow.list_unresolved_gap_incidents(conn),
+            'gap_sidecar_pending': shadow.count_gap_sidecar_pending(path),
             'proof_max_message_id': wm,
             'outbox_pending': pending,
             'watermark_lag': health.watermark_lag,
@@ -112,8 +114,12 @@ def _cmd_status(db_path: str) -> int:
     finally:
         conn.close()
     print(json.dumps(payload, ensure_ascii=False, indent=2))
-    # lag / gap / pending → 非零退出便于脚本探测
-    if health.proof_gap or health.watermark_lag or (pending or 0) > 0:
+    if (
+        health.proof_gap
+        or health.watermark_lag
+        or (pending or 0) > 0
+        or (health.gap_sidecar_pending or 0) > 0
+    ):
         return 1
     return 0
 
@@ -152,13 +158,12 @@ def _cmd_inspect_gap(db_path: str) -> int:
     conn = store.open_store(path)
     try:
         proof = shadow.read_proof_health(conn)
-        side = shadow.read_proof_gap_sidecar(path)
         acks = []
         if _table_exists(conn, shadow.GAP_ACK_TABLE):
             rows = conn.execute(
                 f"""
-                SELECT id, message_id, reason, acked_at, previous_error_code,
-                       previous_failed_message_id
+                SELECT id, incident_id, message_id, reason, acked_at,
+                       previous_error_code, previous_failed_message_id
                 FROM {shadow.GAP_ACK_TABLE}
                 ORDER BY id DESC LIMIT 20
                 """
@@ -169,16 +174,18 @@ def _cmd_inspect_gap(db_path: str) -> int:
                 else:
                     acks.append({
                         'id': r[0],
-                        'message_id': r[1],
-                        'reason': r[2],
-                        'acked_at': r[3],
-                        'previous_error_code': r[4],
-                        'previous_failed_message_id': r[5],
+                        'incident_id': r[1],
+                        'message_id': r[2],
+                        'reason': r[3],
+                        'acked_at': r[4],
+                        'previous_error_code': r[5],
+                        'previous_failed_message_id': r[6],
                     })
         payload = {
             'unresolved': shadow.has_unresolved_proof_gap(conn, db_path=path),
             'proof_health': proof.as_dict(),
-            'sidecar': side,
+            'incidents': shadow.list_unresolved_gap_incidents(conn),
+            'gap_sidecar_pending': shadow.count_gap_sidecar_pending(path),
             'recent_acks': acks,
         }
         print(json.dumps(payload, ensure_ascii=False, indent=2))
@@ -187,17 +194,22 @@ def _cmd_inspect_gap(db_path: str) -> int:
         conn.close()
 
 
-def _cmd_ack_gap(db_path: str, message_id: int, reason: str) -> int:
+def _cmd_ack_gap(
+    db_path: str,
+    message_id: int,
+    reason: str,
+    incident_id: int | None,
+) -> int:
     path = isv3.memories_db_path(db_path)
     conn = store.open_store(path)
     try:
-        # 确保 ack 审计表存在（不 bootstrap）
         shadow.ensure_shadow_schema(conn, db_path=path)
         result = shadow.ack_proof_gap(
             conn,
             message_id=message_id,
             reason=reason,
             db_path=path,
+            incident_id=incident_id,
         )
         if conn.in_transaction:
             conn.execute('COMMIT')
@@ -219,13 +231,14 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser('bootstrap', help='explicit production bootstrap')
     drain_p = sub.add_parser('drain-outbox', help='deliver pending shadow outbox rows')
     drain_p.add_argument('--limit', type=int, default=32)
-    sub.add_parser('inspect-gap', help='show durable proof gap + recent acks')
+    sub.add_parser('inspect-gap', help='show durable proof gap incidents + recent acks')
     ack_p = sub.add_parser(
         'ack-gap',
-        help='audited clear of proof gap (requires --message-id and --reason)',
+        help='audited resolve of gap incident(s) for one message_id',
     )
     ack_p.add_argument('--message-id', type=int, required=True)
     ack_p.add_argument('--reason', required=True)
+    ack_p.add_argument('--incident-id', type=int, default=None)
     args = p.parse_args(argv)
     if args.cmd == 'prepare-schema':
         return _cmd_prepare_schema(args.db)
@@ -238,7 +251,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == 'inspect-gap':
         return _cmd_inspect_gap(args.db)
     if args.cmd == 'ack-gap':
-        return _cmd_ack_gap(args.db, args.message_id, args.reason)
+        return _cmd_ack_gap(args.db, args.message_id, args.reason, args.incident_id)
     return 2
 
 

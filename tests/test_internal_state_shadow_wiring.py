@@ -233,17 +233,19 @@ class ProofAtomicityTests(unittest.TestCase):
         self.assertIsNotNone(side)
         self.assertTrue(side.get('gap_detected'))
         self.assertEqual(side.get('error_code'), 'proof_schema_missing')
+        self.assertGreaterEqual(shadow.count_gap_sidecar_pending(db2), 1)
         # prepare-schema 不得洗白
         conn = store.open_store(db2)
         try:
             shadow.ensure_shadow_schema(conn, db_path=db2)
+            self.assertTrue(shadow.has_unresolved_proof_gap(conn, db_path=db2))
+            self.assertEqual(shadow.count_unresolved_gap_incidents(conn), 1)
             health = shadow.read_proof_health(conn)
             self.assertTrue(health.gap_detected)
             self.assertEqual(health.error_code, 'proof_schema_missing')
-            self.assertTrue(shadow.has_unresolved_proof_gap(conn, db_path=db2))
         finally:
             conn.close()
-        self.assertIsNone(shadow.read_proof_gap_sidecar(db2))
+        self.assertEqual(shadow.count_gap_sidecar_pending(db2), 0)
 
 
 class GapBootstrapTests(unittest.TestCase):
@@ -281,7 +283,7 @@ class GapBootstrapTests(unittest.TestCase):
             )
             conn.execute('BEGIN')
             shadow.record_score_proof_in_txn(
-                conn, 5, applied_at=T0, source='unit')
+                conn, 5, applied_at=T0, source='unit', score_hash='unit')
             conn.execute('COMMIT')
             shadow.mark_proof_gap(
                 conn, failed_message_id=6, error_code='unit_gap')
@@ -587,7 +589,7 @@ class OutboxReliabilityTests(unittest.TestCase):
             shadow.ensure_shadow_schema(conn, db_path=self.db_path)
             conn.execute('BEGIN')
             shadow.record_score_proof_in_txn(
-                conn, 20, applied_at=T0, source='unit')
+                conn, 20, applied_at=T0, source='unit', score_hash='unit')
             conn.execute('COMMIT')
         finally:
             conn.close()
@@ -626,7 +628,7 @@ class OutboxReliabilityTests(unittest.TestCase):
             )
             # 模拟同事务权威 proof（完整 scores 已在 outbox）
             shadow.record_score_proof_in_txn(
-                conn, 101, applied_at=scored_at, source='unit')
+                conn, 101, applied_at=scored_at, source='unit', score_hash='unit')
             conn.execute('COMMIT')
         finally:
             conn.close()
@@ -675,7 +677,7 @@ class OutboxReliabilityTests(unittest.TestCase):
         try:
             conn.execute('BEGIN')
             shadow.record_score_proof_in_txn(
-                conn, 200, applied_at='2026-07-21 12:01:00', source='unit')
+                conn, 200, applied_at='2026-07-21 12:01:00', source='unit', score_hash='unit')
             conn.execute('COMMIT')
         finally:
             conn.close()
@@ -729,7 +731,7 @@ class OutboxReliabilityTests(unittest.TestCase):
 
 
 class AckGapTests(unittest.TestCase):
-    def test_ack_gap_requires_matching_message_id_and_reason(self):
+    def test_ack_gap_resolves_only_matching_message_incidents(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         db_path = str(Path(tmp.name) / 'ack.db')
@@ -738,28 +740,144 @@ class AckGapTests(unittest.TestCase):
             _seed_emotion(conn)
             shadow.ensure_shadow_schema(conn, db_path=db_path)
             shadow.mark_proof_gap(
-                conn, failed_message_id=9, error_code='unit_gap',
+                conn, failed_message_id=101, error_code='gap_101',
             )
+            shadow.mark_proof_gap(
+                conn, failed_message_id=102, error_code='gap_102',
+            )
+            self.assertEqual(shadow.count_unresolved_gap_incidents(conn), 2)
             with self.assertRaises(store.StoreError):
                 shadow.ack_proof_gap(
                     conn, message_id=8, reason='wrong id', db_path=db_path,
                 )
             with self.assertRaises(store.StoreError):
                 shadow.ack_proof_gap(
-                    conn, message_id=9, reason='  ', db_path=db_path,
+                    conn, message_id=102, reason='  ', db_path=db_path,
                 )
             result = shadow.ack_proof_gap(
-                conn, message_id=9, reason='reconciled after inspect',
+                conn, message_id=102, reason='reconciled 102 only',
                 db_path=db_path,
             )
             self.assertTrue(result['acked'])
-            self.assertFalse(shadow.read_proof_health(conn).gap_detected)
-            n = conn.execute(
-                f'SELECT COUNT(*) FROM {shadow.GAP_ACK_TABLE}'
-            ).fetchone()[0]
-            self.assertEqual(n, 1)
+            self.assertEqual(result['remaining_unresolved'], 1)
+            # 101 仍在
+            unresolved = shadow.list_unresolved_gap_incidents(conn)
+            self.assertEqual(len(unresolved), 1)
+            self.assertEqual(unresolved[0]['message_id'], 101)
+            self.assertTrue(shadow.has_unresolved_proof_gap(conn, db_path=db_path))
         finally:
             conn.close()
+
+
+class ScoreHashIdempotencyTests(unittest.TestCase):
+    def test_same_message_same_second_different_scores_no_silent_split(self):
+        """两线程同 message_id、同秒、不同 scores：第二次不得改 legacy，也不得静默留不同 outbox。"""
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        db_path = str(Path(tmp.name) / 'hash.db')
+        import os
+        patch = mock.patch.dict(os.environ, ALL_ON, clear=False)
+        patch.start()
+        self.addCleanup(patch.stop)
+        conn = store.open_store(db_path)
+        try:
+            _seed_legacy_for_bootstrap(conn)
+            shadow.ensure_shadow_schema(conn, db_path=db_path)
+            conn.execute('BEGIN')
+            shadow.record_score_proof_in_txn(
+                conn, 20, applied_at=T0, source='unit', score_hash='boot')
+            conn.execute('COMMIT')
+        finally:
+            conn.close()
+        self.assertTrue(shadow.ensure_bootstrapped(
+            db_path=db_path, environ={shadow.SHADOW_ENABLED_ENV: '1'},
+        ).ok)
+
+        ee.DB_PATH = db_path
+        scores_a = {
+            'valence': 0.2, 'arousal': 0.4, 'mood_word': 'A',
+            'passion_delta': 0.01, 'intimacy_delta': 0.0,
+        }
+        scores_b = {
+            'valence': 0.9, 'arousal': 0.1, 'mood_word': 'B',
+            'passion_delta': 0.05, 'intimacy_delta': 0.02,
+        }
+        frozen_at = '2026-07-21 15:00:00'
+
+        with mock.patch.object(ee, '_deepseek_score', return_value=scores_a), \
+             mock.patch.object(ee, '_get_ombre_va', return_value=(None, None)), \
+             mock.patch.object(ee, 'get_longing', return_value=0.1), \
+             mock.patch.object(ee, '_now_str', return_value=frozen_at):
+            ee.score_and_update('first', message_id=50)
+
+        conn = store.open_store(db_path)
+        try:
+            pa_after_a = conn.execute(
+                'SELECT pa FROM emotion_state WHERE id=1'
+            ).fetchone()[0]
+            proof = shadow.lookup_score_proof(conn, 50)
+            self.assertIsNotNone(proof)
+            hash_a = proof['score_hash']
+        finally:
+            conn.close()
+
+        with mock.patch.object(ee, '_deepseek_score', return_value=scores_b), \
+             mock.patch.object(ee, '_get_ombre_va', return_value=(None, None)), \
+             mock.patch.object(ee, 'get_longing', return_value=0.1), \
+             mock.patch.object(ee, '_now_str', return_value=frozen_at):
+            ee.score_and_update('second', message_id=50)
+
+        conn = store.open_store(db_path)
+        try:
+            pa_after_b = conn.execute(
+                'SELECT pa FROM emotion_state WHERE id=1'
+            ).fetchone()[0]
+            self.assertAlmostEqual(pa_after_a, pa_after_b, places=4)
+            proof2 = shadow.lookup_score_proof(conn, 50)
+            self.assertEqual(proof2['score_hash'], hash_a)
+            # outbox 若存在，只能是 A
+            row = conn.execute(
+                f"SELECT payload_json FROM {shadow.OUTBOX_TABLE} "
+                "WHERE event_key='user_scored:50'"
+            ).fetchone()
+            if row is not None:
+                payload = json.loads(row[0])
+                self.assertEqual(payload['scores']['mood_word'], 'A')
+            self.assertTrue(shadow.has_unresolved_proof_gap(conn, db_path=db_path))
+            codes = [
+                i['error_code']
+                for i in shadow.list_unresolved_gap_incidents(conn)
+            ]
+            self.assertIn('score_proof_payload_conflict', codes)
+        finally:
+            conn.close()
+
+
+class MultiGapIncidentTests(unittest.TestCase):
+    def test_sidecar_append_does_not_overwrite(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        db_path = str(Path(tmp.name) / 'multi.db')
+        shadow.append_gap_incident_sidecar(
+            db_path, failed_message_id=101, error_code='first',
+        )
+        shadow.append_gap_incident_sidecar(
+            db_path, failed_message_id=102, error_code='second',
+        )
+        self.assertEqual(shadow.count_gap_sidecar_pending(db_path), 2)
+        conn = store.open_store(db_path)
+        try:
+            _seed_emotion(conn)
+            shadow.ensure_shadow_schema(conn, db_path=db_path)
+            self.assertEqual(shadow.count_unresolved_gap_incidents(conn), 2)
+            mids = {
+                i['message_id']
+                for i in shadow.list_unresolved_gap_incidents(conn)
+            }
+            self.assertEqual(mids, {101, 102})
+        finally:
+            conn.close()
+        self.assertEqual(shadow.count_gap_sidecar_pending(db_path), 0)
 
 
 if __name__ == '__main__':

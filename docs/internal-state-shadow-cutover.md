@@ -8,7 +8,9 @@ INTERNAL_STATE_V3_SCORE_PROOF_ENABLED=0
 INTERNAL_STATE_V3_USER_EVENTS_ENABLED=0
 ```
 
-`USER_EVENTS` 必须三者同开。`SCORE_PROOF=0, SHADOW=1, USER_EVENTS=1` 会被拒绝（避免只有 `user_rule`、永远没有 `user_scored` 的半套事件史）。
+`USER_EVENTS` 必须三者同开。`SCORE_PROOF=0, SHADOW=1, USER_EVENTS=1` 会被拒绝。
+
+开启 `USER_EVENTS` 前必须 `prepare-schema`：**缺 outbox 表则事件门 fail-closed**（记 `outbox_capture_gap`，不写 JSONL outbox 热路径）。
 
 ## 阶段 0：部署代码
 
@@ -24,8 +26,8 @@ python3 tools/internal_state_shadow_admin.py status
 确认：
 
 - `journal_mode` 未变
-- `score_applied` / `internal_state_v3` / `internal_state_events` / `proof_health` / `outbox` 就绪
-- 若曾有 proof-gap sidecar，已迁入 health（`proof_gap` 可能为 true——不得洗白）
+- `score_applied`（含 `score_hash`）/ `outbox`（含 `payload_hash`）/ `gap_incidents` 就绪
+- 若曾有 gap sidecar JSONL，已迁入 incident ledger（不得洗白）
 - **未** bootstrap
 
 ## 阶段 2：proof-only
@@ -55,8 +57,7 @@ python3 tools/internal_state_shadow_admin.py status
 - `bootstrapped=True`
 - `provenance_ok=True`
 - `last_scored_message_id == proof max`
-- `last_error=None`
-- `proof_gap=False`
+- `proof_gap=False` / 无 unresolved incidents
 - `watermark_lag=False`
 
 ## 阶段 4：开启用户事件
@@ -67,30 +68,23 @@ SHADOW_ENABLED=1
 USER_EVENTS_ENABLED=1
 ```
 
-从此 `user_rule` / `user_scored` 经 **durable outbox** 进入 Shadow：
+`user_rule` / `user_scored` 经 **数据库 outbox** 同事务入队；commit 后 drain；payload hash 冲突即失败（无 sidecar 热路径）。
 
-- 与权威写入同事务入队
-- commit 后立即 drain
-- 投递失败行保留，可 `drain-outbox` 重放
-- v3 `event_key` 幂等去重
-
-旧系统仍是唯一生产权威。
-
-## Proof gap 恢复（受审计）
+## Proof gap 恢复（incident ledger）
 
 ```bash
 python3 tools/internal_state_shadow_admin.py inspect-gap
-# 人工核对 / 必要时补齐 outbox 后：
 python3 tools/internal_state_shadow_admin.py ack-gap --message-id N --reason '...'
+# 或指定单条：
+python3 tools/internal_state_shadow_admin.py ack-gap --message-id N --incident-id I --reason '...'
 ```
 
-禁止无证据地调用内部 `clear_proof_gap()`。
+`ack-gap` 只解决该 `message_id`（或指定 `incident_id`）的未解决项，不会一键擦掉其它缺口。
 
 ## 硬交接
 
-- 评分事务开始前 proof / outbox 表必须已由 `prepare-schema` 建好
-- `emotion_state` UPDATE 与 proof（及 scored outbox）**同一** `BEGIN…COMMIT`
-- `chat_messages` INSERT 与 user_rule outbox **同一**事务
-- 事务内禁止 `ensure_schema` / DDL
-- schema 缺失时的 gap 写入 sidecar；`prepare-schema` 迁入 health
-- `wake_outcome` 生产调用点仍为 0（留给后续 PR）
+- 评分：`BEGIN IMMEDIATE` → **先查 proof（score_hash）** → 再 UPDATE emotion → proof → outbox → COMMIT
+- 同 `message_id` + 同 `score_hash`：整次 no-op；不同 hash：冲突并记 incident，不改 emotion
+- `chat_messages` INSERT 与 user_rule outbox 同事务；缺 outbox 表 → `outbox_capture_gap`
+- schema 缺失：先 append gap JSONL，再改 emotion
+- `wake_outcome` 生产调用点仍为 0

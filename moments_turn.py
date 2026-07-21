@@ -188,7 +188,7 @@ def insert_user_message(
         if row is not None:
             created_at = row['created_at'] if hasattr(row, 'keys') else row[0]
             created_at = str(created_at)[:19] if created_at else None
-        # Shadow user_rule outbox：与 chat INSERT 同事务；失败不阻断落库
+        # Shadow user_rule outbox：与 chat INSERT 同事务；缺表则 outbox_capture_gap
         if user_id is not None and created_at:
             try:
                 import internal_state_shadow as _shadow
@@ -203,19 +203,21 @@ def insert_user_message(
                         )
                     except Exception:
                         try:
-                            _shadow.append_outbox_sidecar(
-                                memories_db_path,
-                                event_key=f'user_rule:{user_id}',
-                                event_type=_shadow.EVENT_TYPE_USER_RULE,
-                                payload={
-                                    'message_id': user_id,
-                                    'text': text,
-                                    'created_at': created_at,
-                                    'previous_user_at': previous_user_at,
-                                },
+                            _shadow.mark_proof_gap(
+                                conn,
+                                failed_message_id=user_id,
+                                error_code='outbox_capture_gap',
+                                db_path=memories_db_path,
                             )
                         except Exception:
-                            pass
+                            try:
+                                _shadow.mark_proof_gap_standalone(
+                                    db_path=memories_db_path,
+                                    failed_message_id=user_id,
+                                    error_code='outbox_capture_gap',
+                                )
+                            except Exception:
+                                pass
             except Exception:
                 pass
         conn.commit()

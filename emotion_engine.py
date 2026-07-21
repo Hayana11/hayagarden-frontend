@@ -467,10 +467,9 @@ def score_and_update(conversation_excerpt: str, *, message_id=None):
         proof_enabled = False
         if proof_env:
             try:
-                # 不依赖 shadow 模块的最小 sidecar（与 shadow.write_proof_gap_sidecar 同路径）
+                # append-only JSONL（不依赖 shadow 模块）
                 import json as _json
-                _side = DB_PATH + '.shadow_proof_gap.json'
-                _tmp = _side + '.tmp'
+                _side = DB_PATH + '.shadow_proof_gap.jsonl'
                 _body = _json.dumps({
                     'gap_detected': True,
                     'failed_message_id': (
@@ -482,20 +481,18 @@ def score_and_update(conversation_excerpt: str, *, message_id=None):
                     ),
                     'error_code': 'shadow_module_unavailable',
                     'failed_at': scored_at,
-                }, ensure_ascii=False, separators=(',', ':'))
-                with open(_tmp, 'w', encoding='utf-8') as _fh:
+                }, ensure_ascii=False, separators=(',', ':')) + '\n'
+                with open(_side, 'a', encoding='utf-8') as _fh:
                     _fh.write(_body)
                     _fh.flush()
                     os.fsync(_fh.fileno())
-                os.replace(_tmp, _side)
             except Exception:
                 pass
 
-    # ── 写入（proof 开启时与证明 / scored outbox 同行提交）────────────────
+    # ── 写入（proof 开启时：先查 proof 幂等，再改 emotion）────────────────
     conn = _db()
     try:
         if proof_enabled and _shadow is not None:
-            # 显式事务：禁止隐式 autocommit 拆开 emotion / proof / outbox
             conn.isolation_level = None
             mid_ok = None
             try:
@@ -527,12 +524,12 @@ def score_and_update(conversation_excerpt: str, *, message_id=None):
                 and frozen_message_id > 0
                 else None
             )
+            score_hash = _shadow.compute_score_hash(scored_payload)
 
             if mid_ok is None:
-                # 无可靠身份证：旧情绪落库；health 可写则同事务标 gap
                 health_ready = conn.execute(
                     "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
-                    (_shadow.PROOF_HEALTH_TABLE,),
+                    (_shadow.GAP_INCIDENTS_TABLE,),
                 ).fetchone() is not None
                 try:
                     conn.execute('BEGIN IMMEDIATE')
@@ -561,76 +558,73 @@ def score_and_update(conversation_excerpt: str, *, message_id=None):
                 else:
                     if not health_ready:
                         try:
-                            _shadow.write_proof_gap_sidecar(
+                            _shadow.append_gap_incident_sidecar(
                                 DB_PATH,
                                 failed_message_id=_bad_mid,
                                 error_code='missing_or_invalid_message_id',
                             )
                         except Exception:
                             pass
-                        try:
-                            _shadow.mark_proof_gap_standalone(
-                                db_path=DB_PATH,
-                                failed_message_id=_bad_mid,
-                                error_code='missing_or_invalid_message_id',
-                            )
-                        except Exception:
-                            pass
             elif not _shadow.score_proof_schema_ready(conn):
-                # 表未准备：旧评分照常完成；sidecar 持久化 gap（prepare 后迁入）
-                conn.execute(_emotion_sql, _emotion_params)
-                conn.commit()
+                # 表未准备：先 fsync gap sidecar，再改权威（保守假阳性优于不可见缺口）
                 try:
-                    _shadow.write_proof_gap_sidecar(
+                    _shadow.append_gap_incident_sidecar(
                         DB_PATH,
                         failed_message_id=mid_ok,
                         error_code='proof_schema_missing',
                     )
                 except Exception:
                     pass
-                try:
-                    _shadow.mark_proof_gap_standalone(
-                        db_path=DB_PATH,
-                        failed_message_id=mid_ok,
-                        error_code='proof_schema_missing',
-                    )
-                except Exception:
-                    pass
+                conn.execute(_emotion_sql, _emotion_params)
+                conn.commit()
             else:
-                outbox_ok = True
                 try:
                     conn.execute('BEGIN IMMEDIATE')
+                    # 强幂等：先看 proof，再决定是否改 emotion
+                    existing = _shadow.lookup_score_proof(conn, mid_ok)
+                    if existing is not None:
+                        prev_hash = existing.get('score_hash')
+                        if prev_hash is not None and str(prev_hash) == score_hash:
+                            conn.execute('ROLLBACK')
+                            return  # 整次 no-op：不改 legacy，不改 outbox
+                        # 同 message_id 不同 scores → 冲突，不改 emotion
+                        _shadow.mark_proof_gap(
+                            conn,
+                            failed_message_id=mid_ok,
+                            error_code='score_proof_payload_conflict',
+                            db_path=DB_PATH,
+                        )
+                        conn.commit()
+                        return
+
                     conn.execute(_emotion_sql, _emotion_params)
-                    _shadow.record_score_proof_in_txn(
+                    status = _shadow.record_score_proof_in_txn(
                         conn,
                         mid_ok,
                         applied_at=scored_at,
                         source=_shadow.PROOF_SOURCE_SCORE_AND_UPDATE,
+                        score_hash=score_hash,
                     )
-                    # user_scored outbox 与 emotion+proof 同事务（完整冻结 scores）
+                    if status == 'duplicate':
+                        # 竞态下另一线程已写入相同 hash：回滚本事务 emotion
+                        conn.execute('ROLLBACK')
+                        return
                     if _shadow.is_user_events_enabled():
-                        try:
+                        if not _shadow.outbox_schema_ready(conn):
+                            _shadow.mark_proof_gap(
+                                conn,
+                                failed_message_id=mid_ok,
+                                error_code='outbox_capture_gap',
+                                db_path=DB_PATH,
+                            )
+                            # 权威 emotion+proof 仍提交；事件门 fail-closed 不写 sidecar
+                        else:
                             _shadow.enqueue_user_scored_in_txn(
                                 conn,
                                 message_id=mid_ok,
                                 scores=scored_payload,
                                 scored_at=scored_at,
                             )
-                        except Exception:
-                            outbox_ok = False
-                            try:
-                                _shadow.append_outbox_sidecar(
-                                    DB_PATH,
-                                    event_key=f'user_scored:{mid_ok}',
-                                    event_type=_shadow.EVENT_TYPE_USER_SCORED,
-                                    payload={
-                                        'message_id': mid_ok,
-                                        'scores': scored_payload,
-                                        'scored_at': scored_at,
-                                    },
-                                )
-                            except Exception:
-                                pass
                     conn.commit()
                     proof_written = True
                 except Exception:
@@ -646,11 +640,7 @@ def score_and_update(conversation_excerpt: str, *, message_id=None):
                         )
                     except Exception:
                         pass
-                    # 同事务失败：情绪也未落库；不阻断聊天（异步线程）
                     return
-                if not outbox_ok:
-                    # 权威已提交；sidecar 待 prepare/drain 迁入
-                    pass
         else:
             conn.execute("""
                 UPDATE emotion_state SET
@@ -681,7 +671,6 @@ def score_and_update(conversation_excerpt: str, *, message_id=None):
     except Exception:
         pass
 
-    # commit 后立即 drain outbox（失败行仍保留，可重放）
     if proof_written and _shadow is not None:
         try:
             _shadow.drain_shadow_outbox_best_effort(db_path=DB_PATH)

@@ -115,7 +115,7 @@ def _insert_score_applied(
     conn.execute('BEGIN')
     try:
         shadow.record_score_proof_in_txn(
-            conn, message_id, applied_at=T0, source=source,
+            conn, message_id, applied_at=T0, source=source, score_hash='unit',
         )
         conn.execute('COMMIT')
     except Exception:
@@ -221,7 +221,7 @@ class ScoreProofTxnTests(unittest.TestCase):
     def test_without_transaction_fails_and_writes_nothing(self):
         with self.assertRaises(store.StoreError) as ctx:
             shadow.record_score_proof_in_txn(
-                self.conn, 1, applied_at=T0, source='x',
+                self.conn, 1, applied_at=T0, source='x', score_hash='unit',
             )
         self.assertIn('active caller-owned transaction', str(ctx.exception))
         n = self.conn.execute(
@@ -234,7 +234,7 @@ class ScoreProofTxnTests(unittest.TestCase):
         self.conn.execute(
             'UPDATE emotion_state SET pa=0.91 WHERE id=1')
         shadow.record_score_proof_in_txn(
-            self.conn, 101, applied_at=T0, source='atomic')
+            self.conn, 101, applied_at=T0, source='atomic', score_hash='unit')
         self.conn.execute('ROLLBACK')
 
         pa = self.conn.execute(
@@ -248,9 +248,9 @@ class ScoreProofTxnTests(unittest.TestCase):
     def test_identical_proof_retry_idempotent(self):
         self.conn.execute('BEGIN')
         shadow.record_score_proof_in_txn(
-            self.conn, 7, applied_at=T0, source='same')
+            self.conn, 7, applied_at=T0, source='same', score_hash='unit')
         shadow.record_score_proof_in_txn(
-            self.conn, 7, applied_at=T0, source='same')
+            self.conn, 7, applied_at=T0, source='same', score_hash='unit')
         self.conn.execute('COMMIT')
         n = self.conn.execute(
             f'SELECT COUNT(*) FROM {shadow.SCORE_APPLIED_TABLE}'
@@ -260,13 +260,13 @@ class ScoreProofTxnTests(unittest.TestCase):
     def test_different_proof_content_conflicts(self):
         self.conn.execute('BEGIN')
         shadow.record_score_proof_in_txn(
-            self.conn, 7, applied_at=T0, source='a')
+            self.conn, 7, applied_at=T0, source='a', score_hash='hash_a')
         self.conn.execute('COMMIT')
         self.conn.execute('BEGIN')
         with self.assertRaises(store.StoreError) as ctx:
             shadow.record_score_proof_in_txn(
-                self.conn, 7, applied_at=T0, source='b')
-        self.assertIn('score proof conflict', str(ctx.exception))
+                self.conn, 7, applied_at=T0, source='b', score_hash='hash_b')
+        self.assertIn('payload conflict', str(ctx.exception))
         self.conn.execute('ROLLBACK')
 
 
@@ -293,7 +293,7 @@ class SameTxnCaptureTests(unittest.TestCase):
         self.conn.execute(
             'UPDATE emotion_state SET pa=0.91, valence=0.88 WHERE id=1')
         shadow.record_score_proof_in_txn(
-            self.conn, 101, applied_at=T0, source='atomic_score')
+            self.conn, 101, applied_at=T0, source='atomic_score', score_hash='unit')
         self.conn.execute('COMMIT')
 
         bundle = shadow.capture_bootstrap_bundle(self.db_path)
@@ -314,7 +314,7 @@ class SameTxnCaptureTests(unittest.TestCase):
                 w.execute(
                     'UPDATE emotion_state SET pa=0.99 WHERE id=1')
                 shadow.record_score_proof_in_txn(
-                    w, 101, applied_at=T0, source='race')
+                    w, 101, applied_at=T0, source='race', score_hash='unit')
                 barrier.set()
                 done.wait(timeout=5)
                 w.execute('COMMIT')
@@ -388,7 +388,7 @@ class LinearizedBootstrapTests(unittest.TestCase):
                 late_applied_at_box.append(late)
                 w.execute('UPDATE emotion_state SET pa=0.99 WHERE id=1')
                 shadow.record_score_proof_in_txn(
-                    w, 101, applied_at=late, source='inflight')
+                    w, 101, applied_at=late, source='inflight', score_hash='unit')
                 writer_holding.set()
                 # 给 bootstrap 时间在 BEGIN IMMEDIATE 上排队
                 time.sleep(0.8)

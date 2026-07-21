@@ -29,6 +29,7 @@
 from __future__ import annotations
 
 import datetime
+import hashlib
 import json
 import logging
 import math
@@ -54,16 +55,22 @@ BOOTSTRAP_EVENT_KEY = 'bootstrap:initial'
 SCORE_APPLIED_TABLE = 'internal_state_score_applied'
 PROOF_HEALTH_TABLE = 'internal_state_score_proof_health'
 OUTBOX_TABLE = 'internal_state_shadow_outbox'
+GAP_INCIDENTS_TABLE = 'internal_state_shadow_gap_incidents'
 GAP_ACK_TABLE = 'internal_state_shadow_gap_ack'
 WATERMARK_SOURCE = 'internal_state_score_applied:max(message_id)'
 PRODUCTION_BOOTSTRAP_SOURCE_ID = 'phase1a4a_shadow'
 PROOF_SOURCE_SCORE_AND_UPDATE = 'emotion_engine.score_and_update'
 CAPTURE_MODE_PRODUCTION = 'same_sqlite_snapshot_v1'
 CAPTURE_MODE_TEST = 'test_injection'
-PROOF_GAP_SIDECAR_SUFFIX = '.shadow_proof_gap.json'
-OUTBOX_SIDECAR_SUFFIX = '.shadow_outbox.jsonl'
+PROOF_GAP_SIDECAR_SUFFIX = '.shadow_proof_gap.jsonl'
+PROOF_GAP_SIDECAR_LEGACY_SUFFIX = '.shadow_proof_gap.json'
+OUTBOX_SIDECAR_SUFFIX = '.shadow_outbox.jsonl'  # legacy only; hot path removed
 EVENT_TYPE_USER_RULE = 'user_rule'
 EVENT_TYPE_USER_SCORED = 'user_scored'
+_SCORE_HASH_FIELDS = (
+    'valence', 'arousal', 'mood_word',
+    'passion_delta', 'intimacy_delta', 'source',
+)
 _DEFAULT_VERSION_RETRIES = 2
 _DEFAULT_DRAIN_LIMIT = 32
 
@@ -99,6 +106,8 @@ class ShadowHealth:
     watermark_lag: Optional[bool] = None
     outbox_pending: Optional[int] = None
     outbox_schema_ready: Optional[bool] = None
+    gap_incidents_unresolved: Optional[int] = None
+    gap_sidecar_pending: Optional[int] = None
 
     def as_dict(self) -> dict:
         return asdict(self)
@@ -227,8 +236,72 @@ def proof_gap_sidecar_path(db_path: Optional[str] = None) -> str:
     return isv3.memories_db_path(db_path) + PROOF_GAP_SIDECAR_SUFFIX
 
 
+def proof_gap_sidecar_legacy_path(db_path: Optional[str] = None) -> str:
+    return isv3.memories_db_path(db_path) + PROOF_GAP_SIDECAR_LEGACY_SUFFIX
+
+
 def outbox_sidecar_path(db_path: Optional[str] = None) -> str:
+    """Legacy path only — USER_EVENTS 热路径不再写 outbox sidecar。"""
     return isv3.memories_db_path(db_path) + OUTBOX_SIDECAR_SUFFIX
+
+
+def canonical_payload_json(payload: Mapping[str, Any]) -> str:
+    return json.dumps(dict(payload), ensure_ascii=False, sort_keys=True, separators=(',', ':'))
+
+
+def compute_payload_hash(payload: Mapping[str, Any]) -> str:
+    return hashlib.sha256(canonical_payload_json(payload).encode('utf-8')).hexdigest()
+
+
+def compute_score_hash(scores: Mapping[str, Any]) -> str:
+    """冻结 scores 的稳定哈希；用作 proof / outbox 幂等键的一部分。"""
+    if not isinstance(scores, Mapping):
+        raise store.StoreError('scores must be a mapping')
+    subset = {k: scores.get(k) for k in _SCORE_HASH_FIELDS}
+    return compute_payload_hash(subset)
+
+
+def _normalize_gap_mid(failed_message_id: Optional[int]) -> Optional[int]:
+    if failed_message_id is None:
+        return None
+    try:
+        return store.require_positive_message_id(
+            failed_message_id, field='failed_message_id',
+        )
+    except store.StoreError:
+        return None
+
+
+def append_gap_incident_sidecar(
+    db_path: Optional[str],
+    *,
+    failed_message_id: Optional[int],
+    error_code: str,
+) -> None:
+    """Append-only JSONL gap incident（不得覆盖旧缺口）。"""
+    if not isinstance(error_code, str) or not error_code.strip():
+        raise store.StoreError(f'error_code invalid: {error_code!r}')
+    mid = _normalize_gap_mid(failed_message_id)
+    code = error_code.strip()[:64]
+    dest = proof_gap_sidecar_path(db_path)
+    path = Path(dest)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    row = {
+        'gap_detected': True,
+        'failed_message_id': mid,
+        'error_code': code,
+        'failed_at': _now_beijing(),
+    }
+    line = json.dumps(row, ensure_ascii=False, separators=(',', ':')) + '\n'
+    with open(path, 'a', encoding='utf-8') as fh:
+        fh.write(line)
+        fh.flush()
+        os.fsync(fh.fileno())
+    logger.critical(
+        'internal_state_shadow: gap incident sidecar appended code=%s '
+        'message_id=%s path=%s',
+        code, mid, dest,
+    )
 
 
 def write_proof_gap_sidecar(
@@ -237,71 +310,185 @@ def write_proof_gap_sidecar(
     failed_message_id: Optional[int],
     error_code: str,
 ) -> None:
-    """不依赖 health 表的持久 gap 事实（prepare-schema 前 / 表缺失时）。"""
-    if not isinstance(error_code, str) or not error_code.strip():
-        raise store.StoreError(f'error_code invalid: {error_code!r}')
-    mid = None
-    if failed_message_id is not None:
-        try:
-            mid = store.require_positive_message_id(
-                failed_message_id, field='failed_message_id',
-            )
-        except store.StoreError:
-            mid = None
-    dest = proof_gap_sidecar_path(db_path)
-    payload = {
-        'gap_detected': True,
-        'failed_message_id': mid,
-        'error_code': error_code.strip()[:64],
-        'failed_at': _now_beijing(),
-    }
-    path = Path(dest)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + '.tmp')
-    data = json.dumps(payload, ensure_ascii=False, separators=(',', ':'))
-    with open(tmp, 'w', encoding='utf-8') as fh:
-        fh.write(data)
-        fh.flush()
-        os.fsync(fh.fileno())
-    os.replace(str(tmp), str(path))
-    logger.critical(
-        'internal_state_shadow: proof gap sidecar written code=%s message_id=%s path=%s',
-        payload['error_code'], mid, dest,
+    """兼容别名：现为 append-only JSONL，不再 os.replace 单槽位。"""
+    append_gap_incident_sidecar(
+        db_path,
+        failed_message_id=failed_message_id,
+        error_code=error_code,
     )
 
 
-def read_proof_gap_sidecar(db_path: Optional[str] = None) -> Optional[dict]:
+def count_gap_sidecar_pending(db_path: Optional[str] = None) -> int:
     path = Path(proof_gap_sidecar_path(db_path))
-    if not path.is_file():
-        return None
-    try:
-        raw = json.loads(path.read_text(encoding='utf-8'))
-    except Exception as exc:  # noqa: BLE001
-        logger.critical(
-            'internal_state_shadow: proof gap sidecar unreadable: %s', exc,
-        )
-        return {
-            'gap_detected': True,
-            'failed_message_id': None,
-            'error_code': 'sidecar_unreadable',
-            'failed_at': None,
-        }
-    if not isinstance(raw, dict):
-        return {
-            'gap_detected': True,
-            'failed_message_id': None,
-            'error_code': 'sidecar_invalid',
-            'failed_at': None,
-        }
-    return raw
+    legacy = Path(proof_gap_sidecar_legacy_path(db_path))
+    n = 0
+    if path.is_file():
+        try:
+            n += sum(1 for line in path.read_text(encoding='utf-8').splitlines() if line.strip())
+        except Exception:
+            n += 1
+    if legacy.is_file():
+        n += 1
+    return n
+
+
+def read_proof_gap_sidecar(db_path: Optional[str] = None) -> Optional[dict]:
+    """兼容旧 API：返回最新一条 sidecar incident（若有）。"""
+    path = Path(proof_gap_sidecar_path(db_path))
+    legacy = Path(proof_gap_sidecar_legacy_path(db_path))
+    latest: Optional[dict] = None
+    if legacy.is_file():
+        try:
+            raw = json.loads(legacy.read_text(encoding='utf-8'))
+            if isinstance(raw, dict) and raw.get('gap_detected'):
+                latest = raw
+        except Exception:
+            latest = {
+                'gap_detected': True,
+                'failed_message_id': None,
+                'error_code': 'sidecar_unreadable',
+                'failed_at': None,
+            }
+    if path.is_file():
+        try:
+            for line in path.read_text(encoding='utf-8').splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    raw = json.loads(line)
+                except json.JSONDecodeError:
+                    latest = {
+                        'gap_detected': True,
+                        'failed_message_id': None,
+                        'error_code': 'sidecar_unreadable',
+                        'failed_at': None,
+                    }
+                    continue
+                if isinstance(raw, dict) and raw.get('gap_detected'):
+                    latest = raw
+        except Exception:
+            latest = {
+                'gap_detected': True,
+                'failed_message_id': None,
+                'error_code': 'sidecar_unreadable',
+                'failed_at': None,
+            }
+    return latest
 
 
 def clear_proof_gap_sidecar(db_path: Optional[str] = None) -> None:
-    path = Path(proof_gap_sidecar_path(db_path))
-    try:
-        path.unlink()
-    except FileNotFoundError:
-        pass
+    """仅在全部 incident 已 resolve 且无未迁入 sidecar 时由 ack 路径调用。"""
+    for suffix_path in (
+        proof_gap_sidecar_path(db_path),
+        proof_gap_sidecar_legacy_path(db_path),
+    ):
+        try:
+            Path(suffix_path).unlink()
+        except FileNotFoundError:
+            pass
+
+
+def gap_incidents_schema_ready(conn: sqlite3.Connection) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+        (GAP_INCIDENTS_TABLE,),
+    ).fetchone()
+    return row is not None
+
+
+def count_unresolved_gap_incidents(conn: sqlite3.Connection) -> int:
+    if not gap_incidents_schema_ready(conn):
+        return 0
+    row = conn.execute(
+        f'SELECT COUNT(*) FROM {GAP_INCIDENTS_TABLE} WHERE resolved_at IS NULL'
+    ).fetchone()
+    return int(row[0] if row else 0)
+
+
+def list_unresolved_gap_incidents(
+    conn: sqlite3.Connection, *, limit: int = 50,
+) -> list[dict]:
+    if not gap_incidents_schema_ready(conn):
+        return []
+    rows = conn.execute(
+        f"""
+        SELECT incident_id, message_id, error_code, detected_at,
+               resolved_at, resolution_reason
+        FROM {GAP_INCIDENTS_TABLE}
+        WHERE resolved_at IS NULL
+        ORDER BY incident_id ASC
+        LIMIT ?
+        """,
+        (max(1, int(limit)),),
+    ).fetchall()
+    out: list[dict] = []
+    for r in rows:
+        if isinstance(r, sqlite3.Row):
+            out.append(dict(r))
+        else:
+            out.append({
+                'incident_id': r[0],
+                'message_id': r[1],
+                'error_code': r[2],
+                'detected_at': r[3],
+                'resolved_at': r[4],
+                'resolution_reason': r[5],
+            })
+    return out
+
+
+def _refresh_proof_health_summary(conn: sqlite3.Connection) -> None:
+    """health 单行仅作摘要；真源是 incident ledger。"""
+    if conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+        (PROOF_HEALTH_TABLE,),
+    ).fetchone() is None:
+        return
+    if not gap_incidents_schema_ready(conn):
+        return
+    row = conn.execute(
+        f"""
+        SELECT message_id, error_code, detected_at
+        FROM {GAP_INCIDENTS_TABLE}
+        WHERE resolved_at IS NULL
+        ORDER BY incident_id DESC
+        LIMIT 1
+        """
+    ).fetchone()
+    if row is None:
+        conn.execute(
+            f"""
+            INSERT INTO {PROOF_HEALTH_TABLE}
+                (id, ready, gap_detected, failed_message_id, error_code, failed_at)
+            VALUES (1, 1, 0, NULL, NULL, NULL)
+            ON CONFLICT(id) DO UPDATE SET
+                ready=1,
+                gap_detected=0,
+                failed_message_id=NULL,
+                error_code=NULL,
+                failed_at=NULL
+            """
+        )
+        return
+    if isinstance(row, sqlite3.Row):
+        mid, code, at = row['message_id'], row['error_code'], row['detected_at']
+    else:
+        mid, code, at = row[0], row[1], row[2]
+    conn.execute(
+        f"""
+        INSERT INTO {PROOF_HEALTH_TABLE}
+            (id, ready, gap_detected, failed_message_id, error_code, failed_at)
+        VALUES (1, 0, 1, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+            ready=0,
+            gap_detected=1,
+            failed_message_id=excluded.failed_message_id,
+            error_code=excluded.error_code,
+            failed_at=excluded.failed_at
+        """,
+        (mid, code, at),
+    )
 
 
 def has_unresolved_proof_gap(
@@ -309,35 +496,124 @@ def has_unresolved_proof_gap(
     *,
     db_path: Optional[str] = None,
 ) -> bool:
-    """health 表 gap **或** sidecar 任一存在即视为未解决。"""
-    if read_proof_health(conn).gap_detected:
+    """任一 unresolved incident 或 sidecar 条目即视为未解决。"""
+    if count_unresolved_gap_incidents(conn) > 0:
         return True
     path = db_path or _conn_file_path(conn)
-    side = read_proof_gap_sidecar(path) if path else read_proof_gap_sidecar()
-    return bool(side and side.get('gap_detected'))
+    if count_gap_sidecar_pending(path) > 0:
+        return True
+    return bool(read_proof_health(conn).gap_detected)
 
 
 def migrate_proof_gap_sidecar(
     conn: sqlite3.Connection,
     *,
     db_path: Optional[str] = None,
-) -> bool:
-    """prepare-schema：把 sidecar 迁入 health，避免初始化洗白为 gap=false。"""
+) -> int:
+    """prepare-schema：把 JSONL/legacy sidecar 迁入 incident ledger。"""
     path = db_path or _conn_file_path(conn)
-    side = read_proof_gap_sidecar(path)
-    if not side or not side.get('gap_detected'):
-        return False
-    mark_proof_gap(
-        conn,
-        failed_message_id=side.get('failed_message_id'),
-        error_code=str(side.get('error_code') or 'sidecar_migrated'),
-        db_path=path,
-        write_sidecar_if_missing=False,
+    migrated = 0
+    # legacy single JSON
+    legacy = Path(proof_gap_sidecar_legacy_path(path))
+    if legacy.is_file():
+        try:
+            raw = json.loads(legacy.read_text(encoding='utf-8'))
+        except Exception as exc:  # noqa: BLE001
+            logger.critical(
+                'internal_state_shadow: legacy gap sidecar unreadable: %s', exc,
+            )
+            raw = {
+                'gap_detected': True,
+                'failed_message_id': None,
+                'error_code': 'sidecar_unreadable',
+            }
+        if isinstance(raw, dict) and raw.get('gap_detected'):
+            mark_proof_gap(
+                conn,
+                failed_message_id=raw.get('failed_message_id'),
+                error_code=str(raw.get('error_code') or 'sidecar_migrated'),
+                db_path=path,
+                write_sidecar_if_missing=False,
+            )
+            migrated += 1
+        try:
+            legacy.unlink()
+        except FileNotFoundError:
+            pass
+
+    jsonl = Path(proof_gap_sidecar_path(path))
+    if not jsonl.is_file():
+        return migrated
+    try:
+        lines = jsonl.read_text(encoding='utf-8').splitlines()
+    except Exception as exc:  # noqa: BLE001
+        logger.critical('internal_state_shadow: gap jsonl read failed: %s', exc)
+        return migrated
+    kept_bad: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            continue
+        try:
+            raw = json.loads(stripped)
+        except json.JSONDecodeError:
+            kept_bad.append(stripped)
+            continue
+        if not isinstance(raw, dict) or not raw.get('gap_detected'):
+            kept_bad.append(stripped)
+            continue
+        mark_proof_gap(
+            conn,
+            failed_message_id=raw.get('failed_message_id'),
+            error_code=str(raw.get('error_code') or 'sidecar_migrated'),
+            db_path=path,
+            write_sidecar_if_missing=False,
+        )
+        migrated += 1
+    if kept_bad:
+        # 坏行进入 quarantine，不静默删除
+        q = Path(str(jsonl) + '.quarantine')
+        with open(q, 'a', encoding='utf-8') as fh:
+            for bad in kept_bad:
+                fh.write(bad + '\n')
+                fh.flush()
+                os.fsync(fh.fileno())
+        logger.critical(
+            'internal_state_shadow: %s corrupt gap sidecar lines quarantined at %s',
+            len(kept_bad), q,
+        )
+    try:
+        jsonl.unlink()
+    except FileNotFoundError:
+        pass
+    return migrated
+
+
+def quarantine_legacy_outbox_sidecar(
+    db_path: Optional[str] = None,
+) -> Optional[str]:
+    """热路径已禁用 outbox sidecar；残留文件移入 quarantine，绝不静默投递。"""
+    src = Path(outbox_sidecar_path(db_path))
+    if not src.is_file():
+        return None
+    dest = Path(str(src) + '.quarantine')
+    os.replace(str(src), str(dest))
+    logger.critical(
+        'internal_state_shadow: legacy outbox sidecar quarantined at %s '
+        '(USER_EVENTS requires DB outbox; no hot-path sidecar)',
+        dest,
     )
-    if read_proof_health(conn).gap_detected:
-        clear_proof_gap_sidecar(path)
-        return True
-    return False
+    return str(dest)
+
+
+def _ensure_score_hash_column(conn: sqlite3.Connection) -> None:
+    cols = {
+        str(r[1]) for r in conn.execute(f'PRAGMA table_info({SCORE_APPLIED_TABLE})')
+    }
+    if 'score_hash' not in cols:
+        conn.execute(
+            f'ALTER TABLE {SCORE_APPLIED_TABLE} ADD COLUMN score_hash TEXT'
+        )
 
 
 def ensure_shadow_schema(
@@ -345,10 +621,9 @@ def ensure_shadow_schema(
     *,
     db_path: Optional[str] = None,
 ) -> None:
-    """internal_state_v3/events + proof ledger + outbox + gap ack。
+    """internal_state_v3/events + proof ledger + outbox + gap incidents。
 
     仅供 ``prepare-schema`` / 管理入口调用；**禁止**在评分事务内执行。
-    若存在 proof-gap sidecar，迁入 health（不得洗白为 gap=false）。
     """
     store.ensure_schema(conn)
     conn.execute(
@@ -357,10 +632,12 @@ def ensure_shadow_schema(
             message_id INTEGER PRIMARY KEY
                 CHECK (message_id > 0),
             applied_at TEXT NOT NULL,
-            source TEXT NOT NULL
+            source TEXT NOT NULL,
+            score_hash TEXT
         )
         """
     )
+    _ensure_score_hash_column(conn)
     conn.execute(
         f"""
         CREATE TABLE IF NOT EXISTS {PROOF_HEALTH_TABLE} (
@@ -388,6 +665,7 @@ def ensure_shadow_schema(
             event_key TEXT PRIMARY KEY,
             event_type TEXT NOT NULL,
             payload_json TEXT NOT NULL,
+            payload_hash TEXT NOT NULL,
             created_at TEXT NOT NULL,
             attempts INTEGER NOT NULL DEFAULT 0
                 CHECK (attempts >= 0),
@@ -396,10 +674,32 @@ def ensure_shadow_schema(
         )
         """
     )
+    # 旧 outbox 无 payload_hash 时补列
+    if outbox_schema_ready(conn):
+        cols = {
+            str(r[1]) for r in conn.execute(f'PRAGMA table_info({OUTBOX_TABLE})')
+        }
+        if 'payload_hash' not in cols:
+            conn.execute(
+                f'ALTER TABLE {OUTBOX_TABLE} ADD COLUMN payload_hash TEXT'
+            )
+    conn.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS {GAP_INCIDENTS_TABLE} (
+            incident_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            message_id INTEGER,
+            error_code TEXT NOT NULL,
+            detected_at TEXT NOT NULL,
+            resolved_at TEXT,
+            resolution_reason TEXT
+        )
+        """
+    )
     conn.execute(
         f"""
         CREATE TABLE IF NOT EXISTS {GAP_ACK_TABLE} (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
+            incident_id INTEGER,
             message_id INTEGER,
             reason TEXT NOT NULL,
             acked_at TEXT NOT NULL,
@@ -408,9 +708,16 @@ def ensure_shadow_schema(
         )
         """
     )
-    # sidecar → health（必须在 INSERT OR IGNORE 默认 gap=0 之后覆盖）
+    ack_cols = {
+        str(r[1]) for r in conn.execute(f'PRAGMA table_info({GAP_ACK_TABLE})')
+    }
+    if 'incident_id' not in ack_cols:
+        conn.execute(
+            f'ALTER TABLE {GAP_ACK_TABLE} ADD COLUMN incident_id INTEGER'
+        )
     migrate_proof_gap_sidecar(conn, db_path=db_path)
-    migrate_outbox_sidecar(conn, db_path=db_path)
+    quarantine_legacy_outbox_sidecar(db_path or _conn_file_path(conn))
+    _refresh_proof_health_summary(conn)
 
 
 def score_proof_schema_ready(conn: sqlite3.Connection) -> bool:
@@ -431,6 +738,19 @@ def outbox_schema_ready(conn: sqlite3.Connection) -> bool:
 
 
 def read_proof_health(conn: sqlite3.Connection) -> ProofHealth:
+    # 优先用 incident ledger 摘要
+    if gap_incidents_schema_ready(conn):
+        n = count_unresolved_gap_incidents(conn)
+        if n > 0:
+            latest = list_unresolved_gap_incidents(conn, limit=10)
+            last = latest[-1] if latest else {}
+            return ProofHealth(
+                ready=False,
+                gap_detected=True,
+                failed_message_id=last.get('message_id'),
+                error_code=last.get('error_code'),
+                failed_at=last.get('detected_at'),
+            )
     exists = conn.execute(
         "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
         (PROOF_HEALTH_TABLE,),
@@ -472,57 +792,44 @@ def mark_proof_gap(
     error_code: str,
     db_path: Optional[str] = None,
     write_sidecar_if_missing: bool = True,
-) -> None:
-    """持久化 proof gap；不含正文 / excerpt / Prompt。
+) -> Optional[int]:
+    """追加一条 gap incident；不得覆盖既有未解决缺口。
 
-    health 表存在时写入该表（可与权威 UPDATE 同事务）。
-    表缺失时写 sidecar（日志会轮转，sidecar 不会被 prepare-schema 洗白）。
+    incidents 表可写时 INSERT ledger 行。
+    表缺失时 append JSONL sidecar。
     """
     if not isinstance(error_code, str) or not error_code.strip():
         raise store.StoreError(f'error_code invalid: {error_code!r}')
-    mid = None
-    if failed_message_id is not None:
-        try:
-            mid = store.require_positive_message_id(
-                failed_message_id, field='failed_message_id',
-            )
-        except store.StoreError:
-            mid = None
+    mid = _normalize_gap_mid(failed_message_id)
     ts = _now_beijing()
     code = error_code.strip()[:64]
     path = db_path or _conn_file_path(conn)
-    if conn.execute(
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
-        (PROOF_HEALTH_TABLE,),
-    ).fetchone() is None:
+    if not gap_incidents_schema_ready(conn):
         logger.critical(
-            'internal_state_shadow: proof gap (no health table) '
+            'internal_state_shadow: proof gap (no incidents table) '
             'code=%s message_id=%s',
             code, mid,
         )
         if write_sidecar_if_missing and path:
-            write_proof_gap_sidecar(
+            append_gap_incident_sidecar(
                 path, failed_message_id=mid, error_code=code,
             )
-        return
-    conn.execute(
+        return None
+    cur = conn.execute(
         f"""
-        INSERT INTO {PROOF_HEALTH_TABLE}
-            (id, ready, gap_detected, failed_message_id, error_code, failed_at)
-        VALUES (1, 0, 1, ?, ?, ?)
-        ON CONFLICT(id) DO UPDATE SET
-            ready=0,
-            gap_detected=1,
-            failed_message_id=excluded.failed_message_id,
-            error_code=excluded.error_code,
-            failed_at=excluded.failed_at
+        INSERT INTO {GAP_INCIDENTS_TABLE}
+            (message_id, error_code, detected_at, resolved_at, resolution_reason)
+        VALUES (?, ?, ?, NULL, NULL)
         """,
         (mid, code, ts),
     )
+    incident_id = int(cur.lastrowid)
+    _refresh_proof_health_summary(conn)
     logger.critical(
-        'internal_state_shadow: proof gap marked code=%s message_id=%s',
-        code, mid,
+        'internal_state_shadow: proof gap incident=%s code=%s message_id=%s',
+        incident_id, code, mid,
     )
+    return incident_id
 
 
 def clear_proof_gap(
@@ -530,27 +837,29 @@ def clear_proof_gap(
     *,
     db_path: Optional[str] = None,
 ) -> None:
-    """内部清除；运维请用 ``ack_proof_gap``（带审计）。"""
-    if conn.execute(
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
-        (PROOF_HEALTH_TABLE,),
-    ).fetchone() is None:
+    """危险内部 API：仅清摘要。运维必须用 ``ack_proof_gap``。"""
+    _refresh_proof_health_summary(conn)
+    if count_unresolved_gap_incidents(conn) == 0 and count_gap_sidecar_pending(
+        db_path or _conn_file_path(conn)
+    ) == 0:
+        if conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+            (PROOF_HEALTH_TABLE,),
+        ).fetchone() is not None:
+            conn.execute(
+                f"""
+                INSERT INTO {PROOF_HEALTH_TABLE}
+                    (id, ready, gap_detected, failed_message_id, error_code, failed_at)
+                VALUES (1, 1, 0, NULL, NULL, NULL)
+                ON CONFLICT(id) DO UPDATE SET
+                    ready=1,
+                    gap_detected=0,
+                    failed_message_id=NULL,
+                    error_code=NULL,
+                    failed_at=NULL
+                """
+            )
         clear_proof_gap_sidecar(db_path or _conn_file_path(conn))
-        return
-    conn.execute(
-        f"""
-        INSERT INTO {PROOF_HEALTH_TABLE}
-            (id, ready, gap_detected, failed_message_id, error_code, failed_at)
-        VALUES (1, 1, 0, NULL, NULL, NULL)
-        ON CONFLICT(id) DO UPDATE SET
-            ready=1,
-            gap_detected=0,
-            failed_message_id=NULL,
-            error_code=NULL,
-            failed_at=NULL
-        """
-    )
-    clear_proof_gap_sidecar(db_path or _conn_file_path(conn))
 
 
 def ack_proof_gap(
@@ -559,61 +868,121 @@ def ack_proof_gap(
     message_id: int,
     reason: str,
     db_path: Optional[str] = None,
+    incident_id: Optional[int] = None,
 ) -> dict:
-    """受审计的 gap 确认清除；要求 message_id 与当前 failed_message_id 一致。"""
+    """受审计地解决指定 incident（或该 message_id 下全部未解决项）。
+
+    不得一键清除其它 message 的缺口。
+    """
     if not isinstance(reason, str) or not reason.strip():
         raise store.StoreError('ack reason required')
     mid = store.require_positive_message_id(message_id, field='message_id')
-    health = read_proof_health(conn)
-    side = read_proof_gap_sidecar(db_path or _conn_file_path(conn))
-    gap_present = health.gap_detected or bool(side and side.get('gap_detected'))
-    if not gap_present:
-        raise store.StoreError('no unresolved proof gap to ack')
-    expected = health.failed_message_id
-    if expected is None and side is not None:
-        try:
-            expected = (
-                int(side['failed_message_id'])
-                if side.get('failed_message_id') is not None
-                else None
+    if not gap_incidents_schema_ready(conn):
+        raise store.StoreError(
+            f'{GAP_INCIDENTS_TABLE} missing; run prepare-schema before ack-gap'
+        )
+    # 先迁入 sidecar，再 ack
+    migrate_proof_gap_sidecar(conn, db_path=db_path)
+    if incident_id is not None:
+        row = conn.execute(
+            f"""
+            SELECT incident_id, message_id, error_code
+            FROM {GAP_INCIDENTS_TABLE}
+            WHERE incident_id=? AND resolved_at IS NULL
+            """,
+            (int(incident_id),),
+        ).fetchone()
+        if row is None:
+            raise store.StoreError(
+                f'no unresolved incident_id={incident_id}'
             )
-        except (TypeError, ValueError):
-            expected = None
-    if expected is not None and int(expected) != int(mid):
-        raise store.StoreError(
-            f'ack message_id {mid} does not match failed_message_id {expected}'
-        )
-    if expected is None:
-        raise store.StoreError(
-            'gap has no failed_message_id; refuse untargeted ack'
-        )
-    prev_code = health.error_code
-    if prev_code is None and side is not None:
-        prev_code = side.get('error_code')
+        row_mid = row['message_id'] if isinstance(row, sqlite3.Row) else row[1]
+        if row_mid is not None and int(row_mid) != int(mid):
+            raise store.StoreError(
+                f'incident {incident_id} message_id {row_mid} != ack {mid}'
+            )
+        targets = [row]
+    else:
+        targets = conn.execute(
+            f"""
+            SELECT incident_id, message_id, error_code
+            FROM {GAP_INCIDENTS_TABLE}
+            WHERE resolved_at IS NULL AND message_id=?
+            ORDER BY incident_id ASC
+            """,
+            (mid,),
+        ).fetchall()
+        if not targets:
+            raise store.StoreError(
+                f'no unresolved gap incidents for message_id={mid}'
+            )
     ts = _now_beijing()
-    if conn.execute(
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
-        (GAP_ACK_TABLE,),
-    ).fetchone() is None:
-        raise store.StoreError(
-            f'{GAP_ACK_TABLE} missing; run prepare-schema before ack-gap'
+    reason_s = reason.strip()[:512]
+    resolved_ids = []
+    for row in targets:
+        if isinstance(row, sqlite3.Row):
+            iid, row_mid, code = row['incident_id'], row['message_id'], row['error_code']
+        else:
+            iid, row_mid, code = row[0], row[1], row[2]
+        conn.execute(
+            f"""
+            UPDATE {GAP_INCIDENTS_TABLE}
+            SET resolved_at=?, resolution_reason=?
+            WHERE incident_id=? AND resolved_at IS NULL
+            """,
+            (ts, reason_s, iid),
         )
-    conn.execute(
-        f"""
-        INSERT INTO {GAP_ACK_TABLE}
-            (message_id, reason, acked_at, previous_error_code,
-             previous_failed_message_id)
-        VALUES (?, ?, ?, ?, ?)
-        """,
-        (mid, reason.strip()[:512], ts, prev_code, expected),
-    )
-    clear_proof_gap(conn, db_path=db_path)
+        conn.execute(
+            f"""
+            INSERT INTO {GAP_ACK_TABLE}
+                (incident_id, message_id, reason, acked_at,
+                 previous_error_code, previous_failed_message_id)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (iid, mid, reason_s, ts, code, row_mid),
+        )
+        resolved_ids.append(int(iid))
+    _refresh_proof_health_summary(conn)
+    if count_unresolved_gap_incidents(conn) == 0:
+        clear_proof_gap_sidecar(db_path or _conn_file_path(conn))
     return {
         'acked': True,
         'message_id': mid,
-        'reason': reason.strip()[:512],
+        'incident_ids': resolved_ids,
+        'reason': reason_s,
         'acked_at': ts,
-        'previous_error_code': prev_code,
+        'remaining_unresolved': count_unresolved_gap_incidents(conn),
+    }
+
+
+def lookup_score_proof(
+    conn: sqlite3.Connection, message_id: int,
+) -> Optional[dict]:
+    mid = store.require_positive_message_id(message_id, field='message_id')
+    if not score_proof_schema_ready(conn):
+        return None
+    row = conn.execute(
+        f"""
+        SELECT message_id, applied_at, source, score_hash
+        FROM {SCORE_APPLIED_TABLE}
+        WHERE message_id=?
+        """,
+        (mid,),
+    ).fetchone()
+    if row is None:
+        return None
+    if isinstance(row, sqlite3.Row):
+        return {
+            'message_id': int(row['message_id']),
+            'applied_at': row['applied_at'],
+            'source': row['source'],
+            'score_hash': row['score_hash'],
+        }
+    return {
+        'message_id': int(row[0]),
+        'applied_at': row[1],
+        'source': row[2],
+        'score_hash': row[3] if len(row) > 3 else None,
     }
 
 
@@ -623,16 +992,17 @@ def record_score_proof_in_txn(
     *,
     applied_at: str,
     source: str,
-) -> None:
+    score_hash: str,
+) -> str:
     """在调用方事务内写入评分证明行；**不** COMMIT / ROLLBACK。
 
     安全门：
-      - 必须 ``conn.in_transaction``（``open_store`` 为 autocommit，
-        未 BEGIN 时单条 INSERT 会立刻提交，故强制拒绝）
-      - 严格幂等：同 message_id + 同 applied_at/source → no-op
-      - 同 message_id、不同内容 → ``StoreError``（禁止改写历史证据）
+      - 必须 ``conn.in_transaction``
+      - ``message_id`` 为强幂等键，辅以 ``score_hash``
+      - 同 message_id + 同 score_hash → 返回 ``duplicate``（整次应 no-op）
+      - 同 message_id、不同 score_hash → ``StoreError``
 
-    #117 必须与 ``UPDATE emotion_state`` 处于同一 ``BEGIN…COMMIT``。
+    返回 ``inserted`` / ``duplicate``。
     """
     if not conn.in_transaction:
         raise store.StoreError(
@@ -646,34 +1016,44 @@ def record_score_proof_in_txn(
     if not isinstance(source, str) or not source.strip() or len(source) > 64:
         raise store.StoreError(f'source must be a non-empty str <= 64: {source!r}')
     source_canon = source.strip()
+    if not isinstance(score_hash, str) or not score_hash.strip() or len(score_hash) > 128:
+        raise store.StoreError(f'score_hash invalid: {score_hash!r}')
+    hash_canon = score_hash.strip()
 
-    row = conn.execute(
-        f"""
-        SELECT applied_at, source FROM {SCORE_APPLIED_TABLE}
-        WHERE message_id=?
-        """,
-        (mid,),
-    ).fetchone()
-    if row is not None:
-        if isinstance(row, sqlite3.Row):
-            prev_at, prev_src = row['applied_at'], row['source']
-        else:
-            prev_at, prev_src = row[0], row[1]
-        if str(prev_at) == applied_canon and str(prev_src) == source_canon:
-            return
+    existing = lookup_score_proof(conn, mid)
+    if existing is not None:
+        prev_hash = existing.get('score_hash')
+        if prev_hash is not None and str(prev_hash) == hash_canon:
+            return 'duplicate'
+        # 旧行无 hash：仅当 applied_at+source 全同且仍无 hash 时，补写 hash 一次
+        if (
+            prev_hash in (None, '')
+            and str(existing.get('applied_at')) == applied_canon
+            and str(existing.get('source')) == source_canon
+        ):
+            conn.execute(
+                f"""
+                UPDATE {SCORE_APPLIED_TABLE}
+                SET score_hash=?
+                WHERE message_id=? AND (score_hash IS NULL OR score_hash='')
+                """,
+                (hash_canon, mid),
+            )
+            return 'duplicate'
         raise store.StoreError(
-            f'score proof conflict for message_id={mid}: '
-            f'existing=({prev_at!r}, {prev_src!r}) '
-            f'new=({applied_canon!r}, {source_canon!r})'
+            f'score proof payload conflict for message_id={mid}: '
+            f'existing_hash={prev_hash!r} new_hash={hash_canon!r}'
         )
 
     conn.execute(
         f"""
-        INSERT INTO {SCORE_APPLIED_TABLE} (message_id, applied_at, source)
-        VALUES (?, ?, ?)
+        INSERT INTO {SCORE_APPLIED_TABLE}
+            (message_id, applied_at, source, score_hash)
+        VALUES (?, ?, ?, ?)
         """,
-        (mid, applied_canon, source_canon),
+        (mid, applied_canon, source_canon, hash_canon),
     )
+    return 'inserted'
 
 
 def enqueue_outbox_in_txn(
@@ -682,8 +1062,12 @@ def enqueue_outbox_in_txn(
     event_key: str,
     event_type: str,
     payload: Mapping[str, Any],
-) -> None:
-    """权威写入同事务入队；**不** COMMIT。要求 ``conn.in_transaction``。"""
+) -> str:
+    """权威写入同事务入队；**不** COMMIT。要求 ``conn.in_transaction``。
+
+    同 key + 同 payload_hash → ``duplicate``；同 key 不同载荷 → 冲突。
+    USER_EVENTS 热路径禁止 JSONL sidecar；缺表即 StoreError（fail closed）。
+    """
     if not conn.in_transaction:
         raise store.StoreError(
             'enqueue_outbox_in_txn requires an active caller-owned transaction'
@@ -699,113 +1083,55 @@ def enqueue_outbox_in_txn(
     if not isinstance(payload, Mapping):
         raise store.StoreError('payload must be a mapping')
     key = event_key.strip()
-    body = json.dumps(dict(payload), ensure_ascii=False, separators=(',', ':'))
+    body = canonical_payload_json(payload)
+    phash = compute_payload_hash(payload)
     ts = _now_beijing()
-    # 同 key 已存在（含已投递）→ 保持首条载荷，避免改写历史
+    row = conn.execute(
+        f"""
+        SELECT payload_json, payload_hash FROM {OUTBOX_TABLE}
+        WHERE event_key=?
+        """,
+        (key,),
+    ).fetchone()
+    if row is not None:
+        if isinstance(row, sqlite3.Row):
+            prev_body, prev_hash = row['payload_json'], row['payload_hash']
+        else:
+            prev_body, prev_hash = row[0], row[1]
+        if prev_hash and str(prev_hash) == phash:
+            return 'duplicate'
+        # 旧行无 hash：按规范化 JSON 比较
+        try:
+            prev_obj = json.loads(prev_body)
+            if (
+                isinstance(prev_obj, dict)
+                and compute_payload_hash(prev_obj) == phash
+            ):
+                if not prev_hash:
+                    conn.execute(
+                        f"""
+                        UPDATE {OUTBOX_TABLE} SET payload_hash=?
+                        WHERE event_key=? AND (payload_hash IS NULL OR payload_hash='')
+                        """,
+                        (phash, key),
+                    )
+                return 'duplicate'
+        except Exception:
+            pass
+        raise store.StoreError(
+            f'outbox payload conflict for event_key={key}: '
+            f'existing_hash={prev_hash!r} new_hash={phash!r}'
+        )
     conn.execute(
         f"""
-        INSERT OR IGNORE INTO {OUTBOX_TABLE}
-            (event_key, event_type, payload_json, created_at,
+        INSERT INTO {OUTBOX_TABLE}
+            (event_key, event_type, payload_json, payload_hash, created_at,
              attempts, last_error, delivered_at)
-        VALUES (?, ?, ?, ?, 0, NULL, NULL)
+        VALUES (?, ?, ?, ?, ?, 0, NULL, NULL)
         """,
-        (key, event_type, body, ts),
+        (key, event_type, body, phash, ts),
     )
-
-
-def append_outbox_sidecar(
-    db_path: Optional[str],
-    *,
-    event_key: str,
-    event_type: str,
-    payload: Mapping[str, Any],
-) -> None:
-    """outbox 表不可用时的 durable 回退（JSONL）；prepare-schema / drain 迁入。"""
-    dest = outbox_sidecar_path(db_path)
-    path = Path(dest)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    row = {
-        'event_key': event_key,
-        'event_type': event_type,
-        'payload': dict(payload),
-        'created_at': _now_beijing(),
-    }
-    line = json.dumps(row, ensure_ascii=False, separators=(',', ':')) + '\n'
-    with open(path, 'a', encoding='utf-8') as fh:
-        fh.write(line)
-        fh.flush()
-        os.fsync(fh.fileno())
-    logger.critical(
-        'internal_state_shadow: outbox sidecar appended key=%s path=%s',
-        event_key, dest,
-    )
-
-
-def migrate_outbox_sidecar(
-    conn: sqlite3.Connection,
-    *,
-    db_path: Optional[str] = None,
-) -> int:
-    """把 JSONL sidecar 迁入 outbox 表；成功后删除 sidecar。"""
-    if not outbox_schema_ready(conn):
-        return 0
-    path = Path(outbox_sidecar_path(db_path or _conn_file_path(conn)))
-    if not path.is_file():
-        return 0
-    migrated = 0
-    try:
-        lines = path.read_text(encoding='utf-8').splitlines()
-    except Exception as exc:  # noqa: BLE001
-        logger.critical('internal_state_shadow: outbox sidecar read failed: %s', exc)
-        return 0
-    own_txn = not conn.in_transaction
-    if own_txn:
-        conn.execute('BEGIN IMMEDIATE')
-    try:
-        for line in lines:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                row = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if not isinstance(row, dict):
-                continue
-            key = row.get('event_key')
-            et = row.get('event_type')
-            payload = row.get('payload')
-            if not key or et not in (EVENT_TYPE_USER_RULE, EVENT_TYPE_USER_SCORED):
-                continue
-            if not isinstance(payload, Mapping):
-                continue
-            created = row.get('created_at') or _now_beijing()
-            body = json.dumps(dict(payload), ensure_ascii=False, separators=(',', ':'))
-            cur = conn.execute(
-                f"""
-                INSERT OR IGNORE INTO {OUTBOX_TABLE}
-                    (event_key, event_type, payload_json, created_at,
-                     attempts, last_error, delivered_at)
-                VALUES (?, ?, ?, ?, 0, NULL, NULL)
-                """,
-                (str(key), str(et), body, str(created)[:19]),
-            )
-            if cur.rowcount:
-                migrated += 1
-        if own_txn:
-            conn.execute('COMMIT')
-    except Exception:
-        if own_txn:
-            try:
-                conn.execute('ROLLBACK')
-            except Exception:
-                pass
-        raise
-    try:
-        path.unlink()
-    except FileNotFoundError:
-        pass
-    return migrated
+    return 'inserted'
 
 
 def enqueue_user_rule_in_txn(
@@ -817,9 +1143,16 @@ def enqueue_user_rule_in_txn(
     previous_user_at: Optional[str],
     environ: Optional[Mapping[str, str]] = None,
 ) -> bool:
-    """与 chat_messages INSERT 同事务写入 user_rule outbox。"""
+    """与 chat_messages INSERT 同事务写入 user_rule outbox。
+
+    缺 outbox 表时抛 StoreError（调用方应记 outbox_capture_gap，不得 sidecar）。
+    """
     if not is_user_events_enabled(environ=environ):
         return False
+    if not outbox_schema_ready(conn):
+        raise store.StoreError(
+            f'{OUTBOX_TABLE} missing; USER_EVENTS fail-closed without sidecar'
+        )
     mid = store.require_positive_message_id(message_id, field='message_id')
     enqueue_outbox_in_txn(
         conn,
@@ -843,9 +1176,13 @@ def enqueue_user_scored_in_txn(
     scored_at: str,
     environ: Optional[Mapping[str, str]] = None,
 ) -> bool:
-    """与 emotion UPDATE + proof 同事务写入 user_scored outbox（含完整冻结 scores）。"""
+    """与 emotion UPDATE + proof 同事务写入 user_scored outbox。"""
     if not is_user_events_enabled(environ=environ):
         return False
+    if not outbox_schema_ready(conn):
+        raise store.StoreError(
+            f'{OUTBOX_TABLE} missing; USER_EVENTS fail-closed without sidecar'
+        )
     mid = store.require_positive_message_id(message_id, field='message_id')
     if not isinstance(scores, Mapping):
         raise store.StoreError('scores must be a mapping')
@@ -928,7 +1265,7 @@ def drain_shadow_outbox(
     conn = None
     try:
         conn = open_shadow_connection(path)
-        migrate_outbox_sidecar(conn, db_path=path)
+        quarantine_legacy_outbox_sidecar(path)
         if not outbox_schema_ready(conn):
             summary['failed'] = 1
             summary['error'] = f'{OUTBOX_TABLE} missing'
@@ -1388,6 +1725,8 @@ def get_shadow_health(
             watermark_lag=None,
             outbox_pending=None,
             outbox_schema_ready=None,
+            gap_incidents_unresolved=None,
+            gap_sidecar_pending=None,
         )
 
     conn = None
@@ -1402,10 +1741,9 @@ def get_shadow_health(
             _bootstrap_provenance_ok(state, event)
             if structural else False
         )
-        health = read_proof_health(conn)
-        gap = health.gap_detected or bool(
-            (read_proof_gap_sidecar(path) or {}).get('gap_detected')
-        )
+        gap = has_unresolved_proof_gap(conn, db_path=path)
+        incidents_n = count_unresolved_gap_incidents(conn)
+        sidecar_n = count_gap_sidecar_pending(path)
         proof_max = None
         if score_proof_schema_ready(conn):
             try:
@@ -1421,8 +1759,9 @@ def get_shadow_health(
         elif proof_max is not None and last_scored is None:
             lag = True
         pending = count_pending_outbox(conn) if outbox_schema_ready(conn) else None
-        # proof 超前且无 pending outbox 可解释时，标红 last_status
-        if lag and (pending or 0) == 0 and status not in ('proof_gap',):
+        if gap and status not in ('proof_gap',):
+            status = 'proof_gap'
+        elif lag and (pending or 0) == 0 and status not in ('proof_gap',):
             status = 'watermark_lag'
         elif pending and pending > 0 and status not in ('proof_gap', 'watermark_lag'):
             status = 'outbox_pending'
@@ -1446,6 +1785,8 @@ def get_shadow_health(
             watermark_lag=lag,
             outbox_pending=pending,
             outbox_schema_ready=outbox_schema_ready(conn),
+            gap_incidents_unresolved=incidents_n,
+            gap_sidecar_pending=sidecar_n,
         )
     except Exception as exc:  # noqa: BLE001
         _record_error(f'get_shadow_health: {exc}')
@@ -1467,6 +1808,8 @@ def get_shadow_health(
             watermark_lag=None,
             outbox_pending=None,
             outbox_schema_ready=None,
+            gap_incidents_unresolved=None,
+            gap_sidecar_pending=None,
         )
     finally:
         if conn is not None:
@@ -2037,6 +2380,7 @@ __all__ = [
     'EVENT_TYPE_USER_RULE',
     'EVENT_TYPE_USER_SCORED',
     'GAP_ACK_TABLE',
+    'GAP_INCIDENTS_TABLE',
     'OUTBOX_TABLE',
     'PRODUCTION_BOOTSTRAP_SOURCE_ID',
     'PROOF_HEALTH_TABLE',
@@ -2051,12 +2395,15 @@ __all__ = [
     'ShadowHealth',
     'ShadowResult',
     'ack_proof_gap',
-    'append_outbox_sidecar',
+    'append_gap_incident_sidecar',
     'apply_outcome_shadow',
     'capture_bootstrap_bundle',
     'clear_proof_gap',
     'clear_proof_gap_sidecar',
+    'compute_score_hash',
+    'count_gap_sidecar_pending',
     'count_pending_outbox',
+    'count_unresolved_gap_incidents',
     'drain_shadow_outbox',
     'drain_shadow_outbox_best_effort',
     'emit_user_rule_if_enabled',
@@ -2072,9 +2419,10 @@ __all__ = [
     'is_score_proof_enabled',
     'is_shadow_enabled',
     'is_user_events_enabled',
+    'list_unresolved_gap_incidents',
+    'lookup_score_proof',
     'mark_proof_gap',
     'mark_proof_gap_standalone',
-    'migrate_outbox_sidecar',
     'migrate_proof_gap_sidecar',
     'observe_scored_shadow',
     'observe_user_message_shadow',
@@ -2082,6 +2430,7 @@ __all__ = [
     'outbox_schema_ready',
     'outbox_sidecar_path',
     'proof_gap_sidecar_path',
+    'quarantine_legacy_outbox_sidecar',
     'read_proof_gap_sidecar',
     'read_proof_health',
     'record_score_proof_in_txn',
