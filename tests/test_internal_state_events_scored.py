@@ -73,7 +73,8 @@ class ScoredBase(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.db_path = str(Path(self.tmp.name) / 'scored.db')
         self.conn = store.open_store(self.db_path)
-        store.bootstrap_from_snapshot(self.conn, _snapshot())
+        store.bootstrap_from_snapshot(
+            self.conn, _snapshot(), last_scored_message_id=1)
 
     def tearDown(self):
         self.conn.close()

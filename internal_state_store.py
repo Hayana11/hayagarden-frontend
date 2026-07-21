@@ -100,6 +100,19 @@ class StoreError(RuntimeError):
     pass
 
 
+# SQLite INTEGER 有符号 64 位上限；message_id 契约与 events 模块对齐
+_SQLITE_MAX_S64 = 2**63 - 1
+
+
+def require_positive_message_id(value: Any, *, field: str = 'message_id') -> int:
+    """正整数 message_id；禁止 bool / 浮点 / 字符串静默转换。"""
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise StoreError(f'{field} must be a positive integer: {value!r}')
+    if value <= 0 or value > _SQLITE_MAX_S64:
+        raise StoreError(f'{field} out of SQLite integer range: {value!r}')
+    return value
+
+
 def _now_beijing() -> str:
     return (datetime.datetime.utcnow() + datetime.timedelta(hours=8)).strftime(
         '%Y-%m-%d %H:%M:%S'
@@ -597,6 +610,8 @@ def bootstrap_from_snapshot(
     conn: sqlite3.Connection,
     snapshot: Any,
     *,
+    last_scored_message_id: int,
+    last_scored_message_id_source: str = 'explicit_argument',
     event_key: str = 'bootstrap:initial',
     source_id: Optional[Any] = 'phase0_snapshot',
 ) -> ApplyResult:
@@ -608,12 +623,29 @@ def bootstrap_from_snapshot(
     旧来源时间保留在 bootstrap event payload 的
     ``legacy_source_timestamps`` 中。
 
+    ``last_scored_message_id`` **必填**正整数：禁止 None / 0 / 猜测。
+    来源说明写入 payload（不含消息正文 / 评分原文 / Prompt）。
+
     幂等与 ``apply_state_update`` 一致：同 key 仅当 type/source/payload
     语义相同才算 duplicate，否则 ``idempotency_conflict``。
 
     若状态行已存在但缺少 bootstrap 事件：fail closed
     （``bootstrap_inconsistent``），绝不伪造 provenance。
     """
+    watermark = require_positive_message_id(
+        last_scored_message_id, field='last_scored_message_id',
+    )
+    if not isinstance(last_scored_message_id_source, str):
+        raise StoreError(
+            'last_scored_message_id_source must be a str: '
+            f'{last_scored_message_id_source!r}'
+        )
+    source_note = last_scored_message_id_source.strip()
+    if not source_note or len(source_note) > 128:
+        raise StoreError(
+            'last_scored_message_id_source must be non-empty and <= 128 chars'
+        )
+
     _require_clean_write_connection(conn)
     ensure_schema(conn)
     # ensure_schema 可能经由 executescript 提交 DDL；确认仍无挂起事务
@@ -661,7 +693,7 @@ def bootstrap_from_snapshot(
         'stress': _clamp01(_g(drives, 'stress'), 0.10, field='stress'),
         'fatigue': _clamp01(_g(drives, 'fatigue'), 0.20, field='fatigue'),
         'drives_updated_at': observed_at,
-        'last_scored_message_id': None,
+        'last_scored_message_id': watermark,
         'state_version': 0,
         'updated_at': observed_at,
     }
@@ -670,6 +702,8 @@ def bootstrap_from_snapshot(
         'source': 'bootstrap_from_snapshot',
         'observed_at': observed_at,
         'legacy_source_timestamps': legacy_ts,
+        'last_scored_message_id': watermark,
+        'last_scored_message_id_source': source_note,
         'seed': seed,
     }
     p_json = _canonical_payload_json(payload)
@@ -789,4 +823,5 @@ __all__ = [
     'apply_conditional_state_update',
     'apply_state_update',
     'bootstrap_from_snapshot',
+    'require_positive_message_id',
 ]
