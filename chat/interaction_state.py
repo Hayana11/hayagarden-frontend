@@ -80,15 +80,16 @@ def touch_user_interaction(get_db_fn: Optional[Callable] = None) -> None:
         _LOG.warning('touch drive_engine failed: %s', exc)
 
 
-def read_interaction_clock(
-    get_db_fn: Callable,
+def read_interaction_clock_from_conn(
+    conn,
     now: Optional[datetime.datetime] = None,
 ) -> InteractionClock:
-    """Read the shared interaction clock. Never raises; fail closed on errors."""
+    """在调用方已打开的连接上读时钟；不关闭连接。
+
+    供 Shadow bootstrap 同事务采集使用。永不抛出；失败 fail closed。
+    """
     now = now or _now_beijing()
-    conn = None
     try:
-        conn = get_db_fn()
         last_user = conn.execute(
             "SELECT created_at FROM chat_messages "
             f"WHERE {USER_AUTHOR_SQL} ORDER BY id DESC LIMIT 1"
@@ -98,7 +99,7 @@ def read_interaction_clock(
             "ORDER BY id DESC LIMIT 1"
         ).fetchone()
     except Exception as exc:
-        _LOG.warning('read_interaction_clock db error: %s', exc)
+        _LOG.warning('read_interaction_clock_from_conn db error: %s', exc)
         return InteractionClock(
             last_user_at=None,
             last_wake_message_at=None,
@@ -107,12 +108,6 @@ def read_interaction_clock(
             reliable=False,
             reason='clock_unreadable',
         )
-    finally:
-        if conn is not None:
-            try:
-                conn.close()
-            except Exception:
-                pass
 
     user_raw = None
     if last_user is not None:
@@ -125,7 +120,6 @@ def read_interaction_clock(
     last_wake_at = _parse_dt(wake_raw)
 
     if last_user_at is None:
-        # No reliable user message timestamp → fail closed for Wake.
         return InteractionClock(
             last_user_at=None,
             last_wake_message_at=last_wake_at,
@@ -149,6 +143,33 @@ def read_interaction_clock(
         reliable=True,
         reason='ok',
     )
+
+
+def read_interaction_clock(
+    get_db_fn: Callable,
+    now: Optional[datetime.datetime] = None,
+) -> InteractionClock:
+    """Read the shared interaction clock. Never raises; fail closed on errors."""
+    conn = None
+    try:
+        conn = get_db_fn()
+        return read_interaction_clock_from_conn(conn, now=now)
+    except Exception as exc:
+        _LOG.warning('read_interaction_clock db error: %s', exc)
+        return InteractionClock(
+            last_user_at=None,
+            last_wake_message_at=None,
+            user_idle_hours=None,
+            effective_idle_hours=None,
+            reliable=False,
+            reason='clock_unreadable',
+        )
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
 
 def wake_guard_reason(

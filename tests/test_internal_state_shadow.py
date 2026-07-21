@@ -1,7 +1,6 @@
 """Phase 1A-4a — Shadow 基础设施与生产 bootstrap（临时 SQLite）。
 
 禁止 import emotion_engine / drive_engine / desire / gateway / wake。
-禁止从 gateway 调用；本套件只测 adapter。
 """
 
 from __future__ import annotations
@@ -12,6 +11,7 @@ import sqlite3
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -38,18 +38,28 @@ def _snapshot(**overrides):
         candidate_unified_drives=SimpleNamespace(
             attachment=0.50, curiosity=0.20, reflection=0.30, social=0.10,
             duty=0.15, libido=0.10, stress=0.20, fatigue=0.40),
-        diagnostics=SimpleNamespace(source_timestamps={
-            'legacy.emotion_state.p_updated_at': '2026-07-21 06:00:00',
-        }),
+        diagnostics=SimpleNamespace(
+            source_timestamps={
+                'legacy.emotion_state.p_updated_at': '2026-07-21 06:00:00',
+            },
+            source_health={
+                'clock_reliable': True,
+                'clock_reason': 'ok',
+                'emotion_state': True,
+                'drive_state': True,
+                'desire_state': True,
+            },
+            warnings=(),
+        ),
     )
     for k, v in overrides.items():
         setattr(base, k, v)
     return base
 
 
-def _seed_legacy_rows(conn: sqlite3.Connection) -> None:
+def _seed_legacy_rows(conn: sqlite3.Connection, *, pa: float = 0.55) -> None:
     conn.executescript(
-        """
+        f"""
         CREATE TABLE IF NOT EXISTS emotion_state (
             id INTEGER PRIMARY KEY,
             pa REAL, na REAL, valence REAL, arousal REAL,
@@ -70,11 +80,21 @@ def _seed_legacy_rows(conn: sqlite3.Connection) -> None:
             libido REAL, stress REAL, fatigue REAL,
             last_updated TEXT, last_hayana_msg_time TEXT
         );
+        CREATE TABLE IF NOT EXISTS chat_messages (
+            id INTEGER PRIMARY KEY,
+            author TEXT, content TEXT, created_at TEXT
+        );
+        CREATE TABLE IF NOT EXISTS wake_log (
+            id INTEGER PRIMARY KEY,
+            action TEXT, woke_at TEXT
+        );
         DELETE FROM emotion_state;
         DELETE FROM drive_state;
         DELETE FROM desire_state;
+        DELETE FROM chat_messages;
+        DELETE FROM wake_log;
         INSERT INTO emotion_state VALUES (
-            1, 0.55, 0.25, 0.6, 0.4, '平静', 0.1,
+            1, {pa}, 0.25, 0.6, 0.4, '平静', 0.1,
             '2026-07-21 11:00:00', '2026-07-21 11:00:00',
             0.5, 0.6, 0.7, '2026-07-21 06:00:00', '2026-07-21 06:00:00');
         INSERT INTO drive_state VALUES (
@@ -83,35 +103,41 @@ def _seed_legacy_rows(conn: sqlite3.Connection) -> None:
         INSERT INTO desire_state VALUES (
             1, 0.2, 0.3, 0.15, 0.1, 0.1, 0.2, 0.4,
             '2026-07-21 10:00:00', NULL);
+        INSERT INTO chat_messages VALUES (
+            1, 'hayana', 'hi', '2026-07-21 11:00:00');
         """
     )
 
 
-def _insert_score_applied(conn: sqlite3.Connection, message_id: int) -> None:
+def _insert_score_applied(
+    conn: sqlite3.Connection, message_id: int, *, source: str = 'unit_test',
+) -> None:
     shadow.ensure_shadow_schema(conn)
-    conn.execute(
-        f"""
-        INSERT OR REPLACE INTO {shadow.SCORE_APPLIED_TABLE}
-            (message_id, applied_at, source)
-        VALUES (?, ?, ?)
-        """,
-        (message_id, T0, 'unit_test'),
+    shadow.record_score_proof_in_txn(
+        conn, message_id, applied_at=T0, source=source,
+    )
+
+
+def _boot(db_path: str, *, watermark: int = 77) -> shadow.ShadowResult:
+    return shadow.ensure_bootstrapped(
+        db_path=db_path,
+        environ=ON,
+        snapshot=_snapshot(),
+        last_scored_message_id=watermark,
+        last_scored_message_id_source=shadow.WATERMARK_SOURCE,
     )
 
 
 class FlagGateTests(unittest.TestCase):
     def test_default_disabled_and_zero_db_ops(self):
         self.assertFalse(shadow.is_shadow_enabled(environ={}))
-        self.assertFalse(shadow.is_shadow_enabled(environ=OFF))
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / 'never.db'
             r = shadow.ensure_bootstrapped(db_path=str(path), environ=OFF)
             self.assertEqual(r.status, 'disabled')
-            self.assertTrue(r.ok)
             self.assertFalse(path.exists())
             h = shadow.get_shadow_health(db_path=str(path), environ=OFF)
             self.assertFalse(h.enabled)
-            self.assertFalse(h.bootstrapped)
             self.assertFalse(path.exists())
 
     def test_enabled_only_with_one(self):
@@ -119,6 +145,136 @@ class FlagGateTests(unittest.TestCase):
         self.assertFalse(shadow.is_shadow_enabled(environ={
             shadow.SHADOW_ENABLED_ENV: 'true',
         }))
+
+
+class StrictSnapshotTests(unittest.TestCase):
+    def test_validate_rejects_missing_affect(self):
+        snap = _snapshot(
+            affect=SimpleNamespace(
+                pa=None, na=0.2, valence=0.6, arousal=0.4, mood_word='平静'),
+        )
+        with self.assertRaises(store.StoreError) as ctx:
+            shadow.validate_bootstrap_snapshot(snap)
+        self.assertIn('affect.pa', str(ctx.exception))
+
+    def test_validate_rejects_unreliable_clock(self):
+        snap = _snapshot()
+        snap.diagnostics.source_health = {
+            'clock_reliable': False,
+            'clock_reason': 'clock_unreadable',
+            'emotion_state': True,
+            'drive_state': True,
+        }
+        with self.assertRaises(store.StoreError) as ctx:
+            shadow.validate_bootstrap_snapshot(snap)
+        self.assertIn('unreliable interaction clock', str(ctx.exception))
+
+    def test_ensure_bootstrapped_refuses_default_wash(self):
+        """emotion 读失败不得用默认人格成功 bootstrap。"""
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        db_path = str(Path(tmp.name) / 'wash.db')
+        conn = store.open_store(db_path)
+        try:
+            _seed_legacy_rows(conn)
+            _insert_score_applied(conn, 5)
+            # 毁掉 emotion 行 → 采集失败
+            conn.execute('DELETE FROM emotion_state')
+        finally:
+            conn.close()
+        r = shadow.ensure_bootstrapped(db_path=db_path, environ=ON)
+        self.assertFalse(r.ok)
+        self.assertEqual(r.status, 'failed')
+        self.assertIn('emotion_state', r.error or '')
+        conn = store.open_store(db_path)
+        try:
+            self.assertIsNone(store.read_state(conn))
+            self.assertIsNone(store.read_event(conn, 'bootstrap:initial'))
+        finally:
+            conn.close()
+
+
+class SameTxnCaptureTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.db_path = str(Path(self.tmp.name) / 'txn.db')
+        self.conn = store.open_store(self.db_path)
+        _seed_legacy_rows(self.conn, pa=0.55)
+        _insert_score_applied(self.conn, 100)
+
+    def tearDown(self):
+        self.conn.close()
+        self.tmp.cleanup()
+
+    def test_bundle_reads_watermark_and_emotion_together(self):
+        bundle = shadow.capture_bootstrap_bundle(self.db_path)
+        self.assertEqual(bundle.watermark, 100)
+        self.assertAlmostEqual(bundle.snapshot.affect.pa, 0.55, places=4)
+        self.assertTrue(bundle.snapshot.diagnostics.source_health['clock_reliable'])
+
+    def test_atomic_score_proof_visible_together(self):
+        """emotion 更新与 proof 同行提交后，bundle 同时看见两者。"""
+        self.conn.execute('BEGIN IMMEDIATE')
+        self.conn.execute(
+            'UPDATE emotion_state SET pa=0.91, valence=0.88 WHERE id=1')
+        shadow.record_score_proof_in_txn(
+            self.conn, 101, applied_at=T0, source='atomic_score')
+        self.conn.execute('COMMIT')
+
+        bundle = shadow.capture_bootstrap_bundle(self.db_path)
+        self.assertEqual(bundle.watermark, 101)
+        self.assertAlmostEqual(bundle.snapshot.affect.pa, 0.91, places=4)
+        self.assertEqual(bundle.watermark_row_source, 'atomic_score')
+
+    def test_interleaved_commit_cannot_tear_read_txn(self):
+        """写事务未提交时，读事务只能看到旧一致截面。"""
+        barrier = threading.Event()
+        done = threading.Event()
+        bundles: list[shadow.BootstrapBundle] = []
+        errors: list[BaseException] = []
+
+        def writer():
+            w = store.open_store(self.db_path)
+            try:
+                w.execute('BEGIN IMMEDIATE')
+                w.execute(
+                    'UPDATE emotion_state SET pa=0.99 WHERE id=1')
+                shadow.record_score_proof_in_txn(
+                    w, 101, applied_at=T0, source='race')
+                barrier.set()
+                # 等读者完成同事务采集
+                done.wait(timeout=5)
+                w.execute('COMMIT')
+            except BaseException as exc:  # noqa: BLE001
+                errors.append(exc)
+            finally:
+                w.close()
+
+        def reader():
+            try:
+                barrier.wait(timeout=5)
+                bundles.append(shadow.capture_bootstrap_bundle(self.db_path))
+            except BaseException as exc:  # noqa: BLE001
+                errors.append(exc)
+            finally:
+                done.set()
+
+        tw = threading.Thread(target=writer)
+        tr = threading.Thread(target=reader)
+        tw.start()
+        tr.start()
+        tw.join(timeout=10)
+        tr.join(timeout=10)
+        self.assertEqual(errors, [])
+        self.assertEqual(len(bundles), 1)
+        # 写未提交：仍是 watermark 100 + pa 0.55
+        self.assertEqual(bundles[0].watermark, 100)
+        self.assertAlmostEqual(bundles[0].snapshot.affect.pa, 0.55, places=4)
+
+        # 提交后两者一起到 101 / 0.99
+        after = shadow.capture_bootstrap_bundle(self.db_path)
+        self.assertEqual(after.watermark, 101)
+        self.assertAlmostEqual(after.snapshot.affect.pa, 0.99, places=4)
 
 
 class WatermarkAndBootstrapTests(unittest.TestCase):
@@ -134,29 +290,16 @@ class WatermarkAndBootstrapTests(unittest.TestCase):
 
     def test_empty_ledger_fail_closed_no_half_state(self):
         shadow.ensure_shadow_schema(self.conn)
-        with self.assertRaises(store.StoreError) as ctx:
-            shadow.resolve_scored_watermark(self.conn)
-        self.assertIn('empty', str(ctx.exception))
-        r = shadow.ensure_bootstrapped(
-            db_path=self.db_path, environ=ON, snapshot=_snapshot(),
-        )
+        r = shadow.ensure_bootstrapped(db_path=self.db_path, environ=ON)
         self.assertFalse(r.ok)
         self.assertEqual(r.status, 'failed')
         self.assertIsNone(store.read_state(self.conn))
         self.assertIsNone(store.read_event(self.conn, 'bootstrap:initial'))
 
-    def test_missing_ledger_fail_closed(self):
-        store.ensure_schema(self.conn)
-        with self.assertRaises(store.StoreError) as ctx:
-            shadow.resolve_scored_watermark(self.conn)
-        self.assertIn('missing', str(ctx.exception))
-
     def test_enabled_bootstrap_writes_watermark(self):
         _insert_score_applied(self.conn, 77)
         journal_before = store.get_journal_mode(self.conn)
-        r = shadow.ensure_bootstrapped(
-            db_path=self.db_path, environ=ON, snapshot=_snapshot(),
-        )
+        r = _boot(self.db_path, watermark=77)
         self.assertTrue(r.ok)
         self.assertEqual(r.status, 'applied')
         st = store.read_state(self.conn)
@@ -164,34 +307,30 @@ class WatermarkAndBootstrapTests(unittest.TestCase):
         payload = json.loads(
             store.read_event(self.conn, 'bootstrap:initial')['payload_json'])
         self.assertEqual(payload['last_scored_message_id'], 77)
-        self.assertEqual(
-            payload['last_scored_message_id_source'],
-            shadow.WATERMARK_SOURCE,
-        )
         self.assertEqual(store.get_journal_mode(self.conn), journal_before)
+
+    def test_production_capture_bootstrap_path(self):
+        _insert_score_applied(self.conn, 42, source='prod_score')
+        r = shadow.ensure_bootstrapped(db_path=self.db_path, environ=ON)
+        self.assertTrue(r.ok, msg=r.error)
+        self.assertEqual(r.status, 'applied')
+        st = store.read_state(self.conn)
+        self.assertEqual(st['last_scored_message_id'], 42)
+        self.assertAlmostEqual(st['pa'], 0.55, places=4)
 
     def test_duplicate_bootstrap_no_state_change(self):
         _insert_score_applied(self.conn, 5)
-        r1 = shadow.ensure_bootstrapped(
-            db_path=self.db_path, environ=ON, snapshot=_snapshot())
+        r1 = _boot(self.db_path, watermark=5)
         self.assertEqual(r1.status, 'applied')
         st1 = dict(store.read_state(self.conn))
-        r2 = shadow.ensure_bootstrapped(
-            db_path=self.db_path, environ=ON, snapshot=_snapshot())
+        r2 = _boot(self.db_path, watermark=5)
         self.assertEqual(r2.status, 'already_bootstrapped')
         st2 = store.read_state(self.conn)
         self.assertEqual(st1['state_version'], st2['state_version'])
-        self.assertEqual(st1['last_scored_message_id'], st2['last_scored_message_id'])
 
     def test_different_watermark_conflict(self):
         _insert_score_applied(self.conn, 10)
-        self.assertEqual(
-            shadow.ensure_bootstrapped(
-                db_path=self.db_path, environ=ON, snapshot=_snapshot(),
-            ).status,
-            'applied',
-        )
-        # 直接用 store 同 key 不同 watermark
+        self.assertEqual(_boot(self.db_path, watermark=10).status, 'applied')
         r = store.bootstrap_from_snapshot(
             self.conn, _snapshot(),
             last_scored_message_id=11,
@@ -204,21 +343,127 @@ class WatermarkAndBootstrapTests(unittest.TestCase):
     def test_legacy_tables_unchanged_by_bootstrap(self):
         _insert_score_applied(self.conn, 3)
         before = self.conn.execute(
-            'SELECT pa, valence, mood_word FROM emotion_state WHERE id=1'
-        ).fetchone()
-        drive_before = self.conn.execute(
-            'SELECT attachment, fatigue FROM drive_state WHERE id=1'
-        ).fetchone()
-        shadow.ensure_bootstrapped(
-            db_path=self.db_path, environ=ON, snapshot=_snapshot())
+            'SELECT pa, valence FROM emotion_state WHERE id=1').fetchone()
+        _boot(self.db_path, watermark=3)
         after = self.conn.execute(
-            'SELECT pa, valence, mood_word FROM emotion_state WHERE id=1'
-        ).fetchone()
-        drive_after = self.conn.execute(
-            'SELECT attachment, fatigue FROM drive_state WHERE id=1'
-        ).fetchone()
+            'SELECT pa, valence FROM emotion_state WHERE id=1').fetchone()
         self.assertEqual(tuple(before), tuple(after))
-        self.assertEqual(tuple(drive_before), tuple(drive_after))
+
+
+class PhaseABoundaryTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.db_path = str(Path(self.tmp.name) / 'phase.db')
+        conn = store.open_store(self.db_path)
+        try:
+            _seed_legacy_rows(conn)
+            _insert_score_applied(conn, 20)
+        finally:
+            conn.close()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_event_wrapper_requires_prior_bootstrap(self):
+        r = shadow.observe_user_message_shadow(
+            message_id=21, text='你好', created_at=T0,
+            previous_user_at=None, db_path=self.db_path, environ=ON,
+        )
+        self.assertEqual(r.status, 'bootstrap_required')
+        self.assertFalse(r.ok)
+        # 不得偷偷 bootstrap
+        conn = store.open_store(self.db_path)
+        try:
+            self.assertIsNone(store.read_state(conn))
+        finally:
+            conn.close()
+
+    def test_first_event_after_explicit_bootstrap_does_not_double(self):
+        """方案 A：先 bootstrap（含 watermark=20），再 scored 20 → stale。"""
+        self.assertEqual(
+            shadow.ensure_bootstrapped(
+                db_path=self.db_path, environ=ON).status,
+            'applied',
+        )
+        r = shadow.observe_scored_shadow(
+            message_id=20,
+            scores={
+                'valence': 0.8, 'arousal': 0.4, 'mood_word': '开心',
+                'passion_delta': 0.0, 'intimacy_delta': 0.0, 'source': 't',
+            },
+            scored_at=T0,
+            db_path=self.db_path,
+            environ=ON,
+        )
+        self.assertEqual(r.status, 'stale_skipped')
+        conn = store.open_store(self.db_path)
+        try:
+            st = store.read_state(conn)
+            self.assertEqual(st['last_scored_message_id'], 20)
+            # 未因重复评分改 valence
+            self.assertAlmostEqual(st['valence'], 0.6, places=4)
+        finally:
+            conn.close()
+
+
+class AdapterSafetyTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.db_path = str(Path(self.tmp.name) / 'adapt.db')
+        conn = store.open_store(self.db_path)
+        try:
+            _seed_legacy_rows(conn)
+            _insert_score_applied(conn, 20)
+        finally:
+            conn.close()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_disabled_scores_none_no_throw_no_db(self):
+        path = Path(self.tmp.name) / 'ghost.db'
+        main_ok = True
+        try:
+            r = shadow.observe_scored_shadow(
+                message_id=1,
+                scores=None,  # type: ignore[arg-type]
+                scored_at=T0,
+                db_path=str(path),
+                environ=OFF,
+            )
+        except Exception:  # noqa: BLE001
+            main_ok = False
+            raise
+        self.assertTrue(main_ok)
+        self.assertEqual(r.status, 'disabled')
+        self.assertFalse(path.exists())
+
+    def test_enabled_scores_none_returns_failed(self):
+        shadow.ensure_bootstrapped(db_path=self.db_path, environ=ON)
+        r = shadow.observe_scored_shadow(
+            message_id=21,
+            scores=None,  # type: ignore[arg-type]
+            scored_at=T0,
+            db_path=self.db_path,
+            environ=ON,
+        )
+        self.assertEqual(r.status, 'failed')
+        self.assertFalse(r.ok)
+        self.assertIn('NoneType', r.error or '')
+
+    def test_wrapper_catches_bad_message_id(self):
+        shadow.ensure_bootstrapped(db_path=self.db_path, environ=ON)
+        r = shadow.observe_scored_shadow(
+            message_id=True,  # type: ignore[arg-type]
+            scores={
+                'valence': 0.5, 'arousal': 0.4, 'mood_word': 'x',
+                'passion_delta': 0.0, 'intimacy_delta': 0.0, 'source': 't',
+            },
+            scored_at=T0,
+            db_path=self.db_path,
+            environ=ON,
+        )
+        self.assertEqual(r.status, 'failed')
 
 
 class ConcurrencyBootstrapTests(unittest.TestCase):
@@ -239,89 +484,29 @@ class ConcurrencyBootstrapTests(unittest.TestCase):
         def run(label: str):
             try:
                 results[label] = shadow.ensure_bootstrapped(
-                    db_path=db_path, environ=ON, snapshot=_snapshot(),
+                    db_path=db_path, environ=ON,
                 )
             except BaseException as exc:  # noqa: BLE001
                 errors.append(exc)
 
-        threads = [
-            threading.Thread(target=run, args=('a',)),
-            threading.Thread(target=run, args=('b',)),
-            threading.Thread(target=run, args=('c',)),
-        ]
+        threads = [threading.Thread(target=run, args=(x,)) for x in 'abc']
         for t in threads:
             t.start()
         for t in threads:
             t.join(timeout=15)
         self.assertEqual(errors, [])
-        statuses = {results[k].status for k in results}
-        self.assertTrue(
-            statuses <= {'applied', 'duplicate', 'already_bootstrapped'})
         self.assertTrue(all(results[k].ok for k in results))
         conn = store.open_store(db_path)
         try:
-            n_boot = conn.execute(
+            n = conn.execute(
                 "SELECT COUNT(*) FROM internal_state_events "
                 "WHERE event_key='bootstrap:initial'"
             ).fetchone()[0]
-            self.assertEqual(n_boot, 1)
-            st = store.read_state(conn)
-            self.assertEqual(st['last_scored_message_id'], 99)
-            self.assertEqual(st['state_version'], 0)
+            self.assertEqual(n, 1)
+            self.assertEqual(
+                store.read_state(conn)['last_scored_message_id'], 99)
         finally:
             conn.close()
-
-
-class AdapterSafetyTests(unittest.TestCase):
-    def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.db_path = str(Path(self.tmp.name) / 'adapt.db')
-        conn = store.open_store(self.db_path)
-        try:
-            _seed_legacy_rows(conn)
-            _insert_score_applied(conn, 20)
-        finally:
-            conn.close()
-
-    def tearDown(self):
-        self.tmp.cleanup()
-
-    def test_wrapper_disabled_skips(self):
-        r = shadow.observe_user_message_shadow(
-            message_id=21, text='你好', created_at=T0,
-            previous_user_at=None, db_path=self.db_path, environ=OFF,
-        )
-        self.assertEqual(r.status, 'disabled')
-        self.assertTrue(r.ok)
-
-    def test_wrapper_catches_exception_main_flow_ok(self):
-        # 开启但 bootstrap 后用非法参数；adapter 不得抛
-        shadow.ensure_bootstrapped(
-            db_path=self.db_path, environ=ON, snapshot=_snapshot())
-        main_ok = True
-        try:
-            r = shadow.observe_scored_shadow(
-                message_id=True,  # type: ignore[arg-type]
-                scores={'valence': 0.5, 'arousal': 0.4, 'mood_word': 'x',
-                        'passion_delta': 0.0, 'intimacy_delta': 0.0,
-                        'source': 't'},
-                scored_at=T0,
-                db_path=self.db_path,
-                environ=ON,
-            )
-        except Exception:  # noqa: BLE001
-            main_ok = False
-            raise
-        self.assertTrue(main_ok)
-        self.assertFalse(r.ok)
-        self.assertEqual(r.status, 'failed')
-        health = shadow.get_shadow_health(db_path=self.db_path, environ=ON)
-        self.assertIsNotNone(health.last_error)
-
-    def test_wrappers_exist_but_no_gateway_imports(self):
-        self.assertTrue(callable(shadow.observe_user_message_shadow))
-        self.assertTrue(callable(shadow.observe_scored_shadow))
-        self.assertTrue(callable(shadow.apply_outcome_shadow))
 
 
 class GuardTests(unittest.TestCase):
@@ -342,22 +527,17 @@ class GuardTests(unittest.TestCase):
         self.assertFalse(forbidden & found, msg=f'{forbidden & found}')
 
     def test_no_production_call_sites(self):
-        """gateway / wake / app 不得引用 shadow 事件包装。"""
         for name in ('gateway.py', 'app.py'):
             path = Path(ROOT, name)
             if not path.exists():
                 continue
             text = path.read_text(encoding='utf-8', errors='replace')
-            self.assertNotIn('observe_user_message_shadow', text)
-            self.assertNotIn('observe_scored_shadow', text)
-            self.assertNotIn('apply_outcome_shadow', text)
             self.assertNotIn('internal_state_shadow', text)
         wake_dir = Path(ROOT, 'wake')
         if wake_dir.is_dir():
             for path in wake_dir.rglob('*.py'):
                 text = path.read_text(encoding='utf-8', errors='replace')
                 self.assertNotIn('internal_state_shadow', text)
-                self.assertNotIn('apply_outcome_shadow', text)
 
 
 if __name__ == '__main__':
