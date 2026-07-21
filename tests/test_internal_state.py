@@ -5,24 +5,31 @@
   2. 相同输入与 observed_at → 相同结果（纯核心确定性）
   3. user_idle_hours 与 effective_idle_hours 不混用（longing 只吃 user_idle）
   4. 三条 longing 公式各自正确
-  5. Bond P/I 衰减使用各自时间戳（τ6 / τ96）
+  5. Bond P/I 衰减使用各自时间戳（τ6 / τ96）；I=0/P=0 不复活
   6. fatigue 指数回归正确（含 na 微调）
   7. candidate ChatStateView 不含任何自由文风文案 / 禁词
   8. 时钟不可靠时 fail closed：longing 全空，不制造 999h 思念
   9. internal_state 不引入 gateway（无循环依赖）
  10. 未来写接口签名必须携带唯一事件 ID
+ 11. legacy replay 与 unified candidate 分离（attachment boost 来源不同）
+ 12. 状态表缺失时生产 DB 不被建表/补列
+ 13. CLI --compact 输出单行 JSON
 """
 
 from __future__ import annotations
 
 import datetime
+import hashlib
 import inspect
+import json
 import math
+import os
 import sqlite3
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = str(Path(__file__).resolve().parents[1])
 if ROOT not in sys.path:
@@ -41,6 +48,14 @@ def _fmt(dt: datetime.datetime) -> str:
     return dt.strftime('%Y-%m-%d %H:%M:%S')
 
 
+def _sha256_file(path: str) -> str:
+    h = hashlib.sha256()
+    with open(path, 'rb') as f:
+        for chunk in iter(lambda: f.read(65536), b''):
+            h.update(chunk)
+    return h.hexdigest()
+
+
 class ShadowBase(unittest.TestCase):
     """临时库：三张旧状态表 + chat_messages + wake_log，全部指向同一文件。"""
 
@@ -48,12 +63,14 @@ class ShadowBase(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.db_path = str(Path(self.tmp.name) / 'memories.db')
 
-        # 三个旧模块的 DB_PATH 打到临时库（模块属性在调用时读取）
+        # 三个旧模块的 DB_PATH 打到临时库（仅供测试 seed / 公式对拍）
         self._orig_paths = (emotion_engine.DB_PATH, drive_engine.DB_PATH,
                             desire.DB_PATH)
+        self._orig_env = os.environ.get('MEMORIES_DB')
         emotion_engine.DB_PATH = self.db_path
         drive_engine.DB_PATH = self.db_path
         desire.DB_PATH = self.db_path
+        os.environ['MEMORIES_DB'] = self.db_path
 
         conn = sqlite3.connect(self.db_path)
         conn.executescript(
@@ -76,6 +93,10 @@ class ShadowBase(unittest.TestCase):
     def tearDown(self):
         (emotion_engine.DB_PATH, drive_engine.DB_PATH,
          desire.DB_PATH) = self._orig_paths
+        if self._orig_env is None:
+            os.environ.pop('MEMORIES_DB', None)
+        else:
+            os.environ['MEMORIES_DB'] = self._orig_env
         self.tmp.cleanup()
 
     # ── helpers ────────────────────────────────────────────
@@ -128,30 +149,97 @@ class ShadowBase(unittest.TestCase):
         conn.close()
         return out
 
-    def capture(self, now=NOW, include_legacy=True):
-        return ist.capture_shadow_snapshot(self.get_db, now=now,
-                                           include_legacy=include_legacy)
+    def capture(self, now=NOW, include_legacy=False):
+        return ist.capture_shadow_snapshot(
+            self.get_db, now=now, include_legacy=include_legacy,
+            db_path=self.db_path)
 
 
 class ReadOnlyTests(ShadowBase):
     def test_capture_writes_nothing(self):
-        """验收 1 & 10：运行前后五张表内容完全一致。"""
+        """验收 1：默认路径（无 legacy）运行前后五张表内容完全一致。"""
         self.seed_user_message(NOW - datetime.timedelta(hours=3))
         self.seed_emotion(sternberg_p=0.5, sternberg_i=0.6,
                           p_updated_at=_fmt(NOW - datetime.timedelta(hours=6)),
                           i_updated_at=_fmt(NOW - datetime.timedelta(hours=6)))
         before = self.dump_tables()
-        snap = self.capture()
+        before_hash = _sha256_file(self.db_path)
+        snap = self.capture(include_legacy=False)
         ist.build_chat_view(snap)
         ist.snapshot_to_json(snap)
+        ist.snapshot_to_json(snap, compact=True)
         after = self.dump_tables()
         self.assertEqual(before, after)
+        self.assertEqual(before_hash, _sha256_file(self.db_path))
+
+    def test_legacy_isolated_does_not_mutate_source(self):
+        """legacy 对照走副本+子进程；源库字节不变。"""
+        self.seed_user_message(NOW - datetime.timedelta(hours=2))
+        before_hash = _sha256_file(self.db_path)
+        before = self.dump_tables()
+        snap = self.capture(include_legacy=True)
+        self.assertEqual(before_hash, _sha256_file(self.db_path))
+        self.assertEqual(before, self.dump_tables())
+        # 子进程应至少带回部分 getter（或明确错误，但不碰源库）
+        self.assertIsInstance(snap.diagnostics.legacy_readings, dict)
+
+    def test_missing_state_tables_do_not_create(self):
+        """验收 12：状态表缺失时生产 DB 仍不被建表或补列。"""
+        bare = tempfile.NamedTemporaryFile(suffix='.db', delete=False)
+        bare.close()
+        bare_path = bare.name
+        try:
+            conn = sqlite3.connect(bare_path)
+            conn.execute(
+                "CREATE TABLE chat_messages ("
+                "id INTEGER PRIMARY KEY, author TEXT, content TEXT, created_at TEXT)"
+            )
+            conn.commit()
+            # 记录 schema
+            schema_before = conn.execute(
+                "SELECT name, sql FROM sqlite_master ORDER BY name"
+            ).fetchall()
+            conn.close()
+            before_hash = _sha256_file(bare_path)
+
+            def get_bare():
+                c = sqlite3.connect(f'file:{bare_path}?mode=ro', uri=True)
+                c.row_factory = sqlite3.Row
+                return c
+
+            with mock.patch.dict(os.environ, {'MEMORIES_DB': bare_path}):
+                snap = ist.capture_shadow_snapshot(
+                    get_bare, now=NOW, include_legacy=False, db_path=bare_path)
+
+            self.assertEqual(before_hash, _sha256_file(bare_path))
+            conn = sqlite3.connect(bare_path)
+            schema_after = conn.execute(
+                "SELECT name, sql FROM sqlite_master ORDER BY name"
+            ).fetchall()
+            tables = {r[0] for r in schema_after}
+            conn.close()
+            self.assertEqual(schema_before, schema_after)
+            self.assertNotIn('emotion_state', tables)
+            self.assertNotIn('drive_state', tables)
+            self.assertNotIn('desire_state', tables)
+            self.assertIsNone(snap.affect.pa)
+            self.assertIsNone(snap.legacy_drive_engine_replay.attachment)
+            self.assertIsNone(snap.candidate_unified_drives.attachment)
+        finally:
+            os.unlink(bare_path)
+
+    def test_no_import_old_modules_for_db_path(self):
+        """源码路径解析不得依赖 import emotion/drive/desire。"""
+        src = Path(ROOT, 'internal_state.py').read_text(encoding='utf-8')
+        # memories_db_path 函数体附近不应通过旧模块取路径
+        self.assertIn('MEMORIES_DB', src)
+        self.assertIn('def memories_db_path', src)
+        # capture 默认 include_legacy=False
+        sig = inspect.signature(ist.capture_shadow_snapshot)
+        self.assertFalse(sig.parameters['include_legacy'].default)
 
     def test_no_forbidden_write_calls_in_source(self):
-        """守卫：AST 扫描，源码中不得出现任何旧系统写函数的真实调用。
-
-        用 AST 而非字符串匹配，避免把 docstring/注释里的禁用清单误判成调用。
-        """
+        """守卫：AST 扫描，源码中不得出现任何旧系统写函数的真实调用。"""
         import ast
         src = Path(ROOT, 'internal_state.py').read_text(encoding='utf-8')
         forbidden = {'touch_interaction', 'touch_hayana', 'rest', 'discharge',
@@ -207,15 +295,13 @@ class ClockSeparationTests(ShadowBase):
         d = snap.derived
         self.assertAlmostEqual(d.user_idle_hours, 48.0, places=2)
         self.assertAlmostEqual(d.effective_idle_hours, 10 / 60, places=2)
-        # 三条 longing 都必须按 48h 算，而不是 10 分钟
         self.assertAlmostEqual(
             d.longing_emotion_legacy,
             ist.longing_emotion_legacy_curve(48.0), places=3)
         self.assertAlmostEqual(
             d.longing_desire_legacy,
             ist.longing_desire_legacy_curve(48.0), places=3)
-        self.assertGreater(d.longing_desire_legacy, 0.4)  # 48h 明显思念
-        # 若误用 effective(10min)，L 应接近 0：
+        self.assertGreater(d.longing_desire_legacy, 0.4)
         wrong = ist.longing_desire_legacy_curve(10 / 60)
         self.assertLess(wrong, 0.02)
         self.assertNotAlmostEqual(d.longing_desire_legacy, wrong, places=2)
@@ -238,7 +324,7 @@ class LongingFormulaTests(unittest.TestCase):
         t = 24.0
         low = ist.longing_candidate_curve(t, 0.0)   # τ=21.6
         high = ist.longing_candidate_curve(t, 1.0)  # τ=14.4
-        self.assertGreater(high, low)               # 依恋高 → 想得快
+        self.assertGreater(high, low)
         att = 0.5
         tau = 18.0 * (1.2 - 0.4 * att)
         expect = min(0.85 * (1 - (1 + t / tau) ** (-0.8)), 0.90)
@@ -261,8 +347,31 @@ class BondDecayTests(unittest.TestCase):
         self.assertAlmostEqual(bond.passion, 0.8 * math.exp(-12 / 6.0), places=3)
         self.assertAlmostEqual(bond.intimacy, 0.8 * math.exp(-48 / 96.0), places=3)
         self.assertAlmostEqual(bond.commitment, 0.7, places=4)
-        # P 衰得比 I 狠得多
         self.assertLess(bond.passion, bond.intimacy)
+
+    def test_zero_intimacy_not_resurrected(self):
+        """sternberg_i=0.0 → 衰减后仍为 0.0（不得被 or 0.3 复活）。"""
+        row = {'sternberg_p': 0.5, 'sternberg_i': 0.0, 'sternberg_c': 0.7,
+               'p_updated_at': _fmt(NOW),
+               'i_updated_at': _fmt(NOW - datetime.timedelta(hours=10))}
+        bond = ist.bond_from_emotion_row(row, NOW)
+        self.assertEqual(bond.intimacy, 0.0)
+
+    def test_zero_passion_not_resurrected(self):
+        """sternberg_p=0.0 → 衰减后仍为 0.0。"""
+        row = {'sternberg_p': 0.0, 'sternberg_i': 0.5, 'sternberg_c': 0.7,
+               'p_updated_at': _fmt(NOW - datetime.timedelta(hours=3)),
+               'i_updated_at': _fmt(NOW)}
+        bond = ist.bond_from_emotion_row(row, NOW)
+        self.assertEqual(bond.passion, 0.0)
+
+    def test_none_intimacy_uses_default_then_decays(self):
+        row = {'sternberg_p': 0.0, 'sternberg_i': None, 'sternberg_c': None,
+               'p_updated_at': _fmt(NOW),
+               'i_updated_at': _fmt(NOW - datetime.timedelta(hours=96))}
+        bond = ist.bond_from_emotion_row(row, NOW)
+        self.assertAlmostEqual(bond.intimacy, 0.3 * math.exp(-1.0), places=3)
+        self.assertAlmostEqual(bond.commitment, 0.7, places=4)
 
 
 class DriveMathTests(unittest.TestCase):
@@ -271,15 +380,14 @@ class DriveMathTests(unittest.TestCase):
         row = {k: 0.2 for k in ist.DRIVE_KEYS}
         row['fatigue'] = 0.8
         row['last_updated'] = _fmt(NOW - datetime.timedelta(hours=10))
-        drives = ist.candidate_drives_from_raw(row, NOW, 0.0, 0.0, 0.3)
+        drives = ist.drives_from_raw(row, NOW, 0.0, 0.0, 0.3)
         expect = 0.35 + (0.8 - 0.35) * math.exp(-0.05 * 10) + 0.3 * 0.06
         self.assertAlmostEqual(drives.fatigue, round(expect, 4), places=3)
 
     def test_explicit_cap_boosts(self):
         row = {k: 0.1 for k in ist.DRIVE_KEYS}
         row['last_updated'] = _fmt(NOW - datetime.timedelta(hours=1000))
-        # t→∞ 时值趋近 cap，可直接验证 boost 后的 cap
-        drives = ist.candidate_drives_from_raw(
+        drives = ist.drives_from_raw(
             row, NOW, longing_for_boost=0.6, passion_for_boost=0.5,
             na_for_boost=0.4)
         self.assertAlmostEqual(drives.attachment, min(0.92, 0.75 + 0.6 * 0.15), places=2)
@@ -303,6 +411,49 @@ class DriveMathTests(unittest.TestCase):
         self.assertEqual(intent_high, 'express_longing')
 
 
+class DriveSeparationTests(ShadowBase):
+    def test_legacy_uses_emotion_longing_candidate_uses_desire(self):
+        """验收 11：两组 drives 分离；attachment 因 longing 源不同而分歧。"""
+        self.seed_user_message(NOW - datetime.timedelta(hours=48))
+        # t→∞ 逼近 cap，便于直接看见 boost 差异
+        self.seed_drive(**{k: 0.1 for k in ist.DRIVE_KEYS},
+                        last_updated=_fmt(NOW - datetime.timedelta(hours=1000)))
+        self.seed_emotion(na=0.2, sternberg_p=0.0, sternberg_i=0.5)
+        snap = self.capture(include_legacy=False)
+
+        l_e = snap.derived.longing_emotion_legacy
+        l_d = snap.derived.longing_desire_legacy
+        self.assertIsNotNone(l_e)
+        self.assertIsNotNone(l_d)
+        self.assertGreater(l_e, l_d)  # τ8 比 τ18 涨得快
+
+        legacy_att = snap.legacy_drive_engine_replay.attachment
+        cand_att = snap.candidate_unified_drives.attachment
+        expect_legacy = min(0.92, 0.75 + l_e * 0.15)
+        expect_cand = min(0.92, 0.75 + l_d * 0.15)
+        self.assertAlmostEqual(legacy_att, expect_legacy, places=2)
+        self.assertAlmostEqual(cand_att, expect_cand, places=2)
+        self.assertGreater(legacy_att, cand_att)
+
+        cmp_ = snap.diagnostics.drive_comparison
+        self.assertEqual(cmp_['attachment_boost_sources']['legacy'],
+                         'longing_emotion_legacy')
+        self.assertEqual(cmp_['attachment_boost_sources']['candidate'],
+                         'longing_desire_legacy')
+        self.assertAlmostEqual(
+            cmp_['diff_candidate_minus_legacy']['attachment'],
+            round(cand_att - legacy_att, 4), places=4)
+        # libido/stress 同源 → diff ≈ 0
+        self.assertAlmostEqual(
+            cmp_['diff_candidate_minus_legacy']['libido'], 0.0, places=4)
+        self.assertIn('longing_emotion_legacy',
+                      snap.diagnostics.linkage_sources[
+                          'legacy_drive_engine_replay.attachment_cap_boost'])
+        self.assertIn('候选',
+                      snap.diagnostics.linkage_sources[
+                          'candidate_unified_drives.attachment_cap_boost'])
+
+
 class ChatViewTests(ShadowBase):
     def test_view_is_structured_and_style_free(self):
         """验收 7：view 序列化后不含任何文风禁词与中文自由文案。"""
@@ -314,7 +465,6 @@ class ChatViewTests(ShadowBase):
         blob = repr(view)
         for token in ist.FORBIDDEN_STYLE_TOKENS:
             self.assertNotIn(token, blob)
-        # content_targets 只允许机器 token（ASCII 标识符）
         for target in view.content_targets:
             self.assertRegex(target, r'^[a-z_]+$')
         for dim in view.source_dimensions:
@@ -341,9 +491,41 @@ class FailClosedTests(ShadowBase):
         self.assertTrue(any('longing' in w for w in snap.diagnostics.warnings))
         js = ist.snapshot_to_json(snap)
         self.assertNotIn('999', js.replace('1999', '').replace('2999', ''))
-        # fail closed 时也不调用 desire.get_longing 的默认路径（可能读到停摆字段）
         self.assertIsNone(
             snap.diagnostics.legacy_readings.get('desire.get_longing'))
+
+
+class CompactJsonTests(ShadowBase):
+    def test_compact_is_single_line_jsonl(self):
+        """验收 13：--compact / compact=True → 单行合法 JSON。"""
+        self.seed_user_message(NOW - datetime.timedelta(hours=1))
+        snap = self.capture(include_legacy=False)
+        pretty = ist.snapshot_to_json(snap, compact=False)
+        compact = ist.snapshot_to_json(snap, compact=True)
+        self.assertIn('\n', pretty)
+        self.assertNotIn('\n', compact)
+        data = json.loads(compact)
+        self.assertIn('legacy_drive_engine_replay', data)
+        self.assertIn('candidate_unified_drives', data)
+
+    def test_cli_default_no_legacy_and_compact_flag(self):
+        import importlib.util
+        import io
+        cli_path = Path(ROOT, 'tools', 'internal_state_shadow.py')
+        spec = importlib.util.spec_from_file_location(
+            'internal_state_shadow_cli', cli_path)
+        cli = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cli)
+        self.seed_user_message(NOW - datetime.timedelta(hours=1))
+        buf = io.StringIO()
+        with mock.patch('sys.stdout', buf):
+            rc = cli.main(['--db', self.db_path, '--compact'])
+        self.assertEqual(rc, 0)
+        out = buf.getvalue().strip()
+        self.assertNotIn('\n', out)
+        payload = json.loads(out)
+        # 默认无 legacy → legacy_readings 为空
+        self.assertEqual(payload['diagnostics']['legacy_readings'], {})
 
 
 class WriteInterfaceSignatureTests(unittest.TestCase):

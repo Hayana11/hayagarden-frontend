@@ -3,7 +3,9 @@
 目标：建立统一状态模型并验证数学与字段映射。**不接管任何生产行为。**
 
 本模块保证：
-  - 只做 SELECT，不写任何业务数据库；
+  - 所有原始表读取使用 SQLite ``mode=ro`` URI，不写任何业务数据库；
+  - 不通过 import 旧模块获取 DB 路径（直接读 ``MEMORIES_DB``）；
+  - 默认不运行旧 getter；若启用，仅在隔离子进程 + 临时 DB 副本上运行；
   - 不修改 emotion_engine / desire / drive_engine 的逻辑；
   - 不进入任何 prompt；不被 gateway / system_builder / wake 引用；
   - 不创建 internal_state_v3 权威表。
@@ -15,11 +17,13 @@
 
 架构分两层：
   1. 纯计算核心 compute_snapshot()：输入 = 三张旧表的原始行 + 统一时钟 +
-     observed_at，输出完全确定（同输入同输出），所有衰减/积累/联动在
-     observed_at 下重算，跨模块隐藏读取全部显式展开并注明来源。
-  2. 旧 getter 对照层 gather_legacy_readings()：调用旧系统的只读 getter
-     （它们内部用墙钟，无法注入时间），结果仅存入 diagnostics 供新旧对比，
-     不参与候选计算。
+     observed_at，输出完全确定（同输入同输出）。驱动分两列：
+       · legacy_drive_engine_replay —— attachment boost 用 longing_emotion_legacy
+         （τ8），精确复现旧 drive_engine ← emotion_engine.get_longing
+       · candidate_unified_drives —— attachment boost 用 longing_desire_legacy
+         （τ18），明确标为候选设计，不得冒充旧逻辑
+  2. 旧 getter 对照层（可选）：仅在隔离子进程对 DB 副本调用，结果只进
+     diagnostics.legacy_readings，不参与候选计算。
 
 时钟规则：
   - 唯一权威时钟 = chat.interaction_state.read_interaction_clock()
@@ -35,8 +39,13 @@ from __future__ import annotations
 import datetime
 import json
 import math
+import os
+import shutil
 import sqlite3
-from dataclasses import dataclass, field, asdict
+import subprocess
+import sys
+import tempfile
+from dataclasses import dataclass, asdict
 from typing import Optional, Protocol, Callable
 
 from chat.interaction_state import read_interaction_clock, InteractionClock
@@ -44,6 +53,8 @@ from chat.interaction_state import read_interaction_clock, InteractionClock
 # ═══════════════════════════════════════════════════════════
 # 常量：全部从旧模块的当前实现照抄，Phase 0 不调参
 # ═══════════════════════════════════════════════════════════
+
+DEFAULT_MEMORIES_DB = '/opt/frontend/memories.db'
 
 # Bond 衰减（来源：emotion_engine.TAU_P / TAU_I）
 TAU_P_HOURS = 6.0     # passion 半衰特征时间
@@ -71,9 +82,10 @@ DRIVE_GROWTH_K = {
     'social': 0.04, 'duty': 0.08, 'libido': 0.06, 'stress': 0.04,
 }
 # 显式联动（原 drive_engine.CAP_BOOST，隐藏在 _get_emotion_factors 里）：
-#   attachment cap += longing × 0.15   ← 来源：本快照 longing_desire_legacy
-#   libido     cap += passion × 0.20   ← 来源：本快照 Bond.passion（τ6 衰减后）
-#   stress     cap += na × 0.15        ← 来源：emotion_state.na 原始列
+#   legacy replay: attachment cap += longing_emotion_legacy × 0.15
+#   candidate:     attachment cap += longing_desire_legacy × 0.15（候选，非旧逻辑）
+#   libido     cap += passion × 0.20   ← Bond.passion（τ6 衰减后）
+#   stress     cap += na × 0.15        ← emotion_state.na 原始列
 # cap 上限 0.92（原实现同）
 CAP_BOOST_LIMIT = 0.92
 FATIGUE_EQ = 0.35
@@ -171,6 +183,7 @@ class Diagnostics:
     source_health: dict
     legacy_readings: dict     # 旧 getter 只读输出（墙钟），仅对照
     linkage_sources: dict     # 显式联动来源说明
+    drive_comparison: dict    # legacy / candidate / 逐维 diff
     warnings: tuple
 
 
@@ -179,7 +192,8 @@ class InternalStateSnapshot:
     observed_at: str
     affect: Affect
     bond: Bond
-    drives: Drives            # candidate drives（同快照显式联动）
+    legacy_drive_engine_replay: Drives   # 精确复现旧 drive_engine
+    candidate_unified_drives: Drives     # 候选设计，不得冒充旧逻辑
     derived: Derived
     diagnostics: Diagnostics
 
@@ -198,6 +212,14 @@ class ChatStateView:
 
 def _clamp01(v: float) -> float:
     return max(0.0, min(1.0, v))
+
+
+def _float_or_default(row: dict, key: str, default: float) -> float:
+    """仅当值为 None 时用默认值；0.0 必须保留。"""
+    raw = row.get(key)
+    if raw is None:
+        return float(default)
+    return float(raw)
 
 
 def decay_exponential(value: float, hours_elapsed: float, tau_hours: float) -> float:
@@ -244,6 +266,7 @@ def bond_from_emotion_row(row: dict, observed_at: datetime.datetime) -> Bond:
 
     P 用 p_updated_at + τ6，I 用 i_updated_at + τ96，C 不衰减
     ——与 emotion_engine.get_desire 数学一致，但时间可注入。
+    零值保留：sternberg_i/p/c 仅在 None 时用默认值。
     """
     def _hours_since(ts):
         dt = _parse_dt(ts)
@@ -251,37 +274,35 @@ def bond_from_emotion_row(row: dict, observed_at: datetime.datetime) -> Bond:
             return 0.0
         return max(0.0, (observed_at - dt).total_seconds() / 3600.0)
 
-    p = decay_exponential(float(row.get('sternberg_p') or 0.0),
+    p = decay_exponential(_float_or_default(row, 'sternberg_p', 0.0),
                           _hours_since(row.get('p_updated_at')), TAU_P_HOURS)
-    i = decay_exponential(float(row.get('sternberg_i') or 0.3),
+    i = decay_exponential(_float_or_default(row, 'sternberg_i', 0.3),
                           _hours_since(row.get('i_updated_at')), TAU_I_HOURS)
-    c = float(row.get('sternberg_c') if row.get('sternberg_c') is not None else 0.7)
+    c = _float_or_default(row, 'sternberg_c', 0.7)
     return Bond(intimacy=round(i, 4), passion=round(p, 4), commitment=round(c, 4))
 
 
-def candidate_drives_from_raw(drive_row: dict,
-                              observed_at: datetime.datetime,
-                              longing_for_boost: Optional[float],
-                              passion_for_boost: Optional[float],
-                              na_for_boost: Optional[float]) -> Drives:
-    """从 drive_state 原始行显式重算积累 + 联动（原 drive_engine.get_drive 的
-    纯化版本；隐藏的 import emotion_engine 被展开为三个显式入参）。
+def drives_from_raw(drive_row: dict,
+                    observed_at: datetime.datetime,
+                    longing_for_boost: Optional[float],
+                    passion_for_boost: Optional[float],
+                    na_for_boost: Optional[float]) -> Drives:
+    """从 drive_state 原始行显式重算积累 + 联动。
 
-    联动来源（记录在 diagnostics.linkage_sources）：
-      attachment cap boost ← longing_for_boost（本快照 longing_desire_legacy）
-      libido     cap boost ← passion_for_boost（本快照 Bond.passion）
-      stress     cap boost ← na_for_boost（emotion_state.na 原始列）
-      fatigue    na 微调  ← na_for_boost
+    原 drive_engine.get_drive 的纯化版本；隐藏的 import emotion_engine
+    被展开为三个显式入参。调用方决定 longing_for_boost 用哪条 longing：
+      · legacy_drive_engine_replay → longing_emotion_legacy（τ8）
+      · candidate_unified_drives   → longing_desire_legacy（τ18，候选）
     """
     last = _parse_dt(drive_row.get('last_updated'))
     t = max(0.0, (observed_at - last).total_seconds() / 3600.0) if last else 0.0
-    lf = longing_for_boost or 0.0
-    pf = passion_for_boost or 0.0
-    nf = na_for_boost if na_for_boost is not None else 0.2
+    lf = 0.0 if longing_for_boost is None else float(longing_for_boost)
+    pf = 0.0 if passion_for_boost is None else float(passion_for_boost)
+    nf = 0.2 if na_for_boost is None else float(na_for_boost)
 
     out = {}
     for key in DRIVE_KEYS:
-        base = float(drive_row.get(key) if drive_row.get(key) is not None else 0.1)
+        base = _float_or_default(drive_row, key, 0.1)
         if key == 'fatigue':
             val = FATIGUE_EQ + (base - FATIGUE_EQ) * math.exp(-FATIGUE_K * t)
             val += nf * FATIGUE_NA_COEF
@@ -298,6 +319,10 @@ def candidate_drives_from_raw(drive_row: dict,
         val = cap - (cap - base) * math.exp(-gk * t)
         out[key] = round(_clamp01(val), 4)
     return Drives(**out)
+
+
+# 兼容旧测试名
+candidate_drives_from_raw = drives_from_raw
 
 
 def pick_candidate_intent(drives: Drives,
@@ -323,6 +348,19 @@ def pick_candidate_intent(drives: Drives,
     return dominant, intent
 
 
+def _drive_diff(candidate: Drives, legacy: Drives) -> dict:
+    """逐维 candidate − legacy；任一侧为 None 则该维为 None。"""
+    out = {}
+    for key in DRIVE_KEYS:
+        c = getattr(candidate, key)
+        l = getattr(legacy, key)
+        if c is None or l is None:
+            out[key] = None
+        else:
+            out[key] = round(float(c) - float(l), 4)
+    return out
+
+
 # ═══════════════════════════════════════════════════════════
 # 只读采集层
 # ═══════════════════════════════════════════════════════════
@@ -340,24 +378,57 @@ def _now_beijing() -> datetime.datetime:
     return datetime.datetime.utcnow() + datetime.timedelta(hours=8)
 
 
-def _read_single_row(db_path: str, table: str) -> Optional[dict]:
-    """SELECT-only 读取单例行。任何异常返回 None。"""
+def memories_db_path(override: Optional[str] = None) -> str:
+    """统一 DB 路径：显式 override > MEMORIES_DB 环境变量 > 默认。
+
+    不 import emotion_engine / drive_engine / desire（它们的 ensure_table
+    会在 import 时写库）。
+    """
+    if override:
+        return override
+    return os.environ.get('MEMORIES_DB', DEFAULT_MEMORIES_DB)
+
+
+def _readonly_connect(db_path: str) -> sqlite3.Connection:
+    """以 mode=ro URI 打开；失败抛出（调用方决定）。"""
+    conn = sqlite3.connect(f'file:{db_path}?mode=ro', uri=True)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def _read_single_row(db_path: Optional[str], table: str) -> Optional[dict]:
+    """SELECT-only 只读 URI 读取单例行。任何异常返回 None，绝不建表。"""
+    if not db_path:
+        return None
     try:
-        conn = sqlite3.connect(db_path)
-        conn.row_factory = sqlite3.Row
-        row = conn.execute(f"SELECT * FROM {table} WHERE id=1").fetchone()
-        conn.close()
+        conn = _readonly_connect(db_path)
+        try:
+            row = conn.execute(f"SELECT * FROM {table} WHERE id=1").fetchone()
+        finally:
+            conn.close()
         return dict(row) if row else None
     except Exception:
         return None
 
 
-def gather_legacy_readings(user_idle_hours: Optional[float]) -> dict:
-    """调用旧系统的只读 getter，仅供新旧对照。
+def _copy_db_via_backup(src_path: str, dst_path: str) -> None:
+    """从只读源库 backup 到目标文件（WAL 安全，不写源库）。"""
+    src = _readonly_connect(src_path)
+    try:
+        dst = sqlite3.connect(dst_path)
+        try:
+            src.backup(dst)
+        finally:
+            dst.close()
+    finally:
+        src.close()
 
-    这些 getter 内部使用墙钟，结果不可注入时间、不确定，
-    因此**不参与**候选计算，只进 diagnostics.legacy_readings。
-    绝不调用任何写函数。
+
+def gather_legacy_readings(user_idle_hours: Optional[float]) -> dict:
+    """调用旧系统的只读 getter（**会 import 旧模块，触发 ensure_table**）。
+
+    仅允许在隔离子进程 + 临时 DB 副本上调用（见
+    gather_legacy_readings_isolated）。切勿在主进程对生产库调用。
     """
     readings: dict = {}
 
@@ -368,14 +439,10 @@ def gather_legacy_readings(user_idle_hours: Optional[float]) -> dict:
             readings[name] = None
             readings.setdefault('_errors', []).append(f'{name}: {exc}')
 
-    def _load():
+    try:
         import emotion_engine as _ee
         import drive_engine as _de
         import desire as _des
-        return _ee, _de, _des
-
-    try:
-        _ee, _de, _des = _load()
     except Exception as exc:
         readings['_errors'] = [f'import: {exc}']
         return readings
@@ -393,25 +460,46 @@ def gather_legacy_readings(user_idle_hours: Optional[float]) -> dict:
     return readings
 
 
-def _legacy_db_paths() -> dict:
-    """各旧模块当前生效的 DB 路径（测试可通过模块属性补丁改写）。"""
-    paths = {}
+def gather_legacy_readings_isolated(
+        db_path: str,
+        user_idle_hours: Optional[float],
+        timeout_sec: float = 30.0) -> dict:
+    """安全对照：backup 到临时库，在子进程中 import 旧模块。
+
+    生产库始终以 mode=ro 打开做 backup，旧模块的 ensure_table 只碰副本。
+    """
+    root = os.path.dirname(os.path.abspath(__file__))
     try:
-        import emotion_engine as _ee
-        paths['emotion_state'] = _ee.DB_PATH
-    except Exception:
-        paths['emotion_state'] = None
-    try:
-        import drive_engine as _de
-        paths['drive_state'] = _de.DB_PATH
-    except Exception:
-        paths['drive_state'] = None
-    try:
-        import desire as _des
-        paths['desire_state'] = _des.DB_PATH
-    except Exception:
-        paths['desire_state'] = None
-    return paths
+        with tempfile.TemporaryDirectory(prefix='ist_legacy_') as td:
+            copy_path = os.path.join(td, 'memories.db')
+            _copy_db_via_backup(db_path, copy_path)
+            idle_repr = 'None' if user_idle_hours is None else repr(float(user_idle_hours))
+            script = (
+                'import json, os, sys\n'
+                f'sys.path.insert(0, {root!r})\n'
+                f'os.environ["MEMORIES_DB"] = {copy_path!r}\n'
+                'import internal_state as ist\n'
+                f'print(json.dumps(ist.gather_legacy_readings({idle_repr}), '
+                'ensure_ascii=False, default=str))\n'
+            )
+            env = os.environ.copy()
+            env['MEMORIES_DB'] = copy_path
+            proc = subprocess.run(
+                [sys.executable, '-c', script],
+                capture_output=True, text=True, timeout=timeout_sec, env=env,
+                cwd=root,
+            )
+            if proc.returncode != 0:
+                return {
+                    '_errors': [
+                        f'isolated subprocess exit {proc.returncode}: '
+                        f'{(proc.stderr or proc.stdout or "")[-500:]}'
+                    ]
+                }
+            line = (proc.stdout or '').strip().splitlines()[-1]
+            return json.loads(line)
+    except Exception as exc:
+        return {'_errors': [f'isolated: {exc}']}
 
 
 # ═══════════════════════════════════════════════════════════
@@ -453,28 +541,38 @@ def compute_snapshot(emotion_row: Optional[dict],
     l_emotion = longing_emotion_legacy_curve(user_idle)
     l_desire = longing_desire_legacy_curve(user_idle)
 
-    # ── Candidate drives：显式联动，来源注明 ──
+    # ── 两组 drives：旧复现 vs 统一候选（不得混列）──
     linkage = {
-        'attachment_cap_boost': 'longing_desire_legacy × 0.15（本快照派生）',
+        'legacy_drive_engine_replay.attachment_cap_boost':
+            'longing_emotion_legacy × 0.15（精确复现 drive_engine ← emotion_engine.get_longing，τ8）',
+        'candidate_unified_drives.attachment_cap_boost':
+            'longing_desire_legacy × 0.15（候选设计，τ18；不得冒充旧逻辑）',
         'libido_cap_boost': 'Bond.passion × 0.20（emotion_state P，τ6 衰减后）',
         'stress_cap_boost': 'emotion_state.na × 0.15（原始列）',
         'fatigue_na_adjust': 'emotion_state.na × 0.06（原始列）',
         'longing_candidate_tau': '仅 attachment 调制；intimacy 调制尚未实现',
     }
     if drive_row:
-        drives = candidate_drives_from_raw(
+        legacy_drives = drives_from_raw(
+            drive_row, observed_at,
+            longing_for_boost=l_emotion,
+            passion_for_boost=bond.passion,
+            na_for_boost=affect.na,
+        )
+        candidate_drives = drives_from_raw(
             drive_row, observed_at,
             longing_for_boost=l_desire,
             passion_for_boost=bond.passion,
             na_for_boost=affect.na,
         )
     else:
-        drives = Drives(*([None] * 8))
+        legacy_drives = Drives(*([None] * 8))
+        candidate_drives = Drives(*([None] * 8))
         warnings.append('drive_state row missing')
 
-    l_candidate = longing_candidate_curve(user_idle, drives.attachment)
+    l_candidate = longing_candidate_curve(user_idle, candidate_drives.attachment)
 
-    dominant, intent = pick_candidate_intent(drives, l_desire)
+    dominant, intent = pick_candidate_intent(candidate_drives, l_desire)
 
     derived = Derived(
         user_idle_hours=round(user_idle, 4) if user_idle is not None else None,
@@ -485,6 +583,18 @@ def compute_snapshot(emotion_row: Optional[dict],
         dominant_drive=dominant,
         candidate_intent=intent,
     )
+
+    drive_comparison = {
+        'legacy_drive_engine_replay': legacy_drives.as_dict(),
+        'candidate_unified_drives': candidate_drives.as_dict(),
+        'diff_candidate_minus_legacy': _drive_diff(candidate_drives, legacy_drives),
+        'attachment_boost_sources': {
+            'legacy': 'longing_emotion_legacy',
+            'candidate': 'longing_desire_legacy',
+            'longing_emotion_legacy': l_emotion,
+            'longing_desire_legacy': l_desire,
+        },
+    }
 
     diagnostics = Diagnostics(
         source_timestamps={
@@ -507,32 +617,41 @@ def compute_snapshot(emotion_row: Optional[dict],
         },
         legacy_readings=legacy_readings or {},
         linkage_sources=linkage,
+        drive_comparison=drive_comparison,
         warnings=tuple(warnings),
     )
 
     return InternalStateSnapshot(
         observed_at=observed_at.strftime('%Y-%m-%d %H:%M:%S'),
-        affect=affect, bond=bond, drives=drives,
+        affect=affect, bond=bond,
+        legacy_drive_engine_replay=legacy_drives,
+        candidate_unified_drives=candidate_drives,
         derived=derived, diagnostics=diagnostics,
     )
 
 
 def capture_shadow_snapshot(get_db_fn: Callable,
                             now: Optional[datetime.datetime] = None,
-                            include_legacy: bool = True) -> InternalStateSnapshot:
-    """采集一次完整影子快照。只读，无任何写副作用。"""
+                            include_legacy: bool = False,
+                            db_path: Optional[str] = None) -> InternalStateSnapshot:
+    """采集一次完整影子快照。
+
+    默认 include_legacy=False（不 import 旧模块）。
+    原始状态表一律 mode=ro 读取；路径来自 MEMORIES_DB / db_path，
+    不通过 import 旧模块获取。
+    """
     observed_at = now or _now_beijing()
     clock = read_interaction_clock(get_db_fn, now=observed_at)
 
-    paths = _legacy_db_paths()
-    emotion_row = _read_single_row(paths['emotion_state'], 'emotion_state') if paths['emotion_state'] else None
-    drive_row = _read_single_row(paths['drive_state'], 'drive_state') if paths['drive_state'] else None
-    desire_row = _read_single_row(paths['desire_state'], 'desire_state') if paths['desire_state'] else None
+    path = memories_db_path(db_path)
+    emotion_row = _read_single_row(path, 'emotion_state')
+    drive_row = _read_single_row(path, 'drive_state')
+    desire_row = _read_single_row(path, 'desire_state')
 
     legacy = None
     if include_legacy:
-        legacy = gather_legacy_readings(
-            clock.user_idle_hours if clock.reliable else None)
+        legacy = gather_legacy_readings_isolated(
+            path, clock.user_idle_hours if clock.reliable else None)
 
     return compute_snapshot(emotion_row, drive_row, desire_row,
                             clock, observed_at, legacy_readings=legacy)
@@ -546,7 +665,7 @@ def build_chat_view(snapshot: InternalStateSnapshot) -> ChatStateView:
     intent = snapshot.derived.candidate_intent
     if intent not in INTENTS:
         intent = 'none'
-    d = snapshot.drives.as_dict()
+    d = snapshot.candidate_unified_drives.as_dict()
     dominant = snapshot.derived.dominant_drive
     if intent == 'none' or dominant is None or dominant == 'fatigue':
         intensity = 0.0
@@ -572,9 +691,12 @@ def snapshot_to_dict(snapshot: InternalStateSnapshot) -> dict:
     return asdict(snapshot)
 
 
-def snapshot_to_json(snapshot: InternalStateSnapshot) -> str:
-    return json.dumps(snapshot_to_dict(snapshot), ensure_ascii=False,
-                      indent=2, default=str)
+def snapshot_to_json(snapshot: InternalStateSnapshot, compact: bool = False) -> str:
+    data = snapshot_to_dict(snapshot)
+    if compact:
+        return json.dumps(data, ensure_ascii=False, separators=(',', ':'),
+                          default=str)
+    return json.dumps(data, ensure_ascii=False, indent=2, default=str)
 
 
 # ═══════════════════════════════════════════════════════════
@@ -599,11 +721,13 @@ class StateWriteInterface(Protocol):
 __all__ = [
     'Affect', 'Bond', 'Drives', 'Derived', 'Diagnostics',
     'InternalStateSnapshot', 'ChatStateView', 'StateWriteInterface',
-    'INTENTS', 'FORBIDDEN_STYLE_TOKENS',
+    'INTENTS', 'FORBIDDEN_STYLE_TOKENS', 'DRIVE_KEYS',
+    'DEFAULT_MEMORIES_DB',
     'longing_emotion_legacy_curve', 'longing_desire_legacy_curve',
     'longing_candidate_curve', 'bond_from_emotion_row',
-    'candidate_drives_from_raw', 'pick_candidate_intent',
+    'drives_from_raw', 'candidate_drives_from_raw', 'pick_candidate_intent',
     'compute_snapshot', 'capture_shadow_snapshot',
-    'gather_legacy_readings', 'build_chat_view',
+    'gather_legacy_readings', 'gather_legacy_readings_isolated',
+    'memories_db_path', 'build_chat_view',
     'snapshot_to_dict', 'snapshot_to_json',
 ]
