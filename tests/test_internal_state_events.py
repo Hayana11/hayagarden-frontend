@@ -1,16 +1,22 @@
-"""Phase 1A-1 — observe_user_message / plan_user_message_transition（仅临时 SQLite）。"""
+"""Phase 1A-1 — observe_user_message / plan_user_message_transition（仅临时 SQLite）。
+
+禁止 import emotion_engine / drive_engine / desire / gateway：
+parity 通过 AST + literal_eval 读取旧源码常量，不触发旧模块 ensure_table。
+"""
 
 from __future__ import annotations
 
 import ast
 import hashlib
-import importlib
+import json
 import math
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
 ROOT = str(Path(__file__).resolve().parents[1])
 if ROOT not in sys.path:
@@ -22,9 +28,11 @@ import internal_state_store as store
 
 
 T0 = '2026-07-21 12:00:00'
+T_MINUS_1H = '2026-07-21 11:00:00'
 T_2H = '2026-07-21 14:00:00'
 T_24H = '2026-07-22 12:00:00'
 T_6H = '2026-07-21 18:00:00'
+T_13H = '2026-07-21 13:00:00'
 
 
 def _snapshot(**overrides):
@@ -41,6 +49,38 @@ def _snapshot(**overrides):
     for k, v in overrides.items():
         setattr(base, k, v)
     return base
+
+
+def _load_emotion_desire_constants() -> dict:
+    """从 emotion_engine.py 源码 AST 提取常量；绝不 import 该模块。"""
+    src = Path(ROOT, 'emotion_engine.py').read_text(encoding='utf-8')
+    tree = ast.parse(src)
+    wanted = ('DESIRE_LEXICON', 'DESIRE_WEIGHTS', 'DESIRE_CAP')
+    out = {}
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and len(node.targets) == 1:
+            target = node.targets[0]
+            if isinstance(target, ast.Name) and target.id in wanted:
+                out[target.id] = ast.literal_eval(node.value)
+    missing = set(wanted) - set(out)
+    if missing:
+        raise AssertionError(f'missing constants in emotion_engine.py: {missing}')
+    return out
+
+
+def _score_with_constants(text: str, lexicon, weights, cap) -> dict:
+    """用提取出的常量本地重算，避免 import emotion_engine。"""
+    p_delta = 0.0
+    i_delta = 0.0
+    for category, words in lexicon.items():
+        hits = sum(1 for w in words if w in text)
+        if hits > 0:
+            effective = math.log1p(hits)
+            p_delta += weights[category]['p'] * effective
+            i_delta += weights[category]['i'] * effective
+    p_delta = max(-cap['p'], min(cap['p'], p_delta))
+    i_delta = max(-cap['i'], min(cap['i'], i_delta))
+    return {'p_delta': round(p_delta, 4), 'i_delta': round(i_delta, 4)}
 
 
 class EventsBase(unittest.TestCase):
@@ -60,18 +100,12 @@ class EventsBase(unittest.TestCase):
 
 class LongingClockTests(EventsBase):
     def test_longing_0h_2h_24h(self):
-        cases = [
-            (T0, 0.0),
-            (T_2H, None),  # filled below
-            (T_24H, None),
-        ]
-        # expected via frozen τ18 curve
-        expect_2h = isv3.longing_desire_legacy_curve(2.0)
-        expect_24h = isv3.longing_desire_legacy_curve(24.0)
-        cases[1] = (T_2H, expect_2h)
-        cases[2] = (T_24H, expect_24h)
-
-        for created_at, expect in cases:
+        expect = {
+            T0: isv3.longing_desire_legacy_curve(0.0),
+            T_2H: isv3.longing_desire_legacy_curve(2.0),
+            T_24H: isv3.longing_desire_legacy_curve(24.0),
+        }
+        for created_at, want in expect.items():
             plan = events.plan_user_message_transition(
                 self.state(),
                 message_id=1,
@@ -80,7 +114,7 @@ class LongingClockTests(EventsBase):
                 previous_user_at=T0,
             )
             self.assertAlmostEqual(
-                plan['payload']['longing_before_reunion'], expect, places=3,
+                plan['payload']['longing_before_reunion'], want, places=3,
                 msg=f'created_at={created_at}')
             self.assertFalse(plan['payload']['clock_missing'])
 
@@ -96,7 +130,6 @@ class LongingClockTests(EventsBase):
         self.assertEqual(plan['payload']['longing_before_reunion'], 0.0)
 
     def test_current_message_time_not_used_as_previous(self):
-        """显式 previous=T0；若误用 created_at 当 previous，24h longing 会变 0。"""
         created = T_24H
         plan = events.plan_user_message_transition(
             self.state(),
@@ -108,11 +141,9 @@ class LongingClockTests(EventsBase):
         expect = isv3.longing_desire_legacy_curve(24.0)
         self.assertAlmostEqual(plan['payload']['longing_before_reunion'], expect)
         self.assertNotAlmostEqual(plan['payload']['longing_before_reunion'], 0.0)
-        # 证明未把 created_at 当作 previous：idle 应为 24 而非 0
         self.assertAlmostEqual(plan['diagnostics']['user_idle_hours'], 24.0)
 
     def test_observe_does_not_query_chat_messages(self):
-        # 即便临时库里有误导性「当前消息时间」，也不得读取
         self.conn.execute(
             'CREATE TABLE chat_messages ('
             'id INTEGER PRIMARY KEY, author TEXT, created_at TEXT)')
@@ -129,16 +160,100 @@ class LongingClockTests(EventsBase):
         )
         self.assertEqual(r.status, 'applied')
         ev = store.read_event(self.conn, 'user_rule:99')
-        payload = __import__('json').loads(ev['payload_json'])
+        payload = json.loads(ev['payload_json'])
         self.assertEqual(payload['previous_user_at'], T0)
         self.assertAlmostEqual(
             payload['longing_before_reunion'],
             isv3.longing_desire_legacy_curve(24.0))
 
+    def test_previous_user_after_created_at_is_invalid(self):
+        with self.assertRaises(store.StoreError) as ctx:
+            events.plan_user_message_transition(
+                self.state(),
+                message_id=4,
+                text='你好',
+                created_at=T0,
+                previous_user_at=T_2H,
+            )
+        self.assertIn('previous_user_at', str(ctx.exception))
+        with self.assertRaises(store.StoreError):
+            events.observe_user_message(
+                self.conn,
+                message_id=4,
+                text='你好',
+                created_at=T0,
+                previous_user_at=T_2H,
+            )
+        self.assertIsNone(store.read_event(self.conn, 'user_rule:4'))
+        self.assertEqual(self.state()['state_version'], 0)
+
+
+class ClockRejectTests(EventsBase):
+    def test_invalid_created_at_rejected_without_consuming_key(self):
+        with self.assertRaises(store.StoreError) as ctx:
+            events.observe_user_message(
+                self.conn,
+                message_id=50,
+                text='你好',
+                created_at='not-a-timestamp',
+                previous_user_at=T0,
+            )
+        self.assertIn('not parseable', str(ctx.exception))
+        self.assertIsNone(store.read_event(self.conn, 'user_rule:50'))
+        st = self.state()
+        self.assertEqual(st['state_version'], 0)
+        self.assertEqual(st['p_updated_at'], T0)
+        self.assertEqual(st['passion'], 0.60)
+
+    def test_out_of_order_observe_does_not_rewind_state_clocks(self):
+        before = self.state()
+        with self.assertRaises(store.StoreError) as ctx:
+            events.observe_user_message(
+                self.conn,
+                message_id=51,
+                text='迟到的消息',
+                created_at=T_MINUS_1H,
+                previous_user_at=None,
+            )
+        self.assertIn('refusing to rewind', str(ctx.exception))
+        self.assertIsNone(store.read_event(self.conn, 'user_rule:51'))
+        after = self.state()
+        self.assertEqual(after['p_updated_at'], before['p_updated_at'])
+        self.assertEqual(after['i_updated_at'], before['i_updated_at'])
+        self.assertEqual(after['drives_updated_at'], before['drives_updated_at'])
+        self.assertEqual(after['passion'], before['passion'])
+        self.assertEqual(after['state_version'], before['state_version'])
+
+    def test_event_after_rejected_out_of_order_counts_only_new_interval(self):
+        """倒序被拒后，下一条正常消息只按真实新区间衰减，不双倍。"""
+        with self.assertRaises(store.StoreError):
+            events.observe_user_message(
+                self.conn,
+                message_id=52,
+                text='倒序',
+                created_at=T_MINUS_1H,
+                previous_user_at=None,
+            )
+        # 正常消息：12:00 → 13:00，应只衰减 1h
+        r = events.observe_user_message(
+            self.conn,
+            message_id=53,
+            text='无关键词消息',
+            created_at=T_13H,
+            previous_user_at=T0,
+        )
+        self.assertEqual(r.status, 'applied')
+        st = self.state()
+        expect_p = round(isv3.decay_exponential(0.60, 1.0, isv3.TAU_P_HOURS), 4)
+        self.assertAlmostEqual(st['passion'], expect_p, places=4)
+        self.assertEqual(st['p_updated_at'], T_13H)
+        # 若曾被拨回 11:00，则 13:00 会按 2h 衰减
+        wrong_2h = round(isv3.decay_exponential(0.60, 2.0, isv3.TAU_P_HOURS), 4)
+        self.assertNotAlmostEqual(st['passion'], wrong_2h, places=4)
+
 
 class BondMaterializeTests(EventsBase):
     def test_passion_tau6_intimacy_tau96(self):
-        # bootstrap 后 p/i_updated_at = T0；passion=0.60 intimacy=0.50
         plan = events.plan_user_message_transition(
             self.state(),
             message_id=10,
@@ -154,30 +269,10 @@ class BondMaterializeTests(EventsBase):
         self.assertAlmostEqual(
             plan['payload']['materialized_before']['intimacy'],
             round(expect_i, 4), places=4)
-        # 无关键词 → delta 0 → updates 等于物化值
         self.assertAlmostEqual(plan['updates']['passion'], round(expect_p, 4))
         self.assertAlmostEqual(plan['updates']['intimacy'], round(expect_i, 4))
         self.assertEqual(plan['updates']['p_updated_at'], T_6H)
         self.assertEqual(plan['updates']['i_updated_at'], T_6H)
-
-    def test_negative_time_fail_closed_no_reverse_decay(self):
-        st = self.state()
-        # 人为把基准时间推到未来
-        self.conn.execute(
-            "UPDATE internal_state_v3 SET p_updated_at=?, i_updated_at=? WHERE id=1",
-            (T_24H, T_24H))
-        self.conn.commit()
-        st = self.state()
-        plan = events.plan_user_message_transition(
-            st,
-            message_id=11,
-            text='无关键词',
-            created_at=T0,  # 早于 p_updated_at
-            previous_user_at=None,
-        )
-        # 不倒着衰减：hours=0，passion/intimacy 保持原值
-        self.assertAlmostEqual(plan['payload']['materialized_before']['passion'], 0.60)
-        self.assertAlmostEqual(plan['payload']['materialized_before']['intimacy'], 0.50)
 
 
 class DrivesMaterializeTests(EventsBase):
@@ -191,7 +286,6 @@ class DrivesMaterializeTests(EventsBase):
             created_at=T_6H,
             previous_user_at=T0,
         )
-        # 手工对齐 v3 解析解
         bond_p = isv3.decay_exponential(0.60, 6.0, isv3.TAU_P_HOURS)
         t = 6.0
         base_att = 0.50
@@ -202,7 +296,6 @@ class DrivesMaterializeTests(EventsBase):
         self.assertAlmostEqual(
             plan['payload']['materialized_before']['attachment'], expect_att)
         self.assertEqual(plan['updates']['drives_updated_at'], T_6H)
-        # libido cap 使用物化后 passion
         base_lib = 0.10
         cap_l = min(isv3.CAP_BOOST_LIMIT, isv3.DRIVE_CAP['libido'] + bond_p * 0.20)
         expect_lib = round(
@@ -210,10 +303,74 @@ class DrivesMaterializeTests(EventsBase):
                 -isv3.DRIVE_GROWTH_K['libido'] * t))), 4)
         self.assertAlmostEqual(plan['updates']['libido'], expect_lib)
 
+    def test_zero_elapsed_drive_materialization_is_identity(self):
+        st = self.state()
+        plan = events.plan_user_message_transition(
+            st,
+            message_id=21,
+            text='无关键词',
+            created_at=T0,
+            previous_user_at=T0,
+        )
+        mat = plan['diagnostics']['drives_materialized']
+        for key in isv3.DRIVE_KEYS:
+            self.assertAlmostEqual(
+                mat[key], float(st[key]), places=4, msg=key)
+        self.assertAlmostEqual(
+            plan['payload']['materialized_before']['fatigue'], 0.40, places=4)
+        self.assertAlmostEqual(
+            plan['payload']['materialized_before']['attachment'], 0.50, places=4)
+
+    def test_zero_elapsed_user_message_only_applies_fatigue_restore(self):
+        plan = events.plan_user_message_transition(
+            self.state(),
+            message_id=22,
+            text='无关键词',
+            created_at=T0,
+            previous_user_at=T0,
+        )
+        # t=0：fatigue 物化恒等 0.40，仅 rest −0.12 → 0.28
+        self.assertAlmostEqual(
+            plan['payload']['materialized_before']['fatigue'], 0.40)
+        self.assertAlmostEqual(plan['updates']['fatigue'], 0.28)
+
+    def test_fatigue_does_not_reapply_na_on_every_message(self):
+        # 连续两条零间隔消息：不应每次 +na*0.06
+        r1 = events.observe_user_message(
+            self.conn,
+            message_id=23,
+            text='第一句',
+            created_at=T0,
+            previous_user_at=None,
+        )
+        self.assertEqual(r1.status, 'applied')
+        f1 = self.state()['fatigue']
+        self.assertAlmostEqual(f1, 0.28, places=4)
+
+        # 同刻第二条：t=0 相对新锚点，物化恒等后再 −0.12
+        r2 = events.observe_user_message(
+            self.conn,
+            message_id=24,
+            text='第二句',
+            created_at=T0,
+            previous_user_at=T0,
+        )
+        self.assertEqual(r2.status, 'applied')
+        f2 = self.state()['fatigue']
+        self.assertAlmostEqual(f2, max(0.0, 0.28 - 0.12), places=4)
+        # 旧错误路径：0.40+0.015-0.12=0.295，再 +0.015-0.12…
+        self.assertNotAlmostEqual(f1, 0.295, places=4)
+
 
 class KeywordParityTests(unittest.TestCase):
-    def test_parity_with_emotion_engine_samples(self):
-        import emotion_engine as ee
+    def test_lexicon_weights_cap_match_emotion_engine_source(self):
+        legacy = _load_emotion_desire_constants()
+        self.assertEqual(events.DESIRE_LEXICON, legacy['DESIRE_LEXICON'])
+        self.assertEqual(events.DESIRE_WEIGHTS, legacy['DESIRE_WEIGHTS'])
+        self.assertEqual(events.DESIRE_CAP, legacy['DESIRE_CAP'])
+
+    def test_parity_samples_against_extracted_constants(self):
+        legacy = _load_emotion_desire_constants()
         samples = [
             '今天天气不错',
             '想你了抱抱',
@@ -221,14 +378,21 @@ class KeywordParityTests(unittest.TestCase):
             '害怕哭了难受',
             '恨你走开滚',
             '想你想你想你抱抱陪我',
+            '摸摸摸摸摸摸',  # 多命中递减
+            '费佳陪我爱你',
         ]
         for text in samples:
-            legacy = ee.rule_score_desire(text)
+            expect = _score_with_constants(
+                text,
+                legacy['DESIRE_LEXICON'],
+                legacy['DESIRE_WEIGHTS'],
+                legacy['DESIRE_CAP'],
+            )
             ours = events.rule_score_desire(text)
             self.assertAlmostEqual(
-                ours['passion_delta'], legacy['p_delta'], places=4, msg=text)
+                ours['passion_delta'], expect['p_delta'], places=4, msg=text)
             self.assertAlmostEqual(
-                ours['intimacy_delta'], legacy['i_delta'], places=4, msg=text)
+                ours['intimacy_delta'], expect['i_delta'], places=4, msg=text)
 
     def test_no_keyword_delta_zero(self):
         r = events.rule_score_desire('今天天气不错xyz')
@@ -237,24 +401,27 @@ class KeywordParityTests(unittest.TestCase):
         self.assertEqual(r['hit_categories'], [])
 
     def test_multi_hit_log1p_diminishing(self):
-        # physical 多词命中应小于线性叠加
         one = events.rule_score_desire('摸')
         multi = events.rule_score_desire('摸摸抱抱亲亲')
         self.assertGreater(multi['passion_delta'], one['passion_delta'])
-        # 线性 3*0.18=0.54 会被 cap 到 0.40；log1p 路径应与 emotion 一致
-        import emotion_engine as ee
-        self.assertAlmostEqual(
-            multi['passion_delta'], ee.rule_score_desire('摸摸抱抱亲亲')['p_delta'])
+        # 线性 3×0.18 会超 cap；log1p 路径应低于线性且与提取常量一致
+        legacy = _load_emotion_desire_constants()
+        expect = _score_with_constants(
+            '摸摸抱抱亲亲',
+            legacy['DESIRE_LEXICON'],
+            legacy['DESIRE_WEIGHTS'],
+            legacy['DESIRE_CAP'],
+        )
+        self.assertAlmostEqual(multi['passion_delta'], expect['p_delta'])
 
 
 class SettlementTests(EventsBase):
     def test_attachment_above_threshold_subtracts(self):
-        # attachment 物化后仍 >0.3
         plan = events.plan_user_message_transition(
             self.state(),
             message_id=30,
             text='你好',
-            created_at=T0,  # 无时间流逝
+            created_at=T0,
             previous_user_at=T0,
         )
         mat = plan['payload']['materialized_before']['attachment']
@@ -292,9 +459,9 @@ class SettlementTests(EventsBase):
             created_at=T0,
             previous_user_at=T0,
         )
-        mat_f = plan['payload']['materialized_before']['fatigue']
         self.assertAlmostEqual(
-            plan['updates']['fatigue'], max(0.0, mat_f - 0.12), places=4)
+            plan['payload']['materialized_before']['fatigue'], 0.40)
+        self.assertAlmostEqual(plan['updates']['fatigue'], 0.28)
         self.assertEqual(
             plan['payload']['legacy_settlement']['fatigue_restore'], 0.12)
 
@@ -312,7 +479,6 @@ class SettlementTests(EventsBase):
             plan['payload']['candidate_settlement']['mode'], 'shadow_only')
         self.assertAlmostEqual(
             plan['payload']['candidate_settlement']['result_attachment'], cand)
-        # 权威路径是减法，不是乘性
         self.assertNotAlmostEqual(plan['updates']['attachment'], cand)
 
     def test_reunion_boost_recorded_not_applied(self):
@@ -327,7 +493,6 @@ class SettlementTests(EventsBase):
         expect_boost = round(0.05 + longing * 0.10, 3)
         self.assertAlmostEqual(
             plan['payload']['candidate_reunion_boost'], expect_boost)
-        # intimacy 不含 boost
         mat_i = plan['payload']['materialized_before']['intimacy']
         self.assertAlmostEqual(plan['updates']['intimacy'], mat_i)
 
@@ -371,7 +536,6 @@ class ObserveIdempotencyTests(EventsBase):
         self.assertEqual(self.state()['state_version'], ver)
 
     def test_version_conflict_then_same_key_retry(self):
-        # 先用 store 推高 version
         store.apply_state_update(
             self.conn,
             event_key='noise:1',
@@ -381,7 +545,6 @@ class ObserveIdempotencyTests(EventsBase):
             mutator=lambda s: {'pa': 0.61},
             expected_state_version=0,
         )
-        # 用过期 expected → conflict，且不消费 user_rule key
         r1 = events.observe_user_message(
             self.conn,
             message_id=102,
@@ -393,7 +556,6 @@ class ObserveIdempotencyTests(EventsBase):
         self.assertEqual(r1.status, 'version_conflict')
         self.assertIsNone(store.read_event(self.conn, 'user_rule:102'))
 
-        # 重读版本后同 key 重试成功（重新 plan）
         latest = self.state()['state_version']
         r2 = events.observe_user_message(
             self.conn,
@@ -405,6 +567,148 @@ class ObserveIdempotencyTests(EventsBase):
         )
         self.assertEqual(r2.status, 'applied')
         self.assertIsNotNone(store.read_event(self.conn, 'user_rule:102'))
+
+    def test_existing_wrong_event_type_is_conflict(self):
+        self.conn.execute(
+            """
+            INSERT INTO internal_state_events (
+                event_key, event_type, source_id, payload_json, payload_hash,
+                status, state_version_before, state_version_after, applied_at
+            ) VALUES (?, ?, ?, ?, ?, 'applied', 0, 0, ?)
+            """,
+            (
+                'user_rule:103',
+                'wrong_type',
+                '103',
+                json.dumps({
+                    'message_id': 103,
+                    'created_at': T_2H,
+                    'previous_user_at': T0,
+                    'text_hash': hashlib.sha256('你好'.encode('utf-8')).hexdigest(),
+                }, ensure_ascii=False, sort_keys=True, separators=(',', ':')),
+                'deadbeef',
+                T0,
+            ),
+        )
+        self.conn.commit()
+        r = events.observe_user_message(
+            self.conn,
+            message_id=103,
+            text='你好',
+            created_at=T_2H,
+            previous_user_at=T0,
+        )
+        self.assertEqual(r.status, 'idempotency_conflict')
+        self.assertEqual(self.state()['state_version'], 0)
+
+    def test_existing_wrong_source_id_is_conflict(self):
+        self.conn.execute(
+            """
+            INSERT INTO internal_state_events (
+                event_key, event_type, source_id, payload_json, payload_hash,
+                status, state_version_before, state_version_after, applied_at
+            ) VALUES (?, ?, ?, ?, ?, 'applied', 0, 0, ?)
+            """,
+            (
+                'user_rule:104',
+                'user_rule',
+                'not-104',
+                json.dumps({
+                    'message_id': 104,
+                    'created_at': T_2H,
+                    'previous_user_at': T0,
+                    'text_hash': hashlib.sha256('你好'.encode('utf-8')).hexdigest(),
+                }, ensure_ascii=False, sort_keys=True, separators=(',', ':')),
+                'deadbeef',
+                T0,
+            ),
+        )
+        self.conn.commit()
+        r = events.observe_user_message(
+            self.conn,
+            message_id=104,
+            text='你好',
+            created_at=T_2H,
+            previous_user_at=T0,
+        )
+        self.assertEqual(r.status, 'idempotency_conflict')
+
+    def test_same_observation_race_with_different_planned_state_is_duplicate(self):
+        """A plan 后、apply 前被抢先；store 可能报 conflict，业务校正为 duplicate。"""
+        a_entered_apply = threading.Event()
+        b_finished = threading.Event()
+        results: dict[str, store.ApplyResult] = {}
+        errors: list[BaseException] = []
+        db_path = self.db_path
+        holder: dict[str, int | None] = {'a_ident': None}
+
+        real_apply = store.apply_state_update
+
+        def gated_apply(*args, **kwargs):
+            # 仅拦截 A 线程对同一观察的 apply；B 走真实路径
+            if (kwargs.get('event_key') == 'user_rule:105'
+                    and threading.get_ident() == holder['a_ident']):
+                a_entered_apply.set()
+                if not b_finished.wait(timeout=5.0):
+                    raise TimeoutError('B did not finish before A apply resumed')
+            return real_apply(*args, **kwargs)
+
+        obs_kwargs = dict(
+            message_id=105,
+            text='你好竞态',
+            created_at=T_2H,
+            previous_user_at=T0,
+        )
+
+        def thread_a():
+            holder['a_ident'] = threading.get_ident()
+            conn = store.open_store(db_path)
+            try:
+                with mock.patch(
+                        'internal_state_events.apply_state_update',
+                        side_effect=gated_apply):
+                    results['a'] = events.observe_user_message(
+                        conn, **obs_kwargs)
+            except BaseException as exc:  # noqa: BLE001
+                errors.append(exc)
+            finally:
+                conn.close()
+
+        def thread_b():
+            conn = store.open_store(db_path)
+            try:
+                if not a_entered_apply.wait(timeout=5.0):
+                    raise TimeoutError('A never entered apply')
+                store.apply_state_update(
+                    conn,
+                    event_key='noise:race',
+                    event_type='noise',
+                    source_id='race',
+                    payload={'n': 1},
+                    mutator=lambda s: {'pa': 0.66, 'passion': 0.55},
+                )
+                results['b'] = events.observe_user_message(
+                    conn, **obs_kwargs)
+            except BaseException as exc:  # noqa: BLE001
+                errors.append(exc)
+            finally:
+                b_finished.set()
+                conn.close()
+
+        ta = threading.Thread(target=thread_a)
+        tb = threading.Thread(target=thread_b)
+        ta.start()
+        tb.start()
+        ta.join(timeout=10.0)
+        tb.join(timeout=10.0)
+
+        self.assertEqual(errors, [])
+        self.assertEqual(results['b'].status, 'applied')
+        self.assertEqual(results['a'].status, 'duplicate')
+        ev = store.read_event(self.conn, 'user_rule:105')
+        self.assertIsNotNone(ev)
+        st = store.read_state(self.conn)
+        self.assertEqual(st['state_version'], 2)  # noise + one user_rule
 
 
 class PayloadPrivacyTests(EventsBase):
@@ -422,7 +726,7 @@ class PayloadPrivacyTests(EventsBase):
         raw = ev['payload_json']
         self.assertNotIn(secret, raw)
         self.assertNotIn('"text":', raw)
-        payload = __import__('json').loads(raw)
+        payload = json.loads(raw)
         self.assertEqual(
             payload['text_hash'],
             hashlib.sha256(secret.encode('utf-8')).hexdigest())
@@ -450,31 +754,25 @@ class ImportGuardTests(unittest.TestCase):
                     found.add(node.module)
         self.assertFalse(forbidden & found, msg=f'forbidden imports: {forbidden & found}')
 
+    def test_events_tests_do_not_import_legacy_engines(self):
+        src = Path(__file__).read_text(encoding='utf-8')
+        tree = ast.parse(src)
+        forbidden = {'emotion_engine', 'drive_engine', 'desire', 'gateway'}
+        found = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    found.add(alias.name.split('.')[0])
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                found.add(node.module.split('.')[0])
+        self.assertFalse(forbidden & found)
+
     def test_no_module_level_side_effects(self):
         src = Path(ROOT, 'internal_state_events.py').read_text(encoding='utf-8')
         tree = ast.parse(src)
         for node in tree.body:
             if isinstance(node, ast.Expr) and isinstance(node.value, ast.Call):
                 self.fail(f'module-level call forbidden: line {node.lineno}')
-
-    def test_runtime_import_does_not_load_legacy_engines(self):
-        # 清掉可能已加载的模块后，只加载 events，确认未拉起旧引擎
-        # （internal_state 允许；旧引擎禁止）
-        for name in list(sys.modules):
-            if name in ('internal_state_events',) or name.startswith(
-                    'internal_state_events.'):
-                del sys.modules[name]
-        before = {
-            k for k in ('emotion_engine', 'drive_engine', 'desire', 'gateway')
-            if k in sys.modules
-        }
-        importlib.reload(events) if 'internal_state_events' in sys.modules else \
-            importlib.import_module('internal_state_events')
-        after = {
-            k for k in ('emotion_engine', 'drive_engine', 'desire', 'gateway')
-            if k in sys.modules
-        }
-        self.assertEqual(before, after)
 
     def test_temp_sqlite_only_smoke(self):
         with tempfile.TemporaryDirectory() as td:
