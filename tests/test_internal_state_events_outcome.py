@@ -19,6 +19,7 @@ ROOT = str(Path(__file__).resolve().parents[1])
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
+import internal_state as isv3
 import internal_state_events as events
 import internal_state_store as store
 
@@ -94,7 +95,7 @@ def _outcome_kwargs(**overrides):
         desire_action='github',
         fired_drive='curiosity',
         desire_driven=False,
-        longing_for_boost=0.0,
+        user_idle_hours=0.0,
         outcome_at=T0,
     )
     base.update(overrides)
@@ -287,10 +288,42 @@ class FixedDischargeTests(OutcomeBase):
 
 
 class LongingMaterializeTests(OutcomeBase):
-    def test_different_longing_changes_attachment_materialized(self):
+    def test_tau18_formula_known_values(self):
+        """L = 0.85*(1-(1+t/18)^-0.8)，clamp 0.90；内部派生写入 diagnostics。"""
+        cases = {
+            0.0: isv3.longing_desire_legacy_curve(0.0),
+            18.0: isv3.longing_desire_legacy_curve(18.0),
+            1000.0: isv3.longing_desire_legacy_curve(1000.0),
+        }
+        self.assertAlmostEqual(cases[0.0], 0.0, places=3)
+        self.assertLessEqual(cases[1000.0], 0.90)
+        for idle, expect in cases.items():
+            with self.subTest(idle=idle):
+                plan = self.plan(
+                    wake_run_id=f'L-{idle}',
+                    user_idle_hours=idle,
+                    executor_action='message',
+                    desire_action=None,
+                    fired_drive='attachment',
+                    outcome_at=T0,
+                )
+                self.assertAlmostEqual(
+                    plan['diagnostics']['longing_for_boost'], expect, places=3)
+                self.assertEqual(plan['payload']['user_idle_hours'], idle)
+                self.assertNotIn('longing_for_boost', plan['payload'])
+
+    def test_same_idle_deterministic_longing(self):
+        a = self.plan(wake_run_id='d1', user_idle_hours=18.0)
+        b = self.plan(wake_run_id='d2', user_idle_hours=18.0)
+        self.assertEqual(
+            a['diagnostics']['longing_for_boost'],
+            b['diagnostics']['longing_for_boost'],
+        )
+
+    def test_different_idle_changes_attachment_materialized(self):
         plan0 = self.plan(
             wake_run_id='l0',
-            longing_for_boost=0.0,
+            user_idle_hours=0.0,
             outcome_at=T_12H,
             executor_action='message',
             desire_action=None,
@@ -298,17 +331,21 @@ class LongingMaterializeTests(OutcomeBase):
         )
         plan_hi = self.plan(
             wake_run_id='l1',
-            longing_for_boost=0.8,
+            user_idle_hours=18.0,
             outcome_at=T_12H,
             executor_action='message',
             desire_action=None,
             fired_drive='attachment',
         )
+        self.assertAlmostEqual(
+            plan_hi['diagnostics']['longing_for_boost'],
+            isv3.longing_desire_legacy_curve(18.0),
+            places=3,
+        )
         att0 = plan0['diagnostics']['materialized_before']['attachment']
         att1 = plan_hi['diagnostics']['materialized_before']['attachment']
         self.assertNotAlmostEqual(att0, att1, places=4)
         self.assertGreater(att1, att0)
-        # fixed / candidate 均从提高后的 attachment 起算
         self.assertAlmostEqual(
             plan_hi['updates']['attachment'],
             round(max(0.0, att1 - FIXED['attachment']), 4),
@@ -320,21 +357,28 @@ class LongingMaterializeTests(OutcomeBase):
             places=4,
         )
 
-    def test_illegal_longing_does_not_consume_key(self):
-        for bad in (None, True, '0.5', float('nan'), -0.1, 1.1):
+    def test_illegal_user_idle_hours_does_not_consume_key(self):
+        for bad in (None, True, '0.5', float('nan'), float('inf'), -0.1):
             with self.subTest(bad=bad):
                 with self.assertRaises(store.StoreError):
                     events.apply_outcome(
                         self.conn,
                         **_outcome_kwargs(
                             wake_run_id=f'lg-{id(bad)}',
-                            longing_for_boost=bad,  # type: ignore[arg-type]
+                            user_idle_hours=bad,  # type: ignore[arg-type]
                         ),
                     )
                 self.assertIsNone(
                     store.read_event(
                         self.conn, f'wake_outcome:lg-{id(bad)}'))
         self.assertEqual(self.state()['state_version'], 0)
+
+    def test_public_api_has_no_longing_for_boost_parameter(self):
+        import inspect
+        for fn in (events.plan_outcome_transition, events.apply_outcome):
+            params = inspect.signature(fn).parameters
+            self.assertIn('user_idle_hours', params)
+            self.assertNotIn('longing_for_boost', params)
 
 
 class MaterializeThenSettleTests(OutcomeBase):
@@ -353,7 +397,7 @@ class MaterializeThenSettleTests(OutcomeBase):
             desire_action='github',
             fired_drive='curiosity',
             desire_driven=False,
-            longing_for_boost=0.0,
+            user_idle_hours=0.0,
             outcome_at=T_6H,
         )
         mat = plan['diagnostics']['materialized_before']
@@ -421,41 +465,86 @@ class DesireDiagnosticsTests(OutcomeBase):
                     places=4,
                 )
 
-    def test_desire_driven_live_double_diagnostics_only(self):
+    def test_live_double_none_applies_duty_ratio_on_executor(self):
+        """none + desire_driven：fixed fatigue-0.04 后，再 duty×0.8、fatigue+0.08。"""
         plan = self.plan(
-            executor_action='explore',
-            desire_action='github',
-            fired_drive='curiosity',
+            executor_action='none',
+            desire_action='github',  # mapping 用；不得影响 live-double
+            fired_drive='duty',
             desire_driven=True,
             outcome_at=T0,
         )
         fixed = plan['diagnostics']['legacy_fixed_after']
         double = plan['diagnostics']['legacy_live_double_after']
-        self.assertIsNotNone(double)
-        expect_cur = round(max(0.0, 0.70 - FIXED['curiosity']), 4)
-        self.assertAlmostEqual(fixed['curiosity'], expect_cur, places=4)
+        ratio = plan['diagnostics']['legacy_desire_ratio_after']
         self.assertAlmostEqual(
-            double['curiosity'],
-            round(expect_cur * DESIRE_RATIO['github']['curiosity'], 4),
+            fixed['fatigue'],
+            round(max(0.0, 0.30 - FIXED_FATIGUE), 4),
             places=4,
         )
-        self.assertEqual(plan['updates']['curiosity'], fixed['curiosity'])
-        self.assertNotEqual(plan['updates']['curiosity'], double['curiosity'])
-
-        r = events.apply_outcome(
-            self.conn,
-            **_outcome_kwargs(desire_driven=True, outcome_at=T0),
+        self.assertAlmostEqual(fixed['duty'], 0.55, places=4)
+        # live-double 跟 executor none，不是 desire_action=github
+        self.assertAlmostEqual(
+            double['duty'],
+            round(fixed['duty'] * DESIRE_RATIO['none']['duty'], 4),
+            places=4,
         )
-        self.assertEqual(r.status, 'applied')
-        st = self.state()
-        self.assertAlmostEqual(st['curiosity'], expect_cur, places=4)
+        self.assertAlmostEqual(
+            double['fatigue'],
+            round(min(1.0, fixed['fatigue'] + DESIRE_FATIGUE), 4),
+            places=4,
+        )
+        # mapping 仍按 github（curiosity×0.5），与 live-double 分流
+        self.assertAlmostEqual(
+            ratio['curiosity'],
+            round(0.70 * DESIRE_RATIO['github']['curiosity'], 4),
+            places=4,
+        )
+        self.assertNotAlmostEqual(double['curiosity'], ratio['curiosity'])
+        roles = plan['diagnostics']['diagnostics_roles']
+        self.assertIn('mapping comparison', roles['legacy_desire_ratio_after'])
+        self.assertIn('exact current-live', roles['legacy_live_double_after'])
+
+    def test_live_double_message_diary_explore_fatigue_only(self):
+        """message/diary/explore + desire_driven：不再乘普通 drive，只 fatigue+0.08。"""
+        for exec_act in ('message', 'diary', 'explore'):
+            with self.subTest(executor_action=exec_act):
+                plan = self.plan(
+                    wake_run_id=f'live-{exec_act}',
+                    executor_action=exec_act,
+                    desire_action='github',
+                    fired_drive='curiosity',
+                    desire_driven=True,
+                    outcome_at=T0,
+                )
+                fixed = plan['diagnostics']['legacy_fixed_after']
+                double = plan['diagnostics']['legacy_live_double_after']
+                ratio = plan['diagnostics']['legacy_desire_ratio_after']
+                expect_cur = round(max(0.0, 0.70 - FIXED['curiosity']), 4)
+                self.assertAlmostEqual(fixed['curiosity'], expect_cur, places=4)
+                # live-double：普通 drive 保持 fixed，不乘 github
+                for k in FIXED:
+                    self.assertAlmostEqual(double[k], fixed[k], places=4)
+                self.assertAlmostEqual(
+                    double['fatigue'],
+                    round(min(1.0, fixed['fatigue'] + DESIRE_FATIGUE), 4),
+                    places=4,
+                )
+                # mapping 仍受 desire_action=github 影响
+                self.assertAlmostEqual(
+                    ratio['curiosity'],
+                    round(0.70 * DESIRE_RATIO['github']['curiosity'], 4),
+                    places=4,
+                )
+                self.assertNotEqual(double['curiosity'], ratio['curiosity'])
+                self.assertEqual(plan['updates']['curiosity'], fixed['curiosity'])
 
     def test_desire_driven_false_double_is_none(self):
         plan = self.plan(desire_driven=False)
         self.assertIsNone(plan['diagnostics']['legacy_live_double_after'])
 
     def test_explore_without_desire_action_ratio_is_fatigue_only(self):
-        """executor explore 不在 desire 表：ratio 只加 fatigue。"""
+        """desire_action=None：mapping ratio 只加 fatigue。"""
         plan = self.plan(
             executor_action='explore',
             desire_action=None,
@@ -499,7 +588,7 @@ class ResultJsonAuditTests(OutcomeBase):
             set(payload.keys()),
             {
                 'wake_run_id', 'executor_action', 'desire_action',
-                'fired_drive', 'desire_driven', 'longing_for_boost',
+                'fired_drive', 'desire_driven', 'user_idle_hours',
                 'outcome_at',
             },
         )
@@ -613,11 +702,11 @@ class IdempotencyTests(OutcomeBase):
     def test_same_key_different_longing_conflict(self):
         events.apply_outcome(
             self.conn,
-            **_outcome_kwargs(wake_run_id='c3', longing_for_boost=0.0),
+            **_outcome_kwargs(wake_run_id='c3', user_idle_hours=0.0),
         )
         r = events.apply_outcome(
             self.conn,
-            **_outcome_kwargs(wake_run_id='c3', longing_for_boost=0.5),
+            **_outcome_kwargs(wake_run_id='c3', user_idle_hours=6.0),
         )
         self.assertEqual(r.status, 'idempotency_conflict')
 
@@ -823,7 +912,8 @@ class PayloadAndGuardTests(OutcomeBase):
         )
         fixed_c = round(max(0.0, 0.70 - FIXED['curiosity']), 4)
         ratio_c = round(0.70 * DESIRE_RATIO['github']['curiosity'], 4)
-        double_c = round(fixed_c * DESIRE_RATIO['github']['curiosity'], 4)
+        # live-double 跟 executor explore：不乘 curiosity
+        double_c = fixed_c
         self.assertEqual(
             plan['diagnostics']['legacy_fixed_after']['curiosity'], fixed_c)
         self.assertEqual(

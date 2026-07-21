@@ -1059,7 +1059,9 @@ def get_scored_event_stats(conn: sqlite3.Connection) -> dict:
 #
 # action 合同拆分：
 #   executor_action — Wake 合同：none / message / diary / explore
-#   desire_action   — desire.ACTION_SATISFY 键（可选）；用于 ratio 对照
+#                     固定结算 + legacy_live_double（真实 desire.satisfy 入参）
+#   desire_action   — desire.ACTION_SATISFY 键（可选）；仅 mapping 对照
+#   user_idle_hours — 权威用户空闲；内部 τ18 派生 longing，禁止外传 scalar
 #
 
 _WAKE_OUTCOME_EVENT_TYPE = 'wake_outcome'
@@ -1158,16 +1160,16 @@ def _require_desire_driven(value: Any) -> bool:
     return value
 
 
-def _require_longing_for_boost(value: Any) -> float:
-    """稳定输入：禁止静默当成 0；bool / 非有限 / 越界一律拒绝。"""
+def _require_user_idle_hours(value: Any) -> float:
+    """稳定源输入：真实用户空闲小时；禁止 bool / 字符串 / NaN / Inf / 负值。"""
     if type(value) is bool or type(value) not in (int, float):
         raise StoreError(
-            f'longing_for_boost must be a finite int/float in [0, 1]: {value!r}'
+            f'user_idle_hours must be a finite int/float >= 0: {value!r}'
         )
     v = float(value)
-    if not math.isfinite(v) or v < 0.0 or v > 1.0:
+    if not math.isfinite(v) or v < 0.0:
         raise StoreError(
-            f'longing_for_boost must be a finite int/float in [0, 1]: {value!r}'
+            f'user_idle_hours must be a finite int/float >= 0: {value!r}'
         )
     return v
 
@@ -1237,9 +1239,9 @@ def _apply_legacy_fixed_settlement(
 def _apply_legacy_desire_ratio(
     drives: Mapping[str, float], *, desire_action: Optional[str],
 ) -> dict:
-    """旧 desire.ACTION_SATISFY 对照；不写 state。
+    """Hypothetical mapping comparison：按 desire_action 查 ACTION_SATISFY。
 
-    desire_action=None 时仅加 fatigue（对应 executor 键不在表内的 live 行为）。
+    不宣称是线上真实执行结果；desire_action=None 时仅 fatigue +0.08。
     """
     out = _drives_dict_copy(drives)
     ratios = (
@@ -1247,6 +1249,24 @@ def _apply_legacy_desire_ratio(
         if desire_action is not None else {}
     )
     for key, ratio in ratios.items():
+        out[key] = round(max(0.0, out[key] * ratio), 4)
+    out['fatigue'] = round(
+        min(1.0, out['fatigue'] + _LEGACY_DESIRE_FATIGUE_COST), 4,
+    )
+    return out
+
+
+def _apply_legacy_live_desire_satisfy(
+    drives: Mapping[str, float], *, executor_action: str,
+) -> dict:
+    """Exact current-live：``desire.satisfy(executor_action)``。
+
+    生产 executor 把同一 Wake action 原样传入；ACTION_SATISFY 在 executor
+    词表中仅 ``none`` 有乘性行，``message/diary/explore`` 只加 fatigue。
+    """
+    out = _drives_dict_copy(drives)
+    for key, ratio in _LEGACY_DESIRE_ACTION_SATISFY.get(
+            executor_action, {}).items():
         out[key] = round(max(0.0, out[key] * ratio), 4)
     out['fatigue'] = round(
         min(1.0, out['fatigue'] + _LEGACY_DESIRE_FATIGUE_COST), 4,
@@ -1262,7 +1282,7 @@ def plan_outcome_transition(
     desire_action: Optional[str],
     fired_drive: Optional[str],
     desire_driven: bool,
-    longing_for_boost: float,
+    user_idle_hours: float,
     outcome_at: str,
 ) -> dict:
     """纯函数：Wake 结果 → drives updates + 对照 diagnostics。
@@ -1271,14 +1291,19 @@ def plan_outcome_transition(
     仅记录。不修改 Affect / Bond / last_scored_message_id。
 
     非 ``none`` 的 executor_action 必须显式提供 fired_drive；缺失 fail closed。
-    longing_for_boost 为稳定观察输入，禁止静默当成 0。
+    Longing 仅由 ``user_idle_hours`` 经冻结 τ18 公式派生，禁止外传 scalar。
     """
     rid = _require_wake_run_id(wake_run_id)
     exec_act = _require_executor_action(executor_action)
     des_act = _require_desire_action(desire_action)
     fired = _require_fired_drive(fired_drive)
     driven = _require_desire_driven(desire_driven)
-    longing = _require_longing_for_boost(longing_for_boost)
+    idle = _require_user_idle_hours(user_idle_hours)
+    longing = longing_desire_legacy_curve(idle)
+    if longing is None:
+        raise StoreError(
+            f'longing_desire_legacy_curve returned None for idle={idle!r}'
+        )
     outcome_canon = _canonicalize_ts(outcome_at, field='outcome_at')
     _require_drives_clock_for_outcome(state, outcome_at=outcome_canon)
 
@@ -1288,24 +1313,26 @@ def plan_outcome_transition(
             f"'none' (got executor_action={exec_act!r})"
         )
 
-    # Bond 只读衰减供 libido cap；attachment cap 使用显式 longing
+    # Bond 只读衰减供 libido cap；attachment cap 使用派生 longing
     bond_m = _materialize_bond(state, outcome_canon)
     drives_m = _materialize_drives(
         state,
         created_at=outcome_canon,
-        longing_for_boost=longing,
+        longing_for_boost=float(longing),
         passion_for_boost=bond_m['passion'],
     )
 
     legacy_fixed = _apply_legacy_fixed_settlement(
         drives_m, executor_action=exec_act, fired_drive=fired,
     )
+    # mapping comparison（可用独立 desire_action）
     legacy_ratio = _apply_legacy_desire_ratio(
         drives_m, desire_action=des_act,
     )
+    # exact current-live：fixed 后再 desire.satisfy(executor_action)
     if driven:
-        legacy_double = _apply_legacy_desire_ratio(
-            legacy_fixed, desire_action=des_act,
+        legacy_double = _apply_legacy_live_desire_satisfy(
+            legacy_fixed, executor_action=exec_act,
         )
     else:
         legacy_double = None
@@ -1325,7 +1352,7 @@ def plan_outcome_transition(
         'desire_action': des_act,
         'fired_drive': fired,
         'desire_driven': driven,
-        'longing_for_boost': longing,
+        'user_idle_hours': idle,
         'outcome_at': outcome_canon,
     }
 
@@ -1338,12 +1365,23 @@ def plan_outcome_transition(
             else None
         ),
         'candidate_attachment_ratio_after': candidate_att,
-        'longing_for_boost': longing,
+        'user_idle_hours': idle,
+        'longing_for_boost': float(longing),
         'executor_action': exec_act,
         'desire_action': des_act,
         'authority': 'legacy_fixed_discharge_phase1',
+        'diagnostics_roles': {
+            'legacy_desire_ratio_after': (
+                'hypothetical ACTION_SATISFY mapping comparison '
+                '(uses desire_action; not claimed as live execution)'
+            ),
+            'legacy_live_double_after': (
+                'exact current-live simulation: fixed discharge then '
+                'desire.satisfy(executor_action)'
+            ),
+        },
         'note': (
-            'desire ratio / live-double / attachment×0.45 are diagnostics only; '
+            'ratio / live-double / attachment×0.45 are diagnostics only; '
             'state applies fixed discharge once; result_json holds this audit'
         ),
     }
@@ -1363,7 +1401,7 @@ def apply_outcome(
     desire_action: Optional[str],
     fired_drive: Optional[str],
     desire_driven: bool,
-    longing_for_boost: float,
+    user_idle_hours: float,
     outcome_at: str,
     expected_state_version: Optional[int] = None,
 ) -> ApplyResult:
@@ -1378,7 +1416,7 @@ def apply_outcome(
     des_act = _require_desire_action(desire_action)
     fired = _require_fired_drive(fired_drive)
     driven = _require_desire_driven(desire_driven)
-    longing = _require_longing_for_boost(longing_for_boost)
+    idle = _require_user_idle_hours(user_idle_hours)
     outcome_canon = _canonicalize_ts(outcome_at, field='outcome_at')
 
     if exec_act != 'none' and fired is None:
@@ -1394,7 +1432,7 @@ def apply_outcome(
         'desire_action': des_act,
         'fired_drive': fired,
         'desire_driven': driven,
-        'longing_for_boost': longing,
+        'user_idle_hours': idle,
         'outcome_at': outcome_canon,
     }
 
@@ -1406,7 +1444,7 @@ def apply_outcome(
             desire_action=des_act,
             fired_drive=fired,
             desire_driven=driven,
-            longing_for_boost=longing,
+            user_idle_hours=idle,
             outcome_at=outcome_canon,
         )
         return ConditionalDecision(
