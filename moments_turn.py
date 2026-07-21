@@ -189,6 +189,7 @@ def insert_user_message(
             created_at = row['created_at'] if hasattr(row, 'keys') else row[0]
             created_at = str(created_at)[:19] if created_at else None
         # Shadow user_rule outbox：与 chat INSERT 同事务；缺表则 outbox_capture_gap
+        # 聊天主流程不得阻断；证据全失败时记 sticky alert（status fail-closed）
         if user_id is not None and created_at:
             try:
                 import internal_state_shadow as _shadow
@@ -217,9 +218,17 @@ def insert_user_message(
                                     error_code='outbox_capture_gap',
                                 )
                             except Exception:
-                                pass
-            except Exception:
-                pass
+                                _shadow.note_capture_evidence_failure(
+                                    f'user_rule message_id={user_id}'
+                                )
+            except Exception as _cap_exc:
+                try:
+                    import internal_state_shadow as _shadow2
+                    _shadow2.note_capture_evidence_failure(
+                        f'user_rule import/enable: {_cap_exc}'
+                    )
+                except Exception:
+                    pass
         conn.commit()
         turn_data['user_message_id'] = user_id
     finally:

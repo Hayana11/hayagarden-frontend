@@ -1111,17 +1111,18 @@ class SidecarMigrateRaceTests(unittest.TestCase):
         shadow.append_gap_incident_sidecar(
             db_path, failed_message_id=1, error_code='old',
         )
-        # Hook rename：在 rename 之后、处理之前追加新行到新的 canonical
+        # Hook rename：claim *.json → *.processing 之后再写新文件
         real_rename = os.rename
         appended = {}
 
         def rename_and_append(src, dst):
             real_rename(src, dst)
-            if str(src).endswith('.shadow_proof_gap.jsonl') and 'processing' in str(dst):
-                shadow.append_gap_incident_sidecar(
-                    db_path, failed_message_id=2, error_code='new_during_migrate',
-                )
-                appended['ok'] = True
+            if str(src).endswith('.json') and str(dst).endswith('.json.processing'):
+                if 'shadow_gap_incidents' in str(src):
+                    shadow.append_gap_incident_sidecar(
+                        db_path, failed_message_id=2, error_code='new_during_migrate',
+                    )
+                    appended['ok'] = True
 
         conn = store.open_store(db_path)
         try:
@@ -1133,11 +1134,8 @@ class SidecarMigrateRaceTests(unittest.TestCase):
                 i['message_id']
                 for i in shadow.list_unresolved_gap_incidents(conn)
             }
-            # old 已迁入；new 仍在 canonical sidecar 或也已可见
             self.assertIn(1, mids)
-            # 新 append 的 canonical 仍应 pending
             self.assertGreaterEqual(shadow.count_gap_sidecar_pending(db_path), 1)
-            # 再 migrate 一次把新行迁入
             shadow.migrate_proof_gap_sidecar(conn, db_path=db_path)
             mids2 = {
                 i['message_id']
@@ -1148,18 +1146,63 @@ class SidecarMigrateRaceTests(unittest.TestCase):
         finally:
             conn.close()
 
+    def test_open_tmp_before_migrate_survives(self):
+        """writer 已 open(.tmp) 尚未 write 时 migrator 跑完，最终 incident 仍在。"""
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        db_path = str(Path(tmp.name) / 'fd_race.db')
+        opened = threading.Event()
+        release_write = threading.Event()
+        real_open = open
+        done = {}
+
+        def gated_open(file, mode='r', *args, **kwargs):
+            path_s = str(file)
+            if path_s.endswith('.tmp') and isinstance(mode, str) and 'w' in mode:
+                fh = real_open(file, mode, *args, **kwargs)
+                opened.set()
+                self.assertTrue(release_write.wait(timeout=5))
+                return fh
+            return real_open(file, mode, *args, **kwargs)
+
+        def writer():
+            with mock.patch('builtins.open', side_effect=gated_open):
+                shadow.append_gap_incident_sidecar(
+                    db_path, failed_message_id=9, error_code='fd_race',
+                )
+            done['ok'] = True
+
+        t = threading.Thread(target=writer, daemon=True)
+        t.start()
+        self.assertTrue(opened.wait(timeout=5))
+        conn = store.open_store(db_path)
+        try:
+            _seed_emotion(conn)
+            shadow.ensure_shadow_schema(conn, db_path=db_path)
+            # migrator 时只有 .tmp，不应吞掉尚未 rename 的证据
+            release_write.set()
+            t.join(timeout=5)
+            self.assertTrue(done.get('ok'))
+            shadow.migrate_proof_gap_sidecar(conn, db_path=db_path)
+            mids = {
+                i['message_id']
+                for i in shadow.list_unresolved_gap_incidents(conn)
+            }
+            self.assertIn(9, mids)
+        finally:
+            conn.close()
+
     def test_corrupt_quarantine_blocks_bootstrap(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         db_path = str(Path(tmp.name) / 'corrupt.db')
-        side = Path(shadow.proof_gap_sidecar_path(db_path))
-        side.write_text('{not-json\n', encoding='utf-8')
+        d = shadow.gap_incidents_dir(db_path)
+        d.mkdir(parents=True, exist_ok=True)
+        (d / 'bad.json').write_text('{not-json\n', encoding='utf-8')
         conn = store.open_store(db_path)
         try:
             _seed_legacy_for_bootstrap(conn)
-            # 需要至少一条合法 proof 才能 bootstrap；先准备
             shadow.ensure_shadow_schema(conn, db_path=db_path)
-            # ensure 已 migrate corrupt → sidecar_corrupt incident + quarantine
             self.assertTrue(shadow.has_unresolved_proof_gap(conn, db_path=db_path))
             self.assertGreaterEqual(shadow.count_quarantine_pending(db_path), 1)
             codes = {
@@ -1179,6 +1222,200 @@ class SidecarMigrateRaceTests(unittest.TestCase):
         )
         self.assertFalse(r.ok)
         self.assertEqual(r.status, 'proof_gap')
+
+
+class SerializedTransitionTests(unittest.TestCase):
+    def test_dual_score_cumulative_matches_shadow(self):
+        """101/102 都先取得 raw scores（barrier），再写入；legacy 累计须与 Shadow 一致。
+
+        旧实现会在写锁外双读 S0，最终只保留 transition(S0,102)；
+        正确实现在 BEGIN IMMEDIATE 内读当前行，得到累计 transition。
+        """
+        import time as _time
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        db_path = str(Path(tmp.name) / 'cumul.db')
+        patch = mock.patch.dict(os.environ, ALL_ON, clear=False)
+        patch.start()
+        self.addCleanup(patch.stop)
+        conn = store.open_store(db_path)
+        try:
+            _seed_legacy_for_bootstrap(conn)
+            shadow.ensure_shadow_schema(conn, db_path=db_path)
+            conn.execute('BEGIN')
+            shadow.record_score_proof_in_txn(
+                conn, 20, applied_at=T0, source='unit', score_hash='boot')
+            conn.execute('COMMIT')
+            p0 = float(conn.execute(
+                'SELECT sternberg_p FROM emotion_state WHERE id=1'
+            ).fetchone()[0])
+        finally:
+            conn.close()
+        self.assertTrue(shadow.ensure_bootstrapped(
+            db_path=db_path, environ={shadow.SHADOW_ENABLED_ENV: '1'},
+        ).ok)
+
+        ee.DB_PATH = db_path
+        scores_ready = threading.Barrier(2)
+        scores_101 = {
+            'valence': 0.8, 'arousal': 0.5, 'mood_word': '一',
+            'passion_delta': 0.1, 'intimacy_delta': 0.05,
+        }
+        scores_102 = {
+            'valence': 0.2, 'arousal': 0.4, 'mood_word': '二',
+            'passion_delta': 0.1, 'intimacy_delta': 0.05,
+        }
+        import datetime as _dt
+        conn = store.open_store(db_path)
+        try:
+            base = store.read_state(conn)['p_updated_at']
+        finally:
+            conn.close()
+        base_dt = _dt.datetime.strptime(base, '%Y-%m-%d %H:%M:%S')
+        at_101 = (base_dt + _dt.timedelta(seconds=1)).strftime('%Y-%m-%d %H:%M:%S')
+        at_102 = (base_dt + _dt.timedelta(seconds=2)).strftime('%Y-%m-%d %H:%M:%S')
+
+        def deepseek_dispatch(_text):
+            mid = getattr(threading.current_thread(), 'score_mid', None)
+            scores_ready.wait(timeout=5)
+            if mid == 102:
+                # 双方 scores 已就绪；略延迟让 101 先拿到写锁
+                _time.sleep(0.05)
+                return scores_102
+            return scores_101
+
+        def now_str_dispatch():
+            mid = getattr(threading.current_thread(), 'score_mid', None)
+            return at_102 if mid == 102 else at_101
+
+        def run_101():
+            threading.current_thread().score_mid = 101  # type: ignore[attr-defined]
+            ee.score_and_update('turn-101', message_id=101)
+
+        def run_102():
+            threading.current_thread().score_mid = 102  # type: ignore[attr-defined]
+            ee.score_and_update('turn-102', message_id=102)
+
+        with mock.patch.object(ee, '_deepseek_score', side_effect=deepseek_dispatch), \
+             mock.patch.object(ee, '_get_ombre_va', return_value=(None, None)), \
+             mock.patch.object(ee, '_now_str', side_effect=now_str_dispatch):
+            t101 = threading.Thread(target=run_101, daemon=True)
+            t102 = threading.Thread(target=run_102, daemon=True)
+            t101.start()
+            t102.start()
+            t101.join(timeout=8)
+            t102.join(timeout=8)
+
+        shadow.drain_shadow_outbox(db_path=db_path, environ=ALL_ON)
+        # 再 drain 一次，避免 102 因 101 尚未 apply 而 rewind 后重放
+        shadow.drain_shadow_outbox(db_path=db_path, environ=ALL_ON)
+        conn = store.open_store(db_path)
+        try:
+            leg = conn.execute(
+                'SELECT pa, na, valence, arousal, mood_word, '
+                'sternberg_p, sternberg_i FROM emotion_state WHERE id=1'
+            ).fetchone()
+            st = store.read_state(conn)
+            self.assertEqual(shadow.max_score_proof_message_id(conn), 102)
+            self.assertIsNotNone(shadow.lookup_score_proof(conn, 101))
+            self.assertIsNotNone(shadow.lookup_score_proof(conn, 102))
+            self.assertEqual(int(st['last_scored_message_id']), 102)
+            self.assertAlmostEqual(float(leg[0]), float(st['pa']), places=4)
+            self.assertAlmostEqual(float(leg[1]), float(st['na']), places=4)
+            self.assertAlmostEqual(float(leg[2]), float(st['valence']), places=4)
+            self.assertAlmostEqual(float(leg[3]), float(st['arousal']), places=4)
+            self.assertEqual(leg[4], st['mood_word'])
+            self.assertAlmostEqual(float(leg[5]), float(st['passion']), places=4)
+            self.assertAlmostEqual(float(leg[6]), float(st['intimacy']), places=4)
+            # 累计：双读 S0 时 P≈p0+0.1；串行应为 p0+0.2
+            self.assertGreater(float(leg[5]), p0 + 0.15)
+            h = shadow.get_shadow_health(db_path=db_path, environ=ALL_ON)
+            self.assertFalse(h.watermark_lag)
+        finally:
+            conn.close()
+
+
+class QuarantineReconcileTests(unittest.TestCase):
+    def test_reconcile_archives_and_unlocks(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        db_path = str(Path(tmp.name) / 'qr.db')
+        d = shadow.gap_incidents_dir(db_path)
+        d.mkdir(parents=True, exist_ok=True)
+        bad = d / 'x.json'
+        bad.write_text('{bad\n', encoding='utf-8')
+        conn = store.open_store(db_path)
+        try:
+            _seed_emotion(conn)
+            shadow.ensure_shadow_schema(conn, db_path=db_path)
+            self.assertGreaterEqual(shadow.count_quarantine_pending(db_path), 1)
+            items = shadow.inspect_quarantine(db_path)
+            self.assertEqual(len(items), 1)
+            item = items[0]
+            # ack alone 不得清 quarantine
+            iid = shadow.list_unresolved_gap_incidents(conn)[0]['incident_id']
+            shadow.ack_proof_gap(
+                conn, incident_id=iid, reason='acked corrupt without file',
+                db_path=db_path,
+            )
+            self.assertGreaterEqual(shadow.count_quarantine_pending(db_path), 1)
+            self.assertTrue(shadow.has_unresolved_proof_gap(conn, db_path=db_path))
+            # 再制造一条 sidecar_corrupt（ack 已解决前一条）——直接再 quarantine 流程
+            # reconcile 当前 pending 文件；若 incident 已被 ack，需再有一条
+            # ensure 时已有 quarantine；ack 清了 incident 但文件仍在 → has_gap True
+            # 为 reconcile 再插一条 matching incident
+            shadow.mark_proof_gap(
+                conn, failed_message_id=None, error_code='sidecar_corrupt',
+                db_path=db_path, write_sidecar_if_missing=False,
+            )
+            result = shadow.reconcile_quarantine(
+                conn,
+                path=item['path'],
+                sha256=item['sha256'],
+                reason='operator reviewed corrupt gap',
+                db_path=db_path,
+            )
+            self.assertTrue(result['reconciled'])
+            self.assertEqual(shadow.count_quarantine_pending(db_path), 0)
+            self.assertTrue(Path(result['resolved_archive']).is_file())
+            self.assertFalse(
+                shadow.has_unresolved_proof_gap(conn, db_path=db_path)
+            )
+        finally:
+            conn.close()
+
+    def test_ack_null_message_id_incident_without_forged_mid(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        db_path = str(Path(tmp.name) / 'nullmid.db')
+        conn = store.open_store(db_path)
+        try:
+            _seed_emotion(conn)
+            shadow.ensure_shadow_schema(conn, db_path=db_path)
+            shadow.mark_proof_gap(
+                conn, failed_message_id=None, error_code='sidecar_corrupt',
+                db_path=db_path, write_sidecar_if_missing=False,
+            )
+            iid = shadow.list_unresolved_gap_incidents(conn)[0]['incident_id']
+            with self.assertRaises(store.StoreError):
+                shadow.ack_proof_gap(
+                    conn, message_id=999, incident_id=iid, reason='no forge',
+                    db_path=db_path,
+                )
+            result = shadow.ack_proof_gap(
+                conn, incident_id=iid, reason='null mid ok',
+                db_path=db_path,
+            )
+            self.assertIsNone(result['message_id'])
+            self.assertEqual(result['remaining_unresolved'], 0)
+            row = conn.execute(
+                f'SELECT message_id FROM {shadow.GAP_ACK_TABLE} '
+                f'WHERE incident_id=?',
+                (iid,),
+            ).fetchone()
+            self.assertIsNone(row[0])
+        finally:
+            conn.close()
 
 
 class LegacyHashUnknownTests(unittest.TestCase):

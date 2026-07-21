@@ -75,19 +75,23 @@ USER_EVENTS_ENABLED=1
 ```bash
 python3 tools/internal_state_shadow_admin.py inspect-gap
 python3 tools/internal_state_shadow_admin.py ack-gap --message-id N --reason '...'
-# 或指定单条：
-python3 tools/internal_state_shadow_admin.py ack-gap --message-id N --incident-id I --reason '...'
+# NULL message_id 的 incident（如 sidecar_corrupt）不得伪造 mid：
+python3 tools/internal_state_shadow_admin.py ack-gap --incident-id I --reason '...'
+python3 tools/internal_state_shadow_admin.py inspect-quarantine
+python3 tools/internal_state_shadow_admin.py reconcile-quarantine \
+  --path ... --sha256 ... --reason '...'
 ```
 
 `ack-gap` 只解决该 `message_id`（或指定 `incident_id`）的未解决项，不会一键擦掉其它缺口。
+`reconcile-quarantine` 核对 hash 后原子归档 quarantine，并解决对应 incident。
 
 ## 硬交接
 
-- 评分：`BEGIN IMMEDIATE` → **先查 proof（score_hash）** → **跨 message 单调门** → UPDATE emotion → proof → outbox → COMMIT
+- 评分：网络取得 raw scores → `BEGIN IMMEDIATE` → proof / 单调门 → **事务内读 emotion_state 再算 PA/NA/P/I** → UPDATE → proof → outbox → COMMIT
 - 同 `message_id` + 同 `score_hash`：整次 no-op；不同 hash：冲突并记 incident，不改 emotion
 - 已有更高 `message_id` proof 时，迟到评分整次放弃（不改 legacy / 不写 outbox）
-- gap sidecar：必须先成功持久化 incident，才允许改 emotion；迁移经 atomic rename processing
-- quarantine 未 reconcile 前 bootstrap/status fail-closed
-- `chat_messages` INSERT 与 user_rule outbox 同事务；缺 outbox 表 → `outbox_capture_gap`
-- schema 缺失：先 append gap JSONL，再改 emotion
+- gap sidecar：一 incident 一文件（tmp→fsync→rename）；必须先成功持久化，才允许改 emotion
+- quarantine 未 reconcile 前 bootstrap/status fail-closed；不得手工静默删文件
+- `chat_messages` INSERT 与 user_rule outbox 同事务；缺 outbox 表 → `outbox_capture_gap`；证据全失败 → sticky `capture_evidence_failures`（status 非零）
+- schema 缺失：先写 gap incident 文件，再改 emotion
 - `wake_outcome` 生产调用点仍为 0

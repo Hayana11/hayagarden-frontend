@@ -385,6 +385,132 @@ def _bou_revert(pa: float, na: float) -> tuple:
 # 核心：完整评分+更新（对话后异步跑）
 # ═══════════════════════════════════════════════════════════
 
+def _longing_from_last_interaction(last_str) -> float:
+    """事务内思念：仅依赖已读到的 last_interaction，不再另开连接读库。"""
+    if not last_str:
+        return 0.0
+    try:
+        last = _parse_dt(last_str)
+        if not last:
+            return 0.0
+        now = datetime.datetime.utcnow() + datetime.timedelta(hours=8)
+        t = max(0.0, (now - last).total_seconds() / 3600)
+        L = 0.85 * (1 - (1 + t / 8) ** (-0.8))
+        return round(min(L, 0.92), 3)
+    except Exception:
+        return 0.0
+
+
+def _transition_from_state(
+    state: dict,
+    *,
+    final_v: float,
+    final_a: float,
+    mood_word: str,
+    p_delta: float,
+    i_delta: float,
+    scored_at: str,
+) -> dict:
+    """在持有写锁后，根据*当前* emotion_state 行计算本轮写入值。"""
+    old_pa, old_na = state['pa'], state['na']
+    new_pa = max(0.0, min(1.0, 0.75 * old_pa + 0.25 * final_v))
+    na_signal = final_a * (1 - final_v) * 0.5 + 0.05
+    new_na = max(0.0, min(1.0, 0.75 * old_na + 0.25 * na_signal))
+    new_pa, new_na = _bou_revert(new_pa, new_na)
+
+    p_now = _decay(state.get('sternberg_p', 0.0), state.get('p_updated_at'), TAU_P)
+    i_now = _decay(state.get('sternberg_i', 0.3), state.get('i_updated_at'), TAU_I)
+    c_now = state.get('sternberg_c', 0.7)
+    new_p = max(0.0, min(1.0, p_now + p_delta))
+    new_i = max(0.0, min(1.0, i_now + i_delta))
+    longing = _longing_from_last_interaction(state.get('last_interaction'))
+
+    return {
+        'pa': round(new_pa, 4),
+        'na': round(new_na, 4),
+        'valence': round(final_v, 4),
+        'arousal': round(final_a, 4),
+        'mood_word': mood_word,
+        'longing': round(longing, 4),
+        'sternberg_p': round(new_p, 4),
+        'sternberg_i': round(new_i, 4),
+        'sternberg_c': round(c_now, 4),
+        'p_updated_at': scored_at,
+        'i_updated_at': scored_at,
+        'last_interaction': scored_at,
+        'updated_at': scored_at,
+    }
+
+
+def _emotion_update_params(tr: dict) -> tuple:
+    return (
+        tr['pa'], tr['na'], tr['valence'], tr['arousal'],
+        tr['mood_word'], tr['longing'],
+        tr['sternberg_p'], tr['sternberg_i'], tr['sternberg_c'],
+        tr['p_updated_at'], tr['i_updated_at'],
+        tr['last_interaction'], tr['updated_at'],
+    )
+
+
+_EMOTION_UPDATE_SQL = """
+    UPDATE emotion_state SET
+        pa=?, na=?, valence=?, arousal=?, mood_word=?, longing=?,
+        sternberg_p=?, sternberg_i=?, sternberg_c=?,
+        p_updated_at=?, i_updated_at=?,
+        last_interaction=?, updated_at=?
+    WHERE id=1
+"""
+
+
+def _read_emotion_state_row(conn) -> dict:
+    row = conn.execute('SELECT * FROM emotion_state WHERE id=1').fetchone()
+    if row is None:
+        return {
+            'pa': 0.5, 'na': 0.2, 'valence': 0.6, 'arousal': 0.3,
+            'mood_word': '平静', 'longing': 0.0,
+            'sternberg_i': 0.3, 'sternberg_p': 0.0, 'sternberg_c': 0.7,
+            'p_updated_at': None, 'i_updated_at': None,
+            'last_interaction': None,
+        }
+    return dict(row)
+
+
+def _write_shadow_unavailable_incident(
+    *, message_id, scored_at: str,
+) -> None:
+    """Shadow import 失败时的 per-file gap（不依赖 shadow 模块）。"""
+    import json as _json
+    import uuid as _uuid
+    mid = (
+        message_id
+        if isinstance(message_id, int)
+        and not isinstance(message_id, bool)
+        and message_id > 0
+        else None
+    )
+    d = DB_PATH + '.shadow_gap_incidents'
+    os.makedirs(d, exist_ok=True)
+    uid = _uuid.uuid4().hex
+    tmp = os.path.join(d, f'{uid}.tmp')
+    final = os.path.join(d, f'{uid}.json')
+    body = _json.dumps({
+        'gap_detected': True,
+        'failed_message_id': mid,
+        'error_code': 'shadow_module_unavailable',
+        'failed_at': scored_at,
+    }, ensure_ascii=False, separators=(',', ':')) + '\n'
+    with open(tmp, 'w', encoding='utf-8') as fh:
+        fh.write(body)
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.rename(tmp, final)
+    dir_fd = os.open(d, os.O_RDONLY)
+    try:
+        os.fsync(dir_fd)
+    finally:
+        os.close(dir_fd)
+
+
 def score_and_update(conversation_excerpt: str, *, message_id=None):
     """
     对话后全量更新：情绪(PA/NA/V/A) + 欲望(P/I)
@@ -392,10 +518,13 @@ def score_and_update(conversation_excerpt: str, *, message_id=None):
 
     ``message_id``：已提交的用户 chat_messages 行 ID。异步线程启动前冻结；
     不得在线程内回查“最新消息”。Shadow proof / user_scored 依赖此身份。
+
+    网络评分可并发；所有依赖旧 emotion_state 的派生计算必须在
+    ``BEGIN IMMEDIATE`` 之后、基于事务内当前行完成。
     """
     scored = _deepseek_score(conversation_excerpt)
 
-    # ── 情绪层 ──────────────────────────────────────
+    # ── 仅冻结网络侧 raw scores（不得在写锁外读 legacy / 算 PA/P/I）──
     ds_v = (scored['valence'] + 1) / 2   # [-1,1] → [0,1]
     ds_a = scored['arousal']
     mood_word = scored['mood_word']
@@ -408,36 +537,11 @@ def score_and_update(conversation_excerpt: str, *, message_id=None):
         final_v = ds_v
         final_a = ds_a
 
-    state = get_state()
-    old_pa, old_na = state['pa'], state['na']
-    new_pa = max(0.0, min(1.0, 0.75 * old_pa + 0.25 * final_v))
-    na_signal = final_a * (1 - final_v) * 0.5 + 0.05
-    new_na = max(0.0, min(1.0, 0.75 * old_na + 0.25 * na_signal))
-    new_pa, new_na = _bou_revert(new_pa, new_na)
-
-    # ── 欲望层 ──────────────────────────────────────
     p_delta_ds = scored['passion_delta']
     i_delta_ds = scored['intimacy_delta']
-
-    # 读当前衰减后的P/I
-    p_now = _decay(state.get('sternberg_p', 0.0), state.get('p_updated_at'), TAU_P)
-    i_now = _decay(state.get('sternberg_i', 0.3), state.get('i_updated_at'), TAU_I)
-    c_now = state.get('sternberg_c', 0.7)
-
-    new_p = max(0.0, min(1.0, p_now + p_delta_ds))
-    new_i = max(0.0, min(1.0, i_now + i_delta_ds))
-
-    # 冻结本轮数值身份（同一次评分重试不得另生时间戳）
-    longing = get_longing()
     scored_at = _now_str()
     frozen_v = round(final_v, 4)
     frozen_a = round(final_a, 4)
-    frozen_pa = round(new_pa, 4)
-    frozen_na = round(new_na, 4)
-    frozen_p = round(new_p, 4)
-    frozen_i = round(new_i, 4)
-    frozen_c = round(c_now, 4)
-    frozen_longing = round(longing, 4)
     frozen_mood = mood_word
     frozen_p_delta = p_delta_ds
     frozen_i_delta = i_delta_ds
@@ -445,6 +549,7 @@ def score_and_update(conversation_excerpt: str, *, message_id=None):
 
     proof_written = False
     proof_enabled = False
+    applied_tr = None
     scored_payload = {
         'valence': frozen_v,
         'arousal': frozen_a,
@@ -468,29 +573,14 @@ def score_and_update(conversation_excerpt: str, *, message_id=None):
         proof_enabled = False
         if proof_env:
             try:
-                import json as _json
-                _side = DB_PATH + '.shadow_proof_gap.jsonl'
-                _body = _json.dumps({
-                    'gap_detected': True,
-                    'failed_message_id': (
-                        frozen_message_id
-                        if isinstance(frozen_message_id, int)
-                        and not isinstance(frozen_message_id, bool)
-                        and frozen_message_id > 0
-                        else None
-                    ),
-                    'error_code': 'shadow_module_unavailable',
-                    'failed_at': scored_at,
-                }, ensure_ascii=False, separators=(',', ':')) + '\n'
-                with open(_side, 'a', encoding='utf-8') as _fh:
-                    _fh.write(_body)
-                    _fh.flush()
-                    os.fsync(_fh.fileno())
+                _write_shadow_unavailable_incident(
+                    message_id=frozen_message_id, scored_at=scored_at,
+                )
             except Exception:
                 # sidecar 也写不进 → 不得静默改 emotion
                 abandon_emotion = True
 
-    # ── 写入（proof 开启：单调门 + 先查 proof，再改 emotion）────────────────
+    # ── 写入（proof 开启：单调门 + 事务内读 state 再 transition）────────────
     conn = _db()
     try:
         if abandon_emotion:
@@ -506,20 +596,6 @@ def score_and_update(conversation_excerpt: str, *, message_id=None):
             except Exception:
                 mid_ok = None
 
-            _emotion_params = (
-                frozen_pa, frozen_na, frozen_v, frozen_a,
-                frozen_mood, frozen_longing,
-                frozen_p, frozen_i, frozen_c,
-                scored_at, scored_at, scored_at, scored_at,
-            )
-            _emotion_sql = """
-                UPDATE emotion_state SET
-                    pa=?, na=?, valence=?, arousal=?, mood_word=?, longing=?,
-                    sternberg_p=?, sternberg_i=?, sternberg_c=?,
-                    p_updated_at=?, i_updated_at=?,
-                    last_interaction=?, updated_at=?
-                WHERE id=1
-            """
             _bad_mid = (
                 frozen_message_id
                 if isinstance(frozen_message_id, int)
@@ -528,6 +604,20 @@ def score_and_update(conversation_excerpt: str, *, message_id=None):
                 else None
             )
             score_hash = _shadow.compute_score_hash(scored_payload)
+
+            def _apply_transition_locked() -> dict:
+                state = _read_emotion_state_row(conn)
+                tr = _transition_from_state(
+                    state,
+                    final_v=frozen_v,
+                    final_a=frozen_a,
+                    mood_word=frozen_mood,
+                    p_delta=frozen_p_delta,
+                    i_delta=frozen_i_delta,
+                    scored_at=scored_at,
+                )
+                conn.execute(_EMOTION_UPDATE_SQL, _emotion_update_params(tr))
+                return tr
 
             if mid_ok is None:
                 # incident 必须先持久化，才允许改 emotion
@@ -544,7 +634,7 @@ def score_and_update(conversation_excerpt: str, *, message_id=None):
                             error_code='missing_or_invalid_message_id',
                             db_path=DB_PATH,
                         )
-                        conn.execute(_emotion_sql, _emotion_params)
+                        applied_tr = _apply_transition_locked()
                         conn.commit()
                     else:
                         _shadow.append_gap_incident_sidecar(
@@ -552,7 +642,8 @@ def score_and_update(conversation_excerpt: str, *, message_id=None):
                             failed_message_id=_bad_mid,
                             error_code='missing_or_invalid_message_id',
                         )
-                        conn.execute(_emotion_sql, _emotion_params)
+                        conn.execute('BEGIN IMMEDIATE')
+                        applied_tr = _apply_transition_locked()
                         conn.commit()
                 except Exception:
                     try:
@@ -571,8 +662,16 @@ def score_and_update(conversation_excerpt: str, *, message_id=None):
                     )
                 except Exception:
                     return
-                conn.execute(_emotion_sql, _emotion_params)
-                conn.commit()
+                try:
+                    conn.execute('BEGIN IMMEDIATE')
+                    applied_tr = _apply_transition_locked()
+                    conn.commit()
+                except Exception:
+                    try:
+                        conn.rollback()
+                    except Exception:
+                        pass
+                    return
             else:
                 try:
                     conn.execute('BEGIN IMMEDIATE')
@@ -597,7 +696,7 @@ def score_and_update(conversation_excerpt: str, *, message_id=None):
                         conn.execute('ROLLBACK')
                         return
 
-                    conn.execute(_emotion_sql, _emotion_params)
+                    applied_tr = _apply_transition_locked()
                     status = _shadow.record_score_proof_in_txn(
                         conn,
                         mid_ok,
@@ -640,34 +739,43 @@ def score_and_update(conversation_excerpt: str, *, message_id=None):
                         pass
                     return
         else:
-            conn.execute("""
-                UPDATE emotion_state SET
-                    pa=?, na=?, valence=?, arousal=?, mood_word=?, longing=?,
-                    sternberg_p=?, sternberg_i=?, sternberg_c=?,
-                    p_updated_at=?, i_updated_at=?,
-                    last_interaction=?, updated_at=?
-                WHERE id=1
-            """, (
-                frozen_pa, frozen_na, frozen_v, frozen_a,
-                frozen_mood, frozen_longing,
-                frozen_p, frozen_i, frozen_c,
-                scored_at, scored_at, scored_at, scored_at,
-            ))
-            conn.commit()
+            conn.isolation_level = None
+            conn.execute('BEGIN IMMEDIATE')
+            try:
+                applied_tr = _transition_from_state(
+                    _read_emotion_state_row(conn),
+                    final_v=frozen_v,
+                    final_a=frozen_a,
+                    mood_word=frozen_mood,
+                    p_delta=frozen_p_delta,
+                    i_delta=frozen_i_delta,
+                    scored_at=scored_at,
+                )
+                conn.execute(
+                    _EMOTION_UPDATE_SQL, _emotion_update_params(applied_tr),
+                )
+                conn.commit()
+            except Exception:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                return
     finally:
         conn.close()
 
-    try:
-        import emotion_history
-        emotion_history.append_snapshot(
-            frozen_v,
-            frozen_a,
-            frozen_mood,
-            db_path=DB_PATH,
-            source='score',
-        )
-    except Exception:
-        pass
+    if applied_tr is not None:
+        try:
+            import emotion_history
+            emotion_history.append_snapshot(
+                applied_tr['valence'],
+                applied_tr['arousal'],
+                applied_tr['mood_word'],
+                db_path=DB_PATH,
+                source='score',
+            )
+        except Exception:
+            pass
 
     if proof_written and _shadow is not None:
         try:

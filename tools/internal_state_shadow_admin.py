@@ -11,7 +11,10 @@
   python3 tools/internal_state_shadow_admin.py drain-outbox
   python3 tools/internal_state_shadow_admin.py inspect-gap
   python3 tools/internal_state_shadow_admin.py ack-gap --message-id N --reason '...'
-  python3 tools/internal_state_shadow_admin.py ack-gap --incident-id N --message-id M --reason '...'
+  python3 tools/internal_state_shadow_admin.py ack-gap --incident-id I --reason '...'
+  python3 tools/internal_state_shadow_admin.py inspect-quarantine
+  python3 tools/internal_state_shadow_admin.py reconcile-quarantine \\
+      --path ... --sha256 ... --reason '...'
 
 环境：
   MEMORIES_DB                 默认 /opt/frontend/memories.db
@@ -57,13 +60,26 @@ def _cmd_prepare_schema(db_path: str) -> int:
             'gap_incidents': _table_exists(conn, shadow.GAP_INCIDENTS_TABLE),
             'outbox': shadow.outbox_schema_ready(conn),
             'gap_ack': _table_exists(conn, shadow.GAP_ACK_TABLE),
+            'quarantine_reconcile': _table_exists(
+                conn, shadow.QUARANTINE_RECONCILE_TABLE,
+            ),
             'proof_gap': shadow.has_unresolved_proof_gap(conn, db_path=path),
             'unresolved_incidents': shadow.count_unresolved_gap_incidents(conn),
             'bootstrapped': False,
+            'user_events_preflight_ok': (
+                (not shadow.is_user_events_enabled())
+                or (
+                    shadow.outbox_schema_ready(conn)
+                    and shadow.score_proof_schema_ready(conn)
+                    and not shadow.has_unresolved_proof_gap(conn, db_path=path)
+                )
+            ),
         }
         st = store.read_state(conn)
         ready['bootstrapped'] = st is not None
         print(json.dumps(ready, ensure_ascii=False, indent=2))
+        if shadow.is_user_events_enabled() and not ready['user_events_preflight_ok']:
+            return 1
         return 0
     finally:
         conn.close()
@@ -94,11 +110,20 @@ def _cmd_status(db_path: str) -> int:
             shadow.count_pending_outbox(conn)
             if shadow.outbox_schema_ready(conn) else None
         )
+        events_on = shadow.is_user_events_enabled(environ=environ)
+        preflight_ok = (
+            (not events_on)
+            or (
+                shadow.outbox_schema_ready(conn)
+                and shadow.score_proof_schema_ready(conn)
+                and not shadow.has_unresolved_proof_gap(conn, db_path=path)
+            )
+        )
         payload = {
             'flags': {
                 'SHADOW_ENABLED': shadow.is_shadow_enabled(environ=environ),
                 'SCORE_PROOF_ENABLED': shadow.is_score_proof_enabled(environ=environ),
-                'USER_EVENTS_ENABLED': shadow.is_user_events_enabled(environ=environ),
+                'USER_EVENTS_ENABLED': events_on,
                 'USER_EVENTS_FLAG_RAW': (
                     str(environ.get(shadow.USER_EVENTS_ENABLED_ENV, '0')).strip() == '1'
                 ),
@@ -109,6 +134,8 @@ def _cmd_status(db_path: str) -> int:
             'gap_sidecar_pending': shadow.count_gap_sidecar_pending(path),
             'quarantine_pending': shadow.count_quarantine_pending(path),
             'quarantine_files': shadow.list_gap_quarantine_files(path),
+            'capture_evidence_failures': shadow.capture_evidence_failure_count(),
+            'user_events_preflight_ok': preflight_ok,
             'proof_max_message_id': wm,
             'outbox_pending': pending,
             'watermark_lag': health.watermark_lag,
@@ -122,6 +149,8 @@ def _cmd_status(db_path: str) -> int:
         or (pending or 0) > 0
         or (health.gap_sidecar_pending or 0) > 0
         or (health.quarantine_pending or 0) > 0
+        or (health.capture_evidence_failures or 0) > 0
+        or not payload['user_events_preflight_ok']
     ):
         return 1
     return 0
@@ -201,10 +230,13 @@ def _cmd_inspect_gap(db_path: str) -> int:
 
 def _cmd_ack_gap(
     db_path: str,
-    message_id: int,
+    message_id: int | None,
     reason: str,
     incident_id: int | None,
 ) -> int:
+    if message_id is None and incident_id is None:
+        print('ERROR: require --message-id or --incident-id', file=sys.stderr)
+        return 2
     path = isv3.memories_db_path(db_path)
     conn = store.open_store(path)
     try:
@@ -214,6 +246,47 @@ def _cmd_ack_gap(
             message_id=message_id,
             reason=reason,
             db_path=path,
+            incident_id=incident_id,
+        )
+        if conn.in_transaction:
+            conn.execute('COMMIT')
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0
+    except Exception as exc:
+        print(f'ERROR: {exc}', file=sys.stderr)
+        return 1
+    finally:
+        conn.close()
+
+
+def _cmd_inspect_quarantine(db_path: str) -> int:
+    items = shadow.inspect_quarantine(db_path)
+    print(json.dumps({
+        'quarantine_pending': len(items),
+        'items': items,
+    }, ensure_ascii=False, indent=2))
+    return 0 if not items else 1
+
+
+def _cmd_reconcile_quarantine(
+    db_path: str,
+    path: str,
+    sha256: str,
+    reason: str,
+    backfill_event_key: str | None,
+    incident_id: int | None,
+) -> int:
+    db = isv3.memories_db_path(db_path)
+    conn = store.open_store(db)
+    try:
+        shadow.ensure_shadow_schema(conn, db_path=db)
+        result = shadow.reconcile_quarantine(
+            conn,
+            path=path,
+            sha256=sha256,
+            reason=reason,
+            db_path=db,
+            backfill_event_key=backfill_event_key,
             incident_id=incident_id,
         )
         if conn.in_transaction:
@@ -239,11 +312,21 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser('inspect-gap', help='show durable proof gap incidents + recent acks')
     ack_p = sub.add_parser(
         'ack-gap',
-        help='audited resolve of gap incident(s) for one message_id',
+        help='audited resolve of gap incident(s); NULL mid needs --incident-id only',
     )
-    ack_p.add_argument('--message-id', type=int, required=True)
+    ack_p.add_argument('--message-id', type=int, default=None)
     ack_p.add_argument('--reason', required=True)
     ack_p.add_argument('--incident-id', type=int, default=None)
+    sub.add_parser('inspect-quarantine', help='list quarantine files + sha256')
+    rq = sub.add_parser(
+        'reconcile-quarantine',
+        help='audited archive + resolve one quarantine file',
+    )
+    rq.add_argument('--path', required=True)
+    rq.add_argument('--sha256', required=True)
+    rq.add_argument('--reason', required=True)
+    rq.add_argument('--backfill-event-key', default=None)
+    rq.add_argument('--incident-id', type=int, default=None)
     args = p.parse_args(argv)
     if args.cmd == 'prepare-schema':
         return _cmd_prepare_schema(args.db)
@@ -257,6 +340,17 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_inspect_gap(args.db)
     if args.cmd == 'ack-gap':
         return _cmd_ack_gap(args.db, args.message_id, args.reason, args.incident_id)
+    if args.cmd == 'inspect-quarantine':
+        return _cmd_inspect_quarantine(args.db)
+    if args.cmd == 'reconcile-quarantine':
+        return _cmd_reconcile_quarantine(
+            args.db,
+            args.path,
+            args.sha256,
+            args.reason,
+            args.backfill_event_key,
+            args.incident_id,
+        )
     return 2
 
 

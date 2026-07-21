@@ -939,6 +939,7 @@ def send_chat():
             created_at = row['created_at'] if hasattr(row, 'keys') else row[0]
             created_at = str(created_at)[:19] if created_at else None
         # Shadow user_rule outbox：与 chat INSERT 同事务；缺表则 outbox_capture_gap
+        # 聊天主流程不得阻断；证据全失败时记 sticky alert（status fail-closed）
         if (
             author not in ('fyodor', 'assistant', 'claude')
             and message_id is not None
@@ -971,9 +972,17 @@ def send_chat():
                                     error_code='outbox_capture_gap',
                                 )
                             except Exception:
-                                pass
-            except Exception:
-                pass
+                                _shadow.note_capture_evidence_failure(
+                                    f'user_rule message_id={message_id}'
+                                )
+            except Exception as _cap_exc:
+                try:
+                    import internal_state_shadow as _shadow2
+                    _shadow2.note_capture_evidence_failure(
+                        f'user_rule import/enable: {_cap_exc}'
+                    )
+                except Exception:
+                    pass
         conn.commit()
     finally:
         conn.close()
