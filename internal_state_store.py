@@ -93,10 +93,16 @@ def _payload_hash(payload: Mapping[str, Any]) -> str:
     return hashlib.sha256(blob.encode('utf-8')).hexdigest()
 
 
-def _ensure_explicit_tx(conn: sqlite3.Connection) -> None:
-    """公开写路径兼容普通 sqlite3.Connection：改用显式事务。"""
-    if getattr(conn, 'isolation_level', None) is not None:
-        conn.isolation_level = None
+def _require_clean_write_connection(conn: sqlite3.Connection) -> None:
+    """公开写入口拒绝已有未提交事务，避免没收调用方事务所有权。
+
+    不修改 ``isolation_level``。``executescript`` 会隐式 COMMIT 挂起事务，
+    因此必须先确认连接干净。
+    """
+    if conn.in_transaction:
+        raise StoreError(
+            'store write requires a connection with no active transaction'
+        )
 
 
 def _fetchone_dict(conn: sqlite3.Connection, sql: str,
@@ -114,7 +120,10 @@ def _fetchone_dict(conn: sqlite3.Connection, sql: str,
 
 def open_store(db_path: str,
                busy_timeout_ms: int = DEFAULT_BUSY_TIMEOUT_MS) -> sqlite3.Connection:
-    """打开可写连接；设置 busy_timeout；**不**改 journal_mode。"""
+    """打开可写连接；设置 busy_timeout；**不**改 journal_mode。
+
+    返回的连接由本模块拥有，可安全使用显式 ``BEGIN IMMEDIATE``。
+    """
     conn = sqlite3.connect(db_path, timeout=max(1.0, busy_timeout_ms / 1000.0))
     conn.row_factory = sqlite3.Row
     conn.isolation_level = None
@@ -132,8 +141,8 @@ def get_journal_mode(conn: sqlite3.Connection) -> str:
 
 
 def ensure_schema(conn: sqlite3.Connection) -> None:
-    """创建两张表（可重复调用）。不修改 journal_mode。"""
-    _ensure_explicit_tx(conn)
+    """创建两张表（可重复调用）。不修改 journal_mode / isolation_level。"""
+    _require_clean_write_connection(conn)
     conn.executescript(
         """
         CREATE TABLE IF NOT EXISTS internal_state_v3 (
@@ -310,7 +319,7 @@ def apply_state_update(
     if event_type is None or event_type == '':
         raise StoreError('event_type required')
 
-    _ensure_explicit_tx(conn)
+    _require_clean_write_connection(conn)
 
     payload_obj = dict(payload)
     p_json = json.dumps(payload_obj, ensure_ascii=False, default=str)
@@ -464,9 +473,14 @@ def bootstrap_from_snapshot(
       一律写成 ``observed_at``，避免后续再衰减同一段时间。
     旧来源时间保留在 bootstrap event payload 的
     ``legacy_source_timestamps`` 中。
+
+    幂等与 ``apply_state_update`` 一致：同 key 仅当 type/source/payload
+    语义相同才算 duplicate，否则 ``idempotency_conflict``。
     """
-    _ensure_explicit_tx(conn)
+    _require_clean_write_connection(conn)
     ensure_schema(conn)
+    # ensure_schema 可能经由 executescript 提交 DDL；确认仍无挂起事务
+    _require_clean_write_connection(conn)
 
     def _g(obj: Any, *path: str, default=None):
         cur = obj
@@ -536,40 +550,56 @@ def bootstrap_from_snapshot(
         )
         existing_state = read_state(conn)
 
+        if existing_event is not None:
+            collision = _existing_event_result(
+                existing_event,
+                event_type='bootstrap',
+                source_id=source_id,
+                payload_hash=p_hash,
+            )
+            if existing_state is None:
+                _rollback(conn)
+                if collision.status == 'duplicate':
+                    return ApplyResult(
+                        status='failed',
+                        state_version_before=None,
+                        state_version_after=None,
+                        event_id=collision.event_id,
+                        error='bootstrap event exists without state row',
+                    )
+                return collision
+            # 状态已在：绝不改写；仅按 payload 语义返回 duplicate / conflict
+            _rollback(conn)
+            ver = int(existing_state['state_version'])
+            return ApplyResult(
+                status=collision.status,
+                state_version_before=ver,
+                state_version_after=ver if collision.status == 'duplicate' else None,
+                event_id=collision.event_id,
+                error=collision.error,
+            )
+
         if existing_state is not None:
-            if existing_event is None:
-                conn.execute(
-                    """
-                    INSERT INTO internal_state_events (
-                        event_key, event_type, source_id, payload_json,
-                        payload_hash, status, state_version_before,
-                        state_version_after, applied_at, error
-                    ) VALUES (?, 'bootstrap', ?, ?, ?, 'duplicate',
-                              ?, ?, ?, 'state already present')
-                    """,
-                    (event_key, source_id, p_json, p_hash,
-                     existing_state['state_version'],
-                     existing_state['state_version'], now),
-                )
-                eid = _last_event_id(conn, event_key)
-            else:
-                eid = existing_event['id']
+            # 状态在、事件账缺失：补一条 duplicate 账，仍不改写状态
+            conn.execute(
+                """
+                INSERT INTO internal_state_events (
+                    event_key, event_type, source_id, payload_json,
+                    payload_hash, status, state_version_before,
+                    state_version_after, applied_at, error
+                ) VALUES (?, 'bootstrap', ?, ?, ?, 'duplicate',
+                          ?, ?, ?, 'state already present')
+                """,
+                (event_key, source_id, p_json, p_hash,
+                 existing_state['state_version'],
+                 existing_state['state_version'], now),
+            )
             conn.execute('COMMIT')
             return ApplyResult(
                 status='duplicate',
                 state_version_before=int(existing_state['state_version']),
                 state_version_after=int(existing_state['state_version']),
-                event_id=eid,
-            )
-
-        if existing_event is not None:
-            conn.execute('COMMIT')
-            return ApplyResult(
-                status='failed',
-                state_version_before=None,
-                state_version_after=None,
-                event_id=existing_event['id'],
-                error='bootstrap event exists without state row',
+                event_id=_last_event_id(conn, event_key),
             )
 
         cols: Sequence[str] = (

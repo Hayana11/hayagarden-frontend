@@ -98,17 +98,28 @@ class SchemaTests(StoreBase):
 
 
 class BootstrapTests(StoreBase):
-    def test_bootstrap_idempotent(self):
-        r1 = self.bootstrap()
+    def test_bootstrap_same_snapshot_is_duplicate(self):
+        snap = _snapshot()
+        r1 = store.bootstrap_from_snapshot(self.conn, snap)
         self.assertEqual(r1.status, 'applied')
         state1 = store.read_state(self.conn)
-        r2 = store.bootstrap_from_snapshot(self.conn, _snapshot(
-            affect=SimpleNamespace(
-                pa=0.99, na=0.01, valence=0.9, arousal=0.9, mood_word='变了')))
+        r2 = store.bootstrap_from_snapshot(self.conn, snap)
         self.assertEqual(r2.status, 'duplicate')
         state2 = store.read_state(self.conn)
         self.assertAlmostEqual(state1['pa'], state2['pa'])
-        self.assertAlmostEqual(state1['pa'], 0.55)
+        self.assertEqual(state1['state_version'], state2['state_version'])
+
+    def test_bootstrap_same_key_different_snapshot_is_idempotency_conflict(self):
+        r1 = self.bootstrap()
+        self.assertEqual(r1.status, 'applied')
+        pa_before = store.read_state(self.conn)['pa']
+        r2 = store.bootstrap_from_snapshot(self.conn, _snapshot(
+            affect=SimpleNamespace(
+                pa=0.99, na=0.01, valence=0.9, arousal=0.9, mood_word='变了')))
+        self.assertEqual(r2.status, 'idempotency_conflict')
+        state = store.read_state(self.conn)
+        self.assertAlmostEqual(state['pa'], pa_before)
+        self.assertEqual(state['state_version'], 0)
 
     def test_bootstrap_resets_materialized_timestamps_to_observed_at(self):
         snap = _snapshot()
@@ -480,6 +491,61 @@ class ConnectionContractTests(unittest.TestCase):
             self.assertAlmostEqual(store.read_state(conn)['na'], 0.31)
         finally:
             conn.close()
+
+    def test_plain_connection_isolation_level_is_preserved(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        db_path = str(Path(tmp.name) / 'iso.db')
+        conn = sqlite3.connect(db_path)
+        try:
+            before = conn.isolation_level
+            store.bootstrap_from_snapshot(conn, _snapshot())
+            self.assertEqual(conn.isolation_level, before)
+            store.apply_state_update(
+                conn,
+                event_key='user_rule:iso',
+                event_type='user_rule',
+                source_id='iso',
+                payload={},
+                mutator=lambda s: {'duty': 0.2},
+                expected_state_version=0,
+            )
+            self.assertEqual(conn.isolation_level, before)
+        finally:
+            conn.close()
+
+    def test_write_api_does_not_commit_caller_transaction(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        db_path = str(Path(tmp.name) / 'caller_tx.db')
+        setup = sqlite3.connect(db_path)
+        setup.execute('CREATE TABLE unrelated (x TEXT)')
+        setup.commit()
+        setup.close()
+
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.execute("INSERT INTO unrelated VALUES ('尚未决定提交')")
+            self.assertTrue(conn.in_transaction)
+            with self.assertRaises(store.StoreError) as ctx:
+                store.bootstrap_from_snapshot(conn, _snapshot())
+            self.assertIn('no active transaction', str(ctx.exception))
+            conn.rollback()
+        finally:
+            conn.close()
+
+        verify = sqlite3.connect(db_path)
+        try:
+            n = verify.execute('SELECT COUNT(*) FROM unrelated').fetchone()[0]
+            self.assertEqual(n, 0)
+            # store 也未偷偷建权威表（因入口直接拒绝）
+            tables = {
+                r[0] for r in verify.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'")
+            }
+            self.assertNotIn('internal_state_v3', tables)
+        finally:
+            verify.close()
 
 
 class ConcurrencyTests(StoreBase):

@@ -13,6 +13,17 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+      - name: Prepare /opt/frontend for legacy import side effects
+        run: |
+          sudo mkdir -p /opt
+          if [ ! -e /opt/frontend ]; then
+            sudo ln -sfn "$GITHUB_WORKSPACE" /opt/frontend
+          fi
+          python - <<'PY'
+          import sqlite3
+          for name in ("memories.db", "commands.db"):
+              sqlite3.connect(f"/opt/frontend/{name}").close()
+          PY
       - name: Run internal state Phase 0 + 1A-0 tests
         run: |
           python3 -m unittest tests.test_internal_state_store tests.test_internal_state -v
