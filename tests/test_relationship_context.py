@@ -32,6 +32,13 @@ from chat.relationship_context import (
 class RelationshipFixture(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
+        # 隔离生产环境的手写散文锚点：默认指向不存在的路径,让桶逻辑可测。
+        self.prose_path = str(Path(self.tmp.name) / 'no_prose_anchor.md')
+        self._prose_patcher = mock.patch(
+            'chat.relationship_context.PROSE_ANCHOR_PATH', self.prose_path,
+        )
+        self._prose_patcher.start()
+        self.addCleanup(self._prose_patcher.stop)
         self.bucket_dir = str(Path(self.tmp.name) / 'bucket')
         Path(self.bucket_dir).mkdir()
         (Path(self.bucket_dir) / '01-anchor.md').write_text(
@@ -91,39 +98,49 @@ class RelationshipContextTests(RelationshipFixture):
         self.assertEqual(len(set(fps)), 1)
 
     def test_boundary_jitter_does_not_flip_with_hysteresis(self):
-        """0.49/0.51 边界抖动不得反复翻转象限。"""
+        """迟滞机制保留在 _quantized_mood(不再参与组装);0.49/0.51 边界抖动不翻转。"""
+        from chat.relationship_context import _quantized_mood
         with mock.patch(
             'chat.relationship_context._emotion_engine_scores',
             return_value=(0.52, 0.33, SOURCE_OK),
         ):
-            first = build_relationship_context(self.get_db, bucket_dir=self.bucket_dir)
-        self.assertEqual(first.mood_key, '低唤醒|偏暖')
-        fps = {first.fingerprint}
+            _, first_key, _ = _quantized_mood(None)
+        self.assertEqual(first_key, '低唤醒|偏暖')
         for valence in (0.49, 0.51, 0.49, 0.51, 0.46):
             with mock.patch(
                 'chat.relationship_context._emotion_engine_scores',
                 return_value=(valence, 0.33, SOURCE_OK),
             ):
-                current = build_relationship_context(
-                    self.get_db,
-                    bucket_dir=self.bucket_dir,
-                    previous_mood=first.mood_key,
-                )
-            self.assertEqual(current.mood_key, '低唤醒|偏暖')
-            fps.add(current.fingerprint)
-        self.assertEqual(len(fps), 1)
+                _, key, _ = _quantized_mood(first_key)
+            self.assertEqual(key, '低唤醒|偏暖')
         # Exit warm only below hold threshold.
         with mock.patch(
             'chat.relationship_context._emotion_engine_scores',
             return_value=(0.44, 0.33, SOURCE_OK),
         ):
-            exited = build_relationship_context(
-                self.get_db,
-                bucket_dir=self.bucket_dir,
-                previous_mood=first.mood_key,
-            )
-        self.assertEqual(exited.mood_key, '低唤醒|偏低')
-        self.assertNotEqual(exited.fingerprint, first.fingerprint)
+            _, exited_key, _ = _quantized_mood(first_key)
+        self.assertEqual(exited_key, '低唤醒|偏低')
+
+    def test_mood_absent_from_build_output(self):
+        """教训回归:情绪象限不得进入注入文本、指纹与 sources。
+
+        情绪波动(甚至跨象限)不改变 text/fingerprint;mood_key 恒为 None。
+        """
+        with mock.patch(
+            'chat.relationship_context._emotion_engine_scores',
+            return_value=(0.52, 0.33, SOURCE_OK),
+        ):
+            first = build_relationship_context(self.get_db, bucket_dir=self.bucket_dir)
+        self.assertNotIn('当前基调', first.text)
+        self.assertIsNone(first.mood_key)
+        self.assertNotIn('mood', first.sources)
+        with mock.patch(
+            'chat.relationship_context._emotion_engine_scores',
+            return_value=(0.10, 0.95, SOURCE_OK),  # 跨两个象限
+        ):
+            second = build_relationship_context(self.get_db, bucket_dir=self.bucket_dir)
+        self.assertEqual(second.text, first.text)
+        self.assertEqual(second.fingerprint, first.fingerprint)
 
     def test_state_machine_send_skip_skip_skip_send(self):
         """完整状态机：发送 → 跳过×3 → 发送（第 5 用户轮刷新）。"""
@@ -172,7 +189,7 @@ class RelationshipContextTests(RelationshipFixture):
         ):
             result = build_relationship_context(boom, bucket_dir=self.bucket_dir)
         self.assertIn('我们是长期伴侣', result.text)
-        self.assertIn('当前基调', result.text)
+        self.assertNotIn('当前基调', result.text)
         self.assertEqual(result.sources['daily'], SOURCE_ERROR)
         self.assertEqual(result.sources['anchor'], SOURCE_OK)
         self.assertEqual(rel_context_status(
@@ -195,7 +212,6 @@ class RelationshipContextTests(RelationshipFixture):
         self.assertEqual(result.sources, {
             'anchor': SOURCE_MISSING,
             'daily': SOURCE_ERROR,
-            'mood': SOURCE_ERROR,
         })
         self.assertEqual(
             rel_context_status(result.text, sent=False, sources=result.sources),
@@ -214,7 +230,7 @@ class RelationshipContextTests(RelationshipFixture):
             return_value=(0.6, 0.6, SOURCE_OK),
         ):
             result = build_relationship_context(self.get_db, bucket_dir=self.bucket_dir)
-        self.assertIn('当前基调', result.text)
+        self.assertIn('provider parity', result.text)
         self.assertTrue(result.degraded)
         self.assertEqual(
             rel_context_status(result.text, sent=True, sources=result.sources),
@@ -225,14 +241,15 @@ class RelationshipContextTests(RelationshipFixture):
             'EMPTY',
         )
 
-    def test_emotion_engine_failure_does_not_fake_default_mood(self):
+    def test_emotion_engine_failure_does_not_affect_build(self):
+        """情绪引擎彻底解耦:即使抛错,组装结果与 sources 均不受影响。"""
         with mock.patch(
             'chat.relationship_context._emotion_engine_scores',
-            return_value=(None, None, SOURCE_ERROR),
+            side_effect=RuntimeError('engine down'),
         ):
             result = build_relationship_context(self.get_db, bucket_dir=self.bucket_dir)
         self.assertNotIn('当前基调', result.text)
-        self.assertEqual(result.sources['mood'], SOURCE_ERROR)
+        self.assertNotIn('mood', result.sources)
         self.assertIn('我们是长期伴侣', result.text)
 
     def test_multiple_md_files_merged_in_sorted_order(self):
@@ -463,3 +480,37 @@ class RelationshipCursorTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class ProseAnchorTests(RelationshipFixture):
+    def _write_prose(self, text):
+        Path(self.prose_path).write_text(text, encoding='utf-8')
+
+    def test_prose_anchor_takes_priority_over_bucket(self):
+        self._write_prose('我们的故事是连贯的一整段散文，写在这里。')
+        result = build_relationship_context(self.get_db, bucket_dir=self.bucket_dir)
+        self.assertIn('连贯的一整段散文', result.text)
+        self.assertNotIn('我们是长期伴侣', result.text)  # 桶内容被散文取代
+        self.assertEqual(result.sources['anchor'], SOURCE_OK)
+
+    def test_prose_edit_refreshes_fingerprint(self):
+        self._write_prose('第一版散文。')
+        first = build_relationship_context(self.get_db, bucket_dir=self.bucket_dir)
+        os.utime(self.prose_path, (1000000000, 1000000000))
+        self._write_prose('第二版散文，内容变了。')
+        os.utime(self.prose_path, (2000000000, 2000000000))
+        second = build_relationship_context(self.get_db, bucket_dir=self.bucket_dir)
+        self.assertNotEqual(first.fingerprint, second.fingerprint)
+        self.assertIn('第二版', second.text)
+
+    def test_prose_missing_falls_back_to_bucket(self):
+        # setUp 默认不创建散文文件 → 桶兜底
+        result = build_relationship_context(self.get_db, bucket_dir=self.bucket_dir)
+        self.assertIn('我们是长期伴侣', result.text)
+        self.assertEqual(result.sources['anchor'], SOURCE_OK)
+
+    def test_prose_meta_instruction_sentences_filtered(self):
+        self._write_prose('我们在一起很多天了。回复要更有感情一些。她爱巧克力。')
+        result = build_relationship_context(self.get_db, bucket_dir=self.bucket_dir)
+        self.assertIn('她爱巧克力', result.text)
+        self.assertNotIn('更有感情', result.text)

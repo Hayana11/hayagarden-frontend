@@ -22,6 +22,9 @@ from typing import Callable, Optional
 
 MAX_CONTEXT_CHARS = 400
 RELATIONSHIP_BUCKET_DIR = '/opt/ombre-brain/buckets/permanent/恋爱'
+# 手写关系锚点：存在且非空时优先于桶截断。连贯散文,由哈娅维护;
+# 它同时是内容和语体示范,编辑后 mtime 变化即触发刷新。
+PROSE_ANCHOR_PATH = '/opt/frontend/prompts/relationship_anchor.md'
 SOURCE_OK = 'ok'
 SOURCE_MISSING = 'missing'
 SOURCE_ERROR = 'error'
@@ -84,10 +87,48 @@ def _content_hash(text: str) -> str:
     return hashlib.sha256((text or '').encode('utf-8')).hexdigest()[:16]
 
 
+def _read_prose_anchor(
+    path: Optional[str] = None,
+    *,
+    total_limit: int = 320,
+) -> tuple[str, Optional[str], str]:
+    """手写散文锚点。保留换行(不做句级重排),仅整体过滤元指令句与超长截断。
+
+    指纹 = mtime+size,编辑文件即刷新;文件缺失/为空返回 MISSING 交由桶兜底。
+    """
+    path = path or PROSE_ANCHOR_PATH  # 调用时解析模块属性,测试可 patch
+    try:
+        if not os.path.isfile(path):
+            return '', None, SOURCE_MISSING
+        stat = os.stat(path)
+        with open(path, encoding='utf-8') as fh:
+            raw = _strip_frontmatter(fh.read()).strip()
+        if not raw:
+            return '', None, SOURCE_MISSING
+        # 逐段清理:段内保序,过滤命中元指令模式的句子,保留段落换行。
+        paragraphs = []
+        for para in raw.split('\n'):
+            cleaned = _clean_text(para, total_limit)
+            if cleaned:
+                paragraphs.append(cleaned)
+        body = '\n'.join(paragraphs).strip()
+        if len(body) > total_limit:
+            body = body[: total_limit - 1].rstrip() + '…'
+        if not body:
+            _log('prose anchor present but empty after meta-pattern filter')
+            return '', None, SOURCE_MISSING
+        fp = f'prose:{int(stat.st_mtime)}:{stat.st_size}'
+        return body, fp, SOURCE_OK
+    except Exception as exc:
+        _log(f'prose anchor error: {exc}')
+        return '', None, SOURCE_ERROR
+
+
 def _read_relationship_anchor(
     bucket_dir: str = RELATIONSHIP_BUCKET_DIR,
     *,
     total_limit: int = 250,
+    prose_path: Optional[str] = None,
 ) -> tuple[str, Optional[str], str]:
     """Read all permanent relationship bucket markdown files (sorted by name).
 
@@ -96,6 +137,9 @@ def _read_relationship_anchor(
     (``max(30, total_limit // n)``) so a long first file cannot starve later
     buckets.  Fingerprint is a hash of the cleaned merged body.
     """
+    prose_text, prose_fp, prose_health = _read_prose_anchor(prose_path)
+    if prose_health == SOURCE_OK:
+        return prose_text, prose_fp, SOURCE_OK
     try:
         if not os.path.isdir(bucket_dir):
             _log(f'relationship anchor missing: bucket dir not found: {bucket_dir}')
@@ -217,17 +261,22 @@ def build_relationship_context(
     get_db_fn: Callable,
     *,
     bucket_dir: str = RELATIONSHIP_BUCKET_DIR,
-    previous_mood: Optional[str] = None,
+    prose_path: Optional[str] = None,
+    previous_mood: Optional[str] = None,  # 兼容旧调用方,已不参与组装
 ) -> RelationshipContextResult:
-    anchor, anchor_fp, anchor_health = _read_relationship_anchor(bucket_dir)
+    anchor, anchor_fp, anchor_health = _read_relationship_anchor(
+        bucket_dir, prose_path=prose_path,
+    )
     recent, daily_health = _latest_daily_summary_head(get_db_fn)
-    mood, mood_key, mood_health = _quantized_mood(previous_mood)
+    # 教训:注入到用户消息附近的情绪遥测("当前基调:低唤醒")会被模型读作
+    # 语体指令,arousal 基线偏低时形成持续的"收着写"压力。基调行不再进入
+    # 文本与指纹;情绪自有 state 通道。迟滞机制保留但不参与组装。
     sources = {
         'anchor': anchor_health,
         'daily': daily_health,
-        'mood': mood_health,
     }
-    parts = [p for p in (anchor, recent, mood) if p]
+    mood_key = None
+    parts = [p for p in (anchor, recent) if p]
     text = ('【近期关系脉络】\n' + '\n'.join(parts)) if parts else ''
     if len(text) > MAX_CONTEXT_CHARS:
         text = text[: MAX_CONTEXT_CHARS - 1].rstrip() + '…'
@@ -240,7 +289,7 @@ def build_relationship_context(
         _log(f'relationship_context degraded: sources={sources}')
     return RelationshipContextResult(
         text=text,
-        fingerprint=_fingerprint(anchor_fp, recent, mood),
+        fingerprint=_fingerprint(anchor_fp, recent, ''),
         sources=sources,
         mood_key=mood_key,
     )
