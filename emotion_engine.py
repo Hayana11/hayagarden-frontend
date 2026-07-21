@@ -445,17 +445,57 @@ def score_and_update(conversation_excerpt: str, *, message_id=None):
 
     proof_written = False
     proof_enabled = False
+    scored_payload = {
+        'valence': frozen_v,
+        'arousal': frozen_a,
+        'mood_word': frozen_mood,
+        'passion_delta': frozen_p_delta,
+        'intimacy_delta': frozen_i_delta,
+        'source': 'emotion_engine.score_and_update',
+    }
+    # 即使 shadow 模块 import 失败，也要用环境位留下持久 gap（不得静默走旧路径）
+    proof_env = (
+        str(os.environ.get('INTERNAL_STATE_V3_SCORE_PROOF_ENABLED', '0')).strip()
+        == '1'
+    )
+    _shadow = None
     try:
         import internal_state_shadow as _shadow
         proof_enabled = _shadow.is_score_proof_enabled()
     except Exception:
         _shadow = None
+        proof_enabled = False
+        if proof_env:
+            try:
+                # 不依赖 shadow 模块的最小 sidecar（与 shadow.write_proof_gap_sidecar 同路径）
+                import json as _json
+                _side = DB_PATH + '.shadow_proof_gap.json'
+                _tmp = _side + '.tmp'
+                _body = _json.dumps({
+                    'gap_detected': True,
+                    'failed_message_id': (
+                        frozen_message_id
+                        if isinstance(frozen_message_id, int)
+                        and not isinstance(frozen_message_id, bool)
+                        and frozen_message_id > 0
+                        else None
+                    ),
+                    'error_code': 'shadow_module_unavailable',
+                    'failed_at': scored_at,
+                }, ensure_ascii=False, separators=(',', ':'))
+                with open(_tmp, 'w', encoding='utf-8') as _fh:
+                    _fh.write(_body)
+                    _fh.flush()
+                    os.fsync(_fh.fileno())
+                os.replace(_tmp, _side)
+            except Exception:
+                pass
 
-    # ── 写入（proof 开启时与证明同行提交）────────────────
+    # ── 写入（proof 开启时与证明 / scored outbox 同行提交）────────────────
     conn = _db()
     try:
         if proof_enabled and _shadow is not None:
-            # 显式事务：禁止隐式 autocommit 拆开 emotion / proof
+            # 显式事务：禁止隐式 autocommit 拆开 emotion / proof / outbox
             conn.isolation_level = None
             mid_ok = None
             try:
@@ -466,52 +506,88 @@ def score_and_update(conversation_excerpt: str, *, message_id=None):
             except Exception:
                 mid_ok = None
 
+            _emotion_params = (
+                frozen_pa, frozen_na, frozen_v, frozen_a,
+                frozen_mood, frozen_longing,
+                frozen_p, frozen_i, frozen_c,
+                scored_at, scored_at, scored_at, scored_at,
+            )
+            _emotion_sql = """
+                UPDATE emotion_state SET
+                    pa=?, na=?, valence=?, arousal=?, mood_word=?, longing=?,
+                    sternberg_p=?, sternberg_i=?, sternberg_c=?,
+                    p_updated_at=?, i_updated_at=?,
+                    last_interaction=?, updated_at=?
+                WHERE id=1
+            """
+            _bad_mid = (
+                frozen_message_id
+                if isinstance(frozen_message_id, int)
+                and not isinstance(frozen_message_id, bool)
+                and frozen_message_id > 0
+                else None
+            )
+
             if mid_ok is None:
-                # 无可靠身份证：旧情绪仍按现役逻辑落库，并标记 gap
-                conn.execute("""
-                    UPDATE emotion_state SET
-                        pa=?, na=?, valence=?, arousal=?, mood_word=?, longing=?,
-                        sternberg_p=?, sternberg_i=?, sternberg_c=?,
-                        p_updated_at=?, i_updated_at=?,
-                        last_interaction=?, updated_at=?
-                    WHERE id=1
-                """, (
-                    frozen_pa, frozen_na, frozen_v, frozen_a,
-                    frozen_mood, frozen_longing,
-                    frozen_p, frozen_i, frozen_c,
-                    scored_at, scored_at, scored_at, scored_at,
-                ))
+                # 无可靠身份证：旧情绪落库；health 可写则同事务标 gap
+                health_ready = conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                    (_shadow.PROOF_HEALTH_TABLE,),
+                ).fetchone() is not None
+                try:
+                    conn.execute('BEGIN IMMEDIATE')
+                    conn.execute(_emotion_sql, _emotion_params)
+                    if health_ready:
+                        _shadow.mark_proof_gap(
+                            conn,
+                            failed_message_id=_bad_mid,
+                            error_code='missing_or_invalid_message_id',
+                            db_path=DB_PATH,
+                        )
+                    conn.commit()
+                except Exception:
+                    try:
+                        conn.rollback()
+                    except Exception:
+                        pass
+                    try:
+                        _shadow.mark_proof_gap_standalone(
+                            db_path=DB_PATH,
+                            failed_message_id=_bad_mid,
+                            error_code='missing_or_invalid_message_id',
+                        )
+                    except Exception:
+                        pass
+                else:
+                    if not health_ready:
+                        try:
+                            _shadow.write_proof_gap_sidecar(
+                                DB_PATH,
+                                failed_message_id=_bad_mid,
+                                error_code='missing_or_invalid_message_id',
+                            )
+                        except Exception:
+                            pass
+                        try:
+                            _shadow.mark_proof_gap_standalone(
+                                db_path=DB_PATH,
+                                failed_message_id=_bad_mid,
+                                error_code='missing_or_invalid_message_id',
+                            )
+                        except Exception:
+                            pass
+            elif not _shadow.score_proof_schema_ready(conn):
+                # 表未准备：旧评分照常完成；sidecar 持久化 gap（prepare 后迁入）
+                conn.execute(_emotion_sql, _emotion_params)
                 conn.commit()
                 try:
-                    _shadow.mark_proof_gap_standalone(
-                        db_path=DB_PATH,
-                        failed_message_id=(
-                            frozen_message_id
-                            if isinstance(frozen_message_id, int)
-                            and not isinstance(frozen_message_id, bool)
-                            and frozen_message_id > 0
-                            else None
-                        ),
-                        error_code='missing_or_invalid_message_id',
+                    _shadow.write_proof_gap_sidecar(
+                        DB_PATH,
+                        failed_message_id=mid_ok,
+                        error_code='proof_schema_missing',
                     )
                 except Exception:
                     pass
-            elif not _shadow.score_proof_schema_ready(conn):
-                # 表未准备：旧评分照常完成，不在事务内 DDL
-                conn.execute("""
-                    UPDATE emotion_state SET
-                        pa=?, na=?, valence=?, arousal=?, mood_word=?, longing=?,
-                        sternberg_p=?, sternberg_i=?, sternberg_c=?,
-                        p_updated_at=?, i_updated_at=?,
-                        last_interaction=?, updated_at=?
-                    WHERE id=1
-                """, (
-                    frozen_pa, frozen_na, frozen_v, frozen_a,
-                    frozen_mood, frozen_longing,
-                    frozen_p, frozen_i, frozen_c,
-                    scored_at, scored_at, scored_at, scored_at,
-                ))
-                conn.commit()
                 try:
                     _shadow.mark_proof_gap_standalone(
                         db_path=DB_PATH,
@@ -521,27 +597,40 @@ def score_and_update(conversation_excerpt: str, *, message_id=None):
                 except Exception:
                     pass
             else:
+                outbox_ok = True
                 try:
                     conn.execute('BEGIN IMMEDIATE')
-                    conn.execute("""
-                        UPDATE emotion_state SET
-                            pa=?, na=?, valence=?, arousal=?, mood_word=?, longing=?,
-                            sternberg_p=?, sternberg_i=?, sternberg_c=?,
-                            p_updated_at=?, i_updated_at=?,
-                            last_interaction=?, updated_at=?
-                        WHERE id=1
-                    """, (
-                        frozen_pa, frozen_na, frozen_v, frozen_a,
-                        frozen_mood, frozen_longing,
-                        frozen_p, frozen_i, frozen_c,
-                        scored_at, scored_at, scored_at, scored_at,
-                    ))
+                    conn.execute(_emotion_sql, _emotion_params)
                     _shadow.record_score_proof_in_txn(
                         conn,
                         mid_ok,
                         applied_at=scored_at,
                         source=_shadow.PROOF_SOURCE_SCORE_AND_UPDATE,
                     )
+                    # user_scored outbox 与 emotion+proof 同事务（完整冻结 scores）
+                    if _shadow.is_user_events_enabled():
+                        try:
+                            _shadow.enqueue_user_scored_in_txn(
+                                conn,
+                                message_id=mid_ok,
+                                scores=scored_payload,
+                                scored_at=scored_at,
+                            )
+                        except Exception:
+                            outbox_ok = False
+                            try:
+                                _shadow.append_outbox_sidecar(
+                                    DB_PATH,
+                                    event_key=f'user_scored:{mid_ok}',
+                                    event_type=_shadow.EVENT_TYPE_USER_SCORED,
+                                    payload={
+                                        'message_id': mid_ok,
+                                        'scores': scored_payload,
+                                        'scored_at': scored_at,
+                                    },
+                                )
+                            except Exception:
+                                pass
                     conn.commit()
                     proof_written = True
                 except Exception:
@@ -559,6 +648,9 @@ def score_and_update(conversation_excerpt: str, *, message_id=None):
                         pass
                     # 同事务失败：情绪也未落库；不阻断聊天（异步线程）
                     return
+                if not outbox_ok:
+                    # 权威已提交；sidecar 待 prepare/drain 迁入
+                    pass
         else:
             conn.execute("""
                 UPDATE emotion_state SET
@@ -589,22 +681,10 @@ def score_and_update(conversation_excerpt: str, *, message_id=None):
     except Exception:
         pass
 
-    # proof 成功且用户事件开关打开 → Shadow user_scored（失败不影响旧系统）
+    # commit 后立即 drain outbox（失败行仍保留，可重放）
     if proof_written and _shadow is not None:
         try:
-            _shadow.emit_user_scored_if_enabled(
-                message_id=int(frozen_message_id),
-                scores={
-                    'valence': frozen_v,
-                    'arousal': frozen_a,
-                    'mood_word': frozen_mood,
-                    'passion_delta': frozen_p_delta,
-                    'intimacy_delta': frozen_i_delta,
-                    'source': 'emotion_engine.score_and_update',
-                },
-                scored_at=scored_at,
-                db_path=DB_PATH,
-            )
+            _shadow.drain_shadow_outbox_best_effort(db_path=DB_PATH)
         except Exception:
             pass
 

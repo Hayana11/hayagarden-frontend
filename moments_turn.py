@@ -188,6 +188,36 @@ def insert_user_message(
         if row is not None:
             created_at = row['created_at'] if hasattr(row, 'keys') else row[0]
             created_at = str(created_at)[:19] if created_at else None
+        # Shadow user_rule outbox：与 chat INSERT 同事务；失败不阻断落库
+        if user_id is not None and created_at:
+            try:
+                import internal_state_shadow as _shadow
+                if _shadow.is_user_events_enabled():
+                    try:
+                        _shadow.enqueue_user_rule_in_txn(
+                            conn,
+                            message_id=user_id,
+                            text=text,
+                            created_at=created_at,
+                            previous_user_at=previous_user_at,
+                        )
+                    except Exception:
+                        try:
+                            _shadow.append_outbox_sidecar(
+                                memories_db_path,
+                                event_key=f'user_rule:{user_id}',
+                                event_type=_shadow.EVENT_TYPE_USER_RULE,
+                                payload={
+                                    'message_id': user_id,
+                                    'text': text,
+                                    'created_at': created_at,
+                                    'previous_user_at': previous_user_at,
+                                },
+                            )
+                        except Exception:
+                            pass
+            except Exception:
+                pass
         conn.commit()
         turn_data['user_message_id'] = user_id
     finally:
@@ -198,17 +228,11 @@ def insert_user_message(
         touch_user_interaction(get_db_fn)
     except Exception:
         pass
-    # Shadow user_rule：仅 USER_EVENTS+SHADOW 开启时触碰；失败不影响主流程
+    # commit 后立即 drain（失败行仍保留，可重放）
     if user_id is not None and created_at:
         try:
             import internal_state_shadow as _shadow
-            _shadow.emit_user_rule_if_enabled(
-                message_id=user_id,
-                text=text,
-                created_at=created_at,
-                previous_user_at=previous_user_at,
-                db_path=memories_db_path,
-            )
+            _shadow.drain_shadow_outbox_best_effort(db_path=memories_db_path)
         except Exception:
             pass
     turn_key = turn_data.get('turn_key')

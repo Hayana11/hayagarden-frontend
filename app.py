@@ -938,6 +938,40 @@ def send_chat():
         if row is not None:
             created_at = row['created_at'] if hasattr(row, 'keys') else row[0]
             created_at = str(created_at)[:19] if created_at else None
+        # Shadow user_rule outbox：与 chat INSERT 同事务
+        if (
+            author not in ('fyodor', 'assistant', 'claude')
+            and message_id is not None
+            and created_at
+        ):
+            try:
+                import internal_state_shadow as _shadow
+                if _shadow.is_user_events_enabled():
+                    try:
+                        _shadow.enqueue_user_rule_in_txn(
+                            conn,
+                            message_id=int(message_id),
+                            text=content or '',
+                            created_at=created_at,
+                            previous_user_at=previous_user_at,
+                        )
+                    except Exception:
+                        try:
+                            _shadow.append_outbox_sidecar(
+                                DB_PATH,
+                                event_key=f'user_rule:{int(message_id)}',
+                                event_type=_shadow.EVENT_TYPE_USER_RULE,
+                                payload={
+                                    'message_id': int(message_id),
+                                    'text': content or '',
+                                    'created_at': created_at,
+                                    'previous_user_at': previous_user_at,
+                                },
+                            )
+                        except Exception:
+                            pass
+            except Exception:
+                pass
         conn.commit()
     finally:
         conn.close()
@@ -954,13 +988,7 @@ def send_chat():
         if message_id is not None and created_at:
             try:
                 import internal_state_shadow as _shadow
-                _shadow.emit_user_rule_if_enabled(
-                    message_id=int(message_id),
-                    text=content or '',
-                    created_at=created_at,
-                    previous_user_at=previous_user_at,
-                    db_path=DB_PATH,
-                )
+                _shadow.drain_shadow_outbox_best_effort(db_path=DB_PATH)
             except Exception:
                 pass
     # gateway uses this id to claim wake context only after a successful reply.

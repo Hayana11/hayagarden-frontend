@@ -17,6 +17,13 @@
   - 不停止旧 discharge / satisfy（shadow 失败不得阻断聊天）
   - 不 import emotion_engine / drive_engine / desire / gateway / wake
   - 评分事务内禁止 DDL / ensure_schema
+
+可靠边界（1A-4b 复审）：
+  - user_rule / user_scored 经 durable outbox 与权威写入同事务入队，
+    commit 后 drain；失败可重放；v3 event_key 幂等去重
+  - proof gap：health 表可写则同事务标记；表缺失时写 sidecar，
+    prepare-schema 迁入，禁止被初始化洗白
+  - USER_EVENTS 必须三者同开（拒绝 SCORE_PROOF=0 的半套事件史）
 """
 
 from __future__ import annotations
@@ -30,6 +37,7 @@ import sqlite3
 import threading
 import time
 from dataclasses import asdict, dataclass
+from pathlib import Path
 from typing import Any, Callable, Mapping, Optional
 
 import internal_state as isv3
@@ -45,12 +53,19 @@ USER_EVENTS_ENABLED_ENV = 'INTERNAL_STATE_V3_USER_EVENTS_ENABLED'
 BOOTSTRAP_EVENT_KEY = 'bootstrap:initial'
 SCORE_APPLIED_TABLE = 'internal_state_score_applied'
 PROOF_HEALTH_TABLE = 'internal_state_score_proof_health'
+OUTBOX_TABLE = 'internal_state_shadow_outbox'
+GAP_ACK_TABLE = 'internal_state_shadow_gap_ack'
 WATERMARK_SOURCE = 'internal_state_score_applied:max(message_id)'
 PRODUCTION_BOOTSTRAP_SOURCE_ID = 'phase1a4a_shadow'
 PROOF_SOURCE_SCORE_AND_UPDATE = 'emotion_engine.score_and_update'
 CAPTURE_MODE_PRODUCTION = 'same_sqlite_snapshot_v1'
 CAPTURE_MODE_TEST = 'test_injection'
+PROOF_GAP_SIDECAR_SUFFIX = '.shadow_proof_gap.json'
+OUTBOX_SIDECAR_SUFFIX = '.shadow_outbox.jsonl'
+EVENT_TYPE_USER_RULE = 'user_rule'
+EVENT_TYPE_USER_SCORED = 'user_scored'
 _DEFAULT_VERSION_RETRIES = 2
+_DEFAULT_DRAIN_LIMIT = 32
 
 _AFFECT_FIELDS = ('pa', 'na', 'valence', 'arousal')
 _BOND_FIELDS = ('intimacy', 'passion', 'commitment')
@@ -80,6 +95,10 @@ class ShadowHealth:
     user_events_enabled: bool = False
     proof_gap: Optional[bool] = None
     proof_schema_ready: Optional[bool] = None
+    proof_max_message_id: Optional[int] = None
+    watermark_lag: Optional[bool] = None
+    outbox_pending: Optional[int] = None
+    outbox_schema_ready: Optional[bool] = None
 
     def as_dict(self) -> dict:
         return asdict(self)
@@ -143,10 +162,15 @@ def is_score_proof_enabled(*, environ: Optional[Mapping[str, str]] = None) -> bo
 
 
 def is_user_events_enabled(*, environ: Optional[Mapping[str, str]] = None) -> bool:
-    """用户事件钥匙：必须同时 SHADOW_ENABLED=1 才真正写 user_rule / user_scored。"""
+    """用户事件钥匙：须 SHADOW + SCORE_PROOF + USER_EVENTS 三者同开。
+
+    拒绝 ``SCORE_PROOF=0, SHADOW=1, USER_EVENTS=1`` 的半套事件史
+    （只有 user_rule、永远没有 user_scored）。
+    """
     return (
         _env_flag(USER_EVENTS_ENABLED_ENV, environ=environ)
         and is_shadow_enabled(environ=environ)
+        and is_score_proof_enabled(environ=environ)
     )
 
 
@@ -183,10 +207,148 @@ def open_shadow_connection(
     return store.open_store(path, busy_timeout_ms=busy_timeout_ms)
 
 
-def ensure_shadow_schema(conn: sqlite3.Connection) -> None:
-    """internal_state_v3/events + 评分水位 ledger + proof health。
+def _conn_file_path(conn: sqlite3.Connection) -> Optional[str]:
+    try:
+        row = conn.execute('PRAGMA database_list').fetchone()
+    except sqlite3.Error:
+        return None
+    if row is None:
+        return None
+    if isinstance(row, sqlite3.Row):
+        path = row['file'] if 'file' in row.keys() else row[2]
+    else:
+        path = row[2]
+    if not path:
+        return None
+    return str(path)
+
+
+def proof_gap_sidecar_path(db_path: Optional[str] = None) -> str:
+    return isv3.memories_db_path(db_path) + PROOF_GAP_SIDECAR_SUFFIX
+
+
+def outbox_sidecar_path(db_path: Optional[str] = None) -> str:
+    return isv3.memories_db_path(db_path) + OUTBOX_SIDECAR_SUFFIX
+
+
+def write_proof_gap_sidecar(
+    db_path: Optional[str],
+    *,
+    failed_message_id: Optional[int],
+    error_code: str,
+) -> None:
+    """不依赖 health 表的持久 gap 事实（prepare-schema 前 / 表缺失时）。"""
+    if not isinstance(error_code, str) or not error_code.strip():
+        raise store.StoreError(f'error_code invalid: {error_code!r}')
+    mid = None
+    if failed_message_id is not None:
+        try:
+            mid = store.require_positive_message_id(
+                failed_message_id, field='failed_message_id',
+            )
+        except store.StoreError:
+            mid = None
+    dest = proof_gap_sidecar_path(db_path)
+    payload = {
+        'gap_detected': True,
+        'failed_message_id': mid,
+        'error_code': error_code.strip()[:64],
+        'failed_at': _now_beijing(),
+    }
+    path = Path(dest)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + '.tmp')
+    data = json.dumps(payload, ensure_ascii=False, separators=(',', ':'))
+    with open(tmp, 'w', encoding='utf-8') as fh:
+        fh.write(data)
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(str(tmp), str(path))
+    logger.critical(
+        'internal_state_shadow: proof gap sidecar written code=%s message_id=%s path=%s',
+        payload['error_code'], mid, dest,
+    )
+
+
+def read_proof_gap_sidecar(db_path: Optional[str] = None) -> Optional[dict]:
+    path = Path(proof_gap_sidecar_path(db_path))
+    if not path.is_file():
+        return None
+    try:
+        raw = json.loads(path.read_text(encoding='utf-8'))
+    except Exception as exc:  # noqa: BLE001
+        logger.critical(
+            'internal_state_shadow: proof gap sidecar unreadable: %s', exc,
+        )
+        return {
+            'gap_detected': True,
+            'failed_message_id': None,
+            'error_code': 'sidecar_unreadable',
+            'failed_at': None,
+        }
+    if not isinstance(raw, dict):
+        return {
+            'gap_detected': True,
+            'failed_message_id': None,
+            'error_code': 'sidecar_invalid',
+            'failed_at': None,
+        }
+    return raw
+
+
+def clear_proof_gap_sidecar(db_path: Optional[str] = None) -> None:
+    path = Path(proof_gap_sidecar_path(db_path))
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+
+
+def has_unresolved_proof_gap(
+    conn: sqlite3.Connection,
+    *,
+    db_path: Optional[str] = None,
+) -> bool:
+    """health 表 gap **或** sidecar 任一存在即视为未解决。"""
+    if read_proof_health(conn).gap_detected:
+        return True
+    path = db_path or _conn_file_path(conn)
+    side = read_proof_gap_sidecar(path) if path else read_proof_gap_sidecar()
+    return bool(side and side.get('gap_detected'))
+
+
+def migrate_proof_gap_sidecar(
+    conn: sqlite3.Connection,
+    *,
+    db_path: Optional[str] = None,
+) -> bool:
+    """prepare-schema：把 sidecar 迁入 health，避免初始化洗白为 gap=false。"""
+    path = db_path or _conn_file_path(conn)
+    side = read_proof_gap_sidecar(path)
+    if not side or not side.get('gap_detected'):
+        return False
+    mark_proof_gap(
+        conn,
+        failed_message_id=side.get('failed_message_id'),
+        error_code=str(side.get('error_code') or 'sidecar_migrated'),
+        db_path=path,
+        write_sidecar_if_missing=False,
+    )
+    if read_proof_health(conn).gap_detected:
+        clear_proof_gap_sidecar(path)
+        return True
+    return False
+
+
+def ensure_shadow_schema(
+    conn: sqlite3.Connection,
+    *,
+    db_path: Optional[str] = None,
+) -> None:
+    """internal_state_v3/events + proof ledger + outbox + gap ack。
 
     仅供 ``prepare-schema`` / 管理入口调用；**禁止**在评分事务内执行。
+    若存在 proof-gap sidecar，迁入 health（不得洗白为 gap=false）。
     """
     store.ensure_schema(conn)
     conn.execute(
@@ -220,6 +382,35 @@ def ensure_shadow_schema(conn: sqlite3.Connection) -> None:
         VALUES (1, 1, 0, NULL, NULL, NULL)
         """
     )
+    conn.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS {OUTBOX_TABLE} (
+            event_key TEXT PRIMARY KEY,
+            event_type TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            attempts INTEGER NOT NULL DEFAULT 0
+                CHECK (attempts >= 0),
+            last_error TEXT,
+            delivered_at TEXT
+        )
+        """
+    )
+    conn.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS {GAP_ACK_TABLE} (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            message_id INTEGER,
+            reason TEXT NOT NULL,
+            acked_at TEXT NOT NULL,
+            previous_error_code TEXT,
+            previous_failed_message_id INTEGER
+        )
+        """
+    )
+    # sidecar → health（必须在 INSERT OR IGNORE 默认 gap=0 之后覆盖）
+    migrate_proof_gap_sidecar(conn, db_path=db_path)
+    migrate_outbox_sidecar(conn, db_path=db_path)
 
 
 def score_proof_schema_ready(conn: sqlite3.Connection) -> bool:
@@ -227,6 +418,14 @@ def score_proof_schema_ready(conn: sqlite3.Connection) -> bool:
     row = conn.execute(
         "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
         (SCORE_APPLIED_TABLE,),
+    ).fetchone()
+    return row is not None
+
+
+def outbox_schema_ready(conn: sqlite3.Connection) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+        (OUTBOX_TABLE,),
     ).fetchone()
     return row is not None
 
@@ -271,8 +470,14 @@ def mark_proof_gap(
     *,
     failed_message_id: Optional[int],
     error_code: str,
+    db_path: Optional[str] = None,
+    write_sidecar_if_missing: bool = True,
 ) -> None:
-    """持久化 proof gap；不含正文 / excerpt / Prompt。"""
+    """持久化 proof gap；不含正文 / excerpt / Prompt。
+
+    health 表存在时写入该表（可与权威 UPDATE 同事务）。
+    表缺失时写 sidecar（日志会轮转，sidecar 不会被 prepare-schema 洗白）。
+    """
     if not isinstance(error_code, str) or not error_code.strip():
         raise store.StoreError(f'error_code invalid: {error_code!r}')
     mid = None
@@ -284,7 +489,8 @@ def mark_proof_gap(
         except store.StoreError:
             mid = None
     ts = _now_beijing()
-    # 表缺失时不 DDL——只打日志；prepare-schema 后才有健康行
+    code = error_code.strip()[:64]
+    path = db_path or _conn_file_path(conn)
     if conn.execute(
         "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
         (PROOF_HEALTH_TABLE,),
@@ -292,8 +498,12 @@ def mark_proof_gap(
         logger.critical(
             'internal_state_shadow: proof gap (no health table) '
             'code=%s message_id=%s',
-            error_code, mid,
+            code, mid,
         )
+        if write_sidecar_if_missing and path:
+            write_proof_gap_sidecar(
+                path, failed_message_id=mid, error_code=code,
+            )
         return
     conn.execute(
         f"""
@@ -307,19 +517,25 @@ def mark_proof_gap(
             error_code=excluded.error_code,
             failed_at=excluded.failed_at
         """,
-        (mid, error_code.strip()[:64], ts),
+        (mid, code, ts),
     )
     logger.critical(
         'internal_state_shadow: proof gap marked code=%s message_id=%s',
-        error_code, mid,
+        code, mid,
     )
 
 
-def clear_proof_gap(conn: sqlite3.Connection) -> None:
+def clear_proof_gap(
+    conn: sqlite3.Connection,
+    *,
+    db_path: Optional[str] = None,
+) -> None:
+    """内部清除；运维请用 ``ack_proof_gap``（带审计）。"""
     if conn.execute(
         "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
         (PROOF_HEALTH_TABLE,),
     ).fetchone() is None:
+        clear_proof_gap_sidecar(db_path or _conn_file_path(conn))
         return
     conn.execute(
         f"""
@@ -334,6 +550,71 @@ def clear_proof_gap(conn: sqlite3.Connection) -> None:
             failed_at=NULL
         """
     )
+    clear_proof_gap_sidecar(db_path or _conn_file_path(conn))
+
+
+def ack_proof_gap(
+    conn: sqlite3.Connection,
+    *,
+    message_id: int,
+    reason: str,
+    db_path: Optional[str] = None,
+) -> dict:
+    """受审计的 gap 确认清除；要求 message_id 与当前 failed_message_id 一致。"""
+    if not isinstance(reason, str) or not reason.strip():
+        raise store.StoreError('ack reason required')
+    mid = store.require_positive_message_id(message_id, field='message_id')
+    health = read_proof_health(conn)
+    side = read_proof_gap_sidecar(db_path or _conn_file_path(conn))
+    gap_present = health.gap_detected or bool(side and side.get('gap_detected'))
+    if not gap_present:
+        raise store.StoreError('no unresolved proof gap to ack')
+    expected = health.failed_message_id
+    if expected is None and side is not None:
+        try:
+            expected = (
+                int(side['failed_message_id'])
+                if side.get('failed_message_id') is not None
+                else None
+            )
+        except (TypeError, ValueError):
+            expected = None
+    if expected is not None and int(expected) != int(mid):
+        raise store.StoreError(
+            f'ack message_id {mid} does not match failed_message_id {expected}'
+        )
+    if expected is None:
+        raise store.StoreError(
+            'gap has no failed_message_id; refuse untargeted ack'
+        )
+    prev_code = health.error_code
+    if prev_code is None and side is not None:
+        prev_code = side.get('error_code')
+    ts = _now_beijing()
+    if conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+        (GAP_ACK_TABLE,),
+    ).fetchone() is None:
+        raise store.StoreError(
+            f'{GAP_ACK_TABLE} missing; run prepare-schema before ack-gap'
+        )
+    conn.execute(
+        f"""
+        INSERT INTO {GAP_ACK_TABLE}
+            (message_id, reason, acked_at, previous_error_code,
+             previous_failed_message_id)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        (mid, reason.strip()[:512], ts, prev_code, expected),
+    )
+    clear_proof_gap(conn, db_path=db_path)
+    return {
+        'acked': True,
+        'message_id': mid,
+        'reason': reason.strip()[:512],
+        'acked_at': ts,
+        'previous_error_code': prev_code,
+    }
 
 
 def record_score_proof_in_txn(
@@ -393,6 +674,336 @@ def record_score_proof_in_txn(
         """,
         (mid, applied_canon, source_canon),
     )
+
+
+def enqueue_outbox_in_txn(
+    conn: sqlite3.Connection,
+    *,
+    event_key: str,
+    event_type: str,
+    payload: Mapping[str, Any],
+) -> None:
+    """权威写入同事务入队；**不** COMMIT。要求 ``conn.in_transaction``。"""
+    if not conn.in_transaction:
+        raise store.StoreError(
+            'enqueue_outbox_in_txn requires an active caller-owned transaction'
+        )
+    if not outbox_schema_ready(conn):
+        raise store.StoreError(
+            f'{OUTBOX_TABLE} missing; run prepare-schema before user events'
+        )
+    if not isinstance(event_key, str) or not event_key.strip() or len(event_key) > 128:
+        raise store.StoreError(f'event_key invalid: {event_key!r}')
+    if event_type not in (EVENT_TYPE_USER_RULE, EVENT_TYPE_USER_SCORED):
+        raise store.StoreError(f'event_type unsupported: {event_type!r}')
+    if not isinstance(payload, Mapping):
+        raise store.StoreError('payload must be a mapping')
+    key = event_key.strip()
+    body = json.dumps(dict(payload), ensure_ascii=False, separators=(',', ':'))
+    ts = _now_beijing()
+    # 同 key 已存在（含已投递）→ 保持首条载荷，避免改写历史
+    conn.execute(
+        f"""
+        INSERT OR IGNORE INTO {OUTBOX_TABLE}
+            (event_key, event_type, payload_json, created_at,
+             attempts, last_error, delivered_at)
+        VALUES (?, ?, ?, ?, 0, NULL, NULL)
+        """,
+        (key, event_type, body, ts),
+    )
+
+
+def append_outbox_sidecar(
+    db_path: Optional[str],
+    *,
+    event_key: str,
+    event_type: str,
+    payload: Mapping[str, Any],
+) -> None:
+    """outbox 表不可用时的 durable 回退（JSONL）；prepare-schema / drain 迁入。"""
+    dest = outbox_sidecar_path(db_path)
+    path = Path(dest)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    row = {
+        'event_key': event_key,
+        'event_type': event_type,
+        'payload': dict(payload),
+        'created_at': _now_beijing(),
+    }
+    line = json.dumps(row, ensure_ascii=False, separators=(',', ':')) + '\n'
+    with open(path, 'a', encoding='utf-8') as fh:
+        fh.write(line)
+        fh.flush()
+        os.fsync(fh.fileno())
+    logger.critical(
+        'internal_state_shadow: outbox sidecar appended key=%s path=%s',
+        event_key, dest,
+    )
+
+
+def migrate_outbox_sidecar(
+    conn: sqlite3.Connection,
+    *,
+    db_path: Optional[str] = None,
+) -> int:
+    """把 JSONL sidecar 迁入 outbox 表；成功后删除 sidecar。"""
+    if not outbox_schema_ready(conn):
+        return 0
+    path = Path(outbox_sidecar_path(db_path or _conn_file_path(conn)))
+    if not path.is_file():
+        return 0
+    migrated = 0
+    try:
+        lines = path.read_text(encoding='utf-8').splitlines()
+    except Exception as exc:  # noqa: BLE001
+        logger.critical('internal_state_shadow: outbox sidecar read failed: %s', exc)
+        return 0
+    own_txn = not conn.in_transaction
+    if own_txn:
+        conn.execute('BEGIN IMMEDIATE')
+    try:
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(row, dict):
+                continue
+            key = row.get('event_key')
+            et = row.get('event_type')
+            payload = row.get('payload')
+            if not key or et not in (EVENT_TYPE_USER_RULE, EVENT_TYPE_USER_SCORED):
+                continue
+            if not isinstance(payload, Mapping):
+                continue
+            created = row.get('created_at') or _now_beijing()
+            body = json.dumps(dict(payload), ensure_ascii=False, separators=(',', ':'))
+            cur = conn.execute(
+                f"""
+                INSERT OR IGNORE INTO {OUTBOX_TABLE}
+                    (event_key, event_type, payload_json, created_at,
+                     attempts, last_error, delivered_at)
+                VALUES (?, ?, ?, ?, 0, NULL, NULL)
+                """,
+                (str(key), str(et), body, str(created)[:19]),
+            )
+            if cur.rowcount:
+                migrated += 1
+        if own_txn:
+            conn.execute('COMMIT')
+    except Exception:
+        if own_txn:
+            try:
+                conn.execute('ROLLBACK')
+            except Exception:
+                pass
+        raise
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+    return migrated
+
+
+def enqueue_user_rule_in_txn(
+    conn: sqlite3.Connection,
+    *,
+    message_id: int,
+    text: str,
+    created_at: str,
+    previous_user_at: Optional[str],
+    environ: Optional[Mapping[str, str]] = None,
+) -> bool:
+    """与 chat_messages INSERT 同事务写入 user_rule outbox。"""
+    if not is_user_events_enabled(environ=environ):
+        return False
+    mid = store.require_positive_message_id(message_id, field='message_id')
+    enqueue_outbox_in_txn(
+        conn,
+        event_key=f'user_rule:{mid}',
+        event_type=EVENT_TYPE_USER_RULE,
+        payload={
+            'message_id': mid,
+            'text': text,
+            'created_at': created_at,
+            'previous_user_at': previous_user_at,
+        },
+    )
+    return True
+
+
+def enqueue_user_scored_in_txn(
+    conn: sqlite3.Connection,
+    *,
+    message_id: int,
+    scores: Mapping[str, Any],
+    scored_at: str,
+    environ: Optional[Mapping[str, str]] = None,
+) -> bool:
+    """与 emotion UPDATE + proof 同事务写入 user_scored outbox（含完整冻结 scores）。"""
+    if not is_user_events_enabled(environ=environ):
+        return False
+    mid = store.require_positive_message_id(message_id, field='message_id')
+    if not isinstance(scores, Mapping):
+        raise store.StoreError('scores must be a mapping')
+    enqueue_outbox_in_txn(
+        conn,
+        event_key=f'user_scored:{mid}',
+        event_type=EVENT_TYPE_USER_SCORED,
+        payload={
+            'message_id': mid,
+            'scores': dict(scores),
+            'scored_at': scored_at,
+        },
+    )
+    return True
+
+
+def count_pending_outbox(conn: sqlite3.Connection) -> int:
+    if not outbox_schema_ready(conn):
+        return 0
+    row = conn.execute(
+        f'SELECT COUNT(*) FROM {OUTBOX_TABLE} WHERE delivered_at IS NULL'
+    ).fetchone()
+    return int(row[0] if row else 0)
+
+
+def _deliver_outbox_row(
+    row: Mapping[str, Any],
+    *,
+    db_path: Optional[str],
+    environ: Optional[Mapping[str, str]],
+) -> ShadowResult:
+    et = row['event_type']
+    try:
+        payload = json.loads(row['payload_json'])
+    except Exception as exc:  # noqa: BLE001
+        return ShadowResult(ok=False, status='failed', error=f'payload: {exc}')
+    if not isinstance(payload, dict):
+        return ShadowResult(ok=False, status='failed', error='payload not object')
+    if et == EVENT_TYPE_USER_RULE:
+        return observe_user_message_shadow(
+            message_id=int(payload['message_id']),
+            text=str(payload.get('text') or ''),
+            created_at=str(payload['created_at']),
+            previous_user_at=payload.get('previous_user_at'),
+            db_path=db_path,
+            environ=environ,
+        )
+    if et == EVENT_TYPE_USER_SCORED:
+        scores = payload.get('scores')
+        if not isinstance(scores, dict):
+            return ShadowResult(ok=False, status='failed', error='scores missing')
+        return observe_scored_shadow(
+            message_id=int(payload['message_id']),
+            scores=scores,
+            scored_at=str(payload['scored_at']),
+            db_path=db_path,
+            environ=environ,
+        )
+    return ShadowResult(ok=False, status='failed', error=f'unknown type {et}')
+
+
+def drain_shadow_outbox(
+    db_path: Optional[str] = None,
+    *,
+    environ: Optional[Mapping[str, str]] = None,
+    limit: int = _DEFAULT_DRAIN_LIMIT,
+) -> dict:
+    """投递 pending outbox；失败保留行；v3 event_key 幂等负责去重。"""
+    summary = {
+        'attempted': 0,
+        'delivered': 0,
+        'failed': 0,
+        'skipped_disabled': False,
+        'pending_after': None,
+    }
+    if not is_user_events_enabled(environ=environ):
+        summary['skipped_disabled'] = True
+        return summary
+    path = isv3.memories_db_path(db_path)
+    conn = None
+    try:
+        conn = open_shadow_connection(path)
+        migrate_outbox_sidecar(conn, db_path=path)
+        if not outbox_schema_ready(conn):
+            summary['failed'] = 1
+            summary['error'] = f'{OUTBOX_TABLE} missing'
+            return summary
+        rows = conn.execute(
+            f"""
+            SELECT event_key, event_type, payload_json, attempts
+            FROM {OUTBOX_TABLE}
+            WHERE delivered_at IS NULL
+            ORDER BY created_at ASC, event_key ASC
+            LIMIT ?
+            """,
+            (max(1, int(limit)),),
+        ).fetchall()
+        for row in rows:
+            if isinstance(row, sqlite3.Row):
+                item = dict(row)
+            else:
+                item = {
+                    'event_key': row[0],
+                    'event_type': row[1],
+                    'payload_json': row[2],
+                    'attempts': row[3],
+                }
+            summary['attempted'] += 1
+            result = _deliver_outbox_row(item, db_path=path, environ=environ)
+            ok_statuses = ('applied', 'duplicate', 'stale_skipped')
+            if result.ok and result.status in ok_statuses:
+                conn.execute(
+                    f"""
+                    UPDATE {OUTBOX_TABLE}
+                    SET delivered_at=?, last_error=NULL
+                    WHERE event_key=?
+                    """,
+                    (_now_beijing(), item['event_key']),
+                )
+                summary['delivered'] += 1
+            else:
+                err = result.error or result.status
+                conn.execute(
+                    f"""
+                    UPDATE {OUTBOX_TABLE}
+                    SET attempts=attempts+1, last_error=?
+                    WHERE event_key=?
+                    """,
+                    (str(err)[:256], item['event_key']),
+                )
+                summary['failed'] += 1
+                _record_error(f'drain_outbox {item["event_key"]}: {err}')
+        if conn.in_transaction:
+            conn.execute('COMMIT')
+        summary['pending_after'] = count_pending_outbox(conn)
+        return summary
+    except Exception as exc:  # noqa: BLE001
+        _record_error(f'drain_shadow_outbox: {exc}')
+        summary['error'] = str(exc)
+        summary['failed'] = max(summary['failed'], 1)
+        return summary
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def drain_shadow_outbox_best_effort(
+    db_path: Optional[str] = None,
+    *,
+    environ: Optional[Mapping[str, str]] = None,
+) -> None:
+    """生产路径：drain 失败只打日志，不影响主流程。"""
+    try:
+        if not is_user_events_enabled(environ=environ):
+            return
+        drain_shadow_outbox(db_path=db_path, environ=environ)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning('internal_state_shadow: drain best-effort failed: %s', exc)
 
 
 def _fetch_row_dict(conn: sqlite3.Connection, table: str) -> Optional[dict]:
@@ -773,11 +1384,16 @@ def get_shadow_health(
             user_events_enabled=events_on,
             proof_gap=None,
             proof_schema_ready=None,
+            proof_max_message_id=None,
+            watermark_lag=None,
+            outbox_pending=None,
+            outbox_schema_ready=None,
         )
 
     conn = None
     try:
-        conn = open_shadow_connection(db_path)
+        path = isv3.memories_db_path(db_path)
+        conn = open_shadow_connection(path)
         journal = store.get_journal_mode(conn)
         state = store.read_state(conn)
         event = store.read_event(conn, BOOTSTRAP_EVENT_KEY)
@@ -787,15 +1403,36 @@ def get_shadow_health(
             if structural else False
         )
         health = read_proof_health(conn)
+        gap = health.gap_detected or bool(
+            (read_proof_gap_sidecar(path) or {}).get('gap_detected')
+        )
+        proof_max = None
+        if score_proof_schema_ready(conn):
+            try:
+                proof_max = resolve_scored_watermark(conn)
+            except store.StoreError:
+                proof_max = None
+        last_scored = (
+            state.get('last_scored_message_id') if state is not None else None
+        )
+        lag = None
+        if proof_max is not None and last_scored is not None:
+            lag = int(proof_max) > int(last_scored)
+        elif proof_max is not None and last_scored is None:
+            lag = True
+        pending = count_pending_outbox(conn) if outbox_schema_ready(conn) else None
+        # proof 超前且无 pending outbox 可解释时，标红 last_status
+        if lag and (pending or 0) == 0 and status not in ('proof_gap',):
+            status = 'watermark_lag'
+        elif pending and pending > 0 and status not in ('proof_gap', 'watermark_lag'):
+            status = 'outbox_pending'
         return ShadowHealth(
             enabled=True,
             bootstrapped=structural,
             state_version=(
                 int(state['state_version']) if state is not None else None
             ),
-            last_scored_message_id=(
-                state.get('last_scored_message_id') if state is not None else None
-            ),
+            last_scored_message_id=last_scored,
             last_error=err,
             last_error_at=err_at,
             last_status=status,
@@ -803,8 +1440,12 @@ def get_shadow_health(
             provenance_ok=prov,
             score_proof_enabled=proof_on,
             user_events_enabled=events_on,
-            proof_gap=health.gap_detected,
+            proof_gap=gap,
             proof_schema_ready=score_proof_schema_ready(conn),
+            proof_max_message_id=proof_max,
+            watermark_lag=lag,
+            outbox_pending=pending,
+            outbox_schema_ready=outbox_schema_ready(conn),
         )
     except Exception as exc:  # noqa: BLE001
         _record_error(f'get_shadow_health: {exc}')
@@ -822,6 +1463,10 @@ def get_shadow_health(
             user_events_enabled=events_on,
             proof_gap=None,
             proof_schema_ready=None,
+            proof_max_message_id=None,
+            watermark_lag=None,
+            outbox_pending=None,
+            outbox_schema_ready=None,
         )
     finally:
         if conn is not None:
@@ -854,14 +1499,18 @@ def ensure_bootstrapped(
             probe.close()
 
         conn = open_shadow_connection(path)
-        ensure_shadow_schema(conn)
+        ensure_shadow_schema(conn, db_path=path)
 
         proof_health = read_proof_health(conn)
-        if proof_health.gap_detected:
+        if has_unresolved_proof_gap(conn, db_path=path):
+            side = read_proof_gap_sidecar(path) or {}
+            code = proof_health.error_code or side.get('error_code')
+            mid = proof_health.failed_message_id
+            if mid is None:
+                mid = side.get('failed_message_id')
             _record_error(
                 'ensure_bootstrapped: proof gap unresolved '
-                f'(code={proof_health.error_code!r} '
-                f'message_id={proof_health.failed_message_id!r})'
+                f'(code={code!r} message_id={mid!r})'
             )
             _record_status('proof_gap')
             return ShadowResult(
@@ -907,8 +1556,8 @@ def ensure_bootstrapped(
         # 线性化：先拿到写锁，再冻结 observed_at（不得在排队前填手术结束时间）
         conn.execute('BEGIN IMMEDIATE')
         try:
-            # 拿锁后再读一次 gap，避免与 proof writer 竞态
-            if read_proof_health(conn).gap_detected:
+            # 拿锁后再读一次 gap（含 sidecar），避免与 proof writer 竞态
+            if has_unresolved_proof_gap(conn, db_path=path):
                 conn.execute('ROLLBACK')
                 _record_status('proof_gap')
                 return ShadowResult(
@@ -1026,7 +1675,7 @@ def _ensure_bootstrapped_for_test(
     try:
         path = isv3.memories_db_path(db_path)
         conn = open_shadow_connection(path)
-        ensure_shadow_schema(conn)
+        ensure_shadow_schema(conn, db_path=path)
         if is_bootstrapped(conn):
             _record_status('already_bootstrapped')
             return ShadowResult(
@@ -1309,7 +1958,7 @@ def emit_user_rule_if_enabled(
     db_path: Optional[str] = None,
     environ: Optional[Mapping[str, str]] = None,
 ) -> ShadowResult:
-    """生产 user_rule 门禁：USER_EVENTS 未开则零 DB、不复制参数语义外的工作。"""
+    """直接投递 user_rule（测试 / 管理）；生产路径应 outbox 同事务 + drain。"""
     if not is_user_events_enabled(environ=environ):
         return ShadowResult(ok=True, status='disabled')
     return observe_user_message_shadow(
@@ -1330,7 +1979,7 @@ def emit_user_scored_if_enabled(
     db_path: Optional[str] = None,
     environ: Optional[Mapping[str, str]] = None,
 ) -> ShadowResult:
-    """生产 user_scored 门禁；须在 emotion+proof COMMIT 成功之后调用。"""
+    """直接投递 user_scored（测试 / 管理）；生产路径应 outbox 同事务 + drain。"""
     if not is_user_events_enabled(environ=environ):
         return ShadowResult(ok=True, status='disabled')
     return observe_scored_shadow(
@@ -1348,23 +1997,34 @@ def mark_proof_gap_standalone(
     failed_message_id: Optional[int],
     error_code: str,
 ) -> None:
-    """独立短连接标记 gap（评分事务 ROLLBACK 之后调用）。永不抛向主流程。"""
+    """独立短连接标记 gap。表缺失时写 sidecar。永不抛向主流程。"""
+    path = isv3.memories_db_path(db_path)
     conn = None
     try:
-        conn = open_shadow_connection(db_path)
-        # 若 health 表尚不存在，只打 critical 日志（prepare-schema 前）
+        conn = open_shadow_connection(path)
         mark_proof_gap(
             conn,
             failed_message_id=failed_message_id,
             error_code=error_code,
+            db_path=path,
         )
-        # open_store 为 autocommit；若在隐式事务中则提交
         if conn.in_transaction:
             conn.execute('COMMIT')
     except Exception as exc:  # noqa: BLE001
         logger.critical(
             'internal_state_shadow: failed to persist proof gap: %s', exc,
         )
+        try:
+            write_proof_gap_sidecar(
+                path,
+                failed_message_id=failed_message_id,
+                error_code=error_code,
+            )
+        except Exception as exc2:  # noqa: BLE001
+            logger.critical(
+                'internal_state_shadow: sidecar gap write also failed: %s',
+                exc2,
+            )
     finally:
         if conn is not None:
             conn.close()
@@ -1374,6 +2034,10 @@ __all__ = [
     'BOOTSTRAP_EVENT_KEY',
     'CAPTURE_MODE_PRODUCTION',
     'CAPTURE_MODE_TEST',
+    'EVENT_TYPE_USER_RULE',
+    'EVENT_TYPE_USER_SCORED',
+    'GAP_ACK_TABLE',
+    'OUTBOX_TABLE',
     'PRODUCTION_BOOTSTRAP_SOURCE_ID',
     'PROOF_HEALTH_TABLE',
     'PROOF_SOURCE_SCORE_AND_UPDATE',
@@ -1386,28 +2050,45 @@ __all__ = [
     'ProofHealth',
     'ShadowHealth',
     'ShadowResult',
+    'ack_proof_gap',
+    'append_outbox_sidecar',
     'apply_outcome_shadow',
     'capture_bootstrap_bundle',
     'clear_proof_gap',
+    'clear_proof_gap_sidecar',
+    'count_pending_outbox',
+    'drain_shadow_outbox',
+    'drain_shadow_outbox_best_effort',
     'emit_user_rule_if_enabled',
     'emit_user_scored_if_enabled',
+    'enqueue_outbox_in_txn',
+    'enqueue_user_rule_in_txn',
+    'enqueue_user_scored_in_txn',
     'ensure_bootstrapped',
     'ensure_shadow_schema',
     'get_shadow_health',
+    'has_unresolved_proof_gap',
     'is_bootstrapped',
     'is_score_proof_enabled',
     'is_shadow_enabled',
     'is_user_events_enabled',
     'mark_proof_gap',
     'mark_proof_gap_standalone',
+    'migrate_outbox_sidecar',
+    'migrate_proof_gap_sidecar',
     'observe_scored_shadow',
     'observe_user_message_shadow',
     'open_shadow_connection',
+    'outbox_schema_ready',
+    'outbox_sidecar_path',
+    'proof_gap_sidecar_path',
+    'read_proof_gap_sidecar',
     'read_proof_health',
     'record_score_proof_in_txn',
     'resolve_scored_watermark',
     'resolve_scored_watermark_row',
     'score_proof_schema_ready',
     'validate_bootstrap_snapshot',
+    'write_proof_gap_sidecar',
     '_ensure_bootstrapped_for_test',
 ]

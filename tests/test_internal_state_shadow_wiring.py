@@ -38,6 +38,11 @@ EVENTS_WITHOUT_MASTER = {
     shadow.SCORE_PROOF_ENABLED_ENV: '0',
     shadow.USER_EVENTS_ENABLED_ENV: '1',
 }
+EVENTS_WITHOUT_PROOF = {
+    shadow.SHADOW_ENABLED_ENV: '1',
+    shadow.SCORE_PROOF_ENABLED_ENV: '0',
+    shadow.USER_EVENTS_ENABLED_ENV: '1',
+}
 ALL_ON = {
     shadow.SHADOW_ENABLED_ENV: '1',
     shadow.SCORE_PROOF_ENABLED_ENV: '1',
@@ -76,8 +81,9 @@ class FlagTruthTableTests(unittest.TestCase):
         self.assertFalse(shadow.is_score_proof_enabled(environ={}))
         self.assertFalse(shadow.is_user_events_enabled(environ={}))
 
-    def test_user_events_requires_master(self):
+    def test_user_events_requires_master_and_proof(self):
         self.assertFalse(shadow.is_user_events_enabled(environ=EVENTS_WITHOUT_MASTER))
+        self.assertFalse(shadow.is_user_events_enabled(environ=EVENTS_WITHOUT_PROOF))
         self.assertTrue(shadow.is_user_events_enabled(environ=ALL_ON))
 
     def test_all_off_emit_zero_db(self):
@@ -197,8 +203,8 @@ class ProofAtomicityTests(unittest.TestCase):
         finally:
             conn.close()
 
-    def test_schema_missing_keeps_legacy_and_marks_gap(self):
-        # 新库：有 emotion，无 proof 表
+    def test_schema_missing_keeps_legacy_and_durable_sidecar_gap(self):
+        # 新库：有 emotion，无 proof 表 — gap 必须进 sidecar，prepare 后迁入
         db2 = str(Path(self.tmp.name) / 'nogap.db')
         conn = sqlite3.connect(db2)
         try:
@@ -207,7 +213,6 @@ class ProofAtomicityTests(unittest.TestCase):
         finally:
             conn.close()
         ee.DB_PATH = db2
-        # health 表也不存在 — mark_proof_gap_standalone 只打日志
         with mock.patch.object(ee, '_deepseek_score', return_value={
             'valence': 0.2, 'arousal': 0.4, 'mood_word': '开心',
             'passion_delta': 0.0, 'intimacy_delta': 0.0,
@@ -224,6 +229,21 @@ class ProofAtomicityTests(unittest.TestCase):
             ).fetchone())
         finally:
             conn.close()
+        side = shadow.read_proof_gap_sidecar(db2)
+        self.assertIsNotNone(side)
+        self.assertTrue(side.get('gap_detected'))
+        self.assertEqual(side.get('error_code'), 'proof_schema_missing')
+        # prepare-schema 不得洗白
+        conn = store.open_store(db2)
+        try:
+            shadow.ensure_shadow_schema(conn, db_path=db2)
+            health = shadow.read_proof_health(conn)
+            self.assertTrue(health.gap_detected)
+            self.assertEqual(health.error_code, 'proof_schema_missing')
+            self.assertTrue(shadow.has_unresolved_proof_gap(conn, db_path=db2))
+        finally:
+            conn.close()
+        self.assertIsNone(shadow.read_proof_gap_sidecar(db2))
 
 
 class GapBootstrapTests(unittest.TestCase):
@@ -328,11 +348,11 @@ class MessageIdThreadTests(unittest.TestCase):
 
 
 class UserRulePathTests(unittest.TestCase):
-    def test_insert_user_message_emits_once_when_enabled(self):
+    def test_insert_user_message_enqueues_outbox_when_enabled(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         db_path = str(Path(tmp.name) / 'user.db')
-        calls = []
+        enqueued = []
 
         def get_db():
             c = sqlite3.connect(db_path)
@@ -353,24 +373,30 @@ class UserRulePathTests(unittest.TestCase):
             conn.commit()
         finally:
             conn.close()
+        sconn = store.open_store(db_path)
+        try:
+            shadow.ensure_shadow_schema(sconn, db_path=db_path)
+        finally:
+            sconn.close()
 
         with mock.patch.object(
-            shadow, 'emit_user_rule_if_enabled',
-            side_effect=lambda **kw: calls.append(kw) or shadow.ShadowResult(
-                ok=True, status='disabled'),
-        ), mock.patch.dict(
+            shadow, 'enqueue_user_rule_in_txn',
+            side_effect=lambda conn, **kw: enqueued.append(kw) or True,
+        ), mock.patch.object(
+            shadow, 'drain_shadow_outbox_best_effort',
+        ) as drain, mock.patch.dict(
             __import__('os').environ, ALL_ON, clear=False,
         ):
-            # emit 被 mock；验证参数
             turn = moments_turn.insert_user_message(
                 get_db, {}, '你好呀',
                 memories_db_path=db_path,
             )
-        self.assertEqual(len(calls), 1)
-        self.assertEqual(calls[0]['message_id'], turn['user_message_id'])
-        self.assertEqual(calls[0]['text'], '你好呀')
-        self.assertEqual(calls[0]['previous_user_at'], '2026-07-21 10:00:00')
-        self.assertTrue(calls[0]['created_at'])
+        self.assertEqual(len(enqueued), 1)
+        self.assertEqual(enqueued[0]['message_id'], turn['user_message_id'])
+        self.assertEqual(enqueued[0]['text'], '你好呀')
+        self.assertEqual(enqueued[0]['previous_user_at'], '2026-07-21 10:00:00')
+        self.assertTrue(enqueued[0]['created_at'])
+        drain.assert_called_once()
 
     def test_insert_user_message_disabled_no_emit_db_for_shadow(self):
         tmp = tempfile.TemporaryDirectory()
@@ -394,11 +420,13 @@ class UserRulePathTests(unittest.TestCase):
             conn.close()
 
         with mock.patch.dict(__import__('os').environ, OFF, clear=False), \
-             mock.patch.object(shadow, 'observe_user_message_shadow') as obs:
+             mock.patch.object(shadow, 'observe_user_message_shadow') as obs, \
+             mock.patch.object(shadow, 'enqueue_user_rule_in_txn') as enq:
             moments_turn.insert_user_message(
                 get_db, {}, 'hi', memories_db_path=db_path,
             )
             obs.assert_not_called()
+            enq.assert_not_called()
 
 
 class GatewayGuardTests(unittest.TestCase):
@@ -513,6 +541,225 @@ class EndToEndShadowEventTests(unittest.TestCase):
         h2 = shadow.get_shadow_health(db_path=db_path, environ=ALL_ON)
         self.assertTrue(h2.provenance_ok)
         self.assertEqual(h2.last_scored_message_id, 21)
+
+
+def _seed_legacy_for_bootstrap(conn: sqlite3.Connection) -> None:
+    _seed_emotion(conn)
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS drive_state (
+            id INTEGER PRIMARY KEY,
+            attachment REAL, curiosity REAL, reflection REAL, social REAL,
+            duty REAL, libido REAL, stress REAL, fatigue REAL,
+            last_updated TEXT
+        );
+        CREATE TABLE IF NOT EXISTS desire_state (
+            id INTEGER PRIMARY KEY,
+            curiosity REAL, reflection REAL, duty REAL, social REAL,
+            libido REAL, stress REAL, fatigue REAL,
+            last_updated TEXT, last_hayana_msg_time TEXT
+        );
+        CREATE TABLE IF NOT EXISTS wake_log (
+            id INTEGER PRIMARY KEY,
+            action TEXT, woke_at TEXT
+        );
+        DELETE FROM drive_state; DELETE FROM desire_state;
+        INSERT INTO drive_state VALUES (
+            1, 0.5, 0.2, 0.3, 0.1, 0.15, 0.1, 0.2, 0.4, '2026-07-21 10:00:00');
+        INSERT INTO desire_state VALUES (
+            1, 0.2, 0.3, 0.15, 0.1, 0.1, 0.2, 0.4, '2026-07-21 10:00:00', NULL);
+        INSERT INTO chat_messages (author, content, created_at)
+        VALUES ('hayana', 'hi', '2026-07-21 11:00:00');
+        """
+    )
+
+
+class OutboxReliabilityTests(unittest.TestCase):
+    def setUp(self):
+        import os
+        self.tmp = tempfile.TemporaryDirectory()
+        self.db_path = str(Path(self.tmp.name) / 'outbox.db')
+        self._patch = mock.patch.dict(os.environ, ALL_ON, clear=False)
+        self._patch.start()
+        conn = store.open_store(self.db_path)
+        try:
+            _seed_legacy_for_bootstrap(conn)
+            shadow.ensure_shadow_schema(conn, db_path=self.db_path)
+            conn.execute('BEGIN')
+            shadow.record_score_proof_in_txn(
+                conn, 20, applied_at=T0, source='unit')
+            conn.execute('COMMIT')
+        finally:
+            conn.close()
+        r = shadow.ensure_bootstrapped(
+            db_path=self.db_path,
+            environ={shadow.SHADOW_ENABLED_ENV: '1'},
+        )
+        self.assertTrue(r.ok, msg=r.error)
+
+    def tearDown(self):
+        self._patch.stop()
+        self.tmp.cleanup()
+
+    def test_failed_emit_keeps_outbox_and_replay_is_idempotent(self):
+        import datetime as _dt
+        scores = {
+            'valence': 0.7, 'arousal': 0.4, 'mood_word': '开心',
+            'passion_delta': 0.01, 'intimacy_delta': 0.0, 'source': 't',
+        }
+        conn = store.open_store(self.db_path)
+        try:
+            observed = store.read_state(conn)['p_updated_at']
+        finally:
+            conn.close()
+        base = _dt.datetime.strptime(observed, '%Y-%m-%d %H:%M:%S')
+        scored_at = (base + _dt.timedelta(seconds=1)).strftime('%Y-%m-%d %H:%M:%S')
+        conn = store.open_store(self.db_path)
+        try:
+            conn.execute('BEGIN IMMEDIATE')
+            shadow.enqueue_user_scored_in_txn(
+                conn,
+                message_id=101,
+                scores=scores,
+                scored_at=scored_at,
+                environ=ALL_ON,
+            )
+            # 模拟同事务权威 proof（完整 scores 已在 outbox）
+            shadow.record_score_proof_in_txn(
+                conn, 101, applied_at=scored_at, source='unit')
+            conn.execute('COMMIT')
+        finally:
+            conn.close()
+
+        with mock.patch.object(
+            shadow, 'observe_scored_shadow',
+            return_value=shadow.ShadowResult(
+                ok=False, status='failed', error='simulated'),
+        ):
+            summary = shadow.drain_shadow_outbox(
+                db_path=self.db_path, environ=ALL_ON,
+            )
+        self.assertEqual(summary['failed'], 1)
+        conn = store.open_store(self.db_path)
+        try:
+            pending = shadow.count_pending_outbox(conn)
+            self.assertEqual(pending, 1)
+            row = conn.execute(
+                f"SELECT payload_json FROM {shadow.OUTBOX_TABLE} "
+                "WHERE event_key='user_scored:101'"
+            ).fetchone()
+            payload = json.loads(row[0])
+            self.assertEqual(payload['scores']['valence'], 0.7)
+            self.assertEqual(payload['scores']['passion_delta'], 0.01)
+        finally:
+            conn.close()
+
+        # 进程重启后重放 → 一条 v3 事件；重复 drain 仍一条
+        s1 = shadow.drain_shadow_outbox(db_path=self.db_path, environ=ALL_ON)
+        self.assertEqual(s1['delivered'], 1, msg=s1)
+        s2 = shadow.drain_shadow_outbox(db_path=self.db_path, environ=ALL_ON)
+        self.assertEqual(s2['delivered'], 0)
+        conn = store.open_store(self.db_path)
+        try:
+            n = conn.execute(
+                "SELECT COUNT(*) FROM internal_state_events "
+                "WHERE event_key='user_scored:101'"
+            ).fetchone()[0]
+            self.assertEqual(n, 1)
+            self.assertEqual(shadow.count_pending_outbox(conn), 0)
+        finally:
+            conn.close()
+
+    def test_health_shows_watermark_lag(self):
+        conn = store.open_store(self.db_path)
+        try:
+            conn.execute('BEGIN')
+            shadow.record_score_proof_in_txn(
+                conn, 200, applied_at='2026-07-21 12:01:00', source='unit')
+            conn.execute('COMMIT')
+        finally:
+            conn.close()
+        h = shadow.get_shadow_health(db_path=self.db_path, environ=ALL_ON)
+        self.assertEqual(h.proof_max_message_id, 200)
+        self.assertEqual(h.last_scored_message_id, 20)
+        self.assertTrue(h.watermark_lag)
+        self.assertEqual(h.last_status, 'watermark_lag')
+
+    def test_user_rule_outbox_same_txn_survives_failed_drain(self):
+        def get_db():
+            c = sqlite3.connect(self.db_path)
+            c.row_factory = sqlite3.Row
+            return c
+
+        with mock.patch.object(
+            shadow, 'observe_user_message_shadow',
+            return_value=shadow.ShadowResult(
+                ok=False, status='failed', error='boom'),
+        ):
+            turn = moments_turn.insert_user_message(
+                get_db, {}, '规则消息',
+                memories_db_path=self.db_path,
+            )
+        mid = turn['user_message_id']
+        conn = store.open_store(self.db_path)
+        try:
+            self.assertEqual(shadow.count_pending_outbox(conn), 1)
+            row = conn.execute(
+                f"SELECT event_type, payload_json FROM {shadow.OUTBOX_TABLE} "
+                "WHERE delivered_at IS NULL"
+            ).fetchone()
+            self.assertEqual(row[0], 'user_rule')
+            payload = json.loads(row[1])
+            self.assertEqual(payload['message_id'], mid)
+            self.assertEqual(payload['text'], '规则消息')
+        finally:
+            conn.close()
+        # 重放成功且幂等
+        shadow.drain_shadow_outbox(db_path=self.db_path, environ=ALL_ON)
+        shadow.drain_shadow_outbox(db_path=self.db_path, environ=ALL_ON)
+        conn = store.open_store(self.db_path)
+        try:
+            n = conn.execute(
+                "SELECT COUNT(*) FROM internal_state_events "
+                f"WHERE event_key='user_rule:{mid}'"
+            ).fetchone()[0]
+            self.assertEqual(n, 1)
+        finally:
+            conn.close()
+
+
+class AckGapTests(unittest.TestCase):
+    def test_ack_gap_requires_matching_message_id_and_reason(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        db_path = str(Path(tmp.name) / 'ack.db')
+        conn = store.open_store(db_path)
+        try:
+            _seed_emotion(conn)
+            shadow.ensure_shadow_schema(conn, db_path=db_path)
+            shadow.mark_proof_gap(
+                conn, failed_message_id=9, error_code='unit_gap',
+            )
+            with self.assertRaises(store.StoreError):
+                shadow.ack_proof_gap(
+                    conn, message_id=8, reason='wrong id', db_path=db_path,
+                )
+            with self.assertRaises(store.StoreError):
+                shadow.ack_proof_gap(
+                    conn, message_id=9, reason='  ', db_path=db_path,
+                )
+            result = shadow.ack_proof_gap(
+                conn, message_id=9, reason='reconciled after inspect',
+                db_path=db_path,
+            )
+            self.assertTrue(result['acked'])
+            self.assertFalse(shadow.read_proof_health(conn).gap_detected)
+            n = conn.execute(
+                f'SELECT COUNT(*) FROM {shadow.GAP_ACK_TABLE}'
+            ).fetchone()[0]
+            self.assertEqual(n, 1)
+        finally:
+            conn.close()
 
 
 if __name__ == '__main__':
