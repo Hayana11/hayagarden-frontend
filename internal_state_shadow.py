@@ -2556,6 +2556,9 @@ def drain_shadow_outbox(
                 )
                 summary['failed'] += 1
                 _record_error(f'drain_outbox {item["event_key"]}: {err}')
+                # State events are causal. Never let a later observation advance
+                # clocks past a failed head row and turn it into a rewind poison.
+                break
         if conn.in_transaction:
             conn.execute('COMMIT')
         summary['pending_after'] = count_pending_outbox(conn)

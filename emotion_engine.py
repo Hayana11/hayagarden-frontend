@@ -830,7 +830,6 @@ def score_and_update(conversation_excerpt: str, *, message_id=None):
                             pass
                     finally:
                         legacy_conn.close()
-                    return
         else:
             conn.isolation_level = None
             conn.execute('BEGIN IMMEDIATE')

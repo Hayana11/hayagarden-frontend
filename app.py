@@ -932,7 +932,7 @@ def send_chat():
             ).fetchone()
             if prev is not None:
                 previous_user_at = prev['created_at'] if hasattr(prev, 'keys') else prev[0]
-                previous_user_at = str(previous_user_at)[:19] if previous_user_at else None
+                previous_user_at = str(previous_user_at) if previous_user_at else None
         cur = conn.execute(
             "INSERT INTO chat_messages (author,content,image_url,file_url,file_name) "
             "VALUES (?,?,?,?,?)",
@@ -946,7 +946,7 @@ def send_chat():
             ).fetchone()
             if row is not None:
                 created_at = row['created_at'] if hasattr(row, 'keys') else row[0]
-                created_at = str(created_at)[:19] if created_at else None
+                created_at = str(created_at) if created_at else None
         capture_alert_failed = False
         # Shadow user_rule outbox：与 chat INSERT 同事务；缺表则 outbox_capture_gap
         # 聊天主流程不得阻断；证据全失败时记 sticky alert（status fail-closed）
