@@ -198,7 +198,7 @@ class ClockRejectTests(EventsBase):
                 created_at='not-a-timestamp',
                 previous_user_at=T0,
             )
-        self.assertIn('not parseable', str(ctx.exception))
+        self.assertIn('canonical timestamp', str(ctx.exception))
         self.assertIsNone(store.read_event(self.conn, 'user_rule:50'))
         st = self.state()
         self.assertEqual(st['state_version'], 0)
@@ -250,6 +250,127 @@ class ClockRejectTests(EventsBase):
         # 若曾被拨回 11:00，则 13:00 会按 2h 衰减
         wrong_2h = round(isv3.decay_exponential(0.60, 2.0, isv3.TAU_P_HOURS), 4)
         self.assertNotAlmostEqual(st['passion'], wrong_2h, places=4)
+
+
+
+    def test_malformed_previous_user_at_rejected_then_same_key_retries(self):
+        """非 None 不可解析不得伪装 clock_missing；同 key 正确时间可重试。"""
+        with self.assertRaises(store.StoreError) as ctx:
+            events.observe_user_message(
+                self.conn,
+                message_id=60,
+                text='你好',
+                created_at=T_2H,
+                previous_user_at='坏掉的时间',
+            )
+        self.assertIn('previous_user_at', str(ctx.exception))
+        self.assertIsNone(store.read_event(self.conn, 'user_rule:60'))
+        self.assertEqual(self.state()['state_version'], 0)
+
+        r = events.observe_user_message(
+            self.conn,
+            message_id=60,
+            text='你好',
+            created_at=T_2H,
+            previous_user_at=T0,
+        )
+        self.assertEqual(r.status, 'applied')
+        payload = json.loads(store.read_event(self.conn, 'user_rule:60')['payload_json'])
+        self.assertFalse(payload['clock_missing'])
+        self.assertEqual(payload['previous_user_at'], T0)
+
+    def test_corrupted_state_clocks_fail_closed(self):
+        """三锚点分别损坏：不更新状态、不消费事件、不洗白。"""
+        for field in ('p_updated_at', 'i_updated_at', 'drives_updated_at'):
+            with self.subTest(field=field):
+                self.conn.execute(
+                    f'UPDATE internal_state_v3 SET {field}=? WHERE id=1',
+                    ('不是时间',))
+                self.conn.commit()
+                before = dict(self.state())
+                with self.assertRaises(store.StoreError) as ctx:
+                    events.observe_user_message(
+                        self.conn,
+                        message_id=70 + hash(field) % 1000,
+                        text='你好',
+                        created_at=T_2H,
+                        previous_user_at=T0,
+                    )
+                self.assertIn(field, str(ctx.exception))
+                after = self.state()
+                self.assertEqual(after['state_version'], before['state_version'])
+                self.assertEqual(after[field], '不是时间')
+                self.assertEqual(after['passion'], before['passion'])
+                # restore for next subTest
+                self.conn.execute(
+                    f'UPDATE internal_state_v3 SET {field}=? WHERE id=1', (T0,))
+                self.conn.commit()
+
+    def test_missing_state_clock_rejected(self):
+        self.conn.execute(
+            'UPDATE internal_state_v3 SET drives_updated_at=NULL WHERE id=1')
+        self.conn.commit()
+        with self.assertRaises(store.StoreError) as ctx:
+            events.observe_user_message(
+                self.conn,
+                message_id=71,
+                text='你好',
+                created_at=T_2H,
+                previous_user_at=None,
+            )
+        self.assertIn('missing', str(ctx.exception))
+        self.assertIsNone(store.read_event(self.conn, 'user_rule:71'))
+        self.assertEqual(self.state()['state_version'], 0)
+
+    def test_trailing_garbage_timestamp_rejected(self):
+        garbage = T0 + '坏猫乱写'
+        with self.assertRaises(store.StoreError):
+            events.observe_user_message(
+                self.conn,
+                message_id=72,
+                text='你好',
+                created_at=garbage,
+                previous_user_at=None,
+            )
+        self.assertIsNone(store.read_event(self.conn, 'user_rule:72'))
+        with self.assertRaises(store.StoreError):
+            events.observe_user_message(
+                self.conn,
+                message_id=73,
+                text='你好',
+                created_at=T_2H,
+                previous_user_at=T0 + '尾巴',
+            )
+        self.assertIsNone(store.read_event(self.conn, 'user_rule:73'))
+
+    def test_equivalent_timestamp_forms_share_identity(self):
+        """微秒形式 canonicalize 后与标准形式同身份，不产生假 conflict。"""
+        r1 = events.observe_user_message(
+            self.conn,
+            message_id=74,
+            text='你好',
+            created_at=T_2H + '.000000',
+            previous_user_at=T0 + '.000000',
+        )
+        self.assertEqual(r1.status, 'applied')
+        ev = store.read_event(self.conn, 'user_rule:74')
+        payload = json.loads(ev['payload_json'])
+        self.assertEqual(payload['created_at'], T_2H)
+        self.assertEqual(payload['previous_user_at'], T0)
+        st = self.state()
+        self.assertEqual(st['p_updated_at'], T_2H)
+        self.assertEqual(st['i_updated_at'], T_2H)
+        self.assertEqual(st['drives_updated_at'], T_2H)
+
+        r2 = events.observe_user_message(
+            self.conn,
+            message_id=74,
+            text='你好',
+            created_at=T_2H,
+            previous_user_at=T0,
+        )
+        self.assertEqual(r2.status, 'duplicate')
+
 
 
 class BondMaterializeTests(EventsBase):
@@ -360,6 +481,63 @@ class DrivesMaterializeTests(EventsBase):
         self.assertAlmostEqual(f2, max(0.0, 0.28 - 0.12), places=4)
         # 旧错误路径：0.40+0.015-0.12=0.295，再 +0.015-0.12…
         self.assertNotAlmostEqual(f1, 0.295, places=4)
+
+
+
+class FatigueContinuityTests(EventsBase):
+    def test_phase0_raw_to_v3_t0_fatigue_is_continuous(self):
+        """Phase 0 raw 物化 → bootstrap → t=0 transition：fatigue 数值连续。
+
+        说明：Phase 0 对 raw 加一次 NA；Phase 1A-1 对 materialized base
+        使用 effective equilibrium，t=0 恒等，不得再加 NA。
+        """
+        import datetime as _dt
+        observed = _dt.datetime.strptime(T0, '%Y-%m-%d %H:%M:%S')
+        last_updated = '2026-07-21 06:00:00'  # 6h earlier
+        raw = {
+            'attachment': 0.20, 'curiosity': 0.20, 'reflection': 0.20,
+            'social': 0.10, 'duty': 0.15, 'libido': 0.05, 'stress': 0.10,
+            'fatigue': 0.80,
+            'last_updated': last_updated,
+        }
+        na = 0.25
+        phase0 = isv3.drives_from_raw(
+            raw, observed, longing_for_boost=0.0,
+            passion_for_boost=0.0, na_for_boost=na,
+        )
+        # 重建库：用 Phase 0 物化值 bootstrap
+        self.conn.close()
+        self.tmp.cleanup()
+        self.tmp = __import__('tempfile').TemporaryDirectory()
+        self.db_path = str(Path(self.tmp.name) / 'cont.db')
+        self.conn = store.open_store(self.db_path)
+        snap = _snapshot(
+            observed_at=T0,
+            affect=__import__('types').SimpleNamespace(
+                pa=0.55, na=na, valence=0.6, arousal=0.4, mood_word='平静'),
+            candidate_unified_drives=__import__('types').SimpleNamespace(
+                **{k: getattr(phase0, k) for k in isv3.DRIVE_KEYS}),
+        )
+        store.bootstrap_from_snapshot(self.conn, snap)
+        st = self.state()
+        self.assertAlmostEqual(st['fatigue'], phase0.fatigue, places=4)
+        self.assertEqual(st['drives_updated_at'], T0)
+
+        plan = events.plan_user_message_transition(
+            st,
+            message_id=80,
+            text='无关键词',
+            created_at=T0,
+            previous_user_at=T0,
+        )
+        # t=0 物化恒等 Phase 0 / bootstrap fatigue
+        self.assertAlmostEqual(
+            plan['payload']['materialized_before']['fatigue'],
+            phase0.fatigue, places=4)
+        # 权威写入仅 rest −0.12
+        self.assertAlmostEqual(
+            plan['updates']['fatigue'],
+            max(0.0, phase0.fatigue - 0.12), places=4)
 
 
 class KeywordParityTests(unittest.TestCase):

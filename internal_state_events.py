@@ -90,15 +90,35 @@ CANDIDATE_ATTACHMENT_SATISFY_RATIO = 0.45
 
 _STATE_CLOCK_FIELDS = ('p_updated_at', 'i_updated_at', 'drives_updated_at')
 _USER_RULE_EVENT_TYPE = 'user_rule'
+_TS_FMT = '%Y-%m-%d %H:%M:%S'
+# 有限几种可解析格式；一律 canonicalize 成 _TS_FMT。禁止 [:19] 截断吞尾随垃圾。
+_TS_PARSE_FORMATS = (_TS_FMT, '%Y-%m-%d %H:%M:%S.%f')
 
 
 def _parse_dt(value: Any) -> Optional[datetime.datetime]:
-    if not value:
+    """解析时间；整串必须匹配某一允许格式，拒绝尾随垃圾。"""
+    if value is None:
         return None
-    try:
-        return datetime.datetime.strptime(str(value)[:19], '%Y-%m-%d %H:%M:%S')
-    except (TypeError, ValueError):
+    s = str(value)
+    if not s:
         return None
+    for fmt in _TS_PARSE_FORMATS:
+        try:
+            return datetime.datetime.strptime(s, fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def _canonicalize_ts(value: Any, *, field: str) -> str:
+    """解析成功后统一写成 YYYY-MM-DD HH:MM:SS；失败抛 StoreError。"""
+    dt = _parse_dt(value)
+    if dt is None:
+        raise StoreError(
+            f'{field} is not a canonical timestamp '
+            f'YYYY-MM-DD HH:MM:SS: {value!r}'
+        )
+    return dt.strftime(_TS_FMT)
 
 
 def _clamp01(v: float) -> float:
@@ -112,42 +132,81 @@ def _float_field(state: Mapping[str, Any], key: str, default: float) -> float:
     return float(raw)
 
 
-def _require_parseable_created_at(created_at: Any) -> datetime.datetime:
+def _canonicalize_observation_clocks(
+    *,
+    created_at: Any,
+    previous_user_at: Optional[Any],
+) -> tuple[str, Optional[str]]:
+    """规范化观察时钟；不读状态行。
+
+    - ``previous_user_at is None`` → 合法 clock_missing（返回 None）
+    - 非 None 但不可解析 → StoreError（不得当成 clock_missing）
+    """
     if not created_at:
         raise StoreError('created_at required')
-    dt = _parse_dt(created_at)
-    if dt is None:
-        raise StoreError(f'created_at is not parseable: {created_at!r}')
-    return dt
+    created_canon = _canonicalize_ts(created_at, field='created_at')
+    created_dt = _parse_dt(created_canon)
+    assert created_dt is not None
+
+    if previous_user_at is None:
+        return created_canon, None
+
+    # 非 None：空串 / 垃圾 / 不可解析一律拒绝，禁止伪装成 clock_missing
+    prev_canon = _canonicalize_ts(previous_user_at, field='previous_user_at')
+    prev_dt = _parse_dt(prev_canon)
+    assert prev_dt is not None
+    if prev_dt > created_dt:
+        raise StoreError(
+            f'previous_user_at {previous_user_at!r} is after '
+            f'created_at {created_at!r}; invalid observation clock'
+        )
+    return created_canon, prev_canon
 
 
-def _validate_transition_clocks(
+def _require_state_clocks(
     state: Mapping[str, Any],
     *,
     created_at: str,
-    previous_user_at: Optional[str],
-) -> datetime.datetime:
-    """拒绝非法 / 倒序时钟；禁止用 max(0, elapsed) 掩盖后回拨时间锚点。"""
-    created_dt = _require_parseable_created_at(created_at)
+) -> None:
+    """bootstrap 后的三个锚点必须存在且可解析；损坏不得按 elapsed=0 洗白。"""
+    created_dt = _parse_dt(created_at)
+    if created_dt is None:
+        raise StoreError(f'created_at is not parseable: {created_at!r}')
 
     for field in _STATE_CLOCK_FIELDS:
         anchor_raw = state.get(field)
-        anchor = _parse_dt(anchor_raw)
-        if anchor is not None and created_dt < anchor:
+        if anchor_raw is None or str(anchor_raw).strip() == '':
+            raise StoreError(
+                f'state clock {field} is missing; refusing transition'
+            )
+        anchor_dt = _parse_dt(anchor_raw)
+        if anchor_dt is None:
+            raise StoreError(
+                f'state clock {field} is not parseable: {anchor_raw!r}; '
+                f'refusing to whitewash'
+            )
+        if created_dt < anchor_dt:
             raise StoreError(
                 f'created_at {created_at!r} is before state clock '
                 f'{field}={anchor_raw!r}; refusing to rewind'
             )
 
-    if previous_user_at is not None:
-        prev_dt = _parse_dt(previous_user_at)
-        if prev_dt is not None and prev_dt > created_dt:
-            raise StoreError(
-                f'previous_user_at {previous_user_at!r} is after '
-                f'created_at {created_at!r}; invalid observation clock'
-            )
 
-    return created_dt
+def _validate_transition_clocks(
+    state: Mapping[str, Any],
+    *,
+    created_at: Any,
+    previous_user_at: Optional[Any],
+) -> tuple[str, Optional[str]]:
+    """返回规范化后的 (created_at, previous_user_at)。
+
+    禁止用 max(0, elapsed) 掩盖后回拨或洗白损坏锚点。
+    """
+    created_canon, previous_canon = _canonicalize_observation_clocks(
+        created_at=created_at, previous_user_at=previous_user_at,
+    )
+    _require_state_clocks(state, created_at=created_canon)
+    return created_canon, previous_canon
 
 
 def _hours_elapsed(from_at: Any, to_at: str) -> float:
@@ -155,10 +214,11 @@ def _hours_elapsed(from_at: Any, to_at: str) -> float:
     start = _parse_dt(from_at)
     end = _parse_dt(to_at)
     if start is None or end is None:
-        return 0.0
+        raise StoreError(
+            f'unparseable elapsed endpoints from={from_at!r} to={to_at!r}'
+        )
     elapsed = (end - start).total_seconds() / 3600.0
     if elapsed < 0:
-        # 防御：校验应已拒绝倒序；此处绝不静默归零后继续写时钟
         raise StoreError(
             f'negative elapsed hours from {from_at!r} to {to_at!r}'
         )
@@ -225,8 +285,15 @@ def _materialize_drives(
 ) -> dict:
     """Internal State v3 解析解；输入为已物化的 v3 状态（非旧 raw row）。
 
-    fatigue：把 NA 放进平衡点，保证 t=0 时严格恒等 base，
-    避免每次消息把瞬时 NA 修正重复叠加。
+    fatigue 使用 effective equilibrium（NA 并入平衡点），使 t=0 恒等 base。
+
+    这是 raw-state → materialized-state 的表示转换，不是偷偷调 fatigue 参数：
+      - Phase 0 ``drives_from_raw`` 输入 legacy raw row：先向 FATIGUE_EQ 演化，
+        再额外加 ``na × 0.06``（瞬时修正只加一次，写进物化结果）。
+      - Phase 1A-1 输入已是 bootstrap / 上次事件后的 materialized base；
+        若再 ``+ na×0.06``，同一份 NA 会在每条消息上重复叠加。
+      - 因此权威演化改为 ``eq' = FATIGUE_EQ + na×0.06``，再向 eq' 回归；
+        t=0 时 value ≡ base，与 Phase 0 物化结果数值连续。
     """
     t = _hours_elapsed(state.get('drives_updated_at'), created_at)
     lf = float(longing_for_boost)
@@ -237,6 +304,7 @@ def _materialize_drives(
     for key in DRIVE_KEYS:
         base = _float_field(state, key, 0.1)
         if key == 'fatigue':
+            # raw→materialized 表示转换：NA 进平衡点，t=0 不重加
             effective_eq = FATIGUE_EQ + nf * FATIGUE_NA_COEF
             val = effective_eq + (base - effective_eq) * math.exp(-FATIGUE_K * t)
             out[key] = round(_clamp01(val), 4)
@@ -260,16 +328,17 @@ def _longing_before_reunion(
 ) -> tuple[float, bool, Optional[float]]:
     """返回 (longing, clock_missing, idle_hours)。
 
-    previous_user_at 必须由调用方显式传入；本函数绝不查询消息表。
-    正式候选固定 τ=18h（longing_desire_legacy_curve）。
-    previous > created 已由 ``_validate_transition_clocks`` 拒绝。
+    入参须已是 canonicalize 结果：``None`` 才表示 clock_missing；
+    非 None 不可解析不得进入本函数（上游已 StoreError）。
     """
     if previous_user_at is None:
         return 0.0, True, None
     start = _parse_dt(previous_user_at)
     end = _parse_dt(created_at)
     if start is None or end is None:
-        return 0.0, True, None
+        raise StoreError(
+            'canonical longing clocks became unparseable; refusing'
+        )
     idle = (end - start).total_seconds() / 3600.0
     if idle < 0:
         raise StoreError(
@@ -296,9 +365,10 @@ def plan_user_message_transition(
     """纯函数：用户消息 → updates / diagnostics / payload。
 
     同输入必须同输出；不读数据库、不读墙钟、不 import 旧引擎。
-    非法 / 倒序时钟抛 ``StoreError``，调用方不得落库。
+    非法 / 倒序 / 损坏时钟抛 ``StoreError``，调用方不得落库。
+    写入 payload / updates 的时间一律为 canonicalize 后的 19 位字符串。
     """
-    _validate_transition_clocks(
+    created_at, previous_user_at = _validate_transition_clocks(
         state, created_at=created_at, previous_user_at=previous_user_at,
     )
 
@@ -399,6 +469,8 @@ def plan_user_message_transition(
         },
         'candidate_attachment_not_applied': candidate_attachment,
         'candidate_reunion_boost_not_applied': reunion_boost,
+        'canonical_created_at': created_at,
+        'canonical_previous_user_at': previous_user_at,
     }
 
     return {
@@ -493,22 +565,28 @@ def observe_user_message(
     当前最后一条用户消息——真实接入时当前消息已落库，``last_user_at``
     会指向现在，思念会瞬间归零。
 
-    并发：经 ``apply_state_update``；version_conflict 不消费 event_key。
-    调用方重读 ``state_version`` 后可用同 key 重试，且必须重新执行本函数
-    （内部会重新 ``plan_user_message_transition``），不得复用旧 updates。
+    时钟契约：
+      - ``previous_user_at is None`` → 合法 ``clock_missing``
+      - 非 None 但不可解析 → ``StoreError``，不消费 event_key
+      - 状态三锚点缺失 / 不可解析 → ``StoreError``，不洗白
+      - 观察时间 canonicalize 后同时用于 identity / payload / 状态时钟
 
-    幂等：已存在事件须同时满足 event_type / source_id / 观察身份。
-    若 store 因完整 payload hash（含动态物化快照）返回
-    ``idempotency_conflict``，会重读落账事件；观察身份相同则校正为
-    ``duplicate``。
+    并发：经 ``apply_state_update``；version_conflict 不消费 event_key。
+    幂等：已存在事件须同时满足 event_type / source_id / 观察身份；
+    store 因完整 payload hash 冲突时，同观察校正为 ``duplicate``。
     """
     mid = int(message_id)
     event_key = f'user_rule:{mid}'
+
+    # 先规范化观察时钟（坏 previous 不得伪装 clock_missing 后占 key）
+    created_canon, previous_canon = _canonicalize_observation_clocks(
+        created_at=created_at, previous_user_at=previous_user_at,
+    )
     identity = _observation_identity(
         message_id=mid,
         text=text,
-        created_at=created_at,
-        previous_user_at=previous_user_at,
+        created_at=created_canon,
+        previous_user_at=previous_canon,
     )
 
     existing = read_event(conn, event_key)
@@ -546,13 +624,13 @@ def observe_user_message(
             ),
         )
 
-    # 时钟校验在 plan 内；失败抛 StoreError，不进入 apply → 不消费 key
+    # 状态时钟校验在 plan 内；失败抛 StoreError → 不消费 key
     plan = plan_user_message_transition(
         state,
         message_id=mid,
         text=text,
-        created_at=created_at,
-        previous_user_at=previous_user_at,
+        created_at=created_canon,
+        previous_user_at=previous_canon,
     )
     updates = dict(plan['updates'])
 
@@ -563,7 +641,6 @@ def observe_user_message(
         source_id=str(mid),
         payload=plan['payload'],
         mutator=lambda _s: dict(updates),
-        # 始终绑到 plan 时的版本，避免闭包 updates 落到更新后的 state
         expected_state_version=planned_version,
     )
 
@@ -572,7 +649,6 @@ def observe_user_message(
         if (landed is not None
                 and _event_matches_observation(
                     landed, message_id=mid, identity=identity)):
-            # 同观察、不同物化快照的竞态：业务上视为 duplicate
             return _duplicate_result(landed)
 
     return result
