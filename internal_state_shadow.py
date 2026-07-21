@@ -131,6 +131,9 @@ class ShadowHealth:
     quarantine_pending: Optional[int] = None
     capture_evidence_failures: Optional[int] = None
     capture_alert_pending: Optional[bool] = None
+    capture_alert_intents_pending: Optional[int] = None
+    pending_incident_intents_pending: Optional[int] = None
+    quarantine_intents_pending: Optional[int] = None
 
     def as_dict(self) -> dict:
         return asdict(self)
@@ -544,7 +547,11 @@ def ack_capture_alert(
         raise store.StoreError('no pending configured capture alert')
     processing = Path(f'{alert}.processing.{uuid.uuid4().hex}')
     archive = Path(f'{processing}.resolved.{uuid.uuid4().hex}')
-    actual = _sha256_file(alert)
+    # Claim before hash: concurrent writers publish a fresh canonical marker and
+    # cannot replace the file whose identity this ack verifies.
+    os.rename(str(alert), str(processing))
+    _fsync_dir(processing.parent)
+    actual = _sha256_file(processing)
     if actual.lower() != sha256.lower():
         raise store.StoreError(f'capture alert sha256 mismatch: {actual}')
     conn.execute(
@@ -573,7 +580,8 @@ def ack_capture_alert(
         )
         """
     )
-    # Intent is durable before claim: source-present recovery can resume rename.
+    # Claim already happened. If power fails before this insert, recovery scans
+    # orphan processing files and synthesizes a durable recovery intent.
     conn.execute('BEGIN IMMEDIATE')
     try:
         cur = conn.execute(
@@ -590,8 +598,6 @@ def ack_capture_alert(
     except Exception:
         conn.execute('ROLLBACK')
         raise
-    os.rename(str(alert), str(processing))
-    _fsync_dir(processing.parent)
     return _complete_capture_alert_intent(conn, intent_id=intent_id)
 
 
@@ -675,6 +681,33 @@ def recover_capture_alert_acks(conn: sqlite3.Connection) -> list[dict]:
             os.rename(str(canonical), str(processing))
             _fsync_dir(processing.parent)
         out.append(_complete_capture_alert_intent(conn, intent_id=iid))
+    # Claim-first crash before intent: adopt orphan processing as an audited
+    # recovery intent. New canonical markers are intentionally untouched.
+    alert = capture_alert_path()
+    if alert is not None:
+        known = {x['processing_path'] for x in inspect_capture_alert_acks(conn)}
+        for proc in alert.parent.glob(alert.name + '.processing.*'):
+            if str(proc) in known or '.resolved.' in proc.name or not proc.is_file():
+                continue
+            digest = _sha256_file(proc)
+            archive = Path(f'{proc}.resolved.{uuid.uuid4().hex}')
+            conn.execute('BEGIN IMMEDIATE')
+            try:
+                cur = conn.execute(
+                    f"""
+                    INSERT INTO {CAPTURE_ALERT_INTENT_TABLE}
+                        (canonical_path, processing_path, archive_path, sha256, reason, prepared_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (str(alert), str(proc), str(archive), digest,
+                     'recovered orphan processing claim', _now_beijing()),
+                )
+                oid = int(cur.lastrowid)
+                conn.execute('COMMIT')
+            except Exception:
+                conn.execute('ROLLBACK')
+                raise
+            out.append(_complete_capture_alert_intent(conn, intent_id=oid))
     return out
 
 
@@ -853,7 +886,44 @@ def has_unresolved_proof_gap(
         return True
     if count_quarantine_pending(path) > 0:
         return True
+    if count_incomplete_recovery_intents(conn) > 0:
+        return True
     return bool(read_proof_health(conn).gap_detected)
+
+
+def _count_incomplete_table(conn: sqlite3.Connection, table: str) -> int:
+    try:
+        row = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,),
+        ).fetchone()
+        if row is None:
+            return 0
+        value = conn.execute(
+            f'SELECT COUNT(*) FROM {table} WHERE completed_at IS NULL'
+        ).fetchone()
+        return int(value[0] if value else 0)
+    except Exception:
+        return 1
+
+
+def count_capture_alert_intents_pending(conn: sqlite3.Connection) -> int:
+    return _count_incomplete_table(conn, CAPTURE_ALERT_INTENT_TABLE)
+
+
+def count_pending_incident_intents_pending(conn: sqlite3.Connection) -> int:
+    return _count_incomplete_table(conn, PENDING_INCIDENT_INTENT_TABLE)
+
+
+def count_quarantine_intents_pending(conn: sqlite3.Connection) -> int:
+    return _count_incomplete_table(conn, QUARANTINE_INTENT_TABLE)
+
+
+def count_incomplete_recovery_intents(conn: sqlite3.Connection) -> int:
+    return (
+        count_capture_alert_intents_pending(conn)
+        + count_pending_incident_intents_pending(conn)
+        + count_quarantine_intents_pending(conn)
+    )
 
 
 def _unique_quarantine_path(src: Path) -> Path:
@@ -2872,6 +2942,9 @@ def get_shadow_health(
             if structural else False
         )
         gap = has_unresolved_proof_gap(conn, db_path=path)
+        capture_intents_n = count_capture_alert_intents_pending(conn)
+        pending_intents_n = count_pending_incident_intents_pending(conn)
+        quarantine_intents_n = count_quarantine_intents_pending(conn)
         incidents_n = count_unresolved_gap_incidents(conn)
         sidecar_n = count_gap_sidecar_pending(path)
         quarantine_n = count_quarantine_pending(path)
@@ -2929,6 +3002,9 @@ def get_shadow_health(
             quarantine_pending=quarantine_n,
             capture_evidence_failures=capture_fail_n,
             capture_alert_pending=capture_alert,
+            capture_alert_intents_pending=capture_intents_n,
+            pending_incident_intents_pending=pending_intents_n,
+            quarantine_intents_pending=quarantine_intents_n,
         )
     except Exception as exc:  # noqa: BLE001
         _record_error(f'get_shadow_health: {exc}')
@@ -3577,6 +3653,10 @@ __all__ = [
     'count_gap_sidecar_pending',
     'count_quarantine_pending',
     'count_pending_outbox',
+    'count_incomplete_recovery_intents',
+    'count_capture_alert_intents_pending',
+    'count_pending_incident_intents_pending',
+    'count_quarantine_intents_pending',
     'count_unresolved_gap_incidents',
     'drain_shadow_outbox',
     'drain_shadow_outbox_best_effort',

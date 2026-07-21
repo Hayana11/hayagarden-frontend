@@ -78,6 +78,7 @@ def _cmd_prepare_schema(db_path: str) -> int:
                     and shadow.capture_alert_configured()
                     and shadow.capture_alert_preflight(path)['ok']
                     and not shadow.has_capture_alert(path)
+                    and shadow.count_incomplete_recovery_intents(conn) == 0
                 )
             ),
         }
@@ -127,6 +128,7 @@ def _cmd_status(db_path: str) -> int:
                 and shadow.capture_alert_configured()
                 and alert_preflight['ok']
                 and not shadow.has_capture_alert(path)
+                and shadow.count_incomplete_recovery_intents(conn) == 0
             )
         )
         payload = {
@@ -148,6 +150,7 @@ def _cmd_status(db_path: str) -> int:
             'capture_alert_configured': shadow.capture_alert_configured(),
             'capture_alert_pending': shadow.has_capture_alert(path),
             'capture_alert_preflight': alert_preflight,
+            'recovery_intents_pending': shadow.count_incomplete_recovery_intents(conn),
             'user_events_preflight_ok': preflight_ok,
             'proof_max_message_id': wm,
             'outbox_pending': pending,

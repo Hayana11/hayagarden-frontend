@@ -1568,11 +1568,13 @@ class CaptureAlertTests(unittest.TestCase):
                         )
                 self.assertTrue(Path(alert_path).is_file())
                 prepared = shadow.inspect_capture_alert_acks(conn)
-                self.assertEqual(len(prepared), 1)
-                recovered = shadow.recover_capture_alert_acks(conn)
-                self.assertTrue(recovered[0]['acked'])
+                self.assertEqual(prepared, [])
+                # Claim 尚未发生时 canonical 仍是完整 pending；重试可安全继续。
+                result = shadow.ack_capture_alert(
+                    conn, sha256=digest, reason='review', db_path=db_path,
+                )
+                self.assertTrue(result['acked'])
                 self.assertFalse(Path(alert_path).exists())
-                self.assertEqual(shadow.inspect_capture_alert_acks(conn), [])
             finally:
                 conn.close()
 
