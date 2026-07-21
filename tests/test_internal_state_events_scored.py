@@ -220,6 +220,7 @@ class StaleOrderingTests(ScoredBase):
         stats = events.get_scored_event_stats(self.conn)
         self.assertEqual(stats['applied'], 1)
         self.assertEqual(stats['stale_skipped'], 1)
+        self.assertEqual(stats['stale_score_count'], 1)
         self.assertEqual(stats['total_decided'], 2)
         self.assertAlmostEqual(stats['stale_score_rate'], 0.5)
 
@@ -422,6 +423,138 @@ class ConcurrencyWatermarkTests(ScoredBase):
         self.assertEqual(st['last_scored_message_id'], 102)
         # 若 102 applied：mood 为 m102；若竞态下 101 先写但 102 后写覆盖
         self.assertEqual(st['mood_source_message_id'], 102)
+
+
+
+class MessageIdContractTests(ScoredBase):
+    def test_scored_rejects_bool_message_id_without_consuming_key(self):
+        with self.assertRaises(store.StoreError) as ctx:
+            events.observe_scored(
+                self.conn, message_id=True, scores=_scores(), scored_at=T0)
+        self.assertIn('positive integer', str(ctx.exception))
+        self.assertIsNone(store.read_event(self.conn, 'user_scored:1'))
+        self.assertEqual(self.state()['state_version'], 0)
+
+    def test_scored_rejects_fractional_message_id_without_consuming_key(self):
+        with self.assertRaises(store.StoreError):
+            events.observe_scored(
+                self.conn, message_id=101.9, scores=_scores(), scored_at=T0)
+        self.assertIsNone(store.read_event(self.conn, 'user_scored:101'))
+        # 真 101 仍可落账
+        r = events.observe_scored(
+            self.conn, message_id=101, scores=_scores(), scored_at=T0)
+        self.assertEqual(r.status, 'applied')
+        self.assertEqual(self.state()['last_scored_message_id'], 101)
+
+    def test_scored_rejects_zero_and_negative_message_id(self):
+        for bad in (0, -3):
+            with self.subTest(bad=bad):
+                with self.assertRaises(store.StoreError):
+                    events.observe_scored(
+                        self.conn, message_id=bad, scores=_scores(),
+                        scored_at=T0)
+                self.assertIsNone(
+                    store.read_event(self.conn, f'user_scored:{bad}'))
+        self.assertEqual(self.state()['state_version'], 0)
+
+    def test_user_rule_and_user_scored_share_strict_message_id_contract(self):
+        for bad in (True, 1.5, 0, -1, '001'):
+            with self.subTest(channel='rule', bad=bad):
+                with self.assertRaises(store.StoreError):
+                    events.observe_user_message(
+                        self.conn, message_id=bad, text='你好',
+                        created_at=T0, previous_user_at=None)
+            with self.subTest(channel='scored', bad=bad):
+                with self.assertRaises(store.StoreError):
+                    events.observe_scored(
+                        self.conn, message_id=bad, scores=_scores(),
+                        scored_at=T0)
+        self.assertEqual(self.state()['state_version'], 0)
+        self.assertIsNone(store.read_event(self.conn, 'user_rule:1'))
+        self.assertIsNone(store.read_event(self.conn, 'user_scored:1'))
+
+
+class StaleVersionRetryTests(ScoredBase):
+    def test_stale_with_old_expected_version_retries_to_stale_skipped(self):
+        """旧 expected → version_conflict → 重读版本重试 → stale_skipped。"""
+        r102 = events.observe_scored(
+            self.conn, message_id=102, scores=_scores(mood_word='新'),
+            scored_at=T_1H, expected_state_version=0,
+        )
+        self.assertEqual(r102.status, 'applied')
+        current = self.state()['state_version']
+        self.assertEqual(current, 1)
+
+        # 评分任务仍拿着启动时的 expected=0
+        r_conflict = events.observe_scored(
+            self.conn, message_id=101, scores=_scores(mood_word='旧迟到'),
+            scored_at=T_2H, expected_state_version=0,
+        )
+        self.assertEqual(r_conflict.status, 'version_conflict')
+        self.assertIsNone(store.read_event(self.conn, 'user_scored:101'))
+        empty = events.get_scored_event_stats(self.conn)
+        self.assertEqual(empty['stale_skipped'], 0)
+        self.assertEqual(empty['stale_score_count'], 0)
+
+        # 重读当前版本后同 payload 重试 → 终态 stale
+        r_stale = events.observe_scored(
+            self.conn, message_id=101, scores=_scores(mood_word='旧迟到'),
+            scored_at=T_2H, expected_state_version=current,
+        )
+        self.assertEqual(r_stale.status, 'stale_skipped')
+        ev = store.read_event(self.conn, 'user_scored:101')
+        self.assertEqual(ev['status'], 'stale_skipped')
+        self.assertEqual(self.state()['last_scored_message_id'], 102)
+        self.assertEqual(self.state()['mood_word'], '新')
+
+    def test_stale_version_retry_consumes_key_once(self):
+        events.observe_scored(
+            self.conn, message_id=50, scores=_scores(), scored_at=T0)
+        ver = self.state()['state_version']
+        kwargs = dict(
+            message_id=40, scores=_scores(mood_word='晚'), scored_at=T_1H,
+            expected_state_version=0,
+        )
+        self.assertEqual(
+            events.observe_scored(self.conn, **kwargs).status,
+            'version_conflict')
+        kwargs['expected_state_version'] = ver
+        self.assertEqual(
+            events.observe_scored(self.conn, **kwargs).status,
+            'stale_skipped')
+        self.assertEqual(
+            events.observe_scored(self.conn, **kwargs).status,
+            'duplicate')
+        rows = self.conn.execute(
+            "SELECT COUNT(*) FROM internal_state_events "
+            "WHERE event_key='user_scored:40'"
+        ).fetchone()[0]
+        self.assertEqual(rows, 1)
+
+    def test_stale_stats_include_retried_version_conflict(self):
+        events.observe_scored(
+            self.conn, message_id=102, scores=_scores(), scored_at=T0)
+        ver = self.state()['state_version']
+        events.observe_scored(
+            self.conn, message_id=101, scores=_scores(), scored_at=T_1H,
+            expected_state_version=0)  # conflict, not counted
+        before = events.get_scored_event_stats(self.conn)
+        self.assertEqual(before['stale_score_count'], 0)
+        events.observe_scored(
+            self.conn, message_id=101, scores=_scores(), scored_at=T_1H,
+            expected_state_version=ver)
+        after = events.get_scored_event_stats(self.conn)
+        self.assertEqual(after['applied'], 1)
+        self.assertEqual(after['stale_score_count'], 1)
+        self.assertEqual(after['stale_skipped'], 1)
+        self.assertAlmostEqual(after['stale_score_rate'], 0.5)
+
+    def test_empty_ledger_stale_rate_is_none(self):
+        stats = events.get_scored_event_stats(self.conn)
+        self.assertEqual(stats['applied'], 0)
+        self.assertEqual(stats['stale_score_count'], 0)
+        self.assertEqual(stats['total_decided'], 0)
+        self.assertIsNone(stats['stale_score_rate'])
 
 
 class GuardTests(unittest.TestCase):

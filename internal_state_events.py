@@ -151,6 +151,26 @@ def _float_field(state: Mapping[str, Any], key: str, default: float) -> float:
     return float(raw)
 
 
+_SQLITE_MAX_S64 = (2 ** 63) - 1
+
+
+def _require_message_id(value: Any) -> int:
+    """事件身份用 message_id：只接受正整数，禁止 bool / 浮点静默截断。
+
+    ``user_rule`` 与 ``user_scored`` 共用；非法值抛 ``StoreError`` 且不得
+    消费 event_key（调用方须在写库前先校验）。
+    """
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise StoreError(
+            f'message_id must be a positive integer: {value!r}'
+        )
+    if value <= 0 or value > _SQLITE_MAX_S64:
+        raise StoreError(
+            f'message_id out of SQLite integer range: {value!r}'
+        )
+    return value
+
+
 def _canonicalize_observation_clocks(
     *,
     created_at: Any,
@@ -396,6 +416,7 @@ def plan_user_message_transition(
     非法 / 倒序 / 损坏时钟抛 ``StoreError``，调用方不得落库。
     写入 payload / updates 的时间一律为 canonicalize 后的 19 位字符串。
     """
+    mid = _require_message_id(message_id)
     created_at, previous_user_at = _validate_transition_clocks(
         state, created_at=created_at, previous_user_at=previous_user_at,
     )
@@ -451,7 +472,7 @@ def plan_user_message_transition(
 
     fingerprint = _text_fingerprint(text)
     payload = {
-        'message_id': int(message_id),
+        'message_id': mid,
         'created_at': created_at,
         'previous_user_at': previous_user_at,
         'clock_missing': bool(clock_missing),
@@ -516,9 +537,10 @@ def _observation_identity(
     previous_user_at: Optional[str],
 ) -> dict:
     """观察身份：仅由消息输入决定，不含状态物化结果。"""
+    mid = _require_message_id(message_id)
     fp = _text_fingerprint(text)
     return {
-        'message_id': int(message_id),
+        'message_id': mid,
         'created_at': created_at,
         'previous_user_at': previous_user_at,
         'text_hash': fp['text_hash'],
@@ -603,7 +625,7 @@ def observe_user_message(
     幂等：已存在事件须同时满足 event_type / source_id / 观察身份；
     store 因完整 payload hash 冲突时，同观察校正为 ``duplicate``。
     """
-    mid = int(message_id)
+    mid = _require_message_id(message_id)
     event_key = f'user_rule:{mid}'
 
     # 先规范化观察时钟（坏 previous 不得伪装 clock_missing 后占 key）
@@ -809,6 +831,7 @@ def plan_scored_transition(
     复现 emotion_engine.score_and_update 的状态数学（不 import 旧引擎）。
     仅用于非 stale 路径；调用前须已判定 message_id > watermark。
     """
+    mid = _require_message_id(message_id)
     scored_canon = _canonicalize_ts(scored_at, field='scored_at')
     norm = normalize_scored_scores(scores)
     _require_bond_clocks_for_scored(state, scored_at=scored_canon)
@@ -845,17 +868,17 @@ def plan_scored_transition(
         'valence': round(final_v, 4),
         'arousal': round(final_a, 4),
         'mood_word': norm['mood_word'],
-        'mood_source_message_id': int(message_id),
+        'mood_source_message_id': mid,
         'passion': round(new_p, 4),
         'intimacy': round(new_i, 4),
         'commitment': commitment,
         'p_updated_at': scored_canon,
         'i_updated_at': scored_canon,
-        'last_scored_message_id': int(message_id),
+        'last_scored_message_id': mid,
     }
 
     payload = {
-        'message_id': int(message_id),
+        'message_id': mid,
         'scored_at': scored_canon,
         'scores': {
             'valence': norm['valence'],
@@ -899,10 +922,11 @@ def _scored_payload(
     scored_at: str,
     scores: Mapping[str, Any],
 ) -> dict:
+    mid = _require_message_id(message_id)
     norm = normalize_scored_scores(scores)
     scored_canon = _canonicalize_ts(scored_at, field='scored_at')
     return {
-        'message_id': int(message_id),
+        'message_id': mid,
         'scored_at': scored_canon,
         'scores': {
             'valence': norm['valence'],
@@ -929,9 +953,18 @@ def observe_scored(
       - ``message_id > last_scored_message_id``（或 watermark 为空）→ applied
       - 否则 → ``stale_skipped``：落账、消费 key、不升版本、不改状态
 
+    ``expected_state_version`` 与业务 stale 的优先级：
+      存储层先做乐观版本校验，再调用 ``decide()``。因此若调用方携带
+      **过期** expected version，迟到评分会先得到 ``version_conflict``
+      （**不消费** event_key，**不是**评分终态）。调用方须重读当前
+      ``state_version`` 后用同一 payload 重试；重试后才会进入
+      ``stale_skipped`` 并纳入 ``stale_score_rate``。
+      下一阶段接入评分线程时，应对 version_conflict 做有限重试，
+      否则迟到率统计会系统性漏样本。
+
     不调用 DeepSeek / 渐变脑；只接受已规范化的 scores。
     """
-    mid = int(message_id)
+    mid = _require_message_id(message_id)
     event_key = f'user_scored:{mid}'
 
     # 输入校验在事务外失败 → 不消费 key
@@ -950,7 +983,7 @@ def observe_scored(
                     f'last_scored_message_id={int(last)}'
                 ),
             )
-        # stale 优先：仅 applied 路径才做 Bond 物化 / 时钟校验
+        # stale 优先于 Bond：仅 applied 路径才做物化 / 时钟校验
         plan = plan_scored_transition(
             state,
             message_id=mid,
@@ -974,10 +1007,13 @@ def observe_scored(
 
 
 def get_scored_event_stats(conn: sqlite3.Connection) -> dict:
-    """只读诊断：applied / stale_skipped 计数与迟到率。
+    """只读诊断：applied / stale 计数与迟到率。
 
     ``total_decided = applied + stale_skipped``；
+    ``stale_score_count`` 为规格别名，等于 ``stale_skipped``。
     duplicate 不进分母（不会新增账本行）。
+    空账本时 ``stale_score_rate`` 为 ``None``（非 0.0），避免零样本被
+    误读成“零迟到率”。
     """
     rows = conn.execute(
         """
@@ -997,6 +1033,7 @@ def get_scored_event_stats(conn: sqlite3.Connection) -> dict:
     return {
         'applied': applied,
         'stale_skipped': stale,
+        'stale_score_count': stale,
         'total_decided': total,
         'stale_score_rate': rate,
     }
