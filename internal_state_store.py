@@ -1,15 +1,16 @@
-"""Internal State v3 — Phase 1A-0 存储底座
+"""Internal State v3 — Phase 1A-0/1A-2 存储底座
 
 只提供：
   - ``internal_state_v3`` / ``internal_state_events`` schema
   - ``BEGIN IMMEDIATE`` 事务封装
   - ``event_key`` 幂等、``state_version`` 乐观校验
+  - ``apply_state_update`` / ``apply_conditional_state_update``
   - 显式传入 snapshot 的 bootstrap（不接启动路径）
 
 严格不做：
   - 不修改 journal_mode（不开启/关闭 WAL）
   - 不接 gateway / chat / Wake / prompt
-  - 不实现 observe_* / apply_outcome 业务
+  - 不实现 observe_* / apply_outcome 业务语义（由 events 模块调用本层）
   - 不 import emotion_engine / drive_engine / desire
   - 不写生产库（调用方传入临时 conn / 路径）
 """
