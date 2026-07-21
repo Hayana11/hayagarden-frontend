@@ -1798,5 +1798,274 @@ class LegacyHashUnknownTests(unittest.TestCase):
             conn.close()
 
 
+def _deepseek_scores() -> dict:
+    return {
+        'valence': 0.2, 'arousal': 0.4, 'mood_word': '测试',
+        'passion_delta': 0.05, 'intimacy_delta': 0.02,
+    }
+
+
+def _history_count(db_path: str) -> int:
+    import emotion_history
+    emotion_history.ensure_schema(db_path)
+    conn = sqlite3.connect(db_path)
+    try:
+        return int(conn.execute('SELECT COUNT(*) FROM emotion_history').fetchone()[0])
+    finally:
+        conn.close()
+
+
+def _enqueue_user_scored(
+    db_path: str,
+    *,
+    message_id: int,
+    created_at: str,
+    scores: dict | None = None,
+) -> None:
+    body = scores or _deepseek_scores()
+    conn = store.open_store(db_path)
+    try:
+        conn.execute('BEGIN IMMEDIATE')
+        shadow.enqueue_user_scored_in_txn(
+            conn,
+            message_id=message_id,
+            scores=body,
+            scored_at=created_at,
+            environ=ALL_ON,
+        )
+        conn.execute('COMMIT')
+    finally:
+        conn.close()
+
+
+class OutboxFifoQueueIdTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.db_path = str(Path(self.tmp.name) / 'fifo.db')
+        self.patch = mock.patch.dict(os.environ, ALL_ON, clear=False)
+        self.patch.start()
+        self.addCleanup(self.patch.stop)
+        conn = store.open_store(self.db_path)
+        try:
+            _seed_legacy_for_bootstrap(conn)
+            shadow.ensure_shadow_schema(conn, db_path=self.db_path)
+            conn.execute('BEGIN')
+            shadow.record_score_proof_in_txn(
+                conn, 20, applied_at=T0, source='unit', score_hash='boot',
+            )
+            conn.execute('COMMIT')
+        finally:
+            conn.close()
+        self.assertTrue(shadow.ensure_bootstrapped(
+            db_path=self.db_path, environ={shadow.SHADOW_ENABLED_ENV: '1'},
+        ).ok)
+
+    def test_same_second_enqueue_order_follows_queue_id_not_event_key(self):
+        same_ts = '2026-07-21 12:00:00'
+        _enqueue_user_scored(
+            self.db_path, message_id=99, created_at=same_ts,
+        )
+        _enqueue_user_scored(
+            self.db_path, message_id=100, created_at=same_ts,
+        )
+        conn = store.open_store(self.db_path)
+        try:
+            rows = conn.execute(
+                f"""
+                SELECT queue_id, event_key FROM {shadow.OUTBOX_TABLE}
+                WHERE delivered_at IS NULL
+                ORDER BY queue_id ASC
+                """
+            ).fetchall()
+            self.assertEqual([r[1] for r in rows], ['user_scored:99', 'user_scored:100'])
+        finally:
+            conn.close()
+
+        order: list[int] = []
+
+        def track(item, **kwargs):
+            payload = json.loads(item['payload_json'])
+            order.append(int(payload['message_id']))
+            return shadow.ShadowResult(ok=True, status='applied')
+
+        with mock.patch.object(shadow, '_deliver_outbox_row', side_effect=track):
+            summary = shadow.drain_shadow_outbox(db_path=self.db_path, environ=ALL_ON)
+        self.assertEqual(summary['delivered'], 2)
+        self.assertEqual(order, [99, 100])
+
+    def test_head_failure_stops_drain_without_touching_tail(self):
+        same_ts = '2026-07-21 12:00:01'
+        _enqueue_user_scored(self.db_path, message_id=201, created_at=same_ts)
+        _enqueue_user_scored(self.db_path, message_id=202, created_at=same_ts)
+        delivered: list[str] = []
+        real = shadow._deliver_outbox_row
+
+        def gated(item, **kwargs):
+            delivered.append(item['event_key'])
+            if item['event_key'] == 'user_scored:201':
+                return shadow.ShadowResult(
+                    ok=False, status='failed', error='head blocked',
+                )
+            return real(item, **kwargs)
+
+        with mock.patch.object(shadow, '_deliver_outbox_row', side_effect=gated):
+            summary = shadow.drain_shadow_outbox(db_path=self.db_path, environ=ALL_ON)
+        self.assertEqual(summary['failed'], 1)
+        self.assertEqual(delivered, ['user_scored:201'])
+        conn = store.open_store(self.db_path)
+        try:
+            pending = conn.execute(
+                f"""
+                SELECT event_key FROM {shadow.OUTBOX_TABLE}
+                WHERE delivered_at IS NULL ORDER BY queue_id ASC
+                """
+            ).fetchall()
+            self.assertEqual([r[0] for r in pending], ['user_scored:201', 'user_scored:202'])
+        finally:
+            conn.close()
+
+
+class FallbackHistoryFinalizeTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.db_path = str(Path(self.tmp.name) / 'fallback.db')
+        self.patch = mock.patch.dict(os.environ, PROOF_ONLY, clear=False)
+        self.patch.start()
+        self.addCleanup(self.patch.stop)
+        conn = sqlite3.connect(self.db_path)
+        try:
+            _seed_emotion(conn)
+            conn.commit()
+        finally:
+            conn.close()
+        ee.DB_PATH = self.db_path
+
+    def test_invalid_message_id_incident_fail_updates_emotion_and_history_once(self):
+        before = _history_count(self.db_path)
+        with mock.patch.object(ee, '_deepseek_score', return_value=_deepseek_scores()), \
+             mock.patch.object(ee, '_get_ombre_va', return_value=(None, None)), \
+             mock.patch.object(ee, 'get_longing', return_value=0.1), \
+             mock.patch.object(
+                 shadow, 'append_gap_incident_sidecar',
+                 side_effect=OSError('no sidecar'),
+             ):
+            ee.score_and_update('hello', message_id=True)  # type: ignore[arg-type]
+        conn = sqlite3.connect(self.db_path)
+        try:
+            pa = conn.execute('SELECT pa FROM emotion_state WHERE id=1').fetchone()[0]
+            self.assertNotAlmostEqual(pa, 0.5, places=4)
+        finally:
+            conn.close()
+        self.assertEqual(_history_count(self.db_path), before + 1)
+
+    def test_proof_schema_missing_sidecar_fail_updates_emotion_and_history_once(self):
+        before = _history_count(self.db_path)
+        with mock.patch.object(ee, '_deepseek_score', return_value=_deepseek_scores()), \
+             mock.patch.object(ee, '_get_ombre_va', return_value=(None, None)), \
+             mock.patch.object(ee, 'get_longing', return_value=0.1), \
+             mock.patch.object(
+                 shadow, 'append_gap_incident_sidecar',
+                 side_effect=OSError('disk full'),
+             ):
+            ee.score_and_update('hello', message_id=11)
+        conn = sqlite3.connect(self.db_path)
+        try:
+            pa = conn.execute('SELECT pa FROM emotion_state WHERE id=1').fetchone()[0]
+            self.assertNotAlmostEqual(pa, 0.5, places=4)
+        finally:
+            conn.close()
+        self.assertEqual(_history_count(self.db_path), before + 1)
+
+    def test_proof_schema_missing_emotion_txn_fail_updates_emotion_and_history_once(self):
+        conn = store.open_store(self.db_path)
+        try:
+            shadow.ensure_shadow_schema(conn, db_path=self.db_path)
+            conn.execute(f'DROP TABLE {shadow.SCORE_APPLIED_TABLE}')
+            conn.commit()
+        finally:
+            conn.close()
+        before = _history_count(self.db_path)
+        real_transition = ee._transition_from_state
+        fail_once = {'pending': True}
+
+        def flaky_transition(*args, **kwargs):
+            if fail_once['pending']:
+                fail_once['pending'] = False
+                raise RuntimeError('txn boom')
+            return real_transition(*args, **kwargs)
+
+        with mock.patch.object(ee, '_deepseek_score', return_value=_deepseek_scores()), \
+             mock.patch.object(ee, '_get_ombre_va', return_value=(None, None)), \
+             mock.patch.object(ee, 'get_longing', return_value=0.1), \
+             mock.patch.object(ee, '_transition_from_state', side_effect=flaky_transition):
+            ee.score_and_update('hello', message_id=12)
+        conn = sqlite3.connect(self.db_path)
+        try:
+            pa = conn.execute('SELECT pa FROM emotion_state WHERE id=1').fetchone()[0]
+            self.assertNotAlmostEqual(pa, 0.5, places=4)
+        finally:
+            conn.close()
+        self.assertEqual(_history_count(self.db_path), before + 1)
+
+    def test_compute_score_hash_failure_still_legacy_and_history_once(self):
+        before = _history_count(self.db_path)
+        conn = store.open_store(self.db_path)
+        try:
+            shadow.ensure_shadow_schema(conn, db_path=self.db_path)
+            conn.commit()
+        finally:
+            conn.close()
+        with mock.patch.object(ee, '_deepseek_score', return_value=_deepseek_scores()), \
+             mock.patch.object(ee, '_get_ombre_va', return_value=(None, None)), \
+             mock.patch.object(ee, 'get_longing', return_value=0.1), \
+             mock.patch.object(
+                 shadow, 'compute_score_hash',
+                 side_effect=RuntimeError('hash boom'),
+             ):
+            ee.score_and_update('hello', message_id=13)
+        conn = sqlite3.connect(self.db_path)
+        try:
+            pa = conn.execute('SELECT pa FROM emotion_state WHERE id=1').fetchone()[0]
+            self.assertNotAlmostEqual(pa, 0.5, places=4)
+        finally:
+            conn.close()
+        self.assertEqual(_history_count(self.db_path), before + 1)
+
+    def test_duplicate_stale_conflict_skip_history(self):
+        conn = store.open_store(self.db_path)
+        try:
+            shadow.ensure_shadow_schema(conn, db_path=self.db_path)
+            conn.commit()
+        finally:
+            conn.close()
+        before = _history_count(self.db_path)
+        with mock.patch.object(ee, '_deepseek_score', return_value=_deepseek_scores()), \
+             mock.patch.object(ee, '_get_ombre_va', return_value=(None, None)), \
+             mock.patch.object(ee, 'get_longing', return_value=0.1):
+            ee.score_and_update('first', message_id=50)
+            pa_after_first = sqlite3.connect(self.db_path).execute(
+                'SELECT pa FROM emotion_state WHERE id=1',
+            ).fetchone()[0]
+            conn = store.open_store(self.db_path)
+            try:
+                conn.execute('BEGIN')
+                shadow.record_score_proof_in_txn(
+                    conn, 60, applied_at=T0, source='unit', score_hash='other',
+                )
+                conn.execute('COMMIT')
+            finally:
+                conn.close()
+            ee.score_and_update('dup', message_id=50)
+            pa_after_dup = sqlite3.connect(self.db_path).execute(
+                'SELECT pa FROM emotion_state WHERE id=1',
+            ).fetchone()[0]
+            self.assertAlmostEqual(pa_after_first, pa_after_dup, places=4)
+            ee.score_and_update('stale', message_id=40)
+            ee.score_and_update('conflict', message_id=60)
+        self.assertEqual(_history_count(self.db_path), before + 1)
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -651,7 +651,6 @@ def score_and_update(conversation_excerpt: str, *, message_id=None):
                 and frozen_message_id > 0
                 else None
             )
-            score_hash = _shadow.compute_score_hash(scored_payload)
 
             def _apply_transition_locked(applied_at: str) -> dict:
                 state = _read_emotion_state_row(conn)
@@ -683,153 +682,160 @@ def score_and_update(conversation_excerpt: str, *, message_id=None):
                     except Exception:
                         pass
 
-            if mid_ok is None:
-                # incident 必须先持久化，才允许改 emotion
-                incidents_ready = conn.execute(
-                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
-                    (_shadow.GAP_INCIDENTS_TABLE,),
-                ).fetchone() is not None
-                try:
-                    if incidents_ready:
-                        conn.execute('BEGIN IMMEDIATE')
-                        applied_at = _now_str()
-                        _shadow.mark_proof_gap(
-                            conn,
-                            failed_message_id=_bad_mid,
-                            error_code='missing_or_invalid_message_id',
-                            db_path=DB_PATH,
-                        )
-                        applied_tr = _apply_transition_locked(applied_at)
-                        conn.commit()
-                    else:
+            proof_shadow_active = True
+            score_hash = None
+            try:
+                score_hash = _shadow.compute_score_hash(scored_payload)
+            except Exception:
+                proof_shadow_active = False
+                _fallback_legacy_only()
+
+            if proof_shadow_active:
+                if mid_ok is None:
+                    # incident 必须先持久化，才允许改 emotion
+                    incidents_ready = conn.execute(
+                        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                        (_shadow.GAP_INCIDENTS_TABLE,),
+                    ).fetchone() is not None
+                    try:
+                        if incidents_ready:
+                            conn.execute('BEGIN IMMEDIATE')
+                            applied_at = _now_str()
+                            _shadow.mark_proof_gap(
+                                conn,
+                                failed_message_id=_bad_mid,
+                                error_code='missing_or_invalid_message_id',
+                                db_path=DB_PATH,
+                            )
+                            applied_tr = _apply_transition_locked(applied_at)
+                            conn.commit()
+                        else:
+                            _shadow.append_gap_incident_sidecar(
+                                DB_PATH,
+                                failed_message_id=_bad_mid,
+                                error_code='missing_or_invalid_message_id',
+                            )
+                            conn.execute('BEGIN IMMEDIATE')
+                            applied_tr = _apply_transition_locked(_now_str())
+                            conn.commit()
+                    except Exception:
+                        try:
+                            conn.rollback()
+                        except Exception:
+                            pass
+                        # incident 未落地 → legacy-only，仍须写 history
+                        _fallback_legacy_only()
+                elif not _shadow.score_proof_schema_ready(conn):
+                    # 表未准备：incident sidecar 必须成功，否则 legacy-only
+                    try:
                         _shadow.append_gap_incident_sidecar(
                             DB_PATH,
-                            failed_message_id=_bad_mid,
-                            error_code='missing_or_invalid_message_id',
-                        )
-                        conn.execute('BEGIN IMMEDIATE')
-                        applied_tr = _apply_transition_locked(_now_str())
-                        conn.commit()
-                except Exception:
-                    try:
-                        conn.rollback()
-                    except Exception:
-                        pass
-                    # incident 未落地 → 放弃 emotion
-                    _fallback_legacy_only()
-                    return
-            elif not _shadow.score_proof_schema_ready(conn):
-                # 表未准备：incident sidecar 必须成功，否则放弃 emotion
-                try:
-                    _shadow.append_gap_incident_sidecar(
-                        DB_PATH,
-                        failed_message_id=mid_ok,
-                        error_code='proof_schema_missing',
-                    )
-                except Exception:
-                    _fallback_legacy_only()
-                    return
-                try:
-                    conn.execute('BEGIN IMMEDIATE')
-                    applied_tr = _apply_transition_locked(_now_str())
-                    conn.commit()
-                except Exception:
-                    try:
-                        conn.rollback()
-                    except Exception:
-                        pass
-                    _fallback_legacy_only()
-                    return
-            else:
-                try:
-                    conn.execute('BEGIN IMMEDIATE')
-                    existing = _shadow.lookup_score_proof(conn, mid_ok)
-                    if existing is not None:
-                        prev_hash = existing.get('score_hash')
-                        if prev_hash is not None and str(prev_hash) == score_hash:
-                            conn.execute('ROLLBACK')
-                            return
-                        _shadow.mark_proof_gap(
-                            conn,
                             failed_message_id=mid_ok,
-                            error_code='score_proof_payload_conflict',
-                            db_path=DB_PATH,
+                            error_code='proof_schema_missing',
                         )
-                        conn.commit()
-                        return
-
-                    # 跨 message 单调门：已有更高 message proof 时，迟到评分不得改 legacy
-                    max_mid = _shadow.max_score_proof_message_id(conn)
-                    if max_mid is not None and int(mid_ok) < int(max_mid):
-                        conn.execute('ROLLBACK')
-                        return
-
-                    applied_at = _now_str()
-                    applied_tr = _apply_transition_locked(applied_at)
-                    status = _shadow.record_score_proof_in_txn(
-                        conn,
-                        mid_ok,
-                        applied_at=applied_at,
-                        source=_shadow.PROOF_SOURCE_SCORE_AND_UPDATE,
-                        score_hash=score_hash,
-                    )
-                    if status == 'duplicate':
-                        conn.execute('ROLLBACK')
-                        return
-                    if _shadow.is_user_events_enabled():
-                        if not _shadow.outbox_schema_ready(conn):
+                    except Exception:
+                        _fallback_legacy_only()
+                    else:
+                        try:
+                            conn.execute('BEGIN IMMEDIATE')
+                            applied_tr = _apply_transition_locked(_now_str())
+                            conn.commit()
+                        except Exception:
+                            try:
+                                conn.rollback()
+                            except Exception:
+                                pass
+                            _fallback_legacy_only()
+                else:
+                    try:
+                        conn.execute('BEGIN IMMEDIATE')
+                        existing = _shadow.lookup_score_proof(conn, mid_ok)
+                        if existing is not None:
+                            prev_hash = existing.get('score_hash')
+                            if prev_hash is not None and str(prev_hash) == score_hash:
+                                conn.execute('ROLLBACK')
+                                return
                             _shadow.mark_proof_gap(
                                 conn,
                                 failed_message_id=mid_ok,
-                                error_code='outbox_capture_gap',
+                                error_code='score_proof_payload_conflict',
                                 db_path=DB_PATH,
                             )
-                        else:
-                            _shadow.enqueue_user_scored_in_txn(
-                                conn,
-                                message_id=mid_ok,
-                                scores=scored_payload,
-                                scored_at=applied_at,
-                            )
-                    conn.commit()
-                    proof_written = True
-                except Exception:
-                    try:
-                        conn.rollback()
-                    except Exception:
-                        pass
-                    try:
-                        _shadow.mark_proof_gap_standalone(
-                            db_path=DB_PATH,
-                            failed_message_id=mid_ok,
-                            error_code='proof_txn_failed',
+                            conn.commit()
+                            return
+
+                        # 跨 message 单调门：已有更高 message proof 时，迟到评分不得改 legacy
+                        max_mid = _shadow.max_score_proof_message_id(conn)
+                        if max_mid is not None and int(mid_ok) < int(max_mid):
+                            conn.execute('ROLLBACK')
+                            return
+
+                        applied_at = _now_str()
+                        applied_tr = _apply_transition_locked(applied_at)
+                        status = _shadow.record_score_proof_in_txn(
+                            conn,
+                            mid_ok,
+                            applied_at=applied_at,
+                            source=_shadow.PROOF_SOURCE_SCORE_AND_UPDATE,
+                            score_hash=score_hash,
                         )
-                    except Exception:
-                        pass
-                    # Shadow proof/outbox failure must not veto legacy emotion.
-                    legacy_conn = _db()
-                    try:
-                        legacy_conn.isolation_level = None
-                        legacy_conn.execute('BEGIN IMMEDIATE')
-                        fallback_at = _now_str()
-                        fallback = _transition_from_state(
-                            _read_emotion_state_row(legacy_conn),
-                            final_v=frozen_v, final_a=frozen_a,
-                            mood_word=frozen_mood, p_delta=frozen_p_delta,
-                            i_delta=frozen_i_delta, applied_at=fallback_at,
-                        )
-                        legacy_conn.execute(
-                            _EMOTION_UPDATE_SQL, _emotion_update_params(fallback),
-                        )
-                        legacy_conn.commit()
-                        applied_tr = fallback
+                        if status == 'duplicate':
+                            conn.execute('ROLLBACK')
+                            return
+                        if _shadow.is_user_events_enabled():
+                            if not _shadow.outbox_schema_ready(conn):
+                                _shadow.mark_proof_gap(
+                                    conn,
+                                    failed_message_id=mid_ok,
+                                    error_code='outbox_capture_gap',
+                                    db_path=DB_PATH,
+                                )
+                            else:
+                                _shadow.enqueue_user_scored_in_txn(
+                                    conn,
+                                    message_id=mid_ok,
+                                    scores=scored_payload,
+                                    scored_at=applied_at,
+                                )
+                        conn.commit()
+                        proof_written = True
                     except Exception:
                         try:
-                            legacy_conn.rollback()
+                            conn.rollback()
                         except Exception:
                             pass
-                    finally:
-                        legacy_conn.close()
+                        try:
+                            _shadow.mark_proof_gap_standalone(
+                                db_path=DB_PATH,
+                                failed_message_id=mid_ok,
+                                error_code='proof_txn_failed',
+                            )
+                        except Exception:
+                            pass
+                        # Shadow proof/outbox failure must not veto legacy emotion.
+                        legacy_conn = _db()
+                        try:
+                            legacy_conn.isolation_level = None
+                            legacy_conn.execute('BEGIN IMMEDIATE')
+                            fallback_at = _now_str()
+                            fallback = _transition_from_state(
+                                _read_emotion_state_row(legacy_conn),
+                                final_v=frozen_v, final_a=frozen_a,
+                                mood_word=frozen_mood, p_delta=frozen_p_delta,
+                                i_delta=frozen_i_delta, applied_at=fallback_at,
+                            )
+                            legacy_conn.execute(
+                                _EMOTION_UPDATE_SQL, _emotion_update_params(fallback),
+                            )
+                            legacy_conn.commit()
+                            applied_tr = fallback
+                        except Exception:
+                            try:
+                                legacy_conn.rollback()
+                            except Exception:
+                                pass
+                        finally:
+                            legacy_conn.close()
         else:
             conn.isolation_level = None
             conn.execute('BEGIN IMMEDIATE')

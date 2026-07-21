@@ -1248,6 +1248,54 @@ def _ensure_score_hash_column(conn: sqlite3.Connection) -> None:
         )
 
 
+def _outbox_table_columns(conn: sqlite3.Connection) -> set[str]:
+    if not outbox_schema_ready(conn):
+        return set()
+    return {
+        str(r[1]) for r in conn.execute(f'PRAGMA table_info({OUTBOX_TABLE})')
+    }
+
+
+def _ensure_outbox_queue_id_schema(conn: sqlite3.Connection) -> None:
+    """Outbox drain order is queue_id only; never created_at/event_key."""
+    if not outbox_schema_ready(conn):
+        return
+    if 'queue_id' in _outbox_table_columns(conn):
+        return
+    conn.execute(
+        f"""
+        CREATE TABLE {OUTBOX_TABLE}_queue_mig (
+            queue_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_key TEXT NOT NULL UNIQUE,
+            event_type TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            payload_hash TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            attempts INTEGER NOT NULL DEFAULT 0
+                CHECK (attempts >= 0),
+            last_error TEXT,
+            delivered_at TEXT
+        )
+        """
+    )
+    conn.execute(
+        f"""
+        INSERT INTO {OUTBOX_TABLE}_queue_mig
+            (event_key, event_type, payload_json, payload_hash, created_at,
+             attempts, last_error, delivered_at)
+        SELECT event_key, event_type, payload_json,
+               COALESCE(payload_hash, ''), created_at,
+               attempts, last_error, delivered_at
+        FROM {OUTBOX_TABLE}
+        ORDER BY created_at ASC, event_key ASC
+        """
+    )
+    conn.execute(f'DROP TABLE {OUTBOX_TABLE}')
+    conn.execute(
+        f'ALTER TABLE {OUTBOX_TABLE}_queue_mig RENAME TO {OUTBOX_TABLE}'
+    )
+
+
 def ensure_shadow_schema(
     conn: sqlite3.Connection,
     *,
@@ -1294,7 +1342,8 @@ def ensure_shadow_schema(
     conn.execute(
         f"""
         CREATE TABLE IF NOT EXISTS {OUTBOX_TABLE} (
-            event_key TEXT PRIMARY KEY,
+            queue_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_key TEXT NOT NULL UNIQUE,
             event_type TEXT NOT NULL,
             payload_json TEXT NOT NULL,
             payload_hash TEXT NOT NULL,
@@ -1306,15 +1355,14 @@ def ensure_shadow_schema(
         )
         """
     )
-    # 旧 outbox 无 payload_hash 时补列
+    # 旧 outbox：补 payload_hash，再迁移 event_key-PK → queue_id-PK
     if outbox_schema_ready(conn):
-        cols = {
-            str(r[1]) for r in conn.execute(f'PRAGMA table_info({OUTBOX_TABLE})')
-        }
+        cols = _outbox_table_columns(conn)
         if 'payload_hash' not in cols:
             conn.execute(
                 f'ALTER TABLE {OUTBOX_TABLE} ADD COLUMN payload_hash TEXT'
             )
+        _ensure_outbox_queue_id_schema(conn)
     conn.execute(
         f"""
         CREATE TABLE IF NOT EXISTS {GAP_INCIDENTS_TABLE} (
@@ -2513,10 +2561,10 @@ def drain_shadow_outbox(
             return summary
         rows = conn.execute(
             f"""
-            SELECT event_key, event_type, payload_json, attempts
+            SELECT queue_id, event_key, event_type, payload_json, attempts
             FROM {OUTBOX_TABLE}
             WHERE delivered_at IS NULL
-            ORDER BY created_at ASC, event_key ASC
+            ORDER BY queue_id ASC
             LIMIT ?
             """,
             (max(1, int(limit)),),
@@ -2526,10 +2574,11 @@ def drain_shadow_outbox(
                 item = dict(row)
             else:
                 item = {
-                    'event_key': row[0],
-                    'event_type': row[1],
-                    'payload_json': row[2],
-                    'attempts': row[3],
+                    'queue_id': row[0],
+                    'event_key': row[1],
+                    'event_type': row[2],
+                    'payload_json': row[3],
+                    'attempts': row[4],
                 }
             summary['attempted'] += 1
             result = _deliver_outbox_row(item, db_path=path, environ=environ)
