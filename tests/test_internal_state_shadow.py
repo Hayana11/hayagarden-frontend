@@ -11,7 +11,6 @@ import sqlite3
 import sys
 import tempfile
 import threading
-import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -113,18 +112,23 @@ def _insert_score_applied(
     conn: sqlite3.Connection, message_id: int, *, source: str = 'unit_test',
 ) -> None:
     shadow.ensure_shadow_schema(conn)
-    shadow.record_score_proof_in_txn(
-        conn, message_id, applied_at=T0, source=source,
-    )
+    conn.execute('BEGIN')
+    try:
+        shadow.record_score_proof_in_txn(
+            conn, message_id, applied_at=T0, source=source,
+        )
+        conn.execute('COMMIT')
+    except Exception:
+        conn.execute('ROLLBACK')
+        raise
 
 
-def _boot(db_path: str, *, watermark: int = 77) -> shadow.ShadowResult:
-    return shadow.ensure_bootstrapped(
+def _boot_test(db_path: str, *, watermark: int = 77) -> shadow.ShadowResult:
+    return shadow._ensure_bootstrapped_for_test(
         db_path=db_path,
         environ=ON,
         snapshot=_snapshot(),
         last_scored_message_id=watermark,
-        last_scored_message_id_source=shadow.WATERMARK_SOURCE,
     )
 
 
@@ -157,6 +161,15 @@ class StrictSnapshotTests(unittest.TestCase):
             shadow.validate_bootstrap_snapshot(snap)
         self.assertIn('affect.pa', str(ctx.exception))
 
+    def test_validate_rejects_out_of_range(self):
+        snap = _snapshot(
+            affect=SimpleNamespace(
+                pa=1.5, na=0.2, valence=0.6, arousal=0.4, mood_word='平静'),
+        )
+        with self.assertRaises(store.StoreError) as ctx:
+            shadow.validate_bootstrap_snapshot(snap)
+        self.assertIn('out of [0,1]', str(ctx.exception))
+
     def test_validate_rejects_unreliable_clock(self):
         snap = _snapshot()
         snap.diagnostics.source_health = {
@@ -178,7 +191,6 @@ class StrictSnapshotTests(unittest.TestCase):
         try:
             _seed_legacy_rows(conn)
             _insert_score_applied(conn, 5)
-            # 毁掉 emotion 行 → 采集失败
             conn.execute('DELETE FROM emotion_state')
         finally:
             conn.close()
@@ -192,6 +204,70 @@ class StrictSnapshotTests(unittest.TestCase):
             self.assertIsNone(store.read_event(conn, 'bootstrap:initial'))
         finally:
             conn.close()
+
+
+class ScoreProofTxnTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.db_path = str(Path(self.tmp.name) / 'proof.db')
+        self.conn = store.open_store(self.db_path)
+        _seed_legacy_rows(self.conn)
+        shadow.ensure_shadow_schema(self.conn)
+
+    def tearDown(self):
+        self.conn.close()
+        self.tmp.cleanup()
+
+    def test_without_transaction_fails_and_writes_nothing(self):
+        with self.assertRaises(store.StoreError) as ctx:
+            shadow.record_score_proof_in_txn(
+                self.conn, 1, applied_at=T0, source='x',
+            )
+        self.assertIn('active caller-owned transaction', str(ctx.exception))
+        n = self.conn.execute(
+            f'SELECT COUNT(*) FROM {shadow.SCORE_APPLIED_TABLE}'
+        ).fetchone()[0]
+        self.assertEqual(n, 0)
+
+    def test_rollback_hides_emotion_and_proof(self):
+        self.conn.execute('BEGIN IMMEDIATE')
+        self.conn.execute(
+            'UPDATE emotion_state SET pa=0.91 WHERE id=1')
+        shadow.record_score_proof_in_txn(
+            self.conn, 101, applied_at=T0, source='atomic')
+        self.conn.execute('ROLLBACK')
+
+        pa = self.conn.execute(
+            'SELECT pa FROM emotion_state WHERE id=1').fetchone()[0]
+        self.assertAlmostEqual(pa, 0.55, places=4)
+        n = self.conn.execute(
+            f'SELECT COUNT(*) FROM {shadow.SCORE_APPLIED_TABLE}'
+        ).fetchone()[0]
+        self.assertEqual(n, 0)
+
+    def test_identical_proof_retry_idempotent(self):
+        self.conn.execute('BEGIN')
+        shadow.record_score_proof_in_txn(
+            self.conn, 7, applied_at=T0, source='same')
+        shadow.record_score_proof_in_txn(
+            self.conn, 7, applied_at=T0, source='same')
+        self.conn.execute('COMMIT')
+        n = self.conn.execute(
+            f'SELECT COUNT(*) FROM {shadow.SCORE_APPLIED_TABLE}'
+        ).fetchone()[0]
+        self.assertEqual(n, 1)
+
+    def test_different_proof_content_conflicts(self):
+        self.conn.execute('BEGIN')
+        shadow.record_score_proof_in_txn(
+            self.conn, 7, applied_at=T0, source='a')
+        self.conn.execute('COMMIT')
+        self.conn.execute('BEGIN')
+        with self.assertRaises(store.StoreError) as ctx:
+            shadow.record_score_proof_in_txn(
+                self.conn, 7, applied_at=T0, source='b')
+        self.assertIn('score proof conflict', str(ctx.exception))
+        self.conn.execute('ROLLBACK')
 
 
 class SameTxnCaptureTests(unittest.TestCase):
@@ -213,7 +289,6 @@ class SameTxnCaptureTests(unittest.TestCase):
         self.assertTrue(bundle.snapshot.diagnostics.source_health['clock_reliable'])
 
     def test_atomic_score_proof_visible_together(self):
-        """emotion 更新与 proof 同行提交后，bundle 同时看见两者。"""
         self.conn.execute('BEGIN IMMEDIATE')
         self.conn.execute(
             'UPDATE emotion_state SET pa=0.91, valence=0.88 WHERE id=1')
@@ -227,7 +302,6 @@ class SameTxnCaptureTests(unittest.TestCase):
         self.assertEqual(bundle.watermark_row_source, 'atomic_score')
 
     def test_interleaved_commit_cannot_tear_read_txn(self):
-        """写事务未提交时，读事务只能看到旧一致截面。"""
         barrier = threading.Event()
         done = threading.Event()
         bundles: list[shadow.BootstrapBundle] = []
@@ -242,7 +316,6 @@ class SameTxnCaptureTests(unittest.TestCase):
                 shadow.record_score_proof_in_txn(
                     w, 101, applied_at=T0, source='race')
                 barrier.set()
-                # 等读者完成同事务采集
                 done.wait(timeout=5)
                 w.execute('COMMIT')
             except BaseException as exc:  # noqa: BLE001
@@ -267,14 +340,87 @@ class SameTxnCaptureTests(unittest.TestCase):
         tr.join(timeout=10)
         self.assertEqual(errors, [])
         self.assertEqual(len(bundles), 1)
-        # 写未提交：仍是 watermark 100 + pa 0.55
         self.assertEqual(bundles[0].watermark, 100)
         self.assertAlmostEqual(bundles[0].snapshot.affect.pa, 0.55, places=4)
 
-        # 提交后两者一起到 101 / 0.99
         after = shadow.capture_bootstrap_bundle(self.db_path)
         self.assertEqual(after.watermark, 101)
         self.assertAlmostEqual(after.snapshot.affect.pa, 0.99, places=4)
+
+
+class LinearizedBootstrapTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.db_path = str(Path(self.tmp.name) / 'lin.db')
+        conn = store.open_store(self.db_path)
+        try:
+            _seed_legacy_rows(conn, pa=0.55)
+            _insert_score_applied(conn, 100)
+        finally:
+            conn.close()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_bootstrap_waits_and_absorbs_inflight_score(self):
+        """写事务未提交时 bootstrap 阻塞；提交后吸收完整 101 截面。"""
+        import time
+
+        writer_holding = threading.Event()
+        results: list[shadow.ShadowResult] = []
+        errors: list[BaseException] = []
+
+        def writer():
+            w = store.open_store(self.db_path)
+            try:
+                w.execute('BEGIN IMMEDIATE')
+                w.execute('UPDATE emotion_state SET pa=0.99 WHERE id=1')
+                shadow.record_score_proof_in_txn(
+                    w, 101, applied_at=T0, source='inflight')
+                writer_holding.set()
+                # 让 bootstrap 线程有时间在 BEGIN IMMEDIATE 上排队
+                time.sleep(0.8)
+                w.execute('COMMIT')
+            except BaseException as exc:  # noqa: BLE001
+                errors.append(exc)
+                writer_holding.set()
+            finally:
+                w.close()
+
+        def boot():
+            try:
+                writer_holding.wait(timeout=5)
+                results.append(
+                    shadow.ensure_bootstrapped(db_path=self.db_path, environ=ON)
+                )
+            except BaseException as exc:  # noqa: BLE001
+                errors.append(exc)
+
+        tw = threading.Thread(target=writer)
+        tb = threading.Thread(target=boot)
+        tw.start()
+        tb.start()
+        tw.join(timeout=15)
+        tb.join(timeout=15)
+        self.assertEqual(errors, [])
+        self.assertEqual(len(results), 1)
+        self.assertTrue(results[0].ok, msg=results[0].error)
+        self.assertEqual(results[0].status, 'applied')
+
+        conn = store.open_store(self.db_path)
+        try:
+            st = store.read_state(conn)
+            self.assertEqual(st['last_scored_message_id'], 101)
+            self.assertAlmostEqual(st['pa'], 0.99, places=4)
+            ev = store.read_event(conn, 'bootstrap:initial')
+            payload = json.loads(ev['payload_json'])
+            self.assertEqual(
+                payload['capture_mode'], shadow.CAPTURE_MODE_PRODUCTION)
+            self.assertEqual(
+                payload['watermark_proof']['message_id'], 101)
+            self.assertTrue(shadow._bootstrap_provenance_ok(st, ev))
+        finally:
+            conn.close()
 
 
 class WatermarkAndBootstrapTests(unittest.TestCase):
@@ -296,18 +442,25 @@ class WatermarkAndBootstrapTests(unittest.TestCase):
         self.assertIsNone(store.read_state(self.conn))
         self.assertIsNone(store.read_event(self.conn, 'bootstrap:initial'))
 
-    def test_enabled_bootstrap_writes_watermark(self):
-        _insert_score_applied(self.conn, 77)
+    def test_enabled_bootstrap_writes_structured_proof(self):
+        _insert_score_applied(self.conn, 77, source='prod_score')
         journal_before = store.get_journal_mode(self.conn)
-        r = _boot(self.db_path, watermark=77)
-        self.assertTrue(r.ok)
+        r = shadow.ensure_bootstrapped(db_path=self.db_path, environ=ON)
+        self.assertTrue(r.ok, msg=r.error)
         self.assertEqual(r.status, 'applied')
         st = store.read_state(self.conn)
         self.assertEqual(st['last_scored_message_id'], 77)
-        payload = json.loads(
-            store.read_event(self.conn, 'bootstrap:initial')['payload_json'])
+        ev = store.read_event(self.conn, 'bootstrap:initial')
+        payload = json.loads(ev['payload_json'])
         self.assertEqual(payload['last_scored_message_id'], 77)
+        self.assertEqual(
+            payload['watermark_proof']['resolver'], shadow.WATERMARK_SOURCE)
+        self.assertEqual(payload['watermark_proof']['row_source'], 'prod_score')
+        self.assertEqual(
+            payload['capture_mode'], shadow.CAPTURE_MODE_PRODUCTION)
+        self.assertEqual(ev['source_id'], shadow.PRODUCTION_BOOTSTRAP_SOURCE_ID)
         self.assertEqual(store.get_journal_mode(self.conn), journal_before)
+        self.assertTrue(shadow._bootstrap_provenance_ok(st, ev))
 
     def test_production_capture_bootstrap_path(self):
         _insert_score_applied(self.conn, 42, source='prod_score')
@@ -320,17 +473,33 @@ class WatermarkAndBootstrapTests(unittest.TestCase):
 
     def test_duplicate_bootstrap_no_state_change(self):
         _insert_score_applied(self.conn, 5)
-        r1 = _boot(self.db_path, watermark=5)
+        r1 = shadow.ensure_bootstrapped(db_path=self.db_path, environ=ON)
         self.assertEqual(r1.status, 'applied')
         st1 = dict(store.read_state(self.conn))
-        r2 = _boot(self.db_path, watermark=5)
+        r2 = shadow.ensure_bootstrapped(db_path=self.db_path, environ=ON)
         self.assertEqual(r2.status, 'already_bootstrapped')
         st2 = store.read_state(self.conn)
         self.assertEqual(st1['state_version'], st2['state_version'])
 
+    def test_test_injection_not_provenance_ok(self):
+        _insert_score_applied(self.conn, 10)
+        r = _boot_test(self.db_path, watermark=10)
+        self.assertEqual(r.status, 'applied')
+        st = store.read_state(self.conn)
+        ev = store.read_event(self.conn, 'bootstrap:initial')
+        self.assertTrue(shadow.is_bootstrapped(self.conn))
+        self.assertFalse(shadow._bootstrap_provenance_ok(st, ev))
+        h = shadow.get_shadow_health(db_path=self.db_path, environ=ON)
+        self.assertTrue(h.bootstrapped)
+        self.assertFalse(h.provenance_ok)
+
     def test_different_watermark_conflict(self):
         _insert_score_applied(self.conn, 10)
-        self.assertEqual(_boot(self.db_path, watermark=10).status, 'applied')
+        self.assertEqual(
+            shadow.ensure_bootstrapped(
+                db_path=self.db_path, environ=ON).status,
+            'applied',
+        )
         r = store.bootstrap_from_snapshot(
             self.conn, _snapshot(),
             last_scored_message_id=11,
@@ -344,7 +513,7 @@ class WatermarkAndBootstrapTests(unittest.TestCase):
         _insert_score_applied(self.conn, 3)
         before = self.conn.execute(
             'SELECT pa, valence FROM emotion_state WHERE id=1').fetchone()
-        _boot(self.db_path, watermark=3)
+        shadow.ensure_bootstrapped(db_path=self.db_path, environ=ON)
         after = self.conn.execute(
             'SELECT pa, valence FROM emotion_state WHERE id=1').fetchone()
         self.assertEqual(tuple(before), tuple(after))
@@ -371,7 +540,6 @@ class PhaseABoundaryTests(unittest.TestCase):
         )
         self.assertEqual(r.status, 'bootstrap_required')
         self.assertFalse(r.ok)
-        # 不得偷偷 bootstrap
         conn = store.open_store(self.db_path)
         try:
             self.assertIsNone(store.read_state(conn))
@@ -379,7 +547,6 @@ class PhaseABoundaryTests(unittest.TestCase):
             conn.close()
 
     def test_first_event_after_explicit_bootstrap_does_not_double(self):
-        """方案 A：先 bootstrap（含 watermark=20），再 scored 20 → stale。"""
         self.assertEqual(
             shadow.ensure_bootstrapped(
                 db_path=self.db_path, environ=ON).status,
@@ -400,7 +567,6 @@ class PhaseABoundaryTests(unittest.TestCase):
         try:
             st = store.read_state(conn)
             self.assertEqual(st['last_scored_message_id'], 20)
-            # 未因重复评分改 valence
             self.assertAlmostEqual(st['valence'], 0.6, places=4)
         finally:
             conn.close()
@@ -505,6 +671,9 @@ class ConcurrencyBootstrapTests(unittest.TestCase):
             self.assertEqual(n, 1)
             self.assertEqual(
                 store.read_state(conn)['last_scored_message_id'], 99)
+            st = store.read_state(conn)
+            ev = store.read_event(conn, 'bootstrap:initial')
+            self.assertTrue(shadow._bootstrap_provenance_ok(st, ev))
         finally:
             conn.close()
 
@@ -538,6 +707,12 @@ class GuardTests(unittest.TestCase):
             for path in wake_dir.rglob('*.py'):
                 text = path.read_text(encoding='utf-8', errors='replace')
                 self.assertNotIn('internal_state_shadow', text)
+
+    def test_public_ensure_bootstrapped_has_no_injection_kwargs(self):
+        import inspect
+        sig = inspect.signature(shadow.ensure_bootstrapped)
+        self.assertNotIn('snapshot', sig.parameters)
+        self.assertNotIn('last_scored_message_id', sig.parameters)
 
 
 if __name__ == '__main__':

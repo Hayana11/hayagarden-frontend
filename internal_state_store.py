@@ -606,14 +606,65 @@ def _last_event_id(conn: sqlite3.Connection, event_key: str) -> Optional[int]:
     return int(row['id']) if row else None
 
 
+def _normalize_watermark_proof(
+    watermark_proof: Optional[Mapping[str, Any]],
+    *,
+    watermark: int,
+    last_scored_message_id_source: str,
+) -> Optional[dict]:
+    """可选结构化水位证明；提供时必须自洽。"""
+    if watermark_proof is None:
+        return None
+    if not isinstance(watermark_proof, Mapping):
+        raise StoreError(
+            f'watermark_proof must be a mapping: {watermark_proof!r}'
+        )
+    resolver = watermark_proof.get('resolver')
+    message_id = watermark_proof.get('message_id')
+    applied_at = watermark_proof.get('applied_at')
+    row_source = watermark_proof.get('row_source')
+    if not isinstance(resolver, str) or not resolver.strip():
+        raise StoreError(f'watermark_proof.resolver invalid: {resolver!r}')
+    mid = require_positive_message_id(message_id, field='watermark_proof.message_id')
+    if mid != watermark:
+        raise StoreError(
+            'watermark_proof.message_id must equal last_scored_message_id: '
+            f'{mid} != {watermark}'
+        )
+    if not isinstance(applied_at, str) or not applied_at.strip():
+        raise StoreError(
+            f'watermark_proof.applied_at invalid: {applied_at!r}'
+        )
+    if not isinstance(row_source, str) or not row_source.strip() or len(row_source) > 64:
+        raise StoreError(
+            f'watermark_proof.row_source invalid: {row_source!r}'
+        )
+    # 允许调用方用旧字符串字段与结构化 resolver 对齐
+    if last_scored_message_id_source.strip() and (
+        last_scored_message_id_source.strip() != resolver.strip()
+        and not last_scored_message_id_source.strip().startswith(resolver.strip())
+    ):
+        # 不强制相等：legacy 字符串可能含附加说明；resolver 以结构化为准
+        pass
+    return {
+        'resolver': resolver.strip(),
+        'message_id': mid,
+        'applied_at': applied_at.strip(),
+        'row_source': row_source.strip(),
+    }
+
+
 def bootstrap_from_snapshot(
     conn: sqlite3.Connection,
     snapshot: Any,
     *,
     last_scored_message_id: int,
     last_scored_message_id_source: str = 'explicit_argument',
+    watermark_proof: Optional[Mapping[str, Any]] = None,
+    capture_mode: Optional[str] = None,
     event_key: str = 'bootstrap:initial',
     source_id: Optional[Any] = 'phase0_snapshot',
+    manage_transaction: bool = True,
 ) -> ApplyResult:
     """用显式传入的 Phase 0 snapshot 初始化 id=1。
 
@@ -624,7 +675,12 @@ def bootstrap_from_snapshot(
     ``legacy_source_timestamps`` 中。
 
     ``last_scored_message_id`` **必填**正整数：禁止 None / 0 / 猜测。
-    来源说明写入 payload（不含消息正文 / 评分原文 / Prompt）。
+    可选 ``watermark_proof`` / ``capture_mode`` 写入 payload，供 Shadow
+    provenance 校验（不含消息正文 / 评分原文 / Prompt）。
+
+    ``manage_transaction=True``（默认）：本函数 ``BEGIN IMMEDIATE…COMMIT``。
+    ``manage_transaction=False``：要求调用方已持有事务；成功不 COMMIT，
+    失败不 ROLLBACK（由调用方负责），用于与 legacy 读取同一线性化边界。
 
     幂等与 ``apply_state_update`` 一致：同 key 仅当 type/source/payload
     语义相同才算 duplicate，否则 ``idempotency_conflict``。
@@ -645,11 +701,27 @@ def bootstrap_from_snapshot(
         raise StoreError(
             'last_scored_message_id_source must be non-empty and <= 128 chars'
         )
+    if capture_mode is not None:
+        if not isinstance(capture_mode, str) or not capture_mode.strip():
+            raise StoreError(f'capture_mode invalid: {capture_mode!r}')
+        capture_mode = capture_mode.strip()
+    proof = _normalize_watermark_proof(
+        watermark_proof,
+        watermark=watermark,
+        last_scored_message_id_source=source_note,
+    )
 
-    _require_clean_write_connection(conn)
-    ensure_schema(conn)
-    # ensure_schema 可能经由 executescript 提交 DDL；确认仍无挂起事务
-    _require_clean_write_connection(conn)
+    if manage_transaction:
+        _require_clean_write_connection(conn)
+        ensure_schema(conn)
+        # ensure_schema 可能经由 executescript 提交 DDL；确认仍无挂起事务
+        _require_clean_write_connection(conn)
+    else:
+        if not conn.in_transaction:
+            raise StoreError(
+                'bootstrap_from_snapshot(manage_transaction=False) '
+                'requires an active caller-owned transaction'
+            )
 
     def _g(obj: Any, *path: str, default=None):
         cur = obj
@@ -698,7 +770,7 @@ def bootstrap_from_snapshot(
         'updated_at': observed_at,
     }
 
-    payload = {
+    payload: dict[str, Any] = {
         'source': 'bootstrap_from_snapshot',
         'observed_at': observed_at,
         'legacy_source_timestamps': legacy_ts,
@@ -706,12 +778,21 @@ def bootstrap_from_snapshot(
         'last_scored_message_id_source': source_note,
         'seed': seed,
     }
+    if proof is not None:
+        payload['watermark_proof'] = proof
+    if capture_mode is not None:
+        payload['capture_mode'] = capture_mode
     p_json = _canonical_payload_json(payload)
     p_hash = _payload_hash_from_json(p_json)
     now = _now_beijing()
 
+    def _abort_txn() -> None:
+        if manage_transaction:
+            _rollback(conn)
+
     try:
-        _begin_immediate(conn)
+        if manage_transaction:
+            _begin_immediate(conn)
 
         existing_event = _fetchone_dict(
             conn,
@@ -730,7 +811,7 @@ def bootstrap_from_snapshot(
                 payload_hash=p_hash,
             )
             if existing_state is None:
-                _rollback(conn)
+                _abort_txn()
                 if collision.status == 'duplicate':
                     return ApplyResult(
                         status='failed',
@@ -741,7 +822,7 @@ def bootstrap_from_snapshot(
                     )
                 return collision
             # 状态已在：绝不改写；仅按 payload 语义返回 duplicate / conflict
-            _rollback(conn)
+            _abort_txn()
             ver = int(existing_state['state_version'])
             return ApplyResult(
                 status=collision.status,
@@ -753,7 +834,7 @@ def bootstrap_from_snapshot(
 
         if existing_state is not None:
             # 状态在、bootstrap 事件缺失：fail closed，绝不伪造 provenance
-            _rollback(conn)
+            _abort_txn()
             return ApplyResult(
                 status='bootstrap_inconsistent',
                 state_version_before=int(existing_state['state_version']),
@@ -795,7 +876,8 @@ def bootstrap_from_snapshot(
             """,
             (event_key, source_id_norm, p_json, p_hash, now),
         )
-        conn.execute('COMMIT')
+        if manage_transaction:
+            conn.execute('COMMIT')
         return ApplyResult(
             status='applied',
             state_version_before=0,
@@ -803,7 +885,8 @@ def bootstrap_from_snapshot(
             event_id=_last_event_id(conn, event_key),
         )
     except Exception:
-        _rollback(conn)
+        if manage_transaction:
+            _rollback(conn)
         raise
 
 
