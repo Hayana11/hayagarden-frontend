@@ -75,6 +75,18 @@ class ApplyResult:
         return self.status == 'applied'
 
 
+@dataclass(frozen=True)
+class ConditionalDecision:
+    """``apply_conditional_state_update`` 在事务内的业务裁决。
+
+    - ``status='applied'``：必须提供非空 ``updates``
+    - ``status='stale_skipped'``：不更新状态；``error`` 记录 watermark 等原因
+    """
+    status: str
+    updates: Optional[Mapping[str, Any]] = None
+    error: Optional[str] = None
+
+
 class VersionConflictError(RuntimeError):
     """expected_state_version 与当前行不一致；不静默覆盖。"""
 
@@ -320,29 +332,23 @@ def _existing_event_result(
     )
 
 
-def apply_state_update(
+def apply_conditional_state_update(
     conn: sqlite3.Connection,
     *,
     event_key: str,
     event_type: str,
     source_id: Optional[Any],
     payload: Mapping[str, Any],
-    mutator: Callable[[dict], Mapping[str, Any]],
+    decide: Callable[[dict], ConditionalDecision],
     expected_state_version: Optional[int] = None,
 ) -> ApplyResult:
-    """在同一 ``BEGIN IMMEDIATE`` 事务内写事件 + 更新状态。
+    """在同一 ``BEGIN IMMEDIATE`` 内由 ``decide(state)`` 裁决 applied / stale。
 
-    幂等 / 冲突语义：
-      - 同 key + 同语义 payload → ``duplicate``（不更新状态）
-      - 同 key + 不同语义 → ``idempotency_conflict``（不更新、不插新行）
-      - 基础设施版本冲突 → **不消费** event_key，rollback 后
-        ``version_conflict``，允许同 key 重试
-      - 状态行缺失 → **不消费** event_key，返回 ``failed``，bootstrap 后可重试
-      - mutator 未知字段 / 空更新 / 改系统字段 → rollback + ``StoreError``
-      - 成功时 ``state_version`` 恰好 +1
-
-    业务 stale（如 ``message_id <= last_scored_message_id``）不在本层判断，
-    留给后续 ``observe_scored`` 在同一事务内完成。
+    - ``applied``：写状态（version +1）+ 事件 ``status=applied``
+    - ``stale_skipped``：不改状态、不升版本；仍插入事件并**消费** event_key；
+      ``state_version_before == state_version_after``；原因写入 ``error``
+    - ``version_conflict`` / 缺状态：**不消费** event_key
+    - 同 key 幂等语义与 ``apply_state_update`` 一致
     """
     if not event_key:
         raise StoreError('event_key required')
@@ -378,7 +384,6 @@ def apply_state_update(
 
         state = read_state(conn)
         if state is None:
-            # 不消费 event_key：rollback，bootstrap 后可同 key 重试
             _rollback(conn)
             return ApplyResult(
                 status='failed',
@@ -395,7 +400,6 @@ def apply_state_update(
                 f'version conflict: expected {expected_state_version}, '
                 f'current {version_before}'
             )
-            # 基础设施乐观锁冲突：不消费 key；业务 stale 不在本层伪装
             _rollback(conn)
             return ApplyResult(
                 status='version_conflict',
@@ -405,7 +409,40 @@ def apply_state_update(
                 error=err,
             )
 
-        raw_updates = _validate_mutator_updates(mutator(dict(state)))
+        decision = decide(dict(state))
+        if not isinstance(decision, ConditionalDecision):
+            raise StoreError(
+                'decide() must return ConditionalDecision, '
+                f'got {type(decision)!r}'
+            )
+
+        if decision.status == 'stale_skipped':
+            conn.execute(
+                """
+                INSERT INTO internal_state_events (
+                    event_key, event_type, source_id, payload_json,
+                    payload_hash, status, state_version_before,
+                    state_version_after, applied_at, error
+                ) VALUES (?, ?, ?, ?, ?, 'stale_skipped', ?, ?, ?, ?)
+                """,
+                (event_key, event_type, source_id_norm, p_json, p_hash,
+                 version_before, version_before, now, decision.error),
+            )
+            conn.execute('COMMIT')
+            return ApplyResult(
+                status='stale_skipped',
+                state_version_before=version_before,
+                state_version_after=version_before,
+                event_id=_last_event_id(conn, event_key),
+                error=decision.error,
+            )
+
+        if decision.status != 'applied':
+            raise StoreError(
+                f'decide() returned unsupported status: {decision.status!r}'
+            )
+
+        raw_updates = _validate_mutator_updates(decision.updates or {})
         version_after = version_before + 1
         updates = dict(raw_updates)
         updates['state_version'] = version_after
@@ -458,6 +495,47 @@ def apply_state_update(
     except Exception:
         _rollback(conn)
         raise
+
+
+def apply_state_update(
+    conn: sqlite3.Connection,
+    *,
+    event_key: str,
+    event_type: str,
+    source_id: Optional[Any],
+    payload: Mapping[str, Any],
+    mutator: Callable[[dict], Mapping[str, Any]],
+    expected_state_version: Optional[int] = None,
+) -> ApplyResult:
+    """在同一 ``BEGIN IMMEDIATE`` 事务内写事件 + 更新状态。
+
+    幂等 / 冲突语义：
+      - 同 key + 同语义 payload → ``duplicate``（不更新状态）
+      - 同 key + 不同语义 → ``idempotency_conflict``（不更新、不插新行）
+      - 基础设施版本冲突 → **不消费** event_key，rollback 后
+        ``version_conflict``，允许同 key 重试
+      - 状态行缺失 → **不消费** event_key，返回 ``failed``，bootstrap 后可重试
+      - mutator 未知字段 / 空更新 / 改系统字段 → rollback + ``StoreError``
+      - 成功时 ``state_version`` 恰好 +1
+
+    实现上为 ``apply_conditional_state_update`` 的 applied 包装；
+    行为与 Phase 1A-0 保持兼容。业务 stale 请用条件接口。
+    """
+    def _decide(state: dict) -> ConditionalDecision:
+        return ConditionalDecision(
+            status='applied',
+            updates=mutator(dict(state)),
+        )
+
+    return apply_conditional_state_update(
+        conn,
+        event_key=event_key,
+        event_type=event_type,
+        source_id=source_id,
+        payload=payload,
+        decide=_decide,
+        expected_state_version=expected_state_version,
+    )
 
 
 def _last_event_id(conn: sqlite3.Connection, event_key: str) -> Optional[int]:
@@ -653,6 +731,7 @@ __all__ = [
     'DEFAULT_BUSY_TIMEOUT_MS',
     'EVENT_STATUSES',
     'ApplyResult',
+    'ConditionalDecision',
     'VersionConflictError',
     'StoreError',
     'open_store',
@@ -661,6 +740,7 @@ __all__ = [
     'ensure_schema',
     'read_state',
     'read_event',
+    'apply_conditional_state_update',
     'apply_state_update',
     'bootstrap_from_snapshot',
 ]
