@@ -630,7 +630,9 @@ def score_and_update(conversation_excerpt: str, *, message_id=None):
     conn = _db()
     try:
         if abandon_emotion:
-            return
+            # Evidence channels are unavailable, but Shadow must not veto the
+            # authoritative legacy heartbeat. Fall through to legacy-only write.
+            proof_enabled = False
         if proof_enabled and _shadow is not None:
             conn.isolation_level = None
             mid_ok = None
@@ -665,6 +667,22 @@ def score_and_update(conversation_excerpt: str, *, message_id=None):
                 conn.execute(_EMOTION_UPDATE_SQL, _emotion_update_params(tr))
                 return tr
 
+            def _fallback_legacy_only() -> None:
+                nonlocal applied_tr
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                try:
+                    conn.execute('BEGIN IMMEDIATE')
+                    applied_tr = _apply_transition_locked(_now_str())
+                    conn.commit()
+                except Exception:
+                    try:
+                        conn.rollback()
+                    except Exception:
+                        pass
+
             if mid_ok is None:
                 # incident 必须先持久化，才允许改 emotion
                 incidents_ready = conn.execute(
@@ -698,6 +716,7 @@ def score_and_update(conversation_excerpt: str, *, message_id=None):
                     except Exception:
                         pass
                     # incident 未落地 → 放弃 emotion
+                    _fallback_legacy_only()
                     return
             elif not _shadow.score_proof_schema_ready(conn):
                 # 表未准备：incident sidecar 必须成功，否则放弃 emotion
@@ -708,6 +727,7 @@ def score_and_update(conversation_excerpt: str, *, message_id=None):
                         error_code='proof_schema_missing',
                     )
                 except Exception:
+                    _fallback_legacy_only()
                     return
                 try:
                     conn.execute('BEGIN IMMEDIATE')
@@ -718,6 +738,7 @@ def score_and_update(conversation_excerpt: str, *, message_id=None):
                         conn.rollback()
                     except Exception:
                         pass
+                    _fallback_legacy_only()
                     return
             else:
                 try:
