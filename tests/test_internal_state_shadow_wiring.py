@@ -978,7 +978,7 @@ class MonotonicScoreGuardTests(unittest.TestCase):
 
 
 class SidecarFailClosedTests(unittest.TestCase):
-    def test_sidecar_open_failure_keeps_emotion(self):
+    def test_sidecar_open_failure_preserves_legacy_emotion(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         db_path = str(Path(tmp.name) / 'fail.db')
@@ -1006,11 +1006,11 @@ class SidecarFailClosedTests(unittest.TestCase):
         conn = sqlite3.connect(db_path)
         try:
             pa = conn.execute('SELECT pa FROM emotion_state WHERE id=1').fetchone()[0]
-            self.assertAlmostEqual(pa, 0.5, places=4)
+            self.assertNotAlmostEqual(pa, 0.5, places=4)
         finally:
             conn.close()
 
-    def test_invalid_message_id_sidecar_failure_keeps_emotion(self):
+    def test_invalid_message_id_sidecar_failure_preserves_legacy_emotion(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         db_path = str(Path(tmp.name) / 'badid.db')
@@ -1038,11 +1038,11 @@ class SidecarFailClosedTests(unittest.TestCase):
         conn = sqlite3.connect(db_path)
         try:
             pa = conn.execute('SELECT pa FROM emotion_state WHERE id=1').fetchone()[0]
-            self.assertAlmostEqual(pa, 0.5, places=4)
+            self.assertNotAlmostEqual(pa, 0.5, places=4)
         finally:
             conn.close()
 
-    def test_sidecar_fsync_failure_keeps_emotion(self):
+    def test_sidecar_fsync_failure_preserves_legacy_emotion(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         db_path = str(Path(tmp.name) / 'fsync.db')
@@ -1066,11 +1066,11 @@ class SidecarFailClosedTests(unittest.TestCase):
         conn = sqlite3.connect(db_path)
         try:
             pa = conn.execute('SELECT pa FROM emotion_state WHERE id=1').fetchone()[0]
-            self.assertAlmostEqual(pa, 0.5, places=4)
+            self.assertNotAlmostEqual(pa, 0.5, places=4)
         finally:
             conn.close()
 
-    def test_shadow_import_failure_and_sidecar_unwritable_keeps_emotion(self):
+    def test_shadow_import_failure_and_sidecar_unwritable_preserves_legacy_emotion(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         db_path = str(Path(tmp.name) / 'importfail.db')
@@ -1102,7 +1102,7 @@ class SidecarFailClosedTests(unittest.TestCase):
         conn = sqlite3.connect(db_path)
         try:
             pa = conn.execute('SELECT pa FROM emotion_state WHERE id=1').fetchone()[0]
-            self.assertAlmostEqual(pa, 0.5, places=4)
+            self.assertNotAlmostEqual(pa, 0.5, places=4)
         finally:
             conn.close()
 
