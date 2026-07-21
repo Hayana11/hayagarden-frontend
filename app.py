@@ -912,11 +912,105 @@ def send_chat():
     if file_url and not content:
         content = '[文件:%s]' % (file_name or '附件')
     conn = get_db()
-    cur = conn.execute("INSERT INTO chat_messages (author,content,image_url,file_url,file_name) VALUES (?,?,?,?,?)",
-        (author, content, image_url, file_url, file_name))
-    message_id = cur.lastrowid
-    conn.commit()
-    conn.close()
+    previous_user_at = None
+    created_at = None
+    message_id = None
+    _user_events_requested = all(
+        str(os.environ.get(name, '0')).strip() == '1'
+        for name in (
+            'INTERNAL_STATE_V3_SHADOW_ENABLED',
+            'INTERNAL_STATE_V3_SCORE_PROOF_ENABLED',
+            'INTERNAL_STATE_V3_USER_EVENTS_ENABLED',
+        )
+    )
+    try:
+        if _user_events_requested and author not in ('fyodor', 'assistant', 'claude'):
+            from chat.interaction_state import USER_AUTHOR_SQL
+            prev = conn.execute(
+                f"SELECT created_at FROM chat_messages WHERE {USER_AUTHOR_SQL} "
+                "ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+            if prev is not None:
+                previous_user_at = prev['created_at'] if hasattr(prev, 'keys') else prev[0]
+                previous_user_at = str(previous_user_at) if previous_user_at else None
+        cur = conn.execute(
+            "INSERT INTO chat_messages (author,content,image_url,file_url,file_name) "
+            "VALUES (?,?,?,?,?)",
+            (author, content, image_url, file_url, file_name),
+        )
+        message_id = cur.lastrowid
+        if _user_events_requested:
+            row = conn.execute(
+                "SELECT created_at FROM chat_messages WHERE id=?",
+                (message_id,),
+            ).fetchone()
+            if row is not None:
+                created_at = row['created_at'] if hasattr(row, 'keys') else row[0]
+                created_at = str(created_at) if created_at else None
+        capture_alert_failed = False
+        # Shadow user_rule outbox：与 chat INSERT 同事务；缺表则 outbox_capture_gap
+        # 聊天主流程不得阻断；证据全失败时记 sticky alert（status fail-closed）
+        if (
+            _user_events_requested
+            and author not in ('fyodor', 'assistant', 'claude')
+            and message_id is not None
+            and created_at
+        ):
+            try:
+                import internal_state_shadow as _shadow
+                if _shadow.is_user_events_enabled():
+                    try:
+                        _shadow.enqueue_user_rule_in_txn(
+                            conn,
+                            message_id=int(message_id),
+                            text=content or '',
+                            created_at=created_at,
+                            previous_user_at=previous_user_at,
+                        )
+                    except Exception:
+                        try:
+                            _shadow.mark_proof_gap(
+                                conn,
+                                failed_message_id=int(message_id),
+                                error_code='outbox_capture_gap',
+                                db_path=DB_PATH,
+                            )
+                        except Exception:
+                            try:
+                                _gap_result = _shadow.mark_proof_gap_standalone(
+                                    db_path=DB_PATH,
+                                    failed_message_id=int(message_id),
+                                    error_code='outbox_capture_gap',
+                                )
+                                if _gap_result.status == 'failed':
+                                    capture_alert_failed = not _shadow.note_capture_evidence_failure(
+                                        f'user_rule message_id={message_id}',
+                                        db_path=DB_PATH,
+                                    )
+                            except Exception as _gap_exc:
+                                capture_alert_failed = not _shadow.note_capture_evidence_failure(
+                                    f'user_rule standalone exception={_gap_exc}',
+                                    db_path=DB_PATH,
+                                )
+            except Exception as _cap_exc:
+                try:
+                    import internal_state_shadow as _shadow2
+                    capture_alert_failed = not _shadow2.note_capture_evidence_failure(
+                        f'user_rule import/enable: {_cap_exc}',
+                        db_path=DB_PATH,
+                    )
+                except Exception:
+                    try:
+                        from internal_state_capture_alert import write_capture_alert
+                        capture_alert_failed = not write_capture_alert(
+                            db_path=DB_PATH,
+                            detail=f'user_rule shadow import/enable: {_cap_exc}',
+                        )
+                    except Exception:
+                        capture_alert_failed = True
+        conn.commit()
+    finally:
+        conn.close()
     # Production React path: app persists here, then gateway stream only gets
     # user_message_id (empty content). Touch must happen on this commit —
     # moments_turn.insert_user_message will not run again for the body.
@@ -927,6 +1021,12 @@ def send_chat():
             touch_user_interaction(get_db)
         except Exception:
             pass
+        if message_id is not None and created_at:
+            try:
+                import internal_state_shadow as _shadow
+                _shadow.drain_shadow_outbox_best_effort(db_path=DB_PATH)
+            except Exception:
+                pass
     # gateway uses this id to claim wake context only after a successful reply.
     return jsonify({"ok": True, "message_id": message_id})
 

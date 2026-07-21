@@ -24,7 +24,7 @@ jobs:
           for name in ("memories.db", "commands.db"):
               sqlite3.connect(f"/opt/frontend/{name}").close()
           PY
-      - name: Run internal state Phase 0 + 1A-0..1A-3 + 1A-4a shadow tests
+      - name: Run internal state Phase 0 + 1A-0..1A-4b shadow tests
         run: |
           python3 -m unittest \
             tests.test_internal_state_store \
@@ -33,4 +33,5 @@ jobs:
             tests.test_internal_state_events_scored \
             tests.test_internal_state_events_outcome \
             tests.test_internal_state_shadow \
+            tests.test_internal_state_shadow_wiring \
             -v

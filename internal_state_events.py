@@ -19,6 +19,7 @@ import datetime
 import hashlib
 import json
 import math
+import re
 import sqlite3
 from typing import Any, Mapping, Optional
 
@@ -407,9 +408,10 @@ def plan_user_message_transition(
     state: Mapping[str, Any],
     *,
     message_id: int,
-    text: str,
+    text: str = '',
     created_at: str,
     previous_user_at: Optional[str],
+    observation: Optional[Mapping[str, Any]] = None,
 ) -> dict:
     """纯函数：用户消息 → updates / diagnostics / payload。
 
@@ -434,7 +436,22 @@ def plan_user_message_transition(
         passion_for_boost=bond_m['passion'],
     )
 
-    rule = rule_score_desire(text)
+    if observation is None:
+        rule = rule_score_desire(text)
+        fingerprint = _text_fingerprint(text)
+    else:
+        _validate_user_rule_observation(observation, mid=mid,
+                                        created_at=created_at,
+                                        previous_user_at=previous_user_at)
+        rule = {
+            'passion_delta': float(observation['passion_delta']),
+            'intimacy_delta': float(observation['intimacy_delta']),
+            'hit_categories': list(observation['rule_hit_categories']),
+        }
+        fingerprint = {
+            'text_hash': observation['text_hash'],
+            'text_length': observation['text_length'],
+        }
     passion_after = _clamp01(bond_m['passion'] + rule['passion_delta'])
     intimacy_after = _clamp01(bond_m['intimacy'] + rule['intimacy_delta'])
 
@@ -471,7 +488,6 @@ def plan_user_message_transition(
         'drives_updated_at': created_at,
     }
 
-    fingerprint = _text_fingerprint(text)
     payload = {
         'message_id': mid,
         'created_at': created_at,
@@ -528,6 +544,53 @@ def plan_user_message_transition(
         'diagnostics': diagnostics,
         'payload': payload,
     }
+
+
+def sanitize_user_rule_observation(
+    *, message_id: int, text: str, created_at: str,
+    previous_user_at: Optional[str],
+) -> dict:
+    """唯一允许进入 outbox 的、与 state 无关的 user_rule 观察事实。"""
+    mid = _require_message_id(message_id)
+    created, previous = _canonicalize_observation_clocks(
+        created_at=created_at, previous_user_at=previous_user_at,
+    )
+    rule = rule_score_desire(text)
+    fp = _text_fingerprint(text)
+    return {
+        'message_id': mid, 'created_at': created, 'previous_user_at': previous,
+        'text_hash': fp['text_hash'], 'text_length': fp['text_length'],
+        'passion_delta': rule['passion_delta'],
+        'intimacy_delta': rule['intimacy_delta'],
+        'rule_hit_categories': list(rule['hit_categories']),
+    }
+
+
+def _validate_user_rule_observation(
+    obs: Mapping[str, Any], *, mid: int, created_at: str,
+    previous_user_at: Optional[str],
+) -> None:
+    required = {
+        'message_id', 'created_at', 'previous_user_at', 'text_hash',
+        'text_length', 'passion_delta', 'intimacy_delta', 'rule_hit_categories',
+    }
+    if set(obs) != required:
+        raise StoreError('user_rule observation keys invalid')
+    if obs['message_id'] != mid or obs['created_at'] != created_at or obs['previous_user_at'] != previous_user_at:
+        raise StoreError('user_rule observation identity mismatch')
+    if not isinstance(obs['text_hash'], str) or not re.fullmatch(r'[0-9a-f]{64}', obs['text_hash']):
+        raise StoreError('user_rule observation text_hash invalid')
+    if isinstance(obs['text_length'], bool) or not isinstance(obs['text_length'], int) or obs['text_length'] < 0:
+        raise StoreError('user_rule observation text_length invalid')
+    for key, cap in (('passion_delta', DESIRE_CAP['p']), ('intimacy_delta', DESIRE_CAP['i'])):
+        value = obs[key]
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or abs(float(value)) > cap:
+            raise StoreError(f'user_rule observation {key} invalid')
+    if not isinstance(obs['rule_hit_categories'], list) or any(
+        not isinstance(x, str) or x not in DESIRE_LEXICON
+        for x in obs['rule_hit_categories']
+    ):
+        raise StoreError('user_rule observation categories invalid')
 
 
 def _observation_identity(
@@ -703,6 +766,57 @@ def observe_user_message(
             return _duplicate_result(landed)
 
     return result
+
+
+def apply_planned_user_message(
+    conn: sqlite3.Connection,
+    *,
+    envelope: Mapping[str, Any],
+    expected_state_version: Optional[int] = None,
+) -> ApplyResult:
+    """应用已冻结、无原文的 user_rule envelope。
+
+    生产 outbox 仅保存 plan 的 payload/updates；drain 不得重新取得用户原文。
+    """
+    if not isinstance(envelope, Mapping):
+        raise StoreError('planned user_rule envelope must be a mapping')
+    payload = envelope.get('observation')
+    if not isinstance(payload, Mapping):
+        raise StoreError('planned user_rule envelope missing observation')
+    mid = _require_message_id(payload.get('message_id'))
+    # Strictly reject raw-text keys before persistence/application.
+    if any(k in payload for k in ('text', 'content', 'raw_text')):
+        raise StoreError('planned user_rule payload must not contain text')
+    created, previous = _canonicalize_observation_clocks(
+        created_at=payload['created_at'], previous_user_at=payload['previous_user_at'],
+    )
+    if created != payload['created_at'] or previous != payload['previous_user_at']:
+        raise StoreError('planned user_rule timestamps not canonical')
+    event_key = f'user_rule:{mid}'
+    existing = read_event(conn, event_key)
+    identity = {
+        'message_id': mid, 'created_at': created, 'previous_user_at': previous,
+        'text_hash': payload['text_hash'], 'text_length': payload['text_length'],
+    }
+    if existing is not None:
+        if _event_matches_observation(existing, message_id=mid, identity=identity):
+            return _duplicate_result(existing)
+        return _idempotency_conflict_result(existing, 'planned user_rule identity conflict')
+    state = read_state(conn)
+    if state is None:
+        return ApplyResult('failed', None, None, None, 'state row missing')
+    version = int(state['state_version'])
+    if expected_state_version is not None and int(expected_state_version) != version:
+        return ApplyResult('version_conflict', version, None, None, 'version conflict')
+    plan = plan_user_message_transition(
+        state, message_id=mid, created_at=created, previous_user_at=previous,
+        observation=payload,
+    )
+    return apply_state_update(
+        conn, event_key=event_key, event_type=_USER_RULE_EVENT_TYPE,
+        source_id=str(mid), payload=plan['payload'],
+        mutator=lambda _s: dict(plan['updates']), expected_state_version=version,
+    )
 
 
 # ═══════════════════════════════════════════════════════════

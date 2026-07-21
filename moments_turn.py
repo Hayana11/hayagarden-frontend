@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import secrets
 import sqlite3
+import os
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
@@ -163,13 +164,98 @@ def insert_user_message(
     if not text:
         return turn_data
     conn = get_db_fn()
+    previous_user_at = None
+    created_at = None
+    user_id = None
+    _user_events_requested = all(
+        str(os.environ.get(name, '0')).strip() == '1'
+        for name in (
+            'INTERNAL_STATE_V3_SHADOW_ENABLED',
+            'INTERNAL_STATE_V3_SCORE_PROOF_ENABLED',
+            'INTERNAL_STATE_V3_USER_EVENTS_ENABLED',
+        )
+    )
     try:
+        # previous_user_at：必须在插入本条之前读取，避免 longing 被算成 0
+        from chat.interaction_state import USER_AUTHOR_SQL
+        if _user_events_requested:
+            prev = conn.execute(
+            f"SELECT created_at FROM chat_messages WHERE {USER_AUTHOR_SQL} "
+            "ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+            if prev is not None:
+                previous_user_at = prev['created_at'] if hasattr(prev, 'keys') else prev[0]
+                previous_user_at = str(previous_user_at) if previous_user_at else None
         cur = conn.execute(
             "INSERT INTO chat_messages (author,content) VALUES ('hayana',?)",
             (text,),
         )
-        conn.commit()
         user_id = int(cur.lastrowid)
+        if _user_events_requested:
+            row = conn.execute(
+            "SELECT created_at FROM chat_messages WHERE id=?",
+            (user_id,),
+        ).fetchone()
+            if row is not None:
+                created_at = row['created_at'] if hasattr(row, 'keys') else row[0]
+                created_at = str(created_at) if created_at else None
+        capture_alert_failed = False
+        # Shadow user_rule outbox：与 chat INSERT 同事务；缺表则 outbox_capture_gap
+        # 聊天主流程不得阻断；证据全失败时记 sticky alert（status fail-closed）
+        if _user_events_requested and user_id is not None and created_at:
+            try:
+                import internal_state_shadow as _shadow
+                if _shadow.is_user_events_enabled():
+                    try:
+                        _shadow.enqueue_user_rule_in_txn(
+                            conn,
+                            message_id=user_id,
+                            text=text,
+                            created_at=created_at,
+                            previous_user_at=previous_user_at,
+                        )
+                    except Exception:
+                        try:
+                            _shadow.mark_proof_gap(
+                                conn,
+                                failed_message_id=user_id,
+                                error_code='outbox_capture_gap',
+                                db_path=memories_db_path,
+                            )
+                        except Exception:
+                            try:
+                                _gap_result = _shadow.mark_proof_gap_standalone(
+                                    db_path=memories_db_path,
+                                    failed_message_id=user_id,
+                                    error_code='outbox_capture_gap',
+                                )
+                                if _gap_result.status == 'failed':
+                                    capture_alert_failed = not _shadow.note_capture_evidence_failure(
+                                        f'user_rule message_id={user_id}',
+                                        db_path=memories_db_path,
+                                    )
+                            except Exception as _gap_exc:
+                                capture_alert_failed = not _shadow.note_capture_evidence_failure(
+                                    f'user_rule standalone exception={_gap_exc}',
+                                    db_path=memories_db_path,
+                                )
+            except Exception as _cap_exc:
+                try:
+                    import internal_state_shadow as _shadow2
+                    capture_alert_failed = not _shadow2.note_capture_evidence_failure(
+                        f'user_rule import/enable: {_cap_exc}',
+                        db_path=memories_db_path,
+                    )
+                except Exception:
+                    try:
+                        from internal_state_capture_alert import write_capture_alert
+                        capture_alert_failed = not write_capture_alert(
+                            db_path=memories_db_path,
+                            detail=f'user_rule shadow import/enable: {_cap_exc}',
+                        )
+                    except Exception:
+                        capture_alert_failed = True
+        conn.commit()
         turn_data['user_message_id'] = user_id
     finally:
         conn.close()
@@ -179,6 +265,13 @@ def insert_user_message(
         touch_user_interaction(get_db_fn)
     except Exception:
         pass
+    # commit 后立即 drain（失败行仍保留，可重放）
+    if user_id is not None and created_at:
+        try:
+            import internal_state_shadow as _shadow
+            _shadow.drain_shadow_outbox_best_effort(db_path=memories_db_path)
+        except Exception:
+            pass
     turn_key = turn_data.get('turn_key')
     if turn_key:
         sync_user_message_id(
