@@ -105,6 +105,7 @@ incident/ack/audit；`recover-quarantine-intents` 用于进程在中途退出后
 - USER_EVENTS 部署必须设置独立持久卷上的
   `INTERNAL_STATE_V3_CAPTURE_ALERT_PATH`。DB 与 incident 文件都失败时写 sticky
   alert；preflight 会真实测试 write/fsync/rename/directory-fsync，并拒绝与 DB /
-  incident 同一文件系统。运行时 alert 写入也失败时，聊天事务会 rollback。
+  incident 同一文件系统。任何 Shadow evidence 失败都不否决聊天或 legacy
+  emotion；只让 health/bootstrap/cutover 保持 fail-closed。
 - schema 缺失：先写 gap incident 文件，再改 emotion
 - `wake_outcome` 生产调用点仍为 0

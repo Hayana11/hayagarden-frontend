@@ -2394,11 +2394,8 @@ def enqueue_user_rule_in_txn(
     mid = store.require_positive_message_id(message_id, field='message_id')
     if not isinstance(text, str):
         raise store.StoreError('user_rule text must be str')
-    state = store.read_state(conn)
-    if state is None:
-        raise store.StoreError('shadow state missing; cannot sanitize user_rule')
-    plan = events.plan_user_message_transition(
-        state, message_id=mid, text=text, created_at=created_at,
+    observation = events.sanitize_user_rule_observation(
+        message_id=mid, text=text, created_at=created_at,
         previous_user_at=previous_user_at,
     )
     enqueue_outbox_in_txn(
@@ -2407,8 +2404,7 @@ def enqueue_user_rule_in_txn(
         event_type=EVENT_TYPE_USER_RULE,
         payload={
             'envelope': {
-                'payload': plan['payload'],
-                'updates': plan['updates'],
+                'observation': observation,
             },
         },
     )

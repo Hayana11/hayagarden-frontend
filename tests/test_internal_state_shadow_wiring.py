@@ -716,9 +716,9 @@ class OutboxReliabilityTests(unittest.TestCase):
             self.assertNotIn('规则消息', row[1])
             self.assertNotIn('text', payload)
             envelope = payload['envelope']
-            self.assertEqual(envelope['payload']['message_id'], mid)
-            self.assertIn('text_hash', envelope['payload'])
-            self.assertIn('text_length', envelope['payload'])
+            self.assertEqual(envelope['observation']['message_id'], mid)
+            self.assertIn('text_hash', envelope['observation'])
+            self.assertIn('text_length', envelope['observation'])
         finally:
             conn.close()
         # 重放成功且幂等
