@@ -1549,6 +1549,61 @@ class CaptureAlertTests(unittest.TestCase):
             finally:
                 conn.close()
 
+    def test_capture_ack_recovers_prepared_before_claim(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        db_path = str(Path(tmp.name) / 'ack-crash.db')
+        alert_path = str(Path(tmp.name) / 'alerts' / 'capture.json')
+        with mock.patch.dict(
+            os.environ, {shadow.CAPTURE_ALERT_PATH_ENV: alert_path}, clear=False,
+        ):
+            shadow.note_capture_evidence_failure('A', db_path=db_path)
+            digest = shadow._sha256_file(Path(alert_path))
+            conn = store.open_store(db_path)
+            try:
+                with mock.patch.object(os, 'rename', side_effect=OSError('crash before claim')):
+                    with self.assertRaises(OSError):
+                        shadow.ack_capture_alert(
+                            conn, sha256=digest, reason='review', db_path=db_path,
+                        )
+                self.assertTrue(Path(alert_path).is_file())
+                prepared = shadow.inspect_capture_alert_acks(conn)
+                self.assertEqual(len(prepared), 1)
+                recovered = shadow.recover_capture_alert_acks(conn)
+                self.assertTrue(recovered[0]['acked'])
+                self.assertFalse(Path(alert_path).exists())
+                self.assertEqual(shadow.inspect_capture_alert_acks(conn), [])
+            finally:
+                conn.close()
+
+    def test_capture_ack_recovers_claimed_processing(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        db_path = str(Path(tmp.name) / 'ack-processing.db')
+        alert_path = str(Path(tmp.name) / 'alerts' / 'capture.json')
+        with mock.patch.dict(
+            os.environ, {shadow.CAPTURE_ALERT_PATH_ENV: alert_path}, clear=False,
+        ):
+            shadow.note_capture_evidence_failure('A', db_path=db_path)
+            digest = shadow._sha256_file(Path(alert_path))
+            conn = store.open_store(db_path)
+            try:
+                with mock.patch.object(
+                    shadow, '_complete_capture_alert_intent',
+                    side_effect=OSError('crash after claim'),
+                ):
+                    with self.assertRaises(OSError):
+                        shadow.ack_capture_alert(
+                            conn, sha256=digest, reason='review', db_path=db_path,
+                        )
+                self.assertFalse(Path(alert_path).exists())
+                self.assertTrue(shadow.has_capture_alert(db_path))
+                recovered = shadow.recover_capture_alert_acks(conn)
+                self.assertTrue(recovered[0]['acked'])
+                self.assertFalse(shadow.has_capture_alert(db_path))
+            finally:
+                conn.close()
+
 
 class PendingIncidentTmpTests(unittest.TestCase):
     def test_promote_stale_complete_tmp_is_audited_and_migrates(self):
@@ -1579,6 +1634,41 @@ class PendingIncidentTmpTests(unittest.TestCase):
                 x['message_id'] for x in shadow.list_unresolved_gap_incidents(conn)
             }
             self.assertIn(77, mids)
+            self.assertEqual(
+                conn.execute(
+                    f'SELECT COUNT(*) FROM {shadow.PENDING_INCIDENT_ACTION_TABLE}'
+                ).fetchone()[0],
+                1,
+            )
+        finally:
+            conn.close()
+
+    def test_prepared_before_rename_recovers_and_audits_once(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        db_path = str(Path(tmp.name) / 'tmp-crash.db')
+        d = shadow.gap_incidents_dir(db_path)
+        d.mkdir(parents=True, exist_ok=True)
+        pending = d / 'complete.tmp'
+        pending.write_text(
+            json.dumps({
+                'gap_detected': True, 'failed_message_id': 88,
+                'error_code': 'crash_before_rename', 'failed_at': T0,
+            }) + '\n', encoding='utf-8',
+        )
+        conn = store.open_store(db_path)
+        try:
+            _seed_emotion(conn)
+            shadow.ensure_shadow_schema(conn, db_path=db_path)
+            with mock.patch.object(os, 'rename', side_effect=OSError('crash before rename')):
+                with self.assertRaises(OSError):
+                    shadow.recover_pending_incident_tmp(
+                        conn, path=str(pending), action='promote', reason='verified',
+                        stale_after_seconds=0, db_path=db_path,
+                    )
+            self.assertTrue(pending.is_file())
+            recovered = shadow.recover_pending_incident_intents(conn, db_path=db_path)
+            self.assertEqual(recovered[0]['status'], 'completed')
             self.assertEqual(
                 conn.execute(
                     f'SELECT COUNT(*) FROM {shadow.PENDING_INCIDENT_ACTION_TABLE}'

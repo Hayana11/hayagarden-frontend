@@ -85,6 +85,8 @@ python3 tools/internal_state_shadow_admin.py inspect-pending-incidents
 python3 tools/internal_state_shadow_admin.py recover-pending-incident-intents
 python3 tools/internal_state_shadow_admin.py ack-capture-alert \
   --sha256 ... --reason '...'
+python3 tools/internal_state_shadow_admin.py inspect-capture-alert-acks
+python3 tools/internal_state_shadow_admin.py recover-capture-alert-acks
 ```
 
 `ack-gap` 只解决该 `message_id`（或指定 `incident_id`）的未解决项，不会一键擦掉其它缺口。

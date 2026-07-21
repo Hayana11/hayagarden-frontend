@@ -395,6 +395,23 @@ def _cmd_recover_pending_incident_intents(db_path: str) -> int:
         conn.close()
 
 
+def _cmd_capture_alert_acks(db_path: str, recover: bool) -> int:
+    db = isv3.memories_db_path(db_path)
+    conn = store.open_store(db)
+    try:
+        result = (
+            shadow.recover_capture_alert_acks(conn)
+            if recover else shadow.inspect_capture_alert_acks(conn)
+        )
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0 if (recover and all(x.get('acked') for x in result)) else (0 if not result else 1)
+    except Exception as exc:
+        print(f'ERROR: {exc}', file=sys.stderr)
+        return 1
+    finally:
+        conn.close()
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description='Internal State Shadow admin')
     p.add_argument('--db', default=None, help='memories.db path')
@@ -444,6 +461,8 @@ def main(argv: list[str] | None = None) -> int:
         'recover-pending-incident-intents',
         help='complete prepared stale-tmp action intents after a crash',
     )
+    sub.add_parser('inspect-capture-alert-acks', help='show prepared capture alert acks')
+    sub.add_parser('recover-capture-alert-acks', help='resume prepared capture alert acks')
     args = p.parse_args(argv)
     if args.cmd == 'prepare-schema':
         return _cmd_prepare_schema(args.db)
@@ -479,6 +498,10 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_ack_capture_alert(args.db, args.sha256, args.reason)
     if args.cmd == 'recover-pending-incident-intents':
         return _cmd_recover_pending_incident_intents(args.db)
+    if args.cmd == 'inspect-capture-alert-acks':
+        return _cmd_capture_alert_acks(args.db, False)
+    if args.cmd == 'recover-capture-alert-acks':
+        return _cmd_capture_alert_acks(args.db, True)
     return 2
 
 

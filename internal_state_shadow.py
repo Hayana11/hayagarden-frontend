@@ -73,6 +73,7 @@ QUARANTINE_INTENT_TABLE = 'internal_state_shadow_quarantine_reconcile_intents'
 PENDING_INCIDENT_ACTION_TABLE = 'internal_state_shadow_pending_incident_actions'
 PENDING_INCIDENT_INTENT_TABLE = 'internal_state_shadow_pending_incident_intents'
 CAPTURE_ALERT_ACK_TABLE = 'internal_state_shadow_capture_alert_ack'
+CAPTURE_ALERT_INTENT_TABLE = 'internal_state_shadow_capture_alert_intents'
 EVENT_TYPE_USER_RULE = 'user_rule'
 EVENT_TYPE_USER_SCORED = 'user_scored'
 _SCORE_HASH_FIELDS = (
@@ -465,7 +466,10 @@ def has_capture_alert(db_path: Optional[str] = None) -> bool:
     path = capture_alert_path(db_path)
     return bool(
         path is not None and (
-            path.is_file() or any(path.parent.glob(path.name + '.processing.*'))
+            path.is_file() or any(
+                '.resolved.' not in p.name
+                for p in path.parent.glob(path.name + '.processing.*')
+            )
         )
     )
 
@@ -530,7 +534,7 @@ def ack_capture_alert(
     reason: str,
     db_path: Optional[str] = None,
 ) -> dict:
-    """受审计归档独立 capture alert；不得直接删除 marker。"""
+    """capture alert prepared state machine：可在 claim/归档断电后恢复。"""
     if not isinstance(reason, str) or not reason.strip():
         raise store.StoreError('capture alert ack reason required')
     if not isinstance(sha256, str) or len(sha256) != 64:
@@ -538,15 +542,10 @@ def ack_capture_alert(
     alert = capture_alert_path(db_path)
     if alert is None or not alert.is_file():
         raise store.StoreError('no pending configured capture alert')
-    # Claim canonical first. A concurrent writer now publishes a *new* canonical
-    # marker and cannot be silently carried into this acknowledgement.
     processing = Path(f'{alert}.processing.{uuid.uuid4().hex}')
-    os.rename(str(alert), str(processing))
-    _fsync_dir(processing.parent)
-    actual = _sha256_file(processing)
+    archive = Path(f'{processing}.resolved.{uuid.uuid4().hex}')
+    actual = _sha256_file(alert)
     if actual.lower() != sha256.lower():
-        # Keep processing visible to health for operator recovery; never overwrite
-        # a concurrently-created canonical marker.
         raise store.StoreError(f'capture alert sha256 mismatch: {actual}')
     conn.execute(
         f"""
@@ -560,8 +559,65 @@ def ack_capture_alert(
         )
         """
     )
-    archive = Path(f'{processing}.resolved.{uuid.uuid4().hex}')
-    # DB audit intent first: a post-rename crash leaves a visible prepared row.
+    conn.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS {CAPTURE_ALERT_INTENT_TABLE} (
+            intent_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            canonical_path TEXT NOT NULL,
+            processing_path TEXT NOT NULL UNIQUE,
+            archive_path TEXT NOT NULL UNIQUE,
+            sha256 TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            prepared_at TEXT NOT NULL,
+            completed_at TEXT
+        )
+        """
+    )
+    # Intent is durable before claim: source-present recovery can resume rename.
+    conn.execute('BEGIN IMMEDIATE')
+    try:
+        cur = conn.execute(
+            f"""
+            INSERT INTO {CAPTURE_ALERT_INTENT_TABLE}
+                (canonical_path, processing_path, archive_path, sha256, reason, prepared_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (str(alert), str(processing), str(archive), actual.lower(),
+             reason.strip()[:512], _now_beijing()),
+        )
+        intent_id = int(cur.lastrowid)
+        conn.execute('COMMIT')
+    except Exception:
+        conn.execute('ROLLBACK')
+        raise
+    os.rename(str(alert), str(processing))
+    _fsync_dir(processing.parent)
+    return _complete_capture_alert_intent(conn, intent_id=intent_id)
+
+
+def _complete_capture_alert_intent(conn: sqlite3.Connection, *, intent_id: int) -> dict:
+    row = conn.execute(
+        f"""
+        SELECT canonical_path, processing_path, archive_path, sha256, reason, completed_at
+        FROM {CAPTURE_ALERT_INTENT_TABLE} WHERE intent_id=?
+        """, (intent_id,),
+    ).fetchone()
+    if row is None:
+        raise store.StoreError(f'unknown capture alert intent {intent_id}')
+    get = lambda k, i: row[k] if isinstance(row, sqlite3.Row) else row[i]
+    canonical, processing, archive = (Path(str(get('canonical_path', 0))),
+                                      Path(str(get('processing_path', 1))),
+                                      Path(str(get('archive_path', 2))))
+    digest, reason_s, completed = str(get('sha256', 3)), str(get('reason', 4)), get('completed_at', 5)
+    if completed is not None:
+        return {'acked': True, 'intent_id': intent_id, 'idempotent': True}
+    if processing.is_file() and not archive.exists():
+        if _sha256_file(processing).lower() != digest.lower():
+            raise store.StoreError(f'capture intent {intent_id} processing hash mismatch')
+        os.rename(str(processing), str(archive))
+        _fsync_dir(archive.parent)
+    if not archive.is_file() or _sha256_file(archive).lower() != digest.lower():
+        raise store.StoreError(f'capture intent {intent_id} archive missing/mismatched')
     conn.execute('BEGIN IMMEDIATE')
     try:
         cur = conn.execute(
@@ -570,20 +626,56 @@ def ack_capture_alert(
                 (path, sha256, reason, archive_path, acked_at)
             VALUES (?, ?, ?, ?, ?)
             """,
-            (str(alert), actual.lower(), reason.strip()[:512], str(archive),
-             _now_beijing()),
+            (str(canonical), digest, reason_s, str(archive), _now_beijing()),
         )
         ack_id = int(cur.lastrowid)
+        conn.execute(
+            f'UPDATE {CAPTURE_ALERT_INTENT_TABLE} SET completed_at=? WHERE intent_id=?',
+            (_now_beijing(), intent_id),
+        )
         conn.execute('COMMIT')
     except Exception:
         conn.execute('ROLLBACK')
         raise
-    os.rename(str(processing), str(archive))
-    _fsync_dir(archive.parent)
     return {
-        'acked': True, 'ack_id': ack_id, 'path': str(alert),
-        'sha256': actual.lower(), 'archive_path': str(archive),
+        'acked': True, 'ack_id': ack_id, 'intent_id': intent_id,
+        'path': str(canonical), 'sha256': digest, 'archive_path': str(archive),
     }
+
+
+def inspect_capture_alert_acks(conn: sqlite3.Connection) -> list[dict]:
+    conn.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS {CAPTURE_ALERT_INTENT_TABLE} (
+            intent_id INTEGER PRIMARY KEY AUTOINCREMENT, canonical_path TEXT NOT NULL,
+            processing_path TEXT NOT NULL UNIQUE, archive_path TEXT NOT NULL UNIQUE,
+            sha256 TEXT NOT NULL, reason TEXT NOT NULL, prepared_at TEXT NOT NULL,
+            completed_at TEXT
+        )
+        """
+    )
+    rows = conn.execute(
+        f'SELECT * FROM {CAPTURE_ALERT_INTENT_TABLE} WHERE completed_at IS NULL'
+    ).fetchall()
+    return [dict(x) if isinstance(x, sqlite3.Row) else dict(enumerate(x)) for x in rows]
+
+
+def recover_capture_alert_acks(conn: sqlite3.Connection) -> list[dict]:
+    """接续 source/processing/archive 任一 prepared 状态；不触碰新 canonical。"""
+    rows = inspect_capture_alert_acks(conn)
+    out = []
+    for row in rows:
+        iid = int(row['intent_id'])
+        canonical, processing = Path(row['canonical_path']), Path(row['processing_path'])
+        digest = str(row['sha256'])
+        if canonical.is_file() and not processing.exists():
+            if _sha256_file(canonical).lower() != digest.lower():
+                out.append({'intent_id': iid, 'status': 'canonical_replaced'})
+                continue
+            os.rename(str(canonical), str(processing))
+            _fsync_dir(processing.parent)
+        out.append(_complete_capture_alert_intent(conn, intent_id=iid))
+    return out
 
 
 def read_proof_gap_sidecar(db_path: Optional[str] = None) -> Optional[dict]:
@@ -1503,6 +1595,28 @@ def recover_pending_incident_tmp(
         raw, valid = None, False
     ensure_quarantine_reconcile_schema(conn)
     digest = _sha256_file(src)
+    existing = conn.execute(
+        f"""
+        SELECT intent_id, archive_path, sha256, action, reason, completed_at
+        FROM {PENDING_INCIDENT_INTENT_TABLE} WHERE source_path=?
+        """,
+        (str(src),),
+    ).fetchone()
+    if existing is not None:
+        get = lambda k, i: existing[k] if isinstance(existing, sqlite3.Row) else existing[i]
+        if (
+            str(get('sha256', 2)) != digest
+            or str(get('action', 3)) != action
+            or str(get('reason', 4)) != reason.strip()[:512]
+        ):
+            raise store.StoreError('prepared tmp intent does not match retry parameters')
+        intent_id = int(get('intent_id', 0))
+        recover_pending_incident_intents(conn, db_path=db_path)
+        archive = str(get('archive_path', 1))
+        return {
+            'action': action, 'path': str(src), 'intent_id': intent_id,
+            'reused_prepared_intent': True, 'archive': archive,
+        }
     if action == 'promote':
         if not valid:
             raise store.StoreError('cannot promote invalid tmp; use quarantine/discard')
@@ -1580,6 +1694,12 @@ def recover_pending_incident_intents(
         iid = int(get('intent_id', 0))
         src, archive = Path(str(get('source_path', 1))), Path(str(get('archive_path', 2)))
         digest, action, reason = str(get('sha256', 3)), str(get('action', 4)), str(get('reason', 5))
+        if src.is_file() and not archive.exists():
+            if _sha256_file(src) != digest:
+                out.append({'intent_id': iid, 'status': 'source_hash_mismatch'})
+                continue
+            os.rename(str(src), str(archive))
+            _fsync_dir(archive.parent)
         if archive.is_file() and not src.exists() and _sha256_file(archive) == digest:
             conn.execute('BEGIN IMMEDIATE')
             try:
@@ -1605,8 +1725,6 @@ def recover_pending_incident_intents(
             except Exception:
                 conn.execute('ROLLBACK')
                 raise
-        elif src.is_file() and not archive.exists():
-            out.append({'intent_id': iid, 'status': 'prepared_source_present'})
         else:
             out.append({'intent_id': iid, 'status': 'split_brain'})
     return out
@@ -3421,6 +3539,7 @@ __all__ = [
     'CAPTURE_MODE_TEST',
     'CAPTURE_ALERT_PATH_ENV',
     'CAPTURE_ALERT_ACK_TABLE',
+    'CAPTURE_ALERT_INTENT_TABLE',
     'EVENT_TYPE_USER_RULE',
     'EVENT_TYPE_USER_SCORED',
     'GAP_ACK_TABLE',
@@ -3445,6 +3564,7 @@ __all__ = [
     'PENDING_INCIDENT_INTENT_TABLE',
     'ack_proof_gap',
     'ack_capture_alert',
+    'inspect_capture_alert_acks',
     'append_gap_incident_sidecar',
     'apply_outcome_shadow',
     'capture_bootstrap_bundle',
@@ -3497,6 +3617,7 @@ __all__ = [
     'reconcile_quarantine',
     'recover_pending_incident_tmp',
     'recover_pending_incident_intents',
+    'recover_capture_alert_acks',
     'recover_quarantine_intents',
     'record_score_proof_in_txn',
     'resolve_scored_watermark',
