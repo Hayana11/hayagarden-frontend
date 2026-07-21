@@ -19,6 +19,7 @@ from __future__ import annotations
 import datetime
 import hashlib
 import json
+import math
 import sqlite3
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping, Optional, Sequence
@@ -248,11 +249,17 @@ def read_event(conn: sqlite3.Connection, event_key: str) -> Optional[dict]:
     )
 
 
-def _clamp01(value: Any, default: float) -> float:
+def _clamp01(value: Any, default: float, *, field: str = 'value') -> float:
+    """写入前强制有限且落在 [0,1]；NaN/Inf 不得被 clamp 成 0/1。"""
     if value is None:
         v = float(default)
     else:
-        v = float(value)
+        try:
+            v = float(value)
+        except (TypeError, ValueError) as exc:
+            raise StoreError(f'non-numeric value for {field}: {value!r}') from exc
+    if not math.isfinite(v):
+        raise StoreError(f'non-finite value for {field}: {value!r}')
     return max(0.0, min(1.0, v))
 
 
@@ -406,7 +413,7 @@ def apply_state_update(
 
         for key in _UNIT_FIELDS:
             if key in updates:
-                updates[key] = _clamp01(updates[key], float(state[key]))
+                updates[key] = _clamp01(updates[key], float(state[key]), field=key)
 
         cols = [c for c in updates.keys() if c in _STATE_COLUMN_SET and c != 'id']
         sets = ', '.join(f'{c}=?' for c in cols)
@@ -509,26 +516,26 @@ def bootstrap_from_snapshot(
     source_id_norm = _normalize_source_id(source_id)
 
     seed = {
-        'pa': _clamp01(_g(affect, 'pa'), 0.5),
-        'na': _clamp01(_g(affect, 'na'), 0.2),
-        'valence': _clamp01(_g(affect, 'valence'), 0.6),
-        'arousal': _clamp01(_g(affect, 'arousal'), 0.3),
+        'pa': _clamp01(_g(affect, 'pa'), 0.5, field='pa'),
+        'na': _clamp01(_g(affect, 'na'), 0.2, field='na'),
+        'valence': _clamp01(_g(affect, 'valence'), 0.6, field='valence'),
+        'arousal': _clamp01(_g(affect, 'arousal'), 0.3, field='arousal'),
         'mood_word': _g(affect, 'mood_word') or '平静',
         'mood_source_message_id': None,
-        'intimacy': _clamp01(_g(bond, 'intimacy'), 0.3),
-        'passion': _clamp01(_g(bond, 'passion'), 0.0),
-        'commitment': _clamp01(_g(bond, 'commitment'), 0.7),
+        'intimacy': _clamp01(_g(bond, 'intimacy'), 0.3, field='intimacy'),
+        'passion': _clamp01(_g(bond, 'passion'), 0.0, field='passion'),
+        'commitment': _clamp01(_g(bond, 'commitment'), 0.7, field='commitment'),
         # 已物化到 observed_at：时间基准必须对齐，禁止双倍衰减
         'p_updated_at': observed_at,
         'i_updated_at': observed_at,
-        'attachment': _clamp01(_g(drives, 'attachment'), 0.10),
-        'curiosity': _clamp01(_g(drives, 'curiosity'), 0.20),
-        'reflection': _clamp01(_g(drives, 'reflection'), 0.10),
-        'social': _clamp01(_g(drives, 'social'), 0.10),
-        'duty': _clamp01(_g(drives, 'duty'), 0.15),
-        'libido': _clamp01(_g(drives, 'libido'), 0.00),
-        'stress': _clamp01(_g(drives, 'stress'), 0.10),
-        'fatigue': _clamp01(_g(drives, 'fatigue'), 0.20),
+        'attachment': _clamp01(_g(drives, 'attachment'), 0.10, field='attachment'),
+        'curiosity': _clamp01(_g(drives, 'curiosity'), 0.20, field='curiosity'),
+        'reflection': _clamp01(_g(drives, 'reflection'), 0.10, field='reflection'),
+        'social': _clamp01(_g(drives, 'social'), 0.10, field='social'),
+        'duty': _clamp01(_g(drives, 'duty'), 0.15, field='duty'),
+        'libido': _clamp01(_g(drives, 'libido'), 0.00, field='libido'),
+        'stress': _clamp01(_g(drives, 'stress'), 0.10, field='stress'),
+        'fatigue': _clamp01(_g(drives, 'fatigue'), 0.20, field='fatigue'),
         'drives_updated_at': observed_at,
         'last_scored_message_id': None,
         'state_version': 0,
