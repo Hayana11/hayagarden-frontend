@@ -36,6 +36,7 @@ import math
 import os
 import sqlite3
 import threading
+import uuid
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -108,6 +109,7 @@ class ShadowHealth:
     outbox_schema_ready: Optional[bool] = None
     gap_incidents_unresolved: Optional[int] = None
     gap_sidecar_pending: Optional[int] = None
+    quarantine_pending: Optional[int] = None
 
     def as_dict(self) -> dict:
         return asdict(self)
@@ -319,9 +321,11 @@ def write_proof_gap_sidecar(
 
 
 def count_gap_sidecar_pending(db_path: Optional[str] = None) -> int:
-    path = Path(proof_gap_sidecar_path(db_path))
-    legacy = Path(proof_gap_sidecar_legacy_path(db_path))
+    """canonical JSONL + legacy JSON + in-flight processing 文件行数。"""
+    base = isv3.memories_db_path(db_path)
     n = 0
+    path = Path(base + PROOF_GAP_SIDECAR_SUFFIX)
+    legacy = Path(base + PROOF_GAP_SIDECAR_LEGACY_SUFFIX)
     if path.is_file():
         try:
             n += sum(1 for line in path.read_text(encoding='utf-8').splitlines() if line.strip())
@@ -329,7 +333,36 @@ def count_gap_sidecar_pending(db_path: Optional[str] = None) -> int:
             n += 1
     if legacy.is_file():
         n += 1
+    parent = Path(base).parent
+    stem = Path(base).name + PROOF_GAP_SIDECAR_SUFFIX
+    for proc in parent.glob(stem + '.processing.*'):
+        if proc.is_file():
+            try:
+                n += sum(1 for line in proc.read_text(encoding='utf-8').splitlines() if line.strip())
+            except Exception:
+                n += 1
     return n
+
+
+def list_gap_quarantine_files(db_path: Optional[str] = None) -> list[str]:
+    base = isv3.memories_db_path(db_path)
+    parent = Path(base).parent
+    name = Path(base).name
+    patterns = [
+        name + PROOF_GAP_SIDECAR_SUFFIX + '.quarantine.*',
+        name + PROOF_GAP_SIDECAR_LEGACY_SUFFIX + '.quarantine.*',
+        name + OUTBOX_SIDECAR_SUFFIX + '.quarantine.*',
+    ]
+    found: list[str] = []
+    for pat in patterns:
+        for p in sorted(parent.glob(pat)):
+            if p.is_file():
+                found.append(str(p))
+    return found
+
+
+def count_quarantine_pending(db_path: Optional[str] = None) -> int:
+    return len(list_gap_quarantine_files(db_path))
 
 
 def read_proof_gap_sidecar(db_path: Optional[str] = None) -> Optional[dict]:
@@ -375,18 +408,6 @@ def read_proof_gap_sidecar(db_path: Optional[str] = None) -> Optional[dict]:
                 'failed_at': None,
             }
     return latest
-
-
-def clear_proof_gap_sidecar(db_path: Optional[str] = None) -> None:
-    """仅在全部 incident 已 resolve 且无未迁入 sidecar 时由 ack 路径调用。"""
-    for suffix_path in (
-        proof_gap_sidecar_path(db_path),
-        proof_gap_sidecar_legacy_path(db_path),
-    ):
-        try:
-            Path(suffix_path).unlink()
-        except FileNotFoundError:
-            pass
 
 
 def gap_incidents_schema_ready(conn: sqlite3.Connection) -> bool:
@@ -496,60 +517,32 @@ def has_unresolved_proof_gap(
     *,
     db_path: Optional[str] = None,
 ) -> bool:
-    """任一 unresolved incident 或 sidecar 条目即视为未解决。"""
+    """任一 unresolved incident、sidecar/processing、或 quarantine 即未解决。"""
     if count_unresolved_gap_incidents(conn) > 0:
         return True
     path = db_path or _conn_file_path(conn)
     if count_gap_sidecar_pending(path) > 0:
         return True
+    if count_quarantine_pending(path) > 0:
+        return True
     return bool(read_proof_health(conn).gap_detected)
 
 
-def migrate_proof_gap_sidecar(
-    conn: sqlite3.Connection,
-    *,
-    db_path: Optional[str] = None,
-) -> int:
-    """prepare-schema：把 JSONL/legacy sidecar 迁入 incident ledger。"""
-    path = db_path or _conn_file_path(conn)
-    migrated = 0
-    # legacy single JSON
-    legacy = Path(proof_gap_sidecar_legacy_path(path))
-    if legacy.is_file():
-        try:
-            raw = json.loads(legacy.read_text(encoding='utf-8'))
-        except Exception as exc:  # noqa: BLE001
-            logger.critical(
-                'internal_state_shadow: legacy gap sidecar unreadable: %s', exc,
-            )
-            raw = {
-                'gap_detected': True,
-                'failed_message_id': None,
-                'error_code': 'sidecar_unreadable',
-            }
-        if isinstance(raw, dict) and raw.get('gap_detected'):
-            mark_proof_gap(
-                conn,
-                failed_message_id=raw.get('failed_message_id'),
-                error_code=str(raw.get('error_code') or 'sidecar_migrated'),
-                db_path=path,
-                write_sidecar_if_missing=False,
-            )
-            migrated += 1
-        try:
-            legacy.unlink()
-        except FileNotFoundError:
-            pass
+def _unique_quarantine_path(src: Path) -> Path:
+    return Path(f'{src}.quarantine.{uuid.uuid4().hex}')
 
-    jsonl = Path(proof_gap_sidecar_path(path))
-    if not jsonl.is_file():
-        return migrated
-    try:
-        lines = jsonl.read_text(encoding='utf-8').splitlines()
-    except Exception as exc:  # noqa: BLE001
-        logger.critical('internal_state_shadow: gap jsonl read failed: %s', exc)
-        return migrated
-    kept_bad: list[str] = []
+
+def _migrate_gap_lines_into_incidents(
+    conn: sqlite3.Connection,
+    lines: list[str],
+    *,
+    db_path: Optional[str],
+    quarantine_dest: Path,
+) -> tuple[int, int]:
+    """返回 (migrated_ok, corrupt_count)。corrupt 写入 quarantine 并记 sidecar_corrupt incident。"""
+    migrated = 0
+    corrupt = 0
+    corrupt_lines: list[str] = []
     for line in lines:
         stripped = line.strip()
         if not stripped:
@@ -557,47 +550,138 @@ def migrate_proof_gap_sidecar(
         try:
             raw = json.loads(stripped)
         except json.JSONDecodeError:
-            kept_bad.append(stripped)
+            corrupt += 1
+            corrupt_lines.append(stripped)
             continue
         if not isinstance(raw, dict) or not raw.get('gap_detected'):
-            kept_bad.append(stripped)
+            corrupt += 1
+            corrupt_lines.append(stripped)
             continue
         mark_proof_gap(
             conn,
             failed_message_id=raw.get('failed_message_id'),
             error_code=str(raw.get('error_code') or 'sidecar_migrated'),
-            db_path=path,
+            db_path=db_path,
             write_sidecar_if_missing=False,
         )
         migrated += 1
-    if kept_bad:
-        # 坏行进入 quarantine，不静默删除
-        q = Path(str(jsonl) + '.quarantine')
-        with open(q, 'a', encoding='utf-8') as fh:
-            for bad in kept_bad:
+    if corrupt_lines:
+        quarantine_dest.parent.mkdir(parents=True, exist_ok=True)
+        with open(quarantine_dest, 'a', encoding='utf-8') as fh:
+            for bad in corrupt_lines:
                 fh.write(bad + '\n')
-                fh.flush()
-                os.fsync(fh.fileno())
-        logger.critical(
-            'internal_state_shadow: %s corrupt gap sidecar lines quarantined at %s',
-            len(kept_bad), q,
+            fh.flush()
+            os.fsync(fh.fileno())
+        # quarantine 必须留下 unresolved incident，阻止 bootstrap 洗白
+        mark_proof_gap(
+            conn,
+            failed_message_id=None,
+            error_code='sidecar_corrupt',
+            db_path=db_path,
+            write_sidecar_if_missing=False,
         )
-    try:
-        jsonl.unlink()
-    except FileNotFoundError:
-        pass
+        logger.critical(
+            'internal_state_shadow: %s corrupt gap lines quarantined at %s',
+            len(corrupt_lines), quarantine_dest,
+        )
+    return migrated, corrupt
+
+
+def migrate_proof_gap_sidecar(
+    conn: sqlite3.Connection,
+    *,
+    db_path: Optional[str] = None,
+) -> int:
+    """原子 rename → processing，再迁入 incident ledger。
+
+    新 append 进入新的 canonical 文件，不会随 processing 被删。
+    """
+    path = db_path or _conn_file_path(conn)
+    migrated = 0
+
+    legacy = Path(proof_gap_sidecar_legacy_path(path))
+    if legacy.is_file():
+        processing = Path(f'{legacy}.processing.{uuid.uuid4().hex}')
+        os.rename(str(legacy), str(processing))
+        try:
+            raw = json.loads(processing.read_text(encoding='utf-8'))
+            lines = [json.dumps(raw, ensure_ascii=False)] if isinstance(raw, dict) else []
+        except Exception:
+            lines = [processing.read_text(encoding='utf-8')]
+        q = _unique_quarantine_path(legacy)
+        m, _c = _migrate_gap_lines_into_incidents(
+            conn, lines, db_path=path, quarantine_dest=q,
+        )
+        migrated += m
+        try:
+            processing.unlink()
+        except FileNotFoundError:
+            pass
+
+    jsonl = Path(proof_gap_sidecar_path(path))
+    if jsonl.is_file():
+        processing = Path(f'{jsonl}.processing.{uuid.uuid4().hex}')
+        os.rename(str(jsonl), str(processing))
+        try:
+            lines = processing.read_text(encoding='utf-8').splitlines()
+        except Exception as exc:  # noqa: BLE001
+            logger.critical('internal_state_shadow: gap processing read failed: %s', exc)
+            # 读失败：保留 processing，记 incident，不得假装成功
+            mark_proof_gap(
+                conn,
+                failed_message_id=None,
+                error_code='sidecar_processing_unreadable',
+                db_path=path,
+                write_sidecar_if_missing=False,
+            )
+            return migrated
+        q = _unique_quarantine_path(jsonl)
+        m, _c = _migrate_gap_lines_into_incidents(
+            conn, lines, db_path=path, quarantine_dest=q,
+        )
+        migrated += m
+        try:
+            processing.unlink()
+        except FileNotFoundError:
+            pass
+
+    # 清理历史遗留的 processing（崩溃残留）
+    base = isv3.memories_db_path(path)
+    parent = Path(base).parent
+    stem = Path(base).name + PROOF_GAP_SIDECAR_SUFFIX
+    for proc in parent.glob(stem + '.processing.*'):
+        try:
+            lines = proc.read_text(encoding='utf-8').splitlines()
+        except Exception:
+            mark_proof_gap(
+                conn,
+                failed_message_id=None,
+                error_code='sidecar_processing_unreadable',
+                db_path=path,
+                write_sidecar_if_missing=False,
+            )
+            continue
+        q = _unique_quarantine_path(Path(proof_gap_sidecar_path(path)))
+        m, _c = _migrate_gap_lines_into_incidents(
+            conn, lines, db_path=path, quarantine_dest=q,
+        )
+        migrated += m
+        try:
+            proc.unlink()
+        except FileNotFoundError:
+            pass
     return migrated
 
 
 def quarantine_legacy_outbox_sidecar(
     db_path: Optional[str] = None,
 ) -> Optional[str]:
-    """热路径已禁用 outbox sidecar；残留文件移入 quarantine，绝不静默投递。"""
+    """热路径已禁用 outbox sidecar；残留文件移入唯一 quarantine 名。"""
     src = Path(outbox_sidecar_path(db_path))
     if not src.is_file():
         return None
-    dest = Path(str(src) + '.quarantine')
-    os.replace(str(src), str(dest))
+    dest = _unique_quarantine_path(src)
+    os.rename(str(src), str(dest))
     logger.critical(
         'internal_state_shadow: legacy outbox sidecar quarantined at %s '
         '(USER_EVENTS requires DB outbox; no hot-path sidecar)',
@@ -716,7 +800,15 @@ def ensure_shadow_schema(
             f'ALTER TABLE {GAP_ACK_TABLE} ADD COLUMN incident_id INTEGER'
         )
     migrate_proof_gap_sidecar(conn, db_path=db_path)
-    quarantine_legacy_outbox_sidecar(db_path or _conn_file_path(conn))
+    qpath = quarantine_legacy_outbox_sidecar(db_path or _conn_file_path(conn))
+    if qpath is not None:
+        mark_proof_gap(
+            conn,
+            failed_message_id=None,
+            error_code='outbox_sidecar_quarantined',
+            db_path=db_path,
+            write_sidecar_if_missing=False,
+        )
     _refresh_proof_health_summary(conn)
 
 
@@ -837,11 +929,15 @@ def clear_proof_gap(
     *,
     db_path: Optional[str] = None,
 ) -> None:
-    """危险内部 API：仅清摘要。运维必须用 ``ack_proof_gap``。"""
+    """危险内部 API：仅刷新摘要。不得 unlink canonical sidecar。"""
+    path = db_path or _conn_file_path(conn)
+    migrate_proof_gap_sidecar(conn, db_path=path)
     _refresh_proof_health_summary(conn)
-    if count_unresolved_gap_incidents(conn) == 0 and count_gap_sidecar_pending(
-        db_path or _conn_file_path(conn)
-    ) == 0:
+    if (
+        count_unresolved_gap_incidents(conn) == 0
+        and count_gap_sidecar_pending(path) == 0
+        and count_quarantine_pending(path) == 0
+    ):
         if conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
             (PROOF_HEALTH_TABLE,),
@@ -859,7 +955,6 @@ def clear_proof_gap(
                     failed_at=NULL
                 """
             )
-        clear_proof_gap_sidecar(db_path or _conn_file_path(conn))
 
 
 def ack_proof_gap(
@@ -943,8 +1038,7 @@ def ack_proof_gap(
         )
         resolved_ids.append(int(iid))
     _refresh_proof_health_summary(conn)
-    if count_unresolved_gap_incidents(conn) == 0:
-        clear_proof_gap_sidecar(db_path or _conn_file_path(conn))
+    # 不得 unlink canonical sidecar；仅 migrate 经 processing 文件生命周期管理
     return {
         'acked': True,
         'message_id': mid,
@@ -952,6 +1046,9 @@ def ack_proof_gap(
         'reason': reason_s,
         'acked_at': ts,
         'remaining_unresolved': count_unresolved_gap_incidents(conn),
+        'quarantine_pending': count_quarantine_pending(
+            db_path or _conn_file_path(conn)
+        ),
     }
 
 
@@ -1025,21 +1122,11 @@ def record_score_proof_in_txn(
         prev_hash = existing.get('score_hash')
         if prev_hash is not None and str(prev_hash) == hash_canon:
             return 'duplicate'
-        # 旧行无 hash：仅当 applied_at+source 全同且仍无 hash 时，补写 hash 一次
-        if (
-            prev_hash in (None, '')
-            and str(existing.get('applied_at')) == applied_canon
-            and str(existing.get('source')) == source_canon
-        ):
-            conn.execute(
-                f"""
-                UPDATE {SCORE_APPLIED_TABLE}
-                SET score_hash=?
-                WHERE message_id=? AND (score_hash IS NULL OR score_hash='')
-                """,
-                (hash_canon, mid),
+        if prev_hash in (None, ''):
+            raise store.StoreError(
+                f'legacy_hash_unknown for message_id={mid}: '
+                f'refusing to backfill score_hash without proof'
             )
-            return 'duplicate'
         raise store.StoreError(
             f'score proof payload conflict for message_id={mid}: '
             f'existing_hash={prev_hash!r} new_hash={hash_canon!r}'
@@ -1054,6 +1141,18 @@ def record_score_proof_in_txn(
         (mid, applied_canon, source_canon, hash_canon),
     )
     return 'inserted'
+
+
+def max_score_proof_message_id(conn: sqlite3.Connection) -> Optional[int]:
+    """当前 proof 表最大 message_id；表空返回 None。"""
+    if not score_proof_schema_ready(conn):
+        return None
+    row = conn.execute(
+        f'SELECT MAX(message_id) FROM {SCORE_APPLIED_TABLE}'
+    ).fetchone()
+    if row is None or row[0] is None:
+        return None
+    return int(row[0])
 
 
 def enqueue_outbox_in_txn(
@@ -1727,6 +1826,7 @@ def get_shadow_health(
             outbox_schema_ready=None,
             gap_incidents_unresolved=None,
             gap_sidecar_pending=None,
+            quarantine_pending=None,
         )
 
     conn = None
@@ -1744,6 +1844,7 @@ def get_shadow_health(
         gap = has_unresolved_proof_gap(conn, db_path=path)
         incidents_n = count_unresolved_gap_incidents(conn)
         sidecar_n = count_gap_sidecar_pending(path)
+        quarantine_n = count_quarantine_pending(path)
         proof_max = None
         if score_proof_schema_ready(conn):
             try:
@@ -1787,6 +1888,7 @@ def get_shadow_health(
             outbox_schema_ready=outbox_schema_ready(conn),
             gap_incidents_unresolved=incidents_n,
             gap_sidecar_pending=sidecar_n,
+            quarantine_pending=quarantine_n,
         )
     except Exception as exc:  # noqa: BLE001
         _record_error(f'get_shadow_health: {exc}')
@@ -1810,6 +1912,7 @@ def get_shadow_health(
             outbox_schema_ready=None,
             gap_incidents_unresolved=None,
             gap_sidecar_pending=None,
+            quarantine_pending=None,
         )
     finally:
         if conn is not None:
@@ -2399,9 +2502,9 @@ __all__ = [
     'apply_outcome_shadow',
     'capture_bootstrap_bundle',
     'clear_proof_gap',
-    'clear_proof_gap_sidecar',
-    'compute_score_hash',
+        'compute_score_hash',
     'count_gap_sidecar_pending',
+    'count_quarantine_pending',
     'count_pending_outbox',
     'count_unresolved_gap_incidents',
     'drain_shadow_outbox',
@@ -2421,6 +2524,8 @@ __all__ = [
     'is_user_events_enabled',
     'list_unresolved_gap_incidents',
     'lookup_score_proof',
+    'list_gap_quarantine_files',
+    'max_score_proof_message_id',
     'mark_proof_gap',
     'mark_proof_gap_standalone',
     'migrate_proof_gap_sidecar',

@@ -83,8 +83,11 @@ python3 tools/internal_state_shadow_admin.py ack-gap --message-id N --incident-i
 
 ## 硬交接
 
-- 评分：`BEGIN IMMEDIATE` → **先查 proof（score_hash）** → 再 UPDATE emotion → proof → outbox → COMMIT
+- 评分：`BEGIN IMMEDIATE` → **先查 proof（score_hash）** → **跨 message 单调门** → UPDATE emotion → proof → outbox → COMMIT
 - 同 `message_id` + 同 `score_hash`：整次 no-op；不同 hash：冲突并记 incident，不改 emotion
+- 已有更高 `message_id` proof 时，迟到评分整次放弃（不改 legacy / 不写 outbox）
+- gap sidecar：必须先成功持久化 incident，才允许改 emotion；迁移经 atomic rename processing
+- quarantine 未 reconcile 前 bootstrap/status fail-closed
 - `chat_messages` INSERT 与 user_rule outbox 同事务；缺 outbox 表 → `outbox_capture_gap`
 - schema 缺失：先 append gap JSONL，再改 emotion
 - `wake_outcome` 生产调用点仍为 0

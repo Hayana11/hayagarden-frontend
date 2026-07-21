@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import json
+import os
 import sqlite3
 import sys
 import tempfile
@@ -878,6 +879,333 @@ class MultiGapIncidentTests(unittest.TestCase):
         finally:
             conn.close()
         self.assertEqual(shadow.count_gap_sidecar_pending(db_path), 0)
+
+
+class MonotonicScoreGuardTests(unittest.TestCase):
+    def test_late_lower_message_does_not_rewrite_legacy(self):
+        """101 在写库前阻塞；102 先完成；101 后完成不得覆盖 legacy。"""
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        db_path = str(Path(tmp.name) / 'mono.db')
+        patch = mock.patch.dict(os.environ, ALL_ON, clear=False)
+        patch.start()
+        self.addCleanup(patch.stop)
+        conn = store.open_store(db_path)
+        try:
+            _seed_legacy_for_bootstrap(conn)
+            shadow.ensure_shadow_schema(conn, db_path=db_path)
+            conn.execute('BEGIN')
+            shadow.record_score_proof_in_txn(
+                conn, 20, applied_at=T0, source='unit', score_hash='boot')
+            conn.execute('COMMIT')
+        finally:
+            conn.close()
+        self.assertTrue(shadow.ensure_bootstrapped(
+            db_path=db_path, environ={shadow.SHADOW_ENABLED_ENV: '1'},
+        ).ok)
+
+        ee.DB_PATH = db_path
+        release_101 = threading.Event()
+        entered_101 = threading.Event()
+        done = {}
+
+        scores_101 = {
+            'valence': 0.1, 'arousal': 0.2, 'mood_word': '慢',
+            'passion_delta': 0.0, 'intimacy_delta': 0.0,
+        }
+        scores_102 = {
+            'valence': 0.9, 'arousal': 0.8, 'mood_word': '快',
+            'passion_delta': 0.0, 'intimacy_delta': 0.0,
+        }
+        import datetime as _dt
+        conn = store.open_store(db_path)
+        try:
+            base = store.read_state(conn)['p_updated_at']
+        finally:
+            conn.close()
+        base_dt = _dt.datetime.strptime(base, '%Y-%m-%d %H:%M:%S')
+        at_101 = (base_dt + _dt.timedelta(seconds=1)).strftime('%Y-%m-%d %H:%M:%S')
+        at_102 = (base_dt + _dt.timedelta(seconds=2)).strftime('%Y-%m-%d %H:%M:%S')
+
+        def deepseek_101(_text):
+            entered_101.set()
+            release_101.wait(timeout=5)
+            return scores_101
+
+        def run_101():
+            with mock.patch.object(ee, '_deepseek_score', side_effect=deepseek_101), \
+                 mock.patch.object(ee, '_get_ombre_va', return_value=(None, None)), \
+                 mock.patch.object(ee, 'get_longing', return_value=0.1), \
+                 mock.patch.object(ee, '_now_str', return_value=at_101):
+                ee.score_and_update('turn-101', message_id=101)
+            done['101'] = True
+
+        t101 = threading.Thread(target=run_101, daemon=True)
+        t101.start()
+        self.assertTrue(entered_101.wait(timeout=5))
+
+        with mock.patch.object(ee, '_deepseek_score', return_value=scores_102), \
+             mock.patch.object(ee, '_get_ombre_va', return_value=(None, None)), \
+             mock.patch.object(ee, 'get_longing', return_value=0.1), \
+             mock.patch.object(ee, '_now_str', return_value=at_102):
+            ee.score_and_update('turn-102', message_id=102)
+        done['102'] = True
+
+        release_101.set()
+        t101.join(timeout=5)
+        self.assertTrue(done.get('101'))
+
+        conn = store.open_store(db_path)
+        try:
+            mood = conn.execute(
+                'SELECT mood_word FROM emotion_state WHERE id=1'
+            ).fetchone()[0]
+            self.assertEqual(mood, '快')
+            self.assertEqual(shadow.max_score_proof_message_id(conn), 102)
+            self.assertIsNone(shadow.lookup_score_proof(conn, 101))
+            shadow.drain_shadow_outbox(db_path=db_path, environ=ALL_ON)
+            h2 = shadow.get_shadow_health(db_path=db_path, environ=ALL_ON)
+            self.assertEqual(h2.proof_max_message_id, 102)
+            self.assertFalse(h2.watermark_lag)
+            st = store.read_state(conn)
+            self.assertEqual(int(st['last_scored_message_id']), 102)
+        finally:
+            conn.close()
+
+
+class SidecarFailClosedTests(unittest.TestCase):
+    def test_sidecar_open_failure_keeps_emotion(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        db_path = str(Path(tmp.name) / 'fail.db')
+        import os
+        patch = mock.patch.dict(os.environ, PROOF_ONLY, clear=False)
+        patch.start()
+        self.addCleanup(patch.stop)
+        conn = sqlite3.connect(db_path)
+        try:
+            _seed_emotion(conn)
+            conn.commit()
+        finally:
+            conn.close()
+        ee.DB_PATH = db_path
+        with mock.patch.object(ee, '_deepseek_score', return_value={
+            'valence': 0.2, 'arousal': 0.4, 'mood_word': '开心',
+            'passion_delta': 0.0, 'intimacy_delta': 0.0,
+        }), mock.patch.object(ee, '_get_ombre_va', return_value=(None, None)), \
+             mock.patch.object(ee, 'get_longing', return_value=0.1), \
+             mock.patch.object(
+                 shadow, 'append_gap_incident_sidecar',
+                 side_effect=OSError('disk full'),
+             ):
+            ee.score_and_update('hello', message_id=9)
+        conn = sqlite3.connect(db_path)
+        try:
+            pa = conn.execute('SELECT pa FROM emotion_state WHERE id=1').fetchone()[0]
+            self.assertAlmostEqual(pa, 0.5, places=4)
+        finally:
+            conn.close()
+
+    def test_invalid_message_id_sidecar_failure_keeps_emotion(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        db_path = str(Path(tmp.name) / 'badid.db')
+        import os
+        patch = mock.patch.dict(os.environ, PROOF_ONLY, clear=False)
+        patch.start()
+        self.addCleanup(patch.stop)
+        conn = sqlite3.connect(db_path)
+        try:
+            _seed_emotion(conn)
+            conn.commit()
+        finally:
+            conn.close()
+        ee.DB_PATH = db_path
+        with mock.patch.object(ee, '_deepseek_score', return_value={
+            'valence': 0.2, 'arousal': 0.4, 'mood_word': 'x',
+            'passion_delta': 0.0, 'intimacy_delta': 0.0,
+        }), mock.patch.object(ee, '_get_ombre_va', return_value=(None, None)), \
+             mock.patch.object(ee, 'get_longing', return_value=0.1), \
+             mock.patch.object(
+                 shadow, 'append_gap_incident_sidecar',
+                 side_effect=OSError('no perm'),
+             ):
+            ee.score_and_update('hello', message_id=True)  # type: ignore[arg-type]
+        conn = sqlite3.connect(db_path)
+        try:
+            pa = conn.execute('SELECT pa FROM emotion_state WHERE id=1').fetchone()[0]
+            self.assertAlmostEqual(pa, 0.5, places=4)
+        finally:
+            conn.close()
+
+    def test_sidecar_fsync_failure_keeps_emotion(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        db_path = str(Path(tmp.name) / 'fsync.db')
+        patch = mock.patch.dict(os.environ, PROOF_ONLY, clear=False)
+        patch.start()
+        self.addCleanup(patch.stop)
+        conn = sqlite3.connect(db_path)
+        try:
+            _seed_emotion(conn)
+            conn.commit()
+        finally:
+            conn.close()
+        ee.DB_PATH = db_path
+        with mock.patch.object(ee, '_deepseek_score', return_value={
+            'valence': 0.2, 'arousal': 0.4, 'mood_word': '开心',
+            'passion_delta': 0.0, 'intimacy_delta': 0.0,
+        }), mock.patch.object(ee, '_get_ombre_va', return_value=(None, None)), \
+             mock.patch.object(ee, 'get_longing', return_value=0.1), \
+             mock.patch.object(os, 'fsync', side_effect=OSError('fsync failed')):
+            ee.score_and_update('hello', message_id=9)
+        conn = sqlite3.connect(db_path)
+        try:
+            pa = conn.execute('SELECT pa FROM emotion_state WHERE id=1').fetchone()[0]
+            self.assertAlmostEqual(pa, 0.5, places=4)
+        finally:
+            conn.close()
+
+    def test_shadow_import_failure_and_sidecar_unwritable_keeps_emotion(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        db_path = str(Path(tmp.name) / 'importfail.db')
+        patch = mock.patch.dict(os.environ, PROOF_ONLY, clear=False)
+        patch.start()
+        self.addCleanup(patch.stop)
+        conn = sqlite3.connect(db_path)
+        try:
+            _seed_emotion(conn)
+            conn.commit()
+        finally:
+            conn.close()
+        ee.DB_PATH = db_path
+        real_import = __import__
+
+        def boom_import(name, *args, **kwargs):
+            if name == 'internal_state_shadow':
+                raise ImportError('shadow unavailable')
+            return real_import(name, *args, **kwargs)
+
+        with mock.patch.object(ee, '_deepseek_score', return_value={
+            'valence': 0.2, 'arousal': 0.4, 'mood_word': '开心',
+            'passion_delta': 0.0, 'intimacy_delta': 0.0,
+        }), mock.patch.object(ee, '_get_ombre_va', return_value=(None, None)), \
+             mock.patch.object(ee, 'get_longing', return_value=0.1), \
+             mock.patch('builtins.__import__', side_effect=boom_import), \
+             mock.patch('builtins.open', side_effect=OSError('no perm')):
+            ee.score_and_update('hello', message_id=9)
+        conn = sqlite3.connect(db_path)
+        try:
+            pa = conn.execute('SELECT pa FROM emotion_state WHERE id=1').fetchone()[0]
+            self.assertAlmostEqual(pa, 0.5, places=4)
+        finally:
+            conn.close()
+
+
+class SidecarMigrateRaceTests(unittest.TestCase):
+    def test_append_during_migrate_survives(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        db_path = str(Path(tmp.name) / 'race.db')
+        shadow.append_gap_incident_sidecar(
+            db_path, failed_message_id=1, error_code='old',
+        )
+        # Hook rename：在 rename 之后、处理之前追加新行到新的 canonical
+        real_rename = os.rename
+        appended = {}
+
+        def rename_and_append(src, dst):
+            real_rename(src, dst)
+            if str(src).endswith('.shadow_proof_gap.jsonl') and 'processing' in str(dst):
+                shadow.append_gap_incident_sidecar(
+                    db_path, failed_message_id=2, error_code='new_during_migrate',
+                )
+                appended['ok'] = True
+
+        conn = store.open_store(db_path)
+        try:
+            _seed_emotion(conn)
+            with mock.patch.object(os, 'rename', side_effect=rename_and_append):
+                shadow.ensure_shadow_schema(conn, db_path=db_path)
+            self.assertTrue(appended.get('ok'))
+            mids = {
+                i['message_id']
+                for i in shadow.list_unresolved_gap_incidents(conn)
+            }
+            # old 已迁入；new 仍在 canonical sidecar 或也已可见
+            self.assertIn(1, mids)
+            # 新 append 的 canonical 仍应 pending
+            self.assertGreaterEqual(shadow.count_gap_sidecar_pending(db_path), 1)
+            # 再 migrate 一次把新行迁入
+            shadow.migrate_proof_gap_sidecar(conn, db_path=db_path)
+            mids2 = {
+                i['message_id']
+                for i in shadow.list_unresolved_gap_incidents(conn)
+            }
+            self.assertEqual(mids2, {1, 2})
+            self.assertTrue(shadow.has_unresolved_proof_gap(conn, db_path=db_path))
+        finally:
+            conn.close()
+
+    def test_corrupt_quarantine_blocks_bootstrap(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        db_path = str(Path(tmp.name) / 'corrupt.db')
+        side = Path(shadow.proof_gap_sidecar_path(db_path))
+        side.write_text('{not-json\n', encoding='utf-8')
+        conn = store.open_store(db_path)
+        try:
+            _seed_legacy_for_bootstrap(conn)
+            # 需要至少一条合法 proof 才能 bootstrap；先准备
+            shadow.ensure_shadow_schema(conn, db_path=db_path)
+            # ensure 已 migrate corrupt → sidecar_corrupt incident + quarantine
+            self.assertTrue(shadow.has_unresolved_proof_gap(conn, db_path=db_path))
+            self.assertGreaterEqual(shadow.count_quarantine_pending(db_path), 1)
+            codes = {
+                i['error_code']
+                for i in shadow.list_unresolved_gap_incidents(conn)
+            }
+            self.assertIn('sidecar_corrupt', codes)
+            conn.execute('BEGIN')
+            shadow.record_score_proof_in_txn(
+                conn, 5, applied_at=T0, source='unit', score_hash='x')
+            conn.execute('COMMIT')
+        finally:
+            conn.close()
+        r = shadow.ensure_bootstrapped(
+            db_path=db_path,
+            environ={shadow.SHADOW_ENABLED_ENV: '1'},
+        )
+        self.assertFalse(r.ok)
+        self.assertEqual(r.status, 'proof_gap')
+
+
+class LegacyHashUnknownTests(unittest.TestCase):
+    def test_null_score_hash_refuses_backfill(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        db_path = str(Path(tmp.name) / 'nullhash.db')
+        conn = store.open_store(db_path)
+        try:
+            shadow.ensure_shadow_schema(conn, db_path=db_path)
+            conn.execute(
+                f"""
+                INSERT INTO {shadow.SCORE_APPLIED_TABLE}
+                    (message_id, applied_at, source, score_hash)
+                VALUES (7, ?, 'old', NULL)
+                """,
+                (T0,),
+            )
+            conn.execute('BEGIN')
+            with self.assertRaises(store.StoreError) as ctx:
+                shadow.record_score_proof_in_txn(
+                    conn, 7, applied_at=T0, source='old', score_hash='newhash',
+                )
+            self.assertIn('legacy_hash_unknown', str(ctx.exception))
+            conn.execute('ROLLBACK')
+        finally:
+            conn.close()
 
 
 if __name__ == '__main__':

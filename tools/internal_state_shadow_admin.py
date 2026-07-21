@@ -107,6 +107,8 @@ def _cmd_status(db_path: str) -> int:
             'proof_health': proof.as_dict(),
             'unresolved_incidents': shadow.list_unresolved_gap_incidents(conn),
             'gap_sidecar_pending': shadow.count_gap_sidecar_pending(path),
+            'quarantine_pending': shadow.count_quarantine_pending(path),
+            'quarantine_files': shadow.list_gap_quarantine_files(path),
             'proof_max_message_id': wm,
             'outbox_pending': pending,
             'watermark_lag': health.watermark_lag,
@@ -119,6 +121,7 @@ def _cmd_status(db_path: str) -> int:
         or health.watermark_lag
         or (pending or 0) > 0
         or (health.gap_sidecar_pending or 0) > 0
+        or (health.quarantine_pending or 0) > 0
     ):
         return 1
     return 0
@@ -186,6 +189,8 @@ def _cmd_inspect_gap(db_path: str) -> int:
             'proof_health': proof.as_dict(),
             'incidents': shadow.list_unresolved_gap_incidents(conn),
             'gap_sidecar_pending': shadow.count_gap_sidecar_pending(path),
+            'quarantine_pending': shadow.count_quarantine_pending(path),
+            'quarantine_files': shadow.list_gap_quarantine_files(path),
             'recent_acks': acks,
         }
         print(json.dumps(payload, ensure_ascii=False, indent=2))
