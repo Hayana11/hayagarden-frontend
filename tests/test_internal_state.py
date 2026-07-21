@@ -180,8 +180,30 @@ class ReadOnlyTests(ShadowBase):
         snap = self.capture(include_legacy=True)
         self.assertEqual(before_hash, _sha256_file(self.db_path))
         self.assertEqual(before, self.dump_tables())
-        # 子进程应至少带回部分 getter（或明确错误，但不碰源库）
-        self.assertIsInstance(snap.diagnostics.legacy_readings, dict)
+        readings = snap.diagnostics.legacy_readings
+        self.assertIsInstance(readings, dict)
+        self.assertNotIn('_errors', readings)
+        self.assertIn('drive_engine.get_drive', readings)
+
+    def test_unsafe_legacy_getter_rejected_in_main_process(self):
+        """主进程直接调用危险函数必须被拒绝。"""
+        os.environ.pop('INTERNAL_STATE_LEGACY_ISOLATED', None)
+        with self.assertRaises(RuntimeError) as ctx:
+            ist._gather_legacy_readings_unsafe(1.0)
+        self.assertIn('isolated', str(ctx.exception).lower())
+        self.assertNotIn('gather_legacy_readings', ist.__all__)
+        self.assertNotIn('_gather_legacy_readings_unsafe', ist.__all__)
+
+    def test_isolated_helper_sets_env_and_reads_copy(self):
+        """隔离子进程可成功读副本；源库 hash 不变。"""
+        self.seed_user_message(NOW - datetime.timedelta(hours=3))
+        before_hash = _sha256_file(self.db_path)
+        readings = ist.gather_legacy_readings_isolated(self.db_path, 3.0)
+        self.assertEqual(before_hash, _sha256_file(self.db_path))
+        self.assertNotIn('_errors', readings)
+        self.assertIn('emotion_engine.get_longing', readings)
+        # 主进程环境变量不得被泄漏置位
+        self.assertNotEqual(os.environ.get('INTERNAL_STATE_LEGACY_ISOLATED'), '1')
 
     def test_missing_state_tables_do_not_create(self):
         """验收 12：状态表缺失时生产 DB 仍不被建表或补列。"""
@@ -223,7 +245,7 @@ class ReadOnlyTests(ShadowBase):
             self.assertNotIn('drive_state', tables)
             self.assertNotIn('desire_state', tables)
             self.assertIsNone(snap.affect.pa)
-            self.assertIsNone(snap.legacy_drive_engine_replay.attachment)
+            self.assertIsNone(snap.legacy_formula_unified_clock.attachment)
             self.assertIsNone(snap.candidate_unified_drives.attachment)
         finally:
             os.unlink(bare_path)
@@ -427,7 +449,7 @@ class DriveSeparationTests(ShadowBase):
         self.assertIsNotNone(l_d)
         self.assertGreater(l_e, l_d)  # τ8 比 τ18 涨得快
 
-        legacy_att = snap.legacy_drive_engine_replay.attachment
+        legacy_att = snap.legacy_formula_unified_clock.attachment
         cand_att = snap.candidate_unified_drives.attachment
         expect_legacy = min(0.92, 0.75 + l_e * 0.15)
         expect_cand = min(0.92, 0.75 + l_d * 0.15)
@@ -436,22 +458,30 @@ class DriveSeparationTests(ShadowBase):
         self.assertGreater(legacy_att, cand_att)
 
         cmp_ = snap.diagnostics.drive_comparison
-        self.assertEqual(cmp_['attachment_boost_sources']['legacy'],
-                         'longing_emotion_legacy')
-        self.assertEqual(cmp_['attachment_boost_sources']['candidate'],
-                         'longing_desire_legacy')
+        self.assertEqual(
+            cmp_['attachment_boost_sources']['legacy_formula_unified_clock'],
+            'longing_emotion_legacy')
+        self.assertEqual(
+            cmp_['attachment_boost_sources']['candidate_unified_drives'],
+            'longing_desire_legacy')
         self.assertAlmostEqual(
-            cmp_['diff_candidate_minus_legacy']['attachment'],
+            cmp_['diff_candidate_minus_legacy_formula']['attachment'],
             round(cand_att - legacy_att, 4), places=4)
         # libido/stress 同源 → diff ≈ 0
         self.assertAlmostEqual(
-            cmp_['diff_candidate_minus_legacy']['libido'], 0.0, places=4)
-        self.assertIn('longing_emotion_legacy',
+            cmp_['diff_candidate_minus_legacy_formula']['libido'], 0.0, places=4)
+        self.assertIn('权威',
                       snap.diagnostics.linkage_sources[
-                          'legacy_drive_engine_replay.attachment_cap_boost'])
+                          'legacy_formula_unified_clock.attachment_cap_boost'])
         self.assertIn('候选',
                       snap.diagnostics.linkage_sources[
                           'candidate_unified_drives.attachment_cap_boost'])
+        cols = snap.diagnostics.linkage_sources['columns']
+        self.assertEqual(set(cols), {
+            'legacy_readings',
+            'legacy_formula_unified_clock',
+            'candidate_unified_drives',
+        })
 
 
 class ChatViewTests(ShadowBase):
@@ -505,7 +535,7 @@ class CompactJsonTests(ShadowBase):
         self.assertIn('\n', pretty)
         self.assertNotIn('\n', compact)
         data = json.loads(compact)
-        self.assertIn('legacy_drive_engine_replay', data)
+        self.assertIn('legacy_formula_unified_clock', data)
         self.assertIn('candidate_unified_drives', data)
 
     def test_cli_default_no_legacy_and_compact_flag(self):

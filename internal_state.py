@@ -15,15 +15,15 @@
   satisfy, apply_desire_delta(_async), score_and_update, score_async,
   calibrate_va, _flush
 
-架构分两层：
-  1. 纯计算核心 compute_snapshot()：输入 = 三张旧表的原始行 + 统一时钟 +
-     observed_at，输出完全确定（同输入同输出）。驱动分两列：
-       · legacy_drive_engine_replay —— attachment boost 用 longing_emotion_legacy
-         （τ8），精确复现旧 drive_engine ← emotion_engine.get_longing
-       · candidate_unified_drives —— attachment boost 用 longing_desire_legacy
-         （τ18），明确标为候选设计，不得冒充旧逻辑
-  2. 旧 getter 对照层（可选）：仅在隔离子进程对 DB 副本调用，结果只进
-     diagnostics.legacy_readings，不参与候选计算。
+架构分三列对照（勿混淆）：
+  1. diagnostics.legacy_readings —— 旧系统 getter 的实际输出（墙钟 + 旧状态字段；
+     仅隔离子进程 + DB 副本可采集）
+  2. legacy_formula_unified_clock —— 旧 drive_engine 数学公式（τ8 longing 等）
+     + 统一权威 user_idle_hours；**不是**旧生产 getter 的逐值重放
+  3. candidate_unified_drives —— 新候选（τ18 longing 等），不得冒充旧逻辑
+
+纯计算核心 compute_snapshot()：输入 = 原始行 + 统一时钟 + observed_at，
+同输入同输出。三条 longing 全部按权威 user_idle_hours 计算。
 
 时钟规则：
   - 唯一权威时钟 = chat.interaction_state.read_interaction_clock()
@@ -40,7 +40,6 @@ import datetime
 import json
 import math
 import os
-import shutil
 import sqlite3
 import subprocess
 import sys
@@ -49,6 +48,9 @@ from dataclasses import dataclass, asdict
 from typing import Optional, Protocol, Callable
 
 from chat.interaction_state import read_interaction_clock, InteractionClock
+
+# 子进程采集旧 getter 时必须显式置 1；主进程直接调用危险函数会 RuntimeError
+_LEGACY_ISOLATED_ENV = 'INTERNAL_STATE_LEGACY_ISOLATED'
 
 # ═══════════════════════════════════════════════════════════
 # 常量：全部从旧模块的当前实现照抄，Phase 0 不调参
@@ -82,8 +84,9 @@ DRIVE_GROWTH_K = {
     'social': 0.04, 'duty': 0.08, 'libido': 0.06, 'stress': 0.04,
 }
 # 显式联动（原 drive_engine.CAP_BOOST，隐藏在 _get_emotion_factors 里）：
-#   legacy replay: attachment cap += longing_emotion_legacy × 0.15
-#   candidate:     attachment cap += longing_desire_legacy × 0.15（候选，非旧逻辑）
+#   legacy_formula_unified_clock: attachment cap += longing_emotion_legacy × 0.15
+#     （旧公式 + 权威时钟；生产旧 getter 则读 emotion_state.last_interaction）
+#   candidate_unified_drives:     attachment cap += longing_desire_legacy × 0.15
 #   libido     cap += passion × 0.20   ← Bond.passion（τ6 衰减后）
 #   stress     cap += na × 0.15        ← emotion_state.na 原始列
 # cap 上限 0.92（原实现同）
@@ -192,7 +195,8 @@ class InternalStateSnapshot:
     observed_at: str
     affect: Affect
     bond: Bond
-    legacy_drive_engine_replay: Drives   # 精确复现旧 drive_engine
+    # 旧 drive_engine 数学 + 权威 user_idle；非旧生产 getter 逐值重放
+    legacy_formula_unified_clock: Drives
     candidate_unified_drives: Drives     # 候选设计，不得冒充旧逻辑
     derived: Derived
     diagnostics: Diagnostics
@@ -291,8 +295,8 @@ def drives_from_raw(drive_row: dict,
 
     原 drive_engine.get_drive 的纯化版本；隐藏的 import emotion_engine
     被展开为三个显式入参。调用方决定 longing_for_boost 用哪条 longing：
-      · legacy_drive_engine_replay → longing_emotion_legacy（τ8）
-      · candidate_unified_drives   → longing_desire_legacy（τ18，候选）
+      · legacy_formula_unified_clock → longing_emotion_legacy（τ8，权威时钟）
+      · candidate_unified_drives     → longing_desire_legacy（τ18，候选）
     """
     last = _parse_dt(drive_row.get('last_updated'))
     t = max(0.0, (observed_at - last).total_seconds() / 3600.0) if last else 0.0
@@ -424,12 +428,19 @@ def _copy_db_via_backup(src_path: str, dst_path: str) -> None:
         src.close()
 
 
-def gather_legacy_readings(user_idle_hours: Optional[float]) -> dict:
-    """调用旧系统的只读 getter（**会 import 旧模块，触发 ensure_table**）。
+def _gather_legacy_readings_unsafe(user_idle_hours: Optional[float]) -> dict:
+    """危险：import 旧模块并触发 ensure_table。
 
-    仅允许在隔离子进程 + 临时 DB 副本上调用（见
-    gather_legacy_readings_isolated）。切勿在主进程对生产库调用。
+    代码契约：仅当环境变量 INTERNAL_STATE_LEGACY_ISOLATED=1 时允许执行
+   （由 gather_legacy_readings_isolated 在子进程中设置）。
+    主进程直接调用必失败。不在 __all__ 中导出。
     """
+    if os.environ.get(_LEGACY_ISOLATED_ENV) != '1':
+        raise RuntimeError(
+            'legacy getters may only run in an isolated DB-copy subprocess '
+            f'(set {_LEGACY_ISOLATED_ENV}=1)'
+        )
+
     readings: dict = {}
 
     def _safe(name, fn):
@@ -467,6 +478,7 @@ def gather_legacy_readings_isolated(
     """安全对照：backup 到临时库，在子进程中 import 旧模块。
 
     生产库始终以 mode=ro 打开做 backup，旧模块的 ensure_table 只碰副本。
+    子进程显式设置 INTERNAL_STATE_LEGACY_ISOLATED=1。
     """
     root = os.path.dirname(os.path.abspath(__file__))
     try:
@@ -478,12 +490,14 @@ def gather_legacy_readings_isolated(
                 'import json, os, sys\n'
                 f'sys.path.insert(0, {root!r})\n'
                 f'os.environ["MEMORIES_DB"] = {copy_path!r}\n'
+                f'os.environ[{_LEGACY_ISOLATED_ENV!r}] = "1"\n'
                 'import internal_state as ist\n'
-                f'print(json.dumps(ist.gather_legacy_readings({idle_repr}), '
+                f'print(json.dumps(ist._gather_legacy_readings_unsafe({idle_repr}), '
                 'ensure_ascii=False, default=str))\n'
             )
             env = os.environ.copy()
             env['MEMORIES_DB'] = copy_path
+            env[_LEGACY_ISOLATED_ENV] = '1'
             proc = subprocess.run(
                 [sys.executable, '-c', script],
                 capture_output=True, text=True, timeout=timeout_sec, env=env,
@@ -541,16 +555,22 @@ def compute_snapshot(emotion_row: Optional[dict],
     l_emotion = longing_emotion_legacy_curve(user_idle)
     l_desire = longing_desire_legacy_curve(user_idle)
 
-    # ── 两组 drives：旧复现 vs 统一候选（不得混列）──
+    # ── 两组公式驱动（权威时钟）vs diagnostics.legacy_readings（旧 getter）──
     linkage = {
-        'legacy_drive_engine_replay.attachment_cap_boost':
-            'longing_emotion_legacy × 0.15（精确复现 drive_engine ← emotion_engine.get_longing，τ8）',
+        'legacy_formula_unified_clock.attachment_cap_boost':
+            'longing_emotion_legacy × 0.15（旧 drive_engine 数学 + 权威 user_idle；'
+            '非旧生产 getter 逐值重放；旧 getter 读 emotion_state.last_interaction）',
         'candidate_unified_drives.attachment_cap_boost':
             'longing_desire_legacy × 0.15（候选设计，τ18；不得冒充旧逻辑）',
         'libido_cap_boost': 'Bond.passion × 0.20（emotion_state P，τ6 衰减后）',
         'stress_cap_boost': 'emotion_state.na × 0.15（原始列）',
         'fatigue_na_adjust': 'emotion_state.na × 0.06（原始列）',
         'longing_candidate_tau': '仅 attachment 调制；intimacy 调制尚未实现',
+        'columns': {
+            'legacy_readings': '旧系统 getter 实际输出（隔离子进程）',
+            'legacy_formula_unified_clock': '旧数学 + 权威 user_idle_hours',
+            'candidate_unified_drives': '新候选设计',
+        },
     }
     if drive_row:
         legacy_drives = drives_from_raw(
@@ -585,12 +605,17 @@ def compute_snapshot(emotion_row: Optional[dict],
     )
 
     drive_comparison = {
-        'legacy_drive_engine_replay': legacy_drives.as_dict(),
+        'legacy_formula_unified_clock': legacy_drives.as_dict(),
         'candidate_unified_drives': candidate_drives.as_dict(),
-        'diff_candidate_minus_legacy': _drive_diff(candidate_drives, legacy_drives),
+        'diff_candidate_minus_legacy_formula': _drive_diff(
+            candidate_drives, legacy_drives),
+        'note': (
+            'legacy_formula_unified_clock = 旧 drive_engine 数学 + 权威时钟；'
+            '真正的旧生产输出见 diagnostics.legacy_readings'
+        ),
         'attachment_boost_sources': {
-            'legacy': 'longing_emotion_legacy',
-            'candidate': 'longing_desire_legacy',
+            'legacy_formula_unified_clock': 'longing_emotion_legacy',
+            'candidate_unified_drives': 'longing_desire_legacy',
             'longing_emotion_legacy': l_emotion,
             'longing_desire_legacy': l_desire,
         },
@@ -624,7 +649,7 @@ def compute_snapshot(emotion_row: Optional[dict],
     return InternalStateSnapshot(
         observed_at=observed_at.strftime('%Y-%m-%d %H:%M:%S'),
         affect=affect, bond=bond,
-        legacy_drive_engine_replay=legacy_drives,
+        legacy_formula_unified_clock=legacy_drives,
         candidate_unified_drives=candidate_drives,
         derived=derived, diagnostics=diagnostics,
     )
@@ -727,7 +752,7 @@ __all__ = [
     'longing_candidate_curve', 'bond_from_emotion_row',
     'drives_from_raw', 'candidate_drives_from_raw', 'pick_candidate_intent',
     'compute_snapshot', 'capture_shadow_snapshot',
-    'gather_legacy_readings', 'gather_legacy_readings_isolated',
+    'gather_legacy_readings_isolated',
     'memories_db_path', 'build_chat_view',
     'snapshot_to_dict', 'snapshot_to_json',
 ]
