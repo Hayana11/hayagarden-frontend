@@ -891,23 +891,22 @@ class GuardTests(unittest.TestCase):
                 found.add(node.module.split('.')[0])
         self.assertFalse(forbidden & found, msg=f'{forbidden & found}')
 
-    def test_no_wake_outcome_production_call_sites(self):
-        """1A-4b 已接 user_rule/user_scored；wake_outcome 生产调用点必须仍为 0。"""
-        forbidden = ('apply_outcome_shadow',)
-        for name in ('gateway.py', 'app.py'):
+    def test_wake_outcome_production_call_site_is_gateway_only(self):
+        """wake_outcome 仅 gateway 接线；wake/ 包与 app.py 不得 import shadow。"""
+        for name in ('app.py',):
             path = Path(ROOT, name)
             if not path.exists():
                 continue
             text = path.read_text(encoding='utf-8', errors='replace')
-            for token in forbidden:
-                self.assertNotIn(token, text)
+            self.assertNotIn('apply_outcome_shadow', text)
         wake_dir = Path(ROOT, 'wake')
         if wake_dir.is_dir():
             for path in wake_dir.rglob('*.py'):
                 text = path.read_text(encoding='utf-8', errors='replace')
                 self.assertNotIn('internal_state_shadow', text)
-                for token in forbidden:
-                    self.assertNotIn(token, text)
+                self.assertNotIn('apply_outcome_shadow', text)
+        gateway = Path(ROOT, 'gateway.py').read_text(encoding='utf-8', errors='replace')
+        self.assertIn('apply_outcome_shadow', gateway)
 
     def test_public_ensure_bootstrapped_has_no_injection_kwargs(self):
         import inspect

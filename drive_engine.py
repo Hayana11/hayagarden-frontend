@@ -12,6 +12,7 @@ import math
 import datetime
 import sqlite3
 import os
+from typing import Optional
 
 DB_PATH = os.environ.get('MEMORIES_DB', '/opt/frontend/memories.db')
 
@@ -246,6 +247,23 @@ def discharge(fired_key: str):
     _flush(current)
 
 
+def infer_fired_drive_for_action(action: str, thoughts: str = '') -> Optional[str]:
+    """Infer which drive fired for a wake action without mutating state."""
+    if action == 'none':
+        return None
+    current = get_drive()
+    candidates = {k: current[k] for k in DRIVE_KEYS if k != 'fatigue'}
+    top_key = max(candidates, key=lambda k: candidates[k])
+    if action == 'explore':
+        for k in ['curiosity', 'reflection', 'social']:
+            if current[k] == candidates.get(top_key, 0):
+                top_key = k
+                break
+        else:
+            top_key = 'curiosity'
+    return top_key
+
+
 def discharge_by_action(action: str, thoughts: str = ''):
     """
     根据 wake 的 action 类型自动推断 fired_key
@@ -258,21 +276,10 @@ def discharge_by_action(action: str, thoughts: str = ''):
         _flush(_cur)
         return
 
+    top_key = infer_fired_drive_for_action(action, thoughts=thoughts)
+    if top_key is None:
+        return
     current = get_drive()
-
-    # 推断最高的 drive_key（触发了哪个需求）
-    candidates = {k: current[k] for k in DRIVE_KEYS if k != 'fatigue'}
-    top_key = max(candidates, key=lambda k: candidates[k])
-
-    # 特殊：explore 类行为对应好奇/社交/沉思
-    if action == 'explore':
-        for k in ['curiosity', 'reflection', 'social']:
-            if current[k] == candidates.get(top_key, 0):
-                top_key = k
-                break
-        else:
-            top_key = 'curiosity'
-
     current[top_key] = max(0.0, current[top_key] - DISCHARGE.get(top_key, 0.4))
     current['fatigue'] = min(1.0, current['fatigue'] + FATIGUE_COST)
     _flush(current)

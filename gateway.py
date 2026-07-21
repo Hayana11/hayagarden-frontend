@@ -5516,6 +5516,18 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
 
     # action 执行：写 wake_log / chat_messages / diary / discharge drive
     from wake.executor import execute as _wake_exec
+    shadow_enabled = False
+    fired_drive = None
+    if wake_run_id:
+        try:
+            import internal_state_shadow as _shadow_wake
+            shadow_enabled = _shadow_wake.is_shadow_enabled()
+            if shadow_enabled and action != 'none':
+                import drive_engine as _de_infer
+                fired_drive = _de_infer.infer_fired_drive_for_action(action)
+        except Exception:
+            shadow_enabled = False
+            fired_drive = None
     _wake_exec(
         action, thoughts, c_text, mode,
         get_db_fn=get_db,
@@ -5525,6 +5537,20 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
         cache_info=wake_cache_info,
         wake_run_id=wake_run_id,
     )
+    if wake_run_id and shadow_enabled:
+        try:
+            _shadow_wake.apply_outcome_shadow(
+                wake_run_id=wake_run_id,
+                executor_action=action,
+                desire_action=None,
+                fired_drive=fired_drive,
+                desire_driven=_get_desire_driven(),
+                user_idle_hours=float(t2_hours),
+                outcome_at=now.strftime('%Y-%m-%d %H:%M:%S'),
+                db_path=DB_PATH,
+            )
+        except Exception:
+            pass
     _wake_run_id_mark(wake_run_id)
 
     return jsonify({

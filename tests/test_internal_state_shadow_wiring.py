@@ -432,14 +432,59 @@ class UserRulePathTests(unittest.TestCase):
             enq.assert_not_called()
 
 
+class WakeOutcomeWiringTests(unittest.TestCase):
+    def test_apply_outcome_shadow_disabled_when_shadow_off(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        db_path = str(Path(tmp.name) / 'wake-off.db')
+        r = shadow.apply_outcome_shadow(
+            wake_run_id='run-off-1',
+            executor_action='none',
+            desire_action=None,
+            fired_drive=None,
+            desire_driven=False,
+            user_idle_hours=1.5,
+            outcome_at=T0,
+            db_path=db_path,
+            environ=OFF,
+        )
+        self.assertEqual(r.status, 'disabled')
+        self.assertFalse(Path(db_path).exists())
+
+    def test_infer_fired_drive_matches_discharge_selection(self):
+        import drive_engine as de
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        db_path = str(Path(tmp.name) / 'drive.db')
+        de.DB_PATH = db_path
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.executescript(
+                """
+                CREATE TABLE drive_state (
+                    id INTEGER PRIMARY KEY,
+                    attachment REAL, curiosity REAL, reflection REAL, social REAL,
+                    duty REAL, libido REAL, stress REAL, fatigue REAL,
+                    last_updated TEXT
+                );
+                INSERT INTO drive_state VALUES (
+                    1, 0.1, 0.8, 0.2, 0.3, 0.1, 0.1, 0.1, 0.2, '2026-07-21 10:00:00');
+                """
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        self.assertEqual(de.infer_fired_drive_for_action('message'), 'curiosity')
+
+
 class GatewayGuardTests(unittest.TestCase):
     def test_gateway_passes_message_id_to_score_async(self):
         src = Path(ROOT, 'gateway.py').read_text(encoding='utf-8')
         self.assertIn('message_id=_turn_data.get(', src)
         self.assertEqual(src.count('score_async('), 2)
 
-    def test_no_wake_outcome_wiring(self):
-        for name in ('gateway.py', 'app.py'):
+    def test_wake_outcome_wired_only_in_gateway_not_wake_package(self):
+        for name in ('app.py',):
             text = Path(ROOT, name).read_text(encoding='utf-8', errors='replace')
             self.assertNotIn('apply_outcome_shadow', text)
         wake_dir = Path(ROOT, 'wake')
@@ -447,6 +492,9 @@ class GatewayGuardTests(unittest.TestCase):
             for path in wake_dir.rglob('*.py'):
                 text = path.read_text(encoding='utf-8', errors='replace')
                 self.assertNotIn('apply_outcome_shadow', text)
+        gateway = Path(ROOT, 'gateway.py').read_text(encoding='utf-8', errors='replace')
+        self.assertIn('apply_outcome_shadow', gateway)
+        self.assertIn('is_shadow_enabled()', gateway)
 
     def test_score_txn_has_no_ensure_schema_call(self):
         src = Path(ROOT, 'emotion_engine.py').read_text(encoding='utf-8')
