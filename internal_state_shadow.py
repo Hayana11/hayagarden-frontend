@@ -370,12 +370,34 @@ def validate_bootstrap_snapshot(snapshot: Any) -> None:
             )
 
 
+def _refuse_future_clock(
+    value: Any,
+    *,
+    field: str,
+    observed_dt: datetime.datetime,
+) -> None:
+    """bootstrap 专属：任一来源时间不得晚于线性化 observed_at。"""
+    if value is None:
+        return
+    if isinstance(value, datetime.datetime):
+        dt = value.replace(microsecond=0)
+    else:
+        canon = events._canonicalize_ts(value, field=field)  # noqa: SLF001
+        dt = datetime.datetime.strptime(canon, '%Y-%m-%d %H:%M:%S')
+    if dt > observed_dt.replace(microsecond=0):
+        raise store.StoreError(
+            f'bootstrap refuses future {field}: {dt} > observed_at '
+            f'{observed_dt.replace(microsecond=0)}'
+        )
+
+
 def _read_legacy_bundle_on_conn(
     conn: sqlite3.Connection,
     *,
     observed_dt: datetime.datetime,
 ) -> BootstrapBundle:
     """在调用方已打开的事务内读取一致截面并严格校验。"""
+    observed_dt = observed_dt.replace(microsecond=0)
     wm = resolve_scored_watermark_row(conn)
     clock = read_interaction_clock_from_conn(conn, now=observed_dt)
     emotion_row = _fetch_row_dict(conn, 'emotion_state')
@@ -395,6 +417,18 @@ def _read_legacy_bundle_on_conn(
             f'bootstrap refuses unreliable interaction clock '
             f'(reason={clock.reason!r})'
         )
+
+    _refuse_future_clock(
+        wm['applied_at'], field='watermark.applied_at', observed_dt=observed_dt,
+    )
+    _refuse_future_clock(
+        clock.last_user_at, field='clock.last_user_at', observed_dt=observed_dt,
+    )
+    _refuse_future_clock(
+        clock.last_wake_message_at,
+        field='clock.last_wake_message_at',
+        observed_dt=observed_dt,
+    )
 
     snap = isv3.compute_snapshot(
         emotion_row, drive_row, desire_row, clock, observed_dt,
@@ -449,10 +483,22 @@ def _structural_bootstrap_present(
 def _bootstrap_provenance_ok(
     state: Mapping[str, Any], event: Mapping[str, Any],
 ) -> bool:
-    """正式出生证明；测试注入不得通过。"""
+    """正式出生证明；初始水位不可变，当前水位只允许前进。
+
+    合法：``state.last_scored_message_id >= proof.message_id``。
+    第一次新评分把当前水位推到 101 不得作废出生证明。
+    """
     if not _structural_bootstrap_present(state, event):
         return False
     if event.get('source_id') != PRODUCTION_BOOTSTRAP_SOURCE_ID:
+        return False
+    # bootstrap 事件版本语义：before/after 均为 0
+    try:
+        if int(event.get('state_version_before')) != 0:
+            return False
+        if int(event.get('state_version_after')) != 0:
+            return False
+    except Exception:
         return False
     try:
         payload = json.loads(event['payload_json'])
@@ -466,13 +512,23 @@ def _bootstrap_provenance_ok(
     if proof.get('resolver') != WATERMARK_SOURCE:
         return False
     try:
-        mid = int(proof['message_id'])
-        wm_state = int(state['last_scored_message_id'])
-    except Exception:
+        proof_mid = store.require_positive_message_id(
+            proof.get('message_id'), field='watermark_proof.message_id',
+        )
+        payload_mid = store.require_positive_message_id(
+            payload.get('last_scored_message_id'),
+            field='payload.last_scored_message_id',
+        )
+        state_mid = store.require_positive_message_id(
+            state.get('last_scored_message_id'),
+            field='state.last_scored_message_id',
+        )
+    except store.StoreError:
         return False
-    if mid != wm_state:
+    if payload_mid != proof_mid:
         return False
-    if payload.get('last_scored_message_id') != mid:
+    # 当前水位落后于初始出生水位 → 损坏 / 回拨
+    if state_mid < proof_mid:
         return False
     try:
         events._canonicalize_ts(  # noqa: SLF001
@@ -487,13 +543,27 @@ def _bootstrap_provenance_ok(
 
 
 def is_bootstrapped(conn: sqlite3.Connection) -> bool:
-    """结构意义：state + applied bootstrap 事件同时存在（供 wrapper 边界）。
+    """结构意义：state + applied bootstrap 事件同时存在。
 
-    生产启用前另查 ``get_shadow_health().provenance_ok``。
+    事件路径必须另过 ``_bootstrap_provenance_ok``；不得只靠本函数放行。
     """
     state = store.read_state(conn)
     event = store.read_event(conn, BOOTSTRAP_EVENT_KEY)
     return _structural_bootstrap_present(state, event)
+
+
+def _read_bootstrap_gate(
+    conn: sqlite3.Connection,
+) -> tuple[Optional[dict], Optional[dict], str]:
+    """返回 ``(state, event, gate)``；gate 为 ok / missing / invalid。"""
+    state = store.read_state(conn)
+    event = store.read_event(conn, BOOTSTRAP_EVENT_KEY)
+    if not _structural_bootstrap_present(state, event):
+        return state, event, 'missing'
+    assert state is not None and event is not None
+    if _bootstrap_provenance_ok(state, event):
+        return state, event, 'ok'
+    return state, event, 'invalid'
 
 
 def get_shadow_health(
@@ -592,8 +662,8 @@ def ensure_bootstrapped(
         conn = open_shadow_connection(path)
         ensure_shadow_schema(conn)
 
-        if is_bootstrapped(conn):
-            # 已结构 bootstrap：若正式 provenance 齐全则 already；否则仍算已落地
+        _state, _event, gate = _read_bootstrap_gate(conn)
+        if gate == 'ok':
             _record_status('already_bootstrapped')
             _clear_error()
             after = store.get_journal_mode(conn)
@@ -606,11 +676,27 @@ def ensure_bootstrapped(
                 status='already_bootstrapped',
                 elapsed_ms=(time.monotonic() - t0) * 1000.0,
             )
+        if gate == 'invalid':
+            _record_error(
+                'ensure_bootstrapped: structural bootstrap exists but '
+                'provenance is invalid; refusing to overwrite'
+            )
+            _record_status('bootstrap_provenance_invalid')
+            return ShadowResult(
+                ok=False,
+                status='bootstrap_provenance_invalid',
+                error=(
+                    'bootstrap event/state present but provenance invalid; '
+                    'refusing to overwrite or re-bootstrap'
+                ),
+                elapsed_ms=(time.monotonic() - t0) * 1000.0,
+            )
 
-        observed_dt = _now_beijing_dt().replace(microsecond=0)
+        # 线性化：先拿到写锁，再冻结 observed_at（不得在排队前填手术结束时间）
         conn.execute('BEGIN IMMEDIATE')
         try:
-            if is_bootstrapped(conn):
+            _state, _event, gate = _read_bootstrap_gate(conn)
+            if gate == 'ok':
                 conn.execute('COMMIT')
                 _record_status('already_bootstrapped')
                 _clear_error()
@@ -619,7 +705,24 @@ def ensure_bootstrapped(
                     status='already_bootstrapped',
                     elapsed_ms=(time.monotonic() - t0) * 1000.0,
                 )
+            if gate == 'invalid':
+                conn.execute('ROLLBACK')
+                _record_error(
+                    'ensure_bootstrapped: structural bootstrap exists but '
+                    'provenance is invalid; refusing to overwrite'
+                )
+                _record_status('bootstrap_provenance_invalid')
+                return ShadowResult(
+                    ok=False,
+                    status='bootstrap_provenance_invalid',
+                    error=(
+                        'bootstrap event/state present but provenance invalid; '
+                        'refusing to overwrite or re-bootstrap'
+                    ),
+                    elapsed_ms=(time.monotonic() - t0) * 1000.0,
+                )
 
+            observed_dt = _now_beijing_dt().replace(microsecond=0)
             bundle = _read_legacy_bundle_on_conn(conn, observed_dt=observed_dt)
             proof = {
                 'resolver': WATERMARK_SOURCE,
@@ -771,7 +874,7 @@ def _shadow_call(
     environ: Optional[Mapping[str, str]] = None,
     max_version_retries: int = _DEFAULT_VERSION_RETRIES,
 ) -> ShadowResult:
-    """方案 A：开关开启后若尚未 bootstrap → ``bootstrap_required``，绝不临时 bootstrap。"""
+    """方案 A：必须正式 provenance；非法出生证明不得跑事件。"""
     if not is_shadow_enabled(environ=environ):
         return ShadowResult(ok=True, status='disabled')
 
@@ -779,7 +882,8 @@ def _shadow_call(
     conn = None
     try:
         conn = open_shadow_connection(db_path)
-        if not is_bootstrapped(conn):
+        st, _event, gate = _read_bootstrap_gate(conn)
+        if gate == 'missing':
             _record_status('bootstrap_required')
             return ShadowResult(
                 ok=False,
@@ -790,12 +894,33 @@ def _shadow_call(
                 ),
                 elapsed_ms=(time.monotonic() - t0) * 1000.0,
             )
+        if gate == 'invalid':
+            _record_status('bootstrap_provenance_invalid')
+            return ShadowResult(
+                ok=False,
+                status='bootstrap_provenance_invalid',
+                error=(
+                    'bootstrap provenance invalid; refusing event '
+                    '(no runner, no state_version bump, no event key)'
+                ),
+                elapsed_ms=(time.monotonic() - t0) * 1000.0,
+            )
 
         last: Optional[store.ApplyResult] = None
         for _attempt in range(max_version_retries + 1):
             st = store.read_state(conn)
             if st is None:
                 raise store.StoreError('state missing')
+            # 每次重试前再验 provenance，防止并发损坏后继续跑
+            _st2, _ev2, gate2 = _read_bootstrap_gate(conn)
+            if gate2 != 'ok':
+                _record_status('bootstrap_provenance_invalid')
+                return ShadowResult(
+                    ok=False,
+                    status='bootstrap_provenance_invalid',
+                    error='bootstrap provenance became invalid mid-call',
+                    elapsed_ms=(time.monotonic() - t0) * 1000.0,
+                )
             expected = int(st['state_version'])
             last = make_runner(expected)(conn)
             if last.status != 'version_conflict':

@@ -362,11 +362,17 @@ class LinearizedBootstrapTests(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def test_bootstrap_waits_and_absorbs_inflight_score(self):
-        """写事务未提交时 bootstrap 阻塞；提交后吸收完整 101 截面。"""
+    def test_observed_at_taken_after_lock_absorbs_late_writer(self):
+        """拿锁后才冻结 observed_at；吸收 writer 的较晚 applied_at 与新状态。
+
+        旧顺序（先 now 再 BEGIN）会在排队期间让 proof.applied_at 跑到未来，
+        触发 fail-closed；新顺序必须成功且 observed_at >= applied_at。
+        """
+        import datetime
         import time
 
         writer_holding = threading.Event()
+        late_applied_at_box: list[str] = []
         results: list[shadow.ShadowResult] = []
         errors: list[BaseException] = []
 
@@ -374,11 +380,17 @@ class LinearizedBootstrapTests(unittest.TestCase):
             w = store.open_store(self.db_path)
             try:
                 w.execute('BEGIN IMMEDIATE')
+                # 模拟「排队等待期间」评分提交：applied_at 用真实墙钟
+                time.sleep(1.1)
+                late = (
+                    datetime.datetime.utcnow() + datetime.timedelta(hours=8)
+                ).replace(microsecond=0).strftime('%Y-%m-%d %H:%M:%S')
+                late_applied_at_box.append(late)
                 w.execute('UPDATE emotion_state SET pa=0.99 WHERE id=1')
                 shadow.record_score_proof_in_txn(
-                    w, 101, applied_at=T0, source='inflight')
+                    w, 101, applied_at=late, source='inflight')
                 writer_holding.set()
-                # 让 bootstrap 线程有时间在 BEGIN IMMEDIATE 上排队
+                # 给 bootstrap 时间在 BEGIN IMMEDIATE 上排队
                 time.sleep(0.8)
                 w.execute('COMMIT')
             except BaseException as exc:  # noqa: BLE001
@@ -389,7 +401,7 @@ class LinearizedBootstrapTests(unittest.TestCase):
 
         def boot():
             try:
-                writer_holding.wait(timeout=5)
+                # 尽早启动，与 writer 争锁；若旧顺序会先冻结过早的 observed_at
                 results.append(
                     shadow.ensure_bootstrapped(db_path=self.db_path, environ=ON)
                 )
@@ -399,25 +411,32 @@ class LinearizedBootstrapTests(unittest.TestCase):
         tw = threading.Thread(target=writer)
         tb = threading.Thread(target=boot)
         tw.start()
+        # bootstrap 稍晚启动，确保先撞上 writer 持有的锁
+        time.sleep(0.05)
         tb.start()
-        tw.join(timeout=15)
-        tb.join(timeout=15)
+        tw.join(timeout=20)
+        tb.join(timeout=20)
         self.assertEqual(errors, [])
         self.assertEqual(len(results), 1)
         self.assertTrue(results[0].ok, msg=results[0].error)
         self.assertEqual(results[0].status, 'applied')
+        self.assertEqual(len(late_applied_at_box), 1)
+        late = late_applied_at_box[0]
 
         conn = store.open_store(self.db_path)
         try:
             st = store.read_state(conn)
-            self.assertEqual(st['last_scored_message_id'], 101)
-            self.assertAlmostEqual(st['pa'], 0.99, places=4)
             ev = store.read_event(conn, 'bootstrap:initial')
             payload = json.loads(ev['payload_json'])
-            self.assertEqual(
-                payload['capture_mode'], shadow.CAPTURE_MODE_PRODUCTION)
-            self.assertEqual(
-                payload['watermark_proof']['message_id'], 101)
+            observed = payload['observed_at']
+            proof_at = payload['watermark_proof']['applied_at']
+            self.assertEqual(proof_at, late)
+            self.assertGreaterEqual(observed, proof_at)
+            self.assertEqual(st['last_scored_message_id'], 101)
+            self.assertAlmostEqual(st['pa'], 0.99, places=4)
+            self.assertEqual(st['p_updated_at'], observed)
+            self.assertEqual(st['i_updated_at'], observed)
+            self.assertEqual(st['drives_updated_at'], observed)
             self.assertTrue(shadow._bootstrap_provenance_ok(st, ev))
         finally:
             conn.close()
@@ -630,6 +649,183 @@ class AdapterSafetyTests(unittest.TestCase):
             environ=ON,
         )
         self.assertEqual(r.status, 'failed')
+
+
+class ProvenanceGateTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.db_path = str(Path(self.tmp.name) / 'prov.db')
+        conn = store.open_store(self.db_path)
+        try:
+            _seed_legacy_rows(conn)
+            _insert_score_applied(conn, 20, source='prod_score')
+        finally:
+            conn.close()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_watermark_growth_keeps_provenance_and_wrappers(self):
+        """bootstrap 水位 20 → scored 21 applied → provenance 仍 True。"""
+        self.assertEqual(
+            shadow.ensure_bootstrapped(
+                db_path=self.db_path, environ=ON).status,
+            'applied',
+        )
+        conn = store.open_store(self.db_path)
+        try:
+            observed = store.read_state(conn)['p_updated_at']
+        finally:
+            conn.close()
+        # 事件时间必须不早于 bootstrap 物化时钟
+        import datetime as _dt
+        base = _dt.datetime.strptime(observed, '%Y-%m-%d %H:%M:%S')
+        scored_at = (base + _dt.timedelta(seconds=1)).strftime('%Y-%m-%d %H:%M:%S')
+        created_at = (base + _dt.timedelta(seconds=2)).strftime('%Y-%m-%d %H:%M:%S')
+        outcome_at = (base + _dt.timedelta(seconds=3)).strftime('%Y-%m-%d %H:%M:%S')
+
+        r = shadow.observe_scored_shadow(
+            message_id=21,
+            scores={
+                'valence': 0.8, 'arousal': 0.4, 'mood_word': '开心',
+                'passion_delta': 0.0, 'intimacy_delta': 0.0, 'source': 't',
+            },
+            scored_at=scored_at,
+            db_path=self.db_path,
+            environ=ON,
+        )
+        self.assertEqual(r.status, 'applied', msg=r.error)
+        h = shadow.get_shadow_health(db_path=self.db_path, environ=ON)
+        self.assertTrue(h.provenance_ok)
+        self.assertEqual(h.last_scored_message_id, 21)
+
+        # 后续 user_rule / wake_outcome 仍可工作
+        r_user = shadow.observe_user_message_shadow(
+            message_id=22, text='你好', created_at=created_at,
+            previous_user_at=scored_at, db_path=self.db_path, environ=ON,
+        )
+        self.assertEqual(r_user.status, 'applied', msg=r_user.error)
+        r_out = shadow.apply_outcome_shadow(
+            wake_run_id='wake-prov-1',
+            executor_action='none',
+            desire_action=None,
+            fired_drive=None,
+            desire_driven=False,
+            user_idle_hours=2.0,
+            outcome_at=outcome_at,
+            db_path=self.db_path,
+            environ=ON,
+        )
+        self.assertEqual(r_out.status, 'applied', msg=r_out.error)
+        self.assertTrue(
+            shadow.get_shadow_health(
+                db_path=self.db_path, environ=ON).provenance_ok,
+        )
+
+    def test_test_injection_wrappers_rejected(self):
+        r = _boot_test(self.db_path, watermark=20)
+        self.assertEqual(r.status, 'applied')
+        before = self._snapshot_db()
+        denied = shadow.observe_user_message_shadow(
+            message_id=30, text='x', created_at=T0,
+            previous_user_at=None, db_path=self.db_path, environ=ON,
+        )
+        self.assertEqual(denied.status, 'bootstrap_provenance_invalid')
+        self.assertFalse(denied.ok)
+        self.assertEqual(self._snapshot_db(), before)
+
+    def test_corrupt_capture_mode_rejects_without_mutation(self):
+        self.assertEqual(
+            shadow.ensure_bootstrapped(
+                db_path=self.db_path, environ=ON).status,
+            'applied',
+        )
+        conn = store.open_store(self.db_path)
+        try:
+            ev = store.read_event(conn, 'bootstrap:initial')
+            payload = json.loads(ev['payload_json'])
+            payload['capture_mode'] = 'tampered'
+            conn.execute(
+                'UPDATE internal_state_events SET payload_json=?, payload_hash=? '
+                'WHERE event_key=?',
+                (
+                    json.dumps(payload, ensure_ascii=False, sort_keys=True,
+                               separators=(',', ':')),
+                    'deadbeef',
+                    'bootstrap:initial',
+                ),
+            )
+        finally:
+            conn.close()
+        before = self._snapshot_db()
+        denied = shadow.observe_scored_shadow(
+            message_id=21,
+            scores={
+                'valence': 0.8, 'arousal': 0.4, 'mood_word': '开心',
+                'passion_delta': 0.0, 'intimacy_delta': 0.0, 'source': 't',
+            },
+            scored_at=T0,
+            db_path=self.db_path,
+            environ=ON,
+        )
+        self.assertEqual(denied.status, 'bootstrap_provenance_invalid')
+        self.assertEqual(self._snapshot_db(), before)
+
+        again = shadow.ensure_bootstrapped(db_path=self.db_path, environ=ON)
+        self.assertFalse(again.ok)
+        self.assertEqual(again.status, 'bootstrap_provenance_invalid')
+        self.assertEqual(self._snapshot_db(), before)
+
+    def test_rewound_watermark_invalidates_provenance(self):
+        self.assertEqual(
+            shadow.ensure_bootstrapped(
+                db_path=self.db_path, environ=ON).status,
+            'applied',
+        )
+        conn = store.open_store(self.db_path)
+        try:
+            # 模拟当前水位回拨到初始水位之下
+            conn.execute(
+                'UPDATE internal_state_v3 SET last_scored_message_id=19 WHERE id=1'
+            )
+            st = store.read_state(conn)
+            ev = store.read_event(conn, 'bootstrap:initial')
+            self.assertFalse(shadow._bootstrap_provenance_ok(st, ev))
+        finally:
+            conn.close()
+        before = self._snapshot_db()
+        denied = shadow.apply_outcome_shadow(
+            wake_run_id='wake-bad',
+            executor_action='none',
+            desire_action=None,
+            fired_drive=None,
+            desire_driven=False,
+            user_idle_hours=1.0,
+            outcome_at=T0,
+            db_path=self.db_path,
+            environ=ON,
+        )
+        self.assertEqual(denied.status, 'bootstrap_provenance_invalid')
+        self.assertEqual(self._snapshot_db(), before)
+
+    def _snapshot_db(self):
+        conn = store.open_store(self.db_path)
+        try:
+            st = store.read_state(conn)
+            n_events = conn.execute(
+                'SELECT COUNT(*) FROM internal_state_events'
+            ).fetchone()[0]
+            return (
+                None if st is None else (
+                    st['state_version'],
+                    st['last_scored_message_id'],
+                    st['pa'],
+                    st['valence'],
+                ),
+                n_events,
+            )
+        finally:
+            conn.close()
 
 
 class ConcurrencyBootstrapTests(unittest.TestCase):
