@@ -912,11 +912,35 @@ def send_chat():
     if file_url and not content:
         content = '[文件:%s]' % (file_name or '附件')
     conn = get_db()
-    cur = conn.execute("INSERT INTO chat_messages (author,content,image_url,file_url,file_name) VALUES (?,?,?,?,?)",
-        (author, content, image_url, file_url, file_name))
-    message_id = cur.lastrowid
-    conn.commit()
-    conn.close()
+    previous_user_at = None
+    created_at = None
+    message_id = None
+    try:
+        if author not in ('fyodor', 'assistant', 'claude'):
+            from chat.interaction_state import USER_AUTHOR_SQL
+            prev = conn.execute(
+                f"SELECT created_at FROM chat_messages WHERE {USER_AUTHOR_SQL} "
+                "ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+            if prev is not None:
+                previous_user_at = prev['created_at'] if hasattr(prev, 'keys') else prev[0]
+                previous_user_at = str(previous_user_at)[:19] if previous_user_at else None
+        cur = conn.execute(
+            "INSERT INTO chat_messages (author,content,image_url,file_url,file_name) "
+            "VALUES (?,?,?,?,?)",
+            (author, content, image_url, file_url, file_name),
+        )
+        message_id = cur.lastrowid
+        row = conn.execute(
+            "SELECT created_at FROM chat_messages WHERE id=?",
+            (message_id,),
+        ).fetchone()
+        if row is not None:
+            created_at = row['created_at'] if hasattr(row, 'keys') else row[0]
+            created_at = str(created_at)[:19] if created_at else None
+        conn.commit()
+    finally:
+        conn.close()
     # Production React path: app persists here, then gateway stream only gets
     # user_message_id (empty content). Touch must happen on this commit —
     # moments_turn.insert_user_message will not run again for the body.
@@ -927,6 +951,18 @@ def send_chat():
             touch_user_interaction(get_db)
         except Exception:
             pass
+        if message_id is not None and created_at:
+            try:
+                import internal_state_shadow as _shadow
+                _shadow.emit_user_rule_if_enabled(
+                    message_id=int(message_id),
+                    text=content or '',
+                    created_at=created_at,
+                    previous_user_at=previous_user_at,
+                    db_path=DB_PATH,
+                )
+            except Exception:
+                pass
     # gateway uses this id to claim wake context only after a successful reply.
     return jsonify({"ok": True, "message_id": message_id})
 

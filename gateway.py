@@ -3768,10 +3768,13 @@ def chat():
                 )
             except Exception:
                 pass
-            # 异步情绪评分（不阻塞响应）
+            # 异步情绪评分（不阻塞响应）；message_id 在线程启动前冻结
             try:
                 import emotion_engine as _ee
-                _ee.score_async((_uc + '\n' + text)[:2000])
+                _ee.score_async(
+                    (_uc + '\n' + text)[:2000],
+                    message_id=_turn_data.get('user_message_id'),
+                )
             except Exception:
                 pass
         finally:
@@ -4192,7 +4195,10 @@ def chat_stream():
                             pass
                         try:
                             import emotion_engine as _ee
-                            _ee.score_async((_uc + chr(10) + text)[:2000])
+                            _ee.score_async(
+                                (_uc + chr(10) + text)[:2000],
+                                message_id=_turn_data.get('user_message_id'),
+                            )
                         except Exception:
                             pass
                 finally:

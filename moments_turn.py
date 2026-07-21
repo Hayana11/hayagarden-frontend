@@ -163,13 +163,32 @@ def insert_user_message(
     if not text:
         return turn_data
     conn = get_db_fn()
+    previous_user_at = None
+    created_at = None
+    user_id = None
     try:
+        # previous_user_at：必须在插入本条之前读取，避免 longing 被算成 0
+        from chat.interaction_state import USER_AUTHOR_SQL
+        prev = conn.execute(
+            f"SELECT created_at FROM chat_messages WHERE {USER_AUTHOR_SQL} "
+            "ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        if prev is not None:
+            previous_user_at = prev['created_at'] if hasattr(prev, 'keys') else prev[0]
+            previous_user_at = str(previous_user_at)[:19] if previous_user_at else None
         cur = conn.execute(
             "INSERT INTO chat_messages (author,content) VALUES ('hayana',?)",
             (text,),
         )
-        conn.commit()
         user_id = int(cur.lastrowid)
+        row = conn.execute(
+            "SELECT created_at FROM chat_messages WHERE id=?",
+            (user_id,),
+        ).fetchone()
+        if row is not None:
+            created_at = row['created_at'] if hasattr(row, 'keys') else row[0]
+            created_at = str(created_at)[:19] if created_at else None
+        conn.commit()
         turn_data['user_message_id'] = user_id
     finally:
         conn.close()
@@ -179,6 +198,19 @@ def insert_user_message(
         touch_user_interaction(get_db_fn)
     except Exception:
         pass
+    # Shadow user_rule：仅 USER_EVENTS+SHADOW 开启时触碰；失败不影响主流程
+    if user_id is not None and created_at:
+        try:
+            import internal_state_shadow as _shadow
+            _shadow.emit_user_rule_if_enabled(
+                message_id=user_id,
+                text=text,
+                created_at=created_at,
+                previous_user_at=previous_user_at,
+                db_path=memories_db_path,
+            )
+        except Exception:
+            pass
     turn_key = turn_data.get('turn_key')
     if turn_key:
         sync_user_message_id(

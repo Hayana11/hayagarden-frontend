@@ -1,18 +1,22 @@
-"""Internal State v3 — Phase 1A-4a Shadow 基础设施（默认关闭）
+"""Internal State v3 — Phase 1A-4a/4b Shadow 基础设施与分阶段开关
 
 职责：
-  - ``INTERNAL_STATE_V3_SHADOW_ENABLED`` 安全门（默认 off）
+  - 三道独立开关（默认全部 off）：
+      ``INTERNAL_STATE_V3_SHADOW_ENABLED``
+      ``INTERNAL_STATE_V3_SCORE_PROOF_ENABLED``
+      ``INTERNAL_STATE_V3_USER_EVENTS_ENABLED``
   - 独立短连接 + busy_timeout；**不**改 journal_mode
   - 评分水位 ledger + 同事务 proof writer 辅助（强制 in_transaction）
+  - proof readiness / gap 持久标记（bootstrap fail-closed）
   - 生产 bootstrap：同一 ``BEGIN IMMEDIATE`` 内采集 + 落地（线性化）
-  - 严格 snapshot 校验（禁止默认值洗白；单位区间 fail-closed）
   - 统一 Shadow adapter（方案 A：事件路径不自动 bootstrap）
 
 严格不做：
-  - 不接 gateway / chat / SSE / Wake / Prompt
-  - 不停止旧 discharge / satisfy / score_async
+  - 不接 wake_outcome 生产入口
+  - 不修改 Prompt / Relationship Context
+  - 不停止旧 discharge / satisfy（shadow 失败不得阻断聊天）
   - 不 import emotion_engine / drive_engine / desire / gateway / wake
-  - 不启用开关部署
+  - 评分事务内禁止 DDL / ensure_schema
 """
 
 from __future__ import annotations
@@ -36,10 +40,14 @@ from chat.interaction_state import read_interaction_clock_from_conn
 logger = logging.getLogger(__name__)
 
 SHADOW_ENABLED_ENV = 'INTERNAL_STATE_V3_SHADOW_ENABLED'
+SCORE_PROOF_ENABLED_ENV = 'INTERNAL_STATE_V3_SCORE_PROOF_ENABLED'
+USER_EVENTS_ENABLED_ENV = 'INTERNAL_STATE_V3_USER_EVENTS_ENABLED'
 BOOTSTRAP_EVENT_KEY = 'bootstrap:initial'
 SCORE_APPLIED_TABLE = 'internal_state_score_applied'
+PROOF_HEALTH_TABLE = 'internal_state_score_proof_health'
 WATERMARK_SOURCE = 'internal_state_score_applied:max(message_id)'
 PRODUCTION_BOOTSTRAP_SOURCE_ID = 'phase1a4a_shadow'
+PROOF_SOURCE_SCORE_AND_UPDATE = 'emotion_engine.score_and_update'
 CAPTURE_MODE_PRODUCTION = 'same_sqlite_snapshot_v1'
 CAPTURE_MODE_TEST = 'test_injection'
 _DEFAULT_VERSION_RETRIES = 2
@@ -68,6 +76,22 @@ class ShadowHealth:
     last_status: Optional[str] = None
     journal_mode: Optional[str] = None
     provenance_ok: Optional[bool] = None
+    score_proof_enabled: bool = False
+    user_events_enabled: bool = False
+    proof_gap: Optional[bool] = None
+    proof_schema_ready: Optional[bool] = None
+
+    def as_dict(self) -> dict:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class ProofHealth:
+    ready: bool
+    gap_detected: bool
+    failed_message_id: Optional[int] = None
+    error_code: Optional[str] = None
+    failed_at: Optional[str] = None
 
     def as_dict(self) -> dict:
         return asdict(self)
@@ -103,10 +127,27 @@ def _now_beijing_dt() -> datetime.datetime:
     return datetime.datetime.utcnow() + datetime.timedelta(hours=8)
 
 
+def _env_flag(name: str, *, environ: Optional[Mapping[str, str]] = None) -> bool:
+    env = os.environ if environ is None else environ
+    return str(env.get(name, '0')).strip() == '1'
+
+
 def is_shadow_enabled(*, environ: Optional[Mapping[str, str]] = None) -> bool:
     """默认关闭。仅 ``'1'`` 开启；不读 DB。"""
-    env = os.environ if environ is None else environ
-    return str(env.get(SHADOW_ENABLED_ENV, '0')).strip() == '1'
+    return _env_flag(SHADOW_ENABLED_ENV, environ=environ)
+
+
+def is_score_proof_enabled(*, environ: Optional[Mapping[str, str]] = None) -> bool:
+    """proof-only 钥匙：旧评分成功事务中写证明行。不自动 bootstrap / 不写事件。"""
+    return _env_flag(SCORE_PROOF_ENABLED_ENV, environ=environ)
+
+
+def is_user_events_enabled(*, environ: Optional[Mapping[str, str]] = None) -> bool:
+    """用户事件钥匙：必须同时 SHADOW_ENABLED=1 才真正写 user_rule / user_scored。"""
+    return (
+        _env_flag(USER_EVENTS_ENABLED_ENV, environ=environ)
+        and is_shadow_enabled(environ=environ)
+    )
 
 
 def _record_error(message: str) -> None:
@@ -143,7 +184,10 @@ def open_shadow_connection(
 
 
 def ensure_shadow_schema(conn: sqlite3.Connection) -> None:
-    """internal_state_v3/events + 评分水位 ledger。"""
+    """internal_state_v3/events + 评分水位 ledger + proof health。
+
+    仅供 ``prepare-schema`` / 管理入口调用；**禁止**在评分事务内执行。
+    """
     store.ensure_schema(conn)
     conn.execute(
         f"""
@@ -153,6 +197,141 @@ def ensure_shadow_schema(conn: sqlite3.Connection) -> None:
             applied_at TEXT NOT NULL,
             source TEXT NOT NULL
         )
+        """
+    )
+    conn.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS {PROOF_HEALTH_TABLE} (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            ready INTEGER NOT NULL DEFAULT 1
+                CHECK (ready IN (0, 1)),
+            gap_detected INTEGER NOT NULL DEFAULT 0
+                CHECK (gap_detected IN (0, 1)),
+            failed_message_id INTEGER,
+            error_code TEXT,
+            failed_at TEXT
+        )
+        """
+    )
+    conn.execute(
+        f"""
+        INSERT OR IGNORE INTO {PROOF_HEALTH_TABLE}
+            (id, ready, gap_detected, failed_message_id, error_code, failed_at)
+        VALUES (1, 1, 0, NULL, NULL, NULL)
+        """
+    )
+
+
+def score_proof_schema_ready(conn: sqlite3.Connection) -> bool:
+    """只检查 proof 表是否存在；**不**建表、不 DDL。"""
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+        (SCORE_APPLIED_TABLE,),
+    ).fetchone()
+    return row is not None
+
+
+def read_proof_health(conn: sqlite3.Connection) -> ProofHealth:
+    exists = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+        (PROOF_HEALTH_TABLE,),
+    ).fetchone()
+    if exists is None:
+        return ProofHealth(ready=False, gap_detected=False)
+    row = conn.execute(
+        f"""
+        SELECT ready, gap_detected, failed_message_id, error_code, failed_at
+        FROM {PROOF_HEALTH_TABLE} WHERE id=1
+        """
+    ).fetchone()
+    if row is None:
+        return ProofHealth(ready=False, gap_detected=False)
+    if isinstance(row, sqlite3.Row):
+        return ProofHealth(
+            ready=bool(int(row['ready'])),
+            gap_detected=bool(int(row['gap_detected'])),
+            failed_message_id=(
+                int(row['failed_message_id'])
+                if row['failed_message_id'] is not None else None
+            ),
+            error_code=row['error_code'],
+            failed_at=row['failed_at'],
+        )
+    return ProofHealth(
+        ready=bool(int(row[0])),
+        gap_detected=bool(int(row[1])),
+        failed_message_id=int(row[2]) if row[2] is not None else None,
+        error_code=row[3],
+        failed_at=row[4],
+    )
+
+
+def mark_proof_gap(
+    conn: sqlite3.Connection,
+    *,
+    failed_message_id: Optional[int],
+    error_code: str,
+) -> None:
+    """持久化 proof gap；不含正文 / excerpt / Prompt。"""
+    if not isinstance(error_code, str) or not error_code.strip():
+        raise store.StoreError(f'error_code invalid: {error_code!r}')
+    mid = None
+    if failed_message_id is not None:
+        try:
+            mid = store.require_positive_message_id(
+                failed_message_id, field='failed_message_id',
+            )
+        except store.StoreError:
+            mid = None
+    ts = _now_beijing()
+    # 表缺失时不 DDL——只打日志；prepare-schema 后才有健康行
+    if conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+        (PROOF_HEALTH_TABLE,),
+    ).fetchone() is None:
+        logger.critical(
+            'internal_state_shadow: proof gap (no health table) '
+            'code=%s message_id=%s',
+            error_code, mid,
+        )
+        return
+    conn.execute(
+        f"""
+        INSERT INTO {PROOF_HEALTH_TABLE}
+            (id, ready, gap_detected, failed_message_id, error_code, failed_at)
+        VALUES (1, 0, 1, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+            ready=0,
+            gap_detected=1,
+            failed_message_id=excluded.failed_message_id,
+            error_code=excluded.error_code,
+            failed_at=excluded.failed_at
+        """,
+        (mid, error_code.strip()[:64], ts),
+    )
+    logger.critical(
+        'internal_state_shadow: proof gap marked code=%s message_id=%s',
+        error_code, mid,
+    )
+
+
+def clear_proof_gap(conn: sqlite3.Connection) -> None:
+    if conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+        (PROOF_HEALTH_TABLE,),
+    ).fetchone() is None:
+        return
+    conn.execute(
+        f"""
+        INSERT INTO {PROOF_HEALTH_TABLE}
+            (id, ready, gap_detected, failed_message_id, error_code, failed_at)
+        VALUES (1, 1, 0, NULL, NULL, NULL)
+        ON CONFLICT(id) DO UPDATE SET
+            ready=1,
+            gap_detected=0,
+            failed_message_id=NULL,
+            error_code=NULL,
+            failed_at=NULL
         """
     )
 
@@ -577,6 +756,8 @@ def get_shadow_health(
         err = _last_error
         err_at = _last_error_at
         status = _last_status
+    proof_on = is_score_proof_enabled(environ=environ)
+    events_on = is_user_events_enabled(environ=environ)
     if not enabled:
         return ShadowHealth(
             enabled=False,
@@ -588,6 +769,10 @@ def get_shadow_health(
             last_status=status,
             journal_mode=None,
             provenance_ok=None,
+            score_proof_enabled=proof_on,
+            user_events_enabled=events_on,
+            proof_gap=None,
+            proof_schema_ready=None,
         )
 
     conn = None
@@ -601,6 +786,7 @@ def get_shadow_health(
             _bootstrap_provenance_ok(state, event)
             if structural else False
         )
+        health = read_proof_health(conn)
         return ShadowHealth(
             enabled=True,
             bootstrapped=structural,
@@ -615,6 +801,10 @@ def get_shadow_health(
             last_status=status,
             journal_mode=journal,
             provenance_ok=prov,
+            score_proof_enabled=proof_on,
+            user_events_enabled=events_on,
+            proof_gap=health.gap_detected,
+            proof_schema_ready=score_proof_schema_ready(conn),
         )
     except Exception as exc:  # noqa: BLE001
         _record_error(f'get_shadow_health: {exc}')
@@ -628,6 +818,10 @@ def get_shadow_health(
             last_status='failed',
             journal_mode=None,
             provenance_ok=False,
+            score_proof_enabled=proof_on,
+            user_events_enabled=events_on,
+            proof_gap=None,
+            proof_schema_ready=None,
         )
     finally:
         if conn is not None:
@@ -662,6 +856,24 @@ def ensure_bootstrapped(
         conn = open_shadow_connection(path)
         ensure_shadow_schema(conn)
 
+        proof_health = read_proof_health(conn)
+        if proof_health.gap_detected:
+            _record_error(
+                'ensure_bootstrapped: proof gap unresolved '
+                f'(code={proof_health.error_code!r} '
+                f'message_id={proof_health.failed_message_id!r})'
+            )
+            _record_status('proof_gap')
+            return ShadowResult(
+                ok=False,
+                status='proof_gap',
+                error=(
+                    'score proof gap unresolved; refusing bootstrap with '
+                    'possibly torn emotion/proof surface'
+                ),
+                elapsed_ms=(time.monotonic() - t0) * 1000.0,
+            )
+
         _state, _event, gate = _read_bootstrap_gate(conn)
         if gate == 'ok':
             _record_status('already_bootstrapped')
@@ -695,6 +907,16 @@ def ensure_bootstrapped(
         # 线性化：先拿到写锁，再冻结 observed_at（不得在排队前填手术结束时间）
         conn.execute('BEGIN IMMEDIATE')
         try:
+            # 拿锁后再读一次 gap，避免与 proof writer 竞态
+            if read_proof_health(conn).gap_detected:
+                conn.execute('ROLLBACK')
+                _record_status('proof_gap')
+                return ShadowResult(
+                    ok=False,
+                    status='proof_gap',
+                    error='proof gap appeared under lock; refusing bootstrap',
+                    elapsed_ms=(time.monotonic() - t0) * 1000.0,
+                )
             _state, _event, gate = _read_bootstrap_gate(conn)
             if gate == 'ok':
                 conn.execute('COMMIT')
@@ -1078,30 +1300,114 @@ def apply_outcome_shadow(
         return ShadowResult(ok=False, status='failed', error=str(exc))
 
 
+def emit_user_rule_if_enabled(
+    *,
+    message_id: int,
+    text: str,
+    created_at: str,
+    previous_user_at: Optional[str],
+    db_path: Optional[str] = None,
+    environ: Optional[Mapping[str, str]] = None,
+) -> ShadowResult:
+    """生产 user_rule 门禁：USER_EVENTS 未开则零 DB、不复制参数语义外的工作。"""
+    if not is_user_events_enabled(environ=environ):
+        return ShadowResult(ok=True, status='disabled')
+    return observe_user_message_shadow(
+        message_id=message_id,
+        text=text,
+        created_at=created_at,
+        previous_user_at=previous_user_at,
+        db_path=db_path,
+        environ=environ,
+    )
+
+
+def emit_user_scored_if_enabled(
+    *,
+    message_id: int,
+    scores: dict,
+    scored_at: str,
+    db_path: Optional[str] = None,
+    environ: Optional[Mapping[str, str]] = None,
+) -> ShadowResult:
+    """生产 user_scored 门禁；须在 emotion+proof COMMIT 成功之后调用。"""
+    if not is_user_events_enabled(environ=environ):
+        return ShadowResult(ok=True, status='disabled')
+    return observe_scored_shadow(
+        message_id=message_id,
+        scores=scores,
+        scored_at=scored_at,
+        db_path=db_path,
+        environ=environ,
+    )
+
+
+def mark_proof_gap_standalone(
+    *,
+    db_path: Optional[str] = None,
+    failed_message_id: Optional[int],
+    error_code: str,
+) -> None:
+    """独立短连接标记 gap（评分事务 ROLLBACK 之后调用）。永不抛向主流程。"""
+    conn = None
+    try:
+        conn = open_shadow_connection(db_path)
+        # 若 health 表尚不存在，只打 critical 日志（prepare-schema 前）
+        mark_proof_gap(
+            conn,
+            failed_message_id=failed_message_id,
+            error_code=error_code,
+        )
+        # open_store 为 autocommit；若在隐式事务中则提交
+        if conn.in_transaction:
+            conn.execute('COMMIT')
+    except Exception as exc:  # noqa: BLE001
+        logger.critical(
+            'internal_state_shadow: failed to persist proof gap: %s', exc,
+        )
+    finally:
+        if conn is not None:
+            conn.close()
+
+
 __all__ = [
     'BOOTSTRAP_EVENT_KEY',
     'CAPTURE_MODE_PRODUCTION',
     'CAPTURE_MODE_TEST',
     'PRODUCTION_BOOTSTRAP_SOURCE_ID',
+    'PROOF_HEALTH_TABLE',
+    'PROOF_SOURCE_SCORE_AND_UPDATE',
     'SCORE_APPLIED_TABLE',
+    'SCORE_PROOF_ENABLED_ENV',
     'SHADOW_ENABLED_ENV',
+    'USER_EVENTS_ENABLED_ENV',
     'WATERMARK_SOURCE',
     'BootstrapBundle',
+    'ProofHealth',
     'ShadowHealth',
     'ShadowResult',
     'apply_outcome_shadow',
     'capture_bootstrap_bundle',
+    'clear_proof_gap',
+    'emit_user_rule_if_enabled',
+    'emit_user_scored_if_enabled',
     'ensure_bootstrapped',
     'ensure_shadow_schema',
     'get_shadow_health',
     'is_bootstrapped',
+    'is_score_proof_enabled',
     'is_shadow_enabled',
+    'is_user_events_enabled',
+    'mark_proof_gap',
+    'mark_proof_gap_standalone',
     'observe_scored_shadow',
     'observe_user_message_shadow',
     'open_shadow_connection',
+    'read_proof_health',
     'record_score_proof_in_txn',
     'resolve_scored_watermark',
     'resolve_scored_watermark_row',
+    'score_proof_schema_ready',
     'validate_bootstrap_snapshot',
     '_ensure_bootstrapped_for_test',
 ]
