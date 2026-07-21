@@ -294,6 +294,58 @@ class ValidationTests(ScoredBase):
                     store.read_event(self.conn, f'user_scored:{200 + i}'))
                 self.assertEqual(self.state()['state_version'], 0)
 
+    def test_bool_and_numeric_string_scores_rejected_then_retry(self):
+        """布尔 / 数字字符串不得冒充评分；拒收后同 key 合法数字可重试。"""
+        numeric_fields = (
+            'valence', 'arousal', 'passion_delta', 'intimacy_delta',
+        )
+        before = dict(self.state())
+        mid = 220
+        # bool
+        for field in numeric_fields:
+            for bad in (True, False):
+                with self.subTest(field=field, bad=bad):
+                    with self.assertRaises(store.StoreError) as ctx:
+                        events.observe_scored(
+                            self.conn,
+                            message_id=mid,
+                            scores=_scores(**{field: bad}),
+                            scored_at=T0,
+                        )
+                    self.assertIn('int or float', str(ctx.exception))
+                    self.assertIsNone(
+                        store.read_event(self.conn, f'user_scored:{mid}'))
+                    after = self.state()
+                    self.assertEqual(after['state_version'], before['state_version'])
+                    self.assertEqual(after['pa'], before['pa'])
+                    self.assertEqual(after['valence'], before['valence'])
+        # numeric strings
+        string_values = {
+            'valence': '0.8',
+            'arousal': '0.4',
+            'passion_delta': '0.1',
+            'intimacy_delta': '0.05',
+        }
+        for field, bad in string_values.items():
+            with self.subTest(field=field, bad=bad):
+                with self.assertRaises(store.StoreError) as ctx:
+                    events.observe_scored(
+                        self.conn,
+                        message_id=mid,
+                        scores=_scores(**{field: bad}),
+                        scored_at=T0,
+                    )
+                self.assertIn('int or float', str(ctx.exception))
+                self.assertIsNone(
+                    store.read_event(self.conn, f'user_scored:{mid}'))
+                self.assertEqual(self.state()['state_version'], 0)
+
+        r = events.observe_scored(
+            self.conn, message_id=mid, scores=_scores(), scored_at=T0,
+        )
+        self.assertEqual(r.status, 'applied')
+        self.assertEqual(self.state()['last_scored_message_id'], mid)
+
     def test_illegal_scored_at_does_not_consume_key(self):
         with self.assertRaises(store.StoreError):
             events.observe_scored(

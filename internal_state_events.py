@@ -725,10 +725,18 @@ _BOU_RATE = 0.08
 def _require_finite_in_range(
     value: Any, *, field: str, lo: float, hi: float,
 ) -> float:
-    """越界 / 非有限 / 错误类型 → StoreError；禁止静默 clamp。"""
+    """越界 / 非有限 / 错误类型 → StoreError；禁止静默 clamp。
+
+    只接受真正的 ``int`` / ``float``（排除 ``bool``）；拒绝 str / bytes /
+    None / 容器等。禁止先 ``float(value)`` 把 ``True`` 或 ``"0.8"`` 洗成数字。
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise StoreError(
+            f'{field} must be int or float (not bool/str): {value!r}'
+        )
     try:
         v = float(value)
-    except (TypeError, ValueError) as exc:
+    except (TypeError, ValueError, OverflowError) as exc:
         raise StoreError(f'{field} must be numeric: {value!r}') from exc
     if not math.isfinite(v):
         raise StoreError(f'{field} must be finite: {value!r}')
