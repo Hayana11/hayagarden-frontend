@@ -52,6 +52,7 @@ logger = logging.getLogger(__name__)
 SHADOW_ENABLED_ENV = 'INTERNAL_STATE_V3_SHADOW_ENABLED'
 SCORE_PROOF_ENABLED_ENV = 'INTERNAL_STATE_V3_SCORE_PROOF_ENABLED'
 USER_EVENTS_ENABLED_ENV = 'INTERNAL_STATE_V3_USER_EVENTS_ENABLED'
+CAPTURE_ALERT_PATH_ENV = 'INTERNAL_STATE_V3_CAPTURE_ALERT_PATH'
 BOOTSTRAP_EVENT_KEY = 'bootstrap:initial'
 SCORE_APPLIED_TABLE = 'internal_state_score_applied'
 PROOF_HEALTH_TABLE = 'internal_state_score_proof_health'
@@ -68,6 +69,9 @@ PROOF_GAP_SIDECAR_LEGACY_SUFFIX = '.shadow_proof_gap.json'  # legacy single-slot
 PROOF_GAP_INCIDENTS_DIR_SUFFIX = '.shadow_gap_incidents'  # one incident per file
 OUTBOX_SIDECAR_SUFFIX = '.shadow_outbox.jsonl'  # legacy only; hot path removed
 QUARANTINE_RECONCILE_TABLE = 'internal_state_shadow_quarantine_reconcile'
+QUARANTINE_INTENT_TABLE = 'internal_state_shadow_quarantine_reconcile_intents'
+PENDING_INCIDENT_ACTION_TABLE = 'internal_state_shadow_pending_incident_actions'
+CAPTURE_ALERT_ACK_TABLE = 'internal_state_shadow_capture_alert_ack'
 EVENT_TYPE_USER_RULE = 'user_rule'
 EVENT_TYPE_USER_SCORED = 'user_scored'
 _SCORE_HASH_FIELDS = (
@@ -89,6 +93,16 @@ _last_error: Optional[str] = None
 _last_error_at: Optional[str] = None
 _last_status: Optional[str] = None
 _capture_evidence_failures = 0
+
+
+@dataclass(frozen=True)
+class GapPersistenceResult:
+    """独立 gap 持久化结果；调用方不得把失败误当成已落账。"""
+    status: str
+    ledger_recorded: bool = False
+    sidecar_recorded: bool = False
+    alert_recorded: bool = False
+    error: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -114,6 +128,7 @@ class ShadowHealth:
     gap_sidecar_pending: Optional[int] = None
     quarantine_pending: Optional[int] = None
     capture_evidence_failures: Optional[int] = None
+    capture_alert_pending: Optional[bool] = None
 
     def as_dict(self) -> dict:
         return asdict(self)
@@ -401,22 +416,132 @@ def count_quarantine_pending(db_path: Optional[str] = None) -> int:
     return len(list_gap_quarantine_files(db_path))
 
 
-def note_capture_evidence_failure(detail: str = '') -> None:
-    """聊天主流程不得被 Shadow 阻断，但 capture 证据全失败必须可观测。"""
+def capture_alert_path(db_path: Optional[str] = None) -> Optional[Path]:
+    """独立告警信道路径。
+
+    USER_EVENTS 生产部署必须设置此环境变量到独立于 memories DB / gap
+    incident 目录的持久卷。未配置时 preflight 明确失败，不能把日志当证据。
+    """
+    raw = str(os.environ.get(CAPTURE_ALERT_PATH_ENV, '')).strip()
+    return Path(raw) if raw else None
+
+
+def capture_alert_configured() -> bool:
+    return capture_alert_path() is not None
+
+
+def has_capture_alert(db_path: Optional[str] = None) -> bool:
+    path = capture_alert_path(db_path)
+    return bool(path is not None and path.is_file())
+
+
+def note_capture_evidence_failure(
+    detail: str = '',
+    *,
+    db_path: Optional[str] = None,
+) -> bool:
+    """写入独立、跨进程的 sticky alert；失败仍保留 critical 日志。
+
+    这里故意不复用 gap incident 文件位置：DB + sidecar 同时不可写时，
+    只有预配的独立 alert volume 能让 supervisor / 管理 CLI 看见红灯。
+    """
     global _capture_evidence_failures
     with _lock:
         _capture_evidence_failures += 1
         n = _capture_evidence_failures
+    alert = capture_alert_path(db_path)
+    recorded = False
+    if alert is not None:
+        try:
+            alert.parent.mkdir(parents=True, exist_ok=True)
+            tmp = Path(f'{alert}.tmp.{uuid.uuid4().hex}')
+            body = {
+                'capture_evidence_failed': True,
+                'count': n,
+                'detail': str(detail)[:1024],
+                'detected_at': _now_beijing(),
+                'db_path': isv3.memories_db_path(db_path),
+            }
+            with open(tmp, 'w', encoding='utf-8') as fh:
+                json.dump(body, fh, ensure_ascii=False, sort_keys=True)
+                fh.write('\n')
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(tmp, alert)
+            _fsync_dir(alert.parent)
+            recorded = True
+        except Exception as exc:  # noqa: BLE001
+            logger.critical(
+                'internal_state_shadow: independent capture alert write failed: %s',
+                exc,
+            )
     logger.critical(
         'internal_state_shadow: capture evidence persistence failed '
-        '(count=%s) %s',
-        n, detail,
+        '(count=%s alert_recorded=%s) %s',
+        n, recorded, detail,
     )
+    return recorded
 
 
 def capture_evidence_failure_count() -> int:
     with _lock:
         return int(_capture_evidence_failures)
+
+
+def ack_capture_alert(
+    conn: sqlite3.Connection,
+    *,
+    sha256: str,
+    reason: str,
+    db_path: Optional[str] = None,
+) -> dict:
+    """受审计归档独立 capture alert；不得直接删除 marker。"""
+    if not isinstance(reason, str) or not reason.strip():
+        raise store.StoreError('capture alert ack reason required')
+    if not isinstance(sha256, str) or len(sha256) != 64:
+        raise store.StoreError('capture alert sha256 must be 64 hex chars')
+    alert = capture_alert_path(db_path)
+    if alert is None or not alert.is_file():
+        raise store.StoreError('no pending configured capture alert')
+    actual = _sha256_file(alert)
+    if actual.lower() != sha256.lower():
+        raise store.StoreError(f'capture alert sha256 mismatch: {actual}')
+    conn.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS {CAPTURE_ALERT_ACK_TABLE} (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            path TEXT NOT NULL,
+            sha256 TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            archive_path TEXT NOT NULL,
+            acked_at TEXT NOT NULL
+        )
+        """
+    )
+    archive = Path(f'{alert}.resolved.{uuid.uuid4().hex}')
+    # DB audit intent first: a post-rename crash leaves a visible prepared row.
+    conn.execute('BEGIN IMMEDIATE')
+    try:
+        cur = conn.execute(
+            f"""
+            INSERT INTO {CAPTURE_ALERT_ACK_TABLE}
+                (path, sha256, reason, archive_path, acked_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (str(alert), actual.lower(), reason.strip()[:512], str(archive),
+             _now_beijing()),
+        )
+        ack_id = int(cur.lastrowid)
+        conn.execute('COMMIT')
+    except Exception:
+        conn.execute('ROLLBACK')
+        raise
+    os.rename(str(alert), str(archive))
+    _fsync_dir(archive.parent)
+    return {
+        'acked': True, 'ack_id': ack_id, 'path': str(alert),
+        'sha256': actual.lower(), 'archive_path': str(archive),
+    }
 
 
 def read_proof_gap_sidecar(db_path: Optional[str] = None) -> Optional[dict]:
@@ -1277,6 +1402,97 @@ def inspect_quarantine(db_path: Optional[str] = None) -> list[dict]:
     return out
 
 
+def inspect_pending_incidents(
+    db_path: Optional[str] = None,
+    *,
+    stale_after_seconds: int = 0,
+) -> list[dict]:
+    """列出未完成 ``.tmp``；只报告，绝不自动碰活 writer。"""
+    d = gap_incidents_dir(db_path)
+    now = time.time()
+    out: list[dict] = []
+    if not d.is_dir():
+        return out
+    for p in sorted(d.glob('*.tmp')):
+        try:
+            age = max(0.0, now - p.stat().st_mtime)
+            out.append({
+                'path': str(p),
+                'age_seconds': age,
+                'stale': age >= max(0, int(stale_after_seconds)),
+                'sha256': _sha256_file(p),
+            })
+        except Exception as exc:  # noqa: BLE001
+            out.append({
+                'path': str(p), 'age_seconds': None, 'stale': True,
+                'sha256': None, 'error': str(exc),
+            })
+    return out
+
+
+def recover_pending_incident_tmp(
+    conn: sqlite3.Connection,
+    *,
+    path: str,
+    action: str,
+    reason: str,
+    stale_after_seconds: int,
+    db_path: Optional[str] = None,
+) -> dict:
+    """受审计处理陈旧 tmp：promote / quarantine / discard。
+
+    必须显式调用且文件年龄达到阈值，避免误处理仍在 fsync 的 writer。
+    """
+    if action not in ('promote', 'quarantine', 'discard'):
+        raise store.StoreError('tmp action must be promote/quarantine/discard')
+    if not isinstance(reason, str) or not reason.strip():
+        raise store.StoreError('tmp recovery reason required')
+    src = Path(path)
+    d = gap_incidents_dir(db_path or _conn_file_path(conn))
+    if src.parent != d or src.suffix != '.tmp' or not src.is_file():
+        raise store.StoreError('path is not a pending incident tmp in this db')
+    age = time.time() - src.stat().st_mtime
+    if age < max(0, int(stale_after_seconds)):
+        raise store.StoreError(f'tmp not stale yet: age={age:.3f}s')
+    try:
+        raw = json.loads(src.read_text(encoding='utf-8').strip())
+        valid = isinstance(raw, dict) and bool(raw.get('gap_detected'))
+    except Exception:
+        raw, valid = None, False
+    if action == 'promote':
+        if not valid:
+            raise store.StoreError('cannot promote invalid tmp; use quarantine/discard')
+        dest = Path(str(src).removesuffix('.tmp') + '.json')
+        os.rename(str(src), str(dest))
+        _fsync_dir(d)
+        result = {'action': 'promote', 'path': str(src), 'promoted': str(dest)}
+    elif action == 'quarantine':
+        dest = _unique_quarantine_path(src)
+        os.rename(str(src), str(dest))
+        _fsync_dir(d)
+        mark_proof_gap(
+            conn, failed_message_id=None, error_code='sidecar_corrupt',
+            db_path=db_path, write_sidecar_if_missing=False,
+        )
+        result = {'action': 'quarantine', 'path': str(src), 'quarantine': str(dest)}
+    else:
+        dest = Path(f'{src}.discarded.{uuid.uuid4().hex}')
+        os.rename(str(src), str(dest))
+        _fsync_dir(d)
+        result = {'action': 'discard', 'path': str(src), 'archive': str(dest)}
+    conn.execute(
+        f"""
+        INSERT INTO {PENDING_INCIDENT_ACTION_TABLE}
+            (source_path, action, reason, archive_path, acted_at)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        (str(src), action, reason.strip()[:512],
+         result.get('promoted') or result.get('quarantine') or result.get('archive'),
+         _now_beijing()),
+    )
+    return result
+
+
 def _quarantine_kind(path_s: str) -> str:
     name = Path(path_s).name
     if OUTBOX_SIDECAR_SUFFIX in name:
@@ -1299,6 +1515,42 @@ def ensure_quarantine_reconcile_schema(conn: sqlite3.Connection) -> None:
         )
         """
     )
+    cols = {
+        str(r[1]) for r in conn.execute(
+            f'PRAGMA table_info({QUARANTINE_RECONCILE_TABLE})'
+        )
+    }
+    if 'intent_id' not in cols:
+        conn.execute(
+            f'ALTER TABLE {QUARANTINE_RECONCILE_TABLE} ADD COLUMN intent_id INTEGER'
+        )
+    conn.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS {QUARANTINE_INTENT_TABLE} (
+            intent_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source_path TEXT NOT NULL UNIQUE,
+            archive_path TEXT NOT NULL UNIQUE,
+            sha256 TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            incident_id INTEGER NOT NULL,
+            backfill_event_key TEXT,
+            prepared_at TEXT NOT NULL,
+            completed_at TEXT
+        )
+        """
+    )
+    conn.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS {PENDING_INCIDENT_ACTION_TABLE} (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source_path TEXT NOT NULL,
+            action TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            archive_path TEXT,
+            acted_at TEXT NOT NULL
+        )
+        """
+    )
 
 
 def reconcile_quarantine(
@@ -1311,12 +1563,10 @@ def reconcile_quarantine(
     backfill_event_key: Optional[str] = None,
     incident_id: Optional[int] = None,
 ) -> dict:
-    """受审计地 reconcile 单个 quarantine 文件。
+    """两阶段受审计地 reconcile 单个 quarantine 文件。
 
-    1. 核对文件仍存在且 sha256 一致；
-    2. 写入 reconcile 审计行；
-    3. 原子 rename 到唯一 ``.resolved.<uuid>`` archive（不直接删除）；
-    4. 解决对应 incident（不影响其它 quarantine）。
+    SQLite 与文件系统不能共享原子提交；durable prepared intent 是恢复边界：
+    intent commit → rename/fsync → 单一 SQLite finalization transaction。
     """
     if not isinstance(reason, str) or not reason.strip():
         raise store.StoreError('reconcile reason required')
@@ -1338,6 +1588,13 @@ def reconcile_quarantine(
         raise store.StoreError(
             f'sha256 mismatch: expected {sha256} actual {actual}'
         )
+    # 所有参数必须在文件移动前验证。
+    reason_s = reason.strip()[:512]
+    bf = None
+    if backfill_event_key is not None:
+        if not isinstance(backfill_event_key, str) or not backfill_event_key.strip():
+            raise store.StoreError('backfill_event_key invalid')
+        bf = backfill_event_key.strip()[:128]
     kind = _quarantine_kind(str(src))
     want_code = (
         'outbox_sidecar_quarantined' if kind == 'outbox_sidecar'
@@ -1375,62 +1632,159 @@ def reconcile_quarantine(
             )
         target_iid = int(row[0] if not isinstance(row, sqlite3.Row) else row['incident_id'])
 
-    archive = _unique_resolved_archive_path(src)
-    os.rename(str(src), str(archive))
-    try:
-        _fsync_dir(archive.parent)
-    except Exception:
-        pass
-
-    ts = _now_beijing()
-    reason_s = reason.strip()[:512]
-    bf = None
-    if backfill_event_key is not None:
-        if not isinstance(backfill_event_key, str) or not backfill_event_key.strip():
-            raise store.StoreError('backfill_event_key invalid')
-        bf = backfill_event_key.strip()[:128]
-
-    conn.execute(
+    prepared = conn.execute(
         f"""
-        UPDATE {GAP_INCIDENTS_TABLE}
-        SET resolved_at=?, resolution_reason=?
-        WHERE incident_id=? AND resolved_at IS NULL
+        SELECT intent_id, archive_path, sha256, incident_id, completed_at
+        FROM {QUARANTINE_INTENT_TABLE} WHERE source_path=?
         """,
-        (ts, f'reconcile-quarantine: {reason_s}', target_iid),
+        (str(src),),
+    ).fetchone()
+    if prepared is not None:
+        get = (lambda k, i: prepared[k] if isinstance(prepared, sqlite3.Row)
+               else prepared[i])
+        intent_id = int(get('intent_id', 0))
+        archive = Path(str(get('archive_path', 1)))
+        if str(get('sha256', 2)).lower() != actual.lower() or int(
+            get('incident_id', 3)
+        ) != target_iid:
+            raise store.StoreError(
+                f'prepared intent {intent_id} does not match retry parameters'
+            )
+        if get('completed_at', 4) is not None:
+            return _complete_quarantine_intent(
+                conn, intent_id=intent_id, db_path=db_path,
+            )
+    else:
+        archive = _unique_resolved_archive_path(src)
+        prepared_at = _now_beijing()
+        conn.execute('BEGIN IMMEDIATE')
+        try:
+            cur = conn.execute(
+                f"""
+                INSERT INTO {QUARANTINE_INTENT_TABLE}
+                    (source_path, archive_path, sha256, reason, incident_id,
+                     backfill_event_key, prepared_at, completed_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, NULL)
+                """,
+                (str(src), str(archive), actual.lower(), reason_s, target_iid, bf,
+                 prepared_at),
+            )
+            intent_id = int(cur.lastrowid)
+            conn.execute('COMMIT')
+        except Exception:
+            conn.execute('ROLLBACK')
+            raise
+
+    # Filesystem phase is deliberately after durable intent, and before final DB txn.
+    if src.exists() and not archive.exists():
+        os.rename(str(src), str(archive))
+        _fsync_dir(archive.parent)
+    return _complete_quarantine_intent(
+        conn, intent_id=intent_id, db_path=db_path,
     )
+
+
+def _complete_quarantine_intent(
+    conn: sqlite3.Connection,
+    *,
+    intent_id: int,
+    db_path: Optional[str],
+) -> dict:
+    """在一个 SQLite 事务中完成 resolve + ack + audit + intent。"""
     row = conn.execute(
         f"""
-        SELECT message_id, error_code FROM {GAP_INCIDENTS_TABLE}
-        WHERE incident_id=?
+        SELECT source_path, archive_path, sha256, reason, incident_id,
+               backfill_event_key, prepared_at, completed_at
+        FROM {QUARANTINE_INTENT_TABLE} WHERE intent_id=?
         """,
-        (target_iid,),
+        (int(intent_id),),
     ).fetchone()
-    row_mid = row['message_id'] if isinstance(row, sqlite3.Row) else row[0]
-    code = row['error_code'] if isinstance(row, sqlite3.Row) else row[1]
-    conn.execute(
-        f"""
-        INSERT INTO {GAP_ACK_TABLE}
-            (incident_id, message_id, reason, acked_at,
-             previous_error_code, previous_failed_message_id)
-        VALUES (?, ?, ?, ?, ?, ?)
-        """,
-        (target_iid, row_mid, reason_s, ts, code, row_mid),
-    )
-    conn.execute(
-        f"""
-        INSERT INTO {QUARANTINE_RECONCILE_TABLE}
-            (path, sha256, reason, resolved_archive, incident_id,
-             backfill_event_key, reconciled_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-        """,
-        (str(src), actual.lower(), reason_s, str(archive), target_iid, bf, ts),
-    )
-    _refresh_proof_health_summary(conn)
+    if row is None:
+        raise store.StoreError(f'unknown quarantine intent {intent_id}')
+    get = (lambda k, i: row[k] if isinstance(row, sqlite3.Row) else row[i])
+    src, archive = str(get('source_path', 0)), str(get('archive_path', 1))
+    digest, reason_s = str(get('sha256', 2)), str(get('reason', 3))
+    target_iid, bf = int(get('incident_id', 4)), get('backfill_event_key', 5)
+    completed = get('completed_at', 7)
+    if completed is not None:
+        return {
+            'reconciled': True, 'intent_id': int(intent_id), 'path': src,
+            'sha256': digest, 'resolved_archive': archive,
+            'incident_id': target_iid, 'reason': reason_s,
+            'backfill_event_key': bf, 'reconciled_at': completed,
+            'idempotent': True,
+        }
+    if not Path(archive).is_file():
+        raise store.StoreError(
+            f'intent {intent_id} not finalizable: archive missing {archive}'
+        )
+    if _sha256_file(Path(archive)).lower() != digest.lower():
+        raise store.StoreError(f'intent {intent_id} archive sha256 mismatch')
+
+    ts = _now_beijing()
+    conn.execute('BEGIN IMMEDIATE')
+    try:
+        incident = conn.execute(
+            f"""
+            SELECT message_id, error_code, resolved_at
+            FROM {GAP_INCIDENTS_TABLE} WHERE incident_id=?
+            """,
+            (target_iid,),
+        ).fetchone()
+        if incident is None:
+            raise store.StoreError(f'intent {intent_id} incident missing')
+        mid = incident['message_id'] if isinstance(incident, sqlite3.Row) else incident[0]
+        code = incident['error_code'] if isinstance(incident, sqlite3.Row) else incident[1]
+        resolved = incident['resolved_at'] if isinstance(incident, sqlite3.Row) else incident[2]
+        if resolved is None:
+            conn.execute(
+                f"""
+                UPDATE {GAP_INCIDENTS_TABLE}
+                SET resolved_at=?, resolution_reason=?
+                WHERE incident_id=? AND resolved_at IS NULL
+                """,
+                (ts, f'reconcile-quarantine: {reason_s}', target_iid),
+            )
+            conn.execute(
+                f"""
+                INSERT INTO {GAP_ACK_TABLE}
+                    (incident_id, message_id, reason, acked_at,
+                     previous_error_code, previous_failed_message_id)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (target_iid, mid, reason_s, ts, code, mid),
+            )
+        conn.execute(
+            f"""
+            INSERT INTO {QUARANTINE_RECONCILE_TABLE}
+                (path, sha256, reason, resolved_archive, incident_id,
+                 backfill_event_key, reconciled_at, intent_id)
+            SELECT ?, ?, ?, ?, ?, ?, ?, ?
+            WHERE NOT EXISTS (
+                SELECT 1 FROM {QUARANTINE_RECONCILE_TABLE} WHERE intent_id=?
+            )
+            """,
+            (src, digest.lower(), reason_s, archive, target_iid, bf, ts,
+             int(intent_id), int(intent_id)),
+        )
+        conn.execute(
+            f"""
+            UPDATE {QUARANTINE_INTENT_TABLE}
+            SET completed_at=? WHERE intent_id=? AND completed_at IS NULL
+            """,
+            (ts, int(intent_id)),
+        )
+        _refresh_proof_health_summary(conn)
+        conn.execute('COMMIT')
+    except Exception:
+        conn.execute('ROLLBACK')
+        raise
     return {
         'reconciled': True,
-        'path': str(src),
-        'sha256': actual.lower(),
-        'resolved_archive': str(archive),
+        'intent_id': int(intent_id),
+        'path': src,
+        'sha256': digest.lower(),
+        'resolved_archive': archive,
         'incident_id': target_iid,
         'reason': reason_s,
         'backfill_event_key': bf,
@@ -1440,6 +1794,36 @@ def reconcile_quarantine(
         ),
         'remaining_unresolved': count_unresolved_gap_incidents(conn),
     }
+
+
+def recover_quarantine_intents(
+    conn: sqlite3.Connection,
+    *,
+    db_path: Optional[str] = None,
+) -> list[dict]:
+    """恢复已 prepared 的 reconcile intent；不猜测 source 仍存在的操作员意图。"""
+    ensure_quarantine_reconcile_schema(conn)
+    rows = conn.execute(
+        f"""
+        SELECT intent_id, source_path, archive_path, completed_at
+        FROM {QUARANTINE_INTENT_TABLE} WHERE completed_at IS NULL
+        ORDER BY intent_id ASC
+        """
+    ).fetchall()
+    out = []
+    for row in rows:
+        iid = int(row['intent_id'] if isinstance(row, sqlite3.Row) else row[0])
+        src = Path(row['source_path'] if isinstance(row, sqlite3.Row) else row[1])
+        archive = Path(row['archive_path'] if isinstance(row, sqlite3.Row) else row[2])
+        if archive.is_file() and not src.exists():
+            out.append(_complete_quarantine_intent(
+                conn, intent_id=iid, db_path=db_path,
+            ))
+        elif src.is_file() and not archive.exists():
+            out.append({'intent_id': iid, 'status': 'prepared_source_present'})
+        else:
+            out.append({'intent_id': iid, 'status': 'split_brain'})
+    return out
 
 
 def lookup_score_proof(
@@ -2194,6 +2578,7 @@ def get_shadow_health(
         err_at = _last_error_at
         status = _last_status
         capture_fail_n = int(_capture_evidence_failures)
+    capture_alert = has_capture_alert(db_path)
     proof_on = is_score_proof_enabled(environ=environ)
     events_on = is_user_events_enabled(environ=environ)
     if not enabled:
@@ -2219,6 +2604,7 @@ def get_shadow_health(
             gap_sidecar_pending=None,
             quarantine_pending=None,
             capture_evidence_failures=capture_fail_n,
+            capture_alert_pending=capture_alert,
         )
 
     conn = None
@@ -2258,7 +2644,7 @@ def get_shadow_health(
             status = 'watermark_lag'
         elif pending and pending > 0 and status not in ('proof_gap', 'watermark_lag'):
             status = 'outbox_pending'
-        elif capture_fail_n > 0 and status not in (
+        elif (capture_fail_n > 0 or capture_alert) and status not in (
             'proof_gap', 'watermark_lag', 'outbox_pending',
         ):
             status = 'capture_evidence_failure'
@@ -2286,6 +2672,7 @@ def get_shadow_health(
             gap_sidecar_pending=sidecar_n,
             quarantine_pending=quarantine_n,
             capture_evidence_failures=capture_fail_n,
+            capture_alert_pending=capture_alert,
         )
     except Exception as exc:  # noqa: BLE001
         _record_error(f'get_shadow_health: {exc}')
@@ -2311,6 +2698,7 @@ def get_shadow_health(
             gap_sidecar_pending=None,
             quarantine_pending=None,
             capture_evidence_failures=capture_fail_n,
+            capture_alert_pending=capture_alert,
         )
     finally:
         if conn is not None:
@@ -2840,8 +3228,8 @@ def mark_proof_gap_standalone(
     db_path: Optional[str] = None,
     failed_message_id: Optional[int],
     error_code: str,
-) -> None:
-    """独立短连接标记 gap。表缺失时写 sidecar。永不抛向主流程。"""
+) -> GapPersistenceResult:
+    """独立短连接标记 gap，返回明确的持久化结果，永不抛向聊天主流程。"""
     path = isv3.memories_db_path(db_path)
     conn = None
     try:
@@ -2854,6 +3242,7 @@ def mark_proof_gap_standalone(
         )
         if conn.in_transaction:
             conn.execute('COMMIT')
+        return GapPersistenceResult(status='persisted_db', ledger_recorded=True)
     except Exception as exc:  # noqa: BLE001
         logger.critical(
             'internal_state_shadow: failed to persist proof gap: %s', exc,
@@ -2864,10 +3253,24 @@ def mark_proof_gap_standalone(
                 failed_message_id=failed_message_id,
                 error_code=error_code,
             )
+            return GapPersistenceResult(
+                status='persisted_sidecar',
+                sidecar_recorded=True,
+                error=str(exc),
+            )
         except Exception as exc2:  # noqa: BLE001
             logger.critical(
                 'internal_state_shadow: sidecar gap write also failed: %s',
                 exc2,
+            )
+            alert_recorded = note_capture_evidence_failure(
+                f'gap={error_code} db={exc} sidecar={exc2}',
+                db_path=path,
+            )
+            return GapPersistenceResult(
+                status='failed',
+                alert_recorded=alert_recorded,
+                error=f'db={exc}; sidecar={exc2}',
             )
     finally:
         if conn is not None:
@@ -2878,6 +3281,8 @@ __all__ = [
     'BOOTSTRAP_EVENT_KEY',
     'CAPTURE_MODE_PRODUCTION',
     'CAPTURE_MODE_TEST',
+    'CAPTURE_ALERT_PATH_ENV',
+    'CAPTURE_ALERT_ACK_TABLE',
     'EVENT_TYPE_USER_RULE',
     'EVENT_TYPE_USER_SCORED',
     'GAP_ACK_TABLE',
@@ -2893,13 +3298,19 @@ __all__ = [
     'WATERMARK_SOURCE',
     'BootstrapBundle',
     'ProofHealth',
+    'GapPersistenceResult',
     'ShadowHealth',
     'ShadowResult',
     'QUARANTINE_RECONCILE_TABLE',
+    'QUARANTINE_INTENT_TABLE',
+    'PENDING_INCIDENT_ACTION_TABLE',
     'ack_proof_gap',
+    'ack_capture_alert',
     'append_gap_incident_sidecar',
     'apply_outcome_shadow',
     'capture_bootstrap_bundle',
+    'capture_alert_configured',
+    'capture_alert_path',
     'capture_evidence_failure_count',
     'clear_proof_gap',
     'compute_score_hash',
@@ -2919,7 +3330,9 @@ __all__ = [
     'gap_incidents_dir',
     'get_shadow_health',
     'has_unresolved_proof_gap',
+    'has_capture_alert',
     'inspect_quarantine',
+    'inspect_pending_incidents',
     'is_bootstrapped',
     'is_score_proof_enabled',
     'is_shadow_enabled',
@@ -2942,6 +3355,8 @@ __all__ = [
     'read_proof_gap_sidecar',
     'read_proof_health',
     'reconcile_quarantine',
+    'recover_pending_incident_tmp',
+    'recover_quarantine_intents',
     'record_score_proof_in_txn',
     'resolve_scored_watermark',
     'resolve_scored_watermark_row',

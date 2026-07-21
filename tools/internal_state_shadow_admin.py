@@ -66,12 +66,16 @@ def _cmd_prepare_schema(db_path: str) -> int:
             'proof_gap': shadow.has_unresolved_proof_gap(conn, db_path=path),
             'unresolved_incidents': shadow.count_unresolved_gap_incidents(conn),
             'bootstrapped': False,
+            'capture_alert_configured': shadow.capture_alert_configured(),
+            'capture_alert_pending': shadow.has_capture_alert(path),
             'user_events_preflight_ok': (
                 (not shadow.is_user_events_enabled())
                 or (
                     shadow.outbox_schema_ready(conn)
                     and shadow.score_proof_schema_ready(conn)
                     and not shadow.has_unresolved_proof_gap(conn, db_path=path)
+                    and shadow.capture_alert_configured()
+                    and not shadow.has_capture_alert(path)
                 )
             ),
         }
@@ -117,6 +121,8 @@ def _cmd_status(db_path: str) -> int:
                 shadow.outbox_schema_ready(conn)
                 and shadow.score_proof_schema_ready(conn)
                 and not shadow.has_unresolved_proof_gap(conn, db_path=path)
+                and shadow.capture_alert_configured()
+                and not shadow.has_capture_alert(path)
             )
         )
         payload = {
@@ -134,7 +140,9 @@ def _cmd_status(db_path: str) -> int:
             'gap_sidecar_pending': shadow.count_gap_sidecar_pending(path),
             'quarantine_pending': shadow.count_quarantine_pending(path),
             'quarantine_files': shadow.list_gap_quarantine_files(path),
-            'capture_evidence_failures': shadow.capture_evidence_failure_count(),
+            'capture_evidence_failures_process_local': shadow.capture_evidence_failure_count(),
+            'capture_alert_configured': shadow.capture_alert_configured(),
+            'capture_alert_pending': shadow.has_capture_alert(path),
             'user_events_preflight_ok': preflight_ok,
             'proof_max_message_id': wm,
             'outbox_pending': pending,
@@ -149,7 +157,7 @@ def _cmd_status(db_path: str) -> int:
         or (pending or 0) > 0
         or (health.gap_sidecar_pending or 0) > 0
         or (health.quarantine_pending or 0) > 0
-        or (health.capture_evidence_failures or 0) > 0
+        or bool(health.capture_alert_pending)
         or not payload['user_events_preflight_ok']
     ):
         return 1
@@ -300,6 +308,71 @@ def _cmd_reconcile_quarantine(
         conn.close()
 
 
+def _cmd_recover_quarantine_intents(db_path: str) -> int:
+    db = isv3.memories_db_path(db_path)
+    conn = store.open_store(db)
+    try:
+        shadow.ensure_shadow_schema(conn, db_path=db)
+        if conn.in_transaction:
+            conn.execute('COMMIT')
+        result = shadow.recover_quarantine_intents(conn, db_path=db)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0 if all(x.get('reconciled') for x in result) else 1
+    except Exception as exc:
+        print(f'ERROR: {exc}', file=sys.stderr)
+        return 1
+    finally:
+        conn.close()
+
+
+def _cmd_pending_incidents(
+    db_path: str, path: str | None, action: str | None,
+    reason: str | None, stale_after_seconds: int,
+) -> int:
+    db = isv3.memories_db_path(db_path)
+    conn = store.open_store(db)
+    try:
+        shadow.ensure_shadow_schema(conn, db_path=db)
+        if action is None:
+            result = shadow.inspect_pending_incidents(
+                db, stale_after_seconds=stale_after_seconds,
+            )
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+            return 0 if not result else 1
+        if path is None or reason is None:
+            print('ERROR: --path and --reason required with --action', file=sys.stderr)
+            return 2
+        result = shadow.recover_pending_incident_tmp(
+            conn, path=path, action=action, reason=reason,
+            stale_after_seconds=stale_after_seconds, db_path=db,
+        )
+        if conn.in_transaction:
+            conn.execute('COMMIT')
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0
+    except Exception as exc:
+        print(f'ERROR: {exc}', file=sys.stderr)
+        return 1
+    finally:
+        conn.close()
+
+
+def _cmd_ack_capture_alert(db_path: str, sha256: str, reason: str) -> int:
+    db = isv3.memories_db_path(db_path)
+    conn = store.open_store(db)
+    try:
+        result = shadow.ack_capture_alert(
+            conn, sha256=sha256, reason=reason, db_path=db,
+        )
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0
+    except Exception as exc:
+        print(f'ERROR: {exc}', file=sys.stderr)
+        return 1
+    finally:
+        conn.close()
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description='Internal State Shadow admin')
     p.add_argument('--db', default=None, help='memories.db path')
@@ -327,6 +400,24 @@ def main(argv: list[str] | None = None) -> int:
     rq.add_argument('--reason', required=True)
     rq.add_argument('--backfill-event-key', default=None)
     rq.add_argument('--incident-id', type=int, default=None)
+    sub.add_parser(
+        'recover-quarantine-intents',
+        help='finalize prepared reconcile intents after a crash',
+    )
+    pi = sub.add_parser(
+        'inspect-pending-incidents',
+        help='list or audited-recover stale per-file incident tmp',
+    )
+    pi.add_argument('--stale-after-seconds', type=int, default=300)
+    pi.add_argument('--path', default=None)
+    pi.add_argument('--action', choices=('promote', 'quarantine', 'discard'))
+    pi.add_argument('--reason', default=None)
+    aca = sub.add_parser(
+        'ack-capture-alert',
+        help='audited archive of configured independent capture alert marker',
+    )
+    aca.add_argument('--sha256', required=True)
+    aca.add_argument('--reason', required=True)
     args = p.parse_args(argv)
     if args.cmd == 'prepare-schema':
         return _cmd_prepare_schema(args.db)
@@ -351,6 +442,15 @@ def main(argv: list[str] | None = None) -> int:
             args.backfill_event_key,
             args.incident_id,
         )
+    if args.cmd == 'recover-quarantine-intents':
+        return _cmd_recover_quarantine_intents(args.db)
+    if args.cmd == 'inspect-pending-incidents':
+        return _cmd_pending_incidents(
+            args.db, args.path, args.action, args.reason,
+            args.stale_after_seconds,
+        )
+    if args.cmd == 'ack-capture-alert':
+        return _cmd_ack_capture_alert(args.db, args.sha256, args.reason)
     return 2
 
 

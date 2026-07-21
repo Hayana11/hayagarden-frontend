@@ -212,23 +212,37 @@ def insert_user_message(
                             )
                         except Exception:
                             try:
-                                _shadow.mark_proof_gap_standalone(
+                                _gap_result = _shadow.mark_proof_gap_standalone(
                                     db_path=memories_db_path,
                                     failed_message_id=user_id,
                                     error_code='outbox_capture_gap',
                                 )
-                            except Exception:
+                                if _gap_result.status == 'failed':
+                                    _shadow.note_capture_evidence_failure(
+                                        f'user_rule message_id={user_id}',
+                                        db_path=memories_db_path,
+                                    )
+                            except Exception as _gap_exc:
                                 _shadow.note_capture_evidence_failure(
-                                    f'user_rule message_id={user_id}'
+                                    f'user_rule standalone exception={_gap_exc}',
+                                    db_path=memories_db_path,
                                 )
             except Exception as _cap_exc:
                 try:
                     import internal_state_shadow as _shadow2
                     _shadow2.note_capture_evidence_failure(
-                        f'user_rule import/enable: {_cap_exc}'
+                        f'user_rule import/enable: {_cap_exc}',
+                        db_path=memories_db_path,
                     )
                 except Exception:
-                    pass
+                    try:
+                        from internal_state_capture_alert import write_capture_alert
+                        write_capture_alert(
+                            db_path=memories_db_path,
+                            detail=f'user_rule shadow import/enable: {_cap_exc}',
+                        )
+                    except Exception:
+                        pass
         conn.commit()
         turn_data['user_message_id'] = user_id
     finally:

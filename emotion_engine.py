@@ -153,14 +153,19 @@ def _parse_dt(s):
         return None
 
 
-def _decay(value, stored_at_str, tau_hours):
-    """指数衰减：value × exp(-t/τ)"""
+def _decay(value, stored_at_str, tau_hours, *, observed_at=None):
+    """指数衰减：value × exp(-t/τ)。
+
+    评分事务必须传入同一个 ``applied_at``，避免锁等待期间的墙钟分叉。
+    """
     if not stored_at_str:
         return value
     stored_at = _parse_dt(stored_at_str)
     if not stored_at:
         return value
-    now = datetime.datetime.utcnow() + datetime.timedelta(hours=8)
+    now = _parse_dt(observed_at) if observed_at is not None else None
+    if now is None:
+        now = datetime.datetime.utcnow() + datetime.timedelta(hours=8)
     t = max(0.0, (now - stored_at).total_seconds() / 3600)
     return max(0.0, value * math.exp(-t / tau_hours))
 
@@ -385,7 +390,7 @@ def _bou_revert(pa: float, na: float) -> tuple:
 # 核心：完整评分+更新（对话后异步跑）
 # ═══════════════════════════════════════════════════════════
 
-def _longing_from_last_interaction(last_str) -> float:
+def _longing_from_last_interaction(last_str, *, observed_at: str) -> float:
     """事务内思念：仅依赖已读到的 last_interaction，不再另开连接读库。"""
     if not last_str:
         return 0.0
@@ -393,7 +398,9 @@ def _longing_from_last_interaction(last_str) -> float:
         last = _parse_dt(last_str)
         if not last:
             return 0.0
-        now = datetime.datetime.utcnow() + datetime.timedelta(hours=8)
+        now = _parse_dt(observed_at)
+        if now is None:
+            return 0.0
         t = max(0.0, (now - last).total_seconds() / 3600)
         L = 0.85 * (1 - (1 + t / 8) ** (-0.8))
         return round(min(L, 0.92), 3)
@@ -409,7 +416,7 @@ def _transition_from_state(
     mood_word: str,
     p_delta: float,
     i_delta: float,
-    scored_at: str,
+    applied_at: str,
 ) -> dict:
     """在持有写锁后，根据*当前* emotion_state 行计算本轮写入值。"""
     old_pa, old_na = state['pa'], state['na']
@@ -418,12 +425,20 @@ def _transition_from_state(
     new_na = max(0.0, min(1.0, 0.75 * old_na + 0.25 * na_signal))
     new_pa, new_na = _bou_revert(new_pa, new_na)
 
-    p_now = _decay(state.get('sternberg_p', 0.0), state.get('p_updated_at'), TAU_P)
-    i_now = _decay(state.get('sternberg_i', 0.3), state.get('i_updated_at'), TAU_I)
+    p_now = _decay(
+        state.get('sternberg_p', 0.0), state.get('p_updated_at'), TAU_P,
+        observed_at=applied_at,
+    )
+    i_now = _decay(
+        state.get('sternberg_i', 0.3), state.get('i_updated_at'), TAU_I,
+        observed_at=applied_at,
+    )
     c_now = state.get('sternberg_c', 0.7)
     new_p = max(0.0, min(1.0, p_now + p_delta))
     new_i = max(0.0, min(1.0, i_now + i_delta))
-    longing = _longing_from_last_interaction(state.get('last_interaction'))
+    longing = _longing_from_last_interaction(
+        state.get('last_interaction'), observed_at=applied_at,
+    )
 
     return {
         'pa': round(new_pa, 4),
@@ -435,10 +450,10 @@ def _transition_from_state(
         'sternberg_p': round(new_p, 4),
         'sternberg_i': round(new_i, 4),
         'sternberg_c': round(c_now, 4),
-        'p_updated_at': scored_at,
-        'i_updated_at': scored_at,
-        'last_interaction': scored_at,
-        'updated_at': scored_at,
+        'p_updated_at': applied_at,
+        'i_updated_at': applied_at,
+        'last_interaction': applied_at,
+        'updated_at': applied_at,
     }
 
 
@@ -539,7 +554,6 @@ def score_and_update(conversation_excerpt: str, *, message_id=None):
 
     p_delta_ds = scored['passion_delta']
     i_delta_ds = scored['intimacy_delta']
-    scored_at = _now_str()
     frozen_v = round(final_v, 4)
     frozen_a = round(final_a, 4)
     frozen_mood = mood_word
@@ -574,7 +588,7 @@ def score_and_update(conversation_excerpt: str, *, message_id=None):
         if proof_env:
             try:
                 _write_shadow_unavailable_incident(
-                    message_id=frozen_message_id, scored_at=scored_at,
+                    message_id=frozen_message_id, scored_at=_now_str(),
                 )
             except Exception:
                 # sidecar 也写不进 → 不得静默改 emotion
@@ -605,7 +619,7 @@ def score_and_update(conversation_excerpt: str, *, message_id=None):
             )
             score_hash = _shadow.compute_score_hash(scored_payload)
 
-            def _apply_transition_locked() -> dict:
+            def _apply_transition_locked(applied_at: str) -> dict:
                 state = _read_emotion_state_row(conn)
                 tr = _transition_from_state(
                     state,
@@ -614,7 +628,7 @@ def score_and_update(conversation_excerpt: str, *, message_id=None):
                     mood_word=frozen_mood,
                     p_delta=frozen_p_delta,
                     i_delta=frozen_i_delta,
-                    scored_at=scored_at,
+                    applied_at=applied_at,
                 )
                 conn.execute(_EMOTION_UPDATE_SQL, _emotion_update_params(tr))
                 return tr
@@ -628,13 +642,14 @@ def score_and_update(conversation_excerpt: str, *, message_id=None):
                 try:
                     if incidents_ready:
                         conn.execute('BEGIN IMMEDIATE')
+                        applied_at = _now_str()
                         _shadow.mark_proof_gap(
                             conn,
                             failed_message_id=_bad_mid,
                             error_code='missing_or_invalid_message_id',
                             db_path=DB_PATH,
                         )
-                        applied_tr = _apply_transition_locked()
+                        applied_tr = _apply_transition_locked(applied_at)
                         conn.commit()
                     else:
                         _shadow.append_gap_incident_sidecar(
@@ -643,7 +658,7 @@ def score_and_update(conversation_excerpt: str, *, message_id=None):
                             error_code='missing_or_invalid_message_id',
                         )
                         conn.execute('BEGIN IMMEDIATE')
-                        applied_tr = _apply_transition_locked()
+                        applied_tr = _apply_transition_locked(_now_str())
                         conn.commit()
                 except Exception:
                     try:
@@ -664,7 +679,7 @@ def score_and_update(conversation_excerpt: str, *, message_id=None):
                     return
                 try:
                     conn.execute('BEGIN IMMEDIATE')
-                    applied_tr = _apply_transition_locked()
+                    applied_tr = _apply_transition_locked(_now_str())
                     conn.commit()
                 except Exception:
                     try:
@@ -696,11 +711,12 @@ def score_and_update(conversation_excerpt: str, *, message_id=None):
                         conn.execute('ROLLBACK')
                         return
 
-                    applied_tr = _apply_transition_locked()
+                    applied_at = _now_str()
+                    applied_tr = _apply_transition_locked(applied_at)
                     status = _shadow.record_score_proof_in_txn(
                         conn,
                         mid_ok,
-                        applied_at=scored_at,
+                        applied_at=applied_at,
                         source=_shadow.PROOF_SOURCE_SCORE_AND_UPDATE,
                         score_hash=score_hash,
                     )
@@ -720,7 +736,7 @@ def score_and_update(conversation_excerpt: str, *, message_id=None):
                                 conn,
                                 message_id=mid_ok,
                                 scores=scored_payload,
-                                scored_at=scored_at,
+                                scored_at=applied_at,
                             )
                     conn.commit()
                     proof_written = True
@@ -742,6 +758,7 @@ def score_and_update(conversation_excerpt: str, *, message_id=None):
             conn.isolation_level = None
             conn.execute('BEGIN IMMEDIATE')
             try:
+                applied_at = _now_str()
                 applied_tr = _transition_from_state(
                     _read_emotion_state_row(conn),
                     final_v=frozen_v,
@@ -749,7 +766,7 @@ def score_and_update(conversation_excerpt: str, *, message_id=None):
                     mood_word=frozen_mood,
                     p_delta=frozen_p_delta,
                     i_delta=frozen_i_delta,
-                    scored_at=scored_at,
+                    applied_at=applied_at,
                 )
                 conn.execute(
                     _EMOTION_UPDATE_SQL, _emotion_update_params(applied_tr),

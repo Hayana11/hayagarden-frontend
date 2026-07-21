@@ -80,10 +80,16 @@ python3 tools/internal_state_shadow_admin.py ack-gap --incident-id I --reason '.
 python3 tools/internal_state_shadow_admin.py inspect-quarantine
 python3 tools/internal_state_shadow_admin.py reconcile-quarantine \
   --path ... --sha256 ... --reason '...'
+python3 tools/internal_state_shadow_admin.py recover-quarantine-intents
+python3 tools/internal_state_shadow_admin.py inspect-pending-incidents
+python3 tools/internal_state_shadow_admin.py ack-capture-alert \
+  --sha256 ... --reason '...'
 ```
 
 `ack-gap` 只解决该 `message_id`（或指定 `incident_id`）的未解决项，不会一键擦掉其它缺口。
 `reconcile-quarantine` 核对 hash 后原子归档 quarantine，并解决对应 incident。
+它先写 durable reconcile intent，再移动文件，最后在一个 SQLite 事务内完成
+incident/ack/audit；`recover-quarantine-intents` 用于进程在中途退出后的恢复。
 
 ## 硬交接
 
@@ -92,6 +98,9 @@ python3 tools/internal_state_shadow_admin.py reconcile-quarantine \
 - 已有更高 `message_id` proof 时，迟到评分整次放弃（不改 legacy / 不写 outbox）
 - gap sidecar：一 incident 一文件（tmp→fsync→rename）；必须先成功持久化，才允许改 emotion
 - quarantine 未 reconcile 前 bootstrap/status fail-closed；不得手工静默删文件
-- `chat_messages` INSERT 与 user_rule outbox 同事务；缺 outbox 表 → `outbox_capture_gap`；证据全失败 → sticky `capture_evidence_failures`（status 非零）
+- `chat_messages` INSERT 与 user_rule outbox 同事务；缺 outbox 表 → `outbox_capture_gap`
+- USER_EVENTS 部署必须设置独立持久卷上的
+  `INTERNAL_STATE_V3_CAPTURE_ALERT_PATH`。DB 与 incident 文件都失败时写 sticky
+  alert；所有新进程的 status/preflight 都会 fail closed，直到受审计恢复。
 - schema 缺失：先写 gap incident 文件，再改 emotion
 - `wake_outcome` 生产调用点仍为 0

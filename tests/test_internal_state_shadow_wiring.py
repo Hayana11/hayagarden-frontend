@@ -1417,6 +1417,198 @@ class QuarantineReconcileTests(unittest.TestCase):
         finally:
             conn.close()
 
+    def test_prepared_intent_retries_after_rename_failure(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        db_path = str(Path(tmp.name) / 'intent.db')
+        d = shadow.gap_incidents_dir(db_path)
+        d.mkdir(parents=True, exist_ok=True)
+        (d / 'bad.json').write_text('{bad\n', encoding='utf-8')
+        conn = store.open_store(db_path)
+        try:
+            _seed_emotion(conn)
+            shadow.ensure_shadow_schema(conn, db_path=db_path)
+            item = shadow.inspect_quarantine(db_path)[0]
+            iid = shadow.list_unresolved_gap_incidents(conn)[0]['incident_id']
+            with mock.patch.object(os, 'rename', side_effect=OSError('crash after intent')):
+                with self.assertRaises(OSError):
+                    shadow.reconcile_quarantine(
+                        conn, path=item['path'], sha256=item['sha256'],
+                        reason='reviewed', db_path=db_path, incident_id=iid,
+                    )
+            self.assertEqual(
+                conn.execute(
+                    f'SELECT COUNT(*) FROM {shadow.QUARANTINE_INTENT_TABLE} '
+                    'WHERE completed_at IS NULL'
+                ).fetchone()[0],
+                1,
+            )
+            result = shadow.reconcile_quarantine(
+                conn, path=item['path'], sha256=item['sha256'],
+                reason='reviewed', db_path=db_path, incident_id=iid,
+            )
+            self.assertTrue(result['reconciled'])
+            self.assertEqual(
+                conn.execute(
+                    f'SELECT COUNT(*) FROM {shadow.QUARANTINE_RECONCILE_TABLE}'
+                ).fetchone()[0],
+                1,
+            )
+        finally:
+            conn.close()
+
+
+class CaptureAlertTests(unittest.TestCase):
+    def test_total_gap_persistence_failure_writes_cross_process_alert(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        db_path = str(Path(tmp.name) / 'alert.db')
+        alert_path = str(Path(tmp.name) / 'independent-alerts' / 'capture.json')
+        with mock.patch.dict(
+            os.environ, {shadow.CAPTURE_ALERT_PATH_ENV: alert_path}, clear=False,
+        ), mock.patch.object(
+            shadow, 'open_shadow_connection', side_effect=OSError('db unavailable'),
+        ), mock.patch.object(
+            shadow, 'write_proof_gap_sidecar', side_effect=OSError('sidecar unavailable'),
+        ):
+            result = shadow.mark_proof_gap_standalone(
+                db_path=db_path, failed_message_id=7, error_code='outbox_capture_gap',
+            )
+            self.assertEqual(result.status, 'failed')
+            self.assertTrue(result.alert_recorded)
+            self.assertTrue(Path(alert_path).is_file())
+            self.assertTrue(shadow.has_capture_alert(db_path))
+
+        import subprocess
+        env = dict(os.environ)
+        env[shadow.CAPTURE_ALERT_PATH_ENV] = alert_path
+        out = subprocess.run(
+            [sys.executable, 'tools/internal_state_shadow_admin.py',
+             '--db', db_path, 'status'],
+            cwd=ROOT, env=env, text=True, capture_output=True,
+        )
+        self.assertNotEqual(out.returncode, 0)
+        self.assertIn('"capture_alert_pending": true', out.stdout)
+
+    def test_capture_alert_ack_archives_marker(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        db_path = str(Path(tmp.name) / 'ack-alert.db')
+        alert_path = str(Path(tmp.name) / 'alerts' / 'capture.json')
+        with mock.patch.dict(
+            os.environ, {shadow.CAPTURE_ALERT_PATH_ENV: alert_path}, clear=False,
+        ):
+            self.assertTrue(shadow.note_capture_evidence_failure(
+                'operator test', db_path=db_path,
+            ))
+            conn = store.open_store(db_path)
+            try:
+                result = shadow.ack_capture_alert(
+                    conn, sha256=shadow._sha256_file(Path(alert_path)),
+                    reason='reviewed', db_path=db_path,
+                )
+                self.assertTrue(result['acked'])
+                self.assertFalse(Path(alert_path).exists())
+                self.assertTrue(Path(result['archive_path']).is_file())
+            finally:
+                conn.close()
+
+
+class PendingIncidentTmpTests(unittest.TestCase):
+    def test_promote_stale_complete_tmp_is_audited_and_migrates(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        db_path = str(Path(tmp.name) / 'tmp.db')
+        d = shadow.gap_incidents_dir(db_path)
+        d.mkdir(parents=True, exist_ok=True)
+        pending = d / 'complete.tmp'
+        pending.write_text(
+            json.dumps({
+                'gap_detected': True, 'failed_message_id': 77,
+                'error_code': 'crash_before_rename', 'failed_at': T0,
+            }) + '\n',
+            encoding='utf-8',
+        )
+        conn = store.open_store(db_path)
+        try:
+            _seed_emotion(conn)
+            shadow.ensure_shadow_schema(conn, db_path=db_path)
+            result = shadow.recover_pending_incident_tmp(
+                conn, path=str(pending), action='promote', reason='verified complete',
+                stale_after_seconds=0, db_path=db_path,
+            )
+            self.assertEqual(result['action'], 'promote')
+            shadow.migrate_proof_gap_sidecar(conn, db_path=db_path)
+            mids = {
+                x['message_id'] for x in shadow.list_unresolved_gap_incidents(conn)
+            }
+            self.assertIn(77, mids)
+            self.assertEqual(
+                conn.execute(
+                    f'SELECT COUNT(*) FROM {shadow.PENDING_INCIDENT_ACTION_TABLE}'
+                ).fetchone()[0],
+                1,
+            )
+        finally:
+            conn.close()
+
+
+class AppliedAtLinearizationTests(unittest.TestCase):
+    def test_locked_applied_at_is_shared_by_legacy_proof_and_outbox(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        db_path = str(Path(tmp.name) / 'applied.db')
+        patch = mock.patch.dict(os.environ, ALL_ON, clear=False)
+        patch.start()
+        self.addCleanup(patch.stop)
+        conn = store.open_store(db_path)
+        try:
+            _seed_legacy_for_bootstrap(conn)
+            shadow.ensure_shadow_schema(conn, db_path=db_path)
+            conn.execute('BEGIN')
+            shadow.record_score_proof_in_txn(
+                conn, 20, applied_at=T0, source='unit', score_hash='boot',
+            )
+            conn.execute('COMMIT')
+        finally:
+            conn.close()
+        self.assertTrue(shadow.ensure_bootstrapped(
+            db_path=db_path, environ={shadow.SHADOW_ENABLED_ENV: '1'},
+        ).ok)
+        ee.DB_PATH = db_path
+        import datetime as _dt
+        conn = store.open_store(db_path)
+        try:
+            anchor = store.read_state(conn)['p_updated_at']
+        finally:
+            conn.close()
+        applied = (
+            _dt.datetime.strptime(anchor, '%Y-%m-%d %H:%M:%S')
+            + _dt.timedelta(seconds=1)
+        ).strftime('%Y-%m-%d %H:%M:%S')
+        with mock.patch.object(ee, '_deepseek_score', return_value={
+            'valence': 0.2, 'arousal': 0.4, 'mood_word': '线性化',
+            'passion_delta': 0.1, 'intimacy_delta': 0.05,
+        }), mock.patch.object(ee, '_get_ombre_va', return_value=(None, None)), \
+             mock.patch.object(ee, '_now_str', return_value=applied):
+            ee.score_and_update('hello', message_id=101)
+        conn = store.open_store(db_path)
+        try:
+            emotion = conn.execute(
+                'SELECT p_updated_at, i_updated_at, last_interaction, updated_at '
+                'FROM emotion_state WHERE id=1'
+            ).fetchone()
+            proof = shadow.lookup_score_proof(conn, 101)
+            outbox = conn.execute(
+                f'SELECT payload_json FROM {shadow.OUTBOX_TABLE} '
+                "WHERE event_key='user_scored:101'"
+            ).fetchone()
+            self.assertEqual(tuple(emotion), (applied,) * 4)
+            self.assertEqual(proof['applied_at'], applied)
+            self.assertEqual(json.loads(outbox[0])['scored_at'], applied)
+        finally:
+            conn.close()
+
 
 class LegacyHashUnknownTests(unittest.TestCase):
     def test_null_score_hash_refuses_backfill(self):
