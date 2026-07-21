@@ -24,11 +24,12 @@ jobs:
           for name in ("memories.db", "commands.db"):
               sqlite3.connect(f"/opt/frontend/{name}").close()
           PY
-      - name: Run internal state Phase 0 + 1A-0 + 1A-1 + 1A-2 tests
+      - name: Run internal state Phase 0 + 1A-0 + 1A-1 + 1A-2 + 1A-3 tests
         run: |
           python3 -m unittest \
             tests.test_internal_state_store \
             tests.test_internal_state \
             tests.test_internal_state_events \
             tests.test_internal_state_events_scored \
+            tests.test_internal_state_events_outcome \
             -v
