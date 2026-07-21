@@ -1606,6 +1606,35 @@ class CaptureAlertTests(unittest.TestCase):
             finally:
                 conn.close()
 
+    def test_orphan_processing_awaits_explicit_review(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        db_path = str(Path(tmp.name) / 'orphan.db')
+        alert_path = str(Path(tmp.name) / 'alerts' / 'capture.json')
+        with mock.patch.dict(
+            os.environ, {shadow.CAPTURE_ALERT_PATH_ENV: alert_path}, clear=False,
+        ):
+            shadow.note_capture_evidence_failure('B', db_path=db_path)
+            proc = Path(alert_path + '.processing.orphan')
+            os.rename(alert_path, proc)
+            conn = store.open_store(db_path)
+            try:
+                recovered = shadow.recover_capture_alert_acks(conn)
+                self.assertEqual(recovered[0]['status'], 'awaiting_review')
+                self.assertEqual(
+                    conn.execute(
+                        f'SELECT COUNT(*) FROM {shadow.CAPTURE_ALERT_ACK_TABLE}'
+                    ).fetchone()[0],
+                    0,
+                )
+                result = shadow.ack_capture_alert_orphan(
+                    conn, path=str(proc), sha256=shadow._sha256_file(proc),
+                    reason='operator reviewed B',
+                )
+                self.assertTrue(result['acked'])
+            finally:
+                conn.close()
+
 
 class PendingIncidentTmpTests(unittest.TestCase):
     def test_promote_stale_complete_tmp_is_audited_and_migrates(self):

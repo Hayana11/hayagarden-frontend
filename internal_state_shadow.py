@@ -652,6 +652,15 @@ def _complete_capture_alert_intent(conn: sqlite3.Connection, *, intent_id: int) 
 def inspect_capture_alert_acks(conn: sqlite3.Connection) -> list[dict]:
     conn.execute(
         f"""
+        CREATE TABLE IF NOT EXISTS {CAPTURE_ALERT_ACK_TABLE} (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, path TEXT NOT NULL,
+            sha256 TEXT NOT NULL, reason TEXT NOT NULL,
+            archive_path TEXT NOT NULL, acked_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        f"""
         CREATE TABLE IF NOT EXISTS {CAPTURE_ALERT_INTENT_TABLE} (
             intent_id INTEGER PRIMARY KEY AUTOINCREMENT, canonical_path TEXT NOT NULL,
             processing_path TEXT NOT NULL UNIQUE, archive_path TEXT NOT NULL UNIQUE,
@@ -672,6 +681,9 @@ def recover_capture_alert_acks(conn: sqlite3.Connection) -> list[dict]:
     out = []
     for row in rows:
         iid = int(row['intent_id'])
+        if str(row['reason']).startswith('AWAITING_REVIEW:'):
+            out.append({'intent_id': iid, 'status': 'awaiting_review'})
+            continue
         canonical, processing = Path(row['canonical_path']), Path(row['processing_path'])
         digest = str(row['sha256'])
         if canonical.is_file() and not processing.exists():
@@ -681,8 +693,9 @@ def recover_capture_alert_acks(conn: sqlite3.Connection) -> list[dict]:
             os.rename(str(canonical), str(processing))
             _fsync_dir(processing.parent)
         out.append(_complete_capture_alert_intent(conn, intent_id=iid))
-    # Claim-first crash before intent: adopt orphan processing as an audited
-    # recovery intent. New canonical markers are intentionally untouched.
+    # Claim-first crash before intent: adopt orphan processing as *awaiting
+    # operator review*. Recovery must never auto-ack a marker that may be a
+    # hash-mismatch claim of a newer alert.
     alert = capture_alert_path()
     if alert is not None:
         known = {x['processing_path'] for x in inspect_capture_alert_acks(conn)}
@@ -700,15 +713,46 @@ def recover_capture_alert_acks(conn: sqlite3.Connection) -> list[dict]:
                     VALUES (?, ?, ?, ?, ?, ?)
                     """,
                     (str(alert), str(proc), str(archive), digest,
-                     'recovered orphan processing claim', _now_beijing()),
+                     'AWAITING_REVIEW: orphan processing claim', _now_beijing()),
                 )
                 oid = int(cur.lastrowid)
                 conn.execute('COMMIT')
             except Exception:
                 conn.execute('ROLLBACK')
                 raise
-            out.append(_complete_capture_alert_intent(conn, intent_id=oid))
+            out.append({'intent_id': oid, 'status': 'awaiting_review'})
     return out
+
+
+def ack_capture_alert_orphan(
+    conn: sqlite3.Connection, *, path: str, sha256: str, reason: str,
+) -> dict:
+    """人工核对 orphan processing 后才允许归档/ACK。"""
+    if not isinstance(reason, str) or not reason.strip():
+        raise store.StoreError('orphan ack reason required')
+    row = conn.execute(
+        f"""
+        SELECT intent_id, processing_path, sha256 FROM {CAPTURE_ALERT_INTENT_TABLE}
+        WHERE processing_path=? AND completed_at IS NULL
+        """, (path,),
+    ).fetchone()
+    if row is None:
+        raise store.StoreError('no pending orphan capture intent for path')
+    iid = int(row['intent_id'] if isinstance(row, sqlite3.Row) else row[0])
+    expected = str(row['sha256'] if isinstance(row, sqlite3.Row) else row[2])
+    if expected.lower() != str(sha256).lower():
+        raise store.StoreError('orphan sha256 mismatch')
+    conn.execute('BEGIN IMMEDIATE')
+    try:
+        conn.execute(
+            f'UPDATE {CAPTURE_ALERT_INTENT_TABLE} SET reason=? WHERE intent_id=?',
+            (reason.strip()[:512], iid),
+        )
+        conn.execute('COMMIT')
+    except Exception:
+        conn.execute('ROLLBACK')
+        raise
+    return _complete_capture_alert_intent(conn, intent_id=iid)
 
 
 def read_proof_gap_sidecar(db_path: Optional[str] = None) -> Optional[dict]:
@@ -3640,6 +3684,7 @@ __all__ = [
     'PENDING_INCIDENT_INTENT_TABLE',
     'ack_proof_gap',
     'ack_capture_alert',
+    'ack_capture_alert_orphan',
     'inspect_capture_alert_acks',
     'append_gap_incident_sidecar',
     'apply_outcome_shadow',

@@ -69,6 +69,7 @@ def _cmd_prepare_schema(db_path: str) -> int:
             'capture_alert_configured': shadow.capture_alert_configured(),
             'capture_alert_pending': shadow.has_capture_alert(path),
             'capture_alert_preflight': shadow.capture_alert_preflight(path),
+            'recovery_health_ok': shadow.count_incomplete_recovery_intents(conn) == 0,
             'user_events_preflight_ok': (
                 (not shadow.is_user_events_enabled())
                 or (
@@ -85,7 +86,10 @@ def _cmd_prepare_schema(db_path: str) -> int:
         st = store.read_state(conn)
         ready['bootstrapped'] = st is not None
         print(json.dumps(ready, ensure_ascii=False, indent=2))
-        if shadow.is_user_events_enabled() and not ready['user_events_preflight_ok']:
+        if (
+            not ready['recovery_health_ok']
+            or (shadow.is_user_events_enabled() and not ready['user_events_preflight_ok'])
+        ):
             return 1
         return 0
     finally:
@@ -166,6 +170,7 @@ def _cmd_status(db_path: str) -> int:
         or (health.gap_sidecar_pending or 0) > 0
         or (health.quarantine_pending or 0) > 0
         or bool(health.capture_alert_pending)
+        or payload['recovery_intents_pending'] > 0
         or not payload['user_events_preflight_ok']
     ):
         return 1
@@ -415,6 +420,21 @@ def _cmd_capture_alert_acks(db_path: str, recover: bool) -> int:
         conn.close()
 
 
+def _cmd_ack_capture_alert_orphan(db_path: str, path: str, sha256: str, reason: str) -> int:
+    conn = store.open_store(isv3.memories_db_path(db_path))
+    try:
+        result = shadow.ack_capture_alert_orphan(
+            conn, path=path, sha256=sha256, reason=reason,
+        )
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0
+    except Exception as exc:
+        print(f'ERROR: {exc}', file=sys.stderr)
+        return 1
+    finally:
+        conn.close()
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description='Internal State Shadow admin')
     p.add_argument('--db', default=None, help='memories.db path')
@@ -466,6 +486,10 @@ def main(argv: list[str] | None = None) -> int:
     )
     sub.add_parser('inspect-capture-alert-acks', help='show prepared capture alert acks')
     sub.add_parser('recover-capture-alert-acks', help='resume prepared capture alert acks')
+    oack = sub.add_parser('ack-capture-alert-orphan', help='review and ack orphan capture processing')
+    oack.add_argument('--path', required=True)
+    oack.add_argument('--sha256', required=True)
+    oack.add_argument('--reason', required=True)
     args = p.parse_args(argv)
     if args.cmd == 'prepare-schema':
         return _cmd_prepare_schema(args.db)
@@ -505,6 +529,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_capture_alert_acks(args.db, False)
     if args.cmd == 'recover-capture-alert-acks':
         return _cmd_capture_alert_acks(args.db, True)
+    if args.cmd == 'ack-capture-alert-orphan':
+        return _cmd_ack_capture_alert_orphan(args.db, args.path, args.sha256, args.reason)
     return 2
 
 
