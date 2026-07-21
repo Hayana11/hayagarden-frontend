@@ -26,6 +26,7 @@ from typing import Any, Callable, Mapping, Optional, Sequence
 # 与生产库当前实测 busy_timeout 对齐；本模块绝不改 journal_mode
 DEFAULT_BUSY_TIMEOUT_MS = 5000
 
+# DB 落库允许的 status；API 另可返回 version_conflict / idempotency_conflict
 EVENT_STATUSES = (
     'applied',
     'duplicate',
@@ -33,6 +34,8 @@ EVENT_STATUSES = (
     'shadow_only',
     'failed',
 )
+
+_SYSTEM_MANAGED_FIELDS = frozenset({'id', 'state_version', 'updated_at'})
 
 _UNIT_FIELDS = (
     'pa', 'na', 'valence', 'arousal',
@@ -54,6 +57,8 @@ _STATE_COLUMNS = (
     'state_version',
     'updated_at',
 )
+
+_STATE_COLUMN_SET = frozenset(_STATE_COLUMNS)
 
 
 @dataclass(frozen=True)
@@ -88,12 +93,30 @@ def _payload_hash(payload: Mapping[str, Any]) -> str:
     return hashlib.sha256(blob.encode('utf-8')).hexdigest()
 
 
+def _ensure_explicit_tx(conn: sqlite3.Connection) -> None:
+    """公开写路径兼容普通 sqlite3.Connection：改用显式事务。"""
+    if getattr(conn, 'isolation_level', None) is not None:
+        conn.isolation_level = None
+
+
+def _fetchone_dict(conn: sqlite3.Connection, sql: str,
+                   params: Sequence[Any] = ()) -> Optional[dict]:
+    """兼容 sqlite3.Row 与默认 tuple row。"""
+    cur = conn.execute(sql, params)
+    row = cur.fetchone()
+    if row is None:
+        return None
+    if isinstance(row, sqlite3.Row):
+        return dict(row)
+    cols = [d[0] for d in cur.description]
+    return {cols[i]: row[i] for i in range(len(cols))}
+
+
 def open_store(db_path: str,
                busy_timeout_ms: int = DEFAULT_BUSY_TIMEOUT_MS) -> sqlite3.Connection:
     """打开可写连接；设置 busy_timeout；**不**改 journal_mode。"""
     conn = sqlite3.connect(db_path, timeout=max(1.0, busy_timeout_ms / 1000.0))
     conn.row_factory = sqlite3.Row
-    # 显式事务：禁用 Python 隐式 BEGIN，改由 BEGIN IMMEDIATE 控制
     conn.isolation_level = None
     conn.execute(f'PRAGMA busy_timeout={int(busy_timeout_ms)}')
     return conn
@@ -110,6 +133,7 @@ def get_journal_mode(conn: sqlite3.Connection) -> str:
 
 def ensure_schema(conn: sqlite3.Connection) -> None:
     """创建两张表（可重复调用）。不修改 journal_mode。"""
+    _ensure_explicit_tx(conn)
     conn.executescript(
         """
         CREATE TABLE IF NOT EXISTS internal_state_v3 (
@@ -182,16 +206,15 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
 
 
 def read_state(conn: sqlite3.Connection) -> Optional[dict]:
-    row = conn.execute('SELECT * FROM internal_state_v3 WHERE id=1').fetchone()
-    return dict(row) if row else None
+    return _fetchone_dict(conn, 'SELECT * FROM internal_state_v3 WHERE id=1')
 
 
 def read_event(conn: sqlite3.Connection, event_key: str) -> Optional[dict]:
-    row = conn.execute(
+    return _fetchone_dict(
+        conn,
         'SELECT * FROM internal_state_events WHERE event_key=?',
         (event_key,),
-    ).fetchone()
-    return dict(row) if row else None
+    )
 
 
 def _clamp01(value: Any, default: float) -> float:
@@ -213,6 +236,52 @@ def _rollback(conn: sqlite3.Connection) -> None:
         pass
 
 
+def _validate_mutator_updates(raw_updates: Mapping[str, Any]) -> dict:
+    """先校验业务字段，再允许调用方叠加系统字段。"""
+    updates = dict(raw_updates)
+    unknown = set(updates) - _STATE_COLUMN_SET
+    if unknown:
+        raise StoreError(f'unknown state fields: {sorted(unknown)}')
+    managed = set(updates) & _SYSTEM_MANAGED_FIELDS
+    if managed:
+        raise StoreError(
+            f'mutator may not update system-managed fields: {sorted(managed)}'
+        )
+    if not updates:
+        raise StoreError('mutator returned no updatable fields')
+    return updates
+
+
+def _existing_event_result(
+    existing: dict,
+    *,
+    event_type: str,
+    source_id: Optional[str],
+    payload_hash: str,
+) -> ApplyResult:
+    """同 key：语义相同 → duplicate；语义不同 → idempotency_conflict。"""
+    same_type = existing.get('event_type') == event_type
+    same_source = existing.get('source_id') == source_id
+    same_hash = existing.get('payload_hash') == payload_hash
+    if same_type and same_source and same_hash:
+        return ApplyResult(
+            status='duplicate',
+            state_version_before=existing.get('state_version_before'),
+            state_version_after=existing.get('state_version_after'),
+            event_id=existing.get('id'),
+        )
+    return ApplyResult(
+        status='idempotency_conflict',
+        state_version_before=existing.get('state_version_before'),
+        state_version_after=existing.get('state_version_after'),
+        event_id=existing.get('id'),
+        error=(
+            'event_key reused with different event_type/source_id/payload; '
+            'refusing to treat as duplicate'
+        ),
+    )
+
+
 def apply_state_update(
     conn: sqlite3.Connection,
     *,
@@ -222,20 +291,26 @@ def apply_state_update(
     payload: Mapping[str, Any],
     mutator: Callable[[dict], Mapping[str, Any]],
     expected_state_version: Optional[int] = None,
-    allow_missing_state: bool = False,
+    mark_stale: bool = False,
 ) -> ApplyResult:
     """在同一 ``BEGIN IMMEDIATE`` 事务内写事件 + 更新状态。
 
-    - ``event_key`` 冲突 → 返回 ``duplicate``，不更新状态、不插新行
-    - ``expected_state_version`` 不匹配 → 返回 ``version_conflict``（落一条
-      ``failed`` 事件账，状态不变）；不静默覆盖
-    - ``mutator`` 抛错 → 整体 rollback
-    - 成功时 ``state_version`` 恰好 +1
+    幂等 / 冲突语义：
+      - 同 key + 同语义 payload → ``duplicate``（不更新状态）
+      - 同 key + 不同语义 → ``idempotency_conflict``（不更新、不插新行）
+      - 基础设施版本冲突（默认）→ **不消费** event_key，rollback 后
+        ``version_conflict``，允许同 key 重试
+      - 业务确认过期（``mark_stale=True``）→ 落 ``stale_skipped`` 终态
+      - 状态行缺失 → **不消费** event_key，返回 ``failed``，bootstrap 后可重试
+      - mutator 未知字段 / 空更新 / 改系统字段 → rollback + ``StoreError``
+      - 成功时 ``state_version`` 恰好 +1
     """
     if not event_key:
         raise StoreError('event_key required')
     if event_type is None or event_type == '':
         raise StoreError('event_type required')
+
+    _ensure_explicit_tx(conn)
 
     payload_obj = dict(payload)
     p_json = json.dumps(payload_obj, ensure_ascii=False, default=str)
@@ -245,45 +320,33 @@ def apply_state_update(
     try:
         _begin_immediate(conn)
 
-        # 幂等：已存在则直接 duplicate
-        existing = conn.execute(
-            'SELECT id, state_version_before, state_version_after, status '
+        existing = _fetchone_dict(
+            conn,
+            'SELECT id, event_type, source_id, payload_hash, status, '
+            'state_version_before, state_version_after '
             'FROM internal_state_events WHERE event_key=?',
             (event_key,),
-        ).fetchone()
+        )
         if existing is not None:
             conn.execute('COMMIT')
-            return ApplyResult(
-                status='duplicate',
-                state_version_before=existing['state_version_before'],
-                state_version_after=existing['state_version_after'],
-                event_id=existing['id'],
-                error=None,
+            return _existing_event_result(
+                existing,
+                event_type=event_type,
+                source_id=source_id,
+                payload_hash=p_hash,
             )
 
         state = read_state(conn)
         if state is None:
-            if not allow_missing_state:
-                conn.execute(
-                    """
-                    INSERT INTO internal_state_events (
-                        event_key, event_type, source_id, payload_json,
-                        payload_hash, status, state_version_before,
-                        state_version_after, applied_at, error
-                    ) VALUES (?, ?, ?, ?, ?, 'failed', NULL, NULL, ?, ?)
-                    """,
-                    (event_key, event_type, source_id, p_json, p_hash, now,
-                     'state row missing; call bootstrap_from_snapshot first'),
-                )
-                conn.execute('COMMIT')
-                return ApplyResult(
-                    status='failed',
-                    state_version_before=None,
-                    state_version_after=None,
-                    event_id=_last_event_id(conn, event_key),
-                    error='state row missing',
-                )
-            raise StoreError('state row missing')
+            # 不消费 event_key：rollback，bootstrap 后可同 key 重试
+            _rollback(conn)
+            return ApplyResult(
+                status='failed',
+                state_version_before=None,
+                state_version_after=None,
+                event_id=None,
+                error='state row missing; call bootstrap_from_snapshot first',
+            )
 
         version_before = int(state['state_version'])
         if (expected_state_version is not None
@@ -292,43 +355,48 @@ def apply_state_update(
                 f'version conflict: expected {expected_state_version}, '
                 f'current {version_before}'
             )
-            conn.execute(
-                """
-                INSERT INTO internal_state_events (
-                    event_key, event_type, source_id, payload_json,
-                    payload_hash, status, state_version_before,
-                    state_version_after, applied_at, error
-                ) VALUES (?, ?, ?, ?, ?, 'failed', ?, NULL, ?, ?)
-                """,
-                (event_key, event_type, source_id, p_json, p_hash,
-                 version_before, now, err),
-            )
-            conn.execute('COMMIT')
+            if mark_stale:
+                # 业务终态：消费 key，状态不改
+                conn.execute(
+                    """
+                    INSERT INTO internal_state_events (
+                        event_key, event_type, source_id, payload_json,
+                        payload_hash, status, state_version_before,
+                        state_version_after, applied_at, error
+                    ) VALUES (?, ?, ?, ?, ?, 'stale_skipped', ?, NULL, ?, ?)
+                    """,
+                    (event_key, event_type, source_id, p_json, p_hash,
+                     version_before, now, err),
+                )
+                conn.execute('COMMIT')
+                return ApplyResult(
+                    status='stale_skipped',
+                    state_version_before=version_before,
+                    state_version_after=None,
+                    event_id=_last_event_id(conn, event_key),
+                    error=err,
+                )
+            # 基础设施乐观锁冲突：不消费 key
+            _rollback(conn)
             return ApplyResult(
                 status='version_conflict',
                 state_version_before=version_before,
                 state_version_after=None,
-                event_id=_last_event_id(conn, event_key),
+                event_id=None,
                 error=err,
             )
 
-        updates = dict(mutator(dict(state)))
-        # 禁止 mutator 私自改版本号；由本函数统一 +1
-        updates.pop('state_version', None)
-        updates.pop('id', None)
-
+        raw_updates = _validate_mutator_updates(mutator(dict(state)))
         version_after = version_before + 1
+        updates = dict(raw_updates)
         updates['state_version'] = version_after
         updates['updated_at'] = now
 
-        # 范围钳制（防御）；CHECK 仍是最后一道闸
         for key in _UNIT_FIELDS:
             if key in updates:
                 updates[key] = _clamp01(updates[key], float(state[key]))
 
-        cols = [c for c in updates.keys() if c in _STATE_COLUMNS and c != 'id']
-        if not cols:
-            raise StoreError('mutator returned no updatable fields')
+        cols = [c for c in updates.keys() if c in _STATE_COLUMN_SET and c != 'id']
         sets = ', '.join(f'{c}=?' for c in cols)
         values = [updates[c] for c in cols]
         cur = conn.execute(
@@ -337,7 +405,6 @@ def apply_state_update(
             values + [version_before],
         )
         if cur.rowcount != 1:
-            # 并发下版本被抢走：整体失败回滚（不静默）
             raise VersionConflictError(
                 f'lost race on state_version={version_before}'
             )
@@ -375,10 +442,11 @@ def apply_state_update(
 
 
 def _last_event_id(conn: sqlite3.Connection, event_key: str) -> Optional[int]:
-    row = conn.execute(
+    row = _fetchone_dict(
+        conn,
         'SELECT id FROM internal_state_events WHERE event_key=?',
         (event_key,),
-    ).fetchone()
+    )
     return int(row['id']) if row else None
 
 
@@ -391,10 +459,13 @@ def bootstrap_from_snapshot(
 ) -> ApplyResult:
     """用显式传入的 Phase 0 snapshot 初始化 id=1。
 
-    - 不自行 import 旧引擎
-    - 不自行打开生产库
-    - 幂等：已存在状态行则返回 duplicate，不改写
+    Phase 0 数值已物化到 ``observed_at``，因此：
+      ``p_updated_at`` / ``i_updated_at`` / ``drives_updated_at``
+      一律写成 ``observed_at``，避免后续再衰减同一段时间。
+    旧来源时间保留在 bootstrap event payload 的
+    ``legacy_source_timestamps`` 中。
     """
+    _ensure_explicit_tx(conn)
     ensure_schema(conn)
 
     def _g(obj: Any, *path: str, default=None):
@@ -414,6 +485,7 @@ def bootstrap_from_snapshot(
               or _g(snapshot, 'drives'))
     observed_at = _g(snapshot, 'observed_at') or _now_beijing()
     ts = _g(snapshot, 'diagnostics', 'source_timestamps') or {}
+    legacy_ts = dict(ts) if isinstance(ts, Mapping) else {}
 
     seed = {
         'pa': _clamp01(_g(affect, 'pa'), 0.5),
@@ -425,10 +497,9 @@ def bootstrap_from_snapshot(
         'intimacy': _clamp01(_g(bond, 'intimacy'), 0.3),
         'passion': _clamp01(_g(bond, 'passion'), 0.0),
         'commitment': _clamp01(_g(bond, 'commitment'), 0.7),
-        'p_updated_at': ts.get('legacy.emotion_state.p_updated_at')
-        if isinstance(ts, Mapping) else None,
-        'i_updated_at': ts.get('legacy.emotion_state.i_updated_at')
-        if isinstance(ts, Mapping) else None,
+        # 已物化到 observed_at：时间基准必须对齐，禁止双倍衰减
+        'p_updated_at': observed_at,
+        'i_updated_at': observed_at,
         'attachment': _clamp01(_g(drives, 'attachment'), 0.10),
         'curiosity': _clamp01(_g(drives, 'curiosity'), 0.20),
         'reflection': _clamp01(_g(drives, 'reflection'), 0.10),
@@ -437,10 +508,7 @@ def bootstrap_from_snapshot(
         'libido': _clamp01(_g(drives, 'libido'), 0.00),
         'stress': _clamp01(_g(drives, 'stress'), 0.10),
         'fatigue': _clamp01(_g(drives, 'fatigue'), 0.20),
-        'drives_updated_at': (
-            ts.get('legacy.drive_state.last_updated')
-            if isinstance(ts, Mapping) else None
-        ) or observed_at,
+        'drives_updated_at': observed_at,
         'last_scored_message_id': None,
         'state_version': 0,
         'updated_at': observed_at,
@@ -449,7 +517,8 @@ def bootstrap_from_snapshot(
     payload = {
         'source': 'bootstrap_from_snapshot',
         'observed_at': observed_at,
-        'seed_keys': sorted(seed.keys()),
+        'legacy_source_timestamps': legacy_ts,
+        'seed': seed,
     }
     p_json = json.dumps(payload, ensure_ascii=False, default=str)
     p_hash = _payload_hash(payload)
@@ -458,15 +527,16 @@ def bootstrap_from_snapshot(
     try:
         _begin_immediate(conn)
 
-        existing_event = conn.execute(
-            'SELECT id, status, state_version_before, state_version_after '
+        existing_event = _fetchone_dict(
+            conn,
+            'SELECT id, status, state_version_before, state_version_after, '
+            'event_type, source_id, payload_hash '
             'FROM internal_state_events WHERE event_key=?',
             (event_key,),
-        ).fetchone()
+        )
         existing_state = read_state(conn)
 
         if existing_state is not None:
-            # 已初始化：不改写；若事件缺失则补一条 duplicate 标记账
             if existing_event is None:
                 conn.execute(
                     """
@@ -493,7 +563,6 @@ def bootstrap_from_snapshot(
             )
 
         if existing_event is not None:
-            # 事件在、状态不在：异常残留，拒绝静默重放
             conn.execute('COMMIT')
             return ApplyResult(
                 status='failed',

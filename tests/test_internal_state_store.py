@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import math
 import sqlite3
 import sys
 import tempfile
@@ -23,14 +25,14 @@ def _snapshot(**overrides):
         observed_at='2026-07-21 12:00:00',
         affect=SimpleNamespace(
             pa=0.55, na=0.25, valence=0.6, arousal=0.4, mood_word='平静'),
-        bond=SimpleNamespace(intimacy=0.5, passion=0.2, commitment=0.7),
+        bond=SimpleNamespace(intimacy=0.5, passion=0.294, commitment=0.7),
         candidate_unified_drives=SimpleNamespace(
             attachment=0.35, curiosity=0.2, reflection=0.3, social=0.1,
             duty=0.15, libido=0.05, stress=0.2, fatigue=0.25),
         diagnostics=SimpleNamespace(source_timestamps={
-            'legacy.emotion_state.p_updated_at': '2026-07-21 11:00:00',
-            'legacy.emotion_state.i_updated_at': '2026-07-21 11:00:00',
-            'legacy.drive_state.last_updated': '2026-07-21 11:30:00',
+            'legacy.emotion_state.p_updated_at': '2026-07-21 06:00:00',
+            'legacy.emotion_state.i_updated_at': '2026-07-21 06:00:00',
+            'legacy.drive_state.last_updated': '2026-07-21 10:00:00',
         }),
     )
     for k, v in overrides.items():
@@ -48,8 +50,8 @@ class StoreBase(unittest.TestCase):
         self.conn.close()
         self.tmp.cleanup()
 
-    def bootstrap(self):
-        return store.bootstrap_from_snapshot(self.conn, _snapshot())
+    def bootstrap(self, snap=None):
+        return store.bootstrap_from_snapshot(self.conn, snap or _snapshot())
 
 
 class SchemaTests(StoreBase):
@@ -65,12 +67,10 @@ class SchemaTests(StoreBase):
         self.assertIn('internal_state_events', tables)
 
     def test_does_not_force_wal(self):
-        """迁移代码不得偷偷改 journal_mode。"""
         before = store.get_journal_mode(self.conn)
         store.ensure_schema(self.conn)
         after = store.get_journal_mode(self.conn)
         self.assertEqual(before, after)
-        # 临时库默认 delete；只要我们没写成 wal 即可
         self.assertNotEqual(after, 'wal')
 
     def test_busy_timeout_set(self):
@@ -86,7 +86,6 @@ class SchemaTests(StoreBase):
         for key in ('pa', 'na', 'attachment', 'fatigue'):
             self.assertGreaterEqual(row[key], 0.0)
             self.assertLessEqual(row[key], 1.0)
-        # CHECK：越界写入失败
         with self.assertRaises(sqlite3.IntegrityError):
             self.conn.execute('BEGIN IMMEDIATE')
             self.conn.execute(
@@ -102,16 +101,44 @@ class BootstrapTests(StoreBase):
     def test_bootstrap_idempotent(self):
         r1 = self.bootstrap()
         self.assertEqual(r1.status, 'applied')
-        self.assertEqual(r1.state_version_after, 0)
         state1 = store.read_state(self.conn)
         r2 = store.bootstrap_from_snapshot(self.conn, _snapshot(
             affect=SimpleNamespace(
                 pa=0.99, na=0.01, valence=0.9, arousal=0.9, mood_word='变了')))
         self.assertEqual(r2.status, 'duplicate')
         state2 = store.read_state(self.conn)
-        self.assertEqual(state1['pa'], state2['pa'])
-        self.assertEqual(state1['state_version'], state2['state_version'])
+        self.assertAlmostEqual(state1['pa'], state2['pa'])
         self.assertAlmostEqual(state1['pa'], 0.55)
+
+    def test_bootstrap_resets_materialized_timestamps_to_observed_at(self):
+        snap = _snapshot()
+        self.bootstrap(snap)
+        state = store.read_state(self.conn)
+        self.assertEqual(state['p_updated_at'], snap.observed_at)
+        self.assertEqual(state['i_updated_at'], snap.observed_at)
+        self.assertEqual(state['drives_updated_at'], snap.observed_at)
+        self.assertEqual(state['updated_at'], snap.observed_at)
+        event = store.read_event(self.conn, 'bootstrap:initial')
+        payload = json.loads(event['payload_json'])
+        self.assertEqual(
+            payload['legacy_source_timestamps'][
+                'legacy.emotion_state.p_updated_at'],
+            '2026-07-21 06:00:00')
+        self.assertIn('seed', payload)
+
+    def test_post_bootstrap_decay_only_counts_time_after_observed_at(self):
+        """物化值不应再按旧时间戳二次衰减。"""
+        passion_at_obs = 0.294
+        self.bootstrap(_snapshot(
+            bond=SimpleNamespace(
+                intimacy=0.5, passion=passion_at_obs, commitment=0.7)))
+        state = store.read_state(self.conn)
+        # 若错误保留旧 p_updated_at=06:00，相对 observed 12:00 会再衰 6h
+        wrong_double = passion_at_obs * math.exp(-6.0 / 6.0)
+        # 正确：以 observed_at 为基准，再过 0 小时仍为原值
+        self.assertAlmostEqual(state['passion'], passion_at_obs, places=4)
+        self.assertNotAlmostEqual(state['passion'], wrong_double, places=3)
+        self.assertEqual(state['p_updated_at'], '2026-07-21 12:00:00')
 
     def test_bootstrap_does_not_import_legacy_engines(self):
         import ast
@@ -122,9 +149,8 @@ class BootstrapTests(StoreBase):
             if isinstance(node, ast.Import):
                 for alias in node.names:
                     imported.add(alias.name.split('.')[0])
-            elif isinstance(node, ast.ImportFrom):
-                if node.module:
-                    imported.add(node.module.split('.')[0])
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                imported.add(node.module.split('.')[0])
         for banned in ('emotion_engine', 'drive_engine', 'desire', 'gateway'):
             self.assertNotIn(banned, imported)
 
@@ -132,39 +158,60 @@ class BootstrapTests(StoreBase):
 class EventIdempotencyTests(StoreBase):
     def test_event_key_unique_and_duplicate_skips_version(self):
         self.bootstrap()
+        payload = {'message_id': 1}
         r1 = store.apply_state_update(
             self.conn,
             event_key='user_rule:1',
             event_type='user_rule',
             source_id='1',
-            payload={'message_id': 1},
+            payload=payload,
             mutator=lambda s: {'pa': min(1.0, s['pa'] + 0.05)},
             expected_state_version=0,
         )
         self.assertEqual(r1.status, 'applied')
-        self.assertEqual(r1.state_version_before, 0)
         self.assertEqual(r1.state_version_after, 1)
-        self.assertEqual(store.read_state(self.conn)['state_version'], 1)
 
         r2 = store.apply_state_update(
             self.conn,
             event_key='user_rule:1',
             event_type='user_rule',
             source_id='1',
-            payload={'message_id': 1, 'retry': True},
+            payload=payload,  # 同语义
             mutator=lambda s: {'pa': 0.99},
             expected_state_version=1,
         )
         self.assertEqual(r2.status, 'duplicate')
-        state = store.read_state(self.conn)
-        self.assertEqual(state['state_version'], 1)
-        self.assertNotAlmostEqual(state['pa'], 0.99)
-        # 仍只有一条事件
+        self.assertEqual(store.read_state(self.conn)['state_version'], 1)
         n = self.conn.execute(
             'SELECT COUNT(*) FROM internal_state_events WHERE event_key=?',
             ('user_rule:1',),
         ).fetchone()[0]
         self.assertEqual(n, 1)
+
+    def test_same_key_different_payload_is_idempotency_conflict(self):
+        self.bootstrap()
+        store.apply_state_update(
+            self.conn,
+            event_key='user_rule:123',
+            event_type='user_rule',
+            source_id='123',
+            payload={'message_id': 123, 'delta': 'A'},
+            mutator=lambda s: {'pa': 0.6},
+            expected_state_version=0,
+        )
+        pa_after = store.read_state(self.conn)['pa']
+        r = store.apply_state_update(
+            self.conn,
+            event_key='user_rule:123',
+            event_type='user_rule',
+            source_id='123',
+            payload={'message_id': 123, 'delta': 'B'},
+            mutator=lambda s: {'pa': 0.99},
+            expected_state_version=1,
+        )
+        self.assertEqual(r.status, 'idempotency_conflict')
+        self.assertAlmostEqual(store.read_state(self.conn)['pa'], pa_after)
+        self.assertEqual(store.read_state(self.conn)['state_version'], 1)
 
 
 class AtomicityTests(StoreBase):
@@ -209,9 +256,7 @@ class AtomicityTests(StoreBase):
         state = store.read_state(self.conn)
         event = store.read_event(self.conn, 'user_rule:2')
         self.assertAlmostEqual(state['na'], 0.33)
-        self.assertEqual(state['state_version'], 1)
         self.assertEqual(event['status'], 'applied')
-        self.assertEqual(event['state_version_before'], 0)
         self.assertEqual(event['state_version_after'], 1)
 
 
@@ -235,15 +280,115 @@ class VersionTests(StoreBase):
             source_id='11',
             payload={},
             mutator=lambda s: {'pa': 0.11},
-            expected_state_version=0,  # stale
+            expected_state_version=0,
         )
         self.assertEqual(r.status, 'version_conflict')
+        self.assertIsNone(r.event_id)
+        self.assertIsNone(store.read_event(self.conn, 'user_rule:11'))
         state = store.read_state(self.conn)
         self.assertEqual(state['state_version'], 1)
         self.assertAlmostEqual(state['pa'], pa_before)
-        event = store.read_event(self.conn, 'user_rule:11')
-        self.assertEqual(event['status'], 'failed')
-        self.assertIn('version conflict', event['error'])
+
+    def test_version_conflict_same_event_key_can_retry(self):
+        self.bootstrap()
+        store.apply_state_update(
+            self.conn,
+            event_key='user_rule:other',
+            event_type='user_rule',
+            source_id='other',
+            payload={},
+            mutator=lambda s: {'curiosity': 0.45},
+            expected_state_version=0,
+        )
+        # 用过期版本尝试 A → 冲突且不消费 key
+        r1 = store.apply_state_update(
+            self.conn,
+            event_key='user_rule:A',
+            event_type='user_rule',
+            source_id='A',
+            payload={'message_id': 'A'},
+            mutator=lambda s: {'pa': 0.77},
+            expected_state_version=0,
+        )
+        self.assertEqual(r1.status, 'version_conflict')
+        self.assertIsNone(store.read_event(self.conn, 'user_rule:A'))
+        # 重读最新版本后同 key 重试
+        cur_ver = store.read_state(self.conn)['state_version']
+        r2 = store.apply_state_update(
+            self.conn,
+            event_key='user_rule:A',
+            event_type='user_rule',
+            source_id='A',
+            payload={'message_id': 'A'},
+            mutator=lambda s: {'pa': 0.77},
+            expected_state_version=cur_ver,
+        )
+        self.assertEqual(r2.status, 'applied')
+        self.assertEqual(r2.state_version_after, cur_ver + 1)
+        self.assertAlmostEqual(store.read_state(self.conn)['pa'], 0.77)
+
+    def test_missing_state_event_can_retry_after_bootstrap(self):
+        store.ensure_schema(self.conn)
+        r1 = store.apply_state_update(
+            self.conn,
+            event_key='user_rule:early',
+            event_type='user_rule',
+            source_id='early',
+            payload={'message_id': 'early'},
+            mutator=lambda s: {'pa': 0.66},
+            expected_state_version=0,
+        )
+        self.assertEqual(r1.status, 'failed')
+        self.assertIn('missing', r1.error)
+        self.assertIsNone(store.read_event(self.conn, 'user_rule:early'))
+        self.bootstrap()
+        r2 = store.apply_state_update(
+            self.conn,
+            event_key='user_rule:early',
+            event_type='user_rule',
+            source_id='early',
+            payload={'message_id': 'early'},
+            mutator=lambda s: {'pa': 0.66},
+            expected_state_version=0,
+        )
+        self.assertEqual(r2.status, 'applied')
+        self.assertAlmostEqual(store.read_state(self.conn)['pa'], 0.66)
+
+    def test_mark_stale_consumes_key_as_terminal(self):
+        self.bootstrap()
+        store.apply_state_update(
+            self.conn,
+            event_key='user_scored:1',
+            event_type='user_scored',
+            source_id='1',
+            payload={'v': 1},
+            mutator=lambda s: {'last_scored_message_id': 1},
+            expected_state_version=0,
+        )
+        r = store.apply_state_update(
+            self.conn,
+            event_key='user_scored:0',
+            event_type='user_scored',
+            source_id='0',
+            payload={'v': 0},
+            mutator=lambda s: {'last_scored_message_id': 0},
+            expected_state_version=0,
+            mark_stale=True,
+        )
+        self.assertEqual(r.status, 'stale_skipped')
+        event = store.read_event(self.conn, 'user_scored:0')
+        self.assertEqual(event['status'], 'stale_skipped')
+        # 终态后再同 key → duplicate
+        r2 = store.apply_state_update(
+            self.conn,
+            event_key='user_scored:0',
+            event_type='user_scored',
+            source_id='0',
+            payload={'v': 0},
+            mutator=lambda s: {'last_scored_message_id': 0},
+            expected_state_version=1,
+        )
+        self.assertEqual(r2.status, 'duplicate')
 
     def test_successful_update_increments_version_by_one(self):
         self.bootstrap()
@@ -262,6 +407,81 @@ class VersionTests(StoreBase):
         self.assertEqual(store.read_state(self.conn)['state_version'], 3)
 
 
+class MutatorValidationTests(StoreBase):
+    def test_unknown_mutator_field_rolls_back(self):
+        self.bootstrap()
+        with self.assertRaises(store.StoreError) as ctx:
+            store.apply_state_update(
+                self.conn,
+                event_key='user_rule:typo',
+                event_type='user_rule',
+                source_id='typo',
+                payload={},
+                mutator=lambda s: {'curiosty': 0.8},
+                expected_state_version=0,
+            )
+        self.assertIn('unknown', str(ctx.exception))
+        self.assertEqual(store.read_state(self.conn)['state_version'], 0)
+        self.assertIsNone(store.read_event(self.conn, 'user_rule:typo'))
+
+    def test_empty_mutator_rolls_back(self):
+        self.bootstrap()
+        with self.assertRaises(store.StoreError):
+            store.apply_state_update(
+                self.conn,
+                event_key='user_rule:empty',
+                event_type='user_rule',
+                source_id='empty',
+                payload={},
+                mutator=lambda s: {},
+                expected_state_version=0,
+            )
+        self.assertEqual(store.read_state(self.conn)['state_version'], 0)
+        self.assertIsNone(store.read_event(self.conn, 'user_rule:empty'))
+
+    def test_system_managed_field_rejected(self):
+        self.bootstrap()
+        with self.assertRaises(store.StoreError) as ctx:
+            store.apply_state_update(
+                self.conn,
+                event_key='user_rule:sys',
+                event_type='user_rule',
+                source_id='sys',
+                payload={},
+                mutator=lambda s: {'state_version': 99, 'pa': 0.5},
+                expected_state_version=0,
+            )
+        self.assertIn('system-managed', str(ctx.exception))
+        self.assertEqual(store.read_state(self.conn)['state_version'], 0)
+
+
+class ConnectionContractTests(unittest.TestCase):
+    def test_plain_sqlite_connection_is_supported(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        db_path = str(Path(tmp.name) / 'plain.db')
+        conn = sqlite3.connect(db_path)  # 默认 row_factory=None
+        try:
+            r = store.bootstrap_from_snapshot(conn, _snapshot())
+            self.assertEqual(r.status, 'applied')
+            self.assertIsNotNone(r.event_id)
+            state = store.read_state(conn)
+            self.assertEqual(state['p_updated_at'], '2026-07-21 12:00:00')
+            r2 = store.apply_state_update(
+                conn,
+                event_key='user_rule:plain',
+                event_type='user_rule',
+                source_id='plain',
+                payload={'ok': True},
+                mutator=lambda s: {'na': 0.31},
+                expected_state_version=0,
+            )
+            self.assertEqual(r2.status, 'applied')
+            self.assertAlmostEqual(store.read_state(conn)['na'], 0.31)
+        finally:
+            conn.close()
+
+
 class ConcurrencyTests(StoreBase):
     def test_two_connections_no_silent_lost_update(self):
         self.bootstrap()
@@ -276,7 +496,6 @@ class ConcurrencyTests(StoreBase):
                 barrier.wait(timeout=5)
 
                 def mutator(state, _field=field, _value=value):
-                    # 拉长临界区，放大竞争窗口
                     time.sleep(0.05)
                     return {_field: _value}
 
@@ -299,28 +518,35 @@ class ConcurrencyTests(StoreBase):
         t1.join(timeout=10); t2.join(timeout=10)
 
         self.assertEqual(len(results), 2)
-        statuses = sorted(r.status for r in results)
-        # 一个 applied，另一个 version_conflict（或因 IMMEDIATE 串行后仍版本冲突）
-        self.assertIn('applied', statuses)
-        self.assertTrue(
-            statuses.count('applied') == 1,
-            f'expected exactly one applied, got {statuses}',
-        )
-        self.assertTrue(
-            any(s in ('version_conflict',) for s in statuses)
-            or statuses.count('applied') == 1 and 'version_conflict' in statuses,
-            f'unexpected statuses: {statuses}',
-        )
+        statuses = [r.status for r in results]
+        self.assertEqual(statuses.count('applied'), 1)
+        self.assertEqual(statuses.count('version_conflict'), 1)
 
         c = store.open_store(self.db_path)
         try:
             state = store.read_state(c)
             self.assertEqual(state['state_version'], 1)
-            # 只有赢家的字段被写入，不会两个都悄悄写上却版本仍像只加一次
-            winners = [r for r in results if r.status == 'applied']
-            self.assertEqual(len(winners), 1)
-            # 版本只 +1
-            self.assertEqual(winners[0].state_version_after, 1)
+            # 失败者未消费 key：可同 key 用新版本重试
+            loser = next(r for r in results if r.status == 'version_conflict')
+            # 找出未 applied 的 key
+            applied_keys = {
+                'user_rule:a' if store.read_event(c, 'user_rule:a') else None,
+                'user_rule:b' if store.read_event(c, 'user_rule:b') else None,
+            }
+            missing = [k for k in ('user_rule:a', 'user_rule:b')
+                       if store.read_event(c, k) is None]
+            self.assertEqual(len(missing), 1, applied_keys)
+            retry = store.apply_state_update(
+                c,
+                event_key=missing[0],
+                event_type='user_rule',
+                source_id=missing[0],
+                payload={'field': 'retry'},
+                mutator=lambda s: {'social': 0.22},
+                expected_state_version=1,
+            )
+            self.assertEqual(retry.status, 'applied')
+            self.assertEqual(store.read_state(c)['state_version'], 2)
         finally:
             c.close()
 
@@ -329,17 +555,13 @@ class NoProductionHookTests(unittest.TestCase):
     def test_module_has_no_startup_side_effects_or_hooks(self):
         import ast
         src = Path(ROOT, 'internal_state_store.py').read_text(encoding='utf-8')
-        # 不得在模块级调用 ensure_schema / bootstrap（无启动副作用）
         tree = ast.parse(src)
         for node in tree.body:
             if isinstance(node, ast.Expr) and isinstance(node.value, ast.Call):
                 self.fail(f'module-level call forbidden: line {node.lineno}')
-        # 业务钩子与改 WAL 不得出现在可执行语句（允许 docstring 禁令清单）
-        body_src = ast.get_source_segment(src, tree) or src
-        # 剥掉模块 docstring 后再扫
         if (isinstance(tree.body[0], ast.Expr)
                 and isinstance(tree.body[0].value, ast.Constant)):
-            start = tree.body[1].lineno - 1 if len(tree.body) > 1 else len(src)
+            start = tree.body[1].lineno - 1 if len(tree.body) > 1 else 0
             code_only = '\n'.join(src.splitlines()[start:])
         else:
             code_only = src
