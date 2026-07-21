@@ -91,12 +91,17 @@ CANDIDATE_ATTACHMENT_SATISFY_RATIO = 0.45
 _STATE_CLOCK_FIELDS = ('p_updated_at', 'i_updated_at', 'drives_updated_at')
 _USER_RULE_EVENT_TYPE = 'user_rule'
 _TS_FMT = '%Y-%m-%d %H:%M:%S'
-# 有限几种可解析格式；一律 canonicalize 成 _TS_FMT。禁止 [:19] 截断吞尾随垃圾。
+# 有限几种可解析格式。禁止 [:19] 截断吞尾随垃圾。
+# 小数秒仅允许全 0（兼容 .0 / .000000）；非零微秒在 canonicalize 拒绝。
 _TS_PARSE_FORMATS = (_TS_FMT, '%Y-%m-%d %H:%M:%S.%f')
 
 
 def _parse_dt(value: Any) -> Optional[datetime.datetime]:
-    """解析时间；整串必须匹配某一允许格式，拒绝尾随垃圾。"""
+    """解析时间；整串必须匹配某一允许格式，拒绝尾随垃圾。
+
+    注意：本函数可能返回带 microsecond 的 datetime；业务入口必须再经
+    ``_canonicalize_ts`` / ``_require_state_clocks``，禁止先截断再比较。
+    """
     if value is None:
         return None
     s = str(value)
@@ -111,12 +116,22 @@ def _parse_dt(value: Any) -> Optional[datetime.datetime]:
 
 
 def _canonicalize_ts(value: Any, *, field: str) -> str:
-    """解析成功后统一写成 YYYY-MM-DD HH:MM:SS；失败抛 StoreError。"""
+    """规范化为 YYYY-MM-DD HH:MM:SS。
+
+    - 标准 19 位：接受
+    - 小数部分全为 0（如 ``.0`` / ``.000000``）：接受并去掉小数
+    - ``microsecond != 0``：``StoreError``（不得静默截成整秒掩盖倒序）
+    """
     dt = _parse_dt(value)
     if dt is None:
         raise StoreError(
             f'{field} is not a canonical timestamp '
             f'YYYY-MM-DD HH:MM:SS: {value!r}'
+        )
+    if dt.microsecond != 0:
+        raise StoreError(
+            f'{field} has non-zero fractional seconds: {value!r}; '
+            f'only whole seconds or zero-fraction (.000000) are accepted'
         )
     return dt.strftime(_TS_FMT)
 
@@ -140,7 +155,7 @@ def _canonicalize_observation_clocks(
     """规范化观察时钟；不读状态行。
 
     - ``previous_user_at is None`` → 合法 clock_missing（返回 None）
-    - 非 None 但不可解析 → StoreError（不得当成 clock_missing）
+    - 非 None 但不可解析 / 非零微秒 → StoreError（不得当成 clock_missing）
     """
     if not created_at:
         raise StoreError('created_at required')
@@ -151,7 +166,7 @@ def _canonicalize_observation_clocks(
     if previous_user_at is None:
         return created_canon, None
 
-    # 非 None：空串 / 垃圾 / 不可解析一律拒绝，禁止伪装成 clock_missing
+    # 非 None：空串 / 垃圾 / 非零微秒一律拒绝，禁止伪装成 clock_missing
     prev_canon = _canonicalize_ts(previous_user_at, field='previous_user_at')
     prev_dt = _parse_dt(prev_canon)
     assert prev_dt is not None
@@ -168,10 +183,13 @@ def _require_state_clocks(
     *,
     created_at: str,
 ) -> None:
-    """bootstrap 后的三个锚点必须存在且可解析；损坏不得按 elapsed=0 洗白。"""
+    """bootstrap 后的三个锚点必须存在、可解析、且无非零微秒。
+
+    损坏 / 非零小数秒不得按 elapsed=0 或截断后比较来洗白。
+    """
     created_dt = _parse_dt(created_at)
-    if created_dt is None:
-        raise StoreError(f'created_at is not parseable: {created_at!r}')
+    if created_dt is None or created_dt.microsecond != 0:
+        raise StoreError(f'created_at is not a whole-second timestamp: {created_at!r}')
 
     for field in _STATE_CLOCK_FIELDS:
         anchor_raw = state.get(field)
@@ -179,12 +197,18 @@ def _require_state_clocks(
             raise StoreError(
                 f'state clock {field} is missing; refusing transition'
             )
-        anchor_dt = _parse_dt(anchor_raw)
-        if anchor_dt is None:
-            raise StoreError(
-                f'state clock {field} is not parseable: {anchor_raw!r}; '
-                f'refusing to whitewash'
+        # 非零微秒在此失败，绝不先截断再跟 created_at 比先后
+        try:
+            anchor_canon = _canonicalize_ts(
+                anchor_raw, field=f'state clock {field}',
             )
+        except StoreError as exc:
+            raise StoreError(
+                f'state clock {field} invalid: {anchor_raw!r}; '
+                f'refusing to whitewash ({exc})'
+            ) from exc
+        anchor_dt = _parse_dt(anchor_canon)
+        assert anchor_dt is not None
         if created_dt < anchor_dt:
             raise StoreError(
                 f'created_at {created_at!r} is before state clock '

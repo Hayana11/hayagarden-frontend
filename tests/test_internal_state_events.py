@@ -344,7 +344,7 @@ class ClockRejectTests(EventsBase):
         self.assertIsNone(store.read_event(self.conn, 'user_rule:73'))
 
     def test_equivalent_timestamp_forms_share_identity(self):
-        """微秒形式 canonicalize 后与标准形式同身份，不产生假 conflict。"""
+        """零小数秒（.000000）canonicalize 后与整秒同身份，不产生假 conflict。"""
         r1 = events.observe_user_message(
             self.conn,
             message_id=74,
@@ -371,6 +371,65 @@ class ClockRejectTests(EventsBase):
         )
         self.assertEqual(r2.status, 'duplicate')
 
+    def test_nonzero_fractional_same_second_order_rejected(self):
+        """同一秒内真实倒序不得因截断成整秒而被当成零间隔。"""
+        with self.assertRaises(store.StoreError) as ctx:
+            events.observe_user_message(
+                self.conn,
+                message_id=75,
+                text='你好',
+                created_at='2026-07-21 12:00:00.100000',
+                previous_user_at='2026-07-21 12:00:00.900000',
+            )
+        msg = str(ctx.exception)
+        self.assertIn('fractional seconds', msg)
+        self.assertIsNone(store.read_event(self.conn, 'user_rule:75'))
+        self.assertEqual(self.state()['state_version'], 0)
+
+    def test_nonzero_fractional_created_at_rejected_then_whole_second_retries(self):
+        with self.assertRaises(store.StoreError) as ctx:
+            events.observe_user_message(
+                self.conn,
+                message_id=76,
+                text='你好',
+                created_at=T_2H + '.100000',
+                previous_user_at=T0,
+            )
+        self.assertIn('fractional seconds', str(ctx.exception))
+        self.assertIsNone(store.read_event(self.conn, 'user_rule:76'))
+
+        r = events.observe_user_message(
+            self.conn,
+            message_id=76,
+            text='你好',
+            created_at=T_2H,
+            previous_user_at=T0,
+        )
+        self.assertEqual(r.status, 'applied')
+        payload = json.loads(
+            store.read_event(self.conn, 'user_rule:76')['payload_json'])
+        self.assertEqual(payload['created_at'], T_2H)
+
+    def test_state_clock_nonzero_fractional_rejected_unchanged(self):
+        before = dict(self.state())
+        self.conn.execute(
+            "UPDATE internal_state_v3 SET p_updated_at=? WHERE id=1",
+            (T0 + '.100000',))
+        self.conn.commit()
+        with self.assertRaises(store.StoreError) as ctx:
+            events.observe_user_message(
+                self.conn,
+                message_id=77,
+                text='你好',
+                created_at=T_2H,
+                previous_user_at=T0,
+            )
+        self.assertIn('fractional seconds', str(ctx.exception))
+        self.assertIsNone(store.read_event(self.conn, 'user_rule:77'))
+        after = self.state()
+        self.assertEqual(after['p_updated_at'], T0 + '.100000')
+        self.assertEqual(after['state_version'], before['state_version'])
+        self.assertEqual(after['passion'], before['passion'])
 
 
 class BondMaterializeTests(EventsBase):
