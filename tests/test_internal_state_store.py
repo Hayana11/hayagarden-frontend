@@ -51,7 +51,7 @@ class StoreBase(unittest.TestCase):
         self.tmp.cleanup()
 
     def bootstrap(self, snap=None):
-        return store.bootstrap_from_snapshot(self.conn, snap or _snapshot())
+        return store.bootstrap_from_snapshot(self.conn, snap or _snapshot(), last_scored_message_id=1)
 
 
 class SchemaTests(StoreBase):
@@ -100,10 +100,10 @@ class SchemaTests(StoreBase):
 class BootstrapTests(StoreBase):
     def test_bootstrap_same_snapshot_is_duplicate(self):
         snap = _snapshot()
-        r1 = store.bootstrap_from_snapshot(self.conn, snap)
+        r1 = store.bootstrap_from_snapshot(self.conn, snap, last_scored_message_id=1)
         self.assertEqual(r1.status, 'applied')
         state1 = store.read_state(self.conn)
-        r2 = store.bootstrap_from_snapshot(self.conn, snap)
+        r2 = store.bootstrap_from_snapshot(self.conn, snap, last_scored_message_id=1)
         self.assertEqual(r2.status, 'duplicate')
         state2 = store.read_state(self.conn)
         self.assertAlmostEqual(state1['pa'], state2['pa'])
@@ -113,9 +113,12 @@ class BootstrapTests(StoreBase):
         r1 = self.bootstrap()
         self.assertEqual(r1.status, 'applied')
         pa_before = store.read_state(self.conn)['pa']
-        r2 = store.bootstrap_from_snapshot(self.conn, _snapshot(
-            affect=SimpleNamespace(
-                pa=0.99, na=0.01, valence=0.9, arousal=0.9, mood_word='变了')))
+        r2 = store.bootstrap_from_snapshot(
+            self.conn, _snapshot(
+                affect=SimpleNamespace(
+                    pa=0.99, na=0.01, valence=0.9, arousal=0.9, mood_word='变了')),
+            last_scored_message_id=1,
+        )
         self.assertEqual(r2.status, 'idempotency_conflict')
         state = store.read_state(self.conn)
         self.assertAlmostEqual(state['pa'], pa_before)
@@ -144,7 +147,8 @@ class BootstrapTests(StoreBase):
         )
         self.conn.execute('COMMIT')
         before = store.read_state(self.conn)
-        r = store.bootstrap_from_snapshot(self.conn, _snapshot())
+        r = store.bootstrap_from_snapshot(
+            self.conn, _snapshot(), last_scored_message_id=1)
         self.assertEqual(r.status, 'bootstrap_inconsistent')
         self.assertIn('forge provenance', r.error)
         self.assertIsNone(store.read_event(self.conn, 'bootstrap:initial'))
@@ -154,6 +158,49 @@ class BootstrapTests(StoreBase):
         n = self.conn.execute(
             'SELECT COUNT(*) FROM internal_state_events').fetchone()[0]
         self.assertEqual(n, 0)
+
+    def test_bootstrap_writes_explicit_scored_watermark(self):
+        r = store.bootstrap_from_snapshot(
+            self.conn, _snapshot(),
+            last_scored_message_id=42,
+            last_scored_message_id_source='unit_test_ledger',
+        )
+        self.assertEqual(r.status, 'applied')
+        st = store.read_state(self.conn)
+        self.assertEqual(st['last_scored_message_id'], 42)
+        payload = json.loads(
+            store.read_event(self.conn, 'bootstrap:initial')['payload_json'])
+        self.assertEqual(payload['last_scored_message_id'], 42)
+        self.assertEqual(payload['last_scored_message_id_source'], 'unit_test_ledger')
+        self.assertNotIn('conversation', payload)
+        self.assertNotIn('prompt', json.dumps(payload))
+
+    def test_bootstrap_rejects_invalid_watermark(self):
+        store.ensure_schema(self.conn)
+        for bad in (None, True, False, 0, -1, 1.5, '9', 2**63):
+            with self.subTest(bad=bad):
+                with self.assertRaises(store.StoreError):
+                    store.bootstrap_from_snapshot(
+                        self.conn, _snapshot(),
+                        last_scored_message_id=bad,  # type: ignore[arg-type]
+                    )
+                self.assertIsNone(store.read_state(self.conn))
+                self.assertIsNone(
+                    store.read_event(self.conn, 'bootstrap:initial'))
+
+    def test_bootstrap_different_watermark_same_key_is_conflict(self):
+        self.assertEqual(
+            store.bootstrap_from_snapshot(
+                self.conn, _snapshot(), last_scored_message_id=10,
+            ).status,
+            'applied',
+        )
+        r = store.bootstrap_from_snapshot(
+            self.conn, _snapshot(), last_scored_message_id=11,
+        )
+        self.assertEqual(r.status, 'idempotency_conflict')
+        self.assertEqual(
+            store.read_state(self.conn)['last_scored_message_id'], 10)
 
     def test_bootstrap_resets_materialized_timestamps_to_observed_at(self):
         snap = _snapshot()
@@ -733,7 +780,7 @@ class ConnectionContractTests(unittest.TestCase):
         db_path = str(Path(tmp.name) / 'plain.db')
         conn = sqlite3.connect(db_path)  # 默认 row_factory=None
         try:
-            r = store.bootstrap_from_snapshot(conn, _snapshot())
+            r = store.bootstrap_from_snapshot(conn, _snapshot(), last_scored_message_id=1)
             self.assertEqual(r.status, 'applied')
             self.assertIsNotNone(r.event_id)
             state = store.read_state(conn)
@@ -759,7 +806,7 @@ class ConnectionContractTests(unittest.TestCase):
         conn = sqlite3.connect(db_path)
         try:
             before = conn.isolation_level
-            store.bootstrap_from_snapshot(conn, _snapshot())
+            store.bootstrap_from_snapshot(conn, _snapshot(), last_scored_message_id=1)
             self.assertEqual(conn.isolation_level, before)
             store.apply_state_update(
                 conn,
@@ -788,7 +835,7 @@ class ConnectionContractTests(unittest.TestCase):
             conn.execute("INSERT INTO unrelated VALUES ('尚未决定提交')")
             self.assertTrue(conn.in_transaction)
             with self.assertRaises(store.StoreError) as ctx:
-                store.bootstrap_from_snapshot(conn, _snapshot())
+                store.bootstrap_from_snapshot(conn, _snapshot(), last_scored_message_id=1)
             self.assertIn('no active transaction', str(ctx.exception))
             conn.rollback()
         finally:

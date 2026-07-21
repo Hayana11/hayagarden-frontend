@@ -88,7 +88,8 @@ class EventsBase(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.db_path = str(Path(self.tmp.name) / 'events.db')
         self.conn = store.open_store(self.db_path)
-        store.bootstrap_from_snapshot(self.conn, _snapshot())
+        store.bootstrap_from_snapshot(
+            self.conn, _snapshot(), last_scored_message_id=1)
 
     def tearDown(self):
         self.conn.close()
@@ -577,7 +578,7 @@ class FatigueContinuityTests(EventsBase):
             candidate_unified_drives=__import__('types').SimpleNamespace(
                 **{k: getattr(phase0, k) for k in isv3.DRIVE_KEYS}),
         )
-        store.bootstrap_from_snapshot(self.conn, snap)
+        store.bootstrap_from_snapshot(self.conn, snap, last_scored_message_id=1)
         st = self.state()
         self.assertAlmostEqual(st['fatigue'], phase0.fatigue, places=4)
         self.assertEqual(st['drives_updated_at'], T0)
@@ -1015,7 +1016,7 @@ class ImportGuardTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             path = str(Path(td) / 'only.db')
             conn = store.open_store(path)
-            store.bootstrap_from_snapshot(conn, _snapshot())
+            store.bootstrap_from_snapshot(conn, _snapshot(), last_scored_message_id=1)
             r = events.observe_user_message(
                 conn,
                 message_id=1,
