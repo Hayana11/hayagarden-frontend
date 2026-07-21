@@ -1,15 +1,16 @@
-"""Internal State v3 — Phase 1A-1/1A-2 业务事件（试管）
+"""Internal State v3 — Phase 1A-1/1A-2/1A-3 业务事件（试管）
 
 公开接口：
   - ``plan_user_message_transition`` / ``observe_user_message``
   - ``plan_scored_transition`` / ``observe_scored`` / ``get_scored_event_stats``
+  - ``plan_outcome_transition`` / ``apply_outcome``
 
 严格不做：
-  - 不接 gateway / app / chat / SSE / Wake / prompt
-  - 不 import emotion_engine / drive_engine / desire / gateway
+  - 不接 gateway / app / chat / SSE / Wake / prompt / wake.executor
+  - 不 import emotion_engine / drive_engine / desire / gateway / wake
   - 不调用 DeepSeek / 渐变脑 / score_async
-  - 不启用 reunion boost / 乘性 attachment 权威参数
-  - 不实现 apply_outcome
+  - 不启用 reunion boost / 新 attachment ratio 权威参数
+  - 不停止旧 discharge / satisfy（本 PR 无生产调用点）
 """
 
 from __future__ import annotations
@@ -1047,6 +1048,422 @@ def get_scored_event_stats(conn: sqlite3.Connection) -> dict:
     }
 
 
+# ═══════════════════════════════════════════════════════════
+# Phase 1A-3 — apply_outcome（Wake 结算；试管）
+# ═══════════════════════════════════════════════════════════
+#
+# 一个 wake_run_id 只能进结算室一次。
+# Phase 1 权威路径只应用 drive_engine 兼容的固定减法 + fatigue±0.04；
+# desire 乘性 / live 双结算 / attachment×0.45 写入 result_json（审计），
+# 不进入 payload_hash，不写 state。
+#
+# action 合同拆分：
+#   executor_action — Wake 合同：none / message / diary / explore
+#                     固定结算 + legacy_live_double（真实 desire.satisfy 入参）
+#   desire_action   — desire.ACTION_SATISFY 键（可选）；仅 mapping 对照
+#   user_idle_hours — 权威用户空闲；内部 τ18 派生 longing，禁止外传 scalar
+#
+
+_WAKE_OUTCOME_EVENT_TYPE = 'wake_outcome'
+_WAKE_RUN_ID_MAX_LEN = 128
+
+_EXECUTOR_ACTIONS = frozenset({'none', 'message', 'diary', 'explore'})
+
+_FIRED_DRIVE_ENUM = frozenset({
+    'attachment', 'curiosity', 'reflection', 'social',
+    'duty', 'libido', 'stress',
+})
+
+# drive_engine.DISCHARGE（不含 fatigue）
+_LEGACY_FIXED_DISCHARGE = {
+    'attachment': 0.55,
+    'curiosity': 0.45,
+    'reflection': 0.40,
+    'social': 0.40,
+    'duty': 0.50,
+    'libido': 0.60,
+    'stress': 0.50,
+}
+_LEGACY_FATIGUE_BEHAVIOR_COST = 0.04
+_LEGACY_FATIGUE_NONE_RESTORE = 0.04
+_LEGACY_DESIRE_FATIGUE_COST = 0.08
+
+# desire.ACTION_SATISFY（照抄；不 import desire）
+_LEGACY_DESIRE_ACTION_SATISFY = {
+    'co_read': {'reflection': 0.45, 'curiosity': 0.85},
+    'github': {'curiosity': 0.50},
+    'web_search': {'curiosity': 0.48},
+    'web_browse': {'social': 0.48, 'curiosity': 0.82},
+    'none': {'duty': 0.80},
+    'tease': {'libido': 0.55},
+    'vent': {'stress': 0.45},
+}
+_DESIRE_ACTIONS = frozenset(_LEGACY_DESIRE_ACTION_SATISFY.keys())
+
+
+def _require_wake_run_id(value: Any) -> str:
+    if not isinstance(value, str):
+        raise StoreError(
+            f'wake_run_id must be a non-empty str: {value!r}'
+        )
+    rid = value.strip()
+    if not rid or len(rid) > _WAKE_RUN_ID_MAX_LEN:
+        raise StoreError(
+            f'wake_run_id must be non-empty and <= {_WAKE_RUN_ID_MAX_LEN}: '
+            f'{value!r}'
+        )
+    return rid
+
+
+def _require_executor_action(value: Any) -> str:
+    if not isinstance(value, str):
+        raise StoreError(
+            f'executor_action must be one of {sorted(_EXECUTOR_ACTIONS)}: '
+            f'{value!r}'
+        )
+    action = value.strip()
+    if action not in _EXECUTOR_ACTIONS:
+        raise StoreError(
+            f'executor_action must be one of {sorted(_EXECUTOR_ACTIONS)}: '
+            f'{value!r}'
+        )
+    return action
+
+
+def _require_desire_action(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    if not isinstance(value, str) or value not in _DESIRE_ACTIONS:
+        raise StoreError(
+            f'desire_action must be None or one of '
+            f'{sorted(_DESIRE_ACTIONS)}: {value!r}'
+        )
+    return value
+
+
+def _require_fired_drive(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    if not isinstance(value, str) or value not in _FIRED_DRIVE_ENUM:
+        raise StoreError(
+            f'fired_drive must be None or one of {sorted(_FIRED_DRIVE_ENUM)}: '
+            f'{value!r}'
+        )
+    return value
+
+
+def _require_desire_driven(value: Any) -> bool:
+    if type(value) is not bool:
+        raise StoreError(
+            f'desire_driven must be a real bool: {value!r}'
+        )
+    return value
+
+
+def _require_user_idle_hours(value: Any) -> float:
+    """稳定源输入：真实用户空闲小时；禁止 bool / 字符串 / NaN / Inf / 负值。"""
+    if type(value) is bool or type(value) not in (int, float):
+        raise StoreError(
+            f'user_idle_hours must be a finite int/float >= 0: {value!r}'
+        )
+    v = float(value)
+    if not math.isfinite(v) or v < 0.0:
+        raise StoreError(
+            f'user_idle_hours must be a finite int/float >= 0: {value!r}'
+        )
+    return v
+
+
+def _require_drives_clock_for_outcome(
+    state: Mapping[str, Any], *, outcome_at: str,
+) -> None:
+    """outcome_at 不得早于 drives_updated_at；损坏锚点 fail closed。"""
+    outcome_dt = _parse_dt(outcome_at)
+    if outcome_dt is None or outcome_dt.microsecond != 0:
+        raise StoreError(
+            f'outcome_at is not a whole-second timestamp: {outcome_at!r}'
+        )
+    anchor_raw = state.get('drives_updated_at')
+    if anchor_raw is None or str(anchor_raw).strip() == '':
+        raise StoreError(
+            'state clock drives_updated_at is missing; refusing outcome'
+        )
+    try:
+        anchor_canon = _canonicalize_ts(
+            anchor_raw, field='state clock drives_updated_at',
+        )
+    except StoreError as exc:
+        raise StoreError(
+            f'state clock drives_updated_at invalid: {anchor_raw!r}; '
+            f'refusing outcome ({exc})'
+        ) from exc
+    anchor_dt = _parse_dt(anchor_canon)
+    assert anchor_dt is not None
+    if outcome_dt < anchor_dt:
+        raise StoreError(
+            f'outcome_at {outcome_at!r} is before drives_updated_at '
+            f'{anchor_raw!r}; refusing to rewind'
+        )
+
+
+def _drives_dict_copy(drives: Mapping[str, float]) -> dict:
+    return {k: float(drives[k]) for k in DRIVE_KEYS}
+
+
+def _apply_legacy_fixed_settlement(
+    materialized: Mapping[str, float],
+    *,
+    executor_action: str,
+    fired_drive: Optional[str],
+) -> dict:
+    """Phase 1 权威：drive_engine 兼容固定减法 / none 恢复。
+
+    非 none 必须已由调用方保证 fired_drive 非空；此处不再猜最高 drive。
+    """
+    out = _drives_dict_copy(materialized)
+    if executor_action == 'none':
+        # fired_drive 可非空（例如 desire duty→none）；固定路径仍只休息
+        out['fatigue'] = round(
+            max(0.0, out['fatigue'] - _LEGACY_FATIGUE_NONE_RESTORE), 4,
+        )
+        return out
+    assert fired_drive is not None
+    sub = _LEGACY_FIXED_DISCHARGE[fired_drive]
+    out[fired_drive] = round(max(0.0, out[fired_drive] - sub), 4)
+    out['fatigue'] = round(
+        min(1.0, out['fatigue'] + _LEGACY_FATIGUE_BEHAVIOR_COST), 4,
+    )
+    return out
+
+
+def _apply_legacy_desire_ratio(
+    drives: Mapping[str, float], *, desire_action: Optional[str],
+) -> dict:
+    """Hypothetical mapping comparison：按 desire_action 查 ACTION_SATISFY。
+
+    不宣称是线上真实执行结果；desire_action=None 时仅 fatigue +0.08。
+    """
+    out = _drives_dict_copy(drives)
+    ratios = (
+        _LEGACY_DESIRE_ACTION_SATISFY.get(desire_action, {})
+        if desire_action is not None else {}
+    )
+    for key, ratio in ratios.items():
+        out[key] = round(max(0.0, out[key] * ratio), 4)
+    out['fatigue'] = round(
+        min(1.0, out['fatigue'] + _LEGACY_DESIRE_FATIGUE_COST), 4,
+    )
+    return out
+
+
+def _apply_legacy_live_desire_satisfy(
+    drives: Mapping[str, float], *, executor_action: str,
+) -> dict:
+    """Exact current-live：``desire.satisfy(executor_action)``。
+
+    生产 executor 把同一 Wake action 原样传入；ACTION_SATISFY 在 executor
+    词表中仅 ``none`` 有乘性行，``message/diary/explore`` 只加 fatigue。
+    """
+    out = _drives_dict_copy(drives)
+    for key, ratio in _LEGACY_DESIRE_ACTION_SATISFY.get(
+            executor_action, {}).items():
+        out[key] = round(max(0.0, out[key] * ratio), 4)
+    out['fatigue'] = round(
+        min(1.0, out['fatigue'] + _LEGACY_DESIRE_FATIGUE_COST), 4,
+    )
+    return out
+
+
+def plan_outcome_transition(
+    state: Mapping[str, Any],
+    *,
+    wake_run_id: str,
+    executor_action: str,
+    desire_action: Optional[str],
+    fired_drive: Optional[str],
+    desire_driven: bool,
+    user_idle_hours: float,
+    outcome_at: str,
+) -> dict:
+    """纯函数：Wake 结果 → drives updates + 对照 diagnostics。
+
+    权威 state 只应用一次固定减法路径；ratio / live-double / attachment×0.45
+    仅记录。不修改 Affect / Bond / last_scored_message_id。
+
+    非 ``none`` 的 executor_action 必须显式提供 fired_drive；缺失 fail closed。
+    Longing 仅由 ``user_idle_hours`` 经冻结 τ18 公式派生，禁止外传 scalar。
+    """
+    rid = _require_wake_run_id(wake_run_id)
+    exec_act = _require_executor_action(executor_action)
+    des_act = _require_desire_action(desire_action)
+    fired = _require_fired_drive(fired_drive)
+    driven = _require_desire_driven(desire_driven)
+    idle = _require_user_idle_hours(user_idle_hours)
+    longing = longing_desire_legacy_curve(idle)
+    if longing is None:
+        raise StoreError(
+            f'longing_desire_legacy_curve returned None for idle={idle!r}'
+        )
+    outcome_canon = _canonicalize_ts(outcome_at, field='outcome_at')
+    _require_drives_clock_for_outcome(state, outcome_at=outcome_canon)
+
+    if exec_act != 'none' and fired is None:
+        raise StoreError(
+            'fired_drive is required when executor_action is not '
+            f"'none' (got executor_action={exec_act!r})"
+        )
+
+    # Bond 只读衰减供 libido cap；attachment cap 使用派生 longing
+    bond_m = _materialize_bond(state, outcome_canon)
+    drives_m = _materialize_drives(
+        state,
+        created_at=outcome_canon,
+        longing_for_boost=float(longing),
+        passion_for_boost=bond_m['passion'],
+    )
+
+    legacy_fixed = _apply_legacy_fixed_settlement(
+        drives_m, executor_action=exec_act, fired_drive=fired,
+    )
+    # mapping comparison（可用独立 desire_action）
+    legacy_ratio = _apply_legacy_desire_ratio(
+        drives_m, desire_action=des_act,
+    )
+    # exact current-live：fixed 后再 desire.satisfy(executor_action)
+    if driven:
+        legacy_double = _apply_legacy_live_desire_satisfy(
+            legacy_fixed, executor_action=exec_act,
+        )
+    else:
+        legacy_double = None
+    candidate_att = round(
+        max(0.0, drives_m['attachment'] * CANDIDATE_ATTACHMENT_SATISFY_RATIO),
+        4,
+    )
+
+    updates = {
+        **{k: legacy_fixed[k] for k in DRIVE_KEYS},
+        'drives_updated_at': outcome_canon,
+    }
+
+    payload = {
+        'wake_run_id': rid,
+        'executor_action': exec_act,
+        'desire_action': des_act,
+        'fired_drive': fired,
+        'desire_driven': driven,
+        'user_idle_hours': idle,
+        'outcome_at': outcome_canon,
+    }
+
+    diagnostics = {
+        'materialized_before': _drives_dict_copy(drives_m),
+        'legacy_fixed_after': _drives_dict_copy(legacy_fixed),
+        'legacy_desire_ratio_after': _drives_dict_copy(legacy_ratio),
+        'legacy_live_double_after': (
+            _drives_dict_copy(legacy_double) if legacy_double is not None
+            else None
+        ),
+        'candidate_attachment_ratio_after': candidate_att,
+        'user_idle_hours': idle,
+        'longing_for_boost': float(longing),
+        'executor_action': exec_act,
+        'desire_action': des_act,
+        'authority': 'legacy_fixed_discharge_phase1',
+        'diagnostics_roles': {
+            'legacy_desire_ratio_after': (
+                'hypothetical ACTION_SATISFY mapping comparison '
+                '(uses desire_action; not claimed as live execution)'
+            ),
+            'legacy_live_double_after': (
+                'exact current-live simulation: fixed discharge then '
+                'desire.satisfy(executor_action)'
+            ),
+        },
+        'note': (
+            'ratio / live-double / attachment×0.45 are diagnostics only; '
+            'state applies fixed discharge once; result_json holds this audit'
+        ),
+    }
+
+    return {
+        'updates': updates,
+        'payload': payload,
+        'diagnostics': diagnostics,
+    }
+
+
+def apply_outcome(
+    conn: sqlite3.Connection,
+    *,
+    wake_run_id: str,
+    executor_action: str,
+    desire_action: Optional[str],
+    fired_drive: Optional[str],
+    desire_driven: bool,
+    user_idle_hours: float,
+    outcome_at: str,
+    expected_state_version: Optional[int] = None,
+) -> ApplyResult:
+    """Wake 结算事件 ``wake_outcome:{wake_run_id}``：一票只进结算室一次。
+
+    ``payload_json/hash`` 仅含稳定观察输入；``result_json`` 保存事务内
+    基于最新 state 算出的 diagnostics（duplicate 回放原值，不重算覆盖）。
+    version_conflict 不消费 key，重读版本后可同 key 重试。
+    """
+    rid = _require_wake_run_id(wake_run_id)
+    exec_act = _require_executor_action(executor_action)
+    des_act = _require_desire_action(desire_action)
+    fired = _require_fired_drive(fired_drive)
+    driven = _require_desire_driven(desire_driven)
+    idle = _require_user_idle_hours(user_idle_hours)
+    outcome_canon = _canonicalize_ts(outcome_at, field='outcome_at')
+
+    if exec_act != 'none' and fired is None:
+        raise StoreError(
+            'fired_drive is required when executor_action is not '
+            f"'none' (got executor_action={exec_act!r})"
+        )
+
+    event_key = f'wake_outcome:{rid}'
+    payload = {
+        'wake_run_id': rid,
+        'executor_action': exec_act,
+        'desire_action': des_act,
+        'fired_drive': fired,
+        'desire_driven': driven,
+        'user_idle_hours': idle,
+        'outcome_at': outcome_canon,
+    }
+
+    def decide(state: dict) -> ConditionalDecision:
+        plan = plan_outcome_transition(
+            state,
+            wake_run_id=rid,
+            executor_action=exec_act,
+            desire_action=des_act,
+            fired_drive=fired,
+            desire_driven=driven,
+            user_idle_hours=idle,
+            outcome_at=outcome_canon,
+        )
+        return ConditionalDecision(
+            status='applied',
+            updates=plan['updates'],
+            result=plan['diagnostics'],
+        )
+
+    return apply_conditional_state_update(
+        conn,
+        event_key=event_key,
+        event_type=_WAKE_OUTCOME_EVENT_TYPE,
+        source_id=rid,
+        payload=payload,
+        decide=decide,
+        expected_state_version=expected_state_version,
+    )
+
+
 __all__ = [
     'CANDIDATE_ATTACHMENT_SATISFY_RATIO',
     'DESIRE_CAP',
@@ -1055,10 +1472,12 @@ __all__ = [
     'LEGACY_ATTACHMENT_SUBTRACT',
     'LEGACY_ATTACHMENT_THRESHOLD',
     'LEGACY_FATIGUE_RESTORE',
+    'apply_outcome',
     'get_scored_event_stats',
     'normalize_scored_scores',
     'observe_scored',
     'observe_user_message',
+    'plan_outcome_transition',
     'plan_scored_transition',
     'plan_user_message_transition',
     'rule_score_desire',

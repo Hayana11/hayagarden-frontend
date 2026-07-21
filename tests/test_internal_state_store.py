@@ -200,6 +200,136 @@ class BootstrapTests(StoreBase):
             self.assertNotIn(banned, imported)
 
 
+class ResultJsonTests(StoreBase):
+    def test_result_json_migrates_from_legacy_table(self):
+        """真实旧表：缺 result_json → ensure_schema 补齐且保留原事件。"""
+        self.conn.executescript(
+            """
+            CREATE TABLE internal_state_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_key TEXT NOT NULL UNIQUE,
+                event_type TEXT NOT NULL,
+                source_id TEXT,
+                payload_json TEXT NOT NULL,
+                payload_hash TEXT NOT NULL,
+                status TEXT NOT NULL,
+                state_version_before INTEGER,
+                state_version_after INTEGER,
+                applied_at TEXT NOT NULL,
+                error TEXT
+            );
+            """
+        )
+        old_row = (
+            'wake_outcome:legacy',
+            'wake_outcome',
+            'legacy',
+            '{"wake_run_id":"legacy"}',
+            'hash-legacy-001',
+            'applied',
+            0,
+            1,
+            '2026-07-21 12:00:00',
+            None,
+        )
+        self.conn.execute(
+            """
+            INSERT INTO internal_state_events (
+                event_key, event_type, source_id, payload_json, payload_hash,
+                status, state_version_before, state_version_after,
+                applied_at, error
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            old_row,
+        )
+        cols_before = {
+            r[1] for r in self.conn.execute(
+                'PRAGMA table_info(internal_state_events)')
+        }
+        self.assertNotIn('result_json', cols_before)
+
+        store.ensure_schema(self.conn)
+        cols_after = {
+            r[1] for r in self.conn.execute(
+                'PRAGMA table_info(internal_state_events)')
+        }
+        self.assertIn('result_json', cols_after)
+
+        preserved = store.read_event(self.conn, 'wake_outcome:legacy')
+        self.assertIsNotNone(preserved)
+        self.assertEqual(preserved['event_key'], 'wake_outcome:legacy')
+        self.assertEqual(preserved['event_type'], 'wake_outcome')
+        self.assertEqual(preserved['source_id'], 'legacy')
+        self.assertEqual(preserved['payload_json'], '{"wake_run_id":"legacy"}')
+        self.assertEqual(preserved['payload_hash'], 'hash-legacy-001')
+        self.assertEqual(preserved['status'], 'applied')
+        self.assertEqual(preserved['state_version_before'], 0)
+        self.assertEqual(preserved['state_version_after'], 1)
+        self.assertEqual(preserved['applied_at'], '2026-07-21 12:00:00')
+        self.assertIsNone(preserved['error'])
+        self.assertIsNone(preserved['result_json'])
+
+        store.ensure_schema(self.conn)
+        again = store.read_event(self.conn, 'wake_outcome:legacy')
+        self.assertEqual(again['payload_hash'], 'hash-legacy-001')
+        n = self.conn.execute(
+            "SELECT COUNT(*) FROM internal_state_events "
+            "WHERE event_key='wake_outcome:legacy'"
+        ).fetchone()[0]
+        self.assertEqual(n, 1)
+
+    def test_conditional_persists_result_and_duplicate_replays(self):
+        self.bootstrap()
+        audit = {
+            'materialized_before': {'curiosity': 0.7},
+            'legacy_fixed_after': {'curiosity': 0.25},
+        }
+
+        def decide(_state):
+            return store.ConditionalDecision(
+                status='applied',
+                updates={'curiosity': 0.25},
+                result=audit,
+            )
+
+        r1 = store.apply_conditional_state_update(
+            self.conn,
+            event_key='wake_outcome:audit',
+            event_type='wake_outcome',
+            source_id='audit',
+            payload={'wake_run_id': 'audit', 'outcome_at': '2026-07-21 12:00:00'},
+            decide=decide,
+            expected_state_version=0,
+        )
+        self.assertEqual(r1.status, 'applied')
+        self.assertEqual(r1.result, audit)
+        ev = store.read_event(self.conn, 'wake_outcome:audit')
+        self.assertEqual(json.loads(ev['result_json']), audit)
+        # payload 不含 audit 键
+        self.assertNotIn('materialized_before', ev['payload_json'])
+
+        r2 = store.apply_conditional_state_update(
+            self.conn,
+            event_key='wake_outcome:audit',
+            event_type='wake_outcome',
+            source_id='audit',
+            payload={'wake_run_id': 'audit', 'outcome_at': '2026-07-21 12:00:00'},
+            decide=lambda s: store.ConditionalDecision(
+                status='applied',
+                updates={'curiosity': 0.01},
+                result={'should': 'not_overwrite'},
+            ),
+        )
+        self.assertEqual(r2.status, 'duplicate')
+        self.assertEqual(r2.result, audit)
+        self.assertEqual(
+            json.loads(
+                store.read_event(self.conn, 'wake_outcome:audit')['result_json']
+            ),
+            audit,
+        )
+
+
 class EventIdempotencyTests(StoreBase):
     def test_event_key_unique_and_duplicate_skips_version(self):
         self.bootstrap()
