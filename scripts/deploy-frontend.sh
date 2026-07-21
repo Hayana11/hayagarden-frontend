@@ -12,6 +12,7 @@ SERVICES=(frontend frontend-gw)
 LOCK_FILE="/var/lock/hayagarden-frontend-deploy.lock"
 STATE_DIR="/var/lib/hayagarden"
 VAULT_KEY_FILE="${HAYAGARDEN_RELAY_VAULT_KEY_FILE:-/etc/hayagarden/relay-credentials.key}"
+ENV_FILE="${ENV_FILE:-$ROOT/.env}"
 
 fail() {
   echo "DEPLOY REFUSED: $*" >&2
