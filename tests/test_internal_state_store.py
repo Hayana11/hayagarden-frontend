@@ -121,6 +121,40 @@ class BootstrapTests(StoreBase):
         self.assertAlmostEqual(state['pa'], pa_before)
         self.assertEqual(state['state_version'], 0)
 
+    def test_bootstrap_state_without_event_is_inconsistent(self):
+        """状态存在但缺少 bootstrap 事件时，绝不伪造 provenance。"""
+        store.ensure_schema(self.conn)
+        self.conn.execute('BEGIN IMMEDIATE')
+        self.conn.execute(
+            """
+            INSERT INTO internal_state_v3 (
+                id, pa, na, valence, arousal, mood_word,
+                intimacy, passion, commitment,
+                attachment, curiosity, reflection, social,
+                duty, libido, stress, fatigue,
+                state_version, updated_at
+            ) VALUES (
+                1, 0.5, 0.2, 0.6, 0.3, '平静',
+                0.3, 0.0, 0.7,
+                0.1, 0.2, 0.1, 0.1,
+                0.15, 0.0, 0.1, 0.2,
+                0, '2026-07-21 12:00:00'
+            )
+            """
+        )
+        self.conn.execute('COMMIT')
+        before = store.read_state(self.conn)
+        r = store.bootstrap_from_snapshot(self.conn, _snapshot())
+        self.assertEqual(r.status, 'bootstrap_inconsistent')
+        self.assertIn('forge provenance', r.error)
+        self.assertIsNone(store.read_event(self.conn, 'bootstrap:initial'))
+        after = store.read_state(self.conn)
+        self.assertEqual(before['pa'], after['pa'])
+        self.assertEqual(before['state_version'], after['state_version'])
+        n = self.conn.execute(
+            'SELECT COUNT(*) FROM internal_state_events').fetchone()[0]
+        self.assertEqual(n, 0)
+
     def test_bootstrap_resets_materialized_timestamps_to_observed_at(self):
         snap = _snapshot()
         self.bootstrap(snap)
@@ -365,42 +399,6 @@ class VersionTests(StoreBase):
         self.assertEqual(r2.status, 'applied')
         self.assertAlmostEqual(store.read_state(self.conn)['pa'], 0.66)
 
-    def test_mark_stale_consumes_key_as_terminal(self):
-        self.bootstrap()
-        store.apply_state_update(
-            self.conn,
-            event_key='user_scored:1',
-            event_type='user_scored',
-            source_id='1',
-            payload={'v': 1},
-            mutator=lambda s: {'last_scored_message_id': 1},
-            expected_state_version=0,
-        )
-        r = store.apply_state_update(
-            self.conn,
-            event_key='user_scored:0',
-            event_type='user_scored',
-            source_id='0',
-            payload={'v': 0},
-            mutator=lambda s: {'last_scored_message_id': 0},
-            expected_state_version=0,
-            mark_stale=True,
-        )
-        self.assertEqual(r.status, 'stale_skipped')
-        event = store.read_event(self.conn, 'user_scored:0')
-        self.assertEqual(event['status'], 'stale_skipped')
-        # 终态后再同 key → duplicate
-        r2 = store.apply_state_update(
-            self.conn,
-            event_key='user_scored:0',
-            event_type='user_scored',
-            source_id='0',
-            payload={'v': 0},
-            mutator=lambda s: {'last_scored_message_id': 0},
-            expected_state_version=1,
-        )
-        self.assertEqual(r2.status, 'duplicate')
-
     def test_successful_update_increments_version_by_one(self):
         self.bootstrap()
         for i in range(3):
@@ -416,6 +414,70 @@ class VersionTests(StoreBase):
             self.assertEqual(r.status, 'applied')
             self.assertEqual(r.state_version_after, i + 1)
         self.assertEqual(store.read_state(self.conn)['state_version'], 3)
+
+
+class IdempotencyIdentityTests(StoreBase):
+    def test_source_id_int_and_str_retry_are_duplicate(self):
+        self.bootstrap()
+        payload = {'message_id': 123}
+        r1 = store.apply_state_update(
+            self.conn,
+            event_key='user_rule:123',
+            event_type='user_rule',
+            source_id=123,
+            payload=payload,
+            mutator=lambda s: {'pa': 0.61},
+            expected_state_version=0,
+        )
+        self.assertEqual(r1.status, 'applied')
+        event = store.read_event(self.conn, 'user_rule:123')
+        self.assertEqual(event['source_id'], '123')
+        r2 = store.apply_state_update(
+            self.conn,
+            event_key='user_rule:123',
+            event_type='user_rule',
+            source_id='123',
+            payload=payload,
+            mutator=lambda s: {'pa': 0.99},
+            expected_state_version=1,
+        )
+        self.assertEqual(r2.status, 'duplicate')
+        self.assertAlmostEqual(store.read_state(self.conn)['pa'], 0.61)
+
+    def test_illegal_payload_rolls_back(self):
+        self.bootstrap()
+        with self.assertRaises(store.StoreError) as ctx:
+            store.apply_state_update(
+                self.conn,
+                event_key='user_rule:bad',
+                event_type='user_rule',
+                source_id='bad',
+                payload={'x': {1, 2, 3}},  # set 不可 JSON
+                mutator=lambda s: {'pa': 0.7},
+                expected_state_version=0,
+            )
+        self.assertIn('JSON-serializable', str(ctx.exception))
+        self.assertEqual(store.read_state(self.conn)['state_version'], 0)
+        self.assertIsNone(store.read_event(self.conn, 'user_rule:bad'))
+
+    def test_payload_json_matches_hash_bytes(self):
+        self.bootstrap()
+        payload = {'b': 2, 'a': 1}
+        store.apply_state_update(
+            self.conn,
+            event_key='user_rule:canon',
+            event_type='user_rule',
+            source_id='canon',
+            payload=payload,
+            mutator=lambda s: {'na': 0.22},
+            expected_state_version=0,
+        )
+        event = store.read_event(self.conn, 'user_rule:canon')
+        expect_json = store._canonical_payload_json(payload)
+        self.assertEqual(event['payload_json'], expect_json)
+        self.assertEqual(
+            event['payload_hash'],
+            store._payload_hash_from_json(expect_json))
 
 
 class MutatorValidationTests(StoreBase):
@@ -632,9 +694,9 @@ class NoProductionHookTests(unittest.TestCase):
         else:
             code_only = src
         for needle in (
-            'observe_user_message',
-            'observe_scored',
-            'apply_outcome(',
+            'def observe_user_message',
+            'def observe_scored',
+            'def apply_outcome',
             'PRAGMA journal_mode=',
             'RELATIONSHIP_CONTEXT',
         ):

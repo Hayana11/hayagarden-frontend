@@ -88,9 +88,31 @@ def _now_beijing() -> str:
     )
 
 
-def _payload_hash(payload: Mapping[str, Any]) -> str:
-    blob = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
-    return hashlib.sha256(blob.encode('utf-8')).hexdigest()
+def _normalize_source_id(source_id: Optional[Any]) -> Optional[str]:
+    if source_id is None:
+        return None
+    return str(source_id)
+
+
+def _canonical_payload_json(payload: Mapping[str, Any]) -> str:
+    """只接受标准 JSON 可序列化值；禁止 default=str。
+
+    返回的字符串同时用于落库 ``payload_json`` 与 ``payload_hash``。
+    """
+    try:
+        return json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(',', ':'),
+            allow_nan=False,
+        )
+    except (TypeError, ValueError) as exc:
+        raise StoreError(f'payload is not JSON-serializable: {exc}') from exc
+
+
+def _payload_hash_from_json(canonical_json: str) -> str:
+    return hashlib.sha256(canonical_json.encode('utf-8')).hexdigest()
 
 
 def _require_clean_write_connection(conn: sqlite3.Connection) -> None:
@@ -270,7 +292,7 @@ def _existing_event_result(
 ) -> ApplyResult:
     """同 key：语义相同 → duplicate；语义不同 → idempotency_conflict。"""
     same_type = existing.get('event_type') == event_type
-    same_source = existing.get('source_id') == source_id
+    same_source = _normalize_source_id(existing.get('source_id')) == source_id
     same_hash = existing.get('payload_hash') == payload_hash
     if same_type and same_source and same_hash:
         return ApplyResult(
@@ -296,23 +318,24 @@ def apply_state_update(
     *,
     event_key: str,
     event_type: str,
-    source_id: Optional[str],
+    source_id: Optional[Any],
     payload: Mapping[str, Any],
     mutator: Callable[[dict], Mapping[str, Any]],
     expected_state_version: Optional[int] = None,
-    mark_stale: bool = False,
 ) -> ApplyResult:
     """在同一 ``BEGIN IMMEDIATE`` 事务内写事件 + 更新状态。
 
     幂等 / 冲突语义：
       - 同 key + 同语义 payload → ``duplicate``（不更新状态）
       - 同 key + 不同语义 → ``idempotency_conflict``（不更新、不插新行）
-      - 基础设施版本冲突（默认）→ **不消费** event_key，rollback 后
+      - 基础设施版本冲突 → **不消费** event_key，rollback 后
         ``version_conflict``，允许同 key 重试
-      - 业务确认过期（``mark_stale=True``）→ 落 ``stale_skipped`` 终态
       - 状态行缺失 → **不消费** event_key，返回 ``failed``，bootstrap 后可重试
       - mutator 未知字段 / 空更新 / 改系统字段 → rollback + ``StoreError``
       - 成功时 ``state_version`` 恰好 +1
+
+    业务 stale（如 ``message_id <= last_scored_message_id``）不在本层判断，
+    留给后续 ``observe_scored`` 在同一事务内完成。
     """
     if not event_key:
         raise StoreError('event_key required')
@@ -321,9 +344,10 @@ def apply_state_update(
 
     _require_clean_write_connection(conn)
 
+    source_id_norm = _normalize_source_id(source_id)
     payload_obj = dict(payload)
-    p_json = json.dumps(payload_obj, ensure_ascii=False, default=str)
-    p_hash = _payload_hash(payload_obj)
+    p_json = _canonical_payload_json(payload_obj)
+    p_hash = _payload_hash_from_json(p_json)
     now = _now_beijing()
 
     try:
@@ -341,7 +365,7 @@ def apply_state_update(
             return _existing_event_result(
                 existing,
                 event_type=event_type,
-                source_id=source_id,
+                source_id=source_id_norm,
                 payload_hash=p_hash,
             )
 
@@ -364,28 +388,7 @@ def apply_state_update(
                 f'version conflict: expected {expected_state_version}, '
                 f'current {version_before}'
             )
-            if mark_stale:
-                # 业务终态：消费 key，状态不改
-                conn.execute(
-                    """
-                    INSERT INTO internal_state_events (
-                        event_key, event_type, source_id, payload_json,
-                        payload_hash, status, state_version_before,
-                        state_version_after, applied_at, error
-                    ) VALUES (?, ?, ?, ?, ?, 'stale_skipped', ?, NULL, ?, ?)
-                    """,
-                    (event_key, event_type, source_id, p_json, p_hash,
-                     version_before, now, err),
-                )
-                conn.execute('COMMIT')
-                return ApplyResult(
-                    status='stale_skipped',
-                    state_version_before=version_before,
-                    state_version_after=None,
-                    event_id=_last_event_id(conn, event_key),
-                    error=err,
-                )
-            # 基础设施乐观锁冲突：不消费 key
+            # 基础设施乐观锁冲突：不消费 key；业务 stale 不在本层伪装
             _rollback(conn)
             return ApplyResult(
                 status='version_conflict',
@@ -426,7 +429,7 @@ def apply_state_update(
                 state_version_after, applied_at, error
             ) VALUES (?, ?, ?, ?, ?, 'applied', ?, ?, ?, NULL)
             """,
-            (event_key, event_type, source_id, p_json, p_hash,
+            (event_key, event_type, source_id_norm, p_json, p_hash,
              version_before, version_after, now),
         )
         conn.execute('COMMIT')
@@ -464,7 +467,7 @@ def bootstrap_from_snapshot(
     snapshot: Any,
     *,
     event_key: str = 'bootstrap:initial',
-    source_id: Optional[str] = 'phase0_snapshot',
+    source_id: Optional[Any] = 'phase0_snapshot',
 ) -> ApplyResult:
     """用显式传入的 Phase 0 snapshot 初始化 id=1。
 
@@ -476,6 +479,9 @@ def bootstrap_from_snapshot(
 
     幂等与 ``apply_state_update`` 一致：同 key 仅当 type/source/payload
     语义相同才算 duplicate，否则 ``idempotency_conflict``。
+
+    若状态行已存在但缺少 bootstrap 事件：fail closed
+    （``bootstrap_inconsistent``），绝不伪造 provenance。
     """
     _require_clean_write_connection(conn)
     ensure_schema(conn)
@@ -500,6 +506,7 @@ def bootstrap_from_snapshot(
     observed_at = _g(snapshot, 'observed_at') or _now_beijing()
     ts = _g(snapshot, 'diagnostics', 'source_timestamps') or {}
     legacy_ts = dict(ts) if isinstance(ts, Mapping) else {}
+    source_id_norm = _normalize_source_id(source_id)
 
     seed = {
         'pa': _clamp01(_g(affect, 'pa'), 0.5),
@@ -534,8 +541,8 @@ def bootstrap_from_snapshot(
         'legacy_source_timestamps': legacy_ts,
         'seed': seed,
     }
-    p_json = json.dumps(payload, ensure_ascii=False, default=str)
-    p_hash = _payload_hash(payload)
+    p_json = _canonical_payload_json(payload)
+    p_hash = _payload_hash_from_json(p_json)
     now = _now_beijing()
 
     try:
@@ -554,7 +561,7 @@ def bootstrap_from_snapshot(
             collision = _existing_event_result(
                 existing_event,
                 event_type='bootstrap',
-                source_id=source_id,
+                source_id=source_id_norm,
                 payload_hash=p_hash,
             )
             if existing_state is None:
@@ -580,26 +587,17 @@ def bootstrap_from_snapshot(
             )
 
         if existing_state is not None:
-            # 状态在、事件账缺失：补一条 duplicate 账，仍不改写状态
-            conn.execute(
-                """
-                INSERT INTO internal_state_events (
-                    event_key, event_type, source_id, payload_json,
-                    payload_hash, status, state_version_before,
-                    state_version_after, applied_at, error
-                ) VALUES (?, 'bootstrap', ?, ?, ?, 'duplicate',
-                          ?, ?, ?, 'state already present')
-                """,
-                (event_key, source_id, p_json, p_hash,
-                 existing_state['state_version'],
-                 existing_state['state_version'], now),
-            )
-            conn.execute('COMMIT')
+            # 状态在、bootstrap 事件缺失：fail closed，绝不伪造 provenance
+            _rollback(conn)
             return ApplyResult(
-                status='duplicate',
+                status='bootstrap_inconsistent',
                 state_version_before=int(existing_state['state_version']),
-                state_version_after=int(existing_state['state_version']),
-                event_id=_last_event_id(conn, event_key),
+                state_version_after=None,
+                event_id=None,
+                error=(
+                    'internal_state_v3 exists without bootstrap event; '
+                    'refusing to forge provenance'
+                ),
             )
 
         cols: Sequence[str] = (
@@ -630,7 +628,7 @@ def bootstrap_from_snapshot(
                 state_version_after, applied_at, error
             ) VALUES (?, 'bootstrap', ?, ?, ?, 'applied', 0, 0, ?, NULL)
             """,
-            (event_key, source_id, p_json, p_hash, now),
+            (event_key, source_id_norm, p_json, p_hash, now),
         )
         conn.execute('COMMIT')
         return ApplyResult(
