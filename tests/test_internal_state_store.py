@@ -481,6 +481,74 @@ class IdempotencyIdentityTests(StoreBase):
 
 
 class MutatorValidationTests(StoreBase):
+    def test_reject_nan_in_state_fields(self):
+        self.bootstrap()
+        before = store.read_state(self.conn)
+        with self.assertRaises(store.StoreError) as ctx:
+            store.apply_state_update(
+                self.conn,
+                event_key='user_rule:nan',
+                event_type='user_rule',
+                source_id='nan',
+                payload={'k': 1},
+                mutator=lambda s: {'passion': float('nan')},
+                expected_state_version=0,
+            )
+        self.assertIn('non-finite', str(ctx.exception))
+        self.assertEqual(store.read_state(self.conn)['passion'], before['passion'])
+        self.assertEqual(store.read_state(self.conn)['state_version'], 0)
+        self.assertIsNone(store.read_event(self.conn, 'user_rule:nan'))
+
+    def test_reject_inf_in_state_fields(self):
+        self.bootstrap()
+        with self.assertRaises(store.StoreError) as ctx:
+            store.apply_state_update(
+                self.conn,
+                event_key='user_rule:inf',
+                event_type='user_rule',
+                source_id='inf',
+                payload={'k': 1},
+                mutator=lambda s: {'intimacy': float('inf')},
+                expected_state_version=0,
+            )
+        self.assertIn('non-finite', str(ctx.exception))
+        self.assertEqual(store.read_state(self.conn)['state_version'], 0)
+        self.assertIsNone(store.read_event(self.conn, 'user_rule:inf'))
+
+    def test_reject_neg_inf_in_state_fields(self):
+        self.bootstrap()
+        with self.assertRaises(store.StoreError) as ctx:
+            store.apply_state_update(
+                self.conn,
+                event_key='user_rule:ninf',
+                event_type='user_rule',
+                source_id='ninf',
+                payload={'k': 1},
+                mutator=lambda s: {'attachment': float('-inf')},
+                expected_state_version=0,
+            )
+        self.assertIn('non-finite', str(ctx.exception))
+        self.assertEqual(store.read_state(self.conn)['state_version'], 0)
+        self.assertIsNone(store.read_event(self.conn, 'user_rule:ninf'))
+
+    def test_nan_not_clamped_to_zero_or_one(self):
+        """NaN 不得经 clamp 变成 0/1；必须整笔 rollback。"""
+        self.bootstrap()
+        with self.assertRaises(store.StoreError):
+            store.apply_state_update(
+                self.conn,
+                event_key='user_rule:nan2',
+                event_type='user_rule',
+                source_id='nan2',
+                payload={},
+                mutator=lambda s: {'libido': float('nan'), 'stress': 0.5},
+                expected_state_version=0,
+            )
+        st = store.read_state(self.conn)
+        self.assertEqual(st['state_version'], 0)
+        self.assertNotEqual(st['stress'], 0.5)
+        self.assertIsNone(store.read_event(self.conn, 'user_rule:nan2'))
+
     def test_unknown_mutator_field_rolls_back(self):
         self.bootstrap()
         with self.assertRaises(store.StoreError) as ctx:
