@@ -2356,6 +2356,150 @@ class OutboxQueueMigrationAtomicityTests(unittest.TestCase):
         after = self._finish_migration(db_path)
         self.assertEqual(before, after)
 
+    def test_create_interrupt_legacy_full_mig_empty_preserves_rows(self):
+        _, db_path = self._open_legacy_db()
+        conn = store.open_store(db_path)
+        try:
+            before = _outbox_payload_snapshot(conn)
+            conn.execute(
+                f"""
+                CREATE TABLE {shadow.OUTBOX_QUEUE_MIG_TABLE} (
+                    queue_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    event_key TEXT NOT NULL UNIQUE,
+                    event_type TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    payload_hash TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    attempts INTEGER NOT NULL DEFAULT 0,
+                    last_error TEXT,
+                    delivered_at TEXT
+                )
+                """
+            )
+        finally:
+            conn.close()
+        conn = store.open_store(db_path)
+        try:
+            shadow._recover_orphan_outbox_queue_mig(conn)
+            self.assertFalse(
+                shadow._shadow_table_exists(conn, shadow.OUTBOX_QUEUE_MIG_TABLE),
+            )
+            self.assertNotIn('queue_id', shadow._outbox_table_columns(conn))
+            self.assertEqual(_outbox_payload_snapshot(conn), before)
+        finally:
+            conn.close()
+        after = self._finish_migration(db_path)
+        self.assertEqual(before, after)
+
+    def test_copy_interrupt_identical_tables_recovers_safely(self):
+        _, db_path = self._open_legacy_db()
+        conn = store.open_store(db_path)
+        try:
+            before = _outbox_payload_snapshot(conn)
+            conn.execute('BEGIN IMMEDIATE')
+            conn.execute(
+                f"""
+                CREATE TABLE {shadow.OUTBOX_QUEUE_MIG_TABLE} (
+                    queue_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    event_key TEXT NOT NULL UNIQUE,
+                    event_type TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    payload_hash TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    attempts INTEGER NOT NULL DEFAULT 0,
+                    last_error TEXT,
+                    delivered_at TEXT
+                )
+                """
+            )
+            conn.execute(
+                f"""
+                INSERT INTO {shadow.OUTBOX_QUEUE_MIG_TABLE}
+                    (event_key, event_type, payload_json, payload_hash, created_at,
+                     attempts, last_error, delivered_at)
+                SELECT event_key, event_type, payload_json, payload_hash, created_at,
+                       attempts, last_error, delivered_at
+                FROM {shadow.OUTBOX_TABLE}
+                ORDER BY created_at ASC, event_key ASC
+                """
+            )
+            conn.execute('COMMIT')
+        finally:
+            conn.close()
+        conn = store.open_store(db_path)
+        try:
+            shadow._recover_orphan_outbox_queue_mig(conn)
+            self.assertFalse(
+                shadow._shadow_table_exists(conn, shadow.OUTBOX_QUEUE_MIG_TABLE),
+            )
+            self.assertIn('queue_id', shadow._outbox_table_columns(conn))
+            self.assertEqual(_outbox_payload_snapshot(conn), before)
+            shadow._recover_orphan_outbox_queue_mig(conn)
+            self.assertFalse(
+                shadow._shadow_table_exists(conn, shadow.OUTBOX_QUEUE_MIG_TABLE),
+            )
+        finally:
+            conn.close()
+
+    def test_both_nonempty_divergent_fail_closed_keeps_both_tables(self):
+        _, db_path = self._open_legacy_db()
+        conn = store.open_store(db_path)
+        try:
+            conn.execute('BEGIN IMMEDIATE')
+            conn.execute(
+                f"""
+                CREATE TABLE {shadow.OUTBOX_QUEUE_MIG_TABLE} (
+                    queue_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    event_key TEXT NOT NULL UNIQUE,
+                    event_type TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    payload_hash TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    attempts INTEGER NOT NULL DEFAULT 0,
+                    last_error TEXT,
+                    delivered_at TEXT
+                )
+                """
+            )
+            conn.execute(
+                f"""
+                INSERT INTO {shadow.OUTBOX_QUEUE_MIG_TABLE}
+                    (event_key, event_type, payload_json, payload_hash, created_at,
+                     attempts, last_error, delivered_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    'user_scored:199', 'user_scored', '{"message_id": 199}',
+                    'different', '2026-07-21 12:00:00', 0, None, None,
+                ),
+            )
+            conn.execute('COMMIT')
+        finally:
+            conn.close()
+        conn = store.open_store(db_path)
+        try:
+            with self.assertRaises(store.StoreError) as ctx:
+                shadow._recover_orphan_outbox_queue_mig(conn)
+            self.assertIn('reconciliation_conflict', str(ctx.exception))
+            self.assertTrue(shadow.outbox_schema_ready(conn))
+            self.assertTrue(
+                shadow._shadow_table_exists(conn, shadow.OUTBOX_QUEUE_MIG_TABLE),
+            )
+            self.assertGreater(
+                conn.execute(
+                    f'SELECT COUNT(*) FROM {shadow.OUTBOX_TABLE}'
+                ).fetchone()[0],
+                0,
+            )
+            self.assertGreater(
+                conn.execute(
+                    f'SELECT COUNT(*) FROM {shadow.OUTBOX_QUEUE_MIG_TABLE}'
+                ).fetchone()[0],
+                0,
+            )
+        finally:
+            conn.close()
+
 
 if __name__ == '__main__':
     unittest.main()

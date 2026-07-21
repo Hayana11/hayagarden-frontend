@@ -1265,8 +1265,33 @@ def _shadow_table_exists(conn: sqlite3.Connection, table: str) -> bool:
     return row is not None
 
 
+def _outbox_reconcile_rows(
+    conn: sqlite3.Connection,
+    table: str,
+) -> list[tuple]:
+    """Comparable outbox rows for orphan reconciliation (queue_id-agnostic)."""
+    return conn.execute(
+        f"""
+        SELECT event_key, payload_json, COALESCE(payload_hash, ''),
+               attempts, last_error, delivered_at
+        FROM {table}
+        ORDER BY event_key ASC
+        """
+    ).fetchall()
+
+
+def _outbox_tables_reconcile_equal(
+    conn: sqlite3.Connection,
+    left: str,
+    right: str,
+) -> bool:
+    return _outbox_reconcile_rows(conn, left) == _outbox_reconcile_rows(
+        conn, right,
+    )
+
+
 def _recover_orphan_outbox_queue_mig(conn: sqlite3.Connection) -> bool:
-    """Finish an interrupted queue_id migration without losing rows."""
+    """Finish or disambiguate an interrupted queue_id migration without data loss."""
     if not _shadow_table_exists(conn, OUTBOX_QUEUE_MIG_TABLE):
         return False
     conn.execute('BEGIN IMMEDIATE')
@@ -1274,37 +1299,62 @@ def _recover_orphan_outbox_queue_mig(conn: sqlite3.Connection) -> bool:
         if not _shadow_table_exists(conn, OUTBOX_QUEUE_MIG_TABLE):
             conn.execute('COMMIT')
             return False
+
         mig_count = int(
             conn.execute(
                 f'SELECT COUNT(*) FROM {OUTBOX_QUEUE_MIG_TABLE}'
             ).fetchone()[0]
         )
-        if not outbox_schema_ready(conn):
+        outbox_exists = outbox_schema_ready(conn)
+
+        if not outbox_exists:
             conn.execute(
                 f'ALTER TABLE {OUTBOX_QUEUE_MIG_TABLE} RENAME TO {OUTBOX_TABLE}'
             )
-        else:
-            cols = _outbox_table_columns(conn)
-            outbox_count = int(
-                conn.execute(f'SELECT COUNT(*) FROM {OUTBOX_TABLE}').fetchone()[0]
+            conn.execute('COMMIT')
+            return True
+
+        outbox_count = int(
+            conn.execute(f'SELECT COUNT(*) FROM {OUTBOX_TABLE}').fetchone()[0]
+        )
+        has_queue_id = 'queue_id' in _outbox_table_columns(conn)
+
+        if mig_count == 0 and outbox_count == 0:
+            conn.execute(f'DROP TABLE {OUTBOX_QUEUE_MIG_TABLE}')
+            conn.execute('COMMIT')
+            return True
+
+        if mig_count == 0 and outbox_count > 0:
+            # CREATE-interrupt: empty mig shell; keep authoritative outbox.
+            conn.execute(f'DROP TABLE {OUTBOX_QUEUE_MIG_TABLE}')
+            conn.execute('COMMIT')
+            return True
+
+        if mig_count > 0 and outbox_count == 0:
+            # Empty outbox shell (legacy or queue_id) with populated mig.
+            conn.execute(f'DROP TABLE {OUTBOX_TABLE}')
+            conn.execute(
+                f'ALTER TABLE {OUTBOX_QUEUE_MIG_TABLE} RENAME TO {OUTBOX_TABLE}'
             )
-            if 'queue_id' not in cols:
-                conn.execute(f'DROP TABLE {OUTBOX_TABLE}')
-                conn.execute(
-                    f'ALTER TABLE {OUTBOX_QUEUE_MIG_TABLE} RENAME TO {OUTBOX_TABLE}'
-                )
-            elif mig_count > 0 and outbox_count == 0:
-                conn.execute(f'DROP TABLE {OUTBOX_TABLE}')
-                conn.execute(
-                    f'ALTER TABLE {OUTBOX_QUEUE_MIG_TABLE} RENAME TO {OUTBOX_TABLE}'
-                )
-            elif mig_count > 0 and outbox_count > 0:
-                conn.execute(f'DROP TABLE {OUTBOX_TABLE}')
-                conn.execute(
-                    f'ALTER TABLE {OUTBOX_QUEUE_MIG_TABLE} RENAME TO {OUTBOX_TABLE}'
-                )
-            else:
-                conn.execute(f'DROP TABLE {OUTBOX_QUEUE_MIG_TABLE}')
+            conn.execute('COMMIT')
+            return True
+
+        # Both tables non-empty: reconcile exactly or fail closed.
+        if not _outbox_tables_reconcile_equal(
+            conn, OUTBOX_TABLE, OUTBOX_QUEUE_MIG_TABLE,
+        ):
+            raise store.StoreError(
+                'outbox_queue_mig_reconciliation_conflict: '
+                f'{OUTBOX_TABLE} and {OUTBOX_QUEUE_MIG_TABLE} diverge'
+            )
+
+        if has_queue_id:
+            conn.execute(f'DROP TABLE {OUTBOX_QUEUE_MIG_TABLE}')
+        else:
+            conn.execute(f'DROP TABLE {OUTBOX_TABLE}')
+            conn.execute(
+                f'ALTER TABLE {OUTBOX_QUEUE_MIG_TABLE} RENAME TO {OUTBOX_TABLE}'
+            )
         conn.execute('COMMIT')
         return True
     except Exception:
@@ -1412,6 +1462,7 @@ def ensure_shadow_schema(
         VALUES (1, 1, 0, NULL, NULL, NULL)
         """
     )
+    _recover_orphan_outbox_queue_mig(conn)
     conn.execute(
         f"""
         CREATE TABLE IF NOT EXISTS {OUTBOX_TABLE} (
