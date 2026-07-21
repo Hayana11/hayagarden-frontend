@@ -188,6 +188,7 @@ def insert_user_message(
         if row is not None:
             created_at = row['created_at'] if hasattr(row, 'keys') else row[0]
             created_at = str(created_at)[:19] if created_at else None
+        capture_alert_failed = False
         # Shadow user_rule outbox：与 chat INSERT 同事务；缺表则 outbox_capture_gap
         # 聊天主流程不得阻断；证据全失败时记 sticky alert（status fail-closed）
         if user_id is not None and created_at:
@@ -218,31 +219,33 @@ def insert_user_message(
                                     error_code='outbox_capture_gap',
                                 )
                                 if _gap_result.status == 'failed':
-                                    _shadow.note_capture_evidence_failure(
+                                    capture_alert_failed = not _shadow.note_capture_evidence_failure(
                                         f'user_rule message_id={user_id}',
                                         db_path=memories_db_path,
                                     )
                             except Exception as _gap_exc:
-                                _shadow.note_capture_evidence_failure(
+                                capture_alert_failed = not _shadow.note_capture_evidence_failure(
                                     f'user_rule standalone exception={_gap_exc}',
                                     db_path=memories_db_path,
                                 )
             except Exception as _cap_exc:
                 try:
                     import internal_state_shadow as _shadow2
-                    _shadow2.note_capture_evidence_failure(
+                    capture_alert_failed = not _shadow2.note_capture_evidence_failure(
                         f'user_rule import/enable: {_cap_exc}',
                         db_path=memories_db_path,
                     )
                 except Exception:
                     try:
                         from internal_state_capture_alert import write_capture_alert
-                        write_capture_alert(
+                        capture_alert_failed = not write_capture_alert(
                             db_path=memories_db_path,
                             detail=f'user_rule shadow import/enable: {_cap_exc}',
                         )
                     except Exception:
-                        pass
+                        capture_alert_failed = True
+        if capture_alert_failed:
+            raise RuntimeError('shadow capture evidence and independent alert unavailable')
         conn.commit()
         turn_data['user_message_id'] = user_id
     finally:

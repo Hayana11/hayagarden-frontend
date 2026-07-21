@@ -68,6 +68,7 @@ def _cmd_prepare_schema(db_path: str) -> int:
             'bootstrapped': False,
             'capture_alert_configured': shadow.capture_alert_configured(),
             'capture_alert_pending': shadow.has_capture_alert(path),
+            'capture_alert_preflight': shadow.capture_alert_preflight(path),
             'user_events_preflight_ok': (
                 (not shadow.is_user_events_enabled())
                 or (
@@ -75,6 +76,7 @@ def _cmd_prepare_schema(db_path: str) -> int:
                     and shadow.score_proof_schema_ready(conn)
                     and not shadow.has_unresolved_proof_gap(conn, db_path=path)
                     and shadow.capture_alert_configured()
+                    and shadow.capture_alert_preflight(path)['ok']
                     and not shadow.has_capture_alert(path)
                 )
             ),
@@ -115,6 +117,7 @@ def _cmd_status(db_path: str) -> int:
             if shadow.outbox_schema_ready(conn) else None
         )
         events_on = shadow.is_user_events_enabled(environ=environ)
+        alert_preflight = shadow.capture_alert_preflight(path)
         preflight_ok = (
             (not events_on)
             or (
@@ -122,6 +125,7 @@ def _cmd_status(db_path: str) -> int:
                 and shadow.score_proof_schema_ready(conn)
                 and not shadow.has_unresolved_proof_gap(conn, db_path=path)
                 and shadow.capture_alert_configured()
+                and alert_preflight['ok']
                 and not shadow.has_capture_alert(path)
             )
         )
@@ -143,6 +147,7 @@ def _cmd_status(db_path: str) -> int:
             'capture_evidence_failures_process_local': shadow.capture_evidence_failure_count(),
             'capture_alert_configured': shadow.capture_alert_configured(),
             'capture_alert_pending': shadow.has_capture_alert(path),
+            'capture_alert_preflight': alert_preflight,
             'user_events_preflight_ok': preflight_ok,
             'proof_max_message_id': wm,
             'outbox_pending': pending,
@@ -373,6 +378,23 @@ def _cmd_ack_capture_alert(db_path: str, sha256: str, reason: str) -> int:
         conn.close()
 
 
+def _cmd_recover_pending_incident_intents(db_path: str) -> int:
+    db = isv3.memories_db_path(db_path)
+    conn = store.open_store(db)
+    try:
+        shadow.ensure_shadow_schema(conn, db_path=db)
+        if conn.in_transaction:
+            conn.execute('COMMIT')
+        result = shadow.recover_pending_incident_intents(conn, db_path=db)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0 if all(x.get('status') == 'completed' for x in result) else 1
+    except Exception as exc:
+        print(f'ERROR: {exc}', file=sys.stderr)
+        return 1
+    finally:
+        conn.close()
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description='Internal State Shadow admin')
     p.add_argument('--db', default=None, help='memories.db path')
@@ -418,6 +440,10 @@ def main(argv: list[str] | None = None) -> int:
     )
     aca.add_argument('--sha256', required=True)
     aca.add_argument('--reason', required=True)
+    sub.add_parser(
+        'recover-pending-incident-intents',
+        help='complete prepared stale-tmp action intents after a crash',
+    )
     args = p.parse_args(argv)
     if args.cmd == 'prepare-schema':
         return _cmd_prepare_schema(args.db)
@@ -451,6 +477,8 @@ def main(argv: list[str] | None = None) -> int:
         )
     if args.cmd == 'ack-capture-alert':
         return _cmd_ack_capture_alert(args.db, args.sha256, args.reason)
+    if args.cmd == 'recover-pending-incident-intents':
+        return _cmd_recover_pending_incident_intents(args.db)
     return 2
 
 

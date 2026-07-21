@@ -1513,6 +1513,42 @@ class CaptureAlertTests(unittest.TestCase):
             finally:
                 conn.close()
 
+    def test_ack_claim_does_not_archive_concurrent_new_alert(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        db_path = str(Path(tmp.name) / 'alert-race.db')
+        alert_path = str(Path(tmp.name) / 'alerts' / 'capture.json')
+        with mock.patch.dict(
+            os.environ, {shadow.CAPTURE_ALERT_PATH_ENV: alert_path}, clear=False,
+        ):
+            self.assertTrue(shadow.note_capture_evidence_failure('A', db_path=db_path))
+            hash_a = shadow._sha256_file(Path(alert_path))
+            real_hash = shadow._sha256_file
+            wrote_b = {}
+
+            def hash_then_publish_b(path):
+                if '.processing.' in str(path) and not wrote_b:
+                    wrote_b['yes'] = shadow.note_capture_evidence_failure(
+                        'B', db_path=db_path,
+                    )
+                return real_hash(path)
+
+            conn = store.open_store(db_path)
+            try:
+                with mock.patch.object(shadow, '_sha256_file', side_effect=hash_then_publish_b):
+                    result = shadow.ack_capture_alert(
+                        conn, sha256=hash_a, reason='ack A', db_path=db_path,
+                    )
+                self.assertTrue(result['acked'])
+                self.assertTrue(wrote_b.get('yes'))
+                self.assertTrue(Path(alert_path).is_file())
+                self.assertNotEqual(shadow._sha256_file(Path(alert_path)), hash_a)
+                self.assertEqual(
+                    shadow._sha256_file(Path(result['archive_path'])), hash_a,
+                )
+            finally:
+                conn.close()
+
 
 class PendingIncidentTmpTests(unittest.TestCase):
     def test_promote_stale_complete_tmp_is_audited_and_migrates(self):

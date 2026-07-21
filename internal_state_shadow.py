@@ -71,6 +71,7 @@ OUTBOX_SIDECAR_SUFFIX = '.shadow_outbox.jsonl'  # legacy only; hot path removed
 QUARANTINE_RECONCILE_TABLE = 'internal_state_shadow_quarantine_reconcile'
 QUARANTINE_INTENT_TABLE = 'internal_state_shadow_quarantine_reconcile_intents'
 PENDING_INCIDENT_ACTION_TABLE = 'internal_state_shadow_pending_incident_actions'
+PENDING_INCIDENT_INTENT_TABLE = 'internal_state_shadow_pending_incident_intents'
 CAPTURE_ALERT_ACK_TABLE = 'internal_state_shadow_capture_alert_ack'
 EVENT_TYPE_USER_RULE = 'user_rule'
 EVENT_TYPE_USER_SCORED = 'user_scored'
@@ -430,9 +431,43 @@ def capture_alert_configured() -> bool:
     return capture_alert_path() is not None
 
 
+def capture_alert_preflight(db_path: Optional[str] = None) -> dict:
+    """实际探测独立 capture-alert 卷，而非仅检查环境变量字符串。"""
+    alert = capture_alert_path(db_path)
+    if alert is None:
+        return {'ok': False, 'reason': f'{CAPTURE_ALERT_PATH_ENV} is unset'}
+    try:
+        alert = alert.resolve()
+        alert.parent.mkdir(parents=True, exist_ok=True)
+        db_parent = Path(isv3.memories_db_path(db_path)).resolve().parent
+        incidents = gap_incidents_dir(db_path).resolve()
+        alert_dev = os.stat(alert.parent).st_dev
+        if alert_dev == os.stat(db_parent).st_dev:
+            return {'ok': False, 'reason': 'alert path shares DB filesystem'}
+        if incidents.exists() and alert_dev == os.stat(incidents).st_dev:
+            return {'ok': False, 'reason': 'alert path shares incident filesystem'}
+        probe = Path(f'{alert}.probe.{uuid.uuid4().hex}')
+        renamed = Path(f'{probe}.renamed')
+        with open(probe, 'w', encoding='utf-8') as fh:
+            fh.write('capture-alert-preflight\n')
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.rename(probe, renamed)
+        _fsync_dir(alert.parent)
+        renamed.unlink()
+        _fsync_dir(alert.parent)
+        return {'ok': True, 'path': str(alert), 'device': alert_dev}
+    except Exception as exc:  # noqa: BLE001
+        return {'ok': False, 'reason': str(exc), 'path': str(alert)}
+
+
 def has_capture_alert(db_path: Optional[str] = None) -> bool:
     path = capture_alert_path(db_path)
-    return bool(path is not None and path.is_file())
+    return bool(
+        path is not None and (
+            path.is_file() or any(path.parent.glob(path.name + '.processing.*'))
+        )
+    )
 
 
 def note_capture_evidence_failure(
@@ -503,8 +538,15 @@ def ack_capture_alert(
     alert = capture_alert_path(db_path)
     if alert is None or not alert.is_file():
         raise store.StoreError('no pending configured capture alert')
-    actual = _sha256_file(alert)
+    # Claim canonical first. A concurrent writer now publishes a *new* canonical
+    # marker and cannot be silently carried into this acknowledgement.
+    processing = Path(f'{alert}.processing.{uuid.uuid4().hex}')
+    os.rename(str(alert), str(processing))
+    _fsync_dir(processing.parent)
+    actual = _sha256_file(processing)
     if actual.lower() != sha256.lower():
+        # Keep processing visible to health for operator recovery; never overwrite
+        # a concurrently-created canonical marker.
         raise store.StoreError(f'capture alert sha256 mismatch: {actual}')
     conn.execute(
         f"""
@@ -518,7 +560,7 @@ def ack_capture_alert(
         )
         """
     )
-    archive = Path(f'{alert}.resolved.{uuid.uuid4().hex}')
+    archive = Path(f'{processing}.resolved.{uuid.uuid4().hex}')
     # DB audit intent first: a post-rename crash leaves a visible prepared row.
     conn.execute('BEGIN IMMEDIATE')
     try:
@@ -536,7 +578,7 @@ def ack_capture_alert(
     except Exception:
         conn.execute('ROLLBACK')
         raise
-    os.rename(str(alert), str(archive))
+    os.rename(str(processing), str(archive))
     _fsync_dir(archive.parent)
     return {
         'acked': True, 'ack_id': ack_id, 'path': str(alert),
@@ -1459,38 +1501,115 @@ def recover_pending_incident_tmp(
         valid = isinstance(raw, dict) and bool(raw.get('gap_detected'))
     except Exception:
         raw, valid = None, False
+    ensure_quarantine_reconcile_schema(conn)
+    digest = _sha256_file(src)
     if action == 'promote':
         if not valid:
             raise store.StoreError('cannot promote invalid tmp; use quarantine/discard')
         dest = Path(str(src).removesuffix('.tmp') + '.json')
-        os.rename(str(src), str(dest))
-        _fsync_dir(d)
-        result = {'action': 'promote', 'path': str(src), 'promoted': str(dest)}
     elif action == 'quarantine':
         dest = _unique_quarantine_path(src)
-        os.rename(str(src), str(dest))
-        _fsync_dir(d)
-        mark_proof_gap(
-            conn, failed_message_id=None, error_code='sidecar_corrupt',
-            db_path=db_path, write_sidecar_if_missing=False,
-        )
-        result = {'action': 'quarantine', 'path': str(src), 'quarantine': str(dest)}
     else:
         dest = Path(f'{src}.discarded.{uuid.uuid4().hex}')
-        os.rename(str(src), str(dest))
-        _fsync_dir(d)
-        result = {'action': 'discard', 'path': str(src), 'archive': str(dest)}
-    conn.execute(
-        f"""
-        INSERT INTO {PENDING_INCIDENT_ACTION_TABLE}
-            (source_path, action, reason, archive_path, acted_at)
-        VALUES (?, ?, ?, ?, ?)
-        """,
-        (str(src), action, reason.strip()[:512],
-         result.get('promoted') or result.get('quarantine') or result.get('archive'),
-         _now_beijing()),
-    )
+    reason_s = reason.strip()[:512]
+    conn.execute('BEGIN IMMEDIATE')
+    try:
+        cur = conn.execute(
+            f"""
+            INSERT INTO {PENDING_INCIDENT_INTENT_TABLE}
+                (source_path, archive_path, sha256, action, reason, prepared_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (str(src), str(dest), digest, action, reason_s, _now_beijing()),
+        )
+        intent_id = int(cur.lastrowid)
+        conn.execute('COMMIT')
+    except Exception:
+        conn.execute('ROLLBACK')
+        raise
+    os.rename(str(src), str(dest))
+    _fsync_dir(d)
+    conn.execute('BEGIN IMMEDIATE')
+    try:
+        if action == 'quarantine':
+            mark_proof_gap(
+                conn, failed_message_id=None, error_code='sidecar_corrupt',
+                db_path=db_path, write_sidecar_if_missing=False,
+            )
+        conn.execute(
+            f"""
+            INSERT INTO {PENDING_INCIDENT_ACTION_TABLE}
+                (source_path, action, reason, archive_path, acted_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (str(src), action, reason_s, str(dest), _now_beijing()),
+        )
+        conn.execute(
+            f"""
+            UPDATE {PENDING_INCIDENT_INTENT_TABLE}
+            SET completed_at=? WHERE intent_id=? AND completed_at IS NULL
+            """,
+            (_now_beijing(), intent_id),
+        )
+        conn.execute('COMMIT')
+    except Exception:
+        conn.execute('ROLLBACK')
+        raise
+    key = {'promote': 'promoted', 'quarantine': 'quarantine', 'discard': 'archive'}[action]
+    result = {'action': action, 'path': str(src), key: str(dest), 'intent_id': intent_id}
     return result
+
+
+def recover_pending_incident_intents(
+    conn: sqlite3.Connection,
+    *,
+    db_path: Optional[str] = None,
+) -> list[dict]:
+    """恢复 stale-tmp action prepared intent；archive 存在才可完成审计。"""
+    ensure_quarantine_reconcile_schema(conn)
+    rows = conn.execute(
+        f"""
+        SELECT intent_id, source_path, archive_path, sha256, action, reason
+        FROM {PENDING_INCIDENT_INTENT_TABLE} WHERE completed_at IS NULL
+        ORDER BY intent_id ASC
+        """
+    ).fetchall()
+    out = []
+    for row in rows:
+        get = lambda k, i: row[k] if isinstance(row, sqlite3.Row) else row[i]
+        iid = int(get('intent_id', 0))
+        src, archive = Path(str(get('source_path', 1))), Path(str(get('archive_path', 2)))
+        digest, action, reason = str(get('sha256', 3)), str(get('action', 4)), str(get('reason', 5))
+        if archive.is_file() and not src.exists() and _sha256_file(archive) == digest:
+            conn.execute('BEGIN IMMEDIATE')
+            try:
+                if action == 'quarantine':
+                    mark_proof_gap(
+                        conn, failed_message_id=None, error_code='sidecar_corrupt',
+                        db_path=db_path, write_sidecar_if_missing=False,
+                    )
+                conn.execute(
+                    f"""
+                    INSERT INTO {PENDING_INCIDENT_ACTION_TABLE}
+                        (source_path, action, reason, archive_path, acted_at)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (str(src), action, reason, str(archive), _now_beijing()),
+                )
+                conn.execute(
+                    f'UPDATE {PENDING_INCIDENT_INTENT_TABLE} SET completed_at=? WHERE intent_id=?',
+                    (_now_beijing(), iid),
+                )
+                conn.execute('COMMIT')
+                out.append({'intent_id': iid, 'status': 'completed'})
+            except Exception:
+                conn.execute('ROLLBACK')
+                raise
+        elif src.is_file() and not archive.exists():
+            out.append({'intent_id': iid, 'status': 'prepared_source_present'})
+        else:
+            out.append({'intent_id': iid, 'status': 'split_brain'})
+    return out
 
 
 def _quarantine_kind(path_s: str) -> str:
@@ -1548,6 +1667,20 @@ def ensure_quarantine_reconcile_schema(conn: sqlite3.Connection) -> None:
             reason TEXT NOT NULL,
             archive_path TEXT,
             acted_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS {PENDING_INCIDENT_INTENT_TABLE} (
+            intent_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source_path TEXT NOT NULL UNIQUE,
+            archive_path TEXT NOT NULL UNIQUE,
+            sha256 TEXT NOT NULL,
+            action TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            prepared_at TEXT NOT NULL,
+            completed_at TEXT
         )
         """
     )
@@ -2579,6 +2712,7 @@ def get_shadow_health(
         status = _last_status
         capture_fail_n = int(_capture_evidence_failures)
     capture_alert = has_capture_alert(db_path)
+    capture_preflight = capture_alert_preflight(db_path)
     proof_on = is_score_proof_enabled(environ=environ)
     events_on = is_user_events_enabled(environ=environ)
     if not enabled:
@@ -2644,6 +2778,10 @@ def get_shadow_health(
             status = 'watermark_lag'
         elif pending and pending > 0 and status not in ('proof_gap', 'watermark_lag'):
             status = 'outbox_pending'
+        elif events_on and not capture_preflight['ok'] and status not in (
+            'proof_gap', 'watermark_lag', 'outbox_pending',
+        ):
+            status = 'capture_alert_unready'
         elif (capture_fail_n > 0 or capture_alert) and status not in (
             'proof_gap', 'watermark_lag', 'outbox_pending',
         ):
@@ -3304,6 +3442,7 @@ __all__ = [
     'QUARANTINE_RECONCILE_TABLE',
     'QUARANTINE_INTENT_TABLE',
     'PENDING_INCIDENT_ACTION_TABLE',
+    'PENDING_INCIDENT_INTENT_TABLE',
     'ack_proof_gap',
     'ack_capture_alert',
     'append_gap_incident_sidecar',
@@ -3311,6 +3450,7 @@ __all__ = [
     'capture_bootstrap_bundle',
     'capture_alert_configured',
     'capture_alert_path',
+    'capture_alert_preflight',
     'capture_evidence_failure_count',
     'clear_proof_gap',
     'compute_score_hash',
@@ -3356,6 +3496,7 @@ __all__ = [
     'read_proof_health',
     'reconcile_quarantine',
     'recover_pending_incident_tmp',
+    'recover_pending_incident_intents',
     'recover_quarantine_intents',
     'record_score_proof_in_txn',
     'resolve_scored_watermark',

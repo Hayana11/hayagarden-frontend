@@ -82,6 +82,7 @@ python3 tools/internal_state_shadow_admin.py reconcile-quarantine \
   --path ... --sha256 ... --reason '...'
 python3 tools/internal_state_shadow_admin.py recover-quarantine-intents
 python3 tools/internal_state_shadow_admin.py inspect-pending-incidents
+python3 tools/internal_state_shadow_admin.py recover-pending-incident-intents
 python3 tools/internal_state_shadow_admin.py ack-capture-alert \
   --sha256 ... --reason '...'
 ```
@@ -101,6 +102,7 @@ incident/ack/audit；`recover-quarantine-intents` 用于进程在中途退出后
 - `chat_messages` INSERT 与 user_rule outbox 同事务；缺 outbox 表 → `outbox_capture_gap`
 - USER_EVENTS 部署必须设置独立持久卷上的
   `INTERNAL_STATE_V3_CAPTURE_ALERT_PATH`。DB 与 incident 文件都失败时写 sticky
-  alert；所有新进程的 status/preflight 都会 fail closed，直到受审计恢复。
+  alert；preflight 会真实测试 write/fsync/rename/directory-fsync，并拒绝与 DB /
+  incident 同一文件系统。运行时 alert 写入也失败时，聊天事务会 rollback。
 - schema 缺失：先写 gap incident 文件，再改 emotion
 - `wake_outcome` 生产调用点仍为 0
