@@ -1054,12 +1054,18 @@ def get_scored_event_stats(conn: sqlite3.Connection) -> dict:
 #
 # 一个 wake_run_id 只能进结算室一次。
 # Phase 1 权威路径只应用 drive_engine 兼容的固定减法 + fatigue±0.04；
-# desire 乘性 / live 双结算 / attachment×0.45 仅 diagnostics，不写 state。
+# desire 乘性 / live 双结算 / attachment×0.45 写入 result_json（审计），
+# 不进入 payload_hash，不写 state。
+#
+# action 合同拆分：
+#   executor_action — Wake 合同：none / message / diary / explore
+#   desire_action   — desire.ACTION_SATISFY 键（可选）；用于 ratio 对照
 #
 
 _WAKE_OUTCOME_EVENT_TYPE = 'wake_outcome'
 _WAKE_RUN_ID_MAX_LEN = 128
-_ACTION_MAX_LEN = 64
+
+_EXECUTOR_ACTIONS = frozenset({'none', 'message', 'diary', 'explore'})
 
 _FIRED_DRIVE_ENUM = frozenset({
     'attachment', 'curiosity', 'reflection', 'social',
@@ -1090,6 +1096,7 @@ _LEGACY_DESIRE_ACTION_SATISFY = {
     'tease': {'libido': 0.55},
     'vent': {'stress': 0.45},
 }
+_DESIRE_ACTIONS = frozenset(_LEGACY_DESIRE_ACTION_SATISFY.keys())
 
 
 def _require_wake_run_id(value: Any) -> str:
@@ -1106,15 +1113,30 @@ def _require_wake_run_id(value: Any) -> str:
     return rid
 
 
-def _require_action(value: Any) -> str:
+def _require_executor_action(value: Any) -> str:
     if not isinstance(value, str):
-        raise StoreError(f'action must be a non-empty str: {value!r}')
-    action = value.strip()
-    if not action or len(action) > _ACTION_MAX_LEN:
         raise StoreError(
-            f'action must be non-empty and <= {_ACTION_MAX_LEN}: {value!r}'
+            f'executor_action must be one of {sorted(_EXECUTOR_ACTIONS)}: '
+            f'{value!r}'
+        )
+    action = value.strip()
+    if action not in _EXECUTOR_ACTIONS:
+        raise StoreError(
+            f'executor_action must be one of {sorted(_EXECUTOR_ACTIONS)}: '
+            f'{value!r}'
         )
     return action
+
+
+def _require_desire_action(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    if not isinstance(value, str) or value not in _DESIRE_ACTIONS:
+        raise StoreError(
+            f'desire_action must be None or one of '
+            f'{sorted(_DESIRE_ACTIONS)}: {value!r}'
+        )
+    return value
 
 
 def _require_fired_drive(value: Any) -> Optional[str]:
@@ -1134,6 +1156,20 @@ def _require_desire_driven(value: Any) -> bool:
             f'desire_driven must be a real bool: {value!r}'
         )
     return value
+
+
+def _require_longing_for_boost(value: Any) -> float:
+    """稳定输入：禁止静默当成 0；bool / 非有限 / 越界一律拒绝。"""
+    if type(value) is bool or type(value) not in (int, float):
+        raise StoreError(
+            f'longing_for_boost must be a finite int/float in [0, 1]: {value!r}'
+        )
+    v = float(value)
+    if not math.isfinite(v) or v < 0.0 or v > 1.0:
+        raise StoreError(
+            f'longing_for_boost must be a finite int/float in [0, 1]: {value!r}'
+        )
+    return v
 
 
 def _require_drives_clock_for_outcome(
@@ -1175,31 +1211,42 @@ def _drives_dict_copy(drives: Mapping[str, float]) -> dict:
 def _apply_legacy_fixed_settlement(
     materialized: Mapping[str, float],
     *,
-    action: str,
+    executor_action: str,
     fired_drive: Optional[str],
 ) -> dict:
-    """Phase 1 权威：drive_engine 兼容固定减法 / none 恢复。"""
+    """Phase 1 权威：drive_engine 兼容固定减法 / none 恢复。
+
+    非 none 必须已由调用方保证 fired_drive 非空；此处不再猜最高 drive。
+    """
     out = _drives_dict_copy(materialized)
-    if action == 'none':
+    if executor_action == 'none':
+        # fired_drive 可非空（例如 desire duty→none）；固定路径仍只休息
         out['fatigue'] = round(
             max(0.0, out['fatigue'] - _LEGACY_FATIGUE_NONE_RESTORE), 4,
         )
         return out
-    if fired_drive is not None:
-        sub = _LEGACY_FIXED_DISCHARGE[fired_drive]
-        out[fired_drive] = round(max(0.0, out[fired_drive] - sub), 4)
-        out['fatigue'] = round(
-            min(1.0, out['fatigue'] + _LEGACY_FATIGUE_BEHAVIOR_COST), 4,
-        )
+    assert fired_drive is not None
+    sub = _LEGACY_FIXED_DISCHARGE[fired_drive]
+    out[fired_drive] = round(max(0.0, out[fired_drive] - sub), 4)
+    out['fatigue'] = round(
+        min(1.0, out['fatigue'] + _LEGACY_FATIGUE_BEHAVIOR_COST), 4,
+    )
     return out
 
 
 def _apply_legacy_desire_ratio(
-    drives: Mapping[str, float], *, action: str,
+    drives: Mapping[str, float], *, desire_action: Optional[str],
 ) -> dict:
-    """旧 desire.ACTION_SATISFY 对照；不写 state。"""
+    """旧 desire.ACTION_SATISFY 对照；不写 state。
+
+    desire_action=None 时仅加 fatigue（对应 executor 键不在表内的 live 行为）。
+    """
     out = _drives_dict_copy(drives)
-    for key, ratio in _LEGACY_DESIRE_ACTION_SATISFY.get(action, {}).items():
+    ratios = (
+        _LEGACY_DESIRE_ACTION_SATISFY.get(desire_action, {})
+        if desire_action is not None else {}
+    )
+    for key, ratio in ratios.items():
         out[key] = round(max(0.0, out[key] * ratio), 4)
     out['fatigue'] = round(
         min(1.0, out['fatigue'] + _LEGACY_DESIRE_FATIGUE_COST), 4,
@@ -1211,38 +1258,55 @@ def plan_outcome_transition(
     state: Mapping[str, Any],
     *,
     wake_run_id: str,
-    action: str,
+    executor_action: str,
+    desire_action: Optional[str],
     fired_drive: Optional[str],
     desire_driven: bool,
+    longing_for_boost: float,
     outcome_at: str,
 ) -> dict:
     """纯函数：Wake 结果 → drives updates + 对照 diagnostics。
 
     权威 state 只应用一次固定减法路径；ratio / live-double / attachment×0.45
     仅记录。不修改 Affect / Bond / last_scored_message_id。
+
+    非 ``none`` 的 executor_action 必须显式提供 fired_drive；缺失 fail closed。
+    longing_for_boost 为稳定观察输入，禁止静默当成 0。
     """
     rid = _require_wake_run_id(wake_run_id)
-    act = _require_action(action)
+    exec_act = _require_executor_action(executor_action)
+    des_act = _require_desire_action(desire_action)
     fired = _require_fired_drive(fired_drive)
     driven = _require_desire_driven(desire_driven)
+    longing = _require_longing_for_boost(longing_for_boost)
     outcome_canon = _canonicalize_ts(outcome_at, field='outcome_at')
     _require_drives_clock_for_outcome(state, outcome_at=outcome_canon)
 
-    # 物化因子：Bond 只读衰减供 libido cap；Longing 无 user idle → 0
+    if exec_act != 'none' and fired is None:
+        raise StoreError(
+            'fired_drive is required when executor_action is not '
+            f"'none' (got executor_action={exec_act!r})"
+        )
+
+    # Bond 只读衰减供 libido cap；attachment cap 使用显式 longing
     bond_m = _materialize_bond(state, outcome_canon)
     drives_m = _materialize_drives(
         state,
         created_at=outcome_canon,
-        longing_for_boost=0.0,
+        longing_for_boost=longing,
         passion_for_boost=bond_m['passion'],
     )
 
     legacy_fixed = _apply_legacy_fixed_settlement(
-        drives_m, action=act, fired_drive=fired,
+        drives_m, executor_action=exec_act, fired_drive=fired,
     )
-    legacy_ratio = _apply_legacy_desire_ratio(drives_m, action=act)
+    legacy_ratio = _apply_legacy_desire_ratio(
+        drives_m, desire_action=des_act,
+    )
     if driven:
-        legacy_double = _apply_legacy_desire_ratio(legacy_fixed, action=act)
+        legacy_double = _apply_legacy_desire_ratio(
+            legacy_fixed, desire_action=des_act,
+        )
     else:
         legacy_double = None
     candidate_att = round(
@@ -1257,9 +1321,11 @@ def plan_outcome_transition(
 
     payload = {
         'wake_run_id': rid,
-        'action': act,
+        'executor_action': exec_act,
+        'desire_action': des_act,
         'fired_drive': fired,
         'desire_driven': driven,
+        'longing_for_boost': longing,
         'outcome_at': outcome_canon,
     }
 
@@ -1272,10 +1338,13 @@ def plan_outcome_transition(
             else None
         ),
         'candidate_attachment_ratio_after': candidate_att,
+        'longing_for_boost': longing,
+        'executor_action': exec_act,
+        'desire_action': des_act,
         'authority': 'legacy_fixed_discharge_phase1',
         'note': (
             'desire ratio / live-double / attachment×0.45 are diagnostics only; '
-            'state applies fixed discharge once'
+            'state applies fixed discharge once; result_json holds this audit'
         ),
     }
 
@@ -1290,50 +1359,69 @@ def apply_outcome(
     conn: sqlite3.Connection,
     *,
     wake_run_id: str,
-    action: str,
+    executor_action: str,
+    desire_action: Optional[str],
     fired_drive: Optional[str],
     desire_driven: bool,
+    longing_for_boost: float,
     outcome_at: str,
     expected_state_version: Optional[int] = None,
 ) -> ApplyResult:
     """Wake 结算事件 ``wake_outcome:{wake_run_id}``：一票只进结算室一次。
 
-    payload 仅含稳定观察输入；计算在事务内基于最新 state 重跑。
+    ``payload_json/hash`` 仅含稳定观察输入；``result_json`` 保存事务内
+    基于最新 state 算出的 diagnostics（duplicate 回放原值，不重算覆盖）。
     version_conflict 不消费 key，重读版本后可同 key 重试。
     """
     rid = _require_wake_run_id(wake_run_id)
-    act = _require_action(action)
+    exec_act = _require_executor_action(executor_action)
+    des_act = _require_desire_action(desire_action)
     fired = _require_fired_drive(fired_drive)
     driven = _require_desire_driven(desire_driven)
+    longing = _require_longing_for_boost(longing_for_boost)
     outcome_canon = _canonicalize_ts(outcome_at, field='outcome_at')
+
+    if exec_act != 'none' and fired is None:
+        raise StoreError(
+            'fired_drive is required when executor_action is not '
+            f"'none' (got executor_action={exec_act!r})"
+        )
 
     event_key = f'wake_outcome:{rid}'
     payload = {
         'wake_run_id': rid,
-        'action': act,
+        'executor_action': exec_act,
+        'desire_action': des_act,
         'fired_drive': fired,
         'desire_driven': driven,
+        'longing_for_boost': longing,
         'outcome_at': outcome_canon,
     }
 
-    def mutator(state: dict) -> dict:
+    def decide(state: dict) -> ConditionalDecision:
         plan = plan_outcome_transition(
             state,
             wake_run_id=rid,
-            action=act,
+            executor_action=exec_act,
+            desire_action=des_act,
             fired_drive=fired,
             desire_driven=driven,
+            longing_for_boost=longing,
             outcome_at=outcome_canon,
         )
-        return plan['updates']
+        return ConditionalDecision(
+            status='applied',
+            updates=plan['updates'],
+            result=plan['diagnostics'],
+        )
 
-    return apply_state_update(
+    return apply_conditional_state_update(
         conn,
         event_key=event_key,
         event_type=_WAKE_OUTCOME_EVENT_TYPE,
         source_id=rid,
         payload=payload,
-        mutator=mutator,
+        decide=decide,
         expected_state_version=expected_state_version,
     )
 

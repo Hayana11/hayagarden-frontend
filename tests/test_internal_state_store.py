@@ -200,6 +200,69 @@ class BootstrapTests(StoreBase):
             self.assertNotIn(banned, imported)
 
 
+class ResultJsonTests(StoreBase):
+    def test_result_json_column_exists_and_migrates(self):
+        store.ensure_schema(self.conn)
+        # 模拟旧库缺列后补齐
+        cols = {
+            r[1] for r in self.conn.execute(
+                'PRAGMA table_info(internal_state_events)')
+        }
+        self.assertIn('result_json', cols)
+        store.ensure_schema(self.conn)  # 幂等
+
+    def test_conditional_persists_result_and_duplicate_replays(self):
+        self.bootstrap()
+        audit = {
+            'materialized_before': {'curiosity': 0.7},
+            'legacy_fixed_after': {'curiosity': 0.25},
+        }
+
+        def decide(_state):
+            return store.ConditionalDecision(
+                status='applied',
+                updates={'curiosity': 0.25},
+                result=audit,
+            )
+
+        r1 = store.apply_conditional_state_update(
+            self.conn,
+            event_key='wake_outcome:audit',
+            event_type='wake_outcome',
+            source_id='audit',
+            payload={'wake_run_id': 'audit', 'outcome_at': '2026-07-21 12:00:00'},
+            decide=decide,
+            expected_state_version=0,
+        )
+        self.assertEqual(r1.status, 'applied')
+        self.assertEqual(r1.result, audit)
+        ev = store.read_event(self.conn, 'wake_outcome:audit')
+        self.assertEqual(json.loads(ev['result_json']), audit)
+        # payload 不含 audit 键
+        self.assertNotIn('materialized_before', ev['payload_json'])
+
+        r2 = store.apply_conditional_state_update(
+            self.conn,
+            event_key='wake_outcome:audit',
+            event_type='wake_outcome',
+            source_id='audit',
+            payload={'wake_run_id': 'audit', 'outcome_at': '2026-07-21 12:00:00'},
+            decide=lambda s: store.ConditionalDecision(
+                status='applied',
+                updates={'curiosity': 0.01},
+                result={'should': 'not_overwrite'},
+            ),
+        )
+        self.assertEqual(r2.status, 'duplicate')
+        self.assertEqual(r2.result, audit)
+        self.assertEqual(
+            json.loads(
+                store.read_event(self.conn, 'wake_outcome:audit')['result_json']
+            ),
+            audit,
+        )
+
+
 class EventIdempotencyTests(StoreBase):
     def test_event_key_unique_and_duplicate_skips_version(self):
         self.bootstrap()

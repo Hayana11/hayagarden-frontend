@@ -70,6 +70,8 @@ class ApplyResult:
     state_version_after: Optional[int]
     event_id: Optional[int]
     error: Optional[str] = None
+    # 与 payload 分离的审计结果（如 shadow diagnostics）；duplicate 时回放原值
+    result: Optional[dict] = None
 
     @property
     def applied(self) -> bool:
@@ -82,10 +84,12 @@ class ConditionalDecision:
 
     - ``status='applied'``：必须提供非空 ``updates``
     - ``status='stale_skipped'``：不更新状态；``error`` 记录 watermark 等原因
+    - ``result``：可选审计字典，写入 ``result_json``，**不**参与 payload_hash
     """
     status: str
     updates: Optional[Mapping[str, Any]] = None
     error: Optional[str] = None
+    result: Optional[Mapping[str, Any]] = None
 
 
 class VersionConflictError(RuntimeError):
@@ -127,6 +131,25 @@ def _canonical_payload_json(payload: Mapping[str, Any]) -> str:
 
 def _payload_hash_from_json(canonical_json: str) -> str:
     return hashlib.sha256(canonical_json.encode('utf-8')).hexdigest()
+
+
+def _canonical_result_json(result: Optional[Mapping[str, Any]]) -> Optional[str]:
+    """审计结果 JSON；None → SQL NULL。不进入 payload_hash。"""
+    if result is None:
+        return None
+    return _canonical_payload_json(result)
+
+
+def _parse_stored_result(raw: Any) -> Optional[dict]:
+    if raw is None or raw == '':
+        return None
+    try:
+        obj = json.loads(str(raw))
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise StoreError(f'corrupt result_json: {exc}') from exc
+    if not isinstance(obj, dict):
+        raise StoreError(f'result_json must be a JSON object, got {type(obj)!r}')
+    return obj
 
 
 def _require_clean_write_connection(conn: sqlite3.Connection) -> None:
@@ -239,7 +262,8 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             state_version_before INTEGER,
             state_version_after INTEGER,
             applied_at TEXT NOT NULL,
-            error TEXT
+            error TEXT,
+            result_json TEXT
         );
 
         CREATE INDEX IF NOT EXISTS idx_internal_state_events_type
@@ -248,6 +272,19 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             ON internal_state_events(applied_at);
         """
     )
+    _ensure_events_result_json_column(conn)
+
+
+def _ensure_events_result_json_column(conn: sqlite3.Connection) -> None:
+    """旧库 CREATE IF NOT EXISTS 不会加列；幂等补齐 result_json。"""
+    cols = {
+        row[1]
+        for row in conn.execute('PRAGMA table_info(internal_state_events)')
+    }
+    if 'result_json' not in cols:
+        conn.execute(
+            'ALTER TABLE internal_state_events ADD COLUMN result_json TEXT'
+        )
 
 
 def read_state(conn: sqlite3.Connection) -> Optional[dict]:
@@ -320,6 +357,7 @@ def _existing_event_result(
             state_version_before=existing.get('state_version_before'),
             state_version_after=existing.get('state_version_after'),
             event_id=existing.get('id'),
+            result=_parse_stored_result(existing.get('result_json')),
         )
     return ApplyResult(
         status='idempotency_conflict',
@@ -370,7 +408,7 @@ def apply_conditional_state_update(
         existing = _fetchone_dict(
             conn,
             'SELECT id, event_type, source_id, payload_hash, status, '
-            'state_version_before, state_version_after '
+            'state_version_before, state_version_after, result_json '
             'FROM internal_state_events WHERE event_key=?',
             (event_key,),
         )
@@ -417,17 +455,22 @@ def apply_conditional_state_update(
                 f'got {type(decision)!r}'
             )
 
+        result_obj = (
+            dict(decision.result) if decision.result is not None else None
+        )
+        r_json = _canonical_result_json(result_obj)
+
         if decision.status == 'stale_skipped':
             conn.execute(
                 """
                 INSERT INTO internal_state_events (
                     event_key, event_type, source_id, payload_json,
                     payload_hash, status, state_version_before,
-                    state_version_after, applied_at, error
-                ) VALUES (?, ?, ?, ?, ?, 'stale_skipped', ?, ?, ?, ?)
+                    state_version_after, applied_at, error, result_json
+                ) VALUES (?, ?, ?, ?, ?, 'stale_skipped', ?, ?, ?, ?, ?)
                 """,
                 (event_key, event_type, source_id_norm, p_json, p_hash,
-                 version_before, version_before, now, decision.error),
+                 version_before, version_before, now, decision.error, r_json),
             )
             conn.execute('COMMIT')
             return ApplyResult(
@@ -436,6 +479,7 @@ def apply_conditional_state_update(
                 state_version_after=version_before,
                 event_id=_last_event_id(conn, event_key),
                 error=decision.error,
+                result=result_obj,
             )
 
         if decision.status != 'applied':
@@ -471,11 +515,11 @@ def apply_conditional_state_update(
             INSERT INTO internal_state_events (
                 event_key, event_type, source_id, payload_json,
                 payload_hash, status, state_version_before,
-                state_version_after, applied_at, error
-            ) VALUES (?, ?, ?, ?, ?, 'applied', ?, ?, ?, NULL)
+                state_version_after, applied_at, error, result_json
+            ) VALUES (?, ?, ?, ?, ?, 'applied', ?, ?, ?, NULL, ?)
             """,
             (event_key, event_type, source_id_norm, p_json, p_hash,
-             version_before, version_after, now),
+             version_before, version_after, now, r_json),
         )
         conn.execute('COMMIT')
         return ApplyResult(
@@ -483,6 +527,7 @@ def apply_conditional_state_update(
             state_version_before=version_before,
             state_version_after=version_after,
             event_id=_last_event_id(conn, event_key),
+            result=result_obj,
         )
     except VersionConflictError as exc:
         _rollback(conn)
