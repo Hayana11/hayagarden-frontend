@@ -57,6 +57,7 @@ BOOTSTRAP_EVENT_KEY = 'bootstrap:initial'
 SCORE_APPLIED_TABLE = 'internal_state_score_applied'
 PROOF_HEALTH_TABLE = 'internal_state_score_proof_health'
 OUTBOX_TABLE = 'internal_state_shadow_outbox'
+OUTBOX_QUEUE_MIG_TABLE = f'{OUTBOX_TABLE}_queue_mig'
 GAP_INCIDENTS_TABLE = 'internal_state_shadow_gap_incidents'
 GAP_ACK_TABLE = 'internal_state_shadow_gap_ack'
 WATERMARK_SOURCE = 'internal_state_score_applied:max(message_id)'
@@ -1256,44 +1257,116 @@ def _outbox_table_columns(conn: sqlite3.Connection) -> set[str]:
     }
 
 
+def _shadow_table_exists(conn: sqlite3.Connection, table: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+        (table,),
+    ).fetchone()
+    return row is not None
+
+
+def _recover_orphan_outbox_queue_mig(conn: sqlite3.Connection) -> bool:
+    """Finish an interrupted queue_id migration without losing rows."""
+    if not _shadow_table_exists(conn, OUTBOX_QUEUE_MIG_TABLE):
+        return False
+    conn.execute('BEGIN IMMEDIATE')
+    try:
+        if not _shadow_table_exists(conn, OUTBOX_QUEUE_MIG_TABLE):
+            conn.execute('COMMIT')
+            return False
+        mig_count = int(
+            conn.execute(
+                f'SELECT COUNT(*) FROM {OUTBOX_QUEUE_MIG_TABLE}'
+            ).fetchone()[0]
+        )
+        if not outbox_schema_ready(conn):
+            conn.execute(
+                f'ALTER TABLE {OUTBOX_QUEUE_MIG_TABLE} RENAME TO {OUTBOX_TABLE}'
+            )
+        else:
+            cols = _outbox_table_columns(conn)
+            outbox_count = int(
+                conn.execute(f'SELECT COUNT(*) FROM {OUTBOX_TABLE}').fetchone()[0]
+            )
+            if 'queue_id' not in cols:
+                conn.execute(f'DROP TABLE {OUTBOX_TABLE}')
+                conn.execute(
+                    f'ALTER TABLE {OUTBOX_QUEUE_MIG_TABLE} RENAME TO {OUTBOX_TABLE}'
+                )
+            elif mig_count > 0 and outbox_count == 0:
+                conn.execute(f'DROP TABLE {OUTBOX_TABLE}')
+                conn.execute(
+                    f'ALTER TABLE {OUTBOX_QUEUE_MIG_TABLE} RENAME TO {OUTBOX_TABLE}'
+                )
+            elif mig_count > 0 and outbox_count > 0:
+                conn.execute(f'DROP TABLE {OUTBOX_TABLE}')
+                conn.execute(
+                    f'ALTER TABLE {OUTBOX_QUEUE_MIG_TABLE} RENAME TO {OUTBOX_TABLE}'
+                )
+            else:
+                conn.execute(f'DROP TABLE {OUTBOX_QUEUE_MIG_TABLE}')
+        conn.execute('COMMIT')
+        return True
+    except Exception:
+        conn.execute('ROLLBACK')
+        raise
+
+
 def _ensure_outbox_queue_id_schema(conn: sqlite3.Connection) -> None:
     """Outbox drain order is queue_id only; never created_at/event_key."""
+    _recover_orphan_outbox_queue_mig(conn)
     if not outbox_schema_ready(conn):
         return
     if 'queue_id' in _outbox_table_columns(conn):
         return
-    conn.execute(
-        f"""
-        CREATE TABLE {OUTBOX_TABLE}_queue_mig (
-            queue_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            event_key TEXT NOT NULL UNIQUE,
-            event_type TEXT NOT NULL,
-            payload_json TEXT NOT NULL,
-            payload_hash TEXT NOT NULL,
-            created_at TEXT NOT NULL,
-            attempts INTEGER NOT NULL DEFAULT 0
-                CHECK (attempts >= 0),
-            last_error TEXT,
-            delivered_at TEXT
+    conn.execute('BEGIN IMMEDIATE')
+    try:
+        if not outbox_schema_ready(conn):
+            conn.execute('COMMIT')
+            return
+        if 'queue_id' in _outbox_table_columns(conn):
+            conn.execute('COMMIT')
+            return
+        if _shadow_table_exists(conn, OUTBOX_QUEUE_MIG_TABLE):
+            conn.execute('ROLLBACK')
+            _recover_orphan_outbox_queue_mig(conn)
+            return
+        conn.execute(
+            f"""
+            CREATE TABLE {OUTBOX_QUEUE_MIG_TABLE} (
+                queue_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_key TEXT NOT NULL UNIQUE,
+                event_type TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                payload_hash TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                attempts INTEGER NOT NULL DEFAULT 0
+                    CHECK (attempts >= 0),
+                last_error TEXT,
+                delivered_at TEXT
+            )
+            """
         )
-        """
-    )
-    conn.execute(
-        f"""
-        INSERT INTO {OUTBOX_TABLE}_queue_mig
-            (event_key, event_type, payload_json, payload_hash, created_at,
-             attempts, last_error, delivered_at)
-        SELECT event_key, event_type, payload_json,
-               COALESCE(payload_hash, ''), created_at,
-               attempts, last_error, delivered_at
-        FROM {OUTBOX_TABLE}
-        ORDER BY created_at ASC, event_key ASC
-        """
-    )
-    conn.execute(f'DROP TABLE {OUTBOX_TABLE}')
-    conn.execute(
-        f'ALTER TABLE {OUTBOX_TABLE}_queue_mig RENAME TO {OUTBOX_TABLE}'
-    )
+        conn.execute(
+            f"""
+            INSERT INTO {OUTBOX_QUEUE_MIG_TABLE}
+                (event_key, event_type, payload_json, payload_hash, created_at,
+                 attempts, last_error, delivered_at)
+            SELECT event_key, event_type, payload_json,
+                   COALESCE(payload_hash, ''), created_at,
+                   attempts, last_error, delivered_at
+            FROM {OUTBOX_TABLE}
+            ORDER BY created_at ASC, event_key ASC
+            """
+        )
+        conn.execute(f'DROP TABLE {OUTBOX_TABLE}')
+        conn.execute(
+            f'ALTER TABLE {OUTBOX_QUEUE_MIG_TABLE} RENAME TO {OUTBOX_TABLE}'
+        )
+        conn.execute('COMMIT')
+    except Exception:
+        conn.execute('ROLLBACK')
+        raise
 
 
 def ensure_shadow_schema(

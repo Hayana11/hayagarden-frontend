@@ -2032,6 +2032,66 @@ class FallbackHistoryFinalizeTests(unittest.TestCase):
         finally:
             conn.close()
         self.assertEqual(_history_count(self.db_path), before + 1)
+        conn = store.open_store(self.db_path)
+        try:
+            self.assertTrue(
+                shadow.has_unresolved_proof_gap(conn, db_path=self.db_path)
+                or shadow.count_gap_sidecar_pending(self.db_path) > 0
+                or shadow.has_capture_alert(self.db_path),
+            )
+            h = shadow.get_shadow_health(
+                db_path=self.db_path,
+                environ={
+                    shadow.SHADOW_ENABLED_ENV: '1',
+                    shadow.SCORE_PROOF_ENABLED_ENV: '1',
+                    shadow.USER_EVENTS_ENABLED_ENV: '0',
+                },
+            )
+            self.assertTrue(h.proof_gap or (h.gap_incidents_unresolved or 0) > 0)
+        finally:
+            conn.close()
+
+    def test_score_proof_schema_ready_probe_failure_legacy_and_fail_closed(self):
+        conn = store.open_store(self.db_path)
+        try:
+            shadow.ensure_shadow_schema(conn, db_path=self.db_path)
+            conn.commit()
+        finally:
+            conn.close()
+        before = _history_count(self.db_path)
+        with mock.patch.object(ee, '_deepseek_score', return_value=_deepseek_scores()), \
+             mock.patch.object(ee, '_get_ombre_va', return_value=(None, None)), \
+             mock.patch.object(ee, 'get_longing', return_value=0.1), \
+             mock.patch.object(
+                 shadow, 'score_proof_schema_ready',
+                 side_effect=RuntimeError('schema probe boom'),
+             ):
+            ee.score_and_update('hello', message_id=14)
+        conn = sqlite3.connect(self.db_path)
+        try:
+            pa = conn.execute('SELECT pa FROM emotion_state WHERE id=1').fetchone()[0]
+            self.assertNotAlmostEqual(pa, 0.5, places=4)
+        finally:
+            conn.close()
+        self.assertEqual(_history_count(self.db_path), before + 1)
+        conn = store.open_store(self.db_path)
+        try:
+            self.assertTrue(
+                shadow.has_unresolved_proof_gap(conn, db_path=self.db_path)
+                or shadow.count_gap_sidecar_pending(self.db_path) > 0
+                or shadow.has_capture_alert(self.db_path),
+            )
+            h = shadow.get_shadow_health(
+                db_path=self.db_path,
+                environ={
+                    shadow.SHADOW_ENABLED_ENV: '1',
+                    shadow.SCORE_PROOF_ENABLED_ENV: '1',
+                    shadow.USER_EVENTS_ENABLED_ENV: '0',
+                },
+            )
+            self.assertTrue(h.proof_gap or (h.gap_incidents_unresolved or 0) > 0)
+        finally:
+            conn.close()
 
     def test_duplicate_stale_conflict_skip_history(self):
         conn = store.open_store(self.db_path)
@@ -2065,6 +2125,236 @@ class FallbackHistoryFinalizeTests(unittest.TestCase):
             ee.score_and_update('stale', message_id=40)
             ee.score_and_update('conflict', message_id=60)
         self.assertEqual(_history_count(self.db_path), before + 1)
+
+
+_LEGACY_OUTBOX_ROWS = (
+    {
+        'event_key': 'user_scored:99',
+        'event_type': 'user_scored',
+        'payload_json': '{"message_id": 99}',
+        'payload_hash': 'hash99',
+        'created_at': '2026-07-21 12:00:00',
+        'attempts': 2,
+        'last_error': 'boom',
+        'delivered_at': None,
+    },
+    {
+        'event_key': 'user_scored:100',
+        'event_type': 'user_scored',
+        'payload_json': '{"message_id": 100}',
+        'payload_hash': 'hash100',
+        'created_at': '2026-07-21 12:00:00',
+        'attempts': 0,
+        'last_error': None,
+        'delivered_at': '2026-07-21 12:01:00',
+    },
+)
+
+
+def _create_legacy_event_key_outbox(
+    conn: sqlite3.Connection,
+    rows: tuple[dict, ...] = _LEGACY_OUTBOX_ROWS,
+) -> None:
+    if shadow.outbox_schema_ready(conn):
+        conn.execute(f'DROP TABLE {shadow.OUTBOX_TABLE}')
+    conn.execute(
+        f"""
+        CREATE TABLE {shadow.OUTBOX_TABLE} (
+            event_key TEXT PRIMARY KEY,
+            event_type TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            payload_hash TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            attempts INTEGER NOT NULL DEFAULT 0,
+            last_error TEXT,
+            delivered_at TEXT
+        )
+        """
+    )
+    for row in rows:
+        conn.execute(
+            f"""
+            INSERT INTO {shadow.OUTBOX_TABLE}
+                (event_key, event_type, payload_json, payload_hash, created_at,
+                 attempts, last_error, delivered_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                row['event_key'], row['event_type'], row['payload_json'],
+                row['payload_hash'], row['created_at'], row['attempts'],
+                row['last_error'], row['delivered_at'],
+            ),
+        )
+
+
+def _outbox_payload_snapshot(conn: sqlite3.Connection) -> list[tuple]:
+    cols = shadow._outbox_table_columns(conn)
+    if 'queue_id' in cols:
+        order = 'queue_id ASC'
+    else:
+        order = 'created_at ASC, event_key ASC'
+    return conn.execute(
+        f"""
+        SELECT event_key, event_type, payload_json, payload_hash, created_at,
+               attempts, last_error, delivered_at
+        FROM {shadow.OUTBOX_TABLE}
+        ORDER BY {order}
+        """
+    ).fetchall()
+
+
+class _FaultInjectConnection:
+    """Proxy sqlite3.Connection for migration fault-injection tests."""
+
+    def __init__(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        fail_at: str,
+        fail_state: dict,
+    ) -> None:
+        self._conn = conn
+        self._fail_at = fail_at
+        self._fail_state = fail_state
+
+    def execute(self, sql, *args, **kwargs):
+        sql_u = ' '.join(str(sql).upper().split())
+        mig = shadow.OUTBOX_QUEUE_MIG_TABLE.upper()
+        if not self._fail_state['fired']:
+            if self._fail_at == 'create' and 'CREATE TABLE' in sql_u and mig in sql_u:
+                self._fail_state['fired'] = True
+                raise RuntimeError(f'fault at {self._fail_at}')
+            if self._fail_at == 'copy' and 'INSERT INTO' in sql_u and mig in sql_u:
+                self._fail_state['fired'] = True
+                raise RuntimeError(f'fault at {self._fail_at}')
+            if (
+                self._fail_at == 'drop'
+                and 'DROP TABLE' in sql_u
+                and shadow.OUTBOX_TABLE.upper() in sql_u
+            ):
+                self._fail_state['fired'] = True
+                raise RuntimeError(f'fault at {self._fail_at}')
+            if self._fail_at == 'rename' and 'RENAME TO' in sql_u and mig in sql_u:
+                self._fail_state['fired'] = True
+                raise RuntimeError(f'fault at {self._fail_at}')
+        return self._conn.execute(sql, *args, **kwargs)
+
+    def __getattr__(self, name: str):
+        return getattr(self._conn, name)
+
+    def __enter__(self):
+        return self._conn.__enter__()
+
+    def __exit__(self, *exc):
+        return self._conn.__exit__(*exc)
+
+
+class OutboxQueueMigrationAtomicityTests(unittest.TestCase):
+    def _open_legacy_db(self) -> tuple[tempfile.TemporaryDirectory, str]:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        db_path = str(Path(tmp.name) / 'mig.db')
+        conn = store.open_store(db_path)
+        try:
+            _create_legacy_event_key_outbox(conn)
+        finally:
+            conn.close()
+        return tmp, db_path
+
+    def _migrate_with_fault(self, db_path: str, fail_at: str) -> list[tuple]:
+        conn = store.open_store(db_path)
+        before = _outbox_payload_snapshot(conn)
+        fail_state = {'fired': False}
+        proxy = _FaultInjectConnection(conn, fail_at=fail_at, fail_state=fail_state)
+        try:
+            with self.assertRaises(RuntimeError):
+                shadow._ensure_outbox_queue_id_schema(proxy)
+        finally:
+            conn.close()
+        self.assertTrue(fail_state['fired'], msg=f'fault not triggered for {fail_at}')
+        return before
+
+    def _finish_migration(self, db_path: str) -> list[tuple]:
+        conn = store.open_store(db_path)
+        try:
+            shadow._ensure_outbox_queue_id_schema(conn)
+            shadow._ensure_outbox_queue_id_schema(conn)
+            after = _outbox_payload_snapshot(conn)
+            cols = shadow._outbox_table_columns(conn)
+            self.assertIn('queue_id', cols)
+            self.assertFalse(
+                shadow._shadow_table_exists(conn, shadow.OUTBOX_QUEUE_MIG_TABLE),
+            )
+            return after
+        finally:
+            conn.close()
+
+    def test_migration_idempotent_preserves_rows(self):
+        _, db_path = self._open_legacy_db()
+        before = self._finish_migration(db_path)
+        self.assertEqual(len(before), len(_LEGACY_OUTBOX_ROWS))
+
+    def test_fault_injection_then_retry_preserves_rows(self):
+        for fail_at in ('create', 'copy', 'drop', 'rename'):
+            with self.subTest(fail_at=fail_at):
+                _, db_path = self._open_legacy_db()
+                before = self._migrate_with_fault(db_path, fail_at)
+                after = self._finish_migration(db_path)
+                self.assertEqual(before, after)
+
+    def test_recovers_orphan_queue_mig_after_empty_recreate(self):
+        _, db_path = self._open_legacy_db()
+        conn = store.open_store(db_path)
+        try:
+            before = _outbox_payload_snapshot(conn)
+            conn.execute('BEGIN IMMEDIATE')
+            conn.execute(
+                f"""
+                CREATE TABLE {shadow.OUTBOX_QUEUE_MIG_TABLE} (
+                    queue_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    event_key TEXT NOT NULL UNIQUE,
+                    event_type TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    payload_hash TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    attempts INTEGER NOT NULL DEFAULT 0,
+                    last_error TEXT,
+                    delivered_at TEXT
+                )
+                """
+            )
+            conn.execute(
+                f"""
+                INSERT INTO {shadow.OUTBOX_QUEUE_MIG_TABLE}
+                    (event_key, event_type, payload_json, payload_hash, created_at,
+                     attempts, last_error, delivered_at)
+                SELECT event_key, event_type, payload_json, payload_hash, created_at,
+                       attempts, last_error, delivered_at
+                FROM {shadow.OUTBOX_TABLE}
+                ORDER BY created_at ASC, event_key ASC
+                """
+            )
+            conn.execute(f'DROP TABLE {shadow.OUTBOX_TABLE}')
+            conn.execute(
+                f"""
+                CREATE TABLE {shadow.OUTBOX_TABLE} (
+                    queue_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    event_key TEXT NOT NULL UNIQUE,
+                    event_type TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    payload_hash TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    attempts INTEGER NOT NULL DEFAULT 0,
+                    last_error TEXT,
+                    delivered_at TEXT
+                )
+                """
+            )
+            conn.execute('COMMIT')
+        finally:
+            conn.close()
+        after = self._finish_migration(db_path)
+        self.assertEqual(before, after)
 
 
 if __name__ == '__main__':

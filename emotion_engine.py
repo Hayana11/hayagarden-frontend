@@ -682,21 +682,41 @@ def score_and_update(conversation_excerpt: str, *, message_id=None):
                     except Exception:
                         pass
 
+            def _persist_shadow_gap(error_code: str, message_id=None) -> None:
+                try:
+                    _shadow.mark_proof_gap_standalone(
+                        db_path=DB_PATH,
+                        failed_message_id=message_id,
+                        error_code=error_code,
+                    )
+                except Exception:
+                    pass
+
             proof_shadow_active = True
             score_hash = None
+            schema_ready = False
+            incidents_ready = False
             try:
                 score_hash = _shadow.compute_score_hash(scored_payload)
             except Exception:
                 proof_shadow_active = False
+                _persist_shadow_gap('score_hash_failed', mid_ok)
                 _fallback_legacy_only()
-
-            if proof_shadow_active:
-                if mid_ok is None:
-                    # incident 必须先持久化，才允许改 emotion
+            else:
+                try:
+                    schema_ready = _shadow.score_proof_schema_ready(conn)
                     incidents_ready = conn.execute(
                         "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
                         (_shadow.GAP_INCIDENTS_TABLE,),
                     ).fetchone() is not None
+                except Exception:
+                    proof_shadow_active = False
+                    _persist_shadow_gap('score_proof_schema_probe_failed', mid_ok)
+                    _fallback_legacy_only()
+
+            if proof_shadow_active:
+                if mid_ok is None:
+                    # incident 必须先持久化，才允许改 emotion
                     try:
                         if incidents_ready:
                             conn.execute('BEGIN IMMEDIATE')
@@ -725,7 +745,7 @@ def score_and_update(conversation_excerpt: str, *, message_id=None):
                             pass
                         # incident 未落地 → legacy-only，仍须写 history
                         _fallback_legacy_only()
-                elif not _shadow.score_proof_schema_ready(conn):
+                elif not schema_ready:
                     # 表未准备：incident sidecar 必须成功，否则 legacy-only
                     try:
                         _shadow.append_gap_incident_sidecar(
