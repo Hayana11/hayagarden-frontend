@@ -156,7 +156,7 @@ restore_runtime() {
   shopt -u nullglob
 }
 
-"$ROOT/tools/backup.sh"
+bash "$ROOT/tools/backup.sh"
 snapshot_runtime
 
 rollback() {
