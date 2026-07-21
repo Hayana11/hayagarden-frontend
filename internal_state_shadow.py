@@ -2392,15 +2392,24 @@ def enqueue_user_rule_in_txn(
             f'{OUTBOX_TABLE} missing; USER_EVENTS fail-closed without sidecar'
         )
     mid = store.require_positive_message_id(message_id, field='message_id')
+    if not isinstance(text, str):
+        raise store.StoreError('user_rule text must be str')
+    state = store.read_state(conn)
+    if state is None:
+        raise store.StoreError('shadow state missing; cannot sanitize user_rule')
+    plan = events.plan_user_message_transition(
+        state, message_id=mid, text=text, created_at=created_at,
+        previous_user_at=previous_user_at,
+    )
     enqueue_outbox_in_txn(
         conn,
         event_key=f'user_rule:{mid}',
         event_type=EVENT_TYPE_USER_RULE,
         payload={
-            'message_id': mid,
-            'text': text,
-            'created_at': created_at,
-            'previous_user_at': previous_user_at,
+            'envelope': {
+                'payload': plan['payload'],
+                'updates': plan['updates'],
+            },
         },
     )
     return True
@@ -2460,13 +2469,11 @@ def _deliver_outbox_row(
     if not isinstance(payload, dict):
         return ShadowResult(ok=False, status='failed', error='payload not object')
     if et == EVENT_TYPE_USER_RULE:
-        return observe_user_message_shadow(
-            message_id=int(payload['message_id']),
-            text=str(payload.get('text') or ''),
-            created_at=str(payload['created_at']),
-            previous_user_at=payload.get('previous_user_at'),
-            db_path=db_path,
-            environ=environ,
+        envelope = payload.get('envelope')
+        if not isinstance(envelope, dict):
+            return ShadowResult(ok=False, status='failed', error='sanitized user_rule envelope missing')
+        return observe_planned_user_message_shadow(
+            envelope=envelope, db_path=db_path, environ=environ,
         )
     if et == EVENT_TYPE_USER_SCORED:
         scores = payload.get('scores')
@@ -3474,6 +3481,34 @@ def observe_user_message_shadow(
         )
     except Exception as exc:  # noqa: BLE001
         _record_error(f'observe_user_message_shadow: {exc}')
+        return ShadowResult(ok=False, status='failed', error=str(exc))
+
+
+def observe_planned_user_message_shadow(
+    *,
+    envelope: dict,
+    db_path: Optional[str] = None,
+    environ: Optional[Mapping[str, str]] = None,
+) -> ShadowResult:
+    """应用无原文的已冻结 user_rule envelope。"""
+    try:
+        if not is_shadow_enabled(environ=environ):
+            return ShadowResult(ok=True, status='disabled')
+        frozen = dict(envelope)
+
+        def make_runner(expected: Optional[int]):
+            def runner(conn: sqlite3.Connection) -> store.ApplyResult:
+                return events.apply_planned_user_message(
+                    conn, envelope=frozen, expected_state_version=expected,
+                )
+            return runner
+
+        return _shadow_call(
+            'observe_planned_user_message_shadow', make_runner,
+            db_path=db_path, environ=environ,
+        )
+    except Exception as exc:  # noqa: BLE001
+        _record_error(f'observe_planned_user_message_shadow: {exc}')
         return ShadowResult(ok=False, status='failed', error=str(exc))
 
 

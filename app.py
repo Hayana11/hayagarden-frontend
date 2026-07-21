@@ -915,8 +915,16 @@ def send_chat():
     previous_user_at = None
     created_at = None
     message_id = None
+    _user_events_requested = all(
+        str(os.environ.get(name, '0')).strip() == '1'
+        for name in (
+            'INTERNAL_STATE_V3_SHADOW_ENABLED',
+            'INTERNAL_STATE_V3_SCORE_PROOF_ENABLED',
+            'INTERNAL_STATE_V3_USER_EVENTS_ENABLED',
+        )
+    )
     try:
-        if author not in ('fyodor', 'assistant', 'claude'):
+        if _user_events_requested and author not in ('fyodor', 'assistant', 'claude'):
             from chat.interaction_state import USER_AUTHOR_SQL
             prev = conn.execute(
                 f"SELECT created_at FROM chat_messages WHERE {USER_AUTHOR_SQL} "
@@ -931,18 +939,20 @@ def send_chat():
             (author, content, image_url, file_url, file_name),
         )
         message_id = cur.lastrowid
-        row = conn.execute(
-            "SELECT created_at FROM chat_messages WHERE id=?",
-            (message_id,),
-        ).fetchone()
-        if row is not None:
-            created_at = row['created_at'] if hasattr(row, 'keys') else row[0]
-            created_at = str(created_at)[:19] if created_at else None
+        if _user_events_requested:
+            row = conn.execute(
+                "SELECT created_at FROM chat_messages WHERE id=?",
+                (message_id,),
+            ).fetchone()
+            if row is not None:
+                created_at = row['created_at'] if hasattr(row, 'keys') else row[0]
+                created_at = str(created_at)[:19] if created_at else None
         capture_alert_failed = False
         # Shadow user_rule outbox：与 chat INSERT 同事务；缺表则 outbox_capture_gap
         # 聊天主流程不得阻断；证据全失败时记 sticky alert（status fail-closed）
         if (
-            author not in ('fyodor', 'assistant', 'claude')
+            _user_events_requested
+            and author not in ('fyodor', 'assistant', 'claude')
             and message_id is not None
             and created_at
         ):
@@ -998,8 +1008,6 @@ def send_chat():
                         )
                     except Exception:
                         capture_alert_failed = True
-        if capture_alert_failed:
-            raise RuntimeError('shadow capture evidence and independent alert unavailable')
         conn.commit()
     finally:
         conn.close()

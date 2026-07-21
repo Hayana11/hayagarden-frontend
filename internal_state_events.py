@@ -705,6 +705,64 @@ def observe_user_message(
     return result
 
 
+def apply_planned_user_message(
+    conn: sqlite3.Connection,
+    *,
+    envelope: Mapping[str, Any],
+    expected_state_version: Optional[int] = None,
+) -> ApplyResult:
+    """应用已冻结、无原文的 user_rule envelope。
+
+    生产 outbox 仅保存 plan 的 payload/updates；drain 不得重新取得用户原文。
+    """
+    if not isinstance(envelope, Mapping):
+        raise StoreError('planned user_rule envelope must be a mapping')
+    payload = envelope.get('payload')
+    updates = envelope.get('updates')
+    if not isinstance(payload, Mapping) or not isinstance(updates, Mapping):
+        raise StoreError('planned user_rule envelope missing payload/updates')
+    mid = _require_message_id(payload.get('message_id'))
+    # Strictly reject raw-text keys before persistence/application.
+    if any(k in payload for k in ('text', 'content', 'raw_text')):
+        raise StoreError('planned user_rule payload must not contain text')
+    required = (
+        'created_at', 'previous_user_at', 'text_hash', 'text_length',
+        'rule_score', 'rule_hit_categories',
+    )
+    if any(k not in payload for k in required):
+        raise StoreError('planned user_rule payload incomplete')
+    if not isinstance(payload['text_hash'], str) or len(payload['text_hash']) != 64:
+        raise StoreError('planned user_rule text_hash invalid')
+    if isinstance(payload['text_length'], bool) or not isinstance(payload['text_length'], int):
+        raise StoreError('planned user_rule text_length invalid')
+    created, previous = _canonicalize_observation_clocks(
+        created_at=payload['created_at'], previous_user_at=payload['previous_user_at'],
+    )
+    if created != payload['created_at'] or previous != payload['previous_user_at']:
+        raise StoreError('planned user_rule timestamps not canonical')
+    event_key = f'user_rule:{mid}'
+    existing = read_event(conn, event_key)
+    identity = {
+        'message_id': mid, 'created_at': created, 'previous_user_at': previous,
+        'text_hash': payload['text_hash'], 'text_length': payload['text_length'],
+    }
+    if existing is not None:
+        if _event_matches_observation(existing, message_id=mid, identity=identity):
+            return _duplicate_result(existing)
+        return _idempotency_conflict_result(existing, 'planned user_rule identity conflict')
+    state = read_state(conn)
+    if state is None:
+        return ApplyResult('failed', None, None, None, 'state row missing')
+    version = int(state['state_version'])
+    if expected_state_version is not None and int(expected_state_version) != version:
+        return ApplyResult('version_conflict', version, None, None, 'version conflict')
+    return apply_state_update(
+        conn, event_key=event_key, event_type=_USER_RULE_EVENT_TYPE,
+        source_id=str(mid), payload=dict(payload),
+        mutator=lambda _s: dict(updates), expected_state_version=version,
+    )
+
+
 # ═══════════════════════════════════════════════════════════
 # Phase 1A-2 — observe_scored（异步评分；试管）
 # ═══════════════════════════════════════════════════════════

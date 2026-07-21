@@ -561,6 +561,38 @@ def score_and_update(conversation_excerpt: str, *, message_id=None):
     frozen_i_delta = i_delta_ds
     frozen_message_id = message_id
 
+    # Strict disabled fast path: preserve the pre-Shadow scoring transaction and
+    # do not import/read/write any Shadow subsystem when SCORE_PROOF is off.
+    if str(os.environ.get('INTERNAL_STATE_V3_SCORE_PROOF_ENABLED', '0')).strip() != '1':
+        state = get_state()
+        new_pa = max(0.0, min(1.0, 0.75 * state['pa'] + 0.25 * frozen_v))
+        na_signal = frozen_a * (1 - frozen_v) * 0.5 + 0.05
+        new_na = max(0.0, min(1.0, 0.75 * state['na'] + 0.25 * na_signal))
+        new_pa, new_na = _bou_revert(new_pa, new_na)
+        p_now = _decay(state.get('sternberg_p', 0.0), state.get('p_updated_at'), TAU_P)
+        i_now = _decay(state.get('sternberg_i', 0.3), state.get('i_updated_at'), TAU_I)
+        scored_at = _now_str()
+        conn = _db()
+        try:
+            conn.execute(_EMOTION_UPDATE_SQL, (
+                round(new_pa, 4), round(new_na, 4), frozen_v, frozen_a,
+                frozen_mood, round(get_longing(), 4),
+                round(max(0.0, min(1.0, p_now + frozen_p_delta)), 4),
+                round(max(0.0, min(1.0, i_now + frozen_i_delta)), 4),
+                round(state.get('sternberg_c', 0.7), 4),
+                scored_at, scored_at, scored_at, scored_at,
+            ))
+            conn.commit()
+        finally:
+            conn.close()
+        try:
+            import emotion_history
+            emotion_history.append_snapshot(frozen_v, frozen_a, frozen_mood,
+                                            db_path=DB_PATH, source='score')
+        except Exception:
+            pass
+        return
+
     proof_written = False
     proof_enabled = False
     applied_tr = None
@@ -753,6 +785,30 @@ def score_and_update(conversation_excerpt: str, *, message_id=None):
                         )
                     except Exception:
                         pass
+                    # Shadow proof/outbox failure must not veto legacy emotion.
+                    legacy_conn = _db()
+                    try:
+                        legacy_conn.isolation_level = None
+                        legacy_conn.execute('BEGIN IMMEDIATE')
+                        fallback_at = _now_str()
+                        fallback = _transition_from_state(
+                            _read_emotion_state_row(legacy_conn),
+                            final_v=frozen_v, final_a=frozen_a,
+                            mood_word=frozen_mood, p_delta=frozen_p_delta,
+                            i_delta=frozen_i_delta, applied_at=fallback_at,
+                        )
+                        legacy_conn.execute(
+                            _EMOTION_UPDATE_SQL, _emotion_update_params(fallback),
+                        )
+                        legacy_conn.commit()
+                        applied_tr = fallback
+                    except Exception:
+                        try:
+                            legacy_conn.rollback()
+                        except Exception:
+                            pass
+                    finally:
+                        legacy_conn.close()
                     return
         else:
             conn.isolation_level = None

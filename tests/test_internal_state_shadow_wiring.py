@@ -174,7 +174,7 @@ class ProofAtomicityTests(unittest.TestCase):
         finally:
             conn.close()
 
-    def test_proof_failure_rolls_back_emotion(self):
+    def test_proof_failure_preserves_legacy_emotion_and_records_gap(self):
         with mock.patch.object(ee, '_deepseek_score', return_value={
             'valence': 0.2, 'arousal': 0.4, 'mood_word': '开心',
             'passion_delta': 0.01, 'intimacy_delta': 0.0,
@@ -188,7 +188,7 @@ class ProofAtomicityTests(unittest.TestCase):
         conn = sqlite3.connect(self.db_path)
         try:
             pa = conn.execute('SELECT pa FROM emotion_state WHERE id=1').fetchone()[0]
-            self.assertAlmostEqual(pa, 0.5, places=4)
+            self.assertNotAlmostEqual(pa, 0.5, places=4)
             n = conn.execute(
                 f'SELECT COUNT(*) FROM {shadow.SCORE_APPLIED_TABLE}'
             ).fetchone()[0]
@@ -695,7 +695,7 @@ class OutboxReliabilityTests(unittest.TestCase):
             return c
 
         with mock.patch.object(
-            shadow, 'observe_user_message_shadow',
+            shadow, 'observe_planned_user_message_shadow',
             return_value=shadow.ShadowResult(
                 ok=False, status='failed', error='boom'),
         ):
@@ -713,8 +713,12 @@ class OutboxReliabilityTests(unittest.TestCase):
             ).fetchone()
             self.assertEqual(row[0], 'user_rule')
             payload = json.loads(row[1])
-            self.assertEqual(payload['message_id'], mid)
-            self.assertEqual(payload['text'], '规则消息')
+            self.assertNotIn('规则消息', row[1])
+            self.assertNotIn('text', payload)
+            envelope = payload['envelope']
+            self.assertEqual(envelope['payload']['message_id'], mid)
+            self.assertIn('text_hash', envelope['payload'])
+            self.assertIn('text_length', envelope['payload'])
         finally:
             conn.close()
         # 重放成功且幂等
