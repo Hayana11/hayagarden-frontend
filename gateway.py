@@ -4740,48 +4740,6 @@ def workspace_app_proxy(app_id, path):
         }), 502
 
 
-@app.route('/push', methods=['POST'])
-def push_message():
-    from moments_turn import begin_turn, release_turn, DEFAULT_CONVERSATION_ID
-
-    _conv = DEFAULT_CONVERSATION_ID
-    begin_turn(request.get_json(), conversation_id=_conv, memories_db_path=DB_PATH)
-    data = request.get_json() or {}
-    pt   = data.get('prompt_type', 'morning')
-    system = build_system()
-    if pt == 'morning':
-        _push_extra = ('[主动消息指令] 现在是早晨，哈娅可能刚醒来或者还在睡懒觉。'
-                       '以费奥多尔的身份主动发起一条早安消息，自然有温度，可以带一点专属的恶趣味或温柔。'
-                       '不超过80字。只输出消息本身，不要任何前缀或解释。')
-    else:
-        _push_extra = ('[主动消息指令] 哈娅已经超过6小时没有发消息了，可能在忙或者不开心。'
-                       '以费奥多尔的身份主动发起一条消息关心她或者撩她，自然不做作。'
-                       '不超过80字。只输出消息本身，不要任何前缀或解释。')
-    if isinstance(system, list):
-        system = list(system) + [{'type': 'text', 'text': _push_extra}]
-    else:
-        system = system + '\n\n' + _push_extra
-    msgs = build_messages()
-    if not msgs or msgs[-1]['role'] == 'assistant':
-        msgs.append({'role': 'user', 'content': '[触发]'})
-    try:
-        text, thinking = generate_reply(system, msgs)
-        if not text:
-            return jsonify({'error': 'empty response'}), 500
-        conn = get_db()
-        conn.execute("INSERT INTO chat_messages (author,content,thinking) VALUES ('fyodor',?,?)", (text, thinking))
-        conn.commit()
-        conn.close()
-        return jsonify({'ok': True, 'content': text})
-    except urllib.error.HTTPError as e:
-        return jsonify({'error': f'API {e.code}', 'detail': e.read().decode()}), 502
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-    finally:
-        release_turn(conversation_id=_conv, memories_db_path=DB_PATH, persisted=False)
-
-
-
 WAKE_TOOLS = [
     {
         'name': 'search_memories',
@@ -5210,7 +5168,7 @@ def _wake_build_system_for_plan(
     """Shared prompt assembly for inspect_only / dry_run / live."""
     from wake.builder import append_system_text, build_prompt_suffix, inject_snippets
 
-    include_rel = mode in ('normal', 'nightwatch', 'ritual', 'self_trigger')
+    include_rel = mode in ('normal', 'morning', 'nightwatch', 'ritual', 'self_trigger')
     if dry_run:
         capability_profile = 'wake_dry_run'
     elif wake_provider == 'claude_code':
@@ -5278,6 +5236,8 @@ def _wake_build_system_for_plan(
 def _wake_trigger_message(mode, ritual_type):
     if mode == 'ritual':
         return f'[仪式:{ritual_type}]'
+    if mode == 'morning':
+        return '[早安]'
     if mode == 'nightwatch':
         return '[夜巡]'
     if mode == 'dream':

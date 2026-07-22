@@ -24,6 +24,8 @@ def _load_template(mode: str, ritual_type: str = '') -> str:
                 return _bc.RITUAL_BIRTHDAY_PROMPT
             else:
                 return _bc.WAKE_DECISION_PROMPT
+        elif mode == 'morning':
+            return _bc.MORNING_DECISION_PROMPT
         elif mode == 'nightwatch':
             return _bc.NIGHTWATCH_DECISION_PROMPT
         elif mode == 'dream':
@@ -50,6 +52,9 @@ def build_prompt_suffix(mode: str, context: dict) -> str:
 
     if mode == 'ritual':
         return tpl  # 仪式模板不格式化，直接 append
+
+    if mode == 'morning':
+        return tpl.format(time=context.get('time', ''))
 
     if mode == 'nightwatch':
         return tpl.format(

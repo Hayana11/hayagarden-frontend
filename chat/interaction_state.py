@@ -188,7 +188,7 @@ def wake_guard_reason(
     # Ordinary autonomous wake requires a reliable clock and the idle floor.
     # self_trigger bypasses the 30-minute idle floor (alarm must not self-destruct)
     # but still respects chat_generating / wake_in_progress above.
-    # nightwatch/ritual/dream/summarize also skip the idle floor.
+    # morning/nightwatch/ritual/dream/summarize also skip the idle floor.
     if mode in ('', 'normal'):
         if not clock.reliable or clock.effective_idle_hours is None:
             return clock.reason or 'clock_unreliable'
