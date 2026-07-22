@@ -163,6 +163,23 @@ export function ContactsScreen() {
           <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
             <div style={{ fontFamily: DISPLAY, fontSize: 11, letterSpacing: 3, color: 'var(--ghost)', padding: '0 2px' }}>游戏室 · GAMES</div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+              <Link
+                to="/monopoly/new"
+                style={{
+                  position: 'relative', overflow: 'hidden', textDecoration: 'none', display: 'flex',
+                  flexDirection: 'column', gap: 9, padding: '17px 16px 15px', borderRadius: 18,
+                  background: 'linear-gradient(135deg, color-mix(in srgb, var(--rose) 14%, var(--card)), var(--card))',
+                  border: '1px solid color-mix(in srgb, var(--rose) 18%, transparent)',
+                  boxShadow: '0 8px 20px var(--shadow)',
+                }}
+              >
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
+                  <span style={{ fontFamily: DISPLAY, fontSize: 15.5, fontWeight: 600, letterSpacing: 1.2, color: 'var(--ink)' }}>葡萄海大富翁</span>
+                  <span style={{ fontSize: 10.5, color: 'var(--deep)', background: 'color-mix(in srgb, var(--rose) 12%, transparent)', borderRadius: 999, padding: '3px 9px' }}>可以玩了</span>
+                </div>
+                <span style={{ fontSize: 12, color: 'var(--mut)', lineHeight: 1.65 }}>双人棋局 · 三人聊天。骰子、任务和两位房间伙伴都在等你。</span>
+                <span style={{ alignSelf: 'flex-end', color: 'var(--rose)', fontSize: 12, letterSpacing: 1 }}>进入游戏室 →</span>
+              </Link>
               <GameCard title="谁是卧底" hint="以后一起玩，等我们都得空的时候。" onLocked={showLocked} />
               <GameCard title="飞行棋" hint="骰子和棋盘都还没做，先记在这里。" onLocked={showLocked} />
             </div>
