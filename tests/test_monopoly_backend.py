@@ -414,10 +414,13 @@ class MonopolyBackendTests(unittest.TestCase):
         self.assertEqual(result["state"]["coins"], {"哈娅": 99, "CC": 1})
         self.assertEqual(result["room"]["status"], "finished")
 
-    def test_uncertain_final_result_freezes_then_resume_finishes_canonically(self):
+    def test_lost_final_result_response_freezes_without_retrying_on_resume(self):
         self.engine.next_roll = {"who": "哈娅", "next_turn": "CC", "game_over": True}
+        final_calls = 0
 
         def uncertain_final(_game_id):
+            nonlocal final_calls
+            final_calls += 1
             raise EngineMutationUncertain(
                 "FINAL_RESULT_UNCERTAIN",
                 "timeout after commit",
@@ -437,23 +440,53 @@ class MonopolyBackendTests(unittest.TestCase):
             event["type"] == "game_over"
             for event in store.list_events(self.room_id, db_path=self.db_path)
         ))
+        with self.assertRaises(RoomError) as resume_error:
+            self.service.resume(self.room_id, expected_seq=self._seq())
+        self.assertEqual(resume_error.exception.code, "FINAL_RESULT_UNCERTAIN")
+        self.assertEqual(final_calls, 1)
 
-        def recovered_final(game_id):
-            self.engine.calls.append(("final_result", game_id))
+    def test_saved_final_payload_resumes_by_refreshing_state_only(self):
+        self.engine.next_roll = {"who": "哈娅", "next_turn": "CC", "game_over": True}
+        final_calls = 0
+        final_returned = False
+        fail_final_state_once = True
+        original_state = self.engine.state
+
+        def final_result(game_id):
+            nonlocal final_calls, final_returned
+            final_calls += 1
+            final_returned = True
             self.engine.current_state = {
                 **self.engine.current_state,
                 "coins": {"哈娅": 88, "CC": 12},
             }
-            return {"winner": "哈娅", "coins": {"哈娅": 88, "CC": 12}}
+            return {"winner": "哈娅", "final_task": "only draw this once"}
 
-        self.engine.final_result = recovered_final
+        def flaky_state(game_id):
+            nonlocal fail_final_state_once
+            if final_returned and fail_final_state_once:
+                fail_final_state_once = False
+                raise EngineUnavailable("ENGINE_UNAVAILABLE", "state timeout", status=503)
+            return original_state(game_id)
+
+        self.engine.final_result = final_result
+        self.engine.state = flaky_state
+        with self.assertRaises(RoomError) as caught:
+            self.service.execute(self.room_id, {
+                "action": "roll", "actor": "haya", "expected_seq": self._seq(),
+            })
+        self.assertEqual(caught.exception.code, "FINAL_RESULT_UNCERTAIN")
+        self.engine.final_result = lambda _game_id: self.fail("final_result must not be called again")
+
         recovered = self.service.resume(self.room_id, expected_seq=self._seq())
         self.assertEqual(recovered["room"]["status"], "finished")
         self.assertEqual(recovered["state"]["coins"], {"哈娅": 88, "CC": 12})
-        self.assertNotIn(
-            "reconciliation_required",
-            store.get_agent_state(self.room_id, self.db_path),
-        )
+        self.assertEqual(final_calls, 1)
+        final_events = [
+            event for event in store.list_events(self.room_id, db_path=self.db_path)
+            if event["type"] == "final_result"
+        ]
+        self.assertEqual(final_events[-1]["payload"]["final_task"], "only draw this once")
 
     def test_uncertain_setup_freezes_and_cannot_resume_or_retry(self):
         room_id = self.service.create_room()["room"]["id"]
@@ -483,6 +516,79 @@ class MonopolyBackendTests(unittest.TestCase):
                 expected_seq=frozen["room"]["event_seq"],
             )
         self.assertEqual(resume_error.exception.code, "SETUP_OUTCOME_UNKNOWN")
+
+    def test_setup_state_failure_keeps_credentials_and_resume_completes_setup(self):
+        room_id = self.service.create_room()["room"]["id"]
+        original_state = self.engine.state
+        state_calls = 0
+
+        def fail_first_state(game_id):
+            nonlocal state_calls
+            state_calls += 1
+            if state_calls == 1:
+                raise EngineUnavailable("ENGINE_UNAVAILABLE", "state timeout", status=503)
+            return original_state(game_id)
+
+        self.engine.state = fail_first_state
+        with self.assertRaises(RoomError) as caught:
+            self.service.setup(
+                room_id,
+                {"p1_name": "哈娅", "p2_name": "CC"},
+                expected_seq=self.service.snapshot(room_id)["room"]["event_seq"],
+            )
+        self.assertEqual(caught.exception.code, "SETUP_STATE_PENDING")
+        durable = store.get_room(room_id, self.db_path, include_token=True)
+        self.assertEqual(durable["status"], "engine_down")
+        self.assertEqual(durable["game_id"], "game-1")
+        self.assertEqual(durable["player_token_cipher"], "test:delete-me")
+        self.assertFalse(any(call[0] == "delete_game" for call in self.engine.calls))
+
+        recovered = self.service.resume(
+            room_id,
+            expected_seq=self.service.snapshot(room_id)["room"]["event_seq"],
+        )
+        self.assertEqual(recovered["room"]["status"], "idle")
+        self.assertEqual(recovered["room"]["game_id"], "game-1")
+        self.assertNotIn(
+            "reconciliation_required",
+            store.get_agent_state(room_id, self.db_path),
+        )
+
+    def test_unverifiable_setup_cleanup_freezes_instead_of_allowing_retry(self):
+        room_id = self.service.create_room()["room"]["id"]
+
+        class BrokenCipher:
+            @staticmethod
+            def encrypt(_value):
+                raise RoomError("TOKEN_CIPHER_NOT_CONFIGURED", "cipher unavailable", status=503)
+
+        self.service.cipher = BrokenCipher()
+
+        def uncertain_delete(game_id, token):
+            raise EngineMutationUncertain(
+                "ENGINE_MUTATION_UNCERTAIN",
+                "delete response lost",
+                status=503,
+                payload={"action": "delete_game", "state": {}},
+            )
+
+        self.engine.delete_game = uncertain_delete
+        with self.assertRaises(RoomError) as caught:
+            self.service.setup(
+                room_id,
+                {"p1_name": "哈娅", "p2_name": "CC"},
+                expected_seq=self.service.snapshot(room_id)["room"]["event_seq"],
+            )
+        self.assertEqual(caught.exception.code, "SETUP_CLEANUP_UNKNOWN")
+        frozen = self.service.snapshot(room_id)
+        self.assertEqual(frozen["room"]["status"], "engine_down")
+        self.assertEqual(frozen["room"]["game_id"], "game-1")
+        with self.assertRaises(RoomError) as resume_error:
+            self.service.resume(
+                room_id,
+                expected_seq=frozen["room"]["event_seq"],
+            )
+        self.assertEqual(resume_error.exception.code, "SETUP_CLEANUP_UNKNOWN")
 
     def test_resume_restores_shop_reminder_and_active_actor(self):
         with store.transaction(self.db_path) as conn:
@@ -669,22 +775,7 @@ class AmbiguousRollClientTests(unittest.TestCase):
                     Client("http://unused").swap("g", "哈娅")
                 self.assertEqual(caught.exception.code, expected.code)
 
-    def test_final_result_retries_once_then_freezes_if_still_unverifiable(self):
-        class RecoveringClient(EngineClient):
-            def __init__(self):
-                super().__init__("http://unused")
-                self.final_calls = 0
-
-            def _request(self, method, path, body=None):
-                if path.startswith("/final_result/"):
-                    self.final_calls += 1
-                    return {} if self.final_calls == 1 else {"winner": "哈娅"}
-                return {"turn": "哈娅"}
-
-        recovered = RecoveringClient()
-        self.assertEqual(recovered.final_result("g"), {"winner": "哈娅"})
-        self.assertEqual(recovered.final_calls, 2)
-
+    def test_final_result_never_retries_an_unverifiable_response(self):
         class FailingClient(EngineClient):
             def __init__(self):
                 super().__init__("http://unused")
@@ -700,7 +791,27 @@ class AmbiguousRollClientTests(unittest.TestCase):
         with self.assertRaises(EngineMutationUncertain) as caught:
             failed.final_result("g")
         self.assertEqual(caught.exception.code, "FINAL_RESULT_UNCERTAIN")
-        self.assertEqual(failed.final_calls, 2)
+        self.assertEqual(failed.final_calls, 1)
+
+    def test_new_game_requires_game_id_and_deletion_token_at_mutation_boundary(self):
+        class Client(EngineClient):
+            def _request(self, method, path, body=None):
+                return {"game_id": "g-without-token"}
+
+        with self.assertRaises(EngineMutationUncertain) as caught:
+            Client("http://unused").new_game({})
+        self.assertEqual(caught.exception.code, "SETUP_OUTCOME_UNKNOWN")
+        self.assertEqual(caught.exception.payload["cause"], "ENGINE_MALFORMED_SUCCESS")
+
+    def test_empty_delete_response_is_uncertain(self):
+        class Client(EngineClient):
+            def _request(self, method, path, body=None):
+                if method == "DELETE":
+                    return {}
+                return {"turn": "哈娅"}
+
+        with self.assertRaises(EngineMutationUncertain):
+            Client("http://unused").delete_game("g", "token")
 
     def test_all_documented_action_paths_are_url_encoded(self):
         class Client(EngineClient):

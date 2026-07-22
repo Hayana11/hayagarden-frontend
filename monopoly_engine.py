@@ -161,7 +161,27 @@ class EngineClient:
         )
 
     def new_game(self, payload: dict) -> dict:
-        return self._mutation_request("new_game", None, "POST", "/new_game", payload)
+        result = self._mutation_request("new_game", None, "POST", "/new_game", payload)
+        game_id = next(
+            (result.get(key) for key in ("game_id", "id", "gameId") if result.get(key)),
+            None,
+        )
+        token = next(
+            (result.get(key) for key in ("player_token", "token", "delete_token") if result.get(key)),
+            None,
+        )
+        if game_id and token:
+            return result
+        raise EngineMutationUncertain(
+            "SETUP_OUTCOME_UNKNOWN",
+            "new_game returned a non-empty response without game_id or deletion token",
+            status=503,
+            payload={
+                "action": "new_game",
+                "cause": "ENGINE_MALFORMED_SUCCESS",
+                "known_game_id": str(game_id) if game_id else None,
+            },
+        )
 
     def help(self) -> dict:
         return self._request("GET", "/help")
@@ -174,36 +194,48 @@ class EngineClient:
 
     def final_result(self, game_id: str) -> dict:
         path = f"/final_result/{self._q(game_id)}"
-        last_error: EngineError | None = None
-        for _attempt in range(2):
-            try:
-                payload = self._request("GET", path)
-            except EngineError as exc:
-                if exc.code not in self._UNCERTAIN_RESPONSE_CODES:
-                    raise
-                last_error = exc
-                continue
-            if payload:
-                return payload
-            last_error = EngineError(
-                "ENGINE_BAD_RESPONSE",
-                "final_result returned an empty response",
-                status=502,
-            )
+        try:
+            payload = self._request("GET", path)
+        except EngineError as exc:
+            if exc.code not in self._UNCERTAIN_RESPONSE_CODES:
+                raise
+            raise EngineMutationUncertain(
+                "FINAL_RESULT_UNCERTAIN",
+                "final_result response is unverifiable and must not be retried",
+                status=503,
+                payload={
+                    "action": "final_result",
+                    "state": self._state_after_uncertain_mutation(game_id),
+                    "cause": exc.code,
+                },
+            ) from exc
+        if payload:
+            return payload
         raise EngineMutationUncertain(
             "FINAL_RESULT_UNCERTAIN",
-            "final_result remained unavailable after one safe retry",
+            "final_result returned an empty response and must not be retried",
             status=503,
             payload={
                 "action": "final_result",
                 "state": self._state_after_uncertain_mutation(game_id),
-                "cause": last_error.code if last_error else "ENGINE_BAD_RESPONSE",
+                "cause": "ENGINE_EMPTY_RESPONSE",
             },
-        ) from last_error
+        )
 
     def delete_game(self, game_id: str, token: str) -> dict:
         query = urllib.parse.urlencode({"token": token})
-        return self._request("DELETE", f"/game/{self._q(game_id)}?{query}")
+        try:
+            return self._mutation_request(
+                "delete_game",
+                game_id,
+                "DELETE",
+                f"/game/{self._q(game_id)}?{query}",
+                None,
+            )
+        except EngineError as exc:
+            if exc.code == "ENGINE_GAME_NOT_FOUND":
+                return {"ok": True, "already_absent": True}
+            raise
 
     def roll(self, game_id: str, body: dict | None = None) -> EngineReply:
         """Roll exactly once; an ambiguous response is never retried.

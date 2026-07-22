@@ -45,7 +45,11 @@ MONOPOLY_SAFE_WORD=404
 
 前端遇到 HTTP/SSE `STALE_ROOM_STATE` 时只刷新快照，不重发。`ENGINE_VALIDATION`（400/422/428）已经写入带 `seq` 的 `room.error`，客户端会同步乐观锁序号。上游没有请求幂等键，而加速卡可能让成功 roll 后仍是同一玩家，因此 roll 的空响应、坏 JSON、HTTP 5xx 或连接中断都只允许一次 `/state` 取证，绝不补掷；返回 `ROLL_OUTCOME_UNKNOWN` 并冻结。`swap/use_card/buy_card` 等即时变更遇到同类不可验证响应时返回 `ACTION_OUTCOME_UNKNOWN`。`new_game` 无法取回丢失的 game id/token，因此返回 `SETUP_OUTCOME_UNKNOWN` 并禁止再次 setup 或普通恢复。
 
-`final_result` 虽是 GET，但首次调用会写入终局金币与跨局历史。由于上游保证该操作幂等，客户端在空响应、坏 JSON、HTTP 5xx 或连接中断时安全重试一次；仍失败则写入 `FINAL_RESULT_UNCERTAIN` 并冻结，不能提交普通 `finished`。网页的 engine-down 恢复按钮会调用 `/resume`：普通离线恢复 canonical state；终局未知会再次完成 final result、刷新 state 后落 `finished`；其他未知 mutation 继续返回 409 并保持冻结。
+`final_result` 虽是 GET，但首次调用会写入终局金币、跨局历史并抽取终极指令；金币结算幂等不代表抽题幂等，因此客户端只调用一次。若 final payload 已取得、只是 canonical state 刷新失败，payload 会写入 reconciliation，`/resume` 仅重试 state/shop 后落 `finished`；若 final response 本身为空、损坏、5xx 或丢失，则写入 `FINAL_RESULT_UNCERTAIN` 并保持冻结，绝不再次调用，直到上游提供原样返回的 final-result cache。
+
+`new_game` 在 mutation 边界同时校验 `game_id` 与删除 token。两者取得且 token 加密成功后，房间会先持久化 game id、密文 token、玩家映射和脱敏开局结果，再请求 canonical state；state 暂不可用时进入 `SETUP_STATE_PENDING`，`/resume` 续接 state/shop 并完成 setup，不删除棋局也不允许重新开局。
+
+若 token 无法加密，后端只在 DELETE 得到可验证成功（或明确 404 已不存在）后才允许 setup 失败回到可重试状态；DELETE 的空响应、坏 JSON、5xx 或断线会进入 `SETUP_CLEANUP_UNKNOWN`，保存已知 game id 并永久冻结，绝不吞错后重新开局。
 
 已核对的上游字段：`POST /roll/{game_id}` 用 `who` 表示本轮掷骰者、用 `next_turn` 表示下一行动者；`GET /state/{game_id}` 顶层 `turn` 是当前行动者名字。`declare_persona` 的 persona 放在 JSON body `{\"persona\": \"...\"}`，不是 URL path。
 
