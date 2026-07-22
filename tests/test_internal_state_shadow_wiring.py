@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import datetime
 import json
 import os
 import sqlite3
@@ -476,6 +477,95 @@ class WakeOutcomeWiringTests(unittest.TestCase):
             conn.close()
         self.assertEqual(de.infer_fired_drive_for_action('message'), 'curiosity')
 
+    def test_normal_mode_records_wake_outcome_once(self):
+        with mock.patch.object(shadow, 'is_shadow_enabled', return_value=True), \
+             mock.patch.object(
+                 shadow, 'apply_outcome_shadow',
+                 return_value=shadow.ShadowResult(ok=True, status='applied'),
+             ) as apply_mock, \
+             mock.patch.object(shadow, 'mark_proof_gap_standalone') as gap_mock:
+            shadow.record_wake_outcome_shadow_if_enabled(
+                wake_run_id='run-normal-1',
+                mode='normal',
+                action='message',
+                fired_drive='curiosity',
+                desire_driven=True,
+                user_idle_hours=2.5,
+                db_path=':memory:',
+            )
+        apply_mock.assert_called_once()
+        gap_mock.assert_not_called()
+
+    def test_dream_and_summarize_skip_wake_outcome(self):
+        for mode in ('dream', 'summarize'):
+            with self.subTest(mode=mode):
+                with mock.patch.object(shadow, 'is_shadow_enabled', return_value=True), \
+                     mock.patch.object(shadow, 'apply_outcome_shadow') as apply_mock:
+                    shadow.record_wake_outcome_shadow_if_enabled(
+                        wake_run_id=f'run-{mode}',
+                        mode=mode,
+                        action='message',
+                        fired_drive='curiosity',
+                        desire_driven=False,
+                        user_idle_hours=1.0,
+                        db_path=':memory:',
+                    )
+                apply_mock.assert_not_called()
+
+    def test_outcome_at_uses_fresh_clock_not_wake_start_now(self):
+        helper = Path(ROOT, 'internal_state_shadow.py').read_text(encoding='utf-8')
+        helper = helper.split('def record_wake_outcome_shadow_if_enabled', 1)[1].split(
+            '\ndef ', 1,
+        )[0]
+        self.assertIn('_now_beijing()', helper)
+        self.assertNotIn('now.strftime', helper)
+        decide = Path(ROOT, 'gateway.py').read_text(encoding='utf-8')
+        decide = decide.split('def _wake_decide_locked', 1)[1].split('\ndef ', 1)[0]
+        self.assertNotIn('outcome_at=now.strftime', decide)
+
+    def test_desire_driven_frozen_before_executor_and_reused(self):
+        src = Path(ROOT, 'gateway.py').read_text(encoding='utf-8')
+        block = src.split('def _wake_decide_locked', 1)[1].split('\ndef ', 1)[0]
+        self.assertEqual(block.count('desire_driven = _get_desire_driven()'), 1)
+        self.assertIn('desire_driven=desire_driven', block)
+        self.assertNotIn('desire_driven=_get_desire_driven()', block)
+
+    def test_shadow_failure_records_gap_without_blocking_mark(self):
+        with mock.patch.object(shadow, 'is_shadow_enabled', return_value=True), \
+             mock.patch.object(
+                 shadow, 'apply_outcome_shadow',
+                 return_value=shadow.ShadowResult(
+                     ok=False, status='failed', error='boom',
+                 ),
+             ), mock.patch.object(shadow, 'mark_proof_gap_standalone') as gap_mock:
+            shadow.record_wake_outcome_shadow_if_enabled(
+                wake_run_id='run-fail-1',
+                mode='normal',
+                action='message',
+                fired_drive='curiosity',
+                desire_driven=True,
+                user_idle_hours=1.0,
+                db_path=':memory:',
+            )
+        gap_mock.assert_called_once()
+        self.assertEqual(
+            gap_mock.call_args.kwargs['error_code'],
+            'wake_outcome_capture_failed',
+        )
+        block = Path(ROOT, 'gateway.py').read_text(encoding='utf-8').split(
+            'def _wake_decide_locked', 1,
+        )[1].split('\ndef ', 1)[0]
+        record_idx = block.index('record_wake_outcome_shadow_if_enabled')
+        self.assertIn('_wake_run_id_mark', block[record_idx:])
+
+    def test_duplicate_wake_run_id_skips_shadow_outcome(self):
+        block = Path(ROOT, 'gateway.py').read_text(encoding='utf-8').split(
+            'def _wake_decide_locked', 1,
+        )[1].split('\ndef ', 1)[0]
+        seen_idx = block.index('_wake_run_id_seen')
+        record_idx = block.index('record_wake_outcome_shadow_if_enabled')
+        self.assertLess(seen_idx, record_idx)
+
 
 class GatewayGuardTests(unittest.TestCase):
     def test_gateway_passes_message_id_to_score_async(self):
@@ -493,8 +583,8 @@ class GatewayGuardTests(unittest.TestCase):
                 text = path.read_text(encoding='utf-8', errors='replace')
                 self.assertNotIn('apply_outcome_shadow', text)
         gateway = Path(ROOT, 'gateway.py').read_text(encoding='utf-8', errors='replace')
-        self.assertIn('apply_outcome_shadow', gateway)
-        self.assertIn('is_shadow_enabled()', gateway)
+        self.assertIn('record_wake_outcome_shadow_if_enabled', gateway)
+        self.assertNotIn('apply_outcome_shadow', gateway)
 
     def test_score_txn_has_no_ensure_schema_call(self):
         src = Path(ROOT, 'emotion_engine.py').read_text(encoding='utf-8')

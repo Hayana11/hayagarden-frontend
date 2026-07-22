@@ -906,7 +906,8 @@ class GuardTests(unittest.TestCase):
                 self.assertNotIn('internal_state_shadow', text)
                 self.assertNotIn('apply_outcome_shadow', text)
         gateway = Path(ROOT, 'gateway.py').read_text(encoding='utf-8', errors='replace')
-        self.assertIn('apply_outcome_shadow', gateway)
+        self.assertIn('record_wake_outcome_shadow_if_enabled', gateway)
+        self.assertNotIn('apply_outcome_shadow', gateway)
 
     def test_public_ensure_bootstrapped_has_no_injection_kwargs(self):
         import inspect
