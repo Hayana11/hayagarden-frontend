@@ -3770,10 +3770,12 @@ def chat():
                 pass
             # 异步情绪评分（不阻塞响应）；message_id 在线程启动前冻结
             try:
-                import emotion_engine as _ee
-                _ee.score_async(
-                    (_uc + '\n' + text)[:2000],
+                from chat.scoring_identity import trigger_turn_scoring
+                trigger_turn_scoring(
+                    user_excerpt=_uc,
+                    assistant_text=text,
                     message_id=_turn_data.get('user_message_id'),
+                    get_db_fn=get_db,
                 )
             except Exception:
                 pass
@@ -4194,10 +4196,12 @@ def chat_stream():
                         except Exception:
                             pass
                         try:
-                            import emotion_engine as _ee
-                            _ee.score_async(
-                                (_uc + chr(10) + text)[:2000],
+                            from chat.scoring_identity import trigger_turn_scoring
+                            trigger_turn_scoring(
+                                user_excerpt=_uc,
+                                assistant_text=text,
                                 message_id=_turn_data.get('user_message_id'),
+                                get_db_fn=get_db,
                             )
                         except Exception:
                             pass
@@ -4335,6 +4339,16 @@ def chat_stream():
                         turn_data=_turn_data,
                         assistant_message_id=assistant_id,
                         conversation_id=getattr(_tool_ctx, 'conversation_id', _conv) or _conv,
+                    )
+                except Exception:
+                    pass
+                try:
+                    from chat.scoring_identity import trigger_turn_scoring
+                    trigger_turn_scoring(
+                        user_excerpt=_uc,
+                        assistant_text=_pc,
+                        message_id=_turn_data.get('user_message_id'),
+                        get_db_fn=get_db,
                     )
                 except Exception:
                     pass

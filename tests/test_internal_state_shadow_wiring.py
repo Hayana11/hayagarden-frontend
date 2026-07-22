@@ -573,10 +573,11 @@ class WakeOutcomeWiringTests(unittest.TestCase):
 
 
 class GatewayGuardTests(unittest.TestCase):
-    def test_gateway_passes_message_id_to_score_async(self):
+    def test_gateway_passes_message_id_to_trigger_turn_scoring(self):
         src = Path(ROOT, 'gateway.py').read_text(encoding='utf-8')
-        self.assertIn('message_id=_turn_data.get(', src)
-        self.assertEqual(src.count('score_async('), 2)
+        self.assertIn('trigger_turn_scoring', src)
+        self.assertIn("message_id=_turn_data.get('user_message_id')", src)
+        self.assertNotIn('_ee.score_async(', src)
 
     def test_wake_outcome_wired_only_in_gateway_not_wake_package(self):
         for name in ('app.py',):

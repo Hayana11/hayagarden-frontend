@@ -388,11 +388,14 @@ export function uploadChatFile(file: File): Promise<{ fileUrl: string; fileName:
 }
 
 // POST /api/chat/edit — archives the tail as an edit branch, truncates after msg
-export function editChatMessage(msgId: number, content: string): Promise<boolean> {
+export function editChatMessage(
+  msgId: number,
+  content: string,
+): Promise<{ ok: boolean; messageId: number | null }> {
   return http
-    .post<{ ok: boolean }>('/api/chat/edit', { msg_id: msgId, content })
-    .then((r) => Boolean(r.ok))
-    .catch(() => false);
+    .post<{ ok: boolean; message_id?: number }>('/api/chat/edit', { msg_id: msgId, content })
+    .then((r) => ({ ok: Boolean(r.ok), messageId: r.ok && r.message_id ? Number(r.message_id) : null }))
+    .catch(() => ({ ok: false, messageId: null }));
 }
 
 // POST /api/chat/branch/switch -> { branch_idx, total }
@@ -403,11 +406,23 @@ export function switchChatBranch(msgId: number, direction: 1 | -1): Promise<{ br
     .catch(() => null);
 }
 
-// POST /api/chat/regen/prepare -> { old_branches } (deletes the assistant row)
-export function regenPrepare(msgId: number): Promise<unknown[] | null> {
+// POST /api/chat/regen/prepare -> { old_branches, user_message_id } (deletes the assistant row)
+export function regenPrepare(
+  msgId: number,
+): Promise<{ oldBranches: unknown[]; userMessageId: number | null } | null> {
   return http
-    .post<{ ok: boolean; old_branches: unknown[] }>('/api/chat/regen/prepare', { msg_id: msgId })
-    .then((r) => (r.ok ? r.old_branches : null))
+    .post<{ ok: boolean; old_branches: unknown[]; user_message_id?: number }>(
+      '/api/chat/regen/prepare',
+      { msg_id: msgId },
+    )
+    .then((r) =>
+      r.ok
+        ? {
+            oldBranches: r.old_branches,
+            userMessageId: r.user_message_id != null ? Number(r.user_message_id) : null,
+          }
+        : null,
+    )
     .catch(() => null);
 }
 

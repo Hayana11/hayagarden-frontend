@@ -4094,10 +4094,15 @@ def regen_prepare():
             'thinking': row['thinking'] or '',
             'tool_calls': row['tool_calls'] or ''
         }]
+    from chat.scoring_identity import find_user_message_before
+    user_message_id = find_user_message_before(conn, int(msg_id))
     conn.execute('DELETE FROM chat_messages WHERE id=?', (msg_id,))
     conn.commit()
     conn.close()
-    return jsonify({'ok': True, 'old_branches': old_branches})
+    payload = {'ok': True, 'old_branches': old_branches}
+    if user_message_id is not None:
+        payload['user_message_id'] = user_message_id
+    return jsonify(payload)
 
 
 @app.route('/api/chat/regen/finalize', methods=['POST'])
@@ -4182,16 +4187,97 @@ def edit_message():
         'INSERT INTO chat_edit_branches (fork_msg_id, original_content, messages_json) VALUES (?,?,?)',
         (msg_id, row['content'], tail_json)
     )
-    # Update the edited row's content, clear branches (fresh start)
-    conn.execute(
-        'UPDATE chat_messages SET content=?, branches="", branch_idx=0 WHERE id=?',
-        (new_content, msg_id)
+    author = row['author']
+    image_url = row['image_url'] or ''
+    file_url = row['file_url'] or ''
+    file_name = row['file_name'] or ''
+    # New message identity: edited text must not reuse old shadow event key.
+    conn.execute('DELETE FROM chat_messages WHERE id >= ?', (msg_id,))
+    previous_user_at = None
+    created_at = None
+    new_message_id = None
+    _user_events_requested = all(
+        str(os.environ.get(name, '0')).strip() == '1'
+        for name in (
+            'INTERNAL_STATE_V3_SHADOW_ENABLED',
+            'INTERNAL_STATE_V3_SCORE_PROOF_ENABLED',
+            'INTERNAL_STATE_V3_USER_EVENTS_ENABLED',
+        )
     )
-    # Delete everything after this row
-    conn.execute('DELETE FROM chat_messages WHERE id > ?', (msg_id,))
+    if _user_events_requested and author not in ('fyodor', 'assistant', 'claude'):
+        from chat.interaction_state import USER_AUTHOR_SQL
+        prev = conn.execute(
+            f"SELECT created_at FROM chat_messages WHERE {USER_AUTHOR_SQL} "
+            "ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        if prev is not None:
+            previous_user_at = prev['created_at'] if hasattr(prev, 'keys') else prev[0]
+            previous_user_at = str(previous_user_at) if previous_user_at else None
+    cur = conn.execute(
+        "INSERT INTO chat_messages (author,content,image_url,file_url,file_name) "
+        "VALUES (?,?,?,?,?)",
+        (author, new_content, image_url, file_url, file_name),
+    )
+    new_message_id = cur.lastrowid
+    if _user_events_requested:
+        row2 = conn.execute(
+            "SELECT created_at FROM chat_messages WHERE id=?",
+            (new_message_id,),
+        ).fetchone()
+        if row2 is not None:
+            created_at = row2['created_at'] if hasattr(row2, 'keys') else row2[0]
+            created_at = str(created_at) if created_at else None
+    if (
+        _user_events_requested
+        and author not in ('fyodor', 'assistant', 'claude')
+        and new_message_id is not None
+        and created_at
+    ):
+        try:
+            import internal_state_shadow as _shadow
+            if _shadow.is_user_events_enabled():
+                try:
+                    _shadow.enqueue_user_rule_in_txn(
+                        conn,
+                        message_id=int(new_message_id),
+                        text=new_content or '',
+                        created_at=created_at,
+                        previous_user_at=previous_user_at,
+                    )
+                except Exception:
+                    try:
+                        _shadow.mark_proof_gap(
+                            conn,
+                            failed_message_id=int(new_message_id),
+                            error_code='outbox_capture_gap',
+                            db_path=DB_PATH,
+                        )
+                    except Exception:
+                        try:
+                            _shadow.mark_proof_gap_standalone(
+                                db_path=DB_PATH,
+                                failed_message_id=int(new_message_id),
+                                error_code='outbox_capture_gap',
+                            )
+                        except Exception:
+                            pass
+        except Exception:
+            pass
     conn.commit()
     conn.close()
-    return jsonify({'ok': True})
+    if author not in ('fyodor', 'assistant', 'claude'):
+        try:
+            from chat.interaction_state import touch_user_interaction
+            touch_user_interaction(get_db)
+        except Exception:
+            pass
+        if new_message_id is not None and created_at:
+            try:
+                import internal_state_shadow as _shadow
+                _shadow.drain_shadow_outbox_best_effort(db_path=DB_PATH)
+            except Exception:
+                pass
+    return jsonify({'ok': True, 'message_id': new_message_id})
 
 
 @app.route('/api/chat/delete', methods=['POST'])
