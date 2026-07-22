@@ -3772,7 +3772,6 @@ def chat():
             try:
                 from chat.scoring_identity import trigger_turn_scoring
                 trigger_turn_scoring(
-                    user_excerpt=_uc,
                     assistant_text=text,
                     message_id=_turn_data.get('user_message_id'),
                     get_db_fn=get_db,
@@ -4198,7 +4197,6 @@ def chat_stream():
                         try:
                             from chat.scoring_identity import trigger_turn_scoring
                             trigger_turn_scoring(
-                                user_excerpt=_uc,
                                 assistant_text=text,
                                 message_id=_turn_data.get('user_message_id'),
                                 get_db_fn=get_db,
@@ -4345,7 +4343,6 @@ def chat_stream():
                 try:
                     from chat.scoring_identity import trigger_turn_scoring
                     trigger_turn_scoring(
-                        user_excerpt=_uc,
                         assistant_text=_pc,
                         message_id=_turn_data.get('user_message_id'),
                         get_db_fn=get_db,

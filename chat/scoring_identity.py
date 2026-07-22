@@ -8,7 +8,7 @@ Edit: new message row + new message_id (edited text must not reuse old shadow id
 from __future__ import annotations
 
 import logging
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, Tuple
 
 from chat.interaction_state import USER_AUTHOR_SQL
 
@@ -41,6 +41,29 @@ def find_user_message_before(conn, message_id: int) -> Optional[int]:
     if mid is None:
         return None
     return int(mid)
+
+
+def resolve_scoring_user_message(
+    get_db_fn: Callable[[], Any],
+    message_id: Any,
+) -> Optional[Tuple[int, str]]:
+    """Validate ``message_id`` and load authoritative user row text from DB."""
+    mid = parse_scoring_message_id(message_id)
+    if mid is None:
+        return None
+    conn = get_db_fn()
+    try:
+        row = conn.execute(
+            f'SELECT id, content FROM chat_messages '
+            f'WHERE id=? AND {USER_AUTHOR_SQL}',
+            (mid,),
+        ).fetchone()
+        if not row:
+            return None
+        content = row['content'] if hasattr(row, 'keys') else row[1]
+        return mid, str(content or '')
+    finally:
+        conn.close()
 
 
 def message_already_scored(get_db_fn: Callable[[], Any], message_id: int) -> bool:
@@ -80,22 +103,28 @@ def message_already_scored(get_db_fn: Callable[[], Any], message_id: int) -> boo
 
 def trigger_turn_scoring(
     *,
-    user_excerpt: str,
     assistant_text: str,
     message_id: Any,
     get_db_fn: Callable[[], Any],
 ) -> bool:
-    """Schedule async scoring when identity is valid and not yet scored."""
-    mid = parse_scoring_message_id(message_id)
-    if mid is None:
-        _log.warning('skip score_async: missing or invalid message_id=%r', message_id)
+    """Schedule async scoring when identity resolves to a real user row."""
+    resolved = resolve_scoring_user_message(get_db_fn, message_id)
+    if resolved is None:
+        _log.warning(
+            'skip score_async: user message not found for message_id=%r',
+            message_id,
+        )
         return False
+    mid, user_content = resolved
     if message_already_scored(get_db_fn, mid):
         _log.info('skip score_async: message_id=%s already scored', mid)
         return False
+    excerpt = (user_content + '\n' + (assistant_text or '')).strip()[:2000]
+    if not excerpt:
+        _log.warning('skip score_async: empty excerpt for message_id=%s', mid)
+        return False
     try:
         import emotion_engine as _ee
-        excerpt = ((user_excerpt or '') + '\n' + (assistant_text or '')).strip()[:2000]
         _ee.score_async(excerpt, message_id=mid)
         return True
     except Exception:
