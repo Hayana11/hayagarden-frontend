@@ -269,21 +269,45 @@ def add_message(
     provider_meta: dict | str | None = None,
     db_path: str | None = None,
 ) -> dict:
+    with transaction(db_path) as conn:
+        return add_message_conn(
+            conn,
+            room_id,
+            author,
+            content,
+            thinking=thinking,
+            reply_to=reply_to,
+            game_event_id=game_event_id,
+            provider_meta=provider_meta,
+        )
+
+
+def add_message_conn(
+    conn: sqlite3.Connection,
+    room_id: str,
+    author: str,
+    content: str,
+    *,
+    thinking: str = "",
+    reply_to: int | None = None,
+    game_event_id: int | None = None,
+    provider_meta: dict | str | None = None,
+) -> dict:
+    """Insert a message using the caller's transaction."""
     if author not in {"haya", "cc", "codex", "system"}:
         raise ValueError("invalid monopoly message author")
     content = (content or "").strip()
     if not content:
         raise ValueError("message content is empty")
     meta = provider_meta if isinstance(provider_meta, str) else json.dumps(provider_meta or {}, ensure_ascii=False)
-    with transaction(db_path) as conn:
-        cur = conn.execute(
-            "INSERT INTO monopoly_room_messages "
-            "(room_id, author, content, thinking, reply_to, game_event_id, provider_meta) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (room_id, author, content, thinking or "", reply_to, game_event_id, meta),
-        )
-        row = conn.execute("SELECT * FROM monopoly_room_messages WHERE id=?", (cur.lastrowid,)).fetchone()
-        return message_dict(row)
+    cur = conn.execute(
+        "INSERT INTO monopoly_room_messages "
+        "(room_id, author, content, thinking, reply_to, game_event_id, provider_meta) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (room_id, author, content, thinking or "", reply_to, game_event_id, meta),
+    )
+    row = conn.execute("SELECT * FROM monopoly_room_messages WHERE id=?", (cur.lastrowid,)).fetchone()
+    return message_dict(row)
 
 
 def message_dict(row: sqlite3.Row | dict) -> dict:
@@ -372,7 +396,34 @@ def get_agent_state(room_id: str, db_path: str | None = None) -> dict:
         conn.close()
 
 
-def save_agent_state(room_id: str, value: dict, db_path: str | None = None) -> None:
+def get_agent_state_conn(conn: sqlite3.Connection, room_id: str) -> dict:
+    row = conn.execute("SELECT agent_state_json FROM monopoly_rooms WHERE id=?", (room_id,)).fetchone()
+    return _json_load(row[0], {}) if row else {}
+
+
+def patch_agent_state_conn(
+    conn: sqlite3.Connection,
+    room_id: str,
+    patch: dict | None = None,
+    *,
+    remove: tuple[str, ...] | list[str] = (),
+) -> dict:
+    """Atomically merge selected keys without overwriting unrelated safety state."""
+    value = get_agent_state_conn(conn, room_id)
+    value.update(patch or {})
+    for key in remove:
+        value.pop(key, None)
+    update_room(conn, room_id, agent_state_json=json.dumps(value, ensure_ascii=False))
+    return value
+
+
+def patch_agent_state(
+    room_id: str,
+    patch: dict | None = None,
+    *,
+    remove: tuple[str, ...] | list[str] = (),
+    db_path: str | None = None,
+) -> dict:
     with transaction(db_path) as conn:
-        update_room(conn, room_id, agent_state_json=json.dumps(value, ensure_ascii=False))
+        return patch_agent_state_conn(conn, room_id, patch, remove=remove)
 

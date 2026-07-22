@@ -256,7 +256,11 @@ def create_monopoly_blueprint(
                             }
                         name = "game.pending"
                     elif event["type"] == "room_error":
-                        envelope = {"type": "room.error", "data": event["payload"]}
+                        envelope = {
+                            "type": "room.error",
+                            "seq": event_seq,
+                            "data": event["payload"],
+                        }
                         name = "room.error"
                     else:
                         envelope = {"type": "game.event", "seq": event_seq, "data": event}

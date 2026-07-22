@@ -100,6 +100,12 @@ export function useMonopolyRoom(roomId: string | undefined) {
       return;
     }
     if (envelope.type === 'room.error') {
+      const nextSeq = Number(envelope.seq) || 0;
+      if (nextSeq) seqRef.current = Math.max(seqRef.current, nextSeq);
+      setSnapshot((current) => current ? {
+        ...current,
+        room: { ...current.room, event_seq: Math.max(current.room.event_seq, nextSeq) },
+      } : current);
       setError(envelope.data.detail || envelope.data.code || '房间发生错误');
       return;
     }
@@ -178,7 +184,12 @@ export function useMonopolyRoom(roomId: string | undefined) {
       applySnapshot(next);
       return next;
     } catch (requestError) {
-      if (requestError instanceof HttpError && requestError.status === 409) void refresh();
+      if (
+        requestError instanceof HttpError
+        && [400, 409, 422, 428].includes(requestError.status)
+      ) {
+        await refresh();
+      }
       setError(errorDetail(requestError));
       return null;
     } finally {
@@ -200,10 +211,15 @@ export function useMonopolyRoom(roomId: string | undefined) {
 
   const togglePause = useCallback(() => {
     if (!roomId || !snapshot) return Promise.resolve(null);
-    return run(() => snapshot.room.status === 'paused'
+    return run(() => ['paused', 'engine_down'].includes(snapshot.room.status)
       ? monopolyApi.resume(roomId, eventSeq)
       : monopolyApi.pause(roomId, eventSeq));
   }, [eventSeq, roomId, run, snapshot]);
+
+  const resumeRoom = useCallback(() => {
+    if (!roomId) return Promise.resolve(null);
+    return run(() => monopolyApi.resume(roomId, eventSeq));
+  }, [eventSeq, roomId, run]);
 
   const sendMessage = useCallback(async (content: string, targets: Array<'cc' | 'codex'>) => {
     if (!roomId || busy) return false;
@@ -243,7 +259,7 @@ export function useMonopolyRoom(roomId: string | undefined) {
 
   return {
     snapshot, pending, loading, busy, error, connection, lastEvent, agents, streaming,
-    setupConfirmation, refresh, action, setup, togglePause, sendMessage, speak, providerFor,
+    setupConfirmation, refresh, action, setup, togglePause, resumeRoom, sendMessage, speak, providerFor,
     clearError: () => setError(''),
   };
 }

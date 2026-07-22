@@ -36,7 +36,7 @@
 | `toll_pending` | 交钱并掷下一轮、劳动抵债 |
 | `super_pending` | 做完、买断 |
 | `jail_turn` | 狱中掷骰 |
-| `paused` / `engine_down` | 恢复或刷新，不发送棋局动作 |
+| `paused` / `engine_down` | 调用 `/resume` 对账恢复；未知 mutation 收到 409 后继续冻结 |
 
 ## SSE
 

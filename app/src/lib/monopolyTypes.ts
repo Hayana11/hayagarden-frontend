@@ -109,7 +109,7 @@ export type StreamEnvelope =
   | { type: 'chat.message'; data: MonopolyMessage }
   | { type: 'chat.start' | 'chat.delta' | 'chat.done'; actor: 'cc' | 'codex'; delta?: string; content?: string; message_id?: number }
   | { type: 'agent.status'; actor: 'cc' | 'codex'; data: AgentStatus }
-  | { type: 'room.error'; data: { code?: string; detail?: string } };
+  | { type: 'room.error'; seq: number; data: { code?: string; detail?: string } };
 
 export interface MonopolySetupValues {
   first: 'haya' | 'cc';

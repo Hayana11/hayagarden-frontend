@@ -155,8 +155,7 @@ export function MonopolyRoomScreen() {
               pending={room.pending}
               busy={room.busy}
               onAction={(action, args) => void handleAction(action, args)}
-              onResume={() => void room.togglePause()}
-              onRefresh={() => void room.refresh()}
+              onResume={() => void room.resumeRoom()}
               onNewRoom={() => navigate('/monopoly/new')}
             />
             {snapshot.room.game_id && (

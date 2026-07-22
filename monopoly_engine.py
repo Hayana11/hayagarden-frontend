@@ -32,6 +32,10 @@ class EngineUnavailable(EngineError):
     pass
 
 
+class EngineMutationUncertain(EngineUnavailable):
+    """A mutating request may have committed even though its response was lost."""
+
+
 @dataclass(frozen=True)
 class EngineReply:
     payload: dict
@@ -39,20 +43,13 @@ class EngineReply:
     outcome_unknown: bool = False
 
 
-def _turn_marker(state: dict) -> tuple:
-    """Extract a conservative marker used only for ambiguous roll recovery."""
-    marker = tuple(
-        state.get(key)
-        for key in ("turn", "turn_no", "round", "round_no", "current_player", "active_player")
-    )
-    if any(value is not None for value in marker):
-        return marker
-    # Some engine builds omit explicit turn counters.  A canonical full-state
-    # fallback is safer than assuming that two all-None markers are identical.
-    return (json.dumps(state, ensure_ascii=False, sort_keys=True, separators=(",", ":")),)
-
-
 class EngineClient:
+    _UNCERTAIN_RESPONSE_CODES = {
+        "ENGINE_UNAVAILABLE",
+        "ENGINE_HTTP_ERROR",
+        "ENGINE_BAD_RESPONSE",
+    }
+
     ACTION_PATHS = {
         "skip": "/skip/{game_id}/{who}",
         "swap": "/swap/{game_id}/{who}",
@@ -118,8 +115,73 @@ class EngineClient:
     def _q(value: Any) -> str:
         return urllib.parse.quote(str(value), safe="")
 
+    def _state_after_uncertain_mutation(self, game_id: str | None) -> dict:
+        if not game_id:
+            return {}
+        try:
+            return self.state(game_id)
+        except EngineError:
+            return {}
+
+    def _mutation_request(
+        self,
+        action: str,
+        game_id: str | None,
+        method: str,
+        path: str,
+        body: dict | None,
+    ) -> dict:
+        """Execute a mutation once and fail closed on any unverifiable response."""
+        try:
+            payload = self._request(method, path, body)
+        except EngineError as exc:
+            if exc.code not in self._UNCERTAIN_RESPONSE_CODES:
+                raise
+            raise EngineMutationUncertain(
+                "ENGINE_MUTATION_UNCERTAIN",
+                f"{action} may have committed before its response became unusable",
+                status=503,
+                payload={
+                    "action": action,
+                    "state": self._state_after_uncertain_mutation(game_id),
+                    "cause": exc.code,
+                },
+            ) from exc
+        if payload:
+            return payload
+        raise EngineMutationUncertain(
+            "ENGINE_MUTATION_UNCERTAIN",
+            f"{action} returned an empty response after a mutating request",
+            status=503,
+            payload={
+                "action": action,
+                "state": self._state_after_uncertain_mutation(game_id),
+                "cause": "ENGINE_EMPTY_RESPONSE",
+            },
+        )
+
     def new_game(self, payload: dict) -> dict:
-        return self._request("POST", "/new_game", payload)
+        result = self._mutation_request("new_game", None, "POST", "/new_game", payload)
+        game_id = next(
+            (result.get(key) for key in ("game_id", "id", "gameId") if result.get(key)),
+            None,
+        )
+        token = next(
+            (result.get(key) for key in ("player_token", "token", "delete_token") if result.get(key)),
+            None,
+        )
+        if game_id and token:
+            return result
+        raise EngineMutationUncertain(
+            "SETUP_OUTCOME_UNKNOWN",
+            "new_game returned a non-empty response without game_id or deletion token",
+            status=503,
+            payload={
+                "action": "new_game",
+                "cause": "ENGINE_MALFORMED_SUCCESS",
+                "known_game_id": str(game_id) if game_id else None,
+            },
+        )
 
     def help(self) -> dict:
         return self._request("GET", "/help")
@@ -131,47 +193,75 @@ class EngineClient:
         return self._request("GET", f"/shop/{self._q(game_id)}")
 
     def final_result(self, game_id: str) -> dict:
-        return self._request("GET", f"/final_result/{self._q(game_id)}")
+        path = f"/final_result/{self._q(game_id)}"
+        try:
+            payload = self._request("GET", path)
+        except EngineError as exc:
+            if exc.code not in self._UNCERTAIN_RESPONSE_CODES:
+                raise
+            raise EngineMutationUncertain(
+                "FINAL_RESULT_UNCERTAIN",
+                "final_result response is unverifiable and must not be retried",
+                status=503,
+                payload={
+                    "action": "final_result",
+                    "state": self._state_after_uncertain_mutation(game_id),
+                    "cause": exc.code,
+                },
+            ) from exc
+        if payload:
+            return payload
+        raise EngineMutationUncertain(
+            "FINAL_RESULT_UNCERTAIN",
+            "final_result returned an empty response and must not be retried",
+            status=503,
+            payload={
+                "action": "final_result",
+                "state": self._state_after_uncertain_mutation(game_id),
+                "cause": "ENGINE_EMPTY_RESPONSE",
+            },
+        )
 
     def delete_game(self, game_id: str, token: str) -> dict:
         query = urllib.parse.urlencode({"token": token})
-        return self._request("DELETE", f"/game/{self._q(game_id)}?{query}")
+        try:
+            return self._mutation_request(
+                "delete_game",
+                game_id,
+                "DELETE",
+                f"/game/{self._q(game_id)}?{query}",
+                None,
+            )
+        except EngineError as exc:
+            if exc.code == "ENGINE_GAME_NOT_FOUND":
+                return {"ok": True, "already_absent": True}
+            raise
 
     def roll(self, game_id: str, body: dict | None = None) -> EngineReply:
-        """Roll once, reconciling an ambiguous timeout before one guarded resend."""
-        before = self.state(game_id)
-        marker = _turn_marker(before)
+        """Roll exactly once; an ambiguous response is never retried.
+
+        ``/state`` has no request id and an acceleration card may leave the
+        same player active after a successful roll.  State comparison therefore
+        cannot prove that a timed-out roll was not committed.
+        """
         path = f"/roll/{self._q(game_id)}"
         try:
-            return EngineReply(self._request("POST", path, body or {}))
-        except EngineUnavailable as first_error:
-            try:
-                after = self.state(game_id)
-            except EngineError:
-                raise first_error
-            if _turn_marker(after) != marker:
-                return EngineReply(
-                    {"state": after, "reconciled_after_timeout": True},
-                    reconciled=True,
-                    outcome_unknown=True,
-                )
-
-            # Exactly one resend is allowed, and it is only reached after state
-            # proves that the first request did not advance the turn.
-            try:
-                return EngineReply(self._request("POST", path, body or {}))
-            except EngineUnavailable as second_error:
-                try:
-                    final_state = self.state(game_id)
-                except EngineError:
-                    raise second_error
-                if _turn_marker(final_state) != marker:
-                    return EngineReply(
-                        {"state": final_state, "reconciled_after_timeout": True},
-                        reconciled=True,
-                        outcome_unknown=True,
-                    )
-                raise second_error
+            return EngineReply(
+                self._mutation_request("roll", game_id, "POST", path, body or {})
+            )
+        except EngineMutationUncertain as exc:
+            after = exc.payload.get("state") if isinstance(exc.payload, dict) else {}
+            if not isinstance(after, dict):
+                after = {}
+            return EngineReply(
+                {
+                    "state": after,
+                    "reconciled_after_timeout": bool(after),
+                    "cause": (exc.payload or {}).get("cause") if isinstance(exc.payload, dict) else None,
+                },
+                reconciled=bool(after),
+                outcome_unknown=True,
+            )
 
     def action(self, action: str, game_id: str, **params: Any) -> dict:
         template = self.ACTION_PATHS.get(action)
@@ -184,7 +274,7 @@ class EngineClient:
         except KeyError as exc:
             raise ValueError(f"missing {exc.args[0]} for {action}") from exc
         body = {"persona": params["persona"]} if action == "declare_persona" else {}
-        return self._request("POST", path, body)
+        return self._mutation_request(action, game_id, "POST", path, body)
 
     def skip(self, game_id: str, who: str) -> dict:
         return self.action("skip", game_id, who=who)
