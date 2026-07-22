@@ -4,7 +4,7 @@
 
 - **计划分支**：`plan/unified-heartbeat-tracker`
 - **当前状态**：`DESIGN_LOCKED / IMPLEMENTATION_NOT_STARTED`
-- **最后更新**：2026-07-22
+- **最后更新**：2026-07-23
 - **当前唯一 Nox**：`nox_id=fyodor-default`
 - **首个 Provider Adapter**：Claude Code Unified Resident
 
@@ -52,14 +52,24 @@
   - 状态：已完成（morning cron 继续关闭，普通 Wake 观察期中）
   - 完成日期：2026-07-23（北京时间）
   - 证据：PR #126 合并 `9eb18a4`（含 `9ecb524` morning 门禁/去重 + `ff0c330` CI 修复）；生产 `main@9eb18a4`；`frontend`/`frontend-gw` 已重启；`POST /push`→404；`push_tool.py` 已删；morning cron 未启用
+- [ ] **P-ID-CHAT：Chat 评分身份修复**
+  - 状态：进行中
+  - 完成日期：
+  - 证据：
+  - 范围：正常发送 / redo / edit 三条 stream 路径必须携带可评分 `message_id`；禁止 `message_id=None` 进入 `score_async`；编辑产生新消息身份，重答复用原用户消息 id
+- [ ] **P-ID-WAKE：Wake run_id 修复**
+  - 状态：未开始
+  - 完成日期：
+  - 证据：
+  - 范围：`dream_wake.py` 各模式调用 `/wake` 时生成稳定 `wake_run_id`；`record_wake_outcome_shadow_if_enabled` 能收到非空 id
 - [ ] **P-0：Heartbeat Measurement Foundation**
   - 状态：未开始
   - 完成日期：
   - 证据：
-- [-] **P-SHADOW：Internal State v3 72 小时 Shadow 验收**
-  - 状态：观察中；以生产首个正式用户事件 `message_id=4100` 为起点
+- [!] **P-SHADOW：Internal State v3 72 小时 Shadow 验收**
+  - 状态：身份接线阻塞，等待 P-ID-CHAT / P-ID-WAKE 修复后重启观察
   - 完成日期：
-  - 证据：
+  - 证据：2026-07-23 日检发现 `#4118` 因 edit 后 `runStream(null)` 导致 `user_scored` 缺失 + proof gap；`wake_outcome=0` 因生产 Wake 未传 `wake_run_id`
 
 ### Unified Heartbeat
 
@@ -77,7 +87,7 @@
 
 ### 当前下一步
 
-> **P-126 已合并部署。下一项：PR 0（Heartbeat Measurement Foundation）。morning cron 继续关闭至普通 Wake 观察期满。**
+> **P-126 已合并部署。当前阻塞：P-ID-CHAT → P-ID-WAKE → 重启 P-SHADOW 观察 → PR 0。morning cron 继续关闭。**
 
 ---
 
@@ -131,9 +141,10 @@ user_events_preflight_ok=true
 ### 前置条件
 
 1. PR #126 修正 morning 最近交互门禁与精确 `wake_run_id` 去重后部署稳定；
-2. PR 0 先行部署，确认 requestId、TTL 分桶和指纹可用；
-3. Internal State v3 完成 72 小时 Shadow 验收；
-4. Unified Heartbeat 与 Phase 1B 绝不同车。
+2. **P-ID-CHAT** 与 **P-ID-WAKE** 修复 Shadow 身份接线阻塞；
+3. PR 0 先行部署，确认 requestId、TTL 分桶和指纹可用；
+4. Internal State v3 完成 72 小时 Shadow 验收（修复后重启观察）；
+5. Unified Heartbeat 与 Phase 1B 绝不同车。
 
 ### 本工程禁止
 
@@ -651,7 +662,8 @@ PR #126 修门禁与去重
 - [x] 将 Unified Heartbeat 完整方案与强制进度纪律写入仓库；
 - [x] 确认下一项为 PR #126；
 - [x] PR #126 合并部署完成（`9eb18a4`）；morning cron 继续关闭；
-- [-] Internal State v3 72 小时 Shadow 仍在观察，尚未宣告毕业。
+- [!] P-SHADOW 暂停：Chat `message_id=None` 与 Wake `wake_run_id` 空导致 Shadow 样本/证据链阻塞；
+- [-] 下一项：P-ID-CHAT（Chat 评分身份修复）。
 
 ---
 
