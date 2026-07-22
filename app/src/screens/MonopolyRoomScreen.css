@@ -1,0 +1,343 @@
+.mono-room-root {
+  --mono-bg: #f7f1ee;
+  --mono-card: #fff;
+  --mono-card-2: #f6efec;
+  --mono-bubble: #f0dfdb;
+  --mono-ink: #4a3f3c;
+  --mono-ink-2: #6b5a55;
+  --mono-muted: #8c7b76;
+  --mono-faint: #a99590;
+  --mono-ghost: #c4b4af;
+  --mono-line: #f0e6e2;
+  --mono-rose: #b76e79;
+  --mono-deep: #9c3b4a;
+  --mono-rose-bg: rgba(183, 110, 121, .1);
+  --mono-shadow: rgba(183, 110, 121, .1);
+  --mono-shadow-2: rgba(183, 110, 121, .2);
+  --mono-ok: #7a9b6d;
+  --mono-error: #c25450;
+  --mono-gold: #d9a441;
+  --mono-sage: #7a9b6d;
+  --mono-sage-bg: rgba(122, 155, 109, .12);
+  --mono-indigo: #7b7fb0;
+  --mono-indigo-bg: rgba(123, 127, 176, .12);
+  --mono-amber-bg: rgba(217, 164, 65, .14);
+  width: 100%;
+  max-width: none !important;
+  display: flex;
+  overflow: hidden;
+  background: var(--mono-bg);
+  color: var(--mono-ink);
+  font-family: 'Noto Serif SC', serif;
+}
+
+.mono-room-root *, .mono-loading * { box-sizing: border-box; }
+.mono-room-root button, .mono-room-root input { font: inherit; }
+.mono-room-root button { border: 0; }
+
+.mono-game-column { flex: 1 1 auto; min-width: 0; height: 100%; display: flex; flex-direction: column; overflow: hidden; }
+.mono-room-header { position: relative; z-index: 20; flex: 0 0 auto; background: var(--mono-card); box-shadow: 0 6px 18px var(--mono-shadow); }
+.mono-room-header-inner { width: 100%; max-width: 560px; margin: 0 auto; padding: 10px 14px 9px; display: flex; align-items: center; gap: 10px; }
+.mono-room-mark { width: 38px; height: 38px; flex: 0 0 auto; display: grid; place-items: center; border-radius: 50%; background: linear-gradient(135deg, var(--mono-rose), var(--mono-deep)); box-shadow: 0 6px 14px var(--mono-shadow-2); color: #f7f1ee; font: italic 16px 'Bodoni Moda', serif; }
+.mono-room-heading { min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.mono-room-title-line { display: flex; align-items: center; gap: 7px; white-space: nowrap; font: 600 16px 'Bodoni Moda', 'Noto Serif SC', serif; letter-spacing: 1px; }
+.mono-live-dot { width: 6px; height: 6px; flex: 0 0 auto; border-radius: 50%; background: var(--mono-ok); animation: monoLivePulse 2.4s ease infinite; }
+.mono-live-dot.offline { background: var(--mono-ghost); }
+.mono-room-subtitle { max-width: 100%; overflow: hidden; color: var(--mono-faint); font: italic 10.5px 'Bodoni Moda', serif; letter-spacing: 1px; white-space: nowrap; text-overflow: ellipsis; }
+.mono-room-header-actions { margin-left: auto; flex: 0 0 auto; display: flex; align-items: center; gap: 6px; }
+.mono-round-chip { padding: 5px 12px; border-radius: 999px; background: var(--mono-rose-bg); color: var(--mono-deep); font: 12px 'Bodoni Moda', serif; letter-spacing: 1px; white-space: nowrap; }
+.mono-icon-button { width: 34px; height: 34px; display: grid; place-items: center; padding: 0; border-radius: 50%; background: transparent; color: var(--mono-muted); cursor: pointer; transition: background .18s, color .18s, transform .18s; }
+.mono-icon-button:hover { background: var(--mono-card-2); }
+.mono-icon-button:active { transform: scale(.92); }
+.mono-icon-button.paused { background: var(--mono-amber-bg); color: var(--mono-gold); }
+.mono-icon-button:disabled { opacity: .45; cursor: default; }
+.mono-leave-button { display: none; font: 28px/1 'Bodoni Moda', serif; }
+
+.mono-game-scroll { flex: 1 1 auto; min-height: 0; overflow-y: auto; scrollbar-width: none; padding-bottom: 24px; }
+.mono-game-scroll::-webkit-scrollbar, .mono-hand-scroll::-webkit-scrollbar, .mono-chat-messages::-webkit-scrollbar, .mono-setup-scroll::-webkit-scrollbar { width: 0; height: 0; }
+.mono-game-content { width: 100%; max-width: 560px; margin: 0 auto; padding: 14px 14px 24px; display: flex; flex-direction: column; gap: 12px; }
+
+.mono-player-rail { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.mono-player-card { min-width: 0; padding: 10px 11px; display: flex; flex-direction: column; gap: 5px; border: 1.5px solid transparent; border-radius: 16px; background: var(--mono-card); box-shadow: 0 8px 20px var(--mono-shadow); transition: border-color .2s, opacity .2s, transform .2s; }
+.mono-player-card.active.haya { border-color: var(--mono-rose); }
+.mono-player-card.active.cc { border-color: var(--mono-sage); }
+.mono-player-card.offline { opacity: .54; filter: saturate(.55); }
+.mono-player-name-row { min-width: 0; display: flex; align-items: center; gap: 6px; }
+.mono-player-name-row strong { overflow: hidden; font-size: 13.5px; letter-spacing: 1px; white-space: nowrap; text-overflow: ellipsis; }
+.mono-player-avatar { width: 20px; height: 20px; flex: 0 0 auto; display: grid; place-items: center; border-radius: 50%; color: #fff; font-size: 10px; }
+.mono-player-card.haya .mono-player-avatar { background: var(--mono-rose); }
+.mono-player-card.cc .mono-player-avatar { background: var(--mono-sage); }
+.mono-player-card.codex .mono-player-avatar { background: var(--mono-indigo); }
+.mono-typing-dot { width: 5px; height: 5px; flex: 0 0 auto; border-radius: 50%; background: currentColor; animation: monoLivePulse 1s ease infinite; }
+.mono-player-card.haya .mono-typing-dot { color: var(--mono-rose); }
+.mono-player-card.cc .mono-typing-dot { color: var(--mono-sage); }
+.mono-player-card.codex .mono-typing-dot { color: var(--mono-indigo); }
+.mono-player-provider, .mono-player-identity { overflow: hidden; color: var(--mono-faint); font-size: 10px; letter-spacing: .5px; white-space: nowrap; text-overflow: ellipsis; }
+.mono-player-identity { color: var(--mono-muted); }
+.mono-player-stat-row { display: flex; align-items: center; gap: 5px; margin-top: 1px; }
+.mono-player-coins { color: var(--mono-deep); font: 14px 'Bodoni Moda', serif; }
+.mono-player-status { max-width: 100%; overflow: hidden; padding: 2px 8px; border-radius: 999px; background: var(--mono-card-2); color: var(--mono-faint); font-size: 10px; white-space: nowrap; text-overflow: ellipsis; }
+.mono-player-card.active .mono-player-status { background: var(--mono-rose-bg); color: var(--mono-deep); }
+
+.mono-board-card { padding: 12px; border-radius: 22px; background: var(--mono-card); box-shadow: 0 10px 30px var(--mono-shadow); }
+.mono-board-grid { position: relative; display: grid; grid-template-columns: repeat(8, minmax(0, 1fr)); grid-template-rows: repeat(4, minmax(0, 1fr)); gap: 4px; aspect-ratio: 2.3 / 1; }
+.mono-board-tile { position: relative; min-width: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; overflow: hidden; border: 1.5px solid transparent; border-radius: 8px; background: var(--mono-card-2); transition: border-color .25s, background .25s; }
+.mono-board-tile.start { background: var(--mono-sage-bg); color: var(--mono-ok); }
+.mono-board-tile.truth { background: var(--mono-rose-bg); color: var(--mono-deep); }
+.mono-board-tile.chance, .mono-board-tile.shop { background: var(--mono-amber-bg); color: var(--mono-gold); }
+.mono-board-tile.mystery { background: var(--mono-indigo-bg); color: var(--mono-indigo); }
+.mono-board-tile.jail { background: rgba(74, 63, 60, .12); color: var(--mono-ink); }
+.mono-board-tile.task { color: var(--mono-rose); }
+.mono-board-tile.occupied { border-color: var(--mono-rose); }
+.mono-tile-symbol { font-size: 10px; line-height: 1.15; }
+.mono-tile-name { color: var(--mono-ink-2); font-size: 8px; letter-spacing: .4px; white-space: nowrap; }
+.mono-tile-tokens { position: absolute; right: 0; bottom: 2px; left: 0; display: flex; justify-content: center; gap: 2px; }
+.mono-token { width: 7px; height: 7px; border: 1px solid #fff; border-radius: 50%; box-shadow: 0 2px 5px var(--mono-shadow-2); animation: monoTokenHop 1.6s ease infinite; }
+.mono-token.haya { background: var(--mono-rose); }
+.mono-token.cc { background: var(--mono-sage); animation-delay: .25s; }
+.mono-board-center { grid-area: 2 / 2 / 4 / 8; margin: 2px; padding: 0 14px; display: flex; align-items: center; justify-content: center; gap: 16px; border-radius: 14px; background: var(--mono-card-2); }
+.mono-dice { width: 56px; height: 56px; flex: 0 0 auto; display: grid; place-items: center; padding: 0; border-radius: 15px; background: var(--mono-card-2); color: var(--mono-ghost); font: 600 26px 'Bodoni Moda', serif; cursor: default; transition: box-shadow .2s, background .2s, transform .15s; }
+.mono-dice.ready { background: var(--mono-card); color: var(--mono-deep); box-shadow: 0 0 0 1.5px var(--mono-rose), 0 10px 22px var(--mono-shadow-2); cursor: pointer; }
+.mono-dice.ready:active { transform: scale(.92); }
+.mono-dice.rolling { animation: monoDiceShake .35s ease infinite; }
+.mono-turn-copy { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.mono-turn-copy > div { display: flex; align-items: center; gap: 6px; }
+.mono-turn-copy strong { color: var(--mono-ink-2); font-size: 13px; font-weight: 500; letter-spacing: 1px; }
+.mono-turn-copy span { display: -webkit-box; overflow: hidden; color: var(--mono-faint); font-size: 10.5px; line-height: 1.45; letter-spacing: .4px; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+.mono-turn-copy small { color: var(--mono-ghost); font-size: 9.5px; letter-spacing: .4px; }
+.mono-turn-dot { width: 8px; height: 8px; flex: 0 0 auto; border-radius: 50%; background: var(--mono-ghost); }
+.mono-turn-dot.haya { background: var(--mono-rose); }
+.mono-turn-dot.cc { background: var(--mono-sage); }
+
+.mono-pending-wrap { display: flex; justify-content: center; perspective: 900px; }
+.mono-pending-card { position: relative; width: 100%; max-width: 430px; min-height: 158px; padding: 16px 44px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; border: 1.5px solid var(--mono-rose); border-radius: 16px; background: var(--mono-card); box-shadow: 0 14px 34px var(--mono-shadow-2); text-align: center; animation: monoCardDraw .45s cubic-bezier(.22, 1, .36, 1); }
+.mono-pending-wrap.duel .mono-pending-card { border-color: var(--mono-error); }
+.mono-pending-wrap.toll .mono-pending-card { border-color: var(--mono-muted); }
+.mono-pending-wrap.super .mono-pending-card { border-color: var(--mono-gold); }
+.mono-card-corner { position: absolute; display: flex; flex-direction: column; align-items: center; gap: 1px; color: var(--mono-rose); }
+.mono-card-corner.top { top: 10px; left: 12px; }
+.mono-card-corner.bottom { right: 12px; bottom: 10px; transform: rotate(180deg); }
+.mono-card-corner span { font-size: 15px; line-height: 1; }
+.mono-card-corner b { font: 600 11px 'Bodoni Moda', serif; }
+.mono-hourglass { position: absolute; top: 10px; right: 12px; color: var(--mono-ghost); font-size: 11px; animation: monoHourglass 20s linear infinite; }
+.mono-pending-heading { display: flex; align-items: center; justify-content: center; flex-wrap: wrap; gap: 8px; }
+.mono-pending-heading strong { padding: 3px 12px; border-radius: 999px; background: var(--mono-rose-bg); color: var(--mono-deep); font-size: 12.5px; letter-spacing: 1.5px; }
+.mono-pending-heading span { color: var(--mono-ghost); font: 9.5px 'Bodoni Moda', serif; letter-spacing: 1.5px; }
+.mono-pending-card p { margin: 0; color: var(--mono-ink); font-size: 14.5px; line-height: 1.75; text-wrap: pretty; }
+.mono-pending-card > small { color: var(--mono-faint); font-size: 10.5px; }
+.mono-pending-card > em { padding: 2px 8px; border-radius: 999px; background: var(--mono-sage-bg); color: var(--mono-ok); font-size: 10px; font-style: normal; }
+
+.mono-action-dock, .mono-hand-dock { border-radius: 18px; background: var(--mono-card); box-shadow: 0 10px 30px var(--mono-shadow); }
+.mono-action-dock { padding: 14px 16px; display: flex; flex-direction: column; gap: 10px; }
+.mono-dock-heading { display: flex; align-items: center; gap: 8px; }
+.mono-dock-heading > span, .mono-hand-toggle > span { color: var(--mono-ghost); font: 10px 'Bodoni Moda', serif; letter-spacing: 2.5px; }
+.mono-dock-heading em { margin-left: auto; padding: 3px 10px; border-radius: 999px; background: var(--mono-card-2); color: var(--mono-faint); font-size: 10.5px; font-style: normal; letter-spacing: 1px; }
+.mono-action-dock.status-idle .mono-dock-heading em { background: var(--mono-sage-bg); color: var(--mono-ok); }
+.mono-action-dock.status-paused .mono-dock-heading em, .mono-action-dock.status-engine_down .mono-dock-heading em { background: var(--mono-amber-bg); color: var(--mono-gold); }
+.mono-action-dock p { margin: 0; color: var(--mono-muted); font-size: 12.5px; line-height: 1.6; }
+.mono-dock-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.mono-dock-actions button { flex: 1 1 auto; min-width: 130px; padding: 11px 14px; display: flex; flex-direction: column; align-items: center; border-radius: 15px; background: var(--mono-card-2); color: var(--mono-ink-2); cursor: pointer; transition: transform .15s, opacity .15s, box-shadow .15s; }
+.mono-dock-actions button:hover:not(:disabled) { transform: translateY(-2px); }
+.mono-dock-actions button.primary { background: var(--mono-deep); color: #fbf3f0; box-shadow: 0 10px 24px var(--mono-shadow-2); }
+.mono-dock-actions button.choice { background: var(--mono-rose-bg); color: var(--mono-deep); box-shadow: inset 0 0 0 1px var(--mono-rose); }
+.mono-dock-actions button:disabled { opacity: .45; cursor: default; }
+.mono-dock-actions strong { font-size: 13.5px; font-weight: 500; letter-spacing: 1px; white-space: nowrap; }
+.mono-dock-actions small { margin-top: 2px; font-size: 10px; opacity: .72; }
+
+.mono-hand-dock { overflow: hidden; }
+.mono-hand-toggle { width: 100%; padding: 13px 16px; display: flex; align-items: center; gap: 8px; background: transparent; color: var(--mono-ink); cursor: pointer; text-align: left; }
+.mono-hand-toggle strong { color: var(--mono-ink-2); font-size: 12px; font-weight: 400; letter-spacing: 1px; }
+.mono-hand-toggle i { margin-left: auto; color: var(--mono-ghost); font-style: normal; transition: transform .2s; }
+.mono-hand-toggle i.open { transform: rotate(180deg); }
+.mono-hand-content { margin: 0 16px; padding: 12px 0 15px; display: flex; flex-direction: column; gap: 10px; border-top: 1px solid var(--mono-line); animation: monoFadeIn .2s ease; }
+.mono-hand-scroll { padding: 6px 2px 4px; display: flex; gap: 10px; overflow-x: auto; perspective: 900px; }
+.mono-playing-card, .mono-empty-card { width: 132px; height: 176px; flex: 0 0 auto; border-radius: 13px; }
+.mono-playing-card { position: relative; padding: 10px 8px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; border: 1.5px solid var(--mono-rose); background: var(--mono-card); box-shadow: 0 8px 20px var(--mono-shadow); text-align: center; animation: monoCardDraw .4s cubic-bezier(.22, 1, .36, 1); }
+.mono-playing-card.identity-card { border-color: var(--mono-gold); }
+.mono-card-index { position: absolute; top: 7px; left: 9px; color: var(--mono-rose); font: 600 10px 'Bodoni Moda', serif; }
+.identity-card .mono-card-index { color: var(--mono-gold); }
+.mono-playing-card-copy { display: flex; flex-direction: column; align-items: center; gap: 5px; }
+.mono-playing-card-copy strong { max-width: 100%; overflow: hidden; font-size: 13.5px; letter-spacing: 1px; white-space: nowrap; text-overflow: ellipsis; }
+.mono-playing-card-copy small { color: var(--mono-ghost); font: 8.5px 'Bodoni Moda', serif; letter-spacing: 2px; }
+.mono-playing-card-copy p { margin: 0; display: -webkit-box; overflow: hidden; color: var(--mono-muted); font-size: 10px; line-height: 1.5; -webkit-line-clamp: 4; -webkit-box-orient: vertical; }
+.mono-card-buttons { display: flex; gap: 5px; }
+.mono-card-buttons button { padding: 5px 13px; border-radius: 999px; background: var(--mono-card-2); color: var(--mono-muted); font-size: 11px; cursor: pointer; }
+.mono-card-buttons button.active, .mono-card-buttons button:first-child:not(:disabled):hover { background: var(--mono-deep); color: #fbf3f0; }
+.mono-card-buttons button:disabled { opacity: .45; }
+.mono-card-text-action { max-width: 112px; padding: 3px 6px; background: transparent; color: var(--mono-gold); font-size: 9px; line-height: 1.3; cursor: pointer; }
+.mono-empty-card { padding: 12px; display: grid; place-items: center; border: 1.5px dashed var(--mono-ghost); color: var(--mono-ghost); font-size: 10.5px; line-height: 1.6; text-align: center; }
+.mono-skill-panel { display: flex; flex-direction: column; gap: 8px; }
+.mono-skill-quick { display: flex; flex-wrap: wrap; gap: 6px; }
+.mono-skill-quick button { padding: 6px 10px; border-radius: 999px; background: var(--mono-card-2); color: var(--mono-muted); font-size: 10px; cursor: pointer; }
+.mono-skill-quick button:hover:not(:disabled) { background: var(--mono-rose-bg); color: var(--mono-deep); }
+.mono-skill-quick button:disabled { opacity: .4; }
+.mono-skill-input { display: flex; gap: 7px; }
+.mono-skill-input input { min-width: 0; flex: 1; padding: 8px 12px; border: 0; border-radius: 999px; outline: 0; background: var(--mono-card-2); color: var(--mono-ink); font-size: 11px; }
+.mono-skill-input button { padding: 7px 13px; border-radius: 999px; background: var(--mono-deep); color: #fbf3f0; font-size: 11px; }
+.mono-skill-input button:disabled { opacity: .45; }
+.mono-hand-note { color: var(--mono-ghost); font-size: 9.5px; line-height: 1.5; text-align: center; }
+.mono-room-fineprint { display: flex; align-items: center; justify-content: center; flex-wrap: wrap; gap: 6px; padding: 4px 8px; color: var(--mono-ghost); font: 9px 'Bodoni Moda', 'Noto Serif SC', serif; letter-spacing: .4px; }
+.mono-room-fineprint i { width: 3px; height: 3px; border-radius: 50%; background: var(--mono-line); }
+
+.mono-chat { position: relative; width: 390px; height: 100%; flex: 0 0 auto; border-left: 1px solid var(--mono-line); }
+.mono-chat-panel { height: 100%; display: flex; flex-direction: column; overflow: hidden; background: var(--mono-card); box-shadow: 0 -10px 40px var(--mono-shadow-2); }
+.mono-chat-header { position: relative; flex: 0 0 auto; padding: 10px 16px 8px; display: flex; align-items: center; gap: 8px; border-bottom: 1px solid var(--mono-line); }
+.mono-chat-header > span { color: var(--mono-ghost); font: 10px 'Bodoni Moda', serif; letter-spacing: 2.5px; }
+.mono-chat-header > strong { color: var(--mono-ink-2); font-size: 12px; font-weight: 400; letter-spacing: 1px; }
+.mono-chat-header > button { margin-left: auto; padding: 5px 12px; border-radius: 999px; background: var(--mono-rose-bg); color: var(--mono-deep); font-size: 11px; letter-spacing: 1px; cursor: pointer; }
+.mono-chat-header > button:disabled { opacity: .4; }
+.mono-chat-handle { display: none; }
+.mono-chat-messages { flex: 1 1 auto; min-height: 0; padding: 12px 14px; display: flex; flex-direction: column; gap: 11px; overflow-y: auto; }
+.mono-system-message { padding: 1px 4px; display: flex; align-items: center; gap: 10px; }
+.mono-system-message i { height: 1px; flex: 1; background: var(--mono-amber-bg); }
+.mono-system-message span { max-width: 82%; color: var(--mono-gold); font-size: 10.5px; line-height: 1.6; text-align: center; }
+.mono-chat-message { display: flex; align-items: flex-start; gap: 8px; }
+.mono-chat-message.mine { flex-direction: row-reverse; align-items: flex-end; }
+.mono-chat-avatar { width: 24px; height: 24px; flex: 0 0 auto; margin-top: 2px; display: grid; place-items: center; border-radius: 50%; background: var(--mono-sage); color: #fff; font-size: 10px; }
+.mono-chat-message.codex .mono-chat-avatar { background: var(--mono-indigo); }
+.mono-message-body { min-width: 0; max-width: 85%; display: flex; flex-direction: column; gap: 3px; }
+.mono-message-author { display: flex; align-items: baseline; flex-wrap: wrap; gap: 6px; }
+.mono-message-author strong { color: var(--mono-sage); font-size: 11.5px; letter-spacing: 1px; }
+.mono-chat-message.codex .mono-message-author strong { color: var(--mono-indigo); }
+.mono-message-author small { color: var(--mono-ghost); font-size: 9px; letter-spacing: .4px; }
+.mono-message-body p { margin: 0; padding: 9px 13px; border-radius: 5px 15px 15px 15px; background: var(--mono-card-2); color: var(--mono-ink); font-size: 13.5px; line-height: 1.7; white-space: pre-wrap; overflow-wrap: anywhere; }
+.mono-chat-message.mine .mono-message-body p { border-radius: 15px 15px 5px 15px; background: var(--mono-bubble); box-shadow: 0 4px 12px var(--mono-shadow); }
+.mono-chat-message time { align-self: flex-end; flex: 0 0 auto; color: var(--mono-ghost); font: 9.5px 'Bodoni Moda', serif; letter-spacing: 1px; }
+.mono-typing { display: inline-flex; gap: 4px; padding: 3px 1px; }
+.mono-typing i { width: 5px; height: 5px; border-radius: 50%; background: var(--mono-faint); animation: monoTyping 1.2s ease infinite; }
+.mono-typing i:nth-child(2) { animation-delay: .2s; }
+.mono-typing i:nth-child(3) { animation-delay: .4s; }
+.mono-chat-composer { flex: 0 0 auto; padding: 9px 12px calc(11px + env(safe-area-inset-bottom, 0px)); display: flex; align-items: center; gap: 7px; border-top: 1px solid var(--mono-line); }
+.mono-chat-composer input { min-width: 0; flex: 1; padding: 10px 14px; border: 0; border-radius: 999px; outline: 0; background: var(--mono-card-2); color: var(--mono-ink); font-size: 13px; }
+.mono-chat-composer input::placeholder { color: var(--mono-ghost); }
+.mono-target-button { padding: 7px 9px; border-radius: 999px; background: var(--mono-indigo-bg); color: var(--mono-indigo); font-size: 9.5px; cursor: pointer; }
+.mono-send-button { width: 38px; height: 38px; flex: 0 0 auto; display: grid; place-items: center; border-radius: 50%; background: var(--mono-deep); color: #fbf3f0; font-size: 18px; box-shadow: 0 6px 14px var(--mono-shadow-2); cursor: pointer; }
+.mono-send-button:disabled { opacity: .4; }
+
+.mono-setup-layer { position: fixed; inset: 0; z-index: 100; }
+.mono-setup-backdrop { position: absolute; inset: 0; width: 100%; background: rgba(40, 28, 26, .35); animation: monoFadeIn .2s ease; }
+.mono-setup-sheet { position: absolute; right: 0; bottom: 0; left: 0; width: min(540px, 100%); max-height: 84dvh; margin: 0 auto; display: flex; flex-direction: column; overflow: hidden; border-radius: 26px 26px 0 0; background: var(--mono-card); box-shadow: 0 -20px 60px var(--mono-shadow-2); animation: monoSheetUp .28s ease; }
+.mono-setup-sheet > header { position: relative; flex: 0 0 auto; padding: 16px 22px 12px; display: flex; align-items: center; gap: 10px; border-bottom: 1px solid var(--mono-line); }
+.mono-setup-sheet > header > i { position: absolute; top: 8px; left: 50%; width: 36px; height: 4px; transform: translateX(-50%); border-radius: 999px; background: var(--mono-line); }
+.mono-setup-sheet > header > span { color: var(--mono-ghost); font: 10px 'Bodoni Moda', serif; letter-spacing: 3px; }
+.mono-setup-sheet > header > strong { font-size: 14.5px; letter-spacing: 1px; }
+.mono-setup-sheet > header > button { margin-left: auto; padding: 2px 6px; background: transparent; color: var(--mono-ghost); font-size: 18px; cursor: pointer; }
+.mono-setup-scroll { flex: 1 1 auto; min-height: 0; padding: 16px 22px calc(20px + env(safe-area-inset-bottom, 0px)); display: flex; flex-direction: column; gap: 16px; overflow-y: auto; }
+.mono-setup-field { display: flex; flex-direction: column; gap: 7px; }
+.mono-setup-field > span { color: var(--mono-ink-2); font-size: 12.5px; letter-spacing: 1px; }
+.mono-seat-summary, .mono-setup-locked { padding: 10px 14px; border-radius: 13px; background: var(--mono-card-2); color: var(--mono-muted); font-size: 12px; line-height: 1.7; }
+.mono-seat-summary b:nth-of-type(1) { color: var(--mono-rose); }
+.mono-seat-summary b:nth-of-type(2) { color: var(--mono-sage); }
+.mono-seat-summary b:nth-of-type(3) { color: var(--mono-indigo); }
+.mono-setup-locked { background: var(--mono-amber-bg); color: var(--mono-gold); }
+.mono-segment { padding: 3px; display: flex; gap: 2px; border-radius: 999px; background: var(--mono-card-2); }
+.mono-segment button { min-width: 0; flex: 1; padding: 8px 4px; border-radius: 999px; background: transparent; color: var(--mono-muted); font-size: 12px; cursor: pointer; }
+.mono-segment button.active { background: var(--mono-card); color: var(--mono-deep); box-shadow: 0 4px 10px var(--mono-shadow); }
+.mono-range-field > span { display: flex; justify-content: space-between; }
+.mono-range-field > span b { color: var(--mono-rose); font: 12px 'Bodoni Moda', serif; }
+.mono-range-field input { width: 100%; accent-color: var(--mono-rose); }
+.mono-redline-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; }
+.mono-redline-grid button { min-width: 0; padding: 7px 8px; display: flex; flex-direction: column; gap: 1px; border: 1px solid transparent; border-radius: 12px; background: var(--mono-card-2); color: var(--mono-muted); cursor: pointer; }
+.mono-redline-grid button.active { border-color: var(--mono-rose); background: var(--mono-rose-bg); color: var(--mono-deep); }
+.mono-redline-grid strong { font-size: 11.5px; font-weight: 500; }
+.mono-redline-grid small { overflow: hidden; color: var(--mono-ghost); font: 8.5px 'Bodoni Moda', serif; text-overflow: ellipsis; }
+.mono-toggle-list { display: flex; flex-direction: column; }
+.mono-setup-toggle-row { padding: 9px 2px; display: flex; align-items: center; gap: 10px; }
+.mono-setup-toggle-row > span { min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.mono-setup-toggle-row strong { color: var(--mono-ink); font-size: 13px; font-weight: 400; }
+.mono-setup-toggle-row small { color: var(--mono-faint); font-size: 10.5px; }
+.mono-setup-toggle-row > button { position: relative; width: 40px; height: 23px; margin-left: auto; flex: 0 0 auto; border-radius: 999px; background: var(--mono-line); cursor: pointer; transition: background .2s; }
+.mono-setup-toggle-row > button i { position: absolute; top: 2.5px; left: 3px; width: 18px; height: 18px; border-radius: 50%; background: #fff; box-shadow: 0 2px 6px rgba(0, 0, 0, .18); transition: left .2s; }
+.mono-setup-toggle-row > button.on { background: var(--mono-rose); }
+.mono-setup-toggle-row > button.on i { left: 19px; }
+.mono-safe-word-note, .mono-history-note, .mono-intensity-note { padding: 11px 14px; border-radius: 13px; background: var(--mono-amber-bg); color: var(--mono-ink-2); font-size: 12px; line-height: 1.6; }
+.mono-safe-word-note b { color: var(--mono-gold); font-family: 'Bodoni Moda', serif; }
+.mono-setup-primary { width: 100%; padding: 13px; border-radius: 16px; background: var(--mono-deep); color: #fbf3f0; font-size: 14px; letter-spacing: 2px; box-shadow: 0 10px 24px var(--mono-shadow-2); cursor: pointer; }
+.mono-setup-primary:disabled { opacity: .55; }
+.mono-active-limits-heading { padding: 4px 0 2px; display: flex; flex-direction: column; gap: 4px; text-align: center; }
+.mono-active-limits-heading span { color: var(--mono-ghost); font: 10px 'Bodoni Moda', serif; letter-spacing: 3px; }
+.mono-active-limits-heading strong { font-size: 14px; letter-spacing: 1px; }
+.mono-active-limits { padding: 14px 16px; display: flex; flex-direction: column; gap: 8px; border-radius: 16px; background: var(--mono-card-2); }
+.mono-active-limits p { margin: 0; color: var(--mono-ink); font-size: 12.5px; line-height: 1.7; overflow-wrap: anywhere; }
+.mono-active-limits.loading p { color: var(--mono-faint); animation: monoLivePulse 1.2s ease infinite; }
+.mono-intensity-note { background: var(--mono-rose-bg); color: var(--mono-deep); }
+.mono-history-note { color: var(--mono-gold); }
+.mono-limit-actions { display: flex; gap: 8px; }
+.mono-limit-actions button { flex: 1; padding: 12px; border-radius: 16px; background: var(--mono-card-2); color: var(--mono-muted); font-size: 13px; cursor: pointer; }
+.mono-limit-actions button.primary { flex: 2; background: var(--mono-deep); color: #fbf3f0; letter-spacing: 1px; box-shadow: 0 10px 24px var(--mono-shadow-2); }
+.mono-limit-actions button:disabled { opacity: .42; }
+
+.mono-error-toast { position: fixed; z-index: 130; right: 20px; bottom: 24px; max-width: min(440px, calc(100vw - 40px)); padding: 11px 16px; display: flex; gap: 12px; border-radius: 16px; background: rgba(74, 63, 60, .94); color: #f7f1ee; font-size: 12px; line-height: 1.5; box-shadow: 0 12px 30px rgba(0, 0, 0, .2); cursor: pointer; animation: monoFadeIn .2s ease; }
+.mono-error-toast span { margin-left: auto; color: var(--mono-ghost); }
+.mono-loading { width: 100%; max-width: none !important; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; background: #f7f1ee; color: #6b5a55; font-family: 'Noto Serif SC', serif; }
+.mono-loading-dice { width: 62px; height: 62px; display: grid; place-items: center; border-radius: 18px; background: #fff; color: #9c3b4a; font: 30px 'Bodoni Moda', serif; box-shadow: 0 10px 30px rgba(183, 110, 121, .18); animation: monoDiceShake .7s ease infinite; }
+.mono-loading strong { font-size: 14px; font-weight: 500; letter-spacing: 1px; }
+.mono-loading button { padding: 9px 16px; border: 0; border-radius: 999px; background: #9c3b4a; color: #fff; }
+
+@media (max-width: 979px) {
+  .mono-room-root { display: block; }
+  .mono-game-column { width: 100%; }
+  .mono-game-scroll { padding-bottom: calc(206px + env(safe-area-inset-bottom, 0px)); }
+  .mono-chat { position: fixed; z-index: 60; right: 0; bottom: 0; left: 0; width: 100%; max-width: 560px; height: 206px; margin: 0 auto; border-left: 0; transition: height .25s ease; }
+  .mono-chat.open { height: 70dvh; }
+  .mono-chat-panel { border-radius: 22px 22px 0 0; }
+  .mono-chat-header { padding-top: 13px; cursor: pointer; }
+  .mono-chat-handle { position: absolute; top: 6px; left: 50%; width: 36px; height: 4px; display: block; transform: translateX(-50%); border-radius: 999px; background: var(--mono-line); }
+  .mono-error-toast { bottom: 218px; }
+}
+
+@media (max-width: 560px) {
+  .mono-room-header-inner { padding-right: 10px; padding-left: 10px; gap: 7px; }
+  .mono-leave-button { display: grid; width: 28px; height: 34px; }
+  .mono-room-mark { width: 34px; height: 34px; }
+  .mono-room-title-line { font-size: 14px; }
+  .mono-room-subtitle { max-width: 150px; font-size: 9.5px; }
+  .mono-round-chip { padding: 4px 8px; font-size: 10px; }
+  .mono-icon-button { width: 30px; height: 30px; }
+  .mono-game-content { padding: 12px 10px 22px; gap: 10px; }
+  .mono-player-rail { gap: 6px; }
+  .mono-player-card { padding: 8px; border-radius: 14px; }
+  .mono-player-name-row { gap: 4px; }
+  .mono-player-name-row strong { font-size: 12px; }
+  .mono-player-avatar { width: 18px; height: 18px; }
+  .mono-player-provider, .mono-player-identity { font-size: 8.5px; }
+  .mono-player-coins { font-size: 12px; }
+  .mono-player-status { padding: 2px 5px; font-size: 8.5px; }
+  .mono-board-card { padding: 8px; border-radius: 18px; }
+  .mono-board-grid { gap: 3px; aspect-ratio: 2.15 / 1; }
+  .mono-board-tile { border-radius: 6px; }
+  .mono-tile-symbol { font-size: 9px; }
+  .mono-tile-name { font-size: 7px; letter-spacing: 0; }
+  .mono-board-center { gap: 10px; padding: 0 9px; }
+  .mono-dice { width: 48px; height: 48px; border-radius: 13px; font-size: 23px; }
+  .mono-turn-copy strong { font-size: 11.5px; }
+  .mono-turn-copy span { font-size: 9px; -webkit-line-clamp: 1; }
+  .mono-turn-copy small { font-size: 8px; }
+  .mono-pending-card { min-height: 144px; padding: 14px 38px; }
+  .mono-pending-card p { font-size: 13px; line-height: 1.65; }
+  .mono-dock-actions { flex-direction: column; }
+  .mono-dock-actions button { width: 100%; min-width: 0; }
+  .mono-redline-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+
+@media (max-width: 360px) {
+  .mono-room-mark { display: none; }
+  .mono-room-subtitle { max-width: 120px; }
+  .mono-round-chip { display: none; }
+  .mono-player-card { padding: 7px 6px; }
+  .mono-player-identity { display: none; }
+  .mono-chat-header > span { display: none; }
+}
+
+@keyframes monoFadeIn { from { opacity: 0; } to { opacity: 1; } }
+@keyframes monoSheetUp { from { transform: translateY(100%); } to { transform: translateY(0); } }
+@keyframes monoDiceShake { 0%, 100% { transform: rotate(0); } 25% { transform: rotate(-9deg) scale(1.06); } 75% { transform: rotate(9deg) scale(1.06); } }
+@keyframes monoCardDraw { from { opacity: 0; transform: translateY(-26px) rotateX(28deg) scale(.72); filter: blur(6px); } to { opacity: 1; transform: none; filter: none; } }
+@keyframes monoHourglass { to { transform: rotate(360deg); } }
+@keyframes monoTokenHop { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-3px); } }
+@keyframes monoTyping { 0%, 60%, 100% { opacity: .25; transform: translateY(0); } 30% { opacity: 1; transform: translateY(-2px); } }
+@keyframes monoLivePulse { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
+
+@media (prefers-reduced-motion: reduce) {
+  .mono-room-root *, .mono-room-root *::before, .mono-room-root *::after, .mono-loading * { animation: none !important; transition: none !important; }
+}

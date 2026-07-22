@@ -15,12 +15,13 @@ import { MomentsScreen } from './screens/MomentsScreen';
 import { ContactsScreen } from './screens/ContactsScreen';
 import { CodexChatScreen } from './screens/CodexChatScreen';
 import { ProfileScreen } from './screens/ProfileScreen';
+import { MonopolyRoomScreen } from './screens/MonopolyRoomScreen';
 
 const FULLSCREEN_PATHS = new Set(['/chat', '/settings', '/group-chat', '/moments', '/contacts', '/codex-chat', '/profile']);
 
 function Shell() {
   const location = useLocation();
-  const fullscreen = FULLSCREEN_PATHS.has(location.pathname);
+  const fullscreen = FULLSCREEN_PATHS.has(location.pathname) || location.pathname.startsWith('/monopoly/');
 
   useEffect(() => {
     document.documentElement.classList.toggle('dash-fullscreen', fullscreen);
@@ -42,6 +43,7 @@ function Shell() {
       <Route path="/contacts" element={<ContactsScreen />} />
       <Route path="/codex-chat" element={<CodexChatScreen />} />
       <Route path="/profile" element={<ProfileScreen />} />
+      <Route path="/monopoly/:roomId" element={<MonopolyRoomScreen />} />
     </Routes>
   );
 
