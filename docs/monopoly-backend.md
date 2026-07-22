@@ -38,16 +38,16 @@ MONOPOLY_SAFE_WORD=404
 
 - `/api/monopoly/*` 全部复用 `moments_auth` 的 owner cookie/Bearer 鉴权；生产必须配置 `MOMENTS_OWNER_TOKEN`，未鉴权请求返回 401，未配置返回 503。
 - `POST /api/monopoly/rooms` 建房。
-- `POST /api/monopoly/rooms/:id/setup` 强制注入房间独立 `pair_code` 和 `setup_confirmed`，并先从 `/help` 读取当前 `rules_ack` 再调用 `/new_game`。`p1_name/p2_name` 会持久化为内部 actor 到真实引擎玩家名的映射。
+- `POST /api/monopoly/rooms/:id/setup` 注入关系级稳定 `pair_code` 和 `setup_confirmed`，并先从 `/help` 读取当前 `rules_ack` 再调用 `/new_game`。同一组玩家跨房间复用相同 pair code，换掉的卡和跨局去重才会持续生效；`p1_name/p2_name` 会持久化为内部 actor 到真实引擎玩家名的映射。
 - `POST /api/monopoly/rooms/:id/actions` 的浏览器调用固定以 `haya` 身份执行；AI 动作只在 5051 内部调度器中产生。
 - `GET /api/monopoly/rooms/:id/stream?after=N` 是唯一公开 SSE；跨 worker 通过 SQLite 恢复。游戏事件使用连续 `event_seq`，`chat.start/delta/done` 和 `agent.status` 走独立、限长的 live 队列，不参与乐观锁，也不进入 AI 的最近游戏事件。
-- 安全词默认是 `404`：整条消息精确为 `404`，或 JSON 显式带 `safeWord:true` 时，才会在通知 AI 前把房间切为 `paused`；包含“HTTP 404”的普通消息不会误触。
+- 安全词默认是 `404`：整条消息精确为 `404`，或 JSON 显式带 `safeWord:true` 时，才会在通知 AI 前把房间切为 `paused`；消息、暂停状态、暂停事件和系统提示在同一房间锁与 SQLite 事务中提交，包含“HTTP 404”的普通消息不会误触。
 
-前端遇到 HTTP/SSE `STALE_ROOM_STATE` 时只刷新快照，不重发。`ENGINE_VALIDATION`（400/422/428）已经写入 `room.error`；`roll` 超时由 `EngineClient` 先查 state，仅在回合标记未变化时补发一次。若回合已经推进但响应丢失，上游 `/state` 只有 `turn/status/board/positions/coins/laps`，无法重建本轮 `task/action_needed/settled`，后端会返回 `ROLL_OUTCOME_UNKNOWN`、清除可能过期的本地悬账并冻结房间，禁止自动 resume 或重掷。
+前端遇到 HTTP/SSE `STALE_ROOM_STATE` 时只刷新快照，不重发。`ENGINE_VALIDATION`（400/422/428）已经写入带 `seq` 的 `room.error`，客户端会同步乐观锁序号。上游没有请求幂等键，而加速卡可能让成功 roll 后仍是同一玩家，因此任何 roll 超时都只允许一次 `/state` 取证，绝不补掷；返回 `ROLL_OUTCOME_UNKNOWN` 并冻结。`swap/use_card/buy_card` 等即时变更同样在模糊超时时返回 `ACTION_OUTCOME_UNKNOWN`。两类错误都保留本地悬账和对账材料，并禁止普通 resume。
 
 已核对的上游字段：`POST /roll/{game_id}` 用 `who` 表示本轮掷骰者、用 `next_turn` 表示下一行动者；`GET /state/{game_id}` 顶层 `turn` 是当前行动者名字。`declare_persona` 的 persona 放在 JSON body `{\"persona\": \"...\"}`，不是 URL path。
 
-即时动作的归属由后端把 `who/guesser` 强制改写为调用者自己的真实引擎名，浏览器不能替 CC 操作。上游源码明确允许 `buy_card` “踩商店格触发，或自己随时调”，`use_card/discard` 与身份事件也按本人手牌/身份校验，因此这些动作不额外强制“当前回合”；`swap/reroll_task` 仍由房间层限制为悬账所属玩家。
+即时动作的归属由后端把 `who/guesser` 强制改写为调用者自己的真实引擎名，浏览器不能替 CC 操作。上游源码明确允许 `buy_card` “踩商店格触发，或自己随时调”，`use_card/discard` 与身份事件也按本人手牌/身份校验，因此这些动作不额外强制“当前回合”；`swap/reroll_task` 仍由房间层限制为悬账所属玩家。即时动作默认保留旧悬账，只有响应明确带来新悬账才替换；当前单悬账架构在已有悬账时拒绝 `extra_task`。
 
 SQLite 初始化时启用 WAL 与 30 秒 busy timeout；AI 文本 delta 最多约每 80ms 合并写入一次，SSE 每 500ms 用一个短连接同时拉取游戏事件、live 事件和消息。生产 Gunicorn 必须使用 threaded worker，并给每个常驻 SSE 连接预留一个线程。
 

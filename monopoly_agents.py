@@ -107,10 +107,11 @@ def _allowed_actions(snapshot: dict, actor: str) -> list[dict]:
         {"action": "reroll_identity"},
         {"action": "reroll_task"},
         {"action": "id_event", "args": {"event": "first_climax|say_banned|no_kiss_2turns"}},
-        {"action": "extra_task"},
         {"action": "guess_mark", "args": {"part": "body part"}},
         {"action": "declare_persona", "args": {"persona": "text"}},
     ])
+    if not pending:
+        actions.append({"action": "extra_task"})
     return actions
 
 
@@ -281,8 +282,11 @@ class MonopolyAgentScheduler:
             started = float(agent_state.get("generating_since") or 0)
             if started and time.time() - started < 600:
                 return False
-            agent_state["generating_since"] = time.time()
-            store.save_agent_state(room_id, agent_state, self.service.db_path)
+            store.patch_agent_state(
+                room_id,
+                {"generating_since": time.time()},
+                db_path=self.service.db_path,
+            )
 
         try:
             ordered = [actor for actor in targets if actor in {"cc", "codex"}]
@@ -296,9 +300,11 @@ class MonopolyAgentScheduler:
             return True
         finally:
             with self.service.locks.hold(room_id):
-                agent_state = store.get_agent_state(room_id, self.service.db_path)
-                agent_state.pop("generating_since", None)
-                store.save_agent_state(room_id, agent_state, self.service.db_path)
+                store.patch_agent_state(
+                    room_id,
+                    remove=("generating_since",),
+                    db_path=self.service.db_path,
+                )
 
     def _generate_one(
         self,
@@ -348,8 +354,11 @@ class MonopolyAgentScheduler:
                         "CC 已切换至：" + " · ".join(str(value) for value in current[1:] if value),
                         db_path=self.service.db_path,
                     )
-                agent_state["cc_provider"] = current
-                store.save_agent_state(room_id, agent_state, self.service.db_path)
+                store.patch_agent_state(
+                    room_id,
+                    {"cc_provider": current},
+                    db_path=self.service.db_path,
+                )
                 for chunk in self.cc.stream(room_id, system, prompt):
                     collect_delta(str(chunk))
             else:
@@ -360,8 +369,11 @@ class MonopolyAgentScheduler:
                     if event == "text":
                         collect_delta(str(data))
                     elif event == "done":
-                        state["codex_thread_id"] = data.get("thread_id")
-                        store.save_agent_state(room_id, state, self.service.db_path)
+                        store.patch_agent_state(
+                            room_id,
+                            {"codex_thread_id": data.get("thread_id")},
+                            db_path=self.service.db_path,
+                        )
             collect_delta("", force=True)
             raw = "".join(chunks).strip()
             text, intent = _parse_output(raw)
@@ -375,6 +387,15 @@ class MonopolyAgentScheduler:
                         room_id, actor, "turn", reply_to,
                         retry_after_swap=False, followup_budget=followup_budget,
                     )
+                return
+            if self.service.snapshot(room_id)["room"]["status"] == RoomStatus.PAUSED.value:
+                _live_event(
+                    room_id,
+                    "chat_done",
+                    actor,
+                    {"discarded": True, "reason": "game_paused"},
+                    self.service.db_path,
+                )
                 return
             saved = self.service.post_message(room_id, author=actor, content=text, reply_to=reply_to)
             message = saved["message"]
@@ -394,6 +415,16 @@ class MonopolyAgentScheduler:
                         retry_after_swap=retry_after_swap,
                         followup_budget=followup_budget - 1,
                     )
+        except RoomError as exc:
+            collect_delta("", force=True)
+            reason = "game_paused" if exc.code == "GAME_PAUSED" else "generation_failed"
+            _live_event(
+                room_id,
+                "chat_done",
+                actor,
+                {"discarded": True, "reason": reason},
+                self.service.db_path,
+            )
         except Exception as exc:
             collect_delta("", force=True)
             _live_event(room_id, "chat_done", actor, {"discarded": True, "reason": "generation_failed"}, self.service.db_path)

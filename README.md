@@ -18,7 +18,7 @@ HayaGarden 是部署在个人 VPS 上的 React 仪表盘与 Flask 服务集合�
 
 | 文件 | 职责 |
 | --- | --- |
-| `monopoly_engine.py` | 引擎 REST 客户端、完整动作覆盖、roll 超时对账与不确定结果冻结 |
+| `monopoly_engine.py` | 引擎 REST 客户端、完整动作覆盖、所有变更请求的不确定结果冻结 |
 | `monopoly_rooms.py` | 房间状态机、悬账、跨进程锁、真实玩家名映射、精确安全词 |
 | `monopoly_store.py` | 房间、游戏事件、临时 live 事件、消息持久化与 WAL 并发读取 |
 | `monopoly_routes.py` | owner 鉴权保护的 `/api/monopoly/rooms...` 与单一 SSE |
@@ -43,7 +43,7 @@ pnpm run build
 
 引擎必须只监听 loopback，并将存档目录纳入备份。systemd 模板、环境变量、接口说明和上线冒烟步骤见 [`docs/monopoly-backend.md`](docs/monopoly-backend.md)。整体服务关系见 [`ARCHITECTURE.md`](ARCHITECTURE.md)。
 
-当前适配器按上游真实契约读取 `/roll` 的 `next_turn` 和 `/state` 的 `turn`，并在开局前从 `/help` 获取当前 `rules_ack`。安全词默认是 `404`，只有整条消息（或显式 `safeWord` 字段）命中才暂停；“HTTP 404”不会误停。若 roll 已生效但响应丢失，由于上游 `/state` 不返回本轮事件和悬账，房间会冻结并要求人工对账，绝不会猜成 `IDLE` 或再次掷骰。
+当前适配器按上游真实契约读取 `/roll` 的 `next_turn` 和 `/state` 的 `turn`，并在开局前从 `/help` 获取当前 `rules_ack`。安全词默认是 `404`，只有整条消息（或显式 `safeWord` 字段）命中才暂停；“HTTP 404”不会误停。任何可能改变棋盘的请求一旦响应丢失，房间都会保留本地悬账、冻结并要求人工对账；上游没有幂等键前，后端绝不会自动重发或普通恢复。
 
 聊天流式 `chat.start/delta/done` 使用独立 live 队列，不递增游戏 `event_seq`，所以 AI 打字不会让操作按钮持续收到 `STALE_ROOM_STATE`，也不会污染 AI 的最近游戏事件。网络异常只更新线路状态并允许稍后重试；只有明确内容拒绝才消耗 swap/skip。
 

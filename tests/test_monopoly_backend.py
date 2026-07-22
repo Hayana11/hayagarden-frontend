@@ -1,11 +1,19 @@
+import json
 import os
 import sqlite3
 import tempfile
 import unittest
+from unittest.mock import patch
 
-from monopoly_engine import EngineClient, EngineReply, EngineUnavailable, EngineValidationError
+from monopoly_engine import (
+    EngineClient,
+    EngineMutationUncertain,
+    EngineReply,
+    EngineUnavailable,
+    EngineValidationError,
+)
 from monopoly_agents import CCAdapter, MonopolyAgentScheduler, _REFUSAL_RE, _allowed_actions, _parse_output
-from monopoly_rooms import MonopolyService, PassthroughTokenCipher, RoomError
+from monopoly_rooms import MonopolyService, PassthroughTokenCipher, RoomError, _pending_display
 import monopoly_store as store
 
 
@@ -279,6 +287,69 @@ class MonopolyBackendTests(unittest.TestCase):
         self.assertEqual([call for call in self.engine.calls if call[0] == "swap"][-1][0], "swap")
         self.assertEqual(self.service.snapshot(self.room_id)["pending"]["kind"], "task")
 
+    def test_failed_card_replacement_preserves_existing_pending(self):
+        self.service.execute(self.room_id, {
+            "action": "roll", "actor": "haya", "expected_seq": self._seq(),
+        })
+        original = self.service.snapshot(self.room_id)["pending"]
+
+        def no_replacement(action, game_id, **params):
+            self.engine.calls.append((action, game_id, params))
+            return {"task": None, "reason": "no replacement available"}
+
+        self.engine.action = no_replacement
+        for action in ("swap", "reroll_task"):
+            result = self.service.execute(self.room_id, {
+                "action": action,
+                "actor": "haya",
+                "expected_seq": self._seq(),
+            })
+            self.assertEqual(result["pending"], original)
+            self.assertEqual(result["room"]["status"], "task_pending")
+
+    def test_extra_task_is_blocked_while_any_pending_exists(self):
+        self.service.execute(self.room_id, {
+            "action": "roll", "actor": "haya", "expected_seq": self._seq(),
+        })
+        before = len(self.engine.calls)
+        with self.assertRaises(RoomError) as caught:
+            self.service.execute(self.room_id, {
+                "action": "extra_task",
+                "actor": "haya",
+                "expected_seq": self._seq(),
+            })
+        self.assertEqual(caught.exception.code, "MULTIPLE_PENDING_UNSUPPORTED")
+        self.assertEqual(len(self.engine.calls), before)
+        actions = {item["action"] for item in _allowed_actions(self.service.snapshot(self.room_id), "haya")}
+        self.assertNotIn("extra_task", actions)
+
+    def test_ambiguous_immediate_action_freezes_and_preserves_pending(self):
+        self.service.execute(self.room_id, {
+            "action": "roll", "actor": "haya", "expected_seq": self._seq(),
+        })
+        original = self.service.snapshot(self.room_id)["pending"]
+
+        def uncertain_action(action, game_id, **params):
+            raise EngineMutationUncertain(
+                "ENGINE_MUTATION_UNCERTAIN",
+                "timeout",
+                status=503,
+                payload={"action": action, "state": dict(self.engine.current_state)},
+            )
+
+        self.engine.action = uncertain_action
+        with self.assertRaises(RoomError) as caught:
+            self.service.execute(self.room_id, {
+                "action": "swap", "actor": "haya", "expected_seq": self._seq(),
+            })
+        self.assertEqual(caught.exception.code, "ACTION_OUTCOME_UNKNOWN")
+        snapshot = self.service.snapshot(self.room_id)
+        self.assertEqual(snapshot["room"]["status"], "engine_down")
+        self.assertEqual(snapshot["pending"], original)
+        with self.assertRaises(RoomError) as resume_error:
+            self.service.resume(self.room_id, expected_seq=self._seq())
+        self.assertEqual(resume_error.exception.code, "ACTION_OUTCOME_UNKNOWN")
+
     def test_engine_validation_is_persisted_as_room_error(self):
         def invalid_roll(game_id, body):
             raise EngineValidationError(
@@ -312,6 +383,77 @@ class MonopolyBackendTests(unittest.TestCase):
         self.assertEqual(pending["display"]["text"], "task one")
         reloaded = self.service.snapshot(self.room_id)["pending"]
         self.assertEqual(reloaded["display"]["text"], "task one")
+
+    def test_special_pending_display_uses_top_level_task_copy(self):
+        for kind, mechanism_key in (("duel", "duel"), ("toll", "toll"), ("super", "super_task")):
+            display = _pending_display({
+                "task": {"text": f"{kind} actual card"},
+                mechanism_key: {"cost": 3},
+            }, kind)
+            self.assertEqual(display["text"], f"{kind} actual card")
+            self.assertEqual(display["payload"]["task"]["text"], f"{kind} actual card")
+
+    def test_final_result_is_followed_by_fresh_canonical_state(self):
+        self.engine.next_roll = {"who": "哈娅", "next_turn": "CC", "game_over": True}
+
+        def final_result(game_id):
+            self.engine.calls.append(("final_result", game_id))
+            self.engine.current_state = {**self.engine.current_state, "coins": {"哈娅": 99, "CC": 1}}
+            return {"winner": "哈娅", "coins": {"哈娅": 99, "CC": 1}}
+
+        self.engine.final_result = final_result
+        result = self.service.execute(self.room_id, {
+            "action": "roll", "actor": "haya", "expected_seq": self._seq(),
+        })
+        self.assertEqual(result["state"]["coins"], {"哈娅": 99, "CC": 1})
+        self.assertEqual(result["room"]["status"], "finished")
+
+    def test_resume_restores_shop_reminder_and_active_actor(self):
+        with store.transaction(self.db_path) as conn:
+            state = {**self.service.snapshot(self.room_id)["state"], "identity_reminder": {"cc": "remember"}}
+            store.update_room(conn, self.room_id, state_json=json.dumps(state, ensure_ascii=False))
+        self.engine.current_state = {"turn": "CC", "coins": {"哈娅": 10, "CC": 10}}
+        self.engine.shop = lambda game_id: {"CC": {"hand": ["card"]}}
+        self.service.pause(self.room_id, expected_seq=self._seq())
+        result = self.service.resume(self.room_id, expected_seq=self._seq())
+        self.assertEqual(result["state"]["identity_reminder"], {"cc": "remember"})
+        self.assertEqual(result["state"]["shop"], {"CC": {"hand": ["card"]}})
+        self.assertEqual(result["room"]["active_actor"], "cc")
+
+    def test_agent_state_patch_preserves_reconciliation_marker(self):
+        store.patch_agent_state(
+            self.room_id,
+            {"reconciliation_required": {"code": "ROLL_OUTCOME_UNKNOWN"}},
+            db_path=self.db_path,
+        )
+        store.patch_agent_state(
+            self.room_id,
+            {"cc_provider": ["relay", "guagua", "sonnet"]},
+            db_path=self.db_path,
+        )
+        state = store.get_agent_state(self.room_id, self.db_path)
+        self.assertEqual(state["reconciliation_required"]["code"], "ROLL_OUTCOME_UNKNOWN")
+
+    def test_safe_word_pause_is_one_atomic_transaction(self):
+        original_append = store.append_event
+
+        def fail_pause(conn, room_id, event_type, actor, payload):
+            if event_type == "game_paused":
+                raise RuntimeError("injected failure")
+            return original_append(conn, room_id, event_type, actor, payload)
+
+        with patch("monopoly_rooms.store.append_event", side_effect=fail_pause):
+            with self.assertRaises(RuntimeError):
+                self.service.post_message(self.room_id, author="haya", content="404")
+        snapshot = self.service.snapshot(self.room_id)
+        self.assertNotEqual(snapshot["room"]["status"], "paused")
+        self.assertNotIn("404", [message["content"] for message in snapshot["messages"]])
+
+    def test_pair_code_is_stable_across_rooms_for_same_players(self):
+        second = self.service.create_room()
+        first_pair = self.service.snapshot(self.room_id)["room"]["pair_code"]
+        self.assertEqual(second["room"]["pair_code"], first_pair)
+        self.assertTrue(first_pair.startswith("pair-"))
 
     def test_pending_event_carries_canonical_status(self):
         self.service.execute(self.room_id, {"action": "roll", "actor": "haya", "expected_seq": self._seq()})
@@ -363,6 +505,41 @@ class AmbiguousRollClientTests(unittest.TestCase):
         reply = client.roll("g", {"task": "done"})
         self.assertTrue(reply.reconciled)
         self.assertTrue(reply.outcome_unknown)
+        self.assertEqual(len([call for call in client.calls if call[0] == "POST"]), 1)
+
+    def test_timeout_never_resends_even_when_same_player_remains_active(self):
+        class Client(EngineClient):
+            def __init__(self):
+                super().__init__("http://unused")
+                self.calls = []
+
+            def _request(self, method, path, body=None):
+                self.calls.append((method, path, body))
+                if method == "POST":
+                    raise EngineUnavailable("ENGINE_UNAVAILABLE", "timeout", status=503)
+                return {"turn": "哈娅", "current_player": "哈娅"}
+
+        client = Client()
+        reply = client.roll("g", {})
+        self.assertTrue(reply.outcome_unknown)
+        self.assertEqual(len([call for call in client.calls if call[0] == "POST"]), 1)
+
+    def test_mutating_action_timeout_is_reported_as_uncertain(self):
+        class Client(EngineClient):
+            def __init__(self):
+                super().__init__("http://unused")
+                self.calls = []
+
+            def _request(self, method, path, body=None):
+                self.calls.append((method, path, body))
+                if method == "POST":
+                    raise EngineUnavailable("ENGINE_UNAVAILABLE", "timeout", status=503)
+                return {"turn": "哈娅"}
+
+        client = Client()
+        with self.assertRaises(EngineMutationUncertain) as caught:
+            client.swap("g", "哈娅")
+        self.assertEqual(caught.exception.payload["state"]["turn"], "哈娅")
         self.assertEqual(len([call for call in client.calls if call[0] == "POST"]), 1)
 
     def test_all_documented_action_paths_are_url_encoded(self):
@@ -555,6 +732,25 @@ class MonopolyAgentSchedulerTests(unittest.TestCase):
             db_path=self.db_path,
         )[2]
         self.assertTrue(any(event["type"] == "agent_status" for event in live))
+
+    def test_agent_reply_finishing_after_safe_word_is_discarded(self):
+        service = self.service
+        room_id = self.room_id
+
+        class PausingCC:
+            @staticmethod
+            def snapshot():
+                return {"kind": "relay", "label": "guagua", "model": "sonnet"}
+
+            @staticmethod
+            def stream(*_args):
+                service.post_message(room_id, author="haya", content="404")
+                yield "late reply that must not be saved"
+
+        self._scheduler(PausingCC())._generate_one(self.room_id, "cc", "turn", None)
+        snapshot = self.service.snapshot(self.room_id)
+        self.assertEqual(snapshot["room"]["status"], "paused")
+        self.assertFalse(any(message["author"] == "cc" for message in snapshot["messages"]))
 
     def test_cc_roll_that_draws_own_task_gets_one_followup_turn(self):
         outputs = iter([

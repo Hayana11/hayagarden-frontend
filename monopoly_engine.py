@@ -32,24 +32,15 @@ class EngineUnavailable(EngineError):
     pass
 
 
+class EngineMutationUncertain(EngineUnavailable):
+    """A mutating request may have committed even though its response was lost."""
+
+
 @dataclass(frozen=True)
 class EngineReply:
     payload: dict
     reconciled: bool = False
     outcome_unknown: bool = False
-
-
-def _turn_marker(state: dict) -> tuple:
-    """Extract a conservative marker used only for ambiguous roll recovery."""
-    marker = tuple(
-        state.get(key)
-        for key in ("turn", "turn_no", "round", "round_no", "current_player", "active_player")
-    )
-    if any(value is not None for value in marker):
-        return marker
-    # Some engine builds omit explicit turn counters.  A canonical full-state
-    # fallback is safer than assuming that two all-None markers are identical.
-    return (json.dumps(state, ensure_ascii=False, sort_keys=True, separators=(",", ":")),)
 
 
 class EngineClient:
@@ -138,40 +129,25 @@ class EngineClient:
         return self._request("DELETE", f"/game/{self._q(game_id)}?{query}")
 
     def roll(self, game_id: str, body: dict | None = None) -> EngineReply:
-        """Roll once, reconciling an ambiguous timeout before one guarded resend."""
-        before = self.state(game_id)
-        marker = _turn_marker(before)
+        """Roll exactly once; an ambiguous response is never retried.
+
+        ``/state`` has no request id and an acceleration card may leave the
+        same player active after a successful roll.  State comparison therefore
+        cannot prove that a timed-out roll was not committed.
+        """
         path = f"/roll/{self._q(game_id)}"
         try:
             return EngineReply(self._request("POST", path, body or {}))
-        except EngineUnavailable as first_error:
+        except EngineUnavailable:
             try:
                 after = self.state(game_id)
             except EngineError:
-                raise first_error
-            if _turn_marker(after) != marker:
-                return EngineReply(
-                    {"state": after, "reconciled_after_timeout": True},
-                    reconciled=True,
-                    outcome_unknown=True,
-                )
-
-            # Exactly one resend is allowed, and it is only reached after state
-            # proves that the first request did not advance the turn.
-            try:
-                return EngineReply(self._request("POST", path, body or {}))
-            except EngineUnavailable as second_error:
-                try:
-                    final_state = self.state(game_id)
-                except EngineError:
-                    raise second_error
-                if _turn_marker(final_state) != marker:
-                    return EngineReply(
-                        {"state": final_state, "reconciled_after_timeout": True},
-                        reconciled=True,
-                        outcome_unknown=True,
-                    )
-                raise second_error
+                after = {}
+            return EngineReply(
+                {"state": after, "reconciled_after_timeout": bool(after)},
+                reconciled=bool(after),
+                outcome_unknown=True,
+            )
 
     def action(self, action: str, game_id: str, **params: Any) -> dict:
         template = self.ACTION_PATHS.get(action)
@@ -184,7 +160,19 @@ class EngineClient:
         except KeyError as exc:
             raise ValueError(f"missing {exc.args[0]} for {action}") from exc
         body = {"persona": params["persona"]} if action == "declare_persona" else {}
-        return self._request("POST", path, body)
+        try:
+            return self._request("POST", path, body)
+        except EngineUnavailable as exc:
+            try:
+                after = self.state(game_id)
+            except EngineError:
+                after = {}
+            raise EngineMutationUncertain(
+                "ENGINE_MUTATION_UNCERTAIN",
+                f"{action} may have committed before its response was lost",
+                status=503,
+                payload={"action": action, "state": after},
+            ) from exc
 
     def skip(self, game_id: str, who: str) -> dict:
         return self.action("skip", game_id, who=who)

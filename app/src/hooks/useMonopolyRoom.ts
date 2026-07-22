@@ -100,6 +100,12 @@ export function useMonopolyRoom(roomId: string | undefined) {
       return;
     }
     if (envelope.type === 'room.error') {
+      const nextSeq = Number(envelope.seq) || 0;
+      if (nextSeq) seqRef.current = Math.max(seqRef.current, nextSeq);
+      setSnapshot((current) => current ? {
+        ...current,
+        room: { ...current.room, event_seq: Math.max(current.room.event_seq, nextSeq) },
+      } : current);
       setError(envelope.data.detail || envelope.data.code || '房间发生错误');
       return;
     }
@@ -178,7 +184,12 @@ export function useMonopolyRoom(roomId: string | undefined) {
       applySnapshot(next);
       return next;
     } catch (requestError) {
-      if (requestError instanceof HttpError && requestError.status === 409) void refresh();
+      if (
+        requestError instanceof HttpError
+        && [400, 409, 422, 428].includes(requestError.status)
+      ) {
+        await refresh();
+      }
       setError(errorDetail(requestError));
       return null;
     } finally {
