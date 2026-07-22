@@ -16,14 +16,13 @@ function selectedWinner(pending: PendingDecision): 'haya' | 'cc' | null {
 }
 
 export function GameActionDock({
-  room, pending, busy, onAction, onResume, onRefresh, onNewRoom,
+  room, pending, busy, onAction, onResume, onNewRoom,
 }: {
   room: MonopolyRoom;
   pending: PendingDecision | null;
   busy: boolean;
   onAction: (action: string, args?: Record<string, unknown>) => void;
   onResume: () => void;
-  onRefresh: () => void;
   onNewRoom: () => void;
 }) {
   let chip = '等待掷骰 · IDLE';
@@ -43,7 +42,7 @@ export function GameActionDock({
   } else if (room.status === 'engine_down') {
     chip = '引擎离线 · ENGINE_DOWN';
     note = '游戏服务暂时离线 · 局面已保存。聊天不受影响，恢复后会先对账。';
-    actions = [{ label: '重新检查引擎', kind: 'primary', onClick: onRefresh }];
+    actions = [{ label: '重新检查并恢复', kind: 'primary', onClick: onResume }];
   } else if (room.status === 'finished') {
     chip = '终局 · FINISHED';
     note = '本局已经打满。终局结果仍以引擎返回为准。';

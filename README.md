@@ -43,7 +43,7 @@ pnpm run build
 
 引擎必须只监听 loopback，并将存档目录纳入备份。systemd 模板、环境变量、接口说明和上线冒烟步骤见 [`docs/monopoly-backend.md`](docs/monopoly-backend.md)。整体服务关系见 [`ARCHITECTURE.md`](ARCHITECTURE.md)。
 
-当前适配器按上游真实契约读取 `/roll` 的 `next_turn` 和 `/state` 的 `turn`，并在开局前从 `/help` 获取当前 `rules_ack`。安全词默认是 `404`，只有整条消息（或显式 `safeWord` 字段）命中才暂停；“HTTP 404”不会误停。任何可能改变棋盘的请求一旦响应丢失，房间都会保留本地悬账、冻结并要求人工对账；上游没有幂等键前，后端绝不会自动重发或普通恢复。
+当前适配器按上游真实契约读取 `/roll` 的 `next_turn` 和 `/state` 的 `turn`，并在开局前从 `/help` 获取当前 `rules_ack`。安全词默认是 `404`，只有整条消息（或显式 `safeWord` 字段）命中才暂停；“HTTP 404”不会误停。任何可能改变棋盘的请求只要得到空响应、坏 JSON、HTTP 5xx 或连接中断，房间都会冻结并要求人工对账；上游没有幂等键前，后端绝不会自动重发。`final_result` 是例外：上游保证幂等，客户端安全重试一次，仍失败则冻结并由恢复入口再次完成终局。
 
 聊天流式 `chat.start/delta/done` 使用独立 live 队列，不递增游戏 `event_seq`，所以 AI 打字不会让操作按钮持续收到 `STALE_ROOM_STATE`，也不会污染 AI 的最近游戏事件。网络异常只更新线路状态并允许稍后重试；只有明确内容拒绝才消耗 swap/skip。
 

@@ -44,6 +44,12 @@ class EngineReply:
 
 
 class EngineClient:
+    _UNCERTAIN_RESPONSE_CODES = {
+        "ENGINE_UNAVAILABLE",
+        "ENGINE_HTTP_ERROR",
+        "ENGINE_BAD_RESPONSE",
+    }
+
     ACTION_PATHS = {
         "skip": "/skip/{game_id}/{who}",
         "swap": "/swap/{game_id}/{who}",
@@ -109,8 +115,53 @@ class EngineClient:
     def _q(value: Any) -> str:
         return urllib.parse.quote(str(value), safe="")
 
+    def _state_after_uncertain_mutation(self, game_id: str | None) -> dict:
+        if not game_id:
+            return {}
+        try:
+            return self.state(game_id)
+        except EngineError:
+            return {}
+
+    def _mutation_request(
+        self,
+        action: str,
+        game_id: str | None,
+        method: str,
+        path: str,
+        body: dict | None,
+    ) -> dict:
+        """Execute a mutation once and fail closed on any unverifiable response."""
+        try:
+            payload = self._request(method, path, body)
+        except EngineError as exc:
+            if exc.code not in self._UNCERTAIN_RESPONSE_CODES:
+                raise
+            raise EngineMutationUncertain(
+                "ENGINE_MUTATION_UNCERTAIN",
+                f"{action} may have committed before its response became unusable",
+                status=503,
+                payload={
+                    "action": action,
+                    "state": self._state_after_uncertain_mutation(game_id),
+                    "cause": exc.code,
+                },
+            ) from exc
+        if payload:
+            return payload
+        raise EngineMutationUncertain(
+            "ENGINE_MUTATION_UNCERTAIN",
+            f"{action} returned an empty response after a mutating request",
+            status=503,
+            payload={
+                "action": action,
+                "state": self._state_after_uncertain_mutation(game_id),
+                "cause": "ENGINE_EMPTY_RESPONSE",
+            },
+        )
+
     def new_game(self, payload: dict) -> dict:
-        return self._request("POST", "/new_game", payload)
+        return self._mutation_request("new_game", None, "POST", "/new_game", payload)
 
     def help(self) -> dict:
         return self._request("GET", "/help")
@@ -122,7 +173,33 @@ class EngineClient:
         return self._request("GET", f"/shop/{self._q(game_id)}")
 
     def final_result(self, game_id: str) -> dict:
-        return self._request("GET", f"/final_result/{self._q(game_id)}")
+        path = f"/final_result/{self._q(game_id)}"
+        last_error: EngineError | None = None
+        for _attempt in range(2):
+            try:
+                payload = self._request("GET", path)
+            except EngineError as exc:
+                if exc.code not in self._UNCERTAIN_RESPONSE_CODES:
+                    raise
+                last_error = exc
+                continue
+            if payload:
+                return payload
+            last_error = EngineError(
+                "ENGINE_BAD_RESPONSE",
+                "final_result returned an empty response",
+                status=502,
+            )
+        raise EngineMutationUncertain(
+            "FINAL_RESULT_UNCERTAIN",
+            "final_result remained unavailable after one safe retry",
+            status=503,
+            payload={
+                "action": "final_result",
+                "state": self._state_after_uncertain_mutation(game_id),
+                "cause": last_error.code if last_error else "ENGINE_BAD_RESPONSE",
+            },
+        ) from last_error
 
     def delete_game(self, game_id: str, token: str) -> dict:
         query = urllib.parse.urlencode({"token": token})
@@ -137,14 +214,19 @@ class EngineClient:
         """
         path = f"/roll/{self._q(game_id)}"
         try:
-            return EngineReply(self._request("POST", path, body or {}))
-        except EngineUnavailable:
-            try:
-                after = self.state(game_id)
-            except EngineError:
+            return EngineReply(
+                self._mutation_request("roll", game_id, "POST", path, body or {})
+            )
+        except EngineMutationUncertain as exc:
+            after = exc.payload.get("state") if isinstance(exc.payload, dict) else {}
+            if not isinstance(after, dict):
                 after = {}
             return EngineReply(
-                {"state": after, "reconciled_after_timeout": bool(after)},
+                {
+                    "state": after,
+                    "reconciled_after_timeout": bool(after),
+                    "cause": (exc.payload or {}).get("cause") if isinstance(exc.payload, dict) else None,
+                },
                 reconciled=bool(after),
                 outcome_unknown=True,
             )
@@ -160,19 +242,7 @@ class EngineClient:
         except KeyError as exc:
             raise ValueError(f"missing {exc.args[0]} for {action}") from exc
         body = {"persona": params["persona"]} if action == "declare_persona" else {}
-        try:
-            return self._request("POST", path, body)
-        except EngineUnavailable as exc:
-            try:
-                after = self.state(game_id)
-            except EngineError:
-                after = {}
-            raise EngineMutationUncertain(
-                "ENGINE_MUTATION_UNCERTAIN",
-                f"{action} may have committed before its response was lost",
-                status=503,
-                payload={"action": action, "state": after},
-            ) from exc
+        return self._mutation_request(action, game_id, "POST", path, body)
 
     def skip(self, game_id: str, who: str) -> dict:
         return self.action("skip", game_id, who=who)

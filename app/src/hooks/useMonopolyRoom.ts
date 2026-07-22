@@ -211,10 +211,15 @@ export function useMonopolyRoom(roomId: string | undefined) {
 
   const togglePause = useCallback(() => {
     if (!roomId || !snapshot) return Promise.resolve(null);
-    return run(() => snapshot.room.status === 'paused'
+    return run(() => ['paused', 'engine_down'].includes(snapshot.room.status)
       ? monopolyApi.resume(roomId, eventSeq)
       : monopolyApi.pause(roomId, eventSeq));
   }, [eventSeq, roomId, run, snapshot]);
+
+  const resumeRoom = useCallback(() => {
+    if (!roomId) return Promise.resolve(null);
+    return run(() => monopolyApi.resume(roomId, eventSeq));
+  }, [eventSeq, roomId, run]);
 
   const sendMessage = useCallback(async (content: string, targets: Array<'cc' | 'codex'>) => {
     if (!roomId || busy) return false;
@@ -254,7 +259,7 @@ export function useMonopolyRoom(roomId: string | undefined) {
 
   return {
     snapshot, pending, loading, busy, error, connection, lastEvent, agents, streaming,
-    setupConfirmation, refresh, action, setup, togglePause, sendMessage, speak, providerFor,
+    setupConfirmation, refresh, action, setup, togglePause, resumeRoom, sendMessage, speak, providerFor,
     clearError: () => setError(''),
   };
 }

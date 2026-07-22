@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 from monopoly_engine import (
     EngineClient,
+    EngineError,
     EngineMutationUncertain,
     EngineReply,
     EngineUnavailable,
@@ -35,6 +36,7 @@ class FakeEngine:
             "state": dict(self.current_state),
             "active_limits": {"redline": ["blood"]},
             "history_note": "fresh room",
+            "intensity_note": "heavy content may require adaptation",
         }
 
     def state(self, game_id):
@@ -100,6 +102,10 @@ class MonopolyBackendTests(unittest.TestCase):
         confirmation = next(event for event in events if event["type"] == "setup_confirmed")
         self.assertEqual(confirmation["payload"]["active_limits"], {"redline": ["blood"]})
         self.assertEqual(confirmation["payload"]["history_note"], "fresh room")
+        self.assertEqual(
+            confirmation["payload"]["intensity_note"],
+            "heavy content may require adaptation",
+        )
         started = next(event for event in events if event["type"] == "game_started")
         self.assertNotIn("player_token", started["payload"])
         self.assertNotIn("delete-me", str(self.service.snapshot(self.room_id)["state"]))
@@ -408,6 +414,76 @@ class MonopolyBackendTests(unittest.TestCase):
         self.assertEqual(result["state"]["coins"], {"哈娅": 99, "CC": 1})
         self.assertEqual(result["room"]["status"], "finished")
 
+    def test_uncertain_final_result_freezes_then_resume_finishes_canonically(self):
+        self.engine.next_roll = {"who": "哈娅", "next_turn": "CC", "game_over": True}
+
+        def uncertain_final(_game_id):
+            raise EngineMutationUncertain(
+                "FINAL_RESULT_UNCERTAIN",
+                "timeout after commit",
+                status=503,
+                payload={"action": "final_result", "state": dict(self.engine.current_state)},
+            )
+
+        self.engine.final_result = uncertain_final
+        with self.assertRaises(RoomError) as caught:
+            self.service.execute(self.room_id, {
+                "action": "roll", "actor": "haya", "expected_seq": self._seq(),
+            })
+        self.assertEqual(caught.exception.code, "FINAL_RESULT_UNCERTAIN")
+        frozen = self.service.snapshot(self.room_id)
+        self.assertEqual(frozen["room"]["status"], "engine_down")
+        self.assertFalse(any(
+            event["type"] == "game_over"
+            for event in store.list_events(self.room_id, db_path=self.db_path)
+        ))
+
+        def recovered_final(game_id):
+            self.engine.calls.append(("final_result", game_id))
+            self.engine.current_state = {
+                **self.engine.current_state,
+                "coins": {"哈娅": 88, "CC": 12},
+            }
+            return {"winner": "哈娅", "coins": {"哈娅": 88, "CC": 12}}
+
+        self.engine.final_result = recovered_final
+        recovered = self.service.resume(self.room_id, expected_seq=self._seq())
+        self.assertEqual(recovered["room"]["status"], "finished")
+        self.assertEqual(recovered["state"]["coins"], {"哈娅": 88, "CC": 12})
+        self.assertNotIn(
+            "reconciliation_required",
+            store.get_agent_state(self.room_id, self.db_path),
+        )
+
+    def test_uncertain_setup_freezes_and_cannot_resume_or_retry(self):
+        room_id = self.service.create_room()["room"]["id"]
+
+        def uncertain_setup(_payload):
+            raise EngineMutationUncertain(
+                "ENGINE_MUTATION_UNCERTAIN",
+                "new_game response lost",
+                status=503,
+                payload={"action": "new_game", "cause": "ENGINE_EMPTY_RESPONSE"},
+            )
+
+        self.engine.new_game = uncertain_setup
+        with self.assertRaises(RoomError) as caught:
+            self.service.setup(
+                room_id,
+                {"p1_name": "哈娅", "p2_name": "CC"},
+                expected_seq=self.service.snapshot(room_id)["room"]["event_seq"],
+            )
+        self.assertEqual(caught.exception.code, "SETUP_OUTCOME_UNKNOWN")
+        frozen = self.service.snapshot(room_id)
+        self.assertEqual(frozen["room"]["status"], "engine_down")
+        self.assertIsNone(frozen["room"]["game_id"])
+        with self.assertRaises(RoomError) as resume_error:
+            self.service.resume(
+                room_id,
+                expected_seq=frozen["room"]["event_seq"],
+            )
+        self.assertEqual(resume_error.exception.code, "SETUP_OUTCOME_UNKNOWN")
+
     def test_resume_restores_shop_reminder_and_active_actor(self):
         with store.transaction(self.db_path) as conn:
             state = {**self.service.snapshot(self.room_id)["state"], "identity_reminder": {"cc": "remember"}}
@@ -542,6 +618,90 @@ class AmbiguousRollClientTests(unittest.TestCase):
         self.assertEqual(caught.exception.payload["state"]["turn"], "哈娅")
         self.assertEqual(len([call for call in client.calls if call[0] == "POST"]), 1)
 
+    def test_empty_mutation_response_is_uncertain_for_roll_and_action(self):
+        class Client(EngineClient):
+            def __init__(self):
+                super().__init__("http://unused")
+                self.calls = []
+
+            def _request(self, method, path, body=None):
+                self.calls.append((method, path, body))
+                if method == "POST":
+                    return {}
+                return {"turn": "哈娅"}
+
+        roll_client = Client()
+        reply = roll_client.roll("g", {})
+        self.assertTrue(reply.outcome_unknown)
+        self.assertEqual(reply.payload["cause"], "ENGINE_EMPTY_RESPONSE")
+        self.assertEqual(len([call for call in roll_client.calls if call[0] == "POST"]), 1)
+
+        action_client = Client()
+        with self.assertRaises(EngineMutationUncertain) as caught:
+            action_client.swap("g", "哈娅")
+        self.assertEqual(caught.exception.payload["cause"], "ENGINE_EMPTY_RESPONSE")
+
+    def test_bad_json_and_http_5xx_are_uncertain_after_mutation(self):
+        for code in ("ENGINE_BAD_RESPONSE", "ENGINE_HTTP_ERROR"):
+            class Client(EngineClient):
+                def _request(self, method, path, body=None):
+                    if method == "POST":
+                        raise EngineError(code, "unusable response", status=502)
+                    return {"turn": "哈娅"}
+
+            with self.subTest(code=code):
+                with self.assertRaises(EngineMutationUncertain) as caught:
+                    Client("http://unused").buy_card("g", "哈娅")
+                self.assertEqual(caught.exception.payload["cause"], code)
+
+    def test_validation_and_not_found_remain_definite_failures(self):
+        errors = (
+            EngineValidationError("ENGINE_VALIDATION", "bad args", status=422),
+            EngineError("ENGINE_GAME_NOT_FOUND", "missing", status=404),
+        )
+        for expected in errors:
+            class Client(EngineClient):
+                def _request(self, method, path, body=None):
+                    raise expected
+
+            with self.subTest(code=expected.code):
+                with self.assertRaises(type(expected)) as caught:
+                    Client("http://unused").swap("g", "哈娅")
+                self.assertEqual(caught.exception.code, expected.code)
+
+    def test_final_result_retries_once_then_freezes_if_still_unverifiable(self):
+        class RecoveringClient(EngineClient):
+            def __init__(self):
+                super().__init__("http://unused")
+                self.final_calls = 0
+
+            def _request(self, method, path, body=None):
+                if path.startswith("/final_result/"):
+                    self.final_calls += 1
+                    return {} if self.final_calls == 1 else {"winner": "哈娅"}
+                return {"turn": "哈娅"}
+
+        recovered = RecoveringClient()
+        self.assertEqual(recovered.final_result("g"), {"winner": "哈娅"})
+        self.assertEqual(recovered.final_calls, 2)
+
+        class FailingClient(EngineClient):
+            def __init__(self):
+                super().__init__("http://unused")
+                self.final_calls = 0
+
+            def _request(self, method, path, body=None):
+                if path.startswith("/final_result/"):
+                    self.final_calls += 1
+                    return {}
+                return {"turn": "哈娅"}
+
+        failed = FailingClient()
+        with self.assertRaises(EngineMutationUncertain) as caught:
+            failed.final_result("g")
+        self.assertEqual(caught.exception.code, "FINAL_RESULT_UNCERTAIN")
+        self.assertEqual(failed.final_calls, 2)
+
     def test_all_documented_action_paths_are_url_encoded(self):
         class Client(EngineClient):
             def __init__(self):
@@ -550,7 +710,7 @@ class AmbiguousRollClientTests(unittest.TestCase):
 
             def _request(self, method, path, body=None):
                 self.paths.append(path)
-                return {}
+                return {"ok": True}
 
         client = Client()
         examples = {
@@ -578,7 +738,7 @@ class AmbiguousRollClientTests(unittest.TestCase):
 
             def _request(self, method, path, body=None):
                 self.request = (method, path, body)
-                return {}
+                return {"ok": True}
 
         client = Client()
         client.declare_persona("g", "哈娅", "老师")

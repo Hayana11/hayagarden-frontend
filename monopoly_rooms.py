@@ -414,6 +414,14 @@ class MonopolyService:
                     if help_payload.get("rules_ack"):
                         engine_payload["rules_ack"] = help_payload["rules_ack"]
                 result = self.engine.new_game(engine_payload)
+            except EngineMutationUncertain as exc:
+                latest = self._freeze_unknown_setup(room, exc)
+                raise RoomError(
+                    "SETUP_OUTCOME_UNKNOWN",
+                    "开局请求的响应不可验证；可能已在引擎创建棋局，禁止自动恢复或再次开局",
+                    status=409,
+                    latest=latest,
+                ) from exc
             except EngineValidationError as exc:
                 latest = self._record_room_error(room_id, None, exc)
                 raise RoomError(exc.code, exc.detail, status=exc.status, latest=latest) from exc
@@ -481,6 +489,7 @@ class MonopolyService:
                 safety = {
                     "active_limits": result.get("active_limits"),
                     "history_note": result.get("history_note"),
+                    "intensity_note": result.get("intensity_note"),
                 }
                 store.append_event(conn, room_id, "setup_confirmed", None, safety)
                 store.append_event(conn, room_id, "state", active, state)
@@ -558,12 +567,18 @@ class MonopolyService:
         except EngineError as exc:
             refresh_error = exc
             state = {**(room.get("state") or {}), **_extract_state(payload)}
-        final_payload = self._fetch_final_result(room["game_id"]) if _is_finished(payload) else None
-        if final_payload is not None and not final_payload.get("unavailable"):
-            try:
-                state = self._refresh_state(room["game_id"], final_payload, state)
-            except EngineError as exc:
-                refresh_error = refresh_error or exc
+        final_payload = None
+        if _is_finished(payload):
+            final_payload, state = self._complete_final_result(
+                room,
+                actor,
+                source_event_type="rolled",
+                source_payload=payload,
+                state=state,
+                pending=pending,
+                decision={"decision": body, "reconciled": reply.reconciled},
+            )
+            refresh_error = None
         with store.transaction(self.db_path) as conn:
             if pending:
                 store.append_event(conn, room["id"], "settled", actor, {
@@ -705,12 +720,16 @@ class MonopolyService:
         except EngineError as exc:
             refresh_error = exc
             state = {**(room.get("state") or {}), **_extract_state(payload)}
-        final_payload = self._fetch_final_result(room["game_id"]) if _is_finished(payload) else None
-        if final_payload is not None and not final_payload.get("unavailable"):
-            try:
-                state = self._refresh_state(room["game_id"], final_payload, state)
-            except EngineError as exc:
-                refresh_error = refresh_error or exc
+        final_payload = None
+        if _is_finished(payload):
+            final_payload, state = self._complete_final_result(
+                room,
+                actor,
+                source_event_type=action,
+                source_payload=payload,
+                state=state,
+            )
+            refresh_error = None
         with store.transaction(self.db_path) as conn:
             store.append_event(conn, room["id"], action, actor, payload)
             self._persist_engine_result(
@@ -728,6 +747,103 @@ class MonopolyService:
             self._mark_engine_down(room["id"], refreshed_room, refresh_error)
             raise RoomError(refresh_error.code, refresh_error.detail, status=refresh_error.status)
         return self.snapshot(room["id"])
+
+    def _complete_final_result(
+        self,
+        room: dict,
+        actor: str,
+        *,
+        source_event_type: str,
+        source_payload: dict,
+        state: dict,
+        pending: dict | None = None,
+        decision: dict | None = None,
+    ) -> tuple[dict, dict]:
+        final_payload: dict | None = None
+        try:
+            final_payload = self.engine.final_result(room["game_id"])
+            canonical_state = self._refresh_state(room["game_id"], final_payload, state)
+        except EngineError as exc:
+            latest = self._freeze_final_result(
+                room,
+                actor,
+                source_event_type=source_event_type,
+                source_payload=source_payload,
+                state=state,
+                pending=pending,
+                decision=decision,
+                error=exc,
+                final_payload=final_payload,
+            )
+            raise RoomError(
+                "FINAL_RESULT_UNCERTAIN",
+                "终局结算或结算后的 canonical state 无法确认；房间已冻结等待安全重试",
+                status=409,
+                latest=latest,
+            ) from exc
+        return final_payload, canonical_state
+
+    def _freeze_final_result(
+        self,
+        room: dict,
+        actor: str,
+        *,
+        source_event_type: str,
+        source_payload: dict,
+        state: dict,
+        pending: dict | None,
+        decision: dict | None,
+        error: EngineError,
+        final_payload: dict | None,
+    ) -> int:
+        active = (
+            _actor_for_engine_who(room, _active_engine_player(state))
+            or _actor_for_engine_who(room, _active_engine_player(source_payload))
+            or room.get("active_actor")
+            or actor
+        )
+        with store.transaction(self.db_path) as conn:
+            if source_event_type == "rolled" and pending:
+                store.append_event(conn, room["id"], "settled", actor, {
+                    **(decision or {}),
+                    "response": source_payload,
+                })
+            store.append_event(conn, room["id"], source_event_type, actor, source_payload)
+            store.update_room(
+                conn,
+                room["id"],
+                status=RoomStatus.ENGINE_DOWN.value,
+                state_json=json.dumps(state, ensure_ascii=False),
+                pending_json="{}",
+                active_actor=active,
+            )
+            store.patch_agent_state_conn(conn, room["id"], {
+                "reconciliation_required": {
+                    "code": "FINAL_RESULT_UNCERTAIN",
+                    "action": "final_result",
+                    "actor": actor,
+                },
+                "engine_down_from": RoomStatus.FINISHED.value,
+            })
+            store.append_event(conn, room["id"], "final_result_uncertain", actor, {
+                "cause": error.code,
+                "detail": error.detail,
+                "final_response": final_payload,
+            })
+            store.append_event(
+                conn,
+                room["id"],
+                "pending",
+                actor,
+                _pending_event_payload(None, RoomStatus.ENGINE_DOWN.value),
+            )
+            store.append_event(conn, room["id"], "state", active, state)
+            event = store.append_event(conn, room["id"], "room_error", actor, {
+                "code": "FINAL_RESULT_UNCERTAIN",
+                "detail": "final_result did not complete with a verifiable canonical state",
+                "status": 409,
+            })
+        return int(event["seq"])
 
     def _freeze_unknown_action(
         self,
@@ -902,12 +1018,48 @@ class MonopolyService:
                 store.append_event(conn, room_id, "game_paused", None, {"reason": reason})
             return self.snapshot(room_id)
 
+    def _freeze_unknown_setup(self, room: dict, exc: EngineMutationUncertain) -> int:
+        with store.transaction(self.db_path) as conn:
+            store.update_room(conn, room["id"], status=RoomStatus.ENGINE_DOWN.value)
+            store.patch_agent_state_conn(conn, room["id"], {
+                "reconciliation_required": {
+                    "code": "SETUP_OUTCOME_UNKNOWN",
+                    "action": "new_game",
+                },
+                "engine_down_from": room.get("status") or RoomStatus.LOBBY.value,
+            })
+            store.append_event(conn, room["id"], "setup_outcome_unknown", None, {
+                "detail": exc.detail,
+                "cause": (exc.payload or {}).get("cause") if isinstance(exc.payload, dict) else None,
+            })
+            event = store.append_event(conn, room["id"], "room_error", None, {
+                "code": "SETUP_OUTCOME_UNKNOWN",
+                "detail": "new_game may have committed before its response became unusable",
+                "status": 409,
+            })
+        return int(event["seq"])
+
     def resume(self, room_id: str, *, expected_seq: int | None = None) -> dict:
         with self.locks.hold(room_id):
             room = self._room(room_id)
             self._check_seq(room, expected_seq)
             if room["status"] not in {RoomStatus.PAUSED.value, RoomStatus.ENGINE_DOWN.value}:
                 return self.snapshot(room_id)
+            agent_state = store.get_agent_state(room_id, self.db_path)
+            reconciliation = agent_state.get("reconciliation_required")
+            reconciliation_code = (
+                reconciliation.get("code")
+                if isinstance(reconciliation, dict)
+                else ("ROLL_OUTCOME_UNKNOWN" if reconciliation else None)
+            )
+            if reconciliation_code == "FINAL_RESULT_UNCERTAIN":
+                return self._resume_final_result(room)
+            if reconciliation_code:
+                raise RoomError(
+                    reconciliation_code,
+                    "上一次变更请求的响应丢失，当前状态无法还原完整结果；禁止自动解冻",
+                    status=409,
+                )
             if room.get("game_id"):
                 try:
                     state = self._refresh_state(room["game_id"], {}, room.get("state") or {})
@@ -916,19 +1068,6 @@ class MonopolyService:
             else:
                 state = room["state"]
             pending = room.get("pending")
-            agent_state = store.get_agent_state(room_id, self.db_path)
-            if agent_state.get("reconciliation_required"):
-                reconciliation = agent_state["reconciliation_required"]
-                code = (
-                    reconciliation.get("code")
-                    if isinstance(reconciliation, dict)
-                    else "ROLL_OUTCOME_UNKNOWN"
-                )
-                raise RoomError(
-                    code or "MUTATION_OUTCOME_UNKNOWN",
-                    "上一次变更请求的响应丢失，当前 /state 无法还原完整结果；禁止自动解冻",
-                    status=409,
-                )
             paused_from = agent_state.get("paused_from")
             engine_down_from = agent_state.get("engine_down_from")
             restored = (
@@ -962,6 +1101,63 @@ class MonopolyService:
                 store.append_event(conn, room_id, "state", active, state)
             return self.snapshot(room_id)
 
+    def _resume_final_result(self, room: dict) -> dict:
+        actor = room.get("active_actor") or "haya"
+        try:
+            final_payload = self.engine.final_result(room["game_id"])
+            state = self._refresh_state(
+                room["game_id"],
+                final_payload,
+                room.get("state") or {},
+            )
+        except EngineError as exc:
+            with store.transaction(self.db_path) as conn:
+                store.append_event(conn, room["id"], "final_result_retry_failed", actor, {
+                    "code": exc.code,
+                    "detail": exc.detail,
+                })
+                event = store.append_event(conn, room["id"], "room_error", actor, {
+                    "code": "FINAL_RESULT_UNCERTAIN",
+                    "detail": "final_result retry did not produce a verifiable canonical state",
+                    "status": 409,
+                })
+            raise RoomError(
+                "FINAL_RESULT_UNCERTAIN",
+                "终局结算仍无法确认，房间继续冻结",
+                status=409,
+                latest=int(event["seq"]),
+            ) from exc
+        active = (
+            _actor_for_engine_who(room, _active_engine_player(state))
+            or room.get("active_actor")
+            or actor
+        )
+        with store.transaction(self.db_path) as conn:
+            store.patch_agent_state_conn(
+                conn,
+                room["id"],
+                remove=("reconciliation_required", "paused_from", "engine_down_from"),
+            )
+            store.update_room(
+                conn,
+                room["id"],
+                status=RoomStatus.FINISHED.value,
+                state_json=json.dumps(state, ensure_ascii=False),
+                pending_json="{}",
+                active_actor=active,
+            )
+            store.append_event(conn, room["id"], "final_result", actor, final_payload)
+            store.append_event(
+                conn,
+                room["id"],
+                "pending",
+                actor,
+                _pending_event_payload(None, RoomStatus.FINISHED.value),
+            )
+            store.append_event(conn, room["id"], "state", active, state)
+            store.append_event(conn, room["id"], "game_over", actor, final_payload)
+        return self.snapshot(room["id"])
+
     def delete(self, room_id: str) -> None:
         with self.locks.hold(room_id):
             room = self._room(room_id, include_token=True)
@@ -988,12 +1184,6 @@ class MonopolyService:
                 "engine_payload": exc.payload,
             })
         return int(event["seq"])
-
-    def _fetch_final_result(self, game_id: str) -> dict:
-        try:
-            return self.engine.final_result(game_id)
-        except EngineError as exc:
-            return {"unavailable": True, "code": exc.code, "detail": exc.detail}
 
     def _room(self, room_id: str, *, include_token: bool = False) -> dict:
         room = store.get_room(room_id, self.db_path, include_token=include_token)

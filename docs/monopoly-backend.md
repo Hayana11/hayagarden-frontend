@@ -43,7 +43,9 @@ MONOPOLY_SAFE_WORD=404
 - `GET /api/monopoly/rooms/:id/stream?after=N` 是唯一公开 SSE；跨 worker 通过 SQLite 恢复。游戏事件使用连续 `event_seq`，`chat.start/delta/done` 和 `agent.status` 走独立、限长的 live 队列，不参与乐观锁，也不进入 AI 的最近游戏事件。
 - 安全词默认是 `404`：整条消息精确为 `404`，或 JSON 显式带 `safeWord:true` 时，才会在通知 AI 前把房间切为 `paused`；消息、暂停状态、暂停事件和系统提示在同一房间锁与 SQLite 事务中提交，包含“HTTP 404”的普通消息不会误触。
 
-前端遇到 HTTP/SSE `STALE_ROOM_STATE` 时只刷新快照，不重发。`ENGINE_VALIDATION`（400/422/428）已经写入带 `seq` 的 `room.error`，客户端会同步乐观锁序号。上游没有请求幂等键，而加速卡可能让成功 roll 后仍是同一玩家，因此任何 roll 超时都只允许一次 `/state` 取证，绝不补掷；返回 `ROLL_OUTCOME_UNKNOWN` 并冻结。`swap/use_card/buy_card` 等即时变更同样在模糊超时时返回 `ACTION_OUTCOME_UNKNOWN`。两类错误都保留本地悬账和对账材料，并禁止普通 resume。
+前端遇到 HTTP/SSE `STALE_ROOM_STATE` 时只刷新快照，不重发。`ENGINE_VALIDATION`（400/422/428）已经写入带 `seq` 的 `room.error`，客户端会同步乐观锁序号。上游没有请求幂等键，而加速卡可能让成功 roll 后仍是同一玩家，因此 roll 的空响应、坏 JSON、HTTP 5xx 或连接中断都只允许一次 `/state` 取证，绝不补掷；返回 `ROLL_OUTCOME_UNKNOWN` 并冻结。`swap/use_card/buy_card` 等即时变更遇到同类不可验证响应时返回 `ACTION_OUTCOME_UNKNOWN`。`new_game` 无法取回丢失的 game id/token，因此返回 `SETUP_OUTCOME_UNKNOWN` 并禁止再次 setup 或普通恢复。
+
+`final_result` 虽是 GET，但首次调用会写入终局金币与跨局历史。由于上游保证该操作幂等，客户端在空响应、坏 JSON、HTTP 5xx 或连接中断时安全重试一次；仍失败则写入 `FINAL_RESULT_UNCERTAIN` 并冻结，不能提交普通 `finished`。网页的 engine-down 恢复按钮会调用 `/resume`：普通离线恢复 canonical state；终局未知会再次完成 final result、刷新 state 后落 `finished`；其他未知 mutation 继续返回 409 并保持冻结。
 
 已核对的上游字段：`POST /roll/{game_id}` 用 `who` 表示本轮掷骰者、用 `next_turn` 表示下一行动者；`GET /state/{game_id}` 顶层 `turn` 是当前行动者名字。`declare_persona` 的 persona 放在 JSON body `{\"persona\": \"...\"}`，不是 URL path。
 
