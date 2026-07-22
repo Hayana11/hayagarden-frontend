@@ -458,10 +458,11 @@ class WakeOutcomeWiringTests(unittest.TestCase):
         self.addCleanup(tmp.cleanup)
         db_path = str(Path(tmp.name) / 'drive.db')
         de.DB_PATH = db_path
+        now_str = de._now().strftime('%Y-%m-%d %H:%M:%S')
         conn = sqlite3.connect(db_path)
         try:
             conn.executescript(
-                """
+                f"""
                 CREATE TABLE drive_state (
                     id INTEGER PRIMARY KEY,
                     attachment REAL, curiosity REAL, reflection REAL, social REAL,
@@ -469,13 +470,17 @@ class WakeOutcomeWiringTests(unittest.TestCase):
                     last_updated TEXT
                 );
                 INSERT INTO drive_state VALUES (
-                    1, 0.1, 0.8, 0.2, 0.3, 0.1, 0.1, 0.1, 0.2, '2026-07-21 10:00:00');
+                    1, 0.1, 0.8, 0.2, 0.3, 0.1, 0.1, 0.1, 0.2, '{now_str}');
                 """
             )
             conn.commit()
         finally:
             conn.close()
         self.assertEqual(de.infer_fired_drive_for_action('message'), 'curiosity')
+        before = de.get_drive()
+        de.discharge_by_action('message')
+        after = de.get_drive()
+        self.assertLess(after['curiosity'], before['curiosity'])
 
     def test_normal_mode_records_wake_outcome_once(self):
         with mock.patch.object(shadow, 'is_shadow_enabled', return_value=True), \
