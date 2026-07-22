@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import datetime
 import json
 import os
 import sqlite3
@@ -433,6 +434,32 @@ class UserRulePathTests(unittest.TestCase):
 
 
 class WakeOutcomeWiringTests(unittest.TestCase):
+    def _import_gateway(self):
+        import importlib.util
+        mod_name = 'hayagarden_gateway_under_test'
+        if mod_name in sys.modules:
+            return sys.modules[mod_name]
+        stubbed = []
+        for stub_name in ('tools.workspace_registry', 'tools.workspace_agent'):
+            if stub_name not in sys.modules:
+                stub = mock.MagicMock()
+                stub.TOOLS_NOTE = ''
+                stub.build_resident_tool_defs.return_value = []
+                stub.load_registry.return_value = []
+                stub.get_workspace_tool_defs.return_value = []
+                sys.modules[stub_name] = stub
+                stubbed.append(stub_name)
+        spec = importlib.util.spec_from_file_location(
+            mod_name, Path(ROOT) / 'gateway.py',
+        )
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules[mod_name] = mod
+        assert spec.loader is not None
+        spec.loader.exec_module(mod)
+        for name in stubbed:
+            sys.modules.pop(name, None)
+        return mod
+
     def test_apply_outcome_shadow_disabled_when_shadow_off(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
@@ -475,6 +502,97 @@ class WakeOutcomeWiringTests(unittest.TestCase):
         finally:
             conn.close()
         self.assertEqual(de.infer_fired_drive_for_action('message'), 'curiosity')
+
+    def test_normal_mode_records_wake_outcome_once(self):
+        gateway = self._import_gateway()
+        with mock.patch.object(shadow, 'is_shadow_enabled', return_value=True), \
+             mock.patch.object(
+                 shadow, 'apply_outcome_shadow',
+                 return_value=shadow.ShadowResult(ok=True, status='applied'),
+             ) as apply_mock, \
+             mock.patch.object(shadow, 'mark_proof_gap_standalone') as gap_mock:
+            gateway._record_wake_outcome_shadow_if_enabled(
+                wake_run_id='run-normal-1',
+                mode='normal',
+                action='message',
+                fired_drive='curiosity',
+                desire_driven=True,
+                user_idle_hours=2.5,
+            )
+        apply_mock.assert_called_once()
+        gap_mock.assert_not_called()
+
+    def test_dream_and_summarize_skip_wake_outcome(self):
+        gateway = self._import_gateway()
+        for mode in ('dream', 'summarize'):
+            with self.subTest(mode=mode):
+                with mock.patch.object(shadow, 'is_shadow_enabled', return_value=True), \
+                     mock.patch.object(shadow, 'apply_outcome_shadow') as apply_mock:
+                    gateway._record_wake_outcome_shadow_if_enabled(
+                        wake_run_id=f'run-{mode}',
+                        mode=mode,
+                        action='message',
+                        fired_drive='curiosity',
+                        desire_driven=False,
+                        user_idle_hours=1.0,
+                    )
+                apply_mock.assert_not_called()
+
+    def test_outcome_at_uses_fresh_clock_not_wake_start_now(self):
+        src = Path(ROOT, 'gateway.py').read_text(encoding='utf-8')
+        helper = src.split('def _record_wake_outcome_shadow_if_enabled', 1)[1].split(
+            '\ndef ', 1,
+        )[0]
+        self.assertIn('datetime.datetime.utcnow()', helper)
+        self.assertNotIn('now.strftime', helper)
+        decide = src.split('def _wake_decide_locked', 1)[1].split('\ndef ', 1)[0]
+        self.assertNotIn('outcome_at=now.strftime', decide)
+
+    def test_desire_driven_frozen_before_executor_and_reused(self):
+        src = Path(ROOT, 'gateway.py').read_text(encoding='utf-8')
+        block = src.split('def _wake_decide_locked', 1)[1].split('\ndef ', 1)[0]
+        self.assertEqual(block.count('desire_driven = _get_desire_driven()'), 1)
+        self.assertIn('desire_driven=desire_driven', block)
+        self.assertNotIn('desire_driven=_get_desire_driven()', block)
+
+    def test_shadow_failure_records_gap_without_blocking_mark(self):
+        gateway = self._import_gateway()
+        with mock.patch.object(shadow, 'is_shadow_enabled', return_value=True), \
+             mock.patch.object(
+                 shadow, 'apply_outcome_shadow',
+                 return_value=shadow.ShadowResult(
+                     ok=False, status='failed', error='boom',
+                 ),
+             ), mock.patch.object(shadow, 'mark_proof_gap_standalone') as gap_mock, \
+             mock.patch.object(gateway, '_wake_run_id_mark') as mark_mock:
+            gateway._record_wake_outcome_shadow_if_enabled(
+                wake_run_id='run-fail-1',
+                mode='normal',
+                action='message',
+                fired_drive='curiosity',
+                desire_driven=True,
+                user_idle_hours=1.0,
+            )
+            gateway._wake_run_id_mark('run-fail-1')
+        gap_mock.assert_called_once()
+        self.assertEqual(
+            gap_mock.call_args.kwargs['error_code'],
+            'wake_outcome_capture_failed',
+        )
+        mark_mock.assert_called_once_with('run-fail-1')
+
+    def test_duplicate_wake_run_id_skips_shadow_outcome(self):
+        gateway = self._import_gateway()
+        with gateway.app.test_request_context():
+            with mock.patch.object(gateway, '_wake_run_id_seen', return_value=True), \
+                 mock.patch.object(shadow, 'apply_outcome_shadow') as apply_mock:
+                resp = gateway._wake_decide_locked(
+                    {'wake_run_id': 'dup-run-1'}, 'normal', '', '',
+                )
+        data = resp.get_json()
+        self.assertTrue(data['skipped'])
+        self.assertEqual(data['reason'], 'duplicate_wake_run_id')
+        apply_mock.assert_not_called()
 
 
 class GatewayGuardTests(unittest.TestCase):

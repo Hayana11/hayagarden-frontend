@@ -5176,6 +5176,54 @@ def _wake_run_id_mark(wake_run_id: str) -> None:
         for k in stale:
             _WAKE_RUN_IDS_SEEN.pop(k, None)
 
+
+def _record_wake_outcome_shadow_if_enabled(
+    *,
+    wake_run_id: str,
+    mode: str,
+    action: str,
+    fired_drive,
+    desire_driven: bool,
+    user_idle_hours: float,
+) -> None:
+    """Best-effort wake_outcome capture after legacy executor succeeds."""
+    if not wake_run_id or mode in ('dream', 'summarize'):
+        return
+    try:
+        import internal_state_shadow as _shadow_wake
+        if not _shadow_wake.is_shadow_enabled():
+            return
+        outcome_at = (
+            datetime.datetime.utcnow() + datetime.timedelta(hours=8)
+        ).strftime('%Y-%m-%d %H:%M:%S')
+        result = _shadow_wake.apply_outcome_shadow(
+            wake_run_id=wake_run_id,
+            executor_action=action,
+            desire_action=None,
+            fired_drive=fired_drive,
+            desire_driven=desire_driven,
+            user_idle_hours=float(user_idle_hours),
+            outcome_at=outcome_at,
+            db_path=DB_PATH,
+        )
+        if not result.ok:
+            _shadow_wake.mark_proof_gap_standalone(
+                db_path=DB_PATH,
+                failed_message_id=None,
+                error_code='wake_outcome_capture_failed',
+            )
+    except Exception:
+        try:
+            import internal_state_shadow as _shadow_wake
+            _shadow_wake.mark_proof_gap_standalone(
+                db_path=DB_PATH,
+                failed_message_id=None,
+                error_code='wake_outcome_capture_failed',
+            )
+        except Exception:
+            pass
+
+
 def _parse_wake_response(text):
     """从 AI 输出中提取 THOUGHTS / ACTION / CONTENT。委托给 wake.parser。"""
     from wake.parser import parse_response as _parse
@@ -5516,41 +5564,33 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
 
     # action 执行：写 wake_log / chat_messages / diary / discharge drive
     from wake.executor import execute as _wake_exec
-    shadow_enabled = False
+    desire_driven = _get_desire_driven()
     fired_drive = None
-    if wake_run_id:
+    if wake_run_id and mode not in ('dream', 'summarize'):
         try:
             import internal_state_shadow as _shadow_wake
-            shadow_enabled = _shadow_wake.is_shadow_enabled()
-            if shadow_enabled and action != 'none':
+            if _shadow_wake.is_shadow_enabled() and action != 'none':
                 import drive_engine as _de_infer
                 fired_drive = _de_infer.infer_fired_drive_for_action(action)
         except Exception:
-            shadow_enabled = False
             fired_drive = None
     _wake_exec(
         action, thoughts, c_text, mode,
         get_db_fn=get_db,
-        desire_driven=_get_desire_driven(),
+        desire_driven=desire_driven,
         surfaced_desire_ids=surfaced_desire_ids,
         desire_ledger_enabled=_get_desire_ledger_enabled(),
         cache_info=wake_cache_info,
         wake_run_id=wake_run_id,
     )
-    if wake_run_id and shadow_enabled:
-        try:
-            _shadow_wake.apply_outcome_shadow(
-                wake_run_id=wake_run_id,
-                executor_action=action,
-                desire_action=None,
-                fired_drive=fired_drive,
-                desire_driven=_get_desire_driven(),
-                user_idle_hours=float(t2_hours),
-                outcome_at=now.strftime('%Y-%m-%d %H:%M:%S'),
-                db_path=DB_PATH,
-            )
-        except Exception:
-            pass
+    _record_wake_outcome_shadow_if_enabled(
+        wake_run_id=wake_run_id,
+        mode=mode,
+        action=action,
+        fired_drive=fired_drive,
+        desire_driven=desire_driven,
+        user_idle_hours=t2_hours,
+    )
     _wake_run_id_mark(wake_run_id)
 
     return jsonify({
