@@ -52,15 +52,19 @@ class PendingDecision:
     default: dict | None
     chosen: dict | None
     created_seq: int
+    display: dict | None = None
 
     def as_dict(self) -> dict:
-        return {
+        out = {
             "kind": self.kind,
             "actor": self.actor,
             "default": self.default,
             "chosen": self.chosen,
             "created_seq": self.created_seq,
         }
+        if self.display:
+            out["display"] = self.display
+        return out
 
 
 class TokenCipher:
@@ -279,6 +283,36 @@ def _pending_kind(payload: dict) -> str | None:
             return kind
     event = payload.get("event") or payload.get("tile_type") or payload.get("type")
     return aliases.get(str(event or "").lower())
+
+
+def _pending_display(payload: dict, kind: str) -> dict:
+    """Persist card copy for REST reload; survives refresh without replaying draw events."""
+    buckets = {
+        "task": payload.get("task"),
+        "truth": payload.get("truth"),
+        "duel": payload.get("duel"),
+        "toll": payload.get("toll"),
+        "super": payload.get("super_task"),
+    }
+    source = buckets.get(kind)
+    if not isinstance(source, dict):
+        source = {}
+    text_candidates = [
+        source.get("内容"), source.get("content"), source.get("text"),
+        payload.get("say"), payload.get("hint"),
+    ]
+    text = next(
+        (str(item).strip() for item in text_candidates if isinstance(item, str) and str(item).strip()),
+        "",
+    )
+    slim_payload = dict(source) if source else {}
+    if not text and not slim_payload:
+        return {}
+    return {"text": text, "payload": slim_payload}
+
+
+def _pending_event_payload(pending: dict | None, status: str) -> dict:
+    return {"pending": pending, "status": status}
 
 
 def _is_finished(payload: dict) -> bool:
@@ -552,7 +586,10 @@ class MonopolyService:
                 "reconciled_state": state,
                 "detail": "roll advanced but /state does not expose the rolled event or pending card",
             })
-            store.append_event(conn, room["id"], "pending", actor, {})
+            store.append_event(
+                conn, room["id"], "pending", actor,
+                _pending_event_payload(None, RoomStatus.ENGINE_DOWN.value),
+            )
             store.append_event(conn, room["id"], "state", active, state)
             event = store.append_event(conn, room["id"], "room_error", actor, {
                 "code": "ROLL_OUTCOME_UNKNOWN",
@@ -592,9 +629,13 @@ class MonopolyService:
         else:
             raise RoomError("INVALID_PENDING_KIND", "未知悬账类型")
         pending["chosen"] = chosen
+        restored_status = _PENDING_STATUSES.get(kind) or room["status"]
         with store.transaction(self.db_path) as conn:
             store.update_room(conn, room["id"], pending_json=json.dumps(pending, ensure_ascii=False))
-            store.append_event(conn, room["id"], "pending", actor, pending)
+            store.append_event(
+                conn, room["id"], "pending", actor,
+                _pending_event_payload(pending, restored_status),
+            )
         return self.snapshot(room["id"])
 
     def _duel_result(self, room: dict, actor: str, args: dict) -> dict:
@@ -676,6 +717,7 @@ class MonopolyService:
                 default=_PENDING_DEFAULTS[kind],
                 chosen=None,
                 created_seq=current_seq + 1,
+                display=_pending_display(payload, kind) or None,
             ).as_dict()
             status = _PENDING_STATUSES[kind]
         elif preserve_pending:
@@ -696,7 +738,7 @@ class MonopolyService:
         )
         if kind:
             store.append_event(conn, room["id"], kind + "_drawn", active, payload)
-        store.append_event(conn, room["id"], "pending", active, pending or {})
+        store.append_event(conn, room["id"], "pending", active, _pending_event_payload(pending, status))
         store.append_event(conn, room["id"], "state", active, state)
         if status == RoomStatus.FINISHED.value:
             store.append_event(conn, room["id"], "game_over", active, payload)

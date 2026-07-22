@@ -23,6 +23,8 @@ HayaGarden 是部署在个人 VPS 上的 React 仪表盘与 Flask 服务集合�
 | `monopoly_store.py` | 房间、游戏事件、临时 live 事件、消息持久化与 WAL 并发读取 |
 | `monopoly_routes.py` | owner 鉴权保护的 `/api/monopoly/rooms...` 与单一 SSE |
 | `monopoly_agents.py` | CC/Codex 适配器、发言预算、明确内容拒绝后的 swap/skip 降级 |
+| `app/src/screens/MonopolyRoomScreen.tsx` | 游戏室页面、REST/SSE 编排和响应式双栏布局 |
+| `app/src/components/monopoly/` | 棋盘、悬账操作区、手牌、设置抽屉与三人聊天组件；详见目录内 README |
 
 ### 本地验证
 
@@ -31,6 +33,10 @@ python3.11 -m py_compile \
   monopoly_engine.py monopoly_store.py monopoly_rooms.py \
   monopoly_routes.py monopoly_agents.py codex_app_server.py
 python3.11 -m unittest tests.test_monopoly_backend
+
+cd app
+pnpm run lint
+pnpm run build
 ```
 
 ### 部署
@@ -49,4 +55,3 @@ python3.11 -m unittest tests.test_monopoly_backend
 - `chat/`、`relay/`：上下文构建和模型线路适配。
 - `tools/`：受控工具、备份与后台任务。
 - `tests/`：后端单元与回归测试。
-
