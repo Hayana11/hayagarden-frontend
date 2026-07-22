@@ -24,7 +24,7 @@ NL = chr(10)
 # Modes that stay on BACKGROUND_PROVIDER in B1 — api_relay only (scheme A).
 BACKGROUND_WAKE_MODES = frozenset(('dream', 'summarize'))
 # First-cut CC Wake modes.
-CC_WAKE_MODES = frozenset(('normal', 'nightwatch', 'ritual', 'self_trigger'))
+CC_WAKE_MODES = frozenset(('normal', 'morning', 'nightwatch', 'ritual', 'self_trigger'))
 
 
 class UnsupportedWakeModeError(ValueError):

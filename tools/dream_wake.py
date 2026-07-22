@@ -2,6 +2,7 @@
 """
 AI 自主唤醒调度器 — 每30分钟由 cron 调用。
 普通模式：用概率决定是否触发 /wake，取代原来"沉默>6h硬发消息"的 checkin 逻辑。
+固定早安：每天 8:50 北京时间由 cron 调用 `dream_wake.py morning`（走 Wake 统一路径）。
 夜巡模式：凌晨1-3点，如果 dream_events 显示她还醒着，以低概率静静出现。
 梦境模式：当她睡着60+分钟，自动生成梦。
 """
@@ -35,7 +36,8 @@ def _log(msg):
     line = f"[{ts}] {msg}\n"
     sys.stdout.write(line)
     try:
-        open(LOG_FILE, 'a').write(line)
+        with open(LOG_FILE, 'a', encoding='utf-8') as log_file:
+            log_file.write(line)
     except Exception:
         pass
 
@@ -149,7 +151,7 @@ def run_nightwatch(now):
     """凌晨她还醒着时低概率出现"""
     active, activity_desc = _get_recent_activity(now)
     if not active:
-        _log(f"nightwatch: no recent activity, skip")
+        _log("nightwatch: no recent activity, skip")
         return
 
     roll = random.random()
@@ -165,6 +167,56 @@ def run_nightwatch(now):
         _log(f"nightwatch result: {result.get('action')}")
     except Exception as e:
         _log(f"nightwatch error: {e}")
+
+
+def _morning_already_ran(wake_run_id: str) -> bool:
+    """Return whether this exact fixed-morning run id is already recorded."""
+    conn = _db()
+    try:
+        row = conn.execute(
+            "SELECT 1 FROM wake_log WHERE wake_run_id=? LIMIT 1",
+            (wake_run_id,),
+        ).fetchone()
+        return bool(row)
+    finally:
+        conn.close()
+
+
+def run_morning(now):
+    """Fixed morning: gate locally, then use the unified /wake path."""
+    wake_run_id = f"morning-{now.strftime('%Y-%m-%d')}"
+    if _morning_already_ran(wake_run_id):
+        _log(f"morning: duplicate run id {wake_run_id}, skip")
+        return
+
+    t_hours = _calc_t_hours(now)
+    if t_hours is None:
+        _log("morning: clock_unreliable, skip")
+        return
+
+    min_idle_min = float(_wcfg.get_float('WAKE_MIN_IDLE_MINUTES', 30) or 30)
+    if t_hours < (min_idle_min / 60.0):
+        _log(
+            f"morning: recent_interaction T={t_hours:.3f}h "
+            f"< {min_idle_min:.0f}m, skip"
+        )
+        return
+
+    _log("morning triggered → calling /wake")
+    try:
+        result = _call_wake({'mode': 'morning', 'wake_run_id': wake_run_id})
+        if result.get('skipped'):
+            _log(f"morning skipped: {result.get('reason')}")
+            return
+        action = result.get('action', '?')
+        thoughts = (result.get('thoughts') or '').strip()
+        if thoughts:
+            _log(f"morning result: {action} | {thoughts[:200]}")
+        else:
+            _log(f"morning result: {action}")
+    except Exception as e:
+        _log(f"morning error: {e}")
+
 
 def _release_self_triggers(ids):
     """Restore claimed triggers to pending when /wake cannot run yet."""
@@ -294,7 +346,10 @@ def run():
 if __name__ == '__main__':
     # selftrig 模式：只跑自定义触发器，供每分钟 cron 高频调用，让闹钟到点即触发
     # （不跑做梦/夜巡/概率唤醒那些重逻辑）。其余按原来的 30 分钟 run()。
-    if len(sys.argv) > 1 and sys.argv[1] == 'selftrig':
+    cmd = sys.argv[1] if len(sys.argv) > 1 else ''
+    if cmd == 'selftrig':
         run_self_triggers()
+    elif cmd == 'morning':
+        run_morning(_now())
     else:
         run()

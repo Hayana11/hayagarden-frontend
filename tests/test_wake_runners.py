@@ -62,6 +62,7 @@ class WakeProviderSelectTests(unittest.TestCase):
             'BACKGROUND_PROVIDER': 'api_relay',
         })):
             self.assertEqual(select_wake_provider('normal'), 'claude_code')
+            self.assertEqual(select_wake_provider('morning'), 'claude_code')
             self.assertEqual(select_wake_provider('nightwatch'), 'claude_code')
             self.assertEqual(select_wake_provider('ritual'), 'claude_code')
             self.assertEqual(select_wake_provider('self_trigger'), 'claude_code')

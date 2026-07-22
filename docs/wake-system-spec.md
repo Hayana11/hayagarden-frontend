@@ -4,9 +4,8 @@
 > 知道哈娅最近在干什么，自己判断"现在该不该说话"，并且醒着时做的事（写日记、
 > 探索、发消息）不会在下次正常聊天时"断片"。
 >
-> 现状：已有 `push_tool.py checkin`（每小时检查，沉默>6h硬编码发消息）+
-> `morning`（每天8:50早安）+ `auto_diary.py`（每天23:50写日记）。
-> 这次是把这三者整合升级，不是从零重写。
+> 现状：`dream_wake.py` 统一调度概率唤醒、固定早安（`morning` 模式）、夜巡与梦境；
+> `auto_diary.py`（每天23:50写日记）。`push_tool.py` 与 `/push` 已退役。
 
 ---
 
@@ -65,8 +64,10 @@ CREATE TABLE IF NOT EXISTS wake_log (
 );
 ```
 
-### 2.2 新脚本 `dream_wake.py`（替代 `push_tool.py checkin`）
-cron 改为每30分钟一次：`*/30 * * * *`
+### 2.2 新脚本 `dream_wake.py`（统一调度）
+- 每30分钟：`*/30 * * * * dream_wake.py` — 概率唤醒 / 夜巡 / 梦境
+- 每分钟：`dream_wake.py selftrig` — 自定义闹钟
+- 每天 8:50 北京时间（UTC `50 0`）：`dream_wake.py morning` — 固定早安，走 `/wake mode=morning`
 
 逻辑：
 1. 计算 `T` = 距离"上次有效互动"的小时数。"有效互动"定义为：哈娅发过消息，
@@ -80,7 +81,7 @@ cron 改为每30分钟一次：`*/30 * * * *`
 4. 沿用现状的"活跃时段"判断（比如8:00-次日1:00才允许触发，避免凌晨骚扰），
    `_in_active_hours()` 可以照抄现有的写法。
 
-### 2.3 新接口 `POST /wake`（取代 `/push`，`/push` 可保留给morning用）
+### 2.3 新接口 `POST /wake`（唯一主动消息决策入口）
 
 ```python
 system = build_system()  # 已含交接笺/记忆/感知层(Phase1)/Phase3的wake_log注入
@@ -119,9 +120,10 @@ elif ACTION == 'explore':
 # ACTION == 'none': 什么都不用做，wake_log已经记录了
 ```
 
-### 2.4 morning（早安）保持不变
-继续用现有 `/push` + `prompt_type=morning` 的硬编码逻辑，这部分体验已经
-是确定的，不需要纳入自主决策。
+### 2.4 morning（固定早安）
+由 `dream_wake.py morning` 在每天 8:50 北京时间触发，调用 `/wake` 且 `mode=morning`。
+AI 仍走 THOUGHTS/ACTION/CONTENT 合同，可选 none；落库、互斥、cache_info、Internal State
+与普通 Wake 相同。同一天用 `wake_run_id=morning-YYYY-MM-DD` 与 `wake_log` 去重。
 
 ---
 
