@@ -4,6 +4,7 @@ import type {
   MonopolyGameEvent,
   MonopolyGameState,
   MonopolyMessage,
+  MonopolyRoomStatus,
   MonopolySetupValues,
   MonopolySnapshot,
   ParsedBoard,
@@ -99,7 +100,54 @@ export function denseBoardTypes(gameLength: number): string[] {
   return Array.from({ length: 20 }, (_, index) => special[index] || 'task');
 }
 
+export function pendingStatus(pending: PendingDecision | null): MonopolyRoomStatus {
+  if (!pending) return 'idle';
+  return pending.kind === 'task' || pending.kind === 'truth'
+    ? 'task_pending'
+    : pending.kind === 'duel'
+      ? 'duel_pending'
+      : pending.kind === 'toll'
+        ? 'toll_pending'
+        : 'super_pending';
+}
+
+const TERMINAL_ROOM_STATUSES: ReadonlySet<MonopolyRoomStatus> = new Set([
+  'paused', 'engine_down', 'finished',
+]);
+
+export function statusAfterEmptyPending(current: MonopolyRoomStatus): MonopolyRoomStatus {
+  return TERMINAL_ROOM_STATUSES.has(current) ? current : 'idle';
+}
+
+export function resolveRoomStatus(
+  current: MonopolyRoomStatus,
+  explicit: MonopolyRoomStatus | null | undefined,
+  pending: PendingDecision | null,
+): MonopolyRoomStatus {
+  if (explicit) return explicit;
+  if (pending) return pendingStatus(pending);
+  return statusAfterEmptyPending(current);
+}
+
+export function reduceGameEventStatus(
+  current: MonopolyRoomStatus,
+  eventType: string,
+  payload: Record<string, unknown>,
+): MonopolyRoomStatus {
+  if (eventType === 'game_paused') return 'paused';
+  if (eventType === 'engine_down' || eventType === 'roll_outcome_unknown') return 'engine_down';
+  if (eventType === 'game_over') return 'finished';
+  if (eventType === 'game_resumed') {
+    const restored = payload.status;
+    if (typeof restored === 'string') return restored as MonopolyRoomStatus;
+    return current;
+  }
+  return current;
+}
+
 export function pendingText(pending: PendingDecision | null, lastEvent: MonopolyGameEvent | null): string {
+  const displayText = pending?.display?.text;
+  if (typeof displayText === 'string' && displayText.trim()) return displayText;
   const payload = lastEvent?.payload ?? {};
   const task = asRecord(payload.task);
   const truth = asRecord(payload.truth);

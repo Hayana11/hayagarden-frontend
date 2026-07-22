@@ -1,6 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { HttpError } from '../lib/http';
-import { actorFromEngineName, monopolyApi } from '../lib/monopolyRoom';
+import {
+  actorFromEngineName,
+  monopolyApi,
+  pendingStatus,
+  reduceGameEventStatus,
+  resolveRoomStatus,
+} from '../lib/monopolyRoom';
 import type {
   AgentStatus,
   MonopolyActor,
@@ -13,17 +19,6 @@ import type {
   StreamEnvelope,
 } from '../lib/monopolyTypes';
 import { useRoomStream } from './useRoomStream';
-
-function pendingStatus(pending: PendingDecision | null): MonopolySnapshot['room']['status'] {
-  if (!pending) return 'idle';
-  return pending.kind === 'task' || pending.kind === 'truth'
-    ? 'task_pending'
-    : pending.kind === 'duel'
-      ? 'duel_pending'
-      : pending.kind === 'toll'
-        ? 'toll_pending'
-        : 'super_pending';
-}
 
 function upsertMessage(messages: MonopolyMessage[], incoming: MonopolyMessage): MonopolyMessage[] {
   const index = messages.findIndex((message) => message.id === incoming.id);
@@ -66,6 +61,9 @@ export function useMonopolyRoom(roomId: string | undefined) {
       setLoading(false);
     }
   }, [applySnapshot, roomId]);
+
+  const refreshRef = useRef(refresh);
+  refreshRef.current = refresh;
 
   useEffect(() => {
     setSnapshot(null);
@@ -123,17 +121,27 @@ export function useMonopolyRoom(roomId: string | undefined) {
       return;
     }
     if (envelope.type === 'game.pending') {
-      const pending = envelope.data && Object.keys(envelope.data).length ? envelope.data : null;
-      setSnapshot((current) => current ? {
-        ...current,
-        pending,
-        room: {
-          ...current.room,
-          pending: pending ?? {},
-          status: pendingStatus(pending),
-          event_seq: Math.max(current.room.event_seq, nextSeq),
-        },
-      } : current);
+      const pending = envelope.data && Object.keys(envelope.data).length
+        ? envelope.data as PendingDecision
+        : null;
+      setSnapshot((current) => {
+        if (!current) return current;
+        const status = resolveRoomStatus(
+          current.room.status,
+          envelope.status,
+          pending,
+        );
+        return {
+          ...current,
+          pending,
+          room: {
+            ...current.room,
+            pending: pending ?? {},
+            status,
+            event_seq: Math.max(current.room.event_seq, nextSeq),
+          },
+        };
+      });
       return;
     }
     if (envelope.type === 'game.event') {
@@ -148,13 +156,12 @@ export function useMonopolyRoom(roomId: string | undefined) {
           intensityNote: typeof event.payload.intensity_note === 'string' ? event.payload.intensity_note : undefined,
         });
       }
+      if (event.type === 'roll_outcome_unknown' || event.type === 'game_resumed') {
+        void refreshRef.current();
+      }
       setSnapshot((current) => {
         if (!current) return current;
-        let status = current.room.status;
-        if (event.type === 'game_paused') status = 'paused';
-        if (event.type === 'engine_down' || event.type === 'roll_outcome_unknown') status = 'engine_down';
-        if (event.type === 'game_over') status = 'finished';
-        if (event.type === 'game_resumed') status = 'idle';
+        const status = reduceGameEventStatus(current.room.status, event.type, event.payload);
         return { ...current, room: { ...current.room, status, event_seq: Math.max(current.room.event_seq, nextSeq) } };
       });
     }
@@ -240,3 +247,6 @@ export function useMonopolyRoom(roomId: string | undefined) {
     clearError: () => setError(''),
   };
 }
+
+// Re-export for tests / consumers that need pending status mapping.
+export { pendingStatus };

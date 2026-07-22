@@ -306,6 +306,38 @@ class MonopolyBackendTests(unittest.TestCase):
         actions = _allowed_actions(self.service.snapshot(self.room_id), "cc")
         self.assertIn("roll", {action["action"] for action in actions})
 
+    def test_pending_persists_display_text_for_refresh(self):
+        self.service.execute(self.room_id, {"action": "roll", "actor": "haya", "expected_seq": self._seq()})
+        pending = self.service.snapshot(self.room_id)["pending"]
+        self.assertEqual(pending["display"]["text"], "task one")
+        reloaded = self.service.snapshot(self.room_id)["pending"]
+        self.assertEqual(reloaded["display"]["text"], "task one")
+
+    def test_pending_event_carries_canonical_status(self):
+        self.service.execute(self.room_id, {"action": "roll", "actor": "haya", "expected_seq": self._seq()})
+        events = [event for event in store.list_events(self.room_id, db_path=self.db_path) if event["type"] == "pending"]
+        last = events[-1]
+        self.assertEqual(last["payload"]["status"], "task_pending")
+        self.assertEqual(last["payload"]["pending"]["kind"], "task")
+
+    def test_unknown_roll_pending_event_keeps_engine_down_status(self):
+        def uncertain_roll(game_id, body):
+            return EngineReply(
+                {"state": {"turn": "CC", "coins": {"哈娅": 9, "CC": 11}}},
+                reconciled=True,
+                outcome_unknown=True,
+            )
+
+        self.engine.roll = uncertain_roll
+        with self.assertRaises(RoomError):
+            self.service.execute(self.room_id, {
+                "action": "roll", "actor": "haya", "expected_seq": self._seq(),
+            })
+        events = [event for event in store.list_events(self.room_id, db_path=self.db_path) if event["type"] == "pending"]
+        last = events[-1]
+        self.assertEqual(last["payload"]["status"], "engine_down")
+        self.assertIsNone(last["payload"]["pending"])
+
     def test_delete_uses_decrypted_engine_token(self):
         self.service.delete(self.room_id)
         self.assertIn(("delete_game", "game-1", "delete-me"), self.engine.calls)
@@ -548,6 +580,20 @@ class MonopolyAgentSchedulerTests(unittest.TestCase):
         self.assertEqual(snapshot["pending"]["chosen"], {"task": "done"})
         cc_messages = [message for message in snapshot["messages"] if message["author"] == "cc"]
         self.assertEqual(len(cc_messages), 2)
+
+
+class MonopolyRoomStateScriptTests(unittest.TestCase):
+    def test_room_state_reducer_contract(self):
+        import shutil
+        import subprocess
+        from pathlib import Path
+
+        node = shutil.which('node')
+        if not node:
+            self.skipTest('node not available')
+        script = Path(__file__).with_name('test_monopoly_room_state.mjs')
+        completed = subprocess.run([node, str(script)], check=False, capture_output=True, text=True)
+        self.assertEqual(completed.returncode, 0, completed.stderr or completed.stdout)
 
 
 if __name__ == "__main__":

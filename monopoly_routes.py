@@ -238,7 +238,22 @@ def create_monopoly_blueprint(
                         envelope = {"type": "game.state", "seq": event_seq, "data": event["payload"]}
                         name = "game.state"
                     elif event["type"] == "pending":
-                        envelope = {"type": "game.pending", "seq": event_seq, "data": event["payload"] or None}
+                        payload = event["payload"] or {}
+                        if isinstance(payload, dict) and (
+                            "pending" in payload or "status" in payload
+                        ):
+                            envelope = {
+                                "type": "game.pending",
+                                "seq": event_seq,
+                                "status": payload.get("status"),
+                                "data": payload.get("pending"),
+                            }
+                        else:
+                            envelope = {
+                                "type": "game.pending",
+                                "seq": event_seq,
+                                "data": payload or None,
+                            }
                         name = "game.pending"
                     elif event["type"] == "room_error":
                         envelope = {"type": "room.error", "data": event["payload"]}

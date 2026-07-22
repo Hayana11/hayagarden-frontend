@@ -21,6 +21,10 @@ export interface PendingDecision {
   default: Record<string, unknown>;
   chosen: Record<string, unknown> | null;
   created_seq: number;
+  display?: {
+    text?: string;
+    payload?: Record<string, unknown>;
+  };
 }
 
 export interface ProviderSnapshot {
@@ -101,7 +105,7 @@ export type StreamEnvelope =
   | { type: 'room.snapshot'; data: MonopolySnapshot }
   | { type: 'game.event'; seq: number; data: MonopolyGameEvent }
   | { type: 'game.state'; seq: number; data: MonopolyGameState }
-  | { type: 'game.pending'; seq?: number; data: PendingDecision | null }
+  | { type: 'game.pending'; seq?: number; status?: MonopolyRoomStatus; data: PendingDecision | null }
   | { type: 'chat.message'; data: MonopolyMessage }
   | { type: 'chat.start' | 'chat.delta' | 'chat.done'; actor: 'cc' | 'codex'; delta?: string; content?: string; message_id?: number }
   | { type: 'agent.status'; actor: 'cc' | 'codex'; data: AgentStatus }

@@ -38,6 +38,7 @@ export function MonopolyRoomScreen() {
   const navigate = useNavigate();
   const creatingRef = useRef(false);
   const [createError, setCreateError] = useState('');
+  const [createAttempt, setCreateAttempt] = useState(0);
   const [setupOpen, setSetupOpen] = useState(false);
   const [rolling, setRolling] = useState(false);
   const [dice, setDice] = useState(4);
@@ -45,12 +46,24 @@ export function MonopolyRoomScreen() {
   const room = useMonopolyRoom(roomId);
 
   useEffect(() => {
-    if (roomId !== 'new' || creatingRef.current) return;
+    if (roomId !== 'new') {
+      creatingRef.current = false;
+      return;
+    }
+    if (creatingRef.current) return;
+
     creatingRef.current = true;
+    setCreateError('');
+
     monopolyApi.createRoom()
-      .then((snapshot) => navigate(`/monopoly/${snapshot.room.id}`, { replace: true }))
-      .catch((error: unknown) => setCreateError(error instanceof Error ? error.message : '建房失败'));
-  }, [navigate, roomId]);
+      .then((snapshot) => {
+        navigate(`/monopoly/${snapshot.room.id}`, { replace: true });
+      })
+      .catch((error: unknown) => {
+        creatingRef.current = false;
+        setCreateError(error instanceof Error ? error.message : '建房失败');
+      });
+  }, [createAttempt, navigate, roomId]);
 
   useEffect(() => {
     if (room.snapshot?.room.status === 'lobby' || room.snapshot?.room.status === 'setup') setSetupOpen(true);
@@ -94,7 +107,22 @@ export function MonopolyRoomScreen() {
       <div className="mono-loading dash-fullscreen-page">
         <div className="mono-loading-dice">⚄</div>
         <strong>{createError || room.error || '正在准备大富翁游戏室…'}</strong>
-        {(createError || room.error) && <button type="button" onClick={() => navigate('/contacts')}>返回通讯录</button>}
+        {(createError || room.error) && (
+          <button
+            type="button"
+            onClick={() => {
+              if (roomId === 'new') {
+                creatingRef.current = false;
+                setCreateError('');
+                setCreateAttempt((value) => value + 1);
+              } else {
+                navigate('/contacts');
+              }
+            }}
+          >
+            {roomId === 'new' && createError ? '重试建房' : '返回通讯录'}
+          </button>
+        )}
       </div>
     );
   }

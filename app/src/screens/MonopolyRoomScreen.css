@@ -51,7 +51,7 @@
 .mono-icon-button:active { transform: scale(.92); }
 .mono-icon-button.paused { background: var(--mono-amber-bg); color: var(--mono-gold); }
 .mono-icon-button:disabled { opacity: .45; cursor: default; }
-.mono-leave-button { display: none; font: 28px/1 'Bodoni Moda', serif; }
+.mono-leave-button { display: grid; place-items: center; width: 28px; height: 34px; font: 28px/1 'Bodoni Moda', serif; }
 
 .mono-game-scroll { flex: 1 1 auto; min-height: 0; overflow-y: auto; scrollbar-width: none; padding-bottom: 24px; }
 .mono-game-scroll::-webkit-scrollbar, .mono-hand-scroll::-webkit-scrollbar, .mono-chat-messages::-webkit-scrollbar, .mono-setup-scroll::-webkit-scrollbar { width: 0; height: 0; }
@@ -288,7 +288,7 @@
 
 @media (max-width: 560px) {
   .mono-room-header-inner { padding-right: 10px; padding-left: 10px; gap: 7px; }
-  .mono-leave-button { display: grid; width: 28px; height: 34px; }
+  .mono-leave-button { width: 28px; height: 34px; }
   .mono-room-mark { width: 34px; height: 34px; }
   .mono-room-title-line { font-size: 14px; }
   .mono-room-subtitle { max-width: 150px; font-size: 9.5px; }
