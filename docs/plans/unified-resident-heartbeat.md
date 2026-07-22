@@ -48,10 +48,10 @@
 
 ### 前置工作
 
-- [ ] **P-126：修正并部署 PR #126**
-  - 状态：待处理
-  - 完成日期：
-  - 证据：
+- [x] **P-126：修正并部署 PR #126**
+  - 状态：已完成（morning cron 继续关闭，普通 Wake 观察期中）
+  - 完成日期：2026-07-23（北京时间）
+  - 证据：PR #126 合并 `9eb18a4`（含 `9ecb524` morning 门禁/去重 + `ff0c330` CI 修复）；生产 `main@9eb18a4`；`frontend`/`frontend-gw` 已重启；`POST /push`→404；`push_tool.py` 已删；morning cron 未启用
 - [ ] **P-0：Heartbeat Measurement Foundation**
   - 状态：未开始
   - 完成日期：
@@ -77,7 +77,7 @@
 
 ### 当前下一步
 
-> **立即处理 PR #126。完成后更新本文件，再开始 PR 0。**
+> **P-126 已合并部署。下一项：PR 0（Heartbeat Measurement Foundation）。morning cron 继续关闭至普通 Wake 观察期满。**
 
 ---
 
@@ -199,25 +199,25 @@ Claude Code 若未来不可用，只替换 adapter，不重写 Nox 心跳权威�
 
 必须完成：
 
-- [ ] **126-1：morning 最近交互免费门禁**
+- [x] **126-1：morning 最近交互免费门禁**
   - 用户刚聊过、chat 正在生成或刚产生 assistant 回复时直接跳过；
   - 必须零模型调用。
-- [ ] **126-2：精确 `wake_run_id` 去重**
+- [x] **126-2：精确 `wake_run_id` 去重**
   - `_morning_already_ran()` 查询唯一索引字段：`wake_run_id='morning-YYYY-MM-DD'`；
   - 禁止继续扫描 `cache_info LIKE`。
-- [ ] **126-3：竞争与幂等测试**
+- [x] **126-3：竞争与幂等测试**
   - 近期活动抑制；
   - 重复 run id 零模型调用；
   - morning/chat 竞争；
   - 同一天最多一次可见 morning 消息。
-- [ ] **126-4：测试日志句柄**
+- [x] **126-4：测试日志句柄**
   - 临时文件；
   - 正确关闭；
   - 不污染生产路径。
-- [ ] **126-5：部署与观察**
-  - 合并部署；
-  - morning cron 继续关闭；
-  - 观察普通 Wake 24–48 小时；
+- [x] **126-5：部署与观察**
+  - 合并部署：✅ `9eb18a4` 已上生产；
+  - morning cron 继续关闭：✅；
+  - 观察普通 Wake 24–48 小时：进行中；
   - 之后才决定是否启用北京时间 08:50 cron。
 
 ---
@@ -650,6 +650,7 @@ PR #126 修门禁与去重
 - [x] 创建专用计划分支 `plan/unified-heartbeat-tracker`；
 - [x] 将 Unified Heartbeat 完整方案与强制进度纪律写入仓库；
 - [x] 确认下一项为 PR #126；
+- [x] PR #126 合并部署完成（`9eb18a4`）；morning cron 继续关闭；
 - [-] Internal State v3 72 小时 Shadow 仍在观察，尚未宣告毕业。
 
 ---
