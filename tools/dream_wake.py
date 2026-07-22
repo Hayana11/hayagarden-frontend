@@ -36,7 +36,8 @@ def _log(msg):
     line = f"[{ts}] {msg}\n"
     sys.stdout.write(line)
     try:
-        open(LOG_FILE, 'a').write(line)
+        with open(LOG_FILE, 'a', encoding='utf-8') as log_file:
+            log_file.write(line)
     except Exception:
         pass
 
@@ -168,15 +169,13 @@ def run_nightwatch(now):
         _log(f"nightwatch error: {e}")
 
 
-def _morning_already_ran(today: str) -> bool:
-    """当天是否已跑过 morning Wake（看 wake_log.cache_info 里的 mode）。"""
+def _morning_already_ran(wake_run_id: str) -> bool:
+    """Return whether this exact fixed-morning run id is already recorded."""
     conn = _db()
     try:
         row = conn.execute(
-            "SELECT id FROM wake_log WHERE date(woke_at)=? "
-            "AND (cache_info LIKE '%\"mode\": \"morning\"%' "
-            "OR cache_info LIKE '%\"wake_mode\": \"morning\"%') LIMIT 1",
-            (today,),
+            "SELECT 1 FROM wake_log WHERE wake_run_id=? LIMIT 1",
+            (wake_run_id,),
         ).fetchone()
         return bool(row)
     finally:
@@ -184,25 +183,37 @@ def _morning_already_ran(today: str) -> bool:
 
 
 def run_morning(now):
-    """固定早安：cron 每天 8:50 北京时间触发，统一走 /wake mode=morning。"""
-    today = now.strftime('%Y-%m-%d')
-    if _morning_already_ran(today):
-        _log("morning: already ran today, skip")
+    """Fixed morning: gate locally, then use the unified /wake path."""
+    wake_run_id = f"morning-{now.strftime('%Y-%m-%d')}"
+    if _morning_already_ran(wake_run_id):
+        _log(f"morning: duplicate run id {wake_run_id}, skip")
         return
 
-    wake_run_id = f'morning-{today}'
+    t_hours = _calc_t_hours(now)
+    if t_hours is None:
+        _log("morning: clock_unreliable, skip")
+        return
+
+    min_idle_min = float(_wcfg.get_float('WAKE_MIN_IDLE_MINUTES', 30) or 30)
+    if t_hours < (min_idle_min / 60.0):
+        _log(
+            f"morning: recent_interaction T={t_hours:.3f}h "
+            f"< {min_idle_min:.0f}m, skip"
+        )
+        return
+
     _log("morning triggered → calling /wake")
     try:
         result = _call_wake({'mode': 'morning', 'wake_run_id': wake_run_id})
         if result.get('skipped'):
             _log(f"morning skipped: {result.get('reason')}")
             return
-        _act = result.get('action', '?')
-        _th = (result.get('thoughts') or '').strip()
-        if _th:
-            _log(f"morning result: {_act} | {_th[:200]}")
+        action = result.get('action', '?')
+        thoughts = (result.get('thoughts') or '').strip()
+        if thoughts:
+            _log(f"morning result: {action} | {thoughts[:200]}")
         else:
-            _log(f"morning result: {_act}")
+            _log(f"morning result: {action}")
     except Exception as e:
         _log(f"morning error: {e}")
 
