@@ -108,4 +108,4 @@ incident/ack/audit；`recover-quarantine-intents` 用于进程在中途退出后
   incident 同一文件系统。任何 Shadow evidence 失败都不否决聊天或 legacy
   emotion；只让 health/bootstrap/cutover 保持 fail-closed。
 - schema 缺失：先写 gap incident 文件，再改 emotion
-- `wake_outcome` 生产调用点仍为 0
+- `wake_outcome` 在 `gateway._wake_decide_locked` 接线；仅 `SHADOW_ENABLED=1` 时生效

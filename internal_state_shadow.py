@@ -12,7 +12,7 @@
   - 统一 Shadow adapter（方案 A：事件路径不自动 bootstrap）
 
 严格不做：
-  - 不接 wake_outcome 生产入口
+  - 不接 wake_outcome 生产入口（已迁至 gateway；默认 SHADOW=0 无操作）
   - 不修改 Prompt / Relationship Context
   - 不停止旧 discharge / satisfy（shadow 失败不得阻断聊天）
   - 不 import emotion_engine / drive_engine / desire / gateway / wake
