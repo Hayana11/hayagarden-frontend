@@ -3764,6 +3764,53 @@ def apply_outcome_shadow(
         return ShadowResult(ok=False, status='failed', error=str(exc))
 
 
+def record_wake_outcome_shadow_if_enabled(
+    *,
+    wake_run_id: str,
+    mode: str,
+    action: str,
+    fired_drive: Optional[str],
+    desire_driven: bool,
+    user_idle_hours: float,
+    db_path: Optional[str] = None,
+    environ: Optional[Mapping[str, str]] = None,
+) -> None:
+    """Best-effort wake_outcome capture after legacy executor succeeds."""
+    if not wake_run_id or mode in ('dream', 'summarize'):
+        return
+    if not is_shadow_enabled(environ=environ):
+        return
+    path = isv3.memories_db_path(db_path)
+    try:
+        outcome_at = _now_beijing()
+        result = apply_outcome_shadow(
+            wake_run_id=wake_run_id,
+            executor_action=action,
+            desire_action=None,
+            fired_drive=fired_drive,
+            desire_driven=desire_driven,
+            user_idle_hours=float(user_idle_hours),
+            outcome_at=outcome_at,
+            db_path=path,
+            environ=environ,
+        )
+        if not result.ok:
+            mark_proof_gap_standalone(
+                db_path=path,
+                failed_message_id=None,
+                error_code='wake_outcome_capture_failed',
+            )
+    except Exception:
+        try:
+            mark_proof_gap_standalone(
+                db_path=path,
+                failed_message_id=None,
+                error_code='wake_outcome_capture_failed',
+            )
+        except Exception:
+            pass
+
+
 def emit_user_rule_if_enabled(
     *,
     message_id: int,
@@ -3895,6 +3942,7 @@ __all__ = [
     'inspect_capture_alert_acks',
     'append_gap_incident_sidecar',
     'apply_outcome_shadow',
+    'record_wake_outcome_shadow_if_enabled',
     'capture_bootstrap_bundle',
     'capture_alert_configured',
     'capture_alert_path',
