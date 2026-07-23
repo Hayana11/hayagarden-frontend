@@ -402,6 +402,158 @@ class ResidentJsonlHookTests(unittest.TestCase):
         self.assertEqual(usage["cache_creation_5m"], 0)
 
 
+    def test_resident_captures_session_id_from_camelcase_jsonl_events(self):
+        session = "65305691-efff-4fd6-9df5-2fc4ea4aa43f"
+        lines = [
+            json.dumps({
+                "type": "assistant",
+                "sessionId": session,
+                "message": {
+                    "usage": {
+                        "input_tokens": 1,
+                        "output_tokens": 2,
+                        "cache_read_input_tokens": 0,
+                        "cache_creation_input_tokens": 100,
+                    },
+                },
+            }),
+            json.dumps({"type": "result", "is_error": False}),
+        ]
+        resident = ResidentSession("/tmp/cc-test", "", "/tmp/mcp.json")
+        resident._proc = FakeProc(lines)
+        replay_result = replay.replay_jsonl_lines([
+            _assistant_line(
+                "req-1", cache_creation=100, cache_creation_1h=100
+            ),
+        ])
+        with tempfile.TemporaryDirectory() as tmp:
+            jsonl_path = Path(tmp) / (session + ".jsonl")
+            jsonl_path.write_text(
+                _assistant_line("req-1", cache_creation=100, cache_creation_1h=100) + "\n",
+                encoding="utf-8",
+            )
+            with (
+                mock.patch.object(replay, "claude_project_slug", return_value=Path(tmp).name),
+                mock.patch.object(replay, "replay_session_jsonl", return_value=replay_result),
+                mock.patch.object(
+                    replay,
+                    "snapshot_session_jsonl",
+                    return_value={"path": str(jsonl_path), "offset": 0},
+                ),
+            ):
+                events = list(resident.send_turn("hello"))
+        self.assertEqual(resident.session_id, session)
+        done = [payload for event, payload in events if event == "done"]
+        usage = done[0][2]
+        self.assertEqual(usage["request_ids"], ["req-1"])
+
+    def test_resident_retries_jsonl_replay_when_file_flushes_late(self):
+        session = "199fb8b4-b310-440c-a9c2-7a3292a9d451"
+        lines = [
+            json.dumps({"type": "assistant", "sessionId": session, "message": {"usage": {
+                "input_tokens": 1,
+                "output_tokens": 2,
+                "cache_read_input_tokens": 0,
+                "cache_creation_input_tokens": 100,
+            }}}),
+            json.dumps({"type": "result", "is_error": False}),
+        ]
+        resident = ResidentSession("/tmp/cc-test", "", "/tmp/mcp.json")
+        resident._proc = FakeProc(lines)
+        replay_result = replay.replay_jsonl_lines([
+            _assistant_line("req-1", cache_creation=100, cache_creation_1h=100),
+        ])
+        with (
+            mock.patch.object(
+                replay,
+                "replay_session_jsonl",
+                side_effect=[{"request_count": 0, "request_ids": []}, replay_result],
+            ),
+            mock.patch.object(replay, "snapshot_session_jsonl", return_value=None),
+            mock.patch("cc_resident.time.sleep"),
+        ):
+            events = list(resident.send_turn("hello"))
+        done = [payload for event, payload in events if event == "done"]
+        usage = done[0][2]
+        self.assertEqual(usage["request_ids"], ["req-1"])
+        self.assertEqual(usage["cache_creation_1h"], 100)
+        self.assertTrue(usage["jsonl_usage"]["stream_totals_match"])
+
+    def test_resident_retries_until_all_jsonl_requests_arrive(self):
+        resident = ResidentSession("/tmp/cc-test", "", "/tmp/mcp.json")
+        resident._session_id = "65305691-efff-4fd6-9df5-2fc4ea4aa43f"
+        usage = {
+            "input_tokens": 2,
+            "output_tokens": 4,
+            "cache_read": 100,
+            "cache_creation": 110,
+            "rounds": [
+                {
+                    "index": 1,
+                    "input_tokens": 1,
+                    "output_tokens": 2,
+                    "cache_read": 0,
+                    "cache_creation": 100,
+                    "context_tokens": 101,
+                },
+                {
+                    "index": 2,
+                    "input_tokens": 1,
+                    "output_tokens": 2,
+                    "cache_read": 100,
+                    "cache_creation": 10,
+                    "context_tokens": 111,
+                },
+            ],
+        }
+        partial_replay = replay.replay_jsonl_lines([
+            _assistant_line(
+                "req-1",
+                input_tokens=1,
+                output_tokens=2,
+                cache_creation=100,
+                cache_creation_1h=100,
+            ),
+        ])
+        complete_replay = replay.replay_jsonl_lines([
+            _assistant_line(
+                "req-1",
+                input_tokens=1,
+                output_tokens=2,
+                cache_creation=100,
+                cache_creation_1h=100,
+            ),
+            _assistant_line(
+                "req-2",
+                input_tokens=1,
+                output_tokens=2,
+                cache_read=100,
+                cache_creation=10,
+                cache_creation_1h=10,
+            ),
+        ])
+        replay_calls = []
+
+        def _track_replay(*args, **kwargs):
+            replay_calls.append(kwargs.get("cursor"))
+            if len(replay_calls) == 1:
+                return partial_replay
+            return complete_replay
+
+        with (
+            mock.patch.object(replay, "replay_session_jsonl", side_effect=_track_replay),
+            mock.patch("cc_resident.time.sleep") as sleep_mock,
+        ):
+            merged = resident._attach_jsonl_usage_with_retry(usage)
+        self.assertEqual(len(replay_calls), 2)
+        self.assertEqual(sleep_mock.call_count, 1)
+        self.assertEqual(merged["request_ids"], ["req-1", "req-2"])
+        self.assertEqual(merged["request_count"], 2)
+        self.assertTrue(merged["jsonl_usage"]["stream_totals_match"])
+        partial_merged = replay.attach_jsonl_usage(usage, partial_replay)
+        self.assertFalse(partial_merged["jsonl_usage"]["stream_totals_match"])
+
+
 class WakeUsageIdentityTests(unittest.TestCase):
     def test_wake_uses_same_deduped_request_ids_and_ttl_buckets(self):
         rounds = [

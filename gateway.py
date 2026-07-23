@@ -3446,6 +3446,10 @@ def _cc_resident_stream_gen(messages, *, user_turn=True):
                         '_obs_tool_schema_measurement_status',
                         tool_surface.get('tool_schema_measurement_status'),
                     ),
+                    tool_count=usage.pop(
+                        '_obs_tool_count',
+                        tool_surface.get('tool_count'),
+                    ),
                     claude_session_id=usage.pop('_obs_claude_session_id', _CC_RESIDENT.session_id),
                     model=usage.pop('_obs_model', None),
                     effort=None,
