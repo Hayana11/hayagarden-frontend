@@ -10,6 +10,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
+from typing import Any
+
 ROOT = str(Path(__file__).resolve().parents[1])
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
@@ -208,6 +210,8 @@ class FingerprintAndLeaseTests(unittest.TestCase):
             mcp_config_text='{"mcpServers":{"home":{}}}',
             allowed_tools="mcp__home__read,mcp__brain__search",
             tool_schema_sha256="d" * 64,
+            tool_schema_source="mcp_list_tools",
+            tool_schema_measurement_status="available",
             model="claude-sonnet-4-6",
             thinking_config={"thinking_display": "summarized", "effort": None},
             instance_id="gw-1",
@@ -454,6 +458,95 @@ class WakeUsageIdentityTests(unittest.TestCase):
         self.assertEqual(info["cache_creation"], 105)
         self.assertEqual(info["cache_creation_1h"], 100)
         self.assertEqual(info["cache_creation_5m"], 5)
+
+
+class ToolSurfaceFingerprintTests(unittest.TestCase):
+    def _live_lists(self, *entries: tuple[str, list[dict[str, Any]]]):
+        def provider(_path):
+            return list(entries)
+        return provider
+
+    def test_live_tools_list_order_affects_hash(self):
+        from tools import cc_tool_surface as surface
+
+        schema = {"type": "object", "properties": {}}
+        allow = "mcp__home__tool_a,mcp__home__tool_b"
+        snap_ab = surface.capture_tool_surface_snapshot(
+            allow,
+            live_tool_lists_provider=self._live_lists(
+                ("home", [
+                    {"name": "tool_a", "input_schema": schema},
+                    {"name": "tool_b", "input_schema": schema},
+                ]),
+            ),
+        )
+        snap_ba = surface.capture_tool_surface_snapshot(
+            allow,
+            live_tool_lists_provider=self._live_lists(
+                ("home", [
+                    {"name": "tool_b", "input_schema": schema},
+                    {"name": "tool_a", "input_schema": schema},
+                ]),
+            ),
+        )
+        self.assertNotEqual(
+            snap_ab["tool_schema_sha256"],
+            snap_ba["tool_schema_sha256"],
+        )
+
+    def test_fresh_capture_reflects_schema_change_across_generations(self):
+        from tools import cc_tool_surface as surface
+
+        schema_v1 = {"type": "object", "properties": {"x": {"type": "string"}}}
+        schema_v2 = {"type": "object", "properties": {"y": {"type": "integer"}}}
+        schemas = [schema_v1, schema_v2]
+
+        def provider(_path):
+            schema = schemas.pop(0)
+            return [("home", [{"name": "light_on", "input_schema": schema}])]
+
+        allow = "mcp__home__light_on"
+        snap1 = surface.capture_tool_surface_snapshot(
+            allow, live_tool_lists_provider=provider,
+        )
+        snap2 = surface.capture_tool_surface_snapshot(
+            allow, live_tool_lists_provider=provider,
+        )
+        self.assertNotEqual(snap1["tool_schema_sha256"], snap2["tool_schema_sha256"])
+
+    def test_spawn_refreshes_tool_surface_snapshot(self):
+        from tools import cc_tool_surface as surface
+
+        with tempfile.TemporaryDirectory() as tmp:
+            resident = ResidentSession(tmp, "mcp__home__light_on", "/tmp/mcp.json")
+            with (
+                mock.patch("cc_resident.subprocess.Popen", return_value=FakeProc([])),
+                mock.patch.object(
+                    surface,
+                    "capture_tool_surface_snapshot",
+                    side_effect=[
+                        {
+                            "tool_schema_sha256": "a" * 64,
+                            "tool_schema_text": "[]",
+                            "tool_schema_source": "mcp_list_tools",
+                            "tool_schema_measurement_status": "available",
+                            "tool_count": 1,
+                        },
+                        {
+                            "tool_schema_sha256": "b" * 64,
+                            "tool_schema_text": "[]",
+                            "tool_schema_source": "mcp_list_tools",
+                            "tool_schema_measurement_status": "available",
+                            "tool_count": 1,
+                        },
+                    ],
+                ),
+            ):
+                resident._spawn("system", {}, reason="process_dead")
+                first = resident.tool_surface_snapshot["tool_schema_sha256"]
+                resident._spawn("system", {}, reason="idle")
+                second = resident.tool_surface_snapshot["tool_schema_sha256"]
+        self.assertNotEqual(first, second)
 
 
 if __name__ == "__main__":

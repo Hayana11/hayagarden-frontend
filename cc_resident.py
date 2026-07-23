@@ -143,6 +143,7 @@ class ResidentSession:
         self._turns_since_rel_sent = 0
         self._last_rel_mood = None
         self._keepwarm_lease_expires_at = None
+        self._tool_surface_snapshot = {}
 
     def _spawn(self, system_text, env, *, reason='process_dead'):
         self._kill(quiet=True)
@@ -170,6 +171,14 @@ class ResidentSession:
         self._cold = True
         self._generation += 1
         self._reset_session_meta(respawn_reason=reason)
+        try:
+            from tools.cc_tool_surface import capture_tool_surface_snapshot
+            self._tool_surface_snapshot = capture_tool_surface_snapshot(
+                self._allowed_tools,
+                mcp_config_path=self._mcp_config_path,
+            )
+        except Exception:
+            self._tool_surface_snapshot = {}
 
     def _kill(self, quiet=False):
         proc, self._proc = self._proc, None
@@ -511,18 +520,14 @@ class ResidentSession:
         usage['_obs_resident_pid'] = getattr(proc, 'pid', None)
         usage['_obs_claude_session_id'] = self._session_id
         usage['_obs_keepwarm_lease_expires_at'] = self._keepwarm_lease_expires_at
-        try:
-            from tools.cc_tool_surface import resolve_tool_surface
-            surface = resolve_tool_surface(
-                self._allowed_tools,
-                mcp_config_path=self._mcp_config_path,
-            )
-            usage['_obs_tool_schema_sha256'] = surface.get('tool_schema_sha256')
-            usage['_obs_tool_schema_text'] = surface.get('tool_schema_text')
-            usage['_obs_tool_schema_source'] = surface.get('tool_schema_source')
-            usage['_obs_tool_count'] = surface.get('tool_count')
-        except Exception:
-            pass
+        surface = self._tool_surface_snapshot or {}
+        usage['_obs_tool_schema_sha256'] = surface.get('tool_schema_sha256')
+        usage['_obs_tool_schema_text'] = surface.get('tool_schema_text')
+        usage['_obs_tool_schema_source'] = surface.get('tool_schema_source')
+        usage['_obs_tool_schema_measurement_status'] = surface.get(
+            'tool_schema_measurement_status'
+        )
+        usage['_obs_tool_count'] = surface.get('tool_count')
 
         if timed_out[0]:
             raise ResidentError(
@@ -599,6 +604,10 @@ class ResidentSession:
     @property
     def mcp_config_path(self):
         return self._mcp_config_path
+
+    @property
+    def tool_surface_snapshot(self):
+        return self._tool_surface_snapshot or {}
 
     @property
     def keepwarm_lease_expires_at(self):

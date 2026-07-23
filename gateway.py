@@ -3379,11 +3379,13 @@ def _cc_resident_stream_gen(messages, *, user_turn=True):
 
     # 组装现场测量：只读字符串副本；CC 路径 rolling_summary 未注入
     allowed_tool_count = len([x for x in (CC_ALLOWED_TOOLS or '').split(',') if x.strip()]) or None
-    from tools.cc_tool_surface import resolve_tool_surface
-    tool_surface = resolve_tool_surface(
-        getattr(_CC_RESIDENT, 'allowed_tools', CC_ALLOWED_TOOLS),
-        mcp_config_path=getattr(_CC_RESIDENT, 'mcp_config_path', CC_CWD + '/cc-tools.json'),
-    )
+    from tools.cc_tool_surface import capture_tool_surface_snapshot
+    tool_surface = getattr(_CC_RESIDENT, 'tool_surface_snapshot', None) or {}
+    if not tool_surface:
+        tool_surface = capture_tool_surface_snapshot(
+            getattr(_CC_RESIDENT, 'allowed_tools', CC_ALLOWED_TOOLS),
+            mcp_config_path=getattr(_CC_RESIDENT, 'mcp_config_path', CC_CWD + '/cc-tools.json'),
+        )
     original_system = full_system
     original_content = _cc_obs.snapshot_prompt_content(content)
     obs_breakdown = _cc_obs.build_context_breakdown(
@@ -3435,6 +3437,14 @@ def _cc_resident_stream_gen(messages, *, user_turn=True):
                     tool_schema_sha256=usage.pop(
                         '_obs_tool_schema_sha256',
                         tool_surface.get('tool_schema_sha256'),
+                    ),
+                    tool_schema_source=usage.pop(
+                        '_obs_tool_schema_source',
+                        tool_surface.get('tool_schema_source'),
+                    ),
+                    tool_schema_measurement_status=usage.pop(
+                        '_obs_tool_schema_measurement_status',
+                        tool_surface.get('tool_schema_measurement_status'),
                     ),
                     claude_session_id=usage.pop('_obs_claude_session_id', _CC_RESIDENT.session_id),
                     model=usage.pop('_obs_model', None),

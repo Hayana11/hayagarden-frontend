@@ -308,6 +308,8 @@ def build_runtime(
     mcp_config_text: Optional[str] = None,
     allowed_tools: Optional[str] = None,
     tool_schema_sha256: Optional[str] = None,
+    tool_schema_source: Optional[str] = None,
+    tool_schema_measurement_status: Optional[str] = None,
     claude_session_id: Optional[str] = None,
     model: Optional[str] = None,
     effort: Optional[str] = None,
@@ -355,6 +357,8 @@ def build_runtime(
         "allowed_tools_sha256": allowed_sha,
         "tools_sha256": tools_sha,
         "tool_schema_sha256": tool_schema_sha256,
+        "tool_schema_source": tool_schema_source,
+        "tool_schema_measurement_status": tool_schema_measurement_status,
         "claude_session_id_sha256": sha256_text(claude_session_id) if claude_session_id else None,
         "model": model,
         "model_sha256": model_sha,
@@ -498,7 +502,9 @@ def _fingerprint_value(runtime: Mapping[str, Any], key: str) -> Any:
 
 
 def _fingerprint_complete(runtime: Mapping[str, Any]) -> bool:
-    return all(_fingerprint_value(runtime, key) is not None for key in _FINGERPRINT_KEYS)
+    if not all(_fingerprint_value(runtime, key) is not None for key in _FINGERPRINT_KEYS):
+        return False
+    return runtime.get("tool_schema_measurement_status") == "available"
 
 
 def _fingerprints_equal(a: Mapping[str, Any], b: Mapping[str, Any]) -> bool:

@@ -52,8 +52,12 @@ def _fp(**overrides):
         "gateway_instance_id": "gw-1",
         "resident_generation": 3,
         "static_system_sha256": "a" * 64,
+        "tools_sha256": "d" * 64,
         "mcp_config_sha256": "b" * 64,
         "allowed_tools_sha256": "c" * 64,
+        "tool_schema_sha256": "d" * 64,
+        "tool_schema_source": "mcp_list_tools",
+        "tool_schema_measurement_status": "available",
         "model": "claude-sonnet",
         "effort": "high",
     }
@@ -447,6 +451,25 @@ class ExpiryFingerprintTests(unittest.TestCase):
             obs.classify_suspected_cache_expiry(usage, prev_runtime=_fp(resident_generation=3)),
             True,
         )
+
+    def test_partial_tool_surface_miss_is_unknown(self):
+        rt = _fp(idle_seconds_before_turn=6900, tool_schema_measurement_status="partial")
+        usage = _usage(
+            rounds=[{
+                "index": 1, "complete": True,
+                "input_tokens": 1, "output_tokens": 1,
+                "cache_read": 0, "cache_creation": 59557, "context_tokens": 59558,
+            }],
+            respawn_reason=None,
+            resident_turn_count=8,
+            runtime=rt,
+        )
+        prev = _fp(tool_schema_measurement_status="partial")
+        self.assertEqual(
+            obs.classify_cache_miss_reason(usage, prev_runtime=prev),
+            "unknown",
+        )
+        self.assertIsNone(obs.classify_suspected_cache_expiry(usage, prev_runtime=prev))
 
     def test_requires_all_runtime_fingerprints(self):
         rt = _fp(idle_seconds_before_turn=6900, model="m1")

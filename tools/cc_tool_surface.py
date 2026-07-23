@@ -1,21 +1,25 @@
 """Canonical CC tool-surface fingerprint for observability.
 
-Builds a stable ordered list of allowlisted tool names plus input schemas so
-schema or ordering changes invalidate the tools fingerprint.
+Each resident generation captures one ordered snapshot of the allowlisted tool
+surface.  MCP ``tools/list`` return order is preserved; schema or ordering drift
+invalidates the fingerprint.
 """
 from __future__ import annotations
 
 import json
-import os
 import urllib.error
 import urllib.request
-from functools import lru_cache
 from pathlib import Path
-from typing import Any, Mapping, Optional, Sequence
+from typing import Any, Callable, Mapping, Optional
 
 from tools.cc_usage_observability import sha256_canonical_json, sha256_text
 
 _EMPTY_SCHEMA: dict[str, Any] = {"type": "object", "properties": {}}
+
+LiveToolListsProvider = Callable[
+    [Optional[str]],
+    list[tuple[str, list[dict[str, Any]]]],
+]
 
 # Brain MCP core tools (parameterless); schema drift still changes fingerprint.
 _BRAIN_TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
@@ -77,8 +81,17 @@ _HOME_TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
 }
 
 
-def _parse_allowed_tools(allowed_tools: Optional[str]) -> list[str]:
-    return sorted({x.strip() for x in str(allowed_tools or "").split(",") if x.strip()})
+def _parse_allowed_tools_ordered(allowed_tools: Optional[str]) -> list[str]:
+    """Preserve allowlist CSV order; dedupe by first occurrence only."""
+    seen: set[str] = set()
+    out: list[str] = []
+    for part in str(allowed_tools or "").split(","):
+        name = part.strip()
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        out.append(name)
+    return out
 
 
 def _static_schema_registry() -> dict[str, dict[str, Any]]:
@@ -97,7 +110,6 @@ def _static_schema_registry() -> dict[str, dict[str, Any]]:
                 schema = _EMPTY_SCHEMA
             registry[f"mcp__codebase__{name}"] = schema
             codebase_surface.append({"name": name, "input_schema": schema})
-        # CC allowlist uses the umbrella server entry for codebase.
         registry["mcp__codebase"] = {
             "type": "object",
             "properties": {
@@ -166,20 +178,22 @@ def _fetch_mcp_tools(url: str, *, timeout: float = 2.0) -> list[dict[str, Any]]:
     return out
 
 
-def _live_mcp_registry(mcp_config_path: Optional[str]) -> dict[str, dict[str, Any]]:
+def _default_live_tool_lists(
+    mcp_config_path: Optional[str],
+) -> list[tuple[str, list[dict[str, Any]]]]:
     if not mcp_config_path:
-        return {}
+        return []
     path = Path(mcp_config_path)
     if not path.is_file():
-        return {}
+        return []
     try:
         config = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        return {}
+        return []
     servers = config.get("mcpServers")
     if not isinstance(servers, Mapping):
-        return {}
-    registry: dict[str, dict[str, Any]] = {}
+        return []
+    ordered: list[tuple[str, list[dict[str, Any]]]] = []
     for server, meta in servers.items():
         if not isinstance(meta, Mapping):
             continue
@@ -190,81 +204,96 @@ def _live_mcp_registry(mcp_config_path: Optional[str]) -> dict[str, dict[str, An
             tools = _fetch_mcp_tools(url)
         except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError):
             continue
-        for tool in tools:
-            cc_name = _mcp_cc_name(str(server), str(tool["name"]))
-            registry[cc_name] = tool["input_schema"]
-    return registry
+        ordered.append((str(server), tools))
+    return ordered
 
 
-def build_canonical_tool_surface(
-    allowed_tools: Optional[str],
+def _build_ordered_surface(
+    allowlist: list[str],
     *,
-    mcp_config_path: Optional[str] = None,
-    prefer_live_mcp: bool = True,
-) -> dict[str, Any]:
-    """Return canonical tool surface metadata for observability."""
-    names = _parse_allowed_tools(allowed_tools)
-    static = _static_schema_registry()
-    live = _live_mcp_registry(mcp_config_path) if prefer_live_mcp else {}
-    source = "static_registry"
-    if live:
-        source = "mcp_list_tools"
-
+    live_tool_lists: list[tuple[str, list[dict[str, Any]]]],
+    static_registry: Mapping[str, dict[str, Any]],
+    used_live: bool,
+) -> tuple[list[dict[str, Any]], list[str], str]:
+    allowed = set(allowlist)
     surface: list[dict[str, Any]] = []
+    seen: set[str] = set()
     missing: list[str] = []
-    for name in names:
-        schema = live.get(name) or static.get(name)
+
+    for _server, tools in live_tool_lists:
+        for tool in tools:
+            cc_name = _mcp_cc_name(_server, str(tool.get("name") or ""))
+            if cc_name not in allowed or cc_name in seen:
+                continue
+            schema = tool.get("input_schema")
+            if not isinstance(schema, dict):
+                schema = _EMPTY_SCHEMA
+            surface.append({"name": cc_name, "input_schema": schema})
+            seen.add(cc_name)
+
+    for name in allowlist:
+        if name in seen:
+            continue
+        schema = static_registry.get(name)
         if schema is None:
             missing.append(name)
             schema = _EMPTY_SCHEMA
         surface.append({"name": name, "input_schema": schema})
+        seen.add(name)
 
-    text = json.dumps(surface, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    status = "available"
-    if not names:
+    if not allowlist:
+        source = "unavailable"
         status = "unavailable"
-    elif missing and not live:
+    elif used_live and not missing:
+        source = "mcp_list_tools"
+        status = "available"
+    elif used_live and missing:
+        source = "mcp_list_tools"
         status = "partial"
     elif missing:
+        source = "static_registry"
         status = "partial"
-
-    return {
-        "tool_schema_text": text,
-        "tool_schema_sha256": sha256_text(text),
-        "tool_schema_source": source if names else None,
-        "tool_schema_measurement_status": status,
-        "tool_count": len(names),
-        "allowed_tool_count": len(names),
-        "missing_tool_schemas": missing,
-    }
+    else:
+        source = "static_registry"
+        status = "available"
+    return surface, missing, status if allowlist else "unavailable"
 
 
-@lru_cache(maxsize=8)
-def cached_tool_surface(
-    allowed_tools: str,
-    mcp_config_path: str,
-    mcp_mtime: float,
-) -> dict[str, Any]:
-    del mcp_mtime  # bust cache when mcp config file changes
-    return build_canonical_tool_surface(
-        allowed_tools,
-        mcp_config_path=mcp_config_path or None,
-    )
-
-
-def resolve_tool_surface(
+def capture_tool_surface_snapshot(
     allowed_tools: Optional[str],
     *,
     mcp_config_path: Optional[str] = None,
+    prefer_live_mcp: bool = True,
+    live_tool_lists_provider: Optional[LiveToolListsProvider] = None,
 ) -> dict[str, Any]:
-    allowed = str(allowed_tools or "")
-    path = str(mcp_config_path or "")
-    mtime = 0.0
-    if path:
-        try:
-            mtime = Path(path).stat().st_mtime
-        except OSError:
-            mtime = 0.0
-    if allowed and path:
-        return dict(cached_tool_surface(allowed, path, mtime))
-    return build_canonical_tool_surface(allowed, mcp_config_path=path or None)
+    """Capture one generation-scoped tool surface snapshot."""
+    allowlist = _parse_allowed_tools_ordered(allowed_tools)
+    static = _static_schema_registry()
+    provider = live_tool_lists_provider or _default_live_tool_lists
+    live_lists = provider(mcp_config_path) if prefer_live_mcp else []
+    used_live = bool(live_lists)
+    surface, missing, status = _build_ordered_surface(
+        allowlist,
+        live_tool_lists=live_lists,
+        static_registry=static,
+        used_live=used_live,
+    )
+    source = "mcp_list_tools" if used_live and allowlist else (
+        "static_registry" if allowlist else None
+    )
+    if not allowlist:
+        source = None
+    elif status == "partial" and not used_live:
+        source = "static_registry"
+
+    # Preserve list order; do not sort the surface array.
+    text = json.dumps(surface, ensure_ascii=False, separators=(",", ":"))
+    return {
+        "tool_schema_text": text,
+        "tool_schema_sha256": sha256_text(text),
+        "tool_schema_source": source,
+        "tool_schema_measurement_status": status,
+        "tool_count": len(allowlist),
+        "allowed_tool_count": len(allowlist),
+        "missing_tool_schemas": missing,
+    }
