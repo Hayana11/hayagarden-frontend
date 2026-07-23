@@ -197,7 +197,49 @@ class SelfTriggerRetryTests(unittest.TestCase):
         self.assertEqual(len(wake_calls), 1)
         self.assertEqual(wake_calls[0]['mode'], 'self_trigger')
         self.assertEqual(wake_calls[0]['self_trigger_id'], 7)
+        self.assertEqual(wake_calls[0]['wake_run_id'], 'self-trigger-7')
         self.assertEqual(self._consumed(), 0)
+
+    def test_self_trigger_retry_reuses_same_wake_run_id(self):
+        from tools import dream_wake
+
+        claimed = [{'id': 7, 'note': '提醒小猫'}]
+        wake_calls = []
+
+        class FakeResp:
+            def __init__(self, payload):
+                self._payload = json.dumps(payload).encode()
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def read(self):
+                return self._payload
+
+        def fake_urlopen(req, timeout=5):
+            url = getattr(req, 'full_url', None) or req.get_full_url()
+            if url.endswith('/api/self_triggers/claim'):
+                return FakeResp(claimed)
+            if url.endswith('/api/self_triggers/release'):
+                return FakeResp({'ok': True, 'released': 1})
+            raise AssertionError('unexpected url %s' % url)
+
+        def fake_call_wake(payload):
+            wake_calls.append(payload)
+            return {'ok': True, 'skipped': True, 'reason': 'chat_generating'}
+
+        with mock.patch('urllib.request.urlopen', side_effect=fake_urlopen), \
+             mock.patch.object(dream_wake, '_call_wake', side_effect=fake_call_wake), \
+             mock.patch.object(dream_wake, '_log'):
+            dream_wake.run_self_triggers()
+            dream_wake.run_self_triggers()
+
+        self.assertEqual(len(wake_calls), 2)
+        self.assertEqual(wake_calls[0]['wake_run_id'], 'self-trigger-7')
+        self.assertEqual(wake_calls[1]['wake_run_id'], 'self-trigger-7')
 
     def test_normal_recent_still_skips(self):
         self.assertEqual(

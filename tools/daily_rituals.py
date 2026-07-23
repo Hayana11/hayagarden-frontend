@@ -36,7 +36,13 @@ def run():
     
     _log(f"ritual triggered: {ritual}")
     try:
-        payload = json.dumps({'mode': 'ritual', 'ritual_type': ritual}).encode()
+        from wake.wake_run_id import make_ritual_wake_run_id
+        wake_run_id = make_ritual_wake_run_id(ritual, now)
+        payload = json.dumps({
+            'mode': 'ritual',
+            'ritual_type': ritual,
+            'wake_run_id': wake_run_id,
+        }).encode()
         req = urllib.request.Request(
             GW_WAKE,
             data=payload,

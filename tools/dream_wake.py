@@ -161,9 +161,15 @@ def run_nightwatch(now):
         _log("nightwatch: not triggered")
         return
 
-    _log("nightwatch triggered")
+    from wake.wake_run_id import make_nightwatch_wake_run_id
+    wake_run_id = make_nightwatch_wake_run_id(now)
+    _log(f"nightwatch triggered → {wake_run_id}")
     try:
-        result = _call_wake({'mode': 'nightwatch', 'activity_desc': activity_desc})
+        result = _call_wake({
+            'mode': 'nightwatch',
+            'activity_desc': activity_desc,
+            'wake_run_id': wake_run_id,
+        })
         _log(f"nightwatch result: {result.get('action')}")
     except Exception as e:
         _log(f"nightwatch error: {e}")
@@ -184,7 +190,8 @@ def _morning_already_ran(wake_run_id: str) -> bool:
 
 def run_morning(now):
     """Fixed morning: gate locally, then use the unified /wake path."""
-    wake_run_id = f"morning-{now.strftime('%Y-%m-%d')}"
+    from wake.wake_run_id import make_morning_wake_run_id
+    wake_run_id = make_morning_wake_run_id(now)
     if _morning_already_ran(wake_run_id):
         _log(f"morning: duplicate run id {wake_run_id}, skip")
         return
@@ -267,10 +274,12 @@ def run_self_triggers():
         note = t.get('note') or ''
         _log(f"self_trigger #{tid} fired: {note[:40]}")
         try:
+            from wake.wake_run_id import make_self_trigger_wake_run_id
             result = _call_wake({
                 'mode': 'self_trigger',
                 'self_trigger_id': tid,
                 'self_trigger_note': note,
+                'wake_run_id': make_self_trigger_wake_run_id(tid),
             })
             if result.get('skipped'):
                 reason = result.get('reason') or 'skipped'
@@ -328,9 +337,11 @@ def run():
         _log("not triggered")
         return
 
-    _log("triggered → calling /wake")
+    from wake.wake_run_id import make_normal_wake_run_id
+    wake_run_id = make_normal_wake_run_id(now)
+    _log(f"triggered → calling /wake ({wake_run_id})")
     try:
-        result = _call_wake({})
+        result = _call_wake({'mode': 'normal', 'wake_run_id': wake_run_id})
         if result.get('skipped'):
             _log(f"wake skipped: {result.get('reason')}")
             return
