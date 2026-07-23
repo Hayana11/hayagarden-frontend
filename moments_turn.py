@@ -162,6 +162,11 @@ def insert_user_message(
     turn_data = dict(turn_data)
     text = (content or '').strip()
     if not text:
+        # Redo/edit stream: reuse explicit identity, no new INSERT.
+        from chat.scoring_identity import parse_scoring_message_id
+        mid = parse_scoring_message_id(turn_data.get('user_message_id'))
+        if mid is not None:
+            turn_data['user_message_id'] = mid
         return turn_data
     conn = get_db_fn()
     previous_user_at = None

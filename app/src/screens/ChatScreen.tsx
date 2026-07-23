@@ -385,15 +385,15 @@ export function ChatScreen() {
       if (sending) return;
       setSending(true);
       setChatError(null);
-      const old = await regenPrepare(msgId);
-      if (old === null) {
+      const prep = await regenPrepare(msgId);
+      if (prep === null) {
         showToast('重答准备失败');
         setSending(false);
         return;
       }
       setMsgs((cur) => cur.filter((m) => m.id !== msgId));
-      const ok = await runStream(null);
-      if (ok) await regenFinalize(old);
+      const ok = await runStream(prep.userMessageId);
+      if (ok) await regenFinalize(prep.oldBranches);
       await refetchLatest();
       setSending(false);
     },
@@ -407,14 +407,14 @@ export function ChatScreen() {
       setSending(true);
       setChatError(null);
       setEditingId(null);
-      const ok = await editChatMessage(msgId, content);
-      if (!ok) {
+      const edit = await editChatMessage(msgId, content);
+      if (!edit.ok || edit.messageId === null) {
         showToast('修改失败');
         setSending(false);
         return;
       }
       await refetchLatest();
-      await runStream(null);
+      await runStream(edit.messageId);
       await refetchLatest();
       setSending(false);
     },
