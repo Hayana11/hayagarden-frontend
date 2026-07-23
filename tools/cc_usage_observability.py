@@ -17,7 +17,7 @@ from collections import Counter
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Iterable, Mapping, Optional, Sequence
 
-OBSERVATION_VERSION = 1
+OBSERVATION_VERSION = 2
 CONTEXT_LAYOUT_VERSION = 1
 ESTIMATION_METHOD = "heuristic_cjk1_ascii4_v1"
 TZ_NAME = "Asia/Shanghai"
@@ -70,6 +70,16 @@ def sha256_text(text: Optional[str]) -> Optional[str]:
     if text is None:
         return None
     return hashlib.sha256(str(text).encode("utf-8")).hexdigest()
+
+
+def sha256_canonical_json(value: Any) -> str:
+    payload = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def sha256_file(path: Optional[str]) -> Optional[str]:
@@ -298,12 +308,18 @@ def build_runtime(
     mcp_config_text: Optional[str] = None,
     allowed_tools: Optional[str] = None,
     tool_schema_sha256: Optional[str] = None,
+    tool_schema_source: Optional[str] = None,
+    tool_schema_measurement_status: Optional[str] = None,
     claude_session_id: Optional[str] = None,
     model: Optional[str] = None,
     effort: Optional[str] = None,
+    thinking_config: Optional[Mapping[str, Any]] = None,
     claude_code_version: Optional[str] = None,
     context_layout_version: int = CONTEXT_LAYOUT_VERSION,
     instance_id: Optional[str] = None,
+    observed_at: Optional[str] = None,
+    keepwarm_lease_expires_at: Optional[str] = None,
+    provider: str = "claude_code",
 ) -> dict[str, Any]:
     if mcp_config_text is not None:
         mcp_sha = sha256_text(mcp_config_text)
@@ -314,6 +330,19 @@ def build_runtime(
         idle = float(idle_seconds_before_turn)
         if idle < 0:
             idle = 0.0
+    allowed_sha = sha256_text(allowed_tools if allowed_tools is not None else "")
+    tools_sha = sha256_canonical_json({
+        "allowed_tools": allowed_tools if allowed_tools is not None else "",
+        "tool_schema_sha256": tool_schema_sha256,
+    })
+    model_sha = sha256_text(model) if model else None
+    provider_s = str(provider or "claude_code").strip() or "claude_code"
+    provider_sha = sha256_text(provider_s)
+    thinking_sha = (
+        sha256_canonical_json(dict(thinking_config))
+        if thinking_config is not None
+        else None
+    )
     return {
         "gateway_instance_id": instance_id or gateway_instance_id(),
         "resident_generation": int(resident_generation),
@@ -325,12 +354,21 @@ def build_runtime(
         "context_layout_version": int(context_layout_version),
         "static_system_sha256": sha256_text(static_system or ""),
         "mcp_config_sha256": mcp_sha,
-        "allowed_tools_sha256": sha256_text(allowed_tools if allowed_tools is not None else ""),
+        "allowed_tools_sha256": allowed_sha,
+        "tools_sha256": tools_sha,
         "tool_schema_sha256": tool_schema_sha256,
+        "tool_schema_source": tool_schema_source,
+        "tool_schema_measurement_status": tool_schema_measurement_status,
         "claude_session_id_sha256": sha256_text(claude_session_id) if claude_session_id else None,
         "model": model,
+        "model_sha256": model_sha,
+        "provider": provider_s,
+        "provider_sha256": provider_sha,
         "effort": effort,
+        "thinking_sha256": thinking_sha,
         "claude_code_version": claude_code_version,
+        "observed_at": observed_at,
+        "keepwarm_lease_expires_at": keepwarm_lease_expires_at,
     }
 
 
@@ -436,30 +474,103 @@ _FINGERPRINT_KEYS = (
     "gateway_instance_id",
     "resident_generation",
     "static_system_sha256",
+    "tools_sha256",
     "mcp_config_sha256",
-    "allowed_tools_sha256",
-    "model",
-    "effort",
+    "provider_sha256",
+    "model_sha256",
+    "thinking_sha256",
 )
 
 
-def _fingerprint_complete(runtime: Mapping[str, Any]) -> bool:
-    """全部指纹键必须存在且非 null。
+def _fingerprint_value(runtime: Mapping[str, Any], key: str) -> Any:
+    value = runtime.get(key)
+    if value is not None:
+        return value
+    # Backward-compatible derivation for observation v1 fixtures/history.
+    if key == "tools_sha256":
+        return runtime.get("allowed_tools_sha256")
+    if key == "model_sha256" and runtime.get("model") is not None:
+        return sha256_text(str(runtime.get("model")))
+    if key == "provider_sha256":
+        provider = runtime.get("provider")
+        if provider is not None:
+            return sha256_text(str(provider))
+        return sha256_text("claude_code")
+    if key == "thinking_sha256" and runtime.get("effort") is not None:
+        return sha256_canonical_json({"effort": runtime.get("effort")})
+    return None
 
-    model/effort 在生产尚未从 Claude init 取得真实值时为 null，
-    此时不得判定 suspected_cache_expiry=true，只能 unknown。
-    """
-    for key in _FINGERPRINT_KEYS:
-        if key not in runtime or runtime.get(key) is None:
-            return False
-    return True
+
+def _fingerprint_complete(runtime: Mapping[str, Any]) -> bool:
+    if not all(_fingerprint_value(runtime, key) is not None for key in _FINGERPRINT_KEYS):
+        return False
+    return runtime.get("tool_schema_measurement_status") == "available"
 
 
 def _fingerprints_equal(a: Mapping[str, Any], b: Mapping[str, Any]) -> bool:
-    for key in _FINGERPRINT_KEYS:
-        if a.get(key) != b.get(key):
-            return False
-    return True
+    return all(
+        _fingerprint_value(a, key) == _fingerprint_value(b, key)
+        for key in _FINGERPRINT_KEYS
+    )
+
+
+def _parse_runtime_dt(value: Any) -> Optional[datetime]:
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        try:
+            parsed = datetime.fromisoformat(text)
+        except ValueError:
+            return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=TZ_OFFSET)
+    return parsed.astimezone(TZ_OFFSET)
+
+
+def classify_cache_miss_reason(
+    usage: Mapping[str, Any],
+    *,
+    prev_runtime: Optional[Mapping[str, Any]] = None,
+) -> Optional[str]:
+    runtime = (usage or {}).get("runtime") or {}
+    if not isinstance(runtime, Mapping) or not is_no_respawn_cache_miss(usage, runtime):
+        return None
+    if prev_runtime is None or not isinstance(prev_runtime, Mapping):
+        return "unknown"
+    if not _fingerprint_complete(runtime) or not _fingerprint_complete(prev_runtime):
+        return "unknown"
+
+    changed_labels = (
+        ("gateway_instance_id", "gateway_changed"),
+        ("resident_generation", "resident_generation_changed"),
+        ("static_system_sha256", "system_changed"),
+        ("tools_sha256", "tools_changed"),
+        ("mcp_config_sha256", "mcp_changed"),
+        ("provider_sha256", "provider_changed"),
+        ("model_sha256", "model_changed"),
+        ("thinking_sha256", "thinking_changed"),
+    )
+    for key, label in changed_labels:
+        if _fingerprint_value(runtime, key) != _fingerprint_value(prev_runtime, key):
+            return label
+
+    observed = _parse_runtime_dt(runtime.get("observed_at"))
+    lease_expires = _parse_runtime_dt(runtime.get("keepwarm_lease_expires_at"))
+    if observed is not None and lease_expires is not None and observed >= lease_expires:
+        return "cold_return_after_lease"
+
+    idle = runtime.get("idle_seconds_before_turn")
+    try:
+        if idle is not None and float(idle) >= CACHE_EXPIRY_IDLE_SECONDS:
+            return "natural_cache_expiry"
+    except (TypeError, ValueError):
+        pass
+    return "unexplained_cache_miss"
 
 
 def classify_suspected_cache_expiry(
@@ -467,26 +578,13 @@ def classify_suspected_cache_expiry(
     *,
     prev_runtime: Optional[Mapping[str, Any]] = None,
 ) -> Optional[bool]:
-    """三态：True / False / None(unknown)。"""
-    runtime = (usage or {}).get("runtime") or {}
-    if not isinstance(runtime, dict):
-        runtime = {}
-    if not is_no_respawn_cache_miss(usage, runtime):
+    """Three-state compatibility flag backed by the categorical reason."""
+    if not is_no_respawn_cache_miss(usage, (usage or {}).get("runtime") or {}):
         return False
-    idle = runtime.get("idle_seconds_before_turn")
-    try:
-        idle_ok = idle is not None and float(idle) >= CACHE_EXPIRY_IDLE_SECONDS
-    except (TypeError, ValueError):
-        idle_ok = False
-    if not idle_ok:
-        return False
-    if prev_runtime is None or not isinstance(prev_runtime, dict):
+    reason = classify_cache_miss_reason(usage, prev_runtime=prev_runtime)
+    if reason == "unknown":
         return None
-    if not _fingerprint_complete(runtime) or not _fingerprint_complete(prev_runtime):
-        return None
-    if not _fingerprints_equal(runtime, prev_runtime):
-        return False
-    return True
+    return reason in ("natural_cache_expiry", "cold_return_after_lease")
 
 
 def parse_cache_info_row(raw: Any) -> tuple[str, Optional[dict[str, Any]]]:
@@ -736,6 +834,8 @@ def aggregate_cc_observability(
             "no_respawn_cache_miss_count": 0,
             "suspected_cache_expiry_count": 0,
             "suspected_cache_expiry_unknown_count": 0,
+            "cold_return_after_lease_count": 0,
+            "cache_miss_reasons": Counter(),
             **_empty_creation_fields(),
             "respawns_by_reason": Counter(),
             "_day_all_creation_sum": 0,
@@ -769,6 +869,8 @@ def aggregate_cc_observability(
         "no_respawn_cache_miss_count": 0,
         "suspected_cache_expiry_count": 0,
         "suspected_cache_expiry_unknown_count": 0,
+        "cold_return_after_lease_count": 0,
+        "cache_miss_reasons": Counter(),
         "median_last_round_context": None,
         "p90_last_round_context": None,
         "median_model_rounds": None,
@@ -782,6 +884,7 @@ def aggregate_cc_observability(
     breakdown_buckets: dict[str, list[float]] = {k: [] for k in BREAKDOWN_AVG_KEYS}
 
     prev_runtime: Optional[dict[str, Any]] = None
+    provider_barrier = False
     ordered = sorted(
         rows,
         key=lambda r: (
@@ -806,8 +909,9 @@ def aggregate_cc_observability(
             prev_runtime = None
             continue
         if kind == "other_provider":
-            # api_relay 等不触碰 Claude resident：只计 coverage，保留上一有效 Claude 指纹
+            # api_relay 等不触碰 Claude resident：计 coverage，并标记 provider 屏障
             coverage["other_provider_rows"] += 1
+            provider_barrier = True
             continue
         if kind in ("ambiguous_legacy", "legacy"):
             coverage["ambiguous_legacy_rows"] += 1
@@ -877,7 +981,25 @@ def aggregate_cc_observability(
         cold = is_cold_start(usage, runtime)
         miss = is_no_respawn_cache_miss(usage, runtime)
         hot = is_normal_hot(usage, runtime)
+        miss_reason = classify_cache_miss_reason(usage, prev_runtime=prev_runtime)
         expiry = classify_suspected_cache_expiry(usage, prev_runtime=prev_runtime)
+        if (
+            miss
+            and provider_barrier
+            and miss_reason not in (
+                "gateway_changed",
+                "resident_generation_changed",
+                "system_changed",
+                "tools_changed",
+                "mcp_changed",
+                "model_changed",
+                "thinking_changed",
+            )
+        ):
+            miss_reason = "provider_changed"
+        if miss_reason == "provider_changed":
+            expiry = False
+        provider_barrier = False
 
         for target in (summary, bucket):
             target["later_rounds_creation_sum"] += later_creation
@@ -910,6 +1032,12 @@ def aggregate_cc_observability(
             summary["unclassified_first_round_creation_sum"] += fr_creation
             bucket["unclassified_first_round_creation_sum"] += fr_creation
 
+        if miss_reason:
+            summary["cache_miss_reasons"][miss_reason] += 1
+            bucket["cache_miss_reasons"][miss_reason] += 1
+        if miss_reason == "cold_return_after_lease":
+            summary["cold_return_after_lease_count"] += 1
+            bucket["cold_return_after_lease_count"] += 1
         if expiry is True:
             summary["suspected_cache_expiry_count"] += 1
             bucket["suspected_cache_expiry_count"] += 1
@@ -1021,8 +1149,13 @@ def format_report_text(report: Mapping[str, Any]) -> str:
         % (s.get("input_tokens"), s.get("cache_read"), s.get("cache_creation"), s.get("output_tokens")),
         "  cold_start=%s no_respawn_cache_miss=%s"
         % (s.get("cold_start_count"), s.get("no_respawn_cache_miss_count")),
-        "  suspected_cache_expiry=%s unknown=%s"
-        % (s.get("suspected_cache_expiry_count"), s.get("suspected_cache_expiry_unknown_count")),
+        "  suspected_cache_expiry=%s unknown=%s cold_return_after_lease=%s"
+        % (
+            s.get("suspected_cache_expiry_count"),
+            s.get("suspected_cache_expiry_unknown_count"),
+            s.get("cold_return_after_lease_count"),
+        ),
+        "  cache_miss_reasons=%s" % s.get("cache_miss_reasons"),
         "  median_last_round_context=%s p90=%s median_rounds=%s"
         % (s.get("median_last_round_context"), s.get("p90_last_round_context"), s.get("median_model_rounds")),
         "  cold_start_first_round_creation_share_of_total_creation=%s"

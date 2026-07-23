@@ -52,8 +52,12 @@ def _fp(**overrides):
         "gateway_instance_id": "gw-1",
         "resident_generation": 3,
         "static_system_sha256": "a" * 64,
+        "tools_sha256": "d" * 64,
         "mcp_config_sha256": "b" * 64,
         "allowed_tools_sha256": "c" * 64,
+        "tool_schema_sha256": "d" * 64,
+        "tool_schema_source": "mcp_list_tools",
+        "tool_schema_measurement_status": "available",
         "model": "claude-sonnet",
         "effort": "high",
     }
@@ -448,6 +452,25 @@ class ExpiryFingerprintTests(unittest.TestCase):
             True,
         )
 
+    def test_partial_tool_surface_miss_is_unknown(self):
+        rt = _fp(idle_seconds_before_turn=6900, tool_schema_measurement_status="partial")
+        usage = _usage(
+            rounds=[{
+                "index": 1, "complete": True,
+                "input_tokens": 1, "output_tokens": 1,
+                "cache_read": 0, "cache_creation": 59557, "context_tokens": 59558,
+            }],
+            respawn_reason=None,
+            resident_turn_count=8,
+            runtime=rt,
+        )
+        prev = _fp(tool_schema_measurement_status="partial")
+        self.assertEqual(
+            obs.classify_cache_miss_reason(usage, prev_runtime=prev),
+            "unknown",
+        )
+        self.assertIsNone(obs.classify_suspected_cache_expiry(usage, prev_runtime=prev))
+
     def test_requires_all_runtime_fingerprints(self):
         rt = _fp(idle_seconds_before_turn=6900, model="m1")
         usage = _usage(
@@ -760,7 +783,10 @@ class ReportAggregateTests(unittest.TestCase):
             spec.loader.exec_module(mod)
             buf = io.StringIO()
             with mock.patch("sys.stdout", buf):
-                rc = mod.main(["--db", db, "--days", "3", "--format", "json"])
+                rc = mod.main([
+                    "--db", db, "--days", "3", "--format", "json",
+                    "--now", NOW.isoformat(),
+                ])
             self.assertEqual(rc, 0)
             cli_report = json.loads(buf.getvalue())
             self.assertEqual(cli_report["summary"], from_rows["summary"])
@@ -1250,7 +1276,7 @@ class ProviderInterleaveExpiryTests(unittest.TestCase):
         )
 
     def test_other_provider_does_not_break_claude_fingerprint_chain(self):
-        """Claude → api_relay → 同指纹长 idle Claude miss → expiry=true。"""
+        """Claude → api_relay → 同指纹长 idle Claude miss → provider_changed。"""
         rows = [
             {
                 "id": 1,
@@ -1281,8 +1307,12 @@ class ProviderInterleaveExpiryTests(unittest.TestCase):
         self.assertEqual(report["coverage"]["other_provider_rows"], 1)
         self.assertEqual(report["summary"]["total_user_turns"], 2)
         self.assertEqual(report["summary"]["no_respawn_cache_miss_count"], 1)
-        self.assertEqual(report["summary"]["suspected_cache_expiry_count"], 1)
+        self.assertEqual(report["summary"]["suspected_cache_expiry_count"], 0)
         self.assertEqual(report["summary"]["suspected_cache_expiry_unknown_count"], 0)
+        self.assertEqual(
+            report["summary"]["cache_miss_reasons"],
+            {"provider_changed": 1},
+        )
 
     def test_ambiguous_legacy_still_clears_fingerprint_chain(self):
         rows = [

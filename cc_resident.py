@@ -43,6 +43,10 @@ def empty_usage(**overrides):
         'output_tokens': 0,
         'cache_read': 0,
         'cache_creation': 0,
+        'cache_creation_5m': 0,
+        'cache_creation_1h': 0,
+        'request_ids': [],
+        'request_count': 0,
         'last_round_context': 0,
         'max_round_context': 0,
         'resident_turn_count': 0,
@@ -61,6 +65,10 @@ def summarize_rounds(rounds, *, resident_turn_count=0, respawn_reason=None, max_
         output_tokens=sum(int(r.get('output_tokens') or 0) for r in rounds),
         cache_read=sum(int(r.get('cache_read') or 0) for r in rounds),
         cache_creation=sum(int(r.get('cache_creation') or 0) for r in rounds),
+        cache_creation_5m=sum(int(r.get('cache_creation_5m') or 0) for r in rounds),
+        cache_creation_1h=sum(int(r.get('cache_creation_1h') or 0) for r in rounds),
+        request_ids=[r.get('request_id') for r in rounds if r.get('request_id')],
+        request_count=len([r for r in rounds if r.get('request_id')]),
         resident_turn_count=resident_turn_count,
         respawn_reason=respawn_reason,
         rounds=rounds,
@@ -91,7 +99,7 @@ def normalize_cache_info(raw):
         usage['num_rounds'] = int(raw.get('num_rounds') or len(raw.get('rounds') or []) or 1)
         usage['rounds'] = list(raw.get('rounds') or [])
         # 阶段 1A：成功回复可选观测字段（缺省保持缺失，不写成 0/false）
-        for key in ('observation_version', 'context_breakdown', 'runtime'):
+        for key in ('observation_version', 'context_breakdown', 'runtime', 'jsonl_usage'):
             if key in raw:
                 usage[key] = raw[key]
         return usage
@@ -134,6 +142,8 @@ class ResidentSession:
         self._last_rel_fingerprint = None
         self._turns_since_rel_sent = 0
         self._last_rel_mood = None
+        self._keepwarm_lease_expires_at = None
+        self._tool_surface_snapshot = {}
 
     def _spawn(self, system_text, env, *, reason='process_dead'):
         self._kill(quiet=True)
@@ -161,6 +171,14 @@ class ResidentSession:
         self._cold = True
         self._generation += 1
         self._reset_session_meta(respawn_reason=reason)
+        try:
+            from tools.cc_tool_surface import capture_tool_surface_snapshot
+            self._tool_surface_snapshot = capture_tool_surface_snapshot(
+                self._allowed_tools,
+                mcp_config_path=self._mcp_config_path,
+            )
+        except Exception:
+            self._tool_surface_snapshot = {}
 
     def _kill(self, quiet=False):
         proc, self._proc = self._proc, None
@@ -274,6 +292,14 @@ class ResidentSession:
         proc = self._proc
         if proc is None or proc.poll() is not None:
             raise ResidentError('resident 进程不存在，需要先 ensure_alive')
+
+        # 热 resident 从当前 EOF 开始；冷启动拿到 session_id 后从文件头回放。
+        jsonl_cursor = None
+        try:
+            from tools.cc_jsonl_usage import snapshot_session_jsonl
+            jsonl_cursor = snapshot_session_jsonl(self._cwd, self._session_id)
+        except Exception:
+            pass
 
         # 必须在更新 _last_used 前计算（成功路径末尾才写 _last_used）
         idle_seconds_before_turn = self.peek_idle_seconds()
@@ -477,11 +503,31 @@ class ResidentSession:
             respawn_reason=respawn_reason,
             max_round_context=self._max_round_context,
         )
+        # JSONL 只补 request identity / TTL bucket / model；stream totals 保持权威。
+        try:
+            from tools.cc_jsonl_usage import attach_jsonl_usage, replay_session_jsonl
+            usage = attach_jsonl_usage(
+                usage,
+                replay_session_jsonl(
+                    self._cwd, self._session_id, cursor=jsonl_cursor,
+                ),
+            )
+        except Exception:
+            pass
         # 观测辅助字段：不改变既有 Usage v2 公开语义，供 gateway 组装 runtime
         usage['_obs_idle_seconds_before_turn'] = idle_seconds_before_turn
         usage['_obs_resident_generation'] = self._generation
         usage['_obs_resident_pid'] = getattr(proc, 'pid', None)
         usage['_obs_claude_session_id'] = self._session_id
+        usage['_obs_keepwarm_lease_expires_at'] = self._keepwarm_lease_expires_at
+        surface = self._tool_surface_snapshot or {}
+        usage['_obs_tool_schema_sha256'] = surface.get('tool_schema_sha256')
+        usage['_obs_tool_schema_text'] = surface.get('tool_schema_text')
+        usage['_obs_tool_schema_source'] = surface.get('tool_schema_source')
+        usage['_obs_tool_schema_measurement_status'] = surface.get(
+            'tool_schema_measurement_status'
+        )
+        usage['_obs_tool_count'] = surface.get('tool_count')
 
         if timed_out[0]:
             raise ResidentError(
@@ -558,6 +604,18 @@ class ResidentSession:
     @property
     def mcp_config_path(self):
         return self._mcp_config_path
+
+    @property
+    def tool_surface_snapshot(self):
+        return self._tool_surface_snapshot or {}
+
+    @property
+    def keepwarm_lease_expires_at(self):
+        return self._keepwarm_lease_expires_at
+
+    def set_keepwarm_lease_expires_at(self, value):
+        """UH-A will write authoritative keepwarm lease expiry (ISO-8601)."""
+        self._keepwarm_lease_expires_at = value
 
     @property
     def resident_pid(self):
