@@ -287,7 +287,7 @@ def capture_tool_surface_snapshot(
         source = "static_registry"
 
     # Preserve list order; do not sort the surface array.
-    text = json.dumps(surface, ensure_ascii=False, separators=(",", ":"))
+    text = json.dumps(surface, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return {
         "tool_schema_text": text,
         "tool_schema_sha256": sha256_text(text),
