@@ -57,19 +57,19 @@
   - 完成日期：2026-07-23（北京时间）
   - 证据：PR #128 合并 `61faf6f`（`dc8b8a3` 身份绑定闭环）；`app npm ci && npm run build` 通过；生产 `main@61faf6f`；`frontend`/`frontend-gw` 已重启；`dist/assets/index-3F3miEGl.js`；`resolve_scoring_user_message` + `trigger_turn_scoring` 三线路接线
   - 范围：正常发送 / redo / edit 三条 stream 路径必须携带可评分 `message_id`；禁止 `message_id=None` 进入 `score_async`；评分前凭 id 回 DB 取用户原文；编辑产生新消息身份，重答复用原用户消息 id
-- [ ] **P-ID-WAKE：Wake run_id 修复**
-  - 状态：未开始
-  - 完成日期：
-  - 证据：
-  - 范围：`dream_wake.py` 各模式调用 `/wake` 时生成稳定 `wake_run_id`；`record_wake_outcome_shadow_if_enabled` 能收到非空 id
+- [x] **P-ID-WAKE：Wake run_id 修复**
+  - 状态：已完成
+  - 完成日期：2026-07-23（北京时间）
+  - 证据：PR #129 合并 `549cb55`（`78b67b1`）；`wake/wake_run_id.py` 五模式 builder；continuity CI 接入 22 项 Wake 身份测试；生产 `main@549cb55`；`frontend`/`frontend-gw` 已重启；morning cron 继续关闭
+  - 范围：`dream_wake.py` / `daily_rituals.py` 调用 `/wake` 前注入稳定 `wake_run_id`；gateway 去重 + shadow `wake_outcome` 接线已有
 - [ ] **P-0：Heartbeat Measurement Foundation**
   - 状态：未开始
   - 完成日期：
   - 证据：
-- [!] **P-SHADOW：Internal State v3 72 小时 Shadow 验收**
-  - 状态：身份接线阻塞，等待 P-ID-CHAT / P-ID-WAKE 修复后重启观察
+- [-] **P-SHADOW：Internal State v3 72 小时 Shadow 验收**
+  - 状态：身份接线已修复，等待自然 `wake_outcome` 验证 + ack incident #1 后重启 72h 计时
   - 完成日期：
-  - 证据：2026-07-23 日检发现 `#4118` 因 edit 后 `runStream(null)` 导致 `user_scored` 缺失 + proof gap；`wake_outcome=0` 因生产 Wake 未传 `wake_run_id`
+  - 证据：P-ID-CHAT `61faf6f` + P-ID-WAKE `549cb55` 已部署；旧 incident #1（#4118）待按根因正式结案，不伪造 `user_scored:4118`；重启观察前需抓到第一只有 `wake_run_id` 的自然 Wake 与对应 `wake_outcome`
 
 ### Unified Heartbeat
 
@@ -87,7 +87,7 @@
 
 ### 当前下一步
 
-> **P-ID-CHAT 已合并部署。下一项：P-ID-WAKE → 重启 P-SHADOW 观察 → PR 0。morning cron 继续关闭。**
+> **P-ID-CHAT + P-ID-WAKE 已合并部署（`549cb55`）。下一项：验证自然 `wake_outcome` → ack incident #1 → 重启 P-SHADOW 72h 观察 → PR 0。morning cron 继续关闭。**
 
 ---
 
@@ -663,7 +663,15 @@ PR #126 修门禁与去重
 - [x] 确认下一项为 PR #126；
 - [x] PR #126 合并部署完成（`9eb18a4`）；morning cron 继续关闭；
 - [!] P-SHADOW 暂停：Chat `message_id=None` 与 Wake `wake_run_id` 空导致 Shadow 样本/证据链阻塞；
-- [-] 下一项：P-ID-CHAT（Chat 评分身份修复）。
+- [x] P-ID-CHAT 完成：PR #128 合并部署 `61faf6f`；
+- [x] P-ID-WAKE 完成：PR #129 合并部署 `549cb55`；
+- [-] 下一项：验证自然 Wake `wake_run_id` + `wake_outcome` → ack incident #1 → 重启 P-SHADOW 72h。
+
+### 2026-07-23
+
+- [x] PR #128 门禁通过 → 合并部署 `61faf6f`；P-ID-CHAT 勾 `[x]`；
+- [x] PR #129 门禁通过（continuity 含 22 项 Wake 身份测试）→ 合并部署 `549cb55`；P-ID-WAKE 勾 `[x]`；
+- [-] P-SHADOW：等自然 `normal-YYYY-MM-DD-HH:MM` + `wake_outcome` 样本后重启 72h 计时。
 
 ---
 
