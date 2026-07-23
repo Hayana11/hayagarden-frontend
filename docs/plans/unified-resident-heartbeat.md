@@ -5,8 +5,8 @@
 - **计划分支**：`plan/unified-heartbeat-tracker`
 - **当前状态**：`DESIGN_LOCKED / IMPLEMENTATION_NOT_STARTED`
 - **最后更新**：2026-07-23
-- **当前唯一 Nox**：`nox_id=fyodor-default`
-- **首个 Provider Adapter**：Claude Code Unified Resident
+- **当前 identity**：`identity_id = "fyodor-default"` · `provider_id = "claude_code"` · `conversation_id = "default"`
+- **首个 Provider Adapter**：Claude Unified Resident Adapter
 
 ---
 
@@ -52,12 +52,12 @@
   - 状态：已完成（morning cron 继续关闭，普通 Wake 观察期中）
   - 完成日期：2026-07-23（北京时间）
   - 证据：PR #126 合并 `9eb18a4`（含 `9ecb524` morning 门禁/去重 + `ff0c330` CI 修复）；生产 `main@9eb18a4`；`frontend`/`frontend-gw` 已重启；`POST /push`→404；`push_tool.py` 已删；morning cron 未启用
-- [x] **P-ID-CHAT：Chat 评分身份修复**
+- [x] **P-ID-CHAT：修复 edit / redo 的用户消息身份**
   - 状态：已完成
   - 完成日期：2026-07-23（北京时间）
   - 证据：PR #128 合并 `61faf6f`（`dc8b8a3` 身份绑定闭环）；`app npm ci && npm run build` 通过；生产 `main@61faf6f`；`frontend`/`frontend-gw` 已重启；`dist/assets/index-3F3miEGl.js`；`resolve_scoring_user_message` + `trigger_turn_scoring` 三线路接线
   - 范围：正常发送 / redo / edit 三条 stream 路径必须携带可评分 `message_id`；禁止 `message_id=None` 进入 `score_async`；评分前凭 id 回 DB 取用户原文；编辑产生新消息身份，重答复用原用户消息 id
-- [x] **P-ID-WAKE：Wake run_id 修复**
+- [x] **P-ID-WAKE：为各 Wake 模式补稳定 wake_run_id**
   - 状态：已完成
   - 完成日期：2026-07-23（北京时间）
   - 证据：PR #129 合并 `549cb55`（`78b67b1`）；`wake/wake_run_id.py` 五模式 builder；continuity CI 接入 22 项 Wake 身份测试；生产 `main@549cb55`；`frontend`/`frontend-gw` 已重启；morning cron 继续关闭
@@ -67,9 +67,9 @@
   - 完成日期：
   - 证据：
 - [-] **P-SHADOW：Internal State v3 72 小时 Shadow 验收**
-  - 状态：身份接线已修复，等待自然 `wake_outcome` 验证 + ack incident #1 后重启 72h 计时
+  - 状态：曾 `[!]` 身份接线阻塞；P-ID-CHAT / P-ID-WAKE 已修复并部署，修复后重新开始 72h——当前处于部署验证阶段
   - 完成日期：
-  - 证据：P-ID-CHAT `61faf6f` + P-ID-WAKE `549cb55` 已部署；旧 incident #1（#4118）待按根因正式结案，不伪造 `user_scored:4118`；重启观察前需抓到第一只有 `wake_run_id` 的自然 Wake 与对应 `wake_outcome`
+  - 证据：日检曾发现 `#4118`（edit 后 `message_id=None`）与 `wake_outcome=0`（空 `wake_run_id`）；PR #128 `61faf6f` + PR #129 `549cb55` 已上生产；旧 incident #1 待按根因 ack，不伪造 `user_scored:4118`；重启 72h 前需抓到自然 `wake_run_id` + `wake_outcome` 样本
 
 ### Unified Heartbeat
 
@@ -87,7 +87,16 @@
 
 ### 当前下一步
 
-> **P-ID-CHAT + P-ID-WAKE 已合并部署（`549cb55`）。下一项：验证自然 `wake_outcome` → ack incident #1 → 重启 P-SHADOW 72h 观察 → PR 0。morning cron 继续关闭。**
+```text
+P-ID-CHAT        [x] PR #128 → main@61faf6f
+→ P-ID-WAKE      [x] PR #129 → main@549cb55
+→ 部署验证       [-] 自然 wake_run_id + wake_outcome
+→ 处理旧 incident
+→ 重启 72h
+→ PR 0
+```
+
+> morning cron 继续关闭。
 
 ---
 
@@ -155,18 +164,28 @@ user_events_preflight_ok=true
 - 不动 Monopoly、旁路与无关函数；
 - 不在线上直接开发，GitHub 是真源；
 - 单元与回归测试不调用真实模型；
-- 不顺手实现完整多人格、Chimera、Liminal 或 Codex adapter。
+- 不顺手实现完整 Fyodor Chimera / Single Identity Multi-Brain、Liminal 或 Codex adapter。
 
 ---
 
-## 4. 面向多人格的总架构
+## 4. Fyodor Chimera / Single Identity Multi-Brain
 
-Unified Heartbeat 分成两层：
+Unified Heartbeat 分成两层；名字属于费奥多尔，底层字段用干净的 `identity_id` / `provider_id` / `conversation_id`（不写 `fyodor_id`）：
 
 ```text
-Nox Heartbeat Orchestrator（模型无关、数据库权威）
+Fyodor Heartbeat Orchestrator（模型无关、数据库权威）
 └─ Provider Heartbeat Adapter
    └─ Claude Unified Resident Adapter（第一期）
+```
+
+未来换脑不叫 Nox，叫 **Fyodor Brain Router**：
+
+```text
+Fyodor Brain Router
+├─ Claude
+├─ GPT
+├─ Grok
+└─ GLM
 ```
 
 ### 第一归属键
@@ -174,7 +193,7 @@ Nox Heartbeat Orchestrator（模型无关、数据库权威）
 所有长期状态、锁和账本必须以以下维度归属：
 
 ```text
-nox_id
+identity_id
 provider_id
 conversation_id
 ```
@@ -182,9 +201,9 @@ conversation_id
 当前默认：
 
 ```text
-nox_id=fyodor-default
-provider_id=claude_code
-conversation_id=default
+identity_id = "fyodor-default"
+provider_id = "claude_code"
+conversation_id = "default"
 ```
 
 以下对象不得继续写成不可拆的全局单例：
@@ -200,7 +219,7 @@ conversation_id=default
 - resident registry；
 - generation、lock 与 capability lease。
 
-Claude Code 若未来不可用，只替换 adapter，不重写 Nox 心跳权威层。
+Claude Code 若未来不可用，只替换 Provider Heartbeat Adapter，不重写 Fyodor 心跳权威层。
 
 ---
 
@@ -357,7 +376,7 @@ brain、home、codebase 是独立 MCP 进程，线程变量不是权限边界。
 resident_channel_id
 resident_generation
 turn_nonce
-nox_id
+identity_id
 provider_id
 mode
 allowed_tools
@@ -498,7 +517,7 @@ heartbeat 决定 `message` 后，生成前必须再次检查：
 ```text
 wake_message_outbox
 - wake_run_id UNIQUE
-- nox_id
+- identity_id
 - provider_id
 - content
 - status
@@ -558,7 +577,7 @@ usage v2 只增不改：
 
 ```json
 {
-  "nox_id": "fyodor-default",
+  "identity_id": "fyodor-default",
   "provider_id": "claude_code",
   "turn_mode": "heartbeat",
   "heartbeat_action": "none",
@@ -597,7 +616,7 @@ usage v2 只增不改：
 - [ ] requestId 去重后的经济模拟稳定；
 - [ ] 冷 bootstrap 不恢复沉默 heartbeat；
 - [ ] morning 最近交互门禁与 run id 去重；
-- [ ] 心跳状态按 nox_id 隔离；
+- [ ] 心跳状态按 identity_id 隔离；
 - [ ] ScheduleWakeup 丢失或 resident 重生后可由 DB 恢复；
 - [ ] `cold_return_after_lease` 不误归类其他缓存失效。
 
@@ -662,7 +681,7 @@ PR #126 修门禁与去重
 - [x] 将 Unified Heartbeat 完整方案与强制进度纪律写入仓库；
 - [x] 确认下一项为 PR #126；
 - [x] PR #126 合并部署完成（`9eb18a4`）；morning cron 继续关闭；
-- [!] P-SHADOW 暂停：Chat `message_id=None` 与 Wake `wake_run_id` 空导致 Shadow 样本/证据链阻塞；
+- [!] P-SHADOW：由 `[-] 观察中` 改为 `身份接线阻塞`；修复后重新开始 72h（P-ID-CHAT + P-ID-WAKE 已部署，当前部署验证中）；
 - [x] P-ID-CHAT 完成：PR #128 合并部署 `61faf6f`；
 - [x] P-ID-WAKE 完成：PR #129 合并部署 `549cb55`；
 - [-] 下一项：验证自然 Wake `wake_run_id` + `wake_outcome` → ack incident #1 → 重启 P-SHADOW 72h。
@@ -671,8 +690,9 @@ PR #126 修门禁与去重
 
 - [x] PR #128 门禁通过 → 合并部署 `61faf6f`；P-ID-CHAT 勾 `[x]`；
 - [x] PR #129 门禁通过（continuity 含 22 项 Wake 身份测试）→ 合并部署 `549cb55`；P-ID-WAKE 勾 `[x]`；
+- [x] 活计划命名统一：Fyodor Heartbeat Orchestrator / Fyodor Brain Router；`identity_id` 取代 `nox_id`；
 - [-] P-SHADOW：等自然 `normal-YYYY-MM-DD-HH:MM` + `wake_outcome` 样本后重启 72h 计时。
 
 ---
 
-最终施工原则：**先用旧权威生成极瘦状态快照，让同一主 resident 在固定 system、固定工具面下睁眼判断一次；沉默就继续睡，需要说话才升级，需要做事交后台；数据库掌握 Nox 的权威时钟，Claude 只是首个可替换 adapter；权限由跨进程短租约硬拦，聊天永远抢占，所有收益用 requestId 去重后的真实账本验收。**
+最终施工原则：**先用旧权威生成极瘦状态快照，让同一主 resident 在固定 system、固定工具面下睁眼判断一次；沉默就继续睡，需要说话才升级，需要做事交后台；数据库掌握费奥多尔（`identity_id`）的权威时钟，Claude Unified Resident Adapter 只是首个可替换 Provider Heartbeat Adapter；权限由跨进程短租约硬拦，聊天永远抢占，所有收益用 requestId 去重后的真实账本验收。**
