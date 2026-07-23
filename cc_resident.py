@@ -142,6 +142,7 @@ class ResidentSession:
         self._last_rel_fingerprint = None
         self._turns_since_rel_sent = 0
         self._last_rel_mood = None
+        self._keepwarm_lease_expires_at = None
 
     def _spawn(self, system_text, env, *, reason='process_dead'):
         self._kill(quiet=True)
@@ -509,6 +510,19 @@ class ResidentSession:
         usage['_obs_resident_generation'] = self._generation
         usage['_obs_resident_pid'] = getattr(proc, 'pid', None)
         usage['_obs_claude_session_id'] = self._session_id
+        usage['_obs_keepwarm_lease_expires_at'] = self._keepwarm_lease_expires_at
+        try:
+            from tools.cc_tool_surface import resolve_tool_surface
+            surface = resolve_tool_surface(
+                self._allowed_tools,
+                mcp_config_path=self._mcp_config_path,
+            )
+            usage['_obs_tool_schema_sha256'] = surface.get('tool_schema_sha256')
+            usage['_obs_tool_schema_text'] = surface.get('tool_schema_text')
+            usage['_obs_tool_schema_source'] = surface.get('tool_schema_source')
+            usage['_obs_tool_count'] = surface.get('tool_count')
+        except Exception:
+            pass
 
         if timed_out[0]:
             raise ResidentError(
@@ -585,6 +599,14 @@ class ResidentSession:
     @property
     def mcp_config_path(self):
         return self._mcp_config_path
+
+    @property
+    def keepwarm_lease_expires_at(self):
+        return self._keepwarm_lease_expires_at
+
+    def set_keepwarm_lease_expires_at(self, value):
+        """UH-A will write authoritative keepwarm lease expiry (ISO-8601)."""
+        self._keepwarm_lease_expires_at = value
 
     @property
     def resident_pid(self):

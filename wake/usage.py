@@ -8,12 +8,37 @@ from __future__ import annotations
 
 from typing import Any, Callable, Mapping, Optional, Sequence
 
+from tools.cc_jsonl_usage import pick_authoritative_duplicate_record
+
 
 def _as_int(value: Any) -> int:
     try:
         return max(0, int(value or 0))
     except (TypeError, ValueError):
         return 0
+
+
+def _dedupe_usage_rounds(raw_rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    by_request_id: dict[str, dict[str, Any]] = {}
+    for row in raw_rows:
+        item = dict(row)
+        request_id = str(item.get("request_id") or "").strip()
+        if not request_id:
+            rows.append(item)
+            continue
+        previous = by_request_id.get(request_id)
+        if previous is None:
+            by_request_id[request_id] = item
+            rows.append(item)
+            continue
+        chosen = pick_authoritative_duplicate_record(previous, item)
+        by_request_id[request_id] = chosen
+        for index, existing in enumerate(rows):
+            if str(existing.get("request_id") or "").strip() == request_id:
+                rows[index] = chosen
+                break
+    return rows
 
 
 def usage_round_from_result(
@@ -79,17 +104,12 @@ def build_wake_cache_info(
     guess from WAKE_PROVIDER=inherit alone.
     """
     raw_rows = [dict(row) for row in rounds if isinstance(row, Mapping)]
-    rows: list[dict[str, Any]] = []
-    request_ids: list[str] = []
-    seen_request_ids: set[str] = set()
-    for row in raw_rows:
-        request_id = str(row.get("request_id") or "").strip()
-        if request_id and request_id in seen_request_ids:
-            continue
-        if request_id:
-            seen_request_ids.add(request_id)
-            request_ids.append(request_id)
-        rows.append(row)
+    rows = _dedupe_usage_rounds(raw_rows)
+    request_ids = [
+        str(row.get("request_id"))
+        for row in rows
+        if str(row.get("request_id") or "").strip()
+    ]
     totals = {
         "cache_read": sum(_as_int(row.get("cache_read")) for row in rows),
         "cache_creation": sum(_as_int(row.get("cache_creation")) for row in rows),

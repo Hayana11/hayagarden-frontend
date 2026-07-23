@@ -3379,6 +3379,11 @@ def _cc_resident_stream_gen(messages, *, user_turn=True):
 
     # 组装现场测量：只读字符串副本；CC 路径 rolling_summary 未注入
     allowed_tool_count = len([x for x in (CC_ALLOWED_TOOLS or '').split(',') if x.strip()]) or None
+    from tools.cc_tool_surface import resolve_tool_surface
+    tool_surface = resolve_tool_surface(
+        getattr(_CC_RESIDENT, 'allowed_tools', CC_ALLOWED_TOOLS),
+        mcp_config_path=getattr(_CC_RESIDENT, 'mcp_config_path', CC_CWD + '/cc-tools.json'),
+    )
     original_system = full_system
     original_content = _cc_obs.snapshot_prompt_content(content)
     obs_breakdown = _cc_obs.build_context_breakdown(
@@ -3397,9 +3402,9 @@ def _cc_resident_stream_gen(messages, *, user_turn=True):
         one_shot_text=one_shot_text or '',
         user_text=last_text or '',
         final_content=content,
-        tool_schema_text=None,
-        tool_schema_source=None,
-        tool_count=None,
+        tool_schema_text=tool_surface.get("tool_schema_text"),
+        tool_schema_source=tool_surface.get("tool_schema_source"),
+        tool_count=tool_surface.get("tool_count"),
         allowed_tool_count=allowed_tool_count,
         is_cold=is_cold,
     )
@@ -3427,7 +3432,10 @@ def _cc_resident_stream_gen(messages, *, user_turn=True):
                     static_system=full_system,
                     mcp_config_path=_CC_RESIDENT.mcp_config_path,
                     allowed_tools=_CC_RESIDENT.allowed_tools,
-                    tool_schema_sha256=None,
+                    tool_schema_sha256=usage.pop(
+                        '_obs_tool_schema_sha256',
+                        tool_surface.get('tool_schema_sha256'),
+                    ),
                     claude_session_id=usage.pop('_obs_claude_session_id', _CC_RESIDENT.session_id),
                     model=usage.pop('_obs_model', None),
                     effort=None,
@@ -3437,6 +3445,11 @@ def _cc_resident_stream_gen(messages, *, user_turn=True):
                     },
                     claude_code_version=_cc_obs.detect_claude_code_version(),
                     observed_at=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                    keepwarm_lease_expires_at=usage.pop(
+                        '_obs_keepwarm_lease_expires_at',
+                        getattr(_CC_RESIDENT, 'keepwarm_lease_expires_at', None),
+                    ),
+                    provider='claude_code',
                 )
                 for _k in list(usage.keys()):
                     if str(_k).startswith('_obs_'):

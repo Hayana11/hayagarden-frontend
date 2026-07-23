@@ -317,6 +317,7 @@ def build_runtime(
     instance_id: Optional[str] = None,
     observed_at: Optional[str] = None,
     keepwarm_lease_expires_at: Optional[str] = None,
+    provider: str = "claude_code",
 ) -> dict[str, Any]:
     if mcp_config_text is not None:
         mcp_sha = sha256_text(mcp_config_text)
@@ -333,6 +334,8 @@ def build_runtime(
         "tool_schema_sha256": tool_schema_sha256,
     })
     model_sha = sha256_text(model) if model else None
+    provider_s = str(provider or "claude_code").strip() or "claude_code"
+    provider_sha = sha256_text(provider_s)
     thinking_sha = (
         sha256_canonical_json(dict(thinking_config))
         if thinking_config is not None
@@ -355,6 +358,8 @@ def build_runtime(
         "claude_session_id_sha256": sha256_text(claude_session_id) if claude_session_id else None,
         "model": model,
         "model_sha256": model_sha,
+        "provider": provider_s,
+        "provider_sha256": provider_sha,
         "effort": effort,
         "thinking_sha256": thinking_sha,
         "claude_code_version": claude_code_version,
@@ -467,6 +472,7 @@ _FINGERPRINT_KEYS = (
     "static_system_sha256",
     "tools_sha256",
     "mcp_config_sha256",
+    "provider_sha256",
     "model_sha256",
     "thinking_sha256",
 )
@@ -481,6 +487,11 @@ def _fingerprint_value(runtime: Mapping[str, Any], key: str) -> Any:
         return runtime.get("allowed_tools_sha256")
     if key == "model_sha256" and runtime.get("model") is not None:
         return sha256_text(str(runtime.get("model")))
+    if key == "provider_sha256":
+        provider = runtime.get("provider")
+        if provider is not None:
+            return sha256_text(str(provider))
+        return sha256_text("claude_code")
     if key == "thinking_sha256" and runtime.get("effort") is not None:
         return sha256_canonical_json({"effort": runtime.get("effort")})
     return None
@@ -534,6 +545,7 @@ def classify_cache_miss_reason(
         ("static_system_sha256", "system_changed"),
         ("tools_sha256", "tools_changed"),
         ("mcp_config_sha256", "mcp_changed"),
+        ("provider_sha256", "provider_changed"),
         ("model_sha256", "model_changed"),
         ("thinking_sha256", "thinking_changed"),
     )
@@ -866,6 +878,7 @@ def aggregate_cc_observability(
     breakdown_buckets: dict[str, list[float]] = {k: [] for k in BREAKDOWN_AVG_KEYS}
 
     prev_runtime: Optional[dict[str, Any]] = None
+    provider_barrier = False
     ordered = sorted(
         rows,
         key=lambda r: (
@@ -890,8 +903,9 @@ def aggregate_cc_observability(
             prev_runtime = None
             continue
         if kind == "other_provider":
-            # api_relay 等不触碰 Claude resident：只计 coverage，保留上一有效 Claude 指纹
+            # api_relay 等不触碰 Claude resident：计 coverage，并标记 provider 屏障
             coverage["other_provider_rows"] += 1
+            provider_barrier = True
             continue
         if kind in ("ambiguous_legacy", "legacy"):
             coverage["ambiguous_legacy_rows"] += 1
@@ -963,6 +977,23 @@ def aggregate_cc_observability(
         hot = is_normal_hot(usage, runtime)
         miss_reason = classify_cache_miss_reason(usage, prev_runtime=prev_runtime)
         expiry = classify_suspected_cache_expiry(usage, prev_runtime=prev_runtime)
+        if (
+            miss
+            and provider_barrier
+            and miss_reason not in (
+                "gateway_changed",
+                "resident_generation_changed",
+                "system_changed",
+                "tools_changed",
+                "mcp_changed",
+                "model_changed",
+                "thinking_changed",
+            )
+        ):
+            miss_reason = "provider_changed"
+        if miss_reason == "provider_changed":
+            expiry = False
+        provider_barrier = False
 
         for target in (summary, bucket):
             target["later_rounds_creation_sum"] += later_creation

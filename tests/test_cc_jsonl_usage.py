@@ -118,6 +118,24 @@ class JsonlReplayTests(unittest.TestCase):
         self.assertEqual(result["request_count"], 1)
         self.assertEqual(result["conflicting_duplicate_rows"], 1)
         self.assertEqual(result["totals"]["cache_creation"], 12)
+        self.assertEqual(result["totals"]["cache_creation_1h"], 12)
+        self.assertEqual(result["totals"]["cache_creation_5m"], 0)
+
+    def test_conflicting_duplicate_never_merges_ttl_buckets(self):
+        a = _assistant_line(
+            "req-1", cache_creation=100, cache_creation_5m=100, cache_creation_1h=0
+        )
+        b = _assistant_line(
+            "req-1", cache_creation=100, cache_creation_5m=0, cache_creation_1h=100
+        )
+        result = replay.replay_jsonl_lines([a, b])
+        record = result["records"][0]
+        self.assertEqual(record["cache_creation"], 100)
+        self.assertTrue(
+            record["cache_creation_5m"] + record["cache_creation_1h"] == 100
+        )
+        self.assertEqual(result["totals"]["cache_creation_5m"], record["cache_creation_5m"])
+        self.assertEqual(result["totals"]["cache_creation_1h"], record["cache_creation_1h"])
 
     def test_file_cursor_only_replays_new_requests(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -219,6 +237,7 @@ class FingerprintAndLeaseTests(unittest.TestCase):
             "static_system_sha256",
             "tools_sha256",
             "mcp_config_sha256",
+            "provider_sha256",
             "model_sha256",
             "thinking_sha256",
         ):
@@ -231,6 +250,10 @@ class FingerprintAndLeaseTests(unittest.TestCase):
         self.assertNotEqual(
             a["tools_sha256"],
             self._runtime(allowed_tools="mcp__home__read")["tools_sha256"],
+        )
+        self.assertNotEqual(
+            a["provider_sha256"],
+            self._runtime(provider="api_relay")["provider_sha256"],
         )
         self.assertNotEqual(
             a["model_sha256"],

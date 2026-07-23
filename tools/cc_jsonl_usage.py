@@ -99,19 +99,37 @@ def _accounting_tuple(record: Mapping[str, Any]) -> tuple[Any, ...]:
     return tuple(record.get(key) for key in _NUMERIC_FIELDS) + (record.get("model"),)
 
 
-def _merge_conflicting_duplicate(
+def _ttl_buckets_valid(record: Mapping[str, Any]) -> bool:
+    creation = _as_int(record.get("cache_creation"))
+    bucket_sum = _as_int(record.get("cache_creation_5m")) + _as_int(record.get("cache_creation_1h"))
+    return creation > 0 and bucket_sum == creation
+
+
+def _authoritative_score(record: Mapping[str, Any]) -> tuple[int, int, str]:
+    valid = 1 if _ttl_buckets_valid(record) else 0
+    total = sum(_as_int(record.get(key)) for key in _NUMERIC_FIELDS)
+    timestamp = str(record.get("timestamp") or "")
+    return valid, total, timestamp
+
+
+def _pick_authoritative_duplicate(
     first: Mapping[str, Any],
     later: Mapping[str, Any],
 ) -> dict[str, Any]:
-    """Keep one conservative record without ever charging the request twice."""
-    merged = dict(first)
-    for key in _NUMERIC_FIELDS:
-        merged[key] = max(_as_int(first.get(key)), _as_int(later.get(key)))
-    if not merged.get("model") and later.get("model"):
-        merged["model"] = later.get("model")
-    if not merged.get("timestamp") and later.get("timestamp"):
-        merged["timestamp"] = later.get("timestamp")
-    return merged
+    """Pick one whole record; never merge numeric fields across conflicts."""
+    if _authoritative_score(later) > _authoritative_score(first):
+        return dict(later)
+    if _authoritative_score(later) < _authoritative_score(first):
+        return dict(first)
+    return dict(later)
+
+
+def pick_authoritative_duplicate_record(
+    first: Mapping[str, Any],
+    later: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Public helper for wake/jsonl duplicate requestId resolution."""
+    return _pick_authoritative_duplicate(first, later)
 
 
 def replay_jsonl_lines(
@@ -148,7 +166,7 @@ def replay_jsonl_lines(
             previous = unique[request_id]
             if _accounting_tuple(previous) != _accounting_tuple(record):
                 conflicting_duplicates += 1
-                unique[request_id] = _merge_conflicting_duplicate(previous, record)
+                unique[request_id] = _pick_authoritative_duplicate(previous, record)
             continue
         unique[request_id] = record
 

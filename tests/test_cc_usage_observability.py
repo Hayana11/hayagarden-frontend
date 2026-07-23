@@ -1253,7 +1253,7 @@ class ProviderInterleaveExpiryTests(unittest.TestCase):
         )
 
     def test_other_provider_does_not_break_claude_fingerprint_chain(self):
-        """Claude → api_relay → 同指纹长 idle Claude miss → expiry=true。"""
+        """Claude → api_relay → 同指纹长 idle Claude miss → provider_changed。"""
         rows = [
             {
                 "id": 1,
@@ -1284,8 +1284,12 @@ class ProviderInterleaveExpiryTests(unittest.TestCase):
         self.assertEqual(report["coverage"]["other_provider_rows"], 1)
         self.assertEqual(report["summary"]["total_user_turns"], 2)
         self.assertEqual(report["summary"]["no_respawn_cache_miss_count"], 1)
-        self.assertEqual(report["summary"]["suspected_cache_expiry_count"], 1)
+        self.assertEqual(report["summary"]["suspected_cache_expiry_count"], 0)
         self.assertEqual(report["summary"]["suspected_cache_expiry_unknown_count"], 0)
+        self.assertEqual(
+            report["summary"]["cache_miss_reasons"],
+            {"provider_changed": 1},
+        )
 
     def test_ambiguous_legacy_still_clears_fingerprint_chain(self):
         rows = [
