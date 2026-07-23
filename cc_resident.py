@@ -300,8 +300,12 @@ class ResidentSession:
                 replay_cursor['offset'] = 0
         return replay_cursor
 
+    def _jsonl_usage_complete(self, merged):
+        jsonl_usage = (merged or {}).get('jsonl_usage') or {}
+        return jsonl_usage.get('stream_totals_match') is True
+
     def _attach_jsonl_usage_with_retry(self, usage, jsonl_cursor=None):
-        """JSONL 落盘可能略晚于 stdout；短退避重试，避免 request_ids 恒空。"""
+        """JSONL 落盘可能略晚于 stdout；短退避重试直到 stream totals 对齐。"""
         from tools.cc_jsonl_usage import attach_jsonl_usage, replay_session_jsonl
 
         if not self._session_id:
@@ -309,22 +313,23 @@ class ResidentSession:
         replay_cursor = self._jsonl_replay_cursor(jsonl_cursor)
         delays = (0.0, 0.05, 0.15, 0.35)
         last_replay = None
+        last_merged = usage
         for delay in delays:
             if delay:
                 time.sleep(delay)
             last_replay = replay_session_jsonl(
                 self._cwd, self._session_id, cursor=replay_cursor,
             )
-            merged = attach_jsonl_usage(usage, last_replay)
-            if int(merged.get('request_count') or 0) > 0:
-                return merged
+            last_merged = attach_jsonl_usage(usage, last_replay)
+            if self._jsonl_usage_complete(last_merged):
+                return last_merged
             has_usage = any(
                 int(usage.get(key) or 0) > 0
                 for key in ('cache_creation', 'input_tokens', 'output_tokens')
             )
             if not has_usage:
                 break
-        return attach_jsonl_usage(usage, last_replay)
+        return last_merged
 
     def send_turn(self, content, commit_meta=None):
         """Yield ('text'/'think'/'tool_use'/'tool_result'/'done', payload).
