@@ -66,8 +66,8 @@
   - 状态：未开始
   - 完成日期：
   - 证据：
-- [-] **P-SHADOW：Internal State v3 72 小时 Shadow 验收**
-  - 状态：曾 `[!]` 身份接线阻塞；P-ID-CHAT / P-ID-WAKE 已修复并部署，修复后重新开始 72h——当前处于部署验证阶段
+- [!] **P-SHADOW：Internal State v3 72 小时 Shadow 验收**
+  - 状态：身份接线阻塞；修复后重新开始 72h（P-ID-CHAT / P-ID-WAKE 已部署，待部署验证与自然 `wake_outcome`）
   - 完成日期：
   - 证据：日检曾发现 `#4118`（edit 后 `message_id=None`）与 `wake_outcome=0`（空 `wake_run_id`）；PR #128 `61faf6f` + PR #129 `549cb55` 已上生产；旧 incident #1 待按根因 ack，不伪造 `user_scored:4118`；重启 72h 前需抓到自然 `wake_run_id` + `wake_outcome` 样本
 
