@@ -447,6 +447,37 @@ class ResidentJsonlHookTests(unittest.TestCase):
         usage = done[0][2]
         self.assertEqual(usage["request_ids"], ["req-1"])
 
+    def test_resident_retries_jsonl_replay_when_file_flushes_late(self):
+        session = "199fb8b4-b310-440c-a9c2-7a3292a9d451"
+        lines = [
+            json.dumps({"type": "assistant", "sessionId": session, "message": {"usage": {
+                "input_tokens": 1,
+                "output_tokens": 2,
+                "cache_read_input_tokens": 0,
+                "cache_creation_input_tokens": 100,
+            }}}),
+            json.dumps({"type": "result", "is_error": False}),
+        ]
+        resident = ResidentSession("/tmp/cc-test", "", "/tmp/mcp.json")
+        resident._proc = FakeProc(lines)
+        replay_result = replay.replay_jsonl_lines([
+            _assistant_line("req-1", cache_creation=100, cache_creation_1h=100),
+        ])
+        with (
+            mock.patch.object(
+                replay,
+                "replay_session_jsonl",
+                side_effect=[{"request_count": 0, "request_ids": []}, replay_result],
+            ),
+            mock.patch.object(replay, "snapshot_session_jsonl", return_value=None),
+            mock.patch("cc_resident.time.sleep"),
+        ):
+            events = list(resident.send_turn("hello"))
+        done = [payload for event, payload in events if event == "done"]
+        usage = done[0][2]
+        self.assertEqual(usage["request_ids"], ["req-1"])
+        self.assertEqual(usage["cache_creation_1h"], 100)
+
 
 class WakeUsageIdentityTests(unittest.TestCase):
     def test_wake_uses_same_deduped_request_ids_and_ttl_buckets(self):

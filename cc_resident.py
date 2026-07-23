@@ -288,6 +288,44 @@ class ResidentSession:
         if sid:
             self._session_id = str(sid)
 
+    def _jsonl_replay_cursor(self, jsonl_cursor=None):
+        from tools.cc_jsonl_usage import snapshot_session_jsonl
+
+        replay_cursor = jsonl_cursor
+        if self._session_id and replay_cursor is None:
+            replay_cursor = snapshot_session_jsonl(self._cwd, self._session_id)
+            # 冷启动首轮：session_id 在流结束后才出现，需从文件头回放。
+            if replay_cursor is not None and self._cold:
+                replay_cursor = dict(replay_cursor)
+                replay_cursor['offset'] = 0
+        return replay_cursor
+
+    def _attach_jsonl_usage_with_retry(self, usage, jsonl_cursor=None):
+        """JSONL 落盘可能略晚于 stdout；短退避重试，避免 request_ids 恒空。"""
+        from tools.cc_jsonl_usage import attach_jsonl_usage, replay_session_jsonl
+
+        if not self._session_id:
+            return usage
+        replay_cursor = self._jsonl_replay_cursor(jsonl_cursor)
+        delays = (0.0, 0.05, 0.15, 0.35)
+        last_replay = None
+        for delay in delays:
+            if delay:
+                time.sleep(delay)
+            last_replay = replay_session_jsonl(
+                self._cwd, self._session_id, cursor=replay_cursor,
+            )
+            merged = attach_jsonl_usage(usage, last_replay)
+            if int(merged.get('request_count') or 0) > 0:
+                return merged
+            has_usage = any(
+                int(usage.get(key) or 0) > 0
+                for key in ('cache_creation', 'input_tokens', 'output_tokens')
+            )
+            if not has_usage:
+                break
+        return attach_jsonl_usage(usage, last_replay)
+
     def send_turn(self, content, commit_meta=None):
         """Yield ('text'/'think'/'tool_use'/'tool_result'/'done', payload).
 
@@ -513,24 +551,7 @@ class ResidentSession:
         )
         # JSONL 只补 request identity / TTL bucket / model；stream totals 保持权威。
         try:
-            from tools.cc_jsonl_usage import (
-                attach_jsonl_usage,
-                replay_session_jsonl,
-                snapshot_session_jsonl,
-            )
-            replay_cursor = jsonl_cursor
-            if self._session_id and replay_cursor is None:
-                replay_cursor = snapshot_session_jsonl(self._cwd, self._session_id)
-                # 冷启动首轮：session_id 在流结束后才出现，需从文件头回放。
-                if replay_cursor is not None and self._cold:
-                    replay_cursor = dict(replay_cursor)
-                    replay_cursor['offset'] = 0
-            usage = attach_jsonl_usage(
-                usage,
-                replay_session_jsonl(
-                    self._cwd, self._session_id, cursor=replay_cursor,
-                ),
-            )
+            usage = self._attach_jsonl_usage_with_retry(usage, jsonl_cursor)
         except Exception:
             pass
         # 观测辅助字段：不改变既有 Usage v2 公开语义，供 gateway 组装 runtime
