@@ -281,6 +281,13 @@ class ResidentSession:
             return None
         return max(0.0, time.time() - float(self._last_used))
 
+    def _maybe_set_session_id(self, data):
+        if not isinstance(data, dict):
+            return
+        sid = data.get('session_id') or data.get('sessionId')
+        if sid:
+            self._session_id = str(sid)
+
     def send_turn(self, content, commit_meta=None):
         """Yield ('text'/'think'/'tool_use'/'tool_result'/'done', payload).
 
@@ -344,6 +351,7 @@ class ResidentSession:
                         d = json.loads(line)
                     except Exception:
                         continue
+                    self._maybe_set_session_id(d)
                     t = d.get('type')
                     if t == 'system' and d.get('subtype') == 'init':
                         self._session_id = d.get('session_id') or self._session_id
@@ -505,11 +513,21 @@ class ResidentSession:
         )
         # JSONL 只补 request identity / TTL bucket / model；stream totals 保持权威。
         try:
-            from tools.cc_jsonl_usage import attach_jsonl_usage, replay_session_jsonl
+            from tools.cc_jsonl_usage import (
+                attach_jsonl_usage,
+                replay_session_jsonl,
+                snapshot_session_jsonl,
+            )
+            replay_cursor = jsonl_cursor
+            if self._session_id and replay_cursor is None:
+                replay_cursor = snapshot_session_jsonl(self._cwd, self._session_id)
+                if replay_cursor is not None:
+                    replay_cursor = dict(replay_cursor)
+                    replay_cursor['offset'] = 0
             usage = attach_jsonl_usage(
                 usage,
                 replay_session_jsonl(
-                    self._cwd, self._session_id, cursor=jsonl_cursor,
+                    self._cwd, self._session_id, cursor=replay_cursor,
                 ),
             )
         except Exception:

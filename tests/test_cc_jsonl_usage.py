@@ -402,6 +402,52 @@ class ResidentJsonlHookTests(unittest.TestCase):
         self.assertEqual(usage["cache_creation_5m"], 0)
 
 
+    def test_resident_captures_session_id_from_camelcase_jsonl_events(self):
+        session = "65305691-efff-4fd6-9df5-2fc4ea4aa43f"
+        lines = [
+            json.dumps({
+                "type": "assistant",
+                "sessionId": session,
+                "message": {
+                    "usage": {
+                        "input_tokens": 1,
+                        "output_tokens": 2,
+                        "cache_read_input_tokens": 0,
+                        "cache_creation_input_tokens": 100,
+                    },
+                },
+            }),
+            json.dumps({"type": "result", "is_error": False}),
+        ]
+        resident = ResidentSession("/tmp/cc-test", "", "/tmp/mcp.json")
+        resident._proc = FakeProc(lines)
+        replay_result = replay.replay_jsonl_lines([
+            _assistant_line(
+                "req-1", cache_creation=100, cache_creation_1h=100
+            ),
+        ])
+        with tempfile.TemporaryDirectory() as tmp:
+            jsonl_path = Path(tmp) / (session + ".jsonl")
+            jsonl_path.write_text(
+                _assistant_line("req-1", cache_creation=100, cache_creation_1h=100) + "\n",
+                encoding="utf-8",
+            )
+            with (
+                mock.patch.object(replay, "claude_project_slug", return_value=Path(tmp).name),
+                mock.patch.object(replay, "replay_session_jsonl", return_value=replay_result),
+                mock.patch.object(
+                    replay,
+                    "snapshot_session_jsonl",
+                    return_value={"path": str(jsonl_path), "offset": 0},
+                ),
+            ):
+                events = list(resident.send_turn("hello"))
+        self.assertEqual(resident.session_id, session)
+        done = [payload for event, payload in events if event == "done"]
+        usage = done[0][2]
+        self.assertEqual(usage["request_ids"], ["req-1"])
+
+
 class WakeUsageIdentityTests(unittest.TestCase):
     def test_wake_uses_same_deduped_request_ids_and_ttl_buckets(self):
         rounds = [
