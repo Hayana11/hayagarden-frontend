@@ -3,7 +3,7 @@
 > 同一只费佳、固定 system、固定工具面、三类轮次；普通 Wake 降为主 resident 的一次短心跳，只有需要行动时才升级，用户聊天永远优先。
 
 - **计划分支**：`plan/unified-heartbeat-tracker`
-- **当前状态**：`DESIGN_LOCKED / IMPLEMENTATION_NOT_STARTED`
+- **当前状态**：`P-0_DONE / P-SHADOW_READY_TO_RESTART`
 - **最后更新**：2026-07-23
 - **当前 identity**：`identity_id = "fyodor-default"` · `provider_id = "claude_code"` · `conversation_id = "default"`
 - **首个 Provider Adapter**：Claude Unified Resident Adapter
@@ -62,14 +62,23 @@
   - 完成日期：2026-07-23（北京时间）
   - 证据：PR #129 合并 `549cb55`（`78b67b1`）；`wake/wake_run_id.py` 五模式 builder；continuity CI 接入 22 项 Wake 身份测试；生产 `main@549cb55`；`frontend`/`frontend-gw` 已重启；morning cron 继续关闭
   - 范围：`dream_wake.py` / `daily_rituals.py` 调用 `/wake` 前注入稳定 `wake_run_id`；gateway 去重 + shadow `wake_outcome` 接线已有
-- [ ] **P-0：Heartbeat Measurement Foundation**
-  - 状态：未开始
-  - 完成日期：
+- [x] **P-0：Heartbeat Measurement Foundation**
+  - 状态：已完成（PR #130 + 生产热修 #132）
+  - 完成日期：2026-07-23（北京时间）
   - 证据：
-- [!] **P-SHADOW：Internal State v3 72 小时 Shadow 验收**
-  - 状态：身份接线阻塞；修复后重新开始 72h（P-ID-CHAT / P-ID-WAKE 已部署，待部署验证与自然 `wake_outcome`）
+    - PR #130 合并 `6f66060a63cdc259195d6360eba6f644db40b687`（2026-07-23 12:56 BJT）
+    - 生产热修 PR #132 分支 `cursor/fix-jsonl-session-id-p0-5e1c` @ `5c07231`（sessionId + JSONL 重试）；VPS cherry-pick 部署 `fbf310c`（2026-07-23 13:15 BJT 重启 `frontend-gw`）
+    - 生产 `main@6f66060` + 热修 `fbf310c`；`frontend` / `frontend-gw` active（`frontend-gw` ActiveEnter 2026-07-23 13:09 BJT 起，热修后 13:15 BJT 再启）
+    - 生产 usage 样本：`chat_messages.id=4220`（热修后 live chat）— `request_ids=['req_011CdJRMk1Dzuqce8q9vsAvh']`，`request_count=1`，`cache_creation_5m=0` + `cache_creation_1h=20271` = `cache_creation=20271`，`jsonl_usage.stream_totals_match=true`
+    - Runtime 指纹齐全：`gateway_instance_id` / `resident_generation` / `static_system_sha256` / `tools_sha256` / `mcp_config_sha256` / `provider_sha256` / `model_sha256` / `thinking_sha256`
+    - 工具面：`tool_schema_measurement_status=available`，`tool_count=19`，`tool_schema_source=static_registry`
+    - `keepwarm_lease_expires_at=None`（预期；权威 lease 待 UH-A，PR 0 只铺分类器，不误报 `cold_return_after_lease`）
+  - 验证：普通 Chat smoke（4220）通过；Wake `inspect_only` dry_run 正常；Shadow 七盏灯在 P-0 验收前全绿（`proof_gap=false`，`capture_alert_pending=false`）
+  - 备注：用户自然消息 4214–4216 触发热修前 JSONL 落盘竞态，`request_ids` 为空；热修后样本 4220 为权威验收
+- [-] **P-SHADOW：Internal State v3 72 小时 Shadow 验收**
+  - 状态：P-0 已毕；身份接线（P-ID-CHAT / P-ID-WAKE）已部署；待自然 `wake_run_id` + `wake_outcome` 样本后重启 72h 计时
   - 完成日期：
-  - 证据：日检曾发现 `#4118`（edit 后 `message_id=None`）与 `wake_outcome=0`（空 `wake_run_id`）；PR #128 `61faf6f` + PR #129 `549cb55` 已上生产；旧 incident #1 待按根因 ack，不伪造 `user_scored:4118`；重启 72h 前需抓到自然 `wake_run_id` + `wake_outcome` 样本
+  - 证据：2026-07-23 13:12 BJT `internal_state_shadow_admin.py status` 七盏灯全绿（`proof_gap=false`，`watermark_lag=false`，`outbox_pending=0`，`gap_incidents_unresolved=0`，`capture_alert_pending=false`，`recovery_intents_pending=0`，`user_events_preflight_ok=true`）；`last_scored_message_id=4215`；日检 incident #4118 待按根因 ack，不伪造 `user_scored:4118`
 
 ### Unified Heartbeat
 
@@ -90,13 +99,12 @@
 ```text
 P-ID-CHAT        [x] PR #128 → main@61faf6f
 → P-ID-WAKE      [x] PR #129 → main@549cb55
-→ 部署验证       [-] 自然 wake_run_id + wake_outcome
-→ 处理旧 incident
-→ 重启 72h
-→ PR 0
+→ PR 0           [x] PR #130 → main@6f66060 + 热修 #132 → VPS@fbf310c
+→ P-SHADOW       [-] 自然 wake_run_id + wake_outcome → ack incident #1 → 重启 72h
+→ UH-A           [ ] feature flag 默认关闭
 ```
 
-> morning cron 继续关闭。
+> morning cron 继续关闭。PR 0 已部署并确认 requestId、TTL 分桶与指纹可用；须待 Shadow 72h 毕业后方可进入 Unified Heartbeat 实现（UH-A）。
 
 ---
 
@@ -691,8 +699,14 @@ PR #126 修门禁与去重
 - [x] PR #128 门禁通过 → 合并部署 `61faf6f`；P-ID-CHAT 勾 `[x]`；
 - [x] PR #129 门禁通过（continuity 含 22 项 Wake 身份测试）→ 合并部署 `549cb55`；P-ID-WAKE 勾 `[x]`；
 - [x] 活计划命名统一：Fyodor Heartbeat Orchestrator / Fyodor Brain Router；`identity_id` 取代 `nox_id`；
-- [-] P-SHADOW：等自然 `normal-YYYY-MM-DD-HH:MM` + `wake_outcome` 样本后重启 72h 计时。
+- [-] P-SHADOW：P-0 完成后待自然 `wake_run_id` + `wake_outcome` 样本 → ack incident #1 → 重启 72h；
+- [x] P-0 完成：PR #130 `6f66060` + 热修 PR #132 `5c07231`（VPS `fbf310c`）；生产样本 `message_id=4220` 通过 requestId / TTL / 指纹 / tool surface 验收；
 
----
+### 2026-07-23（续）
+
+- [x] PR #130 合并部署 `6f66060`；P-0 测量基础（requestId 去重、TTL 分桶、runtime 指纹、tool surface）上生产
+- [x] 生产热修：Claude Code `sessionId` 兼容 + JSONL 落盘重试（PR #132）；VPS `fbf310c`；live 样本 `4220` 全项 PASS
+- [x] P-0 勾 `[x]`；`keepwarm_lease_expires_at=None` 记为预期（权威 lease 待 UH-A）
+- [-] P-SHADOW：七盏灯 13:12 BJT 全绿；下一项自然 Wake `wake_outcome` → 重启 72h
 
 最终施工原则：**先用旧权威生成极瘦状态快照，让同一主 resident 在固定 system、固定工具面下睁眼判断一次；沉默就继续睡，需要说话才升级，需要做事交后台；数据库掌握费奥多尔（`identity_id`）的权威时钟，Claude Unified Resident Adapter 只是首个可替换 Provider Heartbeat Adapter；权限由跨进程短租约硬拦，聊天永远抢占，所有收益用 requestId 去重后的真实账本验收。**
