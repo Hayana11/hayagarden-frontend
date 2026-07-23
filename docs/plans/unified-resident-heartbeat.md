@@ -52,11 +52,11 @@
   - 状态：已完成（morning cron 继续关闭，普通 Wake 观察期中）
   - 完成日期：2026-07-23（北京时间）
   - 证据：PR #126 合并 `9eb18a4`（含 `9ecb524` morning 门禁/去重 + `ff0c330` CI 修复）；生产 `main@9eb18a4`；`frontend`/`frontend-gw` 已重启；`POST /push`→404；`push_tool.py` 已删；morning cron 未启用
-- [ ] **P-ID-CHAT：Chat 评分身份修复**
-  - 状态：进行中
-  - 完成日期：
-  - 证据：
-  - 范围：正常发送 / redo / edit 三条 stream 路径必须携带可评分 `message_id`；禁止 `message_id=None` 进入 `score_async`；编辑产生新消息身份，重答复用原用户消息 id
+- [x] **P-ID-CHAT：Chat 评分身份修复**
+  - 状态：已完成
+  - 完成日期：2026-07-23（北京时间）
+  - 证据：PR #128 合并 `61faf6f`（`dc8b8a3` 身份绑定闭环）；`app npm ci && npm run build` 通过；生产 `main@61faf6f`；`frontend`/`frontend-gw` 已重启；`dist/assets/index-3F3miEGl.js`；`resolve_scoring_user_message` + `trigger_turn_scoring` 三线路接线
+  - 范围：正常发送 / redo / edit 三条 stream 路径必须携带可评分 `message_id`；禁止 `message_id=None` 进入 `score_async`；评分前凭 id 回 DB 取用户原文；编辑产生新消息身份，重答复用原用户消息 id
 - [ ] **P-ID-WAKE：Wake run_id 修复**
   - 状态：未开始
   - 完成日期：
@@ -87,7 +87,7 @@
 
 ### 当前下一步
 
-> **P-126 已合并部署。当前阻塞：P-ID-CHAT → P-ID-WAKE → 重启 P-SHADOW 观察 → PR 0。morning cron 继续关闭。**
+> **P-ID-CHAT 已合并部署。下一项：P-ID-WAKE → 重启 P-SHADOW 观察 → PR 0。morning cron 继续关闭。**
 
 ---
 
