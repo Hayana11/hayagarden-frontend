@@ -3,7 +3,7 @@
 > 同一只费佳、固定 system、固定工具面、三类轮次；普通 Wake 降为主 resident 的一次短心跳，只有需要行动时才升级，用户聊天永远优先。
 
 - **计划分支**：`plan/unified-heartbeat-tracker`
-- **当前状态**：`DESIGN_LOCKED / IMPLEMENTATION_NOT_STARTED`
+- **当前状态**：`P-0_DONE / P-SHADOW_OBSERVING`
 - **最后更新**：2026-07-23
 - **当前 identity**：`identity_id = "fyodor-default"` · `provider_id = "claude_code"` · `conversation_id = "default"`
 - **首个 Provider Adapter**：Claude Unified Resident Adapter
@@ -62,14 +62,24 @@
   - 完成日期：2026-07-23（北京时间）
   - 证据：PR #129 合并 `549cb55`（`78b67b1`）；`wake/wake_run_id.py` 五模式 builder；continuity CI 接入 22 项 Wake 身份测试；生产 `main@549cb55`；`frontend`/`frontend-gw` 已重启；morning cron 继续关闭
   - 范围：`dream_wake.py` / `daily_rituals.py` 调用 `/wake` 前注入稳定 `wake_run_id`；gateway 去重 + shadow `wake_outcome` 接线已有
-- [ ] **P-0：Heartbeat Measurement Foundation**
-  - 状态：未开始
-  - 完成日期：
+- [x] **P-0：Heartbeat Measurement Foundation**
+  - 状态：已完成（PR #130 + PR #132 已合并 main）
+  - 完成日期：2026-07-23（北京时间）
   - 证据：
-- [!] **P-SHADOW：Internal State v3 72 小时 Shadow 验收**
-  - 状态：身份接线阻塞；修复后重新开始 72h（P-ID-CHAT / P-ID-WAKE 已部署，待部署验证与自然 `wake_outcome`）
-  - 完成日期：
-  - 证据：日检曾发现 `#4118`（edit 后 `message_id=None`）与 `wake_outcome=0`（空 `wake_run_id`）；PR #128 `61faf6f` + PR #129 `549cb55` 已上生产；旧 incident #1 待按根因 ack，不伪造 `user_scored:4118`；重启 72h 前需抓到自然 `wake_run_id` + `wake_outcome` 样本
+    - PR #130 合并 `6f66060a63cdc259195d6360eba6f644db40b687`（2026-07-23 12:56 BJT）
+    - PR #132 合并 `886e494f90ae5941b69a4dc760a8ce98e21829f7`（含 `a069fcd`：`stream_totals_match` 重试门禁）
+    - 正式部署：`deploy-frontend.sh 605e69743909ab50624d949b801cc2c6aa857ae0`（2026-07-23，含 recovery manifest）；生产 HEAD `605e697`
+    - 生产 usage 样本：`chat_messages.id=4220`（单轮 live chat）— `stream_totals_match=true`，指纹与 tool surface 齐全
+    - `keepwarm_lease_expires_at=None`（预期；权威 lease 待 UH-A）
+  - 验证：单轮 Chat 4220 PASS；#132 已正式固化；部署后七盏灯复验全绿（`proof_gap=false`，`gap_sidecar_pending=0`，`gap_incidents_unresolved=0`，`capture_alert_pending=false`，`user_events_preflight_ok=true`；`last_scored_message_id=4215`）
+- [-] **P-SHADOW：Internal State v3 72 小时 Shadow 验收**
+  - 状态：72h 观察进行中（**不得因 PR #130 / #132 测量层热修重启计时**）
+  - 起点：2026-07-23 10:40:50 BJT（incident #1 正式结案后）
+  - 理论最早毕业：2026-07-26 10:40:50 BJT
+  - baseline：`message_id=4208`；`wake_run_id=normal-2026-07-23-10:30`（自然 Wake，`wake_log` / `wake_outcome` 双票对齐）
+  - incident #1：2026-07-23 10:40:50 已结案；不回填 `user_scored:4118`
+  - 观察期纪律：PR #130 / #132 仅改 Usage 测量层，不改 Internal State 计算、结算、身份或事件语义；`frontend-gw` 重启计入 restart continuity 证据，不构成重新起跑理由
+  - 日检门禁：部署 `605e697` 后复验全绿（2026-07-23）；`proof_gap=false`；未生成新 incident；**72h 起点仍为 10:40:50 BJT**
 
 ### Unified Heartbeat
 
@@ -90,13 +100,13 @@
 ```text
 P-ID-CHAT        [x] PR #128 → main@61faf6f
 → P-ID-WAKE      [x] PR #129 → main@549cb55
-→ 部署验证       [-] 自然 wake_run_id + wake_outcome
-→ 处理旧 incident
-→ 重启 72h
-→ PR 0
+→ PR 0           [x] PR #130 → main@6f66060；#132 → main@886e494；生产@605e697
+→ P-SHADOW       [-] 72h 观察中（起点 2026-07-23 10:40:50 BJT）
+→ 当前           [x] 七盏灯复验全绿（部署 605e697 后）→ 继续观察到 2026-07-26 10:40:50 BJT
+→ UH-A           [ ] 禁止启动（须 Shadow 毕业后）
 ```
 
-> morning cron 继续关闭。
+> morning cron 继续关闭。P-SHADOW 72h 已于 10:40:50 BJT 起跑，不因测量层热修重置。
 
 ---
 
@@ -256,12 +266,12 @@ Claude Code 若未来不可用，只替换 Provider Heartbeat Adapter，不重�
 
 独立小 PR，只负责把尺子做准。
 
-- [ ] JSONL `requestId` 采集与去重；
-- [ ] `ephemeral_1h_input_tokens` / `ephemeral_5m_input_tokens` 正确分桶；
-- [ ] gateway instance、resident generation、system、tools、MCP、model、thinking 指纹；
-- [ ] `cold_return_after_lease` 分类；
-- [ ] 普查脚本；
-- [ ] 历史 JSONL 回放测试。
+- [x] JSONL `requestId` 采集与去重；
+- [x] `ephemeral_1h_input_tokens` / `ephemeral_5m_input_tokens` 正确分桶；
+- [x] gateway instance、resident generation、system、tools、MCP、model、thinking 指纹；
+- [x] `cold_return_after_lease` 分类；
+- [x] 普查脚本；
+- [x] 历史 JSONL 回放测试。
 
 禁止修改 Wake 调度、Prompt、Provider 或 Unified 路径。
 
@@ -684,14 +694,23 @@ PR #126 修门禁与去重
 - [!] P-SHADOW：由 `[-] 观察中` 改为 `身份接线阻塞`；修复后重新开始 72h（P-ID-CHAT + P-ID-WAKE 已部署，当前部署验证中）；
 - [x] P-ID-CHAT 完成：PR #128 合并部署 `61faf6f`；
 - [x] P-ID-WAKE 完成：PR #129 合并部署 `549cb55`；
-- [-] 下一项：验证自然 Wake `wake_run_id` + `wake_outcome` → ack incident #1 → 重启 P-SHADOW 72h。
+- [~] 下一项：已由 2026-07-23 10:40:50 BJT 的正式 Shadow 72h 重启取代（自然 Wake `normal-2026-07-23-10:30` + incident #1 结案）
 
 ### 2026-07-23
 
 - [x] PR #128 门禁通过 → 合并部署 `61faf6f`；P-ID-CHAT 勾 `[x]`；
 - [x] PR #129 门禁通过（continuity 含 22 项 Wake 身份测试）→ 合并部署 `549cb55`；P-ID-WAKE 勾 `[x]`；
 - [x] 活计划命名统一：Fyodor Heartbeat Orchestrator / Fyodor Brain Router；`identity_id` 取代 `nox_id`；
-- [-] P-SHADOW：等自然 `normal-YYYY-MM-DD-HH:MM` + `wake_outcome` 样本后重启 72h 计时。
+- [~] P-SHADOW：已由 2026-07-23 10:40:50 BJT 的正式重启记录取代（此前「待自然 wake_outcome → 重启 72h」待办作废）
+- [x] P-0 完成：PR #130 `6f66060`；生产单轮样本 `message_id=4220` PASS
+- [x] P-SHADOW 重启：自然 Wake `normal-2026-07-23-10:30`；incident #1 于 10:40:50 BJT 结案；72h 自 10:40:50 BJT 起算
+
+### 2026-07-23（续）
+
+- [x] PR #130 合并部署 `6f66060`；P-0 测量基础上生产
+- [x] 单轮 live 样本 `4220`：`stream_totals_match=true`，指纹与 tool surface 齐全
+- [x] PR #132 合并 `886e494` + 正式部署 `605e697`；七盏灯部署后复验全绿
+- [x] P-SHADOW：72h 观察进行中，起点不变（10:40:50 BJT）
 
 ---
 
