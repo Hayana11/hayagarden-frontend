@@ -63,16 +63,15 @@
   - 证据：PR #129 合并 `549cb55`（`78b67b1`）；`wake/wake_run_id.py` 五模式 builder；continuity CI 接入 22 项 Wake 身份测试；生产 `main@549cb55`；`frontend`/`frontend-gw` 已重启；morning cron 继续关闭
   - 范围：`dream_wake.py` / `daily_rituals.py` 调用 `/wake` 前注入稳定 `wake_run_id`；gateway 去重 + shadow `wake_outcome` 接线已有
 - [x] **P-0：Heartbeat Measurement Foundation**
-  - 状态：已完成（PR #130；生产热修 #132 待合并 `a069fcd`）
+  - 状态：已完成（PR #130 + PR #132 已合并 main）
   - 完成日期：2026-07-23（北京时间）
   - 证据：
     - PR #130 合并 `6f66060a63cdc259195d6360eba6f644db40b687`（2026-07-23 12:56 BJT）
-    - PR #132 `cursor/fix-jsonl-session-id-p0-5e1c` @ `a069fcd`（sessionId + JSONL 重试直至 `stream_totals_match`）；VPS 临时 cherry-pick `fbf310c`（13:15 BJT，单轮门禁版；待 #132 合并后正式部署）
-    - 生产 usage 样本：`chat_messages.id=4220`（单轮 live chat）— `request_ids` 非空，`request_count` 与去重一致，TTL 分桶之和 = `cache_creation`，`jsonl_usage.stream_totals_match=true`
-    - Runtime 指纹齐全：`gateway_instance_id` / `resident_generation` / `static_system_sha256` / `tools_sha256` / `mcp_config_sha256` / `provider_sha256` / `model_sha256` / `thinking_sha256`
-    - 工具面：`tool_schema_measurement_status=available`，`tool_count=19`，`tool_schema_source=static_registry`
+    - PR #132 合并 `886e494f90ae5941b69a4dc760a8ce98e21829f7`（含 `a069fcd`：`stream_totals_match` 重试门禁）
+    - 正式部署：`deploy-frontend.sh 605e69743909ab50624d949b801cc2c6aa857ae0`（2026-07-23，含 recovery manifest）；生产 HEAD `605e697`
+    - 生产 usage 样本：`chat_messages.id=4220`（单轮 live chat）— `stream_totals_match=true`，指纹与 tool surface 齐全
     - `keepwarm_lease_expires_at=None`（预期；权威 lease 待 UH-A）
-  - 验证：单轮 Chat 4220 PASS；#132 补多轮 `stream_totals_match` 重试门禁 + 测试后再合并 main
+  - 验证：单轮 Chat 4220 PASS；#132 已正式固化；部署后七盏灯复验全绿（`proof_gap=false`，`gap_sidecar_pending=0`，`gap_incidents_unresolved=0`，`capture_alert_pending=false`，`user_events_preflight_ok=true`；`last_scored_message_id=4215`）
 - [-] **P-SHADOW：Internal State v3 72 小时 Shadow 验收**
   - 状态：72h 观察进行中（**不得因 PR #130 / #132 测量层热修重启计时**）
   - 起点：2026-07-23 10:40:50 BJT（incident #1 正式结案后）
@@ -80,7 +79,7 @@
   - baseline：`message_id=4208`；`wake_run_id=normal-2026-07-23-10:30`（自然 Wake，`wake_log` / `wake_outcome` 双票对齐）
   - incident #1：2026-07-23 10:40:50 已结案；不回填 `user_scored:4118`
   - 观察期纪律：PR #130 / #132 仅改 Usage 测量层，不改 Internal State 计算、结算、身份或事件语义；`frontend-gw` 重启计入 restart continuity 证据，不构成重新起跑理由
-  - 日检门禁：`proof_gap=false`、`gap_incidents_unresolved=0`、`capture_alert_pending=false`、`user_rule` / `user_scored` 对齐；agent smoke 4217–4220 后须等异步评分追平再验票，未生成 incident 则不重置 72h
+  - 日检门禁：部署 `605e697` 后复验全绿（2026-07-23）；`proof_gap=false`；未生成新 incident；**72h 起点仍为 10:40:50 BJT**
 
 ### Unified Heartbeat
 
@@ -101,10 +100,9 @@
 ```text
 P-ID-CHAT        [x] PR #128 → main@61faf6f
 → P-ID-WAKE      [x] PR #129 → main@549cb55
-→ PR 0           [x] PR #130 → main@6f66060；热修 #132 → 待合并 a069fcd
+→ PR 0           [x] PR #130 → main@6f66060；#132 → main@886e494；生产@605e697
 → P-SHADOW       [-] 72h 观察中（起点 2026-07-23 10:40:50 BJT）
-→ 当前           [-] 合并 #132 → 正式部署 → 异步评分追平后七盏灯复验
-→ 毕业检查       [ ] 最早 2026-07-26 10:40:50 BJT
+→ 当前           [x] 七盏灯复验全绿（部署 605e697 后）→ 继续观察到 2026-07-26 10:40:50 BJT
 → UH-A           [ ] 禁止启动（须 Shadow 毕业后）
 ```
 
@@ -696,14 +694,14 @@ PR #126 修门禁与去重
 - [!] P-SHADOW：由 `[-] 观察中` 改为 `身份接线阻塞`；修复后重新开始 72h（P-ID-CHAT + P-ID-WAKE 已部署，当前部署验证中）；
 - [x] P-ID-CHAT 完成：PR #128 合并部署 `61faf6f`；
 - [x] P-ID-WAKE 完成：PR #129 合并部署 `549cb55`；
-- [-] 下一项：验证自然 Wake `wake_run_id` + `wake_outcome` → ack incident #1 → 重启 P-SHADOW 72h。
+- [~] 下一项：已由 2026-07-23 10:40:50 BJT 的正式 Shadow 72h 重启取代（自然 Wake `normal-2026-07-23-10:30` + incident #1 结案）
 
 ### 2026-07-23
 
 - [x] PR #128 门禁通过 → 合并部署 `61faf6f`；P-ID-CHAT 勾 `[x]`；
 - [x] PR #129 门禁通过（continuity 含 22 项 Wake 身份测试）→ 合并部署 `549cb55`；P-ID-WAKE 勾 `[x]`；
 - [x] 活计划命名统一：Fyodor Heartbeat Orchestrator / Fyodor Brain Router；`identity_id` 取代 `nox_id`；
-- [-] P-SHADOW：P-0 完成后待自然 `wake_run_id` + `wake_outcome` 样本 → ack incident #1 → 重启 72h；
+- [~] P-SHADOW：已由 2026-07-23 10:40:50 BJT 的正式重启记录取代（此前「待自然 wake_outcome → 重启 72h」待办作废）
 - [x] P-0 完成：PR #130 `6f66060`；生产单轮样本 `message_id=4220` PASS
 - [x] P-SHADOW 重启：自然 Wake `normal-2026-07-23-10:30`；incident #1 于 10:40:50 BJT 结案；72h 自 10:40:50 BJT 起算
 
@@ -711,9 +709,8 @@ PR #126 修门禁与去重
 
 - [x] PR #130 合并部署 `6f66060`；P-0 测量基础上生产
 - [x] 单轮 live 样本 `4220`：`stream_totals_match=true`，指纹与 tool surface 齐全
-- [-] PR #132：补 `stream_totals_match` 多轮重试门禁（`a069fcd`），待 CI 后合并 main
-- [-] P-SHADOW：72h 观察进行中，**禁止**因 #132 重置计时；`frontend-gw` 重启仅作 continuity 样本
-- [-] 待办：异步评分追平后复验七盏灯（`proof_gap=false` 等），最早毕业检查 2026-07-26 10:40:50 BJT
+- [x] PR #132 合并 `886e494` + 正式部署 `605e697`；七盏灯部署后复验全绿
+- [x] P-SHADOW：72h 观察进行中，起点不变（10:40:50 BJT）
 
 ---
 
