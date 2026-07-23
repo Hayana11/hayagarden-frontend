@@ -39,6 +39,13 @@ jobs:
         run: python -m unittest tests.test_cc_context_dedup
       - name: Run Wake B1 runner regressions
         run: python -m unittest tests.test_wake_runners tests.test_wake_usage tests.test_provider_router
+      - name: Run Wake identity regressions
+        run: |
+          python3 -m unittest \
+            tests.test_wake_run_id \
+            tests.test_dream_wake_morning \
+            tests.test_self_trigger_guard \
+            -v
       - name: Run Wake reply bridge regressions
         run: python -m unittest tests.test_wake_reply_bridge
       - name: Validate deploy guard
