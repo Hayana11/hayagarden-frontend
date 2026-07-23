@@ -521,7 +521,8 @@ class ResidentSession:
             replay_cursor = jsonl_cursor
             if self._session_id and replay_cursor is None:
                 replay_cursor = snapshot_session_jsonl(self._cwd, self._session_id)
-                if replay_cursor is not None:
+                # 冷启动首轮：session_id 在流结束后才出现，需从文件头回放。
+                if replay_cursor is not None and self._cold:
                     replay_cursor = dict(replay_cursor)
                     replay_cursor['offset'] = 0
             usage = attach_jsonl_usage(
