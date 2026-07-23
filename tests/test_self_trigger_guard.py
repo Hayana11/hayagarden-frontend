@@ -197,6 +197,7 @@ class SelfTriggerRetryTests(unittest.TestCase):
         self.assertEqual(len(wake_calls), 1)
         self.assertEqual(wake_calls[0]['mode'], 'self_trigger')
         self.assertEqual(wake_calls[0]['self_trigger_id'], 7)
+        self.assertEqual(wake_calls[0]['wake_run_id'], 'self-trigger-7')
         self.assertEqual(self._consumed(), 0)
 
     def test_normal_recent_still_skips(self):
