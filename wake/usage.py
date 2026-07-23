@@ -78,7 +78,18 @@ def build_wake_cache_info(
     ``provider`` must be the actual executor (api_relay / claude_code), never a
     guess from WAKE_PROVIDER=inherit alone.
     """
-    rows = [dict(row) for row in rounds if isinstance(row, Mapping)]
+    raw_rows = [dict(row) for row in rounds if isinstance(row, Mapping)]
+    rows: list[dict[str, Any]] = []
+    request_ids: list[str] = []
+    seen_request_ids: set[str] = set()
+    for row in raw_rows:
+        request_id = str(row.get("request_id") or "").strip()
+        if request_id and request_id in seen_request_ids:
+            continue
+        if request_id:
+            seen_request_ids.add(request_id)
+            request_ids.append(request_id)
+        rows.append(row)
     totals = {
         "cache_read": sum(_as_int(row.get("cache_read")) for row in rows),
         "cache_creation": sum(_as_int(row.get("cache_creation")) for row in rows),
@@ -103,6 +114,8 @@ def build_wake_cache_info(
         "wake_mode": wake_mode,  # legacy alias
         "num_rounds": len(rows),
         "rounds": rows,
+        "request_ids": request_ids,
+        "request_count": len(request_ids),
         "last_round_context": rows[-1]["context_tokens"] if rows else 0,
         "max_round_context": max((row["context_tokens"] for row in rows), default=0),
     })

@@ -3429,9 +3429,14 @@ def _cc_resident_stream_gen(messages, *, user_turn=True):
                     allowed_tools=_CC_RESIDENT.allowed_tools,
                     tool_schema_sha256=None,
                     claude_session_id=usage.pop('_obs_claude_session_id', _CC_RESIDENT.session_id),
-                    model=None,
+                    model=usage.pop('_obs_model', None),
                     effort=None,
+                    thinking_config={
+                        'thinking_display': 'summarized',
+                        'effort': None,
+                    },
                     claude_code_version=_cc_obs.detect_claude_code_version(),
+                    observed_at=datetime.datetime.now(datetime.timezone.utc).isoformat(),
                 )
                 for _k in list(usage.keys()):
                     if str(_k).startswith('_obs_'):

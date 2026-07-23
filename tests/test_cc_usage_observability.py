@@ -760,7 +760,10 @@ class ReportAggregateTests(unittest.TestCase):
             spec.loader.exec_module(mod)
             buf = io.StringIO()
             with mock.patch("sys.stdout", buf):
-                rc = mod.main(["--db", db, "--days", "3", "--format", "json"])
+                rc = mod.main([
+                    "--db", db, "--days", "3", "--format", "json",
+                    "--now", NOW.isoformat(),
+                ])
             self.assertEqual(rc, 0)
             cli_report = json.loads(buf.getvalue())
             self.assertEqual(cli_report["summary"], from_rows["summary"])
