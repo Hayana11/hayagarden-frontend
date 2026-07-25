@@ -299,17 +299,13 @@ def apply_desire_delta_async(p_delta: float, i_delta: float):
 # ═══════════════════════════════════════════════════════════
 
 def _get_ombre_va():
-    try:
-        req = urllib.request.Request('http://127.0.0.1:8000/emotion_snapshot')
-        with urllib.request.urlopen(req, timeout=3) as resp:
-            data = json.loads(resp.read())
-            v = data.get('valence')
-            a = data.get('arousal')
-            if v is not None and a is not None:
-                return float(v), float(a)
-    except Exception:
-        pass
-    return None, None
+    from tools.ombre_adapter import get_emotion_snapshot
+    data = get_emotion_snapshot(timeout=3.0)
+    valence = data.get('valence')
+    arousal = data.get('arousal')
+    if valence is None or arousal is None:
+        return None, None
+    return float(valence), float(arousal)
 
 
 # ═══════════════════════════════════════════════════════════
