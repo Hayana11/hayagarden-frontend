@@ -5,7 +5,7 @@
 - **计划分支**：`plan/unified-heartbeat-tracker`
 - **当前状态**：`MEMORY_HOTFIX_IN_PROGRESS`（#134 Ready 终审待 merge）
 - **最后更新**：2026-07-26（tracker 续写：Context Lean / UH-A0 / Master roadmap）
-- **tracker head**：`f0bf25d` → 本提交后更新
+- **tracker head**：`02a6239`
 - **当前 identity**：`identity_id = "fyodor-default"` · `provider_id = "claude_code"` · `conversation_id = "default"`
 - **首个 Provider Adapter**：Claude Unified Resident Adapter
 
