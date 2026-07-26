@@ -3,8 +3,8 @@
 > 同一只费佳、固定 system、固定工具面、三类轮次；普通 Wake 降为主 resident 的一次短心跳，只有需要行动时才升级，用户聊天永远优先。
 
 - **计划分支**：`plan/unified-heartbeat-tracker`
-- **当前状态**：`P-0_DONE / P-SHADOW_OBSERVING`
-- **最后更新**：2026-07-23
+- **当前状态**：`P-SHADOW_GRADUATED / MEMORY_HOTFIX_NEXT`
+- **最后更新**：2026-07-26
 - **当前 identity**：`identity_id = "fyodor-default"` · `provider_id = "claude_code"` · `conversation_id = "default"`
 - **首个 Provider Adapter**：Claude Unified Resident Adapter
 
@@ -72,14 +72,17 @@
     - 生产 usage 样本：`chat_messages.id=4220`（单轮 live chat）— `stream_totals_match=true`，指纹与 tool surface 齐全
     - `keepwarm_lease_expires_at=None`（预期；权威 lease 待 UH-A）
   - 验证：单轮 Chat 4220 PASS；#132 已正式固化；部署后七盏灯复验全绿（`proof_gap=false`，`gap_sidecar_pending=0`，`gap_incidents_unresolved=0`，`capture_alert_pending=false`，`user_events_preflight_ok=true`；`last_scored_message_id=4215`）
-- [-] **P-SHADOW：Internal State v3 72 小时 Shadow 验收**
-  - 状态：72h 观察进行中（**不得因 PR #130 / #132 测量层热修重启计时**）
-  - 起点：2026-07-23 10:40:50 BJT（incident #1 正式结案后）
-  - 理论最早毕业：2026-07-26 10:40:50 BJT
-  - baseline：`message_id=4208`；`wake_run_id=normal-2026-07-23-10:30`（自然 Wake，`wake_log` / `wake_outcome` 双票对齐）
-  - incident #1：2026-07-23 10:40:50 已结案；不回填 `user_scored:4118`
-  - 观察期纪律：PR #130 / #132 仅改 Usage 测量层，不改 Internal State 计算、结算、身份或事件语义；`frontend-gw` 重启计入 restart continuity 证据，不构成重新起跑理由
-  - 日检门禁：部署 `605e697` 后复验全绿（2026-07-23）；`proof_gap=false`；未生成新 incident；**72h 起点仍为 10:40:50 BJT**
+- [x] **P-SHADOW：Internal State v3 72 小时 Shadow 验收**
+  - 状态：已毕业（`graduated`）
+  - 完成日期：2026-07-26（北京时间）
+  - 证据：
+    - 观察窗口：2026-07-23 10:40:50 → 终审 2026-07-26 12:44（>72h）
+    - 终审：`status_exit_code=0`；七盏灯全绿；`proof_max=last_scored=4385`；`state_version=332`
+    - 自然样本（窗口内）：`user_rule` 83 · `user_scored` 82 · `wake_outcome` 59（全 `applied`）
+    - 卫生：`failed/stale/conflict/duplicate` 均为空；无新 alert / unresolved incident
+    - 唯一不对称：`user_rule:4225`（superseded turn，非 incident，不回填）
+    - 生产 SHA 终审时：`30d375b`；capture alert 已于 2026-07-24 ack
+    - 起点纪律：PR #130 / #132 仅改 Usage 测量层，未重置 72h 起点（10:40:50 BJT）
 
 ### Unified Heartbeat
 
@@ -101,12 +104,12 @@
 P-ID-CHAT        [x] PR #128 → main@61faf6f
 → P-ID-WAKE      [x] PR #129 → main@549cb55
 → PR 0           [x] PR #130 → main@6f66060；#132 → main@886e494；生产@605e697
-→ P-SHADOW       [-] 72h 观察中（起点 2026-07-23 10:40:50 BJT）
-→ 当前           [x] 七盏灯复验全绿（部署 605e697 后）→ 继续观察到 2026-07-26 10:40:50 BJT
-→ UH-A           [ ] 禁止启动（须 Shadow 毕业后）
+→ P-SHADOW       [x] graduated 2026-07-26 BJT（观察窗口 >72h）
+→ Memory Hotfix  [ ] 下一项
+→ UH-A           [ ] 待 Memory Hotfix 后
 ```
 
-> morning cron 继续关闭。P-SHADOW 72h 已于 10:40:50 BJT 起跑，不因测量层热修重置。
+> morning cron 继续关闭。P-SHADOW 已于 2026-07-26 毕业。
 
 ---
 
@@ -116,7 +119,18 @@ P-ID-CHAT        [x] PR #128 → main@61faf6f
 
 当前真实权威仍是旧 emotion / desire / drive。v3 只在旁边同步打分、记账、计算候选结果，不进入普通聊天 Prompt，也不接管 Wake。
 
-### 起点
+### 起点（2026-07-23 重启后基线）
+
+```text
+部署 SHA：549cb55
+观察开始时间：2026-07-23 10:40:50（北京时间，incident #1 ack + 七盏灯全绿）
+baseline message_id：4208（最新完整 user_rule + user_scored 成对）
+baseline wake_run_id：normal-2026-07-23-10:30（首只带身份证的自然 Wake）
+incident #1：已按根因结案（missing_or_invalid_message_id / #4118 上游身份接线）
+Shadow status：全绿
+```
+
+历史参考（不计入本次 72h 成绩）：
 
 - 生产首个正式 v3 用户事件：`message_id=4100`
 - 三个开关已开启：score proof、shadow、user events
@@ -701,16 +715,22 @@ PR #126 修门禁与去重
 - [x] PR #128 门禁通过 → 合并部署 `61faf6f`；P-ID-CHAT 勾 `[x]`；
 - [x] PR #129 门禁通过（continuity 含 22 项 Wake 身份测试）→ 合并部署 `549cb55`；P-ID-WAKE 勾 `[x]`；
 - [x] 活计划命名统一：Fyodor Heartbeat Orchestrator / Fyodor Brain Router；`identity_id` 取代 `nox_id`；
-- [~] P-SHADOW：已由 2026-07-23 10:40:50 BJT 的正式重启记录取代（此前「待自然 wake_outcome → 重启 72h」待办作废）
-- [x] P-0 完成：PR #130 `6f66060`；生产单轮样本 `message_id=4220` PASS
-- [x] P-SHADOW 重启：自然 Wake `normal-2026-07-23-10:30`；incident #1 于 10:40:50 BJT 结案；72h 自 10:40:50 BJT 起算
+- [x] 自然 Wake 验票：`normal-2026-07-23-10:30` 双票对齐；
+- [x] incident #1 按根因 ack（10:40:50）；七盏灯全绿；
+- [x] P-SHADOW 重启：72h 自 2026-07-23 10:40:50 BJT 起算（不因 PR #130 / #132 重置）
 
 ### 2026-07-23（续）
 
 - [x] PR #130 合并部署 `6f66060`；P-0 测量基础上生产
 - [x] 单轮 live 样本 `4220`：`stream_totals_match=true`，指纹与 tool surface 齐全
 - [x] PR #132 合并 `886e494` + 正式部署 `605e697`；七盏灯部署后复验全绿
-- [x] P-SHADOW：72h 观察进行中，起点不变（10:40:50 BJT）
+
+### 2026-07-26
+
+- [x] P-SHADOW 终审通过（2026-07-26 12:44 北京时间）；`status_exit_code=0`；七盏灯全绿；`proof_max=4385`；
+- [x] 自然样本 83/82/59 全 applied；Wake 版本链连续至 `normal-2026-07-26-12:00` → v332；
+- [x] **P-SHADOW `[x] graduated`**；Observation window >72h；
+- [ ] 下一项：**Memory Hotfix**。
 
 ---
 
