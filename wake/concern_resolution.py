@@ -43,6 +43,15 @@ _QUESTION_ONLY_FRAGMENT_RE = re.compile(
 _COMMA_BEFORE_QUESTION_RE = re.compile(
     r'[，,]\s*(?=(?:怎么|如何|要不要|该不该|怎么办|怎么处理|要不要处理))',
 )
+_COMMA_STATE_TRANSITION_RE = re.compile(
+    r'[，,]\s*(?=(?:后来|其实|不过|但|然而|现在|今天|昨天|刚才|已经|确认))',
+)
+_TRAILING_QUESTION_SUFFIX_RE = re.compile(
+    r'(?:[，,]\s*)?(?:'
+    r'怎么(?:办|处理)|要不要(?:去|继续|再|还)?[\u4e00-\u9fff]{0,4}|'
+    r'该不该|如何[\u4e00-\u9fff]{0,6}|需要吗|行吗'
+    r')[吗？?]*$',
+)
 
 _RESOLUTION_MARKERS = tuple(
     re.compile(p, re.IGNORECASE)
@@ -67,6 +76,7 @@ _REOPEN_MARKERS = tuple(
         r'(?:今天|昨天|刚才|刚刚|现在).{0,12}(?:出问题|报错|失败|恶化|坏了|找不到|延迟|开始|又)',
         r'(?:开始|出现)(?:问题|故障|报错|状况|反复|了|着)',
         r'(?:仍|还)(?:有|没|未).{0,8}(?:问题|故障|报错|完成|解决)',
+        r'(?:又|仍|还)?.{0,4}(?:恶化|红肿|发炎|渗|出错)(?:了|着)?',
     )
 )
 
@@ -79,10 +89,10 @@ _TRAILING_STATE_PHRASE_RE = re.compile(
     r')$',
 )
 _LEADING_FILLER_RE = re.compile(
-    r'^(?:醒来|还在想|还在担心|还在|仍然|依然|医生|记得|提醒|想问|关于)+',
+    r'^(?:醒来|还在想|我还在想|还在担心|还在|仍然|依然|医生|记得|提醒|想问|关于|她之前被|他之前被|我之前被|她被|他被|日记里|夜里仍惦记)+',
 )
 _TRAILING_WORRY_RE = re.compile(
-    r'(?:还在疼|还在痛|仍没|仍未|仍然没|有没有取|有没取|怎么办|怎么处理).*$',
+    r'(?:还在疼|还在痛|仍没|仍未|仍然没|有没有取|有没取|要不要打|要不要|怎么办|怎么处理).*$',
 )
 _FILLER_CHUNK_RE = re.compile(
     r'^(?:不用再|无需|可以|关于|后来|之前|当时).*$',
@@ -92,6 +102,16 @@ _DOMAIN_GENERIC = frozenset({
     '进度', '订单', '工厂', '服务', '故障', '部署', '问题', '系统', '项目',
     '前端', '后端', '接口', '模块', '版本', '环境', '厂家', '产线',
 })
+
+_KNOWN_ENTITY_CORES = (
+    '有骨有尾', '无骨有尾', '有骨无尾', '无骨无尾',
+    '磁吸尾', '意向金', '尾款', '还款', '退款', '快递', '订单', '衬衫',
+    '破伤风', '抓伤', '伤口', '红肿', '渗液',
+)
+_EMBEDDABLE_ENTITY_CORES = tuple(
+    core for core in _KNOWN_ENTITY_CORES
+    if core not in {'衬衫', '订单'}
+)
 
 _GENERIC_TOPIC_TOKENS = frozenset({
     '已经', '可以', '不用', '无需', '没有', '什么', '怎么', '我们', '你们', '自己',
@@ -176,8 +196,11 @@ def _extract_entity_core(chunk: str) -> str:
     if _FILLER_CHUNK_RE.match(value):
         return ''
     value = re.sub(r'^(?:医生说|医生|说)+', '', value)
-    value = re.sub(r'^(?:不用|无需|不用再|可以)+', '', value)
+    value = re.sub(r'^(?:不用|无需|不必|不用再|可以)+', '', value)
+    value = re.sub(r'^(?:猫抓的?|被猫抓的?)', '', value)
     value = _LEADING_FILLER_RE.sub('', value)
+    value = re.sub(r'^(?:她|他|我)?(?:需不需要|要不要|有没有|有没)', '', value)
+    value = re.sub(r'^(?:打|用)', '', value)
     value = re.sub(r'又.{0,8}找不到.*$', '', value)
     value = re.sub(r'又.{0,8}(?:红|肿|疼|痛|发炎|渗|坏|错|恶化|问题|故障|报错).*$', '', value)
     value = re.sub(
@@ -186,6 +209,11 @@ def _extract_entity_core(chunk: str) -> str:
         value,
     )
     value = _TRAILING_STATE_PHRASE_RE.sub('', value)
+    value = re.sub(
+        r'(?:早就|已经|已|仍未|还没|未|不)?(?:愈合|好了|结束|完成|解决|恢复|修好|送到|取完|到账|好转).*$',
+        '',
+        value,
+    )
     value = re.sub(
         r'(?:的)?(?:进度|情况|状态)?(?:已经|已|仍未|还没|未).*$',
         '',
@@ -197,23 +225,74 @@ def _extract_entity_core(chunk: str) -> str:
     return value.strip()
 
 
+def _normalize_entity_variant(core: str) -> set[str]:
+    variants: set[str] = {core}
+    trimmed = re.sub(
+        r'(?:要不要|有没有|有没|怎么办|怎么处理|仍让我放不下).*$',
+        '',
+        core,
+    ).strip()
+    if trimmed and trimmed != core:
+        variants.add(trimmed)
+        core = trimmed
+    for known_core in sorted(_KNOWN_ENTITY_CORES, key=len, reverse=True):
+        if core == known_core:
+            variants.add(known_core)
+            continue
+        if core.endswith(known_core) and len(core) > len(known_core):
+            prefix = core[:-len(known_core)]
+            if len(prefix) <= 2 and not _has_entity_discriminator(prefix):
+                variants.add(known_core)
+        if core.startswith(known_core) and len(core) > len(known_core):
+            suffix = core[len(known_core):]
+            if _has_entity_discriminator(suffix):
+                continue
+            if len(suffix) <= 2:
+                variants.add(known_core)
+    for known_core in sorted(_EMBEDDABLE_ENTITY_CORES, key=len, reverse=True):
+        start = core.find(known_core)
+        if start < 0:
+            continue
+        prefix = core[:start]
+        suffix = core[start + len(known_core):]
+        if _has_entity_discriminator(suffix):
+            continue
+        if _suffix_preserves_distinct_entity(suffix):
+            continue
+        if len(prefix) <= 4 and len(suffix) <= 2:
+            variants.add(known_core)
+    return {item for item in variants if item and len(item) >= 2 and not is_state_token(item)}
+
+
+def _has_entity_discriminator(suffix: str) -> bool:
+    if not suffix:
+        return False
+    return bool(re.match(r'^[a-z0-9]', suffix))
+
+
+def _suffix_preserves_distinct_entity(suffix: str) -> bool:
+    if _has_entity_discriminator(suffix):
+        return True
+    return bool(re.match(r'^订单[a-z0-9]', suffix))
+
+
 def _identity_cores_from_chunk(chunk: str) -> set[str]:
     cores: set[str] = set()
     core = _extract_entity_core(chunk)
-    if not core or len(core) < 2 or is_state_token(core):
-        return cores
-    cores.add(core)
-    if len(core) >= 4 and re.fullmatch(r'[\u4e00-\u9fff]+', core):
-        for size in (3, 4):
-            for i in range(len(core) - size + 1):
-                piece = core[i:i + size]
-                if (
-                    len(piece) >= 3
-                    and not is_state_token(piece)
-                    and not piece.startswith('的')
-                    and not piece.endswith('的')
-                ):
-                    cores.add(piece)
+    if core and len(core) >= 2 and not is_state_token(core):
+        cores.update(_normalize_entity_variant(core))
+    for known_core in sorted(_EMBEDDABLE_ENTITY_CORES, key=len, reverse=True):
+        start = chunk.find(known_core)
+        if start < 0:
+            continue
+        prefix = chunk[:start]
+        suffix = chunk[start + len(known_core):]
+        if _has_entity_discriminator(suffix):
+            continue
+        if _suffix_preserves_distinct_entity(suffix):
+            continue
+        if len(prefix) <= 8 and len(suffix) <= 4:
+            cores.add(known_core)
     return cores
 
 
@@ -257,6 +336,10 @@ def _matchable_tokens(tokens: frozenset[str]) -> frozenset[str]:
     )
 
 
+def _token_prefix_suffix_embedded(shorter: str, longer: str) -> bool:
+    return longer.startswith(shorter) or longer.endswith(shorter)
+
+
 def _anchor_token_match(left_token: str, right_token: str) -> bool:
     if left_token in _DOMAIN_GENERIC or right_token in _DOMAIN_GENERIC:
         return False
@@ -265,7 +348,7 @@ def _anchor_token_match(left_token: str, right_token: str) -> bool:
     if left_token == right_token:
         return True
     shorter, longer = (left_token, right_token) if len(left_token) <= len(right_token) else (right_token, left_token)
-    if len(shorter) < 3 or shorter not in longer:
+    if len(shorter) < 2 or not _token_prefix_suffix_embedded(shorter, longer):
         return False
     if re.fullmatch(r'[a-z0-9]+(?:-[a-z0-9]+)*', shorter) and '-' not in shorter and '-' in longer:
         return False
@@ -293,13 +376,44 @@ def substantive_topic_overlap(left: frozenset[str], right: frozenset[str]) -> bo
 
 
 _DEICTIC_PHRASE = re.compile(r'(?:这件事|那件事|这事|那事)')
+_PRONOUN_CONTEXT_RE = re.compile(r'(?:它|这个|那个)(?:又|还|仍)')
 
 
 def _needs_prior_chat_context(content: str) -> bool:
     body = (content or '').strip()
     if _DEICTIC_PHRASE.search(body):
         return True
+    if _PRONOUN_CONTEXT_RE.search(body):
+        return True
     return len(_identity_tokens(topic_tokens(content))) < 1
+
+
+def _split_factual_question_suffix(clause: str) -> tuple[str, str]:
+    trimmed = clause.strip()
+    match = _TRAILING_QUESTION_SUFFIX_RE.search(trimmed)
+    if not match:
+        return trimmed, ''
+    factual = trimmed[:match.start()].strip().rstrip('，,')
+    if factual:
+        return factual, trimmed[match.start():].strip()
+    return trimmed, ''
+
+
+def _split_segment_clauses(segment: str, *, interrogative: bool) -> list[tuple[str, bool]]:
+    clauses: list[tuple[str, bool]] = []
+    parts = _COMMA_BEFORE_QUESTION_RE.split(segment.strip())
+    for idx, part in enumerate(parts):
+        part = part.strip()
+        if not part:
+            continue
+        subparts = _COMMA_STATE_TRANSITION_RE.split(part)
+        for sub_idx, subpart in enumerate(subparts):
+            subpart = subpart.strip()
+            if not subpart:
+                continue
+            is_last = idx == len(parts) - 1 and sub_idx == len(subparts) - 1
+            clauses.append((subpart, interrogative and is_last))
+    return clauses
 
 
 def _split_concern_clauses(body: str) -> list[tuple[str, bool]]:
@@ -309,21 +423,17 @@ def _split_concern_clauses(body: str) -> list[tuple[str, bool]]:
         if ch in '？?。！；\n':
             was_question = ch in '？?'
             if segment.strip():
-                parts = _COMMA_BEFORE_QUESTION_RE.split(segment.strip())
-                for idx, part in enumerate(parts):
-                    part = part.strip()
-                    if not part:
-                        continue
-                    clauses.append((part, was_question and idx == len(parts) - 1))
+                clauses.extend(_split_segment_clauses(segment, interrogative=was_question))
             segment = ''
         else:
             segment += ch
     if segment.strip():
-        for part in _COMMA_BEFORE_QUESTION_RE.split(segment.strip()):
-            part = part.strip()
-            if part:
-                clauses.append((part, False))
+        clauses.extend(_split_segment_clauses(segment, interrogative=False))
     return clauses
+
+
+def _clause_blocks_resolution(clause: str) -> bool:
+    return bool(_RESOLUTION_NEGATION.search(clause) or _RESOLUTION_RHETORICAL.search(clause))
 
 
 def _collect_clause_state_events(clause: str) -> list[tuple[int, str]]:
@@ -331,9 +441,10 @@ def _collect_clause_state_events(clause: str) -> list[tuple[int, str]]:
     for pattern in _REOPEN_MARKERS:
         for match in pattern.finditer(clause):
             events.append((match.end(), 'reopen'))
-    for pattern in _RESOLUTION_MARKERS:
-        for match in pattern.finditer(clause):
-            events.append((match.end(), 'resolve'))
+    if not _clause_blocks_resolution(clause):
+        for pattern in _RESOLUTION_MARKERS:
+            for match in pattern.finditer(clause):
+                events.append((match.end(), 'resolve'))
     return events
 
 
@@ -352,6 +463,9 @@ def _is_interrogative_about_state(clause: str) -> bool:
 
 
 def _clause_is_pure_question(clause: str, *, interrogative: bool = False) -> bool:
+    factual, suffix = _split_factual_question_suffix(clause)
+    if suffix and factual:
+        return _clause_is_pure_question(factual, interrogative=False)
     trimmed = clause.strip().rstrip('。.!！… ')
     if not trimmed:
         return True
@@ -378,13 +492,14 @@ def classify_user_concern_event(text: str) -> str | None:
     body = (text or '').strip()
     if not body:
         return None
-    if _RESOLUTION_NEGATION.search(body) or _RESOLUTION_RHETORICAL.search(body):
-        return None
     last_event: str | None = None
     for clause, interrogative in _split_concern_clauses(body):
-        if _clause_is_pure_question(clause, interrogative=interrogative):
+        factual, suffix = _split_factual_question_suffix(clause)
+        target = factual if suffix and factual else clause
+        pure_interrogative = interrogative and not suffix
+        if _clause_is_pure_question(target, interrogative=pure_interrogative):
             continue
-        event = _classify_factual_clause(clause)
+        event = _classify_factual_clause(target)
         if event:
             last_event = event
     return last_event
@@ -482,7 +597,7 @@ def fetch_user_messages(
     ]
 
 
-def _collect_resolution_topics(chat_messages: Sequence[dict], message_id: int) -> frozenset[str]:
+def collect_event_topics(chat_messages: Sequence[dict], message_id: int) -> frozenset[str]:
     index = next(
         (i for i, msg in enumerate(chat_messages) if int(msg.get('id') or 0) == int(message_id)),
         -1,
@@ -494,6 +609,10 @@ def _collect_resolution_topics(chat_messages: Sequence[dict], message_id: int) -
     if _needs_prior_chat_context(content) and index > 0:
         tokens.update(identity_topic_tokens(str(chat_messages[index - 1].get('content') or '')))
     return frozenset(tokens)
+
+
+def _collect_resolution_topics(chat_messages: Sequence[dict], message_id: int) -> frozenset[str]:
+    return collect_event_topics(chat_messages, message_id)
 
 
 def _closure_row_to_entry(row) -> ResolutionEntry:
@@ -637,7 +756,7 @@ def _apply_concern_event(
     if is_user_reopen(content):
         _deactivate_matching_closures(
             conn,
-            identity_topic_tokens(content),
+            collect_event_topics(chat_messages, message_id),
             reopened_at=created_at,
         )
         return
@@ -701,7 +820,7 @@ def build_resolution_state(
         content = str(msg.get('content') or '')
         message_id = int(msg.get('id') or 0)
         if is_user_reopen(content):
-            reopen_tokens = identity_topic_tokens(content)
+            reopen_tokens = collect_event_topics(chat_messages, message_id)
             active = [
                 entry for entry in active
                 if not substantive_topic_overlap(entry.topic_tokens, reopen_tokens)
