@@ -777,12 +777,40 @@ class ConcernResolutionLogicTests(unittest.TestCase):
             '我在等快递送到再说',
             '我想等订单完成后再结案',
             '我只是希望伤口早点愈合',
+            '我们希望 frontend 修好',
+            '我们在等快递送到再说',
+            '咱们想等订单完成后再结案',
         )
         for text in cases:
             self.assertFalse(
                 any(event.event == 'resolve' for event in cr.parse_user_concern_events(text)),
                 msg=text,
             )
+
+    def test_bare_intent_want_does_not_resolve(self):
+        cases = (
+            '我想修好 frontend',
+            '我想让 frontend 修好',
+            '我想等 frontend 修好后再结案',
+        )
+        for text in cases:
+            self.assertFalse(
+                any(event.event == 'resolve' for event in cr.parse_user_concern_events(text)),
+                msg=text,
+            )
+
+    def test_factual_resolve_after_intent_phrases(self):
+        events = cr.parse_user_concern_events('今天确认 frontend 已经修好了')
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].event, 'resolve')
+        self.assertIn('frontend', events[0].topics)
+
+        events = cr.parse_user_concern_events(
+            '我本来希望 frontend 修好，今天确认 frontend 已经修好了',
+        )
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].event, 'resolve')
+        self.assertIn('frontend', events[0].topics)
 
     def test_speaker_prefixed_mixed_closure_isolation(self):
         cases = (

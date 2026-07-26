@@ -71,8 +71,15 @@ _FUTURE_WAIT_PREFIX_RE = re.compile(r'^(?:等|在等|想等)')
 _WISH_PREFIX_RE = re.compile(
     r'^(?:希望|但愿|本想|本来想|本来希望)',
 )
-_FACTUALITY_SPEAKER_PREFIX_RE = re.compile(
-    r'^(?:我|我们|咱们)(?:只是|还|想|在)?',
+_SPEAKER_PREFIX_RE = r'(?:我们|咱们|我)'
+_WISH_INTENT_RE = re.compile(
+    rf'^{_SPEAKER_PREFIX_RE}?(?:只是)?(?:希望|但愿|本想|本来想|本来希望)',
+)
+_WAIT_INTENT_RE = re.compile(
+    rf'^{_SPEAKER_PREFIX_RE}?(?:只是)?(?:等|在等|想等)',
+)
+_INTENT_WANT_RE = re.compile(
+    rf'^{_SPEAKER_PREFIX_RE}?想(?!等)',
 )
 _OUTER_NEGATES_UNRESOLVED_RE = re.compile(
     r'^(?:'
@@ -620,9 +627,23 @@ def _split_concern_clauses(body: str) -> list[tuple[str, bool]]:
 
 def _factuality_subject(clause: str) -> str:
     subject = clause.strip()
-    subject = _FACTUALITY_SPEAKER_PREFIX_RE.sub('', subject).strip()
-    subject = re.sub(r'^只是', '', subject).strip()
+    subject = re.sub(rf'^{_SPEAKER_PREFIX_RE}(?:只是)?', '', subject).strip()
     return subject
+
+
+def _clause_has_wish_or_wait_intent(clause: str) -> bool:
+    stripped = clause.strip()
+    if (
+        _WISH_INTENT_RE.match(stripped)
+        or _WAIT_INTENT_RE.match(stripped)
+        or _INTENT_WANT_RE.match(stripped)
+    ):
+        return True
+    subject = _factuality_subject(clause)
+    return bool(
+        _WISH_PREFIX_RE.match(subject)
+        or _FUTURE_WAIT_PREFIX_RE.match(subject)
+    )
 
 
 def _negative_state_assertion_is_outer_negated(clause: str, match: re.Match[str]) -> bool:
@@ -677,11 +698,9 @@ def _state_match_is_non_factual(
     if _CONDITIONAL_BEFORE_REOPEN_RE.search(before):
         if not _FACTUAL_CONTRAST_BREAK_RE.search(before):
             return True
+    if _clause_has_wish_or_wait_intent(segment.strip()):
+        return True
     if _CONDITIONAL_PREFIX_RE.match(segment_head):
-        return True
-    if _FUTURE_WAIT_PREFIX_RE.match(segment_head):
-        return True
-    if _WISH_PREFIX_RE.match(segment_head):
         return True
     if re.match(r'^(?:如果|要是|假如|万一|以后若|倘若|若是)', segment_head):
         return True
@@ -903,11 +922,11 @@ def _clause_explicit_entity_topics(clause: str) -> frozenset[str]:
 
 
 def _clause_is_non_factual_fragment(clause: str) -> bool:
+    if _clause_has_wish_or_wait_intent(clause):
+        return True
     subject = _factuality_subject(clause)
     if (
-        _WISH_PREFIX_RE.match(subject)
-        or _CONDITIONAL_PREFIX_RE.match(subject)
-        or _FUTURE_WAIT_PREFIX_RE.match(subject)
+        _CONDITIONAL_PREFIX_RE.match(subject)
         or re.match(r'^(?:如果|要是|假如|万一|以后若|倘若|若是)', subject)
     ):
         return True
