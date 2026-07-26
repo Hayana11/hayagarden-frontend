@@ -1,0 +1,24 @@
+0 4 * * * cp /opt/frontend/memories.db /opt/frontend/backups/memories_$(date +\%Y\%m\%d).db && find /opt/frontend/backups/ -name 'memories_*.db' -mtime +30 -delete
+50 23 * * * /usr/bin/python3.11 /opt/frontend/auto_diary.py >> /var/log/auto_diary.log 2>&1
+5 4 * * * cd /opt/frontend && git add . && git commit -m "auto backup $(date '+\%Y-\%m-\%d')" --allow-empty && git push origin main >> /var/log/frontend-git-backup.log 2>&1
+*/10 * * * * curl -sf http://localhost:5050/api/drift/check >> /var/log/drift-check.log 2>&1
+0 3 * * * /usr/bin/python3.11 /opt/frontend/tools/cleaner.py >> /var/log/cleaner.log 2>&1
+0 20 * * * /opt/frontend/tools/backup.sh >> /var/log/frontend-backup.log 2>&1
+0 2,8,14,20 * * * /usr/bin/python3 /opt/frontend/tools/patrol.py >> /var/log/patrol.log 2>&1
+*/30 * * * * /usr/bin/python3.11 /opt/frontend/tools/dream_wake.py >> /var/log/dream_wake.log 2>&1
+# 巡逻限时：东八 02:00-08:00（UTC 18:00-24:00），哈娅不在线时段，白天额度留给她
+*/30 18-23 * * * /usr/bin/python3 /opt/frontend/tools/cc_board_check.py >> /var/log/cc_board_check.log 2>&1
+0 0 * * * /usr/bin/python3 /opt/frontend/tools/cc_board_check.py >> /var/log/cc_board_check.log 2>&1
+0 6 * * * /usr/bin/python3.11 /opt/frontend/tools/summarizer.py >> /var/log/summarizer.log 2>&1
+* * * * * /usr/bin/python3.11 /opt/session_mgr/session_watcher.py >> /opt/session_mgr/watcher.log 2>&1
+*/5 * * * * /opt/frontend/tools/health-check.sh
+0 22 * * * /usr/bin/python3.11 /opt/frontend/tools/thought_gen.py >> /var/log/thought_gen.log 2>&1
+0 * * * * python3 /opt/frontend/tools/token_refresh.py >> /var/log/token_refresh.log 2>&1
+3 * * * * /usr/bin/python3.11 /opt/frontend/tools/wake_health.py >> /var/log/wake_health.log 2>&1
+30 18 * * * /usr/bin/python3 /opt/frontend/tools/memory_cycle.py >> /var/log/memory_cycle.log 2>&1
+* * * * * /usr/bin/python3.11 /opt/frontend/tools/dream_wake.py selftrig >> /var/log/dream_wake.log 2>&1
+30 3 * * * /usr/bin/python3.11 /opt/frontend/tools/file_cleaner.py >> /var/log/file_cleaner.log 2>&1
+*/15 * * * * /usr/bin/python3.11 /opt/frontend/tools/rolling_summary.py >> /var/log/rolling_summary.log 2>&1
+15 */6 * * * /usr/bin/python3.11 /opt/frontend/tools/tag_enricher.py >> /var/log/tag_enricher.log 2>&1
+40 5 * * * /usr/bin/python3.11 /opt/frontend/tools/fact_extractor.py >> /var/log/fact_extractor.log 2>&1
+20 * * * * /usr/bin/python3.11 /opt/frontend/tools/vector_indexer.py >> /var/log/vector_indexer.log 2>&1

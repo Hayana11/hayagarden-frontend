@@ -1,0 +1,21 @@
+# Read-only snapshot captured 2026-07-26 (UTC)
+production_root=/opt/frontend
+head=30d375b216d7fb09e528f99fd96fe3c17e6b1193
+head_message=auto backup 2026-07-26
+git_status=## HEAD (no branch)
+worktree_clean=yes
+origin_main=605e69743909ab50624d949b801cc2c6aa857ae0
+production_persona_blob=badf05a062868add020d79f9a1de841f5b29a1f3
+production_persona_lines=166
+production_persona_bytes=23371
+
+production_only_chain:
+41ff65322139f67dee7f4fe84eece6b4c7b8821c  auto backup 2026-07-24  (empty)
+aed5b2e11177b9d3c56c8e2255f2a2d2113be149  auto backup 2026-07-25  (persona.md only)
+30d375b216d7fb09e528f99fd96fe3c17e6b1193  auto backup 2026-07-26  (empty)
+
+canonical_target_v2_blob=992560d906e2a6b90780e3d4fd6d15ba2c66f2ad
+canonical_target_v2_bytes=31542
+canonical_target_v2_lines=120
+
+comparison_note=Production badf05a does NOT match user-supplied canonical persona v2 (992560d). PR restores canonical v2.
