@@ -67,9 +67,20 @@ _REOPEN_FAULT_NEGATED_RE = re.compile(
 )
 _FACTUAL_CONTRAST_BREAK_RE = re.compile(r'(?:但|但是|不过|然而|可是)|今天真的|其实|真的')
 _CONDITIONAL_PREFIX_RE = re.compile(r'^(?:如果|要是|假如|万一|以后若|倘若|若是)')
-_FUTURE_WAIT_PREFIX_RE = re.compile(r'^等')
+_FUTURE_WAIT_PREFIX_RE = re.compile(r'^(?:等|在等|想等)')
 _WISH_PREFIX_RE = re.compile(
     r'^(?:希望|但愿|本想|本来想|本来希望)',
+)
+_FACTUALITY_SPEAKER_PREFIX_RE = re.compile(
+    r'^(?:我|我们|咱们)(?:只是|还|想|在)?',
+)
+_OUTER_NEGATES_UNRESOLVED_RE = re.compile(
+    r'^(?:'
+    r'并不是说|并不是|'
+    r'并非|'
+    r'不是|'
+    r'没有发现|并未发现|没发现'
+    r')',
 )
 _NON_FACTUAL_NEGATION_SEGMENT_RE = re.compile(
     r'^(?:'
@@ -607,6 +618,39 @@ def _split_concern_clauses(body: str) -> list[tuple[str, bool]]:
     return clauses
 
 
+def _factuality_subject(clause: str) -> str:
+    subject = clause.strip()
+    subject = _FACTUALITY_SPEAKER_PREFIX_RE.sub('', subject).strip()
+    subject = re.sub(r'^只是', '', subject).strip()
+    return subject
+
+
+def _negative_state_assertion_is_outer_negated(clause: str, match: re.Match[str]) -> bool:
+    local_start = _local_segment_start(clause, match.start())
+    segment = clause[local_start:match.end()].strip()
+    outer = _OUTER_NEGATES_UNRESOLVED_RE.match(segment)
+    if not outer:
+        return False
+    tail = segment[outer.end():].strip()
+    tail = re.sub(r'^(?:它|这|那)', '', tail).strip()
+    if any(pattern.search(tail) for pattern in _NEGATIVE_UNRESOLVED_MARKERS):
+        return True
+    before = segment[:match.start() - local_start]
+    return bool(_NEGATIVE_POLARITY_RE.search(before))
+
+
+def _unresolved_match_is_outer_negated(clause: str, match: re.Match[str]) -> bool:
+    return _negative_state_assertion_is_outer_negated(clause, match)
+
+
+def _clause_has_outer_negated_unresolved(clause: str) -> bool:
+    for pattern in _NEGATIVE_UNRESOLVED_MARKERS:
+        for match in pattern.finditer(clause):
+            if _unresolved_match_is_outer_negated(clause, match):
+                return True
+    return False
+
+
 def _local_segment_start(clause: str, pos: int) -> int:
     start = 0
     for match in _CLAUSE_LOCAL_SEP_RE.finditer(clause[:pos]):
@@ -623,7 +667,7 @@ def _state_match_is_non_factual(
     local_start = _local_segment_start(clause, match.start())
     before = clause[local_start:match.start()]
     segment = clause[local_start:match.end()]
-    segment_head = segment.strip()
+    segment_head = _factuality_subject(segment)
 
     conditional = _CONDITIONAL_BEFORE_REOPEN_RE.search(segment)
     if conditional:
@@ -643,6 +687,8 @@ def _state_match_is_non_factual(
         return True
 
     if event_kind == 'unresolved':
+        if _unresolved_match_is_outer_negated(clause, match):
+            return True
         return False
 
     if _NON_FACTUAL_NEGATION_SEGMENT_RE.match(segment_head):
@@ -697,6 +743,8 @@ def _collect_clause_state_events(clause: str) -> list[tuple[int, int, str]]:
                 if _state_match_is_non_factual(clause, match, event_kind='resolve'):
                     continue
                 if _match_has_negative_polarity(clause, match):
+                    if _negative_state_assertion_is_outer_negated(clause, match):
+                        continue
                     events.append((
                         match.end(),
                         _EVENT_PRIORITY['unresolved'],
@@ -855,13 +903,15 @@ def _clause_explicit_entity_topics(clause: str) -> frozenset[str]:
 
 
 def _clause_is_non_factual_fragment(clause: str) -> bool:
-    stripped = clause.strip()
-    return bool(
-        _WISH_PREFIX_RE.match(stripped)
-        or _CONDITIONAL_PREFIX_RE.match(stripped)
-        or _FUTURE_WAIT_PREFIX_RE.match(stripped)
-        or re.match(r'^(?:如果|要是|假如|万一|以后若|倘若|若是)', stripped)
-    )
+    subject = _factuality_subject(clause)
+    if (
+        _WISH_PREFIX_RE.match(subject)
+        or _CONDITIONAL_PREFIX_RE.match(subject)
+        or _FUTURE_WAIT_PREFIX_RE.match(subject)
+        or re.match(r'^(?:如果|要是|假如|万一|以后若|倘若|若是)', subject)
+    ):
+        return True
+    return _clause_has_outer_negated_unresolved(clause)
 
 
 def _topics_from_prior_clauses(prior_clauses: Sequence[str]) -> frozenset[str]:
