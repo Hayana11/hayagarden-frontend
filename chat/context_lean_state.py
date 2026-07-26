@@ -120,8 +120,9 @@ def format_structured_state_delta(
     cumulative_before: Mapping[str, str],
     effective_send_payload: Mapping[str, str],
     *,
-    prev_version: str,
-    curr_version: str,
+    anchor_version: str,
+    previous_version: str,
+    current_version: str,
 ) -> str:
     payload = normalize_state_dict(effective_send_payload)
     if not payload:
@@ -132,7 +133,9 @@ def format_structured_state_delta(
         '【状态更新·增量】',
         (
             f'schema_version={STATE_SCHEMA_VERSION} '
-            f'anchor_version={prev_version} curr_version={curr_version} '
+            f'anchor_version={anchor_version} '
+            f'previous_version={previous_version} '
+            f'current_version={current_version} '
             f'changed={",".join(changed)}'
         ),
     ]
@@ -151,13 +154,14 @@ def format_lean_state_for_send(
     effective_send_payload: Mapping[str, Any],
     *,
     is_cold: bool,
-    prev_version: str,
-    curr_version: str,
+    anchor_version: str,
+    previous_version: str,
+    current_version: str,
 ) -> tuple[str, str, str]:
     """Return (text, legacy_state_mode, state_context_mode)."""
     payload = normalize_state_dict(effective_send_payload)
     if is_cold:
-        text = format_structured_state_anchor(payload, state_version=curr_version)
+        text = format_structured_state_anchor(payload, state_version=current_version)
         if not text:
             return '', 'none', 'omitted'
         return text, 'snapshot', 'full_anchor'
@@ -168,8 +172,9 @@ def format_lean_state_for_send(
     text = format_structured_state_delta(
         cumulative_before or {},
         payload,
-        prev_version=prev_version or compute_state_version(cumulative_before),
-        curr_version=curr_version,
+        anchor_version=anchor_version,
+        previous_version=previous_version,
+        current_version=current_version,
     )
     if not text:
         return '', 'none', 'omitted'
@@ -183,6 +188,7 @@ def build_state_lean_observation(
     state_text: str,
     state_version: str,
     anchor_version: str,
+    previous_version: str,
     changed_field_count: int,
     reanchor_reason: Optional[str],
     fallback_reason: Optional[str],
@@ -196,6 +202,7 @@ def build_state_lean_observation(
         'state_context_mode': mode,
         'state_version': state_version,
         'anchor_version': anchor_version,
+        'previous_version': previous_version,
         'changed_field_count': int(changed_field_count),
         'state_context_chars': len(state_text or ''),
         'state_context_estimated_tokens': estimate_tokens_heuristic_cjk1_ascii4_v1(state_text or ''),
@@ -240,6 +247,7 @@ def _legacy_state_context(
             state_text=state_text,
             state_version=compute_state_version(raw_state),
             anchor_version='',
+            previous_version='',
             changed_field_count=0,
             reanchor_reason=None,
             fallback_reason=None,
@@ -266,6 +274,7 @@ def assemble_legacy_full_fallback(
         state_text=state_text,
         state_version=version,
         anchor_version='',
+        previous_version='',
         changed_field_count=0,
         reanchor_reason=None,
         fallback_reason=fallback_reason,
@@ -343,17 +352,23 @@ def assemble_cc_state_context(
             cumulative_before,
             effective_send_payload,
         )
-    prev_version = (
-        getattr(resident, 'last_state_anchor_version', None)
-        or compute_state_version(cumulative_before)
-    )
-    state_version = compute_state_version(effective_state_after)
+    current_version = compute_state_version(effective_state_after)
+    if send_is_cold:
+        anchor_version = current_version
+        previous_version = ''
+    else:
+        anchor_version = (
+            getattr(resident, 'last_state_anchor_version', None)
+            or compute_state_version(cumulative_before)
+        )
+        previous_version = compute_state_version(cumulative_before)
     state_text, state_mode, context_mode = format_lean_state_for_send(
         cumulative_before,
         effective_send_payload,
         is_cold=send_is_cold,
-        prev_version=prev_version,
-        curr_version=state_version,
+        anchor_version=anchor_version,
+        previous_version=previous_version,
+        current_version=current_version,
     )
     changed_count = len(effective_send_payload)
 
@@ -361,8 +376,9 @@ def assemble_cc_state_context(
         'lean_state_active': True,
         'state_send_snapshot': dict(effective_send_payload),
         'state_schema_version': STATE_SCHEMA_VERSION,
-        'state_version': state_version,
-        'state_anchor_version': prev_version if not send_is_cold else state_version,
+        'state_version': current_version,
+        'state_anchor_version': anchor_version,
+        'state_previous_version': previous_version,
         'state_context_chars': len(state_text or ''),
     }
     if needs_reanchor:
@@ -373,8 +389,9 @@ def assemble_cc_state_context(
         enabled=True,
         state_context_mode=context_mode,
         state_text=state_text,
-        state_version=state_version,
-        anchor_version=prev_version if not send_is_cold else state_version,
+        state_version=current_version,
+        anchor_version=anchor_version,
+        previous_version=previous_version,
         changed_field_count=changed_count,
         reanchor_reason=reanchor_reason if needs_reanchor else None,
         fallback_reason=None,
@@ -404,8 +421,8 @@ def assemble_cc_state_for_resident_turn(
     from chat.system_builder import build_cc_state
 
     lean_state_on = _context_lean.lean_state_enabled()
-    raw_state = build_cc_state(lean=lean_state_on)
     try:
+        raw_state = build_cc_state(lean=lean_state_on)
         state_ctx = assemble_cc_state_context(
             raw_state=raw_state,
             is_cold=is_cold,

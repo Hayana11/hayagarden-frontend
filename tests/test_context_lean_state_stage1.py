@@ -1,6 +1,7 @@
 """Stage 1: State delta / re-anchor — fixtures, parity, and observation contracts."""
 from __future__ import annotations
 
+import copy
 import unittest
 from types import SimpleNamespace
 from unittest import mock
@@ -15,7 +16,12 @@ from chat.context_lean_state import (
     format_structured_state_delta,
     format_structured_state_anchor,
 )
-from chat.system_builder import format_state_diff, format_state_snapshot
+from chat.system_builder import (
+    _cc_collect_state,
+    format_state_diff,
+    format_state_snapshot,
+    lean_system_field_is_facts_only,
+)
 from cc_resident import ResidentSession
 
 
@@ -108,12 +114,19 @@ class StructuredFormatTests(unittest.TestCase):
         after = dict(RAW_V1)
         after['lights'] = '（灯·主灯 开）'
         send = {'lights': after['lights']}
+        anchor_v = 'anchor-hash'
+        prev_v = compute_state_version(RAW_V1)
+        curr_v = compute_state_version(merge_cumulative_state_send(RAW_V1, send))
         text = format_structured_state_delta(
             RAW_V1,
             send,
-            prev_version=compute_state_version(RAW_V1),
-            curr_version=compute_state_version(send),
+            anchor_version=anchor_v,
+            previous_version=prev_v,
+            current_version=curr_v,
         )
+        self.assertIn('anchor_version=anchor-hash', text)
+        self.assertIn(f'previous_version={prev_v}', text)
+        self.assertIn(f'current_version={curr_v}', text)
         self.assertIn('changed=lights', text)
         self.assertIn('lights:', text)
 
@@ -379,6 +392,7 @@ class AssembleContextFixtureTests(unittest.TestCase):
             'state_context_mode',
             'state_version',
             'anchor_version',
+            'previous_version',
             'changed_field_count',
             'state_context_chars',
             'state_context_estimated_tokens',
@@ -389,6 +403,65 @@ class AssembleContextFixtureTests(unittest.TestCase):
         ):
             self.assertIn(key, obs)
         self.assertEqual(obs['observation_version'], 3)
+
+
+class ConsecutiveDeltaVersionChainTests(unittest.TestCase):
+    @staticmethod
+    def _commit(sess: ResidentSession, result, raw_state):
+        meta = {
+            'state_snapshot': copy.deepcopy(raw_state),
+            **result.commit_meta_extras,
+        }
+        sess._commit_sent_context(meta)
+
+    def test_two_consecutive_deltas_link_previous_version(self):
+        sess = ResidentSession('/tmp', '', '')
+        raw = dict(RAW_V1)
+
+        anchor = assemble_cc_state_context(
+            raw_state=raw,
+            is_cold=True,
+            user_text='你好',
+            resident=sess,
+            lean_on=True,
+        )
+        self.assertEqual(anchor.state_context_mode, 'full_anchor')
+        anchor_version = anchor.observation['state_version']
+        self._commit(sess, anchor, raw)
+
+        raw_after_delta1 = dict(raw)
+        raw_after_delta1['lights'] = 'main=on bedside=off'
+        delta1 = assemble_cc_state_context(
+            raw_state=raw_after_delta1,
+            is_cold=False,
+            user_text='开灯',
+            resident=sess,
+            lean_on=True,
+        )
+        self.assertEqual(delta1.state_context_mode, 'delta')
+        delta1_current = delta1.observation['state_version']
+        self.assertEqual(delta1.observation['anchor_version'], anchor_version)
+        self.assertEqual(
+            delta1.observation['previous_version'],
+            compute_state_version(sess.last_state_send_snapshot),
+        )
+        self.assertIn(f'previous_version={delta1.observation["previous_version"]}', delta1.state_text)
+        self.assertIn(f'current_version={delta1_current}', delta1.state_text)
+        self._commit(sess, delta1, raw_after_delta1)
+
+        raw_after_delta2 = dict(raw_after_delta1)
+        raw_after_delta2['drive'] = 'attachment=0.80 curiosity=0.50'
+        delta2 = assemble_cc_state_context(
+            raw_state=raw_after_delta2,
+            is_cold=False,
+            user_text='嗯',
+            resident=sess,
+            lean_on=True,
+        )
+        self.assertEqual(delta2.state_context_mode, 'delta')
+        self.assertEqual(delta2.observation['previous_version'], delta1_current)
+        self.assertEqual(delta2.observation['anchor_version'], anchor_version)
+        self.assertIn(f'previous_version={delta1_current}', delta2.state_text)
 
 
 class FallbackTests(unittest.TestCase):
@@ -408,7 +481,7 @@ class FallbackTests(unittest.TestCase):
 
 
 class GatewayFallbackTests(unittest.TestCase):
-    def test_gateway_fail_safe_reloads_legacy_raw(self):
+    def test_gateway_fail_safe_reloads_legacy_raw_on_assemble_failure(self):
         from chat.context_lean_state import assemble_cc_state_for_resident_turn
         from chat.system_builder import format_state_snapshot
 
@@ -439,6 +512,99 @@ class GatewayFallbackTests(unittest.TestCase):
         self.assertEqual(state_ctx.state_context_mode, 'fallback')
         self.assertFalse(state_ctx.commit_meta_extras.get('lean_state_active'))
         self.assertTrue(state_ctx.commit_meta_extras.get('state_lean_fallback'))
+
+    def test_gateway_fail_safe_reloads_legacy_raw_on_lean_collect_failure(self):
+        from chat.context_lean_state import assemble_cc_state_for_resident_turn
+        from chat.system_builder import format_state_snapshot
+
+        legacy_raw = dict(LEGACY_RAW)
+        resident = _resident_stub()
+        build_calls = []
+
+        def fake_build_cc_state(*, lean=False):
+            build_calls.append(lean)
+            if lean:
+                raise RuntimeError('lean collect failed')
+            return legacy_raw
+
+        with mock.patch('chat.context_lean.lean_state_enabled', return_value=True):
+            with mock.patch('chat.system_builder.build_cc_state', side_effect=fake_build_cc_state):
+                raw_state, state_ctx = assemble_cc_state_for_resident_turn(
+                    is_cold=False,
+                    user_text='你好',
+                    resident=resident,
+                )
+
+        self.assertEqual(build_calls, [True, False])
+        self.assertIs(raw_state, legacy_raw)
+        self.assertEqual(state_ctx.state_text, format_state_snapshot(legacy_raw))
+        self.assertEqual(state_ctx.state_context_mode, 'fallback')
+        self.assertFalse(state_ctx.commit_meta_extras.get('lean_state_active'))
+        self.assertTrue(state_ctx.commit_meta_extras.get('state_lean_fallback'))
+
+
+class LeanFactsOnlyCollectionTests(unittest.TestCase):
+    _SYSTEM_FIELD_KEYS = (
+        'time_bucket', 'emotion', 'drive', 'lights', 'pocket', 'ledger', 'recent_activity',
+    )
+
+    def test_lean_system_generated_fields_are_facts_only(self):
+        def get_db():
+            raise AssertionError('db should not be queried in this unit test')
+
+        with mock.patch('chat.system_builder.build_time_bucket', return_value='上午'), \
+             mock.patch('chat.system_builder._format_structured_emotion_snippet', return_value='valence=0.60 arousal=0.30'), \
+             mock.patch('chat.system_builder._format_structured_drive_snippet', return_value='attachment=0.55'), \
+             mock.patch('urllib.request.urlopen') as urlopen_mock, \
+             mock.patch('config_store.get_bool', return_value=False):
+            urlopen_mock.return_value.__enter__.return_value.read.return_value = (
+                b'{"result":{"main":{},"bedside":{}}}'
+            )
+            state = _cc_collect_state(get_db, lean=True)
+
+        for key in self._SYSTEM_FIELD_KEYS:
+            value = state.get(key) or ''
+            if value:
+                self.assertTrue(
+                    lean_system_field_is_facts_only(value),
+                    msg=f'{key} still carries behavior instructions: {value!r}',
+                )
+        self.assertEqual(state['lights'], 'main=关 bedside=关')
+        self.assertNotIn('操作', state['lights'])
+        self.assertNotIn('不要', state['lights'])
+
+    def test_lean_user_records_preserve_raw_text_without_behavior_prefix(self):
+        import sqlite3
+        import tempfile
+
+        tmp = tempfile.NamedTemporaryFile(delete=False)
+        db_path = tmp.name
+        tmp.close()
+        conn = sqlite3.connect(db_path)
+        conn.execute(
+            "CREATE TABLE board (id INTEGER, author TEXT, tag TEXT, content TEXT, "
+            "level TEXT, category TEXT, status TEXT)"
+        )
+        conn.execute(
+            "INSERT INTO board VALUES (1, '爸爸', '语气', '修改 AI 的语气，让表达更克制', '', '给活儿', 'open')"
+        )
+        conn.commit()
+        conn.close()
+
+        def get_db():
+            c = sqlite3.connect(db_path)
+            c.row_factory = sqlite3.Row
+            return c
+
+        with mock.patch('chat.system_builder.build_time_bucket', return_value='上午'), \
+             mock.patch('urllib.request.urlopen', side_effect=OSError('no light')), \
+             mock.patch('config_store.get_bool', return_value=False):
+            state = _cc_collect_state(get_db, lean=True)
+
+        self.assertIn('user_record:', state['todos'])
+        self.assertIn('修改 AI 的语气，让表达更克制', state['todos'])
+        self.assertTrue(lean_system_field_is_facts_only(state['time_bucket']))
+        self.assertTrue(lean_system_field_is_facts_only(state['lights']))
 
 
 class ResidentCommitTests(unittest.TestCase):

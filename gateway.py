@@ -2229,6 +2229,16 @@ def _pocket_status():
     return 'phone_not_connected：手机浏览器离线（上次 %s）。Pocket 依赖亮屏，锁屏后会断线。' % seen
 
 
+def _pocket_structured_snippet():
+    """Facts-only Pocket status for Context Lean state blocks."""
+    d, err = _pocket_request('GET', '/pocket/status', timeout=3)
+    if err:
+        return ''
+    connected = bool(d.get('phone_connected'))
+    seen = d.get('last_seen') or 'unknown'
+    return 'phone_connected=%s last_seen=%s' % (str(connected).lower(), seen)
+
+
 def _pocket_bp3_snippet():
     """BP3 动态区一行：手机浏览器在线/离线 + last_seen。relay 不可用时返回空串。"""
     d, err = _pocket_request('GET', '/pocket/status', timeout=3)

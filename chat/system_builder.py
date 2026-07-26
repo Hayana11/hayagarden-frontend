@@ -883,9 +883,25 @@ def _format_structured_drive_snippet() -> str:
         return ''
 
 
+# System-generated lean fields must not carry behavior/style instructions.
+_LEAN_SYSTEM_FIELD_BEHAVIOR_MARKERS = (
+    '请', '应该', '先', '不要', '语气', '表现得', '操作', '你自己判断', '怎么提',
+)
+
+
+def lean_system_field_is_facts_only(text: str) -> bool:
+    """True when a system-generated lean field contains no behavior-control phrasing."""
+    value = str(text or '')
+    return not any(marker in value for marker in _LEAN_SYSTEM_FIELD_BEHAVIOR_MARKERS)
+
+
 def _cc_collect_state(get_db_fn, *, lean=False):
     state = {
-        'time_bucket': f'当前时间段：{build_time_bucket()} 左右',
+        'time_bucket': (
+            f'bucket={build_time_bucket()}'
+            if lean else
+            f'当前时间段：{build_time_bucket()} 左右'
+        ),
         'emotion': '',
         'drive': '',
         'lights': '',
@@ -925,15 +941,22 @@ def _cc_collect_state(get_db_fn, *, lean=False):
             ls = json.loads(resp.read()).get('result', {})
         ms = _fmt_light_status(ls.get('main', {}))
         bs = _fmt_light_status(ls.get('bedside', {}))
-        state['lights'] = (
-            f'（灯·当前状态：主灯 {ms}，床头灯 {bs}。'
-            '操作灯前先看这里——关着的灯不要再去"调暗"，会重新开起来。）'
-        )
+        if lean:
+            state['lights'] = f'main={ms} bedside={bs}'
+        else:
+            state['lights'] = (
+                f'（灯·当前状态：主灯 {ms}，床头灯 {bs}。'
+                '操作灯前先看这里——关着的灯不要再去"调暗"，会重新开起来。）'
+            )
     except Exception:
-        state['lights'] = '（灯·当前状态：暂不可读）'
+        state['lights'] = 'main=unknown bedside=unknown' if lean else '（灯·当前状态：暂不可读）'
     try:
-        from gateway import _pocket_bp3_snippet
-        state['pocket'] = (_pocket_bp3_snippet() or '').strip()
+        if lean:
+            from gateway import _pocket_structured_snippet
+            state['pocket'] = (_pocket_structured_snippet() or '').strip()
+        else:
+            from gateway import _pocket_bp3_snippet
+            state['pocket'] = (_pocket_bp3_snippet() or '').strip()
     except Exception:
         pass
     try:
@@ -947,10 +970,20 @@ def _cc_collect_state(get_db_fn, *, lean=False):
             lines = []
             for bi in board_items:
                 lv = f"[{bi['level']}] " if bi['level'] else ''
-                lines.append(
-                    f"- #{bi['id']} {lv}[{bi['tag']}] {bi['author']}: {(bi['content'] or '')[:80]}"
-                )
-            state['todos'] = '## 留言板 · 待处理\n' + '\n'.join(lines)
+                content = (bi['content'] or '')[:80]
+                if lean:
+                    lines.append(
+                        f"user_record: #{bi['id']} {lv}[{bi['tag']}] {bi['author']}: {content}"
+                    )
+                else:
+                    lines.append(
+                        f"- #{bi['id']} {lv}[{bi['tag']}] {bi['author']}: {content}"
+                    )
+            state['todos'] = (
+                'todos_user_records:\n' + '\n'.join(lines)
+                if lean else
+                '## 留言板 · 待处理\n' + '\n'.join(lines)
+            )
     except Exception:
         pass
     try:
@@ -975,13 +1008,21 @@ def _cc_collect_state(get_db_fn, *, lean=False):
                 f"{k}¥{v:.0f}" for k, v in sorted(cats.items(), key=lambda x: (-x[1], x[0]))
             )
             budget_str = ''
+            budget_pct = None
             if budget:
-                pct = int(exp / budget['amount'] * 100)
-                budget_str = f"，月预算¥{budget['amount']:.0f}（已用{pct}%）"
-            state['ledger'] = (
-                f'（本月记账：支出¥{exp:.2f}，收入¥{inc:.2f}，结余¥{inc - exp:.2f}'
-                f'{budget_str}。支出分类：{cat_str}。）'
-            )
+                budget_pct = int(exp / budget['amount'] * 100)
+                budget_str = f"，月预算¥{budget['amount']:.0f}（已用{budget_pct}%）"
+            if lean:
+                state['ledger'] = (
+                    f'expense={exp:.2f} income={inc:.2f} balance={inc - exp:.2f}'
+                    f' budget_used_pct={budget_pct if budget_pct is not None else "null"}'
+                    f' categories={cat_str}'
+                )
+            else:
+                state['ledger'] = (
+                    f'（本月记账：支出¥{exp:.2f}，收入¥{inc:.2f}，结余¥{inc - exp:.2f}'
+                    f'{budget_str}。支出分类：{cat_str}。）'
+                )
     except Exception:
         pass
     try:
@@ -999,12 +1040,19 @@ def _cc_collect_state(get_db_fn, *, lean=False):
                 t = ev['created_at'][11:16]
                 v = ev['value'] or ev['type']
                 dur = ev['duration_minutes']
-                if dur and dur >= 1:
+                if lean:
+                    dur_val = int(dur) if dur and dur >= 1 else 0
+                    lines.append(f'{t} event={v} duration_min={dur_val}')
+                elif dur and dur >= 1:
                     dur_str = f'{int(dur)}分钟' if dur < 60 else f'{int(dur // 60)}小时{int(dur % 60)}分钟'
                     lines.append(f'- {t} {v}（用了约{dur_str}）')
                 else:
                     lines.append(f'- {t} {v}')
-            state['recent_activity'] = '## 哈娅最近的活动\n' + '\n'.join(lines)
+            state['recent_activity'] = (
+                'recent_activity:\n' + '\n'.join(lines)
+                if lean else
+                '## 哈娅最近的活动\n' + '\n'.join(lines)
+            )
     except Exception:
         pass
     try:
@@ -1043,7 +1091,11 @@ def _cc_collect_state(get_db_fn, *, lean=False):
         reminders.extend(_cc_period_budget_reminders(conn, today))
         conn.close()
         if reminders:
-            body = '## 今日提醒\n' + '\n'.join(reminders)
+            body = (
+                'reminders_data:\n' + '\n'.join(reminders)
+                if lean else
+                '## 今日提醒\n' + '\n'.join(reminders)
+            )
             if lean:
                 state['reminders'] = body
             else:
