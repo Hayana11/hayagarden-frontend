@@ -3,7 +3,7 @@
 > 同一只费佳、固定 system、固定工具面、三类轮次；普通 Wake 降为主 resident 的一次短心跳，只有需要行动时才升级，用户聊天永远优先。
 
 - **计划分支**：`plan/unified-heartbeat-tracker`
-- **当前状态**：`P-SHADOW_GRADUATED / MEMORY_HOTFIX_NEXT`
+- **当前状态**：`MEMORY_HOTFIX_IN_PROGRESS`（P-CONTEXT-OBS 已完成；#134 待 Ready 终审）
 - **最后更新**：2026-07-26
 - **当前 identity**：`identity_id = "fyodor-default"` · `provider_id = "claude_code"` · `conversation_id = "default"`
 - **首个 Provider Adapter**：Claude Unified Resident Adapter
@@ -83,6 +83,27 @@
     - 唯一不对称：`user_rule:4225`（superseded turn，非 incident，不回填）
     - 生产 SHA 终审时：`30d375b`；capture alert 已于 2026-07-24 ack
     - 起点纪律：PR #130 / #132 仅改 Usage 测量层，未重置 72h 起点（10:40:50 BJT）
+- [x] **P-CONTEXT-OBS：生产真实上下文观测底座**
+  - 状态：已完成
+  - 完成日期：2026-07-26
+  - 证据：PR #138 合并/部署 SHA `995f8ce0246ea2ef5814215cce5ad1618cbc28f4`
+  - observation-only 部署；四个 Context Lean 开关均为 0；persona hash 未变
+  - `observation_version=3` 已在 message_id `4392 / 4394 / 4396` 真实落库
+  - resident generation 稳定为 1；turn count `1 → 2 → 3`；cold → hot → hot
+  - 无 `system_changed` 循环；cache read / creation 行为健康
+- [-] **Memory Hotfix：统一 Ombre adapter**
+  - 状态：进行中
+  - PR #134（Draft / unmerged / undeployed）
+  - head：`179deba8fe2d9be43441d93863b713e81e5637ed`
+  - base：`995f8ce0246ea2ef5814215cce5ad1618cbc28f4`
+  - 子进度：
+    - [x] PR #134 rebase 到 main@995f8ce
+    - [x] legacy_module parity 与相关 CI
+    - [x] HTTP backend 保持 dormant
+    - [ ] Ready 终审
+    - [ ] merge
+    - [ ] legacy_module 默认配置部署
+    - [ ] 生产 smoke test
 
 ### Unified Heartbeat
 
@@ -101,15 +122,13 @@
 ### 当前下一步
 
 ```text
-P-ID-CHAT        [x] PR #128 → main@61faf6f
-→ P-ID-WAKE      [x] PR #129 → main@549cb55
-→ PR 0           [x] PR #130 → main@6f66060；#132 → main@886e494；生产@605e697
-→ P-SHADOW       [x] graduated 2026-07-26 BJT（观察窗口 >72h）
-→ Memory Hotfix  [ ] 下一项
-→ UH-A           [ ] 待 Memory Hotfix 后
+P-SHADOW        [x] graduated 2026-07-26 BJT（观察窗口 >72h）
+→ P-CONTEXT-OBS [x] #138 → main@995f8ce
+→ Memory Hotfix [-] #134 待 Ready 终审
+→ UH-A          [ ] 尚未开始
 ```
 
-> morning cron 继续关闭。P-SHADOW 已于 2026-07-26 毕业。
+> morning cron 继续关闭。P-SHADOW 已于 2026-07-26 毕业。UH-A 不得提前标记或施工。
 
 ---
 
@@ -730,7 +749,22 @@ PR #126 修门禁与去重
 - [x] P-SHADOW 终审通过（2026-07-26 12:44 北京时间）；`status_exit_code=0`；七盏灯全绿；`proof_max=4385`；
 - [x] 自然样本 83/82/59 全 applied；Wake 版本链连续至 `normal-2026-07-26-12:00` → v332；
 - [x] **P-SHADOW `[x] graduated`**；Observation window >72h；
-- [ ] 下一项：**Memory Hotfix**。
+- [-] 下一项：**Memory Hotfix**（PR #134 进行中，待 Ready 终审）。
+
+### 2026-07-26（续）
+
+- [x] **P-CONTEXT-OBS** 完成：PR #138 合并/部署 `995f8ce`；observation-only；Context Lean 四开关均为 0；persona hash 未变
+- [x] `observation_version=3` 在 message_id `4392 / 4394 / 4396` 真实落库；resident generation 稳定为 1；turn `1 → 2 → 3`；cold → hot → hot；无 `system_changed` 循环
+- [-] **Memory Hotfix** 进行中：PR #134 rebase 到 main@995f8ce（head `179deba`）；legacy_module parity + CI 通过；HTTP backend dormant
+
+**用户问题病历（仍 open，不因绿灯自动关闭）：**
+
+- persona-only 对照下表达正常；
+- relationship context 启用后曾导致碎句、自我解释、情绪表达失真；
+- `RELATIONSHIP_CONTEXT_ENABLED` 当前保持 0；
+- 后续发现 emotion / drive / desire 三套状态权重叠，因此进入 Internal State v3 与 Unified Resident Heartbeat 工程；
+- 基础设施、观测和状态统一进度 ≠ 用户可见的“说话问题已经修复”；
+- 该用户问题仍为 open，不得被绿灯测试自动关闭。
 
 ---
 
