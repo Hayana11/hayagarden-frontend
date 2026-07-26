@@ -3,7 +3,7 @@
 > 同一只费佳、固定 system、固定工具面、三类轮次；普通 Wake 降为主 resident 的一次短心跳，只有需要行动时才升级，用户聊天永远优先。
 
 - **计划分支**：`plan/unified-heartbeat-tracker`
-- **当前状态**：`MEMORY_HOTFIX_IN_PROGRESS`（#134 Ready 终审待 merge）
+- **当前状态**：`MEMORY_HOTFIX_IN_PROGRESS`（#134 re-review pending；UH-A 未开始）
 - **最后更新**：2026-07-26（tracker 续写：Context Lean / UH-A0 / Master roadmap）
 - **tracker head**：`02a6239`
 - **当前 identity**：`identity_id = "fyodor-default"` · `provider_id = "claude_code"` · `conversation_id = "default"`
@@ -95,17 +95,21 @@
 - [-] **Memory Hotfix：统一 Ombre adapter**
   - 状态：进行中
   - PR #134（Draft / unmerged / undeployed）
-  - head：`7f7c799930a7a07c390b984aa05c7f7bc65e2b16`
+  - head：`f697503`（re-review pending）
   - base：`995f8ce0246ea2ef5814215cce5ad1618cbc28f4`
   - 子进度：
     - [x] PR #134 rebase 到 main@995f8ce
-    - [x] REQUEST CHANGES 修复（warmup jieba-only / cleaner pin≥8 / 移除 mcp 依赖 / HTTP gap 文档化）
-    - [x] legacy_module 默认路径 parity（限定范围）+ CI
-    - [x] HTTP backend 保持 dormant（已知 archive/touch 缺口未关闭）
-    - [ ] Ready 终审（re-review）
+    - [x] REQUEST CHANGES 修复（warmup jieba-only / 移除 mcp 依赖 / HTTP gap 文档化 / workspace breath 4s）
+    - [x] **已批准行为修复**：停止 nightly cleaner 将 `importance>=8` 自动升级为 `pinned`
+    - [x] legacy_module 默认路径接口/超时/warmup 兼容（限定范围）+ CI
+    - [x] HTTP backend 保持 dormant（archive/touch 缺口未关闭）
+    - [ ] re-review pending（**不得标 Ready**）
     - [ ] merge
     - [ ] legacy_module 默认配置部署
     - [ ] 生产 smoke test
+  - 附带登记（非 #134 施工范围）：
+    - [ ] 历史 ~54 个 auto-pinned 桶清理（备份 → 只读报告 → 审批 → 单独数据修复 PR）
+    - [ ] P0：`/opt/ombre-brain/test_tools.py` 生产路径硬门禁（禁止在生产运行；独立安全 PR）
 - [ ] **P-CONTEXT-LEAN：上下文最小化与旧广播式注入退役**
   - 状态：未开始；**#138 四个开关全部保持 0**
   - 前置：**Memory Hotfix 完成并完成生产 smoke test**
@@ -188,7 +192,7 @@
 ```text
 P-SHADOW        [x]
 → P-CONTEXT-OBS [x]
-→ Memory Hotfix [-]          ← 当前唯一施工项
+→ Memory Hotfix [-]          ← 当前唯一施工项；PR #134 re-review pending
 → P-CONTEXT-LEAN [ ]
 → UH-A0 Tool Parity [ ]
 → UH-A / UH-B [ ]
@@ -200,8 +204,9 @@ P-SHADOW        [x]
 ### 当前下一步（不变）
 
 ```text
-Memory Hotfix #134：
-Ready 终审
+Memory Hotfix #134（re-review pending）：
+re-review
+→ Ready 终审
 → merge
 → legacy_module 部署
 → production smoke
