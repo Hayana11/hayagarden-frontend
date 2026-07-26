@@ -772,12 +772,10 @@ def _cc_collect_cold_once(get_db_fn):
             "SELECT content, created_at FROM posts WHERE type='DIARY' AND resolved=0 ORDER BY id DESC LIMIT 2"
         ).fetchall()
         conn.close()
-        _cold_applied = []
         try:
             from wake.concern_resolution import filter_diary_rows, load_resolution_state_from_db
             _cr_state = load_resolution_state_from_db(get_db_fn)
             _diary_result = filter_diary_rows(diaries, _cr_state)
-            _cold_applied = _diary_result.applied_resolutions
             diaries = _diary_result.kept
         except Exception:
             pass
@@ -797,11 +795,6 @@ def _cc_collect_cold_once(get_db_fn):
             for d in reversed(diaries):
                 c = d['content']
                 lines.append(c[:400] + '…' if len(c) > 400 else c)
-        if _cold_applied:
-            from wake.concern_resolution import format_resolution_guard
-            _cold_guard = format_resolution_guard(_cold_applied)
-            if _cold_guard:
-                lines.append(_cold_guard)
         cold['long_term_memory'] = '\n'.join(lines)
     except Exception:
         pass
@@ -1293,11 +1286,14 @@ def finalize_cc_wake_one_shot(one_shot, *, is_cold=False, messages=None):
     one_shot['wake_nonmessage_background'] = '\n'.join(nonmsg_lines)
     one_shot['wake_message_background'] = '\n'.join(msg_bg_lines)
     one_shot['wake_reply_bridge'] = bridge
-    from wake.concern_resolution import merge_wake_consume_ids
-    one_shot['wake_ids'] = merge_wake_consume_ids(
-        consumable,
-        one_shot.get('suppressed_wake_ids') or [],
-    )
+    try:
+        from wake.concern_resolution import merge_wake_consume_ids
+        one_shot['wake_ids'] = merge_wake_consume_ids(
+            consumable,
+            one_shot.get('suppressed_wake_ids') or [],
+        )
+    except Exception:
+        one_shot['wake_ids'] = list(consumable)
     return one_shot
 
 

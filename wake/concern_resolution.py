@@ -1,10 +1,12 @@
-"""Filter Wake continuity injection when the user has explicitly closed a concern.
+"""Filter Wake continuity when the user has explicitly closed a concern.
 
-Read-only, heuristic, fail-open: callers must wrap DB access in try/finally.
-Does not mutate wake_log.consumed or posts.resolved.
+Persisted closures live in ``concern_closures`` (survive beyond chat lookback).
+Recent user chat is scanned to add/reopen closures; active rows drive filtering.
+Fail-open on parse/DB errors. Does not mutate wake_log.consumed or posts.resolved.
 """
 from __future__ import annotations
 
+import json
 import re
 import sqlite3
 from dataclasses import dataclass, field
@@ -23,40 +25,53 @@ _RESOLUTION_RHETORICAL = re.compile(
 _RESOLUTION_PATTERNS = tuple(
     re.compile(p, re.IGNORECASE)
     for p in (
-        r'已经(?:好了|没事了|解决|愈合|恢复|结案|处理(?:完|好))',
-        r'(?:无需|不需|不用|不必|不要)(?:再|继续|进一步)',
+        r'已经(?:好了|没事了|解决|处理(?:完|好)|取完|送到|到账|修好|恢复|完成|跟完|愈合|好转)',
+        r'已经.{0,8}(?:愈合|好转|恢复|解决|处理(?:完|好)|取完|跟完)',
+        r'(?:无需|不需|不用|不必|不要)(?:再|继续|进一步|跑|催|问|打|管|担心)',
         r'(?:已经|这件事).{0,16}可以放下',
-        r'医生说(?:不用|不(?:用|需要)|没事)',
-        r'不用再(?:问|担心|追问|管)',
+        r'不用再(?:问|担心|追问|管|跑|催|打)',
         r'这件事(?:已经)?(?:结束|过去|完了)',
-        r'(?:伤口|抓伤|磕伤|烫伤).{0,12}(?:已经|早就)(?:好了|愈合|恢复)',
-        r'(?:咨询|问过).{0,6}医生.{0,16}(?:不用|不(?:用|需要)|没事)',
     )
 )
 
 _REOPEN_PATTERNS = tuple(
     re.compile(p, re.IGNORECASE)
     for p in (
-        r'又(?:恶化|严重|疼|痛|红肿|发作|感染|流血)',
-        r'(?:还是|仍然|依然)(?:疼|痛|不舒服|担心|有问题|没好)',
-        r'(?:又得|还是要|还是得|仍要|仍得|需要再)',
-        r'(?:重新|再次)(?:问|担心|处理|去医院|看医生)',
-        r'(?:今天|刚才|刚刚).{0,8}(?:红肿|渗液|发炎|疼|痛|恶化)',
-        r'(?:开始|出现)(?:红肿|渗液|发炎|疼痛|恶化)',
+        r'又(?:出|坏|失败|报错|延迟|问题|恶化|反复|卡住|停|漏|找不到)',
+        r'又.{1,8}(?:了|的|着)',
+        r'(?:还是|仍然|依然)(?:没|不|有)(?:好|行|完成|解决|取到|修好|到账|送到)',
+        r'(?:又得|还是要|还是得|仍要|仍得|需要再|还得)',
+        r'(?:重新|再次)(?:出现|发生|报错|出问题|问|处理|催|跑|取)',
+        r'(?:今天|刚才|刚刚).{0,12}(?:出问题|报错|失败|恶化|坏了|找不到|延迟|开始|又)',
+        r'(?:开始|出现)(?:问题|故障|报错|状况|反复|了|着)',
     )
 )
 
 _GENERIC_TOPIC_TOKENS = frozenset({
     '已经', '可以', '不用', '无需', '没有', '什么', '怎么', '我们', '你们', '自己',
     '一下', '继续', '还是', '就是', '这个', '那个', '事情', '事项', '今天', '昨天',
-    '现在', '之后', '之前', '感觉', '知道', '觉得', '告诉', '医生', '她说', '他说',
-    '我说', '问我', '问你', '好了', '没事', '结束', '放下', '再问', '这件事', '处理',
-    '完了', '过去', '结案', '不用了', '没事了', '都好了', '进一步', '再跑', '再问',
+    '现在', '之后', '之前', '感觉', '知道', '觉得', '告诉', '她说', '他说', '我说',
+    '问我', '问你', '好了', '没事', '结束', '放下', '再问', '这件事', '处理', '完了',
+    '过去', '结案', '不用了', '没事了', '都好了', '进一步', '再跑', '再问', '担心',
+    '有点', '还没', '已经取', '取完',
 })
 
 _DEFAULT_LOOKBACK_HOURS = 168
-_MIN_TOPIC_OVERLAP = 2
 _GUARD_MAX_ENTRIES = 3
+_SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS concern_closures (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    summary TEXT NOT NULL,
+    topic_tokens TEXT NOT NULL,
+    source_message_id INTEGER UNIQUE,
+    resolved_at TEXT NOT NULL,
+    reopened_at TEXT,
+    active INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT DEFAULT (datetime('now', '+8 hours'))
+);
+CREATE INDEX IF NOT EXISTS idx_concern_closures_active
+    ON concern_closures(active, resolved_at);
+"""
 
 _STOPWORDS = _GENERIC_TOPIC_TOKENS
 
@@ -67,6 +82,7 @@ class ResolutionEntry:
     topic_tokens: frozenset[str] = field(default_factory=frozenset)
     message_id: int | None = None
     created_at: str = ''
+    closure_id: int | None = None
 
 
 @dataclass
@@ -79,6 +95,19 @@ class FilterResult:
     kept: list = field(default_factory=list)
     applied_resolutions: list[ResolutionEntry] = field(default_factory=list)
     suppressed_ids: list[int] = field(default_factory=list)
+
+
+def ensure_concern_closure_schema(conn: sqlite3.Connection) -> None:
+    conn.executescript(_SCHEMA_SQL)
+    conn.commit()
+
+
+def ensure_concern_closure_schema_for_path(db_path: str) -> None:
+    conn = sqlite3.connect(db_path, timeout=30)
+    try:
+        ensure_concern_closure_schema(conn)
+    finally:
+        conn.close()
 
 
 def topic_tokens(text: str) -> frozenset[str]:
@@ -103,14 +132,22 @@ def _topic_specific_tokens(text: str) -> frozenset[str]:
     return frozenset(token for token in topic_tokens(text) if token not in _GENERIC_TOPIC_TOKENS)
 
 
+def substantive_topic_overlap(left: frozenset[str], right: frozenset[str]) -> bool:
+    left_s = {t for t in left if t not in _GENERIC_TOPIC_TOKENS and len(t) >= 2}
+    right_s = {t for t in right if t not in _GENERIC_TOPIC_TOKENS and len(t) >= 2}
+    if not left_s or not right_s:
+        return False
+    return bool(left_s & right_s)
+
+
 _DEICTIC_PHRASE = re.compile(r'(?:这件事|那件事|这事|那事)')
 
 
-def _needs_prior_user_context(content: str) -> bool:
+def _needs_prior_chat_context(content: str) -> bool:
     body = (content or '').strip()
     if _DEICTIC_PHRASE.search(body):
         return True
-    return len(_topic_specific_tokens(content)) < _MIN_TOPIC_OVERLAP
+    return len(_topic_specific_tokens(content)) < 1
 
 
 def _looks_like_question(body: str) -> bool:
@@ -138,7 +175,11 @@ def is_user_reopen(text: str) -> bool:
     return any(p.search(body) for p in _REOPEN_PATTERNS)
 
 
-def topic_overlap(left: frozenset[str], right: frozenset[str], *, min_overlap: int = _MIN_TOPIC_OVERLAP) -> bool:
+def topic_overlap(left: frozenset[str], right: frozenset[str], *, min_overlap: int = 1) -> bool:
+    if substantive_topic_overlap(left, right):
+        return True
+    if min_overlap <= 1:
+        return False
     if not left or not right:
         return False
     return len(left & right) >= min_overlap
@@ -156,7 +197,6 @@ def normalize_recorded_at(value: str) -> str | None:
 
 
 def is_strictly_before(source_at: str, resolution_at: str) -> bool | None:
-    """Return True/False when comparable; None => fail-open (do not filter)."""
     source = normalize_recorded_at(source_at)
     resolution = normalize_recorded_at(resolution_at)
     if not source or not resolution:
@@ -171,38 +211,229 @@ def _resolution_summary(text: str, *, limit: int = 120) -> str:
     return body[: limit - 1] + '…'
 
 
-def _collect_resolution_topics(messages: Sequence[dict], index: int) -> frozenset[str]:
-    content = str(messages[index].get('content') or '')
+def _is_user_author(author: str) -> bool:
+    return str(author or '').strip().lower() in _USER_AUTHORS
+
+
+def _row_to_message(row) -> dict:
+    if hasattr(row, 'keys'):
+        return {
+            'id': row['id'],
+            'author': row['author'],
+            'content': row['content'],
+            'created_at': row['created_at'],
+        }
+    return {
+        'id': row[0],
+        'author': row[1],
+        'content': row[2],
+        'created_at': row[3],
+    }
+
+
+def fetch_chat_messages(
+    conn: sqlite3.Connection,
+    *,
+    lookback_hours: int = _DEFAULT_LOOKBACK_HOURS,
+) -> list[dict]:
+    rows = conn.execute(
+        """
+        SELECT id, author, content, created_at
+        FROM chat_messages
+        WHERE created_at >= datetime('now', '+8 hours', ?)
+        ORDER BY id ASC
+        """,
+        (f'-{int(lookback_hours)} hours',),
+    ).fetchall()
+    return [_row_to_message(row) for row in rows]
+
+
+def fetch_user_messages(
+    conn: sqlite3.Connection,
+    *,
+    lookback_hours: int = _DEFAULT_LOOKBACK_HOURS,
+) -> list[dict]:
+    return [
+        msg for msg in fetch_chat_messages(conn, lookback_hours=lookback_hours)
+        if _is_user_author(msg.get('author'))
+    ]
+
+
+def _collect_resolution_topics(chat_messages: Sequence[dict], message_id: int) -> frozenset[str]:
+    index = next(
+        (i for i, msg in enumerate(chat_messages) if int(msg.get('id') or 0) == int(message_id)),
+        -1,
+    )
+    if index < 0:
+        return frozenset()
+    content = str(chat_messages[index].get('content') or '')
     tokens = set(topic_tokens(content))
-    if _needs_prior_user_context(content) and index > 0:
-        tokens.update(topic_tokens(str(messages[index - 1].get('content') or '')))
+    if _needs_prior_chat_context(content) and index > 0:
+        tokens.update(topic_tokens(str(chat_messages[index - 1].get('content') or '')))
     return frozenset(tokens)
+
+
+def _closure_row_to_entry(row) -> ResolutionEntry:
+    try:
+        tokens = frozenset(json.loads(row['topic_tokens'] or '[]'))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        tokens = frozenset()
+    return ResolutionEntry(
+        summary=str(row['summary'] or ''),
+        topic_tokens=tokens,
+        message_id=row['source_message_id'],
+        created_at=str(row['resolved_at'] or ''),
+        closure_id=int(row['id']),
+    )
+
+
+def load_active_closure_state(conn: sqlite3.Connection) -> ResolutionState:
+    rows = conn.execute(
+        """
+        SELECT id, summary, topic_tokens, source_message_id, resolved_at
+        FROM concern_closures
+        WHERE active=1
+        ORDER BY resolved_at ASC, id ASC
+        """
+    ).fetchall()
+    active = [_closure_row_to_entry(row) for row in rows]
+    return ResolutionState(active=active)
+
+
+def _deactivate_matching_closures(
+    conn: sqlite3.Connection,
+    reopen_tokens: frozenset[str],
+    *,
+    reopened_at: str,
+) -> None:
+    rows = conn.execute(
+        """
+        SELECT id, topic_tokens
+        FROM concern_closures
+        WHERE active=1
+        """
+    ).fetchall()
+    for row in rows:
+        try:
+            tokens = frozenset(json.loads(row['topic_tokens'] or '[]'))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if substantive_topic_overlap(reopen_tokens, tokens):
+            conn.execute(
+                """
+                UPDATE concern_closures
+                SET active=0, reopened_at=?
+                WHERE id=? AND active=1
+                """,
+                (reopened_at, int(row['id'])),
+            )
+
+
+def _persist_closure(conn: sqlite3.Connection, entry: ResolutionEntry) -> None:
+    if entry.message_id is not None:
+        existing = conn.execute(
+            "SELECT id FROM concern_closures WHERE source_message_id=?",
+            (int(entry.message_id),),
+        ).fetchone()
+        if existing:
+            return
+    conn.execute(
+        """
+        INSERT INTO concern_closures (
+            summary, topic_tokens, source_message_id, resolved_at, active
+        ) VALUES (?, ?, ?, ?, 1)
+        """,
+        (
+            entry.summary,
+            json.dumps(sorted(entry.topic_tokens), ensure_ascii=False),
+            entry.message_id,
+            entry.created_at,
+        ),
+    )
+
+
+def sync_concern_closures(
+    conn: sqlite3.Connection,
+    *,
+    lookback_hours: int = _DEFAULT_LOOKBACK_HOURS,
+) -> None:
+    ensure_concern_closure_schema(conn)
+    chat_messages = fetch_chat_messages(conn, lookback_hours=lookback_hours)
+    user_messages = [msg for msg in chat_messages if _is_user_author(msg.get('author'))]
+    for msg in user_messages:
+        content = str(msg.get('content') or '')
+        created_at = str(msg.get('created_at') or '')
+        message_id = int(msg.get('id') or 0)
+        if is_user_reopen(content):
+            _deactivate_matching_closures(
+                conn,
+                topic_tokens(content),
+                reopened_at=created_at,
+            )
+            continue
+        if not is_user_resolution(content):
+            continue
+        _persist_closure(conn, ResolutionEntry(
+            summary=_resolution_summary(content),
+            topic_tokens=_collect_resolution_topics(chat_messages, message_id),
+            message_id=message_id,
+            created_at=created_at,
+        ))
+    conn.commit()
 
 
 def build_resolution_state(
     user_messages: Sequence[dict],
-    *,
-    min_overlap: int = _MIN_TOPIC_OVERLAP,
+    chat_messages: Sequence[dict] | None = None,
 ) -> ResolutionState:
+    """Ephemeral builder for unit tests without DB."""
+    chat_messages = list(chat_messages or user_messages)
     active: list[ResolutionEntry] = []
-    for index, msg in enumerate(user_messages):
+    for msg in user_messages:
         content = str(msg.get('content') or '')
+        message_id = int(msg.get('id') or 0)
         if is_user_reopen(content):
             reopen_tokens = topic_tokens(content)
             active = [
                 entry for entry in active
-                if not topic_overlap(entry.topic_tokens, reopen_tokens, min_overlap=1)
+                if not substantive_topic_overlap(entry.topic_tokens, reopen_tokens)
             ]
             continue
         if not is_user_resolution(content):
             continue
         active.append(ResolutionEntry(
             summary=_resolution_summary(content),
-            topic_tokens=_collect_resolution_topics(user_messages, index),
-            message_id=msg.get('id'),
+            topic_tokens=_collect_resolution_topics(chat_messages, message_id),
+            message_id=message_id,
             created_at=str(msg.get('created_at') or ''),
         ))
     return ResolutionState(active=active)
+
+
+def load_resolution_state(
+    conn: sqlite3.Connection,
+    *,
+    lookback_hours: int = _DEFAULT_LOOKBACK_HOURS,
+) -> ResolutionState:
+    try:
+        sync_concern_closures(conn, lookback_hours=lookback_hours)
+    except Exception:
+        try:
+            ensure_concern_closure_schema(conn)
+        except Exception:
+            return ResolutionState(active=[])
+    try:
+        return load_active_closure_state(conn)
+    except Exception:
+        return ResolutionState(active=[])
+
+
+def load_resolution_state_from_db(get_db_fn, *, lookback_hours: int = _DEFAULT_LOOKBACK_HOURS) -> ResolutionState:
+    conn = get_db_fn()
+    try:
+        return load_resolution_state(conn, lookback_hours=lookback_hours)
+    finally:
+        conn.close()
 
 
 def find_superseding_resolution(
@@ -210,7 +441,6 @@ def find_superseding_resolution(
     state: ResolutionState | None,
     *,
     recorded_at: str = '',
-    min_overlap: int = _MIN_TOPIC_OVERLAP,
 ) -> ResolutionEntry | None:
     if not state or not state.active:
         return None
@@ -218,7 +448,7 @@ def find_superseding_resolution(
     if not tokens:
         return None
     for entry in state.active:
-        if not topic_overlap(tokens, entry.topic_tokens, min_overlap=min_overlap):
+        if not substantive_topic_overlap(tokens, entry.topic_tokens):
             continue
         before = is_strictly_before(recorded_at, entry.created_at)
         if before is not True:
@@ -232,11 +462,8 @@ def is_superseded_historical_concern(
     state: ResolutionState | None,
     *,
     recorded_at: str = '',
-    min_overlap: int = _MIN_TOPIC_OVERLAP,
 ) -> bool:
-    return find_superseding_resolution(
-        text, state, recorded_at=recorded_at, min_overlap=min_overlap,
-    ) is not None
+    return find_superseding_resolution(text, state, recorded_at=recorded_at) is not None
 
 
 def dedupe_applied_resolutions(
@@ -253,7 +480,7 @@ def dedupe_applied_resolutions(
     for entry in ordered:
         if len(picked) >= max_items:
             break
-        if any(topic_overlap(entry.topic_tokens, kept.topic_tokens) for kept in picked):
+        if any(substantive_topic_overlap(entry.topic_tokens, kept.topic_tokens) for kept in picked):
             continue
         picked.append(entry)
     return list(reversed(picked))
@@ -276,60 +503,6 @@ def format_resolution_guard(applied: Sequence[ResolutionEntry]) -> str:
         '不得仅凭旧 Wake、旧日记或未消费 wake_log 重新开启追问。'
     )
     return '\n'.join(lines)
-
-
-def _is_user_author(author: str) -> bool:
-    return str(author or '').strip().lower() in _USER_AUTHORS
-
-
-def fetch_user_messages(
-    conn: sqlite3.Connection,
-    *,
-    lookback_hours: int = _DEFAULT_LOOKBACK_HOURS,
-) -> list[dict]:
-    rows = conn.execute(
-        """
-        SELECT id, author, content, created_at
-        FROM chat_messages
-        WHERE lower(author) IN ('hayana', 'haya', 'user')
-          AND created_at >= datetime('now', '+8 hours', ?)
-        ORDER BY id ASC
-        """,
-        (f'-{int(lookback_hours)} hours',),
-    ).fetchall()
-    out: list[dict] = []
-    for row in rows:
-        if hasattr(row, 'keys'):
-            out.append({
-                'id': row['id'],
-                'author': row['author'],
-                'content': row['content'],
-                'created_at': row['created_at'],
-            })
-        else:
-            out.append({
-                'id': row[0],
-                'author': row[1],
-                'content': row[2],
-                'created_at': row[3],
-            })
-    return out
-
-
-def load_resolution_state(
-    conn: sqlite3.Connection,
-    *,
-    lookback_hours: int = _DEFAULT_LOOKBACK_HOURS,
-) -> ResolutionState:
-    return build_resolution_state(fetch_user_messages(conn, lookback_hours=lookback_hours))
-
-
-def load_resolution_state_from_db(get_db_fn, *, lookback_hours: int = _DEFAULT_LOOKBACK_HOURS) -> ResolutionState:
-    conn = get_db_fn()
-    try:
-        return load_resolution_state(conn, lookback_hours=lookback_hours)
-    finally:
-        conn.close()
 
 
 def _row_content_and_time(row) -> tuple[str, str]:
