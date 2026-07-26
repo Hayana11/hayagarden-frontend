@@ -555,6 +555,66 @@ class ConcernResolutionLogicTests(unittest.TestCase):
         ])
         self.assertEqual(len(state.active), 0)
 
+    def test_hypothetical_reopen_does_not_deactivate_closure(self):
+        messages = [
+            {'id': 1, 'content': 'frontend 已经修好了，不用再看了。', 'created_at': '2026-07-21 10:00:00'},
+            {'id': 2, 'content': '如果又报错我再告诉你。', 'created_at': '2026-07-22 08:00:00'},
+        ]
+        state = cr.build_resolution_state(messages)
+        self.assertEqual(len(state.active), 1)
+        self.assertIn('frontend', state.active[0].topic_tokens)
+
+    def test_negated_reopen_does_not_deactivate_closure(self):
+        messages = [
+            {'id': 1, 'content': 'frontend 已经修好了，不用再看了。', 'created_at': '2026-07-21 10:00:00'},
+            {'id': 2, 'content': '没有又报错，只是在复述之前的记录。', 'created_at': '2026-07-22 08:00:00'},
+        ]
+        state = cr.build_resolution_state(messages)
+        self.assertEqual(len(state.active), 1)
+
+    def test_factual_reopen_after_hypothetical(self):
+        messages = [
+            {'id': 1, 'content': 'frontend 已经修好了，不用再看了。', 'created_at': '2026-07-21 10:00:00'},
+            {'id': 2, 'content': '如果又报错我再告诉你。', 'created_at': '2026-07-22 08:00:00'},
+            {'id': 3, 'content': '今天真的又报错了。', 'created_at': '2026-07-22 09:00:00'},
+        ]
+        state = cr.build_resolution_state(messages)
+        self.assertEqual(len(state.active), 0)
+
+    def test_non_factual_reopen_phrases(self):
+        cases = (
+            '伤口已经好了，要是又红肿我会说。',
+            '放心，不会又坏的。',
+            '如果又报错怎么办？',
+        )
+        for text in cases:
+            events = cr.parse_user_concern_events(text)
+            self.assertFalse(
+                any(event.event in {'reopen', 'unresolved'} for event in events),
+                msg=text,
+            )
+
+    def test_entity_only_clause_antecedent_for_pronoun(self):
+        chat_messages = [
+            {'id': 1, 'author': 'hayana', 'content': '今晚吃面。', 'created_at': '2026-07-21 08:00:00'},
+            {'id': 2, 'author': 'hayana', 'content': '这次说的是 frontend。它又报错了。', 'created_at': '2026-07-22 09:00:00'},
+        ]
+        user_messages = [m for m in chat_messages if m['author'] == 'hayana']
+        state = cr.build_resolution_state(user_messages, chat_messages)
+        self.assertEqual(len(state.active), 0)
+        events = cr.parse_user_concern_events(
+            user_messages[-1]['content'], chat_messages, user_messages[-1]['id'],
+        )
+        self.assertEqual(events[-1].topics, frozenset({'frontend'}))
+
+        chat_messages[1]['content'] = '关于淘宝快递。它又找不到了。'
+        user_messages = [m for m in chat_messages if m['author'] == 'hayana']
+        events = cr.parse_user_concern_events(
+            user_messages[-1]['content'], chat_messages, user_messages[-1]['id'],
+        )
+        self.assertIn('快递', events[-1].topics)
+        self.assertNotIn('吃面', events[-1].topics)
+
 
 class WakeConcernResolutionIntegrationTests(unittest.TestCase):
     def setUp(self):
@@ -1440,6 +1500,99 @@ class WakeConcernResolutionIntegrationTests(unittest.TestCase):
         text = self._build_wake_text()
         self.assertNotIn('快递有没有取', text)
         self.assertIn('尾款', text)
+
+    def test_db_hypothetical_then_factual_reopen_lifecycle(self):
+        self._insert_chat_at(
+            message_id=1, author='hayana',
+            content='今晚吃面。',
+            hours_ago=60,
+        )
+        self._insert_wake('explore', '还在想 frontend 故障要不要继续排查。', hours_ago=40)
+        self._insert_chat_at(
+            message_id=2, author='hayana',
+            content='frontend 已经修好了，不用再看了。',
+            hours_ago=30,
+        )
+        cr.load_resolution_state_from_db(self.get_db)
+
+        conn = self.get_db()
+        self.assertEqual(conn.execute(
+            "SELECT COUNT(*) FROM concern_closures WHERE active=1"
+        ).fetchone()[0], 1)
+        conn.close()
+
+        self._insert_chat_at(
+            message_id=3, author='hayana',
+            content='如果又报错我再告诉你。',
+            hours_ago=10,
+        )
+        cr.load_resolution_state_from_db(self.get_db)
+        conn = self.get_db()
+        self.assertEqual(conn.execute(
+            "SELECT COUNT(*) FROM concern_closures WHERE active=1"
+        ).fetchone()[0], 1)
+        conn.close()
+
+        self._insert_chat_at(
+            message_id=4, author='hayana',
+            content='没有又报错，只是在复述。',
+            hours_ago=5,
+        )
+        cr.load_resolution_state_from_db(self.get_db)
+        conn = self.get_db()
+        self.assertEqual(conn.execute(
+            "SELECT COUNT(*) FROM concern_closures WHERE active=1"
+        ).fetchone()[0], 1)
+        conn.close()
+
+        text_before = self._build_wake_text()
+        self.assertNotIn('你醒着的时候', text_before)
+
+        self._insert_chat_at(
+            message_id=5, author='hayana',
+            content='今天真的又报错了。',
+            hours_ago=1,
+        )
+        cr.load_resolution_state_from_db(self.get_db)
+        conn = self.get_db()
+        self.assertEqual(conn.execute(
+            "SELECT COUNT(*) FROM concern_closures WHERE active=1"
+        ).fetchone()[0], 0)
+        conn.close()
+
+        text_after = self._build_wake_text()
+        self.assertIn('你醒着的时候', text_after)
+        self.assertIn('frontend', text_after)
+
+    def test_db_entity_only_clause_antecedent_reopens(self):
+        self._insert_chat_at(
+            message_id=1, author='hayana',
+            content='今晚吃面。',
+            hours_ago=40,
+        )
+        self._insert_wake('explore', '还在想 frontend 故障要不要继续排查。', hours_ago=30)
+        self._insert_chat_at(
+            message_id=2, author='hayana',
+            content='frontend 已经修好了，不用再看了。',
+            hours_ago=20,
+        )
+        cr.load_resolution_state_from_db(self.get_db)
+        self._insert_chat_at(
+            message_id=3, author='hayana',
+            content='这次说的是 frontend。它又报错了。',
+            hours_ago=1,
+        )
+        cr.load_resolution_state_from_db(self.get_db)
+
+        conn = self.get_db()
+        self.assertEqual(conn.execute(
+            "SELECT COUNT(*) FROM concern_closures WHERE active=1"
+        ).fetchone()[0], 0)
+        conn.close()
+
+        text = self._build_wake_text()
+        self.assertIn('你醒着的时候', text)
+        self.assertIn('frontend', text)
 
 
 if __name__ == '__main__':

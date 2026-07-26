@@ -58,6 +58,14 @@ _TRAILING_QUESTION_SUFFIX_RE = re.compile(
 
 _EVENT_PRIORITY = {'unresolved': 3, 'reopen': 2, 'resolve': 1}
 
+_CLAUSE_LOCAL_SEP_RE = re.compile(r'[，,；;]|(?:但|但是|不过|然而|可是)')
+_CONDITIONAL_BEFORE_REOPEN_RE = re.compile(
+    r'(?:如果|要是|假如|万一|以后若|倘若|若是)',
+)
+_REOPEN_FAULT_NEGATED_RE = re.compile(
+    r'(?:没有|并没|并没有|并未|不是|不会|没在|别再)(?:再|仍|还)?$',
+)
+
 _NEGATIVE_POLARITY_RE = re.compile(
     r'(?:还没|仍未|还是|仍然|依然|未曾|没有|没|未|不)$',
 )
@@ -96,7 +104,7 @@ _REOPEN_MARKERS = tuple(
         r'(?:开始|出现)(?:问题|故障|报错|状况|反复|了|着)',
         r'(?:仍|还)(?:有|没|未)[^，,]{0,8}(?:问题|故障|报错|取到|修好|到账|送到)',
         r'(?:还|仍)在.{0,6}(?:报错|出问题|有问题|故障|失败|恶化)',
-        r'(?:又|仍|还)?.{0,4}(?:恶化|红肿|发炎|渗|出错)(?:了|着)?',
+        r'(?:又|仍|还)?[^，,]{0,4}(?:恶化|红肿|发炎|渗|出错)(?:了|着)?',
     )
 )
 
@@ -109,7 +117,7 @@ _TRAILING_STATE_PHRASE_RE = re.compile(
     r')$',
 )
 _LEADING_FILLER_RE = re.compile(
-    r'^(?:醒来|还在想|我还在想|还在担心|还在|仍然|依然|医生|记得|提醒|想问|关于|她之前被|他之前被|我之前被|她被|他被|日记里|夜里仍惦记)+',
+    r'^(?:醒来|还在想|我还在想|还在担心|还在|仍然|依然|医生|记得|提醒|想问|关于|她之前被|他之前被|我之前被|她被|他被|日记里|夜里仍惦记|这次说的是|说的是)+',
 )
 _TRAILING_WORRY_RE = re.compile(
     r'(?:还在疼|还在痛|仍没|仍未|仍然没|有没有取|有没取|要不要打|要不要|怎么办|怎么处理).*$',
@@ -140,6 +148,11 @@ _GENERIC_TOPIC_TOKENS = frozenset({
     '问我', '问你', '好了', '没事', '结束', '放下', '再问', '这件事', '处理', '完了',
     '过去', '结案', '不用了', '没事了', '都好了', '进一步', '再跑', '再问', '担心',
     '有点', '还没', '已经取', '取完',
+})
+
+_NON_ENTITY_FILLER_TOKENS = frozenset({
+    '如果', '要是', '假如', '万一', '倘若', '若是', '以后若',
+    '今天真的', '其实', '说的是', '关于', '放心',
 })
 
 _DEFAULT_LOOKBACK_HOURS = 168
@@ -447,6 +460,7 @@ def _distinctive_clause_identities(clause: str) -> frozenset[str]:
     return frozenset(
         token for token in tokens
         if token not in {'今天', '昨天', '刚才', '现在', '这件事', '那件事'}
+        and token not in _NON_ENTITY_FILLER_TOKENS
     )
 
 
@@ -530,6 +544,33 @@ def _split_concern_clauses(body: str) -> list[tuple[str, bool]]:
     return clauses
 
 
+def _local_segment_start(clause: str, pos: int) -> int:
+    start = 0
+    for match in _CLAUSE_LOCAL_SEP_RE.finditer(clause[:pos]):
+        start = match.end()
+    return start
+
+
+def _reopen_match_is_non_factual(clause: str, match: re.Match[str]) -> bool:
+    local_start = _local_segment_start(clause, match.start())
+    before = clause[local_start:match.start()]
+    segment = clause[local_start:match.end()]
+    conditional = _CONDITIONAL_BEFORE_REOPEN_RE.search(segment)
+    if conditional:
+        between = segment[conditional.end():match.start() - local_start]
+        if not re.search(r'(?:但|但是|不过|然而|可是)|今天真的|其实', between):
+            return True
+    if _CONDITIONAL_BEFORE_REOPEN_RE.search(before):
+        return True
+    if re.match(r'^(?:如果|要是|假如|万一|以后若|倘若|若是)', segment.strip()):
+        return True
+    if _REOPEN_FAULT_NEGATED_RE.search(before):
+        return True
+    if re.search(r'放心[^，,]{0,8}不会', before):
+        return True
+    return False
+
+
 def _clause_blocks_resolution(clause: str) -> bool:
     return bool(_RESOLUTION_NEGATION.search(clause) or _RESOLUTION_RHETORICAL.search(clause))
 
@@ -557,9 +598,13 @@ def _collect_clause_state_events(clause: str) -> list[tuple[int, int, str]]:
     events: list[tuple[int, int, str]] = []
     for pattern in _NEGATIVE_UNRESOLVED_MARKERS:
         for match in pattern.finditer(clause):
+            if _reopen_match_is_non_factual(clause, match):
+                continue
             events.append((match.end(), _EVENT_PRIORITY['unresolved'], 'unresolved'))
     for pattern in _REOPEN_MARKERS:
         for match in pattern.finditer(clause):
+            if _reopen_match_is_non_factual(clause, match):
+                continue
             events.append((match.end(), _EVENT_PRIORITY['reopen'], 'reopen'))
     if not _clause_blocks_resolution(clause):
         for pattern in _RESOLUTION_MARKERS:
@@ -627,20 +672,69 @@ def _prior_chat_content(chat_messages: Sequence[dict], message_id: int | None) -
     return ''
 
 
+def _collect_prior_chat_topics(
+    chat_messages: Sequence[dict],
+    message_id: int | None,
+) -> frozenset[str]:
+    if message_id is None:
+        return frozenset()
+    index = next(
+        (i for i, msg in enumerate(chat_messages) if int(msg.get('id') or 0) == int(message_id)),
+        -1,
+    )
+    for i in range(index - 1, -1, -1):
+        msg = chat_messages[i]
+        content = str(msg.get('content') or '')
+        if not content.strip():
+            continue
+        prior_id = int(msg.get('id') or 0)
+        sub_context = list(chat_messages[:i + 1])
+        for event in parse_user_concern_events(content, sub_context, prior_id):
+            if event.topics:
+                return event.topics
+    return frozenset()
+
+
+def _clause_entity_anchors(clause: str) -> frozenset[str]:
+    raw = identity_topic_tokens(clause)
+    return frozenset(
+        token for token in raw
+        if len(token) >= 2
+        and token not in _GENERIC_TOPIC_TOKENS
+        and token not in _NON_ENTITY_FILLER_TOKENS
+        and not is_state_token(token)
+    )
+
+
+def _clause_has_explicit_entity(clause: str) -> bool:
+    return bool(_clause_explicit_entity_topics(clause))
+
+
+def _clause_explicit_entity_topics(clause: str) -> frozenset[str]:
+    working = clause.strip()
+    conditional_tail = re.split(r'[，,](?=(?:如果|要是|假如|万一|倘若|若是|以后若))', working, maxsplit=1)
+    if len(conditional_tail) > 1:
+        working = conditional_tail[0].strip()
+    working = re.sub(
+        r'^(?:但|但是|不过|然而|可是|今天真的|其实|本来担心)',
+        '',
+        working,
+    ).strip()
+    if re.match(r'^只是', working):
+        return frozenset()
+    distinctive = _distinctive_clause_identities(working)
+    if distinctive:
+        return frozenset(distinctive)
+    if _PRONOUN_CONTEXT_RE.search(clause) or _DEICTIC_PHRASE.search(clause):
+        return frozenset()
+    return _clause_entity_anchors(working)
+
+
 def _topics_from_prior_clauses(prior_clauses: Sequence[str]) -> frozenset[str]:
     for prior in reversed(prior_clauses):
-        distinctive = _distinctive_clause_identities(prior)
-        if distinctive:
-            return frozenset(distinctive)
-        raw = identity_topic_tokens(prior)
-        anchors = frozenset(
-            token for token in raw
-            if len(token) >= 2
-            and token not in _GENERIC_TOPIC_TOKENS
-            and not is_state_token(token)
-        )
-        if anchors:
-            return anchors
+        topics = _clause_explicit_entity_topics(prior)
+        if topics:
+            return topics
     return frozenset()
 
 
@@ -651,18 +745,20 @@ def collect_clause_event_topics(
     *,
     prior_clauses_in_message: Sequence[str] = (),
 ) -> frozenset[str]:
-    tokens = set(identity_topic_tokens(clause))
-    tokens.update(_distinctive_clause_identities(clause))
-    if not _needs_prior_chat_context(clause):
-        return frozenset(tokens)
+    own_topics = _clause_explicit_entity_topics(clause)
+    if own_topics:
+        return own_topics
     same_message_topics = _topics_from_prior_clauses(prior_clauses_in_message)
     if same_message_topics:
-        tokens.update(same_message_topics)
-        return frozenset(tokens)
-    prior = _prior_chat_content(chat_messages, message_id)
-    if prior:
-        tokens.update(identity_topic_tokens(prior))
-    return frozenset(tokens)
+        return same_message_topics
+    prior_topics = _collect_prior_chat_topics(chat_messages, message_id)
+    if prior_topics:
+        return prior_topics
+    if _needs_prior_chat_context(clause):
+        prior = _prior_chat_content(chat_messages, message_id)
+        if prior:
+            return identity_topic_tokens(prior)
+    return frozenset()
 
 
 def parse_user_concern_events(
@@ -683,19 +779,19 @@ def parse_user_concern_events(
         if _clause_is_pure_question(target, interrogative=pure_interrogative):
             continue
         event_type = _classify_factual_clause(target)
-        if not event_type:
-            continue
-        parsed.append(ConcernClauseEvent(
-            event=event_type,
-            topics=collect_clause_event_topics(
-                target,
-                chat_messages,
-                message_id,
-                prior_clauses_in_message=prior_targets,
-            ),
-            clause=target,
-        ))
-        prior_targets.append(target)
+        if event_type:
+            parsed.append(ConcernClauseEvent(
+                event=event_type,
+                topics=collect_clause_event_topics(
+                    target,
+                    chat_messages,
+                    message_id,
+                    prior_clauses_in_message=prior_targets,
+                ),
+                clause=target,
+            ))
+        if _clause_has_explicit_entity(target):
+            prior_targets.append(target)
     return parsed
 
 
