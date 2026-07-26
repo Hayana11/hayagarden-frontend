@@ -1293,7 +1293,11 @@ def finalize_cc_wake_one_shot(one_shot, *, is_cold=False, messages=None):
     one_shot['wake_nonmessage_background'] = '\n'.join(nonmsg_lines)
     one_shot['wake_message_background'] = '\n'.join(msg_bg_lines)
     one_shot['wake_reply_bridge'] = bridge
-    one_shot['wake_ids'] = consumable
+    from wake.concern_resolution import merge_wake_consume_ids
+    one_shot['wake_ids'] = merge_wake_consume_ids(
+        consumable,
+        one_shot.get('suppressed_wake_ids') or [],
+    )
     return one_shot
 
 
@@ -1311,7 +1315,9 @@ def _cc_collect_one_shot(get_db_fn, *, include_wake=True):
         'wake_nonmessage_background': '',
         'wake_message_background': '',
         'wake_reply_bridge': '',
+        'wake_resolution_guard': '',
         'wake_ids': [],
+        'suppressed_wake_ids': [],
         'wake_items': [],
         'task_feedback': '',
         'dream_flash': '',
@@ -1344,6 +1350,11 @@ def _cc_collect_one_shot(get_db_fn, *, include_wake=True):
                 })
             _wake_result = filter_wake_items(items, _cr_state)
             one_shot['wake_items'] = _wake_result.kept
+            one_shot['suppressed_wake_ids'] = list(_wake_result.suppressed_ids)
+            from wake.concern_resolution import format_resolution_guard
+            one_shot['wake_resolution_guard'] = format_resolution_guard(
+                _wake_result.applied_resolutions,
+            )
         except Exception:
             pass
     try:
@@ -1466,6 +1477,9 @@ _ONE_SHOT_TEXT_KEYS = ('task_feedback', 'dream_flash')
 def format_one_shot(one_shot):
     one_shot = one_shot or {}
     chunks = []
+    guard = (one_shot.get('wake_resolution_guard') or '').strip()
+    if guard:
+        chunks.append(guard)
     bg_parts = []
     for key in ('wake_nonmessage_background', 'wake_message_background'):
         val = (one_shot.get(key) or '').strip()

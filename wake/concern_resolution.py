@@ -13,8 +13,8 @@ from typing import Iterable, Sequence
 _USER_AUTHORS = frozenset({'hayana', 'haya', 'user'})
 
 _RESOLUTION_NEGATION = re.compile(
-    r'(?:才不是|并不是|并非|没有|别|别想|不算|哪能|哪能是|哪是)'
-    r'.{0,10}(?:没事了|结束了|都好了|不用了|可以放下|已经好了)',
+    r'(?:才不是|并不是|并非|这不算|哪能是|哪是)'
+    r'.{0,8}(?:没事了|结束了|都好了|不用了|可以放下|已经好了|处理好了)',
 )
 _RESOLUTION_RHETORICAL = re.compile(
     r'(?:你以为|难道|是不是|难道就|怎么就).{0,12}(?:结束了|没事了|都好了|不用了)\??',
@@ -23,7 +23,7 @@ _RESOLUTION_RHETORICAL = re.compile(
 _RESOLUTION_PATTERNS = tuple(
     re.compile(p, re.IGNORECASE)
     for p in (
-        r'已经(?:好了|解决|愈合|恢复|结案|处理(?:完|好))',
+        r'已经(?:好了|没事了|解决|愈合|恢复|结案|处理(?:完|好))',
         r'(?:无需|不需|不用|不必|不要)(?:再|继续|进一步)',
         r'(?:已经|这件事).{0,16}可以放下',
         r'医生说(?:不用|不(?:用|需要)|没事)',
@@ -78,6 +78,7 @@ class ResolutionState:
 class FilterResult:
     kept: list = field(default_factory=list)
     applied_resolutions: list[ResolutionEntry] = field(default_factory=list)
+    suppressed_ids: list[int] = field(default_factory=list)
 
 
 def topic_tokens(text: str) -> frozenset[str]:
@@ -102,20 +103,28 @@ def _topic_specific_tokens(text: str) -> frozenset[str]:
     return frozenset(token for token in topic_tokens(text) if token not in _GENERIC_TOPIC_TOKENS)
 
 
-_DEICTIC_RESOLUTION = re.compile(
-    r'(?:这件事|那件事|这事|那事|不用了|没事了|都好了|处理好了|可以放下|结束了)',
-)
+_DEICTIC_PHRASE = re.compile(r'(?:这件事|那件事|这事|那事)')
+
 
 def _needs_prior_user_context(content: str) -> bool:
     body = (content or '').strip()
-    if _DEICTIC_RESOLUTION.search(body):
+    if _DEICTIC_PHRASE.search(body):
         return True
     return len(_topic_specific_tokens(content)) < _MIN_TOPIC_OVERLAP
+
+
+def _looks_like_question(body: str) -> bool:
+    trimmed = body.rstrip('？?。.!！… ')
+    if body.endswith('?') or body.endswith('？'):
+        return True
+    return bool(trimmed.endswith('吗') or trimmed.endswith('呢'))
 
 
 def is_user_resolution(text: str) -> bool:
     body = (text or '').strip()
     if not body:
+        return False
+    if _looks_like_question(body):
         return False
     if _RESOLUTION_NEGATION.search(body) or _RESOLUTION_RHETORICAL.search(body):
         return False
@@ -282,7 +291,8 @@ def fetch_user_messages(
         """
         SELECT id, author, content, created_at
         FROM chat_messages
-        WHERE created_at >= datetime('now', '+8 hours', ?)
+        WHERE lower(author) IN ('hayana', 'haya', 'user')
+          AND created_at >= datetime('now', '+8 hours', ?)
         ORDER BY id ASC
         """,
         (f'-{int(lookback_hours)} hours',),
@@ -290,24 +300,19 @@ def fetch_user_messages(
     out: list[dict] = []
     for row in rows:
         if hasattr(row, 'keys'):
-            author = row['author']
-            item = {
+            out.append({
                 'id': row['id'],
-                'author': author,
+                'author': row['author'],
                 'content': row['content'],
                 'created_at': row['created_at'],
-            }
+            })
         else:
-            author = row[1]
-            item = {
+            out.append({
                 'id': row[0],
-                'author': author,
+                'author': row[1],
                 'content': row[2],
                 'created_at': row[3],
-            }
-        if not _is_user_author(author):
-            continue
-        out.append(item)
+            })
     return out
 
 
@@ -342,31 +347,54 @@ def _row_content_and_time(row) -> tuple[str, str]:
     return str(row or ''), ''
 
 
+def _append_suppressed_id(target: list[int], raw_id) -> None:
+    try:
+        value = int(raw_id)
+    except (TypeError, ValueError):
+        return
+    if value > 0 and value not in target:
+        target.append(value)
+
+
+def merge_wake_consume_ids(visible_ids: Iterable, suppressed_ids: Iterable) -> list[int]:
+    merged: list[int] = []
+    for value in list(visible_ids or ()) + list(suppressed_ids or ()):
+        _append_suppressed_id(merged, value)
+    return merged
+
+
 def filter_wake_rows(rows: Iterable, state: ResolutionState | None) -> FilterResult:
     kept = []
     applied: list[ResolutionEntry] = []
+    suppressed_ids: list[int] = []
     for row in rows:
         content, recorded_at = _row_content_and_time(row)
         match = find_superseding_resolution(content, state, recorded_at=recorded_at)
         if match:
             applied.append(match)
+            if hasattr(row, 'keys') and 'id' in row.keys():
+                _append_suppressed_id(suppressed_ids, row['id'])
+            elif isinstance(row, dict):
+                _append_suppressed_id(suppressed_ids, row.get('id'))
             continue
         kept.append(row)
-    return FilterResult(kept=kept, applied_resolutions=applied)
+    return FilterResult(kept=kept, applied_resolutions=applied, suppressed_ids=suppressed_ids)
 
 
 def filter_wake_items(items: Iterable[dict], state: ResolutionState | None) -> FilterResult:
     kept: list[dict] = []
     applied: list[ResolutionEntry] = []
+    suppressed_ids: list[int] = []
     for item in items or ():
         content = str(item.get('content') or '')
         recorded_at = str(item.get('woke_at') or '')
         match = find_superseding_resolution(content, state, recorded_at=recorded_at)
         if match:
             applied.append(match)
+            _append_suppressed_id(suppressed_ids, item.get('id'))
             continue
         kept.append(dict(item))
-    return FilterResult(kept=kept, applied_resolutions=applied)
+    return FilterResult(kept=kept, applied_resolutions=applied, suppressed_ids=suppressed_ids)
 
 
 def filter_diary_rows(rows: Iterable, state: ResolutionState | None) -> FilterResult:

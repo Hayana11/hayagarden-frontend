@@ -33,6 +33,13 @@ class ConcernResolutionLogicTests(unittest.TestCase):
         self.assertFalse(cr.is_user_resolution('才不是没事了，你别瞎担心。'))
         self.assertFalse(cr.is_user_resolution('你以为结束了？还早着呢。'))
 
+    def test_comfort_phrases_still_count_as_resolution(self):
+        self.assertTrue(cr.is_user_resolution('别担心，伤口已经好了。'))
+        self.assertTrue(cr.is_user_resolution('没有啦，已经没事了。'))
+
+    def test_question_form_is_not_resolution(self):
+        self.assertFalse(cr.is_user_resolution('医生说不用打针吗？'))
+
     def test_movie_ended_is_not_resolution(self):
         self.assertFalse(cr.is_user_resolution('电影结束了，挺好看的。'))
 
@@ -104,6 +111,9 @@ class ConcernResolutionLogicTests(unittest.TestCase):
         state = cr.build_resolution_state(messages)
         self.assertFalse(cr.is_superseded_historical_concern(
             '还在想买花的事情。', state, recorded_at='2026-07-20 18:00:00',
+        ))
+        self.assertFalse(cr.is_superseded_historical_concern(
+            '还在想要不要提醒她买花。', state, recorded_at='2026-07-20 18:00:00',
         ))
 
     def test_guard_only_for_applied_resolutions(self):
@@ -240,6 +250,16 @@ class WakeConcernResolutionIntegrationTests(unittest.TestCase):
         self.assertIn('你醒着的时候', text)
         self.assertNotIn('用户已明确结案', text)
 
+    def test_flower_reminder_wake_survives_express_processed_ok(self):
+        self._insert_user('记得提醒我买花。', hours_ago=30)
+        self._insert_wake('explore', '还在想要不要提醒她买花。', hours_ago=20)
+        self._insert_user('快递已经处理好了。')
+
+        text = self._build_wake_text()
+        self.assertIn('买花', text)
+        self.assertIn('你醒着的时候', text)
+        self.assertNotIn('用户已明确结案', text)
+
     def test_post_resolution_wake_not_filtered(self):
         self._insert_user('医生说不用打针，伤口已经好了。', hours_ago=48)
         self._insert_wake('explore', '今天伤口开始渗液了，要不要再问医生。', hours_ago=2)
@@ -338,6 +358,46 @@ class WakeConcernResolutionIntegrationTests(unittest.TestCase):
             one_shot = system_builder.build_cc_one_shot(include_wake=True)
 
         self.assertEqual(one_shot.get('wake_items'), [])
+        self.assertEqual(one_shot.get('suppressed_wake_ids'), [1])
+        self.assertIn('用户已明确结案', system_builder.format_one_shot(one_shot))
+
+    def test_cc_suppressed_wake_ids_are_consumable(self):
+        from chat import system_builder
+
+        self._insert_wake('explore', '还在想破伤风要不要打。', hours_ago=24)
+        self._insert_user('医生说破伤风不用打针，伤口已经愈合。')
+
+        gateway_stub = types.ModuleType('gateway')
+        gateway_stub.get_db = self.get_db
+        with mock.patch.dict(sys.modules, {'gateway': gateway_stub}):
+            one_shot = system_builder.build_cc_one_shot(include_wake=True)
+
+        self.assertEqual(one_shot.get('wake_ids'), [1])
+        consumed = context_continuity.consume_wake_ids(self.get_db, one_shot['wake_ids'])
+        self.assertEqual(consumed, 1)
+
+    def test_consumed_suppressed_wake_does_not_revive_after_resolution_window(self):
+        from chat import system_builder
+
+        self._insert_wake('explore', '还在想破伤风要不要打。', hours_ago=24)
+        self._insert_user('医生说破伤风不用打针，伤口已经愈合。', hours_ago=200)
+
+        gateway_stub = types.ModuleType('gateway')
+        gateway_stub.get_db = self.get_db
+        with mock.patch.dict(sys.modules, {'gateway': gateway_stub}):
+            one_shot = system_builder.build_cc_one_shot(include_wake=True)
+            context_continuity.consume_wake_ids(self.get_db, one_shot['wake_ids'])
+            revived = system_builder.build_cc_one_shot(include_wake=True)
+
+        self.assertEqual(revived.get('wake_items'), [])
+        self.assertEqual(revived.get('suppressed_wake_ids'), [])
+        self.assertEqual(revived.get('wake_resolution_guard'), '')
+        conn = self.get_db()
+        pending = conn.execute(
+            "SELECT COUNT(*) FROM wake_log WHERE consumed=0"
+        ).fetchone()[0]
+        conn.close()
+        self.assertEqual(pending, 0)
 
     def test_load_resolution_state_from_db_closes_on_error(self):
         closed = {'value': False}
