@@ -75,18 +75,18 @@ class ConcernResolutionLogicTests(unittest.TestCase):
 
     def test_factory_progress_resolution(self):
         messages = [
-            {'id': 1, 'content': '工厂订单进度还没跟完。', 'created_at': '2026-07-20 10:00:00'},
-            {'id': 2, 'content': '工厂进度已经跟完了，不用再催了。', 'created_at': '2026-07-21 12:00:00'},
+            {'id': 1, 'content': '工厂订单的进度还没跟完。', 'created_at': '2026-07-20 10:00:00'},
+            {'id': 2, 'content': '工厂订单的进度已经跟完了，不用再催了。', 'created_at': '2026-07-21 12:00:00'},
         ]
         state = cr.build_resolution_state(messages)
         self.assertTrue(cr.is_superseded_historical_concern(
-            '还在想工厂订单进度。', state, recorded_at='2026-07-20 18:00:00',
+            '还在想工厂订单的进度。', state, recorded_at='2026-07-20 18:00:00',
         ))
 
     def test_software_fault_reopen_after_resolution(self):
         messages = [
-            {'id': 1, 'content': '服务已经修好了，可以正常用了。', 'created_at': '2026-07-21 12:00:00'},
-            {'id': 2, 'content': '部署服务又报错了，还得排查。', 'created_at': '2026-07-22 09:00:00'},
+            {'id': 1, 'content': '服务故障已经修好了，可以正常用了。', 'created_at': '2026-07-21 12:00:00'},
+            {'id': 2, 'content': '服务故障又报错了，还得排查。', 'created_at': '2026-07-22 09:00:00'},
         ]
         state = cr.build_resolution_state(messages)
         self.assertEqual(len(state.active), 0)
@@ -115,7 +115,7 @@ class ConcernResolutionLogicTests(unittest.TestCase):
         user_messages = [m for m in chat_messages if m['author'] == 'hayana']
         state = cr.build_resolution_state(user_messages, chat_messages)
         entry = state.active[0]
-        self.assertIn('抓伤', entry.topic_tokens)
+        self.assertTrue(any('抓伤' in token for token in entry.topic_tokens))
         self.assertNotIn('买花', entry.topic_tokens)
 
     def test_unrelated_concerns_do_not_cross(self):
@@ -181,6 +181,48 @@ class ConcernResolutionLogicTests(unittest.TestCase):
         ])
         self.assertEqual(cr.format_resolution_guard([]), '')
         self.assertEqual(cr.format_resolution_guard(state.active), '')
+
+    def test_positive_you_completion_is_resolution_not_reopen(self):
+        self.assertTrue(cr.is_user_resolution('服务又修好了，可以正常用了。'))
+        self.assertFalse(cr.is_user_reopen('服务又修好了，可以正常用了。'))
+        self.assertTrue(cr.is_user_resolution('快递又送到了，不用再取了。'))
+        self.assertFalse(cr.is_user_reopen('快递又送到了，不用再取了。'))
+
+    def test_distinct_factory_lines_do_not_cross(self):
+        messages = [
+            {'id': 1, 'content': '一厂衬衫的进度已经跟完了，不用再催了。', 'created_at': '2026-07-21 12:00:00'},
+        ]
+        state = cr.build_resolution_state(messages)
+        self.assertFalse(cr.is_superseded_historical_concern(
+            '还在想二厂磁吸尾的进度。', state, recorded_at='2026-07-20 18:00:00',
+        ))
+        self.assertTrue(cr.is_superseded_historical_concern(
+            '还在想一厂衬衫的进度。', state, recorded_at='2026-07-20 18:00:00',
+        ))
+
+    def test_distinct_orders_do_not_cross(self):
+        messages = [
+            {'id': 1, 'content': '订单a已经发货，不用再问了。', 'created_at': '2026-07-21 12:00:00'},
+        ]
+        state = cr.build_resolution_state(messages)
+        self.assertFalse(cr.is_superseded_historical_concern(
+            '还在想订单b有没有发货。', state, recorded_at='2026-07-20 18:00:00',
+        ))
+        self.assertTrue(cr.is_superseded_historical_concern(
+            '还在想订单a有没有发货。', state, recorded_at='2026-07-20 18:00:00',
+        ))
+
+    def test_frontend_vs_frontend_gw_do_not_cross(self):
+        messages = [
+            {'id': 1, 'content': 'frontend 故障已经修好了，不用再看了。', 'created_at': '2026-07-21 12:00:00'},
+        ]
+        state = cr.build_resolution_state(messages)
+        self.assertFalse(cr.is_superseded_historical_concern(
+            '还在想 frontend-gw 故障要不要继续排查。', state, recorded_at='2026-07-20 18:00:00',
+        ))
+        self.assertTrue(cr.is_superseded_historical_concern(
+            '还在想 frontend 故障要不要继续排查。', state, recorded_at='2026-07-20 18:00:00',
+        ))
 
 
 class WakeConcernResolutionIntegrationTests(unittest.TestCase):
@@ -595,8 +637,8 @@ class WakeConcernResolutionIntegrationTests(unittest.TestCase):
         self.assertNotIn('你醒着的时候', text)
 
     def test_factory_progress_wake_suppressed(self):
-        self._insert_wake('explore', '还在想工厂订单进度。', hours_ago=20)
-        self._insert_user('工厂进度已经跟完了，不用再催了。')
+        self._insert_wake('explore', '还在想工厂订单的进度。', hours_ago=20)
+        self._insert_user('工厂订单的进度已经跟完了，不用再催了。')
 
         text = self._build_wake_text()
         self.assertIn('用户已明确结案', text)
@@ -604,8 +646,8 @@ class WakeConcernResolutionIntegrationTests(unittest.TestCase):
 
     def test_software_fault_reopen_shows_wake_again(self):
         self._insert_wake('explore', '还在想服务故障要不要继续排查。', hours_ago=50)
-        self._insert_user('服务已经修好了，可以正常用了。', hours_ago=48)
-        self._insert_user('部署服务又报错了，还得排查。', hours_ago=1)
+        self._insert_user('服务故障已经修好了，可以正常用了。', hours_ago=48)
+        self._insert_user('服务故障又报错了，还得排查。', hours_ago=1)
 
         text = self._build_wake_text()
         self.assertIn('你醒着的时候', text)
@@ -683,6 +725,73 @@ class WakeConcernResolutionIntegrationTests(unittest.TestCase):
         with mock.patch('wake.concern_resolution.merge_wake_consume_ids', side_effect=RuntimeError('boom')):
             result = system_builder.finalize_cc_wake_one_shot(hot, is_cold=False)
         self.assertEqual(result['wake_ids'], [9])
+
+    def _insert_user_at(self, content, *, message_id: int, hours_ago: float = 1.0):
+        conn = self.get_db()
+        conn.execute(
+            "INSERT INTO chat_messages (id, author, content, created_at) VALUES (?,?,?,?)",
+            (message_id, 'hayana', content, self._ts(hours_ago=hours_ago)),
+        )
+        conn.commit()
+        conn.close()
+
+    def test_sync_idempotent_resolve_reopen_resolve(self):
+        self._insert_wake('explore', '还在想快递有没有取。', hours_ago=30)
+        self._insert_user_at('快递已经取完，不用再跑了。', message_id=1, hours_ago=20)
+        self._insert_user_at('快递又找不到了，还得再去拿。', message_id=2, hours_ago=10)
+        self._insert_user_at('快递已经取到了，不用再跑了。', message_id=3, hours_ago=1)
+
+        states = [cr.load_resolution_state_from_db(self.get_db) for _ in range(3)]
+        for state in states:
+            self.assertEqual(len(state.active), 1)
+            self.assertIn('取到', state.active[0].summary)
+
+        conn = self.get_db()
+        active = conn.execute(
+            "SELECT COUNT(*) FROM concern_closures WHERE active=1"
+        ).fetchone()[0]
+        cursor = conn.execute(
+            "SELECT last_processed_message_id FROM concern_closure_sync WHERE id=1"
+        ).fetchone()[0]
+        conn.close()
+        self.assertEqual(active, 1)
+        self.assertEqual(cursor, 3)
+
+        text = self._build_wake_text()
+        self.assertIn('用户已明确结案', text)
+        self.assertNotIn('你醒着的时候', text)
+
+    def test_sync_state_survives_service_restart(self):
+        self._insert_user('快递已经取完，不用再跑了。')
+        first = cr.load_resolution_state_from_db(self.get_db)
+
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        second = cr.load_resolution_state(conn)
+        conn.close()
+
+        self.assertEqual(len(first.active), len(second.active))
+        self.assertEqual(first.active[0].summary, second.active[0].summary)
+
+    def test_cold_once_and_one_shot_share_persistent_state(self):
+        from chat import system_builder
+
+        self._insert_wake('explore', '还在想快递有没有取。', hours_ago=20)
+        self._insert_diary('还在担心快递有没有取。', hours_ago=18)
+        self._insert_user('快递已经取完，不用再跑了。', hours_ago=1)
+
+        gateway_stub = types.ModuleType('gateway')
+        gateway_stub.get_db = self.get_db
+        with mock.patch.dict(sys.modules, {'gateway': gateway_stub}):
+            for _ in range(3):
+                cr.load_resolution_state_from_db(self.get_db)
+            cold = system_builder._cc_collect_cold_once(self.get_db)
+            one_shot = system_builder.build_cc_one_shot(include_wake=True)
+
+        self.assertNotIn('最近的日记', cold.get('long_term_memory', ''))
+        self.assertNotIn('用户已明确结案', cold.get('long_term_memory', ''))
+        self.assertEqual(one_shot.get('wake_items'), [])
+        self.assertIn('用户已明确结案', system_builder.format_one_shot(one_shot))
 
 
 if __name__ == '__main__':

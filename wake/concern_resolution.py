@@ -27,6 +27,7 @@ _RESOLUTION_PATTERNS = tuple(
     for p in (
         r'已经(?:好了|没事了|解决|处理(?:完|好)|取完|送到|到账|修好|恢复|完成|跟完|愈合|好转)',
         r'已经.{0,8}(?:愈合|好转|恢复|解决|处理(?:完|好)|取完|跟完)',
+        r'又.{0,8}(?:好了|修好|送到|取完|取到|到账|完成|解决|处理(?:完|好)|跟完|愈合)',
         r'(?:无需|不需|不用|不必|不要)(?:再|继续|进一步|跑|催|问|打|管|担心)',
         r'(?:已经|这件事).{0,16}可以放下',
         r'不用再(?:问|担心|追问|管|跑|催|打)',
@@ -38,7 +39,6 @@ _REOPEN_PATTERNS = tuple(
     re.compile(p, re.IGNORECASE)
     for p in (
         r'又(?:出|坏|失败|报错|延迟|问题|恶化|反复|卡住|停|漏|找不到)',
-        r'又.{1,8}(?:了|的|着)',
         r'(?:还是|仍然|依然)(?:没|不|有)(?:好|行|完成|解决|取到|修好|到账|送到)',
         r'(?:又得|还是要|还是得|仍要|仍得|需要再|还得)',
         r'(?:重新|再次)(?:出现|发生|报错|出问题|问|处理|催|跑|取)',
@@ -46,6 +46,12 @@ _REOPEN_PATTERNS = tuple(
         r'(?:开始|出现)(?:问题|故障|报错|状况|反复|了|着)',
     )
 )
+
+_DOMAIN_GENERIC = frozenset({
+    '进度', '订单', '工厂', '服务', '故障', '部署', '问题', '系统', '项目',
+    '前端', '后端', '接口', '模块', '版本', '环境', '厂家', '产线',
+    '发货', '送达', '取完', '修好', '跟完', '排查', '报错',
+})
 
 _GENERIC_TOPIC_TOKENS = frozenset({
     '已经', '可以', '不用', '无需', '没有', '什么', '怎么', '我们', '你们', '自己',
@@ -71,6 +77,10 @@ CREATE TABLE IF NOT EXISTS concern_closures (
 );
 CREATE INDEX IF NOT EXISTS idx_concern_closures_active
     ON concern_closures(active, resolved_at);
+CREATE TABLE IF NOT EXISTS concern_closure_sync (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    last_processed_message_id INTEGER NOT NULL DEFAULT 0
+);
 """
 
 _STOPWORDS = _GENERIC_TOPIC_TOKENS
@@ -110,34 +120,85 @@ def ensure_concern_closure_schema_for_path(db_path: str) -> None:
         conn.close()
 
 
-def topic_tokens(text: str) -> frozenset[str]:
+def _normalize_for_topic_extraction(text: str) -> str:
     text = (text or '').strip().lower()
+    text = re.sub(r'[，。！？、；：\s]+', ' ', text)
+    text = re.sub(
+        r'(?:已经|不用|无需|可以|还是|仍然|依然|记得|提醒|医生|说|想|帮|你|我|她|他|我们|你们|'
+        r'的|了|在|还|要|是|有|没|不|再|又|也|就|都|和|与|及|或|而|但|却|这|那|哪)',
+        ' ',
+        text,
+    )
+    return re.sub(r'\s+', ' ', text).strip()
+
+
+def topic_tokens(text: str) -> frozenset[str]:
+    text = _normalize_for_topic_extraction(text)
     if not text:
         return frozenset()
     tokens: set[str] = set()
-    for chunk in re.split(r'[^\u4e00-\u9fffA-Za-z0-9]+', text):
-        if len(chunk) < 2:
-            continue
-        if chunk not in _STOPWORDS:
+    for chunk in re.findall(
+        r'[\u4e00-\u9fff]+[a-z0-9]*|[a-z0-9]+(?:-[a-z0-9]+)*',
+        text,
+    ):
+        chunk = chunk.strip()
+        if len(chunk) >= 2 and chunk not in _STOPWORDS:
             tokens.add(chunk)
-        if len(chunk) >= 3:
-            for i in range(len(chunk) - 1):
-                bigram = chunk[i:i + 2]
-                if bigram not in _STOPWORDS:
-                    tokens.add(bigram)
+        if len(chunk) >= 4 and re.fullmatch(r'[\u4e00-\u9fff]+', chunk):
+            for size in (3, 4):
+                for i in range(len(chunk) - size + 1):
+                    piece = chunk[i:i + size]
+                    if len(piece) >= 3 and piece not in _STOPWORDS:
+                        tokens.add(piece)
     return frozenset(tokens)
 
 
-def _topic_specific_tokens(text: str) -> frozenset[str]:
-    return frozenset(token for token in topic_tokens(text) if token not in _GENERIC_TOPIC_TOKENS)
+def _identity_tokens(tokens: frozenset[str]) -> frozenset[str]:
+    return frozenset(
+        token for token in tokens
+        if len(token) >= 2
+        and token not in _GENERIC_TOPIC_TOKENS
+        and token not in _DOMAIN_GENERIC
+    )
+
+
+def _anchor_token_match(left_token: str, right_token: str) -> bool:
+    if left_token in _DOMAIN_GENERIC or right_token in _DOMAIN_GENERIC:
+        return False
+    if left_token == right_token:
+        return True
+    shorter, longer = (left_token, right_token) if len(left_token) <= len(right_token) else (right_token, left_token)
+    if len(shorter) < 2 or shorter not in longer:
+        return False
+    if re.fullmatch(r'[a-z0-9]+(?:-[a-z0-9]+)*', shorter) and '-' not in shorter and '-' in longer:
+        return False
+    return True
 
 
 def substantive_topic_overlap(left: frozenset[str], right: frozenset[str]) -> bool:
-    left_s = {t for t in left if t not in _GENERIC_TOPIC_TOKENS and len(t) >= 2}
-    right_s = {t for t in right if t not in _GENERIC_TOPIC_TOKENS and len(t) >= 2}
-    if not left_s or not right_s:
+    left_identity = _identity_tokens(left)
+    right_identity = _identity_tokens(right)
+    if left_identity & right_identity:
+        return True
+    left_all = {
+        token for token in left
+        if len(token) >= 2 and token not in _GENERIC_TOPIC_TOKENS
+    }
+    right_all = {
+        token for token in right
+        if len(token) >= 2 and token not in _GENERIC_TOPIC_TOKENS
+    }
+    for left_token in left_all:
+        for right_token in right_all:
+            if _anchor_token_match(left_token, right_token):
+                return True
+    shared_all = left_all & right_all
+    if not shared_all:
         return False
-    return bool(left_s & right_s)
+    shared_distinctive = shared_all - _DOMAIN_GENERIC
+    if shared_distinctive:
+        return True
+    return len(shared_all) >= 2
 
 
 _DEICTIC_PHRASE = re.compile(r'(?:这件事|那件事|这事|那事)')
@@ -147,7 +208,7 @@ def _needs_prior_chat_context(content: str) -> bool:
     body = (content or '').strip()
     if _DEICTIC_PHRASE.search(body):
         return True
-    return len(_topic_specific_tokens(content)) < 1
+    return len(_identity_tokens(topic_tokens(content))) < 1
 
 
 def _looks_like_question(body: str) -> bool:
@@ -171,6 +232,8 @@ def is_user_resolution(text: str) -> bool:
 def is_user_reopen(text: str) -> bool:
     body = (text or '').strip()
     if not body:
+        return False
+    if is_user_resolution(body):
         return False
     return any(p.search(body) for p in _REOPEN_PATTERNS)
 
@@ -352,33 +415,112 @@ def _persist_closure(conn: sqlite3.Connection, entry: ResolutionEntry) -> None:
     )
 
 
+def _get_sync_cursor(conn: sqlite3.Connection) -> int:
+    row = conn.execute(
+        "SELECT last_processed_message_id FROM concern_closure_sync WHERE id=1"
+    ).fetchone()
+    if not row:
+        return 0
+    return int(row[0] if not hasattr(row, 'keys') else row['last_processed_message_id'])
+
+
+def _set_sync_cursor(conn: sqlite3.Connection, message_id: int) -> None:
+    conn.execute(
+        """
+        INSERT INTO concern_closure_sync (id, last_processed_message_id)
+        VALUES (1, ?)
+        ON CONFLICT(id) DO UPDATE SET
+            last_processed_message_id=excluded.last_processed_message_id
+        """,
+        (int(message_id),),
+    )
+
+
+def _fetch_messages_up_to(conn: sqlite3.Connection, message_id: int) -> list[dict]:
+    rows = conn.execute(
+        """
+        SELECT id, author, content, created_at
+        FROM chat_messages
+        WHERE id <= ?
+        ORDER BY id ASC
+        """,
+        (int(message_id),),
+    ).fetchall()
+    return [_row_to_message(row) for row in rows]
+
+
+def _fetch_incremental_chat_messages(
+    conn: sqlite3.Connection,
+    *,
+    after_message_id: int,
+) -> list[dict]:
+    rows = conn.execute(
+        """
+        SELECT id, author, content, created_at
+        FROM chat_messages
+        WHERE id > ?
+        ORDER BY id ASC
+        """,
+        (int(after_message_id),),
+    ).fetchall()
+    return [_row_to_message(row) for row in rows]
+
+
+def _apply_concern_event(
+    conn: sqlite3.Connection,
+    msg: dict,
+    chat_messages: Sequence[dict],
+) -> None:
+    content = str(msg.get('content') or '')
+    created_at = str(msg.get('created_at') or '')
+    message_id = int(msg.get('id') or 0)
+    if is_user_reopen(content):
+        _deactivate_matching_closures(
+            conn,
+            topic_tokens(content),
+            reopened_at=created_at,
+        )
+        return
+    if not is_user_resolution(content):
+        return
+    _persist_closure(conn, ResolutionEntry(
+        summary=_resolution_summary(content),
+        topic_tokens=_collect_resolution_topics(chat_messages, message_id),
+        message_id=message_id,
+        created_at=created_at,
+    ))
+
+
 def sync_concern_closures(
     conn: sqlite3.Connection,
     *,
     lookback_hours: int = _DEFAULT_LOOKBACK_HOURS,
 ) -> None:
     ensure_concern_closure_schema(conn)
-    chat_messages = fetch_chat_messages(conn, lookback_hours=lookback_hours)
-    user_messages = [msg for msg in chat_messages if _is_user_author(msg.get('author'))]
-    for msg in user_messages:
-        content = str(msg.get('content') or '')
-        created_at = str(msg.get('created_at') or '')
+    cursor = _get_sync_cursor(conn)
+    if cursor == 0:
+        messages = fetch_chat_messages(conn, lookback_hours=lookback_hours)
+    else:
+        messages = _fetch_incremental_chat_messages(conn, after_message_id=cursor)
+    if not messages:
+        return
+
+    max_id = cursor
+    for msg in messages:
         message_id = int(msg.get('id') or 0)
-        if is_user_reopen(content):
-            _deactivate_matching_closures(
-                conn,
-                topic_tokens(content),
-                reopened_at=created_at,
+        if message_id <= cursor:
+            continue
+        if _is_user_author(msg.get('author')):
+            context = (
+                messages
+                if cursor == 0
+                else _fetch_messages_up_to(conn, message_id)
             )
-            continue
-        if not is_user_resolution(content):
-            continue
-        _persist_closure(conn, ResolutionEntry(
-            summary=_resolution_summary(content),
-            topic_tokens=_collect_resolution_topics(chat_messages, message_id),
-            message_id=message_id,
-            created_at=created_at,
-        ))
+            _apply_concern_event(conn, msg, context)
+        max_id = max(max_id, message_id)
+
+    if max_id > cursor:
+        _set_sync_cursor(conn, max_id)
     conn.commit()
 
 
