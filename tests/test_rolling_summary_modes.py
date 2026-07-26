@@ -178,13 +178,23 @@ class RollingSummaryModeTests(unittest.TestCase):
             calls.append(kwargs.get('history_mode'))
             return 0, 0, []
 
-        with mock.patch('chat.context_lean.lean_history_enabled', return_value=True), \
+        env_text = 'DEEPSEEK_API_KEY=test\n'
+
+        def _open(path, *args, **kwargs):
+            if str(path) == '/opt/frontend/.env':
+                return mock.mock_open(read_data=env_text).return_value
+            return open(path, *args, **kwargs)
+
+        with mock.patch('builtins.open', side_effect=_open), \
+             mock.patch('chat.context_lean.lean_history_enabled', return_value=True), \
              mock.patch('tools.rolling_summary._db', return_value=self._get_db()), \
              mock.patch('tools.rolling_summary._cfg.get_int', return_value=3), \
              mock.patch('chat.history_boundary.boundary_rows_for_summary', side_effect=_capture), \
              mock.patch('tools.rolling_summary._ask', return_value='summary'):
-            from tools.rolling_summary import run
-            run()
+            import importlib
+            import tools.rolling_summary as rolling_summary
+            importlib.reload(rolling_summary)
+            rolling_summary.run()
         self.assertEqual(calls, ['legacy_block', 'relay_hysteresis', 'cc_token_budget'])
 
     def test_relay_and_cc_read_different_summaries(self):
