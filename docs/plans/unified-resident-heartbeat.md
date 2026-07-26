@@ -3,9 +3,9 @@
 > 同一只费佳、固定 system、固定工具面、三类轮次；普通 Wake 降为主 resident 的一次短心跳，只有需要行动时才升级，用户聊天永远优先。
 
 - **计划分支**：`plan/unified-heartbeat-tracker`
-- **当前状态**：`MEMORY_HOTFIX_DEPLOYED`（#134 已 merge + legacy_module 生产部署 + smoke PASS）
-- **最后更新**：2026-07-26（#134 merge `dbf3ad4` → deploy → production smoke；#127 证据补齐）
-- **tracker head**：`d7f1ac4`
+- **当前状态**：`P-CONTEXT-LEAN_STAGE1`（#139 Draft；State delta / re-anchor 施工中）
+- **最后更新**：2026-07-26（#139 Draft PR；Stage 1 代码完成，默认开关仍为 0）
+- **tracker head**：`6f656cf`
 - **生产 HEAD**：`dbf3ad4e6db532d7be422004614537e5b3d103ee`
 - **当前 identity**：`identity_id = "fyodor-default"` · `provider_id = "claude_code"` · `conversation_id = "default"`
 - **首个 Provider Adapter**：Claude Unified Resident Adapter
@@ -141,30 +141,14 @@
     生产部署与 smoke 命令严禁包含该脚本
     ```
   - 独立 P0 安全 PR；**不属于 #134 adapter 施工范围**
-- [ ] **P-CONTEXT-LEAN：上下文最小化与旧广播式注入退役**
-  - 状态：未开始；**#138 四个开关全部保持 0**
-  - 前置：**Memory Hotfix 已完成**（#134 merge `dbf3ad4` + smoke）；**仍须本文件标 `[-]` 才授权施工**
+- [-] **P-CONTEXT-LEAN：上下文最小化与旧广播式注入退役**
+  - 状态：进行中（**Stage 1 代码 PR Draft**；默认开关仍为 `0`；**未部署 / 未授权生产开启**）
+  - 代码 PR：**#139** · 分支 `cursor/context-lean-state-delta-8046`
+  - base：`dbf3ad4e6db532d7be422004614537e5b3d103ee` · head：`713f3afd70bdccf4eb22aaffaf7d5f9491b47a68`
+  - 前置：Memory Hotfix 已完成（#134 merge + smoke）
   - 目标：削减常驻广播与重复注入，**不是**关闭全部上下文
-  - 必须保留：
-    ```text
-    persona
-    当前对话历史
-    最新用户消息
-    真正相关的少量 recall
-    尚未消费的 one-shot
-    必要时间信息
-    ```
-  - 需要逐步停止常驻广播：
-    ```text
-    旧 emotion / drive / longing 自然语言形式指令
-    与话题无关的灯、Pocket、账本、留言板和近期活动
-    重复 handoff / diary / weekly summary / memo
-    无关提醒
-    已被结构化路径替代的旧状态包
-    ```
-  - **不得**把系统退化为「persona + 当前一句话」
   - 子阶段：
-    - [ ] State delta / re-anchor
+    - [-] State delta / re-anchor（#139 Draft；CC resident path；`CONTEXT_LEAN_STATE_ENABLED` 默认 0）
     - [ ] Tool-history budget
     - [ ] File-content dedup
     - [ ] History token budget / mode-keyed rolling summary
@@ -224,7 +208,7 @@
 P-SHADOW        [x]
 → P-CONTEXT-OBS [x]
 → Memory Hotfix [x]          ← merge `dbf3ad4` + legacy_module deploy + smoke
-→ P-CONTEXT-LEAN [ ]         ← 前置已满足；仍 **未授权施工**
+→ P-CONTEXT-LEAN [-]         ← Stage 1 #139 Draft；默认开关 0
 → UH-A0 Tool Parity [ ]
 → UH-A / UH-B [ ]
 → ISV3-1B [ ]
@@ -235,13 +219,13 @@ P-SHADOW        [x]
 ### 当前下一步
 
 ```text
-P-CONTEXT-LEAN [ ]           ← 前置 Memory Hotfix 已完成；仍须单独标 [-] 才授权
-MEM-PIN-REPAIR [ ]           ← 独立历史数据修复；不得趁部署顺手改 vault
-OMBRE-P0-TEST-GATE [!]       ← 独立 P0 安全 PR
-UH-A0 [ ]                    ← 未开始；不得提前
+P-CONTEXT-LEAN Stage 1 (#139 Draft)
+→ 人工审查
+→ 仍禁止生产开启 CONTEXT_LEAN_STATE_ENABLED
+→ 后续 Stage 2+ 须单独标 [-]
 ```
 
-> morning cron 继续关闭。P-SHADOW 已于 2026-07-26 毕业。**#134 已 merge/deploy；Context Lean、UH-A0、UH-A、ISV3-1B 等均不得提前施工。**
+> morning cron 继续关闭。#134 已 merge/deploy。**Context Lean 四开关生产仍为 0**；UH-A0、UH-A、ISV3-1B 等均不得提前施工。
 
 ---
 
@@ -973,8 +957,8 @@ PR #126 修门禁与去重
 - [x] **legacy_module 生产部署**：`deploy-frontend.sh dbf3ad4`；`DEPLOYED_SHA=dbf3ad4`；`frontend` / `frontend-gw` active
 - [x] **production smoke PASS**（管道修复；未换 persona / 未启 HTTP backend / 未开 Context Lean）
 - [x] **Memory Hotfix `[x]`**；tracker 证据本条补齐
-- [ ] **MEM-PIN-REPAIR**、**OMBRE-P0-TEST-GATE** 仍独立待办；本轮 **未** 动历史 pinned 数据
-- [ ] 下一项：**P-CONTEXT-LEAN**（须单独开项标 `[-]`；四开关仍保持 0 直至授权）
+- [ ] **MEM-PIN-REPAIR**、**OMBRE-P0-TEST-GATE** 仍独立待办
+- [-] **P-CONTEXT-LEAN Stage 1** 开工：PR **#139** Draft（`cursor/context-lean-state-delta-8046`）；base `dbf3ad4` · head `713f3af`；默认四开关仍为 `0`；**未部署**
 
 ---
 
