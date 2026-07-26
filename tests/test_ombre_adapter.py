@@ -308,10 +308,29 @@ class LegacyParityContractTests(unittest.TestCase):
 
 
 class CleanerPolicyTests(unittest.TestCase):
-    def test_legacy_importance_threshold_pins_synced_memory(self):
-        self.assertFalse(should_pin_synced_memory(7))
-        self.assertTrue(should_pin_synced_memory(8))
-        self.assertTrue(should_pin_synced_memory(10))
+    def test_cleaner_never_auto_pins_by_importance(self):
+        for importance in range(1, 11):
+            self.assertFalse(should_pin_synced_memory(importance))
+
+    def test_explicit_hold_pinned_true_passes_through(self):
+        received = {}
+
+        async def hold(**kwargs):
+            received.update(kwargs)
+            return "saved"
+
+        server = SimpleNamespace(hold=hold)
+        with mock.patch.object(ombre_adapter, "_load_server", return_value=server):
+            result = ombre_adapter.hold_memory(
+                "pinned memory",
+                importance=10,
+                pinned=True,
+                timeout=1.0,
+                wall_timeout=2.0,
+            )
+        self.assertEqual(result, "saved")
+        self.assertTrue(received["pinned"])
+        self.assertEqual(received["importance"], 10)
 
 
 class WiringTests(unittest.TestCase):
@@ -326,6 +345,14 @@ class WiringTests(unittest.TestCase):
             source = (root / relative).read_text(encoding="utf-8")
             self.assertNotIn("from server import", source, relative)
         self.assertIn("from tools import ombre_adapter", (root / "gateway.py").read_text(encoding="utf-8"))
+
+    def test_workspace_chat_uses_workspace_breath_timeout_budget(self):
+        source = (Path(ROOT) / "gateway.py").read_text(encoding="utf-8")
+        self.assertIn("_ombre_breath_sync(timeout=4.0, wall_timeout=5.0)", source)
+        self.assertNotRegex(
+            source,
+            r"def workspace_chat\(\):[\s\S]*?_ombre_breath_sync\(\)",
+        )
 
 
 class CleanerBatchTests(unittest.TestCase):

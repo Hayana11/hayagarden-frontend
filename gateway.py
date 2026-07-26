@@ -462,9 +462,9 @@ def drawers_config():
     return jsonify({'ok': True, 'enabled': tool_drawers.enabled()})
 
 
-def _ombre_breath_sync():
+def _ombre_breath_sync(timeout=6.0, wall_timeout=7.0):
     """Compatibility wrapper for automatic Ombre surfacing."""
-    return ombre_adapter.surface_memories(timeout=6.0, wall_timeout=7.0)
+    return ombre_adapter.surface_memories(timeout=timeout, wall_timeout=wall_timeout)
 
 
 def _write_session_memo(user_msg='', assistant_msg=''):
@@ -3728,9 +3728,9 @@ def workspace_chat():
         else:
             system = str(system) + ws_sys
 
-    # 从记忆中 breath（复用统一适配层；这里只做预热，结果仍不注入工作台消息）
+    # 从记忆中 breath（复用统一适配层；工作台沿用旧 4s 预算，结果仍不注入消息）
     try:
-        _ombre_breath_sync()
+        _ombre_breath_sync(timeout=4.0, wall_timeout=5.0)
     except Exception:
         pass
 

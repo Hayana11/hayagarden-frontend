@@ -251,8 +251,8 @@ def mark_resolved():
 # Task 5 · Process new memories & sync to Ombre Brain
 # ─────────────────────────────────────────────────────────────
 def should_pin_synced_memory(importance):
-    """Preserve legacy cleaner sync policy until a separate pin-policy change lands."""
-    return int(importance) >= 8
+    """Cleaner model scores must never grant permanent pin status."""
+    return False
 
 def process_and_sync():
     log('=== Task 5: Process new & sync to Ombre Brain ===')

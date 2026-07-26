@@ -32,17 +32,25 @@ The optional `mcp` Python package is **not** installed from `requirements.txt`.
 Install it only in disposable shadow environments before enabling the HTTP
 backend.
 
-## Legacy parity scope (default `legacy_module`)
+## Legacy scope (default `legacy_module`)
 
-This PR preserves production behaviour for the default backend:
+Default `legacy_module` keeps call interfaces, return shapes, timeouts and jieba-only
+warmup compatible with production. **One approved behaviour change** is included:
 
-- gateway recall / handoff / breath / hold wrappers keep the same timeouts and
-  return shapes;
-- legacy warmup remains **jieba-only** and does not import `server.py` at
-  gateway import time;
-- cleaner sync still pins Ombre holds when `importance >= 8`.
+- nightly cleaner **stops** auto-upgrading `importance >= 8` to permanent `pinned`.
 
-Anything outside that list is either dormant HTTP code or an explicitly
+`importance`, `layer=core`, and `pinned` are decoupled:
+
+- cleaner auto-sync always passes `pinned=False` regardless of importance 1–10;
+- `layer=core` promotion from high importance may remain;
+- explicit `hold_memory(..., pinned=True)` and other controlled paths still pass
+  through to Ombre unchanged.
+
+This PR **does not** bulk-unpin, delete or rewrite existing production buckets.
+Cleaning ~54 historical auto-pinned records is a **separate data-repair task**
+(re backup → read-only report → approval).
+
+Anything outside the list above is either dormant HTTP code or an explicitly
 documented future change.
 
 ## Safety rules
@@ -108,3 +116,16 @@ requires, in order:
 4. A cleaned disposable vault for sidecar comparison.
 5. Read-only shadow evaluation with real Ombre 2.8.10 fixtures.
 6. A separately approved cutover and rollback window.
+
+## P0 security: Ombre `test_tools.py` (out of scope for deploy)
+
+Production forensics flagged `/opt/ombre-brain/test_tools.py` as potentially
+reading production config and deleting real buckets at test teardown.
+
+**Do not run this script on production.** Until isolated:
+
+- add a hard gate that refuses execution when pointed at production bucket paths;
+- tests must use disposable temp directories only.
+
+Track this as a **separate P0 security fix** — not bundled with #134 adapter
+merge/deploy.

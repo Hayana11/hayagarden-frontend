@@ -266,22 +266,6 @@ def warmup_async() -> None:
     threading.Thread(target=worker, daemon=True, name="ombre-warmup").start()
 
 
-def wait_until_ready(timeout: float = 20.0) -> bool:
-    """Start warmup if needed and wait without touching any memory bucket."""
-    if _backend() == "http":
-        deadline = time.monotonic() + max(0.0, float(timeout))
-        while time.monotonic() <= deadline:
-            try:
-                payload = _http_json("/health", timeout=min(2.0, max(0.2, deadline - time.monotonic())))
-                return isinstance(payload, dict) and payload.get("status") == "ok"
-            except Exception:
-                time.sleep(0.1)
-        return False
-    warmup_async()
-    _SERVER_READY.wait(timeout=max(0.0, float(timeout)))
-    return _SERVER_INSTANCE is not None
-
-
 def _metadata_domains(meta: dict) -> list[str]:
     value = meta.get("domain", [])
     if isinstance(value, str):
