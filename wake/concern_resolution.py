@@ -44,13 +44,30 @@ _COMMA_BEFORE_QUESTION_RE = re.compile(
     r'[，,]\s*(?=(?:怎么|如何|要不要|该不该|怎么办|怎么处理|要不要处理))',
 )
 _COMMA_STATE_TRANSITION_RE = re.compile(
-    r'[，,]\s*(?=(?:后来|其实|不过|但|然而|现在|今天|昨天|刚才|已经|确认))',
+    r'[，,]\s*(?=(?:后来|其实|不过|但|然而|刚才|已经|确认))',
 )
+_CONTRAST_SPLIT_RE = re.compile(r'(?:[，,]\s*|\s+)但\s*')
 _TRAILING_QUESTION_SUFFIX_RE = re.compile(
     r'(?:[，,]\s*)?(?:'
     r'怎么(?:办|处理)|要不要(?:去|继续|再|还)?[\u4e00-\u9fff]{0,4}|'
     r'该不该|如何[\u4e00-\u9fff]{0,6}|需要吗|行吗'
     r')[吗？?]*$',
+)
+
+_EVENT_PRIORITY = {'unresolved': 3, 'reopen': 2, 'resolve': 1}
+
+_NEGATIVE_POLARITY_RE = re.compile(
+    r'(?:还没|仍未|还是|仍然|依然|未曾|没有|没|未|不)$',
+)
+
+_NEGATIVE_UNRESOLVED_MARKERS = tuple(
+    re.compile(p)
+    for p in (
+        r'(?:还没|仍未|还是|仍然|依然|没|未|不)(?:有)?[^，,]{0,6}?(?:'
+        r'完成|解决|处理好|处理完|送到|送达|修好|修复|取完|取到|到账|'
+        r'恢复|愈合|好转|好了|结束'
+        r')',
+    )
 )
 
 _RESOLUTION_MARKERS = tuple(
@@ -75,7 +92,8 @@ _REOPEN_MARKERS = tuple(
         r'(?:重新|再次)(?:出现|发生|报错|出问题|问|处理|催|跑|取)',
         r'(?:今天|昨天|刚才|刚刚|现在).{0,12}(?:出问题|报错|失败|恶化|坏了|找不到|延迟|开始|又)',
         r'(?:开始|出现)(?:问题|故障|报错|状况|反复|了|着)',
-        r'(?:仍|还)(?:有|没|未).{0,8}(?:问题|故障|报错|完成|解决)',
+        r'(?:仍|还)(?:有|没|未)[^，,]{0,8}(?:问题|故障|报错|取到|修好|到账|送到)',
+        r'(?:还|仍)在.{0,6}(?:报错|出问题|有问题|故障|失败|恶化)',
         r'(?:又|仍|还)?.{0,4}(?:恶化|红肿|发炎|渗|出错)(?:了|着)?',
     )
 )
@@ -129,7 +147,7 @@ CREATE TABLE IF NOT EXISTS concern_closures (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     summary TEXT NOT NULL,
     topic_tokens TEXT NOT NULL,
-    source_message_id INTEGER UNIQUE,
+    source_message_id INTEGER,
     resolved_at TEXT NOT NULL,
     reopened_at TEXT,
     active INTEGER NOT NULL DEFAULT 1,
@@ -137,6 +155,8 @@ CREATE TABLE IF NOT EXISTS concern_closures (
 );
 CREATE INDEX IF NOT EXISTS idx_concern_closures_active
     ON concern_closures(active, resolved_at);
+CREATE INDEX IF NOT EXISTS idx_concern_closures_source
+    ON concern_closures(source_message_id);
 CREATE TABLE IF NOT EXISTS concern_closure_sync (
     id INTEGER PRIMARY KEY CHECK (id = 1),
     last_processed_message_id INTEGER NOT NULL DEFAULT 0
@@ -144,6 +164,13 @@ CREATE TABLE IF NOT EXISTS concern_closure_sync (
 """
 
 _STOPWORDS = _GENERIC_TOPIC_TOKENS
+
+
+@dataclass(frozen=True)
+class ConcernClauseEvent:
+    event: str
+    topics: frozenset[str] = field(default_factory=frozenset)
+    clause: str = ''
 
 
 @dataclass(frozen=True)
@@ -399,20 +426,51 @@ def _split_factual_question_suffix(clause: str) -> tuple[str, str]:
     return trimmed, ''
 
 
+def _distinctive_clause_identities(clause: str) -> frozenset[str]:
+    tokens = _identity_tokens(identity_topic_tokens(clause))
+    return frozenset(
+        token for token in tokens
+        if token not in {'今天', '昨天', '刚才', '现在', '这件事', '那件事'}
+    )
+
+
+def _comma_split_concern_clauses(part: str) -> list[str]:
+    pieces = [piece.strip() for piece in re.split(r'[，,]\s*', part) if piece.strip()]
+    if len(pieces) < 2:
+        return [part]
+    events = [_classify_factual_clause(piece) for piece in pieces]
+    if not all(events):
+        return [part]
+    identities = [_distinctive_clause_identities(piece) for piece in pieces]
+    if not all(identities):
+        return [part]
+    if len({identity for identity in identities}) != len(identities):
+        return [part]
+    return pieces
+
+
 def _split_segment_clauses(segment: str, *, interrogative: bool) -> list[tuple[str, bool]]:
     clauses: list[tuple[str, bool]] = []
-    parts = _COMMA_BEFORE_QUESTION_RE.split(segment.strip())
-    for idx, part in enumerate(parts):
-        part = part.strip()
-        if not part:
-            continue
-        subparts = _COMMA_STATE_TRANSITION_RE.split(part)
-        for sub_idx, subpart in enumerate(subparts):
-            subpart = subpart.strip()
-            if not subpart:
+    contrast_parts = _CONTRAST_SPLIT_RE.split(segment.strip())
+    for contrast_idx, contrast_part in enumerate(contrast_parts):
+        parts = _COMMA_BEFORE_QUESTION_RE.split(contrast_part.strip())
+        for idx, part in enumerate(parts):
+            part = part.strip()
+            if not part:
                 continue
-            is_last = idx == len(parts) - 1 and sub_idx == len(subparts) - 1
-            clauses.append((subpart, interrogative and is_last))
+            subparts = _COMMA_STATE_TRANSITION_RE.split(part)
+            if len(subparts) == 1:
+                subparts = _comma_split_concern_clauses(part)
+            for sub_idx, subpart in enumerate(subparts):
+                subpart = subpart.strip()
+                if not subpart:
+                    continue
+                is_last = (
+                    contrast_idx == len(contrast_parts) - 1
+                    and idx == len(parts) - 1
+                    and sub_idx == len(subparts) - 1
+                )
+                clauses.append((subpart, interrogative and is_last))
     return clauses
 
 
@@ -436,15 +494,48 @@ def _clause_blocks_resolution(clause: str) -> bool:
     return bool(_RESOLUTION_NEGATION.search(clause) or _RESOLUTION_RHETORICAL.search(clause))
 
 
-def _collect_clause_state_events(clause: str) -> list[tuple[int, str]]:
-    events: list[tuple[int, str]] = []
+def _match_has_negative_polarity(clause: str, match: re.Match[str]) -> bool:
+    window = clause[max(0, match.start() - 8):match.start()]
+    if '，' in window or ',' in window:
+        window = re.split(r'[，,]', window)[-1]
+    return bool(_NEGATIVE_POLARITY_RE.search(window))
+
+
+def _pick_clause_event(events: list[tuple[int, int, str]]) -> str | None:
+    if not events:
+        return None
+    winners: dict[int, tuple[int, str]] = {}
+    for end, priority, event_type in events:
+        current = winners.get(end)
+        if current is None or priority > current[0]:
+            winners[end] = (priority, event_type)
+    last_end = max(winners)
+    return winners[last_end][1]
+
+
+def _collect_clause_state_events(clause: str) -> list[tuple[int, int, str]]:
+    events: list[tuple[int, int, str]] = []
+    for pattern in _NEGATIVE_UNRESOLVED_MARKERS:
+        for match in pattern.finditer(clause):
+            events.append((match.end(), _EVENT_PRIORITY['unresolved'], 'unresolved'))
     for pattern in _REOPEN_MARKERS:
         for match in pattern.finditer(clause):
-            events.append((match.end(), 'reopen'))
+            events.append((match.end(), _EVENT_PRIORITY['reopen'], 'reopen'))
     if not _clause_blocks_resolution(clause):
         for pattern in _RESOLUTION_MARKERS:
             for match in pattern.finditer(clause):
-                events.append((match.end(), 'resolve'))
+                if _match_has_negative_polarity(clause, match):
+                    events.append((
+                        match.end(),
+                        _EVENT_PRIORITY['unresolved'],
+                        'unresolved',
+                    ))
+                else:
+                    events.append((
+                        match.end(),
+                        _EVENT_PRIORITY['resolve'],
+                        'resolve',
+                    ))
     return events
 
 
@@ -481,11 +572,59 @@ def _clause_is_pure_question(clause: str, *, interrogative: bool = False) -> boo
 
 
 def _classify_factual_clause(clause: str) -> str | None:
-    events = _collect_clause_state_events(clause)
-    if not events:
-        return None
-    events.sort(key=lambda item: item[0])
-    return events[-1][1]
+    return _pick_clause_event(_collect_clause_state_events(clause))
+
+
+def _prior_chat_content(chat_messages: Sequence[dict], message_id: int | None) -> str:
+    if message_id is None:
+        return ''
+    index = next(
+        (i for i, msg in enumerate(chat_messages) if int(msg.get('id') or 0) == int(message_id)),
+        -1,
+    )
+    if index > 0:
+        return str(chat_messages[index - 1].get('content') or '')
+    return ''
+
+
+def collect_clause_event_topics(
+    clause: str,
+    chat_messages: Sequence[dict],
+    message_id: int | None = None,
+) -> frozenset[str]:
+    tokens = set(identity_topic_tokens(clause))
+    if _needs_prior_chat_context(clause):
+        prior = _prior_chat_content(chat_messages, message_id)
+        if prior:
+            tokens.update(identity_topic_tokens(prior))
+    return frozenset(tokens)
+
+
+def parse_user_concern_events(
+    text: str,
+    chat_messages: Sequence[dict] | None = None,
+    message_id: int | None = None,
+) -> list[ConcernClauseEvent]:
+    body = (text or '').strip()
+    if not body:
+        return []
+    chat_messages = list(chat_messages or ())
+    parsed: list[ConcernClauseEvent] = []
+    for clause, interrogative in _split_concern_clauses(body):
+        factual, suffix = _split_factual_question_suffix(clause)
+        target = factual if suffix and factual else clause
+        pure_interrogative = interrogative and not suffix
+        if _clause_is_pure_question(target, interrogative=pure_interrogative):
+            continue
+        event_type = _classify_factual_clause(target)
+        if not event_type:
+            continue
+        parsed.append(ConcernClauseEvent(
+            event=event_type,
+            topics=collect_clause_event_topics(target, chat_messages, message_id),
+            clause=target,
+        ))
+    return parsed
 
 
 def classify_user_concern_event(text: str) -> str | None:
@@ -605,10 +744,7 @@ def collect_event_topics(chat_messages: Sequence[dict], message_id: int) -> froz
     if index < 0:
         return frozenset()
     content = str(chat_messages[index].get('content') or '')
-    tokens = set(identity_topic_tokens(content))
-    if _needs_prior_chat_context(content) and index > 0:
-        tokens.update(identity_topic_tokens(str(chat_messages[index - 1].get('content') or '')))
-    return frozenset(tokens)
+    return collect_clause_event_topics(content, chat_messages, message_id)
 
 
 def _collect_resolution_topics(chat_messages: Sequence[dict], message_id: int) -> frozenset[str]:
@@ -673,12 +809,17 @@ def _deactivate_matching_closures(
 
 def _persist_closure(conn: sqlite3.Connection, entry: ResolutionEntry) -> None:
     if entry.message_id is not None:
-        existing = conn.execute(
-            "SELECT id FROM concern_closures WHERE source_message_id=?",
+        existing_rows = conn.execute(
+            "SELECT id, topic_tokens FROM concern_closures WHERE source_message_id=?",
             (int(entry.message_id),),
-        ).fetchone()
-        if existing:
-            return
+        ).fetchall()
+        for row in existing_rows:
+            try:
+                tokens = frozenset(json.loads(row['topic_tokens'] or '[]'))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+            if substantive_topic_overlap(entry.topic_tokens, tokens):
+                return
     conn.execute(
         """
         INSERT INTO concern_closures (
@@ -745,6 +886,33 @@ def _fetch_incremental_chat_messages(
     return [_row_to_message(row) for row in rows]
 
 
+def _apply_concern_events_to_active(
+    active: list[ResolutionEntry],
+    clause_events: Sequence[ConcernClauseEvent],
+    *,
+    content: str,
+    message_id: int,
+    created_at: str,
+) -> list[ResolutionEntry]:
+    for clause_event in clause_events:
+        if clause_event.event == 'resolve':
+            if not clause_event.topics:
+                continue
+            active.append(ResolutionEntry(
+                summary=_resolution_summary(clause_event.clause or content),
+                topic_tokens=clause_event.topics,
+                message_id=message_id,
+                created_at=created_at,
+            ))
+            continue
+        if clause_event.event in {'reopen', 'unresolved'}:
+            active = [
+                entry for entry in active
+                if not substantive_topic_overlap(entry.topic_tokens, clause_event.topics)
+            ]
+    return active
+
+
 def _apply_concern_event(
     conn: sqlite3.Connection,
     msg: dict,
@@ -753,21 +921,23 @@ def _apply_concern_event(
     content = str(msg.get('content') or '')
     created_at = str(msg.get('created_at') or '')
     message_id = int(msg.get('id') or 0)
-    if is_user_reopen(content):
-        _deactivate_matching_closures(
-            conn,
-            collect_event_topics(chat_messages, message_id),
-            reopened_at=created_at,
-        )
-        return
-    if not is_user_resolution(content):
-        return
-    _persist_closure(conn, ResolutionEntry(
-        summary=_resolution_summary(content),
-        topic_tokens=_collect_resolution_topics(chat_messages, message_id),
-        message_id=message_id,
-        created_at=created_at,
-    ))
+    for clause_event in parse_user_concern_events(content, chat_messages, message_id):
+        if clause_event.event == 'resolve':
+            if not clause_event.topics:
+                continue
+            _persist_closure(conn, ResolutionEntry(
+                summary=_resolution_summary(clause_event.clause or content),
+                topic_tokens=clause_event.topics,
+                message_id=message_id,
+                created_at=created_at,
+            ))
+            continue
+        if clause_event.event in {'reopen', 'unresolved'}:
+            _deactivate_matching_closures(
+                conn,
+                clause_event.topics,
+                reopened_at=created_at,
+            )
 
 
 def sync_concern_closures(
@@ -819,21 +989,14 @@ def build_resolution_state(
     for msg in user_messages:
         content = str(msg.get('content') or '')
         message_id = int(msg.get('id') or 0)
-        if is_user_reopen(content):
-            reopen_tokens = collect_event_topics(chat_messages, message_id)
-            active = [
-                entry for entry in active
-                if not substantive_topic_overlap(entry.topic_tokens, reopen_tokens)
-            ]
-            continue
-        if not is_user_resolution(content):
-            continue
-        active.append(ResolutionEntry(
-            summary=_resolution_summary(content),
-            topic_tokens=_collect_resolution_topics(chat_messages, message_id),
+        clause_events = parse_user_concern_events(content, chat_messages, message_id)
+        active = _apply_concern_events_to_active(
+            active,
+            clause_events,
+            content=content,
             message_id=message_id,
             created_at=str(msg.get('created_at') or ''),
-        ))
+        )
     return ResolutionState(active=active)
 
 

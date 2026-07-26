@@ -409,6 +409,102 @@ class ConcernResolutionLogicTests(unittest.TestCase):
         state = cr.build_resolution_state(user_messages, chat_messages)
         self.assertEqual(len(state.active), 1)
 
+    def test_negative_unresolved_is_not_resolution(self):
+        for text in (
+            '尾款还没处理好。',
+            '快递还没送到。',
+            '订单还没完成。',
+            '问题还没解决。',
+        ):
+            self.assertFalse(cr.is_user_resolution(text), msg=text)
+            events = cr.parse_user_concern_events(text)
+            self.assertEqual(len(events), 1, msg=text)
+            self.assertEqual(events[0].event, 'unresolved', msg=text)
+
+    def test_negative_unresolved_without_prior_closure_creates_none(self):
+        state = cr.build_resolution_state([
+            {'id': 1, 'content': '尾款还没处理好。', 'created_at': '2026-07-21 12:00:00'},
+        ])
+        self.assertEqual(len(state.active), 0)
+
+    def test_negative_unresolved_reopens_existing_closure(self):
+        messages = [
+            {'id': 1, 'content': '尾款已经处理好了，不用再问了。', 'created_at': '2026-07-21 10:00:00'},
+            {'id': 2, 'content': '尾款还没处理好。', 'created_at': '2026-07-22 09:00:00'},
+        ]
+        state = cr.build_resolution_state(messages)
+        self.assertEqual(len(state.active), 0)
+
+    def test_multi_event_express_resolved_tail_unresolved(self):
+        messages = [
+            {'id': 1, 'content': '快递已经取完了，但尾款还没处理好。', 'created_at': '2026-07-21 12:00:00'},
+        ]
+        state = cr.build_resolution_state(messages)
+        self.assertEqual(len(state.active), 1)
+        self.assertTrue(any('快递' in token for token in state.active[0].topic_tokens))
+        self.assertFalse(any('尾款' in token for token in state.active[0].topic_tokens))
+        self.assertTrue(cr.is_superseded_historical_concern(
+            '还在想快递有没有取。', state, recorded_at='2026-07-20 18:00:00',
+        ))
+        self.assertFalse(cr.is_superseded_historical_concern(
+            '还在想尾款有没有付。', state, recorded_at='2026-07-20 18:00:00',
+        ))
+
+    def test_multi_event_frontend_vs_frontend_gw(self):
+        messages = [
+            {'id': 1, 'content': 'frontend 已经修好，但 frontend-gw 还在报错。', 'created_at': '2026-07-21 12:00:00'},
+        ]
+        state = cr.build_resolution_state(messages)
+        self.assertEqual(len(state.active), 1)
+        self.assertIn('frontend', state.active[0].topic_tokens)
+        self.assertFalse(cr.is_superseded_historical_concern(
+            '还在想 frontend-gw 故障要不要继续排查。', state, recorded_at='2026-07-20 18:00:00',
+        ))
+        self.assertTrue(cr.is_superseded_historical_concern(
+            '还在想 frontend 故障要不要继续排查。', state, recorded_at='2026-07-20 18:00:00',
+        ))
+
+    def test_multi_event_order_a_unresolved_b_resolved(self):
+        messages = [
+            {'id': 1, 'content': '订单a还没完成，订单b已经完成。', 'created_at': '2026-07-21 12:00:00'},
+        ]
+        state = cr.build_resolution_state(messages)
+        self.assertEqual(len(state.active), 1)
+        self.assertIn('订单b', state.active[0].topic_tokens)
+        self.assertFalse(cr.is_superseded_historical_concern(
+            '还在想订单a有没有完成。', state, recorded_at='2026-07-20 18:00:00',
+        ))
+        self.assertTrue(cr.is_superseded_historical_concern(
+            '还在想订单b有没有完成。', state, recorded_at='2026-07-20 18:00:00',
+        ))
+
+    def test_multi_event_order_a_resolved_b_unresolved(self):
+        messages = [
+            {'id': 1, 'content': '订单a已经完成，订单b还没完成。', 'created_at': '2026-07-21 12:00:00'},
+        ]
+        state = cr.build_resolution_state(messages)
+        self.assertEqual(len(state.active), 1)
+        self.assertIn('订单a', state.active[0].topic_tokens)
+        self.assertFalse(cr.is_superseded_historical_concern(
+            '还在想订单b有没有完成。', state, recorded_at='2026-07-20 18:00:00',
+        ))
+
+    def test_multi_event_reopen_only_matching_closure(self):
+        messages = [
+            {'id': 1, 'content': '订单a已经完成，不用再问了。', 'created_at': '2026-07-20 10:00:00'},
+            {'id': 2, 'content': '订单b已经完成，不用再问了。', 'created_at': '2026-07-20 11:00:00'},
+            {'id': 3, 'content': '订单a仍正常，但订单b又坏了。', 'created_at': '2026-07-22 09:00:00'},
+        ]
+        state = cr.build_resolution_state(messages)
+        self.assertEqual(len(state.active), 1)
+        self.assertIn('订单a', state.active[0].topic_tokens)
+        self.assertFalse(cr.is_superseded_historical_concern(
+            '还在想订单b有没有完成。', state, recorded_at='2026-07-20 18:00:00',
+        ))
+        self.assertTrue(cr.is_superseded_historical_concern(
+            '还在想订单a有没有完成。', state, recorded_at='2026-07-20 09:00:00',
+        ))
+
 
 class WakeConcernResolutionIntegrationTests(unittest.TestCase):
     def setUp(self):
@@ -1142,6 +1238,104 @@ class WakeConcernResolutionIntegrationTests(unittest.TestCase):
         text = self._build_wake_text()
         self.assertIn('用户已明确结案', text)
         self.assertNotIn('你醒着的时候', text)
+
+    def test_db_multi_event_express_only_closure(self):
+        self._insert_wake('explore', '还在想快递有没有取。', hours_ago=30)
+        self._insert_wake('explore', '还在想尾款有没有付。', hours_ago=28)
+        self._insert_chat_at(
+            message_id=1, author='hayana',
+            content='快递已经取完了，但尾款还没处理好。',
+            hours_ago=1,
+        )
+        cr.load_resolution_state_from_db(self.get_db)
+
+        conn = self.get_db()
+        rows = conn.execute(
+            "SELECT topic_tokens, active FROM concern_closures"
+        ).fetchall()
+        conn.close()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0][1], 1)
+        self.assertIn('快递', rows[0][0])
+        self.assertNotIn('尾款', rows[0][0])
+
+        text = self._build_wake_text()
+        self.assertNotIn('快递有没有取', text)
+        self.assertIn('尾款', text)
+
+    def test_db_multi_event_frontend_gw_wake_survives(self):
+        self._insert_wake('explore', '还在想 frontend 故障要不要继续排查。', hours_ago=30)
+        self._insert_wake('explore', '还在想 frontend-gw 故障要不要继续排查。', hours_ago=28)
+        self._insert_chat_at(
+            message_id=1, author='hayana',
+            content='frontend 已经修好，但 frontend-gw 还在报错。',
+            hours_ago=1,
+        )
+        cr.load_resolution_state_from_db(self.get_db)
+
+        text = self._build_wake_text()
+        self.assertNotIn('frontend 故障', text)
+        self.assertIn('frontend-gw', text)
+
+    def test_db_negative_unresolved_reopens_without_creating(self):
+        self._insert_wake('explore', '还在想尾款有没有付。', hours_ago=30)
+        self._insert_chat_at(
+            message_id=1, author='hayana',
+            content='尾款已经处理好了，不用再问了。',
+            hours_ago=20,
+        )
+        cr.load_resolution_state_from_db(self.get_db)
+
+        self._insert_chat_at(
+            message_id=2, author='hayana',
+            content='尾款还没处理好。',
+            hours_ago=1,
+        )
+        cr.load_resolution_state_from_db(self.get_db)
+
+        conn = self.get_db()
+        active = conn.execute(
+            "SELECT COUNT(*) FROM concern_closures WHERE active=1"
+        ).fetchone()[0]
+        conn.close()
+        self.assertEqual(active, 0)
+
+        text = self._build_wake_text()
+        self.assertIn('尾款', text)
+
+    def test_db_multi_event_reopen_only_order_b(self):
+        self._insert_wake('explore', '还在想订单a有没有完成。', hours_ago=40)
+        self._insert_wake('explore', '还在想订单b有没有完成。', hours_ago=38)
+        self._insert_chat_at(
+            message_id=1, author='hayana',
+            content='订单a已经完成，不用再问了。',
+            hours_ago=30,
+        )
+        self._insert_chat_at(
+            message_id=2, author='hayana',
+            content='订单b已经完成，不用再问了。',
+            hours_ago=20,
+        )
+        cr.load_resolution_state_from_db(self.get_db)
+        self._insert_chat_at(
+            message_id=3, author='hayana',
+            content='订单a仍正常，但订单b又坏了。',
+            hours_ago=1,
+        )
+        cr.load_resolution_state_from_db(self.get_db)
+
+        conn = self.get_db()
+        active_rows = conn.execute(
+            "SELECT topic_tokens FROM concern_closures WHERE active=1"
+        ).fetchall()
+        conn.close()
+        self.assertEqual(len(active_rows), 1)
+        self.assertIn('订单a', active_rows[0][0])
+
+        text = self._build_wake_text()
+        self.assertIn('用户已明确结案', text)
+        self.assertIn('还在想订单b', text)
+        self.assertNotIn('还在想订单a', text)
 
 
 if __name__ == '__main__':
