@@ -5,7 +5,7 @@ import unittest
 from types import SimpleNamespace
 from unittest import mock
 
-from chat.context_budget import normalize_state_dict
+from chat.context_budget import merge_cumulative_state_send, normalize_state_dict
 from chat.context_lean_state import (
     STATE_SCHEMA_VERSION,
     assemble_cc_state_context,
@@ -140,13 +140,124 @@ class StructuredFormatTests(unittest.TestCase):
         self.assertIn('lights', result.send_payload)
         self.assertEqual(result.send_payload['lights'], '')
         self.assertIn('lights: cleared', result.state_text)
+        expected_after = merge_cumulative_state_send(RAW_V1, {'lights': ''})
         self.assertEqual(
-            compute_state_version(result.send_payload),
             result.observation['state_version'],
+            compute_state_version(expected_after),
         )
 
 
-class FallbackTests(unittest.TestCase):
+class StateVersionTests(unittest.TestCase):
+    def test_hot_delta_version_hashes_cumulative_state_after_merge(self):
+        resident = _resident_stub(
+            last_successful_lean_state=True,
+            last_state_snapshot=RAW_V1,
+            last_state_send_snapshot=RAW_V1,
+            last_state_anchor_generation=1,
+            generation=1,
+            last_state_schema_version=STATE_SCHEMA_VERSION,
+        )
+        changed = dict(RAW_V1)
+        changed['lights'] = '（灯·主灯 开）'
+        result = assemble_cc_state_context(
+            raw_state=changed,
+            is_cold=False,
+            user_text='无关',
+            resident=resident,
+            lean_on=True,
+        )
+        expected = merge_cumulative_state_send(RAW_V1, result.send_payload)
+        self.assertEqual(result.observation['state_version'], compute_state_version(expected))
+
+    def test_same_delta_on_different_anchors_has_different_state_version(self):
+        anchor_a = dict(RAW_V1)
+        anchor_b = dict(RAW_V1)
+        anchor_b['emotion'] = 'valence=0.90 arousal=0.10 mood=兴奋 pa=0.80 na=0.10 longing=0.10 desire_p=0.50 desire_i=0.40 desire_c=0.60'
+        lights_delta = {'lights': '（灯·主灯 开）'}
+        changed_a = dict(anchor_a)
+        changed_a['lights'] = lights_delta['lights']
+        changed_b = dict(anchor_b)
+        changed_b['lights'] = lights_delta['lights']
+
+        res_a = assemble_cc_state_context(
+            raw_state=changed_a,
+            is_cold=False,
+            user_text='无关',
+            resident=_resident_stub(
+                last_successful_lean_state=True,
+                last_state_snapshot=anchor_a,
+                last_state_send_snapshot=anchor_a,
+                last_state_anchor_generation=1,
+                generation=1,
+                last_state_schema_version=STATE_SCHEMA_VERSION,
+            ),
+            lean_on=True,
+        )
+        res_b = assemble_cc_state_context(
+            raw_state=changed_b,
+            is_cold=False,
+            user_text='无关',
+            resident=_resident_stub(
+                last_successful_lean_state=True,
+                last_state_snapshot=anchor_b,
+                last_state_send_snapshot=anchor_b,
+                last_state_anchor_generation=1,
+                generation=1,
+                last_state_schema_version=STATE_SCHEMA_VERSION,
+            ),
+            lean_on=True,
+        )
+        self.assertNotEqual(
+            res_a.observation['state_version'],
+            res_b.observation['state_version'],
+        )
+
+    def test_omitted_turn_preserves_cumulative_state_version(self):
+        resident = _resident_stub(
+            last_successful_lean_state=True,
+            last_state_snapshot=RAW_V1,
+            last_state_send_snapshot=RAW_V1,
+            last_state_anchor_generation=1,
+            last_state_schema_version=STATE_SCHEMA_VERSION,
+        )
+        expected_version = compute_state_version(RAW_V1)
+        result = assemble_cc_state_context(
+            raw_state=RAW_V1,
+            is_cold=False,
+            user_text='继续',
+            resident=resident,
+            lean_on=True,
+        )
+        self.assertEqual(result.state_context_mode, 'omitted')
+        self.assertEqual(result.observation['state_version'], expected_version)
+
+    def test_tombstone_version_hashes_state_after_field_removal(self):
+        resident = _resident_stub(
+            last_successful_lean_state=True,
+            last_state_snapshot=RAW_V1,
+            last_state_send_snapshot=RAW_V1,
+            last_state_anchor_generation=1,
+            generation=1,
+            last_state_schema_version=STATE_SCHEMA_VERSION,
+        )
+        cleared = dict(RAW_V1)
+        cleared['lights'] = ''
+        result = assemble_cc_state_context(
+            raw_state=cleared,
+            is_cold=False,
+            user_text='嗯',
+            resident=resident,
+            lean_on=True,
+        )
+        expected_after = merge_cumulative_state_send(RAW_V1, {'lights': ''})
+        self.assertEqual(
+            result.observation['state_version'],
+            compute_state_version(expected_after),
+        )
+        self.assertNotIn('lights', expected_after)
+
+
+class ReanchorDecisionTests(unittest.TestCase):
     def test_cold_start(self):
         reason = evaluate_reanchor_reason(
             lean_on=True,
@@ -294,6 +405,40 @@ class FallbackTests(unittest.TestCase):
         self.assertEqual(result.state_mode, 'snapshot')
         self.assertFalse(result.commit_meta_extras.get('lean_state_active'))
         self.assertTrue(result.commit_meta_extras.get('state_lean_fallback'))
+
+
+class GatewayFallbackTests(unittest.TestCase):
+    def test_gateway_fail_safe_reloads_legacy_raw(self):
+        from chat.context_lean_state import assemble_cc_state_for_resident_turn
+        from chat.system_builder import format_state_snapshot
+
+        lean_raw = dict(RAW_V1)
+        legacy_raw = dict(LEGACY_RAW)
+        resident = _resident_stub()
+        build_calls = []
+
+        def fake_build_cc_state(*, lean=False):
+            build_calls.append(lean)
+            return lean_raw if lean else legacy_raw
+
+        with mock.patch('chat.context_lean.lean_state_enabled', return_value=True):
+            with mock.patch('chat.system_builder.build_cc_state', side_effect=fake_build_cc_state):
+                with mock.patch(
+                    'chat.context_lean_state.assemble_cc_state_context',
+                    side_effect=ValueError('boom'),
+                ):
+                    raw_state, state_ctx = assemble_cc_state_for_resident_turn(
+                        is_cold=False,
+                        user_text='你好',
+                        resident=resident,
+                    )
+
+        self.assertEqual(build_calls, [True, False])
+        self.assertIs(raw_state, legacy_raw)
+        self.assertEqual(state_ctx.state_text, format_state_snapshot(legacy_raw))
+        self.assertEqual(state_ctx.state_context_mode, 'fallback')
+        self.assertFalse(state_ctx.commit_meta_extras.get('lean_state_active'))
+        self.assertTrue(state_ctx.commit_meta_extras.get('state_lean_fallback'))
 
 
 class ResidentCommitTests(unittest.TestCase):

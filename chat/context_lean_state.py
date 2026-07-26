@@ -13,6 +13,7 @@ from typing import Any, Mapping, Optional
 
 from chat.context_budget import (
     build_state_send_payload,
+    merge_cumulative_state_send,
     normalize_state_dict,
 )
 from chat.system_builder import format_state_snapshot
@@ -335,17 +336,24 @@ def assemble_cc_state_context(
         user_text=user_text or '',
         is_cold=send_is_cold,
     )
+    if send_is_cold:
+        effective_state_after = normalize_state_dict(effective_send_payload)
+    else:
+        effective_state_after = merge_cumulative_state_send(
+            cumulative_before,
+            effective_send_payload,
+        )
     prev_version = (
         getattr(resident, 'last_state_anchor_version', None)
         or compute_state_version(cumulative_before)
     )
-    send_version = compute_state_version(effective_send_payload)
+    state_version = compute_state_version(effective_state_after)
     state_text, state_mode, context_mode = format_lean_state_for_send(
         cumulative_before,
         effective_send_payload,
         is_cold=send_is_cold,
         prev_version=prev_version,
-        curr_version=send_version,
+        curr_version=state_version,
     )
     changed_count = len(effective_send_payload)
 
@@ -353,8 +361,8 @@ def assemble_cc_state_context(
         'lean_state_active': True,
         'state_send_snapshot': dict(effective_send_payload),
         'state_schema_version': STATE_SCHEMA_VERSION,
-        'state_version': send_version,
-        'state_anchor_version': prev_version if not send_is_cold else send_version,
+        'state_version': state_version,
+        'state_anchor_version': prev_version if not send_is_cold else state_version,
         'state_context_chars': len(state_text or ''),
     }
     if needs_reanchor:
@@ -365,8 +373,8 @@ def assemble_cc_state_context(
         enabled=True,
         state_context_mode=context_mode,
         state_text=state_text,
-        state_version=send_version,
-        anchor_version=prev_version if not send_is_cold else send_version,
+        state_version=state_version,
+        anchor_version=prev_version if not send_is_cold else state_version,
         changed_field_count=changed_count,
         reanchor_reason=reanchor_reason if needs_reanchor else None,
         fallback_reason=None,
@@ -383,3 +391,34 @@ def assemble_cc_state_context(
         used_lean=True,
         reanchor_reason=reanchor_reason if needs_reanchor else None,
     )
+
+
+def assemble_cc_state_for_resident_turn(
+    *,
+    is_cold: bool,
+    user_text: str,
+    resident,
+):
+    """Build CC state context with lean fail-safe to legacy full snapshot."""
+    from chat import context_lean as _context_lean
+    from chat.system_builder import build_cc_state
+
+    lean_state_on = _context_lean.lean_state_enabled()
+    raw_state = build_cc_state(lean=lean_state_on)
+    try:
+        state_ctx = assemble_cc_state_context(
+            raw_state=raw_state,
+            is_cold=is_cold,
+            user_text=user_text or '',
+            resident=resident,
+            lean_on=lean_state_on,
+        )
+    except Exception as exc:
+        legacy_raw_state = build_cc_state(lean=False)
+        raw_state = legacy_raw_state
+        state_ctx = assemble_legacy_full_fallback(
+            legacy_raw_state=legacy_raw_state,
+            fallback_reason=type(exc).__name__,
+            resident=resident,
+        )
+    return raw_state, state_ctx

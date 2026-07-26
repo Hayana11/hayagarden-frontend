@@ -3177,29 +3177,12 @@ def _cc_resident_stream_gen(messages, *, user_turn=True, history_stats=None, is_
         rel_sources = dict(relationship.sources or {})
 
     # 2) 每轮构建 state / one-shot；3) 仅冷启动构建 cold_once
-    from chat.context_lean import lean_state_enabled
-    from chat.context_lean_state import (
-        assemble_cc_state_context,
-        assemble_legacy_full_fallback,
+    from chat.context_lean_state import assemble_cc_state_for_resident_turn
+    raw_state, state_ctx = assemble_cc_state_for_resident_turn(
+        is_cold=is_cold,
+        user_text=last_text or '',
+        resident=_CC_RESIDENT,
     )
-    lean_state_on = lean_state_enabled()
-    raw_state = build_cc_state(lean=lean_state_on)
-    try:
-        state_ctx = assemble_cc_state_context(
-            raw_state=raw_state,
-            is_cold=is_cold,
-            user_text=last_text or '',
-            resident=_CC_RESIDENT,
-            lean_on=lean_state_on,
-        )
-    except Exception as exc:
-        legacy_raw_state = build_cc_state(lean=False)
-        raw_state = legacy_raw_state
-        state_ctx = assemble_legacy_full_fallback(
-            legacy_raw_state=legacy_raw_state,
-            fallback_reason=type(exc).__name__,
-            resident=_CC_RESIDENT,
-        )
     state_text = state_ctx.state_text
     state_mode = state_ctx.state_mode
     send_payload = state_ctx.send_payload
