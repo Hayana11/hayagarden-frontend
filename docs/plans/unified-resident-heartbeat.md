@@ -3,8 +3,9 @@
 > 同一只费佳、固定 system、固定工具面、三类轮次；普通 Wake 降为主 resident 的一次短心跳，只有需要行动时才升级，用户聊天永远优先。
 
 - **计划分支**：`plan/unified-heartbeat-tracker`
-- **当前状态**：`MEMORY_HOTFIX_IN_PROGRESS`（#134 REQUEST CHANGES 已修复，待 re-review）
-- **最后更新**：2026-07-26
+- **当前状态**：`MEMORY_HOTFIX_IN_PROGRESS`（#134 Ready 终审待 merge）
+- **最后更新**：2026-07-26（tracker 续写：Context Lean / UH-A0 / Master roadmap）
+- **tracker head**：`f0bf25d` → 本提交后更新
 - **当前 identity**：`identity_id = "fyodor-default"` · `provider_id = "claude_code"` · `conversation_id = "default"`
 - **首个 Provider Adapter**：Claude Unified Resident Adapter
 
@@ -105,12 +106,60 @@
     - [ ] merge
     - [ ] legacy_module 默认配置部署
     - [ ] 生产 smoke test
+- [ ] **P-CONTEXT-LEAN：上下文最小化与旧广播式注入退役**
+  - 状态：未开始；**#138 四个开关全部保持 0**
+  - 前置：**Memory Hotfix 完成并完成生产 smoke test**
+  - 目标：削减常驻广播与重复注入，**不是**关闭全部上下文
+  - 必须保留：
+    ```text
+    persona
+    当前对话历史
+    最新用户消息
+    真正相关的少量 recall
+    尚未消费的 one-shot
+    必要时间信息
+    ```
+  - 需要逐步停止常驻广播：
+    ```text
+    旧 emotion / drive / longing 自然语言形式指令
+    与话题无关的灯、Pocket、账本、留言板和近期活动
+    重复 handoff / diary / weekly summary / memo
+    无关提醒
+    已被结构化路径替代的旧状态包
+    ```
+  - **不得**把系统退化为「persona + 当前一句话」
+  - 子阶段：
+    - [ ] State delta / re-anchor
+    - [ ] Tool-history budget
+    - [ ] File-content dedup
+    - [ ] History token budget / mode-keyed rolling summary
+    - [ ] 用户可见表达与记忆连续性验收
+    - [ ] 删除已被替代的广播式旧注入
 
 ### Unified Heartbeat
 
 - [x] **UH-0：架构方案封版**
   - 完成日期：2026-07-22
   - 证据：本文件
+- [ ] **UH-A0：CC Tool Parity & Capability Proxy**
+  - 状态：未开始；**不得提前施工**
+  - 说明：§9 固定 MCP proxy 与 capability lease 是**权限骨架**；UH-A0 补充的是 **Relay 业务工具到 CC 的实际入口**
+  - 迁移范围（登记，非本期实施）：
+    ```text
+    联网搜索       → 只读 CC / MCP bridge
+    GitHub 查询    → 默认只读；写操作必须明确授权
+    Playwright     → 受控浏览器代理
+    位置 / 手机状态 → 只读 home capability
+    截图 / 相册    → 有隐私和体积上限的只读媒体 bridge
+    文件修改 / 命令 → 不开放裸 Bash/Write/Edit，继续走 workspace/code agent
+    ```
+  - 固定工具 schema **不得按轮次变化**；权限继续由短租约控制：
+    ```text
+    CHAT       → 正常批准能力集
+    HEARTBEAT  → 空集
+    ESCALATION → 当前 action 的最小能力集
+    ```
+  - 硬规则：**静态 system 不得宣传 active CC tool contract 中不存在的能力**
 - [ ] **UH-A：新旧 normal 路径并存，feature flag 默认关闭**
 - [ ] **UH-A-DEPLOY：只启用 normal Unified Heartbeat**
 - [ ] **UH-24H：24 小时安全检查**
@@ -118,18 +167,48 @@
 - [ ] **UH-B：删除 normal 旧路由**
 - [ ] **UH-MODES：分别迁移 morning / ritual / nightwatch**
 - [ ] **UH-CLEANUP：最后删除独立 CC Wake resident 与通用旧桥**
-- [ ] **ISV3-1B：Phase 1B 将 v0 adapter 替换为 v1 Wake View**
+- [ ] **ISV3-1B：旧 emotion / drive / desire 三套权威 → reviewed Internal State View**
+  - **不得与 UH-A 同车切换权威**
+- [ ] **Relationship Context Recovery**（独立用户可见问题）
+  - `RELATIONSHIP_CONTEXT_ENABLED` 当前继续为 **0**
+  - 门禁（全部满足前不得自动关闭）：
+    ```text
+    状态所有权已统一
+    ＋ 上下文注入已受控
+    ＋ persona-only / context-on 对照
+    ＋ 用户可见自然聊天验收
+    ```
+  - 不得被 Internal State、Context Lean 或绿灯测试自动关闭
+- [ ] **Fyodor Chimera / Single Identity Multi-Brain**（远期登记）
+  - 目标：Claude / Codex / future providers 共享一个 `identity_id`；共享权威时钟、记忆归属、工具合同与 handoff
+  - **第一期 Unified Heartbeat 仍只施工 Claude adapter**；不得顺手实现 Codex adapter
 
-### 当前下一步
+### Master roadmap（登记真源，非施工授权）
 
 ```text
-P-SHADOW        [x] graduated 2026-07-26 BJT（观察窗口 >72h）
-→ P-CONTEXT-OBS [x] #138 → main@995f8ce
-→ Memory Hotfix [-] #134 待 re-review
-→ UH-A          [ ] 尚未开始
+P-SHADOW        [x]
+→ P-CONTEXT-OBS [x]
+→ Memory Hotfix [-]          ← 当前唯一施工项
+→ P-CONTEXT-LEAN [ ]
+→ UH-A0 Tool Parity [ ]
+→ UH-A / UH-B [ ]
+→ ISV3-1B [ ]
+→ Relationship Context Recovery [ ]
+→ Fyodor Chimera / Single Identity Multi-Brain [ ]
 ```
 
-> morning cron 继续关闭。P-SHADOW 已于 2026-07-26 毕业。UH-A 不得提前标记或施工。
+### 当前下一步（不变）
+
+```text
+Memory Hotfix #134：
+Ready 终审
+→ merge
+→ legacy_module 部署
+→ production smoke
+→ tracker 更新
+```
+
+> morning cron 继续关闭。P-SHADOW 已于 2026-07-26 毕业。**Context Lean、UH-A0、UH-A、ISV3-1B 等均不得提前施工。**
 
 ---
 
@@ -210,9 +289,72 @@ user_events_preflight_ok=true
 - 单元与回归测试不调用真实模型；
 - 不顺手实现完整 Fyodor Chimera / Single Identity Multi-Brain、Liminal 或 Codex adapter。
 
+### 登记 ≠ 授权施工
+
+总进度与 Master roadmap 中登记的后续项（Context Lean、UH-A0、ISV3-1B、Relationship Context Recovery、Chimera、#131 等）**仅用于防止换窗口遗忘**。**当前唯一授权施工项仍为 Memory Hotfix / PR #134。** 未在本文件将对应项标为 `[-]` 且写明前置已满足前，禁止开工。
+
+---
+
+## 3a. Parked plans（挂回索引，未授权施工）
+
+### PR #131 Backend Decoupling & Cleanup
+
+```text
+PR:     #131 Backend Decoupling & Cleanup parked plan
+branch: plan/backend-decoupling-cleanup
+file:   docs/plans/backend-decoupling-cleanup.md
+original commit: efb780d3
+state:  PARKED / 未授权施工
+```
+
+保留阶段 C0～C8：
+
+```text
+C0 只读普查
+C1 护栏与无争议删除
+C2 app.py 路由领域化
+C3 Store / Service 分层
+C4 Chat Turn 统一收尾
+C5 Gateway / Provider 边界
+C6 旧 Wake 清场
+C7 吞错与 import 副作用治理
+C8 删除旧路与生产验收
+```
+
+解锁条件（全部满足前保持 PARKED）：
+
+```text
+Unified normal 稳定
+＋ UH-B 已删除旧 normal 路径
+＋ 生产无未解释红灯
+```
+
+解锁后**第一步只能是 C0 只读普查**；禁止以「顺手整理」为由提前实施 C1～C8。
+
+---
+
+## 3b. 缓存命中归属（非独立工程）
+
+```text
+缓存命中不是独立工程。
+```
+
+它是以下工作的**横向验收指标**：
+
+```text
+P-0 / observation
+＋ Context Lean
+＋ 固定 system / tool surface
+＋ Unified Heartbeat keepwarm lease
+```
+
+**不得**另建重复的 Cache Optimization 项目。
+
 ---
 
 ## 4. Fyodor Chimera / Single Identity Multi-Brain
+
+> **登记状态**：见 §1 Master roadmap；**远期目标，非当前施工项。** 第一期 Unified Heartbeat 只施工 Claude Unified Resident Adapter。
 
 Unified Heartbeat 分成两层；名字属于费奥多尔，底层字段用干净的 `identity_id` / `provider_id` / `conversation_id`（不写 `fyodor_id`）：
 
@@ -264,6 +406,14 @@ conversation_id = "default"
 - generation、lock 与 capability lease。
 
 Claude Code 若未来不可用，只替换 Provider Heartbeat Adapter，不重写 Fyodor 心跳权威层。
+
+远期 Chimera 目标（登记，非本期）：
+
+```text
+Claude / Codex / future providers
+→ 共享 identity_id
+→ 共享权威时钟、记忆归属、工具合同与 handoff
+```
 
 ---
 
@@ -771,6 +921,17 @@ PR #126 修门禁与去重
 - 后续发现 emotion / drive / desire 三套状态权重叠，因此进入 Internal State v3 与 Unified Resident Heartbeat 工程；
 - 基础设施、观测和状态统一进度 ≠ 用户可见的“说话问题已经修复”；
 - 该用户问题仍为 open，不得被绿灯测试自动关闭。
+
+### 2026-07-26（续·tracker 总路线登记）
+
+- [x] 已登记 **P-CONTEXT-LEAN** 为独立待办（#138 四开关保持 0；前置 Memory Hotfix + smoke）
+- [x] 已登记 **UH-A0 CC Tool Parity & Capability Proxy**（Relay 业务工具 → CC 入口；静态 system 不得虚假宣传能力）
+- [x] 已挂回 **#131 Parked plan**（`plan/backend-decoupling-cleanup` · C0–C8 · PARKED）
+- [x] 已登记 **Relationship Context Recovery** 与 **Single Identity Multi-Brain** 后续门禁
+- [x] **缓存命中**定义为 P-0 / Context Lean / 固定 tool surface / keepwarm lease 的横向验收指标，不另起重复工程
+- [x] **Master roadmap** 写入 §1；登记 ≠ 授权施工
+- [-] **当前唯一施工项不变**：Memory Hotfix #134（Ready 终审 → merge → deploy → smoke → tracker 更新）
+- [!] 用户可见说话问题仍为 **open**
 
 ---
 
