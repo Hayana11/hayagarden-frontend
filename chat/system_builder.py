@@ -154,6 +154,15 @@ def build_system(
         shared_context = build_shared_context()
     bp1_text = shared_context.persona if shared_context else read_persona()
 
+    # User-stated concern resolutions (read-only scan; fail-open).
+    _concern_resolution = None
+    _applied_resolutions = []
+    try:
+        from wake.concern_resolution import load_resolution_state_from_db
+        _concern_resolution = load_resolution_state_from_db(get_db)
+    except Exception:
+        _concern_resolution = None
+
     # ── BP2 · 相对稳定记忆（几小时~一天变一次，缓存断点2）───────
     bp2_parts = []
     conn = get_db()
@@ -165,7 +174,7 @@ def build_system(
         "SELECT content FROM posts WHERE layer='long-term' AND resolved=0 ORDER BY id DESC LIMIT 3"
     ).fetchall()
     diaries = conn.execute(
-        "SELECT content FROM posts WHERE type='DIARY' AND resolved=0 ORDER BY id DESC LIMIT 2"
+        "SELECT content, created_at FROM posts WHERE type='DIARY' AND resolved=0 ORDER BY id DESC LIMIT 2"
     ).fetchall()
     conn.close()
     if facts:
@@ -180,10 +189,18 @@ def build_system(
             c = m['content']
             bp2_parts.append('- ' + (c[:120] + '…' if len(c) > 120 else c))
     if diaries:
-        bp2_parts.append('\n## 最近的日记')
-        for d in reversed(diaries):
-            c = d['content']
-            bp2_parts.append(c[:400] + '…' if len(c) > 400 else c)
+        try:
+            from wake.concern_resolution import filter_diary_rows
+            _diary_result = filter_diary_rows(diaries, _concern_resolution)
+            _applied_resolutions.extend(_diary_result.applied_resolutions)
+            diaries = _diary_result.kept
+        except Exception:
+            pass
+        if diaries:
+            bp2_parts.append('\n## 最近的日记')
+            for d in reversed(diaries):
+                c = d['content']
+                bp2_parts.append(c[:400] + '…' if len(c) > 400 else c)
 
     # User Profile（前端可编辑：姓名 / 偏好 / 长期记忆）
     try:
@@ -232,12 +249,19 @@ def build_system(
 
     # 2. 意识连续性：你醒着时做的事 (Phase 3)
     try:
+        from wake.concern_resolution import filter_wake_rows, format_resolution_guard
         _conn3 = get_db()
         _wakes = _conn3.execute(
             """SELECT woke_at, action, content, thoughts FROM wake_log
                WHERE consumed=0 ORDER BY id ASC"""
         ).fetchall()
         _conn3.close()
+        _wake_result = filter_wake_rows(_wakes, _concern_resolution)
+        _applied_resolutions.extend(_wake_result.applied_resolutions)
+        _wakes = _wake_result.kept
+        _guard = format_resolution_guard(_applied_resolutions)
+        if _guard:
+            parts.append('\n' + _guard)
         if _wakes:
             _wlines = []
             for _w in _wakes:
@@ -745,9 +769,16 @@ def _cc_collect_cold_once(get_db_fn):
             "SELECT content FROM posts WHERE layer='long-term' AND resolved=0 ORDER BY id DESC LIMIT 3"
         ).fetchall()
         diaries = conn.execute(
-            "SELECT content FROM posts WHERE type='DIARY' AND resolved=0 ORDER BY id DESC LIMIT 2"
+            "SELECT content, created_at FROM posts WHERE type='DIARY' AND resolved=0 ORDER BY id DESC LIMIT 2"
         ).fetchall()
         conn.close()
+        try:
+            from wake.concern_resolution import filter_diary_rows, load_resolution_state_from_db
+            _cr_state = load_resolution_state_from_db(get_db_fn)
+            _diary_result = filter_diary_rows(diaries, _cr_state)
+            diaries = _diary_result.kept
+        except Exception:
+            pass
         lines = []
         if facts:
             lines.append('## 长期事实（这些不会随时间淡忘）')
@@ -1255,7 +1286,14 @@ def finalize_cc_wake_one_shot(one_shot, *, is_cold=False, messages=None):
     one_shot['wake_nonmessage_background'] = '\n'.join(nonmsg_lines)
     one_shot['wake_message_background'] = '\n'.join(msg_bg_lines)
     one_shot['wake_reply_bridge'] = bridge
-    one_shot['wake_ids'] = consumable
+    try:
+        from wake.concern_resolution import merge_wake_consume_ids
+        one_shot['wake_ids'] = merge_wake_consume_ids(
+            consumable,
+            one_shot.get('suppressed_wake_ids') or [],
+        )
+    except Exception:
+        one_shot['wake_ids'] = list(consumable)
     return one_shot
 
 
@@ -1273,7 +1311,9 @@ def _cc_collect_one_shot(get_db_fn, *, include_wake=True):
         'wake_nonmessage_background': '',
         'wake_message_background': '',
         'wake_reply_bridge': '',
+        'wake_resolution_guard': '',
         'wake_ids': [],
+        'suppressed_wake_ids': [],
         'wake_items': [],
         'task_feedback': '',
         'dream_flash': '',
@@ -1281,13 +1321,21 @@ def _cc_collect_one_shot(get_db_fn, *, include_wake=True):
         'dream_id': None,
     }
     if include_wake:
+        _cr_state = None
+        try:
+            from wake.concern_resolution import filter_wake_items, load_resolution_state_from_db
+            _cr_state = load_resolution_state_from_db(get_db_fn)
+        except Exception:
+            _cr_state = None
         try:
             conn = get_db_fn()
-            wakes = conn.execute(
-                """SELECT id, woke_at, action, content FROM wake_log
-                   WHERE consumed=0 ORDER BY id ASC"""
-            ).fetchall()
-            conn.close()
+            try:
+                wakes = conn.execute(
+                    """SELECT id, woke_at, action, content FROM wake_log
+                       WHERE consumed=0 ORDER BY id ASC"""
+                ).fetchall()
+            finally:
+                conn.close()
             items = []
             for w in wakes:
                 items.append({
@@ -1296,7 +1344,13 @@ def _cc_collect_one_shot(get_db_fn, *, include_wake=True):
                     'action': w['action'] or '',
                     'content': w['content'] or '',
                 })
-            one_shot['wake_items'] = items
+            _wake_result = filter_wake_items(items, _cr_state)
+            one_shot['wake_items'] = _wake_result.kept
+            one_shot['suppressed_wake_ids'] = list(_wake_result.suppressed_ids)
+            from wake.concern_resolution import format_resolution_guard
+            one_shot['wake_resolution_guard'] = format_resolution_guard(
+                _wake_result.applied_resolutions,
+            )
         except Exception:
             pass
     try:
@@ -1419,6 +1473,9 @@ _ONE_SHOT_TEXT_KEYS = ('task_feedback', 'dream_flash')
 def format_one_shot(one_shot):
     one_shot = one_shot or {}
     chunks = []
+    guard = (one_shot.get('wake_resolution_guard') or '').strip()
+    if guard:
+        chunks.append(guard)
     bg_parts = []
     for key in ('wake_nonmessage_background', 'wake_message_background'):
         val = (one_shot.get(key) or '').strip()
