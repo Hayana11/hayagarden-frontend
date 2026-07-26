@@ -137,6 +137,9 @@ class ResidentSession:
         self._pending_respawn_reason = respawn_reason
         self._turns_since_respawn = 0
         self._last_state_snapshot = {}
+        self._last_state_send_snapshot = {}
+        self._committed_file_hashes = set()
+        self._pending_file_hashes = set()
         self._last_group_message_id = 0
         self._group_cursor_initialized = False
         self._last_rel_fingerprint = None
@@ -256,6 +259,12 @@ class ResidentSession:
             self._turns_since_rel_sent += 1
         if 'state_snapshot' in commit_meta:
             self._last_state_snapshot = copy.deepcopy(commit_meta['state_snapshot'] or {})
+        if 'state_send_snapshot' in commit_meta:
+            self._last_state_send_snapshot = copy.deepcopy(commit_meta['state_send_snapshot'] or {})
+        pending_files = commit_meta.get('file_inject_hashes')
+        if pending_files is not None:
+            self._committed_file_hashes = set(str(x) for x in pending_files if x)
+            self._pending_file_hashes = set()
         if commit_meta.get('group_cursor_initialized'):
             self._group_cursor_initialized = True
             if commit_meta.get('group_max_id') is not None:
@@ -605,6 +614,14 @@ class ResidentSession:
     @property
     def last_state_snapshot(self):
         return self._last_state_snapshot
+
+    @property
+    def last_state_send_snapshot(self):
+        return self._last_state_send_snapshot
+
+    @property
+    def committed_file_hashes(self):
+        return set(self._committed_file_hashes)
 
     @property
     def last_group_message_id(self):

@@ -1,13 +1,16 @@
-"""Token budgeting and BP3 relevance helpers for context reduction.
+"""Token budgeting and BP3 state send-payload helpers.
 
-Keeps persona / static system / tool surface unchanged; only trims volatile slices.
+Raw state snapshots are always complete; send payloads omit unchanged volatile
+fields unless user-relevant. Omission never means cleared.
 """
 from __future__ import annotations
 
 import re
-from typing import Any, Callable, Iterable, Mapping, Optional, Sequence
+from typing import Any, Callable, Mapping, Optional, Sequence
 
-EstimateFn = Callable[[Optional[str]], int]
+from chat.system_builder import format_state_diff, format_state_snapshot
+
+EstimateFn = None  # re-exported via default_estimate_tokens
 
 _STATE_RELEVANCE = {
     'lights': re.compile(r'灯|光|亮|暗|床头|照明', re.I),
@@ -26,6 +29,13 @@ def default_estimate_tokens(text: Optional[str]) -> int:
     return estimate_tokens_heuristic_cjk1_ascii4_v1(text)
 
 
+def normalize_state_dict(state: Optional[Mapping[str, Any]]) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for key, value in (state or {}).items():
+        out[str(key)] = str(value or '').strip()
+    return out
+
+
 def state_key_relevant(key: str, user_text: str) -> bool:
     pattern = _STATE_RELEVANCE.get(key)
     if not pattern:
@@ -33,46 +43,86 @@ def state_key_relevant(key: str, user_text: str) -> bool:
     return bool(pattern.search(user_text or ''))
 
 
-def filter_state_dict_for_turn(
-    state: Mapping[str, Any],
+def build_state_send_payload(
+    last_raw_state: Optional[Mapping[str, Any]],
+    raw_state: Mapping[str, Any],
     *,
     user_text: str = '',
-    last_snapshot: Optional[Mapping[str, Any]] = None,
     is_cold: bool = False,
 ) -> dict[str, str]:
-    """Drop volatile BP3 keys unless changed or user-relevant."""
-    state = state or {}
-    last_snapshot = last_snapshot or {}
-    out: dict[str, str] = {}
-    for key, value in state.items():
-        text = str(value or '').strip()
-        if not text:
-            continue
-        if key in _ALWAYS_SEND_STATE_KEYS or key == 'time_bucket':
-            out[key] = text
-            continue
-        if key not in _VOLATILE_STATE_KEYS:
-            out[key] = text
-            continue
-        before = str(last_snapshot.get(key) or '').strip()
-        if is_cold or before != text:
-            out[key] = text
-            continue
-        if state_key_relevant(key, user_text):
-            out[key] = text
-    if not is_cold and out.get('time_bucket'):
-        changed_non_time = any(
-            str(out.get(k) or '').strip() != str(last_snapshot.get(k) or '').strip()
-            for k in out
+    """Build per-turn send dict. Omitted keys are not sent; empty string = tombstone."""
+    last_raw = normalize_state_dict(last_raw_state)
+    raw = normalize_state_dict(raw_state)
+    if is_cold:
+        return {k: v for k, v in raw.items() if v}
+
+    send: dict[str, str] = {}
+    keys = list(dict.fromkeys(list(last_raw.keys()) + list(raw.keys())))
+    for key in keys:
+        before = last_raw.get(key, '')
+        after = raw.get(key, '')
+        if after:
+            if before != after:
+                send[key] = after
+            elif key in _VOLATILE_STATE_KEYS and state_key_relevant(key, user_text):
+                send[key] = after
+        elif before:
+            send[key] = ''
+
+    tb = raw.get('time_bucket', '')
+    if tb:
+        changed_other = any(
+            send.get(k, last_raw.get(k, '')) != last_raw.get(k, '')
+            for k in send
             if k != 'time_bucket'
         )
-        relevant_non_time = any(
-            k != 'time_bucket' and bool(str(out.get(k) or '').strip())
-            for k in out
-        ) and any(state_key_relevant(k, user_text) for k in out if k != 'time_bucket')
-        if not changed_non_time and not relevant_non_time:
-            out.pop('time_bucket', None)
-    return out
+        if tb != last_raw.get('time_bucket', '') or changed_other:
+            send['time_bucket'] = tb
+    return send
+
+
+def format_state_for_send(
+    last_send_state: Optional[Mapping[str, Any]],
+    send_state: Mapping[str, Any],
+    *,
+    is_cold: bool = False,
+) -> tuple[str, str]:
+    """Return (text, mode). Omitted keys in send_state are not treated as cleared."""
+    send_state = normalize_state_dict(send_state)
+    if is_cold:
+        text = format_state_snapshot(send_state)
+        return text, ('snapshot' if text else 'none')
+
+    last_send = normalize_state_dict(last_send_state)
+    lines = []
+    labels = {
+        'time_bucket': '当前时间段',
+        'emotion': '情绪',
+        'drive': '驱动',
+        'lights': '灯',
+        'pocket': 'Pocket',
+        'todos': '留言板待办',
+        'ledger': '记账',
+        'reminders': '今日提醒',
+        'recent_activity': '最近活动',
+    }
+    for key, after in send_state.items():
+        before = last_send.get(key, '')
+        label = labels.get(key, key)
+        if before and not after:
+            lines.append(f'- {label}：已清空')
+        elif not before and after:
+            lines.append(f'- {label}：{after}')
+        elif before != after:
+            if key in ('time_bucket', 'lights', 'pocket') and len(before) < 80 and len(after) < 80:
+                lines.append(f'- {label}：{before} → {after}')
+            else:
+                lines.append(f'- {label}：{after}')
+        elif after:
+            lines.append(f'- {label}：{after}')
+    if not lines:
+        return '', 'none'
+    return '【状态更新】\n' + '\n'.join(lines), 'delta'
 
 
 def trim_rows_to_token_budget(
@@ -89,7 +139,7 @@ def trim_rows_to_token_budget(
     total = 0
     for row in reversed(rows):
         piece = text_fn(row)
-        cost = estimate_tokens(piece)
+        cost = int(piece) if isinstance(piece, (int, float)) else estimate_tokens(piece)
         if kept and total + cost > budget:
             break
         kept.append(row)
@@ -98,51 +148,5 @@ def trim_rows_to_token_budget(
     return kept, total
 
 
-def trim_tool_history_lines(
-    lines: list[str],
-    *,
-    total_budget: int,
-    estimate_tokens: EstimateFn = default_estimate_tokens,
-) -> list[str]:
-    """Preserve header; trim oldest tool result blocks to fit total budget."""
-    if total_budget <= 0 or len(lines) <= 1:
-        return lines
-    header = lines[0]
-    body = lines[1:]
-    if not body:
-        return lines
-    while body:
-        joined = '\n'.join([header] + body)
-        if estimate_tokens(joined) <= total_budget:
-            return [header] + body
-        body.pop(0)
-    return [header]
-
-
-def file_revisit_summary(body: str, *, preview_chars: int = 400) -> str:
-    text = (body or '').strip()
-    if len(text) <= preview_chars:
-        return text
-    return text[:preview_chars] + '\n...(此前已全文注入，以上为摘要)'
-
-
-def collect_messages_file_text(messages: Iterable[Mapping[str, Any]]) -> str:
-    parts: list[str] = []
-    for msg in messages or ():
-        content = msg.get('content')
-        chunks: list[str] = []
-        if isinstance(content, str) and '[用户发来文件:' in content:
-            chunks.append(content)
-        elif isinstance(content, list):
-            for block in content:
-                if isinstance(block, dict) and block.get('type') == 'text':
-                    text = str(block.get('text') or '')
-                    if '[用户发来文件:' in text:
-                        chunks.append(text)
-        if chunks:
-            parts.extend(chunks)
-    return '\n\n'.join(parts)
-
-
-def estimate_messages_file_tokens(messages: Iterable[Mapping[str, Any]], estimate_tokens: EstimateFn = default_estimate_tokens) -> int:
-    return estimate_tokens(collect_messages_file_text(messages))
+# Backward-compatible alias used in early PR #138 drafts.
+filter_state_dict_for_turn = build_state_send_payload

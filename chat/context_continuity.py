@@ -103,7 +103,7 @@ def is_pending_user_turn(get_db_fn, message_id):
         conn.close()
 
 
-def _tool_caps(cap_small, cap_large, cap_total=None):
+def _tool_caps(cap_small, cap_large, cap_per_message=None):
     if cap_small is not None and cap_large is not None:
         small, large = max(0, int(cap_small)), max(0, int(cap_large))
     else:
@@ -114,21 +114,36 @@ def _tool_caps(cap_small, cap_large, cap_total=None):
         except Exception:
             small, large = 2000, 8000
         small, large = max(0, int(small)), max(0, int(large))
-    if cap_total is not None:
-        total = max(0, int(cap_total))
+    if cap_per_message is not None:
+        per_message = max(0, int(cap_per_message))
     else:
         try:
             import config_store
-            total = config_store.get_int("TOOL_INJECT_TOTAL_MAX", 12000)
+            per_message = config_store.get_int("TOOL_INJECT_PER_MESSAGE_MAX", 12000)
+            if per_message <= 0:
+                per_message = config_store.get_int("TOOL_INJECT_TOTAL_MAX", 12000)
         except Exception:
-            total = 12000
-    return small, large, total
+            per_message = 12000
+    return small, large, per_message
 
 
-def format_tool_history(tool_calls_json, cap_small=None, cap_large=None, cap_total=None):
+def _trim_tool_history_lines(lines, *, total_budget, estimate_tokens):
+    if total_budget <= 0 or len(lines) <= 1:
+        return lines
+    header = lines[0]
+    body = lines[1:]
+    while body:
+        joined = '\n'.join([header] + body)
+        if estimate_tokens(joined) <= total_budget:
+            return [header] + body
+        body.pop(0)
+    return [header]
+
+
+def format_tool_history(tool_calls_json, cap_small=None, cap_large=None, cap_per_message=None):
     """Render persisted tool calls as text for the next model turn."""
-    from chat.context_budget import trim_tool_history_lines, default_estimate_tokens
-    small, large, total = _tool_caps(cap_small, cap_large, cap_total)
+    from chat.context_budget import default_estimate_tokens
+    small, large, per_message = _tool_caps(cap_small, cap_large, cap_per_message)
     try:
         calls = json.loads(tool_calls_json)
     except (TypeError, ValueError):
@@ -156,4 +171,8 @@ def format_tool_history(tool_calls_json, cap_small=None, cap_large=None, cap_tot
         lines.append("· %s%s %s\n  → %s" % (name, failed, args_text, result))
     if len(lines) <= 1:
         return ""
-    return "\n".join(trim_tool_history_lines(lines, total_budget=total, estimate_tokens=default_estimate_tokens))
+    return "\n".join(
+        _trim_tool_history_lines(
+            lines, total_budget=per_message, estimate_tokens=default_estimate_tokens,
+        )
+    )

@@ -787,8 +787,12 @@ class HotTurnContentTests(unittest.TestCase):
                     'lights': '关',
                     'time_bucket': '当前时间段：23:00 左右',
                 }
+                self.last_state_send_snapshot = dict(self.last_state_snapshot)
+                self.committed_file_hashes = set()
                 self.last_group_message_id = 50
                 self._group_cursor_initialized = True
+                self.generation = 1
+                self.tool_surface_snapshot = {}
 
             @property
             def group_cursor_initialized(self):
@@ -796,6 +800,9 @@ class HotTurnContentTests(unittest.TestCase):
 
             def ensure_alive(self, system_text, env):
                 return False  # hot
+
+            def peek_idle_seconds(self):
+                return None
 
             def send_turn(self, content, commit_meta=None):
                 return fake_send_turn(content, commit_meta=commit_meta)
@@ -846,6 +853,8 @@ class HotTurnContentTests(unittest.TestCase):
 
         class FakeResident:
             last_state_snapshot = {}
+            last_state_send_snapshot = {}
+            committed_file_hashes = set()
             last_group_message_id = 0
             group_cursor_initialized = True
             last_rel_fingerprint = 'rel-v2:old'

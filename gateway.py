@@ -720,22 +720,31 @@ def _extract_choices(text):
     return clean, (found[0] if found else [])
 
 
-def build_messages():
-    from chat.context_budget import (
-        default_estimate_tokens,
-        file_revisit_summary,
-        trim_rows_to_token_budget,
-    )
+def _read_upload_file_body(static_dir, file_url):
+    if not file_url or not str(file_url).startswith('/static/'):
+        return None
+    try:
+        fp = os.path.realpath(static_dir + str(file_url)[7:])
+        if fp.startswith(os.path.realpath(static_dir)) and os.path.exists(fp):
+            with open(fp, 'r', encoding='utf-8', errors='replace') as ff:
+                return ff.read()
+    except Exception:
+        return None
+    return None
+
+
+def build_messages(*, resident_file_hashes=None, history_stats_out=None):
+    from chat.history_assembly import assemble_history_from_rows
     conn = get_db()
-    # 今天的所有对话 + 昨天最后5条（保持连续性）。历史窗口按 token 预算裁剪
-    # （默认 24000，可用 HISTORY_TOKEN_BUDGET 调整；设为 0 则回退块裁剪 60+20）。
+    # 历史窗口：HISTORY_TOKEN_BUDGET 约束的是渲染后文本块总量（不含图片二进制）。
+    # 图片仍维持最近 2 张硬上限；图片不计入文本 token 预算。
     _where = "date(created_at) >= date('now', '+8 hours', '-1 day')"
     _window_base, _window_block = 60, 20
     try:
         import config_store
         _history_token_budget = config_store.get_int("HISTORY_TOKEN_BUDGET", 24000)
     except Exception:
-        _history_token_budget = 0
+        _history_token_budget = 24000
     try:
         _available = conn.execute(
             "SELECT COUNT(*) FROM chat_messages WHERE " + _where
@@ -757,116 +766,33 @@ def build_messages():
         (_fetch_limit,),
     ).fetchall()))
     conn.close()
-    if _history_token_budget > 0 and rows:
-        def _row_text(row):
-            parts = [str(row['content'] or '')]
-            if row['file_url']:
-                parts.append(str(row['file_name'] or row['file_url']))
-            return '\n'.join(parts)
-        rows, _ = trim_rows_to_token_budget(
-            rows,
-            budget=_history_token_budget,
-            text_fn=_row_text,
-            estimate_tokens=default_estimate_tokens,
-        )
-        _limit = len(rows)
-        _available = max(_available, _limit)
-    else:
-        _limit = len(rows)
-    _total = len(rows)
 
-    # 图片大小限制：base64编码后的图片payload很容易让请求体爆炸到几十MB，
-    # 拖垮上传时间甚至触发中转站的请求体大小限制，表现为"一直转圈/卡死"。
-    # 只给最近2张图片带原图，更早的图片只留文字占位，不影响对话连续性。
-    _img_indices = [i for i, r in enumerate(rows) if r['image_url']]
-    _keep_img_indices = set(_img_indices[-2:])  # 只保留最后2张
-
-    msgs = []
-    prev_dt = None
-    seen_files = {}
-    for _ri, r in enumerate(rows):
-        is_ai = r['author'] in ('fyodor', 'claude', 'assistant')
-        role  = 'assistant' if is_ai else 'user'
-
-        note = ''
-        cur_dt = None
-        try:
-            cur_dt = datetime.datetime.strptime(r['created_at'], '%Y-%m-%d %H:%M:%S')
-        except Exception:
-            pass
-        if cur_dt and prev_dt and not is_ai:
-            gap = cur_dt - prev_dt
-            if gap >= datetime.timedelta(minutes=30):
-                hrs, rem = divmod(int(gap.total_seconds()), 3600)
-                mins = rem // 60
-                gap_str = ('%d小时%d分' % (hrs, mins)) if hrs else ('%d分钟' % mins)
-                note = '[%s · 距上一条消息隔了%s] ' % (cur_dt.strftime('%m月%d日 %H:%M'), gap_str)
-        if cur_dt:
-            prev_dt = cur_dt
-
-        blocks = []
-        if r['image_url']:
-            if _ri in _keep_img_indices:
-                blk = img_block(r['image_url'])
-                if blk:
-                    blocks.append(blk)
-            else:
-                # 较早的图片不再携带原图数据，只留占位文字，避免payload爆炸
-                blocks.append({'type': 'text', 'text': '[一张较早发送的图片，内容已不在上下文中]'})
-        if r['content']:
-            blocks.append({'type': 'text', 'text': note + r['content']})
-        # 用户发的文件：抄图片的降级策略——最近 6 条注入全文，更早只留标记（content 里的 [文件:x]）
-        _fu = r['file_url'] if ('file_url' in r.keys()) else ''
-        if _fu and not is_ai and _fu.startswith('/static/'):
-            try:
-                _fp = os.path.realpath(STATIC_DIR + _fu[7:])  # /static/... → 磁盘路径，realpath 除掉 ../
-                if _fp.startswith(os.path.realpath(STATIC_DIR)) and os.path.exists(_fp):
-                    with open(_fp, 'r', encoding='utf-8', errors='replace') as _ff:
-                        _body = _ff.read()
-                    _fname = r['file_name'] or '附件'
-                    if _fu in seen_files:
-                        _body = file_revisit_summary(_body)
-                        blocks.append({'type': 'text', 'text': '[用户发来文件: %s · 此前已全文注入]\n```\n%s\n```' % (_fname, _body)})
-                    elif _ri >= _total - 6:
-                        if len(_body) > 30000:
-                            _body = _body[:30000] + '\n...(文件过长已截断)'
-                        seen_files[_fu] = True
-                        blocks.append({'type': 'text', 'text': '[用户发来文件: %s]\n```\n%s\n```' % (_fname, _body)})
-            except Exception:
-                pass
-        # AI 消息：把上一轮工具调用与结果也注入回去，否则模型下轮会失忆
-        if is_ai:
-            try:
-                _th = _format_tool_history(r['tool_calls']) if r['tool_calls'] else ''
-            except Exception:
-                _th = ''
-            if _th:
-                blocks.append({'type': 'text', 'text': _th})
-        if not blocks:
-            continue
-
-        content = blocks[0]['text'] if len(blocks) == 1 and blocks[0]['type'] == 'text' else blocks
-
-        if msgs and msgs[-1]['role'] == role:
-            prev = msgs[-1]['content']
-            if isinstance(prev, str) and isinstance(content, str):
-                msgs[-1]['content'] = prev + '\n' + content
-            else:
-                if isinstance(prev, str):
-                    prev = [{'type': 'text', 'text': prev}]
-                if isinstance(content, str):
-                    content = [{'type': 'text', 'text': content}]
-                msgs[-1]['content'] = prev + content
-        else:
-            msgs.append({'role': role, 'content': content})
-
-    # 滚动摘要：发生裁剪（块裁剪或 token 预算）时注入。
-    _cropped_by_count = (
-        _history_token_budget <= 0
-        and _available > _limit
+    msgs, stats = assemble_history_from_rows(
+        rows,
+        available_count=_available,
+        history_token_budget=_history_token_budget,
+        window_base=_window_base,
+        window_block=_window_block,
+        static_dir=STATIC_DIR,
+        read_file_fn=_read_upload_file_body,
+        img_block_fn=img_block,
+        is_ai_author=lambda author: author in ('fyodor', 'claude', 'assistant'),
+        resident_file_hashes=resident_file_hashes,
     )
-    _cropped_by_tokens = _history_token_budget > 0 and _fetch_limit > _limit
-    if _cropped_by_count or _cropped_by_tokens:
+    if history_stats_out is not None:
+        history_stats_out.clear()
+        history_stats_out.update({
+            'rows_before_trim': stats.rows_before_trim,
+            'rows_after_trim': stats.rows_after_trim,
+            'image_block_count': stats.image_block_count,
+            'image_placeholder_count': stats.image_placeholder_count,
+            'rendered_text_tokens_estimate': stats.rendered_text_tokens_estimate,
+            'file_injections': list(stats.file_injections),
+            'history_trimmed': stats.history_trimmed,
+            'block_count_trimmed': stats.block_count_trimmed,
+        })
+
+    if stats.rows_before_trim > stats.rows_after_trim or stats.block_count_trimmed:
         try:
             _rc = get_db()
             _rsrow = _rc.execute('SELECT summary FROM rolling_summary WHERE id=1').fetchone()
@@ -3207,7 +3133,7 @@ def _format_group_chat_recap(rows, *, cold=False):
     return head + NL.join(lines) + NL + NL
 
 
-def _cc_resident_stream_gen(messages, *, user_turn=True):
+def _cc_resident_stream_gen(messages, *, user_turn=True, history_stats=None):
     """常驻 CC：静态 system 只在 spawn 时贴墙；热轮只发差量。
 
     构建顺序：
@@ -3287,12 +3213,17 @@ def _cc_resident_stream_gen(messages, *, user_turn=True):
         rel_sources = dict(relationship.sources or {})
 
     # 2) 每轮构建 state / one-shot；3) 仅冷启动构建 cold_once
-    from chat.context_budget import filter_state_dict_for_turn, collect_messages_file_text
+    from chat.context_budget import build_state_send_payload, format_state_for_send
     raw_state = build_cc_state()
-    state = filter_state_dict_for_turn(
+    send_payload = build_state_send_payload(
+        getattr(_CC_RESIDENT, 'last_state_snapshot', None),
         raw_state,
         user_text=last_text or '',
-        last_snapshot=getattr(_CC_RESIDENT, 'last_state_snapshot', None),
+        is_cold=is_cold,
+    )
+    state_text, state_mode = format_state_for_send(
+        getattr(_CC_RESIDENT, 'last_state_send_snapshot', None),
+        send_payload,
         is_cold=is_cold,
     )
     one_shot = build_cc_one_shot(include_wake=user_turn)
@@ -3313,19 +3244,15 @@ def _cc_resident_stream_gen(messages, *, user_turn=True):
     group_max_id = None
     group_cursor_ok = False
     cold_text = ''
-    state_text = ''
     group_text = ''
-    state_mode = 'none'
     history_bootstrap_text = ''
     recall_text = recall_blk.strip() if recall_blk else ''
     if is_cold:
         cold_text = format_cold_once(cold_once)
         if cold_text:
             pieces.append(cold_text)
-        state_text = format_state_snapshot(state)
         if state_text:
             pieces.append(state_text)
-            state_mode = 'snapshot'
         rows, group_max_id = _fetch_group_chat_rows(limit=8, cold=True)
         if group_max_id is not None:
             group_cursor_ok = True
@@ -3349,7 +3276,8 @@ def _cc_resident_stream_gen(messages, *, user_turn=True):
         history_bootstrap_text += NL + NL + '请回复最后一条消息。'
         content = prefix + history_bootstrap_text
         commit_meta = {
-            'state_snapshot': state,
+            'state_snapshot': raw_state,
+            'state_send_snapshot': send_payload,
             'feedback_ids': list(one_shot.get('feedback_ids') or []),
             'dream_id': one_shot.get('dream_id'),
             'wake_ids': list(one_shot.get('wake_ids') or []),
@@ -3358,10 +3286,8 @@ def _cc_resident_stream_gen(messages, *, user_turn=True):
             commit_meta['group_cursor_initialized'] = True
             commit_meta['group_max_id'] = group_max_id
     else:
-        state_text = format_state_diff(_CC_RESIDENT.last_state_snapshot, state)
         if state_text:
             pieces.append(state_text)
-            state_mode = 'delta'
         # 未初始化时不得退化成热查询 id>0（会读出远古 backlog）
         if not _CC_RESIDENT.group_cursor_initialized:
             rows, group_max_id = _fetch_group_chat_rows(limit=8, cold=True)
@@ -3397,7 +3323,8 @@ def _cc_resident_stream_gen(messages, *, user_turn=True):
         else:
             content = last_content
         commit_meta = {
-            'state_snapshot': state,
+            'state_snapshot': raw_state,
+            'state_send_snapshot': send_payload,
             'feedback_ids': list(one_shot.get('feedback_ids') or []),
             'dream_id': one_shot.get('dream_id'),
             'wake_ids': list(one_shot.get('wake_ids') or []),
@@ -3424,6 +3351,18 @@ def _cc_resident_stream_gen(messages, *, user_turn=True):
         elif user_turn:
             commit_meta['rel_tick'] = True
 
+    file_hashes = set(getattr(_CC_RESIDENT, 'committed_file_hashes', set()) or set())
+    for fi in (history_stats or {}).get('file_injections') or []:
+        if fi.get('mode') == 'full' and fi.get('url'):
+            file_hashes.add(str(fi['url']))
+    if not is_cold and isinstance(last_content, list):
+        for block in last_content:
+            if isinstance(block, dict) and block.get('type') == 'text':
+                text = str(block.get('text') or '')
+                if '[用户发来文件:' in text:
+                    commit_meta['hot_file_present'] = True
+    commit_meta['file_inject_hashes'] = sorted(file_hashes)
+
     # 组装现场测量：只读字符串副本；CC 路径 rolling_summary 未注入
     allowed_tool_count = len([x for x in (CC_ALLOWED_TOOLS or '').split(',') if x.strip()]) or None
     from tools.cc_tool_surface import capture_tool_surface_snapshot
@@ -3435,6 +3374,24 @@ def _cc_resident_stream_gen(messages, *, user_turn=True):
         )
     original_system = full_system
     original_content = _cc_obs.snapshot_prompt_content(content)
+    _hist = history_stats or {}
+    _file_injections = list(_hist.get('file_injections') or [])
+    if is_cold:
+        _files_text = '\n\n'.join(
+            '[file:%s mode=%s tokens=%s]' % (
+                fi.get('url'), fi.get('mode'), fi.get('tokens_estimate'),
+            )
+            for fi in _file_injections
+        )
+    else:
+        _files_text = last_text if (
+            isinstance(last_content, str) and '[用户发来文件:' in (last_content or '')
+        ) or commit_meta.get('hot_file_present') else ''
+        if not _files_text and isinstance(last_content, list):
+            _files_text = '\n'.join(
+                str(b.get('text') or '') for b in last_content
+                if isinstance(b, dict) and b.get('type') == 'text' and '[用户发来文件:' in str(b.get('text') or '')
+            )
     obs_breakdown = _cc_obs.build_context_breakdown(
         persona=persona_text,
         stable_note=stable_note_text,
@@ -3451,9 +3408,13 @@ def _cc_resident_stream_gen(messages, *, user_turn=True):
         one_shot_text=one_shot_text or '',
         wake_reply_bridge_text=wake_reply_bridge or '',
         relationship_text=relationship_text or '',
-        files_text=collect_messages_file_text(messages) if is_cold else '',
+        files_text=_files_text,
         user_text=last_text or '',
         final_content=content,
+        image_block_count=int(_hist.get('image_block_count') or 0),
+        image_placeholder_count=int(_hist.get('image_placeholder_count') or 0),
+        history_rendered_text_tokens_estimate=_hist.get('rendered_text_tokens_estimate'),
+        file_injection_modes=[fi.get('mode') for fi in _file_injections],
         tool_schema_text=tool_surface.get("tool_schema_text"),
         tool_schema_source=tool_surface.get("tool_schema_source"),
         tool_count=tool_surface.get("tool_count"),
@@ -4215,9 +4176,15 @@ def chat_stream():
                 try:
                     # 只 snapshot wake ids，避免 build_system() 先把 one_shot 反馈 drain 掉
                     _wake_claim_ids = capture_pending_wake_ids(get_db) if _is_user_turn else []
-                    messages = build_messages()
+                    _history_stats = {}
+                    messages = build_messages(
+                        resident_file_hashes=getattr(_CC_RESIDENT, 'committed_file_hashes', set()),
+                        history_stats_out=_history_stats,
+                    )
                     cc_tool_calls = []
-                    for evt, payload in _cc_resident_stream_gen(messages, user_turn=_is_user_turn):
+                    for evt, payload in _cc_resident_stream_gen(
+                        messages, user_turn=_is_user_turn, history_stats=_history_stats,
+                    ):
                         if evt == 'text':
                             yield 'data: ' + json.dumps({'t': 'text', 'd': payload}) + SSE_END
                         elif evt == 'think':

@@ -31,6 +31,8 @@ LIMITATIONS = [
     "序列化开销、未观测非文本 block、以及 provider usage 口径差异；不得直接解释为 MCP 工具大小。",
     "suspected_cache_expiry=true 仅表示疑似缓存过期或供应端驱逐，不宣称严格 TTL 到期。",
     "tool schema 仅在获得 mcp_list_tools 或真实 static_registry 时估算；否则为 null/unavailable。",
+    "HISTORY_TOKEN_BUDGET 仅约束渲染后的文本块（正文、时间间隔、文件正文、工具历史、图片占位符）；"
+    "图片二进制 payload 不计入该预算，仍由最近 2 张硬上限单独约束。",
     "confidence 默认 low。",
 ]
 
@@ -202,6 +204,10 @@ def build_context_breakdown(
     files_text: str = "",
     user_text: str = "",
     final_content: Any = None,
+    image_block_count: int = 0,
+    image_placeholder_count: int = 0,
+    history_rendered_text_tokens_estimate: Optional[int] = None,
+    file_injection_modes: Optional[Sequence[str]] = None,
     tool_result_text: Optional[str] = None,
     tool_result_measured: bool = False,
     tool_schema_text: Optional[str] = None,
@@ -289,6 +295,10 @@ def build_context_breakdown(
         "relationship_tokens_estimate": rel_est,
         "files_tokens_estimate": files_est,
         "user_tokens_estimate": user_est,
+        "image_block_count": int(image_block_count or 0),
+        "image_placeholder_count": int(image_placeholder_count or 0),
+        "history_rendered_text_tokens_estimate": history_rendered_text_tokens_estimate,
+        "file_injection_modes": list(file_injection_modes or ()),
         "visible_payload_tokens_estimate": visible_payload,
         "known_visible_context_tokens_estimate": known_visible,
         "tool_schema_tokens_estimate": tools["tool_schema_tokens_estimate"],
@@ -470,8 +480,10 @@ def classify_turn_tags(
     num_rounds = int((usage or {}).get("num_rounds") or bd.get("provider_num_rounds") or 1)
     if num_rounds > 1 or bd.get("tool_result_tokens_estimate") not in (None, 0):
         tags.append("has_tools")
-    if int(bd.get("files_tokens_estimate") or 0) > 0 or int(bd.get("non_text_block_count") or 0) > 0:
+    if int(bd.get("files_tokens_estimate") or 0) > 0 or bd.get("file_injection_modes"):
         tags.append("has_files")
+    if int(bd.get("image_block_count") or 0) > 0:
+        tags.append("has_images")
     if int(bd.get("wake_reply_bridge_tokens_estimate") or 0) > 0:
         tags.append("wake_reply")
     if str(bd.get("state_mode") or "") == "delta" and int(bd.get("state_tokens_estimate") or 0) > 0:
