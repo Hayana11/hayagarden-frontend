@@ -154,6 +154,16 @@ def build_system(
         shared_context = build_shared_context()
     bp1_text = shared_context.persona if shared_context else read_persona()
 
+    # User-stated concern resolutions (read-only scan; fail-open).
+    _concern_resolution = None
+    try:
+        from wake.concern_resolution import load_resolution_state
+        _conn_cr = get_db()
+        _concern_resolution = load_resolution_state(_conn_cr)
+        _conn_cr.close()
+    except Exception:
+        _concern_resolution = None
+
     # ── BP2 · 相对稳定记忆（几小时~一天变一次，缓存断点2）───────
     bp2_parts = []
     conn = get_db()
@@ -180,10 +190,17 @@ def build_system(
             c = m['content']
             bp2_parts.append('- ' + (c[:120] + '…' if len(c) > 120 else c))
     if diaries:
-        bp2_parts.append('\n## 最近的日记')
-        for d in reversed(diaries):
-            c = d['content']
-            bp2_parts.append(c[:400] + '…' if len(c) > 400 else c)
+        try:
+            from wake.concern_resolution import filter_diary_texts
+            _diary_texts = filter_diary_texts(
+                [d['content'] for d in diaries], _concern_resolution,
+            )
+        except Exception:
+            _diary_texts = [d['content'] for d in diaries]
+        if _diary_texts:
+            bp2_parts.append('\n## 最近的日记')
+            for c in reversed(_diary_texts):
+                bp2_parts.append(c[:400] + '…' if len(c) > 400 else c)
 
     # User Profile（前端可编辑：姓名 / 偏好 / 长期记忆）
     try:
@@ -232,12 +249,17 @@ def build_system(
 
     # 2. 意识连续性：你醒着时做的事 (Phase 3)
     try:
+        from wake.concern_resolution import filter_wake_rows, format_resolution_guard
+        _guard = format_resolution_guard(_concern_resolution)
+        if _guard:
+            parts.append('\n' + _guard)
         _conn3 = get_db()
         _wakes = _conn3.execute(
             """SELECT woke_at, action, content, thoughts FROM wake_log
                WHERE consumed=0 ORDER BY id ASC"""
         ).fetchall()
         _conn3.close()
+        _wakes = filter_wake_rows(_wakes, _concern_resolution)
         if _wakes:
             _wlines = []
             for _w in _wakes:
@@ -760,10 +782,20 @@ def _cc_collect_cold_once(get_db_fn):
                 c = m['content']
                 lines.append('- ' + (c[:120] + '…' if len(c) > 120 else c))
         if diaries:
-            lines.append('## 最近的日记')
-            for d in reversed(diaries):
-                c = d['content']
-                lines.append(c[:400] + '…' if len(c) > 400 else c)
+            try:
+                from wake.concern_resolution import filter_diary_texts, load_resolution_state
+                _conn_d = get_db_fn()
+                _cr_state = load_resolution_state(_conn_d)
+                _conn_d.close()
+                _diary_texts = filter_diary_texts(
+                    [d['content'] for d in diaries], _cr_state,
+                )
+            except Exception:
+                _diary_texts = [d['content'] for d in diaries]
+            if _diary_texts:
+                lines.append('## 最近的日记')
+                for c in reversed(_diary_texts):
+                    lines.append(c[:400] + '…' if len(c) > 400 else c)
         cold['long_term_memory'] = '\n'.join(lines)
     except Exception:
         pass
@@ -1281,6 +1313,14 @@ def _cc_collect_one_shot(get_db_fn, *, include_wake=True):
         'dream_id': None,
     }
     if include_wake:
+        _cr_state = None
+        try:
+            from wake.concern_resolution import filter_wake_items, load_resolution_state
+            conn = get_db_fn()
+            _cr_state = load_resolution_state(conn)
+            conn.close()
+        except Exception:
+            _cr_state = None
         try:
             conn = get_db_fn()
             wakes = conn.execute(
@@ -1296,7 +1336,7 @@ def _cc_collect_one_shot(get_db_fn, *, include_wake=True):
                     'action': w['action'] or '',
                     'content': w['content'] or '',
                 })
-            one_shot['wake_items'] = items
+            one_shot['wake_items'] = filter_wake_items(items, _cr_state)
         except Exception:
             pass
     try:
