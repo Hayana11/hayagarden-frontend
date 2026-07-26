@@ -1,6 +1,6 @@
 """Filter Wake continuity injection when the user has explicitly closed a concern.
 
-Read-only, heuristic, fail-open: callers must wrap in try/except and continue on error.
+Read-only, heuristic, fail-open: callers must wrap DB access in try/finally.
 Does not mutate wake_log.consumed or posts.resolved.
 """
 from __future__ import annotations
@@ -10,24 +10,30 @@ import sqlite3
 from dataclasses import dataclass, field
 from typing import Iterable, Sequence
 
-_AI_AUTHORS = frozenset({'fyodor', 'claude', 'assistant'})
+_USER_AUTHORS = frozenset({'hayana', 'haya', 'user'})
 
-# User explicitly closes a concern — assistant agreement alone does not count.
+_RESOLUTION_NEGATION = re.compile(
+    r'(?:才不是|并不是|并非|没有|别|别想|不算|哪能|哪能是|哪是)'
+    r'.{0,10}(?:没事了|结束了|都好了|不用了|可以放下|已经好了)',
+)
+_RESOLUTION_RHETORICAL = re.compile(
+    r'(?:你以为|难道|是不是|难道就|怎么就).{0,12}(?:结束了|没事了|都好了|不用了)\??',
+)
+
 _RESOLUTION_PATTERNS = tuple(
     re.compile(p, re.IGNORECASE)
     for p in (
-        r'已经(?:好了|没事了|解决|愈合|恢复|结案|结束|处理(?:完|好)|没事了)',
+        r'已经(?:好了|解决|愈合|恢复|结案|处理(?:完|好))',
         r'(?:无需|不需|不用|不必|不要)(?:再|继续|进一步)',
         r'(?:已经|这件事).{0,16}可以放下',
         r'医生说(?:不用|不(?:用|需要)|没事)',
-        r'都好了',
-        r'没事了',
         r'不用再(?:问|担心|追问|管)',
         r'这件事(?:已经)?(?:结束|过去|完了)',
+        r'(?:伤口|抓伤|磕伤|烫伤).{0,12}(?:已经|早就)(?:好了|愈合|恢复)',
+        r'(?:咨询|问过).{0,6}医生.{0,16}(?:不用|不(?:用|需要)|没事)',
     )
 )
 
-# New user evidence may reopen a previously closed concern.
 _REOPEN_PATTERNS = tuple(
     re.compile(p, re.IGNORECASE)
     for p in (
@@ -35,26 +41,27 @@ _REOPEN_PATTERNS = tuple(
         r'(?:还是|仍然|依然)(?:疼|痛|不舒服|担心|有问题|没好)',
         r'(?:又得|还是要|还是得|仍要|仍得|需要再)',
         r'(?:重新|再次)(?:问|担心|处理|去医院|看医生)',
+        r'(?:今天|刚才|刚刚).{0,8}(?:红肿|渗液|发炎|疼|痛|恶化)',
+        r'(?:开始|出现)(?:红肿|渗液|发炎|疼痛|恶化)',
     )
 )
 
-_STOPWORDS = frozenset({
+_GENERIC_TOPIC_TOKENS = frozenset({
     '已经', '可以', '不用', '无需', '没有', '什么', '怎么', '我们', '你们', '自己',
     '一下', '继续', '还是', '就是', '这个', '那个', '事情', '事项', '今天', '昨天',
-    '现在', '之后', '之前', '一下', '感觉', '知道', '觉得', '告诉', '医生', '她说',
-    '他说', '我说', '问我', '问你', '好了', '没事', '结束', '放下', '不用', '再问',
+    '现在', '之后', '之前', '感觉', '知道', '觉得', '告诉', '医生', '她说', '他说',
+    '我说', '问我', '问你', '好了', '没事', '结束', '放下', '再问', '这件事', '处理',
+    '完了', '过去', '结案', '不用了', '没事了', '都好了', '进一步', '再跑', '再问',
 })
 
-_DEFAULT_LOOKBACK_HOURS = 168  # resolution scan only; not the Wake 8h chat snippet
-_TOPIC_CONTEXT_MESSAGES = 20
+_DEFAULT_LOOKBACK_HOURS = 168
 _MIN_TOPIC_OVERLAP = 2
+_GUARD_MAX_ENTRIES = 3
 
-_WORRY_MARKERS = re.compile(
-    r'(?:还在想|担心|要不要|需不需要|悬而|放不下|仍未|还没(?:好|解决|愈合))'
-)
+_STOPWORDS = _GENERIC_TOPIC_TOKENS
 
 
-@dataclass
+@dataclass(frozen=True)
 class ResolutionEntry:
     summary: str
     topic_tokens: frozenset[str] = field(default_factory=frozenset)
@@ -67,8 +74,13 @@ class ResolutionState:
     active: list[ResolutionEntry] = field(default_factory=list)
 
 
+@dataclass
+class FilterResult:
+    kept: list = field(default_factory=list)
+    applied_resolutions: list[ResolutionEntry] = field(default_factory=list)
+
+
 def topic_tokens(text: str) -> frozenset[str]:
-    """Extract coarse Chinese/alpha tokens for overlap matching."""
     text = (text or '').strip().lower()
     if not text:
         return frozenset()
@@ -86,9 +98,26 @@ def topic_tokens(text: str) -> frozenset[str]:
     return frozenset(tokens)
 
 
+def _topic_specific_tokens(text: str) -> frozenset[str]:
+    return frozenset(token for token in topic_tokens(text) if token not in _GENERIC_TOPIC_TOKENS)
+
+
+_DEICTIC_RESOLUTION = re.compile(
+    r'(?:这件事|那件事|这事|那事|不用了|没事了|都好了|处理好了|可以放下|结束了)',
+)
+
+def _needs_prior_user_context(content: str) -> bool:
+    body = (content or '').strip()
+    if _DEICTIC_RESOLUTION.search(body):
+        return True
+    return len(_topic_specific_tokens(content)) < _MIN_TOPIC_OVERLAP
+
+
 def is_user_resolution(text: str) -> bool:
     body = (text or '').strip()
     if not body:
+        return False
+    if _RESOLUTION_NEGATION.search(body) or _RESOLUTION_RHETORICAL.search(body):
         return False
     return any(p.search(body) for p in _RESOLUTION_PATTERNS)
 
@@ -106,6 +135,26 @@ def topic_overlap(left: frozenset[str], right: frozenset[str], *, min_overlap: i
     return len(left & right) >= min_overlap
 
 
+def normalize_recorded_at(value: str) -> str | None:
+    value = (value or '').strip()
+    if not value:
+        return None
+    if len(value) >= 19 and value[4] == '-' and value[7] == '-':
+        return value[:19]
+    if len(value) >= 16 and value[4] == '-' and value[7] == '-':
+        return value[:16] + ':00'
+    return None
+
+
+def is_strictly_before(source_at: str, resolution_at: str) -> bool | None:
+    """Return True/False when comparable; None => fail-open (do not filter)."""
+    source = normalize_recorded_at(source_at)
+    resolution = normalize_recorded_at(resolution_at)
+    if not source or not resolution:
+        return None
+    return source < resolution
+
+
 def _resolution_summary(text: str, *, limit: int = 120) -> str:
     body = ' '.join((text or '').split())
     if len(body) <= limit:
@@ -113,24 +162,12 @@ def _resolution_summary(text: str, *, limit: int = 120) -> str:
     return body[: limit - 1] + '…'
 
 
-def _collect_resolution_topics(
-    messages: Sequence[dict],
-    index: int,
-    *,
-    window: int = _TOPIC_CONTEXT_MESSAGES,
-) -> frozenset[str]:
-    tokens: set[str] = set()
-    start = max(0, index - window + 1)
-    for msg in messages[start:index + 1]:
-        tokens.update(topic_tokens(str(msg.get('content') or '')))
+def _collect_resolution_topics(messages: Sequence[dict], index: int) -> frozenset[str]:
+    content = str(messages[index].get('content') or '')
+    tokens = set(topic_tokens(content))
+    if _needs_prior_user_context(content) and index > 0:
+        tokens.update(topic_tokens(str(messages[index - 1].get('content') or '')))
     return frozenset(tokens)
-
-
-def _latest_resolution_time(state: ResolutionState | None) -> str:
-    if not state or not state.active:
-        return ''
-    stamps = [entry.created_at for entry in state.active if entry.created_at]
-    return max(stamps) if stamps else ''
 
 
 def build_resolution_state(
@@ -138,7 +175,6 @@ def build_resolution_state(
     *,
     min_overlap: int = _MIN_TOPIC_OVERLAP,
 ) -> ResolutionState:
-    """Chronological scan: later user reopen removes matching active resolutions."""
     active: list[ResolutionEntry] = []
     for index, msg in enumerate(user_messages):
         content = str(msg.get('content') or '')
@@ -146,57 +182,84 @@ def build_resolution_state(
             reopen_tokens = topic_tokens(content)
             active = [
                 entry for entry in active
-                if not topic_overlap(entry.topic_tokens, reopen_tokens, min_overlap=min_overlap)
+                if not topic_overlap(entry.topic_tokens, reopen_tokens, min_overlap=1)
             ]
             continue
         if not is_user_resolution(content):
             continue
-        entry = ResolutionEntry(
+        active.append(ResolutionEntry(
             summary=_resolution_summary(content),
             topic_tokens=_collect_resolution_topics(user_messages, index),
             message_id=msg.get('id'),
             created_at=str(msg.get('created_at') or ''),
-        )
-        active.append(entry)
+        ))
     return ResolutionState(active=active)
+
+
+def find_superseding_resolution(
+    text: str,
+    state: ResolutionState | None,
+    *,
+    recorded_at: str = '',
+    min_overlap: int = _MIN_TOPIC_OVERLAP,
+) -> ResolutionEntry | None:
+    if not state or not state.active:
+        return None
+    tokens = topic_tokens(text)
+    if not tokens:
+        return None
+    for entry in state.active:
+        if not topic_overlap(tokens, entry.topic_tokens, min_overlap=min_overlap):
+            continue
+        before = is_strictly_before(recorded_at, entry.created_at)
+        if before is not True:
+            continue
+        return entry
+    return None
 
 
 def is_superseded_historical_concern(
     text: str,
     state: ResolutionState | None,
     *,
-    min_overlap: int = _MIN_TOPIC_OVERLAP,
     recorded_at: str = '',
+    min_overlap: int = _MIN_TOPIC_OVERLAP,
 ) -> bool:
-    if not state or not state.active:
-        return False
-    tokens = topic_tokens(text)
-    if tokens:
-        for entry in state.active:
-            if topic_overlap(tokens, entry.topic_tokens, min_overlap=min_overlap):
-                return True
-            if _WORRY_MARKERS.search(text or '') and topic_overlap(
-                tokens, entry.topic_tokens, min_overlap=1,
-            ):
-                return True
-    if _WORRY_MARKERS.search(text or '') and recorded_at:
-        latest = _latest_resolution_time(state)
-        if latest and recorded_at < latest:
-            worry_tokens = topic_tokens(text)
-            for entry in state.active:
-                if topic_overlap(worry_tokens, entry.topic_tokens, min_overlap=1):
-                    return True
-    return False
+    return find_superseding_resolution(
+        text, state, recorded_at=recorded_at, min_overlap=min_overlap,
+    ) is not None
 
 
-def format_resolution_guard(state: ResolutionState | None) -> str:
-    if not state or not state.active:
+def dedupe_applied_resolutions(
+    entries: Iterable[ResolutionEntry],
+    *,
+    max_items: int = _GUARD_MAX_ENTRIES,
+) -> list[ResolutionEntry]:
+    ordered = sorted(
+        entries,
+        key=lambda entry: normalize_recorded_at(entry.created_at) or '',
+        reverse=True,
+    )
+    picked: list[ResolutionEntry] = []
+    for entry in ordered:
+        if len(picked) >= max_items:
+            break
+        if any(topic_overlap(entry.topic_tokens, kept.topic_tokens) for kept in picked):
+            continue
+        picked.append(entry)
+    return list(reversed(picked))
+
+
+def format_resolution_guard(applied: Sequence[ResolutionEntry]) -> str:
+    entries = dedupe_applied_resolutions(applied)
+    if not entries:
         return ''
     lines = ['## 用户已明确结案（勿再当作悬案追问）']
-    for entry in state.active:
+    for entry in entries:
         stamp = ''
-        if entry.created_at and len(entry.created_at) >= 16:
-            stamp = f'[{entry.created_at[5:16]}] '
+        normalized = normalize_recorded_at(entry.created_at)
+        if normalized:
+            stamp = f'[{normalized[5:16]}] '
         lines.append(f'- {stamp}{entry.summary}')
     lines.append(
         '说明：以上是她亲口给出的结论，优先于你过去的 Wake / 日记 / 推测。'
@@ -204,6 +267,10 @@ def format_resolution_guard(state: ResolutionState | None) -> str:
         '不得仅凭旧 Wake、旧日记或未消费 wake_log 重新开启追问。'
     )
     return '\n'.join(lines)
+
+
+def _is_user_author(author: str) -> bool:
+    return str(author or '').strip().lower() in _USER_AUTHORS
 
 
 def fetch_user_messages(
@@ -215,8 +282,7 @@ def fetch_user_messages(
         """
         SELECT id, author, content, created_at
         FROM chat_messages
-        WHERE author NOT IN ('fyodor', 'claude', 'assistant')
-          AND created_at >= datetime('now', '+8 hours', ?)
+        WHERE created_at >= datetime('now', '+8 hours', ?)
         ORDER BY id ASC
         """,
         (f'-{int(lookback_hours)} hours',),
@@ -224,19 +290,24 @@ def fetch_user_messages(
     out: list[dict] = []
     for row in rows:
         if hasattr(row, 'keys'):
-            out.append({
+            author = row['author']
+            item = {
                 'id': row['id'],
-                'author': row['author'],
+                'author': author,
                 'content': row['content'],
                 'created_at': row['created_at'],
-            })
+            }
         else:
-            out.append({
+            author = row[1]
+            item = {
                 'id': row[0],
-                'author': row[1],
+                'author': author,
                 'content': row[2],
                 'created_at': row[3],
-            })
+            }
+        if not _is_user_author(author):
+            continue
+        out.append(item)
     return out
 
 
@@ -248,44 +319,64 @@ def load_resolution_state(
     return build_resolution_state(fetch_user_messages(conn, lookback_hours=lookback_hours))
 
 
-def filter_wake_rows(rows: Iterable, state: ResolutionState | None) -> list:
+def load_resolution_state_from_db(get_db_fn, *, lookback_hours: int = _DEFAULT_LOOKBACK_HOURS) -> ResolutionState:
+    conn = get_db_fn()
+    try:
+        return load_resolution_state(conn, lookback_hours=lookback_hours)
+    finally:
+        conn.close()
+
+
+def _row_content_and_time(row) -> tuple[str, str]:
+    if hasattr(row, 'keys'):
+        keys = row.keys()
+        if 'woke_at' in keys:
+            return str(row['content'] or ''), str(row['woke_at'] or '')
+        return str(row['content'] or ''), str(row['created_at'] or '')
+    if isinstance(row, dict):
+        if 'woke_at' in row:
+            return str(row.get('content') or ''), str(row.get('woke_at') or '')
+        return str(row.get('content') or ''), str(row.get('created_at') or '')
+    if isinstance(row, (list, tuple)) and len(row) >= 3:
+        return str(row[2] or ''), str(row[0] or '')
+    return str(row or ''), ''
+
+
+def filter_wake_rows(rows: Iterable, state: ResolutionState | None) -> FilterResult:
     kept = []
+    applied: list[ResolutionEntry] = []
     for row in rows:
-        content = ''
-        recorded_at = ''
-        if hasattr(row, 'keys'):
-            content = row['content'] or ''
-            recorded_at = row['woke_at'] or ''
-        elif isinstance(row, dict):
-            content = row.get('content') or ''
-            recorded_at = row.get('woke_at') or ''
-        elif isinstance(row, (list, tuple)) and len(row) >= 3:
-            content = row[2] or ''
-            if len(row) >= 1:
-                recorded_at = row[0] or ''
-        if is_superseded_historical_concern(
-            content, state, recorded_at=recorded_at,
-        ):
+        content, recorded_at = _row_content_and_time(row)
+        match = find_superseding_resolution(content, state, recorded_at=recorded_at)
+        if match:
+            applied.append(match)
             continue
         kept.append(row)
-    return kept
+    return FilterResult(kept=kept, applied_resolutions=applied)
 
 
-def filter_wake_items(items: Iterable[dict], state: ResolutionState | None) -> list[dict]:
+def filter_wake_items(items: Iterable[dict], state: ResolutionState | None) -> FilterResult:
     kept: list[dict] = []
+    applied: list[ResolutionEntry] = []
     for item in items or ():
-        if is_superseded_historical_concern(
-            str(item.get('content') or ''),
-            state,
-            recorded_at=str(item.get('woke_at') or ''),
-        ):
+        content = str(item.get('content') or '')
+        recorded_at = str(item.get('woke_at') or '')
+        match = find_superseding_resolution(content, state, recorded_at=recorded_at)
+        if match:
+            applied.append(match)
             continue
         kept.append(dict(item))
-    return kept
+    return FilterResult(kept=kept, applied_resolutions=applied)
 
 
-def filter_diary_texts(texts: Iterable[str], state: ResolutionState | None) -> list[str]:
-    return [
-        text for text in texts
-        if not is_superseded_historical_concern(str(text or ''), state)
-    ]
+def filter_diary_rows(rows: Iterable, state: ResolutionState | None) -> FilterResult:
+    kept = []
+    applied: list[ResolutionEntry] = []
+    for row in rows:
+        content, recorded_at = _row_content_and_time(row)
+        match = find_superseding_resolution(content, state, recorded_at=recorded_at)
+        if match:
+            applied.append(match)
+            continue
+        kept.append(row)
+    return FilterResult(kept=kept, applied_resolutions=applied)
