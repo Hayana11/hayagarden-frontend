@@ -114,10 +114,10 @@ def _needs_prior_user_context(content: str) -> bool:
 
 
 def _looks_like_question(body: str) -> bool:
-    trimmed = body.rstrip('？?。.!！… ')
-    if body.endswith('?') or body.endswith('？'):
+    if '?' in body or '？' in body:
         return True
-    return bool(trimmed.endswith('吗') or trimmed.endswith('呢'))
+    trimmed = body.rstrip('。.!！… ')
+    return trimmed.endswith('吗')
 
 
 def is_user_resolution(text: str) -> bool:

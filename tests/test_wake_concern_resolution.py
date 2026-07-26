@@ -39,6 +39,8 @@ class ConcernResolutionLogicTests(unittest.TestCase):
 
     def test_question_form_is_not_resolution(self):
         self.assertFalse(cr.is_user_resolution('医生说不用打针吗？'))
+        self.assertFalse(cr.is_user_resolution('医生说不用打针吗？我没听清。'))
+        self.assertFalse(cr.is_user_resolution('我忘了，医生说不用打针？后来怎么说的。'))
 
     def test_movie_ended_is_not_resolution(self):
         self.assertFalse(cr.is_user_resolution('电影结束了，挺好看的。'))
@@ -380,13 +382,24 @@ class WakeConcernResolutionIntegrationTests(unittest.TestCase):
         from chat import system_builder
 
         self._insert_wake('explore', '还在想破伤风要不要打。', hours_ago=24)
-        self._insert_user('医生说破伤风不用打针，伤口已经愈合。', hours_ago=200)
+        self._insert_user('医生说破伤风不用打针，伤口已经愈合。', hours_ago=1)
 
         gateway_stub = types.ModuleType('gateway')
         gateway_stub.get_db = self.get_db
         with mock.patch.dict(sys.modules, {'gateway': gateway_stub}):
             one_shot = system_builder.build_cc_one_shot(include_wake=True)
+            self.assertEqual(one_shot.get('wake_items'), [])
+            self.assertEqual(one_shot.get('suppressed_wake_ids'), [1])
             context_continuity.consume_wake_ids(self.get_db, one_shot['wake_ids'])
+
+            conn = self.get_db()
+            conn.execute(
+                "UPDATE chat_messages SET created_at=? WHERE id=1",
+                (self._ts(hours_ago=200),),
+            )
+            conn.commit()
+            conn.close()
+
             revived = system_builder.build_cc_one_shot(include_wake=True)
 
         self.assertEqual(revived.get('wake_items'), [])
