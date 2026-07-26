@@ -5,7 +5,7 @@
 - **计划分支**：`plan/unified-heartbeat-tracker`
 - **当前状态**：`MEMORY_HOTFIX_READY`（#134 代码审查 PASS；待 merge，非 deploy）
 - **最后更新**：2026-07-26（#134 Ready 终审；登记 MEM-PIN-REPAIR / OMBRE-P0-TEST-GATE）
-- **tracker head**：`cdeeeeb`
+- **tracker head**：`bfe8921`
 - **当前 identity**：`identity_id = "fyodor-default"` · `provider_id = "claude_code"` · `conversation_id = "default"`
 - **首个 Provider Adapter**：Claude Unified Resident Adapter
 
