@@ -5,7 +5,7 @@
 - **计划分支**：`plan/unified-heartbeat-tracker`
 - **当前状态**：`MEMORY_HOTFIX_DEPLOYED`（#134 已 merge + legacy_module 生产部署 + smoke PASS）
 - **最后更新**：2026-07-26（#134 merge `dbf3ad4` → deploy → production smoke；#127 证据补齐）
-- **tracker head**：`11c5f8b`
+- **tracker head**：`fcda443`
 - **生产 HEAD**：`dbf3ad4e6db532d7be422004614537e5b3d103ee`
 - **当前 identity**：`identity_id = "fyodor-default"` · `provider_id = "claude_code"` · `conversation_id = "default"`
 - **首个 Provider Adapter**：Claude Unified Resident Adapter
