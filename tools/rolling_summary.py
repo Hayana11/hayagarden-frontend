@@ -98,17 +98,13 @@ def _run_mode(mode: str, *, horizon: int, maxchar: int, static_dir: str):
     from chat.history_boundary import boundary_rows_for_summary
     from chat.rolling_summary_store import clear_summary, get_summary, save_summary
 
-    for_cc = mode == 'cc_token_budget'
-    if mode == 'legacy_block':
-        for_cc = False
-
     def get_db():
         return _db()
 
     trimmed_up_to_id, oldest_retained_id, rows = boundary_rows_for_summary(
         get_db,
         horizon_days=horizon,
-        for_cc=for_cc,
+        history_mode=mode,
         static_dir=static_dir,
     )
     if trimmed_up_to_id <= 0 or not rows:

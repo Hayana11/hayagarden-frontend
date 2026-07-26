@@ -171,7 +171,40 @@ def resolve_fetch_plan(
     available_count: int,
     for_cc: bool,
     lean_history: Optional[bool] = None,
+    history_mode: Optional[str] = None,
 ) -> dict[str, Any]:
+    if history_mode is not None:
+        mode = str(history_mode)
+        if mode == 'legacy_block':
+            limit = legacy_block_limit(available_count)
+            return {
+                'mode': 'legacy_block',
+                'fetch_limit': limit,
+                'history_token_budget': 0,
+                'relay_high_water': 0,
+                'relay_low_water': 0,
+                'relay_head_id': 0,
+            }
+        if mode == 'relay_hysteresis':
+            return {
+                'mode': 'relay_hysteresis',
+                'fetch_limit': max(available_count, _WINDOW_BASE + _WINDOW_BLOCK),
+                'history_token_budget': 0,
+                'relay_high_water': relay_history_high_water(),
+                'relay_low_water': relay_history_low_water(),
+                'relay_head_id': relay_history_head_id(),
+            }
+        if mode == 'cc_token_budget':
+            return {
+                'mode': 'cc_token_budget',
+                'fetch_limit': max(available_count, _WINDOW_BASE + _WINDOW_BLOCK),
+                'history_token_budget': cc_history_token_budget(),
+                'relay_high_water': 0,
+                'relay_low_water': 0,
+                'relay_head_id': 0,
+            }
+        raise ValueError('unknown history_mode: %r' % mode)
+
     lean = lean_history_enabled() if lean_history is None else bool(lean_history)
     if not lean:
         limit = legacy_block_limit(available_count)
@@ -207,6 +240,7 @@ def boundary_rows_for_summary(
     *,
     horizon_days: int = 3,
     for_cc: bool = False,
+    history_mode: Optional[str] = None,
     static_dir: str = '/opt/frontend/static',
     read_file_fn: Optional[Callable[[str, str], Optional[str]]] = None,
 ) -> tuple[int, int, list[Any]]:
@@ -232,7 +266,11 @@ def boundary_rows_for_summary(
     if not rows:
         return 0, 0, []
 
-    plan = resolve_fetch_plan(available_count=available, for_cc=for_cc)
+    plan = resolve_fetch_plan(
+        available_count=available,
+        for_cc=for_cc,
+        history_mode=history_mode,
+    )
     all_ids = [int(_row_id(r)) for r in rows]
 
     if plan['mode'] == 'legacy_block':
