@@ -6,6 +6,7 @@ import os
 import sqlite3
 import sys
 import tempfile
+import threading
 import types
 import unittest
 from pathlib import Path
@@ -224,6 +225,58 @@ class ConcernResolutionLogicTests(unittest.TestCase):
             '还在想 frontend 故障要不要继续排查。', state, recorded_at='2026-07-20 18:00:00',
         ))
 
+    def test_compound_sentence_last_reopen_wins(self):
+        self.assertTrue(cr.is_user_reopen('昨天已经修好了，但今天又报错了。'))
+        self.assertFalse(cr.is_user_resolution('昨天已经修好了，但今天又报错了。'))
+
+    def test_compound_sentence_last_resolution_wins(self):
+        self.assertTrue(cr.is_user_resolution('刚才又报错了，不过现在已经修好了。'))
+        self.assertFalse(cr.is_user_reopen('刚才又报错了，不过现在已经修好了。'))
+
+    def test_compound_sentence_doctor_then_new_problem_is_reopen(self):
+        self.assertTrue(cr.is_user_reopen('医生之前说没事，但现在又出现问题。'))
+        self.assertFalse(cr.is_user_resolution('医生之前说没事，但现在又出现问题。'))
+
+    def test_compound_sentence_still_problem_now_resolved(self):
+        self.assertTrue(cr.is_user_resolution('刚才仍有问题，现在已经解决。'))
+        self.assertFalse(cr.is_user_reopen('刚才仍有问题，现在已经解决。'))
+
+    def test_state_tokens_do_not_cross_distinct_orders(self):
+        messages = [
+            {'id': 1, 'content': '订单a已经完成，不用再问了。', 'created_at': '2026-07-21 12:00:00'},
+        ]
+        state = cr.build_resolution_state(messages)
+        self.assertFalse(cr.is_superseded_historical_concern(
+            '订单b还是没完成。', state, recorded_at='2026-07-20 18:00:00',
+        ))
+
+    def test_state_tokens_do_not_cross_frontend_variants(self):
+        messages = [
+            {'id': 1, 'content': 'frontend已经解决，不用再看了。', 'created_at': '2026-07-21 12:00:00'},
+        ]
+        state = cr.build_resolution_state(messages)
+        self.assertFalse(cr.is_superseded_historical_concern(
+            'frontend-gw还是没解决。', state, recorded_at='2026-07-20 18:00:00',
+        ))
+
+    def test_state_tokens_do_not_cross_distinct_express_items(self):
+        messages = [
+            {'id': 1, 'content': '快递a已经送到，不用再问了。', 'created_at': '2026-07-21 12:00:00'},
+        ]
+        state = cr.build_resolution_state(messages)
+        self.assertFalse(cr.is_superseded_historical_concern(
+            '快递b还是没送到。', state, recorded_at='2026-07-20 18:00:00',
+        ))
+
+    def test_state_tokens_do_not_cross_distinct_services(self):
+        messages = [
+            {'id': 1, 'content': '服务a已经恢复，不用再排查了。', 'created_at': '2026-07-21 12:00:00'},
+        ]
+        state = cr.build_resolution_state(messages)
+        self.assertFalse(cr.is_superseded_historical_concern(
+            '服务b还没恢复。', state, recorded_at='2026-07-20 18:00:00',
+        ))
+
 
 class WakeConcernResolutionIntegrationTests(unittest.TestCase):
     def setUp(self):
@@ -262,6 +315,7 @@ class WakeConcernResolutionIntegrationTests(unittest.TestCase):
             );
             """
         )
+        cr.ensure_concern_closure_schema(conn)
         conn.commit()
         conn.close()
 
@@ -792,6 +846,58 @@ class WakeConcernResolutionIntegrationTests(unittest.TestCase):
         self.assertNotIn('用户已明确结案', cold.get('long_term_memory', ''))
         self.assertEqual(one_shot.get('wake_items'), [])
         self.assertIn('用户已明确结案', system_builder.format_one_shot(one_shot))
+
+    def test_concurrent_sync_preserves_final_resolution(self):
+        self._insert_user_at('快递已经取完，不用再跑了。', message_id=1, hours_ago=30)
+        self._insert_user_at('快递又找不到了，还得再去拿。', message_id=2, hours_ago=20)
+        self._insert_user_at('快递已经取到了，不用再跑了。', message_id=3, hours_ago=10)
+
+        barrier = threading.Barrier(2)
+        errors: list[BaseException] = []
+
+        def worker():
+            conn = sqlite3.connect(self.db_path, timeout=30)
+            conn.row_factory = sqlite3.Row
+            try:
+                barrier.wait(timeout=5)
+                cr.sync_concern_closures(conn)
+            except BaseException as exc:
+                errors.append(exc)
+            finally:
+                conn.close()
+
+        threads = [threading.Thread(target=worker) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=10)
+
+        self.assertEqual(errors, [])
+
+        conn = self.get_db()
+        active = conn.execute(
+            "SELECT COUNT(*) FROM concern_closures WHERE active=1"
+        ).fetchone()[0]
+        cursor = conn.execute(
+            "SELECT last_processed_message_id FROM concern_closure_sync WHERE id=1"
+        ).fetchone()[0]
+        summary = conn.execute(
+            "SELECT summary FROM concern_closures WHERE active=1"
+        ).fetchone()[0]
+        conn.close()
+
+        self.assertEqual(active, 1)
+        self.assertEqual(cursor, 3)
+        self.assertIn('取到', summary)
+
+        state = cr.load_active_closure_state(self.get_db())
+        self.assertEqual(len(state.active), 1)
+        self.assertTrue(cr.is_superseded_historical_concern(
+            '还在想快递有没有取。', state, recorded_at='2026-07-20 11:00:00',
+        ))
+        self.assertFalse(cr.is_superseded_historical_concern(
+            '还在想订单b还是没完成。', state, recorded_at='2026-07-20 11:00:00',
+        ))
 
 
 if __name__ == '__main__':

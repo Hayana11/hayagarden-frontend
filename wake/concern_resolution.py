@@ -44,13 +44,19 @@ _REOPEN_PATTERNS = tuple(
         r'(?:重新|再次)(?:出现|发生|报错|出问题|问|处理|催|跑|取)',
         r'(?:今天|刚才|刚刚).{0,12}(?:出问题|报错|失败|恶化|坏了|找不到|延迟|开始|又)',
         r'(?:开始|出现)(?:问题|故障|报错|状况|反复|了|着)',
+        r'(?:仍|还)(?:有|没|未).{0,8}(?:问题|故障|报错|完成|解决)',
     )
 )
 
 _DOMAIN_GENERIC = frozenset({
     '进度', '订单', '工厂', '服务', '故障', '部署', '问题', '系统', '项目',
     '前端', '后端', '接口', '模块', '版本', '环境', '厂家', '产线',
-    '发货', '送达', '取完', '修好', '跟完', '排查', '报错',
+})
+
+_STATE_TOKENS = frozenset({
+    '完成', '解决', '恢复', '修好', '送到', '到账', '取到', '愈合', '好转',
+    '取完', '跟完', '发货', '失败', '报错', '排查', '处理', '正常', '没事',
+    '好了', '结束', '完了', '过去', '放下', '送达',
 })
 
 _GENERIC_TOPIC_TOKENS = frozenset({
@@ -109,13 +115,13 @@ class FilterResult:
 
 def ensure_concern_closure_schema(conn: sqlite3.Connection) -> None:
     conn.executescript(_SCHEMA_SQL)
-    conn.commit()
 
 
 def ensure_concern_closure_schema_for_path(db_path: str) -> None:
     conn = sqlite3.connect(db_path, timeout=30)
     try:
         ensure_concern_closure_schema(conn)
+        conn.commit()
     finally:
         conn.close()
 
@@ -153,12 +159,29 @@ def topic_tokens(text: str) -> frozenset[str]:
     return frozenset(tokens)
 
 
+def identity_topic_tokens(text: str) -> frozenset[str]:
+    return frozenset(
+        token for token in topic_tokens(text)
+        if token not in _STATE_TOKENS
+    )
+
+
 def _identity_tokens(tokens: frozenset[str]) -> frozenset[str]:
     return frozenset(
         token for token in tokens
         if len(token) >= 2
         and token not in _GENERIC_TOPIC_TOKENS
         and token not in _DOMAIN_GENERIC
+        and token not in _STATE_TOKENS
+    )
+
+
+def _matchable_tokens(tokens: frozenset[str]) -> frozenset[str]:
+    return frozenset(
+        token for token in tokens
+        if len(token) >= 2
+        and token not in _GENERIC_TOPIC_TOKENS
+        and token not in _STATE_TOKENS
     )
 
 
@@ -180,14 +203,8 @@ def substantive_topic_overlap(left: frozenset[str], right: frozenset[str]) -> bo
     right_identity = _identity_tokens(right)
     if left_identity & right_identity:
         return True
-    left_all = {
-        token for token in left
-        if len(token) >= 2 and token not in _GENERIC_TOPIC_TOKENS
-    }
-    right_all = {
-        token for token in right
-        if len(token) >= 2 and token not in _GENERIC_TOPIC_TOKENS
-    }
+    left_all = _matchable_tokens(left)
+    right_all = _matchable_tokens(right)
     for left_token in left_all:
         for right_token in right_all:
             if _anchor_token_match(left_token, right_token):
@@ -218,24 +235,39 @@ def _looks_like_question(body: str) -> bool:
     return trimmed.endswith('吗')
 
 
-def is_user_resolution(text: str) -> bool:
+def _last_match_position(body: str, patterns: Sequence[re.Pattern]) -> int:
+    last = -1
+    for pattern in patterns:
+        for match in pattern.finditer(body):
+            last = max(last, match.start())
+    return last
+
+
+def classify_user_concern_event(text: str) -> str | None:
     body = (text or '').strip()
     if not body:
-        return False
+        return None
     if _looks_like_question(body):
-        return False
+        return None
     if _RESOLUTION_NEGATION.search(body) or _RESOLUTION_RHETORICAL.search(body):
-        return False
-    return any(p.search(body) for p in _RESOLUTION_PATTERNS)
+        return None
+    resolution_pos = _last_match_position(body, _RESOLUTION_PATTERNS)
+    reopen_pos = _last_match_position(body, _REOPEN_PATTERNS)
+    if resolution_pos < 0 and reopen_pos < 0:
+        return None
+    if reopen_pos > resolution_pos:
+        return 'reopen'
+    if resolution_pos > reopen_pos:
+        return 'resolve'
+    return 'reopen' if reopen_pos >= 0 else 'resolve'
+
+
+def is_user_resolution(text: str) -> bool:
+    return classify_user_concern_event(text) == 'resolve'
 
 
 def is_user_reopen(text: str) -> bool:
-    body = (text or '').strip()
-    if not body:
-        return False
-    if is_user_resolution(body):
-        return False
-    return any(p.search(body) for p in _REOPEN_PATTERNS)
+    return classify_user_concern_event(text) == 'reopen'
 
 
 def topic_overlap(left: frozenset[str], right: frozenset[str], *, min_overlap: int = 1) -> bool:
@@ -330,9 +362,9 @@ def _collect_resolution_topics(chat_messages: Sequence[dict], message_id: int) -
     if index < 0:
         return frozenset()
     content = str(chat_messages[index].get('content') or '')
-    tokens = set(topic_tokens(content))
+    tokens = set(identity_topic_tokens(content))
     if _needs_prior_chat_context(content) and index > 0:
-        tokens.update(topic_tokens(str(chat_messages[index - 1].get('content') or '')))
+        tokens.update(identity_topic_tokens(str(chat_messages[index - 1].get('content') or '')))
     return frozenset(tokens)
 
 
@@ -477,7 +509,7 @@ def _apply_concern_event(
     if is_user_reopen(content):
         _deactivate_matching_closures(
             conn,
-            topic_tokens(content),
+            identity_topic_tokens(content),
             reopened_at=created_at,
         )
         return
@@ -496,32 +528,38 @@ def sync_concern_closures(
     *,
     lookback_hours: int = _DEFAULT_LOOKBACK_HOURS,
 ) -> None:
-    ensure_concern_closure_schema(conn)
-    cursor = _get_sync_cursor(conn)
-    if cursor == 0:
-        messages = fetch_chat_messages(conn, lookback_hours=lookback_hours)
-    else:
-        messages = _fetch_incremental_chat_messages(conn, after_message_id=cursor)
-    if not messages:
-        return
+    conn.execute('BEGIN IMMEDIATE')
+    try:
+        cursor = _get_sync_cursor(conn)
+        if cursor == 0:
+            messages = fetch_chat_messages(conn, lookback_hours=lookback_hours)
+        else:
+            messages = _fetch_incremental_chat_messages(conn, after_message_id=cursor)
+        if not messages:
+            conn.commit()
+            return
 
-    max_id = cursor
-    for msg in messages:
-        message_id = int(msg.get('id') or 0)
-        if message_id <= cursor:
-            continue
-        if _is_user_author(msg.get('author')):
-            context = (
-                messages
-                if cursor == 0
-                else _fetch_messages_up_to(conn, message_id)
-            )
-            _apply_concern_event(conn, msg, context)
-        max_id = max(max_id, message_id)
+        max_id = cursor
+        bootstrap = cursor == 0
+        for msg in messages:
+            message_id = int(msg.get('id') or 0)
+            if message_id <= cursor:
+                continue
+            if _is_user_author(msg.get('author')):
+                context = (
+                    messages
+                    if bootstrap
+                    else _fetch_messages_up_to(conn, message_id)
+                )
+                _apply_concern_event(conn, msg, context)
+            max_id = max(max_id, message_id)
 
-    if max_id > cursor:
-        _set_sync_cursor(conn, max_id)
-    conn.commit()
+        if max_id > cursor:
+            _set_sync_cursor(conn, max_id)
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
 
 
 def build_resolution_state(
@@ -535,7 +573,7 @@ def build_resolution_state(
         content = str(msg.get('content') or '')
         message_id = int(msg.get('id') or 0)
         if is_user_reopen(content):
-            reopen_tokens = topic_tokens(content)
+            reopen_tokens = identity_topic_tokens(content)
             active = [
                 entry for entry in active
                 if not substantive_topic_overlap(entry.topic_tokens, reopen_tokens)
@@ -559,11 +597,10 @@ def load_resolution_state(
 ) -> ResolutionState:
     try:
         sync_concern_closures(conn, lookback_hours=lookback_hours)
+    except sqlite3.OperationalError:
+        pass
     except Exception:
-        try:
-            ensure_concern_closure_schema(conn)
-        except Exception:
-            return ResolutionState(active=[])
+        pass
     try:
         return load_active_closure_state(conn)
     except Exception:
@@ -586,7 +623,7 @@ def find_superseding_resolution(
 ) -> ResolutionEntry | None:
     if not state or not state.active:
         return None
-    tokens = topic_tokens(text)
+    tokens = identity_topic_tokens(text)
     if not tokens:
         return None
     for entry in state.active:
