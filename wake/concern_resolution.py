@@ -79,7 +79,7 @@ _WAIT_INTENT_RE = re.compile(
     rf'^{_SPEAKER_PREFIX_RE}?(?:只是)?(?:等|在等|想等)',
 )
 _INTENT_WANT_RE = re.compile(
-    rf'^{_SPEAKER_PREFIX_RE}?想(?!等)',
+    rf'^{_SPEAKER_PREFIX_RE}?(?:只是)?想(?!等)',
 )
 _OUTER_NEGATES_UNRESOLVED_RE = re.compile(
     r'^(?:'

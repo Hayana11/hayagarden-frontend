@@ -792,6 +792,9 @@ class ConcernResolutionLogicTests(unittest.TestCase):
             '我想修好 frontend',
             '我想让 frontend 修好',
             '我想等 frontend 修好后再结案',
+            '我只是想修好 frontend',
+            '我们只是想让 frontend 修好',
+            '只是想修好 frontend',
         )
         for text in cases:
             self.assertFalse(
