@@ -103,24 +103,32 @@ def is_pending_user_turn(get_db_fn, message_id):
         conn.close()
 
 
-def _tool_caps(cap_small, cap_large):
+def _tool_caps(cap_small, cap_large, cap_total=None):
     if cap_small is not None and cap_large is not None:
-        return max(0, int(cap_small)), max(0, int(cap_large))
-    try:
-        import config_store
-        small = config_store.get_int("TOOL_INJECT_MAX", 2000)
-        large = config_store.get_int("TOOL_INJECT_MAX_MCP", 8000)
-    except Exception:
-        small, large = 2000, 8000
-    return (
-        max(0, int(small if cap_small is None else cap_small)),
-        max(0, int(large if cap_large is None else cap_large)),
-    )
+        small, large = max(0, int(cap_small)), max(0, int(cap_large))
+    else:
+        try:
+            import config_store
+            small = config_store.get_int("TOOL_INJECT_MAX", 2000)
+            large = config_store.get_int("TOOL_INJECT_MAX_MCP", 8000)
+        except Exception:
+            small, large = 2000, 8000
+        small, large = max(0, int(small)), max(0, int(large))
+    if cap_total is not None:
+        total = max(0, int(cap_total))
+    else:
+        try:
+            import config_store
+            total = config_store.get_int("TOOL_INJECT_TOTAL_MAX", 12000)
+        except Exception:
+            total = 12000
+    return small, large, total
 
 
-def format_tool_history(tool_calls_json, cap_small=None, cap_large=None):
+def format_tool_history(tool_calls_json, cap_small=None, cap_large=None, cap_total=None):
     """Render persisted tool calls as text for the next model turn."""
-    small, large = _tool_caps(cap_small, cap_large)
+    from chat.context_budget import trim_tool_history_lines, default_estimate_tokens
+    small, large, total = _tool_caps(cap_small, cap_large, cap_total)
     try:
         calls = json.loads(tool_calls_json)
     except (TypeError, ValueError):
@@ -146,4 +154,6 @@ def format_tool_history(tool_calls_json, cap_small=None, cap_large=None):
             result = result[:cap] + "…(已截断)"
         failed = "" if call.get("success", True) else "（失败）"
         lines.append("· %s%s %s\n  → %s" % (name, failed, args_text, result))
-    return "\n".join(lines) if len(lines) > 1 else ""
+    if len(lines) <= 1:
+        return ""
+    return "\n".join(trim_tool_history_lines(lines, total_budget=total, estimate_tokens=default_estimate_tokens))

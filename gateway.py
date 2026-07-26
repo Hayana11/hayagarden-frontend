@@ -721,29 +721,58 @@ def _extract_choices(text):
 
 
 def build_messages():
+    from chat.context_budget import (
+        default_estimate_tokens,
+        file_revisit_summary,
+        trim_rows_to_token_budget,
+    )
     conn = get_db()
-    # 今天的所有对话 + 昨天最后5条（保持连续性）。历史窗口按块裁剪：
-    # 60 条以后先继续增长到 79 条，攒满 20 条再一次裁掉一块。这样
-    # 缓存前缀不会因为每来一条新消息就从开头滑动一次。
+    # 今天的所有对话 + 昨天最后5条（保持连续性）。历史窗口按 token 预算裁剪
+    # （默认 24000，可用 HISTORY_TOKEN_BUDGET 调整；设为 0 则回退块裁剪 60+20）。
     _where = "date(created_at) >= date('now', '+8 hours', '-1 day')"
     _window_base, _window_block = 60, 20
+    try:
+        import config_store
+        _history_token_budget = config_store.get_int("HISTORY_TOKEN_BUDGET", 24000)
+    except Exception:
+        _history_token_budget = 0
     try:
         _available = conn.execute(
             "SELECT COUNT(*) FROM chat_messages WHERE " + _where
         ).fetchone()[0] or 0
     except Exception:
         _available = _window_base
-    _limit = _available
-    if _available > _window_base:
-        _limit = _window_base + ((_available - _window_base) % _window_block)
-    if _limit <= 0:
-        _limit = _window_base
+    if _history_token_budget > 0:
+        _fetch_limit = max(_available, _window_base + _window_block)
+    else:
+        _limit = _available
+        if _available > _window_base:
+            _limit = _window_base + ((_available - _window_base) % _window_block)
+        if _limit <= 0:
+            _limit = _window_base
+        _fetch_limit = _limit
     rows = list(reversed(conn.execute(
         "SELECT author, content, image_url, created_at, tool_calls, file_url, file_name FROM chat_messages "
         "WHERE " + _where + " ORDER BY id DESC LIMIT ?",
-        (_limit,),
+        (_fetch_limit,),
     ).fetchall()))
     conn.close()
+    if _history_token_budget > 0 and rows:
+        def _row_text(row):
+            parts = [str(row['content'] or '')]
+            if row['file_url']:
+                parts.append(str(row['file_name'] or row['file_url']))
+            return '\n'.join(parts)
+        rows, _ = trim_rows_to_token_budget(
+            rows,
+            budget=_history_token_budget,
+            text_fn=_row_text,
+            estimate_tokens=default_estimate_tokens,
+        )
+        _limit = len(rows)
+        _available = max(_available, _limit)
+    else:
+        _limit = len(rows)
     _total = len(rows)
 
     # 图片大小限制：base64编码后的图片payload很容易让请求体爆炸到几十MB，
@@ -754,6 +783,7 @@ def build_messages():
 
     msgs = []
     prev_dt = None
+    seen_files = {}
     for _ri, r in enumerate(rows):
         is_ai = r['author'] in ('fyodor', 'claude', 'assistant')
         role  = 'assistant' if is_ai else 'user'
@@ -787,15 +817,21 @@ def build_messages():
             blocks.append({'type': 'text', 'text': note + r['content']})
         # 用户发的文件：抄图片的降级策略——最近 6 条注入全文，更早只留标记（content 里的 [文件:x]）
         _fu = r['file_url'] if ('file_url' in r.keys()) else ''
-        if _fu and not is_ai and _ri >= _total - 6 and _fu.startswith('/static/'):
+        if _fu and not is_ai and _fu.startswith('/static/'):
             try:
                 _fp = os.path.realpath(STATIC_DIR + _fu[7:])  # /static/... → 磁盘路径，realpath 除掉 ../
                 if _fp.startswith(os.path.realpath(STATIC_DIR)) and os.path.exists(_fp):
                     with open(_fp, 'r', encoding='utf-8', errors='replace') as _ff:
                         _body = _ff.read()
-                    if len(_body) > 30000:
-                        _body = _body[:30000] + '\n...(文件过长已截断)'
-                    blocks.append({'type': 'text', 'text': '[用户发来文件: %s]\n```\n%s\n```' % (r['file_name'] or '附件', _body)})
+                    _fname = r['file_name'] or '附件'
+                    if _fu in seen_files:
+                        _body = file_revisit_summary(_body)
+                        blocks.append({'type': 'text', 'text': '[用户发来文件: %s · 此前已全文注入]\n```\n%s\n```' % (_fname, _body)})
+                    elif _ri >= _total - 6:
+                        if len(_body) > 30000:
+                            _body = _body[:30000] + '\n...(文件过长已截断)'
+                        seen_files[_fu] = True
+                        blocks.append({'type': 'text', 'text': '[用户发来文件: %s]\n```\n%s\n```' % (_fname, _body)})
             except Exception:
                 pass
         # AI 消息：把上一轮工具调用与结果也注入回去，否则模型下轮会失忆
@@ -824,9 +860,13 @@ def build_messages():
         else:
             msgs.append({'role': role, 'content': content})
 
-    # 滚动摘要：只有发生块状裁剪时才注入。增长期(61~79条)窗口里
-    # 仍保留全部实时消息，不注入摘要，避免重复内容和缓存头部抖动。
-    if _available > _limit:
+    # 滚动摘要：发生裁剪（块裁剪或 token 预算）时注入。
+    _cropped_by_count = (
+        _history_token_budget <= 0
+        and _available > _limit
+    )
+    _cropped_by_tokens = _history_token_budget > 0 and _fetch_limit > _limit
+    if _cropped_by_count or _cropped_by_tokens:
         try:
             _rc = get_db()
             _rsrow = _rc.execute('SELECT summary FROM rolling_summary WHERE id=1').fetchone()
@@ -3247,7 +3287,14 @@ def _cc_resident_stream_gen(messages, *, user_turn=True):
         rel_sources = dict(relationship.sources or {})
 
     # 2) 每轮构建 state / one-shot；3) 仅冷启动构建 cold_once
-    state = build_cc_state()
+    from chat.context_budget import filter_state_dict_for_turn, collect_messages_file_text
+    raw_state = build_cc_state()
+    state = filter_state_dict_for_turn(
+        raw_state,
+        user_text=last_text or '',
+        last_snapshot=getattr(_CC_RESIDENT, 'last_state_snapshot', None),
+        is_cold=is_cold,
+    )
     one_shot = build_cc_one_shot(include_wake=user_turn)
     # 冷启动：none/diary/explore 必须保留；message 仅在结构化 messages 的
     # assistant 精确命中时省略。可见性检查零 I/O，不调用 messages_to_text
@@ -3402,6 +3449,9 @@ def _cc_resident_stream_gen(messages, *, user_turn=True):
         memory_recall_text=recall_text or '',
         group_delta_text=group_text or '',
         one_shot_text=one_shot_text or '',
+        wake_reply_bridge_text=wake_reply_bridge or '',
+        relationship_text=relationship_text or '',
+        files_text=collect_messages_file_text(messages) if is_cold else '',
         user_text=last_text or '',
         final_content=content,
         tool_schema_text=tool_surface.get("tool_schema_text"),
@@ -3416,11 +3466,22 @@ def _cc_resident_stream_gen(messages, *, user_turn=True):
     if not _cc_obs.prompt_content_unchanged(original_content, content):
         raise RuntimeError('cc observability mutated content')
 
+    tool_result_chunks = []
     for evt, payload in _CC_RESIDENT.send_turn(content, commit_meta=commit_meta):
+        if evt == 'tool_result' and isinstance(payload, dict):
+            tool_result_chunks.append(str(payload.get('result') or ''))
         if evt == 'done' and isinstance(payload, tuple) and len(payload) >= 3 and isinstance(payload[2], dict):
             raw_text, thinking, usage = payload[0], payload[1], payload[2]
             claims = payload[3] if len(payload) >= 4 else {}
             try:
+                if tool_result_chunks:
+                    obs_breakdown = dict(obs_breakdown)
+                    obs_breakdown['tool_result_tokens_estimate'] = (
+                        _cc_obs.estimate_tokens_heuristic_cjk1_ascii4_v1(
+                            '\n'.join(tool_result_chunks)
+                        )
+                    )
+                    obs_breakdown['tool_result_measured'] = True
                 breakdown = _cc_obs.finalize_breakdown_with_usage(
                     obs_breakdown, usage, is_cold=is_cold,
                 )
@@ -3465,12 +3526,22 @@ def _cc_resident_stream_gen(messages, *, user_turn=True):
                     ),
                     provider='claude_code',
                 )
+                turn_measurement = _cc_obs.build_turn_measurement(
+                    breakdown=breakdown,
+                    usage=usage,
+                    runtime=runtime,
+                    is_cold=is_cold,
+                )
+                breakdown['turn_tags'] = list(turn_measurement.get('turn_tags') or [])
+                breakdown['turn_measurement'] = turn_measurement
                 for _k in list(usage.keys()):
                     if str(_k).startswith('_obs_'):
                         usage.pop(_k, None)
                 usage = _cc_obs.attach_observation(
                     usage, context_breakdown=breakdown, runtime=runtime,
                 )
+                usage['turn_tags'] = list(breakdown.get('turn_tags') or [])
+                usage['turn_measurement'] = turn_measurement
             except Exception:
                 for _k in list(usage.keys()):
                     if str(_k).startswith('_obs_'):
