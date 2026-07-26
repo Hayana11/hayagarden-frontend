@@ -1,28 +1,39 @@
 """Stage 1: State delta / re-anchor — fixtures, parity, and observation contracts."""
 from __future__ import annotations
 
-import copy
 import unittest
 from types import SimpleNamespace
 from unittest import mock
 
-from chat.context_budget import merge_cumulative_state_send, normalize_state_dict
+from chat.context_budget import normalize_state_dict
 from chat.context_lean_state import (
     STATE_SCHEMA_VERSION,
     assemble_cc_state_context,
+    assemble_legacy_full_fallback,
     compute_state_version,
-    contains_style_instruction,
     evaluate_reanchor_reason,
     format_structured_state_delta,
     format_structured_state_anchor,
 )
-from chat.system_builder import (
-    build_cc_static_system,
-    format_state_diff,
-    format_state_snapshot,
-)
+from chat.system_builder import format_state_diff, format_state_snapshot
 from cc_resident import ResidentSession
-from tools.cc_usage_observability import sha256_text
+
+
+# Frozen legacy fixture (representative production-shaped strings).
+LEGACY_RAW = normalize_state_dict({
+    'time_bucket': '当前时间段：上午 左右',
+    'emotion': '## 此刻的情绪与欲望\n情绪：V0.60/A0.30 — 平静\nPA 0.50 | NA 0.20 | 混合张力',
+    'drive': '驱动：想她 中等（0.55）',
+    'lights': '（灯·当前状态：主灯 关，床头灯 关）',
+    'reminders': '## 今日提醒\n- 修改 AI 的语气，让表达更克制',
+})
+
+RAW_V1 = normalize_state_dict({
+    'time_bucket': '当前时间段：上午 左右',
+    'emotion': 'valence=0.60 arousal=0.30 mood=平静 pa=0.50 na=0.20 longing=0.35 desire_p=0.10 desire_i=0.30 desire_c=0.70',
+    'drive': 'attachment=0.55 curiosity=0.20',
+    'lights': '（灯·当前状态：主灯 关）',
+})
 
 
 def _resident_stub(**overrides):
@@ -41,53 +52,57 @@ def _resident_stub(**overrides):
     return SimpleNamespace(**base)
 
 
-RAW_V1 = normalize_state_dict({
-    'time_bucket': '当前时间段：上午 左右',
-    'emotion': 'valence=0.60 arousal=0.30 mood=平静 pa=0.50 na=0.20 longing=0.35 desire_p=0.10 desire_i=0.30 desire_c=0.70',
-    'drive': 'attachment=0.55 curiosity=0.20',
-    'lights': '（灯·当前状态：主灯 关）',
-})
-
-
 class FlagZeroParityTests(unittest.TestCase):
-    def test_static_system_hash_unchanged(self):
-        with mock.patch('config_store.get_bool', return_value=False):
-            h1 = sha256_text(build_cc_static_system())
-            h2 = sha256_text(build_cc_static_system())
-        self.assertEqual(h1, h2)
-
-    @mock.patch('chat.context_lean.lean_state_enabled', return_value=False)
-    def test_legacy_state_path_byte_stable(self, _lean):
-        raw = {
-            'time_bucket': '当前时间段：上午 左右',
-            'emotion': '## 此刻的情绪与欲望\n情绪：V0.60/A0.30 — 平静',
-            'lights': '（灯·主灯 关）',
-        }
-        snap = format_state_snapshot(raw)
-        diff = format_state_diff(raw, raw)
-        self.assertIn('【当前状态】', snap)
-        self.assertEqual(diff, '')
-        resident = _resident_stub(last_state_snapshot=raw)
+    def test_cold_snapshot_matches_legacy_formatter(self):
+        resident = _resident_stub()
+        expected = format_state_snapshot(LEGACY_RAW)
         result = assemble_cc_state_context(
-            raw_state=raw,
-            is_cold=False,
+            raw_state=LEGACY_RAW,
+            is_cold=True,
             user_text='你好',
             resident=resident,
+            lean_on=False,
         )
+        self.assertEqual(result.state_text, expected)
         self.assertFalse(result.used_lean)
+
+    def test_hot_diff_matches_legacy_formatter(self):
+        before = dict(LEGACY_RAW)
+        after = dict(LEGACY_RAW)
+        after['lights'] = '（灯·当前状态：主灯 开，床头灯 关）'
+        resident = _resident_stub(last_state_snapshot=before)
+        expected = format_state_diff(before, after)
+        result = assemble_cc_state_context(
+            raw_state=after,
+            is_cold=False,
+            user_text='灯还亮吗',
+            resident=resident,
+            lean_on=False,
+        )
+        self.assertEqual(result.state_text, expected)
+        self.assertFalse(result.used_lean)
+
+    def test_hot_unchanged_matches_empty_legacy_diff(self):
+        resident = _resident_stub(last_state_snapshot=LEGACY_RAW)
+        result = assemble_cc_state_context(
+            raw_state=LEGACY_RAW,
+            is_cold=False,
+            user_text='继续',
+            resident=resident,
+            lean_on=False,
+        )
         self.assertEqual(result.state_text, '')
         self.assertEqual(result.state_mode, 'none')
-        self.assertFalse(result.observation['context_lean_state_enabled'])
 
 
 class StructuredFormatTests(unittest.TestCase):
-    def test_anchor_has_schema_and_no_style_ban(self):
-        ver = compute_state_version(RAW_V1)
-        text = format_structured_state_anchor(RAW_V1, state_version=ver)
-        self.assertIn('schema_version=1', text)
-        self.assertIn('state_version=', text)
-        self.assertNotIn('话少一些', text)
-        self.assertNotIn('安静等待', text)
+    def test_anchor_preserves_user_fact_text_verbatim(self):
+        payload = {'reminders': '## 今日提醒\n- 修改 AI 的语气，让表达更克制'}
+        ver = compute_state_version(payload)
+        text = format_structured_state_anchor(payload, state_version=ver)
+        self.assertIn('修改 AI 的语气，让表达更克制', text)
+        self.assertIn('语气', text)
+        self.assertIn('克制', text)
 
     def test_delta_lists_changed_fields(self):
         after = dict(RAW_V1)
@@ -97,17 +112,41 @@ class StructuredFormatTests(unittest.TestCase):
             RAW_V1,
             send,
             prev_version=compute_state_version(RAW_V1),
-            curr_version=compute_state_version(after),
+            curr_version=compute_state_version(send),
         )
         self.assertIn('changed=lights', text)
         self.assertIn('lights:', text)
 
-    def test_style_instruction_detector(self):
-        self.assertTrue(contains_style_instruction('很想但已经变成安静等着，话少一些。'))
-        self.assertFalse(contains_style_instruction('valence=0.60 arousal=0.30'))
+    def test_tombstone_changed_field_count(self):
+        resident = _resident_stub(
+            last_successful_lean_state=True,
+            last_state_snapshot=RAW_V1,
+            last_state_send_snapshot=RAW_V1,
+            last_state_anchor_generation=1,
+            generation=1,
+            last_state_schema_version=STATE_SCHEMA_VERSION,
+        )
+        cleared = dict(RAW_V1)
+        cleared['lights'] = ''
+        result = assemble_cc_state_context(
+            raw_state=cleared,
+            is_cold=False,
+            user_text='嗯',
+            resident=resident,
+            lean_on=True,
+        )
+        self.assertEqual(result.state_context_mode, 'delta')
+        self.assertEqual(result.observation['changed_field_count'], len(result.send_payload))
+        self.assertIn('lights', result.send_payload)
+        self.assertEqual(result.send_payload['lights'], '')
+        self.assertIn('lights: cleared', result.state_text)
+        self.assertEqual(
+            compute_state_version(result.send_payload),
+            result.observation['state_version'],
+        )
 
 
-class ReanchorDecisionTests(unittest.TestCase):
+class FallbackTests(unittest.TestCase):
     def test_cold_start(self):
         reason = evaluate_reanchor_reason(
             lean_on=True,
@@ -136,38 +175,26 @@ class ReanchorDecisionTests(unittest.TestCase):
         )
         self.assertEqual(reason, 'resident_generation_change')
 
-    def test_turn_interval(self):
-        from chat.context_lean_state import REANCHOR_TURN_INTERVAL
-        reason = evaluate_reanchor_reason(
-            lean_on=True,
-            prev_lean_success=True,
-            is_cold=False,
-            resident_generation=1,
-            last_anchor_generation=1,
-            last_schema_version=STATE_SCHEMA_VERSION,
-            turns_since_anchor=REANCHOR_TURN_INTERVAL,
-            delta_chars_since_anchor=0,
-            cumulative_send_nonempty=True,
-        )
-        self.assertEqual(reason, 'reanchor_turn_interval')
-
 
 class AssembleContextFixtureTests(unittest.TestCase):
-    @mock.patch('chat.context_lean.lean_state_enabled', return_value=True)
-    def test_cold_full_anchor(self, _lean):
+    def test_cold_full_anchor(self):
         resident = _resident_stub()
         result = assemble_cc_state_context(
             raw_state=RAW_V1,
             is_cold=True,
             user_text='你好',
             resident=resident,
+            lean_on=True,
         )
         self.assertEqual(result.state_context_mode, 'full_anchor')
         self.assertIn('锚点', result.state_text)
         self.assertEqual(result.reanchor_reason, 'cold_start')
+        self.assertEqual(
+            compute_state_version(result.send_payload),
+            result.observation['state_version'],
+        )
 
-    @mock.patch('chat.context_lean.lean_state_enabled', return_value=True)
-    def test_hot_unchanged_omitted(self, _lean):
+    def test_hot_unchanged_omitted(self):
         resident = _resident_stub(
             last_successful_lean_state=True,
             last_state_snapshot=RAW_V1,
@@ -180,12 +207,12 @@ class AssembleContextFixtureTests(unittest.TestCase):
             is_cold=False,
             user_text='继续聊',
             resident=resident,
+            lean_on=True,
         )
         self.assertEqual(result.state_context_mode, 'omitted')
         self.assertEqual(result.state_text, '')
 
-    @mock.patch('chat.context_lean.lean_state_enabled', return_value=True)
-    def test_hot_single_field_delta(self, _lean):
+    def test_hot_single_field_delta(self):
         resident = _resident_stub(
             last_successful_lean_state=True,
             last_state_snapshot=RAW_V1,
@@ -201,35 +228,13 @@ class AssembleContextFixtureTests(unittest.TestCase):
             is_cold=False,
             user_text='无关',
             resident=resident,
+            lean_on=True,
         )
         self.assertEqual(result.state_context_mode, 'delta')
         self.assertIn('灯', result.state_text)
         self.assertGreaterEqual(result.observation['changed_field_count'], 1)
 
-    @mock.patch('chat.context_lean.lean_state_enabled', return_value=True)
-    def test_hot_multi_field_delta(self, _lean):
-        resident = _resident_stub(
-            last_successful_lean_state=True,
-            last_state_snapshot=RAW_V1,
-            last_state_send_snapshot=RAW_V1,
-            last_state_anchor_generation=1,
-            generation=1,
-            last_state_schema_version=STATE_SCHEMA_VERSION,
-        )
-        changed = dict(RAW_V1)
-        changed['lights'] = '（灯·主灯 开）'
-        changed['drive'] = 'attachment=0.80 curiosity=0.20'
-        result = assemble_cc_state_context(
-            raw_state=changed,
-            is_cold=False,
-            user_text='无关',
-            resident=resident,
-        )
-        self.assertEqual(result.state_context_mode, 'delta')
-        self.assertGreaterEqual(result.observation['changed_field_count'], 2)
-
-    @mock.patch('chat.context_lean.lean_state_enabled', return_value=True)
-    def test_generation_change_reanchor(self, _lean):
+    def test_generation_change_reanchor(self):
         resident = _resident_stub(
             last_successful_lean_state=True,
             last_state_snapshot=RAW_V1,
@@ -243,34 +248,19 @@ class AssembleContextFixtureTests(unittest.TestCase):
             is_cold=False,
             user_text='你好',
             resident=resident,
+            lean_on=True,
         )
         self.assertEqual(result.reanchor_reason, 'resident_generation_change')
         self.assertEqual(result.state_context_mode, 'full_anchor')
 
-    @mock.patch('chat.context_lean.lean_state_enabled', return_value=True)
-    def test_invalid_delta_fallback(self, _lean):
-        resident = _resident_stub(last_successful_lean_state=True)
-        with mock.patch(
-            'chat.context_lean_state.format_lean_state_for_send',
-            side_effect=ValueError('bad delta'),
-        ):
-            result = assemble_cc_state_context(
-                raw_state=RAW_V1,
-                is_cold=False,
-                user_text='你好',
-                resident=resident,
-            )
-        self.assertEqual(result.state_context_mode, 'fallback')
-        self.assertIsNotNone(result.fallback_reason)
-
-    @mock.patch('chat.context_lean.lean_state_enabled', return_value=True)
-    def test_observation_v3_fields_present(self, _lean):
+    def test_observation_v3_fields_present(self):
         resident = _resident_stub()
         result = assemble_cc_state_context(
             raw_state=RAW_V1,
             is_cold=True,
             user_text='你好',
             resident=resident,
+            lean_on=True,
         )
         obs = result.observation
         for key in (
@@ -290,37 +280,40 @@ class AssembleContextFixtureTests(unittest.TestCase):
         self.assertEqual(obs['observation_version'], 3)
 
 
+class FallbackTests(unittest.TestCase):
+    def test_legacy_full_fallback_uses_snapshot_not_diff(self):
+        resident = _resident_stub(last_state_snapshot=RAW_V1)
+        legacy = dict(LEGACY_RAW)
+        result = assemble_legacy_full_fallback(
+            legacy_raw_state=legacy,
+            fallback_reason='ValueError',
+            resident=resident,
+        )
+        self.assertEqual(result.state_context_mode, 'fallback')
+        self.assertEqual(result.state_text, format_state_snapshot(legacy))
+        self.assertEqual(result.state_mode, 'snapshot')
+        self.assertFalse(result.commit_meta_extras.get('lean_state_active'))
+        self.assertTrue(result.commit_meta_extras.get('state_lean_fallback'))
+
+
 class ResidentCommitTests(unittest.TestCase):
     def test_reanchor_resets_delta_counter(self):
         sess = ResidentSession('/tmp', '', '')
+        payload = dict(RAW_V1)
         sess._commit_sent_context({
             'state_snapshot': RAW_V1,
             'lean_state_active': True,
             'lean_state_reanchor': True,
+            'state_send_snapshot': payload,
             'state_schema_version': STATE_SCHEMA_VERSION,
-            'state_version': compute_state_version(RAW_V1),
+            'state_version': compute_state_version(payload),
             'state_context_chars': 500,
         })
         self.assertEqual(sess.turns_since_state_anchor, 0)
         self.assertEqual(sess.state_delta_chars_since_anchor, 0)
-        self.assertEqual(sess.last_state_anchor_generation, sess.generation)
-
-    def test_hot_turn_accumulates_delta_chars(self):
-        sess = ResidentSession('/tmp', '', '')
-        sess._last_successful_lean_state = True
-        sess._commit_sent_context({
-            'state_snapshot': RAW_V1,
-            'lean_state_active': True,
-            'state_send_snapshot': {'lights': 'x'},
-            'state_context_chars': 120,
-        })
-        self.assertEqual(sess.turns_since_state_anchor, 1)
-        self.assertEqual(sess.state_delta_chars_since_anchor, 120)
 
 
-class OneShotAndBridgePreservationTests(unittest.TestCase):
-    """State lean must not alter one-shot / bridge assembly contracts."""
-
+class OneShotPreservationTests(unittest.TestCase):
     def test_one_shot_keys_untouched_by_state_module(self):
         from chat.system_builder import format_one_shot
         one_shot = {

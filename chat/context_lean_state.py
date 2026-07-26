@@ -1,24 +1,21 @@
 """Stage 1: State delta / re-anchor for Context Lean (CC resident path).
 
-Raw state snapshots remain complete in commit_meta. Provider-visible send
-payloads may be full anchors, structured deltas, or omitted when unchanged.
+Raw state snapshots in commit_meta remain complete. Cumulative send snapshots
+track exactly what the model was told — the same bytes as state_text.
 """
 from __future__ import annotations
 
 import hashlib
 import json
 import logging
-import re
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Optional
 
 from chat.context_budget import (
     build_state_send_payload,
-    merge_cumulative_state_send,
     normalize_state_dict,
 )
-from chat import context_lean as _context_lean
-from chat.system_builder import format_state_diff, format_state_snapshot
+from chat.system_builder import format_state_snapshot
 
 _LOG = logging.getLogger('hayagarden.context_lean_state')
 
@@ -26,14 +23,8 @@ STATE_SCHEMA_VERSION = 1
 # Re-anchor before CC_MAX_RESIDENT_TURNS (default 30); P-CONTEXT-OBS showed
 # stable generation across cold→hot turns 1–3 — periodic anchor limits drift.
 REANCHOR_TURN_INTERVAL = 24
-# ~3–4 cumulative delta blocks before forced full anchor (observed state blocks
-# often 800–1200 estimated tokens each on hot turns with changes).
+# ~3–4 cumulative delta blocks before forced full anchor.
 REANCHOR_DELTA_CHAR_THRESHOLD = 3500
-
-_STYLE_INSTRUCTION_RE = re.compile(
-    r'话少|安静等待|简短|克制|语气|文风|更主动|更冷淡|因为她刚才',
-    re.I,
-)
 
 _STATE_CONTEXT_MODES = frozenset({'full_anchor', 'delta', 'omitted', 'fallback'})
 
@@ -56,10 +47,6 @@ def compute_state_version(state: Optional[Mapping[str, Any]]) -> str:
     normalized = normalize_state_dict(state)
     payload = json.dumps(normalized, sort_keys=True, ensure_ascii=False)
     return hashlib.sha256(payload.encode('utf-8')).hexdigest()[:16]
-
-
-def contains_style_instruction(text: str) -> bool:
-    return bool(_STYLE_INSTRUCTION_RE.search(text or ''))
 
 
 def evaluate_reanchor_reason(
@@ -94,22 +81,20 @@ def evaluate_reanchor_reason(
 
 
 def _structured_value_line(key: str, value: str) -> str:
+    """Pure serialization — must not alter field semantics."""
     value = str(value or '').strip()
     if not value:
         return f'{key}: cleared'
-    if contains_style_instruction(value):
-        _LOG.warning('state lean stripped style-like content in key=%s', key)
-        value = re.sub(_STYLE_INSTRUCTION_RE, '', value).strip(' ，。;')
     return f'{key}: {value}'
 
 
 def format_structured_state_anchor(
-    send_delta: Mapping[str, str],
+    effective_send_payload: Mapping[str, str],
     *,
     state_version: str,
 ) -> str:
-    send_delta = normalize_state_dict(send_delta)
-    if not send_delta:
+    payload = normalize_state_dict(effective_send_payload)
+    if not payload:
         return ''
     lines = [
         '【当前状态·锚点】',
@@ -119,12 +104,12 @@ def format_structured_state_anchor(
         'time_bucket', 'emotion', 'drive', 'lights', 'pocket',
         'todos', 'ledger', 'reminders', 'recent_activity',
     )
-    seen = set()
+    seen: set[str] = set()
     for key in order:
-        if key in send_delta and send_delta[key]:
-            lines.append(_structured_value_line(key, send_delta[key]))
+        if key in payload and payload[key]:
+            lines.append(_structured_value_line(key, payload[key]))
             seen.add(key)
-    for key, value in send_delta.items():
+    for key, value in payload.items():
         if key not in seen and value:
             lines.append(_structured_value_line(key, value))
     return '\n'.join(lines)
@@ -132,16 +117,16 @@ def format_structured_state_anchor(
 
 def format_structured_state_delta(
     cumulative_before: Mapping[str, str],
-    send_delta: Mapping[str, str],
+    effective_send_payload: Mapping[str, str],
     *,
     prev_version: str,
     curr_version: str,
 ) -> str:
-    send_delta = normalize_state_dict(send_delta)
-    if not send_delta:
+    payload = normalize_state_dict(effective_send_payload)
+    if not payload:
         return ''
     cumulative = normalize_state_dict(cumulative_before)
-    changed = sorted(send_delta.keys())
+    changed = sorted(payload.keys())
     lines = [
         '【状态更新·增量】',
         (
@@ -151,7 +136,7 @@ def format_structured_state_delta(
         ),
     ]
     for key in changed:
-        after = send_delta[key]
+        after = payload[key]
         before = cumulative.get(key, '')
         if before and not after:
             lines.append(f'{key}: cleared')
@@ -162,28 +147,27 @@ def format_structured_state_delta(
 
 def format_lean_state_for_send(
     cumulative_before: Optional[Mapping[str, Any]],
-    send_delta: Mapping[str, Any],
+    effective_send_payload: Mapping[str, Any],
     *,
     is_cold: bool,
     prev_version: str,
     curr_version: str,
 ) -> tuple[str, str, str]:
     """Return (text, legacy_state_mode, state_context_mode)."""
-    send_delta = normalize_state_dict(send_delta)
+    payload = normalize_state_dict(effective_send_payload)
     if is_cold:
-        text = format_structured_state_anchor(send_delta, state_version=curr_version)
+        text = format_structured_state_anchor(payload, state_version=curr_version)
         if not text:
             return '', 'none', 'omitted'
         return text, 'snapshot', 'full_anchor'
 
-    cumulative = normalize_state_dict(cumulative_before)
-    if not send_delta:
+    if not payload:
         return '', 'none', 'omitted'
 
     text = format_structured_state_delta(
-        cumulative,
-        send_delta,
-        prev_version=prev_version or compute_state_version(cumulative),
+        cumulative_before or {},
+        payload,
+        prev_version=prev_version or compute_state_version(cumulative_before),
         curr_version=curr_version,
     )
     if not text:
@@ -227,7 +211,10 @@ def _legacy_state_context(
     raw_state: Mapping[str, str],
     is_cold: bool,
     last_state_snapshot: Optional[Mapping[str, Any]],
+    resident_generation: int = 0,
 ) -> StateContextResult:
+    from chat.system_builder import format_state_diff
+
     if is_cold:
         state_text = format_state_snapshot(raw_state)
         state_mode = 'snapshot' if state_text else 'none'
@@ -243,7 +230,7 @@ def _legacy_state_context(
         state_text=state_text,
         state_mode=state_mode,
         state_context_mode=context_mode,
-        raw_state=dict(raw_state),
+        raw_state=dict(normalize_state_dict(raw_state)),
         send_payload={},
         commit_meta_extras={'lean_state_active': False},
         observation=build_state_lean_observation(
@@ -255,9 +242,47 @@ def _legacy_state_context(
             changed_field_count=0,
             reanchor_reason=None,
             fallback_reason=None,
-            resident_generation=0,
+            resident_generation=resident_generation,
         ),
         used_lean=False,
+    )
+
+
+def assemble_legacy_full_fallback(
+    *,
+    legacy_raw_state: Mapping[str, str],
+    fallback_reason: str,
+    resident,
+) -> StateContextResult:
+    """True legacy fallback: full snapshot from lean=False raw state."""
+    raw = normalize_state_dict(legacy_raw_state)
+    state_text = format_state_snapshot(raw)
+    state_mode = 'snapshot' if state_text else 'none'
+    version = compute_state_version(raw)
+    observation = build_state_lean_observation(
+        enabled=True,
+        state_context_mode='fallback',
+        state_text=state_text,
+        state_version=version,
+        anchor_version='',
+        changed_field_count=0,
+        reanchor_reason=None,
+        fallback_reason=fallback_reason,
+        resident_generation=int(getattr(resident, 'generation', 0) or 0),
+    )
+    return StateContextResult(
+        state_text=state_text,
+        state_mode=state_mode,
+        state_context_mode='fallback',
+        raw_state=dict(raw),
+        send_payload={},
+        commit_meta_extras={
+            'lean_state_active': False,
+            'state_lean_fallback': True,
+        },
+        observation=observation,
+        used_lean=False,
+        fallback_reason=fallback_reason,
     )
 
 
@@ -267,122 +292,94 @@ def assemble_cc_state_context(
     is_cold: bool,
     user_text: str,
     resident,
+    lean_on: bool,
 ) -> StateContextResult:
     """Build provider-visible state block for one CC resident turn."""
     raw = normalize_state_dict(raw_state)
-    if not _context_lean.lean_state_enabled():
+    generation = int(getattr(resident, 'generation', 0) or 0)
+
+    if not lean_on:
         return _legacy_state_context(
             raw_state=raw,
             is_cold=is_cold,
             last_state_snapshot=getattr(resident, 'last_state_snapshot', None),
+            resident_generation=generation,
         )
 
-    try:
-        prev_lean = bool(getattr(resident, 'last_successful_lean_state', False))
-        cumulative = getattr(resident, 'last_state_send_snapshot', None) or {}
-        cumulative_nonempty = bool(normalize_state_dict(cumulative))
-        reanchor_reason = evaluate_reanchor_reason(
-            lean_on=True,
-            prev_lean_success=prev_lean,
-            is_cold=is_cold,
-            resident_generation=int(getattr(resident, 'generation', 0) or 0),
-            last_anchor_generation=int(getattr(resident, 'last_state_anchor_generation', 0) or 0),
-            last_schema_version=getattr(resident, 'last_state_schema_version', None),
-            turns_since_anchor=int(getattr(resident, 'turns_since_state_anchor', 0) or 0),
-            delta_chars_since_anchor=int(getattr(resident, 'state_delta_chars_since_anchor', 0) or 0),
-            cumulative_send_nonempty=cumulative_nonempty,
-        )
-        needs_reanchor = reanchor_reason is not None
-        last_raw = (
-            {}
-            if needs_reanchor
-            else getattr(resident, 'last_state_snapshot', None) or {}
-        )
-        cumulative_before = {} if needs_reanchor else cumulative
-        send_is_cold = bool(needs_reanchor or is_cold)
+    prev_lean = bool(getattr(resident, 'last_successful_lean_state', False))
+    cumulative = getattr(resident, 'last_state_send_snapshot', None) or {}
+    cumulative_nonempty = bool(normalize_state_dict(cumulative))
+    reanchor_reason = evaluate_reanchor_reason(
+        lean_on=True,
+        prev_lean_success=prev_lean,
+        is_cold=is_cold,
+        resident_generation=generation,
+        last_anchor_generation=int(getattr(resident, 'last_state_anchor_generation', 0) or 0),
+        last_schema_version=getattr(resident, 'last_state_schema_version', None),
+        turns_since_anchor=int(getattr(resident, 'turns_since_state_anchor', 0) or 0),
+        delta_chars_since_anchor=int(getattr(resident, 'state_delta_chars_since_anchor', 0) or 0),
+        cumulative_send_nonempty=cumulative_nonempty,
+    )
+    needs_reanchor = reanchor_reason is not None
+    last_raw = (
+        {}
+        if needs_reanchor
+        else getattr(resident, 'last_state_snapshot', None) or {}
+    )
+    cumulative_before = {} if needs_reanchor else cumulative
+    send_is_cold = bool(needs_reanchor or is_cold)
 
-        send_payload = build_state_send_payload(
-            last_raw,
-            raw,
-            user_text=user_text or '',
-            is_cold=send_is_cold,
-        )
-        prev_version = (
-            getattr(resident, 'last_state_anchor_version', None)
-            or compute_state_version(cumulative_before)
-        )
-        curr_version = compute_state_version(raw)
-        state_text, state_mode, context_mode = format_lean_state_for_send(
-            cumulative_before,
-            send_payload,
-            is_cold=send_is_cold,
-            prev_version=prev_version,
-            curr_version=curr_version,
-        )
-        changed_count = len([k for k, v in send_payload.items() if v != ''])
+    effective_send_payload = build_state_send_payload(
+        last_raw,
+        raw,
+        user_text=user_text or '',
+        is_cold=send_is_cold,
+    )
+    prev_version = (
+        getattr(resident, 'last_state_anchor_version', None)
+        or compute_state_version(cumulative_before)
+    )
+    send_version = compute_state_version(effective_send_payload)
+    state_text, state_mode, context_mode = format_lean_state_for_send(
+        cumulative_before,
+        effective_send_payload,
+        is_cold=send_is_cold,
+        prev_version=prev_version,
+        curr_version=send_version,
+    )
+    changed_count = len(effective_send_payload)
 
-        commit_extras = {
-            'lean_state_active': True,
-            'state_send_snapshot': send_payload,
-            'state_schema_version': STATE_SCHEMA_VERSION,
-            'state_version': curr_version,
-            'state_anchor_version': prev_version if not send_is_cold else curr_version,
-        }
-        if needs_reanchor:
-            commit_extras['lean_state_reanchor'] = True
-            commit_extras['reanchor_reason'] = reanchor_reason
-        commit_extras['state_context_chars'] = len(state_text or '')
+    commit_extras = {
+        'lean_state_active': True,
+        'state_send_snapshot': dict(effective_send_payload),
+        'state_schema_version': STATE_SCHEMA_VERSION,
+        'state_version': send_version,
+        'state_anchor_version': prev_version if not send_is_cold else send_version,
+        'state_context_chars': len(state_text or ''),
+    }
+    if needs_reanchor:
+        commit_extras['lean_state_reanchor'] = True
+        commit_extras['reanchor_reason'] = reanchor_reason
 
-        observation = build_state_lean_observation(
-            enabled=True,
-            state_context_mode=context_mode,
-            state_text=state_text,
-            state_version=curr_version,
-            anchor_version=prev_version if not send_is_cold else curr_version,
-            changed_field_count=changed_count,
-            reanchor_reason=reanchor_reason if needs_reanchor else None,
-            fallback_reason=None,
-            resident_generation=int(getattr(resident, 'generation', 0) or 0),
-        )
-        return StateContextResult(
-            state_text=state_text,
-            state_mode=state_mode,
-            state_context_mode=context_mode,
-            raw_state=dict(raw),
-            send_payload=dict(send_payload),
-            commit_meta_extras=commit_extras,
-            observation=observation,
-            used_lean=True,
-            reanchor_reason=reanchor_reason if needs_reanchor else None,
-        )
-    except Exception as exc:
-        _LOG.exception('state lean failed; falling back to legacy path')
-        legacy = _legacy_state_context(
-            raw_state=raw,
-            is_cold=is_cold,
-            last_state_snapshot=getattr(resident, 'last_state_snapshot', None),
-        )
-        obs = dict(legacy.observation)
-        obs.update(build_state_lean_observation(
-            enabled=True,
-            state_context_mode='fallback',
-            state_text=legacy.state_text,
-            state_version=compute_state_version(raw),
-            anchor_version='',
-            changed_field_count=0,
-            reanchor_reason=None,
-            fallback_reason=f'{type(exc).__name__}',
-            resident_generation=int(getattr(resident, 'generation', 0) or 0),
-        ))
-        legacy = StateContextResult(
-            state_text=legacy.state_text,
-            state_mode=legacy.state_mode,
-            state_context_mode='fallback',
-            raw_state=legacy.raw_state,
-            send_payload={},
-            commit_meta_extras={'lean_state_active': False, 'state_lean_fallback': True},
-            observation=obs,
-            used_lean=False,
-            fallback_reason=f'{type(exc).__name__}',
-        )
-        return legacy
+    observation = build_state_lean_observation(
+        enabled=True,
+        state_context_mode=context_mode,
+        state_text=state_text,
+        state_version=send_version,
+        anchor_version=prev_version if not send_is_cold else send_version,
+        changed_field_count=changed_count,
+        reanchor_reason=reanchor_reason if needs_reanchor else None,
+        fallback_reason=None,
+        resident_generation=generation,
+    )
+    return StateContextResult(
+        state_text=state_text,
+        state_mode=state_mode,
+        state_context_mode=context_mode,
+        raw_state=dict(raw),
+        send_payload=dict(effective_send_payload),
+        commit_meta_extras=commit_extras,
+        observation=observation,
+        used_lean=True,
+        reanchor_reason=reanchor_reason if needs_reanchor else None,
+    )
