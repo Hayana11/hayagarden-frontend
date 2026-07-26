@@ -139,6 +139,11 @@ class ResidentSession:
         self._last_state_snapshot = {}
         self._last_state_send_snapshot = {}
         self._last_successful_lean_state = False
+        self._last_state_anchor_generation = -1
+        self._last_state_schema_version = None
+        self._turns_since_state_anchor = 0
+        self._state_delta_chars_since_anchor = 0
+        self._last_state_anchor_version = None
         self._committed_file_hashes = set()
         self._pending_file_hashes = set()
         self._last_group_message_id = 0
@@ -274,6 +279,18 @@ class ResidentSession:
                 )
         if 'lean_state_active' in commit_meta:
             self._last_successful_lean_state = bool(commit_meta['lean_state_active'])
+        if commit_meta.get('lean_state_reanchor'):
+            self._last_state_anchor_generation = self._generation
+            self._last_state_schema_version = commit_meta.get('state_schema_version')
+            self._turns_since_state_anchor = 0
+            self._state_delta_chars_since_anchor = 0
+            if commit_meta.get('state_version'):
+                self._last_state_anchor_version = commit_meta['state_version']
+        elif commit_meta.get('lean_state_active'):
+            self._turns_since_state_anchor += 1
+            self._state_delta_chars_since_anchor += int(
+                commit_meta.get('state_context_chars') or 0
+            )
         pending_files = commit_meta.get('file_inject_hashes')
         if pending_files is not None:
             self._committed_file_hashes = normalize_known_file_refs(pending_files)
@@ -635,6 +652,26 @@ class ResidentSession:
     @property
     def last_successful_lean_state(self):
         return self._last_successful_lean_state
+
+    @property
+    def last_state_anchor_generation(self):
+        return self._last_state_anchor_generation
+
+    @property
+    def last_state_schema_version(self):
+        return self._last_state_schema_version
+
+    @property
+    def turns_since_state_anchor(self):
+        return self._turns_since_state_anchor
+
+    @property
+    def state_delta_chars_since_anchor(self):
+        return self._state_delta_chars_since_anchor
+
+    @property
+    def last_state_anchor_version(self):
+        return self._last_state_anchor_version
 
     @property
     def committed_file_hashes(self):

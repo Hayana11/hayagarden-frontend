@@ -30,13 +30,14 @@ jobs:
               sqlite3.connect(f"/opt/frontend/{name}").close()
           PY
       - name: Compile context paths
-        run: python -m py_compile app.py gateway.py cc_resident.py chat/system_builder.py chat/context_continuity.py chat/context_budget.py chat/context_lean.py chat/history_assembly.py chat/history_boundary.py chat/history_legacy.py chat/rolling_summary_store.py tools/rolling_summary.py scripts/measure_production_context.py context_usage_routes.py context_usage_store.py tools/context_usage_collector.py tools/cc_usage_observability.py tools/cc_jsonl_usage.py tools/cc_tool_surface.py scripts/report_cc_usage.py scripts/replay_cc_jsonl_usage.py wake/usage.py wake/concern_resolution.py
+        run: python -m py_compile app.py gateway.py cc_resident.py chat/system_builder.py chat/context_continuity.py chat/context_budget.py chat/context_lean.py chat/context_lean_state.py chat/history_assembly.py chat/history_boundary.py chat/history_legacy.py chat/rolling_summary_store.py tools/rolling_summary.py scripts/measure_production_context.py context_usage_routes.py context_usage_store.py tools/context_usage_collector.py tools/cc_usage_observability.py tools/cc_jsonl_usage.py tools/cc_tool_surface.py scripts/report_cc_usage.py scripts/replay_cc_jsonl_usage.py wake/usage.py wake/concern_resolution.py
       - name: Run Context Lean regressions
         run: |
           python -m unittest \
             tests.test_context_lean \
             tests.test_context_lean_golden \
             tests.test_context_lean_state_reanchor \
+            tests.test_context_lean_state_stage1 \
             tests.test_context_budget \
             tests.test_context_state_integration \
             tests.test_history_assembly \

@@ -851,7 +851,39 @@ def _cc_period_budget_reminders(conn, today):
     return reminders
 
 
-def _cc_collect_state(get_db_fn):
+def _format_structured_emotion_snippet() -> str:
+    """Facts-only emotion line for Context Lean state blocks."""
+    try:
+        import emotion_engine as _ee
+        st = _ee.get_state()
+        longing = float(_ee.get_longing() or 0.0)
+        desire = _ee.get_desire()
+        return (
+            f"valence={st['valence']:.2f} arousal={st['arousal']:.2f} "
+            f"mood={st.get('mood_word') or '平静'} "
+            f"pa={st['pa']:.2f} na={st['na']:.2f} "
+            f"longing={longing:.2f} "
+            f"desire_p={desire['p']:.2f} desire_i={desire['i']:.2f} desire_c={desire['c']:.2f}"
+        )
+    except Exception:
+        return ''
+
+
+def _format_structured_drive_snippet() -> str:
+    """Facts-only drive bars for Context Lean (no action / style hints)."""
+    try:
+        import drive_engine as _de
+        drive = _de.get_drive()
+        parts = []
+        for key, value in sorted(drive.items()):
+            if key == 'fatigue' or float(value or 0) >= 0.30:
+                parts.append(f'{key}={float(value):.2f}')
+        return ' '.join(parts)
+    except Exception:
+        return ''
+
+
+def _cc_collect_state(get_db_fn, *, lean=False):
     state = {
         'time_bucket': f'当前时间段：{build_time_bucket()} 左右',
         'emotion': '',
@@ -865,15 +897,21 @@ def _cc_collect_state(get_db_fn):
     }
     try:
         import emotion_engine as _ee
-        state['emotion'] = (_ee.get_bp3_snippet() or '').strip()
+        if lean:
+            state['emotion'] = _format_structured_emotion_snippet()
+        else:
+            state['emotion'] = (_ee.get_bp3_snippet() or '').strip()
     except Exception:
         pass
     try:
         import drive_engine as _de
-        state['drive'] = (_de.get_bp3_snippet() or '').strip()
+        if lean:
+            state['drive'] = _format_structured_drive_snippet()
+        else:
+            state['drive'] = (_de.get_bp3_snippet() or '').strip()
     except Exception:
         pass
-    if config_store.get_bool('LONGING_ENABLED', True):
+    if not lean and config_store.get_bool('LONGING_ENABLED', True):
         try:
             import desire as _des
             state['drive'] = '\n'.join(
@@ -1005,11 +1043,15 @@ def _cc_collect_state(get_db_fn):
         reminders.extend(_cc_period_budget_reminders(conn, today))
         conn.close()
         if reminders:
-            state['reminders'] = (
-                '## 今日提醒\n' + '\n'.join(reminders)
-                + '\n（以上是后台数据，你自己留意即可。是否要跟她提、怎么提、什么时候提，'
-                  '由你自己判断——根据对话自然地提及。）'
-            )
+            body = '## 今日提醒\n' + '\n'.join(reminders)
+            if lean:
+                state['reminders'] = body
+            else:
+                state['reminders'] = (
+                    body
+                    + '\n（以上是后台数据，你自己留意即可。是否要跟她提、怎么提、什么时候提，'
+                      '由你自己判断——根据对话自然地提及。）'
+                )
     except Exception:
         pass
     return state
@@ -1326,10 +1368,10 @@ def _cc_collect_one_shot(get_db_fn, *, include_wake=True):
     return finalize_cc_wake_one_shot(one_shot, is_cold=False)
 
 
-def build_cc_state():
+def build_cc_state(*, lean=False):
     """每轮构建的状态差量源。"""
     from gateway import get_db
-    return _cc_collect_state(get_db)
+    return _cc_collect_state(get_db, lean=lean)
 
 
 def build_cc_one_shot(*, include_wake=True):
