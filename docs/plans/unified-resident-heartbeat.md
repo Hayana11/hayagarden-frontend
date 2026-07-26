@@ -4,8 +4,8 @@
 
 - **计划分支**：`plan/unified-heartbeat-tracker`
 - **当前状态**：`P-CONTEXT-LEAN_STAGE1`（#139 Draft；State delta / re-anchor 施工中）
-- **最后更新**：2026-07-26（#139 re-review pending；累计 `state_version` 语义修复 `7226b98`）
-- **tracker head**：`7c3365e`
+- **最后更新**：2026-07-26（#139 第三轮审查修复 `8f94358`：fail-safe 采集、版本链、facts-only）
+- **tracker head**：`844c7d4`
 - **生产 HEAD**：`dbf3ad4e6db532d7be422004614537e5b3d103ee`
 - **当前 identity**：`identity_id = "fyodor-default"` · `provider_id = "claude_code"` · `conversation_id = "default"`
 - **首个 Provider Adapter**：Claude Unified Resident Adapter
@@ -144,7 +144,7 @@
 - [-] **P-CONTEXT-LEAN：上下文最小化与旧广播式注入退役**
   - 状态：进行中（**Stage 1 代码 PR Draft**；默认开关仍为 `0`；**未部署 / 未授权生产开启**）
   - 代码 PR：**#139** · 分支 `cursor/context-lean-state-delta-8046`
-  - base：`dbf3ad4e6db532d7be422004614537e5b3d103ee` · head：`7226b986c699cdc2834bf0f89adfc859d4943d7b`
+  - base：`dbf3ad4e6db532d7be422004614537e5b3d103ee` · head：`8f94358e`（第三轮审查：fail-safe 采集 / 版本链 / facts-only）
   - 状态：**Draft · re-review pending**（累计状态 `state_version` 合同已修；四开关生产仍为 `0`；**未部署**）
   - 前置：Memory Hotfix 已完成（#134 merge + smoke）
   - 目标：削减常驻广播与重复注入，**不是**关闭全部上下文
@@ -959,7 +959,13 @@ PR #126 修门禁与去重
 - [x] **production smoke PASS**（管道修复；未换 persona / 未启 HTTP backend / 未开 Context Lean）
 - [x] **Memory Hotfix `[x]`**；tracker 证据本条补齐
 - [ ] **MEM-PIN-REPAIR**、**OMBRE-P0-TEST-GATE** 仍独立待办
-- [-] **P-CONTEXT-LEAN Stage 1** 开工：PR **#139** Draft（`cursor/context-lean-state-delta-8046`）；base `dbf3ad4` · head `7226b98`；**re-review pending**；默认四开关仍为 `0`；**未部署**
+- [-] **P-CONTEXT-LEAN Stage 1** 开工：PR **#139** Draft（`cursor/context-lean-state-delta-8046`）；base `dbf3ad4` · head `8f94358`；**re-review pending**；默认四开关仍为 `0`；**未部署**
+
+### 2026-07-26（续·#139 第三轮审查修复）
+
+- [-] **#139** head `8f94358`：fail-safe 包住 `build_cc_state(lean=True)`；delta 头拆分 `anchor_version` / `previous_version` / `current_version`；lean 系统字段 facts-only 采集；三组回归测试；PR 正文补全边界说明
+- [ ] **#127 PR 描述同步**：待人工更新（agent 无 #127 写权限）
+- [ ] 终审通过前：**保持 Draft · 不 merge · 不部署 · 不开 `CONTEXT_LEAN_STATE_ENABLED`**
 
 ---
 
