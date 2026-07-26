@@ -219,6 +219,91 @@ class EmotionSnapshotTests(unittest.TestCase):
         self.assertEqual(manager.touched, [])
 
 
+class LegacyParityContractTests(unittest.TestCase):
+    """Golden contracts for default legacy_module production behaviour."""
+
+    def test_default_backend_is_legacy_module(self):
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(ombre_adapter._backend(), "legacy_module")
+
+    def test_empty_query_returns_empty_list_without_server_load(self):
+        with mock.patch.object(ombre_adapter, "_load_server") as load:
+            self.assertEqual(ombre_adapter.search_memories("   "), [])
+            load.assert_not_called()
+
+    def test_search_contract_matches_gateway_recall_shape(self):
+        long_content = "x" * 400
+        manager = FakeBucketManager(search_results=[
+            bucket("a", long_content, name="alpha"),
+            bucket("b", "second hit", name="beta"),
+            bucket("c", "third hit", name="gamma"),
+        ])
+        server = SimpleNamespace(bucket_mgr=manager)
+        with mock.patch.object(ombre_adapter, "_load_server", return_value=server):
+            result = ombre_adapter.search_memories(
+                "curwe",
+                limit=2,
+                timeout=1.0,
+                wall_timeout=2.0,
+                touch=True,
+            )
+        self.assertEqual(manager.last_limit, 2)
+        self.assertEqual(len(result), 2)
+        self.assertEqual(result[0][0], "alpha")
+        self.assertEqual(len(result[0][1]), 300)
+        self.assertEqual(result[0][1], long_content[:300])
+        self.assertEqual(result[1], ("beta", "second hit"))
+        self.assertEqual(manager.touched, ["a", "b"])
+
+    def test_search_failure_degrades_to_empty_list(self):
+        def boom():
+            raise RuntimeError("ombre unavailable")
+
+        with mock.patch.object(ombre_adapter, "_load_server", side_effect=boom):
+            self.assertEqual(
+                ombre_adapter.search_memories("curwe", timeout=0.2, wall_timeout=0.3),
+                [],
+            )
+
+    def test_handoff_failure_degrades_to_none(self):
+        def boom():
+            raise RuntimeError("ombre unavailable")
+
+        with mock.patch.object(ombre_adapter, "_load_server", side_effect=boom):
+            self.assertIsNone(ombre_adapter.get_handoff(timeout=0.2, wall_timeout=0.3))
+
+    def test_breath_contract_preserves_legacy_timeouts(self):
+        async def breath():
+            return "BREATH SURFACE"
+
+        server = SimpleNamespace(breath=breath)
+        with mock.patch.object(ombre_adapter, "_load_server", return_value=server):
+            result = ombre_adapter.surface_memories(timeout=6.0, wall_timeout=7.0)
+        self.assertEqual(result, "BREATH SURFACE")
+
+    def test_breath_failure_degrades_to_none(self):
+        def boom():
+            raise RuntimeError("ombre unavailable")
+
+        with mock.patch.object(ombre_adapter, "_load_server", side_effect=boom):
+            self.assertIsNone(ombre_adapter.surface_memories(timeout=0.2, wall_timeout=0.3))
+
+    def test_emotion_http_endpoint_failure_returns_empty_snapshot(self):
+        with mock.patch.dict(os.environ, {"OMBRE_EMOTION_MODE": "http"}, clear=False), \
+             mock.patch("urllib.request.urlopen", side_effect=OSError("down")):
+            result = ombre_adapter.get_emotion_snapshot(timeout=0.2)
+        self.assertEqual(result, {"valence": None, "arousal": None, "count": 0})
+
+    def test_warmup_async_returns_immediately(self):
+        import time
+
+        started = time.monotonic()
+        with mock.patch.object(ombre_adapter, "_WARMUP_STARTED", False), \
+             mock.patch.object(ombre_adapter, "_load_server", side_effect=lambda: time.sleep(2)):
+            ombre_adapter.warmup_async()
+        self.assertLess(time.monotonic() - started, 0.2)
+
+
 class CleanerPolicyTests(unittest.TestCase):
     def test_importance_never_implies_pin(self):
         for importance in (1, 5, 8, 9, 10, 999):

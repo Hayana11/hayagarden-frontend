@@ -65,6 +65,15 @@ jobs:
         run: python -m unittest tests.test_wake_reply_bridge
       - name: Run concern resolution regressions
         run: python -m unittest tests.test_wake_concern_resolution -v
+      - name: Run unified Ombre adapter regressions
+        run: |
+          python -m pip install python-frontmatter
+          python -m unittest \
+            tests.test_ombre_adapter \
+            tests.test_memory_unification_audit \
+            -v
+      - name: Run relay sanitize regressions
+        run: python -m unittest tests.test_relay_sanitize -v
       - name: Run CC usage observability regressions
         run: |
           python3 -m unittest \
