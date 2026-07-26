@@ -17,8 +17,8 @@ from collections import Counter
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Iterable, Mapping, Optional, Sequence
 
-OBSERVATION_VERSION = 2
-CONTEXT_LAYOUT_VERSION = 1
+OBSERVATION_VERSION = 3
+CONTEXT_LAYOUT_VERSION = 2
 ESTIMATION_METHOD = "heuristic_cjk1_ascii4_v1"
 TZ_NAME = "Asia/Shanghai"
 TZ_OFFSET = timezone(timedelta(hours=8))
@@ -31,6 +31,8 @@ LIMITATIONS = [
     "序列化开销、未观测非文本 block、以及 provider usage 口径差异；不得直接解释为 MCP 工具大小。",
     "suspected_cache_expiry=true 仅表示疑似缓存过期或供应端驱逐，不宣称严格 TTL 到期。",
     "tool schema 仅在获得 mcp_list_tools 或真实 static_registry 时估算；否则为 null/unavailable。",
+    "HISTORY_TOKEN_BUDGET 仅约束渲染后的文本块（正文、时间间隔、文件正文、工具历史、图片占位符）；"
+    "图片二进制 payload 不计入该预算，仍由最近 2 张硬上限单独约束。",
     "confidence 默认 low。",
 ]
 
@@ -197,8 +199,15 @@ def build_context_breakdown(
     memory_recall_text: str = "",
     group_delta_text: str = "",
     one_shot_text: str = "",
+    wake_reply_bridge_text: str = "",
+    relationship_text: str = "",
+    files_text: str = "",
     user_text: str = "",
     final_content: Any = None,
+    image_block_count: int = 0,
+    image_placeholder_count: int = 0,
+    history_rendered_text_tokens_estimate: Optional[int] = None,
+    file_injection_modes: Optional[Sequence[str]] = None,
     tool_result_text: Optional[str] = None,
     tool_result_measured: bool = False,
     tool_schema_text: Optional[str] = None,
@@ -236,6 +245,9 @@ def build_context_breakdown(
     mem_est = estimate_tokens_heuristic_cjk1_ascii4_v1(memory_recall_text)
     group_est = estimate_tokens_heuristic_cjk1_ascii4_v1(group_delta_text)
     one_est = estimate_tokens_heuristic_cjk1_ascii4_v1(one_shot_text)
+    bridge_est = estimate_tokens_heuristic_cjk1_ascii4_v1(wake_reply_bridge_text)
+    rel_est = estimate_tokens_heuristic_cjk1_ascii4_v1(relationship_text)
+    files_est = estimate_tokens_heuristic_cjk1_ascii4_v1(files_text)
     user_est = estimate_tokens_heuristic_cjk1_ascii4_v1(user_text)
     # 未采集工具结果时必须为 null，不能报成零负担
     if tool_result_measured:
@@ -279,7 +291,14 @@ def build_context_breakdown(
         "memory_recall_tokens_estimate": mem_est,
         "group_delta_tokens_estimate": group_est,
         "one_shot_tokens_estimate": one_est,
+        "wake_reply_bridge_tokens_estimate": bridge_est,
+        "relationship_tokens_estimate": rel_est,
+        "files_tokens_estimate": files_est,
         "user_tokens_estimate": user_est,
+        "image_block_count": int(image_block_count or 0),
+        "image_placeholder_count": int(image_placeholder_count or 0),
+        "history_rendered_text_tokens_estimate": history_rendered_text_tokens_estimate,
+        "file_injection_modes": list(file_injection_modes or ()),
         "visible_payload_tokens_estimate": visible_payload,
         "known_visible_context_tokens_estimate": known_visible,
         "tool_schema_tokens_estimate": tools["tool_schema_tokens_estimate"],
@@ -387,6 +406,10 @@ def attach_observation(
     out["observation_version"] = OBSERVATION_VERSION
     out["context_breakdown"] = dict(context_breakdown or {})
     out["runtime"] = dict(runtime or {})
+    if context_breakdown.get("turn_tags") is not None:
+        out["turn_tags"] = list(context_breakdown.get("turn_tags") or [])
+    if isinstance(context_breakdown.get("turn_measurement"), dict):
+        out["turn_measurement"] = dict(context_breakdown.get("turn_measurement") or {})
     return out
 
 
@@ -396,10 +419,28 @@ def finalize_breakdown_with_usage(
     *,
     is_cold: bool,
 ) -> dict[str, Any]:
-    """在拿到真实 rounds 后回填 unattributed（仍不重跑 builder）。"""
+    """在拿到真实 rounds 后回填 unattributed 与 provider 实测。"""
     out = dict(breakdown or {})
     rounds = list((usage or {}).get("rounds") or [])
     first = rounds[0] if rounds else None
+    last = rounds[-1] if rounds else None
+    if first:
+        out["provider_first_round_context_tokens"] = round_context_tokens(first)
+        out["provider_first_round_cache_read"] = int(first.get("cache_read") or 0)
+        out["provider_first_round_cache_creation"] = int(first.get("cache_creation") or 0)
+    else:
+        out["provider_first_round_context_tokens"] = None
+        out["provider_first_round_cache_read"] = None
+        out["provider_first_round_cache_creation"] = None
+    if last:
+        out["provider_last_round_context_tokens"] = round_context_tokens(last)
+    else:
+        out["provider_last_round_context_tokens"] = usage.get("last_round_context")
+    out["provider_turn_cache_read"] = int((usage or {}).get("cache_read") or 0)
+    out["provider_turn_cache_creation"] = int((usage or {}).get("cache_creation") or 0)
+    out["provider_turn_input_tokens"] = int((usage or {}).get("input_tokens") or 0)
+    out["provider_turn_output_tokens"] = int((usage or {}).get("output_tokens") or 0)
+    out["provider_num_rounds"] = int((usage or {}).get("num_rounds") or len(rounds) or 0)
     if not (is_cold and first):
         out["unattributed_bootstrap_tokens_estimate"] = (
             None if not is_cold else out.get("unattributed_bootstrap_tokens_estimate")
@@ -417,6 +458,84 @@ def finalize_breakdown_with_usage(
         deduct += int(out["tool_schema_tokens_estimate"])
     out["unattributed_bootstrap_tokens_estimate"] = max(0, ctx - deduct)
     return out
+
+
+def classify_turn_tags(
+    *,
+    breakdown: Mapping[str, Any],
+    usage: Mapping[str, Any],
+    runtime: Optional[Mapping[str, Any]] = None,
+    is_cold: bool = False,
+) -> list[str]:
+    """Semantic turn labels for production measurement segmentation."""
+    runtime = runtime or (usage or {}).get("runtime") or {}
+    bd = breakdown or {}
+    tags: list[str] = []
+    if is_cold or is_cold_start(usage, runtime):
+        tags.append("resident_cold_start")
+    else:
+        tags.append("resident_hot")
+    if int(bd.get("memory_recall_tokens_estimate") or 0) > 0:
+        tags.append("has_recall")
+    num_rounds = int((usage or {}).get("num_rounds") or bd.get("provider_num_rounds") or 1)
+    if num_rounds > 1 or bd.get("tool_result_tokens_estimate") not in (None, 0):
+        tags.append("has_tools")
+    if int(bd.get("files_tokens_estimate") or 0) > 0 or bd.get("file_injection_modes"):
+        tags.append("has_files")
+    if int(bd.get("image_block_count") or 0) > 0:
+        tags.append("has_images")
+    if int(bd.get("wake_reply_bridge_tokens_estimate") or 0) > 0:
+        tags.append("wake_reply")
+    if str(bd.get("state_mode") or "") == "delta" and int(bd.get("state_tokens_estimate") or 0) > 0:
+        tags.append("has_state_delta")
+    elif str(bd.get("state_mode") or "") == "snapshot" and int(bd.get("state_tokens_estimate") or 0) > 0:
+        tags.append("has_state_snapshot")
+    return tags
+
+
+def build_turn_measurement(
+    *,
+    breakdown: Mapping[str, Any],
+    usage: Mapping[str, Any],
+    runtime: Optional[Mapping[str, Any]] = None,
+    is_cold: bool = False,
+) -> dict[str, Any]:
+    bd = dict(breakdown or {})
+    tags = classify_turn_tags(
+        breakdown=bd, usage=usage, runtime=runtime, is_cold=is_cold,
+    )
+    return {
+        "turn_tags": tags,
+        "provider": {
+            "num_rounds": bd.get("provider_num_rounds"),
+            "first_round_context_tokens": bd.get("provider_first_round_context_tokens"),
+            "last_round_context_tokens": bd.get("provider_last_round_context_tokens"),
+            "cache_read": bd.get("provider_turn_cache_read"),
+            "cache_creation": bd.get("provider_turn_cache_creation"),
+            "input_tokens": bd.get("provider_turn_input_tokens"),
+            "output_tokens": bd.get("provider_turn_output_tokens"),
+            "resident_generation": (runtime or {}).get("resident_generation"),
+        },
+        "components_estimate": {
+            "persona": bd.get("persona_tokens_estimate"),
+            "stable_system": bd.get("stable_note_tokens_estimate"),
+            "save_instr": bd.get("save_instr_tokens_estimate"),
+            "cold_once": bd.get("cold_once_tokens_estimate"),
+            "state": bd.get("state_tokens_estimate"),
+            "recall": bd.get("memory_recall_tokens_estimate"),
+            "one_shot": bd.get("one_shot_tokens_estimate"),
+            "wake_reply_bridge": bd.get("wake_reply_bridge_tokens_estimate"),
+            "relationship": bd.get("relationship_tokens_estimate"),
+            "history_bootstrap": bd.get("history_bootstrap_tokens_estimate"),
+            "files": bd.get("files_tokens_estimate"),
+            "user": bd.get("user_tokens_estimate"),
+            "tool_schema": bd.get("tool_schema_tokens_estimate"),
+            "tool_results": bd.get("tool_result_tokens_estimate"),
+            "visible_payload": bd.get("visible_payload_tokens_estimate"),
+            "known_visible": bd.get("known_visible_context_tokens_estimate"),
+            "unattributed_bootstrap": bd.get("unattributed_bootstrap_tokens_estimate"),
+        },
+    }
 
 
 def first_round(usage: Mapping[str, Any]) -> Optional[dict[str, Any]]:
@@ -747,12 +866,19 @@ BREAKDOWN_AVG_KEYS = (
     "memory_recall_tokens_estimate",
     "group_delta_tokens_estimate",
     "one_shot_tokens_estimate",
+    "wake_reply_bridge_tokens_estimate",
+    "relationship_tokens_estimate",
+    "files_tokens_estimate",
     "user_tokens_estimate",
     "visible_payload_tokens_estimate",
     "known_visible_context_tokens_estimate",
     "tool_schema_tokens_estimate",
     "tool_result_tokens_estimate",
     "unattributed_bootstrap_tokens_estimate",
+    "provider_first_round_context_tokens",
+    "provider_last_round_context_tokens",
+    "provider_turn_cache_read",
+    "provider_turn_cache_creation",
 )
 
 # 仅冷启动有意义；热轮的 0/null 不得进入平均
@@ -884,6 +1010,22 @@ def aggregate_cc_observability(
     model_rounds_list: list[float] = []
     all_creation_sum = 0
     breakdown_buckets: dict[str, list[float]] = {k: [] for k in BREAKDOWN_AVG_KEYS}
+    turn_tag_segments: dict[str, dict[str, Any]] = {}
+
+    def _segment_bucket(tag: str) -> dict[str, Any]:
+        if tag not in turn_tag_segments:
+            turn_tag_segments[tag] = {
+                "turn_count": 0,
+                "provider_last_round_context_sum": 0,
+                "provider_cache_read_sum": 0,
+                "provider_cache_creation_sum": 0,
+                "visible_payload_sum": 0,
+                "state_sum": 0,
+                "recall_sum": 0,
+                "one_shot_sum": 0,
+                "tool_result_sum": 0,
+            }
+        return turn_tag_segments[tag]
 
     prev_runtime: Optional[dict[str, Any]] = None
     provider_barrier = False
@@ -944,6 +1086,36 @@ def aggregate_cc_observability(
                     pass
         else:
             coverage["rows_missing_breakdown"] += 1
+
+        tags = list(usage.get("turn_tags") or [])
+        if not tags and breakdown:
+            tags = classify_turn_tags(
+                breakdown=breakdown,
+                usage=usage,
+                runtime=runtime,
+                is_cold=cold_for_avg,
+            )
+        if breakdown and tags:
+            for tag in tags:
+                seg = _segment_bucket(tag)
+                seg["turn_count"] += 1
+                for src, dst in (
+                    ("provider_last_round_context_tokens", "provider_last_round_context_sum"),
+                    ("provider_turn_cache_read", "provider_cache_read_sum"),
+                    ("provider_turn_cache_creation", "provider_cache_creation_sum"),
+                    ("visible_payload_tokens_estimate", "visible_payload_sum"),
+                    ("state_tokens_estimate", "state_sum"),
+                    ("memory_recall_tokens_estimate", "recall_sum"),
+                    ("one_shot_tokens_estimate", "one_shot_sum"),
+                    ("tool_result_tokens_estimate", "tool_result_sum"),
+                ):
+                    val = breakdown.get(src)
+                    if val is None:
+                        continue
+                    try:
+                        seg[dst] += float(val)
+                    except (TypeError, ValueError):
+                        pass
 
         rounds = list(usage.get("rounds") or [])
         num_rounds = int(usage.get("num_rounds") or len(rounds) or 0)
@@ -1084,6 +1256,14 @@ def aggregate_cc_observability(
 
     breakdown_averages = {k: _avg_with_count(breakdown_buckets[k]) for k in BREAKDOWN_AVG_KEYS}
 
+    for tag, seg in turn_tag_segments.items():
+        count = int(seg.get("turn_count") or 0)
+        for key in list(seg.keys()):
+            if key == "turn_count" or not key.endswith("_sum"):
+                continue
+            avg_key = key[:-4] + "_avg"
+            seg[avg_key] = _avg_or_none(float(seg.get(key) or 0), count)
+
     return {
         "ok": True,
         "timezone": timezone_name,
@@ -1092,6 +1272,7 @@ def aggregate_cc_observability(
         "summary": summary,
         "daily": daily,
         "breakdown_averages": breakdown_averages,
+        "turn_tag_segments": dict(sorted(turn_tag_segments.items())),
         "coverage": coverage,
         "limitations": list(LIMITATIONS),
     }
@@ -1205,6 +1386,23 @@ def format_report_text(report: Mapping[str, Any]) -> str:
     for key in BREAKDOWN_AVG_KEYS:
         item = avgs.get(key) or {}
         lines.append("  %s: value=%s sample_count=%s" % (key, item.get("value"), item.get("sample_count")))
+    segments = report.get("turn_tag_segments") or {}
+    if segments:
+        lines.append("")
+        lines.append("turn_tag_segments:")
+        for tag, seg in segments.items():
+            lines.append(
+                "  %s: turns=%s last_round_ctx_avg=%s cache_read_avg=%s visible_payload_avg=%s recall_avg=%s one_shot_avg=%s"
+                % (
+                    tag,
+                    seg.get("turn_count"),
+                    seg.get("provider_last_round_context_avg"),
+                    seg.get("provider_cache_read_avg"),
+                    seg.get("visible_payload_avg"),
+                    seg.get("recall_avg"),
+                    seg.get("one_shot_avg"),
+                )
+            )
     lines.append("")
     lines.append("limitations:")
     for item in report.get("limitations") or []:

@@ -1384,5 +1384,55 @@ class ProviderInterleaveExpiryTests(unittest.TestCase):
         self.assertEqual(report["summary"]["suspected_cache_expiry_unknown_count"], 1)
 
 
+class TurnMeasurementTests(unittest.TestCase):
+    def test_classify_turn_tags_semantic_labels(self):
+        usage = {
+            "num_rounds": 2,
+            "rounds": [{"cache_read": 1000, "cache_creation": 0, "input_tokens": 0}],
+            "resident_turn_count": 3,
+        }
+        breakdown = {
+            "memory_recall_tokens_estimate": 120,
+            "wake_reply_bridge_tokens_estimate": 80,
+            "state_mode": "delta",
+            "state_tokens_estimate": 40,
+            "tool_result_tokens_estimate": 500,
+            "files_tokens_estimate": 0,
+            "non_text_block_count": 0,
+        }
+        tags = obs.classify_turn_tags(breakdown=breakdown, usage=usage, is_cold=False)
+        self.assertIn("resident_hot", tags)
+        self.assertIn("has_recall", tags)
+        self.assertIn("has_tools", tags)
+        self.assertIn("wake_reply", tags)
+        self.assertIn("has_state_delta", tags)
+
+    def test_build_turn_measurement_provider_block(self):
+        usage = {
+            "num_rounds": 1,
+            "cache_read": 9000,
+            "cache_creation": 100,
+            "input_tokens": 50,
+            "output_tokens": 200,
+            "resident_turn_count": 1,
+            "respawn_reason": "process_dead",
+        }
+        breakdown = obs.finalize_breakdown_with_usage(
+            obs.build_context_breakdown(
+                persona="p",
+                stable_note="s",
+                full_system="p\n\ns",
+                is_cold=True,
+                first_round_context_tokens=12000,
+            ),
+            usage,
+            is_cold=True,
+        )
+        tm = obs.build_turn_measurement(breakdown=breakdown, usage=usage, is_cold=True)
+        self.assertIn("resident_cold_start", tm["turn_tags"])
+        self.assertEqual(tm["provider"]["cache_read"], 9000)
+        self.assertIsNotNone(tm["components_estimate"]["persona"])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1,26 +1,25 @@
 #!/usr/bin/env python3.11
 """滚动对话摘要——每 15 分钟跑（cron）。
 
-解决的问题：build_messages 的实时窗口按块裁剪。当今天聊得很长（动辄上百条），
-早于最近 60 条的那部分会直接滞出上下文——而 summarizer.py 只给*过去的天*做日摘要，
-所以同一天的长会话里，开头那段既不在窗口、也没日摘要，彻底丢。
-
-本脚本把“比实时窗口早、但在 HORIZON_DAYS 内”的那段历史压成一段滚动摘要，
-存进 rolling_summary 表；build_messages 只在块状裁剪真的发生时把它注入到开头。
-生成走后台 cron + 便宜的 DeepSeek，不占对话热路径。
-
-旋钮（config_store）：ROLLING_LIVE_N / ROLLING_WINDOW_BLOCK / ROLLING_HORIZON_DAYS / ROLLING_MAX_CHARS。
+边界与 build_messages 对齐：摘要覆盖所有被 conversation-content 裁掉的消息。
+按 history mode 分桶存储，避免 legacy / relay / CC 互相污染。
 """
-import os, sys, sqlite3, datetime, json, re, time
+import datetime
+import json
+import os
+import re
+import sqlite3
+import sys
+import time
 import urllib.request as _req
 
 if '/opt/frontend' not in sys.path:
     sys.path.insert(0, '/opt/frontend')
 import config_store as _cfg
 
-DB_PATH  = '/opt/frontend/memories.db'
-API_URL  = 'https://api.deepseek.com/v1/chat/completions'
-MODEL    = 'deepseek-chat'
+DB_PATH = '/opt/frontend/memories.db'
+API_URL = 'https://api.deepseek.com/v1/chat/completions'
+MODEL = 'deepseek-chat'
 LOG_FILE = '/var/log/rolling_summary.log'
 
 API_KEY = ''
@@ -45,32 +44,7 @@ def _db():
     return c
 
 
-def _ensure_table(conn):
-    conn.execute('''CREATE TABLE IF NOT EXISTS rolling_summary (
-        id INTEGER PRIMARY KEY CHECK (id=1),
-        summary TEXT DEFAULT '',
-        up_to_id INTEGER DEFAULT 0,
-        msg_count INTEGER DEFAULT 0,
-        updated_at DATETIME
-    )''')
-    conn.commit()
-
-
-def _ask(prompt):
-    body = json.dumps({
-        'model': MODEL, 'max_tokens': 700,
-        'messages': [{'role': 'user', 'content': prompt}],
-    }).encode()
-    req = _req.Request(API_URL, data=body, method='POST',
-                       headers={'Content-Type': 'application/json',
-                                'Authorization': 'Bearer ' + API_KEY})
-    with _req.urlopen(req, timeout=90) as resp:
-        data = json.load(resp)
-    return (data.get('choices', [{}])[0].get('message', {}).get('content') or '').strip()
-
-
 def _sample(rows, cap=60):
-    """太多时 head/mid/tail 采样，控制 prompt 体积。"""
     if len(rows) <= cap:
         return list(rows)
     head = list(rows[:15])
@@ -81,70 +55,14 @@ def _sample(rows, cap=60):
     return head + mid + tail
 
 
-def run():
-    live_n  = _cfg.get_int('ROLLING_LIVE_N', 60)
-    block_n = _cfg.get_int('ROLLING_WINDOW_BLOCK', 20)
-    horizon = _cfg.get_int('ROLLING_HORIZON_DAYS', 3)
-    maxchar = _cfg.get_int('ROLLING_MAX_CHARS', 700)
-    conn = _db()
-    _ensure_table(conn)
+def _enabled_modes():
+    from chat.context_lean import lean_history_enabled
+    if not lean_history_enabled():
+        return ['legacy_block']
+    return ['legacy_block', 'relay_hysteresis', 'cc_token_budget']
 
-    where = "date(created_at) >= date('now', '+8 hours', '-1 day')"
-    available = conn.execute(
-        'SELECT COUNT(*) FROM chat_messages WHERE ' + where
-    ).fetchone()[0] or 0
-    limit = available
-    if available > live_n:
-        limit = live_n + ((available - live_n) % max(1, block_n))
-    if limit <= 0:
-        limit = live_n
 
-    if available <= limit:
-        # 当前块还没发生裁剪，窗口能装下全部实时消息；不需要头部摘要。
-        conn.execute("UPDATE rolling_summary SET summary='', up_to_id=0, msg_count=0, "
-                     "updated_at=datetime('now','+8 hours') WHERE id=1")
-        conn.commit(); conn.close()
-        _log('no cropped messages (available=%d limit=%d), cleared' % (available, limit))
-        return
-
-    # 实时窗口边界：第 limit 新的消息 id（比它旧的才是真正滞出窗口的）。
-    boundary = conn.execute(
-        'SELECT id FROM chat_messages WHERE ' + where + ' ORDER BY id DESC LIMIT 1 OFFSET ?',
-        (limit - 1,)
-    ).fetchone()
-    if not boundary:
-        conn.execute("UPDATE rolling_summary SET summary='', up_to_id=0, msg_count=0, "
-                     "updated_at=datetime('now','+8 hours') WHERE id=1")
-        conn.commit(); conn.close()
-        _log('no boundary (available=%d limit=%d), cleared' % (available, limit))
-        return
-    boundary_id = boundary['id']
-
-    rows = conn.execute(
-        "SELECT id, author, content FROM chat_messages "
-        "WHERE id < ? AND created_at >= datetime('now','+8 hours', ?) "
-        "ORDER BY id ASC",
-        (boundary_id, '-%d days' % horizon)
-    ).fetchall()
-    rows = [r for r in rows if (r['content'] or '').strip()]
-    if not rows:
-        conn.execute("UPDATE rolling_summary SET summary='', up_to_id=?, msg_count=0, "
-                     "updated_at=datetime('now','+8 hours') WHERE id=1", (boundary_id,))
-        # 若还没行则插入一行
-        if conn.total_changes == 0:
-            conn.execute("INSERT OR IGNORE INTO rolling_summary (id,summary,up_to_id,msg_count,updated_at) "
-                         "VALUES (1,'',?,0,datetime('now','+8 hours'))", (boundary_id,))
-        conn.commit(); conn.close()
-        _log('no pre-window messages within horizon')
-        return
-
-    up_to = rows[-1]['id']
-    current = conn.execute('SELECT summary, up_to_id, msg_count FROM rolling_summary WHERE id=1').fetchone()
-    if current and (current['summary'] or '').strip() and current['up_to_id'] == up_to:
-        conn.close()
-        _log('unchanged cropped boundary (up_to id=%d), skip' % up_to)
-        return
-
+def _summarize_rows(rows, *, maxchar):
     sampled = _sample(rows)
     lines = []
     for r in sampled:
@@ -160,26 +78,85 @@ def run():
         '3. 按时间/话题分条或分段都行，' + str(maxchar) + '字以内\n'
         '4. 直接写摘要本身，不要标题、不要前缀'
     )
-    try:
-        summary = _ask(prompt)[:maxchar + 100]
-    except Exception as e:
-        _log('deepseek error: %s' % e)
-        conn.close()
-        return
-    if not summary:
-        _log('empty summary, skip')
-        conn.close()
+    return _ask(prompt)[:maxchar + 100]
+
+
+def _ask(prompt):
+    body = json.dumps({
+        'model': MODEL, 'max_tokens': 700,
+        'messages': [{'role': 'user', 'content': prompt}],
+    }).encode()
+    req = _req.Request(API_URL, data=body, method='POST',
+                       headers={'Content-Type': 'application/json',
+                                'Authorization': 'Bearer ' + API_KEY})
+    with _req.urlopen(req, timeout=90) as resp:
+        data = json.load(resp)
+    return (data.get('choices', [{}])[0].get('message', {}).get('content') or '').strip()
+
+
+def _run_mode(mode: str, *, horizon: int, maxchar: int, static_dir: str):
+    from chat.history_boundary import boundary_rows_for_summary
+    from chat.rolling_summary_store import clear_summary, get_summary, save_summary
+
+    def get_db():
+        return _db()
+
+    trimmed_up_to_id, oldest_retained_id, rows = boundary_rows_for_summary(
+        get_db,
+        horizon_days=horizon,
+        history_mode=mode,
+        static_dir=static_dir,
+    )
+    if trimmed_up_to_id <= 0 or not rows:
+        clear_summary(mode)
+        _log('mode=%s no cropped messages (trimmed_up_to=%d oldest=%d), cleared' % (
+            mode, trimmed_up_to_id, oldest_retained_id,
+        ))
         return
 
-    conn.execute(
-        "INSERT INTO rolling_summary (id, summary, up_to_id, msg_count, updated_at) "
-        "VALUES (1, ?, ?, ?, datetime('now','+8 hours')) "
-        "ON CONFLICT(id) DO UPDATE SET summary=excluded.summary, up_to_id=excluded.up_to_id, "
-        "msg_count=excluded.msg_count, updated_at=excluded.updated_at",
-        (summary, up_to, len(rows)))
-    conn.commit()
+    up_to = rows[-1]['id']
+    current = get_summary(mode)
+    if current.get('summary') and int(current.get('up_to_id') or 0) == up_to:
+        _log('mode=%s unchanged cropped boundary (up_to id=%d), skip' % (mode, up_to))
+        return
+
+    try:
+        summary = _summarize_rows(rows, maxchar=maxchar)
+    except Exception as e:
+        _log('mode=%s deepseek error: %s' % (mode, e))
+        return
+    if not summary:
+        _log('mode=%s empty summary, skip' % mode)
+        return
+
+    save_summary(
+        mode,
+        summary=summary,
+        up_to_id=up_to,
+        oldest_retained_id=oldest_retained_id,
+        msg_count=len(rows),
+    )
+    _log('mode=%s summarized %d pre-window msgs (up_to id=%d trimmed_up_to=%d): %s' % (
+        mode, len(rows), up_to, trimmed_up_to_id, summary[:60],
+    ))
+
+
+def run(for_cc: bool = False):
+    from chat.rolling_summary_store import ensure_tables
+
+    horizon = _cfg.get_int('ROLLING_HORIZON_DAYS', 3)
+    maxchar = _cfg.get_int('ROLLING_MAX_CHARS', 700)
+    static_dir = os.path.join('/opt/frontend', 'static')
+    conn = _db()
+    ensure_tables(conn)
     conn.close()
-    _log('summarized %d pre-window msgs (up_to id=%d): %s' % (len(rows), up_to, summary[:60]))
+
+    if for_cc:
+        modes = ['cc_token_budget']
+    else:
+        modes = _enabled_modes()
+    for mode in modes:
+        _run_mode(mode, horizon=horizon, maxchar=maxchar, static_dir=static_dir)
 
 
 if __name__ == '__main__':

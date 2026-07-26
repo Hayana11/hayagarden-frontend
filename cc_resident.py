@@ -137,6 +137,10 @@ class ResidentSession:
         self._pending_respawn_reason = respawn_reason
         self._turns_since_respawn = 0
         self._last_state_snapshot = {}
+        self._last_state_send_snapshot = {}
+        self._last_successful_lean_state = False
+        self._committed_file_hashes = set()
+        self._pending_file_hashes = set()
         self._last_group_message_id = 0
         self._group_cursor_initialized = False
         self._last_rel_fingerprint = None
@@ -244,6 +248,7 @@ class ResidentSession:
 
     def _commit_sent_context(self, commit_meta):
         """flush 后只提交仍存活 resident 内的游标；one-shot 不在这里消费。"""
+        from chat.context_budget import merge_cumulative_state_send, normalize_known_file_refs
         if not commit_meta:
             return
         if commit_meta.get('rel_fingerprint'):
@@ -256,6 +261,23 @@ class ResidentSession:
             self._turns_since_rel_sent += 1
         if 'state_snapshot' in commit_meta:
             self._last_state_snapshot = copy.deepcopy(commit_meta['state_snapshot'] or {})
+        if 'state_send_snapshot' in commit_meta:
+            if commit_meta.get('lean_state_reanchor'):
+                self._last_state_send_snapshot = merge_cumulative_state_send(
+                    {},
+                    commit_meta['state_send_snapshot'] or {},
+                )
+            else:
+                self._last_state_send_snapshot = merge_cumulative_state_send(
+                    self._last_state_send_snapshot,
+                    commit_meta['state_send_snapshot'] or {},
+                )
+        if 'lean_state_active' in commit_meta:
+            self._last_successful_lean_state = bool(commit_meta['lean_state_active'])
+        pending_files = commit_meta.get('file_inject_hashes')
+        if pending_files is not None:
+            self._committed_file_hashes = normalize_known_file_refs(pending_files)
+            self._pending_file_hashes = set()
         if commit_meta.get('group_cursor_initialized'):
             self._group_cursor_initialized = True
             if commit_meta.get('group_max_id') is not None:
@@ -605,6 +627,18 @@ class ResidentSession:
     @property
     def last_state_snapshot(self):
         return self._last_state_snapshot
+
+    @property
+    def last_state_send_snapshot(self):
+        return self._last_state_send_snapshot
+
+    @property
+    def last_successful_lean_state(self):
+        return self._last_successful_lean_state
+
+    @property
+    def committed_file_hashes(self):
+        return set(self._committed_file_hashes)
 
     @property
     def last_group_message_id(self):

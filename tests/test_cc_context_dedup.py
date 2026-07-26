@@ -52,6 +52,7 @@ from chat.system_builder import (
     format_state_diff,
     format_state_snapshot,
 )
+from chat.context_budget import file_content_sha256, file_ref_key, merge_cumulative_state_send
 from cc_resident import (
     ResidentError,
     ResidentSession,
@@ -604,6 +605,136 @@ class GatewayOneShotPersistWiringTests(unittest.TestCase):
         self.assertNotIn('feedback_ids', chunk[cache_start:commit_at])
 
 
+class ResidentCumulativeStateTests(unittest.TestCase):
+    def test_commit_merges_cumulative_send_snapshot(self):
+        sess = ResidentSession('/tmp', '', '/tmp/cc-tools.json')
+        sess._last_state_send_snapshot = merge_cumulative_state_send(
+            {},
+            {'lights': '关', 'time_bucket': '12:00'},
+        )
+        sess._commit_sent_context({'state_send_snapshot': {}})
+        self.assertIn('lights', sess.last_state_send_snapshot)
+        sess._commit_sent_context({'state_send_snapshot': {'lights': ''}})
+        self.assertNotIn('lights', sess.last_state_send_snapshot)
+        self.assertIn('time_bucket', sess.last_state_send_snapshot)
+
+
+class ResidentFileRefTests(unittest.TestCase):
+    def test_spawn_clears_committed_file_refs(self):
+        sess = ResidentSession('/tmp', '', '/tmp/cc-tools.json')
+        body = 'file-a'
+        ref = file_ref_key('/static/a.txt', file_content_sha256(body))
+        sess._committed_file_hashes = {ref}
+        with mock.patch('subprocess.Popen', return_value=FakeProc([])):
+            sess._spawn('STATIC', {}, reason='turn_limit')
+        self.assertEqual(sess.committed_file_hashes, set())
+
+    def test_commit_stores_url_hash_pairs(self):
+        sess = ResidentSession('/tmp', '', '/tmp/cc-tools.json')
+        body = 'file-a'
+        ref = file_ref_key('/static/a.txt', file_content_sha256(body))
+        sess._commit_sent_context({'file_inject_hashes': [ref]})
+        self.assertEqual(sess.committed_file_hashes, {ref})
+
+
+class ResidentRespawnFileBootstrapTests(unittest.TestCase):
+    def test_respawn_cold_uses_empty_known_files_for_history(self):
+        gateway = _import_gateway()
+        body = 'FULL FILE BODY'
+        url = '/static/doc.txt'
+        ref = file_ref_key(url, file_content_sha256(body))
+
+        class FakeResident:
+            def __init__(self):
+                self.committed_file_hashes = {ref}
+                self.last_state_snapshot = {}
+                self.last_state_send_snapshot = {}
+                self.last_group_message_id = 0
+                self._group_cursor_initialized = True
+                self.generation = 2
+                self.tool_surface_snapshot = {}
+                self._spawned = False
+
+            @property
+            def group_cursor_initialized(self):
+                return self._group_cursor_initialized
+
+            def ensure_alive(self, system_text, env):
+                self._spawned = True
+                self.committed_file_hashes = set()
+                return True
+
+        fake = FakeResident()
+        captured_build = {}
+
+        def fake_build_messages(*, resident_file_hashes=None, history_stats_out=None):
+            captured_build['resident_file_hashes'] = set(resident_file_hashes or ())
+            return [{'role': 'user', 'content': 'hi'}]
+
+        from chat.system_builder import build_cc_static_parts
+        parts = build_cc_static_parts()
+        is_cold = fake.ensure_alive(parts['full_system'], {})
+        resident_files = set() if is_cold else fake.committed_file_hashes
+        with mock.patch.object(gateway, 'build_messages', side_effect=fake_build_messages):
+            gateway.build_messages(resident_file_hashes=resident_files)
+
+        self.assertTrue(fake._spawned)
+        self.assertEqual(captured_build['resident_file_hashes'], set())
+
+    def test_same_url_new_hash_not_in_known_set(self):
+        url = '/static/a.txt'
+        old_ref = file_ref_key(url, file_content_sha256('v1'))
+        new_ref = file_ref_key(url, file_content_sha256('v2'))
+        self.assertNotEqual(old_ref, new_ref)
+
+    def test_hot_file_present_in_list_content(self):
+        gateway = _import_gateway()
+        captured = {}
+
+        class FakeResident:
+            last_state_snapshot = {}
+            last_state_send_snapshot = {}
+            committed_file_hashes = set()
+            last_group_message_id = 0
+            group_cursor_initialized = True
+            tool_surface_snapshot = {}
+
+            def ensure_alive(self, system_text, env):
+                return False
+
+            def peek_idle_seconds(self):
+                return None
+
+            def send_turn(self, content, commit_meta=None):
+                captured['content'] = content
+                captured['commit_meta'] = commit_meta
+                yield ('done', ('ok', '', empty_usage(), {}))
+
+        with mock.patch.object(gateway, '_CC_RESIDENT', FakeResident()), \
+             mock.patch.object(gateway, 'CC_TOKEN', 'tok'), \
+             mock.patch.object(gateway, 'CC_CWD', tempfile.mkdtemp()), \
+             mock.patch.object(gateway, '_recall_memories', return_value=('', [])), \
+             mock.patch('chat.system_builder.build_cc_state', return_value={}), \
+             mock.patch('chat.system_builder.build_cc_one_shot', return_value={
+                 'wake_nonmessage_background': '', 'wake_message_background': '',
+                 'wake_reply_bridge': '', 'wake_ids': [], 'wake_items': [],
+                 'task_feedback': '', 'dream_flash': '',
+                 'feedback_ids': [], 'dream_id': None,
+             }), \
+             mock.patch('chat.system_builder.build_cc_cold_once', return_value={}), \
+             mock.patch('chat.system_builder.build_cc_static_parts', return_value={
+                 'persona': 'STATIC', 'stable_note': '', 'save_instr': '', 'full_system': 'STATIC',
+             }), \
+             mock.patch.object(gateway, '_fetch_group_chat_rows', return_value=([], 0)):
+            file_text = '[用户发来文件: note.txt]\n```\nhello\n```'
+            list(gateway._cc_resident_stream_gen(
+                [{'role': 'user', 'content': [{'type': 'text', 'text': file_text + '\n请读'}]}],
+                user_turn=True,
+                is_cold=False,
+            ))
+        self.assertTrue(captured['commit_meta'].get('hot_file_present'))
+
+
 class ResidentRespawnTests(unittest.TestCase):
     def test_turn_limit_triggers_before_next_send(self):
         sess = ResidentSession('/tmp', '', '/tmp/cc-tools.json')
@@ -787,8 +918,12 @@ class HotTurnContentTests(unittest.TestCase):
                     'lights': '关',
                     'time_bucket': '当前时间段：23:00 左右',
                 }
+                self.last_state_send_snapshot = dict(self.last_state_snapshot)
+                self.committed_file_hashes = set()
                 self.last_group_message_id = 50
                 self._group_cursor_initialized = True
+                self.generation = 1
+                self.tool_surface_snapshot = {}
 
             @property
             def group_cursor_initialized(self):
@@ -796,6 +931,9 @@ class HotTurnContentTests(unittest.TestCase):
 
             def ensure_alive(self, system_text, env):
                 return False  # hot
+
+            def peek_idle_seconds(self):
+                return None
 
             def send_turn(self, content, commit_meta=None):
                 return fake_send_turn(content, commit_meta=commit_meta)
@@ -846,6 +984,8 @@ class HotTurnContentTests(unittest.TestCase):
 
         class FakeResident:
             last_state_snapshot = {}
+            last_state_send_snapshot = {}
+            committed_file_hashes = set()
             last_group_message_id = 0
             group_cursor_initialized = True
             last_rel_fingerprint = 'rel-v2:old'
