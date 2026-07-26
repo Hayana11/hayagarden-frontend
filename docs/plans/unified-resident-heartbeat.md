@@ -3,9 +3,10 @@
 > 同一只费佳、固定 system、固定工具面、三类轮次；普通 Wake 降为主 resident 的一次短心跳，只有需要行动时才升级，用户聊天永远优先。
 
 - **计划分支**：`plan/unified-heartbeat-tracker`
-- **当前状态**：`MEMORY_HOTFIX_READY`（#134 代码审查 PASS；待 merge，非 deploy）
-- **最后更新**：2026-07-26（#134 Ready 终审；登记 MEM-PIN-REPAIR / OMBRE-P0-TEST-GATE）
-- **tracker head**：`bfe8921`
+- **当前状态**：`MEMORY_HOTFIX_DEPLOYED`（#134 已 merge + legacy_module 生产部署 + smoke PASS）
+- **最后更新**：2026-07-26（#134 merge `dbf3ad4` → deploy → production smoke；#127 证据补齐）
+- **tracker head**：`（本 commit）`
+- **生产 HEAD**：`dbf3ad4e6db532d7be422004614537e5b3d103ee`
 - **当前 identity**：`identity_id = "fyodor-default"` · `provider_id = "claude_code"` · `conversation_id = "default"`
 - **首个 Provider Adapter**：Claude Unified Resident Adapter
 
@@ -92,20 +93,32 @@
   - `observation_version=3` 已在 message_id `4392 / 4394 / 4396` 真实落库
   - resident generation 稳定为 1；turn count `1 → 2 → 3`；cold → hot → hot
   - 无 `system_changed` 循环；cache read / creation 行为健康
-- [-] **Memory Hotfix：统一 Ombre adapter**
-  - 状态：Ready 终审（代码审查 PASS；**未 merge / 未 deploy**）
-  - PR #134（Ready for review / unmerged / undeployed）
-  - head：`f697503c92d04ee129756f54e948012c42b2438e`
+- [x] **Memory Hotfix：统一 Ombre adapter**
+  - 状态：已完成（merge + legacy_module 部署 + production smoke）
+  - 完成日期：2026-07-26（北京时间）
+  - PR #134 合并：`dbf3ad4e6db532d7be422004614537e5b3d103ee`（merge commit；PR head `f697503`）
   - base：`995f8ce0246ea2ef5814215cce5ad1618cbc28f4`
+  - 部署：`sudo scripts/deploy-frontend.sh dbf3ad4e6db532d7be422004614537e5b3d103ee`；`/var/lib/hayagarden/DEPLOYED_SHA=dbf3ad4`；`frontend` / `frontend-gw` active；`OMBRE_ADAPTER_BACKEND` 未写入 `.env`（默认 `legacy_module`）
   - 子进度：
     - [x] PR #134 rebase 到 main@995f8ce
     - [x] REQUEST CHANGES + 第二轮修复（warmup jieba-only / 停止 cleaner auto-pin / workspace breath 4s / 移除 mcp 依赖 / HTTP gap 文档化）
     - [x] legacy_module 默认路径接口/超时/warmup 兼容 + CI 全绿
-    - [x] HTTP backend 保持 dormant
-    - [x] **Ready 终审**（2026-07-26：代码审查 PASS；persona 未改；Context Lean 未开）
-    - [ ] merge
-    - [ ] legacy_module 默认配置部署
-    - [ ] 生产 smoke test
+    - [x] HTTP backend 保持 dormant（`requirements.txt` 无 `mcp`；未设 `OMBRE_ADAPTER_BACKEND=http`）
+    - [x] **Ready 终审**（2026-07-26：代码审查 PASS）
+    - [x] merge（`dbf3ad4`）
+    - [x] legacy_module 默认配置部署
+    - [x] 生产 smoke test（见下）
+  - smoke 摘要（2026-07-26，VPS `python3.11` + 运行中 gateway）：
+    - `static_system_sha256` 未变：`6c129b226b9370fe4d6fd9197850dfdc6282ddb1fd68ecbc112af045946a2bc2`（与 pre-merge `995f8ce` 一致）
+    - Context Lean 四开关均为 `0`：`CONTEXT_LEAN_STATE/HISTORY/TOOL_BUDGET/FILE_DEDUP_ENABLED`；`RELATIONSHIP_CONTEXT_ENABLED=0`
+    - `should_pin_synced_memory(1..10)` 全 `False`；显式 `pinned=True` hold 成功（例 `eca225789ae6`）
+    - `search_memories('记忆')` 有命中；`hold_memory` 在 server warm 后可写（默认 3s/4s 冷路径可能 `None`；memo 路径用 10s/11s）
+    - `get_handoff(10/15)` 冷路径 ~14s、2010 字符；warm 后 `3/5` ~0.3s 仍 2010 字符；**默认 3s/5s 冷启动可能空**（pre-#134 同类限制，非 adapter 独有回归）
+    - `get_emotion_snapshot(timeout=0.001)` 安全降级 `{'valence': None, 'arousal': None, 'count': 0}`
+    - `surface_memories(timeout=0.001)` → `None`，墙钟 ~0.09s（breath 失败不拖死）
+    - `curl /api/debug/wake_check` → `{"ok":true,...}`
+    - `scripts/deploy-frontend.sh` **无** `test_tools`；smoke 命令 **未** 调用 `test_tools.py`
+    - **UH-A0 / UH-A 未开始**
 - [ ] **MEM-PIN-REPAIR：历史自动 pinned 数据修复**
   - 状态：未开始；**不阻塞 #134 Ready，但 merge 前必须登记**
   - 说明：#134 只阻止未来继续制造错误 pin，**不处理**现有约 54 个历史 pinned bucket
@@ -130,7 +143,7 @@
   - 独立 P0 安全 PR；**不属于 #134 adapter 施工范围**
 - [ ] **P-CONTEXT-LEAN：上下文最小化与旧广播式注入退役**
   - 状态：未开始；**#138 四个开关全部保持 0**
-  - 前置：**Memory Hotfix 完成并完成生产 smoke test**
+  - 前置：**Memory Hotfix 已完成**（#134 merge `dbf3ad4` + smoke）；**仍须本文件标 `[-]` 才授权施工**
   - 目标：削减常驻广播与重复注入，**不是**关闭全部上下文
   - 必须保留：
     ```text
@@ -210,8 +223,8 @@
 ```text
 P-SHADOW        [x]
 → P-CONTEXT-OBS [x]
-→ Memory Hotfix [-]          ← Ready 终审；待 merge（非 deploy）
-→ P-CONTEXT-LEAN [ ]
+→ Memory Hotfix [x]          ← merge `dbf3ad4` + legacy_module deploy + smoke
+→ P-CONTEXT-LEAN [ ]         ← 前置已满足；仍 **未授权施工**
 → UH-A0 Tool Parity [ ]
 → UH-A / UH-B [ ]
 → ISV3-1B [ ]
@@ -219,19 +232,16 @@ P-SHADOW        [x]
 → Fyodor Chimera / Single Identity Multi-Brain [ ]
 ```
 
-### 当前下一步（不变）
+### 当前下一步
 
 ```text
-Memory Hotfix #134（Ready 终审）：
-merge
-→ legacy_module 部署
-→ production smoke
-→ tracker 更新
-→ MEM-PIN-REPAIR（独立数据修复；门禁见上）
-→ OMBRE-P0-TEST-GATE（独立 P0 安全 PR）
+P-CONTEXT-LEAN [ ]           ← 前置 Memory Hotfix 已完成；仍须单独标 [-] 才授权
+MEM-PIN-REPAIR [ ]           ← 独立历史数据修复；不得趁部署顺手改 vault
+OMBRE-P0-TEST-GATE [!]       ← 独立 P0 安全 PR
+UH-A0 [ ]                    ← 未开始；不得提前
 ```
 
-> morning cron 继续关闭。P-SHADOW 已于 2026-07-26 毕业。**Context Lean、UH-A0、UH-A、ISV3-1B 等均不得提前施工。**
+> morning cron 继续关闭。P-SHADOW 已于 2026-07-26 毕业。**#134 已 merge/deploy；Context Lean、UH-A0、UH-A、ISV3-1B 等均不得提前施工。**
 
 ---
 
@@ -314,7 +324,7 @@ user_events_preflight_ok=true
 
 ### 登记 ≠ 授权施工
 
-总进度与 Master roadmap 中登记的后续项（Context Lean、UH-A0、ISV3-1B、Relationship Context Recovery、Chimera、#131 等）**仅用于防止换窗口遗忘**。**当前唯一授权施工项仍为 Memory Hotfix / PR #134。** 未在本文件将对应项标为 `[-]` 且写明前置已满足前，禁止开工。
+总进度与 Master roadmap 中登记的后续项（Context Lean、UH-A0、ISV3-1B、Relationship Context Recovery、Chimera、#131 等）**仅用于防止换窗口遗忘**。**#134 Memory Hotfix 已完成；当前无授权中的新施工项。** 未在本文件将对应项标为 `[-]` 且写明前置已满足前，禁止开工。
 
 ---
 
@@ -956,6 +966,15 @@ PR #126 修门禁与去重
 - [x] **#134 Ready 终审**（head `f697503`）：代码审查 PASS；CI 全绿（continuity + internal-state）；默认 `legacy_module` PASS；persona 未改；Context Lean 未开；HTTP dormant
 - [x] 登记 **MEM-PIN-REPAIR** 与 **OMBRE-P0-TEST-GATE**（merge 前工单；不阻塞 #134 Ready）
 - [-] 待 merge → deploy → smoke；**仍未 merge / 未 deploy**；UH-A 未开始
+
+### 2026-07-26（续·#134 merge + deploy + smoke）
+
+- [x] **PR #134 merge** → `dbf3ad4e6db532d7be422004614537e5b3d103ee`（main；base `995f8ce`）
+- [x] **legacy_module 生产部署**：`deploy-frontend.sh dbf3ad4`；`DEPLOYED_SHA=dbf3ad4`；`frontend` / `frontend-gw` active
+- [x] **production smoke PASS**（管道修复；未换 persona / 未启 HTTP backend / 未开 Context Lean）
+- [x] **Memory Hotfix `[x]`**；tracker 证据本条补齐
+- [ ] **MEM-PIN-REPAIR**、**OMBRE-P0-TEST-GATE** 仍独立待办；本轮 **未** 动历史 pinned 数据
+- [ ] 下一项：**P-CONTEXT-LEAN**（须单独开项标 `[-]`；四开关仍保持 0 直至授权）
 
 ---
 
