@@ -5,7 +5,7 @@
 - **计划分支**：`plan/unified-heartbeat-tracker`
 - **当前状态**：`P-CONTEXT-LEAN_STAGE1`（#139 已 merge；Stage 1 代码已部署；**四开关仍为 `0`**；待单独授权开启 `CONTEXT_LEAN_STATE_ENABLED`）
 - **最后更新**：2026-07-27（#139 merge `6678ee5` + 四开关 0 部署 + legacy parity smoke）
-- **tracker head**：`c5ca30e`
+- **tracker head**：`ef0c450`
 - **生产 HEAD**：`6678ee59bf4f930c6be7687af71f19f28b0f5c1d`（main merge #139）
 - **当前 identity**：`identity_id = "fyodor-default"` · `provider_id = "claude_code"` · `conversation_id = "default"`
 - **首个 Provider Adapter**：Claude Unified Resident Adapter
