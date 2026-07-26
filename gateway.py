@@ -11,6 +11,7 @@ from codebase.client import CODEBASE_TOOLS, CODEBASE_READ_TOOLS, run_codebase_to
 from tools import workspace_agent
 from tools import workspace_jobs
 from tools import workspace_apps
+from tools import ombre_adapter
 from tools.workspace_apps import WorkspaceAppError, verified_proxy_upstream, proxy_target
 
 app = Flask(__name__)
@@ -18,22 +19,9 @@ DB_PATH    = '/opt/frontend/memories.db'
 _tool_ctx = threading.local()
 
 def _warmup_ombre_brain():
-    """
-    进程/worker启动时在后台线程预热ombre-brain（主要是jieba分词器初始化，
-    冷启动要5-7秒，热启动后只要0.4秒）。
-    放在模块顶层是因为gunicorn直接import gateway:app，不会走if __name__主分支。
-    """
-    import threading, logging as _log
-    def _do_warmup():
-        try:
-            import sys as _sys
-            _sys.path.insert(0, '/opt/ombre-brain')
-            import jieba
-            jieba.initialize()
-            _log.getLogger('gateway').info('[warmup] jieba预热完成')
-        except Exception as e:
-            _log.getLogger('gateway').warning('[warmup] jieba预热失败: %s', e)
-    threading.Thread(target=_do_warmup, daemon=True).start()
+    """Warm Ombre through the shared adapter without blocking gateway import."""
+    ombre_adapter.warmup_async()
+
 
 _warmup_ombre_brain()
 
@@ -184,51 +172,14 @@ def _build_cache_info_payload(
     return payload
 
 def _ombre_recall_search(query, limit=2, timeout=4.0):
-    """联邦召回的渐变脑分支：直接调 bucket_mgr.search（跳过 breath 的 dehydrate——
-    那是一次 LLM 调用，热路径吃不起）。独立线程+事件循环，超时安静放弃。
-    返回 [(name, content_clip)]。"""
-    import concurrent.futures as _cf
-
-    def _worker():
-        import asyncio as _aio, sys as _sys, logging as _log
-        _log.getLogger('ombre_brain').setLevel(_log.WARNING)
-        _sys.path.insert(0, '/opt/ombre-brain')
-        from server import bucket_mgr as _bm
-        loop = _aio.new_event_loop()
-        _aio.set_event_loop(loop)
-        try:
-            matches = loop.run_until_complete(
-                _aio.wait_for(_bm.search(query, limit=limit), timeout=timeout))
-            out = []
-            for b in matches or []:
-                meta = b.get('metadata', {})
-                name = meta.get('name', '') or '记忆桶'
-                content = (b.get('content') or '').strip()
-                if content:
-                    out.append((name, content[:300]))
-                    try:
-                        loop.run_until_complete(_bm.touch(b['id']))
-                    except Exception:
-                        pass
-            return out
-        except Exception:
-            return []
-        finally:
-            try:
-                pending = _aio.all_tasks(loop)
-                for t in pending:
-                    t.cancel()
-                if pending:
-                    loop.run_until_complete(_aio.gather(*pending, return_exceptions=True))
-            except Exception:
-                pass
-            loop.close()
-
-    try:
-        with _cf.ThreadPoolExecutor(max_workers=1) as ex:
-            return ex.submit(_worker).result(timeout=timeout + 1.0) or []
-    except Exception:
-        return []
+    """Compatibility wrapper for explicit federated Ombre recall."""
+    return ombre_adapter.search_memories(
+        query,
+        limit=limit,
+        timeout=timeout,
+        wall_timeout=timeout + 1.0,
+        touch=True,
+    )
 
 
 def _recall_memories(user_msg, limit=None):
@@ -511,50 +462,9 @@ def drawers_config():
     return jsonify({'ok': True, 'enabled': tool_drawers.enabled()})
 
 
-def _ombre_breath_sync():
-    """
-    Call breath() in a dedicated thread with its own event loop.
-    Returns the result string, or None if timeout / error.
-    Completely isolated from gateway's main thread.
-    """
-    import concurrent.futures as _cf
-
-    def _worker():
-        import asyncio as _aio, sys as _sys, logging as _log
-        # suppress ombre-brain noise in gateway logs
-        _log.getLogger('ombre_brain').setLevel(_log.WARNING)
-        _sys.path.insert(0, '/opt/ombre-brain')
-        from server import breath as _breath
-        loop = _aio.new_event_loop()
-        _aio.set_event_loop(loop)
-        try:
-            return loop.run_until_complete(
-                _aio.wait_for(_breath(), timeout=6.0)
-            )
-        except _aio.TimeoutError:
-            return None
-        except Exception:
-            return None
-        finally:
-            # clean up pending tasks before closing the loop
-            try:
-                pending = _aio.all_tasks(loop)
-                for t in pending:
-                    t.cancel()
-                if pending:
-                    loop.run_until_complete(
-                        _aio.gather(*pending, return_exceptions=True)
-                    )
-            except Exception:
-                pass
-            loop.close()
-
-    try:
-        with _cf.ThreadPoolExecutor(max_workers=1) as ex:
-            future = ex.submit(_worker)
-            return future.result(timeout=7.0)
-    except Exception:
-        return None
+def _ombre_breath_sync(timeout=6.0, wall_timeout=7.0):
+    """Compatibility wrapper for automatic Ombre surfacing."""
+    return ombre_adapter.surface_memories(timeout=timeout, wall_timeout=wall_timeout)
 
 
 def _write_session_memo(user_msg='', assistant_msg=''):
@@ -570,40 +480,24 @@ def _write_session_memo(user_msg='', assistant_msg=''):
 
     def _worker():
         try:
-            import asyncio as _aio, sys as _sys, logging as _log
-            _log.getLogger('ombre_brain').setLevel(_log.WARNING)
-            _sys.path.insert(0, '/opt/ombre-brain')
-            from server import hold as _hold
-
             now = (_dt.datetime.utcnow() + _dt.timedelta(hours=8)).strftime('%m-%d %H:%M')
-            # 极简memo：时间戳 + 她说了什么 + 我回了什么的开头
             u_clip = user_msg.strip()[:80]
             a_clip = assistant_msg.strip()[:80]
             memo = f'[网页窗口 {now}] 她：{u_clip}… / 我：{a_clip}…'
-
             _mlog.getLogger('gateway').info('[memo] 开始写入 ombre-brain: %s', memo[:60])
-            loop = _aio.new_event_loop()
-            _aio.set_event_loop(loop)
-            try:
-                _hold_result = loop.run_until_complete(
-                    _aio.wait_for(
-                        _hold(content=memo, tags='memo,网页窗口,跨端', importance=4),
-                        timeout=10.0
-                    )
-                )
-                _mlog.getLogger('gateway').info('[memo] 写入 ombre-brain 成功: %s', _hold_result)
-            finally:
-                try:
-                    pending = _aio.all_tasks(loop)
-                    for t in pending: t.cancel()
-                    if pending:
-                        loop.run_until_complete(_aio.gather(*pending, return_exceptions=True))
-                except Exception:
-                    pass
-                loop.close()
+            result = ombre_adapter.hold_memory(
+                memo,
+                tags='memo,网页窗口,跨端',
+                importance=4,
+                pinned=False,
+                timeout=10.0,
+                wall_timeout=11.0,
+            )
+            if result is None:
+                raise RuntimeError('Ombre hold timed out or failed')
+            _mlog.getLogger('gateway').info('[memo] 写入 ombre-brain 成功: %s', result)
         except Exception as _e:
-            import logging as _log2
-            _log2.getLogger('gateway').error('[memo] 写入 ombre-brain 失败: %s', _e, exc_info=True)
+            _mlog.getLogger('gateway').error('[memo] 写入 ombre-brain 失败: %s', _e, exc_info=True)
 
     try:
         # 用 daemon thread 而非裸 ThreadPoolExecutor.submit()——
@@ -617,45 +511,15 @@ def _write_session_memo(user_msg='', assistant_msg=''):
 
 
 def _ombre_hold_sync(content, tags='', importance=5, pinned=False):
-    """
-    把一条记忆写进ombre-brain（hold）。与_ombre_breath_sync同样的
-    独立线程+事件循环模式，跟主线程/HTTP连接无关。
-    成功返回结果字符串，失败返回None（不抛异常，调用方按"尽力而为"处理）。
-    """
-    import concurrent.futures as _cf
-
-    def _worker():
-        import asyncio as _aio, sys as _sys, logging as _log
-        _log.getLogger('ombre_brain').setLevel(_log.WARNING)
-        _sys.path.insert(0, '/opt/ombre-brain')
-        from server import hold as _hold
-        loop = _aio.new_event_loop()
-        _aio.set_event_loop(loop)
-        try:
-            return loop.run_until_complete(
-                _aio.wait_for(_hold(content=content, tags=tags, importance=importance, pinned=pinned), timeout=3.0)
-            )
-        except Exception:
-            return None
-        finally:
-            try:
-                pending = _aio.all_tasks(loop)
-                for t in pending:
-                    t.cancel()
-                if pending:
-                    loop.run_until_complete(
-                        _aio.gather(*pending, return_exceptions=True)
-                    )
-            except Exception:
-                pass
-            loop.close()
-
-    try:
-        with _cf.ThreadPoolExecutor(max_workers=1) as ex:
-            future = ex.submit(_worker)
-            return future.result(timeout=4.0)
-    except Exception:
-        return None
+    """Compatibility wrapper for Ombre writes."""
+    return ombre_adapter.hold_memory(
+        content,
+        tags=tags,
+        importance=importance,
+        pinned=pinned,
+        timeout=3.0,
+        wall_timeout=4.0,
+    )
 
 
 from chat.system_builder import build_system, build_wake_system, _blocks_to_str
@@ -3864,13 +3728,9 @@ def workspace_chat():
         else:
             system = str(system) + ws_sys
 
-    # 从记忆中breath（复用现有逻辑）
+    # 从记忆中 breath（复用统一适配层；工作台沿用旧 4s 预算，结果仍不注入消息）
     try:
-        from server import breath as _breath
-        import asyncio as _aio
-        loop = _aio.new_event_loop()
-        loop.run_until_complete(_aio.wait_for(_breath(), timeout=4))
-        loop.close()
+        _ombre_breath_sync(timeout=4.0, wall_timeout=5.0)
     except Exception:
         pass
 

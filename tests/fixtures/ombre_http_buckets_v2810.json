@@ -1,0 +1,35 @@
+[
+  {
+    "id": "self-anchor-001",
+    "type": "permanent",
+    "domain": ["self_anchor"],
+    "resolved": false,
+    "digested": false,
+    "dont_surface": false,
+    "pinned": true,
+    "importance": 10,
+    "last_active_epoch_ms": 5
+  },
+  {
+    "id": "recent-dynamic-001",
+    "type": "dynamic",
+    "domain": ["技术"],
+    "resolved": false,
+    "digested": false,
+    "dont_surface": false,
+    "pinned": false,
+    "importance": 7,
+    "last_active_epoch_ms": 10
+  },
+  {
+    "id": "pinned-dynamic-001",
+    "type": "dynamic",
+    "domain": ["日常"],
+    "resolved": false,
+    "digested": false,
+    "dont_surface": false,
+    "pinned": true,
+    "importance": 9,
+    "last_active_epoch_ms": 99
+  }
+]

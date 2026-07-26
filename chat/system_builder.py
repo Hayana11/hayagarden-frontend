@@ -53,55 +53,9 @@ def build_shared_context(**kwargs):
 
 
 def _ombre_handoff_sync():
-    """
-    Call handoff() for new window continuity.
-    Returns compact self_anchor + portraits + recent continuity.
-
-    Uses daemon thread + Event so the 5s wall-clock timeout is enforced even
-    when the worker is blocked on a non-cancellable import (e.g. jieba loading
-    during gateway cold-start). ThreadPoolExecutor.shutdown(wait=True) would
-    block indefinitely in that case.
-    """
-    import threading as _th
-
-    result_holder = [None]
-    done = _th.Event()
-
-    def _worker():
-        try:
-            import asyncio as _aio, sys as _sys, logging as _log
-            _log.getLogger('ombre_brain').setLevel(_log.WARNING)
-            _sys.path.insert(0, '/opt/ombre-brain')
-            from server import handoff as _handoff
-            loop = _aio.new_event_loop()
-            _aio.set_event_loop(loop)
-            try:
-                result_holder[0] = loop.run_until_complete(
-                    _aio.wait_for(_handoff(), timeout=3.0)
-                )
-            except Exception:
-                pass
-            finally:
-                try:
-                    pending = _aio.all_tasks(loop)
-                    for t in pending:
-                        t.cancel()
-                    if pending:
-                        loop.run_until_complete(
-                            _aio.gather(*pending, return_exceptions=True)
-                        )
-                except Exception:
-                    pass
-                loop.close()
-        except Exception:
-            pass
-        finally:
-            done.set()
-
-    t = _th.Thread(target=_worker, daemon=True)
-    t.start()
-    done.wait(timeout=5.0)
-    return result_holder[0]
+    """Compatibility wrapper around the single Ombre integration boundary."""
+    from tools.ombre_adapter import get_handoff
+    return get_handoff(timeout=3.0, wall_timeout=5.0)
 
 
 def build_system(

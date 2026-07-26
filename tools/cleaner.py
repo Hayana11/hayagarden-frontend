@@ -62,22 +62,20 @@ def ask(prompt, expect_json=False):
 import asyncio as _asyncio
 
 async def _batch_hold(sync_items):
-    """
-    Call server.hold() for each item in ONE shared event loop.
-    Importing inside the coroutine so module-level server init
-    (BucketManager / Dehydrator / DecayEngine) runs inside the loop.
-    """
-    sys.path.insert(0, '/opt/ombre-brain')
-    from server import hold
+    """Write a cleaner batch through the same Ombre adapter boundary."""
+    try:
+        from tools.ombre_adapter import hold_memory_async
+    except ImportError:  # running as /opt/frontend/tools/cleaner.py
+        from ombre_adapter import hold_memory_async
 
     results = []
     for item in sync_items:
         try:
-            r = await hold(
-                content    = item['content'],
-                tags       = item['tags_str'],
-                importance = item['importance'],
-                pinned     = item['pinned'],
+            r = await hold_memory_async(
+                content=item['content'],
+                tags=item['tags_str'],
+                importance=item['importance'],
+                pinned=item['pinned'],
             )
             results.append((item['id'], r, None))
         except Exception as e:
@@ -252,6 +250,10 @@ def mark_resolved():
 # ─────────────────────────────────────────────────────────────
 # Task 5 · Process new memories & sync to Ombre Brain
 # ─────────────────────────────────────────────────────────────
+def should_pin_synced_memory(importance):
+    """Cleaner model scores must never grant permanent pin status."""
+    return False
+
 def process_and_sync():
     log('=== Task 5: Process new & sync to Ombre Brain ===')
     conn = get_db()
@@ -313,7 +315,7 @@ def process_and_sync():
                 'content':    r['content'],
                 'tags_str':   tags_str,
                 'importance': importance,
-                'pinned':     (importance >= 8),
+                'pinned':     should_pin_synced_memory(importance),
             })
         except Exception as e:
             log(f'  id={r["id"]} DeepSeek error: {e}')
