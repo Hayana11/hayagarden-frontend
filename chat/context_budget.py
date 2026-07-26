@@ -1,14 +1,15 @@
 """Token budgeting and BP3 state send-payload helpers.
 
-Raw state snapshots are always complete; send payloads omit unchanged volatile
-fields unless user-relevant. Omission never means cleared.
+Raw state snapshots are always complete. The cumulative send snapshot tracks
+what the model has been told and still considers valid.
 """
 from __future__ import annotations
 
+import hashlib
 import re
 from typing import Any, Callable, Mapping, Optional, Sequence
 
-from chat.system_builder import format_state_diff, format_state_snapshot
+from chat.system_builder import format_state_snapshot
 
 EstimateFn = None  # re-exported via default_estimate_tokens
 
@@ -18,10 +19,10 @@ _STATE_RELEVANCE = {
     'ledger': re.compile(r'账|预算|花钱|收入|支出|记账|结余', re.I),
     'todos': re.compile(r'待办|活儿|留言板|board|给活儿', re.I),
     'reminders': re.compile(r'提醒|倒计时|待办事项|todo', re.I),
+    'time_bucket': re.compile(r'几点|现在几点|什么时间|什么时候|时间|几点了|现在.*几点', re.I),
 }
 
 _VOLATILE_STATE_KEYS = frozenset({'lights', 'pocket', 'ledger', 'todos', 'reminders'})
-_ALWAYS_SEND_STATE_KEYS = frozenset({'emotion', 'drive', 'recent_activity'})
 
 
 def default_estimate_tokens(text: Optional[str]) -> int:
@@ -43,6 +44,20 @@ def state_key_relevant(key: str, user_text: str) -> bool:
     return bool(pattern.search(user_text or ''))
 
 
+def merge_cumulative_state_send(
+    cumulative: Optional[Mapping[str, Any]],
+    send_delta: Mapping[str, Any],
+) -> dict[str, str]:
+    """Merge per-turn send delta into cumulative model-known state."""
+    out = normalize_state_dict(cumulative)
+    for key, value in normalize_state_dict(send_delta).items():
+        if value == '':
+            out.pop(key, None)
+        else:
+            out[key] = value
+    return out
+
+
 def build_state_send_payload(
     last_raw_state: Optional[Mapping[str, Any]],
     raw_state: Mapping[str, Any],
@@ -50,7 +65,7 @@ def build_state_send_payload(
     user_text: str = '',
     is_cold: bool = False,
 ) -> dict[str, str]:
-    """Build per-turn send dict. Omitted keys are not sent; empty string = tombstone."""
+    """Build per-turn send delta. Omitted keys are not sent; empty string = tombstone."""
     last_raw = normalize_state_dict(last_raw_state)
     raw = normalize_state_dict(raw_state)
     if is_cold:
@@ -59,6 +74,8 @@ def build_state_send_payload(
     send: dict[str, str] = {}
     keys = list(dict.fromkeys(list(last_raw.keys()) + list(raw.keys())))
     for key in keys:
+        if key == 'time_bucket':
+            continue
         before = last_raw.get(key, '')
         after = raw.get(key, '')
         if after:
@@ -71,29 +88,25 @@ def build_state_send_payload(
 
     tb = raw.get('time_bucket', '')
     if tb:
-        changed_other = any(
-            send.get(k, last_raw.get(k, '')) != last_raw.get(k, '')
-            for k in send
-            if k != 'time_bucket'
-        )
-        if tb != last_raw.get('time_bucket', '') or changed_other:
+        meaningful = any(k != 'time_bucket' for k in send)
+        if meaningful or state_key_relevant('time_bucket', user_text):
             send['time_bucket'] = tb
     return send
 
 
 def format_state_for_send(
-    last_send_state: Optional[Mapping[str, Any]],
-    send_state: Mapping[str, Any],
+    cumulative_before: Optional[Mapping[str, Any]],
+    send_delta: Mapping[str, Any],
     *,
     is_cold: bool = False,
 ) -> tuple[str, str]:
-    """Return (text, mode). Omitted keys in send_state are not treated as cleared."""
-    send_state = normalize_state_dict(send_state)
+    """Diff cumulative-before against this turn's send_delta for display."""
+    send_delta = normalize_state_dict(send_delta)
     if is_cold:
-        text = format_state_snapshot(send_state)
+        text = format_state_snapshot(send_delta)
         return text, ('snapshot' if text else 'none')
 
-    last_send = normalize_state_dict(last_send_state)
+    cumulative = normalize_state_dict(cumulative_before)
     lines = []
     labels = {
         'time_bucket': '当前时间段',
@@ -106,8 +119,8 @@ def format_state_for_send(
         'reminders': '今日提醒',
         'recent_activity': '最近活动',
     }
-    for key, after in send_state.items():
-        before = last_send.get(key, '')
+    for key, after in send_delta.items():
+        before = cumulative.get(key, '')
         label = labels.get(key, key)
         if before and not after:
             lines.append(f'- {label}：已清空')
@@ -146,6 +159,29 @@ def trim_rows_to_token_budget(
         total += cost
     kept.reverse()
     return kept, total
+
+
+def file_content_sha256(body: str) -> str:
+    return hashlib.sha256((body or '').encode('utf-8')).hexdigest()
+
+
+def file_ref_key(url: str, content_sha256: str) -> str:
+    return '%s|%s' % (str(url), str(content_sha256))
+
+
+def parse_file_ref_key(key: str) -> tuple[str, str]:
+    url, _, digest = str(key).partition('|')
+    return url, digest
+
+
+def normalize_known_file_refs(refs: Optional[Iterable[Any]]) -> set[str]:
+    out: set[str] = set()
+    for item in refs or ():
+        if isinstance(item, (list, tuple)) and len(item) >= 2:
+            out.add(file_ref_key(item[0], item[1]))
+        elif isinstance(item, str) and '|' in item:
+            out.add(item)
+    return out
 
 
 # Backward-compatible alias used in early PR #138 drafts.

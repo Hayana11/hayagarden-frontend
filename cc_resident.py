@@ -247,6 +247,7 @@ class ResidentSession:
 
     def _commit_sent_context(self, commit_meta):
         """flush 后只提交仍存活 resident 内的游标；one-shot 不在这里消费。"""
+        from chat.context_budget import merge_cumulative_state_send, normalize_known_file_refs
         if not commit_meta:
             return
         if commit_meta.get('rel_fingerprint'):
@@ -260,10 +261,13 @@ class ResidentSession:
         if 'state_snapshot' in commit_meta:
             self._last_state_snapshot = copy.deepcopy(commit_meta['state_snapshot'] or {})
         if 'state_send_snapshot' in commit_meta:
-            self._last_state_send_snapshot = copy.deepcopy(commit_meta['state_send_snapshot'] or {})
+            self._last_state_send_snapshot = merge_cumulative_state_send(
+                self._last_state_send_snapshot,
+                commit_meta['state_send_snapshot'] or {},
+            )
         pending_files = commit_meta.get('file_inject_hashes')
         if pending_files is not None:
-            self._committed_file_hashes = set(str(x) for x in pending_files if x)
+            self._committed_file_hashes = normalize_known_file_refs(pending_files)
             self._pending_file_hashes = set()
         if commit_meta.get('group_cursor_initialized'):
             self._group_cursor_initialized = True

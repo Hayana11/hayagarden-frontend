@@ -11,7 +11,12 @@ import datetime
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable, Mapping, Optional, Sequence
 
-from chat.context_budget import default_estimate_tokens, trim_rows_to_token_budget
+from chat.context_budget import (
+    default_estimate_tokens,
+    file_content_sha256,
+    file_ref_key,
+    trim_rows_to_token_budget,
+)
 from chat.context_continuity import format_tool_history
 
 EstimateFn = Callable[[Optional[str]], int]
@@ -20,6 +25,8 @@ ReadFileFn = Callable[[str, str], Optional[str]]
 
 _TOOL_HISTORY_HEADER = '[上一轮我调用的工具与结果]'
 _HISTORY_OMITTED_MARKER = '[更早的工具结果已因上下文预算省略]'
+_ROLLING_SUMMARY_MARKER = '[更早对话的连续性摘要（滞出当前窗口的部分）]'
+_RESIDENT_FILE_SUMMARY_SUFFIX = '...(此前 resident 已全文注入，以上为摘要)'
 
 
 def _row_get(row: Any, key: str, default: Any = '') -> Any:
@@ -38,18 +45,24 @@ class HistoryBuildStats:
     file_injections: list[dict[str, Any]] = field(default_factory=list)
     history_trimmed: bool = False
     block_count_trimmed: bool = False
+    conversation_content_trimmed: bool = False
+    tool_history_trimmed: bool = False
+
+
+def flatten_message_content(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for block in content:
+            if isinstance(block, dict) and block.get('type') == 'text':
+                parts.append(str(block.get('text') or ''))
+        return '\n'.join(parts)
+    return str(content or '')
 
 
 def estimate_message_text_tokens(content: Any, estimate_tokens: EstimateFn = default_estimate_tokens) -> int:
-    if isinstance(content, str):
-        return estimate_tokens(content)
-    if isinstance(content, list):
-        total = 0
-        for block in content:
-            if isinstance(block, dict) and block.get('type') == 'text':
-                total += estimate_tokens(str(block.get('text') or ''))
-        return total
-    return estimate_tokens(str(content or ''))
+    return estimate_tokens(flatten_message_content(content))
 
 
 def _tool_caps():
@@ -90,9 +103,6 @@ def apply_history_tool_budget(
 
     if not refs:
         return messages, False
-
-    def _total() -> int:
-        return sum(estimate_tokens(r['text']) for r in refs)
 
     refs_work = list(refs)
     while len(refs_work) > 0 and sum(estimate_tokens(r['text']) for r in refs_work) > total_budget:
@@ -135,26 +145,132 @@ def apply_history_tool_budget(
     return out, True
 
 
+def _last_user_index(messages: Sequence[dict[str, Any]]) -> Optional[int]:
+    for i in range(len(messages) - 1, -1, -1):
+        if messages[i].get('role') == 'user':
+            return i
+    return None
+
+
 def trim_messages_to_text_budget(
     messages: list[dict[str, Any]],
     *,
     budget: int,
     estimate_tokens: EstimateFn = default_estimate_tokens,
+    protect_indices: Optional[Iterable[int]] = None,
 ) -> tuple[list[dict[str, Any]], bool]:
     if budget <= 0 or not messages:
         return messages, False
-    kept: list[dict[str, Any]] = []
-    total = 0
-    for msg in reversed(messages):
-        cost = estimate_message_text_tokens(msg.get('content'), estimate_tokens)
-        if kept and total + cost > budget:
+
+    n = len(messages)
+    protected = {int(i) for i in (protect_indices or ())}
+    last_user = _last_user_index(messages)
+    if last_user is not None:
+        protected.add(last_user)
+
+    costs = [estimate_message_text_tokens(messages[i].get('content'), estimate_tokens) for i in range(n)]
+    kept = set(protected)
+    total = sum(costs[i] for i in kept)
+
+    for i in range(n - 1, -1, -1):
+        if i in kept:
+            continue
+        if kept - protected and total + costs[i] > budget:
+            continue
+        if not (kept - protected) and total + costs[i] > budget:
+            kept.add(i)
+            total += costs[i]
+            continue
+        if total + costs[i] > budget:
             break
-        kept.append(msg)
-        total += cost
-    if len(kept) == len(messages):
+        kept.add(i)
+        total += costs[i]
+
+    if not kept:
+        kept.add(n - 1)
+    if len(kept) == n:
         return messages, False
-    kept.reverse()
-    return kept, True
+    return [messages[i] for i in sorted(kept)], True
+
+
+def inject_rolling_summary_and_enforce_budget(
+    messages: list[dict[str, Any]],
+    *,
+    rolling_summary: str,
+    budget: int,
+    estimate_tokens: EstimateFn = default_estimate_tokens,
+) -> tuple[list[dict[str, Any]], int, bool]:
+    """Inject rolling summary prefix and trim while protecting summary + last user."""
+    summary = (rolling_summary or '').strip()
+    if not summary or budget <= 0:
+        tokens = sum(estimate_message_text_tokens(m.get('content'), estimate_tokens) for m in messages)
+        return messages, tokens, False
+
+    msgs = [dict(m) for m in messages]
+    last_user = _last_user_index(msgs)
+    last_user_msg = msgs[last_user] if last_user is not None else None
+    middle = [msgs[i] for i in range(len(msgs)) if i != last_user]
+
+    marker = _ROLLING_SUMMARY_MARKER + '\n'
+    summary_text = summary
+    trimmed = False
+
+    def _assemble(summary_body: str) -> list[dict[str, Any]]:
+        out: list[dict[str, Any]] = []
+        if summary_body:
+            out.append({'role': 'user', 'content': marker + summary_body})
+        out.extend(middle)
+        if last_user_msg is not None:
+            out.append(dict(last_user_msg))
+        return out
+
+    while True:
+        assembled = _assemble(summary_text)
+        tokens = sum(estimate_message_text_tokens(m.get('content'), estimate_tokens) for m in assembled)
+        if tokens <= budget:
+            return assembled, tokens, trimmed
+        if len(middle) > 0:
+            middle, dropped = trim_messages_to_text_budget(middle, budget=max(1, budget // 2), estimate_tokens=estimate_tokens)
+            if dropped:
+                trimmed = True
+                continue
+            middle = middle[1:]
+            trimmed = True
+            continue
+        if summary_text:
+            summary_text = summary_text[: max(0, len(summary_text) - 200)]
+            trimmed = True
+            if not summary_text:
+                assembled = _assemble('')
+                tokens = sum(estimate_message_text_tokens(m.get('content'), estimate_tokens) for m in assembled)
+                return assembled, tokens, trimmed
+            continue
+        return assembled, tokens, trimmed
+
+
+def committed_file_refs_in_messages(
+    messages: Sequence[dict[str, Any]],
+    file_injections: Sequence[Mapping[str, Any]],
+) -> set[str]:
+    """Return url|sha256 refs for full file bodies still present in rendered messages."""
+    joined = '\n'.join(flatten_message_content(m.get('content')) for m in messages)
+    refs: set[str] = set()
+    for fi in file_injections or ():
+        if fi.get('mode') != 'full':
+            continue
+        url = str(fi.get('url') or '')
+        ref_key = str(fi.get('ref_key') or '')
+        if not url or not ref_key:
+            continue
+        if '[用户发来文件:' not in joined or url not in joined:
+            continue
+        idx = joined.find(url)
+        if idx >= 0:
+            snippet = joined[max(0, idx - 40): idx + 500]
+            if _RESIDENT_FILE_SUMMARY_SUFFIX in snippet:
+                continue
+        refs.add(ref_key)
+    return refs
 
 
 def estimate_row_rendered_text(
@@ -176,6 +292,12 @@ def estimate_row_rendered_text(
     return estimate_tokens('\n'.join(p for p in parts if p))
 
 
+def _resident_knows_file(url: str, body: str, resident_known_files: set[str]) -> bool:
+    if not body:
+        return False
+    return file_ref_key(str(url), file_content_sha256(body)) in resident_known_files
+
+
 def assemble_history_from_rows(
     rows: Sequence[Any],
     *,
@@ -193,7 +315,7 @@ def assemble_history_from_rows(
     """Build API-relay/CC-bootstrap history messages from DB rows."""
     stats = HistoryBuildStats(rows_before_trim=len(rows))
     rows = list(rows)
-    resident_file_hashes = set(resident_file_hashes or ())
+    resident_known_files = set(resident_file_hashes or ())
 
     if history_token_budget <= 0:
         limit = available_count
@@ -203,21 +325,38 @@ def assemble_history_from_rows(
             limit = window_base
         if len(rows) > limit:
             stats.block_count_trimmed = True
+            stats.conversation_content_trimmed = True
             rows = rows[-limit:]
     else:
         small, large, per_message, _history_total = _tool_caps()
+        prev_preview_dt: Optional[datetime.datetime] = None
 
         def _preview_row(row):
-            author = row['author'] if hasattr(row, 'keys') else getattr(row, 'author', '')
-            tool_calls = row['tool_calls'] if hasattr(row, 'keys') else getattr(row, 'tool_calls', '')
-            content = row['content'] if hasattr(row, 'keys') else getattr(row, 'content', '')
-            file_url = row['file_url'] if hasattr(row, 'keys') else getattr(row, 'file_url', '')
+            nonlocal prev_preview_dt
+            author = _row_get(row, 'author')
+            tool_calls = _row_get(row, 'tool_calls')
+            content = _row_get(row, 'content')
+            file_url = _row_get(row, 'file_url')
             gap = ''
+            cur_dt = None
+            try:
+                cur_dt = datetime.datetime.strptime(_row_get(row, 'created_at'), '%Y-%m-%d %H:%M:%S')
+            except Exception:
+                pass
+            if cur_dt and prev_preview_dt and not is_ai_author(author):
+                gap_delta = cur_dt - prev_preview_dt
+                if gap_delta >= datetime.timedelta(minutes=30):
+                    hrs, rem = divmod(int(gap_delta.total_seconds()), 3600)
+                    mins = rem // 60
+                    gap_str = ('%d小时%d分' % (hrs, mins)) if hrs else ('%d分钟' % mins)
+                    gap = '[%s · 距上一条消息隔了%s] ' % (cur_dt.strftime('%m月%d日 %H:%M'), gap_str)
+            if cur_dt:
+                prev_preview_dt = cur_dt
             file_body = ''
             tool_text = ''
             if is_ai_author(author) and tool_calls:
                 tool_text = format_tool_history(
-                    row['tool_calls'],
+                    tool_calls,
                     cap_small=small,
                     cap_large=large,
                     cap_per_message=per_message,
@@ -225,8 +364,8 @@ def assemble_history_from_rows(
             fu = file_url
             if fu and not is_ai_author(author) and str(fu).startswith('/static/'):
                 file_body = read_file_fn(static_dir, str(fu)) or ''
-                if file_body and str(fu) in resident_file_hashes:
-                    file_body = file_body[:400] + '\n...(此前 resident 已全文注入，以上为摘要)'
+                if file_body and _resident_knows_file(str(fu), file_body, resident_known_files):
+                    file_body = file_body[:400] + '\n' + _RESIDENT_FILE_SUMMARY_SUFFIX
             return estimate_row_rendered_text(
                 {'content': content},
                 time_gap_prefix=gap,
@@ -242,9 +381,10 @@ def assemble_history_from_rows(
             estimate_tokens=estimate_tokens,
         )
         if stats.rows_before_trim > len(rows):
-            stats.history_trimmed = True
+            stats.conversation_content_trimmed = True
 
     stats.rows_after_trim = len(rows)
+    stats.history_trimmed = stats.conversation_content_trimmed
     total = len(rows)
     img_indices = [i for i, r in enumerate(rows) if _row_get(r, 'image_url')]
     keep_img_indices = set(img_indices[-2:])
@@ -293,9 +433,10 @@ def assemble_history_from_rows(
             body = read_file_fn(static_dir, str(fu))
             if body is not None:
                 fname = _row_get(r, 'file_name') or '附件'
+                full_sha = file_content_sha256(body)
                 mode = 'full'
-                if str(fu) in resident_file_hashes:
-                    body = body[:400] + '\n...(此前 resident 已全文注入，以上为摘要)'
+                if _resident_knows_file(str(fu), body, resident_known_files):
+                    body = body[:400] + '\n' + _RESIDENT_FILE_SUMMARY_SUFFIX
                     mode = 'resident_summary'
                 elif ri >= total - 6:
                     if len(body) > 30000:
@@ -310,6 +451,8 @@ def assemble_history_from_rows(
                     stats.file_injections.append({
                         'url': str(fu),
                         'mode': mode,
+                        'content_sha256': full_sha,
+                        'ref_key': file_ref_key(str(fu), full_sha),
                         'tokens_estimate': estimate_tokens(text),
                     })
 
@@ -346,12 +489,13 @@ def assemble_history_from_rows(
             msgs, budget=history_token_budget, estimate_tokens=estimate_tokens,
         )
         if msg_trimmed:
-            stats.history_trimmed = True
+            stats.conversation_content_trimmed = True
 
     msgs, _tool_trimmed = apply_history_tool_budget(msgs, estimate_tokens=estimate_tokens)
     if _tool_trimmed:
-        stats.history_trimmed = True
+        stats.tool_history_trimmed = True
 
+    stats.history_trimmed = stats.conversation_content_trimmed or stats.tool_history_trimmed
     stats.rendered_text_tokens_estimate = sum(
         estimate_message_text_tokens(m.get('content'), estimate_tokens) for m in msgs
     )

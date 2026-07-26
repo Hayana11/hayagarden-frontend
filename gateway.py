@@ -734,7 +734,10 @@ def _read_upload_file_body(static_dir, file_url):
 
 
 def build_messages(*, resident_file_hashes=None, history_stats_out=None):
-    from chat.history_assembly import assemble_history_from_rows
+    from chat.history_assembly import (
+        assemble_history_from_rows,
+        inject_rolling_summary_and_enforce_budget,
+    )
     conn = get_db()
     # 历史窗口：HISTORY_TOKEN_BUDGET 约束的是渲染后文本块总量（不含图片二进制）。
     # 图片仍维持最近 2 张硬上限；图片不计入文本 token 预算。
@@ -790,18 +793,34 @@ def build_messages(*, resident_file_hashes=None, history_stats_out=None):
             'file_injections': list(stats.file_injections),
             'history_trimmed': stats.history_trimmed,
             'block_count_trimmed': stats.block_count_trimmed,
+            'conversation_content_trimmed': stats.conversation_content_trimmed,
+            'tool_history_trimmed': stats.tool_history_trimmed,
+            'rolling_summary_in_prompt': False,
+            'rolling_summary_text': '',
         })
 
-    if stats.rows_before_trim > stats.rows_after_trim or stats.block_count_trimmed:
+    rolling_summary_text = ''
+    if stats.conversation_content_trimmed:
         try:
             _rc = get_db()
             _rsrow = _rc.execute('SELECT summary FROM rolling_summary WHERE id=1').fetchone()
             _rc.close()
-            _rsum = (_rsrow['summary'] if _rsrow else '') or ''
+            rolling_summary_text = ((_rsrow['summary'] if _rsrow else '') or '').strip()
         except Exception:
-            _rsum = ''
-        if _rsum.strip():
-            _pre = '[更早对话的连续性摘要（滞出当前窗口的部分）]\n' + _rsum.strip()
+            rolling_summary_text = ''
+        if rolling_summary_text and _history_token_budget > 0:
+            msgs, rendered_tokens, _ = inject_rolling_summary_and_enforce_budget(
+                msgs,
+                rolling_summary=rolling_summary_text,
+                budget=_history_token_budget,
+            )
+            stats.rendered_text_tokens_estimate = rendered_tokens
+            if history_stats_out is not None:
+                history_stats_out['rendered_text_tokens_estimate'] = rendered_tokens
+                history_stats_out['rolling_summary_in_prompt'] = True
+                history_stats_out['rolling_summary_text'] = rolling_summary_text
+        elif rolling_summary_text:
+            _pre = '[更早对话的连续性摘要（滞出当前窗口的部分）]\n' + rolling_summary_text
             if msgs and msgs[0]['role'] == 'user':
                 _c0 = msgs[0]['content']
                 if isinstance(_c0, str):
@@ -810,6 +829,9 @@ def build_messages(*, resident_file_hashes=None, history_stats_out=None):
                     msgs[0]['content'] = [{'type': 'text', 'text': _pre}] + _c0
             else:
                 msgs.insert(0, {'role': 'user', 'content': _pre})
+            if history_stats_out is not None:
+                history_stats_out['rolling_summary_in_prompt'] = True
+                history_stats_out['rolling_summary_text'] = rolling_summary_text
 
     if not msgs or msgs[0]['role'] == 'assistant':
         msgs.insert(0, {'role': 'user', 'content': '...'})
@@ -3133,7 +3155,7 @@ def _format_group_chat_recap(rows, *, cold=False):
     return head + NL.join(lines) + NL + NL
 
 
-def _cc_resident_stream_gen(messages, *, user_turn=True, history_stats=None):
+def _cc_resident_stream_gen(messages, *, user_turn=True, history_stats=None, is_cold=None):
     """常驻 CC：静态 system 只在 spawn 时贴墙；热轮只发差量。
 
     构建顺序：
@@ -3185,7 +3207,8 @@ def _cc_resident_stream_gen(messages, *, user_turn=True, history_stats=None):
     idle_seconds_before_turn = getattr(
         _CC_RESIDENT, 'peek_idle_seconds', lambda: None
     )()
-    is_cold = _CC_RESIDENT.ensure_alive(full_system, env)
+    if is_cold is None:
+        is_cold = _CC_RESIDENT.ensure_alive(full_system, env)
 
     relationship_text = ''
     rel_context_usage = None
@@ -3351,10 +3374,14 @@ def _cc_resident_stream_gen(messages, *, user_turn=True, history_stats=None):
         elif user_turn:
             commit_meta['rel_tick'] = True
 
-    file_hashes = set(getattr(_CC_RESIDENT, 'committed_file_hashes', set()) or set())
-    for fi in (history_stats or {}).get('file_injections') or []:
-        if fi.get('mode') == 'full' and fi.get('url'):
-            file_hashes.add(str(fi['url']))
+    from chat.history_assembly import committed_file_refs_in_messages
+
+    _hist = history_stats or {}
+    base_refs = set() if is_cold else set(getattr(_CC_RESIDENT, 'committed_file_hashes', set()) or set())
+    sent_refs = committed_file_refs_in_messages(
+        messages, (_hist.get('file_injections') or []),
+    )
+    file_hashes = base_refs | sent_refs
     if not is_cold and isinstance(last_content, list):
         for block in last_content:
             if isinstance(block, dict) and block.get('type') == 'text':
@@ -3374,8 +3401,9 @@ def _cc_resident_stream_gen(messages, *, user_turn=True, history_stats=None):
         )
     original_system = full_system
     original_content = _cc_obs.snapshot_prompt_content(content)
-    _hist = history_stats or {}
     _file_injections = list(_hist.get('file_injections') or [])
+    _rolling_summary_text = str(_hist.get('rolling_summary_text') or '').strip()
+    _rolling_summary_in_prompt = bool(_hist.get('rolling_summary_in_prompt'))
     if is_cold:
         _files_text = '\n\n'.join(
             '[file:%s mode=%s tokens=%s]' % (
@@ -3399,8 +3427,8 @@ def _cc_resident_stream_gen(messages, *, user_turn=True, history_stats=None):
         full_system=full_system,
         cold_once_text=cold_text or '',
         history_bootstrap_text=history_bootstrap_text or '',
-        rolling_summary_text='',
-        rolling_summary_in_prompt=False,
+        rolling_summary_text=_rolling_summary_text,
+        rolling_summary_in_prompt=_rolling_summary_in_prompt,
         state_text=state_text or '',
         state_mode=state_mode,
         memory_recall_text=recall_text or '',
@@ -4173,17 +4201,32 @@ def chat_stream():
                 _is_user_turn = bool(_uc) or is_pending_user_turn(
                     get_db, _turn_data.get('user_message_id')
                 )
+                # 只 snapshot wake ids，避免 build_system() 先把 one_shot 反馈 drain 掉
+                _wake_claim_ids = capture_pending_wake_ids(get_db) if _is_user_turn else []
                 try:
-                    # 只 snapshot wake ids，避免 build_system() 先把 one_shot 反馈 drain 掉
-                    _wake_claim_ids = capture_pending_wake_ids(get_db) if _is_user_turn else []
+                    # 先确定 resident cold/hot，再按当前 generation 的已知文件集合构建 history
+                    from chat.system_builder import build_cc_static_parts
+                    _static_parts = build_cc_static_parts()
+                    _cc_env = dict(os.environ)
+                    _cc_env['CLAUDE_CODE_OAUTH_TOKEN'] = CC_TOKEN
+                    _cc_env.pop('ANTHROPIC_API_KEY', None)
+                    _cc_is_cold = _CC_RESIDENT.ensure_alive(_static_parts['full_system'], _cc_env)
+                    _resident_files = (
+                        set()
+                        if _cc_is_cold else
+                        set(getattr(_CC_RESIDENT, 'committed_file_hashes', set()) or set())
+                    )
                     _history_stats = {}
                     messages = build_messages(
-                        resident_file_hashes=getattr(_CC_RESIDENT, 'committed_file_hashes', set()),
+                        resident_file_hashes=_resident_files,
                         history_stats_out=_history_stats,
                     )
                     cc_tool_calls = []
                     for evt, payload in _cc_resident_stream_gen(
-                        messages, user_turn=_is_user_turn, history_stats=_history_stats,
+                        messages,
+                        user_turn=_is_user_turn,
+                        history_stats=_history_stats,
+                        is_cold=_cc_is_cold,
                     ):
                         if evt == 'text':
                             yield 'data: ' + json.dumps({'t': 'text', 'd': payload}) + SSE_END
