@@ -733,54 +733,117 @@ def _read_upload_file_body(static_dir, file_url):
     return None
 
 
-def build_messages(*, resident_file_hashes=None, history_stats_out=None):
+def build_messages(*, resident_file_hashes=None, history_stats_out=None, for_cc=False):
+    from chat.context_lean import (
+        lean_file_dedup_enabled,
+        lean_history_enabled,
+        lean_tool_budget_enabled,
+    )
+    from chat.history_boundary import (
+        fetch_history_rows,
+        legacy_block_limit,
+        persist_history_boundary,
+        resolve_fetch_plan,
+        rolling_summary_covers_boundary,
+    )
     from chat.history_assembly import (
         assemble_history_from_rows,
         inject_rolling_summary_and_enforce_budget,
+        strip_internal_metadata,
     )
-    conn = get_db()
-    # 历史窗口：HISTORY_TOKEN_BUDGET 约束的是渲染后文本块总量（不含图片二进制）。
-    # 图片仍维持最近 2 张硬上限；图片不计入文本 token 预算。
+    from chat.history_legacy import assemble_legacy_history
+
     _where = "date(created_at) >= date('now', '+8 hours', '-1 day')"
-    _window_base, _window_block = 60, 20
-    try:
-        import config_store
-        _history_token_budget = config_store.get_int("HISTORY_TOKEN_BUDGET", 24000)
-    except Exception:
-        _history_token_budget = 24000
+    conn = get_db()
     try:
         _available = conn.execute(
             "SELECT COUNT(*) FROM chat_messages WHERE " + _where
         ).fetchone()[0] or 0
     except Exception:
-        _available = _window_base
-    if _history_token_budget > 0:
-        _fetch_limit = max(_available, _window_base + _window_block)
-    else:
-        _limit = _available
-        if _available > _window_base:
-            _limit = _window_base + ((_available - _window_base) % _window_block)
-        if _limit <= 0:
-            _limit = _window_base
-        _fetch_limit = _limit
-    rows = list(reversed(conn.execute(
-        "SELECT author, content, image_url, created_at, tool_calls, file_url, file_name FROM chat_messages "
-        "WHERE " + _where + " ORDER BY id DESC LIMIT ?",
-        (_fetch_limit,),
-    ).fetchall()))
-    conn.close()
+        _available = 60
+    finally:
+        conn.close()
 
+    lean_history = lean_history_enabled()
+    if not lean_history:
+        _fetch_limit = legacy_block_limit(_available)
+        rows, _ = fetch_history_rows(get_db, fetch_limit=_fetch_limit)
+        msgs, legacy_stats = assemble_legacy_history(
+            rows,
+            available_count=_available,
+            static_dir=STATIC_DIR,
+            read_file_fn=_read_upload_file_body,
+            img_block_fn=img_block,
+            format_tool_history_fn=_format_tool_history,
+            is_ai_author=lambda author: author in ('fyodor', 'claude', 'assistant'),
+        )
+        if history_stats_out is not None:
+            history_stats_out.clear()
+            history_stats_out.update({
+                'rows_before_trim': len(rows),
+                'rows_after_trim': legacy_stats.get('rows_after_trim', len(rows)),
+                'conversation_content_trimmed': legacy_stats.get('conversation_content_trimmed', False),
+                'trimmed_up_to_id': legacy_stats.get('trimmed_up_to_id', 0),
+                'oldest_retained_message_id': legacy_stats.get('oldest_retained_message_id', 0),
+                'rolling_summary_in_prompt': False,
+                'rolling_summary_text': '',
+                'rolling_summary_coverage_gap': False,
+            })
+        if legacy_stats.get('conversation_content_trimmed'):
+            try:
+                _rc = get_db()
+                _rsrow = _rc.execute('SELECT summary, up_to_id FROM rolling_summary WHERE id=1').fetchone()
+                _rc.close()
+                rolling_summary_text = ((_rsrow['summary'] if _rsrow else '') or '').strip()
+                summary_up_to = int(_rsrow['up_to_id'] or 0) if _rsrow else 0
+            except Exception:
+                rolling_summary_text = ''
+                summary_up_to = 0
+            trimmed_up_to = int(legacy_stats.get('trimmed_up_to_id') or 0)
+            if rolling_summary_text and rolling_summary_covers_boundary(summary_up_to, trimmed_up_to):
+                _pre = '[更早对话的连续性摘要（滞出当前窗口的部分）]\n' + rolling_summary_text
+                if msgs and msgs[0]['role'] == 'user':
+                    _c0 = msgs[0]['content']
+                    if isinstance(_c0, str):
+                        msgs[0]['content'] = _pre + '\n\n' + _c0
+                    else:
+                        msgs[0]['content'] = [{'type': 'text', 'text': _pre}] + _c0
+                else:
+                    msgs.insert(0, {'role': 'user', 'content': _pre})
+                if history_stats_out is not None:
+                    history_stats_out['rolling_summary_in_prompt'] = True
+                    history_stats_out['rolling_summary_text'] = rolling_summary_text
+            elif trimmed_up_to > 0 and history_stats_out is not None:
+                history_stats_out['rolling_summary_coverage_gap'] = True
+        if not msgs or msgs[0]['role'] == 'assistant':
+            msgs.insert(0, {'role': 'user', 'content': '...'})
+        return msgs
+
+    plan = resolve_fetch_plan(available_count=_available, for_cc=for_cc)
+    rows, _ = fetch_history_rows(
+        get_db,
+        fetch_limit=plan['fetch_limit'],
+        min_id=plan.get('relay_head_id') or 0,
+    )
+    file_hashes = resident_file_hashes if (lean_file_dedup_enabled() and for_cc) else set()
     msgs, stats = assemble_history_from_rows(
         rows,
         available_count=_available,
-        history_token_budget=_history_token_budget,
-        window_base=_window_base,
-        window_block=_window_block,
+        history_token_budget=plan['history_token_budget'],
+        history_mode=plan['mode'],
+        relay_high_water=plan['relay_high_water'],
+        relay_low_water=plan['relay_low_water'],
+        relay_head_id=plan['relay_head_id'],
         static_dir=STATIC_DIR,
         read_file_fn=_read_upload_file_body,
         img_block_fn=img_block,
         is_ai_author=lambda author: author in ('fyodor', 'claude', 'assistant'),
-        resident_file_hashes=resident_file_hashes,
+        resident_file_hashes=file_hashes,
+        apply_tool_budget=lean_tool_budget_enabled(),
+    )
+    persist_history_boundary(
+        trimmed_up_to_id=stats.trimmed_up_to_id,
+        oldest_retained_message_id=stats.oldest_retained_message_id,
     )
     if history_stats_out is not None:
         history_stats_out.clear()
@@ -795,47 +858,60 @@ def build_messages(*, resident_file_hashes=None, history_stats_out=None):
             'block_count_trimmed': stats.block_count_trimmed,
             'conversation_content_trimmed': stats.conversation_content_trimmed,
             'tool_history_trimmed': stats.tool_history_trimmed,
+            'trimmed_up_to_id': stats.trimmed_up_to_id,
+            'oldest_retained_message_id': stats.oldest_retained_message_id,
+            'committed_full_file_refs': list(stats.committed_full_file_refs),
+            'budget_overflow': stats.budget_overflow,
+            'overflow_tokens': stats.overflow_tokens,
             'rolling_summary_in_prompt': False,
             'rolling_summary_text': '',
+            'rolling_summary_coverage_gap': False,
         })
 
-    rolling_summary_text = ''
+    budget = plan['history_token_budget'] or plan['relay_low_water']
     if stats.conversation_content_trimmed:
         try:
             _rc = get_db()
-            _rsrow = _rc.execute('SELECT summary FROM rolling_summary WHERE id=1').fetchone()
+            _rsrow = _rc.execute('SELECT summary, up_to_id FROM rolling_summary WHERE id=1').fetchone()
             _rc.close()
             rolling_summary_text = ((_rsrow['summary'] if _rsrow else '') or '').strip()
+            summary_up_to = int(_rsrow['up_to_id'] or 0) if _rsrow else 0
         except Exception:
             rolling_summary_text = ''
-        if rolling_summary_text and _history_token_budget > 0:
-            msgs, rendered_tokens, _ = inject_rolling_summary_and_enforce_budget(
-                msgs,
-                rolling_summary=rolling_summary_text,
-                budget=_history_token_budget,
-            )
-            stats.rendered_text_tokens_estimate = rendered_tokens
-            if history_stats_out is not None:
-                history_stats_out['rendered_text_tokens_estimate'] = rendered_tokens
-                history_stats_out['rolling_summary_in_prompt'] = True
-                history_stats_out['rolling_summary_text'] = rolling_summary_text
-        elif rolling_summary_text:
-            _pre = '[更早对话的连续性摘要（滞出当前窗口的部分）]\n' + rolling_summary_text
-            if msgs and msgs[0]['role'] == 'user':
-                _c0 = msgs[0]['content']
-                if isinstance(_c0, str):
-                    msgs[0]['content'] = _pre + '\n\n' + _c0
-                else:
-                    msgs[0]['content'] = [{'type': 'text', 'text': _pre}] + _c0
+            summary_up_to = 0
+        if rolling_summary_text and rolling_summary_covers_boundary(summary_up_to, stats.trimmed_up_to_id):
+            if budget > 0:
+                msgs, rendered_tokens, _, ov, ov_tok = inject_rolling_summary_and_enforce_budget(
+                    msgs,
+                    rolling_summary=rolling_summary_text,
+                    budget=budget,
+                )
+                stats.rendered_text_tokens_estimate = rendered_tokens
+                if ov:
+                    stats.budget_overflow = True
+                    stats.overflow_tokens = max(stats.overflow_tokens, ov_tok)
             else:
-                msgs.insert(0, {'role': 'user', 'content': _pre})
+                _pre = '[更早对话的连续性摘要（滞出当前窗口的部分）]\n' + rolling_summary_text
+                if msgs and msgs[0]['role'] == 'user':
+                    _c0 = msgs[0]['content']
+                    if isinstance(_c0, str):
+                        msgs[0]['content'] = _pre + '\n\n' + _c0
+                    else:
+                        msgs[0]['content'] = [{'type': 'text', 'text': _pre}] + _c0
+                else:
+                    msgs.insert(0, {'role': 'user', 'content': _pre})
             if history_stats_out is not None:
+                history_stats_out['rendered_text_tokens_estimate'] = stats.rendered_text_tokens_estimate
                 history_stats_out['rolling_summary_in_prompt'] = True
                 history_stats_out['rolling_summary_text'] = rolling_summary_text
+                history_stats_out['budget_overflow'] = stats.budget_overflow
+                history_stats_out['overflow_tokens'] = stats.overflow_tokens
+        elif stats.trimmed_up_to_id > 0 and history_stats_out is not None:
+            history_stats_out['rolling_summary_coverage_gap'] = True
 
+    msgs = strip_internal_metadata(msgs)
     if not msgs or msgs[0]['role'] == 'assistant':
         msgs.insert(0, {'role': 'user', 'content': '...'})
-
     return msgs
 
 
@@ -3237,18 +3313,31 @@ def _cc_resident_stream_gen(messages, *, user_turn=True, history_stats=None, is_
 
     # 2) 每轮构建 state / one-shot；3) 仅冷启动构建 cold_once
     from chat.context_budget import build_state_send_payload, format_state_for_send
+    from chat.context_lean import lean_state_enabled
     raw_state = build_cc_state()
-    send_payload = build_state_send_payload(
-        getattr(_CC_RESIDENT, 'last_state_snapshot', None),
-        raw_state,
-        user_text=last_text or '',
-        is_cold=is_cold,
-    )
-    state_text, state_mode = format_state_for_send(
-        getattr(_CC_RESIDENT, 'last_state_send_snapshot', None),
-        send_payload,
-        is_cold=is_cold,
-    )
+    if lean_state_enabled():
+        send_payload = build_state_send_payload(
+            getattr(_CC_RESIDENT, 'last_state_snapshot', None),
+            raw_state,
+            user_text=last_text or '',
+            is_cold=is_cold,
+        )
+        state_text, state_mode = format_state_for_send(
+            getattr(_CC_RESIDENT, 'last_state_send_snapshot', None),
+            send_payload,
+            is_cold=is_cold,
+        )
+    else:
+        send_payload = {}
+        if is_cold:
+            state_text = format_state_snapshot(raw_state)
+            state_mode = 'snapshot' if state_text else 'none'
+        else:
+            state_text = format_state_diff(
+                getattr(_CC_RESIDENT, 'last_state_snapshot', None) or {},
+                raw_state,
+            )
+            state_mode = 'delta' if state_text else 'none'
     one_shot = build_cc_one_shot(include_wake=user_turn)
     # 冷启动：none/diary/explore 必须保留；message 仅在结构化 messages 的
     # assistant 精确命中时省略。可见性检查零 I/O，不调用 messages_to_text
@@ -3300,11 +3389,12 @@ def _cc_resident_stream_gen(messages, *, user_turn=True, history_stats=None, is_
         content = prefix + history_bootstrap_text
         commit_meta = {
             'state_snapshot': raw_state,
-            'state_send_snapshot': send_payload,
             'feedback_ids': list(one_shot.get('feedback_ids') or []),
             'dream_id': one_shot.get('dream_id'),
             'wake_ids': list(one_shot.get('wake_ids') or []),
         }
+        if lean_state_enabled():
+            commit_meta['state_send_snapshot'] = send_payload
         if group_cursor_ok:
             commit_meta['group_cursor_initialized'] = True
             commit_meta['group_max_id'] = group_max_id
@@ -3347,11 +3437,12 @@ def _cc_resident_stream_gen(messages, *, user_turn=True, history_stats=None, is_
             content = last_content
         commit_meta = {
             'state_snapshot': raw_state,
-            'state_send_snapshot': send_payload,
             'feedback_ids': list(one_shot.get('feedback_ids') or []),
             'dream_id': one_shot.get('dream_id'),
             'wake_ids': list(one_shot.get('wake_ids') or []),
         }
+        if lean_state_enabled():
+            commit_meta['state_send_snapshot'] = send_payload
         if group_cursor_ok:
             commit_meta['group_cursor_initialized'] = True
             commit_meta['group_max_id'] = group_max_id
@@ -3374,13 +3465,11 @@ def _cc_resident_stream_gen(messages, *, user_turn=True, history_stats=None, is_
         elif user_turn:
             commit_meta['rel_tick'] = True
 
-    from chat.history_assembly import committed_file_refs_in_messages
+    from chat.history_assembly import strip_internal_metadata
 
     _hist = history_stats or {}
     base_refs = set() if is_cold else set(getattr(_CC_RESIDENT, 'committed_file_hashes', set()) or set())
-    sent_refs = committed_file_refs_in_messages(
-        messages, (_hist.get('file_injections') or []),
-    )
+    sent_refs = set(_hist.get('committed_full_file_refs') or [])
     file_hashes = base_refs | sent_refs
     if not is_cold and isinstance(last_content, list):
         for block in last_content:
@@ -4220,6 +4309,7 @@ def chat_stream():
                     messages = build_messages(
                         resident_file_hashes=_resident_files,
                         history_stats_out=_history_stats,
+                        for_cc=True,
                     )
                     cc_tool_calls = []
                     for evt, payload in _cc_resident_stream_gen(

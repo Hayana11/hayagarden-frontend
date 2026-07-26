@@ -1,10 +1,4 @@
-"""Assemble chat history messages with token budgets and tool caps.
-
-Text-token budget covers rendered text blocks only (content, time-gap notes,
-file bodies, tool history, image placeholders). Image binary payloads are not
-included in HISTORY_TOKEN_BUDGET; callers should keep the last-N image hard cap
-separately and record image counts/bytes in observability.
-"""
+"""Assemble chat history messages with token budgets and tool caps."""
 from __future__ import annotations
 
 import datetime
@@ -18,6 +12,7 @@ from chat.context_budget import (
     trim_rows_to_token_budget,
 )
 from chat.context_continuity import format_tool_history
+from chat.history_boundary import compute_boundary_ids, set_relay_history_head_id
 
 EstimateFn = Callable[[Optional[str]], int]
 ImgBlockFn = Callable[[str], Optional[dict]]
@@ -27,12 +22,17 @@ _TOOL_HISTORY_HEADER = '[上一轮我调用的工具与结果]'
 _HISTORY_OMITTED_MARKER = '[更早的工具结果已因上下文预算省略]'
 _ROLLING_SUMMARY_MARKER = '[更早对话的连续性摘要（滞出当前窗口的部分）]'
 _RESIDENT_FILE_SUMMARY_SUFFIX = '...(此前 resident 已全文注入，以上为摘要)'
+_FILE_WRAPPER_PREFIX = '[用户发来文件:'
 
 
 def _row_get(row: Any, key: str, default: Any = '') -> Any:
     if hasattr(row, 'keys') and key in row.keys():
         return row[key]
     return getattr(row, key, default)
+
+
+def _row_id(row: Any) -> int:
+    return int(_row_get(row, 'id', 0) or 0)
 
 
 @dataclass
@@ -47,6 +47,11 @@ class HistoryBuildStats:
     block_count_trimmed: bool = False
     conversation_content_trimmed: bool = False
     tool_history_trimmed: bool = False
+    oldest_retained_message_id: int = 0
+    trimmed_up_to_id: int = 0
+    committed_full_file_refs: list[str] = field(default_factory=list)
+    budget_overflow: bool = False
+    overflow_tokens: int = 0
 
 
 def flatten_message_content(content: Any) -> str:
@@ -77,13 +82,55 @@ def _tool_caps():
     return small, large, per_message, history_total
 
 
+def _text_block(text: str, *, meta: Optional[dict[str, Any]] = None) -> dict[str, Any]:
+    block: dict[str, Any] = {'type': 'text', 'text': text}
+    if meta:
+        block['_hg_meta'] = meta
+    return block
+
+
+def strip_internal_metadata(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for msg in messages:
+        msg = dict(msg)
+        msg.pop('_hg_row_ids', None)
+        content = msg.get('content')
+        if isinstance(content, list):
+            blocks = []
+            for block in content:
+                if not isinstance(block, dict):
+                    blocks.append(block)
+                    continue
+                clean = {k: v for k, v in block.items() if k != '_hg_meta'}
+                blocks.append(clean)
+            msg['content'] = blocks
+        out.append(msg)
+    return out
+
+
+def collect_committed_full_file_refs(messages: Sequence[dict[str, Any]]) -> set[str]:
+    refs: set[str] = set()
+    for msg in messages:
+        content = msg.get('content')
+        if isinstance(content, str):
+            continue
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            meta = block.get('_hg_meta') or {}
+            if meta.get('kind') == 'file' and meta.get('mode') == 'full' and meta.get('ref_key'):
+                refs.add(str(meta['ref_key']))
+    return refs
+
+
 def apply_history_tool_budget(
     messages: list[dict[str, Any]],
     *,
     total_budget: Optional[int] = None,
     estimate_tokens: EstimateFn = default_estimate_tokens,
 ) -> tuple[list[dict[str, Any]], bool]:
-    """Trim oldest tool-history blocks across the whole transcript."""
     if total_budget is None:
         _, _, _, total_budget = _tool_caps()
     if total_budget <= 0 or not messages:
@@ -158,39 +205,49 @@ def trim_messages_to_text_budget(
     budget: int,
     estimate_tokens: EstimateFn = default_estimate_tokens,
     protect_indices: Optional[Iterable[int]] = None,
-) -> tuple[list[dict[str, Any]], bool]:
+) -> tuple[list[dict[str, Any]], bool, bool, int]:
+    """Keep a contiguous newest suffix; always retain the latest user message."""
     if budget <= 0 or not messages:
-        return messages, False
+        return messages, False, False, 0
 
     n = len(messages)
-    protected = {int(i) for i in (protect_indices or ())}
-    last_user = _last_user_index(messages)
-    if last_user is not None:
-        protected.add(last_user)
-
     costs = [estimate_message_text_tokens(messages[i].get('content'), estimate_tokens) for i in range(n)]
-    kept = set(protected)
-    total = sum(costs[i] for i in kept)
+    last_user = _last_user_index(messages)
+    if last_user is None:
+        last_user = n - 1
 
-    for i in range(n - 1, -1, -1):
-        if i in kept:
-            continue
-        if kept - protected and total + costs[i] > budget:
-            continue
-        if not (kept - protected) and total + costs[i] > budget:
-            kept.add(i)
-            total += costs[i]
-            continue
-        if total + costs[i] > budget:
+    start = last_user
+    total = costs[last_user]
+    while start > 0:
+        prev = start - 1
+        if total + costs[prev] <= budget:
+            start -= 1
+            total += costs[prev]
+        else:
             break
-        kept.add(i)
-        total += costs[i]
 
-    if not kept:
-        kept.add(n - 1)
-    if len(kept) == n:
-        return messages, False
-    return [messages[i] for i in sorted(kept)], True
+    suffix = [dict(messages[i]) for i in range(start, n)]
+    trimmed = start > 0
+    overflow = total > budget
+    overflow_tokens = max(0, total - budget) if overflow else 0
+    return suffix, trimmed, overflow, overflow_tokens
+
+
+def _merge_message_content(prev: Any, content: Any) -> Any:
+    if isinstance(prev, str) and isinstance(content, str):
+        return prev + '\n' + content
+    if isinstance(prev, str):
+        prev = [{'type': 'text', 'text': prev}]
+    if isinstance(content, str):
+        content = [{'type': 'text', 'text': content}]
+    return list(prev) + list(content)
+
+
+def _merge_row_ids(msg: dict[str, Any], row_id: int) -> None:
+    ids = list(msg.get('_hg_row_ids') or [])
+    if row_id and row_id not in ids:
+        ids.append(row_id)
+    msg['_hg_row_ids'] = ids
 
 
 def inject_rolling_summary_and_enforce_budget(
@@ -199,12 +256,11 @@ def inject_rolling_summary_and_enforce_budget(
     rolling_summary: str,
     budget: int,
     estimate_tokens: EstimateFn = default_estimate_tokens,
-) -> tuple[list[dict[str, Any]], int, bool]:
-    """Inject rolling summary prefix and trim while protecting summary + last user."""
+) -> tuple[list[dict[str, Any]], int, bool, bool, int]:
     summary = (rolling_summary or '').strip()
     if not summary or budget <= 0:
         tokens = sum(estimate_message_text_tokens(m.get('content'), estimate_tokens) for m in messages)
-        return messages, tokens, False
+        return messages, tokens, False, False, 0
 
     msgs = [dict(m) for m in messages]
     last_user = _last_user_index(msgs)
@@ -214,6 +270,8 @@ def inject_rolling_summary_and_enforce_budget(
     marker = _ROLLING_SUMMARY_MARKER + '\n'
     summary_text = summary
     trimmed = False
+    overflow = False
+    overflow_tokens = 0
 
     def _assemble(summary_body: str) -> list[dict[str, Any]]:
         out: list[dict[str, Any]] = []
@@ -228,9 +286,13 @@ def inject_rolling_summary_and_enforce_budget(
         assembled = _assemble(summary_text)
         tokens = sum(estimate_message_text_tokens(m.get('content'), estimate_tokens) for m in assembled)
         if tokens <= budget:
-            return assembled, tokens, trimmed
+            return assembled, tokens, trimmed, overflow, overflow_tokens
         if len(middle) > 0:
-            middle, dropped = trim_messages_to_text_budget(middle, budget=max(1, budget // 2), estimate_tokens=estimate_tokens)
+            middle, dropped, ov, ov_tok = trim_messages_to_text_budget(
+                middle, budget=max(1, budget // 2), estimate_tokens=estimate_tokens,
+            )
+            overflow = overflow or ov
+            overflow_tokens = max(overflow_tokens, ov_tok)
             if dropped:
                 trimmed = True
                 continue
@@ -243,34 +305,11 @@ def inject_rolling_summary_and_enforce_budget(
             if not summary_text:
                 assembled = _assemble('')
                 tokens = sum(estimate_message_text_tokens(m.get('content'), estimate_tokens) for m in assembled)
-                return assembled, tokens, trimmed
+                return assembled, tokens, trimmed, overflow, overflow_tokens
             continue
-        return assembled, tokens, trimmed
-
-
-def committed_file_refs_in_messages(
-    messages: Sequence[dict[str, Any]],
-    file_injections: Sequence[Mapping[str, Any]],
-) -> set[str]:
-    """Return url|sha256 refs for full file bodies still present in rendered messages."""
-    joined = '\n'.join(flatten_message_content(m.get('content')) for m in messages)
-    refs: set[str] = set()
-    for fi in file_injections or ():
-        if fi.get('mode') != 'full':
-            continue
-        url = str(fi.get('url') or '')
-        ref_key = str(fi.get('ref_key') or '')
-        if not url or not ref_key:
-            continue
-        if '[用户发来文件:' not in joined or url not in joined:
-            continue
-        idx = joined.find(url)
-        if idx >= 0:
-            snippet = joined[max(0, idx - 40): idx + 500]
-            if _RESIDENT_FILE_SUMMARY_SUFFIX in snippet:
-                continue
-        refs.add(ref_key)
-    return refs
+        overflow = True
+        overflow_tokens = max(overflow_tokens, tokens - budget)
+        return assembled, tokens, trimmed, overflow, overflow_tokens
 
 
 def estimate_row_rendered_text(
@@ -298,11 +337,31 @@ def _resident_knows_file(url: str, body: str, resident_known_files: set[str]) ->
     return file_ref_key(str(url), file_content_sha256(body)) in resident_known_files
 
 
+def _finalize_boundary_stats(
+    stats: HistoryBuildStats,
+    all_row_ids: list[int],
+    messages: list[dict[str, Any]],
+) -> None:
+    retained_ids: list[int] = []
+    for msg in messages:
+        for rid in msg.get('_hg_row_ids') or []:
+            if rid not in retained_ids:
+                retained_ids.append(int(rid))
+    trimmed_up_to, oldest = compute_boundary_ids(all_row_ids, retained_ids)
+    stats.trimmed_up_to_id = trimmed_up_to
+    stats.oldest_retained_message_id = oldest or (min(retained_ids) if retained_ids else 0)
+    stats.committed_full_file_refs = sorted(collect_committed_full_file_refs(messages))
+
+
 def assemble_history_from_rows(
     rows: Sequence[Any],
     *,
     available_count: int,
-    history_token_budget: int,
+    history_token_budget: int = 0,
+    history_mode: str = 'legacy_block',
+    relay_high_water: int = 0,
+    relay_low_water: int = 0,
+    relay_head_id: int = 0,
     window_base: int = 60,
     window_block: int = 20,
     static_dir: str,
@@ -310,14 +369,15 @@ def assemble_history_from_rows(
     img_block_fn: ImgBlockFn,
     is_ai_author: Callable[[str], bool],
     resident_file_hashes: Optional[set[str]] = None,
+    apply_tool_budget: bool = True,
     estimate_tokens: EstimateFn = default_estimate_tokens,
 ) -> tuple[list[dict[str, Any]], HistoryBuildStats]:
-    """Build API-relay/CC-bootstrap history messages from DB rows."""
     stats = HistoryBuildStats(rows_before_trim=len(rows))
     rows = list(rows)
+    all_row_ids = [_row_id(r) for r in rows if _row_id(r)]
     resident_known_files = set(resident_file_hashes or ())
 
-    if history_token_budget <= 0:
+    if history_mode == 'legacy_block':
         limit = available_count
         if available_count > window_base:
             limit = window_base + ((available_count - window_base) % window_block)
@@ -327,7 +387,7 @@ def assemble_history_from_rows(
             stats.block_count_trimmed = True
             stats.conversation_content_trimmed = True
             rows = rows[-limit:]
-    else:
+    elif history_mode == 'cc_token_budget' and history_token_budget > 0:
         small, large, per_message, _history_total = _tool_caps()
         prev_preview_dt: Optional[datetime.datetime] = None
 
@@ -354,7 +414,7 @@ def assemble_history_from_rows(
                 prev_preview_dt = cur_dt
             file_body = ''
             tool_text = ''
-            if is_ai_author(author) and tool_calls:
+            if is_ai_author(author) and tool_calls and apply_tool_budget:
                 tool_text = format_tool_history(
                     tool_calls,
                     cap_small=small,
@@ -382,26 +442,27 @@ def assemble_history_from_rows(
         )
         if stats.rows_before_trim > len(rows):
             stats.conversation_content_trimmed = True
+    elif history_mode == 'relay_hysteresis' and relay_head_id > 0:
+        rows = [r for r in rows if _row_id(r) >= relay_head_id]
 
     stats.rows_after_trim = len(rows)
-    stats.history_trimmed = stats.conversation_content_trimmed
     total = len(rows)
     img_indices = [i for i, r in enumerate(rows) if _row_get(r, 'image_url')]
     keep_img_indices = set(img_indices[-2:])
 
     msgs: list[dict[str, Any]] = []
     prev_dt = None
-    seen_files: set[str] = set()
 
     for ri, r in enumerate(rows):
         author = _row_get(r, 'author')
+        row_id = _row_id(r)
         is_ai = is_ai_author(author)
         role = 'assistant' if is_ai else 'user'
 
         note = ''
         cur_dt = None
         try:
-            cur_dt = datetime.datetime.strptime(r['created_at'], '%Y-%m-%d %H:%M:%S')
+            cur_dt = datetime.datetime.strptime(_row_get(r, 'created_at'), '%Y-%m-%d %H:%M:%S')
         except Exception:
             pass
         if cur_dt and prev_dt and not is_ai:
@@ -422,11 +483,11 @@ def assemble_history_from_rows(
                     blocks.append(blk)
                     stats.image_block_count += 1
             else:
-                blocks.append({'type': 'text', 'text': '[一张较早发送的图片，内容已不在上下文中]'})
+                blocks.append(_text_block('[一张较早发送的图片，内容已不在上下文中]'))
                 stats.image_placeholder_count += 1
 
         if _row_get(r, 'content'):
-            blocks.append({'type': 'text', 'text': note + _row_get(r, 'content')})
+            blocks.append(_text_block(note + _row_get(r, 'content')))
 
         fu = _row_get(r, 'file_url')
         if fu and not is_ai and str(fu).startswith('/static/'):
@@ -434,6 +495,7 @@ def assemble_history_from_rows(
             if body is not None:
                 fname = _row_get(r, 'file_name') or '附件'
                 full_sha = file_content_sha256(body)
+                ref_key = file_ref_key(str(fu), full_sha)
                 mode = 'full'
                 if _resident_knows_file(str(fu), body, resident_known_files):
                     body = body[:400] + '\n' + _RESIDENT_FILE_SUMMARY_SUFFIX
@@ -441,18 +503,23 @@ def assemble_history_from_rows(
                 elif ri >= total - 6:
                     if len(body) > 30000:
                         body = body[:30000] + '\n...(文件过长已截断)'
-                    seen_files.add(str(fu))
                 else:
                     mode = 'marker_only'
                     body = ''
                 if body:
                     text = '[用户发来文件: %s]\n```\n%s\n```' % (fname, body)
-                    blocks.append({'type': 'text', 'text': text})
+                    blocks.append(_text_block(text, meta={
+                        'kind': 'file',
+                        'mode': mode,
+                        'url': str(fu),
+                        'ref_key': ref_key,
+                        'content_sha256': full_sha,
+                    }))
                     stats.file_injections.append({
                         'url': str(fu),
                         'mode': mode,
                         'content_sha256': full_sha,
-                        'ref_key': file_ref_key(str(fu), full_sha),
+                        'ref_key': ref_key,
                         'tokens_estimate': estimate_tokens(text),
                     })
 
@@ -462,41 +529,56 @@ def assemble_history_from_rows(
                 _row_get(r, 'tool_calls'),
                 cap_small=small,
                 cap_large=large,
-                cap_per_message=per_message,
+                cap_per_message=per_message if apply_tool_budget else 10**9,
             )
             if th:
-                blocks.append({'type': 'text', 'text': th})
+                blocks.append(_text_block(th))
 
         if not blocks:
             continue
 
-        content: Any = blocks[0]['text'] if len(blocks) == 1 and blocks[0]['type'] == 'text' else blocks
+        content: Any = blocks[0]['text'] if len(blocks) == 1 and blocks[0]['type'] == 'text' and '_hg_meta' not in blocks[0] else blocks
         if msgs and msgs[-1]['role'] == role:
             prev = msgs[-1]['content']
-            if isinstance(prev, str) and isinstance(content, str):
-                msgs[-1]['content'] = prev + '\n' + content
-            else:
-                if isinstance(prev, str):
-                    prev = [{'type': 'text', 'text': prev}]
-                if isinstance(content, str):
-                    content = [{'type': 'text', 'text': content}]
-                msgs[-1]['content'] = prev + content
+            msgs[-1]['content'] = _merge_message_content(prev, content)
+            _merge_row_ids(msgs[-1], row_id)
         else:
-            msgs.append({'role': role, 'content': content})
+            msgs.append({'role': role, 'content': content, '_hg_row_ids': [row_id] if row_id else []})
 
-    if history_token_budget > 0:
-        msgs, msg_trimmed = trim_messages_to_text_budget(
+    if history_mode == 'cc_token_budget' and history_token_budget > 0:
+        msgs, msg_trimmed, overflow, overflow_tokens = trim_messages_to_text_budget(
             msgs, budget=history_token_budget, estimate_tokens=estimate_tokens,
         )
         if msg_trimmed:
             stats.conversation_content_trimmed = True
+        if overflow:
+            stats.budget_overflow = True
+            stats.overflow_tokens = overflow_tokens
+    elif history_mode == 'relay_hysteresis' and relay_high_water > 0 and relay_low_water > 0:
+        current_tokens = sum(estimate_message_text_tokens(m.get('content'), estimate_tokens) for m in msgs)
+        if current_tokens > relay_high_water:
+            msgs, msg_trimmed, overflow, overflow_tokens = trim_messages_to_text_budget(
+                msgs, budget=relay_low_water, estimate_tokens=estimate_tokens,
+            )
+            if msg_trimmed:
+                stats.conversation_content_trimmed = True
+            if overflow:
+                stats.budget_overflow = True
+                stats.overflow_tokens = overflow_tokens
+            retained_ids = []
+            for msg in msgs:
+                retained_ids.extend(int(x) for x in (msg.get('_hg_row_ids') or []))
+            if retained_ids:
+                set_relay_history_head_id(min(retained_ids))
 
-    msgs, _tool_trimmed = apply_history_tool_budget(msgs, estimate_tokens=estimate_tokens)
-    if _tool_trimmed:
-        stats.tool_history_trimmed = True
+    if apply_tool_budget:
+        msgs, tool_trimmed = apply_history_tool_budget(msgs, estimate_tokens=estimate_tokens)
+        if tool_trimmed:
+            stats.tool_history_trimmed = True
 
     stats.history_trimmed = stats.conversation_content_trimmed or stats.tool_history_trimmed
     stats.rendered_text_tokens_estimate = sum(
         estimate_message_text_tokens(m.get('content'), estimate_tokens) for m in msgs
     )
+    _finalize_boundary_stats(stats, all_row_ids, msgs)
     return msgs, stats
