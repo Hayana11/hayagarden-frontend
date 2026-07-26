@@ -3,7 +3,7 @@
 > 同一只费佳、固定 system、固定工具面、三类轮次；普通 Wake 降为主 resident 的一次短心跳，只有需要行动时才升级，用户聊天永远优先。
 
 - **计划分支**：`plan/unified-heartbeat-tracker`
-- **当前状态**：`MEMORY_HOTFIX_IN_PROGRESS`（P-CONTEXT-OBS 已完成；#134 待 Ready 终审）
+- **当前状态**：`MEMORY_HOTFIX_IN_PROGRESS`（#134 REQUEST CHANGES 已修复，待 re-review）
 - **最后更新**：2026-07-26
 - **当前 identity**：`identity_id = "fyodor-default"` · `provider_id = "claude_code"` · `conversation_id = "default"`
 - **首个 Provider Adapter**：Claude Unified Resident Adapter
@@ -94,13 +94,14 @@
 - [-] **Memory Hotfix：统一 Ombre adapter**
   - 状态：进行中
   - PR #134（Draft / unmerged / undeployed）
-  - head：`179deba8fe2d9be43441d93863b713e81e5637ed`
+  - head：`7f7c799930a7a07c390b984aa05c7f7bc65e2b16`
   - base：`995f8ce0246ea2ef5814215cce5ad1618cbc28f4`
   - 子进度：
     - [x] PR #134 rebase 到 main@995f8ce
-    - [x] legacy_module parity 与相关 CI
-    - [x] HTTP backend 保持 dormant
-    - [ ] Ready 终审
+    - [x] REQUEST CHANGES 修复（warmup jieba-only / cleaner pin≥8 / 移除 mcp 依赖 / HTTP gap 文档化）
+    - [x] legacy_module 默认路径 parity（限定范围）+ CI
+    - [x] HTTP backend 保持 dormant（已知 archive/touch 缺口未关闭）
+    - [ ] Ready 终审（re-review）
     - [ ] merge
     - [ ] legacy_module 默认配置部署
     - [ ] 生产 smoke test
@@ -124,7 +125,7 @@
 ```text
 P-SHADOW        [x] graduated 2026-07-26 BJT（观察窗口 >72h）
 → P-CONTEXT-OBS [x] #138 → main@995f8ce
-→ Memory Hotfix [-] #134 待 Ready 终审
+→ Memory Hotfix [-] #134 待 re-review
 → UH-A          [ ] 尚未开始
 ```
 
@@ -749,13 +750,18 @@ PR #126 修门禁与去重
 - [x] P-SHADOW 终审通过（2026-07-26 12:44 北京时间）；`status_exit_code=0`；七盏灯全绿；`proof_max=4385`；
 - [x] 自然样本 83/82/59 全 applied；Wake 版本链连续至 `normal-2026-07-26-12:00` → v332；
 - [x] **P-SHADOW `[x] graduated`**；Observation window >72h；
-- [-] 下一项：**Memory Hotfix**（PR #134 进行中，待 Ready 终审）。
+- [-] 下一项：**Memory Hotfix**（PR #134 REQUEST CHANGES 已修复，待 re-review）。
+
+### 2026-07-26（续·#134 review fix）
+
+- [x] **REQUEST CHANGES 修复**（head `7f7c799`）：恢复 cleaner `importance>=8` pin；legacy warmup 改回 jieba-only；从 `requirements.txt` 移除 `mcp`；HTTP 使用 2.8.10 形 fixture + 总墙钟 deadline；明确 archive/touch HTTP 缺口
+- [-] 待 re-review 后方可标 Ready 终审；**仍保持 Draft，不 merge，不 deploy**
 
 ### 2026-07-26（续）
 
 - [x] **P-CONTEXT-OBS** 完成：PR #138 合并/部署 `995f8ce`；observation-only；Context Lean 四开关均为 0；persona hash 未变
 - [x] `observation_version=3` 在 message_id `4392 / 4394 / 4396` 真实落库；resident generation 稳定为 1；turn `1 → 2 → 3`；cold → hot → hot；无 `system_changed` 循环
-- [-] **Memory Hotfix** 进行中：PR #134 rebase 到 main@995f8ce（head `179deba`）；legacy_module parity + CI 通过；HTTP backend dormant
+- [-] **Memory Hotfix** 进行中：PR #134 rebase 到 main@995f8ce；首轮 review 指出 false parity 声明后已修复（head `7f7c799`）；continuity + internal-state CI 通过
 
 **用户问题病历（仍 open，不因绿灯自动关闭）：**
 
