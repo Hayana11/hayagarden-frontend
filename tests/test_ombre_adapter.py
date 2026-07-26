@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import os
 import sys
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -294,20 +295,23 @@ class LegacyParityContractTests(unittest.TestCase):
             result = ombre_adapter.get_emotion_snapshot(timeout=0.2)
         self.assertEqual(result, {"valence": None, "arousal": None, "count": 0})
 
-    def test_warmup_async_returns_immediately(self):
+    def test_warmup_async_returns_immediately_without_loading_server(self):
         import time
 
         started = time.monotonic()
         with mock.patch.object(ombre_adapter, "_WARMUP_STARTED", False), \
-             mock.patch.object(ombre_adapter, "_load_server", side_effect=lambda: time.sleep(2)):
+             mock.patch.object(ombre_adapter, "_warmup_jieba_only", side_effect=lambda: time.sleep(2)), \
+             mock.patch.object(ombre_adapter, "_load_server") as load_server:
             ombre_adapter.warmup_async()
         self.assertLess(time.monotonic() - started, 0.2)
+        load_server.assert_not_called()
 
 
 class CleanerPolicyTests(unittest.TestCase):
-    def test_importance_never_implies_pin(self):
-        for importance in (1, 5, 8, 9, 10, 999):
-            self.assertFalse(should_pin_synced_memory(importance))
+    def test_legacy_importance_threshold_pins_synced_memory(self):
+        self.assertFalse(should_pin_synced_memory(7))
+        self.assertTrue(should_pin_synced_memory(8))
+        self.assertTrue(should_pin_synced_memory(10))
 
 
 class WiringTests(unittest.TestCase):
@@ -349,61 +353,109 @@ class CleanerBatchTests(unittest.TestCase):
 
 
 class HttpBackendTests(unittest.TestCase):
-    def test_http_handoff_reads_dashboard_records_without_touch(self):
-        records = [
-            {
-                "id": "self", "type": "permanent", "domain": ["self_anchor"],
-                "resolved": False, "digested": False, "dont_surface": False,
-                "pinned": True, "importance": 10, "last_active_epoch_ms": 5,
-            },
-            {
-                "id": "recent", "type": "dynamic", "domain": ["技术"],
-                "resolved": False, "digested": False, "dont_surface": False,
-                "pinned": False, "importance": 7, "last_active_epoch_ms": 10,
-            },
-        ]
+    @classmethod
+    def setUpClass(cls):
+        import json
+        fixture = Path(ROOT) / "tests/fixtures/ombre_http_buckets_v2810.json"
+        cls.bucket_records = json.loads(fixture.read_text(encoding="utf-8"))
+
+    def test_http_handoff_reads_realistic_v2810_bucket_list(self):
+        records = self.bucket_records
 
         def fake_json(path, **kwargs):
             if path == "/api/buckets":
                 return records
-            if path == "/api/bucket/self":
+            if path == "/api/bucket/self-anchor-001":
                 return {"content": "SELF HTTP"}
-            if path == "/api/bucket/recent":
+            if path == "/api/bucket/recent-dynamic-001":
                 return {"content": "RECENT HTTP"}
             raise AssertionError(path)
 
-        with mock.patch.dict(os.environ, {"OMBRE_ADAPTER_BACKEND": "http"}, clear=False),              mock.patch.object(ombre_adapter, "_http_json", side_effect=fake_json):
+        with mock.patch.dict(os.environ, {"OMBRE_ADAPTER_BACKEND": "http"}, clear=False), \
+             mock.patch.object(ombre_adapter, "_http_json", side_effect=fake_json):
             text = ombre_adapter.get_handoff(timeout=1, wall_timeout=2)
         self.assertIn("[自我] SELF HTTP", text)
         self.assertIn("[近期·I7] RECENT HTTP", text)
 
-    def test_http_handoff_excludes_protected_dynamic_from_recent(self):
-        records = [
-            {
-                "id": "protected", "type": "dynamic", "domain": ["技术"],
-                "resolved": False, "digested": False, "dont_surface": False,
-                "pinned": False, "protected": True, "importance": 9,
-                "last_active_epoch_ms": 99,
-            },
-            {
-                "id": "recent", "type": "dynamic", "domain": ["日常"],
-                "resolved": False, "digested": False, "dont_surface": False,
-                "pinned": False, "protected": False, "importance": 6,
-                "last_active_epoch_ms": 10,
-            },
-        ]
+    def test_http_handoff_excludes_pinned_dynamic_from_recent(self):
+        records = self.bucket_records
 
         def fake_json(path, **kwargs):
             if path == "/api/buckets":
                 return records
-            if path == "/api/bucket/recent":
+            if path == "/api/bucket/self-anchor-001":
+                return {"content": "SELF"}
+            if path == "/api/bucket/recent-dynamic-001":
                 return {"content": "SAFE RECENT"}
             raise AssertionError(path)
 
-        with mock.patch.dict(os.environ, {"OMBRE_ADAPTER_BACKEND": "http"}, clear=False),              mock.patch.object(ombre_adapter, "_http_json", side_effect=fake_json):
+        with mock.patch.dict(os.environ, {"OMBRE_ADAPTER_BACKEND": "http"}, clear=False), \
+             mock.patch.object(ombre_adapter, "_http_json", side_effect=fake_json):
             text = ombre_adapter.get_handoff(timeout=1, wall_timeout=2)
-        self.assertIn("[近期·I6] SAFE RECENT", text)
-        self.assertNotIn("protected", text)
+        self.assertIn("[近期·I7] SAFE RECENT", text)
+        self.assertNotIn("pinned-dynamic-001", text)
+
+    def test_http_handoff_respects_total_wall_timeout(self):
+        def slow_json(path, **kwargs):
+            time.sleep(0.3)
+            return []
+
+        import time
+        with mock.patch.dict(os.environ, {"OMBRE_ADAPTER_BACKEND": "http"}, clear=False), \
+             mock.patch.object(ombre_adapter, "_http_json", side_effect=slow_json):
+            started = time.monotonic()
+            text = ombre_adapter.get_handoff(timeout=1, wall_timeout=0.2)
+            elapsed = time.monotonic() - started
+        self.assertIsNone(text)
+        self.assertLess(elapsed, 0.6)
+
+    def test_http_search_does_not_touch_hits_known_gap(self):
+        touched = []
+
+        def fake_json(path, **kwargs):
+            if path == "/api/search":
+                return [{"id": "hit-1", "name": "alpha", "content_preview": "matched"}]
+            if path == "/api/bucket/hit-1":
+                return {"content": "matched"}
+            raise AssertionError(path)
+
+        with mock.patch.dict(os.environ, {"OMBRE_ADAPTER_BACKEND": "http"}, clear=False), \
+             mock.patch.object(ombre_adapter, "_http_json", side_effect=fake_json), \
+             mock.patch.object(ombre_adapter, "_mcp_call", side_effect=lambda *a, **k: touched.append(a)):
+            result = ombre_adapter.search_memories(
+                "curwe", limit=1, timeout=1.0, wall_timeout=2.0, touch=True,
+            )
+        self.assertEqual(result, [("alpha", "matched")])
+        self.assertEqual(touched, [])
+
+    def test_http_handoff_may_surface_archive_bucket_without_list_flag(self):
+        records = list(self.bucket_records) + [{
+            "id": "archive-dynamic-001",
+            "type": "dynamic",
+            "domain": ["技术"],
+            "resolved": False,
+            "digested": False,
+            "dont_surface": False,
+            "pinned": False,
+            "importance": 8,
+            "last_active_epoch_ms": 100,
+        }]
+
+        def fake_json(path, **kwargs):
+            if path == "/api/buckets":
+                return records
+            if path == "/api/bucket/self-anchor-001":
+                return {"content": "SELF"}
+            if path == "/api/bucket/archive-dynamic-001":
+                return {"content": "ARCHIVE LEAK"}
+            if path == "/api/bucket/recent-dynamic-001":
+                return {"content": "SAFE RECENT"}
+            raise AssertionError(path)
+
+        with mock.patch.dict(os.environ, {"OMBRE_ADAPTER_BACKEND": "http"}, clear=False), \
+             mock.patch.object(ombre_adapter, "_http_json", side_effect=fake_json):
+            text = ombre_adapter.get_handoff(timeout=1, wall_timeout=2)
+        self.assertIn("ARCHIVE LEAK", text)
 
     def test_http_emotion_filters_core_and_test_records(self):
         records = [

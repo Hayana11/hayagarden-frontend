@@ -28,16 +28,48 @@ Dashboard endpoints and MCP use separate authentication. The adapter logs into
 the Dashboard with a cookie for `/api/*`; MCP calls use the MCP token or the
 sidecar's configured localhost-only no-auth mode.
 
+The optional `mcp` Python package is **not** installed from `requirements.txt`.
+Install it only in disposable shadow environments before enabling the HTTP
+backend.
+
+## Legacy parity scope (default `legacy_module`)
+
+This PR preserves production behaviour for the default backend:
+
+- gateway recall / handoff / breath / hold wrappers keep the same timeouts and
+  return shapes;
+- legacy warmup remains **jieba-only** and does not import `server.py` at
+  gateway import time;
+- cleaner sync still pins Ombre holds when `importance >= 8`.
+
+Anything outside that list is either dormant HTTP code or an explicitly
+documented future change.
+
 ## Safety rules
 
 - Automatic handoff never calls `touch`.
 - Recent continuity accepts only ordinary `type=dynamic` memories.
-- Permanent, pinned, protected, resolved, digested and `dont_surface` records
-  cannot masquerade as recent continuity.
+- Permanent, pinned, protected (legacy metadata), resolved, digested and
+  `dont_surface` records cannot masquerade as recent continuity in the legacy
+  safe builder.
 - Emotion calibration excludes permanent/pinned/test/terminal memories.
-- Importance never implies `pinned`; only an explicit caller may pin.
 - Frontend hot paths no longer import Ombre Brain's internal `server.py`.
 - `memory_unification_audit.py` opens SQLite read-only and never writes Markdown.
+
+## HTTP backend known gaps (dormant until shadow phase)
+
+The HTTP path is intentionally incomplete and must not be treated as production
+parity merely because unit mocks pass:
+
+- `/api/buckets` includes archive buckets but list payloads expose no archive
+  flag, so HTTP recent continuity cannot yet match
+  `list_all(include_archive=False)`.
+- Ombre 2.8.10 list payloads expose `pinned`, `resolved`, `digested`,
+  `dont_surface`, etc., but **not** legacy vault `protected` metadata.
+- HTTP explicit search currently ignores `touch=True`; activation / last_active
+  semantics differ from legacy recall until a touch API is chosen.
+- HTTP handoff/search now honour a total wall-clock deadline, but cutover still
+  requires real sidecar fixtures, not invented mock fields.
 
 ## Read-only inventory
 
@@ -74,5 +106,5 @@ requires, in order:
 2. A verified vault and SQLite backup.
 3. A reviewed unification report and ID mapping.
 4. A cleaned disposable vault for sidecar comparison.
-5. Read-only shadow evaluation.
+5. Read-only shadow evaluation with real Ombre 2.8.10 fixtures.
 6. A separately approved cutover and rollback window.

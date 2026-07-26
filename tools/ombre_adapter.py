@@ -37,6 +37,12 @@ _HTTP_OPENER = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(_H
 _HTTP_LOGIN_LOCK = threading.Lock()
 _HTTP_LOGGED_IN = False
 
+# HTTP backend is dormant by default.  Known parity gaps vs legacy_module are
+# documented in docs/unified-memory-adapter.md and must be closed before cutover:
+# - /api/buckets includes archive buckets with no archive flag in list payload
+# - explicit search does not touch hits (activation / last_active semantics differ)
+# - MCP client dependency is not installed from requirements.txt until shadow phase
+
 
 def _backend() -> str:
     return os.environ.get("OMBRE_ADAPTER_BACKEND", "legacy_module").strip().lower()
@@ -72,8 +78,18 @@ def _http_login(timeout: float) -> bool:
         return _HTTP_LOGGED_IN
 
 
-def _http_json(path: str, *, params: Optional[dict[str, Any]] = None, timeout: float = 5.0) -> Any:
+def _http_json(
+    path: str,
+    *,
+    params: Optional[dict[str, Any]] = None,
+    timeout: float = 5.0,
+    deadline: Optional[float] = None,
+) -> Any:
     global _HTTP_LOGGED_IN
+    if deadline is not None:
+        timeout = min(timeout, max(0.05, deadline - time.monotonic()))
+    if timeout <= 0:
+        raise TimeoutError("http deadline exceeded")
     url = _http_base() + path
     if params:
         url += "?" + urllib.parse.urlencode(params)
@@ -89,14 +105,24 @@ def _http_json(path: str, *, params: Optional[dict[str, Any]] = None, timeout: f
         _HTTP_LOGGED_IN = False
         if not _http_login(timeout):
             raise
+        if deadline is not None:
+            timeout = min(timeout, max(0.05, deadline - time.monotonic()))
+        if timeout <= 0:
+            raise TimeoutError("http deadline exceeded")
         retry = urllib.request.Request(url, headers=_http_headers())
         with _HTTP_OPENER.open(retry, timeout=timeout) as response:
             return json.loads(response.read())
 
 
 async def _mcp_call(tool_name: str, arguments: dict[str, Any], *, timeout: float) -> str:
-    from mcp import ClientSession
-    from mcp.client.streamable_http import streamablehttp_client
+    try:
+        from mcp import ClientSession
+        from mcp.client.streamable_http import streamablehttp_client
+    except ImportError as exc:
+        raise RuntimeError(
+            "HTTP backend requires the optional `mcp` package; "
+            "install it only in disposable shadow environments"
+        ) from exc
 
     url = os.environ.get("OMBRE_MCP_URL", _http_base() + "/mcp")
     async with streamablehttp_client(
@@ -185,6 +211,39 @@ def _run_async(
     return result[0]
 
 
+def _run_sync(
+    worker: Callable[[], Any],
+    *,
+    wall_timeout: float,
+    default: Any,
+) -> Any:
+    """Run one synchronous worker in a daemon thread with a wall-clock timeout."""
+    result = [default]
+    done = threading.Event()
+
+    def target() -> None:
+        try:
+            result[0] = worker()
+        except Exception:
+            result[0] = default
+        finally:
+            done.set()
+
+    threading.Thread(target=target, daemon=True, name="ombre-adapter-sync").start()
+    done.wait(timeout=max(0.05, wall_timeout))
+    return result[0]
+
+
+def _warmup_jieba_only() -> None:
+    """Match legacy gateway warmup: tokenizer only, no server/vault import."""
+    root = os.environ.get("OMBRE_BRAIN_ROOT", _DEFAULT_ROOT).strip() or _DEFAULT_ROOT
+    if root not in sys.path:
+        sys.path.insert(0, root)
+    import jieba
+
+    jieba.initialize()
+
+
 def warmup_async() -> None:
     """Warm the selected backend without blocking gateway import."""
     global _WARMUP_STARTED
@@ -196,9 +255,9 @@ def warmup_async() -> None:
         try:
             if _backend() == "http":
                 _http_json("/health", timeout=3.0)
-                _SERVER_READY.set()
             else:
-                _load_server()
+                _warmup_jieba_only()
+            _SERVER_READY.set()
             _LOG.info("Ombre backend warmup complete")
         except Exception as exc:
             _LOG.warning("Ombre warmup failed: %s", exc)
@@ -311,8 +370,25 @@ async def _safe_handoff_async(server: Any) -> str:
     return "\n---\n".join(parts)
 
 
-def _http_handoff(timeout: float) -> str:
-    buckets = _http_json("/api/buckets", params={"sort": "created_desc"}, timeout=timeout)
+def _http_handoff(*, timeout: float, wall_timeout: float) -> str:
+    """HTTP handoff builder.
+
+    Ombre 2.8.10 ``/api/buckets`` calls ``list_all(include_archive=True)`` but
+    does not expose an archive flag in list payloads.  Until upstream adds an
+    active-only filter, HTTP recent continuity cannot be proven equivalent to
+    legacy ``list_all(include_archive=False)``.
+    """
+    deadline = time.monotonic() + max(0.05, float(wall_timeout))
+
+    def req_timeout() -> float:
+        return min(timeout, max(0.05, deadline - time.monotonic()))
+
+    buckets = _http_json(
+        "/api/buckets",
+        params={"sort": "created_desc"},
+        timeout=req_timeout(),
+        deadline=deadline,
+    )
     sections = {"self_anchor": [], "user_portrait": [], "relationship": []}
     recent = []
     for meta in buckets if isinstance(buckets, list) else []:
@@ -335,12 +411,15 @@ def _http_handoff(timeout: float) -> str:
             not matched
             and meta.get("type") == "dynamic"
             and not meta.get("pinned")
-            and not meta.get("protected")
         ):
             recent.append(meta)
 
     def detail(item: dict) -> str:
-        payload = _http_json(f"/api/bucket/{item['id']}", timeout=timeout)
+        payload = _http_json(
+            f"/api/bucket/{item['id']}",
+            timeout=req_timeout(),
+            deadline=deadline,
+        )
         return _clip(payload.get("content", "")) if isinstance(payload, dict) else ""
 
     parts = []
@@ -363,10 +442,11 @@ def get_handoff(*, timeout: float = 3.0, wall_timeout: float = 5.0) -> Optional[
     it automatically falls back to the safe builder.
     """
     if _backend() == "http":
-        try:
-            return _http_handoff(timeout=max(timeout, wall_timeout))
-        except Exception:
-            return None
+        return _run_sync(
+            lambda: _http_handoff(timeout=timeout, wall_timeout=wall_timeout),
+            wall_timeout=wall_timeout,
+            default=None,
+        )
 
     async def call() -> str:
         server = _load_server()
@@ -392,17 +472,39 @@ def search_memories(
     if not query:
         return []
     if _backend() == "http":
-        try:
-            matches = _http_json("/api/search", params={"q": query}, timeout=timeout)
-            output = []
+        def worker() -> list[tuple[str, str]]:
+            deadline = time.monotonic() + max(0.05, float(wall_timeout or timeout + 1.0))
+
+            def req_timeout() -> float:
+                return min(timeout, max(0.05, deadline - time.monotonic()))
+
+            matches = _http_json(
+                "/api/search",
+                params={"q": query},
+                timeout=req_timeout(),
+                deadline=deadline,
+            )
+            output: list[tuple[str, str]] = []
             for item in (matches or [])[: max(1, int(limit))]:
-                detail = _http_json(f"/api/bucket/{item['id']}", timeout=timeout)
+                detail = _http_json(
+                    f"/api/bucket/{item['id']}",
+                    timeout=req_timeout(),
+                    deadline=deadline,
+                )
                 content = str(detail.get("content") or item.get("content_preview") or "").strip()
                 if content:
                     output.append((str(item.get("name") or "记忆桶"), content[:300]))
+            if touch:
+                _LOG.debug(
+                    "HTTP search ignores touch=True until shadow evaluation picks a touch API"
+                )
             return output
-        except Exception:
-            return []
+
+        return _run_sync(
+            worker,
+            wall_timeout=wall_timeout or timeout + 1.0,
+            default=[],
+        )
 
     async def call() -> list[tuple[str, str]]:
         server = _load_server()

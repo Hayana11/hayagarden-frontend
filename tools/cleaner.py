@@ -250,9 +250,9 @@ def mark_resolved():
 # ─────────────────────────────────────────────────────────────
 # Task 5 · Process new memories & sync to Ombre Brain
 # ─────────────────────────────────────────────────────────────
-def should_pin_synced_memory(_importance):
-    """Automatic analysis may rank importance, but only a human may pin core rules."""
-    return False
+def should_pin_synced_memory(importance):
+    """Preserve legacy cleaner sync policy until a separate pin-policy change lands."""
+    return int(importance) >= 8
 
 def process_and_sync():
     log('=== Task 5: Process new & sync to Ombre Brain ===')
