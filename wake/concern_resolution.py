@@ -74,7 +74,7 @@ _WISH_PREFIX_RE = re.compile(
 _NON_FACTUAL_NEGATION_SEGMENT_RE = re.compile(
     r'^(?:'
     r'并不?是|不是说|并不是说|'
-    r'没有?|并没|并没有|并未|没在|别再|不会|'
+    r'没有|并没|并没有|并未|没在|别再|不会|'
     r'未发现|没发现|没有发现|并未发现'
     r')',
 )
@@ -532,9 +532,19 @@ def _contrast_split_concern_clauses(part: str) -> list[str]:
         segments.append(tail)
     if len(segments) < 2:
         return [part]
-    if not all(_classify_factual_clause(segment) for segment in segments):
+    events = [_classify_factual_clause(segment) for segment in segments]
+    if not any(events):
         return [part]
-    return segments
+    non_factual_segments = [segment for segment, event in zip(segments, events) if not event]
+    if non_factual_segments and all(
+        _clause_is_non_factual_fragment(segment) for segment in non_factual_segments
+    ):
+        return segments
+    if all(events):
+        identities = [_distinctive_clause_identities(segment) for segment in segments]
+        if all(identities) and len({frozenset(identity) for identity in identities}) > 1:
+            return segments
+    return [part]
 
 
 def _comma_split_concern_clauses(part: str) -> list[str]:
@@ -542,14 +552,18 @@ def _comma_split_concern_clauses(part: str) -> list[str]:
     if len(pieces) < 2:
         return [part]
     events = [_classify_factual_clause(piece) for piece in pieces]
-    if not all(events):
+    if not any(events):
         return [part]
-    identities = [_distinctive_clause_identities(piece) for piece in pieces]
-    if not all(identities):
-        return [part]
-    if len({identity for identity in identities}) != len(identities):
-        return [part]
-    return pieces
+    non_factual_pieces = [piece for piece, event in zip(pieces, events) if not event]
+    if non_factual_pieces and all(
+        _clause_is_non_factual_fragment(piece) for piece in non_factual_pieces
+    ):
+        return pieces
+    if all(events):
+        identities = [_distinctive_clause_identities(piece) for piece in pieces]
+        if all(identities) and len({frozenset(identity) for identity in identities}) > 1:
+            return pieces
+    return [part]
 
 
 def _split_segment_clauses(segment: str, *, interrogative: bool) -> list[tuple[str, bool]]:
@@ -600,7 +614,12 @@ def _local_segment_start(clause: str, pos: int) -> int:
     return start
 
 
-def _state_match_is_non_factual(clause: str, match: re.Match[str]) -> bool:
+def _state_match_is_non_factual(
+    clause: str,
+    match: re.Match[str],
+    *,
+    event_kind: str,
+) -> bool:
     local_start = _local_segment_start(clause, match.start())
     before = clause[local_start:match.start()]
     segment = clause[local_start:match.end()]
@@ -622,6 +641,10 @@ def _state_match_is_non_factual(clause: str, match: re.Match[str]) -> bool:
         return True
     if re.match(r'^(?:如果|要是|假如|万一|以后若|倘若|若是)', segment_head):
         return True
+
+    if event_kind == 'unresolved':
+        return False
+
     if _NON_FACTUAL_NEGATION_SEGMENT_RE.match(segment_head):
         return True
     if _NON_FACTUAL_NEGATION_BEFORE_RE.search(before):
@@ -660,18 +683,18 @@ def _collect_clause_state_events(clause: str) -> list[tuple[int, int, str]]:
     events: list[tuple[int, int, str]] = []
     for pattern in _NEGATIVE_UNRESOLVED_MARKERS:
         for match in pattern.finditer(clause):
-            if _state_match_is_non_factual(clause, match):
+            if _state_match_is_non_factual(clause, match, event_kind='unresolved'):
                 continue
             events.append((match.end(), _EVENT_PRIORITY['unresolved'], 'unresolved'))
     for pattern in _REOPEN_MARKERS:
         for match in pattern.finditer(clause):
-            if _state_match_is_non_factual(clause, match):
+            if _state_match_is_non_factual(clause, match, event_kind='reopen'):
                 continue
             events.append((match.end(), _EVENT_PRIORITY['reopen'], 'reopen'))
     if not _clause_blocks_resolution(clause):
         for pattern in _RESOLUTION_MARKERS:
             for match in pattern.finditer(clause):
-                if _state_match_is_non_factual(clause, match):
+                if _state_match_is_non_factual(clause, match, event_kind='resolve'):
                     continue
                 if _match_has_negative_polarity(clause, match):
                     events.append((
@@ -736,6 +759,14 @@ def _prior_chat_content(chat_messages: Sequence[dict], message_id: int | None) -
     return ''
 
 
+def _marker_event_kind(pattern: re.Pattern[str]) -> str:
+    if pattern in _NEGATIVE_UNRESOLVED_MARKERS:
+        return 'unresolved'
+    if pattern in _REOPEN_MARKERS:
+        return 'reopen'
+    return 'resolve'
+
+
 def _message_blocks_entity_topic_fallback(content: str) -> bool:
     body = (content or '').strip()
     if not body:
@@ -749,7 +780,11 @@ def _message_blocks_entity_topic_fallback(content: str) -> bool:
         for pattern in (*_REOPEN_MARKERS, *_NEGATIVE_UNRESOLVED_MARKERS, *_RESOLUTION_MARKERS):
             for match in pattern.finditer(target):
                 saw_marker = True
-                if not _state_match_is_non_factual(target, match):
+                if not _state_match_is_non_factual(
+                    target,
+                    match,
+                    event_kind=_marker_event_kind(pattern),
+                ):
                     return False
     return saw_marker
 
@@ -805,7 +840,7 @@ def _clause_explicit_entity_topics(clause: str) -> frozenset[str]:
     if len(conditional_tail) > 1:
         working = conditional_tail[0].strip()
     working = re.sub(
-        r'^(?:但|但是|不过|然而|可是|今天真的|今天确认|其实|本来担心)',
+        r'^(?:但|但是|不过|然而|可是|今天真的|今天确认|其实|本来担心|后来)',
         '',
         working,
     ).strip()
@@ -819,8 +854,20 @@ def _clause_explicit_entity_topics(clause: str) -> frozenset[str]:
     return _clause_entity_anchors(working)
 
 
+def _clause_is_non_factual_fragment(clause: str) -> bool:
+    stripped = clause.strip()
+    return bool(
+        _WISH_PREFIX_RE.match(stripped)
+        or _CONDITIONAL_PREFIX_RE.match(stripped)
+        or _FUTURE_WAIT_PREFIX_RE.match(stripped)
+        or re.match(r'^(?:如果|要是|假如|万一|以后若|倘若|若是)', stripped)
+    )
+
+
 def _topics_from_prior_clauses(prior_clauses: Sequence[str]) -> frozenset[str]:
     for prior in reversed(prior_clauses):
+        if _clause_is_non_factual_fragment(prior):
+            continue
         topics = _clause_explicit_entity_topics(prior)
         if topics:
             return topics

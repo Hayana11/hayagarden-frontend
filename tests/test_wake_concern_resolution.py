@@ -687,6 +687,75 @@ class ConcernResolutionLogicTests(unittest.TestCase):
         self.assertIn('尾款', topics)
         self.assertNotIn('快递', topics)
 
+    def test_bare_unresolved_statements_produce_events(self):
+        cases = (
+            ('没修好', 'unresolved'),
+            ('没有处理好', 'unresolved'),
+            ('没送到', 'unresolved'),
+            ('还没有完成', 'unresolved'),
+        )
+        for text, expected in cases:
+            events = cr.parse_user_concern_events(text)
+            self.assertEqual(len(events), 1, msg=text)
+            self.assertEqual(events[0].event, expected, msg=text)
+
+    def test_fault_negation_still_blocks_reopen(self):
+        self.assertEqual(cr.parse_user_concern_events('没有又报错'), [])
+
+    def test_mixed_non_factual_factual_topic_isolation(self):
+        cases = (
+            (
+                '希望 frontend 修好，今天确认 backend 已经修好了',
+                'resolve',
+                frozenset({'backend'}),
+                frozenset({'frontend'}),
+            ),
+            (
+                '如果订单A完成我再说，今天订单B已经完成',
+                'resolve',
+                frozenset({'今天订单b'}),
+                frozenset({'如果订单a'}),
+            ),
+            (
+                '希望快递送到，后来尾款已经处理好了',
+                'resolve',
+                frozenset({'尾款'}),
+                frozenset({'快递', '希望快递'}),
+            ),
+        )
+        for text, event_type, expected_topics, forbidden in cases:
+            events = cr.parse_user_concern_events(text)
+            self.assertEqual(len(events), 1, msg=text)
+            self.assertEqual(events[0].event, event_type, msg=text)
+            self.assertTrue(expected_topics <= events[0].topics, msg=text)
+            self.assertFalse(events[0].topics & forbidden, msg=text)
+
+    def test_hope_pronoun_then_factual_resolve_same_theme(self):
+        messages = [
+            {'id': 1, 'content': 'frontend 已经修好了，不用再看了。', 'created_at': '2026-07-21 10:00:00'},
+            {'id': 2, 'content': '本来希望它修好，今天确认它已经修好了', 'created_at': '2026-07-22 09:00:00'},
+        ]
+        events = cr.parse_user_concern_events(
+            messages[1]['content'], messages, messages[1]['id'],
+        )
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].event, 'resolve')
+        self.assertIn('frontend', events[0].topics)
+
+    def test_bare_unresolved_reopens_active_closure(self):
+        messages = [
+            {'id': 1, 'content': 'frontend 已经修好了，不用再看了。', 'created_at': '2026-07-21 10:00:00'},
+            {'id': 2, 'content': '没修好', 'created_at': '2026-07-22 08:00:00'},
+        ]
+        state = cr.build_resolution_state(messages)
+        self.assertEqual(len(state.active), 0)
+
+    def test_bare_unresolved_without_closure_creates_no_record(self):
+        state = cr.build_resolution_state([
+            {'id': 1, 'content': '没有处理好', 'created_at': '2026-07-21 10:00:00'},
+        ])
+        self.assertEqual(len(state.active), 0)
+
 
 class WakeConcernResolutionIntegrationTests(unittest.TestCase):
     def setUp(self):
@@ -1788,6 +1857,78 @@ class WakeConcernResolutionIntegrationTests(unittest.TestCase):
         text = self._build_wake_text()
         self.assertNotIn('快递有没有取', text)
         self.assertIn('尾款', text)
+
+    def test_db_bare_unresolved_reopens_closure_but_fault_negation_does_not(self):
+        self._insert_wake('explore', '还在想 frontend 故障要不要继续排查。', hours_ago=40)
+        self._insert_chat_at(
+            message_id=1, author='hayana',
+            content='frontend 已经修好了，不用再看了。',
+            hours_ago=30,
+        )
+        cr.load_resolution_state_from_db(self.get_db)
+
+        conn = self.get_db()
+        self.assertEqual(conn.execute(
+            "SELECT COUNT(*) FROM concern_closures WHERE active=1"
+        ).fetchone()[0], 1)
+        conn.close()
+
+        self._insert_chat_at(
+            message_id=2, author='hayana',
+            content='没修好',
+            hours_ago=10,
+        )
+        cr.load_resolution_state_from_db(self.get_db)
+
+        conn = self.get_db()
+        self.assertEqual(conn.execute(
+            "SELECT COUNT(*) FROM concern_closures WHERE active=1"
+        ).fetchone()[0], 0)
+        conn.close()
+
+        text_after_unresolved = self._build_wake_text()
+        self.assertIn('你醒着的时候', text_after_unresolved)
+        self.assertIn('frontend', text_after_unresolved)
+
+        self._insert_chat_at(
+            message_id=3, author='hayana',
+            content='frontend 已经修好了，不用再看了。',
+            hours_ago=8,
+        )
+        cr.load_resolution_state_from_db(self.get_db)
+
+        conn = self.get_db()
+        self.assertEqual(conn.execute(
+            "SELECT COUNT(*) FROM concern_closures WHERE active=1"
+        ).fetchone()[0], 1)
+        conn.close()
+
+        self._insert_chat_at(
+            message_id=4, author='hayana',
+            content='没有又报错',
+            hours_ago=1,
+        )
+        cr.load_resolution_state_from_db(self.get_db)
+
+        conn = self.get_db()
+        self.assertEqual(conn.execute(
+            "SELECT COUNT(*) FROM concern_closures WHERE active=1"
+        ).fetchone()[0], 1)
+        conn.close()
+
+    def test_db_bare_unresolved_without_closure_creates_no_row(self):
+        self._insert_chat_at(
+            message_id=1, author='hayana',
+            content='没有处理好',
+            hours_ago=1,
+        )
+        cr.load_resolution_state_from_db(self.get_db)
+
+        conn = self.get_db()
+        self.assertEqual(conn.execute(
+            "SELECT COUNT(*) FROM concern_closures"
+        ).fetchone()[0], 0)
+        conn.close()
 
 
 if __name__ == '__main__':
