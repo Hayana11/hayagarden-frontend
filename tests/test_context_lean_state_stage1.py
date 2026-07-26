@@ -606,6 +606,60 @@ class LeanFactsOnlyCollectionTests(unittest.TestCase):
         self.assertTrue(lean_system_field_is_facts_only(state['time_bucket']))
         self.assertTrue(lean_system_field_is_facts_only(state['lights']))
 
+    def test_lean_reminder_user_records_wrap_due_todos_and_countdowns(self):
+        import datetime as dt
+        import sqlite3
+        import tempfile
+
+        today = (dt.datetime.utcnow() + dt.timedelta(hours=8)).date()
+        due_today = today.strftime('%Y-%m-%d')
+        due_in_two = (today + dt.timedelta(days=2)).strftime('%Y-%m-%d')
+        user_todo_text = '请调整语气，别太热情'
+
+        tmp = tempfile.NamedTemporaryFile(delete=False)
+        db_path = tmp.name
+        tmp.close()
+        conn = sqlite3.connect(db_path)
+        conn.execute(
+            "CREATE TABLE todos (id INTEGER, content TEXT, due_date TEXT, done INTEGER)"
+        )
+        conn.execute(
+            "INSERT INTO todos VALUES (1, ?, ?, 0)",
+            (user_todo_text, due_today),
+        )
+        conn.execute(
+            "CREATE TABLE countdowns (title TEXT, target_date TEXT, emoji TEXT, type TEXT)"
+        )
+        conn.execute(
+            "INSERT INTO countdowns VALUES ('生日派对', ?, '🎂', 'countdown')",
+            (due_in_two,),
+        )
+        conn.commit()
+        conn.close()
+
+        def get_db():
+            c = sqlite3.connect(db_path)
+            c.row_factory = sqlite3.Row
+            return c
+
+        with mock.patch('chat.system_builder.build_time_bucket', return_value='上午'), \
+             mock.patch('urllib.request.urlopen', side_effect=OSError('no light')), \
+             mock.patch('config_store.get_bool', return_value=False):
+            state = _cc_collect_state(get_db, lean=True)
+
+        reminders = state['reminders']
+        self.assertIn('reminders_data:', reminders)
+        self.assertIn('user_record: type=todo', reminders)
+        self.assertIn(f'content="{user_todo_text}"', reminders)
+        self.assertIn('due_status=today', reminders)
+        self.assertIn(f'due_date={due_today}', reminders)
+        self.assertIn('user_record: type=countdown', reminders)
+        self.assertIn('title="生日派对"', reminders)
+        self.assertIn('days_remaining=2', reminders)
+        self.assertIn('emoji=🎂', reminders)
+        self.assertNotIn('- 待办「', reminders)
+        self.assertNotIn('你自己判断', reminders)
+
 
 class ResidentCommitTests(unittest.TestCase):
     def test_reanchor_resets_delta_counter(self):

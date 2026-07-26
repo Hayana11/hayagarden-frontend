@@ -851,6 +851,45 @@ def _cc_period_budget_reminders(conn, today):
     return reminders
 
 
+def _lean_escape_user_record_value(text: str) -> str:
+    return str(text or '').replace('\\', '\\\\').replace('"', '\\"')
+
+
+def _lean_user_record_todo_line(
+    content: str,
+    *,
+    due_status: str,
+    due_date: str = '',
+    overdue_days: int | None = None,
+) -> str:
+    parts = [
+        'user_record: type=todo',
+        f'content="{_lean_escape_user_record_value(content)}"',
+        f'due_status={due_status}',
+    ]
+    if due_date:
+        parts.append(f'due_date={due_date}')
+    if overdue_days is not None:
+        parts.append(f'overdue_days={overdue_days}')
+    return ' '.join(parts)
+
+
+def _lean_user_record_countdown_line(
+    title: str,
+    *,
+    emoji: str = '',
+    days_remaining: int,
+) -> str:
+    parts = [
+        'user_record: type=countdown',
+        f'title="{_lean_escape_user_record_value(title)}"',
+        f'days_remaining={days_remaining}',
+    ]
+    if emoji:
+        parts.append(f'emoji={emoji}')
+    return ' '.join(parts)
+
+
 def _format_structured_emotion_snippet() -> str:
     """Facts-only emotion line for Context Lean state blocks."""
     try:
@@ -1069,7 +1108,27 @@ def _cc_collect_state(get_db_fn, *, lean=False):
             except Exception:
                 continue
             delta = (due - today).days
-            if delta < 0:
+            if lean:
+                if delta < 0:
+                    reminders.append(_lean_user_record_todo_line(
+                        t['content'],
+                        due_status='overdue',
+                        due_date=t['due_date'],
+                        overdue_days=-delta,
+                    ))
+                elif delta == 0:
+                    reminders.append(_lean_user_record_todo_line(
+                        t['content'],
+                        due_status='today',
+                        due_date=t['due_date'],
+                    ))
+                elif delta == 1:
+                    reminders.append(_lean_user_record_todo_line(
+                        t['content'],
+                        due_status='tomorrow',
+                        due_date=t['due_date'],
+                    ))
+            elif delta < 0:
                 reminders.append(f'- 待办「{t["content"]}」已逾期{-delta}天（原定{t["due_date"]}）')
             elif delta == 0:
                 reminders.append(f'- 待办「{t["content"]}」今天到期')
@@ -1087,7 +1146,14 @@ def _cc_collect_state(get_db_fn, *, lean=False):
                 continue
             delta = (target - today).days
             if 0 <= delta <= 3:
-                reminders.append(f'- 倒数日 {c["emoji"]}「{c["title"]}」还剩{delta}天')
+                if lean:
+                    reminders.append(_lean_user_record_countdown_line(
+                        c['title'],
+                        emoji=c['emoji'] or '',
+                        days_remaining=delta,
+                    ))
+                else:
+                    reminders.append(f'- 倒数日 {c["emoji"]}「{c["title"]}」还剩{delta}天')
         reminders.extend(_cc_period_budget_reminders(conn, today))
         conn.close()
         if reminders:
