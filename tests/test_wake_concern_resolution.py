@@ -615,6 +615,78 @@ class ConcernResolutionLogicTests(unittest.TestCase):
         self.assertIn('快递', events[-1].topics)
         self.assertNotIn('吃面', events[-1].topics)
 
+    def test_non_factual_resolve_phrases(self):
+        cases = (
+            '如果 frontend 修好了我再告诉你。',
+            '等快递送到了再说。',
+            '希望伤口早点愈合。',
+            '还没修好，等修好了再结案。',
+        )
+        for text in cases:
+            events = cr.parse_user_concern_events(text)
+            self.assertFalse(
+                any(event.event == 'resolve' for event in events),
+                msg=text,
+            )
+
+    def test_hope_then_factual_resolve(self):
+        events = cr.parse_user_concern_events('本来希望它修好，今天确认已经修好了')
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].event, 'resolve')
+
+    def test_negated_reopen_with_subject_gap(self):
+        cases = (
+            '并不是它又报错了。',
+            '我不是说 frontend 又坏了，只是在举例。',
+            '没有发现服务又出现问题。',
+        )
+        for text in cases:
+            events = cr.parse_user_concern_events(text)
+            self.assertFalse(
+                any(event.event in {'reopen', 'unresolved'} for event in events),
+                msg=text,
+            )
+
+    def test_factual_reopen_after_subject_negation_contrast(self):
+        events = cr.parse_user_concern_events('之前不是它报错，但今天 frontend 真的又坏了')
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].event, 'reopen')
+        self.assertIn('frontend', events[0].topics)
+
+    def test_hypothetical_resolve_does_not_create_closure(self):
+        messages = [
+            {'id': 1, 'content': '如果修好了再说。', 'created_at': '2026-07-21 10:00:00'},
+        ]
+        state = cr.build_resolution_state(messages)
+        self.assertEqual(len(state.active), 0)
+
+    def test_pronoun_binds_last_multi_order_topic(self):
+        messages = [
+            {'id': 1, 'content': '订单A已经完成，订单B还没完成。', 'created_at': '2026-07-21 10:00:00'},
+            {'id': 2, 'content': '它又出问题了。', 'created_at': '2026-07-22 09:00:00'},
+        ]
+        state = cr.build_resolution_state(messages)
+        self.assertEqual(len(state.active), 1)
+        self.assertIn('订单a', state.active[0].topic_tokens)
+        events = cr.parse_user_concern_events(
+            messages[1]['content'], messages, messages[1]['id'],
+        )
+        self.assertEqual(events[-1].event, 'reopen')
+        self.assertIn('订单b', events[-1].topics)
+        self.assertNotIn('订单a', events[-1].topics)
+
+    def test_pronoun_does_not_reopen_completed_express(self):
+        messages = [
+            {'id': 1, 'content': '快递已经取完了，但尾款还没处理好。', 'created_at': '2026-07-21 10:00:00'},
+            {'id': 2, 'content': '它还是有问题。', 'created_at': '2026-07-22 09:00:00'},
+        ]
+        state = cr.build_resolution_state(messages)
+        self.assertEqual(len(state.active), 1)
+        self.assertIn('快递', state.active[0].topic_tokens)
+        topics = cr._collect_prior_chat_topics(messages, messages[1]['id'])
+        self.assertIn('尾款', topics)
+        self.assertNotIn('快递', topics)
+
 
 class WakeConcernResolutionIntegrationTests(unittest.TestCase):
     def setUp(self):
@@ -1593,6 +1665,129 @@ class WakeConcernResolutionIntegrationTests(unittest.TestCase):
         text = self._build_wake_text()
         self.assertIn('你醒着的时候', text)
         self.assertIn('frontend', text)
+
+    def test_db_hypothetical_resolve_then_factual_closure_lifecycle(self):
+        self._insert_wake('explore', '还在想快递有没有送到。', hours_ago=40)
+        self._insert_chat_at(
+            message_id=1, author='hayana',
+            content='快递还没送到。',
+            hours_ago=35,
+        )
+        self._insert_chat_at(
+            message_id=2, author='hayana',
+            content='如果修好了再说。',
+            hours_ago=30,
+        )
+        cr.load_resolution_state_from_db(self.get_db)
+        conn = self.get_db()
+        self.assertEqual(conn.execute(
+            "SELECT COUNT(*) FROM concern_closures WHERE active=1"
+        ).fetchone()[0], 0)
+        conn.close()
+
+        self._insert_chat_at(
+            message_id=3, author='hayana',
+            content='等送到了再说。',
+            hours_ago=20,
+        )
+        cr.load_resolution_state_from_db(self.get_db)
+        conn = self.get_db()
+        self.assertEqual(conn.execute(
+            "SELECT COUNT(*) FROM concern_closures WHERE active=1"
+        ).fetchone()[0], 0)
+        conn.close()
+
+        text_before = self._build_wake_text()
+        self.assertIn('快递有没有送到', text_before)
+
+        self._insert_chat_at(
+            message_id=4, author='hayana',
+            content='今天确认已经送到了。',
+            hours_ago=1,
+        )
+        cr.load_resolution_state_from_db(self.get_db)
+        conn = self.get_db()
+        self.assertEqual(conn.execute(
+            "SELECT COUNT(*) FROM concern_closures WHERE active=1"
+        ).fetchone()[0], 1)
+        conn.close()
+
+        text_after = self._build_wake_text()
+        self.assertNotIn('你醒着的时候', text_after)
+
+    def test_db_pronoun_reopens_last_not_first_order(self):
+        self._insert_wake('explore', '还在想订单A进度。', hours_ago=40)
+        self._insert_wake('explore', '还在想订单B进度。', hours_ago=38)
+        self._insert_chat_at(
+            message_id=1, author='hayana',
+            content='订单A已经完成，订单B还没完成。',
+            hours_ago=20,
+        )
+        cr.load_resolution_state_from_db(self.get_db)
+
+        conn = self.get_db()
+        self.assertEqual(conn.execute(
+            "SELECT COUNT(*) FROM concern_closures WHERE active=1"
+        ).fetchone()[0], 1)
+        row = conn.execute(
+            "SELECT topic_tokens FROM concern_closures WHERE active=1"
+        ).fetchone()
+        conn.close()
+        self.assertIn('订单a', row[0].lower())
+
+        self._insert_chat_at(
+            message_id=2, author='hayana',
+            content='它又出问题了。',
+            hours_ago=1,
+        )
+        cr.load_resolution_state_from_db(self.get_db)
+
+        conn = self.get_db()
+        self.assertEqual(conn.execute(
+            "SELECT COUNT(*) FROM concern_closures WHERE active=1"
+        ).fetchone()[0], 1)
+        conn.close()
+
+        text = self._build_wake_text()
+        self.assertNotIn('订单A进度', text)
+        self.assertIn('订单B进度', text)
+
+    def test_db_express_pronoun_does_not_reopen_completed_item(self):
+        self._insert_wake('explore', '还在想快递有没有取。', hours_ago=40)
+        self._insert_wake('explore', '还在想尾款有没有付。', hours_ago=38)
+        self._insert_chat_at(
+            message_id=1, author='hayana',
+            content='快递已经取完了，但尾款还没处理好。',
+            hours_ago=20,
+        )
+        cr.load_resolution_state_from_db(self.get_db)
+
+        conn = self.get_db()
+        self.assertEqual(conn.execute(
+            "SELECT COUNT(*) FROM concern_closures WHERE active=1"
+        ).fetchone()[0], 1)
+        row = conn.execute(
+            "SELECT topic_tokens FROM concern_closures WHERE active=1"
+        ).fetchone()
+        conn.close()
+        self.assertIn('快递', row[0])
+
+        self._insert_chat_at(
+            message_id=2, author='hayana',
+            content='它还是有问题。',
+            hours_ago=1,
+        )
+        cr.load_resolution_state_from_db(self.get_db)
+
+        conn = self.get_db()
+        self.assertEqual(conn.execute(
+            "SELECT COUNT(*) FROM concern_closures WHERE active=1"
+        ).fetchone()[0], 1)
+        conn.close()
+
+        text = self._build_wake_text()
+        self.assertNotIn('快递有没有取', text)
+        self.assertIn('尾款', text)
 
 
 if __name__ == '__main__':

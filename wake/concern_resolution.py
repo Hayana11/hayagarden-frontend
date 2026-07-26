@@ -65,6 +65,26 @@ _CONDITIONAL_BEFORE_REOPEN_RE = re.compile(
 _REOPEN_FAULT_NEGATED_RE = re.compile(
     r'(?:没有|并没|并没有|并未|不是|不会|没在|别再)(?:再|仍|还)?$',
 )
+_FACTUAL_CONTRAST_BREAK_RE = re.compile(r'(?:但|但是|不过|然而|可是)|今天真的|其实|真的')
+_CONDITIONAL_PREFIX_RE = re.compile(r'^(?:如果|要是|假如|万一|以后若|倘若|若是)')
+_FUTURE_WAIT_PREFIX_RE = re.compile(r'^等')
+_WISH_PREFIX_RE = re.compile(
+    r'^(?:希望|但愿|本想|本来想|本来希望)',
+)
+_NON_FACTUAL_NEGATION_SEGMENT_RE = re.compile(
+    r'^(?:'
+    r'并不?是|不是说|并不是说|'
+    r'没有?|并没|并没有|并未|没在|别再|不会|'
+    r'未发现|没发现|没有发现|并未发现'
+    r')',
+)
+_NON_FACTUAL_NEGATION_BEFORE_RE = re.compile(
+    r'(?:'
+    r'(?:没有|并没|并没有|并未|不是|并不会|不会|没在|别再|未发现|没发现|没有发现|并未发现)'
+    r'(?:说|表示|提到|发现|看到)?'
+    r'[^，,；;]{0,16}'
+    r')$',
+)
 
 _NEGATIVE_POLARITY_RE = re.compile(
     r'(?:还没|仍未|还是|仍然|依然|未曾|没有|没|未|不)$',
@@ -152,7 +172,7 @@ _GENERIC_TOPIC_TOKENS = frozenset({
 
 _NON_ENTITY_FILLER_TOKENS = frozenset({
     '如果', '要是', '假如', '万一', '倘若', '若是', '以后若',
-    '今天真的', '其实', '说的是', '关于', '放心',
+    '今天真的', '今天确认', '其实', '说的是', '关于', '放心',
 })
 
 _DEFAULT_LOOKBACK_HOURS = 168
@@ -435,13 +455,42 @@ _DEICTIC_PHRASE = re.compile(r'(?:这件事|那件事|这事|那事)')
 _PRONOUN_CONTEXT_RE = re.compile(r'(?:它|这个|那个)(?:又|还|仍)')
 
 
-def _needs_prior_chat_context(content: str) -> bool:
+def _needs_immediate_prior_chat(content: str) -> bool:
     body = (content or '').strip()
     if _DEICTIC_PHRASE.search(body):
         return True
     if _PRONOUN_CONTEXT_RE.search(body):
         return True
-    return len(_identity_tokens(topic_tokens(content))) < 1
+    return False
+
+
+def _immediate_prior_message_topics(
+    chat_messages: Sequence[dict],
+    message_id: int | None,
+) -> frozenset[str]:
+    if message_id is None:
+        return frozenset()
+    index = next(
+        (i for i, msg in enumerate(chat_messages) if int(msg.get('id') or 0) == int(message_id)),
+        -1,
+    )
+    if index <= 0:
+        return frozenset()
+    msg = chat_messages[index - 1]
+    content = str(msg.get('content') or '')
+    if not content.strip():
+        return frozenset()
+    prior_id = int(msg.get('id') or 0)
+    sub_context = list(chat_messages[:index])
+    events = parse_user_concern_events(content, sub_context, prior_id)
+    for event in reversed(events):
+        if event.topics:
+            return event.topics
+    if _is_user_author(msg.get('author')):
+        entity_topics = _clause_explicit_entity_topics(content)
+        if entity_topics and not _message_blocks_entity_topic_fallback(content):
+            return entity_topics
+    return identity_topic_tokens(content)
 
 
 def _split_factual_question_suffix(clause: str) -> tuple[str, str]:
@@ -551,18 +600,31 @@ def _local_segment_start(clause: str, pos: int) -> int:
     return start
 
 
-def _reopen_match_is_non_factual(clause: str, match: re.Match[str]) -> bool:
+def _state_match_is_non_factual(clause: str, match: re.Match[str]) -> bool:
     local_start = _local_segment_start(clause, match.start())
     before = clause[local_start:match.start()]
     segment = clause[local_start:match.end()]
+    segment_head = segment.strip()
+
     conditional = _CONDITIONAL_BEFORE_REOPEN_RE.search(segment)
     if conditional:
         between = segment[conditional.end():match.start() - local_start]
-        if not re.search(r'(?:但|但是|不过|然而|可是)|今天真的|其实', between):
+        if not _FACTUAL_CONTRAST_BREAK_RE.search(between):
             return True
     if _CONDITIONAL_BEFORE_REOPEN_RE.search(before):
+        if not _FACTUAL_CONTRAST_BREAK_RE.search(before):
+            return True
+    if _CONDITIONAL_PREFIX_RE.match(segment_head):
         return True
-    if re.match(r'^(?:如果|要是|假如|万一|以后若|倘若|若是)', segment.strip()):
+    if _FUTURE_WAIT_PREFIX_RE.match(segment_head):
+        return True
+    if _WISH_PREFIX_RE.match(segment_head):
+        return True
+    if re.match(r'^(?:如果|要是|假如|万一|以后若|倘若|若是)', segment_head):
+        return True
+    if _NON_FACTUAL_NEGATION_SEGMENT_RE.match(segment_head):
+        return True
+    if _NON_FACTUAL_NEGATION_BEFORE_RE.search(before):
         return True
     if _REOPEN_FAULT_NEGATED_RE.search(before):
         return True
@@ -598,17 +660,19 @@ def _collect_clause_state_events(clause: str) -> list[tuple[int, int, str]]:
     events: list[tuple[int, int, str]] = []
     for pattern in _NEGATIVE_UNRESOLVED_MARKERS:
         for match in pattern.finditer(clause):
-            if _reopen_match_is_non_factual(clause, match):
+            if _state_match_is_non_factual(clause, match):
                 continue
             events.append((match.end(), _EVENT_PRIORITY['unresolved'], 'unresolved'))
     for pattern in _REOPEN_MARKERS:
         for match in pattern.finditer(clause):
-            if _reopen_match_is_non_factual(clause, match):
+            if _state_match_is_non_factual(clause, match):
                 continue
             events.append((match.end(), _EVENT_PRIORITY['reopen'], 'reopen'))
     if not _clause_blocks_resolution(clause):
         for pattern in _RESOLUTION_MARKERS:
             for match in pattern.finditer(clause):
+                if _state_match_is_non_factual(clause, match):
+                    continue
                 if _match_has_negative_polarity(clause, match):
                     events.append((
                         match.end(),
@@ -672,6 +736,24 @@ def _prior_chat_content(chat_messages: Sequence[dict], message_id: int | None) -
     return ''
 
 
+def _message_blocks_entity_topic_fallback(content: str) -> bool:
+    body = (content or '').strip()
+    if not body:
+        return True
+    saw_marker = False
+    for clause, _ in _split_concern_clauses(body):
+        factual, suffix = _split_factual_question_suffix(clause)
+        target = factual if suffix and factual else clause
+        if _clause_is_pure_question(target):
+            continue
+        for pattern in (*_REOPEN_MARKERS, *_NEGATIVE_UNRESOLVED_MARKERS, *_RESOLUTION_MARKERS):
+            for match in pattern.finditer(target):
+                saw_marker = True
+                if not _state_match_is_non_factual(target, match):
+                    return False
+    return saw_marker
+
+
 def _collect_prior_chat_topics(
     chat_messages: Sequence[dict],
     message_id: int | None,
@@ -684,14 +766,21 @@ def _collect_prior_chat_topics(
     )
     for i in range(index - 1, -1, -1):
         msg = chat_messages[i]
+        author = str(msg.get('author') or '').strip().lower()
+        if author and author not in _USER_AUTHORS:
+            continue
         content = str(msg.get('content') or '')
         if not content.strip():
             continue
         prior_id = int(msg.get('id') or 0)
         sub_context = list(chat_messages[:i + 1])
-        for event in parse_user_concern_events(content, sub_context, prior_id):
+        events = parse_user_concern_events(content, sub_context, prior_id)
+        for event in reversed(events):
             if event.topics:
                 return event.topics
+        entity_topics = _clause_explicit_entity_topics(content)
+        if entity_topics and not _message_blocks_entity_topic_fallback(content):
+            return entity_topics
     return frozenset()
 
 
@@ -716,7 +805,7 @@ def _clause_explicit_entity_topics(clause: str) -> frozenset[str]:
     if len(conditional_tail) > 1:
         working = conditional_tail[0].strip()
     working = re.sub(
-        r'^(?:但|但是|不过|然而|可是|今天真的|其实|本来担心)',
+        r'^(?:但|但是|不过|然而|可是|今天真的|今天确认|其实|本来担心)',
         '',
         working,
     ).strip()
@@ -751,13 +840,13 @@ def collect_clause_event_topics(
     same_message_topics = _topics_from_prior_clauses(prior_clauses_in_message)
     if same_message_topics:
         return same_message_topics
+    if _needs_immediate_prior_chat(clause):
+        immediate_topics = _immediate_prior_message_topics(chat_messages, message_id)
+        if immediate_topics:
+            return immediate_topics
     prior_topics = _collect_prior_chat_topics(chat_messages, message_id)
     if prior_topics:
         return prior_topics
-    if _needs_prior_chat_context(clause):
-        prior = _prior_chat_content(chat_messages, message_id)
-        if prior:
-            return identity_topic_tokens(prior)
     return frozenset()
 
 
