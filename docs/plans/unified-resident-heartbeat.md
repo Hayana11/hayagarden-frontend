@@ -3,10 +3,10 @@
 > 同一只费佳、固定 system、固定工具面、三类轮次；普通 Wake 降为主 resident 的一次短心跳，只有需要行动时才升级，用户聊天永远优先。
 
 - **计划分支**：`plan/unified-heartbeat-tracker`
-- **当前状态**：`P-CONTEXT-LEAN_STAGE1`（#139 Draft；State delta / re-anchor 施工中）
-- **最后更新**：2026-07-27（#139 reminder `user_record` 合同补齐 `c721c26`）
-- **tracker head**：`8c2373b`
-- **生产 HEAD**：`dbf3ad4e6db532d7be422004614537e5b3d103ee`
+- **当前状态**：`P-CONTEXT-LEAN_STAGE1`（#139 已 merge；Stage 1 代码已部署；**四开关仍为 `0`**；待单独授权开启 `CONTEXT_LEAN_STATE_ENABLED`）
+- **最后更新**：2026-07-27（#139 merge `6678ee5` + 四开关 0 部署 + legacy parity smoke）
+- **tracker head**：`待推送`
+- **生产 HEAD**：`6678ee59bf4f930c6be7687af71f19f28b0f5c1d`（main merge #139）
 - **当前 identity**：`identity_id = "fyodor-default"` · `provider_id = "claude_code"` · `conversation_id = "default"`
 - **首个 Provider Adapter**：Claude Unified Resident Adapter
 
@@ -141,15 +141,20 @@
     生产部署与 smoke 命令严禁包含该脚本
     ```
   - 独立 P0 安全 PR；**不属于 #134 adapter 施工范围**
-- [-] **P-CONTEXT-LEAN：上下文最小化与旧广播式注入退役**
-  - 状态：进行中（**Stage 1 代码 PR Draft**；默认开关仍为 `0`；**未部署 / 未授权生产开启**）
-  - 代码 PR：**#139** · 分支 `cursor/context-lean-state-delta-8046`
-  - base：`dbf3ad4e6db532d7be422004614537e5b3d103ee` · head：`c721c26`（reminder `user_record` 合同补齐）
-  - 状态：**Draft · re-review pending**（累计状态 `state_version` 合同已修；四开关生产仍为 `0`；**未部署**）
-  - 前置：Memory Hotfix 已完成（#134 merge + smoke）
-  - 目标：削减常驻广播与重复注入，**不是**关闭全部上下文
+- [x] **P-CONTEXT-LEAN Stage 1 代码：State delta / re-anchor**
+  - 状态：**已 merge + 已部署（四开关仍为 `0`）**；**未授权生产开启 `CONTEXT_LEAN_STATE_ENABLED`**
+  - 代码 PR：**#139** · merge commit `6678ee59bf4f930c6be7687af71f19f28b0f5c1d`（2026-07-27）
+  - base：`dbf3ad4` · feature head：`c721c26`
+  - 部署：`deploy-frontend.sh` 预检全绿；`DEPLOYED_SHA=6678ee5`；checkout `6678ee5`
+  - smoke（2026-07-27）：
+    - `static_system_sha256` 未变：`6c129b226b9370fe4d6fd9197850dfdc6282ddb1fd68ecbc112af045946a2bc2`
+    - 四开关默认/显式均为 `0`：`CONTEXT_LEAN_STATE/HISTORY/TOOL_BUDGET/FILE_DEDUP_ENABLED`
+    - `OMBRE_ADAPTER_BACKEND=legacy_module`
+    - legacy parity unittest 23 项 PASS（`test_context_lean` + golden + flag=0 parity + `LegacyParityContractTests`）
+    - **未**开启 `CONTEXT_LEAN_STATE_ENABLED`；**未**做 lean-on 生产表达验收
   - 子阶段：
-    - [-] State delta / re-anchor（#139 Draft；CC resident path；`CONTEXT_LEAN_STATE_ENABLED` 默认 0）
+    - [x] State delta / re-anchor（代码在 main@6678ee5；开关默认 0）
+    - [ ] `CONTEXT_LEAN_STATE_ENABLED` 生产小流量开启 + 人工表达验收
     - [ ] Tool-history budget
     - [ ] File-content dedup
     - [ ] History token budget / mode-keyed rolling summary
@@ -209,7 +214,7 @@
 P-SHADOW        [x]
 → P-CONTEXT-OBS [x]
 → Memory Hotfix [x]          ← merge `dbf3ad4` + legacy_module deploy + smoke
-→ P-CONTEXT-LEAN [-]         ← Stage 1 #139 Draft；默认开关 0
+→ P-CONTEXT-LEAN [-]         ← Stage 1 merge `6678ee5`；四开关 0；待授权开 STATE
 → UH-A0 Tool Parity [ ]
 → UH-A / UH-B [ ]
 → ISV3-1B [ ]
@@ -961,10 +966,18 @@ PR #126 修门禁与去重
 - [ ] **MEM-PIN-REPAIR**、**OMBRE-P0-TEST-GATE** 仍独立待办
 - [-] **P-CONTEXT-LEAN Stage 1** 开工：PR **#139** Draft（`cursor/context-lean-state-delta-8046`）；base `dbf3ad4` · head `c721c26`；**re-review pending**；默认四开关仍为 `0`；**未部署**
 
+### 2026-07-27（续·#139 merge + deploy + smoke）
+
+- [x] **#139 merge** → `6678ee59bf4f930c6be7687af71f19f28b0f5c1d`（main；2026-07-27）
+- [x] **四开关 0 部署**：`DEPLOYED_SHA=6678ee5`；`CONTEXT_LEAN_*` 均未设置/均为默认 `False`
+- [x] **legacy parity smoke PASS**（`static_system_sha256` 不变；23 项 unittest；`legacy_module`）
+- [x] **P-CONTEXT-LEAN Stage 1 代码 `[x]`**（开关仍为 0）
+- [ ] **单独授权** `CONTEXT_LEAN_STATE_ENABLED=1` + 小窗口生产表达验收（**未开始**）
+- [ ] Stage 2+（tool-history / file dedup / history budget）**未授权**
+
 ### 2026-07-27（续·#139 reminder user_record）
 
-- [-] **#139** head `c721c26`：lean reminders 中 todo/countdown 显式 `user_record:` 行；用户原文（含行为词）不篡改；回归测试补齐
-- [ ] 终审通过前：**保持 Draft · 不 merge · 不部署 · 不开 `CONTEXT_LEAN_STATE_ENABLED`**
+- [x] **#139** head `c721c26`：lean reminders `user_record:` 合同补齐；终审 Ready PASS
 
 ---
 
