@@ -505,6 +505,56 @@ class ConcernResolutionLogicTests(unittest.TestCase):
             '还在想订单a有没有完成。', state, recorded_at='2026-07-20 09:00:00',
         ))
 
+    def test_same_message_pronoun_uses_prior_clause_not_chat(self):
+        chat_messages = [
+            {'id': 1, 'author': 'hayana', 'content': '今晚吃面。', 'created_at': '2026-07-21 08:00:00'},
+            {'id': 2, 'author': 'assistant', 'content': '记得买牛奶。', 'created_at': '2026-07-21 08:30:00'},
+            {'id': 3, 'author': 'hayana', 'content': 'frontend 已经修好，但它又报错了。', 'created_at': '2026-07-22 09:00:00'},
+        ]
+        user_messages = [m for m in chat_messages if m['author'] == 'hayana']
+        state = cr.build_resolution_state(user_messages, chat_messages)
+        self.assertEqual(len(state.active), 0)
+        events = cr.parse_user_concern_events(
+            user_messages[-1]['content'], chat_messages, user_messages[-1]['id'],
+        )
+        self.assertEqual(events[-1].event, 'reopen')
+        self.assertIn('frontend', events[-1].topics)
+        self.assertNotIn('吃面', events[-1].topics)
+        self.assertNotIn('牛奶', events[-1].topics)
+
+    def test_same_message_pronoun_variants(self):
+        cases = (
+            ('快递已经取完了，但它又找不到了。', '快递'),
+            ('服务已经恢复，不过这个又坏了。', '服务'),
+        )
+        for content, topic in cases:
+            events = cr.parse_user_concern_events(content)
+            self.assertEqual(len(events), 2, msg=content)
+            self.assertEqual(events[0].event, 'resolve', msg=content)
+            self.assertEqual(events[1].event, 'reopen', msg=content)
+            self.assertIn(topic, events[0].topics, msg=content)
+            self.assertIn(topic, events[1].topics, msg=content)
+
+    def test_contrast_split_without_punctuation(self):
+        cases = (
+            ('快递已取完但尾款还没处理好', '快递', '尾款', 'resolve', 'unresolved'),
+            ('frontend已修好但frontend-gw还在报错', 'frontend', 'frontend-gw', 'resolve', 'reopen'),
+            ('订单a已完成但是订单b未完成', '订单a', '订单b', 'resolve', 'unresolved'),
+        )
+        for content, topic_a, topic_b, event_a, event_b in cases:
+            events = cr.parse_user_concern_events(content)
+            self.assertEqual(len(events), 2, msg=content)
+            self.assertEqual(events[0].event, event_a, msg=content)
+            self.assertEqual(events[1].event, event_b, msg=content)
+            self.assertIn(topic_a, events[0].topics, msg=content)
+            self.assertIn(topic_b, events[1].topics, msg=content)
+
+    def test_contrast_split_same_concern_reopen_leaves_no_closure(self):
+        state = cr.build_resolution_state([
+            {'id': 1, 'content': '服务已修好但又报错了。', 'created_at': '2026-07-21 12:00:00'},
+        ])
+        self.assertEqual(len(state.active), 0)
+
 
 class WakeConcernResolutionIntegrationTests(unittest.TestCase):
     def setUp(self):
@@ -1336,6 +1386,60 @@ class WakeConcernResolutionIntegrationTests(unittest.TestCase):
         self.assertIn('用户已明确结案', text)
         self.assertIn('还在想订单b', text)
         self.assertNotIn('还在想订单a', text)
+
+    def test_db_same_message_pronoun_reopens_frontend_closure(self):
+        self._insert_chat_at(
+            message_id=1, author='hayana',
+            content='今晚吃面。',
+            hours_ago=50,
+        )
+        self._insert_chat_at(
+            message_id=2, author='assistant',
+            content='记得买牛奶。',
+            hours_ago=40,
+        )
+        self._insert_wake('explore', '还在想 frontend 故障要不要继续排查。', hours_ago=30)
+        self._insert_chat_at(
+            message_id=3, author='hayana',
+            content='frontend 已经修好，但它又报错了。',
+            hours_ago=1,
+        )
+        cr.load_resolution_state_from_db(self.get_db)
+
+        conn = self.get_db()
+        active = conn.execute(
+            "SELECT COUNT(*) FROM concern_closures WHERE active=1"
+        ).fetchone()[0]
+        conn.close()
+        self.assertEqual(active, 0)
+
+        text = self._build_wake_text()
+        self.assertNotIn('用户已明确结案', text)
+        self.assertIn('你醒着的时候', text)
+        self.assertIn('frontend', text)
+
+    def test_db_contrast_split_without_punctuation(self):
+        self._insert_wake('explore', '还在想快递有没有取。', hours_ago=30)
+        self._insert_wake('explore', '还在想尾款有没有付。', hours_ago=28)
+        self._insert_chat_at(
+            message_id=1, author='hayana',
+            content='快递已取完但尾款还没处理好。',
+            hours_ago=1,
+        )
+        cr.load_resolution_state_from_db(self.get_db)
+
+        conn = self.get_db()
+        rows = conn.execute(
+            "SELECT topic_tokens, active FROM concern_closures"
+        ).fetchall()
+        conn.close()
+        self.assertEqual(len(rows), 1)
+        self.assertIn('快递', rows[0][0])
+        self.assertNotIn('尾款', rows[0][0])
+
+        text = self._build_wake_text()
+        self.assertNotIn('快递有没有取', text)
+        self.assertIn('尾款', text)
 
 
 if __name__ == '__main__':

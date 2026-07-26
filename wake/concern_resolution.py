@@ -46,7 +46,9 @@ _COMMA_BEFORE_QUESTION_RE = re.compile(
 _COMMA_STATE_TRANSITION_RE = re.compile(
     r'[，,]\s*(?=(?:后来|其实|不过|但|然而|刚才|已经|确认))',
 )
-_CONTRAST_SPLIT_RE = re.compile(r'(?:[，,]\s*|\s+)但\s*')
+_CONTRAST_CONNECTOR_RE = re.compile(
+    r'(?:[，,]\s*|\s+|(?<=[\u4e00-\u9fff0-9a-z_-]))(但是|然而|不过|可是|但)',
+)
 _TRAILING_QUESTION_SUFFIX_RE = re.compile(
     r'(?:[，,]\s*)?(?:'
     r'怎么(?:办|处理)|要不要(?:去|继续|再|还)?[\u4e00-\u9fff]{0,4}|'
@@ -382,7 +384,21 @@ def _anchor_token_match(left_token: str, right_token: str) -> bool:
     return True
 
 
+def _exact_anchor_overlap(left: frozenset[str], right: frozenset[str]) -> bool:
+    shared = (left & right) - _GENERIC_TOPIC_TOKENS - _DOMAIN_GENERIC
+    for token in shared:
+        if not re.fullmatch(r'[a-z0-9]+(?:-[a-z0-9]+)*', token):
+            return True
+        left_extended = any(item.startswith(f'{token}-') for item in left)
+        right_extended = any(item.startswith(f'{token}-') for item in right)
+        if left_extended == right_extended:
+            return True
+    return False
+
+
 def substantive_topic_overlap(left: frozenset[str], right: frozenset[str]) -> bool:
+    if _exact_anchor_overlap(left, right):
+        return True
     left_identity = _identity_tokens(left)
     right_identity = _identity_tokens(right)
     if left_identity & right_identity:
@@ -434,6 +450,30 @@ def _distinctive_clause_identities(clause: str) -> frozenset[str]:
     )
 
 
+def _contrast_split_concern_clauses(part: str) -> list[str]:
+    part = part.strip()
+    if not part:
+        return []
+    matches = list(_CONTRAST_CONNECTOR_RE.finditer(part))
+    if not matches:
+        return [part]
+    segments: list[str] = []
+    last_end = 0
+    for match in matches:
+        left = part[last_end:match.start()].strip()
+        if left:
+            segments.append(left)
+        last_end = match.end()
+    tail = part[last_end:].strip()
+    if tail:
+        segments.append(tail)
+    if len(segments) < 2:
+        return [part]
+    if not all(_classify_factual_clause(segment) for segment in segments):
+        return [part]
+    return segments
+
+
 def _comma_split_concern_clauses(part: str) -> list[str]:
     pieces = [piece.strip() for piece in re.split(r'[，,]\s*', part) if piece.strip()]
     if len(pieces) < 2:
@@ -451,7 +491,7 @@ def _comma_split_concern_clauses(part: str) -> list[str]:
 
 def _split_segment_clauses(segment: str, *, interrogative: bool) -> list[tuple[str, bool]]:
     clauses: list[tuple[str, bool]] = []
-    contrast_parts = _CONTRAST_SPLIT_RE.split(segment.strip())
+    contrast_parts = _contrast_split_concern_clauses(segment.strip())
     for contrast_idx, contrast_part in enumerate(contrast_parts):
         parts = _COMMA_BEFORE_QUESTION_RE.split(contrast_part.strip())
         for idx, part in enumerate(parts):
@@ -587,16 +627,41 @@ def _prior_chat_content(chat_messages: Sequence[dict], message_id: int | None) -
     return ''
 
 
+def _topics_from_prior_clauses(prior_clauses: Sequence[str]) -> frozenset[str]:
+    for prior in reversed(prior_clauses):
+        distinctive = _distinctive_clause_identities(prior)
+        if distinctive:
+            return frozenset(distinctive)
+        raw = identity_topic_tokens(prior)
+        anchors = frozenset(
+            token for token in raw
+            if len(token) >= 2
+            and token not in _GENERIC_TOPIC_TOKENS
+            and not is_state_token(token)
+        )
+        if anchors:
+            return anchors
+    return frozenset()
+
+
 def collect_clause_event_topics(
     clause: str,
     chat_messages: Sequence[dict],
     message_id: int | None = None,
+    *,
+    prior_clauses_in_message: Sequence[str] = (),
 ) -> frozenset[str]:
     tokens = set(identity_topic_tokens(clause))
-    if _needs_prior_chat_context(clause):
-        prior = _prior_chat_content(chat_messages, message_id)
-        if prior:
-            tokens.update(identity_topic_tokens(prior))
+    tokens.update(_distinctive_clause_identities(clause))
+    if not _needs_prior_chat_context(clause):
+        return frozenset(tokens)
+    same_message_topics = _topics_from_prior_clauses(prior_clauses_in_message)
+    if same_message_topics:
+        tokens.update(same_message_topics)
+        return frozenset(tokens)
+    prior = _prior_chat_content(chat_messages, message_id)
+    if prior:
+        tokens.update(identity_topic_tokens(prior))
     return frozenset(tokens)
 
 
@@ -610,6 +675,7 @@ def parse_user_concern_events(
         return []
     chat_messages = list(chat_messages or ())
     parsed: list[ConcernClauseEvent] = []
+    prior_targets: list[str] = []
     for clause, interrogative in _split_concern_clauses(body):
         factual, suffix = _split_factual_question_suffix(clause)
         target = factual if suffix and factual else clause
@@ -621,9 +687,15 @@ def parse_user_concern_events(
             continue
         parsed.append(ConcernClauseEvent(
             event=event_type,
-            topics=collect_clause_event_topics(target, chat_messages, message_id),
+            topics=collect_clause_event_topics(
+                target,
+                chat_messages,
+                message_id,
+                prior_clauses_in_message=prior_targets,
+            ),
             clause=target,
         ))
+        prior_targets.append(target)
     return parsed
 
 
@@ -796,7 +868,7 @@ def _deactivate_matching_closures(
             tokens = frozenset(json.loads(row['topic_tokens'] or '[]'))
         except (TypeError, ValueError, json.JSONDecodeError):
             continue
-        if substantive_topic_overlap(reopen_tokens, tokens):
+        if _deactivate_topic_overlap(tokens, reopen_tokens):
             conn.execute(
                 """
                 UPDATE concern_closures
@@ -886,6 +958,19 @@ def _fetch_incremental_chat_messages(
     return [_row_to_message(row) for row in rows]
 
 
+def _deactivate_topic_overlap(stored: frozenset[str], event_topics: frozenset[str]) -> bool:
+    if substantive_topic_overlap(stored, event_topics):
+        return True
+    shared = (stored & event_topics) - _GENERIC_TOPIC_TOKENS
+    if not shared:
+        return False
+    stored_extra = _identity_tokens(stored) - shared
+    event_extra = _identity_tokens(event_topics) - shared
+    if stored_extra or event_extra:
+        return False
+    return True
+
+
 def _apply_concern_events_to_active(
     active: list[ResolutionEntry],
     clause_events: Sequence[ConcernClauseEvent],
@@ -908,7 +993,7 @@ def _apply_concern_events_to_active(
         if clause_event.event in {'reopen', 'unresolved'}:
             active = [
                 entry for entry in active
-                if not substantive_topic_overlap(entry.topic_tokens, clause_event.topics)
+                if not _deactivate_topic_overlap(entry.topic_tokens, clause_event.topics)
             ]
     return active
 
