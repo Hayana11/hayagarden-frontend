@@ -56,3 +56,5 @@ jobs:
             -v
       - name: Validate deploy guard
         run: bash -n scripts/deploy-frontend.sh
+      - name: Run production git drift regressions
+        run: bash tests/test_check_production_git_drift.sh
