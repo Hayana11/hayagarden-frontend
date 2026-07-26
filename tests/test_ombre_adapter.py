@@ -292,6 +292,34 @@ class HttpBackendTests(unittest.TestCase):
         self.assertIn("[自我] SELF HTTP", text)
         self.assertIn("[近期·I7] RECENT HTTP", text)
 
+    def test_http_handoff_excludes_protected_dynamic_from_recent(self):
+        records = [
+            {
+                "id": "protected", "type": "dynamic", "domain": ["技术"],
+                "resolved": False, "digested": False, "dont_surface": False,
+                "pinned": False, "protected": True, "importance": 9,
+                "last_active_epoch_ms": 99,
+            },
+            {
+                "id": "recent", "type": "dynamic", "domain": ["日常"],
+                "resolved": False, "digested": False, "dont_surface": False,
+                "pinned": False, "protected": False, "importance": 6,
+                "last_active_epoch_ms": 10,
+            },
+        ]
+
+        def fake_json(path, **kwargs):
+            if path == "/api/buckets":
+                return records
+            if path == "/api/bucket/recent":
+                return {"content": "SAFE RECENT"}
+            raise AssertionError(path)
+
+        with mock.patch.dict(os.environ, {"OMBRE_ADAPTER_BACKEND": "http"}, clear=False),              mock.patch.object(ombre_adapter, "_http_json", side_effect=fake_json):
+            text = ombre_adapter.get_handoff(timeout=1, wall_timeout=2)
+        self.assertIn("[近期·I6] SAFE RECENT", text)
+        self.assertNotIn("protected", text)
+
     def test_http_emotion_filters_core_and_test_records(self):
         records = [
             {"id": "a", "type": "dynamic", "valence": 0.8, "arousal": 0.6},

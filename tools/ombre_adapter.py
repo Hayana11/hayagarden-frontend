@@ -316,7 +316,12 @@ def _http_handoff(timeout: float) -> str:
     sections = {"self_anchor": [], "user_portrait": [], "relationship": []}
     recent = []
     for meta in buckets if isinstance(buckets, list) else []:
-        if meta.get("resolved") or meta.get("digested") or meta.get("dont_surface"):
+        if (
+            meta.get("resolved")
+            or meta.get("digested")
+            or meta.get("dont_surface")
+            or meta.get("deleted_at")
+        ):
             continue
         domains = meta.get("domain") or []
         if isinstance(domains, str):
@@ -326,7 +331,12 @@ def _http_handoff(timeout: float) -> str:
             if key in domains:
                 sections[key].append(meta)
                 matched = True
-        if not matched and meta.get("type") == "dynamic" and not meta.get("pinned"):
+        if (
+            not matched
+            and meta.get("type") == "dynamic"
+            and not meta.get("pinned")
+            and not meta.get("protected")
+        ):
             recent.append(meta)
 
     def detail(item: dict) -> str:
