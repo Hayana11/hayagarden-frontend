@@ -21,8 +21,8 @@ def assemble_legacy_history(
     all_ids = [_legacy_row_id(r) for r in rows]
     original_count = len(rows)
     limit = legacy_block_limit(available_count)
-    trimmed = len(rows) > limit
-    if trimmed:
+    trimmed = available_count > limit
+    if len(rows) > limit:
         rows = rows[-limit:]
 
     total = len(rows)

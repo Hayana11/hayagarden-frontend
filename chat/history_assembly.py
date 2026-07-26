@@ -12,7 +12,11 @@ from chat.context_budget import (
     trim_rows_to_token_budget,
 )
 from chat.context_continuity import format_tool_history
-from chat.history_boundary import compute_boundary_ids, set_relay_history_head_id
+from chat.history_boundary import (
+    compute_boundary_ids,
+    set_relay_history_head_id,
+    set_relay_history_trimmed_up_to_id,
+)
 
 EstimateFn = Callable[[Optional[str]], int]
 ImgBlockFn = Callable[[str], Optional[dict]]
@@ -529,7 +533,7 @@ def assemble_history_from_rows(
                 _row_get(r, 'tool_calls'),
                 cap_small=small,
                 cap_large=large,
-                cap_per_message=per_message if apply_tool_budget else 10**9,
+                cap_per_message=per_message if apply_tool_budget else None,
             )
             if th:
                 blocks.append(_text_block(th))
@@ -570,6 +574,9 @@ def assemble_history_from_rows(
                 retained_ids.extend(int(x) for x in (msg.get('_hg_row_ids') or []))
             if retained_ids:
                 set_relay_history_head_id(min(retained_ids))
+            trimmed_up_to, _oldest = compute_boundary_ids(all_row_ids, retained_ids)
+            if trimmed_up_to > 0:
+                set_relay_history_trimmed_up_to_id(trimmed_up_to)
 
     if apply_tool_budget:
         msgs, tool_trimmed = apply_history_tool_budget(msgs, estimate_tokens=estimate_tokens)

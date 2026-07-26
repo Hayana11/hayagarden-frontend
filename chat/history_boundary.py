@@ -14,6 +14,7 @@ _HISTORY_WHERE = "date(created_at) >= date('now', '+8 hours', '-1 day')"
 _WINDOW_BASE = 60
 _WINDOW_BLOCK = 20
 _BOUNDARY_HEAD_KEY = 'RELAY_HISTORY_HEAD_ID'
+_RELAY_TRIM_KEY = 'RELAY_HISTORY_TRIMMED_UP_TO_ID'
 _BOUNDARY_TRIM_KEY = 'HISTORY_TRIMMED_UP_TO_ID'
 _BOUNDARY_OLDEST_KEY = 'HISTORY_OLDEST_RETAINED_ID'
 
@@ -65,6 +66,54 @@ def set_relay_history_head_id(message_id: int) -> None:
         config_store.set(_BOUNDARY_HEAD_KEY, str(int(message_id or 0)))
     except Exception:
         pass
+
+
+def relay_history_trimmed_up_to_id() -> int:
+    try:
+        import config_store
+        return config_store.get_int(_RELAY_TRIM_KEY, 0)
+    except Exception:
+        return 0
+
+
+def set_relay_history_trimmed_up_to_id(message_id: int) -> None:
+    try:
+        import config_store
+        config_store.set(_RELAY_TRIM_KEY, str(int(message_id or 0)))
+    except Exception:
+        pass
+
+
+def read_relay_trim_state() -> dict[str, int]:
+    return {
+        'head_id': relay_history_head_id(),
+        'trimmed_up_to_id': relay_history_trimmed_up_to_id(),
+    }
+
+
+def has_relay_prior_trim() -> bool:
+    return relay_history_trimmed_up_to_id() > 0
+
+
+def effective_trimmed_up_to_id(*, current_trimmed_up_to_id: int, history_mode: str) -> int:
+    if history_mode == 'relay_hysteresis':
+        persisted = relay_history_trimmed_up_to_id()
+        return max(int(current_trimmed_up_to_id or 0), int(persisted or 0))
+    return int(current_trimmed_up_to_id or 0)
+
+
+def should_inject_rolling_summary(
+    *,
+    conversation_content_trimmed: bool,
+    history_mode: str,
+    available_count: int = 0,
+    legacy_limit: int = 0,
+) -> bool:
+    if history_mode == 'legacy_block':
+        return available_count > legacy_limit
+    if history_mode == 'relay_hysteresis':
+        return bool(conversation_content_trimmed) or has_relay_prior_trim()
+    return bool(conversation_content_trimmed)
 
 
 def compute_boundary_ids(
@@ -158,10 +207,26 @@ def boundary_rows_for_summary(
     *,
     horizon_days: int = 3,
     for_cc: bool = False,
+    static_dir: str = '/opt/frontend/static',
+    read_file_fn: Optional[Callable[[str, str], Optional[str]]] = None,
 ) -> tuple[int, int, list[Any]]:
     """Recompute production boundary and return rows to summarize."""
     from chat.history_assembly import assemble_history_from_rows
     from chat.context_lean import lean_file_dedup_enabled, lean_tool_budget_enabled
+
+    if read_file_fn is None:
+        import os
+        def read_file_fn(sd, url):
+            if not url or not str(url).startswith('/static/'):
+                return None
+            path = os.path.realpath(sd + str(url)[7:])
+            if not path.startswith(os.path.realpath(sd)) or not os.path.exists(path):
+                return None
+            try:
+                with open(path, 'r', encoding='utf-8', errors='replace') as ff:
+                    return ff.read()
+            except Exception:
+                return None
 
     rows, available = fetch_history_rows(get_db, fetch_limit=100000)
     if not rows:
@@ -184,9 +249,6 @@ def boundary_rows_for_summary(
     def _noop_img(_u):
         return None
 
-    def _noop_read(_static, _url):
-        return None
-
     msgs, stats = assemble_history_from_rows(
         rows,
         available_count=available,
@@ -195,8 +257,8 @@ def boundary_rows_for_summary(
         relay_high_water=plan['relay_high_water'],
         relay_low_water=plan['relay_low_water'],
         relay_head_id=plan['relay_head_id'],
-        static_dir='/tmp',
-        read_file_fn=_noop_read,
+        static_dir=static_dir,
+        read_file_fn=read_file_fn,
         img_block_fn=_noop_img,
         is_ai_author=lambda author: author in ('fyodor', 'claude', 'assistant'),
         resident_file_hashes=set() if not lean_file_dedup_enabled() else set(),

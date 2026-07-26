@@ -171,8 +171,15 @@ def format_tool_history(tool_calls_json, cap_small=None, cap_large=None, cap_per
         lines.append("· %s%s %s\n  → %s" % (name, failed, args_text, result))
     if len(lines) <= 1:
         return ""
+    if cap_per_message is None:
+        return "\n".join(lines)
     return "\n".join(
         _trim_tool_history_lines(
             lines, total_budget=per_message, estimate_tokens=default_estimate_tokens,
         )
     )
+
+
+def format_tool_history_legacy(tool_calls_json, cap_small=None, cap_large=None):
+    """Main-branch tool history: per-tool caps only, no per-message budget."""
+    return format_tool_history(tool_calls_json, cap_small=cap_small, cap_large=cap_large, cap_per_message=None)

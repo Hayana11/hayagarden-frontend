@@ -664,6 +664,7 @@ from chat.context_continuity import (
     capture_pending_wake_ids,
     consume_wake_ids,
     format_tool_history as _format_tool_history,
+    format_tool_history_legacy as _format_tool_history_legacy,
     is_pending_user_turn,
 )
 
@@ -740,11 +741,14 @@ def build_messages(*, resident_file_hashes=None, history_stats_out=None, for_cc=
         lean_tool_budget_enabled,
     )
     from chat.history_boundary import (
+        effective_trimmed_up_to_id,
         fetch_history_rows,
         legacy_block_limit,
         persist_history_boundary,
         resolve_fetch_plan,
         rolling_summary_covers_boundary,
+        set_relay_history_trimmed_up_to_id,
+        should_inject_rolling_summary,
     )
     from chat.history_assembly import (
         assemble_history_from_rows,
@@ -752,6 +756,7 @@ def build_messages(*, resident_file_hashes=None, history_stats_out=None, for_cc=
         strip_internal_metadata,
     )
     from chat.history_legacy import assemble_legacy_history
+    from chat.rolling_summary_store import get_summary
 
     _where = "date(created_at) >= date('now', '+8 hours', '-1 day')"
     conn = get_db()
@@ -765,42 +770,36 @@ def build_messages(*, resident_file_hashes=None, history_stats_out=None, for_cc=
         conn.close()
 
     lean_history = lean_history_enabled()
+    legacy_limit = legacy_block_limit(_available)
     if not lean_history:
-        _fetch_limit = legacy_block_limit(_available)
-        rows, _ = fetch_history_rows(get_db, fetch_limit=_fetch_limit)
+        rows, _ = fetch_history_rows(get_db, fetch_limit=legacy_limit)
+        tool_fn = _format_tool_history if lean_tool_budget_enabled() else _format_tool_history_legacy
         msgs, legacy_stats = assemble_legacy_history(
             rows,
             available_count=_available,
             static_dir=STATIC_DIR,
             read_file_fn=_read_upload_file_body,
             img_block_fn=img_block,
-            format_tool_history_fn=_format_tool_history,
+            format_tool_history_fn=tool_fn,
             is_ai_author=lambda author: author in ('fyodor', 'claude', 'assistant'),
         )
+        conversation_trimmed = _available > legacy_limit
         if history_stats_out is not None:
             history_stats_out.clear()
             history_stats_out.update({
                 'rows_before_trim': len(rows),
                 'rows_after_trim': legacy_stats.get('rows_after_trim', len(rows)),
-                'conversation_content_trimmed': legacy_stats.get('conversation_content_trimmed', False),
+                'conversation_content_trimmed': conversation_trimmed,
                 'trimmed_up_to_id': legacy_stats.get('trimmed_up_to_id', 0),
                 'oldest_retained_message_id': legacy_stats.get('oldest_retained_message_id', 0),
                 'rolling_summary_in_prompt': False,
                 'rolling_summary_text': '',
                 'rolling_summary_coverage_gap': False,
             })
-        if legacy_stats.get('conversation_content_trimmed'):
-            try:
-                _rc = get_db()
-                _rsrow = _rc.execute('SELECT summary, up_to_id FROM rolling_summary WHERE id=1').fetchone()
-                _rc.close()
-                rolling_summary_text = ((_rsrow['summary'] if _rsrow else '') or '').strip()
-                summary_up_to = int(_rsrow['up_to_id'] or 0) if _rsrow else 0
-            except Exception:
-                rolling_summary_text = ''
-                summary_up_to = 0
-            trimmed_up_to = int(legacy_stats.get('trimmed_up_to_id') or 0)
-            if rolling_summary_text and rolling_summary_covers_boundary(summary_up_to, trimmed_up_to):
+        if conversation_trimmed:
+            rolling = get_summary('legacy_block')
+            rolling_summary_text = (rolling.get('summary') or '').strip()
+            if rolling_summary_text:
                 _pre = '[更早对话的连续性摘要（滞出当前窗口的部分）]\n' + rolling_summary_text
                 if msgs and msgs[0]['role'] == 'user':
                     _c0 = msgs[0]['content']
@@ -813,8 +812,6 @@ def build_messages(*, resident_file_hashes=None, history_stats_out=None, for_cc=
                 if history_stats_out is not None:
                     history_stats_out['rolling_summary_in_prompt'] = True
                     history_stats_out['rolling_summary_text'] = rolling_summary_text
-            elif trimmed_up_to > 0 and history_stats_out is not None:
-                history_stats_out['rolling_summary_coverage_gap'] = True
         if not msgs or msgs[0]['role'] == 'assistant':
             msgs.insert(0, {'role': 'user', 'content': '...'})
         return msgs
@@ -845,6 +842,12 @@ def build_messages(*, resident_file_hashes=None, history_stats_out=None, for_cc=
         trimmed_up_to_id=stats.trimmed_up_to_id,
         oldest_retained_message_id=stats.oldest_retained_message_id,
     )
+    if plan['mode'] == 'relay_hysteresis' and stats.conversation_content_trimmed and stats.trimmed_up_to_id > 0:
+        set_relay_history_trimmed_up_to_id(stats.trimmed_up_to_id)
+    trimmed_up_to = effective_trimmed_up_to_id(
+        current_trimmed_up_to_id=stats.trimmed_up_to_id,
+        history_mode=plan['mode'],
+    )
     if history_stats_out is not None:
         history_stats_out.clear()
         history_stats_out.update({
@@ -858,7 +861,7 @@ def build_messages(*, resident_file_hashes=None, history_stats_out=None, for_cc=
             'block_count_trimmed': stats.block_count_trimmed,
             'conversation_content_trimmed': stats.conversation_content_trimmed,
             'tool_history_trimmed': stats.tool_history_trimmed,
-            'trimmed_up_to_id': stats.trimmed_up_to_id,
+            'trimmed_up_to_id': trimmed_up_to,
             'oldest_retained_message_id': stats.oldest_retained_message_id,
             'committed_full_file_refs': list(stats.committed_full_file_refs),
             'budget_overflow': stats.budget_overflow,
@@ -869,17 +872,17 @@ def build_messages(*, resident_file_hashes=None, history_stats_out=None, for_cc=
         })
 
     budget = plan['history_token_budget'] or plan['relay_low_water']
-    if stats.conversation_content_trimmed:
-        try:
-            _rc = get_db()
-            _rsrow = _rc.execute('SELECT summary, up_to_id FROM rolling_summary WHERE id=1').fetchone()
-            _rc.close()
-            rolling_summary_text = ((_rsrow['summary'] if _rsrow else '') or '').strip()
-            summary_up_to = int(_rsrow['up_to_id'] or 0) if _rsrow else 0
-        except Exception:
-            rolling_summary_text = ''
-            summary_up_to = 0
-        if rolling_summary_text and rolling_summary_covers_boundary(summary_up_to, stats.trimmed_up_to_id):
+    inject_summary = should_inject_rolling_summary(
+        conversation_content_trimmed=stats.conversation_content_trimmed,
+        history_mode=plan['mode'],
+        available_count=_available,
+        legacy_limit=legacy_limit,
+    )
+    if inject_summary:
+        rolling = get_summary(plan['mode'])
+        rolling_summary_text = (rolling.get('summary') or '').strip()
+        summary_up_to = int(rolling.get('up_to_id') or 0)
+        if rolling_summary_text and rolling_summary_covers_boundary(summary_up_to, trimmed_up_to):
             if budget > 0:
                 msgs, rendered_tokens, _, ov, ov_tok = inject_rolling_summary_and_enforce_budget(
                     msgs,
@@ -906,7 +909,7 @@ def build_messages(*, resident_file_hashes=None, history_stats_out=None, for_cc=
                 history_stats_out['rolling_summary_text'] = rolling_summary_text
                 history_stats_out['budget_overflow'] = stats.budget_overflow
                 history_stats_out['overflow_tokens'] = stats.overflow_tokens
-        elif stats.trimmed_up_to_id > 0 and history_stats_out is not None:
+        elif trimmed_up_to > 0 and history_stats_out is not None:
             history_stats_out['rolling_summary_coverage_gap'] = True
 
     msgs = strip_internal_metadata(msgs)
@@ -3315,17 +3318,20 @@ def _cc_resident_stream_gen(messages, *, user_turn=True, history_stats=None, is_
     from chat.context_budget import build_state_send_payload, format_state_for_send
     from chat.context_lean import lean_state_enabled
     raw_state = build_cc_state()
-    if lean_state_enabled():
+    lean_state_on = lean_state_enabled()
+    prev_lean_state = getattr(_CC_RESIDENT, 'last_successful_lean_state', False)
+    needs_state_reanchor = lean_state_on and not prev_lean_state
+    if lean_state_on:
         send_payload = build_state_send_payload(
-            getattr(_CC_RESIDENT, 'last_state_snapshot', None),
+            {} if needs_state_reanchor else getattr(_CC_RESIDENT, 'last_state_snapshot', None),
             raw_state,
             user_text=last_text or '',
-            is_cold=is_cold,
+            is_cold=needs_state_reanchor or is_cold,
         )
         state_text, state_mode = format_state_for_send(
-            getattr(_CC_RESIDENT, 'last_state_send_snapshot', None),
+            {} if needs_state_reanchor else getattr(_CC_RESIDENT, 'last_state_send_snapshot', None),
             send_payload,
-            is_cold=is_cold,
+            is_cold=needs_state_reanchor or is_cold,
         )
     else:
         send_payload = {}
@@ -3395,6 +3401,9 @@ def _cc_resident_stream_gen(messages, *, user_turn=True, history_stats=None, is_
         }
         if lean_state_enabled():
             commit_meta['state_send_snapshot'] = send_payload
+            commit_meta['lean_state_active'] = True
+            if needs_state_reanchor:
+                commit_meta['lean_state_reanchor'] = True
         if group_cursor_ok:
             commit_meta['group_cursor_initialized'] = True
             commit_meta['group_max_id'] = group_max_id
@@ -3443,6 +3452,9 @@ def _cc_resident_stream_gen(messages, *, user_turn=True, history_stats=None, is_
         }
         if lean_state_enabled():
             commit_meta['state_send_snapshot'] = send_payload
+            commit_meta['lean_state_active'] = True
+            if needs_state_reanchor:
+                commit_meta['lean_state_reanchor'] = True
         if group_cursor_ok:
             commit_meta['group_cursor_initialized'] = True
             commit_meta['group_max_id'] = group_max_id
@@ -3453,6 +3465,9 @@ def _cc_resident_stream_gen(messages, *, user_turn=True, history_stats=None, is_
         ):
             # 热轮仅在有新增行时推进 cursor；空成功保持原 cursor
             commit_meta['group_max_id'] = group_max_id
+
+    if not lean_state_on:
+        commit_meta['lean_state_active'] = False
 
     # Resident cursors advance only after stdin.flush() succeeds inside
     # ResidentSession.send_turn().  Failed sends therefore cannot suppress a
