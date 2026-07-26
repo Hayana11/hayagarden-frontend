@@ -3,9 +3,9 @@
 > 同一只费佳、固定 system、固定工具面、三类轮次；普通 Wake 降为主 resident 的一次短心跳，只有需要行动时才升级，用户聊天永远优先。
 
 - **计划分支**：`plan/unified-heartbeat-tracker`
-- **当前状态**：`MEMORY_HOTFIX_IN_PROGRESS`（#134 re-review pending；UH-A 未开始）
-- **最后更新**：2026-07-26（tracker 续写：Context Lean / UH-A0 / Master roadmap）
-- **tracker head**：`02a6239`
+- **当前状态**：`MEMORY_HOTFIX_READY`（#134 代码审查 PASS；待 merge，非 deploy）
+- **最后更新**：2026-07-26（#134 Ready 终审；登记 MEM-PIN-REPAIR / OMBRE-P0-TEST-GATE）
+- **tracker head**：`fe8e32d`（本提交将更新）
 - **当前 identity**：`identity_id = "fyodor-default"` · `provider_id = "claude_code"` · `conversation_id = "default"`
 - **首个 Provider Adapter**：Claude Unified Resident Adapter
 
@@ -93,23 +93,41 @@
   - resident generation 稳定为 1；turn count `1 → 2 → 3`；cold → hot → hot
   - 无 `system_changed` 循环；cache read / creation 行为健康
 - [-] **Memory Hotfix：统一 Ombre adapter**
-  - 状态：进行中
-  - PR #134（Draft / unmerged / undeployed）
-  - head：`f697503`（re-review pending）
+  - 状态：Ready 终审（代码审查 PASS；**未 merge / 未 deploy**）
+  - PR #134（Ready for review / unmerged / undeployed）
+  - head：`f697503c92d04ee129756f54e948012c42b2438e`
   - base：`995f8ce0246ea2ef5814215cce5ad1618cbc28f4`
   - 子进度：
     - [x] PR #134 rebase 到 main@995f8ce
-    - [x] REQUEST CHANGES 修复（warmup jieba-only / 移除 mcp 依赖 / HTTP gap 文档化 / workspace breath 4s）
-    - [x] **已批准行为修复**：停止 nightly cleaner 将 `importance>=8` 自动升级为 `pinned`
-    - [x] legacy_module 默认路径接口/超时/warmup 兼容（限定范围）+ CI
-    - [x] HTTP backend 保持 dormant（archive/touch 缺口未关闭）
-    - [ ] re-review pending（**不得标 Ready**）
+    - [x] REQUEST CHANGES + 第二轮修复（warmup jieba-only / 停止 cleaner auto-pin / workspace breath 4s / 移除 mcp 依赖 / HTTP gap 文档化）
+    - [x] legacy_module 默认路径接口/超时/warmup 兼容 + CI 全绿
+    - [x] HTTP backend 保持 dormant
+    - [x] **Ready 终审**（2026-07-26：代码审查 PASS；persona 未改；Context Lean 未开）
     - [ ] merge
     - [ ] legacy_module 默认配置部署
     - [ ] 生产 smoke test
-  - 附带登记（非 #134 施工范围）：
-    - [ ] 历史 ~54 个 auto-pinned 桶清理（备份 → 只读报告 → 审批 → 单独数据修复 PR）
-    - [ ] P0：`/opt/ombre-brain/test_tools.py` 生产路径硬门禁（禁止在生产运行；独立安全 PR）
+- [ ] **MEM-PIN-REPAIR：历史自动 pinned 数据修复**
+  - 状态：未开始；**不阻塞 #134 Ready，但 merge 前必须登记**
+  - 说明：#134 只阻止未来继续制造错误 pin，**不处理**现有约 54 个历史 pinned bucket
+  - 门禁（顺序强制）：
+    ```text
+    vault + SQLite 备份
+    → 只读审计报告
+    → 区分显式 pin 与 cleaner 自动 pin
+    → 人工批准名单
+    → 才允许批量修改
+    ```
+  - **禁止**简单把 54 个全部 unpin
+- [!] **OMBRE-P0-TEST-GATE：`test_tools.py` 生产安全门**
+  - 状态：阻塞项登记；**不阻塞 #134 adapter 实现，但 merge 前必须登记**
+  - 风险：`/opt/ombre-brain/test_tools.py` 可能读取生产配置，teardown 删除真实 bucket
+  - 要求：
+    ```text
+    指向生产 bucket 路径时拒绝运行
+    测试只允许 temp / disposable vault
+    生产部署与 smoke 命令严禁包含该脚本
+    ```
+  - 独立 P0 安全 PR；**不属于 #134 adapter 施工范围**
 - [ ] **P-CONTEXT-LEAN：上下文最小化与旧广播式注入退役**
   - 状态：未开始；**#138 四个开关全部保持 0**
   - 前置：**Memory Hotfix 完成并完成生产 smoke test**
@@ -192,7 +210,7 @@
 ```text
 P-SHADOW        [x]
 → P-CONTEXT-OBS [x]
-→ Memory Hotfix [-]          ← 当前唯一施工项；PR #134 re-review pending
+→ Memory Hotfix [-]          ← Ready 终审；待 merge（非 deploy）
 → P-CONTEXT-LEAN [ ]
 → UH-A0 Tool Parity [ ]
 → UH-A / UH-B [ ]
@@ -204,13 +222,13 @@ P-SHADOW        [x]
 ### 当前下一步（不变）
 
 ```text
-Memory Hotfix #134（re-review pending）：
-re-review
-→ Ready 终审
-→ merge
+Memory Hotfix #134（Ready 终审）：
+merge
 → legacy_module 部署
 → production smoke
 → tracker 更新
+→ MEM-PIN-REPAIR（独立数据修复；门禁见上）
+→ OMBRE-P0-TEST-GATE（独立 P0 安全 PR）
 ```
 
 > morning cron 继续关闭。P-SHADOW 已于 2026-07-26 毕业。**Context Lean、UH-A0、UH-A、ISV3-1B 等均不得提前施工。**
@@ -935,8 +953,9 @@ PR #126 修门禁与去重
 - [x] 已登记 **Relationship Context Recovery** 与 **Single Identity Multi-Brain** 后续门禁
 - [x] **缓存命中**定义为 P-0 / Context Lean / 固定 tool surface / keepwarm lease 的横向验收指标，不另起重复工程
 - [x] **Master roadmap** 写入 §1；登记 ≠ 授权施工
-- [-] **当前唯一施工项不变**：Memory Hotfix #134（Ready 终审 → merge → deploy → smoke → tracker 更新）
-- [!] 用户可见说话问题仍为 **open**
+- [x] **#134 Ready 终审**（head `f697503`）：代码审查 PASS；CI 全绿（continuity + internal-state）；默认 `legacy_module` PASS；persona 未改；Context Lean 未开；HTTP dormant
+- [x] 登记 **MEM-PIN-REPAIR** 与 **OMBRE-P0-TEST-GATE**（merge 前工单；不阻塞 #134 Ready）
+- [-] 待 merge → deploy → smoke；**仍未 merge / 未 deploy**；UH-A 未开始
 
 ---
 
