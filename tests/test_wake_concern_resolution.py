@@ -160,7 +160,7 @@ class ConcernResolutionLogicTests(unittest.TestCase):
         user_messages = [m for m in chat_messages if m['author'] == 'hayana']
         state = cr.build_resolution_state(user_messages, chat_messages)
         entry = state.active[0]
-        self.assertIn('伤口', entry.topic_tokens)
+        self.assertTrue(any('伤口' in token for token in entry.topic_tokens))
         self.assertNotIn('买花', entry.topic_tokens)
 
     def test_express_resolution_does_not_absorb_distant_flower_topic(self):
@@ -275,6 +275,64 @@ class ConcernResolutionLogicTests(unittest.TestCase):
         state = cr.build_resolution_state(messages)
         self.assertFalse(cr.is_superseded_historical_concern(
             '服务b还没恢复。', state, recorded_at='2026-07-20 18:00:00',
+        ))
+
+    def test_question_suffix_does_not_block_factual_reopen(self):
+        self.assertTrue(cr.is_user_reopen('服务又报错了，怎么办？'))
+        self.assertFalse(cr.is_user_resolution('服务又报错了，怎么办？'))
+        self.assertTrue(cr.is_user_reopen('伤口今天又恶化了，要不要处理？'))
+        self.assertFalse(cr.is_user_resolution('伤口今天又恶化了，要不要处理？'))
+
+    def test_pure_question_does_not_resolve(self):
+        self.assertIsNone(cr.classify_user_concern_event('服务已经修好了吗？'))
+        self.assertFalse(cr.is_user_resolution('服务已经修好了吗？'))
+
+    def test_question_then_explicit_resolution(self):
+        self.assertTrue(cr.is_user_resolution('医生说不用吗？后来确认不用了，这件事结束了。'))
+        self.assertFalse(cr.is_user_reopen('医生说不用吗？后来确认不用了，这件事结束了。'))
+
+    def test_state_end_position_not_regex_start(self):
+        self.assertTrue(cr.is_user_resolution('已经出现问题，刚解决。'))
+        self.assertFalse(cr.is_user_reopen('已经出现问题，刚解决。'))
+        self.assertTrue(cr.is_user_resolution('刚才出现问题，后来解决了。'))
+        self.assertFalse(cr.is_user_reopen('刚才出现问题，后来解决了。'))
+        self.assertTrue(cr.is_user_reopen('刚才解决了，后来又出现问题。'))
+        self.assertFalse(cr.is_user_resolution('刚才解决了，后来又出现问题。'))
+        self.assertTrue(cr.is_user_reopen('现在修好了，但刚刚又报错了。'))
+        self.assertFalse(cr.is_user_resolution('现在修好了，但刚刚又报错了。'))
+
+    def test_repayment_entity_preserved_and_matched(self):
+        messages = [
+            {'id': 1, 'content': '还款已经完成，不用再问了。', 'created_at': '2026-07-21 12:00:00'},
+        ]
+        state = cr.build_resolution_state(messages)
+        self.assertTrue(cr.is_superseded_historical_concern(
+            '还款仍未完成。', state, recorded_at='2026-07-20 18:00:00',
+        ))
+        self.assertFalse(cr.is_superseded_historical_concern(
+            '退款仍未完成。', state, recorded_at='2026-07-20 18:00:00',
+        ))
+
+    def test_bone_tail_order_identity_preserved(self):
+        messages = [
+            {'id': 1, 'content': '有骨有尾订单已完成，不用再催了。', 'created_at': '2026-07-21 12:00:00'},
+        ]
+        state = cr.build_resolution_state(messages)
+        self.assertTrue(any('有骨' in token or '有尾' in token for token in state.active[0].topic_tokens))
+        self.assertTrue(cr.is_superseded_historical_concern(
+            '还在想有骨有尾订单进度。', state, recorded_at='2026-07-20 18:00:00',
+        ))
+
+    def test_tail_payment_does_not_cross_intent_payment(self):
+        messages = [
+            {'id': 1, 'content': '尾款已经处理好了，不用再问了。', 'created_at': '2026-07-21 12:00:00'},
+        ]
+        state = cr.build_resolution_state(messages)
+        self.assertFalse(cr.is_superseded_historical_concern(
+            '意向金还没处理好。', state, recorded_at='2026-07-20 18:00:00',
+        ))
+        self.assertTrue(cr.is_superseded_historical_concern(
+            '尾款还没处理好。', state, recorded_at='2026-07-20 18:00:00',
         ))
 
 
