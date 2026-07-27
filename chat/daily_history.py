@@ -12,7 +12,6 @@ from chat.daily_context import (
     DEFAULT_CHAT_ID,
     HANDOFF_ABSENT,
     HANDOFF_READY,
-    STATUS_FINALIZED,
     STATUS_PROVISIONAL,
     chat_day_window,
     format_formal_handoff_prompt,
