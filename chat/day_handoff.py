@@ -11,7 +11,6 @@ import hashlib
 import os
 import re
 import stat
-import tempfile
 from typing import Any, Callable, Iterable, Optional
 
 NL = chr(10)
@@ -40,7 +39,7 @@ HANDOFF_SCALAR_KEYS = (
     'last_topic',
 )
 
-HANDOFF_REQUIRED_KEYS = HANDOFF_LIST_KEYS + ('last_topic',)
+HANDOFF_REQUIRED_KEYS = HANDOFF_SCALAR_KEYS + HANDOFF_LIST_KEYS
 
 ALLOWED_TOP_LEVEL_KEYS = frozenset(HANDOFF_LIST_KEYS + HANDOFF_SCALAR_KEYS)
 
@@ -81,6 +80,14 @@ _USER_AUTHORS = frozenset({'hayana', 'user'})
 _AI_AUTHORS = frozenset({'fyodor', 'claude', 'assistant'})
 
 _DAY_RE = re.compile(r'^\d{4}-\d{2}-\d{2}$')
+_SHA256_RE = re.compile(r'^[0-9a-f]{64}$')
+_ASSISTANT_VOICE_MARKERS = (
+    '助手回应', '助手：', '助手:', 'fyodor', 'claude', 'assistant',
+    '我轻轻', '我抱着', '我揽着', '我低声', '我轻声',
+)
+_CONFIRMATION_MARKERS = (
+    '好', '好的', '可以', '没问题', '就这样', '嗯', '行', '收到', '明白',
+)
 
 
 def _now_local() -> datetime.datetime:
@@ -111,15 +118,17 @@ def chat_day_str(*, offset_days: int = -1, now: Optional[datetime.datetime] = No
     return day.strftime('%Y-%m-%d')
 
 
-def chat_day_window(day_str: str) -> tuple[str, str, str]:
-    """Return (source_day, start_at, end_at) for a chat day."""
+def chat_day_window(day_str: str) -> tuple[str, str, str, str]:
+    """Return (source_day, start_at, end_at, next_start_at) for a chat day."""
     day = validate_day_string(day_str)
     start = datetime.datetime.strptime(day + ' 04:00:00', '%Y-%m-%d %H:%M:%S')
-    end = start + datetime.timedelta(days=1) - datetime.timedelta(seconds=1)
+    next_start = start + datetime.timedelta(days=1)
+    end = next_start - datetime.timedelta(seconds=1)
     return (
         day,
         start.strftime('%Y-%m-%d %H:%M:%S'),
         end.strftime('%Y-%m-%d %H:%M:%S'),
+        next_start.strftime('%Y-%m-%d %H:%M:%S'),
     )
 
 
@@ -196,6 +205,23 @@ def _assistant_answered(rows: list[Any], question_index: int) -> bool:
     return False
 
 
+def _looks_like_narrow_confirmation(text: str) -> bool:
+    t = str(text or '').strip()
+    if not t or len(t) > 40:
+        return False
+    return any(t == m or t.startswith(m) for m in _CONFIRMATION_MARKERS)
+
+
+def _contains_assistant_voice(text: str) -> bool:
+    t = str(text or '').strip().lower()
+    if not t:
+        return False
+    for marker in _ASSISTANT_VOICE_MARKERS:
+        if marker.lower() in t:
+            return True
+    return False
+
+
 def _detect_joint_decision(rows: list[Any], index: int) -> Optional[str]:
     row = rows[index]
     if _row_author(row) not in _USER_AUTHORS:
@@ -203,13 +229,20 @@ def _detect_joint_decision(rows: list[Any], index: int) -> Optional[str]:
     text = _content(row)
     if not any(h in text for h in _DECISION_HINTS):
         return None
+    confirmed = False
     for follow in rows[index + 1:index + 4]:
-        if _row_author(follow) in _AI_AUTHORS and _content(follow):
-            note = _normalize_note(text, max_len=120)
-            reply = _normalize_note(_content(follow), max_len=80)
-            if note and reply:
-                return '议题：%s；助手回应：%s' % (note, reply)
-    return None
+        author = _row_author(follow)
+        if author in _USER_AUTHORS:
+            return None
+        if author in _AI_AUTHORS and _content(follow):
+            if not _looks_like_narrow_confirmation(_content(follow)):
+                return None
+            confirmed = True
+            break
+    if not confirmed:
+        return None
+    note = _normalize_note(text, max_len=120)
+    return note or None
 
 
 def _source_sha256(rows: list[Any]) -> str:
@@ -225,13 +258,13 @@ def fetch_day_messages(
     get_db_fn: Callable[[], Any],
     day_str: str,
 ) -> list[Any]:
-    source_day, start_at, end_at = chat_day_window(day_str)
+    source_day, start_at, end_at, next_start_at = chat_day_window(day_str)
     conn = get_db_fn()
     try:
         return list(conn.execute(
             'SELECT id, author, content, created_at FROM chat_messages '
-            'WHERE created_at >= ? AND created_at <= ? ORDER BY id ASC',
-            (start_at, end_at),
+            'WHERE created_at >= ? AND created_at < ? ORDER BY id ASC',
+            (start_at, next_start_at),
         ).fetchall())
     finally:
         conn.close()
@@ -243,7 +276,7 @@ def build_day_handoff_from_messages(
     day_str: str = '',
 ) -> dict[str, Any]:
     """Conservative rule extraction; empty sections preferred over guessing."""
-    source_day, start_at, end_at = chat_day_window(day_str or chat_day_str())
+    source_day, start_at, end_at, _next_start_at = chat_day_window(day_str or chat_day_str())
     users = [r for r in rows if _row_author(r) in _USER_AUTHORS]
     user_texts = [_content(r) for r in users if _content(r)]
 
@@ -302,14 +335,16 @@ def build_day_handoff_from_messages(
 
     last_topic = ''
     if rows:
-        tail = rows[-5:]
-        bits = []
-        for row in tail:
-            author = '用户' if _row_author(row) in _USER_AUTHORS else '助手'
+        user_bits: list[str] = []
+        for row in reversed(rows[-10:]):
+            if _row_author(row) not in _USER_AUTHORS:
+                continue
             note = _normalize_note(_content(row), max_len=80)
             if note:
-                bits.append('%s：%s' % (author, note))
-        last_topic = '；'.join(bits[-3:])[:MAX_LAST_TOPIC_CHARS]
+                user_bits.append(note)
+            if len(user_bits) >= 3:
+                break
+        last_topic = '；'.join(reversed(user_bits))[:MAX_LAST_TOPIC_CHARS]
 
     first_id = _row_id(rows[0]) if rows else 0
     last_id = _row_id(rows[-1]) if rows else 0
@@ -334,6 +369,24 @@ def build_day_handoff_from_messages(
     }
 
 
+def _parse_non_negative_int(value: Any, path: str, errors: list[str]) -> Optional[int]:
+    if isinstance(value, bool):
+        errors.append('%s: must be a non-negative integer' % path)
+        return None
+    if isinstance(value, int):
+        n = value
+    else:
+        s = str(value or '').strip()
+        if not s.isdigit():
+            errors.append('%s: must be a non-negative integer' % path)
+            return None
+        n = int(s)
+    if n < 0:
+        errors.append('%s: must be a non-negative integer' % path)
+        return None
+    return n
+
+
 def validate_day_handoff(data: dict[str, Any]) -> list[str]:
     errors: list[str] = []
     if not isinstance(data, dict):
@@ -347,13 +400,62 @@ def validate_day_handoff(data: dict[str, Any]) -> list[str]:
     if unknown:
         errors.append('unknown keys: %s' % ', '.join(sorted(unknown)))
 
+    if data.get('extraction_mode') != 'conservative_rules':
+        errors.append('extraction_mode must be conservative_rules')
+
     if data.get('requires_human_review') not in (True, 'true', 'True', 1):
         errors.append('requires_human_review must be true')
+
+    day = str(data.get('day') or '').strip()
+    source_day = str(data.get('source_day') or '').strip()
+    if day and source_day and day != source_day:
+        errors.append('day and source_day must match')
+    for label, value in (('day', day), ('source_day', source_day)):
+        if value and not _DAY_RE.match(value):
+            errors.append('%s: must be YYYY-MM-DD' % label)
+    if source_day:
+        try:
+            expected_day, expected_start, expected_end, _next_start = chat_day_window(source_day)
+        except ValueError:
+            errors.append('source_day: invalid chat day')
+            expected_day = expected_start = expected_end = ''
+        else:
+            if day and day != expected_day:
+                errors.append('day does not match 04:00 chat-day window')
+            if str(data.get('source_start_at') or '') != expected_start:
+                errors.append('source_start_at does not match 04:00 chat-day window')
+            if str(data.get('source_end_at') or '') != expected_end:
+                errors.append('source_end_at does not match 04:00 chat-day window')
+
+    sha = str(data.get('source_sha256') or '').strip().lower()
+    if not _SHA256_RE.match(sha):
+        errors.append('source_sha256 must be 64 lowercase hex characters')
+
+    first_id = _parse_non_negative_int(
+        data.get('source_first_message_id'), 'source_first_message_id', errors,
+    )
+    last_id = _parse_non_negative_int(
+        data.get('source_last_message_id'), 'source_last_message_id', errors,
+    )
+    msg_count = _parse_non_negative_int(
+        data.get('source_message_count'), 'source_message_count', errors,
+    )
+    if first_id is not None and last_id is not None and msg_count is not None:
+        if msg_count == 0:
+            if first_id != 0 or last_id != 0:
+                errors.append('source message ids must be 0 when count is 0')
+        else:
+            if first_id <= 0 or last_id <= 0:
+                errors.append('source message ids must be positive when count > 0')
+            elif first_id > last_id:
+                errors.append('source_first_message_id must be <= source_last_message_id')
 
     def _check_value(path: str, value: str):
         v = str(value or '')
         if not v.strip():
             return
+        if _contains_assistant_voice(v):
+            errors.append('%s: contains assistant voice' % path)
         if len(v) > MAX_ITEM_CHARS and path != 'last_topic':
             errors.append('%s: exceeds max item length' % path)
         for pat in _QUOTE_PATTERNS:
@@ -368,7 +470,7 @@ def validate_day_handoff(data: dict[str, Any]) -> list[str]:
             if marker in v:
                 errors.append('%s: contains behavior directive %r' % (path, marker))
                 break
-        if re.search(r'^我[^。]{8,}', v):
+        if re.search(r'^我(?!们)[^。]{7,}', v):
             errors.append('%s: first-person assistant-style narration' % path)
 
     last_topic = str(data.get('last_topic') or '')
@@ -430,9 +532,27 @@ def format_day_handoff_prompt(data: dict[str, Any]) -> str:
     )
 
 
+def _stat_owned_path(path: str, *, expect_dir: bool = False) -> os.stat_result:
+    st = os.lstat(path)
+    if stat.S_ISLNK(st.st_mode):
+        raise ValueError('path must not be a symlink: %s' % path)
+    if expect_dir:
+        if not stat.S_ISDIR(st.st_mode):
+            raise ValueError('expected directory: %s' % path)
+    elif not stat.S_ISREG(st.st_mode):
+        raise ValueError('expected regular file: %s' % path)
+    if st.st_uid != os.geteuid():
+        raise ValueError('path owner mismatch: %s' % path)
+    return st
+
+
 def ensure_shadow_handoff_dir() -> str:
-    os.makedirs(SHADOW_HANDOFF_DIR, mode=0o700, exist_ok=True)
+    if os.path.exists(SHADOW_HANDOFF_DIR):
+        _stat_owned_path(SHADOW_HANDOFF_DIR, expect_dir=True)
+    else:
+        os.makedirs(SHADOW_HANDOFF_DIR, mode=0o700, exist_ok=True)
     os.chmod(SHADOW_HANDOFF_DIR, stat.S_IRWXU)
+    _stat_owned_path(SHADOW_HANDOFF_DIR, expect_dir=True)
     return SHADOW_HANDOFF_DIR
 
 
@@ -452,16 +572,35 @@ def resolve_shadow_handoff_path(path: str) -> str:
     raw = str(path or '')
     if os.path.islink(raw):
         raise ValueError('day_handoff path must not be a symlink')
+    parent = os.path.dirname(os.path.abspath(raw))
+    _stat_owned_path(parent, expect_dir=True)
     candidate = os.path.realpath(raw)
     base = os.path.realpath(SHADOW_HANDOFF_DIR)
     if os.path.commonpath([candidate, base]) != base:
         raise ValueError('day_handoff path must be under %s' % SHADOW_HANDOFF_DIR)
     _validate_handoff_filename(os.path.basename(candidate))
-    if not os.path.isfile(candidate):
+    if not os.path.exists(candidate):
         raise FileNotFoundError(candidate)
-    if os.path.islink(candidate):
-        raise ValueError('day_handoff file must not be a symlink')
+    _stat_owned_path(candidate, expect_dir=False)
     return candidate
+
+
+def _read_regular_file_no_follow(path: str) -> str:
+    fd = os.open(path, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0))
+    try:
+        st = os.fstat(fd)
+        if stat.S_ISLNK(st.st_mode):
+            raise ValueError('day_handoff file must not be a symlink')
+        if not stat.S_ISREG(st.st_mode):
+            raise ValueError('day_handoff file must be a regular file')
+        if st.st_uid != os.geteuid():
+            raise ValueError('day_handoff file owner mismatch')
+        with os.fdopen(fd, 'r', encoding='utf-8') as fh:
+            fd = None
+            return fh.read()
+    finally:
+        if fd is not None:
+            os.close(fd)
 
 
 def parse_day_handoff_yaml(text: str) -> dict[str, Any]:
@@ -523,8 +662,7 @@ def parse_day_handoff_yaml(text: str) -> dict[str, Any]:
 
 def load_day_handoff_from_path(path: str) -> dict[str, Any]:
     real = resolve_shadow_handoff_path(path)
-    with open(real, encoding='utf-8') as fh:
-        text = fh.read()
+    text = _read_regular_file_no_follow(real)
     return parse_day_handoff_yaml(text)
 
 
@@ -550,24 +688,27 @@ def write_day_handoff_to_tmp(
     filename = _validate_handoff_filename('%s%s%s' % (prefix, day, HANDOFF_FILENAME_SUFFIX))
     final_path = os.path.join(SHADOW_HANDOFF_DIR, filename)
 
-    if os.path.exists(final_path):
+    if os.path.lexists(final_path):
         raise FileExistsError('refusing to overwrite existing handoff: %s' % final_path)
 
-    fd, tmp_path = tempfile.mkstemp(
-        prefix='.handoff-', suffix='.tmp', dir=SHADOW_HANDOFF_DIR, text=True,
+    fd = os.open(
+        final_path,
+        os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+        stat.S_IRUSR | stat.S_IWUSR,
     )
     try:
         with os.fdopen(fd, 'w', encoding='utf-8') as fh:
+            fd = None
             fh.write(format_day_handoff_yaml(data))
             fh.flush()
             os.fsync(fh.fileno())
-        os.chmod(tmp_path, stat.S_IRUSR | stat.S_IWUSR)
-        os.replace(tmp_path, final_path)
         os.chmod(final_path, stat.S_IRUSR | stat.S_IWUSR)
     finally:
-        if os.path.exists(tmp_path):
+        if fd is not None:
+            os.close(fd)
+        if os.path.exists(final_path) and os.path.getsize(final_path) == 0:
             try:
-                os.remove(tmp_path)
+                os.remove(final_path)
             except OSError:
                 pass
     return final_path

@@ -25,6 +25,9 @@ def _sha(text: str) -> str:
     return hashlib.sha256((text or '').encode('utf-8')).hexdigest()
 
 
+VALID_HANDOFF_SHA256 = hashlib.sha256(b'clean-shadow-handoff-fixture').hexdigest()
+
+
 class _FakeResident:
     generation = 1
     session_id = 'shadow-test-session'
@@ -611,7 +614,7 @@ class DailyCandidateShadowTests(unittest.TestCase):
             'source_first_message_id': 1,
             'source_last_message_id': 2,
             'source_message_count': 2,
-            'source_sha256': 'abc',
+            'source_sha256': VALID_HANDOFF_SHA256,
             'extraction_mode': 'conservative_rules',
             'requires_human_review': True,
             'topics': ['疲劳'],
