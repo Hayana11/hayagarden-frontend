@@ -5931,7 +5931,6 @@ def debug_clean_window_start():
         return jsonify(_clean_window_shadow_manager().start(
             context_profile=data.get('context_profile'),
             day_handoff_path=data.get('day_handoff_path'),
-            day_handoff_text=data.get('day_handoff_text'),
         ))
     except PermissionError as e:
         return jsonify({'ok': False, 'error': str(e)}), 403
@@ -6003,7 +6002,6 @@ def debug_clean_window_reset():
             session_id,
             context_profile=data.get('context_profile'),
             day_handoff_path=data.get('day_handoff_path'),
-            day_handoff_text=data.get('day_handoff_text'),
         ))
     except PermissionError as e:
         return jsonify({'ok': False, 'error': str(e)}), 403
@@ -6026,20 +6024,21 @@ def debug_clean_window_generate_day_handoff():
     data = request.get_json(silent=True) or {}
     day_str = str(data.get('day') or '').strip() or None
     try:
-        from chat.day_handoff import build_and_write_yesterday_handoff, validate_day_handoff
+        from chat.day_handoff import build_and_write_yesterday_handoff, format_day_handoff_yaml, validate_day_handoff
         path, handoff = build_and_write_yesterday_handoff(get_db, day_str=day_str)
         errors = validate_day_handoff(handoff)
         return jsonify({
             'ok': True,
             'path': path,
-            'day': handoff.get('day'),
-            'message_count': handoff.get('message_count'),
-            'user_message_count': handoff.get('user_message_count'),
+            'source_sha256': handoff.get('source_sha256'),
+            'source_day': handoff.get('source_day'),
+            'source_start_at': handoff.get('source_start_at'),
+            'source_end_at': handoff.get('source_end_at'),
+            'source_message_count': handoff.get('source_message_count'),
+            'extraction_mode': handoff.get('extraction_mode'),
+            'requires_human_review': handoff.get('requires_human_review'),
             'validation_errors': errors,
-            'preview': {
-                'topics': handoff.get('topics'),
-                'last_topic': handoff.get('last_topic'),
-            },
+            'yaml': format_day_handoff_yaml(handoff),
         })
     except ValueError as e:
         return jsonify({'ok': False, 'error': str(e)}), 400

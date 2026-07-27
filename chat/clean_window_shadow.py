@@ -79,9 +79,10 @@ def build_base_manifest(
     save_marker_suppressed: bool = False,
     blocked_tool_names: Optional[list[str]] = None,
     context_profile: str = CONTEXT_PROFILE_CLEAN,
-    day_handoff_injected: bool = False,
+    day_handoff_loaded: bool = False,
+    day_handoff_injected_this_turn: bool = False,
     day_handoff_path: str = '',
-    state_injected: bool = False,
+    state_injected_this_turn: bool = False,
     state_mode: str = 'none',
 ) -> dict[str, Any]:
     return {
@@ -96,9 +97,12 @@ def build_base_manifest(
         'clean_turn_index': int(turn_index),
         'shadow_history_user_turns': int(shadow_history_user_turns),
         'shadow_history_assistant_turns': int(shadow_history_assistant_turns),
-        'state_injected': bool(state_injected),
+        'state_injected': bool(state_injected_this_turn),
+        'state_injected_this_turn': bool(state_injected_this_turn),
         'state_mode': state_mode,
-        'day_handoff_injected': bool(day_handoff_injected),
+        'day_handoff_loaded': bool(day_handoff_loaded),
+        'day_handoff_injected_this_turn': bool(day_handoff_injected_this_turn),
+        'day_handoff_injected': bool(day_handoff_injected_this_turn),
         'day_handoff_path': day_handoff_path or '',
         'cold_once_injected': False,
         'long_term_memory_injected': False,
@@ -182,31 +186,13 @@ def _build_daily_state_text(
     return text, mode, raw
 
 
-def _resolve_day_handoff_text(
-    *,
-    day_handoff_path: Optional[str],
-    day_handoff_text: Optional[str],
-) -> tuple[str, str]:
-    from chat.day_handoff import (
-        format_day_handoff_prompt,
-        load_day_handoff_from_path,
-        validate_day_handoff,
-    )
+def _resolve_day_handoff_text(*, day_handoff_path: Optional[str]) -> tuple[str, str]:
+    from chat.day_handoff import format_day_handoff_prompt, load_and_validate_day_handoff
 
-    if day_handoff_path:
-        data = load_day_handoff_from_path(day_handoff_path)
-        errors = validate_day_handoff(data)
-        if errors:
-            raise ValueError('day_handoff validation failed: ' + '; '.join(errors))
-        return format_day_handoff_prompt(data), str(day_handoff_path)
-
-    if day_handoff_text and str(day_handoff_text).strip():
-        text = str(day_handoff_text).strip()
-        if not text.startswith('【昨日交接'):
-            text = '【昨日交接·仅事实】\n' + text
-        return text, ''
-
-    raise ValueError('daily_candidate requires day_handoff_path or day_handoff_text')
+    if not day_handoff_path:
+        raise ValueError('daily_candidate requires day_handoff_path')
+    data, _errors = load_and_validate_day_handoff(day_handoff_path)
+    return format_day_handoff_prompt(data), str(day_handoff_path)
 
 
 @dataclass
@@ -226,6 +212,8 @@ class CleanWindowSession:
     day_handoff_path: str = ''
     last_state_snapshot: dict[str, str] = field(default_factory=dict)
     last_state_mode: str = 'none'
+    last_state_injected_this_turn: bool = False
+    last_day_handoff_injected_this_turn: bool = False
     turn_count: int = 0
     blocked_tool_calls: list[str] = field(default_factory=list)
     last_save_suppressed: bool = False
@@ -255,9 +243,10 @@ class CleanWindowSession:
             save_marker_suppressed=self.last_save_suppressed,
             blocked_tool_names=self.blocked_tool_calls,
             context_profile=self.context_profile,
-            day_handoff_injected=bool(self.day_handoff_text.strip()),
+            day_handoff_loaded=bool(self.day_handoff_text.strip()),
+            day_handoff_injected_this_turn=self.last_day_handoff_injected_this_turn,
             day_handoff_path=self.day_handoff_path,
-            state_injected=self.last_state_mode != 'none',
+            state_injected_this_turn=self.last_state_injected_this_turn,
             state_mode=self.last_state_mode,
         )
         base.update(overrides)
@@ -341,7 +330,6 @@ class CleanWindowManager:
         *,
         context_profile: Optional[str] = None,
         day_handoff_path: Optional[str] = None,
-        day_handoff_text: Optional[str] = None,
     ) -> dict[str, Any]:
         if not enabled():
             raise PermissionError('CC_CLEAN_WINDOW_SHADOW_ENABLED=0')
@@ -362,7 +350,6 @@ class CleanWindowManager:
             if profile == CONTEXT_PROFILE_DAILY_CANDIDATE:
                 handoff_text, handoff_path = _resolve_day_handoff_text(
                     day_handoff_path=day_handoff_path,
-                    day_handoff_text=day_handoff_text,
                 )
 
             session_id = SESSION_PREFIX + uuid.uuid4().hex
@@ -450,17 +437,22 @@ class CleanWindowManager:
 
             prefix_parts: list[str] = []
             state_mode = 'none'
+            state_injected_this_turn = False
+            day_handoff_injected_this_turn = False
+            pending_state_snapshot: Optional[dict[str, str]] = None
+
             if session.context_profile == CONTEXT_PROFILE_DAILY_CANDIDATE:
-                if session.day_handoff_text and session.turn_count == 0:
+                if session.day_handoff_text and is_cold:
                     prefix_parts.append(session.day_handoff_text)
+                    day_handoff_injected_this_turn = True
                 state_text, state_mode, raw_state = _build_daily_state_text(
-                    is_cold=is_cold or session.turn_count == 0,
+                    is_cold=is_cold,
                     last_snapshot=session.last_state_snapshot or None,
                 )
-                session.last_state_snapshot = dict(raw_state)
-                session.last_state_mode = state_mode
                 if state_text:
                     prefix_parts.append(state_text)
+                    state_injected_this_turn = True
+                    pending_state_snapshot = dict(raw_state)
 
             content = _turn_content_for_resident(
                 message=message,
@@ -474,6 +466,7 @@ class CleanWindowManager:
             think_parts: list[str] = []
             usage: dict[str, Any] = {}
             blocked_this_turn: list[str] = []
+            send_succeeded = False
 
             for evt, payload in session.resident.send_turn(content, commit_meta={}):
                 if evt == 'text':
@@ -489,7 +482,18 @@ class CleanWindowManager:
                 elif evt == 'done':
                     if isinstance(payload, (list, tuple)) and len(payload) >= 3:
                         usage = dict(payload[2] or {}) if isinstance(payload[2], dict) else {}
+                    send_succeeded = True
                     break
+
+            if not send_succeeded:
+                session.messages.pop()
+                raise RuntimeError('resident send_turn failed before completion')
+
+            if pending_state_snapshot is not None:
+                session.last_state_snapshot = pending_state_snapshot
+            session.last_state_mode = state_mode
+            session.last_state_injected_this_turn = state_injected_this_turn
+            session.last_day_handoff_injected_this_turn = day_handoff_injected_this_turn
 
             raw_text = ''.join(text_parts).strip()
             cleaned, had_save = strip_save_markers(raw_text)
@@ -509,7 +513,11 @@ class CleanWindowManager:
                 'turn_index': session.turn_count,
                 'history_message_count': len(session.messages),
                 'static_system_sha256': session.static_system_sha256,
-                'context_manifest': session.manifest(state_mode=state_mode),
+                'context_manifest': session.manifest(
+                    state_mode=state_mode,
+                    state_injected_this_turn=state_injected_this_turn,
+                    day_handoff_injected_this_turn=day_handoff_injected_this_turn,
+                ),
                 'usage': usage,
             }
 
@@ -529,7 +537,6 @@ class CleanWindowManager:
         *,
         context_profile: Optional[str] = None,
         day_handoff_path: Optional[str] = None,
-        day_handoff_text: Optional[str] = None,
     ) -> dict[str, Any]:
         if session_id:
             try:
@@ -539,7 +546,6 @@ class CleanWindowManager:
         return self.start(
             context_profile=context_profile,
             day_handoff_path=day_handoff_path,
-            day_handoff_text=day_handoff_text,
         )
 
 

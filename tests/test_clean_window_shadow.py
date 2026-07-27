@@ -54,6 +54,19 @@ class _FakeResident:
         yield ('done', ('shadow reply', '', {'input_tokens': 1, 'output_tokens': 2}, []))
 
 
+class _RespawnResident(_FakeResident):
+    def ensure_alive(self, system_text, env):
+        self._alive_calls += 1
+        return self._alive_calls in (1, 3)
+
+
+class _FailingResident(_FakeResident):
+    def send_turn(self, content, commit_meta=None):
+        self.sent_contents.append(content)
+        self.sent_commit_meta.append(commit_meta or {})
+        yield ('text', 'partial')
+
+
 def _manager_with_fake_resident(fake_resident=None, **kwargs):
     fake_resident = fake_resident or _FakeResident()
     mgr = cws.CleanWindowManager(
@@ -577,33 +590,54 @@ class CleanWindowShadowGatewayTests(unittest.TestCase):
 class DailyCandidateShadowTests(unittest.TestCase):
     def setUp(self):
         cws.reset_manager_for_tests()
+        self._tmpdir = tempfile.mkdtemp()
+        self._handoff_patch = mock.patch('chat.day_handoff.SHADOW_HANDOFF_DIR', self._tmpdir)
+        self._handoff_patch.start()
+        import chat.day_handoff as dh
+        dh.ensure_shadow_handoff_dir()
 
     def tearDown(self):
+        self._handoff_patch.stop()
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
         cws.reset_manager_for_tests()
 
-    def _valid_handoff_yaml(self) -> str:
-        return (
-            'day: "2026-07-26"\n'
-            'topics:\n'
-            '  - "疲劳"\n'
-            'confirmed_facts:\n'
-            '  - "用户提到身体疲惫"\n'
-            'decisions:\n'
-            '  -\n'
-            'open_loops:\n'
-            '  -\n'
-            'explicit_user_requests:\n'
-            '  - "用户提到：希望陪伴而非建议"\n'
-            'last_topic: "用户提到：询问接下来想说什么"\n'
-        )
+    def _write_handoff_file(self, name: str = 'day_handoff_20260726.yaml') -> str:
+        import chat.day_handoff as dh
+        data = {
+            'day': '2026-07-26',
+            'source_day': '2026-07-26',
+            'source_start_at': '2026-07-26 04:00:00',
+            'source_end_at': '2026-07-27 03:59:59',
+            'source_first_message_id': 1,
+            'source_last_message_id': 2,
+            'source_message_count': 2,
+            'source_sha256': 'abc',
+            'extraction_mode': 'conservative_rules',
+            'requires_human_review': True,
+            'topics': ['疲劳'],
+            'confirmed_facts': [],
+            'decisions': [],
+            'open_loops': [],
+            'explicit_user_requests': ['不要给我列建议，只要陪我'],
+            'last_topic': '用户谈及休息',
+        }
+        path = os.path.join(self._tmpdir, name)
+        with open(path, 'w', encoding='utf-8') as fh:
+            fh.write(dh.format_day_handoff_yaml(data))
+        os.chmod(path, 0o600)
+        return path
 
-    def test_daily_candidate_injects_handoff_and_state_once(self):
-        resident = _FakeResident(cold_turns=0)
+    def _run_with_patches(self, fake_resident=None):
+        return _PatchedManager(fake_resident)
+
+    def test_daily_candidate_requires_valid_file_path(self):
+        resident = _FakeResident(cold_turns=2)
         fake_state = {
             'time_bucket': 'bucket=2026-07-27 12:00',
-            'emotion': 'valence=0.5 arousal=0.3 mood=平静 pa=0.5 na=0.2 longing=0.00 desire_p=0.00 desire_i=0.25 desire_c=0.70',
+            'emotion': 'valence=0.5',
             'lights': 'main=关 bedside=关',
         }
+        handoff_path = self._write_handoff_file()
         with self._run_with_patches(resident) as (stack, mgr, *_):
             with mock.patch('chat.clean_window_shadow._build_daily_state_text') as build_state:
                 build_state.side_effect = [
@@ -612,28 +646,66 @@ class DailyCandidateShadowTests(unittest.TestCase):
                 ]
                 started = mgr.start(
                     context_profile='daily_candidate',
-                    day_handoff_text=self._valid_handoff_yaml(),
+                    day_handoff_path=handoff_path,
                 )
                 self.assertEqual(started['context_profile'], 'daily_candidate')
                 manifest = started['context_manifest']
-                self.assertTrue(manifest['day_handoff_injected'])
+                self.assertTrue(manifest['day_handoff_loaded'])
+                self.assertFalse(manifest['day_handoff_injected_this_turn'])
                 self.assertFalse(manifest['cold_once_injected'])
-                self.assertFalse(manifest['auto_recall_injected'])
 
                 sid = started['session_id']
-                mgr.turn(sid, '第一轮')
+                turn1 = mgr.turn(sid, '第一轮')
                 first = resident.sent_contents[0]
-                self.assertIn('【昨日交接·仅事实】', first)
+                self.assertIn('【昨日交接·事实记录】', first)
                 self.assertIn('【当前状态】', first)
-                self.assertEqual(first.strip().split('\n')[-1], '第一轮')
+                m1 = turn1['context_manifest']
+                self.assertTrue(m1['day_handoff_injected_this_turn'])
+                self.assertTrue(m1['state_injected_this_turn'])
 
+                turn2 = mgr.turn(sid, '第二轮')
+                second = resident.sent_contents[1]
+                self.assertNotIn('【昨日交接·事实记录】', second)
+                self.assertEqual(second, '第二轮')
+                m2 = turn2['context_manifest']
+                self.assertFalse(m2['day_handoff_injected_this_turn'])
+
+    def test_daily_candidate_reinjects_on_cold_respawn(self):
+        resident = _RespawnResident(cold_turns=99)
+        fake_state = {'time_bucket': 'bucket=1', 'emotion': 'valence=0.5', 'lights': 'main=关 bedside=关'}
+        handoff_path = self._write_handoff_file()
+        with self._run_with_patches(resident) as (stack, mgr, *_):
+            with mock.patch('chat.clean_window_shadow._build_daily_state_text') as build_state:
+                build_state.side_effect = [
+                    ('【当前状态】\nX', 'snapshot', fake_state),
+                    ('', 'none', fake_state),
+                    ('【当前状态】\nX', 'snapshot', fake_state),
+                ]
+                started = mgr.start(context_profile='daily_candidate', day_handoff_path=handoff_path)
+                sid = started['session_id']
+                mgr.turn(sid, '第一轮')
                 mgr.turn(sid, '第二轮')
                 second = resident.sent_contents[1]
-                self.assertNotIn('【昨日交接·仅事实】', second)
-                self.assertEqual(second, '第二轮')
+                self.assertIn('【昨日交接·事实记录】', second)
 
-    def _run_with_patches(self, fake_resident=None):
-        return _PatchedManager(fake_resident)
+    def test_send_turn_failure_does_not_commit_state_snapshot(self):
+        resident = _FailingResident(cold_turns=1)
+        handoff_path = self._write_handoff_file()
+        with self._run_with_patches(resident) as (stack, mgr, *_):
+            with mock.patch('chat.clean_window_shadow._build_daily_state_text') as build_state:
+                build_state.return_value = ('【当前状态】\nX', 'snapshot', {'emotion': 'x'})
+                started = mgr.start(context_profile='daily_candidate', day_handoff_path=handoff_path)
+                sid = started['session_id']
+                with self.assertRaises(RuntimeError):
+                    mgr.turn(sid, 'fail')
+                session = mgr._sessions[sid]
+                self.assertEqual(session.last_state_snapshot, {})
+                self.assertFalse(session.last_state_injected_this_turn)
+
+    def test_raw_day_handoff_text_not_accepted(self):
+        with self._run_with_patches(_FakeResident()) as (stack, mgr, *_):
+            with self.assertRaises(ValueError):
+                mgr.start(context_profile='daily_candidate', day_handoff_path=None)
 
     def test_clean_profile_unchanged(self):
         with self._run_with_patches() as (stack, mgr, resident, *_):

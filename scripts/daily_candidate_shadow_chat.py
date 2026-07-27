@@ -1,24 +1,35 @@
 #!/usr/bin/env python3
-"""Daily Candidate Shadow — 5-turn tone validation.
+"""Daily Candidate Shadow — inspect or run the 5-turn tone validation.
 
-Pipeline:
-  1) POST /api/debug/clean-window/generate-day-handoff  -> /tmp YAML
-  2) POST /api/debug/clean-window/start with context_profile=daily_candidate
-  3) Run the standard 5 suggested prompts once
+Step 1 (human review):
+  python3 scripts/generate_day_handoff.py > /tmp/review.yaml
+  # edit/review the YAML, place final file under /tmp/hayagarden-clean-shadow/
 
-Requires (gateway process):
+Step 2 (optional check only):
+  python3 scripts/daily_candidate_shadow_chat.py --handoff-path /tmp/hayagarden-clean-shadow/day_handoff_20260726.yaml
+
+Step 3 (explicit 5 model calls):
+  python3 scripts/daily_candidate_shadow_chat.py --handoff-path ... --run
+
+Requires gateway:
   - CC_CLEAN_WINDOW_SHADOW_ENABLED=1
   - CC_CLEAN_WINDOW_SHADOW_TOKEN in /opt/frontend/.env
 
-Does NOT deploy, does NOT enable on production by default.
+This script never generates handoff by itself.
 """
 from __future__ import annotations
 
+import argparse
+import hashlib
 import json
 import os
 import sys
 import urllib.error
 import urllib.request
+
+ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+if ROOT not in sys.path:
+    sys.path.insert(0, ROOT)
 
 BASE = os.environ.get('CLEAN_WINDOW_GW_BASE', 'http://127.0.0.1:5051').rstrip('/')
 ENV_PATH = os.environ.get('HAYAGARDEN_ENV_PATH', '/opt/frontend/.env')
@@ -66,30 +77,49 @@ def _post(path: str, payload: dict | None = None) -> dict:
         raise SystemExit('HTTP %s %s\n%s' % (e.code, path, body)) from e
 
 
+def _inspect_handoff(path: str) -> tuple[str, str]:
+    from chat.day_handoff import format_day_handoff_yaml, load_and_validate_day_handoff
+
+    data, errors = load_and_validate_day_handoff(path)
+    if errors:
+        raise SystemExit('handoff validation failed: ' + '; '.join(errors))
+    yaml_text = format_day_handoff_yaml(data)
+    sha = hashlib.sha256(yaml_text.encode('utf-8')).hexdigest()
+    print('Validated handoff:', path)
+    print('yaml_sha256:', sha)
+    print('source_sha256:', data.get('source_sha256'))
+    print('source_day:', data.get('source_day'))
+    print('source_start_at:', data.get('source_start_at'))
+    print('source_end_at:', data.get('source_end_at'))
+    print('requires_human_review:', data.get('requires_human_review'))
+    print('\n--- handoff yaml ---\n')
+    print(yaml_text, end='')
+    return yaml_text, sha
+
+
 def main() -> int:
+    parser = argparse.ArgumentParser(description='Daily Candidate Shadow inspect/run helper')
+    parser.add_argument('--handoff-path', required=True, help='Validated YAML under /tmp/hayagarden-clean-shadow/')
+    parser.add_argument('--run', action='store_true', help='Execute 5 model calls (default: inspect only)')
+    args = parser.parse_args()
+
     print('Daily Candidate Shadow — base:', BASE)
+    _inspect_handoff(args.handoff_path)
 
-    handoff = _post('/api/debug/clean-window/generate-day-handoff', {})
-    if not handoff.get('ok'):
-        print('generate-day-handoff failed:', handoff, file=sys.stderr)
-        return 1
-    path = handoff['path']
-    print('day_handoff:', path)
-    print('preview:', json.dumps(handoff.get('preview') or {}, ensure_ascii=False))
+    if not args.run:
+        print('\nInspect only. Re-run with --run to execute 5 model calls.', file=sys.stderr)
+        return 0
 
+    print('\n--- starting shadow session (5 model calls) ---', file=sys.stderr)
     started = _post('/api/debug/clean-window/start', {
         'context_profile': 'daily_candidate',
-        'day_handoff_path': path,
+        'day_handoff_path': args.handoff_path,
     })
     if not started.get('ok'):
         print('start failed:', started, file=sys.stderr)
         return 1
 
     sid = started['session_id']
-    print('session:', sid)
-    print('profile:', started.get('context_profile'))
-    print('manifest:', json.dumps(started.get('context_manifest') or {}, ensure_ascii=False, indent=2))
-
     results = []
     try:
         for i, message in enumerate(SUGGESTED, start=1):
@@ -106,9 +136,10 @@ def main() -> int:
                 'turn': i,
                 'user': message,
                 'assistant': content,
-                'state_injected': manifest.get('state_injected'),
+                'day_handoff_loaded': manifest.get('day_handoff_loaded'),
+                'day_handoff_injected_this_turn': manifest.get('day_handoff_injected_this_turn'),
+                'state_injected_this_turn': manifest.get('state_injected_this_turn'),
                 'state_mode': manifest.get('state_mode'),
-                'day_handoff_injected': manifest.get('day_handoff_injected'),
             })
     finally:
         try:
@@ -118,12 +149,9 @@ def main() -> int:
 
     out_path = os.environ.get('DAILY_CANDIDATE_RESULT', '/tmp/daily_candidate_5turn.json')
     with open(out_path, 'w', encoding='utf-8') as fh:
-        json.dump({
-            'session_id': sid,
-            'day_handoff_path': path,
-            'turns': results,
-        }, fh, ensure_ascii=False, indent=2)
-    print('\nWrote', out_path)
+        json.dump({'session_id': sid, 'day_handoff_path': args.handoff_path, 'turns': results}, fh,
+                  ensure_ascii=False, indent=2)
+    print('\nWrote', out_path, file=sys.stderr)
     return 0
 
 
