@@ -4,8 +4,8 @@
 
 - **计划分支**：`plan/unified-heartbeat-tracker`
 - **当前状态**：`P-CONTEXT-LEAN_STAGE1_PAUSED`（`CONTEXT_LEAN_STATE_ENABLED=0` 观察暂停；#140 REQUEST CHANGES；其余三 Lean + Relationship 仍为 `0`）
-- **最后更新**：2026-07-27（暂停 STATE lean；#140 灯语义修复审查中）
-- **tracker head**：`db35815`
+- **最后更新**：2026-07-27（#140 round 2：per-zone partial merge + CI mijiaAPI lazy import）
+- **tracker head**：`31e0c63`（本分支；#140 代码在 `cursor/fix-light-capability-state-semantics-8046`）
 - **生产 HEAD**：`6678ee59bf4f930c6be7687af71f19f28b0f5c1d`（main merge #139）
 - **当前 identity**：`identity_id = "fyodor-default"` · `provider_id = "claude_code"` · `conversation_id = "default"`
 - **首个 Provider Adapter**：Claude Unified Resident Adapter
@@ -189,7 +189,7 @@
   - **观察暂停**（2026-07-27）：
     - 原因：灯设备 unsupported 属性（brightness/color_temp）与瞬时读取失败被错误解释为状态变化；State Lean 骨架未判失败，污染模型注意力
     - `config_store.set(CONTEXT_LEAN_STATE_ENABLED, 0)` + `systemctl restart frontend frontend-gw`（未回滚 #139 代码）
-  - [-] **灯能力 / State 采集语义修复**（PR **#140** · `cursor/fix-light-capability-state-semantics-8046`）：**REQUEST CHANGES**；已修 collector tombstone / prop_map / MIOT 校验 / legacy observation / CI；**未 merge / 未部署**
+  - [-] **灯能力 / State 采集语义修复**（PR **#140** · `cursor/fix-light-capability-state-semantics-8046`）：**REQUEST CHANGES → round 2 待 re-review**（`a4f23d3`：per-zone partial merge、CI lazy import）；**未 merge / 未部署**
   - 子阶段：
     - [x] State delta / re-anchor 代码 merge（main@6678ee5）
     - [x] 四开关 0 生产部署（VPS `6678ee5`）
@@ -1037,8 +1037,7 @@ PR #126 修门禁与去重
 
 - [x] **观察暂停**：`config_store.set(CONTEXT_LEAN_STATE_ENABLED, 0)`；未改 `.env`；`systemctl restart frontend frontend-gw`
 - [~] **Stage 1 表达观察暂停**：灯 unsupported/瞬时失败被误解释为状态变化；代码项 `[x]` 不回退
-- [-] **PR #140**（`cursor/fix-light-capability-state-semantics-8046`）：爸爸审查 **REQUEST CHANGES**；修订 collector tombstone、prop_map 合并、MIOT 严格校验、legacy observation、CI 接入 `test_light_capability_state`；tracker 真源仅在本分支维护
-- [ ] **禁止** merge / deploy #140 / 恢复 `CONTEXT_LEAN_STATE_ENABLED=1`，待 re-review
+- [-] **PR #140** round 2（`a4f23d3`）：per-zone partial merge；`mijiaAPI` lazy import 修 CI；**待 re-review**；**未 merge / 未部署 / 未重开 STATE lean**
 
 ### 2026-07-27（续·#139 reminder user_record）
 
