@@ -63,12 +63,22 @@ _migrate_chat_columns()
 group_chat_store.ensure_schema(DB_PATH)
 context_usage_store.ensure_schema(DB_PATH)
 moments_store.ensure_schema(DB_PATH, gallery_store.DB_PATH)
+try:
+    from chat.daily_context import ensure_schema as _daily_context_ensure_schema
+    _daily_context_ensure_schema(DB_PATH)
+except Exception:
+    pass
 from wake.concern_resolution import ensure_concern_closure_schema_for_path
 ensure_concern_closure_schema_for_path(DB_PATH)
 app.register_blueprint(create_context_usage_blueprint(
     db_path=DB_PATH,
     report_token_getter=lambda: CONTEXT_USAGE_REPORT_TOKEN,
 ))
+try:
+    from daily_context_routes import daily_context_bp
+    app.register_blueprint(daily_context_bp)
+except Exception:
+    pass
 app.register_blueprint(create_moments_blueprint(
     memories_db_path=DB_PATH,
     gallery_db_path=gallery_store.DB_PATH,
