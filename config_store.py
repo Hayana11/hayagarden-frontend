@@ -58,6 +58,8 @@ _DEFAULTS = {
     'WAKE_MIN_IDLE_MINUTES': '30',
     # A1.1：Wake 注入 A1 关系上下文的独立回滚开关（不影响互动时钟修复）。
     'WAKE_RELATIONSHIP_CONTEXT_ENABLED': '1',
+    # P-CONTEXT-CLEAN-WINDOW-SHADOW：诊断用干净窗，默认关闭。
+    'CC_CLEAN_WINDOW_SHADOW_ENABLED': '0',
 }
 
 

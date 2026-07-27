@@ -5886,6 +5886,93 @@ def debug_wake_check():
         return jsonify({'ok': False, 'error': str(e)}), 500
 
 
+def _clean_window_shadow_enabled():
+    from chat.clean_window_shadow import enabled as _cws_enabled
+    return _cws_enabled()
+
+
+def _clean_window_shadow_manager():
+    from chat.clean_window_shadow import get_manager as _cws_get_manager
+    return _cws_get_manager(
+        cc_cwd=CC_CWD,
+        cc_token=CC_TOKEN,
+        mcp_config_path=CC_CWD + '/cc-tools.json',
+        get_provider=_get_provider,
+        get_model=_get_model,
+    )
+
+
+@app.route('/api/debug/clean-window/start', methods=['POST'])
+def debug_clean_window_start():
+    if not _clean_window_shadow_enabled():
+        return jsonify({'ok': False, 'error': 'disabled'}), 404
+    try:
+        return jsonify(_clean_window_shadow_manager().start())
+    except PermissionError as e:
+        return jsonify({'ok': False, 'error': str(e)}), 403
+    except RuntimeError as e:
+        return jsonify({'ok': False, 'error': str(e)}), 429
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+
+@app.route('/api/debug/clean-window/turn', methods=['POST'])
+def debug_clean_window_turn():
+    if not _clean_window_shadow_enabled():
+        return jsonify({'ok': False, 'error': 'disabled'}), 404
+    data = request.get_json(silent=True) or {}
+    session_id = str(data.get('session_id') or '').strip()
+    message = str(data.get('message') or '').strip()
+    if not session_id:
+        return jsonify({'ok': False, 'error': 'session_id required'}), 400
+    try:
+        return jsonify(_clean_window_shadow_manager().turn(session_id, message))
+    except KeyError as e:
+        return jsonify({'ok': False, 'error': str(e)}), 404
+    except ValueError as e:
+        return jsonify({'ok': False, 'error': str(e)}), 400
+    except PermissionError as e:
+        return jsonify({'ok': False, 'error': str(e)}), 403
+    except RuntimeError as e:
+        return jsonify({'ok': False, 'error': str(e)}), 429
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+
+@app.route('/api/debug/clean-window/close', methods=['POST'])
+def debug_clean_window_close():
+    if not _clean_window_shadow_enabled():
+        return jsonify({'ok': False, 'error': 'disabled'}), 404
+    data = request.get_json(silent=True) or {}
+    session_id = str(data.get('session_id') or '').strip()
+    if not session_id:
+        return jsonify({'ok': False, 'error': 'session_id required'}), 400
+    try:
+        return jsonify(_clean_window_shadow_manager().close(session_id))
+    except KeyError as e:
+        return jsonify({'ok': False, 'error': str(e)}), 404
+    except PermissionError as e:
+        return jsonify({'ok': False, 'error': str(e)}), 403
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+
+@app.route('/api/debug/clean-window/reset', methods=['POST'])
+def debug_clean_window_reset():
+    if not _clean_window_shadow_enabled():
+        return jsonify({'ok': False, 'error': 'disabled'}), 404
+    data = request.get_json(silent=True) or {}
+    session_id = str(data.get('session_id') or '').strip() or None
+    try:
+        return jsonify(_clean_window_shadow_manager().reset(session_id))
+    except PermissionError as e:
+        return jsonify({'ok': False, 'error': str(e)}), 403
+    except RuntimeError as e:
+        return jsonify({'ok': False, 'error': str(e)}), 429
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+
 # Monopoly agents live on the AI gateway while room truth/API live on 5050.
 # Both services share SQLite; the public SSE reads the persisted ordered stream.
 from monopoly_rooms import MonopolyService as _MonopolyService
