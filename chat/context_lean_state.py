@@ -193,11 +193,12 @@ def build_state_lean_observation(
     reanchor_reason: Optional[str],
     fallback_reason: Optional[str],
     resident_generation: int,
+    lights_source_meta: Optional[Mapping[str, Any]] = None,
 ) -> dict[str, Any]:
     from tools.cc_usage_observability import estimate_tokens_heuristic_cjk1_ascii4_v1
 
     mode = state_context_mode if state_context_mode in _STATE_CONTEXT_MODES else 'omitted'
-    return {
+    obs: dict[str, Any] = {
         'context_lean_state_enabled': bool(enabled),
         'state_context_mode': mode,
         'state_version': state_version,
@@ -212,6 +213,29 @@ def build_state_lean_observation(
         'resident_generation': int(resident_generation),
         'observation_version': 3,
     }
+    if lights_source_meta:
+        for key in (
+            'lights_source_status',
+            'lights_main_available',
+            'lights_bedside_available',
+            'lights_last_success_at',
+        ):
+            if key in lights_source_meta:
+                obs[key] = lights_source_meta[key]
+    return obs
+
+
+def _parse_lights_source_meta(raw_state: Mapping[str, Any]) -> dict[str, Any]:
+    raw = (raw_state or {}).get('_lights_source')
+    if not raw:
+        return {}
+    if isinstance(raw, dict):
+        return dict(raw)
+    try:
+        parsed = json.loads(str(raw))
+        return parsed if isinstance(parsed, dict) else {}
+    except Exception:
+        return {}
 
 
 def _legacy_state_context(
@@ -305,6 +329,7 @@ def assemble_cc_state_context(
     lean_on: bool,
 ) -> StateContextResult:
     """Build provider-visible state block for one CC resident turn."""
+    lights_meta = _parse_lights_source_meta(raw_state)
     raw = normalize_state_dict(raw_state)
     generation = int(getattr(resident, 'generation', 0) or 0)
 
@@ -396,6 +421,7 @@ def assemble_cc_state_context(
         reanchor_reason=reanchor_reason if needs_reanchor else None,
         fallback_reason=None,
         resident_generation=generation,
+        lights_source_meta=lights_meta,
     )
     return StateContextResult(
         state_text=state_text,

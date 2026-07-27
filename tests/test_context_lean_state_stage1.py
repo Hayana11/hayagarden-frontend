@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+import json
 import unittest
 from types import SimpleNamespace
 from unittest import mock
@@ -557,9 +558,13 @@ class LeanFactsOnlyCollectionTests(unittest.TestCase):
              mock.patch('chat.system_builder._format_structured_drive_snippet', return_value='attachment=0.55'), \
              mock.patch('urllib.request.urlopen') as urlopen_mock, \
              mock.patch('config_store.get_bool', return_value=False):
-            urlopen_mock.return_value.__enter__.return_value.read.return_value = (
-                b'{"result":{"main":{},"bedside":{}}}'
-            )
+            urlopen_mock.return_value.__enter__.return_value.read.return_value = json.dumps({
+                'ok': True,
+                'result': {
+                    'main': {'available': True, 'values': {'power': False}},
+                    'bedside': {'available': True, 'values': {'power': False}},
+                },
+            }).encode()
             state = _cc_collect_state(get_db, lean=True)
 
         for key in self._SYSTEM_FIELD_KEYS:

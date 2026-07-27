@@ -1,6 +1,14 @@
 {
   "bedroom2_did": "1124131223",
   "bedroom2_bedside_did": "1124131223",
+  "zones": {
+    "main": {
+      "supported_query_props": ["power"]
+    },
+    "bedside": {
+      "supported_query_props": ["power"]
+    }
+  },
   "prop_map": {
     "power": {"siid": 2, "piid": 1}
   }
