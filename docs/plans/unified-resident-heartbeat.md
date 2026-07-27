@@ -3,8 +3,8 @@
 > 同一只费佳、固定 system、固定工具面、三类轮次；普通 Wake 降为主 resident 的一次短心跳，只有需要行动时才升级，用户聊天永远优先。
 
 - **计划分支**：`plan/unified-heartbeat-tracker`
-- **当前状态**：`P-CONTEXT-LEAN_STAGE1_OBS`（`CONTEXT_LEAN_STATE_ENABLED=1` 生产观察中；其余三 Lean + Relationship 仍为 `0`）
-- **最后更新**：2026-07-27（授权开启 STATE lean；VPS 重启；chat `4422` 观测落库）
+- **当前状态**：`P-CONTEXT-LEAN_STAGE1_PAUSED`（`CONTEXT_LEAN_STATE_ENABLED=0` 观察暂停；#140 REQUEST CHANGES；其余三 Lean + Relationship 仍为 `0`）
+- **最后更新**：2026-07-27（暂停 STATE lean；#140 灯语义修复审查中）
 - **tracker head**：`db35815`
 - **生产 HEAD**：`6678ee59bf4f930c6be7687af71f19f28b0f5c1d`（main merge #139）
 - **当前 identity**：`identity_id = "fyodor-default"` · `provider_id = "claude_code"` · `conversation_id = "default"`
@@ -142,7 +142,7 @@
     ```
   - 独立 P0 安全 PR；**不属于 #134 adapter 施工范围**
 - [x] **P-CONTEXT-LEAN Stage 1 代码：State delta / re-anchor**（merge 完成）
-  - 状态：**main@6678ee5 已部署**；**`CONTEXT_LEAN_STATE_ENABLED=1` 生产观察中**；其余 Lean + Relationship 仍为 `0`
+  - 状态：**main@6678ee5 已部署**；**`CONTEXT_LEAN_STATE_ENABLED=0` 观察已暂停**；#140 REQUEST CHANGES；其余 Lean + Relationship 仍为 `0`
   - 代码 PR：**#139** · merge commit `6678ee59bf4f930c6be7687af71f19f28b0f5c1d`（2026-07-27）
   - base：`dbf3ad4` · feature head：`c721c26`
   - 受控合并进度：
@@ -151,11 +151,12 @@
     目标 SHA checkout / 本地 smoke      [x]
     生产 frontend 服务加载 6678ee5      [x] systemctl active
     生产 frontend-gw 加载 6678ee5       [x] systemctl active
-    CONTEXT_LEAN_STATE_ENABLED=1        [x] 已授权开启（2026-07-27）
+    CONTEXT_LEAN_STATE_ENABLED=1        [x] 曾授权开启（2026-07-27；chat 4422）
+    CONTEXT_LEAN_STATE_ENABLED=0        [x] 观察暂停（2026-07-27；灯源语义修复前）
     其余三 Lean + RELATIONSHIP         [x] 保持 0
     ```
-  - **生产开关**（`runtime_config`，2026-07-27）：
-    - `CONTEXT_LEAN_STATE_ENABLED=1`
+  - **生产开关**（`runtime_config`，2026-07-27 暂停后）：
+    - `CONTEXT_LEAN_STATE_ENABLED=0`（`config_store.set`；未改 `.env`）
     - `CONTEXT_LEAN_HISTORY_ENABLED=0`
     - `CONTEXT_LEAN_TOOL_BUDGET_ENABLED=0`
     - `CONTEXT_LEAN_FILE_DEDUP_ENABLED=0`
@@ -184,11 +185,15 @@
       changed_field_count=7
       fallback_reason=null
       ```
-    - 助手回复自然（提及 emotion/灯状态事实）；**人工表达验收进行中**
+    - 助手回复自然（提及 emotion/灯状态事实）；**人工表达验收已暂停**
+  - **观察暂停**（2026-07-27）：
+    - 原因：灯设备 unsupported 属性（brightness/color_temp）与瞬时读取失败被错误解释为状态变化；State Lean 骨架未判失败，污染模型注意力
+    - `config_store.set(CONTEXT_LEAN_STATE_ENABLED, 0)` + `systemctl restart frontend frontend-gw`（未回滚 #139 代码）
+  - [-] **灯能力 / State 采集语义修复**（PR **#140** · `cursor/fix-light-capability-state-semantics-8046`）：**REQUEST CHANGES**；已修 collector tombstone / prop_map / MIOT 校验 / legacy observation / CI；**未 merge / 未部署**
   - 子阶段：
     - [x] State delta / re-anchor 代码 merge（main@6678ee5）
     - [x] 四开关 0 生产部署（VPS `6678ee5`）
-    - [-] `CONTEXT_LEAN_STATE_ENABLED=1` 生产观察（chat 4422 已落库；人工表达验收待续）
+    - [~] `CONTEXT_LEAN_STATE_ENABLED=1` 生产表达观察（**暂停**；chat 4422 已落库；待 #140 merge 后恢复）
     - [ ] Tool-history budget
     - [ ] File-content dedup
     - [ ] History token budget / mode-keyed rolling summary
@@ -248,7 +253,7 @@
 P-SHADOW        [x]
 → P-CONTEXT-OBS [x]
 → Memory Hotfix [x]          ← merge `dbf3ad4` + legacy_module deploy + smoke
-→ P-CONTEXT-LEAN [-]         ← STATE=1 生产观察中；其余 Lean 0
+→ P-CONTEXT-LEAN [-]         ← STATE=0 观察暂停；#140 REQUEST CHANGES；其余 Lean 0
 → UH-A0 Tool Parity [ ]
 → UH-A / UH-B [ ]
 → ISV3-1B [ ]
@@ -259,13 +264,14 @@ P-SHADOW        [x]
 ### 当前下一步
 
 ```text
-P-CONTEXT-LEAN Stage 1 STATE lean 生产观察（CONTEXT_LEAN_STATE_ENABLED=1）
-→ 小窗口真实聊天 + 人工表达验收（chat 4422 已落库）
+灯能力 / State 采集语义修复（PR #140 · cursor/fix-light-capability-state-semantics-8046）
+→ 审查 #140 修订（collector / MIOT / legacy observation / CI）
+→ merge + 部署后单独授权恢复 CONTEXT_LEAN_STATE_ENABLED=1 观察
 → 其余三 Lean + Relationship 保持 0
 → Stage 2 / UH-A0 / UH-A 未授权
 ```
 
-> #139 @6678ee5 已部署。STATE lean 已授权开启；HISTORY/TOOL/FILE/RELATIONSHIP 仍为 0。
+> #139 @6678ee5 已部署。STATE lean 观察已暂停（`CONTEXT_LEAN_STATE_ENABLED=0`）。#140 **REQUEST CHANGES**，**未 merge / 未部署**。
 
 ---
 
@@ -1026,6 +1032,13 @@ PR #126 修门禁与去重
 - [x] **SHA 对齐** → `DEPLOYED_SHA` + `git HEAD` = `6678ee5`
 - [x] **运行中 smoke** → `static_system_sha256` 不变 · 四开关 `False` · `legacy_module` · `wake_check ok`
 - [ ] **`CONTEXT_LEAN_STATE_ENABLED=1`** 未授权
+
+### 2026-07-27（续·STATE lean 观察暂停 + #140 审查）
+
+- [x] **观察暂停**：`config_store.set(CONTEXT_LEAN_STATE_ENABLED, 0)`；未改 `.env`；`systemctl restart frontend frontend-gw`
+- [~] **Stage 1 表达观察暂停**：灯 unsupported/瞬时失败被误解释为状态变化；代码项 `[x]` 不回退
+- [-] **PR #140**（`cursor/fix-light-capability-state-semantics-8046`）：爸爸审查 **REQUEST CHANGES**；修订 collector tombstone、prop_map 合并、MIOT 严格校验、legacy observation、CI 接入 `test_light_capability_state`；tracker 真源仅在本分支维护
+- [ ] **禁止** merge / deploy #140 / 恢复 `CONTEXT_LEAN_STATE_ENABLED=1`，待 re-review
 
 ### 2026-07-27（续·#139 reminder user_record）
 
