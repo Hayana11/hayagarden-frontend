@@ -5,7 +5,7 @@
 - **计划分支**：`plan/unified-heartbeat-tracker`
 - **当前状态**：`P-CONTEXT-LEAN_STAGE1_OBS`（`CONTEXT_LEAN_STATE_ENABLED=1` 生产观察中；其余三 Lean + Relationship 仍为 `0`）
 - **最后更新**：2026-07-27（授权开启 STATE lean；VPS 重启；chat `4422` 观测落库）
-- **tracker head**：`b8539c9`
+- **tracker head**：`db35815`
 - **生产 HEAD**：`6678ee59bf4f930c6be7687af71f19f28b0f5c1d`（main merge #139）
 - **当前 identity**：`identity_id = "fyodor-default"` · `provider_id = "claude_code"` · `conversation_id = "default"`
 - **首个 Provider Adapter**：Claude Unified Resident Adapter
@@ -259,13 +259,13 @@ P-SHADOW        [x]
 ### 当前下一步
 
 ```text
-P-CONTEXT-LEAN Stage 1 (#139 deployed @6678ee5，四开关 0)
-→ 单独授权 CONTEXT_LEAN_STATE_ENABLED=1 + 小窗口表达验收
-→ 仍禁止同一步自动开启 Lean
-→ Stage 2+ 须单独标 [-]
+P-CONTEXT-LEAN Stage 1 STATE lean 生产观察（CONTEXT_LEAN_STATE_ENABLED=1）
+→ 小窗口真实聊天 + 人工表达验收（chat 4422 已落库）
+→ 其余三 Lean + Relationship 保持 0
+→ Stage 2 / UH-A0 / UH-A 未授权
 ```
 
-> #139 merge+deploy 完成（`6678ee5`）。**Context Lean 四开关生产仍为 0**。UH-A0、UH-A、ISV3-1B 等均不得提前施工。
+> #139 @6678ee5 已部署。STATE lean 已授权开启；HISTORY/TOOL/FILE/RELATIONSHIP 仍为 0。
 
 ---
 
