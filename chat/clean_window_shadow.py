@@ -27,6 +27,9 @@ MAX_SESSIONS = 5
 MAX_TURNS_PER_SESSION = 12
 SHADOW_ALLOWED_TOOLS = ''  # schema in static system; execution blocked
 ACTUAL_EXECUTOR = 'claude_code'
+CONTEXT_PROFILE_CLEAN = 'clean'
+CONTEXT_PROFILE_DAILY_CANDIDATE = 'daily_candidate'
+ALLOWED_CONTEXT_PROFILES = frozenset({CONTEXT_PROFILE_CLEAN, CONTEXT_PROFILE_DAILY_CANDIDATE})
 
 SAVE_RE = re.compile(r'\[\[SAVE:\s*(.*?)\]\]', re.DOTALL)
 
@@ -75,6 +78,12 @@ def build_base_manifest(
     shadow_history_assistant_turns: int = 0,
     save_marker_suppressed: bool = False,
     blocked_tool_names: Optional[list[str]] = None,
+    context_profile: str = CONTEXT_PROFILE_CLEAN,
+    day_handoff_loaded: bool = False,
+    day_handoff_injected_this_turn: bool = False,
+    day_handoff_path: str = '',
+    state_injected_this_turn: bool = False,
+    state_mode: str = 'none',
 ) -> dict[str, Any]:
     return {
         'static_system_sha256': static_system_sha256,
@@ -83,11 +92,18 @@ def build_base_manifest(
         'model': model,
         'actual_executor': actual_executor,
         'clean_window_shadow': True,
+        'context_profile': context_profile,
         'clean_session_id': session_id,
         'clean_turn_index': int(turn_index),
         'shadow_history_user_turns': int(shadow_history_user_turns),
         'shadow_history_assistant_turns': int(shadow_history_assistant_turns),
-        'state_injected': False,
+        'state_injected': bool(state_injected_this_turn),
+        'state_injected_this_turn': bool(state_injected_this_turn),
+        'state_mode': state_mode,
+        'day_handoff_loaded': bool(day_handoff_loaded),
+        'day_handoff_injected_this_turn': bool(day_handoff_injected_this_turn),
+        'day_handoff_injected': bool(day_handoff_injected_this_turn),
+        'day_handoff_path': day_handoff_path or '',
         'cold_once_injected': False,
         'long_term_memory_injected': False,
         'handoff_injected': False,
@@ -124,16 +140,59 @@ def _turn_content_for_resident(
     messages: list[dict[str, str]],
     is_cold: bool,
     had_prior_turns: bool,
+    prefix: str = '',
 ) -> str:
     """First turn of a fresh session sends raw user text; replay only after mid-session respawn."""
     if is_cold and had_prior_turns:
         history = _format_shadow_history(messages)
-        return (
+        body = (
             '以下是本诊断会话内的对话记录：' + NL + NL
             + history + NL + NL
             + '请回复最后一条消息。'
         )
-    return message
+    else:
+        body = message
+    prefix = (prefix or '').strip()
+    if prefix:
+        return prefix + NL + NL + body
+    return body
+
+
+def _normalize_context_profile(value: Optional[str]) -> str:
+    profile = str(value or CONTEXT_PROFILE_CLEAN).strip().lower()
+    if profile not in ALLOWED_CONTEXT_PROFILES:
+        raise ValueError(
+            'unsupported context_profile: %r (allowed: %s)'
+            % (profile, ', '.join(sorted(ALLOWED_CONTEXT_PROFILES)))
+        )
+    return profile
+
+
+def _build_daily_state_text(
+    *,
+    is_cold: bool,
+    last_snapshot: Optional[dict[str, str]],
+) -> tuple[str, str, dict[str, str]]:
+    """Facts-only lean state for daily_candidate profile."""
+    from chat.system_builder import build_cc_state, format_state_diff, format_state_snapshot
+
+    raw = build_cc_state(lean=True)
+    if is_cold or not last_snapshot:
+        text = format_state_snapshot(raw)
+        mode = 'snapshot' if text else 'none'
+    else:
+        text = format_state_diff(last_snapshot, raw)
+        mode = 'delta' if text else 'none'
+    return text, mode, raw
+
+
+def _resolve_day_handoff_text(*, day_handoff_path: Optional[str]) -> tuple[str, str]:
+    from chat.day_handoff import format_day_handoff_prompt, load_and_validate_day_handoff
+
+    if not day_handoff_path:
+        raise ValueError('daily_candidate requires day_handoff_path')
+    data, _errors = load_and_validate_day_handoff(day_handoff_path)
+    return format_day_handoff_prompt(data), str(day_handoff_path)
 
 
 @dataclass
@@ -148,6 +207,13 @@ class CleanWindowSession:
     provider: str
     model: str
     work_dir: str
+    context_profile: str = CONTEXT_PROFILE_CLEAN
+    day_handoff_text: str = ''
+    day_handoff_path: str = ''
+    last_state_snapshot: dict[str, str] = field(default_factory=dict)
+    last_state_mode: str = 'none'
+    last_state_injected_this_turn: bool = False
+    last_day_handoff_injected_this_turn: bool = False
     turn_count: int = 0
     blocked_tool_calls: list[str] = field(default_factory=list)
     last_save_suppressed: bool = False
@@ -176,6 +242,12 @@ class CleanWindowSession:
             shadow_history_assistant_turns=self.assistant_turns,
             save_marker_suppressed=self.last_save_suppressed,
             blocked_tool_names=self.blocked_tool_calls,
+            context_profile=self.context_profile,
+            day_handoff_loaded=bool(self.day_handoff_text.strip()),
+            day_handoff_injected_this_turn=self.last_day_handoff_injected_this_turn,
+            day_handoff_path=self.day_handoff_path,
+            state_injected_this_turn=self.last_state_injected_this_turn,
+            state_mode=self.last_state_mode,
         )
         base.update(overrides)
         return base
@@ -253,9 +325,15 @@ class CleanWindowManager:
         env.pop('ANTHROPIC_API_KEY', None)
         return env
 
-    def start(self) -> dict[str, Any]:
+    def start(
+        self,
+        *,
+        context_profile: Optional[str] = None,
+        day_handoff_path: Optional[str] = None,
+    ) -> dict[str, Any]:
         if not enabled():
             raise PermissionError('CC_CLEAN_WINDOW_SHADOW_ENABLED=0')
+        profile = _normalize_context_profile(context_profile)
         provider = self._require_claude_code_provider()
         with self._lock:
             self._purge_expired()
@@ -266,6 +344,13 @@ class CleanWindowManager:
             full_system = parts['full_system']
             static_sha = sha256_text(full_system)
             persona_sha = sha256_text(parts.get('persona') or '')
+
+            handoff_text = ''
+            handoff_path = ''
+            if profile == CONTEXT_PROFILE_DAILY_CANDIDATE:
+                handoff_text, handoff_path = _resolve_day_handoff_text(
+                    day_handoff_path=day_handoff_path,
+                )
 
             session_id = SESSION_PREFIX + uuid.uuid4().hex
             work_dir = tempfile.mkdtemp(prefix='clean-shadow-')
@@ -296,12 +381,17 @@ class CleanWindowManager:
                 provider=provider,
                 model=self._get_model(),
                 work_dir=work_dir,
+                context_profile=profile,
+                day_handoff_text=handoff_text,
+                day_handoff_path=handoff_path,
             )
             self._sessions[session_id] = session
             self._schedule_ttl(session)
             return {
                 'ok': True,
                 'session_id': session_id,
+                'context_profile': profile,
+                'day_handoff_path': handoff_path,
                 'static_system_sha256': static_sha,
                 'persona_sha256': persona_sha,
                 'model': session.model,
@@ -344,17 +434,39 @@ class CleanWindowManager:
                 or any(m.get('role') == 'assistant' for m in session.messages)
             )
             session.messages.append({'role': 'user', 'content': message})
+
+            prefix_parts: list[str] = []
+            state_mode = 'none'
+            state_injected_this_turn = False
+            day_handoff_injected_this_turn = False
+            pending_state_snapshot: Optional[dict[str, str]] = None
+
+            if session.context_profile == CONTEXT_PROFILE_DAILY_CANDIDATE:
+                if session.day_handoff_text and is_cold:
+                    prefix_parts.append(session.day_handoff_text)
+                    day_handoff_injected_this_turn = True
+                state_text, state_mode, raw_state = _build_daily_state_text(
+                    is_cold=is_cold,
+                    last_snapshot=session.last_state_snapshot or None,
+                )
+                if state_text:
+                    prefix_parts.append(state_text)
+                    state_injected_this_turn = True
+                    pending_state_snapshot = dict(raw_state)
+
             content = _turn_content_for_resident(
                 message=message,
                 messages=session.messages,
                 is_cold=is_cold,
                 had_prior_turns=had_prior_turns,
+                prefix=NL.join(p for p in prefix_parts if p),
             )
 
             text_parts: list[str] = []
             think_parts: list[str] = []
             usage: dict[str, Any] = {}
             blocked_this_turn: list[str] = []
+            send_succeeded = False
 
             for evt, payload in session.resident.send_turn(content, commit_meta={}):
                 if evt == 'text':
@@ -370,7 +482,18 @@ class CleanWindowManager:
                 elif evt == 'done':
                     if isinstance(payload, (list, tuple)) and len(payload) >= 3:
                         usage = dict(payload[2] or {}) if isinstance(payload[2], dict) else {}
+                    send_succeeded = True
                     break
+
+            if not send_succeeded:
+                session.messages.pop()
+                raise RuntimeError('resident send_turn failed before completion')
+
+            if pending_state_snapshot is not None:
+                session.last_state_snapshot = pending_state_snapshot
+            session.last_state_mode = state_mode
+            session.last_state_injected_this_turn = state_injected_this_turn
+            session.last_day_handoff_injected_this_turn = day_handoff_injected_this_turn
 
             raw_text = ''.join(text_parts).strip()
             cleaned, had_save = strip_save_markers(raw_text)
@@ -384,12 +507,17 @@ class CleanWindowManager:
             return {
                 'ok': True,
                 'session_id': session_id,
+                'context_profile': session.context_profile,
                 'content': cleaned,
                 'thinking': ''.join(think_parts).strip(),
                 'turn_index': session.turn_count,
                 'history_message_count': len(session.messages),
                 'static_system_sha256': session.static_system_sha256,
-                'context_manifest': session.manifest(),
+                'context_manifest': session.manifest(
+                    state_mode=state_mode,
+                    state_injected_this_turn=state_injected_this_turn,
+                    day_handoff_injected_this_turn=day_handoff_injected_this_turn,
+                ),
                 'usage': usage,
             }
 
@@ -403,13 +531,22 @@ class CleanWindowManager:
             session.close()
             return {'ok': True, 'session_id': session_id}
 
-    def reset(self, session_id: Optional[str] = None) -> dict[str, Any]:
+    def reset(
+        self,
+        session_id: Optional[str] = None,
+        *,
+        context_profile: Optional[str] = None,
+        day_handoff_path: Optional[str] = None,
+    ) -> dict[str, Any]:
         if session_id:
             try:
                 self.close(session_id)
             except KeyError:
                 pass
-        return self.start()
+        return self.start(
+            context_profile=context_profile,
+            day_handoff_path=day_handoff_path,
+        )
 
 
 _MANAGER: Optional[CleanWindowManager] = None
