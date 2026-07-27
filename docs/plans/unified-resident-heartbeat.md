@@ -4,7 +4,7 @@
 
 - **计划分支**：`plan/unified-heartbeat-tracker`
 - **当前状态**：`P-CONTEXT-LEAN_STAGE1_PAUSED`（`CONTEXT_LEAN_STATE_ENABLED=0` 观察暂停；#140 REQUEST CHANGES；其余三 Lean + Relationship 仍为 `0`）
-- **最后更新**：2026-07-27（#140 round 3：re-anchor partial zone preservation）
+- **最后更新**：2026-07-27（#140 round 4：全 unavailable re-anchor + 断线恢复无假 delta）
 - **tracker branch tip**：以 [PR #127](https://github.com/Hayana11/hayagarden-frontend/pull/127) head 为准（勿将本文件内自报 SHA 当作分支 tip）
 - **生产 HEAD**：`6678ee59bf4f930c6be7687af71f19f28b0f5c1d`（main merge #139）
 - **当前 identity**：`identity_id = "fyodor-default"` · `provider_id = "claude_code"` · `conversation_id = "default"`
@@ -189,7 +189,7 @@
   - **观察暂停**（2026-07-27）：
     - 原因：灯设备 unsupported 属性（brightness/color_temp）与瞬时读取失败被错误解释为状态变化；State Lean 骨架未判失败，污染模型注意力
     - `config_store.set(CONTEXT_LEAN_STATE_ENABLED, 0)` + `systemctl restart frontend frontend-gw`（未回滚 #139 代码）
-  - [-] **灯能力 / State 采集语义修复**（PR **#140** · `cursor/fix-light-capability-state-semantics-8046`）：**round 3 待 re-review**（`1ad8df3`：re-anchor partial preservation）；**未 merge / 未部署**
+  - [-] **灯能力 / State 采集语义修复**（PR **#140** · `cursor/fix-light-capability-state-semantics-8046`）：**round 4 待 re-review**（`6e6daa6`：unavailable 保留 + 断线恢复）；**未 merge / 未部署**
   - 子阶段：
     - [x] State delta / re-anchor 代码 merge（main@6678ee5）
     - [x] 四开关 0 生产部署（VPS `6678ee5`）
@@ -264,8 +264,8 @@ P-SHADOW        [x]
 ### 当前下一步
 
 ```text
-灯能力 / State 采集语义修复（PR #140 @ `1ad8df3`）
-→ re-review round 3（re-anchor partial zone preservation）
+灯能力 / State 采集语义修复（PR #140 @ `6e6daa6`）
+→ re-review round 4（unavailable re-anchor + reconnect omit）
 → merge + 部署后单独授权恢复 CONTEXT_LEAN_STATE_ENABLED=1 观察
 → 其余三 Lean + Relationship 保持 0
 → Stage 2 / UH-A0 / UH-A 未授权
@@ -1037,7 +1037,7 @@ PR #126 修门禁与去重
 
 - [x] **观察暂停**：`config_store.set(CONTEXT_LEAN_STATE_ENABLED, 0)`；未改 `.env`；`systemctl restart frontend frontend-gw`
 - [~] **Stage 1 表达观察暂停**：灯 unsupported/瞬时失败被误解释为状态变化；代码项 `[x]` 不回退
-- [-] **PR #140** round 3（`1ad8df3`）：re-anchor 时 partial merge 使用清零前 cumulative；**待 re-review**；**未 merge / 未部署 / 未重开 STATE lean**
+- [-] **PR #140** round 4（`6e6daa6`）：全 unavailable re-anchor 保留；成功→断线→恢复无假 delta；**待 re-review**
 
 ### 2026-07-27（续·#139 reminder user_record）
 
