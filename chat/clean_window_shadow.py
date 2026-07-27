@@ -232,7 +232,7 @@ class CleanWindowManager:
     def _expire_session(self, session_id: str):
         with self._lock:
             session = self._sessions.pop(session_id, None)
-            if session is not None and session.expires_at <= time.time():
+            if session is not None:
                 session.close()
 
     def _schedule_ttl(self, session: CleanWindowSession):

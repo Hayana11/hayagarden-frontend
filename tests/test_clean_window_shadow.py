@@ -434,6 +434,25 @@ class CleanWindowShadowSessionTests(unittest.TestCase):
             self.assertNotIn(sid, mgr._sessions)
             self.assertEqual(killed['n'], 1)
 
+    def test_expire_session_closes_even_if_timer_fires_early(self):
+        resident = _FakeResident(cold_turns=0)
+        killed = {'n': 0}
+        original_kill = resident._kill
+
+        def tracked_kill(*args, **kwargs):
+            killed['n'] += 1
+            return original_kill(*args, **kwargs)
+
+        resident._kill = tracked_kill
+        with self._run_with_patches(resident) as (stack, mgr, *_):
+            started = mgr.start()
+            sid = started['session_id']
+            session = mgr._sessions[sid]
+            session.expires_at = time.time() + 60
+            mgr._expire_session(sid)
+            self.assertNotIn(sid, mgr._sessions)
+            self.assertEqual(killed['n'], 1)
+
     def test_close_force_works_when_feature_disabled(self):
         with self._run_with_patches() as (stack, mgr, *_):
             started = mgr.start()

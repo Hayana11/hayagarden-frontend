@@ -5,6 +5,9 @@ Requires on the gateway process:
   - CC_CLEAN_WINDOW_SHADOW_ENABLED=1 in runtime_config
   - CC_CLEAN_WINDOW_SHADOW_TOKEN in /opt/frontend/.env
 
+Token is read when frontend-gw starts (not per-request like runtime_config).
+Write the token to .env before deploying or restarting frontend-gw.
+
 Default gateway base: http://127.0.0.1:5051
 
 Example:
