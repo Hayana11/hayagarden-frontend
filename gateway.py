@@ -46,17 +46,19 @@ def _workspace_job_event_hook(event):
         }]
         conn = sqlite3.connect(DB_PATH, timeout=5)
         cols = {r[1] for r in conn.execute('PRAGMA table_info(chat_messages)')}
-        if 'source_kind' in cols:
-            conn.execute(
-                "INSERT INTO chat_messages (author, content, tool_calls, source_kind) "
-                "VALUES ('assistant', ?, ?, 'workspace_job')",
-                (event.get('content', ''), json.dumps(tc, ensure_ascii=False)),
+        if 'source_kind' not in cols:
+            print(
+                '[workspace_jobs] chat_messages.source_kind missing; '
+                'deferring workspace job message write',
+                flush=True,
             )
-        else:
-            conn.execute(
-                "INSERT INTO chat_messages (author, content, tool_calls) VALUES ('assistant', ?, ?)",
-                (event.get('content', ''), json.dumps(tc, ensure_ascii=False)),
-            )
+            conn.close()
+            return
+        conn.execute(
+            "INSERT INTO chat_messages (author, content, tool_calls, source_kind) "
+            "VALUES ('assistant', ?, ?, 'workspace_job')",
+            (event.get('content', ''), json.dumps(tc, ensure_ascii=False)),
+        )
         conn.commit()
         conn.close()
     except Exception:
@@ -96,8 +98,6 @@ def _init_workspace_apps():
         print(f"[workspace_apps] autostart failed: {exc}", flush=True)
 
 
-_init_workspace_jobs()
-_init_workspace_apps()
 STATIC_DIR = '/opt/frontend/static'
 
 import config_store
@@ -110,6 +110,9 @@ import cc_resident
 group_chat_store.ensure_schema(DB_PATH)
 from chat.daily_context import ensure_schema_logged as _daily_context_ensure_schema
 _daily_context_ensure_schema(DB_PATH)
+
+_init_workspace_jobs()
+_init_workspace_apps()
 
 # API_URL/API_KEY/CC_TOKEN：部署配置，.env 兜底（真正生效的值由 relay.manager
 # 按 ACTIVE_RELAY 动态解析，这里仅供 /api/debug/provider 展示部署期默认值）。

@@ -246,6 +246,83 @@ class CarryoverAndAutoFinalizeTests(unittest.TestCase):
         finally:
             os.unlink(db)
 
+    def test_formal_assistant_with_tool_calls_included(self):
+        db = _tmp_db()
+        try:
+            _init_chat_messages(db)
+            _insert(db, 'hayana', '查 GitHub', '2026-07-26 10:00:00')
+            tool_reply = _insert(
+                db, 'fyodor', '审查结果如下', '2026-07-26 10:01:00',
+                tool_calls='[{"name":"search","args":{}}]',
+                source_kind='chat',
+            )
+            ctx = dc.get_or_create_daily_context(chat_id='tools', local_day='2026-07-27', db_path=db)
+            cands = dc.list_carryover_candidates(int(ctx['id']), limit=10, db_path=db)
+            previews = [c['content_preview'] for c in cands]
+            self.assertIn('审查结果如下', previews)
+            dc.select_carryover(int(ctx['id']), 3, db_path=db)
+            carry = dc.get_selected_carryover_messages(int(ctx['id']), db_path=db)
+            self.assertTrue(any(m['message_id'] == tool_reply for m in carry))
+
+            user = _insert(db, 'hayana', '继续', '2026-07-27 10:00:00')
+            formal_tool = _insert(
+                db, 'fyodor', '今日工具回复', '2026-07-27 10:01:00',
+                tool_calls='[{"name":"light_on","args":{}}]',
+                source_kind='chat',
+            )
+            with mock.patch('chat.daily_history._build_state_text', return_value=('', 'none', {})):
+                built = dh.build_daily_window_context(
+                    chat_id='tools',
+                    daily_context=dc.get_daily_context_by_id(int(ctx['id']), db_path=db),
+                    static_system='S',
+                    is_cold=False,
+                    db_path=db,
+                )
+            ids = [m['message_id'] for m in built['current_day_history']]
+            self.assertIn(user, ids)
+            self.assertIn(formal_tool, ids)
+        finally:
+            os.unlink(db)
+
+    def test_workspace_job_with_tool_calls_excluded(self):
+        db = _tmp_db()
+        try:
+            _init_chat_messages(db)
+            _insert(db, 'hayana', 'u', '2026-07-26 10:00:00')
+            _insert(
+                db, 'assistant', 'job done', '2026-07-26 10:01:00',
+                tool_calls='[{"name":"ws_job"}]', source_kind='workspace_job',
+            )
+            _insert(db, 'fyodor', 'real', '2026-07-26 10:02:00')
+            ctx = dc.get_or_create_daily_context(chat_id='ws', local_day='2026-07-27', db_path=db)
+            cands = dc.list_carryover_candidates(int(ctx['id']), limit=10, db_path=db)
+            previews = [c['content_preview'] for c in cands]
+            self.assertNotIn('job done', previews)
+            self.assertIn('real', previews)
+        finally:
+            os.unlink(db)
+
+    def test_legacy_ws_job_without_source_kind_excluded(self):
+        db = _tmp_db()
+        try:
+            _init_chat_messages(db)
+            conn = sqlite3.connect(db)
+            conn.execute(
+                "INSERT INTO chat_messages (author, content, tool_calls, created_at) "
+                "VALUES ('assistant', 'legacy job', ?, '2026-07-26 10:00:00')",
+                (json.dumps([{'name': 'ws_job', 'args': {}}]),),
+            )
+            conn.commit()
+            conn.close()
+            _insert(db, 'fyodor', 'formal', '2026-07-26 10:01:00')
+            ctx = dc.get_or_create_daily_context(chat_id='leg', local_day='2026-07-27', db_path=db)
+            cands = dc.list_carryover_candidates(int(ctx['id']), limit=10, db_path=db)
+            previews = [c['content_preview'] for c in cands]
+            self.assertNotIn('legacy job', previews)
+            self.assertIn('formal', previews)
+        finally:
+            os.unlink(db)
+
     def test_image_only_message_eligible(self):
         db = _tmp_db()
         try:
@@ -282,6 +359,49 @@ class HistoryAssemblyFilterTests(unittest.TestCase):
                 )
             ids = [m['message_id'] for m in built['current_day_history']]
             self.assertEqual(ids, [user, formal])
+        finally:
+            os.unlink(db)
+
+    def test_hot_turn_skips_handoff_and_carryover(self):
+        db = _tmp_db()
+        try:
+            _init_chat_messages(db)
+            _insert(db, 'hayana', 'x', '2026-07-26 11:00:00')
+            _insert(db, 'fyodor', 'y', '2026-07-26 11:01:00')
+            _insert(db, 'hayana', 'z', '2026-07-26 11:02:00')
+            ctx = dc.get_or_create_daily_context(chat_id='hot', local_day='2026-07-27', db_path=db)
+            dc.select_carryover(int(ctx['id']), 3, db_path=db)
+            with mock.patch('chat.daily_history._build_state_text', return_value=('S', 'delta', {'k': 'v'})):
+                built = dh.build_daily_window_context(
+                    chat_id='hot',
+                    daily_context=dc.get_daily_context_by_id(int(ctx['id']), db_path=db),
+                    static_system='STATIC',
+                    is_cold=False,
+                    db_path=db,
+                )
+            self.assertFalse(built['manifest']['handoff_injected_this_turn'])
+            self.assertFalse(built['manifest']['carryover_injected_this_turn'])
+            self.assertEqual(built['carryover_messages'], [])
+        finally:
+            os.unlink(db)
+
+    def test_missing_handoff_static_only_no_fallback(self):
+        db = _tmp_db()
+        try:
+            _init_chat_messages(db)
+            ctx = dc.get_or_create_daily_context(chat_id='m', local_day='2026-07-27', db_path=db)
+            with mock.patch('chat.daily_history._build_state_text', return_value=('', 'none', {})):
+                built = dh.build_daily_window_context(
+                    chat_id='m',
+                    daily_context=ctx,
+                    static_system='STATIC_ONLY',
+                    is_cold=True,
+                    db_path=db,
+                )
+            self.assertEqual(built['static'], 'STATIC_ONLY')
+            self.assertEqual(built['day_handoff'], '')
+            self.assertEqual(built['manifest']['handoff_status'], dc.HANDOFF_ABSENT)
+            self.assertFalse(built['manifest']['legacy_cold_once_injected'])
         finally:
             os.unlink(db)
 
@@ -371,6 +491,31 @@ class EpochFenceTests(unittest.TestCase):
                 dc.get_daily_context_by_id(int(ctx['id']), db_path=db)['morning_greeting_message_id'],
                 7,
             )
+        finally:
+            os.unlink(db)
+
+    def test_respawn_bumps_generation(self):
+        db = _tmp_db()
+        try:
+            _init_chat_messages(db)
+            ctx = dc.get_or_create_daily_context(chat_id='r', local_day='2026-07-27', db_path=db)
+            self.assertEqual(int(ctx['resident_generation']), 1)
+            nxt = dc.respawn_daily_resident(int(ctx['id']), db_path=db)
+            self.assertEqual(int(nxt['resident_generation']), 2)
+            d2 = dc.get_or_create_daily_context(chat_id='r', local_day='2026-07-28', db_path=db)
+            self.assertEqual(int(d2['resident_generation']), 1)
+            self.assertGreater(int(d2['context_epoch']), int(ctx['context_epoch']))
+        finally:
+            os.unlink(db)
+
+    def test_morning_greeting_cas(self):
+        db = _tmp_db()
+        try:
+            _init_chat_messages(db)
+            ctx = dc.get_or_create_daily_context(chat_id='g', local_day='2026-07-27', db_path=db)
+            dc.set_morning_greeting_message_id(int(ctx['id']), 99, db_path=db)
+            with self.assertRaises(dc.ConflictError):
+                dc.set_morning_greeting_message_id(int(ctx['id']), 100, db_path=db)
         finally:
             os.unlink(db)
 
@@ -468,8 +613,72 @@ class HandoffValidationTests(unittest.TestCase):
                     source_last_message_id=10,
                     source_message_count=10,
                     source_sha256='abc',
+                    source_epoch=1,
                     db_path=db,
                 )
+        finally:
+            os.unlink(db)
+
+    def test_ready_requires_source_epoch(self):
+        db = _tmp_db()
+        try:
+            _init_chat_messages(db)
+            with self.assertRaises(ValueError) as ctx:
+                dc.store_day_handoff(
+                    chat_id='h',
+                    source_day='2026-07-26',
+                    content=self._valid_content(source_epoch=37),
+                    boundary_message_id=10,
+                    source_first_message_id=1,
+                    source_last_message_id=10,
+                    source_message_count=10,
+                    source_sha256=hashlib.sha256(b'no-epoch').hexdigest(),
+                    source_epoch=None,
+                    db_path=db,
+                )
+            self.assertIn('source_epoch', str(ctx.exception))
+        finally:
+            os.unlink(db)
+
+    def test_impossible_message_count_rejected(self):
+        db = _tmp_db()
+        try:
+            _init_chat_messages(db)
+            with self.assertRaises(ValueError) as ctx:
+                dc.store_day_handoff(
+                    chat_id='h',
+                    source_day='2026-07-26',
+                    content=self._valid_content(),
+                    boundary_message_id=11,
+                    source_first_message_id=10,
+                    source_last_message_id=11,
+                    source_message_count=500,
+                    source_sha256=hashlib.sha256(b'bad-count').hexdigest(),
+                    source_epoch=1,
+                    db_path=db,
+                )
+            self.assertIn('exceeds', str(ctx.exception))
+        finally:
+            os.unlink(db)
+
+    def test_last_message_id_beyond_boundary_rejected(self):
+        db = _tmp_db()
+        try:
+            _init_chat_messages(db)
+            with self.assertRaises(ValueError) as ctx:
+                dc.store_day_handoff(
+                    chat_id='h',
+                    source_day='2026-07-26',
+                    content=self._valid_content(boundary_message_id=10),
+                    boundary_message_id=10,
+                    source_first_message_id=1,
+                    source_last_message_id=11,
+                    source_message_count=2,
+                    source_sha256=hashlib.sha256(b'bad-boundary').hexdigest(),
+                    source_epoch=1,
+                    db_path=db,
+                )
+            self.assertIn('boundary', str(ctx.exception))
         finally:
             os.unlink(db)
 
@@ -517,6 +726,21 @@ class ApiRouteHardeningTests(unittest.TestCase):
                 headers={'Authorization': 'Bearer moments-secret'},
             )
         self.assertEqual(r.status_code, 503)
+
+    def test_routes_disabled_by_default(self):
+        from daily_context_routes import create_daily_context_blueprint
+        from flask import Flask
+        app = Flask(__name__)
+        app.register_blueprint(create_daily_context_blueprint(
+            db_path=self.db, token_getter=lambda: 'tok',
+        ))
+        client = app.test_client()
+        with mock.patch('chat.daily_context.enabled', return_value=False):
+            r = client.get(
+                '/api/daily-context/current',
+                headers={'Authorization': 'Bearer tok'},
+            )
+        self.assertEqual(r.status_code, 404)
 
 
 class FlagTests(unittest.TestCase):

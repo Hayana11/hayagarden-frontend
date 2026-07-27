@@ -487,14 +487,26 @@ def _row_source_kind(row: Any) -> str:
     return SOURCE_KIND_CHAT
 
 
-def _tool_calls_nonempty(row: Any) -> bool:
+def _is_legacy_workspace_job(row: Any) -> bool:
+    """Detect pre-source_kind workspace rows tagged only via ws_job tool_calls."""
     if not (hasattr(row, 'keys') and 'tool_calls' in row.keys()):
         return False
     tc = row['tool_calls']
     if tc is None:
         return False
     s = str(tc).strip()
-    return s not in ('', 'null', 'None', '[]', '{}')
+    if s in ('', 'null', 'None', '[]', '{}'):
+        return False
+    try:
+        parsed = json.loads(tc) if isinstance(tc, str) else tc
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return False
+    if not isinstance(parsed, list):
+        return False
+    return any(
+        isinstance(item, dict) and item.get('name') == 'ws_job'
+        for item in parsed
+    )
 
 
 def is_formal_chat_message(row: Any) -> bool:
@@ -506,10 +518,11 @@ def is_formal_chat_message(row: Any) -> bool:
         return False
 
     kind = _row_source_kind(row)
-    if kind and kind not in (SOURCE_KIND_CHAT,):
+    if kind not in ('', SOURCE_KIND_CHAT):
         return False
 
-    if _tool_calls_nonempty(row):
+    # Legacy rows written before source_kind migration.
+    if _is_legacy_workspace_job(row):
         return False
 
     content = str(row['content'] or '')
@@ -891,7 +904,9 @@ def validate_formal_handoff_content(
     if expected_source_day is not None:
         if str(data.get('source_day') or '') != str(expected_source_day):
             errors.append('content.source_day must match column source_day')
-    if expected_source_epoch is not None:
+    if expected_source_epoch is None:
+        errors.append('source_epoch is required for READY handoff')
+    else:
         try:
             if int(data.get('source_epoch')) != int(expected_source_epoch):
                 errors.append('content.source_epoch must match column source_epoch')
@@ -986,8 +1001,16 @@ def store_day_handoff(
         raise ValueError('source message ids must be positive when count > 0')
     elif int(source_first_message_id) > int(source_last_message_id):
         raise ValueError('source_first_message_id must be <= source_last_message_id')
+    elif int(source_message_count) > (
+        int(source_last_message_id) - int(source_first_message_id) + 1
+    ):
+        raise ValueError('source_message_count exceeds message id span')
+    if int(source_last_message_id) > int(boundary_message_id):
+        raise ValueError('source_last_message_id must be <= boundary_message_id')
 
     if status == HANDOFF_READY:
+        if source_epoch is None:
+            raise ValueError('source_epoch is required for READY handoff')
         errors = validate_formal_handoff_content(
             content,
             expected_source_day=source_day,
@@ -1176,9 +1199,14 @@ def commit_if_epoch_current(
             conn.rollback()
             return False, None
         result = writer(conn)
+        if not conn.in_transaction:
+            raise DailyContextError(
+                'epoch-fenced writer must not commit or rollback',
+            )
         row2 = conn.execute(
-            'SELECT context_epoch, resident_generation FROM daily_contexts WHERE id=?',
-            (int(row['id']),),
+            'SELECT context_epoch, resident_generation FROM daily_contexts '
+            'WHERE chat_id=? ORDER BY context_epoch DESC LIMIT 1',
+            (chat_id,),
         ).fetchone()
         if (
             row2 is None
