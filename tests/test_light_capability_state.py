@@ -14,7 +14,7 @@ from chat.context_lean_state import (
     build_state_lean_observation,
     compute_state_version,
 )
-from chat.system_builder import _collect_lights_from_status_payload
+from chat.system_builder import _cc_collect_state, _collect_lights_from_status_payload
 
 
 def _resident_stub(**overrides):
@@ -65,6 +65,73 @@ class PowerOnlyCapabilityTests(unittest.TestCase):
         self.assertNotIn('brightness', result['values'])
         self.assertNotIn('color_temp', result['values'])
         os.unlink(cfg_path)
+
+    def test_power_only_config_keeps_control_mappings(self):
+        import tools.light_control as lc
+
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as tmp:
+            json.dump({
+                'prop_map': {'power': {'siid': 2, 'piid': 1}},
+                'zones': {
+                    'main': {'supported_query_props': ['power']},
+                    'bedside': {'supported_query_props': ['power']},
+                },
+            }, tmp)
+            cfg_path = tmp.name
+
+        with mock.patch.object(lc, 'CONFIG_PATH', cfg_path), \
+             mock.patch.object(lc, 'AUTH_PATH', '/tmp/fake-auth'), \
+             mock.patch('tools.light_control.os.path.exists', return_value=True), \
+             mock.patch('tools.light_control.mijiaAPI') as api_cls:
+            api = api_cls.return_value
+            api.get_devices_prop.return_value = [{'code': 0, 'value': False}]
+            lc.light_status('did-main', supported_props=lc.supported_query_props('main'))
+            query = api.get_devices_prop.call_args[0][0]
+            self.assertEqual(len(query), 1)
+            self.assertEqual(query[0]['piid'], 1)
+
+            api.reset_mock()
+            lc.set_brightness('did-main', 50)
+            lc.set_color_temp('did-main', 4000)
+            calls = api.set_devices_prop.call_args_list
+            self.assertEqual(calls[0][0][0]['piid'], 2)
+            self.assertEqual(calls[1][0][0]['piid'], 3)
+        os.unlink(cfg_path)
+
+
+class MiotResponseValidationTests(unittest.TestCase):
+    def _status_with_rows(self, rows):
+        import tools.light_control as lc
+
+        with mock.patch.object(lc, 'AUTH_PATH', '/tmp/fake-auth'), \
+             mock.patch('tools.light_control.os.path.exists', return_value=True), \
+             mock.patch('tools.light_control.mijiaAPI') as api_cls:
+            api = api_cls.return_value
+            api.get_devices_prop.return_value = rows
+            with self.assertRaises(RuntimeError):
+                lc.light_status('did-main', supported_props=['power'])
+
+    def test_empty_row_is_unavailable(self):
+        self._status_with_rows([{}])
+
+    def test_nonzero_code_is_unavailable(self):
+        self._status_with_rows([{'code': 1, 'value': False}])
+
+    def test_none_value_is_unavailable(self):
+        self._status_with_rows([{'code': 0, 'value': None}])
+
+    def test_row_count_mismatch_is_unavailable(self):
+        self._status_with_rows([])
+
+    def test_invalid_power_type_is_unavailable(self):
+        self._status_with_rows([{'code': 0, 'value': 'on'}])
+
+    def test_zone_status_marks_invalid_response_unavailable(self):
+        import tools.light_control as lc
+
+        with mock.patch('tools.light_control.light_status', side_effect=RuntimeError('bad row')):
+            result = lc.zone_status('main', 'did-main')
+        self.assertFalse(result['available'])
 
 
 class WarmNeutralActionSeparationTests(unittest.TestCase):
@@ -154,6 +221,44 @@ class HotRoundTransientFailureTests(unittest.TestCase):
         after = {'emotion': 'valence=0.61'}
         send = build_state_send_payload(before, after, user_text='嗯', is_cold=False)
         self.assertNotIn('lights', send)
+
+    def test_collector_urlopen_failure_omits_lights_and_preserves_hot_state(self):
+        cumulative = normalize_state_dict({
+            'lights': 'main=关 bedside=关',
+            'emotion': 'valence=0.60',
+            'drive': 'attachment=0.55',
+            'time_bucket': 'bucket=上午',
+        })
+        resident = _resident_stub(
+            last_state_snapshot=cumulative,
+            last_state_send_snapshot=cumulative,
+            last_state_anchor_generation=1,
+            last_state_schema_version=1,
+            last_state_anchor_version=compute_state_version(cumulative),
+        )
+
+        def get_db():
+            raise AssertionError('db should not be queried')
+
+        with mock.patch('chat.system_builder.build_time_bucket', return_value='上午'), \
+             mock.patch('chat.system_builder._format_structured_emotion_snippet', return_value='valence=0.60'), \
+             mock.patch('chat.system_builder._format_structured_drive_snippet', return_value='attachment=0.55'), \
+             mock.patch('urllib.request.urlopen', side_effect=OSError('light daemon down')), \
+             mock.patch('config_store.get_bool', return_value=False):
+            raw = _cc_collect_state(get_db, lean=True)
+
+        self.assertNotIn('lights', raw)
+        result = assemble_cc_state_context(
+            raw_state=raw,
+            is_cold=False,
+            user_text='继续',
+            resident=resident,
+            lean_on=True,
+        )
+        self.assertEqual(result.state_context_mode, 'omitted')
+        self.assertNotIn('lights', result.send_payload)
+        self.assertNotIn('cleared', result.state_text.lower())
+        self.assertEqual(result.observation.get('lights_source_status'), 'unavailable')
 
 
 class ColdStartNoLightsTests(unittest.TestCase):
@@ -259,6 +364,28 @@ class ObservationMetaTests(unittest.TestCase):
         self.assertTrue(obs['lights_main_available'])
         self.assertFalse(obs['lights_bedside_available'])
         self.assertEqual(obs['lights_last_success_at'], '2026-07-27T00:00:00Z')
+
+    def test_legacy_path_records_lights_source_observation(self):
+        raw = {
+            'emotion': 'valence=0.60',
+            '_lights_source': json.dumps({
+                'lights_source_status': 'partial',
+                'lights_main_available': True,
+                'lights_bedside_available': False,
+            }),
+        }
+        resident = _resident_stub(last_successful_lean_state=False)
+        result = assemble_cc_state_context(
+            raw_state=raw,
+            is_cold=True,
+            user_text='你好',
+            resident=resident,
+            lean_on=False,
+        )
+        self.assertFalse(result.used_lean)
+        self.assertEqual(result.observation.get('lights_source_status'), 'partial')
+        self.assertTrue(result.observation.get('lights_main_available'))
+        self.assertFalse(result.observation.get('lights_bedside_available'))
 
 
 if __name__ == '__main__':

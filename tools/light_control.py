@@ -46,8 +46,10 @@ def _load_config() -> dict[str, Any]:
         return cfg
     cfg.update({k: v for k, v in user.items() if k not in ('prop_map', 'zones')})
     user_pm = user.get('prop_map')
-    if isinstance(user_pm, dict) and user_pm:
-        cfg['prop_map'] = {str(k): v for k, v in user_pm.items()}
+    pm = dict(DEFAULT_PROP_MAP)
+    if isinstance(user_pm, dict):
+        pm.update({str(k): v for k, v in user_pm.items()})
+    cfg['prop_map'] = pm
     zones = user.get('zones')
     if isinstance(zones, dict):
         cfg['zones'] = zones
@@ -110,6 +112,24 @@ def set_color_temp(did, value):
     return _api().set_devices_prop({'did': did, 'siid': p['siid'], 'piid': p['piid'], 'value': value})
 
 
+def _parse_prop_row(name: str, row: Any) -> Any:
+    """Validate one MIOT property row; raise on incomplete or error responses."""
+    if not isinstance(row, dict):
+        raise RuntimeError('invalid MIOT row for %s' % name)
+    if row.get('code', 0) != 0:
+        raise RuntimeError('MIOT error for %s: code=%s' % (name, row.get('code')))
+    if 'value' not in row:
+        raise RuntimeError('MIOT row missing value for %s' % name)
+    value = row['value']
+    if name == 'power':
+        if isinstance(value, bool):
+            return value
+        if value in (0, 1):
+            return bool(value)
+        raise RuntimeError('invalid power value for %s: %r' % (name, value))
+    return value
+
+
 def light_status(did, *, supported_props: list[str] | None = None) -> dict[str, Any]:
     """Query only supported properties for one device.
 
@@ -130,9 +150,13 @@ def light_status(did, *, supported_props: list[str] | None = None) -> dict[str, 
         return {'available': True, 'values': {}}
     res = _api().get_devices_prop(query)
     rows = res if isinstance(res, list) else [res]
+    if len(rows) != len(names):
+        raise RuntimeError(
+            'MIOT response row count mismatch: expected %d got %d' % (len(names), len(rows))
+        )
     values: dict[str, Any] = {}
     for name, row in zip(names, rows):
-        values[name] = row.get('value') if isinstance(row, dict) else row
+        values[name] = _parse_prop_row(name, row)
     return {'available': True, 'values': values}
 
 

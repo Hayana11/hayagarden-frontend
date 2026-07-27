@@ -244,6 +244,7 @@ def _legacy_state_context(
     is_cold: bool,
     last_state_snapshot: Optional[Mapping[str, Any]],
     resident_generation: int = 0,
+    lights_source_meta: Optional[Mapping[str, Any]] = None,
 ) -> StateContextResult:
     from chat.system_builder import format_state_diff
 
@@ -276,6 +277,7 @@ def _legacy_state_context(
             reanchor_reason=None,
             fallback_reason=None,
             resident_generation=resident_generation,
+            lights_source_meta=lights_source_meta,
         ),
         used_lean=False,
     )
@@ -288,6 +290,7 @@ def assemble_legacy_full_fallback(
     resident,
 ) -> StateContextResult:
     """True legacy fallback: full snapshot from lean=False raw state."""
+    lights_meta = _parse_lights_source_meta(legacy_raw_state)
     raw = normalize_state_dict(legacy_raw_state)
     state_text = format_state_snapshot(raw)
     state_mode = 'snapshot' if state_text else 'none'
@@ -303,6 +306,7 @@ def assemble_legacy_full_fallback(
         reanchor_reason=None,
         fallback_reason=fallback_reason,
         resident_generation=int(getattr(resident, 'generation', 0) or 0),
+        lights_source_meta=lights_meta,
     )
     return StateContextResult(
         state_text=state_text,
@@ -339,6 +343,7 @@ def assemble_cc_state_context(
             is_cold=is_cold,
             last_state_snapshot=getattr(resident, 'last_state_snapshot', None),
             resident_generation=generation,
+            lights_source_meta=lights_meta,
         )
 
     prev_lean = bool(getattr(resident, 'last_successful_lean_state', False))

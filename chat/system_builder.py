@@ -702,7 +702,10 @@ def _fmt_light_status(light):
         light = light.get('values') or {}
     if not light or 'power' not in light:
         return ''
-    if not light.get('power'):
+    power = light.get('power')
+    if power is None:
+        return ''
+    if not power:
         return '关'
     pieces = ['开']
     if light.get('brightness'):
@@ -989,7 +992,6 @@ def _cc_collect_state(get_db_fn, *, lean=False):
         ),
         'emotion': '',
         'drive': '',
-        'lights': '',
         'pocket': '',
         'todos': '',
         'ledger': '',
@@ -1032,9 +1034,13 @@ def _cc_collect_state(get_db_fn, *, lean=False):
         )
         if lights_text:
             state['lights'] = lights_text
+        elif lean:
+            state.pop('lights', None)
         state['_lights_source'] = json.dumps(lights_meta, ensure_ascii=False)
     except Exception:
-        if not lean:
+        if lean:
+            state.pop('lights', None)
+        else:
             state['lights'] = '（灯·当前状态：暂不可读）'
         state['_lights_source'] = json.dumps({
             'lights_source_status': 'unavailable',
