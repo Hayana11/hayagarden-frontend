@@ -190,7 +190,7 @@
     - 原因：灯设备 unsupported 属性（brightness/color_temp）与瞬时读取失败被错误解释为状态变化；State Lean 骨架未判失败，污染模型注意力
     - `config_store.set(CONTEXT_LEAN_STATE_ENABLED, 0)` + `systemctl restart frontend frontend-gw`（未回滚 #139 代码）
     - 终验：`frontend`/`frontend-gw` active；五开关均为 `False`；`DEPLOYED_SHA`/`git HEAD`=`6678ee5`
-  - [-] **灯能力 / State 采集语义修复**（`fix/light-capability-state-semantics-8046` · Draft PR 待开）：power-only 查询、部分成功、热轮 last-known preservation、冷启动省略 lights；**未 merge / 未部署**
+  - [-] **灯能力 / State 采集语义修复**（`cursor/fix-light-capability-state-semantics-8046` · Draft PR 待审）：power-only 查询、部分成功、热轮 last-known preservation、冷启动省略 lights；**未 merge / 未部署**
   - 子阶段：
     - [x] State delta / re-anchor 代码 merge（main@6678ee5）
     - [x] 四开关 0 生产部署（VPS `6678ee5`）
@@ -265,7 +265,7 @@ P-SHADOW        [x]
 ### 当前下一步
 
 ```text
-灯能力 / State 采集语义修复（fix/light-capability-state-semantics-8046 · Draft PR 待审）
+灯能力 / State 采集语义修复（cursor/fix-light-capability-state-semantics-8046 · Draft PR 待审）
 → 人工审查 merge + 单独授权恢复 CONTEXT_LEAN_STATE_ENABLED=1 观察
 → 其余三 Lean + Relationship 保持 0
 → Stage 2 / UH-A0 / UH-A 未授权
@@ -1038,7 +1038,7 @@ PR #126 修门禁与去重
 - [x] **观察暂停**：`config_store.set(CONTEXT_LEAN_STATE_ENABLED, 0)`；未改 `.env`；`systemctl restart frontend frontend-gw` → active
 - [x] **五开关终验**：STATE/HISTORY/TOOL/FILE/RELATIONSHIP 均为 `False`；`DEPLOYED_SHA`/`git HEAD`=`6678ee5`；**未回滚 #139**
 - [~] **Stage 1 表达观察暂停**：原因——灯 unsupported 属性与瞬时读取失败被错误解释为状态变化；State Lean 骨架未判失败，待灯源语义修复后恢复（代码项 `[x]` 不回退）
-- [-] **灯能力语义修复 PR**（`fix/light-capability-state-semantics-8046`）：power-only 查询、部分成功、热轮 preserve、冷启动省略；Draft 待审；**未 merge / 未部署 / 未重开 STATE lean**
+- [-] **灯能力语义修复 PR**（`cursor/fix-light-capability-state-semantics-8046`）：power-only 查询、部分成功、热轮 preserve、冷启动省略；Draft 待审；**未 merge / 未部署 / 未重开 STATE lean**
 
 ### 2026-07-27（续·#139 reminder user_record）
 
