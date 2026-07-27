@@ -264,8 +264,8 @@ P-SHADOW        [x]
 ### 当前下一步
 
 ```text
-灯能力 / State 采集语义修复（PR #140 · cursor/fix-light-capability-state-semantics-8046）
-→ 审查 #140 修订（collector / MIOT / legacy observation / CI）
+灯能力 / State 采集语义修复（PR #140 · cursor/fix-light-capability-state-semantics-8046 @ a4f23d3）
+→ re-review round 2（per-zone partial merge + CI lazy import）
 → merge + 部署后单独授权恢复 CONTEXT_LEAN_STATE_ENABLED=1 观察
 → 其余三 Lean + Relationship 保持 0
 → Stage 2 / UH-A0 / UH-A 未授权
