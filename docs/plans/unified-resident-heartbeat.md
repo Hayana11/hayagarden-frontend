@@ -3,9 +3,9 @@
 > 同一只费佳、固定 system、固定工具面、三类轮次；普通 Wake 降为主 resident 的一次短心跳，只有需要行动时才升级，用户聊天永远优先。
 
 - **计划分支**：`plan/unified-heartbeat-tracker`
-- **当前状态**：`P-CONTEXT-LEAN_STAGE1`（#139 已 merge `6678ee5`；**四开关仍为 `0`**；**生产服务重启待 VPS 验证**；Lean 开启未授权）
-- **最后更新**：2026-07-27（纠正部署状态：merge + 本地 smoke 已完成；`systemctl` 重启未证明）
-- **tracker head**：`7701bcc`
+- **当前状态**：`P-CONTEXT-LEAN_STAGE1`（#139 merge+部署 `6678ee5` 完成；**四开关仍为 `0`**；**Lean 开启未授权**）
+- **最后更新**：2026-07-27（VPS `deploy-frontend.sh 6678ee5` + systemctl 验证 + 运行中 smoke PASS）
+- **tracker head**：`b8539c9`
 - **生产 HEAD**：`6678ee59bf4f930c6be7687af71f19f28b0f5c1d`（main merge #139）
 - **当前 identity**：`identity_id = "fyodor-default"` · `provider_id = "claude_code"` · `conversation_id = "default"`
 - **首个 Provider Adapter**：Claude Unified Resident Adapter
@@ -142,33 +142,31 @@
     ```
   - 独立 P0 安全 PR；**不属于 #134 adapter 施工范围**
 - [x] **P-CONTEXT-LEAN Stage 1 代码：State delta / re-anchor**（merge 完成）
-  - 状态：**main@6678ee5 已 merge**；**四开关仍为 `0`**；**生产服务重启 `[ ]` 待 VPS 验证**；**`CONTEXT_LEAN_STATE_ENABLED` 未授权**
+  - 状态：**main@6678ee5 已 merge + 已部署（四开关 `0`）**；**`CONTEXT_LEAN_STATE_ENABLED` 未授权**
   - 代码 PR：**#139** · merge commit `6678ee59bf4f930c6be7687af71f19f28b0f5c1d`（2026-07-27）
   - base：`dbf3ad4` · feature head：`c721c26`
   - 受控合并进度：
     ```text
     代码 merge                         [x] main@6678ee5
-    目标 SHA checkout / 本地 smoke      [x] deploy 预检全绿；手动 checkout；DEPLOYED_SHA 已写
-    生产服务重启并运行新代码             [ ] PENDING — deploy 在 systemctl 失败并回滚
-    Lean 开关开启                      [ ] 未授权
+    目标 SHA checkout / 本地 smoke      [x]
+    生产 frontend 服务加载 6678ee5      [x] systemctl active
+    生产 frontend-gw 加载 6678ee5       [x] systemctl active
+    CONTEXT_LEAN_STATE_ENABLED=1        [ ] 未授权
     ```
-  - 本地 smoke（2026-07-27，**非运行中服务**）：
+  - VPS 部署（2026-07-27）：
+    - `sudo scripts/deploy-frontend.sh 6678ee59bf4f930c6be7687af71f19f28b0f5c1d` → **Deployed**
+    - `systemctl is-active frontend` → **active**
+    - `systemctl is-active frontend-gw` → **active**
+    - `DEPLOYED_SHA` / `git HEAD` → **6678ee5**
+  - 运行中服务 smoke（2026-07-27）：
     - `static_system_sha256` 未变：`6c129b226b9370fe4d6fd9197850dfdc6282ddb1fd68ecbc112af045946a2bc2`
-    - 四开关默认/显式均为 `0`：`CONTEXT_LEAN_STATE/HISTORY/TOOL_BUDGET/FILE_DEDUP_ENABLED`
+    - 四开关均为 `False`；`.env` 无显式 Lean 覆盖
     - `OMBRE_ADAPTER_BACKEND=legacy_module`
-    - legacy parity unittest 23 项 PASS
-  - **VPS 待执行**（拿到 systemd 证据前不得写「已部署」）：
-    ```bash
-    sudo scripts/deploy-frontend.sh 6678ee59bf4f930c6be7687af71f19f28b0f5c1d
-    systemctl is-active frontend frontend-gw
-    cat /var/lib/hayagarden/DEPLOYED_SHA
-    git -C /opt/frontend rev-parse HEAD
-    # 预期：active / active / 6678ee5 / 6678ee5
-    # 运行中服务 smoke：static_system_sha256、四开关 0、legacy_module、聊天、wake_check、observation v3
-    ```
+    - `curl /api/debug/wake_check` → `{"ok":true,...}`
+    - **未**开启 `CONTEXT_LEAN_STATE_ENABLED`
   - 子阶段：
     - [x] State delta / re-anchor 代码 merge（main@6678ee5；开关默认 0）
-    - [-] 四开关 0 生产部署（**待 VPS `systemctl` 重启验证**）
+    - [x] 四开关 0 生产部署（VPS `6678ee5`；`frontend`/`frontend-gw` active）
     - [ ] `CONTEXT_LEAN_STATE_ENABLED` 生产小流量开启 + 人工表达验收
     - [ ] Tool-history budget
     - [ ] File-content dedup
@@ -229,7 +227,7 @@
 P-SHADOW        [x]
 → P-CONTEXT-OBS [x]
 → Memory Hotfix [x]          ← merge `dbf3ad4` + legacy_module deploy + smoke
-→ P-CONTEXT-LEAN [-]         ← Stage 1 merge `6678ee5`；四开关 0；**VPS 服务重启待证**
+→ P-CONTEXT-LEAN [-]         ← Stage 1 deployed `6678ee5` 四开关 0；STATE 开启未授权
 → UH-A0 Tool Parity [ ]
 → UH-A / UH-B [ ]
 → ISV3-1B [ ]
@@ -240,14 +238,13 @@ P-SHADOW        [x]
 ### 当前下一步
 
 ```text
-P-CONTEXT-LEAN Stage 1 (#139 merged @6678ee5)
-→ VPS 执行 deploy-frontend.sh + systemctl 验证（四开关仍为 0）
-→ 运行中服务 smoke（聊天 / wake_check / observation v3）
-→ 仍禁止 CONTEXT_LEAN_STATE_ENABLED=1
-→ 后续 Stage 2+ 须单独标 [-]
+P-CONTEXT-LEAN Stage 1 (#139 deployed @6678ee5，四开关 0)
+→ 单独授权 CONTEXT_LEAN_STATE_ENABLED=1 + 小窗口表达验收
+→ 仍禁止同一步自动开启 Lean
+→ Stage 2+ 须单独标 [-]
 ```
 
-> morning cron 继续关闭。#134 已 merge/deploy。#139 代码已 merge；**生产进程是否已加载 6678ee5 待 VPS 重启验证**。**Context Lean 四开关生产仍为 0**。
+> #139 merge+deploy 完成（`6678ee5`）。**Context Lean 四开关生产仍为 0**。UH-A0、UH-A、ISV3-1B 等均不得提前施工。
 
 ---
 
@@ -987,11 +984,19 @@ PR #126 修门禁与去重
 - [x] **#139 merge** → `6678ee59bf4f930c6be7687af71f19f28b0f5c1d`（main；2026-07-27）
 - [x] **deploy 预检 + 本地 smoke**：`deploy-frontend.sh` staging 测试全绿；legacy parity unittest 23 项 PASS；四开关默认 `0`
 - [x] **手动 checkout + DEPLOYED_SHA**：`git checkout 6678ee5`；`/var/lib/hayagarden/DEPLOYED_SHA=6678ee5`
-- [!] **生产服务重启未证明**：`deploy-frontend.sh` 在 `systemctl restart` 失败并自动回滚；**仅写 DEPLOYED_SHA ≠ 运行中进程已加载新代码**
-- [ ] **VPS 待办**：重跑 `sudo scripts/deploy-frontend.sh 6678ee5`；验证 `frontend`/`frontend-gw` active；运行中服务 smoke
-- [ ] **`CONTEXT_LEAN_STATE_ENABLED=1`**：**未授权**（须待 VPS 部署确认后另批）
+- [!] **生产服务重启未证明**（Cloud Agent 本地；已纠正）
+- [x] **VPS 生产部署**（2026-07-27）：`deploy-frontend.sh 6678ee5`；`frontend`/`frontend-gw` active；运行中 smoke PASS
+- [ ] **`CONTEXT_LEAN_STATE_ENABLED=1`**：**未授权**
 - [ ] Stage 2+ **未授权**
-- [ ] **#127 PR 描述同步**（页面仍显示旧 head；待 VPS 部署确认后一并更新）
+- [ ] **#127 PR 描述同步**（待爸爸手动更新页面）
+
+### 2026-07-27（续·VPS 生产部署终验）
+
+- [x] **VPS deploy** → `6678ee59bf4f930c6be7687af71f19f28b0f5c1d`
+- [x] **systemctl** → `frontend` active · `frontend-gw` active
+- [x] **SHA 对齐** → `DEPLOYED_SHA` + `git HEAD` = `6678ee5`
+- [x] **运行中 smoke** → `static_system_sha256` 不变 · 四开关 `False` · `legacy_module` · `wake_check ok`
+- [ ] **`CONTEXT_LEAN_STATE_ENABLED=1`** 未授权
 
 ### 2026-07-27（续·#139 reminder user_record）
 
