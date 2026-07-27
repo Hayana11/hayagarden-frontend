@@ -574,6 +574,75 @@ class CleanWindowShadowGatewayTests(unittest.TestCase):
         self.assertEqual(rows[0][0], 'formal')
 
 
+class DailyCandidateShadowTests(unittest.TestCase):
+    def setUp(self):
+        cws.reset_manager_for_tests()
+
+    def tearDown(self):
+        cws.reset_manager_for_tests()
+
+    def _valid_handoff_yaml(self) -> str:
+        return (
+            'day: "2026-07-26"\n'
+            'topics:\n'
+            '  - "疲劳"\n'
+            'confirmed_facts:\n'
+            '  - "用户提到身体疲惫"\n'
+            'decisions:\n'
+            '  -\n'
+            'open_loops:\n'
+            '  -\n'
+            'explicit_user_requests:\n'
+            '  - "用户提到：希望陪伴而非建议"\n'
+            'last_topic: "用户提到：询问接下来想说什么"\n'
+        )
+
+    def test_daily_candidate_injects_handoff_and_state_once(self):
+        resident = _FakeResident(cold_turns=0)
+        fake_state = {
+            'time_bucket': 'bucket=2026-07-27 12:00',
+            'emotion': 'valence=0.5 arousal=0.3 mood=平静 pa=0.5 na=0.2 longing=0.00 desire_p=0.00 desire_i=0.25 desire_c=0.70',
+            'lights': 'main=关 bedside=关',
+        }
+        with self._run_with_patches(resident) as (stack, mgr, *_):
+            with mock.patch('chat.clean_window_shadow._build_daily_state_text') as build_state:
+                build_state.side_effect = [
+                    ('【当前状态】\n' + fake_state['emotion'], 'snapshot', fake_state),
+                    ('', 'none', fake_state),
+                ]
+                started = mgr.start(
+                    context_profile='daily_candidate',
+                    day_handoff_text=self._valid_handoff_yaml(),
+                )
+                self.assertEqual(started['context_profile'], 'daily_candidate')
+                manifest = started['context_manifest']
+                self.assertTrue(manifest['day_handoff_injected'])
+                self.assertFalse(manifest['cold_once_injected'])
+                self.assertFalse(manifest['auto_recall_injected'])
+
+                sid = started['session_id']
+                mgr.turn(sid, '第一轮')
+                first = resident.sent_contents[0]
+                self.assertIn('【昨日交接·仅事实】', first)
+                self.assertIn('【当前状态】', first)
+                self.assertEqual(first.strip().split('\n')[-1], '第一轮')
+
+                mgr.turn(sid, '第二轮')
+                second = resident.sent_contents[1]
+                self.assertNotIn('【昨日交接·仅事实】', second)
+                self.assertEqual(second, '第二轮')
+
+    def _run_with_patches(self, fake_resident=None):
+        return _PatchedManager(fake_resident)
+
+    def test_clean_profile_unchanged(self):
+        with self._run_with_patches() as (stack, mgr, resident, *_):
+            started = mgr.start(context_profile='clean')
+            self.assertEqual(started.get('context_profile', 'clean'), 'clean')
+            mgr.turn(started['session_id'], 'hi')
+            self.assertEqual(resident.sent_contents[0], 'hi')
+
+
 class CleanWindowShadowConfigTests(unittest.TestCase):
     def test_default_config_store_value(self):
         self.assertEqual(config_store._DEFAULTS.get('CC_CLEAN_WINDOW_SHADOW_ENABLED'), '0')

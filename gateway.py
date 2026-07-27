@@ -5926,10 +5926,17 @@ def debug_clean_window_start():
     auth_err = _clean_window_shadow_auth_error()
     if auth_err:
         return auth_err
+    data = request.get_json(silent=True) or {}
     try:
-        return jsonify(_clean_window_shadow_manager().start())
+        return jsonify(_clean_window_shadow_manager().start(
+            context_profile=data.get('context_profile'),
+            day_handoff_path=data.get('day_handoff_path'),
+            day_handoff_text=data.get('day_handoff_text'),
+        ))
     except PermissionError as e:
         return jsonify({'ok': False, 'error': str(e)}), 403
+    except ValueError as e:
+        return jsonify({'ok': False, 'error': str(e)}), 400
     except RuntimeError as e:
         return jsonify({'ok': False, 'error': str(e)}), 429
     except Exception as e:
@@ -5992,11 +5999,50 @@ def debug_clean_window_reset():
     data = request.get_json(silent=True) or {}
     session_id = str(data.get('session_id') or '').strip() or None
     try:
-        return jsonify(_clean_window_shadow_manager().reset(session_id))
+        return jsonify(_clean_window_shadow_manager().reset(
+            session_id,
+            context_profile=data.get('context_profile'),
+            day_handoff_path=data.get('day_handoff_path'),
+            day_handoff_text=data.get('day_handoff_text'),
+        ))
     except PermissionError as e:
         return jsonify({'ok': False, 'error': str(e)}), 403
+    except ValueError as e:
+        return jsonify({'ok': False, 'error': str(e)}), 400
     except RuntimeError as e:
         return jsonify({'ok': False, 'error': str(e)}), 429
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+
+@app.route('/api/debug/clean-window/generate-day-handoff', methods=['POST'])
+def debug_clean_window_generate_day_handoff():
+    """Build facts-only yesterday handoff to /tmp; read-only DB, no model calls."""
+    if not _clean_window_shadow_enabled():
+        return jsonify({'ok': False, 'error': 'disabled'}), 404
+    auth_err = _clean_window_shadow_auth_error()
+    if auth_err:
+        return auth_err
+    data = request.get_json(silent=True) or {}
+    day_str = str(data.get('day') or '').strip() or None
+    try:
+        from chat.day_handoff import build_and_write_yesterday_handoff, validate_day_handoff
+        path, handoff = build_and_write_yesterday_handoff(get_db, day_str=day_str)
+        errors = validate_day_handoff(handoff)
+        return jsonify({
+            'ok': True,
+            'path': path,
+            'day': handoff.get('day'),
+            'message_count': handoff.get('message_count'),
+            'user_message_count': handoff.get('user_message_count'),
+            'validation_errors': errors,
+            'preview': {
+                'topics': handoff.get('topics'),
+                'last_topic': handoff.get('last_topic'),
+            },
+        })
+    except ValueError as e:
+        return jsonify({'ok': False, 'error': str(e)}), 400
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e)}), 500
 
