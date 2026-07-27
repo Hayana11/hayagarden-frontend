@@ -10,6 +10,7 @@ Example:
   cd /opt/frontend
   python3 scripts/generate_day_handoff.py
   python3 scripts/generate_day_handoff.py --day 2026-07-26
+  python3 scripts/generate_day_handoff.py --db /tmp/fixture.db
 """
 from __future__ import annotations
 
@@ -17,6 +18,7 @@ import argparse
 import hashlib
 import json
 import os
+import sqlite3
 import sys
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
@@ -33,17 +35,36 @@ from chat.day_handoff import (
     write_day_handoff_to_tmp,
 )
 
+DEFAULT_DB_PATH = '/opt/frontend/memories.db'
 
-def main() -> int:
+
+def open_readonly_db(db_path: str) -> sqlite3.Connection:
+    """Open an existing SQLite database read-only; never create a new file."""
+    path = os.path.abspath(str(db_path or ''))
+    if not os.path.isfile(path):
+        raise FileNotFoundError('database not found: %s' % path)
+    uri = 'file:%s?mode=ro' % path
+    conn = sqlite3.connect(uri, uri=True)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def make_get_db(db_path: str):
+    def get_db() -> sqlite3.Connection:
+        return open_readonly_db(db_path)
+
+    return get_db
+
+
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description='Generate day_handoff YAML for human review')
     parser.add_argument('--day', help='Chat day YYYY-MM-DD (default: previous chat day)')
+    parser.add_argument('--db', default=DEFAULT_DB_PATH, help='SQLite database path (read-only)')
     parser.add_argument('--json-summary', action='store_true', help='Also print JSON summary after YAML')
-    args = parser.parse_args()
-
-    from gateway import get_db
+    args = parser.parse_args(argv)
 
     day = validate_day_string(args.day or chat_day_str(offset_days=-1))
-    rows = fetch_day_messages(get_db, day)
+    rows = fetch_day_messages(make_get_db(args.db), day)
     data = build_day_handoff_from_messages(rows, day_str=day)
     errors = validate_day_handoff(data)
     if errors:
