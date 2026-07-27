@@ -572,21 +572,6 @@ def prepare_daily_turn(
             db_path=db_path,
         )
 
-        try:
-            dc.acquire_resident_turn_lease(
-                context_id,
-                resident_generation,
-                lease_owner=owner,
-                request_message_id=int(user_message_id),
-                db_path=db_path,
-                now=now,
-            )
-        except ConflictError as exc:
-            raise LeaseConflictError(str(exc)) from exc
-        lease_acquired = True
-        lease_context_id = context_id
-        lease_generation = resident_generation
-
         db_cursor = dc.get_resident_history_cursor(
             context_id, resident_generation, db_path=db_path,
         )
@@ -601,11 +586,30 @@ def prepare_daily_turn(
         )
         if owner_status == 'takeover':
             refreshed = dc.get_daily_context_by_id(context_id, db_path=db_path) or refreshed
+            context_epoch = int(refreshed['context_epoch'])
             resident_generation = int(refreshed['resident_generation'])
             resident_key = owner_key
             db_cursor = None
             if resident is not None:
-                close_local_resident_if_bound(resident, expected_key=get_local_binding().resident_key if get_local_binding() else None)
+                close_local_resident_if_bound(
+                    resident,
+                    expected_key=get_local_binding().resident_key if get_local_binding() else None,
+                )
+
+        try:
+            dc.acquire_resident_turn_lease(
+                context_id,
+                resident_generation,
+                lease_owner=owner,
+                request_message_id=int(user_message_id),
+                db_path=db_path,
+                now=now,
+            )
+        except ConflictError as exc:
+            raise LeaseConflictError(str(exc)) from exc
+        lease_acquired = True
+        lease_context_id = context_id
+        lease_generation = resident_generation
 
         is_cold = not _can_hot_turn(
             plan=DailyTurnPlan(

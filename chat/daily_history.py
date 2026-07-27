@@ -85,9 +85,18 @@ def _fetch_current_day_history(
                 'ORDER BY id ASC' % ', '.join(select_cols),
                 (start_at, next_start, int(boundary_message_id or 0)),
             ).fetchall()
+        excluded_ids: frozenset[int] = frozenset()
+        if context_id is not None:
+            other_rows = conn.execute(
+                'SELECT message_id FROM daily_message_contexts WHERE context_id != ?',
+                (int(context_id),),
+            ).fetchall()
+            excluded_ids = frozenset(int(r[0]) for r in other_rows)
         out = []
         for r in rows:
             mid = int(r['id'])
+            if mid in excluded_ids:
+                continue
             if exclude_message_id is not None and mid == int(exclude_message_id):
                 continue
             if after_message_id is not None and mid <= int(after_message_id):
