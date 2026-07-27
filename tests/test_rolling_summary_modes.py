@@ -11,6 +11,9 @@ from chat.history_boundary import boundary_rows_for_summary, legacy_block_limit,
 from chat.rolling_summary_store import get_summary, save_summary
 
 
+_FIXED_HISTORY_WHERE = "created_at >= '2026-07-25 00:00:00'"
+
+
 def _row(mid, content='msg', *, file_url='', author=None):
     if author is None:
         author = 'hayana' if mid % 2 else 'assistant'
@@ -24,8 +27,14 @@ class RollingSummaryModeTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.db_path = str(Path(self.tmp.name) / 'memories.db')
+        self._history_where = mock.patch(
+            'chat.history_boundary._HISTORY_WHERE',
+            _FIXED_HISTORY_WHERE,
+        )
+        self._history_where.start()
 
     def tearDown(self):
+        self._history_where.stop()
         self.tmp.cleanup()
 
     def _make_db(self, rows):

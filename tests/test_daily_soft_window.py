@@ -93,16 +93,27 @@ def _seed_handoff_contexts(db: str, source: str = '2026-07-26', target: str = '2
     _ctx(db, target)
 
 
-def _cold_then_hot_build(db, ctx, **kwargs):
+def _cold_then_hot_build(db, ctx, *, state_mock=('', 'none', {}), **kwargs):
     ctx_id = int(ctx['id'])
-    with mock.patch('chat.daily_history._build_state_text', return_value=('', 'none', {})):
-        dh.build_daily_window_context(
+    gen = int(ctx.get('resident_generation') or 1)
+    with mock.patch('chat.daily_history._build_state_text', return_value=state_mock):
+        cold = dh.build_daily_window_context(
             chat_id=str(ctx.get('chat_id') or 'default'),
             daily_context=ctx,
-            static_system='S',
+            static_system=kwargs.get('static_system', 'S'),
             is_cold=True,
             db_path=db,
+            **{k: v for k, v in kwargs.items() if k != 'static_system'},
         )
+        replayed = int(cold['manifest'].get('replayed_through_message_id') or 0)
+        if cold['manifest'].get('cursor_advance_required'):
+            advance_to = replayed
+            if advance_to <= 0:
+                advance_to = int(ctx.get('boundary_message_id') or 0)
+            if advance_to > 0 or cold['current_day_history']:
+                dc.advance_resident_history_cursor(
+                    ctx_id, gen, max(advance_to, replayed), db_path=db,
+                )
         refreshed = dc.get_daily_context_by_id(ctx_id, db_path=db) or ctx
         return dh.build_daily_window_context(
             chat_id=str(refreshed.get('chat_id') or 'default'),
@@ -359,12 +370,16 @@ class CarryoverAndAutoFinalizeTests(unittest.TestCase):
                 source_kind='chat',
             )
             with mock.patch('chat.daily_history._build_state_text', return_value=('', 'none', {})):
-                dh.build_daily_window_context(
+                cold = dh.build_daily_window_context(
                     chat_id='wschat',
                     daily_context=dc.get_daily_context_by_id(int(ctx['id']), db_path=db),
                     static_system='S',
                     is_cold=True,
                     db_path=db,
+                )
+                replayed = int(cold['manifest']['replayed_through_message_id'])
+                dc.advance_resident_history_cursor(
+                    int(ctx['id']), int(ctx['resident_generation']), replayed, db_path=db,
                 )
                 built = dh.build_daily_window_context(
                     chat_id='wschat',
@@ -470,10 +485,12 @@ class HistoryAssemblyFilterTests(unittest.TestCase):
             _insert(db, 'hayana', 'z', '2026-07-26 11:02:00')
             ctx = dc.get_or_create_daily_context(chat_id='hot', local_day='2026-07-27', db_path=db)
             dc.select_carryover(int(ctx['id']), 3, db_path=db)
+            _insert(db, 'hayana', 'today', '2026-07-27 09:00:00')
             with mock.patch('chat.daily_history._build_state_text', return_value=('S', 'delta', {'k': 'v'})):
                 built = _cold_then_hot_build(
                     db, dc.get_daily_context_by_id(int(ctx['id']), db_path=db),
                     static_system='STATIC',
+                    state_mock=('S', 'delta', {'k': 'v'}),
                 )
             self.assertFalse(built['manifest']['handoff_injected_this_turn'])
             self.assertFalse(built['manifest']['carryover_injected_this_turn'])
@@ -540,22 +557,21 @@ class EpochFenceTests(unittest.TestCase):
                 resident_generation=1,
             )
 
-            def writer(conn):
-                # Simulate generation change inside the same transaction (SQLite
-                # blocks cross-connection writers under BEGIN IMMEDIATE).
-                conn.execute(
-                    'UPDATE daily_contexts SET resident_generation=resident_generation+1 WHERE id=?',
-                    (ctx['id'],),
-                )
-                conn.execute(
-                    'UPDATE daily_contexts SET morning_greeting_message_id=123 WHERE id=?',
-                    (ctx['id'],),
-                )
-                return 'wrote'
+            def writer_ops():
+                return [
+                    (
+                        'UPDATE daily_contexts SET resident_generation=resident_generation+1 WHERE id=?',
+                        (ctx['id'],),
+                    ),
+                    (
+                        'UPDATE daily_contexts SET morning_greeting_message_id=123 WHERE id=?',
+                        (ctx['id'],),
+                    ),
+                ]
 
-            ok, result = dc.commit_if_epoch_current(token, writer, db_path=db)
+            ok, result = dc.commit_if_epoch_current(token, writer_ops(), db_path=db)
             self.assertFalse(ok)
-            self.assertIsNone(result)
+            self.assertEqual(result, 0)
             refreshed = dc.get_daily_context_by_id(int(ctx['id']), db_path=db)
             self.assertIsNone(refreshed.get('morning_greeting_message_id'))
             self.assertEqual(int(refreshed['resident_generation']), 1)
@@ -573,16 +589,14 @@ class EpochFenceTests(unittest.TestCase):
                 resident_generation=1,
             )
 
-            def writer(conn):
-                conn.execute(
+            ok, affected = dc.commit_if_epoch_current(token, [
+                (
                     "UPDATE daily_contexts SET morning_greeting_message_id=7 WHERE id=?",
                     (ctx['id'],),
-                )
-                return 'ok'
-
-            ok, result = dc.commit_if_epoch_current(token, writer, db_path=db)
+                ),
+            ], db_path=db)
             self.assertTrue(ok)
-            self.assertEqual(result, 'ok')
+            self.assertEqual(affected, 1)
             self.assertEqual(
                 dc.get_daily_context_by_id(int(ctx['id']), db_path=db)['morning_greeting_message_id'],
                 7,
@@ -859,19 +873,332 @@ class R0Round4HardeningTests(unittest.TestCase):
             _init_chat_messages(db)
             ctx = _ctx(db, chat_id='hotnew')
             u1 = _insert(db, 'hayana', 'first', '2026-07-27 09:00:00')
-            with mock.patch('chat.daily_history._build_state_text', return_value=('', 'none', {})):
-                dh.build_daily_window_context(
-                    chat_id='hotnew', daily_context=ctx,
-                    static_system='S', is_cold=True, db_path=db,
-                )
             a2 = _insert(db, 'fyodor', 'second', '2026-07-27 09:05:00')
+            ctx_id = int(ctx['id'])
+            gen = int(ctx['resident_generation'])
+            with mock.patch('chat.daily_history._build_state_text', return_value=('', 'none', {})):
+                cold = dh.build_daily_window_context(
+                    chat_id='hotnew',
+                    daily_context=dc.get_daily_context_by_id(ctx_id, db_path=db),
+                    current_user_message_id=u1,
+                    static_system='S',
+                    is_cold=True,
+                    db_path=db,
+                )
+            self.assertEqual(cold['current_day_history'], [])
+            self.assertIsNone(dc.get_resident_history_cursor(ctx_id, gen, db_path=db))
+            dc.advance_resident_history_cursor(ctx_id, gen, a2, db_path=db)
+            u3 = _insert(db, 'hayana', 'third', '2026-07-27 09:10:00')
             with mock.patch('chat.daily_history._build_state_text', return_value=('', 'none', {})):
                 built = dh.build_daily_window_context(
                     chat_id='hotnew',
-                    daily_context=dc.get_daily_context_by_id(int(ctx['id']), db_path=db),
-                    static_system='S', is_cold=False, db_path=db,
+                    daily_context=dc.get_daily_context_by_id(ctx_id, db_path=db),
+                    current_user_message_id=u3,
+                    static_system='S',
+                    is_cold=False,
+                    db_path=db,
                 )
-            self.assertEqual([m['message_id'] for m in built['current_day_history']], [a2])
+            self.assertEqual(built['current_day_history'], [])
+            self.assertEqual(built['manifest']['cursor_before'], a2)
+        finally:
+            os.unlink(db)
+
+    def test_resident_cursor_lifecycle_excludes_replayed_messages(self):
+        db = _tmp_db()
+        try:
+            _init_chat_messages(db)
+            ctx = _ctx(db, chat_id='cursorlife')
+            ctx_id = int(ctx['id'])
+            gen = int(ctx['resident_generation'])
+            u101 = _insert(db, 'hayana', 'user one', '2026-07-27 09:00:00')
+            with mock.patch('chat.daily_history._build_state_text', return_value=('', 'none', {})):
+                cold = dh.build_daily_window_context(
+                    chat_id='cursorlife',
+                    daily_context=dc.get_daily_context_by_id(ctx_id, db_path=db),
+                    current_user_message_id=u101,
+                    static_system='S',
+                    is_cold=True,
+                    db_path=db,
+                )
+            self.assertEqual(cold['current_day_history'], [])
+            self.assertTrue(cold['manifest']['cursor_advance_required'])
+            self.assertIsNone(dc.get_resident_history_cursor(ctx_id, gen, db_path=db))
+            a102 = _insert(db, 'fyodor', 'assistant one', '2026-07-27 09:01:00')
+            dc.advance_resident_history_cursor(ctx_id, gen, a102, db_path=db)
+            u103 = _insert(db, 'hayana', 'user two', '2026-07-27 09:02:00')
+            with mock.patch('chat.daily_history._build_state_text', return_value=('', 'none', {})):
+                hot = dh.build_daily_window_context(
+                    chat_id='cursorlife',
+                    daily_context=dc.get_daily_context_by_id(ctx_id, db_path=db),
+                    current_user_message_id=u103,
+                    static_system='S',
+                    is_cold=False,
+                    db_path=db,
+                )
+            ids = [m['message_id'] for m in hot['current_day_history']]
+            self.assertNotIn(u101, ids)
+            self.assertNotIn(a102, ids)
+            self.assertNotIn(u103, ids)
+            self.assertEqual(ids, [])
+        finally:
+            os.unlink(db)
+
+    def test_cursor_advance_monotonic_and_cas(self):
+        db = _tmp_db()
+        try:
+            _init_chat_messages(db)
+            ctx = _ctx(db, chat_id='monocur')
+            ctx_id = int(ctx['id'])
+            gen = int(ctx['resident_generation'])
+            m1 = _insert(db, 'hayana', 'a', '2026-07-27 09:00:00')
+            m2 = _insert(db, 'fyodor', 'b', '2026-07-27 09:01:00')
+            dc.advance_resident_history_cursor(ctx_id, gen, m1, db_path=db)
+            dc.advance_resident_history_cursor(ctx_id, gen, m2, db_path=db)
+            with self.assertRaises(dc.ConflictError):
+                dc.advance_resident_history_cursor(ctx_id, gen, m1, db_path=db)
+            with self.assertRaises(dc.ConflictError):
+                dc.advance_resident_history_cursor(
+                    ctx_id, gen, m2, expected_cursor=m1, db_path=db,
+                )
+        finally:
+            os.unlink(db)
+
+    def test_respawn_cold_like_rebuilds_handoff_carryover_state(self):
+        db = _tmp_db()
+        try:
+            _init_chat_messages(db)
+            _insert(db, 'hayana', 'prev', '2026-07-26 11:00:00')
+            _insert(db, 'fyodor', 'prev reply', '2026-07-26 11:01:00')
+            src = _ctx(db, '2026-07-26', chat_id='resp', allow_backfill=True)
+            tgt = _ctx(db, '2026-07-27', chat_id='resp')
+            dc.select_carryover(int(tgt['id']), 3, db_path=db)
+            content = {
+                'source_day': '2026-07-26',
+                'source_epoch': int(src['context_epoch']),
+                'boundary_message_id': int(tgt['boundary_message_id']),
+                'topics': ['休息'],
+                'confirmed_facts': ['用户表示会好好吃早饭'],
+                'decisions': [],
+                'open_loops': [],
+                'explicit_user_requests': [],
+                'last_topic': '用户询问休息安排',
+            }
+            dc.store_day_handoff(
+                chat_id='resp',
+                source_day='2026-07-26',
+                content=content,
+                boundary_message_id=int(tgt['boundary_message_id']),
+                source_first_message_id=1,
+                source_last_message_id=1,
+                source_message_count=1,
+                source_sha256=hashlib.sha256(b'respawn').hexdigest(),
+                source_epoch=int(src['context_epoch']),
+                db_path=db,
+            )
+            respawned = dc.respawn_daily_resident(int(tgt['id']), db_path=db)
+            _insert(db, 'hayana', 'today user', '2026-07-27 10:00:00')
+            with mock.patch(
+                'chat.daily_history._build_state_text',
+                return_value=('STATE', 'snapshot', {'k': 'v'}),
+            ):
+                built = dh.build_daily_window_context(
+                    chat_id='resp',
+                    daily_context=respawned,
+                    static_system='S',
+                    is_cold=False,
+                    is_respawn=True,
+                    db_path=db,
+                )
+            self.assertTrue(built['manifest']['handoff_injected_this_turn'])
+            self.assertTrue(built['manifest']['carryover_injected_this_turn'])
+            self.assertEqual(built['manifest']['state_mode'], 'snapshot')
+            self.assertTrue(built['current_day_history'])
+        finally:
+            os.unlink(db)
+
+    def test_active_backfill_epoch_collision_active_stays_current(self):
+        db = _tmp_db()
+        try:
+            _init_chat_messages(db)
+            active = _ctx(db, '2026-07-27', chat_id='collide')
+            back = _ctx(db, '2026-07-25', chat_id='collide', allow_backfill=True)
+            self.assertEqual(int(active['context_epoch']), 1)
+            self.assertEqual(int(back['context_epoch']), 1)
+            self.assertEqual(int(back.get('is_backfill') or 0), 1)
+            active_token = dc.make_epoch_token(
+                chat_id='collide',
+                context_epoch=int(active['context_epoch']),
+                resident_generation=int(active['resident_generation']),
+            )
+            backfill_token = dc.make_epoch_token(
+                chat_id='collide',
+                context_epoch=int(back['context_epoch']),
+                resident_generation=int(back['resident_generation']),
+                is_backfill=True,
+            )
+            self.assertTrue(dc.is_epoch_current(active_token, db_path=db))
+            self.assertFalse(dc.is_epoch_current(backfill_token, db_path=db))
+            ok, _ = dc.commit_if_epoch_current(active_token, [
+                (
+                    'UPDATE daily_contexts SET carryover_count=carryover_count WHERE id=?',
+                    (int(active['id']),),
+                ),
+            ], db_path=db)
+            self.assertTrue(ok)
+            ok_back, _ = dc.commit_if_epoch_current(backfill_token, [
+                (
+                    'UPDATE daily_contexts SET carryover_count=carryover_count WHERE id=?',
+                    (int(back['id']),),
+                ),
+            ], db_path=db)
+            self.assertFalse(ok_back)
+        finally:
+            os.unlink(db)
+
+    def test_fence_rejects_end_begin_and_multi_statement(self):
+        db = _tmp_db()
+        try:
+            _init_chat_messages(db)
+            ctx = _ctx(db, chat_id='fencebypass')
+            token = dc.make_epoch_token(
+                chat_id='fencebypass',
+                context_epoch=int(ctx['context_epoch']),
+                resident_generation=1,
+            )
+            for sql in ('END', 'BEGIN', 'COMMIT; SELECT 1'):
+                with self.assertRaises(Exception):
+                    dc.commit_if_epoch_current(token, [(sql, ())], db_path=db)
+                self.assertIsNone(
+                    dc.get_daily_context_by_id(int(ctx['id']), db_path=db).get(
+                        'morning_greeting_message_id',
+                    ),
+                )
+        finally:
+            os.unlink(db)
+
+    def test_handoff_behavior_instruction_rejected(self):
+        data = {
+            'source_day': '2026-07-26',
+            'source_epoch': 1,
+            'boundary_message_id': 0,
+            'topics': [],
+            'confirmed_facts': [],
+            'decisions': [],
+            'open_loops': [],
+            'explicit_user_requests': [],
+            'last_topic': '你应该温柔地回复用户',
+        }
+        errors = dc.validate_formal_handoff_content(
+            data,
+            expected_source_day='2026-07-26',
+            expected_source_epoch=1,
+            expected_boundary_message_id=0,
+        )
+        self.assertTrue(any('behavior instruction' in e for e in errors))
+
+    def test_handoff_neutral_tone_product_description_allowed(self):
+        data = {
+            'source_day': '2026-07-26',
+            'source_epoch': 1,
+            'boundary_message_id': 0,
+            'topics': [],
+            'confirmed_facts': ['讨论了不同模型的语气差异'],
+            'decisions': [],
+            'open_loops': [],
+            'explicit_user_requests': [],
+            'last_topic': 'Claude 与 Opus 产品对比',
+        }
+        errors = dc.validate_formal_handoff_content(
+            data,
+            expected_source_day='2026-07-26',
+            expected_source_epoch=1,
+            expected_boundary_message_id=0,
+        )
+        self.assertFalse(any('behavior instruction' in e for e in errors))
+
+    def test_handoff_wrong_chat_id_rejected_on_resolve(self):
+        db = _tmp_db()
+        try:
+            _init_chat_messages(db)
+            _seed_handoff_contexts(db)
+            tgt = _ctx(db, chat_id='default')
+            src = _ctx(db, '2026-07-26', allow_backfill=True)
+            stored = dc.store_day_handoff(
+                chat_id='default',
+                source_day='2026-07-26',
+                content={
+                    'source_day': '2026-07-26',
+                    'source_epoch': int(src['context_epoch']),
+                    'boundary_message_id': int(tgt['boundary_message_id']),
+                    'topics': [],
+                    'confirmed_facts': ['事实'],
+                    'decisions': [],
+                    'open_loops': [],
+                    'explicit_user_requests': [],
+                    'last_topic': '话题',
+                },
+                boundary_message_id=int(tgt['boundary_message_id']),
+                source_first_message_id=1,
+                source_last_message_id=1,
+                source_message_count=1,
+                source_sha256=hashlib.sha256(b'wrong-chat').hexdigest(),
+                source_epoch=int(src['context_epoch']),
+                db_path=db,
+            )
+            conn = sqlite3.connect(db)
+            conn.execute(
+                'UPDATE day_handoffs SET chat_id=? WHERE id=?',
+                ('other', int(stored['id'])),
+            )
+            conn.commit()
+            conn.close()
+            ctx = dict(tgt)
+            ctx['handoff_id'] = int(stored['id'])
+            content_out, status = dc.resolve_bound_handoff(ctx, db_path=db)
+            self.assertIsNone(content_out)
+            self.assertEqual(status, dc.HANDOFF_FAILED_RETRYABLE)
+        finally:
+            os.unlink(db)
+
+    def test_handoff_wrong_source_day_rejected_on_resolve(self):
+        db = _tmp_db()
+        try:
+            _init_chat_messages(db)
+            _seed_handoff_contexts(db)
+            tgt = _ctx(db, chat_id='default')
+            wrong_day = _ctx(db, '2026-07-25', allow_backfill=True)
+            consumer = dc.get_daily_context_by_id(
+                int(_ctx(db, '2026-07-26', allow_backfill=True)['id']),
+                db_path=db,
+            )
+            bnd = int(consumer['boundary_message_id'])
+            stored = dc.store_day_handoff(
+                chat_id='default',
+                source_day='2026-07-25',
+                content={
+                    'source_day': '2026-07-25',
+                    'source_epoch': int(wrong_day['context_epoch']),
+                    'boundary_message_id': bnd,
+                    'topics': [],
+                    'confirmed_facts': ['事实'],
+                    'decisions': [],
+                    'open_loops': [],
+                    'explicit_user_requests': [],
+                    'last_topic': '话题',
+                },
+                boundary_message_id=bnd,
+                source_first_message_id=bnd if bnd else 0,
+                source_last_message_id=bnd if bnd else 0,
+                source_message_count=1 if bnd else 0,
+                source_sha256=hashlib.sha256(b'wrong-day').hexdigest(),
+                source_epoch=int(wrong_day['context_epoch']),
+                db_path=db,
+            )
+            ctx = dict(tgt)
+            ctx['handoff_id'] = int(stored['id'])
+            content_out, status = dc.resolve_bound_handoff(ctx, db_path=db)
+            self.assertIsNone(content_out)
+            self.assertEqual(status, dc.HANDOFF_FAILED_RETRYABLE)
         finally:
             os.unlink(db)
 
@@ -913,7 +1240,7 @@ class R0Round4HardeningTests(unittest.TestCase):
             with self.assertRaises(Exception):
                 dc.commit_if_epoch_current(
                     token,
-                    lambda w: w.execute('COMMIT'),
+                    [('COMMIT', ())],
                     db_path=db,
                 )
             self.assertIsNone(

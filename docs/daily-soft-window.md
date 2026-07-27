@@ -53,14 +53,21 @@ Wake executor and workspace job completion writes set `source_kind` explicitly.
 
 ## Epoch fence
 
-`commit_if_epoch_current(token, writer(conn))` runs inside one `BEGIN IMMEDIATE`
-transaction: verify epoch/generation → `writer(conn)` → re-verify → commit/rollback.
+`commit_if_epoch_current(token, operations=[(sql, params), ...])` runs inside one
+`BEGIN IMMEDIATE` transaction: verify active epoch/generation (`is_backfill=0`) →
+execute validated SQL operations → re-verify → commit/rollback.
 
-The writer callback is a **trusted contract**: it must use the provided connection
-only and must not call `commit()`, `rollback()`, or start a new transaction. If the
-callback ends the transaction early, its writes are already durable and cannot be
-undone by the outer helper. Future wiring should prefer a constrained connection
-proxy or structured CAS writes instead of arbitrary callbacks.
+Forbidden SQL includes transaction control (`BEGIN`/`END`/`COMMIT`/…), multi-statement
+batches, and `PRAGMA`. Backfill tokens (`is_backfill=1`) never pass fence checks.
+
+## Resident history cursor
+
+`build_daily_window_context()` is read-only for the cursor. It returns
+`cursor_before`, `replayed_through_message_id`, and `cursor_advance_required` in
+the manifest. After the assistant message is persisted and provider success is
+confirmed, call `advance_resident_history_cursor(context_id, resident_generation,
+processed_through_message_id, expected_cursor=None)` — cursor advances
+monotonically only.
 
 ## APIs (flag-gated; db_path injected at blueprint construction)
 

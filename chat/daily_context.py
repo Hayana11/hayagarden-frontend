@@ -16,7 +16,7 @@ import logging
 import os
 import re
 import sqlite3
-from typing import Any, Callable, Optional
+from typing import Any, Optional
 
 from chat.day_handoff import (
     CHAT_DAY_START_HOUR,
@@ -28,6 +28,8 @@ from chat.day_handoff import (
     chat_day_for_timestamp,
     chat_day_window,
     contains_assistant_voice_in_text,
+    contains_behavior_instruction_in_text,
+    previous_chat_day,
     validate_day_string,
 )
 from chat.daily_schema import (
@@ -1058,6 +1060,8 @@ def validate_formal_handoff_content(
                 errors.append('%s[%d]: exceeds max item length' % (key, i))
             if contains_assistant_voice_in_text(item):
                 errors.append('%s[%d]: contains assistant voice' % (key, i))
+            if contains_behavior_instruction_in_text(item):
+                errors.append('%s[%d]: contains behavior instruction' % (key, i))
             if re.search(r'[「『""].{8,}?[」』""]', item):
                 errors.append('%s[%d]: contains long quoted speech' % (key, i))
 
@@ -1071,6 +1075,8 @@ def validate_formal_handoff_content(
             errors.append('last_topic: exceeds max length')
         if contains_assistant_voice_in_text(last):
             errors.append('last_topic: contains assistant voice')
+        if contains_behavior_instruction_in_text(last):
+            errors.append('last_topic: contains behavior instruction')
     return errors
 
 
@@ -1130,7 +1136,6 @@ def store_day_handoff(
         if src_ctx is None:
             raise ValueError('source_day daily_context must exist')
         if source_epoch is not None and int(source_epoch) != int(src_ctx['context_epoch']):
-            raise ValueError('source_epoch must match source_day context epoch')
             raise ValueError('source_epoch must match source_day context epoch')
         day_dt = datetime.datetime.strptime(source_day, '%Y-%m-%d')
         target_day = (day_dt + datetime.timedelta(days=1)).strftime('%Y-%m-%d')
@@ -1289,6 +1294,11 @@ def resolve_bound_handoff(
         h = get_latest_handoff_for_day(ctx['chat_id'], prev, db_path=db_path)
     if not h:
         return None, HANDOFF_ABSENT
+    if str(h.get('chat_id') or '') != str(ctx.get('chat_id') or DEFAULT_CHAT_ID):
+        return None, HANDOFF_FAILED_RETRYABLE
+    expected_prev_day = previous_chat_day(str(ctx['local_day']))
+    if str(h.get('source_day') or '') != expected_prev_day:
+        return None, HANDOFF_FAILED_RETRYABLE
     handoff_status = str(h.get('status') or HANDOFF_ABSENT)
     if handoff_status != HANDOFF_READY:
         return None, handoff_status
@@ -1349,17 +1359,71 @@ def set_resident_history_cursor(
     *,
     db_path: Optional[str] = None,
 ) -> None:
+    """Test/setup helper only — production must use advance_resident_history_cursor."""
+    advance_resident_history_cursor(
+        context_id,
+        resident_generation,
+        int(message_id),
+        db_path=db_path,
+    )
+
+
+def advance_resident_history_cursor(
+    context_id: int,
+    resident_generation: int,
+    processed_through_message_id: int,
+    *,
+    expected_cursor: Optional[int] = None,
+    db_path: Optional[str] = None,
+) -> dict[str, Any]:
+    """Advance resident history cursor after assistant message is persisted."""
+    new_id = int(processed_through_message_id)
+    if new_id <= 0:
+        raise ValueError('processed_through_message_id must be positive')
+
     conn = _connect(db_path)
     try:
+        conn.execute('BEGIN IMMEDIATE')
+        row = conn.execute(
+            'SELECT history_cursor_message_id FROM daily_resident_cursors '
+            'WHERE context_id=? AND resident_generation=?',
+            (int(context_id), int(resident_generation)),
+        ).fetchone()
+        current = int(row['history_cursor_message_id']) if row else None
+        if expected_cursor is not None:
+            exp = int(expected_cursor)
+            if (current or 0) != exp:
+                conn.rollback()
+                raise ConflictError('resident cursor CAS failed')
+        if current is not None and new_id < current:
+            conn.rollback()
+            raise ConflictError('resident cursor cannot move backward')
+        if current is not None and new_id == current:
+            conn.commit()
+            return {
+                'context_id': int(context_id),
+                'resident_generation': int(resident_generation),
+                'history_cursor_message_id': current,
+                'advanced': False,
+            }
         conn.execute(
             'INSERT INTO daily_resident_cursors '
             '(context_id, resident_generation, history_cursor_message_id) VALUES (?,?,?) '
             'ON CONFLICT(context_id, resident_generation) DO UPDATE SET '
             'history_cursor_message_id=excluded.history_cursor_message_id, '
             "updated_at=datetime('now','+8 hours')",
-            (int(context_id), int(resident_generation), int(message_id)),
+            (int(context_id), int(resident_generation), new_id),
         )
         conn.commit()
+        return {
+            'context_id': int(context_id),
+            'resident_generation': int(resident_generation),
+            'history_cursor_message_id': new_id,
+            'advanced': True,
+        }
+    except Exception:
+        conn.rollback()
+        raise
     finally:
         conn.close()
 
@@ -1369,11 +1433,13 @@ def make_epoch_token(
     chat_id: str,
     context_epoch: int,
     resident_generation: int,
+    is_backfill: bool = False,
 ) -> dict[str, Any]:
     return {
         'chat_id': chat_id,
         'context_epoch': int(context_epoch),
         'resident_generation': int(resident_generation),
+        'is_backfill': int(bool(is_backfill)),
     }
 
 
@@ -1382,12 +1448,14 @@ def is_epoch_current(
     *,
     db_path: Optional[str] = None,
 ) -> bool:
+    if int(token.get('is_backfill') or 0):
+        return False
     chat_id = str(token.get('chat_id') or DEFAULT_CHAT_ID)
     conn = _connect(db_path)
     try:
         row = conn.execute(
             'SELECT context_epoch, resident_generation FROM daily_contexts '
-            'WHERE chat_id=? ORDER BY context_epoch DESC LIMIT 1',
+            'WHERE chat_id=? AND is_backfill=0 ORDER BY context_epoch DESC LIMIT 1',
             (chat_id,),
         ).fetchone()
         if row is None:
@@ -1402,13 +1470,13 @@ def is_epoch_current(
 
 def commit_if_epoch_current(
     token: dict[str, Any],
-    writer: Callable[[Any], Any],
+    operations: list[tuple[str, tuple | list]],
     *,
     db_path: Optional[str] = None,
-) -> tuple[bool, Any]:
-    """Epoch-fenced write via constrained connection proxy (see daily_fence)."""
+) -> tuple[bool, int]:
+    """Epoch-fenced write via validated structured SQL operations."""
     from chat.daily_fence import commit_if_epoch_current as _fence_commit
-    return _fence_commit(token, writer, connect_fn=_connect, db_path=db_path)
+    return _fence_commit(token, operations, connect_fn=_connect, db_path=db_path)
 
 
 def retire_resident_for_rollover(

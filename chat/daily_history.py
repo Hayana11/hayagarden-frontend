@@ -22,7 +22,6 @@ from chat.daily_context import (
     get_resident_history_cursor,
     is_formal_chat_message,
     resolve_bound_handoff,
-    set_resident_history_cursor,
 )
 from chat.daily_schema import META_SOURCE_KIND_CUTOVER, get_meta_int
 from chat.day_handoff import TZ_OFFSET_HOURS
@@ -128,13 +127,17 @@ def build_daily_window_context(
     Order: static → handoff → carryover → state → current-day history.
 
     Resident history:
-    - cold / respawn: replay full epoch history (excluding current user message)
+    - cold_like (cold or respawn): replay full epoch history (excluding current user)
     - hot: only messages after resident cursor; fail closed if cursor missing
+
+    Does not persist resident cursor — caller must invoke
+    advance_resident_history_cursor() after assistant message lands.
     """
     _ = TZ_OFFSET_HOURS
     ctx = dict(daily_context)
     context_id = int(ctx['id'])
     resident_generation = int(ctx.get('resident_generation') or 1)
+    cold_like = bool(is_cold or is_respawn)
 
     if not ctx.get('selection_finalized_at'):
         ensure_carryover_zero_if_user_messages_exist(context_id, db_path=db_path)
@@ -147,23 +150,24 @@ def build_daily_window_context(
         format_formal_handoff_prompt(handoff_content)
         if handoff_status == HANDOFF_READY and handoff_content else ''
     )
-    handoff_injected = bool(inject_handoff and is_cold and handoff_prompt)
+    handoff_injected = bool(inject_handoff and cold_like and handoff_prompt)
 
     from chat.daily_context import get_selected_carryover_messages
     carryover_messages = get_selected_carryover_messages(context_id, db_path=db_path)
     carryover_ids = [int(m['message_id']) for m in carryover_messages]
-    carryover_injected = bool(inject_carryover and is_cold and carryover_messages)
+    carryover_injected = bool(inject_carryover and cold_like and carryover_messages)
 
     state_text, state_mode, state_snapshot = _build_state_text(
-        is_cold=is_cold, last_snapshot=last_state_snapshot,
+        is_cold=cold_like, last_snapshot=last_state_snapshot,
     )
     state_injected = bool(state_text)
 
+    cursor_before = get_resident_history_cursor(
+        context_id, resident_generation, db_path=db_path,
+    )
     after_cursor: Optional[int] = None
-    if not is_cold and not is_respawn:
-        after_cursor = get_resident_history_cursor(
-            context_id, resident_generation, db_path=db_path,
-        )
+    if not cold_like:
+        after_cursor = cursor_before
         if after_cursor is None:
             raise HotTurnCursorError('hot turn requires resident history cursor')
 
@@ -177,11 +181,14 @@ def build_daily_window_context(
     )
 
     if current_day_history:
-        cursor_mid = int(current_day_history[-1]['message_id'])
+        replayed_through_message_id = int(current_day_history[-1]['message_id'])
+    elif cursor_before is not None:
+        replayed_through_message_id = int(cursor_before)
     else:
-        cursor_mid = int(ctx.get('boundary_message_id') or 0)
-    set_resident_history_cursor(
-        context_id, resident_generation, cursor_mid, db_path=db_path,
+        replayed_through_message_id = int(ctx.get('boundary_message_id') or 0)
+
+    cursor_advance_required = bool(
+        current_day_history or current_user_message_id is not None,
     )
 
     layers: list[dict[str, Any]] = []
@@ -215,7 +222,10 @@ def build_daily_window_context(
         'boundary_message_id': int(ctx.get('boundary_message_id') or 0),
         'daily_context_status': ctx.get('status'),
         'resident_generation': resident_generation,
-        'resident_history_cursor_id': after_cursor,
+        'cursor_before': cursor_before,
+        'replayed_through_message_id': replayed_through_message_id,
+        'cursor_advance_required': cursor_advance_required,
+        'resident_history_cursor_id': cursor_before,
         'handoff_status': handoff_status,
         'handoff_injected_this_turn': handoff_injected,
         'carryover_count': len(carryover_ids),
