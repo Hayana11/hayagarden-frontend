@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+import json
 import unittest
 from types import SimpleNamespace
 from unittest import mock
@@ -557,9 +558,13 @@ class LeanFactsOnlyCollectionTests(unittest.TestCase):
              mock.patch('chat.system_builder._format_structured_drive_snippet', return_value='attachment=0.55'), \
              mock.patch('urllib.request.urlopen') as urlopen_mock, \
              mock.patch('config_store.get_bool', return_value=False):
-            urlopen_mock.return_value.__enter__.return_value.read.return_value = (
-                b'{"result":{"main":{},"bedside":{}}}'
-            )
+            urlopen_mock.return_value.__enter__.return_value.read.return_value = json.dumps({
+                'ok': True,
+                'result': {
+                    'main': {'available': True, 'values': {'power': False}},
+                    'bedside': {'available': True, 'values': {'power': False}},
+                },
+            }).encode()
             state = _cc_collect_state(get_db, lean=True)
 
         for key in self._SYSTEM_FIELD_KEYS:
@@ -604,7 +609,7 @@ class LeanFactsOnlyCollectionTests(unittest.TestCase):
         self.assertIn('user_record:', state['todos'])
         self.assertIn('修改 AI 的语气，让表达更克制', state['todos'])
         self.assertTrue(lean_system_field_is_facts_only(state['time_bucket']))
-        self.assertTrue(lean_system_field_is_facts_only(state['lights']))
+        self.assertNotIn('lights', state)
 
     def test_lean_reminder_user_records_wrap_due_todos_and_countdowns(self):
         import datetime as dt

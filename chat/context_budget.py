@@ -33,6 +33,8 @@ def default_estimate_tokens(text: Optional[str]) -> int:
 def normalize_state_dict(state: Optional[Mapping[str, Any]]) -> dict[str, str]:
     out: dict[str, str] = {}
     for key, value in (state or {}).items():
+        if str(key).startswith('_'):
+            continue
         out[str(key)] = str(value or '').strip()
     return out
 
@@ -74,6 +76,9 @@ def build_state_send_payload(
     send: dict[str, str] = {}
     keys = list(dict.fromkeys(list(last_raw.keys()) + list(raw.keys())))
     for key in keys:
+        if key not in raw:
+            if key == 'lights':
+                continue
         if key == 'time_bucket':
             continue
         before = last_raw.get(key, '')

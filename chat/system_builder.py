@@ -14,6 +14,7 @@ import json
 import datetime
 import urllib.request
 import config_store
+from typing import Mapping
 
 from chat.context_contract import SharedContext
 from chat.relationship_context import build_relationship_context
@@ -282,15 +283,14 @@ def build_system(
     try:
         _lreq = urllib.request.Request('http://127.0.0.1:5052/light/status')
         with urllib.request.urlopen(_lreq, timeout=3) as _lr:
-            _ls = json.loads(_lr.read()).get('result', {})
-        def _fmt_l(l):
-            if not l.get('power'): return '关'
-            p = ['开']
-            if l.get('brightness'): p.append(str(l['brightness']) + '%')
-            if l.get('color_temp'): p.append(str(l['color_temp']) + 'K')
-            return ' '.join(p)
-        _ms = _fmt_l(_ls.get('main', {})); _bs = _fmt_l(_ls.get('bedside', {}))
-        parts.append(f'（灯·当前状态：主灯 {_ms}，床头灯 {_bs}。操作灯前先看这里——关着的灯不要再去"调暗"，会重新开起来。）')
+            body = json.loads(_lr.read())
+        if body.get('ok'):
+            lights_text, _ = _collect_lights_from_status_payload(
+                body.get('result') or {},
+                lean=False,
+            )
+            if lights_text:
+                parts.append(lights_text)
     except Exception:
         pass
 
@@ -696,7 +696,17 @@ def build_cc_static_system():
 
 
 def _fmt_light_status(light):
-    if not light.get('power'):
+    """Format a zone status dict or legacy flat power map for display."""
+    if isinstance(light, dict) and 'values' in light:
+        if not light.get('available'):
+            return ''
+        light = light.get('values') or {}
+    if not light or 'power' not in light:
+        return ''
+    power = light.get('power')
+    if power is None:
+        return ''
+    if not power:
         return '关'
     pieces = ['开']
     if light.get('brightness'):
@@ -704,6 +714,85 @@ def _fmt_light_status(light):
     if light.get('color_temp'):
         pieces.append(str(light['color_temp']) + 'K')
     return ' '.join(pieces)
+
+
+def _parse_lean_lights_zones(text: str) -> dict[str, str]:
+    """Parse lean lights tokens like ``main=关 bedside=开`` into per-zone values."""
+    zones: dict[str, str] = {}
+    for token in (text or '').split():
+        if '=' not in token:
+            continue
+        zone, _, value = token.partition('=')
+        if zone in ('main', 'bedside') and value:
+            zones[zone] = value
+    return zones
+
+
+def _format_lean_lights_zones(zones: Mapping[str, str]) -> str:
+    parts = []
+    for zone in ('main', 'bedside'):
+        value = zones.get(zone)
+        if value:
+            parts.append('%s=%s' % (zone, value))
+    return ' '.join(parts)
+
+
+def merge_partial_lean_lights(
+    observed: str,
+    cumulative: str,
+    *,
+    main_available: bool,
+    bedside_available: bool,
+) -> str | None:
+    """Merge successful zone reads with last-known values for unavailable zones."""
+    obs = _parse_lean_lights_zones(observed)
+    merged = dict(_parse_lean_lights_zones(cumulative))
+    if main_available and 'main' in obs:
+        merged['main'] = obs['main']
+    if bedside_available and 'bedside' in obs:
+        merged['bedside'] = obs['bedside']
+    text = _format_lean_lights_zones(merged)
+    return text or None
+
+
+def _collect_lights_from_status_payload(payload: dict, *, lean: bool) -> tuple[str | None, dict]:
+    """Return (provider-visible lights text or None to omit, observation meta)."""
+    main = payload.get('main') or {}
+    bedside = payload.get('bedside') or {}
+    main_ok = bool(main.get('available'))
+    bedside_ok = bool(bedside.get('available'))
+    meta = {
+        'lights_main_available': main_ok,
+        'lights_bedside_available': bedside_ok,
+    }
+    if main_ok and bedside_ok:
+        meta['lights_source_status'] = 'ok'
+    elif main_ok or bedside_ok:
+        meta['lights_source_status'] = 'partial'
+    else:
+        meta['lights_source_status'] = 'unavailable'
+
+    parts = []
+    if main_ok:
+        ms = _fmt_light_status(main)
+        if ms:
+            parts.append('main=%s' % ms if lean else '主灯 %s' % ms)
+    if bedside_ok:
+        bs = _fmt_light_status(bedside)
+        if bs:
+            parts.append('bedside=%s' % bs if lean else '床头灯 %s' % bs)
+
+    if not parts:
+        return None, meta
+    meta['lights_last_success_at'] = (
+        datetime.datetime.utcnow().replace(microsecond=0).isoformat() + 'Z'
+    )
+    if lean:
+        return ' '.join(parts), meta
+    return (
+        '（灯·当前状态：%s。操作灯前先看这里——关着的灯不要再去"调暗"，会重新开起来。）'
+        % '，'.join(parts)
+    ), meta
 
 
 def _cc_collect_cold_once(get_db_fn):
@@ -943,7 +1032,6 @@ def _cc_collect_state(get_db_fn, *, lean=False):
         ),
         'emotion': '',
         'drive': '',
-        'lights': '',
         'pocket': '',
         'todos': '',
         'ledger': '',
@@ -977,18 +1065,28 @@ def _cc_collect_state(get_db_fn, *, lean=False):
     try:
         req = urllib.request.Request('http://127.0.0.1:5052/light/status')
         with urllib.request.urlopen(req, timeout=3) as resp:
-            ls = json.loads(resp.read()).get('result', {})
-        ms = _fmt_light_status(ls.get('main', {}))
-        bs = _fmt_light_status(ls.get('bedside', {}))
-        if lean:
-            state['lights'] = f'main={ms} bedside={bs}'
-        else:
-            state['lights'] = (
-                f'（灯·当前状态：主灯 {ms}，床头灯 {bs}。'
-                '操作灯前先看这里——关着的灯不要再去"调暗"，会重新开起来。）'
-            )
+            body = json.loads(resp.read())
+        if not body.get('ok'):
+            raise OSError(body.get('error') or 'light status not ok')
+        lights_text, lights_meta = _collect_lights_from_status_payload(
+            body.get('result') or {},
+            lean=lean,
+        )
+        if lights_text:
+            state['lights'] = lights_text
+        elif lean:
+            state.pop('lights', None)
+        state['_lights_source'] = json.dumps(lights_meta, ensure_ascii=False)
     except Exception:
-        state['lights'] = 'main=unknown bedside=unknown' if lean else '（灯·当前状态：暂不可读）'
+        if lean:
+            state.pop('lights', None)
+        else:
+            state['lights'] = '（灯·当前状态：暂不可读）'
+        state['_lights_source'] = json.dumps({
+            'lights_source_status': 'unavailable',
+            'lights_main_available': False,
+            'lights_bedside_available': False,
+        }, ensure_ascii=False)
     try:
         if lean:
             from gateway import _pocket_structured_snippet

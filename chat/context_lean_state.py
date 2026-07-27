@@ -16,7 +16,7 @@ from chat.context_budget import (
     merge_cumulative_state_send,
     normalize_state_dict,
 )
-from chat.system_builder import format_state_snapshot
+from chat.system_builder import format_state_snapshot, merge_partial_lean_lights
 
 _LOG = logging.getLogger('hayagarden.context_lean_state')
 
@@ -193,11 +193,12 @@ def build_state_lean_observation(
     reanchor_reason: Optional[str],
     fallback_reason: Optional[str],
     resident_generation: int,
+    lights_source_meta: Optional[Mapping[str, Any]] = None,
 ) -> dict[str, Any]:
     from tools.cc_usage_observability import estimate_tokens_heuristic_cjk1_ascii4_v1
 
     mode = state_context_mode if state_context_mode in _STATE_CONTEXT_MODES else 'omitted'
-    return {
+    obs: dict[str, Any] = {
         'context_lean_state_enabled': bool(enabled),
         'state_context_mode': mode,
         'state_version': state_version,
@@ -212,6 +213,72 @@ def build_state_lean_observation(
         'resident_generation': int(resident_generation),
         'observation_version': 3,
     }
+    if lights_source_meta:
+        for key in (
+            'lights_source_status',
+            'lights_main_available',
+            'lights_bedside_available',
+            'lights_last_success_at',
+        ):
+            if key in lights_source_meta:
+                obs[key] = lights_source_meta[key]
+    return obs
+
+
+def _parse_lights_source_meta(raw_state: Mapping[str, Any]) -> dict[str, Any]:
+    raw = (raw_state or {}).get('_lights_source')
+    if not raw:
+        return {}
+    if isinstance(raw, dict):
+        return dict(raw)
+    try:
+        parsed = json.loads(str(raw))
+        return parsed if isinstance(parsed, dict) else {}
+    except Exception:
+        return {}
+
+
+def _apply_lights_source_to_raw(
+    raw: Mapping[str, str],
+    lights_meta: Mapping[str, Any],
+    known_state: Mapping[str, str],
+) -> dict[str, str]:
+    """Normalize lean lights field before diff/anchor (device-level source semantics only)."""
+    out = dict(normalize_state_dict(raw))
+    known_lights = normalize_state_dict(known_state).get('lights', '')
+    status = lights_meta.get('lights_source_status')
+
+    if status == 'partial':
+        merged = merge_partial_lean_lights(
+            out.get('lights', ''),
+            known_lights,
+            main_available=bool(lights_meta.get('lights_main_available')),
+            bedside_available=bool(lights_meta.get('lights_bedside_available')),
+        )
+        if merged:
+            out['lights'] = merged
+        else:
+            out.pop('lights', None)
+    elif status == 'unavailable':
+        if known_lights:
+            out['lights'] = known_lights
+        else:
+            out.pop('lights', None)
+    return out
+
+
+def _last_raw_for_lights_diff(
+    last_raw: Mapping[str, Any],
+    known_state: Mapping[str, str],
+) -> dict[str, str]:
+    """Backfill last-known lights when a prior outage left a hole in last_state_snapshot."""
+    last = normalize_state_dict(last_raw)
+    known_lights = normalize_state_dict(known_state).get('lights', '')
+    if known_lights and 'lights' not in last:
+        patched = dict(last)
+        patched['lights'] = known_lights
+        return patched
+    return dict(last)
 
 
 def _legacy_state_context(
@@ -220,6 +287,7 @@ def _legacy_state_context(
     is_cold: bool,
     last_state_snapshot: Optional[Mapping[str, Any]],
     resident_generation: int = 0,
+    lights_source_meta: Optional[Mapping[str, Any]] = None,
 ) -> StateContextResult:
     from chat.system_builder import format_state_diff
 
@@ -252,6 +320,7 @@ def _legacy_state_context(
             reanchor_reason=None,
             fallback_reason=None,
             resident_generation=resident_generation,
+            lights_source_meta=lights_source_meta,
         ),
         used_lean=False,
     )
@@ -264,6 +333,7 @@ def assemble_legacy_full_fallback(
     resident,
 ) -> StateContextResult:
     """True legacy fallback: full snapshot from lean=False raw state."""
+    lights_meta = _parse_lights_source_meta(legacy_raw_state)
     raw = normalize_state_dict(legacy_raw_state)
     state_text = format_state_snapshot(raw)
     state_mode = 'snapshot' if state_text else 'none'
@@ -279,6 +349,7 @@ def assemble_legacy_full_fallback(
         reanchor_reason=None,
         fallback_reason=fallback_reason,
         resident_generation=int(getattr(resident, 'generation', 0) or 0),
+        lights_source_meta=lights_meta,
     )
     return StateContextResult(
         state_text=state_text,
@@ -305,6 +376,7 @@ def assemble_cc_state_context(
     lean_on: bool,
 ) -> StateContextResult:
     """Build provider-visible state block for one CC resident turn."""
+    lights_meta = _parse_lights_source_meta(raw_state)
     raw = normalize_state_dict(raw_state)
     generation = int(getattr(resident, 'generation', 0) or 0)
 
@@ -314,6 +386,7 @@ def assemble_cc_state_context(
             is_cold=is_cold,
             last_state_snapshot=getattr(resident, 'last_state_snapshot', None),
             resident_generation=generation,
+            lights_source_meta=lights_meta,
         )
 
     prev_lean = bool(getattr(resident, 'last_successful_lean_state', False))
@@ -331,6 +404,7 @@ def assemble_cc_state_context(
         cumulative_send_nonempty=cumulative_nonempty,
     )
     needs_reanchor = reanchor_reason is not None
+    known_state_before_reanchor = cumulative
     last_raw = (
         {}
         if needs_reanchor
@@ -338,6 +412,9 @@ def assemble_cc_state_context(
     )
     cumulative_before = {} if needs_reanchor else cumulative
     send_is_cold = bool(needs_reanchor or is_cold)
+
+    raw = _apply_lights_source_to_raw(raw, lights_meta, known_state_before_reanchor)
+    last_raw = _last_raw_for_lights_diff(last_raw, known_state_before_reanchor)
 
     effective_send_payload = build_state_send_payload(
         last_raw,
@@ -396,6 +473,7 @@ def assemble_cc_state_context(
         reanchor_reason=reanchor_reason if needs_reanchor else None,
         fallback_reason=None,
         resident_generation=generation,
+        lights_source_meta=lights_meta,
     )
     return StateContextResult(
         state_text=state_text,
