@@ -1,6 +1,7 @@
 """Light capability modeling, partial status reads, and State Lean preservation."""
 from __future__ import annotations
 
+import copy
 import json
 import os
 import tempfile
@@ -10,11 +11,13 @@ from unittest import mock
 
 from chat.context_budget import build_state_send_payload, normalize_state_dict
 from chat.context_lean_state import (
+    REANCHOR_TURN_INTERVAL,
     assemble_cc_state_context,
     build_state_lean_observation,
     compute_state_version,
 )
 from chat.system_builder import _cc_collect_state, _collect_lights_from_status_payload
+from cc_resident import ResidentSession
 
 
 def _resident_stub(**overrides):
@@ -289,6 +292,100 @@ class PartialZoneHotTurnTests(unittest.TestCase):
             lean_on=True,
         )
         self.assertEqual(result.send_payload.get('lights'), 'main=开 bedside=关')
+
+
+class PartialZoneReanchorTests(unittest.TestCase):
+    _PARTIAL_META = {
+        'lights_source_status': 'partial',
+        'lights_main_available': True,
+        'lights_bedside_available': False,
+    }
+
+    def _cumulative(self):
+        return normalize_state_dict({
+            'lights': 'main=关 bedside=关',
+            'emotion': 'valence=0.60',
+        })
+
+    def _raw_partial_main_on(self):
+        return {
+            'lights': 'main=开',
+            'emotion': 'valence=0.60',
+            '_lights_source': json.dumps(self._PARTIAL_META),
+        }
+
+    def _assert_reanchor_partial_lights(self, result, *, reason: str):
+        self.assertEqual(result.state_context_mode, 'full_anchor')
+        self.assertEqual(result.reanchor_reason, reason)
+        self.assertEqual(result.send_payload.get('lights'), 'main=开 bedside=关')
+        self.assertIn('lights: main=开 bedside=关', result.state_text)
+        expected_version = compute_state_version({
+            'lights': 'main=开 bedside=关',
+            'emotion': 'valence=0.60',
+        })
+        self.assertEqual(result.observation['state_version'], expected_version)
+
+    def test_partial_periodic_reanchor_preserves_unavailable_zone(self):
+        cumulative = self._cumulative()
+        resident = _resident_stub(
+            last_state_snapshot=cumulative,
+            last_state_send_snapshot=cumulative,
+            last_state_anchor_generation=1,
+            generation=1,
+            last_state_schema_version=1,
+            turns_since_state_anchor=REANCHOR_TURN_INTERVAL,
+        )
+        result = assemble_cc_state_context(
+            raw_state=self._raw_partial_main_on(),
+            is_cold=False,
+            user_text='开灯',
+            resident=resident,
+            lean_on=True,
+        )
+        self._assert_reanchor_partial_lights(result, reason='reanchor_turn_interval')
+
+        sess = ResidentSession('/tmp', '', '')
+        sess._last_state_send_snapshot = dict(cumulative)
+        sess._last_successful_lean_state = True
+        sess._last_state_anchor_generation = 1
+        sess._generation = 1
+        meta = {
+            'state_snapshot': copy.deepcopy(result.raw_state),
+            **result.commit_meta_extras,
+        }
+        sess._commit_sent_context(meta)
+        self.assertEqual(sess.last_state_send_snapshot.get('lights'), 'main=开 bedside=关')
+
+    def test_partial_generation_reanchor_preserves_unavailable_zone(self):
+        cumulative = self._cumulative()
+        resident = _resident_stub(
+            last_state_snapshot=cumulative,
+            last_state_send_snapshot=cumulative,
+            last_state_anchor_generation=1,
+            generation=2,
+            last_state_schema_version=1,
+            turns_since_state_anchor=3,
+        )
+        result = assemble_cc_state_context(
+            raw_state=self._raw_partial_main_on(),
+            is_cold=False,
+            user_text='开灯',
+            resident=resident,
+            lean_on=True,
+        )
+        self._assert_reanchor_partial_lights(result, reason='resident_generation_change')
+
+        sess = ResidentSession('/tmp', '', '')
+        sess._last_state_send_snapshot = dict(cumulative)
+        sess._last_successful_lean_state = True
+        sess._last_state_anchor_generation = 1
+        sess._generation = 2
+        meta = {
+            'state_snapshot': copy.deepcopy(result.raw_state),
+            **result.commit_meta_extras,
+        }
+        sess._commit_sent_context(meta)
+        self.assertEqual(sess.last_state_send_snapshot.get('lights'), 'main=开 bedside=关')
 
 
 class HotRoundTransientFailureTests(unittest.TestCase):

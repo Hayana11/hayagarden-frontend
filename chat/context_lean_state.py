@@ -361,6 +361,7 @@ def assemble_cc_state_context(
         cumulative_send_nonempty=cumulative_nonempty,
     )
     needs_reanchor = reanchor_reason is not None
+    known_state_before_reanchor = cumulative
     last_raw = (
         {}
         if needs_reanchor
@@ -370,10 +371,7 @@ def assemble_cc_state_context(
     send_is_cold = bool(needs_reanchor or is_cold)
 
     if lights_meta.get('lights_source_status') == 'partial' and 'lights' in raw:
-        cumulative_lights = (
-            normalize_state_dict(cumulative_before).get('lights', '')
-            or normalize_state_dict(last_raw).get('lights', '')
-        )
+        cumulative_lights = normalize_state_dict(known_state_before_reanchor).get('lights', '')
         merged_lights = merge_partial_lean_lights(
             raw.get('lights', ''),
             cumulative_lights,
