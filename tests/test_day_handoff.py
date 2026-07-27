@@ -208,6 +208,48 @@ class DayHandoffValidationTests(unittest.TestCase):
         self.assertTrue(any('assistant voice' in e for e in errors))
 
 
+class DayHandoffAssistantVoiceMatcherTests(unittest.TestCase):
+    def test_product_names_allowed(self):
+        allowed = [
+            'Opus 5 与其他 Claude 模型的关系',
+            'Claude Code 已部署',
+            '用户询问 Claude 与其他模型的差异',
+            '用户询问 Opus 5 与其他 Claude 模型的关系及其占有欲差异，并表示尚未理解上一轮解释。',
+            '用户尚未理解关于不同 Claude 模型关系的解释。',
+        ]
+        for text in allowed:
+            with self.subTest(text=text):
+                self.assertFalse(dh._contains_assistant_voice(text), text)
+
+    def test_speaker_labels_rejected(self):
+        rejected = [
+            'Claude：那就过来，爸爸抱着你',
+            'assistant: 好的，我来陪你',
+            'fyodor：嗯，先休息',
+            '助手回应：那就这样吧',
+            '助手：我来抱抱你',
+            '我轻轻把她揽进怀里',
+        ]
+        for text in rejected:
+            with self.subTest(text=text):
+                self.assertTrue(dh._contains_assistant_voice(text), text)
+
+    def test_reviewed_handoff_topics_pass_validation(self):
+        data = _valid_handoff_data(
+            topics=[
+                'Opus 5 与其他 Claude 模型的关系',
+                '模型间占有欲表现的差异',
+            ],
+            last_topic='用户询问 Opus 5 与其他 Claude 模型的关系及其占有欲差异，并表示尚未理解上一轮解释。',
+            open_loops=['用户尚未理解关于不同 Claude 模型关系的解释。'],
+            confirmed_facts=[
+                '用户曾因没有吃早饭而出现腹痛和不适，喝可乐后有所缓解，并表示以后会好好吃早饭。',
+                '用户在2026年5月搬入当前住所，平时主要待在客厅，并曾担心卧室甲醛。',
+            ],
+            explicit_user_requests=[],
+        )
+        self.assertEqual(dh.validate_day_handoff(data), [])
+
 class DayHandoffParserTests(unittest.TestCase):
     def _valid_yaml(self) -> str:
         return dh.format_day_handoff_yaml(_valid_handoff_data(
