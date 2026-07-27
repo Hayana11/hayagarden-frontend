@@ -1,4 +1,4 @@
-import os, re, sqlite3, json, base64, mimetypes, datetime, threading, time, sys as _sys, random, shutil
+import os, re, sqlite3, json, base64, mimetypes, datetime, threading, time, sys as _sys, random, shutil, hmac
 if '/opt/frontend' not in _sys.path:
     _sys.path.insert(0, '/opt/frontend')
 if '/opt/frontend' not in _sys.path:
@@ -109,6 +109,7 @@ group_chat_store.ensure_schema(DB_PATH)
 API_URL = 'https://gua.guagua.uk/v1/messages'
 API_KEY = ''
 CC_TOKEN = ''
+CC_CLEAN_WINDOW_SHADOW_TOKEN = ''
 TAVILY_KEY = ''
 GITHUB_TOKEN = ''
 try:
@@ -119,6 +120,8 @@ try:
             API_URL = line.split('=', 1)[1].strip() or API_URL
         elif line.startswith('CLAUDE_CODE_OAUTH_TOKEN='):
             CC_TOKEN = line.split('=', 1)[1].strip()
+        elif line.startswith('CC_CLEAN_WINDOW_SHADOW_TOKEN='):
+            CC_CLEAN_WINDOW_SHADOW_TOKEN = line.split('=', 1)[1].strip()
         elif line.startswith('TAVILY_API_KEY='):
             TAVILY_KEY = line.split('=', 1)[1].strip()
         elif line.startswith('GITHUB_TOKEN='):
@@ -5891,6 +5894,20 @@ def _clean_window_shadow_enabled():
     return _cws_enabled()
 
 
+def _clean_window_shadow_auth_error():
+    expected = str(CC_CLEAN_WINDOW_SHADOW_TOKEN or '').strip()
+    if not expected:
+        return jsonify({'ok': False, 'error': 'clean window token not configured'}), 503
+    header = request.headers.get('Authorization', '')
+    supplied = header[7:].strip() if header.startswith('Bearer ') else ''
+    if not supplied or not hmac.compare_digest(supplied, expected):
+        response = jsonify({'ok': False, 'error': 'unauthorized'})
+        response.status_code = 401
+        response.headers['WWW-Authenticate'] = 'Bearer'
+        return response
+    return None
+
+
 def _clean_window_shadow_manager():
     from chat.clean_window_shadow import get_manager as _cws_get_manager
     return _cws_get_manager(
@@ -5906,6 +5923,9 @@ def _clean_window_shadow_manager():
 def debug_clean_window_start():
     if not _clean_window_shadow_enabled():
         return jsonify({'ok': False, 'error': 'disabled'}), 404
+    auth_err = _clean_window_shadow_auth_error()
+    if auth_err:
+        return auth_err
     try:
         return jsonify(_clean_window_shadow_manager().start())
     except PermissionError as e:
@@ -5920,6 +5940,9 @@ def debug_clean_window_start():
 def debug_clean_window_turn():
     if not _clean_window_shadow_enabled():
         return jsonify({'ok': False, 'error': 'disabled'}), 404
+    auth_err = _clean_window_shadow_auth_error()
+    if auth_err:
+        return auth_err
     data = request.get_json(silent=True) or {}
     session_id = str(data.get('session_id') or '').strip()
     message = str(data.get('message') or '').strip()
@@ -5941,14 +5964,16 @@ def debug_clean_window_turn():
 
 @app.route('/api/debug/clean-window/close', methods=['POST'])
 def debug_clean_window_close():
-    if not _clean_window_shadow_enabled():
-        return jsonify({'ok': False, 'error': 'disabled'}), 404
+    auth_err = _clean_window_shadow_auth_error()
+    if auth_err:
+        return auth_err
     data = request.get_json(silent=True) or {}
     session_id = str(data.get('session_id') or '').strip()
     if not session_id:
         return jsonify({'ok': False, 'error': 'session_id required'}), 400
+    force = not _clean_window_shadow_enabled()
     try:
-        return jsonify(_clean_window_shadow_manager().close(session_id))
+        return jsonify(_clean_window_shadow_manager().close(session_id, force=force))
     except KeyError as e:
         return jsonify({'ok': False, 'error': str(e)}), 404
     except PermissionError as e:
@@ -5961,6 +5986,9 @@ def debug_clean_window_close():
 def debug_clean_window_reset():
     if not _clean_window_shadow_enabled():
         return jsonify({'ok': False, 'error': 'disabled'}), 404
+    auth_err = _clean_window_shadow_auth_error()
+    if auth_err:
+        return auth_err
     data = request.get_json(silent=True) or {}
     session_id = str(data.get('session_id') or '').strip() or None
     try:

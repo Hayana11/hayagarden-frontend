@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+import shutil
 import tempfile
 import threading
 import time
@@ -25,6 +26,7 @@ TTL_SECONDS = 30 * 60
 MAX_SESSIONS = 5
 MAX_TURNS_PER_SESSION = 12
 SHADOW_ALLOWED_TOOLS = ''  # schema in static system; execution blocked
+ACTUAL_EXECUTOR = 'claude_code'
 
 SAVE_RE = re.compile(r'\[\[SAVE:\s*(.*?)\]\]', re.DOTALL)
 
@@ -67,6 +69,7 @@ def build_base_manifest(
     persona_sha256: str,
     provider: str,
     model: str,
+    actual_executor: str = ACTUAL_EXECUTOR,
     turn_index: int = 0,
     shadow_history_user_turns: int = 0,
     shadow_history_assistant_turns: int = 0,
@@ -78,6 +81,7 @@ def build_base_manifest(
         'persona_sha256': persona_sha256,
         'provider': provider,
         'model': model,
+        'actual_executor': actual_executor,
         'clean_window_shadow': True,
         'clean_session_id': session_id,
         'clean_turn_index': int(turn_index),
@@ -114,6 +118,24 @@ def _format_shadow_history(messages: list[dict[str, str]]) -> str:
     return NL.join(lines)
 
 
+def _turn_content_for_resident(
+    *,
+    message: str,
+    messages: list[dict[str, str]],
+    is_cold: bool,
+    had_prior_turns: bool,
+) -> str:
+    """First turn of a fresh session sends raw user text; replay only after mid-session respawn."""
+    if is_cold and had_prior_turns:
+        history = _format_shadow_history(messages)
+        return (
+            '以下是本诊断会话内的对话记录：' + NL + NL
+            + history + NL + NL
+            + '请回复最后一条消息。'
+        )
+    return message
+
+
 @dataclass
 class CleanWindowSession:
     session_id: str
@@ -129,6 +151,7 @@ class CleanWindowSession:
     turn_count: int = 0
     blocked_tool_calls: list[str] = field(default_factory=list)
     last_save_suppressed: bool = False
+    _ttl_timer: Optional[threading.Timer] = field(default=None, repr=False, compare=False)
 
     @property
     def user_turns(self) -> int:
@@ -158,12 +181,15 @@ class CleanWindowSession:
         return base
 
     def close(self):
+        timer = self._ttl_timer
+        if timer is not None:
+            timer.cancel()
+            self._ttl_timer = None
         try:
             self.resident._kill(quiet=True)
         except Exception:
             pass
         try:
-            import shutil
             shutil.rmtree(self.work_dir, ignore_errors=True)
         except Exception:
             pass
@@ -187,12 +213,34 @@ class CleanWindowManager:
         self._sessions: dict[str, CleanWindowSession] = {}
         self._lock = threading.Lock()
 
+    def _require_claude_code_provider(self) -> str:
+        provider = str(self._get_provider() or '').strip()
+        if provider != ACTUAL_EXECUTOR:
+            raise RuntimeError(
+                'clean window shadow requires chat provider %s (current: %s)'
+                % (ACTUAL_EXECUTOR, provider or 'unknown')
+            )
+        return provider
+
     def _purge_expired(self):
         expired = [sid for sid, s in self._sessions.items() if s.expires_at <= time.time()]
         for sid in expired:
             session = self._sessions.pop(sid, None)
             if session is not None:
                 session.close()
+
+    def _expire_session(self, session_id: str):
+        with self._lock:
+            session = self._sessions.pop(session_id, None)
+            if session is not None and session.expires_at <= time.time():
+                session.close()
+
+    def _schedule_ttl(self, session: CleanWindowSession):
+        delay = max(0.0, session.expires_at - time.time())
+        timer = threading.Timer(delay, self._expire_session, args=(session.session_id,))
+        timer.daemon = True
+        session._ttl_timer = timer
+        timer.start()
 
     def _static_parts(self):
         from chat.system_builder import build_cc_static_parts
@@ -208,8 +256,9 @@ class CleanWindowManager:
     def start(self) -> dict[str, Any]:
         if not enabled():
             raise PermissionError('CC_CLEAN_WINDOW_SHADOW_ENABLED=0')
-        self._purge_expired()
+        provider = self._require_claude_code_provider()
         with self._lock:
+            self._purge_expired()
             if len(self._sessions) >= MAX_SESSIONS:
                 raise RuntimeError('clean window session limit reached (%d)' % MAX_SESSIONS)
 
@@ -225,7 +274,15 @@ class CleanWindowManager:
                 SHADOW_ALLOWED_TOOLS,
                 self._mcp_config_path,
             )
-            resident.ensure_alive(full_system, self._env())
+            try:
+                resident.ensure_alive(full_system, self._env())
+            except Exception:
+                try:
+                    resident._kill(quiet=True)
+                except Exception:
+                    pass
+                shutil.rmtree(work_dir, ignore_errors=True)
+                raise
 
             now = time.time()
             session = CleanWindowSession(
@@ -236,11 +293,12 @@ class CleanWindowManager:
                 expires_at=now + TTL_SECONDS,
                 static_system_sha256=static_sha,
                 persona_sha256=persona_sha,
-                provider=self._get_provider(),
+                provider=provider,
                 model=self._get_model(),
                 work_dir=work_dir,
             )
             self._sessions[session_id] = session
+            self._schedule_ttl(session)
             return {
                 'ok': True,
                 'session_id': session_id,
@@ -266,6 +324,7 @@ class CleanWindowManager:
     def turn(self, session_id: str, message: str) -> dict[str, Any]:
         if not enabled():
             raise PermissionError('CC_CLEAN_WINDOW_SHADOW_ENABLED=0')
+        self._require_claude_code_provider()
         message = str(message or '').strip()
         if not message:
             raise ValueError('empty message')
@@ -280,17 +339,17 @@ class CleanWindowManager:
             parts = self._static_parts()
             full_system = parts['full_system']
             is_cold = session.resident.ensure_alive(full_system, self._env())
-
+            had_prior_turns = (
+                session.turn_count > 0
+                or any(m.get('role') == 'assistant' for m in session.messages)
+            )
             session.messages.append({'role': 'user', 'content': message})
-            if is_cold:
-                history = _format_shadow_history(session.messages)
-                content = (
-                    '以下是本诊断会话内的对话记录：' + NL + NL
-                    + history + NL + NL
-                    + '请回复最后一条消息。'
-                )
-            else:
-                content = message
+            content = _turn_content_for_resident(
+                message=message,
+                messages=session.messages,
+                is_cold=is_cold,
+                had_prior_turns=had_prior_turns,
+            )
 
             text_parts: list[str] = []
             think_parts: list[str] = []
@@ -334,8 +393,8 @@ class CleanWindowManager:
                 'usage': usage,
             }
 
-    def close(self, session_id: str) -> dict[str, Any]:
-        if not enabled():
+    def close(self, session_id: str, *, force: bool = False) -> dict[str, Any]:
+        if not force and not enabled():
             raise PermissionError('CC_CLEAN_WINDOW_SHADOW_ENABLED=0')
         with self._lock:
             session = self._sessions.pop(session_id, None)
@@ -359,6 +418,11 @@ _MANAGER: Optional[CleanWindowManager] = None
 def reset_manager_for_tests():
     """Clear the process-global manager singleton (tests only)."""
     global _MANAGER
+    if _MANAGER is not None:
+        with _MANAGER._lock:
+            for session in list(_MANAGER._sessions.values()):
+                session.close()
+            _MANAGER._sessions.clear()
     _MANAGER = None
 
 

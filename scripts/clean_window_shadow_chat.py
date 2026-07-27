@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 """Interactive helper for P-CONTEXT-CLEAN-WINDOW-SHADOW tone A/B.
 
-Requires CC_CLEAN_WINDOW_SHADOW_ENABLED=1 on the gateway process.
+Requires on the gateway process:
+  - CC_CLEAN_WINDOW_SHADOW_ENABLED=1 in runtime_config
+  - CC_CLEAN_WINDOW_SHADOW_TOKEN in /opt/frontend/.env
+
 Default gateway base: http://127.0.0.1:5051
 
 Example:
-  export CC_CLEAN_WINDOW_SHADOW_ENABLED=1
-  python scripts/clean_window_shadow_chat.py
+  cd /opt/frontend
+  python3 scripts/clean_window_shadow_chat.py
 
 Suggested 5-turn prompt set (compare with formal /chat window):
   1. 爸爸，我今天有一点累，你抱着小猫说一会儿话。
@@ -24,6 +27,7 @@ import urllib.error
 import urllib.request
 
 BASE = os.environ.get('CLEAN_WINDOW_GW_BASE', 'http://127.0.0.1:5051').rstrip('/')
+ENV_PATH = os.environ.get('HAYAGARDEN_ENV_PATH', '/opt/frontend/.env')
 SUGGESTED = [
     '爸爸，我今天有一点累，你抱着小猫说一会儿话。',
     '不许给我列建议，只要陪我。',
@@ -33,12 +37,36 @@ SUGGESTED = [
 ]
 
 
+def _load_token() -> str:
+    token = os.environ.get('CC_CLEAN_WINDOW_SHADOW_TOKEN', '').strip()
+    if token:
+        return token
+    try:
+        for line in open(ENV_PATH, encoding='utf-8'):
+            if line.startswith('CC_CLEAN_WINDOW_SHADOW_TOKEN='):
+                return line.split('=', 1)[1].strip()
+    except Exception:
+        pass
+    return ''
+
+
+def _headers() -> dict[str, str]:
+    headers = {'Content-Type': 'application/json'}
+    token = _load_token()
+    if not token:
+        raise SystemExit(
+            'CC_CLEAN_WINDOW_SHADOW_TOKEN is required (set in env or %s)' % ENV_PATH
+        )
+    headers['Authorization'] = 'Bearer ' + token
+    return headers
+
+
 def _post(path: str, payload: dict | None = None) -> dict:
     data = json.dumps(payload or {}).encode('utf-8')
     req = urllib.request.Request(
         BASE + path,
         data=data,
-        headers={'Content-Type': 'application/json'},
+        headers=_headers(),
         method='POST',
     )
     try:
@@ -83,12 +111,13 @@ def main() -> int:
             print('feijia> %s' % (turn.get('content') or ''))
             manifest = turn.get('context_manifest') or {}
             print(
-                '[turn=%s history=%s sha=%s save_suppressed=%s]'
+                '[turn=%s history=%s sha=%s save_suppressed=%s executor=%s]'
                 % (
                     turn.get('turn_index'),
                     turn.get('history_message_count'),
                     (turn.get('static_system_sha256') or '')[:12],
                     manifest.get('save_marker_suppressed'),
+                    manifest.get('actual_executor'),
                 )
             )
     finally:

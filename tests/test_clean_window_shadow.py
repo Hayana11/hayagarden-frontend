@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import shutil
 import sqlite3
 import sys
 import tempfile
@@ -59,8 +60,8 @@ def _manager_with_fake_resident(fake_resident=None, **kwargs):
         cc_cwd=kwargs.get('cc_cwd', '/tmp/cc-gw'),
         cc_token=kwargs.get('cc_token', 'tok'),
         mcp_config_path=kwargs.get('mcp_config_path', '/tmp/cc-gw/cc-tools.json'),
-        get_provider=lambda: 'api_relay',
-        get_model=lambda: 'test-model',
+        get_provider=kwargs.get('get_provider', lambda: 'claude_code'),
+        get_model=kwargs.get('get_model', lambda: 'test-model'),
     )
     static_parts = {
         'persona': 'PERSONA_BLOCK',
@@ -123,9 +124,10 @@ class CleanWindowShadowUnitTests(unittest.TestCase):
             session_id='clean-shadow:abc',
             static_system_sha256='a' * 64,
             persona_sha256='b' * 64,
-            provider='api_relay',
+            provider='claude_code',
             model='m',
         )
+        self.assertEqual(manifest['actual_executor'], 'claude_code')
         for key in (
             'state_injected', 'cold_once_injected', 'long_term_memory_injected',
             'handoff_injected', 'diary_summary_injected', 'web_memo_injected',
@@ -159,7 +161,7 @@ class CleanWindowShadowSessionTests(unittest.TestCase):
             cc_cwd='/tmp/cc-gw',
             cc_token='tok',
             mcp_config_path='/tmp/cc-gw/cc-tools.json',
-            get_provider=lambda: 'api_relay',
+            get_provider=lambda: 'claude_code',
             get_model=lambda: 'test-model',
         )
         with mock.patch.object(config_store, 'get_bool', return_value=True), \
@@ -327,6 +329,119 @@ class CleanWindowShadowSessionTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 mgr.turn(sid, 'too many')
 
+    def test_first_turn_sends_raw_message_when_cold(self):
+        class AlwaysColdResident(_FakeResident):
+            def ensure_alive(self, system_text, env):
+                self._alive_calls += 1
+                return True
+
+        msg = '爸爸，我今天有一点累，你抱着小猫说一会儿话。'
+        with self._run_with_patches(AlwaysColdResident()) as (stack, mgr, resident, *_):
+            started = mgr.start()
+            mgr.turn(started['session_id'], msg)
+            self.assertEqual(resident.sent_contents[0], msg)
+            self.assertNotIn('诊断会话', resident.sent_contents[0])
+
+    def test_mid_session_respawn_replays_clean_history(self):
+        class RespawnOnThirdAlive(_FakeResident):
+            def ensure_alive(self, system_text, env):
+                self._alive_calls += 1
+                return self._alive_calls in (1, 3)
+
+        with self._run_with_patches(RespawnOnThirdAlive()) as (stack, mgr, resident, *_):
+            started = mgr.start()
+            sid = started['session_id']
+            mgr.turn(sid, '第一轮')
+            mgr.turn(sid, '第二轮')
+            self.assertEqual(resident.sent_contents[0], '第一轮')
+            self.assertIn('诊断会话内的对话记录', resident.sent_contents[1])
+            self.assertIn('[用户] 第二轮', resident.sent_contents[1])
+
+    def test_rejects_non_claude_code_provider(self):
+        mgr = cws.CleanWindowManager(
+            cc_cwd='/tmp/cc-gw',
+            cc_token='tok',
+            mcp_config_path='/tmp/cc-gw/cc-tools.json',
+            get_provider=lambda: 'api_relay',
+            get_model=lambda: 'test-model',
+        )
+        with mock.patch.object(config_store, 'get_bool', return_value=True), \
+             mock.patch('cc_resident.ResidentSession', return_value=_FakeResident()):
+            with self.assertRaisesRegex(RuntimeError, 'claude_code'):
+                mgr.start()
+
+    def test_manifest_reports_actual_executor(self):
+        with self._run_with_patches() as (stack, mgr, *_):
+            started = mgr.start()
+            manifest = started['context_manifest']
+            self.assertEqual(manifest['provider'], 'claude_code')
+            self.assertEqual(manifest['actual_executor'], 'claude_code')
+
+    def test_start_failure_cleans_work_dir(self):
+        class BoomResident:
+            def ensure_alive(self, *args, **kwargs):
+                raise RuntimeError('boom')
+
+            def _kill(self, quiet=True):
+                pass
+
+        tmp = tempfile.mkdtemp()
+        work_dir = os.path.join(tmp, 'clean-shadow-fail')
+        os.makedirs(work_dir)
+        marker = os.path.join(work_dir, 'marker')
+        with open(marker, 'w', encoding='utf-8') as fh:
+            fh.write('x')
+        mgr = cws.CleanWindowManager(
+            cc_cwd='/tmp/cc-gw',
+            cc_token='tok',
+            mcp_config_path='/tmp/cc-gw/cc-tools.json',
+            get_provider=lambda: 'claude_code',
+            get_model=lambda: 'test-model',
+        )
+        try:
+            with mock.patch.object(config_store, 'get_bool', return_value=True), \
+                 mock.patch('chat.system_builder.build_cc_static_parts', return_value={
+                     'persona': 'P', 'full_system': 'P',
+                 }), \
+                 mock.patch('cc_resident.ResidentSession', return_value=BoomResident()), \
+                 mock.patch('chat.clean_window_shadow.tempfile.mkdtemp', return_value=work_dir):
+                with self.assertRaises(RuntimeError):
+                    mgr.start()
+                self.assertEqual(len(mgr._sessions), 0)
+                self.assertFalse(os.path.exists(marker))
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_ttl_timer_closes_without_followup_request(self):
+        resident = _FakeResident(cold_turns=0)
+        killed = {'n': 0}
+        original_kill = resident._kill
+
+        def tracked_kill(*args, **kwargs):
+            killed['n'] += 1
+            return original_kill(*args, **kwargs)
+
+        resident._kill = tracked_kill
+        with self._run_with_patches(resident) as (stack, mgr, *_):
+            started = mgr.start()
+            sid = started['session_id']
+            session = mgr._sessions[sid]
+            if session._ttl_timer is not None:
+                session._ttl_timer.cancel()
+            session.expires_at = time.time() + 0.05
+            mgr._schedule_ttl(session)
+            time.sleep(0.2)
+            self.assertNotIn(sid, mgr._sessions)
+            self.assertEqual(killed['n'], 1)
+
+    def test_close_force_works_when_feature_disabled(self):
+        with self._run_with_patches() as (stack, mgr, *_):
+            started = mgr.start()
+            sid = started['session_id']
+            with mock.patch.object(config_store, 'get_bool', return_value=False):
+                closed = mgr.close(sid, force=True)
+            self.assertTrue(closed['ok'])
+
 
 class CleanWindowShadowGatewayTests(unittest.TestCase):
     @classmethod
@@ -348,19 +463,54 @@ class CleanWindowShadowGatewayTests(unittest.TestCase):
         for path in (
             '/api/debug/clean-window/start',
             '/api/debug/clean-window/turn',
-            '/api/debug/clean-window/close',
             '/api/debug/clean-window/reset',
         ):
             resp = client.post(path, json={})
             self.assertEqual(resp.status_code, 404, path)
+        resp = client.post('/api/debug/clean-window/close', json={'session_id': 'clean-shadow:x'})
+        self.assertIn(resp.status_code, (401, 503))
+
+    def test_gateway_requires_bearer_token(self):
+        import gateway
+        client = gateway.app.test_client()
+        with mock.patch.object(gateway, '_clean_window_shadow_enabled', return_value=True), \
+             mock.patch.object(gateway, 'CC_CLEAN_WINDOW_SHADOW_TOKEN', 'top-secret'):
+            resp = client.post('/api/debug/clean-window/start', json={})
+            self.assertEqual(resp.status_code, 401)
+            resp = client.post(
+                '/api/debug/clean-window/start',
+                json={},
+                headers={'Authorization': 'Bearer top-secret'},
+            )
+            self.assertNotEqual(resp.status_code, 401)
+
+    def test_gateway_close_allowed_when_disabled_with_auth(self):
+        import gateway
+        fake_mgr = mock.Mock()
+        fake_mgr.close.return_value = {'ok': True, 'session_id': 'clean-shadow:x'}
+        client = gateway.app.test_client()
+        with mock.patch.object(gateway, '_clean_window_shadow_enabled', return_value=False), \
+             mock.patch.object(gateway, 'CC_CLEAN_WINDOW_SHADOW_TOKEN', 'top-secret'), \
+             mock.patch.object(gateway, '_clean_window_shadow_manager', return_value=fake_mgr):
+            resp = client.post(
+                '/api/debug/clean-window/close',
+                json={'session_id': 'clean-shadow:x'},
+                headers={'Authorization': 'Bearer top-secret'},
+            )
+            self.assertEqual(resp.status_code, 200)
+            fake_mgr.close.assert_called_once_with('clean-shadow:x', force=True)
 
     def test_gateway_start_when_enabled(self):
         import gateway
         fake_mgr = mock.Mock()
         fake_mgr.start.return_value = {'ok': True, 'session_id': 'clean-shadow:x'}
         with mock.patch.object(gateway, '_clean_window_shadow_enabled', return_value=True), \
+             mock.patch.object(gateway, 'CC_CLEAN_WINDOW_SHADOW_TOKEN', 'top-secret'), \
              mock.patch.object(gateway, '_clean_window_shadow_manager', return_value=fake_mgr):
-            resp = gateway.app.test_client().post('/api/debug/clean-window/start')
+            resp = gateway.app.test_client().post(
+                '/api/debug/clean-window/start',
+                headers={'Authorization': 'Bearer top-secret'},
+            )
             self.assertEqual(resp.status_code, 200)
             self.assertTrue(resp.get_json()['ok'])
 
