@@ -45,10 +45,18 @@ def _workspace_job_event_hook(event):
             'job': meta,
         }]
         conn = sqlite3.connect(DB_PATH, timeout=5)
-        conn.execute(
-            "INSERT INTO chat_messages (author, content, tool_calls) VALUES ('assistant', ?, ?)",
-            (event.get('content', ''), json.dumps(tc, ensure_ascii=False)),
-        )
+        cols = {r[1] for r in conn.execute('PRAGMA table_info(chat_messages)')}
+        if 'source_kind' in cols:
+            conn.execute(
+                "INSERT INTO chat_messages (author, content, tool_calls, source_kind) "
+                "VALUES ('assistant', ?, ?, 'workspace_job')",
+                (event.get('content', ''), json.dumps(tc, ensure_ascii=False)),
+            )
+        else:
+            conn.execute(
+                "INSERT INTO chat_messages (author, content, tool_calls) VALUES ('assistant', ?, ?)",
+                (event.get('content', ''), json.dumps(tc, ensure_ascii=False)),
+            )
         conn.commit()
         conn.close()
     except Exception:
@@ -100,11 +108,8 @@ import codex_app_server
 import cc_resident
 
 group_chat_store.ensure_schema(DB_PATH)
-try:
-    from chat.daily_context import ensure_schema as _daily_context_ensure_schema
-    _daily_context_ensure_schema(DB_PATH)
-except Exception:
-    pass
+from chat.daily_context import ensure_schema_logged as _daily_context_ensure_schema
+_daily_context_ensure_schema(DB_PATH)
 
 # API_URL/API_KEY/CC_TOKEN：部署配置，.env 兜底（真正生效的值由 relay.manager
 # 按 ACTIVE_RELAY 动态解析，这里仅供 /api/debug/provider 展示部署期默认值）。
@@ -6092,11 +6097,8 @@ _monopoly_scheduler = _MonopolyAgentScheduler(
     codex=_MonopolyCodexAdapter(codex_app_server.client),
 )
 app.register_blueprint(_create_monopoly_agent_blueprint(_monopoly_scheduler))
-try:
-    from daily_context_routes import daily_context_bp
-    app.register_blueprint(daily_context_bp)
-except Exception:
-    pass
+from daily_context_routes import create_daily_context_blueprint
+app.register_blueprint(create_daily_context_blueprint(db_path=DB_PATH))
 
 
 if __name__ == '__main__':

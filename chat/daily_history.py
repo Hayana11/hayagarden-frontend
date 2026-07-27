@@ -13,20 +13,23 @@ from chat.daily_context import (
     HANDOFF_ABSENT,
     HANDOFF_READY,
     STATUS_PROVISIONAL,
+    _USER_AUTHORS,
+    _message_display_content,
+    _table_columns,
     chat_day_window,
+    finalize_zero_for_first_user_message,
     format_formal_handoff_prompt,
     get_daily_context_by_id,
     get_day_handoff,
     get_latest_handoff_for_day,
     get_selected_carryover_messages,
-    maybe_auto_finalize_zero_on_first_user_message,
+    is_formal_chat_message,
 )
 from chat.day_handoff import TZ_OFFSET_HOURS
 
 
 def _connect(db_path: Optional[str]):
-    import sqlite3
-    from chat.daily_context import DEFAULT_DB_PATH, _connect as dc_connect
+    from chat.daily_context import _connect as dc_connect
     return dc_connect(db_path)
 
 
@@ -37,15 +40,18 @@ def _fetch_current_day_history(
     db_path: Optional[str] = None,
     up_to_message_id: Optional[int] = None,
 ) -> list[dict[str, Any]]:
-    from chat.daily_context import _USER_AUTHORS
-
     _d, start_at, _end, next_start = chat_day_window(local_day)
     conn = _connect(db_path)
     try:
+        cols = _table_columns(conn, 'chat_messages')
+        select_cols = ['id', 'author', 'content', 'created_at']
+        for optional in ('tool_calls', 'source_kind', 'image_url'):
+            if optional in cols:
+                select_cols.append(optional)
         rows = conn.execute(
-            'SELECT id, author, content, created_at FROM chat_messages '
+            'SELECT %s FROM chat_messages '
             'WHERE created_at >= ? AND created_at < ? AND id > ? '
-            'ORDER BY id ASC',
+            'ORDER BY id ASC' % ', '.join(select_cols),
             (start_at, next_start, int(boundary_message_id or 0)),
         ).fetchall()
         out = []
@@ -53,12 +59,14 @@ def _fetch_current_day_history(
             mid = int(r['id'])
             if up_to_message_id is not None and mid > int(up_to_message_id):
                 break
+            if not is_formal_chat_message(r):
+                continue
             role = 'user' if str(r['author']).lower() in _USER_AUTHORS else 'assistant'
             out.append({
                 'message_id': mid,
                 'role': role,
                 'author': str(r['author']),
-                'content': str(r['content'] or ''),
+                'content': _message_display_content(r),
                 'created_at': str(r['created_at'] or ''),
             })
         return out
@@ -71,7 +79,6 @@ def _resolve_handoff(
     *,
     db_path: Optional[str] = None,
 ) -> tuple[Optional[dict[str, Any]], str, str]:
-    """Return (content, status, prompt_text)."""
     handoff_status = HANDOFF_ABSENT
     content = None
     prompt = ''
@@ -97,7 +104,6 @@ def _build_state_text(
     is_cold: bool,
     last_snapshot: Optional[dict[str, str]] = None,
 ) -> tuple[str, str, dict[str, str]]:
-    """Facts-only lean state — does not flip global Context Lean flags."""
     from chat.system_builder import build_cc_state, format_state_diff, format_state_snapshot
 
     raw = build_cc_state(lean=True)
@@ -130,13 +136,17 @@ def build_daily_window_context(
 
     Order: static → handoff → carryover → state → current-day history.
     """
+    _ = TZ_OFFSET_HOURS
     ctx = dict(daily_context)
     context_id = int(ctx['id'])
 
-    # Auto-finalize zero carryover when first user message arrives without selection.
-    if current_user_message_id and ctx.get('status') == STATUS_PROVISIONAL:
-        if not ctx.get('selection_finalized_at'):
-            maybe_auto_finalize_zero_on_first_user_message(context_id, db_path=db_path)
+    if current_user_message_id and not ctx.get('selection_finalized_at'):
+        if ctx.get('status') in (
+            STATUS_PROVISIONAL, 'ABSENT', 'FAILED_RETRYABLE', 'COMPACTING',
+        ):
+            finalize_zero_for_first_user_message(
+                context_id, int(current_user_message_id), db_path=db_path,
+            )
             refreshed = get_daily_context_by_id(context_id, db_path=db_path)
             if refreshed:
                 ctx = refreshed
@@ -160,7 +170,6 @@ def build_daily_window_context(
         up_to_message_id=current_user_message_id,
     )
 
-    # Provider-facing ordered layers (explicit; not a summary).
     layers: list[dict[str, Any]] = []
     if static_system:
         layers.append({'kind': 'static', 'text': static_system})
