@@ -14,6 +14,7 @@ import json
 import datetime
 import urllib.request
 import config_store
+from typing import Mapping
 
 from chat.context_contract import SharedContext
 from chat.relationship_context import build_relationship_context
@@ -713,6 +714,45 @@ def _fmt_light_status(light):
     if light.get('color_temp'):
         pieces.append(str(light['color_temp']) + 'K')
     return ' '.join(pieces)
+
+
+def _parse_lean_lights_zones(text: str) -> dict[str, str]:
+    """Parse lean lights tokens like ``main=关 bedside=开`` into per-zone values."""
+    zones: dict[str, str] = {}
+    for token in (text or '').split():
+        if '=' not in token:
+            continue
+        zone, _, value = token.partition('=')
+        if zone in ('main', 'bedside') and value:
+            zones[zone] = value
+    return zones
+
+
+def _format_lean_lights_zones(zones: Mapping[str, str]) -> str:
+    parts = []
+    for zone in ('main', 'bedside'):
+        value = zones.get(zone)
+        if value:
+            parts.append('%s=%s' % (zone, value))
+    return ' '.join(parts)
+
+
+def merge_partial_lean_lights(
+    observed: str,
+    cumulative: str,
+    *,
+    main_available: bool,
+    bedside_available: bool,
+) -> str | None:
+    """Merge successful zone reads with last-known values for unavailable zones."""
+    obs = _parse_lean_lights_zones(observed)
+    merged = dict(_parse_lean_lights_zones(cumulative))
+    if main_available and 'main' in obs:
+        merged['main'] = obs['main']
+    if bedside_available and 'bedside' in obs:
+        merged['bedside'] = obs['bedside']
+    text = _format_lean_lights_zones(merged)
+    return text or None
 
 
 def _collect_lights_from_status_payload(payload: dict, *, lean: bool) -> tuple[str | None, dict]:

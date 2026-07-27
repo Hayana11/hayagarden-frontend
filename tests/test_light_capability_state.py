@@ -52,11 +52,9 @@ class PowerOnlyCapabilityTests(unittest.TestCase):
             cfg_path = tmp.name
 
         with mock.patch.object(lc, 'CONFIG_PATH', cfg_path), \
-             mock.patch.object(lc, 'AUTH_PATH', '/tmp/fake-auth'), \
-             mock.patch('tools.light_control.os.path.exists', return_value=True), \
-             mock.patch('tools.light_control.mijiaAPI') as api_cls:
-            api = api_cls.return_value
-            api.get_devices_prop.return_value = [{'value': False}]
+             mock.patch('tools.light_control._api') as api_factory:
+            api = api_factory.return_value
+            api.get_devices_prop.return_value = [{'code': 0, 'value': False}]
             result = lc.light_status('did-main', supported_props=lc.supported_query_props('main'))
 
         query = api.get_devices_prop.call_args[0][0]
@@ -80,10 +78,8 @@ class PowerOnlyCapabilityTests(unittest.TestCase):
             cfg_path = tmp.name
 
         with mock.patch.object(lc, 'CONFIG_PATH', cfg_path), \
-             mock.patch.object(lc, 'AUTH_PATH', '/tmp/fake-auth'), \
-             mock.patch('tools.light_control.os.path.exists', return_value=True), \
-             mock.patch('tools.light_control.mijiaAPI') as api_cls:
-            api = api_cls.return_value
+             mock.patch('tools.light_control._api') as api_factory:
+            api = api_factory.return_value
             api.get_devices_prop.return_value = [{'code': 0, 'value': False}]
             lc.light_status('did-main', supported_props=lc.supported_query_props('main'))
             query = api.get_devices_prop.call_args[0][0]
@@ -103,10 +99,8 @@ class MiotResponseValidationTests(unittest.TestCase):
     def _status_with_rows(self, rows):
         import tools.light_control as lc
 
-        with mock.patch.object(lc, 'AUTH_PATH', '/tmp/fake-auth'), \
-             mock.patch('tools.light_control.os.path.exists', return_value=True), \
-             mock.patch('tools.light_control.mijiaAPI') as api_cls:
-            api = api_cls.return_value
+        with mock.patch('tools.light_control._api') as api_factory:
+            api = api_factory.return_value
             api.get_devices_prop.return_value = rows
             with self.assertRaises(RuntimeError):
                 lc.light_status('did-main', supported_props=['power'])
@@ -176,6 +170,125 @@ class PartialSuccessStatusTests(unittest.TestCase):
         self.assertEqual(main['values']['power'], False)
         self.assertFalse(bedside['available'])
         self.assertIn('error', bedside)
+
+
+class PartialZoneHotTurnTests(unittest.TestCase):
+    def test_partial_main_change_preserves_cumulative_bedside(self):
+        cumulative = normalize_state_dict({
+            'lights': 'main=关 bedside=关',
+            'emotion': 'valence=0.60',
+            'drive': 'attachment=0.55',
+            'time_bucket': 'bucket=上午',
+        })
+        raw_partial = {
+            'lights': 'main=开',
+            'emotion': 'valence=0.60',
+            'drive': 'attachment=0.55',
+            'time_bucket': 'bucket=上午',
+            '_lights_source': json.dumps({
+                'lights_source_status': 'partial',
+                'lights_main_available': True,
+                'lights_bedside_available': False,
+            }),
+        }
+        resident = _resident_stub(
+            last_state_snapshot=cumulative,
+            last_state_send_snapshot=cumulative,
+            last_state_anchor_generation=1,
+            last_state_schema_version=1,
+            last_state_anchor_version=compute_state_version(cumulative),
+        )
+        result = assemble_cc_state_context(
+            raw_state=raw_partial,
+            is_cold=False,
+            user_text='开灯',
+            resident=resident,
+            lean_on=True,
+        )
+        self.assertEqual(result.state_context_mode, 'delta')
+        self.assertEqual(result.send_payload.get('lights'), 'main=开 bedside=关')
+        self.assertIn('changed=lights', result.state_text)
+
+    def test_partial_main_unchanged_with_bedside_failure_is_omitted(self):
+        cumulative = normalize_state_dict({
+            'lights': 'main=关 bedside=关',
+            'emotion': 'valence=0.60',
+            'drive': 'attachment=0.55',
+            'time_bucket': 'bucket=上午',
+        })
+        raw_partial = {
+            'lights': 'main=关',
+            'emotion': 'valence=0.60',
+            'drive': 'attachment=0.55',
+            'time_bucket': 'bucket=上午',
+            '_lights_source': json.dumps({
+                'lights_source_status': 'partial',
+                'lights_main_available': True,
+                'lights_bedside_available': False,
+            }),
+        }
+        resident = _resident_stub(
+            last_state_snapshot=cumulative,
+            last_state_send_snapshot=cumulative,
+            last_state_anchor_generation=1,
+            last_state_schema_version=1,
+            last_state_anchor_version=compute_state_version(cumulative),
+        )
+        result = assemble_cc_state_context(
+            raw_state=raw_partial,
+            is_cold=False,
+            user_text='继续',
+            resident=resident,
+            lean_on=True,
+        )
+        self.assertEqual(result.state_context_mode, 'omitted')
+        self.assertNotIn('lights', result.send_payload)
+        self.assertNotIn('changed=lights', result.state_text or '')
+
+    def test_collector_partial_status_merges_on_hot_assemble(self):
+        cumulative = normalize_state_dict({
+            'lights': 'main=关 bedside=关',
+            'emotion': 'valence=0.60',
+            'drive': 'attachment=0.55',
+            'time_bucket': 'bucket=上午',
+        })
+        resident = _resident_stub(
+            last_state_snapshot=cumulative,
+            last_state_send_snapshot=cumulative,
+            last_state_anchor_generation=1,
+            last_state_schema_version=1,
+            last_state_anchor_version=compute_state_version(cumulative),
+        )
+
+        def get_db():
+            raise AssertionError('db should not be queried')
+
+        payload = {
+            'ok': True,
+            'result': {
+                'main': {'available': True, 'values': {'power': True}},
+                'bedside': {'available': False, 'error': 'timeout'},
+            },
+        }
+        with mock.patch('chat.system_builder.build_time_bucket', return_value='上午'), \
+             mock.patch('chat.system_builder._format_structured_emotion_snippet', return_value='valence=0.60'), \
+             mock.patch('chat.system_builder._format_structured_drive_snippet', return_value='attachment=0.55'), \
+             mock.patch('urllib.request.urlopen') as urlopen_mock, \
+             mock.patch('config_store.get_bool', return_value=False):
+            urlopen_mock.return_value.__enter__.return_value.read.return_value = (
+                json.dumps(payload).encode()
+            )
+            raw = _cc_collect_state(get_db, lean=True)
+
+        self.assertEqual(raw.get('lights'), 'main=开')
+        result = assemble_cc_state_context(
+            raw_state=raw,
+            is_cold=False,
+            user_text='开灯',
+            resident=resident,
+            lean_on=True,
+        )
+        self.assertEqual(result.send_payload.get('lights'), 'main=开 bedside=关')
 
 
 class HotRoundTransientFailureTests(unittest.TestCase):

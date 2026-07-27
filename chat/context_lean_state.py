@@ -16,7 +16,7 @@ from chat.context_budget import (
     merge_cumulative_state_send,
     normalize_state_dict,
 )
-from chat.system_builder import format_state_snapshot
+from chat.system_builder import format_state_snapshot, merge_partial_lean_lights
 
 _LOG = logging.getLogger('hayagarden.context_lean_state')
 
@@ -368,6 +368,23 @@ def assemble_cc_state_context(
     )
     cumulative_before = {} if needs_reanchor else cumulative
     send_is_cold = bool(needs_reanchor or is_cold)
+
+    if lights_meta.get('lights_source_status') == 'partial' and 'lights' in raw:
+        cumulative_lights = (
+            normalize_state_dict(cumulative_before).get('lights', '')
+            or normalize_state_dict(last_raw).get('lights', '')
+        )
+        merged_lights = merge_partial_lean_lights(
+            raw.get('lights', ''),
+            cumulative_lights,
+            main_available=bool(lights_meta.get('lights_main_available')),
+            bedside_available=bool(lights_meta.get('lights_bedside_available')),
+        )
+        raw = dict(raw)
+        if merged_lights:
+            raw['lights'] = merged_lights
+        else:
+            raw.pop('lights', None)
 
     effective_send_payload = build_state_send_payload(
         last_raw,

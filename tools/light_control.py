@@ -16,8 +16,6 @@ import json
 import os
 from typing import Any, Mapping
 
-from mijiaAPI import mijiaAPI
-
 AUTH_PATH = '/opt/frontend/.mijia_auth'
 CONFIG_PATH = '/opt/frontend/tools/light_config.json'
 
@@ -75,6 +73,7 @@ def supported_query_props(zone: str | None = None) -> list[str]:
 def _api():
     if not os.path.exists(AUTH_PATH):
         raise RuntimeError('未授权：请先运行 mijia_login.py 扫码登录')
+    from mijiaAPI import mijiaAPI
     return mijiaAPI(auth_data_path=AUTH_PATH)
 
 
