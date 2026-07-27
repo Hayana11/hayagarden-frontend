@@ -4125,30 +4125,27 @@ def _stream_cc_daily_soft_window(_turn_data, _uc):
     from moments_turn import DEFAULT_CONVERSATION_ID
     from chat import daily_context as _daily_ctx
     from chat import daily_runtime as _daily_rt
-    from chat.system_builder import build_cc_static_parts
+    from chat.system_builder import build_cc_daily_static_parts
 
     _daily_plan = None
     text, thinking = None, None
     cc_cache_read, cc_cache_create = 0, 0
     cc_usage = None
+    unexpected_save = False
     try:
-        _static_parts = build_cc_static_parts()
+        _static_parts = build_cc_daily_static_parts()
+        _full_system = _static_parts['full_system']
         _cc_env = dict(os.environ)
         _cc_env['CLAUDE_CODE_OAUTH_TOKEN'] = CC_TOKEN
         _cc_env.pop('ANTHROPIC_API_KEY', None)
 
-        def _alive_for_key(key):
-            alive = getattr(_CC_RESIDENT, '_alive', lambda: False)()
-            return _daily_rt._BINDING_KEY == key and alive
-
         _daily_plan = _daily_rt.prepare_daily_turn(
             user_message_id=int(_turn_data['user_message_id']),
             db_path=DB_PATH,
-            resident_alive_fn=_alive_for_key,
             resident=_CC_RESIDENT,
-            static_system=_static_parts['full_system'],
+            static_system=_full_system,
             static_system_sha256=hashlib.sha256(
-                (_static_parts['full_system'] or '').encode('utf-8'),
+                (_full_system or '').encode('utf-8'),
             ).hexdigest(),
             persona_sha256=hashlib.sha256(
                 (_static_parts.get('persona') or '').encode('utf-8'),
@@ -4156,14 +4153,17 @@ def _stream_cc_daily_soft_window(_turn_data, _uc):
             provider='claude_code',
             model=_get_model() or '',
         )
-        _daily_plan._resident_close_fn = lambda: _daily_rt.close_resident(_CC_RESIDENT)
+        key = _daily_plan.resident_key
+        _daily_plan._resident_close_fn = lambda k=key: _daily_rt.close_local_resident_if_bound(
+            _CC_RESIDENT, expected_key=k,
+        )
 
         cc_tool_calls = []
         for evt, payload in _daily_rt.stream_daily_resident_turn(
             _daily_plan,
             resident=_CC_RESIDENT,
             env=_cc_env,
-            static_system=_static_parts['full_system'],
+            static_system=_full_system,
         ):
             if evt == 'text':
                 yield 'data: ' + json.dumps({'t': 'text', 'd': payload}) + SSE_END
@@ -4197,7 +4197,7 @@ def _stream_cc_daily_soft_window(_turn_data, _uc):
                         'cache_read': cc_cache_read,
                         'cache_creation': cc_cache_create,
                     }
-                text = _cc_save_markers(raw_text)
+                text, unexpected_save = _daily_rt.strip_daily_save_markers(raw_text)
 
         if not str(text or '').strip():
             _daily_rt.handle_provider_failure(
@@ -4222,43 +4222,48 @@ def _stream_cc_daily_soft_window(_turn_data, _uc):
         _cc_text, _cc_choices = _extract_choices(text)
         if _cc_choices and not _cc_text:
             _cc_text = '[选项: ' + ' / '.join(_cc_choices) + ']'
-        conn = get_db()
         try:
-            cur = conn.execute(
-                "INSERT INTO chat_messages (author, content, thinking, tool_calls, cache_info, choices) "
-                "VALUES ('assistant', ?, ?, ?, ?, ?)",
-                (
-                    _cc_text, thinking,
-                    json.dumps(
-                        [{k: v for k, v in tc.items() if k != 'id'} for tc in cc_tool_calls],
-                        ensure_ascii=False,
-                    ) if cc_tool_calls else '',
-                    _cache_info_json,
-                    json.dumps(_cc_choices, ensure_ascii=False) if _cc_choices else '',
-                ),
+            assistant_id = _daily_rt.persist_daily_assistant_for_plan(
+                _daily_plan,
+                content=_cc_text,
+                thinking=thinking or '',
+                tool_calls=json.dumps(
+                    [{k: v for k, v in tc.items() if k != 'id'} for tc in cc_tool_calls],
+                    ensure_ascii=False,
+                ) if cc_tool_calls else '',
+                cache_info=_cache_info_json,
+                choices=json.dumps(_cc_choices, ensure_ascii=False) if _cc_choices else '',
             )
-            conn.commit()
-            assistant_id = int(cur.lastrowid)
+        except _daily_ctx.ConflictError as exc:
+            _daily_rt.abort_daily_turn(
+                _daily_plan,
+                error_code='assistant_persist_stale_epoch',
+                resident=_CC_RESIDENT,
+                respawn=False,
+            )
+            yield 'data: ' + json.dumps({
+                't': 'err', 'd': str(exc), 'retryable': False, 'code': 'epoch_mismatch',
+            }) + SSE_END
+            yield 'data: ' + json.dumps({'t': 'done', 'ok': False}) + SSE_END
+            return
         except Exception as exc:
             _daily_rt.abort_daily_turn(
                 _daily_plan,
                 error_code='assistant_persist_failed',
-                close_resident_obj=_CC_RESIDENT,
+                resident=_CC_RESIDENT,
             )
             yield 'data: ' + json.dumps({
                 't': 'err', 'd': 'assistant persist failed: %s' % exc, 'retryable': False,
             }) + SSE_END
             yield 'data: ' + json.dumps({'t': 'done', 'ok': False}) + SSE_END
             return
-        finally:
-            conn.close()
 
-        _daily_rt.verify_epoch_token(_daily_plan)
         manifest = _daily_rt.handle_provider_success(
             _daily_plan,
             assistant_message_id=assistant_id,
             raw_text=text,
             usage=cc_usage if isinstance(cc_usage, dict) else {},
+            unexpected_save_marker=unexpected_save,
         )
         _write_session_memo(_uc, _cc_text)
         try:
@@ -4317,7 +4322,7 @@ def _stream_cc_daily_soft_window(_turn_data, _uc):
             _daily_rt.abort_daily_turn(
                 _daily_plan,
                 error_code='DailyWindowToolFencePending',
-                close_resident_obj=_CC_RESIDENT,
+                resident=_CC_RESIDENT,
             )
         yield 'data: ' + json.dumps({
             't': 'err', 'd': str(exc), 'code': 'DailyWindowToolFencePending', 'retryable': False,
@@ -4329,7 +4334,7 @@ def _stream_cc_daily_soft_window(_turn_data, _uc):
             _daily_rt.abort_daily_turn(
                 _daily_plan,
                 error_code='epoch_mismatch',
-                close_resident_obj=_CC_RESIDENT,
+                resident=_CC_RESIDENT,
                 respawn=False,
             )
         yield 'data: ' + json.dumps({

@@ -45,8 +45,9 @@ def _fetch_current_day_history(
     after_message_id: Optional[int] = None,
     exclude_message_id: Optional[int] = None,
     up_to_message_id: Optional[int] = None,
+    context_id: Optional[int] = None,
+    context_epoch: Optional[int] = None,
 ) -> list[dict[str, Any]]:
-    _d, start_at, _end, next_start = chat_day_window(local_day)
     conn = _connect(db_path)
     try:
         cols = _table_columns(conn, 'chat_messages')
@@ -54,14 +55,36 @@ def _fetch_current_day_history(
         for optional in ('tool_calls', 'source_kind', 'image_url'):
             if optional in cols:
                 select_cols.append(optional)
-        rows = conn.execute(
-            'SELECT %s FROM chat_messages '
-            'WHERE created_at >= ? AND created_at < ? AND id > ? '
-            'ORDER BY id ASC' % ', '.join(select_cols),
-            (start_at, next_start, int(boundary_message_id or 0)),
-        ).fetchall()
         wake_contents = _wake_content_set(conn)
         cutover = get_meta_int(conn, META_SOURCE_KIND_CUTOVER)
+        if context_id is not None and context_epoch is not None:
+            mapped_count = conn.execute(
+                'SELECT COUNT(*) AS c FROM daily_message_contexts '
+                'WHERE context_id=? AND context_epoch=?',
+                (int(context_id), int(context_epoch)),
+            ).fetchone()
+            has_mappings = int(mapped_count['c'] if mapped_count else 0) > 0
+            if has_mappings:
+                rows = conn.execute(
+                    'SELECT %s FROM chat_messages m '
+                    'INNER JOIN daily_message_contexts dmc ON dmc.message_id = m.id '
+                    'WHERE dmc.context_id=? AND dmc.context_epoch=? AND m.id > ? '
+                    'ORDER BY m.id ASC' % ', '.join('m.' + c for c in select_cols),
+                    (int(context_id), int(context_epoch), int(boundary_message_id or 0)),
+                ).fetchall()
+            else:
+                has_mappings = False
+        else:
+            has_mappings = False
+            rows = []
+        if not has_mappings:
+            _d, start_at, _end, next_start = chat_day_window(local_day)
+            rows = conn.execute(
+                'SELECT %s FROM chat_messages '
+                'WHERE created_at >= ? AND created_at < ? AND id > ? '
+                'ORDER BY id ASC' % ', '.join(select_cols),
+                (start_at, next_start, int(boundary_message_id or 0)),
+            ).fetchall()
         out = []
         for r in rows:
             mid = int(r['id'])
@@ -178,6 +201,8 @@ def build_daily_window_context(
         after_message_id=after_cursor,
         exclude_message_id=current_user_message_id,
         up_to_message_id=current_user_message_id,
+        context_id=context_id,
+        context_epoch=int(ctx.get('context_epoch') or 0),
     )
 
     if current_day_history:

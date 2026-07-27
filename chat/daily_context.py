@@ -230,6 +230,28 @@ def ensure_schema(db_path: Optional[str] = None) -> None:
                 updated_at DATETIME NOT NULL DEFAULT (datetime('now', '+8 hours')),
                 PRIMARY KEY (context_id, resident_generation)
             );
+
+            CREATE TABLE IF NOT EXISTS daily_message_contexts (
+                message_id INTEGER PRIMARY KEY,
+                context_id INTEGER NOT NULL,
+                context_epoch INTEGER NOT NULL,
+                resident_generation INTEGER NOT NULL,
+                role TEXT NOT NULL,
+                created_at DATETIME NOT NULL DEFAULT (datetime('now', '+8 hours'))
+            );
+            CREATE INDEX IF NOT EXISTS idx_daily_message_contexts_ctx
+                ON daily_message_contexts(context_id, context_epoch);
+
+            CREATE TABLE IF NOT EXISTS daily_resident_owners (
+                context_id INTEGER NOT NULL,
+                resident_generation INTEGER NOT NULL,
+                worker_id TEXT NOT NULL,
+                resident_key TEXT NOT NULL,
+                bound_cursor_message_id INTEGER NULL,
+                process_generation INTEGER NULL,
+                updated_at DATETIME NOT NULL DEFAULT (datetime('now', '+8 hours')),
+                PRIMARY KEY (context_id, resident_generation)
+            );
             """
         )
         ensure_daily_meta_table(conn)
@@ -1680,7 +1702,7 @@ def acquire_resident_turn_lease(
     *,
     lease_owner: str,
     request_message_id: int,
-    ttl_seconds: int = 360,
+    ttl_seconds: int = 480,
     db_path: Optional[str] = None,
     now: Optional[datetime.datetime] = None,
 ) -> dict[str, Any]:
@@ -1756,9 +1778,10 @@ def renew_resident_turn_lease(
     resident_generation: int,
     *,
     lease_owner: str,
-    ttl_seconds: int = 360,
+    ttl_seconds: int = 480,
     db_path: Optional[str] = None,
     now: Optional[datetime.datetime] = None,
+    epoch_token: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     owner = str(lease_owner or '').strip()
     now_dt = now or (datetime.datetime.utcnow() + datetime.timedelta(hours=TZ_OFFSET_HOURS))
@@ -1767,6 +1790,21 @@ def renew_resident_turn_lease(
     conn = _connect(db_path)
     try:
         conn.execute('BEGIN IMMEDIATE')
+        if epoch_token is not None:
+            row_ctx = conn.execute(
+                'SELECT context_epoch, resident_generation, is_backfill FROM daily_contexts WHERE id=?',
+                (int(context_id),),
+            ).fetchone()
+            if row_ctx is None or int(dict(row_ctx).get('is_backfill') or 0):
+                conn.rollback()
+                raise ConflictError('epoch not current for renew')
+            cur = dict(row_ctx)
+            if (
+                int(cur['context_epoch']) != int(epoch_token.get('context_epoch') or -1)
+                or int(cur['resident_generation']) != int(epoch_token.get('resident_generation') or -1)
+            ):
+                conn.rollback()
+                raise ConflictError('epoch token stale for renew')
         row = conn.execute(
             'SELECT * FROM daily_resident_turn_leases '
             'WHERE context_id=? AND resident_generation=?',
@@ -1775,6 +1813,13 @@ def renew_resident_turn_lease(
         if row is None or str(dict(row)['lease_owner']) != owner:
             conn.rollback()
             raise ConflictError('resident turn lease owner mismatch')
+        try:
+            exp_dt = _parse_local_dt(str(dict(row)['expires_at']))
+        except ValueError:
+            exp_dt = now_dt
+        if exp_dt <= now_dt:
+            conn.rollback()
+            raise ConflictError('resident turn lease expired')
         conn.execute(
             '''UPDATE daily_resident_turn_leases SET expires_at=?, updated_at=?
                WHERE context_id=? AND resident_generation=? AND lease_owner=?''',
@@ -1817,6 +1862,231 @@ def release_resident_turn_lease(
         raise
     finally:
         conn.close()
+
+
+def record_daily_message_context(
+    message_id: int,
+    *,
+    context_id: int,
+    context_epoch: int,
+    resident_generation: int,
+    role: str,
+    db_path: Optional[str] = None,
+) -> None:
+    ensure_schema(db_path)
+    now_s = _now_local_str()
+    conn = _connect(db_path)
+    try:
+        conn.execute(
+            'INSERT OR IGNORE INTO daily_message_contexts '
+            '(message_id, context_id, context_epoch, resident_generation, role, created_at) '
+            'VALUES (?,?,?,?,?,?)',
+            (
+                int(message_id), int(context_id), int(context_epoch),
+                int(resident_generation), str(role), now_s,
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_message_context(
+    message_id: int,
+    *,
+    db_path: Optional[str] = None,
+) -> Optional[dict[str, Any]]:
+    conn = _connect(db_path)
+    try:
+        return _row_to_dict(conn.execute(
+            'SELECT * FROM daily_message_contexts WHERE message_id=?',
+            (int(message_id),),
+        ).fetchone())
+    finally:
+        conn.close()
+
+
+def persist_daily_assistant_if_current(
+    *,
+    chat_id: str,
+    context_id: int,
+    context_epoch: int,
+    resident_generation: int,
+    lease_owner: str,
+    content: str,
+    thinking: str = '',
+    tool_calls: str = '',
+    cache_info: str = '',
+    choices: str = '',
+    db_path: Optional[str] = None,
+    now: Optional[datetime.datetime] = None,
+) -> int:
+    """Atomically verify epoch+lease and INSERT assistant with context membership."""
+    ensure_schema(db_path)
+    owner = str(lease_owner or '').strip()
+    now_dt = now or (datetime.datetime.utcnow() + datetime.timedelta(hours=TZ_OFFSET_HOURS))
+    conn = _connect(db_path)
+    try:
+        conn.execute('BEGIN IMMEDIATE')
+        row = conn.execute(
+            'SELECT id, context_epoch, resident_generation, is_backfill FROM daily_contexts WHERE id=?',
+            (int(context_id),),
+        ).fetchone()
+        if row is None or int(dict(row).get('is_backfill') or 0):
+            conn.rollback()
+            raise ConflictError('daily_context not active')
+        current = dict(row)
+        if (
+            int(current['context_epoch']) != int(context_epoch)
+            or int(current['resident_generation']) != int(resident_generation)
+        ):
+            conn.rollback()
+            raise ConflictError('epoch/generation stale at persist')
+        active = conn.execute(
+            'SELECT context_epoch, resident_generation FROM daily_contexts '
+            'WHERE chat_id=? AND is_backfill=0 ORDER BY context_epoch DESC LIMIT 1',
+            (str(chat_id),),
+        ).fetchone()
+        if active is None or int(active['context_epoch']) != int(context_epoch):
+            conn.rollback()
+            raise ConflictError('context epoch no longer active')
+        lease = conn.execute(
+            'SELECT lease_owner, expires_at FROM daily_resident_turn_leases '
+            'WHERE context_id=? AND resident_generation=?',
+            (int(context_id), int(resident_generation)),
+        ).fetchone()
+        if lease is None or str(dict(lease)['lease_owner']) != owner:
+            conn.rollback()
+            raise ConflictError('lease owner mismatch at persist')
+        try:
+            exp_dt = _parse_local_dt(str(dict(lease)['expires_at']))
+        except ValueError:
+            exp_dt = now_dt
+        if exp_dt <= now_dt:
+            conn.rollback()
+            raise ConflictError('lease expired at persist')
+        cur = conn.execute(
+            "INSERT INTO chat_messages (author, content, thinking, tool_calls, cache_info, choices) "
+            "VALUES ('assistant', ?, ?, ?, ?, ?)",
+            (content, thinking, tool_calls, cache_info, choices),
+        )
+        assistant_id = int(cur.lastrowid)
+        now_s = now_dt.strftime('%Y-%m-%d %H:%M:%S')
+        conn.execute(
+            'INSERT INTO daily_message_contexts '
+            '(message_id, context_id, context_epoch, resident_generation, role, created_at) '
+            'VALUES (?,?,?,?,?,?)',
+            (
+                assistant_id, int(context_id), int(context_epoch),
+                int(resident_generation), 'assistant', now_s,
+            ),
+        )
+        conn.commit()
+        return assistant_id
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def get_resident_owner(
+    context_id: int,
+    resident_generation: int,
+    *,
+    db_path: Optional[str] = None,
+) -> Optional[dict[str, Any]]:
+    conn = _connect(db_path)
+    try:
+        return _row_to_dict(conn.execute(
+            'SELECT * FROM daily_resident_owners WHERE context_id=? AND resident_generation=?',
+            (int(context_id), int(resident_generation)),
+        ).fetchone())
+    finally:
+        conn.close()
+
+
+def upsert_resident_owner(
+    context_id: int,
+    resident_generation: int,
+    *,
+    worker_id: str,
+    resident_key: str,
+    bound_cursor_message_id: Optional[int] = None,
+    process_generation: Optional[int] = None,
+    db_path: Optional[str] = None,
+) -> dict[str, Any]:
+    now_s = _now_local_str()
+    conn = _connect(db_path)
+    try:
+        conn.execute(
+            'INSERT INTO daily_resident_owners '
+            '(context_id, resident_generation, worker_id, resident_key, '
+            'bound_cursor_message_id, process_generation, updated_at) '
+            'VALUES (?,?,?,?,?,?,?) '
+            'ON CONFLICT(context_id, resident_generation) DO UPDATE SET '
+            'worker_id=excluded.worker_id, resident_key=excluded.resident_key, '
+            'bound_cursor_message_id=excluded.bound_cursor_message_id, '
+            'process_generation=excluded.process_generation, '
+            'updated_at=excluded.updated_at',
+            (
+                int(context_id), int(resident_generation), str(worker_id), str(resident_key),
+                bound_cursor_message_id, process_generation, now_s,
+            ),
+        )
+        conn.commit()
+        return get_resident_owner(context_id, resident_generation, db_path=db_path) or {}
+    finally:
+        conn.close()
+
+
+def ensure_worker_resident_owner(
+    context_id: int,
+    resident_generation: int,
+    *,
+    worker_id: str,
+    resident_key: str,
+    bound_cursor_message_id: Optional[int],
+    process_generation: Optional[int],
+    db_path: Optional[str] = None,
+) -> tuple[str, int, str]:
+    """Return (status, generation, resident_key). status is owned|takeover."""
+    owner = get_resident_owner(context_id, resident_generation, db_path=db_path)
+    if owner is None or str(owner.get('worker_id') or '') == str(worker_id):
+        upsert_resident_owner(
+            context_id, resident_generation,
+            worker_id=worker_id,
+            resident_key=resident_key,
+            bound_cursor_message_id=bound_cursor_message_id,
+            process_generation=process_generation,
+            db_path=db_path,
+        )
+        return 'owned', int(resident_generation), resident_key
+    new_ctx = respawn_daily_resident(context_id, db_path=db_path)
+    new_gen = int(new_ctx['resident_generation'])
+    new_key = make_resident_key(
+        chat_id=str(new_ctx.get('chat_id') or DEFAULT_CHAT_ID),
+        context_epoch=int(new_ctx['context_epoch']),
+        resident_generation=new_gen,
+    )
+    upsert_resident_owner(
+        context_id, new_gen,
+        worker_id=worker_id,
+        resident_key=new_key,
+        bound_cursor_message_id=None,
+        process_generation=None,
+        db_path=db_path,
+    )
+    return 'takeover', new_gen, new_key
+
+
+def make_resident_key(
+    *,
+    chat_id: str,
+    context_epoch: int,
+    resident_generation: int,
+) -> str:
+    return 'daily:%s:%s:%s' % (chat_id, int(context_epoch), int(resident_generation))
 
 
 def current_summary(
