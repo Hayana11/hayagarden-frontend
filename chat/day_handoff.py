@@ -224,12 +224,6 @@ _FORMAL_BEHAVIOR_MARKERS = (
     '不得复述', '不得改变语气', '怎么提', '顺嘴',
 )
 
-_NEUTRAL_TONE_PHRASES = (
-    '不同模型的语气差异',
-    '模型的语气差异',
-)
-
-
 def previous_chat_day(local_day: str) -> str:
     day = validate_day_string(local_day)
     day_dt = datetime.datetime.strptime(day, '%Y-%m-%d')
@@ -240,8 +234,6 @@ def contains_behavior_instruction_in_text(text: str) -> bool:
     """Reject reply/style/action coaching while allowing neutral product mentions."""
     v = str(text or '').strip()
     if not v:
-        return False
-    if any(phrase in v for phrase in _NEUTRAL_TONE_PHRASES):
         return False
     for marker in _FORMAL_BEHAVIOR_MARKERS:
         if marker in v:

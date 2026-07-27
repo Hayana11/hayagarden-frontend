@@ -16,7 +16,9 @@ import logging
 import os
 import re
 import sqlite3
-from typing import Any, Optional
+from typing import Any, Optional, Union
+
+_CURSOR_CAS_OMITTED = object()
 
 from chat.day_handoff import (
     CHAT_DAY_START_HOUR,
@@ -1373,7 +1375,7 @@ def advance_resident_history_cursor(
     resident_generation: int,
     processed_through_message_id: int,
     *,
-    expected_cursor: Optional[int] = None,
+    expected_cursor: Union[int, None, object] = _CURSOR_CAS_OMITTED,
     db_path: Optional[str] = None,
 ) -> dict[str, Any]:
     """Advance resident history cursor after assistant message is persisted."""
@@ -1390,11 +1392,16 @@ def advance_resident_history_cursor(
             (int(context_id), int(resident_generation)),
         ).fetchone()
         current = int(row['history_cursor_message_id']) if row else None
-        if expected_cursor is not None:
-            exp = int(expected_cursor)
-            if (current or 0) != exp:
-                conn.rollback()
-                raise ConflictError('resident cursor CAS failed')
+        if expected_cursor is not _CURSOR_CAS_OMITTED:
+            if expected_cursor is None:
+                if row is not None:
+                    conn.rollback()
+                    raise ConflictError('resident cursor CAS failed')
+            else:
+                exp = int(expected_cursor)
+                if current != exp:
+                    conn.rollback()
+                    raise ConflictError('resident cursor CAS failed')
         if current is not None and new_id < current:
             conn.rollback()
             raise ConflictError('resident cursor cannot move backward')
@@ -1487,6 +1494,8 @@ def retire_resident_for_rollover(
     ctx = get_daily_context_by_id(context_id, db_path=db_path)
     if not ctx:
         raise DailyContextError('daily_context not found')
+    if int(ctx.get('is_backfill') or 0):
+        raise DailyContextError('backfill context cannot retire resident')
     return {
         'retired_chat_id': ctx['chat_id'],
         'retired_epoch': int(ctx['context_epoch']),
@@ -1507,6 +1516,8 @@ def respawn_daily_resident(
         ).fetchone()
         if row is None:
             raise DailyContextError('daily_context not found')
+        if int(dict(row).get('is_backfill') or 0):
+            raise DailyContextError('backfill context cannot respawn resident')
         conn.execute(
             '''UPDATE daily_contexts SET resident_generation=resident_generation+1,
                version=version+1, updated_at=datetime('now','+8 hours') WHERE id=?''',

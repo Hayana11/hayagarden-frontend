@@ -7,10 +7,8 @@ from typing import Any, Callable, Optional, Sequence
 
 Operation = tuple[str, tuple | list]
 
-_FORBIDDEN_SQL = re.compile(
-    r'^\s*(BEGIN|COMMIT|END|ROLLBACK|SAVEPOINT|RELEASE|ATTACH|DETACH|VACUUM|PRAGMA\b)',
-    re.IGNORECASE,
-)
+_ALLOWED_KEYWORDS = frozenset({'INSERT', 'UPDATE', 'DELETE', 'REPLACE'})
+_FIRST_KEYWORD_RE = re.compile(r'^([A-Za-z_]+)')
 
 _CURRENT_ROW_SQL = (
     'SELECT id, context_epoch, resident_generation FROM daily_contexts '
@@ -22,17 +20,53 @@ class EpochFenceError(Exception):
     """Epoch fence contract violation."""
 
 
+def _strip_leading_sql_comments(sql: str) -> str:
+    """Remove consecutive leading -- line comments and /* */ block comments."""
+    s = str(sql or '')
+    while True:
+        s = s.lstrip()
+        if not s:
+            return ''
+        if s.startswith('/*'):
+            end = s.find('*/', 2)
+            if end < 0:
+                return ''
+            s = s[end + 2:]
+            continue
+        if s.startswith('--'):
+            nl = s.find('\n')
+            if nl < 0:
+                return ''
+            s = s[nl + 1:]
+            continue
+        break
+    return s.lstrip()
+
+
+def _sql_first_keyword(sql: str) -> str:
+    stripped = _strip_leading_sql_comments(sql)
+    if not stripped:
+        return ''
+    match = _FIRST_KEYWORD_RE.match(stripped)
+    return match.group(1).upper() if match else ''
+
+
 def _validate_sql(sql: str) -> None:
-    head = str(sql or '').strip()
-    if not head:
+    raw = str(sql or '').strip()
+    if not raw:
         raise EpochFenceError('empty SQL')
-    stripped = head.rstrip(';').rstrip()
-    if ';' in stripped:
+    body = raw.rstrip(';').rstrip()
+    if ';' in body:
         raise EpochFenceError('epoch-fenced writer forbids multi-statement SQL')
-    if _FORBIDDEN_SQL.match(head):
-        raise EpochFenceError('epoch-fenced writer forbids transaction control SQL')
-    if 'executescript' in head.lower():
+    if 'executescript' in raw.lower():
         raise EpochFenceError('epoch-fenced writer forbids executescript')
+    keyword = _sql_first_keyword(raw)
+    if not keyword:
+        raise EpochFenceError('empty SQL after comment stripping')
+    if keyword not in _ALLOWED_KEYWORDS:
+        raise EpochFenceError(
+            'epoch-fenced writer only allows INSERT/UPDATE/DELETE/REPLACE',
+        )
 
 
 def _execute_operations(conn: sqlite3.Connection, operations: Sequence[Operation]) -> int:
