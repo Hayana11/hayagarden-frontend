@@ -284,6 +284,53 @@ class CarryoverAndAutoFinalizeTests(unittest.TestCase):
         finally:
             os.unlink(db)
 
+    def test_formal_chat_ws_job_start_retained(self):
+        db = _tmp_db()
+        try:
+            _init_chat_messages(db)
+            _insert(db, 'hayana', '开个后台任务', '2026-07-26 10:00:00')
+            ws_start = _insert(
+                db, 'fyodor', '已经帮你启动了。', '2026-07-26 10:01:00',
+                tool_calls=json.dumps([{
+                    'name': 'ws_job',
+                    'args': {'action': 'start', 'command': 'echo hi'},
+                    'result': '{"ok": true}',
+                    'success': True,
+                }]),
+                source_kind='chat',
+            )
+            ctx = dc.get_or_create_daily_context(chat_id='wschat', local_day='2026-07-27', db_path=db)
+            cands = dc.list_carryover_candidates(int(ctx['id']), limit=10, db_path=db)
+            self.assertEqual(
+                [c['message_id'] for c in cands if '已经帮你启动了' in c['content_preview']],
+                [ws_start],
+            )
+            dc.select_carryover(int(ctx['id']), 3, db_path=db)
+            carry_ids = [m['message_id'] for m in dc.get_selected_carryover_messages(int(ctx['id']), db_path=db)]
+            self.assertIn(ws_start, carry_ids)
+
+            today = _insert(
+                db, 'fyodor', '继续跟进', '2026-07-27 10:00:00',
+                tool_calls=json.dumps([{
+                    'name': 'ws_job',
+                    'args': {'action': 'status', 'id': 'job-1'},
+                    'result': '{"ok": true}',
+                    'success': True,
+                }]),
+                source_kind='chat',
+            )
+            with mock.patch('chat.daily_history._build_state_text', return_value=('', 'none', {})):
+                built = dh.build_daily_window_context(
+                    chat_id='wschat',
+                    daily_context=dc.get_daily_context_by_id(int(ctx['id']), db_path=db),
+                    static_system='S',
+                    is_cold=False,
+                    db_path=db,
+                )
+            self.assertIn(today, [m['message_id'] for m in built['current_day_history']])
+        finally:
+            os.unlink(db)
+
     def test_workspace_job_with_tool_calls_excluded(self):
         db = _tmp_db()
         try:
@@ -302,15 +349,22 @@ class CarryoverAndAutoFinalizeTests(unittest.TestCase):
         finally:
             os.unlink(db)
 
-    def test_legacy_ws_job_without_source_kind_excluded(self):
+    def test_legacy_ws_job_completion_without_source_kind_excluded(self):
         db = _tmp_db()
         try:
             _init_chat_messages(db)
+            legacy_tc = [{
+                'name': 'ws_job',
+                'args': {'action': 'status', 'id': 'job-old'},
+                'result': '{"ok": true}',
+                'success': True,
+                'job': {'job_id': 'job-old', 'status': 'succeeded'},
+            }]
             conn = sqlite3.connect(db)
             conn.execute(
                 "INSERT INTO chat_messages (author, content, tool_calls, created_at) "
-                "VALUES ('assistant', 'legacy job', ?, '2026-07-26 10:00:00')",
-                (json.dumps([{'name': 'ws_job', 'args': {}}]),),
+                "VALUES ('assistant', 'legacy completion', ?, '2026-07-26 10:00:00')",
+                (json.dumps(legacy_tc, ensure_ascii=False),),
             )
             conn.commit()
             conn.close()
@@ -318,7 +372,7 @@ class CarryoverAndAutoFinalizeTests(unittest.TestCase):
             ctx = dc.get_or_create_daily_context(chat_id='leg', local_day='2026-07-27', db_path=db)
             cands = dc.list_carryover_candidates(int(ctx['id']), limit=10, db_path=db)
             previews = [c['content_preview'] for c in cands]
-            self.assertNotIn('legacy job', previews)
+            self.assertNotIn('legacy completion', previews)
             self.assertIn('formal', previews)
         finally:
             os.unlink(db)

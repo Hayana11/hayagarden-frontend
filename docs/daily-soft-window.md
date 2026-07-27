@@ -43,8 +43,9 @@ same transaction. Pass `skip_compaction=False` to leave ABSENT for
 `is_formal_chat_message()` (shared by carryover + current-day history):
 
 - author user/assistant only
-- `source_kind` must be `chat` (or legacy empty)
-- reject non-empty `tool_calls`
+- `source_kind` must be `chat` (or legacy empty); non-chat kinds excluded
+- formal chat rows with non-empty `tool_calls` are kept (including `ws_job` tool use)
+- legacy pre-migration workspace completions: `ws_job` + top-level `job` + `args.action=status`
 - reject SAVE markers
 - allow image-only rows as `[image]`
 
@@ -54,6 +55,12 @@ Wake executor and workspace job completion writes set `source_kind` explicitly.
 
 `commit_if_epoch_current(token, writer(conn))` runs inside one `BEGIN IMMEDIATE`
 transaction: verify epoch/generation → `writer(conn)` → re-verify → commit/rollback.
+
+The writer callback is a **trusted contract**: it must use the provided connection
+only and must not call `commit()`, `rollback()`, or start a new transaction. If the
+callback ends the transaction early, its writes are already durable and cannot be
+undone by the outer helper. Future wiring should prefer a constrained connection
+proxy or structured CAS writes instead of arbitrary callbacks.
 
 ## APIs (flag-gated; db_path injected at blueprint construction)
 

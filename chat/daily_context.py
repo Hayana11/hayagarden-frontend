@@ -488,7 +488,12 @@ def _row_source_kind(row: Any) -> str:
 
 
 def _is_legacy_workspace_job(row: Any) -> bool:
-    """Detect pre-source_kind workspace rows tagged only via ws_job tool_calls."""
+    """Detect pre-source_kind workspace completion rows (not formal ws_job tool use).
+
+    Old workspace hook rows carry a top-level ``job`` dict and
+    ``args.action == 'status'``. Formal chat tool_calls_acc entries use ws_job
+    for start/status/etc. but never include that completion-only ``job`` field.
+    """
     if not (hasattr(row, 'keys') and 'tool_calls' in row.keys()):
         return False
     tc = row['tool_calls']
@@ -504,7 +509,10 @@ def _is_legacy_workspace_job(row: Any) -> bool:
     if not isinstance(parsed, list):
         return False
     return any(
-        isinstance(item, dict) and item.get('name') == 'ws_job'
+        isinstance(item, dict)
+        and item.get('name') == 'ws_job'
+        and isinstance(item.get('job'), dict)
+        and (item.get('args') or {}).get('action') == 'status'
         for item in parsed
     )
 
