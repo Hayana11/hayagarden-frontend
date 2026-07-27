@@ -4,7 +4,7 @@
 
 - **计划分支**：`plan/unified-heartbeat-tracker`
 - **当前状态**：`P-CONTEXT-LEAN_STAGE1_PAUSED`（`CONTEXT_LEAN_STATE_ENABLED=0` 观察暂停；#140 REQUEST CHANGES；其余三 Lean + Relationship 仍为 `0`）
-- **最后更新**：2026-07-27（#140 round 4：全 unavailable re-anchor + 断线恢复无假 delta）
+- **最后更新**：2026-07-27（P-CONTEXT-CLEAN-WINDOW-SHADOW 诊断设施登记；#140 round 4 待 re-review）
 - **tracker branch tip**：以 [PR #127](https://github.com/Hayana11/hayagarden-frontend/pull/127) head 为准（勿将本文件内自报 SHA 当作分支 tip）
 - **生产 HEAD**：`6678ee59bf4f930c6be7687af71f19f28b0f5c1d`（main merge #139）
 - **当前 identity**：`identity_id = "fyodor-default"` · `provider_id = "claude_code"` · `conversation_id = "default"`
@@ -199,6 +199,18 @@
     - [ ] History token budget / mode-keyed rolling summary
     - [ ] 用户可见表达与记忆连续性验收
     - [ ] 删除已被替代的广播式旧注入
+- [-] **P-CONTEXT-CLEAN-WINDOW-SHADOW：干净新窗语气诊断模式**
+  - 状态：Draft PR 进行中（与 #140 独立；**不改变 Stage 1 暂停状态**）
+  - 目的：区分旧窗口模仿惯性 / 动态上下文 / persona / 模型本身
+  - 分支：`cursor/clean-window-shadow-8046`（base `main@6678ee5`）
+  - 开关：`CC_CLEAN_WINDOW_SHADOW_ENABLED=0`（默认关闭；`config_store` / `runtime_config`）
+  - 约束：
+    - 与正式聊天逐字相同的 `build_cc_static_parts()['full_system']`（`static_system_sha256` 基线 `6c129b22…`）
+    - 独立 `clean-shadow:<uuid>` session；不复用 `conversation_id=default` 或正式 resident 游标/历史
+    - 暂停 state / memory / handoff / recall / wake / relationship / 正式历史等全部动态注入
+    - 无副作用：不写 `chat_messages` / posts / memory；不消费 wake / feedback / dream；`[[SAVE:…]]` 抑制
+    - debug API：`POST /api/debug/clean-window/{start,turn,close,reset}`（仅 flag=1）
+  - **禁止**：merge / deploy / 开启生产开关；不得基于或修改 #140
 
 ### Unified Heartbeat
 
@@ -254,6 +266,7 @@ P-SHADOW        [x]
 → P-CONTEXT-OBS [x]
 → Memory Hotfix [x]          ← merge `dbf3ad4` + legacy_module deploy + smoke
 → P-CONTEXT-LEAN [-]         ← STATE=0 观察暂停；#140 REQUEST CHANGES；其余 Lean 0
+→ P-CONTEXT-CLEAN-WINDOW-SHADOW [-]  ← 诊断设施；与 #140 独立；默认关闭
 → UH-A0 Tool Parity [ ]
 → UH-A / UH-B [ ]
 → ISV3-1B [ ]
@@ -1042,6 +1055,13 @@ PR #126 修门禁与去重
 ### 2026-07-27（续·#139 reminder user_record）
 
 - [x] **#139** head `c721c26`：lean reminders `user_record:` 合同补齐；终审 Ready PASS
+
+### 2026-07-27（续·P-CONTEXT-CLEAN-WINDOW-SHADOW 登记）
+
+- [-] **P-CONTEXT-CLEAN-WINDOW-SHADOW**：干净新窗语气诊断模式（Draft PR；`cursor/clean-window-shadow-8046`；base `6678ee5`）
+- 目的：A/B 区分旧聊天历史模仿惯性 vs 动态上下文 vs persona/static vs 模型
+- 与 #140 独立；**不改变** Stage 1 暂停（`CONTEXT_LEAN_STATE_ENABLED=0`）
+- `CC_CLEAN_WINDOW_SHADOW_ENABLED=0` 默认；**未 merge / 未 deploy / 未开启**
 
 ---
 
