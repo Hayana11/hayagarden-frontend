@@ -81,9 +81,15 @@ _AI_AUTHORS = frozenset({'fyodor', 'claude', 'assistant'})
 
 _DAY_RE = re.compile(r'^\d{4}-\d{2}-\d{2}$')
 _SHA256_RE = re.compile(r'^[0-9a-f]{64}$')
-_ASSISTANT_VOICE_MARKERS = (
-    '助手回应', '助手：', '助手:', 'fyodor', 'claude', 'assistant',
+_ASSISTANT_NARRATION_MARKERS = (
     '我轻轻', '我抱着', '我揽着', '我低声', '我轻声',
+)
+_SPEAKER_LABEL_PATTERNS = (
+    re.compile(r'助手回应'),
+    re.compile(r'助手[:：]'),
+    re.compile(r'(?:^|[；;，,\s])assistant[:：]\s*', re.IGNORECASE),
+    re.compile(r'(?:^|[；;，,\s])claude[:：]\s*', re.IGNORECASE),
+    re.compile(r'(?:^|[；;，,\s])fyodor[:：]\s*', re.IGNORECASE),
 )
 _CONFIRMATION_MARKERS = (
     '好', '好的', '可以', '没问题', '就这样', '嗯', '行', '收到', '明白',
@@ -213,11 +219,14 @@ def _looks_like_narrow_confirmation(text: str) -> bool:
 
 
 def _contains_assistant_voice(text: str) -> bool:
-    t = str(text or '').strip().lower()
-    if not t:
+    v = str(text or '').strip()
+    if not v:
         return False
-    for marker in _ASSISTANT_VOICE_MARKERS:
-        if marker.lower() in t:
+    for marker in _ASSISTANT_NARRATION_MARKERS:
+        if marker in v:
+            return True
+    for pat in _SPEAKER_LABEL_PATTERNS:
+        if pat.search(v):
             return True
     return False
 
