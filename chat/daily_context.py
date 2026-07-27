@@ -27,7 +27,14 @@ from chat.day_handoff import (
     TZ_OFFSET_HOURS,
     chat_day_for_timestamp,
     chat_day_window,
+    contains_assistant_voice_in_text,
     validate_day_string,
+)
+from chat.daily_schema import (
+    META_SOURCE_KIND_CUTOVER,
+    ensure_chat_messages_source_kind,
+    ensure_daily_meta_table,
+    get_meta_int,
 )
 
 logger = logging.getLogger(__name__)
@@ -60,9 +67,9 @@ _TRANSITIONS: dict[str, frozenset[str]] = {
     STATUS_ABSENT: frozenset({STATUS_COMPACTING, STATUS_PROVISIONAL}),
     STATUS_COMPACTING: frozenset({STATUS_PROVISIONAL, STATUS_FAILED_RETRYABLE}),
     STATUS_FAILED_RETRYABLE: frozenset({STATUS_PROVISIONAL, STATUS_COMPACTING}),
-    # Late / retry compaction after chat already opened.
-    STATUS_PROVISIONAL: frozenset({STATUS_FINALIZED, STATUS_COMPACTING}),
-    STATUS_FINALIZED: frozenset(),
+    # Handoff compaction axis — independent of carryover selection_finalized_at.
+    STATUS_PROVISIONAL: frozenset({STATUS_COMPACTING}),
+    STATUS_FINALIZED: frozenset({STATUS_COMPACTING}),
 }
 
 _USER_AUTHORS = frozenset({'hayana', 'haya', 'user'})
@@ -85,18 +92,15 @@ HANDOFF_CONTENT_KEYS = (
     'last_topic',
 )
 
-_FORBIDDEN_HANDOFF_MARKERS = (
-    '助手回应', '助手：', '助手:',
-    '我轻轻', '我抱着', '我揽着', '我低声', '我轻声',
-    '你应该', '怎么回复', '怎么哄', '语气',
-    '（抱', '（揽', '（亲', '【动作',
-)
-
 _SCHEMA_READY: set[str] = set()
 
 
 class DailyContextError(Exception):
     """Base error for daily soft window."""
+
+
+class HotTurnCursorError(DailyContextError):
+    """Hot resident turn missing history cursor (fail closed)."""
 
 
 class ConflictError(DailyContextError):
@@ -198,14 +202,29 @@ def ensure_schema(db_path: Optional[str] = None) -> None:
             );
             CREATE INDEX IF NOT EXISTS idx_day_handoffs_chat_day
                 ON day_handoffs(chat_id, source_day);
+
+            CREATE TABLE IF NOT EXISTS daily_soft_window_meta (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS daily_resident_cursors (
+                context_id INTEGER NOT NULL,
+                resident_generation INTEGER NOT NULL,
+                history_cursor_message_id INTEGER NOT NULL,
+                updated_at DATETIME NOT NULL DEFAULT (datetime('now', '+8 hours')),
+                PRIMARY KEY (context_id, resident_generation)
+            );
             """
         )
-        # Authoritative origin for formal vs wake/workspace/tool rows.
-        cols = _table_columns(conn, 'chat_messages')
-        if cols and 'source_kind' not in cols:
+        ensure_daily_meta_table(conn)
+        dcols = _table_columns(conn, 'daily_contexts')
+        if dcols and 'is_backfill' not in dcols:
             conn.execute(
-                "ALTER TABLE chat_messages ADD COLUMN source_kind TEXT NOT NULL DEFAULT 'chat'"
+                'ALTER TABLE daily_contexts ADD COLUMN is_backfill INTEGER NOT NULL DEFAULT 0'
             )
+        if _table_columns(conn, 'chat_messages'):
+            ensure_chat_messages_source_kind(conn, record_cutover=True)
         conn.commit()
         _SCHEMA_READY.add(path)
     finally:
@@ -234,17 +253,29 @@ def get_boundary_message_id(
     local_day: str,
     chat_id: str = DEFAULT_CHAT_ID,
 ) -> int:
-    """Last formal chat_messages.id before local_day 04:00; 0 if none.
-
-    R0: chat_id is accepted for API symmetry but message table is global.
-    """
+    """Last formal chat_messages.id before local_day 04:00; 0 if none."""
     _ = chat_id
     _day, start_at, _end, _next = chat_day_window(local_day)
-    row = conn.execute(
-        'SELECT id FROM chat_messages WHERE created_at < ? ORDER BY id DESC LIMIT 1',
+    cols = _table_columns(conn, 'chat_messages')
+    if not cols:
+        return 0
+    select_cols = ['id', 'author', 'content', 'created_at']
+    for optional in ('tool_calls', 'source_kind', 'image_url'):
+        if optional in cols:
+            select_cols.append(optional)
+    rows = conn.execute(
+        'SELECT %s FROM chat_messages WHERE created_at < ? ORDER BY id DESC'
+        % ', '.join(select_cols),
         (start_at,),
-    ).fetchone()
-    return int(row['id'] if row else 0)
+    ).fetchall()
+    wake_contents = _wake_content_set(conn)
+    cutover = get_meta_int(conn, META_SOURCE_KIND_CUTOVER)
+    for row in rows:
+        if is_formal_chat_message(
+            row, wake_contents=wake_contents, cutover_id=cutover,
+        ):
+            return int(row['id'])
+    return 0
 
 
 def _max_epoch(conn: sqlite3.Connection, chat_id: str) -> int:
@@ -253,6 +284,76 @@ def _max_epoch(conn: sqlite3.Connection, chat_id: str) -> int:
         (chat_id,),
     ).fetchone()
     return int(row['m'] or 0) if row else 0
+
+
+def _active_epoch_high_water(conn: sqlite3.Connection, chat_id: str) -> int:
+    row = conn.execute(
+        'SELECT MAX(context_epoch) AS m FROM daily_contexts '
+        'WHERE chat_id=? AND is_backfill=0',
+        (chat_id,),
+    ).fetchone()
+    return int(row['m'] or 0) if row else 0
+
+
+def _current_chat_day(now: Optional[datetime.datetime] = None) -> str:
+    base = now or (datetime.datetime.utcnow() + datetime.timedelta(hours=TZ_OFFSET_HOURS))
+    return chat_day_for_timestamp(base)
+
+
+def validate_local_day_for_create(
+    local_day: str,
+    *,
+    now: Optional[datetime.datetime] = None,
+    allow_backfill: bool = False,
+) -> str:
+    local_day = validate_day_string(local_day)
+    current = _current_chat_day(now)
+    if local_day > current:
+        raise ValueError('future local_day not allowed')
+    if local_day < current and not allow_backfill:
+        raise ValueError('historical local_day requires allow_backfill=True')
+    return local_day
+
+
+def _assign_context_epoch(
+    conn: sqlite3.Connection,
+    chat_id: str,
+    local_day: str,
+    *,
+    current_chat_day: str,
+) -> tuple[int, int]:
+    """Return (context_epoch, is_backfill). Active days bump epoch; backfill does not."""
+    active_hwm = _active_epoch_high_water(conn, chat_id)
+    if local_day >= current_chat_day:
+        return max(_max_epoch(conn, chat_id), active_hwm) + 1, 0
+    # Historical backfill — must not receive the latest active epoch.
+    row = conn.execute(
+        'SELECT MAX(context_epoch) AS m FROM daily_contexts '
+        'WHERE chat_id=? AND local_day<?',
+        (chat_id, local_day),
+    ).fetchone()
+    prior = int(row['m'] or 0) if row else 0
+    if active_hwm > 0:
+        epoch = min(prior + 1 if prior else 1, active_hwm - 1) if active_hwm > 1 else 1
+        if epoch >= active_hwm:
+            epoch = active_hwm - 1 if active_hwm > 1 else 1
+    else:
+        epoch = prior + 1 if prior else 1
+    return epoch, 1
+
+
+def _wake_content_set(conn: sqlite3.Connection) -> frozenset[str]:
+    tables = {
+        str(r[0]) for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()
+    }
+    if 'wake_log' not in tables:
+        return frozenset()
+    rows = conn.execute(
+        'SELECT content FROM wake_log WHERE content IS NOT NULL AND content != ""'
+    ).fetchall()
+    return frozenset(str(r[0] or '') for r in rows)
 
 
 def _row_to_dict(row: Optional[sqlite3.Row]) -> Optional[dict[str, Any]]:
@@ -281,6 +382,7 @@ def get_or_create_daily_context(
     db_path: Optional[str] = None,
     provider_busy: bool = False,
     skip_compaction: bool = True,
+    allow_backfill: bool = False,
 ) -> dict[str, Any]:
     """Idempotent create for (chat_id, local_day). Uses BEGIN IMMEDIATE.
 
@@ -293,11 +395,13 @@ def get_or_create_daily_context(
         raise DeferredError('provider request in flight; rollover deferred')
 
     ensure_schema(db_path)
+    current_chat_day = _current_chat_day(now)
     if local_day is None:
-        base = now or (datetime.datetime.utcnow() + datetime.timedelta(hours=TZ_OFFSET_HOURS))
-        local_day = chat_day_for_timestamp(base)
+        local_day = current_chat_day
     else:
-        local_day = validate_day_string(local_day)
+        local_day = validate_local_day_for_create(
+            local_day, now=now, allow_backfill=allow_backfill,
+        )
     validate_timezone(DEFAULT_TIMEZONE)
 
     conn = _connect(db_path)
@@ -309,18 +413,20 @@ def get_or_create_daily_context(
             return existing
 
         boundary_id = get_boundary_message_id(conn, local_day=local_day, chat_id=chat_id)
-        epoch = _max_epoch(conn, chat_id) + 1
+        epoch, is_backfill = _assign_context_epoch(
+            conn, chat_id, local_day, current_chat_day=current_chat_day,
+        )
         now_s = _now_local_str()
         status = STATUS_ABSENT
         cur = conn.execute(
             '''INSERT INTO daily_contexts (
                 chat_id, local_day, timezone, boundary_hour, context_epoch,
-                boundary_message_id, status, carryover_count,
+                boundary_message_id, status, carryover_count, is_backfill,
                 resident_generation, version, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, 0, 1, 1, ?, ?)''',
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, 1, 1, ?, ?)''',
             (
                 chat_id, local_day, DEFAULT_TIMEZONE, CHAT_DAY_START_HOUR,
-                epoch, boundary_id, status, now_s, now_s,
+                epoch, boundary_id, status, is_backfill, now_s, now_s,
             ),
         )
         context_id = int(cur.lastrowid)
@@ -517,7 +623,12 @@ def _is_legacy_workspace_job(row: Any) -> bool:
     )
 
 
-def is_formal_chat_message(row: Any) -> bool:
+def is_formal_chat_message(
+    row: Any,
+    *,
+    wake_contents: Optional[frozenset[str]] = None,
+    cutover_id: Optional[int] = None,
+) -> bool:
     """Authoritative formal-message predicate for carryover and current-day history."""
     author = str(row['author'] or '').strip().lower()
     if author in _EXCLUDED_AUTHORS:
@@ -529,8 +640,18 @@ def is_formal_chat_message(row: Any) -> bool:
     if kind not in ('', SOURCE_KIND_CHAT):
         return False
 
-    # Legacy rows written before source_kind migration.
     if _is_legacy_workspace_job(row):
+        return False
+
+    mid = int(row['id']) if hasattr(row, 'keys') and 'id' in row.keys() else 0
+    if (
+        cutover_id is not None
+        and mid > 0
+        and mid <= int(cutover_id)
+        and wake_contents is not None
+        and str(row['content'] or '') in wake_contents
+        and author in _ASSISTANT_AUTHORS
+    ):
         return False
 
     content = str(row['content'] or '')
@@ -584,7 +705,14 @@ def list_carryover_candidates(
             'ORDER BY id ASC' % ', '.join(select_cols),
             (start_at, next_start, boundary if boundary > 0 else 10**18),
         ).fetchall()
-        eligible = [r for r in rows if is_formal_chat_message(r)]
+        wake_contents = _wake_content_set(conn)
+        cutover = get_meta_int(conn, META_SOURCE_KIND_CUTOVER)
+        eligible = [
+            r for r in rows
+            if is_formal_chat_message(
+                r, wake_contents=wake_contents, cutover_id=cutover,
+            )
+        ]
         tail = eligible[-limit:] if limit else []
         out = []
         for r in tail:
@@ -621,21 +749,21 @@ def _first_user_message_id_for_day(
         % ', '.join(select_cols),
         (start_at, next_start),
     ).fetchall()
+    wake_contents = _wake_content_set(conn)
+    cutover = get_meta_int(conn, META_SOURCE_KIND_CUTOVER)
     for r in rows:
         if str(r['author'] or '').lower() not in _USER_AUTHORS:
             continue
-        if not is_formal_chat_message(r):
+        if not is_formal_chat_message(
+            r, wake_contents=wake_contents, cutover_id=cutover,
+        ):
             continue
         return int(r['id'])
     return None
 
 
 def _selection_locked_conn(conn: sqlite3.Connection, ctx: dict[str, Any]) -> bool:
-    if ctx.get('selection_finalized_at'):
-        return True
-    if ctx.get('status') == STATUS_FINALIZED:
-        return True
-    return _first_user_message_id_for_day(conn, local_day=ctx['local_day']) is not None
+    return bool(ctx.get('selection_finalized_at'))
 
 
 def _selection_locked(ctx: dict[str, Any], db_path: Optional[str] = None) -> bool:
@@ -655,6 +783,38 @@ def select_carryover(
     if count not in ALLOWED_CARRYOVER_COUNTS:
         raise ValueError('count must be one of %s' % sorted(ALLOWED_CARRYOVER_COUNTS))
 
+    conn = _connect(db_path)
+    try:
+        conn.execute('BEGIN IMMEDIATE')
+        row = conn.execute(
+            'SELECT * FROM daily_contexts WHERE id=?', (context_id,),
+        ).fetchone()
+        if row is None:
+            raise DailyContextError('daily_context not found')
+        current = dict(row)
+        if current.get('selection_finalized_at'):
+            prev_count = int(current.get('carryover_count') or 0)
+            if prev_count == 0 and count > 0:
+                raise ConflictError('carryover locked at 0; cannot select %d' % count)
+            if prev_count == count:
+                conn.commit()
+                return {
+                    'context_id': context_id,
+                    'context_epoch': int(current['context_epoch']),
+                    'selected_message_ids': [
+                        int(r['message_id']) for r in conn.execute(
+                            'SELECT message_id FROM daily_carryover_messages '
+                            'WHERE context_id=? ORDER BY ordinal ASC',
+                            (context_id,),
+                        ).fetchall()
+                    ],
+                    'carryover_count': prev_count,
+                    'finalized_at': current.get('selection_finalized_at'),
+                }
+            raise ConflictError('carryover selection is locked')
+    finally:
+        conn.close()
+
     candidates = list_carryover_candidates(context_id, limit=10, db_path=db_path)
     if count == 0:
         selected = []
@@ -673,7 +833,10 @@ def select_carryover(
         current = dict(row)
         if _selection_locked_conn(conn, current):
             raise ConflictError('carryover selection is locked')
-        assert_transition(current['status'], STATUS_FINALIZED)
+        if count > 0 and _first_user_message_id_for_day(conn, local_day=current['local_day']):
+            raise ConflictError(
+                'carryover selection closed; formal user message already exists',
+            )
 
         conn.execute('DELETE FROM daily_carryover_messages WHERE context_id=?', (context_id,))
         ids = []
@@ -685,10 +848,10 @@ def select_carryover(
             )
             ids.append(mid)
         conn.execute(
-            '''UPDATE daily_contexts SET status=?, carryover_count=?,
+            '''UPDATE daily_contexts SET carryover_count=?,
                selection_finalized_at=?, version=version+1,
                updated_at=datetime('now','+8 hours') WHERE id=?''',
-            (STATUS_FINALIZED, len(ids), now_s, context_id),
+            (len(ids), now_s, context_id),
         )
         conn.commit()
         return {
@@ -713,17 +876,12 @@ def finalize_zero_carryover(
     return select_carryover(context_id, 0, db_path=db_path)
 
 
-def finalize_zero_for_first_user_message(
+def ensure_carryover_zero_if_user_messages_exist(
     context_id: int,
-    user_message_id: int,
     *,
     db_path: Optional[str] = None,
-) -> dict[str, Any]:
-    """Atomically finalize carryover=0 when user_message_id is the day's first formal user msg.
-
-    Intended for the formal chat path: user row is already committed, then assembly
-    calls this with that message id. Does not use the generic select_carryover lock.
-    """
+) -> Optional[dict[str, Any]]:
+    """Atomically finalize carryover=0 when any formal user message exists for the day."""
     now_s = _now_local_str()
     conn = _connect(db_path)
     try:
@@ -734,71 +892,26 @@ def finalize_zero_for_first_user_message(
         if row is None:
             raise DailyContextError('daily_context not found')
         current = dict(row)
-
-        if current.get('selection_finalized_at') or current['status'] == STATUS_FINALIZED:
-            if int(current.get('carryover_count') or 0) == 0:
-                conn.commit()
-                return {
-                    'context_id': context_id,
-                    'context_epoch': int(current['context_epoch']),
-                    'selected_message_ids': [],
-                    'carryover_count': 0,
-                    'finalized_at': current.get('selection_finalized_at') or now_s,
-                    'already_finalized': True,
-                }
-            raise ConflictError('carryover selection is locked')
-
-        if current['status'] not in (STATUS_PROVISIONAL, STATUS_ABSENT, STATUS_FAILED_RETRYABLE):
-            if current['status'] != STATUS_COMPACTING:
-                raise ConflictError('cannot auto-finalize from status %s' % current['status'])
-
-        cols = _table_columns(conn, 'chat_messages')
-        select_cols = ['id', 'author', 'content', 'created_at']
-        for optional in ('tool_calls', 'source_kind', 'image_url'):
-            if optional in cols:
-                select_cols.append(optional)
-        msg = conn.execute(
-            'SELECT %s FROM chat_messages WHERE id=?' % ', '.join(select_cols),
-            (int(user_message_id),),
-        ).fetchone()
-        if msg is None:
-            raise DailyContextError('user message not found: %s' % user_message_id)
-        if str(msg['author'] or '').lower() not in _USER_AUTHORS:
-            raise ConflictError('message is not a user message')
-        if not is_formal_chat_message(msg):
-            raise ConflictError('message is not a formal chat message')
-
-        _d, start_at, _end, next_start = chat_day_window(current['local_day'])
-        created = str(msg['created_at'] or '')
-        if not (start_at <= created < next_start):
-            raise ConflictError('message is outside current chat day')
-
+        if current.get('selection_finalized_at'):
+            conn.commit()
+            return {
+                'context_id': context_id,
+                'context_epoch': int(current['context_epoch']),
+                'selected_message_ids': [],
+                'carryover_count': int(current.get('carryover_count') or 0),
+                'finalized_at': current.get('selection_finalized_at'),
+                'already_finalized': True,
+            }
         first_id = _first_user_message_id_for_day(conn, local_day=current['local_day'])
-        if first_id is None or int(first_id) != int(user_message_id):
-            raise ConflictError('message is not the first formal user message of the day')
-
-        if current['status'] != STATUS_FINALIZED:
-            # PROVISIONAL → FINALIZED (or from COMPACTING/ABSENT/FAILED via provisional first)
-            if current['status'] == STATUS_PROVISIONAL:
-                assert_transition(STATUS_PROVISIONAL, STATUS_FINALIZED)
-            elif current['status'] in (STATUS_ABSENT, STATUS_FAILED_RETRYABLE, STATUS_COMPACTING):
-                # Promote to provisional then finalize in one txn without separate public calls.
-                if current['status'] != STATUS_PROVISIONAL:
-                    # Direct jump not in table for ABSENT→FINALIZED; do two asserts.
-                    if current['status'] == STATUS_ABSENT:
-                        assert_transition(STATUS_ABSENT, STATUS_PROVISIONAL)
-                    elif current['status'] == STATUS_FAILED_RETRYABLE:
-                        assert_transition(STATUS_FAILED_RETRYABLE, STATUS_PROVISIONAL)
-                    elif current['status'] == STATUS_COMPACTING:
-                        assert_transition(STATUS_COMPACTING, STATUS_PROVISIONAL)
-                    assert_transition(STATUS_PROVISIONAL, STATUS_FINALIZED)
-
+        if first_id is None:
+            conn.commit()
+            return None
         conn.execute('DELETE FROM daily_carryover_messages WHERE context_id=?', (context_id,))
         conn.execute(
-            '''UPDATE daily_contexts SET status=?, carryover_count=0,
-               selection_finalized_at=?, lease_owner=NULL, lease_expires_at=NULL,
-               version=version+1, updated_at=datetime('now','+8 hours') WHERE id=?''',
-            (STATUS_FINALIZED, now_s, context_id),
+            '''UPDATE daily_contexts SET carryover_count=0,
+               selection_finalized_at=?, version=version+1,
+               updated_at=datetime('now','+8 hours') WHERE id=?''',
+            (now_s, context_id),
         )
         conn.commit()
         return {
@@ -807,6 +920,7 @@ def finalize_zero_for_first_user_message(
             'selected_message_ids': [],
             'carryover_count': 0,
             'finalized_at': now_s,
+            'first_user_message_id': int(first_id),
             'already_finalized': False,
         }
     except Exception:
@@ -816,31 +930,28 @@ def finalize_zero_for_first_user_message(
         conn.close()
 
 
+def finalize_zero_for_first_user_message(
+    context_id: int,
+    user_message_id: int,
+    *,
+    db_path: Optional[str] = None,
+) -> dict[str, Any]:
+    """Legacy entry: auto-zero when the day's first formal user message is known."""
+    _ = user_message_id
+    out = ensure_carryover_zero_if_user_messages_exist(context_id, db_path=db_path)
+    if out is None:
+        raise ConflictError('no formal user message for auto-zero')
+    return out
+
+
 def maybe_auto_finalize_zero_on_first_user_message(
     context_id: int,
     *,
     user_message_id: Optional[int] = None,
     db_path: Optional[str] = None,
 ) -> Optional[dict[str, Any]]:
-    """Prefer finalize_zero_for_first_user_message when id is known."""
-    if user_message_id is None:
-        return None
-    try:
-        return finalize_zero_for_first_user_message(
-            context_id, int(user_message_id), db_path=db_path,
-        )
-    except ConflictError:
-        ctx = get_daily_context_by_id(context_id, db_path=db_path)
-        if ctx and ctx.get('selection_finalized_at') and int(ctx.get('carryover_count') or 0) == 0:
-            return {
-                'context_id': context_id,
-                'context_epoch': int(ctx['context_epoch']),
-                'selected_message_ids': [],
-                'carryover_count': 0,
-                'finalized_at': ctx.get('selection_finalized_at'),
-                'already_finalized': True,
-            }
-        raise
+    """Auto-zero when any formal user message exists (idempotent)."""
+    return ensure_carryover_zero_if_user_messages_exist(context_id, db_path=db_path)
 
 
 def get_selected_carryover_messages(
@@ -945,10 +1056,8 @@ def validate_formal_handoff_content(
                 continue
             if len(item) > MAX_ITEM_CHARS:
                 errors.append('%s[%d]: exceeds max item length' % (key, i))
-            for marker in _FORBIDDEN_HANDOFF_MARKERS:
-                if marker in item:
-                    errors.append('%s[%d]: forbidden marker %r' % (key, i, marker))
-                    break
+            if contains_assistant_voice_in_text(item):
+                errors.append('%s[%d]: contains assistant voice' % (key, i))
             if re.search(r'[「『""].{8,}?[」』""]', item):
                 errors.append('%s[%d]: contains long quoted speech' % (key, i))
 
@@ -960,10 +1069,8 @@ def validate_formal_handoff_content(
     else:
         if len(last) > MAX_LAST_TOPIC_CHARS:
             errors.append('last_topic: exceeds max length')
-        for marker in _FORBIDDEN_HANDOFF_MARKERS:
-            if marker in last:
-                errors.append('last_topic: forbidden marker %r' % marker)
-                break
+        if contains_assistant_voice_in_text(last):
+            errors.append('last_topic: contains assistant voice')
     return errors
 
 
@@ -1015,6 +1122,29 @@ def store_day_handoff(
         raise ValueError('source_message_count exceeds message id span')
     if int(source_last_message_id) > int(boundary_message_id):
         raise ValueError('source_last_message_id must be <= boundary_message_id')
+
+    conn = _connect(db_path)
+    try:
+        conn.execute('BEGIN IMMEDIATE')
+        src_ctx = get_daily_context(conn, chat_id=chat_id, local_day=source_day)
+        if src_ctx is None:
+            raise ValueError('source_day daily_context must exist')
+        if source_epoch is not None and int(source_epoch) != int(src_ctx['context_epoch']):
+            raise ValueError('source_epoch must match source_day context epoch')
+            raise ValueError('source_epoch must match source_day context epoch')
+        day_dt = datetime.datetime.strptime(source_day, '%Y-%m-%d')
+        target_day = (day_dt + datetime.timedelta(days=1)).strftime('%Y-%m-%d')
+        tgt_ctx = get_daily_context(conn, chat_id=chat_id, local_day=target_day)
+        if tgt_ctx is None:
+            raise ValueError('target daily_context for handoff consumer day must exist')
+        if int(boundary_message_id) != int(tgt_ctx['boundary_message_id']):
+            raise ValueError('boundary_message_id must match target daily_context')
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
     if status == HANDOFF_READY:
         if source_epoch is None:
@@ -1142,6 +1272,98 @@ def get_latest_handoff_for_day(
         conn.close()
 
 
+def resolve_bound_handoff(
+    ctx: dict[str, Any],
+    *,
+    db_path: Optional[str] = None,
+) -> tuple[Optional[dict[str, Any]], str]:
+    """Resolve handoff with strict binding; never inject on mismatch."""
+    handoff_status = HANDOFF_ABSENT
+    content = None
+    h = None
+    if ctx.get('handoff_id'):
+        h = get_day_handoff(int(ctx['handoff_id']), db_path=db_path)
+    else:
+        day_dt = datetime.datetime.strptime(ctx['local_day'], '%Y-%m-%d')
+        prev = (day_dt - datetime.timedelta(days=1)).strftime('%Y-%m-%d')
+        h = get_latest_handoff_for_day(ctx['chat_id'], prev, db_path=db_path)
+    if not h:
+        return None, HANDOFF_ABSENT
+    handoff_status = str(h.get('status') or HANDOFF_ABSENT)
+    if handoff_status != HANDOFF_READY:
+        return None, handoff_status
+    try:
+        content = h.get('content')
+        if content is None and h.get('content_json'):
+            content = json.loads(h['content_json'])
+    except json.JSONDecodeError:
+        return None, HANDOFF_FAILED_RETRYABLE
+    if not isinstance(content, dict):
+        return None, HANDOFF_FAILED_RETRYABLE
+    errors = validate_formal_handoff_content(
+        content,
+        expected_source_day=str(h.get('source_day') or ''),
+        expected_source_epoch=h.get('source_epoch'),
+        expected_boundary_message_id=int(ctx.get('boundary_message_id') or 0),
+    )
+    if errors:
+        return None, HANDOFF_FAILED_RETRYABLE
+    conn = _connect(db_path)
+    try:
+        source_row = get_daily_context(
+            conn, chat_id=str(ctx['chat_id']), local_day=str(h.get('source_day') or ''),
+        )
+    finally:
+        conn.close()
+    if source_row is None:
+        return None, HANDOFF_ABSENT
+    if int(h.get('source_epoch') or -1) != int(source_row['context_epoch']):
+        return None, HANDOFF_FAILED_RETRYABLE
+    if int(h.get('boundary_message_id') or -1) != int(ctx.get('boundary_message_id') or 0):
+        return None, HANDOFF_FAILED_RETRYABLE
+    return content, HANDOFF_READY
+
+
+def get_resident_history_cursor(
+    context_id: int,
+    resident_generation: int,
+    *,
+    db_path: Optional[str] = None,
+) -> Optional[int]:
+    conn = _connect(db_path)
+    try:
+        row = conn.execute(
+            'SELECT history_cursor_message_id FROM daily_resident_cursors '
+            'WHERE context_id=? AND resident_generation=?',
+            (int(context_id), int(resident_generation)),
+        ).fetchone()
+        return int(row['history_cursor_message_id']) if row else None
+    finally:
+        conn.close()
+
+
+def set_resident_history_cursor(
+    context_id: int,
+    resident_generation: int,
+    message_id: int,
+    *,
+    db_path: Optional[str] = None,
+) -> None:
+    conn = _connect(db_path)
+    try:
+        conn.execute(
+            'INSERT INTO daily_resident_cursors '
+            '(context_id, resident_generation, history_cursor_message_id) VALUES (?,?,?) '
+            'ON CONFLICT(context_id, resident_generation) DO UPDATE SET '
+            'history_cursor_message_id=excluded.history_cursor_message_id, '
+            "updated_at=datetime('now','+8 hours')",
+            (int(context_id), int(resident_generation), int(message_id)),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def make_epoch_token(
     *,
     chat_id: str,
@@ -1180,56 +1402,13 @@ def is_epoch_current(
 
 def commit_if_epoch_current(
     token: dict[str, Any],
-    writer: Callable[[sqlite3.Connection], Any],
+    writer: Callable[[Any], Any],
     *,
     db_path: Optional[str] = None,
 ) -> tuple[bool, Any]:
-    """Run writer(conn) inside one BEGIN IMMEDIATE txn with epoch/generation CAS.
-
-    writer MUST use the provided connection. A second CAS check runs after writer
-    returns and before commit, so respawn mid-write still rolls back.
-    """
-    chat_id = str(token.get('chat_id') or DEFAULT_CHAT_ID)
-    want_epoch = int(token.get('context_epoch') or -1)
-    want_gen = int(token.get('resident_generation') or -1)
-    conn = _connect(db_path)
-    try:
-        conn.execute('BEGIN IMMEDIATE')
-        row = conn.execute(
-            'SELECT id, context_epoch, resident_generation FROM daily_contexts '
-            'WHERE chat_id=? ORDER BY context_epoch DESC LIMIT 1',
-            (chat_id,),
-        ).fetchone()
-        if row is None:
-            conn.rollback()
-            return False, None
-        if int(row['context_epoch']) != want_epoch or int(row['resident_generation']) != want_gen:
-            conn.rollback()
-            return False, None
-        result = writer(conn)
-        if not conn.in_transaction:
-            raise DailyContextError(
-                'epoch-fenced writer must not commit or rollback',
-            )
-        row2 = conn.execute(
-            'SELECT context_epoch, resident_generation FROM daily_contexts '
-            'WHERE chat_id=? ORDER BY context_epoch DESC LIMIT 1',
-            (chat_id,),
-        ).fetchone()
-        if (
-            row2 is None
-            or int(row2['context_epoch']) != want_epoch
-            or int(row2['resident_generation']) != want_gen
-        ):
-            conn.rollback()
-            return False, None
-        conn.commit()
-        return True, result
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        conn.close()
+    """Epoch-fenced write via constrained connection proxy (see daily_fence)."""
+    from chat.daily_fence import commit_if_epoch_current as _fence_commit
+    return _fence_commit(token, writer, connect_fn=_connect, db_path=db_path)
 
 
 def retire_resident_for_rollover(
@@ -1264,6 +1443,11 @@ def respawn_daily_resident(
             '''UPDATE daily_contexts SET resident_generation=resident_generation+1,
                version=version+1, updated_at=datetime('now','+8 hours') WHERE id=?''',
             (context_id,),
+        )
+        new_gen = int(dict(row)['resident_generation']) + 1
+        conn.execute(
+            'DELETE FROM daily_resident_cursors WHERE context_id=? AND resident_generation=?',
+            (context_id, new_gen),
         )
         conn.commit()
     except Exception:

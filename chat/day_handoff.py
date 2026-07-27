@@ -218,6 +218,11 @@ def _looks_like_narrow_confirmation(text: str) -> bool:
     return any(t == m or t.startswith(m) for m in _CONFIRMATION_MARKERS)
 
 
+def contains_assistant_voice_in_text(text: str) -> bool:
+    """Public assistant-voice / speaker-label gate for formal handoff text."""
+    return _contains_assistant_voice(text)
+
+
 def _contains_assistant_voice(text: str) -> bool:
     v = str(text or '').strip()
     if not v:

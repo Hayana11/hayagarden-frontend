@@ -30,6 +30,16 @@ def _default_token_from_env() -> str:
     return ''
 
 
+def _reject_non_default_chat_id(chat_id: str):
+    from chat.daily_context import DEFAULT_CHAT_ID
+    if str(chat_id or '') != DEFAULT_CHAT_ID:
+        return jsonify({
+            'ok': False,
+            'error': 'R0 supports chat_id=%s only' % DEFAULT_CHAT_ID,
+        }), 400
+    return None
+
+
 def create_daily_context_blueprint(
     *,
     db_path: str,
@@ -63,9 +73,14 @@ def create_daily_context_blueprint(
         from chat.daily_context import DEFAULT_CHAT_ID, current_summary
 
         chat_id = str(request.args.get('chat_id') or DEFAULT_CHAT_ID)
+        cid_err = _reject_non_default_chat_id(chat_id)
+        if cid_err:
+            return cid_err
         try:
             data = current_summary(chat_id=chat_id, db_path=db_path)
             return jsonify({'ok': True, **data})
+        except ValueError as exc:
+            return jsonify({'ok': False, 'error': str(exc)}), 400
         except Exception as exc:
             logger.exception('daily-context/current failed')
             return jsonify({'ok': False, 'error': str(exc)}), 500
@@ -82,6 +97,9 @@ def create_daily_context_blueprint(
         )
 
         chat_id = str(request.args.get('chat_id') or DEFAULT_CHAT_ID)
+        cid_err = _reject_non_default_chat_id(chat_id)
+        if cid_err:
+            return cid_err
         try:
             ctx = get_or_create_daily_context(chat_id=chat_id, db_path=db_path)
             items = list_carryover_candidates(int(ctx['id']), limit=10, db_path=db_path)
@@ -97,6 +115,8 @@ def create_daily_context_blueprint(
                 'context_epoch': int(ctx['context_epoch']),
                 'candidates': safe,
             })
+        except ValueError as exc:
+            return jsonify({'ok': False, 'error': str(exc)}), 400
         except Exception as exc:
             logger.exception('daily-context/carryover-candidates failed')
             return jsonify({'ok': False, 'error': str(exc)}), 500
@@ -115,6 +135,9 @@ def create_daily_context_blueprint(
 
         data = request.get_json(silent=True) or {}
         chat_id = str(data.get('chat_id') or request.args.get('chat_id') or DEFAULT_CHAT_ID)
+        cid_err = _reject_non_default_chat_id(chat_id)
+        if cid_err:
+            return cid_err
         try:
             count = int(data.get('count'))
         except Exception:
