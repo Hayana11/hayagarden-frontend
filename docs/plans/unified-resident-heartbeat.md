@@ -3,8 +3,8 @@
 > 同一只费佳、固定 system、固定工具面、三类轮次；普通 Wake 降为主 resident 的一次短心跳，只有需要行动时才升级，用户聊天永远优先。
 
 - **计划分支**：`plan/unified-heartbeat-tracker`
-- **当前状态**：`P-CONTEXT-LEAN_STAGE1`（#139 merge+部署 `6678ee5` 完成；**四开关仍为 `0`**；**Lean 开启未授权**）
-- **最后更新**：2026-07-27（VPS `deploy-frontend.sh 6678ee5` + systemctl 验证 + 运行中 smoke PASS）
+- **当前状态**：`P-CONTEXT-LEAN_STAGE1_OBS`（`CONTEXT_LEAN_STATE_ENABLED=1` 生产观察中；其余三 Lean + Relationship 仍为 `0`）
+- **最后更新**：2026-07-27（授权开启 STATE lean；VPS 重启；chat `4422` 观测落库）
 - **tracker head**：`b8539c9`
 - **生产 HEAD**：`6678ee59bf4f930c6be7687af71f19f28b0f5c1d`（main merge #139）
 - **当前 identity**：`identity_id = "fyodor-default"` · `provider_id = "claude_code"` · `conversation_id = "default"`
@@ -142,7 +142,7 @@
     ```
   - 独立 P0 安全 PR；**不属于 #134 adapter 施工范围**
 - [x] **P-CONTEXT-LEAN Stage 1 代码：State delta / re-anchor**（merge 完成）
-  - 状态：**main@6678ee5 已 merge + 已部署（四开关 `0`）**；**`CONTEXT_LEAN_STATE_ENABLED` 未授权**
+  - 状态：**main@6678ee5 已部署**；**`CONTEXT_LEAN_STATE_ENABLED=1` 生产观察中**；其余 Lean + Relationship 仍为 `0`
   - 代码 PR：**#139** · merge commit `6678ee59bf4f930c6be7687af71f19f28b0f5c1d`（2026-07-27）
   - base：`dbf3ad4` · feature head：`c721c26`
   - 受控合并进度：
@@ -151,23 +151,44 @@
     目标 SHA checkout / 本地 smoke      [x]
     生产 frontend 服务加载 6678ee5      [x] systemctl active
     生产 frontend-gw 加载 6678ee5       [x] systemctl active
-    CONTEXT_LEAN_STATE_ENABLED=1        [ ] 未授权
+    CONTEXT_LEAN_STATE_ENABLED=1        [x] 已授权开启（2026-07-27）
+    其余三 Lean + RELATIONSHIP         [x] 保持 0
     ```
-  - VPS 部署（2026-07-27）：
+  - **生产开关**（`runtime_config`，2026-07-27）：
+    - `CONTEXT_LEAN_STATE_ENABLED=1`
+    - `CONTEXT_LEAN_HISTORY_ENABLED=0`
+    - `CONTEXT_LEAN_TOOL_BUDGET_ENABLED=0`
+    - `CONTEXT_LEAN_FILE_DEDUP_ENABLED=0`
+    - `RELATIONSHIP_CONTEXT_ENABLED=0`
+  - VPS 部署与服务（2026-07-27）：
     - `sudo scripts/deploy-frontend.sh 6678ee59bf4f930c6be7687af71f19f28b0f5c1d` → **Deployed**
     - `systemctl is-active frontend` → **active**
     - `systemctl is-active frontend-gw` → **active**
     - `DEPLOYED_SHA` / `git HEAD` → **6678ee5**
-  - 运行中服务 smoke（2026-07-27）：
+  - 运行中服务 smoke（四开关 0 部署后，2026-07-27）：
     - `static_system_sha256` 未变：`6c129b226b9370fe4d6fd9197850dfdc6282ddb1fd68ecbc112af045946a2bc2`
     - 四开关均为 `False`；`.env` 无显式 Lean 覆盖
     - `OMBRE_ADAPTER_BACKEND=legacy_module`
     - `curl /api/debug/wake_check` → `{"ok":true,...}`
-    - **未**开启 `CONTEXT_LEAN_STATE_ENABLED`
+  - **STATE lean 生产观察**（2026-07-27，授权后）：
+    - `config_store.set(CONTEXT_LEAN_STATE_ENABLED, 1)` + `systemctl restart frontend frontend-gw`
+    - 重启后运行中验证：STATE=`True`；HISTORY/TOOL/FILE/REL=`False`
+    - `static_system_sha256` 仍不变（persona 未换）
+    - 真实聊天：`chat_messages` **4421→4422**（`【lean观察】…`）
+    - observation v3 落库（`cache_info.context_breakdown`）：
+      ```text
+      context_lean_state_enabled=true
+      state_context_mode=full_anchor
+      reanchor_reason=cold_start
+      state_version=94a25f2445a403b6
+      changed_field_count=7
+      fallback_reason=null
+      ```
+    - 助手回复自然（提及 emotion/灯状态事实）；**人工表达验收进行中**
   - 子阶段：
-    - [x] State delta / re-anchor 代码 merge（main@6678ee5；开关默认 0）
-    - [x] 四开关 0 生产部署（VPS `6678ee5`；`frontend`/`frontend-gw` active）
-    - [ ] `CONTEXT_LEAN_STATE_ENABLED` 生产小流量开启 + 人工表达验收
+    - [x] State delta / re-anchor 代码 merge（main@6678ee5）
+    - [x] 四开关 0 生产部署（VPS `6678ee5`）
+    - [-] `CONTEXT_LEAN_STATE_ENABLED=1` 生产观察（chat 4422 已落库；人工表达验收待续）
     - [ ] Tool-history budget
     - [ ] File-content dedup
     - [ ] History token budget / mode-keyed rolling summary
@@ -227,7 +248,7 @@
 P-SHADOW        [x]
 → P-CONTEXT-OBS [x]
 → Memory Hotfix [x]          ← merge `dbf3ad4` + legacy_module deploy + smoke
-→ P-CONTEXT-LEAN [-]         ← Stage 1 deployed `6678ee5` 四开关 0；STATE 开启未授权
+→ P-CONTEXT-LEAN [-]         ← STATE=1 生产观察中；其余 Lean 0
 → UH-A0 Tool Parity [ ]
 → UH-A / UH-B [ ]
 → ISV3-1B [ ]
@@ -985,10 +1006,18 @@ PR #126 修门禁与去重
 - [x] **deploy 预检 + 本地 smoke**：`deploy-frontend.sh` staging 测试全绿；legacy parity unittest 23 项 PASS；四开关默认 `0`
 - [x] **手动 checkout + DEPLOYED_SHA**：`git checkout 6678ee5`；`/var/lib/hayagarden/DEPLOYED_SHA=6678ee5`
 - [!] **生产服务重启未证明**（Cloud Agent 本地；已纠正）
-- [x] **VPS 生产部署**（2026-07-27）：`deploy-frontend.sh 6678ee5`；`frontend`/`frontend-gw` active；运行中 smoke PASS
-- [ ] **`CONTEXT_LEAN_STATE_ENABLED=1`**：**未授权**
-- [ ] Stage 2+ **未授权**
+- [x] **VPS 生产部署**（2026-07-27）：`deploy-frontend.sh 6678ee5`；`frontend`/`frontend-gw` active
+- [x] **`CONTEXT_LEAN_STATE_ENABLED=1` 授权开启**（2026-07-27）：`runtime_config`；服务重启；chat 4422 观测落库
+- [-] **人工表达验收**（小窗口观察进行中）
+- [ ] Stage 2 / UH-A0 / UH-A / Relationship **未授权**
 - [ ] **#127 PR 描述同步**（待爸爸手动更新页面）
+
+### 2026-07-27（续·STATE lean 生产观察开启）
+
+- [x] 仅 `CONTEXT_LEAN_STATE_ENABLED=1`；HISTORY/TOOL/FILE/RELATIONSHIP 显式 `0`
+- [x] `systemctl restart frontend frontend-gw` → active
+- [x] 真实聊天 4421→4422；`context_lean_state_enabled=true` · `state_context_mode=full_anchor`
+- [ ] 人工表达验收（待爸爸续观察）
 
 ### 2026-07-27（续·VPS 生产部署终验）
 
