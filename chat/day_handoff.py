@@ -218,6 +218,41 @@ def _looks_like_narrow_confirmation(text: str) -> bool:
     return any(t == m or t.startswith(m) for m in _CONFIRMATION_MARKERS)
 
 
+_FORMAL_BEHAVIOR_MARKERS = (
+    '你应该', '请回复', '怎么回复', '怎么哄', '表现得',
+    '抱着她说', '抱着她说话', '下一轮要表现', '请抱着', '请把它视为',
+    '不得复述', '不得改变语气', '怎么提', '顺嘴',
+)
+
+def previous_chat_day(local_day: str) -> str:
+    day = validate_day_string(local_day)
+    day_dt = datetime.datetime.strptime(day, '%Y-%m-%d')
+    return (day_dt - datetime.timedelta(days=1)).strftime('%Y-%m-%d')
+
+
+def contains_behavior_instruction_in_text(text: str) -> bool:
+    """Reject reply/style/action coaching while allowing neutral product mentions."""
+    v = str(text or '').strip()
+    if not v:
+        return False
+    for marker in _FORMAL_BEHAVIOR_MARKERS:
+        if marker in v:
+            return True
+    for marker in _ACTION_MARKERS:
+        if marker in v:
+            return True
+    if re.search(r'（[^）]*(抱|揽|亲|摸)[^）]*）', v):
+        return True
+    if re.search(r'下一轮要.*?表现', v):
+        return True
+    return False
+
+
+def contains_assistant_voice_in_text(text: str) -> bool:
+    """Public assistant-voice / speaker-label gate for formal handoff text."""
+    return _contains_assistant_voice(text)
+
+
 def _contains_assistant_voice(text: str) -> bool:
     v = str(text or '').strip()
     if not v:

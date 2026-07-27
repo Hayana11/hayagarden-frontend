@@ -62,7 +62,20 @@ def execute(action: str, thoughts: str, content: str,
 
     # 执行 action
     if action == 'message' and content and mode not in ('summarize', 'dream'):
-        if 'cache_info' in _table_columns(conn, 'chat_messages'):
+        msg_cols = _table_columns(conn, 'chat_messages')
+        if 'cache_info' in msg_cols and 'source_kind' in msg_cols:
+            conn.execute(
+                "INSERT INTO chat_messages (author, content, thinking, cache_info, source_kind) "
+                "VALUES ('fyodor',?,?,?,'wake')",
+                (content, thoughts, cache_info_json),
+            )
+        elif 'source_kind' in msg_cols:
+            conn.execute(
+                "INSERT INTO chat_messages (author, content, thinking, source_kind) "
+                "VALUES ('fyodor',?,?,'wake')",
+                (content, thoughts),
+            )
+        elif 'cache_info' in msg_cols:
             conn.execute(
                 "INSERT INTO chat_messages (author, content, thinking, cache_info) "
                 "VALUES ('fyodor',?,?,?)",
