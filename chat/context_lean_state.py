@@ -238,6 +238,49 @@ def _parse_lights_source_meta(raw_state: Mapping[str, Any]) -> dict[str, Any]:
         return {}
 
 
+def _apply_lights_source_to_raw(
+    raw: Mapping[str, str],
+    lights_meta: Mapping[str, Any],
+    known_state: Mapping[str, str],
+) -> dict[str, str]:
+    """Normalize lean lights field before diff/anchor (device-level source semantics only)."""
+    out = dict(normalize_state_dict(raw))
+    known_lights = normalize_state_dict(known_state).get('lights', '')
+    status = lights_meta.get('lights_source_status')
+
+    if status == 'partial':
+        merged = merge_partial_lean_lights(
+            out.get('lights', ''),
+            known_lights,
+            main_available=bool(lights_meta.get('lights_main_available')),
+            bedside_available=bool(lights_meta.get('lights_bedside_available')),
+        )
+        if merged:
+            out['lights'] = merged
+        else:
+            out.pop('lights', None)
+    elif status == 'unavailable':
+        if known_lights:
+            out['lights'] = known_lights
+        else:
+            out.pop('lights', None)
+    return out
+
+
+def _last_raw_for_lights_diff(
+    last_raw: Mapping[str, Any],
+    known_state: Mapping[str, str],
+) -> dict[str, str]:
+    """Backfill last-known lights when a prior outage left a hole in last_state_snapshot."""
+    last = normalize_state_dict(last_raw)
+    known_lights = normalize_state_dict(known_state).get('lights', '')
+    if known_lights and 'lights' not in last:
+        patched = dict(last)
+        patched['lights'] = known_lights
+        return patched
+    return dict(last)
+
+
 def _legacy_state_context(
     *,
     raw_state: Mapping[str, str],
@@ -370,19 +413,8 @@ def assemble_cc_state_context(
     cumulative_before = {} if needs_reanchor else cumulative
     send_is_cold = bool(needs_reanchor or is_cold)
 
-    if lights_meta.get('lights_source_status') == 'partial' and 'lights' in raw:
-        cumulative_lights = normalize_state_dict(known_state_before_reanchor).get('lights', '')
-        merged_lights = merge_partial_lean_lights(
-            raw.get('lights', ''),
-            cumulative_lights,
-            main_available=bool(lights_meta.get('lights_main_available')),
-            bedside_available=bool(lights_meta.get('lights_bedside_available')),
-        )
-        raw = dict(raw)
-        if merged_lights:
-            raw['lights'] = merged_lights
-        else:
-            raw.pop('lights', None)
+    raw = _apply_lights_source_to_raw(raw, lights_meta, known_state_before_reanchor)
+    last_raw = _last_raw_for_lights_diff(last_raw, known_state_before_reanchor)
 
     effective_send_payload = build_state_send_payload(
         last_raw,

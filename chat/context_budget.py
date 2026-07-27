@@ -77,8 +77,8 @@ def build_state_send_payload(
     keys = list(dict.fromkeys(list(last_raw.keys()) + list(raw.keys())))
     for key in keys:
         if key not in raw:
-            # Source unavailable this turn: preserve cumulative state, no tombstone.
-            continue
+            if key == 'lights':
+                continue
         if key == 'time_bucket':
             continue
         before = last_raw.get(key, '')

@@ -388,6 +388,188 @@ class PartialZoneReanchorTests(unittest.TestCase):
         self.assertEqual(sess.last_state_send_snapshot.get('lights'), 'main=开 bedside=关')
 
 
+class UnavailableZoneReanchorTests(unittest.TestCase):
+    _UNAVAILABLE_META = {
+        'lights_source_status': 'unavailable',
+        'lights_main_available': False,
+        'lights_bedside_available': False,
+    }
+
+    def _cumulative(self):
+        return normalize_state_dict({
+            'lights': 'main=关 bedside=关',
+            'emotion': 'valence=0.60',
+        })
+
+    def _raw_unavailable(self):
+        return {
+            'emotion': 'valence=0.60',
+            '_lights_source': json.dumps(self._UNAVAILABLE_META),
+        }
+
+    def _assert_reanchor_preserves_known_lights(self, result, *, reason: str):
+        self.assertEqual(result.state_context_mode, 'full_anchor')
+        self.assertEqual(result.reanchor_reason, reason)
+        self.assertEqual(result.send_payload.get('lights'), 'main=关 bedside=关')
+        self.assertIn('lights: main=关 bedside=关', result.state_text)
+        expected_version = compute_state_version({
+            'lights': 'main=关 bedside=关',
+            'emotion': 'valence=0.60',
+        })
+        self.assertEqual(result.observation['state_version'], expected_version)
+
+    def test_unavailable_periodic_reanchor_preserves_known_lights(self):
+        cumulative = self._cumulative()
+        resident = _resident_stub(
+            last_state_snapshot=cumulative,
+            last_state_send_snapshot=cumulative,
+            last_state_anchor_generation=1,
+            generation=1,
+            last_state_schema_version=1,
+            turns_since_state_anchor=REANCHOR_TURN_INTERVAL,
+        )
+        result = assemble_cc_state_context(
+            raw_state=self._raw_unavailable(),
+            is_cold=False,
+            user_text='继续',
+            resident=resident,
+            lean_on=True,
+        )
+        self._assert_reanchor_preserves_known_lights(result, reason='reanchor_turn_interval')
+
+        sess = ResidentSession('/tmp', '', '')
+        sess._last_state_send_snapshot = dict(cumulative)
+        sess._last_successful_lean_state = True
+        sess._last_state_anchor_generation = 1
+        sess._generation = 1
+        meta = {
+            'state_snapshot': copy.deepcopy(result.raw_state),
+            **result.commit_meta_extras,
+        }
+        sess._commit_sent_context(meta)
+        self.assertEqual(sess.last_state_send_snapshot.get('lights'), 'main=关 bedside=关')
+
+    def test_unavailable_generation_reanchor_preserves_known_lights(self):
+        cumulative = self._cumulative()
+        resident = _resident_stub(
+            last_state_snapshot=cumulative,
+            last_state_send_snapshot=cumulative,
+            last_state_anchor_generation=1,
+            generation=2,
+            last_state_schema_version=1,
+            turns_since_state_anchor=2,
+        )
+        result = assemble_cc_state_context(
+            raw_state=self._raw_unavailable(),
+            is_cold=False,
+            user_text='继续',
+            resident=resident,
+            lean_on=True,
+        )
+        self._assert_reanchor_preserves_known_lights(result, reason='resident_generation_change')
+
+        sess = ResidentSession('/tmp', '', '')
+        sess._last_state_send_snapshot = dict(cumulative)
+        sess._last_successful_lean_state = True
+        sess._last_state_anchor_generation = 1
+        sess._generation = 2
+        meta = {
+            'state_snapshot': copy.deepcopy(result.raw_state),
+            **result.commit_meta_extras,
+        }
+        sess._commit_sent_context(meta)
+        self.assertEqual(sess.last_state_send_snapshot.get('lights'), 'main=关 bedside=关')
+
+
+class DisconnectRecoverChainTests(unittest.TestCase):
+    _OK_META = {
+        'lights_source_status': 'ok',
+        'lights_main_available': True,
+        'lights_bedside_available': True,
+    }
+    _UNAVAILABLE_META = {
+        'lights_source_status': 'unavailable',
+        'lights_main_available': False,
+        'lights_bedside_available': False,
+    }
+
+    def _base_state(self):
+        return normalize_state_dict({
+            'lights': 'main=关 bedside=关',
+            'emotion': 'valence=0.60',
+            'drive': 'attachment=0.55',
+            'time_bucket': 'bucket=上午',
+        })
+
+    def _raw_ok(self):
+        base = self._base_state()
+        return {
+            **base,
+            '_lights_source': json.dumps(self._OK_META),
+        }
+
+    def _raw_unavailable(self):
+        base = self._base_state()
+        raw = {k: v for k, v in base.items() if k != 'lights'}
+        raw['_lights_source'] = json.dumps(self._UNAVAILABLE_META)
+        return raw
+
+    def test_success_disconnect_recover_unchanged_no_false_delta(self):
+        cumulative = self._base_state()
+        sess = ResidentSession('/tmp', '', '')
+        sess._last_state_send_snapshot = dict(cumulative)
+        sess._last_state_snapshot = dict(cumulative)
+        sess._last_successful_lean_state = True
+        sess._last_state_anchor_generation = 1
+        sess._generation = 1
+        sess._last_state_schema_version = 1
+        sess._turns_since_state_anchor = 1
+
+        r1 = assemble_cc_state_context(
+            raw_state=self._raw_ok(),
+            is_cold=False,
+            user_text='继续',
+            resident=sess,
+            lean_on=True,
+        )
+        self.assertEqual(r1.state_context_mode, 'omitted')
+        sess._commit_sent_context({
+            'state_snapshot': copy.deepcopy(r1.raw_state),
+            **r1.commit_meta_extras,
+        })
+
+        r2 = assemble_cc_state_context(
+            raw_state=self._raw_unavailable(),
+            is_cold=False,
+            user_text='继续',
+            resident=sess,
+            lean_on=True,
+        )
+        self.assertEqual(r2.state_context_mode, 'omitted')
+        self.assertNotIn('lights', r2.send_payload)
+        sess._commit_sent_context({
+            'state_snapshot': copy.deepcopy(r2.raw_state),
+            **r2.commit_meta_extras,
+        })
+        self.assertEqual(sess.last_state_snapshot.get('lights'), 'main=关 bedside=关')
+        self.assertEqual(sess.last_state_send_snapshot.get('lights'), 'main=关 bedside=关')
+
+        version_before_recover = compute_state_version(sess.last_state_send_snapshot)
+        r3 = assemble_cc_state_context(
+            raw_state=self._raw_ok(),
+            is_cold=False,
+            user_text='继续',
+            resident=sess,
+            lean_on=True,
+        )
+        self.assertEqual(r3.state_context_mode, 'omitted')
+        self.assertNotIn('lights', r3.send_payload)
+        self.assertEqual(r3.observation['previous_version'], r3.observation['state_version'])
+        self.assertEqual(r3.observation['state_version'], version_before_recover)
+        self.assertEqual(sess.last_state_snapshot.get('lights'), 'main=关 bedside=关')
+        self.assertEqual(sess.last_state_send_snapshot.get('lights'), 'main=关 bedside=关')
+
+
 class HotRoundTransientFailureTests(unittest.TestCase):
     def test_light_source_failure_preserves_cumulative_lights(self):
         cumulative = normalize_state_dict({
