@@ -278,13 +278,46 @@ class CleanWindowShadowSessionTests(unittest.TestCase):
                 mgr.turn(sid, 'after close')
 
     def test_ttl_expiry(self):
-        with self._run_with_patches() as (stack, mgr, *_):
+        with self._run_with_patches() as (stack, mgr, resident, *_):
             started = mgr.start()
             sid = started['session_id']
             session = mgr._sessions[sid]
             session.expires_at = time.time() - 1
+            killed = {'n': 0}
+            original_kill = resident._kill
+
+            def tracked_kill(*args, **kwargs):
+                killed['n'] += 1
+                return original_kill(*args, **kwargs)
+
+            resident._kill = tracked_kill
             with self.assertRaises(KeyError):
                 mgr.turn(sid, 'expired')
+            self.assertEqual(killed['n'], 1)
+            self.assertNotIn(sid, mgr._sessions)
+
+    def test_ttl_purge_closes_session_resources(self):
+        with self._run_with_patches() as (stack, mgr, resident, *_):
+            started = mgr.start()
+            sid = started['session_id']
+            session = mgr._sessions[sid]
+            session.expires_at = time.time() - 1
+            killed = {'n': 0}
+            original_kill = resident._kill
+
+            def tracked_kill(*args, **kwargs):
+                killed['n'] += 1
+                return original_kill(*args, **kwargs)
+
+            resident._kill = tracked_kill
+            os.makedirs(session.work_dir, exist_ok=True)
+            marker = os.path.join(session.work_dir, 'marker')
+            with open(marker, 'w', encoding='utf-8') as fh:
+                fh.write('ttl')
+            mgr._purge_expired()
+            self.assertNotIn(sid, mgr._sessions)
+            self.assertEqual(killed['n'], 1)
+            self.assertFalse(os.path.exists(marker))
 
     def test_turn_limit_auto_closes(self):
         with self._run_with_patches() as (stack, mgr, *_):

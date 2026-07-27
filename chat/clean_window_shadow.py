@@ -188,10 +188,11 @@ class CleanWindowManager:
         self._lock = threading.Lock()
 
     def _purge_expired(self):
-        now = time.time()
-        expired = [sid for sid, s in self._sessions.items() if s.expires_at <= now]
+        expired = [sid for sid, s in self._sessions.items() if s.expires_at <= time.time()]
         for sid in expired:
-            self._sessions.pop(sid, None)
+            session = self._sessions.pop(sid, None)
+            if session is not None:
+                session.close()
 
     def _static_parts(self):
         from chat.system_builder import build_cc_static_parts
