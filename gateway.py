@@ -4118,6 +4118,239 @@ def group_chat_stream():
     )
 
 
+def _stream_cc_daily_soft_window(_turn_data, _uc):
+    """Yield SSE event strings for DAILY_SOFT_WINDOW_ENABLED claude_code chat."""
+    import hashlib
+    import logging
+    from moments_turn import DEFAULT_CONVERSATION_ID
+    from chat import daily_context as _daily_ctx
+    from chat import daily_runtime as _daily_rt
+    from chat.system_builder import build_cc_static_parts
+
+    _daily_plan = None
+    text, thinking = None, None
+    cc_cache_read, cc_cache_create = 0, 0
+    cc_usage = None
+    try:
+        _static_parts = build_cc_static_parts()
+        _cc_env = dict(os.environ)
+        _cc_env['CLAUDE_CODE_OAUTH_TOKEN'] = CC_TOKEN
+        _cc_env.pop('ANTHROPIC_API_KEY', None)
+
+        def _alive_for_key(key):
+            alive = getattr(_CC_RESIDENT, '_alive', lambda: False)()
+            return _daily_rt._BINDING_KEY == key and alive
+
+        _daily_plan = _daily_rt.prepare_daily_turn(
+            user_message_id=int(_turn_data['user_message_id']),
+            db_path=DB_PATH,
+            resident_alive_fn=_alive_for_key,
+            resident=_CC_RESIDENT,
+            static_system=_static_parts['full_system'],
+            static_system_sha256=hashlib.sha256(
+                (_static_parts['full_system'] or '').encode('utf-8'),
+            ).hexdigest(),
+            persona_sha256=hashlib.sha256(
+                (_static_parts.get('persona') or '').encode('utf-8'),
+            ).hexdigest(),
+            provider='claude_code',
+            model=_get_model() or '',
+        )
+        _daily_plan._resident_close_fn = lambda: _daily_rt.close_resident(_CC_RESIDENT)
+
+        cc_tool_calls = []
+        for evt, payload in _daily_rt.stream_daily_resident_turn(
+            _daily_plan,
+            resident=_CC_RESIDENT,
+            env=_cc_env,
+            static_system=_static_parts['full_system'],
+        ):
+            if evt == 'text':
+                yield 'data: ' + json.dumps({'t': 'text', 'd': payload}) + SSE_END
+            elif evt == 'think':
+                yield 'data: ' + json.dumps({'t': 'think', 'd': payload}) + SSE_END
+            elif evt == 'tool_use':
+                cc_tool_calls.append({
+                    'id': payload.get('id'), 'name': payload.get('name'),
+                    'args': payload.get('args'), 'result': '', 'success': True,
+                })
+                yield 'data: ' + json.dumps({
+                    't': 'tool_use',
+                    'd': {'name': payload.get('name'), 'args': _slim_args(payload.get('args'))},
+                    'idx': len(cc_tool_calls) - 1,
+                }, ensure_ascii=False) + SSE_END
+            elif evt == 'tool_result':
+                _ti = next(
+                    (i for i in range(len(cc_tool_calls) - 1, -1, -1)
+                     if cc_tool_calls[i].get('id') == payload.get('tool_use_id')),
+                    len(cc_tool_calls) - 1,
+                )
+                if _ti >= 0:
+                    cc_tool_calls[_ti]['result'] = payload.get('result', '')
+                    cc_tool_calls[_ti]['success'] = not payload.get('is_error')
+            elif evt == 'done':
+                if isinstance(payload, tuple) and len(payload) >= 3 and isinstance(payload[2], dict):
+                    raw_text, thinking, cc_usage = payload[0], payload[1], payload[2]
+                else:
+                    raw_text, thinking, cc_cache_read, cc_cache_create = payload
+                    cc_usage = {
+                        'cache_read': cc_cache_read,
+                        'cache_creation': cc_cache_create,
+                    }
+                text = _cc_save_markers(raw_text)
+
+        if not str(text or '').strip():
+            _daily_rt.handle_provider_failure(
+                _daily_plan,
+                error_code='empty_provider_response',
+                resident=_CC_RESIDENT,
+            )
+            yield 'data: ' + json.dumps({
+                't': 'err', 'd': 'empty provider response', 'retryable': False,
+            }) + SSE_END
+            yield 'data: ' + json.dumps({'t': 'done', 'ok': False}) + SSE_END
+            return
+
+        _cache_info_json = (
+            json.dumps(cc_usage, ensure_ascii=False)
+            if cc_usage else
+            json.dumps({
+                'cache_read': cc_cache_read,
+                'cache_creation': cc_cache_create,
+            }, ensure_ascii=False) if (cc_cache_read or cc_cache_create) else ''
+        )
+        _cc_text, _cc_choices = _extract_choices(text)
+        if _cc_choices and not _cc_text:
+            _cc_text = '[选项: ' + ' / '.join(_cc_choices) + ']'
+        conn = get_db()
+        try:
+            cur = conn.execute(
+                "INSERT INTO chat_messages (author, content, thinking, tool_calls, cache_info, choices) "
+                "VALUES ('assistant', ?, ?, ?, ?, ?)",
+                (
+                    _cc_text, thinking,
+                    json.dumps(
+                        [{k: v for k, v in tc.items() if k != 'id'} for tc in cc_tool_calls],
+                        ensure_ascii=False,
+                    ) if cc_tool_calls else '',
+                    _cache_info_json,
+                    json.dumps(_cc_choices, ensure_ascii=False) if _cc_choices else '',
+                ),
+            )
+            conn.commit()
+            assistant_id = int(cur.lastrowid)
+        except Exception as exc:
+            _daily_rt.abort_daily_turn(
+                _daily_plan,
+                error_code='assistant_persist_failed',
+                close_resident_obj=_CC_RESIDENT,
+            )
+            yield 'data: ' + json.dumps({
+                't': 'err', 'd': 'assistant persist failed: %s' % exc, 'retryable': False,
+            }) + SSE_END
+            yield 'data: ' + json.dumps({'t': 'done', 'ok': False}) + SSE_END
+            return
+        finally:
+            conn.close()
+
+        _daily_rt.verify_epoch_token(_daily_plan)
+        manifest = _daily_rt.handle_provider_success(
+            _daily_plan,
+            assistant_message_id=assistant_id,
+            raw_text=text,
+            usage=cc_usage if isinstance(cc_usage, dict) else {},
+        )
+        _write_session_memo(_uc, _cc_text)
+        try:
+            from moments_persistence import after_assistant_persisted
+            after_assistant_persisted(
+                memories_db_path=DB_PATH,
+                turn_data=_turn_data,
+                assistant_message_id=assistant_id,
+                conversation_id=DEFAULT_CONVERSATION_ID,
+            )
+        except Exception:
+            pass
+        try:
+            from chat.scoring_identity import trigger_turn_scoring
+            trigger_turn_scoring(
+                assistant_text=text,
+                message_id=_turn_data.get('user_message_id'),
+                get_db_fn=get_db,
+            )
+        except Exception:
+            pass
+        logging.getLogger(__name__).info(
+            'daily_window_manifest %s', json.dumps(manifest, ensure_ascii=False),
+        )
+        if cc_usage or cc_cache_read or cc_cache_create:
+            _usage_evt = {'t': 'usage', 'cache_read': cc_cache_read, 'cache_creation': cc_cache_create}
+            if isinstance(cc_usage, dict):
+                for _k in (
+                    'v', 'provider', 'num_rounds', 'input_tokens', 'output_tokens',
+                    'last_round_context', 'max_round_context', 'resident_turn_count',
+                    'respawn_reason',
+                ):
+                    if _k in cc_usage:
+                        _usage_evt[_k] = cc_usage[_k]
+            yield 'data: ' + json.dumps(_usage_evt) + SSE_END
+        yield 'data: ' + json.dumps({'t': 'done', 'ok': True}) + SSE_END
+        return ('persisted', text, thinking)
+    except _daily_ctx.DeferredError as exc:
+        if _daily_plan:
+            _daily_rt._release_lease(_daily_plan)
+        yield 'data: ' + json.dumps({
+            't': 'err', 'd': str(exc), 'retryable': True, 'code': 'rollover_deferred',
+        }) + SSE_END
+        yield 'data: ' + json.dumps({'t': 'done', 'ok': False}) + SSE_END
+        return None
+    except (_daily_ctx.ConflictError, _daily_rt.LeaseConflictError) as exc:
+        if _daily_plan:
+            _daily_rt._release_lease(_daily_plan)
+        yield 'data: ' + json.dumps({
+            't': 'err', 'd': str(exc), 'retryable': True, 'code': 'resident_turn_lease_conflict',
+        }) + SSE_END
+        yield 'data: ' + json.dumps({'t': 'done', 'ok': False}) + SSE_END
+        return None
+    except _daily_rt.DailyWindowToolFencePending as exc:
+        if _daily_plan:
+            _daily_rt.abort_daily_turn(
+                _daily_plan,
+                error_code='DailyWindowToolFencePending',
+                close_resident_obj=_CC_RESIDENT,
+            )
+        yield 'data: ' + json.dumps({
+            't': 'err', 'd': str(exc), 'code': 'DailyWindowToolFencePending', 'retryable': False,
+        }) + SSE_END
+        yield 'data: ' + json.dumps({'t': 'done', 'ok': False}) + SSE_END
+        return None
+    except _daily_rt.EpochMismatchError as exc:
+        if _daily_plan:
+            _daily_rt.abort_daily_turn(
+                _daily_plan,
+                error_code='epoch_mismatch',
+                close_resident_obj=_CC_RESIDENT,
+                respawn=False,
+            )
+        yield 'data: ' + json.dumps({
+            't': 'err', 'd': str(exc), 'code': 'epoch_mismatch', 'retryable': False,
+        }) + SSE_END
+        yield 'data: ' + json.dumps({'t': 'done', 'ok': False}) + SSE_END
+        return None
+    except Exception as exc:
+        if _daily_plan:
+            _daily_rt.handle_provider_failure(
+                _daily_plan,
+                error_code=str(exc),
+                resident=_CC_RESIDENT,
+            )
+        yield 'data: ' + json.dumps({
+            't': 'err', 'd': str(exc), 'retryable': False,
+        }) + SSE_END
+        yield 'data: ' + json.dumps({'t': 'done', 'ok': False}) + SSE_END
+        return None
+
+
 @app.route('/chat/stream', methods=['POST'])
 def chat_stream():
     from flask import Response, stream_with_context
@@ -4154,6 +4387,23 @@ def chat_stream():
                     yield 'data: ' + json.dumps({'t': 'done', 'ok': bool(text)}) + SSE_END
                     return
                 _turn_data = activate_turn(_turn_data, conversation_id=_conv, memories_db_path=DB_PATH)
+                from chat import daily_context as _daily_ctx
+                if _daily_ctx.enabled():
+                    _daily_out = None
+                    try:
+                        for _chunk in _stream_cc_daily_soft_window(_turn_data, _uc):
+                            if isinstance(_chunk, tuple) and _chunk[0] == 'persisted':
+                                _daily_out = _chunk
+                                continue
+                            yield _chunk
+                    finally:
+                        _released[0] = True
+                        if _daily_out:
+                            _persisted[0] = True
+                            _gen_release((_daily_out[1], _daily_out[2]))
+                        else:
+                            _gen_release(None)
+                    return
                 text, thinking = None, None
                 cc_cache_read, cc_cache_create = 0, 0
                 cc_usage = None

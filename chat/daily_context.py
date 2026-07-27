@@ -219,6 +219,17 @@ def ensure_schema(db_path: Optional[str] = None) -> None:
                 updated_at DATETIME NOT NULL DEFAULT (datetime('now', '+8 hours')),
                 PRIMARY KEY (context_id, resident_generation)
             );
+
+            CREATE TABLE IF NOT EXISTS daily_resident_turn_leases (
+                context_id INTEGER NOT NULL,
+                resident_generation INTEGER NOT NULL,
+                lease_owner TEXT NOT NULL,
+                request_message_id INTEGER NOT NULL,
+                acquired_at DATETIME NOT NULL,
+                expires_at DATETIME NOT NULL,
+                updated_at DATETIME NOT NULL DEFAULT (datetime('now', '+8 hours')),
+                PRIMARY KEY (context_id, resident_generation)
+            );
             """
         )
         ensure_daily_meta_table(conn)
@@ -1569,6 +1580,243 @@ def set_morning_greeting_message_id(
     finally:
         conn.close()
     return get_daily_context_by_id(context_id, db_path=db_path) or {}
+
+
+def _parse_local_dt(value: str) -> datetime.datetime:
+    return datetime.datetime.strptime(str(value), '%Y-%m-%d %H:%M:%S')
+
+
+def get_latest_active_context(
+    chat_id: str = DEFAULT_CHAT_ID,
+    *,
+    db_path: Optional[str] = None,
+) -> Optional[dict[str, Any]]:
+    """Highest active (non-backfill) daily context for chat_id."""
+    conn = _connect(db_path)
+    try:
+        return _row_to_dict(conn.execute(
+            'SELECT * FROM daily_contexts WHERE chat_id=? AND is_backfill=0 '
+            'ORDER BY context_epoch DESC LIMIT 1',
+            (chat_id,),
+        ).fetchone())
+    finally:
+        conn.close()
+
+
+def get_context_for_local_day(
+    chat_id: str,
+    local_day: str,
+    *,
+    db_path: Optional[str] = None,
+) -> Optional[dict[str, Any]]:
+    conn = _connect(db_path)
+    try:
+        return get_daily_context(conn, chat_id=chat_id, local_day=local_day)
+    finally:
+        conn.close()
+
+
+def _lease_row_to_dict(row: Optional[sqlite3.Row]) -> Optional[dict[str, Any]]:
+    return _row_to_dict(row)
+
+
+def is_resident_turn_active(
+    context_id: int,
+    resident_generation: int,
+    *,
+    db_path: Optional[str] = None,
+    now: Optional[datetime.datetime] = None,
+) -> bool:
+    conn = _connect(db_path)
+    try:
+        row = conn.execute(
+            'SELECT expires_at FROM daily_resident_turn_leases '
+            'WHERE context_id=? AND resident_generation=?',
+            (int(context_id), int(resident_generation)),
+        ).fetchone()
+        if row is None:
+            return False
+        now_dt = now or (datetime.datetime.utcnow() + datetime.timedelta(hours=TZ_OFFSET_HOURS))
+        try:
+            exp_dt = _parse_local_dt(str(row['expires_at']))
+        except ValueError:
+            return False
+        return exp_dt > now_dt
+    finally:
+        conn.close()
+
+
+def has_active_provider_turn_lease(
+    chat_id: str = DEFAULT_CHAT_ID,
+    *,
+    db_path: Optional[str] = None,
+    now: Optional[datetime.datetime] = None,
+) -> bool:
+    conn = _connect(db_path)
+    try:
+        rows = conn.execute(
+            'SELECT l.context_id, l.resident_generation, l.expires_at '
+            'FROM daily_resident_turn_leases l '
+            'JOIN daily_contexts c ON c.id=l.context_id '
+            'WHERE c.chat_id=? AND c.is_backfill=0',
+            (chat_id,),
+        ).fetchall()
+        now_dt = now or (datetime.datetime.utcnow() + datetime.timedelta(hours=TZ_OFFSET_HOURS))
+        for row in rows:
+            try:
+                exp_dt = _parse_local_dt(str(row['expires_at']))
+            except ValueError:
+                continue
+            if exp_dt > now_dt:
+                return True
+        return False
+    finally:
+        conn.close()
+
+
+def acquire_resident_turn_lease(
+    context_id: int,
+    resident_generation: int,
+    *,
+    lease_owner: str,
+    request_message_id: int,
+    ttl_seconds: int = 360,
+    db_path: Optional[str] = None,
+    now: Optional[datetime.datetime] = None,
+) -> dict[str, Any]:
+    """Acquire exclusive turn lease for one resident generation."""
+    ensure_schema(db_path)
+    owner = str(lease_owner or '').strip()
+    if not owner:
+        raise ValueError('lease_owner required')
+    req_id = int(request_message_id)
+    if req_id <= 0:
+        raise ValueError('request_message_id must be positive')
+    now_dt = now or (datetime.datetime.utcnow() + datetime.timedelta(hours=TZ_OFFSET_HOURS))
+    now_s = now_dt.strftime('%Y-%m-%d %H:%M:%S')
+    exp_s = (now_dt + datetime.timedelta(seconds=int(ttl_seconds))).strftime('%Y-%m-%d %H:%M:%S')
+    conn = _connect(db_path)
+    try:
+        conn.execute('BEGIN IMMEDIATE')
+        row = conn.execute(
+            'SELECT * FROM daily_resident_turn_leases '
+            'WHERE context_id=? AND resident_generation=?',
+            (int(context_id), int(resident_generation)),
+        ).fetchone()
+        if row is not None:
+            current = dict(row)
+            try:
+                exp_dt = _parse_local_dt(str(current['expires_at']))
+            except ValueError:
+                exp_dt = now_dt
+            if exp_dt > now_dt and str(current['lease_owner']) != owner:
+                conn.rollback()
+                raise ConflictError('resident turn lease held by another owner')
+            conn.execute(
+                '''UPDATE daily_resident_turn_leases SET lease_owner=?, request_message_id=?,
+                   acquired_at=?, expires_at=?, updated_at=?
+                   WHERE context_id=? AND resident_generation=?''',
+                (
+                    owner, req_id, now_s, exp_s, now_s,
+                    int(context_id), int(resident_generation),
+                ),
+            )
+        else:
+            conn.execute(
+                '''INSERT INTO daily_resident_turn_leases (
+                    context_id, resident_generation, lease_owner, request_message_id,
+                    acquired_at, expires_at, updated_at
+                ) VALUES (?,?,?,?,?,?,?)''',
+                (
+                    int(context_id), int(resident_generation), owner, req_id,
+                    now_s, exp_s, now_s,
+                ),
+            )
+        held = conn.execute(
+            'SELECT * FROM daily_resident_turn_leases '
+            'WHERE context_id=? AND resident_generation=?',
+            (int(context_id), int(resident_generation)),
+        ).fetchone()
+        if held is None or str(dict(held)['lease_owner']) != owner:
+            conn.rollback()
+            raise ConflictError('resident turn lease acquire failed')
+        conn.commit()
+        return dict(held)
+    except ConflictError:
+        raise
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def renew_resident_turn_lease(
+    context_id: int,
+    resident_generation: int,
+    *,
+    lease_owner: str,
+    ttl_seconds: int = 360,
+    db_path: Optional[str] = None,
+    now: Optional[datetime.datetime] = None,
+) -> dict[str, Any]:
+    owner = str(lease_owner or '').strip()
+    now_dt = now or (datetime.datetime.utcnow() + datetime.timedelta(hours=TZ_OFFSET_HOURS))
+    now_s = now_dt.strftime('%Y-%m-%d %H:%M:%S')
+    exp_s = (now_dt + datetime.timedelta(seconds=int(ttl_seconds))).strftime('%Y-%m-%d %H:%M:%S')
+    conn = _connect(db_path)
+    try:
+        conn.execute('BEGIN IMMEDIATE')
+        row = conn.execute(
+            'SELECT * FROM daily_resident_turn_leases '
+            'WHERE context_id=? AND resident_generation=?',
+            (int(context_id), int(resident_generation)),
+        ).fetchone()
+        if row is None or str(dict(row)['lease_owner']) != owner:
+            conn.rollback()
+            raise ConflictError('resident turn lease owner mismatch')
+        conn.execute(
+            '''UPDATE daily_resident_turn_leases SET expires_at=?, updated_at=?
+               WHERE context_id=? AND resident_generation=? AND lease_owner=?''',
+            (exp_s, now_s, int(context_id), int(resident_generation), owner),
+        )
+        conn.commit()
+        held = conn.execute(
+            'SELECT * FROM daily_resident_turn_leases '
+            'WHERE context_id=? AND resident_generation=?',
+            (int(context_id), int(resident_generation)),
+        ).fetchone()
+        return dict(held) if held else {}
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def release_resident_turn_lease(
+    context_id: int,
+    resident_generation: int,
+    *,
+    lease_owner: str,
+    db_path: Optional[str] = None,
+) -> bool:
+    owner = str(lease_owner or '').strip()
+    conn = _connect(db_path)
+    try:
+        conn.execute('BEGIN IMMEDIATE')
+        cur = conn.execute(
+            'DELETE FROM daily_resident_turn_leases '
+            'WHERE context_id=? AND resident_generation=? AND lease_owner=?',
+            (int(context_id), int(resident_generation), owner),
+        )
+        conn.commit()
+        return int(cur.rowcount or 0) > 0
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 
 def current_summary(
