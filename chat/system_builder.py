@@ -851,9 +851,96 @@ def _cc_period_budget_reminders(conn, today):
     return reminders
 
 
-def _cc_collect_state(get_db_fn):
+def _lean_escape_user_record_value(text: str) -> str:
+    return str(text or '').replace('\\', '\\\\').replace('"', '\\"')
+
+
+def _lean_user_record_todo_line(
+    content: str,
+    *,
+    due_status: str,
+    due_date: str = '',
+    overdue_days: int | None = None,
+) -> str:
+    parts = [
+        'user_record: type=todo',
+        f'content="{_lean_escape_user_record_value(content)}"',
+        f'due_status={due_status}',
+    ]
+    if due_date:
+        parts.append(f'due_date={due_date}')
+    if overdue_days is not None:
+        parts.append(f'overdue_days={overdue_days}')
+    return ' '.join(parts)
+
+
+def _lean_user_record_countdown_line(
+    title: str,
+    *,
+    emoji: str = '',
+    days_remaining: int,
+) -> str:
+    parts = [
+        'user_record: type=countdown',
+        f'title="{_lean_escape_user_record_value(title)}"',
+        f'days_remaining={days_remaining}',
+    ]
+    if emoji:
+        parts.append(f'emoji={emoji}')
+    return ' '.join(parts)
+
+
+def _format_structured_emotion_snippet() -> str:
+    """Facts-only emotion line for Context Lean state blocks."""
+    try:
+        import emotion_engine as _ee
+        st = _ee.get_state()
+        longing = float(_ee.get_longing() or 0.0)
+        desire = _ee.get_desire()
+        return (
+            f"valence={st['valence']:.2f} arousal={st['arousal']:.2f} "
+            f"mood={st.get('mood_word') or '平静'} "
+            f"pa={st['pa']:.2f} na={st['na']:.2f} "
+            f"longing={longing:.2f} "
+            f"desire_p={desire['p']:.2f} desire_i={desire['i']:.2f} desire_c={desire['c']:.2f}"
+        )
+    except Exception:
+        return ''
+
+
+def _format_structured_drive_snippet() -> str:
+    """Facts-only drive bars for Context Lean (no action / style hints)."""
+    try:
+        import drive_engine as _de
+        drive = _de.get_drive()
+        parts = []
+        for key, value in sorted(drive.items()):
+            if key == 'fatigue' or float(value or 0) >= 0.30:
+                parts.append(f'{key}={float(value):.2f}')
+        return ' '.join(parts)
+    except Exception:
+        return ''
+
+
+# System-generated lean fields must not carry behavior/style instructions.
+_LEAN_SYSTEM_FIELD_BEHAVIOR_MARKERS = (
+    '请', '应该', '先', '不要', '语气', '表现得', '操作', '你自己判断', '怎么提',
+)
+
+
+def lean_system_field_is_facts_only(text: str) -> bool:
+    """True when a system-generated lean field contains no behavior-control phrasing."""
+    value = str(text or '')
+    return not any(marker in value for marker in _LEAN_SYSTEM_FIELD_BEHAVIOR_MARKERS)
+
+
+def _cc_collect_state(get_db_fn, *, lean=False):
     state = {
-        'time_bucket': f'当前时间段：{build_time_bucket()} 左右',
+        'time_bucket': (
+            f'bucket={build_time_bucket()}'
+            if lean else
+            f'当前时间段：{build_time_bucket()} 左右'
+        ),
         'emotion': '',
         'drive': '',
         'lights': '',
@@ -865,15 +952,21 @@ def _cc_collect_state(get_db_fn):
     }
     try:
         import emotion_engine as _ee
-        state['emotion'] = (_ee.get_bp3_snippet() or '').strip()
+        if lean:
+            state['emotion'] = _format_structured_emotion_snippet()
+        else:
+            state['emotion'] = (_ee.get_bp3_snippet() or '').strip()
     except Exception:
         pass
     try:
         import drive_engine as _de
-        state['drive'] = (_de.get_bp3_snippet() or '').strip()
+        if lean:
+            state['drive'] = _format_structured_drive_snippet()
+        else:
+            state['drive'] = (_de.get_bp3_snippet() or '').strip()
     except Exception:
         pass
-    if config_store.get_bool('LONGING_ENABLED', True):
+    if not lean and config_store.get_bool('LONGING_ENABLED', True):
         try:
             import desire as _des
             state['drive'] = '\n'.join(
@@ -887,15 +980,22 @@ def _cc_collect_state(get_db_fn):
             ls = json.loads(resp.read()).get('result', {})
         ms = _fmt_light_status(ls.get('main', {}))
         bs = _fmt_light_status(ls.get('bedside', {}))
-        state['lights'] = (
-            f'（灯·当前状态：主灯 {ms}，床头灯 {bs}。'
-            '操作灯前先看这里——关着的灯不要再去"调暗"，会重新开起来。）'
-        )
+        if lean:
+            state['lights'] = f'main={ms} bedside={bs}'
+        else:
+            state['lights'] = (
+                f'（灯·当前状态：主灯 {ms}，床头灯 {bs}。'
+                '操作灯前先看这里——关着的灯不要再去"调暗"，会重新开起来。）'
+            )
     except Exception:
-        state['lights'] = '（灯·当前状态：暂不可读）'
+        state['lights'] = 'main=unknown bedside=unknown' if lean else '（灯·当前状态：暂不可读）'
     try:
-        from gateway import _pocket_bp3_snippet
-        state['pocket'] = (_pocket_bp3_snippet() or '').strip()
+        if lean:
+            from gateway import _pocket_structured_snippet
+            state['pocket'] = (_pocket_structured_snippet() or '').strip()
+        else:
+            from gateway import _pocket_bp3_snippet
+            state['pocket'] = (_pocket_bp3_snippet() or '').strip()
     except Exception:
         pass
     try:
@@ -909,10 +1009,20 @@ def _cc_collect_state(get_db_fn):
             lines = []
             for bi in board_items:
                 lv = f"[{bi['level']}] " if bi['level'] else ''
-                lines.append(
-                    f"- #{bi['id']} {lv}[{bi['tag']}] {bi['author']}: {(bi['content'] or '')[:80]}"
-                )
-            state['todos'] = '## 留言板 · 待处理\n' + '\n'.join(lines)
+                content = (bi['content'] or '')[:80]
+                if lean:
+                    lines.append(
+                        f"user_record: #{bi['id']} {lv}[{bi['tag']}] {bi['author']}: {content}"
+                    )
+                else:
+                    lines.append(
+                        f"- #{bi['id']} {lv}[{bi['tag']}] {bi['author']}: {content}"
+                    )
+            state['todos'] = (
+                'todos_user_records:\n' + '\n'.join(lines)
+                if lean else
+                '## 留言板 · 待处理\n' + '\n'.join(lines)
+            )
     except Exception:
         pass
     try:
@@ -937,13 +1047,21 @@ def _cc_collect_state(get_db_fn):
                 f"{k}¥{v:.0f}" for k, v in sorted(cats.items(), key=lambda x: (-x[1], x[0]))
             )
             budget_str = ''
+            budget_pct = None
             if budget:
-                pct = int(exp / budget['amount'] * 100)
-                budget_str = f"，月预算¥{budget['amount']:.0f}（已用{pct}%）"
-            state['ledger'] = (
-                f'（本月记账：支出¥{exp:.2f}，收入¥{inc:.2f}，结余¥{inc - exp:.2f}'
-                f'{budget_str}。支出分类：{cat_str}。）'
-            )
+                budget_pct = int(exp / budget['amount'] * 100)
+                budget_str = f"，月预算¥{budget['amount']:.0f}（已用{budget_pct}%）"
+            if lean:
+                state['ledger'] = (
+                    f'expense={exp:.2f} income={inc:.2f} balance={inc - exp:.2f}'
+                    f' budget_used_pct={budget_pct if budget_pct is not None else "null"}'
+                    f' categories={cat_str}'
+                )
+            else:
+                state['ledger'] = (
+                    f'（本月记账：支出¥{exp:.2f}，收入¥{inc:.2f}，结余¥{inc - exp:.2f}'
+                    f'{budget_str}。支出分类：{cat_str}。）'
+                )
     except Exception:
         pass
     try:
@@ -961,12 +1079,19 @@ def _cc_collect_state(get_db_fn):
                 t = ev['created_at'][11:16]
                 v = ev['value'] or ev['type']
                 dur = ev['duration_minutes']
-                if dur and dur >= 1:
+                if lean:
+                    dur_val = int(dur) if dur and dur >= 1 else 0
+                    lines.append(f'{t} event={v} duration_min={dur_val}')
+                elif dur and dur >= 1:
                     dur_str = f'{int(dur)}分钟' if dur < 60 else f'{int(dur // 60)}小时{int(dur % 60)}分钟'
                     lines.append(f'- {t} {v}（用了约{dur_str}）')
                 else:
                     lines.append(f'- {t} {v}')
-            state['recent_activity'] = '## 哈娅最近的活动\n' + '\n'.join(lines)
+            state['recent_activity'] = (
+                'recent_activity:\n' + '\n'.join(lines)
+                if lean else
+                '## 哈娅最近的活动\n' + '\n'.join(lines)
+            )
     except Exception:
         pass
     try:
@@ -983,7 +1108,27 @@ def _cc_collect_state(get_db_fn):
             except Exception:
                 continue
             delta = (due - today).days
-            if delta < 0:
+            if lean:
+                if delta < 0:
+                    reminders.append(_lean_user_record_todo_line(
+                        t['content'],
+                        due_status='overdue',
+                        due_date=t['due_date'],
+                        overdue_days=-delta,
+                    ))
+                elif delta == 0:
+                    reminders.append(_lean_user_record_todo_line(
+                        t['content'],
+                        due_status='today',
+                        due_date=t['due_date'],
+                    ))
+                elif delta == 1:
+                    reminders.append(_lean_user_record_todo_line(
+                        t['content'],
+                        due_status='tomorrow',
+                        due_date=t['due_date'],
+                    ))
+            elif delta < 0:
                 reminders.append(f'- 待办「{t["content"]}」已逾期{-delta}天（原定{t["due_date"]}）')
             elif delta == 0:
                 reminders.append(f'- 待办「{t["content"]}」今天到期')
@@ -1001,15 +1146,30 @@ def _cc_collect_state(get_db_fn):
                 continue
             delta = (target - today).days
             if 0 <= delta <= 3:
-                reminders.append(f'- 倒数日 {c["emoji"]}「{c["title"]}」还剩{delta}天')
+                if lean:
+                    reminders.append(_lean_user_record_countdown_line(
+                        c['title'],
+                        emoji=c['emoji'] or '',
+                        days_remaining=delta,
+                    ))
+                else:
+                    reminders.append(f'- 倒数日 {c["emoji"]}「{c["title"]}」还剩{delta}天')
         reminders.extend(_cc_period_budget_reminders(conn, today))
         conn.close()
         if reminders:
-            state['reminders'] = (
+            body = (
+                'reminders_data:\n' + '\n'.join(reminders)
+                if lean else
                 '## 今日提醒\n' + '\n'.join(reminders)
-                + '\n（以上是后台数据，你自己留意即可。是否要跟她提、怎么提、什么时候提，'
-                  '由你自己判断——根据对话自然地提及。）'
             )
+            if lean:
+                state['reminders'] = body
+            else:
+                state['reminders'] = (
+                    body
+                    + '\n（以上是后台数据，你自己留意即可。是否要跟她提、怎么提、什么时候提，'
+                      '由你自己判断——根据对话自然地提及。）'
+                )
     except Exception:
         pass
     return state
@@ -1326,10 +1486,10 @@ def _cc_collect_one_shot(get_db_fn, *, include_wake=True):
     return finalize_cc_wake_one_shot(one_shot, is_cold=False)
 
 
-def build_cc_state():
+def build_cc_state(*, lean=False):
     """每轮构建的状态差量源。"""
     from gateway import get_db
-    return _cc_collect_state(get_db)
+    return _cc_collect_state(get_db, lean=lean)
 
 
 def build_cc_one_shot(*, include_wake=True):

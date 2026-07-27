@@ -2229,6 +2229,16 @@ def _pocket_status():
     return 'phone_not_connected：手机浏览器离线（上次 %s）。Pocket 依赖亮屏，锁屏后会断线。' % seen
 
 
+def _pocket_structured_snippet():
+    """Facts-only Pocket status for Context Lean state blocks."""
+    d, err = _pocket_request('GET', '/pocket/status', timeout=3)
+    if err:
+        return ''
+    connected = bool(d.get('phone_connected'))
+    seen = d.get('last_seen') or 'unknown'
+    return 'phone_connected=%s last_seen=%s' % (str(connected).lower(), seen)
+
+
 def _pocket_bp3_snippet():
     """BP3 动态区一行：手机浏览器在线/离线 + last_seen。relay 不可用时返回空串。"""
     d, err = _pocket_request('GET', '/pocket/status', timeout=3)
@@ -3115,8 +3125,6 @@ def _cc_resident_stream_gen(messages, *, user_turn=True, history_stats=None, is_
         finalize_cc_wake_one_shot,
         format_cold_once,
         format_one_shot,
-        format_state_diff,
-        format_state_snapshot,
     )
     from chat.relationship_context import (
         build_relationship_context,
@@ -3179,35 +3187,17 @@ def _cc_resident_stream_gen(messages, *, user_turn=True, history_stats=None, is_
         rel_sources = dict(relationship.sources or {})
 
     # 2) 每轮构建 state / one-shot；3) 仅冷启动构建 cold_once
-    from chat.context_budget import build_state_send_payload, format_state_for_send
-    from chat.context_lean import lean_state_enabled
-    raw_state = build_cc_state()
-    lean_state_on = lean_state_enabled()
-    prev_lean_state = getattr(_CC_RESIDENT, 'last_successful_lean_state', False)
-    needs_state_reanchor = lean_state_on and not prev_lean_state
-    if lean_state_on:
-        send_payload = build_state_send_payload(
-            {} if needs_state_reanchor else getattr(_CC_RESIDENT, 'last_state_snapshot', None),
-            raw_state,
-            user_text=last_text or '',
-            is_cold=needs_state_reanchor or is_cold,
-        )
-        state_text, state_mode = format_state_for_send(
-            {} if needs_state_reanchor else getattr(_CC_RESIDENT, 'last_state_send_snapshot', None),
-            send_payload,
-            is_cold=needs_state_reanchor or is_cold,
-        )
-    else:
-        send_payload = {}
-        if is_cold:
-            state_text = format_state_snapshot(raw_state)
-            state_mode = 'snapshot' if state_text else 'none'
-        else:
-            state_text = format_state_diff(
-                getattr(_CC_RESIDENT, 'last_state_snapshot', None) or {},
-                raw_state,
-            )
-            state_mode = 'delta' if state_text else 'none'
+    from chat.context_lean_state import assemble_cc_state_for_resident_turn
+    raw_state, state_ctx = assemble_cc_state_for_resident_turn(
+        is_cold=is_cold,
+        user_text=last_text or '',
+        resident=_CC_RESIDENT,
+    )
+    state_text = state_ctx.state_text
+    state_mode = state_ctx.state_mode
+    send_payload = state_ctx.send_payload
+    needs_state_reanchor = bool(state_ctx.reanchor_reason)
+    state_lean_observation = dict(state_ctx.observation or {})
     one_shot = build_cc_one_shot(include_wake=user_turn)
     # 冷启动：none/diary/explore 必须保留；message 仅在结构化 messages 的
     # assistant 精确命中时省略。可见性检查零 I/O，不调用 messages_to_text
@@ -3263,11 +3253,7 @@ def _cc_resident_stream_gen(messages, *, user_turn=True, history_stats=None, is_
             'dream_id': one_shot.get('dream_id'),
             'wake_ids': list(one_shot.get('wake_ids') or []),
         }
-        if lean_state_enabled():
-            commit_meta['state_send_snapshot'] = send_payload
-            commit_meta['lean_state_active'] = True
-            if needs_state_reanchor:
-                commit_meta['lean_state_reanchor'] = True
+        commit_meta.update(state_ctx.commit_meta_extras)
         if group_cursor_ok:
             commit_meta['group_cursor_initialized'] = True
             commit_meta['group_max_id'] = group_max_id
@@ -3314,11 +3300,7 @@ def _cc_resident_stream_gen(messages, *, user_turn=True, history_stats=None, is_
             'dream_id': one_shot.get('dream_id'),
             'wake_ids': list(one_shot.get('wake_ids') or []),
         }
-        if lean_state_enabled():
-            commit_meta['state_send_snapshot'] = send_payload
-            commit_meta['lean_state_active'] = True
-            if needs_state_reanchor:
-                commit_meta['lean_state_reanchor'] = True
+        commit_meta.update(state_ctx.commit_meta_extras)
         if group_cursor_ok:
             commit_meta['group_cursor_initialized'] = True
             commit_meta['group_max_id'] = group_max_id
@@ -3329,9 +3311,6 @@ def _cc_resident_stream_gen(messages, *, user_turn=True, history_stats=None, is_
         ):
             # 热轮仅在有新增行时推进 cursor；空成功保持原 cursor
             commit_meta['group_max_id'] = group_max_id
-
-    if not lean_state_on:
-        commit_meta['lean_state_active'] = False
 
     # Resident cursors advance only after stdin.flush() succeeds inside
     # ResidentSession.send_turn().  Failed sends therefore cannot suppress a
@@ -3417,6 +3396,7 @@ def _cc_resident_stream_gen(messages, *, user_turn=True, history_stats=None, is_
         allowed_tool_count=allowed_tool_count,
         is_cold=is_cold,
     )
+    obs_breakdown.update(state_lean_observation)
     # 回归：观测不得改变即将送入 resident 的字节（list 用 deepcopy 快照）
     if original_system.encode('utf-8') != full_system.encode('utf-8'):
         raise RuntimeError('cc observability mutated system prompt')
