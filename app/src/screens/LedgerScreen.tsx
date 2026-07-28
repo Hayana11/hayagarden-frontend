@@ -27,6 +27,7 @@ import {
   readDailyBudget,
   resolveLedgerLinks,
   seedDrawerLinksFromEntry,
+  shouldApplyMonthTicket,
   smoothPath,
   weekSpendBuckets,
   writeDailyBudget,
@@ -105,7 +106,8 @@ export function LedgerScreen() {
   const [viewOffset, setViewOffset] = useState(0);
   const [tab, setTab] = useState<Tab>('流水');
   const [entries, setEntries] = useState<LedgerEntry[]>([]);
-  const [budget, setBudget] = useState(3000);
+  const [budget, setBudget] = useState<number | null>(null);
+  const [budgetDraft, setBudgetDraft] = useState(0);
   const [trend, setTrend] = useState<LedgerTrendPoint[]>([]);
   const [memPicks, setMemPicks] = useState<MemoryItem[]>([]);
   const [readRef, setReadRef] = useState('');
@@ -127,6 +129,7 @@ export function LedgerScreen() {
   const [autoRecalc, setAutoRecalc] = useState(() => localStorage.getItem(LS_AUTO) !== '0');
 
   const [monthLoading, setMonthLoading] = useState(true);
+  const [budgetLoading, setBudgetLoading] = useState(true);
   const [entriesError, setEntriesError] = useState(false);
   const [budgetError, setBudgetError] = useState(false);
   const [trendError, setTrendError] = useState(false);
@@ -140,6 +143,8 @@ export function LedgerScreen() {
   const now = new Date();
   const base = new Date(now.getFullYear(), now.getMonth() + viewOffset, 1);
   const key = monthKey(base);
+  const currentMonthRef = useRef(key);
+  currentMonthRef.current = key;
   const isCur = viewOffset === 0;
   const monthLabel = `${base.getFullYear()}.${String(base.getMonth() + 1).padStart(2, '0')}`;
 
@@ -151,9 +156,11 @@ export function LedgerScreen() {
   async function reloadMonth(month: string) {
     const ticket = monthGuardRef.current.begin(month);
     setMonthLoading(true);
+    setBudgetLoading(true);
     setEntriesError(false);
     setBudgetError(false);
     setEntries([]);
+    setBudget(null);
     try {
       const [entriesRes, budgetRes] = await Promise.all([
         fetchLedgerEntries(month).then(
@@ -165,20 +172,25 @@ export function LedgerScreen() {
           () => ({ ok: false as const }),
         ),
       ]);
-      if (!ticket.isCurrent()) return;
+      if (!shouldApplyMonthTicket(ticket, currentMonthRef.current)) return;
       if (!entriesRes.ok) {
         setEntriesError(true);
         setEntries([]);
       } else {
         setEntries(entriesRes.data);
       }
-      if (!budgetRes.ok) {
+      if (!budgetRes.ok || budgetRes.v === null) {
         setBudgetError(true);
+        setBudget(null);
       } else {
-        setBudget(budgetRes.v ?? 3000);
+        setBudget(budgetRes.v);
+        setBudgetError(false);
       }
     } finally {
-      if (ticket.isCurrent()) setMonthLoading(false);
+      if (shouldApplyMonthTicket(ticket, currentMonthRef.current)) {
+        setMonthLoading(false);
+        setBudgetLoading(false);
+      }
     }
   }
 
@@ -218,24 +230,28 @@ export function LedgerScreen() {
   );
   const spend = monthEntries.filter((e) => e.amount < 0).reduce((s, e) => s - e.amount, 0);
   const income = monthEntries.filter((e) => e.amount > 0).reduce((s, e) => s + e.amount, 0);
-  const pct = budget ? spend / budget : 0;
-  const over = spend > budget;
-  const near = !over && pct >= 0.8;
+  const budgetReady = !budgetLoading && !budgetError && budget !== null;
+  const pct = budgetReady && budget > 0 ? spend / budget : 0;
+  const over = budgetReady && spend > budget;
+  const near = budgetReady && !over && pct >= 0.8;
 
   const dim = new Date(base.getFullYear(), base.getMonth() + 1, 0).getDate();
   const todayD = now.getDate();
   const todaySpend = monthEntries.filter((e) => e.date === today && e.amount < 0).reduce((s, e) => s - e.amount, 0);
   const daysLeft = isCur ? Math.max(dim - todayD + 1, 1) : dim;
-  const dayAllow =
-    dailyBudget ?? (autoRecalc && isCur ? Math.max(budget - (spend - todaySpend), 0) / daysLeft : budget / dim);
-  const todayLeft = dayAllow - todaySpend;
+  const dayAllow = budgetReady
+    ? dailyBudget ?? (autoRecalc && isCur ? Math.max(budget - (spend - todaySpend), 0) / daysLeft : budget / dim)
+    : 0;
+  const todayLeft = budgetReady ? dayAllow - todaySpend : 0;
   const fmt1 = (v: number) => fmtAmount(Math.round(v * 10) / 10);
 
-  const statusLine = over
-    ? `超出预算 ¥${fmtAmount(spend - budget)} · 这个月先慢一点`
-    : near
-      ? `快到预算了，还可以花 ¥${fmtAmount(budget - spend)}`
-      : `还可以花 ¥${fmtAmount(budget - spend)}`;
+  const statusLine = !budgetReady
+    ? ''
+    : over
+      ? `超出预算 ¥${fmtAmount(spend - budget)} · 这个月先慢一点`
+      : near
+        ? `快到预算了，还可以花 ¥${fmtAmount(budget - spend)}`
+        : `还可以花 ¥${fmtAmount(budget - spend)}`;
 
   // 流水
   const usedCats = [...new Set(monthEntries.map((e) => e.catId))];
@@ -351,6 +367,7 @@ export function LedgerScreen() {
 
   async function removeEntry(id: number) {
     if (saving) return;
+    const opMonth = currentMonthRef.current;
     setSaving(true);
     const prev = entries;
     setEntries((es) => es.filter((e) => e.id !== id));
@@ -358,9 +375,10 @@ export function LedgerScreen() {
     try {
       const ok = await deleteLedgerEntry(id);
       if (!ok) {
-        setEntries(prev);
-        showError('删除失败，记录未被删除');
-        await reloadMonth(key);
+        if (opMonth === currentMonthRef.current) {
+          setEntries(prev);
+          showError('删除失败，记录未被删除');
+        }
       }
     } finally {
       setSaving(false);
@@ -369,6 +387,7 @@ export function LedgerScreen() {
 
   async function saveEntry() {
     if (saving) return;
+    const opMonth = currentMonthRef.current;
     const val = parseFloat(form.amount);
     if (!val || val <= 0) return;
     const isInc = form.type === 'inc';
@@ -391,9 +410,10 @@ export function LedgerScreen() {
         setEntries((es) => es.map((e) => (e.id === editingId ? { ...e, ...draft, id: e.id } : e)));
         const ok = await updateLedgerEntry(editingId, draft);
         if (!ok) {
-          setEntries(prev);
-          showError('保存失败，请重试');
-          await reloadMonth(key);
+          if (opMonth === currentMonthRef.current) {
+            setEntries(prev);
+            showError('保存失败，请重试');
+          }
           return;
         }
       } else {
@@ -402,10 +422,12 @@ export function LedgerScreen() {
           showError('保存失败，请重试');
           return;
         }
-        setEntries((es) => [{ ...draft, id }, ...es]);
-        setViewOffset(0);
-        setTab('流水');
-        setFilterCat('all');
+        if (opMonth === currentMonthRef.current) {
+          setEntries((es) => [{ ...draft, id }, ...es]);
+          setViewOffset(0);
+          setTab('流水');
+          setFilterCat('all');
+        }
       }
       setDrawerOpen(false);
       setEditingId(null);
@@ -428,16 +450,23 @@ export function LedgerScreen() {
     if (next) setDaily(null);
   }
 
+  function openBudgetSheet() {
+    setBudgetDraft(budget ?? 0);
+    setBudgetSheetOpen(true);
+  }
+
   async function saveBudgetAndClose() {
     if (budgetSaving) return;
     setBudgetSaving(true);
     try {
-      const ok = await setLedgerBudgetAmount(key, budget);
+      const ok = await setLedgerBudgetAmount(key, budgetDraft);
       if (!ok) {
         showError('预算保存失败');
         return;
       }
+      setBudget(budgetDraft);
       setBudgetError(false);
+      setBudgetLoading(false);
       setBudgetSheetOpen(false);
     } finally {
       setBudgetSaving(false);
@@ -464,6 +493,7 @@ export function LedgerScreen() {
 
         {errorBanner && (
           <div
+            data-testid="ledger-error-banner"
             style={{
               margin: '0 0 12px',
               padding: '10px 14px',
@@ -479,7 +509,7 @@ export function LedgerScreen() {
         )}
 
         {/* ── month gauge ── */}
-        <Card style={{ padding: 22 }}>
+        <Card style={{ padding: 22 }} data-testid="ledger-month-gauge">
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
             <span onClick={() => { setViewOffset(viewOffset - 1); setCalSel(null); setExpandedId(null); }} style={{ ...monthBtn, color: 'var(--color-text-soft)' }}>
               ‹
@@ -499,45 +529,67 @@ export function LedgerScreen() {
               </div>
               <div style={{ fontSize: 13, color: 'var(--color-text-mute)', letterSpacing: 2, marginTop: 5 }}>本月共同支出</div>
               {income > 0 && <div style={{ fontSize: 12, color: 'var(--color-green-deep)', marginTop: 8 }}>收入 +¥{fmtAmount(income)}</div>}
-              <div style={{ fontSize: 12, color: over ? 'var(--color-rose-deep)' : near ? '#B8862F' : 'var(--color-text-faint)', marginTop: 4, lineHeight: 1.7 }}>
-                {statusLine}
-              </div>
+              {budgetReady && statusLine && (
+                <div style={{ fontSize: 12, color: over ? 'var(--color-rose-deep)' : near ? '#B8862F' : 'var(--color-text-faint)', marginTop: 4, lineHeight: 1.7 }}>
+                  {statusLine}
+                </div>
+              )}
+              {!budgetLoading && (budgetError || budget === null) && (
+                <div data-testid="ledger-budget-unavailable" style={{ fontSize: 12, color: 'var(--color-rose-deep)', marginTop: 4, lineHeight: 1.7 }}>
+                  预算暂不可用
+                </div>
+              )}
+              {budgetLoading && (
+                <div style={{ fontSize: 12, color: 'var(--color-text-faint)', marginTop: 4, lineHeight: 1.7 }}>预算加载中…</div>
+              )}
             </div>
-            <svg viewBox="0 0 150 150" style={{ width: 126, height: 126, flexShrink: 0 }}>
-              <circle cx={75} cy={75} r={62} fill="none" stroke={over ? '#F3DDD9' : near ? '#F3E7CE' : '#F0E3D2'} strokeWidth={10} />
-              <circle
-                cx={75}
-                cy={75}
-                r={62}
-                fill="none"
-                stroke={over ? 'var(--color-rose-deep)' : near ? 'var(--color-amber)' : 'var(--color-rose)'}
-                strokeWidth={10}
-                strokeLinecap="round"
-                strokeDasharray={RING_C}
-                strokeDashoffset={over ? 0 : (RING_C * (1 - Math.min(pct, 1))).toFixed(1)}
-                transform="rotate(-90 75 75)"
-                style={over ? { animation: 'livePulse 5s ease-in-out infinite' } : undefined}
-              />
-              <text x={75} y={71} textAnchor="middle" fill="var(--color-text)" style={{ fontFamily: DISPLAY, fontSize: 23, fontWeight: 600 }}>
-                {Math.round(pct * 100)}%
-              </text>
-              <text x={75} y={92} textAnchor="middle" fill="var(--color-text-faint)" style={{ fontSize: 11, letterSpacing: 3 }}>
-                预算
-              </text>
-            </svg>
+            {budgetReady ? (
+              <svg viewBox="0 0 150 150" style={{ width: 126, height: 126, flexShrink: 0 }} data-testid="ledger-budget-ring">
+                <circle cx={75} cy={75} r={62} fill="none" stroke={over ? '#F3DDD9' : near ? '#F3E7CE' : '#F0E3D2'} strokeWidth={10} />
+                <circle
+                  cx={75}
+                  cy={75}
+                  r={62}
+                  fill="none"
+                  stroke={over ? 'var(--color-rose-deep)' : near ? 'var(--color-amber)' : 'var(--color-rose)'}
+                  strokeWidth={10}
+                  strokeLinecap="round"
+                  strokeDasharray={RING_C}
+                  strokeDashoffset={over ? 0 : (RING_C * (1 - Math.min(pct, 1))).toFixed(1)}
+                  transform="rotate(-90 75 75)"
+                  style={over ? { animation: 'livePulse 5s ease-in-out infinite' } : undefined}
+                />
+                <text x={75} y={71} textAnchor="middle" fill="var(--color-text)" style={{ fontFamily: DISPLAY, fontSize: 23, fontWeight: 600 }}>
+                  {Math.round(pct * 100)}%
+                </text>
+                <text x={75} y={92} textAnchor="middle" fill="var(--color-text-faint)" style={{ fontSize: 11, letterSpacing: 3 }}>
+                  预算
+                </text>
+              </svg>
+            ) : (
+              <div
+                data-testid="ledger-budget-ring-placeholder"
+                style={{ width: 126, height: 126, flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 12, color: 'var(--color-text-faint)', textAlign: 'center', lineHeight: 1.6 }}
+              >
+                {budgetLoading ? '加载中…' : '预算\n暂不可用'}
+              </div>
+            )}
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 16, paddingTop: 14, borderTop: '1px solid var(--color-track)', fontSize: 12, color: 'var(--color-text-mute)' }}>
-            {budgetError ? (
-              <span style={{ color: 'var(--color-rose-deep)' }}>预算暂不可用</span>
-            ) : (
+            {budgetReady ? (
               <>
                 <span>本月预算 ¥{fmtAmount(budget)}</span>
                 <span style={{ color: '#DFD4CF' }}>·</span>
                 <span>日均 ¥{fmt1(dayAllow)}{dailyBudget !== null ? '（手动）' : ''}</span>
               </>
+            ) : budgetLoading ? (
+              <span>预算加载中…</span>
+            ) : (
+              <span style={{ color: 'var(--color-rose-deep)' }}>预算暂不可用</span>
             )}
             <span
-              onClick={() => setBudgetSheetOpen(true)}
+              onClick={openBudgetSheet}
+              data-testid="ledger-adjust-budget"
               style={{ cursor: 'pointer', marginLeft: 'auto', color: 'var(--color-rose-deep)', padding: '4px 14px', borderRadius: 999, background: 'rgba(183,110,121,0.10)' }}
             >
               调整
@@ -627,6 +679,7 @@ export function LedgerScreen() {
                       return (
                         <div
                           key={e.id}
+                          data-testid={`ledger-entry-${e.id}`}
                           onClick={() => setExpandedId(open ? null : e.id)}
                           className="card-hover"
                           style={{ cursor: 'pointer', background: '#FFFFFF', borderRadius: 18, boxShadow: '0 6px 20px rgba(183,110,121,0.08)', padding: '14px 16px' }}
@@ -1016,7 +1069,7 @@ export function LedgerScreen() {
       {drawerOpen && (
         <>
           <div onClick={() => setDrawerOpen(false)} style={overlayStyle} />
-          <div style={{ ...sheetShell, height: '85%', padding: '14px 20px 30px', overflowY: 'auto' }}>
+          <div style={{ ...sheetShell, height: '85%', padding: '14px 20px 30px', overflowY: 'auto' }} data-testid="ledger-drawer">
             <div style={grabber} />
 
             <div style={{ display: 'flex', gap: 4, background: '#F1E7E2', borderRadius: 14, padding: 4, marginTop: 18, width: 'fit-content' }}>
@@ -1065,7 +1118,11 @@ export function LedgerScreen() {
               )}
             </div>
             <div style={{ fontSize: 12, color: todayLeft >= 0 ? 'var(--color-text-mute)' : 'var(--color-rose-deep)', marginTop: 10, paddingLeft: 4 }}>
-              {todayLeft >= 0 ? `今日还可花 ¥${fmt1(todayLeft)}` : `今日已超 ¥${fmt1(-todayLeft)}`}
+              {budgetReady
+                ? todayLeft >= 0
+                  ? `今日还可花 ¥${fmt1(todayLeft)}`
+                  : `今日已超 ¥${fmt1(-todayLeft)}`
+                : ''}
             </div>
 
             {form.type === 'exp' && (
@@ -1251,6 +1308,7 @@ export function LedgerScreen() {
             )}
 
             <div
+              data-testid="ledger-save-button"
               onClick={() => { if (!saving) void saveEntry(); }}
               style={{
                 cursor: saving ? 'default' : 'pointer',
@@ -1276,7 +1334,7 @@ export function LedgerScreen() {
       {budgetSheetOpen && (
         <>
           <div onClick={() => setBudgetSheetOpen(false)} style={overlayStyle} />
-          <div style={{ ...sheetShell, padding: '14px 20px 34px' }}>
+          <div style={{ ...sheetShell, padding: '14px 20px 34px' }} data-testid="ledger-budget-sheet">
             <div style={grabber} />
             <div style={{ fontSize: 16, fontWeight: 600, letterSpacing: 3, marginTop: 20 }}>预算</div>
 
@@ -1284,16 +1342,11 @@ export function LedgerScreen() {
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 10, background: '#FFFFFF', borderRadius: 14, padding: '12px 16px', boxShadow: '0 4px 12px rgba(183,110,121,0.07)' }}>
               <span style={{ fontFamily: DISPLAY, fontSize: 17, color: 'var(--color-text-faint)' }}>¥</span>
               <input
-                value={String(budget)}
+                data-testid="ledger-budget-input"
+                value={String(budgetDraft)}
                 onChange={(ev) => {
                   const v = parseInt(ev.target.value.replace(/[^\d]/g, ''), 10);
-                  setBudget(Number.isNaN(v) ? 0 : v);
-                }}
-                onBlur={() => {
-                  void setLedgerBudgetAmount(key, budget).then((ok) => {
-                    if (!ok) showError('预算保存失败');
-                    else setBudgetError(false);
-                  });
+                  setBudgetDraft(Number.isNaN(v) ? 0 : v);
                 }}
                 inputMode="numeric"
                 style={{ flex: 1, minWidth: 0, border: 'none', background: 'transparent', fontFamily: DISPLAY, fontSize: 22, color: 'var(--color-text)', padding: 0, outline: 'none' }}
@@ -1310,7 +1363,7 @@ export function LedgerScreen() {
                   setDaily(raw === '' ? null : parseInt(raw, 10));
                 }}
                 inputMode="numeric"
-                placeholder={`自动 · ¥${fmt1(dayAllow)}`}
+                placeholder={budgetReady ? `自动 · ¥${fmt1(dayAllow)}` : '自动'}
                 style={{ flex: 1, minWidth: 0, border: 'none', background: 'transparent', fontFamily: DISPLAY, fontSize: 22, color: 'var(--color-text)', padding: 0, outline: 'none' }}
               />
             </div>
@@ -1322,14 +1375,17 @@ export function LedgerScreen() {
               <span style={{ fontSize: 13, color: 'var(--color-text-soft)' }}>自动按剩余天数重算每日预算</span>
             </div>
             <div style={{ fontSize: 12, color: 'var(--color-text-faint)', marginTop: 12, lineHeight: 1.7 }}>
-              {isCur
-                ? `本月还剩 ${daysLeft} 天 · 日均 ¥${fmt1(dayAllow)}${dailyBudget !== null ? '（手动设定，仅本月）' : '（自动重算）'}`
-                : dailyBudget !== null
-                  ? `历史月手动日预算 ¥${fmt1(dailyBudget)}（仅 ${monthLabel}）`
-                  : `按整月 ${dim} 天平均计算 · 日均 ¥${fmt1(dayAllow)}`}
+              {budgetReady
+                ? isCur
+                  ? `本月还剩 ${daysLeft} 天 · 日均 ¥${fmt1(dayAllow)}${dailyBudget !== null ? '（手动设定，仅本月）' : '（自动重算）'}`
+                  : dailyBudget !== null
+                    ? `历史月手动日预算 ¥${fmt1(dailyBudget)}（仅 ${monthLabel}）`
+                    : `按整月 ${dim} 天平均计算 · 日均 ¥${fmt1(dayAllow)}`
+                : '预算加载完成后才能计算日均额度'}
             </div>
 
             <div
+              data-testid="ledger-budget-save-button"
               onClick={() => { if (!budgetSaving) void saveBudgetAndClose(); }}
               style={{ cursor: budgetSaving ? 'default' : 'pointer', marginTop: 24, textAlign: 'center', padding: '13px 0', borderRadius: 16, background: 'var(--color-rose)', color: '#FFF9F7', fontSize: 14, letterSpacing: 4, boxShadow: '0 10px 26px rgba(183,110,121,0.28)', opacity: budgetSaving ? 0.7 : 1 }}
             >

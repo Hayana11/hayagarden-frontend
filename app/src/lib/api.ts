@@ -308,7 +308,7 @@ export function fetchBookCurrent(): Promise<BookCurrent> {
 // GET /api/ledger/budget?month=YYYY-MM -> LedgerBudget
 export function fetchLedgerBudget(now: Date): Promise<LedgerBudget> {
   const month = monthKey(now);
-  return withFallback(async () => {
+  return withLedgerFallback(async () => {
     const [budgetResp, ledgerResp] = await Promise.all([
       http.get<{ amount: number | null }>('/api/ledger/budget', { month }),
       http.get<{ records: Array<{ amount?: number; category?: string | null }> }>('/api/ledger', { month }),
@@ -328,7 +328,7 @@ export function fetchLedgerBudget(now: Date): Promise<LedgerBudget> {
       .slice(0, 6)
       .map(([name, amount]) => ({ name, amount }));
     return {
-      budget: Number(budgetResp.amount ?? 0),
+      budget: budgetResp.amount === null || budgetResp.amount === undefined ? null : Number(budgetResp.amount),
       spent,
       categories,
     };

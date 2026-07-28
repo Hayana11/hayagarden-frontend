@@ -35,7 +35,8 @@ export function DashScreen() {
   const { todos, toggle } = useTodos();
   const memory = useMemorySummary();
   const usage = useUsage(now);
-  const ledger = useLedger(now);
+  const ledgerState = useLedger(now);
+  const ledger = ledgerState.data;
   const period = usePeriod();
 
   const msgToday = usage?.msgToday ?? 0;
@@ -75,12 +76,15 @@ export function DashScreen() {
   };
 
   const spent = ledger?.spent ?? 0;
-  const budget = ledger?.budget ?? CONFIG.fallbackBudget;
-  const pct = budget ? Math.min(1, spent / budget) : 0;
+  const budgetAmount = ledger?.budget ?? null;
+  const budgetReady = Boolean(ledger && !ledgerState.error && !ledgerState.loading && budgetAmount !== null);
+  const pct = budgetReady && budgetAmount! > 0 ? Math.min(1, spent / budgetAmount!) : 0;
   const ringOffset = (251.3 * (1 - pct)).toFixed(1);
-  const spendHint = ledger
-    ? `剩余 ${formatCurrency(budget - spent)} · 本月还有 ${new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate() - now.getDate()} 天`
-    : '';
+  const spendHint = ledgerState.loading
+    ? '加载中…'
+    : ledgerState.error || budgetAmount === null
+      ? '预算暂不可用'
+      : `剩余 ${formatCurrency(budgetAmount - spent)} · 本月还有 ${new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate() - now.getDate()} 天`;
   const activeTodos = todos.filter((t) => !t.done).length;
   const recentItems = memory?.sections.find((s) => s.key === 'recent')?.items.slice(0, 6) ?? [];
 
@@ -356,7 +360,7 @@ export function DashScreen() {
             transform="rotate(-90 48 48)"
           />
           <text x={48} y={55} textAnchor="middle" fill="var(--color-green-deep)" style={{ fontFamily: "'Bodoni Moda',serif", fontSize: 18, fontWeight: 600 }}>
-            {ledger ? `${Math.round(pct * 100)}%` : '—'}
+            {budgetReady ? `${Math.round(pct * 100)}%` : '—'}
           </text>
         </svg>
         <div style={{ flex: 1 }}>
@@ -365,7 +369,12 @@ export function DashScreen() {
             <span style={{ color: '#9DB5A6', fontSize: 18 }}>›</span>
           </div>
           <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 20, marginTop: 3 }}>
-            {formatCurrency(spent)} <span style={{ fontSize: 13, color: 'var(--color-green-soft)' }}>/ {formatCurrency(budget)}</span>
+            {formatCurrency(spent)}
+            {budgetReady ? (
+              <span style={{ fontSize: 13, color: 'var(--color-green-soft)' }}> / {formatCurrency(budgetAmount!)}</span>
+            ) : (
+              <span style={{ fontSize: 13, color: 'var(--color-green-soft)' }}> · 预算暂不可用</span>
+            )}
           </div>
           <div style={{ fontSize: 11, color: 'var(--color-green-soft)', marginTop: 2 }}>{spendHint}</div>
         </div>

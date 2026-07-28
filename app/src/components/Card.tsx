@@ -1,14 +1,15 @@
-import type { CSSProperties, ReactNode } from 'react';
+import type { CSSProperties, HTMLAttributes, ReactNode } from 'react';
 
 export function Card({
   children,
   style,
   onClick,
+  ...rest
 }: {
   children: ReactNode;
   style?: CSSProperties;
   onClick?: () => void;
-}) {
+} & HTMLAttributes<HTMLDivElement>) {
   return (
     <div
       onClick={onClick}
@@ -20,6 +21,7 @@ export function Card({
         cursor: onClick ? 'pointer' : undefined,
         ...style,
       }}
+      {...rest}
     >
       {children}
     </div>

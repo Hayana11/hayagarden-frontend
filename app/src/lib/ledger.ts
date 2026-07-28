@@ -195,11 +195,16 @@ export function writeDailyBudget(month: string, value: number | null, storage: S
   else storage.setItem(key, String(value));
 }
 
+export interface MonthRequestTicket {
+  month: string;
+  isCurrent(): boolean;
+}
+
 /** Monotonic request guard so stale month responses cannot overwrite current state. */
 export function createMonthRequestGuard() {
   let seq = 0;
   return {
-    begin(month: string) {
+    begin(month: string): MonthRequestTicket {
       const id = ++seq;
       return {
         month,
@@ -209,6 +214,11 @@ export function createMonthRequestGuard() {
       };
     },
   };
+}
+
+/** Apply a month response only when it is still the latest request for the viewed month. */
+export function shouldApplyMonthTicket(ticket: MonthRequestTicket, currentMonth: string): boolean {
+  return ticket.isCurrent() && ticket.month === currentMonth;
 }
 
 export interface LedgerDrawerLinkState {

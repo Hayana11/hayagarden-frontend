@@ -16,6 +16,7 @@ const {
   readDailyBudget,
   writeDailyBudget,
   createMonthRequestGuard,
+  shouldApplyMonthTicket,
   resolveLedgerLinks,
   seedDrawerLinksFromEntry,
 } = ledger;
@@ -146,10 +147,17 @@ check('month request guard ignores stale responses', () => {
   const guard = createMonthRequestGuard();
   const first = guard.begin('2026-06');
   const second = guard.begin('2026-07');
-  assert.equal(first.isCurrent(), false);
-  assert.equal(second.isCurrent(), true);
-  assert.equal(first.month, '2026-06');
-  assert.equal(second.month, '2026-07');
+  assert.equal(shouldApplyMonthTicket(first, '2026-07'), false);
+  assert.equal(shouldApplyMonthTicket(second, '2026-07'), true);
+  assert.equal(shouldApplyMonthTicket(first, '2026-06'), false);
+});
+
+check('stale failure callback cannot apply to a different viewed month', () => {
+  const guard = createMonthRequestGuard();
+  const julyTicket = guard.begin('2026-07');
+  guard.begin('2026-06');
+  assert.equal(shouldApplyMonthTicket(julyTicket, '2026-06'), false);
+  assert.equal(shouldApplyMonthTicket(julyTicket, '2026-07'), false);
 });
 
 // 8. production/default: ledger reads do not allow mock
@@ -161,7 +169,6 @@ check('ledgerReadsAllowMock is off without explicit DEV mock flag', () => {
 
 // 4–7 write-path contract helpers (payload / id validity semantics)
 check('addLedgerEntry treats missing/invalid id as failure shape', () => {
-  // Pure contract: backend must return positive id; FE maps otherwise to null.
   const accept = (r) => {
     if (!r.ok) return null;
     const id = r.id;
@@ -172,33 +179,6 @@ check('addLedgerEntry treats missing/invalid id as failure shape', () => {
   assert.equal(accept({ ok: true }), null);
   assert.equal(accept({ ok: true, id: 0 }), null);
   assert.equal(accept({ ok: false, id: 3 }), null);
-});
-
-check('write failure rollback semantics for local lists', () => {
-  const prev = [{ id: 1, title: '旧' }, { id: 2, title: '留' }];
-  // POST fail: never insert temp
-  let list = [...prev];
-  const tempId = -1;
-  const postOk = false;
-  if (postOk) list = [{ id: tempId, title: '新' }, ...list];
-  assert.deepEqual(list, prev);
-
-  // PATCH fail: restore
-  list = prev.map((e) => (e.id === 1 ? { ...e, title: '新' } : e));
-  const patchOk = false;
-  if (!patchOk) list = prev;
-  assert.deepEqual(list, prev);
-
-  // DELETE fail: restore
-  list = prev.filter((e) => e.id !== 1);
-  const delOk = false;
-  if (!delOk) list = prev;
-  assert.equal(list.some((e) => e.id === 1), true);
-
-  // budget fail surfaces error string
-  const budgetOk = false;
-  const banner = budgetOk ? null : '预算保存失败';
-  assert.equal(banner, '预算保存失败');
 });
 
 console.log(`\n${passed} ledger integrity checks passed`);

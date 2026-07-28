@@ -1,11 +1,18 @@
-"""Ledger API reliability: 404 on missing rows, amount/budget/date validation.
+"""Ledger API tests with import-time isolation from /opt/frontend production paths.
 
-Uses a temporary SQLite DB and monkeypatches app.get_db — never the production DB.
+Tests redirect app import-time access to a temporary directory and never open,
+create, or modify:
+  /opt/frontend/memories.db
+  /opt/frontend/.env
 """
 
 from __future__ import annotations
 
+import builtins
+import hashlib
+import json
 import os
+import shutil
 import sqlite3
 import sys
 import tempfile
@@ -17,8 +24,27 @@ ROOT = str(Path(__file__).resolve().parents[1])
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
+PROD_DB = '/opt/frontend/memories.db'
+PROD_ENV = '/opt/frontend/.env'
+PROD_GALLERY_DB = '/opt/frontend/gallery.db'
+PROD_CLIENT_LOG = '/opt/frontend/client_errors.log'
+PROD_PREFIX = '/opt/frontend/'
 
-def _chat_schema(conn: sqlite3.Connection) -> None:
+_ISOLATION_DIR = tempfile.mkdtemp(prefix='ledger-route-test-')
+_ISOLATION_DB = str(Path(_ISOLATION_DIR) / 'memories.db')
+_ISOLATION_ENV = str(Path(_ISOLATION_DIR) / '.env')
+_ISOLATION_GALLERY_DB = str(Path(_ISOLATION_DIR) / 'gallery.db')
+_ISOLATION_CLIENT_LOG = str(Path(_ISOLATION_DIR) / 'client_errors.log')
+Path(_ISOLATION_ENV).write_text('', encoding='utf-8')
+Path(_ISOLATION_DIR, 'gallery').mkdir(parents=True, exist_ok=True)
+
+_ORIG_CONNECT = sqlite3.connect
+_ORIG_OPEN = builtins.open
+_ORIG_MAKEDIRS = os.makedirs
+
+
+def _bootstrap_isolation_db() -> None:
+    conn = _ORIG_CONNECT(_ISOLATION_DB)
     conn.executescript(
         """
         CREATE TABLE IF NOT EXISTS chat_messages (
@@ -38,24 +64,77 @@ def _chat_schema(conn: sqlite3.Connection) -> None:
         );
         """
     )
-
-
-def _ensure_app_importable() -> None:
-    db = '/opt/frontend/memories.db'
-    os.makedirs(os.path.dirname(db), exist_ok=True)
-    open('/opt/frontend/.env', 'a').close()
-    conn = sqlite3.connect(db)
-    _chat_schema(conn)
     conn.commit()
     conn.close()
 
 
-_ensure_app_importable()
+_bootstrap_isolation_db()
+
+_PROD_CONNECT_TARGETS: list[str] = []
+
+
+def _redirect_prod_path(path: str) -> str:
+    if path == PROD_DB:
+        return _ISOLATION_DB
+    if path == PROD_GALLERY_DB:
+        return _ISOLATION_GALLERY_DB
+    if path.startswith(PROD_PREFIX):
+        rel = path[len(PROD_PREFIX):]
+        return str(Path(_ISOLATION_DIR) / rel)
+    return path
+
+
+def _guarded_connect(database, *args, **kwargs):
+    raw = str(database)
+    if raw == PROD_DB:
+        _PROD_CONNECT_TARGETS.append(raw)
+    database = _redirect_prod_path(raw)
+    return _ORIG_CONNECT(database, *args, **kwargs)
+
+
+def _guarded_open(file, *args, **kwargs):
+    path = os.fsdecode(file) if isinstance(file, bytes) else str(file)
+    if path == PROD_ENV:
+        return _ORIG_OPEN(_ISOLATION_ENV, *args, **kwargs)
+    if path == PROD_CLIENT_LOG:
+        return _ORIG_OPEN(_ISOLATION_CLIENT_LOG, *args, **kwargs)
+    return _ORIG_OPEN(file, *args, **kwargs)
+
+
+def _guarded_makedirs(name, mode=0o777, exist_ok=False):
+    path = _redirect_prod_path(str(name))
+    return _ORIG_MAKEDIRS(path, mode, exist_ok=exist_ok)
+
+
+def _file_fingerprint(path: str):
+    try:
+        st = os.stat(path)
+        with open(path, 'rb') as fh:
+            digest = hashlib.sha256(fh.read()).hexdigest()
+        return (st.st_ino, st.st_size, st.st_mtime_ns, digest)
+    except FileNotFoundError:
+        return None
+
+
+_PROD_FINGERPRINTS_BEFORE = {
+    PROD_DB: _file_fingerprint(PROD_DB),
+    PROD_ENV: _file_fingerprint(PROD_ENV),
+}
+
+_connect_patch = mock.patch('sqlite3.connect', _guarded_connect)
+_open_patch = mock.patch('builtins.open', _guarded_open)
+_makedirs_patch = mock.patch('os.makedirs', _guarded_makedirs)
+_connect_patch.start()
+_open_patch.start()
+_makedirs_patch.start()
+
 import app as app_module  # noqa: E402
 
 
 def _make_get_db(db_path: str):
     def get_db():
+        if os.path.realpath(db_path) == os.path.realpath(PROD_DB):
+            raise AssertionError('ledger tests must not connect to production database')
         conn = sqlite3.connect(db_path)
         conn.row_factory = sqlite3.Row
         return conn
@@ -89,6 +168,23 @@ def _init_ledger_tables(db_path: str) -> None:
 
 
 class LedgerRouteTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls._prod_before = dict(_PROD_FINGERPRINTS_BEFORE)
+
+    @classmethod
+    def tearDownClass(cls):
+        _connect_patch.stop()
+        _open_patch.stop()
+        _makedirs_patch.stop()
+        shutil.rmtree(_ISOLATION_DIR, ignore_errors=True)
+        for path, before in cls._prod_before.items():
+            after = _file_fingerprint(path)
+            if before is None:
+                assert not os.path.exists(path), f'{path} must not be created by ledger tests'
+            else:
+                assert after == before, f'{path} was modified by ledger tests'
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.db_path = str(Path(self.tmp.name) / 'ledger-test.db')
@@ -101,6 +197,14 @@ class LedgerRouteTests(unittest.TestCase):
     def tearDown(self):
         self.patcher.stop()
         self.tmp.cleanup()
+
+    def test_import_used_isolation_database_not_production(self):
+        self.assertTrue(os.path.exists(_ISOLATION_DB))
+        self.assertNotEqual(os.path.realpath(_ISOLATION_DB), os.path.realpath(PROD_DB))
+
+    def test_guard_blocks_direct_production_connect(self):
+        with self.assertRaises(AssertionError):
+            _make_get_db(PROD_DB)()
 
     def _insert(self, amount=-12.0, date='2026-07-10', meta=None):
         conn = self.get_db()
@@ -220,7 +324,6 @@ class LedgerRouteTests(unittest.TestCase):
         conn = self.get_db()
         row = conn.execute('SELECT meta FROM ledger WHERE id=?', (lid,)).fetchone()
         conn.close()
-        import json
         meta = json.loads(row['meta'])
         self.assertEqual(set(meta.keys()), {'who', 'reason', 'note', 'mem', 'read', 'later'})
         self.assertNotIn('evil', meta)
