@@ -1,7 +1,7 @@
 // 身体节律 — implements the Cycle.dc.html design: prediction hero with inline
 // settings, monthly calendar with logged/predicted/ovulation marks, per-day
 // record editor (flow/pain/states/intimacy/note), and a recent-cycle summary.
-import { useEffect, useState, type CSSProperties } from 'react';
+import { useEffect, useRef, useState, type CSSProperties } from 'react';
 import { BackHeader } from '../components/BackHeader';
 import { Card, ScreenLayout } from '../components/Card';
 import { fetchPeriodDays, fetchPeriodSettings, savePeriodDay, savePeriodSettings } from '../lib/api';
@@ -18,6 +18,7 @@ import {
   toYmd,
 } from '../lib/cycle';
 import type { PeriodDayRecord, PeriodDays, PeriodSettings } from '../types';
+import { isLatestSaveToken, nextSaveToken } from '../lib/periodSave';
 
 const WEEKDAY_EN = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const DISPLAY = 'var(--font-serif-display)';
@@ -120,15 +121,66 @@ export function PeriodScreen() {
   const today = toYmd(new Date());
   const [days, setDays] = useState<PeriodDays | null>(null);
   const [settings, setSettings] = useState<PeriodSettings | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const [settingsError, setSettingsError] = useState<string | null>(null);
+  const [settingsSaving, setSettingsSaving] = useState(false);
   const [viewOffset, setViewOffset] = useState(0);
   const [selDate, setSelDate] = useState(today);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [draft, setDraft] = useState<{ start: string; cycle: number; period: number } | null>(null);
+  const [loadTick, setLoadTick] = useState(0);
+  const daySaveTokens = useRef(new Map<string, number>());
+  // Keep a mutable mirror so rapid multi-field edits on the same day merge correctly.
+  const daysRef = useRef<PeriodDays>({});
 
   useEffect(() => {
-    fetchPeriodDays().then(setDays);
-    fetchPeriodSettings().then(setSettings);
-  }, []);
+    let cancelled = false;
+    setLoadError(null);
+    Promise.all([fetchPeriodDays(), fetchPeriodSettings()])
+      .then(([d, s]) => {
+        if (cancelled) return;
+        daysRef.current = d;
+        setDays(d);
+        setSettings(s);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setDays(null);
+        setSettings(null);
+        setLoadError('经期数据暂时没有连接成功');
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [loadTick]);
+
+  if (loadError) {
+    return (
+      <ScreenLayout>
+        <BackHeader title="身体节律" subtitle="body rhythm" />
+        <Card style={{ padding: 22 }}>
+          <div style={{ fontSize: 14, color: 'var(--color-text-soft)', letterSpacing: 1 }}>{loadError}</div>
+          <div
+            onClick={() => setLoadTick((t) => t + 1)}
+            style={{
+              cursor: 'pointer',
+              marginTop: 16,
+              textAlign: 'center',
+              padding: '11px 0',
+              borderRadius: 13,
+              background: 'var(--color-rose)',
+              color: '#FFF9F7',
+              fontSize: 13,
+              letterSpacing: 4,
+            }}
+          >
+            重试
+          </div>
+        </Card>
+      </ScreenLayout>
+    );
+  }
 
   if (!days || !settings) {
     return (
@@ -142,14 +194,33 @@ export function PeriodScreen() {
     deriveCycle(days, settings, today);
   const { cycleLength, periodLength } = settings;
 
-  function updateDay(date: string, patch: Partial<PeriodDayRecord>) {
-    const rec = { ...(days?.[date] || {}), ...patch };
-    setDays((d) => ({ ...(d || {}), [date]: rec }));
-    savePeriodDay(date, rec);
+  async function updateDay(date: string, patch: Partial<PeriodDayRecord>) {
+    const prev = daysRef.current[date] ? { ...daysRef.current[date] } : undefined;
+    const rec = { ...(daysRef.current[date] || {}), ...patch };
+    daysRef.current = { ...daysRef.current, [date]: rec };
+    setDays({ ...daysRef.current });
+    setSaveError(null);
+    const token = nextSaveToken(daySaveTokens.current, date);
+    try {
+      const ok = await savePeriodDay(date, rec);
+      if (!isLatestSaveToken(daySaveTokens.current, date, token)) return;
+      if (!ok) throw new Error('save failed');
+    } catch {
+      if (!isLatestSaveToken(daySaveTokens.current, date, token)) return;
+      if (prev === undefined) {
+        const next = { ...daysRef.current };
+        delete next[date];
+        daysRef.current = next;
+      } else {
+        daysRef.current = { ...daysRef.current, [date]: prev };
+      }
+      setDays({ ...daysRef.current });
+      setSaveError('保存没有成功，请再试一次');
+    }
   }
 
   function toggleInList(date: string, key: 'states' | 'extras', label: string) {
-    const list = days?.[date]?.[key] || [];
+    const list = daysRef.current[date]?.[key] || [];
     updateDay(date, { [key]: list.includes(label) ? list.filter((x) => x !== label) : [...list, label] });
   }
 
@@ -173,12 +244,20 @@ export function PeriodScreen() {
   const effDraft = draft ?? { start: currentStart, cycle: cycleLength, period: periodLength };
   const bump = (patch: Partial<typeof effDraft>) => setDraft({ ...effDraft, ...patch });
 
-  function saveSettings() {
+  async function saveSettings() {
     const next = { cycleLength: effDraft.cycle, periodLength: effDraft.period, lastStart: effDraft.start };
-    setSettings(next);
-    savePeriodSettings(next);
-    setSettingsOpen(false);
-    setDraft(null);
+    setSettingsSaving(true);
+    setSettingsError(null);
+    try {
+      await savePeriodSettings(next);
+      setSettings(next);
+      setSettingsOpen(false);
+      setDraft(null);
+    } catch {
+      setSettingsError('设置没有保存成功，草稿还在，可以再试');
+    } finally {
+      setSettingsSaving(false);
+    }
   }
 
   // ── calendar ──
@@ -268,6 +347,10 @@ export function PeriodScreen() {
     <ScreenLayout>
       <BackHeader title="身体节律" subtitle="body rhythm" />
 
+      {saveError && (
+        <div style={{ fontSize: 12, color: 'var(--color-rose-deep)', letterSpacing: 1, padding: '0 4px' }}>{saveError}</div>
+      )}
+
       {/* ── 周期预测卡 ── */}
       <Card style={{ padding: '16px 20px 14px' }}>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
@@ -275,6 +358,7 @@ export function PeriodScreen() {
           <span
             onClick={() => {
               setSettingsOpen(!settingsOpen);
+              setSettingsError(null);
               setDraft(settingsOpen ? null : { start: currentStart, cycle: cycleLength, period: periodLength });
             }}
             style={{ cursor: 'pointer', color: 'var(--color-rose-deep)', fontSize: 12, padding: '4px 14px', borderRadius: 999, background: 'rgba(183,110,121,0.10)' }}
@@ -334,11 +418,26 @@ export function PeriodScreen() {
                 onPlus={() => bump({ period: Math.min(effDraft.period + 1, 10) })}
               />
             </div>
+            {settingsError && (
+              <div style={{ fontSize: 12, color: 'var(--color-rose-deep)', letterSpacing: 1 }}>{settingsError}</div>
+            )}
             <div
-              onClick={saveSettings}
-              style={{ cursor: 'pointer', textAlign: 'center', padding: '11px 0', borderRadius: 13, background: 'var(--color-rose)', color: '#FFF9F7', fontSize: 13, letterSpacing: 4, boxShadow: '0 8px 20px rgba(183,110,121,0.24)', marginTop: 2 }}
+              onClick={settingsSaving ? undefined : () => { void saveSettings(); }}
+              style={{
+                cursor: settingsSaving ? 'default' : 'pointer',
+                opacity: settingsSaving ? 0.6 : 1,
+                textAlign: 'center',
+                padding: '11px 0',
+                borderRadius: 13,
+                background: 'var(--color-rose)',
+                color: '#FFF9F7',
+                fontSize: 13,
+                letterSpacing: 4,
+                boxShadow: '0 8px 20px rgba(183,110,121,0.24)',
+                marginTop: 2,
+              }}
             >
-              保存
+              {settingsSaving ? '保存中…' : '保存'}
             </div>
           </div>
         )}

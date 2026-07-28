@@ -31,8 +31,9 @@
     var periodDates = new Set();
     var sexDates = new Set();
     records.forEach(function (r) {
-      if (r.type === 'period') periodDates.add(r.date);
+      if (r.type === 'period' || r.type === 'start') periodDates.add(r.date);
       else if (r.type === 'sex') sexDates.add(r.date);
+      // end / unknown: not intimacy, not a new cycle mark on the grid
     });
 
     var predDates = new Set();
@@ -112,6 +113,13 @@
     renderDmList(d.records || []);
   }
 
+  function recordTypeLabel(type) {
+    if (type === 'period' || type === 'start') return '🩸 经期';
+    if (type === 'end') return '经期结束';
+    if (type === 'sex') return '♥ 亲密';
+    return '记录';
+  }
+
   function renderDmList(recs) {
     var el = document.getElementById('dm-list');
     if (!recs.length) {
@@ -119,7 +127,7 @@
       return;
     }
     el.innerHTML = recs.map(function (r) {
-      var label = r.type === 'period' ? '🩸 经期' : '♥ 爱爱';
+      var label = recordTypeLabel(r.type);
       if (r.note) label += ' · ' + r.note;
       return '<div class="dm-rec"><span>' + label + '</span>' +
              '<button class="dm-del" onclick="dmDelete(' + r.id + ')">删除</button></div>';
