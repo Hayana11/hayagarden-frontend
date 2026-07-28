@@ -1,6 +1,7 @@
 import type { ReactNode } from 'react';
 import {
   CARRYOVER_COUNTS,
+  countLabel,
   groupIntoRounds,
   pickLastNRounds,
   roundSnippetMessages,
@@ -35,9 +36,13 @@ function whoLabel(role: CarryoverCandidate['role']): string {
   return role === 'user' ? '小猫' : '爸爸';
 }
 
-function tokenHint(count: CarryoverCount): string {
-  if (count === 0) return '0';
-  return (count * 0.13).toFixed(1);
+/**
+ * handoff 的 metaLine 是「与各档相同」——整句不随选中档位变化，
+ * 所以估算走全部轮数，不走 draftCount。
+ */
+function tokenHint(totalRounds: number): string {
+  if (totalRounds <= 0) return '0';
+  return (totalRounds * 0.13).toFixed(1);
 }
 
 export function CarryoverModal({
@@ -88,14 +93,7 @@ export function CarryoverModal({
                   disabled={isLocked}
                   onClick={() => onDraftChange(n)}
                 >
-                  {n === 0 ? (
-                    <span className="daily-window-option-word">不带</span>
-                  ) : (
-                    <>
-                      <span className="daily-window-option-number">{n}</span>
-                      <span className="daily-window-option-unit">轮</span>
-                    </>
-                  )}
+                  <span className="daily-window-option-label">{countLabel(n)}</span>
                 </button>
               );
             })}
@@ -103,7 +101,7 @@ export function CarryoverModal({
           <p className="daily-window-helper">
             {uiState === 'empty'
               ? '昨天没有可带走的正式对话 · 与各档相同 · 0 tokens'
-              : `全部 ${rounds.length} 轮 · 与各档相同 · 约${tokenHint(draftCount)}k tokens`}
+              : `全部 ${rounds.length} 轮 · 与各档相同 · 约${tokenHint(rounds.length)}k tokens`}
           </p>
         </section>
 
@@ -111,7 +109,7 @@ export function CarryoverModal({
           <span className="daily-window-divider-mark" />
         </div>
 
-        <section className="daily-window-section">
+        <section className="daily-window-section daily-window-section--snippets">
           <h3 className="daily-window-section-title">对话首尾片段</h3>
           {draftCount === 0 ? (
             <div className="daily-window-empty">不带走昨天的话。直接开始新的一天也可以。</div>
@@ -129,7 +127,7 @@ export function CarryoverModal({
           )}
         </section>
 
-        <section className="daily-window-section">
+        <section className="daily-window-section daily-window-section--left-behind">
           <h3 className="daily-window-section-title">不会装进行李箱</h3>
           <div className="daily-window-tags">
             {(['提醒', '工具', 'thinking'] as const).map((label) => (
