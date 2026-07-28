@@ -25,7 +25,8 @@ Before the first send of the new chat-day, a small card sits above the composer:
 不带｜3条｜5条｜10条
 ```
 
-Tap → centered suitcase modal (reference style; no kitten art).
+Tap → centered soft-pink modal (reference style 2).
+Hero art is a replaceable slot (`artSrc`); illustration may peek outside without growing the dialog.
 Selecting 3 / 5 / 10 previews dialogue snippets by exact `message_id`.
 Sending without a choice auto-locks **0**. After lock, card becomes readonly.
 

@@ -31,10 +31,10 @@ async function shot(page, name) {
 
   await page.locator('.dsw-card').first().click();
   await page.waitForTimeout(450);
-  await page.locator('.dsw-opt').nth(2).click(); // 5
+  await page.locator('.daily-window-option').nth(2).click(); // 5
   await page.waitForTimeout(350);
   await shot(page, 'dsw-fe-r0-modal-5-mobile.png');
-  await page.locator('.dsw-btn.primary').click();
+  await page.locator('.daily-window-button--primary').click();
   await page.waitForTimeout(450);
   await shot(page, 'dsw-fe-r0-locked-mobile.png');
   await context.close();
@@ -48,7 +48,7 @@ async function shot(page, name) {
   await page.waitForTimeout(500);
   await page.locator('.dsw-card').first().click();
   await page.waitForTimeout(450);
-  await page.locator('.dsw-opt').nth(1).click(); // 3
+  await page.locator('.daily-window-option').nth(1).click(); // 3
   await page.waitForTimeout(300);
   await shot(page, 'dsw-fe-r0-modal-desktop.png');
   await context.close();

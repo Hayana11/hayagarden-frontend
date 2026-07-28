@@ -1,4 +1,57 @@
-/* P-CONTEXT-DAILY-SOFT-WINDOW-FE-R0 — suitcase modal (reference style, no kitten) */
+/* =========================================================
+   Daily Soft Window / 换窗弹窗
+   目标：轻、薄、柔、留白大，接近参考图二
+   顶部插画为可替换槽位（可探出容器，不撑高弹窗）
+   ========================================================= */
+
+:root {
+  --window-overlay: rgba(238, 218, 223, 0.68);
+  --window-overlay-blur: 12px;
+
+  --window-surface: #fff9f9;
+  --window-surface-soft: #fffdfd;
+  --window-surface-muted: #fbf3f4;
+
+  --window-border: #efd9de;
+  --window-border-soft: #f3e6e8;
+  --window-border-active: #da88a0;
+
+  --window-title: #55474b;
+  --window-body: #6c5f63;
+  --window-muted: #a9989e;
+  --window-faint: #b8a8ad;
+
+  --window-accent: #d97e9a;
+  --window-accent-strong: #d96f90;
+  --window-accent-soft: #e7a8ba;
+
+  --window-secondary-bg: #f7eeee;
+  --window-secondary-text: #8b7b80;
+  --window-primary-text: #ffffff;
+
+  --window-radius: 32px;
+  --window-card-radius: 16px;
+  --window-pill-radius: 999px;
+
+  --window-shadow:
+    0 24px 60px rgba(102, 62, 75, 0.14),
+    0 4px 16px rgba(102, 62, 75, 0.06);
+
+  --window-serif:
+    "Bodoni Moda",
+    "Cormorant Garamond",
+    "Noto Serif SC",
+    "Source Han Serif SC",
+    serif;
+
+  --window-sans:
+    "PingFang SC",
+    "Noto Sans SC",
+    "Microsoft YaHei",
+    sans-serif;
+}
+
+/* ── chat-day soft separator + composer card ── */
 
 .dsw-boundary {
   display: flex;
@@ -12,21 +65,21 @@
 .dsw-boundary-line {
   width: min(220px, 70%);
   height: 1px;
-  background: linear-gradient(90deg, transparent, rgba(183, 110, 121, 0.35), transparent);
+  background: linear-gradient(90deg, transparent, rgba(217, 126, 154, 0.35), transparent);
   margin-bottom: 6px;
 }
 
 .dsw-boundary-title {
-  font-family: 'Bodoni Moda', 'Noto Serif SC', serif;
+  font-family: var(--window-serif);
   font-size: 13px;
   letter-spacing: 3px;
-  color: var(--rose, #B76E79);
+  color: var(--window-accent);
 }
 
 .dsw-boundary-sub {
-  font-family: 'Noto Serif SC', serif;
+  font-family: var(--window-serif);
   font-size: 12px;
-  color: var(--faint, #A99590);
+  color: var(--window-faint);
   letter-spacing: 0.5px;
 }
 
@@ -35,13 +88,13 @@
   padding: 12px 14px;
   border-radius: 18px;
   background:
-    radial-gradient(120% 80% at 0% 0%, rgba(183, 110, 121, 0.10), transparent 55%),
-    linear-gradient(180deg, #fffdfc, #f8f1ee);
-  border: 1px solid rgba(183, 110, 121, 0.16);
-  box-shadow: 0 10px 28px rgba(183, 110, 121, 0.10);
+    linear-gradient(180deg, rgba(255, 255, 255, 0.7), rgba(255, 249, 249, 0.96)),
+    var(--window-surface);
+  border: 1px solid var(--window-border);
+  box-shadow: 0 10px 28px rgba(102, 62, 75, 0.08);
   cursor: pointer;
   transition: transform 0.18s ease, box-shadow 0.18s ease;
-  animation: dswFadeUp 0.35s cubic-bezier(0.32, 0.72, 0.33, 1);
+  animation: daily-window-dialog-in 0.35s cubic-bezier(0.2, 0.8, 0.2, 1);
 }
 
 .dsw-card:active {
@@ -50,32 +103,32 @@
 
 .dsw-card.locked {
   cursor: default;
-  background: linear-gradient(180deg, #fbf7f5, #f4ece9);
   box-shadow: none;
+  background: var(--window-surface-muted);
 }
 
 .dsw-card-kicker {
-  font-family: 'Bodoni Moda', serif;
+  font-family: var(--window-serif);
   font-size: 10.5px;
   letter-spacing: 2.5px;
-  color: var(--ghost, #C4B4AF);
+  color: var(--window-faint);
   margin-bottom: 4px;
 }
 
 .dsw-card-title {
-  font-family: 'Noto Serif SC', serif;
+  font-family: var(--window-serif);
   font-size: 15px;
   font-weight: 600;
-  color: var(--ink, #4A3F3C);
-  letter-spacing: 1px;
+  color: var(--window-title);
+  letter-spacing: 0.5px;
 }
 
 .dsw-card-sub {
   margin-top: 4px;
-  font-family: 'Noto Serif SC', serif;
+  font-family: var(--window-sans);
   font-size: 12.5px;
   line-height: 1.55;
-  color: var(--mut, #8C7B76);
+  color: var(--window-muted);
 }
 
 .dsw-card-chips {
@@ -86,373 +139,705 @@
 }
 
 .dsw-chip {
-  font-family: 'Bodoni Moda', serif;
+  font-family: var(--window-serif);
   font-size: 12px;
   letter-spacing: 0.5px;
   padding: 4px 10px;
-  border-radius: 999px;
-  border: 1px solid rgba(183, 110, 121, 0.22);
-  color: var(--deep, #9C3B4A);
-  background: rgba(183, 110, 121, 0.08);
+  border-radius: var(--window-pill-radius);
+  border: 1px solid var(--window-border);
+  color: var(--window-accent);
+  background: rgba(217, 126, 154, 0.08);
 }
 
 .dsw-card-meta {
   margin-top: 8px;
   font-size: 11px;
-  color: var(--ghost, #C4B4AF);
-  font-family: 'Noto Serif SC', serif;
+  color: var(--window-faint);
+  font-family: var(--window-sans);
 }
 
-/* ── Centered modal (reference suitcase dialog) ── */
+.dsw-msg-highlight {
+  outline: 1.5px solid rgba(217, 126, 154, 0.45);
+  outline-offset: 4px;
+  border-radius: 14px;
+  background: rgba(217, 126, 154, 0.06);
+}
 
-.dsw-ov {
+/* =========================================================
+   遮罩层
+   ========================================================= */
+
+.daily-window-overlay {
   position: fixed;
   inset: 0;
-  z-index: 90;
+  z-index: 1000;
+
   display: flex;
-  justify-content: center;
   align-items: center;
-  padding: 18px 14px calc(18px + env(safe-area-inset-bottom, 0px));
+  justify-content: center;
+
+  padding:
+    max(24px, env(safe-area-inset-top))
+    16px
+    max(24px, env(safe-area-inset-bottom));
+
+  overflow-y: auto;
+
+  background: var(--window-overlay);
+  backdrop-filter: blur(var(--window-overlay-blur));
+  -webkit-backdrop-filter: blur(var(--window-overlay-blur));
+
+  animation: daily-window-overlay-in 180ms ease-out both;
 }
 
-.dsw-backdrop {
+/* =========================================================
+   主弹窗
+   ========================================================= */
+
+.daily-window-dialog {
+  position: relative;
+
+  width: min(100%, 358px);
+  max-height: calc(100dvh - 48px);
+
+  padding: 20px 20px 18px;
+
+  overflow-y: auto;
+  overscroll-behavior: contain;
+
+  color: var(--window-body);
+  background:
+    linear-gradient(
+      180deg,
+      rgba(255, 255, 255, 0.58) 0%,
+      rgba(255, 249, 249, 0.96) 20%,
+      var(--window-surface) 100%
+    );
+
+  border: 1px solid rgba(239, 217, 222, 0.9);
+  border-radius: var(--window-radius);
+  box-shadow: var(--window-shadow);
+
+  scrollbar-width: none;
+
+  animation: daily-window-dialog-in 220ms cubic-bezier(.2, .8, .2, 1) both;
+}
+
+.daily-window-dialog::-webkit-scrollbar {
+  display: none;
+}
+
+.daily-window-dialog::before {
+  content: "";
+  position: absolute;
+  inset: 5px;
+  pointer-events: none;
+
+  border: 1px solid rgba(255, 255, 255, 0.72);
+  border-radius: calc(var(--window-radius) - 5px);
+}
+
+.daily-window-dialog.is-loading {
+  pointer-events: none;
+}
+
+.daily-window-dialog.is-loading::after {
+  content: "";
   position: absolute;
   inset: 0;
-  background:
-    radial-gradient(120% 80% at 50% 20%, rgba(232, 190, 196, 0.42), transparent 55%),
-    rgba(58, 36, 40, 0.38);
-  backdrop-filter: blur(10px);
-  -webkit-backdrop-filter: blur(10px);
-  animation: dswFadeIn 0.22s ease;
+  z-index: 10;
+
+  background: rgba(255, 249, 249, 0.48);
+
+  border-radius: inherit;
 }
 
-.dsw-modal {
-  position: relative;
-  width: min(100%, 392px);
-  max-height: min(88vh, 720px);
-  background:
-    radial-gradient(90% 55% at 8% 0%, rgba(183, 110, 121, 0.11), transparent 58%),
-    linear-gradient(180deg, #fffdfc 0%, #faf4f1 100%);
-  border-radius: 26px;
-  border: 1px solid rgba(183, 110, 121, 0.12);
-  box-shadow:
-    0 28px 70px rgba(92, 48, 58, 0.22),
-    0 2px 0 rgba(255, 255, 255, 0.65) inset;
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-  animation: dswModalIn 0.34s cubic-bezier(0.32, 0.72, 0.33, 1);
-}
+/* =========================================================
+   关闭按钮
+   ========================================================= */
 
-.dsw-modal-hd {
-  display: flex;
-  align-items: center;
-  gap: 14px;
-  padding: 20px 20px 14px;
-  flex-shrink: 0;
-}
-
-.dsw-suit {
-  width: 72px;
-  height: 72px;
-  flex-shrink: 0;
-  border-radius: 18px;
-  background:
-    radial-gradient(circle at 30% 25%, rgba(255, 255, 255, 0.55), transparent 45%),
-    linear-gradient(160deg, #f3ddd8 0%, #e8c4c0 48%, #d9a8ad 100%);
-  box-shadow: 0 10px 22px rgba(183, 110, 121, 0.22);
-  display: grid;
-  place-items: center;
-  position: relative;
-  overflow: hidden;
-}
-
-.dsw-suit svg {
-  width: 44px;
-  height: 44px;
-  display: block;
-}
-
-.dsw-modal-titles {
-  min-width: 0;
-  flex: 1;
-  padding-top: 2px;
-}
-
-.dsw-modal-title {
-  font-family: 'Noto Serif SC', serif;
-  font-size: 20px;
-  font-weight: 700;
-  color: #3f3431;
-  letter-spacing: 0.5px;
-  line-height: 1.25;
-}
-
-.dsw-modal-sub {
-  margin-top: 4px;
-  font-family: 'Bodoni Moda', serif;
-  font-style: italic;
-  font-size: 13px;
-  color: #b08a8f;
-  letter-spacing: 0.2px;
-}
-
-.dsw-close {
+.daily-window-close {
   position: absolute;
   top: 14px;
   right: 14px;
-  width: 30px;
-  height: 30px;
-  border-radius: 50%;
-  border: none;
-  background: rgba(246, 239, 236, 0.9);
-  color: var(--mut, #8C7B76);
-  cursor: pointer;
-  font-size: 15px;
   z-index: 2;
+
+  width: 36px;
+  height: 36px;
+
+  display: grid;
+  place-items: center;
+
+  padding: 0;
+
+  color: #8f7d82;
+  background: rgba(251, 243, 244, 0.88);
+
+  border: 1px solid var(--window-border-soft);
+  border-radius: 50%;
+
+  cursor: pointer;
+  font-size: 18px;
+  line-height: 1;
+
+  transition:
+    transform 160ms ease,
+    background-color 160ms ease,
+    border-color 160ms ease;
 }
 
-.dsw-body {
-  flex: 1;
-  min-height: 0;
-  overflow-y: auto;
-  padding: 2px 18px 8px;
-  -webkit-overflow-scrolling: touch;
+.daily-window-close:hover {
+  background: #f8edef;
+  border-color: var(--window-border);
+  transform: rotate(4deg);
 }
 
-.dsw-section {
-  margin-bottom: 16px;
+.daily-window-close:active {
+  transform: scale(0.94);
 }
 
-.dsw-section-label {
+/* =========================================================
+   顶部 Hero — 左插画槽位 + 右标题
+   插画可探出容器，不撑高弹窗
+   ========================================================= */
+
+.daily-window-hero {
+  min-height: 120px;
+
+  display: grid;
+  grid-template-columns: 132px minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+
+  margin: -2px 0 12px;
+  padding-right: 20px;
+}
+
+.daily-window-hero-art {
+  position: relative;
+  align-self: end;
+
+  width: 140px;
+  height: 128px;
+
+  margin-left: -10px;
+  margin-bottom: -4px;
+
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+
+  pointer-events: none;
+  overflow: visible;
+}
+
+.daily-window-hero-art img {
+  display: block;
+  width: 118%;
+  max-width: none;
+  height: auto;
+  max-height: 148px;
+
+  object-fit: contain;
+  object-position: center bottom;
+
+  filter: drop-shadow(0 8px 12px rgba(112, 73, 84, 0.08));
+}
+
+/* 没有插画时的轻占位：可换成窗页 / 月亮 / 信封透明 PNG */
+.daily-window-hero-art.is-placeholder {
+  width: 108px;
+  height: 108px;
+
+  margin-left: 4px;
+
+  background:
+    linear-gradient(145deg, #fbe9eb, #e9bcc5);
+
+  border-radius: 28px;
+  overflow: hidden;
+}
+
+.daily-window-hero-art.is-placeholder svg {
+  width: 64%;
+  height: 64%;
+  margin: auto;
+  opacity: 0.82;
+}
+
+.daily-window-hero-copy {
+  min-width: 0;
+  padding-top: 6px;
+}
+
+.daily-window-title {
+  margin: 0;
+
+  color: var(--window-title);
+
+  font-family: var(--window-serif);
+  font-size: 24px;
+  font-weight: 700;
+  line-height: 1.18;
+  letter-spacing: -0.02em;
+
+  text-wrap: balance;
+}
+
+.daily-window-subtitle {
+  margin: 7px 0 0;
+
+  color: #b59fa6;
+
+  font-family: var(--window-serif);
+  font-size: 13px;
+  font-style: italic;
+  font-weight: 400;
+  line-height: 1.3;
+  letter-spacing: 0.035em;
+
+  white-space: nowrap;
+}
+
+/* =========================================================
+   分区
+   ========================================================= */
+
+.daily-window-section {
+  margin-top: 18px;
+}
+
+.daily-window-section:first-of-type {
+  margin-top: 10px;
+}
+
+.daily-window-section-title {
   display: flex;
   align-items: center;
-  gap: 6px;
-  font-family: 'Noto Serif SC', serif;
-  font-size: 12.5px;
-  letter-spacing: 0.5px;
-  color: #8a7276;
-  margin-bottom: 10px;
+  gap: 8px;
+
+  margin: 0 0 12px;
+
+  color: #8d747c;
+
+  font-family: var(--window-sans);
+  font-size: 15px;
+  font-weight: 500;
+  line-height: 1.4;
+  letter-spacing: 0.01em;
 }
 
-.dsw-spark {
-  color: #c4848d;
-  font-size: 12px;
+.daily-window-section-title::before {
+  content: "✦";
+
+  flex: 0 0 auto;
+
+  color: var(--window-accent);
+  font-size: 13px;
   line-height: 1;
 }
 
-/* Reference-style large pill options */
-.dsw-options {
+/* =========================================================
+   轮次 / 条数选项
+   ========================================================= */
+
+.daily-window-options {
   display: grid;
-  grid-template-columns: repeat(2, 1fr);
-  gap: 10px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px 12px;
 }
 
-.dsw-opt {
-  appearance: none;
-  border: 1.5px solid #e7d9d6;
-  background: #f7f1ef;
-  border-radius: 999px;
+.daily-window-option {
   min-height: 54px;
-  padding: 10px 14px;
-  cursor: pointer;
+
   display: flex;
   align-items: baseline;
   justify-content: center;
   gap: 6px;
-  transition: border-color 0.15s ease, color 0.15s ease, background 0.15s ease, transform 0.15s ease;
-  font-family: inherit;
-  color: #9a8683;
+
+  padding: 8px 12px;
+
+  color: #9b898e;
+  background: rgba(255, 253, 253, 0.62);
+
+  border: 1px solid var(--window-border);
+  border-radius: var(--window-pill-radius);
+
+  cursor: pointer;
+
+  transition:
+    color 160ms ease,
+    background-color 160ms ease,
+    border-color 160ms ease,
+    box-shadow 160ms ease,
+    transform 160ms ease;
 }
 
-.dsw-opt:hover {
-  border-color: rgba(183, 110, 121, 0.4);
+.daily-window-option:hover {
+  border-color: #e5b9c4;
+  background: #fffafa;
 }
 
-.dsw-opt:active {
+.daily-window-option:active {
   transform: scale(0.98);
 }
 
-.dsw-opt.selected {
-  border-color: #c4848d;
-  background: #fff9f8;
-  color: #b76e79;
-  box-shadow: 0 0 0 1px rgba(183, 110, 121, 0.12);
+.daily-window-option.is-selected,
+.daily-window-option[aria-pressed="true"] {
+  color: var(--window-accent);
+  background:
+    linear-gradient(
+      180deg,
+      rgba(255, 253, 253, 0.96),
+      rgba(255, 247, 249, 0.96)
+    );
+
+  border-color: var(--window-border-active);
+
+  box-shadow:
+    0 4px 12px rgba(217, 126, 154, 0.08),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.7);
 }
 
-.dsw-opt-num {
-  font-family: 'Bodoni Moda', serif;
-  font-size: 26px;
+.daily-window-option-number {
+  font-family: var(--window-serif);
+  font-size: 29px;
   font-weight: 500;
   line-height: 1;
-  letter-spacing: 0.5px;
+  letter-spacing: -0.025em;
 }
 
-.dsw-opt-cap {
-  font-family: 'Noto Serif SC', serif;
-  font-size: 13px;
-  letter-spacing: 0.5px;
+.daily-window-option-unit {
+  font-family: var(--window-serif);
+  font-size: 15px;
+  font-weight: 500;
+  line-height: 1;
 }
 
-.dsw-meta {
-  margin-top: 10px;
-  font-size: 11.5px;
-  color: #b5a19d;
-  font-family: 'Noto Serif SC', serif;
-  letter-spacing: 0.2px;
+.daily-window-option-word {
+  font-family: var(--window-serif);
+  font-size: 17px;
+  font-weight: 500;
 }
 
-.dsw-preview {
+.daily-window-helper {
+  margin: 11px 2px 0;
+
+  color: var(--window-muted);
+
+  font-family: var(--window-sans);
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.45;
+}
+
+/* =========================================================
+   中间细分隔线
+   ========================================================= */
+
+.daily-window-divider {
+  position: relative;
+
   display: flex;
-  flex-direction: column;
-  gap: 8px;
+  align-items: center;
+  gap: 12px;
+
+  margin: 15px 0 4px;
 }
 
-.dsw-preview-row {
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-  padding: 11px 13px;
+.daily-window-divider::before,
+.daily-window-divider::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+
+  background:
+    linear-gradient(
+      90deg,
+      transparent,
+      var(--window-border) 24%,
+      var(--window-border) 76%,
+      transparent
+    );
+}
+
+.daily-window-divider-mark {
+  width: 7px;
+  height: 7px;
+
+  background: var(--window-accent-soft);
+
+  transform: rotate(45deg);
+}
+
+/* =========================================================
+   消息预览
+   ========================================================= */
+
+.daily-window-previews {
+  display: grid;
+  gap: 9px;
+}
+
+.daily-window-preview {
+  min-width: 0;
+
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+
+  min-height: 52px;
+
+  padding: 11px 14px;
+
+  background: rgba(255, 253, 253, 0.78);
+
+  border: 1px solid var(--window-border-soft);
   border-radius: 14px;
-  background: #f3ece9;
-  border: 1px solid transparent;
-  animation: dswFadeUp 0.28s ease both;
 }
 
-.dsw-preview-row.highlight {
-  border-color: rgba(183, 110, 121, 0.28);
-  background: #f7eef0;
+.daily-window-preview-speaker {
+  color: #d7869d;
+
+  font-family: var(--window-serif);
+  font-size: 15px;
+  font-weight: 700;
+  line-height: 1.3;
+
+  white-space: nowrap;
 }
 
-.dsw-preview-who {
-  font-family: 'Noto Serif SC', serif;
-  font-size: 12.5px;
-  font-weight: 600;
-  color: #b76e79;
-}
+.daily-window-preview-text {
+  min-width: 0;
 
-.dsw-preview-text {
-  font-family: 'Noto Serif SC', serif;
-  font-size: 12.5px;
-  line-height: 1.55;
-  color: #6b5a55;
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
   overflow: hidden;
+
+  color: var(--window-body);
+
+  font-family: var(--window-sans);
+  font-size: 13px;
+  font-weight: 400;
+  line-height: 1.45;
+
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.dsw-exclude {
+/* =========================================================
+   不带过去的内容标签
+   ========================================================= */
+
+.daily-window-tags {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
 }
 
-.dsw-exclude-tag {
-  font-family: 'Noto Serif SC', serif;
+.daily-window-tag {
+  min-height: 32px;
+
+  display: inline-flex;
+  align-items: center;
+
+  padding: 6px 13px;
+
+  color: #9f8e93;
+  background: var(--window-surface-muted);
+
+  border: 1px solid rgba(243, 230, 232, 0.86);
+  border-radius: var(--window-pill-radius);
+
+  font-family: var(--window-sans);
   font-size: 12px;
-  color: #9a8683;
-  background: #f1e9e6;
-  border-radius: 999px;
-  padding: 7px 12px;
-  letter-spacing: 0.2px;
-}
-
-.dsw-exclude-tag b {
-  font-family: 'Bodoni Moda', serif;
   font-weight: 500;
-  color: #8c7470;
+  line-height: 1;
 }
 
-.dsw-state {
-  padding: 28px 12px;
-  text-align: center;
-  font-family: 'Noto Serif SC', serif;
-  font-size: 13.5px;
-  line-height: 1.7;
-  color: var(--mut, #8C7B76);
-}
+/* =========================================================
+   底部操作区
+   ========================================================= */
 
-.dsw-state strong {
-  display: block;
-  font-family: 'Bodoni Moda', serif;
-  font-size: 22px;
-  letter-spacing: 1px;
-  color: #b76e79;
-  margin-bottom: 8px;
-  font-weight: 500;
-}
-
-.dsw-foot {
-  flex-shrink: 0;
+.daily-window-actions {
   display: grid;
-  grid-template-columns: 1fr 1.15fr;
-  gap: 10px;
-  padding: 12px 18px 18px;
-  background: linear-gradient(180deg, transparent, rgba(255, 253, 252, 0.92) 28%);
+  grid-template-columns: 1fr 1.08fr;
+  gap: 12px;
+
+  margin-top: 22px;
 }
 
-.dsw-btn {
-  appearance: none;
+.daily-window-button {
+  min-height: 52px;
+
+  padding: 0 16px;
+
+  border-radius: 20px;
   border: none;
-  border-radius: 14px;
-  padding: 13px 12px;
-  font-family: 'Noto Serif SC', serif;
-  font-size: 14px;
-  letter-spacing: 1px;
+
+  font-family: var(--window-serif);
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 1;
+
   cursor: pointer;
-  transition: opacity 0.15s ease, transform 0.15s ease;
+
+  transition:
+    transform 160ms ease,
+    box-shadow 160ms ease,
+    filter 160ms ease,
+    background-color 160ms ease;
 }
 
-.dsw-btn:active {
+.daily-window-button:active {
   transform: scale(0.98);
 }
 
-.dsw-btn:disabled {
-  opacity: 0.45;
-  cursor: default;
+.daily-window-button--secondary {
+  color: var(--window-secondary-text);
+  background: var(--window-secondary-bg);
+
+  border: 1px solid rgba(239, 217, 222, 0.7);
 }
 
-.dsw-btn.ghost {
-  background: #f1e9e6;
-  color: #8c7b76;
+.daily-window-button--secondary:hover {
+  background: #f3e8ea;
 }
 
-.dsw-btn.primary {
-  background: #b76e79;
-  color: #fff9f7;
-  box-shadow: 0 8px 20px rgba(183, 110, 121, 0.28);
+.daily-window-button--primary {
+  color: var(--window-primary-text);
+
+  background:
+    linear-gradient(
+      135deg,
+      #cf6687 0%,
+      #db7595 52%,
+      #df819e 100%
+    );
+
+  border: 1px solid rgba(202, 91, 125, 0.14);
+
+  box-shadow:
+    0 8px 18px rgba(205, 91, 126, 0.18),
+    inset 0 1px 0 rgba(255, 255, 255, 0.24);
 }
 
-.dsw-msg-highlight {
-  outline: 1.5px solid rgba(183, 110, 121, 0.45);
-  outline-offset: 4px;
-  border-radius: 14px;
-  background: rgba(183, 110, 121, 0.06);
-  transition: outline-color 0.2s ease, background 0.2s ease;
+.daily-window-button--primary:hover {
+  filter: brightness(1.025);
+  box-shadow:
+    0 10px 24px rgba(205, 91, 126, 0.22),
+    inset 0 1px 0 rgba(255, 255, 255, 0.28);
 }
 
-@keyframes dswFadeIn {
+.daily-window-button:focus-visible,
+.daily-window-option:focus-visible,
+.daily-window-close:focus-visible {
+  outline: 2px solid rgba(217, 111, 144, 0.5);
+  outline-offset: 3px;
+}
+
+.daily-window-empty {
+  min-height: 110px;
+
+  display: grid;
+  place-items: center;
+
+  padding: 20px;
+
+  color: var(--window-muted);
+
+  font-family: var(--window-sans);
+  font-size: 13px;
+  line-height: 1.6;
+  text-align: center;
+
+  background: rgba(255, 253, 253, 0.7);
+
+  border: 1px dashed var(--window-border);
+  border-radius: var(--window-card-radius);
+}
+
+.daily-window-button:disabled,
+.daily-window-option:disabled {
+  cursor: not-allowed;
+  opacity: 0.48;
+  box-shadow: none;
+}
+
+/* =========================================================
+   手机窄屏
+   ========================================================= */
+
+@media (max-width: 374px) {
+  .daily-window-dialog {
+    width: min(100%, 344px);
+    padding-inline: 17px;
+  }
+
+  .daily-window-hero {
+    grid-template-columns: 118px minmax(0, 1fr);
+  }
+
+  .daily-window-hero-art {
+    width: 126px;
+    height: 116px;
+  }
+
+  .daily-window-title {
+    font-size: 22px;
+  }
+
+  .daily-window-subtitle {
+    font-size: 12px;
+  }
+
+  .daily-window-option-number {
+    font-size: 27px;
+  }
+}
+
+/* =========================================================
+   桌面端
+   ========================================================= */
+
+@media (min-width: 768px) {
+  .daily-window-overlay {
+    padding: 32px;
+  }
+
+  .daily-window-dialog {
+    width: 390px;
+    max-height: min(760px, calc(100dvh - 64px));
+  }
+}
+
+/* =========================================================
+   动效
+   ========================================================= */
+
+@keyframes daily-window-overlay-in {
   from { opacity: 0; }
   to { opacity: 1; }
 }
 
-@keyframes dswFadeUp {
-  from { opacity: 0; transform: translateY(8px); }
-  to { opacity: 1; transform: translateY(0); }
-}
-
-@keyframes dswModalIn {
-  from { opacity: 0; transform: translateY(14px) scale(0.97); }
-  to { opacity: 1; transform: translateY(0) scale(1); }
-}
-
-@media (min-width: 900px) {
-  .dsw-card {
-    margin-bottom: 12px;
+@keyframes daily-window-dialog-in {
+  from {
+    opacity: 0;
+    transform: translateY(12px) scale(0.985);
   }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
 
-  .dsw-modal {
-    width: min(100%, 420px);
+@media (prefers-reduced-motion: reduce) {
+  .daily-window-overlay,
+  .daily-window-dialog,
+  .daily-window-option,
+  .daily-window-button,
+  .daily-window-close,
+  .dsw-card {
+    animation: none;
+    transition: none;
   }
 }

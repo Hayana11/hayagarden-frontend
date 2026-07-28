@@ -16,29 +16,32 @@ type Props = {
   candidates: CarryoverCandidate[];
   submitting?: boolean;
   errorDetail?: string;
+  /** Optional transparent PNG for the hero art slot (may peek outside). */
+  artSrc?: string;
+  artAlt?: string;
   onClose: () => void;
   onDraftChange: (count: CarryoverCount) => void;
   onConfirm: () => void;
 };
 
 function whoLabel(role: CarryoverCandidate['role']): string {
-  return role === 'user' ? '哈娅' : 'Fyodor';
+  return role === 'user' ? '小猫' : '爸爸';
 }
 
-/** Soft suitcase glyph — cozy mark without the kitten illustration. */
-function SuitcaseMark() {
+/** Soft placeholder mark until a real transparent PNG is dropped in. */
+function HeroArtPlaceholder() {
   return (
-    <div className="dsw-suit" aria-hidden="true">
-      <svg viewBox="0 0 64 64" fill="none">
-        <rect x="12" y="22" width="40" height="30" rx="7" fill="#F7F1EE" stroke="#9C3B4A" strokeWidth="2.2" />
-        <path d="M24 22V18a6 6 0 0 1 6-6h4a6 6 0 0 1 6 6v4" stroke="#9C3B4A" strokeWidth="2.2" strokeLinecap="round" />
-        <path d="M12 34h40" stroke="#C4848D" strokeWidth="2" />
-        <circle cx="20" cy="37" r="2" fill="#B76E79" />
-        <circle cx="44" cy="37" r="2" fill="#B76E79" />
-        <rect x="28" y="30" width="8" height="6" rx="2" fill="#B76E79" opacity="0.85" />
-        <path d="M18 48h8M38 48h8" stroke="#C4848D" strokeWidth="2" strokeLinecap="round" />
-      </svg>
-    </div>
+    <svg viewBox="0 0 64 64" fill="none" aria-hidden="true">
+      <path
+        d="M18 40c0-10 6-18 14-18s14 8 14 18"
+        stroke="#fff9f9"
+        strokeWidth="2.4"
+        strokeLinecap="round"
+      />
+      <circle cx="32" cy="22" r="7" stroke="#fff9f9" strokeWidth="2.4" />
+      <path d="M22 46h20" stroke="#fff9f9" strokeWidth="2.4" strokeLinecap="round" />
+      <path d="M28 50h8" stroke="#fff9f9" strokeWidth="2.2" strokeLinecap="round" opacity="0.7" />
+    </svg>
   );
 }
 
@@ -49,6 +52,8 @@ export function CarryoverModal({
   candidates,
   submitting,
   errorDetail,
+  artSrc,
+  artAlt = '',
   onClose,
   onDraftChange,
   onConfirm,
@@ -58,96 +63,79 @@ export function CarryoverModal({
   const preview = pickLastNCandidates(candidates, draftCount);
   const isLocked = uiState === 'locked';
   const canConfirm = !submitting && (uiState === 'ready' || uiState === 'empty');
-  // Reference-style “首尾片段”: show first + last when picking many; else exact N.
   const snippetRows =
     draftCount >= 5 && preview.length >= 2
       ? [preview[0], preview[preview.length - 1]]
       : preview;
 
-  let body: ReactNode;
+  let mid: ReactNode;
   if (uiState === 'loading') {
-    body = (
-      <div className="dsw-state">
-        <strong>翻找中</strong>
-        正在取出昨天可带走的句子…
-      </div>
-    );
+    mid = <div className="daily-window-empty">正在翻找昨天可带走的句子…</div>;
   } else if (uiState === 'disabled' || uiState === 'conflict' || uiState === 'error') {
-    body = (
-      <div className="dsw-state">
-        <strong>{uiState === 'disabled' ? '404' : uiState === 'conflict' ? '409' : '出错了'}</strong>
+    mid = (
+      <div className="daily-window-empty">
         {errorDetail || softWindowErrorMessage(uiState)}
       </div>
     );
   } else {
-    body = (
+    mid = (
       <>
-        <section className="dsw-section">
-          <div className="dsw-section-label">
-            <span className="dsw-spark">✦</span>
-            带走轮次
-          </div>
-          <div className="dsw-options" role="radiogroup" aria-label="带走条数">
-            {CARRYOVER_COUNTS.map((n) => (
-              <button
-                key={n}
-                type="button"
-                className={`dsw-opt${draftCount === n ? ' selected' : ''}`}
-                role="radio"
-                aria-checked={draftCount === n}
-                disabled={isLocked}
-                onClick={() => onDraftChange(n)}
-              >
-                <span className="dsw-opt-num">{n === 0 ? '0' : String(n)}</span>
-                <span className="dsw-opt-cap">{n === 0 ? '不带' : '条'}</span>
-              </button>
-            ))}
-          </div>
-          <div className="dsw-meta">
-            {uiState === 'empty'
-              ? '昨天没有可带走的正式对话 · 与存档相同 · 0 tokens'
-              : `全部 ${candidates.length} 条 · 与选中相同 · 约${draftCount === 0 ? '0' : (draftCount * 0.26).toFixed(1)}k tokens`}
+        <section className="daily-window-section">
+          <h3 className="daily-window-section-title">带过去几句</h3>
+          <div className="daily-window-options" role="radiogroup" aria-label="带过去几句">
+            {CARRYOVER_COUNTS.map((n) => {
+              const selected = draftCount === n;
+              return (
+                <button
+                  key={n}
+                  type="button"
+                  className={`daily-window-option${selected ? ' is-selected' : ''}`}
+                  aria-pressed={selected}
+                  disabled={isLocked}
+                  onClick={() => onDraftChange(n)}
+                >
+                  {n === 0 ? (
+                    <span className="daily-window-option-word">不带</span>
+                  ) : (
+                    <>
+                      <span className="daily-window-option-number">{n}</span>
+                      <span className="daily-window-option-unit">句</span>
+                    </>
+                  )}
+                </button>
+              );
+            })}
           </div>
         </section>
 
-        <section className="dsw-section">
-          <div className="dsw-section-label">
-            <span className="dsw-spark">✦</span>
-            对话首尾片段
-          </div>
+        <div className="daily-window-divider" aria-hidden="true">
+          <span className="daily-window-divider-mark" />
+        </div>
+
+        <section className="daily-window-section">
+          <h3 className="daily-window-section-title">会带过去的话</h3>
           {draftCount === 0 ? (
-            <div className="dsw-state" style={{ padding: '12px 8px' }}>
-              不带走昨天的话。直接开始新的一天也可以。
-            </div>
-          ) : snippetRows.length === 0 ? (
-            <div className="dsw-state" style={{ padding: '12px 8px' }}>
-              没有足够的候选消息可预览。
-            </div>
+            <div className="daily-window-empty">不带走昨天的话。直接翻到新的一页也可以。</div>
+          ) : snippetRows.length === 0 || uiState === 'empty' ? (
+            <div className="daily-window-empty">昨天没有可带走的正式对话。</div>
           ) : (
-            <div className="dsw-preview">
-              {snippetRows.map((c, i) => (
-                <div
-                  key={`${c.message_id}-${i}`}
-                  className="dsw-preview-row highlight"
-                  style={{ animationDelay: `${i * 40}ms` }}
-                >
-                  <div className="dsw-preview-who">{whoLabel(c.role)}</div>
-                  <div className="dsw-preview-text">{c.content_preview}</div>
-                </div>
+            <div className="daily-window-previews">
+              {snippetRows.map((c: CarryoverCandidate, i) => (
+                <article key={`${c.message_id}-${i}`} className="daily-window-preview">
+                  <strong className="daily-window-preview-speaker">{whoLabel(c.role)}</strong>
+                  <span className="daily-window-preview-text">{c.content_preview}</span>
+                </article>
               ))}
             </div>
           )}
         </section>
 
-        <section className="dsw-section">
-          <div className="dsw-section-label">
-            <span className="dsw-spark">✦</span>
-            不会装进行李箱
-          </div>
-          <div className="dsw-exclude">
-            <span className="dsw-exclude-tag">提醒 · <b>7</b></span>
-            <span className="dsw-exclude-tag">工具 · <b>88</b></span>
-            <span className="dsw-exclude-tag">thinking · <b>20</b></span>
+        <section className="daily-window-section">
+          <h3 className="daily-window-section-title">不会带过去</h3>
+          <div className="daily-window-tags">
+            <span className="daily-window-tag">提醒</span>
+            <span className="daily-window-tag">工具</span>
+            <span className="daily-window-tag">thinking</span>
           </div>
         </section>
       </>
@@ -155,34 +143,44 @@ export function CarryoverModal({
   }
 
   return (
-    <div className="dsw-ov" role="dialog" aria-modal="true" aria-label="小猫的行李箱">
-      <div className="dsw-backdrop" onClick={onClose} />
-      <div className="dsw-modal">
-        <button type="button" className="dsw-close" onClick={onClose} aria-label="关闭">
+    <div className="daily-window-overlay" onClick={onClose}>
+      <section
+        className={`daily-window-dialog${uiState === 'loading' || submitting ? ' is-loading' : ''}`}
+        role="dialog"
+        aria-modal="true"
+        aria-label="翻到新的一页"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <button type="button" className="daily-window-close" onClick={onClose} aria-label="关闭">
           ×
         </button>
-        <div className="dsw-modal-hd">
-          <SuitcaseMark />
-          <div className="dsw-modal-titles">
-            <div className="dsw-modal-title">小猫的行李箱</div>
-            <div className="dsw-modal-sub">Packing for the Next Window</div>
+
+        <header className="daily-window-hero">
+          <div className={`daily-window-hero-art${artSrc ? '' : ' is-placeholder'}`}>
+            {artSrc ? <img src={artSrc} alt={artAlt} /> : <HeroArtPlaceholder />}
           </div>
-        </div>
-        <div className="dsw-body">{body}</div>
-        <div className="dsw-foot">
-          <button type="button" className="dsw-btn ghost" onClick={onClose}>
-            再想一想
+          <div className="daily-window-hero-copy">
+            <h2 className="daily-window-title">翻到新的一页</h2>
+            <p className="daily-window-subtitle">Packing for the Next Window</p>
+          </div>
+        </header>
+
+        {mid}
+
+        <footer className="daily-window-actions">
+          <button type="button" className="daily-window-button daily-window-button--secondary" onClick={onClose}>
+            再想想
           </button>
           <button
             type="button"
-            className="dsw-btn primary"
+            className="daily-window-button daily-window-button--primary"
             disabled={!canConfirm || isLocked}
             onClick={onConfirm}
           >
-            {submitting ? '装进行李箱…' : isLocked ? '已锁定' : '确认换窗'}
+            {submitting ? '翻页中…' : isLocked ? '已锁定' : '确认翻页'}
           </button>
-        </div>
-      </div>
+        </footer>
+      </section>
     </div>
   );
 }

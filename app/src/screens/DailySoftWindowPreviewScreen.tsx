@@ -84,9 +84,9 @@ export function DailySoftWindowPreviewScreen() {
             </Link>
             <div style={{ minWidth: 0 }}>
               <div style={{ fontFamily: DISPLAY, fontSize: 11, letterSpacing: 2, color: 'var(--ghost)' }}>
-                FE-R0 · MOCK · 弹窗
+                FE-R0 · MOCK · 轻薄弹窗
               </div>
-              <div style={{ fontFamily: SERIF, fontSize: 16, fontWeight: 600, letterSpacing: 1 }}>小猫的行李箱</div>
+              <div style={{ fontFamily: SERIF, fontSize: 16, fontWeight: 600, letterSpacing: 1 }}>翻到新的一页</div>
             </div>
           </div>
           <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
