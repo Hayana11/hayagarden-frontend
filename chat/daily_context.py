@@ -151,6 +151,98 @@ def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
     return {str(r[1]) for r in conn.execute('PRAGMA table_info(%s)' % table)}
 
 
+_MIGRATION_INJECT_FAULT_AT: Optional[str] = None
+
+_RELATED_CONTEXT_ID_TABLES = (
+    'daily_carryover_messages',
+    'daily_resident_cursors',
+    'daily_resident_turn_leases',
+    'daily_message_contexts',
+    'daily_resident_owners',
+)
+
+
+def _snapshot_related_context_ids(conn: sqlite3.Connection) -> dict[str, set[int]]:
+    snap: dict[str, set[int]] = {}
+    tables = {
+        str(r[0])
+        for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+    }
+    for table in _RELATED_CONTEXT_ID_TABLES:
+        if table not in tables:
+            snap[table] = set()
+            continue
+        snap[table] = {
+            int(r[0])
+            for r in conn.execute('SELECT DISTINCT context_id FROM %s' % table).fetchall()
+        }
+    return snap
+
+
+def _verify_related_context_ids(
+    conn: sqlite3.Connection,
+    before: dict[str, set[int]],
+    valid_ids: set[int],
+) -> None:
+    after = _snapshot_related_context_ids(conn)
+    if after != before:
+        raise DailyContextError('related context_id mapping changed during migration')
+    for table, ids in after.items():
+        if ids and not ids.issubset(valid_ids):
+            raise DailyContextError(
+                '%s references missing context_id after migration' % table
+            )
+
+
+def _read_sqlite_sequence(conn: sqlite3.Connection, table: str) -> Optional[int]:
+    try:
+        row = conn.execute(
+            'SELECT seq FROM sqlite_sequence WHERE name=?', (table,),
+        ).fetchone()
+        return int(row[0]) if row is not None else None
+    except sqlite3.OperationalError:
+        return None
+
+
+def _sync_sqlite_sequence(conn: sqlite3.Connection, table: str) -> None:
+    row = conn.execute('SELECT MAX(id) AS m FROM %s' % table).fetchone()
+    max_id = int(row['m'] or 0) if row is not None else 0
+    if max_id <= 0:
+        conn.execute('DELETE FROM sqlite_sequence WHERE name=?', (table,))
+        return
+    conn.execute('DELETE FROM sqlite_sequence WHERE name=?', (table,))
+    conn.execute(
+        'INSERT INTO sqlite_sequence (name, seq) VALUES (?, ?)',
+        (table, max_id),
+    )
+
+
+def _migration_checkpoint(stage: str) -> None:
+    if _MIGRATION_INJECT_FAULT_AT == stage:
+        raise DailyContextError('migration fault injection: %s' % stage)
+
+
+def _create_manual_window_indexes(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        'CREATE INDEX IF NOT EXISTS idx_daily_contexts_chat_epoch '
+        'ON daily_contexts(chat_id, context_epoch)'
+    )
+    conn.execute(
+        'CREATE UNIQUE INDEX IF NOT EXISTS idx_daily_contexts_legacy_day_unique '
+        "ON daily_contexts(chat_id, local_day) WHERE window_mode='legacy_daily'"
+    )
+    conn.execute(
+        'CREATE UNIQUE INDEX IF NOT EXISTS idx_daily_contexts_open_manual_unique '
+        "ON daily_contexts(chat_id) WHERE window_mode='manual' "
+        'AND closed_at IS NULL AND is_backfill=0'
+    )
+    conn.execute(
+        'CREATE UNIQUE INDEX IF NOT EXISTS idx_daily_contexts_switch_idem_unique '
+        'ON daily_contexts(chat_id, switch_request_id) '
+        'WHERE switch_request_id IS NOT NULL'
+    )
+
+
 def _migrate_manual_window_schema(conn: sqlite3.Connection) -> None:
     """Idempotent rebuild: drop table-level (chat_id, local_day) unique; add manual-window columns."""
     dcols = _table_columns(conn, 'daily_contexts')
@@ -165,11 +257,16 @@ def _migrate_manual_window_schema(conn: sqlite3.Connection) -> None:
         old_ids = {
             int(r[0]) for r in conn.execute('SELECT id FROM daily_contexts').fetchall()
         }
+        old_max_id = int(
+            conn.execute('SELECT MAX(id) FROM daily_contexts').fetchone()[0] or 0
+        )
+        old_seq = _read_sqlite_sequence(conn, 'daily_contexts')
+        related_before = _snapshot_related_context_ids(conn)
 
-        conn.executescript(
-            """
+        conn.execute(
+            '''
             CREATE TABLE daily_contexts__mw_new (
-                id INTEGER PRIMARY KEY,
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
                 chat_id TEXT NOT NULL,
                 local_day TEXT NOT NULL,
                 timezone TEXT NOT NULL DEFAULT 'Asia/Shanghai',
@@ -195,9 +292,11 @@ def _migrate_manual_window_schema(conn: sqlite3.Connection) -> None:
                 close_reason TEXT NULL,
                 source_context_id INTEGER NULL,
                 switch_request_id TEXT NULL
-            );
-            """
+            )
+            '''
         )
+        _migration_checkpoint('after_create')
+
         has_backfill = 'is_backfill' in dcols
         has_requested = 'carryover_requested_count' in dcols
         backfill_expr = 'COALESCE(is_backfill, 0)' if has_backfill else '0'
@@ -227,27 +326,42 @@ def _migrate_manual_window_schema(conn: sqlite3.Connection) -> None:
             FROM daily_contexts
             ''' % (backfill_expr, requested_expr)
         )
+        _migration_checkpoint('after_copy')
+
         new_count = int(conn.execute('SELECT COUNT(*) FROM daily_contexts__mw_new').fetchone()[0])
         new_ids = {
             int(r[0]) for r in conn.execute('SELECT id FROM daily_contexts__mw_new').fetchall()
         }
-        if new_count != old_count or new_ids != old_ids:
+        new_max_id = int(
+            conn.execute('SELECT MAX(id) FROM daily_contexts__mw_new').fetchone()[0] or 0
+        )
+        if new_count != old_count or new_ids != old_ids or new_max_id != old_max_id:
             raise DailyContextError(
                 'manual window migration row/id mismatch: %s vs %s'
                 % (old_count, new_count)
             )
+        _verify_related_context_ids(conn, related_before, new_ids)
 
-        carryover_ids = {
-            int(r[0])
-            for r in conn.execute(
-                'SELECT DISTINCT context_id FROM daily_carryover_messages'
-            ).fetchall()
-        }
-        if carryover_ids and not carryover_ids.issubset(new_ids):
-            raise DailyContextError('carryover context_id set changed during migration')
-
+        _migration_checkpoint('before_drop')
         conn.execute('DROP TABLE daily_contexts')
         conn.execute('ALTER TABLE daily_contexts__mw_new RENAME TO daily_contexts')
+        _migration_checkpoint('after_rename')
+
+        _sync_sqlite_sequence(conn, 'daily_contexts')
+        _create_manual_window_indexes(conn)
+        _migration_checkpoint('during_index')
+
+        final_ids = {
+            int(r[0]) for r in conn.execute('SELECT id FROM daily_contexts').fetchall()
+        }
+        if final_ids != old_ids:
+            raise DailyContextError('context id set changed after migration finalize')
+        _verify_related_context_ids(conn, related_before, final_ids)
+
+        new_seq = _read_sqlite_sequence(conn, 'daily_contexts')
+        if old_seq is not None and new_seq is not None and new_seq < old_seq:
+            raise DailyContextError('sqlite_sequence regressed during migration')
+
         conn.commit()
     except Exception:
         conn.rollback()
@@ -255,24 +369,10 @@ def _migrate_manual_window_schema(conn: sqlite3.Connection) -> None:
 
 
 def _ensure_manual_window_indexes(conn: sqlite3.Connection) -> None:
-    conn.execute(
-        'CREATE INDEX IF NOT EXISTS idx_daily_contexts_chat_epoch '
-        'ON daily_contexts(chat_id, context_epoch)'
-    )
-    conn.execute(
-        'CREATE UNIQUE INDEX IF NOT EXISTS idx_daily_contexts_legacy_day_unique '
-        "ON daily_contexts(chat_id, local_day) WHERE window_mode='legacy_daily'"
-    )
-    conn.execute(
-        'CREATE UNIQUE INDEX IF NOT EXISTS idx_daily_contexts_open_manual_unique '
-        "ON daily_contexts(chat_id) WHERE window_mode='manual' "
-        'AND closed_at IS NULL AND is_backfill=0'
-    )
-    conn.execute(
-        'CREATE UNIQUE INDEX IF NOT EXISTS idx_daily_contexts_switch_idem_unique '
-        'ON daily_contexts(chat_id, switch_request_id) '
-        'WHERE switch_request_id IS NOT NULL'
-    )
+    dcols = _table_columns(conn, 'daily_contexts')
+    if not dcols or 'window_mode' not in dcols:
+        return
+    _create_manual_window_indexes(conn)
 
 
 def ensure_schema(db_path: Optional[str] = None) -> None:

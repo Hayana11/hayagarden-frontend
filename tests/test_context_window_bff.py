@@ -125,11 +125,35 @@ class ContextWindowBffTests(unittest.TestCase):
             with mock.patch('urllib.request.urlopen', side_effect=fake_urlopen):
                 resp = client.post(
                     '/context-window/switch',
-                    json={'source_context_id': 1, 'source_context_epoch': 1, 'count': 0, 'request_id': '00000000-0000-4000-8000-000000000001'},
+                    json={
+                        'source_context_id': 1,
+                        'source_context_epoch': 1,
+                        'count': 0,
+                        'request_id': '00000000-0000-4000-8000-000000000001',
+                    },
                     headers={'Origin': 'https://evil.example'},
                 )
         self.assertEqual(resp.status_code, 403)
         self.assertEqual(calls, [])
+
+    def test_candidates_proxy_passes_query(self):
+        app = self._app()
+        captured = {}
+
+        def fake_urlopen(req, timeout=20):
+            captured['url'] = req.full_url
+            return _FakeResp(json.dumps({'ok': True, 'rounds': []}).encode())
+
+        client = app.test_client()
+        client.set_cookie('moments_owner', owner_session_digest(OWNER_TOKEN))
+        with mock.patch('chat.context_window.enabled', return_value=True):
+            with mock.patch('urllib.request.urlopen', side_effect=fake_urlopen):
+                resp = client.get(
+                    '/context-window/carryover-candidates?source_context_id=2&source_context_epoch=3',
+                )
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn('source_context_id=2', captured.get('url', ''))
+        self.assertIn('source_context_epoch=3', captured.get('url', ''))
 
 
 if __name__ == '__main__':

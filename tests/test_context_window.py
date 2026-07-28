@@ -122,6 +122,45 @@ def _create_old_schema_db(db_path: str):
             PRIMARY KEY(context_id, ordinal)
         );
         INSERT INTO daily_carryover_messages VALUES (1, 0, 99);
+        CREATE TABLE daily_resident_cursors (
+            context_id INTEGER NOT NULL,
+            resident_generation INTEGER NOT NULL,
+            history_cursor_message_id INTEGER NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (context_id, resident_generation)
+        );
+        INSERT INTO daily_resident_cursors VALUES (1, 1, 50, '2026-07-26 10:00:00');
+        CREATE TABLE daily_resident_turn_leases (
+            context_id INTEGER NOT NULL,
+            resident_generation INTEGER NOT NULL,
+            lease_owner TEXT NOT NULL,
+            request_message_id INTEGER NOT NULL,
+            acquired_at TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (context_id, resident_generation)
+        );
+        INSERT INTO daily_resident_turn_leases VALUES (
+            1, 1, 'owner', 1, '2026-07-26 10:00:00', '2026-07-26 11:00:00', '2026-07-26 10:00:00'
+        );
+        CREATE TABLE daily_message_contexts (
+            message_id INTEGER PRIMARY KEY,
+            context_id INTEGER NOT NULL,
+            context_epoch INTEGER NOT NULL,
+            resident_generation INTEGER NOT NULL,
+            role TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        INSERT INTO daily_message_contexts VALUES (99, 1, 1, 1, 'user', '2026-07-26 10:00:00');
+        CREATE TABLE daily_resident_owners (
+            context_id INTEGER NOT NULL,
+            resident_generation INTEGER NOT NULL,
+            worker_id TEXT NOT NULL,
+            resident_key TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (context_id, resident_generation)
+        );
+        INSERT INTO daily_resident_owners VALUES (1, 1, 'w1', 'rk', '2026-07-26 10:00:00');
         '''
     )
     conn.commit()
@@ -397,6 +436,163 @@ class CompatibilityTests(unittest.TestCase):
         import chat.daily_runtime as dr
         source = inspect.getsource(dr)
         self.assertNotIn('switch_context_window', source)
+
+
+class MigrationFaultInjectionTests(unittest.TestCase):
+    _FAULT_STAGES = (
+        'after_create', 'after_copy', 'before_drop', 'after_rename', 'during_index',
+    )
+
+    def _assert_old_schema_intact(self, db: str):
+        conn = sqlite3.connect(db)
+        cols = {r[1] for r in conn.execute('PRAGMA table_info(daily_contexts)')}
+        self.assertNotIn('window_mode', cols)
+        self.assertEqual(conn.execute('SELECT COUNT(*) FROM daily_contexts').fetchone()[0], 1)
+        tables = {
+            str(r[0]) for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        self.assertNotIn('daily_contexts__mw_new', tables)
+        conn.close()
+
+    def test_fault_injection_rollback(self):
+        for stage in self._FAULT_STAGES:
+            with self.subTest(stage=stage):
+                db = _tmp_db()
+                _create_old_schema_db(db)
+                dc._MIGRATION_INJECT_FAULT_AT = stage
+                try:
+                    with self.assertRaises(dc.DailyContextError):
+                        dc.ensure_schema(db)
+                finally:
+                    dc._MIGRATION_INJECT_FAULT_AT = None
+                self._assert_old_schema_intact(db)
+                dc.ensure_schema(db)
+                conn = sqlite3.connect(db)
+                self.assertIn('window_mode', {r[1] for r in conn.execute('PRAGMA table_info(daily_contexts)')})
+                conn.close()
+
+
+class MigrationAutoincrementTests(unittest.TestCase):
+    def test_autoincrement_preserved_after_migration(self):
+        db = _tmp_db()
+        _create_old_schema_db(db)
+        dc.ensure_schema(db)
+        conn = sqlite3.connect(db)
+        seq_before = dc._read_sqlite_sequence(conn, 'daily_contexts')
+        conn.execute('DELETE FROM daily_contexts WHERE id=1')
+        cur = conn.execute(
+            '''INSERT INTO daily_contexts (
+                chat_id, local_day, timezone, boundary_hour, context_epoch,
+                boundary_message_id, status, carryover_count, resident_generation,
+                version, created_at, updated_at, window_mode, opened_at
+            ) VALUES ('default','2026-07-27','Asia/Shanghai',4,2,0,'PROVISIONAL',0,1,1,
+                      '2026-07-27 10:00:00','2026-07-27 10:00:00','legacy_daily','2026-07-27 10:00:00')'''
+        )
+        new_id = int(cur.lastrowid)
+        conn.commit()
+        self.assertGreater(new_id, 1)
+        seq_after = dc._read_sqlite_sequence(conn, 'daily_contexts')
+        self.assertIsNotNone(seq_after)
+        if seq_before is not None:
+            self.assertGreaterEqual(seq_after, seq_before)
+        conn.close()
+
+
+class StrictJsonContractTests(unittest.TestCase):
+    def test_reject_non_json_integers(self):
+        for bad in ('1', 1.0, 1.9, True, 0.9):
+            with self.subTest(value=bad):
+                with self.assertRaises(ValueError):
+                    cw.parse_strict_json_positive_int('source_context_id', bad)
+                with self.assertRaises(ValueError):
+                    cw.parse_strict_json_carryover_count(bad)
+
+
+class NaturalCalendarDayTests(unittest.TestCase):
+    def setUp(self):
+        self.db = _tmp_db()
+        _init_chat_messages(self.db)
+        dc.ensure_schema(self.db)
+        self.ctx = _legacy_ctx(self.db, now=datetime.datetime(2026, 7, 28, 1, 0, 0))
+        u = _insert(self.db, 'hayana', 'late', '2026-07-28 01:30:00')
+        _map(self.db, int(self.ctx['id']), int(self.ctx['context_epoch']), u, 'user')
+
+    def test_switch_at_0200_uses_natural_day(self):
+        out = cw.switch_context_window(
+            source_context_id=int(self.ctx['id']),
+            source_context_epoch=int(self.ctx['context_epoch']),
+            count=0,
+            request_id=str(uuid.uuid4()),
+            db_path=self.db,
+            now=datetime.datetime(2026, 7, 28, 2, 0, 0),
+        )
+        target = dc.get_daily_context_by_id(out['target_context_id'], db_path=self.db)
+        assert target is not None
+        self.assertEqual(target['local_day'], '2026-07-28')
+
+
+class IdempotencyEpochTests(unittest.TestCase):
+    def setUp(self):
+        self.db = _tmp_db()
+        _init_chat_messages(self.db)
+        dc.ensure_schema(self.db)
+        self.ctx = _legacy_ctx(self.db)
+        self.cid = int(self.ctx['id'])
+        self.epoch = int(self.ctx['context_epoch'])
+        u = _insert(self.db, 'hayana', 'x', '2026-07-27 10:00:00')
+        _map(self.db, self.cid, self.epoch, u, 'user')
+
+    def test_replay_wrong_source_epoch_409(self):
+        req = str(uuid.uuid4())
+        cw.switch_context_window(
+            source_context_id=self.cid,
+            source_context_epoch=self.epoch,
+            count=0,
+            request_id=req,
+            db_path=self.db,
+        )
+        for wrong in (self.epoch + 1, max(1, self.epoch - 1)):
+            if wrong == self.epoch:
+                continue
+            with self.subTest(epoch=wrong):
+                with self.assertRaises(cw.IdempotencyMismatchError):
+                    cw.switch_context_window(
+                        source_context_id=self.cid,
+                        source_context_epoch=wrong,
+                        count=0,
+                        request_id=req,
+                        db_path=self.db,
+                    )
+
+
+class ClosedManualRecoveryTests(unittest.TestCase):
+    def test_closed_manual_only_fail_closed(self):
+        db = _tmp_db()
+        _init_chat_messages(db)
+        dc.ensure_schema(db)
+        ctx = _legacy_ctx(db)
+        u = _insert(db, 'hayana', 'x', '2026-07-27 10:00:00')
+        _map(db, int(ctx['id']), int(ctx['context_epoch']), u, 'user')
+        cw.switch_context_window(
+            source_context_id=int(ctx['id']),
+            source_context_epoch=int(ctx['context_epoch']),
+            count=0,
+            request_id=str(uuid.uuid4()),
+            db_path=db,
+        )
+        conn = sqlite3.connect(db)
+        conn.execute(
+            "UPDATE daily_contexts SET closed_at='2026-07-27 12:00:00', close_reason='manual' "
+            "WHERE window_mode=? AND closed_at IS NULL",
+            (cw.WINDOW_MODE_MANUAL,),
+        )
+        conn.execute("DELETE FROM daily_contexts WHERE window_mode=?", (cw.WINDOW_MODE_LEGACY_DAILY,))
+        conn.commit()
+        conn.close()
+        with self.assertRaises(cw.NoOpenContextWindowError):
+            cw.get_current_context_window(db_path=db)
 
 
 if __name__ == '__main__':

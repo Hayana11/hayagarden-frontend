@@ -12,11 +12,15 @@ from flask import Blueprint, jsonify, request
 from chat.context_window import (
     CLOSE_REASON_MANUAL,
     IdempotencyMismatchError,
+    NoOpenContextWindowError,
     StaleSourceContextError,
     WindowBusyError,
     current_window_summary,
     enabled,
     list_context_window_carryover_rounds,
+    parse_strict_json_carryover_count,
+    parse_strict_json_positive_int,
+    parse_strict_query_positive_int,
     switch_context_window,
 )
 from chat.daily_context import DEFAULT_CHAT_ID
@@ -61,6 +65,8 @@ def create_context_window_blueprint(
         try:
             data = current_window_summary(chat_id=chat_id, db_path=db_path)
             return jsonify({'ok': True, **data})
+        except NoOpenContextWindowError as exc:
+            return jsonify({'ok': False, 'error': str(exc), 'code': 'no_open_context'}), 409
         except ValueError as exc:
             return jsonify({'ok': False, 'error': str(exc)}), 400
         except Exception as exc:
@@ -77,10 +83,18 @@ def create_context_window_blueprint(
         if cid_err:
             return cid_err
         try:
-            current = current_window_summary(chat_id=chat_id, db_path=db_path)
+            source_context_id = parse_strict_query_positive_int(
+                'source_context_id', request.args.get('source_context_id'),
+            )
+            source_context_epoch = parse_strict_query_positive_int(
+                'source_context_epoch', request.args.get('source_context_epoch'),
+            )
+        except ValueError as exc:
+            return jsonify({'ok': False, 'error': str(exc)}), 400
+        try:
             data = list_context_window_carryover_rounds(
-                int(current['context_id']),
-                int(current['context_epoch']),
+                source_context_id,
+                source_context_epoch,
                 chat_id=chat_id,
                 db_path=db_path,
             )
@@ -111,12 +125,18 @@ def create_context_window_blueprint(
         if cid_err:
             return cid_err
         try:
-            source_context_id = int(data['source_context_id'])
-            source_context_epoch = int(data['source_context_epoch'])
-            count = int(data['count'])
+            source_context_id = parse_strict_json_positive_int(
+                'source_context_id', data.get('source_context_id'),
+            )
+            source_context_epoch = parse_strict_json_positive_int(
+                'source_context_epoch', data.get('source_context_epoch'),
+            )
+            count = parse_strict_json_carryover_count(data.get('count'))
             request_id = str(data['request_id'])
-        except (KeyError, TypeError, ValueError):
+        except (KeyError, TypeError):
             return jsonify({'ok': False, 'error': 'invalid switch payload'}), 400
+        except ValueError as exc:
+            return jsonify({'ok': False, 'error': str(exc)}), 400
         try:
             result = switch_context_window(
                 source_context_id=source_context_id,

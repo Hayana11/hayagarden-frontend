@@ -16,26 +16,20 @@ from chat.daily_context import (
     ALLOWED_CARRYOVER_COUNTS,
     CARRYOVER_UNIT,
     CHAT_DAY_START_HOUR,
-    ConflictError,
     DEFAULT_CHAT_ID,
     DEFAULT_TIMEZONE,
     STATUS_PROVISIONAL,
+    TZ_OFFSET_HOURS,
     _active_epoch_high_water,
     _connect,
-    _current_chat_day,
-    _now_local_str,
     _parse_local_dt,
     _row_to_dict,
     _table_columns,
     _wake_content_set,
-    assert_transition,
     ensure_schema,
     get_boundary_message_id,
-    get_daily_context_by_id,
-    get_selected_carryover_messages,
     group_carryover_rounds,
     is_formal_chat_message,
-    is_resident_turn_active,
 )
 from chat.daily_schema import META_SOURCE_KIND_CUTOVER, get_meta_int
 
@@ -49,10 +43,15 @@ _UUID_RE = re.compile(
     r'^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$',
     re.IGNORECASE,
 )
+_POSITIVE_QUERY_INT_RE = re.compile(r'^[1-9]\d*$')
 
 
 class ContextWindowError(Exception):
     """Base error for manual context window."""
+
+
+class NoOpenContextWindowError(ContextWindowError):
+    """No open manual/legacy window; closed-only history (fail closed)."""
 
 
 class StaleSourceContextError(ContextWindowError):
@@ -72,21 +71,53 @@ def enabled() -> bool:
     return daily_enabled()
 
 
+def _shanghai_now(now: Optional[datetime.datetime] = None) -> datetime.datetime:
+    return now or (datetime.datetime.utcnow() + datetime.timedelta(hours=TZ_OFFSET_HOURS))
+
+
+def shanghai_calendar_day(now: Optional[datetime.datetime] = None) -> str:
+    """Shanghai wall-clock natural date — no 04:00 chat-day boundary."""
+    return _shanghai_now(now).strftime('%Y-%m-%d')
+
+
+def parse_strict_json_positive_int(name: str, value: Any) -> int:
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise ValueError('%s must be a JSON integer' % name)
+    if value <= 0:
+        raise ValueError('%s must be a positive integer' % name)
+    return value
+
+
+def parse_strict_json_carryover_count(value: Any) -> int:
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise ValueError('count must be a JSON integer')
+    if value not in ALLOWED_CARRYOVER_COUNTS:
+        raise ValueError('count must be one of %s' % sorted(ALLOWED_CARRYOVER_COUNTS))
+    return value
+
+
+def parse_strict_query_positive_int(name: str, raw: Any) -> int:
+    if raw is None or raw == '':
+        raise ValueError('%s is required' % name)
+    if isinstance(raw, bool):
+        raise ValueError('%s must be a positive integer' % name)
+    if isinstance(raw, float):
+        raise ValueError('%s must be a positive integer' % name)
+    if isinstance(raw, int):
+        if raw <= 0:
+            raise ValueError('%s must be a positive integer' % name)
+        return raw
+    text = str(raw).strip()
+    if not _POSITIVE_QUERY_INT_RE.match(text):
+        raise ValueError('%s must be a positive integer' % name)
+    return int(text)
+
+
 def _validate_request_id(request_id: str) -> str:
     value = str(request_id or '').strip()
     if not value or not _UUID_RE.match(value):
         raise ValueError('request_id must be a valid UUID')
     return value.lower()
-
-
-def _validate_positive_int(name: str, value: Any) -> int:
-    try:
-        n = int(value)
-    except (TypeError, ValueError):
-        raise ValueError('%s must be a positive integer' % name) from None
-    if n <= 0:
-        raise ValueError('%s must be a positive integer' % name)
-    return n
 
 
 def _collect_context_formal_messages(
@@ -117,6 +148,37 @@ def _collect_context_formal_messages(
     ]
 
 
+def _carryover_ids_conn(conn: sqlite3.Connection, context_id: int) -> list[int]:
+    return [
+        int(r['message_id'])
+        for r in conn.execute(
+            'SELECT message_id FROM daily_carryover_messages '
+            'WHERE context_id=? ORDER BY ordinal ASC',
+            (int(context_id),),
+        ).fetchall()
+    ]
+
+
+def _is_resident_turn_active_conn(
+    conn: sqlite3.Connection,
+    context_id: int,
+    resident_generation: int,
+    now_dt: datetime.datetime,
+) -> bool:
+    row = conn.execute(
+        'SELECT expires_at FROM daily_resident_turn_leases '
+        'WHERE context_id=? AND resident_generation=?',
+        (int(context_id), int(resident_generation)),
+    ).fetchone()
+    if row is None:
+        return False
+    try:
+        exp_dt = _parse_local_dt(str(row['expires_at']))
+    except ValueError:
+        return False
+    return exp_dt > now_dt
+
+
 def _last_formal_message_id(messages: list[Any]) -> int:
     if not messages:
         return 0
@@ -133,7 +195,6 @@ def _bootstrap_legacy_context_conn(
     chat_id: str,
     now_dt: datetime.datetime,
 ) -> dict[str, Any]:
-    """One-time idempotent bootstrap when no contexts exist."""
     row = conn.execute(
         'SELECT COUNT(*) AS c FROM daily_contexts WHERE chat_id=?',
         (chat_id,),
@@ -141,7 +202,7 @@ def _bootstrap_legacy_context_conn(
     if int(row['c']) > 0:
         return {}
 
-    local_day = _current_chat_day(now_dt)
+    local_day = shanghai_calendar_day(now_dt)
     boundary_id = get_boundary_message_id(conn, local_day=local_day, chat_id=chat_id)
     now_s = now_dt.strftime('%Y-%m-%d %H:%M:%S')
     cur = conn.execute(
@@ -185,9 +246,9 @@ def _find_latest_legacy_bootstrap_conn(
 ) -> Optional[dict[str, Any]]:
     return _row_to_dict(conn.execute(
         '''SELECT * FROM daily_contexts
-           WHERE chat_id=? AND is_backfill=0
+           WHERE chat_id=? AND window_mode=? AND is_backfill=0
            ORDER BY context_epoch DESC LIMIT 1''',
-        (chat_id,),
+        (chat_id, WINDOW_MODE_LEGACY_DAILY),
     ).fetchone())
 
 
@@ -197,16 +258,18 @@ def resolve_canonical_context_row_conn(
     chat_id: str = DEFAULT_CHAT_ID,
     now: Optional[datetime.datetime] = None,
 ) -> dict[str, Any]:
-    """Return the canonical open context row without date-based creation."""
-    now_dt = now or (
-        datetime.datetime.utcnow() + datetime.timedelta(hours=8)
-    )
+    now_dt = _shanghai_now(now)
     manual = _find_open_manual_window_conn(conn, chat_id)
     if manual is not None:
         return manual
     legacy = _find_latest_legacy_bootstrap_conn(conn, chat_id)
     if legacy is not None:
         return legacy
+    any_count = int(conn.execute(
+        'SELECT COUNT(*) FROM daily_contexts WHERE chat_id=?', (chat_id,),
+    ).fetchone()[0])
+    if any_count > 0:
+        raise NoOpenContextWindowError('no_open_context_window')
     boot = _bootstrap_legacy_context_conn(conn, chat_id=chat_id, now_dt=now_dt)
     if boot:
         return boot
@@ -216,40 +279,18 @@ def resolve_canonical_context_row_conn(
     return legacy
 
 
-def get_current_context_window(
+def _summary_from_row_conn(
+    conn: sqlite3.Connection,
+    ctx: dict[str, Any],
     *,
-    chat_id: str = DEFAULT_CHAT_ID,
-    db_path: Optional[str] = None,
-    now: Optional[datetime.datetime] = None,
+    now_dt: datetime.datetime,
 ) -> dict[str, Any]:
-    """Canonical current window — no calendar rollover side effects."""
-    ensure_schema(db_path)
-    conn = _connect(db_path)
-    try:
-        conn.execute('BEGIN IMMEDIATE')
-        ctx = resolve_canonical_context_row_conn(conn, chat_id=chat_id, now=now)
-        conn.commit()
-        return dict(ctx)
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        conn.close()
-
-
-def _window_busy_reason(ctx: dict[str, Any], *, db_path: Optional[str], now: Optional[datetime.datetime]) -> Optional[str]:
-    if is_resident_turn_active(
-        int(ctx['id']),
-        int(ctx.get('resident_generation') or 1),
-        db_path=db_path,
-        now=now,
-    ):
-        return 'window_busy'
-    return None
-
-
-def _carryover_fields(ctx: dict[str, Any], *, db_path: Optional[str]) -> dict[str, Any]:
     context_id = int(ctx['id'])
+    context_epoch = int(ctx['context_epoch'])
+    messages = _collect_context_formal_messages(
+        conn, context_id=context_id, context_epoch=context_epoch,
+    )
+    formal_round_count = _count_formal_rounds(messages)
     selected_round_count = int(ctx.get('carryover_count') or 0)
     raw_requested = ctx.get('carryover_requested_count')
     if raw_requested is None and ctx.get('selection_finalized_at'):
@@ -259,38 +300,14 @@ def _carryover_fields(ctx: dict[str, Any], *, db_path: Optional[str]) -> dict[st
     else:
         requested_round_count = int(raw_requested)
     if ctx.get('selection_finalized_at'):
-        selected_messages = get_selected_carryover_messages(context_id, db_path=db_path)
-        selected_message_ids = [int(m['message_id']) for m in selected_messages]
+        selected_message_ids = _carryover_ids_conn(conn, context_id)
     else:
         selected_message_ids = []
-    return {
-        'requested_round_count': requested_round_count,
-        'selected_round_count': selected_round_count,
-        'selected_message_count': len(selected_message_ids),
-        'selected_message_ids': selected_message_ids,
-    }
-
-
-def current_window_summary(
-    *,
-    chat_id: str = DEFAULT_CHAT_ID,
-    db_path: Optional[str] = None,
-    now: Optional[datetime.datetime] = None,
-) -> dict[str, Any]:
-    ctx = get_current_context_window(chat_id=chat_id, db_path=db_path, now=now)
-    context_id = int(ctx['id'])
-    context_epoch = int(ctx['context_epoch'])
-    conn = _connect(db_path)
-    try:
-        messages = _collect_context_formal_messages(
-            conn, context_id=context_id, context_epoch=context_epoch,
-        )
-        formal_round_count = _count_formal_rounds(messages)
-    finally:
-        conn.close()
-
-    carry = _carryover_fields(ctx, db_path=db_path)
-    busy = _window_busy_reason(ctx, db_path=db_path, now=now)
+    busy = None
+    if _is_resident_turn_active_conn(
+        conn, context_id, int(ctx.get('resident_generation') or 1), now_dt,
+    ):
+        busy = 'window_busy'
     can_switch = busy is None and ctx.get('closed_at') is None
     out: dict[str, Any] = {
         'context_id': context_id,
@@ -303,11 +320,58 @@ def current_window_summary(
         'resident_generation': int(ctx.get('resident_generation') or 1),
         'formal_round_count': formal_round_count,
         'can_switch': can_switch,
-        **carry,
+        'requested_round_count': requested_round_count,
+        'selected_round_count': selected_round_count,
+        'selected_message_count': len(selected_message_ids),
+        'selected_message_ids': selected_message_ids,
+        'version': int(ctx.get('version') or 1),
     }
     if not can_switch and busy:
         out['can_switch_reason'] = busy
     return out
+
+
+def get_current_context_window(
+    *,
+    chat_id: str = DEFAULT_CHAT_ID,
+    db_path: Optional[str] = None,
+    now: Optional[datetime.datetime] = None,
+) -> dict[str, Any]:
+    ensure_schema(db_path)
+    now_dt = _shanghai_now(now)
+    conn = _connect(db_path)
+    try:
+        conn.execute('BEGIN IMMEDIATE')
+        ctx = resolve_canonical_context_row_conn(conn, chat_id=chat_id, now=now_dt)
+        conn.commit()
+        return dict(ctx)
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def current_window_summary(
+    *,
+    chat_id: str = DEFAULT_CHAT_ID,
+    db_path: Optional[str] = None,
+    now: Optional[datetime.datetime] = None,
+) -> dict[str, Any]:
+    ensure_schema(db_path)
+    now_dt = _shanghai_now(now)
+    conn = _connect(db_path)
+    try:
+        conn.execute('BEGIN IMMEDIATE')
+        ctx = resolve_canonical_context_row_conn(conn, chat_id=chat_id, now=now_dt)
+        summary = _summary_from_row_conn(conn, ctx, now_dt=now_dt)
+        conn.commit()
+        return summary
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 
 def list_context_window_carryover_rounds(
@@ -320,21 +384,23 @@ def list_context_window_carryover_rounds(
     now: Optional[datetime.datetime] = None,
 ) -> dict[str, Any]:
     ensure_schema(db_path)
-    source_id = _validate_positive_int('source_context_id', source_context_id)
-    source_epoch = _validate_positive_int('source_context_epoch', source_context_epoch)
+    source_id = parse_strict_json_positive_int('source_context_id', source_context_id)
+    source_epoch = parse_strict_json_positive_int('source_context_epoch', source_context_epoch)
+    now_dt = _shanghai_now(now)
 
     conn = _connect(db_path)
     try:
         conn.execute('BEGIN IMMEDIATE')
-        current = resolve_canonical_context_row_conn(conn, chat_id=chat_id, now=now)
+        current = resolve_canonical_context_row_conn(conn, chat_id=chat_id, now=now_dt)
         if int(current['id']) != source_id or int(current['context_epoch']) != source_epoch:
             conn.rollback()
             raise StaleSourceContextError('stale_source_context')
         if current.get('closed_at'):
             conn.rollback()
             raise StaleSourceContextError('stale_source_context')
-        busy = _window_busy_reason(current, db_path=db_path, now=now)
-        if busy:
+        if _is_resident_turn_active_conn(
+            conn, source_id, int(current.get('resident_generation') or 1), now_dt,
+        ):
             conn.rollback()
             raise WindowBusyError('window_busy')
         messages = _collect_context_formal_messages(
@@ -374,15 +440,49 @@ def _find_idempotent_target_conn(
     ).fetchone())
 
 
-def _switch_result_from_target(
+def _validate_idempotent_payload_conn(
+    conn: sqlite3.Connection,
+    existing_target: dict[str, Any],
+    *,
+    chat_id: str,
+    source_id: int,
+    source_epoch: int,
+    count: int,
+    close_reason: str,
+) -> dict[str, Any]:
+    if str(existing_target.get('chat_id') or '') != str(chat_id):
+        raise IdempotencyMismatchError('idempotency_mismatch')
+    if int(existing_target.get('source_context_id') or 0) != source_id:
+        raise IdempotencyMismatchError('idempotency_mismatch')
+    if int(existing_target.get('carryover_requested_count') or 0) != count:
+        raise IdempotencyMismatchError('idempotency_mismatch')
+    stored_source = int(existing_target.get('source_context_id') or 0)
+    src_row = conn.execute(
+        'SELECT context_epoch, close_reason FROM daily_contexts WHERE id=?',
+        (stored_source,),
+    ).fetchone()
+    if src_row is None:
+        raise IdempotencyMismatchError('idempotency_mismatch')
+    if int(src_row['context_epoch']) != source_epoch:
+        raise IdempotencyMismatchError('idempotency_mismatch')
+    if str(src_row['close_reason'] or '') != str(close_reason):
+        raise IdempotencyMismatchError('idempotency_mismatch')
+    source_full = conn.execute(
+        'SELECT * FROM daily_contexts WHERE id=?', (stored_source,),
+    ).fetchone()
+    if source_full is None:
+        raise IdempotencyMismatchError('idempotency_mismatch')
+    return dict(source_full)
+
+
+def _switch_result_from_target_conn(
+    conn: sqlite3.Connection,
     *,
     source: dict[str, Any],
     target: dict[str, Any],
-    db_path: Optional[str],
 ) -> dict[str, Any]:
     target_id = int(target['id'])
-    selected_messages = get_selected_carryover_messages(target_id, db_path=db_path)
-    selected_message_ids = [int(m['message_id']) for m in selected_messages]
+    selected_message_ids = _carryover_ids_conn(conn, target_id)
     requested = int(target.get('carryover_requested_count') or 0)
     selected_round_count = int(target.get('carryover_count') or 0)
     return {
@@ -412,22 +512,18 @@ def switch_context_window(
     db_path: Optional[str] = None,
     now: Optional[datetime.datetime] = None,
 ) -> dict[str, Any]:
-    """Atomic manual window switch. Public API always uses close_reason=manual."""
     if close_reason not in (CLOSE_REASON_MANUAL, CLOSE_REASON_CAPACITY_RESCUE):
         raise ValueError('invalid close_reason')
-    if count not in ALLOWED_CARRYOVER_COUNTS:
-        raise ValueError('count must be one of %s' % sorted(ALLOWED_CARRYOVER_COUNTS))
 
-    source_id = _validate_positive_int('source_context_id', source_context_id)
-    source_epoch = _validate_positive_int('source_context_epoch', source_context_epoch)
+    source_id = parse_strict_json_positive_int('source_context_id', source_context_id)
+    source_epoch = parse_strict_json_positive_int('source_context_epoch', source_context_epoch)
+    count = parse_strict_json_carryover_count(count)
     req_id = _validate_request_id(request_id)
 
     ensure_schema(db_path)
-    now_dt = now or (
-        datetime.datetime.utcnow() + datetime.timedelta(hours=8)
-    )
+    now_dt = _shanghai_now(now)
     now_s = now_dt.strftime('%Y-%m-%d %H:%M:%S')
-    local_day = _current_chat_day(now_dt)
+    local_day = shanghai_calendar_day(now_dt)
 
     conn = _connect(db_path)
     try:
@@ -437,27 +533,19 @@ def switch_context_window(
             conn, chat_id=chat_id, request_id=req_id,
         )
         if existing_target is not None:
-            src_row = conn.execute(
-                'SELECT * FROM daily_contexts WHERE id=?', (source_id,),
-            ).fetchone()
-            if src_row is None:
-                conn.rollback()
-                raise StaleSourceContextError('stale_source_context')
-            stored_source = int(existing_target.get('source_context_id') or 0)
-            stored_requested = int(existing_target.get('carryover_requested_count') or 0)
-            if (
-                stored_source != source_id
-                or stored_requested != count
-                or int(existing_target.get('context_epoch') or 0) <= source_epoch
-            ):
-                conn.rollback()
-                raise IdempotencyMismatchError('idempotency_mismatch')
-            conn.commit()
-            return _switch_result_from_target(
-                source=dict(src_row),
-                target=dict(existing_target),
-                db_path=db_path,
+            source = _validate_idempotent_payload_conn(
+                conn, existing_target,
+                chat_id=chat_id,
+                source_id=source_id,
+                source_epoch=source_epoch,
+                count=count,
+                close_reason=close_reason,
             )
+            result = _switch_result_from_target_conn(
+                conn, source=source, target=existing_target,
+            )
+            conn.commit()
+            return result
 
         current = resolve_canonical_context_row_conn(conn, chat_id=chat_id, now=now_dt)
         if int(current['id']) != source_id or int(current['context_epoch']) != source_epoch:
@@ -467,21 +555,12 @@ def switch_context_window(
             conn.rollback()
             raise StaleSourceContextError('stale_source_context')
 
-        busy = _window_busy_reason(current, db_path=db_path, now=now_dt)
-        if busy:
+        source_version = int(current.get('version') or 1)
+        if _is_resident_turn_active_conn(
+            conn, source_id, int(current.get('resident_generation') or 1), now_dt,
+        ):
             conn.rollback()
             raise WindowBusyError('window_busy')
-
-        source_row = conn.execute(
-            'SELECT * FROM daily_contexts WHERE id=?', (source_id,),
-        ).fetchone()
-        if source_row is None:
-            conn.rollback()
-            raise StaleSourceContextError('stale_source_context')
-        source = dict(source_row)
-        if int(source['version'] or 0) != int(current.get('version') or 0):
-            conn.rollback()
-            raise StaleSourceContextError('stale_source_context')
 
         messages = _collect_context_formal_messages(
             conn, context_id=source_id, context_epoch=source_epoch,
@@ -495,15 +574,14 @@ def switch_context_window(
                 all_rounds[-count:] if len(all_rounds) >= count else list(all_rounds)
             )
         selected_round_count = len(selected_rounds)
-
         next_epoch = _active_epoch_high_water(conn, chat_id) + 1
 
-        conn.execute(
+        close_cur = conn.execute(
             '''UPDATE daily_contexts SET closed_at=?, close_reason=?, version=version+1,
-               updated_at=? WHERE id=? AND closed_at IS NULL''',
-            (now_s, close_reason, now_s, source_id),
+               updated_at=? WHERE id=? AND context_epoch=? AND version=? AND closed_at IS NULL''',
+            (now_s, close_reason, now_s, source_id, source_epoch, source_version),
         )
-        if conn.total_changes == 0:
+        if close_cur.rowcount != 1:
             conn.rollback()
             raise StaleSourceContextError('stale_source_context')
 
@@ -535,16 +613,18 @@ def switch_context_window(
                 )
                 ordinal += 1
 
+        source_row = conn.execute(
+            'SELECT * FROM daily_contexts WHERE id=?', (source_id,),
+        ).fetchone()
         target_row = conn.execute(
             'SELECT * FROM daily_contexts WHERE id=?', (target_id,),
         ).fetchone()
-        conn.commit()
-        assert target_row is not None
-        return _switch_result_from_target(
-            source=source,
-            target=dict(target_row),
-            db_path=db_path,
+        assert source_row is not None and target_row is not None
+        result = _switch_result_from_target_conn(
+            conn, source=dict(source_row), target=dict(target_row),
         )
+        conn.commit()
+        return result
     except sqlite3.IntegrityError as exc:
         conn.rollback()
         replay = _connect(db_path)
@@ -554,20 +634,19 @@ def switch_context_window(
                 replay, chat_id=chat_id, request_id=req_id,
             )
             if existing is not None:
-                src = replay.execute(
-                    'SELECT * FROM daily_contexts WHERE id=?', (source_id,),
-                ).fetchone()
+                source = _validate_idempotent_payload_conn(
+                    replay, existing,
+                    chat_id=chat_id,
+                    source_id=source_id,
+                    source_epoch=source_epoch,
+                    count=count,
+                    close_reason=close_reason,
+                )
+                result = _switch_result_from_target_conn(
+                    replay, source=source, target=existing,
+                )
                 replay.commit()
-                if src is not None:
-                    stored_source = int(existing.get('source_context_id') or 0)
-                    stored_requested = int(existing.get('carryover_requested_count') or 0)
-                    if stored_source == source_id and stored_requested == count:
-                        return _switch_result_from_target(
-                            source=dict(src),
-                            target=dict(existing),
-                            db_path=db_path,
-                        )
-                    raise IdempotencyMismatchError('idempotency_mismatch') from exc
+                return result
             replay.rollback()
         finally:
             replay.close()
