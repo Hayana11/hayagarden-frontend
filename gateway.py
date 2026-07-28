@@ -4318,6 +4318,12 @@ def _stream_cc_daily_soft_window(_turn_data, _uc):
             yield 'data: ' + json.dumps(_usage_evt) + SSE_END
         yield 'data: ' + json.dumps({'t': 'done', 'ok': True}) + SSE_END
         return ('persisted', text, thinking)
+    except _daily_rt.DuplicateTurnInProgress as exc:
+        yield 'data: ' + json.dumps({
+            't': 'err', 'd': str(exc), 'retryable': True, 'code': 'duplicate_turn_in_progress',
+        }) + SSE_END
+        yield 'data: ' + json.dumps({'t': 'done', 'ok': False}) + SSE_END
+        return None
     except _daily_ctx.DeferredError as exc:
         if _daily_plan:
             _daily_rt._release_lease(_daily_plan)

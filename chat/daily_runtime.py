@@ -64,6 +64,11 @@ class DailyWindowToolFencePending(DailyRuntimeError):
         super().__init__(message, error_code='DailyWindowToolFencePending', retryable=False)
 
 
+class DuplicateTurnInProgress(DailyRuntimeError):
+    def __init__(self, message: str = 'duplicate turn already in progress'):
+        super().__init__(message, error_code='duplicate_turn_in_progress', retryable=True)
+
+
 class CursorCASConflictAfterPersist(DailyRuntimeError):
     def __init__(
         self,
@@ -609,9 +614,7 @@ def prepare_daily_turn(
                 origin_local_day=origin_day,
                 actual_wall_now=context_wall_now,
                 db_path=db_path,
-                provider_busy=dc.has_active_provider_turn_lease(
-                    chat_id, db_path=db_path, now=lease_now,
-                ),
+                provider_busy=False,
             )
         except StaleOriginDayError as exc:
             raise DailyRuntimeError(
@@ -665,6 +668,10 @@ def prepare_daily_turn(
             )
         except ConflictError as exc:
             raise LeaseConflictError(str(exc)) from exc
+        if claim.get('status') == 'idempotent':
+            raise DuplicateTurnInProgress(
+                'resident turn lease already held for this request',
+            )
         lease_acquired = True
         lease_context_id = context_id
         if claim.get('status') == 'takeover':

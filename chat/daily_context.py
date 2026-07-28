@@ -426,6 +426,29 @@ def _latest_active_context_row(
     ).fetchone())
 
 
+def _assign_origin_closing_epoch(
+    conn: sqlite3.Connection,
+    chat_id: str,
+) -> int:
+    """Assign next active epoch for a late origin-day turn (never backfill)."""
+    active_hwm = _active_epoch_high_water(conn, chat_id)
+    max_epoch = _max_epoch(conn, chat_id)
+    return max(active_hwm, max_epoch) + 1
+
+
+def _origin_day_is_stale(
+    *,
+    origin_local_day: str,
+    latest: Optional[dict[str, Any]],
+    newest_local_day: Optional[str],
+) -> bool:
+    if latest is not None and str(latest['local_day']) > origin_local_day:
+        return True
+    if newest_local_day and newest_local_day > origin_local_day:
+        return True
+    return False
+
+
 def resolve_or_create_daily_context_for_origin(
     *,
     chat_id: str = DEFAULT_CHAT_ID,
@@ -445,7 +468,7 @@ def resolve_or_create_daily_context_for_origin(
     wall_now = actual_wall_now or (
         datetime.datetime.utcnow() + datetime.timedelta(hours=TZ_OFFSET_HOURS)
     )
-    wall_chat_day = chat_day_for_timestamp(wall_now)
+    _ = wall_now  # reserved for future audit metadata; epoch uses closing semantics
 
     conn = _connect(db_path)
     try:
@@ -457,28 +480,29 @@ def resolve_or_create_daily_context_for_origin(
             (str(chat_id),),
         ).fetchone()
         newest_local_day = str(latest_day_row['local_day']) if latest_day_row else None
+        if _origin_day_is_stale(
+            origin_local_day=origin_local_day,
+            latest=latest,
+            newest_local_day=newest_local_day,
+        ):
+            conn.rollback()
+            stale_ref = (
+                str(latest['local_day']) if latest is not None
+                else newest_local_day
+            )
+            raise StaleOriginDayError(
+                'origin day %s stale; latest context day is %s'
+                % (origin_local_day, stale_ref),
+            )
         if existing is not None:
             conn.commit()
             return existing
-        if latest is not None and str(latest['local_day']) > origin_local_day:
-            conn.rollback()
-            raise StaleOriginDayError(
-                'origin day %s stale; latest active is %s'
-                % (origin_local_day, latest['local_day']),
-            )
-        if newest_local_day and newest_local_day > origin_local_day:
-            conn.rollback()
-            raise StaleOriginDayError(
-                'origin day %s stale; newest context day is %s'
-                % (origin_local_day, newest_local_day),
-            )
         boundary_id = get_boundary_message_id(
             conn, local_day=origin_local_day, chat_id=chat_id,
         )
-        epoch, is_backfill = _assign_context_epoch(
-            conn, chat_id, origin_local_day, current_chat_day=wall_chat_day,
-        )
-        now_s = _now_local_str()
+        epoch = _assign_origin_closing_epoch(conn, chat_id)
+        is_backfill = 0
+        now_s = wall_now.strftime('%Y-%m-%d %H:%M:%S')
         status = STATUS_ABSENT
         cur = conn.execute(
             '''INSERT INTO daily_contexts (
@@ -508,6 +532,20 @@ def resolve_or_create_daily_context_for_origin(
         existing = get_daily_context(conn, chat_id=chat_id, local_day=origin_local_day)
         if existing is None:
             raise
+        latest = _latest_active_context_row(conn, chat_id)
+        latest_day_row = conn.execute(
+            'SELECT local_day FROM daily_contexts WHERE chat_id=? ORDER BY local_day DESC LIMIT 1',
+            (str(chat_id),),
+        ).fetchone()
+        newest_local_day = str(latest_day_row['local_day']) if latest_day_row else None
+        if _origin_day_is_stale(
+            origin_local_day=origin_local_day,
+            latest=latest,
+            newest_local_day=newest_local_day,
+        ):
+            raise StaleOriginDayError(
+                'origin day %s stale after concurrent create' % origin_local_day,
+            )
         return existing
     except Exception:
         conn.rollback()
