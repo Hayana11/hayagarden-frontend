@@ -4,6 +4,7 @@ from __future__ import annotations
 import contextlib
 import datetime
 import hashlib
+import json
 import os
 import sqlite3
 import sys
@@ -1649,6 +1650,241 @@ class GatewayClientDisconnectTests(unittest.TestCase):
                 list(resp.response)
 
             abort_mock.assert_not_called()
+            self.assertEqual(gen_release_calls, [('daily reply', '')])
+            self.assertNotIn(None, gen_release_calls)
+            self.assertTrue(release_turn_calls)
+            self.assertTrue(all(c.get('persisted') for c in release_turn_calls))
+        finally:
+            os.unlink(db)
+
+
+def _sse_events_from_chunks(chunks) -> list[dict]:
+    events: list[dict] = []
+    for chunk in chunks:
+        text = chunk.decode('utf-8') if isinstance(chunk, bytes) else str(chunk)
+        for line in text.split('\n'):
+            line = line.strip()
+            if line.startswith('data: '):
+                events.append(json.loads(line[6:].strip()))
+    return events
+
+
+class GatewaySuccessHandoffTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        os.makedirs('/opt/workspace/tools', exist_ok=True)
+
+    def _success_stream_patches(self, db, uid, resident):
+        import gateway
+
+        gen_release_calls: list = []
+        release_turn_calls: list = []
+        memo_mock = mock.Mock()
+        moments_mock = mock.Mock()
+        scoring_mock = mock.Mock()
+
+        def _prepare_real(**kwargs):
+            with mock.patch.object(config_store, 'get_bool', return_value=True), \
+                 mock.patch('chat.daily_history._build_state_text', return_value=('', 'none', {})):
+                return _REAL_PREPARE_DAILY_TURN(
+                    user_message_id=kwargs.get('user_message_id', uid),
+                    db_path=db,
+                    resident=resident,
+                    static_system=kwargs.get('static_system', 'S'),
+                    wall_now=_FIXED_NOW,
+                )
+
+        patches = [
+            mock.patch.object(config_store, 'get_bool', return_value=True),
+            mock.patch('chat.daily_context.enabled', return_value=True),
+            mock.patch.object(gateway, 'DB_PATH', db),
+            mock.patch.object(gateway, '_get_provider', return_value='claude_code'),
+            mock.patch('gateway._gen_acquire_or_wait', return_value=('new', None)),
+            mock.patch.object(gateway, '_gen_release', side_effect=lambda v: gen_release_calls.append(v)),
+            mock.patch('moments_turn.prepare_turn', return_value={'content': 'hi'}),
+            mock.patch(
+                'moments_turn.insert_user_message',
+                return_value={'content': 'hi', 'user_message_id': uid},
+            ),
+            mock.patch('moments_turn.activate_turn', side_effect=lambda td, **_k: td),
+            mock.patch('moments_turn.release_turn', side_effect=lambda *a, **k: release_turn_calls.append(k)),
+            mock.patch('chat.system_builder.build_cc_daily_static_parts', return_value={
+                'persona': 'P', 'full_system': 'STATIC',
+            }),
+            mock.patch.object(dr, 'prepare_daily_turn', side_effect=_prepare_real),
+            mock.patch.object(gateway, '_write_session_memo', memo_mock),
+            mock.patch('moments_persistence.after_assistant_persisted', moments_mock),
+            mock.patch('chat.scoring_identity.trigger_turn_scoring', scoring_mock),
+            mock.patch.object(gateway, '_CC_RESIDENT', resident),
+            mock.patch('gateway.get_db', return_value=sqlite3.connect(db)),
+        ]
+        return gateway, patches, gen_release_calls, release_turn_calls, memo_mock, moments_mock, scoring_mock
+
+    def test_chat_stream_success_full_handoff(self):
+        db = _tmp_db()
+        try:
+            _init_chat_messages(db)
+            uid = _insert(db, 'hayana', 'full-ok', '2026-07-27 10:00:00')
+            resident = _FakeResident()
+            ctx_before = dc.get_or_create_daily_context(
+                chat_id='default', local_day='2026-07-27', db_path=db, now=_FIXED_NOW,
+            )
+            gen_before = int(ctx_before['resident_generation'])
+            cursor_before = dc.get_resident_history_cursor(
+                int(ctx_before['id']), gen_before, db_path=db,
+            ) or 0
+
+            gateway, patches, gen_release_calls, release_turn_calls, memo_mock, moments_mock, scoring_mock = (
+                self._success_stream_patches(db, uid, resident)
+            )
+            abort_mock = mock.Mock(wraps=dr.abort_daily_turn)
+            with contextlib.ExitStack() as stack:
+                for p in patches:
+                    stack.enter_context(p)
+                stack.enter_context(mock.patch.object(dr, 'abort_daily_turn', abort_mock))
+                client = gateway.app.test_client()
+                resp = client.post('/chat/stream', json={'content': 'hi'})
+                self.assertEqual(resp.status_code, 200)
+                events = _sse_events_from_chunks(list(resp.response))
+
+            conn = sqlite3.connect(db)
+            assistant_row = conn.execute(
+                "SELECT id, content FROM chat_messages WHERE author='assistant'"
+            ).fetchone()
+            assistant_count = conn.execute(
+                "SELECT COUNT(*) FROM chat_messages WHERE author='assistant'"
+            ).fetchone()[0]
+            mapping_count = conn.execute(
+                "SELECT COUNT(*) FROM daily_message_contexts dmc "
+                "INNER JOIN chat_messages m ON m.id=dmc.message_id "
+                "WHERE m.author='assistant'"
+            ).fetchone()[0]
+            conn.close()
+            ctx_after = dc.get_context_for_local_day('default', '2026-07-27', db_path=db)
+            cursor_after = dc.get_resident_history_cursor(
+                int(ctx_after['id']), gen_before, db_path=db,
+            ) or 0
+
+            self.assertEqual(int(assistant_count), 1)
+            self.assertEqual(assistant_row[1], 'daily reply')
+            self.assertEqual(int(mapping_count), 1)
+            self.assertGreater(cursor_after, cursor_before)
+            self.assertEqual(cursor_after, int(assistant_row[0]))
+            self.assertEqual(int(ctx_after['resident_generation']), gen_before)
+            self.assertFalse(dc.is_resident_turn_active(
+                int(ctx_after['id']), gen_before, db_path=db, now=_FIXED_NOW,
+            ))
+            self.assertEqual(resident.killed, 0)
+            abort_mock.assert_not_called()
+            self.assertEqual(gen_release_calls, [('daily reply', '')])
+            self.assertNotIn(None, gen_release_calls)
+            self.assertTrue(release_turn_calls)
+            self.assertTrue(all(c.get('persisted') for c in release_turn_calls))
+            memo_mock.assert_called_once()
+            moments_mock.assert_called_once()
+            scoring_mock.assert_called_once()
+            done_evt = next(e for e in events if e.get('t') == 'done')
+            self.assertTrue(done_evt.get('ok'))
+        finally:
+            os.unlink(db)
+
+    def test_chat_stream_success_disconnect_after_usage(self):
+        db = _tmp_db()
+        try:
+            _init_chat_messages(db)
+            uid = _insert(db, 'hayana', 'usage-disc', '2026-07-27 10:00:00')
+            resident = _FakeResident()
+            gen_before = int(dc.get_or_create_daily_context(
+                chat_id='default', local_day='2026-07-27', db_path=db, now=_FIXED_NOW,
+            )['resident_generation'])
+
+            gateway, patches, gen_release_calls, release_turn_calls, memo_mock, moments_mock, scoring_mock = (
+                self._success_stream_patches(db, uid, resident)
+            )
+            abort_mock = mock.Mock(wraps=dr.abort_daily_turn)
+            with contextlib.ExitStack() as stack:
+                for p in patches:
+                    stack.enter_context(p)
+                stack.enter_context(mock.patch.object(dr, 'abort_daily_turn', abort_mock))
+                client = gateway.app.test_client()
+                resp = client.post('/chat/stream', json={'content': 'hi'})
+                self.assertEqual(resp.status_code, 200)
+                body_iter = resp.response
+                for chunk in body_iter:
+                    for evt in _sse_events_from_chunks([chunk]):
+                        if evt.get('t') == 'usage':
+                            body_iter.close()
+                            break
+                    else:
+                        continue
+                    break
+
+            ctx_after = dc.get_context_for_local_day('default', '2026-07-27', db_path=db)
+            conn = sqlite3.connect(db)
+            assistant_count = conn.execute(
+                "SELECT COUNT(*) FROM chat_messages WHERE author='assistant'"
+            ).fetchone()[0]
+            conn.close()
+
+            self.assertEqual(int(assistant_count), 1)
+            self.assertEqual(int(ctx_after['resident_generation']), gen_before)
+            self.assertEqual(resident.killed, 0)
+            abort_mock.assert_not_called()
+            self.assertEqual(gen_release_calls, [('daily reply', '')])
+            self.assertTrue(all(c.get('persisted') for c in release_turn_calls))
+            memo_mock.assert_called_once()
+            moments_mock.assert_called_once()
+            scoring_mock.assert_called_once()
+        finally:
+            os.unlink(db)
+
+    def test_chat_stream_success_disconnect_after_done(self):
+        db = _tmp_db()
+        try:
+            _init_chat_messages(db)
+            uid = _insert(db, 'hayana', 'done-disc', '2026-07-27 10:00:00')
+            resident = _FakeResident()
+            gen_before = int(dc.get_or_create_daily_context(
+                chat_id='default', local_day='2026-07-27', db_path=db, now=_FIXED_NOW,
+            )['resident_generation'])
+
+            gateway, patches, gen_release_calls, release_turn_calls, memo_mock, moments_mock, scoring_mock = (
+                self._success_stream_patches(db, uid, resident)
+            )
+            abort_mock = mock.Mock(wraps=dr.abort_daily_turn)
+            with contextlib.ExitStack() as stack:
+                for p in patches:
+                    stack.enter_context(p)
+                stack.enter_context(mock.patch.object(dr, 'abort_daily_turn', abort_mock))
+                client = gateway.app.test_client()
+                resp = client.post('/chat/stream', json={'content': 'hi'})
+                self.assertEqual(resp.status_code, 200)
+                body_iter = resp.response
+                for chunk in body_iter:
+                    for evt in _sse_events_from_chunks([chunk]):
+                        if evt.get('t') == 'done' and evt.get('ok') is True:
+                            body_iter.close()
+                            break
+                    else:
+                        continue
+                    break
+
+            ctx_after = dc.get_context_for_local_day('default', '2026-07-27', db_path=db)
+            conn = sqlite3.connect(db)
+            assistant_count = conn.execute(
+                "SELECT COUNT(*) FROM chat_messages WHERE author='assistant'"
+            ).fetchone()[0]
+            conn.close()
+
+            self.assertEqual(int(assistant_count), 1)
+            self.assertEqual(int(ctx_after['resident_generation']), gen_before)
+            self.assertEqual(resident.killed, 0)
+            abort_mock.assert_not_called()
+            self.assertEqual(gen_release_calls, [('daily reply', '')])
+            self.assertTrue(all(c.get('persisted') for c in release_turn_calls))
+            memo_mock.assert_called_once()
+            moments_mock.assert_called_once()
+            scoring_mock.assert_called_once()
         finally:
             os.unlink(db)
 

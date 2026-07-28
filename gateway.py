@@ -4287,6 +4287,9 @@ def _stream_cc_daily_soft_window(_turn_data, _uc):
             yield 'data: ' + json.dumps({'t': 'done', 'ok': False}) + SSE_END
             return
 
+        turn_terminal = True
+        yield ('persisted', text, thinking)
+
         _write_session_memo(_uc, _cc_text)
         try:
             from moments_persistence import after_assistant_persisted
@@ -4322,8 +4325,7 @@ def _stream_cc_daily_soft_window(_turn_data, _uc):
                         _usage_evt[_k] = cc_usage[_k]
             yield 'data: ' + json.dumps(_usage_evt) + SSE_END
         yield 'data: ' + json.dumps({'t': 'done', 'ok': True}) + SSE_END
-        turn_terminal = True
-        return ('persisted', text, thinking)
+        return None
     except _daily_rt.DuplicateTurnInProgress as exc:
         turn_terminal = True
         yield 'data: ' + json.dumps({
