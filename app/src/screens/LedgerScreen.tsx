@@ -23,6 +23,9 @@ import {
   catOf,
   createMonthRequestGuard,
   fmtAmount,
+  budgetIsOver,
+  budgetRingCenterLabel,
+  budgetUsageRatio,
   migrateLegacyDailyBudget,
   readDailyBudget,
   resolveLedgerLinks,
@@ -133,6 +136,7 @@ export function LedgerScreen() {
   const [entriesError, setEntriesError] = useState(false);
   const [budgetError, setBudgetError] = useState(false);
   const [trendError, setTrendError] = useState(false);
+  const [trendLoading, setTrendLoading] = useState(true);
   const [errorBanner, setErrorBanner] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [budgetSaving, setBudgetSaving] = useState(false);
@@ -204,14 +208,18 @@ export function LedgerScreen() {
   }, [key]);
 
   useEffect(() => {
+    setTrendLoading(true);
+    setTrendError(false);
     fetchLedgerTrend(new Date()).then(
       (t) => {
         setTrend(t);
         setTrendError(false);
+        setTrendLoading(false);
       },
       () => {
         setTrend([]);
         setTrendError(true);
+        setTrendLoading(false);
       },
     );
     fetchMemorySummary().then((s) => {
@@ -233,9 +241,10 @@ export function LedgerScreen() {
   const entriesReady = !monthLoading && !entriesError;
   const budgetSet = !budgetLoading && !budgetError && budget !== null;
   const budgetRingReady = entriesReady && budgetSet;
-  const pct = budgetRingReady && budget! > 0 ? spend / budget! : 0;
-  const over = budgetRingReady && spend > budget!;
-  const near = budgetRingReady && !over && pct >= 0.8;
+  const pct = budgetRingReady ? budgetUsageRatio(spend, budget!) : 0;
+  const over = budgetRingReady && budgetIsOver(spend, budget!);
+  const near = budgetRingReady && !over && budget! > 0 && pct >= 0.8;
+  const ringCenterLabel = budgetRingReady ? budgetRingCenterLabel(spend, budget!) : '';
 
   const dim = new Date(base.getFullYear(), base.getMonth() + 1, 0).getDate();
   const todayD = now.getDate();
@@ -294,7 +303,8 @@ export function LedgerScreen() {
   const { d: trendPath, pts: trendPts } = trendVals.length
     ? smoothPath(trendVals.map((v) => Math.max(v, 0)), 340, 96)
     : { d: '', pts: [] as Array<[number, number]> };
-  const trendLast = trendPts[trendPts.length - 1];
+  const trendLast = trendPts.length > 0 ? trendPts[trendPts.length - 1] : undefined;
+  const trendReady = !trendLoading && !trendError && trendPts.length > 0 && trendLast !== undefined;
   const trendLabels = trend.length
     ? trend.map((t) => new Date(`${t.month}-01T12:00:00`).toLocaleString('en', { month: 'short' }))
     : ['—', '—', '—', '—', '—', '—'];
@@ -587,12 +597,12 @@ export function LedgerScreen() {
                   strokeWidth={10}
                   strokeLinecap="round"
                   strokeDasharray={RING_C}
-                  strokeDashoffset={over ? 0 : (RING_C * (1 - Math.min(pct, 1))).toFixed(1)}
+                  strokeDashoffset={over ? 0 : (RING_C * (1 - pct)).toFixed(1)}
                   transform="rotate(-90 75 75)"
                   style={over ? { animation: 'livePulse 5s ease-in-out infinite' } : undefined}
                 />
-                <text x={75} y={71} textAnchor="middle" fill="var(--color-text)" style={{ fontFamily: DISPLAY, fontSize: 23, fontWeight: 600 }}>
-                  {Math.round(pct * 100)}%
+                <text x={75} y={71} textAnchor="middle" fill="var(--color-text)" style={{ fontFamily: DISPLAY, fontSize: 23, fontWeight: 600 }} data-testid="ledger-budget-ring-label">
+                  {ringCenterLabel}
                 </text>
                 <text x={75} y={92} textAnchor="middle" fill="var(--color-text-faint)" style={{ fontSize: 11, letterSpacing: 3 }}>
                   预算
@@ -824,13 +834,13 @@ export function LedgerScreen() {
                 <span style={{ fontSize: 15, fontWeight: 600, letterSpacing: 2 }}>最近六个月</span>
                 <span style={{ fontFamily: DISPLAY, fontSize: 12, color: 'var(--color-text-faint)' }}>总支出趋势</span>
               </div>
-              {trendError ? (
-                <div style={{ marginTop: 18, fontSize: 13, color: 'var(--color-text-mute)' }}>趋势暂不可用</div>
-              ) : (
+              {trendLoading ? (
+                <div data-testid="ledger-trend-loading" style={{ marginTop: 18, fontSize: 13, color: 'var(--color-text-mute)' }}>趋势加载中…</div>
+              ) : trendReady ? (
                 <>
-                  <svg viewBox="0 0 340 96" style={{ width: '100%', height: 96, marginTop: 14, overflow: 'visible' }}>
+                  <svg viewBox="0 0 340 96" style={{ width: '100%', height: 96, marginTop: 14, overflow: 'visible' }} data-testid="ledger-trend-chart">
                     <path d={trendPath} fill="none" stroke="var(--color-rose)" strokeWidth={2} strokeLinecap="round" />
-                    <circle cx={trendLast[0]} cy={trendLast[1]} r={4} fill="var(--color-rose-deep)" />
+                    <circle cx={trendLast![0]} cy={trendLast![1]} r={4} fill="var(--color-rose-deep)" />
                   </svg>
                   <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 8 }}>
                     {trendLabels.map((m, i) => (
@@ -840,6 +850,8 @@ export function LedgerScreen() {
                     ))}
                   </div>
                 </>
+              ) : (
+                <div data-testid="ledger-trend-unavailable" style={{ marginTop: 18, fontSize: 13, color: 'var(--color-text-mute)' }}>趋势暂不可用</div>
               )}
             </Card>
 

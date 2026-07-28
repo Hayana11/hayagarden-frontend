@@ -62,6 +62,8 @@ export interface LedgerRouteOptions {
   budgetPostFail?: boolean;
   patchDelayMs?: number;
   entriesDelayMs?: number;
+  trendDelayMs?: number;
+  trendEmpty?: boolean;
   juneEntries?: Array<typeof MOCK_ENTRY_JUNE>;
   juneBudgetAmount?: number | null;
 }
@@ -158,7 +160,9 @@ export async function installLedgerRoutes(page: Page, opts: LedgerRouteOptions =
 
     if (pathname === '/api/ledger/trend' && method === 'GET') {
       counts.trendGet += 1;
-      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(TREND_PAYLOAD) });
+      if (opts.trendDelayMs) await new Promise((r) => setTimeout(r, opts.trendDelayMs));
+      const body = opts.trendEmpty ? [] : TREND_PAYLOAD;
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(body) });
       return;
     }
 

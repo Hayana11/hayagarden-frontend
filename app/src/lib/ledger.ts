@@ -221,6 +221,23 @@ export function shouldApplyMonthTicket(ticket: MonthRequestTicket, currentMonth:
   return ticket.isCurrent() && ticket.month === currentMonth;
 }
 
+/** Ring fill ratio for spent/budget; budget 0 with spend > 0 is treated as fully used. */
+export function budgetUsageRatio(spent: number, budget: number): number {
+  if (budget <= 0) return spent > 0 ? 1 : 0;
+  return Math.min(1, spent / budget);
+}
+
+/** Center label for budget rings; never shows misleading 0% when budget is zero but spend is positive. */
+export function budgetRingCenterLabel(spent: number, budget: number): string {
+  if (budget <= 0) return spent > 0 ? '已超出' : '0%';
+  return `${Math.round((spent / budget) * 100)}%`;
+}
+
+/** Whether spend exceeds a set budget (including zero budget with positive spend). */
+export function budgetIsOver(spent: number, budget: number): boolean {
+  return budget >= 0 && spent > budget;
+}
+
 export interface LedgerDrawerLinkState {
   mem?: string;
   memSel: number | null;

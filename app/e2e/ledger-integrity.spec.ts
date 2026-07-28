@@ -171,4 +171,40 @@ test.describe('LedgerScreen integration', () => {
     await expect(page.getByText('测试面')).toHaveCount(0);
     routes.assertExpected({ entriesGet: 2, budgetGet: 2, trendGet: 1, patch: 1 });
   });
+
+  test('stats tab shows trend loading then chart when trend is delayed', async ({ page }) => {
+    const routes = await installLedgerRoutes(page, { trendDelayMs: 2000 });
+    const pageErrors: string[] = [];
+    page.on('pageerror', (err) => pageErrors.push(err.message));
+    await gotoLedger(page);
+    await page.getByText('统计', { exact: true }).click();
+    await expect(page.getByTestId('ledger-trend-loading')).toBeVisible();
+    await expect(page.getByTestId('ledger-trend-chart')).toHaveCount(0);
+    expect(pageErrors).toEqual([]);
+    await expect(page.getByTestId('ledger-trend-chart')).toBeVisible({ timeout: 5000 });
+    routes.assertExpected({ ...LEDGER_PAGE_LOAD_REQUESTS });
+  });
+
+  test('empty trend response shows unavailable without crashing', async ({ page }) => {
+    const routes = await installLedgerRoutes(page, { trendEmpty: true });
+    const pageErrors: string[] = [];
+    page.on('pageerror', (err) => pageErrors.push(err.message));
+    await gotoLedger(page);
+    await page.getByText('统计', { exact: true }).click();
+    await expect(page.getByTestId('ledger-trend-unavailable')).toBeVisible();
+    await expect(page.getByTestId('ledger-trend-chart')).toHaveCount(0);
+    expect(pageErrors).toEqual([]);
+    routes.assertExpected({ ...LEDGER_PAGE_LOAD_REQUESTS });
+  });
+
+  test('zero budget with spend shows over label not misleading zero percent', async ({ page }) => {
+    await installLedgerRoutes(page, { budgetAmount: 0 });
+    await gotoLedger(page);
+    await expect(page.getByTestId('ledger-budget-ring')).toBeVisible();
+    await expect(page.getByTestId('ledger-budget-ring-label')).toHaveText('已超出');
+    await expect(page.getByText('超出预算 ¥68')).toBeVisible();
+    await expect(page.getByTestId('ledger-budget-ring')).not.toContainText('0%');
+    await expect(page.getByText('NaN')).toHaveCount(0);
+    await expect(page.getByText('Infinity')).toHaveCount(0);
+  });
 });

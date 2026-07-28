@@ -19,6 +19,9 @@ const {
   shouldApplyMonthTicket,
   resolveLedgerLinks,
   seedDrawerLinksFromEntry,
+  budgetRingCenterLabel,
+  budgetUsageRatio,
+  budgetIsOver,
 } = ledger;
 
 let passed = 0;
@@ -179,6 +182,16 @@ check('addLedgerEntry treats missing/invalid id as failure shape', () => {
   assert.equal(accept({ ok: true }), null);
   assert.equal(accept({ ok: true, id: 0 }), null);
   assert.equal(accept({ ok: false, id: 3 }), null);
+});
+
+check('zero budget ring labels avoid misleading 0% when spend is positive', () => {
+  assert.equal(budgetRingCenterLabel(68, 0), '已超出');
+  assert.equal(budgetRingCenterLabel(0, 0), '0%');
+  assert.equal(budgetRingCenterLabel(68, 5000), '1%');
+  assert.equal(budgetUsageRatio(68, 0), 1);
+  assert.equal(budgetUsageRatio(0, 0), 0);
+  assert.equal(budgetIsOver(68, 0), true);
+  assert.equal(budgetIsOver(0, 0), false);
 });
 
 console.log(`\n${passed} ledger integrity checks passed`);

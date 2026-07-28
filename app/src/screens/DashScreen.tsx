@@ -16,6 +16,7 @@ import { pad, smoothPath, WEEK_CN_MON_FIRST, WEEK_CN_SUN_FIRST } from '../lib/fo
 import { buildHeatmapCells, heatmapStats } from '../lib/heatmapCells';
 import { formatCurrency, formatTokens } from '../lib/formatDisplay';
 import { derivePeriod } from '../lib/period';
+import { budgetRingCenterLabel, budgetUsageRatio } from '../lib/ledger';
 import { CONFIG } from '../config';
 import type { UsageAgentId } from '../types';
 
@@ -81,7 +82,8 @@ export function DashScreen() {
   const spent = ledgerOk ? ledger!.spent : null;
   const budgetAmount = ledgerOk ? ledger!.budget : null;
   const budgetSet = ledgerOk && budgetAmount !== null;
-  const pct = budgetSet && budgetAmount! > 0 ? Math.min(1, spent! / budgetAmount!) : 0;
+  const pct = budgetSet ? budgetUsageRatio(spent!, budgetAmount!) : 0;
+  const ringCenterLabel = budgetSet ? budgetRingCenterLabel(spent!, budgetAmount!) : '—';
   const ringOffset = (251.3 * (1 - pct)).toFixed(1);
   const spentDisplay = ledgerLoading || ledgerError ? '—' : formatCurrency(spent!);
   const budgetDisplay = ledgerLoading || ledgerError ? '—' : budgetAmount === null ? '未设置' : formatCurrency(budgetAmount);
@@ -367,8 +369,8 @@ export function DashScreen() {
             strokeDashoffset={ringOffset}
             transform="rotate(-90 48 48)"
           />
-          <text x={48} y={55} textAnchor="middle" fill="var(--color-green-deep)" style={{ fontFamily: "'Bodoni Moda',serif", fontSize: 18, fontWeight: 600 }}>
-            {budgetSet ? `${Math.round(pct * 100)}%` : '—'}
+          <text x={48} y={55} textAnchor="middle" fill="var(--color-green-deep)" style={{ fontFamily: "'Bodoni Moda',serif", fontSize: 18, fontWeight: 600 }} data-testid="dash-ledger-ring-label">
+            {budgetSet ? ringCenterLabel : '—'}
           </text>
         </svg>
         <div style={{ flex: 1 }}>

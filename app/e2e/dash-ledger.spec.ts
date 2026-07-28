@@ -28,4 +28,13 @@ test.describe('DashScreen ledger widget', () => {
     expect(routes.counts.entriesGet).toBeGreaterThan(0);
     expect(routes.counts.budgetGet).toBeGreaterThan(0);
   });
+
+  test('zero budget shows over label not zero percent on dashboard', async ({ page }) => {
+    await installLedgerRoutes(page, { budgetAmount: 0 });
+    await gotoDash(page);
+    await expect(page.getByTestId('dash-ledger-ring-label')).toHaveText('已超出');
+    await expect(page.getByTestId('dash-ledger-card')).not.toContainText('0%');
+    await expect(page.getByText('NaN')).toHaveCount(0);
+    await expect(page.getByText('Infinity')).toHaveCount(0);
+  });
 });
