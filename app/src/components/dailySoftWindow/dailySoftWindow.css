@@ -43,7 +43,7 @@
     0 20px 50px rgba(183, 110, 121, 0.16),
     inset 0 0 0 1px var(--window-inner-line);
 
-  /* 衬线只给数字和英文副标题用，中文一律走 sans */
+  /* Bodoni 只给英文副标题和 dsw-card 的 kicker 用 */
   --window-serif:
     "Bodoni Moda",
     "Didot",
@@ -51,6 +51,16 @@
     Georgia,
     "Times New Roman",
     serif;
+
+  /* handoff 整框是 'Noto Serif SC'，弹窗里的中文一律走这条，不要换 sans */
+  --window-cn:
+    "Noto Serif SC",
+    "Songti SC",
+    "SimSun",
+    serif;
+
+  /* handoff 里 metaLine / 片段正文显式指定 Arial，别的地方不用 */
+  --window-latin: Arial, Helvetica, sans-serif;
 
   --window-sans:
     "PingFang SC",
@@ -210,7 +220,10 @@
 
   width: 334px;
   max-width: 88%;
-  max-height: calc(100dvh - 56px);
+  max-height: calc(100dvh - 56px - 6vh);
+
+  /* handoff 的弹窗中心在 47%，不是正中；靠 margin 把它抬起 3vh */
+  margin-bottom: 6vh;
 
   padding: 26px 24px 24px;
 
@@ -318,7 +331,7 @@
 
   color: var(--window-title);
 
-  font-family: var(--window-sans);
+  font-family: var(--window-cn);
   font-size: 22px;
   font-weight: 700;
   line-height: 1.25;
@@ -370,6 +383,15 @@
   margin: 0;
 }
 
+/* handoff 里三个分区的内部 gap 不一样：10 / 12 / 9 */
+.daily-window-section--snippets {
+  gap: 12px;
+}
+
+.daily-window-section--left-behind {
+  gap: 9px;
+}
+
 /* 分区标题是暖灰棕 + 1px 字距，不是粉色 */
 .daily-window-section-title {
   display: flex;
@@ -380,7 +402,7 @@
 
   color: var(--window-body);
 
-  font-family: var(--window-sans);
+  font-family: var(--window-cn);
   font-size: 12px;
   font-weight: 400;
   line-height: 1.4;
@@ -392,7 +414,7 @@
 
   flex: 0 0 auto;
 
-  color: var(--window-accent);
+  color: rgba(212, 138, 158, 0.92);
   font-size: 12px;
   line-height: 1;
 }
@@ -412,9 +434,8 @@
   min-width: 0;
 
   display: flex;
-  align-items: baseline;
+  align-items: center;
   justify-content: center;
-  gap: 3px;
 
   padding: 8px 0;
 
@@ -451,28 +472,12 @@
   box-shadow: none;
 }
 
-/* 数字用衬线斜体 —— 全卡唯一的「贵气」来源，字号仍按 handoff 收在 14px 档 */
-.daily-window-option-number {
-  font-family: var(--window-serif);
-  font-style: italic;
-  font-size: 16px;
-  font-weight: 400;
-  line-height: 1;
-  letter-spacing: 0.5px;
-}
-
-.daily-window-option-unit {
-  font-family: var(--window-sans);
-  font-size: 13px;
-  font-weight: 400;
-  line-height: 1;
-  letter-spacing: 0.5px;
-}
-
-.daily-window-option-word {
-  font-family: var(--window-sans);
+/* handoff 是「3轮」一整串同字体同字号，数字不拆、不斜体 */
+.daily-window-option-label {
+  font-family: var(--window-cn);
   font-size: 14px;
   font-weight: 400;
+  line-height: 1;
   letter-spacing: 0.5px;
 }
 
@@ -481,7 +486,7 @@
 
   color: rgba(169, 149, 144, 0.72);
 
-  font-family: Arial, var(--window-sans);
+  font-family: var(--window-latin);
   font-size: 11.5px;
   font-weight: 400;
   line-height: 1.45;
@@ -558,11 +563,12 @@
   border-radius: var(--window-card-radius);
 }
 
+/* handoff 里两个说话人是 rose / deep 两色，这里按要求统一走 accent */
 .daily-window-preview-speaker {
   color: var(--window-accent);
 
-  font-family: var(--window-sans);
-  font-size: 12.5px;
+  font-family: var(--window-cn);
+  font-size: 12px;
   font-weight: 600;
   line-height: 1.3;
   letter-spacing: 0.3px;
@@ -575,10 +581,10 @@
 
   overflow: hidden;
 
-  color: var(--window-body);
+  color: var(--window-muted);
 
-  font-family: var(--window-sans);
-  font-size: 12.5px;
+  font-family: var(--window-latin);
+  font-size: 11.5px;
   font-weight: 400;
   line-height: 1.45;
 
@@ -613,7 +619,7 @@
   border: 1px solid rgba(175, 139, 145, 0.35);
   border-radius: var(--window-pill-radius);
 
-  font-family: var(--window-sans);
+  font-family: var(--window-cn);
   font-size: 11px;
   font-weight: 400;
   line-height: 1.2;
@@ -621,13 +627,11 @@
   white-space: nowrap;
 }
 
-/* 「提醒 · 7」里的数字也走衬线斜体，和档位数字呼应 */
+/* 「提醒 · 7」在 handoff 里是一整串同字体，数字不单独做样式 */
 .daily-window-tag-count {
-  color: var(--window-faint);
+  color: inherit;
 
-  font-family: var(--window-serif);
-  font-style: italic;
-  font-size: 11.5px;
+  font: inherit;
 }
 
 /* =========================================================
@@ -654,7 +658,7 @@
   border-radius: var(--window-pill-radius);
   border: none;
 
-  font-family: var(--window-sans);
+  font-family: var(--window-cn);
   font-size: 14.5px;
   font-weight: 400;
   line-height: 1;
@@ -721,7 +725,7 @@
 
   color: var(--window-muted);
 
-  font-family: var(--window-sans);
+  font-family: var(--window-cn);
   font-size: 13px;
   line-height: 1.6;
   text-align: center;
@@ -740,6 +744,35 @@
 }
 
 /* =========================================================
+   Toast — 确认 / 再想想 之后的回执
+   ========================================================= */
+
+.daily-window-toast {
+  position: fixed;
+  bottom: max(36px, env(safe-area-inset-bottom));
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 1100;
+
+  padding: 10px 20px;
+
+  color: #f7f1ee;
+  background: rgba(74, 63, 60, 0.92);
+
+  border-radius: var(--window-pill-radius);
+
+  font-family: var(--window-cn);
+  font-size: 13px;
+  line-height: 1.2;
+  letter-spacing: 1px;
+
+  white-space: nowrap;
+  pointer-events: none;
+
+  animation: daily-window-overlay-in 200ms ease both;
+}
+
+/* =========================================================
    手机窄屏
    ========================================================= */
 
@@ -752,8 +785,7 @@
     font-size: 20px;
   }
 
-  .daily-window-option,
-  .daily-window-option-word {
+  .daily-window-option-label {
     font-size: 13px;
   }
 }
@@ -767,10 +799,9 @@
     padding: 32px;
   }
 
+  /* 宽度按 handoff 钉死 334，桌面端不放大 */
   .daily-window-dialog {
-    width: 360px;
-    max-width: 360px;
-    max-height: min(760px, calc(100dvh - 64px));
+    max-height: min(760px, calc(100dvh - 64px - 6vh));
   }
 }
 
@@ -800,6 +831,7 @@
   .daily-window-option,
   .daily-window-button,
   .daily-window-close,
+  .daily-window-toast,
   .dsw-card {
     animation: none;
     transition: none;

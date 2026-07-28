@@ -1,4 +1,4 @@
-import { useMemo, useState, type CSSProperties } from 'react';
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import { Link } from 'react-router-dom';
 import { CarryoverModal, CarryoverPickerCard, DaySoftBoundary } from '../components/dailySoftWindow';
 import { useDailySoftWindow } from '../hooks/useDailySoftWindow';
@@ -48,6 +48,19 @@ export function DailySoftWindowPreviewScreen() {
   const [scenario, setScenario] = useState<SoftWindowMockScenario>(() => getMockScenario());
   const dsw = useDailySoftWindow({ enabled: true, forceMock: true });
   const transcript = useMemo(() => mockPreviewTranscript(), []);
+  const [toast, setToast] = useState('');
+  const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => () => {
+    if (toastTimer.current) clearTimeout(toastTimer.current);
+  }, []);
+
+  // handoff 的两个动作都会在底部留一条回执
+  const showToast = (text: string) => {
+    setToast(text);
+    if (toastTimer.current) clearTimeout(toastTimer.current);
+    toastTimer.current = setTimeout(() => setToast(''), 1800);
+  };
 
   const applyScenario = (next: SoftWindowMockScenario) => {
     setScenario(next);
@@ -217,12 +230,24 @@ export function DailySoftWindowPreviewScreen() {
         rounds={dsw.rounds}
         submitting={dsw.submitting}
         errorDetail={dsw.errorDetail}
-        onClose={dsw.closeDrawer}
+        onClose={() => {
+          dsw.closeDrawer();
+          showToast('再想想 · 保留当前窗口');
+        }}
         onDraftChange={dsw.setDraftCount}
         onConfirm={() => {
-          void dsw.confirmSelection();
+          const picked = dsw.draftCount;
+          void dsw.confirmSelection().then((ok) => {
+            if (ok) showToast(`已确认换窗 · 携带 ${picked} 轮次`);
+          });
         }}
       />
+
+      {toast ? (
+        <div className="daily-window-toast" role="status">
+          {toast}
+        </div>
+      ) : null}
     </div>
   );
 }

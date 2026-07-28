@@ -57,7 +57,8 @@ export function useDailySoftWindow(opts: Options = {}): DailySoftWindowControlle
   const [summary, setSummary] = useState<DailyContextSummary | null>(null);
   const [candidates, setCandidates] = useState<CarryoverCandidate[]>([]);
   const [rounds, setRounds] = useState<CarryoverRound[]>([]);
-  const [draftCount, setDraftCount] = useState<CarryoverCount>(3);
+  // handoff 的 defaultRounds 是 '10'
+  const [draftCount, setDraftCount] = useState<CarryoverCount>(10);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [errorDetail, setErrorDetail] = useState('');
