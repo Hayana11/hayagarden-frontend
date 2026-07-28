@@ -268,9 +268,11 @@ class CarryoverAndAutoFinalizeTests(unittest.TestCase):
             self.assertTrue(all('SAVE' not in p for p in previews))
             result = dc.select_carryover(int(ctx['id']), 3, db_path=db)
             self.assertEqual(result['carryover_count'], 3)
+            self.assertEqual(result['selected_round_count'], 3)
+            self.assertEqual(result['selected_message_count'], 5)
             self.assertEqual(
                 [m['content'] for m in dc.get_selected_carryover_messages(int(ctx['id']), db_path=db)],
-                ['u3', 'a2', 'u4'],
+                ['u1', 'a1', 'u3', 'a2', 'u4'],
             )
         finally:
             os.unlink(db)
@@ -423,6 +425,7 @@ class CarryoverAndAutoFinalizeTests(unittest.TestCase):
         db = _tmp_db()
         try:
             _init_chat_messages(db)
+            _insert(db, 'hayana', 'ask', '2026-07-26 09:59:00')
             legacy_tc = [{
                 'name': 'ws_job',
                 'args': {'action': 'status', 'id': 'job-old'},
@@ -1453,6 +1456,588 @@ class R0Round4HardeningTests(unittest.TestCase):
                     headers={'Authorization': 'Bearer tok'},
                 )
             self.assertEqual(r.status_code, 400)
+        finally:
+            os.unlink(db)
+
+
+class RoundBasedCarryoverTests(unittest.TestCase):
+    def _ctx(self, db: str, chat_id: str = 'default'):
+        return dc.get_or_create_daily_context(
+            chat_id=chat_id, local_day='2026-07-27', db_path=db,
+        )
+
+    def _seed_three_rounds_six_messages(self, db: str):
+        _insert(db, 'hayana', 'u1', '2026-07-26 10:00:00')
+        _insert(db, 'fyodor', 'a1', '2026-07-26 10:01:00')
+        _insert(db, 'hayana', 'u2', '2026-07-26 10:02:00')
+        _insert(db, 'fyodor', 'a2', '2026-07-26 10:03:00')
+        _insert(db, 'hayana', 'u3', '2026-07-26 10:04:00')
+        _insert(db, 'fyodor', 'a3', '2026-07-26 10:05:00')
+
+    def test_three_rounds_map_to_six_messages(self):
+        db = _tmp_db()
+        try:
+            _init_chat_messages(db)
+            self._seed_three_rounds_six_messages(db)
+            ctx = self._ctx(db)
+            data = dc.list_carryover_rounds(int(ctx['id']), limit_rounds=10, db_path=db)
+            self.assertEqual(data['available_round_count'], 3)
+            self.assertEqual(len(data['rounds']), 3)
+            flat = dc.list_carryover_candidates(int(ctx['id']), limit=10, db_path=db)
+            self.assertEqual(len(flat), 6)
+            self.assertEqual([r['messages'][0]['role'] for r in data['rounds']], ['user', 'user', 'user'])
+        finally:
+            os.unlink(db)
+
+    def test_round_with_multiple_assistants(self):
+        db = _tmp_db()
+        try:
+            _init_chat_messages(db)
+            u = _insert(db, 'hayana', 'question', '2026-07-26 10:00:00')
+            a1 = _insert(db, 'fyodor', 'part1', '2026-07-26 10:01:00')
+            a2 = _insert(db, 'fyodor', 'part2', '2026-07-26 10:02:00')
+            ctx = self._ctx(db)
+            rnd = dc.group_carryover_rounds(
+                dc._collect_prev_day_eligible_messages(
+                    dc.get_daily_context_by_id(int(ctx['id']), db_path=db),
+                    db_path=db,
+                )
+            )
+            self.assertEqual(len(rnd), 1)
+            self.assertEqual(rnd[0]['round_id'], u)
+            self.assertEqual(rnd[0]['message_ids'], [u, a1, a2])
+        finally:
+            os.unlink(db)
+
+    def test_last_round_user_only(self):
+        db = _tmp_db()
+        try:
+            _init_chat_messages(db)
+            _insert(db, 'hayana', 'u1', '2026-07-26 10:00:00')
+            _insert(db, 'fyodor', 'a1', '2026-07-26 10:01:00')
+            tail = _insert(db, 'hayana', 'u-tail', '2026-07-26 10:02:00')
+            ctx = self._ctx(db)
+            data = dc.list_carryover_rounds(int(ctx['id']), limit_rounds=10, db_path=db)
+            self.assertEqual(data['rounds'][-1]['round_id'], tail)
+            self.assertEqual(data['rounds'][-1]['message_ids'], [tail])
+            self.assertEqual(data['rounds'][-1]['messages'][0]['role'], 'user')
+        finally:
+            os.unlink(db)
+
+    def test_leading_orphan_assistant_excluded(self):
+        db = _tmp_db()
+        try:
+            _init_chat_messages(db)
+            _insert(db, 'fyodor', 'orphan', '2026-07-26 10:00:00')
+            u = _insert(db, 'hayana', 'real', '2026-07-26 10:01:00')
+            ctx = self._ctx(db)
+            data = dc.list_carryover_rounds(int(ctx['id']), limit_rounds=10, db_path=db)
+            self.assertEqual(len(data['rounds']), 1)
+            self.assertEqual(data['rounds'][0]['round_id'], u)
+            cands = dc.list_carryover_candidates(int(ctx['id']), limit=10, db_path=db)
+            self.assertEqual([c['content_preview'] for c in cands], ['real'])
+        finally:
+            os.unlink(db)
+
+    def test_save_user_excludes_orphan_assistant(self):
+        db = _tmp_db()
+        try:
+            _init_chat_messages(db)
+            _insert(db, 'hayana', 'u [[SAVE]]', '2026-07-26 10:00:00')
+            _insert(db, 'fyodor', 'orphan-after-save', '2026-07-26 10:01:00')
+            u2 = _insert(db, 'hayana', 'ok', '2026-07-26 10:02:00')
+            ctx = self._ctx(db)
+            data = dc.list_carryover_rounds(int(ctx['id']), limit_rounds=10, db_path=db)
+            self.assertEqual(len(data['rounds']), 1)
+            self.assertEqual(data['rounds'][0]['round_id'], u2)
+        finally:
+            os.unlink(db)
+
+    def test_limit_applies_to_rounds_not_messages(self):
+        db = _tmp_db()
+        try:
+            _init_chat_messages(db)
+            for i in range(12):
+                _insert(db, 'hayana', 'u%d' % i, '2026-07-26 %02d:00:00' % (10 + i))
+                _insert(db, 'fyodor', 'a%d' % i, '2026-07-26 %02d:01:00' % (10 + i))
+            ctx = self._ctx(db)
+            data = dc.list_carryover_rounds(int(ctx['id']), limit_rounds=10, db_path=db)
+            self.assertEqual(data['available_round_count'], 12)
+            self.assertEqual(len(data['rounds']), 10)
+            self.assertEqual(sum(len(r['message_ids']) for r in data['rounds']), 20)
+            result = dc.select_carryover(int(ctx['id']), 3, db_path=db)
+            self.assertEqual(result['selected_round_count'], 3)
+            self.assertEqual(result['selected_message_count'], 6)
+        finally:
+            os.unlink(db)
+
+    def test_select_fewer_rounds_than_available(self):
+        db = _tmp_db()
+        try:
+            _init_chat_messages(db)
+            self._seed_three_rounds_six_messages(db)
+            ctx = self._ctx(db)
+            result = dc.select_carryover(int(ctx['id']), 5, db_path=db)
+            self.assertEqual(result['selected_round_count'], 3)
+            self.assertEqual(result['selected_message_count'], 6)
+        finally:
+            os.unlink(db)
+
+    def test_selected_message_ids_flatten_order_and_ordinals(self):
+        db = _tmp_db()
+        try:
+            _init_chat_messages(db)
+            self._seed_three_rounds_six_messages(db)
+            ctx = self._ctx(db)
+            result = dc.select_carryover(int(ctx['id']), 3, db_path=db)
+            self.assertEqual(result['selected_round_count'], 3)
+            self.assertEqual(result['selected_message_count'], 6)
+            selected = dc.get_selected_carryover_messages(int(ctx['id']), db_path=db)
+            self.assertEqual(result['selected_message_ids'], [m['message_id'] for m in selected])
+            self.assertEqual([m['content'] for m in selected], ['u1', 'a1', 'u2', 'a2', 'u3', 'a3'])
+        finally:
+            os.unlink(db)
+
+    def test_carryover_count_stores_rounds_message_count_separate(self):
+        db = _tmp_db()
+        try:
+            _init_chat_messages(db)
+            self._seed_three_rounds_six_messages(db)
+            ctx = self._ctx(db)
+            result = dc.select_carryover(int(ctx['id']), 3, db_path=db)
+            refreshed = dc.get_daily_context_by_id(int(ctx['id']), db_path=db)
+            self.assertEqual(refreshed['carryover_count'], 3)
+            self.assertEqual(result['selected_round_count'], 3)
+            self.assertEqual(result['selected_message_count'], 6)
+        finally:
+            os.unlink(db)
+
+    def test_idempotent_retry_returns_same_counts_and_ids(self):
+        db = _tmp_db()
+        try:
+            _init_chat_messages(db)
+            self._seed_three_rounds_six_messages(db)
+            ctx = self._ctx(db)
+            first = dc.select_carryover(int(ctx['id']), 3, db_path=db)
+            second = dc.select_carryover(int(ctx['id']), 3, db_path=db)
+            self.assertEqual(second['requested_round_count'], first['requested_round_count'])
+            self.assertEqual(second['selected_round_count'], first['selected_round_count'])
+            self.assertEqual(second['selected_message_count'], first['selected_message_count'])
+            self.assertEqual(second['selected_message_ids'], first['selected_message_ids'])
+        finally:
+            os.unlink(db)
+
+    def test_idempotent_when_fewer_rounds_than_requested(self):
+        db = _tmp_db()
+        try:
+            _init_chat_messages(db)
+            _insert(db, 'hayana', 'u1', '2026-07-26 10:00:00')
+            _insert(db, 'fyodor', 'a1', '2026-07-26 10:01:00')
+            _insert(db, 'hayana', 'u2', '2026-07-26 10:02:00')
+            _insert(db, 'fyodor', 'a2', '2026-07-26 10:03:00')
+            ctx = self._ctx(db)
+            first = dc.select_carryover(int(ctx['id']), 3, db_path=db)
+            second = dc.select_carryover(int(ctx['id']), 3, db_path=db)
+            self.assertEqual(first['requested_round_count'], 3)
+            self.assertEqual(first['selected_round_count'], 2)
+            self.assertEqual(first['selected_message_count'], 4)
+            self.assertEqual(second, first)
+            refreshed = dc.get_daily_context_by_id(int(ctx['id']), db_path=db)
+            self.assertEqual(int(refreshed['carryover_requested_count']), 3)
+            self.assertEqual(int(refreshed['carryover_count']), 2)
+        finally:
+            os.unlink(db)
+
+    def test_idempotent_when_three_rounds_request_five(self):
+        db = _tmp_db()
+        try:
+            _init_chat_messages(db)
+            self._seed_three_rounds_six_messages(db)
+            ctx = self._ctx(db)
+            first = dc.select_carryover(int(ctx['id']), 5, db_path=db)
+            second = dc.select_carryover(int(ctx['id']), 5, db_path=db)
+            self.assertEqual(first['requested_round_count'], 5)
+            self.assertEqual(first['selected_round_count'], 3)
+            self.assertEqual(second, first)
+        finally:
+            os.unlink(db)
+
+    def test_idempotent_zero_rounds_available_request_three(self):
+        db = _tmp_db()
+        try:
+            _init_chat_messages(db)
+            ctx = self._ctx(db)
+            first = dc.select_carryover(int(ctx['id']), 3, db_path=db)
+            second = dc.select_carryover(int(ctx['id']), 3, db_path=db)
+            self.assertEqual(first['requested_round_count'], 3)
+            self.assertEqual(first['selected_round_count'], 0)
+            self.assertEqual(second, first)
+        finally:
+            os.unlink(db)
+
+    def test_different_requested_tier_after_lock_returns_409(self):
+        db = _tmp_db()
+        try:
+            _init_chat_messages(db)
+            self._seed_three_rounds_six_messages(db)
+            ctx = self._ctx(db)
+            dc.select_carryover(int(ctx['id']), 3, db_path=db)
+            with self.assertRaises(dc.ConflictError):
+                dc.select_carryover(int(ctx['id']), 5, db_path=db)
+        finally:
+            os.unlink(db)
+
+    def test_api_routes_deferred_while_old_day_lease_active(self):
+        from daily_context_routes import create_daily_context_blueprint
+        from flask import Flask
+
+        db = _tmp_db()
+        try:
+            _init_chat_messages(db)
+            start = datetime.datetime(2026, 7, 27, 3, 59, 59)
+            finish = datetime.datetime(2026, 7, 27, 4, 1, 0)
+            old_ctx = dc.get_or_create_daily_context(
+                chat_id='default', local_day='2026-07-26', db_path=db,
+                now=start, allow_backfill=True,
+            )
+            uid = _insert(db, 'hayana', 'late', start.strftime('%Y-%m-%d %H:%M:%S'))
+            dc.acquire_resident_turn_lease(
+                int(old_ctx['id']), 1,
+                lease_owner='worker-api', request_message_id=uid,
+                db_path=db, now=start,
+            )
+
+            app = Flask(__name__)
+            app.register_blueprint(create_daily_context_blueprint(
+                db_path=db, token_getter=lambda: 'tok',
+            ))
+            client = app.test_client()
+
+            auth = {'Authorization': 'Bearer tok'}
+            real_resolve = dc.resolve_current_daily_context_for_api
+            with mock.patch('chat.daily_context.enabled', return_value=True), \
+                 mock.patch(
+                     'chat.daily_context.resolve_current_daily_context_for_api',
+                     side_effect=lambda **kw: real_resolve(
+                         chat_id=kw.get('chat_id', 'default'),
+                         db_path=kw.get('db_path', db),
+                         now=finish,
+                     ),
+                 ):
+                for path in (
+                    '/api/daily-context/carryover-candidates',
+                    '/api/daily-context/current',
+                ):
+                    resp = client.get(path, headers=auth)
+                    self.assertEqual(resp.status_code, 423, path)
+                    body = resp.get_json()
+                    self.assertEqual(body['code'], 'rollover_deferred')
+                    self.assertTrue(body['retryable'])
+                resp = client.post(
+                    '/api/daily-context/select-carryover',
+                    json={'count': 3},
+                    headers=auth,
+                )
+                self.assertEqual(resp.status_code, 423)
+                self.assertEqual(resp.get_json()['code'], 'rollover_deferred')
+            self.assertIsNone(
+                dc.get_context_for_local_day('default', '2026-07-27', db_path=db),
+            )
+        finally:
+            os.unlink(db)
+
+    def test_post_route_idempotent_contract_fewer_rounds(self):
+        from daily_context_routes import create_daily_context_blueprint
+        from flask import Flask
+
+        db = _tmp_db()
+        try:
+            _init_chat_messages(db)
+            _insert(db, 'hayana', 'u1', '2026-07-26 10:00:00')
+            _insert(db, 'fyodor', 'a1', '2026-07-26 10:01:00')
+            self._ctx(db, chat_id='default')
+            app = Flask(__name__)
+            app.register_blueprint(create_daily_context_blueprint(
+                db_path=db, token_getter=lambda: 'tok',
+            ))
+            client = app.test_client()
+            auth = {'Authorization': 'Bearer tok'}
+            real_resolve = dc.resolve_current_daily_context_for_api
+            with mock.patch('chat.daily_context.enabled', return_value=True), \
+                 mock.patch(
+                     'chat.daily_context.resolve_current_daily_context_for_api',
+                     side_effect=lambda **kw: real_resolve(
+                         chat_id=kw.get('chat_id', 'default'),
+                         db_path=kw.get('db_path', db),
+                         now=_FIXED_NOW,
+                     ),
+                 ):
+                first = client.post(
+                    '/api/daily-context/select-carryover',
+                    json={'count': 3},
+                    headers=auth,
+                )
+                second = client.post(
+                    '/api/daily-context/select-carryover',
+                    json={'count': 3},
+                    headers=auth,
+                )
+            self.assertEqual(first.status_code, 200)
+            self.assertEqual(second.status_code, 200)
+            body1 = first.get_json()
+            body2 = second.get_json()
+            self.assertEqual(body1['requested_round_count'], 3)
+            self.assertEqual(body1['selected_round_count'], 1)
+            self.assertEqual(body1['selected_message_count'], 2)
+            self.assertEqual(body2['selected_message_ids'], body1['selected_message_ids'])
+        finally:
+            os.unlink(db)
+
+    def test_cross_midnight_user_and_mapped_assistant_same_round(self):
+        db = _tmp_db()
+        try:
+            _init_chat_messages(db)
+            start = datetime.datetime(2026, 7, 27, 3, 59, 59)
+            finish = datetime.datetime(2026, 7, 27, 4, 1, 0)
+            old_ctx = dc.get_or_create_daily_context(
+                chat_id='xmid', local_day='2026-07-26', db_path=db,
+                now=start, allow_backfill=True,
+            )
+            uid = _insert(db, 'hayana', 'late user', start.strftime('%Y-%m-%d %H:%M:%S'))
+            aid = _insert(db, 'assistant', 'late reply', finish.strftime('%Y-%m-%d %H:%M:%S'))
+            dc.record_daily_message_context(
+                uid, context_id=int(old_ctx['id']), context_epoch=int(old_ctx['context_epoch']),
+                resident_generation=1, role='user', db_path=db,
+            )
+            dc.record_daily_message_context(
+                aid, context_id=int(old_ctx['id']), context_epoch=int(old_ctx['context_epoch']),
+                resident_generation=1, role='assistant', db_path=db,
+            )
+            new_ctx = dc.get_or_create_daily_context(
+                chat_id='xmid', local_day='2026-07-27', db_path=db, now=finish,
+            )
+            data = dc.list_carryover_rounds(int(new_ctx['id']), limit_rounds=10, db_path=db)
+            self.assertEqual(len(data['rounds']), 1)
+            self.assertEqual(data['rounds'][0]['message_ids'], [uid, aid])
+            result = dc.select_carryover(int(new_ctx['id']), 3, db_path=db)
+            self.assertEqual(result['selected_round_count'], 1)
+            self.assertEqual(result['selected_message_count'], 2)
+            self.assertEqual(result['selected_message_ids'], [uid, aid])
+        finally:
+            os.unlink(db)
+
+    def test_manifest_reports_round_and_message_counts(self):
+        db = _tmp_db()
+        try:
+            _init_chat_messages(db)
+            self._seed_three_rounds_six_messages(db)
+            ctx = self._ctx(db)
+            dc.select_carryover(int(ctx['id']), 3, db_path=db)
+            _insert(db, 'hayana', 'today', '2026-07-27 09:00:00')
+            with mock.patch('chat.daily_history._build_state_text', return_value=('', 'none', {})):
+                built = dh.build_daily_window_context(
+                    chat_id='default',
+                    daily_context=dc.get_daily_context_by_id(int(ctx['id']), db_path=db),
+                    static_system='S',
+                    is_cold=True,
+                    db_path=db,
+                )
+            manifest = built['manifest']
+            self.assertEqual(manifest['carryover_unit'], 'round')
+            self.assertEqual(manifest['carryover_count'], 3)
+            self.assertEqual(manifest['carryover_round_count'], 3)
+            self.assertEqual(manifest['carryover_message_count'], 6)
+            user_contents = [
+                m['content'] for m in built['carryover_messages'] if m['role'] == 'user'
+            ]
+            self.assertEqual(user_contents, ['u1', 'u2', 'u3'])
+        finally:
+            os.unlink(db)
+
+    def test_get_route_round_contract(self):
+        from daily_context_routes import create_daily_context_blueprint
+        from flask import Flask
+
+        db = _tmp_db()
+        try:
+            _init_chat_messages(db)
+            self._seed_three_rounds_six_messages(db)
+            app = Flask(__name__)
+            app.register_blueprint(create_daily_context_blueprint(
+                db_path=db, token_getter=lambda: 'test-token',
+            ))
+            client = app.test_client()
+            real_resolve = dc.resolve_current_daily_context_for_api
+            with mock.patch('chat.daily_context.enabled', return_value=True), \
+                 mock.patch(
+                     'chat.daily_context.resolve_current_daily_context_for_api',
+                     side_effect=lambda **kw: real_resolve(
+                         chat_id=kw.get('chat_id', 'default'),
+                         db_path=kw.get('db_path', db),
+                         now=_FIXED_NOW,
+                     ),
+                 ):
+                resp = client.get(
+                    '/api/daily-context/carryover-candidates',
+                    headers={'Authorization': 'Bearer test-token'},
+                )
+                self.assertEqual(resp.status_code, 200)
+                body = resp.get_json()
+                self.assertEqual(body['carryover_unit'], 'round')
+                self.assertEqual(body['available_round_count'], 3)
+                self.assertEqual(len(body['rounds']), 3)
+                flat_ids = [c['message_id'] for c in body['candidates']]
+                round_flat = [
+                    m['message_id'] for r in body['rounds'] for m in r['messages']
+                ]
+                self.assertEqual(flat_ids, round_flat)
+        finally:
+            os.unlink(db)
+
+
+class CurrentRoundTruthTests(unittest.TestCase):
+    def _summary(self, db: str, *, now=_FIXED_NOW):
+        return dc.current_summary(chat_id='default', db_path=db, now=now)
+
+    def test_unselected_current_round_truth(self):
+        db = _tmp_db()
+        try:
+            _init_chat_messages(db)
+            dc.get_or_create_daily_context(
+                chat_id='default', local_day='2026-07-27', db_path=db,
+            )
+            data = self._summary(db)
+            self.assertEqual(data['carryover_unit'], 'round')
+            self.assertIsNone(data['requested_round_count'])
+            self.assertEqual(data['selected_round_count'], 0)
+            self.assertEqual(data['selected_message_count'], 0)
+            self.assertEqual(data['selected_message_ids'], [])
+            self.assertEqual(data['carryover_count'], 0)
+            self.assertFalse(data['selection_finalized'])
+        finally:
+            os.unlink(db)
+
+    def test_explicit_zero_locked_current_truth(self):
+        db = _tmp_db()
+        try:
+            _init_chat_messages(db)
+            ctx = dc.get_or_create_daily_context(
+                chat_id='default', local_day='2026-07-27', db_path=db,
+            )
+            dc.select_carryover(int(ctx['id']), 0, db_path=db)
+            data = self._summary(db)
+            self.assertEqual(data['requested_round_count'], 0)
+            self.assertEqual(data['selected_round_count'], 0)
+            self.assertEqual(data['selected_message_count'], 0)
+            self.assertEqual(data['selected_message_ids'], [])
+            self.assertTrue(data['selection_finalized'])
+        finally:
+            os.unlink(db)
+
+    def test_request_five_only_two_rounds_current_truth(self):
+        db = _tmp_db()
+        try:
+            _init_chat_messages(db)
+            _insert(db, 'hayana', 'u1', '2026-07-26 10:00:00')
+            _insert(db, 'fyodor', 'a1', '2026-07-26 10:01:00')
+            _insert(db, 'hayana', 'u2', '2026-07-26 10:02:00')
+            _insert(db, 'fyodor', 'a2', '2026-07-26 10:03:00')
+            ctx = dc.get_or_create_daily_context(
+                chat_id='default', local_day='2026-07-27', db_path=db,
+            )
+            dc.select_carryover(int(ctx['id']), 5, db_path=db)
+            data = self._summary(db)
+            self.assertEqual(data['requested_round_count'], 5)
+            self.assertEqual(data['selected_round_count'], 2)
+            self.assertEqual(data['carryover_count'], 2)
+            self.assertEqual(data['selected_message_count'], 4)
+            self.assertEqual(len(data['selected_message_ids']), 4)
+            self.assertTrue(data['selection_finalized'])
+        finally:
+            os.unlink(db)
+
+    def test_selected_message_ids_follow_ordinal_order(self):
+        db = _tmp_db()
+        try:
+            _init_chat_messages(db)
+            u1 = _insert(db, 'hayana', 'u1', '2026-07-26 10:00:00')
+            a1 = _insert(db, 'fyodor', 'a1', '2026-07-26 10:01:00')
+            u2 = _insert(db, 'hayana', 'u2', '2026-07-26 10:02:00')
+            a2 = _insert(db, 'fyodor', 'a2', '2026-07-26 10:03:00')
+            ctx = dc.get_or_create_daily_context(
+                chat_id='default', local_day='2026-07-27', db_path=db,
+            )
+            dc.select_carryover(int(ctx['id']), 3, db_path=db)
+            data = self._summary(db)
+            self.assertEqual(data['selected_message_ids'], [u1, a1, u2, a2])
+        finally:
+            os.unlink(db)
+
+    def test_current_route_returns_round_truth_fields(self):
+        from daily_context_routes import create_daily_context_blueprint
+        from flask import Flask
+
+        db = _tmp_db()
+        try:
+            _init_chat_messages(db)
+            _insert(db, 'hayana', 'u1', '2026-07-26 10:00:00')
+            _insert(db, 'fyodor', 'a1', '2026-07-26 10:01:00')
+            ctx = dc.get_or_create_daily_context(
+                chat_id='default', local_day='2026-07-27', db_path=db,
+            )
+            dc.select_carryover(int(ctx['id']), 5, db_path=db)
+            expected = self._summary(db)
+            app = Flask(__name__)
+            app.register_blueprint(create_daily_context_blueprint(
+                db_path=db, token_getter=lambda: 'tok',
+            ))
+            client = app.test_client()
+            real_resolve = dc.resolve_current_daily_context_for_api
+            with mock.patch('chat.daily_context.enabled', return_value=True), \
+                 mock.patch(
+                     'chat.daily_context.resolve_current_daily_context_for_api',
+                     side_effect=lambda **kw: real_resolve(
+                         chat_id=kw.get('chat_id', 'default'),
+                         db_path=kw.get('db_path', db),
+                         now=_FIXED_NOW,
+                     ),
+                 ):
+                resp = client.get(
+                    '/api/daily-context/current',
+                    headers={'Authorization': 'Bearer tok'},
+                )
+            self.assertEqual(resp.status_code, 200)
+            body = resp.get_json()
+            self.assertTrue(body['ok'])
+            for key in (
+                'carryover_unit', 'requested_round_count', 'selected_round_count',
+                'selected_message_count', 'selected_message_ids', 'carryover_count',
+                'selection_finalized',
+            ):
+                self.assertEqual(body[key], expected[key], key)
+        finally:
+            os.unlink(db)
+
+    def test_after_409_get_current_restores_requested_tier(self):
+        db = _tmp_db()
+        try:
+            _init_chat_messages(db)
+            _insert(db, 'hayana', 'u1', '2026-07-26 10:00:00')
+            _insert(db, 'fyodor', 'a1', '2026-07-26 10:01:00')
+            _insert(db, 'hayana', 'u2', '2026-07-26 10:02:00')
+            _insert(db, 'fyodor', 'a2', '2026-07-26 10:03:00')
+            ctx = dc.get_or_create_daily_context(
+                chat_id='default', local_day='2026-07-27', db_path=db,
+            )
+            dc.select_carryover(int(ctx['id']), 3, db_path=db)
+            with self.assertRaises(dc.ConflictError):
+                dc.select_carryover(int(ctx['id']), 5, db_path=db)
+            data = self._summary(db)
+            self.assertEqual(data['requested_round_count'], 3)
+            self.assertEqual(data['selected_round_count'], 2)
+            self.assertEqual(data['carryover_count'], 2)
+            self.assertEqual(data['selected_message_count'], 4)
+            self.assertTrue(data['selection_finalized'])
         finally:
             os.unlink(db)
 

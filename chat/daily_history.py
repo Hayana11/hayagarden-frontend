@@ -257,6 +257,9 @@ def build_daily_window_context(
             ],
         })
 
+    carryover_round_count = int(ctx.get('carryover_count') or 0)
+    carryover_message_count = len(carryover_ids)
+
     manifest = {
         'chat_id': ctx.get('chat_id') or chat_id,
         'local_day': ctx.get('local_day'),
@@ -270,7 +273,10 @@ def build_daily_window_context(
         'resident_history_cursor_id': cursor_before,
         'handoff_status': handoff_status,
         'handoff_injected_this_turn': handoff_injected,
-        'carryover_count': len(carryover_ids),
+        'carryover_unit': 'round',
+        'carryover_count': carryover_round_count,
+        'carryover_round_count': carryover_round_count,
+        'carryover_message_count': carryover_message_count,
         'carryover_message_ids': carryover_ids,
         'carryover_injected_this_turn': carryover_injected,
         'selection_finalized': bool(ctx.get('selection_finalized_at')),

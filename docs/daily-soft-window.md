@@ -71,9 +71,26 @@ monotonically only.
 
 ## APIs (flag-gated; db_path injected at blueprint construction)
 
-- `GET /api/daily-context/current`
-- `GET /api/daily-context/carryover-candidates`
-- `POST /api/daily-context/select-carryover` `{ "count": 0|3|5|10 }`
+- `GET /api/daily-context/current` — includes `carryover_unit`, `requested_round_count`,
+  `selected_round_count`, `selected_message_count`, `selected_message_ids`
+- `GET /api/daily-context/carryover-candidates` — `carryover_unit=round`, authoritative `rounds[]`
+- `POST /api/daily-context/select-carryover` `{ "count": 0|3|5|10 }` — count is **round** count
+
+`daily_contexts.carryover_count` stores the number of selected **rounds** (not messages).
+`carryover_requested_count` stores the user-selected tier (`0|3|5|10`) for idempotent
+retries when fewer rounds are available than requested.
+
+Provider manifest reports both `carryover_round_count` and `carryover_message_count`.
+
+HTTP routes resolve the current day via `resolve_current_daily_context_for_api()`,
+which applies the cross-day provider lease fence before creating a new context.
+`DeferredError` returns HTTP 423 with `code: rollover_deferred`.
+
+### FE wiring note (post-#146)
+
+Backend round shape (`message_ids` + `messages[]`) differs from the merged FE preview
+shape (`user` + `assistants`). Formal chat wiring requires a canonical adapter and
+separate handling of `requested_round_count` vs `selected_round_count`.
 
 Auto zero-carryover after the day's first formal user message is already
 committed: `finalize_zero_for_first_user_message(context_id, user_message_id)`.
