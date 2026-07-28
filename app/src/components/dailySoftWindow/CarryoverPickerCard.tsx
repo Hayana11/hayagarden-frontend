@@ -19,8 +19,8 @@ export function CarryoverPickerCard({
   if (locked) {
     return (
       <div className="dsw-card locked" role="status">
-        <div className="dsw-card-kicker">DAILY SOFT WINDOW</div>
-        <div className="dsw-card-title">新的一天</div>
+        <div className="dsw-card-kicker">PACKING FOR THE NEXT WINDOW</div>
+        <div className="dsw-card-title">小猫的行李箱</div>
         <div className="dsw-card-sub">{lockedSummaryText(carryoverCount)}</div>
         {statusText ? <div className="dsw-card-meta">{statusText}</div> : null}
       </div>
@@ -40,8 +40,8 @@ export function CarryoverPickerCard({
         }
       }}
     >
-      <div className="dsw-card-kicker">DAILY SOFT WINDOW</div>
-      <div className="dsw-card-title">新的一天</div>
+      <div className="dsw-card-kicker">PACKING FOR THE NEXT WINDOW</div>
+      <div className="dsw-card-title">小猫的行李箱</div>
       <div className="dsw-card-sub">
         {loading
           ? '正在翻看昨天的话…'

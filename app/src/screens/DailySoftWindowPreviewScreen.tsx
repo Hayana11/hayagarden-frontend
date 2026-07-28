@@ -1,6 +1,6 @@
 import { useMemo, useState, type CSSProperties } from 'react';
 import { Link } from 'react-router-dom';
-import { CarryoverDrawer, CarryoverPickerCard, DaySoftBoundary } from '../components/dailySoftWindow';
+import { CarryoverModal, CarryoverPickerCard, DaySoftBoundary } from '../components/dailySoftWindow';
 import { useDailySoftWindow } from '../hooks/useDailySoftWindow';
 import {
   chatDayKeyFromLocalTs,
@@ -45,8 +45,7 @@ const SCENARIOS: { id: SoftWindowMockScenario; label: string }[] = [
  * Open: /dash/daily-soft-window
  */
 export function DailySoftWindowPreviewScreen() {
-  const [scenario, setScenario] = useState<SoftWindowMockScenario>('ready');
-  const [wide, setWide] = useState(() => typeof window !== 'undefined' && window.innerWidth >= 900);
+  const [scenario, setScenario] = useState<SoftWindowMockScenario>(() => getMockScenario());
   const dsw = useDailySoftWindow({ enabled: true, forceMock: true });
   const transcript = useMemo(() => mockPreviewTranscript(), []);
 
@@ -85,28 +84,10 @@ export function DailySoftWindowPreviewScreen() {
             </Link>
             <div style={{ minWidth: 0 }}>
               <div style={{ fontFamily: DISPLAY, fontSize: 11, letterSpacing: 2, color: 'var(--ghost)' }}>
-                FE-R0 · MOCK
+                FE-R0 · MOCK · 弹窗
               </div>
-              <div style={{ fontFamily: SERIF, fontSize: 16, fontWeight: 600, letterSpacing: 1 }}>小猫每天会看到的样子</div>
+              <div style={{ fontFamily: SERIF, fontSize: 16, fontWeight: 600, letterSpacing: 1 }}>小猫的行李箱</div>
             </div>
-            <button
-              type="button"
-              onClick={() => setWide((w) => !w)}
-              style={{
-                marginLeft: 'auto',
-                border: 'none',
-                borderRadius: 999,
-                padding: '6px 12px',
-                background: 'var(--rosebg)',
-                color: 'var(--deep)',
-                fontFamily: DISPLAY,
-                fontSize: 11,
-                letterSpacing: 1,
-                cursor: 'pointer',
-              }}
-            >
-              {wide ? '桌面抽屉' : '手机抽屉'}
-            </button>
           </div>
           <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
             {SCENARIOS.map((s) => (
@@ -228,9 +209,8 @@ export function DailySoftWindowPreviewScreen() {
         </div>
       </div>
 
-      <CarryoverDrawer
+      <CarryoverModal
         open={dsw.drawerOpen}
-        wide={wide}
         uiState={dsw.uiState}
         draftCount={dsw.draftCount}
         candidates={dsw.candidates}

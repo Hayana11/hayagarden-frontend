@@ -35,7 +35,7 @@ import {
   type ChatMsg,
   type ChatToolCall,
 } from '../lib/chat';
-import { CarryoverDrawer, CarryoverPickerCard, DaySoftBoundary } from '../components/dailySoftWindow';
+import { CarryoverModal, CarryoverPickerCard, DaySoftBoundary } from '../components/dailySoftWindow';
 import { useDailySoftWindow } from '../hooks/useDailySoftWindow';
 import type { ReactElement } from 'react';
 
@@ -1208,10 +1208,9 @@ export function ChatScreen() {
         </div>
       </div>
 
-      {/* ══ Soft Window carryover drawer (FE-R0, gated) ══ */}
-      <CarryoverDrawer
+      {/* ══ Soft Window carryover modal (FE-R0, gated) ══ */}
+      <CarryoverModal
         open={dsw.drawerOpen}
-        wide={wide}
         uiState={dsw.uiState}
         draftCount={dsw.draftCount}
         candidates={dsw.candidates}

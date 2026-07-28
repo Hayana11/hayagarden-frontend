@@ -25,8 +25,8 @@ Before the first send of the new chat-day, a small card sits above the composer:
 不带｜3条｜5条｜10条
 ```
 
-Tap → mobile bottom drawer (85% height) / desktop right narrow drawer.
-Selecting 3 / 5 / 10 previews the exact last-N candidates by `message_id`.
+Tap → centered suitcase modal (reference style; no kitten art).
+Selecting 3 / 5 / 10 previews dialogue snippets by exact `message_id`.
 Sending without a choice auto-locks **0**. After lock, card becomes readonly.
 
 ## Gate (must stay off in production)

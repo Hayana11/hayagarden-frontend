@@ -33,27 +33,24 @@ async function shot(page, name) {
   await page.waitForTimeout(450);
   await page.locator('.dsw-opt').nth(2).click(); // 5
   await page.waitForTimeout(350);
-  await shot(page, 'dsw-fe-r0-drawer-5-mobile.png');
+  await shot(page, 'dsw-fe-r0-modal-5-mobile.png');
   await page.locator('.dsw-btn.primary').click();
   await page.waitForTimeout(450);
   await shot(page, 'dsw-fe-r0-locked-mobile.png');
   await context.close();
 }
 
-// Desktop
+// Desktop centered modal
 {
   const context = await browser.newContext({ viewport: { width: 1100, height: 800 } });
   const page = await context.newPage();
   await page.goto(`${BASE}/dash/daily-soft-window?mockScenario=ready`, { waitUntil: 'networkidle' });
   await page.waitForTimeout(500);
-  const toggle = page.getByRole('button', { name: /手机抽屉|桌面抽屉/ });
-  if (await toggle.count()) {
-    const label = await toggle.innerText();
-    if (label.includes('手机')) await toggle.click();
-  }
   await page.locator('.dsw-card').first().click();
   await page.waitForTimeout(450);
-  await shot(page, 'dsw-fe-r0-drawer-desktop.png');
+  await page.locator('.dsw-opt').nth(1).click(); // 3
+  await page.waitForTimeout(300);
+  await shot(page, 'dsw-fe-r0-modal-desktop.png');
   await context.close();
 }
 
