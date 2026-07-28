@@ -623,16 +623,21 @@ def build_wake_system():
 
 # ── Claude Code resident：结构化上下文（止血：不再每轮重抄动态包）──────────
 
-_CC_SAVE_INSTR = (
-    '【记忆存储】当你认为对话中出现了值得长期记住的信息时，'
-    '在回复正文的最后另起一行，写一个或多个 [[SAVE: 内容]] 标记，'
-    '用一句话概括要保存的内容。这些标记会被自动处理，不会显示给哈娅。'
-    '正文本身不要提及"我已记录"之类的话。'
+_CC_REPLY_IDENTITY = (
     '\n\n每一轮都请以费奥多尔的身份自然地回复哈娅最新的消息，只输出回复内容本身，不要任何前缀。'
     '\n\n【此刻你在哪里】你现在在私聊窗口——只有你和哈娅两个人，Codex 不在场。'
     '这和群聊房间是同一个你，记忆是共通的：如果她在群聊里提过的事，你不该表现得毫不知情；'
     '但语气和场合要分清楚——私聊窗口没有第三方在场的顾虑，群聊时说话要考虑到 Codex 也能看见。'
 )
+
+_CC_SAVE_MARKER_INSTR = (
+    '【记忆存储】当你认为对话中出现了值得长期记住的信息时，'
+    '在回复正文的最后另起一行，写一个或多个 [[SAVE: 内容]] 标记，'
+    '用一句话概括要保存的内容。这些标记会被自动处理，不会显示给哈娅。'
+    '正文本身不要提及"我已记录"之类的话。'
+)
+
+_CC_SAVE_INSTR = _CC_SAVE_MARKER_INSTR + _CC_REPLY_IDENTITY
 
 _CC_TOOLS_CAPABILITY = (
     '（你拥有真实的工具：保存与搜索记忆、控制次卧灯、查看与发布留言板、'
@@ -693,6 +698,29 @@ def build_cc_static_parts():
 def build_cc_static_system():
     """Resident 启动时一次性贴墙的静态 system（逐字稳定）。"""
     return build_cc_static_parts()['full_system']
+
+
+_CC_DAILY_CHOICES_NOTE = (
+    '\n## 你可以发选择器\n'
+    '- 选择器：需要她从几个选项里点一下就能回答时，在正文里写 '
+    '[choices]选项A|选项B|选项C[/choices]（竖线分隔），渲染成一组可点按钮。'
+    '自己判断时机，别滥用；纯聊天不需要。一条回复最多一组选择器。'
+)
+
+
+def build_cc_daily_static_parts():
+    """Daily Soft Window text-only static system — same persona, no tools/SAVE."""
+    persona = read_persona()
+    identity = _CC_REPLY_IDENTITY + _CC_DAILY_CHOICES_NOTE
+    full_system = '\n\n'.join(
+        p for p in (persona, identity) if p and str(p).strip()
+    )
+    return {
+        'persona': persona,
+        'identity': identity,
+        'save_instr': '',
+        'full_system': full_system,
+    }
 
 
 def _fmt_light_status(light):

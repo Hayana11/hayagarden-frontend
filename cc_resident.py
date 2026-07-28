@@ -19,6 +19,8 @@ import config_store
 NL = chr(10)
 CC_STREAM_TIMEOUT = 360
 IDLE_REAP_SECONDS = 3 * 60 * 60
+TOOL_PROFILE_LEGACY = 'legacy'
+TOOL_PROFILE_TEXT_ONLY = 'text_only'
 
 
 def _cfg_int(key, default):
@@ -128,6 +130,7 @@ class ResidentSession:
         self._last_used = 0.0
         self._generation = 0
         self._lock = threading.Lock()
+        self._tool_profile = TOOL_PROFILE_LEGACY
         self._reset_session_meta(respawn_reason=None)
 
     def _reset_session_meta(self, *, respawn_reason):
@@ -154,9 +157,10 @@ class ResidentSession:
         self._keepwarm_lease_expires_at = None
         self._tool_surface_snapshot = {}
 
-    def _spawn(self, system_text, env, *, reason='process_dead'):
+    def _spawn(self, system_text, env, *, reason='process_dead', tool_profile=TOOL_PROFILE_LEGACY):
         self._kill(quiet=True)
-        args = [
+        self._tool_profile = str(tool_profile or TOOL_PROFILE_LEGACY)
+        base_args = [
             'claude', '-p',
             '--input-format', 'stream-json',
             '--output-format', 'stream-json',
@@ -166,11 +170,16 @@ class ResidentSession:
             '--max-turns', '5',
             '--tools', '',
             '--thinking-display', 'summarized',
-            '--mcp-config', self._mcp_config_path,
-            '--strict-mcp-config',
-            '--allowedTools', self._allowed_tools,
             '--exclude-dynamic-system-prompt-sections',
         ]
+        if self._tool_profile == TOOL_PROFILE_TEXT_ONLY:
+            args = base_args + ['--allowedTools', '']
+        else:
+            args = base_args + [
+                '--mcp-config', self._mcp_config_path,
+                '--strict-mcp-config',
+                '--allowedTools', self._allowed_tools,
+            ]
         self._proc = subprocess.Popen(
             args, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, bufsize=1, cwd=self._cwd, env=env,
@@ -180,14 +189,17 @@ class ResidentSession:
         self._cold = True
         self._generation += 1
         self._reset_session_meta(respawn_reason=reason)
-        try:
-            from tools.cc_tool_surface import capture_tool_surface_snapshot
-            self._tool_surface_snapshot = capture_tool_surface_snapshot(
-                self._allowed_tools,
-                mcp_config_path=self._mcp_config_path,
-            )
-        except Exception:
+        if self._tool_profile == TOOL_PROFILE_TEXT_ONLY:
             self._tool_surface_snapshot = {}
+        else:
+            try:
+                from tools.cc_tool_surface import capture_tool_surface_snapshot
+                self._tool_surface_snapshot = capture_tool_surface_snapshot(
+                    self._allowed_tools,
+                    mcp_config_path=self._mcp_config_path,
+                )
+            except Exception:
+                self._tool_surface_snapshot = {}
 
     def _kill(self, quiet=False):
         proc, self._proc = self._proc, None
@@ -220,9 +232,11 @@ class ResidentSession:
     def _alive(self):
         return self._proc is not None and self._proc.poll() is None
 
-    def _decide_respawn_reason(self, system_text):
+    def _decide_respawn_reason(self, system_text, *, tool_profile=TOOL_PROFILE_LEGACY):
         if not self._alive():
             return 'process_dead'
+        if str(tool_profile or TOOL_PROFILE_LEGACY) != str(self._tool_profile or TOOL_PROFILE_LEGACY):
+            return 'tool_profile_changed'
         if (time.time() - self._last_used) > IDLE_REAP_SECONDS:
             return 'idle'
         if system_text != self._system_text:
@@ -244,11 +258,11 @@ class ResidentSession:
             return 'soft_context'
         return None
 
-    def ensure_alive(self, system_text, env):
+    def ensure_alive(self, system_text, env, *, tool_profile=TOOL_PROFILE_LEGACY):
         with self._lock:
-            reason = self._decide_respawn_reason(system_text)
+            reason = self._decide_respawn_reason(system_text, tool_profile=tool_profile)
             if reason:
-                self._spawn(system_text, env, reason=reason)
+                self._spawn(system_text, env, reason=reason, tool_profile=tool_profile)
             return self._cold
 
     def _commit_sent_context(self, commit_meta):
@@ -700,6 +714,10 @@ class ResidentSession:
     @property
     def pending_respawn_reason(self):
         return self._pending_respawn_reason
+
+    @property
+    def tool_profile(self):
+        return self._tool_profile
 
     @property
     def generation(self):

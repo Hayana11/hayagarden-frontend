@@ -45,8 +45,9 @@ def _fetch_current_day_history(
     after_message_id: Optional[int] = None,
     exclude_message_id: Optional[int] = None,
     up_to_message_id: Optional[int] = None,
+    context_id: Optional[int] = None,
+    context_epoch: Optional[int] = None,
 ) -> list[dict[str, Any]]:
-    _d, start_at, _end, next_start = chat_day_window(local_day)
     conn = _connect(db_path)
     try:
         cols = _table_columns(conn, 'chat_messages')
@@ -54,36 +55,75 @@ def _fetch_current_day_history(
         for optional in ('tool_calls', 'source_kind', 'image_url'):
             if optional in cols:
                 select_cols.append(optional)
-        rows = conn.execute(
-            'SELECT %s FROM chat_messages '
-            'WHERE created_at >= ? AND created_at < ? AND id > ? '
-            'ORDER BY id ASC' % ', '.join(select_cols),
-            (start_at, next_start, int(boundary_message_id or 0)),
-        ).fetchall()
         wake_contents = _wake_content_set(conn)
         cutover = get_meta_int(conn, META_SOURCE_KIND_CUTOVER)
-        out = []
-        for r in rows:
-            mid = int(r['id'])
-            if exclude_message_id is not None and mid == int(exclude_message_id):
-                continue
-            if after_message_id is not None and mid <= int(after_message_id):
-                continue
-            if up_to_message_id is not None and mid > int(up_to_message_id):
-                break
+
+        def _to_item(r: Any) -> Optional[dict[str, Any]]:
             if not is_formal_chat_message(
                 r, wake_contents=wake_contents, cutover_id=cutover,
             ):
-                continue
+                return None
+            mid = int(r['id'])
             role = 'user' if str(r['author']).lower() in _USER_AUTHORS else 'assistant'
-            out.append({
+            return {
                 'message_id': mid,
                 'role': role,
                 'author': str(r['author']),
                 'content': _message_display_content(r),
                 'created_at': str(r['created_at'] or ''),
-            })
-        return out
+            }
+
+        mapped_items: dict[int, dict[str, Any]] = {}
+        if context_id is not None and context_epoch is not None:
+            for r in conn.execute(
+                'SELECT %s FROM chat_messages m '
+                'INNER JOIN daily_message_contexts dmc ON dmc.message_id = m.id '
+                'WHERE dmc.context_id=? AND dmc.context_epoch=? '
+                'ORDER BY m.id ASC' % ', '.join('m.' + c for c in select_cols),
+                (int(context_id), int(context_epoch)),
+            ).fetchall():
+                mid = int(r['id'])
+                if exclude_message_id is not None and mid == int(exclude_message_id):
+                    continue
+                if after_message_id is not None and mid <= int(after_message_id):
+                    continue
+                item = _to_item(r)
+                if item is not None:
+                    mapped_items[mid] = item
+
+        _d, start_at, _end, next_start = chat_day_window(local_day)
+        other_mapped: frozenset[int] = frozenset()
+        if context_id is not None:
+            other_rows = conn.execute(
+                'SELECT message_id FROM daily_message_contexts WHERE context_id != ?',
+                (int(context_id),),
+            ).fetchall()
+            other_mapped = frozenset(int(r[0]) for r in other_rows)
+
+        legacy_items: dict[int, dict[str, Any]] = {}
+        for r in conn.execute(
+            'SELECT %s FROM chat_messages '
+            'WHERE created_at >= ? AND created_at < ? AND id > ? '
+            'ORDER BY id ASC' % ', '.join(select_cols),
+            (start_at, next_start, int(boundary_message_id or 0)),
+        ).fetchall():
+            mid = int(r['id'])
+            if mid in mapped_items or mid in other_mapped:
+                continue
+            if exclude_message_id is not None and mid == int(exclude_message_id):
+                continue
+            if after_message_id is not None and mid <= int(after_message_id):
+                continue
+            if up_to_message_id is not None and mid > int(up_to_message_id):
+                continue
+            item = _to_item(r)
+            if item is not None:
+                legacy_items[mid] = item
+
+        rows_by_id = dict(mapped_items)
+        for mid, item in legacy_items.items():
+            rows_by_id.setdefault(mid, item)
+        return [rows_by_id[k] for k in sorted(rows_by_id.keys())]
     finally:
         conn.close()
 
@@ -178,6 +218,8 @@ def build_daily_window_context(
         after_message_id=after_cursor,
         exclude_message_id=current_user_message_id,
         up_to_message_id=current_user_message_id,
+        context_id=context_id,
+        context_epoch=int(ctx.get('context_epoch') or 0),
     )
 
     if current_day_history:
