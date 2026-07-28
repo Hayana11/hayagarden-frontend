@@ -4118,6 +4118,308 @@ def group_chat_stream():
     )
 
 
+def _stream_cc_daily_soft_window(_turn_data, _uc):
+    """Yield SSE event strings for DAILY_SOFT_WINDOW_ENABLED claude_code chat."""
+    import hashlib
+    import logging
+    from moments_turn import DEFAULT_CONVERSATION_ID
+    from chat import daily_context as _daily_ctx
+    from chat import daily_runtime as _daily_rt
+    from chat.system_builder import build_cc_daily_static_parts
+
+    _daily_plan = None
+    turn_terminal = False
+    text, thinking = None, None
+    cc_cache_read, cc_cache_create = 0, 0
+    cc_usage = None
+    unexpected_save = False
+    try:
+        _static_parts = build_cc_daily_static_parts()
+        _full_system = _static_parts['full_system']
+        _cc_env = dict(os.environ)
+        _cc_env['CLAUDE_CODE_OAUTH_TOKEN'] = CC_TOKEN
+        _cc_env.pop('ANTHROPIC_API_KEY', None)
+
+        _daily_plan = _daily_rt.prepare_daily_turn(
+            user_message_id=int(_turn_data['user_message_id']),
+            db_path=DB_PATH,
+            resident=_CC_RESIDENT,
+            static_system=_full_system,
+            static_system_sha256=hashlib.sha256(
+                (_full_system or '').encode('utf-8'),
+            ).hexdigest(),
+            persona_sha256=hashlib.sha256(
+                (_static_parts.get('persona') or '').encode('utf-8'),
+            ).hexdigest(),
+            provider='claude_code',
+            model=_get_model() or '',
+        )
+        key = _daily_plan.resident_key
+        _daily_plan._resident_close_fn = lambda k=key: _daily_rt.close_local_resident_if_bound(
+            _CC_RESIDENT, expected_key=k,
+        )
+
+        cc_tool_calls = []
+        for evt, payload in _daily_rt.stream_daily_resident_turn(
+            _daily_plan,
+            resident=_CC_RESIDENT,
+            env=_cc_env,
+            static_system=_full_system,
+        ):
+            if evt == 'text':
+                yield 'data: ' + json.dumps({'t': 'text', 'd': payload}) + SSE_END
+            elif evt == 'think':
+                yield 'data: ' + json.dumps({'t': 'think', 'd': payload}) + SSE_END
+            elif evt == 'tool_use':
+                cc_tool_calls.append({
+                    'id': payload.get('id'), 'name': payload.get('name'),
+                    'args': payload.get('args'), 'result': '', 'success': True,
+                })
+                yield 'data: ' + json.dumps({
+                    't': 'tool_use',
+                    'd': {'name': payload.get('name'), 'args': _slim_args(payload.get('args'))},
+                    'idx': len(cc_tool_calls) - 1,
+                }, ensure_ascii=False) + SSE_END
+            elif evt == 'tool_result':
+                _ti = next(
+                    (i for i in range(len(cc_tool_calls) - 1, -1, -1)
+                     if cc_tool_calls[i].get('id') == payload.get('tool_use_id')),
+                    len(cc_tool_calls) - 1,
+                )
+                if _ti >= 0:
+                    cc_tool_calls[_ti]['result'] = payload.get('result', '')
+                    cc_tool_calls[_ti]['success'] = not payload.get('is_error')
+            elif evt == 'done':
+                if isinstance(payload, tuple) and len(payload) >= 3 and isinstance(payload[2], dict):
+                    raw_text, thinking, cc_usage = payload[0], payload[1], payload[2]
+                else:
+                    raw_text, thinking, cc_cache_read, cc_cache_create = payload
+                    cc_usage = {
+                        'cache_read': cc_cache_read,
+                        'cache_creation': cc_cache_create,
+                    }
+                text, unexpected_save = _daily_rt.strip_daily_save_markers(raw_text)
+
+        if not str(text or '').strip():
+            _daily_rt.handle_provider_failure(
+                _daily_plan,
+                error_code='empty_provider_response',
+                resident=_CC_RESIDENT,
+            )
+            turn_terminal = True
+            yield 'data: ' + json.dumps({
+                't': 'err', 'd': 'empty provider response', 'retryable': False,
+            }) + SSE_END
+            yield 'data: ' + json.dumps({'t': 'done', 'ok': False}) + SSE_END
+            return
+
+        _cache_info_json = (
+            json.dumps(cc_usage, ensure_ascii=False)
+            if cc_usage else
+            json.dumps({
+                'cache_read': cc_cache_read,
+                'cache_creation': cc_cache_create,
+            }, ensure_ascii=False) if (cc_cache_read or cc_cache_create) else ''
+        )
+        _cc_text, _cc_choices = _extract_choices(text)
+        if _cc_choices and not _cc_text:
+            _cc_text = '[选项: ' + ' / '.join(_cc_choices) + ']'
+        try:
+            assistant_id = _daily_rt.persist_daily_assistant_for_plan(
+                _daily_plan,
+                content=_cc_text,
+                thinking=thinking or '',
+                tool_calls=json.dumps(
+                    [{k: v for k, v in tc.items() if k != 'id'} for tc in cc_tool_calls],
+                    ensure_ascii=False,
+                ) if cc_tool_calls else '',
+                cache_info=_cache_info_json,
+                choices=json.dumps(_cc_choices, ensure_ascii=False) if _cc_choices else '',
+            )
+        except _daily_ctx.ConflictError as exc:
+            _daily_rt.abort_daily_turn(
+                _daily_plan,
+                error_code='assistant_persist_stale_epoch',
+                resident=_CC_RESIDENT,
+                respawn=False,
+            )
+            turn_terminal = True
+            yield 'data: ' + json.dumps({
+                't': 'err', 'd': str(exc), 'retryable': False, 'code': 'epoch_mismatch',
+            }) + SSE_END
+            yield 'data: ' + json.dumps({'t': 'done', 'ok': False}) + SSE_END
+            return
+        except Exception as exc:
+            _daily_rt.abort_daily_turn(
+                _daily_plan,
+                error_code='assistant_persist_failed',
+                resident=_CC_RESIDENT,
+            )
+            turn_terminal = True
+            yield 'data: ' + json.dumps({
+                't': 'err', 'd': 'assistant persist failed: %s' % exc, 'retryable': False,
+            }) + SSE_END
+            yield 'data: ' + json.dumps({'t': 'done', 'ok': False}) + SSE_END
+            return
+
+        try:
+            manifest = _daily_rt.handle_provider_success(
+                _daily_plan,
+                assistant_message_id=assistant_id,
+                raw_text=text,
+                usage=cc_usage if isinstance(cc_usage, dict) else {},
+                unexpected_save_marker=unexpected_save,
+            )
+        except _daily_rt.CursorCASConflictAfterPersist as exc:
+            logging.getLogger(__name__).warning(
+                'daily_window_cursor_cas_conflict assistant_id=%s manifest=%s',
+                exc.assistant_message_id,
+                json.dumps(exc.manifest, ensure_ascii=False),
+            )
+            turn_terminal = True
+            yield 'data: ' + json.dumps({
+                't': 'err',
+                'd': 'cursor CAS conflict after assistant persist',
+                'retryable': False,
+                'code': 'cursor_cas_conflict',
+                'assistant_message_id': exc.assistant_message_id,
+            }) + SSE_END
+            yield 'data: ' + json.dumps({'t': 'done', 'ok': False}) + SSE_END
+            return
+
+        turn_terminal = True
+        yield ('persisted', text, thinking)
+
+        _write_session_memo(_uc, _cc_text)
+        try:
+            from moments_persistence import after_assistant_persisted
+            after_assistant_persisted(
+                memories_db_path=DB_PATH,
+                turn_data=_turn_data,
+                assistant_message_id=assistant_id,
+                conversation_id=DEFAULT_CONVERSATION_ID,
+            )
+        except Exception:
+            pass
+        try:
+            from chat.scoring_identity import trigger_turn_scoring
+            trigger_turn_scoring(
+                assistant_text=text,
+                message_id=_turn_data.get('user_message_id'),
+                get_db_fn=get_db,
+            )
+        except Exception:
+            pass
+        logging.getLogger(__name__).info(
+            'daily_window_manifest %s', json.dumps(manifest, ensure_ascii=False),
+        )
+        if cc_usage or cc_cache_read or cc_cache_create:
+            _usage_evt = {'t': 'usage', 'cache_read': cc_cache_read, 'cache_creation': cc_cache_create}
+            if isinstance(cc_usage, dict):
+                for _k in (
+                    'v', 'provider', 'num_rounds', 'input_tokens', 'output_tokens',
+                    'last_round_context', 'max_round_context', 'resident_turn_count',
+                    'respawn_reason',
+                ):
+                    if _k in cc_usage:
+                        _usage_evt[_k] = cc_usage[_k]
+            yield 'data: ' + json.dumps(_usage_evt) + SSE_END
+        yield 'data: ' + json.dumps({'t': 'done', 'ok': True}) + SSE_END
+        return None
+    except _daily_rt.DuplicateTurnInProgress as exc:
+        turn_terminal = True
+        yield 'data: ' + json.dumps({
+            't': 'err', 'd': str(exc), 'retryable': True, 'code': 'duplicate_turn_in_progress',
+        }) + SSE_END
+        yield 'data: ' + json.dumps({'t': 'done', 'ok': False}) + SSE_END
+        return None
+    except _daily_ctx.DeferredError as exc:
+        if _daily_plan:
+            _daily_rt._release_lease(_daily_plan)
+        turn_terminal = True
+        yield 'data: ' + json.dumps({
+            't': 'err', 'd': str(exc), 'retryable': True, 'code': 'rollover_deferred',
+        }) + SSE_END
+        yield 'data: ' + json.dumps({'t': 'done', 'ok': False}) + SSE_END
+        return None
+    except (_daily_ctx.ConflictError, _daily_rt.LeaseConflictError) as exc:
+        if _daily_plan:
+            _daily_rt._release_lease(_daily_plan)
+        turn_terminal = True
+        yield 'data: ' + json.dumps({
+            't': 'err', 'd': str(exc), 'retryable': True, 'code': 'resident_turn_lease_conflict',
+        }) + SSE_END
+        yield 'data: ' + json.dumps({'t': 'done', 'ok': False}) + SSE_END
+        return None
+    except _daily_rt.LeaseHeartbeatTerminalFailure as exc:
+        if _daily_plan:
+            _daily_rt.abort_daily_turn(
+                _daily_plan,
+                error_code='lease_heartbeat_terminal_failure',
+                resident=_CC_RESIDENT,
+                respawn=False,
+            )
+        turn_terminal = True
+        yield 'data: ' + json.dumps({
+            't': 'err', 'd': str(exc), 'retryable': False, 'code': 'lease_heartbeat_terminal_failure',
+        }) + SSE_END
+        yield 'data: ' + json.dumps({'t': 'done', 'ok': False}) + SSE_END
+        return None
+    except _daily_rt.DailyWindowToolFencePending as exc:
+        if _daily_plan:
+            _daily_rt.abort_daily_turn(
+                _daily_plan,
+                error_code='DailyWindowToolFencePending',
+                resident=_CC_RESIDENT,
+            )
+        turn_terminal = True
+        yield 'data: ' + json.dumps({
+            't': 'err', 'd': str(exc), 'code': 'DailyWindowToolFencePending', 'retryable': False,
+        }) + SSE_END
+        yield 'data: ' + json.dumps({'t': 'done', 'ok': False}) + SSE_END
+        return None
+    except _daily_rt.EpochMismatchError as exc:
+        if _daily_plan:
+            _daily_rt.abort_daily_turn(
+                _daily_plan,
+                error_code='epoch_mismatch',
+                resident=_CC_RESIDENT,
+                respawn=False,
+            )
+        turn_terminal = True
+        yield 'data: ' + json.dumps({
+            't': 'err', 'd': str(exc), 'code': 'epoch_mismatch', 'retryable': False,
+        }) + SSE_END
+        yield 'data: ' + json.dumps({'t': 'done', 'ok': False}) + SSE_END
+        return None
+    except Exception as exc:
+        if _daily_plan:
+            _daily_rt.handle_provider_failure(
+                _daily_plan,
+                error_code=str(exc),
+                resident=_CC_RESIDENT,
+            )
+        turn_terminal = True
+        yield 'data: ' + json.dumps({
+            't': 'err', 'd': str(exc), 'retryable': False,
+        }) + SSE_END
+        yield 'data: ' + json.dumps({'t': 'done', 'ok': False}) + SSE_END
+        return None
+    finally:
+        if _daily_plan is not None and not turn_terminal:
+            try:
+                _daily_rt.abort_daily_turn(
+                    _daily_plan,
+                    error_code='client_stream_cancelled',
+                    resident=_CC_RESIDENT,
+                    respawn=True,
+                )
+            except Exception:
+                logging.getLogger(__name__).exception(
+                    'daily_window client_stream_cancelled cleanup failed',
+                )
+
+
 @app.route('/chat/stream', methods=['POST'])
 def chat_stream():
     from flask import Response, stream_with_context
@@ -4154,6 +4456,23 @@ def chat_stream():
                     yield 'data: ' + json.dumps({'t': 'done', 'ok': bool(text)}) + SSE_END
                     return
                 _turn_data = activate_turn(_turn_data, conversation_id=_conv, memories_db_path=DB_PATH)
+                from chat import daily_context as _daily_ctx
+                if _daily_ctx.enabled():
+                    _daily_out = None
+                    try:
+                        for _chunk in _stream_cc_daily_soft_window(_turn_data, _uc):
+                            if isinstance(_chunk, tuple) and _chunk[0] == 'persisted':
+                                _daily_out = _chunk
+                                continue
+                            yield _chunk
+                    finally:
+                        _released[0] = True
+                        if _daily_out:
+                            _persisted[0] = True
+                            _gen_release((_daily_out[1], _daily_out[2]))
+                        else:
+                            _gen_release(None)
+                    return
                 text, thinking = None, None
                 cc_cache_read, cc_cache_create = 0, 0
                 cc_usage = None

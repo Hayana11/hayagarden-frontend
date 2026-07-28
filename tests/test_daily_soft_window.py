@@ -76,6 +76,16 @@ def _insert(
 
 _FIXED_NOW = datetime.datetime(2026, 7, 27, 10, 0, 0)
 
+# Pin chat-day for calls that omit explicit now= (CI may run on a later calendar day).
+_real_current_chat_day = dc._current_chat_day
+
+
+def _pinned_current_chat_day(now=None):
+    return _real_current_chat_day(now or _FIXED_NOW)
+
+
+dc._current_chat_day = _pinned_current_chat_day
+
 
 def _ctx(db: str, day: str = '2026-07-27', *, chat_id: str = 'default', **kwargs):
     return dc.get_or_create_daily_context(
