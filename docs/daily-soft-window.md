@@ -71,7 +71,8 @@ monotonically only.
 
 ## APIs (flag-gated; db_path injected at blueprint construction)
 
-- `GET /api/daily-context/current`
+- `GET /api/daily-context/current` — includes `carryover_unit`, `requested_round_count`,
+  `selected_round_count`, `selected_message_count`, `selected_message_ids`
 - `GET /api/daily-context/carryover-candidates` — `carryover_unit=round`, authoritative `rounds[]`
 - `POST /api/daily-context/select-carryover` `{ "count": 0|3|5|10 }` — count is **round** count
 

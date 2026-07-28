@@ -2705,6 +2705,21 @@ def current_summary(
     ctx = resolve_current_daily_context_for_api(
         chat_id=chat_id, db_path=db_path, now=now,
     )
+    context_id = int(ctx['id'])
+    selection_finalized = bool(ctx.get('selection_finalized_at'))
+    if selection_finalized:
+        selected_round_count = int(ctx.get('carryover_count') or 0)
+        raw_requested = ctx.get('carryover_requested_count')
+        if raw_requested is None:
+            requested_round_count: Optional[int] = selected_round_count
+        else:
+            requested_round_count = int(raw_requested)
+        selected_messages = get_selected_carryover_messages(context_id, db_path=db_path)
+        selected_message_ids = [int(m['message_id']) for m in selected_messages]
+    else:
+        requested_round_count = None
+        selected_round_count = 0
+        selected_message_ids = []
     handoff_status = HANDOFF_ABSENT
     if ctx.get('handoff_id'):
         h = get_day_handoff(int(ctx['handoff_id']), db_path=db_path)
@@ -2720,9 +2735,14 @@ def current_summary(
         'context_epoch': int(ctx['context_epoch']),
         'status': ctx['status'],
         'boundary_message_id': int(ctx['boundary_message_id'] or 0),
-        'carryover_count': int(ctx['carryover_count'] or 0),
-        'selection_finalized': bool(ctx.get('selection_finalized_at')),
+        'carryover_unit': CARRYOVER_UNIT,
+        'requested_round_count': requested_round_count,
+        'selected_round_count': selected_round_count,
+        'selected_message_count': len(selected_message_ids),
+        'selected_message_ids': selected_message_ids,
+        'carryover_count': selected_round_count,
+        'selection_finalized': selection_finalized,
         'handoff_status': handoff_status,
         'resident_generation': int(ctx['resident_generation'] or 1),
-        'context_id': int(ctx['id']),
+        'context_id': context_id,
     }
