@@ -192,8 +192,11 @@ def chat():
     return send_from_directory('/opt/frontend/static', 'chat.html')
 
 @app.route('/calendar')
+@app.route('/calendar.html')
+@app.route('/static/calendar.html')
 def calendar():
-    return send_from_directory('/opt/frontend/static', 'calendar.html')
+    from flask import redirect
+    return redirect('/dash', code=302)
 
 @app.route('/pocket-settings.html')
 def pocket_settings_page():
@@ -1919,26 +1922,20 @@ def trigger_patrol():
 
 
 # ── Period Tracker ──
+# period_days = detailed source of truth; period_records = legacy/chat compat.
+# type='period' markers are cycle starts only (never every bleeding day).
+import period_logic as _period
+
 def _init_period_tables():
     conn = get_db()
-    conn.execute("""CREATE TABLE IF NOT EXISTS period_records (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        date TEXT NOT NULL,
-        type TEXT NOT NULL,
-        note TEXT DEFAULT '',
-        created_at TEXT DEFAULT (datetime('now','+8 hours'))
-    )""")
-    conn.execute("""CREATE TABLE IF NOT EXISTS period_days (
-        date TEXT PRIMARY KEY,
-        data TEXT NOT NULL DEFAULT '{}',
-        updated_at TEXT DEFAULT (datetime('now','+8 hours'))
-    )""")
-    conn.execute("""CREATE TABLE IF NOT EXISTS period_settings (
-        key TEXT PRIMARY KEY,
-        value TEXT NOT NULL
-    )""")
-    conn.commit()
-    conn.close()
+    try:
+        _period.migrate_period_compat(conn)
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 _init_period_tables()
 
@@ -1947,23 +1944,30 @@ def get_period_records():
     year  = request.args.get('year', type=int)
     month = request.args.get('month', type=int)
     date  = request.args.get('date', '')
+    if date and not _period.is_valid_ymd(date):
+        return jsonify({'error': 'invalid date'}), 400
     conn  = get_db()
-    if date:
-        rows = conn.execute(
-            "SELECT * FROM period_records WHERE date=? ORDER BY id", (date,)
-        ).fetchall()
-    elif year and month:
-        prefix = f"{year}-{month:02d}"
-        rows = conn.execute(
-            "SELECT * FROM period_records WHERE date LIKE ? ORDER BY date,id",
-            (prefix + '%',)
-        ).fetchall()
-    else:
-        rows = conn.execute(
-            "SELECT * FROM period_records ORDER BY date DESC LIMIT 200"
-        ).fetchall()
-    conn.close()
-    return jsonify({'records': [dict(r) for r in rows]})
+    try:
+        # Soft-repair so chat-written start rows become visible as type=period.
+        _period.rebuild_period_start_markers(conn)
+        conn.commit()
+        if date:
+            rows = conn.execute(
+                "SELECT * FROM period_records WHERE date=? ORDER BY id", (date,)
+            ).fetchall()
+        elif year and month:
+            prefix = f"{year}-{month:02d}"
+            rows = conn.execute(
+                "SELECT * FROM period_records WHERE date LIKE ? ORDER BY date,id",
+                (prefix + '%',)
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM period_records ORDER BY date DESC LIMIT 200"
+            ).fetchall()
+        return jsonify({'records': [dict(r) for r in rows]})
+    finally:
+        conn.close()
 
 @app.route('/api/period/records', methods=['POST'])
 def add_period_record():
@@ -1971,109 +1975,86 @@ def add_period_record():
     date  = (data.get('date') or '').strip()
     rtype = (data.get('type') or '').strip()
     note  = (data.get('note') or '').strip()
-    if not date or rtype not in ('period', 'sex'):
-        return jsonify({'error': 'invalid'}), 400
+    if not _period.is_valid_ymd(date) or rtype not in ('period', 'sex'):
+        return jsonify({'error': 'invalid date or type'}), 400
     conn = get_db()
-    cur  = conn.execute(
-        "INSERT INTO period_records (date,type,note) VALUES (?,?,?)", (date, rtype, note)
-    )
-    conn.commit()
-    conn.close()
-    return jsonify({'ok': True, 'id': cur.lastrowid})
+    try:
+        cur = conn.execute(
+            "INSERT INTO period_records (date,type,note) VALUES (?,?,?)", (date, rtype, note)
+        )
+        rid = cur.lastrowid
+        if rtype == 'period':
+            _period.rebuild_period_start_markers(conn)
+        conn.commit()
+        return jsonify({'ok': True, 'id': rid})
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 @app.route('/api/period/records/<int:rid>', methods=['DELETE'])
 def delete_period_record(rid):
     conn = get_db()
-    conn.execute("DELETE FROM period_records WHERE id=?", (rid,))
-    conn.commit()
-    conn.close()
-    return jsonify({'ok': True})
+    try:
+        deleted = _period.delete_period_record(conn, rid)
+        if not deleted:
+            conn.rollback()
+            return jsonify({'error': 'not found'}), 404
+        conn.commit()
+        return jsonify({'ok': True})
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 @app.route('/api/period/stats', methods=['GET'])
 def period_stats():
-    from datetime import datetime as _dt, timedelta as _td
     conn = get_db()
-    rows = conn.execute(
-        "SELECT date FROM period_records WHERE type='period' ORDER BY date"
-    ).fetchall()
-    conn.close()
-    dates = [r['date'] for r in rows]
-    if not dates:
-        return jsonify({'last_period': None, 'cycle_length': None,
-                        'next_period': None, 'ovulation': None})
-    last = dates[-1]
-    cycle_length = 28
-    if len(dates) >= 2:
-        diffs = []
-        for i in range(1, len(dates)):
-            d1 = _dt.strptime(dates[i-1], '%Y-%m-%d')
-            d2 = _dt.strptime(dates[i], '%Y-%m-%d')
-            diff = (d2 - d1).days
-            if 18 <= diff <= 45:
-                diffs.append(diff)
-        if diffs:
-            cycle_length = round(sum(diffs) / len(diffs))
-    last_dt  = _dt.strptime(last, '%Y-%m-%d')
-    next_dt  = last_dt + _td(days=cycle_length)
-    ovul_dt  = next_dt - _td(days=14)
-    return jsonify({
-        'last_period':   last,
-        'cycle_length':  cycle_length,
-        'next_period':   next_dt.strftime('%Y-%m-%d'),
-        'ovulation':     ovul_dt.strftime('%Y-%m-%d'),
-    })
+    try:
+        _period.rebuild_period_start_markers(conn)
+        conn.commit()
+        stats = _period.derive_cycle_stats(conn)
+        return jsonify({
+            'last_period':  stats['last_period'],
+            'cycle_length': stats['cycle_length'],
+            'period_length': stats.get('period_length'),
+            'next_period':  stats['next_period'],
+            'ovulation':    stats['ovulation'],
+        })
+    finally:
+        conn.close()
 
 
 # 每日详细记录：{came, flow, pain, states[], extras[], sex, note}
-# 写入时同步维护 period_records（came→type='period'，sex→type='sex'），
-# 这样 /api/period/stats 和其他读 period_records 的端不受影响。
+# 写入后重建 period_records.type='period' 为每次经期开始日（兼容旧聊天查询）。
 @app.route('/api/period/days', methods=['GET'])
 def get_period_days():
     month = (request.args.get('month') or '').strip()  # YYYY-MM
     conn = get_db()
-    if month:
-        rows = conn.execute(
-            "SELECT date,data FROM period_days WHERE date LIKE ? ORDER BY date",
-            (month + '%',)
-        ).fetchall()
-        legacy = conn.execute(
-            "SELECT date,type FROM period_records WHERE date LIKE ?", (month + '%',)
-        ).fetchall()
-    else:
-        rows = conn.execute(
-            "SELECT date,data FROM period_days ORDER BY date DESC LIMIT 400"
-        ).fetchall()
-        legacy = conn.execute(
-            "SELECT date,type FROM period_records ORDER BY date DESC LIMIT 400"
-        ).fetchall()
-    conn.close()
-    # 旧表记录先铺底（'period'/'start' 视为经期日，'sex' 为亲密），
-    # 这样新页面能看到历史数据；period_days 里的记录覆盖同一天。
-    days = {}
-    for r in legacy:
-        d = days.setdefault(r['date'], {})
-        if r['type'] in ('period', 'start'):
-            d['came'] = True
-        elif r['type'] == 'sex':
-            d['sex'] = True
-    for r in rows:
-        try:
-            rec = json.loads(r['data'])
-        except (ValueError, TypeError):
-            continue
-        if isinstance(rec, dict):
-            days[r['date']] = rec
-    return jsonify({'days': days})
-
-
-def _sync_period_record(conn, date, rtype, present):
-    exists = conn.execute(
-        "SELECT id FROM period_records WHERE date=? AND type=?", (date, rtype)
-    ).fetchone()
-    if present and not exists:
-        conn.execute("INSERT INTO period_records (date,type) VALUES (?,?)", (date, rtype))
-    elif not present and exists:
-        conn.execute("DELETE FROM period_records WHERE date=? AND type=?", (date, rtype))
+    try:
+        _period.rebuild_period_start_markers(conn)
+        conn.commit()
+        if month:
+            rows = conn.execute(
+                "SELECT date,data FROM period_days WHERE date LIKE ? ORDER BY date",
+                (month + '%',)
+            ).fetchall()
+            legacy = conn.execute(
+                "SELECT date,type FROM period_records WHERE date LIKE ?", (month + '%',)
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT date,data FROM period_days ORDER BY date DESC LIMIT 400"
+            ).fetchall()
+            legacy = conn.execute(
+                "SELECT date,type FROM period_records ORDER BY date DESC LIMIT 400"
+            ).fetchall()
+        days = _period.merge_legacy_into_days(rows, legacy)
+        return jsonify({'days': days})
+    finally:
+        conn.close()
 
 
 @app.route('/api/period/day', methods=['PUT', 'POST'])
@@ -2081,26 +2062,21 @@ def put_period_day():
     data = request.get_json() or {}
     date = (data.get('date') or '').strip()
     record = data.get('record')
-    if not date or not isinstance(record, dict):
-        return jsonify({'error': 'invalid'}), 400
-    allowed = {'came', 'flow', 'pain', 'states', 'extras', 'sex', 'note'}
-    record = {k: v for k, v in record.items() if k in allowed and v is not None}
+    if not _period.is_valid_ymd(date) or not isinstance(record, dict):
+        return jsonify({'error': 'invalid date or record'}), 400
     conn = get_db()
-    if record:
-        conn.execute(
-            """INSERT INTO period_days (date,data,updated_at)
-               VALUES (?,?,datetime('now','+8 hours'))
-               ON CONFLICT(date) DO UPDATE SET
-                 data=excluded.data, updated_at=excluded.updated_at""",
-            (date, json.dumps(record, ensure_ascii=False))
-        )
-    else:
-        conn.execute("DELETE FROM period_days WHERE date=?", (date,))
-    _sync_period_record(conn, date, 'period', record.get('came') is True)
-    _sync_period_record(conn, date, 'sex', record.get('sex') is True)
-    conn.commit()
-    conn.close()
-    return jsonify({'ok': True, 'date': date, 'record': record})
+    try:
+        cleaned = _period.put_period_day(conn, date, record)
+        conn.commit()
+        return jsonify({'ok': True, 'date': date, 'record': cleaned})
+    except ValueError as exc:
+        conn.rollback()
+        return jsonify({'error': str(exc)}), 400
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 
 @app.route('/api/period/settings', methods=['GET'])
@@ -2114,33 +2090,44 @@ def get_period_settings():
             return int(kv[k])
         except (KeyError, ValueError):
             return None
+    last_start = kv.get('last_start') or None
+    if last_start and not _period.is_valid_ymd(last_start):
+        last_start = None
     return jsonify({
         'cycle_length':  _int('cycle_length'),
         'period_length': _int('period_length'),
-        'last_start':    kv.get('last_start') or None,
+        'last_start':    last_start,
     })
 
 
 @app.route('/api/period/settings', methods=['PUT', 'POST'])
 def put_period_settings():
     data = request.get_json() or {}
+    ls_raw = data.get('last_start')
+    ls = (ls_raw or '').strip() if isinstance(ls_raw, str) else ''
+    if ls and not _period.is_valid_ymd(ls):
+        return jsonify({'error': 'invalid last_start date'}), 400
     conn = get_db()
-    for key, lo, hi in (('cycle_length', 21, 40), ('period_length', 2, 10)):
-        v = data.get(key)
-        if isinstance(v, (int, float)) and lo <= int(v) <= hi:
+    try:
+        for key, lo, hi in (('cycle_length', 21, 40), ('period_length', 2, 10)):
+            v = data.get(key)
+            if isinstance(v, (int, float)) and lo <= int(v) <= hi:
+                conn.execute(
+                    "INSERT INTO period_settings (key,value) VALUES (?,?) "
+                    "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                    (key, str(int(v)))
+                )
+        if ls:
             conn.execute(
-                "INSERT INTO period_settings (key,value) VALUES (?,?) "
-                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                (key, str(int(v)))
+                "INSERT INTO period_settings (key,value) VALUES ('last_start',?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (ls,)
             )
-    ls = (data.get('last_start') or '').strip() if isinstance(data.get('last_start'), str) else ''
-    if ls:
-        conn.execute(
-            "INSERT INTO period_settings (key,value) VALUES ('last_start',?) "
-            "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (ls,)
-        )
-    conn.commit()
-    conn.close()
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
     return get_period_settings()
 
 

@@ -15,7 +15,6 @@ import { weatherDesc } from '../lib/weather';
 import { pad, smoothPath, WEEK_CN_MON_FIRST, WEEK_CN_SUN_FIRST } from '../lib/format';
 import { buildHeatmapCells, heatmapStats } from '../lib/heatmapCells';
 import { formatCurrency, formatTokens } from '../lib/formatDisplay';
-import { derivePeriod } from '../lib/period';
 import { budgetRingCenterLabel, budgetUsageRatio } from '../lib/ledger';
 import { CONFIG } from '../config';
 import type { UsageAgentId } from '../types';
@@ -38,7 +37,7 @@ export function DashScreen() {
   const usage = useUsage(now);
   const ledgerState = useLedger(now);
   const ledger = ledgerState.data;
-  const period = usePeriod();
+  const period = usePeriod(now);
 
   const msgToday = usage?.msgToday ?? 0;
   const heat = useHeatmap(now, msgToday);
@@ -97,9 +96,7 @@ export function DashScreen() {
   const activeTodos = todos.filter((t) => !t.done).length;
   const recentItems = memory?.sections.find((s) => s.key === 'recent')?.items.slice(0, 6) ?? [];
 
-  const { daysLeft: periodDaysLeft, phase: periodPhase } = period
-    ? derivePeriod(period, now)
-    : { daysLeft: 0, phase: '—' };
+  const periodPhase = period.status === 'ready' ? period.phase : period.status === 'error' ? '未连接' : '—';
 
   return (
     <div style={{ padding: '26px 20px 110px', display: 'flex', flexDirection: 'column', gap: 16, position: 'relative' }}>
@@ -291,7 +288,19 @@ export function DashScreen() {
             Period
           </span>
           <span style={{ fontSize: 13, color: '#7A625E' }}>{periodPhase}</span>
-          <span style={{ fontSize: 11, color: 'var(--color-text-faint)', marginTop: 'auto' }}>距下次 {periodDaysLeft} 天</span>
+          <span style={{ fontSize: 11, color: 'var(--color-text-faint)', marginTop: 'auto' }}>
+            {period.status === 'error'
+              ? period.message
+              : period.status !== 'ready'
+                ? '…'
+                : !period.cycle.hasAnchor
+                  ? '等待首次记录'
+                  : period.cycle.overdue
+                    ? `比预计晚了 ${-(period.cycle.daysUntil ?? 0)} 天`
+                    : period.cycle.inPeriod
+                      ? '经期中'
+                      : `距下次 ${period.cycle.daysUntil} 天`}
+          </span>
         </div>
         <Card style={{ padding: '16px 16px 12px', overflow: 'hidden' }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>

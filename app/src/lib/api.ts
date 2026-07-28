@@ -548,41 +548,40 @@ export function setLedgerBudgetAmount(month: string, amount: number): Promise<bo
 
 // GET /api/period/days?month=YYYY-MM -> { days: { 'YYYY-MM-DD': PeriodDayRecord } }
 // Fetched without a month filter so predictions/averages can look across months.
+// Health data: never silently fall back to fixed mock dates on failure.
 export function fetchPeriodDays(): Promise<PeriodDays> {
-  return withFallback(
-    () => http.get<{ days: PeriodDays }>('/api/period/days').then((r) => r.days || {}),
-    mock.mockPeriodDays,
-  );
+  if (typeof window !== 'undefined' && (window as unknown as { __HAYA_PERIOD_MOCK__?: boolean }).__HAYA_PERIOD_MOCK__) {
+    return Promise.resolve(mock.mockPeriodDays());
+  }
+  return http.get<{ days: PeriodDays }>('/api/period/days').then((r) => r.days || {});
 }
 
 // PUT /api/period/day  body: { date, record } — upsert one day's record.
-// Backend mirrors came/sex into the legacy period_records table.
+// Backend rebuilds legacy period_records cycle-start markers after write.
 export function savePeriodDay(date: string, record: PeriodDayRecord): Promise<boolean> {
   return http
     .put<{ ok: boolean }>('/api/period/day', { date, record })
-    .then((r) => Boolean(r.ok))
-    .catch(() => false);
+    .then((r) => Boolean(r.ok));
 }
 
 // GET /api/period/settings -> { cycle_length, period_length, last_start }
 export function fetchPeriodSettings(): Promise<PeriodSettings> {
-  return withFallback(
-    async () => {
-      const [settings, stats] = await Promise.all([
-        http.get<{ cycle_length: number | null; period_length: number | null; last_start: string | null }>('/api/period/settings'),
-        http
-          .get<{ last_period: string | null; cycle_length: number | null }>('/api/period/stats')
-          .catch(() => ({ last_period: null, cycle_length: null })),
-      ]);
-      const fallback = mock.mockPeriodSettings();
-      return {
-        cycleLength: settings.cycle_length ?? stats.cycle_length ?? fallback.cycleLength,
-        periodLength: settings.period_length ?? fallback.periodLength,
-        lastStart: settings.last_start ?? stats.last_period ?? fallback.lastStart,
-      };
-    },
-    mock.mockPeriodSettings,
-  );
+  if (typeof window !== 'undefined' && (window as unknown as { __HAYA_PERIOD_MOCK__?: boolean }).__HAYA_PERIOD_MOCK__) {
+    return Promise.resolve(mock.mockPeriodSettings());
+  }
+  return (async () => {
+    const [settings, stats] = await Promise.all([
+      http.get<{ cycle_length: number | null; period_length: number | null; last_start: string | null }>('/api/period/settings'),
+      http
+        .get<{ last_period: string | null; cycle_length: number | null; period_length: number | null }>('/api/period/stats')
+        .catch(() => ({ last_period: null, cycle_length: null, period_length: null })),
+    ]);
+    return {
+      cycleLength: settings.cycle_length ?? stats.cycle_length ?? 28,
+      periodLength: settings.period_length ?? stats.period_length ?? 5,
+      lastStart: settings.last_start ?? stats.last_period ?? '',
+    };
+  })();
 }
 
 // PUT /api/period/settings  body: { cycle_length?, period_length?, last_start? }
@@ -591,32 +590,33 @@ export function savePeriodSettings(s: PeriodSettings): Promise<boolean> {
     .put<{ cycle_length: number | null }>('/api/period/settings', {
       cycle_length: s.cycleLength,
       period_length: s.periodLength,
-      last_start: s.lastStart,
+      last_start: s.lastStart || undefined,
     })
-    .then(() => true)
-    .catch(() => false);
+    .then(() => true);
 }
 
 // GET /api/period/stats -> PeriodStats
+// Prefer deriveCycle(days, settings) on the client; this remains for legacy callers.
 export function fetchPeriodStats(): Promise<PeriodStats> {
-  return withFallback(
-    () =>
-      http
-        .get<{
-          last_period: string | null;
-          cycle_length: number | null;
-          next_period: string | null;
-        }>('/api/period/stats')
-        .then((r) => {
-          if (!r.last_period || !r.next_period || !r.cycle_length) throw new Error('missing period stats');
-          return {
-            lastPeriodStart: r.last_period,
-            cycleLengthAvgDays: Number(r.cycle_length),
-            periodLengthAvgDays: 5,
-            recordsCount: 1,
-            nextPredicted: r.next_period,
-          } satisfies PeriodStats;
-        }),
-    mock.mockPeriodStats,
-  );
+  if (typeof window !== 'undefined' && (window as unknown as { __HAYA_PERIOD_MOCK__?: boolean }).__HAYA_PERIOD_MOCK__) {
+    return Promise.resolve(mock.mockPeriodStats());
+  }
+  return http
+    .get<{
+      last_period: string | null;
+      cycle_length: number | null;
+      period_length: number | null;
+      next_period: string | null;
+    }>('/api/period/stats')
+    .then((r) => {
+      if (!r.last_period || !r.next_period || !r.cycle_length) throw new Error('missing period stats');
+      return {
+        lastPeriodStart: r.last_period,
+        cycleLengthAvgDays: Number(r.cycle_length),
+        periodLengthAvgDays: Number(r.period_length ?? 5),
+        recordsCount: 1,
+        nextPredicted: r.next_period,
+      } satisfies PeriodStats;
+    });
 }
+
