@@ -86,5 +86,8 @@ committed: `finalize_zero_for_first_user_message(context_id, user_message_id)`.
 
 ## Frontend companion
 
-See `docs/daily-soft-window-fe.md` for **P-CONTEXT-DAILY-SOFT-WINDOW-FE-R0**
-(carryover picker UI, mock-first, default off).
+See `docs/daily-soft-window-fe.md` for **P-CONTEXT-DAILY-SOFT-WINDOW-FE-R0**.
+
+Current FE Draft is **preview-only** (`/dash/daily-soft-window` mock + round
+semantics). Formal `/dash/chat` Soft Window wiring stays off until backend
+**R1.1 round contract**.

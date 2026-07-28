@@ -35,8 +35,6 @@ import {
   type ChatMsg,
   type ChatToolCall,
 } from '../lib/chat';
-import { CarryoverModal, CarryoverPickerCard, DaySoftBoundary } from '../components/dailySoftWindow';
-import { useDailySoftWindow } from '../hooks/useDailySoftWindow';
 import type { ReactElement } from 'react';
 
 const SETTINGS_KEY = 'fyodor-chat-settings';
@@ -168,12 +166,6 @@ export function ChatScreen() {
   const [refreshing, setRefreshing] = useState(false);
   const [chatError, setChatError] = useState<{ message: string; hint: string } | null>(null);
   const [pickedChoices, setPickedChoices] = useState<Record<number, string>>({});
-
-  // Soft Window FE-R0: default OFF. Opt-in via ?dailySoftWindowFe=1 or localStorage.
-  const dsw = useDailySoftWindow();
-  const dswEnabled = dsw.enabled;
-  const dswLocked = dsw.locked;
-  const dswLockZeroIfNeeded = dsw.lockZeroIfNeeded;
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const taRef = useRef<HTMLTextAreaElement>(null);
@@ -368,10 +360,6 @@ export function ChatScreen() {
     const extra = pendingImage ? { imageFile: pendingImage } : pendingFile ? { fileUrl: pendingFile.fileUrl, fileName: pendingFile.fileName } : {};
     setPendingFile(null);
     setPendingImage(null);
-    // Unselected first send of the day → auto lock 0 (FE mock/gated only).
-    if (dswEnabled && !dswLocked) {
-      await dswLockZeroIfNeeded();
-    }
     const messageId = await sendChatMessage(text, extra);
     if (messageId === null) {
       showToast('发送失败');
@@ -384,7 +372,7 @@ export function ChatScreen() {
     await refetchLatest();
     setSending(false);
     taRef.current?.focus();
-  }, [input, pendingFile, pendingImage, sending, refetchLatest, runStream, showToast, dswEnabled, dswLocked, dswLockZeroIfNeeded]);
+  }, [input, pendingFile, pendingImage, sending, refetchLatest, runStream, showToast]);
 
   const chooseOption = useCallback(async (text: string, msgId: number) => {
     if (sending || isChoicesAnswered(msgId, msgs)) return;
@@ -857,28 +845,11 @@ export function ChatScreen() {
     );
   }
 
-  // date separators (+ Soft Window chat-day boundary when FE gate is on)
+  // date separators
   const rendered: ReactElement[] = [];
   let lastDate = '';
-  let lastChatDay = '';
   for (const m of msgs) {
-    if (dsw.enabled) {
-      const day = m.chatDay || m.dateKey;
-      if (day && day !== lastChatDay) {
-        if (lastChatDay) {
-          rendered.push(<DaySoftBoundary key={`dsw-${day}`} />);
-        } else if (m.dateKey) {
-          const label = m.dateKey === new Date().toISOString().slice(0, 10) ? dateLabel : m.dateKey.replace(/-/g, '.');
-          rendered.push(
-            <div key={`d-${m.dateKey}`} style={{ textAlign: 'center', fontFamily: DISPLAY, fontSize: 12, letterSpacing: 2, color: 'var(--ghost)', padding: '2px 0' }}>
-              {label}
-            </div>,
-          );
-        }
-        lastChatDay = day;
-        lastDate = m.dateKey || lastDate;
-      }
-    } else if (m.dateKey && m.dateKey !== lastDate) {
+    if (m.dateKey && m.dateKey !== lastDate) {
       lastDate = m.dateKey;
       const label = m.dateKey === new Date().toISOString().slice(0, 10) ? dateLabel : m.dateKey.replace(/-/g, '.');
       rendered.push(
@@ -887,9 +858,8 @@ export function ChatScreen() {
         </div>,
       );
     }
-    const highlight = dsw.enabled && dsw.drawerOpen && dsw.draftCount > 0 && dsw.highlightIds.has(m.id);
     rendered.push(
-      <div key={m.id} className={highlight ? 'dsw-msg-highlight' : undefined}>
+      <div key={m.id}>
         {m.role === 'user' ? renderUserMsg(m) : renderAssistantMsg(m)}
       </div>,
     );
@@ -1157,16 +1127,6 @@ export function ChatScreen() {
             </div>
           )}
 
-          {dsw.showPickerCard ? (
-            <CarryoverPickerCard
-              locked={dsw.locked}
-              carryoverCount={dsw.summary?.carryover_count ?? 0}
-              loading={dsw.uiState === 'loading'}
-              statusText={dsw.statusText}
-              onOpen={dsw.openDrawer}
-            />
-          ) : null}
-
           <div style={{ background: 'var(--card)', borderRadius: 26, boxShadow: '0 14px 40px var(--shadow2)', padding: '12px 12px 10px', transition: 'background .3s' }}>
             <textarea
               ref={taRef}
@@ -1207,21 +1167,6 @@ export function ChatScreen() {
           </div>
         </div>
       </div>
-
-      {/* ══ Soft Window carryover modal (FE-R0, gated) ══ */}
-      <CarryoverModal
-        open={dsw.drawerOpen}
-        uiState={dsw.uiState}
-        draftCount={dsw.draftCount}
-        candidates={dsw.candidates}
-        submitting={dsw.submitting}
-        errorDetail={dsw.errorDetail}
-        onClose={dsw.closeDrawer}
-        onDraftChange={dsw.setDraftCount}
-        onConfirm={() => {
-          void dsw.confirmSelection();
-        }}
-      />
 
       {/* ══ thinking drawer ══ */}
       {drawer && (

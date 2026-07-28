@@ -1,9 +1,12 @@
 /**
  * P-CONTEXT-DAILY-SOFT-WINDOW-FE-R0
  *
- * Frontend-only Soft Window carryover picker.
- * Default OFF — does not change formal chat until explicitly gated on.
- * Development uses mock API; live routes stay behind DAILY_SOFT_WINDOW_ENABLED=0.
+ * Frontend Soft Window carryover picker — **preview-only** until backend R1.1
+ * round contract lands.
+ *
+ * - `/dash/daily-soft-window` uses mock API + round semantics
+ * - `/dash/chat` is intentionally unwired (no picker, no select-carryover, no auto-lock)
+ * - Does not enable `DAILY_SOFT_WINDOW_ENABLED`, does not call resident / Wake
  */
 
 import { HttpError, http } from './http';
@@ -28,12 +31,21 @@ export type CarryoverCandidate = {
   author?: string;
 };
 
+/** One conversation round: a user turn + following assistants until the next user. */
+export type CarryoverRound = {
+  /** Stable id = leading user message_id. */
+  round_id: number;
+  user: CarryoverCandidate;
+  assistants: CarryoverCandidate[];
+};
+
 export type DailyContextSummary = {
   ok?: boolean;
   local_day: string;
   context_epoch: number;
   status: DailyContextStatus | string;
   boundary_message_id: number;
+  /** Selected round count (not raw message count). */
   carryover_count: number;
   selection_finalized: boolean;
   handoff_status?: string;
@@ -45,7 +57,10 @@ export type CarryoverCandidatesResponse = {
   ok?: boolean;
   context_id: number;
   context_epoch: number;
+  /** Flat formal messages (ordered). Prefer grouping via `groupIntoRounds`. */
   candidates: CarryoverCandidate[];
+  /** Round view for FE preview (awaiting backend R1.1 contract). */
+  rounds: CarryoverRound[];
 };
 
 export type SelectCarryoverResponse = {
@@ -53,6 +68,7 @@ export type SelectCarryoverResponse = {
   selected_message_ids: number[];
   finalized_at: string;
   context_epoch: number;
+  /** Selected round count. */
   carryover_count: number;
 };
 
@@ -75,34 +91,26 @@ export type SoftWindowMockScenario =
   | 'locked'
   | 'error';
 
-const FE_FLAG_KEY = 'DAILY_SOFT_WINDOW_FE';
 const MOCK_SCENARIO_KEY = 'DAILY_SOFT_WINDOW_FE_MOCK';
 
-/** Explicit opt-in only. Production chat stays unchanged by default. */
-export function isDailySoftWindowFeEnabled(search = typeof location !== 'undefined' ? location.search : ''): boolean {
-  const params = new URLSearchParams(search);
-  const q = params.get('dailySoftWindowFe');
-  if (q === '1' || q === 'true') return true;
-  if (q === '0' || q === 'false') return false;
-  try {
-    return localStorage.getItem(FE_FLAG_KEY) === '1';
-  } catch {
-    return false;
-  }
+/**
+ * Formal chat Soft Window integration is paused until backend R1.1 round contract.
+ * Preview page passes `enabled: true` explicitly — do not re-enable via URL/localStorage.
+ */
+export function isDailySoftWindowFeEnabled(
+  _search = typeof location !== 'undefined' ? location.search : '',
+): boolean {
+  return false;
 }
 
-export function preferMockDailySoftWindow(search = typeof location !== 'undefined' ? location.search : ''): boolean {
+/** Preview always uses mock until live round contract is ready. */
+export function preferMockDailySoftWindow(
+  search = typeof location !== 'undefined' ? location.search : '',
+): boolean {
   const params = new URLSearchParams(search);
   const q = params.get('dailySoftWindowMock');
-  if (q === '1' || q === 'true') return true;
   if (q === '0' || q === 'false') return false;
-  // Preview route / explicit FE flag without live backend → mock by default.
-  if (params.get('dailySoftWindowFe') === '1') return true;
-  try {
-    return localStorage.getItem(MOCK_SCENARIO_KEY) !== 'live';
-  } catch {
-    return true;
-  }
+  return true;
 }
 
 export function getMockScenario(search = typeof location !== 'undefined' ? location.search : ''): SoftWindowMockScenario {
@@ -169,14 +177,45 @@ export function isCarryoverCount(n: number): n is CarryoverCount {
   return (CARRYOVER_COUNTS as readonly number[]).includes(n);
 }
 
-/** Exact last-N by message_id order (backend stores candidates ascending). */
+/**
+ * Group formal messages into conversation rounds:
+ * one user message + following assistants until the next user.
+ * Leading assistant-only rows (if any) are dropped for carryover preview.
+ */
+export function groupIntoRounds(messages: CarryoverCandidate[]): CarryoverRound[] {
+  const rounds: CarryoverRound[] = [];
+  let current: CarryoverRound | null = null;
+  for (const msg of messages) {
+    if (msg.role === 'user') {
+      if (current) rounds.push(current);
+      current = { round_id: msg.message_id, user: msg, assistants: [] };
+      continue;
+    }
+    if (current) current.assistants.push(msg);
+  }
+  if (current) rounds.push(current);
+  return rounds;
+}
+
+export function flattenRoundMessages(rounds: CarryoverRound[]): CarryoverCandidate[] {
+  const out: CarryoverCandidate[] = [];
+  for (const r of rounds) {
+    out.push(r.user, ...r.assistants);
+  }
+  return out;
+}
+
+export function pickLastNRounds(rounds: CarryoverRound[], count: CarryoverCount): CarryoverRound[] {
+  if (count === 0 || !rounds.length) return [];
+  return rounds.slice(-count);
+}
+
+/** Exact last-N **rounds**, flattened to messages (preview / highlight). */
 export function pickLastNCandidates(
   candidates: CarryoverCandidate[],
   count: CarryoverCount,
 ): CarryoverCandidate[] {
-  if (count === 0) return [];
-  if (!candidates.length) return [];
-  return candidates.slice(-count);
+  return flattenRoundMessages(pickLastNRounds(groupIntoRounds(candidates), count));
 }
 
 export function selectedMessageIds(
@@ -184,6 +223,23 @@ export function selectedMessageIds(
   count: CarryoverCount,
 ): number[] {
   return pickLastNCandidates(candidates, count).map((c) => c.message_id);
+}
+
+export function selectedRoundMessageIds(rounds: CarryoverRound[], count: CarryoverCount): number[] {
+  return flattenRoundMessages(pickLastNRounds(rounds, count)).map((c) => c.message_id);
+}
+
+/** First/last fragment messages for the packing modal preview. */
+export function roundSnippetMessages(rounds: CarryoverRound[]): CarryoverCandidate[] {
+  if (!rounds.length) return [];
+  if (rounds.length === 1) {
+    const only = rounds[0];
+    return only.assistants.length ? [only.user, only.assistants[only.assistants.length - 1]] : [only.user];
+  }
+  const first = rounds[0].user;
+  const lastRound = rounds[rounds.length - 1];
+  const last = lastRound.assistants[lastRound.assistants.length - 1] ?? lastRound.user;
+  return [first, last];
 }
 
 export function countLabel(count: CarryoverCount): string {
@@ -196,74 +252,165 @@ export function lockedSummaryText(count: number): string {
   return `今天带来了 ${count} 轮昨天的话。`;
 }
 
+/**
+ * Mock transcript organized as 10 full conversation rounds.
+ * Some rounds include multiple assistant messages (still one round).
+ */
 const MOCK_CANDIDATES: CarryoverCandidate[] = [
+  // 1
   {
     message_id: 9001,
     role: 'user',
     content_preview: '今天想先把 Soft Window 的界面定下来，数字用 Bodoni。',
-    created_at: '2026-07-27 23:12:08',
+    created_at: '2026-07-27 22:12:08',
     author: 'hayana',
   },
   {
     message_id: 9002,
     role: 'assistant',
-    content_preview: '好。那就只做小猫每天会看见的那一层——卡片、抽屉、锁定。',
-    created_at: '2026-07-27 23:13:41',
+    content_preview: '好。就做小猫每天会看见的那一层——卡片、弹窗、锁定。',
+    created_at: '2026-07-27 22:13:41',
     author: 'fyodor',
   },
+  // 2
   {
     message_id: 9003,
     role: 'user',
     content_preview: '选了就不能再悄悄改成十条。直接发消息就算不带。',
-    created_at: '2026-07-27 23:40:02',
+    created_at: '2026-07-27 22:40:02',
     author: 'hayana',
   },
   {
     message_id: 9004,
     role: 'assistant',
-    content_preview: '那条后台任务失败不用管——是我想临时再开一眼状态。',
-    created_at: '2026-07-27 23:41:18',
+    content_preview: '锁定以后只读。预览页可以反复试，正式聊天先不接线。',
+    created_at: '2026-07-27 22:41:18',
     author: 'fyodor',
   },
+  // 3 — multi-assistant round
   {
     message_id: 9005,
     role: 'user',
-    content_preview: '明天四点以后旧消息还留在原处，中间只放一条很轻的分隔。',
-    created_at: '2026-07-28 01:05:33',
+    content_preview: '候选要按完整对话轮：一条 user 加上后面的 assistant。',
+    created_at: '2026-07-27 23:05:33',
     author: 'hayana',
   },
   {
     message_id: 9006,
     role: 'assistant',
-    content_preview: '☾ 新的一天。昨天的话还留在身后——你选要带几句。',
-    created_at: '2026-07-28 01:06:11',
+    content_preview: '对。中间如果还有工具回声，也算在同一轮里。',
+    created_at: '2026-07-27 23:06:11',
     author: 'fyodor',
   },
   {
     message_id: 9007,
+    role: 'assistant',
+    content_preview: '（整理了一下昨天尾巴，十轮都齐了。）',
+    created_at: '2026-07-27 23:06:40',
+    author: 'fyodor',
+  },
+  // 4
+  {
+    message_id: 9008,
     role: 'user',
-    content_preview: '预览要按 message id 精确高亮最后 N 条，不要猜文本。',
-    created_at: '2026-07-28 02:18:44',
+    content_preview: '视觉语义写成：不带 / 3轮 / 5轮 / 10轮。',
+    created_at: '2026-07-27 23:18:44',
     author: 'hayana',
   },
   {
-    message_id: 9008,
+    message_id: 9009,
     role: 'assistant',
-    content_preview: '可以。候选来自昨天的正式聊天尾巴，选中就锁进行李箱。',
-    created_at: '2026-07-28 02:19:20',
+    content_preview: '收到。档位按轮数，不再按单条消息数。',
+    created_at: '2026-07-27 23:19:20',
     author: 'fyodor',
   },
+  // 5
   {
-    message_id: 9009,
+    message_id: 9010,
     role: 'user',
-    content_preview: '手机从底部抽屉，桌面用窄侧栏。别做全屏阻断。',
+    content_preview: '手机验收只要打开 /dash/daily-soft-window 就行。',
+    created_at: '2026-07-27 23:32:55',
+    author: 'hayana',
+  },
+  {
+    message_id: 9011,
+    role: 'assistant',
+    content_preview: '这条 preview route 自带 mock，不依赖 live Soft Window。',
+    created_at: '2026-07-27 23:33:40',
+    author: 'fyodor',
+  },
+  // 6
+  {
+    message_id: 9012,
+    role: 'user',
+    content_preview: '正式聊天先别自动锁 0，也别弹选择卡。',
+    created_at: '2026-07-28 00:02:11',
+    author: 'hayana',
+  },
+  {
+    message_id: 9013,
+    role: 'assistant',
+    content_preview: '好。/dash/chat 保持原样，等 R1.1 round contract。',
+    created_at: '2026-07-28 00:02:48',
+    author: 'fyodor',
+  },
+  // 7
+  {
+    message_id: 9014,
+    role: 'user',
+    content_preview: 'DAILY_SOFT_WINDOW_ENABLED 继续保持 0。',
+    created_at: '2026-07-28 00:40:02',
+    author: 'hayana',
+  },
+  {
+    message_id: 9015,
+    role: 'assistant',
+    content_preview: '不调用模型，不跑 Wake，不改 runtime flag。',
+    created_at: '2026-07-28 00:40:33',
+    author: 'fyodor',
+  },
+  // 8
+  {
+    message_id: 9016,
+    role: 'user',
+    content_preview: '弹窗去掉左边行李箱，单列就好。',
+    created_at: '2026-07-28 01:15:09',
+    author: 'hayana',
+  },
+  {
+    message_id: 9017,
+    role: 'assistant',
+    content_preview: '已经改成「新的一天」单列 packing modal。',
+    created_at: '2026-07-28 01:15:41',
+    author: 'fyodor',
+  },
+  // 9
+  {
+    message_id: 9018,
+    role: 'user',
+    content_preview: '预览要按 round 高亮整轮，不要只高亮一条。',
+    created_at: '2026-07-28 02:08:22',
+    author: 'hayana',
+  },
+  {
+    message_id: 9019,
+    role: 'assistant',
+    content_preview: '选中 N 轮时，这一轮里的 user 和 assistant 都会标出来。',
+    created_at: '2026-07-28 02:08:55',
+    author: 'fyodor',
+  },
+  // 10
+  {
+    message_id: 9020,
+    role: 'user',
+    content_preview: 'Draft 先留着，等后端 round contract 再接正式聊天。',
     created_at: '2026-07-28 03:02:55',
     author: 'hayana',
   },
   {
-    message_id: 9010,
+    message_id: 9021,
     role: 'assistant',
-    content_preview: '收到。你先睡，四点以后卡片会等你——不选也可以直接说话。',
+    content_preview: '收到。你先睡，preview 留在手机里验视觉就好。',
     created_at: '2026-07-28 03:03:40',
     author: 'fyodor',
   },
@@ -273,6 +420,7 @@ type MockStore = {
   scenario: SoftWindowMockScenario;
   summary: DailyContextSummary;
   candidates: CarryoverCandidate[];
+  rounds: CarryoverRound[];
   selectedIds: number[];
 };
 
@@ -292,6 +440,9 @@ function resetMockStore(scenario: SoftWindowMockScenario = activeMockScenario): 
   activeMockScenario = scenario;
   const localDay = todayChatDay() || '2026-07-28';
   const locked = scenario === 'locked' || scenario === 'conflict';
+  const candidates = scenario === 'empty' ? [] : MOCK_CANDIDATES.slice();
+  const rounds = groupIntoRounds(candidates);
+  const lockedRounds = locked ? pickLastNRounds(rounds, 5) : [];
   mockStore = {
     scenario,
     summary: {
@@ -299,15 +450,16 @@ function resetMockStore(scenario: SoftWindowMockScenario = activeMockScenario): 
       local_day: localDay,
       context_epoch: 42,
       status: 'PROVISIONAL',
-      boundary_message_id: 9010,
-      carryover_count: locked ? 5 : 0,
+      boundary_message_id: candidates.length ? candidates[candidates.length - 1].message_id : 0,
+      carryover_count: locked ? lockedRounds.length : 0,
       selection_finalized: locked,
       handoff_status: 'ABSENT',
       resident_generation: 1,
       context_id: 7,
     },
-    candidates: scenario === 'empty' ? [] : MOCK_CANDIDATES.slice(),
-    selectedIds: locked ? MOCK_CANDIDATES.slice(-5).map((c) => c.message_id) : [],
+    candidates,
+    rounds,
+    selectedIds: flattenRoundMessages(lockedRounds).map((c) => c.message_id),
   };
   return mockStore;
 }
@@ -351,6 +503,11 @@ async function mockCandidates(): Promise<CarryoverCandidatesResponse> {
     context_id: store.summary.context_id,
     context_epoch: store.summary.context_epoch,
     candidates: store.candidates.slice(),
+    rounds: store.rounds.map((r) => ({
+      round_id: r.round_id,
+      user: { ...r.user },
+      assistants: r.assistants.map((a) => ({ ...a })),
+    })),
   };
 }
 
@@ -375,8 +532,8 @@ async function mockSelect(count: CarryoverCount): Promise<SelectCarryoverRespons
       carryover_count: store.summary.carryover_count,
     };
   }
-  const picked = pickLastNCandidates(store.candidates, count);
-  store.selectedIds = picked.map((c) => c.message_id);
+  const picked = pickLastNRounds(store.rounds, count);
+  store.selectedIds = flattenRoundMessages(picked).map((c) => c.message_id);
   store.summary.carryover_count = picked.length;
   store.summary.selection_finalized = true;
   return {
@@ -417,10 +574,15 @@ export function createDailySoftWindowClient(opts?: {
       },
     };
   }
+  // Live paths exist for a future Integration PR only. Chat is unwired in this Draft.
   return {
     mode: 'live',
     getCurrent: () => http.get<DailyContextSummary>('/api/daily-context/current'),
-    getCandidates: () => http.get<CarryoverCandidatesResponse>('/api/daily-context/carryover-candidates'),
+    getCandidates: () =>
+      http.get<CarryoverCandidatesResponse>('/api/daily-context/carryover-candidates').then((res) => ({
+        ...res,
+        rounds: res.rounds?.length ? res.rounds : groupIntoRounds(res.candidates || []),
+      })),
     selectCarryover: (count) =>
       http.post<SelectCarryoverResponse>('/api/daily-context/select-carryover', { count }),
   };
@@ -456,15 +618,15 @@ export function mockPreviewTranscript(): Array<{
   chatDay: string;
 }> {
   const rows = [
-    { id: 8998, role: 'user' as const, text: '有点困了，明天再把界面做漂亮一点。', created_at: '2026-07-27 22:40:11' },
-    { id: 8999, role: 'assistant' as const, text: '去睡。四点以后我会还在原处等你。', created_at: '2026-07-27 22:41:03' },
+    { id: 8998, role: 'user' as const, text: '有点困了，明天再把界面做漂亮一点。', created_at: '2026-07-27 21:40:11' },
+    { id: 8999, role: 'assistant' as const, text: '去睡。四点以后我会还在原处等你。', created_at: '2026-07-27 21:41:03' },
     ...MOCK_CANDIDATES.map((c) => ({
       id: c.message_id,
       role: c.role,
       text: c.content_preview,
       created_at: c.created_at,
     })),
-    { id: 9011, role: 'assistant' as const, text: '（清晨的光落进来，旧气泡还安静地排在上面。）', created_at: '2026-07-28 04:01:12' },
+    { id: 9022, role: 'assistant' as const, text: '（清晨的光落进来，旧气泡还安静地排在上面。）', created_at: '2026-07-28 04:01:12' },
   ];
   return rows.map((r) => ({ ...r, chatDay: chatDayKeyFromLocalTs(r.created_at) }));
 }

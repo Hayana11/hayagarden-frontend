@@ -84,7 +84,7 @@ export function DailySoftWindowPreviewScreen() {
             </Link>
             <div style={{ minWidth: 0 }}>
               <div style={{ fontFamily: DISPLAY, fontSize: 11, letterSpacing: 2, color: 'var(--ghost)' }}>
-                FE-R0 · MOCK · 轻薄弹窗
+                FE-R0 · MOCK · 预览专用 · 正式聊天未接线
               </div>
               <div style={{ fontFamily: SERIF, fontSize: 16, fontWeight: 600, letterSpacing: 1 }}>新的一天</div>
             </div>
@@ -184,7 +184,7 @@ export function DailySoftWindowPreviewScreen() {
             }}
           >
             <div style={{ fontSize: 14, color: 'var(--ghost)', padding: '4px 8px 10px', fontFamily: SERIF }}>
-              和岛聊聊…（预览页不发送；点发送语义 = 自动锁 0）
+              和岛聊聊…（仅预览；不调用 live API。点 ↑ = 模拟锁 0 轮）
             </div>
             <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
               <button
@@ -214,6 +214,7 @@ export function DailySoftWindowPreviewScreen() {
         uiState={dsw.uiState}
         draftCount={dsw.draftCount}
         candidates={dsw.candidates}
+        rounds={dsw.rounds}
         submitting={dsw.submitting}
         errorDetail={dsw.errorDetail}
         onClose={dsw.closeDrawer}

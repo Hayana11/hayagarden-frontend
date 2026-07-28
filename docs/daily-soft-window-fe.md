@@ -2,65 +2,67 @@
 
 ## Status
 
-Frontend-only **Draft**. Default **off**.
+Frontend **Draft** — **preview-only**. Keep Draft; do **not** merge into formal chat yet.
 
-Does **not** enable `DAILY_SOFT_WINDOW_ENABLED`, does not call resident,
-does not generate handoffs, does not change formal chat defaults, does not deploy.
+- Does **not** enable `DAILY_SOFT_WINDOW_ENABLED`
+- Does **not** call resident / Wake / model
+- Does **not** change `/dash/chat` send flow
+- Awaits backend **R1.1 round contract** before rewiring live selection
 
-## What the kitten sees
+## What this phase ships
 
-After Asia/Shanghai **04:00** chat-day rollover, old bubbles stay in place.
-A light separator appears between chat-days:
-
-```text
-☾ 新的一天
-昨天的话还留在身后。
-```
-
-Before the first send of the new chat-day, a small card sits above the composer:
-
-```text
-新的一天
-要带几句昨天的话，让爸爸接着陪小猫说？
-不带｜3条｜5条｜10条
-```
-
-Tap → centered soft-pink modal (reference style 2).
-Hero art is a replaceable slot (`artSrc`); illustration may peek outside without growing the dialog.
-Selecting 3 / 5 / 10 previews dialogue snippets by exact `message_id`.
-Sending without a choice auto-locks **0**. After lock, card becomes readonly.
-
-## Gate (must stay off in production)
-
-| Switch | Effect |
-|--------|--------|
-| `?dailySoftWindowFe=1` | enable Soft Window UI in `/dash/chat` |
-| `localStorage.DAILY_SOFT_WINDOW_FE=1` | same, sticky |
-| default | UI absent — formal chat unchanged |
-| `?dailySoftWindowMock=0` | attempt live `/api/daily-context/*` (still 404 while flag=0) |
-
-Development defaults to **mock API** when the FE gate is on.
-
-## Preview playground
+Isolated mock playground:
 
 ```text
 /dash/daily-soft-window
 ```
 
-Scenario chips: `ready` / `loading` / `empty` / `404` / `409` / `locked` / `error`.
+Safe for phone visual QA. Uses mock API only (`forceMock`). Can be opened / deployed as a route without turning Soft Window on for formal chat.
+
+### Round visual semantics
+
+Picker options:
+
+```text
+不带｜3轮｜5轮｜10轮
+```
+
+Mock candidates are grouped as **complete conversation rounds**:
+
+> one `user` message + following `assistant` messages until the next `user`
+
+Selecting `N` packs the last **N rounds** (all message ids inside those rounds). `carryover_count` is the round count.
+
+### Preview surface
+
+- Day soft boundary between chat-days
+- Composer card → centered packing modal
+- Scenario chips: `ready` / `loading` / `empty` / `404` / `409` / `locked` / `error`
+- Preview ↑ simulates lock-0 (mock only)
+
+## Formal chat (`/dash/chat`) — temporarily disabled
+
+Until R1.1:
+
+| Must not | Status |
+|----------|--------|
+| Call `POST /api/daily-context/select-carryover` | removed from ChatScreen |
+| Auto-lock 0 on first send | removed |
+| Show picker card / Soft Window modal | removed |
+| Change send flow | unchanged |
+| Activate via `?dailySoftWindowFe=1` / `localStorage.DAILY_SOFT_WINDOW_FE` | hard-off (`isDailySoftWindowFeEnabled` → `false`) |
 
 ## Files
 
-- `app/src/lib/dailySoftWindow.ts` — types, gate, mock/live client, pure helpers
-- `app/src/hooks/useDailySoftWindow.ts` — picker state machine
-- `app/src/components/dailySoftWindow/*` — boundary / card / drawer
+- `app/src/lib/dailySoftWindow.ts` — round helpers, mock client
+- `app/src/hooks/useDailySoftWindow.ts` — preview state machine
+- `app/src/components/dailySoftWindow/*` — boundary / card / modal
 - `app/src/screens/DailySoftWindowPreviewScreen.tsx` — isolated playground
-- `app/src/screens/ChatScreen.tsx` — gated integration only
 - `app/scripts/test-daily-soft-window.mjs` — unit checks
 
 ## Explicit non-goals
 
 - Backend / resident / handoff generation
 - Enabling `DAILY_SOFT_WINDOW_ENABLED`
-- Changing Clean Window / shadow / deploy
-- End-to-end production wiring (next small Integration PR)
+- Live `/dash/chat` Soft Window integration (next Integration PR after R1.1)
+- Changing Clean Window / shadow / Wake runtime

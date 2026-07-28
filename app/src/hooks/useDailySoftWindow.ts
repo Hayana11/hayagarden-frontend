@@ -2,19 +2,20 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   classifySoftWindowError,
   createDailySoftWindowClient,
+  groupIntoRounds,
   isCarryoverCount,
   isDailySoftWindowFeEnabled,
-  pickLastNCandidates,
-  selectedMessageIds,
+  selectedRoundMessageIds,
   softWindowErrorMessage,
   type CarryoverCandidate,
   type CarryoverCount,
+  type CarryoverRound,
   type DailyContextSummary,
   type SoftWindowUiState,
 } from '../lib/dailySoftWindow';
 
 type Options = {
-  /** Force enable (preview page). Default reads URL/localStorage gate. */
+  /** Force enable (preview page only). Chat must not pass true until R1.1. */
   enabled?: boolean;
   forceMock?: boolean;
   search?: string;
@@ -26,6 +27,7 @@ export type DailySoftWindowController = {
   uiState: SoftWindowUiState;
   summary: DailyContextSummary | null;
   candidates: CarryoverCandidate[];
+  rounds: CarryoverRound[];
   draftCount: CarryoverCount;
   highlightIds: Set<number>;
   drawerOpen: boolean;
@@ -38,7 +40,7 @@ export type DailySoftWindowController = {
   closeDrawer: () => void;
   setDraftCount: (count: CarryoverCount) => void;
   confirmSelection: () => Promise<boolean>;
-  /** Call before/when first user message of the day is sent without an explicit pick. */
+  /** Preview-only: simulate first send locking 0. Not used by formal chat. */
   lockZeroIfNeeded: () => Promise<boolean>;
   reload: () => Promise<void>;
 };
@@ -54,6 +56,7 @@ export function useDailySoftWindow(opts: Options = {}): DailySoftWindowControlle
   const [uiState, setUiState] = useState<SoftWindowUiState>('idle');
   const [summary, setSummary] = useState<DailyContextSummary | null>(null);
   const [candidates, setCandidates] = useState<CarryoverCandidate[]>([]);
+  const [rounds, setRounds] = useState<CarryoverRound[]>([]);
   const [draftCount, setDraftCount] = useState<CarryoverCount>(3);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [submitting, setSubmitting] = useState(false);
@@ -75,11 +78,14 @@ export function useDailySoftWindow(opts: Options = {}): DailySoftWindowControlle
       const [cur, cand] = await Promise.all([client.getCurrent(), client.getCandidates()]);
       if (!mounted.current) return;
       setSummary(cur);
-      setCandidates(cand.candidates || []);
+      const nextCandidates = cand.candidates || [];
+      const nextRounds = cand.rounds?.length ? cand.rounds : groupIntoRounds(nextCandidates);
+      setCandidates(nextCandidates);
+      setRounds(nextRounds);
       if (cur.selection_finalized) {
         setUiState('locked');
         if (isCarryoverCount(cur.carryover_count)) setDraftCount(cur.carryover_count);
-      } else if (!(cand.candidates || []).length) {
+      } else if (!nextRounds.length) {
         setUiState('empty');
       } else {
         setUiState('ready');
@@ -101,15 +107,11 @@ export function useDailySoftWindow(opts: Options = {}): DailySoftWindowControlle
 
   const highlightIds = useMemo(() => {
     if (locked && summary) {
-      // After lock, highlight the finalized selection from candidates when possible.
-      const ids = pickLastNCandidates(
-        candidates,
-        isCarryoverCount(summary.carryover_count) ? summary.carryover_count : 0,
-      ).map((c) => c.message_id);
-      return new Set(ids);
+      const n = isCarryoverCount(summary.carryover_count) ? summary.carryover_count : 0;
+      return new Set(selectedRoundMessageIds(rounds, n));
     }
-    return new Set(selectedMessageIds(candidates, draftCount));
-  }, [locked, summary, candidates, draftCount]);
+    return new Set(selectedRoundMessageIds(rounds, draftCount));
+  }, [locked, summary, rounds, draftCount]);
 
   const confirmSelection = useCallback(async () => {
     if (!enabled || locked) return false;
@@ -172,7 +174,7 @@ export function useDailySoftWindow(opts: Options = {}): DailySoftWindowControlle
       setDrawerOpen(false);
       return true;
     } catch (err) {
-      // Sending must not be blocked by Soft Window FE — fail open after surfacing state.
+      // Preview send must not hang Soft Window state — fail open after surfacing.
       if (!mounted.current) return true;
       const state = classifySoftWindowError(err);
       if (state === 'conflict') {
@@ -191,17 +193,16 @@ export function useDailySoftWindow(opts: Options = {}): DailySoftWindowControlle
   const statusText = useMemo(() => {
     if (!enabled) return '';
     if (uiState === 'loading') return '加载中…';
-    if (uiState === 'disabled') return '接口未启用 · mock/flag 可见';
+    if (uiState === 'disabled') return '接口未启用 · mock 可见';
     if (uiState === 'conflict') return '选择已锁定';
     if (uiState === 'error') return errorDetail || '出错了';
-    if (uiState === 'empty') return '昨天暂无可带走的句子';
-    if (locked) return `已锁定 · ${summary?.carryover_count ?? 0} 条`;
-    if (client.mode === 'mock') return '开发预览 · mock API';
-    return `候选 ${candidates.length} 条`;
-  }, [enabled, uiState, errorDetail, locked, summary?.carryover_count, client.mode, candidates.length]);
+    if (uiState === 'empty') return '昨天暂无可带走的对话轮';
+    if (locked) return `已锁定 · ${summary?.carryover_count ?? 0} 轮`;
+    if (client.mode === 'mock') return '预览 · mock · 按完整对话轮';
+    return `候选 ${rounds.length} 轮`;
+  }, [enabled, uiState, errorDetail, locked, summary?.carryover_count, client.mode, rounds.length]);
 
-  // Show for all loaded states including 404/409 so FE can demo API surfaces.
-  // Production chat stays unaffected because `enabled` defaults false.
+  // Preview-only card. Formal chat must not mount this hook with enabled=true yet.
   const showPickerCard = enabled && uiState !== 'idle';
 
   return {
@@ -210,6 +211,7 @@ export function useDailySoftWindow(opts: Options = {}): DailySoftWindowControlle
     uiState,
     summary,
     candidates,
+    rounds,
     draftCount,
     highlightIds,
     drawerOpen,

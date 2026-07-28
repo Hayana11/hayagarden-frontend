@@ -1,10 +1,13 @@
 import type { ReactNode } from 'react';
 import {
   CARRYOVER_COUNTS,
-  pickLastNCandidates,
+  groupIntoRounds,
+  pickLastNRounds,
+  roundSnippetMessages,
   softWindowErrorMessage,
   type CarryoverCandidate,
   type CarryoverCount,
+  type CarryoverRound,
   type SoftWindowUiState,
 } from '../../lib/dailySoftWindow';
 import './dailySoftWindow.css';
@@ -13,7 +16,10 @@ type Props = {
   open: boolean;
   uiState: SoftWindowUiState;
   draftCount: CarryoverCount;
-  candidates: CarryoverCandidate[];
+  /** Flat messages (optional if rounds provided). */
+  candidates?: CarryoverCandidate[];
+  /** Preferred: complete conversation rounds for preview selection. */
+  rounds?: CarryoverRound[];
   submitting?: boolean;
   errorDetail?: string;
   /** Counts for the excluded-category chips. Defaults match the packing mock. */
@@ -38,7 +44,8 @@ export function CarryoverModal({
   open,
   uiState,
   draftCount,
-  candidates,
+  candidates = [],
+  rounds: roundsProp,
   submitting,
   errorDetail,
   excludedCounts,
@@ -48,13 +55,11 @@ export function CarryoverModal({
 }: Props) {
   if (!open) return null;
 
-  const preview = pickLastNCandidates(candidates, draftCount);
+  const rounds = roundsProp?.length ? roundsProp : groupIntoRounds(candidates);
+  const previewRounds = pickLastNRounds(rounds, draftCount);
+  const snippetRows = roundSnippetMessages(previewRounds);
   const isLocked = uiState === 'locked';
   const canConfirm = !submitting && (uiState === 'ready' || uiState === 'empty');
-  const snippetRows =
-    draftCount >= 5 && preview.length >= 2
-      ? [preview[0], preview[preview.length - 1]]
-      : preview;
   const excluded = { ...DEFAULT_EXCLUDED, ...excludedCounts };
 
   let mid: ReactNode;
@@ -98,7 +103,7 @@ export function CarryoverModal({
           <p className="daily-window-helper">
             {uiState === 'empty'
               ? '昨天没有可带走的正式对话 · 与各档相同 · 0 tokens'
-              : `全部 ${candidates.length} 轮 · 与各档相同 · 约${tokenHint(draftCount)}k tokens`}
+              : `全部 ${rounds.length} 轮 · 与各档相同 · 约${tokenHint(draftCount)}k tokens`}
           </p>
         </section>
 
