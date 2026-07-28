@@ -46,7 +46,7 @@ assert.equal(preferMockDailySoftWindow('?dailySoftWindowFe=1'), true);
 assert.equal(preferMockDailySoftWindow('?dailySoftWindowMock=0&dailySoftWindowFe=1'), false);
 
 assert.equal(lockedSummaryText(0), '今天没有带走昨天的话。');
-assert.equal(lockedSummaryText(5), '今天带来了 5 句昨天的话。');
+assert.equal(lockedSummaryText(5), '今天带来了 5 轮昨天的话。');
 
 // mock client happy path
 {

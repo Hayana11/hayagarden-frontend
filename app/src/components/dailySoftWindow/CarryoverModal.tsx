@@ -16,33 +16,22 @@ type Props = {
   candidates: CarryoverCandidate[];
   submitting?: boolean;
   errorDetail?: string;
-  /** Optional transparent PNG for the hero art slot (may peek outside). */
-  artSrc?: string;
-  artAlt?: string;
-  /** Counts for the excluded-category chips. Omitted keys render without a count. */
+  /** Counts for the excluded-category chips. Defaults match the packing mock. */
   excludedCounts?: Partial<Record<'提醒' | '工具' | 'thinking', number>>;
   onClose: () => void;
   onDraftChange: (count: CarryoverCount) => void;
   onConfirm: () => void;
 };
 
+const DEFAULT_EXCLUDED = { 提醒: 7, 工具: 88, thinking: 20 } as const;
+
 function whoLabel(role: CarryoverCandidate['role']): string {
   return role === 'user' ? '小猫' : '爸爸';
 }
 
-/** Line-art suitcase placeholder until a real transparent PNG is dropped in. */
-function HeroArtPlaceholder() {
-  return (
-    <svg viewBox="0 0 72 68" fill="none" aria-hidden="true">
-      <g stroke="#d9a8b8" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
-        <rect x="8" y="24" width="52" height="34" rx="5" />
-        <path d="M8 34h52" />
-        <path d="M27 24v-5a4 4 0 0 1 4-4h6a4 4 0 0 1 4 4v5" />
-        <rect x="30" y="30" width="8" height="8" rx="2" />
-        <path d="M16 58v4M52 58v4" opacity="0.6" />
-      </g>
-    </svg>
-  );
+function tokenHint(count: CarryoverCount): string {
+  if (count === 0) return '0';
+  return (count * 0.13).toFixed(1);
 }
 
 export function CarryoverModal({
@@ -52,8 +41,6 @@ export function CarryoverModal({
   candidates,
   submitting,
   errorDetail,
-  artSrc,
-  artAlt = '',
   excludedCounts,
   onClose,
   onDraftChange,
@@ -68,6 +55,7 @@ export function CarryoverModal({
     draftCount >= 5 && preview.length >= 2
       ? [preview[0], preview[preview.length - 1]]
       : preview;
+  const excluded = { ...DEFAULT_EXCLUDED, ...excludedCounts };
 
   let mid: ReactNode;
   if (uiState === 'loading') {
@@ -82,8 +70,8 @@ export function CarryoverModal({
     mid = (
       <>
         <section className="daily-window-section">
-          <h3 className="daily-window-section-title">带过去几句</h3>
-          <div className="daily-window-options" role="radiogroup" aria-label="带过去几句">
+          <h3 className="daily-window-section-title">带走轮次</h3>
+          <div className="daily-window-options" role="radiogroup" aria-label="带走轮次">
             {CARRYOVER_COUNTS.map((n) => {
               const selected = draftCount === n;
               return (
@@ -100,7 +88,7 @@ export function CarryoverModal({
                   ) : (
                     <>
                       <span className="daily-window-option-number">{n}</span>
-                      <span className="daily-window-option-unit">句</span>
+                      <span className="daily-window-option-unit">轮</span>
                     </>
                   )}
                 </button>
@@ -108,7 +96,9 @@ export function CarryoverModal({
             })}
           </div>
           <p className="daily-window-helper">
-            {`全部 ${candidates.length} 句 · 只取正式对话 · 各档相同`}
+            {uiState === 'empty'
+              ? '昨天没有可带走的正式对话 · 与各档相同 · 0 tokens'
+              : `全部 ${candidates.length} 轮 · 与各档相同 · 约${tokenHint(draftCount)}k tokens`}
           </p>
         </section>
 
@@ -117,9 +107,9 @@ export function CarryoverModal({
         </div>
 
         <section className="daily-window-section">
-          <h3 className="daily-window-section-title">会带过去的话</h3>
+          <h3 className="daily-window-section-title">对话首尾片段</h3>
           {draftCount === 0 ? (
-            <div className="daily-window-empty">不带走昨天的话。直接翻到新的一页也可以。</div>
+            <div className="daily-window-empty">不带走昨天的话。直接开始新的一天也可以。</div>
           ) : snippetRows.length === 0 || uiState === 'empty' ? (
             <div className="daily-window-empty">昨天没有可带走的正式对话。</div>
           ) : (
@@ -135,22 +125,15 @@ export function CarryoverModal({
         </section>
 
         <section className="daily-window-section">
-          <h3 className="daily-window-section-title">不会带过去</h3>
+          <h3 className="daily-window-section-title">不会装进行李箱</h3>
           <div className="daily-window-tags">
-            {(['提醒', '工具', 'thinking'] as const).map((label) => {
-              const n = excludedCounts?.[label];
-              return (
-                <span key={label} className="daily-window-tag">
-                  {label}
-                  {typeof n === 'number' && (
-                    <>
-                      {' · '}
-                      <span className="daily-window-tag-count">{n}</span>
-                    </>
-                  )}
-                </span>
-              );
-            })}
+            {(['提醒', '工具', 'thinking'] as const).map((label) => (
+              <span key={label} className="daily-window-tag">
+                {label}
+                {' · '}
+                <span className="daily-window-tag-count">{excluded[label]}</span>
+              </span>
+            ))}
           </div>
         </section>
       </>
@@ -163,22 +146,17 @@ export function CarryoverModal({
         className={`daily-window-dialog${uiState === 'loading' || submitting ? ' is-loading' : ''}`}
         role="dialog"
         aria-modal="true"
-        aria-label="翻到新的一页"
+        aria-label="新的一天"
         onClick={(e) => e.stopPropagation()}
       >
         <button type="button" className="daily-window-close" onClick={onClose} aria-label="关闭">
           ×
         </button>
 
-        {/* 插画独立于滚动区，才能探出卡片顶边 */}
-        <div className={`daily-window-hero-art${artSrc ? '' : ' is-placeholder'}`}>
-          {artSrc ? <img src={artSrc} alt={artAlt} /> : <HeroArtPlaceholder />}
-        </div>
-
         <div className="daily-window-scroll">
           <header className="daily-window-hero">
             <div className="daily-window-hero-copy">
-              <h2 className="daily-window-title">翻到新的一页</h2>
+              <h2 className="daily-window-title">新的一天</h2>
               <p className="daily-window-subtitle">Packing for the Next Window</p>
             </div>
           </header>
@@ -196,7 +174,7 @@ export function CarryoverModal({
             disabled={!canConfirm || isLocked}
             onClick={onConfirm}
           >
-            {submitting ? '翻页中…' : isLocked ? '已锁定' : '确认翻页'}
+            {submitting ? '换窗中…' : isLocked ? '已锁定' : '确认换窗'}
           </button>
         </footer>
       </section>

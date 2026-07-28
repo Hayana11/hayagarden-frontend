@@ -1,7 +1,6 @@
 /* =========================================================
    Daily Soft Window / 换窗弹窗
-   目标：轻、薄、柔、留白大，接近参考图二
-   顶部插画为可替换槽位（可探出容器，不撑高弹窗）
+   目标：轻、薄、柔、留白大；单列标题，无左侧插画占位
    ========================================================= */
 
 /* Tokens 直接取自 handoff/android/project/Packing Modal.dc.html —— 不要凭感觉调 */
@@ -215,8 +214,8 @@
 
   padding: 26px 24px 24px;
 
-  /* 关键：可见溢出，让插画探出卡片顶边（滚动交给内部 .scroll） */
-  overflow: visible;
+  /* 卡片本体可滚动；无探出插画后不再需要 overflow:visible */
+  overflow: hidden;
 
   color: var(--window-body);
   background: var(--window-surface);
@@ -294,65 +293,16 @@
 }
 
 /* =========================================================
-   顶部 Hero — 左插画槽位 + 右标题
-   插画可探出容器，不撑高弹窗
+   顶部标题 — 单列，无左侧插画
    ========================================================= */
 
-/* 插画：脱离文档流，压在卡片左上角并探出顶边。
-   不占高度 → 弹窗不会被它撑大。 */
-.daily-window-hero-art {
-  position: absolute;
-  top: -32px;
-  left: -8px;
-  z-index: 2;
-
-  width: 140px;
-  height: 132px;
-
-  display: flex;
-  align-items: flex-end;
-  justify-content: center;
-
-  pointer-events: none;
-}
-
-.daily-window-hero-art img {
-  display: block;
-  width: 100%;
-  max-width: none;
-  height: 100%;
-
-  object-fit: contain;
-  object-position: center bottom;
-
-  filter: drop-shadow(0 10px 14px rgba(112, 73, 84, 0.10));
-}
-
-/* 无图时的占位：描边线稿，不要实心色块（色块=笨重的主因） */
-.daily-window-hero-art.is-placeholder {
-  width: 120px;
-  height: 118px;
-  top: -20px;
-  left: -4px;
-
-  background: none;
-}
-
-.daily-window-hero-art.is-placeholder svg {
-  width: 100%;
-  height: 100%;
-  opacity: 0.5;
-}
-
-/* 标题行：插画在左、文字在右，垂直居中，gap 14px */
 .daily-window-hero {
   display: flex;
-  align-items: center;
-  gap: 14px;
+  align-items: flex-start;
 
   margin: 0;
-  padding: 0 0 0 108px;
-  min-height: 72px;
+  padding: 2px 28px 0 0;
+  min-height: 0;
 }
 
 .daily-window-hero-copy {
@@ -360,10 +310,9 @@
 
   display: flex;
   flex-direction: column;
-  gap: 3px;
+  gap: 4px;
 }
 
-/* 中文标题走 sans —— 衬线中文在这个字号下就是「土」的来源 */
 .daily-window-title {
   margin: 0;
 
@@ -374,8 +323,6 @@
   font-weight: 700;
   line-height: 1.25;
   letter-spacing: 1px;
-
-  white-space: nowrap;
 }
 
 .daily-window-subtitle {
@@ -389,8 +336,6 @@
   font-weight: 400;
   line-height: 1.3;
   letter-spacing: 0.3px;
-
-  white-space: nowrap;
 }
 
 /* 内部滚动区：把滚动从 dialog 挪进来，dialog 才能 overflow: visible */
@@ -801,15 +746,6 @@
 @media (max-width: 374px) {
   .daily-window-dialog {
     padding-inline: 18px;
-  }
-
-  .daily-window-hero {
-    padding-left: 94px;
-  }
-
-  .daily-window-hero-art {
-    width: 132px;
-    height: 122px;
   }
 
   .daily-window-title {

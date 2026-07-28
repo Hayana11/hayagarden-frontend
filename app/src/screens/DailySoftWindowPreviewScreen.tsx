@@ -86,7 +86,7 @@ export function DailySoftWindowPreviewScreen() {
               <div style={{ fontFamily: DISPLAY, fontSize: 11, letterSpacing: 2, color: 'var(--ghost)' }}>
                 FE-R0 · MOCK · 轻薄弹窗
               </div>
-              <div style={{ fontFamily: SERIF, fontSize: 16, fontWeight: 600, letterSpacing: 1 }}>翻到新的一页</div>
+              <div style={{ fontFamily: SERIF, fontSize: 16, fontWeight: 600, letterSpacing: 1 }}>新的一天</div>
             </div>
           </div>
           <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>

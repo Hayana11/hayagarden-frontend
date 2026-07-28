@@ -188,12 +188,12 @@ export function selectedMessageIds(
 
 export function countLabel(count: CarryoverCount): string {
   if (count === 0) return '不带';
-  return `${count}句`;
+  return `${count}轮`;
 }
 
 export function lockedSummaryText(count: number): string {
   if (count <= 0) return '今天没有带走昨天的话。';
-  return `今天带来了 ${count} 句昨天的话。`;
+  return `今天带来了 ${count} 轮昨天的话。`;
 }
 
 const MOCK_CANDIDATES: CarryoverCandidate[] = [
