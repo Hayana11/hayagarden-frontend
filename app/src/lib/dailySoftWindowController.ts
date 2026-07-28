@@ -1,6 +1,10 @@
 /**
  * Formal Soft Window state machine (no React).
  * Injectable client + scheduler for integration tests.
+ *
+ * Cross-operation fencing: shared contextGeneration + activeContextKey gate
+ * current, candidates, and select so stale in-flight work cannot write after
+ * authoritative current moves to a different context.
  */
 import {
   classifySoftWindowError,
@@ -19,6 +23,11 @@ import {
 import { HttpError } from './http';
 
 export const DEFERRED_RETRY_MS = [750, 2000, 5000] as const;
+
+export type ContextKey = {
+  context_id: number;
+  context_epoch: number;
+};
 
 export type FocusableOpener = {
   focus: () => void;
@@ -43,6 +52,8 @@ export type SoftWindowControllerSnapshot = {
   highlightIds: number[];
   /** Test/debug: last opener used for focus return. */
   opener: FocusableOpener | null;
+  /** Shared context fence generation (bumps when authoritative context identity changes). */
+  contextGeneration: number;
 };
 
 export type SoftWindowScheduler = {
@@ -67,6 +78,16 @@ export type SoftWindowControllerOptions = {
   scheduler?: SoftWindowScheduler;
 };
 
+export function contextKeyFromCurrent(cur: DailyContextCurrent | null | undefined): ContextKey | null {
+  if (!cur) return null;
+  return { context_id: cur.context_id, context_epoch: cur.context_epoch };
+}
+
+export function contextKeysMatch(a: ContextKey | null | undefined, b: ContextKey | null | undefined): boolean {
+  if (!a || !b) return false;
+  return a.context_id === b.context_id && a.context_epoch === b.context_epoch;
+}
+
 export class DailySoftWindowController {
   readonly client: DailySoftWindowClient;
   readonly live: boolean;
@@ -87,12 +108,18 @@ export class DailySoftWindowController {
   highlightOverride: number[] | null = null;
   opener: FocusableOpener | null = null;
 
+  /** Bumps when authoritative current context identity changes. */
+  contextGeneration = 0;
+  private activeContextKey: ContextKey | null = null;
+
   private currentAbort: AbortController | null = null;
   private candidatesAbort: AbortController | null = null;
+  private selectAbort: AbortController | null = null;
   private deferredCancels: Array<{ cancel: () => void }> = [];
   private deferredAttempt = 0;
   private probeGen = 0;
   private candidatesGen = 0;
+  private submitGen = 0;
   private submitLock = false;
 
   constructor(opts: SoftWindowControllerOptions) {
@@ -166,6 +193,7 @@ export class DailySoftWindowController {
       boundaryMessageId,
       highlightIds,
       opener: this.opener,
+      contextGeneration: this.contextGeneration,
     };
   }
 
@@ -195,8 +223,8 @@ export class DailySoftWindowController {
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
+    this.invalidateInFlightOps({ closeDrawer: true, clearRounds: true });
     this.currentAbort?.abort();
-    this.candidatesAbort?.abort();
     this.clearDeferredTimers();
     this.listeners.clear();
   }
@@ -220,7 +248,44 @@ export class DailySoftWindowController {
     }
   }
 
-  private applyCurrent(cur: DailyContextCurrent, nextRounds?: CarryoverRound[]): void {
+  private abortCandidatesOp(): void {
+    this.candidatesAbort?.abort();
+    this.candidatesGen += 1;
+    this.candidatesAbort = null;
+  }
+
+  private abortSelectOp(): void {
+    this.selectAbort?.abort();
+    this.submitGen += 1;
+    this.selectAbort = null;
+  }
+
+  /**
+   * Invalidate candidates/select in-flight work. Optionally tear down drawer UI.
+   * Does not bump contextGeneration — caller does that when identity changes.
+   */
+  private invalidateInFlightOps(opts?: {
+    closeDrawer?: boolean;
+    clearRounds?: boolean;
+    resetSubmitting?: boolean;
+  }): void {
+    this.abortCandidatesOp();
+    this.abortSelectOp();
+    if (opts?.resetSubmitting !== false) {
+      this.submitting = false;
+      this.submitLock = false;
+    }
+    if (opts?.closeDrawer) {
+      this.drawerOpen = false;
+      this.restoreFocus();
+    }
+    if (opts?.clearRounds) {
+      this.rounds = [];
+      this.candidates = [];
+    }
+  }
+
+  private applyCurrentFields(cur: DailyContextCurrent, nextRounds?: CarryoverRound[]): void {
     this.current = cur;
     this.errorDetail = '';
     if (cur.selection_finalized) {
@@ -239,6 +304,48 @@ export class DailySoftWindowController {
     }
     this.uiState = nextRounds && nextRounds.length === 0 ? 'empty' : 'ready';
     this.draftCount = 10;
+  }
+
+  /**
+   * Authoritative current adoption. When context identity changes, bump shared
+   * generation and invalidate cross-operation in-flight work.
+   */
+  private adoptAuthoritativeCurrent(cur: DailyContextCurrent, nextRounds?: CarryoverRound[]): void {
+    const nextKey = contextKeyFromCurrent(cur);
+    const contextChanged = !contextKeysMatch(this.activeContextKey, nextKey);
+
+    if (contextChanged) {
+      this.contextGeneration += 1;
+      this.invalidateInFlightOps({ closeDrawer: true, clearRounds: true });
+      this.activeContextKey = nextKey;
+      this.applyCurrentFields(cur, nextRounds);
+      return;
+    }
+
+    this.activeContextKey = nextKey;
+    this.applyCurrentFields(cur, nextRounds);
+
+    // Formal live: preserve modal rounds when same context + drawer still open.
+    if (this.live && !this.preview && !this.drawerOpen) {
+      this.rounds = [];
+      this.candidates = [];
+    }
+  }
+
+  private contextStillOwned(
+    capturedKey: ContextKey | null,
+    capturedGen: number,
+    responseKey?: ContextKey | null,
+  ): boolean {
+    if (!capturedKey || capturedGen !== this.contextGeneration) return false;
+    if (!contextKeysMatch(capturedKey, this.activeContextKey)) return false;
+    if (!contextKeysMatch(capturedKey, contextKeyFromCurrent(this.current))) return false;
+    if (responseKey && !contextKeysMatch(capturedKey, responseKey)) return false;
+    return true;
+  }
+
+  private async authoritativeRefresh(): Promise<void> {
+    await this.probeCurrent();
   }
 
   async probeCurrent(opts?: { fromDeferred?: boolean }): Promise<void> {
@@ -267,19 +374,25 @@ export class DailySoftWindowController {
           if (this.disposed || gen !== this.probeGen) return;
           this.rounds = cand.rounds;
           this.candidates = cand.candidates;
+          const nextKey = contextKeyFromCurrent(cur);
+          const contextChanged = !contextKeysMatch(this.activeContextKey, nextKey);
+          if (contextChanged) this.contextGeneration += 1;
+          this.activeContextKey = nextKey;
           if (cur.selection_finalized) {
-            this.applyCurrent(cur, cand.rounds);
+            this.applyCurrentFields(cur, cand.rounds);
           } else if (!cand.rounds.length) {
             this.current = cur;
             this.uiState = 'empty';
             this.draftCount = 10;
           } else {
-            this.applyCurrent(cur, cand.rounds);
+            this.applyCurrentFields(cur, cand.rounds);
           }
         } catch (err) {
           if (this.disposed || gen !== this.probeGen) return;
           const kind = classifySoftWindowError(err);
           if (kind === 'disabled') {
+            this.contextGeneration += 1;
+            this.activeContextKey = null;
             this.current = null;
             this.uiState = 'disabled';
             this.rounds = [];
@@ -287,16 +400,13 @@ export class DailySoftWindowController {
             this.emit();
             return;
           }
-          this.applyCurrent(cur);
+          this.adoptAuthoritativeCurrent(cur);
         }
         this.emit();
         return;
       }
 
-      // Formal: do NOT fetch candidates until modal open.
-      this.rounds = [];
-      this.candidates = [];
-      this.applyCurrent(cur);
+      this.adoptAuthoritativeCurrent(cur);
       this.emit();
     } catch (err) {
       if (this.disposed || gen !== this.probeGen) return;
@@ -306,20 +416,20 @@ export class DailySoftWindowController {
       const kind = classifySoftWindowError(err);
       if (kind === 'disabled') {
         this.clearDeferredTimers();
+        this.contextGeneration += 1;
+        this.activeContextKey = null;
+        this.invalidateInFlightOps({ closeDrawer: true, clearRounds: true });
         this.current = null;
-        this.rounds = [];
-        this.candidates = [];
         this.highlightOverride = null;
-        this.drawerOpen = false;
         this.uiState = 'disabled';
         this.emit();
         return;
       }
       if (kind === 'deferred') {
+        this.contextGeneration += 1;
+        this.activeContextKey = null;
+        this.invalidateInFlightOps({ closeDrawer: true, clearRounds: true });
         this.current = null;
-        this.rounds = [];
-        this.candidates = [];
-        this.drawerOpen = false;
         this.uiState = 'deferred';
         this.emit();
         if (this.deferredAttempt < DEFERRED_RETRY_MS.length) {
@@ -377,33 +487,39 @@ export class DailySoftWindowController {
 
     if (this.preview) return;
 
-    const gen = ++this.candidatesGen;
+    const opGen = ++this.candidatesGen;
     this.candidatesAbort?.abort();
     const ctrl = new AbortController();
     this.candidatesAbort = ctrl;
-    const capturedId = this.current?.context_id;
-    const capturedEpoch = this.current?.context_epoch;
+    const capturedKey = contextKeyFromCurrent(this.current);
+    const capturedGen = this.contextGeneration;
 
     void (async () => {
-      if (capturedId == null || capturedEpoch == null) return;
+      if (!capturedKey) return;
       try {
         const cand = await this.client.getCandidates({ signal: ctrl.signal });
-        if (this.disposed || gen !== this.candidatesGen || !this.drawerOpen) return;
-        if (cand.context_id !== capturedId || cand.context_epoch !== capturedEpoch) {
+        if (this.disposed || opGen !== this.candidatesGen || !this.drawerOpen) return;
+
+        const responseKey: ContextKey = {
+          context_id: cand.context_id,
+          context_epoch: cand.context_epoch,
+        };
+        if (!this.contextStillOwned(capturedKey, capturedGen, responseKey)) {
           this.drawerOpen = false;
           this.rounds = [];
           this.candidates = [];
           this.restoreFocus();
           this.emit();
-          await this.reload();
+          await this.authoritativeRefresh();
           return;
         }
+
         this.rounds = cand.rounds;
         this.candidates = cand.candidates;
         this.uiState = !cand.rounds.length ? 'empty' : 'ready';
         this.emit();
       } catch (err) {
-        if (this.disposed || gen !== this.candidatesGen) return;
+        if (this.disposed || opGen !== this.candidatesGen) return;
         if (err instanceof DOMException && err.name === 'AbortError') return;
         if (err instanceof Error && err.name === 'AbortError') return;
         const kind = classifySoftWindowError(err);
@@ -437,8 +553,7 @@ export class DailySoftWindowController {
   }
 
   closeDrawer(): void {
-    this.candidatesAbort?.abort();
-    this.candidatesGen += 1;
+    this.abortCandidatesOp();
     this.drawerOpen = false;
     this.restoreFocus();
     this.emit();
@@ -447,53 +562,63 @@ export class DailySoftWindowController {
   async confirmSelection(): Promise<boolean> {
     const snap = this.getSnapshot();
     if (!this.active || snap.locked || this.submitting || this.submitLock) return false;
+
+    const capturedKey = contextKeyFromCurrent(this.current);
+    const capturedGen = this.contextGeneration;
+    if (!capturedKey) return false;
+
+    const submitOpGen = ++this.submitGen;
+    this.selectAbort?.abort();
+    const selectCtrl = new AbortController();
+    this.selectAbort = selectCtrl;
+
     this.submitLock = true;
     this.submitting = true;
     this.uiState = 'submitting';
     this.errorDetail = '';
     this.emit();
 
-    const capturedId = this.current?.context_id ?? null;
-    const capturedEpoch = this.current?.context_epoch ?? null;
     const requested = this.draftCount;
 
+    const finishSubmit = async (ok: boolean): Promise<boolean> => {
+      this.submitting = false;
+      this.submitLock = false;
+      if (this.selectAbort === selectCtrl) this.selectAbort = null;
+      this.emit();
+      return ok;
+    };
+
+    const rejectStaleSubmit = async (): Promise<boolean> => {
+      this.drawerOpen = false;
+      this.restoreFocus();
+      await finishSubmit(false);
+      await this.authoritativeRefresh();
+      return false;
+    };
+
     try {
-      const res = await this.client.selectCarryover(requested);
+      const res = await this.client.selectCarryover(requested, { signal: selectCtrl.signal });
       if (this.disposed) return true;
 
-      // Context ownership: response must match capture; else discard + GET current.
+      const responseKey: ContextKey = {
+        context_id: res.context_id,
+        context_epoch: res.context_epoch,
+      };
+
       if (
-        capturedId == null ||
-        capturedEpoch == null ||
-        res.context_id !== capturedId ||
-        res.context_epoch !== capturedEpoch
+        submitOpGen !== this.submitGen ||
+        !this.contextStillOwned(capturedKey, capturedGen, responseKey)
       ) {
-        this.submitting = false;
-        this.drawerOpen = false;
-        this.submitLock = false;
-        this.restoreFocus();
-        this.emit();
-        await this.probeCurrent();
-        return false;
+        return rejectStaleSubmit();
       }
 
-      // Never patch with local draftCount — parser already validated tiers.
+      const base = this.current;
+      if (!base || !contextKeysMatch(capturedKey, contextKeyFromCurrent(base))) {
+        return rejectStaleSubmit();
+      }
+
       const next: DailyContextCurrent = {
-        ...(this.current ?? {
-          context_id: res.context_id,
-          context_epoch: res.context_epoch,
-          local_day: '',
-          boundary_message_id: 0,
-          carryover_unit: 'round' as const,
-          handoff_status: 'ABSENT',
-          resident_generation: 1,
-          requested_round_count: null,
-          selected_round_count: 0,
-          selected_message_count: 0,
-          selected_message_ids: [],
-          carryover_count: 0,
-          selection_finalized: false,
-        }),
+        ...base,
         context_id: res.context_id,
         context_epoch: res.context_epoch,
         requested_round_count: res.requested_round_count,
@@ -504,65 +629,62 @@ export class DailySoftWindowController {
         selection_finalized: true,
       };
       this.current = next;
+      this.activeContextKey = contextKeyFromCurrent(next);
       this.highlightOverride = res.selected_message_ids.slice();
       this.draftCount = draftCountFromCurrent(next);
       this.uiState = 'locked';
       this.drawerOpen = false;
       this.pickerSuppressed = false;
-      this.submitting = false;
-      this.submitLock = false;
       this.restoreFocus();
-      this.emit();
-      return true;
+      return finishSubmit(true);
     } catch (err) {
       if (this.disposed) return false;
+      if (err instanceof DOMException && err.name === 'AbortError') return finishSubmit(false);
+      if (err instanceof Error && err.name === 'AbortError') return finishSubmit(false);
+
+      if (submitOpGen !== this.submitGen || capturedGen !== this.contextGeneration) {
+        return rejectStaleSubmit();
+      }
+
       const kind = classifySoftWindowError(err);
       if (kind === 'conflict') {
-        this.submitting = false;
         this.drawerOpen = false;
-        this.submitLock = false;
         this.restoreFocus();
-        this.emit();
-        await this.probeCurrent();
+        await finishSubmit(false);
+        await this.authoritativeRefresh();
         return false;
       }
       if (kind === 'deferred') {
-        this.submitting = false;
         this.drawerOpen = false;
         this.uiState = 'deferred';
         this.deferredAttempt = 0;
-        this.submitLock = false;
         this.restoreFocus();
-        this.emit();
+        await finishSubmit(false);
         void this.probeCurrent({ fromDeferred: true });
         return false;
       }
       if (kind === 'disabled') {
-        this.submitting = false;
         this.drawerOpen = false;
         this.current = null;
+        this.activeContextKey = null;
         this.rounds = [];
         this.candidates = [];
         this.uiState = 'disabled';
-        this.submitLock = false;
         this.restoreFocus();
-        this.emit();
+        await finishSubmit(false);
         return false;
       }
-      // malformed / 5xx — fail-soft + GET current; never lock from draftCount
-      this.submitting = false;
       this.drawerOpen = false;
       this.errorDetail = softWindowErrorMessage(kind, err);
-      this.submitLock = false;
       this.restoreFocus();
       if (kind === 'auth_error') {
         console.error('[AUTH_BRIDGE] select-carryover failed', err);
         this.uiState = 'unavailable';
-        this.emit();
+        await finishSubmit(false);
         return false;
       }
-      this.emit();
-      await this.probeCurrent();
+      await finishSubmit(false);
+      await this.authoritativeRefresh();
       return false;
     }
   }
@@ -603,6 +725,7 @@ export class DailySoftWindowController {
         selection_finalized: true,
       };
       this.current = next;
+      this.activeContextKey = contextKeyFromCurrent(next);
       this.highlightOverride = res.selected_message_ids.slice();
       this.uiState = 'locked';
       this.drawerOpen = false;
@@ -627,15 +750,12 @@ export class DailySoftWindowController {
   }
 
   notifySendStarted(): void {
-    this.candidatesAbort?.abort();
-    this.candidatesGen += 1;
-    this.drawerOpen = false;
+    this.invalidateInFlightOps({ closeDrawer: true, clearRounds: true });
     this.pickerSuppressed = true;
     this.emit();
   }
 
   notifySendSettled(success: boolean): void {
-    // Reuse unified probe — never bypass probe generation with raw getCurrent.
     void (async () => {
       await this.probeCurrent();
       if (this.disposed) return;
@@ -644,7 +764,6 @@ export class DailySoftWindowController {
         this.emit();
         return;
       }
-      // After probe, restore picker visibility if still unselected / or locked.
       this.pickerSuppressed = false;
       void success;
       this.emit();

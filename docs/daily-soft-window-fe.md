@@ -47,6 +47,7 @@ Carryover unit is **`round`**:
 | 423 | Hide; retry 750 / 2000 / 5000 ms (max 3); then wait for window focus |
 | 401/403 | Fail-hidden; `console.error` with `AUTH_BRIDGE` |
 | Send | `notifySendStarted` closes modal / suppresses picker; **never** POST 0 before send; `notifySendSettled` refreshes current |
+| Fencing | Shared `contextGeneration` + `activeContextKey` gate current/candidates/select; `selectAbort` + `submitGen`; stale cross-op responses discarded + GET current |
 | Boundary | Insert only when loaded messages include **both** `id ≤ boundary` and `id > boundary` |
 | Focus | Modal opener is the CarryoverPickerCard element; dismiss/Esc/success restores focus to that element |
 

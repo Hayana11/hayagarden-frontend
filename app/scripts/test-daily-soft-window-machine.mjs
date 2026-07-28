@@ -628,4 +628,185 @@ ok('send settled probe');
 }
 ok('dismiss no POST + focus return');
 
+// ── cross-op: candidates A in flight, current B applies, A must not write ──
+{
+  const client = makeFakeClient();
+  const ctxA = baseCurrent({ context_id: 1, context_epoch: 10, local_day: '2026-07-27' });
+  const ctxB = baseCurrent({ context_id: 2, context_epoch: 20, local_day: '2026-07-28' });
+  const roundsA = [
+    {
+      round_id: 101,
+      message_ids: [101, 102],
+      messages: [
+        { message_id: 101, role: 'user', author: 'h', content_preview: 'A', created_at: 't' },
+        { message_id: 102, role: 'assistant', author: 'f', content_preview: 'a', created_at: 't' },
+      ],
+    },
+  ];
+  const roundsB = [
+    {
+      round_id: 201,
+      message_ids: [201, 202],
+      messages: [
+        { message_id: 201, role: 'user', author: 'h', content_preview: 'B', created_at: 't' },
+        { message_id: 202, role: 'assistant', author: 'f', content_preview: 'b', created_at: 't' },
+      ],
+    },
+  ];
+
+  let resolveCandA;
+  let currentCall = 0;
+  client.setCurrent(async () => {
+    currentCall += 1;
+    if (currentCall === 1) return ctxA;
+    return ctxB;
+  });
+  client.setCandidates(async () => {
+    return new Promise((r) => {
+      resolveCandA = () =>
+        r({
+          ok: true,
+          context_id: 1,
+          context_epoch: 10,
+          carryover_unit: 'round',
+          available_round_count: 1,
+          rounds: roundsA,
+          candidates: [],
+        });
+    });
+  });
+
+  const ctrl = new DailySoftWindowController({ client, live: true });
+  ctrl.start();
+  await waitFor(() => ctrl.current?.context_id === 1, 'context A');
+  ctrl.openDrawer({ focus() {}, isConnected: true });
+  await waitMicrotasks(3);
+  assert.equal(ctrl.drawerOpen, true);
+
+  // Simulate focus re-probe applying context B while candidates A is in flight.
+  void ctrl.probeCurrent();
+  await waitFor(() => ctrl.current?.context_id === 2, 'context B');
+  assert.equal(ctrl.drawerOpen, false, 'drawer closed when context changed');
+
+  resolveCandA();
+  await waitMicrotasks(8);
+
+  assert.equal(ctrl.current?.context_id, 2);
+  assert.equal(ctrl.rounds.length, 0, 'stale A rounds must not write under B');
+  assert.ok(!ctrl.rounds.some((r) => r.round_id === 101));
+  ctrl.dispose();
+}
+ok('cross candidates stale after context B');
+
+// ── cross-op: select A in flight, current B applies, A must not mix/lock ──
+{
+  const client = makeFakeClient();
+  const ctxA = baseCurrent({
+    context_id: 1,
+    context_epoch: 10,
+    local_day: '2026-07-27',
+    boundary_message_id: 50,
+    handoff_status: 'ABSENT',
+  });
+  const ctxB = baseCurrent({
+    context_id: 2,
+    context_epoch: 20,
+    local_day: '2026-07-28',
+    boundary_message_id: 99,
+    handoff_status: 'PENDING',
+  });
+
+  let resolveSelectA;
+  let probeCount = 0;
+  client.setCurrent(async () => {
+    probeCount += 1;
+    if (probeCount === 1) return ctxA;
+    return ctxB;
+  });
+  client.setSelect(async (count) => {
+    return new Promise((r) => {
+      resolveSelectA = () =>
+        r({
+          ok: true,
+          context_id: 1,
+          context_epoch: 10,
+          carryover_unit: 'round',
+          requested_round_count: count,
+          selected_round_count: count,
+          selected_message_count: 2,
+          selected_message_ids: [1, 2],
+          carryover_count: count,
+          finalized_at: 't',
+        });
+    });
+  });
+
+  const ctrl = new DailySoftWindowController({ client, live: true });
+  ctrl.start();
+  await waitFor(() => ctrl.uiState === 'ready', 'ready');
+  ctrl.setDraftCount(3);
+  const selectPromise = ctrl.confirmSelection();
+  await waitMicrotasks(3);
+
+  // Current probe applies B while select A is still in flight.
+  void ctrl.probeCurrent();
+  await waitFor(() => ctrl.current?.context_id === 2, 'context B applied');
+
+  resolveSelectA();
+  const okSel = await selectPromise;
+  assert.equal(okSel, false);
+  assert.equal(ctrl.getSnapshot().locked, false);
+  assert.equal(ctrl.current?.context_id, 2);
+  assert.equal(ctrl.current?.local_day, '2026-07-28');
+  assert.equal(ctrl.current?.boundary_message_id, 99);
+  assert.equal(ctrl.current?.selection_finalized, false);
+  ctrl.dispose();
+}
+ok('cross select stale after context B');
+
+// ── focus same context: open drawer with loaded rounds must not silently clear ──
+{
+  const client = makeFakeClient();
+  const ctx = baseCurrent();
+  const loadedRounds = [
+    {
+      round_id: 11,
+      message_ids: [11, 12],
+      messages: [
+        { message_id: 11, role: 'user', author: 'h', content_preview: 'u', created_at: 't' },
+        { message_id: 12, role: 'assistant', author: 'f', content_preview: 'a', created_at: 't' },
+      ],
+    },
+  ];
+  client.setCurrent(async () => ctx);
+  client.setCandidates(async () => ({
+    ok: true,
+    context_id: 7,
+    context_epoch: 42,
+    carryover_unit: 'round',
+    available_round_count: 1,
+    rounds: loadedRounds,
+    candidates: [],
+  }));
+
+  const ctrl = new DailySoftWindowController({ client, live: true });
+  ctrl.start();
+  await waitFor(() => ctrl.uiState === 'ready', 'ready');
+  ctrl.openDrawer({ focus() {}, isConnected: true });
+  await waitFor(() => ctrl.rounds.length === 1, 'rounds loaded');
+  assert.equal(ctrl.drawerOpen, true);
+
+  const genBefore = ctrl.getSnapshot().contextGeneration;
+  ctrl.onWindowFocus();
+  await waitMicrotasks(8);
+
+  assert.equal(ctrl.current?.context_id, 7);
+  assert.equal(ctrl.getSnapshot().contextGeneration, genBefore, 'same context must not bump generation');
+  assert.equal(ctrl.drawerOpen, true, 'drawer stays open on same-context focus');
+  assert.equal(ctrl.rounds.length, 1, 'loaded rounds preserved');
+  assert.equal(ctrl.rounds[0].round_id, 11);
+  ctrl.dispose();
+}
+ok('focus same context preserves drawer rounds');
+
 console.log(`daily-soft-window state-machine tests: ok (${passed} groups)`);
