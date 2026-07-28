@@ -858,7 +858,11 @@ export function ChatScreen() {
         </div>,
       );
     }
-    rendered.push(<div key={m.id}>{m.role === 'user' ? renderUserMsg(m) : renderAssistantMsg(m)}</div>);
+    rendered.push(
+      <div key={m.id}>
+        {m.role === 'user' ? renderUserMsg(m) : renderAssistantMsg(m)}
+      </div>,
+    );
   }
 
   return (

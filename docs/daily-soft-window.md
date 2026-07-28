@@ -83,3 +83,11 @@ committed: `finalize_zero_for_first_user_message(context_id, user_message_id)`.
 - Auto LLM handoff generation / Wake rollover wiring / morning greeting / frontend
 - Enabling `DAILY_SOFT_WINDOW_ENABLED`
 - Changing Clean Window / Daily Candidate Shadow behavior
+
+## Frontend companion
+
+See `docs/daily-soft-window-fe.md` for **P-CONTEXT-DAILY-SOFT-WINDOW-FE-R0**.
+
+Current FE Draft is **preview-only** (`/dash/daily-soft-window` mock + round
+semantics). Formal `/dash/chat` Soft Window wiring stays off until backend
+**R1.1 round contract**.
