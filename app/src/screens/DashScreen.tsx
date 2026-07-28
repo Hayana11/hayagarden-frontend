@@ -281,11 +281,13 @@ export function DashScreen() {
               ? period.message
               : period.status !== 'ready'
                 ? '…'
-                : period.cycle.overdue
-                  ? `比预计晚了 ${-period.cycle.daysUntil} 天`
-                  : period.cycle.inPeriod
-                    ? '经期中'
-                    : `距下次 ${period.cycle.daysUntil} 天`}
+                : !period.cycle.hasAnchor
+                  ? '等待首次记录'
+                  : period.cycle.overdue
+                    ? `比预计晚了 ${-(period.cycle.daysUntil ?? 0)} 天`
+                    : period.cycle.inPeriod
+                      ? '经期中'
+                      : `距下次 ${period.cycle.daysUntil} 天`}
           </span>
         </div>
         <Card style={{ padding: '16px 16px 12px', overflow: 'hidden' }}>

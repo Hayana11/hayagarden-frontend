@@ -218,6 +218,132 @@ class PeriodLogicTests(unittest.TestCase):
         )
         self.assertEqual(days, {})
 
+    def test_non_start_period_notes_migrated_to_period_days(self):
+        for d, note in [
+            ('2026-06-01', 'first day'),
+            ('2026-06-02', 'second day note'),
+            ('2026-06-03', 'third day'),
+        ]:
+            self._insert_legacy(d, 'period', note)
+        self.conn.commit()
+        period.rebuild_period_start_markers(self.conn)
+        self.conn.commit()
+        for d, expected in [
+            ('2026-06-01', 'first day'),
+            ('2026-06-02', 'second day note'),
+            ('2026-06-03', 'third day'),
+        ]:
+            row = self.conn.execute(
+                "SELECT data FROM period_days WHERE date=?", (d,)
+            ).fetchone()
+            self.assertIsNotNone(row, d)
+            data = json.loads(row['data'])
+            self.assertEqual(data['note'], expected)
+            self.assertTrue(data['came'])
+
+    def test_existing_day_note_not_overwritten_by_migration(self):
+        period.put_period_day(self.conn, '2026-06-02', {'came': True, 'note': 'keep me'})
+        self._insert_legacy('2026-06-02', 'period', 'legacy note')
+        self.conn.commit()
+        period.rebuild_period_start_markers(self.conn)
+        self.conn.commit()
+        row = self.conn.execute(
+            "SELECT data FROM period_days WHERE date='2026-06-02'"
+        ).fetchone()
+        data = json.loads(row['data'])
+        self.assertEqual(data['note'], 'keep me')
+
+    def test_note_migration_idempotent_no_duplicate(self):
+        self._insert_legacy('2026-06-02', 'period', 'same note')
+        self.conn.commit()
+        period.rebuild_period_start_markers(self.conn)
+        period.rebuild_period_start_markers(self.conn)
+        self.conn.commit()
+        row = self.conn.execute(
+            "SELECT data FROM period_days WHERE date='2026-06-02'"
+        ).fetchone()
+        data = json.loads(row['data'])
+        self.assertEqual(data['note'], 'same note')
+        self.assertNotIn('\n\n', data['note'])
+
+    def test_multiple_same_day_notes_merged_stable(self):
+        self._insert_legacy('2026-06-02', 'period', 'alpha')
+        self._insert_legacy('2026-06-02', 'period', 'beta')
+        self.conn.commit()
+        period.rebuild_period_start_markers(self.conn)
+        self.conn.commit()
+        row = self.conn.execute(
+            "SELECT data FROM period_days WHERE date='2026-06-02'"
+        ).fetchone()
+        data = json.loads(row['data'])
+        self.assertEqual(data['note'], 'alpha\nbeta')
+
+    def test_delete_period_record_clears_bleeding_fact(self):
+        for d in ['2026-06-01', '2026-06-02', '2026-06-03']:
+            period.put_period_day(self.conn, d, {'came': True})
+        self.conn.commit()
+        row = self.conn.execute(
+            "SELECT id FROM period_records WHERE date='2026-06-01' AND type='period'"
+        ).fetchone()
+        self.assertTrue(period.delete_period_record(self.conn, row['id']))
+        self.conn.commit()
+        data = json.loads(
+            self.conn.execute(
+                "SELECT data FROM period_days WHERE date='2026-06-01'"
+            ).fetchone()['data']
+        )
+        self.assertEqual(data.get('came'), False)
+        self.assertEqual(self._period_dates(), ['2026-06-02'])
+
+    def test_delete_middle_legacy_period_keeps_other_bleeding_days(self):
+        for d in ['2026-06-01', '2026-06-02', '2026-06-03']:
+            period.put_period_day(self.conn, d, {'came': True})
+        self.conn.commit()
+        self._insert_legacy('2026-06-02', 'period')
+        self.conn.commit()
+        row = self.conn.execute(
+            "SELECT id FROM period_records WHERE date='2026-06-02' AND type='period' ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        period.delete_period_record(self.conn, row['id'])
+        self.conn.commit()
+        d2 = json.loads(
+            self.conn.execute(
+                "SELECT data FROM period_days WHERE date='2026-06-02'"
+            ).fetchone()['data']
+        )
+        self.assertEqual(d2.get('came'), False)
+        d1 = json.loads(
+            self.conn.execute(
+                "SELECT data FROM period_days WHERE date='2026-06-01'"
+            ).fetchone()['data']
+        )
+        d3 = json.loads(
+            self.conn.execute(
+                "SELECT data FROM period_days WHERE date='2026-06-03'"
+            ).fetchone()['data']
+        )
+        self.assertTrue(d1.get('came'))
+        self.assertTrue(d3.get('came'))
+
+    def test_delete_sex_record_preserves_came(self):
+        period.put_period_day(self.conn, '2026-06-10', {'came': True, 'sex': True})
+        self.conn.commit()
+        row = self.conn.execute(
+            "SELECT id FROM period_records WHERE type='sex' AND date='2026-06-10'"
+        ).fetchone()
+        period.delete_period_record(self.conn, row['id'])
+        self.conn.commit()
+        data = json.loads(
+            self.conn.execute(
+                "SELECT data FROM period_days WHERE date='2026-06-10'"
+            ).fetchone()['data']
+        )
+        self.assertTrue(data.get('came'))
+        self.assertEqual(data.get('sex'), False)
+
+    def test_delete_missing_record_returns_false(self):
+        self.assertFalse(period.delete_period_record(self.conn, 99999))
+
 
 class PeriodRouteValidationTests(unittest.TestCase):
     """HTTP-level checks against a mini Flask app wired to a temp DB."""
@@ -273,11 +399,23 @@ class PeriodRouteValidationTests(unittest.TestCase):
                 return jsonify({'error': 'invalid last_start date'}), 400
             return jsonify({'ok': True})
 
+        @app.route('/api/period/records/<int:rid>', methods=['DELETE'])
+        def delete_rec(rid):
+            c = get_db()
+            try:
+                deleted = period.delete_period_record(c, rid)
+                if not deleted:
+                    c.rollback()
+                    return jsonify({'error': 'not found'}), 404
+                c.commit()
+                return jsonify({'ok': True})
+            finally:
+                c.close()
+
         @app.route('/api/period/stats', methods=['GET'])
         def stats():
             c = get_db()
             try:
-                # Inject a dirty row, then ensure stats still returns 200.
                 c.execute(
                     "INSERT INTO period_records (date, type) VALUES ('nope', 'period')"
                 )
@@ -292,7 +430,12 @@ class PeriodRouteValidationTests(unittest.TestCase):
             finally:
                 c.close()
 
+        @app.route('/api/period/stats/broken', methods=['GET'])
+        def stats_broken():
+            raise RuntimeError('simulated database failure')
+
         self.client = app.test_client()
+        self.get_db = get_db
 
     def tearDown(self):
         os.unlink(self.db_path)
@@ -322,6 +465,35 @@ class PeriodRouteValidationTests(unittest.TestCase):
         r = self.client.get('/api/period/stats')
         self.assertEqual(r.status_code, 200)
         self.assertIn('last_period', r.get_json())
+
+    def test_stats_real_db_error_returns_500(self):
+        r = self.client.get('/api/period/stats/broken')
+        self.assertEqual(r.status_code, 500)
+
+    def test_delete_legacy_period_via_http(self):
+        c = self.get_db()
+        period.put_period_day(c, '2026-06-05', {'came': True, 'note': 'flow'})
+        c.commit()
+        c.close()
+        row = self.get_db().execute(
+            "SELECT id FROM period_records WHERE date='2026-06-05' AND type='period'"
+        ).fetchone()
+        self.get_db().close()
+        rid = row['id']
+        r = self.client.delete(f'/api/period/records/{rid}')
+        self.assertEqual(r.status_code, 200)
+        conn = self.get_db()
+        data = json.loads(
+            conn.execute(
+                "SELECT data FROM period_days WHERE date='2026-06-05'"
+            ).fetchone()['data']
+        )
+        conn.close()
+        self.assertEqual(data.get('came'), False)
+
+    def test_delete_missing_record_404(self):
+        r = self.client.delete('/api/period/records/424242')
+        self.assertEqual(r.status_code, 404)
 
 
 if __name__ == '__main__':

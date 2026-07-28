@@ -65,14 +65,15 @@ export function groupFlowDates(days: PeriodDays): FlowGroup[] {
 }
 
 export interface CycleDerived {
-  currentStart: string;
-  cycleDay: number;
+  hasAnchor: boolean;
+  currentStart: string | null;
+  cycleDay: number | null;
   inPeriod: boolean;
-  nextStart: string;
-  daysUntil: number;
+  nextStart: string | null;
+  daysUntil: number | null;
   soon: boolean;
   overdue: boolean;
-  /** dates predicted to be inside a period (excluding logged flow days) */
+  /** dates predicted to be inside a period (only when came is undefined) */
   predicted: Set<string>;
   /** dates predicted to be ovulation days */
   ovulation: Set<string>;
@@ -83,25 +84,35 @@ export interface CycleDerived {
   topStates: string[];
 }
 
-function resolveCurrentStart(settings: PeriodSettings, today: string, groups: FlowGroup[]): string {
-  let currentStart = settings.lastStart || '';
+function resolveCurrentStart(settings: PeriodSettings, groups: FlowGroup[]): string | null {
+  let currentStart = (settings.lastStart || '').trim() || null;
   for (const g of groups) {
     if (!currentStart || diffDays(g.start, currentStart) > 0) currentStart = g.start;
   }
-  return currentStart || today;
+  return currentStart;
+}
+
+export function hasCycleAnchor(settings: PeriodSettings, groups: FlowGroup[]): boolean {
+  return Boolean(resolveCurrentStart(settings, groups));
 }
 
 /** Actual record beats prediction for inPeriod. */
 export function resolveInPeriod(
   days: PeriodDays,
   today: string,
-  cycleDay: number,
+  cycleDay: number | null,
   periodLength: number,
 ): boolean {
   const rec = days[today];
   if (rec?.came === true) return true;
   if (rec?.came === false) return false;
+  if (cycleDay === null) return false;
   return cycleDay >= 1 && cycleDay <= periodLength;
+}
+
+/** Only dates with no explicit came record may be predicted. */
+export function shouldPredictPeriodDay(days: PeriodDays, date: string): boolean {
+  return days[date]?.came === undefined;
 }
 
 /** States logged on non-bleeding days in the 1–5 days before each real period start. */
@@ -126,12 +137,34 @@ export function collectPrePeriodTopStates(days: PeriodDays, groups: FlowGroup[],
     .map(([k]) => k);
 }
 
+const EMPTY_CYCLE: Omit<CycleDerived, 'groups' | 'lastRange' | 'topStates'> = {
+  hasAnchor: false,
+  currentStart: null,
+  cycleDay: null,
+  inPeriod: false,
+  nextStart: null,
+  daysUntil: null,
+  soon: false,
+  overdue: false,
+  predicted: new Set<string>(),
+  ovulation: new Set<string>(),
+};
+
 export function deriveCycle(days: PeriodDays, settings: PeriodSettings, today: string): CycleDerived {
   const cycleLength = settings.cycleLength || 28;
   const periodLength = settings.periodLength || 5;
   const groups = groupFlowDates(days);
+  const currentStart = resolveCurrentStart(settings, groups);
 
-  const currentStart = resolveCurrentStart(settings, today, groups);
+  if (!currentStart) {
+    return {
+      ...EMPTY_CYCLE,
+      groups,
+      lastRange: '—',
+      topStates: collectPrePeriodTopStates(days, groups),
+    };
+  }
+
   const cycleDay = diffDays(today, currentStart) + 1;
   const inPeriod = resolveInPeriod(days, today, cycleDay, periodLength);
   const nextStart = addDays(currentStart, cycleLength);
@@ -145,9 +178,8 @@ export function deriveCycle(days: PeriodDays, settings: PeriodSettings, today: s
     const st = addDays(currentStart, k * cycleLength);
     for (let i = 0; i < periodLength; i++) {
       const d = addDays(st, i);
-      if (days[d]?.came !== true) predicted.add(d);
+      if (shouldPredictPeriodDay(days, d)) predicted.add(d);
     }
-    // Ovulation = next period start − 14 days
     ovulation.add(addDays(st, cycleLength - 14));
   }
 
@@ -164,6 +196,7 @@ export function deriveCycle(days: PeriodDays, settings: PeriodSettings, today: s
   const topStates = collectPrePeriodTopStates(days, groups);
 
   return {
+    hasAnchor: true,
     currentStart,
     cycleDay,
     inPeriod,
@@ -181,7 +214,8 @@ export function deriveCycle(days: PeriodDays, settings: PeriodSettings, today: s
 
 /** Home card phase label — same derivation as PeriodScreen. */
 export function cyclePhaseLabel(c: CycleDerived): string {
+  if (!c.hasAnchor) return '暂无记录';
   if (c.inPeriod) return `经期第${c.cycleDay}天`;
-  if (c.overdue) return `逾期 ${-c.daysUntil} 天`;
+  if (c.overdue && c.daysUntil !== null) return `逾期 ${-c.daysUntil} 天`;
   return `周期第${c.cycleDay}天`;
 }

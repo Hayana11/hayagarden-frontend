@@ -18,7 +18,7 @@ import {
   toYmd,
 } from '../lib/cycle';
 import type { PeriodDayRecord, PeriodDays, PeriodSettings } from '../types';
-import { isLatestSaveToken, nextSaveToken } from '../lib/periodSave';
+import { schedulePeriodDaySave } from '../lib/periodSave';
 
 const WEEKDAY_EN = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const DISPLAY = 'var(--font-serif-display)';
@@ -130,7 +130,6 @@ export function PeriodScreen() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [draft, setDraft] = useState<{ start: string; cycle: number; period: number } | null>(null);
   const [loadTick, setLoadTick] = useState(0);
-  const daySaveTokens = useRef(new Map<string, number>());
   // Keep a mutable mirror so rapid multi-field edits on the same day merge correctly.
   const daysRef = useRef<PeriodDays>({});
 
@@ -190,7 +189,7 @@ export function PeriodScreen() {
     );
   }
 
-  const { cycleDay, inPeriod, currentStart, nextStart, daysUntil, soon, overdue, predicted, ovulation, lastRange, topStates } =
+  const { hasAnchor, cycleDay, inPeriod, currentStart, nextStart, daysUntil, soon, overdue, predicted, ovulation, lastRange, topStates } =
     deriveCycle(days, settings, today);
   const { cycleLength, periodLength } = settings;
 
@@ -200,21 +199,29 @@ export function PeriodScreen() {
     daysRef.current = { ...daysRef.current, [date]: rec };
     setDays({ ...daysRef.current });
     setSaveError(null);
-    const token = nextSaveToken(daySaveTokens.current, date);
     try {
-      const ok = await savePeriodDay(date, rec);
-      if (!isLatestSaveToken(daySaveTokens.current, date, token)) return;
-      if (!ok) throw new Error('save failed');
-    } catch {
-      if (!isLatestSaveToken(daySaveTokens.current, date, token)) return;
-      if (prev === undefined) {
-        const next = { ...daysRef.current };
-        delete next[date];
-        daysRef.current = next;
-      } else {
-        daysRef.current = { ...daysRef.current, [date]: prev };
+      const ok = await schedulePeriodDaySave(date, rec, savePeriodDay);
+      if (!ok) {
+        const fresh = await fetchPeriodDays();
+        daysRef.current = fresh;
+        setDays(fresh);
+        setSaveError('保存没有成功，请再试一次');
       }
-      setDays({ ...daysRef.current });
+    } catch {
+      try {
+        const fresh = await fetchPeriodDays();
+        daysRef.current = fresh;
+        setDays(fresh);
+      } catch {
+        if (prev === undefined) {
+          const next = { ...daysRef.current };
+          delete next[date];
+          daysRef.current = next;
+        } else {
+          daysRef.current = { ...daysRef.current, [date]: prev };
+        }
+        setDays({ ...daysRef.current });
+      }
       setSaveError('保存没有成功，请再试一次');
     }
   }
@@ -225,23 +232,28 @@ export function PeriodScreen() {
   }
 
   // ── hero ──
-  const heroCaption = inPeriod ? '现在是' : '今天是';
-  const heroPre = inPeriod ? '经期第' : '周期第';
-  const heroSub = inPeriod
-    ? `预计还剩 ${Math.max(periodLength - cycleDay, 0)} 天`
-    : overdue
-      ? `比预计晚了 ${-daysUntil} 天，别担心，记录会修正它`
-      : daysUntil === 0
-        ? '预计就是今天'
-        : `预计 ${daysUntil} 天后开始`;
+  const heroCaption = !hasAnchor ? '今天是' : inPeriod ? '现在是' : '今天是';
+  const heroPre = !hasAnchor ? '' : inPeriod ? '经期第' : '周期第';
+  const heroSub = !hasAnchor
+    ? '等待首次记录'
+    : inPeriod
+      ? `预计还剩 ${Math.max(periodLength - (cycleDay ?? 0), 0)} 天`
+      : overdue && daysUntil !== null
+        ? `比预计晚了 ${-daysUntil} 天，别担心，记录会修正它`
+        : daysUntil === 0
+          ? '预计就是今天'
+          : `预计 ${daysUntil} 天后开始`;
   const nextLabel = inPeriod ? '本次经期' : '下次经期';
-  const nextRange = inPeriod
-    ? `${shortMd(currentStart)} – ${shortMd(addDays(currentStart, periodLength - 1))}`
-    : `${shortMd(nextStart)} – ${shortMd(addDays(nextStart, periodLength - 1))}`;
-  const soonLine = !inPeriod && (soon || overdue) ? '快来了，今天温柔一点' : '';
+  const nextRange =
+    !hasAnchor || !currentStart || !nextStart
+      ? '—'
+      : inPeriod
+        ? `${shortMd(currentStart)} – ${shortMd(addDays(currentStart, periodLength - 1))}`
+        : `${shortMd(nextStart)} – ${shortMd(addDays(nextStart, periodLength - 1))}`;
+  const soonLine = hasAnchor && !inPeriod && (soon || overdue) ? '快来了，今天温柔一点' : '';
 
   // ── settings draft ──
-  const effDraft = draft ?? { start: currentStart, cycle: cycleLength, period: periodLength };
+  const effDraft = draft ?? { start: currentStart || today, cycle: cycleLength, period: periodLength };
   const bump = (patch: Partial<typeof effDraft>) => setDraft({ ...effDraft, ...patch });
 
   async function saveSettings() {
@@ -359,7 +371,7 @@ export function PeriodScreen() {
             onClick={() => {
               setSettingsOpen(!settingsOpen);
               setSettingsError(null);
-              setDraft(settingsOpen ? null : { start: currentStart, cycle: cycleLength, period: periodLength });
+              setDraft(settingsOpen ? null : { start: currentStart || today, cycle: cycleLength, period: periodLength });
             }}
             style={{ cursor: 'pointer', color: 'var(--color-rose-deep)', fontSize: 12, padding: '4px 14px', borderRadius: 999, background: 'rgba(183,110,121,0.10)' }}
           >
@@ -368,11 +380,11 @@ export function PeriodScreen() {
         </div>
 
         <div style={{ display: 'flex', alignItems: 'baseline', gap: 7, marginTop: 6 }}>
-          <span style={{ fontSize: 16, color: 'var(--color-text-soft)', letterSpacing: 1 }}>{heroPre}</span>
+          {heroPre && <span style={{ fontSize: 16, color: 'var(--color-text-soft)', letterSpacing: 1 }}>{heroPre}</span>}
           <span style={{ fontFamily: DISPLAY, fontSize: 48, fontWeight: 600, color: inPeriod ? 'var(--color-rose-deep)' : 'var(--color-text)', lineHeight: 1 }}>
-            {cycleDay}
+            {hasAnchor ? cycleDay : '暂无记录'}
           </span>
-          <span style={{ fontSize: 16, color: 'var(--color-text-soft)' }}>天</span>
+          {hasAnchor && <span style={{ fontSize: 16, color: 'var(--color-text-soft)' }}>天</span>}
         </div>
         <div style={{ fontSize: 13, color: 'var(--color-text-mute)', marginTop: 5, letterSpacing: 1 }}>{heroSub}</div>
 

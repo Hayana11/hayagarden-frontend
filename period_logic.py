@@ -236,6 +236,143 @@ def derive_cycle_stats(conn) -> dict:
     return compute_stats_from_starts(starts, period_length=period_len)
 
 
+def _merge_notes(existing: str | None, *incoming: str) -> str:
+    """Stable dedupe merge: preserve first-seen order, join with newline."""
+    lines: list[str] = []
+    seen: set[str] = set()
+    for src in [existing, *incoming]:
+        if not src:
+            continue
+        for line in str(src).split('\n'):
+            line = line.strip()
+            if not line or line in seen:
+                continue
+            lines.append(line)
+            seen.add(line)
+    return '\n'.join(lines)
+
+
+def migrate_period_row_notes_to_days(conn) -> None:
+    """Before deleting legacy period rows, copy their notes into period_days."""
+    rows = conn.execute(
+        "SELECT date, note FROM period_records WHERE type='period' ORDER BY id"
+    ).fetchall()
+    by_date: dict[str, list[str]] = {}
+    for row in rows:
+        d = row['date'] if hasattr(row, 'keys') else row[0]
+        note = row['note'] if hasattr(row, 'keys') else row[1]
+        if not is_valid_ymd(d):
+            continue
+        note = (note or '').strip()
+        if note:
+            by_date.setdefault(d, []).append(note)
+
+    for d, notes in by_date.items():
+        row = conn.execute("SELECT data FROM period_days WHERE date=?", (d,)).fetchone()
+        data = _load_day_data(row['data']) if row else {}
+        existing_note = (data.get('note') or '').strip()
+        if existing_note:
+            # period_days is authoritative — never append or replace an existing note.
+            continue
+        merged = _merge_notes(None, *notes)
+        if not merged or merged == (data.get('note') or '').strip():
+            continue
+        data['note'] = merged
+        payload = json.dumps(data, ensure_ascii=False)
+        if row:
+            conn.execute(
+                """UPDATE period_days SET data=?, updated_at=datetime('now','+8 hours')
+                   WHERE date=?""",
+                (payload, d),
+            )
+        else:
+            conn.execute(
+                """INSERT INTO period_days (date, data, updated_at)
+                   VALUES (?, ?, datetime('now','+8 hours'))""",
+                (d, payload),
+            )
+
+
+def _set_came_false(conn, date_str: str) -> None:
+    """Mark a day as explicitly not bleeding (prevents rebuild from re-adding it)."""
+    row = conn.execute("SELECT data FROM period_days WHERE date=?", (date_str,)).fetchone()
+    if row:
+        data = _load_day_data(row['data'])
+        data['came'] = False
+        conn.execute(
+            """UPDATE period_days SET data=?, updated_at=datetime('now','+8 hours')
+               WHERE date=?""",
+            (json.dumps(data, ensure_ascii=False), date_str),
+        )
+    else:
+        conn.execute(
+            """INSERT INTO period_days (date, data, updated_at)
+               VALUES (?, ?, datetime('now','+8 hours'))""",
+            (date_str, json.dumps({'came': False}, ensure_ascii=False)),
+        )
+
+
+def _clear_sex_on_day(conn, date_str: str) -> None:
+    row = conn.execute("SELECT data FROM period_days WHERE date=?", (date_str,)).fetchone()
+    if not row:
+        return
+    data = _load_day_data(row['data'])
+    if data.get('sex') is not True:
+        return
+    data['sex'] = False
+    if _day_record_is_empty(data):
+        conn.execute("DELETE FROM period_days WHERE date=?", (date_str,))
+    else:
+        conn.execute(
+            """UPDATE period_days SET data=?, updated_at=datetime('now','+8 hours')
+               WHERE date=?""",
+            (json.dumps(data, ensure_ascii=False), date_str),
+        )
+
+
+def _day_record_is_empty(data: dict) -> bool:
+    if not data:
+        return True
+    for k, v in data.items():
+        if v is None:
+            continue
+        if isinstance(v, (list, str)) and not v:
+            continue
+        return False
+    return True
+
+
+def delete_period_record(conn, rid: int) -> bool:
+    """Delete a legacy record and the underlying day fact it represents."""
+    row = conn.execute(
+        "SELECT id, date, type FROM period_records WHERE id=?", (rid,)
+    ).fetchone()
+    if not row:
+        return False
+
+    date_str = row['date'] if hasattr(row, 'keys') else row[1]
+    rtype = row['type'] if hasattr(row, 'keys') else row[2]
+    if not is_valid_ymd(date_str):
+        conn.execute("DELETE FROM period_records WHERE id=?", (rid,))
+        rebuild_period_start_markers(conn)
+        return True
+
+    if rtype in ('period', 'start'):
+        _set_came_false(conn, date_str)
+        conn.execute(
+            "DELETE FROM period_records WHERE date=? AND type IN ('period', 'start')",
+            (date_str,),
+        )
+    elif rtype == 'sex':
+        _clear_sex_on_day(conn, date_str)
+        conn.execute("DELETE FROM period_records WHERE id=?", (rid,))
+    else:
+        conn.execute("DELETE FROM period_records WHERE id=?", (rid,))
+
+    rebuild_period_start_markers(conn)
+    return True
+
+
 def _upsert_came_true(conn, date_str: str) -> None:
     row = conn.execute("SELECT data FROM period_days WHERE date=?", (date_str,)).fetchone()
     if row:
@@ -275,10 +412,12 @@ def rebuild_period_start_markers(conn) -> dict:
     """Idempotent: period_records.type='period' becomes one row per cycle start.
 
     Steps:
+      0. Migrate legacy period-row notes into period_days before deleting rows.
       1. Map bleeding dates (period_days.came + period/start rows) into period_days.
       2. Group consecutive bleeding days; keep only each group's first day as type='period'.
       3. Preserve sex/end/start rows; never wipe the tables.
     """
+    migrate_period_row_notes_to_days(conn)
     bleeding = collect_bleeding_dates(conn)
     for d in bleeding:
         _upsert_came_true(conn, d)

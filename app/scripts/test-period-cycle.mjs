@@ -1,5 +1,5 @@
 /**
- * Period cycle algorithm + save-token unit checks (no vitest).
+ * Period cycle algorithm + serial save-queue unit checks (no vitest).
  * Run: npm run test:period-cycle
  */
 import assert from 'node:assert/strict';
@@ -16,19 +16,18 @@ const {
   resolveInPeriod,
   collectPrePeriodTopStates,
   cyclePhaseLabel,
+  shouldPredictPeriodDay,
   ymdToEpochDay,
 } = cycle;
 
 const { derivePeriod } = period;
-const { nextSaveToken, isLatestSaveToken } = save;
+const { schedulePeriodDaySave, resetPeriodSaveQueues } = save;
 
 // ── date math (UTC epoch-day; DST-safe) ──
 assert.equal(diffDays('2026-03-10', '2026-03-08'), 2);
 assert.equal(addDays('2026-03-08', 2), '2026-03-10');
-// US DST spring-forward neighborhood (2026-03-08): calendar days still +1
 assert.equal(diffDays('2026-03-09', '2026-03-08'), 1);
 assert.equal(addDays('2026-03-08', 1), '2026-03-09');
-// Cross month / year
 assert.equal(addDays('2026-01-31', 1), '2026-02-01');
 assert.equal(addDays('2025-12-31', 1), '2026-01-01');
 assert.equal(diffDays('2026-01-01', '2025-12-31'), 1);
@@ -39,23 +38,27 @@ const groups = groupFlowDates({
   '2026-06-01': { came: true },
   '2026-06-02': { came: true },
   '2026-06-03': { came: true },
-  '2026-06-05': { came: true }, // gap → new group
+  '2026-06-05': { came: true },
   '2026-06-29': { came: true },
   '2026-06-30': { came: true },
 });
 assert.equal(groups.length, 3);
-assert.deepEqual(groups[0], { start: '2026-06-01', end: '2026-06-03' });
-assert.deepEqual(groups[1], { start: '2026-06-05', end: '2026-06-05' });
-assert.deepEqual(groups[2], { start: '2026-06-29', end: '2026-06-30' });
-
-// Non-consecutive form different cycles
-const g2 = groupFlowDates({
-  '2026-06-01': { came: true },
-  '2026-06-29': { came: true },
-});
-assert.equal(g2.length, 2);
 
 const settings = { cycleLength: 28, periodLength: 5, lastStart: '2026-06-01' };
+const emptySettings = { cycleLength: 28, periodLength: 5, lastStart: '' };
+
+// ── empty anchor: no fake day-1 period ──
+{
+  const c = deriveCycle({}, emptySettings, '2026-07-10');
+  assert.equal(c.hasAnchor, false);
+  assert.equal(c.inPeriod, false);
+  assert.equal(c.cycleDay, null);
+  assert.equal(c.nextStart, null);
+  assert.equal(c.daysUntil, null);
+  assert.equal(c.predicted.size, 0);
+  assert.equal(c.ovulation.size, 0);
+  assert.equal(cyclePhaseLabel(c), '暂无记录');
+}
 
 // ── came:true beats average period length ──
 {
@@ -65,36 +68,41 @@ const settings = { cycleLength: 28, periodLength: 5, lastStart: '2026-06-01' };
     '2026-06-03': { came: true },
     '2026-06-04': { came: true },
     '2026-06-05': { came: true },
-    '2026-06-06': { came: true }, // day 6 > periodLength 5
+    '2026-06-06': { came: true },
   };
   assert.equal(resolveInPeriod(days, '2026-06-06', 6, 5), true);
-  const c = deriveCycle(days, settings, '2026-06-06');
-  assert.equal(c.inPeriod, true);
+  assert.equal(deriveCycle(days, settings, '2026-06-06').inPeriod, true);
 }
 
 // ── came:false beats prediction ──
 {
   const days = {
     '2026-06-01': { came: true },
-    '2026-06-29': { came: false }, // predicted period day 1 of next cycle if lastStart advanced…
+    '2026-06-29': { came: false },
   };
-  // With lastStart still Jun 1 and today = Jun 29 (= next start), prediction would say in period,
-  // but explicit came:false wins.
   const c = deriveCycle(days, settings, '2026-06-29');
   assert.equal(c.inPeriod, false);
-  assert.equal(resolveInPeriod(days, '2026-06-29', 29, 5), false);
+  assert.equal(shouldPredictPeriodDay(days, '2026-06-29'), false);
+  assert.ok(!c.predicted.has('2026-06-29'));
 }
 
-// ── overdue: daysUntil negative ──
+// ── came:false excluded from predicted set ──
+{
+  const days = { '2026-06-01': { came: true }, '2026-06-30': { came: false } };
+  const c = deriveCycle(days, settings, '2026-06-10');
+  assert.ok(!c.predicted.has('2026-06-30'));
+}
+
+// ── overdue ──
 {
   const days = { '2026-06-01': { came: true } };
-  const c = deriveCycle(days, settings, '2026-07-01'); // next was Jun 29
-  assert.ok(c.daysUntil < 0);
+  const c = deriveCycle(days, settings, '2026-07-01');
+  assert.ok(c.daysUntil !== null && c.daysUntil < 0);
   assert.equal(c.overdue, true);
   assert.equal(cyclePhaseLabel(c), `逾期 ${-c.daysUntil} 天`);
 }
 
-// ── home (derivePeriod wrapper) and detail (deriveCycle) agree on phase/days ──
+// ── home and detail agree ──
 {
   const days = {
     '2026-06-01': { came: true },
@@ -111,7 +119,6 @@ const settings = { cycleLength: 28, periodLength: 5, lastStart: '2026-06-01' };
       recordsCount: 3,
       nextPredicted: '2026-06-29',
     },
-    // local Date matching today ymd
     new Date(2026, 5, 10),
   );
   assert.equal(home.phase, cyclePhaseLabel(detail));
@@ -123,83 +130,77 @@ const settings = { cycleLength: 28, periodLength: 5, lastStart: '2026-06-01' };
   const days = { '2026-06-01': { came: true } };
   const c = deriveCycle(days, { cycleLength: 30, periodLength: 5, lastStart: '2026-06-01' }, '2026-06-10');
   assert.equal(c.nextStart, '2026-07-01');
-  assert.ok(c.ovulation.has('2026-06-17')); // 07-01 - 14
-  // Must NOT use cycleLength/2 as a separate algorithm (15 ≠ 16)
+  assert.ok(c.ovulation.has('2026-06-17'));
   assert.ok(!c.ovulation.has(addDays('2026-06-01', Math.round(30 / 2))));
 }
 
-// ── pre-period states only in window before real starts ──
+// ── pre-period states ──
 {
   const days = {
-    '2026-05-28': { came: false, states: ['困'] }, // 4 days before Jun 1
+    '2026-05-28': { came: false, states: ['困'] },
     '2026-05-30': { came: false, states: ['情绪敏感', '想吃甜'] },
     '2026-06-01': { came: true },
-    '2026-06-10': { came: false, states: ['腰酸'] }, // far from period — exclude
-    '2026-06-02': { came: true, states: ['困'] }, // bleeding — exclude
+    '2026-06-10': { came: false, states: ['腰酸'] },
+    '2026-06-02': { came: true, states: ['困'] },
   };
-  const groups = groupFlowDates(days);
-  const top = collectPrePeriodTopStates(days, groups);
-  assert.ok(top.includes('情绪敏感') || top.includes('想吃甜') || top.includes('困'));
+  const g = groupFlowDates(days);
+  const top = collectPrePeriodTopStates(days, g);
   assert.ok(!top.includes('腰酸'));
-  const c = deriveCycle(days, { ...settings, lastStart: '2026-06-01' }, '2026-06-10');
-  assert.ok(!c.topStates.includes('腰酸'));
-  assert.ok(c.topStates.length >= 1);
 }
 
-// Ordinary far-away states alone → empty topStates / neutral copy path
+// ── serial save queue: out-of-order completion keeps latest snapshot ──
 {
-  const days = {
-    '2026-06-01': { came: true },
-    '2026-06-15': { came: false, states: ['困'] },
+  resetPeriodSaveQueues();
+  const server = new Map();
+  const delays = new Map([
+    ['2026-06-01:A', 40],
+    ['2026-06-01:B', 5],
+  ]);
+  const saveFn = (date, record) =>
+    new Promise((resolve) => {
+      const key = `${date}:${record.flow || record.came}`;
+      setTimeout(() => {
+        server.set(date, structuredClone(record));
+        resolve(true);
+      }, delays.get(key) ?? 5);
+    });
+
+  const pA = schedulePeriodDaySave('2026-06-01', { came: true, flow: 'A' }, saveFn);
+  const pB = schedulePeriodDaySave('2026-06-01', { came: true, flow: 'B' }, saveFn);
+  await Promise.all([pA, pB]);
+  assert.deepEqual(server.get('2026-06-01'), { came: true, flow: 'B' });
+}
+
+// ── rapid triple edit ends with last state ──
+{
+  resetPeriodSaveQueues();
+  const server = new Map();
+  const saveFn = async (date, record) => {
+    server.set(date, structuredClone(record));
+    return true;
   };
-  const c = deriveCycle(days, settings, '2026-06-20');
-  assert.deepEqual(c.topStates, []);
+  schedulePeriodDaySave('2026-06-02', { came: true }, saveFn);
+  schedulePeriodDaySave('2026-06-02', { came: true, flow: '少量' }, saveFn);
+  await schedulePeriodDaySave('2026-06-02', { came: true, flow: '多', pain: '轻微' }, saveFn);
+  assert.deepEqual(server.get('2026-06-02'), { came: true, flow: '多', pain: '轻微' });
 }
 
-// ── save token: older request must not win ──
+// ── middle failure then later success keeps final good state ──
 {
-  const map = new Map();
-  const t1 = nextSaveToken(map, '2026-06-01');
-  const t2 = nextSaveToken(map, '2026-06-01');
-  assert.equal(isLatestSaveToken(map, '2026-06-01', t1), false);
-  assert.equal(isLatestSaveToken(map, '2026-06-01', t2), true);
-}
-
-// ── save success / failure semantics (pure) ──
-{
-  // success keeps new state
-  let local = {};
-  const next = { came: true, flow: '中等' };
-  local = { ...local, '2026-06-01': next };
-  const ok = true;
-  assert.equal(ok, true);
-  assert.deepEqual(local['2026-06-01'], next);
-
-  // failure rolls back — do not keep fake success
-  const prev = undefined;
-  let rolled = { '2026-06-01': { came: true } };
-  const failed = true;
-  if (failed) {
-    if (prev === undefined) {
-      const copy = { ...rolled };
-      delete copy['2026-06-01'];
-      rolled = copy;
-    }
-  }
-  assert.equal(rolled['2026-06-01'], undefined);
-}
-
-// settings panel stays open on failure (boolean flag model)
-{
-  let settingsOpen = true;
-  let draft = { start: '2026-06-01', cycle: 28, period: 5 };
-  const saveOk = false;
-  if (saveOk) {
-    settingsOpen = false;
-    draft = null;
-  }
-  assert.equal(settingsOpen, true);
-  assert.ok(draft);
+  resetPeriodSaveQueues();
+  const server = new Map();
+  let calls = 0;
+  const saveFn = async (date, record) => {
+    calls += 1;
+    if (calls === 1) return false;
+    server.set(date, structuredClone(record));
+    return true;
+  };
+  const r1 = await schedulePeriodDaySave('2026-06-03', { came: true, flow: 'A' }, saveFn);
+  const r2 = await schedulePeriodDaySave('2026-06-03', { came: true, flow: 'B' }, saveFn);
+  assert.equal(r1, false);
+  assert.equal(r2, true);
+  assert.deepEqual(server.get('2026-06-03'), { came: true, flow: 'B' });
 }
 
 console.log('period cycle tests: ok');

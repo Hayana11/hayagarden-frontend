@@ -192,8 +192,11 @@ def chat():
     return send_from_directory('/opt/frontend/static', 'chat.html')
 
 @app.route('/calendar')
+@app.route('/calendar.html')
+@app.route('/static/calendar.html')
 def calendar():
-    return send_from_directory('/opt/frontend/static', 'calendar.html')
+    from flask import redirect
+    return redirect('/dash', code=302)
 
 @app.route('/pocket-settings.html')
 def pocket_settings_page():
@@ -1994,8 +1997,10 @@ def add_period_record():
 def delete_period_record(rid):
     conn = get_db()
     try:
-        conn.execute("DELETE FROM period_records WHERE id=?", (rid,))
-        _period.rebuild_period_start_markers(conn)
+        deleted = _period.delete_period_record(conn, rid)
+        if not deleted:
+            conn.rollback()
+            return jsonify({'error': 'not found'}), 404
         conn.commit()
         return jsonify({'ok': True})
     except Exception:
@@ -2017,12 +2022,6 @@ def period_stats():
             'period_length': stats.get('period_length'),
             'next_period':  stats['next_period'],
             'ovulation':    stats['ovulation'],
-        })
-    except Exception:
-        # Dirty historical dates are skipped inside derive; never 500 the client.
-        return jsonify({
-            'last_period': None, 'cycle_length': None,
-            'period_length': None, 'next_period': None, 'ovulation': None,
         })
     finally:
         conn.close()
