@@ -119,6 +119,10 @@ class DeferredError(DailyContextError):
     """Provider request in flight; rollover deferred (retryable)."""
 
 
+class StaleOriginDayError(DailyContextError):
+    """Origin local day is older than latest active context; cannot create."""
+
+
 def enabled() -> bool:
     import config_store
     return config_store.get_bool('DAILY_SOFT_WINDOW_ENABLED', False)
@@ -409,6 +413,107 @@ def get_daily_context(
         'SELECT * FROM daily_contexts WHERE chat_id=? AND local_day=?',
         (chat_id, local_day),
     ).fetchone())
+
+
+def _latest_active_context_row(
+    conn: sqlite3.Connection,
+    chat_id: str,
+) -> Optional[dict[str, Any]]:
+    return _row_to_dict(conn.execute(
+        'SELECT * FROM daily_contexts WHERE chat_id=? AND is_backfill=0 '
+        'ORDER BY context_epoch DESC LIMIT 1',
+        (str(chat_id),),
+    ).fetchone())
+
+
+def resolve_or_create_daily_context_for_origin(
+    *,
+    chat_id: str = DEFAULT_CHAT_ID,
+    origin_local_day: str,
+    actual_wall_now: Optional[datetime.datetime] = None,
+    db_path: Optional[str] = None,
+    provider_busy: bool = False,
+    skip_compaction: bool = True,
+) -> dict[str, Any]:
+    """Resolve origin-day context without treating message time as current wall clock."""
+    if provider_busy:
+        raise DeferredError('provider request in flight; rollover deferred')
+
+    ensure_schema(db_path)
+    origin_local_day = validate_day_string(origin_local_day)
+    validate_timezone(DEFAULT_TIMEZONE)
+    wall_now = actual_wall_now or (
+        datetime.datetime.utcnow() + datetime.timedelta(hours=TZ_OFFSET_HOURS)
+    )
+    wall_chat_day = chat_day_for_timestamp(wall_now)
+
+    conn = _connect(db_path)
+    try:
+        conn.execute('BEGIN IMMEDIATE')
+        existing = get_daily_context(conn, chat_id=chat_id, local_day=origin_local_day)
+        latest = _latest_active_context_row(conn, chat_id)
+        latest_day_row = conn.execute(
+            'SELECT local_day FROM daily_contexts WHERE chat_id=? ORDER BY local_day DESC LIMIT 1',
+            (str(chat_id),),
+        ).fetchone()
+        newest_local_day = str(latest_day_row['local_day']) if latest_day_row else None
+        if existing is not None:
+            conn.commit()
+            return existing
+        if latest is not None and str(latest['local_day']) > origin_local_day:
+            conn.rollback()
+            raise StaleOriginDayError(
+                'origin day %s stale; latest active is %s'
+                % (origin_local_day, latest['local_day']),
+            )
+        if newest_local_day and newest_local_day > origin_local_day:
+            conn.rollback()
+            raise StaleOriginDayError(
+                'origin day %s stale; newest context day is %s'
+                % (origin_local_day, newest_local_day),
+            )
+        boundary_id = get_boundary_message_id(
+            conn, local_day=origin_local_day, chat_id=chat_id,
+        )
+        epoch, is_backfill = _assign_context_epoch(
+            conn, chat_id, origin_local_day, current_chat_day=wall_chat_day,
+        )
+        now_s = _now_local_str()
+        status = STATUS_ABSENT
+        cur = conn.execute(
+            '''INSERT INTO daily_contexts (
+                chat_id, local_day, timezone, boundary_hour, context_epoch,
+                boundary_message_id, status, carryover_count, is_backfill,
+                resident_generation, version, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, 1, 1, ?, ?)''',
+            (
+                chat_id, origin_local_day, DEFAULT_TIMEZONE, CHAT_DAY_START_HOUR,
+                epoch, boundary_id, status, is_backfill, now_s, now_s,
+            ),
+        )
+        context_id = int(cur.lastrowid)
+        if skip_compaction:
+            assert_transition(STATUS_ABSENT, STATUS_PROVISIONAL)
+            conn.execute(
+                '''UPDATE daily_contexts SET status=?, version=version+1,
+                   updated_at=datetime('now','+8 hours') WHERE id=?''',
+                (STATUS_PROVISIONAL, context_id),
+            )
+        conn.commit()
+        created = get_daily_context(conn, chat_id=chat_id, local_day=origin_local_day)
+        assert created is not None
+        return created
+    except sqlite3.IntegrityError:
+        conn.rollback()
+        existing = get_daily_context(conn, chat_id=chat_id, local_day=origin_local_day)
+        if existing is None:
+            raise
+        return existing
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 
 def get_or_create_daily_context(
@@ -748,9 +853,9 @@ def list_carryover_candidates(
             for r in conn.execute(
                 'SELECT %s FROM chat_messages m '
                 'INNER JOIN daily_message_contexts dmc ON dmc.message_id = m.id '
-                'WHERE dmc.context_id=? AND dmc.context_epoch=? AND m.id <= ? '
+                'WHERE dmc.context_id=? AND dmc.context_epoch=? '
                 'ORDER BY m.id ASC' % ', '.join('m.' + c for c in select_cols),
-                (src_id, src_epoch, boundary if boundary > 0 else 10**18),
+                (src_id, src_epoch),
             ).fetchall():
                 rows_by_id[int(r['id'])] = r
             other_mapped = {
@@ -1786,6 +1891,7 @@ def claim_daily_resident_turn(
             conn.rollback()
             raise ConflictError('context is not latest active')
 
+        idempotent_lease: Optional[tuple[int, dict[str, Any]]] = None
         for lr in conn.execute(
             'SELECT * FROM daily_resident_turn_leases WHERE context_id=?',
             (int(context_id),),
@@ -1795,9 +1901,51 @@ def claim_daily_resident_turn(
                 exp_dt = _parse_local_dt(str(lr_d['expires_at']))
             except ValueError:
                 continue
-            if exp_dt > now_dt and str(lr_d['lease_owner']) != owner:
+            if exp_dt <= now_dt:
+                continue
+            lease_gen = int(lr_d['resident_generation'])
+            if (
+                str(lr_d['lease_owner']) == owner
+                and int(lr_d['request_message_id']) == req_id
+            ):
+                owner_row = conn.execute(
+                    'SELECT * FROM daily_resident_owners '
+                    'WHERE context_id=? AND resident_generation=?',
+                    (int(context_id), lease_gen),
+                ).fetchone()
+                if (
+                    owner_row is not None
+                    and str(dict(owner_row).get('worker_id') or '') == wid
+                    and int(ctx['resident_generation']) == lease_gen
+                ):
+                    if idempotent_lease is not None:
+                        conn.rollback()
+                        raise ConflictError('multiple active idempotent leases')
+                    idempotent_lease = (lease_gen, lr_d)
+                else:
+                    conn.rollback()
+                    raise ConflictError('active lease owner mismatch for idempotent claim')
+            else:
                 conn.rollback()
-                raise ConflictError('resident turn lease held by another owner')
+                raise ConflictError('resident turn lease held by another claim')
+
+        if idempotent_lease is not None:
+            resident_generation, held = idempotent_lease
+            context_epoch = int(dict(ctx_row)['context_epoch'])
+            resident_key = make_resident_key(
+                chat_id=str(chat_id),
+                context_epoch=context_epoch,
+                resident_generation=resident_generation,
+            )
+            conn.commit()
+            return {
+                'status': 'idempotent',
+                'context_id': int(context_id),
+                'context_epoch': context_epoch,
+                'resident_generation': resident_generation,
+                'resident_key': str(resident_key),
+                'lease': dict(held),
+            }
 
         resident_generation = int(ctx['resident_generation'])
         context_epoch = int(ctx['context_epoch'])
@@ -2022,14 +2170,16 @@ def renew_resident_turn_lease(
             'SELECT * FROM daily_resident_owners WHERE context_id=? AND resident_generation=?',
             (int(context_id), int(resident_generation)),
         ).fetchone()
-        if owner_row is not None:
-            o = dict(owner_row)
-            if worker_id is not None and str(o.get('worker_id') or '') != str(worker_id):
-                conn.rollback()
-                raise ConflictError('resident owner worker mismatch for renew')
-            if resident_key is not None and str(o.get('resident_key') or '') != str(resident_key):
-                conn.rollback()
-                raise ConflictError('resident owner key mismatch for renew')
+        if owner_row is None:
+            conn.rollback()
+            raise ConflictError('resident owner missing for renew')
+        o = dict(owner_row)
+        if worker_id is not None and str(o.get('worker_id') or '') != str(worker_id):
+            conn.rollback()
+            raise ConflictError('resident owner worker mismatch for renew')
+        if resident_key is not None and str(o.get('resident_key') or '') != str(resident_key):
+            conn.rollback()
+            raise ConflictError('resident owner key mismatch for renew')
         row = conn.execute(
             'SELECT * FROM daily_resident_turn_leases '
             'WHERE context_id=? AND resident_generation=?',

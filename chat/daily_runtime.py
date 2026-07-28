@@ -21,6 +21,7 @@ from chat.daily_context import (
     ConflictError,
     DEFAULT_CHAT_ID,
     DeferredError,
+    StaleOriginDayError,
     chat_day_for_timestamp,
     make_resident_key,
 )
@@ -46,6 +47,11 @@ class DailyRuntimeError(Exception):
 class LeaseConflictError(DailyRuntimeError):
     def __init__(self, message: str = 'resident turn lease conflict'):
         super().__init__(message, error_code='resident_turn_lease_conflict', retryable=True)
+
+
+class LeaseHeartbeatTerminalFailure(DailyRuntimeError):
+    def __init__(self, message: str = 'lease heartbeat failed terminally'):
+        super().__init__(message, error_code='lease_heartbeat_terminal_failure', retryable=False)
 
 
 class EpochMismatchError(DailyRuntimeError):
@@ -561,6 +567,7 @@ def prepare_daily_turn(
     request_id: Optional[str] = None,
     db_path: Optional[str] = None,
     now: Optional[datetime.datetime] = None,
+    wall_now: Optional[datetime.datetime] = None,
     origin_local_day: Optional[str] = None,
     lease_owner: Optional[str] = None,
     resident: Optional[Any] = None,
@@ -582,26 +589,34 @@ def prepare_daily_turn(
         user_created_at = now
     origin_day = str(origin_local_day or chat_day_for_timestamp(user_created_at))
     turn_started_at = user_created_at
-    turn_now = datetime.datetime.utcnow() + datetime.timedelta(hours=dc.TZ_OFFSET_HOURS)
+    lease_now = datetime.datetime.utcnow() + datetime.timedelta(hours=dc.TZ_OFFSET_HOURS)
+    context_wall_now = wall_now or lease_now
 
     lease_context_id: Optional[int] = None
     lease_generation: Optional[int] = None
     lease_acquired = False
 
     try:
-        if dc.has_active_provider_turn_lease(chat_id, db_path=db_path, now=turn_now):
+        if dc.has_active_provider_turn_lease(chat_id, db_path=db_path, now=lease_now):
             prior = dc.get_latest_active_context(chat_id, db_path=db_path)
             if prior and str(prior.get('local_day') or '') != origin_day:
                 raise DeferredError('provider request in flight; rollover deferred')
 
         prior_ctx = dc.get_latest_active_context(chat_id, db_path=db_path)
-        ctx = dc.get_or_create_daily_context(
-            chat_id=chat_id,
-            local_day=origin_day,
-            now=user_created_at,
-            db_path=db_path,
-            provider_busy=dc.has_active_provider_turn_lease(chat_id, db_path=db_path, now=turn_now),
-        )
+        try:
+            ctx = dc.resolve_or_create_daily_context_for_origin(
+                chat_id=chat_id,
+                origin_local_day=origin_day,
+                actual_wall_now=context_wall_now,
+                db_path=db_path,
+                provider_busy=dc.has_active_provider_turn_lease(
+                    chat_id, db_path=db_path, now=lease_now,
+                ),
+            )
+        except StaleOriginDayError as exc:
+            raise DailyRuntimeError(
+                str(exc), error_code='stale_origin_day', retryable=False,
+            ) from exc
         context_id = int(ctx['id'])
 
         if (
@@ -646,7 +661,7 @@ def prepare_daily_turn(
                 bound_cursor_message_id=db_cursor,
                 process_generation=int(getattr(resident, 'generation', 0) or 0) if resident else None,
                 db_path=db_path,
-                now=turn_now,
+                now=lease_now,
             )
         except ConflictError as exc:
             raise LeaseConflictError(str(exc)) from exc
@@ -829,13 +844,17 @@ def ensure_resident_and_stream(
         for evt, payload in resident.send_turn(content, commit_meta=commit_meta):
             if heartbeat.failed:
                 close_local_resident_if_bound(resident, expected_key=plan.resident_key)
-                raise LeaseConflictError('lease heartbeat failed during stream')
+                raise LeaseHeartbeatTerminalFailure('lease heartbeat failed during stream')
             if evt == 'tool_use':
                 raise DailyWindowToolFencePending()
             yield evt, payload
+
+        if heartbeat.stop():
+            close_local_resident_if_bound(resident, expected_key=plan.resident_key)
+            raise LeaseHeartbeatTerminalFailure('lease heartbeat failed after stream')
     finally:
-        failed = heartbeat.stop()
-        if failed:
+        heartbeat.stop()
+        if heartbeat.failed:
             close_local_resident_if_bound(resident, expected_key=plan.resident_key)
 
 

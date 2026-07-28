@@ -4334,6 +4334,19 @@ def _stream_cc_daily_soft_window(_turn_data, _uc):
         }) + SSE_END
         yield 'data: ' + json.dumps({'t': 'done', 'ok': False}) + SSE_END
         return None
+    except _daily_rt.LeaseHeartbeatTerminalFailure as exc:
+        if _daily_plan:
+            _daily_rt.abort_daily_turn(
+                _daily_plan,
+                error_code='lease_heartbeat_terminal_failure',
+                resident=_CC_RESIDENT,
+                respawn=False,
+            )
+        yield 'data: ' + json.dumps({
+            't': 'err', 'd': str(exc), 'retryable': False, 'code': 'lease_heartbeat_terminal_failure',
+        }) + SSE_END
+        yield 'data: ' + json.dumps({'t': 'done', 'ok': False}) + SSE_END
+        return None
     except _daily_rt.DailyWindowToolFencePending as exc:
         if _daily_plan:
             _daily_rt.abort_daily_turn(

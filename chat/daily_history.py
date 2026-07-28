@@ -57,16 +57,39 @@ def _fetch_current_day_history(
                 select_cols.append(optional)
         wake_contents = _wake_content_set(conn)
         cutover = get_meta_int(conn, META_SOURCE_KIND_CUTOVER)
-        rows_by_id: dict[int, Any] = {}
+
+        def _to_item(r: Any) -> Optional[dict[str, Any]]:
+            if not is_formal_chat_message(
+                r, wake_contents=wake_contents, cutover_id=cutover,
+            ):
+                return None
+            mid = int(r['id'])
+            role = 'user' if str(r['author']).lower() in _USER_AUTHORS else 'assistant'
+            return {
+                'message_id': mid,
+                'role': role,
+                'author': str(r['author']),
+                'content': _message_display_content(r),
+                'created_at': str(r['created_at'] or ''),
+            }
+
+        mapped_items: dict[int, dict[str, Any]] = {}
         if context_id is not None and context_epoch is not None:
             for r in conn.execute(
                 'SELECT %s FROM chat_messages m '
                 'INNER JOIN daily_message_contexts dmc ON dmc.message_id = m.id '
-                'WHERE dmc.context_id=? AND dmc.context_epoch=? AND m.id > ? '
+                'WHERE dmc.context_id=? AND dmc.context_epoch=? '
                 'ORDER BY m.id ASC' % ', '.join('m.' + c for c in select_cols),
-                (int(context_id), int(context_epoch), int(boundary_message_id or 0)),
+                (int(context_id), int(context_epoch)),
             ).fetchall():
-                rows_by_id[int(r['id'])] = r
+                mid = int(r['id'])
+                if exclude_message_id is not None and mid == int(exclude_message_id):
+                    continue
+                if after_message_id is not None and mid <= int(after_message_id):
+                    continue
+                item = _to_item(r)
+                if item is not None:
+                    mapped_items[mid] = item
 
         _d, start_at, _end, next_start = chat_day_window(local_day)
         other_mapped: frozenset[int] = frozenset()
@@ -76,6 +99,8 @@ def _fetch_current_day_history(
                 (int(context_id),),
             ).fetchall()
             other_mapped = frozenset(int(r[0]) for r in other_rows)
+
+        legacy_items: dict[int, dict[str, Any]] = {}
         for r in conn.execute(
             'SELECT %s FROM chat_messages '
             'WHERE created_at >= ? AND created_at < ? AND id > ? '
@@ -83,32 +108,22 @@ def _fetch_current_day_history(
             (start_at, next_start, int(boundary_message_id or 0)),
         ).fetchall():
             mid = int(r['id'])
-            if mid in rows_by_id or mid in other_mapped:
+            if mid in mapped_items or mid in other_mapped:
                 continue
-            rows_by_id[mid] = r
-
-        out = []
-        for r in (rows_by_id[k] for k in sorted(rows_by_id.keys())):
-            mid = int(r['id'])
             if exclude_message_id is not None and mid == int(exclude_message_id):
                 continue
             if after_message_id is not None and mid <= int(after_message_id):
                 continue
             if up_to_message_id is not None and mid > int(up_to_message_id):
-                break
-            if not is_formal_chat_message(
-                r, wake_contents=wake_contents, cutover_id=cutover,
-            ):
                 continue
-            role = 'user' if str(r['author']).lower() in _USER_AUTHORS else 'assistant'
-            out.append({
-                'message_id': mid,
-                'role': role,
-                'author': str(r['author']),
-                'content': _message_display_content(r),
-                'created_at': str(r['created_at'] or ''),
-            })
-        return out
+            item = _to_item(r)
+            if item is not None:
+                legacy_items[mid] = item
+
+        rows_by_id = dict(mapped_items)
+        for mid, item in legacy_items.items():
+            rows_by_id.setdefault(mid, item)
+        return [rows_by_id[k] for k in sorted(rows_by_id.keys())]
     finally:
         conn.close()
 

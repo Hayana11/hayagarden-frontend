@@ -76,6 +76,17 @@ def _pinned_current_chat_day(now=None):
 
 dc._current_chat_day = _pinned_current_chat_day
 
+_orig_prepare_daily_turn = dr.prepare_daily_turn
+
+
+def _prepare_daily_turn_pinned(*args, **kwargs):
+    if kwargs.get('wall_now') is None:
+        kwargs['wall_now'] = kwargs.get('now') or _FIXED_NOW
+    return _orig_prepare_daily_turn(*args, **kwargs)
+
+
+dr.prepare_daily_turn = _prepare_daily_turn_pinned
+
 
 class _FakeResident:
     generation = 1
@@ -506,6 +517,14 @@ class DailyRuntimeLeaseTtlTests(unittest.TestCase):
                 cid, gen, lease_owner='owner-a', request_message_id=1,
                 ttl_seconds=2, db_path=db, now=t0,
             )
+            dc.upsert_resident_owner(
+                cid, gen,
+                worker_id='worker-a',
+                resident_key=dc.make_resident_key(
+                    chat_id='ttl', context_epoch=int(ctx['context_epoch']), resident_generation=gen,
+                ),
+                db_path=db,
+            )
             t_renew = t0 + datetime.timedelta(seconds=1)
             token = dc.make_epoch_token(
                 chat_id='ttl', context_epoch=int(ctx['context_epoch']), resident_generation=gen,
@@ -542,7 +561,7 @@ class DailyRuntimeLeaseTtlTests(unittest.TestCase):
                 )
                 resident = _SlowResident()
                 with mock.patch.object(dr, 'LEASE_HEARTBEAT_INTERVAL', 0.01):
-                    with self.assertRaises(dr.LeaseConflictError):
+                    with self.assertRaises((dr.LeaseConflictError, dr.LeaseHeartbeatTerminalFailure)):
                         list(dr.stream_daily_resident_turn(
                             plan, resident=resident, env={}, static_system='S',
                         ))
@@ -579,6 +598,14 @@ class DailyRuntimeMidnightPersistTests(unittest.TestCase):
             dc.acquire_resident_turn_lease(
                 int(ctx['id']), 1, lease_owner='night-owner', request_message_id=uid,
                 db_path=db, now=start,
+            )
+            dc.upsert_resident_owner(
+                int(ctx['id']), 1,
+                worker_id='night-worker',
+                resident_key=dc.make_resident_key(
+                    chat_id='mid', context_epoch=int(ctx['context_epoch']), resident_generation=1,
+                ),
+                db_path=db,
             )
             dc.renew_resident_turn_lease(
                 int(ctx['id']), 1, lease_owner='night-owner', db_path=db,
@@ -745,8 +772,120 @@ class DailyRuntimeAtomicClaimTests(unittest.TestCase):
         finally:
             os.unlink(db)
 
+    def test_claim_same_owner_different_request_conflicts(self):
+        db = _tmp_db()
+        try:
+            _init_chat_messages(db)
+            ctx = dc.get_or_create_daily_context(
+                chat_id='same-owner', local_day='2026-07-27', db_path=db, now=_FIXED_NOW,
+            )
+            cid = int(ctx['id'])
+            gen = int(ctx['resident_generation'])
+            key = dc.make_resident_key(
+                chat_id='same-owner', context_epoch=int(ctx['context_epoch']), resident_generation=gen,
+            )
+            now = datetime.datetime.utcnow() + datetime.timedelta(hours=dc.TZ_OFFSET_HOURS)
+            dc.claim_daily_resident_turn(
+                chat_id='same-owner',
+                context_id=cid,
+                expected_context_epoch=int(ctx['context_epoch']),
+                worker_id='worker-a',
+                request_message_id=100,
+                lease_owner='shared-owner',
+                resident_key=key,
+                db_path=db,
+                now=now,
+            )
+            with self.assertRaises(dc.ConflictError):
+                dc.claim_daily_resident_turn(
+                    chat_id='same-owner',
+                    context_id=cid,
+                    expected_context_epoch=int(ctx['context_epoch']),
+                    worker_id='worker-b',
+                    request_message_id=101,
+                    lease_owner='shared-owner',
+                    resident_key=key,
+                    db_path=db,
+                    now=now,
+                )
+        finally:
+            os.unlink(db)
+
+    def test_claim_idempotent_same_owner_returns_without_bump(self):
+        db = _tmp_db()
+        try:
+            _init_chat_messages(db)
+            ctx = dc.get_or_create_daily_context(
+                chat_id='idem', local_day='2026-07-27', db_path=db, now=_FIXED_NOW,
+            )
+            cid = int(ctx['id'])
+            gen = int(ctx['resident_generation'])
+            key = dc.make_resident_key(
+                chat_id='idem', context_epoch=int(ctx['context_epoch']), resident_generation=gen,
+            )
+            now = datetime.datetime.utcnow() + datetime.timedelta(hours=dc.TZ_OFFSET_HOURS)
+            first = dc.claim_daily_resident_turn(
+                chat_id='idem',
+                context_id=cid,
+                expected_context_epoch=int(ctx['context_epoch']),
+                worker_id='worker-a',
+                request_message_id=200,
+                lease_owner='idem-owner',
+                resident_key=key,
+                db_path=db,
+                now=now,
+            )
+            second = dc.claim_daily_resident_turn(
+                chat_id='idem',
+                context_id=cid,
+                expected_context_epoch=int(ctx['context_epoch']),
+                worker_id='worker-a',
+                request_message_id=200,
+                lease_owner='idem-owner',
+                resident_key=key,
+                db_path=db,
+                now=now,
+            )
+            self.assertEqual(second['status'], 'idempotent')
+            self.assertEqual(int(second['resident_generation']), int(first['resident_generation']))
+            refreshed = dc.get_daily_context_by_id(cid, db_path=db)
+            self.assertEqual(int(refreshed['resident_generation']), gen)
+        finally:
+            os.unlink(db)
+
 
 class DailyRuntimeOriginDayTests(unittest.TestCase):
+    def test_stale_origin_prevents_backdated_context_creation(self):
+        db = _tmp_db()
+        try:
+            _init_chat_messages(db)
+            start = datetime.datetime(2026, 7, 27, 3, 59, 59)
+            finish = datetime.datetime(2026, 7, 27, 4, 1, 0)
+            uid = _insert(db, 'hayana', 'late', start.strftime('%Y-%m-%d %H:%M:%S'))
+            new_ctx = dc.get_or_create_daily_context(
+                chat_id='origin', local_day='2026-07-27', db_path=db, now=finish,
+            )
+            with mock.patch.object(config_store, 'get_bool', return_value=True), \
+                 mock.patch('chat.daily_history._build_state_text', return_value=('S', 'snap', {})):
+                with self.assertRaises(dr.DailyRuntimeError) as ctx:
+                    dr.prepare_daily_turn(
+                        user_message_id=uid,
+                        chat_id='origin',
+                        db_path=db,
+                        now=start,
+                        wall_now=finish,
+                        static_system='S',
+                    )
+                self.assertEqual(ctx.exception.error_code, 'stale_origin_day')
+            self.assertIsNone(
+                dc.get_context_for_local_day('origin', '2026-07-26', db_path=db),
+            )
+            latest = dc.get_latest_active_context('origin', db_path=db)
+            self.assertEqual(int(latest['id']), int(new_ctx['id']))
+            self.assertEqual(str(latest['local_day']), '2026-07-27')
+        finally:
+            os.unlink(db)
+
     def test_reprepare_keeps_origin_day_across_midnight(self):
         db = _tmp_db()
         try:
@@ -808,9 +947,6 @@ class DailyRuntimeMembershipHistoryTests(unittest.TestCase):
                 chat_id='co', local_day='2026-07-26', db_path=db,
                 now=start, allow_backfill=True,
             )
-            new_ctx = dc.get_or_create_daily_context(
-                chat_id='co', local_day='2026-07-27', db_path=db, now=finish,
-            )
             uid = _insert(db, 'hayana', 'late user', start.strftime('%Y-%m-%d %H:%M:%S'))
             dc.record_daily_message_context(
                 uid, context_id=int(old_ctx['id']), context_epoch=int(old_ctx['context_epoch']),
@@ -821,6 +957,12 @@ class DailyRuntimeMembershipHistoryTests(unittest.TestCase):
                 aid, context_id=int(old_ctx['id']), context_epoch=int(old_ctx['context_epoch']),
                 resident_generation=1, role='assistant', db_path=db,
             )
+            new_ctx = dc.get_or_create_daily_context(
+                chat_id='co', local_day='2026-07-27', db_path=db, now=finish,
+            )
+            self.assertGreater(int(new_ctx['boundary_message_id']), 0)
+            self.assertEqual(int(new_ctx['boundary_message_id']), uid)
+            self.assertGreater(aid, uid)
             from chat import daily_history as dh
             with mock.patch('chat.daily_history._build_state_text', return_value=('', 'none', {})):
                 built = dh.build_daily_window_context(
@@ -832,9 +974,74 @@ class DailyRuntimeMembershipHistoryTests(unittest.TestCase):
             cands = dc.list_carryover_candidates(int(new_ctx['id']), limit=10, db_path=db)
             cand_ids = [c['message_id'] for c in cands]
             self.assertIn(aid, cand_ids)
-            dc.select_carryover(int(new_ctx['id']), 3, db_path=db)
-            selected = [m['message_id'] for m in dc.get_selected_carryover_messages(int(new_ctx['id']), db_path=db)]
-            self.assertIn(aid, selected)
+            for count in (3, 5, 10):
+                db2 = _tmp_db()
+                try:
+                    _init_chat_messages(db2)
+                    old2 = dc.get_or_create_daily_context(
+                        chat_id='co%d' % count, local_day='2026-07-26', db_path=db2,
+                        now=start, allow_backfill=True,
+                    )
+                    u2 = _insert(db2, 'hayana', 'late user', start.strftime('%Y-%m-%d %H:%M:%S'))
+                    dc.record_daily_message_context(
+                        u2, context_id=int(old2['id']), context_epoch=int(old2['context_epoch']),
+                        resident_generation=1, role='user', db_path=db2,
+                    )
+                    a2 = _insert(db2, 'assistant', 'late reply', finish.strftime('%Y-%m-%d %H:%M:%S'))
+                    dc.record_daily_message_context(
+                        a2, context_id=int(old2['id']), context_epoch=int(old2['context_epoch']),
+                        resident_generation=1, role='assistant', db_path=db2,
+                    )
+                    new2 = dc.get_or_create_daily_context(
+                        chat_id='co%d' % count, local_day='2026-07-27', db_path=db2, now=finish,
+                    )
+                    dc.select_carryover(int(new2['id']), count, db_path=db2)
+                    selected = [
+                        m['message_id']
+                        for m in dc.get_selected_carryover_messages(int(new2['id']), db_path=db2)
+                    ]
+                    self.assertIn(a2, selected)
+                finally:
+                    os.unlink(db2)
+        finally:
+            os.unlink(db)
+
+    def test_queued_turn_cold_history_includes_prior_assistant(self):
+        db = _tmp_db()
+        try:
+            _init_chat_messages(db)
+            ctx = dc.get_or_create_daily_context(
+                chat_id='queue', local_day='2026-07-27', db_path=db, now=_FIXED_NOW,
+            )
+            uid_a = _insert(db, 'hayana', 'user a', '2026-07-27 10:00:00')
+            uid_b = _insert(db, 'hayana', 'user b', '2026-07-27 10:01:00')
+            aid_a = _insert(db, 'assistant', 'reply a', '2026-07-27 10:02:00')
+            dc.record_daily_message_context(
+                uid_a, context_id=int(ctx['id']), context_epoch=int(ctx['context_epoch']),
+                resident_generation=1, role='user', db_path=db,
+            )
+            dc.record_daily_message_context(
+                aid_a, context_id=int(ctx['id']), context_epoch=int(ctx['context_epoch']),
+                resident_generation=1, role='assistant', db_path=db,
+            )
+            dc.record_daily_message_context(
+                uid_b, context_id=int(ctx['id']), context_epoch=int(ctx['context_epoch']),
+                resident_generation=1, role='user', db_path=db,
+            )
+            from chat import daily_history as dh
+            with mock.patch('chat.daily_history._build_state_text', return_value=('', 'none', {})):
+                built = dh.build_daily_window_context(
+                    chat_id='queue',
+                    daily_context=ctx,
+                    current_user_message_id=uid_b,
+                    static_system='S',
+                    is_cold=True,
+                    db_path=db,
+                )
+            hist_ids = [m['message_id'] for m in built.get('current_day_history') or []]
+            self.assertIn(uid_a, hist_ids)
+            self.assertIn(aid_a, hist_ids)
+            self.assertNotIn(uid_b, hist_ids)
         finally:
             os.unlink(db)
 
@@ -874,6 +1081,59 @@ class DailyRuntimeBindingFailClosedTests(unittest.TestCase):
 
 
 class DailyRuntimeHeartbeatKillTests(unittest.TestCase):
+    def test_heartbeat_terminal_failure_after_done_yield(self):
+        db = _tmp_db()
+        try:
+            _init_chat_messages(db)
+            uid = _insert(db, 'hayana', 'tail-fail', '2026-07-27 10:00:00')
+            with mock.patch.object(config_store, 'get_bool', return_value=True), \
+                 mock.patch('chat.daily_history._build_state_text', return_value=('', 'none', {})):
+                plan = dr.prepare_daily_turn(
+                    user_message_id=uid, db_path=db, static_system='S',
+                )
+                resident = _FakeResident()
+                hb_inst = mock.MagicMock()
+                hb_inst.failed = False
+                hb_inst.stop.return_value = True
+                with mock.patch.object(dr, 'LeaseHeartbeat', return_value=hb_inst):
+                    with self.assertRaises(dr.LeaseHeartbeatTerminalFailure):
+                        list(dr.stream_daily_resident_turn(
+                            plan, resident=resident, env={}, static_system='S',
+                        ))
+            conn = sqlite3.connect(db)
+            count = conn.execute(
+                "SELECT COUNT(*) FROM chat_messages WHERE author='assistant'"
+            ).fetchone()[0]
+            conn.close()
+            self.assertEqual(int(count), 0)
+            self.assertEqual(len(resident.sent), 1)
+        finally:
+            os.unlink(db)
+
+    def test_renew_rejects_missing_owner_row(self):
+        db = _tmp_db()
+        try:
+            _init_chat_messages(db)
+            ctx = dc.get_or_create_daily_context(
+                chat_id='renew', local_day='2026-07-27', db_path=db, now=_FIXED_NOW,
+            )
+            cid, gen = int(ctx['id']), int(ctx['resident_generation'])
+            now = datetime.datetime.utcnow() + datetime.timedelta(hours=dc.TZ_OFFSET_HOURS)
+            dc.acquire_resident_turn_lease(
+                cid, gen, lease_owner='owner-a', request_message_id=1,
+                db_path=db, now=now,
+            )
+            token = dc.make_epoch_token(
+                chat_id='renew', context_epoch=int(ctx['context_epoch']), resident_generation=gen,
+            )
+            with self.assertRaises(dc.ConflictError):
+                dc.renew_resident_turn_lease(
+                    cid, gen, lease_owner='owner-a', db_path=db,
+                    now=now, epoch_token=token,
+                )
+        finally:
+            os.unlink(db)
+
     def test_blocking_resident_killed_on_renew_failure(self):
         db = _tmp_db()
         try:
@@ -901,6 +1161,79 @@ class DailyRuntimeHeartbeatKillTests(unittest.TestCase):
                             plan, resident=resident, env={}, static_system='S',
                         ))
             self.assertGreaterEqual(resident.killed, 1)
+        finally:
+            os.unlink(db)
+
+
+class GatewayDailyCasSseTests(unittest.TestCase):
+    def test_cursor_cas_conflict_sse_fail_closed(self):
+        import json
+        import gateway
+
+        db = _tmp_db()
+        try:
+            _init_chat_messages(db)
+            uid = _insert(db, 'hayana', 'cas-sse', '2026-07-27 10:00:00')
+            turn_data = {'user_message_id': uid, 'content': 'cas-sse'}
+            uc = {'content': 'cas-sse'}
+
+            plan = mock.MagicMock()
+            plan.resident_key = 'daily:default:1:1'
+            plan.manifest = {}
+
+            def _fake_stream(plan_arg, *, resident, env, static_system):
+                yield ('text', 'daily reply')
+                yield ('done', ('daily reply', '', {'input_tokens': 1, 'output_tokens': 1}, {}))
+
+            manifest = {'cursor_cas_success': False, 'error_code': 'cursor_cas_conflict'}
+            cas_exc = dr.CursorCASConflictAfterPersist(
+                'cursor stale', assistant_message_id=999, manifest=manifest,
+            )
+
+            memo_mock = mock.Mock()
+            moments_mock = mock.Mock()
+            scoring_mock = mock.Mock()
+            patches = [
+                mock.patch.object(config_store, 'get_bool', return_value=True),
+                mock.patch('chat.daily_context.enabled', return_value=True),
+                mock.patch.object(gateway, 'DB_PATH', db),
+                mock.patch('chat.system_builder.build_cc_daily_static_parts', return_value={
+                    'persona': 'P', 'full_system': 'STATIC',
+                }),
+                mock.patch.object(dr, 'prepare_daily_turn', return_value=plan),
+                mock.patch.object(dr, 'stream_daily_resident_turn', side_effect=_fake_stream),
+                mock.patch.object(dr, 'persist_daily_assistant_for_plan', return_value=999),
+                mock.patch.object(dr, 'handle_provider_success', side_effect=cas_exc),
+                mock.patch.object(gateway, '_write_session_memo', memo_mock),
+                mock.patch('moments_persistence.after_assistant_persisted', moments_mock),
+                mock.patch('chat.scoring_identity.trigger_turn_scoring', scoring_mock),
+            ]
+            with contextlib.ExitStack() as stack:
+                for p in patches:
+                    stack.enter_context(p)
+                stack.enter_context(mock.patch.object(gateway, '_CC_RESIDENT', mock.MagicMock()))
+                gen = gateway._stream_cc_daily_soft_window(turn_data, uc)
+                chunks = []
+                retval = None
+                while True:
+                    try:
+                        chunks.append(next(gen))
+                    except StopIteration as exc:
+                        retval = exc.value
+                        break
+
+            events = []
+            for chunk in chunks:
+                if chunk.startswith('data: '):
+                    events.append(json.loads(chunk[6:].strip()))
+            err_evt = next(e for e in events if e.get('t') == 'err')
+            done_evt = next(e for e in events if e.get('t') == 'done')
+            self.assertEqual(err_evt.get('code'), 'cursor_cas_conflict')
+            self.assertFalse(done_evt.get('ok'))
+            memo_mock.assert_not_called()
+            moments_mock.assert_not_called()
+            scoring_mock.assert_not_called()
+            self.assertIsNone(retval)
         finally:
             os.unlink(db)
 
