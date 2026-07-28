@@ -2,49 +2,91 @@
 import type { PeriodDayRecord } from '../types';
 
 type QueueState = {
-  tail: Promise<boolean>;
+  tail: Promise<SaveResult>;
   pending: PeriodDayRecord | null;
+  snapshots: Map<number, PeriodDayRecord>;
 };
 
+export type SaveResult = { ok: boolean; generation: number };
+
 const queues = new Map<string, QueueState>();
+const editGenerations = new Map<string, number>();
+
+export function bumpEditGeneration(date: string): number {
+  const next = (editGenerations.get(date) || 0) + 1;
+  editGenerations.set(date, next);
+  return next;
+}
+
+export function getEditGeneration(date: string): number {
+  return editGenerations.get(date) || 0;
+}
+
+/** Only reload from server when no newer local edit happened after this save began. */
+export function shouldReloadAfterFailedSave(date: string, saveGeneration: number): boolean {
+  return saveGeneration === getEditGeneration(date);
+}
 
 function getQueue(date: string): QueueState {
   let q = queues.get(date);
   if (!q) {
-    q = { tail: Promise.resolve(true), pending: null };
+    q = { tail: Promise.resolve({ ok: true, generation: 0 }), pending: null, snapshots: new Map() };
     queues.set(date, q);
   }
   return q;
 }
 
-async function flushDate(
+function maybeCleanupQueue(date: string) {
+  const q = queues.get(date);
+  if (q && !q.pending && q.snapshots.size === 0) {
+    queues.delete(date);
+  }
+}
+
+async function flushGeneration(
   date: string,
+  saveGeneration: number,
   saveFn: (date: string, record: PeriodDayRecord) => Promise<boolean>,
 ): Promise<boolean> {
   const q = getQueue(date);
-  let lastOk = true;
-  while (q.pending) {
-    const snapshot = q.pending;
-    q.pending = null;
-    lastOk = await saveFn(date, snapshot);
-    if (!lastOk) break;
+  const snapshot = q.snapshots.get(saveGeneration);
+  if (!snapshot) {
+    maybeCleanupQueue(date);
+    return false;
   }
+  q.snapshots.delete(saveGeneration);
+  let lastOk = false;
+  try {
+    lastOk = await saveFn(date, snapshot);
+  } catch {
+    lastOk = false;
+  }
+  maybeCleanupQueue(date);
   return lastOk;
 }
 
-/** Merge patch and enqueue; returns when this date's latest snapshot has been saved. */
+/** Merge patch and enqueue; resolves when this generation's flush turn completes. */
 export function schedulePeriodDaySave(
   date: string,
   patch: PeriodDayRecord,
+  saveGeneration: number,
   saveFn: (date: string, record: PeriodDayRecord) => Promise<boolean>,
-): Promise<boolean> {
+): Promise<SaveResult> {
   const q = getQueue(date);
   q.pending = { ...(q.pending || {}), ...patch };
-  q.tail = q.tail.then(() => flushDate(date, saveFn));
-  return q.tail;
+  q.snapshots.set(saveGeneration, { ...q.pending });
+  const promise = q.tail
+    .catch(() => ({ ok: false, generation: saveGeneration }))
+    .then(async (): Promise<SaveResult> => {
+      const ok = await flushGeneration(date, saveGeneration, saveFn);
+      return { ok, generation: saveGeneration };
+    });
+  q.tail = promise;
+  return promise;
 }
 
 /** Test helper — reset module state between cases. */
 export function resetPeriodSaveQueues(): void {
   queues.clear();
+  editGenerations.clear();
 }

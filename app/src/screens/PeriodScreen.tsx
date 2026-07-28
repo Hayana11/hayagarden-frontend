@@ -18,7 +18,7 @@ import {
   toYmd,
 } from '../lib/cycle';
 import type { PeriodDayRecord, PeriodDays, PeriodSettings } from '../types';
-import { schedulePeriodDaySave } from '../lib/periodSave';
+import { bumpEditGeneration, schedulePeriodDaySave, shouldReloadAfterFailedSave } from '../lib/periodSave';
 
 const WEEKDAY_EN = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const DISPLAY = 'var(--font-serif-display)';
@@ -194,33 +194,30 @@ export function PeriodScreen() {
   const { cycleLength, periodLength } = settings;
 
   async function updateDay(date: string, patch: Partial<PeriodDayRecord>) {
-    const prev = daysRef.current[date] ? { ...daysRef.current[date] } : undefined;
+    const generation = bumpEditGeneration(date);
     const rec = { ...(daysRef.current[date] || {}), ...patch };
     daysRef.current = { ...daysRef.current, [date]: rec };
     setDays({ ...daysRef.current });
     setSaveError(null);
     try {
-      const ok = await schedulePeriodDaySave(date, rec, savePeriodDay);
+      const { ok } = await schedulePeriodDaySave(date, rec, generation, savePeriodDay);
       if (!ok) {
-        const fresh = await fetchPeriodDays();
-        daysRef.current = fresh;
-        setDays(fresh);
+        if (shouldReloadAfterFailedSave(date, generation)) {
+          const fresh = await fetchPeriodDays();
+          daysRef.current = fresh;
+          setDays(fresh);
+        }
         setSaveError('保存没有成功，请再试一次');
       }
     } catch {
-      try {
-        const fresh = await fetchPeriodDays();
-        daysRef.current = fresh;
-        setDays(fresh);
-      } catch {
-        if (prev === undefined) {
-          const next = { ...daysRef.current };
-          delete next[date];
-          daysRef.current = next;
-        } else {
-          daysRef.current = { ...daysRef.current, [date]: prev };
+      if (shouldReloadAfterFailedSave(date, generation)) {
+        try {
+          const fresh = await fetchPeriodDays();
+          daysRef.current = fresh;
+          setDays(fresh);
+        } catch {
+          /* keep latest local edits when reload also fails */
         }
-        setDays({ ...daysRef.current });
       }
       setSaveError('保存没有成功，请再试一次');
     }

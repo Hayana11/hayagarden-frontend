@@ -496,5 +496,42 @@ class PeriodRouteValidationTests(unittest.TestCase):
         self.assertEqual(r.status_code, 404)
 
 
+class CalendarRedirectTests(unittest.TestCase):
+    """Redirect routes mirror app.py; static calendar.html must stay deleted."""
+
+    def setUp(self):
+        from flask import Flask, redirect
+
+        app = Flask(__name__, static_folder=os.path.join(ROOT, 'static'))
+
+        @app.route('/calendar')
+        @app.route('/calendar.html')
+        @app.route('/static/calendar.html')
+        def calendar():
+            return redirect('/dash', code=302)
+
+        self.client = app.test_client()
+
+    def _assert_redirects_to_dash(self, path):
+        r = self.client.get(path)
+        self.assertIn(r.status_code, (301, 302), f'{path} -> {r.status_code}')
+        location = r.headers.get('Location', '')
+        self.assertIn('/dash', location, f'{path} Location={location!r}')
+
+    def test_calendar_html_file_removed(self):
+        self.assertFalse(os.path.exists(os.path.join(ROOT, 'static', 'calendar.html')))
+
+    def test_calendar_redirect(self):
+        self._assert_redirects_to_dash('/calendar')
+
+    def test_calendar_html_redirect(self):
+        self._assert_redirects_to_dash('/calendar.html')
+
+    def test_static_calendar_html_redirect_not_404(self):
+        self._assert_redirects_to_dash('/static/calendar.html')
+        r = self.client.get('/static/calendar.html', follow_redirects=False)
+        self.assertNotEqual(r.status_code, 404)
+
+
 if __name__ == '__main__':
     unittest.main()
