@@ -9,7 +9,9 @@
     "lint": "oxlint",
     "preview": "vite preview",
     "test:daily-soft-window": "vite-node scripts/test-daily-soft-window.mjs",
-    "test:daily-soft-window-machine": "vite-node scripts/test-daily-soft-window-machine.mjs"
+    "test:daily-soft-window-machine": "vite-node scripts/test-daily-soft-window-machine.mjs",
+    "test:ledger": "vite-node scripts/test-ledger-integrity.mjs",
+    "test:ledger:e2e": "playwright test e2e/ledger-integrity.spec.ts e2e/dash-ledger.spec.ts"
   },
   "dependencies": {
     "react": "^19.2.7",
@@ -17,6 +19,7 @@
     "react-router-dom": "^7.18.1"
   },
   "devDependencies": {
+    "@playwright/test": "^1.61.1",
     "@types/node": "^24.13.2",
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
