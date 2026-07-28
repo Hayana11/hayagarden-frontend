@@ -4,44 +4,53 @@
    顶部插画为可替换槽位（可探出容器，不撑高弹窗）
    ========================================================= */
 
+/* Tokens 直接取自 handoff/android/project/Packing Modal.dc.html —— 不要凭感觉调 */
 :root {
-  --window-overlay: rgba(238, 218, 223, 0.68);
-  --window-overlay-blur: 12px;
+  /* 遮罩是深棕半透，不是粉。粉底+粉罩会糊成一片 */
+  --window-overlay: rgba(40, 28, 26, 0.35);
+  --window-overlay-blur: 0px;
 
-  --window-surface: #fff9f9;
-  --window-surface-soft: #fffdfd;
-  --window-surface-muted: #fbf3f4;
+  --window-surface: #fcf0f2;
+  --window-surface-soft: #fff8f8;
+  --window-surface-muted: #fff8f8;
 
-  --window-border: #efd9de;
-  --window-border-soft: #f3e6e8;
-  --window-border-active: #da88a0;
+  --window-border: #f0e6e2;
+  --window-border-soft: rgba(215, 143, 163, 0.35);
+  --window-border-active: #c1587a;
 
-  --window-title: #55474b;
-  --window-body: #6c5f63;
-  --window-muted: #a9989e;
-  --window-faint: #b8a8ad;
+  --window-title: #4a3f3c;
+  --window-body: #6b5a55;
+  --window-muted: #8c7b76;
+  --window-faint: #a99590;
+  --window-ghost: #c4b4af;
 
-  --window-accent: #d97e9a;
-  --window-accent-strong: #d96f90;
-  --window-accent-soft: #e7a8ba;
+  --window-accent: #d48a9e;
+  --window-accent-strong: #ce637f;
+  --window-accent-soft: #d78fa3;
 
-  --window-secondary-bg: #f7eeee;
-  --window-secondary-text: #8b7b80;
-  --window-primary-text: #ffffff;
+  --window-numeral: #6b5a55;
 
-  --window-radius: 32px;
+  --window-secondary-bg: #fcf0f2;
+  --window-secondary-text: #6b5a55;
+  --window-primary-text: #fbf3f0;
+
+  --window-radius: 28px;
   --window-card-radius: 16px;
   --window-pill-radius: 999px;
 
+  /* 内红线 + 外浅影，两者都在同一条 box-shadow 上 */
+  --window-inner-line: rgba(215, 143, 163, 0.45);
   --window-shadow:
-    0 24px 60px rgba(102, 62, 75, 0.14),
-    0 4px 16px rgba(102, 62, 75, 0.06);
+    0 20px 50px rgba(183, 110, 121, 0.16),
+    inset 0 0 0 1px var(--window-inner-line);
 
+  /* 衬线只给数字和英文副标题用，中文一律走 sans */
   --window-serif:
     "Bodoni Moda",
-    "Cormorant Garamond",
-    "Noto Serif SC",
-    "Source Han Serif SC",
+    "Didot",
+    "Playfair Display",
+    Georgia,
+    "Times New Roman",
     serif;
 
   --window-sans:
@@ -184,8 +193,6 @@
   overflow-y: auto;
 
   background: var(--window-overlay);
-  backdrop-filter: blur(var(--window-overlay-blur));
-  -webkit-backdrop-filter: blur(var(--window-overlay-blur));
 
   animation: daily-window-overlay-in 180ms ease-out both;
 }
@@ -197,24 +204,24 @@
 .daily-window-dialog {
   position: relative;
 
-  width: min(100%, 358px);
-  max-height: calc(100dvh - 48px);
+  display: flex;
+  flex-direction: column;
 
-  padding: 20px 20px 18px;
+  gap: 18px;
 
-  overflow-y: auto;
-  overscroll-behavior: contain;
+  width: 334px;
+  max-width: 88%;
+  max-height: calc(100dvh - 56px);
+
+  padding: 26px 24px 24px;
+
+  /* 关键：可见溢出，让插画探出卡片顶边（滚动交给内部 .scroll） */
+  overflow: visible;
 
   color: var(--window-body);
-  background:
-    linear-gradient(
-      180deg,
-      rgba(255, 255, 255, 0.58) 0%,
-      rgba(255, 249, 249, 0.96) 20%,
-      var(--window-surface) 100%
-    );
+  background: var(--window-surface);
 
-  border: 1px solid rgba(239, 217, 222, 0.9);
+  border: none;
   border-radius: var(--window-radius);
   box-shadow: var(--window-shadow);
 
@@ -225,16 +232,6 @@
 
 .daily-window-dialog::-webkit-scrollbar {
   display: none;
-}
-
-.daily-window-dialog::before {
-  content: "";
-  position: absolute;
-  inset: 5px;
-  pointer-events: none;
-
-  border: 1px solid rgba(255, 255, 255, 0.72);
-  border-radius: calc(var(--window-radius) - 5px);
 }
 
 .daily-window-dialog.is-loading {
@@ -270,10 +267,10 @@
 
   padding: 0;
 
-  color: #8f7d82;
-  background: rgba(251, 243, 244, 0.88);
+  color: #a8969c;
+  background: var(--window-surface-muted);
 
-  border: 1px solid var(--window-border-soft);
+  border: none;
   border-radius: 50%;
 
   cursor: pointer;
@@ -301,130 +298,148 @@
    插画可探出容器，不撑高弹窗
    ========================================================= */
 
-.daily-window-hero {
-  min-height: 120px;
-
-  display: grid;
-  grid-template-columns: 132px minmax(0, 1fr);
-  align-items: center;
-  gap: 10px;
-
-  margin: -2px 0 12px;
-  padding-right: 20px;
-}
-
+/* 插画：脱离文档流，压在卡片左上角并探出顶边。
+   不占高度 → 弹窗不会被它撑大。 */
 .daily-window-hero-art {
-  position: relative;
-  align-self: end;
+  position: absolute;
+  top: -32px;
+  left: -8px;
+  z-index: 2;
 
   width: 140px;
-  height: 128px;
-
-  margin-left: -10px;
-  margin-bottom: -4px;
+  height: 132px;
 
   display: flex;
   align-items: flex-end;
   justify-content: center;
 
   pointer-events: none;
-  overflow: visible;
 }
 
 .daily-window-hero-art img {
   display: block;
-  width: 118%;
+  width: 100%;
   max-width: none;
-  height: auto;
-  max-height: 148px;
+  height: 100%;
 
   object-fit: contain;
   object-position: center bottom;
 
-  filter: drop-shadow(0 8px 12px rgba(112, 73, 84, 0.08));
+  filter: drop-shadow(0 10px 14px rgba(112, 73, 84, 0.10));
 }
 
-/* 没有插画时的轻占位：可换成窗页 / 月亮 / 信封透明 PNG */
+/* 无图时的占位：描边线稿，不要实心色块（色块=笨重的主因） */
 .daily-window-hero-art.is-placeholder {
-  width: 108px;
-  height: 108px;
+  width: 120px;
+  height: 118px;
+  top: -20px;
+  left: -4px;
 
-  margin-left: 4px;
-
-  background:
-    linear-gradient(145deg, #fbe9eb, #e9bcc5);
-
-  border-radius: 28px;
-  overflow: hidden;
+  background: none;
 }
 
 .daily-window-hero-art.is-placeholder svg {
-  width: 64%;
-  height: 64%;
-  margin: auto;
-  opacity: 0.82;
+  width: 100%;
+  height: 100%;
+  opacity: 0.5;
+}
+
+/* 标题行：插画在左、文字在右，垂直居中，gap 14px */
+.daily-window-hero {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+
+  margin: 0;
+  padding: 0 0 0 108px;
+  min-height: 72px;
 }
 
 .daily-window-hero-copy {
   min-width: 0;
-  padding-top: 6px;
+
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
 }
 
+/* 中文标题走 sans —— 衬线中文在这个字号下就是「土」的来源 */
 .daily-window-title {
   margin: 0;
 
   color: var(--window-title);
 
-  font-family: var(--window-serif);
-  font-size: 24px;
+  font-family: var(--window-sans);
+  font-size: 22px;
   font-weight: 700;
-  line-height: 1.18;
-  letter-spacing: -0.02em;
+  line-height: 1.25;
+  letter-spacing: 1px;
 
-  text-wrap: balance;
+  white-space: nowrap;
 }
 
 .daily-window-subtitle {
-  margin: 7px 0 0;
+  margin: 0;
 
-  color: #b59fa6;
+  color: var(--window-faint);
 
   font-family: var(--window-serif);
-  font-size: 13px;
+  font-size: 12.5px;
   font-style: italic;
   font-weight: 400;
   line-height: 1.3;
-  letter-spacing: 0.035em;
+  letter-spacing: 0.3px;
 
   white-space: nowrap;
+}
+
+/* 内部滚动区：把滚动从 dialog 挪进来，dialog 才能 overflow: visible */
+.daily-window-scroll {
+  min-height: 0;
+  flex: 1 1 auto;
+
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+
+  overflow-y: auto;
+  overscroll-behavior: contain;
+
+  scrollbar-width: none;
+}
+
+.daily-window-scroll::-webkit-scrollbar {
+  display: none;
 }
 
 /* =========================================================
    分区
    ========================================================= */
 
+/* 分区之间靠 .daily-window-scroll 的 gap，不用 margin */
 .daily-window-section {
-  margin-top: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+
+  margin: 0;
 }
 
-.daily-window-section:first-of-type {
-  margin-top: 10px;
-}
-
+/* 分区标题是暖灰棕 + 1px 字距，不是粉色 */
 .daily-window-section-title {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
 
-  margin: 0 0 12px;
+  margin: 0;
 
-  color: #8d747c;
+  color: var(--window-body);
 
   font-family: var(--window-sans);
-  font-size: 15px;
-  font-weight: 500;
+  font-size: 12px;
+  font-weight: 400;
   line-height: 1.4;
-  letter-spacing: 0.01em;
+  letter-spacing: 1px;
 }
 
 .daily-window-section-title::before {
@@ -433,7 +448,7 @@
   flex: 0 0 auto;
 
   color: var(--window-accent);
-  font-size: 13px;
+  font-size: 12px;
   line-height: 1;
 }
 
@@ -441,26 +456,27 @@
    轮次 / 条数选项
    ========================================================= */
 
+/* 一行排开、各占等宽，不是 2x2 —— 2x2 是「笨重」的主因 */
 .daily-window-options {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 10px 12px;
+  display: flex;
+  gap: 8px;
 }
 
 .daily-window-option {
-  min-height: 54px;
+  flex: 1 1 0;
+  min-width: 0;
 
   display: flex;
   align-items: baseline;
   justify-content: center;
-  gap: 6px;
+  gap: 3px;
 
-  padding: 8px 12px;
+  padding: 8px 0;
 
-  color: #9b898e;
-  background: rgba(255, 253, 253, 0.62);
+  color: var(--window-body);
+  background: transparent;
 
-  border: 1px solid var(--window-border);
+  border: 1.5px solid var(--window-border);
   border-radius: var(--window-pill-radius);
 
   cursor: pointer;
@@ -474,8 +490,7 @@
 }
 
 .daily-window-option:hover {
-  border-color: #e5b9c4;
-  background: #fffafa;
+  border-color: #e5c3ce;
 }
 
 .daily-window-option:active {
@@ -484,51 +499,50 @@
 
 .daily-window-option.is-selected,
 .daily-window-option[aria-pressed="true"] {
-  color: var(--window-accent);
-  background:
-    linear-gradient(
-      180deg,
-      rgba(255, 253, 253, 0.96),
-      rgba(255, 247, 249, 0.96)
-    );
+  color: var(--window-border-active);
+  background: transparent;
 
   border-color: var(--window-border-active);
-
-  box-shadow:
-    0 4px 12px rgba(217, 126, 154, 0.08),
-    inset 0 0 0 1px rgba(255, 255, 255, 0.7);
+  box-shadow: none;
 }
 
+/* 数字用衬线斜体 —— 全卡唯一的「贵气」来源，字号仍按 handoff 收在 14px 档 */
 .daily-window-option-number {
   font-family: var(--window-serif);
-  font-size: 29px;
-  font-weight: 500;
+  font-style: italic;
+  font-size: 16px;
+  font-weight: 400;
   line-height: 1;
-  letter-spacing: -0.025em;
+  letter-spacing: 0.5px;
 }
 
 .daily-window-option-unit {
-  font-family: var(--window-serif);
-  font-size: 15px;
-  font-weight: 500;
+  font-family: var(--window-sans);
+  font-size: 13px;
+  font-weight: 400;
   line-height: 1;
+  letter-spacing: 0.5px;
 }
 
 .daily-window-option-word {
-  font-family: var(--window-serif);
-  font-size: 17px;
-  font-weight: 500;
+  font-family: var(--window-sans);
+  font-size: 14px;
+  font-weight: 400;
+  letter-spacing: 0.5px;
 }
 
 .daily-window-helper {
-  margin: 11px 2px 0;
+  margin: 0;
 
-  color: var(--window-muted);
+  color: rgba(169, 149, 144, 0.72);
 
-  font-family: var(--window-sans);
-  font-size: 12px;
+  font-family: Arial, var(--window-sans);
+  font-size: 11.5px;
   font-weight: 400;
   line-height: 1.45;
+  letter-spacing: 0.3px;
+
+  text-align: left;
 }
 
 /* =========================================================
@@ -540,9 +554,9 @@
 
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 8px;
 
-  margin: 15px 0 4px;
+  margin: 0;
 }
 
 .daily-window-divider::before,
@@ -550,24 +564,28 @@
   content: "";
   flex: 1;
   height: 1px;
-
-  background:
-    linear-gradient(
-      90deg,
-      transparent,
-      var(--window-border) 24%,
-      var(--window-border) 76%,
-      transparent
-    );
 }
 
+.daily-window-divider::before {
+  background: linear-gradient(to left, var(--window-accent-soft), transparent);
+}
+
+.daily-window-divider::after {
+  background: linear-gradient(to right, var(--window-accent-soft), transparent);
+}
+
+/* 中心是 ✦，不是菱形色块 */
 .daily-window-divider-mark {
-  width: 7px;
-  height: 7px;
+  flex-shrink: 0;
 
-  background: var(--window-accent-soft);
+  color: var(--window-accent-soft);
 
-  transform: rotate(45deg);
+  font-size: 13px;
+  line-height: 1;
+}
+
+.daily-window-divider-mark::before {
+  content: "✦";
 }
 
 /* =========================================================
@@ -576,7 +594,7 @@
 
 .daily-window-previews {
   display: grid;
-  gap: 9px;
+  gap: 8px;
 }
 
 .daily-window-preview {
@@ -585,25 +603,24 @@
   display: grid;
   grid-template-columns: max-content minmax(0, 1fr);
   align-items: center;
-  gap: 10px;
+  gap: 14px;
 
-  min-height: 52px;
+  padding: 12px 15px;
 
-  padding: 11px 14px;
+  background: var(--window-surface-soft);
 
-  background: rgba(255, 253, 253, 0.78);
-
-  border: 1px solid var(--window-border-soft);
-  border-radius: 14px;
+  border: none;
+  border-radius: var(--window-card-radius);
 }
 
 .daily-window-preview-speaker {
-  color: #d7869d;
+  color: var(--window-accent);
 
-  font-family: var(--window-serif);
-  font-size: 15px;
-  font-weight: 700;
+  font-family: var(--window-sans);
+  font-size: 12.5px;
+  font-weight: 600;
   line-height: 1.3;
+  letter-spacing: 0.3px;
 
   white-space: nowrap;
 }
@@ -616,7 +633,7 @@
   color: var(--window-body);
 
   font-family: var(--window-sans);
-  font-size: 13px;
+  font-size: 12.5px;
   font-weight: 400;
   line-height: 1.45;
 
@@ -628,55 +645,73 @@
    不带过去的内容标签
    ========================================================= */
 
+/* 三个标签等宽平分一行 */
 .daily-window-tags {
   display: flex;
-  flex-wrap: wrap;
   gap: 8px;
 }
 
 .daily-window-tag {
-  min-height: 32px;
+  flex: 1 1 0;
+  min-width: 0;
 
   display: inline-flex;
   align-items: center;
+  justify-content: center;
+  gap: 3px;
 
-  padding: 6px 13px;
+  padding: 7px 6px;
 
-  color: #9f8e93;
-  background: var(--window-surface-muted);
+  color: var(--window-body);
+  background: var(--window-surface);
 
-  border: 1px solid rgba(243, 230, 232, 0.86);
+  border: 1px solid rgba(175, 139, 145, 0.35);
   border-radius: var(--window-pill-radius);
 
   font-family: var(--window-sans);
-  font-size: 12px;
-  font-weight: 500;
-  line-height: 1;
+  font-size: 11px;
+  font-weight: 400;
+  line-height: 1.2;
+
+  white-space: nowrap;
+}
+
+/* 「提醒 · 7」里的数字也走衬线斜体，和档位数字呼应 */
+.daily-window-tag-count {
+  color: var(--window-faint);
+
+  font-family: var(--window-serif);
+  font-style: italic;
+  font-size: 11.5px;
 }
 
 /* =========================================================
    底部操作区
    ========================================================= */
 
+/* 次要:主要 = 1:2 */
 .daily-window-actions {
-  display: grid;
-  grid-template-columns: 1fr 1.08fr;
-  gap: 12px;
+  flex: 0 0 auto;
 
-  margin-top: 22px;
+  display: flex;
+  gap: 10px;
+
+  margin: 0;
 }
 
 .daily-window-button {
-  min-height: 52px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 
-  padding: 0 16px;
+  padding: 15px 0;
 
-  border-radius: 20px;
+  border-radius: var(--window-pill-radius);
   border: none;
 
-  font-family: var(--window-serif);
-  font-size: 16px;
-  font-weight: 600;
+  font-family: var(--window-sans);
+  font-size: 14.5px;
+  font-weight: 400;
   line-height: 1;
 
   cursor: pointer;
@@ -693,39 +728,35 @@
 }
 
 .daily-window-button--secondary {
+  flex: 1 1 0;
+
   color: var(--window-secondary-text);
   background: var(--window-secondary-bg);
 
-  border: 1px solid rgba(239, 217, 222, 0.7);
+  border: 1px solid rgba(215, 143, 163, 0.4);
+
+  letter-spacing: 1px;
 }
 
 .daily-window-button--secondary:hover {
-  background: #f3e8ea;
+  background: #f9e8ec;
 }
 
+/* 纯色（不要渐变），投影按 handoff 保留一层 */
 .daily-window-button--primary {
+  flex: 2 1 0;
+
   color: var(--window-primary-text);
+  background: var(--window-accent-strong);
 
-  background:
-    linear-gradient(
-      135deg,
-      #cf6687 0%,
-      #db7595 52%,
-      #df819e 100%
-    );
+  border: none;
+  box-shadow: 0 8px 20px rgba(206, 99, 127, 0.28);
 
-  border: 1px solid rgba(202, 91, 125, 0.14);
-
-  box-shadow:
-    0 8px 18px rgba(205, 91, 126, 0.18),
-    inset 0 1px 0 rgba(255, 255, 255, 0.24);
+  letter-spacing: 1.5px;
 }
 
 .daily-window-button--primary:hover {
-  filter: brightness(1.025);
-  box-shadow:
-    0 10px 24px rgba(205, 91, 126, 0.22),
-    inset 0 1px 0 rgba(255, 255, 255, 0.28);
+  background: #c25874;
 }
 
 .daily-window-button:focus-visible,
@@ -769,29 +800,25 @@
 
 @media (max-width: 374px) {
   .daily-window-dialog {
-    width: min(100%, 344px);
-    padding-inline: 17px;
+    padding-inline: 18px;
   }
 
   .daily-window-hero {
-    grid-template-columns: 118px minmax(0, 1fr);
+    padding-left: 94px;
   }
 
   .daily-window-hero-art {
-    width: 126px;
-    height: 116px;
+    width: 132px;
+    height: 122px;
   }
 
   .daily-window-title {
-    font-size: 22px;
+    font-size: 20px;
   }
 
-  .daily-window-subtitle {
-    font-size: 12px;
-  }
-
-  .daily-window-option-number {
-    font-size: 27px;
+  .daily-window-option,
+  .daily-window-option-word {
+    font-size: 13px;
   }
 }
 
@@ -805,7 +832,8 @@
   }
 
   .daily-window-dialog {
-    width: 390px;
+    width: 360px;
+    max-width: 360px;
     max-height: min(760px, calc(100dvh - 64px));
   }
 }

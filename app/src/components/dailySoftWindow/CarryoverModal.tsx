@@ -19,6 +19,8 @@ type Props = {
   /** Optional transparent PNG for the hero art slot (may peek outside). */
   artSrc?: string;
   artAlt?: string;
+  /** Counts for the excluded-category chips. Omitted keys render without a count. */
+  excludedCounts?: Partial<Record<'提醒' | '工具' | 'thinking', number>>;
   onClose: () => void;
   onDraftChange: (count: CarryoverCount) => void;
   onConfirm: () => void;
@@ -28,19 +30,17 @@ function whoLabel(role: CarryoverCandidate['role']): string {
   return role === 'user' ? '小猫' : '爸爸';
 }
 
-/** Soft placeholder mark until a real transparent PNG is dropped in. */
+/** Line-art suitcase placeholder until a real transparent PNG is dropped in. */
 function HeroArtPlaceholder() {
   return (
-    <svg viewBox="0 0 64 64" fill="none" aria-hidden="true">
-      <path
-        d="M18 40c0-10 6-18 14-18s14 8 14 18"
-        stroke="#fff9f9"
-        strokeWidth="2.4"
-        strokeLinecap="round"
-      />
-      <circle cx="32" cy="22" r="7" stroke="#fff9f9" strokeWidth="2.4" />
-      <path d="M22 46h20" stroke="#fff9f9" strokeWidth="2.4" strokeLinecap="round" />
-      <path d="M28 50h8" stroke="#fff9f9" strokeWidth="2.2" strokeLinecap="round" opacity="0.7" />
+    <svg viewBox="0 0 72 68" fill="none" aria-hidden="true">
+      <g stroke="#d9a8b8" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+        <rect x="8" y="24" width="52" height="34" rx="5" />
+        <path d="M8 34h52" />
+        <path d="M27 24v-5a4 4 0 0 1 4-4h6a4 4 0 0 1 4 4v5" />
+        <rect x="30" y="30" width="8" height="8" rx="2" />
+        <path d="M16 58v4M52 58v4" opacity="0.6" />
+      </g>
     </svg>
   );
 }
@@ -54,6 +54,7 @@ export function CarryoverModal({
   errorDetail,
   artSrc,
   artAlt = '',
+  excludedCounts,
   onClose,
   onDraftChange,
   onConfirm,
@@ -106,6 +107,9 @@ export function CarryoverModal({
               );
             })}
           </div>
+          <p className="daily-window-helper">
+            {`全部 ${candidates.length} 句 · 只取正式对话 · 各档相同`}
+          </p>
         </section>
 
         <div className="daily-window-divider" aria-hidden="true">
@@ -133,9 +137,20 @@ export function CarryoverModal({
         <section className="daily-window-section">
           <h3 className="daily-window-section-title">不会带过去</h3>
           <div className="daily-window-tags">
-            <span className="daily-window-tag">提醒</span>
-            <span className="daily-window-tag">工具</span>
-            <span className="daily-window-tag">thinking</span>
+            {(['提醒', '工具', 'thinking'] as const).map((label) => {
+              const n = excludedCounts?.[label];
+              return (
+                <span key={label} className="daily-window-tag">
+                  {label}
+                  {typeof n === 'number' && (
+                    <>
+                      {' · '}
+                      <span className="daily-window-tag-count">{n}</span>
+                    </>
+                  )}
+                </span>
+              );
+            })}
           </div>
         </section>
       </>
@@ -155,17 +170,21 @@ export function CarryoverModal({
           ×
         </button>
 
-        <header className="daily-window-hero">
-          <div className={`daily-window-hero-art${artSrc ? '' : ' is-placeholder'}`}>
-            {artSrc ? <img src={artSrc} alt={artAlt} /> : <HeroArtPlaceholder />}
-          </div>
-          <div className="daily-window-hero-copy">
-            <h2 className="daily-window-title">翻到新的一页</h2>
-            <p className="daily-window-subtitle">Packing for the Next Window</p>
-          </div>
-        </header>
+        {/* 插画独立于滚动区，才能探出卡片顶边 */}
+        <div className={`daily-window-hero-art${artSrc ? '' : ' is-placeholder'}`}>
+          {artSrc ? <img src={artSrc} alt={artAlt} /> : <HeroArtPlaceholder />}
+        </div>
 
-        {mid}
+        <div className="daily-window-scroll">
+          <header className="daily-window-hero">
+            <div className="daily-window-hero-copy">
+              <h2 className="daily-window-title">翻到新的一页</h2>
+              <p className="daily-window-subtitle">Packing for the Next Window</p>
+            </div>
+          </header>
+
+          {mid}
+        </div>
 
         <footer className="daily-window-actions">
           <button type="button" className="daily-window-button daily-window-button--secondary" onClick={onClose}>
