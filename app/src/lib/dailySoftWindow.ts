@@ -63,8 +63,8 @@ export type CarryoverCandidatesResponse = {
 export type SelectCarryoverResponse = {
   context_id: number;
   context_epoch: number;
-  carryover_unit?: 'round';
-  requested_round_count: number;
+  carryover_unit: 'round';
+  requested_round_count: 0 | 3 | 5 | 10;
   selected_round_count: number;
   selected_message_count: number;
   selected_message_ids: number[];
@@ -227,22 +227,25 @@ function parseMessage(raw: unknown): CarryoverMessage | null {
 
 /**
  * Validate canonical backend rounds. Fail-soft → null when shape is wrong.
- * Rejects: carryover_unit≠round, first msg not user, round_id≠first user id,
- * message_ids≠messages ids, assistant-only rounds.
+ * Requires carryover_unit === "round" (missing also malformed).
+ * message_ids must be present (never synthesized from messages).
+ * messages[0] = user; messages[1:] all assistant; no duplicate IDs in response.
  */
 export function validateCanonicalRounds(
   rounds: unknown,
   carryoverUnit?: string | null,
 ): CarryoverRound[] | null {
-  if (carryoverUnit != null && carryoverUnit !== 'round') return null;
+  if (carryoverUnit !== 'round') return null;
   if (!Array.isArray(rounds)) return null;
   const out: CarryoverRound[] = [];
+  const seenIds = new Set<number>();
   for (const raw of rounds) {
     if (!raw || typeof raw !== 'object') return null;
     const r = raw as Record<string, unknown>;
     const round_id = normalizeMessageId(r.round_id);
     if (round_id === null) return null;
     if (!Array.isArray(r.messages) || r.messages.length === 0) return null;
+    if (!Array.isArray(r.message_ids)) return null;
     const messages: CarryoverMessage[] = [];
     for (const m of r.messages) {
       const parsed = parseMessage(m);
@@ -251,20 +254,20 @@ export function validateCanonicalRounds(
     }
     if (messages[0].role !== 'user') return null;
     if (messages[0].message_id !== round_id) return null;
-    let message_ids: number[];
-    if (Array.isArray(r.message_ids)) {
-      message_ids = [];
-      for (const id of r.message_ids) {
-        const n = normalizeMessageId(id);
-        if (n === null) return null;
-        message_ids.push(n);
-      }
-    } else {
-      message_ids = messages.map((m) => m.message_id);
+    for (let i = 1; i < messages.length; i++) {
+      if (messages[i].role !== 'assistant') return null;
+    }
+    const message_ids: number[] = [];
+    for (const id of r.message_ids) {
+      const n = normalizeMessageId(id);
+      if (n === null) return null;
+      message_ids.push(n);
     }
     if (message_ids.length !== messages.length) return null;
     for (let i = 0; i < messages.length; i++) {
       if (message_ids[i] !== messages[i].message_id) return null;
+      if (seenIds.has(message_ids[i])) return null;
+      seenIds.add(message_ids[i]);
     }
     out.push({ round_id, message_ids, messages });
   }
@@ -342,8 +345,9 @@ export function draftCountFromCurrent(cur: DailyContextCurrent): CarryoverCount 
 
 /**
  * Insert index for DaySoftBoundary among message ids.
- * Before first id > boundary, or after last id ≤ boundary.
- * If the loaded page has no id ≤ boundary, return null (don't fake at top).
+ * Requires BOTH sides of the boundary in the loaded page:
+ *   some id ≤ boundary AND some id > boundary.
+ * Only old-side or only new-side → null (wait for load-more).
  */
 export function boundaryInsertIndex(
   messageIds: number[],
@@ -352,9 +356,9 @@ export function boundaryInsertIndex(
   const bid = normalizeMessageId(boundaryMessageId);
   if (bid === null || !messageIds.length) return null;
   const hasAtOrBefore = messageIds.some((id) => id <= bid);
-  if (!hasAtOrBefore) return null;
-  const idx = messageIds.findIndex((id) => id > bid);
-  return idx === -1 ? messageIds.length : idx;
+  const hasAfter = messageIds.some((id) => id > bid);
+  if (!hasAtOrBefore || !hasAfter) return null;
+  return messageIds.findIndex((id) => id > bid);
 }
 
 export function classifySoftWindowError(err: unknown): SoftWindowErrorKind {
@@ -381,13 +385,14 @@ export function softWindowErrorMessage(state: SoftWindowUiState | SoftWindowErro
   return '';
 }
 
-function parseCurrent(raw: unknown): DailyContextCurrent | null {
+/** Strict current parser — missing carryover_unit is malformed. */
+export function parseCurrent(raw: unknown): DailyContextCurrent | null {
   if (!raw || typeof raw !== 'object') return null;
   const r = raw as Record<string, unknown>;
   const context_id = normalizeMessageId(r.context_id);
   const context_epoch = typeof r.context_epoch === 'number' ? Math.trunc(r.context_epoch) : null;
   if (context_id === null || context_epoch === null) return null;
-  if (r.carryover_unit != null && r.carryover_unit !== 'round') return null;
+  if (r.carryover_unit !== 'round') return null;
   const boundary = normalizeMessageId(r.boundary_message_id) ?? 0;
   const selected_ids_raw = Array.isArray(r.selected_message_ids) ? r.selected_message_ids : [];
   const selected_message_ids: number[] = [];
@@ -420,6 +425,47 @@ function parseCurrent(raw: unknown): DailyContextCurrent | null {
     handoff_status: typeof r.handoff_status === 'string' ? r.handoff_status : 'ABSENT',
     resident_generation: Number(r.resident_generation ?? 1) || 1,
     status: typeof r.status === 'string' ? r.status : undefined,
+    ok: r.ok === undefined ? undefined : Boolean(r.ok),
+  };
+}
+
+/**
+ * Strict select-carryover response. Never patch with local draftCount.
+ * Malformed → null (caller fail-soft + GET current).
+ */
+export function parseSelectCarryoverResponse(raw: unknown): SelectCarryoverResponse | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const r = raw as Record<string, unknown>;
+  const context_id = normalizeMessageId(r.context_id);
+  const context_epoch = typeof r.context_epoch === 'number' ? Math.trunc(r.context_epoch) : null;
+  if (context_id === null || context_epoch === null) return null;
+  if (r.carryover_unit !== 'round') return null;
+  if (!isCarryoverCount(Number(r.requested_round_count))) return null;
+  const requested_round_count = Number(r.requested_round_count) as CarryoverCount;
+  if (typeof r.selected_round_count !== 'number' || !Number.isFinite(r.selected_round_count)) return null;
+  if (r.selected_round_count < 0 || !Number.isInteger(r.selected_round_count)) return null;
+  if (typeof r.selected_message_count !== 'number' || !Number.isFinite(r.selected_message_count)) return null;
+  if (r.selected_message_count < 0 || !Number.isInteger(r.selected_message_count)) return null;
+  if (!Array.isArray(r.selected_message_ids)) return null;
+  const selected_message_ids: number[] = [];
+  for (const id of r.selected_message_ids) {
+    const n = normalizeMessageId(id);
+    if (n === null) return null;
+    selected_message_ids.push(n);
+  }
+  if (selected_message_ids.length !== r.selected_message_count) return null;
+  if (typeof r.carryover_count !== 'number' || !Number.isFinite(r.carryover_count)) return null;
+  if (!Number.isInteger(r.carryover_count) || r.carryover_count !== r.selected_round_count) return null;
+  return {
+    context_id,
+    context_epoch,
+    carryover_unit: 'round',
+    requested_round_count,
+    selected_round_count: r.selected_round_count,
+    selected_message_count: r.selected_message_count,
+    selected_message_ids,
+    carryover_count: r.carryover_count,
+    finalized_at: typeof r.finalized_at === 'string' ? r.finalized_at : '',
     ok: r.ok === undefined ? undefined : Boolean(r.ok),
   };
 }
@@ -718,25 +764,38 @@ export function createDailySoftWindowClient(opts?: {
         undefined,
         init,
       );
-      const unit = raw?.carryover_unit ?? 'round';
-      const rounds = parseCanonicalRounds(raw?.rounds, unit);
+      // Must not default-fill carryover_unit — missing is malformed.
+      if (!raw || raw.carryover_unit !== 'round') {
+        throw new HttpError(500, 'malformed candidates', 'malformed daily-context/carryover-candidates');
+      }
+      const rounds = parseCanonicalRounds(raw.rounds, raw.carryover_unit);
       if (!rounds) {
         throw new HttpError(500, 'malformed rounds', 'malformed daily-context/carryover-candidates');
       }
+      const context_id = normalizeMessageId(raw.context_id);
+      const context_epoch =
+        typeof raw.context_epoch === 'number' ? Math.trunc(raw.context_epoch) : null;
+      if (context_id === null || context_epoch === null) {
+        throw new HttpError(500, 'malformed candidates', 'malformed daily-context/carryover-candidates');
+      }
       return {
         ok: raw.ok,
-        context_id: Number(raw.context_id),
-        context_epoch: Number(raw.context_epoch),
+        context_id,
+        context_epoch,
         carryover_unit: 'round',
         available_round_count: Number(raw.available_round_count ?? rounds.length),
         rounds,
-        candidates: Array.isArray(raw.candidates)
-          ? flattenRoundMessages(rounds)
-          : flattenRoundMessages(rounds),
+        candidates: flattenRoundMessages(rounds),
       };
     },
-    selectCarryover: (count, init) =>
-      http.post<SelectCarryoverResponse>(LIVE_DAILY_CONTEXT_SELECT, { count }, init),
+    selectCarryover: async (count, init) => {
+      const raw = await http.post<unknown>(LIVE_DAILY_CONTEXT_SELECT, { count }, init);
+      const parsed = parseSelectCarryoverResponse(raw);
+      if (!parsed) {
+        throw new HttpError(500, 'malformed select', 'malformed daily-context/select-carryover');
+      }
+      return parsed;
+    },
   };
 }
 

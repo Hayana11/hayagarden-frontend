@@ -192,12 +192,39 @@ assert.equal(
 );
 ok('draft recovery');
 
-// ── boundary insert ──
+// ── boundary insert: both sides required ──
 assert.equal(boundaryInsertIndex([10, 20, 30], 20), 2);
-assert.equal(boundaryInsertIndex([10, 20, 30], 30), 3);
-assert.equal(boundaryInsertIndex([25, 30, 35], 20), null); // no neighborhood
-assert.equal(boundaryInsertIndex([5, 10], 20), 2); // all ≤ → after last
+assert.equal(boundaryInsertIndex([10, 20, 30], 30), null); // no id > boundary
+assert.equal(boundaryInsertIndex([25, 30, 35], 20), null); // only new side
+assert.equal(boundaryInsertIndex([5, 10], 20), null); // only old side
 ok('boundary');
+
+// ── missing carryover_unit / message_ids not synthesized ──
+{
+  const { parseCurrent, parseSelectCarryoverResponse } = mod;
+  assert.equal(parseCurrent({ context_id: 1, context_epoch: 1, boundary_message_id: 1 }), null);
+  assert.equal(
+    validateCanonicalRounds(
+      [{ round_id: 1, messages: [{ message_id: 1, role: 'user', author: 'h', content_preview: 'x', created_at: 't' }] }],
+      'round',
+    ),
+    null,
+  );
+  assert.equal(
+    parseSelectCarryoverResponse({
+      context_id: 1,
+      context_epoch: 1,
+      carryover_unit: 'round',
+      requested_round_count: 3,
+      selected_round_count: 3,
+      selected_message_count: 1,
+      selected_message_ids: [1, 2],
+      carryover_count: 3,
+    }),
+    null,
+  );
+}
+ok('strict parse');
 
 // ── classify 404/423/409/401 ──
 assert.equal(classifySoftWindowError(new HttpError(404, 'disabled', 'x')), 'disabled');

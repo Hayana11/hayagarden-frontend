@@ -1,4 +1,5 @@
 import { CARRYOVER_COUNTS, countLabel, lockedSummaryText, type CarryoverCount } from '../../lib/dailySoftWindow';
+import type { FocusableOpener } from '../../lib/dailySoftWindowController';
 import './dailySoftWindow.css';
 
 type Props = {
@@ -7,7 +8,8 @@ type Props = {
   carryoverCount: number;
   loading?: boolean;
   statusText?: string;
-  onOpen: () => void;
+  /** Pass the card element so dismiss can restore focus without querySelector. */
+  onOpen: (opener?: FocusableOpener | null) => void;
 };
 
 export function CarryoverPickerCard({
@@ -33,11 +35,11 @@ export function CarryoverPickerCard({
       className="dsw-card"
       role="button"
       tabIndex={0}
-      onClick={onOpen}
+      onClick={(e) => onOpen(e.currentTarget)}
       onKeyDown={(e) => {
         if (e.key === 'Enter' || e.key === ' ') {
           e.preventDefault();
-          onOpen();
+          onOpen(e.currentTarget);
         }
       }}
     >

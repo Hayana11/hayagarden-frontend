@@ -14,11 +14,17 @@ Frontend Soft Window **formal chat wiring** via same-origin BFF. Flag-off truth 
 ```text
 Browser  →  /api/gw/daily-context/{current|carryover-candidates|select-carryover}
 nginx    →  strips /api/gw
-gateway  →  daily_context_bff.py  →  http://127.0.0.1:5050/api/daily-context/*
-           injects Authorization: Bearer <DAILY_SOFT_WINDOW_TOKEN>
+gateway  →  daily_context_bff.py
+             1) moments_auth.require_owner (moments_owner cookie / owner Bearer)
+             2) POST: Origin/Referer must match Host (cross-origin → 403)
+             3) inject Authorization: Bearer <DAILY_SOFT_WINDOW_TOKEN>
+             →  http://127.0.0.1:5050/api/daily-context/*
 ```
 
-Original `/api/daily-context/*` Bearer protection is unchanged.
+- Anonymous browser → **401**, no upstream call, no Soft Window token injection
+- Valid `moments_owner` cookie (`path=/`, Secure, SameSite=Lax) from Moments/Monopoly login is sent on `/dash/chat` same-origin fetches
+- Browser `Authorization` is never forwarded; only the server Soft Window Bearer is used upstream
+- Original `/api/daily-context/*` Bearer protection is unchanged
 
 ## Canonical rounds (backend #147)
 
@@ -41,7 +47,8 @@ Carryover unit is **`round`**:
 | 423 | Hide; retry 750 / 2000 / 5000 ms (max 3); then wait for window focus |
 | 401/403 | Fail-hidden; `console.error` with `AUTH_BRIDGE` |
 | Send | `notifySendStarted` closes modal / suppresses picker; **never** POST 0 before send; `notifySendSettled` refreshes current |
-| Boundary | Insert by `boundary_message_id` only when neighborhood is on the loaded page |
+| Boundary | Insert only when loaded messages include **both** `id ≤ boundary` and `id > boundary` |
+| Focus | Modal opener is the CarryoverPickerCard element; dismiss/Esc/success restores focus to that element |
 
 ## Preview
 
@@ -55,12 +62,14 @@ Carryover unit is **`round`**:
 
 - `daily_context_bff.py` — gateway BFF
 - `app/src/lib/dailySoftWindow.ts` — canonical types, helpers, mock + live client
-- `app/src/hooks/useDailySoftWindow.ts` — formal + preview state machine
+- `app/src/hooks/useDailySoftWindow.ts` — React adapter
+- `app/src/lib/dailySoftWindowController.ts` — formal + preview state machine
 - `app/src/components/dailySoftWindow/*` — #148 visuals
 - `app/src/screens/ChatScreen.tsx` — live wiring
 - `app/src/screens/DailySoftWindowPreviewScreen.tsx` — mock playground
 - `app/scripts/test-daily-soft-window.mjs` — FE unit checks
-- `tests/test_daily_context_bff.py` — BFF proxy / token injection
+- `app/scripts/test-daily-soft-window-machine.mjs` — state-machine / race fencing
+- `tests/test_daily_context_bff.py` — BFF owner auth + proxy / token injection
 
 ## Explicit non-goals
 
