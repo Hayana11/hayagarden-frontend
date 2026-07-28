@@ -1,68 +1,81 @@
-# P-CONTEXT-DAILY-SOFT-WINDOW-FE-R0
+# P-CONTEXT-DAILY-SOFT-WINDOW-FE-R1
 
 ## Status
 
-Frontend **Draft** — **preview-only**. Keep Draft; do **not** merge into formal chat yet.
+Frontend Soft Window **formal chat wiring** via same-origin BFF. Flag-off truth is upstream **404** (UI fully hidden after one silent `GET /current` probe).
 
 - Does **not** enable `DAILY_SOFT_WINDOW_ENABLED`
+- Does **not** put `DAILY_SOFT_WINDOW_TOKEN` in app/src, `VITE_*`, localStorage, URL, or bundle
 - Does **not** call resident / Wake / model
-- Does **not** change `/dash/chat` send flow
-- Awaits backend **R1.1 round contract** before rewiring live selection
+- Browser only talks to `/api/gw/daily-context/*` (credentials include); BFF injects Bearer server-side
 
-## What this phase ships
+## Auth bridge
 
-Isolated mock playground:
+```text
+Browser  →  /api/gw/daily-context/{current|carryover-candidates|select-carryover}
+nginx    →  strips /api/gw
+gateway  →  daily_context_bff.py
+             1) moments_auth.require_owner (moments_owner cookie / owner Bearer)
+             2) POST: Origin/Referer must match Host (cross-origin → 403)
+             3) inject Authorization: Bearer <DAILY_SOFT_WINDOW_TOKEN>
+             →  http://127.0.0.1:5050/api/daily-context/*
+```
+
+- Anonymous browser → **401**, no upstream call, no Soft Window token injection
+- Valid `moments_owner` cookie (`path=/`, Secure, SameSite=Lax) from Moments/Monopoly login is sent on `/dash/chat` same-origin fetches
+- Browser `Authorization` is never forwarded; only the server Soft Window Bearer is used upstream
+- Original `/api/daily-context/*` Bearer protection is unchanged
+
+## Canonical rounds (backend #147)
+
+Carryover unit is **`round`**:
+
+- `round_id` = first user `message_id`
+- `message_ids` / `messages` aligned
+- First message must be `user`; assistant-only groups rejected
+- Select count ∈ `{0, 3, 5, 10}`; `carryover_count` = selected **round** count
+- Locked recovery: draft uses `requested_round_count` when valid tier, else `selected_round_count`; card shows `selected_round_count`
+
+## Formal chat (`/dash/chat`)
+
+| Behavior | Detail |
+|----------|--------|
+| Mount | Always probe `GET …/current` (`{ live: true }`) |
+| 200 unselected | Show picker card; default draft **10**; candidates fetched only on modal open |
+| 200 locked | Readonly card; highlight `selected_message_ids` |
+| 404 | Hide all Soft Window UI |
+| 423 | Hide; retry 750 / 2000 / 5000 ms (max 3); then wait for window focus |
+| 401/403 | Fail-hidden; `console.error` with `AUTH_BRIDGE` |
+| Send | `notifySendStarted` closes modal / suppresses picker; **never** POST 0 before send; `notifySendSettled` refreshes current |
+| Fencing | Shared `contextGeneration` + `activeContextKey`; `candidatesReadyKey` gates confirm until live candidates load; same-context focus preserves rounds + draftCount |
+| Auth 401/403 | Fail-hidden: bump generation, abort ops, close drawer, restore focus, hide card/modal/boundary |
+| Boundary | Insert only when loaded messages include **both** `id ≤ boundary` and `id > boundary` |
+| Focus | Modal opener is the CarryoverPickerCard element; dismiss/Esc/success restores focus to that element |
+
+## Preview
 
 ```text
 /dash/daily-soft-window
 ```
 
-Safe for phone visual QA. Uses mock API only (`forceMock`). Can be opened / deployed as a route without turning Soft Window on for formal chat.
-
-### Round visual semantics
-
-Picker options:
-
-```text
-不带｜3轮｜5轮｜10轮
-```
-
-Mock candidates are grouped as **complete conversation rounds**:
-
-> one `user` message + following `assistant` messages until the next `user`
-
-Selecting `N` packs the last **N rounds** (all message ids inside those rounds). `carryover_count` is the round count.
-
-### Preview surface
-
-- Day soft boundary between chat-days
-- Composer card → centered packing modal
-- Scenario chips: `ready` / `loading` / `empty` / `404` / `409` / `locked` / `error`
-- Preview ↑ simulates lock-0 (mock only)
-
-## Formal chat (`/dash/chat`) — temporarily disabled
-
-Until R1.1:
-
-| Must not | Status |
-|----------|--------|
-| Call `POST /api/daily-context/select-carryover` | removed from ChatScreen |
-| Auto-lock 0 on first send | removed |
-| Show picker card / Soft Window modal | removed |
-| Change send flow | unchanged |
-| Activate via `?dailySoftWindowFe=1` / `localStorage.DAILY_SOFT_WINDOW_FE` | hard-off (`isDailySoftWindowFeEnabled` → `false`) |
+`forceMock: true`. Scenario chips include `ready` / `loading` / `empty` / `404` / `409` / `locked` / `423` / `error`. Preview ↑ may simulate lock-0 (mock only).
 
 ## Files
 
-- `app/src/lib/dailySoftWindow.ts` — round helpers, mock client
-- `app/src/hooks/useDailySoftWindow.ts` — preview state machine
-- `app/src/components/dailySoftWindow/*` — boundary / card / modal
-- `app/src/screens/DailySoftWindowPreviewScreen.tsx` — isolated playground
-- `app/scripts/test-daily-soft-window.mjs` — unit checks
+- `daily_context_bff.py` — gateway BFF
+- `app/src/lib/dailySoftWindow.ts` — canonical types, helpers, mock + live client
+- `app/src/hooks/useDailySoftWindow.ts` — React adapter
+- `app/src/lib/dailySoftWindowController.ts` — formal + preview state machine
+- `app/src/components/dailySoftWindow/*` — #148 visuals
+- `app/src/screens/ChatScreen.tsx` — live wiring
+- `app/src/screens/DailySoftWindowPreviewScreen.tsx` — mock playground
+- `app/scripts/test-daily-soft-window.mjs` — FE unit checks
+- `app/scripts/test-daily-soft-window-machine.mjs` — state-machine / race fencing
+- `tests/test_daily_context_bff.py` — BFF owner auth + proxy / token injection
 
 ## Explicit non-goals
 
-- Backend / resident / handoff generation
 - Enabling `DAILY_SOFT_WINDOW_ENABLED`
-- Live `/dash/chat` Soft Window integration (next Integration PR after R1.1)
-- Changing Clean Window / shadow / Wake runtime
+- Changing `chat/daily_context.py` contract
+- Merge / deploy notes in this doc
+- Redesigning #148 packing UI

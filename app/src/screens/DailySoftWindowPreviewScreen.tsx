@@ -37,16 +37,17 @@ const SCENARIOS: { id: SoftWindowMockScenario; label: string }[] = [
   { id: 'disabled', label: '404' },
   { id: 'conflict', label: '409' },
   { id: 'locked', label: 'locked' },
+  { id: 'deferred', label: '423' },
   { id: 'error', label: 'error' },
 ];
 
 /**
- * Isolated FE-R0 playground. Does not touch formal chat defaults.
+ * Isolated FE-R1 playground. Does not enable Soft Window for formal chat.
  * Open: /dash/daily-soft-window
  */
 export function DailySoftWindowPreviewScreen() {
   const [scenario, setScenario] = useState<SoftWindowMockScenario>(() => getMockScenario());
-  const dsw = useDailySoftWindow({ enabled: true, forceMock: true });
+  const dsw = useDailySoftWindow({ forceMock: true });
   const transcript = useMemo(() => mockPreviewTranscript(), []);
   const [toast, setToast] = useState('');
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -55,7 +56,6 @@ export function DailySoftWindowPreviewScreen() {
     if (toastTimer.current) clearTimeout(toastTimer.current);
   }, []);
 
-  // handoff 的两个动作都会在底部留一条回执
   const showToast = (text: string) => {
     setToast(text);
     if (toastTimer.current) clearTimeout(toastTimer.current);
@@ -65,8 +65,12 @@ export function DailySoftWindowPreviewScreen() {
   const applyScenario = (next: SoftWindowMockScenario) => {
     setScenario(next);
     setMockScenario(next);
-    // Force mock store rebuild + reload.
     window.location.search = `?mockScenario=${encodeURIComponent(next)}`;
+  };
+
+  const dismissModal = () => {
+    dsw.closeDrawer();
+    showToast('再想想 · 保留当前窗口');
   };
 
   return (
@@ -97,7 +101,7 @@ export function DailySoftWindowPreviewScreen() {
             </Link>
             <div style={{ minWidth: 0 }}>
               <div style={{ fontFamily: DISPLAY, fontSize: 11, letterSpacing: 2, color: 'var(--ghost)' }}>
-                FE-R0 · MOCK · 预览专用 · 正式聊天未接线
+                FE-R1 · MOCK · 预览专用 · 正式聊天走 BFF 探针
               </div>
               <div style={{ fontFamily: SERIF, fontSize: 16, fontWeight: 600, letterSpacing: 1 }}>新的一天</div>
             </div>
@@ -182,8 +186,8 @@ export function DailySoftWindowPreviewScreen() {
           {dsw.showPickerCard ? (
             <CarryoverPickerCard
               locked={dsw.locked}
-              carryoverCount={dsw.summary?.carryover_count ?? 0}
-              loading={dsw.uiState === 'loading'}
+              carryoverCount={dsw.current?.selected_round_count ?? dsw.current?.carryover_count ?? 0}
+              loading={dsw.uiState === 'probing' || dsw.uiState === 'loading'}
               statusText={dsw.statusText}
               onOpen={dsw.openDrawer}
             />
@@ -226,14 +230,11 @@ export function DailySoftWindowPreviewScreen() {
         open={dsw.drawerOpen}
         uiState={dsw.uiState}
         draftCount={dsw.draftCount}
-        candidates={dsw.candidates}
         rounds={dsw.rounds}
         submitting={dsw.submitting}
         errorDetail={dsw.errorDetail}
-        onClose={() => {
-          dsw.closeDrawer();
-          showToast('再想想 · 保留当前窗口');
-        }}
+        onDismiss={dismissModal}
+        onReconsider={dismissModal}
         onDraftChange={dsw.setDraftCount}
         onConfirm={() => {
           const picked = dsw.draftCount;
