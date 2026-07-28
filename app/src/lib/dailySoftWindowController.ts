@@ -285,7 +285,12 @@ export class DailySoftWindowController {
     }
   }
 
-  private applyCurrentFields(cur: DailyContextCurrent, nextRounds?: CarryoverRound[]): void {
+  private applyCurrentFields(
+    cur: DailyContextCurrent,
+    nextRounds?: CarryoverRound[],
+    opts?: { preserveDraftCount?: boolean },
+  ): void {
+    const previousDraft = this.draftCount;
     this.current = cur;
     this.errorDetail = '';
     if (cur.selection_finalized) {
@@ -299,11 +304,11 @@ export class DailySoftWindowController {
     this.highlightOverride = null;
     if (nextRounds && nextRounds.length === 0) {
       this.uiState = 'empty';
-      this.draftCount = 10;
+      this.draftCount = opts?.preserveDraftCount ? previousDraft : 10;
       return;
     }
     this.uiState = nextRounds && nextRounds.length === 0 ? 'empty' : 'ready';
-    this.draftCount = 10;
+    this.draftCount = opts?.preserveDraftCount ? previousDraft : 10;
   }
 
   /**
@@ -313,6 +318,8 @@ export class DailySoftWindowController {
   private adoptAuthoritativeCurrent(cur: DailyContextCurrent, nextRounds?: CarryoverRound[]): void {
     const nextKey = contextKeyFromCurrent(cur);
     const contextChanged = !contextKeysMatch(this.activeContextKey, nextKey);
+    const preserveDraft =
+      !contextChanged && this.drawerOpen && !cur.selection_finalized;
 
     if (contextChanged) {
       this.contextGeneration += 1;
@@ -323,7 +330,7 @@ export class DailySoftWindowController {
     }
 
     this.activeContextKey = nextKey;
-    this.applyCurrentFields(cur, nextRounds);
+    this.applyCurrentFields(cur, nextRounds, { preserveDraftCount: preserveDraft });
 
     // Formal live: preserve modal rounds when same context + drawer still open.
     if (this.live && !this.preview && !this.drawerOpen) {

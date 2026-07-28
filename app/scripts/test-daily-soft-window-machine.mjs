@@ -795,6 +795,8 @@ ok('cross select stale after context B');
   ctrl.openDrawer({ focus() {}, isConnected: true });
   await waitFor(() => ctrl.rounds.length === 1, 'rounds loaded');
   assert.equal(ctrl.drawerOpen, true);
+  ctrl.setDraftCount(3);
+  assert.equal(ctrl.draftCount, 3);
 
   const genBefore = ctrl.getSnapshot().contextGeneration;
   ctrl.onWindowFocus();
@@ -805,8 +807,13 @@ ok('cross select stale after context B');
   assert.equal(ctrl.drawerOpen, true, 'drawer stays open on same-context focus');
   assert.equal(ctrl.rounds.length, 1, 'loaded rounds preserved');
   assert.equal(ctrl.rounds[0].round_id, 11);
+  assert.equal(ctrl.draftCount, 3, 'user draft tier must survive same-context focus');
+
+  const okSel = await ctrl.confirmSelection();
+  assert.equal(okSel, true);
+  assert.equal(client.calls.selectBodies.at(-1), 3, 'POST must use preserved draft count');
   ctrl.dispose();
 }
-ok('focus same context preserves drawer rounds');
+ok('focus same context preserves drawer rounds and draft count');
 
 console.log(`daily-soft-window state-machine tests: ok (${passed} groups)`);
