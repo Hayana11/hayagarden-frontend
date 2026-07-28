@@ -1461,7 +1461,7 @@ class R0Round4HardeningTests(unittest.TestCase):
 
 
 class RoundBasedCarryoverTests(unittest.TestCase):
-    def _ctx(self, db: str, chat_id: str = 'rounds'):
+    def _ctx(self, db: str, chat_id: str = 'default'):
         return dc.get_or_create_daily_context(
             chat_id=chat_id, local_day='2026-07-27', db_path=db,
         )
@@ -1620,13 +1620,62 @@ class RoundBasedCarryoverTests(unittest.TestCase):
             ctx = self._ctx(db)
             first = dc.select_carryover(int(ctx['id']), 3, db_path=db)
             second = dc.select_carryover(int(ctx['id']), 3, db_path=db)
+            self.assertEqual(second['requested_round_count'], first['requested_round_count'])
             self.assertEqual(second['selected_round_count'], first['selected_round_count'])
             self.assertEqual(second['selected_message_count'], first['selected_message_count'])
             self.assertEqual(second['selected_message_ids'], first['selected_message_ids'])
         finally:
             os.unlink(db)
 
-    def test_different_count_after_lock_returns_409(self):
+    def test_idempotent_when_fewer_rounds_than_requested(self):
+        db = _tmp_db()
+        try:
+            _init_chat_messages(db)
+            _insert(db, 'hayana', 'u1', '2026-07-26 10:00:00')
+            _insert(db, 'fyodor', 'a1', '2026-07-26 10:01:00')
+            _insert(db, 'hayana', 'u2', '2026-07-26 10:02:00')
+            _insert(db, 'fyodor', 'a2', '2026-07-26 10:03:00')
+            ctx = self._ctx(db)
+            first = dc.select_carryover(int(ctx['id']), 3, db_path=db)
+            second = dc.select_carryover(int(ctx['id']), 3, db_path=db)
+            self.assertEqual(first['requested_round_count'], 3)
+            self.assertEqual(first['selected_round_count'], 2)
+            self.assertEqual(first['selected_message_count'], 4)
+            self.assertEqual(second, first)
+            refreshed = dc.get_daily_context_by_id(int(ctx['id']), db_path=db)
+            self.assertEqual(int(refreshed['carryover_requested_count']), 3)
+            self.assertEqual(int(refreshed['carryover_count']), 2)
+        finally:
+            os.unlink(db)
+
+    def test_idempotent_when_three_rounds_request_five(self):
+        db = _tmp_db()
+        try:
+            _init_chat_messages(db)
+            self._seed_three_rounds_six_messages(db)
+            ctx = self._ctx(db)
+            first = dc.select_carryover(int(ctx['id']), 5, db_path=db)
+            second = dc.select_carryover(int(ctx['id']), 5, db_path=db)
+            self.assertEqual(first['requested_round_count'], 5)
+            self.assertEqual(first['selected_round_count'], 3)
+            self.assertEqual(second, first)
+        finally:
+            os.unlink(db)
+
+    def test_idempotent_zero_rounds_available_request_three(self):
+        db = _tmp_db()
+        try:
+            _init_chat_messages(db)
+            ctx = self._ctx(db)
+            first = dc.select_carryover(int(ctx['id']), 3, db_path=db)
+            second = dc.select_carryover(int(ctx['id']), 3, db_path=db)
+            self.assertEqual(first['requested_round_count'], 3)
+            self.assertEqual(first['selected_round_count'], 0)
+            self.assertEqual(second, first)
+        finally:
+            os.unlink(db)
+
+    def test_different_requested_tier_after_lock_returns_409(self):
         db = _tmp_db()
         try:
             _init_chat_messages(db)
@@ -1635,6 +1684,112 @@ class RoundBasedCarryoverTests(unittest.TestCase):
             dc.select_carryover(int(ctx['id']), 3, db_path=db)
             with self.assertRaises(dc.ConflictError):
                 dc.select_carryover(int(ctx['id']), 5, db_path=db)
+        finally:
+            os.unlink(db)
+
+    def test_api_routes_deferred_while_old_day_lease_active(self):
+        from daily_context_routes import create_daily_context_blueprint
+        from flask import Flask
+
+        db = _tmp_db()
+        try:
+            _init_chat_messages(db)
+            start = datetime.datetime(2026, 7, 27, 3, 59, 59)
+            finish = datetime.datetime(2026, 7, 27, 4, 1, 0)
+            old_ctx = dc.get_or_create_daily_context(
+                chat_id='default', local_day='2026-07-26', db_path=db,
+                now=start, allow_backfill=True,
+            )
+            uid = _insert(db, 'hayana', 'late', start.strftime('%Y-%m-%d %H:%M:%S'))
+            dc.acquire_resident_turn_lease(
+                int(old_ctx['id']), 1,
+                lease_owner='worker-api', request_message_id=uid,
+                db_path=db, now=start,
+            )
+
+            app = Flask(__name__)
+            app.register_blueprint(create_daily_context_blueprint(
+                db_path=db, token_getter=lambda: 'tok',
+            ))
+            client = app.test_client()
+
+            auth = {'Authorization': 'Bearer tok'}
+            real_resolve = dc.resolve_current_daily_context_for_api
+            with mock.patch('chat.daily_context.enabled', return_value=True), \
+                 mock.patch(
+                     'chat.daily_context.resolve_current_daily_context_for_api',
+                     side_effect=lambda **kw: real_resolve(
+                         chat_id=kw.get('chat_id', 'default'),
+                         db_path=kw.get('db_path', db),
+                         now=finish,
+                     ),
+                 ):
+                for path in (
+                    '/api/daily-context/carryover-candidates',
+                    '/api/daily-context/current',
+                ):
+                    resp = client.get(path, headers=auth)
+                    self.assertEqual(resp.status_code, 423, path)
+                    body = resp.get_json()
+                    self.assertEqual(body['code'], 'rollover_deferred')
+                    self.assertTrue(body['retryable'])
+                resp = client.post(
+                    '/api/daily-context/select-carryover',
+                    json={'count': 3},
+                    headers=auth,
+                )
+                self.assertEqual(resp.status_code, 423)
+                self.assertEqual(resp.get_json()['code'], 'rollover_deferred')
+            self.assertIsNone(
+                dc.get_context_for_local_day('default', '2026-07-27', db_path=db),
+            )
+        finally:
+            os.unlink(db)
+
+    def test_post_route_idempotent_contract_fewer_rounds(self):
+        from daily_context_routes import create_daily_context_blueprint
+        from flask import Flask
+
+        db = _tmp_db()
+        try:
+            _init_chat_messages(db)
+            _insert(db, 'hayana', 'u1', '2026-07-26 10:00:00')
+            _insert(db, 'fyodor', 'a1', '2026-07-26 10:01:00')
+            self._ctx(db, chat_id='default')
+            app = Flask(__name__)
+            app.register_blueprint(create_daily_context_blueprint(
+                db_path=db, token_getter=lambda: 'tok',
+            ))
+            client = app.test_client()
+            auth = {'Authorization': 'Bearer tok'}
+            real_resolve = dc.resolve_current_daily_context_for_api
+            with mock.patch('chat.daily_context.enabled', return_value=True), \
+                 mock.patch(
+                     'chat.daily_context.resolve_current_daily_context_for_api',
+                     side_effect=lambda **kw: real_resolve(
+                         chat_id=kw.get('chat_id', 'default'),
+                         db_path=kw.get('db_path', db),
+                         now=_FIXED_NOW,
+                     ),
+                 ):
+                first = client.post(
+                    '/api/daily-context/select-carryover',
+                    json={'count': 3},
+                    headers=auth,
+                )
+                second = client.post(
+                    '/api/daily-context/select-carryover',
+                    json={'count': 3},
+                    headers=auth,
+                )
+            self.assertEqual(first.status_code, 200)
+            self.assertEqual(second.status_code, 200)
+            body1 = first.get_json()
+            body2 = second.get_json()
+            self.assertEqual(body1['requested_round_count'], 3)
+            self.assertEqual(body1['selected_round_count'], 1)
+            self.assertEqual(body1['selected_message_count'], 2)
+            self.assertEqual(body2['selected_message_ids'], body1['selected_message_ids'])
         finally:
             os.unlink(db)
 
@@ -1681,7 +1836,7 @@ class RoundBasedCarryoverTests(unittest.TestCase):
             _insert(db, 'hayana', 'today', '2026-07-27 09:00:00')
             with mock.patch('chat.daily_history._build_state_text', return_value=('', 'none', {})):
                 built = dh.build_daily_window_context(
-                    chat_id='rounds',
+                    chat_id='default',
                     daily_context=dc.get_daily_context_by_id(int(ctx['id']), db_path=db),
                     static_system='S',
                     is_cold=True,
@@ -1712,7 +1867,16 @@ class RoundBasedCarryoverTests(unittest.TestCase):
                 db_path=db, token_getter=lambda: 'test-token',
             ))
             client = app.test_client()
-            with mock.patch('chat.daily_context.enabled', return_value=True):
+            real_resolve = dc.resolve_current_daily_context_for_api
+            with mock.patch('chat.daily_context.enabled', return_value=True), \
+                 mock.patch(
+                     'chat.daily_context.resolve_current_daily_context_for_api',
+                     side_effect=lambda **kw: real_resolve(
+                         chat_id=kw.get('chat_id', 'default'),
+                         db_path=kw.get('db_path', db),
+                         now=_FIXED_NOW,
+                     ),
+                 ):
                 resp = client.get(
                     '/api/daily-context/carryover-candidates',
                     headers={'Authorization': 'Bearer test-token'},

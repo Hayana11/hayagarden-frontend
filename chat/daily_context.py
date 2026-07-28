@@ -265,6 +265,10 @@ def ensure_schema(db_path: Optional[str] = None) -> None:
             conn.execute(
                 'ALTER TABLE daily_contexts ADD COLUMN is_backfill INTEGER NOT NULL DEFAULT 0'
             )
+        if dcols and 'carryover_requested_count' not in dcols:
+            conn.execute(
+                'ALTER TABLE daily_contexts ADD COLUMN carryover_requested_count INTEGER NULL'
+            )
         if _table_columns(conn, 'chat_messages'):
             ensure_chat_messages_source_kind(conn, record_cutover=True)
         conn.commit()
@@ -593,6 +597,29 @@ def resolve_or_create_daily_context_for_origin(
         raise
     finally:
         conn.close()
+
+
+def resolve_current_daily_context_for_api(
+    *,
+    chat_id: str = DEFAULT_CHAT_ID,
+    db_path: Optional[str] = None,
+    now: Optional[datetime.datetime] = None,
+) -> dict[str, Any]:
+    """Fenced current-day resolver for HTTP routes.
+
+    Blocks new-day context creation while another chat-day holds an active
+    provider turn lease (cross-midnight rollover fence).
+    """
+    wall_now = now or (
+        datetime.datetime.utcnow() + datetime.timedelta(hours=TZ_OFFSET_HOURS)
+    )
+    origin_day = _current_chat_day(wall_now)
+    return resolve_or_create_daily_context_for_origin(
+        chat_id=chat_id,
+        origin_local_day=origin_day,
+        actual_wall_now=wall_now,
+        db_path=db_path,
+    )
 
 
 def get_or_create_daily_context(
@@ -1081,6 +1108,37 @@ def _selection_locked(ctx: dict[str, Any], db_path: Optional[str] = None) -> boo
         conn.close()
 
 
+def _carryover_selection_result(
+    *,
+    context_id: int,
+    current: dict[str, Any],
+    selected_ids: list[int],
+    selected_round_count: int,
+    requested_round_count: int,
+    finalized_at: Any,
+) -> dict[str, Any]:
+    return {
+        'context_id': context_id,
+        'context_epoch': int(current['context_epoch']),
+        'carryover_unit': CARRYOVER_UNIT,
+        'requested_round_count': int(requested_round_count),
+        'selected_message_ids': selected_ids,
+        'carryover_count': int(selected_round_count),
+        'selected_round_count': int(selected_round_count),
+        'selected_message_count': len(selected_ids),
+        'finalized_at': finalized_at,
+    }
+
+
+def _stored_carryover_requested_count(current: dict[str, Any]) -> int:
+    raw = current.get('carryover_requested_count')
+    if raw is not None:
+        return int(raw)
+    if current.get('selection_finalized_at'):
+        return int(current.get('carryover_count') or 0)
+    return -1
+
+
 def select_carryover(
     context_id: int,
     count: int,
@@ -1100,10 +1158,11 @@ def select_carryover(
             raise DailyContextError('daily_context not found')
         current = dict(row)
         if current.get('selection_finalized_at'):
-            prev_count = int(current.get('carryover_count') or 0)
-            if prev_count == 0 and count > 0:
+            prev_requested = _stored_carryover_requested_count(current)
+            prev_selected = int(current.get('carryover_count') or 0)
+            if prev_requested == 0 and count > 0:
                 raise ConflictError('carryover locked at 0; cannot select %d' % count)
-            if prev_count == count:
+            if prev_requested == count:
                 selected_ids = [
                     int(r['message_id']) for r in conn.execute(
                         'SELECT message_id FROM daily_carryover_messages '
@@ -1112,16 +1171,14 @@ def select_carryover(
                     ).fetchall()
                 ]
                 conn.commit()
-                return {
-                    'context_id': context_id,
-                    'context_epoch': int(current['context_epoch']),
-                    'carryover_unit': CARRYOVER_UNIT,
-                    'selected_message_ids': selected_ids,
-                    'carryover_count': prev_count,
-                    'selected_round_count': prev_count,
-                    'selected_message_count': len(selected_ids),
-                    'finalized_at': current.get('selection_finalized_at'),
-                }
+                return _carryover_selection_result(
+                    context_id=context_id,
+                    current=current,
+                    selected_ids=selected_ids,
+                    selected_round_count=prev_selected,
+                    requested_round_count=prev_requested,
+                    finalized_at=current.get('selection_finalized_at'),
+                )
             raise ConflictError('carryover selection is locked')
     finally:
         conn.close()
@@ -1166,21 +1223,20 @@ def select_carryover(
         round_count = len(selected_rounds)
         conn.execute(
             '''UPDATE daily_contexts SET carryover_count=?,
-               selection_finalized_at=?, version=version+1,
+               carryover_requested_count=?, selection_finalized_at=?,
+               version=version+1,
                updated_at=datetime('now','+8 hours') WHERE id=?''',
-            (round_count, now_s, context_id),
+            (round_count, count, now_s, context_id),
         )
         conn.commit()
-        return {
-            'context_id': context_id,
-            'context_epoch': int(current['context_epoch']),
-            'carryover_unit': CARRYOVER_UNIT,
-            'selected_message_ids': ids,
-            'carryover_count': round_count,
-            'selected_round_count': round_count,
-            'selected_message_count': len(ids),
-            'finalized_at': now_s,
-        }
+        return _carryover_selection_result(
+            context_id=context_id,
+            current=current,
+            selected_ids=ids,
+            selected_round_count=round_count,
+            requested_round_count=count,
+            finalized_at=now_s,
+        )
     except Exception:
         conn.rollback()
         raise
@@ -1229,7 +1285,8 @@ def ensure_carryover_zero_if_user_messages_exist(
         conn.execute('DELETE FROM daily_carryover_messages WHERE context_id=?', (context_id,))
         conn.execute(
             '''UPDATE daily_contexts SET carryover_count=0,
-               selection_finalized_at=?, version=version+1,
+               carryover_requested_count=0, selection_finalized_at=?,
+               version=version+1,
                updated_at=datetime('now','+8 hours') WHERE id=?''',
             (now_s, context_id),
         )
@@ -2645,7 +2702,9 @@ def current_summary(
     db_path: Optional[str] = None,
     now: Optional[datetime.datetime] = None,
 ) -> dict[str, Any]:
-    ctx = get_or_create_daily_context(chat_id=chat_id, db_path=db_path, now=now)
+    ctx = resolve_current_daily_context_for_api(
+        chat_id=chat_id, db_path=db_path, now=now,
+    )
     handoff_status = HANDOFF_ABSENT
     if ctx.get('handoff_id'):
         h = get_day_handoff(int(ctx['handoff_id']), db_path=db_path)

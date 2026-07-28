@@ -40,6 +40,15 @@ def _reject_non_default_chat_id(chat_id: str):
     return None
 
 
+def _rollover_deferred_response(exc: Exception):
+    return jsonify({
+        'ok': False,
+        'error': str(exc),
+        'code': 'rollover_deferred',
+        'retryable': True,
+    }), 423
+
+
 def create_daily_context_blueprint(
     *,
     db_path: str,
@@ -70,7 +79,7 @@ def create_daily_context_blueprint(
         err = _auth_error()
         if err:
             return err
-        from chat.daily_context import DEFAULT_CHAT_ID, current_summary
+        from chat.daily_context import DEFAULT_CHAT_ID, current_summary, DeferredError
 
         chat_id = str(request.args.get('chat_id') or DEFAULT_CHAT_ID)
         cid_err = _reject_non_default_chat_id(chat_id)
@@ -79,6 +88,8 @@ def create_daily_context_blueprint(
         try:
             data = current_summary(chat_id=chat_id, db_path=db_path)
             return jsonify({'ok': True, **data})
+        except DeferredError as exc:
+            return _rollover_deferred_response(exc)
         except ValueError as exc:
             return jsonify({'ok': False, 'error': str(exc)}), 400
         except Exception as exc:
@@ -92,8 +103,9 @@ def create_daily_context_blueprint(
             return err
         from chat.daily_context import (
             DEFAULT_CHAT_ID,
-            get_or_create_daily_context,
+            DeferredError,
             list_carryover_rounds,
+            resolve_current_daily_context_for_api,
         )
 
         chat_id = str(request.args.get('chat_id') or DEFAULT_CHAT_ID)
@@ -101,7 +113,7 @@ def create_daily_context_blueprint(
         if cid_err:
             return cid_err
         try:
-            ctx = get_or_create_daily_context(chat_id=chat_id, db_path=db_path)
+            ctx = resolve_current_daily_context_for_api(chat_id=chat_id, db_path=db_path)
             data = list_carryover_rounds(int(ctx['id']), limit_rounds=10, db_path=db_path)
             candidates = []
             for rnd in data['rounds']:
@@ -121,6 +133,8 @@ def create_daily_context_blueprint(
                 'rounds': data['rounds'],
                 'candidates': candidates,
             })
+        except DeferredError as exc:
+            return _rollover_deferred_response(exc)
         except ValueError as exc:
             return jsonify({'ok': False, 'error': str(exc)}), 400
         except Exception as exc:
@@ -135,7 +149,8 @@ def create_daily_context_blueprint(
         from chat.daily_context import (
             ConflictError,
             DEFAULT_CHAT_ID,
-            get_or_create_daily_context,
+            DeferredError,
+            resolve_current_daily_context_for_api,
             select_carryover,
         )
 
@@ -149,13 +164,14 @@ def create_daily_context_blueprint(
         except Exception:
             return jsonify({'ok': False, 'error': 'count must be 0|3|5|10'}), 400
         try:
-            ctx = get_or_create_daily_context(chat_id=chat_id, db_path=db_path)
+            ctx = resolve_current_daily_context_for_api(chat_id=chat_id, db_path=db_path)
             result = select_carryover(int(ctx['id']), count, db_path=db_path)
             return jsonify({
                 'ok': True,
                 'context_id': result['context_id'],
                 'context_epoch': result['context_epoch'],
                 'carryover_unit': result.get('carryover_unit', 'round'),
+                'requested_round_count': result.get('requested_round_count', count),
                 'carryover_count': result['carryover_count'],
                 'selected_round_count': result.get(
                     'selected_round_count', result['carryover_count'],
@@ -166,6 +182,8 @@ def create_daily_context_blueprint(
                 'selected_message_ids': result['selected_message_ids'],
                 'finalized_at': result['finalized_at'],
             })
+        except DeferredError as exc:
+            return _rollover_deferred_response(exc)
         except ConflictError as exc:
             return jsonify({'ok': False, 'error': str(exc)}), 409
         except ValueError as exc:
