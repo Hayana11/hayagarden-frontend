@@ -1,12 +1,8 @@
 /**
- * P-CONTEXT-DAILY-SOFT-WINDOW-FE-R0
+ * P-CONTEXT-DAILY-SOFT-WINDOW-FE-R1
  *
- * Frontend Soft Window carryover picker — **preview-only** until backend R1.1
- * round contract lands.
- *
- * - `/dash/daily-soft-window` uses mock API + round semantics
- * - `/dash/chat` is intentionally unwired (no picker, no select-carryover, no auto-lock)
- * - Does not enable `DAILY_SOFT_WINDOW_ENABLED`, does not call resident / Wake
+ * Soft Window carryover picker — formal chat probes live BFF (flag-off = 404 hide);
+ * `/dash/daily-soft-window` stays mock preview. Token never leaves the server BFF.
  */
 
 import { HttpError, http } from './http';
@@ -16,71 +12,90 @@ export type CarryoverCount = (typeof CARRYOVER_COUNTS)[number];
 
 export const CHAT_DAY_START_HOUR = 4;
 
-export type DailyContextStatus =
-  | 'ABSENT'
-  | 'COMPACTING'
-  | 'PROVISIONAL'
-  | 'FINALIZED'
-  | 'FAILED_RETRYABLE';
+/** Browser → nginx `/api/gw` → gateway BFF. Never call `/api/daily-context/*` from FE. */
+export const LIVE_DAILY_CONTEXT_CURRENT = '/api/gw/daily-context/current';
+export const LIVE_DAILY_CONTEXT_CANDIDATES = '/api/gw/daily-context/carryover-candidates';
+export const LIVE_DAILY_CONTEXT_SELECT = '/api/gw/daily-context/select-carryover';
 
-export type CarryoverCandidate = {
+export type CarryoverMessage = {
   message_id: number;
   role: 'user' | 'assistant';
+  author: string;
   content_preview: string;
   created_at: string;
-  author?: string;
 };
 
-/** One conversation round: a user turn + following assistants until the next user. */
 export type CarryoverRound = {
-  /** Stable id = leading user message_id. */
   round_id: number;
-  user: CarryoverCandidate;
-  assistants: CarryoverCandidate[];
+  message_ids: number[];
+  messages: CarryoverMessage[];
 };
 
-export type DailyContextSummary = {
-  ok?: boolean;
-  local_day: string;
+export type DailyContextCurrent = {
+  context_id: number;
   context_epoch: number;
-  status: DailyContextStatus | string;
+  local_day: string;
   boundary_message_id: number;
-  /** Selected round count (not raw message count). */
+  carryover_unit: 'round';
+  requested_round_count: 0 | 3 | 5 | 10 | null;
+  selected_round_count: number;
+  selected_message_count: number;
+  selected_message_ids: number[];
   carryover_count: number;
   selection_finalized: boolean;
-  handoff_status?: string;
-  resident_generation?: number;
-  context_id: number;
+  handoff_status: string;
+  resident_generation: number;
+  status?: string;
+  ok?: boolean;
 };
 
 export type CarryoverCandidatesResponse = {
-  ok?: boolean;
   context_id: number;
   context_epoch: number;
-  /** Flat formal messages (ordered). Prefer grouping via `groupIntoRounds`. */
-  candidates: CarryoverCandidate[];
-  /** Round view for FE preview (awaiting backend R1.1 contract). */
+  carryover_unit: 'round';
+  available_round_count: number;
   rounds: CarryoverRound[];
+  /** Flattened compat only — do not groupIntoRounds for live. */
+  candidates: CarryoverMessage[];
+  ok?: boolean;
 };
 
 export type SelectCarryoverResponse = {
-  ok?: boolean;
-  selected_message_ids: number[];
-  finalized_at: string;
+  context_id: number;
   context_epoch: number;
-  /** Selected round count. */
+  carryover_unit?: 'round';
+  requested_round_count: number;
+  selected_round_count: number;
+  selected_message_count: number;
+  selected_message_ids: number[];
   carryover_count: number;
+  finalized_at: string;
+  ok?: boolean;
 };
 
+/** Formal chat controller states. */
 export type SoftWindowUiState =
-  | 'idle'
-  | 'loading'
+  | 'probing'
+  | 'disabled'
+  | 'deferred'
   | 'ready'
   | 'empty'
-  | 'disabled' // 404
-  | 'conflict' // 409
+  | 'submitting'
+  | 'locked'
+  | 'unavailable'
+  /** Preview / classify leftovers mapped into UI copy. */
+  | 'loading'
+  | 'conflict'
   | 'error'
-  | 'locked';
+  | 'auth_error'
+  | 'idle';
+
+export type SoftWindowErrorKind =
+  | 'disabled'
+  | 'deferred'
+  | 'conflict'
+  | 'auth_error'
+  | 'error';
 
 export type SoftWindowMockScenario =
   | 'ready'
@@ -89,13 +104,14 @@ export type SoftWindowMockScenario =
   | 'disabled'
   | 'conflict'
   | 'locked'
+  | 'deferred'
   | 'error';
 
 const MOCK_SCENARIO_KEY = 'DAILY_SOFT_WINDOW_FE_MOCK';
 
 /**
- * Formal chat Soft Window integration is paused until backend R1.1 round contract.
- * Preview page passes `enabled: true` explicitly — do not re-enable via URL/localStorage.
+ * Formal Soft Window is never gated by URL/localStorage.
+ * Chat mounts with `{ live: true }`; flag-off truth is upstream 404.
  */
 export function isDailySoftWindowFeEnabled(
   _search = typeof location !== 'undefined' ? location.search : '',
@@ -103,7 +119,7 @@ export function isDailySoftWindowFeEnabled(
   return false;
 }
 
-/** Preview always uses mock until live round contract is ready. */
+/** Preview page prefers mock unless explicitly opted out. */
 export function preferMockDailySoftWindow(
   search = typeof location !== 'undefined' ? location.search : '',
 ): boolean {
@@ -113,7 +129,9 @@ export function preferMockDailySoftWindow(
   return true;
 }
 
-export function getMockScenario(search = typeof location !== 'undefined' ? location.search : ''): SoftWindowMockScenario {
+export function getMockScenario(
+  search = typeof location !== 'undefined' ? location.search : '',
+): SoftWindowMockScenario {
   const params = new URLSearchParams(search);
   const q = (params.get('mockScenario') || '').trim() as SoftWindowMockScenario;
   if (
@@ -123,6 +141,7 @@ export function getMockScenario(search = typeof location !== 'undefined' ? locat
     q === 'disabled' ||
     q === 'conflict' ||
     q === 'locked' ||
+    q === 'deferred' ||
     q === 'error'
   ) {
     return q;
@@ -136,6 +155,7 @@ export function getMockScenario(search = typeof location !== 'undefined' ? locat
       stored === 'disabled' ||
       stored === 'conflict' ||
       stored === 'locked' ||
+      stored === 'deferred' ||
       stored === 'error'
     ) {
       return stored;
@@ -154,11 +174,10 @@ export function setMockScenario(scenario: SoftWindowMockScenario): void {
   }
 }
 
-/** Map Asia/Shanghai local timestamp string → chat day (04:00 half-open). */
+/** Map Asia/Shanghai local timestamp string → chat day (04:00 half-open). Preview transcript only. */
 export function chatDayKeyFromLocalTs(createdAt: string | null | undefined): string {
   const raw = String(createdAt || '').trim();
   if (!raw) return '';
-  // Backend stores +8 local as "YYYY-MM-DD HH:MM:SS" (no TZ suffix).
   const m = raw.match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})/);
   if (!m) return raw.slice(0, 10);
   const y = Number(m[1]);
@@ -177,69 +196,124 @@ export function isCarryoverCount(n: number): n is CarryoverCount {
   return (CARRYOVER_COUNTS as readonly number[]).includes(n);
 }
 
-/**
- * Group formal messages into conversation rounds:
- * one user message + following assistants until the next user.
- * Leading assistant-only rows (if any) are dropped for carryover preview.
- */
-export function groupIntoRounds(messages: CarryoverCandidate[]): CarryoverRound[] {
-  const rounds: CarryoverRound[] = [];
-  let current: CarryoverRound | null = null;
-  for (const msg of messages) {
-    if (msg.role === 'user') {
-      if (current) rounds.push(current);
-      current = { round_id: msg.message_id, user: msg, assistants: [] };
-      continue;
-    }
-    if (current) current.assistants.push(msg);
+export function normalizeMessageId(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
+    return Math.trunc(value);
   }
-  if (current) rounds.push(current);
-  return rounds;
+  if (typeof value === 'string' && value.trim()) {
+    const n = Number(value);
+    if (Number.isFinite(n) && n > 0) return Math.trunc(n);
+  }
+  return null;
 }
 
-export function flattenRoundMessages(rounds: CarryoverRound[]): CarryoverCandidate[] {
-  const out: CarryoverCandidate[] = [];
-  for (const r of rounds) {
-    out.push(r.user, ...r.assistants);
+function isRole(v: unknown): v is 'user' | 'assistant' {
+  return v === 'user' || v === 'assistant';
+}
+
+function parseMessage(raw: unknown): CarryoverMessage | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const r = raw as Record<string, unknown>;
+  const message_id = normalizeMessageId(r.message_id);
+  if (message_id === null || !isRole(r.role)) return null;
+  return {
+    message_id,
+    role: r.role,
+    author: typeof r.author === 'string' ? r.author : '',
+    content_preview: typeof r.content_preview === 'string' ? r.content_preview : '',
+    created_at: typeof r.created_at === 'string' ? r.created_at : '',
+  };
+}
+
+/**
+ * Validate canonical backend rounds. Fail-soft → null when shape is wrong.
+ * Rejects: carryover_unit≠round, first msg not user, round_id≠first user id,
+ * message_ids≠messages ids, assistant-only rounds.
+ */
+export function validateCanonicalRounds(
+  rounds: unknown,
+  carryoverUnit?: string | null,
+): CarryoverRound[] | null {
+  if (carryoverUnit != null && carryoverUnit !== 'round') return null;
+  if (!Array.isArray(rounds)) return null;
+  const out: CarryoverRound[] = [];
+  for (const raw of rounds) {
+    if (!raw || typeof raw !== 'object') return null;
+    const r = raw as Record<string, unknown>;
+    const round_id = normalizeMessageId(r.round_id);
+    if (round_id === null) return null;
+    if (!Array.isArray(r.messages) || r.messages.length === 0) return null;
+    const messages: CarryoverMessage[] = [];
+    for (const m of r.messages) {
+      const parsed = parseMessage(m);
+      if (!parsed) return null;
+      messages.push(parsed);
+    }
+    if (messages[0].role !== 'user') return null;
+    if (messages[0].message_id !== round_id) return null;
+    let message_ids: number[];
+    if (Array.isArray(r.message_ids)) {
+      message_ids = [];
+      for (const id of r.message_ids) {
+        const n = normalizeMessageId(id);
+        if (n === null) return null;
+        message_ids.push(n);
+      }
+    } else {
+      message_ids = messages.map((m) => m.message_id);
+    }
+    if (message_ids.length !== messages.length) return null;
+    for (let i = 0; i < messages.length; i++) {
+      if (message_ids[i] !== messages[i].message_id) return null;
+    }
+    out.push({ round_id, message_ids, messages });
   }
   return out;
 }
 
-export function pickLastNRounds(rounds: CarryoverRound[], count: CarryoverCount): CarryoverRound[] {
+export function parseCanonicalRounds(
+  rounds: unknown,
+  carryoverUnit?: string | null,
+): CarryoverRound[] | null {
+  return validateCanonicalRounds(rounds, carryoverUnit);
+}
+
+/** Last N rounds; fewer available → take all; count 0 → []. */
+export function pickLastNRounds(rounds: CarryoverRound[], count: number): CarryoverRound[] {
   if (count === 0 || !rounds.length) return [];
+  if (count < 0) return [];
   return rounds.slice(-count);
 }
 
-/** Exact last-N **rounds**, flattened to messages (preview / highlight). */
-export function pickLastNCandidates(
-  candidates: CarryoverCandidate[],
-  count: CarryoverCount,
-): CarryoverCandidate[] {
-  return flattenRoundMessages(pickLastNRounds(groupIntoRounds(candidates), count));
-}
-
-export function selectedMessageIds(
-  candidates: CarryoverCandidate[],
-  count: CarryoverCount,
-): number[] {
-  return pickLastNCandidates(candidates, count).map((c) => c.message_id);
-}
-
-export function selectedRoundMessageIds(rounds: CarryoverRound[], count: CarryoverCount): number[] {
-  return flattenRoundMessages(pickLastNRounds(rounds, count)).map((c) => c.message_id);
-}
-
-/** First/last fragment messages for the packing modal preview. */
-export function roundSnippetMessages(rounds: CarryoverRound[]): CarryoverCandidate[] {
-  if (!rounds.length) return [];
-  if (rounds.length === 1) {
-    const only = rounds[0];
-    return only.assistants.length ? [only.user, only.assistants[only.assistants.length - 1]] : [only.user];
+export function flattenRoundMessageIds(rounds: CarryoverRound[]): number[] {
+  const out: number[] = [];
+  for (const r of rounds) {
+    for (const id of r.message_ids) out.push(id);
   }
-  const first = rounds[0].user;
+  return out;
+}
+
+export function flattenRoundMessages(rounds: CarryoverRound[]): CarryoverMessage[] {
+  const out: CarryoverMessage[] = [];
+  for (const r of rounds) out.push(...r.messages);
+  return out;
+}
+
+/** First user of first round + last message of last round. */
+export function roundSnippetMessages(rounds: CarryoverRound[]): CarryoverMessage[] {
+  if (!rounds.length) return [];
+  const first = rounds[0].messages[0];
+  if (rounds.length === 1) {
+    const msgs = rounds[0].messages;
+    return msgs.length > 1 ? [first, msgs[msgs.length - 1]] : [first];
+  }
   const lastRound = rounds[rounds.length - 1];
-  const last = lastRound.assistants[lastRound.assistants.length - 1] ?? lastRound.user;
+  const last = lastRound.messages[lastRound.messages.length - 1];
   return [first, last];
+}
+
+export function selectedRoundMessageIds(rounds: CarryoverRound[], count: number): number[] {
+  return flattenRoundMessageIds(pickLastNRounds(rounds, count));
 }
 
 export function countLabel(count: CarryoverCount): string {
@@ -247,219 +321,237 @@ export function countLabel(count: CarryoverCount): string {
   return `${count}轮`;
 }
 
-export function lockedSummaryText(count: number): string {
-  if (count <= 0) return '今天没有带走昨天的话。';
-  return `今天带来了 ${count} 轮昨天的话。`;
+export function lockedSummaryText(selectedRoundCount: number): string {
+  if (selectedRoundCount <= 0) return '今天没有带走昨天的话。';
+  return `今天带来了 ${selectedRoundCount} 轮昨天的话。`;
 }
 
 /**
- * Mock transcript organized as 10 full conversation rounds.
- * Some rounds include multiple assistant messages (still one round).
+ * Locked draft: prefer requested_round_count when it is a valid tier,
+ * else fall back to selected_round_count / carryover_count.
  */
-const MOCK_CANDIDATES: CarryoverCandidate[] = [
-  // 1
-  {
-    message_id: 9001,
-    role: 'user',
-    content_preview: '今天想先把 Soft Window 的界面定下来，数字用 Bodoni。',
-    created_at: '2026-07-27 22:12:08',
-    author: 'hayana',
-  },
-  {
-    message_id: 9002,
-    role: 'assistant',
-    content_preview: '好。就做小猫每天会看见的那一层——卡片、弹窗、锁定。',
-    created_at: '2026-07-27 22:13:41',
-    author: 'fyodor',
-  },
-  // 2
-  {
-    message_id: 9003,
-    role: 'user',
-    content_preview: '选了就不能再悄悄改成十条。直接发消息就算不带。',
-    created_at: '2026-07-27 22:40:02',
-    author: 'hayana',
-  },
-  {
-    message_id: 9004,
-    role: 'assistant',
-    content_preview: '锁定以后只读。预览页可以反复试，正式聊天先不接线。',
-    created_at: '2026-07-27 22:41:18',
-    author: 'fyodor',
-  },
-  // 3 — multi-assistant round
-  {
-    message_id: 9005,
-    role: 'user',
-    content_preview: '候选要按完整对话轮：一条 user 加上后面的 assistant。',
-    created_at: '2026-07-27 23:05:33',
-    author: 'hayana',
-  },
-  {
-    message_id: 9006,
-    role: 'assistant',
-    content_preview: '对。中间如果还有工具回声，也算在同一轮里。',
-    created_at: '2026-07-27 23:06:11',
-    author: 'fyodor',
-  },
-  {
-    message_id: 9007,
-    role: 'assistant',
-    content_preview: '（整理了一下昨天尾巴，十轮都齐了。）',
-    created_at: '2026-07-27 23:06:40',
-    author: 'fyodor',
-  },
-  // 4
-  {
-    message_id: 9008,
-    role: 'user',
-    content_preview: '视觉语义写成：不带 / 3轮 / 5轮 / 10轮。',
-    created_at: '2026-07-27 23:18:44',
-    author: 'hayana',
-  },
-  {
-    message_id: 9009,
-    role: 'assistant',
-    content_preview: '收到。档位按轮数，不再按单条消息数。',
-    created_at: '2026-07-27 23:19:20',
-    author: 'fyodor',
-  },
-  // 5
-  {
-    message_id: 9010,
-    role: 'user',
-    content_preview: '手机验收只要打开 /dash/daily-soft-window 就行。',
-    created_at: '2026-07-27 23:32:55',
-    author: 'hayana',
-  },
-  {
-    message_id: 9011,
-    role: 'assistant',
-    content_preview: '这条 preview route 自带 mock，不依赖 live Soft Window。',
-    created_at: '2026-07-27 23:33:40',
-    author: 'fyodor',
-  },
-  // 6
-  {
-    message_id: 9012,
-    role: 'user',
-    content_preview: '正式聊天先别自动锁 0，也别弹选择卡。',
-    created_at: '2026-07-28 00:02:11',
-    author: 'hayana',
-  },
-  {
-    message_id: 9013,
-    role: 'assistant',
-    content_preview: '好。/dash/chat 保持原样，等 R1.1 round contract。',
-    created_at: '2026-07-28 00:02:48',
-    author: 'fyodor',
-  },
-  // 7
-  {
-    message_id: 9014,
-    role: 'user',
-    content_preview: 'DAILY_SOFT_WINDOW_ENABLED 继续保持 0。',
-    created_at: '2026-07-28 00:40:02',
-    author: 'hayana',
-  },
-  {
-    message_id: 9015,
-    role: 'assistant',
-    content_preview: '不调用模型，不跑 Wake，不改 runtime flag。',
-    created_at: '2026-07-28 00:40:33',
-    author: 'fyodor',
-  },
-  // 8
-  {
-    message_id: 9016,
-    role: 'user',
-    content_preview: '弹窗去掉左边行李箱，单列就好。',
-    created_at: '2026-07-28 01:15:09',
-    author: 'hayana',
-  },
-  {
-    message_id: 9017,
-    role: 'assistant',
-    content_preview: '已经改成「新的一天」单列 packing modal。',
-    created_at: '2026-07-28 01:15:41',
-    author: 'fyodor',
-  },
-  // 9
-  {
-    message_id: 9018,
-    role: 'user',
-    content_preview: '预览要按 round 高亮整轮，不要只高亮一条。',
-    created_at: '2026-07-28 02:08:22',
-    author: 'hayana',
-  },
-  {
-    message_id: 9019,
-    role: 'assistant',
-    content_preview: '选中 N 轮时，这一轮里的 user 和 assistant 都会标出来。',
-    created_at: '2026-07-28 02:08:55',
-    author: 'fyodor',
-  },
-  // 10
-  {
-    message_id: 9020,
-    role: 'user',
-    content_preview: 'Draft 先留着，等后端 round contract 再接正式聊天。',
-    created_at: '2026-07-28 03:02:55',
-    author: 'hayana',
-  },
-  {
-    message_id: 9021,
-    role: 'assistant',
-    content_preview: '收到。你先睡，preview 留在手机里验视觉就好。',
-    created_at: '2026-07-28 03:03:40',
-    author: 'fyodor',
-  },
+export function draftCountFromCurrent(cur: DailyContextCurrent): CarryoverCount {
+  if (cur.selection_finalized) {
+    const requested = cur.requested_round_count;
+    if (requested != null && isCarryoverCount(requested)) return requested;
+    if (isCarryoverCount(cur.selected_round_count)) return cur.selected_round_count;
+    if (isCarryoverCount(cur.carryover_count)) return cur.carryover_count;
+  }
+  return 10;
+}
+
+/**
+ * Insert index for DaySoftBoundary among message ids.
+ * Before first id > boundary, or after last id ≤ boundary.
+ * If the loaded page has no id ≤ boundary, return null (don't fake at top).
+ */
+export function boundaryInsertIndex(
+  messageIds: number[],
+  boundaryMessageId: number,
+): number | null {
+  const bid = normalizeMessageId(boundaryMessageId);
+  if (bid === null || !messageIds.length) return null;
+  const hasAtOrBefore = messageIds.some((id) => id <= bid);
+  if (!hasAtOrBefore) return null;
+  const idx = messageIds.findIndex((id) => id > bid);
+  return idx === -1 ? messageIds.length : idx;
+}
+
+export function classifySoftWindowError(err: unknown): SoftWindowErrorKind {
+  if (err instanceof HttpError) {
+    if (err.status === 404) return 'disabled';
+    if (err.status === 423) return 'deferred';
+    if (err.status === 409) return 'conflict';
+    if (err.status === 401 || err.status === 403) return 'auth_error';
+  }
+  return 'error';
+}
+
+export function softWindowErrorMessage(state: SoftWindowUiState | SoftWindowErrorKind, err?: unknown): string {
+  if (state === 'disabled') return '今天的软换窗还没打开（接口未启用）。';
+  if (state === 'deferred') return '日界换窗还在路上，稍后再看。';
+  if (state === 'conflict') return '选择已经锁定，不能再改。';
+  if (state === 'auth_error') return '鉴权桥接失败。';
+  if (state === 'empty') return '昨天没有可带走的正式对话。';
+  if (state === 'unavailable' || state === 'error') {
+    if (err instanceof HttpError && err.detail) return err.detail;
+    if (err instanceof Error) return err.message;
+    return '行李箱暂时打不开。';
+  }
+  return '';
+}
+
+function parseCurrent(raw: unknown): DailyContextCurrent | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const r = raw as Record<string, unknown>;
+  const context_id = normalizeMessageId(r.context_id);
+  const context_epoch = typeof r.context_epoch === 'number' ? Math.trunc(r.context_epoch) : null;
+  if (context_id === null || context_epoch === null) return null;
+  if (r.carryover_unit != null && r.carryover_unit !== 'round') return null;
+  const boundary = normalizeMessageId(r.boundary_message_id) ?? 0;
+  const selected_ids_raw = Array.isArray(r.selected_message_ids) ? r.selected_message_ids : [];
+  const selected_message_ids: number[] = [];
+  for (const id of selected_ids_raw) {
+    const n = normalizeMessageId(id);
+    if (n !== null) selected_message_ids.push(n);
+  }
+  let requested_round_count: 0 | 3 | 5 | 10 | null = null;
+  if (r.requested_round_count === null || r.requested_round_count === undefined) {
+    requested_round_count = null;
+  } else if (isCarryoverCount(Number(r.requested_round_count))) {
+    requested_round_count = Number(r.requested_round_count) as CarryoverCount;
+  } else if (typeof r.requested_round_count === 'number') {
+    // malformed tier — keep null; locked recovery falls back to selected
+    requested_round_count = null;
+  }
+  const selected_round_count = Number(r.selected_round_count ?? r.carryover_count ?? 0) || 0;
+  return {
+    context_id,
+    context_epoch,
+    local_day: typeof r.local_day === 'string' ? r.local_day : '',
+    boundary_message_id: boundary,
+    carryover_unit: 'round',
+    requested_round_count,
+    selected_round_count,
+    selected_message_count: Number(r.selected_message_count ?? selected_message_ids.length) || selected_message_ids.length,
+    selected_message_ids,
+    carryover_count: Number(r.carryover_count ?? selected_round_count) || 0,
+    selection_finalized: Boolean(r.selection_finalized),
+    handoff_status: typeof r.handoff_status === 'string' ? r.handoff_status : 'ABSENT',
+    resident_generation: Number(r.resident_generation ?? 1) || 1,
+    status: typeof r.status === 'string' ? r.status : undefined,
+    ok: r.ok === undefined ? undefined : Boolean(r.ok),
+  };
+}
+
+// ── Mock (canonical rounds) ───────────────────────────────────────────
+
+function msg(
+  id: number,
+  role: 'user' | 'assistant',
+  preview: string,
+  created_at: string,
+  author?: string,
+): CarryoverMessage {
+  return {
+    message_id: id,
+    role,
+    author: author ?? (role === 'user' ? 'hayana' : 'fyodor'),
+    content_preview: preview,
+    created_at,
+  };
+}
+
+function roundOf(...messages: CarryoverMessage[]): CarryoverRound {
+  return {
+    round_id: messages[0].message_id,
+    message_ids: messages.map((m) => m.message_id),
+    messages,
+  };
+}
+
+/** 10 canonical rounds; round 3 is multi-assistant; round 10 is user-only. */
+const MOCK_ROUNDS: CarryoverRound[] = [
+  roundOf(
+    msg(9001, 'user', '今天想先把 Soft Window 的界面定下来，数字用 Bodoni。', '2026-07-27 22:12:08'),
+    msg(9002, 'assistant', '好。就做小猫每天会看见的那一层——卡片、弹窗、锁定。', '2026-07-27 22:13:41'),
+  ),
+  roundOf(
+    msg(9003, 'user', '选了就不能再悄悄改成十条。直接发消息就算不带。', '2026-07-27 22:40:02'),
+    msg(9004, 'assistant', '锁定以后只读。预览页可以反复试，正式聊天走 BFF。', '2026-07-27 22:41:18'),
+  ),
+  roundOf(
+    msg(9005, 'user', '候选要按完整对话轮：一条 user 加上后面的 assistant。', '2026-07-27 23:05:33'),
+    msg(9006, 'assistant', '对。中间如果还有工具回声，也算在同一轮里。', '2026-07-27 23:06:11'),
+    msg(9007, 'assistant', '（整理了一下昨天尾巴，十轮都齐了。）', '2026-07-27 23:06:40'),
+  ),
+  roundOf(
+    msg(9008, 'user', '视觉语义写成：不带 / 3轮 / 5轮 / 10轮。', '2026-07-27 23:18:44'),
+    msg(9009, 'assistant', '收到。档位按轮数，不再按单条消息数。', '2026-07-27 23:19:20'),
+  ),
+  roundOf(
+    msg(9010, 'user', '手机验收只要打开 /dash/daily-soft-window 就行。', '2026-07-27 23:32:55'),
+    msg(9011, 'assistant', '这条 preview route 自带 mock，不依赖 live Soft Window。', '2026-07-27 23:33:40'),
+  ),
+  roundOf(
+    msg(9012, 'user', '正式聊天走 /api/gw/daily-context，token 只在 BFF。', '2026-07-28 00:02:11'),
+    msg(9013, 'assistant', '好。浏览器从不带 Authorization，404 就整卡隐藏。', '2026-07-28 00:02:48'),
+  ),
+  roundOf(
+    msg(9014, 'user', 'DAILY_SOFT_WINDOW_ENABLED 继续保持 0。', '2026-07-28 00:40:02'),
+    msg(9015, 'assistant', '不调用模型，不跑 Wake，不改 runtime flag。', '2026-07-28 00:40:33'),
+  ),
+  roundOf(
+    msg(9016, 'user', '弹窗去掉左边行李箱，单列就好。', '2026-07-28 01:15:09'),
+    msg(9017, 'assistant', '已经改成「新的一天」单列 packing modal。', '2026-07-28 01:15:41'),
+  ),
+  roundOf(
+    msg(9018, 'user', '预览要按 round 高亮整轮，不要只高亮一条。', '2026-07-28 02:08:22'),
+    msg(9019, 'assistant', '选中 N 轮时，这一轮里的 user 和 assistant 都会标出来。', '2026-07-28 02:08:55'),
+  ),
+  // user-only tail
+  roundOf(
+    msg(9020, 'user', 'Draft 先留着，FE-R1 接正式聊天的 BFF 探针。', '2026-07-28 03:02:55'),
+  ),
 ];
 
 type MockStore = {
   scenario: SoftWindowMockScenario;
-  summary: DailyContextSummary;
-  candidates: CarryoverCandidate[];
+  current: DailyContextCurrent;
   rounds: CarryoverRound[];
-  selectedIds: number[];
 };
 
 let mockStore: MockStore | null = null;
-/** Active scenario for mock client (avoids relying on browser location in tests). */
 let activeMockScenario: SoftWindowMockScenario = 'ready';
 
 function todayChatDay(): string {
   const now = new Date();
-  // Approximate Asia/Shanghai as local for FE mock (agent/dev machines use +8).
-  return chatDayKeyFromLocalTs(
-    `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')} ${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}:00`,
+  return (
+    chatDayKeyFromLocalTs(
+      `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')} ${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}:00`,
+    ) || '2026-07-28'
   );
+}
+
+function cloneRounds(rounds: CarryoverRound[]): CarryoverRound[] {
+  return rounds.map((r) => ({
+    round_id: r.round_id,
+    message_ids: r.message_ids.slice(),
+    messages: r.messages.map((m) => ({ ...m })),
+  }));
 }
 
 function resetMockStore(scenario: SoftWindowMockScenario = activeMockScenario): MockStore {
   activeMockScenario = scenario;
-  const localDay = todayChatDay() || '2026-07-28';
+  const localDay = todayChatDay();
+  const rounds = scenario === 'empty' ? [] : cloneRounds(MOCK_ROUNDS);
   const locked = scenario === 'locked' || scenario === 'conflict';
-  const candidates = scenario === 'empty' ? [] : MOCK_CANDIDATES.slice();
-  const rounds = groupIntoRounds(candidates);
-  const lockedRounds = locked ? pickLastNRounds(rounds, 5) : [];
+  // locked: requested=5, selected=2 (fewer available simulation with fixed ids)
+  const lockedPicked = locked ? pickLastNRounds(rounds, 2) : [];
+  const selectedIds = flattenRoundMessageIds(lockedPicked);
+  const lastId = rounds.length
+    ? rounds[rounds.length - 1].message_ids[rounds[rounds.length - 1].message_ids.length - 1]
+    : 0;
   mockStore = {
     scenario,
-    summary: {
+    current: {
       ok: true,
-      local_day: localDay,
+      context_id: 7,
       context_epoch: 42,
-      status: 'PROVISIONAL',
-      boundary_message_id: candidates.length ? candidates[candidates.length - 1].message_id : 0,
-      carryover_count: locked ? lockedRounds.length : 0,
+      local_day: localDay,
+      boundary_message_id: lastId,
+      carryover_unit: 'round',
+      requested_round_count: locked ? 5 : null,
+      selected_round_count: locked ? lockedPicked.length : 0,
+      selected_message_count: selectedIds.length,
+      selected_message_ids: selectedIds,
+      carryover_count: locked ? lockedPicked.length : 0,
       selection_finalized: locked,
       handoff_status: 'ABSENT',
       resident_generation: 1,
-      context_id: 7,
+      status: 'PROVISIONAL',
     },
-    candidates,
     rounds,
-    selectedIds: flattenRoundMessages(lockedRounds).map((c) => c.message_id),
   };
   return mockStore;
 }
@@ -475,81 +567,119 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function mockCurrent(): Promise<DailyContextSummary> {
+async function mockCurrent(): Promise<DailyContextCurrent> {
   const store = ensureMockStore();
-  if (store.scenario === 'loading') {
-    await sleep(1200);
-  }
+  if (store.scenario === 'loading') await sleep(1200);
   if (store.scenario === 'disabled') {
-    throw new HttpError(404, 'disabled', 'GET /api/daily-context/current failed: 404 · disabled');
+    throw new HttpError(404, 'disabled', `GET ${LIVE_DAILY_CONTEXT_CURRENT} failed: 404 · disabled`);
+  }
+  if (store.scenario === 'deferred') {
+    throw new HttpError(
+      423,
+      'rollover deferred',
+      `GET ${LIVE_DAILY_CONTEXT_CURRENT} failed: 423 · rollover deferred`,
+      { code: 'rollover_deferred', payload: { ok: false, code: 'rollover_deferred' } },
+    );
   }
   if (store.scenario === 'error') {
-    throw new HttpError(500, 'mock boom', 'GET /api/daily-context/current failed: 500 · mock boom');
+    throw new HttpError(500, 'mock boom', `GET ${LIVE_DAILY_CONTEXT_CURRENT} failed: 500 · mock boom`);
   }
-  return { ...store.summary };
+  return { ...store.current, selected_message_ids: store.current.selected_message_ids.slice() };
 }
 
 async function mockCandidates(): Promise<CarryoverCandidatesResponse> {
   const store = ensureMockStore();
   if (store.scenario === 'loading') await sleep(900);
   if (store.scenario === 'disabled') {
-    throw new HttpError(404, 'disabled', 'GET /api/daily-context/carryover-candidates failed: 404 · disabled');
+    throw new HttpError(404, 'disabled', `GET ${LIVE_DAILY_CONTEXT_CANDIDATES} failed: 404 · disabled`);
+  }
+  if (store.scenario === 'deferred') {
+    throw new HttpError(
+      423,
+      'rollover deferred',
+      `GET ${LIVE_DAILY_CONTEXT_CANDIDATES} failed: 423 · rollover deferred`,
+      { code: 'rollover_deferred', payload: { ok: false, code: 'rollover_deferred' } },
+    );
   }
   if (store.scenario === 'error') {
-    throw new HttpError(500, 'mock boom', 'GET /api/daily-context/carryover-candidates failed: 500 · mock boom');
+    throw new HttpError(500, 'mock boom', `GET ${LIVE_DAILY_CONTEXT_CANDIDATES} failed: 500 · mock boom`);
   }
+  const rounds = cloneRounds(store.rounds);
   return {
     ok: true,
-    context_id: store.summary.context_id,
-    context_epoch: store.summary.context_epoch,
-    candidates: store.candidates.slice(),
-    rounds: store.rounds.map((r) => ({
-      round_id: r.round_id,
-      user: { ...r.user },
-      assistants: r.assistants.map((a) => ({ ...a })),
-    })),
+    context_id: store.current.context_id,
+    context_epoch: store.current.context_epoch,
+    carryover_unit: 'round',
+    available_round_count: rounds.length,
+    rounds,
+    candidates: flattenRoundMessages(rounds),
   };
 }
 
 async function mockSelect(count: CarryoverCount): Promise<SelectCarryoverResponse> {
   const store = ensureMockStore();
   if (store.scenario === 'disabled') {
-    throw new HttpError(404, 'disabled', 'POST /api/daily-context/select-carryover failed: 404 · disabled');
+    throw new HttpError(404, 'disabled', `POST ${LIVE_DAILY_CONTEXT_SELECT} failed: 404 · disabled`);
   }
-  if (store.scenario === 'conflict' || (store.summary.selection_finalized && store.summary.carryover_count !== count)) {
+  if (store.scenario === 'deferred') {
+    throw new HttpError(
+      423,
+      'rollover deferred',
+      `POST ${LIVE_DAILY_CONTEXT_SELECT} failed: 423 · rollover deferred`,
+      { code: 'rollover_deferred', payload: { ok: false, code: 'rollover_deferred' } },
+    );
+  }
+  if (
+    store.scenario === 'conflict' ||
+    (store.current.selection_finalized && store.current.requested_round_count !== count)
+  ) {
     throw new HttpError(
       409,
       'carryover selection is locked',
-      'POST /api/daily-context/select-carryover failed: 409 · carryover selection is locked',
+      `POST ${LIVE_DAILY_CONTEXT_SELECT} failed: 409 · carryover selection is locked`,
     );
   }
-  if (store.summary.selection_finalized && store.summary.carryover_count === count) {
+  if (store.current.selection_finalized && store.current.requested_round_count === count) {
     return {
       ok: true,
-      selected_message_ids: store.selectedIds.slice(),
+      context_id: store.current.context_id,
+      context_epoch: store.current.context_epoch,
+      carryover_unit: 'round',
+      requested_round_count: count,
+      selected_round_count: store.current.selected_round_count,
+      selected_message_count: store.current.selected_message_count,
+      selected_message_ids: store.current.selected_message_ids.slice(),
+      carryover_count: store.current.carryover_count,
       finalized_at: '2026-07-28 04:10:00',
-      context_epoch: store.summary.context_epoch,
-      carryover_count: store.summary.carryover_count,
     };
   }
   const picked = pickLastNRounds(store.rounds, count);
-  store.selectedIds = flattenRoundMessages(picked).map((c) => c.message_id);
-  store.summary.carryover_count = picked.length;
-  store.summary.selection_finalized = true;
+  const ids = flattenRoundMessageIds(picked);
+  store.current.selection_finalized = true;
+  store.current.requested_round_count = count;
+  store.current.selected_round_count = picked.length;
+  store.current.selected_message_count = ids.length;
+  store.current.selected_message_ids = ids;
+  store.current.carryover_count = picked.length;
   return {
     ok: true,
-    selected_message_ids: store.selectedIds.slice(),
-    finalized_at: '2026-07-28 04:10:00',
-    context_epoch: store.summary.context_epoch,
+    context_id: store.current.context_id,
+    context_epoch: store.current.context_epoch,
+    carryover_unit: 'round',
+    requested_round_count: count,
+    selected_round_count: picked.length,
+    selected_message_count: ids.length,
+    selected_message_ids: ids,
     carryover_count: picked.length,
+    finalized_at: '2026-07-28 04:10:00',
   };
 }
 
 export type DailySoftWindowClient = {
   mode: 'mock' | 'live';
-  getCurrent: () => Promise<DailyContextSummary>;
-  getCandidates: () => Promise<CarryoverCandidatesResponse>;
-  selectCarryover: (count: CarryoverCount) => Promise<SelectCarryoverResponse>;
+  getCurrent: (init?: RequestInit) => Promise<DailyContextCurrent>;
+  getCandidates: (init?: RequestInit) => Promise<CarryoverCandidatesResponse>;
+  selectCarryover: (count: CarryoverCount, init?: RequestInit) => Promise<SelectCarryoverResponse>;
   resetMock?: (scenario?: SoftWindowMockScenario) => void;
 };
 
@@ -574,39 +704,40 @@ export function createDailySoftWindowClient(opts?: {
       },
     };
   }
-  // Live paths exist for a future Integration PR only. Chat is unwired in this Draft.
   return {
     mode: 'live',
-    getCurrent: () => http.get<DailyContextSummary>('/api/daily-context/current'),
-    getCandidates: () =>
-      http.get<CarryoverCandidatesResponse>('/api/daily-context/carryover-candidates').then((res) => ({
-        ...res,
-        rounds: res.rounds?.length ? res.rounds : groupIntoRounds(res.candidates || []),
-      })),
-    selectCarryover: (count) =>
-      http.post<SelectCarryoverResponse>('/api/daily-context/select-carryover', { count }),
+    getCurrent: async (init) => {
+      const raw = await http.get<unknown>(LIVE_DAILY_CONTEXT_CURRENT, undefined, init);
+      const parsed = parseCurrent(raw);
+      if (!parsed) throw new HttpError(500, 'malformed current', 'malformed daily-context/current');
+      return parsed;
+    },
+    getCandidates: async (init) => {
+      const raw = await http.get<CarryoverCandidatesResponse>(
+        LIVE_DAILY_CONTEXT_CANDIDATES,
+        undefined,
+        init,
+      );
+      const unit = raw?.carryover_unit ?? 'round';
+      const rounds = parseCanonicalRounds(raw?.rounds, unit);
+      if (!rounds) {
+        throw new HttpError(500, 'malformed rounds', 'malformed daily-context/carryover-candidates');
+      }
+      return {
+        ok: raw.ok,
+        context_id: Number(raw.context_id),
+        context_epoch: Number(raw.context_epoch),
+        carryover_unit: 'round',
+        available_round_count: Number(raw.available_round_count ?? rounds.length),
+        rounds,
+        candidates: Array.isArray(raw.candidates)
+          ? flattenRoundMessages(rounds)
+          : flattenRoundMessages(rounds),
+      };
+    },
+    selectCarryover: (count, init) =>
+      http.post<SelectCarryoverResponse>(LIVE_DAILY_CONTEXT_SELECT, { count }, init),
   };
-}
-
-export function classifySoftWindowError(err: unknown): SoftWindowUiState {
-  if (err instanceof HttpError) {
-    if (err.status === 404) return 'disabled';
-    if (err.status === 409) return 'conflict';
-    return 'error';
-  }
-  return 'error';
-}
-
-export function softWindowErrorMessage(state: SoftWindowUiState, err?: unknown): string {
-  if (state === 'disabled') return '今天的软换窗还没打开（接口未启用）。';
-  if (state === 'conflict') return '选择已经锁定，不能再改。';
-  if (state === 'empty') return '昨天没有可带走的正式对话。';
-  if (state === 'error') {
-    if (err instanceof HttpError && err.detail) return err.detail;
-    if (err instanceof Error) return err.message;
-    return '行李箱暂时打不开。';
-  }
-  return '';
 }
 
 /** Demo transcript for the isolated preview page (spans 04:00 boundary). */
@@ -617,16 +748,32 @@ export function mockPreviewTranscript(): Array<{
   created_at: string;
   chatDay: string;
 }> {
+  const flat = flattenRoundMessages(MOCK_ROUNDS);
   const rows = [
-    { id: 8998, role: 'user' as const, text: '有点困了，明天再把界面做漂亮一点。', created_at: '2026-07-27 21:40:11' },
-    { id: 8999, role: 'assistant' as const, text: '去睡。四点以后我会还在原处等你。', created_at: '2026-07-27 21:41:03' },
-    ...MOCK_CANDIDATES.map((c) => ({
+    {
+      id: 8998,
+      role: 'user' as const,
+      text: '有点困了，明天再把界面做漂亮一点。',
+      created_at: '2026-07-27 21:40:11',
+    },
+    {
+      id: 8999,
+      role: 'assistant' as const,
+      text: '去睡。四点以后我会还在原处等你。',
+      created_at: '2026-07-27 21:41:03',
+    },
+    ...flat.map((c) => ({
       id: c.message_id,
       role: c.role,
       text: c.content_preview,
       created_at: c.created_at,
     })),
-    { id: 9022, role: 'assistant' as const, text: '（清晨的光落进来，旧气泡还安静地排在上面。）', created_at: '2026-07-28 04:01:12' },
+    {
+      id: 9022,
+      role: 'assistant' as const,
+      text: '（清晨的光落进来，旧气泡还安静地排在上面。）',
+      created_at: '2026-07-28 04:01:12',
+    },
   ];
   return rows.map((r) => ({ ...r, chatDay: chatDayKeyFromLocalTs(r.created_at) }));
 }

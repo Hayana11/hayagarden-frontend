@@ -6,6 +6,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import { Link } from 'react-router-dom';
 import { BottomNav } from '../components/BottomNav';
+import { CarryoverModal, CarryoverPickerCard, DaySoftBoundary } from '../components/dailySoftWindow';
+import { useDailySoftWindow } from '../hooks/useDailySoftWindow';
 import {
   editChatMessage,
   fetchChatMessages,
@@ -35,6 +37,7 @@ import {
   type ChatMsg,
   type ChatToolCall,
 } from '../lib/chat';
+import { boundaryInsertIndex } from '../lib/dailySoftWindow';
 import type { ReactElement } from 'react';
 
 const SETTINGS_KEY = 'fyodor-chat-settings';
@@ -135,6 +138,9 @@ export function ChatScreen() {
   const [settings, setSettings] = useState<Settings>(loadSettings);
   const [sysDark, setSysDark] = useState(() => window.matchMedia?.('(prefers-color-scheme: dark)').matches ?? false);
   const [wide, setWide] = useState(() => window.innerWidth >= 900);
+
+  const softWindow = useDailySoftWindow({ live: true });
+  const { notifySendStarted, notifySendSettled } = softWindow;
 
   const [msgs, setMsgs] = useState<ChatMsg[]>([]);
   const [hasMoreBefore, setHasMoreBefore] = useState(false);
@@ -353,6 +359,7 @@ export function ChatScreen() {
   const send = useCallback(async (overrideText?: string) => {
     const text = (overrideText ?? input).trim();
     if ((!text && !pendingFile && !pendingImage) || sending) return;
+    notifySendStarted();
     setSending(true);
     setChatError(null);
     if (!overrideText) setInput('');
@@ -362,17 +369,19 @@ export function ChatScreen() {
     setPendingImage(null);
     const messageId = await sendChatMessage(text, extra);
     if (messageId === null) {
+      notifySendSettled(false);
       showToast('发送失败');
       if (!overrideText) setInput(text);
       setSending(false);
       return;
     }
+    notifySendSettled(true);
     await refetchLatest();
     await runStream(messageId);
     await refetchLatest();
     setSending(false);
     taRef.current?.focus();
-  }, [input, pendingFile, pendingImage, sending, refetchLatest, runStream, showToast]);
+  }, [input, pendingFile, pendingImage, sending, refetchLatest, runStream, showToast, notifySendStarted, notifySendSettled]);
 
   const chooseOption = useCallback(async (text: string, msgId: number) => {
     if (sending || isChoicesAnswered(msgId, msgs)) return;
@@ -845,10 +854,16 @@ export function ChatScreen() {
     );
   }
 
-  // date separators
+  // date separators + Soft Window boundary / highlight
   const rendered: ReactElement[] = [];
   let lastDate = '';
-  for (const m of msgs) {
+  const boundaryIdx = softWindow.showBoundary
+    ? boundaryInsertIndex(msgs.map((m) => m.id), softWindow.boundaryMessageId)
+    : null;
+  msgs.forEach((m, i) => {
+    if (boundaryIdx !== null && boundaryIdx === i) {
+      rendered.push(<DaySoftBoundary key="dsw-boundary" />);
+    }
     if (m.dateKey && m.dateKey !== lastDate) {
       lastDate = m.dateKey;
       const label = m.dateKey === new Date().toISOString().slice(0, 10) ? dateLabel : m.dateKey.replace(/-/g, '.');
@@ -858,11 +873,15 @@ export function ChatScreen() {
         </div>,
       );
     }
+    const highlight = softWindow.highlightIds.has(m.id);
     rendered.push(
-      <div key={m.id}>
+      <div key={m.id} className={highlight ? 'dsw-msg-highlight' : undefined}>
         {m.role === 'user' ? renderUserMsg(m) : renderAssistantMsg(m)}
       </div>,
     );
+  });
+  if (boundaryIdx !== null && boundaryIdx === msgs.length) {
+    rendered.push(<DaySoftBoundary key="dsw-boundary" />);
   }
 
   return (
@@ -1127,6 +1146,20 @@ export function ChatScreen() {
             </div>
           )}
 
+          {softWindow.showPickerCard ? (
+            <div style={{ padding: '0 0 10px' }}>
+              <CarryoverPickerCard
+                locked={softWindow.locked}
+                carryoverCount={
+                  softWindow.current?.selected_round_count ?? softWindow.current?.carryover_count ?? 0
+                }
+                loading={softWindow.uiState === 'probing' || softWindow.submitting}
+                statusText={softWindow.statusText}
+                onOpen={softWindow.openDrawer}
+              />
+            </div>
+          ) : null}
+
           <div style={{ background: 'var(--card)', borderRadius: 26, boxShadow: '0 14px 40px var(--shadow2)', padding: '12px 12px 10px', transition: 'background .3s' }}>
             <textarea
               ref={taRef}
@@ -1264,6 +1297,20 @@ export function ChatScreen() {
           </div>
         </div>
       )}
+
+      {/* ══ Soft Window packing modal ══ */}
+      <CarryoverModal
+        open={softWindow.drawerOpen}
+        uiState={softWindow.uiState}
+        draftCount={softWindow.draftCount}
+        rounds={softWindow.rounds}
+        submitting={softWindow.submitting}
+        errorDetail={softWindow.errorDetail}
+        onDismiss={softWindow.closeDrawer}
+        onReconsider={softWindow.closeDrawer}
+        onDraftChange={softWindow.setDraftCount}
+        onConfirm={() => { void softWindow.confirmSelection(); }}
+      />
 
       {/* ══ toast ══ */}
       {toast && (

@@ -6421,6 +6421,8 @@ _monopoly_scheduler = _MonopolyAgentScheduler(
 app.register_blueprint(_create_monopoly_agent_blueprint(_monopoly_scheduler))
 from daily_context_routes import create_daily_context_blueprint
 app.register_blueprint(create_daily_context_blueprint(db_path=DB_PATH))
+from daily_context_bff import create_daily_context_bff_blueprint
+app.register_blueprint(create_daily_context_bff_blueprint())
 
 
 if __name__ == '__main__':

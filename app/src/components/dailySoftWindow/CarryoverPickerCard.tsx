@@ -3,6 +3,7 @@ import './dailySoftWindow.css';
 
 type Props = {
   locked: boolean;
+  /** Locked card uses selected_round_count from server. */
   carryoverCount: number;
   loading?: boolean;
   statusText?: string;

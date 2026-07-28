@@ -1,0 +1,33 @@
+name: Frontend Soft Window FE-R1
+
+on:
+  pull_request:
+    paths:
+      - 'app/**'
+      - 'daily_context_bff.py'
+      - 'gateway.py'
+      - '.github/workflows/frontend-daily-soft-window.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'app/**'
+      - 'daily_context_bff.py'
+      - 'gateway.py'
+      - '.github/workflows/frontend-daily-soft-window.yml'
+
+jobs:
+  soft-window-fe:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      - name: Install + build + Soft Window FE tests
+        working-directory: app
+        run: |
+          npm ci
+          npm run build
+          npm run test:daily-soft-window
