@@ -95,6 +95,8 @@ export function CarryoverModal({
   const previewRounds = pickLastNRounds(rounds, draftCount);
   const snippetRows = roundSnippetMessages(previewRounds);
   const isLocked = uiState === 'locked';
+  const tiersDisabled =
+    isLocked || submitting || uiState === 'loading' || uiState === 'probing' || uiState === 'submitting';
   const canConfirm =
     !submitting && (uiState === 'ready' || uiState === 'empty');
   const excluded = { ...DEFAULT_EXCLUDED, ...excludedCounts };
@@ -130,7 +132,7 @@ export function CarryoverModal({
                   role="radio"
                   className={`daily-window-option${selected ? ' is-selected' : ''}`}
                   aria-checked={selected}
-                  disabled={isLocked}
+                  disabled={tiersDisabled}
                   onClick={() => onDraftChange(n)}
                 >
                   <span className="daily-window-option-label">{countLabel(n)}</span>

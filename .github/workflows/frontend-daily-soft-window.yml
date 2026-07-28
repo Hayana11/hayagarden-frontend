@@ -29,6 +29,7 @@ jobs:
         working-directory: app
         run: |
           npm ci
+          npm run lint
           npm run build
           npm run test:daily-soft-window
           npm run test:daily-soft-window-machine

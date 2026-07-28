@@ -54,6 +54,9 @@ export type SoftWindowControllerSnapshot = {
   opener: FocusableOpener | null;
   /** Shared context fence generation (bumps when authoritative context identity changes). */
   contextGeneration: number;
+  /** Live: candidates successfully loaded for current context. */
+  candidatesReady: boolean;
+  candidatesLoading: boolean;
 };
 
 export type SoftWindowScheduler = {
@@ -121,6 +124,8 @@ export class DailySoftWindowController {
   private candidatesGen = 0;
   private submitGen = 0;
   private submitLock = false;
+  private candidatesReadyKey: ContextKey | null = null;
+  candidatesLoading = false;
 
   constructor(opts: SoftWindowControllerOptions) {
     this.client = opts.client;
@@ -194,7 +199,35 @@ export class DailySoftWindowController {
       highlightIds,
       opener: this.opener,
       contextGeneration: this.contextGeneration,
+      candidatesReady: this.candidatesReadyForCurrent(),
+      candidatesLoading: this.candidatesLoading,
     };
+  }
+
+  /** Live formal: candidates loaded and owned for the current context. Preview always ready. */
+  candidatesReadyForCurrent(): boolean {
+    if (this.preview) return true;
+    const key = contextKeyFromCurrent(this.current);
+    if (!key || this.candidatesLoading || !this.candidatesReadyKey) return false;
+    return contextKeysMatch(key, this.candidatesReadyKey);
+  }
+
+  private clearCandidatesReady(): void {
+    this.candidatesReadyKey = null;
+    this.candidatesLoading = false;
+  }
+
+  private failHiddenAuth(err: unknown): void {
+    console.error('[AUTH_BRIDGE] daily soft window auth failed', err);
+    this.contextGeneration += 1;
+    this.activeContextKey = null;
+    this.clearCandidatesReady();
+    this.invalidateInFlightOps({ closeDrawer: true, clearRounds: true });
+    this.current = null;
+    this.highlightOverride = null;
+    this.uiState = 'unavailable';
+    this.errorDetail = softWindowErrorMessage('auth_error', err);
+    this.emit();
   }
 
   private computeStatusText(locked: boolean): string {
@@ -268,9 +301,13 @@ export class DailySoftWindowController {
     closeDrawer?: boolean;
     clearRounds?: boolean;
     resetSubmitting?: boolean;
+    clearCandidatesReady?: boolean;
   }): void {
     this.abortCandidatesOp();
     this.abortSelectOp();
+    if (opts?.clearCandidatesReady !== false) {
+      this.clearCandidatesReady();
+    }
     if (opts?.resetSubmitting !== false) {
       this.submitting = false;
       this.submitLock = false;
@@ -299,6 +336,7 @@ export class DailySoftWindowController {
       this.highlightOverride = cur.selected_message_ids.slice();
       this.pickerSuppressed = false;
       this.drawerOpen = false;
+      this.clearCandidatesReady();
       return;
     }
     this.highlightOverride = null;
@@ -320,6 +358,12 @@ export class DailySoftWindowController {
     const contextChanged = !contextKeysMatch(this.activeContextKey, nextKey);
     const preserveDraft =
       !contextChanged && this.drawerOpen && !cur.selection_finalized;
+    const passiveExternalLock =
+      !contextChanged &&
+      this.drawerOpen &&
+      this.current != null &&
+      !this.current.selection_finalized &&
+      cur.selection_finalized;
 
     if (contextChanged) {
       this.contextGeneration += 1;
@@ -329,6 +373,13 @@ export class DailySoftWindowController {
       return;
     }
 
+    if (passiveExternalLock) {
+      this.clearCandidatesReady();
+      this.abortCandidatesOp();
+      this.abortSelectOp();
+      this.restoreFocus();
+    }
+
     this.activeContextKey = nextKey;
     this.applyCurrentFields(cur, nextRounds, { preserveDraftCount: preserveDraft });
 
@@ -336,6 +387,7 @@ export class DailySoftWindowController {
     if (this.live && !this.preview && !this.drawerOpen) {
       this.rounds = [];
       this.candidates = [];
+      this.clearCandidatesReady();
     }
   }
 
@@ -450,11 +502,7 @@ export class DailySoftWindowController {
         return;
       }
       if (kind === 'auth_error') {
-        console.error('[AUTH_BRIDGE] daily soft window probe failed', err);
-        this.current = null;
-        this.uiState = 'unavailable';
-        this.errorDetail = softWindowErrorMessage('auth_error', err);
-        this.emit();
+        this.failHiddenAuth(err);
         return;
       }
       this.uiState = 'unavailable';
@@ -490,9 +538,18 @@ export class DailySoftWindowController {
     if (snap.locked) return;
     this.opener = opener ?? null;
     this.drawerOpen = true;
-    this.emit();
 
-    if (this.preview) return;
+    if (this.preview) {
+      this.candidatesReadyKey = contextKeyFromCurrent(this.current);
+      this.candidatesLoading = false;
+      this.emit();
+      return;
+    }
+
+    this.clearCandidatesReady();
+    this.candidatesLoading = true;
+    this.uiState = 'loading';
+    this.emit();
 
     const opGen = ++this.candidatesGen;
     this.candidatesAbort?.abort();
@@ -515,6 +572,7 @@ export class DailySoftWindowController {
           this.drawerOpen = false;
           this.rounds = [];
           this.candidates = [];
+          this.clearCandidatesReady();
           this.restoreFocus();
           this.emit();
           await this.authoritativeRefresh();
@@ -523,12 +581,15 @@ export class DailySoftWindowController {
 
         this.rounds = cand.rounds;
         this.candidates = cand.candidates;
+        this.candidatesReadyKey = { ...capturedKey };
+        this.candidatesLoading = false;
         this.uiState = !cand.rounds.length ? 'empty' : 'ready';
         this.emit();
       } catch (err) {
         if (this.disposed || opGen !== this.candidatesGen) return;
         if (err instanceof DOMException && err.name === 'AbortError') return;
         if (err instanceof Error && err.name === 'AbortError') return;
+        this.clearCandidatesReady();
         const kind = classifySoftWindowError(err);
         if (kind === 'disabled') {
           this.drawerOpen = false;
@@ -547,13 +608,13 @@ export class DailySoftWindowController {
           void this.probeCurrent({ fromDeferred: true });
           return;
         }
+        if (kind === 'auth_error') {
+          this.failHiddenAuth(err);
+          return;
+        }
         this.drawerOpen = false;
         this.errorDetail = softWindowErrorMessage(kind, err);
         this.restoreFocus();
-        if (kind === 'auth_error') {
-          console.error('[AUTH_BRIDGE] carryover-candidates failed', err);
-          this.uiState = 'unavailable';
-        }
         this.emit();
       }
     })();
@@ -561,14 +622,19 @@ export class DailySoftWindowController {
 
   closeDrawer(): void {
     this.abortCandidatesOp();
+    this.clearCandidatesReady();
     this.drawerOpen = false;
     this.restoreFocus();
+    if (this.live && !this.preview && this.uiState === 'loading') {
+      this.uiState = this.current?.selection_finalized ? 'locked' : 'ready';
+    }
     this.emit();
   }
 
   async confirmSelection(): Promise<boolean> {
     const snap = this.getSnapshot();
     if (!this.active || snap.locked || this.submitting || this.submitLock) return false;
+    if (!this.preview && !this.candidatesReadyForCurrent()) return false;
 
     const capturedKey = contextKeyFromCurrent(this.current);
     const capturedGen = this.contextGeneration;
@@ -641,6 +707,7 @@ export class DailySoftWindowController {
       this.draftCount = draftCountFromCurrent(next);
       this.uiState = 'locked';
       this.drawerOpen = false;
+      this.clearCandidatesReady();
       this.pickerSuppressed = false;
       this.restoreFocus();
       return finishSubmit(true);
@@ -682,14 +749,13 @@ export class DailySoftWindowController {
         return false;
       }
       this.drawerOpen = false;
-      this.errorDetail = softWindowErrorMessage(kind, err);
       this.restoreFocus();
       if (kind === 'auth_error') {
-        console.error('[AUTH_BRIDGE] select-carryover failed', err);
-        this.uiState = 'unavailable';
         await finishSubmit(false);
+        this.failHiddenAuth(err);
         return false;
       }
+      this.errorDetail = softWindowErrorMessage(kind, err);
       await finishSubmit(false);
       await this.authoritativeRefresh();
       return false;

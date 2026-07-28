@@ -197,14 +197,33 @@ export function isCarryoverCount(n: number): n is CarryoverCount {
 }
 
 export function normalizeMessageId(value: unknown): number | null {
-  if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
-    return Math.trunc(value);
+  if (typeof value === 'number') {
+    if (!Number.isInteger(value) || value <= 0) return null;
+    return value;
   }
-  if (typeof value === 'string' && value.trim()) {
-    const n = Number(value);
-    if (Number.isFinite(n) && n > 0) return Math.trunc(n);
+  if (typeof value === 'string') {
+    const s = value.trim();
+    if (/^[1-9]\d*$/.test(s)) return Number(s);
   }
   return null;
+}
+
+/** Positive integers only — no decimal truncation, no string patching for formal JSON. */
+export function normalizePositiveInt(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isInteger(value) && value > 0) return value;
+  return null;
+}
+
+/** Non-negative integers — number type only (formal JSON contract). */
+export function normalizeNonNegativeInt(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isInteger(value) && value >= 0) return value;
+  return null;
+}
+
+function parseRequestedRoundCount(value: unknown): 0 | 3 | 5 | 10 | null {
+  if (value === null || value === undefined) return null;
+  if (typeof value !== 'number' || !Number.isInteger(value)) return null;
+  return isCarryoverCount(value) ? value : null;
 }
 
 function isRole(v: unknown): v is 'user' | 'assistant' {
@@ -390,42 +409,101 @@ export function parseCurrent(raw: unknown): DailyContextCurrent | null {
   if (!raw || typeof raw !== 'object') return null;
   const r = raw as Record<string, unknown>;
   const context_id = normalizeMessageId(r.context_id);
-  const context_epoch = typeof r.context_epoch === 'number' ? Math.trunc(r.context_epoch) : null;
+  const context_epoch = normalizePositiveInt(r.context_epoch);
   if (context_id === null || context_epoch === null) return null;
   if (r.carryover_unit !== 'round') return null;
-  const boundary = normalizeMessageId(r.boundary_message_id) ?? 0;
-  const selected_ids_raw = Array.isArray(r.selected_message_ids) ? r.selected_message_ids : [];
+
+  const boundaryRaw = r.boundary_message_id;
+  let boundary_message_id = 0;
+  if (boundaryRaw !== undefined && boundaryRaw !== null) {
+    if (boundaryRaw === 0) {
+      boundary_message_id = 0;
+    } else {
+      const bid = normalizeMessageId(boundaryRaw);
+      if (bid === null) return null;
+      boundary_message_id = bid;
+    }
+  }
+
+  if (!Array.isArray(r.selected_message_ids)) return null;
   const selected_message_ids: number[] = [];
-  for (const id of selected_ids_raw) {
+  const seenIds = new Set<number>();
+  for (const id of r.selected_message_ids) {
     const n = normalizeMessageId(id);
-    if (n !== null) selected_message_ids.push(n);
+    if (n === null) return null;
+    if (seenIds.has(n)) return null;
+    seenIds.add(n);
+    selected_message_ids.push(n);
   }
-  let requested_round_count: 0 | 3 | 5 | 10 | null = null;
-  if (r.requested_round_count === null || r.requested_round_count === undefined) {
-    requested_round_count = null;
-  } else if (isCarryoverCount(Number(r.requested_round_count))) {
-    requested_round_count = Number(r.requested_round_count) as CarryoverCount;
-  } else if (typeof r.requested_round_count === 'number') {
-    // malformed tier — keep null; locked recovery falls back to selected
+
+  const selected_round_count = normalizeNonNegativeInt(r.selected_round_count);
+  const selected_message_count = normalizeNonNegativeInt(r.selected_message_count);
+  const carryover_count = normalizeNonNegativeInt(r.carryover_count);
+  if (
+    selected_round_count === null ||
+    selected_message_count === null ||
+    carryover_count === null
+  ) {
+    return null;
+  }
+  if (selected_message_count !== selected_message_ids.length) return null;
+  if (carryover_count !== selected_round_count) return null;
+
+  const selection_finalized = r.selection_finalized === true;
+  let requested_round_count: 0 | 3 | 5 | 10 | null;
+  if (selection_finalized) {
+    const tier = parseRequestedRoundCount(r.requested_round_count);
+    if (tier === null) return null;
+    requested_round_count = tier;
+  } else {
+    if (r.requested_round_count !== null && r.requested_round_count !== undefined) return null;
     requested_round_count = null;
   }
-  const selected_round_count = Number(r.selected_round_count ?? r.carryover_count ?? 0) || 0;
+
+  const resident_generation = normalizePositiveInt(r.resident_generation) ?? 1;
+
   return {
     context_id,
     context_epoch,
     local_day: typeof r.local_day === 'string' ? r.local_day : '',
-    boundary_message_id: boundary,
+    boundary_message_id,
     carryover_unit: 'round',
     requested_round_count,
     selected_round_count,
-    selected_message_count: Number(r.selected_message_count ?? selected_message_ids.length) || selected_message_ids.length,
+    selected_message_count,
     selected_message_ids,
-    carryover_count: Number(r.carryover_count ?? selected_round_count) || 0,
-    selection_finalized: Boolean(r.selection_finalized),
+    carryover_count,
+    selection_finalized,
     handoff_status: typeof r.handoff_status === 'string' ? r.handoff_status : 'ABSENT',
-    resident_generation: Number(r.resident_generation ?? 1) || 1,
+    resident_generation,
     status: typeof r.status === 'string' ? r.status : undefined,
     ok: r.ok === undefined ? undefined : Boolean(r.ok),
+  };
+}
+
+/**
+ * Strict carryover-candidates response.
+ */
+export function parseCarryoverCandidatesResponse(raw: unknown): CarryoverCandidatesResponse | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const r = raw as Record<string, unknown>;
+  if (r.carryover_unit !== 'round') return null;
+  const context_id = normalizeMessageId(r.context_id);
+  const context_epoch = normalizePositiveInt(r.context_epoch);
+  if (context_id === null || context_epoch === null) return null;
+  const rounds = parseCanonicalRounds(r.rounds, 'round');
+  if (!rounds) return null;
+  const available_round_count = normalizeNonNegativeInt(r.available_round_count);
+  if (available_round_count === null) return null;
+  if (available_round_count < rounds.length) return null;
+  return {
+    ok: r.ok === undefined ? undefined : Boolean(r.ok),
+    context_id,
+    context_epoch,
+    carryover_unit: 'round',
+    available_round_count,
+    rounds,
+    candidates: flattenRoundMessages(rounds),
   };
 }
 
@@ -437,34 +515,48 @@ export function parseSelectCarryoverResponse(raw: unknown): SelectCarryoverRespo
   if (!raw || typeof raw !== 'object') return null;
   const r = raw as Record<string, unknown>;
   const context_id = normalizeMessageId(r.context_id);
-  const context_epoch = typeof r.context_epoch === 'number' ? Math.trunc(r.context_epoch) : null;
+  const context_epoch = normalizePositiveInt(r.context_epoch);
   if (context_id === null || context_epoch === null) return null;
   if (r.carryover_unit !== 'round') return null;
-  if (!isCarryoverCount(Number(r.requested_round_count))) return null;
-  const requested_round_count = Number(r.requested_round_count) as CarryoverCount;
-  if (typeof r.selected_round_count !== 'number' || !Number.isFinite(r.selected_round_count)) return null;
-  if (r.selected_round_count < 0 || !Number.isInteger(r.selected_round_count)) return null;
-  if (typeof r.selected_message_count !== 'number' || !Number.isFinite(r.selected_message_count)) return null;
-  if (r.selected_message_count < 0 || !Number.isInteger(r.selected_message_count)) return null;
+  const requested_round_count = parseRequestedRoundCount(r.requested_round_count);
+  if (requested_round_count === null) return null;
+  const selected_round_count = normalizeNonNegativeInt(r.selected_round_count);
+  const selected_message_count = normalizeNonNegativeInt(r.selected_message_count);
+  const carryover_count = normalizeNonNegativeInt(r.carryover_count);
+  if (
+    selected_round_count === null ||
+    selected_message_count === null ||
+    carryover_count === null
+  ) {
+    return null;
+  }
+  if (selected_round_count > requested_round_count) return null;
+  if (carryover_count !== selected_round_count) return null;
   if (!Array.isArray(r.selected_message_ids)) return null;
   const selected_message_ids: number[] = [];
+  const seenIds = new Set<number>();
   for (const id of r.selected_message_ids) {
     const n = normalizeMessageId(id);
     if (n === null) return null;
+    if (seenIds.has(n)) return null;
+    seenIds.add(n);
     selected_message_ids.push(n);
   }
-  if (selected_message_ids.length !== r.selected_message_count) return null;
-  if (typeof r.carryover_count !== 'number' || !Number.isFinite(r.carryover_count)) return null;
-  if (!Number.isInteger(r.carryover_count) || r.carryover_count !== r.selected_round_count) return null;
+  if (selected_message_ids.length !== selected_message_count) return null;
+  if (requested_round_count === 0) {
+    if (selected_round_count !== 0 || selected_message_count !== 0 || selected_message_ids.length !== 0) {
+      return null;
+    }
+  }
   return {
     context_id,
     context_epoch,
     carryover_unit: 'round',
     requested_round_count,
-    selected_round_count: r.selected_round_count,
-    selected_message_count: r.selected_message_count,
+    selected_round_count,
+    selected_message_count,
     selected_message_ids,
-    carryover_count: r.carryover_count,
+    carryover_count,
     finalized_at: typeof r.finalized_at === 'string' ? r.finalized_at : '',
     ok: r.ok === undefined ? undefined : Boolean(r.ok),
   };
@@ -759,34 +851,12 @@ export function createDailySoftWindowClient(opts?: {
       return parsed;
     },
     getCandidates: async (init) => {
-      const raw = await http.get<CarryoverCandidatesResponse>(
-        LIVE_DAILY_CONTEXT_CANDIDATES,
-        undefined,
-        init,
-      );
-      // Must not default-fill carryover_unit — missing is malformed.
-      if (!raw || raw.carryover_unit !== 'round') {
+      const raw = await http.get<unknown>(LIVE_DAILY_CONTEXT_CANDIDATES, undefined, init);
+      const parsed = parseCarryoverCandidatesResponse(raw);
+      if (!parsed) {
         throw new HttpError(500, 'malformed candidates', 'malformed daily-context/carryover-candidates');
       }
-      const rounds = parseCanonicalRounds(raw.rounds, raw.carryover_unit);
-      if (!rounds) {
-        throw new HttpError(500, 'malformed rounds', 'malformed daily-context/carryover-candidates');
-      }
-      const context_id = normalizeMessageId(raw.context_id);
-      const context_epoch =
-        typeof raw.context_epoch === 'number' ? Math.trunc(raw.context_epoch) : null;
-      if (context_id === null || context_epoch === null) {
-        throw new HttpError(500, 'malformed candidates', 'malformed daily-context/carryover-candidates');
-      }
-      return {
-        ok: raw.ok,
-        context_id,
-        context_epoch,
-        carryover_unit: 'round',
-        available_round_count: Number(raw.available_round_count ?? rounds.length),
-        rounds,
-        candidates: flattenRoundMessages(rounds),
-      };
+      return parsed;
     },
     selectCarryover: async (count, init) => {
       const raw = await http.post<unknown>(LIVE_DAILY_CONTEXT_SELECT, { count }, init);

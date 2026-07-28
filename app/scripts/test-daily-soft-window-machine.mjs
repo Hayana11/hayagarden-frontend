@@ -193,6 +193,11 @@ async function waitFor(pred, label, max = 40) {
   throw new Error(`timeout waiting: ${label}`);
 }
 
+async function openDrawerWithCandidates(ctrl) {
+  ctrl.openDrawer({ focus() {}, isConnected: true });
+  await waitFor(() => ctrl.getSnapshot().candidatesReady === true, 'candidates ready');
+}
+
 // ── strict parsers ──
 {
   assert.equal(parseCurrent({ context_id: 1, context_epoch: 1 }), null); // missing unit
@@ -474,6 +479,7 @@ ok('stale candidates');
   ctrl.start();
   await waitFor(() => ctrl.uiState === 'ready', 'ready');
   const beforeCurrentCalls = client.calls.current;
+  await openDrawerWithCandidates(ctrl);
   ctrl.setDraftCount(3);
   const okSel = await ctrl.confirmSelection();
   assert.equal(okSel, false);
@@ -496,6 +502,7 @@ ok('POST context mismatch');
   ctrl.start();
   await waitFor(() => ctrl.uiState === 'ready', 'ready');
   const before = client.calls.current;
+  await openDrawerWithCandidates(ctrl);
   const okSel = await ctrl.confirmSelection();
   assert.equal(okSel, false);
   assert.equal(ctrl.getSnapshot().locked, false);
@@ -529,6 +536,7 @@ ok('malformed POST');
   const ctrl = new DailySoftWindowController({ client, live: true });
   ctrl.start();
   await waitFor(() => ctrl.uiState === 'ready', 'ready');
+  await openDrawerWithCandidates(ctrl);
   ctrl.setDraftCount(5);
   const p1 = ctrl.confirmSelection();
   const p2 = ctrl.confirmSelection();
@@ -556,6 +564,7 @@ ok('double click');
   const ctrl = new DailySoftWindowController({ client, live: true });
   ctrl.start();
   await waitFor(() => ctrl.uiState === 'ready', 'ready');
+  await openDrawerWithCandidates(ctrl);
   await ctrl.confirmSelection();
   assert.equal(client.calls.select, 1);
   await waitFor(() => ctrl.getSnapshot().locked === true, 'locked via GET');
@@ -740,10 +749,20 @@ ok('cross candidates stale after context B');
         });
     });
   });
+  client.setCandidates(async () => ({
+    ok: true,
+    context_id: 1,
+    context_epoch: 10,
+    carryover_unit: 'round',
+    available_round_count: ROUNDS.length,
+    rounds: ROUNDS,
+    candidates: [],
+  }));
 
   const ctrl = new DailySoftWindowController({ client, live: true });
   ctrl.start();
   await waitFor(() => ctrl.uiState === 'ready', 'ready');
+  await openDrawerWithCandidates(ctrl);
   ctrl.setDraftCount(3);
   const selectPromise = ctrl.confirmSelection();
   await waitMicrotasks(3);
@@ -815,5 +834,167 @@ ok('cross select stale after context B');
   ctrl.dispose();
 }
 ok('focus same context preserves drawer rounds and draft count');
+
+// ── candidates-ready gating ──
+{
+  const client = makeFakeClient();
+  client.setCurrent(async () => baseCurrent());
+  let resolveCand;
+  client.setCandidates(async () => new Promise((r) => { resolveCand = r; }));
+  const ctrl = new DailySoftWindowController({ client, live: true });
+  ctrl.start();
+  await waitFor(() => ctrl.uiState === 'ready', 'ready');
+  ctrl.openDrawer({ focus() {}, isConnected: true });
+  assert.equal(ctrl.uiState, 'loading');
+  assert.equal(ctrl.getSnapshot().candidatesReady, false);
+  const immediate = await ctrl.confirmSelection();
+  assert.equal(immediate, false);
+  assert.equal(client.calls.select, 0);
+  const dbl1 = ctrl.confirmSelection();
+  const dbl2 = ctrl.confirmSelection();
+  await Promise.all([dbl1, dbl2]);
+  assert.equal(client.calls.select, 0);
+  resolveCand({
+    ok: true,
+    context_id: 7,
+    context_epoch: 42,
+    carryover_unit: 'round',
+    available_round_count: ROUNDS.length,
+    rounds: ROUNDS,
+    candidates: [],
+  });
+  await waitFor(() => ctrl.getSnapshot().candidatesReady === true, 'candidates ready');
+  ctrl.setDraftCount(3);
+  const okSel = await ctrl.confirmSelection();
+  assert.equal(okSel, true);
+  assert.equal(client.calls.select, 1);
+  assert.equal(client.calls.selectBodies.at(-1), 3);
+  ctrl.dispose();
+}
+ok('candidates-ready gating');
+
+// ── empty candidates success allows confirm ──
+{
+  const client = makeFakeClient();
+  client.setCurrent(async () => baseCurrent());
+  client.setCandidates(async () => ({
+    ok: true,
+    context_id: 7,
+    context_epoch: 42,
+    carryover_unit: 'round',
+    available_round_count: 0,
+    rounds: [],
+    candidates: [],
+  }));
+  const ctrl = new DailySoftWindowController({ client, live: true });
+  ctrl.start();
+  await waitFor(() => ctrl.uiState === 'ready', 'ready');
+  ctrl.openDrawer({ focus() {}, isConnected: true });
+  await waitFor(() => ctrl.uiState === 'empty', 'empty loaded');
+  assert.equal(ctrl.getSnapshot().candidatesReady, true);
+  ctrl.setDraftCount(0);
+  const okSel = await ctrl.confirmSelection();
+  assert.equal(okSel, true);
+  assert.equal(client.calls.selectBodies.at(-1), 0);
+  ctrl.dispose();
+}
+ok('empty candidates confirm');
+
+// ── stale / closed candidates must not unlock confirm ──
+{
+  const client = makeFakeClient();
+  client.setCurrent(async () => baseCurrent());
+  let resolveLate;
+  client.setCandidates(async () => new Promise((r) => { resolveLate = r; }));
+  const ctrl = new DailySoftWindowController({ client, live: true });
+  ctrl.start();
+  await waitFor(() => ctrl.uiState === 'ready', 'ready');
+  ctrl.openDrawer({ focus() {}, isConnected: true });
+  ctrl.closeDrawer();
+  resolveLate({
+    ok: true,
+    context_id: 7,
+    context_epoch: 42,
+    carryover_unit: 'round',
+    available_round_count: ROUNDS.length,
+    rounds: ROUNDS,
+    candidates: [],
+  });
+  await waitMicrotasks(8);
+  assert.equal(ctrl.getSnapshot().candidatesReady, false);
+  assert.equal(ctrl.rounds.length, 0);
+  const okSel = await ctrl.confirmSelection();
+  assert.equal(okSel, false);
+  assert.equal(client.calls.select, 0);
+  ctrl.dispose();
+}
+ok('late candidates no confirm');
+
+// ── auth fail-hidden + focus return ──
+{
+  const client = makeFakeClient();
+  client.setCurrent(async () => baseCurrent());
+  client.setCandidates(async () => new Promise(() => {}));
+  const focusCalls = { n: 0 };
+  const opener = { focus() { focusCalls.n += 1; }, isConnected: true };
+  const ctrl = new DailySoftWindowController({ client, live: true });
+  ctrl.start();
+  await waitFor(() => ctrl.uiState === 'ready', 'ready');
+  ctrl.openDrawer(opener);
+  client.setCurrent(async () => {
+    throw new HttpError(401, 'auth', 'auth');
+  });
+  await ctrl.probeCurrent();
+  assert.equal(ctrl.uiState, 'unavailable');
+  assert.equal(ctrl.current, null);
+  assert.equal(ctrl.drawerOpen, false);
+  assert.equal(ctrl.getSnapshot().showPickerCard, false);
+  assert.equal(focusCalls.n, 1);
+  assert.equal(ctrl.opener, null);
+  ctrl.dispose();
+}
+ok('auth fail-hidden focus');
+
+// ── passive external lock closes drawer + focus ──
+{
+  const client = makeFakeClient();
+  const unlocked = baseCurrent();
+  const locked = baseCurrent({
+    selection_finalized: true,
+    requested_round_count: 5,
+    selected_round_count: 2,
+    selected_message_count: 2,
+    selected_message_ids: [1, 2],
+    carryover_count: 2,
+  });
+  let phase = 0;
+  client.setCurrent(async () => {
+    phase += 1;
+    return phase === 1 ? unlocked : locked;
+  });
+  client.setCandidates(async () => ({
+    ok: true,
+    context_id: 7,
+    context_epoch: 42,
+    carryover_unit: 'round',
+    available_round_count: ROUNDS.length,
+    rounds: ROUNDS,
+    candidates: [],
+  }));
+  const focusCalls = { n: 0 };
+  const opener = { focus() { focusCalls.n += 1; }, isConnected: true };
+  const ctrl = new DailySoftWindowController({ client, live: true });
+  ctrl.start();
+  await waitFor(() => ctrl.uiState === 'ready', 'ready');
+  ctrl.openDrawer(opener);
+  await waitFor(() => ctrl.getSnapshot().candidatesReady, 'candidates ready');
+  await ctrl.probeCurrent();
+  assert.equal(ctrl.getSnapshot().locked, true);
+  assert.equal(ctrl.drawerOpen, false);
+  assert.equal(focusCalls.n, 1);
+  assert.deepEqual(ctrl.current?.selected_message_ids, [1, 2]);
+  ctrl.dispose();
+}
+ok('passive lock focus');
 
 console.log(`daily-soft-window state-machine tests: ok (${passed} groups)`);

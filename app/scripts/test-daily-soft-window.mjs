@@ -31,6 +31,10 @@ const {
   LIVE_DAILY_CONTEXT_CURRENT,
   LIVE_DAILY_CONTEXT_CANDIDATES,
   LIVE_DAILY_CONTEXT_SELECT,
+  parseCurrent,
+  parseSelectCarryoverResponse,
+  parseCarryoverCandidatesResponse,
+  normalizePositiveInt,
 } = mod;
 
 let passed = 0;
@@ -151,7 +155,115 @@ assert.equal(lockedSummaryText(0), '今天没有带走昨天的话。');
 assert.equal(lockedSummaryText(5), '今天带来了 5 轮昨天的话。');
 assert.equal(normalizeMessageId('42'), 42);
 assert.equal(normalizeMessageId(0), null);
+assert.equal(normalizeMessageId(1.5), null);
+assert.equal(normalizeMessageId('1.5'), null);
+assert.equal(normalizeMessageId(Number.NaN), null);
+assert.equal(normalizeMessageId(Number.POSITIVE_INFINITY), null);
+assert.equal(normalizeMessageId(-1), null);
+assert.equal(normalizePositiveInt(1.5), null);
+assert.equal(normalizePositiveInt('3'), null);
 ok('labels');
+
+// ── strict current / select / candidates parsers ──
+{
+  const base = {
+    context_id: 1,
+    context_epoch: 2,
+    local_day: '2026-07-28',
+    boundary_message_id: 0,
+    carryover_unit: 'round',
+    selected_round_count: 0,
+    selected_message_count: 0,
+    selected_message_ids: [],
+    carryover_count: 0,
+    selection_finalized: false,
+    handoff_status: 'ABSENT',
+    resident_generation: 1,
+    requested_round_count: null,
+  };
+  assert.ok(parseCurrent({ ...base }));
+  assert.equal(parseCurrent({ ...base, context_epoch: 1.5 }), null);
+  assert.equal(parseCurrent({ ...base, selected_message_ids: [1, 1] }), null);
+  assert.equal(parseCurrent({ ...base, selected_message_ids: [1.5] }), null);
+  assert.equal(parseCurrent({ ...base, selected_message_count: 1 }), null);
+  assert.equal(parseCurrent({ ...base, carryover_count: 1 }), null);
+  assert.equal(parseCurrent({ ...base, requested_round_count: 3 }), null);
+  assert.ok(
+    parseCurrent({
+      ...base,
+      selection_finalized: true,
+      requested_round_count: 5,
+      selected_round_count: 2,
+      selected_message_count: 2,
+      selected_message_ids: [10, 11],
+      carryover_count: 2,
+    }),
+  );
+  assert.equal(
+    parseSelectCarryoverResponse({
+      context_id: 1,
+      context_epoch: 2,
+      carryover_unit: 'round',
+      requested_round_count: 3,
+      selected_round_count: 4,
+      selected_message_count: 2,
+      selected_message_ids: [1, 2],
+      carryover_count: 4,
+      finalized_at: 't',
+    }),
+    null,
+  );
+  assert.equal(
+    parseSelectCarryoverResponse({
+      context_id: 1,
+      context_epoch: 2,
+      carryover_unit: 'round',
+      requested_round_count: '3',
+      selected_round_count: 3,
+      selected_message_count: 0,
+      selected_message_ids: [],
+      carryover_count: 3,
+      finalized_at: 't',
+    }),
+    null,
+  );
+  assert.ok(
+    parseSelectCarryoverResponse({
+      context_id: 1,
+      context_epoch: 2,
+      carryover_unit: 'round',
+      requested_round_count: 0,
+      selected_round_count: 0,
+      selected_message_count: 0,
+      selected_message_ids: [],
+      carryover_count: 0,
+      finalized_at: 't',
+    }),
+  );
+  assert.equal(
+    parseCarryoverCandidatesResponse({
+      context_id: 1,
+      context_epoch: 2,
+      carryover_unit: 'round',
+      available_round_count: 0,
+      rounds: [],
+      candidates: [],
+    })?.rounds.length,
+    0,
+  );
+  assert.equal(
+    parseCarryoverCandidatesResponse({
+      context_id: 1,
+      context_epoch: 2,
+      carryover_unit: 'round',
+      available_round_count: 0,
+      rounds: goodRounds,
+      candidates: [],
+    }),
+    null,
+  );
+}
+ok('strict parsers');
 
 // ── draftCountFromCurrent recovery ──
 assert.equal(
