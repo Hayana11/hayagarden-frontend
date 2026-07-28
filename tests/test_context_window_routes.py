@@ -144,6 +144,74 @@ class ContextWindowRouteTests(unittest.TestCase):
         self.assertEqual(resp.status_code, 200)
         self.assertTrue(resp.get_json().get('ok'))
 
+    def test_candidates_stale_source_409(self):
+        with mock.patch('context_window_routes.enabled', return_value=True):
+            resp = self.client.get(
+                '/api/context-window/carryover-candidates'
+                '?source_context_id=999&source_context_epoch=1',
+                headers=self.auth,
+            )
+        self.assertEqual(resp.status_code, 409)
+        self.assertEqual(resp.get_json().get('code'), 'stale_source_context')
+
+    def test_candidates_lease_busy_423(self):
+        cur = None
+        with mock.patch('context_window_routes.enabled', return_value=True):
+            cur = self.client.get('/api/context-window/current', headers=self.auth).get_json()
+        dc.claim_daily_resident_turn(
+            chat_id='default',
+            context_id=int(cur['context_id']),
+            expected_context_epoch=int(cur['context_epoch']),
+            worker_id='w1',
+            request_message_id=1,
+            lease_owner='owner',
+            resident_key='rk',
+            db_path=self.db_path,
+            now=datetime.datetime(2026, 7, 27, 10, 0, 0),
+        )
+        with mock.patch('context_window_routes.enabled', return_value=True):
+            with mock.patch(
+                'chat.context_window._shanghai_now',
+                return_value=datetime.datetime(2026, 7, 27, 10, 0, 0),
+            ):
+                resp = self.client.get(
+                    '/api/context-window/carryover-candidates'
+                    '?source_context_id=%s&source_context_epoch=%s'
+                    % (cur['context_id'], cur['context_epoch']),
+                    headers=self.auth,
+                )
+        self.assertEqual(resp.status_code, 423)
+        self.assertEqual(resp.get_json().get('code'), 'window_busy')
+
+    def test_switch_bool_count_400(self):
+        with mock.patch('context_window_routes.enabled', return_value=True):
+            cur = self.client.get('/api/context-window/current', headers=self.auth).get_json()
+            resp = self.client.post(
+                '/api/context-window/switch',
+                json={
+                    'source_context_id': cur['context_id'],
+                    'source_context_epoch': cur['context_epoch'],
+                    'count': True,
+                    'request_id': str(uuid.uuid4()),
+                },
+                headers=self.auth,
+            )
+        self.assertEqual(resp.status_code, 400)
+
+    def test_switch_null_source_400(self):
+        with mock.patch('context_window_routes.enabled', return_value=True):
+            resp = self.client.post(
+                '/api/context-window/switch',
+                json={
+                    'source_context_id': None,
+                    'source_context_epoch': 1,
+                    'count': 0,
+                    'request_id': str(uuid.uuid4()),
+                },
+                headers=self.auth,
+            )
+        self.assertEqual(resp.status_code, 400)
+
 
 if __name__ == '__main__':
     unittest.main()

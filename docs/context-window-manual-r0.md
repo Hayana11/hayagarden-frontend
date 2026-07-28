@@ -46,17 +46,48 @@ Partial unique indexes:
 - open `manual`: one per `chat_id` where `closed_at IS NULL`
 - idempotency: `(chat_id, switch_request_id)` when set
 
-Migration is idempotent (`BEGIN IMMEDIATE`, row/id verification, rollback on failure).
+Migration is a single atomic transaction:
+
+1. `BEGIN IMMEDIATE`
+2. `CREATE TABLE ... (id INTEGER PRIMARY KEY AUTOINCREMENT, ...)` via `conn.execute`
+   (**not** `sqlite3.executescript`, which implicitly commits)
+3. copy rows → verify row count, ID set, `MAX(id)`, related-table `context_id` maps
+4. `DROP` / `RENAME`
+5. sync `sqlite_sequence`, create all partial indexes
+6. final verify → `COMMIT`
+
+On failure: rollback + drop any leftover `daily_contexts__mw_new`. Original table and
+indexes remain; next `ensure_schema` can retry. Related maps verified for:
+
+- `daily_carryover_messages`
+- `daily_resident_cursors`
+- `daily_resident_turn_leases`
+- `daily_message_contexts`
+- `daily_resident_owners`
+
+Manual `local_day` / `opened_local_day` is the Shanghai **natural calendar day** at open
+time (`strftime('%Y-%m-%d')`), not the legacy 04:00 chat-day.
 
 ## Resolver
 
-`chat/context_window.py` → `get_current_context_window()`:
+`chat/context_window.py` → `get_current_context_window()` / `current_window_summary()`:
 
 1. Open `manual` window (highest epoch), else
-2. Latest non-backfill context (legacy bootstrap), else
-3. One-time bootstrap on empty DB (not a switch).
+2. Open `legacy_daily` with `closed_at IS NULL`, else
+3. If any historical rows exist → **fail closed** (`NoOpenContextWindowError` / HTTP 409
+   `no_open_context`) — never resurrect a closed manual or closed legacy, else
+4. One-time bootstrap on empty DB (not a switch).
+
+`current_window_summary` assembles context row, formal rounds, carryover IDs, lease, and
+`can_switch` on **one connection / one snapshot**.
 
 No 04:00 rollover side effects. No model/Wake/handoff.
+
+### Fail-closed recovery
+
+R0 does not auto-heal a chat that only has closed windows. Operators / a later release
+must open a new window via an explicit switch (or a dedicated recovery path). Silent
+re-open of closed rows is forbidden.
 
 ## Legacy daily resolver
 

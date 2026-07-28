@@ -155,6 +155,26 @@ class ContextWindowBffTests(unittest.TestCase):
         self.assertIn('source_context_id=2', captured.get('url', ''))
         self.assertIn('source_context_epoch=3', captured.get('url', ''))
 
+    def test_browser_forged_authorization_replaced_by_server_bearer(self):
+        app = self._app()
+        captured = {}
+
+        def fake_urlopen(req, timeout=20):
+            captured['auth'] = req.get_header('Authorization')
+            return _FakeResp(json.dumps({'ok': True}).encode())
+
+        client = app.test_client()
+        client.set_cookie('moments_owner', owner_session_digest(OWNER_TOKEN))
+        with mock.patch('chat.context_window.enabled', return_value=True):
+            with mock.patch('urllib.request.urlopen', side_effect=fake_urlopen):
+                resp = client.get(
+                    '/context-window/current',
+                    headers={'Authorization': 'Bearer forged-browser-token'},
+                )
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(captured.get('auth'), 'Bearer ' + SW_TOKEN)
+        self.assertNotIn('forged-browser-token', captured.get('auth') or '')
+
 
 if __name__ == '__main__':
     unittest.main()

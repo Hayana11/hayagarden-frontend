@@ -243,14 +243,46 @@ def _create_manual_window_indexes(conn: sqlite3.Connection) -> None:
     )
 
 
+def _assert_daily_contexts_autoincrement(conn: sqlite3.Connection, table: str) -> None:
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name=?",
+        (table,),
+    ).fetchone()
+    if row is None or not row[0]:
+        raise DailyContextError('missing table sql for %s' % table)
+    sql = str(row[0]).upper()
+    if 'AUTOINCREMENT' not in sql:
+        raise DailyContextError(
+            '%s must keep INTEGER PRIMARY KEY AUTOINCREMENT' % table
+        )
+
+
+def _drop_migration_temp_table(conn: sqlite3.Connection) -> None:
+    """Best-effort cleanup so a failed migrate never leaves a half schema."""
+    try:
+        conn.execute('DROP TABLE IF EXISTS daily_contexts__mw_new')
+        conn.commit()
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+
+
 def _migrate_manual_window_schema(conn: sqlite3.Connection) -> None:
-    """Idempotent rebuild: drop table-level (chat_id, local_day) unique; add manual-window columns."""
+    """Idempotent rebuild: drop table-level (chat_id, local_day) unique; add manual-window columns.
+
+    Uses a single ``BEGIN IMMEDIATE`` transaction with ``conn.execute`` only —
+    never ``executescript`` (which implicitly commits and breaks atomicity).
+    """
     dcols = _table_columns(conn, 'daily_contexts')
     if not dcols:
         return
     if 'window_mode' in dcols:
         return
 
+    # Clear any outer implicit transaction so BEGIN IMMEDIATE owns the migrate.
+    conn.commit()
     conn.execute('BEGIN IMMEDIATE')
     try:
         old_count = int(conn.execute('SELECT COUNT(*) FROM daily_contexts').fetchone()[0])
@@ -295,6 +327,7 @@ def _migrate_manual_window_schema(conn: sqlite3.Connection) -> None:
             )
             '''
         )
+        _assert_daily_contexts_autoincrement(conn, 'daily_contexts__mw_new')
         _migration_checkpoint('after_create')
 
         has_backfill = 'is_backfill' in dcols
@@ -357,14 +390,18 @@ def _migrate_manual_window_schema(conn: sqlite3.Connection) -> None:
         if final_ids != old_ids:
             raise DailyContextError('context id set changed after migration finalize')
         _verify_related_context_ids(conn, related_before, final_ids)
+        _assert_daily_contexts_autoincrement(conn, 'daily_contexts')
 
         new_seq = _read_sqlite_sequence(conn, 'daily_contexts')
         if old_seq is not None and new_seq is not None and new_seq < old_seq:
             raise DailyContextError('sqlite_sequence regressed during migration')
+        if old_max_id > 0 and (new_seq is None or new_seq < old_max_id):
+            raise DailyContextError('sqlite_sequence below MAX(id) after migration')
 
         conn.commit()
     except Exception:
         conn.rollback()
+        _drop_migration_temp_table(conn)
         raise
 
 
