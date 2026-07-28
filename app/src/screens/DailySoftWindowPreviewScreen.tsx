@@ -4,6 +4,7 @@ import { CarryoverDrawer, CarryoverPickerCard, DaySoftBoundary } from '../compon
 import { useDailySoftWindow } from '../hooks/useDailySoftWindow';
 import {
   chatDayKeyFromLocalTs,
+  getMockScenario,
   mockPreviewTranscript,
   setMockScenario,
   type SoftWindowMockScenario,

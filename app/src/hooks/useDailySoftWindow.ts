@@ -200,17 +200,9 @@ export function useDailySoftWindow(opts: Options = {}): DailySoftWindowControlle
     return `候选 ${candidates.length} 条`;
   }, [enabled, uiState, errorDetail, locked, summary?.carryover_count, client.mode, candidates.length]);
 
-  const showPickerCard =
-    enabled &&
-    uiState !== 'idle' &&
-    uiState !== 'disabled' &&
-    // Still show locked readonly card; hide only when fully unavailable.
-    (uiState === 'ready' ||
-      uiState === 'empty' ||
-      uiState === 'loading' ||
-      uiState === 'locked' ||
-      uiState === 'conflict' ||
-      uiState === 'error');
+  // Show for all loaded states including 404/409 so FE can demo API surfaces.
+  // Production chat stays unaffected because `enabled` defaults false.
+  const showPickerCard = enabled && uiState !== 'idle';
 
   return {
     enabled,
