@@ -1,0 +1,46 @@
+name: Manual Context Window R0
+
+on:
+  pull_request:
+    paths:
+      - 'chat/context_window.py'
+      - 'chat/daily_context.py'
+      - 'context_window_routes.py'
+      - 'context_window_bff.py'
+      - 'gateway.py'
+      - 'app.py'
+      - 'tests/test_context_window*.py'
+      - 'docs/context-window-manual-r0.md'
+      - '.github/workflows/context-window-r0.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'chat/context_window.py'
+      - 'chat/daily_context.py'
+      - 'context_window_routes.py'
+      - 'context_window_bff.py'
+      - 'gateway.py'
+      - 'app.py'
+      - 'tests/test_context_window*.py'
+      - 'docs/context-window-manual-r0.md'
+      - '.github/workflows/context-window-r0.yml'
+
+jobs:
+  context-window-r0:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Backend unit tests
+        run: |
+          python3 -m unittest \
+            tests.test_context_window \
+            tests.test_context_window_routes \
+            tests.test_context_window_bff \
+            tests.test_daily_soft_window \
+            tests.test_daily_runtime \
+            tests.test_daily_context_bff \
+            tests.test_day_handoff \
+            -v

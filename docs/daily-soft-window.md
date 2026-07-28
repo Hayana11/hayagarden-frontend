@@ -6,6 +6,10 @@ Backend-only **Draft**. Default **off** (`DAILY_SOFT_WINDOW_ENABLED=0`).
 Does **not** generate day handoffs via LLM, does not change formal chat defaults,
 does not enable itself on deploy.
 
+**Manual window R0** (`docs/context-window-manual-r0.md`) adds canonical
+`/api/context-window/*` and atomic switch; legacy `/api/daily-context/*` remains
+for flag-off compatibility.
+
 **Note:** process boot still runs idempotent `ensure_schema()` so the three new
 tables (and optional `chat_messages.source_kind`) may be created even while the
 flag stays `0`. That is DDL only — no runtime Soft Window behavior.

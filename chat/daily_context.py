@@ -151,6 +151,130 @@ def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
     return {str(r[1]) for r in conn.execute('PRAGMA table_info(%s)' % table)}
 
 
+def _migrate_manual_window_schema(conn: sqlite3.Connection) -> None:
+    """Idempotent rebuild: drop table-level (chat_id, local_day) unique; add manual-window columns."""
+    dcols = _table_columns(conn, 'daily_contexts')
+    if not dcols:
+        return
+    if 'window_mode' in dcols:
+        return
+
+    conn.execute('BEGIN IMMEDIATE')
+    try:
+        old_count = int(conn.execute('SELECT COUNT(*) FROM daily_contexts').fetchone()[0])
+        old_ids = {
+            int(r[0]) for r in conn.execute('SELECT id FROM daily_contexts').fetchall()
+        }
+
+        conn.executescript(
+            """
+            CREATE TABLE daily_contexts__mw_new (
+                id INTEGER PRIMARY KEY,
+                chat_id TEXT NOT NULL,
+                local_day TEXT NOT NULL,
+                timezone TEXT NOT NULL DEFAULT 'Asia/Shanghai',
+                boundary_hour INTEGER NOT NULL DEFAULT 4,
+                context_epoch INTEGER NOT NULL,
+                boundary_message_id INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL,
+                handoff_id INTEGER NULL,
+                carryover_count INTEGER NOT NULL DEFAULT 0,
+                selection_finalized_at DATETIME NULL,
+                resident_generation INTEGER NOT NULL DEFAULT 1,
+                morning_greeting_message_id INTEGER NULL,
+                version INTEGER NOT NULL DEFAULT 1,
+                lease_owner TEXT NULL,
+                lease_expires_at DATETIME NULL,
+                created_at DATETIME NOT NULL,
+                updated_at DATETIME NOT NULL,
+                is_backfill INTEGER NOT NULL DEFAULT 0,
+                carryover_requested_count INTEGER NULL,
+                window_mode TEXT NOT NULL DEFAULT 'legacy_daily',
+                opened_at DATETIME NOT NULL,
+                closed_at DATETIME NULL,
+                close_reason TEXT NULL,
+                source_context_id INTEGER NULL,
+                switch_request_id TEXT NULL
+            );
+            """
+        )
+        has_backfill = 'is_backfill' in dcols
+        has_requested = 'carryover_requested_count' in dcols
+        backfill_expr = 'COALESCE(is_backfill, 0)' if has_backfill else '0'
+        requested_expr = (
+            'carryover_requested_count' if has_requested else 'NULL'
+        )
+        conn.execute(
+            '''
+            INSERT INTO daily_contexts__mw_new (
+                id, chat_id, local_day, timezone, boundary_hour, context_epoch,
+                boundary_message_id, status, handoff_id, carryover_count,
+                selection_finalized_at, resident_generation, morning_greeting_message_id,
+                version, lease_owner, lease_expires_at, created_at, updated_at,
+                is_backfill, carryover_requested_count,
+                window_mode, opened_at, closed_at, close_reason,
+                source_context_id, switch_request_id
+            )
+            SELECT
+                id, chat_id, local_day, timezone, boundary_hour, context_epoch,
+                boundary_message_id, status, handoff_id, carryover_count,
+                selection_finalized_at, resident_generation, morning_greeting_message_id,
+                version, lease_owner, lease_expires_at, created_at, updated_at,
+                %s, %s,
+                'legacy_daily',
+                COALESCE(created_at, updated_at, datetime('now', '+8 hours')),
+                NULL, NULL, NULL, NULL
+            FROM daily_contexts
+            ''' % (backfill_expr, requested_expr)
+        )
+        new_count = int(conn.execute('SELECT COUNT(*) FROM daily_contexts__mw_new').fetchone()[0])
+        new_ids = {
+            int(r[0]) for r in conn.execute('SELECT id FROM daily_contexts__mw_new').fetchall()
+        }
+        if new_count != old_count or new_ids != old_ids:
+            raise DailyContextError(
+                'manual window migration row/id mismatch: %s vs %s'
+                % (old_count, new_count)
+            )
+
+        carryover_ids = {
+            int(r[0])
+            for r in conn.execute(
+                'SELECT DISTINCT context_id FROM daily_carryover_messages'
+            ).fetchall()
+        }
+        if carryover_ids and not carryover_ids.issubset(new_ids):
+            raise DailyContextError('carryover context_id set changed during migration')
+
+        conn.execute('DROP TABLE daily_contexts')
+        conn.execute('ALTER TABLE daily_contexts__mw_new RENAME TO daily_contexts')
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+
+def _ensure_manual_window_indexes(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        'CREATE INDEX IF NOT EXISTS idx_daily_contexts_chat_epoch '
+        'ON daily_contexts(chat_id, context_epoch)'
+    )
+    conn.execute(
+        'CREATE UNIQUE INDEX IF NOT EXISTS idx_daily_contexts_legacy_day_unique '
+        "ON daily_contexts(chat_id, local_day) WHERE window_mode='legacy_daily'"
+    )
+    conn.execute(
+        'CREATE UNIQUE INDEX IF NOT EXISTS idx_daily_contexts_open_manual_unique '
+        "ON daily_contexts(chat_id) WHERE window_mode='manual' "
+        'AND closed_at IS NULL AND is_backfill=0'
+    )
+    conn.execute(
+        'CREATE UNIQUE INDEX IF NOT EXISTS idx_daily_contexts_switch_idem_unique '
+        'ON daily_contexts(chat_id, switch_request_id) '
+        'WHERE switch_request_id IS NOT NULL'
+    )
+
+
 def ensure_schema(db_path: Optional[str] = None) -> None:
     path = os.path.abspath(db_path or DEFAULT_DB_PATH)
     if path in _SCHEMA_READY and os.path.isfile(path):
@@ -178,10 +302,15 @@ def ensure_schema(db_path: Optional[str] = None) -> None:
                 lease_expires_at DATETIME NULL,
                 created_at DATETIME NOT NULL DEFAULT (datetime('now', '+8 hours')),
                 updated_at DATETIME NOT NULL DEFAULT (datetime('now', '+8 hours')),
-                UNIQUE(chat_id, local_day)
+                is_backfill INTEGER NOT NULL DEFAULT 0,
+                carryover_requested_count INTEGER NULL,
+                window_mode TEXT NOT NULL DEFAULT 'legacy_daily',
+                opened_at DATETIME NOT NULL DEFAULT (datetime('now', '+8 hours')),
+                closed_at DATETIME NULL,
+                close_reason TEXT NULL,
+                source_context_id INTEGER NULL,
+                switch_request_id TEXT NULL
             );
-            CREATE INDEX IF NOT EXISTS idx_daily_contexts_chat_epoch
-                ON daily_contexts(chat_id, context_epoch);
 
             CREATE TABLE IF NOT EXISTS daily_carryover_messages (
                 context_id INTEGER NOT NULL,
@@ -269,6 +398,8 @@ def ensure_schema(db_path: Optional[str] = None) -> None:
             conn.execute(
                 'ALTER TABLE daily_contexts ADD COLUMN carryover_requested_count INTEGER NULL'
             )
+        _migrate_manual_window_schema(conn)
+        _ensure_manual_window_indexes(conn)
         if _table_columns(conn, 'chat_messages'):
             ensure_chat_messages_source_kind(conn, record_cutover=True)
         conn.commit()

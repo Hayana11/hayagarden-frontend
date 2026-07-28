@@ -76,6 +76,8 @@ app.register_blueprint(create_context_usage_blueprint(
 ))
 from daily_context_routes import create_daily_context_blueprint
 app.register_blueprint(create_daily_context_blueprint(db_path=DB_PATH))
+from context_window_routes import create_context_window_blueprint
+app.register_blueprint(create_context_window_blueprint(db_path=DB_PATH))
 app.register_blueprint(create_moments_blueprint(
     memories_db_path=DB_PATH,
     gallery_db_path=gallery_store.DB_PATH,
