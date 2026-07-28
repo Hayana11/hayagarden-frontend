@@ -4,6 +4,7 @@
 //   - POST /api/chat/send -> { message_id }, then POST /api/gw/chat/stream
 //   - SSE events `data: {t, d, idx?}` — think/text/tool_use/tool_result/
 //     trace_summary/usage/notice/done/err (家里 t/d 信封，chatnest 语义)
+import { chatDayKeyFromLocalTs } from './dailySoftWindow';
 import { sseUrl } from './http';
 
 export function isFyAuthor(a: string | null | undefined): boolean {
@@ -56,6 +57,10 @@ export interface ChatMsg {
   ts: string;
   /** YYYY-MM-DD for date separators */
   dateKey: string;
+  /** Original created_at (+8 local) */
+  createdAt: string;
+  /** Chat day key using 04:00 Asia/Shanghai boundary */
+  chatDay: string;
 }
 
 export interface ChatMessageRow {
@@ -156,6 +161,8 @@ export function rowToMsg(row: ChatMessageRow): ChatMsg {
     choices: parseJson<string[]>(row.choices, []),
     ts: created.length >= 16 ? created.slice(11, 16) : '',
     dateKey: created.slice(0, 10),
+    createdAt: created,
+    chatDay: chatDayKeyFromLocalTs(created),
   };
 }
 

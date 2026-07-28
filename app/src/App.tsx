@@ -16,8 +16,18 @@ import { ContactsScreen } from './screens/ContactsScreen';
 import { CodexChatScreen } from './screens/CodexChatScreen';
 import { ProfileScreen } from './screens/ProfileScreen';
 import { MonopolyRoomScreen } from './screens/MonopolyRoomScreen';
+import { DailySoftWindowPreviewScreen } from './screens/DailySoftWindowPreviewScreen';
 
-const FULLSCREEN_PATHS = new Set(['/chat', '/settings', '/group-chat', '/moments', '/contacts', '/codex-chat', '/profile']);
+const FULLSCREEN_PATHS = new Set([
+  '/chat',
+  '/settings',
+  '/group-chat',
+  '/moments',
+  '/contacts',
+  '/codex-chat',
+  '/profile',
+  '/daily-soft-window',
+]);
 
 function Shell() {
   const location = useLocation();
@@ -44,6 +54,7 @@ function Shell() {
       <Route path="/codex-chat" element={<CodexChatScreen />} />
       <Route path="/profile" element={<ProfileScreen />} />
       <Route path="/monopoly/:roomId" element={<MonopolyRoomScreen />} />
+      <Route path="/daily-soft-window" element={<DailySoftWindowPreviewScreen />} />
     </Routes>
   );
 
