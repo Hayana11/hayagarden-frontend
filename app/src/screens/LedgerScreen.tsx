@@ -179,12 +179,12 @@ export function LedgerScreen() {
       } else {
         setEntries(entriesRes.data);
       }
-      if (!budgetRes.ok || budgetRes.v === null) {
+      if (!budgetRes.ok) {
         setBudgetError(true);
         setBudget(null);
       } else {
-        setBudget(budgetRes.v);
         setBudgetError(false);
+        setBudget(budgetRes.v);
       }
     } finally {
       if (shouldApplyMonthTicket(ticket, currentMonthRef.current)) {
@@ -230,28 +230,30 @@ export function LedgerScreen() {
   );
   const spend = monthEntries.filter((e) => e.amount < 0).reduce((s, e) => s - e.amount, 0);
   const income = monthEntries.filter((e) => e.amount > 0).reduce((s, e) => s + e.amount, 0);
-  const budgetReady = !budgetLoading && !budgetError && budget !== null;
-  const pct = budgetReady && budget > 0 ? spend / budget : 0;
-  const over = budgetReady && spend > budget;
-  const near = budgetReady && !over && pct >= 0.8;
+  const entriesReady = !monthLoading && !entriesError;
+  const budgetSet = !budgetLoading && !budgetError && budget !== null;
+  const budgetRingReady = entriesReady && budgetSet;
+  const pct = budgetRingReady && budget! > 0 ? spend / budget! : 0;
+  const over = budgetRingReady && spend > budget!;
+  const near = budgetRingReady && !over && pct >= 0.8;
 
   const dim = new Date(base.getFullYear(), base.getMonth() + 1, 0).getDate();
   const todayD = now.getDate();
   const todaySpend = monthEntries.filter((e) => e.date === today && e.amount < 0).reduce((s, e) => s - e.amount, 0);
   const daysLeft = isCur ? Math.max(dim - todayD + 1, 1) : dim;
-  const dayAllow = budgetReady
-    ? dailyBudget ?? (autoRecalc && isCur ? Math.max(budget - (spend - todaySpend), 0) / daysLeft : budget / dim)
+  const dayAllow = budgetRingReady
+    ? dailyBudget ?? (autoRecalc && isCur ? Math.max(budget! - (spend - todaySpend), 0) / daysLeft : budget! / dim)
     : 0;
-  const todayLeft = budgetReady ? dayAllow - todaySpend : 0;
+  const todayLeft = budgetRingReady ? dayAllow - todaySpend : 0;
   const fmt1 = (v: number) => fmtAmount(Math.round(v * 10) / 10);
 
-  const statusLine = !budgetReady
+  const statusLine = !budgetRingReady
     ? ''
     : over
-      ? `超出预算 ¥${fmtAmount(spend - budget)} · 这个月先慢一点`
+      ? `超出预算 ¥${fmtAmount(spend - budget!)} · 这个月先慢一点`
       : near
-        ? `快到预算了，还可以花 ¥${fmtAmount(budget - spend)}`
-        : `还可以花 ¥${fmtAmount(budget - spend)}`;
+        ? `快到预算了，还可以花 ¥${fmtAmount(budget! - spend)}`
+        : `还可以花 ¥${fmtAmount(budget! - spend)}`;
 
   // 流水
   const usedCats = [...new Set(monthEntries.map((e) => e.catId))];
@@ -286,8 +288,12 @@ export function LedgerScreen() {
   });
   const donutTop = catTotals[0];
 
-  const trendVals = trend.length ? trend.map((t) => (t.month === key && isCur ? Math.round(spend) : t.expense)) : [0, 0, 0, 0, 0, Math.round(spend)];
-  const { d: trendPath, pts: trendPts } = smoothPath(trendVals.map((v) => Math.max(v, 0)), 340, 96);
+  const trendVals = trend.length
+    ? trend.map((t) => (t.month === key && isCur && entriesReady ? Math.round(spend) : t.expense))
+    : [];
+  const { d: trendPath, pts: trendPts } = trendVals.length
+    ? smoothPath(trendVals.map((v) => Math.max(v, 0)), 340, 96)
+    : { d: '', pts: [] as Array<[number, number]> };
   const trendLast = trendPts[trendPts.length - 1];
   const trendLabels = trend.length
     ? trend.map((t) => new Date(`${t.month}-01T12:00:00`).toLocaleString('en', { month: 'short' }))
@@ -307,6 +313,19 @@ export function LedgerScreen() {
       (readLinkedCount ? `书的支出有 ${readLinkedCount} 笔关联了共读。` : '') +
       (memLinkedCount ? `有 ${memLinkedCount} 笔消费和记忆连在一起——钱花在了会被记住的地方。` : '')
     : '这个月还没有支出记录，观察也要有素材才行。';
+
+  const entriesUnavailablePane = monthLoading ? (
+    <div data-testid="ledger-tab-entries-loading" style={{ padding: '48px 24px', textAlign: 'center', fontSize: 14, color: 'var(--color-text-mute)', letterSpacing: 2 }}>
+      账目加载中…
+    </div>
+  ) : entriesError ? (
+    <div data-testid="ledger-tab-entries-unavailable" style={{ padding: '48px 24px', textAlign: 'center', fontSize: 15, color: 'var(--color-rose-deep)', letterSpacing: 2, lineHeight: 1.7 }}>
+      账目暂不可用
+      <div style={{ fontSize: 13, color: 'var(--color-text-mute)', marginTop: 8, letterSpacing: 1 }}>
+        没有展示任何统计，以免把未知数据当成零支出
+      </div>
+    </div>
+  ) : null;
 
   // 日历
   const byDay = useMemo(() => {
@@ -524,26 +543,39 @@ export function LedgerScreen() {
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 18, marginTop: 18 }}>
             <div style={{ flex: 1, minWidth: 0 }}>
-              <div style={{ fontSize: 38, fontWeight: 500, letterSpacing: 1, color: over ? 'var(--color-rose-deep)' : 'var(--color-text)' }}>
-                ¥ {fmtAmount(spend, true)}
-              </div>
+              {monthLoading ? (
+                <div style={{ fontSize: 38, fontWeight: 500, letterSpacing: 1, color: 'var(--color-text-faint)' }}>—</div>
+              ) : entriesError ? (
+                <div data-testid="ledger-entries-unavailable" style={{ fontSize: 15, color: 'var(--color-rose-deep)', letterSpacing: 1, lineHeight: 1.7 }}>
+                  账目暂不可用
+                </div>
+              ) : (
+                <div style={{ fontSize: 38, fontWeight: 500, letterSpacing: 1, color: over ? 'var(--color-rose-deep)' : 'var(--color-text)' }}>
+                  ¥ {fmtAmount(spend, true)}
+                </div>
+              )}
               <div style={{ fontSize: 13, color: 'var(--color-text-mute)', letterSpacing: 2, marginTop: 5 }}>本月共同支出</div>
-              {income > 0 && <div style={{ fontSize: 12, color: 'var(--color-green-deep)', marginTop: 8 }}>收入 +¥{fmtAmount(income)}</div>}
-              {budgetReady && statusLine && (
+              {entriesReady && income > 0 && <div style={{ fontSize: 12, color: 'var(--color-green-deep)', marginTop: 8 }}>收入 +¥{fmtAmount(income)}</div>}
+              {budgetRingReady && statusLine && (
                 <div style={{ fontSize: 12, color: over ? 'var(--color-rose-deep)' : near ? '#B8862F' : 'var(--color-text-faint)', marginTop: 4, lineHeight: 1.7 }}>
                   {statusLine}
                 </div>
               )}
-              {!budgetLoading && (budgetError || budget === null) && (
+              {!budgetLoading && budgetError && (
                 <div data-testid="ledger-budget-unavailable" style={{ fontSize: 12, color: 'var(--color-rose-deep)', marginTop: 4, lineHeight: 1.7 }}>
                   预算暂不可用
+                </div>
+              )}
+              {entriesReady && !budgetLoading && !budgetError && budget === null && (
+                <div data-testid="ledger-budget-unset" style={{ fontSize: 12, color: 'var(--color-text-faint)', marginTop: 4, lineHeight: 1.7 }}>
+                  尚未设置预算
                 </div>
               )}
               {budgetLoading && (
                 <div style={{ fontSize: 12, color: 'var(--color-text-faint)', marginTop: 4, lineHeight: 1.7 }}>预算加载中…</div>
               )}
             </div>
-            {budgetReady ? (
+            {budgetRingReady ? (
               <svg viewBox="0 0 150 150" style={{ width: 126, height: 126, flexShrink: 0 }} data-testid="ledger-budget-ring">
                 <circle cx={75} cy={75} r={62} fill="none" stroke={over ? '#F3DDD9' : near ? '#F3E7CE' : '#F0E3D2'} strokeWidth={10} />
                 <circle
@@ -571,21 +603,25 @@ export function LedgerScreen() {
                 data-testid="ledger-budget-ring-placeholder"
                 style={{ width: 126, height: 126, flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 12, color: 'var(--color-text-faint)', textAlign: 'center', lineHeight: 1.6 }}
               >
-                {budgetLoading ? '加载中…' : '预算\n暂不可用'}
+                {budgetLoading ? '加载中…' : budgetError ? '预算\n暂不可用' : !entriesReady ? '支出\n未知' : '尚未\n设置预算'}
               </div>
             )}
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 16, paddingTop: 14, borderTop: '1px solid var(--color-track)', fontSize: 12, color: 'var(--color-text-mute)' }}>
-            {budgetReady ? (
+            {budgetRingReady ? (
               <>
-                <span>本月预算 ¥{fmtAmount(budget)}</span>
+                <span>本月预算 ¥{fmtAmount(budget!)}</span>
                 <span style={{ color: '#DFD4CF' }}>·</span>
                 <span>日均 ¥{fmt1(dayAllow)}{dailyBudget !== null ? '（手动）' : ''}</span>
               </>
             ) : budgetLoading ? (
               <span>预算加载中…</span>
-            ) : (
+            ) : budgetError ? (
               <span style={{ color: 'var(--color-rose-deep)' }}>预算暂不可用</span>
+            ) : !entriesReady ? (
+              <span style={{ color: 'var(--color-rose-deep)' }}>支出未知，预算环不可用</span>
+            ) : (
+              <span style={{ color: 'var(--color-text-faint)' }}>尚未设置预算</span>
             )}
             <span
               onClick={openBudgetSheet}
@@ -755,6 +791,7 @@ export function LedgerScreen() {
 
         {/* ══════════ 统计 ══════════ */}
         {tab === '统计' && (
+          entriesUnavailablePane ?? (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
             <Card style={{ padding: 22 }}>
               <div style={{ fontSize: 15, fontWeight: 600, letterSpacing: 2 }}>本月构成</div>
@@ -865,10 +902,11 @@ export function LedgerScreen() {
               {aiOpen && <div style={{ fontSize: 13, color: '#7A6F94', lineHeight: 1.9, marginTop: 10 }}>{obsText}</div>}
             </div>
           </div>
-        )}
+        ))}
 
         {/* ══════════ 日历 ══════════ */}
         {tab === '日历' && (
+          entriesUnavailablePane ?? (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
             <Card style={{ padding: 22 }}>
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7,1fr)', gap: 6 }}>
@@ -971,10 +1009,11 @@ export function LedgerScreen() {
               <div style={{ textAlign: 'center', fontSize: 12, color: 'var(--color-text-fainter)', letterSpacing: 2, padding: '10px 0' }}>这一天很安静，没有花钱</div>
             )}
           </div>
-        )}
+        ))}
 
         {/* ══════════ 探索 ══════════ */}
         {tab === '探索' && (
+          entriesUnavailablePane ?? (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
             <Card style={{ padding: 20, cursor: 'pointer' }} onClick={() => setLaterOpen(!laterOpen)}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
@@ -1035,7 +1074,7 @@ export function LedgerScreen() {
               <div style={{ fontSize: 13, color: 'var(--color-text-faint)', marginTop: 6, lineHeight: 1.7 }}>从 Memory 反向看消费</div>
             </Card>
           </div>
-        )}
+        ))}
       </ScreenLayout>
 
       {/* ── fab ── */}
@@ -1118,7 +1157,7 @@ export function LedgerScreen() {
               )}
             </div>
             <div style={{ fontSize: 12, color: todayLeft >= 0 ? 'var(--color-text-mute)' : 'var(--color-rose-deep)', marginTop: 10, paddingLeft: 4 }}>
-              {budgetReady
+              {budgetRingReady
                 ? todayLeft >= 0
                   ? `今日还可花 ¥${fmt1(todayLeft)}`
                   : `今日已超 ¥${fmt1(-todayLeft)}`
@@ -1363,7 +1402,7 @@ export function LedgerScreen() {
                   setDaily(raw === '' ? null : parseInt(raw, 10));
                 }}
                 inputMode="numeric"
-                placeholder={budgetReady ? `自动 · ¥${fmt1(dayAllow)}` : '自动'}
+                placeholder={budgetRingReady ? `自动 · ¥${fmt1(dayAllow)}` : '自动'}
                 style={{ flex: 1, minWidth: 0, border: 'none', background: 'transparent', fontFamily: DISPLAY, fontSize: 22, color: 'var(--color-text)', padding: 0, outline: 'none' }}
               />
             </div>
@@ -1375,7 +1414,7 @@ export function LedgerScreen() {
               <span style={{ fontSize: 13, color: 'var(--color-text-soft)' }}>自动按剩余天数重算每日预算</span>
             </div>
             <div style={{ fontSize: 12, color: 'var(--color-text-faint)', marginTop: 12, lineHeight: 1.7 }}>
-              {budgetReady
+              {budgetRingReady
                 ? isCur
                   ? `本月还剩 ${daysLeft} 天 · 日均 ¥${fmt1(dayAllow)}${dailyBudget !== null ? '（手动设定，仅本月）' : '（自动重算）'}`
                   : dailyBudget !== null

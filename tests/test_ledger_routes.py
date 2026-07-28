@@ -84,9 +84,14 @@ def _redirect_prod_path(path: str) -> str:
     return path
 
 
+_STRICT_GUARD = False
+
+
 def _guarded_connect(database, *args, **kwargs):
     raw = str(database)
     if raw == PROD_DB:
+        if _STRICT_GUARD:
+            raise AssertionError('ledger tests must not connect to production database')
         _PROD_CONNECT_TARGETS.append(raw)
     database = _redirect_prod_path(raw)
     return _ORIG_CONNECT(database, *args, **kwargs)
@@ -129,6 +134,8 @@ _open_patch.start()
 _makedirs_patch.start()
 
 import app as app_module  # noqa: E402
+
+_STRICT_GUARD = True
 
 
 def _make_get_db(db_path: str):
@@ -202,9 +209,9 @@ class LedgerRouteTests(unittest.TestCase):
         self.assertTrue(os.path.exists(_ISOLATION_DB))
         self.assertNotEqual(os.path.realpath(_ISOLATION_DB), os.path.realpath(PROD_DB))
 
-    def test_guard_blocks_direct_production_connect(self):
+    def test_strict_guard_blocks_sqlite_connect_production_db(self):
         with self.assertRaises(AssertionError):
-            _make_get_db(PROD_DB)()
+            sqlite3.connect(PROD_DB)
 
     def _insert(self, amount=-12.0, date='2026-07-10', meta=None):
         conn = self.get_db()

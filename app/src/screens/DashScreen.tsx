@@ -75,16 +75,23 @@ export function DashScreen() {
     try { window.localStorage.setItem('haya.usage-agent', next); } catch { /* private mode */ }
   };
 
-  const spent = ledger?.spent ?? 0;
-  const budgetAmount = ledger?.budget ?? null;
-  const budgetReady = Boolean(ledger && !ledgerState.error && !ledgerState.loading && budgetAmount !== null);
-  const pct = budgetReady && budgetAmount! > 0 ? Math.min(1, spent / budgetAmount!) : 0;
+  const ledgerLoading = ledgerState.loading;
+  const ledgerError = ledgerState.error;
+  const ledgerOk = Boolean(ledger && !ledgerError && !ledgerLoading);
+  const spent = ledgerOk ? ledger!.spent : null;
+  const budgetAmount = ledgerOk ? ledger!.budget : null;
+  const budgetSet = ledgerOk && budgetAmount !== null;
+  const pct = budgetSet && budgetAmount! > 0 ? Math.min(1, spent! / budgetAmount!) : 0;
   const ringOffset = (251.3 * (1 - pct)).toFixed(1);
-  const spendHint = ledgerState.loading
+  const spentDisplay = ledgerLoading || ledgerError ? '—' : formatCurrency(spent!);
+  const budgetDisplay = ledgerLoading || ledgerError ? '—' : budgetAmount === null ? '未设置' : formatCurrency(budgetAmount);
+  const spendHint = ledgerLoading
     ? '加载中…'
-    : ledgerState.error || budgetAmount === null
-      ? '预算暂不可用'
-      : `剩余 ${formatCurrency(budgetAmount - spent)} · 本月还有 ${new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate() - now.getDate()} 天`;
+    : ledgerError
+      ? '账本暂不可用'
+      : budgetAmount === null
+        ? `已支出 ${formatCurrency(spent!)} · 预算未设置`
+        : `剩余 ${formatCurrency(budgetAmount - spent!)} · 本月还有 ${new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate() - now.getDate()} 天`;
   const activeTodos = todos.filter((t) => !t.done).length;
   const recentItems = memory?.sections.find((s) => s.key === 'recent')?.items.slice(0, 6) ?? [];
 
@@ -343,6 +350,7 @@ export function DashScreen() {
       {/* ledger (clickable, green) */}
       <div
         onClick={() => navigate('/ledger')}
+        data-testid="dash-ledger-card"
         style={{ cursor: 'pointer', background: '#E2EEE68E', borderRadius: 22, padding: '12px 16px', display: 'flex', alignItems: 'center', gap: 14 }}
       >
         <svg viewBox="0 0 96 96" style={{ width: 50, height: 50, flexShrink: 0 }}>
@@ -360,7 +368,7 @@ export function DashScreen() {
             transform="rotate(-90 48 48)"
           />
           <text x={48} y={55} textAnchor="middle" fill="var(--color-green-deep)" style={{ fontFamily: "'Bodoni Moda',serif", fontSize: 18, fontWeight: 600 }}>
-            {budgetReady ? `${Math.round(pct * 100)}%` : '—'}
+            {budgetSet ? `${Math.round(pct * 100)}%` : '—'}
           </text>
         </svg>
         <div style={{ flex: 1 }}>
@@ -368,15 +376,17 @@ export function DashScreen() {
             <span style={{ fontSize: 13, fontWeight: 600, letterSpacing: 1.5 }}>记账 · 本月支出</span>
             <span style={{ color: '#9DB5A6', fontSize: 18 }}>›</span>
           </div>
-          <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 20, marginTop: 3 }}>
-            {formatCurrency(spent)}
-            {budgetReady ? (
-              <span style={{ fontSize: 13, color: 'var(--color-green-soft)' }}> / {formatCurrency(budgetAmount!)}</span>
+          <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 20, marginTop: 3 }} data-testid="dash-ledger-spent">
+            {spentDisplay}
+            {budgetSet ? (
+              <span style={{ fontSize: 13, color: 'var(--color-green-soft)' }} data-testid="dash-ledger-budget"> / {formatCurrency(budgetAmount!)}</span>
+            ) : ledgerOk && budgetAmount === null ? (
+              <span style={{ fontSize: 13, color: 'var(--color-green-soft)' }} data-testid="dash-ledger-budget"> · 未设置</span>
             ) : (
-              <span style={{ fontSize: 13, color: 'var(--color-green-soft)' }}> · 预算暂不可用</span>
+              <span style={{ fontSize: 13, color: 'var(--color-green-soft)' }} data-testid="dash-ledger-budget"> / {budgetDisplay}</span>
             )}
           </div>
-          <div style={{ fontSize: 11, color: 'var(--color-green-soft)', marginTop: 2 }}>{spendHint}</div>
+          <div style={{ fontSize: 11, color: 'var(--color-green-soft)', marginTop: 2 }} data-testid="dash-ledger-hint">{spendHint}</div>
         </div>
       </div>
 
