@@ -9,11 +9,8 @@
     "lint": "oxlint",
     "preview": "vite preview",
     "test:daily-soft-window": "vite-node scripts/test-daily-soft-window.mjs",
-<<<<<<< HEAD
-    "test:daily-soft-window-machine": "vite-node scripts/test-daily-soft-window-machine.mjs"
-=======
+    "test:daily-soft-window-machine": "vite-node scripts/test-daily-soft-window-machine.mjs",
     "test:period-cycle": "vite-node scripts/test-period-cycle.mjs"
->>>>>>> 5457f58 (fix(period): unify cycle starts, stats, and save reliability)
   },
   "dependencies": {
     "react": "^19.2.7",
