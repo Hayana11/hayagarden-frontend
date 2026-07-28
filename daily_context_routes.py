@@ -93,7 +93,7 @@ def create_daily_context_blueprint(
         from chat.daily_context import (
             DEFAULT_CHAT_ID,
             get_or_create_daily_context,
-            list_carryover_candidates,
+            list_carryover_rounds,
         )
 
         chat_id = str(request.args.get('chat_id') or DEFAULT_CHAT_ID)
@@ -102,18 +102,24 @@ def create_daily_context_blueprint(
             return cid_err
         try:
             ctx = get_or_create_daily_context(chat_id=chat_id, db_path=db_path)
-            items = list_carryover_candidates(int(ctx['id']), limit=10, db_path=db_path)
-            safe = [{
-                'message_id': i['message_id'],
-                'role': i['role'],
-                'content_preview': i['content_preview'],
-                'created_at': i['created_at'],
-            } for i in items]
+            data = list_carryover_rounds(int(ctx['id']), limit_rounds=10, db_path=db_path)
+            candidates = []
+            for rnd in data['rounds']:
+                for item in rnd['messages']:
+                    candidates.append({
+                        'message_id': item['message_id'],
+                        'role': item['role'],
+                        'content_preview': item['content_preview'],
+                        'created_at': item['created_at'],
+                    })
             return jsonify({
                 'ok': True,
                 'context_id': int(ctx['id']),
                 'context_epoch': int(ctx['context_epoch']),
-                'candidates': safe,
+                'carryover_unit': data['carryover_unit'],
+                'available_round_count': data['available_round_count'],
+                'rounds': data['rounds'],
+                'candidates': candidates,
             })
         except ValueError as exc:
             return jsonify({'ok': False, 'error': str(exc)}), 400
@@ -147,10 +153,18 @@ def create_daily_context_blueprint(
             result = select_carryover(int(ctx['id']), count, db_path=db_path)
             return jsonify({
                 'ok': True,
+                'context_id': result['context_id'],
+                'context_epoch': result['context_epoch'],
+                'carryover_unit': result.get('carryover_unit', 'round'),
+                'carryover_count': result['carryover_count'],
+                'selected_round_count': result.get(
+                    'selected_round_count', result['carryover_count'],
+                ),
+                'selected_message_count': result.get(
+                    'selected_message_count', len(result['selected_message_ids']),
+                ),
                 'selected_message_ids': result['selected_message_ids'],
                 'finalized_at': result['finalized_at'],
-                'context_epoch': result['context_epoch'],
-                'carryover_count': result['carryover_count'],
             })
         except ConflictError as exc:
             return jsonify({'ok': False, 'error': str(exc)}), 409

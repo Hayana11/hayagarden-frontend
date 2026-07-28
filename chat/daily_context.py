@@ -66,6 +66,7 @@ SOURCE_KIND_TOOL = 'tool'
 FORMAL_SOURCE_KINDS = frozenset({SOURCE_KIND_CHAT, '', None})
 
 ALLOWED_CARRYOVER_COUNTS = frozenset({0, 3, 5, 10})
+CARRYOVER_UNIT = 'round'
 
 _TRANSITIONS: dict[str, frozenset[str]] = {
     STATUS_ABSENT: frozenset({STATUS_COMPACTING, STATUS_PROVISIONAL}),
@@ -897,15 +898,47 @@ def _message_display_content(row: Any) -> str:
     return ''
 
 
-def list_carryover_candidates(
-    context_id: int,
+def _carryover_message_preview(row: Any) -> dict[str, Any]:
+    content = _message_display_content(row)
+    preview = content if len(content) <= 160 else content[:157] + '…'
+    author = str(row['author'] or '')
+    role = 'user' if author.lower() in _USER_AUTHORS else 'assistant'
+    return {
+        'message_id': int(row['id']),
+        'role': role,
+        'author': author,
+        'content_preview': preview,
+        'created_at': str(row['created_at'] or ''),
+    }
+
+
+def group_carryover_rounds(messages: list[Any]) -> list[dict[str, Any]]:
+    """Group eligible formal messages into conversation rounds (sorted by message_id)."""
+    rounds: list[dict[str, Any]] = []
+    current: Optional[dict[str, Any]] = None
+    for row in messages:
+        preview = _carryover_message_preview(row)
+        if preview['role'] == 'user':
+            if current is not None:
+                rounds.append(current)
+            current = {
+                'round_id': int(preview['message_id']),
+                'message_ids': [int(preview['message_id'])],
+                'messages': [preview],
+            }
+        elif preview['role'] == 'assistant' and current is not None:
+            current['message_ids'].append(int(preview['message_id']))
+            current['messages'].append(preview)
+    if current is not None:
+        rounds.append(current)
+    return rounds
+
+
+def _collect_prev_day_eligible_messages(
+    ctx: dict[str, Any],
     *,
-    limit: int = 10,
     db_path: Optional[str] = None,
-) -> list[dict[str, Any]]:
-    ctx = get_daily_context_by_id(context_id, db_path=db_path)
-    if not ctx:
-        raise DailyContextError('daily_context not found')
+) -> list[Any]:
     local_day = ctx['local_day']
     chat_id = str(ctx.get('chat_id') or DEFAULT_CHAT_ID)
     day_dt = datetime.datetime.strptime(local_day, '%Y-%m-%d')
@@ -960,28 +993,49 @@ def list_carryover_candidates(
                 continue
             rows_by_id[mid] = r
 
-        eligible = [
+        return [
             r for r in (rows_by_id[k] for k in sorted(rows_by_id.keys()))
             if is_formal_chat_message(
                 r, wake_contents=wake_contents, cutover_id=cutover,
             )
         ]
-        tail = eligible[-limit:] if limit else []
-        out = []
-        for r in tail:
-            content = _message_display_content(r)
-            preview = content if len(content) <= 160 else content[:157] + '…'
-            role = 'user' if str(r['author']).lower() in _USER_AUTHORS else 'assistant'
-            out.append({
-                'message_id': int(r['id']),
-                'role': role,
-                'author': str(r['author']),
-                'content_preview': preview,
-                'created_at': str(r['created_at'] or ''),
-            })
-        return out
     finally:
         conn.close()
+
+
+def list_carryover_rounds(
+    context_id: int,
+    *,
+    limit_rounds: int = 10,
+    db_path: Optional[str] = None,
+) -> dict[str, Any]:
+    ctx = get_daily_context_by_id(context_id, db_path=db_path)
+    if not ctx:
+        raise DailyContextError('daily_context not found')
+    all_rounds = group_carryover_rounds(
+        _collect_prev_day_eligible_messages(ctx, db_path=db_path),
+    )
+    available_round_count = len(all_rounds)
+    rounds = all_rounds[-limit_rounds:] if limit_rounds else list(all_rounds)
+    return {
+        'carryover_unit': CARRYOVER_UNIT,
+        'available_round_count': available_round_count,
+        'rounds': rounds,
+    }
+
+
+def list_carryover_candidates(
+    context_id: int,
+    *,
+    limit: int = 10,
+    db_path: Optional[str] = None,
+) -> list[dict[str, Any]]:
+    """Flattened carryover previews — last ``limit`` rounds, in round order."""
+    data = list_carryover_rounds(context_id, limit_rounds=limit, db_path=db_path)
+    out: list[dict[str, Any]] = []
+    for rnd in data['rounds']:
+        out.extend(rnd['messages'])
+    return out
 
 
 def _first_user_message_id_for_day(
@@ -1050,29 +1104,36 @@ def select_carryover(
             if prev_count == 0 and count > 0:
                 raise ConflictError('carryover locked at 0; cannot select %d' % count)
             if prev_count == count:
+                selected_ids = [
+                    int(r['message_id']) for r in conn.execute(
+                        'SELECT message_id FROM daily_carryover_messages '
+                        'WHERE context_id=? ORDER BY ordinal ASC',
+                        (context_id,),
+                    ).fetchall()
+                ]
                 conn.commit()
                 return {
                     'context_id': context_id,
                     'context_epoch': int(current['context_epoch']),
-                    'selected_message_ids': [
-                        int(r['message_id']) for r in conn.execute(
-                            'SELECT message_id FROM daily_carryover_messages '
-                            'WHERE context_id=? ORDER BY ordinal ASC',
-                            (context_id,),
-                        ).fetchall()
-                    ],
+                    'carryover_unit': CARRYOVER_UNIT,
+                    'selected_message_ids': selected_ids,
                     'carryover_count': prev_count,
+                    'selected_round_count': prev_count,
+                    'selected_message_count': len(selected_ids),
                     'finalized_at': current.get('selection_finalized_at'),
                 }
             raise ConflictError('carryover selection is locked')
     finally:
         conn.close()
 
-    candidates = list_carryover_candidates(context_id, limit=10, db_path=db_path)
+    round_data = list_carryover_rounds(context_id, limit_rounds=10, db_path=db_path)
+    all_rounds = round_data['rounds']
     if count == 0:
-        selected = []
+        selected_rounds: list[dict[str, Any]] = []
     else:
-        selected = candidates[-count:] if len(candidates) >= count else list(candidates)
+        selected_rounds = (
+            all_rounds[-count:] if len(all_rounds) >= count else list(all_rounds)
+        )
 
     now_s = _now_local_str()
     conn = _connect(db_path)
@@ -1092,26 +1153,32 @@ def select_carryover(
             )
 
         conn.execute('DELETE FROM daily_carryover_messages WHERE context_id=?', (context_id,))
-        ids = []
-        for i, item in enumerate(selected):
-            mid = int(item['message_id'])
-            conn.execute(
-                'INSERT INTO daily_carryover_messages (context_id, ordinal, message_id) VALUES (?,?,?)',
-                (context_id, i, mid),
-            )
-            ids.append(mid)
+        ids: list[int] = []
+        ordinal = 0
+        for rnd in selected_rounds:
+            for mid in rnd['message_ids']:
+                conn.execute(
+                    'INSERT INTO daily_carryover_messages (context_id, ordinal, message_id) VALUES (?,?,?)',
+                    (context_id, ordinal, int(mid)),
+                )
+                ids.append(int(mid))
+                ordinal += 1
+        round_count = len(selected_rounds)
         conn.execute(
             '''UPDATE daily_contexts SET carryover_count=?,
                selection_finalized_at=?, version=version+1,
                updated_at=datetime('now','+8 hours') WHERE id=?''',
-            (len(ids), now_s, context_id),
+            (round_count, now_s, context_id),
         )
         conn.commit()
         return {
             'context_id': context_id,
             'context_epoch': int(current['context_epoch']),
+            'carryover_unit': CARRYOVER_UNIT,
             'selected_message_ids': ids,
-            'carryover_count': len(ids),
+            'carryover_count': round_count,
+            'selected_round_count': round_count,
+            'selected_message_count': len(ids),
             'finalized_at': now_s,
         }
     except Exception:

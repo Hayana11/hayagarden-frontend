@@ -72,8 +72,11 @@ monotonically only.
 ## APIs (flag-gated; db_path injected at blueprint construction)
 
 - `GET /api/daily-context/current`
-- `GET /api/daily-context/carryover-candidates`
-- `POST /api/daily-context/select-carryover` `{ "count": 0|3|5|10 }`
+- `GET /api/daily-context/carryover-candidates` — `carryover_unit=round`, authoritative `rounds[]`
+- `POST /api/daily-context/select-carryover` `{ "count": 0|3|5|10 }` — count is **round** count
+
+`daily_contexts.carryover_count` stores the number of selected **rounds** (not messages).
+Provider manifest reports both `carryover_round_count` and `carryover_message_count`.
 
 Auto zero-carryover after the day's first formal user message is already
 committed: `finalize_zero_for_first_user_message(context_id, user_message_id)`.
