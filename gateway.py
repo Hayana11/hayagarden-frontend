@@ -4258,13 +4258,30 @@ def _stream_cc_daily_soft_window(_turn_data, _uc):
             yield 'data: ' + json.dumps({'t': 'done', 'ok': False}) + SSE_END
             return
 
-        manifest = _daily_rt.handle_provider_success(
-            _daily_plan,
-            assistant_message_id=assistant_id,
-            raw_text=text,
-            usage=cc_usage if isinstance(cc_usage, dict) else {},
-            unexpected_save_marker=unexpected_save,
-        )
+        try:
+            manifest = _daily_rt.handle_provider_success(
+                _daily_plan,
+                assistant_message_id=assistant_id,
+                raw_text=text,
+                usage=cc_usage if isinstance(cc_usage, dict) else {},
+                unexpected_save_marker=unexpected_save,
+            )
+        except _daily_rt.CursorCASConflictAfterPersist as exc:
+            logging.getLogger(__name__).warning(
+                'daily_window_cursor_cas_conflict assistant_id=%s manifest=%s',
+                exc.assistant_message_id,
+                json.dumps(exc.manifest, ensure_ascii=False),
+            )
+            yield 'data: ' + json.dumps({
+                't': 'err',
+                'd': 'cursor CAS conflict after assistant persist',
+                'retryable': False,
+                'code': 'cursor_cas_conflict',
+                'assistant_message_id': exc.assistant_message_id,
+            }) + SSE_END
+            yield 'data: ' + json.dumps({'t': 'done', 'ok': False}) + SSE_END
+            return
+
         _write_session_memo(_uc, _cc_text)
         try:
             from moments_persistence import after_assistant_persisted

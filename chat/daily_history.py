@@ -57,46 +57,39 @@ def _fetch_current_day_history(
                 select_cols.append(optional)
         wake_contents = _wake_content_set(conn)
         cutover = get_meta_int(conn, META_SOURCE_KIND_CUTOVER)
+        rows_by_id: dict[int, Any] = {}
         if context_id is not None and context_epoch is not None:
-            mapped_count = conn.execute(
-                'SELECT COUNT(*) AS c FROM daily_message_contexts '
-                'WHERE context_id=? AND context_epoch=?',
-                (int(context_id), int(context_epoch)),
-            ).fetchone()
-            has_mappings = int(mapped_count['c'] if mapped_count else 0) > 0
-            if has_mappings:
-                rows = conn.execute(
-                    'SELECT %s FROM chat_messages m '
-                    'INNER JOIN daily_message_contexts dmc ON dmc.message_id = m.id '
-                    'WHERE dmc.context_id=? AND dmc.context_epoch=? AND m.id > ? '
-                    'ORDER BY m.id ASC' % ', '.join('m.' + c for c in select_cols),
-                    (int(context_id), int(context_epoch), int(boundary_message_id or 0)),
-                ).fetchall()
-            else:
-                has_mappings = False
-        else:
-            has_mappings = False
-            rows = []
-        if not has_mappings:
-            _d, start_at, _end, next_start = chat_day_window(local_day)
-            rows = conn.execute(
-                'SELECT %s FROM chat_messages '
-                'WHERE created_at >= ? AND created_at < ? AND id > ? '
-                'ORDER BY id ASC' % ', '.join(select_cols),
-                (start_at, next_start, int(boundary_message_id or 0)),
-            ).fetchall()
-        excluded_ids: frozenset[int] = frozenset()
+            for r in conn.execute(
+                'SELECT %s FROM chat_messages m '
+                'INNER JOIN daily_message_contexts dmc ON dmc.message_id = m.id '
+                'WHERE dmc.context_id=? AND dmc.context_epoch=? AND m.id > ? '
+                'ORDER BY m.id ASC' % ', '.join('m.' + c for c in select_cols),
+                (int(context_id), int(context_epoch), int(boundary_message_id or 0)),
+            ).fetchall():
+                rows_by_id[int(r['id'])] = r
+
+        _d, start_at, _end, next_start = chat_day_window(local_day)
+        other_mapped: frozenset[int] = frozenset()
         if context_id is not None:
             other_rows = conn.execute(
                 'SELECT message_id FROM daily_message_contexts WHERE context_id != ?',
                 (int(context_id),),
             ).fetchall()
-            excluded_ids = frozenset(int(r[0]) for r in other_rows)
-        out = []
-        for r in rows:
+            other_mapped = frozenset(int(r[0]) for r in other_rows)
+        for r in conn.execute(
+            'SELECT %s FROM chat_messages '
+            'WHERE created_at >= ? AND created_at < ? AND id > ? '
+            'ORDER BY id ASC' % ', '.join(select_cols),
+            (start_at, next_start, int(boundary_message_id or 0)),
+        ).fetchall():
             mid = int(r['id'])
-            if mid in excluded_ids:
+            if mid in rows_by_id or mid in other_mapped:
                 continue
+            rows_by_id[mid] = r
+
+        out = []
+        for r in (rows_by_id[k] for k in sorted(rows_by_id.keys())):
+            mid = int(r['id'])
             if exclude_message_id is not None and mid == int(exclude_message_id):
                 continue
             if after_message_id is not None and mid <= int(after_message_id):

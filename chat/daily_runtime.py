@@ -58,6 +58,19 @@ class DailyWindowToolFencePending(DailyRuntimeError):
         super().__init__(message, error_code='DailyWindowToolFencePending', retryable=False)
 
 
+class CursorCASConflictAfterPersist(DailyRuntimeError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        assistant_message_id: int,
+        manifest: dict[str, Any],
+    ):
+        super().__init__(message, error_code='cursor_cas_conflict', retryable=False)
+        self.assistant_message_id = int(assistant_message_id)
+        self.manifest = dict(manifest)
+
+
 @dataclass
 class LocalResidentBinding:
     resident_key: str
@@ -92,6 +105,9 @@ class DailyTurnPlan:
     db_path: Optional[str] = None
     worker_id: str = WORKER_ID
     tool_profile: str = DAILY_TOOL_PROFILE
+    user_created_at: Optional[datetime.datetime] = None
+    origin_local_day: str = ''
+    turn_started_at: Optional[datetime.datetime] = None
     _resident_close_fn: Optional[Callable[[], None]] = field(default=None, repr=False)
 
 
@@ -143,11 +159,15 @@ def is_epoch_token_current(plan: DailyTurnPlan) -> bool:
         return False
 
 
+def _parse_message_created_at(value: str) -> datetime.datetime:
+    return datetime.datetime.strptime(str(value or '').strip(), '%Y-%m-%d %H:%M:%S')
+
+
 def _fetch_user_message(message_id: int, *, db_path: Optional[str] = None) -> dict[str, Any]:
     conn = dc._connect(db_path)
     try:
         row = conn.execute(
-            'SELECT id, author, content, image_url FROM chat_messages WHERE id=?',
+            'SELECT id, author, content, image_url, created_at FROM chat_messages WHERE id=?',
             (int(message_id),),
         ).fetchone()
         if row is None:
@@ -155,7 +175,12 @@ def _fetch_user_message(message_id: int, *, db_path: Optional[str] = None) -> di
         content = str(row['content'] or '').strip()
         if not content and str(row['image_url'] or '').strip():
             content = '[image]'
-        return {'id': int(row['id']), 'content': content}
+        created_at = str(row['created_at'] or '').strip()
+        return {
+            'id': int(row['id']),
+            'content': content,
+            'created_at': created_at,
+        }
     finally:
         conn.close()
 
@@ -234,6 +259,13 @@ def _binding_matches_plan(binding: Optional[LocalResidentBinding], plan: DailyTu
     )
 
 
+def _resident_is_alive(resident: Any) -> bool:
+    alive = getattr(resident, '_alive', None)
+    if callable(alive):
+        return bool(alive())
+    return bool(alive)
+
+
 def _can_hot_turn(
     *,
     plan: DailyTurnPlan,
@@ -243,14 +275,24 @@ def _can_hot_turn(
     binding = get_local_binding()
     if not _binding_matches_plan(binding, plan):
         return False
-    if not getattr(resident, '_alive', lambda: False)():
+    if not _resident_is_alive(resident):
         return False
     if db_cursor is None:
         return False
     if binding is not None and binding.bound_cursor_message_id != db_cursor:
         return False
+    if int(binding.process_generation) != int(getattr(resident, 'generation', 0) or 0):
+        return False
     owner = dc.get_resident_owner(plan.context_id, plan.resident_generation, db_path=plan.db_path)
-    if owner and str(owner.get('worker_id') or '') != str(plan.worker_id):
+    if owner is None:
+        return False
+    if str(owner.get('worker_id') or '') != str(plan.worker_id):
+        return False
+    if str(owner.get('resident_key') or '') != str(plan.resident_key):
+        return False
+    if owner.get('bound_cursor_message_id') is not None and int(owner['bound_cursor_message_id']) != int(db_cursor):
+        return False
+    if int(owner.get('process_generation') or 0) != int(getattr(resident, 'generation', 0) or 0):
         return False
     if str(getattr(resident, 'tool_profile', '')) != str(plan.tool_profile):
         return False
@@ -264,8 +306,9 @@ def close_local_resident_if_bound(
     clear_binding: bool = True,
 ) -> bool:
     binding = get_local_binding()
-    if expected_key is not None and binding is not None and binding.resident_key != expected_key:
-        return False
+    if expected_key is not None:
+        if binding is None or binding.resident_key != expected_key:
+            return False
     kill = getattr(resident, '_kill', None)
     if callable(kill):
         kill(quiet=True)
@@ -316,15 +359,27 @@ def _release_lease(plan: DailyTurnPlan) -> None:
 
 
 class LeaseHeartbeat:
-    def __init__(self, plan: DailyTurnPlan):
+    def __init__(self, plan: DailyTurnPlan, *, on_failure: Optional[Callable[[], None]] = None):
         self._plan = plan
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._failed = False
+        self._on_failure = on_failure
 
     def start(self) -> None:
         self._thread = threading.Thread(target=self._run, name='daily-lease-heartbeat', daemon=True)
         self._thread.start()
+
+    def _fail(self) -> None:
+        if self._failed:
+            return
+        self._failed = True
+        if self._on_failure is not None:
+            try:
+                self._on_failure()
+            except Exception:
+                logger.exception('lease heartbeat on_failure callback failed')
+        self._stop.set()
 
     def _run(self) -> None:
         while not self._stop.wait(LEASE_HEARTBEAT_INTERVAL):
@@ -333,13 +388,15 @@ class LeaseHeartbeat:
                     self._plan.context_id,
                     self._plan.resident_generation,
                     lease_owner=self._plan.lease_owner,
+                    chat_id=self._plan.chat_id,
+                    worker_id=self._plan.worker_id,
+                    resident_key=self._plan.resident_key,
                     db_path=self._plan.db_path,
                     epoch_token=self._plan.epoch_token,
                 )
             except Exception:
                 logger.exception('lease heartbeat renew failed')
-                self._failed = True
-                self._stop.set()
+                self._fail()
                 return
 
     def stop(self) -> bool:
@@ -420,6 +477,9 @@ def _assemble_plan(
     model: str,
     db_path: Optional[str],
     lease_acquired: bool,
+    user_created_at: Optional[datetime.datetime] = None,
+    origin_local_day: str = '',
+    turn_started_at: Optional[datetime.datetime] = None,
 ) -> DailyTurnPlan:
     context_id = int(refreshed['id'])
     context_epoch = int(refreshed['context_epoch'])
@@ -488,6 +548,9 @@ def _assemble_plan(
         user_content=user_content,
         lease_acquired=lease_acquired,
         db_path=db_path,
+        user_created_at=user_created_at,
+        origin_local_day=origin_local_day or local_day,
+        turn_started_at=turn_started_at or user_created_at,
     )
 
 
@@ -498,6 +561,7 @@ def prepare_daily_turn(
     request_id: Optional[str] = None,
     db_path: Optional[str] = None,
     now: Optional[datetime.datetime] = None,
+    origin_local_day: Optional[str] = None,
     lease_owner: Optional[str] = None,
     resident: Optional[Any] = None,
     static_system: str = '',
@@ -512,26 +576,31 @@ def prepare_daily_turn(
 
     req_id = str(request_id or uuid.uuid4())
     owner = str(lease_owner or req_id)
-    now = now or (datetime.datetime.utcnow() + datetime.timedelta(hours=dc.TZ_OFFSET_HOURS))
-    local_day = chat_day_for_timestamp(now)
+    user_row = _fetch_user_message(user_message_id, db_path=db_path)
+    user_created_at = _parse_message_created_at(user_row.get('created_at') or '')
+    if now is not None:
+        user_created_at = now
+    origin_day = str(origin_local_day or chat_day_for_timestamp(user_created_at))
+    turn_started_at = user_created_at
+    turn_now = datetime.datetime.utcnow() + datetime.timedelta(hours=dc.TZ_OFFSET_HOURS)
 
     lease_context_id: Optional[int] = None
     lease_generation: Optional[int] = None
     lease_acquired = False
 
     try:
-        if dc.has_active_provider_turn_lease(chat_id, db_path=db_path, now=now):
+        if dc.has_active_provider_turn_lease(chat_id, db_path=db_path, now=turn_now):
             prior = dc.get_latest_active_context(chat_id, db_path=db_path)
-            if prior and str(prior.get('local_day') or '') != local_day:
+            if prior and str(prior.get('local_day') or '') != origin_day:
                 raise DeferredError('provider request in flight; rollover deferred')
 
         prior_ctx = dc.get_latest_active_context(chat_id, db_path=db_path)
         ctx = dc.get_or_create_daily_context(
             chat_id=chat_id,
-            local_day=local_day,
-            now=now,
+            local_day=origin_day,
+            now=user_created_at,
             db_path=db_path,
-            provider_busy=dc.has_active_provider_turn_lease(chat_id, db_path=db_path, now=now),
+            provider_busy=dc.has_active_provider_turn_lease(chat_id, db_path=db_path, now=turn_now),
         )
         context_id = int(ctx['id'])
 
@@ -562,7 +631,43 @@ def prepare_daily_turn(
         if resident is not None:
             _close_stale_local_resident(resident, expected_key=resident_key)
 
-        user_row = _fetch_user_message(user_message_id, db_path=db_path)
+        db_cursor = dc.get_resident_history_cursor(
+            context_id, resident_generation, db_path=db_path,
+        )
+        try:
+            claim = dc.claim_daily_resident_turn(
+                chat_id=chat_id,
+                context_id=context_id,
+                expected_context_epoch=context_epoch,
+                worker_id=WORKER_ID,
+                request_message_id=int(user_message_id),
+                lease_owner=owner,
+                resident_key=resident_key,
+                bound_cursor_message_id=db_cursor,
+                process_generation=int(getattr(resident, 'generation', 0) or 0) if resident else None,
+                db_path=db_path,
+                now=turn_now,
+            )
+        except ConflictError as exc:
+            raise LeaseConflictError(str(exc)) from exc
+        lease_acquired = True
+        lease_context_id = context_id
+        if claim.get('status') == 'takeover':
+            refreshed = dc.get_daily_context_by_id(context_id, db_path=db_path) or refreshed
+            context_epoch = int(refreshed['context_epoch'])
+            resident_generation = int(claim['resident_generation'])
+            resident_key = str(claim['resident_key'])
+            db_cursor = None
+            if resident is not None:
+                close_local_resident_if_bound(
+                    resident,
+                    expected_key=get_local_binding().resident_key if get_local_binding() else None,
+                )
+        else:
+            resident_generation = int(claim['resident_generation'])
+            resident_key = str(claim['resident_key'])
+        lease_generation = resident_generation
+
         dc.record_daily_message_context(
             int(user_message_id),
             context_id=context_id,
@@ -572,54 +677,17 @@ def prepare_daily_turn(
             db_path=db_path,
         )
 
-        db_cursor = dc.get_resident_history_cursor(
-            context_id, resident_generation, db_path=db_path,
-        )
-        owner_status, owner_gen, owner_key = dc.ensure_worker_resident_owner(
-            context_id,
-            resident_generation,
-            worker_id=WORKER_ID,
-            resident_key=resident_key,
-            bound_cursor_message_id=db_cursor,
-            process_generation=int(getattr(resident, 'generation', 0) or 0) if resident else None,
-            db_path=db_path,
-        )
-        if owner_status == 'takeover':
-            refreshed = dc.get_daily_context_by_id(context_id, db_path=db_path) or refreshed
-            context_epoch = int(refreshed['context_epoch'])
-            resident_generation = int(refreshed['resident_generation'])
-            resident_key = owner_key
-            db_cursor = None
-            if resident is not None:
-                close_local_resident_if_bound(
-                    resident,
-                    expected_key=get_local_binding().resident_key if get_local_binding() else None,
-                )
-
-        try:
-            dc.acquire_resident_turn_lease(
-                context_id,
-                resident_generation,
-                lease_owner=owner,
-                request_message_id=int(user_message_id),
-                db_path=db_path,
-                now=now,
-            )
-        except ConflictError as exc:
-            raise LeaseConflictError(str(exc)) from exc
-        lease_acquired = True
-        lease_context_id = context_id
-        lease_generation = resident_generation
-
         is_cold = not _can_hot_turn(
             plan=DailyTurnPlan(
-                request_id=req_id, chat_id=chat_id, local_day=local_day,
+                request_id=req_id, chat_id=chat_id, local_day=origin_day,
                 context_id=context_id, context_epoch=context_epoch,
                 resident_generation=resident_generation, resident_key=resident_key,
                 user_message_id=int(user_message_id), epoch_token={},
                 lease_owner=owner, is_cold=True, is_respawn=False,
                 cursor_before=db_cursor, assembly={}, manifest={},
                 db_path=db_path, tool_profile=DAILY_TOOL_PROFILE,
+                user_created_at=user_created_at, origin_local_day=origin_day,
+                turn_started_at=turn_started_at,
             ),
             resident=resident or object(),
             db_cursor=db_cursor,
@@ -631,7 +699,7 @@ def prepare_daily_turn(
             req_id=req_id,
             owner=owner,
             chat_id=chat_id,
-            local_day=local_day,
+            local_day=origin_day,
             refreshed=refreshed,
             user_message_id=int(user_message_id),
             user_content=str(user_row.get('content') or ''),
@@ -647,6 +715,9 @@ def prepare_daily_turn(
             model=model,
             db_path=db_path,
             lease_acquired=lease_acquired,
+            user_created_at=user_created_at,
+            origin_local_day=origin_day,
+            turn_started_at=turn_started_at,
         )
         verify_epoch_token(plan)
         return plan
@@ -671,7 +742,18 @@ def ensure_resident_and_stream(
 ) -> Iterator[tuple[str, Any]]:
     """Prepare resident process, handle hot→cold mismatch, stream one turn."""
     verify_epoch_token(plan)
-    heartbeat = LeaseHeartbeat(plan)
+    if (plan.is_cold or plan.is_respawn) and resident is not None:
+        binding = get_local_binding()
+        if not _binding_matches_plan(binding, plan) and _resident_is_alive(resident):
+            kill = getattr(resident, '_kill', None)
+            if callable(kill):
+                kill(quiet=True)
+            set_local_binding(None)
+
+    def _heartbeat_failure() -> None:
+        close_local_resident_if_bound(resident, expected_key=plan.resident_key)
+
+    heartbeat = LeaseHeartbeat(plan, on_failure=_heartbeat_failure)
     heartbeat.start()
     try:
         binding = get_local_binding()
@@ -798,7 +880,11 @@ def complete_daily_turn(
         plan.manifest['cursor_cas_success'] = False
         plan.manifest['error_code'] = 'cursor_cas_conflict'
         plan.manifest['integrity_warning'] = 'cursor_cas_conflict'
-        return dict(plan.manifest)
+        raise CursorCASConflictAfterPersist(
+            'cursor CAS conflict after assistant persist',
+            assistant_message_id=aid,
+            manifest=dict(plan.manifest),
+        ) from exc
 
     _release_lease(plan)
     plan.manifest.update({
@@ -917,6 +1003,8 @@ def reprepare_after_hot_cold_mismatch(
         chat_id=plan.chat_id,
         request_id=plan.request_id,
         db_path=plan.db_path,
+        now=plan.user_created_at,
+        origin_local_day=plan.origin_local_day or plan.local_day,
         lease_owner=plan.lease_owner,
         resident=resident,
         static_system=static_system,
