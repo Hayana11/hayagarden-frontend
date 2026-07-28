@@ -136,3 +136,145 @@ export function smoothPath(vals: number[], w: number, h: number): { d: string; p
   }
   return { d, pts };
 }
+
+/** Calendar-day (1–31) → five natural date-band index: 1–7, 8–14, 15–21, 22–28, 29–月末. */
+export function weekBucketIndex(day: number): number {
+  if (day <= 7) return 0;
+  if (day <= 14) return 1;
+  if (day <= 21) return 2;
+  if (day <= 28) return 3;
+  return 4;
+}
+
+/** Spend totals for the five (or four, if month ≤ 28 days) natural date bands. */
+export function weekSpendBuckets(
+  entries: Array<{ date: string; amount: number }>,
+  daysInMonth: number,
+): { values: number[]; labels: string[] } {
+  const n = daysInMonth <= 28 ? 4 : 5;
+  const values = Array.from({ length: n }, () => 0);
+  const labels =
+    n === 4
+      ? ['1–7', '8–14', '15–21', '22–28']
+      : ['1–7', '8–14', '15–21', '22–28', `29–${daysInMonth}`];
+  for (const e of entries) {
+    if (e.amount >= 0) continue;
+    const day = parseInt(e.date.slice(8), 10);
+    if (!Number.isFinite(day) || day < 1) continue;
+    const idx = weekBucketIndex(day);
+    if (idx < n) values[idx] -= e.amount;
+  }
+  return { values, labels };
+}
+
+const LS_DAILY_LEGACY = 'ledger.dailyBudget';
+
+export function dailyBudgetStorageKey(month: string): string {
+  return `ledger.dailyBudget.${month}`;
+}
+
+/** One-shot: move legacy global key into the given month's key, then delete legacy. */
+export function migrateLegacyDailyBudget(month: string, storage: Storage = localStorage): void {
+  const legacy = storage.getItem(LS_DAILY_LEGACY);
+  if (legacy === null) return;
+  const keyed = dailyBudgetStorageKey(month);
+  if (storage.getItem(keyed) === null) storage.setItem(keyed, legacy);
+  storage.removeItem(LS_DAILY_LEGACY);
+}
+
+export function readDailyBudget(month: string, storage: Storage = localStorage): number | null {
+  const v = storage.getItem(dailyBudgetStorageKey(month));
+  if (v === null || v === '') return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
+export function writeDailyBudget(month: string, value: number | null, storage: Storage = localStorage): void {
+  const key = dailyBudgetStorageKey(month);
+  if (value === null) storage.removeItem(key);
+  else storage.setItem(key, String(value));
+}
+
+export interface MonthRequestTicket {
+  month: string;
+  isCurrent(): boolean;
+}
+
+/** Monotonic request guard so stale month responses cannot overwrite current state. */
+export function createMonthRequestGuard() {
+  let seq = 0;
+  return {
+    begin(month: string): MonthRequestTicket {
+      const id = ++seq;
+      return {
+        month,
+        isCurrent(): boolean {
+          return id === seq;
+        },
+      };
+    },
+  };
+}
+
+/** Apply a month response only when it is still the latest request for the viewed month. */
+export function shouldApplyMonthTicket(ticket: MonthRequestTicket, currentMonth: string): boolean {
+  return ticket.isCurrent() && ticket.month === currentMonth;
+}
+
+/** Ring fill ratio for spent/budget; budget 0 with spend > 0 is treated as fully used. */
+export function budgetUsageRatio(spent: number, budget: number): number {
+  if (budget <= 0) return spent > 0 ? 1 : 0;
+  return Math.min(1, spent / budget);
+}
+
+/** Center label for budget rings; never shows misleading 0% when budget is zero but spend is positive. */
+export function budgetRingCenterLabel(spent: number, budget: number): string {
+  if (budget <= 0) return spent > 0 ? '已超出' : '0%';
+  return `${Math.round((spent / budget) * 100)}%`;
+}
+
+/** Whether spend exceeds a set budget (including zero budget with positive spend). */
+export function budgetIsOver(spent: number, budget: number): boolean {
+  return budget >= 0 && spent > budget;
+}
+
+export interface LedgerDrawerLinkState {
+  mem?: string;
+  memSel: number | null;
+  read?: string;
+  readOn: boolean;
+  later: string;
+}
+
+/** Build mem/read/later for save. `mem`/`read` are the data truth; memSel is UI-only. */
+export function resolveLedgerLinks(
+  form: LedgerDrawerLinkState,
+  memPicks: Array<{ text: string }>,
+): { mem?: string; read?: string; later?: string } {
+  let mem = form.mem;
+  if (form.memSel !== null && memPicks[form.memSel]) {
+    mem = memPicks[form.memSel].text;
+  }
+  const read = form.readOn ? form.read || undefined : undefined;
+  const later = form.later.trim() || undefined;
+  return {
+    ...(mem ? { mem } : {}),
+    ...(read ? { read } : {}),
+    ...(later ? { later } : {}),
+  };
+}
+
+/** Seed drawer link fields from an existing entry without requiring the old mem to be in candidates. */
+export function seedDrawerLinksFromEntry(
+  entry: { mem?: string; read?: string; later?: string },
+  memPicks: Array<{ text: string }>,
+): LedgerDrawerLinkState {
+  const memIdx = entry.mem ? memPicks.findIndex((m) => m.text === entry.mem) : -1;
+  return {
+    mem: entry.mem,
+    memSel: memIdx >= 0 ? memIdx : null,
+    read: entry.read,
+    readOn: !!entry.read,
+    later: entry.later || '',
+  };
+}

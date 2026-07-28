@@ -1,7 +1,7 @@
 // 账本 — implements the Ledger.dc.html design: month gauge with budget ring,
 // four tabs (流水/统计/日历/探索), an add/edit bottom drawer with who/reason/
 // memory/reading/"later" links, and a budget sheet with auto daily recalc.
-import { useEffect, useMemo, useState, type CSSProperties } from 'react';
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import { BackHeader } from '../components/BackHeader';
 import { Card, ScreenLayout } from '../components/Card';
 import {
@@ -16,7 +16,25 @@ import {
   updateLedgerEntry,
   type LedgerEntryDraft,
 } from '../lib/api';
-import { LEDGER_CATS, LEDGER_REASONS, LEDGER_WHO, catOf, fmtAmount, smoothPath } from '../lib/ledger';
+import {
+  LEDGER_CATS,
+  LEDGER_REASONS,
+  LEDGER_WHO,
+  catOf,
+  createMonthRequestGuard,
+  fmtAmount,
+  budgetIsOver,
+  budgetRingCenterLabel,
+  budgetUsageRatio,
+  migrateLegacyDailyBudget,
+  readDailyBudget,
+  resolveLedgerLinks,
+  seedDrawerLinksFromEntry,
+  shouldApplyMonthTicket,
+  smoothPath,
+  weekSpendBuckets,
+  writeDailyBudget,
+} from '../lib/ledger';
 import { monthKey } from '../lib/format';
 import type { LedgerEntry, LedgerTrendPoint, LedgerWho, MemoryItem } from '../types';
 
@@ -28,7 +46,6 @@ type Tab = (typeof TABS)[number];
 const RING_C = 389.6; // 2π·62
 const DONUT_C = 2 * Math.PI * 54;
 
-const LS_DAILY = 'ledger.dailyBudget';
 const LS_AUTO = 'ledger.autoRecalc';
 
 interface DrawerForm {
@@ -38,15 +55,33 @@ interface DrawerForm {
   who: LedgerWho;
   reason: string;
   title: string;
+  /** Actual linked memory text (source of truth). */
+  mem?: string;
   memSel: number | null;
   memOpen: boolean;
+  /** Actual linked reading text (source of truth). */
+  read?: string;
   readOn: boolean;
   laterOpen: boolean;
   later: string;
 }
 
 function blankForm(): DrawerForm {
-  return { type: 'exp', amount: '', catId: 'food', who: 'both', reason: '想吃', title: '', memSel: null, memOpen: false, readOn: false, laterOpen: false, later: '' };
+  return {
+    type: 'exp',
+    amount: '',
+    catId: 'food',
+    who: 'both',
+    reason: '想吃',
+    title: '',
+    mem: undefined,
+    memSel: null,
+    memOpen: false,
+    read: undefined,
+    readOn: false,
+    laterOpen: false,
+    later: '',
+  };
 }
 
 function toYmd(d: Date): string {
@@ -74,7 +109,8 @@ export function LedgerScreen() {
   const [viewOffset, setViewOffset] = useState(0);
   const [tab, setTab] = useState<Tab>('流水');
   const [entries, setEntries] = useState<LedgerEntry[]>([]);
-  const [budget, setBudget] = useState(3000);
+  const [budget, setBudget] = useState<number | null>(null);
+  const [budgetDraft, setBudgetDraft] = useState(0);
   const [trend, setTrend] = useState<LedgerTrendPoint[]>([]);
   const [memPicks, setMemPicks] = useState<MemoryItem[]>([]);
   const [readRef, setReadRef] = useState('');
@@ -92,25 +128,100 @@ export function LedgerScreen() {
   const [form, setForm] = useState<DrawerForm>(blankForm);
 
   const [budgetSheetOpen, setBudgetSheetOpen] = useState(false);
-  const [dailyBudget, setDailyBudget] = useState<number | null>(() => {
-    const v = localStorage.getItem(LS_DAILY);
-    return v ? Number(v) : null;
-  });
+  const [dailyBudget, setDailyBudget] = useState<number | null>(null);
   const [autoRecalc, setAutoRecalc] = useState(() => localStorage.getItem(LS_AUTO) !== '0');
+
+  const [monthLoading, setMonthLoading] = useState(true);
+  const [budgetLoading, setBudgetLoading] = useState(true);
+  const [entriesError, setEntriesError] = useState(false);
+  const [budgetError, setBudgetError] = useState(false);
+  const [trendError, setTrendError] = useState(false);
+  const [trendLoading, setTrendLoading] = useState(true);
+  const [errorBanner, setErrorBanner] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [budgetSaving, setBudgetSaving] = useState(false);
+
+  const monthGuardRef = useRef(createMonthRequestGuard());
+  const migratedDailyRef = useRef(false);
 
   const now = new Date();
   const base = new Date(now.getFullYear(), now.getMonth() + viewOffset, 1);
   const key = monthKey(base);
+  const currentMonthRef = useRef(key);
+  currentMonthRef.current = key;
   const isCur = viewOffset === 0;
   const monthLabel = `${base.getFullYear()}.${String(base.getMonth() + 1).padStart(2, '0')}`;
 
+  function showError(msg: string) {
+    setErrorBanner(msg);
+    window.setTimeout(() => setErrorBanner((cur) => (cur === msg ? null : cur)), 4200);
+  }
+
+  async function reloadMonth(month: string) {
+    const ticket = monthGuardRef.current.begin(month);
+    setMonthLoading(true);
+    setBudgetLoading(true);
+    setEntriesError(false);
+    setBudgetError(false);
+    setEntries([]);
+    setBudget(null);
+    try {
+      const [entriesRes, budgetRes] = await Promise.all([
+        fetchLedgerEntries(month).then(
+          (data) => ({ ok: true as const, data }),
+          () => ({ ok: false as const }),
+        ),
+        fetchLedgerBudgetAmount(month).then(
+          (v) => ({ ok: true as const, v }),
+          () => ({ ok: false as const }),
+        ),
+      ]);
+      if (!shouldApplyMonthTicket(ticket, currentMonthRef.current)) return;
+      if (!entriesRes.ok) {
+        setEntriesError(true);
+        setEntries([]);
+      } else {
+        setEntries(entriesRes.data);
+      }
+      if (!budgetRes.ok) {
+        setBudgetError(true);
+        setBudget(null);
+      } else {
+        setBudgetError(false);
+        setBudget(budgetRes.v);
+      }
+    } finally {
+      if (shouldApplyMonthTicket(ticket, currentMonthRef.current)) {
+        setMonthLoading(false);
+        setBudgetLoading(false);
+      }
+    }
+  }
+
   useEffect(() => {
-    fetchLedgerEntries(key).then(setEntries);
-    fetchLedgerBudgetAmount(key).then((v) => setBudget(v ?? 3000));
+    if (!migratedDailyRef.current) {
+      migrateLegacyDailyBudget(monthKey(new Date()));
+      migratedDailyRef.current = true;
+    }
+    setDailyBudget(readDailyBudget(key));
+    void reloadMonth(key);
   }, [key]);
 
   useEffect(() => {
-    fetchLedgerTrend(new Date()).then(setTrend);
+    setTrendLoading(true);
+    setTrendError(false);
+    fetchLedgerTrend(new Date()).then(
+      (t) => {
+        setTrend(t);
+        setTrendError(false);
+        setTrendLoading(false);
+      },
+      () => {
+        setTrend([]);
+        setTrendError(true);
+        setTrendLoading(false);
+      },
+    );
     fetchMemorySummary().then((s) => {
       const recent = s.sections.find((x) => x.key === 'recent');
       setMemPicks((recent?.items || []).slice(0, 3));
@@ -127,24 +238,31 @@ export function LedgerScreen() {
   );
   const spend = monthEntries.filter((e) => e.amount < 0).reduce((s, e) => s - e.amount, 0);
   const income = monthEntries.filter((e) => e.amount > 0).reduce((s, e) => s + e.amount, 0);
-  const pct = budget ? spend / budget : 0;
-  const over = spend > budget;
-  const near = !over && pct >= 0.8;
+  const entriesReady = !monthLoading && !entriesError;
+  const budgetSet = !budgetLoading && !budgetError && budget !== null;
+  const budgetRingReady = entriesReady && budgetSet;
+  const pct = budgetRingReady ? budgetUsageRatio(spend, budget!) : 0;
+  const over = budgetRingReady && budgetIsOver(spend, budget!);
+  const near = budgetRingReady && !over && budget! > 0 && pct >= 0.8;
+  const ringCenterLabel = budgetRingReady ? budgetRingCenterLabel(spend, budget!) : '';
 
   const dim = new Date(base.getFullYear(), base.getMonth() + 1, 0).getDate();
   const todayD = now.getDate();
   const todaySpend = monthEntries.filter((e) => e.date === today && e.amount < 0).reduce((s, e) => s - e.amount, 0);
   const daysLeft = isCur ? Math.max(dim - todayD + 1, 1) : dim;
-  const dayAllow =
-    dailyBudget ?? (autoRecalc && isCur ? Math.max(budget - (spend - todaySpend), 0) / daysLeft : budget / dim);
-  const todayLeft = dayAllow - todaySpend;
+  const dayAllow = budgetRingReady
+    ? dailyBudget ?? (autoRecalc && isCur ? Math.max(budget! - (spend - todaySpend), 0) / daysLeft : budget! / dim)
+    : 0;
+  const todayLeft = budgetRingReady ? dayAllow - todaySpend : 0;
   const fmt1 = (v: number) => fmtAmount(Math.round(v * 10) / 10);
 
-  const statusLine = over
-    ? `超出预算 ¥${fmtAmount(spend - budget)} · 这个月先慢一点`
-    : near
-      ? `快到预算了，还可以花 ¥${fmtAmount(budget - spend)}`
-      : `还可以花 ¥${fmtAmount(budget - spend)}`;
+  const statusLine = !budgetRingReady
+    ? ''
+    : over
+      ? `超出预算 ¥${fmtAmount(spend - budget!)} · 这个月先慢一点`
+      : near
+        ? `快到预算了，还可以花 ¥${fmtAmount(budget! - spend)}`
+        : `还可以花 ¥${fmtAmount(budget! - spend)}`;
 
   // 流水
   const usedCats = [...new Set(monthEntries.map((e) => e.catId))];
@@ -179,20 +297,22 @@ export function LedgerScreen() {
   });
   const donutTop = catTotals[0];
 
-  const trendVals = trend.length ? trend.map((t) => (t.month === key && isCur ? Math.round(spend) : t.expense)) : [0, 0, 0, 0, 0, Math.round(spend)];
-  const { d: trendPath, pts: trendPts } = smoothPath(trendVals.map((v) => Math.max(v, 0)), 340, 96);
-  const trendLast = trendPts[trendPts.length - 1];
+  const trendVals = trend.length
+    ? trend.map((t) => (t.month === key && isCur && entriesReady ? Math.round(spend) : t.expense))
+    : [];
+  const { d: trendPath, pts: trendPts } = trendVals.length
+    ? smoothPath(trendVals.map((v) => Math.max(v, 0)), 340, 96)
+    : { d: '', pts: [] as Array<[number, number]> };
+  const trendLast = trendPts.length > 0 ? trendPts[trendPts.length - 1] : undefined;
+  const trendReady = !trendLoading && !trendError && trendPts.length > 0 && trendLast !== undefined;
   const trendLabels = trend.length
     ? trend.map((t) => new Date(`${t.month}-01T12:00:00`).toLocaleString('en', { month: 'short' }))
     : ['—', '—', '—', '—', '—', '—'];
 
-  const weeks = [0, 0, 0, 0];
-  for (const e of monthEntries) {
-    if (e.amount < 0) {
-      const day = parseInt(e.date.slice(8), 10);
-      weeks[Math.min(Math.floor((day - 1) / 7), 3)] -= e.amount;
-    }
-  }
+  const { values: weeks, labels: weekLabels } = useMemo(
+    () => weekSpendBuckets(monthEntries, dim),
+    [monthEntries, dim],
+  );
   const wMax = Math.max(...weeks, 1);
   const cMax = catTotals.length ? catTotals[0][1] : 1;
 
@@ -203,6 +323,19 @@ export function LedgerScreen() {
       (readLinkedCount ? `书的支出有 ${readLinkedCount} 笔关联了共读。` : '') +
       (memLinkedCount ? `有 ${memLinkedCount} 笔消费和记忆连在一起——钱花在了会被记住的地方。` : '')
     : '这个月还没有支出记录，观察也要有素材才行。';
+
+  const entriesUnavailablePane = monthLoading ? (
+    <div data-testid="ledger-tab-entries-loading" style={{ padding: '48px 24px', textAlign: 'center', fontSize: 14, color: 'var(--color-text-mute)', letterSpacing: 2 }}>
+      账目加载中…
+    </div>
+  ) : entriesError ? (
+    <div data-testid="ledger-tab-entries-unavailable" style={{ padding: '48px 24px', textAlign: 'center', fontSize: 15, color: 'var(--color-rose-deep)', letterSpacing: 2, lineHeight: 1.7 }}>
+      账目暂不可用
+      <div style={{ fontSize: 13, color: 'var(--color-text-mute)', marginTop: 8, letterSpacing: 1 }}>
+        没有展示任何统计，以免把未知数据当成零支出
+      </div>
+    </div>
+  ) : null;
 
   // 日历
   const byDay = useMemo(() => {
@@ -240,7 +373,7 @@ export function LedgerScreen() {
   }
 
   function startEdit(e: LedgerEntry) {
-    const memIdx = e.mem ? memPicks.findIndex((m) => m.text === e.mem) : -1;
+    const links = seedDrawerLinksFromEntry(e, memPicks);
     setEditingId(e.id);
     setEditKeep({ date: e.date, note: e.note });
     setForm({
@@ -250,26 +383,45 @@ export function LedgerScreen() {
       who: e.who,
       reason: e.reason,
       title: e.title,
-      memSel: memIdx >= 0 ? memIdx : null,
+      mem: links.mem,
+      memSel: links.memSel,
       memOpen: false,
-      readOn: !!e.read,
+      read: links.read,
+      readOn: links.readOn,
       laterOpen: !!e.later,
-      later: e.later || '',
+      later: links.later,
     });
     setDrawerOpen(true);
   }
 
-  function removeEntry(id: number) {
+  async function removeEntry(id: number) {
+    if (saving) return;
+    const opMonth = currentMonthRef.current;
+    setSaving(true);
+    const prev = entries;
     setEntries((es) => es.filter((e) => e.id !== id));
     setExpandedId(null);
-    deleteLedgerEntry(id);
+    try {
+      const ok = await deleteLedgerEntry(id);
+      if (!ok) {
+        if (opMonth === currentMonthRef.current) {
+          setEntries(prev);
+          showError('删除失败，记录未被删除');
+        }
+      }
+    } finally {
+      setSaving(false);
+    }
   }
 
-  function saveEntry() {
+  async function saveEntry() {
+    if (saving) return;
+    const opMonth = currentMonthRef.current;
     const val = parseFloat(form.amount);
     if (!val || val <= 0) return;
     const isInc = form.type === 'inc';
     const catId = isInc ? 'income' : form.catId;
+    const links = resolveLedgerLinks(form, memPicks);
     const draft: LedgerEntryDraft = {
       date: editKeep?.date ?? today,
       amount: isInc ? val : -val,
@@ -278,33 +430,46 @@ export function LedgerScreen() {
       who: form.who,
       reason: isInc ? '收入' : form.reason,
       note: editKeep?.note,
-      mem: form.memSel !== null && memPicks[form.memSel] ? memPicks[form.memSel].text : undefined,
-      read: form.readOn ? readRef : undefined,
-      later: form.later.trim() || undefined,
+      ...links,
     };
-    if (editingId !== null) {
-      setEntries((es) => es.map((e) => (e.id === editingId ? { ...e, ...draft, id: e.id } : e)));
-      updateLedgerEntry(editingId, draft);
-    } else {
-      const tempId = -Date.now();
-      setEntries((es) => [{ ...draft, id: tempId }, ...es]);
-      setViewOffset(0);
-      setTab('流水');
-      setFilterCat('all');
-      addLedgerEntry(draft).then((id) => {
-        if (id !== null) setEntries((es) => es.map((e) => (e.id === tempId ? { ...e, id } : e)));
-      });
+    setSaving(true);
+    try {
+      if (editingId !== null) {
+        const prev = entries;
+        setEntries((es) => es.map((e) => (e.id === editingId ? { ...e, ...draft, id: e.id } : e)));
+        const ok = await updateLedgerEntry(editingId, draft);
+        if (!ok) {
+          if (opMonth === currentMonthRef.current) {
+            setEntries(prev);
+            showError('保存失败，请重试');
+          }
+          return;
+        }
+      } else {
+        const id = await addLedgerEntry(draft);
+        if (id === null) {
+          showError('保存失败，请重试');
+          return;
+        }
+        if (opMonth === currentMonthRef.current) {
+          setEntries((es) => [{ ...draft, id }, ...es]);
+          setViewOffset(0);
+          setTab('流水');
+          setFilterCat('all');
+        }
+      }
+      setDrawerOpen(false);
+      setEditingId(null);
+      setEditKeep(null);
+      setForm(blankForm());
+    } finally {
+      setSaving(false);
     }
-    setDrawerOpen(false);
-    setEditingId(null);
-    setEditKeep(null);
-    setForm(blankForm());
   }
 
   function setDaily(v: number | null) {
     setDailyBudget(v);
-    if (v === null) localStorage.removeItem(LS_DAILY);
-    else localStorage.setItem(LS_DAILY, String(v));
+    writeDailyBudget(key, v);
   }
 
   function toggleAuto() {
@@ -312,6 +477,29 @@ export function LedgerScreen() {
     setAutoRecalc(next);
     localStorage.setItem(LS_AUTO, next ? '1' : '0');
     if (next) setDaily(null);
+  }
+
+  function openBudgetSheet() {
+    setBudgetDraft(budget ?? 0);
+    setBudgetSheetOpen(true);
+  }
+
+  async function saveBudgetAndClose() {
+    if (budgetSaving) return;
+    setBudgetSaving(true);
+    try {
+      const ok = await setLedgerBudgetAmount(key, budgetDraft);
+      if (!ok) {
+        showError('预算保存失败');
+        return;
+      }
+      setBudget(budgetDraft);
+      setBudgetError(false);
+      setBudgetLoading(false);
+      setBudgetSheetOpen(false);
+    } finally {
+      setBudgetSaving(false);
+    }
   }
 
   const monthBtn: CSSProperties = {
@@ -332,8 +520,25 @@ export function LedgerScreen() {
       <ScreenLayout>
         <BackHeader title="账本" subtitle="our ledger" />
 
+        {errorBanner && (
+          <div
+            data-testid="ledger-error-banner"
+            style={{
+              margin: '0 0 12px',
+              padding: '10px 14px',
+              borderRadius: 12,
+              background: 'rgba(156,59,74,0.10)',
+              color: 'var(--color-rose-deep)',
+              fontSize: 13,
+              letterSpacing: 1,
+            }}
+          >
+            {errorBanner}
+          </div>
+        )}
+
         {/* ── month gauge ── */}
-        <Card style={{ padding: 22 }}>
+        <Card style={{ padding: 22 }} data-testid="ledger-month-gauge">
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
             <span onClick={() => { setViewOffset(viewOffset - 1); setCalSel(null); setExpandedId(null); }} style={{ ...monthBtn, color: 'var(--color-text-soft)' }}>
               ‹
@@ -348,44 +553,89 @@ export function LedgerScreen() {
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 18, marginTop: 18 }}>
             <div style={{ flex: 1, minWidth: 0 }}>
-              <div style={{ fontSize: 38, fontWeight: 500, letterSpacing: 1, color: over ? 'var(--color-rose-deep)' : 'var(--color-text)' }}>
-                ¥ {fmtAmount(spend, true)}
-              </div>
+              {monthLoading ? (
+                <div style={{ fontSize: 38, fontWeight: 500, letterSpacing: 1, color: 'var(--color-text-faint)' }}>—</div>
+              ) : entriesError ? (
+                <div data-testid="ledger-entries-unavailable" style={{ fontSize: 15, color: 'var(--color-rose-deep)', letterSpacing: 1, lineHeight: 1.7 }}>
+                  账目暂不可用
+                </div>
+              ) : (
+                <div style={{ fontSize: 38, fontWeight: 500, letterSpacing: 1, color: over ? 'var(--color-rose-deep)' : 'var(--color-text)' }}>
+                  ¥ {fmtAmount(spend, true)}
+                </div>
+              )}
               <div style={{ fontSize: 13, color: 'var(--color-text-mute)', letterSpacing: 2, marginTop: 5 }}>本月共同支出</div>
-              {income > 0 && <div style={{ fontSize: 12, color: 'var(--color-green-deep)', marginTop: 8 }}>收入 +¥{fmtAmount(income)}</div>}
-              <div style={{ fontSize: 12, color: over ? 'var(--color-rose-deep)' : near ? '#B8862F' : 'var(--color-text-faint)', marginTop: 4, lineHeight: 1.7 }}>
-                {statusLine}
-              </div>
+              {entriesReady && income > 0 && <div style={{ fontSize: 12, color: 'var(--color-green-deep)', marginTop: 8 }}>收入 +¥{fmtAmount(income)}</div>}
+              {budgetRingReady && statusLine && (
+                <div style={{ fontSize: 12, color: over ? 'var(--color-rose-deep)' : near ? '#B8862F' : 'var(--color-text-faint)', marginTop: 4, lineHeight: 1.7 }}>
+                  {statusLine}
+                </div>
+              )}
+              {!budgetLoading && budgetError && (
+                <div data-testid="ledger-budget-unavailable" style={{ fontSize: 12, color: 'var(--color-rose-deep)', marginTop: 4, lineHeight: 1.7 }}>
+                  预算暂不可用
+                </div>
+              )}
+              {entriesReady && !budgetLoading && !budgetError && budget === null && (
+                <div data-testid="ledger-budget-unset" style={{ fontSize: 12, color: 'var(--color-text-faint)', marginTop: 4, lineHeight: 1.7 }}>
+                  尚未设置预算
+                </div>
+              )}
+              {budgetLoading && (
+                <div style={{ fontSize: 12, color: 'var(--color-text-faint)', marginTop: 4, lineHeight: 1.7 }}>预算加载中…</div>
+              )}
             </div>
-            <svg viewBox="0 0 150 150" style={{ width: 126, height: 126, flexShrink: 0 }}>
-              <circle cx={75} cy={75} r={62} fill="none" stroke={over ? '#F3DDD9' : near ? '#F3E7CE' : '#F0E3D2'} strokeWidth={10} />
-              <circle
-                cx={75}
-                cy={75}
-                r={62}
-                fill="none"
-                stroke={over ? 'var(--color-rose-deep)' : near ? 'var(--color-amber)' : 'var(--color-rose)'}
-                strokeWidth={10}
-                strokeLinecap="round"
-                strokeDasharray={RING_C}
-                strokeDashoffset={over ? 0 : (RING_C * (1 - Math.min(pct, 1))).toFixed(1)}
-                transform="rotate(-90 75 75)"
-                style={over ? { animation: 'livePulse 5s ease-in-out infinite' } : undefined}
-              />
-              <text x={75} y={71} textAnchor="middle" fill="var(--color-text)" style={{ fontFamily: DISPLAY, fontSize: 23, fontWeight: 600 }}>
-                {Math.round(pct * 100)}%
-              </text>
-              <text x={75} y={92} textAnchor="middle" fill="var(--color-text-faint)" style={{ fontSize: 11, letterSpacing: 3 }}>
-                预算
-              </text>
-            </svg>
+            {budgetRingReady ? (
+              <svg viewBox="0 0 150 150" style={{ width: 126, height: 126, flexShrink: 0 }} data-testid="ledger-budget-ring">
+                <circle cx={75} cy={75} r={62} fill="none" stroke={over ? '#F3DDD9' : near ? '#F3E7CE' : '#F0E3D2'} strokeWidth={10} />
+                <circle
+                  cx={75}
+                  cy={75}
+                  r={62}
+                  fill="none"
+                  stroke={over ? 'var(--color-rose-deep)' : near ? 'var(--color-amber)' : 'var(--color-rose)'}
+                  strokeWidth={10}
+                  strokeLinecap="round"
+                  strokeDasharray={RING_C}
+                  strokeDashoffset={over ? 0 : (RING_C * (1 - pct)).toFixed(1)}
+                  transform="rotate(-90 75 75)"
+                  style={over ? { animation: 'livePulse 5s ease-in-out infinite' } : undefined}
+                />
+                <text x={75} y={71} textAnchor="middle" fill="var(--color-text)" style={{ fontFamily: DISPLAY, fontSize: 23, fontWeight: 600 }} data-testid="ledger-budget-ring-label">
+                  {ringCenterLabel}
+                </text>
+                <text x={75} y={92} textAnchor="middle" fill="var(--color-text-faint)" style={{ fontSize: 11, letterSpacing: 3 }}>
+                  预算
+                </text>
+              </svg>
+            ) : (
+              <div
+                data-testid="ledger-budget-ring-placeholder"
+                style={{ width: 126, height: 126, flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 12, color: 'var(--color-text-faint)', textAlign: 'center', lineHeight: 1.6 }}
+              >
+                {budgetLoading ? '加载中…' : budgetError ? '预算\n暂不可用' : !entriesReady ? '支出\n未知' : '尚未\n设置预算'}
+              </div>
+            )}
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 16, paddingTop: 14, borderTop: '1px solid var(--color-track)', fontSize: 12, color: 'var(--color-text-mute)' }}>
-            <span>本月预算 ¥{fmtAmount(budget)}</span>
-            <span style={{ color: '#DFD4CF' }}>·</span>
-            <span>日均 ¥{fmt1(dayAllow)}</span>
+            {budgetRingReady ? (
+              <>
+                <span>本月预算 ¥{fmtAmount(budget!)}</span>
+                <span style={{ color: '#DFD4CF' }}>·</span>
+                <span>日均 ¥{fmt1(dayAllow)}{dailyBudget !== null ? '（手动）' : ''}</span>
+              </>
+            ) : budgetLoading ? (
+              <span>预算加载中…</span>
+            ) : budgetError ? (
+              <span style={{ color: 'var(--color-rose-deep)' }}>预算暂不可用</span>
+            ) : !entriesReady ? (
+              <span style={{ color: 'var(--color-rose-deep)' }}>支出未知，预算环不可用</span>
+            ) : (
+              <span style={{ color: 'var(--color-text-faint)' }}>尚未设置预算</span>
+            )}
             <span
-              onClick={() => setBudgetSheetOpen(true)}
+              onClick={openBudgetSheet}
+              data-testid="ledger-adjust-budget"
               style={{ cursor: 'pointer', marginLeft: 'auto', color: 'var(--color-rose-deep)', padding: '4px 14px', borderRadius: 999, background: 'rgba(183,110,121,0.10)' }}
             >
               调整
@@ -421,7 +671,22 @@ export function LedgerScreen() {
         {/* ══════════ 流水 ══════════ */}
         {tab === '流水' && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-            {monthEntries.length > 0 ? (
+            {monthLoading ? (
+              <div style={{ padding: '48px 20px', textAlign: 'center', fontSize: 13, color: 'var(--color-text-faint)', letterSpacing: 2 }}>加载中…</div>
+            ) : entriesError ? (
+              <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', padding: '48px 24px 36px', gap: 10 }}>
+                <div style={{ fontSize: 15, color: 'var(--color-rose-deep)', letterSpacing: 2 }}>账目加载失败</div>
+                <div style={{ fontSize: 13, color: 'var(--color-text-mute)', textAlign: 'center', lineHeight: 1.7 }}>
+                  没有展示任何账目，以免把演示数据当成真实记录
+                </div>
+                <div
+                  onClick={() => void reloadMonth(key)}
+                  style={{ cursor: 'pointer', marginTop: 10, padding: '10px 26px', borderRadius: 999, background: 'var(--color-rose)', color: '#FFF9F7', fontSize: 13, letterSpacing: 2 }}
+                >
+                  重新加载
+                </div>
+              </div>
+            ) : monthEntries.length > 0 ? (
               <>
                 <div style={{ display: 'flex', gap: 8, overflowX: 'auto', padding: '2px 2px 6px', margin: '0 -2px' }}>
                   {[{ id: 'all', label: '全部' }, ...LEDGER_CATS.filter((c) => usedCats.includes(c.id)).map((c) => ({ id: c.id, label: `${c.emoji} ${c.name}` }))].map((c) => (
@@ -460,6 +725,7 @@ export function LedgerScreen() {
                       return (
                         <div
                           key={e.id}
+                          data-testid={`ledger-entry-${e.id}`}
                           onClick={() => setExpandedId(open ? null : e.id)}
                           className="card-hover"
                           style={{ cursor: 'pointer', background: '#FFFFFF', borderRadius: 18, boxShadow: '0 6px 20px rgba(183,110,121,0.08)', padding: '14px 16px' }}
@@ -535,6 +801,7 @@ export function LedgerScreen() {
 
         {/* ══════════ 统计 ══════════ */}
         {tab === '统计' && (
+          entriesUnavailablePane ?? (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
             <Card style={{ padding: 22 }}>
               <div style={{ fontSize: 15, fontWeight: 600, letterSpacing: 2 }}>本月构成</div>
@@ -567,17 +834,25 @@ export function LedgerScreen() {
                 <span style={{ fontSize: 15, fontWeight: 600, letterSpacing: 2 }}>最近六个月</span>
                 <span style={{ fontFamily: DISPLAY, fontSize: 12, color: 'var(--color-text-faint)' }}>总支出趋势</span>
               </div>
-              <svg viewBox="0 0 340 96" style={{ width: '100%', height: 96, marginTop: 14, overflow: 'visible' }}>
-                <path d={trendPath} fill="none" stroke="var(--color-rose)" strokeWidth={2} strokeLinecap="round" />
-                <circle cx={trendLast[0]} cy={trendLast[1]} r={4} fill="var(--color-rose-deep)" />
-              </svg>
-              <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 8 }}>
-                {trendLabels.map((m, i) => (
-                  <span key={i} style={{ fontFamily: DISPLAY, fontSize: 11, color: i === trendLabels.length - 1 ? 'var(--color-rose-deep)' : 'var(--color-text-fainter)' }}>
-                    {m}
-                  </span>
-                ))}
-              </div>
+              {trendLoading ? (
+                <div data-testid="ledger-trend-loading" style={{ marginTop: 18, fontSize: 13, color: 'var(--color-text-mute)' }}>趋势加载中…</div>
+              ) : trendReady ? (
+                <>
+                  <svg viewBox="0 0 340 96" style={{ width: '100%', height: 96, marginTop: 14, overflow: 'visible' }} data-testid="ledger-trend-chart">
+                    <path d={trendPath} fill="none" stroke="var(--color-rose)" strokeWidth={2} strokeLinecap="round" />
+                    <circle cx={trendLast![0]} cy={trendLast![1]} r={4} fill="var(--color-rose-deep)" />
+                  </svg>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 8 }}>
+                    {trendLabels.map((m, i) => (
+                      <span key={i} style={{ fontFamily: DISPLAY, fontSize: 11, color: i === trendLabels.length - 1 ? 'var(--color-rose-deep)' : 'var(--color-text-fainter)' }}>
+                        {m}
+                      </span>
+                    ))}
+                  </div>
+                </>
+              ) : (
+                <div data-testid="ledger-trend-unavailable" style={{ marginTop: 18, fontSize: 13, color: 'var(--color-text-mute)' }}>趋势暂不可用</div>
+              )}
             </Card>
 
             <Card style={{ padding: 22 }}>
@@ -603,12 +878,12 @@ export function LedgerScreen() {
                 </span>
               </div>
               {barMode === 'week' ? (
-                <div style={{ display: 'flex', alignItems: 'flex-end', gap: 16, height: 120, marginTop: 18, padding: '0 6px' }}>
+                <div style={{ display: 'flex', alignItems: 'flex-end', gap: weeks.length > 4 ? 10 : 16, height: 120, marginTop: 18, padding: '0 6px' }}>
                   {weeks.map((v, i) => (
                     <div key={i} style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 6, justifyContent: 'flex-end', height: '100%' }}>
                       <span style={{ fontFamily: DISPLAY, fontSize: 10, color: 'var(--color-text-faint)' }}>{v ? `¥${fmtAmount(Math.round(v))}` : ''}</span>
                       <div style={{ width: '100%', maxWidth: 34, height: Math.max(Math.round((v / wMax) * 84), v ? 8 : 3), background: v ? (i % 2 ? 'var(--color-amber)' : 'var(--color-rose)') : '#F0E6E2', borderRadius: '7px 7px 3px 3px' }} />
-                      <span style={{ fontSize: 11, color: 'var(--color-text-faint)' }}>第{i + 1}周</span>
+                      <span style={{ fontSize: 10, color: 'var(--color-text-faint)', textAlign: 'center', lineHeight: 1.3 }}>{weekLabels[i]}</span>
                     </div>
                   ))}
                 </div>
@@ -639,10 +914,11 @@ export function LedgerScreen() {
               {aiOpen && <div style={{ fontSize: 13, color: '#7A6F94', lineHeight: 1.9, marginTop: 10 }}>{obsText}</div>}
             </div>
           </div>
-        )}
+        ))}
 
         {/* ══════════ 日历 ══════════ */}
         {tab === '日历' && (
+          entriesUnavailablePane ?? (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
             <Card style={{ padding: 22 }}>
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7,1fr)', gap: 6 }}>
@@ -745,10 +1021,11 @@ export function LedgerScreen() {
               <div style={{ textAlign: 'center', fontSize: 12, color: 'var(--color-text-fainter)', letterSpacing: 2, padding: '10px 0' }}>这一天很安静，没有花钱</div>
             )}
           </div>
-        )}
+        ))}
 
         {/* ══════════ 探索 ══════════ */}
         {tab === '探索' && (
+          entriesUnavailablePane ?? (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
             <Card style={{ padding: 20, cursor: 'pointer' }} onClick={() => setLaterOpen(!laterOpen)}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
@@ -809,7 +1086,7 @@ export function LedgerScreen() {
               <div style={{ fontSize: 13, color: 'var(--color-text-faint)', marginTop: 6, lineHeight: 1.7 }}>从 Memory 反向看消费</div>
             </Card>
           </div>
-        )}
+        ))}
       </ScreenLayout>
 
       {/* ── fab ── */}
@@ -843,7 +1120,7 @@ export function LedgerScreen() {
       {drawerOpen && (
         <>
           <div onClick={() => setDrawerOpen(false)} style={overlayStyle} />
-          <div style={{ ...sheetShell, height: '85%', padding: '14px 20px 30px', overflowY: 'auto' }}>
+          <div style={{ ...sheetShell, height: '85%', padding: '14px 20px 30px', overflowY: 'auto' }} data-testid="ledger-drawer">
             <div style={grabber} />
 
             <div style={{ display: 'flex', gap: 4, background: '#F1E7E2', borderRadius: 14, padding: 4, marginTop: 18, width: 'fit-content' }}>
@@ -892,7 +1169,11 @@ export function LedgerScreen() {
               )}
             </div>
             <div style={{ fontSize: 12, color: todayLeft >= 0 ? 'var(--color-text-mute)' : 'var(--color-rose-deep)', marginTop: 10, paddingLeft: 4 }}>
-              {todayLeft >= 0 ? `今日还可花 ¥${fmt1(todayLeft)}` : `今日已超 ¥${fmt1(-todayLeft)}`}
+              {budgetRingReady
+                ? todayLeft >= 0
+                  ? `今日还可花 ¥${fmt1(todayLeft)}`
+                  : `今日已超 ¥${fmt1(-todayLeft)}`
+                : ''}
             </div>
 
             {form.type === 'exp' && (
@@ -982,31 +1263,60 @@ export function LedgerScreen() {
             <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 10 }}>
               <span
                 onClick={() => patchForm({ memOpen: !form.memOpen })}
-                style={{ cursor: 'pointer', padding: '8px 14px', borderRadius: 12, background: form.memSel !== null ? 'rgba(183,110,121,0.12)' : 'transparent', color: form.memSel !== null ? 'var(--color-rose-deep)' : 'var(--color-text-mute)', fontSize: 12, border: '1px dashed #D9C6BF' }}
+                style={{ cursor: 'pointer', padding: '8px 14px', borderRadius: 12, background: form.mem ? 'rgba(183,110,121,0.12)' : 'transparent', color: form.mem ? 'var(--color-rose-deep)' : 'var(--color-text-mute)', fontSize: 12, border: '1px dashed #D9C6BF' }}
               >
                 🌙 关联记忆
               </span>
               <span
-                onClick={() => patchForm({ readOn: !form.readOn })}
+                onClick={() => {
+                  if (form.readOn) patchForm({ readOn: false, read: undefined });
+                  else patchForm({ readOn: true, read: form.read || readRef || undefined });
+                }}
                 style={{ cursor: 'pointer', padding: '8px 14px', borderRadius: 12, background: form.readOn ? 'rgba(183,110,121,0.12)' : 'transparent', color: form.readOn ? 'var(--color-rose-deep)' : 'var(--color-text-mute)', fontSize: 12, border: '1px dashed #D9C6BF' }}
               >
                 📖 关联共读
               </span>
               <span
                 onClick={() => patchForm({ laterOpen: !form.laterOpen })}
-                style={{ cursor: 'pointer', padding: '8px 14px', borderRadius: 12, background: form.laterOpen ? 'rgba(183,110,121,0.12)' : 'transparent', color: form.laterOpen ? 'var(--color-rose-deep)' : 'var(--color-text-mute)', fontSize: 12, border: '1px dashed #D9C6BF' }}
+                style={{ cursor: 'pointer', padding: '8px 14px', borderRadius: 12, background: form.laterOpen || !!form.later ? 'rgba(183,110,121,0.12)' : 'transparent', color: form.laterOpen || !!form.later ? 'var(--color-rose-deep)' : 'var(--color-text-mute)', fontSize: 12, border: '1px dashed #D9C6BF' }}
               >
                 ↳ 添加「后来」
               </span>
             </div>
+            {form.mem && !form.memOpen && (
+              <div style={{ background: '#FFFFFF', borderRadius: 12, padding: '10px 13px', marginTop: 12, display: 'flex', gap: 10, alignItems: 'flex-start' }}>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontFamily: DISPLAY, fontStyle: 'italic', fontSize: 10, color: 'var(--color-rose-pink)', letterSpacing: 1 }}>已关联记忆</div>
+                  <div style={{ fontSize: 13, color: 'var(--color-text-soft)', marginTop: 3, lineHeight: 1.6 }}>{form.mem}</div>
+                </div>
+                <span
+                  onClick={() => patchForm({ mem: undefined, memSel: null })}
+                  style={{ cursor: 'pointer', flexShrink: 0, fontSize: 12, color: 'var(--color-rose-deep)', padding: '4px 8px' }}
+                >
+                  取消
+                </span>
+              </div>
+            )}
             {form.memOpen && (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 12 }}>
+                {form.mem && form.memSel === null && (
+                  <div style={{ background: '#F9F3F0', borderRadius: 12, padding: '10px 13px', border: '1.5px solid var(--color-rose)' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
+                      <div style={{ fontFamily: DISPLAY, fontStyle: 'italic', fontSize: 10, color: 'var(--color-rose-pink)', letterSpacing: 1 }}>已关联（不在最近候选）</div>
+                      <span onClick={() => patchForm({ mem: undefined, memSel: null })} style={{ cursor: 'pointer', fontSize: 12, color: 'var(--color-rose-deep)' }}>取消</span>
+                    </div>
+                    <div style={{ fontSize: 13, color: 'var(--color-text-soft)', marginTop: 3, lineHeight: 1.6 }}>{form.mem}</div>
+                  </div>
+                )}
                 {memPicks.length ? (
                   memPicks.map((m, i) => (
                     <div
                       key={i}
-                      onClick={() => patchForm({ memSel: form.memSel === i ? null : i })}
-                      style={{ cursor: 'pointer', background: '#FFFFFF', borderRadius: 12, padding: '10px 13px', border: form.memSel === i ? '1.5px solid var(--color-rose)' : '1.5px solid transparent' }}
+                      onClick={() => {
+                        if (form.memSel === i) patchForm({ memSel: null, mem: undefined });
+                        else patchForm({ memSel: i, mem: m.text });
+                      }}
+                      style={{ cursor: 'pointer', background: '#FFFFFF', borderRadius: 12, padding: '10px 13px', border: form.memSel === i || form.mem === m.text ? '1.5px solid var(--color-rose)' : '1.5px solid transparent' }}
                     >
                       <div style={{ fontFamily: DISPLAY, fontStyle: 'italic', fontSize: 10, color: 'var(--color-rose-pink)', letterSpacing: 1 }}>MEMORY · {m.date}</div>
                       <div style={{ fontSize: 13, color: 'var(--color-text-soft)', marginTop: 3, lineHeight: 1.6 }}>{m.text}</div>
@@ -1019,8 +1329,24 @@ export function LedgerScreen() {
             )}
             {form.readOn && (
               <div style={{ background: '#FFFFFF', borderRadius: 12, padding: '10px 13px', marginTop: 12 }}>
-                <div style={{ fontFamily: DISPLAY, fontStyle: 'italic', fontSize: 10, color: 'var(--color-rose-pink)', letterSpacing: 1 }}>关联共读</div>
-                <div style={{ fontSize: 13, color: 'var(--color-text-soft)', marginTop: 3 }}>{readRef || '暂无进行中的共读'}</div>
+                <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
+                  <div style={{ fontFamily: DISPLAY, fontStyle: 'italic', fontSize: 10, color: 'var(--color-rose-pink)', letterSpacing: 1 }}>关联共读</div>
+                  <span
+                    onClick={() => patchForm({ readOn: false, read: undefined })}
+                    style={{ cursor: 'pointer', fontSize: 12, color: 'var(--color-rose-deep)' }}
+                  >
+                    取消
+                  </span>
+                </div>
+                <div style={{ fontSize: 13, color: 'var(--color-text-soft)', marginTop: 3 }}>{form.read || readRef || '暂无进行中的共读'}</div>
+                {form.read && readRef && form.read !== readRef && (
+                  <div
+                    onClick={() => patchForm({ read: readRef })}
+                    style={{ cursor: 'pointer', marginTop: 8, fontSize: 12, color: 'var(--color-text-mute)' }}
+                  >
+                    改为当前共读：{readRef}
+                  </div>
+                )}
               </div>
             )}
             {form.laterOpen && (
@@ -1033,21 +1359,23 @@ export function LedgerScreen() {
             )}
 
             <div
-              onClick={saveEntry}
+              data-testid="ledger-save-button"
+              onClick={() => { if (!saving) void saveEntry(); }}
               style={{
-                cursor: 'pointer',
+                cursor: saving ? 'default' : 'pointer',
                 marginTop: 26,
                 textAlign: 'center',
                 padding: '14px 0',
                 borderRadius: 16,
-                background: parseFloat(form.amount) > 0 ? (form.type === 'inc' ? 'var(--color-green-deep)' : 'var(--color-rose)') : '#D9C6BF',
+                background: saving ? '#D9C6BF' : parseFloat(form.amount) > 0 ? (form.type === 'inc' ? 'var(--color-green-deep)' : 'var(--color-rose)') : '#D9C6BF',
                 color: '#FFF9F7',
                 fontSize: 15,
                 letterSpacing: 4,
                 boxShadow: '0 10px 26px rgba(183,110,121,0.28)',
+                opacity: saving ? 0.7 : 1,
               }}
             >
-              {editingId !== null ? '保存修改' : '记下这一笔'}
+              {saving ? '保存中…' : editingId !== null ? '保存修改' : '记下这一笔'}
             </div>
           </div>
         </>
@@ -1057,7 +1385,7 @@ export function LedgerScreen() {
       {budgetSheetOpen && (
         <>
           <div onClick={() => setBudgetSheetOpen(false)} style={overlayStyle} />
-          <div style={{ ...sheetShell, padding: '14px 20px 34px' }}>
+          <div style={{ ...sheetShell, padding: '14px 20px 34px' }} data-testid="ledger-budget-sheet">
             <div style={grabber} />
             <div style={{ fontSize: 16, fontWeight: 600, letterSpacing: 3, marginTop: 20 }}>预算</div>
 
@@ -1065,12 +1393,12 @@ export function LedgerScreen() {
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 10, background: '#FFFFFF', borderRadius: 14, padding: '12px 16px', boxShadow: '0 4px 12px rgba(183,110,121,0.07)' }}>
               <span style={{ fontFamily: DISPLAY, fontSize: 17, color: 'var(--color-text-faint)' }}>¥</span>
               <input
-                value={String(budget)}
+                data-testid="ledger-budget-input"
+                value={String(budgetDraft)}
                 onChange={(ev) => {
                   const v = parseInt(ev.target.value.replace(/[^\d]/g, ''), 10);
-                  setBudget(Number.isNaN(v) ? 0 : v);
+                  setBudgetDraft(Number.isNaN(v) ? 0 : v);
                 }}
-                onBlur={() => setLedgerBudgetAmount(key, budget)}
                 inputMode="numeric"
                 style={{ flex: 1, minWidth: 0, border: 'none', background: 'transparent', fontFamily: DISPLAY, fontSize: 22, color: 'var(--color-text)', padding: 0, outline: 'none' }}
               />
@@ -1086,7 +1414,7 @@ export function LedgerScreen() {
                   setDaily(raw === '' ? null : parseInt(raw, 10));
                 }}
                 inputMode="numeric"
-                placeholder={`自动 · ¥${fmt1(dayAllow)}`}
+                placeholder={budgetRingReady ? `自动 · ¥${fmt1(dayAllow)}` : '自动'}
                 style={{ flex: 1, minWidth: 0, border: 'none', background: 'transparent', fontFamily: DISPLAY, fontSize: 22, color: 'var(--color-text)', padding: 0, outline: 'none' }}
               />
             </div>
@@ -1098,16 +1426,21 @@ export function LedgerScreen() {
               <span style={{ fontSize: 13, color: 'var(--color-text-soft)' }}>自动按剩余天数重算每日预算</span>
             </div>
             <div style={{ fontSize: 12, color: 'var(--color-text-faint)', marginTop: 12, lineHeight: 1.7 }}>
-              {isCur
-                ? `本月还剩 ${daysLeft} 天 · 日均 ¥${fmt1(dayAllow)}${dailyBudget !== null ? '（手动设定）' : '（自动重算）'}`
-                : `按整月 ${dim} 天平均计算`}
+              {budgetRingReady
+                ? isCur
+                  ? `本月还剩 ${daysLeft} 天 · 日均 ¥${fmt1(dayAllow)}${dailyBudget !== null ? '（手动设定，仅本月）' : '（自动重算）'}`
+                  : dailyBudget !== null
+                    ? `历史月手动日预算 ¥${fmt1(dailyBudget)}（仅 ${monthLabel}）`
+                    : `按整月 ${dim} 天平均计算 · 日均 ¥${fmt1(dayAllow)}`
+                : '预算加载完成后才能计算日均额度'}
             </div>
 
             <div
-              onClick={() => { setLedgerBudgetAmount(key, budget); setBudgetSheetOpen(false); }}
-              style={{ cursor: 'pointer', marginTop: 24, textAlign: 'center', padding: '13px 0', borderRadius: 16, background: 'var(--color-rose)', color: '#FFF9F7', fontSize: 14, letterSpacing: 4, boxShadow: '0 10px 26px rgba(183,110,121,0.28)' }}
+              data-testid="ledger-budget-save-button"
+              onClick={() => { if (!budgetSaving) void saveBudgetAndClose(); }}
+              style={{ cursor: budgetSaving ? 'default' : 'pointer', marginTop: 24, textAlign: 'center', padding: '13px 0', borderRadius: 16, background: 'var(--color-rose)', color: '#FFF9F7', fontSize: 14, letterSpacing: 4, boxShadow: '0 10px 26px rgba(183,110,121,0.28)', opacity: budgetSaving ? 0.7 : 1 }}
             >
-              完成
+              {budgetSaving ? '保存中…' : '完成'}
             </div>
           </div>
         </>

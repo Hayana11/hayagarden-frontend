@@ -120,7 +120,8 @@ export interface LedgerCategory {
 }
 
 export interface LedgerBudget {
-  budget: number;
+  /** null when the month has no saved budget */
+  budget: number | null;
   spent: number;
   categories: LedgerCategory[];
 }

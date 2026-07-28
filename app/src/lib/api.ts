@@ -40,6 +40,16 @@ async function withFallback<T>(fn: () => Promise<T>, fallback: () => T): Promise
   }
 }
 
+/** Ledger reads only fall back to demo mock under an explicit DEV mock flag. */
+export function ledgerReadsAllowMock(): boolean {
+  return Boolean(import.meta.env.DEV) && import.meta.env.VITE_LEDGER_USE_MOCK === '1';
+}
+
+async function withLedgerFallback<T>(fn: () => Promise<T>, fallback: () => T): Promise<T> {
+  if (!ledgerReadsAllowMock()) return fn();
+  return withFallback(fn, fallback);
+}
+
 // GET /api/todos -> Todo[]
 export function fetchTodos(): Promise<Todo[]> {
   return withFallback(
@@ -298,7 +308,7 @@ export function fetchBookCurrent(): Promise<BookCurrent> {
 // GET /api/ledger/budget?month=YYYY-MM -> LedgerBudget
 export function fetchLedgerBudget(now: Date): Promise<LedgerBudget> {
   const month = monthKey(now);
-  return withFallback(async () => {
+  return withLedgerFallback(async () => {
     const [budgetResp, ledgerResp] = await Promise.all([
       http.get<{ amount: number | null }>('/api/ledger/budget', { month }),
       http.get<{ records: Array<{ amount?: number; category?: string | null }> }>('/api/ledger', { month }),
@@ -318,7 +328,7 @@ export function fetchLedgerBudget(now: Date): Promise<LedgerBudget> {
       .slice(0, 6)
       .map(([name, amount]) => ({ name, amount }));
     return {
-      budget: Number(budgetResp.amount ?? 0),
+      budget: budgetResp.amount === null || budgetResp.amount === undefined ? null : Number(budgetResp.amount),
       spent,
       categories,
     };
@@ -474,7 +484,7 @@ export interface LedgerEntryDraft {
 
 // GET /api/ledger?month=YYYY-MM -> rows with the JSON meta column, mapped to LedgerEntry
 export function fetchLedgerEntries(month: string): Promise<LedgerEntry[]> {
-  return withFallback(
+  return withLedgerFallback(
     () =>
       http
         .get<{ records: Array<Parameters<typeof rowToEntry>[0]> }>('/api/ledger', { month })
@@ -487,7 +497,12 @@ export function fetchLedgerEntries(month: string): Promise<LedgerEntry[]> {
 export function addLedgerEntry(draft: LedgerEntryDraft): Promise<number | null> {
   return http
     .post<{ ok: boolean; id?: number }>('/api/ledger', entryToPayload(draft))
-    .then((r) => (r.ok ? (r.id ?? null) : null))
+    .then((r) => {
+      if (!r.ok) return null;
+      const id = r.id;
+      if (typeof id !== 'number' || !Number.isFinite(id) || id <= 0) return null;
+      return id;
+    })
     .catch(() => null);
 }
 
@@ -509,7 +524,7 @@ export function deleteLedgerEntry(id: number): Promise<boolean> {
 
 // GET /api/ledger/trend -> last six months' expenses
 export function fetchLedgerTrend(now: Date): Promise<LedgerTrendPoint[]> {
-  return withFallback(
+  return withLedgerFallback(
     () => http.get<Array<{ month: string; expense: number }>>('/api/ledger/trend'),
     () => mock.mockLedgerTrend(now),
   );
@@ -517,7 +532,7 @@ export function fetchLedgerTrend(now: Date): Promise<LedgerTrendPoint[]> {
 
 // GET /api/ledger/budget?month= -> { amount } (null when unset)
 export function fetchLedgerBudgetAmount(month: string): Promise<number | null> {
-  return withFallback(
+  return withLedgerFallback(
     () => http.get<{ amount: number | null }>('/api/ledger/budget', { month }).then((r) => r.amount),
     () => 3000,
   );

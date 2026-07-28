@@ -3854,6 +3854,57 @@ def release_self_triggers():
     return jsonify({'ok': True, 'released': released})
 
 
+import math as _math
+
+_LEDGER_MONTH_RE = re.compile(r'^\d{4}-\d{2}$')
+_LEDGER_DATE_RE = re.compile(r'^\d{4}-\d{2}-\d{2}$')
+
+
+def _ledger_valid_month(month):
+    if not isinstance(month, str) or not _LEDGER_MONTH_RE.match(month):
+        return False
+    mm = int(month[5:7])
+    return 1 <= mm <= 12
+
+
+def _ledger_valid_date(date):
+    if not isinstance(date, str) or not _LEDGER_DATE_RE.match(date):
+        return False
+    try:
+        datetime.datetime.strptime(date, '%Y-%m-%d')
+        return True
+    except ValueError:
+        return False
+
+
+def _ledger_parse_amount(raw, *, allow_zero=False):
+    """Parse ledger entry amount. Rejects NaN/Inf/0 (unless allow_zero)."""
+    if raw is None:
+        return None, (jsonify({'ok': False, 'error': 'amount required'}), 400)
+    try:
+        amount = float(raw)
+    except (ValueError, TypeError):
+        return None, (jsonify({'ok': False, 'error': 'invalid amount'}), 400)
+    if _math.isnan(amount) or _math.isinf(amount):
+        return None, (jsonify({'ok': False, 'error': 'invalid amount'}), 400)
+    if not allow_zero and amount == 0:
+        return None, (jsonify({'ok': False, 'error': 'invalid amount'}), 400)
+    return amount, None
+
+
+def _ledger_parse_budget_amount(raw):
+    """Parse monthly budget. Rejects NaN/Inf/negative."""
+    if raw is None:
+        return None, (jsonify({'ok': False, 'error': 'month and amount required'}), 400)
+    try:
+        amount = float(raw)
+    except (ValueError, TypeError):
+        return None, (jsonify({'ok': False, 'error': 'invalid amount'}), 400)
+    if _math.isnan(amount) or _math.isinf(amount) or amount < 0:
+        return None, (jsonify({'ok': False, 'error': 'invalid amount'}), 400)
+    return amount, None
+
+
 @app.route('/api/ledger/trend', methods=['GET'])
 def ledger_trend():
     now = datetime.datetime.utcnow() + datetime.timedelta(hours=8)
@@ -3933,6 +3984,8 @@ def delete_wishlist(wid):
 @app.route('/api/ledger', methods=['GET'])
 def get_ledger():
     month = request.args.get('month', '')
+    if month and not _ledger_valid_month(month):
+        return jsonify({'ok': False, 'error': 'invalid month'}), 400
     conn = get_db()
     if month:
         rows = conn.execute(
@@ -3984,16 +4037,14 @@ def _clean_ledger_meta(meta):
 @app.route('/api/ledger', methods=['POST'])
 def add_ledger():
     data     = request.get_json() or {}
-    amount   = data.get('amount')
-    if amount is None:
-        return jsonify({'error': 'amount required'}), 400
-    try:
-        amount = float(amount)
-    except (ValueError, TypeError):
-        return jsonify({'error': 'invalid amount'}), 400
+    amount, err = _ledger_parse_amount(data.get('amount'))
+    if err:
+        return err
     category = (data.get('category') or '').strip() or None
     note     = (data.get('note')     or '').strip() or None
     date     = (data.get('date')     or '').strip() or None
+    if date is not None and not _ledger_valid_date(date):
+        return jsonify({'ok': False, 'error': 'invalid date'}), 400
     author   = (data.get('author')   or '').strip() or None
     meta     = _clean_ledger_meta(data.get('meta'))
     conn = get_db()
@@ -4009,14 +4060,17 @@ def update_ledger(lid):
     data = request.get_json() or {}
     sets, vals = [], []
     if 'amount' in data:
-        try:
-            vals.append(float(data['amount'])); sets.append('amount=?')
-        except (ValueError, TypeError):
-            return jsonify({'error': 'invalid amount'}), 400
+        amount, err = _ledger_parse_amount(data['amount'])
+        if err:
+            return err
+        vals.append(amount); sets.append('amount=?')
     for col in ('category', 'note', 'date', 'author'):
         if col in data:
+            raw = (data[col] or '').strip() or None
+            if col == 'date' and raw is not None and not _ledger_valid_date(raw):
+                return jsonify({'ok': False, 'error': 'invalid date'}), 400
             sets.append(f'{col}=?')
-            vals.append((data[col] or '').strip() or None)
+            vals.append(raw)
     if 'meta' in data:
         sets.append('meta=?')
         vals.append(_clean_ledger_meta(data['meta']))
@@ -4024,15 +4078,23 @@ def update_ledger(lid):
         return jsonify({'error': 'nothing to update'}), 400
     vals.append(lid)
     conn = get_db()
-    conn.execute(f"UPDATE ledger SET {','.join(sets)} WHERE id=?", vals)
-    conn.commit(); conn.close()
+    cur = conn.execute(f"UPDATE ledger SET {','.join(sets)} WHERE id=?", vals)
+    conn.commit()
+    rowcount = cur.rowcount if cur.rowcount is not None else 0
+    conn.close()
+    if rowcount == 0:
+        return jsonify({'ok': False, 'error': 'ledger entry not found'}), 404
     return jsonify({'ok': True})
 
 @app.route('/api/ledger/<int:lid>', methods=['DELETE'])
 def delete_ledger(lid):
     conn = get_db()
-    conn.execute('DELETE FROM ledger WHERE id=?', (lid,))
-    conn.commit(); conn.close()
+    cur = conn.execute('DELETE FROM ledger WHERE id=?', (lid,))
+    conn.commit()
+    rowcount = cur.rowcount if cur.rowcount is not None else 0
+    conn.close()
+    if rowcount == 0:
+        return jsonify({'ok': False, 'error': 'ledger entry not found'}), 404
     return jsonify({'ok': True})
 
 @app.route('/api/ledger/budget', methods=['GET'])
@@ -4040,6 +4102,8 @@ def get_ledger_budget():
     month = request.args.get('month', '')
     if not month:
         return jsonify({'amount': None})
+    if not _ledger_valid_month(month):
+        return jsonify({'ok': False, 'error': 'invalid month'}), 400
     conn = get_db()
     row = conn.execute('SELECT amount FROM ledger_budget WHERE month=?', (month,)).fetchone()
     conn.close()
@@ -4049,13 +4113,13 @@ def get_ledger_budget():
 def set_ledger_budget():
     data = request.get_json() or {}
     month = (data.get('month') or '').strip()
-    amount = data.get('amount')
-    if not month or amount is None:
+    if not month or data.get('amount') is None:
         return jsonify({'error': 'month and amount required'}), 400
-    try:
-        amount = float(amount)
-    except (ValueError, TypeError):
-        return jsonify({'error': 'invalid amount'}), 400
+    if not _ledger_valid_month(month):
+        return jsonify({'ok': False, 'error': 'invalid month'}), 400
+    amount, err = _ledger_parse_budget_amount(data.get('amount'))
+    if err:
+        return err
     conn = get_db()
     conn.execute('INSERT OR REPLACE INTO ledger_budget (month, amount) VALUES (?,?)', (month, amount))
     conn.commit(); conn.close()
