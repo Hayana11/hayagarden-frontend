@@ -4128,6 +4128,7 @@ def _stream_cc_daily_soft_window(_turn_data, _uc):
     from chat.system_builder import build_cc_daily_static_parts
 
     _daily_plan = None
+    turn_terminal = False
     text, thinking = None, None
     cc_cache_read, cc_cache_create = 0, 0
     cc_usage = None
@@ -4205,6 +4206,7 @@ def _stream_cc_daily_soft_window(_turn_data, _uc):
                 error_code='empty_provider_response',
                 resident=_CC_RESIDENT,
             )
+            turn_terminal = True
             yield 'data: ' + json.dumps({
                 't': 'err', 'd': 'empty provider response', 'retryable': False,
             }) + SSE_END
@@ -4241,6 +4243,7 @@ def _stream_cc_daily_soft_window(_turn_data, _uc):
                 resident=_CC_RESIDENT,
                 respawn=False,
             )
+            turn_terminal = True
             yield 'data: ' + json.dumps({
                 't': 'err', 'd': str(exc), 'retryable': False, 'code': 'epoch_mismatch',
             }) + SSE_END
@@ -4252,6 +4255,7 @@ def _stream_cc_daily_soft_window(_turn_data, _uc):
                 error_code='assistant_persist_failed',
                 resident=_CC_RESIDENT,
             )
+            turn_terminal = True
             yield 'data: ' + json.dumps({
                 't': 'err', 'd': 'assistant persist failed: %s' % exc, 'retryable': False,
             }) + SSE_END
@@ -4272,6 +4276,7 @@ def _stream_cc_daily_soft_window(_turn_data, _uc):
                 exc.assistant_message_id,
                 json.dumps(exc.manifest, ensure_ascii=False),
             )
+            turn_terminal = True
             yield 'data: ' + json.dumps({
                 't': 'err',
                 'd': 'cursor CAS conflict after assistant persist',
@@ -4317,8 +4322,10 @@ def _stream_cc_daily_soft_window(_turn_data, _uc):
                         _usage_evt[_k] = cc_usage[_k]
             yield 'data: ' + json.dumps(_usage_evt) + SSE_END
         yield 'data: ' + json.dumps({'t': 'done', 'ok': True}) + SSE_END
+        turn_terminal = True
         return ('persisted', text, thinking)
     except _daily_rt.DuplicateTurnInProgress as exc:
+        turn_terminal = True
         yield 'data: ' + json.dumps({
             't': 'err', 'd': str(exc), 'retryable': True, 'code': 'duplicate_turn_in_progress',
         }) + SSE_END
@@ -4327,6 +4334,7 @@ def _stream_cc_daily_soft_window(_turn_data, _uc):
     except _daily_ctx.DeferredError as exc:
         if _daily_plan:
             _daily_rt._release_lease(_daily_plan)
+        turn_terminal = True
         yield 'data: ' + json.dumps({
             't': 'err', 'd': str(exc), 'retryable': True, 'code': 'rollover_deferred',
         }) + SSE_END
@@ -4335,6 +4343,7 @@ def _stream_cc_daily_soft_window(_turn_data, _uc):
     except (_daily_ctx.ConflictError, _daily_rt.LeaseConflictError) as exc:
         if _daily_plan:
             _daily_rt._release_lease(_daily_plan)
+        turn_terminal = True
         yield 'data: ' + json.dumps({
             't': 'err', 'd': str(exc), 'retryable': True, 'code': 'resident_turn_lease_conflict',
         }) + SSE_END
@@ -4348,6 +4357,7 @@ def _stream_cc_daily_soft_window(_turn_data, _uc):
                 resident=_CC_RESIDENT,
                 respawn=False,
             )
+        turn_terminal = True
         yield 'data: ' + json.dumps({
             't': 'err', 'd': str(exc), 'retryable': False, 'code': 'lease_heartbeat_terminal_failure',
         }) + SSE_END
@@ -4360,6 +4370,7 @@ def _stream_cc_daily_soft_window(_turn_data, _uc):
                 error_code='DailyWindowToolFencePending',
                 resident=_CC_RESIDENT,
             )
+        turn_terminal = True
         yield 'data: ' + json.dumps({
             't': 'err', 'd': str(exc), 'code': 'DailyWindowToolFencePending', 'retryable': False,
         }) + SSE_END
@@ -4373,6 +4384,7 @@ def _stream_cc_daily_soft_window(_turn_data, _uc):
                 resident=_CC_RESIDENT,
                 respawn=False,
             )
+        turn_terminal = True
         yield 'data: ' + json.dumps({
             't': 'err', 'd': str(exc), 'code': 'epoch_mismatch', 'retryable': False,
         }) + SSE_END
@@ -4385,11 +4397,25 @@ def _stream_cc_daily_soft_window(_turn_data, _uc):
                 error_code=str(exc),
                 resident=_CC_RESIDENT,
             )
+        turn_terminal = True
         yield 'data: ' + json.dumps({
             't': 'err', 'd': str(exc), 'retryable': False,
         }) + SSE_END
         yield 'data: ' + json.dumps({'t': 'done', 'ok': False}) + SSE_END
         return None
+    finally:
+        if _daily_plan is not None and not turn_terminal:
+            try:
+                _daily_rt.abort_daily_turn(
+                    _daily_plan,
+                    error_code='client_stream_cancelled',
+                    resident=_CC_RESIDENT,
+                    respawn=True,
+                )
+            except Exception:
+                logging.getLogger(__name__).exception(
+                    'daily_window client_stream_cancelled cleanup failed',
+                )
 
 
 @app.route('/chat/stream', methods=['POST'])

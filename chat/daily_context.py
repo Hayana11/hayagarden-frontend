@@ -449,6 +449,31 @@ def _origin_day_is_stale(
     return False
 
 
+def _rollover_lease_blocks_origin_conn(
+    conn: sqlite3.Connection,
+    *,
+    chat_id: str,
+    origin_local_day: str,
+    now_dt: datetime.datetime,
+) -> None:
+    """Defer cross-day rollover while another context day holds an active turn lease."""
+    rows = conn.execute(
+        '''SELECT c.local_day, l.expires_at FROM daily_resident_turn_leases l
+           INNER JOIN daily_contexts c ON c.id = l.context_id
+           WHERE c.chat_id=? AND c.is_backfill=0''',
+        (str(chat_id),),
+    ).fetchall()
+    for row in rows:
+        try:
+            exp_dt = _parse_local_dt(str(row['expires_at']))
+        except ValueError:
+            continue
+        if exp_dt <= now_dt:
+            continue
+        if str(row['local_day']) != origin_local_day:
+            raise DeferredError('provider request in flight; rollover deferred')
+
+
 def resolve_or_create_daily_context_for_origin(
     *,
     chat_id: str = DEFAULT_CHAT_ID,
@@ -459,22 +484,24 @@ def resolve_or_create_daily_context_for_origin(
     skip_compaction: bool = True,
 ) -> dict[str, Any]:
     """Resolve origin-day context without treating message time as current wall clock."""
-    if provider_busy:
-        raise DeferredError('provider request in flight; rollover deferred')
-
     ensure_schema(db_path)
     origin_local_day = validate_day_string(origin_local_day)
     validate_timezone(DEFAULT_TIMEZONE)
     wall_now = actual_wall_now or (
         datetime.datetime.utcnow() + datetime.timedelta(hours=TZ_OFFSET_HOURS)
     )
-    _ = wall_now  # reserved for future audit metadata; epoch uses closing semantics
 
     conn = _connect(db_path)
     try:
         conn.execute('BEGIN IMMEDIATE')
         existing = get_daily_context(conn, chat_id=chat_id, local_day=origin_local_day)
         latest = _latest_active_context_row(conn, chat_id)
+        _rollover_lease_blocks_origin_conn(
+            conn,
+            chat_id=chat_id,
+            origin_local_day=origin_local_day,
+            now_dt=wall_now,
+        )
         latest_day_row = conn.execute(
             'SELECT local_day FROM daily_contexts WHERE chat_id=? ORDER BY local_day DESC LIMIT 1',
             (str(chat_id),),
@@ -532,20 +559,33 @@ def resolve_or_create_daily_context_for_origin(
         existing = get_daily_context(conn, chat_id=chat_id, local_day=origin_local_day)
         if existing is None:
             raise
-        latest = _latest_active_context_row(conn, chat_id)
-        latest_day_row = conn.execute(
-            'SELECT local_day FROM daily_contexts WHERE chat_id=? ORDER BY local_day DESC LIMIT 1',
-            (str(chat_id),),
-        ).fetchone()
-        newest_local_day = str(latest_day_row['local_day']) if latest_day_row else None
-        if _origin_day_is_stale(
-            origin_local_day=origin_local_day,
-            latest=latest,
-            newest_local_day=newest_local_day,
-        ):
-            raise StaleOriginDayError(
-                'origin day %s stale after concurrent create' % origin_local_day,
+        conn2 = _connect(db_path)
+        try:
+            conn2.execute('BEGIN IMMEDIATE')
+            latest = _latest_active_context_row(conn2, chat_id)
+            latest_day_row = conn2.execute(
+                'SELECT local_day FROM daily_contexts WHERE chat_id=? ORDER BY local_day DESC LIMIT 1',
+                (str(chat_id),),
+            ).fetchone()
+            newest_local_day = str(latest_day_row['local_day']) if latest_day_row else None
+            _rollover_lease_blocks_origin_conn(
+                conn2,
+                chat_id=chat_id,
+                origin_local_day=origin_local_day,
+                now_dt=wall_now,
             )
+            if _origin_day_is_stale(
+                origin_local_day=origin_local_day,
+                latest=latest,
+                newest_local_day=newest_local_day,
+            ):
+                conn2.rollback()
+                raise StaleOriginDayError(
+                    'origin day %s stale after concurrent create' % origin_local_day,
+                )
+            conn2.commit()
+        finally:
+            conn2.close()
         return existing
     except Exception:
         conn.rollback()
