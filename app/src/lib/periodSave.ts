@@ -1,9 +1,8 @@
-/** Per-date serial save queue: same-day edits merge and flush in order. */
+/** Per-date serial save queue: same-day edits flush in order by generation. */
 import type { PeriodDayRecord } from '../types';
 
 type QueueState = {
   tail: Promise<SaveResult>;
-  pending: PeriodDayRecord | null;
   snapshots: Map<number, PeriodDayRecord>;
 };
 
@@ -30,7 +29,7 @@ export function shouldReloadAfterFailedSave(date: string, saveGeneration: number
 function getQueue(date: string): QueueState {
   let q = queues.get(date);
   if (!q) {
-    q = { tail: Promise.resolve({ ok: true, generation: 0 }), pending: null, snapshots: new Map() };
+    q = { tail: Promise.resolve({ ok: true, generation: 0 }), snapshots: new Map() };
     queues.set(date, q);
   }
   return q;
@@ -38,7 +37,7 @@ function getQueue(date: string): QueueState {
 
 function maybeCleanupQueue(date: string) {
   const q = queues.get(date);
-  if (q && !q.pending && q.snapshots.size === 0) {
+  if (q && q.snapshots.size === 0) {
     queues.delete(date);
   }
 }
@@ -65,16 +64,15 @@ async function flushGeneration(
   return lastOk;
 }
 
-/** Merge patch and enqueue; resolves when this generation's flush turn completes. */
+/** Enqueue a full day record; resolves when this generation's flush turn completes. */
 export function schedulePeriodDaySave(
   date: string,
-  patch: PeriodDayRecord,
+  record: PeriodDayRecord,
   saveGeneration: number,
   saveFn: (date: string, record: PeriodDayRecord) => Promise<boolean>,
 ): Promise<SaveResult> {
   const q = getQueue(date);
-  q.pending = { ...(q.pending || {}), ...patch };
-  q.snapshots.set(saveGeneration, { ...q.pending });
+  q.snapshots.set(saveGeneration, { ...record });
   const promise = q.tail
     .catch(() => ({ ok: false, generation: saveGeneration }))
     .then(async (): Promise<SaveResult> => {
@@ -83,6 +81,11 @@ export function schedulePeriodDaySave(
     });
   q.tail = promise;
   return promise;
+}
+
+/** Test helper — number of dates with active queue state. */
+export function getActiveQueueCountForTests(): number {
+  return queues.size;
 }
 
 /** Test helper — reset module state between cases. */

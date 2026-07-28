@@ -25,6 +25,7 @@ const {
   bumpEditGeneration,
   schedulePeriodDaySave,
   shouldReloadAfterFailedSave,
+  getActiveQueueCountForTests,
   resetPeriodSaveQueues,
 } = save;
 
@@ -168,6 +169,52 @@ const emptySettings = { cycleLength: 28, periodLength: 5, lastStart: '' };
   const pB = schedulePeriodDaySave('2026-06-01', { came: true, flow: 'B' }, gB, saveFn);
   await Promise.all([pA, pB]);
   assert.deepEqual(server.get('2026-06-01'), { came: true, flow: 'B' });
+}
+
+// ── idle queue cleanup: stale fields must not leak into later saves ──
+{
+  resetPeriodSaveQueues();
+  const server = new Map();
+  const date = '2026-06-04';
+  const g1 = bumpEditGeneration(date);
+  await schedulePeriodDaySave(date, { came: true, flow: '多' }, g1, async (d, r) => {
+    server.set(d, structuredClone(r));
+    return true;
+  });
+  assert.equal(getActiveQueueCountForTests(), 0);
+
+  const g2 = bumpEditGeneration(date);
+  await schedulePeriodDaySave(date, { came: false, note: '今天没来' }, g2, async (d, r) => {
+    server.set(d, structuredClone(r));
+    return true;
+  });
+  assert.deepEqual(server.get(date), { came: false, note: '今天没来' });
+  assert.equal(getActiveQueueCountForTests(), 0);
+}
+
+// ── delayed reload must not overwrite newer edit C ──
+{
+  resetPeriodSaveQueues();
+  const date = '2026-06-05';
+  let local = { [date]: { came: true, flow: 'B' } };
+  const serverStale = { [date]: { came: true, flow: 'STALE' } };
+
+  async function reloadIfStillLatest(generation) {
+    if (!shouldReloadAfterFailedSave(date, generation)) return;
+    const fresh = await delay(40).then(() => structuredClone(serverStale));
+    if (!shouldReloadAfterFailedSave(date, generation)) return;
+    local = fresh;
+  }
+
+  const gB = bumpEditGeneration(date);
+  const reloadPromise = reloadIfStillLatest(gB);
+  await delay(10);
+  const _gC = bumpEditGeneration(date);
+  local[date] = { came: false, note: '今天没来' };
+  await reloadPromise;
+
+  assert.equal(shouldReloadAfterFailedSave(date, gB), false);
+  assert.deepEqual(local[date], { came: false, note: '今天没来' });
 }
 
 console.log('period cycle tests: ok');

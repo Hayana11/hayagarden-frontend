@@ -193,6 +193,17 @@ export function PeriodScreen() {
     deriveCycle(days, settings, today);
   const { cycleLength, periodLength } = settings;
 
+  async function reloadDayDataIfStillLatest(date: string, generation: number): Promise<void> {
+    if (!shouldReloadAfterFailedSave(date, generation)) return;
+
+    const fresh = await fetchPeriodDays();
+
+    if (!shouldReloadAfterFailedSave(date, generation)) return;
+
+    daysRef.current = fresh;
+    setDays(fresh);
+  }
+
   async function updateDay(date: string, patch: Partial<PeriodDayRecord>) {
     const generation = bumpEditGeneration(date);
     const rec = { ...(daysRef.current[date] || {}), ...patch };
@@ -202,22 +213,18 @@ export function PeriodScreen() {
     try {
       const { ok } = await schedulePeriodDaySave(date, rec, generation, savePeriodDay);
       if (!ok) {
-        if (shouldReloadAfterFailedSave(date, generation)) {
-          const fresh = await fetchPeriodDays();
-          daysRef.current = fresh;
-          setDays(fresh);
+        try {
+          await reloadDayDataIfStillLatest(date, generation);
+        } catch {
+          /* keep latest local edits when reload also fails */
         }
         setSaveError('保存没有成功，请再试一次');
       }
     } catch {
-      if (shouldReloadAfterFailedSave(date, generation)) {
-        try {
-          const fresh = await fetchPeriodDays();
-          daysRef.current = fresh;
-          setDays(fresh);
-        } catch {
-          /* keep latest local edits when reload also fails */
-        }
+      try {
+        await reloadDayDataIfStillLatest(date, generation);
+      } catch {
+        /* keep latest local edits when reload also fails */
       }
       setSaveError('保存没有成功，请再试一次');
     }
