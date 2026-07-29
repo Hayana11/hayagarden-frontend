@@ -151,6 +151,310 @@ def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
     return {str(r[1]) for r in conn.execute('PRAGMA table_info(%s)' % table)}
 
 
+_MIGRATION_INJECT_FAULT_AT: Optional[str] = None
+
+_RELATED_CONTEXT_ID_TABLES = (
+    'daily_carryover_messages',
+    'daily_resident_cursors',
+    'daily_resident_turn_leases',
+    'daily_message_contexts',
+    'daily_resident_owners',
+)
+
+
+def _ordered_table_columns(conn: sqlite3.Connection, table: str) -> tuple[str, ...]:
+    return tuple(
+        str(r[1])
+        for r in conn.execute('PRAGMA table_info(%s)' % table).fetchall()
+    )
+
+
+def _snapshot_related_table_rows(conn: sqlite3.Connection) -> dict[str, dict[str, Any]]:
+    """Full row-level snapshot for migration verification (in-memory only)."""
+    existing = {
+        str(r[0])
+        for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+    }
+    snap: dict[str, dict[str, Any]] = {}
+    for table in _RELATED_CONTEXT_ID_TABLES:
+        if table not in existing:
+            snap[table] = {'columns': (), 'rows': ()}
+            continue
+        columns = _ordered_table_columns(conn, table)
+        if not columns:
+            snap[table] = {'columns': (), 'rows': ()}
+            continue
+        col_list = ', '.join(columns)
+        order_by = ', '.join(columns)
+        rows = conn.execute(
+            'SELECT %s FROM %s ORDER BY %s' % (col_list, table, order_by)
+        ).fetchall()
+        snap[table] = {
+            'columns': columns,
+            'rows': tuple(tuple(row) for row in rows),
+        }
+    return snap
+
+
+def _verify_related_table_rows(
+    conn: sqlite3.Connection,
+    before: dict[str, dict[str, Any]],
+    valid_context_ids: set[int],
+) -> None:
+    after = _snapshot_related_table_rows(conn)
+    if after != before:
+        for table in _RELATED_CONTEXT_ID_TABLES:
+            if after.get(table) != before.get(table):
+                raise DailyContextError(
+                    '%s row mapping changed during migration' % table
+                )
+        raise DailyContextError('related table row mapping changed during migration')
+    for table in _RELATED_CONTEXT_ID_TABLES:
+        payload = after.get(table) or {'columns': (), 'rows': ()}
+        columns = tuple(payload.get('columns') or ())
+        rows = tuple(payload.get('rows') or ())
+        if not columns or 'context_id' not in columns:
+            continue
+        idx = columns.index('context_id')
+        refs = {
+            int(row[idx])
+            for row in rows
+            if row[idx] is not None
+        }
+        if refs and not refs.issubset(valid_context_ids):
+            raise DailyContextError(
+                '%s references missing context_id after migration' % table
+            )
+
+
+def _read_sqlite_sequence(conn: sqlite3.Connection, table: str) -> Optional[int]:
+    try:
+        row = conn.execute(
+            'SELECT seq FROM sqlite_sequence WHERE name=?', (table,),
+        ).fetchone()
+        return int(row[0]) if row is not None else None
+    except sqlite3.OperationalError:
+        return None
+
+
+def _sync_sqlite_sequence(
+    conn: sqlite3.Connection,
+    table: str,
+    *,
+    floor: int = 0,
+) -> None:
+    """Sync sqlite_sequence to at least ``max(floor, MAX(id))``.
+
+    Preserves AUTOINCREMENT high-water when rows were deleted before migrate:
+    ``floor`` should be ``max(old_seq or 0, old_max_id)`` during migration.
+    """
+    row = conn.execute('SELECT MAX(id) AS m FROM %s' % table).fetchone()
+    max_id = int(row['m'] or 0) if row is not None else 0
+    target = max(int(floor or 0), max_id)
+    if target <= 0:
+        conn.execute('DELETE FROM sqlite_sequence WHERE name=?', (table,))
+        return
+    conn.execute('DELETE FROM sqlite_sequence WHERE name=?', (table,))
+    conn.execute(
+        'INSERT INTO sqlite_sequence (name, seq) VALUES (?, ?)',
+        (table, target),
+    )
+
+
+def _migration_checkpoint(stage: str) -> None:
+    if _MIGRATION_INJECT_FAULT_AT == stage:
+        raise DailyContextError('migration fault injection: %s' % stage)
+
+
+def _create_manual_window_indexes(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        'CREATE INDEX IF NOT EXISTS idx_daily_contexts_chat_epoch '
+        'ON daily_contexts(chat_id, context_epoch)'
+    )
+    conn.execute(
+        'CREATE UNIQUE INDEX IF NOT EXISTS idx_daily_contexts_legacy_day_unique '
+        "ON daily_contexts(chat_id, local_day) WHERE window_mode='legacy_daily'"
+    )
+    conn.execute(
+        'CREATE UNIQUE INDEX IF NOT EXISTS idx_daily_contexts_open_manual_unique '
+        "ON daily_contexts(chat_id) WHERE window_mode='manual' "
+        'AND closed_at IS NULL AND is_backfill=0'
+    )
+    conn.execute(
+        'CREATE UNIQUE INDEX IF NOT EXISTS idx_daily_contexts_switch_idem_unique '
+        'ON daily_contexts(chat_id, switch_request_id) '
+        'WHERE switch_request_id IS NOT NULL'
+    )
+
+
+def _assert_daily_contexts_autoincrement(conn: sqlite3.Connection, table: str) -> None:
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name=?",
+        (table,),
+    ).fetchone()
+    if row is None or not row[0]:
+        raise DailyContextError('missing table sql for %s' % table)
+    sql = str(row[0]).upper()
+    if 'AUTOINCREMENT' not in sql:
+        raise DailyContextError(
+            '%s must keep INTEGER PRIMARY KEY AUTOINCREMENT' % table
+        )
+
+
+def _drop_migration_temp_table(conn: sqlite3.Connection) -> None:
+    """Best-effort cleanup so a failed migrate never leaves a half schema."""
+    try:
+        conn.execute('DROP TABLE IF EXISTS daily_contexts__mw_new')
+        conn.commit()
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+
+
+def _migrate_manual_window_schema(conn: sqlite3.Connection) -> None:
+    """Idempotent rebuild: drop table-level (chat_id, local_day) unique; add manual-window columns.
+
+    Uses a single ``BEGIN IMMEDIATE`` transaction with ``conn.execute`` only —
+    never ``executescript`` (which implicitly commits and breaks atomicity).
+    """
+    dcols = _table_columns(conn, 'daily_contexts')
+    if not dcols:
+        return
+    if 'window_mode' in dcols:
+        return
+
+    # Clear any outer implicit transaction so BEGIN IMMEDIATE owns the migrate.
+    conn.commit()
+    conn.execute('BEGIN IMMEDIATE')
+    try:
+        old_count = int(conn.execute('SELECT COUNT(*) FROM daily_contexts').fetchone()[0])
+        old_ids = {
+            int(r[0]) for r in conn.execute('SELECT id FROM daily_contexts').fetchall()
+        }
+        old_max_id = int(
+            conn.execute('SELECT MAX(id) FROM daily_contexts').fetchone()[0] or 0
+        )
+        old_seq = _read_sqlite_sequence(conn, 'daily_contexts')
+        related_before = _snapshot_related_table_rows(conn)
+
+        conn.execute(
+            '''
+            CREATE TABLE daily_contexts__mw_new (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id TEXT NOT NULL,
+                local_day TEXT NOT NULL,
+                timezone TEXT NOT NULL DEFAULT 'Asia/Shanghai',
+                boundary_hour INTEGER NOT NULL DEFAULT 4,
+                context_epoch INTEGER NOT NULL,
+                boundary_message_id INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL,
+                handoff_id INTEGER NULL,
+                carryover_count INTEGER NOT NULL DEFAULT 0,
+                selection_finalized_at DATETIME NULL,
+                resident_generation INTEGER NOT NULL DEFAULT 1,
+                morning_greeting_message_id INTEGER NULL,
+                version INTEGER NOT NULL DEFAULT 1,
+                lease_owner TEXT NULL,
+                lease_expires_at DATETIME NULL,
+                created_at DATETIME NOT NULL,
+                updated_at DATETIME NOT NULL,
+                is_backfill INTEGER NOT NULL DEFAULT 0,
+                carryover_requested_count INTEGER NULL,
+                window_mode TEXT NOT NULL DEFAULT 'legacy_daily',
+                opened_at DATETIME NOT NULL,
+                closed_at DATETIME NULL,
+                close_reason TEXT NULL,
+                source_context_id INTEGER NULL,
+                switch_request_id TEXT NULL
+            )
+            '''
+        )
+        _assert_daily_contexts_autoincrement(conn, 'daily_contexts__mw_new')
+        _migration_checkpoint('after_create')
+
+        has_backfill = 'is_backfill' in dcols
+        has_requested = 'carryover_requested_count' in dcols
+        backfill_expr = 'COALESCE(is_backfill, 0)' if has_backfill else '0'
+        requested_expr = (
+            'carryover_requested_count' if has_requested else 'NULL'
+        )
+        conn.execute(
+            '''
+            INSERT INTO daily_contexts__mw_new (
+                id, chat_id, local_day, timezone, boundary_hour, context_epoch,
+                boundary_message_id, status, handoff_id, carryover_count,
+                selection_finalized_at, resident_generation, morning_greeting_message_id,
+                version, lease_owner, lease_expires_at, created_at, updated_at,
+                is_backfill, carryover_requested_count,
+                window_mode, opened_at, closed_at, close_reason,
+                source_context_id, switch_request_id
+            )
+            SELECT
+                id, chat_id, local_day, timezone, boundary_hour, context_epoch,
+                boundary_message_id, status, handoff_id, carryover_count,
+                selection_finalized_at, resident_generation, morning_greeting_message_id,
+                version, lease_owner, lease_expires_at, created_at, updated_at,
+                %s, %s,
+                'legacy_daily',
+                COALESCE(created_at, updated_at, datetime('now', '+8 hours')),
+                NULL, NULL, NULL, NULL
+            FROM daily_contexts
+            ''' % (backfill_expr, requested_expr)
+        )
+        _migration_checkpoint('after_copy')
+
+        new_count = int(conn.execute('SELECT COUNT(*) FROM daily_contexts__mw_new').fetchone()[0])
+        new_ids = {
+            int(r[0]) for r in conn.execute('SELECT id FROM daily_contexts__mw_new').fetchall()
+        }
+        new_max_id = int(
+            conn.execute('SELECT MAX(id) FROM daily_contexts__mw_new').fetchone()[0] or 0
+        )
+        if new_count != old_count or new_ids != old_ids or new_max_id != old_max_id:
+            raise DailyContextError(
+                'manual window migration row/id mismatch: %s vs %s'
+                % (old_count, new_count)
+            )
+        _verify_related_table_rows(conn, related_before, new_ids)
+
+        _migration_checkpoint('before_drop')
+        conn.execute('DROP TABLE daily_contexts')
+        conn.execute('ALTER TABLE daily_contexts__mw_new RENAME TO daily_contexts')
+        _migration_checkpoint('after_rename')
+
+        sequence_floor = max(old_seq or 0, old_max_id)
+        _sync_sqlite_sequence(conn, 'daily_contexts', floor=sequence_floor)
+        _create_manual_window_indexes(conn)
+        _migration_checkpoint('during_index')
+
+        final_ids = {
+            int(r[0]) for r in conn.execute('SELECT id FROM daily_contexts').fetchall()
+        }
+        if final_ids != old_ids:
+            raise DailyContextError('context id set changed after migration finalize')
+        _verify_related_table_rows(conn, related_before, final_ids)
+        _assert_daily_contexts_autoincrement(conn, 'daily_contexts')
+
+        new_seq = _read_sqlite_sequence(conn, 'daily_contexts')
+        if sequence_floor > 0 and (new_seq is None or new_seq < sequence_floor):
+            raise DailyContextError('sqlite_sequence below migration floor')
+
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        _drop_migration_temp_table(conn)
+        raise
+
+
+def _ensure_manual_window_indexes(conn: sqlite3.Connection) -> None:
+    dcols = _table_columns(conn, 'daily_contexts')
+    if not dcols or 'window_mode' not in dcols:
+        return
+    _create_manual_window_indexes(conn)
+
+
 def ensure_schema(db_path: Optional[str] = None) -> None:
     path = os.path.abspath(db_path or DEFAULT_DB_PATH)
     if path in _SCHEMA_READY and os.path.isfile(path):
@@ -178,10 +482,15 @@ def ensure_schema(db_path: Optional[str] = None) -> None:
                 lease_expires_at DATETIME NULL,
                 created_at DATETIME NOT NULL DEFAULT (datetime('now', '+8 hours')),
                 updated_at DATETIME NOT NULL DEFAULT (datetime('now', '+8 hours')),
-                UNIQUE(chat_id, local_day)
+                is_backfill INTEGER NOT NULL DEFAULT 0,
+                carryover_requested_count INTEGER NULL,
+                window_mode TEXT NOT NULL DEFAULT 'legacy_daily',
+                opened_at DATETIME NOT NULL DEFAULT (datetime('now', '+8 hours')),
+                closed_at DATETIME NULL,
+                close_reason TEXT NULL,
+                source_context_id INTEGER NULL,
+                switch_request_id TEXT NULL
             );
-            CREATE INDEX IF NOT EXISTS idx_daily_contexts_chat_epoch
-                ON daily_contexts(chat_id, context_epoch);
 
             CREATE TABLE IF NOT EXISTS daily_carryover_messages (
                 context_id INTEGER NOT NULL,
@@ -269,6 +578,8 @@ def ensure_schema(db_path: Optional[str] = None) -> None:
             conn.execute(
                 'ALTER TABLE daily_contexts ADD COLUMN carryover_requested_count INTEGER NULL'
             )
+        _migrate_manual_window_schema(conn)
+        _ensure_manual_window_indexes(conn)
         if _table_columns(conn, 'chat_messages'):
             ensure_chat_messages_source_kind(conn, record_cutover=True)
         conn.commit()

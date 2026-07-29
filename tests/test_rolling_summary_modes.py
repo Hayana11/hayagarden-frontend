@@ -1,6 +1,7 @@
 """Mode-keyed rolling summary isolation tests."""
 from __future__ import annotations
 
+import datetime
 import tempfile
 import unittest
 from pathlib import Path
@@ -11,15 +12,28 @@ from chat.history_boundary import boundary_rows_for_summary, legacy_block_limit,
 from chat.rolling_summary_store import get_summary, save_summary
 
 
-_FIXED_HISTORY_WHERE = "created_at >= '2026-07-25 00:00:00'"
+def _shanghai_now() -> datetime.datetime:
+    return datetime.datetime.utcnow() + datetime.timedelta(hours=8)
 
 
-def _row(mid, content='msg', *, file_url='', author=None):
+def _fixture_created_at() -> str:
+    """Recent Shanghai timestamp — always inside summarize horizon."""
+    return (_shanghai_now() - datetime.timedelta(hours=12)).strftime('%Y-%m-%d %H:%M:%S')
+
+
+def _fixture_history_where() -> str:
+    day = (_shanghai_now() - datetime.timedelta(days=2)).strftime('%Y-%m-%d')
+    return "created_at >= '%s 00:00:00'" % day
+
+
+def _row(mid, content='msg', *, file_url='', author=None, created_at=None):
     if author is None:
         author = 'hayana' if mid % 2 else 'assistant'
+    if created_at is None:
+        created_at = _fixture_created_at()
     return SimpleNamespace(
         id=mid, author=author, content=content, image_url='',
-        created_at='2026-07-26 12:00:00', tool_calls='', file_url=file_url, file_name='f.txt',
+        created_at=created_at, tool_calls='', file_url=file_url, file_name='f.txt',
     )
 
 
@@ -29,7 +43,7 @@ class RollingSummaryModeTests(unittest.TestCase):
         self.db_path = str(Path(self.tmp.name) / 'memories.db')
         self._history_where = mock.patch(
             'chat.history_boundary._HISTORY_WHERE',
-            _FIXED_HISTORY_WHERE,
+            _fixture_history_where(),
         )
         self._history_where.start()
 
