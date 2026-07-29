@@ -204,16 +204,27 @@ def _read_sqlite_sequence(conn: sqlite3.Connection, table: str) -> Optional[int]
         return None
 
 
-def _sync_sqlite_sequence(conn: sqlite3.Connection, table: str) -> None:
+def _sync_sqlite_sequence(
+    conn: sqlite3.Connection,
+    table: str,
+    *,
+    floor: int = 0,
+) -> None:
+    """Sync sqlite_sequence to at least ``max(floor, MAX(id))``.
+
+    Preserves AUTOINCREMENT high-water when rows were deleted before migrate:
+    ``floor`` should be ``max(old_seq or 0, old_max_id)`` during migration.
+    """
     row = conn.execute('SELECT MAX(id) AS m FROM %s' % table).fetchone()
     max_id = int(row['m'] or 0) if row is not None else 0
-    if max_id <= 0:
+    target = max(int(floor or 0), max_id)
+    if target <= 0:
         conn.execute('DELETE FROM sqlite_sequence WHERE name=?', (table,))
         return
     conn.execute('DELETE FROM sqlite_sequence WHERE name=?', (table,))
     conn.execute(
         'INSERT INTO sqlite_sequence (name, seq) VALUES (?, ?)',
-        (table, max_id),
+        (table, target),
     )
 
 
@@ -380,7 +391,8 @@ def _migrate_manual_window_schema(conn: sqlite3.Connection) -> None:
         conn.execute('ALTER TABLE daily_contexts__mw_new RENAME TO daily_contexts')
         _migration_checkpoint('after_rename')
 
-        _sync_sqlite_sequence(conn, 'daily_contexts')
+        sequence_floor = max(old_seq or 0, old_max_id)
+        _sync_sqlite_sequence(conn, 'daily_contexts', floor=sequence_floor)
         _create_manual_window_indexes(conn)
         _migration_checkpoint('during_index')
 
@@ -393,10 +405,8 @@ def _migrate_manual_window_schema(conn: sqlite3.Connection) -> None:
         _assert_daily_contexts_autoincrement(conn, 'daily_contexts')
 
         new_seq = _read_sqlite_sequence(conn, 'daily_contexts')
-        if old_seq is not None and new_seq is not None and new_seq < old_seq:
-            raise DailyContextError('sqlite_sequence regressed during migration')
-        if old_max_id > 0 and (new_seq is None or new_seq < old_max_id):
-            raise DailyContextError('sqlite_sequence below MAX(id) after migration')
+        if sequence_floor > 0 and (new_seq is None or new_seq < sequence_floor):
+            raise DailyContextError('sqlite_sequence below migration floor')
 
         conn.commit()
     except Exception:

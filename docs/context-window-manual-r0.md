@@ -51,13 +51,14 @@ Migration is a single atomic transaction:
 1. `BEGIN IMMEDIATE`
 2. `CREATE TABLE ... (id INTEGER PRIMARY KEY AUTOINCREMENT, ...)` via `conn.execute`
    (**not** `sqlite3.executescript`, which implicitly commits)
-3. copy rows → verify row count, ID set, `MAX(id)`, related-table `context_id` maps
+3. copy rows → verify row count, ID set, `MAX(id)`, related-table `context_id` ID sets (not row-level mapping)
 4. `DROP` / `RENAME`
 5. sync `sqlite_sequence`, create all partial indexes
 6. final verify → `COMMIT`
 
 On failure: rollback + drop any leftover `daily_contexts__mw_new`. Original table and
-indexes remain; next `ensure_schema` can retry. Related maps verified for:
+indexes remain; next `ensure_schema` can retry. Related tables verified for unchanged
+`DISTINCT context_id` sets (orphan refs rejected; row-level mapping not compared):
 
 - `daily_carryover_messages`
 - `daily_resident_cursors`
@@ -73,7 +74,7 @@ time (`strftime('%Y-%m-%d')`), not the legacy 04:00 chat-day.
 `chat/context_window.py` → `get_current_context_window()` / `current_window_summary()`:
 
 1. Open `manual` window (highest epoch), else
-2. Open `legacy_daily` with `closed_at IS NULL`, else
+2. Latest `legacy_daily` row **only if** that row's `closed_at IS NULL` (no older-epoch fallback), else
 3. If any historical rows exist → **fail closed** (`NoOpenContextWindowError` / HTTP 409
    `no_open_context`) — never resurrect a closed manual or closed legacy, else
 4. One-time bootstrap on empty DB (not a switch).

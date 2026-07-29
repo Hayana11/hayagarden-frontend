@@ -212,6 +212,18 @@ class ContextWindowRouteTests(unittest.TestCase):
             )
         self.assertEqual(resp.status_code, 400)
 
+    def test_switch_non_object_json_400(self):
+        with mock.patch('context_window_routes.enabled', return_value=True):
+            for body in ('1', '[]', '"x"'):
+                with self.subTest(body=body):
+                    resp = self.client.post(
+                        '/api/context-window/switch',
+                        data=body,
+                        content_type='application/json',
+                        headers=self.auth,
+                    )
+                    self.assertEqual(resp.status_code, 400)
+
 
 if __name__ == '__main__':
     unittest.main()

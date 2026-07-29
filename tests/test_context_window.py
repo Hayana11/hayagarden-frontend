@@ -517,6 +517,80 @@ class MigrationAutoincrementTests(unittest.TestCase):
             self.assertGreaterEqual(seq_after, seq_before)
         conn.close()
 
+    def _seed_three_row_old_schema(self, db: str) -> int:
+        _create_old_schema_db(db)
+        conn = sqlite3.connect(db)
+        for day, epoch in (('2026-07-27', 2), ('2026-07-28', 3)):
+            conn.execute(
+                '''INSERT INTO daily_contexts (
+                    chat_id, local_day, timezone, boundary_hour, context_epoch,
+                    boundary_message_id, status, carryover_count, resident_generation,
+                    version, created_at, updated_at, is_backfill
+                ) VALUES ('default', ?, 'Asia/Shanghai', 4, ?, 0, 'PROVISIONAL', 0, 1, 1,
+                          '2026-07-27 10:00:00', '2026-07-27 10:00:00', 0)''',
+                (day, epoch),
+            )
+        seq = dc._read_sqlite_sequence(conn, 'daily_contexts')
+        conn.commit()
+        conn.close()
+        return int(seq or 3)
+
+    def test_migration_with_deleted_max_id_preserves_sequence_floor(self):
+        db = _tmp_db()
+        old_seq = self._seed_three_row_old_schema(db)
+        conn = sqlite3.connect(db)
+        conn.execute('DELETE FROM daily_contexts WHERE id=3')
+        conn.commit()
+        conn.close()
+        dc.ensure_schema(db)
+        conn = sqlite3.connect(db)
+        cur = conn.execute(
+            '''INSERT INTO daily_contexts (
+                chat_id, local_day, timezone, boundary_hour, context_epoch,
+                boundary_message_id, status, carryover_count, resident_generation,
+                version, created_at, updated_at, window_mode, opened_at
+            ) VALUES ('default','2026-07-29','Asia/Shanghai',4,4,0,'PROVISIONAL',0,1,1,
+                      '2026-07-29 10:00:00','2026-07-29 10:00:00','legacy_daily','2026-07-29 10:00:00')'''
+        )
+        new_id = int(cur.lastrowid)
+        seq_after = dc._read_sqlite_sequence(conn, 'daily_contexts')
+        conn.commit()
+        conn.close()
+        self.assertGreater(new_id, 2)
+        self.assertGreaterEqual(int(seq_after or 0), old_seq)
+
+    def test_migration_on_empty_table_preserves_sequence_floor(self):
+        db = _tmp_db()
+        old_seq = self._seed_three_row_old_schema(db)
+        conn = sqlite3.connect(db)
+        for table in (
+            'daily_carryover_messages',
+            'daily_resident_cursors',
+            'daily_resident_turn_leases',
+            'daily_message_contexts',
+            'daily_resident_owners',
+        ):
+            conn.execute('DELETE FROM %s' % table)
+        conn.execute('DELETE FROM daily_contexts')
+        conn.commit()
+        conn.close()
+        dc.ensure_schema(db)
+        conn = sqlite3.connect(db)
+        cur = conn.execute(
+            '''INSERT INTO daily_contexts (
+                chat_id, local_day, timezone, boundary_hour, context_epoch,
+                boundary_message_id, status, carryover_count, resident_generation,
+                version, created_at, updated_at, window_mode, opened_at
+            ) VALUES ('default','2026-07-29','Asia/Shanghai',4,1,0,'PROVISIONAL',0,1,1,
+                      '2026-07-29 10:00:00','2026-07-29 10:00:00','legacy_daily','2026-07-29 10:00:00')'''
+        )
+        new_id = int(cur.lastrowid)
+        seq_after = dc._read_sqlite_sequence(conn, 'daily_contexts')
+        conn.commit()
+        conn.close()
+        self.assertGreater(new_id, old_seq)
+        self.assertGreaterEqual(int(seq_after or 0), old_seq)
+
 
 class StrictJsonContractTests(unittest.TestCase):
     def test_reject_non_json_integers(self):
@@ -992,6 +1066,51 @@ class ClosedManualRecoveryTests(unittest.TestCase):
         conn.close()
         self.assertEqual(len(rows), 2)
         self.assertTrue(all(r[2] for r in rows))
+        with self.assertRaises(cw.NoOpenContextWindowError):
+            cw.get_current_context_window(db_path=db)
+
+    def test_multi_legacy_closed_latest_does_not_resurrect_older(self):
+        """Post-migrate multi-day legacy: closing latest must not reopen older epoch."""
+        db = _tmp_db()
+        _init_chat_messages(db)
+        dc.ensure_schema(db)
+        ctxs = []
+        for i, day in enumerate(('2026-07-25', '2026-07-26', '2026-07-27')):
+            ctxs.append(dc.get_or_create_daily_context(
+                local_day=day,
+                allow_backfill=True,
+                db_path=db,
+                now=datetime.datetime(2026, 7, 25 + i, 10, 0, 0),
+            ))
+        latest = max(ctxs, key=lambda c: int(c['context_epoch']))
+        u = _insert(db, 'hayana', 'x', '2026-07-27 10:00:00')
+        _map(db, int(latest['id']), int(latest['context_epoch']), u, 'user')
+        out = cw.switch_context_window(
+            source_context_id=int(latest['id']),
+            source_context_epoch=int(latest['context_epoch']),
+            count=0,
+            request_id=str(uuid.uuid4()),
+            db_path=db,
+        )
+        conn = sqlite3.connect(db)
+        conn.execute(
+            "UPDATE daily_contexts SET closed_at='2026-07-27 12:00:00', close_reason='manual' "
+            "WHERE id=?",
+            (out['target_context_id'],),
+        )
+        conn.commit()
+        older_open = conn.execute(
+            '''SELECT COUNT(*) FROM daily_contexts
+               WHERE window_mode=? AND closed_at IS NULL AND context_epoch < ?''',
+            (cw.WINDOW_MODE_LEGACY_DAILY, int(latest['context_epoch'])),
+        ).fetchone()[0]
+        latest_closed = conn.execute(
+            'SELECT closed_at FROM daily_contexts WHERE id=?',
+            (int(latest['id']),),
+        ).fetchone()[0]
+        conn.close()
+        self.assertGreater(int(older_open), 0)
+        self.assertIsNotNone(latest_closed)
         with self.assertRaises(cw.NoOpenContextWindowError):
             cw.get_current_context_window(db_path=db)
 

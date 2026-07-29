@@ -240,22 +240,29 @@ def _find_open_manual_window_conn(
     ).fetchone())
 
 
-def _find_latest_open_legacy_bootstrap_conn(
+def _find_latest_legacy_bootstrap_conn(
     conn: sqlite3.Connection,
     chat_id: str,
 ) -> Optional[dict[str, Any]]:
-    """Open legacy_daily only — never resurrect a closed legacy after manual history."""
-    return _row_to_dict(conn.execute(
+    """Latest legacy_daily row; return only when that row is still open.
+
+    Never fall back to an older epoch when the newest legacy is closed.
+    """
+    latest = _row_to_dict(conn.execute(
         '''SELECT * FROM daily_contexts
            WHERE chat_id=? AND window_mode=? AND is_backfill=0
-             AND closed_at IS NULL
            ORDER BY context_epoch DESC LIMIT 1''',
         (chat_id, WINDOW_MODE_LEGACY_DAILY),
     ).fetchone())
+    if latest is None:
+        return None
+    if latest.get('closed_at'):
+        return None
+    return latest
 
 
-# Backward-compatible alias used by older call sites / tests.
-_find_latest_legacy_bootstrap_conn = _find_latest_open_legacy_bootstrap_conn
+# Backward-compatible alias.
+_find_latest_open_legacy_bootstrap_conn = _find_latest_legacy_bootstrap_conn
 
 
 def resolve_canonical_context_row_conn(
@@ -268,16 +275,16 @@ def resolve_canonical_context_row_conn(
 
     Fail-closed recovery:
     - Prefer an open ``manual`` window.
-    - Else an open ``legacy_daily`` row (``closed_at IS NULL``).
+    - Else the **latest** ``legacy_daily`` row only when ``closed_at IS NULL``.
     - Else if any historical rows exist (closed manual/legacy), raise
-      ``NoOpenContextWindowError`` — never silently reopen a closed window.
+      ``NoOpenContextWindowError`` — never silently reopen a closed or older window.
     - Else bootstrap one legacy row on a truly empty chat.
     """
     now_dt = _shanghai_now(now)
     manual = _find_open_manual_window_conn(conn, chat_id)
     if manual is not None:
         return manual
-    legacy = _find_latest_open_legacy_bootstrap_conn(conn, chat_id)
+    legacy = _find_latest_legacy_bootstrap_conn(conn, chat_id)
     if legacy is not None:
         return legacy
     any_count = int(conn.execute(
@@ -288,7 +295,7 @@ def resolve_canonical_context_row_conn(
     boot = _bootstrap_legacy_context_conn(conn, chat_id=chat_id, now_dt=now_dt)
     if boot:
         return boot
-    legacy = _find_latest_open_legacy_bootstrap_conn(conn, chat_id)
+    legacy = _find_latest_legacy_bootstrap_conn(conn, chat_id)
     if legacy is None:
         raise ContextWindowError('bootstrap failed')
     return legacy

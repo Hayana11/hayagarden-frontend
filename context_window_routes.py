@@ -119,7 +119,9 @@ def create_context_window_blueprint(
         err = _auth_error()
         if err:
             return err
-        data = request.get_json(silent=True) or {}
+        data = request.get_json(silent=True)
+        if not isinstance(data, dict):
+            return jsonify({'ok': False, 'error': 'invalid switch payload'}), 400
         chat_id = str(data.get('chat_id') or request.args.get('chat_id') or DEFAULT_CHAT_ID)
         cid_err = _reject_non_default_chat_id(chat_id)
         if cid_err:
