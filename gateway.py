@@ -6428,6 +6428,18 @@ app.register_blueprint(create_daily_context_bff_blueprint())
 from context_window_bff import create_context_window_bff_blueprint
 app.register_blueprint(create_context_window_bff_blueprint())
 
+from chat import daily_runtime as _daily_rt_for_switch
+
+def _gw_close_resident_on_context_switch(result: dict) -> None:
+    _daily_rt_for_switch.close_local_resident_for_context_switch(
+        _CC_RESIDENT,
+        source_context_id=int(result['source_context_id']),
+        source_context_epoch=int(result['source_context_epoch']),
+        source_resident_generation=int(result['source_resident_generation']),
+    )
+
+_daily_rt_for_switch.register_context_switch_resident_closer(_gw_close_resident_on_context_switch)
+
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5051, debug=False)

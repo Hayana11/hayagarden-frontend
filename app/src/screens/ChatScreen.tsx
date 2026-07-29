@@ -6,8 +6,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import { Link } from 'react-router-dom';
 import { BottomNav } from '../components/BottomNav';
-import { CarryoverModal, CarryoverPickerCard, DaySoftBoundary } from '../components/dailySoftWindow';
-import { useDailySoftWindow } from '../hooks/useDailySoftWindow';
+import { CarryoverModal } from '../components/dailySoftWindow';
+import { useManualContextWindow } from '../hooks/useManualContextWindow';
 import {
   editChatMessage,
   fetchChatMessages,
@@ -37,7 +37,7 @@ import {
   type ChatMsg,
   type ChatToolCall,
 } from '../lib/chat';
-import { boundaryInsertIndex } from '../lib/dailySoftWindow';
+import type { SoftWindowUiState } from '../lib/dailySoftWindow';
 import type { ReactElement } from 'react';
 
 const SETTINGS_KEY = 'fyodor-chat-settings';
@@ -115,6 +115,7 @@ const IC = {
   edit: 'M17 3a2.85 2.85 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z',
   redo: 'M3 12a9 9 0 1 0 3-6.7|M3 4v5h5',
   refresh: 'M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8|M21 3v5h-5',
+  window: 'M3 7h5v12H3z|M16 7h5v12h-5z|M3 7h18',
   up: 'M12 19V5|M5 12l7-7 7 7',
   down: 'M12 5v14|M19 12l-7 7-7-7',
   plus: 'M12 5v14|M5 12h14',
@@ -138,9 +139,8 @@ export function ChatScreen() {
   const [settings, setSettings] = useState<Settings>(loadSettings);
   const [sysDark, setSysDark] = useState(() => window.matchMedia?.('(prefers-color-scheme: dark)').matches ?? false);
   const [wide, setWide] = useState(() => window.innerWidth >= 900);
-
-  const softWindow = useDailySoftWindow({ live: true });
-  const { notifySendStarted, notifySendSettled } = softWindow;
+  const [compactToolbar, setCompactToolbar] = useState(() => window.innerWidth <= 360);
+  const [genLockBusy, setGenLockBusy] = useState(false);
 
   const [msgs, setMsgs] = useState<ChatMsg[]>([]);
   const [hasMoreBefore, setHasMoreBefore] = useState(false);
@@ -172,6 +172,10 @@ export function ChatScreen() {
   const [refreshing, setRefreshing] = useState(false);
   const [chatError, setChatError] = useState<{ message: string; hint: string } | null>(null);
   const [pickedChoices, setPickedChoices] = useState<Record<number, string>>({});
+
+  const manualWindow = useManualContextWindow();
+  const switchBlocked =
+    sending || live !== null || genLockBusy || manualWindow.submitting;
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const taRef = useRef<HTMLTextAreaElement>(null);
@@ -261,13 +265,36 @@ export function ChatScreen() {
     const mq = window.matchMedia('(prefers-color-scheme: dark)');
     const onMq = () => setSysDark(mq.matches);
     mq.addEventListener?.('change', onMq);
-    const onRs = () => setWide(window.innerWidth >= 900);
+    const onRs = () => {
+      setWide(window.innerWidth >= 900);
+      setCompactToolbar(window.innerWidth <= 360);
+    };
     window.addEventListener('resize', onRs);
     return () => {
       mq.removeEventListener?.('change', onMq);
       window.removeEventListener('resize', onRs);
     };
   }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    const pollLock = async () => {
+      try {
+        const resp = await fetch('/api/gw/chat/lock', { credentials: 'include' });
+        if (!resp.ok) return;
+        const data = (await resp.json()) as { busy?: boolean };
+        if (!cancelled) setGenLockBusy(Boolean(data.busy));
+      } catch {
+        /* ignore */
+      }
+    };
+    void pollLock();
+    const id = setInterval(pollLock, 2500);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, [sending, live]);
 
   // gateway reachability — breathing status under the name
   useEffect(() => {
@@ -359,7 +386,6 @@ export function ChatScreen() {
   const send = useCallback(async (overrideText?: string) => {
     const text = (overrideText ?? input).trim();
     if ((!text && !pendingFile && !pendingImage) || sending) return;
-    notifySendStarted();
     setSending(true);
     setChatError(null);
     if (!overrideText) setInput('');
@@ -369,19 +395,17 @@ export function ChatScreen() {
     setPendingImage(null);
     const messageId = await sendChatMessage(text, extra);
     if (messageId === null) {
-      notifySendSettled(false);
       showToast('发送失败');
       if (!overrideText) setInput(text);
       setSending(false);
       return;
     }
-    notifySendSettled(true);
     await refetchLatest();
     await runStream(messageId);
     await refetchLatest();
     setSending(false);
     taRef.current?.focus();
-  }, [input, pendingFile, pendingImage, sending, refetchLatest, runStream, showToast, notifySendStarted, notifySendSettled]);
+  }, [input, pendingFile, pendingImage, sending, refetchLatest, runStream, showToast]);
 
   const chooseOption = useCallback(async (text: string, msgId: number) => {
     if (sending || isChoicesAnswered(msgId, msgs)) return;
@@ -854,16 +878,10 @@ export function ChatScreen() {
     );
   }
 
-  // date separators + Soft Window boundary / highlight
+  // date separators
   const rendered: ReactElement[] = [];
   let lastDate = '';
-  const boundaryIdx = softWindow.showBoundary
-    ? boundaryInsertIndex(msgs.map((m) => m.id), softWindow.boundaryMessageId)
-    : null;
-  msgs.forEach((m, i) => {
-    if (boundaryIdx !== null && boundaryIdx === i) {
-      rendered.push(<DaySoftBoundary key="dsw-boundary" />);
-    }
+  msgs.forEach((m) => {
     if (m.dateKey && m.dateKey !== lastDate) {
       lastDate = m.dateKey;
       const label = m.dateKey === new Date().toISOString().slice(0, 10) ? dateLabel : m.dateKey.replace(/-/g, '.');
@@ -873,16 +891,18 @@ export function ChatScreen() {
         </div>,
       );
     }
-    const highlight = softWindow.highlightIds.has(m.id);
     rendered.push(
-      <div key={m.id} className={highlight ? 'dsw-msg-highlight' : undefined}>
+      <div key={m.id}>
         {m.role === 'user' ? renderUserMsg(m) : renderAssistantMsg(m)}
       </div>,
     );
   });
-  if (boundaryIdx !== null && boundaryIdx === msgs.length) {
-    rendered.push(<DaySoftBoundary key="dsw-boundary" />);
-  }
+
+  const toolbarIcon = compactToolbar ? 32 : 35;
+  const modalUiState: SoftWindowUiState =
+    manualWindow.uiState === 'probing' || manualWindow.uiState === 'idle'
+      ? 'loading'
+      : manualWindow.uiState;
 
   return (
     <div
@@ -918,7 +938,7 @@ export function ChatScreen() {
                     animation: endpointOnline ? 'chatBreathe 2.2s ease-in-out infinite' : undefined,
                   }}
                 />
-                {endpointOnline !== null && (
+                {endpointOnline !== null && !compactToolbar && (
                   <span style={{ fontFamily: DISPLAY, fontStyle: 'italic', fontSize: 10.5, letterSpacing: 1, color: 'var(--faint)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
                     {endpointOnline ? 'always here' : 'away for now'}
                   </span>
@@ -942,16 +962,39 @@ export function ChatScreen() {
               <div onClick={() => setNavOpen(navOpen === 'font' ? null : 'font')} style={{ ...iconBtn, background: navOpen === 'font' ? 'var(--rosebg)' : 'transparent' }}>
                 <span style={{ fontFamily: DISPLAY, fontSize: 14, letterSpacing: 0.5 }}>Aa</span>
               </div>
-              <div onClick={() => setNavOpen(navOpen === 'search' ? null : 'search')} style={{ ...iconBtn, background: navOpen === 'search' ? 'var(--rosebg)' : 'transparent' }}>
+              <div onClick={() => setNavOpen(navOpen === 'search' ? null : 'search')} style={{ ...iconBtn, width: toolbarIcon, height: toolbarIcon, background: navOpen === 'search' ? 'var(--rosebg)' : 'transparent' }}>
                 <svg viewBox="0 0 24 24" width={16} height={16} fill="none" stroke="currentColor" strokeWidth={1.6} strokeLinecap="round" strokeLinejoin="round">
                   <circle cx={12} cy={12} r={9} />
                   <path d={IC.clock} />
                 </svg>
               </div>
+              {manualWindow.enabled ? (
+                <button
+                  type="button"
+                  title="换一扇窗"
+                  aria-label="换一扇窗"
+                  disabled={switchBlocked}
+                  onClick={() => {
+                    if (!switchBlocked) void manualWindow.openModal();
+                  }}
+                  style={{
+                    ...iconBtn,
+                    width: toolbarIcon,
+                    height: toolbarIcon,
+                    border: 'none',
+                    padding: 0,
+                    background: manualWindow.modalOpen ? 'var(--rosebg)' : 'transparent',
+                    opacity: switchBlocked ? 0.45 : 1,
+                    cursor: switchBlocked ? 'default' : 'pointer',
+                  }}
+                >
+                  <Svg d={IC.window} />
+                </button>
+              ) : null}
               <div
                 onClick={() => { void refreshChat(); }}
                 title="刷新并解锁"
-                style={{ ...iconBtn, opacity: refreshing ? 0.55 : 1, cursor: refreshing ? 'default' : 'pointer' }}
+                style={{ ...iconBtn, width: toolbarIcon, height: toolbarIcon, opacity: refreshing ? 0.55 : 1, cursor: refreshing ? 'default' : 'pointer' }}
               >
                 <span style={{ display: 'flex', animation: refreshing ? 'chatSpin .8s linear infinite' : undefined }}>
                   <Svg d={IC.refresh} />
@@ -1146,20 +1189,6 @@ export function ChatScreen() {
             </div>
           )}
 
-          {softWindow.showPickerCard ? (
-            <div style={{ padding: '0 0 10px' }}>
-              <CarryoverPickerCard
-                locked={softWindow.locked}
-                carryoverCount={
-                  softWindow.current?.selected_round_count ?? softWindow.current?.carryover_count ?? 0
-                }
-                loading={softWindow.uiState === 'probing' || softWindow.submitting}
-                statusText={softWindow.statusText}
-                onOpen={softWindow.openDrawer}
-              />
-            </div>
-          ) : null}
-
           <div style={{ background: 'var(--card)', borderRadius: 26, boxShadow: '0 14px 40px var(--shadow2)', padding: '12px 12px 10px', transition: 'background .3s' }}>
             <textarea
               ref={taRef}
@@ -1298,18 +1327,23 @@ export function ChatScreen() {
         </div>
       )}
 
-      {/* ══ Soft Window packing modal ══ */}
+      {/* ══ Manual context window modal ══ */}
       <CarryoverModal
-        open={softWindow.drawerOpen}
-        uiState={softWindow.uiState}
-        draftCount={softWindow.draftCount}
-        rounds={softWindow.rounds}
-        submitting={softWindow.submitting}
-        errorDetail={softWindow.errorDetail}
-        onDismiss={softWindow.closeDrawer}
-        onReconsider={softWindow.closeDrawer}
-        onDraftChange={softWindow.setDraftCount}
-        onConfirm={() => { void softWindow.confirmSelection(); }}
+        variant="manual"
+        open={manualWindow.modalOpen}
+        uiState={modalUiState}
+        draftCount={manualWindow.draftCount}
+        rounds={manualWindow.rounds}
+        submitting={manualWindow.submitting}
+        errorDetail={manualWindow.errorDetail}
+        onDismiss={manualWindow.closeModal}
+        onReconsider={manualWindow.closeModal}
+        onDraftChange={manualWindow.setDraftCount}
+        onConfirm={() => {
+          void manualWindow.confirmSwitch().then((ok) => {
+            if (ok) showToast('已经换了一扇新窗');
+          });
+        }}
       />
 
       {/* ══ toast ══ */}

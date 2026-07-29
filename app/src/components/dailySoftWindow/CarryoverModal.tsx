@@ -20,6 +20,8 @@ type Props = {
   rounds: CarryoverRound[];
   submitting?: boolean;
   errorDetail?: string;
+  /** `manual` = P-CONTEXT-MANUAL-WINDOW-R1 copy; `auto` = legacy daily preview. */
+  variant?: 'auto' | 'manual';
   /** Counts for the excluded-category chips. Defaults match the packing mock. */
   excludedCounts?: Partial<Record<'提醒' | '工具' | 'thinking', number>>;
   /** × / overlay dismiss — close only, no POST. */
@@ -52,6 +54,7 @@ export function CarryoverModal({
   rounds,
   submitting,
   errorDetail,
+  variant = 'auto',
   excludedCounts,
   onDismiss,
   onReconsider,
@@ -94,23 +97,50 @@ export function CarryoverModal({
 
   const previewRounds = pickLastNRounds(rounds, draftCount);
   const snippetRows = roundSnippetMessages(previewRounds);
+  const isManual = variant === 'manual';
   const isLocked = uiState === 'locked';
   const tiersDisabled =
-    isLocked || submitting || uiState === 'loading' || uiState === 'probing' || uiState === 'submitting';
+    isLocked || submitting || uiState === 'loading' || uiState === 'probing' || uiState === 'submitting' || uiState === 'busy';
   const canConfirm =
     !submitting && (uiState === 'ready' || uiState === 'empty');
   const excluded = { ...DEFAULT_EXCLUDED, ...excludedCounts };
 
+  const loadingText = isManual ? '正在加载可带走的对话…' : '正在翻找昨天可带走的句子…';
+  const tierTitle = isManual ? '带走轮次' : '带走轮次';
+  const snippetTitle = isManual ? '将带去新窗口的对话' : '对话首尾片段';
+  const excludedTitle = isManual ? '不会带去新窗口' : '不会装进行李箱';
+  const zeroSnippet = isManual
+    ? '不带旧窗口的原话，干净地开始。'
+    : '不带走昨天的话。直接开始新的一天也可以。';
+  const emptySnippet = isManual
+    ? '没有可带走的正式对话。'
+    : '昨天没有可带走的正式对话。';
+  const dialogLabel = isManual ? '换一扇窗' : '新的一天';
+  const heroTitle = isManual ? '换一扇窗' : '新的一天';
+  const heroSubtitle = isManual ? 'PACKING FOR THE NEXT WINDOW' : 'Packing for the Next Window';
+  const heroDesc = isManual
+    ? '旧聊天仍会留在这里。新窗口只带上你选择的最近几轮原话。'
+    : null;
+  const confirmLabel = submitting
+    ? (isManual ? '正在换窗…' : '换窗中…')
+    : isLocked
+      ? '已锁定'
+      : '确认换窗';
+  const reconsiderLabel = '再想想';
+
   let mid: ReactNode;
   if (uiState === 'loading' || uiState === 'probing' || uiState === 'submitting') {
-    mid = <div className="daily-window-empty">正在翻找昨天可带走的句子…</div>;
+    mid = <div className="daily-window-empty">{loadingText}</div>;
   } else if (
     uiState === 'disabled' ||
     uiState === 'conflict' ||
     uiState === 'error' ||
     uiState === 'auth_error' ||
     uiState === 'unavailable' ||
-    uiState === 'deferred'
+    uiState === 'deferred' ||
+    uiState === 'busy' ||
+    uiState === 'stale' ||
+    uiState === 'no_open_context'
   ) {
     mid = (
       <div className="daily-window-empty">
@@ -121,7 +151,7 @@ export function CarryoverModal({
     mid = (
       <>
         <section className="daily-window-section">
-          <h3 className="daily-window-section-title">带走轮次</h3>
+          <h3 className="daily-window-section-title">{tierTitle}</h3>
           <div className="daily-window-options" role="radiogroup" aria-label="带走轮次">
             {CARRYOVER_COUNTS.map((n) => {
               const selected = draftCount === n;
@@ -141,9 +171,13 @@ export function CarryoverModal({
             })}
           </div>
           <p className="daily-window-helper">
-            {uiState === 'empty'
-              ? '昨天没有可带走的正式对话 · 与各档相同 · 0 tokens'
-              : `全部 ${rounds.length} 轮 · 与各档相同 · 约${tokenHint(rounds.length)}k tokens`}
+            {isManual
+              ? uiState === 'empty'
+                ? '没有可带走的正式对话'
+                : `全部 ${rounds.length} 轮可选`
+              : uiState === 'empty'
+                ? '昨天没有可带走的正式对话 · 与各档相同 · 0 tokens'
+                : `全部 ${rounds.length} 轮 · 与各档相同 · 约${tokenHint(rounds.length)}k tokens`}
           </p>
         </section>
 
@@ -152,11 +186,11 @@ export function CarryoverModal({
         </div>
 
         <section className="daily-window-section daily-window-section--snippets">
-          <h3 className="daily-window-section-title">对话首尾片段</h3>
+          <h3 className="daily-window-section-title">{snippetTitle}</h3>
           {draftCount === 0 ? (
-            <div className="daily-window-empty">不带走昨天的话。直接开始新的一天也可以。</div>
+            <div className="daily-window-empty">{zeroSnippet}</div>
           ) : snippetRows.length === 0 || uiState === 'empty' ? (
-            <div className="daily-window-empty">昨天没有可带走的正式对话。</div>
+            <div className="daily-window-empty">{emptySnippet}</div>
           ) : (
             <div className="daily-window-previews">
               {snippetRows.map((c: CarryoverMessage, i) => (
@@ -170,7 +204,7 @@ export function CarryoverModal({
         </section>
 
         <section className="daily-window-section daily-window-section--left-behind">
-          <h3 className="daily-window-section-title">不会装进行李箱</h3>
+          <h3 className="daily-window-section-title">{excludedTitle}</h3>
           <div className="daily-window-tags">
             {(['提醒', '工具', 'thinking'] as const).map((label) => (
               <span key={label} className="daily-window-tag">
@@ -192,7 +226,7 @@ export function CarryoverModal({
         className={`daily-window-dialog${uiState === 'loading' || uiState === 'probing' || submitting ? ' is-loading' : ''}`}
         role="dialog"
         aria-modal="true"
-        aria-label="新的一天"
+        aria-label={dialogLabel}
         onClick={(e) => e.stopPropagation()}
       >
         <button type="button" className="daily-window-close" onClick={onDismiss} aria-label="关闭">
@@ -202,8 +236,9 @@ export function CarryoverModal({
         <div className="daily-window-scroll">
           <header className="daily-window-hero">
             <div className="daily-window-hero-copy">
-              <h2 className="daily-window-title">新的一天</h2>
-              <p className="daily-window-subtitle">Packing for the Next Window</p>
+              <h2 className="daily-window-title">{heroTitle}</h2>
+              <p className="daily-window-subtitle">{heroSubtitle}</p>
+              {heroDesc ? <p className="daily-window-desc">{heroDesc}</p> : null}
             </div>
           </header>
 
@@ -216,7 +251,7 @@ export function CarryoverModal({
             className="daily-window-button daily-window-button--secondary"
             onClick={onReconsider}
           >
-            再想想
+            {reconsiderLabel}
           </button>
           <button
             type="button"
@@ -224,7 +259,7 @@ export function CarryoverModal({
             disabled={!canConfirm || isLocked || submitting}
             onClick={onConfirm}
           >
-            {submitting ? '换窗中…' : isLocked ? '已锁定' : '确认换窗'}
+            {confirmLabel}
           </button>
         </footer>
       </section>

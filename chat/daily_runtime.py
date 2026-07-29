@@ -124,6 +124,22 @@ class DailyTurnPlan:
 
 _LOCAL_BINDING: Optional[LocalResidentBinding] = None
 
+_CONTEXT_SWITCH_RESIDENT_CLOSER: Optional[Callable[[dict[str, Any]], None]] = None
+
+
+def register_context_switch_resident_closer(
+    fn: Optional[Callable[[dict[str, Any]], None]],
+) -> None:
+    """Gateway registers _CC_RESIDENT close handler for manual context switch."""
+    global _CONTEXT_SWITCH_RESIDENT_CLOSER
+    _CONTEXT_SWITCH_RESIDENT_CLOSER = fn
+
+
+def notify_context_window_switched(result: dict[str, Any]) -> None:
+    closer = _CONTEXT_SWITCH_RESIDENT_CLOSER
+    if closer is not None:
+        closer(result)
+
 
 def reset_bindings_for_tests() -> None:
     global _LOCAL_BINDING
@@ -152,6 +168,8 @@ def strip_daily_save_markers(text: str) -> tuple[str, bool]:
 
 def verify_epoch_token(plan: DailyTurnPlan) -> None:
     token = plan.epoch_token
+    if int(token.get('context_id') or -1) != int(plan.context_id):
+        raise EpochMismatchError('context_id mismatch')
     if int(token.get('context_epoch') or -1) != int(plan.context_epoch):
         raise EpochMismatchError('context_epoch mismatch')
     if int(token.get('resident_generation') or -1) != int(plan.resident_generation):
@@ -328,6 +346,45 @@ def close_local_resident_if_bound(
     return True
 
 
+def close_local_resident_for_context_switch(
+    resident: Any,
+    *,
+    source_context_id: int,
+    source_context_epoch: int,
+    source_resident_generation: int,
+    chat_id: str = DEFAULT_CHAT_ID,
+) -> bool:
+    """Close CC resident only when local binding matches captured switch source."""
+    binding = get_local_binding()
+    if binding is None:
+        return False
+    expected_key = make_resident_key(
+        chat_id=chat_id,
+        context_epoch=int(source_context_epoch),
+        resident_generation=int(source_resident_generation),
+    )
+    if (
+        int(binding.context_id) != int(source_context_id)
+        or int(binding.context_epoch) != int(source_context_epoch)
+        or int(binding.resident_generation) != int(source_resident_generation)
+        or str(binding.resident_key) != str(expected_key)
+    ):
+        logger.warning(
+            'context switch resident close skipped: binding mismatch '
+            '(have ctx=%s/%s/%s key=%s want ctx=%s/%s/%s key=%s)',
+            binding.context_id,
+            binding.context_epoch,
+            binding.resident_generation,
+            binding.resident_key,
+            source_context_id,
+            source_context_epoch,
+            source_resident_generation,
+            expected_key,
+        )
+        return False
+    return close_local_resident_if_bound(resident, expected_key=expected_key)
+
+
 def _close_stale_local_resident(resident: Any, *, expected_key: str) -> None:
     binding = get_local_binding()
     if binding is not None and binding.resident_key != expected_key:
@@ -499,7 +556,10 @@ def _assemble_plan(
         chat_id=chat_id, context_epoch=context_epoch, resident_generation=resident_generation,
     )
     epoch_token = dc.make_epoch_token(
-        chat_id=chat_id, context_epoch=context_epoch, resident_generation=resident_generation,
+        chat_id=chat_id,
+        context_id=context_id,
+        context_epoch=context_epoch,
+        resident_generation=resident_generation,
     )
     last_state: Optional[dict[str, str]] = None
     cold_like = bool(is_cold or is_respawn)

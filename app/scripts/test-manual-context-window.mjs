@@ -1,0 +1,212 @@
+/**
+ * Manual context window FE tests (no vitest).
+ * Run: npm run test:manual-context-window
+ */
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { HttpError } from '../src/lib/http.ts';
+import {
+  LIVE_CONTEXT_WINDOW_CURRENT,
+  LIVE_CONTEXT_WINDOW_CANDIDATES,
+  LIVE_CONTEXT_WINDOW_SWITCH,
+  captureSourceFromCurrent,
+  parseContextWindowCandidates,
+  parseContextWindowCurrent,
+  parseContextWindowSwitch,
+} from '../src/lib/manualContextWindow.ts';
+import { ManualContextWindowController } from '../src/lib/manualContextWindowController.ts';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+let passed = 0;
+function ok(label) {
+  passed += 1;
+  void label;
+}
+
+assert.equal(LIVE_CONTEXT_WINDOW_CURRENT, '/api/gw/context-window/current');
+assert.equal(LIVE_CONTEXT_WINDOW_CANDIDATES, '/api/gw/context-window/carryover-candidates');
+assert.equal(LIVE_CONTEXT_WINDOW_SWITCH, '/api/gw/context-window/switch');
+ok('live paths');
+
+const currentRaw = {
+  ok: true,
+  context_id: 7,
+  context_epoch: 42,
+  window_mode: 'legacy_daily',
+  opened_local_day: '2026-07-28',
+  opened_at: '2026-07-28 10:00:00',
+  boundary_message_id: 100,
+  source_context_id: null,
+  resident_generation: 1,
+  formal_round_count: 5,
+  can_switch: true,
+  version: 3,
+  requested_round_count: null,
+  selected_round_count: 0,
+  selected_message_count: 0,
+  selected_message_ids: [],
+};
+const cur = parseContextWindowCurrent(currentRaw);
+assert.ok(cur);
+assert.equal(cur?.context_id, 7);
+assert.equal(cur?.version, 3);
+ok('parse current');
+
+const rounds = [
+  {
+    round_id: 1,
+    message_ids: [1, 2],
+    messages: [
+      { message_id: 1, role: 'user', author: 'h', content_preview: 'a', created_at: 't' },
+      { message_id: 2, role: 'assistant', author: 'f', content_preview: 'b', created_at: 't' },
+    ],
+  },
+];
+const cand = parseContextWindowCandidates({
+  ok: true,
+  source_context_id: 7,
+  source_context_epoch: 42,
+  carryover_unit: 'round',
+  available_round_count: 1,
+  rounds,
+});
+assert.ok(cand);
+ok('parse candidates');
+
+const source = captureSourceFromCurrent(cur);
+assert.deepEqual(source, {
+  source_context_id: 7,
+  source_context_epoch: 42,
+  source_resident_generation: 1,
+  version: 3,
+});
+
+const calls = { current: 0, candidates: 0, switch: 0, candidateParams: null, switchBody: null };
+const client = {
+  getCurrent: async () => {
+    calls.current += 1;
+    return cur;
+  },
+  getCandidates: async (src, _init) => {
+    calls.candidates += 1;
+    calls.candidateParams = src;
+    return cand;
+  },
+  switchWindow: async (src, count, requestId, _init) => {
+    calls.switch += 1;
+    calls.switchBody = { src, count, requestId };
+    const parsed = parseContextWindowSwitch({
+      ok: true,
+      source_context_id: src.source_context_id,
+      source_context_epoch: src.source_context_epoch,
+      source_resident_generation: src.source_resident_generation,
+      target_context_id: 8,
+      target_context_epoch: 43,
+      window_mode: 'manual',
+      requested_round_count: count,
+      selected_round_count: count,
+      selected_message_count: count,
+      selected_message_ids: [],
+      boundary_message_id: 100,
+      resident_generation: 1,
+      switched_at: '2026-07-28 11:00:00',
+    });
+    if (!parsed) throw new Error('bad switch parse');
+    return parsed;
+  },
+};
+
+const ctrl = new ManualContextWindowController({ client });
+await ctrl.probeEnabled();
+assert.equal(ctrl.enabled, true);
+ok('probe enabled');
+
+await ctrl.openModal();
+assert.equal(calls.current, 2);
+assert.equal(calls.candidates, 1);
+assert.deepEqual(calls.candidateParams, source);
+assert.equal(ctrl.getSnapshot().rounds.length, 1);
+ok('open loads captured-source candidates');
+
+ctrl.setDraftCount(5);
+const okSwitch = await ctrl.confirmSwitch();
+assert.equal(okSwitch, true);
+assert.equal(calls.switch, 1);
+assert.equal(calls.switchBody.count, 5);
+assert.equal(typeof calls.switchBody.requestId, 'string');
+assert.equal(ctrl.getSnapshot().modalOpen, false);
+ok('confirm switch');
+
+// 404 hides
+const disabledCtrl = new ManualContextWindowController({
+  client: {
+    getCurrent: async () => {
+      throw new HttpError(404, 'disabled', 'disabled');
+    },
+    getCandidates: async () => {
+      throw new Error('should not call');
+    },
+    switchWindow: async () => {
+      throw new Error('should not call');
+    },
+  },
+});
+await disabledCtrl.probeEnabled();
+assert.equal(disabledCtrl.enabled, false);
+ok('404 disabled');
+
+// 423 busy
+const busyCtrl = new ManualContextWindowController({ client });
+await busyCtrl.probeEnabled();
+busyCtrl.client = {
+  ...client,
+  switchWindow: async () => {
+    throw new HttpError(423, 'window_busy', 'busy', { code: 'window_busy' });
+  },
+};
+await busyCtrl.openModal();
+busyCtrl.setDraftCount(0);
+const busyOk = await busyCtrl.confirmSwitch();
+assert.equal(busyOk, false);
+assert.match(busyCtrl.getSnapshot().errorDetail, /爸爸还在回复/);
+ok('423 busy');
+
+// 409 stale refresh path
+let staleOnce = true;
+const staleCtrl = new ManualContextWindowController({ client });
+await staleCtrl.probeEnabled();
+staleCtrl.client = {
+  getCurrent: async () => cur,
+  getCandidates: async () => {
+    if (staleOnce) {
+      staleOnce = false;
+      throw new HttpError(409, 'stale', 'stale', { code: 'stale_source_context' });
+    }
+    return cand;
+  },
+  switchWindow: async () => {
+    throw new Error('no switch');
+  },
+};
+await staleCtrl.openModal();
+assert.match(staleCtrl.getSnapshot().errorDetail, /已经变过了/);
+ok('409 stale');
+
+// CSS box model
+const css = fs.readFileSync(path.join(__dirname, '../src/components/dailySoftWindow/dailySoftWindow.css'), 'utf8');
+assert.match(css, /box-sizing:\s*border-box/);
+assert.match(css, /width:\s*min\(334px,\s*100%\)/);
+ok('334px dialog css');
+
+// ChatScreen wiring
+const chatSrc = fs.readFileSync(path.join(__dirname, '../src/screens/ChatScreen.tsx'), 'utf8');
+assert.match(chatSrc, /useManualContextWindow/);
+assert.match(chatSrc, /title="换一扇窗"/);
+assert.ok(!chatSrc.includes('useDailySoftWindow({ live: true })'));
+assert.ok(!chatSrc.includes('CarryoverPickerCard'));
+assert.match(chatSrc, /已经换了一扇新窗/);
+ok('ChatScreen wiring');
+
+console.log(`manual-context-window: ${passed} checks passed`);

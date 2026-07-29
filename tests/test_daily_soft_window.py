@@ -566,6 +566,7 @@ class EpochFenceTests(unittest.TestCase):
             ctx = dc.get_or_create_daily_context(chat_id='f', local_day='2026-07-27', db_path=db)
             token = dc.make_epoch_token(
                 chat_id='f',
+                context_id=int(ctx['id']),
                 context_epoch=int(ctx['context_epoch']),
                 resident_generation=1,
             )
@@ -598,6 +599,7 @@ class EpochFenceTests(unittest.TestCase):
             ctx = dc.get_or_create_daily_context(chat_id='ok', local_day='2026-07-27', db_path=db)
             token = dc.make_epoch_token(
                 chat_id='ok',
+                context_id=int(ctx['id']),
                 context_epoch=int(ctx['context_epoch']),
                 resident_generation=1,
             )
@@ -1103,11 +1105,13 @@ class R0Round4HardeningTests(unittest.TestCase):
             self.assertEqual(int(back.get('is_backfill') or 0), 1)
             active_token = dc.make_epoch_token(
                 chat_id='collide',
+                context_id=int(active['id']),
                 context_epoch=int(active['context_epoch']),
                 resident_generation=int(active['resident_generation']),
             )
             backfill_token = dc.make_epoch_token(
                 chat_id='collide',
+                context_id=int(back['id']),
                 context_epoch=int(back['context_epoch']),
                 resident_generation=int(back['resident_generation']),
                 is_backfill=True,
@@ -1138,6 +1142,7 @@ class R0Round4HardeningTests(unittest.TestCase):
             ctx = _ctx(db, chat_id='fencebypass')
             token = dc.make_epoch_token(
                 chat_id='fencebypass',
+                context_id=int(ctx['id']),
                 context_epoch=int(ctx['context_epoch']),
                 resident_generation=1,
             )
@@ -1159,6 +1164,7 @@ class R0Round4HardeningTests(unittest.TestCase):
             ctx = _ctx(db, chat_id='fenceallow')
             token = dc.make_epoch_token(
                 chat_id='fenceallow',
+                context_id=int(ctx['id']),
                 context_epoch=int(ctx['context_epoch']),
                 resident_generation=1,
             )
@@ -1360,6 +1366,7 @@ class R0Round4HardeningTests(unittest.TestCase):
             ctx = _ctx(db, chat_id='fence')
             token = dc.make_epoch_token(
                 chat_id='fence',
+                context_id=int(ctx['id']),
                 context_epoch=int(ctx['context_epoch']),
                 resident_generation=1,
             )

@@ -524,7 +524,7 @@ class DailyRuntimeLeaseTtlTests(unittest.TestCase):
             )
             t_renew = t0 + datetime.timedelta(seconds=1)
             token = dc.make_epoch_token(
-                chat_id='ttl', context_epoch=int(ctx['context_epoch']), resident_generation=gen,
+                chat_id='ttl', context_id=cid, context_epoch=int(ctx['context_epoch']), resident_generation=gen,
             )
             dc.renew_resident_turn_lease(
                 cid, gen, lease_owner='owner-a', ttl_seconds=60, db_path=db,
@@ -588,7 +588,7 @@ class DailyRuntimeMidnightPersistTests(unittest.TestCase):
                 resident_generation=1, role='user', db_path=db,
             )
             token = dc.make_epoch_token(
-                chat_id='mid', context_epoch=int(ctx['context_epoch']), resident_generation=1,
+                chat_id='mid', context_id=int(ctx['id']), context_epoch=int(ctx['context_epoch']), resident_generation=1,
             )
             dc.acquire_resident_turn_lease(
                 int(ctx['id']), 1, lease_owner='night-owner', request_message_id=uid,
@@ -1329,7 +1329,7 @@ class DailyRuntimeHeartbeatKillTests(unittest.TestCase):
                 db_path=db, now=now,
             )
             token = dc.make_epoch_token(
-                chat_id='renew', context_epoch=int(ctx['context_epoch']), resident_generation=gen,
+                chat_id='renew', context_id=cid, context_epoch=int(ctx['context_epoch']), resident_generation=gen,
             )
             with self.assertRaises(dc.ConflictError):
                 dc.renew_resident_turn_lease(

@@ -510,6 +510,7 @@ def _switch_result_from_target_conn(
     return {
         'source_context_id': int(source['id']),
         'source_context_epoch': int(source['context_epoch']),
+        'source_resident_generation': int(source.get('resident_generation') or 1),
         'target_context_id': target_id,
         'target_context_epoch': int(target['context_epoch']),
         'window_mode': WINDOW_MODE_MANUAL,

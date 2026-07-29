@@ -2122,12 +2122,14 @@ def advance_resident_history_cursor(
 def make_epoch_token(
     *,
     chat_id: str,
+    context_id: int,
     context_epoch: int,
     resident_generation: int,
     is_backfill: bool = False,
 ) -> dict[str, Any]:
     return {
         'chat_id': chat_id,
+        'context_id': int(context_id),
         'context_epoch': int(context_epoch),
         'resident_generation': int(resident_generation),
         'is_backfill': int(bool(is_backfill)),
@@ -2145,14 +2147,16 @@ def is_epoch_current(
     conn = _connect(db_path)
     try:
         row = conn.execute(
-            'SELECT context_epoch, resident_generation FROM daily_contexts '
-            'WHERE chat_id=? AND is_backfill=0 ORDER BY context_epoch DESC LIMIT 1',
+            'SELECT id, context_epoch, resident_generation FROM daily_contexts '
+            'WHERE chat_id=? AND is_backfill=0 AND closed_at IS NULL '
+            'ORDER BY context_epoch DESC LIMIT 1',
             (chat_id,),
         ).fetchone()
         if row is None:
             return False
         return (
-            int(row['context_epoch']) == int(token.get('context_epoch') or -1)
+            int(row['id']) == int(token.get('context_id') or -1)
+            and int(row['context_epoch']) == int(token.get('context_epoch') or -1)
             and int(row['resident_generation']) == int(token.get('resident_generation') or -1)
         )
     finally:

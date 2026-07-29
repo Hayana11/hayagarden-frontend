@@ -33,3 +33,4 @@ jobs:
           npm run build
           npm run test:daily-soft-window
           npm run test:daily-soft-window-machine
+          npm run test:manual-context-window

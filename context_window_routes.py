@@ -24,6 +24,7 @@ from chat.context_window import (
     switch_context_window,
 )
 from chat.daily_context import DEFAULT_CHAT_ID
+from chat.daily_runtime import notify_context_window_switched
 from daily_context_routes import _default_token_from_env, _reject_non_default_chat_id
 
 logger = logging.getLogger(__name__)
@@ -149,6 +150,7 @@ def create_context_window_blueprint(
                 close_reason=CLOSE_REASON_MANUAL,
                 db_path=db_path,
             )
+            notify_context_window_switched(result)
             return jsonify({'ok': True, **result})
         except IdempotencyMismatchError as exc:
             return jsonify({'ok': False, 'error': str(exc), 'code': 'idempotency_mismatch'}), 409
