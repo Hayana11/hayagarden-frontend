@@ -168,6 +168,104 @@ def _create_old_schema_db(db_path: str):
     conn.close()
 
 
+def _create_rich_old_schema_db(db_path: str):
+    """Old schema with two contexts and multi-row related tables for migration tests."""
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        '''
+        CREATE TABLE daily_contexts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id TEXT NOT NULL,
+            local_day TEXT NOT NULL,
+            timezone TEXT NOT NULL DEFAULT 'Asia/Shanghai',
+            boundary_hour INTEGER NOT NULL DEFAULT 4,
+            context_epoch INTEGER NOT NULL,
+            boundary_message_id INTEGER NOT NULL DEFAULT 0,
+            status TEXT NOT NULL,
+            handoff_id INTEGER NULL,
+            carryover_count INTEGER NOT NULL DEFAULT 0,
+            selection_finalized_at DATETIME NULL,
+            resident_generation INTEGER NOT NULL DEFAULT 1,
+            morning_greeting_message_id INTEGER NULL,
+            version INTEGER NOT NULL DEFAULT 1,
+            lease_owner TEXT NULL,
+            lease_expires_at DATETIME NULL,
+            created_at DATETIME NOT NULL DEFAULT '2026-07-27 10:00:00',
+            updated_at DATETIME NOT NULL DEFAULT '2026-07-27 10:00:00',
+            is_backfill INTEGER NOT NULL DEFAULT 0,
+            UNIQUE(chat_id, local_day)
+        );
+        INSERT INTO daily_contexts (
+            chat_id, local_day, timezone, boundary_hour, context_epoch,
+            boundary_message_id, status, carryover_count, resident_generation,
+            version, created_at, updated_at, is_backfill
+        ) VALUES
+            ('default', '2026-07-26', 'Asia/Shanghai', 4, 1,
+             0, 'PROVISIONAL', 0, 1, 1, '2026-07-26 10:00:00', '2026-07-26 10:00:00', 0),
+            ('default', '2026-07-27', 'Asia/Shanghai', 4, 2,
+             0, 'PROVISIONAL', 0, 1, 1, '2026-07-27 10:00:00', '2026-07-27 10:00:00', 0);
+        CREATE TABLE daily_carryover_messages (
+            context_id INTEGER NOT NULL,
+            ordinal INTEGER NOT NULL,
+            message_id INTEGER NOT NULL,
+            PRIMARY KEY(context_id, ordinal)
+        );
+        INSERT INTO daily_carryover_messages VALUES
+            (1, 0, 99), (1, 1, 100), (2, 0, 101);
+        CREATE TABLE daily_resident_cursors (
+            context_id INTEGER NOT NULL,
+            resident_generation INTEGER NOT NULL,
+            history_cursor_message_id INTEGER NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (context_id, resident_generation)
+        );
+        INSERT INTO daily_resident_cursors VALUES
+            (1, 1, 50, '2026-07-26 10:00:00'),
+            (1, 2, 55, '2026-07-26 10:05:00'),
+            (2, 1, 60, '2026-07-27 10:00:00');
+        CREATE TABLE daily_resident_turn_leases (
+            context_id INTEGER NOT NULL,
+            resident_generation INTEGER NOT NULL,
+            lease_owner TEXT NOT NULL,
+            request_message_id INTEGER NOT NULL,
+            acquired_at TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (context_id, resident_generation)
+        );
+        INSERT INTO daily_resident_turn_leases VALUES
+            (1, 1, 'owner', 1, '2026-07-26 10:00:00', '2026-07-26 11:00:00', '2026-07-26 10:00:00'),
+            (2, 1, 'worker', 2, '2026-07-27 10:00:00', '2026-07-27 11:00:00', '2026-07-27 10:00:00');
+        CREATE TABLE daily_message_contexts (
+            message_id INTEGER PRIMARY KEY,
+            context_id INTEGER NOT NULL,
+            context_epoch INTEGER NOT NULL,
+            resident_generation INTEGER NOT NULL,
+            role TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        INSERT INTO daily_message_contexts VALUES
+            (99, 1, 1, 1, 'user', '2026-07-26 10:00:00'),
+            (100, 1, 1, 1, 'assistant', '2026-07-26 10:01:00'),
+            (101, 2, 2, 1, 'user', '2026-07-27 10:00:00');
+        CREATE TABLE daily_resident_owners (
+            context_id INTEGER NOT NULL,
+            resident_generation INTEGER NOT NULL,
+            worker_id TEXT NOT NULL,
+            resident_key TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (context_id, resident_generation)
+        );
+        INSERT INTO daily_resident_owners VALUES
+            (1, 1, 'w1', 'rk-1', '2026-07-26 10:00:00'),
+            (1, 2, 'w1', 'rk-1-gen2', '2026-07-26 10:05:00'),
+            (2, 1, 'w2', 'rk-2', '2026-07-27 10:00:00');
+        '''
+    )
+    conn.commit()
+    conn.close()
+
+
 class SchemaMigrationTests(unittest.TestCase):
     def test_old_schema_migrates_preserving_ids(self):
         db = _tmp_db()
@@ -180,18 +278,6 @@ class SchemaMigrationTests(unittest.TestCase):
         self.assertEqual(row[0], 1)
         self.assertEqual(row[1], 'legacy_daily')
         self.assertTrue(row[2])
-        for table in (
-            'daily_carryover_messages',
-            'daily_resident_cursors',
-            'daily_resident_turn_leases',
-            'daily_message_contexts',
-            'daily_resident_owners',
-        ):
-            ids = {
-                int(r[0])
-                for r in conn.execute('SELECT DISTINCT context_id FROM %s' % table)
-            }
-            self.assertEqual(ids, {1}, msg=table)
         sql = conn.execute(
             "SELECT sql FROM sqlite_master WHERE type='table' AND name='daily_contexts'"
         ).fetchone()[0]
@@ -207,6 +293,28 @@ class SchemaMigrationTests(unittest.TestCase):
         self.assertIn('idx_daily_contexts_open_manual_unique', indexes)
         self.assertIn('idx_daily_contexts_switch_idem_unique', indexes)
         conn.close()
+
+    def test_migration_preserves_full_related_table_rows(self):
+        db = _tmp_db()
+        _create_rich_old_schema_db(db)
+        conn = sqlite3.connect(db)
+        before = dc._snapshot_related_table_rows(conn)
+        conn.close()
+        dc.ensure_schema(db)
+        conn = sqlite3.connect(db)
+        after = dc._snapshot_related_table_rows(conn)
+        conn.close()
+        self.assertEqual(before, after)
+        for table in (
+            'daily_carryover_messages',
+            'daily_resident_cursors',
+            'daily_resident_turn_leases',
+            'daily_message_contexts',
+            'daily_resident_owners',
+        ):
+            self.assertGreater(len(before[table]['rows']), 0, msg=table)
+            if table == 'daily_carryover_messages':
+                self.assertEqual(len(before[table]['rows']), 3)
 
     def test_migration_idempotent(self):
         db = _tmp_db()
@@ -490,6 +598,50 @@ class MigrationFaultInjectionTests(unittest.TestCase):
                 conn = sqlite3.connect(db)
                 self.assertIn('window_mode', {r[1] for r in conn.execute('PRAGMA table_info(daily_contexts)')})
                 conn.close()
+
+
+class RelatedTableRowSnapshotTests(unittest.TestCase):
+    def test_verify_detects_non_context_id_field_change(self):
+        db = _tmp_db()
+        _create_rich_old_schema_db(db)
+        conn = sqlite3.connect(db)
+        before = dc._snapshot_related_table_rows(conn)
+        conn.execute(
+            'UPDATE daily_carryover_messages SET message_id=999 '
+            'WHERE context_id=1 AND ordinal=0'
+        )
+        conn.commit()
+        with self.assertRaises(dc.DailyContextError):
+            dc._verify_related_table_rows(conn, before, {1, 2})
+        conn.close()
+
+    def test_verify_detects_deleted_row(self):
+        db = _tmp_db()
+        _create_rich_old_schema_db(db)
+        conn = sqlite3.connect(db)
+        before = dc._snapshot_related_table_rows(conn)
+        conn.execute(
+            'DELETE FROM daily_resident_cursors WHERE context_id=1 AND resident_generation=2'
+        )
+        conn.commit()
+        with self.assertRaises(dc.DailyContextError):
+            dc._verify_related_table_rows(conn, before, {1, 2})
+        conn.close()
+
+    def test_verify_detects_inserted_row(self):
+        db = _tmp_db()
+        _create_rich_old_schema_db(db)
+        conn = sqlite3.connect(db)
+        before = dc._snapshot_related_table_rows(conn)
+        conn.execute(
+            'INSERT INTO daily_resident_owners '
+            '(context_id, resident_generation, worker_id, resident_key, updated_at) '
+            "VALUES (2, 2, 'w2b', 'rk-2b', '2026-07-27 10:05:00')"
+        )
+        conn.commit()
+        with self.assertRaises(dc.DailyContextError):
+            dc._verify_related_table_rows(conn, before, {1, 2})
+        conn.close()
 
 
 class MigrationAutoincrementTests(unittest.TestCase):

@@ -162,33 +162,66 @@ _RELATED_CONTEXT_ID_TABLES = (
 )
 
 
-def _snapshot_related_context_ids(conn: sqlite3.Connection) -> dict[str, set[int]]:
-    snap: dict[str, set[int]] = {}
-    tables = {
+def _ordered_table_columns(conn: sqlite3.Connection, table: str) -> tuple[str, ...]:
+    return tuple(
+        str(r[1])
+        for r in conn.execute('PRAGMA table_info(%s)' % table).fetchall()
+    )
+
+
+def _snapshot_related_table_rows(conn: sqlite3.Connection) -> dict[str, dict[str, Any]]:
+    """Full row-level snapshot for migration verification (in-memory only)."""
+    existing = {
         str(r[0])
         for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
     }
+    snap: dict[str, dict[str, Any]] = {}
     for table in _RELATED_CONTEXT_ID_TABLES:
-        if table not in tables:
-            snap[table] = set()
+        if table not in existing:
+            snap[table] = {'columns': (), 'rows': ()}
             continue
+        columns = _ordered_table_columns(conn, table)
+        if not columns:
+            snap[table] = {'columns': (), 'rows': ()}
+            continue
+        col_list = ', '.join(columns)
+        order_by = ', '.join(columns)
+        rows = conn.execute(
+            'SELECT %s FROM %s ORDER BY %s' % (col_list, table, order_by)
+        ).fetchall()
         snap[table] = {
-            int(r[0])
-            for r in conn.execute('SELECT DISTINCT context_id FROM %s' % table).fetchall()
+            'columns': columns,
+            'rows': tuple(tuple(row) for row in rows),
         }
     return snap
 
 
-def _verify_related_context_ids(
+def _verify_related_table_rows(
     conn: sqlite3.Connection,
-    before: dict[str, set[int]],
-    valid_ids: set[int],
+    before: dict[str, dict[str, Any]],
+    valid_context_ids: set[int],
 ) -> None:
-    after = _snapshot_related_context_ids(conn)
+    after = _snapshot_related_table_rows(conn)
     if after != before:
-        raise DailyContextError('related context_id mapping changed during migration')
-    for table, ids in after.items():
-        if ids and not ids.issubset(valid_ids):
+        for table in _RELATED_CONTEXT_ID_TABLES:
+            if after.get(table) != before.get(table):
+                raise DailyContextError(
+                    '%s row mapping changed during migration' % table
+                )
+        raise DailyContextError('related table row mapping changed during migration')
+    for table in _RELATED_CONTEXT_ID_TABLES:
+        payload = after.get(table) or {'columns': (), 'rows': ()}
+        columns = tuple(payload.get('columns') or ())
+        rows = tuple(payload.get('rows') or ())
+        if not columns or 'context_id' not in columns:
+            continue
+        idx = columns.index('context_id')
+        refs = {
+            int(row[idx])
+            for row in rows
+            if row[idx] is not None
+        }
+        if refs and not refs.issubset(valid_context_ids):
             raise DailyContextError(
                 '%s references missing context_id after migration' % table
             )
@@ -304,7 +337,7 @@ def _migrate_manual_window_schema(conn: sqlite3.Connection) -> None:
             conn.execute('SELECT MAX(id) FROM daily_contexts').fetchone()[0] or 0
         )
         old_seq = _read_sqlite_sequence(conn, 'daily_contexts')
-        related_before = _snapshot_related_context_ids(conn)
+        related_before = _snapshot_related_table_rows(conn)
 
         conn.execute(
             '''
@@ -384,7 +417,7 @@ def _migrate_manual_window_schema(conn: sqlite3.Connection) -> None:
                 'manual window migration row/id mismatch: %s vs %s'
                 % (old_count, new_count)
             )
-        _verify_related_context_ids(conn, related_before, new_ids)
+        _verify_related_table_rows(conn, related_before, new_ids)
 
         _migration_checkpoint('before_drop')
         conn.execute('DROP TABLE daily_contexts')
@@ -401,7 +434,7 @@ def _migrate_manual_window_schema(conn: sqlite3.Connection) -> None:
         }
         if final_ids != old_ids:
             raise DailyContextError('context id set changed after migration finalize')
-        _verify_related_context_ids(conn, related_before, final_ids)
+        _verify_related_table_rows(conn, related_before, final_ids)
         _assert_daily_contexts_autoincrement(conn, 'daily_contexts')
 
         new_seq = _read_sqlite_sequence(conn, 'daily_contexts')

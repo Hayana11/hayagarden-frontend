@@ -51,14 +51,17 @@ Migration is a single atomic transaction:
 1. `BEGIN IMMEDIATE`
 2. `CREATE TABLE ... (id INTEGER PRIMARY KEY AUTOINCREMENT, ...)` via `conn.execute`
    (**not** `sqlite3.executescript`, which implicitly commits)
-3. copy rows → verify row count, ID set, `MAX(id)`, related-table `context_id` ID sets (not row-level mapping)
+3. copy rows → verify row count, ID set, `MAX(id)`, full row-level snapshots of five related tables
 4. `DROP` / `RENAME`
 5. sync `sqlite_sequence`, create all partial indexes
 6. final verify → `COMMIT`
 
 On failure: rollback + drop any leftover `daily_contexts__mw_new`. Original table and
-indexes remain; next `ensure_schema` can retry. Related tables verified for unchanged
-`DISTINCT context_id` sets (orphan refs rejected; row-level mapping not compared):
+indexes remain; next `ensure_schema` can retry. Five related tables are snapshotted
+**row-by-row** (all columns, deterministic sort) before and after migration; any added,
+deleted, or modified row aborts with `DailyContextError`. Non-null `context_id` values
+must still reference valid `daily_contexts.id` after migration. Snapshots are in-memory
+only — never persisted.
 
 - `daily_carryover_messages`
 - `daily_resident_cursors`
