@@ -292,6 +292,7 @@ class ContextWindowBffTests(unittest.TestCase):
         self.assertEqual(calls1['callback'][0], calls2['callback'][0])
 
     def test_switch_replay_does_not_close_target_resident_binding(self):
+        import gateway
         from chat import daily_context as dc
         from chat import daily_runtime as dr
 
@@ -311,14 +312,6 @@ class ContextWindowBffTests(unittest.TestCase):
             tool_profile='daily',
         ))
 
-        def close_like_gateway(result):
-            dr.close_local_resident_for_context_switch(
-                resident,
-                source_context_id=int(result['source_context_id']),
-                source_context_epoch=int(result['source_context_epoch']),
-                source_resident_generation=int(result['source_resident_generation']),
-            )
-
         body = self._switch_success_body(
             source_context_id=1,
             source_context_epoch=2,
@@ -326,7 +319,11 @@ class ContextWindowBffTests(unittest.TestCase):
             target_context_id=9,
             target_context_epoch=target_epoch,
         )
-        resp, calls = self._post_switch(body=body, callback=close_like_gateway)
+        with mock.patch.object(gateway, '_CC_RESIDENT', resident):
+            resp, _calls = self._post_switch(
+                body=body,
+                callback=gateway._gw_close_resident_on_context_switch,
+            )
         self.assertEqual(resp.status_code, 200)
         resident._kill.assert_not_called()
         self.assertIsNotNone(dr.get_local_binding())

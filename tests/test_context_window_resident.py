@@ -1,12 +1,18 @@
 """Manual context window resident handoff and epoch fencing (#154)."""
 from __future__ import annotations
 
+import datetime
 import os
 import sqlite3
+import sys
 import tempfile
 import unittest
 import uuid
 from unittest import mock
+
+ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+if ROOT not in sys.path:
+    sys.path.insert(0, ROOT)
 
 from chat import context_window as cw
 from chat import daily_context as dc
@@ -65,7 +71,7 @@ def _legacy_ctx(db: str) -> dict:
     return dc.get_or_create_daily_context(
         local_day='2026-07-27',
         db_path=db,
-        now=__import__('datetime').datetime(2026, 7, 27, 10, 0, 0),
+        now=datetime.datetime(2026, 7, 27, 10, 0, 0),
     )
 
 
