@@ -21,6 +21,7 @@ if ROOT not in sys.path:
 
 import cc_resident
 import config_store
+from chat import context_window as cw
 from chat import daily_context as dc
 from chat import daily_runtime as dr
 from chat.daily_context import ConflictError, DeferredError
@@ -905,24 +906,21 @@ class DailyRuntimeRolloverLeaseFenceTests(unittest.TestCase):
                  mock.patch('chat.daily_history._build_state_text', return_value=('S', 'snap', {})), \
                  mock.patch.object(dc, 'has_active_provider_turn_lease', return_value=False), \
                  mock.patch('chat.daily_context.retire_resident_for_rollover') as retire_mock:
-                with self.assertRaises(DeferredError):
-                    _prepare_turn(
-                        db, uid_new,
-                        chat_id='rollover',
-                        now=finish,
-                        wall_now=finish,
-                        resident=resident,
-                    )
+                plan = _prepare_turn(
+                    db, uid_new,
+                    chat_id='rollover',
+                    now=finish,
+                    wall_now=finish,
+                    resident=resident,
+                )
                 retire_mock.assert_not_called()
             self.assertIsNone(
                 dc.get_context_for_local_day('rollover', '2026-07-27', db_path=db),
             )
-            self.assertEqual(resident.killed, 0)
-            refreshed = dc.get_daily_context_by_id(int(old_ctx['id']), db_path=db)
-            self.assertEqual(int(refreshed['resident_generation']), gen_before)
-            self.assertTrue(dc.is_resident_turn_active(
-                int(old_ctx['id']), gen_before, db_path=db, now=start,
-            ))
+            self.assertEqual(plan.context_id, int(old_ctx['id']))
+            # Manual canonical path may takeover an active lease and close the resident.
+            self.assertGreaterEqual(resident.killed, 1)
+            dr._release_lease(plan)
         finally:
             os.unlink(db)
 
@@ -952,8 +950,10 @@ class DailyRuntimeRolloverLeaseFenceTests(unittest.TestCase):
                     now=finish,
                     wall_now=finish,
                 )
-            new_ctx = dc.get_context_for_local_day('expired', '2026-07-27', db_path=db)
-            self.assertIsNotNone(new_ctx)
+            self.assertEqual(plan.context_id, int(old_ctx['id']))
+            self.assertIsNone(
+                dc.get_context_for_local_day('expired', '2026-07-27', db_path=db),
+            )
             dr._release_lease(plan)
         finally:
             os.unlink(db)
@@ -985,22 +985,19 @@ class DailyRuntimeOriginDayTests(unittest.TestCase):
             )
             with mock.patch.object(config_store, 'get_bool', return_value=True), \
                  mock.patch('chat.daily_history._build_state_text', return_value=('S', 'snap', {})):
-                with self.assertRaises(dr.DailyRuntimeError) as ctx:
-                    dr.prepare_daily_turn(
-                        user_message_id=uid,
-                        chat_id='origin',
-                        db_path=db,
-                        now=start,
-                        wall_now=finish,
-                        static_system='S',
-                    )
-                self.assertEqual(ctx.exception.error_code, 'stale_origin_day')
+                plan = _prepare_turn(
+                    db, uid,
+                    chat_id='origin',
+                    now=start,
+                    wall_now=finish,
+                )
+                open_ctx = cw.get_current_context_window(db_path=db, now=finish, chat_id='origin')
+                self.assertEqual(plan.context_id, int(open_ctx['id']))
+                self.assertEqual(plan.context_id, int(new_ctx['id']))
             self.assertIsNone(
                 dc.get_context_for_local_day('origin', '2026-07-26', db_path=db),
             )
-            latest = dc.get_latest_active_context('origin', db_path=db)
-            self.assertEqual(int(latest['id']), int(new_ctx['id']))
-            self.assertEqual(str(latest['local_day']), '2026-07-27')
+            dr._release_lease(plan)
         finally:
             os.unlink(db)
 
@@ -1022,17 +1019,18 @@ class DailyRuntimeOriginDayTests(unittest.TestCase):
             with mock.patch.object(config_store, 'get_bool', return_value=True), \
                  mock.patch('chat.daily_history._build_state_text', return_value=('S', 'snap', {})), \
                  mock.patch('chat.daily_context.retire_resident_for_rollover') as retire_mock:
-                with self.assertRaises(dr.DailyRuntimeError) as ctx:
-                    _prepare_turn(
-                        db, uid,
-                        chat_id='exist',
-                        now=start,
-                        wall_now=finish,
-                        resident=resident,
-                    )
-                self.assertEqual(ctx.exception.error_code, 'stale_origin_day')
+                plan = _prepare_turn(
+                    db, uid,
+                    chat_id='exist',
+                    now=start,
+                    wall_now=finish,
+                    resident=resident,
+                )
                 retire_mock.assert_not_called()
-            self.assertEqual(resident.killed, 0)
+            open_ctx = cw.get_current_context_window(db_path=db, now=finish, chat_id='exist')
+            self.assertEqual(plan.context_id, int(open_ctx['id']))
+            self.assertEqual(str(open_ctx['local_day']), '2026-07-27')
+            dr._release_lease(plan)
         finally:
             os.unlink(db)
 
@@ -1046,9 +1044,8 @@ class DailyRuntimeOriginDayTests(unittest.TestCase):
             with mock.patch.object(config_store, 'get_bool', return_value=True), \
                  mock.patch('chat.daily_history._build_state_text', return_value=('', 'none', {})):
                 plan = _prepare_turn(db, uid, now=start, wall_now=finish)
-                old_ctx = dc.get_context_for_local_day('default', '2026-07-26', db_path=db)
-                self.assertIsNotNone(old_ctx)
-                self.assertEqual(int(old_ctx['is_backfill']), 0)
+                open_ctx = cw.get_current_context_window(db_path=db, now=finish)
+                self.assertEqual(plan.context_id, int(open_ctx['id']))
                 resident = _FakeResident()
                 list(dr.stream_daily_resident_turn(
                     plan, resident=resident, env={}, static_system='S',
@@ -1058,15 +1055,19 @@ class DailyRuntimeOriginDayTests(unittest.TestCase):
                     plan, content='cross reply', thinking='', tool_calls='', cache_info='', choices='',
                 )
                 mapping = dc.get_message_context(aid, db_path=db)
-                self.assertEqual(int(mapping['context_id']), int(old_ctx['id']))
+                self.assertEqual(int(mapping['context_id']), int(open_ctx['id']))
                 dr._release_lease(plan)
                 uid_new = _insert(db, 'hayana', 'new day', '2026-07-27 10:00:00')
                 new_day = datetime.datetime(2026, 7, 27, 10, 0, 0)
+                before_count = int(sqlite3.connect(db).execute(
+                    'SELECT COUNT(*) FROM daily_contexts',
+                ).fetchone()[0])
                 plan_new = _prepare_turn(db, uid_new, wall_now=new_day)
-                new_ctx = dc.get_context_for_local_day('default', '2026-07-27', db_path=db)
-                self.assertIsNotNone(new_ctx)
-                self.assertEqual(int(new_ctx['is_backfill']), 0)
-                self.assertGreater(int(new_ctx['context_epoch']), int(old_ctx['context_epoch']))
+                after_count = int(sqlite3.connect(db).execute(
+                    'SELECT COUNT(*) FROM daily_contexts',
+                ).fetchone()[0])
+                self.assertEqual(plan_new.context_id, int(open_ctx['id']))
+                self.assertEqual(before_count, after_count)
                 dr._release_lease(plan_new)
         finally:
             os.unlink(db)
@@ -1088,9 +1089,8 @@ class DailyRuntimeOriginDayTests(unittest.TestCase):
                     static_system='S',
                 )
             self.assertEqual(plan.origin_local_day, '2026-07-26')
-            old_ctx = dc.get_context_for_local_day('default', '2026-07-26', db_path=db)
-            self.assertIsNotNone(old_ctx)
-            self.assertEqual(int(old_ctx['is_backfill']), 0)
+            open_ctx = cw.get_current_context_window(db_path=db, now=wall_time)
+            self.assertEqual(plan.context_id, int(open_ctx['id']))
             dr._release_lease(plan)
         finally:
             os.unlink(db)
