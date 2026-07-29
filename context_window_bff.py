@@ -5,9 +5,8 @@ import json
 import logging
 import os
 import urllib.error
-import urllib.parse
 import urllib.request
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 from flask import Blueprint, Response, request
 
@@ -18,6 +17,59 @@ logger = logging.getLogger(__name__)
 
 ENV_PATH = os.environ.get('HAYAGARDEN_ENV_PATH', '/opt/frontend/.env')
 DEFAULT_UPSTREAM = os.environ.get('DAILY_SOFT_WINDOW_UPSTREAM', 'http://127.0.0.1:5050')
+
+SwitchSuccessCallback = Callable[[dict[str, Any]], None]
+
+
+def _positive_int_field(data: dict[str, Any], key: str) -> Optional[int]:
+    value = data.get(key)
+    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+        return int(value)
+    return None
+
+
+def parse_switch_success_payload(payload: bytes) -> Optional[dict[str, Any]]:
+    """Validate upstream switch success body for resident-close callback."""
+    try:
+        data = json.loads(payload.decode('utf-8'))
+    except (json.JSONDecodeError, UnicodeDecodeError, AttributeError):
+        return None
+    if not isinstance(data, dict) or data.get('ok') is not True:
+        return None
+    required = (
+        'source_context_id',
+        'source_context_epoch',
+        'source_resident_generation',
+        'target_context_id',
+        'target_context_epoch',
+    )
+    parsed: dict[str, Any] = {'ok': True}
+    for key in required:
+        val = _positive_int_field(data, key)
+        if val is None:
+            return None
+        parsed[key] = val
+    for optional in ('requested_round_count', 'selected_round_count', 'resident_generation'):
+        if optional in data:
+            parsed[optional] = data[optional]
+    if 'selected_message_ids' in data and isinstance(data['selected_message_ids'], list):
+        parsed['selected_message_ids'] = data['selected_message_ids']
+    return parsed
+
+
+def _invoke_switch_success_callback(
+    callback: Optional[SwitchSuccessCallback],
+    payload: bytes,
+) -> None:
+    if callback is None:
+        return
+    parsed = parse_switch_success_payload(payload)
+    if parsed is None:
+        return
+    try:
+        callback(parsed)
+    except Exception:
+        logger.exception('context-window switch on_switch_success failed')
 
 
 def _default_token_from_env() -> str:
@@ -47,6 +99,7 @@ def create_context_window_bff_blueprint(
     token_getter: Optional[Callable[[], str]] = None,
     upstream_base: Optional[str] = None,
     owner_guard: Optional[Callable] = None,
+    on_switch_success: Optional[SwitchSuccessCallback] = None,
 ) -> Blueprint:
     blueprint = Blueprint('context_window_bff', __name__)
     get_token = token_getter or _default_token_from_env
@@ -102,6 +155,49 @@ def create_context_window_bff_blueprint(
                 mimetype='application/json',
             )
 
+    def _proxy_switch(body: bytes) -> Response:
+        from chat.context_window import enabled as _cw_enabled
+        if not _cw_enabled():
+            return Response(
+                json.dumps({'ok': False, 'error': 'disabled'}, ensure_ascii=False),
+                status=404,
+                mimetype='application/json',
+            )
+        token = str(get_token() or '').strip()
+        if not token:
+            return Response(
+                json.dumps(
+                    {'ok': False, 'error': 'daily soft window token not configured'},
+                    ensure_ascii=False,
+                ),
+                status=503,
+                mimetype='application/json',
+            )
+        headers = {
+            'Authorization': 'Bearer ' + token,
+            'Accept': 'application/json',
+            'Content-Type': 'application/json',
+        }
+        url = base + '/api/context-window/switch'
+        req = urllib.request.Request(url, data=body, method='POST', headers=headers)
+        try:
+            with urllib.request.urlopen(req, timeout=20) as resp:
+                payload = resp.read()
+                status = int(resp.status)
+                if 200 <= status < 300:
+                    _invoke_switch_success_callback(on_switch_success, payload)
+                return Response(payload, status=status, mimetype='application/json')
+        except urllib.error.HTTPError as exc:
+            payload = exc.read() or b'{}'
+            return Response(payload, status=exc.code, mimetype='application/json')
+        except Exception as exc:
+            logger.exception('context-window BFF switch upstream failed')
+            return Response(
+                json.dumps({'ok': False, 'error': str(exc)}, ensure_ascii=False),
+                status=502,
+                mimetype='application/json',
+            )
+
     @blueprint.route('/context-window/current', methods=['GET'])
     def bff_current():
         denied = _require_browser_owner()
@@ -128,6 +224,6 @@ def create_context_window_bff_blueprint(
                 mimetype='application/json',
             )
         body = request.get_data(cache=False, as_text=False) or b'{}'
-        return _proxy('POST', '/api/context-window/switch', body=body)
+        return _proxy_switch(body)
 
     return blueprint

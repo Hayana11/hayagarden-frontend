@@ -17,6 +17,7 @@ import cc_resident
 
 from chat import daily_context as dc
 from chat import daily_history as dh
+from chat import context_window as cw
 from chat.daily_context import (
     ConflictError,
     DEFAULT_CHAT_ID,
@@ -152,6 +153,8 @@ def strip_daily_save_markers(text: str) -> tuple[str, bool]:
 
 def verify_epoch_token(plan: DailyTurnPlan) -> None:
     token = plan.epoch_token
+    if int(token.get('context_id') or -1) != int(plan.context_id):
+        raise EpochMismatchError('context_id mismatch')
     if int(token.get('context_epoch') or -1) != int(plan.context_epoch):
         raise EpochMismatchError('context_epoch mismatch')
     if int(token.get('resident_generation') or -1) != int(plan.resident_generation):
@@ -328,6 +331,45 @@ def close_local_resident_if_bound(
     return True
 
 
+def close_local_resident_for_context_switch(
+    resident: Any,
+    *,
+    source_context_id: int,
+    source_context_epoch: int,
+    source_resident_generation: int,
+    chat_id: str = DEFAULT_CHAT_ID,
+) -> bool:
+    """Close CC resident only when local binding matches captured switch source."""
+    binding = get_local_binding()
+    if binding is None:
+        return False
+    expected_key = make_resident_key(
+        chat_id=chat_id,
+        context_epoch=int(source_context_epoch),
+        resident_generation=int(source_resident_generation),
+    )
+    if (
+        int(binding.context_id) != int(source_context_id)
+        or int(binding.context_epoch) != int(source_context_epoch)
+        or int(binding.resident_generation) != int(source_resident_generation)
+        or str(binding.resident_key) != str(expected_key)
+    ):
+        logger.warning(
+            'context switch resident close skipped: binding mismatch '
+            '(have ctx=%s/%s/%s key=%s want ctx=%s/%s/%s key=%s)',
+            binding.context_id,
+            binding.context_epoch,
+            binding.resident_generation,
+            binding.resident_key,
+            source_context_id,
+            source_context_epoch,
+            source_resident_generation,
+            expected_key,
+        )
+        return False
+    return close_local_resident_if_bound(resident, expected_key=expected_key)
+
+
 def _close_stale_local_resident(resident: Any, *, expected_key: str) -> None:
     binding = get_local_binding()
     if binding is not None and binding.resident_key != expected_key:
@@ -499,7 +541,10 @@ def _assemble_plan(
         chat_id=chat_id, context_epoch=context_epoch, resident_generation=resident_generation,
     )
     epoch_token = dc.make_epoch_token(
-        chat_id=chat_id, context_epoch=context_epoch, resident_generation=resident_generation,
+        chat_id=chat_id,
+        context_id=context_id,
+        context_epoch=context_epoch,
+        resident_generation=resident_generation,
     )
     last_state: Optional[dict[str, str]] = None
     cold_like = bool(is_cold or is_respawn)
@@ -602,44 +647,63 @@ def prepare_daily_turn(
     lease_acquired = False
 
     try:
+        manual_mode = cw.enabled()
         if dc.has_active_provider_turn_lease(chat_id, db_path=db_path, now=lease_now):
-            prior = dc.get_latest_active_context(chat_id, db_path=db_path)
-            if prior and str(prior.get('local_day') or '') != origin_day:
-                raise DeferredError('provider request in flight; rollover deferred')
+            if not manual_mode:
+                prior = dc.get_latest_active_context(chat_id, db_path=db_path)
+                if prior and str(prior.get('local_day') or '') != origin_day:
+                    raise DeferredError('provider request in flight; rollover deferred')
 
-        prior_ctx = dc.get_latest_active_context(chat_id, db_path=db_path)
-        try:
-            ctx = dc.resolve_or_create_daily_context_for_origin(
-                chat_id=chat_id,
-                origin_local_day=origin_day,
-                actual_wall_now=context_wall_now,
-                db_path=db_path,
-                provider_busy=False,
-            )
-        except StaleOriginDayError as exc:
-            raise DailyRuntimeError(
-                str(exc), error_code='stale_origin_day', retryable=False,
-            ) from exc
+        if manual_mode:
+            try:
+                ctx = cw.get_current_context_window(
+                    chat_id=chat_id,
+                    db_path=db_path,
+                    now=context_wall_now,
+                )
+            except cw.NoOpenContextWindowError as exc:
+                raise DailyRuntimeError(
+                    'no open context window',
+                    error_code='no_open_context_window',
+                    retryable=False,
+                ) from exc
+        else:
+            prior_ctx = dc.get_latest_active_context(chat_id, db_path=db_path)
+            try:
+                ctx = dc.resolve_or_create_daily_context_for_origin(
+                    chat_id=chat_id,
+                    origin_local_day=origin_day,
+                    actual_wall_now=context_wall_now,
+                    db_path=db_path,
+                    provider_busy=False,
+                )
+            except StaleOriginDayError as exc:
+                raise DailyRuntimeError(
+                    str(exc), error_code='stale_origin_day', retryable=False,
+                ) from exc
+            context_id = int(ctx['id'])
+            if (
+                prior_ctx is not None
+                and int(prior_ctx['id']) != context_id
+                and resident is not None
+            ):
+                old_key = make_resident_key(
+                    chat_id=chat_id,
+                    context_epoch=int(prior_ctx['context_epoch']),
+                    resident_generation=int(prior_ctx['resident_generation']),
+                )
+                close_local_resident_if_bound(resident, expected_key=old_key)
+                try:
+                    dc.retire_resident_for_rollover(int(prior_ctx['id']), db_path=db_path)
+                except Exception:
+                    logger.exception('retire_resident_for_rollover failed')
+
         context_id = int(ctx['id'])
 
-        if (
-            prior_ctx is not None
-            and int(prior_ctx['id']) != context_id
-            and resident is not None
-        ):
-            old_key = make_resident_key(
-                chat_id=chat_id,
-                context_epoch=int(prior_ctx['context_epoch']),
-                resident_generation=int(prior_ctx['resident_generation']),
-            )
-            close_local_resident_if_bound(resident, expected_key=old_key)
-            try:
-                dc.retire_resident_for_rollover(int(prior_ctx['id']), db_path=db_path)
-            except Exception:
-                logger.exception('retire_resident_for_rollover failed')
-
-        dc.ensure_carryover_zero_if_user_messages_exist(context_id, db_path=db_path)
+        if not manual_mode:
+            dc.ensure_carryover_zero_if_user_messages_exist(context_id, db_path=db_path)
         refreshed = dc.get_daily_context_by_id(context_id, db_path=db_path) or ctx
+        context_local_day = str(refreshed.get('local_day') or origin_day)
         context_epoch = int(refreshed['context_epoch'])
         resident_generation = int(refreshed['resident_generation'])
         resident_key = make_resident_key(
@@ -721,7 +785,7 @@ def prepare_daily_turn(
             req_id=req_id,
             owner=owner,
             chat_id=chat_id,
-            local_day=origin_day,
+            local_day=context_local_day,
             refreshed=refreshed,
             user_message_id=int(user_message_id),
             user_content=str(user_row.get('content') or ''),

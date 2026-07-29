@@ -88,7 +88,11 @@ export type SoftWindowUiState =
   | 'conflict'
   | 'error'
   | 'auth_error'
-  | 'idle';
+  | 'idle'
+  /** Manual context window (P-CONTEXT-MANUAL-WINDOW-R1). */
+  | 'busy'
+  | 'stale'
+  | 'no_open_context';
 
 export type SoftWindowErrorKind =
   | 'disabled'
