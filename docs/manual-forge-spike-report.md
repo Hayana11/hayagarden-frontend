@@ -1,12 +1,12 @@
-# P-CONTEXT-WINDOW-SPIKE-0B 报告
+# P-CONTEXT-WINDOW-SPIKE-0C 报告
 
 **Verdict:** NO-GO (`live_probe_status=NOT_RUN_NO_CREDENTIALS`)  
-**Spike revision:** `P-CONTEXT-WINDOW-SPIKE-0B`  
+**Spike revision:** `P-CONTEXT-WINDOW-SPIKE-0C`
 **Claude Code (pinned):** `@anthropic-ai/claude-code@2.1.220`  
 **Touched production:** 否  
 **ci_verified:** false（本地 structural-only；非 GitHub Actions 已验证结果）
 
-> 机器可读结果见 `artifacts/spike-claude-forge-resume/results.json`（含 `tested_tree_sha`、`tested_diff_sha256`、`generated_at`）。
+> 机器可读结果见 `artifacts/spike-claude-forge-resume/results.json`。本轮只运行 structural-only 与 mocked integration；没有读取或使用真实 Claude 凭证。
 
 ## 执行命令
 
@@ -21,17 +21,27 @@ Credentialed live（仅隔离机，本轮未执行）：
 python3 scripts/spike_claude_forge_resume.py
 ```
 
-## SPIKE-0B 变更
+## SPIKE-0C 变更
 
 | 项 | 内容 |
 |----|------|
-| CASE 0 | 真实 native session 创建 + canary + `--resume` 严格 gate |
-| CASE 5B/6 | `prepare_history_for_live_gate` 为 user 尾历史追加 assistant canary 证明回合 |
-| Append 校验 | sessionId、UUID 链、live prompt、落盘 canary、全量 validator |
+| CASE 0 | create 前生成 canary；stdout 与原生 JSONL 均严格匹配 canary；session 文件名匹配 stdout session ID；create 与 resume 之间不改写 JSONL |
+| Raw-file gate | before bytes 保持完整前缀；after 只追加合法 JSON object；metadata 可穿插 |
+| Conversation projection | 仅投影 user/assistant；对投影执行 sessionId、UUID、parent、validator、tool pairing 与旧 UUID 扫描 |
+| Metadata | 支持 `file-history-snapshot`、`queue-operation`、`agent-name`、`custom-title`、`progress`、`system/turn_duration`；未知类型仅 warning |
+| CASE 5B/6 | `prepare_history_for_live_gate` 依据最后一个对话事件处理 assistant/user 尾，忽略 raw metadata 尾 |
 | Parser | `stream_event` 嵌套 delta；`saw_text_delta` 与 `assistant_text` 分离 |
-| Runner | 唯一 `run_subprocess_with_timeout` + 进程组 kill |
+| Runner | `time.monotonic()` 单一绝对 deadline 覆盖 pipe readers 与 `proc.wait()`；超时终止进程组 |
 | Path guard | `verify_work_root` 在 resolve 前拒绝 symlink |
-| 证据 | `tested_tree_sha` / `tested_diff_sha256` / `generated_at` |
+| 证据 | commit/tree/diff、unit/harness 命令与退出码、artifact pending、generated_at、ci_verified |
+
+## 机器证据语义
+
+- `tested_commit_sha` 是运行测试与 structural harness 时的父提交；本轮提交前应为 `52aaf0d452539a4a7963cb34cd1a904034c6bf53`。
+- `tested_tree_sha` 是测试时已暂存的代码、测试和报告所组成的 Git tree，不包含随后由 harness 刷新的 `results.json`。
+- `tested_diff_sha256` 是相对 `tested_commit_sha` 的被测变更摘要。
+- `artifact_commit_sha` 在提交前明确记录为 `artifact_commit_pending`。刷新后的 `results.json` 与代码一起提交，因此最终 artifact commit 是随后产生的新提交，不能伪装成 `tested_commit_sha`。
+- `ci_verified=false` 表示这些证据来自本地隔离 structural/mock 运行，不代表 GitHub Actions 或 credentialed live 已验证。
 
 ## Verdict truth table
 

@@ -21,6 +21,7 @@ if str(ROOT) not in sys.path:
 
 from tools.claude_forge_core import (  # noqa: E402
     ForgeOptions,
+    _message_text,
     collect_event_uuids,
     dump_jsonl,
     forge_transcript,
@@ -38,8 +39,10 @@ from tools.claude_forge_live_gate import (  # noqa: E402
     decide_verdict,
     evaluate_live_gate,
     generate_history_canary,
+    parse_raw_jsonl_append,
     parse_stdout_events,
     prepare_history_for_live_gate,
+    project_conversational_events,
 )
 from tools.claude_forge_subprocess import SubprocessRunResult, run_subprocess_with_timeout  # noqa: E402
 from tools.claude_forge_validator import validate_forged_transcript  # noqa: E402
@@ -107,7 +110,7 @@ def isolated_claude_env(claude_home: Path) -> dict[str, str]:
 
 
 def git_tree_sha() -> str:
-    out = _git(['rev-parse', 'HEAD^{tree}'])
+    out = _git(['write-tree'])
     return out or _git(['rev-parse', 'HEAD'])
 
 
@@ -140,13 +143,26 @@ class CaseResult:
     canary: str = ''
     canary_matched: bool = False
     live_gate_failures: list[str] = field(default_factory=list)
+    live_gate_warnings: list[str] = field(default_factory=list)
+    native_create_sha256: str = ''
+    native_before_sha256: str = ''
+    native_jsonl_rewritten: Optional[bool] = None
+    native_stdout_session_id: str = ''
+    native_jsonl_session_id: str = ''
 
 
 @dataclass
 class SpikeReport:
     branch: str = ''
+    tested_commit_sha: str = ''
     tested_tree_sha: str = ''
     tested_diff_sha256: str = ''
+    artifact_commit_sha: str = 'artifact_commit_pending'
+    unit_test_command: str = ''
+    unit_test_exit_code: Optional[int] = None
+    unit_test_count: int = 0
+    harness_command: str = ''
+    harness_exit_code: Optional[int] = None
     generated_at: str = ''
     command: str = ''
     command_exit_code: Optional[int] = None
@@ -179,6 +195,8 @@ def _git(cmd: list[str]) -> str:
             cwd=ROOT,
             capture_output=True,
             text=True,
+            encoding='utf-8',
+            errors='replace',
             check=False,
         )
         return (proc.stdout or proc.stderr).strip()
@@ -223,6 +241,7 @@ def _resume_probe_from_run(
     raw.exit_code = run.exit_code
     raw.stderr_text = run.stderr_text
     raw.timed_out = run.timed_out
+    raw.process_started = run.process_started
     if run.timed_out:
         raw.error_type = 'timeout'
         raw.error_detail = 'resume probe timed out'
@@ -230,7 +249,8 @@ def _resume_probe_from_run(
         raw.error_detail = redact(run.stderr_text)
 
     after_bytes = jsonl_path.read_bytes() if jsonl_path.is_file() else b''
-    after_events = load_jsonl(jsonl_path) if jsonl_path.is_file() else []
+    _, appended_events, _ = parse_raw_jsonl_append(before_bytes, after_bytes)
+    after_events = list(before_events) + appended_events
 
     gate = evaluate_live_gate(
         raw=raw,
@@ -253,6 +273,7 @@ def _resume_probe_from_run(
         'state': gate.state,
         'canary_matched': gate.canary_matched,
         'live_gate_failures': gate.failures,
+        'live_gate_warnings': gate.warnings,
     }
 
 
@@ -322,8 +343,16 @@ def _run_case0_native_control(
 ) -> CaseResult:
     result = CaseResult(case_id='0', name='control_native_session_resume')
     env = isolated_claude_env(claude_home)
+    canary = generate_history_canary()
+    result.canary = canary
     first_payload = json.dumps(
-        {'type': 'user', 'message': {'role': 'user', 'content': '测试消息 A'}},
+        {
+            'type': 'user',
+            'message': {
+                'role': 'user',
+                'content': f'请只回复以下校验码，不要添加任何其他字符：{canary}',
+            },
+        },
         ensure_ascii=False,
     ) + '\n'
     create_cmd = _claude_cmd(
@@ -344,29 +373,85 @@ def _run_case0_native_control(
         stdin_payload=first_payload,
         popen_factory=popen_factory,
     )
+    create_raw = parse_stdout_events(create_run.stdout_lines)
+    create_raw.process_started = create_run.process_started
+    create_raw.exit_code = create_run.exit_code
+    result.process_started = create_run.process_started
+    result.exit_code = create_run.exit_code
+    result.first_delta = create_raw.saw_text_delta
+    result.result_ok = create_raw.result_ok
+    result.canary_matched = create_raw.assistant_text.strip() == canary
+    result.native_stdout_session_id = create_raw.stdout_session_id
+    failures: list[str] = []
+    if not create_run.process_started:
+        failures.append('native_create_process_not_started')
     if create_run.exit_code != 0:
-        result.state = 'ENV_FAIL'
-        result.error_type = 'native_create_failed'
-        result.error_detail = redact(create_run.stderr_text or 'native session create failed')
+        failures.append(f'native_create_exit_code:{create_run.exit_code}')
+    if not create_raw.saw_text_delta:
+        failures.append('native_create_missing_text_delta')
+    if not create_raw.result_ok:
+        failures.append('native_create_result_not_ok')
+    if create_raw.result_is_error is not False:
+        failures.append('native_create_result_is_error_not_false')
+    if not create_raw.stdout_session_id:
+        failures.append('native_create_missing_stdout_session_id')
+    if create_raw.assistant_text.strip() != canary:
+        failures.append('native_create_stdout_canary_mismatch')
+
+    try:
+        _, jsonl_path = _discover_latest_session_jsonl(claude_home, str(isolated_cwd))
+    except Exception as exc:
+        result.state = 'NATIVE_CREATE_FAIL'
+        result.error_type = 'native_create_jsonl_missing'
+        result.error_detail = redact(str(exc))
+        result.live_gate_failures = failures + ['native_create_jsonl_missing']
         return result
 
-    session_id, jsonl_path = _discover_latest_session_jsonl(claude_home, str(isolated_cwd))
-    base_events = load_jsonl(jsonl_path)
-    canary = generate_history_canary()
-    result.canary = canary
-    history = prepare_history_for_live_gate(
-        base_events,
-        canary,
-        session_id=session_id,
-        cwd=str(isolated_cwd),
-    )
-    dump_jsonl(jsonl_path, history, allowed_output_root=work_root)
-    result.source_sha256 = sha256_file(jsonl_path)
-    result.event_count = len(history)
-    result.structure_ok = True
+    session_id = create_raw.stdout_session_id
+    result.native_jsonl_session_id = jsonl_path.stem
+    if jsonl_path.stem != session_id:
+        failures.append('native_create_filename_session_mismatch')
 
+    try:
+        base_events = load_jsonl(jsonl_path)
+        create_bytes = jsonl_path.read_bytes()
+    except Exception as exc:
+        failures.append(f'native_create_jsonl_invalid:{type(exc).__name__}')
+        result.state = 'NATIVE_CREATE_FAIL'
+        result.error_type = failures[0]
+        result.error_detail = redact(str(exc))
+        result.live_gate_failures = list(dict.fromkeys(failures))
+        return result
+
+    conversation = project_conversational_events(base_events)
+    if any(str(evt.get('sessionId') or '') != session_id for evt in conversation):
+        failures.append('native_create_jsonl_session_mismatch')
+    assistant_events = [evt for evt in conversation if evt.get('type') == 'assistant']
+    disk_text = (
+        _message_text((assistant_events[-1].get('message') or {}).get('content')).strip()
+        if assistant_events else ''
+    )
+    if disk_text != canary:
+        failures.append('native_create_jsonl_canary_mismatch')
+
+    create_sha = hashlib.sha256(create_bytes).hexdigest()
+    result.source_sha256 = create_sha
+    result.native_create_sha256 = create_sha
+    result.event_count = len(base_events)
+    result.structure_ok = not failures
     before_bytes = jsonl_path.read_bytes()
-    before_events = load_jsonl(jsonl_path)
+    result.native_before_sha256 = hashlib.sha256(before_bytes).hexdigest()
+    result.native_jsonl_rewritten = before_bytes != create_bytes
+    if result.native_jsonl_rewritten:
+        failures.append('native_create_jsonl_rewritten')
+    if failures:
+        result.state = 'NATIVE_CREATE_FAIL'
+        result.error_type = failures[0]
+        result.error_detail = redact(create_run.stderr_text or ';'.join(failures))
+        result.live_gate_failures = list(dict.fromkeys(failures))
+        return result
+
+    before_events = base_events
     probe = _spawn_resume_probe(
         cwd=str(isolated_cwd),
         session_id=session_id,
@@ -390,6 +475,7 @@ def _apply_probe_to_case(result: CaseResult, probe: dict[str, Any]) -> None:
     result.error_detail = probe.get('error_detail') or ''
     result.canary_matched = probe.get('canary_matched', False)
     result.live_gate_failures = list(probe.get('live_gate_failures') or [])
+    result.live_gate_warnings = list(probe.get('live_gate_warnings') or [])
     result.state = probe.get('state') or 'RESUME_FAIL'
 
 
@@ -480,16 +566,31 @@ def run_spike(
     structural_only: bool = False,
     popen_factory: Optional[Callable[..., Any]] = None,
     command: str = '',
+    unit_test_command: str = '',
+    unit_test_exit_code: Optional[int] = None,
+    unit_test_count: int = 0,
+    artifact_commit_sha: str = 'artifact_commit_pending',
 ) -> SpikeReport:
     report = SpikeReport()
     report.structural_only = structural_only
     report.branch = _git(['branch', '--show-current'])
+    report.tested_commit_sha = _git(['rev-parse', 'HEAD'])
     report.tested_tree_sha = git_tree_sha()
     report.tested_diff_sha256 = git_diff_sha256()
+    report.artifact_commit_sha = artifact_commit_sha
+    report.unit_test_command = unit_test_command
+    report.unit_test_exit_code = unit_test_exit_code
+    report.unit_test_count = unit_test_count
+    report.harness_command = command
     report.generated_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
     report.command = command
     report.origin_main_sha = _git(['rev-parse', 'origin/main'])
-    version_raw, version_ok, version_err = claude_version_check()
+    if structural_only:
+        version_raw = f'{CLAUDE_CODE_PINNED_VERSION} (pinned; structural-only did not execute Claude)'
+        version_ok = True
+        version_err = ''
+    else:
+        version_raw, version_ok, version_err = claude_version_check()
     report.claude_version = version_raw
     report.claude_version_ok = version_ok
     report.touched_production = False
@@ -646,18 +747,27 @@ def main() -> int:
     parser.add_argument('--work-root', type=Path, default=None)
     parser.add_argument('--report', type=Path, default=ROOT / 'artifacts' / 'spike-claude-forge-resume' / 'results.json')
     parser.add_argument('--structural-only', action='store_true', help='Skip live resume probes')
+    parser.add_argument('--unit-test-command', default='')
+    parser.add_argument('--unit-test-exit-code', type=int, default=None)
+    parser.add_argument('--unit-test-count', type=int, default=0)
+    parser.add_argument('--artifact-commit-sha', default='artifact_commit_pending')
     args = parser.parse_args()
     cmd_str = ' '.join([sys.executable, str(Path(__file__).resolve())] + sys.argv[1:])
     report = run_spike(
         args.work_root,
         structural_only=args.structural_only,
         command=cmd_str,
+        unit_test_command=args.unit_test_command,
+        unit_test_exit_code=args.unit_test_exit_code,
+        unit_test_count=args.unit_test_count,
+        artifact_commit_sha=args.artifact_commit_sha,
     )
     exit_code = 0 if report.verdict == 'GO' else 2
     report.command_exit_code = exit_code
+    report.harness_exit_code = exit_code
     args.report.parent.mkdir(parents=True, exist_ok=True)
     args.report.write_text(json.dumps(report.to_dict(), ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
-    print(json.dumps(report.to_dict(), ensure_ascii=False, indent=2))
+    print(json.dumps(report.to_dict(), ensure_ascii=True, indent=2))
     return exit_code
 
 

@@ -33,6 +33,7 @@ from tools.claude_forge_live_gate import (
     evaluate_live_gate,
     generate_history_canary,
     inject_canary_into_history,
+    parse_raw_jsonl_append,
     parse_stdout_events,
     prepare_history_for_live_gate,
     verify_jsonl_append_chain,
@@ -56,6 +57,37 @@ def _base_events() -> list[dict]:
         {'type': 'assistant', 'uuid': a, 'parentUuid': u, 'sessionId': sid,
          'message': {'role': 'assistant', 'content': [{'type': 'text', 'text': 'hello'}]}},
     ]
+
+
+def _jsonl_bytes(events: list[dict]) -> bytes:
+    return ''.join(json.dumps(evt, ensure_ascii=False) + '\n' for evt in events).encode('utf-8')
+
+
+def _metadata(event_type: str, **extra: object) -> dict:
+    return {'type': event_type, **extra}
+
+
+def _evaluate_appended(before: list[dict], appended: list[dict], *, canary: str) -> object:
+    sid = str(next(evt['sessionId'] for evt in before if evt.get('sessionId')))
+    raw = LiveProbeRaw(
+        process_started=True,
+        exit_code=0,
+        assistant_text=canary,
+        saw_text_delta=True,
+        result_ok=True,
+        result_is_error=False,
+        stdout_session_id=sid,
+    )
+    after = before + appended
+    return evaluate_live_gate(
+        raw=raw,
+        expected_session_id=sid,
+        canary=canary,
+        before_bytes=_jsonl_bytes(before),
+        after_bytes=_jsonl_bytes(after),
+        before_events=before,
+        after_events=after,
+    )
 
 
 class LiveGateTests(unittest.TestCase):
@@ -177,6 +209,190 @@ class LiveGateTests(unittest.TestCase):
         )
         self.assertFalse(ok)
         self.assertTrue(any(f.startswith('append_bad_parent') for f in failures))
+
+    def test_all_supported_metadata_without_uuid_pass_projection(self) -> None:
+        sid = new_uuid()
+        u0, a0, u1, a1 = new_uuid(), new_uuid(), new_uuid(), new_uuid()
+        canary = generate_history_canary()
+        before = [
+            {'type': 'user', 'uuid': u0, 'parentUuid': None, 'sessionId': sid,
+             'message': {'role': 'user', 'content': 'before'}},
+            _metadata('file-history-snapshot', snapshot={'trackedFileBackups': {}}),
+            {'type': 'assistant', 'uuid': a0, 'parentUuid': u0, 'sessionId': sid,
+             'message': {'role': 'assistant', 'content': [{'type': 'text', 'text': canary}]}},
+        ]
+        appended = [
+            {'type': 'user', 'uuid': u1, 'parentUuid': a0, 'sessionId': sid,
+             'message': {'role': 'user', 'content': build_live_user_prompt()}},
+            _metadata('queue-operation', operation='dequeue'),
+            _metadata('agent-name', agentName='spike'),
+            _metadata('custom-title', customTitle='native'),
+            _metadata('progress', data={'type': 'hook_progress'}),
+            _metadata('system', subtype='turn_duration', durationMs=1),
+            {'type': 'assistant', 'uuid': a1, 'parentUuid': u1, 'sessionId': sid,
+             'message': {'role': 'assistant', 'content': [{'type': 'text', 'text': canary}]}},
+            _metadata('progress', data={'type': 'done'}),
+        ]
+        after = before + appended
+        raw = LiveProbeRaw(
+            process_started=True,
+            exit_code=0,
+            assistant_text=canary,
+            saw_text_delta=True,
+            result_ok=True,
+            result_is_error=False,
+            stdout_session_id=sid,
+        )
+        gate = evaluate_live_gate(
+            raw=raw,
+            expected_session_id=sid,
+            canary=canary,
+            before_bytes=_jsonl_bytes(before),
+            after_bytes=_jsonl_bytes(after),
+            before_events=before,
+            after_events=after,
+        )
+        self.assertTrue(gate.passed, gate.failures)
+        self.assertTrue(gate.raw_append_valid)
+        self.assertFalse(any('bad_uuid' in failure for failure in gate.failures))
+
+    def test_metadata_between_existing_conversation_events_is_ignored(self) -> None:
+        base = _base_events()
+        before = [base[0], _metadata('file-history-snapshot', snapshot={}), base[1]]
+        sid = str(base[0]['sessionId'])
+        canary = generate_history_canary()
+        user_id, assistant_id = new_uuid(), new_uuid()
+        gate = _evaluate_appended(
+            before,
+            [
+                {'type': 'user', 'uuid': user_id, 'parentUuid': base[1]['uuid'], 'sessionId': sid,
+                 'message': {'role': 'user', 'content': build_live_user_prompt()}},
+                {'type': 'assistant', 'uuid': assistant_id, 'parentUuid': user_id, 'sessionId': sid,
+                 'message': {'role': 'assistant', 'content': [{'type': 'text', 'text': canary}]}},
+            ],
+            canary=canary,
+        )
+        self.assertTrue(gate.passed, gate.failures)
+
+    def test_metadata_between_new_user_and_assistant_is_ignored(self) -> None:
+        before = _base_events()
+        sid = str(before[0]['sessionId'])
+        canary = generate_history_canary()
+        user_id, assistant_id = new_uuid(), new_uuid()
+        gate = _evaluate_appended(
+            before,
+            [
+                {'type': 'user', 'uuid': user_id, 'parentUuid': before[-1]['uuid'], 'sessionId': sid,
+                 'message': {'role': 'user', 'content': build_live_user_prompt()}},
+                _metadata('queue-operation', operation='dequeue'),
+                {'type': 'assistant', 'uuid': assistant_id, 'parentUuid': user_id, 'sessionId': sid,
+                 'message': {'role': 'assistant', 'content': [{'type': 'text', 'text': canary}]}},
+            ],
+            canary=canary,
+        )
+        self.assertTrue(gate.passed, gate.failures)
+
+    def test_metadata_after_new_assistant_is_ignored(self) -> None:
+        before = _base_events()
+        sid = str(before[0]['sessionId'])
+        canary = generate_history_canary()
+        user_id, assistant_id = new_uuid(), new_uuid()
+        gate = _evaluate_appended(
+            before,
+            [
+                {'type': 'user', 'uuid': user_id, 'parentUuid': before[-1]['uuid'], 'sessionId': sid,
+                 'message': {'role': 'user', 'content': build_live_user_prompt()}},
+                {'type': 'assistant', 'uuid': assistant_id, 'parentUuid': user_id, 'sessionId': sid,
+                 'message': {'role': 'assistant', 'content': [{'type': 'text', 'text': canary}]}},
+                _metadata('progress', data={'phase': 'after-assistant'}),
+            ],
+            canary=canary,
+        )
+        self.assertTrue(gate.passed, gate.failures)
+
+    def test_unknown_metadata_is_warning_only(self) -> None:
+        before = _base_events()
+        sid = str(before[0]['sessionId'])
+        canary = generate_history_canary()
+        u1, a1 = new_uuid(), new_uuid()
+        after = before + [
+            {'type': 'user', 'uuid': u1, 'parentUuid': before[-1]['uuid'], 'sessionId': sid,
+             'message': {'role': 'user', 'content': build_live_user_prompt()}},
+            _metadata('future-metadata-without-uuid', payload={'safe': True}),
+            {'type': 'assistant', 'uuid': a1, 'parentUuid': u1, 'sessionId': sid,
+             'message': {'role': 'assistant', 'content': [{'type': 'text', 'text': canary}]}},
+        ]
+        raw = LiveProbeRaw(
+            process_started=True,
+            exit_code=0,
+            assistant_text=canary,
+            saw_text_delta=True,
+            result_ok=True,
+            result_is_error=False,
+            stdout_session_id=sid,
+        )
+        gate = evaluate_live_gate(
+            raw=raw,
+            expected_session_id=sid,
+            canary=canary,
+            before_bytes=_jsonl_bytes(before),
+            after_bytes=_jsonl_bytes(after),
+            before_events=before,
+            after_events=after,
+        )
+        self.assertTrue(gate.passed, gate.failures)
+        self.assertIn('unknown_metadata_type:future-metadata-without-uuid', gate.warnings)
+
+    def test_new_user_must_connect_to_resume_before_conversation_leaf(self) -> None:
+        before = _base_events()
+        sid = str(before[0]['sessionId'])
+        canary = generate_history_canary()
+        u1, a1 = new_uuid(), new_uuid()
+        after = before + [
+            {'type': 'user', 'uuid': u1, 'parentUuid': before[0]['uuid'], 'sessionId': sid,
+             'message': {'role': 'user', 'content': build_live_user_prompt()}},
+            {'type': 'assistant', 'uuid': a1, 'parentUuid': u1, 'sessionId': sid,
+             'message': {'role': 'assistant', 'content': [{'type': 'text', 'text': canary}]}},
+        ]
+        ok, _, failures = verify_jsonl_append_chain(
+            before,
+            after,
+            expected_session_id=sid,
+            live_user_prompt=build_live_user_prompt(),
+            canary=canary,
+        )
+        self.assertFalse(ok)
+        self.assertIn('append_user_not_connected_to_old_leaf', failures)
+
+    def test_raw_append_rejects_non_object_json_line(self) -> None:
+        before = _jsonl_bytes(_base_events())
+        ok, _, failures = parse_raw_jsonl_append(before, before + b'[]\n')
+        self.assertFalse(ok)
+        self.assertIn('append_not_object:1', failures)
+
+    def test_metadata_old_uuid_leak_fails(self) -> None:
+        before = _base_events()
+        sid = str(before[0]['sessionId'])
+        old_uuid = new_uuid()
+        canary = generate_history_canary()
+        u1, a1 = new_uuid(), new_uuid()
+        after = before + [
+            {'type': 'user', 'uuid': u1, 'parentUuid': before[-1]['uuid'], 'sessionId': sid,
+             'message': {'role': 'user', 'content': build_live_user_prompt()}},
+            _metadata('progress', leakedReference=old_uuid),
+            {'type': 'assistant', 'uuid': a1, 'parentUuid': u1, 'sessionId': sid,
+             'message': {'role': 'assistant', 'content': [{'type': 'text', 'text': canary}]}},
+        ]
+        ok, _, failures = verify_jsonl_append_chain(
+            before,
+            after,
+            expected_session_id=sid,
+            live_user_prompt=build_live_user_prompt(),
+            canary=canary,
+            old_uuids={old_uuid},
+        )
+        self.assertFalse(ok)
+        self.assertTrue(any(FORGE_UUID_REFERENCE_UNKNOWN in failure for failure in failures))
 
     def test_stream_event_fixture_parses_nested_delta(self) -> None:
         fixture = FIXTURE_ROOT / 'stream_event_sample.jsonl'
@@ -320,6 +536,52 @@ class LiveGateTests(unittest.TestCase):
         self.assertEqual(out[-1]['type'], 'assistant')
         self.assertIn(canary, json.dumps(out[-1], ensure_ascii=False))
 
+    def test_prepare_history_user_assistant_user_tail_appends_assistant(self) -> None:
+        sid = new_uuid()
+        u0, a0, u1 = new_uuid(), new_uuid(), new_uuid()
+        events = [
+            {'type': 'user', 'uuid': u0, 'parentUuid': None, 'sessionId': sid,
+             'message': {'role': 'user', 'content': 'one'}},
+            {'type': 'assistant', 'uuid': a0, 'parentUuid': u0, 'sessionId': sid,
+             'message': {'role': 'assistant', 'content': [{'type': 'text', 'text': 'two'}]}},
+            {'type': 'user', 'uuid': u1, 'parentUuid': a0, 'sessionId': sid,
+             'message': {'role': 'user', 'content': 'three'}},
+        ]
+        canary = generate_history_canary()
+        out = prepare_history_for_live_gate(events, canary, session_id=sid, cwd='/tmp/x')
+        self.assertEqual(len(out), len(events) + 1)
+        self.assertEqual(out[-1]['type'], 'assistant')
+        self.assertEqual(out[-1]['parentUuid'], u1)
+        self.assertEqual(out[1], events[1])
+
+    def test_prepare_history_metadata_tail_uses_conversation_leaf(self) -> None:
+        events = _base_events()
+        events.append(_metadata('progress', data={'phase': 'tail'}))
+        canary = generate_history_canary()
+        out = prepare_history_for_live_gate(
+            events,
+            canary,
+            session_id=str(events[0]['sessionId']),
+            cwd='/tmp/x',
+        )
+        self.assertEqual(len(out), len(events))
+        self.assertEqual(out[-1], events[-1])
+        self.assertIn(canary, json.dumps(out[-2], ensure_ascii=False))
+
+    def test_prepare_history_user_leaf_before_metadata_appends_assistant(self) -> None:
+        sid = new_uuid()
+        user_id = new_uuid()
+        events = [
+            {'type': 'user', 'uuid': user_id, 'parentUuid': None, 'sessionId': sid,
+             'message': {'role': 'user', 'content': 'tail user'}},
+            _metadata('queue-operation', operation='enqueue'),
+        ]
+        canary = generate_history_canary()
+        out = prepare_history_for_live_gate(events, canary, session_id=sid, cwd='/tmp/x')
+        self.assertEqual(out[-1]['type'], 'assistant')
+        self.assertEqual(out[-1]['parentUuid'], user_id)
+        self.assertEqual(out[-2], events[-1])
+
     def test_live_prompt_does_not_contain_canary(self) -> None:
         canary = generate_history_canary()
         prompt = build_live_user_prompt()
@@ -334,7 +596,10 @@ class LiveGateTests(unittest.TestCase):
             real = root / 'real-target'
             real.mkdir()
             link = mid / 'link'
-            link.symlink_to(real)
+            try:
+                link.symlink_to(real)
+            except OSError as exc:
+                self.skipTest(f'symlink unavailable: {exc}')
             out = link / 'out.jsonl'
             events = [{'type': 'user', 'uuid': new_uuid(), 'parentUuid': None, 'sessionId': new_uuid(),
                        'message': {'role': 'user', 'content': 'x'}}]

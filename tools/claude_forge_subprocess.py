@@ -5,6 +5,7 @@ import os
 import signal
 import subprocess
 import threading
+import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
@@ -27,7 +28,8 @@ def run_subprocess_with_timeout(
     timeout_seconds: float,
     popen_factory: Optional[Callable[..., Any]] = None,
 ) -> SubprocessRunResult:
-    """Run a subprocess with line-buffered stdout collection and process-group kill on timeout."""
+    """Run a subprocess under one monotonic deadline, including pipe readers and wait."""
+    deadline = time.monotonic() + timeout_seconds
     factory = popen_factory or subprocess.Popen
     proc = factory(
         cmd,
@@ -58,27 +60,50 @@ def run_subprocess_with_timeout(
     out_thread.start()
     err_thread.start()
     timed_out = False
+
+    def _remaining() -> float:
+        return max(0.0, deadline - time.monotonic())
+
     try:
         assert proc.stdin is not None
         proc.stdin.write(stdin_payload)
         proc.stdin.flush()
         proc.stdin.close()
-        out_thread.join(timeout=timeout_seconds)
-        if out_thread.is_alive():
+        remaining = _remaining()
+        if remaining <= 0:
+            raise subprocess.TimeoutExpired(cmd, timeout_seconds)
+        result.exit_code = int(proc.wait(timeout=remaining))
+
+        for reader in (out_thread, err_thread):
+            remaining = _remaining()
+            if remaining <= 0:
+                timed_out = True
+                break
+            reader.join(timeout=remaining)
+        if out_thread.is_alive() or err_thread.is_alive():
             timed_out = True
             _kill_process_group(proc)
-            out_thread.join(timeout=5)
-        err_thread.join(timeout=5)
-        result.exit_code = int(proc.wait(timeout=10))
     except subprocess.TimeoutExpired:
         timed_out = True
         _kill_process_group(proc)
-        proc.wait(timeout=5)
-        result.exit_code = int(proc.returncode or -1)
+        try:
+            proc.wait(timeout=min(1.0, max(0.1, timeout_seconds)))
+        except subprocess.TimeoutExpired:
+            _kill_process_group(proc)
+        result.exit_code = int(proc.returncode if proc.returncode is not None else -1)
     finally:
         if proc.poll() is None:
             _kill_process_group(proc)
-            proc.wait(timeout=5)
+            try:
+                proc.wait(timeout=min(1.0, max(0.1, timeout_seconds)))
+            except subprocess.TimeoutExpired:
+                pass
+        out_thread.join(timeout=0.1)
+        err_thread.join(timeout=0.1)
+        if not out_thread.is_alive() and proc.stdout is not None:
+            proc.stdout.close()
+        if not err_thread.is_alive() and proc.stderr is not None:
+            proc.stderr.close()
         result.stdout_lines = list(stdout_lines)
         result.stderr_text = ''.join(stderr_chunks)
         result.timed_out = timed_out
@@ -86,6 +111,19 @@ def run_subprocess_with_timeout(
 
 
 def _kill_process_group(proc: subprocess.Popen[str]) -> None:
+    if os.name == 'nt':
+        try:
+            subprocess.run(
+                ['taskkill', '/PID', str(proc.pid), '/T', '/F'],
+                capture_output=True,
+                check=False,
+                timeout=0.5,
+            )
+        except Exception:
+            pass
+        if proc.poll() is None:
+            proc.kill()
+        return
     try:
         os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
     except ProcessLookupError:

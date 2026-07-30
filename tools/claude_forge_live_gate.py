@@ -13,6 +13,14 @@ CLAUDE_CODE_PINNED_VERSION = '2.1.220'
 CLAUDE_CODE_NPM_SPEC = f'@anthropic-ai/claude-code@{CLAUDE_CODE_PINNED_VERSION}'
 
 SYSTEM_PROMPT = '你是隔离 Spike 测试助手。只回复简短确认，不要调用工具。'
+CONVERSATIONAL_EVENT_TYPES = frozenset({'user', 'assistant'})
+KNOWN_METADATA_TYPES = frozenset({
+    'file-history-snapshot',
+    'queue-operation',
+    'agent-name',
+    'custom-title',
+    'progress',
+})
 
 
 def generate_history_canary() -> str:
@@ -27,22 +35,23 @@ def inject_canary_into_history(events: list[dict[str, Any]], canary: str) -> lis
     if not events:
         return events
     out = [json.loads(json.dumps(e)) for e in events]
-    for evt in reversed(out):
-        if evt.get('type') != 'assistant':
-            continue
-        message = evt.setdefault('message', {})
-        content = message.get('content')
-        if isinstance(content, str):
-            message['content'] = content.rstrip() + f'\n[history-canary:{canary}]'
-            return out
-        if isinstance(content, list):
-            for block in reversed(content):
-                if isinstance(block, dict) and block.get('type') == 'text':
-                    block['text'] = str(block.get('text') or '').rstrip() + f'\n[history-canary:{canary}]'
-                    return out
-            content.append({'type': 'text', 'text': f'[history-canary:{canary}]'})
-            return out
-    raise ValueError('no assistant event to inject canary')
+    leaf = next((evt for evt in reversed(out) if _is_conversational_event(evt)), None)
+    if leaf is None or leaf.get('type') != 'assistant':
+        raise ValueError('conversation leaf is not assistant')
+    message = leaf.setdefault('message', {})
+    content = message.get('content')
+    if isinstance(content, str):
+        message['content'] = content.rstrip() + f'\n[history-canary:{canary}]'
+        return out
+    if isinstance(content, list):
+        for block in reversed(content):
+            if isinstance(block, dict) and block.get('type') == 'text':
+                block['text'] = str(block.get('text') or '').rstrip() + f'\n[history-canary:{canary}]'
+                return out
+        content.append({'type': 'text', 'text': f'[history-canary:{canary}]'})
+        return out
+    message['content'] = [{'type': 'text', 'text': f'[history-canary:{canary}]'}]
+    return out
 
 
 def prepare_history_for_live_gate(
@@ -55,18 +64,21 @@ def prepare_history_for_live_gate(
     """Ensure history ends with an assistant carrying the canary (user-tail safe)."""
     if not events:
         raise ValueError('empty history')
-    if any(evt.get('type') == 'assistant' for evt in events):
+    leaf = next((evt for evt in reversed(events) if _is_conversational_event(evt)), None)
+    if leaf is None:
+        raise ValueError('history has no conversational event')
+    if leaf.get('type') == 'assistant':
         return inject_canary_into_history(events, canary)
     out = [json.loads(json.dumps(e)) for e in events]
-    parent = str(out[-1].get('uuid') or '')
+    parent = str(leaf.get('uuid') or '')
     if not parent:
-        raise ValueError('tail event missing uuid')
+        raise ValueError('conversation leaf missing uuid')
     a_id = new_uuid()
     out.append({
         'type': 'assistant',
         'uuid': a_id,
         'parentUuid': parent,
-        'timestamp': out[-1].get('timestamp') or '2026-07-30T00:00:00.000Z',
+        'timestamp': leaf.get('timestamp') or '2026-07-30T00:00:00.000Z',
         'sessionId': session_id,
         'cwd': cwd,
         'version': f'{CLAUDE_CODE_PINNED_VERSION}-spike',
@@ -102,8 +114,66 @@ class LiveGateResult:
     canary: str = ''
     canary_matched: bool = False
     prefix_unchanged: bool = False
+    raw_append_valid: bool = False
     append_valid: bool = False
+    warnings: list[str] = field(default_factory=list)
     raw: Optional[LiveProbeRaw] = None
+
+
+def _is_conversational_event(evt: dict[str, Any]) -> bool:
+    etype = evt.get('type')
+    if etype not in CONVERSATIONAL_EVENT_TYPES:
+        return False
+    message = evt.get('message')
+    return isinstance(message, dict) and message.get('role') == etype
+
+
+def project_conversational_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Project raw Claude JSONL onto user/assistant events only."""
+    return [evt for evt in events if _is_conversational_event(evt)]
+
+
+def _metadata_kind(evt: dict[str, Any]) -> str:
+    etype = str(evt.get('type') or '')
+    if etype in KNOWN_METADATA_TYPES:
+        return etype
+    if etype == 'system' and str(evt.get('subtype') or '') == 'turn_duration':
+        return 'system/turn_duration'
+    return etype or '<missing>'
+
+
+def parse_raw_jsonl_append(
+    before: bytes,
+    after: bytes,
+) -> tuple[bool, list[dict[str, Any]], list[str]]:
+    """Validate the byte prefix and parse only newly appended JSONL objects."""
+    failures: list[str] = []
+    if not verify_jsonl_prefix_unchanged(before, after):
+        return False, [], ['jsonl_prefix_changed']
+    suffix = after[len(before):]
+    if not suffix:
+        return False, [], ['append_empty']
+    try:
+        text = suffix.decode('utf-8')
+    except UnicodeDecodeError:
+        return False, [], ['append_invalid_utf8']
+    new_events: list[dict[str, Any]] = []
+    for offset, raw_line in enumerate(text.splitlines(), 1):
+        line = raw_line.strip()
+        if not line:
+            continue
+        try:
+            evt = json.loads(line)
+        except json.JSONDecodeError:
+            failures.append(f'append_invalid_json:{offset}')
+            continue
+        if not isinstance(evt, dict):
+            failures.append(f'append_not_object:{offset}')
+            continue
+        new_events.append(evt)
+    if not new_events:
+        failures.append('append_no_json_objects')
+    return not failures, new_events, failures
 
 
 def _extract_assistant_message_text(evt: dict[str, Any]) -> str:
@@ -183,55 +253,90 @@ def verify_jsonl_append_chain(
     live_user_prompt: str,
     canary: str,
     old_uuids: Optional[set[str]] = None,
+    warning_sink: Optional[list[str]] = None,
 ) -> tuple[bool, str, list[str]]:
     failures: list[str] = []
-    n_before = len(before_events)
-    if len(after_events) < n_before + 2:
+    warnings = warning_sink if warning_sink is not None else []
+    if len(after_events) < len(before_events):
         return False, 'append_too_few_events', failures
-    if after_events[:n_before] != before_events:
+    if after_events[:len(before_events)] != before_events:
         return False, 'prefix_events_changed', failures
 
-    old_leaf = str(before_events[-1].get('uuid') or '')
-    known_uuids = {str(e.get('uuid') or '') for e in before_events if e.get('uuid')}
-    new_events = after_events[n_before:]
+    before_conversation = project_conversational_events(before_events)
+    after_conversation = project_conversational_events(after_events)
+    if not before_conversation:
+        return False, 'missing_before_conversation', failures
+    if after_conversation[:len(before_conversation)] != before_conversation:
+        return False, 'conversation_prefix_changed', failures
 
-    prev_uuid = old_leaf
-    saw_user = False
-    saw_assistant = False
-    for idx, evt in enumerate(new_events):
+    old_leaf = str(before_conversation[-1].get('uuid') or '')
+    new_conversation = after_conversation[len(before_conversation):]
+    if len(new_conversation) < 2:
+        return False, 'append_too_few_conversation_events', failures
+
+    all_conversation = before_conversation + new_conversation
+    known_uuids: set[str] = set()
+    for idx, evt in enumerate(all_conversation):
         uid = str(evt.get('uuid') or '')
         if not uid or not UUID_RE.match(uid):
-            failures.append(f'append_bad_uuid:{n_before + idx}')
+            failures.append(f'append_bad_uuid:{idx}')
             continue
         if uid in known_uuids:
             failures.append(f'append_duplicate_uuid:{uid}')
         known_uuids.add(uid)
+
+    prev_uuid = old_leaf
+    matching_users: list[dict[str, Any]] = []
+    for idx, evt in enumerate(new_conversation):
+        uid = str(evt.get('uuid') or '')
         if str(evt.get('sessionId') or '') != expected_session_id:
             failures.append(f'append_bad_session_id:{uid}')
         if str(evt.get('parentUuid') or '') != prev_uuid:
             failures.append(f'append_bad_parent:{uid}')
         etype = evt.get('type')
         if etype == 'user':
-            saw_user = True
-            if _message_text((evt.get('message') or {}).get('content')) != live_user_prompt:
-                failures.append('append_user_prompt_mismatch')
-        elif etype == 'assistant':
-            saw_assistant = True
-            if _assistant_on_disk_text(evt) != canary.strip():
-                failures.append('append_assistant_canary_mismatch')
+            if _message_text((evt.get('message') or {}).get('content')) == live_user_prompt:
+                matching_users.append(evt)
         prev_uuid = uid
 
-    if not saw_user:
+    if not matching_users:
         failures.append('append_missing_user')
-    if not saw_assistant:
+        live_user: Optional[dict[str, Any]] = None
+    else:
+        live_user = matching_users[0]
+        if len(matching_users) > 1:
+            failures.append('append_duplicate_live_user')
+        if str(live_user.get('parentUuid') or '') != old_leaf:
+            failures.append('append_user_not_connected_to_old_leaf')
+
+    matching_assistants = [
+        evt for evt in new_conversation
+        if evt.get('type') == 'assistant'
+        and live_user is not None
+        and str(evt.get('parentUuid') or '') == str(live_user.get('uuid') or '')
+    ]
+    if not matching_assistants:
         failures.append('append_missing_assistant')
+    else:
+        live_assistant = matching_assistants[0]
+        if _assistant_on_disk_text(live_assistant) != canary.strip():
+            failures.append('append_assistant_canary_mismatch')
+        if str(live_assistant.get('sessionId') or '') != expected_session_id:
+            failures.append(f'append_bad_session_id:{live_assistant.get("uuid") or ""}')
+
+    for evt in after_events[len(before_events):]:
+        if _is_conversational_event(evt):
+            continue
+        kind = _metadata_kind(evt)
+        if kind not in KNOWN_METADATA_TYPES and kind != 'system/turn_duration':
+            warnings.append(f'unknown_metadata_type:{kind}')
 
     if old_uuids:
         for evt in after_events:
             failures.extend(scan_unknown_uuid_strings(evt, old_uuids))
 
     validation = validate_forged_transcript(
-        after_events,
+        after_conversation,
         session_id=expected_session_id,
         old_uuids=old_uuids,
     )
@@ -282,6 +387,12 @@ def evaluate_live_gate(
     if not result.prefix_unchanged:
         failures.append('jsonl_prefix_changed')
 
+    raw_ok, _, raw_failures = parse_raw_jsonl_append(before_bytes, after_bytes)
+    result.raw_append_valid = raw_ok
+    if not raw_ok:
+        failures.extend(raw_failures)
+
+    warnings: list[str] = []
     append_ok, append_reason, append_failures = verify_jsonl_append_chain(
         before_events,
         after_events,
@@ -289,6 +400,7 @@ def evaluate_live_gate(
         live_user_prompt=build_live_user_prompt(),
         canary=canary,
         old_uuids=old_uuids,
+        warning_sink=warnings,
     )
     result.append_valid = append_ok
     if not append_ok:
@@ -296,6 +408,7 @@ def evaluate_live_gate(
         failures.extend(append_failures)
 
     result.failures = list(dict.fromkeys(failures))
+    result.warnings = list(dict.fromkeys(warnings))
     result.passed = len(result.failures) == 0
     result.state = 'API_ACCEPTED_FIRST_DELTA' if result.passed else 'RESUME_FAIL'
     return result

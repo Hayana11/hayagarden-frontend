@@ -171,14 +171,14 @@ def dump_jsonl(
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = allowed_output_root / f'.forge-tmp-{new_uuid()}.jsonl'
         try:
-            tmp.write_text(text, encoding='utf-8')
+            tmp.write_bytes(text.encode('utf-8'))
             os.replace(tmp, path)
         finally:
             if tmp.exists() and not path.exists():
                 tmp.unlink(missing_ok=True)
     else:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(text, encoding='utf-8')
+        path.write_bytes(text.encode('utf-8'))
     return sha256_text(text)
 
 
