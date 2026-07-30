@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 import secrets
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any, Mapping, Optional
 
 from tools.claude_forge_core import UUID_RE, _content_blocks, _message_text, new_uuid, scan_unknown_uuid_strings
 from tools.claude_forge_validator import validate_forged_transcript
@@ -14,6 +14,10 @@ CLAUDE_CODE_NPM_SPEC = f'@anthropic-ai/claude-code@{CLAUDE_CODE_PINNED_VERSION}'
 
 SYSTEM_PROMPT = '你是隔离 Spike 测试助手。只回复简短确认，不要调用工具。'
 CONVERSATIONAL_EVENT_TYPES = frozenset({'user', 'assistant'})
+RAW_CONVERSATION_NODE = 'conversation_node'
+RAW_ASSISTANT_USAGE_OBSERVATION = 'assistant_usage_observation'
+RAW_METADATA = 'metadata'
+RAW_MALFORMED_CONVERSATION_EVENT = 'malformed_conversation_event'
 KNOWN_METADATA_TYPES = frozenset({
     'file-history-snapshot',
     'queue-operation',
@@ -120,12 +124,74 @@ class LiveGateResult:
     raw: Optional[LiveProbeRaw] = None
 
 
-def _is_conversational_event(evt: dict[str, Any]) -> bool:
+@dataclass(frozen=True)
+class RawEventClassification:
+    kind: str
+    reason: str = ''
+    request_id: str = ''
+
+
+def _has_message_body(content: Any) -> bool:
+    if isinstance(content, str):
+        return bool(content.strip())
+    if isinstance(content, list):
+        return any(
+            (isinstance(block, str) and bool(block.strip()))
+            or (isinstance(block, Mapping) and bool(block))
+            for block in content
+        )
+    return content is not None
+
+
+def classify_raw_jsonl_event(evt: dict[str, Any]) -> RawEventClassification:
+    """Classify one raw Claude JSONL object without weakening conversation validation."""
     etype = evt.get('type')
     if etype not in CONVERSATIONAL_EVENT_TYPES:
-        return False
+        return RawEventClassification(RAW_METADATA)
+
     message = evt.get('message')
-    return isinstance(message, dict) and message.get('role') == etype
+    if not isinstance(message, dict):
+        return RawEventClassification(RAW_MALFORMED_CONVERSATION_EVENT, 'message_missing')
+    if message.get('role') != etype:
+        return RawEventClassification(RAW_MALFORMED_CONVERSATION_EVENT, 'role_mismatch')
+
+    uid = str(evt.get('uuid') or '')
+    uuid_ok = bool(uid and UUID_RE.match(uid))
+    session_ok = bool(str(evt.get('sessionId') or ''))
+    content_present = 'content' in message
+    body_present = content_present and _has_message_body(message.get('content'))
+    canonical = uuid_ok and session_ok and content_present and (etype == 'user' or body_present)
+    if canonical:
+        return RawEventClassification(RAW_CONVERSATION_NODE)
+
+    request_id = str(evt.get('requestId') or evt.get('request_id') or '').strip()
+    usage = message.get('usage')
+    if (
+        etype == 'assistant'
+        and request_id
+        and isinstance(usage, Mapping)
+        and (not canonical or not body_present)
+    ):
+        return RawEventClassification(
+            RAW_ASSISTANT_USAGE_OBSERVATION,
+            request_id=request_id,
+        )
+
+    if not uuid_ok:
+        reason = 'uuid_missing_or_invalid'
+    elif not session_ok:
+        reason = 'session_id_missing'
+    elif not content_present:
+        reason = 'content_missing'
+    elif etype == 'assistant' and not body_present:
+        reason = 'content_empty'
+    else:
+        reason = 'incomplete_conversation_node'
+    return RawEventClassification(RAW_MALFORMED_CONVERSATION_EVENT, reason)
+
+
+def _is_conversational_event(evt: dict[str, Any]) -> bool:
+    return classify_raw_jsonl_event(evt).kind == RAW_CONVERSATION_NODE
 
 
 def project_conversational_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -140,6 +206,35 @@ def _metadata_kind(evt: dict[str, Any]) -> str:
     if etype == 'system' and str(evt.get('subtype') or '') == 'turn_duration':
         return 'system/turn_duration'
     return etype or '<missing>'
+
+
+def _classify_raw_events(
+    events: list[dict[str, Any]],
+    *,
+    warning_sink: list[str],
+) -> list[str]:
+    failures: list[str] = []
+    usage_by_request: dict[str, str] = {}
+    for offset, evt in enumerate(events):
+        classification = classify_raw_jsonl_event(evt)
+        if classification.kind == RAW_MALFORMED_CONVERSATION_EVENT:
+            failures.append(
+                f'malformed_conversation_event:{offset}:{classification.reason}'
+            )
+            continue
+        if classification.kind != RAW_ASSISTANT_USAGE_OBSERVATION:
+            continue
+        usage = (evt.get('message') or {}).get('usage')
+        signature = json.dumps(usage, ensure_ascii=False, sort_keys=True, separators=(',', ':'))
+        request_id = classification.request_id
+        if request_id in usage_by_request:
+            if usage_by_request[request_id] == signature:
+                warning_sink.append(f'duplicate_assistant_usage_request_id:{request_id}')
+            else:
+                warning_sink.append(f'conflicting_assistant_usage_request_id:{request_id}')
+        else:
+            usage_by_request[request_id] = signature
+    return failures
 
 
 def parse_raw_jsonl_append(
@@ -264,6 +359,7 @@ def verify_jsonl_append_chain(
 
     before_conversation = project_conversational_events(before_events)
     after_conversation = project_conversational_events(after_events)
+    failures.extend(_classify_raw_events(after_events, warning_sink=warnings))
     if not before_conversation:
         return False, 'missing_before_conversation', failures
     if after_conversation[:len(before_conversation)] != before_conversation:
@@ -325,7 +421,8 @@ def verify_jsonl_append_chain(
             failures.append(f'append_bad_session_id:{live_assistant.get("uuid") or ""}')
 
     for evt in after_events[len(before_events):]:
-        if _is_conversational_event(evt):
+        classification = classify_raw_jsonl_event(evt)
+        if classification.kind != RAW_METADATA:
             continue
         kind = _metadata_kind(evt)
         if kind not in KNOWN_METADATA_TYPES and kind != 'system/turn_duration':

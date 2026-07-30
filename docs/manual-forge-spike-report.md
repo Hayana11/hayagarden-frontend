@@ -1,7 +1,7 @@
-# P-CONTEXT-WINDOW-SPIKE-0C 报告
+# P-CONTEXT-WINDOW-SPIKE-0C.1 报告
 
 **Verdict:** NO-GO (`live_probe_status=NOT_RUN_NO_CREDENTIALS`)  
-**Spike revision:** `P-CONTEXT-WINDOW-SPIKE-0C`
+**Spike revision:** `P-CONTEXT-WINDOW-SPIKE-0C.1`
 **Claude Code (pinned):** `@anthropic-ai/claude-code@2.1.220`  
 **Touched production:** 否  
 **ci_verified:** false（本地 structural-only；非 GitHub Actions 已验证结果）
@@ -21,11 +21,14 @@ Credentialed live（仅隔离机，本轮未执行）：
 python3 scripts/spike_claude_forge_resume.py
 ```
 
-## SPIKE-0C 变更
+## SPIKE-0C.1 变更
 
 | 项 | 内容 |
 |----|------|
 | CASE 0 | create 前生成 canary；stdout 与原生 JSONL 均严格匹配 canary；session 文件名匹配 stdout session ID；create 与 resume 之间不改写 JSONL |
+| Raw event 分类 | 每条 JSON object 明确分类为 conversation node、assistant usage observation、metadata 或 malformed conversation event |
+| Usage observation | usage-only assistant 保留在 raw append，不参与 UUID/parent 链或 forge validator；重复/冲突 requestId 仅 warning |
+| Malformed event | 显式 user/assistant 若不满足 conversation 或 usage observation 契约，必须以 `malformed_conversation_event` 失败 |
 | Raw-file gate | before bytes 保持完整前缀；after 只追加合法 JSON object；metadata 可穿插 |
 | Conversation projection | 仅投影 user/assistant；对投影执行 sessionId、UUID、parent、validator、tool pairing 与旧 UUID 扫描 |
 | Metadata | 支持 `file-history-snapshot`、`queue-operation`、`agent-name`、`custom-title`、`progress`、`system/turn_duration`；未知类型仅 warning |
@@ -37,11 +40,13 @@ python3 scripts/spike_claude_forge_resume.py
 
 ## 机器证据语义
 
-- `tested_commit_sha` 是运行测试与 structural harness 时的父提交；本轮提交前应为 `52aaf0d452539a4a7963cb34cd1a904034c6bf53`。
+- `tested_commit_sha` 是运行测试与 structural harness 时的父提交；0C.1 提交前应为 `e730293b3f878563b7df20f943c15f540b1fb088`。
 - `tested_tree_sha` 是测试时已暂存的代码、测试和报告所组成的 Git tree，不包含随后由 harness 刷新的 `results.json`。
 - `tested_diff_sha256` 是相对 `tested_commit_sha` 的被测变更摘要。
 - `artifact_commit_sha` 在提交前明确记录为 `artifact_commit_pending`。刷新后的 `results.json` 与代码一起提交，因此最终 artifact commit 是随后产生的新提交，不能伪装成 `tested_commit_sha`。
 - `ci_verified=false` 表示这些证据来自本地隔离 structural/mock 运行，不代表 GitHub Actions 或 credentialed live 已验证。
+
+0C.1 完成后停止结构施工；下一阶段是隔离 credentialed live 验证，本轮未执行。
 
 ## Verdict truth table
 

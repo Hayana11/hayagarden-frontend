@@ -28,7 +28,11 @@ from tools.claude_forge_core import (
 )
 from tools.claude_forge_live_gate import (
     LiveProbeRaw,
+    RAW_ASSISTANT_USAGE_OBSERVATION,
+    RAW_CONVERSATION_NODE,
+    RAW_MALFORMED_CONVERSATION_EVENT,
     build_live_user_prompt,
+    classify_raw_jsonl_event,
     decide_verdict,
     evaluate_live_gate,
     generate_history_canary,
@@ -36,6 +40,7 @@ from tools.claude_forge_live_gate import (
     parse_raw_jsonl_append,
     parse_stdout_events,
     prepare_history_for_live_gate,
+    project_conversational_events,
     verify_jsonl_append_chain,
     verify_jsonl_prefix_unchanged,
 )
@@ -46,6 +51,7 @@ from tools.claude_forge_validator import (
 )
 
 FIXTURE_ROOT = ROOT / 'tests' / 'fixtures' / 'claude_forge_spike'
+USAGE_FIXTURE = ROOT / 'tests' / 'fixtures' / 'cc_usage_history.jsonl'
 
 
 def _base_events() -> list[dict]:
@@ -65,6 +71,21 @@ def _jsonl_bytes(events: list[dict]) -> bytes:
 
 def _metadata(event_type: str, **extra: object) -> dict:
     return {'type': event_type, **extra}
+
+
+def _usage_observation(
+    request_id: str = 'req-usage-observation',
+    *,
+    input_tokens: int = 3,
+) -> dict:
+    return {
+        'type': 'assistant',
+        'requestId': request_id,
+        'message': {
+            'role': 'assistant',
+            'usage': {'input_tokens': input_tokens, 'output_tokens': 1},
+        },
+    }
 
 
 def _evaluate_appended(before: list[dict], appended: list[dict], *, canary: str) -> object:
@@ -91,6 +112,351 @@ def _evaluate_appended(before: list[dict], appended: list[dict], *, canary: str)
 
 
 class LiveGateTests(unittest.TestCase):
+    def test_cc_usage_fixture_rows_are_usage_observations_not_conversation(self) -> None:
+        events = load_jsonl(USAGE_FIXTURE)
+        assistant_rows = [evt for evt in events if evt.get('type') == 'assistant']
+        self.assertEqual(len(assistant_rows), 4)
+        self.assertTrue(all(
+            classify_raw_jsonl_event(evt).kind == RAW_ASSISTANT_USAGE_OBSERVATION
+            for evt in assistant_rows
+        ))
+        self.assertFalse(project_conversational_events(events))
+
+    def test_usage_observation_in_old_transcript_does_not_affect_gate(self) -> None:
+        base = _base_events()
+        before = [base[0], _usage_observation(), base[1]]
+        sid = str(base[0]['sessionId'])
+        canary = generate_history_canary()
+        user_id, assistant_id = new_uuid(), new_uuid()
+        gate = _evaluate_appended(
+            before,
+            [
+                {'type': 'user', 'uuid': user_id, 'parentUuid': base[1]['uuid'], 'sessionId': sid,
+                 'message': {'role': 'user', 'content': build_live_user_prompt()}},
+                {'type': 'assistant', 'uuid': assistant_id, 'parentUuid': user_id, 'sessionId': sid,
+                 'message': {'role': 'assistant', 'content': [{'type': 'text', 'text': canary}]}},
+            ],
+            canary=canary,
+        )
+        self.assertTrue(gate.passed, gate.failures)
+
+    def test_usage_observation_between_new_user_and_assistant_does_not_affect_gate(self) -> None:
+        before = _base_events()
+        sid = str(before[0]['sessionId'])
+        canary = generate_history_canary()
+        user_id, assistant_id = new_uuid(), new_uuid()
+        gate = _evaluate_appended(
+            before,
+            [
+                {'type': 'user', 'uuid': user_id, 'parentUuid': before[-1]['uuid'], 'sessionId': sid,
+                 'message': {'role': 'user', 'content': build_live_user_prompt()}},
+                _usage_observation(),
+                {'type': 'assistant', 'uuid': assistant_id, 'parentUuid': user_id, 'sessionId': sid,
+                 'message': {'role': 'assistant', 'content': [{'type': 'text', 'text': canary}]}},
+            ],
+            canary=canary,
+        )
+        self.assertTrue(gate.passed, gate.failures)
+
+    def test_usage_observation_after_new_assistant_does_not_affect_gate(self) -> None:
+        before = _base_events()
+        sid = str(before[0]['sessionId'])
+        canary = generate_history_canary()
+        user_id, assistant_id = new_uuid(), new_uuid()
+        gate = _evaluate_appended(
+            before,
+            [
+                {'type': 'user', 'uuid': user_id, 'parentUuid': before[-1]['uuid'], 'sessionId': sid,
+                 'message': {'role': 'user', 'content': build_live_user_prompt()}},
+                {'type': 'assistant', 'uuid': assistant_id, 'parentUuid': user_id, 'sessionId': sid,
+                 'message': {'role': 'assistant', 'content': [{'type': 'text', 'text': canary}]}},
+                _usage_observation(),
+            ],
+            canary=canary,
+        )
+        self.assertTrue(gate.passed, gate.failures)
+
+    def test_duplicate_usage_request_id_warns_without_failing(self) -> None:
+        before = _base_events()
+        sid = str(before[0]['sessionId'])
+        canary = generate_history_canary()
+        user_id, assistant_id = new_uuid(), new_uuid()
+        usage = _usage_observation('req-duplicate')
+        gate = _evaluate_appended(
+            before,
+            [
+                {'type': 'user', 'uuid': user_id, 'parentUuid': before[-1]['uuid'], 'sessionId': sid,
+                 'message': {'role': 'user', 'content': build_live_user_prompt()}},
+                usage,
+                json.loads(json.dumps(usage)),
+                {'type': 'assistant', 'uuid': assistant_id, 'parentUuid': user_id, 'sessionId': sid,
+                 'message': {'role': 'assistant', 'content': [{'type': 'text', 'text': canary}]}},
+            ],
+            canary=canary,
+        )
+        self.assertTrue(gate.passed, gate.failures)
+        self.assertIn('duplicate_assistant_usage_request_id:req-duplicate', gate.warnings)
+
+    def test_conflicting_usage_request_id_warns_without_failing(self) -> None:
+        before = _base_events()
+        sid = str(before[0]['sessionId'])
+        canary = generate_history_canary()
+        user_id, assistant_id = new_uuid(), new_uuid()
+        gate = _evaluate_appended(
+            before,
+            [
+                {'type': 'user', 'uuid': user_id, 'parentUuid': before[-1]['uuid'], 'sessionId': sid,
+                 'message': {'role': 'user', 'content': build_live_user_prompt()}},
+                _usage_observation('req-conflict', input_tokens=3),
+                _usage_observation('req-conflict', input_tokens=99),
+                {'type': 'assistant', 'uuid': assistant_id, 'parentUuid': user_id, 'sessionId': sid,
+                 'message': {'role': 'assistant', 'content': [{'type': 'text', 'text': canary}]}},
+            ],
+            canary=canary,
+        )
+        self.assertTrue(gate.passed, gate.failures)
+        self.assertIn('conflicting_assistant_usage_request_id:req-conflict', gate.warnings)
+
+    def test_usage_observation_without_conversation_ids_has_no_bad_uuid_failure(self) -> None:
+        before = _base_events()
+        sid = str(before[0]['sessionId'])
+        canary = generate_history_canary()
+        user_id, assistant_id = new_uuid(), new_uuid()
+        gate = _evaluate_appended(
+            before,
+            [
+                {'type': 'user', 'uuid': user_id, 'parentUuid': before[-1]['uuid'], 'sessionId': sid,
+                 'message': {'role': 'user', 'content': build_live_user_prompt()}},
+                _usage_observation(),
+                {'type': 'assistant', 'uuid': assistant_id, 'parentUuid': user_id, 'sessionId': sid,
+                 'message': {'role': 'assistant', 'content': [{'type': 'text', 'text': canary}]}},
+            ],
+            canary=canary,
+        )
+        self.assertTrue(gate.passed, gate.failures)
+        self.assertFalse(any('bad_uuid' in failure for failure in gate.failures))
+        self.assertFalse(any('malformed_conversation_event' in failure for failure in gate.failures))
+
+    def test_canonical_assistant_with_usage_remains_conversation_node(self) -> None:
+        event = {
+            'type': 'assistant',
+            'uuid': new_uuid(),
+            'parentUuid': new_uuid(),
+            'sessionId': new_uuid(),
+            'requestId': 'req-canonical',
+            'message': {
+                'role': 'assistant',
+                'content': [{'type': 'text', 'text': 'canonical body'}],
+                'usage': {'input_tokens': 1, 'output_tokens': 1},
+            },
+        }
+        self.assertEqual(classify_raw_jsonl_event(event).kind, RAW_CONVERSATION_NODE)
+        self.assertEqual(project_conversational_events([event]), [event])
+
+    def test_assistant_role_mismatch_is_malformed_and_fails_gate(self) -> None:
+        before = _base_events()
+        sid = str(before[0]['sessionId'])
+        canary = generate_history_canary()
+        user_id, assistant_id = new_uuid(), new_uuid()
+        malformed = {
+            'type': 'assistant',
+            'uuid': new_uuid(),
+            'sessionId': sid,
+            'message': {'role': 'user', 'content': 'wrong role'},
+        }
+        gate = _evaluate_appended(
+            before,
+            [
+                malformed,
+                {'type': 'user', 'uuid': user_id, 'parentUuid': before[-1]['uuid'], 'sessionId': sid,
+                 'message': {'role': 'user', 'content': build_live_user_prompt()}},
+                {'type': 'assistant', 'uuid': assistant_id, 'parentUuid': user_id, 'sessionId': sid,
+                 'message': {'role': 'assistant', 'content': [{'type': 'text', 'text': canary}]}},
+            ],
+            canary=canary,
+        )
+        self.assertEqual(
+            classify_raw_jsonl_event(malformed).kind,
+            RAW_MALFORMED_CONVERSATION_EVENT,
+        )
+        self.assertFalse(gate.passed)
+        self.assertTrue(any('malformed_conversation_event' in failure for failure in gate.failures))
+
+    def test_user_without_uuid_is_malformed_and_fails_gate(self) -> None:
+        before = _base_events()
+        sid = str(before[0]['sessionId'])
+        canary = generate_history_canary()
+        user_id, assistant_id = new_uuid(), new_uuid()
+        malformed = {
+            'type': 'user',
+            'sessionId': sid,
+            'message': {'role': 'user', 'content': 'missing uuid'},
+        }
+        gate = _evaluate_appended(
+            before,
+            [
+                malformed,
+                {'type': 'user', 'uuid': user_id, 'parentUuid': before[-1]['uuid'], 'sessionId': sid,
+                 'message': {'role': 'user', 'content': build_live_user_prompt()}},
+                {'type': 'assistant', 'uuid': assistant_id, 'parentUuid': user_id, 'sessionId': sid,
+                 'message': {'role': 'assistant', 'content': [{'type': 'text', 'text': canary}]}},
+            ],
+            canary=canary,
+        )
+        self.assertFalse(gate.passed)
+        self.assertTrue(any(
+            'malformed_conversation_event' in failure and 'uuid_missing_or_invalid' in failure
+            for failure in gate.failures
+        ))
+
+    def test_assistant_without_content_or_usage_is_malformed_and_fails_gate(self) -> None:
+        before = _base_events()
+        sid = str(before[0]['sessionId'])
+        canary = generate_history_canary()
+        user_id, assistant_id = new_uuid(), new_uuid()
+        malformed = {
+            'type': 'assistant',
+            'uuid': new_uuid(),
+            'sessionId': sid,
+            'message': {'role': 'assistant'},
+        }
+        gate = _evaluate_appended(
+            before,
+            [
+                malformed,
+                {'type': 'user', 'uuid': user_id, 'parentUuid': before[-1]['uuid'], 'sessionId': sid,
+                 'message': {'role': 'user', 'content': build_live_user_prompt()}},
+                {'type': 'assistant', 'uuid': assistant_id, 'parentUuid': user_id, 'sessionId': sid,
+                 'message': {'role': 'assistant', 'content': [{'type': 'text', 'text': canary}]}},
+            ],
+            canary=canary,
+        )
+        self.assertFalse(gate.passed)
+        self.assertTrue(any(
+            'malformed_conversation_event' in failure and 'content_missing' in failure
+            for failure in gate.failures
+        ))
+
+    def test_malformed_event_alongside_valid_canary_round_fails_entire_gate(self) -> None:
+        before = _base_events()
+        sid = str(before[0]['sessionId'])
+        canary = generate_history_canary()
+        user_id, assistant_id = new_uuid(), new_uuid()
+        gate = _evaluate_appended(
+            before,
+            [
+                {'type': 'assistant'},
+                {'type': 'user', 'uuid': user_id, 'parentUuid': before[-1]['uuid'], 'sessionId': sid,
+                 'message': {'role': 'user', 'content': build_live_user_prompt()}},
+                {'type': 'assistant', 'uuid': assistant_id, 'parentUuid': user_id, 'sessionId': sid,
+                 'message': {'role': 'assistant', 'content': [{'type': 'text', 'text': canary}]}},
+            ],
+            canary=canary,
+        )
+        self.assertFalse(gate.passed)
+        self.assertTrue(any(
+            'malformed_conversation_event' in failure and 'message_missing' in failure
+            for failure in gate.failures
+        ))
+        self.assertTrue(gate.canary_matched)
+
+    def test_assistant_without_session_id_is_malformed_and_fails_gate(self) -> None:
+        before = _base_events()
+        sid = str(before[0]['sessionId'])
+        canary = generate_history_canary()
+        user_id, assistant_id = new_uuid(), new_uuid()
+        malformed = {
+            'type': 'assistant',
+            'uuid': new_uuid(),
+            'message': {'role': 'assistant', 'content': [{'type': 'text', 'text': 'missing session'}]},
+        }
+        gate = _evaluate_appended(
+            before,
+            [
+                malformed,
+                {'type': 'user', 'uuid': user_id, 'parentUuid': before[-1]['uuid'], 'sessionId': sid,
+                 'message': {'role': 'user', 'content': build_live_user_prompt()}},
+                {'type': 'assistant', 'uuid': assistant_id, 'parentUuid': user_id, 'sessionId': sid,
+                 'message': {'role': 'assistant', 'content': [{'type': 'text', 'text': canary}]}},
+            ],
+            canary=canary,
+        )
+        self.assertFalse(gate.passed)
+        self.assertTrue(any(
+            'malformed_conversation_event' in failure and 'session_id_missing' in failure
+            for failure in gate.failures
+        ))
+
+    def test_old_uuid_in_usage_observation_still_fails(self) -> None:
+        before = _base_events()
+        sid = str(before[0]['sessionId'])
+        old_uuid = new_uuid()
+        canary = generate_history_canary()
+        user_id, assistant_id = new_uuid(), new_uuid()
+        usage = _usage_observation()
+        usage['sourceUuid'] = old_uuid
+        after = before + [
+            {'type': 'user', 'uuid': user_id, 'parentUuid': before[-1]['uuid'], 'sessionId': sid,
+             'message': {'role': 'user', 'content': build_live_user_prompt()}},
+            usage,
+            {'type': 'assistant', 'uuid': assistant_id, 'parentUuid': user_id, 'sessionId': sid,
+             'message': {'role': 'assistant', 'content': [{'type': 'text', 'text': canary}]}},
+        ]
+        ok, _, failures = verify_jsonl_append_chain(
+            before,
+            after,
+            expected_session_id=sid,
+            live_user_prompt=build_live_user_prompt(),
+            canary=canary,
+            old_uuids={old_uuid},
+        )
+        self.assertFalse(ok)
+        self.assertTrue(any(FORGE_UUID_REFERENCE_UNKNOWN in failure for failure in failures))
+
+    def test_duplicate_conversation_uuid_still_fails(self) -> None:
+        before = _base_events()
+        sid = str(before[0]['sessionId'])
+        canary = generate_history_canary()
+        assistant_id = new_uuid()
+        after = before + [
+            {'type': 'user', 'uuid': before[-1]['uuid'], 'parentUuid': before[-1]['uuid'], 'sessionId': sid,
+             'message': {'role': 'user', 'content': build_live_user_prompt()}},
+            {'type': 'assistant', 'uuid': assistant_id, 'parentUuid': before[-1]['uuid'], 'sessionId': sid,
+             'message': {'role': 'assistant', 'content': [{'type': 'text', 'text': canary}]}},
+        ]
+        ok, _, failures = verify_jsonl_append_chain(
+            before,
+            after,
+            expected_session_id=sid,
+            live_user_prompt=build_live_user_prompt(),
+            canary=canary,
+        )
+        self.assertFalse(ok)
+        self.assertTrue(any('append_duplicate_uuid' in failure for failure in failures))
+
+    def test_conflicting_conversation_assistants_same_parent_still_fail(self) -> None:
+        before = _base_events()
+        sid = str(before[0]['sessionId'])
+        canary = generate_history_canary()
+        user_id = new_uuid()
+        after = before + [
+            {'type': 'user', 'uuid': user_id, 'parentUuid': before[-1]['uuid'], 'sessionId': sid,
+             'message': {'role': 'user', 'content': build_live_user_prompt()}},
+            {'type': 'assistant', 'uuid': new_uuid(), 'parentUuid': user_id, 'sessionId': sid,
+             'message': {'role': 'assistant', 'content': [{'type': 'text', 'text': canary}]}},
+            {'type': 'assistant', 'uuid': new_uuid(), 'parentUuid': user_id, 'sessionId': sid,
+             'message': {'role': 'assistant', 'content': [{'type': 'text', 'text': 'conflict'}]}},
+        ]
+        ok, _, failures = verify_jsonl_append_chain(
+            before,
+            after,
+            expected_session_id=sid,
+            live_user_prompt=build_live_user_prompt(),
+            canary=canary,
+        )
+        self.assertFalse(ok)
+        self.assertTrue(any('append_bad_parent' in failure for failure in failures))
+
     def test_canary_gate_fails_without_history_match(self) -> None:
         canary = generate_history_canary()
         before = _base_events()
