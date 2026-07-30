@@ -64,6 +64,68 @@ class ClaudeForgeSpikeTests(unittest.TestCase):
         self.assertEqual(len(forged.events), 1)
         self.assertEqual(forged.events[0]['message']['content'], '主链消息')
 
+    def test_real_metadata_filtered_from_kept_events(self) -> None:
+        sid = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
+        u_uuid = '11111111-1111-1111-1111-111111111111'
+        a_uuid = '22222222-2222-2222-2222-222222222222'
+        src = [
+            {
+                'type': 'queue-operation',
+                'uuid': '00000000-0000-0000-0000-000000000001',
+                'sessionId': sid,
+                'operation': 'enqueue',
+            },
+            {
+                'type': 'user',
+                'uuid': u_uuid,
+                'parentUuid': None,
+                'timestamp': '2026-07-29T10:00:00.000Z',
+                'sessionId': sid,
+                'cwd': '/tmp/clean-shadow',
+                'version': '2.1.220',
+                'message': {'role': 'user', 'content': '测试消息 A'},
+            },
+            {
+                'type': 'assistant',
+                'uuid': a_uuid,
+                'parentUuid': u_uuid,
+                'timestamp': '2026-07-29T10:00:01.000Z',
+                'sessionId': sid,
+                'cwd': '/tmp/clean-shadow',
+                'version': '2.1.220',
+                'message': {
+                    'role': 'assistant',
+                    'content': [{'type': 'text', 'text': '测试回复 A'}],
+                },
+            },
+            {
+                'type': 'last-prompt',
+                'uuid': '33333333-3333-3333-3333-333333333333',
+                'sessionId': sid,
+                'prompt': '测试消息 A',
+            },
+        ]
+        src_snapshot = json.loads(json.dumps(src))
+        new_sid = new_uuid()
+        forged = forge_transcript(
+            src,
+            ForgeOptions(new_session_id=new_sid, cwd='/tmp/clean-shadow'),
+        )
+        self.assertEqual(src, src_snapshot)
+        types = [e.get('type') for e in forged.events]
+        self.assertEqual(types, ['user', 'assistant'])
+        self.assertEqual(forged.events[0]['type'], 'user')
+        self.assertEqual(forged.events[0]['parentUuid'], None)
+        self.assertEqual(forged.events[1]['parentUuid'], forged.events[0]['uuid'])
+        self.assertTrue(all(e.get('sessionId') == new_sid for e in forged.events))
+        old_uuids = collect_event_uuids(src)
+        result = validate_forged_transcript(
+            forged.events,
+            session_id=new_sid,
+            old_uuids=old_uuids,
+        )
+        self.assertTrue(result.ok, result.errors)
+
     def test_case6_summary_removed(self) -> None:
         src = load_jsonl(FIXTURE_ROOT / 'case6_summary_uuid_refs.jsonl')
         forged = forge_transcript(
