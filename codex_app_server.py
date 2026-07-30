@@ -357,11 +357,15 @@ class CodexAppServer:
     def interrupt_turn(self, turn_id: str) -> None:
         """Best-effort cancel for a Nexus-owned server instance only.
 
-        Sends turn/interrupt when possible. Does not touch other CodexAppServer
-        instances (including the module-level global client).
+        Sets the cancel flag immediately and never blocks waiting for the
+        stream lock. If the lock is free, also sends turn/interrupt now;
+        otherwise the stream loop observes cancel and sends it.
         """
         self._cancel_requested.set()
-        with self._lock:
+        acquired = self._lock.acquire(blocking=False)
+        if not acquired:
+            return
+        try:
             if not self._process or self._process.poll() is not None:
                 return
             try:
@@ -375,14 +379,32 @@ class CodexAppServer:
                     }
                 )
             except Exception:
-                # Non-fatal: stream loop observes _cancel_requested.
                 return
+        finally:
+            self._lock.release()
 
     def interrupt_active_turn(self) -> None:
         turn_id = self._active_turn_id
         self._cancel_requested.set()
         if turn_id:
             self.interrupt_turn(turn_id)
+
+    def _next_message(self, timeout: float) -> dict:
+        """Read the next transport message without requiring the server lock.
+
+        The message queue is thread-safe; holding ``_lock`` across a blocking
+        wait would deadlock interrupt_turn / other callers.
+        """
+        if timeout <= 0:
+            raise CodexAppServerError("蓝色线路响应超时")
+        try:
+            message = self._messages.get(timeout=timeout)
+        except queue.Empty as exc:
+            raise CodexAppServerError("蓝色线路响应超时") from exc
+        if message.get("_transport_closed"):
+            detail = self._stderr_tail[-1] if self._stderr_tail else "进程已退出"
+            raise CodexAppServerError("蓝色线路连接关闭：" + detail)
+        return message
 
     def stream_bound_turn(
         self,
@@ -393,89 +415,107 @@ class CodexAppServer:
         timeout: float = 360,
         cancel_event: threading.Event | None = None,
     ) -> Iterator[tuple[str, object]]:
-        """Stream a turn whose thread binding is persisted by the caller."""
+        """Stream a turn whose thread binding is persisted by the caller.
+
+        The server lock is held only for short setup / send / answer sections.
+        Blocking waits and yields happen outside the lock so interrupt can run.
+        """
         self._cancel_requested.clear()
+        turn_id: str | None = None
         with self._lock:
-            try:
-                self._start_locked()
-                bound_id = self._ensure_bound_thread_locked(thread_id, instructions)
-                early: list[dict] = []
-                result = self._request_locked(
-                    "turn/start",
-                    {
-                        "threadId": bound_id,
-                        "input": [{"type": "text", "text": prompt}],
-                        "approvalPolicy": "never",
-                    },
-                    timeout=30,
-                    early_notifications=early,
-                )
-                turn_id = str((result.get("turn") or {}).get("id") or "")
-                if not turn_id:
-                    raise CodexAppServerError("Codex game turn did not return an id")
-                self._active_turn_id = turn_id
-                deadline = time.monotonic() + timeout
-                saw_delta = False
-                buffered = deque(early)
-                while True:
-                    if self._cancel_requested.is_set() or (
-                        cancel_event is not None and cancel_event.is_set()
-                    ):
-                        try:
-                            self._request_id += 1
-                            self._send_locked(
-                                {
-                                    "id": self._request_id,
-                                    "method": "turn/interrupt",
-                                    "params": {"turnId": turn_id},
-                                }
-                            )
-                        except Exception:
-                            pass
-                        yield "err", {"code": "interrupted", "message": "turn interrupted"}
-                        return
-                    message = buffered.popleft() if buffered else self._next_message_locked(deadline - time.monotonic())
-                    if self._answer_server_request_locked(message):
-                        continue
-                    method = message.get("method")
-                    params = message.get("params") or {}
-                    if params.get("threadId") not in (None, bound_id):
-                        continue
-                    if params.get("turnId") not in (None, turn_id):
-                        continue
-                    if method == "item/agentMessage/delta":
-                        delta = str(params.get("delta") or "")
-                        if delta:
-                            saw_delta = True
-                            yield "text", delta
-                    elif method == "item/completed" and not saw_delta:
-                        text = self._agent_text_from_item(params.get("item"))
-                        if text:
-                            saw_delta = True
-                            yield "text", text
-                    elif method == "turn/completed":
-                        turn = params.get("turn") or {}
-                        status = turn.get("status")
-                        if status != "completed":
-                            error = turn.get("error") or {}
-                            raise CodexAppServerError(error.get("message") or f"Codex turn status: {status}")
-                        if not saw_delta:
-                            for item in turn.get("items") or []:
-                                text = self._agent_text_from_item(item)
-                                if text:
-                                    saw_delta = True
-                                    yield "text", text
-                        yield "done", {"thread_id": bound_id, "turn_id": turn_id, "status": status}
-                        return
-                    elif method == "error":
-                        error = params.get("error") or params
-                        detail = error.get("message") if isinstance(error, dict) else str(error)
-                        raise CodexAppServerError("Codex game line error: " + detail)
-            except Exception:
+            self._start_locked()
+            bound_id = self._ensure_bound_thread_locked(thread_id, instructions)
+            early: list[dict] = []
+            result = self._request_locked(
+                "turn/start",
+                {
+                    "threadId": bound_id,
+                    "input": [{"type": "text", "text": prompt}],
+                    "approvalPolicy": "never",
+                },
+                timeout=30,
+                early_notifications=early,
+            )
+            turn_id = str((result.get("turn") or {}).get("id") or "")
+            if not turn_id:
+                raise CodexAppServerError("Codex game turn did not return an id")
+            self._active_turn_id = turn_id
+            buffered = deque(early)
+
+        deadline = time.monotonic() + timeout
+        saw_delta = False
+        try:
+            while True:
+                if self._cancel_requested.is_set() or (
+                    cancel_event is not None and cancel_event.is_set()
+                ):
+                    self.interrupt_turn(turn_id)
+                    yield "err", {"code": "interrupted", "message": "turn interrupted"}
+                    return
+                try:
+                    if buffered:
+                        message = buffered.popleft()
+                    else:
+                        message = self._next_message(deadline - time.monotonic())
+                except CodexAppServerError:
+                    with self._lock:
+                        self._stop_locked()
+                    raise
+
+                with self._lock:
+                    answered = self._answer_server_request_locked(message)
+                if answered:
+                    continue
+
+                method = message.get("method")
+                params = message.get("params") or {}
+                if params.get("threadId") not in (None, bound_id):
+                    continue
+                if params.get("turnId") not in (None, turn_id):
+                    continue
+                if method == "item/agentMessage/delta":
+                    delta = str(params.get("delta") or "")
+                    if delta:
+                        saw_delta = True
+                        yield "text", delta
+                elif method == "item/completed" and not saw_delta:
+                    text = self._agent_text_from_item(params.get("item"))
+                    if text:
+                        saw_delta = True
+                        yield "text", text
+                elif method == "turn/completed":
+                    turn = params.get("turn") or {}
+                    status = turn.get("status")
+                    if status != "completed":
+                        error = turn.get("error") or {}
+                        raise CodexAppServerError(
+                            error.get("message") or f"Codex turn status: {status}"
+                        )
+                    if not saw_delta:
+                        for item in turn.get("items") or []:
+                            text = self._agent_text_from_item(item)
+                            if text:
+                                saw_delta = True
+                                yield "text", text
+                    yield "done", {
+                        "thread_id": bound_id,
+                        "turn_id": turn_id,
+                        "status": status,
+                    }
+                    return
+                elif method == "error":
+                    error = params.get("error") or params
+                    detail = error.get("message") if isinstance(error, dict) else str(error)
+                    raise CodexAppServerError("Codex game line error: " + detail)
+        except Exception:
+            with self._lock:
                 self._stop_locked()
-                raise
-            finally:
-                self._active_turn_id = None
+            raise
+        finally:
+            if turn_id is not None:
+                with self._lock:
+                    if self._active_turn_id == turn_id:
+                        self._active_turn_id = None
 
     def stream_turn(
         self,

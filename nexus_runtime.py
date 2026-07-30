@@ -9,7 +9,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Deque, Dict, Iterator, List, Optional
 
-from nexus_adapters import BaseNexusAdapter, ClaudeNexusAdapter, CodexNexusAdapter
+from nexus_adapters import (
+    CLAUDE_HARD_CONFINEMENT_AVAILABLE,
+    BaseNexusAdapter,
+    ClaudeNexusAdapter,
+    CodexNexusAdapter,
+)
 from nexus_events import is_terminal, make_event, utc_now_iso
 from nexus_git import git_summary
 from nexus_paths import NexusPathError, resolve_nexus_workspace
@@ -18,6 +23,7 @@ TURN_HISTORY_LIMIT = 50
 EVENT_BUFFER_LIMIT = 500
 SUBSCRIBER_LIMIT = 16
 VALID_AGENTS = frozenset({"claude", "codex"})
+_DROP_ON_INTERRUPT = frozenset({"text", "think", "tool_use", "tool_result", "git"})
 
 STATE_IDLE = "idle"
 STATE_RUNNING = "running"
@@ -25,6 +31,11 @@ STATE_INTERRUPTING = "interrupting"
 STATE_DONE = "done"
 STATE_ERROR = "error"
 STATE_INTERRUPTED = "interrupted"
+
+CLAUDE_BLOCKED_DETAIL = (
+    "ENVIRONMENT_BLOCKED: no reusable hard workspace confinement for Claude Code; "
+    "cwd/prompt are not isolation"
+)
 
 
 class NexusBusyError(RuntimeError):
@@ -51,6 +62,7 @@ class TurnRecord:
     events: Deque[dict[str, Any]] = field(default_factory=lambda: deque(maxlen=EVENT_BUFFER_LIMIT))
     sequence: int = 0
     terminal: bool = False
+    interrupt_requested: bool = False
     cond: threading.Condition = field(default_factory=threading.Condition)
 
 
@@ -70,7 +82,7 @@ class NexusRuntime:
         if workspace is not None:
             self._workspace = workspace
         else:
-            self._workspace = None  # resolved lazily / on demand
+            self._workspace = None
         self._adapters = adapters
         self._context_usage_getter = context_usage_getter
         self._state = STATE_IDLE
@@ -84,6 +96,12 @@ class NexusRuntime:
         if self._workspace is None:
             self._workspace = resolve_nexus_workspace(override=self._workspace_override)
         return self._workspace
+
+    def try_workspace(self) -> tuple[Optional[Path], Optional[str]]:
+        try:
+            return self.workspace, None
+        except NexusPathError as exc:
+            return None, exc.code
 
     def _ensure_adapters(self) -> Dict[str, BaseNexusAdapter]:
         if self._adapters is None:
@@ -100,62 +118,111 @@ class NexusRuntime:
             raise NexusTurnError("unknown_agent", f"unknown agent: {agent}", 400)
         return adapters[agent]
 
+    def _claude_available(self, adapter: BaseNexusAdapter | None = None) -> bool:
+        if adapter is not None:
+            return bool(getattr(adapter, "hard_workspace_confinement", False))
+        if self._adapters and "claude" in self._adapters:
+            return bool(getattr(self._adapters["claude"], "hard_workspace_confinement", False))
+        return bool(CLAUDE_HARD_CONFINEMENT_AVAILABLE)
+
+    def _capabilities(self, *, claude_available: bool) -> dict[str, Any]:
+        return {
+            "agents": ["claude", "codex"],
+            "agent_availability": {
+                "claude": {
+                    "available": bool(claude_available),
+                    "reason": None if claude_available else "ENVIRONMENT_BLOCKED",
+                    "detail": None if claude_available else CLAUDE_BLOCKED_DETAIL,
+                },
+                "codex": {
+                    "available": True,
+                    "sandbox": "workspace-write",
+                },
+            },
+            "interrupt": True,
+            "sse": True,
+            "last_event_id": False,
+            "clear": False,
+            "rewind": False,
+            "push": False,
+            "merge": False,
+            "deploy": False,
+            "shell": False,
+            "busy_http_status": 423,
+            "instruction_max_chars": 8000,
+            "turns_history_limit": TURN_HISTORY_LIMIT,
+        }
+
     def status(self) -> dict[str, Any]:
+        """Always return UI-readable JSON; degrade when workspace is missing."""
         with self._lock:
-            adapters = self._ensure_adapters()
             active = self._active_turn_id
             active_agent = self._turns[active].agent if active and active in self._turns else None
+            runtime_state = (
+                self._state
+                if self._state in {STATE_IDLE, STATE_RUNNING, STATE_INTERRUPTING}
+                else (STATE_IDLE if self._active_turn_id is None else self._state)
+            )
+
+        ws, ws_error = self.try_workspace()
+        workspace_ok = ws is not None
+        git = None
+        git_error = None
+        if ws is not None:
             try:
-                git = git_summary(self.workspace)
-                workspace_ok = True
-                workspace_error = None
+                git = git_summary(ws)
             except NexusPathError as exc:
                 git = None
-                workspace_ok = False
-                workspace_error = exc.code
+                git_error = exc.code
 
-            usage = None
-            if self._context_usage_getter:
-                try:
-                    usage = self._context_usage_getter()
-                except Exception:
-                    usage = None
+        sessions = {
+            "claude": {"exists": False, "session_id": None},
+            "codex": {"exists": False, "session_id": None},
+        }
+        claude_available = False
+        if workspace_ok:
+            try:
+                with self._lock:
+                    adapters = self._ensure_adapters()
+                    sessions = {
+                        "claude": {
+                            "exists": adapters["claude"].has_session,
+                            "session_id": adapters["claude"].session_id,
+                        },
+                        "codex": {
+                            "exists": adapters["codex"].has_session,
+                            "session_id": adapters["codex"].session_id,
+                        },
+                    }
+                    claude_available = self._claude_available(adapters["claude"])
+            except Exception:
+                # Never let adapter construction break status JSON.
+                claude_available = False
+        else:
+            claude_available = False
 
-            return {
-                "runtime_state": self._state if self._state in {
-                    STATE_IDLE, STATE_RUNNING, STATE_INTERRUPTING
-                } else (
-                    STATE_IDLE if self._active_turn_id is None else self._state
-                ),
-                "active_turn_id": active,
-                "active_agent": active_agent,
-                "sessions": {
-                    "claude": {"exists": adapters["claude"].has_session, "session_id": adapters["claude"].session_id},
-                    "codex": {"exists": adapters["codex"].has_session, "session_id": adapters["codex"].session_id},
-                },
-                "context_usage": usage,
-                "workspace": {
-                    "root": str(self.workspace) if workspace_ok else None,
-                    "ok": workspace_ok,
-                    "error": workspace_error,
-                },
-                "git": git,
-                "capabilities": {
-                    "agents": ["claude", "codex"],
-                    "interrupt": True,
-                    "sse": True,
-                    "last_event_id": False,
-                    "clear": False,
-                    "rewind": False,
-                    "push": False,
-                    "merge": False,
-                    "deploy": False,
-                    "shell": False,
-                    "busy_http_status": 423,
-                    "instruction_max_chars": 8000,
-                    "turns_history_limit": TURN_HISTORY_LIMIT,
-                },
-            }
+        usage = None
+        if self._context_usage_getter:
+            try:
+                usage = self._context_usage_getter()
+            except Exception:
+                usage = None
+
+        return {
+            "runtime_state": runtime_state,
+            "active_turn_id": active,
+            "active_agent": active_agent,
+            "sessions": sessions,
+            "context_usage": usage,
+            "workspace": {
+                "root": str(ws) if workspace_ok else None,
+                "ok": workspace_ok,
+                "error": ws_error,
+                "git_error": git_error,
+            },
+            "git": git,
+            "capabilities": self._capabilities(claude_available=claude_available),
+        }
 
     def list_turns(self) -> list[dict[str, Any]]:
         with self._lock:
@@ -181,14 +248,20 @@ class NexusRuntime:
         agent = str(agent or "").strip()
         if agent not in VALID_AGENTS:
             raise NexusTurnError("invalid_agent", "agent must be claude or codex", 400)
+
+        # Fail-closed workspace before accepting.
+        try:
+            _ = self.workspace
+        except NexusPathError as exc:
+            raise NexusTurnError(exc.code, exc.detail, 503) from exc
+
         with self._lock:
             if self._active_turn_id is not None or self._state in {STATE_RUNNING, STATE_INTERRUPTING}:
                 raise NexusBusyError("runtime is processing another turn")
-            # Validate workspace before accepting.
-            try:
-                _ = self.workspace
-            except NexusPathError as exc:
-                raise NexusTurnError(exc.code, exc.detail, 503) from exc
+
+            adapter = self.get_adapter(agent)
+            if agent == "claude" and not self._claude_available(adapter):
+                raise NexusTurnError("claude_unavailable", CLAUDE_BLOCKED_DETAIL, 503)
 
             turn_id = uuid.uuid4().hex
             turn = TurnRecord(
@@ -223,7 +296,6 @@ class NexusRuntime:
             keep.add(self._active_turn_id)
         for turn_id in list(self._turns.keys()):
             if turn_id not in keep:
-                # Drop only if no subscribers.
                 if self._subscriber_counts.get(turn_id, 0) <= 0:
                     self._turns.pop(turn_id, None)
                     self._subscriber_counts.pop(turn_id, None)
@@ -264,21 +336,66 @@ class NexusRuntime:
             self._emit(turn, "meta", {"phase": "accepted"})
             for event, data in adapter.stream_turn(turn.instruction):
                 with self._lock:
-                    still_active = self._active_turn_id == turn_id
-                    interrupting = self._state == STATE_INTERRUPTING
-                if not still_active and turn.terminal:
+                    interrupting = (
+                        turn.interrupt_requested
+                        or turn.state == STATE_INTERRUPTING
+                        or self._state == STATE_INTERRUPTING
+                    )
+                if turn.terminal:
                     break
-                if interrupting and event not in {"status", "err", "done"}:
-                    # Drain toward terminal after interrupt request.
-                    pass
+                if interrupting:
+                    if event in _DROP_ON_INTERRUPT:
+                        continue
+                    if event == "done":
+                        # Competitive provider completion cannot mark interrupted turn done.
+                        self._emit(turn, "status", {"phase": "interrupted"})
+                        self._emit(
+                            turn,
+                            "err",
+                            {"code": "interrupted", "message": "turn interrupted"},
+                        )
+                        break
+                    if event == "err":
+                        payload = dict(data) if isinstance(data, dict) else {"value": data}
+                        payload["code"] = "interrupted"
+                        payload.setdefault("message", "turn interrupted")
+                        self._emit(turn, "err", payload)
+                        break
+                    if event == "status":
+                        self._emit(turn, event, data)
+                        continue
+                    continue
                 self._emit(turn, event, data)
                 if turn.terminal:
                     break
             if not turn.terminal:
-                self._emit(turn, "err", {"code": "missing_terminal", "message": "adapter ended without terminal event"})
+                if turn.interrupt_requested or turn.state == STATE_INTERRUPTING:
+                    self._emit(turn, "status", {"phase": "interrupted"})
+                    self._emit(
+                        turn,
+                        "err",
+                        {"code": "interrupted", "message": "turn interrupted"},
+                    )
+                else:
+                    self._emit(
+                        turn,
+                        "err",
+                        {
+                            "code": "missing_terminal",
+                            "message": "adapter ended without terminal event",
+                        },
+                    )
         except Exception as exc:
             if not turn.terminal:
-                self._emit(turn, "err", {"code": "runtime_error", "message": str(exc)[:500]})
+                if turn.interrupt_requested or turn.state == STATE_INTERRUPTING:
+                    self._emit(turn, "status", {"phase": "interrupted"})
+                    self._emit(
+                        turn,
+                        "err",
+                        {"code": "interrupted", "message": "turn interrupted"},
+                    )
+                else:
+                    self._emit(turn, "err", {"code": "runtime_error", "message": str(exc)[:500]})
         finally:
             with self._lock:
                 if self._active_turn_id == turn_id:
@@ -286,12 +403,12 @@ class NexusRuntime:
                     self._state = STATE_IDLE
 
     def interrupt(self, turn_id: str) -> dict[str, Any]:
+        adapter: BaseNexusAdapter | None = None
         with self._lock:
             turn = self._turns.get(turn_id)
             if not turn:
                 raise NexusTurnError("turn_not_found", "turn not found", 404)
             if self._active_turn_id != turn_id:
-                # Idempotent for finished / non-active turns.
                 return {
                     "ok": True,
                     "turn_id": turn_id,
@@ -301,17 +418,22 @@ class NexusRuntime:
                 }
             self._state = STATE_INTERRUPTING
             turn.state = STATE_INTERRUPTING
+            turn.interrupt_requested = True
             adapter = self.get_adapter(turn.agent)
-            adapter.request_interrupt()
-            return {
+            result = {
                 "ok": True,
                 "turn_id": turn_id,
                 "interrupted": True,
                 "state": turn.state,
                 "detail": "interrupt_requested",
             }
+        # Never hold the runtime lock across a potentially blocking adapter interrupt.
+        if adapter is not None:
+            adapter.request_interrupt()
+        return result
 
-    def iter_events(self, turn_id: str, *, after_sequence: int = 0) -> Iterator[dict[str, Any]]:
+    def reserve_event_subscription(self, turn_id: str) -> TurnRecord:
+        """Synchronously validate turn + subscriber quota before SSE Response."""
         with self._lock:
             turn = self._turns.get(turn_id)
             if not turn:
@@ -320,24 +442,40 @@ class NexusRuntime:
             if count >= SUBSCRIBER_LIMIT:
                 raise NexusTurnError("too_many_subscribers", "subscriber limit reached", 429)
             self._subscriber_counts[turn_id] = count + 1
+            return turn
 
+    def release_event_subscription(self, turn_id: str) -> None:
+        with self._lock:
+            self._subscriber_counts[turn_id] = max(0, self._subscriber_counts.get(turn_id, 1) - 1)
+            self._trim_turns_locked()
+
+    def iter_events(self, turn_id: str, *, after_sequence: int = 0) -> Iterator[dict[str, Any]]:
+        """Reserve then stream. Prefer reserve_event_subscription + iter_events_for_turn for HTTP."""
+        turn = self.reserve_event_subscription(turn_id)
         try:
-            last = after_sequence
-            while True:
-                with turn.cond:
-                    while True:
-                        pending = [e for e in turn.events if e["sequence"] > last]
-                        if pending or turn.terminal:
-                            break
-                        turn.cond.wait(timeout=15)
-                    if not pending and turn.terminal:
-                        return
-                    for event in pending:
-                        last = event["sequence"]
-                        yield event
-                        if is_terminal(event["event"]):
-                            return
+            yield from self.iter_events_for_turn(turn, after_sequence=after_sequence)
         finally:
-            with self._lock:
-                self._subscriber_counts[turn_id] = max(0, self._subscriber_counts.get(turn_id, 1) - 1)
-                self._trim_turns_locked()
+            self.release_event_subscription(turn_id)
+
+    def iter_events_for_turn(
+        self, turn: TurnRecord, *, after_sequence: int = 0
+    ) -> Iterator[dict[str, Any]]:
+        last = after_sequence
+        while True:
+            with turn.cond:
+                while True:
+                    pending = [e for e in list(turn.events) if e["sequence"] > last]
+                    terminal = turn.terminal
+                    if pending or terminal:
+                        break
+                    turn.cond.wait(timeout=15)
+                batch = list(pending)
+                finished = terminal and not batch
+            # Yield outside the condition lock so slow subscribers cannot block _emit.
+            if finished:
+                return
+            for event in batch:
+                last = event["sequence"]
+                yield event
+                if is_terminal(event["event"]):
+                    return

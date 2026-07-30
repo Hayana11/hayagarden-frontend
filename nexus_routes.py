@@ -76,10 +76,9 @@ def create_nexus_blueprint(
 
     @bp.get("/status")
     def status():
-        try:
-            return jsonify(runtime.status())
-        except NexusPathError as exc:
-            return jsonify({"ok": False, "code": exc.code, "detail": exc.detail}), 503
+        # Always return a UI-readable payload. Missing workspace degrades inside
+        # runtime.status() (workspace.ok=false) instead of hard 503.
+        return jsonify(runtime.status())
 
     @bp.post("/turn")
     def start_turn():
@@ -126,26 +125,29 @@ def create_nexus_blueprint(
     @bp.get("/turn/<turn_id>/events")
     def turn_events(turn_id: str):
         # Last-Event-ID is intentionally unsupported (adjudicated NO).
-        # Clients should reconnect from the beginning of the in-memory buffer
-        # for the active process lifetime only.
+        # Validate turn + subscriber quota BEFORE creating the SSE Response so
+        # turn_not_found / too_many_subscribers never ride a 200 stream.
         try:
-            stream = runtime.iter_events(turn_id, after_sequence=0)
-
-            @stream_with_context
-            def generate():
-                for event in stream:
-                    yield _sse(event)
-
-            return Response(
-                generate(),
-                mimetype="text/event-stream",
-                headers={
-                    "Cache-Control": "no-cache",
-                    "X-Accel-Buffering": "no",
-                },
-            )
+            turn = runtime.reserve_event_subscription(turn_id)
         except NexusTurnError as exc:
             return jsonify({"ok": False, "code": exc.code, "detail": exc.message}), exc.status
+
+        @stream_with_context
+        def generate():
+            try:
+                for event in runtime.iter_events_for_turn(turn, after_sequence=0):
+                    yield _sse(event)
+            finally:
+                runtime.release_event_subscription(turn_id)
+
+        return Response(
+            generate(),
+            mimetype="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+            },
+        )
 
     @bp.post("/turn/<turn_id>/interrupt")
     def interrupt_turn(turn_id: str):

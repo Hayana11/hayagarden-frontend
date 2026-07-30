@@ -37,6 +37,8 @@ Nexus 是双 Agent 施工台后端：Claude Code 与 Codex 各有独立 session�
 - 只有当前 active turn 可被中断；interrupt 幂等
 - Claude 中断不影响正式 Claude resident
 - Codex 中断只取消当前 Nexus turn，不关闭全局 app-server
+- **Claude 硬隔离（R1）**：仓库无可复用的 Claude Code 硬 workspace confinement（cwd/prompt 不算）。因此生产 Claude capability 保持 `available=false` / `ENVIRONMENT_BLOCKED`；不得用 prompt 或 cwd 冒充隔离。Codex 使用 provider 原生 `workspace-write` sandbox。
+- **status 降级（R1）**：workspace 缺失时 `GET /api/nexus/status` 仍返回可读 JSON（`workspace.ok=false` + capabilities）；`POST /api/nexus/turn` 继续 503 fail-closed。
 
 ## 冻结 Endpoint
 

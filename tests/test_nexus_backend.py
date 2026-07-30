@@ -327,5 +327,392 @@ class NexusSafetyStaticTests(unittest.TestCase):
         self.assertEqual(data["ok"], True)
 
 
+class NexusR1RepairTests(unittest.TestCase):
+    """Minimal verification for PR #158 hard-blocker repairs."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        _init_git_repo(self.root)
+        self.claude = FakeClaudeAdapter(self.root)
+        self.codex = FakeCodexAdapter(self.root)
+        self.runtime = NexusRuntime(
+            workspace=self.root,
+            adapters={"claude": self.claude, "codex": self.codex},
+            context_usage_getter=lambda: None,
+        )
+        self.app = Flask("nexus-r1")
+        self.app.register_blueprint(
+            create_nexus_blueprint(self.runtime, owner_guard=lambda _req: None)
+        )
+        self.client = self.app.test_client()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_unknown_sse_turn_json_404(self):
+        resp = self.client.get("/api/nexus/turn/does-not-exist/events")
+        self.assertEqual(resp.status_code, 404)
+        self.assertTrue(resp.is_json)
+        body = resp.get_json()
+        self.assertEqual(body["code"], "turn_not_found")
+        self.assertFalse(str(resp.content_type).startswith("text/event-stream"))
+
+    def test_subscriber_overflow_json_429(self):
+        from nexus_runtime import SUBSCRIBER_LIMIT
+
+        r = self.client.post("/api/nexus/turn", json={"agent": "claude", "instruction": "sub"})
+        turn_id = r.get_json()["turn_id"]
+        # Reserve up to the limit via runtime API, then HTTP must 429 before SSE.
+        holders = []
+        for _ in range(SUBSCRIBER_LIMIT):
+            holders.append(self.runtime.reserve_event_subscription(turn_id))
+        try:
+            resp = self.client.get(f"/api/nexus/turn/{turn_id}/events")
+            self.assertEqual(resp.status_code, 429)
+            self.assertTrue(resp.is_json)
+            self.assertEqual(resp.get_json()["code"], "too_many_subscribers")
+        finally:
+            for _ in holders:
+                self.runtime.release_event_subscription(turn_id)
+            with self.client.get(f"/api/nexus/turn/{turn_id}/events") as stream:
+                list(stream.response)
+
+    def test_slow_subscriber_does_not_block_producer(self):
+        r = self.runtime.start_turn("claude", "slow-sub")
+        turn_id = r["turn_id"]
+        turn = self.runtime.reserve_event_subscription(turn_id)
+        produced = {"n": 0}
+        done = threading.Event()
+
+        def producer_wait():
+            # Wait until turn finishes emitting; must not stall on slow reader.
+            deadline = time.time() + 3
+            while time.time() < deadline:
+                if turn.terminal and turn.sequence >= 3:
+                    produced["n"] = turn.sequence
+                    done.set()
+                    return
+                time.sleep(0.01)
+
+        threading.Thread(target=producer_wait, daemon=True).start()
+        # Slow subscriber holds condition briefly but yields outside lock.
+        events = []
+        for event in self.runtime.iter_events_for_turn(turn, after_sequence=0):
+            events.append(event)
+            time.sleep(0.05)  # slow consumer
+            if event["event"] in {"done", "err"}:
+                break
+        self.runtime.release_event_subscription(turn_id)
+        self.assertTrue(done.wait(2), "producer stalled behind slow subscriber")
+        self.assertGreaterEqual(produced["n"], 3)
+        self.assertEqual(events[-1]["event"], "done")
+
+    def test_interrupt_unique_interrupted_err_drops_content(self):
+        self.claude.hang = True
+        self.claude.emit_after_interrupt = [
+            ("text", {"text": "should-drop"}),
+            ("think", {"text": "should-drop"}),
+            ("tool_use", {"name": "x"}),
+            ("done", {"ok": True}),
+        ]
+        r = self.runtime.start_turn("claude", "interrupt-race")
+        time.sleep(0.05)
+        ir = self.runtime.interrupt(r["turn_id"])
+        self.assertTrue(ir["interrupted"])
+        events = _drain_events(self.runtime, r["turn_id"], timeout=3)
+        terminals = [e for e in events if e["event"] in {"done", "err"}]
+        self.assertEqual(len(terminals), 1)
+        self.assertEqual(terminals[0]["event"], "err")
+        self.assertEqual(terminals[0]["data"]["code"], "interrupted")
+        # No post-interrupt content events.
+        after_status = False
+        for e in events:
+            if e["event"] == "status" and e["data"].get("phase") == "interrupted":
+                after_status = True
+                continue
+            if after_status and e["event"] in {"text", "think", "tool_use", "tool_result", "git", "done"}:
+                self.fail(f"content/done leaked after interrupt: {e}")
+
+    def test_runtime_interrupt_not_blocked_by_adapter(self):
+        self.codex.hang = True
+        self.codex.block_interrupt.set()
+        r = self.runtime.start_turn("codex", "block-int")
+        time.sleep(0.05)
+        finished = {}
+
+        def do_interrupt():
+            t0 = time.time()
+            finished["result"] = self.runtime.interrupt(r["turn_id"])
+            finished["elapsed"] = time.time() - t0
+
+        th = threading.Thread(target=do_interrupt, daemon=True)
+        th.start()
+        self.assertTrue(self.codex.interrupt_entered.wait(1))
+        # While adapter.request_interrupt is blocked, runtime lock must be free
+        # enough for status / busy checks.
+        status = self.runtime.status()
+        self.assertIn("capabilities", status)
+        with self.assertRaises(NexusBusyError):
+            self.runtime.start_turn("claude", "should-busy")
+        self.codex.block_interrupt.clear()
+        th.join(timeout=2)
+        self.assertTrue(finished.get("result", {}).get("interrupted"))
+        self.assertLess(finished.get("elapsed", 99), 1.5)
+        events = _drain_events(self.runtime, r["turn_id"], timeout=3)
+        self.assertEqual(events[-1]["data"].get("code"), "interrupted")
+        # Next turn can start after old turn ends.
+        nxt = self.runtime.start_turn("claude", "after")
+        ev2 = _drain_events(self.runtime, nxt["turn_id"])
+        self.assertEqual(ev2[-1]["event"], "done")
+
+    def test_claude_partial_final_multiblock_no_dup(self):
+        from nexus_adapters import ClaudeStreamNormalizer
+
+        n = ClaudeStreamNormalizer()
+        events = []
+        events.extend(
+            n.feed(
+                json.dumps(
+                    {
+                        "type": "stream_event",
+                        "event": {
+                            "type": "content_block_delta",
+                            "index": 0,
+                            "delta": {"type": "thinking_delta", "thinking": "plan-"},
+                        },
+                    }
+                )
+            )
+        )
+        events.extend(
+            n.feed(
+                json.dumps(
+                    {
+                        "type": "stream_event",
+                        "event": {
+                            "type": "content_block_delta",
+                            "index": 0,
+                            "delta": {"type": "thinking_delta", "thinking": "ning"},
+                        },
+                    }
+                )
+            )
+        )
+        events.extend(
+            n.feed(
+                json.dumps(
+                    {
+                        "type": "stream_event",
+                        "event": {
+                            "type": "content_block_delta",
+                            "index": 1,
+                            "delta": {"type": "text_delta", "text": "hello "},
+                        },
+                    }
+                )
+            )
+        )
+        events.extend(
+            n.feed(
+                json.dumps(
+                    {
+                        "type": "stream_event",
+                        "event": {
+                            "type": "content_block_delta",
+                            "index": 1,
+                            "delta": {"type": "text_delta", "text": "world"},
+                        },
+                    }
+                )
+            )
+        )
+        # Final assistant message with full blocks — must not re-send streamed text/think,
+        # but must emit tool_use and any non-streamed blocks.
+        events.extend(
+            n.feed(
+                json.dumps(
+                    {
+                        "type": "assistant",
+                        "message": {
+                            "content": [
+                                {"type": "thinking", "thinking": "planning"},
+                                {"type": "text", "text": "hello world"},
+                                {
+                                    "type": "tool_use",
+                                    "id": "t1",
+                                    "name": "Write",
+                                    "input": {"path": "a.txt"},
+                                },
+                            ]
+                        },
+                    }
+                )
+            )
+        )
+        events.extend(
+            n.feed(
+                json.dumps(
+                    {
+                        "type": "user",
+                        "message": {
+                            "content": [
+                                {
+                                    "type": "tool_result",
+                                    "tool_use_id": "t1",
+                                    "content": "ok",
+                                    "is_error": False,
+                                }
+                            ]
+                        },
+                    }
+                )
+            )
+        )
+        names = [e[0] for e in events]
+        self.assertEqual(names.count("think"), 2)  # only deltas
+        self.assertEqual(names.count("text"), 2)  # only deltas
+        self.assertEqual(names.count("tool_use"), 1)
+        self.assertEqual(names.count("tool_result"), 1)
+        # Order: think deltas, text deltas, then tool_use, then tool_result
+        self.assertEqual(names, ["think", "think", "text", "text", "tool_use", "tool_result"])
+        joined_text = "".join(e[1]["text"] for e in events if e[0] == "text")
+        self.assertEqual(joined_text, "hello world")
+
+    def test_staged_git_and_non_repo(self):
+        tracked = self.root / "staged.txt"
+        tracked.write_text("one\n", encoding="utf-8")
+        subprocess.run(["git", "add", "staged.txt"], cwd=str(self.root), check=True, capture_output=True)
+        # staged only (not committed)
+        summary = git_summary(self.root)
+        self.assertIn("staged.txt", summary["changed_files"])
+        self.assertGreaterEqual(summary["additions"], 1)
+        self.assertFalse(summary["clean"])
+
+        # unstaged modification + untracked
+        tracked.write_text("one\ntwo\n", encoding="utf-8")
+        (self.root / "untracked.txt").write_text("a\nb\n", encoding="utf-8")
+        summary2 = git_summary(self.root)
+        self.assertIn("staged.txt", summary2["changed_files"])
+        self.assertIn("untracked.txt", summary2["changed_files"])
+        self.assertGreaterEqual(summary2["additions"], 2)
+        self.assertFalse(summary2["clean"])
+
+        with tempfile.TemporaryDirectory() as bare:
+            bare_path = Path(bare)
+            with self.assertRaises(NexusPathError) as ctx:
+                git_summary(bare_path)
+            self.assertEqual(ctx.exception.code, "not_a_git_worktree")
+
+    def test_status_degraded_when_workspace_missing(self):
+        missing = Path(self.tmp.name) / "no-such-nexus-root"
+        runtime = NexusRuntime(workspace_override=str(missing), context_usage_getter=lambda: None)
+        app = Flask("nexus-missing")
+        app.register_blueprint(create_nexus_blueprint(runtime, owner_guard=lambda _req: None))
+        client = app.test_client()
+        resp = client.get("/api/nexus/status")
+        self.assertEqual(resp.status_code, 200)
+        body = resp.get_json()
+        self.assertFalse(body["workspace"]["ok"])
+        self.assertEqual(body["workspace"]["error"], "workspace_root_missing")
+        self.assertIn("capabilities", body)
+        self.assertFalse(body["capabilities"]["agent_availability"]["claude"]["available"])
+        self.assertEqual(
+            body["capabilities"]["agent_availability"]["claude"]["reason"],
+            "ENVIRONMENT_BLOCKED",
+        )
+        turn = client.post("/api/nexus/turn", json={"agent": "codex", "instruction": "x"})
+        self.assertEqual(turn.status_code, 503)
+
+    def test_live_claude_adapter_unavailable(self):
+        from nexus_adapters import CLAUDE_HARD_CONFINEMENT_AVAILABLE, ClaudeNexusAdapter
+
+        self.assertFalse(CLAUDE_HARD_CONFINEMENT_AVAILABLE)
+        adapter = ClaudeNexusAdapter(self.root)
+        self.assertFalse(adapter.hard_workspace_confinement)
+        runtime = NexusRuntime(
+            workspace=self.root,
+            adapters={"claude": adapter, "codex": self.codex},
+        )
+        with self.assertRaises(Exception) as ctx:
+            runtime.start_turn("claude", "nope")
+        self.assertEqual(ctx.exception.code, "claude_unavailable")
+
+
+class CodexLockShapeStubTests(unittest.TestCase):
+    """In-memory stub proving stream_bound_turn does not hold lock across wait/yield."""
+
+    def test_interrupt_during_stream_bound_turn_no_deadlock(self):
+        import codex_app_server as cas
+
+        server = cas.CodexAppServer(cwd="/tmp", db_path=os.devnull, sandbox="workspace-write")
+        # Avoid real process: stub setup pieces.
+        started = {"turn": False}
+        released_for_wait = threading.Event()
+        interrupt_done = threading.Event()
+
+        def fake_start_locked():
+            return None
+
+        def fake_ensure(_thread_id, _instructions):
+            return "thread-1"
+
+        def fake_request(method, params, *, timeout=30, ensure_started=True, early_notifications=None):
+            if method == "turn/start":
+                started["turn"] = True
+                return {"turn": {"id": "turn-1"}}
+            return {}
+
+        def fake_next(timeout):
+            # Signal that stream is waiting outside the lock.
+            released_for_wait.set()
+            deadline = time.time() + float(timeout)
+            while time.time() < deadline:
+                if server._cancel_requested.is_set():
+                    return {"method": "noop"}
+                time.sleep(0.01)
+            raise cas.CodexAppServerError("timeout")
+
+        server._start_locked = fake_start_locked  # type: ignore[method-assign]
+        server._ensure_bound_thread_locked = fake_ensure  # type: ignore[method-assign]
+        server._request_locked = fake_request  # type: ignore[method-assign]
+        server._next_message = fake_next  # type: ignore[method-assign]
+        server._stop_locked = lambda: None  # type: ignore[method-assign]
+
+        results = {"interrupt_elapsed": None, "events": []}
+
+        def run_stream():
+            try:
+                for item in server.stream_bound_turn(None, "dev", "prompt", timeout=2):
+                    results["events"].append(item)
+            except Exception as exc:
+                results["events"].append(("exc", str(exc)))
+
+        def run_interrupt():
+            self.assertTrue(released_for_wait.wait(1))
+            # Prove lock is free: acquire it quickly while stream waits.
+            acquired = server._lock.acquire(timeout=0.2)
+            self.assertTrue(acquired, "stream held server lock across wait")
+            server._lock.release()
+            t0 = time.time()
+            server.interrupt_turn("turn-1")
+            results["interrupt_elapsed"] = time.time() - t0
+            interrupt_done.set()
+
+        th_s = threading.Thread(target=run_stream, daemon=True)
+        th_i = threading.Thread(target=run_interrupt, daemon=True)
+        th_s.start()
+        th_i.start()
+        th_i.join(timeout=2)
+        th_s.join(timeout=3)
+        self.assertTrue(interrupt_done.is_set())
+        self.assertIsNotNone(results["interrupt_elapsed"])
+        self.assertLess(results["interrupt_elapsed"], 0.5)
+        kinds = [e[0] for e in results["events"]]
+        self.assertIn("err", kinds)
+        err = [e for e in results["events"] if e[0] == "err"][0]
+        self.assertEqual(err[1].get("code"), "interrupted")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -201,6 +201,22 @@ UI：收到 423 时应禁用发送并提示“施工台忙碌”，可短退避�
 | busy_http_status | 423 |
 | instruction_max_chars | 8000 |
 | turns_history_limit | 50 |
+| agent_availability.claude.available | **false**（`ENVIRONMENT_BLOCKED`：无硬 workspace 隔离） |
+| agent_availability.codex.available | true（`workspace-write`） |
+
+### workspace 缺失时的 status
+
+`GET /api/nexus/status` 仍返回 **200** JSON：
+
+- `workspace.ok = false`
+- `workspace.error` 为错误码（如 `workspace_root_missing`）
+- `capabilities` 仍可读
+- UI 应禁用发送并提示 workspace 未就绪
+- `POST /api/nexus/turn` → **503** fail-closed
+
+### Claude unavailable
+
+在 `agent_availability.claude.available === false` 时，UI 不得提供 Claude 发送入口；不得假定 cwd 即隔离。
 
 ## Clear / Rewind
 

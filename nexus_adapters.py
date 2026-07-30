@@ -2,6 +2,11 @@
 
 Live adapters own Nexus-only processes/sessions. They never touch the formal
 Claude resident or the global Codex app-server singleton.
+
+Claude hard workspace confinement: the repository has no reusable mechanism
+(beyond cwd / DAC that still allows writes outside the workspace root). Live
+Claude therefore stays unavailable (ENVIRONMENT_BLOCKED) until a verifiable
+confinement path exists. Test fakes may set hard_workspace_confinement=True.
 """
 
 from __future__ import annotations
@@ -21,6 +26,9 @@ from nexus_git import git_summary
 
 EventTuple = tuple[str, dict[str, Any]]
 
+# Verified: no bubblewrap/landlock/Claude --sandbox reuse path for hard root confinement.
+CLAUDE_HARD_CONFINEMENT_AVAILABLE = False
+
 
 class AdapterError(RuntimeError):
     def __init__(self, code: str, message: str = "") -> None:
@@ -31,6 +39,7 @@ class AdapterError(RuntimeError):
 
 class BaseNexusAdapter:
     agent: str = ""
+    hard_workspace_confinement: bool = False
 
     def __init__(self, workspace: Path) -> None:
         self.workspace = workspace
@@ -52,70 +61,138 @@ class BaseNexusAdapter:
         raise NotImplementedError
 
 
-def _parse_claude_stream_line(line: str) -> Optional[EventTuple]:
-    try:
-        d = json.loads(line)
-    except json.JSONDecodeError:
-        return "status", {"raw_kind": "non_json"}
+class ClaudeStreamNormalizer:
+    """Stateful Claude stream-json normalizer.
 
-    if not isinstance(d, dict):
-        return "status", {"raw_kind": "non_object"}
+    - Emits every content block from an assistant/user message (no early return).
+    - When partial deltas were already streamed for a block index, skips the
+      duplicate final full text/thinking on the completed assistant message.
+    - Preserves encounter order: thinking → text → tool_use within a message;
+      tool_result blocks from user messages in order.
+    """
 
-    typ = d.get("type")
-    if typ == "system" and d.get("subtype") == "init":
-        sid = d.get("session_id") or (d.get("session") or {}).get("id")
-        return "meta", {"session_id": sid, "phase": "init"}
-    if typ == "rate_limit_event":
-        return "status", {"phase": "rate_limit"}
-    if typ == "stream_event":
-        event = d.get("event") or {}
-        et = event.get("type")
-        delta = event.get("delta") or {}
-        if et == "content_block_delta":
-            dt = delta.get("type")
-            if dt == "text_delta":
-                return "text", {"text": str(delta.get("text") or "")}
-            if dt == "thinking_delta":
-                return "think", {"text": str(delta.get("thinking") or delta.get("text") or "")}
-        return "status", {"raw_kind": et or "stream_event"}
-    if typ == "assistant":
-        message = d.get("message") or {}
-        for block in message.get("content") or []:
-            if not isinstance(block, dict):
-                continue
-            if block.get("type") == "tool_use":
-                return "tool_use", {
-                    "id": block.get("id"),
-                    "name": block.get("name"),
-                    "input": redact_value(block.get("input") or {}),
-                }
-            if block.get("type") == "text" and block.get("text"):
-                return "text", {"text": str(block.get("text"))}
-            if block.get("type") == "thinking" and block.get("thinking"):
-                return "think", {"text": str(block.get("thinking"))}
-        return "status", {"raw_kind": "assistant"}
-    if typ == "user":
-        message = d.get("message") or {}
-        for block in message.get("content") or []:
-            if isinstance(block, dict) and block.get("type") == "tool_result":
-                return "tool_result", {
-                    "tool_use_id": block.get("tool_use_id"),
-                    "content": redact_value(block.get("content")),
-                    "is_error": bool(block.get("is_error")),
-                }
-        return "status", {"raw_kind": "user"}
-    if typ == "result":
-        if d.get("is_error"):
-            return "err", {"code": "claude_result_error", "message": str(d.get("result") or "error")[:500]}
-        sid = d.get("session_id")
-        return "meta", {"session_id": sid, "phase": "result"}
-    return "status", {"raw_kind": str(typ or "unknown")}
+    def __init__(self) -> None:
+        self._delta_text_indexes: set[int] = set()
+        self._delta_think_indexes: set[int] = set()
+
+    def feed(self, line: str) -> list[EventTuple]:
+        try:
+            d = json.loads(line)
+        except json.JSONDecodeError:
+            return [("status", {"raw_kind": "non_json"})]
+        if not isinstance(d, dict):
+            return [("status", {"raw_kind": "non_object"})]
+
+        typ = d.get("type")
+        if typ == "system" and d.get("subtype") == "init":
+            sid = d.get("session_id") or (d.get("session") or {}).get("id")
+            return [("meta", {"session_id": sid, "phase": "init"})]
+        if typ == "rate_limit_event":
+            return [("status", {"phase": "rate_limit"})]
+
+        if typ == "stream_event":
+            event = d.get("event") or {}
+            et = event.get("type")
+            idx = event.get("index")
+            try:
+                index = int(idx) if idx is not None else None
+            except (TypeError, ValueError):
+                index = None
+            delta = event.get("delta") or {}
+            if et == "content_block_delta":
+                dt = delta.get("type")
+                if dt == "text_delta":
+                    if index is not None:
+                        self._delta_text_indexes.add(index)
+                    text = str(delta.get("text") or "")
+                    return [("text", {"text": text})] if text else []
+                if dt == "thinking_delta":
+                    if index is not None:
+                        self._delta_think_indexes.add(index)
+                    think = str(delta.get("thinking") or delta.get("text") or "")
+                    return [("think", {"text": think})] if think else []
+            return [("status", {"raw_kind": et or "stream_event"})]
+
+        if typ == "assistant":
+            message = d.get("message") or {}
+            out: list[EventTuple] = []
+            for i, block in enumerate(message.get("content") or []):
+                if not isinstance(block, dict):
+                    continue
+                btype = block.get("type")
+                if btype == "thinking":
+                    if i in self._delta_think_indexes:
+                        continue
+                    think = str(block.get("thinking") or "")
+                    if think:
+                        out.append(("think", {"text": think}))
+                elif btype == "text":
+                    if i in self._delta_text_indexes:
+                        continue
+                    text = str(block.get("text") or "")
+                    if text:
+                        out.append(("text", {"text": text}))
+                elif btype == "tool_use":
+                    out.append(
+                        (
+                            "tool_use",
+                            {
+                                "id": block.get("id"),
+                                "name": block.get("name"),
+                                "input": redact_value(block.get("input") or {}),
+                            },
+                        )
+                    )
+            return out or [("status", {"raw_kind": "assistant"})]
+
+        if typ == "user":
+            message = d.get("message") or {}
+            out = []
+            for block in message.get("content") or []:
+                if isinstance(block, dict) and block.get("type") == "tool_result":
+                    out.append(
+                        (
+                            "tool_result",
+                            {
+                                "tool_use_id": block.get("tool_use_id"),
+                                "content": redact_value(block.get("content")),
+                                "is_error": bool(block.get("is_error")),
+                            },
+                        )
+                    )
+            return out or [("status", {"raw_kind": "user"})]
+
+        if typ == "result":
+            if d.get("is_error"):
+                return [
+                    (
+                        "err",
+                        {
+                            "code": "claude_result_error",
+                            "message": str(d.get("result") or "error")[:500],
+                        },
+                    )
+                ]
+            sid = d.get("session_id")
+            return [("meta", {"session_id": sid, "phase": "result"})]
+
+        return [("status", {"raw_kind": str(typ or "unknown")})]
+
+
+def _parse_claude_stream_line(line: str) -> list[EventTuple]:
+    """Stateless helper used by unit tests; prefer ClaudeStreamNormalizer for live streams."""
+    return ClaudeStreamNormalizer().feed(line)
 
 
 class ClaudeNexusAdapter(BaseNexusAdapter):
-    """Independent Claude Code process for Nexus only."""
+    """Independent Claude Code process for Nexus only.
+
+    Live launches are refused: hard_workspace_confinement is False until a
+    reusable OS/provider confinement mechanism exists in this repository.
+    """
 
     agent = "claude"
+    hard_workspace_confinement = CLAUDE_HARD_CONFINEMENT_AVAILABLE
 
     def __init__(self, workspace: Path, *, claude_bin: str | None = None) -> None:
         super().__init__(workspace)
@@ -135,6 +212,16 @@ class ClaudeNexusAdapter(BaseNexusAdapter):
                     pass
 
     def stream_turn(self, instruction: str) -> Iterator[EventTuple]:
+        if not self.hard_workspace_confinement:
+            yield "err", {
+                "code": "claude_unavailable",
+                "message": (
+                    "ENVIRONMENT_BLOCKED: Claude hard workspace confinement is unavailable; "
+                    "refusing to launch"
+                ),
+            }
+            return
+
         self.clear_interrupt()
         args = [
             self._claude_bin,
@@ -153,12 +240,12 @@ class ClaudeNexusAdapter(BaseNexusAdapter):
             "HOME": os.environ.get("HOME", "/tmp"),
             "LANG": os.environ.get("LANG", "C.UTF-8"),
         }
-        # Do not forward arbitrary caller env; keep a minimal safe subset.
         for key in ("ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "TERM"):
             if key in os.environ:
                 env[key] = os.environ[key]
 
         yield "meta", {"phase": "start", "agent": "claude"}
+        normalizer = ClaudeStreamNormalizer()
         try:
             self._proc = subprocess.Popen(
                 args,
@@ -185,17 +272,14 @@ class ClaudeNexusAdapter(BaseNexusAdapter):
                 line = raw.strip()
                 if not line:
                     continue
-                parsed = _parse_claude_stream_line(line)
-                if not parsed:
-                    continue
-                event, data = parsed
-                if event == "meta" and data.get("session_id"):
-                    self.session_id = str(data["session_id"])
-                if event == "err":
+                for event, data in normalizer.feed(line):
+                    if event == "meta" and data.get("session_id"):
+                        self.session_id = str(data["session_id"])
+                    if event == "err":
+                        yield event, data
+                        saw_terminal = True
+                        return
                     yield event, data
-                    saw_terminal = True
-                    return
-                yield event, data
             rc = self._proc.wait(timeout=5)
             if self._cancel.is_set():
                 yield "status", {"phase": "interrupted"}
@@ -235,13 +319,13 @@ class CodexNexusAdapter(BaseNexusAdapter):
     """Nexus-owned CodexAppServer instance (never the global singleton)."""
 
     agent = "codex"
+    hard_workspace_confinement = True  # Codex workspace-write sandbox is provider-native.
 
     def __init__(self, workspace: Path, *, server_factory: Callable[..., Any] | None = None) -> None:
         super().__init__(workspace)
         self._server_factory = server_factory
         self._server = None
         self._active_codex_turn_id: Optional[str] = None
-        self._thread_local = threading.local()
 
     def _get_server(self):
         if self._server is None:
@@ -250,7 +334,6 @@ class CodexNexusAdapter(BaseNexusAdapter):
             else:
                 from codex_app_server import CodexAppServer
 
-                # Dedicated instance: workspace-write sandbox, no group-chat DB use.
                 self._server = CodexAppServer(
                     cwd=str(self.workspace),
                     db_path=os.devnull,
@@ -264,7 +347,6 @@ class CodexNexusAdapter(BaseNexusAdapter):
         turn_id = self._active_codex_turn_id
         if server is None:
             return
-        # Best-effort turn cancel on the Nexus-owned server only.
         try:
             if turn_id and hasattr(server, "interrupt_turn"):
                 server.interrupt_turn(turn_id)
@@ -316,7 +398,17 @@ class CodexNexusAdapter(BaseNexusAdapter):
                     yield "done", {"ok": True, "session_id": self.session_id}
                     return
                 elif kind == "err":
-                    yield "err", {"code": "codex_error", "message": str(payload)[:500]}
+                    data = payload if isinstance(payload, dict) else {"message": str(payload)[:500]}
+                    if data.get("code") == "interrupted":
+                        yield "err", {
+                            "code": "interrupted",
+                            "message": str(data.get("message") or "turn interrupted"),
+                        }
+                    else:
+                        yield "err", {
+                            "code": "codex_error",
+                            "message": str(data.get("message") or payload)[:500],
+                        }
                     return
                 else:
                     yield normalize_event_name(kind), redact_value(
@@ -347,15 +439,18 @@ def _supports_cancel(fn: Callable[..., Any]) -> bool:
 
 
 class FakeClaudeAdapter(BaseNexusAdapter):
-    """Deterministic adapter for M5 verification without live credentials."""
+    """Deterministic adapter for verification without live credentials."""
 
     agent = "claude"
+    # Test double only — does not claim production hard confinement exists.
+    hard_workspace_confinement = True
 
     def __init__(self, workspace: Path, *, fail: bool = False, hang: bool = False) -> None:
         super().__init__(workspace)
         self.fail = fail
         self.hang = hang
         self.turns = 0
+        self.emit_after_interrupt: list[EventTuple] = []
 
     def stream_turn(self, instruction: str) -> Iterator[EventTuple]:
         self.clear_interrupt()
@@ -368,6 +463,9 @@ class FakeClaudeAdapter(BaseNexusAdapter):
         if self.hang:
             for _ in range(40):
                 if self._cancel.is_set():
+                    # Optionally emit competitive content then done — runtime must drop/convert.
+                    for item in self.emit_after_interrupt:
+                        yield item
                     yield "status", {"phase": "interrupted"}
                     yield "err", {"code": "interrupted", "message": "turn interrupted"}
                     return
@@ -376,6 +474,8 @@ class FakeClaudeAdapter(BaseNexusAdapter):
             yield "err", {"code": "fake_failure", "message": "injected failure"}
             return
         if self._cancel.is_set():
+            for item in self.emit_after_interrupt:
+                yield item
             yield "status", {"phase": "interrupted"}
             yield "err", {"code": "interrupted", "message": "turn interrupted"}
             return
@@ -389,12 +489,26 @@ class FakeClaudeAdapter(BaseNexusAdapter):
 
 class FakeCodexAdapter(BaseNexusAdapter):
     agent = "codex"
+    hard_workspace_confinement = True
 
     def __init__(self, workspace: Path, *, fail: bool = False, hang: bool = False) -> None:
         super().__init__(workspace)
         self.fail = fail
         self.hang = hang
         self.turns = 0
+        self.block_interrupt = threading.Event()
+        self.interrupt_entered = threading.Event()
+        self._interrupt_delay = 0.0
+
+    def request_interrupt(self) -> None:
+        self.interrupt_entered.set()
+        if self._interrupt_delay:
+            time.sleep(self._interrupt_delay)
+        if self.block_interrupt.is_set():
+            # Wait until test clears the block — used to prove runtime lock is released.
+            while self.block_interrupt.is_set():
+                time.sleep(0.01)
+        super().request_interrupt()
 
     def stream_turn(self, instruction: str) -> Iterator[EventTuple]:
         self.clear_interrupt()
@@ -422,7 +536,6 @@ class FakeCodexAdapter(BaseNexusAdapter):
         yield "tool_use", {"name": "write", "path": "nexus_fixture_codex.txt"}
         yield "tool_result", {"ok": True, "path": "nexus_fixture_codex.txt"}
         yield "text", {"text": f"updated nexus_fixture_codex.txt (turn {self.turns})"}
-        # Unknown raw event → caller/runtime normalizes; emit status-shaped unknown.
         yield "status", {"raw_kind": "weird_provider_event", "token": "SECRET_TOKEN_VALUE"}
         yield "git", git_summary(self.workspace)
         yield "done", {"ok": True, "session_id": self.session_id}
