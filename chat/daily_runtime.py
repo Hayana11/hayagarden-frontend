@@ -83,6 +83,11 @@ class CursorCASConflictAfterPersist(DailyRuntimeError):
         self.manifest = dict(manifest)
 
 
+class SwitchInProgressRuntimeError(DailyRuntimeError):
+    def __init__(self, message: str = 'switch_in_progress'):
+        super().__init__(message, error_code='switch_in_progress', retryable=True)
+
+
 @dataclass
 class LocalResidentBinding:
     resident_key: str
@@ -92,6 +97,7 @@ class LocalResidentBinding:
     bound_cursor_message_id: Optional[int]
     process_generation: int
     tool_profile: str
+    claude_session_id: Optional[str] = None
 
 
 @dataclass
@@ -368,6 +374,81 @@ def close_local_resident_for_context_switch(
         )
         return False
     return close_local_resident_if_bound(resident, expected_key=expected_key)
+
+
+_HANDOFF_LOCK = threading.Lock()
+
+
+def handoff_lock() -> threading.Lock:
+    return _HANDOFF_LOCK
+
+
+def bind_target_resident_after_switch(
+    *,
+    staged_resident: Any,
+    result: dict[str, Any],
+    chat_id: str = DEFAULT_CHAT_ID,
+    tool_profile: str = 'daily',
+    db_path: Optional[str] = None,
+) -> LocalResidentBinding:
+    """Establish LocalResidentBinding + daily_resident_owners for target window."""
+    target_id = int(result['target_context_id'])
+    target_epoch = int(result['target_context_epoch'])
+    target_gen = int(result.get('resident_generation') or 1)
+    key = make_resident_key(
+        chat_id=chat_id,
+        context_epoch=target_epoch,
+        resident_generation=target_gen,
+    )
+    process_generation = int(getattr(staged_resident, 'generation', 1) or 1)
+    cursor = None
+    selected = result.get('selected_message_ids') or []
+    if selected:
+        cursor = int(selected[-1])
+    elif result.get('boundary_message_id'):
+        cursor = int(result['boundary_message_id']) or None
+    session_id = result.get('claude_session_id') or getattr(
+        staged_resident, 'session_id', None,
+    )
+    binding = LocalResidentBinding(
+        resident_key=key,
+        context_id=target_id,
+        context_epoch=target_epoch,
+        resident_generation=target_gen,
+        bound_cursor_message_id=cursor,
+        process_generation=process_generation,
+        tool_profile=str(tool_profile or 'daily'),
+        claude_session_id=str(session_id) if session_id else None,
+    )
+    set_local_binding(binding)
+    conn = dc._connect(db_path)
+    try:
+        now_s = (
+            datetime.datetime.utcnow() + datetime.timedelta(hours=dc.TZ_OFFSET_HOURS)
+        ).strftime('%Y-%m-%d %H:%M:%S')
+        conn.execute('BEGIN IMMEDIATE')
+        conn.execute(
+            'INSERT INTO daily_resident_owners '
+            '(context_id, resident_generation, worker_id, resident_key, '
+            'bound_cursor_message_id, process_generation, updated_at) '
+            'VALUES (?,?,?,?,?,?,?) '
+            'ON CONFLICT(context_id, resident_generation) DO UPDATE SET '
+            'worker_id=excluded.worker_id, resident_key=excluded.resident_key, '
+            'bound_cursor_message_id=excluded.bound_cursor_message_id, '
+            'process_generation=excluded.process_generation, '
+            'updated_at=excluded.updated_at',
+            (
+                target_id, target_gen, WORKER_ID, key,
+                cursor, process_generation, now_s,
+            ),
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+    return binding
 
 
 def _close_stale_local_resident(resident: Any, *, expected_key: str) -> None:
@@ -655,6 +736,8 @@ def prepare_daily_turn(
                     raise DeferredError('provider request in flight; rollover deferred')
 
         if manual_mode:
+            if cw.has_active_switch_intent(chat_id, db_path=db_path):
+                raise SwitchInProgressRuntimeError('switch_in_progress')
             try:
                 ctx = cw.get_current_context_window(
                     chat_id=chat_id,

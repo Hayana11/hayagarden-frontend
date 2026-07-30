@@ -458,6 +458,12 @@ def _ensure_manual_window_indexes(conn: sqlite3.Connection) -> None:
 def ensure_schema(db_path: Optional[str] = None) -> None:
     path = os.path.abspath(db_path or DEFAULT_DB_PATH)
     if path in _SCHEMA_READY and os.path.isfile(path):
+        conn = _connect(path)
+        try:
+            _ensure_context_switch_forge_schema(conn)
+            conn.commit()
+        finally:
+            conn.close()
         return
     conn = _connect(path)
     try:
@@ -580,12 +586,49 @@ def ensure_schema(db_path: Optional[str] = None) -> None:
             )
         _migrate_manual_window_schema(conn)
         _ensure_manual_window_indexes(conn)
+        _ensure_context_switch_forge_schema(conn)
         if _table_columns(conn, 'chat_messages'):
             ensure_chat_messages_source_kind(conn, record_cutover=True)
         conn.commit()
         _SCHEMA_READY.add(path)
     finally:
         conn.close()
+
+
+def _ensure_context_switch_forge_schema(conn: sqlite3.Connection) -> None:
+    """P-CONTEXT-WINDOW step5: switch intents + target claude_session_id."""
+    dcols = _table_columns(conn, 'daily_contexts')
+    if dcols and 'claude_session_id' not in dcols:
+        conn.execute(
+            'ALTER TABLE daily_contexts ADD COLUMN claude_session_id TEXT NULL'
+        )
+    conn.execute(
+        '''CREATE TABLE IF NOT EXISTS context_switch_intents (
+            request_id TEXT PRIMARY KEY,
+            chat_id TEXT NOT NULL,
+            payload_hash TEXT NOT NULL,
+            status TEXT NOT NULL,
+            source_context_id INTEGER NOT NULL,
+            source_context_epoch INTEGER NOT NULL,
+            source_version INTEGER NOT NULL,
+            source_resident_generation INTEGER NOT NULL,
+            source_boundary_message_id INTEGER NOT NULL,
+            carryover_count INTEGER NOT NULL,
+            selected_message_ids_json TEXT NOT NULL,
+            target_session_id TEXT NULL,
+            target_jsonl_sha256 TEXT NULL,
+            target_context_id INTEGER NULL,
+            staged_ready_at TEXT NULL,
+            error_code TEXT NULL,
+            orphan_jsonl_state TEXT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )'''
+    )
+    conn.execute(
+        'CREATE INDEX IF NOT EXISTS idx_context_switch_intents_chat_status '
+        'ON context_switch_intents(chat_id, status)'
+    )
 
 
 def ensure_schema_logged(db_path: Optional[str] = None) -> None:

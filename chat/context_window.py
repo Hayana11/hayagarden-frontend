@@ -8,9 +8,14 @@ Does not call models, generate handoffs, or enable itself (``DAILY_SOFT_WINDOW_E
 from __future__ import annotations
 
 import datetime
+import hashlib
+import json
+import logging
 import re
 import sqlite3
-from typing import Any, Optional
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Callable, Optional
 
 from chat.daily_context import (
     ALLOWED_CARRYOVER_COUNTS,
@@ -33,11 +38,32 @@ from chat.daily_context import (
 )
 from chat.daily_schema import META_SOURCE_KIND_CUTOVER, get_meta_int
 
+logger = logging.getLogger(__name__)
+
 WINDOW_MODE_LEGACY_DAILY = 'legacy_daily'
 WINDOW_MODE_MANUAL = 'manual'
 
 CLOSE_REASON_MANUAL = 'manual'
 CLOSE_REASON_CAPACITY_RESCUE = 'capacity_rescue'
+
+INTENT_RESERVED = 'reserved'
+INTENT_FORGING = 'forging'
+INTENT_READY = 'ready'
+INTENT_COMMITTING = 'committing'
+INTENT_HANDOFF_PENDING = 'handoff_pending'
+INTENT_COMMITTED = 'committed'
+INTENT_FAILED = 'failed'
+INTENT_RELEASED = 'released'
+
+ACTIVE_INTENT_STATUSES = frozenset({
+    INTENT_RESERVED,
+    INTENT_FORGING,
+    INTENT_READY,
+    INTENT_COMMITTING,
+    INTENT_HANDOFF_PENDING,
+})
+
+TERMINAL_FAILURE_STATUSES = frozenset({INTENT_FAILED, INTENT_RELEASED})
 
 _UUID_RE = re.compile(
     r'^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$',
@@ -64,6 +90,22 @@ class WindowBusyError(ContextWindowError):
 
 class IdempotencyMismatchError(ContextWindowError):
     """Same request_id with different payload (HTTP 409)."""
+
+
+class SwitchInProgressError(ContextWindowError):
+    """Active switch intent blocks formal turns / concurrent switch (HTTP 423)."""
+
+
+class CarryoverMessageUnforgeableError(ContextWindowError):
+    """Locked selected messages cannot be forged (HTTP 409)."""
+
+
+class SwitchFailedError(ContextWindowError):
+    """Switch failed with a terminal error_code."""
+
+    def __init__(self, error_code: str, message: Optional[str] = None):
+        super().__init__(message or error_code)
+        self.error_code = error_code
 
 
 def enabled() -> bool:
@@ -330,6 +372,21 @@ def _summary_from_row_conn(
         conn, context_id, int(ctx.get('resident_generation') or 1), now_dt,
     ):
         busy = 'window_busy'
+    if busy is None:
+        existing_tables = {
+            str(r[0])
+            for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        if 'context_switch_intents' in existing_tables:
+            active = conn.execute(
+                'SELECT 1 FROM context_switch_intents WHERE chat_id=? AND status IN (%s) LIMIT 1'
+                % ','.join('?' for _ in ACTIVE_INTENT_STATUSES),
+                (str(ctx.get('chat_id') or DEFAULT_CHAT_ID), *tuple(ACTIVE_INTENT_STATUSES)),
+            ).fetchone()
+            if active is not None:
+                busy = 'switch_in_progress'
     can_switch = busy is None and ctx.get('closed_at') is None
     out: dict[str, Any] = {
         'context_id': context_id,
@@ -449,6 +506,161 @@ def list_context_window_carryover_rounds(
     }
 
 
+
+@dataclass
+class SwitchHooks:
+    """Process-side hooks for staged resident prepare and handoff.
+
+    ``prepare_staged(intent, forge_path)`` must spawn an independent staged
+    ResidentSession with ``--resume``, run the no-stdin health window, and
+    return an opaque staged handle.
+
+    ``take_handoff(staged, result)`` runs under the caller-provided handoff
+    lock semantics: swap formal resident holder to staged, bind target owner.
+
+    ``discard_staged(staged)`` kills a staged handle after failure.
+    """
+
+    prepare_staged: Callable[[dict[str, Any], Path], Any]
+    take_handoff: Callable[[Any, dict[str, Any]], None]
+    discard_staged: Callable[[Any], None]
+    forge_cwd: str
+    claude_home: Path
+
+
+def _payload_hash(
+    *,
+    chat_id: str,
+    source_id: int,
+    source_epoch: int,
+    count: int,
+    close_reason: str,
+) -> str:
+    raw = json.dumps(
+        {
+            'chat_id': chat_id,
+            'source_context_id': int(source_id),
+            'source_context_epoch': int(source_epoch),
+            'count': int(count),
+            'close_reason': str(close_reason),
+        },
+        sort_keys=True,
+        separators=(',', ':'),
+    )
+    return hashlib.sha256(raw.encode('utf-8')).hexdigest()
+
+
+def _now_s(now_dt: datetime.datetime) -> str:
+    return now_dt.strftime('%Y-%m-%d %H:%M:%S')
+
+
+def _intent_row(conn: sqlite3.Connection, request_id: str) -> Optional[dict[str, Any]]:
+    return _row_to_dict(conn.execute(
+        'SELECT * FROM context_switch_intents WHERE request_id=?',
+        (request_id,),
+    ).fetchone())
+
+
+def _parse_selected_ids(raw: Any) -> list[int]:
+    if isinstance(raw, list):
+        return [int(x) for x in raw]
+    data = json.loads(str(raw or '[]'))
+    return [int(x) for x in data]
+
+
+def has_active_switch_intent(
+    chat_id: str = DEFAULT_CHAT_ID,
+    *,
+    db_path: Optional[str] = None,
+) -> bool:
+    ensure_schema(db_path)
+    conn = _connect(db_path)
+    try:
+        row = conn.execute(
+            'SELECT 1 FROM context_switch_intents WHERE chat_id=? AND status IN (%s) LIMIT 1'
+            % ','.join('?' for _ in ACTIVE_INTENT_STATUSES),
+            (chat_id, *tuple(ACTIVE_INTENT_STATUSES)),
+        ).fetchone()
+        return row is not None
+    finally:
+        conn.close()
+
+
+def get_active_switch_intent(
+    chat_id: str = DEFAULT_CHAT_ID,
+    *,
+    db_path: Optional[str] = None,
+) -> Optional[dict[str, Any]]:
+    ensure_schema(db_path)
+    conn = _connect(db_path)
+    try:
+        return _row_to_dict(conn.execute(
+            'SELECT * FROM context_switch_intents WHERE chat_id=? AND status IN (%s) '
+            'ORDER BY created_at DESC LIMIT 1'
+            % ','.join('?' for _ in ACTIVE_INTENT_STATUSES),
+            (chat_id, *tuple(ACTIVE_INTENT_STATUSES)),
+        ).fetchone())
+    finally:
+        conn.close()
+
+
+def _update_intent_conn(
+    conn: sqlite3.Connection,
+    request_id: str,
+    *,
+    status: Optional[str] = None,
+    fields: Optional[dict[str, Any]] = None,
+    now_s: str,
+) -> None:
+    sets = ['updated_at=?']
+    params: list[Any] = [now_s]
+    if status is not None:
+        sets.append('status=?')
+        params.append(status)
+    for key, val in (fields or {}).items():
+        sets.append('%s=?' % key)
+        params.append(val)
+    params.append(request_id)
+    conn.execute(
+        'UPDATE context_switch_intents SET %s WHERE request_id=?' % ', '.join(sets),
+        tuple(params),
+    )
+
+
+def _fail_intent_conn(
+    conn: sqlite3.Connection,
+    request_id: str,
+    *,
+    error_code: str,
+    orphan_jsonl_state: Optional[str] = None,
+    now_s: str,
+    release: bool = True,
+) -> None:
+    status = INTENT_RELEASED if release else INTENT_FAILED
+    fields = {'error_code': error_code}
+    if orphan_jsonl_state is not None:
+        fields['orphan_jsonl_state'] = orphan_jsonl_state
+    _update_intent_conn(
+        conn, request_id, status=status, fields=fields, now_s=now_s,
+    )
+
+
+def _select_rounds_locked(
+    messages: list[Any],
+    count: int,
+) -> tuple[list[dict[str, Any]], list[int], int]:
+    all_rounds = group_carryover_rounds(messages)
+    if count == 0:
+        selected_rounds: list[dict[str, Any]] = []
+    else:
+        selected_rounds = all_rounds[-count:] if len(all_rounds) >= count else list(all_rounds)
+    selected_ids: list[int] = []
+    for rnd in selected_rounds:
+        for mid in rnd['message_ids']:
+            selected_ids.append(int(mid))
+    return selected_rounds, selected_ids, len(selected_rounds)
+
+
 def _find_idempotent_target_conn(
     conn: sqlite3.Connection,
     *,
@@ -462,41 +674,6 @@ def _find_idempotent_target_conn(
     ).fetchone())
 
 
-def _validate_idempotent_payload_conn(
-    conn: sqlite3.Connection,
-    existing_target: dict[str, Any],
-    *,
-    chat_id: str,
-    source_id: int,
-    source_epoch: int,
-    count: int,
-    close_reason: str,
-) -> dict[str, Any]:
-    if str(existing_target.get('chat_id') or '') != str(chat_id):
-        raise IdempotencyMismatchError('idempotency_mismatch')
-    if int(existing_target.get('source_context_id') or 0) != source_id:
-        raise IdempotencyMismatchError('idempotency_mismatch')
-    if int(existing_target.get('carryover_requested_count') or 0) != count:
-        raise IdempotencyMismatchError('idempotency_mismatch')
-    stored_source = int(existing_target.get('source_context_id') or 0)
-    src_row = conn.execute(
-        'SELECT context_epoch, close_reason FROM daily_contexts WHERE id=?',
-        (stored_source,),
-    ).fetchone()
-    if src_row is None:
-        raise IdempotencyMismatchError('idempotency_mismatch')
-    if int(src_row['context_epoch']) != source_epoch:
-        raise IdempotencyMismatchError('idempotency_mismatch')
-    if str(src_row['close_reason'] or '') != str(close_reason):
-        raise IdempotencyMismatchError('idempotency_mismatch')
-    source_full = conn.execute(
-        'SELECT * FROM daily_contexts WHERE id=?', (stored_source,),
-    ).fetchone()
-    if source_full is None:
-        raise IdempotencyMismatchError('idempotency_mismatch')
-    return dict(source_full)
-
-
 def _switch_result_from_target_conn(
     conn: sqlite3.Connection,
     *,
@@ -507,7 +684,7 @@ def _switch_result_from_target_conn(
     selected_message_ids = _carryover_ids_conn(conn, target_id)
     requested = int(target.get('carryover_requested_count') or 0)
     selected_round_count = int(target.get('carryover_count') or 0)
-    return {
+    out = {
         'source_context_id': int(source['id']),
         'source_context_epoch': int(source['context_epoch']),
         'source_resident_generation': int(source.get('resident_generation') or 1),
@@ -522,9 +699,73 @@ def _switch_result_from_target_conn(
         'resident_generation': int(target.get('resident_generation') or 1),
         'switched_at': str(target.get('opened_at') or target.get('created_at') or ''),
     }
+    if target.get('claude_session_id'):
+        out['claude_session_id'] = str(target['claude_session_id'])
+    return out
 
 
-def switch_context_window(
+def _mark_orphan_best_effort(path: Optional[Path]) -> str:
+    if path is None:
+        return 'none'
+    try:
+        if path.is_file():
+            path.unlink()
+            return 'deleted'
+        return 'none'
+    except OSError:
+        return 'delete_failed'
+
+
+def offline_switch_hooks(work_root: str | Path) -> SwitchHooks:
+    """Test/default hooks: real DB Forge write, no Claude process."""
+    root = Path(work_root)
+    root.mkdir(parents=True, exist_ok=True)
+    cwd = str(root / 'cwd')
+    Path(cwd).mkdir(parents=True, exist_ok=True)
+    claude_home = root / 'claude_home'
+    claude_home.mkdir(parents=True, exist_ok=True)
+
+    class _OfflineStaged:
+        def __init__(self, session_id: str, jsonl_path: Path):
+            self.session_id = session_id
+            self.jsonl_path = jsonl_path
+            self.generation = 1
+            self._alive = True
+
+        def is_alive(self) -> bool:
+            return self._alive
+
+        def kill(self) -> None:
+            self._alive = False
+
+    def prepare_staged(intent: dict[str, Any], forge_path: Path) -> Any:
+        before = forge_path.read_bytes()
+        # Health window simulation: process "alive", JSONL unchanged.
+        staged = _OfflineStaged(str(intent['target_session_id']), forge_path)
+        after = forge_path.read_bytes()
+        if before != after:
+            raise SwitchFailedError('staged_jsonl_mutated_before_handoff')
+        if not staged.is_alive():
+            raise SwitchFailedError('staged_exited_during_health_window')
+        return staged
+
+    def take_handoff(staged: Any, result: dict[str, Any]) -> None:
+        return None
+
+    def discard_staged(staged: Any) -> None:
+        if staged is not None and hasattr(staged, 'kill'):
+            staged.kill()
+
+    return SwitchHooks(
+        prepare_staged=prepare_staged,
+        take_handoff=take_handoff,
+        discard_staged=discard_staged,
+        forge_cwd=cwd,
+        claude_home=claude_home,
+    )
+
+
+def reserve_or_load_intent(
     *,
     source_context_id: int,
     source_context_epoch: int,
@@ -535,40 +776,45 @@ def switch_context_window(
     db_path: Optional[str] = None,
     now: Optional[datetime.datetime] = None,
 ) -> dict[str, Any]:
+    """Create reserved intent or return existing same-payload intent."""
     if close_reason not in (CLOSE_REASON_MANUAL, CLOSE_REASON_CAPACITY_RESCUE):
         raise ValueError('invalid close_reason')
-
     source_id = parse_strict_json_positive_int('source_context_id', source_context_id)
     source_epoch = parse_strict_json_positive_int('source_context_epoch', source_context_epoch)
     count = parse_strict_json_carryover_count(count)
     req_id = _validate_request_id(request_id)
-
     ensure_schema(db_path)
     now_dt = _shanghai_now(now)
-    now_s = now_dt.strftime('%Y-%m-%d %H:%M:%S')
-    local_day = shanghai_calendar_day(now_dt)
+    now_s = _now_s(now_dt)
+    ph = _payload_hash(
+        chat_id=chat_id,
+        source_id=source_id,
+        source_epoch=source_epoch,
+        count=count,
+        close_reason=close_reason,
+    )
 
     conn = _connect(db_path)
     try:
         conn.execute('BEGIN IMMEDIATE')
-
-        existing_target = _find_idempotent_target_conn(
-            conn, chat_id=chat_id, request_id=req_id,
-        )
-        if existing_target is not None:
-            source = _validate_idempotent_payload_conn(
-                conn, existing_target,
-                chat_id=chat_id,
-                source_id=source_id,
-                source_epoch=source_epoch,
-                count=count,
-                close_reason=close_reason,
-            )
-            result = _switch_result_from_target_conn(
-                conn, source=source, target=existing_target,
-            )
+        existing = _intent_row(conn, req_id)
+        if existing is not None:
+            if str(existing.get('payload_hash') or '') != ph:
+                conn.rollback()
+                raise IdempotencyMismatchError('idempotency_mismatch')
             conn.commit()
-            return result
+            return existing
+
+        # Another active intent for this chat?
+        other = conn.execute(
+            'SELECT request_id, status FROM context_switch_intents '
+            'WHERE chat_id=? AND status IN (%s) LIMIT 1'
+            % ','.join('?' for _ in ACTIVE_INTENT_STATUSES),
+            (chat_id, *tuple(ACTIVE_INTENT_STATUSES)),
+        ).fetchone()
+        if other is not None:
+            conn.rollback()
+            raise SwitchInProgressError('switch_in_progress')
 
         current = resolve_canonical_context_row_conn(conn, chat_id=chat_id, now=now_dt)
         if int(current['id']) != source_id or int(current['context_epoch']) != source_epoch:
@@ -579,9 +825,8 @@ def switch_context_window(
             raise StaleSourceContextError('stale_source_context')
 
         source_version = int(current.get('version') or 1)
-        if _is_resident_turn_active_conn(
-            conn, source_id, int(current.get('resident_generation') or 1), now_dt,
-        ):
+        source_gen = int(current.get('resident_generation') or 1)
+        if _is_resident_turn_active_conn(conn, source_id, source_gen, now_dt):
             conn.rollback()
             raise WindowBusyError('window_busy')
 
@@ -589,15 +834,232 @@ def switch_context_window(
             conn, context_id=source_id, context_epoch=source_epoch,
         )
         boundary_id = _last_formal_message_id(messages)
-        all_rounds = group_carryover_rounds(messages)
-        if count == 0:
-            selected_rounds: list[dict[str, Any]] = []
-        else:
-            selected_rounds = (
-                all_rounds[-count:] if len(all_rounds) >= count else list(all_rounds)
+        _rounds, selected_ids, selected_round_count = _select_rounds_locked(messages, count)
+
+        conn.execute(
+            '''INSERT INTO context_switch_intents (
+                request_id, chat_id, payload_hash, status,
+                source_context_id, source_context_epoch, source_version,
+                source_resident_generation, source_boundary_message_id,
+                carryover_count, selected_message_ids_json,
+                orphan_jsonl_state, created_at, updated_at
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
+            (
+                req_id, chat_id, ph, INTENT_RESERVED,
+                source_id, source_epoch, source_version,
+                source_gen, boundary_id,
+                count, json.dumps(selected_ids),
+                'none', now_s, now_s,
+            ),
+        )
+        # selected_round_count stored indirectly via carryover_count request;
+        # keep locked ids as authority. Expose round count on row via unused field? skip.
+        intent = _intent_row(conn, req_id)
+        assert intent is not None
+        intent['_selected_round_count'] = selected_round_count
+        conn.commit()
+        return intent
+    except sqlite3.IntegrityError as exc:
+        conn.rollback()
+        # concurrent same request_id insert
+        replay = _connect(db_path)
+        try:
+            replay.execute('BEGIN IMMEDIATE')
+            existing = _intent_row(replay, req_id)
+            if existing is not None:
+                if str(existing.get('payload_hash') or '') != ph:
+                    replay.rollback()
+                    raise IdempotencyMismatchError('idempotency_mismatch') from exc
+                replay.commit()
+                return existing
+            replay.rollback()
+        finally:
+            replay.close()
+        raise StaleSourceContextError('stale_source_context') from exc
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def _set_intent_status(
+    request_id: str,
+    status: str,
+    *,
+    db_path: Optional[str] = None,
+    now: Optional[datetime.datetime] = None,
+    fields: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
+    ensure_schema(db_path)
+    now_s = _now_s(_shanghai_now(now))
+    conn = _connect(db_path)
+    try:
+        conn.execute('BEGIN IMMEDIATE')
+        _update_intent_conn(
+            conn, request_id, status=status, fields=fields, now_s=now_s,
+        )
+        row = _intent_row(conn, request_id)
+        conn.commit()
+        assert row is not None
+        return row
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def commit_switch_to_handoff_pending(
+    intent: dict[str, Any],
+    *,
+    close_reason: str = CLOSE_REASON_MANUAL,
+    db_path: Optional[str] = None,
+    now: Optional[datetime.datetime] = None,
+) -> dict[str, Any]:
+    """Final DB transaction ending in handoff_pending (never committed)."""
+    ensure_schema(db_path)
+    now_dt = _shanghai_now(now)
+    now_s = _now_s(now_dt)
+    local_day = shanghai_calendar_day(now_dt)
+    req_id = str(intent['request_id'])
+    chat_id = str(intent['chat_id'])
+    source_id = int(intent['source_context_id'])
+    source_epoch = int(intent['source_context_epoch'])
+    source_version = int(intent['source_version'])
+    source_gen = int(intent['source_resident_generation'])
+    boundary_id = int(intent['source_boundary_message_id'])
+    count = int(intent['carryover_count'])
+    selected_ids = _parse_selected_ids(intent.get('selected_message_ids_json'))
+    target_session_id = str(intent.get('target_session_id') or '')
+    if not target_session_id:
+        raise SwitchFailedError('target_session_missing')
+
+    conn = _connect(db_path)
+    try:
+        conn.execute('BEGIN IMMEDIATE')
+        live = _intent_row(conn, req_id)
+        if live is None or str(live.get('status')) not in (INTENT_READY, INTENT_COMMITTING):
+            conn.rollback()
+            raise SwitchFailedError('intent_not_ready')
+        _update_intent_conn(
+            conn, req_id, status=INTENT_COMMITTING, now_s=now_s,
+        )
+
+        # Peer may have already committed this request_id.
+        existing_target = _find_idempotent_target_conn(
+            conn, chat_id=chat_id, request_id=req_id,
+        )
+        if existing_target is not None:
+            source_row = conn.execute(
+                'SELECT * FROM daily_contexts WHERE id=?', (source_id,),
+            ).fetchone()
+            if source_row is None:
+                conn.rollback()
+                raise StaleSourceContextError('stale_source_context')
+            _update_intent_conn(
+                conn,
+                req_id,
+                status=INTENT_HANDOFF_PENDING,
+                fields={'target_context_id': int(existing_target['id'])},
+                now_s=now_s,
             )
-        selected_round_count = len(selected_rounds)
-        next_epoch = _active_epoch_high_water(conn, chat_id) + 1
+            result = _switch_result_from_target_conn(
+                conn, source=dict(source_row), target=existing_target,
+            )
+            conn.commit()
+            return result
+
+        current = resolve_canonical_context_row_conn(conn, chat_id=chat_id, now=now_dt)
+        if int(current['id']) != source_id or int(current['context_epoch']) != source_epoch:
+            existing_target = _find_idempotent_target_conn(
+                conn, chat_id=chat_id, request_id=req_id,
+            )
+            if existing_target is not None:
+                source_row = conn.execute(
+                    'SELECT * FROM daily_contexts WHERE id=?', (source_id,),
+                ).fetchone()
+                assert source_row is not None
+                _update_intent_conn(
+                    conn,
+                    req_id,
+                    status=INTENT_HANDOFF_PENDING,
+                    fields={'target_context_id': int(existing_target['id'])},
+                    now_s=now_s,
+                )
+                result = _switch_result_from_target_conn(
+                    conn, source=dict(source_row), target=existing_target,
+                )
+                conn.commit()
+                return result
+            _fail_intent_conn(
+                conn, req_id, error_code='stale_source_context', now_s=now_s,
+            )
+            conn.commit()
+            raise StaleSourceContextError('stale_source_context')
+        if current.get('closed_at'):
+            existing_target = _find_idempotent_target_conn(
+                conn, chat_id=chat_id, request_id=req_id,
+            )
+            if existing_target is not None:
+                source_row = conn.execute(
+                    'SELECT * FROM daily_contexts WHERE id=?', (source_id,),
+                ).fetchone()
+                assert source_row is not None
+                _update_intent_conn(
+                    conn,
+                    req_id,
+                    status=INTENT_HANDOFF_PENDING,
+                    fields={'target_context_id': int(existing_target['id'])},
+                    now_s=now_s,
+                )
+                result = _switch_result_from_target_conn(
+                    conn, source=dict(source_row), target=existing_target,
+                )
+                conn.commit()
+                return result
+            _fail_intent_conn(
+                conn, req_id, error_code='stale_source_context', now_s=now_s,
+            )
+            conn.commit()
+            raise StaleSourceContextError('stale_source_context')
+        if int(current.get('version') or 1) != source_version:
+            _fail_intent_conn(
+                conn, req_id, error_code='stale_source_context', now_s=now_s,
+            )
+            conn.commit()
+            raise StaleSourceContextError('stale_source_context')
+        if int(current.get('resident_generation') or 1) != source_gen:
+            _fail_intent_conn(
+                conn, req_id, error_code='stale_source_context', now_s=now_s,
+            )
+            conn.commit()
+            raise StaleSourceContextError('stale_source_context')
+        if _is_resident_turn_active_conn(conn, source_id, source_gen, now_dt):
+            # retryable: restore ready
+            _update_intent_conn(
+                conn, req_id, status=INTENT_READY, now_s=now_s,
+            )
+            conn.commit()
+            raise WindowBusyError('window_busy')
+
+        messages = _collect_context_formal_messages(
+            conn, context_id=source_id, context_epoch=source_epoch,
+        )
+        live_boundary = _last_formal_message_id(messages)
+        if live_boundary != boundary_id:
+            _fail_intent_conn(
+                conn, req_id, error_code='stale_source_context', now_s=now_s,
+            )
+            conn.commit()
+            raise StaleSourceContextError('stale_source_context')
+        _rounds, live_ids, selected_round_count = _select_rounds_locked(messages, count)
+        if live_ids != selected_ids:
+            _fail_intent_conn(
+                conn, req_id, error_code='stale_source_context', now_s=now_s,
+            )
+            conn.commit()
+            raise StaleSourceContextError('stale_source_context')
 
         close_cur = conn.execute(
             '''UPDATE daily_contexts SET closed_at=?, close_reason=?, version=version+1,
@@ -605,37 +1067,46 @@ def switch_context_window(
             (now_s, close_reason, now_s, source_id, source_epoch, source_version),
         )
         if close_cur.rowcount != 1:
-            conn.rollback()
+            _fail_intent_conn(
+                conn, req_id, error_code='stale_source_context', now_s=now_s,
+            )
+            conn.commit()
             raise StaleSourceContextError('stale_source_context')
 
+        next_epoch = _active_epoch_high_water(conn, chat_id) + 1
         cur = conn.execute(
             '''INSERT INTO daily_contexts (
                 chat_id, local_day, timezone, boundary_hour, context_epoch,
                 boundary_message_id, status, carryover_count, carryover_requested_count,
                 selection_finalized_at, is_backfill, resident_generation, version,
                 created_at, updated_at, window_mode, opened_at, closed_at,
-                close_reason, source_context_id, switch_request_id
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 1, 1, ?, ?, ?, ?, NULL, NULL, ?, ?)''',
+                close_reason, source_context_id, switch_request_id, claude_session_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 1, 1, ?, ?, ?, ?, NULL, NULL, ?, ?, ?)''',
             (
                 chat_id, local_day, DEFAULT_TIMEZONE, CHAT_DAY_START_HOUR,
                 next_epoch, boundary_id, STATUS_PROVISIONAL,
                 selected_round_count, count, now_s,
                 now_s, now_s, WINDOW_MODE_MANUAL, now_s,
-                source_id, req_id,
+                source_id, req_id, target_session_id,
             ),
         )
         target_id = int(cur.lastrowid)
-
         ordinal = 0
-        for rnd in selected_rounds:
-            for mid in rnd['message_ids']:
-                conn.execute(
-                    'INSERT INTO daily_carryover_messages (context_id, ordinal, message_id) '
-                    'VALUES (?,?,?)',
-                    (target_id, ordinal, int(mid)),
-                )
-                ordinal += 1
+        for mid in selected_ids:
+            conn.execute(
+                'INSERT INTO daily_carryover_messages (context_id, ordinal, message_id) '
+                'VALUES (?,?,?)',
+                (target_id, ordinal, int(mid)),
+            )
+            ordinal += 1
 
+        _update_intent_conn(
+            conn,
+            req_id,
+            status=INTENT_HANDOFF_PENDING,
+            fields={'target_context_id': target_id},
+            now_s=now_s,
+        )
         source_row = conn.execute(
             'SELECT * FROM daily_contexts WHERE id=?', (source_id,),
         ).fetchone()
@@ -648,34 +1119,395 @@ def switch_context_window(
         )
         conn.commit()
         return result
-    except sqlite3.IntegrityError as exc:
+    except (StaleSourceContextError, WindowBusyError, SwitchFailedError, IdempotencyMismatchError):
+        raise
+    except sqlite3.Error:
         conn.rollback()
-        replay = _connect(db_path)
+        # retryable DB error → restore ready
+        fix = _connect(db_path)
         try:
-            replay.execute('BEGIN IMMEDIATE')
-            existing = _find_idempotent_target_conn(
-                replay, chat_id=chat_id, request_id=req_id,
-            )
-            if existing is not None:
-                source = _validate_idempotent_payload_conn(
-                    replay, existing,
-                    chat_id=chat_id,
-                    source_id=source_id,
-                    source_epoch=source_epoch,
-                    count=count,
-                    close_reason=close_reason,
+            fix.execute('BEGIN IMMEDIATE')
+            live = _intent_row(fix, req_id)
+            if live is not None and str(live.get('status')) in (
+                INTENT_COMMITTING, INTENT_READY,
+            ):
+                _update_intent_conn(
+                    fix, req_id, status=INTENT_READY, now_s=_now_s(_shanghai_now(now)),
                 )
-                result = _switch_result_from_target_conn(
-                    replay, source=source, target=existing,
-                )
-                replay.commit()
-                return result
-            replay.rollback()
+            fix.commit()
         finally:
-            replay.close()
-        raise StaleSourceContextError('stale_source_context') from exc
+            fix.close()
+        raise
     except Exception:
         conn.rollback()
         raise
     finally:
         conn.close()
+
+
+def mark_intent_committed(
+    request_id: str,
+    *,
+    db_path: Optional[str] = None,
+    now: Optional[datetime.datetime] = None,
+) -> dict[str, Any]:
+    return _set_intent_status(
+        request_id, INTENT_COMMITTED, db_path=db_path, now=now,
+    )
+
+
+def complete_handoff_pending_recovery(
+    *,
+    chat_id: str = DEFAULT_CHAT_ID,
+    request_id: Optional[str] = None,
+    hooks: Optional[SwitchHooks] = None,
+    db_path: Optional[str] = None,
+    now: Optional[datetime.datetime] = None,
+) -> Optional[dict[str, Any]]:
+    """Resume handoff_pending without re-Forge."""
+    ensure_schema(db_path)
+    hooks = hooks or offline_switch_hooks(
+        Path('/tmp/context-switch-offline') / 'recovery'
+    )
+    conn = _connect(db_path)
+    try:
+        if request_id:
+            intent = _intent_row(conn, _validate_request_id(request_id))
+        else:
+            intent = _row_to_dict(conn.execute(
+                'SELECT * FROM context_switch_intents WHERE chat_id=? AND status=? '
+                'ORDER BY updated_at DESC LIMIT 1',
+                (chat_id, INTENT_HANDOFF_PENDING),
+            ).fetchone())
+    finally:
+        conn.close()
+    if intent is None or str(intent.get('status')) != INTENT_HANDOFF_PENDING:
+        return None
+    target_id = int(intent['target_context_id'])
+    target = _row_to_dict(_connect(db_path).execute(
+        'SELECT * FROM daily_contexts WHERE id=?', (target_id,),
+    ).fetchone()) if False else None
+    # reopen properly
+    c2 = _connect(db_path)
+    try:
+        target = _row_to_dict(c2.execute(
+            'SELECT * FROM daily_contexts WHERE id=?', (target_id,),
+        ).fetchone())
+        source = _row_to_dict(c2.execute(
+            'SELECT * FROM daily_contexts WHERE id=?',
+            (int(intent['source_context_id']),),
+        ).fetchone())
+    finally:
+        c2.close()
+    if target is None or source is None:
+        return None
+    result = None
+    c3 = _connect(db_path)
+    try:
+        result = _switch_result_from_target_conn(c3, source=source, target=target)
+    finally:
+        c3.close()
+
+    from tools.claude_forge_core import session_jsonl_path_for_cwd
+    sid = str(target.get('claude_session_id') or intent.get('target_session_id') or '')
+    forge_path = session_jsonl_path_for_cwd(
+        hooks.forge_cwd, sid, claude_home=hooks.claude_home,
+    )
+    intent = dict(intent)
+    intent['target_session_id'] = sid
+    staged = hooks.prepare_staged(intent, forge_path)
+    try:
+        hooks.take_handoff(staged, result)
+        mark_intent_committed(str(intent['request_id']), db_path=db_path, now=now)
+    except Exception:
+        hooks.discard_staged(staged)
+        raise
+    return result
+
+
+def switch_context_window(
+    *,
+    source_context_id: int,
+    source_context_epoch: int,
+    count: int,
+    request_id: str,
+    chat_id: str = DEFAULT_CHAT_ID,
+    close_reason: str = CLOSE_REASON_MANUAL,
+    db_path: Optional[str] = None,
+    now: Optional[datetime.datetime] = None,
+    hooks: Optional[SwitchHooks] = None,
+) -> dict[str, Any]:
+    """Seamless Forge switch: reserve → forge → staged ready → commit → handoff → committed."""
+    from chat.context_window_forge import (
+        CarryoverUnforgeableError as ForgeUnforgeable,
+        forge_target_session_from_db,
+    )
+    from tools.claude_forge_core import session_jsonl_path_for_cwd, sha256_file
+
+    if hooks is None:
+        hooks = offline_switch_hooks(
+            Path('/tmp/context-switch-offline') / str(request_id or 'default')
+        )
+
+    # Idempotent committed replay via target row
+    ensure_schema(db_path)
+    req_id = _validate_request_id(request_id)
+
+    expected_hash = _payload_hash(
+        chat_id=chat_id,
+        source_id=parse_strict_json_positive_int('source_context_id', source_context_id),
+        source_epoch=parse_strict_json_positive_int('source_context_epoch', source_context_epoch),
+        count=parse_strict_json_carryover_count(count),
+        close_reason=close_reason,
+    )
+    conn = _connect(db_path)
+    try:
+        existing_intent = _intent_row(conn, req_id)
+        if existing_intent is not None:
+            if str(existing_intent.get('payload_hash') or '') != expected_hash:
+                raise IdempotencyMismatchError('idempotency_mismatch')
+        if existing_intent and str(existing_intent.get('status')) == INTENT_COMMITTED:
+            target = _find_idempotent_target_conn(
+                conn, chat_id=chat_id, request_id=req_id,
+            )
+            if target is not None:
+                source = _row_to_dict(conn.execute(
+                    'SELECT * FROM daily_contexts WHERE id=?',
+                    (int(target['source_context_id']),),
+                ).fetchone())
+                if source is not None:
+                    return _switch_result_from_target_conn(
+                        conn, source=source, target=target,
+                    )
+        if existing_intent and str(existing_intent.get('status')) == INTENT_HANDOFF_PENDING:
+            conn.close()
+            recovered = complete_handoff_pending_recovery(
+                chat_id=chat_id,
+                request_id=req_id,
+                hooks=hooks,
+                db_path=db_path,
+                now=now,
+            )
+            if recovered is not None:
+                return recovered
+            conn = _connect(db_path)
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+    intent = reserve_or_load_intent(
+        source_context_id=source_context_id,
+        source_context_epoch=source_context_epoch,
+        count=count,
+        request_id=req_id,
+        chat_id=chat_id,
+        close_reason=close_reason,
+        db_path=db_path,
+        now=now,
+    )
+    status = str(intent.get('status'))
+
+    if status == INTENT_COMMITTED:
+        c = _connect(db_path)
+        try:
+            target = _find_idempotent_target_conn(
+                c, chat_id=chat_id, request_id=req_id,
+            )
+            source = _row_to_dict(c.execute(
+                'SELECT * FROM daily_contexts WHERE id=?',
+                (int(intent['source_context_id']),),
+            ).fetchone())
+            assert target is not None and source is not None
+            return _switch_result_from_target_conn(c, source=source, target=target)
+        finally:
+            c.close()
+
+    if status == INTENT_HANDOFF_PENDING:
+        recovered = complete_handoff_pending_recovery(
+            chat_id=chat_id,
+            request_id=req_id,
+            hooks=hooks,
+            db_path=db_path,
+            now=now,
+        )
+        if recovered is not None:
+            return recovered
+
+    staged = None
+    forge_path: Optional[Path] = None
+    try:
+        if status in (INTENT_RESERVED, INTENT_FORGING) or (
+            status == INTENT_READY and not intent.get('target_session_id')
+        ):
+            _set_intent_status(req_id, INTENT_FORGING, db_path=db_path, now=now)
+            selected_ids = _parse_selected_ids(intent.get('selected_message_ids_json'))
+            # Skip re-Forge when target already written for this intent
+            if intent.get('target_session_id') and intent.get('target_jsonl_sha256'):
+                sid = str(intent['target_session_id'])
+                forge_path = session_jsonl_path_for_cwd(
+                    hooks.forge_cwd, sid, claude_home=hooks.claude_home,
+                )
+                if forge_path.is_file() and sha256_file(forge_path) == str(
+                    intent['target_jsonl_sha256']
+                ):
+                    pass  # reuse
+                else:
+                    intent['target_session_id'] = None
+
+            if not intent.get('target_session_id'):
+                c = _connect(db_path)
+                try:
+                    forged = forge_target_session_from_db(
+                        c,
+                        selected_message_ids=selected_ids,
+                        cwd=hooks.forge_cwd,
+                        claude_home=hooks.claude_home,
+                    )
+                except ForgeUnforgeable as exc:
+                    c2 = _connect(db_path)
+                    try:
+                        c2.execute('BEGIN IMMEDIATE')
+                        _fail_intent_conn(
+                            c2,
+                            req_id,
+                            error_code='carryover_message_unforgeable',
+                            orphan_jsonl_state='pending',
+                            now_s=_now_s(_shanghai_now(now)),
+                        )
+                        c2.commit()
+                    finally:
+                        c2.close()
+                    raise CarryoverMessageUnforgeableError(str(exc)) from exc
+                finally:
+                    c.close()
+                forge_path = forged.jsonl_path
+                intent = _set_intent_status(
+                    req_id,
+                    INTENT_FORGING,
+                    db_path=db_path,
+                    now=now,
+                    fields={
+                        'target_session_id': forged.target_session_id,
+                        'target_jsonl_sha256': forged.sha256,
+                        'orphan_jsonl_state': 'none',
+                    },
+                )
+            else:
+                forge_path = session_jsonl_path_for_cwd(
+                    hooks.forge_cwd,
+                    str(intent['target_session_id']),
+                    claude_home=hooks.claude_home,
+                )
+
+            assert forge_path is not None
+            before_sha = sha256_file(forge_path)
+            staged = hooks.prepare_staged(intent, forge_path)
+            after_sha = sha256_file(forge_path)
+            if before_sha != after_sha:
+                raise SwitchFailedError('staged_jsonl_mutated_before_handoff')
+            intent = _set_intent_status(
+                req_id,
+                INTENT_READY,
+                db_path=db_path,
+                now=now,
+                fields={'staged_ready_at': _now_s(_shanghai_now(now))},
+            )
+            status = INTENT_READY
+
+        if status == INTENT_READY:
+            # Re-prepare staged if this is a retry after ready
+            if staged is None:
+                forge_path = session_jsonl_path_for_cwd(
+                    hooks.forge_cwd,
+                    str(intent['target_session_id']),
+                    claude_home=hooks.claude_home,
+                )
+                staged = hooks.prepare_staged(intent, forge_path)
+
+            result = commit_switch_to_handoff_pending(
+                intent,
+                close_reason=close_reason,
+                db_path=db_path,
+                now=now,
+            )
+            hooks.take_handoff(staged, result)
+            mark_intent_committed(req_id, db_path=db_path, now=now)
+            return result
+
+        if status == INTENT_COMMITTING:
+            # resume commit
+            result = commit_switch_to_handoff_pending(
+                intent,
+                close_reason=close_reason,
+                db_path=db_path,
+                now=now,
+            )
+            if staged is None:
+                forge_path = session_jsonl_path_for_cwd(
+                    hooks.forge_cwd,
+                    str(intent['target_session_id']),
+                    claude_home=hooks.claude_home,
+                )
+                staged = hooks.prepare_staged(intent, forge_path)
+            hooks.take_handoff(staged, result)
+            mark_intent_committed(req_id, db_path=db_path, now=now)
+            return result
+
+        if status in TERMINAL_FAILURE_STATUSES:
+            raise SwitchFailedError(
+                str(intent.get('error_code') or status),
+            )
+
+        raise SwitchFailedError('unexpected_intent_status:%s' % status)
+    except (
+        StaleSourceContextError,
+        WindowBusyError,
+        IdempotencyMismatchError,
+        SwitchInProgressError,
+        CarryoverMessageUnforgeableError,
+    ):
+        if staged is not None:
+            hooks.discard_staged(staged)
+        raise
+    except SwitchFailedError as exc:
+        if staged is not None:
+            hooks.discard_staged(staged)
+        orphan = _mark_orphan_best_effort(forge_path)
+        c = _connect(db_path)
+        try:
+            c.execute('BEGIN IMMEDIATE')
+            live = _intent_row(c, req_id)
+            if live is not None and str(live.get('status')) in ACTIVE_INTENT_STATUSES:
+                _fail_intent_conn(
+                    c,
+                    req_id,
+                    error_code=exc.error_code,
+                    orphan_jsonl_state='pending' if orphan != 'deleted' else orphan,
+                    now_s=_now_s(_shanghai_now(now)),
+                )
+            c.commit()
+        finally:
+            c.close()
+        raise
+    except Exception as exc:
+        if staged is not None:
+            hooks.discard_staged(staged)
+        orphan = _mark_orphan_best_effort(forge_path)
+        c = _connect(db_path)
+        try:
+            c.execute('BEGIN IMMEDIATE')
+            live = _intent_row(c, req_id)
+            if live is not None and str(live.get('status')) in ACTIVE_INTENT_STATUSES:
+                _fail_intent_conn(
+                    c,
+                    req_id,
+                    error_code='switch_internal_error',
+                    orphan_jsonl_state='pending' if orphan != 'deleted' else orphan,
+                    now_s=_now_s(_shanghai_now(now)),
+                )
+            c.commit()
+        finally:
+            c.close()
+        raise SwitchFailedError('switch_internal_error', str(exc)) from exc

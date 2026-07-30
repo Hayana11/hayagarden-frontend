@@ -62,6 +62,8 @@ _DEFAULTS = {
     'CC_CLEAN_WINDOW_SHADOW_ENABLED': '0',
     # P-CONTEXT-DAILY-SOFT-WINDOW：正式日窗，默认关闭（本 PR 仅代码落地）。
     'DAILY_SOFT_WINDOW_ENABLED': '0',
+    # P-CONTEXT-WINDOW step5：staged --resume 无 stdin 健康窗（毫秒）。
+    'CONTEXT_SWITCH_STAGED_HEALTH_MS': '2000',
 }
 
 

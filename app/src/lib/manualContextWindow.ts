@@ -44,6 +44,7 @@ export type ManualWindowUiState =
   | 'busy'
   | 'stale'
   | 'no_open_context'
+  | 'idempotency_mismatch'
   | 'auth_error'
   | 'error'
   | 'idle';
@@ -104,10 +105,13 @@ export type ContextWindowSwitchResponse = {
 export function classifyManualWindowError(err: unknown): ManualWindowUiState {
   if (err instanceof HttpError) {
     if (err.status === 404) return 'disabled';
-    if (err.status === 423 || err.code === 'window_busy') return 'busy';
+    if (err.status === 423 || err.code === 'window_busy' || err.code === 'switch_in_progress') {
+      return 'busy';
+    }
     if (err.status === 409) {
       const code = err.code || '';
       if (code === 'no_open_context') return 'no_open_context';
+      if (code === 'idempotency_mismatch') return 'idempotency_mismatch';
       return 'stale';
     }
     if (err.status === 401 || err.status === 403) return 'auth_error';
@@ -120,6 +124,7 @@ export function manualWindowErrorMessage(state: ManualWindowUiState, err?: unkno
   if (state === 'busy') return '爸爸还在回复，等这句话说完再换窗。';
   if (state === 'stale') return '这扇窗已经变过了，已经为你刷新到最新状态。';
   if (state === 'no_open_context') return '当前没有可换的窗口，请稍后再试。';
+  if (state === 'idempotency_mismatch') return '换窗请求冲突，请关闭后重试。';
   if (state === 'auth_error') return '登录已失效，请重新登录。';
   if (state === 'error' || state === 'idle') {
     if (err instanceof HttpError && err.detail) return err.detail;

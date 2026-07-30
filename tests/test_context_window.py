@@ -909,8 +909,11 @@ class ConcurrencySwitchTests(unittest.TestCase):
         self.ctx = _legacy_ctx(self.db)
         self.cid = int(self.ctx['id'])
         self.epoch = int(self.ctx['context_epoch'])
-        u = _insert(self.db, 'hayana', 'x', '2026-07-27 10:00:00')
-        _map(self.db, self.cid, self.epoch, u, 'user')
+        for i in range(3):
+            u = _insert(self.db, 'hayana', 'x%d' % i, '2026-07-27 10:%02d:00' % i)
+            a = _insert(self.db, 'fyodor', 'y%d' % i, '2026-07-27 10:%02d:30' % i)
+            _map(self.db, self.cid, self.epoch, u, 'user')
+            _map(self.db, self.cid, self.epoch, a, 'assistant')
 
     def test_same_request_concurrent_identical_payload(self):
         req = str(uuid.uuid4())
@@ -1007,7 +1010,7 @@ class ConcurrencySwitchTests(unittest.TestCase):
                     db_path=self.db,
                 )
                 outcomes.append(('ok', out['target_context_id']))
-            except cw.StaleSourceContextError:
+            except (cw.StaleSourceContextError, cw.SwitchInProgressError):
                 outcomes.append(('stale', None))
             except Exception as exc:
                 outcomes.append(('err', exc))

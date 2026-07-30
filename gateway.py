@@ -3025,7 +3025,38 @@ CC_ALLOWED_TOOLS = ','.join([
 # 常驻进程：只服务 /chat（Fyodor 独聊）的真实多轮对话。日记生成等一次性调用
 # 仍走下面的 claude_code_call()/_cc_stream_gen 一次性管道——那些不是"轮对话"，
 # 混进常驻会话的上下文里语义上是错的。group-chat 的 claude 房间同理，暂不接入。
-_CC_RESIDENT = cc_resident.ResidentSession(CC_CWD, CC_ALLOWED_TOOLS, CC_CWD + '/cc-tools.json')
+class _SwappableResident:
+    """Holder so formal send paths always read the current resident instance."""
+
+    __slots__ = ('_inner', '_lock')
+
+    def __init__(self, inner):
+        object.__setattr__(self, '_inner', inner)
+        object.__setattr__(self, '_lock', __import__('threading').RLock())
+
+    def get(self):
+        return object.__getattribute__(self, '_inner')
+
+    def swap(self, new_inner):
+        lock = object.__getattribute__(self, '_lock')
+        with lock:
+            old = object.__getattribute__(self, '_inner')
+            object.__setattr__(self, '_inner', new_inner)
+            return old
+
+    def __getattr__(self, name):
+        return getattr(object.__getattribute__(self, '_inner'), name)
+
+    def __setattr__(self, name, value):
+        if name in ('_inner', '_lock'):
+            object.__setattr__(self, name, value)
+        else:
+            setattr(object.__getattribute__(self, '_inner'), name, value)
+
+
+_CC_RESIDENT = _SwappableResident(
+    cc_resident.ResidentSession(CC_CWD, CC_ALLOWED_TOOLS, CC_CWD + '/cc-tools.json')
+)
 
 # B1：独立 CC Wake resident——绝不复用上面的聊天 resident，避免半夜
 # ACTION/THOUGHTS/工具检查混进白天私聊上下文。
@@ -6427,18 +6458,109 @@ from daily_context_bff import create_daily_context_bff_blueprint
 app.register_blueprint(create_daily_context_bff_blueprint())
 from context_window_bff import create_context_window_bff_blueprint
 from chat import daily_runtime as _daily_rt_for_switch
+from chat import context_window as _cw_for_switch
+from pathlib import Path as _Path
+
+
+def _gw_build_switch_hooks():
+    import logging
+    claude_home = _Path(os.environ.get('HOME', '/root')) / '.claude'
+
+    def prepare_staged(intent, forge_path):
+        system_text = '你是费奥多尔。保持简短。'
+        env = os.environ.copy()
+        staged = cc_resident.ResidentSession(
+            CC_CWD, CC_ALLOWED_TOOLS, CC_CWD + '/cc-tools.json',
+        )
+        try:
+            staged.spawn_resumable(
+                system_text,
+                env,
+                resume_session_id=str(intent['target_session_id']),
+            )
+            staged.wait_staged_health(
+                jsonl_path=forge_path,
+                expected_sha256=intent.get('target_jsonl_sha256'),
+            )
+        except cc_resident.ResidentError as exc:
+            try:
+                staged._kill(quiet=True)
+            except Exception:
+                pass
+            msg = str(exc)
+            for code in (
+                'staged_spawn_failed',
+                'staged_exited_during_health_window',
+                'staged_stderr_fatal',
+                'staged_jsonl_mutated_before_handoff',
+            ):
+                if code in msg:
+                    raise _cw_for_switch.SwitchFailedError(code, msg) from exc
+            raise _cw_for_switch.SwitchFailedError('staged_spawn_failed', msg) from exc
+        return staged
+
+    def take_handoff(staged, result):
+        with _daily_rt_for_switch.handoff_lock():
+            old = _CC_RESIDENT.swap(staged)
+            _daily_rt_for_switch.bind_target_resident_after_switch(
+                staged_resident=staged,
+                result=result,
+                db_path=DB_PATH,
+            )
+        # Close old only after binding swap left the lock.
+        try:
+            kill = getattr(old, '_kill', None)
+            if callable(kill):
+                kill(quiet=True)
+        except Exception:
+            logging.getLogger(__name__).exception('old resident close after handoff failed')
+
+    def discard_staged(staged):
+        try:
+            if staged is not None:
+                staged._kill(quiet=True)
+        except Exception:
+            logging.getLogger(__name__).exception('discard staged resident failed')
+
+    return _cw_for_switch.SwitchHooks(
+        prepare_staged=prepare_staged,
+        take_handoff=take_handoff,
+        discard_staged=discard_staged,
+        forge_cwd=CC_CWD,
+        claude_home=claude_home,
+    )
+
+
+_GW_SWITCH_HOOKS = _gw_build_switch_hooks()
+
+
+def _gw_run_seamless_switch(body: dict) -> dict:
+    return _cw_for_switch.switch_context_window(
+        source_context_id=int(body['source_context_id']),
+        source_context_epoch=int(body['source_context_epoch']),
+        count=int(body['count']),
+        request_id=str(body['request_id']),
+        chat_id=str(body.get('chat_id') or 'default'),
+        close_reason=_cw_for_switch.CLOSE_REASON_MANUAL,
+        db_path=DB_PATH,
+        hooks=_GW_SWITCH_HOOKS,
+    )
+
 
 def _gw_close_resident_on_context_switch(result: dict) -> None:
+    # Legacy callback kept for tests; seamless path performs handoff itself.
     _daily_rt_for_switch.close_local_resident_for_context_switch(
-        _CC_RESIDENT,
+        _CC_RESIDENT.get(),
         source_context_id=int(result['source_context_id']),
         source_context_epoch=int(result['source_context_epoch']),
         source_resident_generation=int(result['source_resident_generation']),
     )
 
+
 app.register_blueprint(
     create_context_window_bff_blueprint(
         on_switch_success=_gw_close_resident_on_context_switch,
+        switch_runner=_gw_run_seamless_switch,
     ),
 )
 
