@@ -97,6 +97,43 @@ class CodexAppServerTests(unittest.TestCase):
             'result': {'permissions': {}, 'scope': 'turn'},
         })
 
+    def test_inherit_env_unchanged_for_group_chat(self):
+        os.environ['BOARD_TOKEN_TEST_MARKER'] = 'legacy-secret'
+        env = self.client._environment()
+        self.assertEqual(env.get('BOARD_TOKEN_TEST_MARKER'), 'legacy-secret')
+        self.assertEqual(self.client.env_mode, 'inherit')
+        self.assertFalse(self.client.ephemeral_threads)
+
+    def test_nexus_allowlist_env_and_ephemeral_defaults(self):
+        os.environ['BOARD_TOKEN_TEST_MARKER'] = 'must-not-leak'
+        with tempfile.TemporaryDirectory() as tmp:
+            home = os.path.join(tmp, 'codex-home')
+            os.makedirs(home)
+            nexus = codex_app_server.CodexAppServer(
+                cwd=tmp,
+                db_path=os.devnull,
+                sandbox='workspace-write',
+                env_mode='nexus_allowlist',
+                codex_home=home,
+                ephemeral_threads=True,
+                service_name='hayagarden_nexus',
+            )
+            env = nexus._environment()
+            self.assertNotIn('BOARD_TOKEN_TEST_MARKER', env)
+            self.assertEqual(env['CODEX_HOME'], home)
+            self.assertTrue(nexus.ephemeral_threads)
+            captured = {}
+
+            def request(method, params, **kwargs):
+                captured['method'] = method
+                captured['params'] = dict(params)
+                return {'thread': {'id': 't-ephem', 'path': None}}
+
+            with mock.patch.object(nexus, '_request_locked', side_effect=request):
+                tid = nexus._ensure_bound_thread_locked('should-ignore', 'dev')
+            self.assertEqual(tid, 't-ephem')
+            self.assertTrue(captured['params'].get('ephemeral') is True)
+
 
 if __name__ == '__main__':
     unittest.main()

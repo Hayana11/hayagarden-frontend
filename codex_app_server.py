@@ -95,6 +95,10 @@ class CodexAppServer:
         db_path: str = DEFAULT_DB_PATH,
         cwd: str = DEFAULT_CWD,
         sandbox: str = "read-only",
+        env_mode: str = "inherit",
+        codex_home: str | None = None,
+        ephemeral_threads: bool = False,
+        service_name: str | None = None,
     ):
         self.db_path = db_path
         self.cwd = cwd
@@ -103,18 +107,78 @@ class CodexAppServer:
         if sandbox == "danger-full-access":
             raise ValueError("danger-full-access is not allowed")
         self.sandbox = sandbox if sandbox in {"read-only", "workspace-write"} else "read-only"
+        # env_mode:
+        #   inherit — existing group-chat / monopoly behavior (full os.environ)
+        #   nexus_allowlist — minimal env for Nexus only (no app secrets)
+        if env_mode not in {"inherit", "nexus_allowlist"}:
+            raise ValueError("invalid env_mode")
+        self.env_mode = env_mode
+        self.codex_home = codex_home
+        self.ephemeral_threads = bool(ephemeral_threads)
+        self.service_name = service_name
         self._lock = threading.RLock()
         self._process: subprocess.Popen | None = None
         self._messages: queue.Queue = queue.Queue()
         self._request_id = 0
         self._stderr_tail: deque[str] = deque(maxlen=40)
         self._active_turn_id: str | None = None
+        self._active_thread_id: str | None = None
         self._cancel_requested = threading.Event()
+        self._interrupt_rpc_sent = threading.Event()
+        self._last_interrupt_params: dict | None = None
+        self._last_environment: dict | None = None
 
     def _environment(self) -> dict:
-        env = dict(os.environ)
-        env.setdefault("HOME", "/root")
-        env["CODEX_HOME"] = DEFAULT_CODEX_HOME
+        if self.env_mode == "nexus_allowlist":
+            env = self._nexus_allowlist_environment()
+        else:
+            env = dict(os.environ)
+            env.setdefault("HOME", "/root")
+            env["CODEX_HOME"] = self.codex_home or DEFAULT_CODEX_HOME
+            local_bin = os.path.dirname(find_codex() or "")
+            if local_bin:
+                env["PATH"] = local_bin + os.pathsep + env.get("PATH", "")
+        self._last_environment = dict(env)
+        return env
+
+    def _nexus_allowlist_environment(self) -> dict:
+        """Minimal env for Nexus-owned Codex processes.
+
+        Does not inherit BOARD_TOKEN / DB passwords / API keys / app secrets.
+        """
+        allow = (
+            "PATH",
+            "HOME",
+            "LANG",
+            "LC_ALL",
+            "LC_CTYPE",
+            "TERM",
+            "TMPDIR",
+            "TMP",
+            "TEMP",
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "NO_PROXY",
+            "http_proxy",
+            "https_proxy",
+            "no_proxy",
+            "ALL_PROXY",
+            "all_proxy",
+        )
+        env: dict[str, str] = {}
+        for key in allow:
+            value = os.environ.get(key)
+            if value is not None and value != "":
+                env[key] = value
+        env.setdefault("PATH", "/usr/bin:/bin")
+        env.setdefault("HOME", "/tmp")
+        env.setdefault("LANG", "C.UTF-8")
+        env.setdefault("LC_ALL", "C.UTF-8")
+        # Independent Nexus CODEX_HOME — never default to /root/.codex for writes.
+        home = self.codex_home
+        if not home:
+            raise CodexAppServerError("Nexus Codex requires an explicit codex_home")
+        env["CODEX_HOME"] = home
         local_bin = os.path.dirname(find_codex() or "")
         if local_bin:
             env["PATH"] = local_bin + os.pathsep + env.get("PATH", "")
@@ -327,6 +391,8 @@ class CodexAppServer:
 
         Monopoly keeps its binding in its own room record, so game history and
         the existing group-chat store remain strictly separate.
+        Nexus uses ephemeral_threads=True so thread.path stays null / not persisted
+        into the formal CODEX_HOME rollout store.
         """
         common = {
             "cwd": self.cwd,
@@ -336,7 +402,10 @@ class CodexAppServer:
             "sandbox": self.sandbox,
             "personality": "friendly",
         }
-        if thread_id:
+        if self.ephemeral_threads:
+            common["ephemeral"] = True
+        # Ephemeral Nexus threads are never resumed from a prior id.
+        if thread_id and not self.ephemeral_threads:
             try:
                 self._request_locked(
                     "thread/resume", {"threadId": thread_id, **common}, timeout=30,
@@ -344,29 +413,44 @@ class CodexAppServer:
                 return thread_id
             except CodexAppServerError:
                 pass
+        service = self.service_name or (
+            "hayagarden_nexus" if self.ephemeral_threads else "hayagarden_monopoly"
+        )
+        start_params = {**common, "serviceName": service}
         result = self._request_locked(
             "thread/start",
-            {**common, "serviceName": "hayagarden_monopoly"},
+            start_params,
             timeout=30,
         )
         new_id = str((result.get("thread") or {}).get("id") or "")
         if not new_id:
             raise CodexAppServerError("Codex game thread did not return an id")
+        # Defense: ephemeral threads must not report a durable path into formal home.
+        thread = result.get("thread") or {}
+        if self.ephemeral_threads and thread.get("path"):
+            raise CodexAppServerError("ephemeral Codex thread unexpectedly returned a path")
         return new_id
 
-    def interrupt_turn(self, turn_id: str) -> None:
-        """Best-effort cancel for a Nexus-owned server instance only.
+    def interrupt_turn(self, turn_id: str, thread_id: str | None = None) -> None:
+        """Request turn/interrupt with both threadId and turnId.
 
-        Sets the cancel flag immediately and never blocks waiting for the
-        stream lock. If the lock is free, also sends turn/interrupt now;
-        otherwise the stream loop observes cancel and sends it.
+        Sets the cancel flag immediately and never blocks waiting for the stream
+        lock. Does NOT claim the turn is finished — the stream loop must observe
+        turn/completed status=interrupted.
         """
         self._cancel_requested.set()
+        tid = thread_id or self._active_thread_id
+        params = {"turnId": turn_id}
+        if tid:
+            params["threadId"] = tid
+        self._last_interrupt_params = dict(params)
         acquired = self._lock.acquire(blocking=False)
         if not acquired:
             return
         try:
             if not self._process or self._process.poll() is not None:
+                return
+            if not turn_id:
                 return
             try:
                 self._request_id += 1
@@ -375,9 +459,10 @@ class CodexAppServer:
                     {
                         "id": request_id,
                         "method": "turn/interrupt",
-                        "params": {"turnId": turn_id},
+                        "params": params,
                     }
                 )
+                self._interrupt_rpc_sent.set()
             except Exception:
                 return
         finally:
@@ -385,9 +470,10 @@ class CodexAppServer:
 
     def interrupt_active_turn(self) -> None:
         turn_id = self._active_turn_id
+        thread_id = self._active_thread_id
         self._cancel_requested.set()
         if turn_id:
-            self.interrupt_turn(turn_id)
+            self.interrupt_turn(turn_id, thread_id)
 
     def _next_message(self, timeout: float) -> dict:
         """Read the next transport message without requiring the server lock.
@@ -406,6 +492,27 @@ class CodexAppServer:
             raise CodexAppServerError("蓝色线路连接关闭：" + detail)
         return message
 
+    def _send_interrupt_rpc(self, thread_id: str, turn_id: str) -> bool:
+        """Send turn/interrupt under a short lock. Returns True if sent."""
+        params = {"threadId": thread_id, "turnId": turn_id}
+        self._last_interrupt_params = dict(params)
+        with self._lock:
+            if not self._process or self._process.poll() is not None:
+                return False
+            try:
+                self._request_id += 1
+                self._send_locked(
+                    {
+                        "id": self._request_id,
+                        "method": "turn/interrupt",
+                        "params": params,
+                    }
+                )
+                self._interrupt_rpc_sent.set()
+                return True
+            except Exception:
+                return False
+
     def stream_bound_turn(
         self,
         thread_id: str | None,
@@ -419,12 +526,28 @@ class CodexAppServer:
 
         The server lock is held only for short setup / send / answer sections.
         Blocking waits and yields happen outside the lock so interrupt can run.
+
+        Interrupt completion requires provider ``turn/completed`` with
+        ``status=interrupted`` — a local cancel flag alone is insufficient.
         """
-        self._cancel_requested.clear()
+        # Preserve a cancel that was already requested before this turn started
+        # (immediate POST→interrupt race). Only clear when no cancel is pending.
+        pending_cancel = self._cancel_requested.is_set() or (
+            cancel_event is not None and cancel_event.is_set()
+        )
+        if not pending_cancel:
+            self._cancel_requested.clear()
+            self._interrupt_rpc_sent.clear()
+            self._last_interrupt_params = None
+
         turn_id: str | None = None
+        bound_id: str | None = None
         with self._lock:
             self._start_locked()
+            # If cancel already requested before server create / turn start, still
+            # create the turn so we can send a precise interrupt, then wait.
             bound_id = self._ensure_bound_thread_locked(thread_id, instructions)
+            self._active_thread_id = bound_id
             early: list[dict] = []
             result = self._request_locked(
                 "turn/start",
@@ -444,14 +567,25 @@ class CodexAppServer:
 
         deadline = time.monotonic() + timeout
         saw_delta = False
+        interrupt_sent = False
+        waiting_interrupt_ack = False
         try:
             while True:
-                if self._cancel_requested.is_set() or (
+                cancel_now = self._cancel_requested.is_set() or (
                     cancel_event is not None and cancel_event.is_set()
-                ):
-                    self.interrupt_turn(turn_id)
-                    yield "err", {"code": "interrupted", "message": "turn interrupted"}
-                    return
+                )
+                if cancel_now and not interrupt_sent and turn_id and bound_id:
+                    self._cancel_requested.set()
+                    sent = self._send_interrupt_rpc(bound_id, turn_id)
+                    interrupt_sent = True
+                    waiting_interrupt_ack = True
+                    if not sent:
+                        yield "err", {
+                            "code": "interrupt_failed",
+                            "message": "failed to send turn/interrupt",
+                        }
+                        return
+
                 try:
                     if buffered:
                         message = buffered.popleft()
@@ -460,11 +594,29 @@ class CodexAppServer:
                 except CodexAppServerError:
                     with self._lock:
                         self._stop_locked()
+                    if waiting_interrupt_ack:
+                        yield "err", {
+                            "code": "interrupt_unconfirmed",
+                            "message": "provider did not confirm interrupted status",
+                        }
+                        return
                     raise
 
                 with self._lock:
                     answered = self._answer_server_request_locked(message)
                 if answered:
+                    continue
+
+                # JSON-RPC response to our interrupt request — not completion yet.
+                if message.get("id") is not None and "result" in message and waiting_interrupt_ack:
+                    if message.get("error"):
+                        detail = message["error"]
+                        msg = detail.get("message") if isinstance(detail, dict) else str(detail)
+                        yield "err", {
+                            "code": "interrupt_rejected",
+                            "message": msg or "provider rejected turn/interrupt",
+                        }
+                        return
                     continue
 
                 method = message.get("method")
@@ -474,11 +626,13 @@ class CodexAppServer:
                 if params.get("turnId") not in (None, turn_id):
                     continue
                 if method == "item/agentMessage/delta":
+                    if waiting_interrupt_ack:
+                        continue
                     delta = str(params.get("delta") or "")
                     if delta:
                         saw_delta = True
                         yield "text", delta
-                elif method == "item/completed" and not saw_delta:
+                elif method == "item/completed" and not saw_delta and not waiting_interrupt_ack:
                     text = self._agent_text_from_item(params.get("item"))
                     if text:
                         saw_delta = True
@@ -486,6 +640,23 @@ class CodexAppServer:
                 elif method == "turn/completed":
                     turn = params.get("turn") or {}
                     status = turn.get("status")
+                    cancel_now = self._cancel_requested.is_set() or (
+                        cancel_event is not None and cancel_event.is_set()
+                    )
+                    if waiting_interrupt_ack or cancel_now:
+                        if status == "interrupted":
+                            yield "err", {
+                                "code": "interrupted",
+                                "message": "turn interrupted",
+                                "provider_status": status,
+                            }
+                            return
+                        yield "err", {
+                            "code": "interrupt_unconfirmed",
+                            "message": f"expected interrupted, got {status!r}",
+                            "provider_status": status,
+                        }
+                        return
                     if status != "completed":
                         error = turn.get("error") or {}
                         raise CodexAppServerError(
@@ -512,10 +683,11 @@ class CodexAppServer:
                 self._stop_locked()
             raise
         finally:
-            if turn_id is not None:
-                with self._lock:
-                    if self._active_turn_id == turn_id:
-                        self._active_turn_id = None
+            with self._lock:
+                if turn_id is not None and self._active_turn_id == turn_id:
+                    self._active_turn_id = None
+                if bound_id is not None and self._active_thread_id == bound_id:
+                    self._active_thread_id = None
 
     def stream_turn(
         self,

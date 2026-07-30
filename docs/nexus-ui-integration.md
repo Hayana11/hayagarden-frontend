@@ -202,7 +202,8 @@ UI：收到 423 时应禁用发送并提示“施工台忙碌”，可短退避�
 | instruction_max_chars | 8000 |
 | turns_history_limit | 50 |
 | agent_availability.claude.available | **false**（`ENVIRONMENT_BLOCKED`：无硬 workspace 隔离） |
-| agent_availability.codex.available | true（`workspace-write`） |
+| agent_availability.codex.available | **false**（`ENVIRONMENT_BLOCKED`：`workspace-write` ≠ 读取隔离） |
+| agent_availability.codex.sandbox_is_read_isolation | false |
 
 ### workspace 缺失时的 status
 
@@ -214,9 +215,11 @@ UI：收到 423 时应禁用发送并提示“施工台忙碌”，可短退避�
 - UI 应禁用发送并提示 workspace 未就绪
 - `POST /api/nexus/turn` → **503** fail-closed
 
-### Claude unavailable
+### Claude / Codex unavailable
 
-在 `agent_availability.claude.available === false` 时，UI 不得提供 Claude 发送入口；不得假定 cwd 即隔离。
+在 `agent_availability.*.available === false` 时，UI 不得提供对应 Agent 发送入口；不得假定 cwd / workspace-write 即硬隔离。
+Codex `POST` 失败码：`codex_unavailable`（503）。
+Claude `POST` 失败码：`claude_unavailable`（503）。
 
 ## Clear / Rewind
 

@@ -10,16 +10,22 @@ from nexus_paths import NexusPathError, assert_path_inside
 
 _GIT_TIMEOUT = 15
 
+# Untracked directories: we expand to concrete files via `git ls-files --others`.
+# Directory entries themselves are not counted as additions.
+UNTRACKED_DIR_POLICY = "expand_files"
 
-def _run_git(workspace: Path, args: list[str]) -> subprocess.CompletedProcess[str]:
+
+def _run_git(
+    workspace: Path, args: list[str], *, binary: bool = False
+) -> subprocess.CompletedProcess:
     assert_path_inside(workspace, workspace)
     try:
         return subprocess.run(
             ["git", *args],
             cwd=str(workspace),
             capture_output=True,
-            text=True,
-            errors="replace",
+            text=not binary,
+            errors="replace" if not binary else None,
             timeout=_GIT_TIMEOUT,
             check=False,
             env={
@@ -33,15 +39,20 @@ def _run_git(workspace: Path, args: list[str]) -> subprocess.CompletedProcess[st
         raise NexusPathError("git_unavailable", str(exc)) from exc
 
 
-def _stdout(proc: subprocess.CompletedProcess[str]) -> str:
-    return proc.stdout or ""
+def _stdout(proc: subprocess.CompletedProcess) -> str:
+    out = proc.stdout or ("" if not isinstance(proc.stdout, (bytes, bytearray)) else b"")
+    if isinstance(out, (bytes, bytearray)):
+        return out.decode("utf-8", errors="surrogateescape")
+    return out
 
 
 def _ensure_git_worktree(workspace: Path) -> None:
     proc = _run_git(workspace, ["rev-parse", "--is-inside-work-tree"])
     if proc.returncode != 0 or _stdout(proc).strip().lower() != "true":
-        detail = (_stdout(proc) or proc.stderr or "").strip()[:200]
-        raise NexusPathError("not_a_git_worktree", detail or "not a git worktree")
+        detail = (_stdout(proc) or (proc.stderr or b"" if isinstance(proc.stderr, bytes) else proc.stderr) or "")
+        if isinstance(detail, bytes):
+            detail = detail.decode("utf-8", errors="replace")
+        raise NexusPathError("not_a_git_worktree", str(detail).strip()[:200] or "not a git worktree")
 
 
 def _parse_numstat(text: str) -> tuple[int, int]:
@@ -61,12 +72,61 @@ def _parse_numstat(text: str) -> tuple[int, int]:
     return additions, deletions
 
 
+def _parse_z_paths(data: bytes) -> list[str]:
+    """Parse NUL-separated path lists from git -z outputs (no quoting/escaping)."""
+    if not data:
+        return []
+    parts = data.split(b"\0")
+    out: list[str] = []
+    for part in parts:
+        if not part:
+            continue
+        out.append(part.decode("utf-8", errors="surrogateescape"))
+    return out
+
+
+def _parse_porcelain_z(data: bytes) -> list[tuple[str, str]]:
+    """Parse `git status --porcelain -z` into (status, path) pairs.
+
+    Rename/copy entries are XY\\0old\\0new\\0 — we keep the final path.
+    Paths are returned without Git shell quoting.
+    """
+    if not data:
+        return []
+    entries: list[tuple[str, str]] = []
+    parts = data.split(b"\0")
+    i = 0
+    while i < len(parts):
+        chunk = parts[i]
+        if not chunk:
+            i += 1
+            continue
+        if len(chunk) < 3:
+            i += 1
+            continue
+        status = chunk[:2].decode("ascii", errors="replace")
+        # porcelain -z: first record is "XY path" (space after status)
+        name = chunk[3:] if chunk[2:3] == b" " else chunk[2:]
+        path = name.decode("utf-8", errors="surrogateescape")
+        # Rename/copy: next NUL field is the other path; use destination.
+        if status[0] in {"R", "C"} or status[1] in {"R", "C"}:
+            if i + 1 < len(parts) and parts[i + 1]:
+                path = parts[i + 1].decode("utf-8", errors="surrogateescape")
+                i += 2
+            else:
+                i += 1
+        else:
+            i += 1
+        if path:
+            entries.append((status, path))
+    return entries
+
+
 def _untracked_line_count(workspace: Path, rel: str) -> int:
     path = workspace / rel
     try:
         if not path.is_file():
             return 0
-        # Cap read to avoid huge files dominating the summary.
         data = path.read_bytes()[:512_000]
         if not data:
             return 0
@@ -78,52 +138,51 @@ def _untracked_line_count(workspace: Path, rel: str) -> int:
 def git_summary(workspace: Path) -> dict[str, Any]:
     """Return the frozen six-field git summary.
 
-    Covers staged + unstaged (via diff against HEAD) and untracked (via porcelain).
-    Raises NexusPathError when the workspace is not a git worktree — never reports
-    clean=true for a non-repo.
+    Covers staged + unstaged (via diff against HEAD) and untracked files
+    (expanded via ``git ls-files --others``; directories are not counted as
+    additions — see UNTRACKED_DIR_POLICY).
     """
     _ensure_git_worktree(workspace)
 
     branch_proc = _run_git(workspace, ["rev-parse", "--abbrev-ref", "HEAD"])
     branch = _stdout(branch_proc).strip() or "HEAD"
 
-    porcelain = _stdout(_run_git(workspace, ["status", "--porcelain"]))
-    # HEAD-relative covers both staged and unstaged tracked changes.
+    porcelain_proc = _run_git(workspace, ["status", "--porcelain", "-z"], binary=True)
+    porcelain_entries = _parse_porcelain_z(porcelain_proc.stdout or b"")
+
     diff_stat = _stdout(_run_git(workspace, ["diff", "HEAD", "--stat"])).rstrip()
     numstat = _stdout(_run_git(workspace, ["diff", "HEAD", "--numstat"]))
-    name_only = _stdout(_run_git(workspace, ["diff", "HEAD", "--name-only"]))
-
-    changed: list[str] = []
-    for line in name_only.splitlines():
-        name = line.strip()
-        if name and name not in changed:
-            changed.append(name)
+    name_only_proc = _run_git(workspace, ["diff", "HEAD", "-z", "--name-only"], binary=True)
+    changed = _parse_z_paths(name_only_proc.stdout or b"")
 
     additions, deletions = _parse_numstat(numstat)
 
-    untracked_additions = 0
-    for line in porcelain.splitlines():
-        if len(line) < 4:
-            continue
-        status = line[:2]
-        name = line[3:].strip()
-        if " -> " in name:
-            name = name.split(" -> ", 1)[-1].strip()
-        if not name:
-            continue
-        if name not in changed:
-            changed.append(name)
-        if status == "??":
-            untracked_additions += _untracked_line_count(workspace, name)
+    # Expand untracked to concrete files (never treat a directory as one "addition").
+    others_proc = _run_git(
+        workspace,
+        ["ls-files", "--others", "--exclude-standard", "-z"],
+        binary=True,
+    )
+    untracked_files = _parse_z_paths(others_proc.stdout or b"")
 
+    for status, path in porcelain_entries:
+        if path not in changed:
+            changed.append(path)
+
+    for path in untracked_files:
+        if path not in changed:
+            changed.append(path)
+
+    untracked_additions = 0
+    for path in untracked_files:
+        untracked_additions += _untracked_line_count(workspace, path)
     additions += untracked_additions
 
-    # Append a compact untracked note to diff_stat when needed (field name frozen).
-    if untracked_additions and "??" in porcelain:
-        note = f"\n untracked files | {untracked_additions} +\n"
+    if untracked_files:
+        note = f"\n untracked files | {len(untracked_files)} files, {untracked_additions} +\n"
         diff_stat = (diff_stat + note).strip() if diff_stat else note.strip()
 
-    clean = not porcelain.strip() and not changed
+    clean = not porcelain_entries and not changed and not untracked_files
     return {
         "branch": branch[:200],
         "changed_files": changed[:500],

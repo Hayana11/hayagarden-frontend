@@ -11,6 +11,8 @@ from typing import Any, Callable, Deque, Dict, Iterator, List, Optional
 
 from nexus_adapters import (
     CLAUDE_HARD_CONFINEMENT_AVAILABLE,
+    CODEX_BLOCKED_DETAIL,
+    CODEX_HARD_CONFINEMENT_AVAILABLE,
     BaseNexusAdapter,
     ClaudeNexusAdapter,
     CodexNexusAdapter,
@@ -125,7 +127,14 @@ class NexusRuntime:
             return bool(getattr(self._adapters["claude"], "hard_workspace_confinement", False))
         return bool(CLAUDE_HARD_CONFINEMENT_AVAILABLE)
 
-    def _capabilities(self, *, claude_available: bool) -> dict[str, Any]:
+    def _codex_available(self, adapter: BaseNexusAdapter | None = None) -> bool:
+        if adapter is not None:
+            return bool(getattr(adapter, "hard_workspace_confinement", False))
+        if self._adapters and "codex" in self._adapters:
+            return bool(getattr(self._adapters["codex"], "hard_workspace_confinement", False))
+        return bool(CODEX_HARD_CONFINEMENT_AVAILABLE)
+
+    def _capabilities(self, *, claude_available: bool, codex_available: bool) -> dict[str, Any]:
         return {
             "agents": ["claude", "codex"],
             "agent_availability": {
@@ -135,8 +144,11 @@ class NexusRuntime:
                     "detail": None if claude_available else CLAUDE_BLOCKED_DETAIL,
                 },
                 "codex": {
-                    "available": True,
+                    "available": bool(codex_available),
+                    "reason": None if codex_available else "ENVIRONMENT_BLOCKED",
+                    "detail": None if codex_available else CODEX_BLOCKED_DETAIL,
                     "sandbox": "workspace-write",
+                    "sandbox_is_read_isolation": False,
                 },
             },
             "interrupt": True,
@@ -180,6 +192,7 @@ class NexusRuntime:
             "codex": {"exists": False, "session_id": None},
         }
         claude_available = False
+        codex_available = False
         if workspace_ok:
             try:
                 with self._lock:
@@ -195,11 +208,14 @@ class NexusRuntime:
                         },
                     }
                     claude_available = self._claude_available(adapters["claude"])
+                    codex_available = self._codex_available(adapters["codex"])
             except Exception:
                 # Never let adapter construction break status JSON.
                 claude_available = False
+                codex_available = False
         else:
             claude_available = False
+            codex_available = False
 
         usage = None
         if self._context_usage_getter:
@@ -221,7 +237,10 @@ class NexusRuntime:
                 "git_error": git_error,
             },
             "git": git,
-            "capabilities": self._capabilities(claude_available=claude_available),
+            "capabilities": self._capabilities(
+                claude_available=claude_available,
+                codex_available=codex_available,
+            ),
         }
 
     def list_turns(self) -> list[dict[str, Any]]:
@@ -262,6 +281,12 @@ class NexusRuntime:
             adapter = self.get_adapter(agent)
             if agent == "claude" and not self._claude_available(adapter):
                 raise NexusTurnError("claude_unavailable", CLAUDE_BLOCKED_DETAIL, 503)
+            if agent == "codex" and not self._codex_available(adapter):
+                raise NexusTurnError("codex_unavailable", CODEX_BLOCKED_DETAIL, 503)
+
+            # Initialize cancel state at accept time (before worker / interrupt race).
+            if hasattr(adapter, "begin_turn"):
+                adapter.begin_turn()
 
             turn_id = uuid.uuid4().hex
             turn = TurnRecord(
@@ -408,7 +433,8 @@ class NexusRuntime:
             turn = self._turns.get(turn_id)
             if not turn:
                 raise NexusTurnError("turn_not_found", "turn not found", 404)
-            if self._active_turn_id != turn_id:
+            # Completed turns must never report interrupted=true.
+            if turn.terminal or self._active_turn_id != turn_id:
                 return {
                     "ok": True,
                     "turn_id": turn_id,

@@ -24,6 +24,7 @@ from nexus_git import git_summary  # noqa: E402
 from nexus_paths import NexusPathError, resolve_under_nexus  # noqa: E402
 from nexus_routes import create_nexus_blueprint  # noqa: E402
 from nexus_runtime import NexusBusyError, NexusRuntime  # noqa: E402
+import unittest.mock  # noqa: E402
 
 
 def _init_git_repo(path: Path) -> None:
@@ -669,7 +670,14 @@ class CodexLockShapeStubTests(unittest.TestCase):
             deadline = time.time() + float(timeout)
             while time.time() < deadline:
                 if server._cancel_requested.is_set():
-                    return {"method": "noop"}
+                    return {
+                        "method": "turn/completed",
+                        "params": {
+                            "threadId": "thread-1",
+                            "turnId": "turn-1",
+                            "turn": {"status": "interrupted"},
+                        },
+                    }
                 time.sleep(0.01)
             raise cas.CodexAppServerError("timeout")
 
@@ -678,8 +686,9 @@ class CodexLockShapeStubTests(unittest.TestCase):
         server._request_locked = fake_request  # type: ignore[method-assign]
         server._next_message = fake_next  # type: ignore[method-assign]
         server._stop_locked = lambda: None  # type: ignore[method-assign]
+        server._send_locked = lambda payload: None  # type: ignore[method-assign]
 
-        results = {"interrupt_elapsed": None, "events": []}
+        results = {"interrupt_elapsed": None, "events": [], "params": None}
 
         def run_stream():
             try:
@@ -690,13 +699,13 @@ class CodexLockShapeStubTests(unittest.TestCase):
 
         def run_interrupt():
             self.assertTrue(released_for_wait.wait(1))
-            # Prove lock is free: acquire it quickly while stream waits.
             acquired = server._lock.acquire(timeout=0.2)
             self.assertTrue(acquired, "stream held server lock across wait")
             server._lock.release()
             t0 = time.time()
-            server.interrupt_turn("turn-1")
+            server.interrupt_turn("turn-1", "thread-1")
             results["interrupt_elapsed"] = time.time() - t0
+            results["params"] = dict(server._last_interrupt_params or {})
             interrupt_done.set()
 
         th_s = threading.Thread(target=run_stream, daemon=True)
@@ -708,10 +717,263 @@ class CodexLockShapeStubTests(unittest.TestCase):
         self.assertTrue(interrupt_done.is_set())
         self.assertIsNotNone(results["interrupt_elapsed"])
         self.assertLess(results["interrupt_elapsed"], 0.5)
+        self.assertEqual(results["params"].get("turnId"), "turn-1")
+        self.assertEqual(results["params"].get("threadId"), "thread-1")
         kinds = [e[0] for e in results["events"]]
         self.assertIn("err", kinds)
         err = [e for e in results["events"] if e[0] == "err"][0]
         self.assertEqual(err[1].get("code"), "interrupted")
+
+
+class NexusR2CodexGateTests(unittest.TestCase):
+    """R2: Codex read-isolation gate, env allowlist, ephemeral, interrupt protocol, git -z."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        _init_git_repo(self.root)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_workspace_write_is_not_hard_confinement(self):
+        from nexus_adapters import (
+            CODEX_HARD_CONFINEMENT_AVAILABLE,
+            CodexNexusAdapter,
+        )
+
+        self.assertFalse(CODEX_HARD_CONFINEMENT_AVAILABLE)
+        adapter = CodexNexusAdapter(self.root)
+        self.assertFalse(adapter.hard_workspace_confinement)
+        # sandbox may still be workspace-write on the server factory path, but
+        # that must not flip hard confinement.
+        self.assertEqual(adapter.hard_workspace_confinement, False)
+
+    def test_blocked_codex_status_and_post_503(self):
+        from nexus_adapters import CodexNexusAdapter, FakeClaudeAdapter
+
+        runtime = NexusRuntime(
+            workspace=self.root,
+            adapters={
+                "claude": FakeClaudeAdapter(self.root),
+                "codex": CodexNexusAdapter(self.root),
+            },
+        )
+        status = runtime.status()
+        self.assertFalse(status["capabilities"]["agent_availability"]["codex"]["available"])
+        self.assertEqual(
+            status["capabilities"]["agent_availability"]["codex"]["reason"],
+            "ENVIRONMENT_BLOCKED",
+        )
+        self.assertFalse(
+            status["capabilities"]["agent_availability"]["codex"]["sandbox_is_read_isolation"]
+        )
+        app = Flask("nexus-r2")
+        app.register_blueprint(create_nexus_blueprint(runtime, owner_guard=lambda _req: None))
+        client = app.test_client()
+        resp = client.post("/api/nexus/turn", json={"agent": "codex", "instruction": "x"})
+        self.assertEqual(resp.status_code, 503)
+        self.assertEqual(resp.get_json()["code"], "codex_unavailable")
+
+    def test_nexus_env_allowlist_excludes_secrets(self):
+        import codex_app_server as cas
+
+        os.environ["APP_SECRET"] = "should-not-leak"
+        os.environ["BOARD_TOKEN"] = "board-secret"
+        os.environ["DATABASE_PASSWORD"] = "db-secret"
+        home = self.root / "nexus-codex-home"
+        home.mkdir()
+        server = cas.CodexAppServer(
+            cwd=str(self.root),
+            db_path=os.devnull,
+            sandbox="workspace-write",
+            env_mode="nexus_allowlist",
+            codex_home=str(home),
+            ephemeral_threads=True,
+        )
+        env = server._environment()
+        self.assertNotIn("APP_SECRET", env)
+        self.assertNotIn("BOARD_TOKEN", env)
+        self.assertNotIn("DATABASE_PASSWORD", env)
+        self.assertEqual(env.get("CODEX_HOME"), str(home))
+        self.assertNotEqual(env.get("CODEX_HOME"), "/root/.codex")
+        # inherit mode still carries secrets for non-Nexus callers
+        legacy = cas.CodexAppServer(cwd=str(self.root), db_path=os.devnull)
+        legacy_env = legacy._environment()
+        self.assertIn("APP_SECRET", legacy_env)
+
+    def test_ephemeral_thread_start_param(self):
+        import codex_app_server as cas
+
+        home = self.root / "nx-home"
+        home.mkdir()
+        server = cas.CodexAppServer(
+            cwd=str(self.root),
+            db_path=os.devnull,
+            env_mode="nexus_allowlist",
+            codex_home=str(home),
+            ephemeral_threads=True,
+            service_name="hayagarden_nexus",
+        )
+        captured = {}
+
+        def fake_request(method, params, **kwargs):
+            captured["method"] = method
+            captured["params"] = dict(params)
+            return {"thread": {"id": "thr-ephemeral", "path": None}}
+
+        with unittest.mock.patch.object(server, "_request_locked", side_effect=fake_request):
+            tid = server._ensure_bound_thread_locked(None, "dev")
+        self.assertEqual(tid, "thr-ephemeral")
+        self.assertEqual(captured["method"], "thread/start")
+        self.assertTrue(captured["params"].get("ephemeral") is True)
+        self.assertEqual(captured["params"].get("serviceName"), "hayagarden_nexus")
+
+    def test_runtime_memory_only_after_restart(self):
+        claude = FakeClaudeAdapter(self.root)
+        codex = FakeCodexAdapter(self.root)
+        runtime = NexusRuntime(
+            workspace=self.root,
+            adapters={"claude": claude, "codex": codex},
+        )
+        r = runtime.start_turn("claude", "one")
+        _drain_events(runtime, r["turn_id"])
+        self.assertTrue(runtime.list_turns())
+        # New runtime instance: no recoverable Nexus turn state.
+        runtime2 = NexusRuntime(
+            workspace=self.root,
+            adapters={"claude": FakeClaudeAdapter(self.root), "codex": FakeCodexAdapter(self.root)},
+        )
+        self.assertEqual(runtime2.list_turns(), [])
+        self.assertIsNone(runtime2.status()["active_turn_id"])
+
+    def test_interrupt_requires_provider_completed_interrupted(self):
+        import codex_app_server as cas
+
+        home = self.root / "nx-home2"
+        home.mkdir()
+        server = cas.CodexAppServer(
+            cwd=str(self.root),
+            db_path=os.devnull,
+            env_mode="nexus_allowlist",
+            codex_home=str(home),
+            ephemeral_threads=True,
+        )
+        server._start_locked = lambda: None  # type: ignore
+        server._ensure_bound_thread_locked = lambda *_a, **_k: "thread-9"  # type: ignore
+        server._request_locked = lambda *_a, **_k: {"turn": {"id": "turn-9"}}  # type: ignore
+        server._stop_locked = lambda: None  # type: ignore
+        server._process = unittest.mock.Mock()
+        server._process.poll.return_value = None
+        server._process.stdin = unittest.mock.Mock()
+        sent = []
+
+        def fake_send(payload):
+            sent.append(payload)
+
+        server._send_locked = fake_send  # type: ignore
+        msgs = [
+            {
+                "method": "turn/completed",
+                "params": {
+                    "threadId": "thread-9",
+                    "turnId": "turn-9",
+                    "turn": {"status": "interrupted"},
+                },
+            }
+        ]
+
+        def fake_next(_timeout):
+            if msgs:
+                return msgs.pop(0)
+            raise cas.CodexAppServerError("empty")
+
+        server._next_message = fake_next  # type: ignore
+        server._cancel_requested.set()
+        events = list(server.stream_bound_turn(None, "d", "p", timeout=2))
+        self.assertTrue(any(e[0] == "err" and e[1].get("code") == "interrupted" for e in events))
+        interrupt_rpc = [p for p in sent if p.get("method") == "turn/interrupt"]
+        self.assertTrue(interrupt_rpc)
+        params = interrupt_rpc[0]["params"]
+        self.assertEqual(params.get("threadId"), "thread-9")
+        self.assertEqual(params.get("turnId"), "turn-9")
+
+    def test_interrupt_rejected_does_not_pretend_success(self):
+        import codex_app_server as cas
+
+        home = self.root / "nx-home3"
+        home.mkdir()
+        server = cas.CodexAppServer(
+            cwd=str(self.root),
+            db_path=os.devnull,
+            env_mode="nexus_allowlist",
+            codex_home=str(home),
+            ephemeral_threads=True,
+        )
+        server._start_locked = lambda: None  # type: ignore
+        server._ensure_bound_thread_locked = lambda *_a, **_k: "thread-8"  # type: ignore
+        server._request_locked = lambda *_a, **_k: {"turn": {"id": "turn-8"}}  # type: ignore
+        server._stop_locked = lambda: None  # type: ignore
+        server._process = unittest.mock.Mock()
+        server._process.poll.return_value = None
+        server._process.stdin = unittest.mock.Mock()
+        server._send_locked = lambda payload: None  # type: ignore
+        server._cancel_requested.set()
+        # Provider completes as completed instead of interrupted.
+        server._next_message = lambda _t: {  # type: ignore
+            "method": "turn/completed",
+            "params": {
+                "threadId": "thread-8",
+                "turnId": "turn-8",
+                "turn": {"status": "completed"},
+            },
+        }
+        events = list(server.stream_bound_turn(None, "d", "p", timeout=2))
+        err = [e for e in events if e[0] == "err"][0]
+        self.assertEqual(err[1]["code"], "interrupt_unconfirmed")
+
+    def test_immediate_interrupt_preserves_cancel(self):
+        claude = FakeClaudeAdapter(self.root)
+        claude.hang = True
+        runtime = NexusRuntime(
+            workspace=self.root,
+            adapters={"claude": claude, "codex": FakeCodexAdapter(self.root)},
+        )
+        accepted = runtime.start_turn("claude", "hang")
+        # Interrupt immediately — must not be cleared by stream_turn start.
+        ir = runtime.interrupt(accepted["turn_id"])
+        self.assertTrue(ir["interrupted"])
+        events = _drain_events(runtime, accepted["turn_id"], timeout=3)
+        self.assertEqual(events[-1]["data"].get("code"), "interrupted")
+
+    def test_interrupt_after_done_is_not_active(self):
+        runtime = NexusRuntime(
+            workspace=self.root,
+            adapters={"claude": FakeClaudeAdapter(self.root), "codex": FakeCodexAdapter(self.root)},
+        )
+        r = runtime.start_turn("claude", "done")
+        events = _drain_events(runtime, r["turn_id"])
+        self.assertEqual(events[-1]["event"], "done")
+        ir = runtime.interrupt(r["turn_id"])
+        self.assertFalse(ir["interrupted"])
+        self.assertEqual(ir["detail"], "not_active")
+
+    def test_git_special_names_and_untracked_dir(self):
+        special = self.root / 'file with spaces "quotes".txt'
+        special.write_text("hello\n", encoding="utf-8")
+        uni = self.root / "文件-unicode.txt"
+        uni.write_text("你好\n", encoding="utf-8")
+        nested = self.root / "untracked_dir"
+        nested.mkdir()
+        (nested / "inner.txt").write_text("a\nb\n", encoding="utf-8")
+        summary = git_summary(self.root)
+        self.assertIn('file with spaces "quotes".txt', summary["changed_files"])
+        self.assertIn("文件-unicode.txt", summary["changed_files"])
+        self.assertIn("untracked_dir/inner.txt", summary["changed_files"])
+        # Directory itself is not a fake single-line addition entry.
+        self.assertNotIn("untracked_dir", summary["changed_files"])
+        self.assertFalse(summary["clean"])
+        self.assertGreaterEqual(summary["additions"], 1 + 1 + 2)
 
 
 if __name__ == "__main__":

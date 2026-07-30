@@ -28,6 +28,13 @@ EventTuple = tuple[str, dict[str, Any]]
 
 # Verified: no bubblewrap/landlock/Claude --sandbox reuse path for hard root confinement.
 CLAUDE_HARD_CONFINEMENT_AVAILABLE = False
+# workspace-write limits outbound writes only — it is NOT read isolation.
+CODEX_HARD_CONFINEMENT_AVAILABLE = False
+
+CODEX_BLOCKED_DETAIL = (
+    "ENVIRONMENT_BLOCKED: Codex workspace-write is not read isolation; "
+    "no reusable hard workspace confinement for Codex"
+)
 
 
 class AdapterError(RuntimeError):
@@ -55,6 +62,13 @@ class BaseNexusAdapter:
         self._cancel.set()
 
     def clear_interrupt(self) -> None:
+        self._cancel.clear()
+
+    def begin_turn(self) -> None:
+        """Reset cancel state when a turn is accepted — before the worker starts.
+
+        Must not be called from stream_turn() after an interrupt may already be pending.
+        """
         self._cancel.clear()
 
     def stream_turn(self, instruction: str) -> Iterator[EventTuple]:
@@ -222,7 +236,6 @@ class ClaudeNexusAdapter(BaseNexusAdapter):
             }
             return
 
-        self.clear_interrupt()
         args = [
             self._claude_bin,
             "-p",
@@ -316,16 +329,23 @@ class ClaudeNexusAdapter(BaseNexusAdapter):
 
 
 class CodexNexusAdapter(BaseNexusAdapter):
-    """Nexus-owned CodexAppServer instance (never the global singleton)."""
+    """Nexus-owned CodexAppServer instance (never the global singleton).
+
+    ``workspace-write`` is write confinement only. Without verifiable read
+    isolation, hard_workspace_confinement stays False and the runtime keeps
+    Codex unavailable (ENVIRONMENT_BLOCKED).
+    """
 
     agent = "codex"
-    hard_workspace_confinement = True  # Codex workspace-write sandbox is provider-native.
+    hard_workspace_confinement = CODEX_HARD_CONFINEMENT_AVAILABLE
 
     def __init__(self, workspace: Path, *, server_factory: Callable[..., Any] | None = None) -> None:
         super().__init__(workspace)
         self._server_factory = server_factory
         self._server = None
         self._active_codex_turn_id: Optional[str] = None
+        self._active_codex_thread_id: Optional[str] = None
+        self._codex_home = workspace / ".nexus-codex-home"
 
     def _get_server(self):
         if self._server is None:
@@ -334,10 +354,15 @@ class CodexNexusAdapter(BaseNexusAdapter):
             else:
                 from codex_app_server import CodexAppServer
 
+                self._codex_home.mkdir(parents=True, exist_ok=True)
                 self._server = CodexAppServer(
                     cwd=str(self.workspace),
                     db_path=os.devnull,
                     sandbox="workspace-write",
+                    env_mode="nexus_allowlist",
+                    codex_home=str(self._codex_home),
+                    ephemeral_threads=True,
+                    service_name="hayagarden_nexus",
                 )
         return self._server
 
@@ -345,27 +370,36 @@ class CodexNexusAdapter(BaseNexusAdapter):
         super().request_interrupt()
         server = self._server
         turn_id = self._active_codex_turn_id
+        thread_id = self._active_codex_thread_id
         if server is None:
             return
         try:
             if turn_id and hasattr(server, "interrupt_turn"):
-                server.interrupt_turn(turn_id)
+                server.interrupt_turn(turn_id, thread_id)
             elif hasattr(server, "interrupt_active_turn"):
                 server.interrupt_active_turn()
         except Exception:
             pass
 
     def stream_turn(self, instruction: str) -> Iterator[EventTuple]:
-        self.clear_interrupt()
+        # Do NOT clear cancel here — begin_turn() runs at accept time only.
+        if not self.hard_workspace_confinement:
+            yield "err", {
+                "code": "codex_unavailable",
+                "message": CODEX_BLOCKED_DETAIL,
+            }
+            return
+
         yield "meta", {"phase": "start", "agent": "codex"}
         server = self._get_server()
         developer = (
             "You are the Nexus construction agent. Stay inside the current workspace. "
             "Do not push, merge, deploy, or leave the workspace."
         )
+        # Ephemeral threads: do not resume a prior provider thread id.
         try:
             stream = server.stream_bound_turn(
-                self.session_id,
+                None,
                 developer,
                 instruction,
                 timeout=360,
@@ -373,7 +407,7 @@ class CodexNexusAdapter(BaseNexusAdapter):
             )
         except TypeError:
             stream = server.stream_bound_turn(
-                self.session_id,
+                None,
                 developer,
                 instruction,
                 timeout=360,
@@ -381,15 +415,16 @@ class CodexNexusAdapter(BaseNexusAdapter):
 
         try:
             for kind, payload in stream:
-                if self._cancel.is_set():
-                    yield "status", {"phase": "interrupted"}
-                    yield "err", {"code": "interrupted", "message": "turn interrupted"}
-                    return
                 if kind == "text":
+                    if self._cancel.is_set():
+                        continue
                     yield "text", {"text": str(payload)}
                 elif kind == "done":
                     meta = payload if isinstance(payload, dict) else {}
                     if meta.get("thread_id"):
+                        self._active_codex_thread_id = str(meta["thread_id"])
+                        # Keep a process-local session marker only; ephemeral means
+                        # we do not resume across process restarts.
                         self.session_id = str(meta["thread_id"])
                     if meta.get("turn_id"):
                         self._active_codex_turn_id = str(meta["turn_id"])
@@ -399,32 +434,31 @@ class CodexNexusAdapter(BaseNexusAdapter):
                     return
                 elif kind == "err":
                     data = payload if isinstance(payload, dict) else {"message": str(payload)[:500]}
-                    if data.get("code") == "interrupted":
-                        yield "err", {
-                            "code": "interrupted",
-                            "message": str(data.get("message") or "turn interrupted"),
-                        }
-                    else:
-                        yield "err", {
-                            "code": "codex_error",
-                            "message": str(data.get("message") or payload)[:500],
-                        }
+                    code = str(data.get("code") or "codex_error")
+                    yield "err", {
+                        "code": code,
+                        "message": str(data.get("message") or payload)[:500],
+                    }
                     return
                 else:
                     yield normalize_event_name(kind), redact_value(
                         payload if isinstance(payload, dict) else {"value": payload}
                     )
             if self._cancel.is_set():
-                yield "status", {"phase": "interrupted"}
-                yield "err", {"code": "interrupted", "message": "turn interrupted"}
+                yield "err", {
+                    "code": "interrupt_unconfirmed",
+                    "message": "cancel set but provider did not confirm interrupted",
+                }
                 return
             summary = git_summary(self.workspace)
             yield "git", summary
             yield "done", {"ok": True, "session_id": self.session_id}
         except Exception as exc:
             if self._cancel.is_set():
-                yield "status", {"phase": "interrupted"}
-                yield "err", {"code": "interrupted", "message": "turn interrupted"}
+                yield "err", {
+                    "code": "interrupt_unconfirmed",
+                    "message": str(exc)[:500],
+                }
                 return
             yield "err", {"code": "codex_error", "message": str(exc)[:500]}
 
@@ -453,7 +487,7 @@ class FakeClaudeAdapter(BaseNexusAdapter):
         self.emit_after_interrupt: list[EventTuple] = []
 
     def stream_turn(self, instruction: str) -> Iterator[EventTuple]:
-        self.clear_interrupt()
+        # Do NOT clear cancel here — begin_turn() runs at accept time.
         self.turns += 1
         if not self.session_id:
             self.session_id = f"fake-claude-session-{id(self)}"
@@ -511,7 +545,7 @@ class FakeCodexAdapter(BaseNexusAdapter):
         super().request_interrupt()
 
     def stream_turn(self, instruction: str) -> Iterator[EventTuple]:
-        self.clear_interrupt()
+        # Do NOT clear cancel here — begin_turn() runs at accept time.
         self.turns += 1
         if not self.session_id:
             self.session_id = f"fake-codex-session-{id(self)}"
