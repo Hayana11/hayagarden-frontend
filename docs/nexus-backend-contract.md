@@ -39,9 +39,10 @@ Nexus 是双 Agent 施工台后端：Claude Code 与 Codex 各有独立 session�
 - Codex 中断只取消当前 Nexus turn，不关闭全局 app-server
 - **Claude 硬隔离（R1）**：仓库无可复用的 Claude Code 硬 workspace confinement（cwd/prompt 不算）。因此生产 Claude capability 保持 `available=false` / `ENVIRONMENT_BLOCKED`；不得用 prompt 或 cwd 冒充隔离。
 - **Codex 硬隔离（R2）**：`workspace-write` 只限制写入，**不是**读取隔离。在无可验证读取隔离时，Codex 同样 `available=false` / `ENVIRONMENT_BLOCKED`；`POST` Codex turn → 503 `codex_unavailable`。不得用 sandbox/cwd/prompt 冒充硬隔离。
-- Nexus 专用 Codex 实例：`env_mode=nexus_allowlist`（不继承 BOARD_TOKEN/DB/API secrets）、独立 `CODEX_HOME`、`ephemeral: true` thread；`turn/interrupt` 必须带 `threadId`+`turnId`，并以 provider `turn/completed status=interrupted` 为唯一确认。
+- Nexus 专用 Codex 实例：`env_mode=nexus_allowlist`（不继承 BOARD_TOKEN/DB/API secrets）、独立 `CODEX_HOME`（与 login/auth probe 同源；不得用 `/root/.codex` 冒充 ready）、`ephemeral: true` thread（同进程可 resume，进程重启不恢复）、`turn/interrupt` 必须带 `threadId`+`turnId`，并以 provider `turn/completed status=interrupted` 为唯一确认。
+- **Interrupt 终态保真（R3）**：`interrupting` 时不得把任意 err 改写成 `interrupted`。仅 `code=interrupted`（provider 已确认）→ turn.state=`interrupted`；`interrupt_failed` / `interrupt_rejected` / `interrupt_unconfirmed` 原样进入唯一 `err` 终态且 `state=error`。未确认停止时关闭 Nexus 专用 app-server 后再释放串行门。
 - **status 降级（R1）**：workspace 缺失时 `GET /api/nexus/status` 仍返回可读 JSON（`workspace.ok=false` + capabilities）；`POST /api/nexus/turn` 继续 503 fail-closed。
-- **Git（R2）**：`status --porcelain -z` / `diff -z --name-only` 解析特殊文件名；未跟踪目录展开为文件（`UNTRACKED_DIR_POLICY=expand_files`），目录本身不计入 additions。
+- **Git（R2/R3）**：`status --porcelain -z` / `diff -z --name-only` 解析特殊文件名；rename/copy 只保留目标路径；未跟踪目录展开为文件（`UNTRACKED_DIR_POLICY=expand_files`）；`.nexus-codex-home` 不进入 git 摘要。
 ## 冻结 Endpoint
 
 | Method | Path |
@@ -101,7 +102,8 @@ busy 时使用仓库既有临时锁语义：**HTTP 423 Locked**，`code: nexus_b
 
 - `sequence` 单调递增
 - 每个 turn 只能产生一个终态事件：`done` 或 `err`
-- 中断过程用 `status`（如 `{"phase":"interrupted"}`）表达，并以单一 `err` 结束（`data.code = "interrupted"`）
+- 确认中断：可选 `status.phase=interrupted`，再以单一 `err` 结束（`data.code = "interrupted"`，turn.state=`interrupted`）
+- 中断失败终态（不得伪装成 interrupted）：`interrupt_failed` / `interrupt_rejected` / `interrupt_unconfirmed` → 单一 `err`，turn.state=`error`
 - 未知原始事件归一化为 `status`
 - 不得透传 token、密钥、完整环境变量与敏感绝对路径
 

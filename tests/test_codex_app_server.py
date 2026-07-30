@@ -130,8 +130,23 @@ class CodexAppServerTests(unittest.TestCase):
                 return {'thread': {'id': 't-ephem', 'path': None}}
 
             with mock.patch.object(nexus, '_request_locked', side_effect=request):
-                tid = nexus._ensure_bound_thread_locked('should-ignore', 'dev')
+                tid = nexus._ensure_bound_thread_locked(None, 'dev')
             self.assertEqual(tid, 't-ephem')
+            self.assertEqual(captured['method'], 'thread/start')
+            self.assertTrue(captured['params'].get('ephemeral') is True)
+
+            # Same process may resume an ephemeral thread id (in-process only).
+            captured.clear()
+
+            def resume_request(method, params, **kwargs):
+                captured['method'] = method
+                captured['params'] = dict(params)
+                return {}
+
+            with mock.patch.object(nexus, '_request_locked', side_effect=resume_request):
+                tid2 = nexus._ensure_bound_thread_locked('t-ephem', 'dev')
+            self.assertEqual(tid2, 't-ephem')
+            self.assertEqual(captured['method'], 'thread/resume')
             self.assertTrue(captured['params'].get('ephemeral') is True)
 
 

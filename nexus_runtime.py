@@ -26,6 +26,10 @@ EVENT_BUFFER_LIMIT = 500
 SUBSCRIBER_LIMIT = 16
 VALID_AGENTS = frozenset({"claude", "codex"})
 _DROP_ON_INTERRUPT = frozenset({"text", "think", "tool_use", "tool_result", "git"})
+_INTERRUPT_FAIL_CODES = frozenset(
+    {"interrupt_failed", "interrupt_rejected", "interrupt_unconfirmed"}
+)
+_CONFIRMED_INTERRUPT_CODE = "interrupted"
 
 STATE_IDLE = "idle"
 STATE_RUNNING = "running"
@@ -357,6 +361,7 @@ class NexusRuntime:
             adapter = self.get_adapter(turn.agent) if turn else None
         if not turn or not adapter:
             return
+        provider_stop_required = False
         try:
             self._emit(turn, "meta", {"phase": "accepted"})
             for event, data in adapter.stream_turn(turn.instruction):
@@ -372,19 +377,36 @@ class NexusRuntime:
                     if event in _DROP_ON_INTERRUPT:
                         continue
                     if event == "done":
-                        # Competitive provider completion cannot mark interrupted turn done.
-                        self._emit(turn, "status", {"phase": "interrupted"})
+                        # Competitive completion while interrupting is not a confirmed stop.
+                        provider_stop_required = True
                         self._emit(
                             turn,
                             "err",
-                            {"code": "interrupted", "message": "turn interrupted"},
+                            {
+                                "code": "interrupt_unconfirmed",
+                                "message": "provider completed without interrupted status",
+                            },
                         )
                         break
                     if event == "err":
                         payload = dict(data) if isinstance(data, dict) else {"value": data}
-                        payload["code"] = "interrupted"
-                        payload.setdefault("message", "turn interrupted")
-                        self._emit(turn, "err", payload)
+                        code = str(payload.get("code") or "error")
+                        # Preserve interrupt failure codes; only confirmed interrupted
+                        # becomes state=interrupted. Never rewrite failures to interrupted.
+                        if code == _CONFIRMED_INTERRUPT_CODE:
+                            self._emit(turn, "err", payload)
+                        elif code in _INTERRUPT_FAIL_CODES:
+                            provider_stop_required = True
+                            self._emit(turn, "err", payload)
+                        else:
+                            provider_stop_required = True
+                            payload = {
+                                **payload,
+                                "code": "interrupt_unconfirmed",
+                                "message": payload.get("message")
+                                or "interrupt ended without provider confirmation",
+                            }
+                            self._emit(turn, "err", payload)
                         break
                     if event == "status":
                         self._emit(turn, event, data)
@@ -395,11 +417,14 @@ class NexusRuntime:
                     break
             if not turn.terminal:
                 if turn.interrupt_requested or turn.state == STATE_INTERRUPTING:
-                    self._emit(turn, "status", {"phase": "interrupted"})
+                    provider_stop_required = True
                     self._emit(
                         turn,
                         "err",
-                        {"code": "interrupted", "message": "turn interrupted"},
+                        {
+                            "code": "interrupt_unconfirmed",
+                            "message": "adapter ended without interrupt confirmation",
+                        },
                     )
                 else:
                     self._emit(
@@ -413,15 +438,29 @@ class NexusRuntime:
         except Exception as exc:
             if not turn.terminal:
                 if turn.interrupt_requested or turn.state == STATE_INTERRUPTING:
-                    self._emit(turn, "status", {"phase": "interrupted"})
+                    provider_stop_required = True
                     self._emit(
                         turn,
                         "err",
-                        {"code": "interrupted", "message": "turn interrupted"},
+                        {
+                            "code": "interrupt_unconfirmed",
+                            "message": str(exc)[:500],
+                        },
                     )
                 else:
                     self._emit(turn, "err", {"code": "runtime_error", "message": str(exc)[:500]})
         finally:
+            # If interrupt was not provider-confirmed, force-stop Nexus provider
+            # before releasing the serial gate.
+            if provider_stop_required or (
+                turn.error_code in _INTERRUPT_FAIL_CODES if turn else False
+            ):
+                stopper = getattr(adapter, "ensure_provider_stopped", None)
+                if callable(stopper):
+                    try:
+                        stopper()
+                    except Exception:
+                        pass
             with self._lock:
                 if self._active_turn_id == turn_id:
                     self._active_turn_id = None

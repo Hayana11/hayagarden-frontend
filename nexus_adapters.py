@@ -334,6 +334,9 @@ class CodexNexusAdapter(BaseNexusAdapter):
     ``workspace-write`` is write confinement only. Without verifiable read
     isolation, hard_workspace_confinement stays False and the runtime keeps
     Codex unavailable (ENVIRONMENT_BLOCKED).
+
+    Ephemeral thread ids are process-local only: the same Nexus app-server
+    process may resume the prior id; a restart must not recover from disk.
     """
 
     agent = "codex"
@@ -346,6 +349,13 @@ class CodexNexusAdapter(BaseNexusAdapter):
         self._active_codex_turn_id: Optional[str] = None
         self._active_codex_thread_id: Optional[str] = None
         self._codex_home = workspace / ".nexus-codex-home"
+
+    def begin_turn(self) -> None:
+        # Clear previous turn ids at accept time; keep session_id for in-process
+        # ephemeral continuity until ensure_provider_stopped / process death.
+        super().begin_turn()
+        self._active_codex_turn_id = None
+        self._active_codex_thread_id = None
 
     def _get_server(self):
         if self._server is None:
@@ -369,15 +379,42 @@ class CodexNexusAdapter(BaseNexusAdapter):
     def request_interrupt(self) -> None:
         super().request_interrupt()
         server = self._server
-        turn_id = self._active_codex_turn_id
-        thread_id = self._active_codex_thread_id
         if server is None:
             return
         try:
-            if turn_id and hasattr(server, "interrupt_turn"):
-                server.interrupt_turn(turn_id, thread_id)
-            elif hasattr(server, "interrupt_active_turn"):
+            # Always interrupt the server's current active turn — never prefer
+            # a stale adapter-cached id from a previous turn.
+            if hasattr(server, "interrupt_active_turn"):
                 server.interrupt_active_turn()
+            elif hasattr(server, "interrupt_turn"):
+                turn_id = getattr(server, "_active_turn_id", None)
+                thread_id = getattr(server, "_active_thread_id", None)
+                if turn_id:
+                    server.interrupt_turn(turn_id, thread_id)
+        except Exception:
+            pass
+
+    def ensure_provider_stopped(self) -> None:
+        """Kill the Nexus-owned app-server when interrupt was not confirmed."""
+        server = self._server
+        self._server = None
+        self.session_id = None
+        self._active_codex_turn_id = None
+        self._active_codex_thread_id = None
+        if server is None:
+            return
+        try:
+            if hasattr(server, "stop"):
+                server.stop()
+            elif hasattr(server, "close"):
+                server.close()
+            elif hasattr(server, "_stop_locked"):
+                lock = getattr(server, "_lock", None)
+                if lock is not None:
+                    with lock:
+                        server._stop_locked()
+                else:
+                    server._stop_locked()
         except Exception:
             pass
 
@@ -396,10 +433,11 @@ class CodexNexusAdapter(BaseNexusAdapter):
             "You are the Nexus construction agent. Stay inside the current workspace. "
             "Do not push, merge, deploy, or leave the workspace."
         )
-        # Ephemeral threads: do not resume a prior provider thread id.
+        # Resume ephemeral thread id within the same app-server process only.
+        resume_thread_id = self.session_id
         try:
             stream = server.stream_bound_turn(
-                None,
+                resume_thread_id,
                 developer,
                 instruction,
                 timeout=360,
@@ -407,7 +445,7 @@ class CodexNexusAdapter(BaseNexusAdapter):
             )
         except TypeError:
             stream = server.stream_bound_turn(
-                None,
+                resume_thread_id,
                 developer,
                 instruction,
                 timeout=360,
@@ -415,6 +453,19 @@ class CodexNexusAdapter(BaseNexusAdapter):
 
         try:
             for kind, payload in stream:
+                if (
+                    kind == "meta"
+                    and isinstance(payload, dict)
+                    and payload.get("phase") == "turn_started"
+                ):
+                    # Sync active ids immediately after provider turn/start.
+                    if payload.get("thread_id"):
+                        self._active_codex_thread_id = str(payload["thread_id"])
+                        self.session_id = str(payload["thread_id"])
+                    if payload.get("turn_id"):
+                        self._active_codex_turn_id = str(payload["turn_id"])
+                    yield "meta", payload
+                    continue
                 if kind == "text":
                     if self._cancel.is_set():
                         continue
@@ -423,8 +474,6 @@ class CodexNexusAdapter(BaseNexusAdapter):
                     meta = payload if isinstance(payload, dict) else {}
                     if meta.get("thread_id"):
                         self._active_codex_thread_id = str(meta["thread_id"])
-                        # Keep a process-local session marker only; ephemeral means
-                        # we do not resume across process restarts.
                         self.session_id = str(meta["thread_id"])
                     if meta.get("turn_id"):
                         self._active_codex_turn_id = str(meta["turn_id"])
@@ -485,6 +534,11 @@ class FakeClaudeAdapter(BaseNexusAdapter):
         self.hang = hang
         self.turns = 0
         self.emit_after_interrupt: list[EventTuple] = []
+        self.interrupt_err_code: Optional[str] = None
+        self.ensure_stopped_calls = 0
+
+    def ensure_provider_stopped(self) -> None:
+        self.ensure_stopped_calls += 1
 
     def stream_turn(self, instruction: str) -> Iterator[EventTuple]:
         # Do NOT clear cancel here — begin_turn() runs at accept time.
@@ -500,8 +554,9 @@ class FakeClaudeAdapter(BaseNexusAdapter):
                     # Optionally emit competitive content then done — runtime must drop/convert.
                     for item in self.emit_after_interrupt:
                         yield item
+                    code = self.interrupt_err_code or "interrupted"
                     yield "status", {"phase": "interrupted"}
-                    yield "err", {"code": "interrupted", "message": "turn interrupted"}
+                    yield "err", {"code": code, "message": f"turn {code}"}
                     return
                 time.sleep(0.02)
         if self.fail:
@@ -510,8 +565,9 @@ class FakeClaudeAdapter(BaseNexusAdapter):
         if self._cancel.is_set():
             for item in self.emit_after_interrupt:
                 yield item
+            code = self.interrupt_err_code or "interrupted"
             yield "status", {"phase": "interrupted"}
-            yield "err", {"code": "interrupted", "message": "turn interrupted"}
+            yield "err", {"code": code, "message": f"turn {code}"}
             return
         target.write_text(f"claude:{instruction[:200]}\n", encoding="utf-8")
         yield "tool_use", {"name": "write", "path": "nexus_fixture.txt"}
@@ -533,6 +589,8 @@ class FakeCodexAdapter(BaseNexusAdapter):
         self.block_interrupt = threading.Event()
         self.interrupt_entered = threading.Event()
         self._interrupt_delay = 0.0
+        self.interrupt_err_code: Optional[str] = None
+        self.ensure_stopped_calls = 0
 
     def request_interrupt(self) -> None:
         self.interrupt_entered.set()
@@ -543,6 +601,9 @@ class FakeCodexAdapter(BaseNexusAdapter):
             while self.block_interrupt.is_set():
                 time.sleep(0.01)
         super().request_interrupt()
+
+    def ensure_provider_stopped(self) -> None:
+        self.ensure_stopped_calls += 1
 
     def stream_turn(self, instruction: str) -> Iterator[EventTuple]:
         # Do NOT clear cancel here — begin_turn() runs at accept time.
@@ -555,16 +616,18 @@ class FakeCodexAdapter(BaseNexusAdapter):
         if self.hang:
             for _ in range(40):
                 if self._cancel.is_set():
+                    code = self.interrupt_err_code or "interrupted"
                     yield "status", {"phase": "interrupted"}
-                    yield "err", {"code": "interrupted", "message": "turn interrupted"}
+                    yield "err", {"code": code, "message": f"turn {code}"}
                     return
                 time.sleep(0.02)
         if self.fail:
             yield "err", {"code": "fake_failure", "message": "injected failure"}
             return
         if self._cancel.is_set():
+            code = self.interrupt_err_code or "interrupted"
             yield "status", {"phase": "interrupted"}
-            yield "err", {"code": "interrupted", "message": "turn interrupted"}
+            yield "err", {"code": code, "message": f"turn {code}"}
             return
         target.write_text(f"codex:{instruction[:200]}\n", encoding="utf-8")
         yield "tool_use", {"name": "write", "path": "nexus_fixture_codex.txt"}

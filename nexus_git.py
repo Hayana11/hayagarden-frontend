@@ -85,10 +85,17 @@ def _parse_z_paths(data: bytes) -> list[str]:
     return out
 
 
+def _is_nexus_codex_home_path(path: str) -> bool:
+    """Exclude Nexus-owned CODEX_HOME from git summaries."""
+    parts = Path(path).parts
+    return any(part == ".nexus-codex-home" for part in parts)
+
+
 def _parse_porcelain_z(data: bytes) -> list[tuple[str, str]]:
     """Parse `git status --porcelain -z` into (status, path) pairs.
 
-    Rename/copy entries are XY\\0old\\0new\\0 — we keep the final path.
+    For rename/copy, porcelain ``-z`` emits destination first, then source.
+    ``changed_files`` keeps only the destination (target) path and skips source.
     Paths are returned without Git shell quoting.
     """
     if not data:
@@ -107,17 +114,17 @@ def _parse_porcelain_z(data: bytes) -> list[tuple[str, str]]:
         status = chunk[:2].decode("ascii", errors="replace")
         # porcelain -z: first record is "XY path" (space after status)
         name = chunk[3:] if chunk[2:3] == b" " else chunk[2:]
+        # First path is the destination/target for rename/copy.
         path = name.decode("utf-8", errors="surrogateescape")
-        # Rename/copy: next NUL field is the other path; use destination.
         if status[0] in {"R", "C"} or status[1] in {"R", "C"}:
+            # Skip the second NUL field (original/source path).
             if i + 1 < len(parts) and parts[i + 1]:
-                path = parts[i + 1].decode("utf-8", errors="surrogateescape")
                 i += 2
             else:
                 i += 1
         else:
             i += 1
-        if path:
+        if path and not _is_nexus_codex_home_path(path):
             entries.append((status, path))
     return entries
 
@@ -153,7 +160,9 @@ def git_summary(workspace: Path) -> dict[str, Any]:
     diff_stat = _stdout(_run_git(workspace, ["diff", "HEAD", "--stat"])).rstrip()
     numstat = _stdout(_run_git(workspace, ["diff", "HEAD", "--numstat"]))
     name_only_proc = _run_git(workspace, ["diff", "HEAD", "-z", "--name-only"], binary=True)
-    changed = _parse_z_paths(name_only_proc.stdout or b"")
+    changed = [
+        p for p in _parse_z_paths(name_only_proc.stdout or b"") if not _is_nexus_codex_home_path(p)
+    ]
 
     additions, deletions = _parse_numstat(numstat)
 
@@ -163,10 +172,12 @@ def git_summary(workspace: Path) -> dict[str, Any]:
         ["ls-files", "--others", "--exclude-standard", "-z"],
         binary=True,
     )
-    untracked_files = _parse_z_paths(others_proc.stdout or b"")
+    untracked_files = [
+        p for p in _parse_z_paths(others_proc.stdout or b"") if not _is_nexus_codex_home_path(p)
+    ]
 
     for status, path in porcelain_entries:
-        if path not in changed:
+        if path not in changed and not _is_nexus_codex_home_path(path):
             changed.append(path)
 
     for path in untracked_files:

@@ -136,7 +136,8 @@ UI：收到 423 时应禁用发送并提示“施工台忙碌”，可短退避�
 
 - `sequence` 从 1 单调递增
 - 每个 turn **恰好一个**终态：`done` 或 `err`
-- 中断：先可选 `status.phase=interrupted`，再以 `err.code=interrupted` 结束
+- 确认中断：先可选 `status.phase=interrupted`，再以 `err.code=interrupted` 结束（turn.state=`interrupted`）
+- 中断失败：`err.code` 为 `interrupt_failed` / `interrupt_rejected` / `interrupt_unconfirmed`（turn.state=`error`）；UI 不得显示为“已停止成功”
 - 未知原始事件归一为 `status`
 
 ## Interrupt
@@ -228,10 +229,10 @@ Claude `POST` 失败码：`claude_unavailable`（503）。
 
 ## 明日接线第一步
 
-1. 调 `GET /api/nexus/status` 确认 `capabilities`
-2. 用下方 fixture 的 `POST /api/nexus/turn` → 订阅 `events_url`
-3. 渲染九类事件；在 `done`/`err` 结束
-4. 接线 `interrupt` 与 `GET /api/nexus/git`
+1. 调 `GET /api/nexus/status` 确认 `capabilities` 与 `agent_availability`
+2. **真实 Agent turn：当前不允许**——Claude/Codex 均为 `ENVIRONMENT_BLOCKED`；仅可先读 status / 用 Fake fixture 验证 SSE
+3. 渲染九类事件；在 `done`/`err` 结束；`interrupt_*` 失败码不得显示为已停止
+4. 接线 `interrupt` 与 `GET /api/nexus/git`（rename 只显示目标路径）
 
 ## 不依赖真实 Agent 的接线 Fixture
 

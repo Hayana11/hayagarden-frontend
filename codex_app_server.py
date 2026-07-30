@@ -125,6 +125,7 @@ class CodexAppServer:
         self._active_thread_id: str | None = None
         self._cancel_requested = threading.Event()
         self._interrupt_rpc_sent = threading.Event()
+        self._interrupt_request_id: int | None = None
         self._last_interrupt_params: dict | None = None
         self._last_environment: dict | None = None
 
@@ -206,16 +207,51 @@ class CodexAppServer:
         except Exception:
             pass
 
+    def _nexus_auth_status(self) -> dict:
+        """Probe login using the same allowlist env + CODEX_HOME as the Nexus server."""
+        binary = find_codex()
+        result = {
+            "installed": bool(binary),
+            "authenticated": False,
+            "ready": False,
+            "detail": "蓝色线路尚未安装",
+        }
+        if not binary:
+            return result
+        env = self._nexus_allowlist_environment()
+        try:
+            probe = subprocess.run(
+                [binary, "login", "status"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                timeout=6,
+                env=env,
+            )
+            result["authenticated"] = probe.returncode == 0
+            result["ready"] = probe.returncode == 0
+            result["detail"] = (
+                "可以回复" if probe.returncode == 0 else "Nexus CODEX_HOME 等待登录"
+            )
+        except (OSError, subprocess.SubprocessError):
+            result["detail"] = "Nexus CODEX_HOME 状态检查失败"
+        return result
+
     def _start_locked(self) -> None:
         if self._process is not None and self._process.poll() is None:
             return
         binary = find_codex()
         if not binary:
             raise CodexAppServerError("蓝色线路尚未安装")
-        status = runtime_status(force=True)
+        if self.env_mode == "nexus_allowlist":
+            status = self._nexus_auth_status()
+        else:
+            status = runtime_status(force=True)
         if not status["authenticated"]:
-            raise CodexAppServerError("蓝色线路等待登录")
+            raise CodexAppServerError(status.get("detail") or "蓝色线路等待登录")
         os.makedirs(self.cwd, exist_ok=True)
+        if self.codex_home:
+            os.makedirs(self.codex_home, exist_ok=True)
         self._messages = queue.Queue()
         self._stderr_tail.clear()
         try:
@@ -236,12 +272,13 @@ class CodexAppServer:
             target=self._reader, args=(process, self._messages), daemon=True
         ).start()
         threading.Thread(target=self._stderr_reader, args=(process,), daemon=True).start()
+        client_name = "hayagarden-nexus" if self.env_mode == "nexus_allowlist" else "hayagarden-group-chat"
         self._request_locked(
             "initialize",
             {
                 "clientInfo": {
-                    "name": "hayagarden-group-chat",
-                    "title": "HayaGarden Group Chat",
+                    "name": client_name,
+                    "title": "HayaGarden Nexus" if self.env_mode == "nexus_allowlist" else "HayaGarden Group Chat",
                     "version": "1.0.0",
                 },
                 "capabilities": {"experimentalApi": False},
@@ -268,6 +305,10 @@ class CodexAppServer:
     def close(self) -> None:
         with self._lock:
             self._stop_locked()
+
+    def stop(self) -> None:
+        """Public alias used by Nexus when interrupt is not provider-confirmed."""
+        self.close()
 
     def _send_locked(self, payload: dict) -> None:
         process = self._process
@@ -391,8 +432,9 @@ class CodexAppServer:
 
         Monopoly keeps its binding in its own room record, so game history and
         the existing group-chat store remain strictly separate.
-        Nexus uses ephemeral_threads=True so thread.path stays null / not persisted
-        into the formal CODEX_HOME rollout store.
+
+        Nexus ephemeral threads are in-process only (path must stay null) but the
+        same app-server process may resume the prior ephemeral thread id.
         """
         common = {
             "cwd": self.cwd,
@@ -404,8 +446,7 @@ class CodexAppServer:
         }
         if self.ephemeral_threads:
             common["ephemeral"] = True
-        # Ephemeral Nexus threads are never resumed from a prior id.
-        if thread_id and not self.ephemeral_threads:
+        if thread_id:
             try:
                 self._request_locked(
                     "thread/resume", {"threadId": thread_id, **common}, timeout=30,
@@ -425,7 +466,6 @@ class CodexAppServer:
         new_id = str((result.get("thread") or {}).get("id") or "")
         if not new_id:
             raise CodexAppServerError("Codex game thread did not return an id")
-        # Defense: ephemeral threads must not report a durable path into formal home.
         thread = result.get("thread") or {}
         if self.ephemeral_threads and thread.get("path"):
             raise CodexAppServerError("ephemeral Codex thread unexpectedly returned a path")
@@ -435,8 +475,7 @@ class CodexAppServer:
         """Request turn/interrupt with both threadId and turnId.
 
         Sets the cancel flag immediately and never blocks waiting for the stream
-        lock. Does NOT claim the turn is finished — the stream loop must observe
-        turn/completed status=interrupted.
+        lock. Sends at most one interrupt RPC per turn (shared with the stream loop).
         """
         self._cancel_requested.set()
         tid = thread_id or self._active_thread_id
@@ -444,10 +483,14 @@ class CodexAppServer:
         if tid:
             params["threadId"] = tid
         self._last_interrupt_params = dict(params)
+        if self._interrupt_rpc_sent.is_set():
+            return
         acquired = self._lock.acquire(blocking=False)
         if not acquired:
             return
         try:
+            if self._interrupt_rpc_sent.is_set():
+                return
             if not self._process or self._process.poll() is not None:
                 return
             if not turn_id:
@@ -455,6 +498,7 @@ class CodexAppServer:
             try:
                 self._request_id += 1
                 request_id = self._request_id
+                self._interrupt_request_id = request_id
                 self._send_locked(
                     {
                         "id": request_id,
@@ -475,12 +519,35 @@ class CodexAppServer:
         if turn_id:
             self.interrupt_turn(turn_id, thread_id)
 
-    def _next_message(self, timeout: float) -> dict:
-        """Read the next transport message without requiring the server lock.
+    def _send_interrupt_rpc(self, thread_id: str, turn_id: str) -> bool:
+        """Send turn/interrupt under a short lock. Returns True if sent or already sent."""
+        params = {"threadId": thread_id, "turnId": turn_id}
+        self._last_interrupt_params = dict(params)
+        if self._interrupt_rpc_sent.is_set():
+            return True
+        with self._lock:
+            if self._interrupt_rpc_sent.is_set():
+                return True
+            if not self._process or self._process.poll() is not None:
+                return False
+            try:
+                self._request_id += 1
+                request_id = self._request_id
+                self._interrupt_request_id = request_id
+                self._send_locked(
+                    {
+                        "id": request_id,
+                        "method": "turn/interrupt",
+                        "params": params,
+                    }
+                )
+                self._interrupt_rpc_sent.set()
+                return True
+            except Exception:
+                return False
 
-        The message queue is thread-safe; holding ``_lock`` across a blocking
-        wait would deadlock interrupt_turn / other callers.
-        """
+    def _next_message(self, timeout: float) -> dict:
+        """Read the next transport message without requiring the server lock."""
         if timeout <= 0:
             raise CodexAppServerError("蓝色线路响应超时")
         try:
@@ -491,27 +558,6 @@ class CodexAppServer:
             detail = self._stderr_tail[-1] if self._stderr_tail else "进程已退出"
             raise CodexAppServerError("蓝色线路连接关闭：" + detail)
         return message
-
-    def _send_interrupt_rpc(self, thread_id: str, turn_id: str) -> bool:
-        """Send turn/interrupt under a short lock. Returns True if sent."""
-        params = {"threadId": thread_id, "turnId": turn_id}
-        self._last_interrupt_params = dict(params)
-        with self._lock:
-            if not self._process or self._process.poll() is not None:
-                return False
-            try:
-                self._request_id += 1
-                self._send_locked(
-                    {
-                        "id": self._request_id,
-                        "method": "turn/interrupt",
-                        "params": params,
-                    }
-                )
-                self._interrupt_rpc_sent.set()
-                return True
-            except Exception:
-                return False
 
     def stream_bound_turn(
         self,
@@ -538,14 +584,13 @@ class CodexAppServer:
         if not pending_cancel:
             self._cancel_requested.clear()
             self._interrupt_rpc_sent.clear()
+            self._interrupt_request_id = None
             self._last_interrupt_params = None
 
         turn_id: str | None = None
         bound_id: str | None = None
         with self._lock:
             self._start_locked()
-            # If cancel already requested before server create / turn start, still
-            # create the turn so we can send a precise interrupt, then wait.
             bound_id = self._ensure_bound_thread_locked(thread_id, instructions)
             self._active_thread_id = bound_id
             early: list[dict] = []
@@ -565,26 +610,32 @@ class CodexAppServer:
             self._active_turn_id = turn_id
             buffered = deque(early)
 
+        # Publish IDs immediately after turn/start so adapters can sync before done.
+        yield "meta", {
+            "phase": "turn_started",
+            "thread_id": bound_id,
+            "turn_id": turn_id,
+        }
+
         deadline = time.monotonic() + timeout
         saw_delta = False
-        interrupt_sent = False
         waiting_interrupt_ack = False
         try:
             while True:
                 cancel_now = self._cancel_requested.is_set() or (
                     cancel_event is not None and cancel_event.is_set()
                 )
-                if cancel_now and not interrupt_sent and turn_id and bound_id:
+                if cancel_now and turn_id and bound_id:
                     self._cancel_requested.set()
-                    sent = self._send_interrupt_rpc(bound_id, turn_id)
-                    interrupt_sent = True
+                    if not self._interrupt_rpc_sent.is_set():
+                        sent = self._send_interrupt_rpc(bound_id, turn_id)
+                        if not sent:
+                            yield "err", {
+                                "code": "interrupt_failed",
+                                "message": "failed to send turn/interrupt",
+                            }
+                            return
                     waiting_interrupt_ack = True
-                    if not sent:
-                        yield "err", {
-                            "code": "interrupt_failed",
-                            "message": "failed to send turn/interrupt",
-                        }
-                        return
 
                 try:
                     if buffered:
@@ -607,9 +658,15 @@ class CodexAppServer:
                 if answered:
                     continue
 
-                # JSON-RPC response to our interrupt request — not completion yet.
-                if message.get("id") is not None and "result" in message and waiting_interrupt_ack:
-                    if message.get("error"):
+                # Match interrupt JSON-RPC response by request id only.
+                msg_id = message.get("id")
+                if (
+                    waiting_interrupt_ack
+                    and msg_id is not None
+                    and self._interrupt_request_id is not None
+                    and msg_id == self._interrupt_request_id
+                ):
+                    if message.get("error") is not None:
                         detail = message["error"]
                         msg = detail.get("message") if isinstance(detail, dict) else str(detail)
                         yield "err", {
@@ -617,6 +674,7 @@ class CodexAppServer:
                             "message": msg or "provider rejected turn/interrupt",
                         }
                         return
+                    # Successful interrupt RPC ack — still wait for turn/completed.
                     continue
 
                 method = message.get("method")
@@ -686,8 +744,8 @@ class CodexAppServer:
             with self._lock:
                 if turn_id is not None and self._active_turn_id == turn_id:
                     self._active_turn_id = None
-                if bound_id is not None and self._active_thread_id == bound_id:
-                    self._active_thread_id = None
+                # Keep _active_thread_id for in-process ephemeral continuity until
+                # a new turn binds a different id; clear only the finished turn.
 
     def stream_turn(
         self,

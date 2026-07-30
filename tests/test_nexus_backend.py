@@ -425,15 +425,25 @@ class NexusR1RepairTests(unittest.TestCase):
         terminals = [e for e in events if e["event"] in {"done", "err"}]
         self.assertEqual(len(terminals), 1)
         self.assertEqual(terminals[0]["event"], "err")
-        self.assertEqual(terminals[0]["data"]["code"], "interrupted")
+        # Competitive done while interrupting is not a confirmed provider stop.
+        self.assertEqual(terminals[0]["data"]["code"], "interrupt_unconfirmed")
+        turn = self.runtime._turns[r["turn_id"]]
+        self.assertEqual(turn.state, "error")
+        self.assertEqual(turn.error_code, "interrupt_unconfirmed")
         # No post-interrupt content events.
-        after_status = False
         for e in events:
-            if e["event"] == "status" and e["data"].get("phase") == "interrupted":
-                after_status = True
-                continue
-            if after_status and e["event"] in {"text", "think", "tool_use", "tool_result", "git", "done"}:
-                self.fail(f"content/done leaked after interrupt: {e}")
+            if e["event"] in {"text", "think", "tool_use", "tool_result", "git", "done"}:
+                # meta/accepted and pre-interrupt think may exist; only fail if
+                # payload matches the injected competitive content.
+                if e["event"] == "think" and e["data"].get("text") == "planning edit":
+                    continue
+                if e["event"] in {"text", "think", "tool_use"} and (
+                    e["data"].get("text") == "should-drop" or e["data"].get("name") == "x"
+                ):
+                    self.fail(f"content/done leaked after interrupt: {e}")
+                if e["event"] in {"git", "done"}:
+                    self.fail(f"content/done leaked after interrupt: {e}")
+        self.assertGreaterEqual(self.claude.ensure_stopped_calls, 1)
 
     def test_runtime_interrupt_not_blocked_by_adapter(self):
         self.codex.hang = True
@@ -974,6 +984,422 @@ class NexusR2CodexGateTests(unittest.TestCase):
         self.assertNotIn("untracked_dir", summary["changed_files"])
         self.assertFalse(summary["clean"])
         self.assertGreaterEqual(summary["additions"], 1 + 1 + 2)
+
+
+class NexusR3InterruptFidelityTests(unittest.TestCase):
+    """R3: runtime e2e interrupt terminal fidelity (not CodexAppServer-only)."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        _init_git_repo(self.root)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _runtime(self, claude: FakeClaudeAdapter) -> NexusRuntime:
+        return NexusRuntime(
+            workspace=self.root,
+            adapters={"claude": claude, "codex": FakeCodexAdapter(self.root)},
+        )
+
+    def _assert_terminal_code(self, runtime, turn_id, code, *, state):
+        events = _drain_events(runtime, turn_id, timeout=3)
+        terminals = [e for e in events if e["event"] in {"done", "err"}]
+        self.assertEqual(len(terminals), 1)
+        self.assertEqual(terminals[0]["event"], "err")
+        self.assertEqual(terminals[0]["data"]["code"], code)
+        turn = runtime._turns[turn_id]
+        self.assertEqual(turn.state, state)
+        self.assertEqual(turn.error_code, code)
+        return events
+
+    def test_runtime_preserves_interrupt_failed(self):
+        claude = FakeClaudeAdapter(self.root, hang=True)
+        claude.interrupt_err_code = "interrupt_failed"
+        runtime = self._runtime(claude)
+        r = runtime.start_turn("claude", "fail")
+        time.sleep(0.05)
+        runtime.interrupt(r["turn_id"])
+        self._assert_terminal_code(runtime, r["turn_id"], "interrupt_failed", state="error")
+        self.assertGreaterEqual(claude.ensure_stopped_calls, 1)
+
+    def test_runtime_preserves_interrupt_rejected(self):
+        claude = FakeClaudeAdapter(self.root, hang=True)
+        claude.interrupt_err_code = "interrupt_rejected"
+        runtime = self._runtime(claude)
+        r = runtime.start_turn("claude", "reject")
+        time.sleep(0.05)
+        runtime.interrupt(r["turn_id"])
+        self._assert_terminal_code(runtime, r["turn_id"], "interrupt_rejected", state="error")
+        self.assertGreaterEqual(claude.ensure_stopped_calls, 1)
+
+    def test_runtime_preserves_interrupt_unconfirmed(self):
+        claude = FakeClaudeAdapter(self.root, hang=True)
+        claude.interrupt_err_code = "interrupt_unconfirmed"
+        runtime = self._runtime(claude)
+        r = runtime.start_turn("claude", "unconfirmed")
+        time.sleep(0.05)
+        runtime.interrupt(r["turn_id"])
+        self._assert_terminal_code(runtime, r["turn_id"], "interrupt_unconfirmed", state="error")
+        self.assertGreaterEqual(claude.ensure_stopped_calls, 1)
+
+    def test_runtime_confirmed_interrupted_only(self):
+        claude = FakeClaudeAdapter(self.root, hang=True)
+        claude.interrupt_err_code = "interrupted"
+        runtime = self._runtime(claude)
+        r = runtime.start_turn("claude", "ok-interrupt")
+        time.sleep(0.05)
+        runtime.interrupt(r["turn_id"])
+        self._assert_terminal_code(runtime, r["turn_id"], "interrupted", state="interrupted")
+        # Confirmed interrupt does not require force-stop before releasing the gate.
+        self.assertEqual(claude.ensure_stopped_calls, 0)
+
+    def test_serial_gate_released_after_failed_interrupt_stop(self):
+        claude = FakeClaudeAdapter(self.root, hang=True)
+        claude.interrupt_err_code = "interrupt_failed"
+        runtime = self._runtime(claude)
+        r = runtime.start_turn("claude", "gate")
+        time.sleep(0.05)
+        runtime.interrupt(r["turn_id"])
+        _drain_events(runtime, r["turn_id"], timeout=3)
+        nxt = runtime.start_turn("claude", "after-failed-interrupt")
+        ev = _drain_events(runtime, nxt["turn_id"])
+        self.assertEqual(ev[-1]["event"], "done")
+
+
+class NexusR3CodexSessionTests(unittest.TestCase):
+    """R3: ephemeral session continuity, interrupt id lifecycle, auth/home, rename."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        _init_git_repo(self.root)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_ephemeral_session_continues_in_same_process(self):
+        from nexus_adapters import CodexNexusAdapter
+
+        class LiveCodex(CodexNexusAdapter):
+            hard_workspace_confinement = True
+
+        class FakeServer:
+            def __init__(self, **kwargs):
+                self.thread_ids_seen = []
+                self._active_thread_id = None
+                self._active_turn_id = None
+                self.interrupt_calls = []
+                self.stopped = False
+                self._n = 0
+
+            def stream_bound_turn(self, thread_id, instructions, prompt, **kwargs):
+                self.thread_ids_seen.append(thread_id)
+                self._n += 1
+                tid = thread_id or "ephemeral-thread-A"
+                turn = f"turn-{self._n}"
+                self._active_thread_id = tid
+                self._active_turn_id = turn
+                yield "meta", {"phase": "turn_started", "thread_id": tid, "turn_id": turn}
+                yield "text", f"hello-{self._n}"
+                yield "done", {"thread_id": tid, "turn_id": turn, "status": "completed"}
+
+            def interrupt_active_turn(self):
+                self.interrupt_calls.append(
+                    (self._active_thread_id, self._active_turn_id)
+                )
+
+            def stop(self):
+                self.stopped = True
+
+            def close(self):
+                self.stop()
+
+        servers = []
+
+        def factory(**kwargs):
+            s = FakeServer(**kwargs)
+            servers.append(s)
+            return s
+
+        adapter = LiveCodex(self.root, server_factory=factory)
+        runtime = NexusRuntime(
+            workspace=self.root,
+            adapters={"claude": FakeClaudeAdapter(self.root), "codex": adapter},
+        )
+        r1 = runtime.start_turn("codex", "first")
+        ev1 = _drain_events(runtime, r1["turn_id"])
+        self.assertEqual(ev1[-1]["event"], "done")
+        sid = adapter.session_id
+        self.assertEqual(sid, "ephemeral-thread-A")
+        self.assertEqual(runtime.status()["sessions"]["codex"]["session_id"], sid)
+        self.assertEqual(servers[0].thread_ids_seen, [None])
+
+        r2 = runtime.start_turn("codex", "second")
+        ev2 = _drain_events(runtime, r2["turn_id"])
+        self.assertEqual(ev2[-1]["event"], "done")
+        self.assertEqual(adapter.session_id, sid)
+        self.assertEqual(runtime.status()["sessions"]["codex"]["session_id"], sid)
+        # Second turn resumes the first ephemeral thread id — never forced None.
+        self.assertEqual(servers[0].thread_ids_seen, [None, "ephemeral-thread-A"])
+        self.assertEqual(len(servers), 1)
+
+    def test_interrupt_uses_server_active_turn_not_stale_cache(self):
+        from nexus_adapters import CodexNexusAdapter
+
+        class LiveCodex(CodexNexusAdapter):
+            hard_workspace_confinement = True
+
+        class FakeServer:
+            def __init__(self, **kwargs):
+                self._active_thread_id = None
+                self._active_turn_id = None
+                self.interrupt_targets = []
+                self._n = 0
+                self.hang = threading.Event()
+                self.started = threading.Event()
+
+            def stream_bound_turn(
+                self,
+                thread_id,
+                instructions,
+                prompt,
+                *,
+                timeout=360,
+                cancel_event=None,
+            ):
+                self._n += 1
+                tid = thread_id or "thr-live"
+                turn = f"turn-live-{self._n}"
+                self._active_thread_id = tid
+                self._active_turn_id = turn
+                yield "meta", {"phase": "turn_started", "thread_id": tid, "turn_id": turn}
+                self.started.set()
+                for _ in range(200):
+                    if cancel_event is not None and cancel_event.is_set():
+                        yield "err", {
+                            "code": "interrupted",
+                            "message": "turn interrupted",
+                            "provider_status": "interrupted",
+                        }
+                        return
+                    time.sleep(0.01)
+                yield "done", {"thread_id": tid, "turn_id": turn, "status": "completed"}
+
+            def interrupt_active_turn(self):
+                self.interrupt_targets.append(
+                    (self._active_thread_id, self._active_turn_id)
+                )
+
+            def stop(self):
+                pass
+
+        server = FakeServer()
+        adapter = LiveCodex(self.root, server_factory=lambda **kw: server)
+        # Poison stale cache from a previous turn — must not be preferred.
+        adapter._active_codex_thread_id = "stale-thread"
+        adapter._active_codex_turn_id = "stale-turn"
+        runtime = NexusRuntime(
+            workspace=self.root,
+            adapters={"claude": FakeClaudeAdapter(self.root), "codex": adapter},
+        )
+        r = runtime.start_turn("codex", "hang")
+        self.assertTrue(server.started.wait(2))
+        # Ensure the stream loop is waiting on cancel before we interrupt.
+        time.sleep(0.05)
+        runtime.interrupt(r["turn_id"])
+        events = _drain_events(runtime, r["turn_id"], timeout=3)
+        self.assertEqual(events[-1]["data"]["code"], "interrupted")
+        self.assertEqual(server.interrupt_targets, [("thr-live", "turn-live-1")])
+        self.assertNotIn(("stale-thread", "stale-turn"), server.interrupt_targets)
+
+    def test_interrupt_rpc_sent_once_when_stream_also_cancels(self):
+        import codex_app_server as cas
+
+        home = self.root / "nx-once"
+        home.mkdir()
+        server = cas.CodexAppServer(
+            cwd=str(self.root),
+            db_path=os.devnull,
+            env_mode="nexus_allowlist",
+            codex_home=str(home),
+            ephemeral_threads=True,
+        )
+        server._start_locked = lambda: None  # type: ignore
+        server._ensure_bound_thread_locked = lambda *_a, **_k: "thread-once"  # type: ignore
+        server._request_locked = lambda *_a, **_k: {"turn": {"id": "turn-once"}}  # type: ignore
+        server._stop_locked = lambda: None  # type: ignore
+        server._process = unittest.mock.Mock()
+        server._process.poll.return_value = None
+        server._process.stdin = unittest.mock.Mock()
+        sent = []
+
+        def fake_send(payload):
+            sent.append(dict(payload))
+
+        server._send_locked = fake_send  # type: ignore
+        msgs = [
+            {"id": 99, "result": {"ok": True}},  # unrelated response — must not ack interrupt
+            {
+                "id": None,  # placeholder filled after interrupt request id known
+            },
+            {
+                "method": "turn/completed",
+                "params": {
+                    "threadId": "thread-once",
+                    "turnId": "turn-once",
+                    "turn": {"status": "interrupted"},
+                },
+            },
+        ]
+        phase = {"n": 0}
+
+        def fake_next(_timeout):
+            phase["n"] += 1
+            if phase["n"] == 1:
+                # External interrupt already sent one RPC before stream sees cancel.
+                server.interrupt_turn("turn-once", "thread-once")
+                return msgs[0]
+            if phase["n"] == 2:
+                # Matching interrupt ack by request id.
+                return {"id": server._interrupt_request_id, "result": {}}
+            if phase["n"] == 3:
+                return msgs[2]
+            raise cas.CodexAppServerError("empty")
+
+        server._next_message = fake_next  # type: ignore
+        server._cancel_requested.set()
+        events = list(server.stream_bound_turn(None, "d", "p", timeout=2))
+        interrupt_rpc = [p for p in sent if p.get("method") == "turn/interrupt"]
+        self.assertEqual(len(interrupt_rpc), 1)
+        self.assertTrue(any(e[0] == "err" and e[1].get("code") == "interrupted" for e in events))
+
+    def test_jsonrpc_error_response_is_interrupt_rejected(self):
+        import codex_app_server as cas
+
+        home = self.root / "nx-rej"
+        home.mkdir()
+        server = cas.CodexAppServer(
+            cwd=str(self.root),
+            db_path=os.devnull,
+            env_mode="nexus_allowlist",
+            codex_home=str(home),
+            ephemeral_threads=True,
+        )
+        server._start_locked = lambda: None  # type: ignore
+        server._ensure_bound_thread_locked = lambda *_a, **_k: "thread-rej"  # type: ignore
+        server._request_locked = lambda *_a, **_k: {"turn": {"id": "turn-rej"}}  # type: ignore
+        server._stop_locked = lambda: None  # type: ignore
+        server._process = unittest.mock.Mock()
+        server._process.poll.return_value = None
+        server._process.stdin = unittest.mock.Mock()
+        sent = []
+        server._send_locked = lambda payload: sent.append(payload)  # type: ignore
+        phase = {"n": 0}
+
+        def fake_next(_timeout):
+            phase["n"] += 1
+            if phase["n"] == 1:
+                return {
+                    "id": server._interrupt_request_id,
+                    "error": {"message": "turn not interruptible"},
+                }
+            raise cas.CodexAppServerError("empty")
+
+        server._next_message = fake_next  # type: ignore
+        server._cancel_requested.set()
+        events = list(server.stream_bound_turn(None, "d", "p", timeout=2))
+        err = [e for e in events if e[0] == "err"][0]
+        self.assertEqual(err[1]["code"], "interrupt_rejected")
+
+    def test_nexus_auth_probe_uses_allowlist_codex_home(self):
+        import codex_app_server as cas
+
+        home = self.root / ".nexus-codex-home"
+        home.mkdir()
+        server = cas.CodexAppServer(
+            cwd=str(self.root),
+            db_path=os.devnull,
+            env_mode="nexus_allowlist",
+            codex_home=str(home),
+            ephemeral_threads=True,
+        )
+        captured = {}
+
+        def fake_run(cmd, **kwargs):
+            captured["env"] = dict(kwargs.get("env") or {})
+            captured["cmd"] = list(cmd)
+            return unittest.mock.Mock(returncode=1, stdout="not logged in")
+
+        with unittest.mock.patch.object(cas, "find_codex", return_value="/tmp/fake-codex"), unittest.mock.patch.object(
+            cas.subprocess, "run", side_effect=fake_run
+        ):
+            status = server._nexus_auth_status()
+        self.assertFalse(status["authenticated"])
+        self.assertFalse(status["ready"])
+        self.assertEqual(captured["env"].get("CODEX_HOME"), str(home))
+        self.assertNotEqual(captured["env"].get("CODEX_HOME"), "/root/.codex")
+        self.assertNotIn("BOARD_TOKEN", captured["env"])
+
+    def test_restart_has_no_recoverable_nexus_thread_on_disk(self):
+        home = self.root / ".nexus-codex-home"
+        home.mkdir()
+        # Simulate leftover provider files that must not be treated as recoverable
+        # Nexus session state across Python process restart.
+        (home / "sessions").mkdir()
+        (home / "sessions" / "rollout-fake.jsonl").write_text("{}", encoding="utf-8")
+        claude = FakeClaudeAdapter(self.root)
+        codex = FakeCodexAdapter(self.root)
+        runtime = NexusRuntime(
+            workspace=self.root,
+            adapters={"claude": claude, "codex": codex},
+        )
+        r = runtime.start_turn("claude", "one")
+        _drain_events(runtime, r["turn_id"])
+        runtime2 = NexusRuntime(
+            workspace=self.root,
+            adapters={"claude": FakeClaudeAdapter(self.root), "codex": FakeCodexAdapter(self.root)},
+        )
+        self.assertEqual(runtime2.list_turns(), [])
+        self.assertIsNone(runtime2.status()["active_turn_id"])
+        self.assertIsNone(runtime2.status()["sessions"]["codex"]["session_id"])
+        self.assertFalse(runtime2.status()["sessions"]["codex"]["exists"])
+        # Disk leftovers under .nexus-codex-home are not a recoverable Nexus thread.
+        self.assertTrue((home / "sessions" / "rollout-fake.jsonl").exists())
+        summary = git_summary(self.root)
+        self.assertTrue(
+            all(".nexus-codex-home" not in p for p in summary["changed_files"]),
+            summary["changed_files"],
+        )
+
+    def test_git_staged_and_unstaged_rename_target_only(self):
+        from nexus_git import _parse_porcelain_z
+
+        # Synthetic porcelain -z: destination first, source second.
+        staged = _parse_porcelain_z(b"R  dest_staged.txt\0src_staged.txt\0")
+        self.assertEqual(staged, [("R ", "dest_staged.txt")])
+        unstaged = _parse_porcelain_z(b" R dest_work.txt\0src_work.txt\0")
+        self.assertEqual(unstaged, [(" R", "dest_work.txt")])
+
+        src = self.root / "rename_src.txt"
+        src.write_text("body\n", encoding="utf-8")
+        subprocess.run(["git", "add", "rename_src.txt"], cwd=str(self.root), check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "add src"], cwd=str(self.root), check=True, capture_output=True)
+        subprocess.run(
+            ["git", "mv", "rename_src.txt", "rename_dst.txt"],
+            cwd=str(self.root),
+            check=True,
+            capture_output=True,
+        )
+        summary = git_summary(self.root)
+        self.assertIn("rename_dst.txt", summary["changed_files"])
+        self.assertNotIn("rename_src.txt", summary["changed_files"])
+        # Frozen six field names only.
+        self.assertEqual(
+            set(summary.keys()),
+            {"branch", "changed_files", "diff_stat", "additions", "deletions", "clean"},
+        )
 
 
 if __name__ == "__main__":
