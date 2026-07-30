@@ -49,6 +49,8 @@ export class ManualContextWindowController {
   private currentAbort: AbortController | null = null;
   private candidatesAbort: AbortController | null = null;
   private switchAbort: AbortController | null = null;
+  /** Retained across network retries until a terminal switch outcome. */
+  private pendingRequestId: string | null = null;
 
   constructor(opts: ManualWindowControllerOptions = {}) {
     this.client = opts.client ?? createManualContextWindowClient();
@@ -220,6 +222,7 @@ export class ManualContextWindowController {
     this.switchAbort?.abort();
     this.modalOpen = false;
     this.submitting = false;
+    this.pendingRequestId = null;
     if (this.enabled) this.uiState = 'idle';
     this.emit();
   }
@@ -244,7 +247,10 @@ export class ManualContextWindowController {
     this.errorDetail = '';
     this.emit();
 
-    const requestId = crypto.randomUUID();
+    if (!this.pendingRequestId) {
+      this.pendingRequestId = crypto.randomUUID();
+    }
+    const requestId = this.pendingRequestId;
 
     try {
       const res = await this.client.switchWindow(source, count, requestId, { signal: ctrl.signal });
@@ -254,10 +260,12 @@ export class ManualContextWindowController {
         res.source_context_epoch !== source.source_context_epoch
       ) {
         this.submitting = false;
+        this.pendingRequestId = null;
         this.handleStale();
         return false;
       }
       this.submitting = false;
+      this.pendingRequestId = null;
       this.modalOpen = false;
       this.capturedSource = null;
       this.rounds = [];
@@ -271,21 +279,25 @@ export class ManualContextWindowController {
       this.submitting = false;
       const kind = classifyManualWindowError(err);
       if (kind === 'busy') {
+        // switch_in_progress / window_busy: keep requestId for retry
         this.errorDetail = manualWindowErrorMessage('busy', err);
         this.uiState = 'busy';
         this.emit();
         return false;
       }
-      if (kind === 'stale' || kind === 'no_open_context') {
-        this.handleStale(kind);
+      if (kind === 'stale' || kind === 'no_open_context' || kind === 'idempotency_mismatch') {
+        this.pendingRequestId = null;
+        this.handleStale(kind === 'idempotency_mismatch' ? 'idempotency_mismatch' : kind);
         return false;
       }
       if (kind === 'auth_error') {
+        this.pendingRequestId = null;
         this.errorDetail = manualWindowErrorMessage('auth_error', err);
         this.uiState = 'auth_error';
         this.emit();
         return false;
       }
+      // Network / 5xx: retain requestId so the next confirmSwitch retries the same intent.
       this.errorDetail = manualWindowErrorMessage('error', err);
       this.uiState = 'error';
       this.emit();

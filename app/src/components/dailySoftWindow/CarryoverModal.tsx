@@ -140,7 +140,8 @@ export function CarryoverModal({
     uiState === 'deferred' ||
     uiState === 'busy' ||
     uiState === 'stale' ||
-    uiState === 'no_open_context'
+    uiState === 'no_open_context' ||
+    uiState === 'idempotency_mismatch'
   ) {
     mid = (
       <div className="daily-window-empty">

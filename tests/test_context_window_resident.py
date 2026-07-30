@@ -75,6 +75,13 @@ def _legacy_ctx(db: str) -> dict:
     )
 
 
+
+def _offline_hooks():
+    import tempfile
+    return cw.offline_switch_hooks(tempfile.mkdtemp(prefix='cw-hooks-'))
+
+
+
 class ResidentSwitchCloseTests(unittest.TestCase):
     def setUp(self):
         self.db = _tmp_db()
@@ -116,7 +123,8 @@ class ResidentSwitchCloseTests(unittest.TestCase):
             count=0,
             request_id=str(uuid.uuid4()),
             db_path=self.db,
-        )
+        
+            hooks=_offline_hooks())
         closed = dr.close_local_resident_for_context_switch(
             self.resident,
             source_context_id=int(out['source_context_id']),
@@ -137,7 +145,8 @@ class ResidentSwitchCloseTests(unittest.TestCase):
             count=0,
             request_id=str(uuid.uuid4()),
             db_path=self.db,
-        )
+        
+            hooks=_offline_hooks())
         target_epoch = int(out['target_context_epoch'])
         new_key = dc.make_resident_key(
             chat_id='default', context_epoch=target_epoch, resident_generation=1,
@@ -170,14 +179,16 @@ class ResidentSwitchCloseTests(unittest.TestCase):
             count=0,
             request_id=req,
             db_path=self.db,
-        )
+        
+            hooks=_offline_hooks())
         out2 = cw.switch_context_window(
             source_context_id=int(ctx['id']),
             source_context_epoch=int(ctx['context_epoch']),
             count=0,
             request_id=req,
             db_path=self.db,
-        )
+        
+            hooks=_offline_hooks())
         self.assertEqual(out1['target_context_id'], out2['target_context_id'])
         self._bind_source({'id': out1['target_context_id'], 'context_epoch': out1['target_context_epoch'], 'resident_generation': 1})
         closed = dr.close_local_resident_for_context_switch(
@@ -220,7 +231,8 @@ class EpochTokenContextIdTests(unittest.TestCase):
                 count=0,
                 request_id=str(uuid.uuid4()),
                 db_path=db,
-            )
+            
+            hooks=_offline_hooks())
             self.assertFalse(dc.is_epoch_current(token, db_path=db))
         finally:
             os.unlink(db)

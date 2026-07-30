@@ -265,6 +265,135 @@ class ResidentSession:
                 self._spawn(system_text, env, reason=reason, tool_profile=tool_profile)
             return self._cold
 
+    def spawn_resumable(
+        self,
+        system_text,
+        env,
+        *,
+        resume_session_id,
+        tool_profile=TOOL_PROFILE_LEGACY,
+        reason='forge_staged',
+    ):
+        """Start this (staged) instance with --resume. Must not be the live singleton mid-turn.
+
+        Does not send stdin. Caller runs a no-stdin health window afterwards.
+        """
+        resume_session_id = str(resume_session_id or '').strip()
+        if not resume_session_id:
+            raise ResidentError('resume_session_id required')
+        with self._lock:
+            if self._alive():
+                raise ResidentError('staged spawn on live session')
+            self._tool_profile = str(tool_profile or TOOL_PROFILE_LEGACY)
+            base_args = [
+                'claude', '-p',
+                '--input-format', 'stream-json',
+                '--output-format', 'stream-json',
+                '--verbose',
+                '--include-partial-messages',
+                '--system-prompt', system_text,
+                '--max-turns', '5',
+                '--tools', '',
+                '--thinking-display', 'summarized',
+                '--exclude-dynamic-system-prompt-sections',
+                '--resume', resume_session_id,
+            ]
+            if self._tool_profile == TOOL_PROFILE_TEXT_ONLY:
+                args = base_args + ['--allowedTools', '']
+            else:
+                args = base_args + [
+                    '--mcp-config', self._mcp_config_path,
+                    '--strict-mcp-config',
+                    '--allowedTools', self._allowed_tools,
+                ]
+            try:
+                self._proc = subprocess.Popen(
+                    args, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    text=True, bufsize=1, cwd=self._cwd, env=env,
+                )
+            except Exception as exc:
+                self._proc = None
+                raise ResidentError('staged_spawn_failed:%s' % exc) from exc
+            self._system_text = system_text
+            self._session_id = resume_session_id
+            self._cold = False
+            self._generation += 1
+            self._reset_session_meta(respawn_reason=reason)
+            if self._tool_profile == TOOL_PROFILE_TEXT_ONLY:
+                self._tool_surface_snapshot = {}
+            else:
+                try:
+                    from tools.cc_tool_surface import capture_tool_surface_snapshot
+                    self._tool_surface_snapshot = capture_tool_surface_snapshot(
+                        self._allowed_tools,
+                        mcp_config_path=self._mcp_config_path,
+                    )
+                except Exception:
+                    self._tool_surface_snapshot = {}
+            return self
+
+    def wait_staged_health(
+        self,
+        *,
+        health_ms=None,
+        jsonl_path=None,
+        expected_sha256=None,
+    ):
+        """No-stdin health window for staged --resume process."""
+        import config_store
+        from tools.claude_forge_core import sha256_file
+
+        if health_ms is None:
+            try:
+                health_ms = int(config_store.get_int('CONTEXT_SWITCH_STAGED_HEALTH_MS', 2000))
+            except Exception:
+                health_ms = 2000
+        health_ms = max(0, int(health_ms))
+        before = None
+        if jsonl_path is not None:
+            from pathlib import Path
+            path = Path(jsonl_path)
+            if not path.is_file():
+                raise ResidentError('staged_spawn_failed:jsonl_missing')
+            before = path.read_bytes()
+            if expected_sha256 and sha256_file(path) != str(expected_sha256):
+                raise ResidentError('staged_jsonl_mutated_before_handoff')
+
+        deadline = time.time() + (health_ms / 1000.0)
+        stderr_fatal_markers = (
+            'error: ',
+            'ENOENT',
+            'Cannot resume',
+            'session not found',
+            'Invalid resume',
+        )
+        while time.time() < deadline:
+            if not self._alive():
+                err = ''
+                try:
+                    if self._proc and self._proc.stderr:
+                        err = (self._proc.stderr.read() or '')[:2000]
+                except Exception:
+                    err = ''
+                lower = err.lower()
+                if any(m.lower() in lower for m in stderr_fatal_markers):
+                    raise ResidentError('staged_stderr_fatal')
+                raise ResidentError('staged_exited_during_health_window')
+            # Non-blocking peek at stderr for fatal markers without consuming all.
+            time.sleep(min(0.05, max(0.0, deadline - time.time())))
+
+        if not self._alive():
+            raise ResidentError('staged_exited_during_health_window')
+        if jsonl_path is not None:
+            from pathlib import Path
+            path = Path(jsonl_path)
+            after = path.read_bytes()
+            if before != after:
+                raise ResidentError('staged_jsonl_mutated_before_handoff')
+            if expected_sha256 and sha256_file(path) != str(expected_sha256):
+                raise ResidentError('staged_jsonl_mutated_before_handoff')
+        return True
+
     def _commit_sent_context(self, commit_meta):
         """flush 后只提交仍存活 resident 内的游标；one-shot 不在这里消费。"""
         from chat.context_budget import merge_cumulative_state_send, normalize_known_file_refs

@@ -194,6 +194,47 @@ await staleCtrl.openModal();
 assert.match(staleCtrl.getSnapshot().errorDetail, /已经变过了/);
 ok('409 stale');
 
+// Network error keeps same requestId for retry
+const ids = [];
+const retryCtrl = new ManualContextWindowController({ client });
+await retryCtrl.probeEnabled();
+let failOnce = true;
+retryCtrl.client = {
+  ...client,
+  switchWindow: async (src, count, requestId) => {
+    ids.push(requestId);
+    if (failOnce) {
+      failOnce = false;
+      throw new HttpError(502, 'bad gateway', 'bad gateway');
+    }
+    return {
+      source_context_id: src.source_context_id,
+      source_context_epoch: src.source_context_epoch,
+      source_resident_generation: src.source_resident_generation,
+      target_context_id: 9,
+      target_context_epoch: 44,
+      window_mode: 'manual',
+      requested_round_count: count,
+      selected_round_count: 0,
+      selected_message_count: 0,
+      selected_message_ids: [],
+      boundary_message_id: 100,
+      resident_generation: 1,
+      switched_at: '2026-07-28 11:00:00',
+    };
+  },
+};
+await retryCtrl.openModal();
+retryCtrl.setDraftCount(0);
+const failOk = await retryCtrl.confirmSwitch();
+assert.equal(failOk, false);
+assert.equal(retryCtrl.getSnapshot().uiState, 'error');
+const retryOk = await retryCtrl.confirmSwitch();
+assert.equal(retryOk, true);
+assert.equal(ids.length, 2);
+assert.equal(ids[0], ids[1]);
+ok('network retry reuses requestId');
+
 // CSS box model
 const css = fs.readFileSync(path.join(__dirname, '../src/components/dailySoftWindow/dailySoftWindow.css'), 'utf8');
 assert.match(css, /box-sizing:\s*border-box/);

@@ -11,9 +11,13 @@ from flask import Blueprint, jsonify, request
 
 from chat.context_window import (
     CLOSE_REASON_MANUAL,
+    CarryoverMessageUnforgeableError,
     IdempotencyMismatchError,
     NoOpenContextWindowError,
     StaleSourceContextError,
+    SwitchFailedError,
+    SwitchHooksRequiredError,
+    SwitchInProgressError,
     WindowBusyError,
     current_window_summary,
     enabled,
@@ -150,10 +154,31 @@ def create_context_window_blueprint(
                 db_path=db_path,
             )
             return jsonify({'ok': True, **result})
+        except SwitchHooksRequiredError as exc:
+            return jsonify({
+                'ok': False,
+                'error': str(exc),
+                'code': 'switch_hooks_required',
+            }), 503
         except IdempotencyMismatchError as exc:
             return jsonify({'ok': False, 'error': str(exc), 'code': 'idempotency_mismatch'}), 409
         except StaleSourceContextError as exc:
             return jsonify({'ok': False, 'error': str(exc), 'code': 'stale_source_context'}), 409
+        except CarryoverMessageUnforgeableError as exc:
+            return jsonify({
+                'ok': False,
+                'error': str(exc),
+                'code': 'carryover_message_unforgeable',
+            }), 409
+        except SwitchFailedError as exc:
+            return jsonify({'ok': False, 'error': str(exc), 'code': exc.error_code}), 409
+        except SwitchInProgressError as exc:
+            return jsonify({
+                'ok': False,
+                'error': str(exc),
+                'code': 'switch_in_progress',
+                'retryable': True,
+            }), 423
         except WindowBusyError as exc:
             return jsonify({
                 'ok': False,

@@ -266,6 +266,13 @@ def _create_rich_old_schema_db(db_path: str):
     conn.close()
 
 
+
+def _offline_hooks():
+    import tempfile
+    return cw.offline_switch_hooks(tempfile.mkdtemp(prefix='cw-hooks-'))
+
+
+
 class SchemaMigrationTests(unittest.TestCase):
     def test_old_schema_migrates_preserving_ids(self):
         db = _tmp_db()
@@ -342,7 +349,8 @@ class SchemaMigrationTests(unittest.TestCase):
             request_id=req1,
             db_path=db,
             now=datetime.datetime(2026, 7, 27, 12, 0, 0),
-        )
+        
+            hooks=_offline_hooks())
         current = cw.get_current_context_window(db_path=db, now=datetime.datetime(2026, 7, 27, 13, 0, 0))
         u2 = _insert(db, 'hayana', 'again', '2026-07-27 14:00:00')
         _map(db, int(current['id']), int(current['context_epoch']), u2, 'user')
@@ -354,7 +362,8 @@ class SchemaMigrationTests(unittest.TestCase):
             request_id=req2,
             db_path=db,
             now=datetime.datetime(2026, 7, 27, 15, 0, 0),
-        )
+        
+            hooks=_offline_hooks())
         conn = sqlite3.connect(db)
         manual_same_day = conn.execute(
             "SELECT COUNT(*) FROM daily_contexts WHERE local_day='2026-07-27' AND window_mode='manual'"
@@ -411,7 +420,8 @@ class CurrentResolverTests(unittest.TestCase):
             count=0,
             request_id=str(uuid.uuid4()),
             db_path=self.db,
-        )
+        
+            hooks=_offline_hooks())
         current = cw.get_current_context_window(db_path=self.db)
         self.assertEqual(int(current['id']), switched['target_context_id'])
 
@@ -483,7 +493,8 @@ class SwitchTransactionTests(unittest.TestCase):
             count=3,
             request_id=req,
             db_path=self.db,
-        )
+        
+            hooks=_offline_hooks())
         self.assertEqual(out['selected_round_count'], 3)
         self.assertEqual(out['requested_round_count'], 3)
         source = dc.get_daily_context_by_id(self.cid, db_path=self.db)
@@ -503,14 +514,16 @@ class SwitchTransactionTests(unittest.TestCase):
             count=0,
             request_id=req,
             db_path=self.db,
-        )
+        
+            hooks=_offline_hooks())
         second = cw.switch_context_window(
             source_context_id=self.cid,
             source_context_epoch=self.epoch,
             count=0,
             request_id=req,
             db_path=self.db,
-        )
+        
+            hooks=_offline_hooks())
         self.assertEqual(first['target_context_id'], second['target_context_id'])
         conn = sqlite3.connect(self.db)
         manual_count = conn.execute(
@@ -527,7 +540,8 @@ class SwitchTransactionTests(unittest.TestCase):
             count=0,
             request_id=req,
             db_path=self.db,
-        )
+        
+            hooks=_offline_hooks())
         with self.assertRaises(cw.IdempotencyMismatchError):
             cw.switch_context_window(
                 source_context_id=self.cid,
@@ -535,7 +549,8 @@ class SwitchTransactionTests(unittest.TestCase):
                 count=3,
                 request_id=req,
                 db_path=self.db,
-            )
+            
+            hooks=_offline_hooks())
 
 
 class CompatibilityTests(unittest.TestCase):
@@ -776,7 +791,8 @@ class NaturalCalendarDayTests(unittest.TestCase):
             request_id=str(uuid.uuid4()),
             db_path=self.db,
             now=datetime.datetime(2026, 7, 28, 2, 0, 0),
-        )
+        
+            hooks=_offline_hooks())
         target = dc.get_daily_context_by_id(out['target_context_id'], db_path=self.db)
         assert target is not None
         self.assertEqual(target['local_day'], '2026-07-28')
@@ -805,7 +821,8 @@ class NaturalCalendarDayTests(unittest.TestCase):
             request_id=str(uuid.uuid4()),
             db_path=db,
             now=datetime.datetime(2026, 7, 28, 3, 59, 0),
-        )
+        
+            hooks=_offline_hooks())
         t1 = dc.get_daily_context_by_id(first['target_context_id'], db_path=db)
         assert t1 is not None
         self.assertEqual(t1['local_day'], '2026-07-28')
@@ -818,7 +835,8 @@ class NaturalCalendarDayTests(unittest.TestCase):
             request_id=str(uuid.uuid4()),
             db_path=db,
             now=datetime.datetime(2026, 7, 28, 4, 1, 0),
-        )
+        
+            hooks=_offline_hooks())
         t2 = dc.get_daily_context_by_id(second['target_context_id'], db_path=db)
         assert t2 is not None
         self.assertEqual(t2['local_day'], '2026-07-28')
@@ -831,7 +849,8 @@ class NaturalCalendarDayTests(unittest.TestCase):
             request_id=str(uuid.uuid4()),
             db_path=self.db,
             now=datetime.datetime(2026, 7, 28, 2, 30, 0),
-        )
+        
+            hooks=_offline_hooks())
         summary_before = cw.current_window_summary(
             db_path=self.db, now=datetime.datetime(2026, 7, 28, 3, 59, 0),
         )
@@ -866,7 +885,8 @@ class IdempotencyEpochTests(unittest.TestCase):
             count=0,
             request_id=req,
             db_path=self.db,
-        )
+        
+            hooks=_offline_hooks())
         for wrong in (self.epoch + 1, max(1, self.epoch - 1)):
             if wrong == self.epoch:
                 continue
@@ -878,7 +898,8 @@ class IdempotencyEpochTests(unittest.TestCase):
                         count=0,
                         request_id=req,
                         db_path=self.db,
-                    )
+                    
+            hooks=_offline_hooks())
 
     def test_replay_wrong_close_reason_409(self):
         req = str(uuid.uuid4())
@@ -889,7 +910,8 @@ class IdempotencyEpochTests(unittest.TestCase):
             request_id=req,
             close_reason=cw.CLOSE_REASON_MANUAL,
             db_path=self.db,
-        )
+        
+            hooks=_offline_hooks())
         with self.assertRaises(cw.IdempotencyMismatchError):
             cw.switch_context_window(
                 source_context_id=self.cid,
@@ -898,7 +920,8 @@ class IdempotencyEpochTests(unittest.TestCase):
                 request_id=req,
                 close_reason=cw.CLOSE_REASON_CAPACITY_RESCUE,
                 db_path=self.db,
-            )
+            
+            hooks=_offline_hooks())
 
 
 class ConcurrencySwitchTests(unittest.TestCase):
@@ -909,14 +932,97 @@ class ConcurrencySwitchTests(unittest.TestCase):
         self.ctx = _legacy_ctx(self.db)
         self.cid = int(self.ctx['id'])
         self.epoch = int(self.ctx['context_epoch'])
-        u = _insert(self.db, 'hayana', 'x', '2026-07-27 10:00:00')
-        _map(self.db, self.cid, self.epoch, u, 'user')
+        for i in range(3):
+            u = _insert(self.db, 'hayana', 'x%d' % i, '2026-07-27 10:%02d:00' % i)
+            a = _insert(self.db, 'fyodor', 'y%d' % i, '2026-07-27 10:%02d:30' % i)
+            _map(self.db, self.cid, self.epoch, u, 'user')
+            _map(self.db, self.cid, self.epoch, a, 'assistant')
 
     def test_same_request_concurrent_identical_payload(self):
         req = str(uuid.uuid4())
         barrier = threading.Barrier(2)
         results = []
         errors = []
+        counts = {
+            'forge': 0,
+            'prepare': 0,
+            'take_handoff': 0,
+            'discard': 0,
+            'mark_committed': 0,
+        }
+        counts_lock = threading.Lock()
+        prepare_entered = threading.Event()
+        release_prepare = threading.Event()
+        mid_switch_snapshot = {}
+
+        class _OldResident:
+            def __init__(self):
+                self.session_id = 'old-resident-session'
+                self.close_n = 0
+                self._alive = True
+
+            def kill(self) -> None:
+                self.close_n += 1
+                self._alive = False
+
+            def _kill(self, quiet: bool = True) -> None:
+                self.kill()
+
+        class _Holder:
+            def __init__(self, resident):
+                self.current = resident
+                self.session_id = resident.session_id
+
+        old_resident = _OldResident()
+        holder = _Holder(old_resident)
+        base = _offline_hooks()
+
+        def prepare_staged(intent, forge_path):
+            with counts_lock:
+                counts['prepare'] += 1
+            prepare_entered.set()
+            self.assertTrue(
+                release_prepare.wait(timeout=5),
+                'prepare gate was not released',
+            )
+            return base.prepare_staged(intent, forge_path)
+
+        def take_handoff(staged, result):
+            with counts_lock:
+                counts['take_handoff'] += 1
+            old = holder.current
+            holder.current = staged
+            holder.session_id = str(getattr(staged, 'session_id', '') or '')
+            return old
+
+        def discard_staged(staged):
+            with counts_lock:
+                counts['discard'] += 1
+            return base.discard_staged(staged)
+
+        hooks = cw.SwitchHooks(
+            prepare_staged=prepare_staged,
+            take_handoff=take_handoff,
+            discard_staged=discard_staged,
+            forge_cwd=base.forge_cwd,
+            claude_home=base.claude_home,
+            formal_holder=holder,
+        )
+
+        import chat.context_window_forge as forge_mod
+        real_forge = forge_mod.forge_target_session_from_db
+
+        def counting_forge(*args, **kwargs):
+            with counts_lock:
+                counts['forge'] += 1
+            return real_forge(*args, **kwargs)
+
+        real_mark = cw.mark_intent_committed
+
+        def counting_mark(*args, **kwargs):
+            with counts_lock:
+                counts['mark_committed'] += 1
+            return real_mark(*args, **kwargs)
 
         def worker():
             try:
@@ -927,19 +1033,62 @@ class ConcurrencySwitchTests(unittest.TestCase):
                     count=0,
                     request_id=req,
                     db_path=self.db,
+                    hooks=hooks,
                 )
                 results.append(out)
             except Exception as exc:
                 errors.append(exc)
 
-        threads = [threading.Thread(target=worker) for _ in range(2)]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join(timeout=10)
+        with mock.patch.object(
+            forge_mod, 'forge_target_session_from_db', side_effect=counting_forge,
+        ), mock.patch.object(
+            cw, 'mark_intent_committed', side_effect=counting_mark,
+        ):
+            threads = [threading.Thread(target=worker) for _ in range(2)]
+            for t in threads:
+                t.start()
+            self.assertTrue(prepare_entered.wait(timeout=5))
+            # Lock-scope proof: while owner is inside prepare, peer must still
+            # be blocked outside switch_context_window (no second forge/prepare/
+            # take_handoff / target row).
+            with counts_lock:
+                mid_switch_snapshot.update(dict(counts))
+            conn_mid = sqlite3.connect(self.db)
+            mid_targets = conn_mid.execute(
+                'SELECT COUNT(*) FROM daily_contexts WHERE switch_request_id=?',
+                (req,),
+            ).fetchone()[0]
+            conn_mid.close()
+            self.assertEqual(mid_switch_snapshot['forge'], 1)
+            self.assertEqual(mid_switch_snapshot['prepare'], 1)
+            self.assertEqual(mid_switch_snapshot['take_handoff'], 0)
+            self.assertEqual(mid_switch_snapshot['discard'], 0)
+            self.assertEqual(mid_targets, 0)
+            release_prepare.set()
+            for t in threads:
+                t.join(timeout=10)
+
         self.assertEqual(errors, [])
         self.assertEqual(len(results), 2)
         self.assertEqual(results[0]['target_context_id'], results[1]['target_context_id'])
+        self.assertEqual(
+            results[0].get('claude_session_id'),
+            results[1].get('claude_session_id'),
+        )
+        self.assertTrue(results[0].get('claude_session_id'))
+        self.assertEqual(holder.session_id, results[0]['claude_session_id'])
+        self.assertEqual(
+            getattr(holder.current, 'session_id', None),
+            results[0]['claude_session_id'],
+        )
+        self.assertIsNot(holder.current, old_resident)
+        self.assertEqual(old_resident.close_n, 1)
+        self.assertFalse(old_resident._alive)
+        self.assertEqual(counts['forge'], 1)
+        self.assertEqual(counts['prepare'], 1)
+        self.assertEqual(counts['take_handoff'], 1)
+        self.assertEqual(counts['mark_committed'], 1)
+        self.assertEqual(counts['discard'], 0)
         conn = sqlite3.connect(self.db)
         self.assertEqual(
             conn.execute(
@@ -947,6 +1096,18 @@ class ConcurrencySwitchTests(unittest.TestCase):
             ).fetchone()[0],
             1,
         )
+        self.assertEqual(
+            conn.execute(
+                'SELECT COUNT(*) FROM daily_contexts WHERE switch_request_id=?',
+                (req,),
+            ).fetchone()[0],
+            1,
+        )
+        intent_status = conn.execute(
+            'SELECT status FROM context_switch_intents WHERE request_id=?',
+            (req,),
+        ).fetchone()[0]
+        self.assertEqual(intent_status, cw.INTENT_COMMITTED)
         conn.close()
 
     def test_same_request_concurrent_different_payload(self):
@@ -963,7 +1124,8 @@ class ConcurrencySwitchTests(unittest.TestCase):
                     count=count,
                     request_id=req,
                     db_path=self.db,
-                )
+                
+            hooks=_offline_hooks())
                 outcomes.append(('ok', count, out['target_context_id']))
             except cw.IdempotencyMismatchError:
                 outcomes.append(('mismatch', count, None))
@@ -1005,9 +1167,10 @@ class ConcurrencySwitchTests(unittest.TestCase):
                     count=0,
                     request_id=req,
                     db_path=self.db,
-                )
+                
+            hooks=_offline_hooks())
                 outcomes.append(('ok', out['target_context_id']))
-            except cw.StaleSourceContextError:
+            except (cw.StaleSourceContextError, cw.SwitchInProgressError):
                 outcomes.append(('stale', None))
             except Exception as exc:
                 outcomes.append(('err', exc))
@@ -1079,6 +1242,7 @@ class CurrentSnapshotRaceTests(unittest.TestCase):
                 count=0,
                 request_id=str(uuid.uuid4()),
                 db_path=db,
+                hooks=_offline_hooks(),
             ))
 
         threads = [threading.Thread(target=reader), threading.Thread(target=writer)]
@@ -1134,7 +1298,8 @@ class CasRollbackTests(unittest.TestCase):
                     count=0,
                     request_id=req,
                     db_path=db,
-                )
+                
+            hooks=_offline_hooks())
         conn = sqlite3.connect(db)
         self.assertEqual(
             conn.execute(
@@ -1176,7 +1341,8 @@ class ClosedManualRecoveryTests(unittest.TestCase):
             count=0,
             request_id=str(uuid.uuid4()),
             db_path=db,
-        )
+        
+            hooks=_offline_hooks())
         conn = sqlite3.connect(db)
         conn.execute(
             "UPDATE daily_contexts SET closed_at='2026-07-27 12:00:00', close_reason='manual' "
@@ -1203,7 +1369,8 @@ class ClosedManualRecoveryTests(unittest.TestCase):
             count=0,
             request_id=str(uuid.uuid4()),
             db_path=db,
-        )
+        
+            hooks=_offline_hooks())
         conn = sqlite3.connect(db)
         conn.execute(
             "UPDATE daily_contexts SET closed_at='2026-07-27 12:00:00', close_reason='manual' "
@@ -1243,7 +1410,8 @@ class ClosedManualRecoveryTests(unittest.TestCase):
             count=0,
             request_id=str(uuid.uuid4()),
             db_path=db,
-        )
+        
+            hooks=_offline_hooks())
         conn = sqlite3.connect(db)
         conn.execute(
             "UPDATE daily_contexts SET closed_at='2026-07-27 12:00:00', close_reason='manual' "

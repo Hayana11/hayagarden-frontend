@@ -92,7 +92,8 @@ export type SoftWindowUiState =
   /** Manual context window (P-CONTEXT-MANUAL-WINDOW-R1). */
   | 'busy'
   | 'stale'
-  | 'no_open_context';
+  | 'no_open_context'
+  | 'idempotency_mismatch';
 
 export type SoftWindowErrorKind =
   | 'disabled'
@@ -400,6 +401,7 @@ export function softWindowErrorMessage(state: SoftWindowUiState | SoftWindowErro
   if (state === 'conflict') return '选择已经锁定，不能再改。';
   if (state === 'auth_error') return '鉴权桥接失败。';
   if (state === 'empty') return '昨天没有可带走的正式对话。';
+  if (state === 'idempotency_mismatch') return '换窗请求冲突，请关闭后重试。';
   if (state === 'unavailable' || state === 'error') {
     if (err instanceof HttpError && err.detail) return err.detail;
     if (err instanceof Error) return err.message;

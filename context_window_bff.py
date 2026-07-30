@@ -100,6 +100,7 @@ def create_context_window_bff_blueprint(
     upstream_base: Optional[str] = None,
     owner_guard: Optional[Callable] = None,
     on_switch_success: Optional[SwitchSuccessCallback] = None,
+    switch_runner: Optional[Callable[[dict[str, Any]], dict[str, Any]]] = None,
 ) -> Blueprint:
     blueprint = Blueprint('context_window_bff', __name__)
     get_token = token_getter or _default_token_from_env
@@ -181,7 +182,7 @@ def create_context_window_bff_blueprint(
         url = base + '/api/context-window/switch'
         req = urllib.request.Request(url, data=body, method='POST', headers=headers)
         try:
-            with urllib.request.urlopen(req, timeout=20) as resp:
+            with urllib.request.urlopen(req, timeout=120) as resp:
                 payload = resp.read()
                 status = int(resp.status)
                 if 200 <= status < 300:
@@ -224,6 +225,103 @@ def create_context_window_bff_blueprint(
                 mimetype='application/json',
             )
         body = request.get_data(cache=False, as_text=False) or b'{}'
+        if switch_runner is not None:
+            from chat.context_window import (
+                CarryoverMessageUnforgeableError,
+                IdempotencyMismatchError,
+                StaleSourceContextError,
+                SwitchFailedError,
+                SwitchInProgressError,
+                WindowBusyError,
+                enabled as _cw_enabled,
+                parse_strict_json_carryover_count,
+                parse_strict_json_positive_int,
+            )
+            if not _cw_enabled():
+                return Response(
+                    json.dumps({'ok': False, 'error': 'disabled'}, ensure_ascii=False),
+                    status=404,
+                    mimetype='application/json',
+                )
+            try:
+                data = json.loads(body.decode('utf-8') or '{}')
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                return Response(
+                    json.dumps({'ok': False, 'error': 'invalid switch payload'}, ensure_ascii=False),
+                    status=400,
+                    mimetype='application/json',
+                )
+            if not isinstance(data, dict):
+                return Response(
+                    json.dumps({'ok': False, 'error': 'invalid switch payload'}, ensure_ascii=False),
+                    status=400,
+                    mimetype='application/json',
+                )
+            try:
+                payload = {
+                    'source_context_id': parse_strict_json_positive_int(
+                        'source_context_id', data.get('source_context_id'),
+                    ),
+                    'source_context_epoch': parse_strict_json_positive_int(
+                        'source_context_epoch', data.get('source_context_epoch'),
+                    ),
+                    'count': parse_strict_json_carryover_count(data.get('count')),
+                    'request_id': str(data['request_id']),
+                    'chat_id': str(data.get('chat_id') or 'default'),
+                }
+            except (KeyError, TypeError, ValueError) as exc:
+                return Response(
+                    json.dumps({'ok': False, 'error': str(exc)}, ensure_ascii=False),
+                    status=400,
+                    mimetype='application/json',
+                )
+            try:
+                result = switch_runner(payload)
+                out = json.dumps({'ok': True, **result}, ensure_ascii=False).encode('utf-8')
+                return Response(out, status=200, mimetype='application/json')
+            except IdempotencyMismatchError as exc:
+                return Response(
+                    json.dumps({'ok': False, 'error': str(exc), 'code': 'idempotency_mismatch'}, ensure_ascii=False),
+                    status=409,
+                    mimetype='application/json',
+                )
+            except StaleSourceContextError as exc:
+                return Response(
+                    json.dumps({'ok': False, 'error': str(exc), 'code': 'stale_source_context'}, ensure_ascii=False),
+                    status=409,
+                    mimetype='application/json',
+                )
+            except CarryoverMessageUnforgeableError as exc:
+                return Response(
+                    json.dumps({'ok': False, 'error': str(exc), 'code': 'carryover_message_unforgeable'}, ensure_ascii=False),
+                    status=409,
+                    mimetype='application/json',
+                )
+            except SwitchFailedError as exc:
+                return Response(
+                    json.dumps({'ok': False, 'error': str(exc), 'code': exc.error_code}, ensure_ascii=False),
+                    status=409,
+                    mimetype='application/json',
+                )
+            except (WindowBusyError, SwitchInProgressError) as exc:
+                code = 'switch_in_progress' if isinstance(exc, SwitchInProgressError) else 'window_busy'
+                return Response(
+                    json.dumps({
+                        'ok': False,
+                        'error': str(exc),
+                        'code': code,
+                        'retryable': True,
+                    }, ensure_ascii=False),
+                    status=423,
+                    mimetype='application/json',
+                )
+            except Exception as exc:
+                logger.exception('context-window BFF local switch_runner failed')
+                return Response(
+                    json.dumps({'ok': False, 'error': str(exc)}, ensure_ascii=False),
+                    status=500,
+                    mimetype='application/json',
+                )
         return _proxy_switch(body)
 
     return blueprint
