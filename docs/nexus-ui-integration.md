@@ -137,7 +137,7 @@ UI：收到 423 时应禁用发送并提示“施工台忙碌”，可短退避�
 - `sequence` 从 1 单调递增
 - 每个 turn **恰好一个**终态：`done` 或 `err`
 - 确认中断：先可选 `status.phase=interrupted`，再以 `err.code=interrupted` 结束（turn.state=`interrupted`）
-- 中断失败：`err.code` 为 `interrupt_failed` / `interrupt_rejected` / `interrupt_unconfirmed`（turn.state=`error`）；UI 不得显示为“已停止成功”
+- 中断失败：`err.code` 为 `interrupt_failed` / `interrupt_rejected` / `interrupt_unconfirmed`（turn.state=`error`）；UI 不得显示为“已停止成功”。若 `data.provider_stop_confirmed=false`，完整 provider process tree 未确认停止，runtime 会保持 blocked，后续 turn 返回 503 `provider_stop_unconfirmed`
 - 未知原始事件归一为 `status`
 
 ## Interrupt
@@ -203,7 +203,8 @@ UI：收到 423 时应禁用发送并提示“施工台忙碌”，可短退避�
 | instruction_max_chars | 8000 |
 | turns_history_limit | 50 |
 | agent_availability.claude.available | **false**（`ENVIRONMENT_BLOCKED`：无硬 workspace 隔离） |
-| agent_availability.codex.available | **false**（`ENVIRONMENT_BLOCKED`：`workspace-write` ≠ 读取隔离） |
+| agent_availability.codex.available | 仅 binary + workspace 外 `NEXUS_CODEX_HOME` + 同 home auth + 原生 permission profile 全部就绪时为 true；否则 `ENVIRONMENT_BLOCKED` |
+| agent_availability.codex.permission_profile | `hayagarden_nexus` |
 | agent_availability.codex.sandbox_is_read_isolation | false |
 
 ### workspace 缺失时的 status
@@ -218,7 +219,7 @@ UI：收到 423 时应禁用发送并提示“施工台忙碌”，可短退避�
 
 ### Claude / Codex unavailable
 
-在 `agent_availability.*.available === false` 时，UI 不得提供对应 Agent 发送入口；不得假定 cwd / workspace-write 即硬隔离。
+在 `agent_availability.*.available === false` 时，UI 不得提供对应 Agent 发送入口；不得假定 cwd / workspace-write 即硬隔离。Codex 的 `NEXUS_CODEX_HOME` 必须是 workspace 外已存在的绝对目录，且不能是 `/opt/frontend` 或 `/root/.codex`；named profile 固定为 `hayagarden_nexus`。
 Codex `POST` 失败码：`codex_unavailable`（503）。
 Claude `POST` 失败码：`claude_unavailable`（503）。
 
@@ -230,8 +231,8 @@ Claude `POST` 失败码：`claude_unavailable`（503）。
 ## 明日接线第一步
 
 1. 调 `GET /api/nexus/status` 确认 `capabilities` 与 `agent_availability`
-2. **真实 Agent turn：当前不允许**——Claude/Codex 均为 `ENVIRONMENT_BLOCKED`；仅可先读 status / 用 Fake fixture 验证 SSE
-3. 渲染九类事件；在 `done`/`err` 结束；`interrupt_*` 失败码不得显示为已停止
+2. **真实 Agent turn**：以 status 为准；Codex 在 `NEXUS_CODEX_HOME`、auth、binary 或 native isolation 任一未就绪时仍为 `ENVIRONMENT_BLOCKED`
+3. 渲染九类事件；在 `done`/`err` 结束；`interrupt_*` 失败码及 `provider_stop_confirmed=false` 不得显示为已停止
 4. 接线 `interrupt` 与 `GET /api/nexus/git`（rename 只显示目标路径）
 
 ## 不依赖真实 Agent 的接线 Fixture

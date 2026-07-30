@@ -14,6 +14,7 @@ DEFAULT_NEXUS_WORKSPACE_ROOT = "/opt/workspace/projects/nexus/current"
 _FORBIDDEN_FALLBACKS = (
     "/opt/frontend",
 )
+_FORMAL_CODEX_HOME = "/root/.codex"
 
 
 class NexusPathError(ValueError):
@@ -74,6 +75,109 @@ def resolve_nexus_workspace(*, override: Optional[str] = None) -> Path:
     if not resolved.is_absolute():
         raise NexusPathError("workspace_root_must_be_absolute", resolved_s)
 
+    return resolved
+
+
+def configured_nexus_codex_home(*, override: Optional[str] = None) -> str:
+    """Return configured NEXUS_CODEX_HOME string without creating directories."""
+    if override is not None:
+        raw = str(override).strip()
+    else:
+        raw = str(os.environ.get("NEXUS_CODEX_HOME", "")).strip()
+    if not raw:
+        raise NexusPathError(
+            "nexus_codex_home_unconfigured",
+            "ENVIRONMENT_BLOCKED: NEXUS_CODEX_HOME is unset",
+        )
+    return raw
+
+
+def resolve_nexus_codex_home(
+    workspace: Path,
+    *,
+    override: Optional[str] = None,
+) -> Path:
+    """Resolve private Nexus CODEX_HOME outside the Agent workspace.
+
+    Fail-closed rules:
+    - absolute path required
+    - directory must already exist (never created on import / resolve)
+    - canonical path must be outside the Nexus workspace
+    - must not be /opt/frontend or under it
+    - must not be formal /root/.codex or under it
+    - symlink targets that land in those forbidden areas are rejected
+    """
+    raw = configured_nexus_codex_home(override=override)
+    candidate = Path(raw)
+    if not candidate.is_absolute():
+        raise NexusPathError(
+            "nexus_codex_home_must_be_absolute",
+            f"ENVIRONMENT_BLOCKED: NEXUS_CODEX_HOME must be absolute: {raw}",
+        )
+
+    normalized = os.path.normpath(raw)
+    for forbidden in _FORBIDDEN_FALLBACKS:
+        if normalized == forbidden or normalized.startswith(forbidden + os.sep):
+            raise NexusPathError(
+                "nexus_codex_home_forbidden",
+                f"ENVIRONMENT_BLOCKED: NEXUS_CODEX_HOME under forbidden path: {normalized}",
+            )
+    if normalized == _FORMAL_CODEX_HOME or normalized.startswith(
+        _FORMAL_CODEX_HOME + os.sep
+    ):
+        raise NexusPathError(
+            "nexus_codex_home_is_formal",
+            "ENVIRONMENT_BLOCKED: NEXUS_CODEX_HOME must not be formal /root/.codex",
+        )
+
+    try:
+        ws = workspace.resolve(strict=True)
+    except (OSError, FileNotFoundError) as exc:
+        raise NexusPathError("workspace_root_invalid", str(workspace)) from exc
+
+    try:
+        resolved = candidate.resolve(strict=False)
+    except (OSError, RuntimeError) as exc:
+        raise NexusPathError(
+            "nexus_codex_home_unresolvable",
+            f"ENVIRONMENT_BLOCKED: NEXUS_CODEX_HOME unresolvable: {raw}",
+        ) from exc
+
+    resolved_s = str(resolved)
+    for forbidden in _FORBIDDEN_FALLBACKS:
+        if resolved_s == forbidden or resolved_s.startswith(forbidden + os.sep):
+            raise NexusPathError(
+                "nexus_codex_home_forbidden",
+                f"ENVIRONMENT_BLOCKED: NEXUS_CODEX_HOME under forbidden path: {resolved_s}",
+            )
+
+    formal = str(Path(_FORMAL_CODEX_HOME).resolve(strict=False))
+    if resolved_s == formal or resolved_s.startswith(formal + os.sep):
+        raise NexusPathError(
+            "nexus_codex_home_is_formal",
+            "ENVIRONMENT_BLOCKED: NEXUS_CODEX_HOME must not be formal /root/.codex",
+        )
+
+    try:
+        resolved.relative_to(ws)
+    except ValueError:
+        pass
+    else:
+        raise NexusPathError(
+            "nexus_codex_home_inside_workspace",
+            "ENVIRONMENT_BLOCKED: NEXUS_CODEX_HOME must be outside Nexus workspace",
+        )
+
+    if not resolved.exists():
+        raise NexusPathError(
+            "nexus_codex_home_missing",
+            f"ENVIRONMENT_BLOCKED: NEXUS_CODEX_HOME does not exist: {resolved_s}",
+        )
+    if not resolved.is_dir():
+        raise NexusPathError(
+            "nexus_codex_home_not_directory",
+            f"ENVIRONMENT_BLOCKED: NEXUS_CODEX_HOME is not a directory: {resolved_s}",
+        )
     return resolved
 
 

@@ -23,7 +23,7 @@ from nexus_events import FROZEN_EVENTS, PUBLIC_FIELDS, make_event, redact_value 
 from nexus_git import git_summary  # noqa: E402
 from nexus_paths import NexusPathError, resolve_under_nexus  # noqa: E402
 from nexus_routes import create_nexus_blueprint  # noqa: E402
-from nexus_runtime import NexusBusyError, NexusRuntime  # noqa: E402
+from nexus_runtime import NexusBusyError, NexusRuntime, NexusTurnError  # noqa: E402
 import unittest.mock  # noqa: E402
 
 
@@ -785,6 +785,48 @@ class NexusR2CodexGateTests(unittest.TestCase):
         self.assertEqual(resp.status_code, 503)
         self.assertEqual(resp.get_json()["code"], "codex_unavailable")
 
+    def test_codex_availability_requires_home_auth_and_profile_version(self):
+        import codex_app_server as cas
+        from nexus_adapters import CodexNexusAdapter
+
+        with tempfile.TemporaryDirectory() as home:
+            def fake_run(cmd, **kwargs):
+                if cmd[-2:] == ["login", "status"]:
+                    return unittest.mock.Mock(returncode=0, stdout="logged in")
+                if cmd[-1:] == ["--version"]:
+                    return unittest.mock.Mock(returncode=0, stdout="codex-cli 0.138.0")
+                return unittest.mock.Mock(returncode=1, stdout="")
+
+            with unittest.mock.patch.dict(
+                os.environ, {"NEXUS_CODEX_HOME": home}
+            ), unittest.mock.patch.object(
+                cas, "find_codex", return_value="/tmp/fake-codex"
+            ), unittest.mock.patch.object(
+                cas.subprocess, "run", side_effect=fake_run
+            ):
+                adapter = CodexNexusAdapter(self.root)
+
+        self.assertTrue(adapter.hard_workspace_confinement)
+        self.assertEqual(adapter.availability_detail, "")
+
+    def test_codex_unavailable_detail_distinguishes_missing_auth(self):
+        import codex_app_server as cas
+        from nexus_adapters import CodexNexusAdapter
+
+        with tempfile.TemporaryDirectory() as home, unittest.mock.patch.dict(
+            os.environ, {"NEXUS_CODEX_HOME": home}
+        ), unittest.mock.patch.object(
+            cas, "find_codex", return_value="/tmp/fake-codex"
+        ), unittest.mock.patch.object(
+            cas.subprocess,
+            "run",
+            return_value=unittest.mock.Mock(returncode=1, stdout="not logged in"),
+        ):
+            adapter = CodexNexusAdapter(self.root)
+
+        self.assertFalse(adapter.hard_workspace_confinement)
+        self.assertIn("not authenticated", adapter.availability_detail)
+
     def test_nexus_env_allowlist_excludes_secrets(self):
         import codex_app_server as cas
 
@@ -830,7 +872,14 @@ class NexusR2CodexGateTests(unittest.TestCase):
         def fake_request(method, params, **kwargs):
             captured["method"] = method
             captured["params"] = dict(params)
-            return {"thread": {"id": "thr-ephemeral", "path": None}}
+            return {
+                "thread": {
+                    "id": "thr-ephemeral",
+                    "path": None,
+                    "activePermissionProfile": {"id": "hayagarden_nexus"},
+                    "runtimeWorkspaceRoots": [str(self.root)],
+                }
+            }
 
         with unittest.mock.patch.object(server, "_request_locked", side_effect=fake_request):
             tid = server._ensure_bound_thread_locked(None, "dev")
@@ -838,6 +887,11 @@ class NexusR2CodexGateTests(unittest.TestCase):
         self.assertEqual(captured["method"], "thread/start")
         self.assertTrue(captured["params"].get("ephemeral") is True)
         self.assertEqual(captured["params"].get("serviceName"), "hayagarden_nexus")
+        self.assertEqual(captured["params"].get("permissions"), "hayagarden_nexus")
+        self.assertEqual(
+            captured["params"].get("runtimeWorkspaceRoots"), [str(self.root)]
+        )
+        self.assertNotIn("sandbox", captured["params"])
 
     def test_runtime_memory_only_after_restart(self):
         claude = FakeClaudeAdapter(self.root)
@@ -1067,6 +1121,32 @@ class NexusR3InterruptFidelityTests(unittest.TestCase):
         ev = _drain_events(runtime, nxt["turn_id"])
         self.assertEqual(ev[-1]["event"], "done")
 
+    def test_serial_gate_stays_blocked_when_provider_stop_unconfirmed(self):
+        claude = FakeClaudeAdapter(self.root, hang=True)
+        claude.interrupt_err_code = "interrupt_failed"
+        claude.stop_confirmed = False
+        runtime = self._runtime(claude)
+        r = runtime.start_turn("claude", "gate-blocked")
+        time.sleep(0.05)
+        runtime.interrupt(r["turn_id"])
+        _drain_events(runtime, r["turn_id"], timeout=3)
+        deadline = time.time() + 2
+        while not runtime._provider_stop_blocked and time.time() < deadline:
+            time.sleep(0.01)
+        self.assertTrue(runtime._provider_stop_blocked)
+        self.assertEqual(runtime._active_turn_id, r["turn_id"])
+        self.assertFalse(runtime._turns[r["turn_id"]].provider_stop_confirmed)
+        terminal = [
+            event
+            for event in runtime._turns[r["turn_id"]].events
+            if event["event"] == "err"
+        ][-1]
+        self.assertFalse(terminal["data"]["provider_stop_confirmed"])
+        with self.assertRaises(NexusTurnError) as ctx:
+            runtime.start_turn("codex", "must-not-start")
+        self.assertEqual(ctx.exception.code, "provider_stop_unconfirmed")
+        self.assertEqual(ctx.exception.status, 503)
+
 
 class NexusR3CodexSessionTests(unittest.TestCase):
     """R3: ephemeral session continuity, interrupt id lifecycle, auth/home, rename."""
@@ -1144,6 +1224,60 @@ class NexusR3CodexSessionTests(unittest.TestCase):
         # Second turn resumes the first ephemeral thread id — never forced None.
         self.assertEqual(servers[0].thread_ids_seen, [None, "ephemeral-thread-A"])
         self.assertEqual(len(servers), 1)
+
+    def test_adapter_updates_session_when_resume_is_replaced(self):
+        from nexus_adapters import CodexNexusAdapter
+
+        class LiveCodex(CodexNexusAdapter):
+            hard_workspace_confinement = True
+
+        class ReplacingServer:
+            def stream_bound_turn(self, thread_id, instructions, prompt, **kwargs):
+                self.old_id = thread_id
+                yield "meta", {
+                    "phase": "turn_started",
+                    "thread_id": "ephemeral-thread-new",
+                    "turn_id": "turn-new",
+                }
+                yield "done", {
+                    "thread_id": "ephemeral-thread-new",
+                    "turn_id": "turn-new",
+                    "status": "completed",
+                }
+
+        server = ReplacingServer()
+        adapter = LiveCodex(self.root, server_factory=lambda **kwargs: server)
+        adapter.session_id = "ephemeral-thread-stale"
+        events = list(adapter.stream_turn("replace stale resume"))
+        self.assertEqual(server.old_id, "ephemeral-thread-stale")
+        self.assertEqual(adapter.session_id, "ephemeral-thread-new")
+        self.assertEqual(events[-1][0], "done")
+        self.assertEqual(events[-1][1]["session_id"], "ephemeral-thread-new")
+
+    def test_ensure_provider_stopped_requires_confirmation(self):
+        from nexus_adapters import CodexNexusAdapter
+
+        class LiveCodex(CodexNexusAdapter):
+            hard_workspace_confinement = True
+
+        class FakeServer:
+            def __init__(self):
+                self.confirmed = False
+
+            def stop_process_tree(self):
+                return self.confirmed
+
+        server = FakeServer()
+        adapter = LiveCodex(self.root, server_factory=lambda **kwargs: server)
+        adapter._server = server
+        adapter.session_id = "keep-until-confirmed"
+        self.assertFalse(adapter.ensure_provider_stopped())
+        self.assertIs(adapter._server, server)
+        self.assertEqual(adapter.session_id, "keep-until-confirmed")
+        server.confirmed = True
+        self.assertTrue(adapter.ensure_provider_stopped())
+        self.assertIsNone(adapter._server)
+        self.assertIsNone(adapter.session_id)
 
     def test_interrupt_uses_server_active_turn_not_stale_cache(self):
         from nexus_adapters import CodexNexusAdapter
@@ -1316,7 +1450,7 @@ class NexusR3CodexSessionTests(unittest.TestCase):
     def test_nexus_auth_probe_uses_allowlist_codex_home(self):
         import codex_app_server as cas
 
-        home = self.root / ".nexus-codex-home"
+        home = self.root / "auth-probe-home"
         home.mkdir()
         server = cas.CodexAppServer(
             cwd=str(self.root),
@@ -1343,35 +1477,33 @@ class NexusR3CodexSessionTests(unittest.TestCase):
         self.assertNotIn("BOARD_TOKEN", captured["env"])
 
     def test_restart_has_no_recoverable_nexus_thread_on_disk(self):
-        home = self.root / ".nexus-codex-home"
-        home.mkdir()
-        # Simulate leftover provider files that must not be treated as recoverable
-        # Nexus session state across Python process restart.
-        (home / "sessions").mkdir()
-        (home / "sessions" / "rollout-fake.jsonl").write_text("{}", encoding="utf-8")
-        claude = FakeClaudeAdapter(self.root)
-        codex = FakeCodexAdapter(self.root)
-        runtime = NexusRuntime(
-            workspace=self.root,
-            adapters={"claude": claude, "codex": codex},
-        )
-        r = runtime.start_turn("claude", "one")
-        _drain_events(runtime, r["turn_id"])
-        runtime2 = NexusRuntime(
-            workspace=self.root,
-            adapters={"claude": FakeClaudeAdapter(self.root), "codex": FakeCodexAdapter(self.root)},
-        )
-        self.assertEqual(runtime2.list_turns(), [])
-        self.assertIsNone(runtime2.status()["active_turn_id"])
-        self.assertIsNone(runtime2.status()["sessions"]["codex"]["session_id"])
-        self.assertFalse(runtime2.status()["sessions"]["codex"]["exists"])
-        # Disk leftovers under .nexus-codex-home are not a recoverable Nexus thread.
-        self.assertTrue((home / "sessions" / "rollout-fake.jsonl").exists())
-        summary = git_summary(self.root)
-        self.assertTrue(
-            all(".nexus-codex-home" not in p for p in summary["changed_files"]),
-            summary["changed_files"],
-        )
+        with tempfile.TemporaryDirectory() as home_tmp:
+            home = Path(home_tmp)
+            # Provider files outside the workspace are never Nexus runtime state.
+            (home / "sessions").mkdir()
+            (home / "sessions" / "rollout-fake.jsonl").write_text(
+                "{}", encoding="utf-8"
+            )
+            claude = FakeClaudeAdapter(self.root)
+            codex = FakeCodexAdapter(self.root)
+            runtime = NexusRuntime(
+                workspace=self.root,
+                adapters={"claude": claude, "codex": codex},
+            )
+            r = runtime.start_turn("claude", "one")
+            _drain_events(runtime, r["turn_id"])
+            runtime2 = NexusRuntime(
+                workspace=self.root,
+                adapters={
+                    "claude": FakeClaudeAdapter(self.root),
+                    "codex": FakeCodexAdapter(self.root),
+                },
+            )
+            self.assertEqual(runtime2.list_turns(), [])
+            self.assertIsNone(runtime2.status()["active_turn_id"])
+            self.assertIsNone(runtime2.status()["sessions"]["codex"]["session_id"])
+            self.assertFalse(runtime2.status()["sessions"]["codex"]["exists"])
+            self.assertTrue((home / "sessions" / "rollout-fake.jsonl").exists())
 
     def test_git_staged_and_unstaged_rename_target_only(self):
         from nexus_git import _parse_porcelain_z

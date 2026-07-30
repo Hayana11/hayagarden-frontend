@@ -6,6 +6,7 @@ import os
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -15,6 +16,8 @@ if ROOT not in sys.path:
 from nexus_paths import (  # noqa: E402
     DEFAULT_NEXUS_WORKSPACE_ROOT,
     NexusPathError,
+    configured_nexus_codex_home,
+    resolve_nexus_codex_home,
     resolve_nexus_workspace,
     resolve_under_nexus,
 )
@@ -73,6 +76,52 @@ class NexusPathTests(unittest.TestCase):
             self.assertTrue(root.is_dir())
             child = resolve_under_nexus(root, "a/b.txt")
             self.assertTrue(str(child).startswith(str(root)))
+
+    def test_nexus_codex_home_unset_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=False
+        ):
+            os.environ.pop("NEXUS_CODEX_HOME", None)
+            with self.assertRaises(NexusPathError) as ctx:
+                configured_nexus_codex_home()
+            self.assertEqual(ctx.exception.code, "nexus_codex_home_unconfigured")
+            with self.assertRaises(NexusPathError):
+                resolve_nexus_codex_home(Path(tmp))
+
+    def test_nexus_codex_home_rejects_workspace_and_forbidden_homes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            workspace.mkdir()
+            inside = workspace / "codex-home"
+            inside.mkdir()
+            with self.assertRaises(NexusPathError) as ctx:
+                resolve_nexus_codex_home(workspace, override=str(inside))
+            self.assertEqual(ctx.exception.code, "nexus_codex_home_inside_workspace")
+
+            with self.assertRaises(NexusPathError) as ctx:
+                resolve_nexus_codex_home(workspace, override="/opt/frontend")
+            self.assertEqual(ctx.exception.code, "nexus_codex_home_forbidden")
+
+            with self.assertRaises(NexusPathError) as ctx:
+                resolve_nexus_codex_home(workspace, override="/root/.codex")
+            self.assertEqual(ctx.exception.code, "nexus_codex_home_is_formal")
+
+    def test_nexus_codex_home_missing_and_valid_external(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            workspace = base / "workspace"
+            workspace.mkdir()
+            missing = base / "missing-home"
+            with self.assertRaises(NexusPathError) as ctx:
+                resolve_nexus_codex_home(workspace, override=str(missing))
+            self.assertEqual(ctx.exception.code, "nexus_codex_home_missing")
+
+            external = base / "external-home"
+            external.mkdir()
+            self.assertEqual(
+                resolve_nexus_codex_home(workspace, override=str(external)),
+                external.resolve(),
+            )
 
 
 if __name__ == "__main__":

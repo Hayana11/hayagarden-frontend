@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -23,6 +24,7 @@ from typing import Any, Callable, Iterator, Optional
 
 from nexus_events import normalize_event_name, redact_value
 from nexus_git import git_summary
+from nexus_paths import NexusPathError, resolve_nexus_codex_home
 
 EventTuple = tuple[str, dict[str, Any]]
 
@@ -32,8 +34,8 @@ CLAUDE_HARD_CONFINEMENT_AVAILABLE = False
 CODEX_HARD_CONFINEMENT_AVAILABLE = False
 
 CODEX_BLOCKED_DETAIL = (
-    "ENVIRONMENT_BLOCKED: Codex workspace-write is not read isolation; "
-    "no reusable hard workspace confinement for Codex"
+    "ENVIRONMENT_BLOCKED: Codex requires an external NEXUS_CODEX_HOME, "
+    "authentication in that home, and native permission-profile isolation"
 )
 
 
@@ -73,6 +75,48 @@ class BaseNexusAdapter:
 
     def stream_turn(self, instruction: str) -> Iterator[EventTuple]:
         raise NotImplementedError
+
+
+def _codex_supports_permission_profiles(binary: str, env: dict[str, str]) -> bool:
+    """Recognize Codex 0.138+ or an explicit permission-profile CLI surface."""
+    try:
+        version = subprocess.run(
+            [binary, "--version"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            timeout=6,
+            env=env,
+        )
+        output = str(version.stdout or "")
+        match = re.search(r"(?<!\d)(\d+)\.(\d+)(?:\.\d+)?", output)
+        if version.returncode == 0 and match:
+            major, minor = int(match.group(1)), int(match.group(2))
+            if major > 0 or minor >= 138:
+                return True
+        if "permissionProfile/list" in output:
+            return True
+    except (OSError, subprocess.SubprocessError, ValueError):
+        pass
+
+    for args in (["sandbox", "--help"], ["app-server", "--help"]):
+        try:
+            probe = subprocess.run(
+                [binary, *args],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                timeout=6,
+                env=env,
+            )
+            output = str(probe.stdout or "")
+            if "permissionProfile/list" in output or re.search(
+                r"(^|\s)-P(?:[,\s]|$)", output
+            ):
+                return True
+        except (OSError, subprocess.SubprocessError):
+            continue
+    return False
 
 
 class ClaudeStreamNormalizer:
@@ -331,9 +375,8 @@ class ClaudeNexusAdapter(BaseNexusAdapter):
 class CodexNexusAdapter(BaseNexusAdapter):
     """Nexus-owned CodexAppServer instance (never the global singleton).
 
-    ``workspace-write`` is write confinement only. Without verifiable read
-    isolation, hard_workspace_confinement stays False and the runtime keeps
-    Codex unavailable (ENVIRONMENT_BLOCKED).
+    Availability requires a pre-existing external NEXUS_CODEX_HOME, auth in
+    that same home, and a Codex release with native permission profiles.
 
     Ephemeral thread ids are process-local only: the same Nexus app-server
     process may resume the prior id; a restart must not recover from disk.
@@ -348,7 +391,69 @@ class CodexNexusAdapter(BaseNexusAdapter):
         self._server = None
         self._active_codex_turn_id: Optional[str] = None
         self._active_codex_thread_id: Optional[str] = None
-        self._codex_home = workspace / ".nexus-codex-home"
+        self._codex_home: Path | None = None
+        self.availability_detail = CODEX_BLOCKED_DETAIL
+        self.hard_workspace_confinement = False
+
+        # Explicit factories are test/integration injection points. A subclass
+        # must opt in to confinement; no live process readiness is claimed.
+        if server_factory is not None:
+            self.hard_workspace_confinement = bool(
+                getattr(type(self), "hard_workspace_confinement", False)
+            )
+            return
+
+        try:
+            self._codex_home = resolve_nexus_codex_home(workspace)
+        except NexusPathError as exc:
+            self.availability_detail = exc.detail
+            return
+
+        from codex_app_server import CodexAppServer, find_codex
+
+        binary = find_codex()
+        if not binary:
+            self.availability_detail = (
+                "ENVIRONMENT_BLOCKED: Codex binary is not installed or executable"
+            )
+            return
+
+        probe_server = CodexAppServer(
+            cwd=str(self.workspace),
+            db_path=os.devnull,
+            sandbox="workspace-write",
+            env_mode="nexus_allowlist",
+            codex_home=str(self._codex_home),
+            ephemeral_threads=True,
+            service_name="hayagarden_nexus",
+        )
+        try:
+            auth = probe_server._nexus_auth_status()
+        except Exception as exc:
+            self.availability_detail = (
+                f"ENVIRONMENT_BLOCKED: Nexus CODEX_HOME auth probe failed: {exc}"
+            )
+            return
+        if not auth.get("authenticated"):
+            self.availability_detail = (
+                "ENVIRONMENT_BLOCKED: Nexus CODEX_HOME is not authenticated"
+            )
+            return
+        try:
+            env = probe_server._environment()
+        except Exception as exc:
+            self.availability_detail = (
+                f"ENVIRONMENT_BLOCKED: Nexus Codex environment is invalid: {exc}"
+            )
+            return
+        if not _codex_supports_permission_profiles(binary, env):
+            self.availability_detail = (
+                "ENVIRONMENT_BLOCKED: installed Codex lacks native permission-profile "
+                "isolation (requires 0.138+ or an equivalent profile API)"
+            )
+            return
+        self.hard_workspace_confinement = True
+        self.availability_detail = ""
 
     def begin_turn(self) -> None:
         # Clear previous turn ids at accept time; keep session_id for in-process
@@ -364,7 +469,10 @@ class CodexNexusAdapter(BaseNexusAdapter):
             else:
                 from codex_app_server import CodexAppServer
 
-                self._codex_home.mkdir(parents=True, exist_ok=True)
+                if self._codex_home is None:
+                    raise AdapterError(
+                        "codex_unavailable", self.availability_detail
+                    )
                 self._server = CodexAppServer(
                     cwd=str(self.workspace),
                     db_path=os.devnull,
@@ -394,36 +502,44 @@ class CodexNexusAdapter(BaseNexusAdapter):
         except Exception:
             pass
 
-    def ensure_provider_stopped(self) -> None:
-        """Kill the Nexus-owned app-server when interrupt was not confirmed."""
+    def ensure_provider_stopped(self) -> bool:
+        """Confirm the Nexus app-server process tree stopped before forgetting it."""
         server = self._server
-        self._server = None
-        self.session_id = None
-        self._active_codex_turn_id = None
-        self._active_codex_thread_id = None
         if server is None:
-            return
+            self.session_id = None
+            self._active_codex_turn_id = None
+            self._active_codex_thread_id = None
+            return True
+        confirmed = False
         try:
-            if hasattr(server, "stop"):
-                server.stop()
+            if hasattr(server, "stop_process_tree"):
+                confirmed = bool(server.stop_process_tree())
+            elif hasattr(server, "stop"):
+                confirmed = bool(server.stop())
             elif hasattr(server, "close"):
-                server.close()
+                confirmed = bool(server.close())
             elif hasattr(server, "_stop_locked"):
                 lock = getattr(server, "_lock", None)
                 if lock is not None:
                     with lock:
-                        server._stop_locked()
+                        confirmed = bool(server._stop_locked())
                 else:
-                    server._stop_locked()
+                    confirmed = bool(server._stop_locked())
         except Exception:
-            pass
+            confirmed = False
+        if confirmed:
+            self._server = None
+            self.session_id = None
+            self._active_codex_turn_id = None
+            self._active_codex_thread_id = None
+        return confirmed
 
     def stream_turn(self, instruction: str) -> Iterator[EventTuple]:
         # Do NOT clear cancel here — begin_turn() runs at accept time only.
         if not self.hard_workspace_confinement:
             yield "err", {
                 "code": "codex_unavailable",
-                "message": CODEX_BLOCKED_DETAIL,
+                "message": self.availability_detail or CODEX_BLOCKED_DETAIL,
             }
             return
 
@@ -536,9 +652,11 @@ class FakeClaudeAdapter(BaseNexusAdapter):
         self.emit_after_interrupt: list[EventTuple] = []
         self.interrupt_err_code: Optional[str] = None
         self.ensure_stopped_calls = 0
+        self.stop_confirmed = True
 
-    def ensure_provider_stopped(self) -> None:
+    def ensure_provider_stopped(self) -> bool:
         self.ensure_stopped_calls += 1
+        return self.stop_confirmed
 
     def stream_turn(self, instruction: str) -> Iterator[EventTuple]:
         # Do NOT clear cancel here — begin_turn() runs at accept time.
@@ -591,6 +709,7 @@ class FakeCodexAdapter(BaseNexusAdapter):
         self._interrupt_delay = 0.0
         self.interrupt_err_code: Optional[str] = None
         self.ensure_stopped_calls = 0
+        self.stop_confirmed = True
 
     def request_interrupt(self) -> None:
         self.interrupt_entered.set()
@@ -602,8 +721,9 @@ class FakeCodexAdapter(BaseNexusAdapter):
                 time.sleep(0.01)
         super().request_interrupt()
 
-    def ensure_provider_stopped(self) -> None:
+    def ensure_provider_stopped(self) -> bool:
         self.ensure_stopped_calls += 1
+        return self.stop_confirmed
 
     def stream_turn(self, instruction: str) -> Iterator[EventTuple]:
         # Do NOT clear cancel here — begin_turn() runs at accept time.

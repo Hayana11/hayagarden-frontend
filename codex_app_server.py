@@ -12,6 +12,7 @@ from collections import deque
 import json
 import os
 import queue
+import signal
 import shutil
 import subprocess
 import threading
@@ -24,6 +25,7 @@ import group_chat_store
 DEFAULT_DB_PATH = os.environ.get("HAYA_DB_PATH", "/opt/frontend/memories.db")
 DEFAULT_CWD = os.environ.get("CODEX_CHAT_CWD", "/tmp/hayagarden-codex-chat")
 DEFAULT_CODEX_HOME = os.environ.get("CODEX_HOME", "/root/.codex")
+NEXUS_PERMISSION_PROFILE = "hayagarden_nexus"
 _CODEX_CANDIDATES = (
     os.environ.get("CODEX_BIN", ""),
     "/root/.local/bin/codex",
@@ -113,11 +115,17 @@ class CodexAppServer:
         if env_mode not in {"inherit", "nexus_allowlist"}:
             raise ValueError("invalid env_mode")
         self.env_mode = env_mode
+        self._nexus_mode = env_mode == "nexus_allowlist"
         self.codex_home = codex_home
         self.ephemeral_threads = bool(ephemeral_threads)
         self.service_name = service_name
         self._lock = threading.RLock()
         self._process: subprocess.Popen | None = None
+        self._process_pgid: int | None = None
+        self._stop_confirmed = True
+        self._last_start_result: dict | None = None
+        self._session_resumed = False
+        self._last_resume_error: str | None = None
         self._messages: queue.Queue = queue.Queue()
         self._request_id = 0
         self._stderr_tail: deque[str] = deque(maxlen=40)
@@ -237,37 +245,138 @@ class CodexAppServer:
             result["detail"] = "Nexus CODEX_HOME 状态检查失败"
         return result
 
+    def _ensure_nexus_permission_profile(self) -> None:
+        """Merge the Nexus permission profile into an existing private CODEX_HOME."""
+        home = self.codex_home
+        if not home or not os.path.isdir(home):
+            raise CodexAppServerError(
+                "Nexus CODEX_HOME must already exist and be a directory"
+            )
+
+        config_path = os.path.join(home, "config.toml")
+        existing = ""
+        try:
+            if os.path.exists(config_path):
+                with open(config_path, "r", encoding="utf-8") as handle:
+                    existing = handle.read()
+        except OSError as exc:
+            raise CodexAppServerError(
+                f"Nexus CODEX_HOME config.toml could not be read: {exc}"
+            ) from exc
+
+        # Preserve unrelated top-level keys and tables. Replace only the Nexus
+        # profile tables and the top-level default_permissions assignment.
+        kept: list[str] = []
+        section = ""
+        skip_nexus_section = False
+        for line in existing.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("[") and stripped.endswith("]"):
+                section = stripped[1:-1].strip()
+                skip_nexus_section = (
+                    section == f"permissions.{NEXUS_PERMISSION_PROFILE}"
+                    or section.startswith(
+                        f"permissions.{NEXUS_PERMISSION_PROFILE}."
+                    )
+                )
+                if skip_nexus_section:
+                    continue
+            if skip_nexus_section:
+                continue
+            if section == "" and stripped.split("=", 1)[0].strip() == "default_permissions":
+                continue
+            kept.append(line)
+
+        home_key = json.dumps(os.path.abspath(home), ensure_ascii=False)
+        profile = [
+            f'default_permissions = "{NEXUS_PERMISSION_PROFILE}"',
+            "",
+            f"[permissions.{NEXUS_PERMISSION_PROFILE}]",
+            'description = "HayaGarden Nexus hard isolation"',
+            "",
+            f"[permissions.{NEXUS_PERMISSION_PROFILE}.filesystem]",
+            '":minimal" = "read"',
+            f"{home_key} = \"deny\"",
+            '"/opt/frontend" = "deny"',
+            '"/root/.codex" = "deny"',
+            "",
+            f'[permissions.{NEXUS_PERMISSION_PROFILE}.filesystem.":workspace_roots"]',
+            '"." = "write"',
+            "",
+            f"[permissions.{NEXUS_PERMISSION_PROFILE}.network]",
+            "enabled = false",
+        ]
+        prefix = "\n".join(kept).rstrip()
+        merged = (prefix + "\n\n" if prefix else "") + "\n".join(profile) + "\n"
+        temporary = config_path + ".nexus.tmp"
+        try:
+            with open(temporary, "w", encoding="utf-8") as handle:
+                handle.write(merged)
+            os.replace(temporary, config_path)
+        except OSError as exc:
+            try:
+                os.unlink(temporary)
+            except OSError:
+                pass
+            raise CodexAppServerError(
+                f"Nexus CODEX_HOME config.toml could not be updated: {exc}"
+            ) from exc
+
     def _start_locked(self) -> None:
         if self._process is not None and self._process.poll() is None:
             return
+        if self._nexus_mode:
+            if not self.codex_home or not os.path.isdir(self.codex_home):
+                raise CodexAppServerError(
+                    "Nexus CODEX_HOME must already exist and be a directory"
+                )
+            self._ensure_nexus_permission_profile()
         binary = find_codex()
         if not binary:
             raise CodexAppServerError("蓝色线路尚未安装")
-        if self.env_mode == "nexus_allowlist":
+        if self._nexus_mode:
             status = self._nexus_auth_status()
         else:
             status = runtime_status(force=True)
         if not status["authenticated"]:
             raise CodexAppServerError(status.get("detail") or "蓝色线路等待登录")
         os.makedirs(self.cwd, exist_ok=True)
-        if self.codex_home:
+        if self.codex_home and not self._nexus_mode:
             os.makedirs(self.codex_home, exist_ok=True)
         self._messages = queue.Queue()
         self._stderr_tail.clear()
+        popen_kwargs = {
+            "stdin": subprocess.PIPE,
+            "stdout": subprocess.PIPE,
+            "stderr": subprocess.PIPE,
+            "text": True,
+            "bufsize": 1,
+            "cwd": self.cwd,
+            "env": self._environment(),
+        }
+        if self._nexus_mode:
+            popen_kwargs["start_new_session"] = True
         try:
             process = subprocess.Popen(
                 [binary, "app-server", "--listen", "stdio://"],
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                bufsize=1,
-                cwd=self.cwd,
-                env=self._environment(),
+                **popen_kwargs,
             )
         except OSError as exc:
             raise CodexAppServerError(f"蓝色线路启动失败：{exc}") from exc
         self._process = process
+        self._stop_confirmed = False
+        if self._nexus_mode:
+            try:
+                self._process_pgid = os.getpgid(process.pid)
+            except OSError as exc:
+                try:
+                    process.terminate()
+                except Exception:
+                    pass
+                self._process = None
+                raise CodexAppServerError(
+                    f"Nexus Codex process group could not be recorded: {exc}"
+                ) from exc
         threading.Thread(
             target=self._reader, args=(process, self._messages), daemon=True
         ).start()
@@ -288,10 +397,12 @@ class CodexAppServer:
         )
         self._send_locked({"method": "initialized", "params": {}})
 
-    def _stop_locked(self) -> None:
+    def _stop_locked(self) -> bool:
+        if self._nexus_mode:
+            return self._stop_process_tree_locked()
         process, self._process = self._process, None
         if process is None:
-            return
+            return True
         try:
             if process.poll() is None:
                 process.terminate()
@@ -301,14 +412,116 @@ class CodexAppServer:
                 process.kill()
             except Exception:
                 pass
+        return process.poll() is not None
 
-    def close(self) -> None:
+    def clean_background_terminals(self, thread_id: str | None) -> bool:
+        """Best-effort cleanup of terminals owned by one Nexus thread."""
+        if not thread_id:
+            return True
         with self._lock:
-            self._stop_locked()
+            process = self._process
+            if process is None or process.poll() is not None:
+                return True
+            try:
+                self._request_locked(
+                    "thread/backgroundTerminals/clean",
+                    {"threadId": thread_id},
+                    timeout=2,
+                    ensure_started=False,
+                )
+                return True
+            except Exception:
+                return False
 
-    def stop(self) -> None:
+    @staticmethod
+    def _process_group_alive(pgid: int | None) -> bool:
+        if not pgid or pgid == os.getpgrp():
+            return False
+        try:
+            os.killpg(pgid, 0)
+            return True
+        except ProcessLookupError:
+            return False
+        except (PermissionError, OSError):
+            return True
+
+    def _stop_process_tree_locked(
+        self, *, soft_timeout: float = 4, hard_timeout: float = 3
+    ) -> bool:
+        process = self._process
+        pgid = self._process_pgid
+        thread_id = self._active_thread_id
+        self._stop_confirmed = process is None or process.poll() is not None
+
+        if process is not None:
+            self.clean_background_terminals(thread_id)
+            try:
+                if process.stdin is not None:
+                    process.stdin.close()
+            except Exception:
+                pass
+            try:
+                if process.poll() is None:
+                    process.terminate()
+            except Exception:
+                pass
+            try:
+                process.wait(timeout=max(0.0, soft_timeout))
+            except Exception:
+                pass
+
+            if self._process_group_alive(pgid):
+                try:
+                    os.killpg(pgid, signal.SIGTERM)
+                except (ProcessLookupError, PermissionError, OSError):
+                    pass
+
+            deadline = time.monotonic() + max(0.0, hard_timeout)
+            while self._process_group_alive(pgid) and time.monotonic() < deadline:
+                time.sleep(0.05)
+
+            if self._process_group_alive(pgid):
+                try:
+                    os.killpg(pgid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError, OSError):
+                    pass
+            try:
+                if process.poll() is None:
+                    process.kill()
+            except Exception:
+                pass
+            try:
+                process.wait(timeout=1)
+            except Exception:
+                pass
+            self._stop_confirmed = process.poll() is not None
+
+        self._process = None
+        self._process_pgid = None
+        self._active_turn_id = None
+        self._active_thread_id = None
+        return self._stop_confirmed
+
+    def stop_process_tree(
+        self, *, soft_timeout: float = 4, hard_timeout: float = 3
+    ) -> bool:
+        """Stop the Nexus app-server and every process in its session group."""
+        with self._lock:
+            if not self._nexus_mode:
+                return self._stop_locked()
+            return self._stop_process_tree_locked(
+                soft_timeout=soft_timeout, hard_timeout=hard_timeout
+            )
+
+    def close(self) -> bool:
+        with self._lock:
+            if self._nexus_mode:
+                return self._stop_process_tree_locked()
+            return self._stop_locked()
+
+    def stop(self) -> bool:
         """Public alias used by Nexus when interrupt is not provider-confirmed."""
-        self.close()
+        return self.close()
 
     def _send_locked(self, payload: dict) -> None:
         process = self._process
@@ -436,33 +649,59 @@ class CodexAppServer:
         Nexus ephemeral threads are in-process only (path must stay null) but the
         same app-server process may resume the prior ephemeral thread id.
         """
-        common = {
-            "cwd": self.cwd,
-            "approvalPolicy": "never",
-            "approvalsReviewer": "user",
-            "developerInstructions": instructions,
-            "sandbox": self.sandbox,
-            "personality": "friendly",
-        }
-        if self.ephemeral_threads:
-            common["ephemeral"] = True
+        if self._nexus_mode:
+            common = {
+                "cwd": self.cwd,
+                "approvalPolicy": "never",
+                "approvalsReviewer": "user",
+                "developerInstructions": instructions,
+                "permissions": NEXUS_PERMISSION_PROFILE,
+                "runtimeWorkspaceRoots": [self.cwd],
+                "personality": "friendly",
+            }
+            resume_common = dict(common)
+            start_common = {**common, "ephemeral": True}
+        else:
+            common = {
+                "cwd": self.cwd,
+                "approvalPolicy": "never",
+                "approvalsReviewer": "user",
+                "developerInstructions": instructions,
+                "sandbox": self.sandbox,
+                "personality": "friendly",
+            }
+            if self.ephemeral_threads:
+                common["ephemeral"] = True
+            resume_common = common
+            start_common = common
+
+        self._session_resumed = False
+        self._last_resume_error = None
         if thread_id:
             try:
-                self._request_locked(
-                    "thread/resume", {"threadId": thread_id, **common}, timeout=30,
+                result = self._request_locked(
+                    "thread/resume",
+                    {"threadId": thread_id, **resume_common},
+                    timeout=30,
                 )
+            except CodexAppServerError as exc:
+                self._last_resume_error = str(exc)
+            else:
+                if self._nexus_mode:
+                    self._record_nexus_thread_result(result, operation="resume")
+                self._session_resumed = True
                 return thread_id
-            except CodexAppServerError:
-                pass
         service = self.service_name or (
             "hayagarden_nexus" if self.ephemeral_threads else "hayagarden_monopoly"
         )
-        start_params = {**common, "serviceName": service}
+        start_params = {**start_common, "serviceName": service}
         result = self._request_locked(
             "thread/start",
             start_params,
             timeout=30,
         )
+        if self._nexus_mode:
+            self._record_nexus_thread_result(result, operation="start")
         new_id = str((result.get("thread") or {}).get("id") or "")
         if not new_id:
             raise CodexAppServerError("Codex game thread did not return an id")
@@ -470,6 +709,27 @@ class CodexAppServer:
         if self.ephemeral_threads and thread.get("path"):
             raise CodexAppServerError("ephemeral Codex thread unexpectedly returned a path")
         return new_id
+
+    def _record_nexus_thread_result(self, result: dict, *, operation: str) -> None:
+        """Fail closed unless Codex confirms the requested native profile."""
+        thread = result.get("thread") if isinstance(result, dict) else None
+        thread = thread if isinstance(thread, dict) else {}
+        profile = result.get("activePermissionProfile") if isinstance(result, dict) else None
+        if profile is None:
+            profile = thread.get("activePermissionProfile")
+        profile_id = profile.get("id") if isinstance(profile, dict) else None
+        if profile_id != NEXUS_PERMISSION_PROFILE:
+            state = "missing" if not profile_id else f"unexpected {profile_id!r}"
+            raise CodexAppServerError(
+                f"thread/{operation} did not activate {NEXUS_PERMISSION_PROFILE}: {state}"
+            )
+
+        roots = result.get("runtimeWorkspaceRoots") if isinstance(result, dict) else None
+        if roots is None:
+            roots = thread.get("runtimeWorkspaceRoots")
+        recorded = dict(result)
+        recorded["runtimeWorkspaceRoots"] = roots
+        self._last_start_result = recorded
 
     def interrupt_turn(self, turn_id: str, thread_id: str | None = None) -> None:
         """Request turn/interrupt with both threadId and turnId.

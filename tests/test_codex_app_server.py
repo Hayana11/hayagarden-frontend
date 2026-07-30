@@ -1,5 +1,9 @@
 import os
+from pathlib import Path
+import subprocess
+import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -127,13 +131,28 @@ class CodexAppServerTests(unittest.TestCase):
             def request(method, params, **kwargs):
                 captured['method'] = method
                 captured['params'] = dict(params)
-                return {'thread': {'id': 't-ephem', 'path': None}}
+                return {
+                    'thread': {
+                        'id': 't-ephem',
+                        'path': None,
+                        'activePermissionProfile': {
+                            'id': codex_app_server.NEXUS_PERMISSION_PROFILE,
+                        },
+                        'runtimeWorkspaceRoots': [tmp],
+                    }
+                }
 
             with mock.patch.object(nexus, '_request_locked', side_effect=request):
                 tid = nexus._ensure_bound_thread_locked(None, 'dev')
             self.assertEqual(tid, 't-ephem')
             self.assertEqual(captured['method'], 'thread/start')
             self.assertTrue(captured['params'].get('ephemeral') is True)
+            self.assertEqual(
+                captured['params'].get('permissions'),
+                codex_app_server.NEXUS_PERMISSION_PROFILE,
+            )
+            self.assertEqual(captured['params'].get('runtimeWorkspaceRoots'), [tmp])
+            self.assertNotIn('sandbox', captured['params'])
 
             # Same process may resume an ephemeral thread id (in-process only).
             captured.clear()
@@ -141,13 +160,202 @@ class CodexAppServerTests(unittest.TestCase):
             def resume_request(method, params, **kwargs):
                 captured['method'] = method
                 captured['params'] = dict(params)
-                return {}
+                return {
+                    'activePermissionProfile': {
+                        'id': codex_app_server.NEXUS_PERMISSION_PROFILE,
+                    },
+                    'runtimeWorkspaceRoots': [tmp],
+                }
 
             with mock.patch.object(nexus, '_request_locked', side_effect=resume_request):
                 tid2 = nexus._ensure_bound_thread_locked('t-ephem', 'dev')
             self.assertEqual(tid2, 't-ephem')
             self.assertEqual(captured['method'], 'thread/resume')
-            self.assertTrue(captured['params'].get('ephemeral') is True)
+            self.assertNotIn('ephemeral', captured['params'])
+            self.assertNotIn('sandbox', captured['params'])
+            self.assertNotIn('serviceName', captured['params'])
+            self.assertTrue(nexus._session_resumed)
+
+    def test_nexus_resume_failure_starts_new_thread_without_claiming_resume(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = os.path.join(tmp, 'home')
+            os.makedirs(home)
+            nexus = codex_app_server.CodexAppServer(
+                cwd=tmp,
+                db_path=os.devnull,
+                env_mode='nexus_allowlist',
+                codex_home=home,
+                ephemeral_threads=True,
+            )
+            calls = []
+
+            def request(method, params, **kwargs):
+                calls.append((method, dict(params)))
+                if method == 'thread/resume':
+                    raise codex_app_server.CodexAppServerError('stale thread')
+                return {
+                    'thread': {
+                        'id': 'thread-new',
+                        'path': None,
+                        'activePermissionProfile': {
+                            'id': codex_app_server.NEXUS_PERMISSION_PROFILE,
+                        },
+                        'runtimeWorkspaceRoots': [tmp],
+                    }
+                }
+
+            with mock.patch.object(nexus, '_request_locked', side_effect=request):
+                thread_id = nexus._ensure_bound_thread_locked('thread-old', 'dev')
+
+            self.assertEqual(thread_id, 'thread-new')
+            self.assertEqual([call[0] for call in calls], ['thread/resume', 'thread/start'])
+            self.assertFalse(nexus._session_resumed)
+            self.assertIn('stale thread', nexus._last_resume_error)
+
+    def test_nexus_thread_fails_closed_without_active_profile(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            nexus = codex_app_server.CodexAppServer(
+                cwd=tmp,
+                db_path=os.devnull,
+                env_mode='nexus_allowlist',
+                codex_home=tmp,
+                ephemeral_threads=True,
+            )
+            with mock.patch.object(
+                nexus,
+                '_request_locked',
+                return_value={'thread': {'id': 'unsafe', 'path': None}},
+            ):
+                with self.assertRaises(codex_app_server.CodexAppServerError):
+                    nexus._ensure_bound_thread_locked(None, 'dev')
+
+    def test_nexus_start_uses_new_session_and_records_pgid(self):
+        with tempfile.TemporaryDirectory() as workspace, tempfile.TemporaryDirectory() as home:
+            process = mock.Mock(pid=4242, stdout=[], stderr=[])
+            process.poll.return_value = None
+            process.stdin = mock.Mock()
+            with mock.patch.object(
+                codex_app_server, 'find_codex', return_value='/tmp/fake-codex'
+            ), mock.patch.object(
+                codex_app_server.CodexAppServer,
+                '_nexus_auth_status',
+                return_value={'authenticated': True},
+            ), mock.patch.object(
+                codex_app_server.subprocess, 'Popen', return_value=process
+            ) as popen, mock.patch.object(
+                codex_app_server.os, 'getpgid', return_value=4242
+            ), mock.patch.object(
+                codex_app_server.CodexAppServer, '_request_locked', return_value={}
+            ), mock.patch.object(
+                codex_app_server.CodexAppServer, '_send_locked'
+            ):
+                nexus = codex_app_server.CodexAppServer(
+                    cwd=workspace,
+                    db_path=os.devnull,
+                    env_mode='nexus_allowlist',
+                    codex_home=home,
+                    ephemeral_threads=True,
+                )
+                nexus._start_locked()
+
+            self.assertTrue(popen.call_args.kwargs['start_new_session'])
+            self.assertEqual(nexus._process_pgid, 4242)
+            self.assertFalse(nexus._stop_confirmed)
+
+    def test_nexus_start_never_creates_missing_codex_home(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            missing = os.path.join(workspace, 'missing-home')
+            nexus = codex_app_server.CodexAppServer(
+                cwd=workspace,
+                db_path=os.devnull,
+                env_mode='nexus_allowlist',
+                codex_home=missing,
+                ephemeral_threads=True,
+            )
+            with self.assertRaises(codex_app_server.CodexAppServerError) as ctx:
+                nexus._start_locked()
+            self.assertIn('must already exist', str(ctx.exception))
+            self.assertFalse(os.path.exists(missing))
+
+    def test_nexus_permission_profile_preserves_unrelated_config_and_auth(self):
+        with tempfile.TemporaryDirectory() as home:
+            config = Path(home) / 'config.toml'
+            config.write_text('model = "gpt-test"\n[unrelated]\nvalue = 7\n', encoding='utf-8')
+            auth = Path(home) / 'auth.json'
+            auth.write_text('{"token":"keep"}', encoding='utf-8')
+            nexus = codex_app_server.CodexAppServer(
+                cwd='/tmp',
+                db_path=os.devnull,
+                env_mode='nexus_allowlist',
+                codex_home=home,
+                ephemeral_threads=True,
+            )
+            nexus._ensure_nexus_permission_profile()
+            text = config.read_text(encoding='utf-8')
+
+            self.assertIn('model = "gpt-test"', text)
+            self.assertIn('[unrelated]', text)
+            self.assertIn('default_permissions = "hayagarden_nexus"', text)
+            self.assertIn(f'{home!r}'.replace("'", '"') + ' = "deny"', text)
+            self.assertIn('enabled = false', text)
+            self.assertEqual(auth.read_text(encoding='utf-8'), '{"token":"keep"}')
+
+    def test_stop_process_tree_kills_forked_sleeper(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pid_file = Path(tmp) / 'sleeper.pid'
+            script = (
+                'import os,time\n'
+                'child=os.fork()\n'
+                f'path={str(pid_file)!r}\n'
+                'if child == 0:\n'
+                ' open(path,"w").write(str(os.getpid()))\n'
+                ' time.sleep(60)\n'
+                'else:\n'
+                ' time.sleep(60)\n'
+            )
+            process = subprocess.Popen(
+                [sys.executable, '-c', script],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                start_new_session=True,
+            )
+            server = codex_app_server.CodexAppServer(
+                cwd=tmp,
+                db_path=os.devnull,
+                env_mode='nexus_allowlist',
+                codex_home=tmp,
+                ephemeral_threads=True,
+            )
+            server._process = process
+            server._process_pgid = os.getpgid(process.pid)
+            server._stop_confirmed = False
+            server.clean_background_terminals = mock.Mock(return_value=True)
+            deadline = time.time() + 3
+            while not pid_file.exists() and time.time() < deadline:
+                time.sleep(0.02)
+            self.assertTrue(pid_file.exists())
+            sleeper_pid = int(pid_file.read_text(encoding='utf-8'))
+            try:
+                confirmed = server.stop_process_tree(soft_timeout=0.2, hard_timeout=1)
+                self.assertTrue(confirmed)
+                self.assertIsNotNone(process.poll())
+                deadline = time.time() + 2
+                alive = True
+                while alive and time.time() < deadline:
+                    stat = Path(f'/proc/{sleeper_pid}/stat')
+                    alive = stat.exists() and ' Z ' not in stat.read_text(
+                        encoding='utf-8', errors='replace'
+                    )
+                    if alive:
+                        time.sleep(0.02)
+                self.assertFalse(alive, f'forked sleeper {sleeper_pid} survived')
+            finally:
+                try:
+                    os.killpg(process.pid, 9)
+                except ProcessLookupError:
+                    pass
 
 
 if __name__ == '__main__':

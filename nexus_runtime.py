@@ -69,6 +69,7 @@ class TurnRecord:
     sequence: int = 0
     terminal: bool = False
     interrupt_requested: bool = False
+    provider_stop_confirmed: Optional[bool] = None
     cond: threading.Condition = field(default_factory=threading.Condition)
 
 
@@ -93,6 +94,7 @@ class NexusRuntime:
         self._context_usage_getter = context_usage_getter
         self._state = STATE_IDLE
         self._active_turn_id: Optional[str] = None
+        self._provider_stop_blocked = False
         self._turns: Dict[str, TurnRecord] = {}
         self._history: Deque[str] = deque(maxlen=TURN_HISTORY_LIMIT)
         self._subscriber_counts: Dict[str, int] = {}
@@ -138,7 +140,21 @@ class NexusRuntime:
             return bool(getattr(self._adapters["codex"], "hard_workspace_confinement", False))
         return bool(CODEX_HARD_CONFINEMENT_AVAILABLE)
 
-    def _capabilities(self, *, claude_available: bool, codex_available: bool) -> dict[str, Any]:
+    @staticmethod
+    def _codex_blocked_detail(adapter: BaseNexusAdapter | None = None) -> str:
+        if adapter is not None:
+            detail = getattr(adapter, "availability_detail", None)
+            if detail:
+                return str(detail)
+        return CODEX_BLOCKED_DETAIL
+
+    def _capabilities(
+        self,
+        *,
+        claude_available: bool,
+        codex_available: bool,
+        codex_detail: str = CODEX_BLOCKED_DETAIL,
+    ) -> dict[str, Any]:
         return {
             "agents": ["claude", "codex"],
             "agent_availability": {
@@ -150,8 +166,9 @@ class NexusRuntime:
                 "codex": {
                     "available": bool(codex_available),
                     "reason": None if codex_available else "ENVIRONMENT_BLOCKED",
-                    "detail": None if codex_available else CODEX_BLOCKED_DETAIL,
-                    "sandbox": "workspace-write",
+                    "detail": None if codex_available else codex_detail,
+                    "permission_profile": "hayagarden_nexus",
+                    "sandbox": None,
                     "sandbox_is_read_isolation": False,
                 },
             },
@@ -173,6 +190,7 @@ class NexusRuntime:
         """Always return UI-readable JSON; degrade when workspace is missing."""
         with self._lock:
             active = self._active_turn_id
+            provider_stop_blocked = self._provider_stop_blocked
             active_agent = self._turns[active].agent if active and active in self._turns else None
             runtime_state = (
                 self._state
@@ -197,6 +215,7 @@ class NexusRuntime:
         }
         claude_available = False
         codex_available = False
+        codex_detail = CODEX_BLOCKED_DETAIL
         if workspace_ok:
             try:
                 with self._lock:
@@ -213,6 +232,7 @@ class NexusRuntime:
                     }
                     claude_available = self._claude_available(adapters["claude"])
                     codex_available = self._codex_available(adapters["codex"])
+                    codex_detail = self._codex_blocked_detail(adapters["codex"])
             except Exception:
                 # Never let adapter construction break status JSON.
                 claude_available = False
@@ -232,6 +252,7 @@ class NexusRuntime:
             "runtime_state": runtime_state,
             "active_turn_id": active,
             "active_agent": active_agent,
+            "provider_stop_blocked": provider_stop_blocked,
             "sessions": sessions,
             "context_usage": usage,
             "workspace": {
@@ -244,6 +265,7 @@ class NexusRuntime:
             "capabilities": self._capabilities(
                 claude_available=claude_available,
                 codex_available=codex_available,
+                codex_detail=codex_detail,
             ),
         }
 
@@ -262,6 +284,7 @@ class NexusRuntime:
                         "created_at": turn.created_at,
                         "finished_at": turn.finished_at,
                         "error_code": turn.error_code,
+                        "provider_stop_confirmed": turn.provider_stop_confirmed,
                         "instruction_chars": len(turn.instruction),
                     }
                 )
@@ -279,6 +302,12 @@ class NexusRuntime:
             raise NexusTurnError(exc.code, exc.detail, 503) from exc
 
         with self._lock:
+            if self._provider_stop_blocked:
+                raise NexusTurnError(
+                    "provider_stop_unconfirmed",
+                    "previous provider process tree stop was not confirmed",
+                    503,
+                )
             if self._active_turn_id is not None or self._state in {STATE_RUNNING, STATE_INTERRUPTING}:
                 raise NexusBusyError("runtime is processing another turn")
 
@@ -286,7 +315,9 @@ class NexusRuntime:
             if agent == "claude" and not self._claude_available(adapter):
                 raise NexusTurnError("claude_unavailable", CLAUDE_BLOCKED_DETAIL, 503)
             if agent == "codex" and not self._codex_available(adapter):
-                raise NexusTurnError("codex_unavailable", CODEX_BLOCKED_DETAIL, 503)
+                raise NexusTurnError(
+                    "codex_unavailable", self._codex_blocked_detail(adapter), 503
+                )
 
             # Initialize cancel state at accept time (before worker / interrupt race).
             if hasattr(adapter, "begin_turn"):
@@ -452,19 +483,37 @@ class NexusRuntime:
         finally:
             # If interrupt was not provider-confirmed, force-stop Nexus provider
             # before releasing the serial gate.
+            stop_confirmed = True
             if provider_stop_required or (
                 turn.error_code in _INTERRUPT_FAIL_CODES if turn else False
             ):
+                stop_confirmed = False
                 stopper = getattr(adapter, "ensure_provider_stopped", None)
                 if callable(stopper):
                     try:
-                        stopper()
+                        stop_confirmed = bool(stopper())
                     except Exception:
-                        pass
+                        stop_confirmed = False
+                turn.provider_stop_confirmed = stop_confirmed
+                if not stop_confirmed:
+                    # The terminal may already have been delivered. Retain the
+                    # flag on the record and update buffered terminal data when
+                    # it is still available.
+                    with turn.cond:
+                        for event in reversed(turn.events):
+                            if event.get("event") == "err":
+                                event.setdefault("data", {})[
+                                    "provider_stop_confirmed"
+                                ] = False
+                                break
             with self._lock:
                 if self._active_turn_id == turn_id:
-                    self._active_turn_id = None
-                    self._state = STATE_IDLE
+                    if stop_confirmed:
+                        self._active_turn_id = None
+                        self._state = STATE_IDLE
+                    else:
+                        self._provider_stop_blocked = True
+                        self._state = STATE_ERROR
 
     def interrupt(self, turn_id: str) -> dict[str, Any]:
         adapter: BaseNexusAdapter | None = None
