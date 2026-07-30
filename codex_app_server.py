@@ -89,14 +89,27 @@ def runtime_status(*, force: bool = False) -> dict:
 
 
 class CodexAppServer:
-    def __init__(self, *, db_path: str = DEFAULT_DB_PATH, cwd: str = DEFAULT_CWD):
+    def __init__(
+        self,
+        *,
+        db_path: str = DEFAULT_DB_PATH,
+        cwd: str = DEFAULT_CWD,
+        sandbox: str = "read-only",
+    ):
         self.db_path = db_path
         self.cwd = cwd
+        # Nexus may use workspace-write on a dedicated instance. Default remains
+        # read-only so group-chat / monopoly callers keep their existing posture.
+        if sandbox == "danger-full-access":
+            raise ValueError("danger-full-access is not allowed")
+        self.sandbox = sandbox if sandbox in {"read-only", "workspace-write"} else "read-only"
         self._lock = threading.RLock()
         self._process: subprocess.Popen | None = None
         self._messages: queue.Queue = queue.Queue()
         self._request_id = 0
         self._stderr_tail: deque[str] = deque(maxlen=40)
+        self._active_turn_id: str | None = None
+        self._cancel_requested = threading.Event()
 
     def _environment(self) -> dict:
         env = dict(os.environ)
@@ -280,7 +293,7 @@ class CodexAppServer:
             "approvalPolicy": "never",
             "approvalsReviewer": "user",
             "developerInstructions": instructions,
-            "sandbox": "read-only",
+            "sandbox": self.sandbox,
             "personality": "friendly",
         }
         if binding:
@@ -320,7 +333,7 @@ class CodexAppServer:
             "approvalPolicy": "never",
             "approvalsReviewer": "user",
             "developerInstructions": instructions,
-            "sandbox": "read-only",
+            "sandbox": self.sandbox,
             "personality": "friendly",
         }
         if thread_id:
@@ -341,6 +354,36 @@ class CodexAppServer:
             raise CodexAppServerError("Codex game thread did not return an id")
         return new_id
 
+    def interrupt_turn(self, turn_id: str) -> None:
+        """Best-effort cancel for a Nexus-owned server instance only.
+
+        Sends turn/interrupt when possible. Does not touch other CodexAppServer
+        instances (including the module-level global client).
+        """
+        self._cancel_requested.set()
+        with self._lock:
+            if not self._process or self._process.poll() is not None:
+                return
+            try:
+                self._request_id += 1
+                request_id = self._request_id
+                self._send_locked(
+                    {
+                        "id": request_id,
+                        "method": "turn/interrupt",
+                        "params": {"turnId": turn_id},
+                    }
+                )
+            except Exception:
+                # Non-fatal: stream loop observes _cancel_requested.
+                return
+
+    def interrupt_active_turn(self) -> None:
+        turn_id = self._active_turn_id
+        self._cancel_requested.set()
+        if turn_id:
+            self.interrupt_turn(turn_id)
+
     def stream_bound_turn(
         self,
         thread_id: str | None,
@@ -348,8 +391,10 @@ class CodexAppServer:
         prompt: str,
         *,
         timeout: float = 360,
+        cancel_event: threading.Event | None = None,
     ) -> Iterator[tuple[str, object]]:
         """Stream a turn whose thread binding is persisted by the caller."""
+        self._cancel_requested.clear()
         with self._lock:
             try:
                 self._start_locked()
@@ -368,10 +413,27 @@ class CodexAppServer:
                 turn_id = str((result.get("turn") or {}).get("id") or "")
                 if not turn_id:
                     raise CodexAppServerError("Codex game turn did not return an id")
+                self._active_turn_id = turn_id
                 deadline = time.monotonic() + timeout
                 saw_delta = False
                 buffered = deque(early)
                 while True:
+                    if self._cancel_requested.is_set() or (
+                        cancel_event is not None and cancel_event.is_set()
+                    ):
+                        try:
+                            self._request_id += 1
+                            self._send_locked(
+                                {
+                                    "id": self._request_id,
+                                    "method": "turn/interrupt",
+                                    "params": {"turnId": turn_id},
+                                }
+                            )
+                        except Exception:
+                            pass
+                        yield "err", {"code": "interrupted", "message": "turn interrupted"}
+                        return
                     message = buffered.popleft() if buffered else self._next_message_locked(deadline - time.monotonic())
                     if self._answer_server_request_locked(message):
                         continue
@@ -412,6 +474,8 @@ class CodexAppServer:
             except Exception:
                 self._stop_locked()
                 raise
+            finally:
+                self._active_turn_id = None
 
     def stream_turn(
         self,
