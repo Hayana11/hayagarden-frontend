@@ -943,8 +943,86 @@ class ConcurrencySwitchTests(unittest.TestCase):
         barrier = threading.Barrier(2)
         results = []
         errors = []
-        # Shared hooks: same forge cwd as production concurrent callers.
-        hooks = _offline_hooks()
+        counts = {
+            'forge': 0,
+            'prepare': 0,
+            'take_handoff': 0,
+            'discard': 0,
+            'mark_committed': 0,
+        }
+        counts_lock = threading.Lock()
+        prepare_entered = threading.Event()
+        release_prepare = threading.Event()
+        mid_switch_snapshot = {}
+
+        class _OldResident:
+            def __init__(self):
+                self.session_id = 'old-resident-session'
+                self.close_n = 0
+                self._alive = True
+
+            def kill(self) -> None:
+                self.close_n += 1
+                self._alive = False
+
+            def _kill(self, quiet: bool = True) -> None:
+                self.kill()
+
+        class _Holder:
+            def __init__(self, resident):
+                self.current = resident
+                self.session_id = resident.session_id
+
+        old_resident = _OldResident()
+        holder = _Holder(old_resident)
+        base = _offline_hooks()
+
+        def prepare_staged(intent, forge_path):
+            with counts_lock:
+                counts['prepare'] += 1
+            prepare_entered.set()
+            self.assertTrue(
+                release_prepare.wait(timeout=5),
+                'prepare gate was not released',
+            )
+            return base.prepare_staged(intent, forge_path)
+
+        def take_handoff(staged, result):
+            with counts_lock:
+                counts['take_handoff'] += 1
+            old = holder.current
+            holder.current = staged
+            holder.session_id = str(getattr(staged, 'session_id', '') or '')
+            return old
+
+        def discard_staged(staged):
+            with counts_lock:
+                counts['discard'] += 1
+            return base.discard_staged(staged)
+
+        hooks = cw.SwitchHooks(
+            prepare_staged=prepare_staged,
+            take_handoff=take_handoff,
+            discard_staged=discard_staged,
+            forge_cwd=base.forge_cwd,
+            claude_home=base.claude_home,
+            formal_holder=holder,
+        )
+
+        import chat.context_window_forge as forge_mod
+        real_forge = forge_mod.forge_target_session_from_db
+
+        def counting_forge(*args, **kwargs):
+            with counts_lock:
+                counts['forge'] += 1
+            return real_forge(*args, **kwargs)
+
+        real_mark = cw.mark_intent_committed
+
+        def counting_mark(*args, **kwargs):
+            with counts_lock:
+                counts['mark_committed'] += 1
+            return real_mark(*args, **kwargs)
 
         def worker():
             try:
@@ -961,14 +1039,56 @@ class ConcurrencySwitchTests(unittest.TestCase):
             except Exception as exc:
                 errors.append(exc)
 
-        threads = [threading.Thread(target=worker) for _ in range(2)]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join(timeout=10)
+        with mock.patch.object(
+            forge_mod, 'forge_target_session_from_db', side_effect=counting_forge,
+        ), mock.patch.object(
+            cw, 'mark_intent_committed', side_effect=counting_mark,
+        ):
+            threads = [threading.Thread(target=worker) for _ in range(2)]
+            for t in threads:
+                t.start()
+            self.assertTrue(prepare_entered.wait(timeout=5))
+            # Lock-scope proof: while owner is inside prepare, peer must still
+            # be blocked outside switch_context_window (no second forge/prepare/
+            # take_handoff / target row).
+            with counts_lock:
+                mid_switch_snapshot.update(dict(counts))
+            conn_mid = sqlite3.connect(self.db)
+            mid_targets = conn_mid.execute(
+                'SELECT COUNT(*) FROM daily_contexts WHERE switch_request_id=?',
+                (req,),
+            ).fetchone()[0]
+            conn_mid.close()
+            self.assertEqual(mid_switch_snapshot['forge'], 1)
+            self.assertEqual(mid_switch_snapshot['prepare'], 1)
+            self.assertEqual(mid_switch_snapshot['take_handoff'], 0)
+            self.assertEqual(mid_switch_snapshot['discard'], 0)
+            self.assertEqual(mid_targets, 0)
+            release_prepare.set()
+            for t in threads:
+                t.join(timeout=10)
+
         self.assertEqual(errors, [])
         self.assertEqual(len(results), 2)
         self.assertEqual(results[0]['target_context_id'], results[1]['target_context_id'])
+        self.assertEqual(
+            results[0].get('claude_session_id'),
+            results[1].get('claude_session_id'),
+        )
+        self.assertTrue(results[0].get('claude_session_id'))
+        self.assertEqual(holder.session_id, results[0]['claude_session_id'])
+        self.assertEqual(
+            getattr(holder.current, 'session_id', None),
+            results[0]['claude_session_id'],
+        )
+        self.assertIsNot(holder.current, old_resident)
+        self.assertEqual(old_resident.close_n, 1)
+        self.assertFalse(old_resident._alive)
+        self.assertEqual(counts['forge'], 1)
+        self.assertEqual(counts['prepare'], 1)
+        self.assertEqual(counts['take_handoff'], 1)
+        self.assertEqual(counts['mark_committed'], 1)
+        self.assertEqual(counts['discard'], 0)
         conn = sqlite3.connect(self.db)
         self.assertEqual(
             conn.execute(
@@ -976,6 +1096,18 @@ class ConcurrencySwitchTests(unittest.TestCase):
             ).fetchone()[0],
             1,
         )
+        self.assertEqual(
+            conn.execute(
+                'SELECT COUNT(*) FROM daily_contexts WHERE switch_request_id=?',
+                (req,),
+            ).fetchone()[0],
+            1,
+        )
+        intent_status = conn.execute(
+            'SELECT status FROM context_switch_intents WHERE request_id=?',
+            (req,),
+        ).fetchone()[0]
+        self.assertEqual(intent_status, cw.INTENT_COMMITTED)
         conn.close()
 
     def test_same_request_concurrent_different_payload(self):

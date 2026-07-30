@@ -8,11 +8,13 @@ Does not call models, generate handoffs, or enable itself (``DAILY_SOFT_WINDOW_E
 from __future__ import annotations
 
 import datetime
+import functools
 import hashlib
 import json
 import logging
 import re
 import sqlite3
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -65,6 +67,24 @@ ACTIVE_INTENT_STATUSES = frozenset({
 })
 
 TERMINAL_FAILURE_STATUSES = frozenset({INTENT_FAILED, INTENT_RELEASED})
+
+# Single-gateway-process serialization: production frontend-gw runs gunicorn
+# ``--workers=1 --threads=4``, so concurrent switches share one Python worker
+# and one ``_CC_RESIDENT``. RLock covers the full switch (including recovery
+# helpers that may re-enter related paths) and always releases via ``with``.
+_CONTEXT_WINDOW_EXECUTION_LOCK = threading.RLock()
+
+
+def _serialize_context_switch(fn: Callable[..., Any]) -> Callable[..., Any]:
+    """Serialize formal ``switch_context_window`` end-to-end on this process."""
+
+    @functools.wraps(fn)
+    def wrapped(*args: Any, **kwargs: Any) -> Any:
+        with _CONTEXT_WINDOW_EXECUTION_LOCK:
+            return fn(*args, **kwargs)
+
+    return wrapped
+
 
 # Private marker on commit_switch result: stripped before returning to callers.
 _COMMIT_KIND_KEY = '_cw_commit_kind'
@@ -1619,6 +1639,7 @@ def complete_handoff_pending_recovery(
     return result
 
 
+@_serialize_context_switch
 def switch_context_window(
     *,
     source_context_id: int,
