@@ -55,6 +55,16 @@ CLAUDE_ARGS_PREFIX = (
     else []
 )
 PROBE_TIMEOUT_SECONDS = 120
+AUTH_STATUS_TIMEOUT_SECONDS = 60
+ISOLATED_SUBSCRIPTION_AUTH_SOURCE = 'ISOLATED_CLAUDE_APP_SUBSCRIPTION'
+AUTH_PROVIDER_OVERRIDE_VARS = (
+    'ANTHROPIC_API_KEY',
+    'ANTHROPIC_AUTH_TOKEN',
+    'CLAUDE_CODE_OAUTH_TOKEN',
+    'ANTHROPIC_BASE_URL',
+    'CLAUDE_CODE_USE_BEDROCK',
+    'CLAUDE_CODE_USE_VERTEX',
+)
 REDACT_PATTERNS = (
     (re.compile(r'(Bearer\s+)\S+', re.I), r'\1[REDACTED]'),
     (re.compile(r'(api[_-]?key["\']?\s*[:=]\s*)["\']?[\w-]+', re.I), r'\1[REDACTED]'),
@@ -64,6 +74,7 @@ REDACT_PATTERNS = (
 
 # Injectable in integration tests.
 _subprocess_runner: Callable[..., SubprocessRunResult] = run_subprocess_with_timeout
+_auth_status_runner: Callable[..., Any] = subprocess.run
 
 
 def redact(text: str) -> str:
@@ -102,11 +113,116 @@ def explicit_auth_available() -> tuple[bool, str]:
     return False, 'missing'
 
 
-def isolated_claude_env(claude_home: Path) -> dict[str, str]:
+def isolated_claude_env(
+    claude_home: Path,
+    *,
+    remove_auth_overrides: bool = False,
+) -> dict[str, str]:
     env = os.environ.copy()
+    if remove_auth_overrides:
+        for name in AUTH_PROVIDER_OVERRIDE_VARS:
+            env.pop(name, None)
     env['CLAUDE_CONFIG_DIR'] = str(claude_home)
     env['DISABLE_AUTOUPDATER'] = '1'
     return env
+
+
+def _prepare_isolated_workspace(raw_work_root: Path) -> tuple[Path, Path, Path]:
+    work_root = verify_work_root(raw_work_root)
+    repository_root = ROOT.resolve()
+    try:
+        work_root.relative_to(repository_root)
+    except ValueError:
+        pass
+    else:
+        raise ValueError('FORGE_WORK_ROOT_INSIDE_REPOSITORY')
+
+    work_root.mkdir(parents=True, exist_ok=True)
+    work_root = verify_work_root(work_root)
+    isolated_cwd = work_root / 'isolated-project'
+    claude_home = work_root / 'claude-home'
+    for label, path in (
+        ('isolated_project', isolated_cwd),
+        ('claude_home', claude_home),
+    ):
+        if path.is_symlink():
+            raise ValueError(f'FORGE_SYMLINK:{label}')
+        if path.exists() and not path.is_dir():
+            raise ValueError(f'FORGE_ISOLATED_PATH_NOT_DIRECTORY:{label}')
+        path.mkdir(parents=False, exist_ok=True)
+        if path.is_symlink():
+            raise ValueError(f'FORGE_SYMLINK:{label}')
+        try:
+            path.resolve().relative_to(work_root)
+        except ValueError as exc:
+            raise ValueError(f'FORGE_ISOLATED_PATH_OUTSIDE_WORK_ROOT:{label}') from exc
+    return work_root, isolated_cwd, claude_home
+
+
+def _auth_status_explicitly_non_subscription(status: dict[str, Any]) -> bool:
+    discriminator_keys = (
+        'authMethod',
+        'auth_method',
+        'authType',
+        'auth_type',
+        'loginMethod',
+        'login_method',
+        'credentialSource',
+        'credential_source',
+        'provider',
+        'apiProvider',
+        'api_provider',
+        'backend',
+        'source',
+    )
+    rejected_markers = ('console', 'api-key', 'api_key', 'apikey', 'bedrock', 'vertex')
+    for key in discriminator_keys:
+        value = status.get(key)
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if any(marker in normalized for marker in rejected_markers):
+                return True
+    for key in ('useBedrock', 'useVertex', 'isApiKey', 'isConsole'):
+        if status.get(key) is True:
+            return True
+    return False
+
+
+def isolated_subscription_auth_status(
+    claude_home: Path,
+    isolated_cwd: Path,
+) -> tuple[bool, str]:
+    env = isolated_claude_env(claude_home, remove_auth_overrides=True)
+    try:
+        proc = _auth_status_runner(
+            ['npx', '--yes', CLAUDE_CODE_NPM_SPEC, 'auth', 'status'],
+            cwd=str(isolated_cwd),
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=AUTH_STATUS_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except Exception:
+        return False, 'isolated_auth_status_command_failed'
+
+    if proc.returncode != 0:
+        return False, 'isolated_auth_status_command_failed'
+    try:
+        status = json.loads(proc.stdout)
+    except (TypeError, json.JSONDecodeError):
+        return False, 'isolated_auth_status_invalid'
+    if not isinstance(status, dict):
+        return False, 'isolated_auth_status_invalid'
+    if status.get('loggedIn') is not True:
+        return False, 'isolated_auth_not_logged_in'
+    subscription_type = status.get('subscriptionType')
+    if subscription_type is not None:
+        if not isinstance(subscription_type, str) or subscription_type.strip().lower() not in {'pro', 'max'}:
+            return False, 'isolated_auth_wrong_subscription'
+    if _auth_status_explicitly_non_subscription(status):
+        return False, 'isolated_auth_wrong_subscription'
+    return True, ISOLATED_SUBSCRIPTION_AUTH_SOURCE
 
 
 def git_tree_sha() -> str:
@@ -287,9 +403,13 @@ def _spawn_resume_probe(
     before_events: list[dict[str, Any]],
     old_uuids: Optional[set[str]] = None,
     allowed_tools: str = '',
+    remove_auth_overrides: bool = False,
     popen_factory: Optional[Callable[..., Any]] = None,
 ) -> dict[str, Any]:
-    env = isolated_claude_env(claude_home)
+    env = isolated_claude_env(
+        claude_home,
+        remove_auth_overrides=remove_auth_overrides,
+    )
     cmd = _claude_cmd(
         '-p',
         '--resume', session_id,
@@ -339,10 +459,14 @@ def _run_case0_native_control(
     isolated_cwd: Path,
     claude_home: Path,
     work_root: Path,
+    remove_auth_overrides: bool = False,
     popen_factory: Optional[Callable[..., Any]] = None,
 ) -> CaseResult:
     result = CaseResult(case_id='0', name='control_native_session_resume')
-    env = isolated_claude_env(claude_home)
+    env = isolated_claude_env(
+        claude_home,
+        remove_auth_overrides=remove_auth_overrides,
+    )
     canary = generate_history_canary()
     result.canary = canary
     first_payload = json.dumps(
@@ -459,6 +583,7 @@ def _run_case0_native_control(
         canary=canary,
         before_bytes=before_bytes,
         before_events=before_events,
+        remove_auth_overrides=remove_auth_overrides,
         popen_factory=popen_factory,
     )
     _apply_probe_to_case(result, probe)
@@ -492,6 +617,7 @@ def _record_forge_case(
     claude_home: Path,
     old_uuids: set[str],
     run_live: bool,
+    remove_auth_overrides: bool = False,
     popen_factory: Optional[Callable[..., Any]] = None,
 ) -> CaseResult:
     result = CaseResult(case_id=case_id, name=name)
@@ -553,6 +679,7 @@ def _record_forge_case(
         before_bytes=before_bytes,
         before_events=before_events,
         old_uuids=old_uuids,
+        remove_auth_overrides=remove_auth_overrides,
         popen_factory=popen_factory,
     )
     _apply_probe_to_case(result, probe)
@@ -570,6 +697,7 @@ def run_spike(
     unit_test_exit_code: Optional[int] = None,
     unit_test_count: int = 0,
     artifact_commit_sha: str = 'artifact_commit_pending',
+    allow_isolated_subscription_auth: bool = False,
 ) -> SpikeReport:
     report = SpikeReport()
     report.structural_only = structural_only
@@ -585,6 +713,12 @@ def run_spike(
     report.generated_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
     report.command = command
     report.origin_main_sha = _git(['rev-parse', 'origin/main'])
+
+    raw_work_root = work_root or Path(tempfile.mkdtemp(prefix='claude-forge-spike-'))
+    work_root, isolated_cwd, claude_home = _prepare_isolated_workspace(raw_work_root)
+    report.isolated_cwd = str(isolated_cwd)
+    report.claude_home = str(claude_home)
+
     if structural_only:
         version_raw = f'{CLAUDE_CODE_PINNED_VERSION} (pinned; structural-only did not execute Claude)'
         version_ok = True
@@ -603,6 +737,8 @@ def run_spike(
         run_live = False
     else:
         ok, src = explicit_auth_available()
+        if not ok and allow_isolated_subscription_auth:
+            ok, src = isolated_subscription_auth_status(claude_home, isolated_cwd)
         report.auth_available = ok
         report.auth_source = src
         if not ok:
@@ -615,14 +751,7 @@ def run_spike(
             report.live_probe_status = 'RUN'
             run_live = True
 
-    raw_work_root = work_root or Path(tempfile.mkdtemp(prefix='claude-forge-spike-'))
-    work_root = verify_work_root(raw_work_root)
-    isolated_cwd = work_root / 'isolated-project'
-    isolated_cwd.mkdir(parents=True, exist_ok=True)
-    claude_home = work_root / 'claude-home'
-    claude_home.mkdir(parents=True, exist_ok=True)
-    report.isolated_cwd = str(isolated_cwd)
-    report.claude_home = str(claude_home)
+    remove_auth_overrides = report.auth_source == ISOLATED_SUBSCRIPTION_AUTH_SOURCE
 
     fixture_root = ROOT / 'tests' / 'fixtures' / 'claude_forge_spike'
     if not fixture_root.is_dir():
@@ -633,6 +762,7 @@ def run_spike(
             isolated_cwd=isolated_cwd,
             claude_home=claude_home,
             work_root=work_root,
+            remove_auth_overrides=remove_auth_overrides,
             popen_factory=popen_factory,
         )
         report.cases.append(c0)
@@ -656,6 +786,7 @@ def run_spike(
             claude_home=claude_home,
             old_uuids=old_uuids,
             run_live=run_live,
+            remove_auth_overrides=remove_auth_overrides,
             popen_factory=popen_factory,
         )
 
@@ -747,6 +878,11 @@ def main() -> int:
     parser.add_argument('--work-root', type=Path, default=None)
     parser.add_argument('--report', type=Path, default=ROOT / 'artifacts' / 'spike-claude-forge-resume' / 'results.json')
     parser.add_argument('--structural-only', action='store_true', help='Skip live resume probes')
+    parser.add_argument(
+        '--allow-isolated-subscription-auth',
+        action='store_true',
+        help='Accept a pre-existing Pro/Max login only from <work-root>/claude-home',
+    )
     parser.add_argument('--unit-test-command', default='')
     parser.add_argument('--unit-test-exit-code', type=int, default=None)
     parser.add_argument('--unit-test-count', type=int, default=0)
@@ -761,6 +897,7 @@ def main() -> int:
         unit_test_exit_code=args.unit_test_exit_code,
         unit_test_count=args.unit_test_count,
         artifact_commit_sha=args.artifact_commit_sha,
+        allow_isolated_subscription_auth=args.allow_isolated_subscription_auth,
     )
     exit_code = 0 if report.verdict == 'GO' else 2
     report.command_exit_code = exit_code

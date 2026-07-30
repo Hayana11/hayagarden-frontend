@@ -33,6 +33,16 @@ OLD_SHA = '24656ca'
 OLD_PROMPT = '请只回复两个字：收到'
 
 
+def _auth_status_process(payload: Any, *, returncode: int = 0) -> subprocess.CompletedProcess[str]:
+    stdout = payload if isinstance(payload, str) else json.dumps(payload)
+    return subprocess.CompletedProcess(
+        args=['npx', 'auth', 'status'],
+        returncode=returncode,
+        stdout=stdout,
+        stderr='sensitive auth status diagnostics must not enter the report',
+    )
+
+
 def _stream_stdout(canary: str, session_id: str) -> list[str]:
     return [
         json.dumps({
@@ -163,6 +173,297 @@ class IntegrationTests(unittest.TestCase):
                 self.assertIn(cid, by_id)
                 self.assertEqual(by_id[cid]['state'], 'API_ACCEPTED_FIRST_DELTA', cid)
             self.assertEqual(data['verdict'], 'GO')
+
+    def test_subscription_auth_default_off_does_not_check_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(spike, 'explicit_auth_available', return_value=(False, 'missing')):
+                with mock.patch.object(
+                    spike,
+                    'isolated_subscription_auth_status',
+                    side_effect=AssertionError('isolated auth must remain opt-in'),
+                ):
+                    with mock.patch.object(
+                        spike,
+                        'claude_version_check',
+                        return_value=('2.1.220 (Claude Code)', True, ''),
+                    ):
+                        report = spike.run_spike(Path(tmp), structural_only=False)
+            self.assertFalse(report.auth_available)
+            self.assertEqual(report.auth_source, 'missing')
+            self.assertEqual(report.live_probe_status, 'NOT_RUN_NO_CREDENTIALS')
+
+    def test_explicit_environment_auth_preserves_existing_behavior(self) -> None:
+        with mock.patch.dict(os.environ, {'ANTHROPIC_API_KEY': 'fake-test-key'}, clear=False):
+            self.assertEqual(spike.explicit_auth_available(), (True, 'ANTHROPIC_API_KEY'))
+        with mock.patch.dict(
+            os.environ,
+            {'ANTHROPIC_API_KEY': '', 'CLAUDE_CODE_OAUTH_TOKEN': 'fake-test-token'},
+            clear=False,
+        ):
+            self.assertEqual(spike.explicit_auth_available(), (True, 'CLAUDE_CODE_OAUTH_TOKEN'))
+
+    def test_isolated_subscription_auth_accepts_pro(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            claude_home = root / 'claude-home'
+            isolated_cwd = root / 'isolated-project'
+            claude_home.mkdir()
+            isolated_cwd.mkdir()
+            with mock.patch.object(
+                spike,
+                '_auth_status_runner',
+                return_value=_auth_status_process({'loggedIn': True, 'subscriptionType': 'pro'}),
+            ):
+                self.assertEqual(
+                    spike.isolated_subscription_auth_status(claude_home, isolated_cwd),
+                    (True, spike.ISOLATED_SUBSCRIPTION_AUTH_SOURCE),
+                )
+
+    def test_isolated_subscription_auth_accepts_max(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            claude_home = root / 'claude-home'
+            isolated_cwd = root / 'isolated-project'
+            claude_home.mkdir()
+            isolated_cwd.mkdir()
+            with mock.patch.object(
+                spike,
+                '_auth_status_runner',
+                return_value=_auth_status_process({'loggedIn': True, 'subscriptionType': 'max'}),
+            ):
+                self.assertEqual(
+                    spike.isolated_subscription_auth_status(claude_home, isolated_cwd),
+                    (True, spike.ISOLATED_SUBSCRIPTION_AUTH_SOURCE),
+                )
+
+    def test_isolated_subscription_auth_rejects_not_logged_in(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with mock.patch.object(
+                spike,
+                '_auth_status_runner',
+                return_value=_auth_status_process({'loggedIn': False}),
+            ):
+                self.assertEqual(
+                    spike.isolated_subscription_auth_status(root / 'claude-home', root / 'isolated-project'),
+                    (False, 'isolated_auth_not_logged_in'),
+                )
+
+    def test_isolated_subscription_auth_rejects_wrong_subscription(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with mock.patch.object(
+                spike,
+                '_auth_status_runner',
+                return_value=_auth_status_process({'loggedIn': True, 'subscriptionType': 'team'}),
+            ):
+                self.assertEqual(
+                    spike.isolated_subscription_auth_status(root / 'claude-home', root / 'isolated-project'),
+                    (False, 'isolated_auth_wrong_subscription'),
+                )
+
+    def test_isolated_subscription_auth_rejects_explicit_api_provider(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with mock.patch.object(
+                spike,
+                '_auth_status_runner',
+                return_value=_auth_status_process({'loggedIn': True, 'authMethod': 'api-key'}),
+            ):
+                self.assertEqual(
+                    spike.isolated_subscription_auth_status(root / 'claude-home', root / 'isolated-project'),
+                    (False, 'isolated_auth_wrong_subscription'),
+                )
+
+    def test_isolated_subscription_auth_rejects_nonzero_exit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with mock.patch.object(
+                spike,
+                '_auth_status_runner',
+                return_value=_auth_status_process('', returncode=1),
+            ):
+                self.assertEqual(
+                    spike.isolated_subscription_auth_status(root / 'claude-home', root / 'isolated-project'),
+                    (False, 'isolated_auth_status_command_failed'),
+                )
+
+    def test_isolated_subscription_auth_rejects_invalid_json(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with mock.patch.object(
+                spike,
+                '_auth_status_runner',
+                return_value=_auth_status_process('not-json'),
+            ):
+                self.assertEqual(
+                    spike.isolated_subscription_auth_status(root / 'claude-home', root / 'isolated-project'),
+                    (False, 'isolated_auth_status_invalid'),
+                )
+
+    def test_isolated_auth_sensitive_status_fields_do_not_enter_report(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            sensitive_email = 'private-user@example.invalid'
+            sensitive_org = 'private-organization-name'
+            status = {
+                'loggedIn': False,
+                'email': sensitive_email,
+                'organizationName': sensitive_org,
+                'credentialPath': 'private-credential-path',
+            }
+            with mock.patch.object(spike, 'explicit_auth_available', return_value=(False, 'missing')):
+                with mock.patch.object(
+                    spike,
+                    '_auth_status_runner',
+                    return_value=_auth_status_process(status),
+                ):
+                    with mock.patch.object(
+                        spike,
+                        'claude_version_check',
+                        return_value=('2.1.220 (Claude Code)', True, ''),
+                    ):
+                        report = spike.run_spike(
+                            Path(tmp),
+                            structural_only=False,
+                            allow_isolated_subscription_auth=True,
+                        )
+            serialized = json.dumps(report.to_dict())
+            self.assertNotIn(sensitive_email, serialized)
+            self.assertNotIn(sensitive_org, serialized)
+            self.assertNotIn('private-credential-path', serialized)
+            self.assertEqual(report.auth_source, 'isolated_auth_not_logged_in')
+
+    def test_isolated_auth_status_uses_fixed_command_and_config_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            claude_home = root / 'claude-home'
+            isolated_cwd = root / 'isolated-project'
+            runner = mock.Mock(
+                return_value=_auth_status_process({'loggedIn': True, 'subscriptionType': 'pro'}),
+            )
+            with mock.patch.object(spike, '_auth_status_runner', runner):
+                spike.isolated_subscription_auth_status(claude_home, isolated_cwd)
+            args, kwargs = runner.call_args
+            self.assertEqual(
+                args[0],
+                ['npx', '--yes', '@anthropic-ai/claude-code@2.1.220', 'auth', 'status'],
+            )
+            self.assertEqual(kwargs['cwd'], str(isolated_cwd))
+            self.assertEqual(kwargs['env']['CLAUDE_CONFIG_DIR'], str(claude_home))
+            self.assertEqual(kwargs['env']['DISABLE_AUTOUPDATER'], '1')
+
+    def test_isolated_auth_status_removes_auth_and_provider_overrides(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            inherited = {name: f'test-{name}' for name in spike.AUTH_PROVIDER_OVERRIDE_VARS}
+            runner = mock.Mock(
+                return_value=_auth_status_process({'loggedIn': True, 'subscriptionType': 'max'}),
+            )
+            with mock.patch.dict(os.environ, inherited, clear=False):
+                with mock.patch.object(spike, '_auth_status_runner', runner):
+                    spike.isolated_subscription_auth_status(
+                        root / 'claude-home',
+                        root / 'isolated-project',
+                    )
+                child_env = runner.call_args.kwargs['env']
+                for name, value in inherited.items():
+                    self.assertNotIn(name, child_env)
+                    self.assertEqual(os.environ.get(name), value)
+
+    def test_structural_only_does_not_execute_isolated_auth_status(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(
+                spike,
+                'isolated_subscription_auth_status',
+                side_effect=AssertionError('structural-only must not inspect auth status'),
+            ):
+                report = spike.run_spike(
+                    Path(tmp),
+                    structural_only=True,
+                    allow_isolated_subscription_auth=True,
+                )
+            self.assertFalse(report.auth_available)
+            self.assertEqual(report.auth_source, 'ignored_structural_only')
+
+    def test_isolated_auth_keeps_mocked_required_cases_and_go_verdict(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            work_root = Path(tmp)
+            isolated = work_root / 'isolated-project'
+            isolated.mkdir()
+            claude_home = work_root / 'claude-home'
+            claude_home.mkdir()
+            runner = _mock_subprocess_runner(work_root, claude_home, isolated)
+            with mock.patch.object(spike, 'explicit_auth_available', return_value=(False, 'missing')):
+                with mock.patch.object(
+                    spike,
+                    'isolated_subscription_auth_status',
+                    return_value=(True, spike.ISOLATED_SUBSCRIPTION_AUTH_SOURCE),
+                ):
+                    with mock.patch.object(
+                        spike,
+                        'claude_version_check',
+                        return_value=('2.1.220 (Claude Code)', True, ''),
+                    ):
+                        with mock.patch.object(spike, '_subprocess_runner', runner):
+                            report = spike.run_spike(
+                                work_root,
+                                structural_only=False,
+                                allow_isolated_subscription_auth=True,
+                            )
+            by_id = {case.case_id: case for case in report.cases}
+            for case_id in REQUIRED_CASES:
+                self.assertEqual(by_id[case_id].state, 'API_ACCEPTED_FIRST_DELTA', case_id)
+            self.assertEqual(report.verdict, 'GO')
+            self.assertEqual(report.auth_source, spike.ISOLATED_SUBSCRIPTION_AUTH_SOURCE)
+
+    def test_explicit_auth_has_priority_over_isolated_subscription_auth(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            work_root = Path(tmp)
+            isolated = work_root / 'isolated-project'
+            isolated.mkdir()
+            claude_home = work_root / 'claude-home'
+            claude_home.mkdir()
+            runner = _mock_subprocess_runner(work_root, claude_home, isolated)
+            with mock.patch.object(
+                spike,
+                'explicit_auth_available',
+                return_value=(True, 'ANTHROPIC_API_KEY'),
+            ):
+                with mock.patch.object(
+                    spike,
+                    'isolated_subscription_auth_status',
+                    side_effect=AssertionError('explicit auth must win without mixing'),
+                ):
+                    with mock.patch.object(
+                        spike,
+                        'claude_version_check',
+                        return_value=('2.1.220 (Claude Code)', True, ''),
+                    ):
+                        with mock.patch.object(spike, '_subprocess_runner', runner):
+                            report = spike.run_spike(
+                                work_root,
+                                structural_only=False,
+                                allow_isolated_subscription_auth=True,
+                            )
+            self.assertEqual(report.auth_source, 'ANTHROPIC_API_KEY')
+            self.assertEqual(report.verdict, 'GO')
+
+    def test_isolated_claude_home_symlink_is_rejected(self) -> None:
+        original_is_symlink = Path.is_symlink
+
+        def selective_is_symlink(path: Path) -> bool:
+            return path.name == 'claude-home' or original_is_symlink(path)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(Path, 'is_symlink', selective_is_symlink):
+                with self.assertRaisesRegex(ValueError, 'FORGE_SYMLINK:claude_home'):
+                    spike._prepare_isolated_workspace(Path(tmp))
+
+    def test_work_root_inside_repository_is_rejected(self) -> None:
+        candidate = ROOT / 'never-create-isolated-auth-work-root'
+        with self.assertRaisesRegex(ValueError, 'FORGE_WORK_ROOT_INSIDE_REPOSITORY'):
+            spike._prepare_isolated_workspace(candidate)
+        self.assertFalse(candidate.exists())
 
     def test_native_case0_preserves_create_jsonl_before_resume(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
