@@ -1,0 +1,31 @@
+SOURCE=existing_read_only_github_actions_evidence
+WORKFLOW_RUN_ID=30511274044
+JOB_ID=90771726280
+JOB_NAME=continuity
+RUNNER=Ubuntu 24.04.4 (ubuntu-24.04)
+PYTHON=3.11.15
+CHECKOUT_REF=pull/155/merge
+CHECKOUT_SHA=5169cef00f683794273cf447880bd2394a1d784f
+MERGE_DESCRIPTION=Merge 52aaf0d452539a4a7963cb34cd1a904034c6bf53 into 64f5bde7d7a69685938af411fa8660353667d1e0
+LOG_URL=https://github.com/Hayana11/hayagarden-frontend/actions/runs/30511274044/job/90771726280
+
+COMMAND:
+python -m unittest \
+  tests.test_day_handoff \
+  tests.test_generate_day_handoff \
+  tests.test_clean_window_shadow \
+  -v
+
+RELEVANT_LOG_TAIL:
+2026-07-30T03:28:46.8265440Z Ran 72 tests in 0.538s
+2026-07-30T03:28:46.8266613Z OK
+
+NORMALIZED_COUNTS:
+passed=72
+failed=0
+errors=0
+skipped=0
+exit=0
+conclusion=success
+
+LIMITATION=This run existed before CLEAN-WINDOW-DIAG-1 evidence correction. It was inspected read-only and was not triggered as a rerun of agent/clean-window-diag-1.
