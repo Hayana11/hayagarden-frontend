@@ -1,22 +1,19 @@
 #!/usr/bin/env python3
-"""P-CONTEXT-WINDOW-SPIKE-0: validate forged Claude transcript --resume.
-
-Isolation only — never touches production VPS, real transcripts, or secrets in logs.
-"""
+"""P-CONTEXT-WINDOW-SPIKE-0: validate forged Claude transcript --resume."""
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
 import subprocess
 import sys
 import tempfile
-import threading
-import time
 from dataclasses import asdict, dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -31,6 +28,7 @@ from tools.claude_forge_core import (  # noqa: E402
     new_uuid,
     session_jsonl_path_for_cwd,
     sha256_file,
+    verify_work_root,
 )
 from tools.claude_forge_live_gate import (  # noqa: E402
     CLAUDE_CODE_NPM_SPEC,
@@ -40,10 +38,12 @@ from tools.claude_forge_live_gate import (  # noqa: E402
     decide_verdict,
     evaluate_live_gate,
     generate_history_canary,
-    inject_canary_into_history,
     parse_stdout_events,
+    prepare_history_for_live_gate,
 )
+from tools.claude_forge_subprocess import SubprocessRunResult, run_subprocess_with_timeout  # noqa: E402
 from tools.claude_forge_validator import validate_forged_transcript  # noqa: E402
+from tools.cc_jsonl_usage import claude_project_slug  # noqa: E402
 
 CLAUDE_BIN = os.environ.get('CLAUDE_BIN', 'npx')
 CLAUDE_ARGS_PREFIX = (
@@ -58,6 +58,9 @@ REDACT_PATTERNS = (
     (re.compile(r'(toolu_)[A-Za-z0-9]+'), r'\1[REDACTED]'),
     (re.compile(r'sk-ant-[A-Za-z0-9_-]+'), '[REDACTED]'),
 )
+
+# Injectable in integration tests.
+_subprocess_runner: Callable[..., SubprocessRunResult] = run_subprocess_with_timeout
 
 
 def redact(text: str) -> str:
@@ -89,7 +92,6 @@ def claude_version_check() -> tuple[str, bool, str]:
 
 
 def explicit_auth_available() -> tuple[bool, str]:
-    """Only explicit env credentials count — never infer from host ~/.claude."""
     if os.environ.get('ANTHROPIC_API_KEY', '').strip():
         return True, 'ANTHROPIC_API_KEY'
     if os.environ.get('CLAUDE_CODE_OAUTH_TOKEN', '').strip():
@@ -101,8 +103,19 @@ def isolated_claude_env(claude_home: Path) -> dict[str, str]:
     env = os.environ.copy()
     env['CLAUDE_CONFIG_DIR'] = str(claude_home)
     env['DISABLE_AUTOUPDATER'] = '1'
-    # Do not copy host auth/session into isolated dir — credentials only via explicit env.
     return env
+
+
+def git_tree_sha() -> str:
+    out = _git(['rev-parse', 'HEAD^{tree}'])
+    return out or _git(['rev-parse', 'HEAD'])
+
+
+def git_diff_sha256() -> str:
+    diff = _git(['diff', 'HEAD'])
+    if not diff:
+        diff = _git(['diff', '--cached'])
+    return hashlib.sha256(diff.encode('utf-8')).hexdigest()
 
 
 @dataclass
@@ -132,8 +145,11 @@ class CaseResult:
 @dataclass
 class SpikeReport:
     branch: str = ''
-    head_sha: str = ''
-    tested_source_sha: str = ''
+    tested_tree_sha: str = ''
+    tested_diff_sha256: str = ''
+    generated_at: str = ''
+    command: str = ''
+    command_exit_code: Optional[int] = None
     origin_main_sha: str = ''
     claude_version: str = ''
     claude_version_ok: bool = False
@@ -174,6 +190,72 @@ def _claude_cmd(*args: str) -> list[str]:
     return [CLAUDE_BIN, *CLAUDE_ARGS_PREFIX, *args]
 
 
+def _run_claude(
+    *,
+    cmd: list[str],
+    cwd: str,
+    env: dict[str, str],
+    stdin_payload: str,
+    timeout_seconds: float = PROBE_TIMEOUT_SECONDS,
+    popen_factory: Optional[Callable[..., Any]] = None,
+) -> SubprocessRunResult:
+    return _subprocess_runner(
+        cmd=cmd,
+        cwd=cwd,
+        env=env,
+        stdin_payload=stdin_payload,
+        timeout_seconds=timeout_seconds,
+        popen_factory=popen_factory,
+    )
+
+
+def _resume_probe_from_run(
+    *,
+    run: SubprocessRunResult,
+    session_id: str,
+    canary: str,
+    before_bytes: bytes,
+    before_events: list[dict[str, Any]],
+    jsonl_path: Path,
+    old_uuids: Optional[set[str]] = None,
+) -> dict[str, Any]:
+    raw = parse_stdout_events(run.stdout_lines)
+    raw.exit_code = run.exit_code
+    raw.stderr_text = run.stderr_text
+    raw.timed_out = run.timed_out
+    if run.timed_out:
+        raw.error_type = 'timeout'
+        raw.error_detail = 'resume probe timed out'
+    elif run.stderr_text and not raw.error_detail:
+        raw.error_detail = redact(run.stderr_text)
+
+    after_bytes = jsonl_path.read_bytes() if jsonl_path.is_file() else b''
+    after_events = load_jsonl(jsonl_path) if jsonl_path.is_file() else []
+
+    gate = evaluate_live_gate(
+        raw=raw,
+        expected_session_id=session_id,
+        canary=canary,
+        before_bytes=before_bytes,
+        after_bytes=after_bytes,
+        before_events=before_events,
+        after_events=after_events,
+        old_uuids=old_uuids,
+    )
+    return {
+        'process_started': run.process_started,
+        'first_delta': raw.saw_text_delta,
+        'result_ok': raw.result_ok,
+        'transcript_grew': len(after_bytes) > len(before_bytes),
+        'exit_code': run.exit_code,
+        'error_type': raw.error_type,
+        'error_detail': redact(raw.error_detail),
+        'state': gate.state,
+        'canary_matched': gate.canary_matched,
+        'live_gate_failures': gate.failures,
+    }
+
+
 def _spawn_resume_probe(
     *,
     cwd: str,
@@ -182,7 +264,9 @@ def _spawn_resume_probe(
     canary: str,
     before_bytes: bytes,
     before_events: list[dict[str, Any]],
+    old_uuids: Optional[set[str]] = None,
     allowed_tools: str = '',
+    popen_factory: Optional[Callable[..., Any]] = None,
 ) -> dict[str, Any]:
     env = isolated_claude_env(claude_home)
     cmd = _claude_cmd(
@@ -200,89 +284,113 @@ def _spawn_resume_probe(
     payload = json.dumps(
         {'type': 'user', 'message': {'role': 'user', 'content': build_live_user_prompt()}},
         ensure_ascii=False,
-    )
+    ) + '\n'
     path = session_jsonl_path_for_cwd(cwd, session_id, claude_home=claude_home)
-
-    proc = subprocess.Popen(
-        cmd,
+    run = _run_claude(
+        cmd=cmd,
         cwd=cwd,
         env=env,
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
+        stdin_payload=payload,
+        popen_factory=popen_factory,
     )
-    stdout_lines: list[str] = []
-    timed_out = False
-
-    def _reader() -> None:
-        assert proc.stdout is not None
-        for line in proc.stdout:
-            stdout_lines.append(line)
-
-    reader = threading.Thread(target=_reader, daemon=True)
-    reader.start()
-    exit_code: Optional[int] = None
-    stderr_text = ''
-    try:
-        assert proc.stdin is not None
-        proc.stdin.write(payload + '\n')
-        proc.stdin.flush()
-        proc.stdin.close()
-        reader.join(timeout=PROBE_TIMEOUT_SECONDS)
-        if reader.is_alive():
-            timed_out = True
-            proc.kill()
-            reader.join(timeout=5)
-        exit_code = proc.wait(timeout=10)
-    except subprocess.TimeoutExpired:
-        timed_out = True
-        proc.kill()
-        proc.wait(timeout=5)
-        exit_code = proc.returncode
-    finally:
-        if proc.poll() is None:
-            proc.kill()
-            proc.wait(timeout=5)
-        if proc.stderr:
-            stderr_text = proc.stderr.read() or ''
-
-    raw = parse_stdout_events(stdout_lines)
-    raw.exit_code = exit_code
-    if timed_out:
-        raw.timed_out = True
-        raw.error_type = 'timeout'
-        raw.error_detail = 'resume probe timed out'
-    if stderr_text and not raw.error_detail:
-        raw.error_detail = redact(stderr_text)
-
-    after_bytes = path.read_bytes() if path.is_file() else b''
-    after_events = load_jsonl(path) if path.is_file() else []
-
-    gate = evaluate_live_gate(
-        raw=raw,
-        expected_session_id=session_id,
+    return _resume_probe_from_run(
+        run=run,
+        session_id=session_id,
         canary=canary,
         before_bytes=before_bytes,
-        after_bytes=after_bytes,
         before_events=before_events,
-        after_events=after_events,
+        jsonl_path=path,
+        old_uuids=old_uuids,
     )
 
-    return {
-        'process_started': raw.process_started,
-        'first_delta': bool(raw.assistant_text),
-        'result_ok': raw.result_ok,
-        'transcript_grew': len(after_bytes) > len(before_bytes),
-        'exit_code': exit_code,
-        'error_type': raw.error_type,
-        'error_detail': redact(raw.error_detail),
-        'state': gate.state,
-        'canary_matched': gate.canary_matched,
-        'live_gate_failures': gate.failures,
-        'assistant_text': raw.assistant_text,
-        'stdout_session_id': raw.stdout_session_id,
-    }
+
+def _discover_latest_session_jsonl(claude_home: Path, cwd: str) -> tuple[str, Path]:
+    proj = claude_home / 'projects' / claude_project_slug(cwd)
+    files = sorted(proj.glob('*.jsonl'), key=lambda p: p.stat().st_mtime, reverse=True)
+    if not files:
+        raise RuntimeError('no native session jsonl created')
+    path = files[0]
+    return path.stem, path
+
+
+def _run_case0_native_control(
+    *,
+    isolated_cwd: Path,
+    claude_home: Path,
+    work_root: Path,
+    popen_factory: Optional[Callable[..., Any]] = None,
+) -> CaseResult:
+    result = CaseResult(case_id='0', name='control_native_session_resume')
+    env = isolated_claude_env(claude_home)
+    first_payload = json.dumps(
+        {'type': 'user', 'message': {'role': 'user', 'content': '测试消息 A'}},
+        ensure_ascii=False,
+    ) + '\n'
+    create_cmd = _claude_cmd(
+        '-p',
+        '--input-format', 'stream-json',
+        '--output-format', 'stream-json',
+        '--verbose',
+        '--include-partial-messages',
+        '--system-prompt', SYSTEM_PROMPT,
+        '--max-turns', '2',
+        '--tools', '',
+        '--allowedTools', '',
+    )
+    create_run = _run_claude(
+        cmd=create_cmd,
+        cwd=str(isolated_cwd),
+        env=env,
+        stdin_payload=first_payload,
+        popen_factory=popen_factory,
+    )
+    if create_run.exit_code != 0:
+        result.state = 'ENV_FAIL'
+        result.error_type = 'native_create_failed'
+        result.error_detail = redact(create_run.stderr_text or 'native session create failed')
+        return result
+
+    session_id, jsonl_path = _discover_latest_session_jsonl(claude_home, str(isolated_cwd))
+    base_events = load_jsonl(jsonl_path)
+    canary = generate_history_canary()
+    result.canary = canary
+    history = prepare_history_for_live_gate(
+        base_events,
+        canary,
+        session_id=session_id,
+        cwd=str(isolated_cwd),
+    )
+    dump_jsonl(jsonl_path, history, allowed_output_root=work_root)
+    result.source_sha256 = sha256_file(jsonl_path)
+    result.event_count = len(history)
+    result.structure_ok = True
+
+    before_bytes = jsonl_path.read_bytes()
+    before_events = load_jsonl(jsonl_path)
+    probe = _spawn_resume_probe(
+        cwd=str(isolated_cwd),
+        session_id=session_id,
+        claude_home=claude_home,
+        canary=canary,
+        before_bytes=before_bytes,
+        before_events=before_events,
+        popen_factory=popen_factory,
+    )
+    _apply_probe_to_case(result, probe)
+    return result
+
+
+def _apply_probe_to_case(result: CaseResult, probe: dict[str, Any]) -> None:
+    result.process_started = probe['process_started']
+    result.first_delta = probe['first_delta']
+    result.result_ok = probe['result_ok']
+    result.transcript_grew = probe['transcript_grew']
+    result.exit_code = probe.get('exit_code')
+    result.error_type = probe.get('error_type') or ''
+    result.error_detail = probe.get('error_detail') or ''
+    result.canary_matched = probe.get('canary_matched', False)
+    result.live_gate_failures = list(probe.get('live_gate_failures') or [])
+    result.state = probe.get('state') or 'RESUME_FAIL'
 
 
 def _record_forge_case(
@@ -298,6 +406,7 @@ def _record_forge_case(
     claude_home: Path,
     old_uuids: set[str],
     run_live: bool,
+    popen_factory: Optional[Callable[..., Any]] = None,
 ) -> CaseResult:
     result = CaseResult(case_id=case_id, name=name)
     result.source_sha256 = sha256_file(source_path)
@@ -305,39 +414,19 @@ def _record_forge_case(
     result.first_type = str(forged_events[0].get('type') if forged_events else '')
     result.last_type = str(forged_events[-1].get('type') if forged_events else '')
 
-    events_to_write = forged_events
-    canary = ''
+    canary = generate_history_canary() if run_live else ''
     if run_live:
-        if not any(evt.get('type') == 'assistant' for evt in forged_events):
-            out_path = session_jsonl_path_for_cwd(
-                str(isolated_cwd), new_session_id, claude_home=claude_home,
-            )
-            result.target_sha256 = dump_jsonl(
-                out_path,
-                forged_events,
-                allowed_output_root=work_root,
-            )
-            validation = validate_forged_transcript(
-                forged_events,
-                session_id=new_session_id,
-                output_path=out_path,
-                expected_sha256=result.target_sha256,
-                allowed_output_root=work_root,
-                old_uuids=old_uuids,
-            )
-            result.structure_ok = validation.ok
-            if not validation.ok:
-                result.error_type = 'structure'
-                result.error_detail = redact(';'.join(validation.errors[:5]))
-                result.state = 'STRUCTURE_FAIL'
-            else:
-                result.state = 'LIVE_SKIPPED_NO_ASSISTANT'
-                result.notes = 'no assistant event for canary injection after forge'
-            report.cases.append(result)
-            return result
-        canary = generate_history_canary()
         result.canary = canary
-        events_to_write = inject_canary_into_history(forged_events, canary)
+    events_to_write = (
+        prepare_history_for_live_gate(
+            forged_events,
+            canary,
+            session_id=new_session_id,
+            cwd=str(isolated_cwd),
+        )
+        if run_live
+        else forged_events
+    )
 
     out_path = session_jsonl_path_for_cwd(str(isolated_cwd), new_session_id, claude_home=claude_home)
     result.target_sha256 = dump_jsonl(
@@ -377,17 +466,10 @@ def _record_forge_case(
         canary=canary,
         before_bytes=before_bytes,
         before_events=before_events,
+        old_uuids=old_uuids,
+        popen_factory=popen_factory,
     )
-    result.process_started = probe['process_started']
-    result.first_delta = probe['first_delta']
-    result.result_ok = probe['result_ok']
-    result.transcript_grew = probe['transcript_grew']
-    result.exit_code = probe.get('exit_code')
-    result.error_type = probe.get('error_type') or ''
-    result.error_detail = probe.get('error_detail') or ''
-    result.canary_matched = probe.get('canary_matched', False)
-    result.live_gate_failures = list(probe.get('live_gate_failures') or [])
-    result.state = probe.get('state') or 'RESUME_FAIL'
+    _apply_probe_to_case(result, probe)
     report.cases.append(result)
     return result
 
@@ -396,12 +478,16 @@ def run_spike(
     work_root: Optional[Path] = None,
     *,
     structural_only: bool = False,
+    popen_factory: Optional[Callable[..., Any]] = None,
+    command: str = '',
 ) -> SpikeReport:
     report = SpikeReport()
     report.structural_only = structural_only
     report.branch = _git(['branch', '--show-current'])
-    report.head_sha = _git(['rev-parse', 'HEAD'])
-    report.tested_source_sha = report.head_sha
+    report.tested_tree_sha = git_tree_sha()
+    report.tested_diff_sha256 = git_diff_sha256()
+    report.generated_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    report.command = command
     report.origin_main_sha = _git(['rev-parse', 'origin/main'])
     version_raw, version_ok, version_err = claude_version_check()
     report.claude_version = version_raw
@@ -428,8 +514,8 @@ def run_spike(
             report.live_probe_status = 'RUN'
             run_live = True
 
-    work_root = work_root or Path(tempfile.mkdtemp(prefix='claude-forge-spike-'))
-    work_root = work_root.resolve()
+    raw_work_root = work_root or Path(tempfile.mkdtemp(prefix='claude-forge-spike-'))
+    work_root = verify_work_root(raw_work_root)
     isolated_cwd = work_root / 'isolated-project'
     isolated_cwd.mkdir(parents=True, exist_ok=True)
     claude_home = work_root / 'claude-home'
@@ -441,15 +527,19 @@ def run_spike(
     if not fixture_root.is_dir():
         subprocess.run([sys.executable, str(ROOT / 'scripts' / 'build_claude_forge_fixtures.py')], check=True)
 
-    # CASE 0 control — only when live enabled
-    c0 = CaseResult(case_id='0', name='control_native_session_resume')
-    report.cases.append(c0)
     if run_live:
-        c0.state = 'NOT_IMPLEMENTED_IN_SPIKE'
-        c0.notes = 'CASE 0 baseline creation deferred to credentialed runner; use CASE 1+ forge path'
+        c0 = _run_case0_native_control(
+            isolated_cwd=isolated_cwd,
+            claude_home=claude_home,
+            work_root=work_root,
+            popen_factory=popen_factory,
+        )
+        report.cases.append(c0)
     else:
-        c0.state = 'NOT_RUN_NO_CREDENTIALS' if structural_only or not report.auth_available else 'BLOCKED'
+        c0 = CaseResult(case_id='0', name='control_native_session_resume')
+        c0.state = 'NOT_RUN_NO_CREDENTIALS'
         c0.notes = report.live_probe_status
+        report.cases.append(c0)
 
     def _forge_case(case_id: str, name: str, src: Path, opts: ForgeOptions, old_uuids: set[str]) -> None:
         forged = forge_transcript(load_jsonl(src), opts)
@@ -465,14 +555,13 @@ def run_spike(
             claude_home=claude_home,
             old_uuids=old_uuids,
             run_live=run_live,
+            popen_factory=popen_factory,
         )
 
     src1 = fixture_root / 'case1_plain_two_rounds.jsonl'
-    old1 = collect_event_uuids(load_jsonl(src1))
-    sid1 = new_uuid()
     _forge_case('1', 'minimal_plain_text_forge', src1, ForgeOptions(
-        new_session_id=sid1, cwd=str(isolated_cwd), allowed_output_root=work_root,
-    ), old1)
+        new_session_id=new_uuid(), cwd=str(isolated_cwd), allowed_output_root=work_root,
+    ), collect_event_uuids(load_jsonl(src1)))
 
     src2 = fixture_root / 'case2a_signed_thinking.jsonl'
     old2 = collect_event_uuids(load_jsonl(src2))
@@ -503,13 +592,12 @@ def run_spike(
     canon = json.loads((fixture_root / 'app_db_canonical_messages.json').read_text(encoding='utf-8'))
     ev7 = load_jsonl(src7)
     inj_uuid = next(str(e.get('uuid')) for e in ev7 if e.get('type') == 'user')
-    old7 = collect_event_uuids(ev7)
     _forge_case('7', 'legacy_injection_strip', src7, ForgeOptions(
         new_session_id=new_uuid(),
         cwd=str(isolated_cwd),
         allowed_output_root=work_root,
         user_canonical_by_event_uuid={inj_uuid: canon['by_claude_event_uuid'][inj_uuid]},
-    ), old7)
+    ), collect_event_uuids(ev7))
 
     for label, events in (
         ('empty_thinking', [
@@ -549,9 +637,7 @@ def run_spike(
     if not version_ok:
         report.verdict = 'NO-GO'
         version_note = f'Claude Code 版本锁定失败: {version_err}'
-        report.verdict_reason = (
-            f'{version_note}; {reason}' if reason else version_note
-        )
+        report.verdict_reason = f'{version_note}; {reason}' if reason else version_note
     return report
 
 
@@ -561,12 +647,18 @@ def main() -> int:
     parser.add_argument('--report', type=Path, default=ROOT / 'artifacts' / 'spike-claude-forge-resume' / 'results.json')
     parser.add_argument('--structural-only', action='store_true', help='Skip live resume probes')
     args = parser.parse_args()
-
-    report = run_spike(args.work_root, structural_only=args.structural_only)
+    cmd_str = ' '.join([sys.executable, str(Path(__file__).resolve())] + sys.argv[1:])
+    report = run_spike(
+        args.work_root,
+        structural_only=args.structural_only,
+        command=cmd_str,
+    )
+    exit_code = 0 if report.verdict == 'GO' else 2
+    report.command_exit_code = exit_code
     args.report.parent.mkdir(parents=True, exist_ok=True)
     args.report.write_text(json.dumps(report.to_dict(), ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
     print(json.dumps(report.to_dict(), ensure_ascii=False, indent=2))
-    return 0 if report.verdict == 'GO' else 2
+    return exit_code
 
 
 if __name__ == '__main__':

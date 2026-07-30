@@ -1,0 +1,4 @@
+{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"X"}}}
+{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"Y"}}}
+{"type":"assistant","sessionId":"00000000-0000-4000-8000-000000000001","message":{"role":"assistant","content":[{"type":"text","text":"XY"}]}}
+{"type":"result","is_error":false,"sessionId":"00000000-0000-4000-8000-000000000001"}

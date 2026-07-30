@@ -19,10 +19,12 @@ if str(ROOT) not in sys.path:
 from tools.claude_forge_core import (
     ForgeOptions,
     collect_event_uuids,
+    dump_jsonl,
     forge_transcript,
     load_jsonl,
     new_uuid,
     scan_unknown_uuid_strings,
+    verify_work_root,
 )
 from tools.claude_forge_live_gate import (
     LiveProbeRaw,
@@ -31,6 +33,8 @@ from tools.claude_forge_live_gate import (
     evaluate_live_gate,
     generate_history_canary,
     inject_canary_into_history,
+    parse_stdout_events,
+    prepare_history_for_live_gate,
     verify_jsonl_append_chain,
     verify_jsonl_prefix_unchanged,
 )
@@ -68,6 +72,7 @@ class LiveGateTests(unittest.TestCase):
             process_started=True,
             exit_code=0,
             assistant_text='wrong-answer',
+            saw_text_delta=True,
             result_ok=True,
             result_is_error=False,
             stdout_session_id=str(before[0]['sessionId']),
@@ -91,6 +96,7 @@ class LiveGateTests(unittest.TestCase):
             process_started=True,
             exit_code=0,
             assistant_text=canary,
+            saw_text_delta=True,
             result_ok=True,
             result_is_error=False,
             stdout_session_id='other-session-id',
@@ -112,6 +118,7 @@ class LiveGateTests(unittest.TestCase):
             process_started=True,
             exit_code=1,
             assistant_text=canary,
+            saw_text_delta=True,
             result_ok=True,
             result_is_error=False,
             stdout_session_id='sid',
@@ -130,6 +137,55 @@ class LiveGateTests(unittest.TestCase):
     def test_file_replaced_not_appended_fails(self) -> None:
         self.assertFalse(verify_jsonl_prefix_unchanged(b'original', b'replaced'))
 
+    def test_append_bad_session_id_fails(self) -> None:
+        before = _base_events()
+        canary = generate_history_canary()
+        after = before + [
+            {'type': 'user', 'uuid': new_uuid(), 'parentUuid': before[-1]['uuid'],
+             'sessionId': 'wrong-session', 'message': {'role': 'user', 'content': build_live_user_prompt()}},
+            {'type': 'assistant', 'uuid': new_uuid(), 'parentUuid': before[-1]['uuid'],
+             'sessionId': 'wrong-session',
+             'message': {'role': 'assistant', 'content': [{'type': 'text', 'text': canary}]}},
+        ]
+        ok, reason, failures = verify_jsonl_append_chain(
+            before, after,
+            expected_session_id=str(before[0]['sessionId']),
+            live_user_prompt=build_live_user_prompt(),
+            canary=canary,
+        )
+        self.assertFalse(ok)
+        self.assertTrue(reason.startswith('append_bad_session_id'))
+        self.assertTrue(any(f.startswith('append_bad_session_id') for f in failures))
+
+    def test_append_third_new_event_breaks_chain(self) -> None:
+        before = _base_events()
+        canary = generate_history_canary()
+        u1, a1, u2 = new_uuid(), new_uuid(), new_uuid()
+        after = before + [
+            {'type': 'user', 'uuid': u1, 'parentUuid': before[-1]['uuid'],
+             'sessionId': before[0]['sessionId'], 'message': {'role': 'user', 'content': build_live_user_prompt()}},
+            {'type': 'assistant', 'uuid': a1, 'parentUuid': u1, 'sessionId': before[0]['sessionId'],
+             'message': {'role': 'assistant', 'content': [{'type': 'text', 'text': canary}]}},
+            {'type': 'user', 'uuid': u2, 'parentUuid': before[-1]['uuid'],
+             'sessionId': before[0]['sessionId'], 'message': {'role': 'user', 'content': 'orphan'}},
+        ]
+        ok, reason, failures = verify_jsonl_append_chain(
+            before, after,
+            expected_session_id=str(before[0]['sessionId']),
+            live_user_prompt=build_live_user_prompt(),
+            canary=canary,
+        )
+        self.assertFalse(ok)
+        self.assertTrue(any(f.startswith('append_bad_parent') for f in failures))
+
+    def test_stream_event_fixture_parses_nested_delta(self) -> None:
+        fixture = FIXTURE_ROOT / 'stream_event_sample.jsonl'
+        lines = fixture.read_text(encoding='utf-8').splitlines()
+        raw = parse_stdout_events(lines)
+        self.assertTrue(raw.saw_text_delta)
+        self.assertEqual(raw.assistant_text, 'XY')
+        self.assertEqual(raw.stdout_session_id, '00000000-0000-4000-8000-000000000001')
+
     def test_append_wrong_parent_fails(self) -> None:
         before = _base_events()
         after = before + [
@@ -138,9 +194,14 @@ class LiveGateTests(unittest.TestCase):
             {'type': 'assistant', 'uuid': new_uuid(), 'parentUuid': 'x', 'sessionId': before[0]['sessionId'],
              'message': {'role': 'assistant', 'content': [{'type': 'text', 'text': 'a'}]}},
         ]
-        ok, reason = verify_jsonl_append_chain(before, after)
+        ok, reason, _ = verify_jsonl_append_chain(
+            before, after,
+            expected_session_id=str(before[0]['sessionId']),
+            live_user_prompt=build_live_user_prompt(),
+            canary=generate_history_canary(),
+        )
         self.assertFalse(ok)
-        self.assertEqual(reason, 'append_user_parent_not_old_leaf')
+        self.assertTrue(reason.startswith('append_bad_parent'))
 
     def test_verdict_2a_2b_both_fail_is_nogo(self) -> None:
         cases = [
@@ -153,23 +214,22 @@ class LiveGateTests(unittest.TestCase):
         verdict, _ = decide_verdict(cases, structural_only=False, live_probe_status='RUN')
         self.assertEqual(verdict, 'NO-GO')
 
-    def test_probe_timeout_does_not_hang(self) -> None:
-        proc = subprocess.Popen(
-            [sys.executable, '-c', 'import time; time.sleep(30)'],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
-        start = time.time()
-        reader = threading.Thread(
-            target=lambda: proc.stdout.readline() if proc.stdout else None,
-            daemon=True,
-        )
-        reader.start()
-        reader.join(timeout=0.2)
-        proc.kill()
-        proc.wait(timeout=2)
-        self.assertLess(time.time() - start, 5)
+    def test_probe_timeout_uses_harness_runner(self) -> None:
+        from tools.claude_forge_subprocess import run_subprocess_with_timeout
+
+        with tempfile.TemporaryDirectory() as tmp:
+            script = Path(tmp) / 'slow.py'
+            script.write_text('import time; time.sleep(30)\n', encoding='utf-8')
+            start = time.time()
+            result = run_subprocess_with_timeout(
+                cmd=[sys.executable, str(script)],
+                cwd=tmp,
+                env=os.environ.copy(),
+                stdin_payload='',
+                timeout_seconds=0.3,
+            )
+            self.assertLess(time.time() - start, 5)
+            self.assertTrue(result.timed_out)
 
     def test_structural_only_ignores_host_credentials(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -196,6 +256,8 @@ class LiveGateTests(unittest.TestCase):
             self.assertFalse(data['auth_available'])
             self.assertEqual(data['live_probe_status'], 'NOT_RUN_NO_CREDENTIALS')
             self.assertEqual(data['verdict'], 'NO-GO')
+            self.assertIn('tested_tree_sha', data)
+            self.assertNotIn('24656ca', json.dumps(data))
 
     def test_nested_old_uuid_residual_fails(self) -> None:
         old = new_uuid()
@@ -247,11 +309,48 @@ class LiveGateTests(unittest.TestCase):
         )
         self.assertTrue(result.ok, result.errors)
 
+    def test_prepare_history_user_tail_gets_assistant_canary(self) -> None:
+        sid = new_uuid()
+        user_only = [
+            {'type': 'user', 'uuid': new_uuid(), 'parentUuid': None, 'sessionId': sid,
+             'message': {'role': 'user', 'content': '主链消息'}},
+        ]
+        canary = generate_history_canary()
+        out = prepare_history_for_live_gate(user_only, canary, session_id=sid, cwd='/tmp/x')
+        self.assertEqual(out[-1]['type'], 'assistant')
+        self.assertIn(canary, json.dumps(out[-1], ensure_ascii=False))
+
     def test_live_prompt_does_not_contain_canary(self) -> None:
         canary = generate_history_canary()
         prompt = build_live_user_prompt()
         self.assertNotIn(canary, prompt)
-        self.assertNotIn('CANARY-', prompt)
+
+    def test_symlink_middle_component_rejected_on_dump(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / 'root'
+            root.mkdir()
+            mid = root / 'mid'
+            mid.mkdir()
+            real = root / 'real-target'
+            real.mkdir()
+            link = mid / 'link'
+            link.symlink_to(real)
+            out = link / 'out.jsonl'
+            events = [{'type': 'user', 'uuid': new_uuid(), 'parentUuid': None, 'sessionId': new_uuid(),
+                       'message': {'role': 'user', 'content': 'x'}}]
+            with self.assertRaises(ValueError):
+                dump_jsonl(out, events, allowed_output_root=root)
+
+    def test_normal_root_atomic_write_succeeds(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            out = root / 'nested' / 'out.jsonl'
+            sid = new_uuid()
+            events = [{'type': 'user', 'uuid': new_uuid(), 'parentUuid': None, 'sessionId': sid,
+                       'message': {'role': 'user', 'content': 'x'}}]
+            digest = dump_jsonl(out, events, allowed_output_root=root)
+            self.assertTrue(out.is_file())
+            self.assertEqual(len(digest), 64)
 
 
 if __name__ == '__main__':

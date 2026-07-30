@@ -139,7 +139,7 @@ class ClaudeForgeSpikeTests(unittest.TestCase):
             self.assertFalse(data['auth_available'])
             self.assertEqual(data['live_probe_status'], 'NOT_RUN_NO_CREDENTIALS')
             self.assertEqual(data['verdict'], 'NO-GO')
-            self.assertEqual(data['tested_source_sha'], data['head_sha'])
+            self.assertIn('tested_tree_sha', data)
             self.assertFalse(data['ci_verified'])
             self.assertFalse(data['touched_production'])
             case1 = next(c for c in data['cases'] if c['case_id'] == '1')

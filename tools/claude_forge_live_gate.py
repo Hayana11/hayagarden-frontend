@@ -3,13 +3,11 @@ from __future__ import annotations
 
 import json
 import secrets
-import threading
-import time
 from dataclasses import dataclass, field
-from typing import Any, Callable, Optional
+from typing import Any, Optional
 
-from tools.claude_forge_core import UUID_RE, _content_blocks, _message_text, load_jsonl
-from pathlib import Path
+from tools.claude_forge_core import UUID_RE, _content_blocks, _message_text, new_uuid, scan_unknown_uuid_strings
+from tools.claude_forge_validator import validate_forged_transcript
 
 CLAUDE_CODE_PINNED_VERSION = '2.1.220'
 CLAUDE_CODE_NPM_SPEC = f'@anthropic-ai/claude-code@{CLAUDE_CODE_PINNED_VERSION}'
@@ -18,17 +16,14 @@ SYSTEM_PROMPT = '你是隔离 Spike 测试助手。只回复简短确认，不�
 
 
 def generate_history_canary() -> str:
-    """Unpredictable token embedded only in forged history, never in live prompts."""
     return f'CANARY-{secrets.token_hex(16)}'
 
 
 def build_live_user_prompt() -> str:
-    """Probe prompt must not contain the canary."""
     return '请只回复上一轮助手消息末尾约定的历史校验码，不要添加任何其他字符。'
 
 
 def inject_canary_into_history(events: list[dict[str, Any]], canary: str) -> list[dict[str, Any]]:
-    """Append canary to the last assistant text block in forged history."""
     if not events:
         return events
     out = [json.loads(json.dumps(e)) for e in events]
@@ -50,11 +45,45 @@ def inject_canary_into_history(events: list[dict[str, Any]], canary: str) -> lis
     raise ValueError('no assistant event to inject canary')
 
 
+def prepare_history_for_live_gate(
+    events: list[dict[str, Any]],
+    canary: str,
+    *,
+    session_id: str,
+    cwd: str,
+) -> list[dict[str, Any]]:
+    """Ensure history ends with an assistant carrying the canary (user-tail safe)."""
+    if not events:
+        raise ValueError('empty history')
+    if any(evt.get('type') == 'assistant' for evt in events):
+        return inject_canary_into_history(events, canary)
+    out = [json.loads(json.dumps(e)) for e in events]
+    parent = str(out[-1].get('uuid') or '')
+    if not parent:
+        raise ValueError('tail event missing uuid')
+    a_id = new_uuid()
+    out.append({
+        'type': 'assistant',
+        'uuid': a_id,
+        'parentUuid': parent,
+        'timestamp': out[-1].get('timestamp') or '2026-07-30T00:00:00.000Z',
+        'sessionId': session_id,
+        'cwd': cwd,
+        'version': f'{CLAUDE_CODE_PINNED_VERSION}-spike',
+        'message': {
+            'role': 'assistant',
+            'content': [{'type': 'text', 'text': f'[history-canary:{canary}]'}],
+        },
+    })
+    return out
+
+
 @dataclass
 class LiveProbeRaw:
     process_started: bool = False
     exit_code: Optional[int] = None
     assistant_text: str = ''
+    saw_text_delta: bool = False
     result_ok: bool = False
     result_is_error: Optional[bool] = None
     stdout_session_id: str = ''
@@ -77,21 +106,33 @@ class LiveGateResult:
     raw: Optional[LiveProbeRaw] = None
 
 
-def _extract_assistant_text(evt: dict[str, Any]) -> str:
-    message = evt.get('message') or {}
-    content = message.get('content')
-    if isinstance(content, str):
-        return content
-    parts: list[str] = []
-    for block in _content_blocks(message):
-        if block.get('type') == 'text':
-            parts.append(str(block.get('text') or ''))
-    return ''.join(parts)
+def _extract_assistant_message_text(evt: dict[str, Any]) -> str:
+    if evt.get('type') != 'assistant':
+        return ''
+    return _message_text((evt.get('message') or {}).get('content'))
+
+
+def _extract_stream_text_delta(evt: dict[str, Any]) -> str:
+    if evt.get('type') != 'stream_event':
+        return ''
+    inner = evt.get('event')
+    if not isinstance(inner, dict):
+        return ''
+    delta = inner.get('delta')
+    if isinstance(delta, dict) and delta.get('type') == 'text_delta':
+        return str(delta.get('text') or '')
+    block = inner.get('content_block_delta')
+    if isinstance(block, dict):
+        nested = block.get('delta')
+        if isinstance(nested, dict) and nested.get('type') == 'text_delta':
+            return str(nested.get('text') or '')
+    return ''
 
 
 def parse_stdout_events(lines: list[str]) -> LiveProbeRaw:
     raw = LiveProbeRaw(process_started=True)
-    text_parts: list[str] = []
+    delta_parts: list[str] = []
+    assistant_parts: list[str] = []
     for line in lines:
         line = line.strip()
         if not line:
@@ -110,11 +151,17 @@ def parse_stdout_events(lines: list[str]) -> LiveProbeRaw:
         if etype == 'result':
             raw.result_ok = not bool(evt.get('is_error'))
             raw.result_is_error = bool(evt.get('is_error'))
-        delta = evt.get('delta')
-        if isinstance(delta, dict) and delta.get('type') == 'text_delta':
-            text_parts.append(str(delta.get('text') or ''))
-        text_parts.append(_extract_assistant_text(evt))
-    raw.assistant_text = ''.join(text_parts).strip()
+        stream_delta = _extract_stream_text_delta(evt)
+        if stream_delta:
+            raw.saw_text_delta = True
+            delta_parts.append(stream_delta)
+        assistant_text = _extract_assistant_message_text(evt)
+        if assistant_text:
+            assistant_parts.append(assistant_text)
+    if assistant_parts:
+        raw.assistant_text = assistant_parts[-1].strip()
+    elif delta_parts:
+        raw.assistant_text = ''.join(delta_parts).strip()
     return raw
 
 
@@ -124,26 +171,76 @@ def verify_jsonl_prefix_unchanged(before: bytes, after: bytes) -> bool:
     return after[: len(before)] == before
 
 
+def _assistant_on_disk_text(evt: dict[str, Any]) -> str:
+    return _message_text((evt.get('message') or {}).get('content')).strip()
+
+
 def verify_jsonl_append_chain(
     before_events: list[dict[str, Any]],
     after_events: list[dict[str, Any]],
-) -> tuple[bool, str]:
-    if len(after_events) < len(before_events) + 2:
-        return False, 'append_too_few_events'
-    if after_events[: len(before_events)] != before_events:
-        return False, 'prefix_events_changed'
+    *,
+    expected_session_id: str,
+    live_user_prompt: str,
+    canary: str,
+    old_uuids: Optional[set[str]] = None,
+) -> tuple[bool, str, list[str]]:
+    failures: list[str] = []
+    n_before = len(before_events)
+    if len(after_events) < n_before + 2:
+        return False, 'append_too_few_events', failures
+    if after_events[:n_before] != before_events:
+        return False, 'prefix_events_changed', failures
+
     old_leaf = str(before_events[-1].get('uuid') or '')
-    new_user = after_events[len(before_events)]
-    new_assistant = after_events[len(before_events) + 1]
-    if new_user.get('type') != 'user':
-        return False, 'append_first_not_user'
-    if new_assistant.get('type') != 'assistant':
-        return False, 'append_second_not_assistant'
-    if str(new_user.get('parentUuid') or '') != old_leaf:
-        return False, 'append_user_parent_not_old_leaf'
-    if str(new_assistant.get('parentUuid') or '') != str(new_user.get('uuid') or ''):
-        return False, 'append_assistant_parent_not_new_user'
-    return True, ''
+    known_uuids = {str(e.get('uuid') or '') for e in before_events if e.get('uuid')}
+    new_events = after_events[n_before:]
+
+    prev_uuid = old_leaf
+    saw_user = False
+    saw_assistant = False
+    for idx, evt in enumerate(new_events):
+        uid = str(evt.get('uuid') or '')
+        if not uid or not UUID_RE.match(uid):
+            failures.append(f'append_bad_uuid:{n_before + idx}')
+            continue
+        if uid in known_uuids:
+            failures.append(f'append_duplicate_uuid:{uid}')
+        known_uuids.add(uid)
+        if str(evt.get('sessionId') or '') != expected_session_id:
+            failures.append(f'append_bad_session_id:{uid}')
+        if str(evt.get('parentUuid') or '') != prev_uuid:
+            failures.append(f'append_bad_parent:{uid}')
+        etype = evt.get('type')
+        if etype == 'user':
+            saw_user = True
+            if _message_text((evt.get('message') or {}).get('content')) != live_user_prompt:
+                failures.append('append_user_prompt_mismatch')
+        elif etype == 'assistant':
+            saw_assistant = True
+            if _assistant_on_disk_text(evt) != canary.strip():
+                failures.append('append_assistant_canary_mismatch')
+        prev_uuid = uid
+
+    if not saw_user:
+        failures.append('append_missing_user')
+    if not saw_assistant:
+        failures.append('append_missing_assistant')
+
+    if old_uuids:
+        for evt in after_events:
+            failures.extend(scan_unknown_uuid_strings(evt, old_uuids))
+
+    validation = validate_forged_transcript(
+        after_events,
+        session_id=expected_session_id,
+        old_uuids=old_uuids,
+    )
+    if not validation.ok:
+        failures.extend(validation.errors[:5])
+
+    if failures:
+        return False, failures[0], failures
+    return True, '', failures
 
 
 def evaluate_live_gate(
@@ -155,6 +252,7 @@ def evaluate_live_gate(
     after_bytes: bytes,
     before_events: list[dict[str, Any]],
     after_events: list[dict[str, Any]],
+    old_uuids: Optional[set[str]] = None,
 ) -> LiveGateResult:
     result = LiveGateResult(raw=raw, canary=canary)
     failures: list[str] = []
@@ -163,6 +261,8 @@ def evaluate_live_gate(
         failures.append('process_not_started')
     if raw.exit_code != 0:
         failures.append(f'exit_code:{raw.exit_code}')
+    if not raw.saw_text_delta:
+        failures.append('missing_text_delta')
     if not raw.assistant_text:
         failures.append('missing_assistant_text')
     if not raw.result_ok:
@@ -182,59 +282,23 @@ def evaluate_live_gate(
     if not result.prefix_unchanged:
         failures.append('jsonl_prefix_changed')
 
-    append_ok, append_reason = verify_jsonl_append_chain(before_events, after_events)
+    append_ok, append_reason, append_failures = verify_jsonl_append_chain(
+        before_events,
+        after_events,
+        expected_session_id=expected_session_id,
+        live_user_prompt=build_live_user_prompt(),
+        canary=canary,
+        old_uuids=old_uuids,
+    )
     result.append_valid = append_ok
     if not append_ok:
         failures.append(append_reason or 'append_invalid')
+        failures.extend(append_failures)
 
-    result.failures = failures
-    result.passed = len(failures) == 0
+    result.failures = list(dict.fromkeys(failures))
+    result.passed = len(result.failures) == 0
     result.state = 'API_ACCEPTED_FIRST_DELTA' if result.passed else 'RESUME_FAIL'
     return result
-
-
-def run_subprocess_with_timeout(
-    *,
-    popen_factory: Callable[[], Any],
-    stdin_payload: str,
-    timeout_seconds: float,
-    on_line: Callable[[str], None],
-) -> tuple[int, bool]:
-    """Run subprocess with non-blocking stdout read; kill on timeout."""
-    proc = popen_factory()
-    timed_out = False
-    lines: list[str] = []
-
-    def _reader() -> None:
-        assert proc.stdout is not None
-        for line in proc.stdout:
-            lines.append(line)
-            on_line(line)
-
-    reader = threading.Thread(target=_reader, daemon=True)
-    reader.start()
-    try:
-        assert proc.stdin is not None
-        proc.stdin.write(stdin_payload)
-        proc.stdin.flush()
-        proc.stdin.close()
-        reader.join(timeout=timeout_seconds)
-        if reader.is_alive():
-            timed_out = True
-            proc.kill()
-            reader.join(timeout=5)
-        proc.wait(timeout=10)
-    except Exception:
-        proc.kill()
-        proc.wait(timeout=5)
-        raise
-    finally:
-        if proc.poll() is None:
-            proc.kill()
-            proc.wait(timeout=5)
-    for line in lines:
-        on_line(line)
-    return int(proc.returncode or 0), timed_out
 
 
 def decide_verdict(
@@ -243,7 +307,6 @@ def decide_verdict(
     structural_only: bool,
     live_probe_status: str,
 ) -> tuple[str, str]:
-    """Return (verdict, reason). Never GO without all required live cases passing."""
     if structural_only or live_probe_status == 'NOT_RUN_NO_CREDENTIALS':
         return (
             'NO-GO',
@@ -254,17 +317,13 @@ def decide_verdict(
     required = ('0', '1', '2A', '2B', '3A', '5B', '6', '7')
     by_id = {c['case_id']: c for c in cases}
 
-    def _state(cid: str) -> str:
-        return str(by_id.get(cid, {}).get('state') or 'MISSING')
-
     def _passed(cid: str) -> bool:
-        return _state(cid) == 'API_ACCEPTED_FIRST_DELTA'
+        return str(by_id.get(cid, {}).get('state') or 'MISSING') == 'API_ACCEPTED_FIRST_DELTA'
 
     if not _passed('0') or not _passed('1'):
         return 'NO-GO', 'CASE 0 或 CASE 1 live gate 未通过'
 
-    c2a, c2b = _passed('2A'), _passed('2B')
-    if not c2a and not c2b:
+    if not _passed('2A') and not _passed('2B'):
         return 'NO-GO', 'CASE 2A 与 2B 均失败 — 不得 GO 或仅凭结构通过升级'
 
     missing_or_failed = [cid for cid in required if not _passed(cid)]

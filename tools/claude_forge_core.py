@@ -124,16 +124,33 @@ def apply_uuid_map_deep(obj: Any, uuid_map: dict[str, str]) -> Any:
     return obj
 
 
+def verify_work_root(work_root: Path) -> Path:
+    """Reject symlink work roots and symlink components before any resolve()."""
+    if work_root.is_symlink():
+        raise ValueError('FORGE_SYMLINK:work_root')
+    current = work_root
+    while True:
+        if current.exists() and current.is_symlink():
+            raise ValueError(f'FORGE_SYMLINK:{current}')
+        if current.parent == current:
+            break
+        current = current.parent
+    return work_root.resolve()
+
+
 def verify_safe_output_path(path: Path, allowed_root: Path) -> None:
     """Reject symlink escapes before writing forged JSONL."""
-    root = allowed_root.resolve()
-    if root.is_symlink():
-        raise ValueError('FORGE_OUTPUT_PATH:allowed_root_is_symlink')
+    root = verify_work_root(allowed_root)
+    if path.is_symlink():
+        raise ValueError(f'FORGE_SYMLINK:{path}')
     candidate = path if path.is_absolute() else (allowed_root / path)
-    parent = candidate.parent
-    for part in [parent, candidate]:
-        if part.exists() and part.is_symlink():
-            raise ValueError(f'FORGE_SYMLINK:{part}')
+    current = candidate.parent
+    while True:
+        if current.exists() and current.is_symlink():
+            raise ValueError(f'FORGE_SYMLINK:{current}')
+        if current == root or current.parent == current:
+            break
+        current = current.parent
     resolved = candidate.resolve()
     try:
         resolved.relative_to(root)
