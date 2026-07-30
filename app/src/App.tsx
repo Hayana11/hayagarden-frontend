@@ -18,6 +18,7 @@ import { ProfileScreen } from './screens/ProfileScreen';
 import { MonopolyRoomScreen } from './screens/MonopolyRoomScreen';
 import { DailySoftWindowPreviewScreen } from './screens/DailySoftWindowPreviewScreen';
 import { ManualContextWindowPreviewScreen } from './screens/ManualContextWindowPreviewScreen';
+import { NexusScreen } from './screens/NexusScreen';
 
 const FULLSCREEN_PATHS = new Set([
   '/chat',
@@ -28,6 +29,7 @@ const FULLSCREEN_PATHS = new Set([
   '/codex-chat',
   '/profile',
   '/daily-soft-window',
+  '/nexus',
 ]);
 
 function Shell() {
@@ -57,6 +59,7 @@ function Shell() {
       <Route path="/monopoly/:roomId" element={<MonopolyRoomScreen />} />
       <Route path="/daily-soft-window" element={<DailySoftWindowPreviewScreen />} />
       <Route path="/manual-context-window" element={<ManualContextWindowPreviewScreen />} />
+      <Route path="/nexus" element={<NexusScreen />} />
     </Routes>
   );
 
