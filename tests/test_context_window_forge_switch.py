@@ -921,6 +921,391 @@ class PostCommitRecoveryTests(unittest.TestCase):
             )
 
 
+class _SwappableResident:
+    """Behavior-equivalent holder (mirrors gateway._SwappableResident)."""
+
+    __slots__ = ('_inner', '_lock')
+
+    def __init__(self, inner):
+        object.__setattr__(self, '_inner', inner)
+        object.__setattr__(self, '_lock', __import__('threading').RLock())
+
+    def get(self):
+        return object.__getattribute__(self, '_inner')
+
+    def swap(self, new_inner):
+        lock = object.__getattribute__(self, '_lock')
+        with lock:
+            old = object.__getattribute__(self, '_inner')
+            object.__setattr__(self, '_inner', new_inner)
+            return old
+
+    def __getattr__(self, name):
+        return getattr(object.__getattribute__(self, '_inner'), name)
+
+
+class _AliveResident:
+    def __init__(self, *, session_id='old-sid', generation=1, label='old'):
+        self.session_id = session_id
+        self.generation = generation
+        self._tool_profile = dr.DAILY_TOOL_PROFILE
+        self.label = label
+        self._alive_flag = True
+        self.kill_calls = 0
+
+    @property
+    def tool_profile(self):
+        return self._tool_profile
+
+    def _alive(self):
+        return self._alive_flag
+
+    def _kill(self, quiet=True):
+        self.kill_calls += 1
+        self._alive_flag = False
+
+
+class PartialSwapAtomicityTests(unittest.TestCase):
+    """P1/P2: post-swap metadata failure must roll back holder atomically."""
+
+    def setUp(self):
+        self.db = _tmp_db()
+        _init_chat_messages(self.db)
+        dc.ensure_schema(self.db)
+        self.forge_root = tempfile.mkdtemp(prefix='forge-pswap-')
+        self.base_hooks = cw.offline_switch_hooks(self.forge_root)
+        self.ctx = dc.get_or_create_daily_context(
+            local_day='2026-07-27',
+            db_path=self.db,
+            now=datetime.datetime(2026, 7, 27, 10, 0, 0),
+        )
+        _seed_rounds(self.db, self.ctx, 2)
+        dr.reset_bindings_for_tests()
+        self._flag_patch = mock.patch('chat.daily_context.enabled', return_value=True)
+        self._flag_patch.start()
+        self._cw_flag = mock.patch('chat.context_window.enabled', return_value=True)
+        self._cw_flag.start()
+        self.old = _AliveResident(session_id='old-sid', generation=2, label='old')
+        self.holder = _SwappableResident(self.old)
+        # Source binding before switch.
+        dr.set_local_binding(dr.LocalResidentBinding(
+            resident_key=dc.make_resident_key(
+                chat_id='default',
+                context_epoch=int(self.ctx['context_epoch']),
+                resident_generation=1,
+            ),
+            context_id=int(self.ctx['id']),
+            context_epoch=int(self.ctx['context_epoch']),
+            resident_generation=1,
+            bound_cursor_message_id=None,
+            process_generation=2,
+            tool_profile=dr.DAILY_TOOL_PROFILE,
+            claude_session_id='old-sid',
+        ))
+        self.prev_binding = dr.get_local_binding()
+
+    def tearDown(self):
+        dr.set_owner_cursor_write_hook_for_tests(None)
+        self._flag_patch.stop()
+        self._cw_flag.stop()
+        dr.reset_bindings_for_tests()
+        try:
+            os.unlink(self.db)
+        except OSError:
+            pass
+
+    def _make_hooks(self, *, fail_mode: str):
+        """fail_mode: owner | cursor."""
+        staged_box = {'obj': None, 'prepare_n': 0, 'discard_n': 0}
+        forge_home = self.base_hooks.claude_home
+        forge_cwd = self.base_hooks.forge_cwd
+
+        def prepare_staged(intent, forge_path):
+            staged_box['prepare_n'] += 1
+            staged = _AliveResident(
+                session_id=str(intent['target_session_id']),
+                generation=5,
+                label='staged-%d' % staged_box['prepare_n'],
+            )
+            staged.jsonl_path = forge_path
+            staged_box['obj'] = staged
+            return staged
+
+        def take_handoff(staged, result):
+            with dr.handoff_lock():
+                return dr.install_target_resident_after_swap(
+                    holder=self.holder,
+                    staged_resident=staged,
+                    result=result,
+                    tool_profile=dr.DAILY_TOOL_PROFILE,
+                    db_path=self.db,
+                )
+
+        def discard_staged(staged):
+            staged_box['discard_n'] += 1
+            if staged is not None and self.holder.get() is staged:
+                raise AssertionError('discard_staged while staged is formal holder')
+            if staged is not None:
+                staged._kill(quiet=True)
+
+        if fail_mode == 'owner':
+            def hook(phase):
+                if phase == 'after_owner':
+                    raise RuntimeError('owner write boom')
+            # Raise before owner upsert completes: fail at start of write.
+            real_write = dr.write_target_resident_db_metadata
+
+            def boom_write(binding, *, db_path=None):
+                raise RuntimeError('owner write boom')
+
+            write_patch = mock.patch.object(
+                dr, 'write_target_resident_db_metadata', side_effect=boom_write,
+            )
+        else:
+            def hook(phase):
+                if phase == 'after_owner':
+                    raise RuntimeError('cursor write boom')
+            write_patch = None
+            dr.set_owner_cursor_write_hook_for_tests(hook)
+
+        hooks = cw.SwitchHooks(
+            prepare_staged=prepare_staged,
+            take_handoff=take_handoff,
+            discard_staged=discard_staged,
+            forge_cwd=forge_cwd,
+            claude_home=forge_home,
+        )
+        return hooks, staged_box, write_patch
+
+    def _assert_pending_and_jsonl(self, req, hooks):
+        conn = dc._connect(self.db)
+        try:
+            intent = conn.execute(
+                'SELECT status FROM context_switch_intents WHERE request_id=?',
+                (req,),
+            ).fetchone()
+            self.assertEqual(intent['status'], cw.INTENT_HANDOFF_PENDING)
+            target = conn.execute(
+                'SELECT * FROM daily_contexts WHERE switch_request_id=?', (req,),
+            ).fetchone()
+            source = conn.execute(
+                'SELECT * FROM daily_contexts WHERE id=?', (int(self.ctx['id']),),
+            ).fetchone()
+        finally:
+            conn.close()
+        self.assertIsNotNone(target)
+        self.assertIsNotNone(source['closed_at'])
+        files = list(Path(hooks.claude_home).rglob('*.jsonl'))
+        self.assertTrue(files and files[0].is_file())
+        u = _insert(self.db, 'hayana', 'blocked', '2026-07-27 18:00:00')
+        with self.assertRaises(dr.SwitchInProgressRuntimeError):
+            dr.prepare_daily_turn(user_message_id=u, db_path=self.db)
+        return int(target['id']), int(target['resident_generation'])
+
+    def test_P1_swap_then_owner_write_fail_rolls_back_holder(self):
+        req = str(uuid.uuid4())
+        hooks, staged_box, write_patch = self._make_hooks(fail_mode='owner')
+        with write_patch:
+            with self.assertRaises(Exception) as ar:
+                cw.switch_context_window(
+                    source_context_id=int(self.ctx['id']),
+                    source_context_epoch=int(self.ctx['context_epoch']),
+                    count=0,
+                    request_id=req,
+                    db_path=self.db,
+                    hooks=hooks,
+                )
+        self.assertIn('owner write boom', str(ar.exception))
+        # Holder restored to old; old not killed; staged discarded only after restore.
+        self.assertIs(self.holder.get(), self.old)
+        self.assertEqual(self.old.kill_calls, 0)
+        self.assertTrue(self.old._alive())
+        self.assertEqual(dr.get_local_binding(), self.prev_binding)
+        target_id, target_gen = self._assert_pending_and_jsonl(req, hooks)
+        self.assertIsNone(dc.get_resident_owner(target_id, target_gen, db_path=self.db))
+        self.assertIsNone(dc.get_resident_history_cursor(
+            target_id, target_gen, db_path=self.db,
+        ))
+        first_staged = staged_box['obj']
+        self.assertIsNotNone(first_staged)
+        self.assertGreaterEqual(first_staged.kill_calls, 1)
+        self.assertGreaterEqual(staged_box['discard_n'], 1)
+
+        # Retry: no re-Forge; re-prepare staged; commit; close old only after committed.
+        forge_calls = {'n': 0}
+        import chat.context_window_forge as forge_mod
+        real_forge = forge_mod.forge_target_session_from_db
+
+        def counting(*a, **k):
+            forge_calls['n'] += 1
+            return real_forge(*a, **k)
+
+        # Clear fail patch for retry (new hooks without boom).
+        hooks2, staged_box2, _ = self._make_hooks(fail_mode='cursor')
+        dr.set_owner_cursor_write_hook_for_tests(None)
+        # Rebuild clean hooks (no fail).
+        def prepare_staged(intent, forge_path):
+            staged_box2['prepare_n'] += 1
+            staged = _AliveResident(
+                session_id=str(intent['target_session_id']),
+                generation=8,
+                label='retry-staged',
+            )
+            staged_box2['obj'] = staged
+            return staged
+
+        def take_handoff(staged, result):
+            with dr.handoff_lock():
+                return dr.install_target_resident_after_swap(
+                    holder=self.holder,
+                    staged_resident=staged,
+                    result=result,
+                    tool_profile=dr.DAILY_TOOL_PROFILE,
+                    db_path=self.db,
+                )
+
+        def discard_staged(staged):
+            if staged is not None and self.holder.get() is staged:
+                raise AssertionError('discard while holder')
+            if staged is not None:
+                staged._kill(quiet=True)
+
+        retry_hooks = cw.SwitchHooks(
+            prepare_staged=prepare_staged,
+            take_handoff=take_handoff,
+            discard_staged=discard_staged,
+            forge_cwd=hooks.forge_cwd,
+            claude_home=hooks.claude_home,
+        )
+        with mock.patch.object(forge_mod, 'forge_target_session_from_db', counting):
+            out = cw.switch_context_window(
+                source_context_id=int(self.ctx['id']),
+                source_context_epoch=int(self.ctx['context_epoch']),
+                count=0,
+                request_id=req,
+                db_path=self.db,
+                hooks=retry_hooks,
+            )
+        self.assertEqual(forge_calls['n'], 0)
+        self.assertGreaterEqual(staged_box2['prepare_n'], 1)
+        self.assertIs(self.holder.get(), staged_box2['obj'])
+        self.assertEqual(self.old.kill_calls, 1)  # closed after committed
+        conn = dc._connect(self.db)
+        try:
+            st = conn.execute(
+                'SELECT status FROM context_switch_intents WHERE request_id=?',
+                (req,),
+            ).fetchone()['status']
+        finally:
+            conn.close()
+        self.assertEqual(st, cw.INTENT_COMMITTED)
+        self.assertTrue(dr.target_resident_binding_matches(
+            out,
+            session_id=out['claude_session_id'],
+            holder=self.holder,
+            expected_resident=staged_box2['obj'],
+            db_path=self.db,
+        ))
+
+    def test_P2_owner_ok_cursor_fail_no_half_write(self):
+        req = str(uuid.uuid4())
+        hooks, staged_box, _ = self._make_hooks(fail_mode='cursor')
+        with self.assertRaises(Exception) as ar:
+            cw.switch_context_window(
+                source_context_id=int(self.ctx['id']),
+                source_context_epoch=int(self.ctx['context_epoch']),
+                count=0,
+                request_id=req,
+                db_path=self.db,
+                hooks=hooks,
+            )
+        self.assertIn('cursor write boom', str(ar.exception))
+        dr.set_owner_cursor_write_hook_for_tests(None)
+        self.assertIs(self.holder.get(), self.old)
+        self.assertEqual(self.old.kill_calls, 0)
+        self.assertEqual(dr.get_local_binding(), self.prev_binding)
+        target_id, target_gen = self._assert_pending_and_jsonl(req, hooks)
+        # No owner/cursor inconsistency.
+        self.assertIsNone(dc.get_resident_owner(target_id, target_gen, db_path=self.db))
+        self.assertIsNone(dc.get_resident_history_cursor(
+            target_id, target_gen, db_path=self.db,
+        ))
+        self.assertGreaterEqual(staged_box['obj'].kill_calls, 1)
+
+        forge_calls = {'n': 0}
+        import chat.context_window_forge as forge_mod
+        real_forge = forge_mod.forge_target_session_from_db
+
+        def counting(*a, **k):
+            forge_calls['n'] += 1
+            return real_forge(*a, **k)
+
+        staged_box2 = {'obj': None, 'prepare_n': 0}
+
+        def prepare_staged(intent, forge_path):
+            staged_box2['prepare_n'] += 1
+            staged = _AliveResident(
+                session_id=str(intent['target_session_id']),
+                generation=9,
+                label='retry-staged',
+            )
+            staged_box2['obj'] = staged
+            return staged
+
+        def take_handoff(staged, result):
+            with dr.handoff_lock():
+                return dr.install_target_resident_after_swap(
+                    holder=self.holder,
+                    staged_resident=staged,
+                    result=result,
+                    tool_profile=dr.DAILY_TOOL_PROFILE,
+                    db_path=self.db,
+                )
+
+        retry_hooks = cw.SwitchHooks(
+            prepare_staged=prepare_staged,
+            take_handoff=take_handoff,
+            discard_staged=lambda s: None,
+            forge_cwd=hooks.forge_cwd,
+            claude_home=hooks.claude_home,
+        )
+        with mock.patch.object(forge_mod, 'forge_target_session_from_db', counting):
+            out = cw.switch_context_window(
+                source_context_id=int(self.ctx['id']),
+                source_context_epoch=int(self.ctx['context_epoch']),
+                count=0,
+                request_id=req,
+                db_path=self.db,
+                hooks=retry_hooks,
+            )
+        self.assertEqual(forge_calls['n'], 0)
+        self.assertGreaterEqual(staged_box2['prepare_n'], 1)
+        self.assertIs(self.holder.get(), staged_box2['obj'])
+        self.assertEqual(self.old.kill_calls, 1)
+        owner = dc.get_resident_owner(
+            int(out['target_context_id']),
+            int(out['resident_generation']),
+            db_path=self.db,
+        )
+        cursor = dc.get_resident_history_cursor(
+            int(out['target_context_id']),
+            int(out['resident_generation']),
+            db_path=self.db,
+        )
+        self.assertIsNotNone(owner)
+        self.assertEqual(int(cursor), int(out['boundary_message_id']))
+        self.assertEqual(
+            int(dr.get_local_binding().bound_cursor_message_id), int(cursor),
+        )
+        self.assertTrue(dr.target_resident_binding_matches(
+            out,
+            session_id=out['claude_session_id'],
+            holder=self.holder,
+            expected_resident=staged_box2['obj'],
+            db_path=self.db,
+        ))
+
+
 class FrontendRequestIdTests(unittest.TestCase):
     def test_controller_reuses_request_id_source(self):
         # Source-level assertion: pendingRequestId field exists in controller source.

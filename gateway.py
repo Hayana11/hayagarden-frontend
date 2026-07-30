@@ -6505,35 +6505,23 @@ def _gw_build_switch_hooks():
         return staged
 
     def take_handoff(staged, result):
-        """Swap holder + bind target; return old resident for orchestrator close."""
+        """Swap then bind; roll back holder+binding+DB on any post-swap failure."""
         with _daily_rt_for_switch.handoff_lock():
-            if _daily_rt_for_switch.target_resident_binding_matches(
-                result,
-                session_id=str(
-                    getattr(staged, 'session_id', None)
-                    or result.get('claude_session_id')
-                    or '',
-                ),
-            ):
-                # Idempotent recovery: binding already target; ensure cursor/owner.
-                _daily_rt_for_switch.bind_target_resident_after_switch(
-                    staged_resident=staged or _CC_RESIDENT.get(),
-                    result=result,
-                    tool_profile=_daily_rt_for_switch.DAILY_TOOL_PROFILE,
-                    db_path=DB_PATH,
-                )
-                return None
-            old = _CC_RESIDENT.swap(staged)
-            _daily_rt_for_switch.bind_target_resident_after_switch(
+            return _daily_rt_for_switch.install_target_resident_after_swap(
+                holder=_CC_RESIDENT,
                 staged_resident=staged,
                 result=result,
                 tool_profile=_daily_rt_for_switch.DAILY_TOOL_PROFILE,
                 db_path=DB_PATH,
             )
-            return old
 
     def discard_staged(staged):
         try:
+            if staged is not None and _CC_RESIDENT.get() is staged:
+                logging.getLogger(__name__).error(
+                    'refuse discard_staged: staged is current formal holder',
+                )
+                return
             if staged is not None:
                 staged._kill(quiet=True)
         except Exception:

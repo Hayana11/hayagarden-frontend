@@ -135,6 +135,7 @@ _LOCAL_BINDING: Optional[LocalResidentBinding] = None
 def reset_bindings_for_tests() -> None:
     global _LOCAL_BINDING
     _LOCAL_BINDING = None
+    set_owner_cursor_write_hook_for_tests(None)
     try:
         from chat.context_window import clear_pending_old_resident_close_for_tests
         clear_pending_old_resident_close_for_tests()
@@ -388,12 +389,15 @@ _HANDOFF_LOCK = threading.Lock()
 # Never claim hot with cursor=None.
 EMPTY_WINDOW_CURSOR_BOOTSTRAP = 'empty_window_cursor_bootstrap'
 
+# Test-only hook: called inside owner+cursor txn after owner upsert ('after_owner').
+_OWNER_CURSOR_WRITE_HOOK = None
 
-def handoff_lock() -> threading.Lock:
+
+def handoff_lock():
     return _HANDOFF_LOCK
 
 
-def forged_history_watermark(result: dict[str, Any]) -> Optional[int]:
+def forged_history_watermark(result):
     """Cursor must match forged history watermark.
 
     - selected_message_ids present → last selected id
@@ -409,38 +413,19 @@ def forged_history_watermark(result: dict[str, Any]) -> Optional[int]:
     return None
 
 
-def target_resident_binding_matches(
-    result: dict[str, Any],
-    *,
-    session_id: Optional[str] = None,
-) -> bool:
-    binding = get_local_binding()
-    if binding is None:
-        return False
-    if int(binding.context_id) != int(result['target_context_id']):
-        return False
-    if int(binding.context_epoch) != int(result['target_context_epoch']):
-        return False
-    want_sid = str(
-        session_id
-        or result.get('claude_session_id')
-        or '',
-    ).strip()
-    have_sid = str(binding.claude_session_id or '').strip()
-    if want_sid and have_sid and want_sid != have_sid:
-        return False
-    return True
+def set_owner_cursor_write_hook_for_tests(hook):
+    global _OWNER_CURSOR_WRITE_HOOK
+    _OWNER_CURSOR_WRITE_HOOK = hook
 
 
-def bind_target_resident_after_switch(
+def build_target_resident_binding(
     *,
-    staged_resident: Any,
-    result: dict[str, Any],
-    chat_id: str = DEFAULT_CHAT_ID,
-    tool_profile: Optional[str] = None,
-    db_path: Optional[str] = None,
-) -> LocalResidentBinding:
-    """Establish LocalResidentBinding + owners + cursors for target window."""
+    staged_resident,
+    result,
+    chat_id=DEFAULT_CHAT_ID,
+    tool_profile=None,
+):
+    """Compute target LocalResidentBinding payload (no side effects)."""
     profile = str(tool_profile or DAILY_TOOL_PROFILE)
     target_id = int(result['target_context_id'])
     target_epoch = int(result['target_context_epoch'])
@@ -455,10 +440,9 @@ def bind_target_resident_after_switch(
     session_id = result.get('claude_session_id') or getattr(
         staged_resident, 'session_id', None,
     )
-    # Keep staged tool_profile aligned with formal daily path.
     if hasattr(staged_resident, '_tool_profile'):
         staged_resident._tool_profile = profile
-    binding = LocalResidentBinding(
+    return LocalResidentBinding(
         resident_key=key,
         context_id=target_id,
         context_epoch=target_epoch,
@@ -468,7 +452,10 @@ def bind_target_resident_after_switch(
         tool_profile=profile,
         claude_session_id=str(session_id) if session_id else None,
     )
-    set_local_binding(binding)
+
+
+def write_target_resident_db_metadata(binding, *, db_path=None):
+    """Write owner + cursor in one transaction (no LocalResidentBinding change)."""
     conn = dc._connect(db_path)
     try:
         now_s = (
@@ -486,10 +473,42 @@ def bind_target_resident_after_switch(
             'process_generation=excluded.process_generation, '
             'updated_at=excluded.updated_at',
             (
-                target_id, target_gen, WORKER_ID, key,
-                cursor, process_generation, now_s,
+                int(binding.context_id), int(binding.resident_generation),
+                WORKER_ID, binding.resident_key,
+                binding.bound_cursor_message_id,
+                int(binding.process_generation), now_s,
             ),
         )
+        hook = _OWNER_CURSOR_WRITE_HOOK
+        if hook is not None:
+            hook('after_owner')
+        if binding.bound_cursor_message_id is not None:
+            cursor_id = int(binding.bound_cursor_message_id)
+            if cursor_id <= 0:
+                raise ValueError('forged watermark cursor must be positive')
+            conn.execute(
+                'INSERT INTO daily_resident_cursors '
+                '(context_id, resident_generation, history_cursor_message_id) '
+                'VALUES (?,?,?) '
+                'ON CONFLICT(context_id, resident_generation) DO UPDATE SET '
+                'history_cursor_message_id=excluded.history_cursor_message_id, '
+                "updated_at=datetime('now','+8 hours')",
+                (
+                    int(binding.context_id), int(binding.resident_generation),
+                    cursor_id,
+                ),
+            )
+        else:
+            conn.execute(
+                'DELETE FROM daily_resident_cursors '
+                'WHERE context_id=? AND resident_generation=?',
+                (int(binding.context_id), int(binding.resident_generation)),
+            )
+            logger.info(
+                'context switch empty-window cursor bootstrap context_id=%s gen=%s state=%s',
+                binding.context_id, binding.resident_generation,
+                EMPTY_WINDOW_CURSOR_BOOTSTRAP,
+            )
         conn.commit()
     except Exception:
         conn.rollback()
@@ -497,18 +516,221 @@ def bind_target_resident_after_switch(
     finally:
         conn.close()
 
-    if cursor is not None:
-        dc.advance_resident_history_cursor(
-            target_id,
-            target_gen,
-            int(cursor),
-            db_path=db_path,
+
+def rollback_target_resident_db_metadata(
+    *,
+    context_id,
+    resident_generation,
+    db_path=None,
+):
+    """Best-effort clear target owner/cursor after a failed post-swap bind."""
+    conn = dc._connect(db_path)
+    try:
+        conn.execute('BEGIN IMMEDIATE')
+        conn.execute(
+            'DELETE FROM daily_resident_owners '
+            'WHERE context_id=? AND resident_generation=?',
+            (int(context_id), int(resident_generation)),
         )
+        conn.execute(
+            'DELETE FROM daily_resident_cursors '
+            'WHERE context_id=? AND resident_generation=?',
+            (int(context_id), int(resident_generation)),
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        logger.exception(
+            'rollback_target_resident_db_metadata failed ctx=%s gen=%s',
+            context_id, resident_generation,
+        )
+        raise
+    finally:
+        conn.close()
+
+
+def target_resident_binding_matches(
+    result,
+    *,
+    session_id=None,
+    holder=None,
+    expected_resident=None,
+    db_path=None,
+):
+    """True only when handoff is fully installed (not merely context id overlap).
+
+    Handoff-complete ≠ hot-ready: boundary=0 bootstrap leaves cursor unset and
+    must not be treated as hot by ``_can_hot_turn``.
+    """
+    binding = get_local_binding()
+    if binding is None:
+        return False
+    target_id = int(result['target_context_id'])
+    target_epoch = int(result['target_context_epoch'])
+    target_gen = int(result.get('resident_generation') or 1)
+    if int(binding.context_id) != target_id:
+        return False
+    if int(binding.context_epoch) != target_epoch:
+        return False
+    if int(binding.resident_generation) != target_gen:
+        return False
+    if str(binding.tool_profile or '') != str(DAILY_TOOL_PROFILE):
+        return False
+
+    want_sid = str(
+        session_id
+        or result.get('claude_session_id')
+        or '',
+    ).strip()
+    have_sid = str(binding.claude_session_id or '').strip()
+    if not want_sid or not have_sid or want_sid != have_sid:
+        return False
+
+    watermark = forged_history_watermark(result)
+    if watermark is not None:
+        if binding.bound_cursor_message_id is None:
+            return False
+        if int(binding.bound_cursor_message_id) != int(watermark):
+            return False
     else:
-        logger.info(
-            'context switch empty-window cursor bootstrap context_id=%s gen=%s state=%s',
-            target_id, target_gen, EMPTY_WINDOW_CURSOR_BOOTSTRAP,
+        if binding.bound_cursor_message_id is not None:
+            return False
+
+    current = None
+    if holder is not None and hasattr(holder, 'get'):
+        current = holder.get()
+    elif expected_resident is not None:
+        current = expected_resident
+    if holder is not None or expected_resident is not None:
+        if current is None:
+            return False
+        if expected_resident is not None and current is not expected_resident:
+            return False
+        if not _resident_is_alive(current):
+            return False
+        cur_sid = str(getattr(current, 'session_id', None) or '').strip()
+        if cur_sid != want_sid:
+            return False
+        if int(getattr(current, 'generation', 0) or 0) != int(binding.process_generation):
+            return False
+        if str(getattr(current, 'tool_profile', '') or '') != str(DAILY_TOOL_PROFILE):
+            return False
+
+    owner = dc.get_resident_owner(target_id, target_gen, db_path=db_path)
+    if owner is None:
+        return False
+    if str(owner.get('worker_id') or '') != str(WORKER_ID):
+        return False
+    if str(owner.get('resident_key') or '') != str(binding.resident_key):
+        return False
+    if int(owner.get('process_generation') or 0) != int(binding.process_generation):
+        return False
+    owner_cursor = owner.get('bound_cursor_message_id')
+    if watermark is not None:
+        if owner_cursor is None or int(owner_cursor) != int(watermark):
+            return False
+    elif owner_cursor is not None:
+        return False
+
+    db_cursor = dc.get_resident_history_cursor(
+        target_id, target_gen, db_path=db_path,
+    )
+    if watermark is not None:
+        if db_cursor is None or int(db_cursor) != int(watermark):
+            return False
+        if int(binding.bound_cursor_message_id) != int(db_cursor):
+            return False
+    else:
+        if db_cursor is not None:
+            return False
+    return True
+
+
+def install_target_resident_after_swap(
+    *,
+    holder,
+    staged_resident,
+    result,
+    chat_id=DEFAULT_CHAT_ID,
+    tool_profile=None,
+    db_path=None,
+):
+    """Swap formal holder to staged, then write metadata.
+
+    On any post-swap failure: restore holder + previous binding and roll back
+    target owner/cursor inside the caller's handoff lock.
+    Returns the previous (old) resident handle; caller closes it only after
+    ``mark_intent_committed``.
+    """
+    sid = str(
+        getattr(staged_resident, 'session_id', None)
+        or result.get('claude_session_id')
+        or '',
+    )
+    if target_resident_binding_matches(
+        result,
+        session_id=sid,
+        holder=holder,
+        expected_resident=holder.get() if hasattr(holder, 'get') else None,
+        db_path=db_path,
+    ):
+        current = holder.get() if hasattr(holder, 'get') else staged_resident
+        binding = build_target_resident_binding(
+            staged_resident=current,
+            result=result,
+            chat_id=chat_id,
+            tool_profile=tool_profile,
         )
+        write_target_resident_db_metadata(binding, db_path=db_path)
+        set_local_binding(binding)
+        return None
+
+    prev_binding = get_local_binding()
+    binding = build_target_resident_binding(
+        staged_resident=staged_resident,
+        result=result,
+        chat_id=chat_id,
+        tool_profile=tool_profile,
+    )
+    old = holder.swap(staged_resident)
+    try:
+        write_target_resident_db_metadata(binding, db_path=db_path)
+        set_local_binding(binding)
+    except Exception:
+        try:
+            holder.swap(old)
+        except Exception:
+            logger.exception('failed to restore old resident after partial swap')
+        set_local_binding(prev_binding)
+        try:
+            rollback_target_resident_db_metadata(
+                context_id=int(binding.context_id),
+                resident_generation=int(binding.resident_generation),
+                db_path=db_path,
+            )
+        except Exception:
+            logger.exception('failed to rollback target owner/cursor after partial swap')
+        raise
+    return old
+
+
+def bind_target_resident_after_switch(
+    *,
+    staged_resident,
+    result,
+    chat_id=DEFAULT_CHAT_ID,
+    tool_profile=None,
+    db_path=None,
+):
+    """Write owner+cursor then LocalResidentBinding (offline / no-holder path)."""
+    binding = build_target_resident_binding(
+        staged_resident=staged_resident,
+        result=result,
+        chat_id=chat_id,
+        tool_profile=tool_profile,
+    )
+    write_target_resident_db_metadata(binding, db_path=db_path)
+    set_local_binding(binding)
     return binding
 
 

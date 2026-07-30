@@ -1276,7 +1276,9 @@ def complete_handoff_pending_recovery(
 
     sid = str(target.get('claude_session_id') or intent.get('target_session_id') or '')
     # Already swapped + bound to target: only patch committed, never re-Forge/respawn.
-    if daily_rt.target_resident_binding_matches(result, session_id=sid):
+    if daily_rt.target_resident_binding_matches(
+        result, session_id=sid, db_path=db_path,
+    ):
         mark_intent_committed(str(intent['request_id']), db_path=db_path, now=now)
         flush_old_resident_close()
         return result
