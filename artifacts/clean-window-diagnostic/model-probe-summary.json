@@ -1,0 +1,34 @@
+{
+  "diagnostic_gate": "BLOCKED_NO_MODEL_OUTPUT",
+  "claude_code_version": "2.1.220 (Claude Code)",
+  "auth_status_provider": "firstParty",
+  "configured_model": "claude-sonnet-4-6[1M]",
+  "configured_local_route": {
+    "host": "127.0.0.1",
+    "port": 15721,
+    "reachable": false
+  },
+  "direct_first_party_probe": {
+    "session_id": "7cd56923-c891-4a43-9999-f48e6ac9fe0d",
+    "exit_status": 1,
+    "terminal_reason": "api_error",
+    "api_error_status": 401,
+    "error": "Invalid bearer token",
+    "usage": {
+      "input_tokens": 0,
+      "cache_creation_input_tokens": 0,
+      "cache_read_input_tokens": 0,
+      "output_tokens": 0
+    },
+    "cost_usd": 0,
+    "respawn": false,
+    "visible_model_output": false
+  },
+  "abc_sessions_started": 0,
+  "abc_outputs_produced": 0,
+  "blind_evaluation_performed": false,
+  "production_vps_connected": false,
+  "real_chat_read": false,
+  "memories_db_touched": false,
+  "secrets_included": false
+}
