@@ -943,6 +943,8 @@ class ConcurrencySwitchTests(unittest.TestCase):
         barrier = threading.Barrier(2)
         results = []
         errors = []
+        # Shared hooks: same forge cwd as production concurrent callers.
+        hooks = _offline_hooks()
 
         def worker():
             try:
@@ -953,8 +955,8 @@ class ConcurrencySwitchTests(unittest.TestCase):
                     count=0,
                     request_id=req,
                     db_path=self.db,
-                
-            hooks=_offline_hooks())
+                    hooks=hooks,
+                )
                 results.append(out)
             except Exception as exc:
                 errors.append(exc)

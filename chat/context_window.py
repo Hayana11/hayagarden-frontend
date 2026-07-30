@@ -13,6 +13,7 @@ import json
 import logging
 import re
 import sqlite3
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -64,6 +65,12 @@ ACTIVE_INTENT_STATUSES = frozenset({
 })
 
 TERMINAL_FAILURE_STATUSES = frozenset({INTENT_FAILED, INTENT_RELEASED})
+
+# Private marker on commit_switch result: stripped before returning to callers.
+_COMMIT_KIND_KEY = '_cw_commit_kind'
+_COMMIT_KIND_SELF = 'self'
+_COMMIT_KIND_PEER_HANDOFF = 'peer_handoff'
+_COMMIT_KIND_PEER_COMMITTED = 'peer_committed'
 
 _UUID_RE = re.compile(
     r'^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$',
@@ -982,6 +989,25 @@ def _set_intent_status(
     conn = _connect(db_path)
     try:
         conn.execute('BEGIN IMMEDIATE')
+        live = _intent_row(conn, request_id)
+        if live is None:
+            conn.rollback()
+            raise SwitchFailedError('intent_missing')
+        cur = str(live.get('status') or '')
+        # Never downgrade a peer that already finished DB handoff / commit,
+        # and never move READY/COMMITTING backward to FORGING/RESERVED.
+        _FORWARD = {
+            INTENT_RESERVED: 0,
+            INTENT_FORGING: 1,
+            INTENT_READY: 2,
+            INTENT_COMMITTING: 3,
+            INTENT_HANDOFF_PENDING: 4,
+            INTENT_COMMITTED: 5,
+        }
+        if cur in _FORWARD and status in _FORWARD:
+            if _FORWARD[cur] > _FORWARD[status]:
+                conn.commit()
+                return live
         _update_intent_conn(
             conn, request_id, status=status, fields=fields, now_s=now_s,
         )
@@ -994,6 +1020,168 @@ def _set_intent_status(
         raise
     finally:
         conn.close()
+
+
+def _result_for_existing_target(
+    *,
+    chat_id: str,
+    request_id: str,
+    source_context_id: int,
+    db_path: Optional[str],
+) -> Optional[dict[str, Any]]:
+    """Return switch result for an already-created same-request target, if any."""
+    conn = _connect(db_path)
+    try:
+        target = _find_idempotent_target_conn(
+            conn, chat_id=chat_id, request_id=request_id,
+        )
+        if target is None:
+            return None
+        source = _row_to_dict(conn.execute(
+            'SELECT * FROM daily_contexts WHERE id=?',
+            (int(source_context_id),),
+        ).fetchone())
+        if source is None:
+            source = _row_to_dict(conn.execute(
+                'SELECT * FROM daily_contexts WHERE id=?',
+                (int(target['source_context_id']),),
+            ).fetchone())
+        if source is None:
+            return None
+        return _switch_result_from_target_conn(conn, source=source, target=target)
+    finally:
+        conn.close()
+
+
+def _await_same_request_progress(
+    request_id: str,
+    *,
+    db_path: Optional[str],
+    timeout_s: float = 2.0,
+    poll_s: float = 0.05,
+) -> dict[str, Any]:
+    """Short wait for peer to leave RESERVED/FORGING. No busy-spin; bounded.
+
+    Only used when this caller cannot make progress itself (e.g. after a
+    no-downgrade re-read shows the peer still owns early stages).
+    """
+    deadline = time.monotonic() + max(0.0, float(timeout_s))
+    last: Optional[dict[str, Any]] = None
+    while True:
+        conn = _connect(db_path)
+        try:
+            last = _intent_row(conn, request_id)
+        finally:
+            conn.close()
+        if last is None:
+            raise SwitchFailedError('intent_missing')
+        st = str(last.get('status') or '')
+        if st not in (INTENT_RESERVED, INTENT_FORGING):
+            return last
+        if time.monotonic() >= deadline:
+            return last
+        time.sleep(poll_s)
+
+
+def _await_peer_committed(
+    request_id: str,
+    *,
+    db_path: Optional[str],
+    timeout_s: float = 2.0,
+    poll_s: float = 0.05,
+) -> dict[str, Any]:
+    """Short wait until peer reaches committed (or terminal failure)."""
+    deadline = time.monotonic() + max(0.0, float(timeout_s))
+    last: Optional[dict[str, Any]] = None
+    while True:
+        conn = _connect(db_path)
+        try:
+            last = _intent_row(conn, request_id)
+        finally:
+            conn.close()
+        if last is None:
+            raise SwitchFailedError('intent_missing')
+        st = str(last.get('status') or '')
+        if st in (INTENT_COMMITTED, INTENT_FAILED, INTENT_RELEASED):
+            return last
+        if time.monotonic() >= deadline:
+            return last
+        time.sleep(poll_s)
+
+
+def _converge_if_peer_ahead(
+    *,
+    chat_id: str,
+    request_id: str,
+    intent: dict[str, Any],
+    hooks: SwitchHooks,
+    db_path: Optional[str],
+    now: Optional[datetime.datetime],
+) -> Optional[dict[str, Any]]:
+    """If live status is already HANDOFF_PENDING/COMMITTED, return converged result."""
+    status = str(intent.get('status') or '')
+    source_id = int(intent['source_context_id'])
+    if status == INTENT_COMMITTED:
+        return _result_for_existing_target(
+            chat_id=chat_id,
+            request_id=request_id,
+            source_context_id=source_id,
+            db_path=db_path,
+        )
+    if status == INTENT_HANDOFF_PENDING:
+        recovered = complete_handoff_pending_recovery(
+            chat_id=chat_id,
+            request_id=request_id,
+            hooks=hooks,
+            db_path=db_path,
+            now=now,
+        )
+        if recovered is not None:
+            return recovered
+        # Peer may have marked committed while we looked up handoff_pending.
+        return _result_for_existing_target(
+            chat_id=chat_id,
+            request_id=request_id,
+            source_context_id=source_id,
+            db_path=db_path,
+        )
+    return None
+
+
+def _prepare_staged_or_await_peer(
+    *,
+    intent: dict[str, Any],
+    hooks: SwitchHooks,
+    chat_id: str,
+    request_id: str,
+    db_path: Optional[str],
+    now: Optional[datetime.datetime],
+    session_jsonl_path_for_cwd: Callable[..., Path],
+) -> tuple[Any, Optional[dict[str, Any]]]:
+    """Prepare staged when local JSONL exists; otherwise await peer committed.
+
+    Returns (staged, None) or (None, converged_result).
+    """
+    sid = str(intent.get('target_session_id') or '')
+    if not sid:
+        raise SwitchFailedError('target_session_missing')
+    forge_path = session_jsonl_path_for_cwd(
+        hooks.forge_cwd, sid, claude_home=hooks.claude_home,
+    )
+    if forge_path.is_file():
+        return hooks.prepare_staged(intent, forge_path), None
+    # Without a local JSONL we cannot prepare/resume; wait for peer committed.
+    live = _await_peer_committed(request_id, db_path=db_path)
+    if str(live.get('status') or '') == INTENT_COMMITTED:
+        out = _result_for_existing_target(
+            chat_id=chat_id,
+            request_id=request_id,
+            source_context_id=int(intent['source_context_id']),
+            db_path=db_path,
+        )
+        if out is not None:
+            return None, out
+    raise SwitchInProgressError('switch_in_progress')
 
 
 def commit_switch_to_handoff_pending(
@@ -1025,7 +1213,43 @@ def commit_switch_to_handoff_pending(
     try:
         conn.execute('BEGIN IMMEDIATE')
         live = _intent_row(conn, req_id)
-        if live is None or str(live.get('status')) not in (INTENT_READY, INTENT_COMMITTING):
+        if live is None:
+            conn.rollback()
+            raise SwitchFailedError('intent_not_ready')
+        live_status = str(live.get('status') or '')
+
+        # Same request_id peer already past READY: converge, never intent_not_ready.
+        if live_status in (INTENT_HANDOFF_PENDING, INTENT_COMMITTED):
+            existing_target = _find_idempotent_target_conn(
+                conn, chat_id=chat_id, request_id=req_id,
+            )
+            if existing_target is None:
+                conn.rollback()
+                raise SwitchFailedError('intent_not_ready')
+            source_row = conn.execute(
+                'SELECT * FROM daily_contexts WHERE id=?', (source_id,),
+            ).fetchone()
+            if source_row is None:
+                source_row = conn.execute(
+                    'SELECT * FROM daily_contexts WHERE id=?',
+                    (int(existing_target['source_context_id']),),
+                ).fetchone()
+            if source_row is None:
+                conn.rollback()
+                raise StaleSourceContextError('stale_source_context')
+            result = _switch_result_from_target_conn(
+                conn, source=dict(source_row), target=existing_target,
+            )
+            # Do not downgrade COMMITTED → HANDOFF_PENDING.
+            result[_COMMIT_KIND_KEY] = (
+                _COMMIT_KIND_PEER_COMMITTED
+                if live_status == INTENT_COMMITTED
+                else _COMMIT_KIND_PEER_HANDOFF
+            )
+            conn.commit()
+            return result
+
+        if live_status not in (INTENT_READY, INTENT_COMMITTING):
             conn.rollback()
             raise SwitchFailedError('intent_not_ready')
         _update_intent_conn(
@@ -1382,15 +1606,16 @@ def switch_context_window(
                     )
         if existing_intent and str(existing_intent.get('status')) == INTENT_HANDOFF_PENDING:
             conn.close()
-            recovered = complete_handoff_pending_recovery(
+            converged = _converge_if_peer_ahead(
                 chat_id=chat_id,
                 request_id=req_id,
+                intent=existing_intent,
                 hooks=hooks,
                 db_path=db_path,
                 now=now,
             )
-            if recovered is not None:
-                return recovered
+            if converged is not None:
+                return converged
             conn = _connect(db_path)
     finally:
         try:
@@ -1426,15 +1651,16 @@ def switch_context_window(
             c.close()
 
     if status == INTENT_HANDOFF_PENDING:
-        recovered = complete_handoff_pending_recovery(
+        converged = _converge_if_peer_ahead(
             chat_id=chat_id,
             request_id=req_id,
+            intent=intent,
             hooks=hooks,
             db_path=db_path,
             now=now,
         )
-        if recovered is not None:
-            return recovered
+        if converged is not None:
+            return converged
 
     staged = None
     forge_path: Optional[Path] = None
@@ -1442,93 +1668,180 @@ def switch_context_window(
     handoff_taken = False
     old_handle = None
     try:
+        # Do NOT block-await while status is RESERVED/FORGING: both same-request
+        # callers may own that stage. Converge on DB state at each step instead.
         if status in (INTENT_RESERVED, INTENT_FORGING) or (
             status == INTENT_READY and not intent.get('target_session_id')
         ):
-            _set_intent_status(req_id, INTENT_FORGING, db_path=db_path, now=now)
-            selected_ids = _parse_selected_ids(intent.get('selected_message_ids_json'))
-            # Skip re-Forge when target already written for this intent
-            if intent.get('target_session_id') and intent.get('target_jsonl_sha256'):
-                sid = str(intent['target_session_id'])
-                forge_path = session_jsonl_path_for_cwd(
-                    hooks.forge_cwd, sid, claude_home=hooks.claude_home,
-                )
-                if forge_path.is_file() and sha256_file(forge_path) == str(
-                    intent['target_jsonl_sha256']
-                ):
-                    pass  # reuse
-                else:
-                    intent['target_session_id'] = None
-
-            if not intent.get('target_session_id'):
-                c = _connect(db_path)
-                try:
-                    forged = forge_target_session_from_db(
-                        c,
-                        selected_message_ids=selected_ids,
-                        cwd=hooks.forge_cwd,
-                        claude_home=hooks.claude_home,
-                    )
-                except ForgeUnforgeable as exc:
-                    c2 = _connect(db_path)
-                    try:
-                        c2.execute('BEGIN IMMEDIATE')
-                        _fail_intent_conn(
-                            c2,
-                            req_id,
-                            error_code='carryover_message_unforgeable',
-                            orphan_jsonl_state='pending',
-                            now_s=_now_s(_shanghai_now(now)),
-                        )
-                        c2.commit()
-                    finally:
-                        c2.close()
-                    raise CarryoverMessageUnforgeableError(str(exc)) from exc
-                finally:
-                    c.close()
-                forge_path = forged.jsonl_path
-                intent = _set_intent_status(
-                    req_id,
-                    INTENT_FORGING,
-                    db_path=db_path,
-                    now=now,
-                    fields={
-                        'target_session_id': forged.target_session_id,
-                        'target_jsonl_sha256': forged.sha256,
-                        'orphan_jsonl_state': 'none',
-                    },
-                )
-            else:
-                forge_path = session_jsonl_path_for_cwd(
-                    hooks.forge_cwd,
-                    str(intent['target_session_id']),
-                    claude_home=hooks.claude_home,
-                )
-
-            assert forge_path is not None
-            before_sha = sha256_file(forge_path)
-            staged = hooks.prepare_staged(intent, forge_path)
-            after_sha = sha256_file(forge_path)
-            if before_sha != after_sha:
-                raise SwitchFailedError('staged_jsonl_mutated_before_handoff')
-            intent = _set_intent_status(
-                req_id,
-                INTENT_READY,
+            intent = _set_intent_status(req_id, INTENT_FORGING, db_path=db_path, now=now)
+            status = str(intent.get('status'))
+            converged = _converge_if_peer_ahead(
+                chat_id=chat_id,
+                request_id=req_id,
+                intent=intent,
+                hooks=hooks,
                 db_path=db_path,
                 now=now,
-                fields={'staged_ready_at': _now_s(_shanghai_now(now))},
             )
-            status = INTENT_READY
+            if converged is not None:
+                return converged
+            if status not in (INTENT_RESERVED, INTENT_FORGING, INTENT_READY):
+                # Peer moved to committing etc.; fall through to matching branches.
+                pass
+            else:
+                selected_ids = _parse_selected_ids(intent.get('selected_message_ids_json'))
+                # Skip re-Forge when target already written for this intent
+                if intent.get('target_session_id') and intent.get('target_jsonl_sha256'):
+                    sid = str(intent['target_session_id'])
+                    forge_path = session_jsonl_path_for_cwd(
+                        hooks.forge_cwd, sid, claude_home=hooks.claude_home,
+                    )
+                    if forge_path.is_file() and sha256_file(forge_path) == str(
+                        intent['target_jsonl_sha256']
+                    ):
+                        pass  # reuse
+                    else:
+                        intent['target_session_id'] = None
+
+                if not intent.get('target_session_id'):
+                    c = _connect(db_path)
+                    try:
+                        forged = forge_target_session_from_db(
+                            c,
+                            selected_message_ids=selected_ids,
+                            cwd=hooks.forge_cwd,
+                            claude_home=hooks.claude_home,
+                        )
+                    except ForgeUnforgeable as exc:
+                        c2 = _connect(db_path)
+                        try:
+                            c2.execute('BEGIN IMMEDIATE')
+                            live = _intent_row(c2, req_id)
+                            # Peer may already have handoff_pending/committed — don't fail it.
+                            if live is not None and str(live.get('status')) in (
+                                INTENT_HANDOFF_PENDING, INTENT_COMMITTED,
+                            ):
+                                c2.commit()
+                            else:
+                                _fail_intent_conn(
+                                    c2,
+                                    req_id,
+                                    error_code='carryover_message_unforgeable',
+                                    orphan_jsonl_state='pending',
+                                    now_s=_now_s(_shanghai_now(now)),
+                                )
+                                c2.commit()
+                                raise CarryoverMessageUnforgeableError(str(exc)) from exc
+                        finally:
+                            c2.close()
+                        live_peer = None
+                        c_peer = _connect(db_path)
+                        try:
+                            live_peer = _intent_row(c_peer, req_id)
+                        finally:
+                            c_peer.close()
+                        if live_peer is not None:
+                            converged = _converge_if_peer_ahead(
+                                chat_id=chat_id,
+                                request_id=req_id,
+                                intent=live_peer,
+                                hooks=hooks,
+                                db_path=db_path,
+                                now=now,
+                            )
+                            if converged is not None:
+                                return converged
+                        raise CarryoverMessageUnforgeableError(str(exc)) from exc
+                    finally:
+                        c.close()
+                    # Re-check after forge race with peer.
+                    live_after = None
+                    c3 = _connect(db_path)
+                    try:
+                        live_after = _intent_row(c3, req_id)
+                    finally:
+                        c3.close()
+                    if live_after is not None:
+                        converged = _converge_if_peer_ahead(
+                            chat_id=chat_id,
+                            request_id=req_id,
+                            intent=live_after,
+                            hooks=hooks,
+                            db_path=db_path,
+                            now=now,
+                        )
+                        if converged is not None:
+                            return converged
+                    forge_path = forged.jsonl_path
+                    intent = _set_intent_status(
+                        req_id,
+                        INTENT_FORGING,
+                        db_path=db_path,
+                        now=now,
+                        fields={
+                            'target_session_id': forged.target_session_id,
+                            'target_jsonl_sha256': forged.sha256,
+                            'orphan_jsonl_state': 'none',
+                        },
+                    )
+                    status = str(intent.get('status'))
+                    converged = _converge_if_peer_ahead(
+                        chat_id=chat_id,
+                        request_id=req_id,
+                        intent=intent,
+                        hooks=hooks,
+                        db_path=db_path,
+                        now=now,
+                    )
+                    if converged is not None:
+                        return converged
+                else:
+                    forge_path = session_jsonl_path_for_cwd(
+                        hooks.forge_cwd,
+                        str(intent['target_session_id']),
+                        claude_home=hooks.claude_home,
+                    )
+
+                if status in (INTENT_RESERVED, INTENT_FORGING, INTENT_READY):
+                    assert forge_path is not None
+                    before_sha = sha256_file(forge_path)
+                    staged = hooks.prepare_staged(intent, forge_path)
+                    after_sha = sha256_file(forge_path)
+                    if before_sha != after_sha:
+                        raise SwitchFailedError('staged_jsonl_mutated_before_handoff')
+                    intent = _set_intent_status(
+                        req_id,
+                        INTENT_READY,
+                        db_path=db_path,
+                        now=now,
+                        fields={'staged_ready_at': _now_s(_shanghai_now(now))},
+                    )
+                    status = str(intent.get('status'))
+                    converged = _converge_if_peer_ahead(
+                        chat_id=chat_id,
+                        request_id=req_id,
+                        intent=intent,
+                        hooks=hooks,
+                        db_path=db_path,
+                        now=now,
+                    )
+                    if converged is not None:
+                        return converged
 
         if status == INTENT_READY:
             # Re-prepare staged if this is a retry after ready
             if staged is None:
-                forge_path = session_jsonl_path_for_cwd(
-                    hooks.forge_cwd,
-                    str(intent['target_session_id']),
-                    claude_home=hooks.claude_home,
+                staged, converged = _prepare_staged_or_await_peer(
+                    intent=intent,
+                    hooks=hooks,
+                    chat_id=chat_id,
+                    request_id=req_id,
+                    db_path=db_path,
+                    now=now,
+                    session_jsonl_path_for_cwd=session_jsonl_path_for_cwd,
                 )
-                staged = hooks.prepare_staged(intent, forge_path)
+                if converged is not None:
+                    return converged
 
             result = commit_switch_to_handoff_pending(
                 intent,
@@ -1536,7 +1849,26 @@ def switch_context_window(
                 db_path=db_path,
                 now=now,
             )
+            commit_kind = str(result.pop(_COMMIT_KIND_KEY, _COMMIT_KIND_SELF))
+            if commit_kind == _COMMIT_KIND_PEER_COMMITTED:
+                return result
+            if commit_kind == _COMMIT_KIND_PEER_HANDOFF:
+                converged = _converge_if_peer_ahead(
+                    chat_id=chat_id,
+                    request_id=req_id,
+                    intent={
+                        **intent,
+                        'status': INTENT_HANDOFF_PENDING,
+                    },
+                    hooks=hooks,
+                    db_path=db_path,
+                    now=now,
+                )
+                if converged is not None:
+                    return converged
+                return result
             post_db_commit = True
+            # Peer may already be committed; mark is idempotent forward-only.
             old_handle = hooks.take_handoff(staged, result)
             handoff_taken = True
             defer_old_resident_close(old_handle)
@@ -1552,14 +1884,37 @@ def switch_context_window(
                 db_path=db_path,
                 now=now,
             )
+            commit_kind = str(result.pop(_COMMIT_KIND_KEY, _COMMIT_KIND_SELF))
+            if commit_kind == _COMMIT_KIND_PEER_COMMITTED:
+                return result
+            if commit_kind == _COMMIT_KIND_PEER_HANDOFF:
+                converged = _converge_if_peer_ahead(
+                    chat_id=chat_id,
+                    request_id=req_id,
+                    intent={
+                        **intent,
+                        'status': INTENT_HANDOFF_PENDING,
+                    },
+                    hooks=hooks,
+                    db_path=db_path,
+                    now=now,
+                )
+                if converged is not None:
+                    return converged
+                return result
             post_db_commit = True
             if staged is None:
-                forge_path = session_jsonl_path_for_cwd(
-                    hooks.forge_cwd,
-                    str(intent['target_session_id']),
-                    claude_home=hooks.claude_home,
+                staged, converged = _prepare_staged_or_await_peer(
+                    intent=intent,
+                    hooks=hooks,
+                    chat_id=chat_id,
+                    request_id=req_id,
+                    db_path=db_path,
+                    now=now,
+                    session_jsonl_path_for_cwd=session_jsonl_path_for_cwd,
                 )
-                staged = hooks.prepare_staged(intent, forge_path)
+                if converged is not None:
+                    return converged
             old_handle = hooks.take_handoff(staged, result)
             handoff_taken = True
             defer_old_resident_close(old_handle)
@@ -1567,10 +1922,94 @@ def switch_context_window(
             flush_old_resident_close()
             return result
 
+        if status == INTENT_HANDOFF_PENDING:
+            converged = _converge_if_peer_ahead(
+                chat_id=chat_id,
+                request_id=req_id,
+                intent=intent,
+                hooks=hooks,
+                db_path=db_path,
+                now=now,
+            )
+            if converged is not None:
+                return converged
+
+        if status == INTENT_COMMITTED:
+            out = _result_for_existing_target(
+                chat_id=chat_id,
+                request_id=req_id,
+                source_context_id=int(intent['source_context_id']),
+                db_path=db_path,
+            )
+            if out is not None:
+                return out
+
         if status in TERMINAL_FAILURE_STATUSES:
             raise SwitchFailedError(
                 str(intent.get('error_code') or status),
             )
+
+        # Still RESERVED/FORGING: peer may own progress — short wait, then converge
+        # or return in-progress (never terminal-fail this request).
+        if status in (INTENT_RESERVED, INTENT_FORGING):
+            intent = _await_same_request_progress(req_id, db_path=db_path)
+            status = str(intent.get('status'))
+            converged = _converge_if_peer_ahead(
+                chat_id=chat_id,
+                request_id=req_id,
+                intent=intent,
+                hooks=hooks,
+                db_path=db_path,
+                now=now,
+            )
+            if converged is not None:
+                return converged
+            if status in (INTENT_READY, INTENT_COMMITTING):
+                # Peer advanced; run commit path without re-Forge.
+                result = commit_switch_to_handoff_pending(
+                    intent,
+                    close_reason=close_reason,
+                    db_path=db_path,
+                    now=now,
+                )
+                commit_kind = str(result.pop(_COMMIT_KIND_KEY, _COMMIT_KIND_SELF))
+                if commit_kind == _COMMIT_KIND_PEER_COMMITTED:
+                    return result
+                if commit_kind == _COMMIT_KIND_PEER_HANDOFF:
+                    converged = _converge_if_peer_ahead(
+                        chat_id=chat_id,
+                        request_id=req_id,
+                        intent={
+                            **intent,
+                            'status': INTENT_HANDOFF_PENDING,
+                        },
+                        hooks=hooks,
+                        db_path=db_path,
+                        now=now,
+                    )
+                    if converged is not None:
+                        return converged
+                    return result
+                post_db_commit = True
+                if staged is None:
+                    staged, converged = _prepare_staged_or_await_peer(
+                        intent=intent,
+                        hooks=hooks,
+                        chat_id=chat_id,
+                        request_id=req_id,
+                        db_path=db_path,
+                        now=now,
+                        session_jsonl_path_for_cwd=session_jsonl_path_for_cwd,
+                    )
+                    if converged is not None:
+                        return converged
+                old_handle = hooks.take_handoff(staged, result)
+                handoff_taken = True
+                defer_old_resident_close(old_handle)
+                mark_intent_committed(req_id, db_path=db_path, now=now)
+                flush_old_resident_close()
+                return result
+            raise SwitchInProgressError('switch_in_progress')
 
         raise SwitchFailedError('unexpected_intent_status:%s' % status)
     except (
