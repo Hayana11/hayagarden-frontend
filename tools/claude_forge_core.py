@@ -333,9 +333,9 @@ def forge_transcript(
         uid = str(evt.get('uuid') or '')
         if uid and uid in excluded:
             continue
-        if evt.get('type') == 'summary':
+        if not _is_conversational(evt):
             continue
-        if evt.get('type') in {'result', 'file-history-snapshot'}:
+        if evt.get('type') == 'summary':
             continue
         kept.append(copy.deepcopy(dict(evt)))
 
