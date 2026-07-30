@@ -1,0 +1,236 @@
+test_default_config_store_value (tests.test_clean_window_shadow.CleanWindowShadowConfigTests.test_default_config_store_value) ... ok
+setUpClass (tests.test_clean_window_shadow.CleanWindowShadowGatewayTests) ... ERROR
+test_close_force_works_when_feature_disabled (tests.test_clean_window_shadow.CleanWindowShadowSessionTests.test_close_force_works_when_feature_disabled) ... ok
+test_close_removes_session (tests.test_clean_window_shadow.CleanWindowShadowSessionTests.test_close_removes_session) ... ok
+test_commit_meta_empty_no_formal_cursor_touch (tests.test_clean_window_shadow.CleanWindowShadowSessionTests.test_commit_meta_empty_no_formal_cursor_touch) ... ok
+test_dynamic_injection_builders_not_called (tests.test_clean_window_shadow.CleanWindowShadowSessionTests.test_dynamic_injection_builders_not_called) ... ok
+test_empty_history_on_start (tests.test_clean_window_shadow.CleanWindowShadowSessionTests.test_empty_history_on_start) ... ok
+test_expire_session_closes_even_if_timer_fires_early (tests.test_clean_window_shadow.CleanWindowShadowSessionTests.test_expire_session_closes_even_if_timer_fires_early) ... ok
+test_first_turn_sends_raw_message_when_cold (tests.test_clean_window_shadow.CleanWindowShadowSessionTests.test_first_turn_sends_raw_message_when_cold) ... ok
+test_manifest_reports_actual_executor (tests.test_clean_window_shadow.CleanWindowShadowSessionTests.test_manifest_reports_actual_executor) ... ok
+test_mid_session_respawn_replays_clean_history (tests.test_clean_window_shadow.CleanWindowShadowSessionTests.test_mid_session_respawn_replays_clean_history) ... ok
+test_rejects_non_claude_code_provider (tests.test_clean_window_shadow.CleanWindowShadowSessionTests.test_rejects_non_claude_code_provider) ... ok
+test_save_marker_suppressed (tests.test_clean_window_shadow.CleanWindowShadowSessionTests.test_save_marker_suppressed) ... ok
+test_session_continuity_within_clean_window (tests.test_clean_window_shadow.CleanWindowShadowSessionTests.test_session_continuity_within_clean_window) ... ok
+test_sessions_are_isolated (tests.test_clean_window_shadow.CleanWindowShadowSessionTests.test_sessions_are_isolated) ... ok
+test_start_failure_cleans_work_dir (tests.test_clean_window_shadow.CleanWindowShadowSessionTests.test_start_failure_cleans_work_dir) ... ok
+test_static_parity_with_production_builder (tests.test_clean_window_shadow.CleanWindowShadowSessionTests.test_static_parity_with_production_builder) ... ok
+test_tool_side_effect_blocked (tests.test_clean_window_shadow.CleanWindowShadowSessionTests.test_tool_side_effect_blocked) ... ok
+test_ttl_expiry (tests.test_clean_window_shadow.CleanWindowShadowSessionTests.test_ttl_expiry) ... ok
+test_ttl_purge_closes_session_resources (tests.test_clean_window_shadow.CleanWindowShadowSessionTests.test_ttl_purge_closes_session_resources) ... ERROR
+test_ttl_timer_closes_without_followup_request (tests.test_clean_window_shadow.CleanWindowShadowSessionTests.test_ttl_timer_closes_without_followup_request) ... ok
+test_turn_limit_auto_closes (tests.test_clean_window_shadow.CleanWindowShadowSessionTests.test_turn_limit_auto_closes) ... ok
+test_disabled_by_default (tests.test_clean_window_shadow.CleanWindowShadowUnitTests.test_disabled_by_default) ... ok
+test_manifest_flags_all_dynamic_sources_off (tests.test_clean_window_shadow.CleanWindowShadowUnitTests.test_manifest_flags_all_dynamic_sources_off) ... ok
+test_side_effect_tool_detection (tests.test_clean_window_shadow.CleanWindowShadowUnitTests.test_side_effect_tool_detection) ... ok
+test_strip_save_markers (tests.test_clean_window_shadow.CleanWindowShadowUnitTests.test_strip_save_markers) ... ok
+test_clean_profile_unchanged (tests.test_clean_window_shadow.DailyCandidateShadowTests.test_clean_profile_unchanged) ... ERROR
+test_daily_candidate_reinjects_on_cold_respawn (tests.test_clean_window_shadow.DailyCandidateShadowTests.test_daily_candidate_reinjects_on_cold_respawn) ... ERROR
+test_daily_candidate_requires_valid_file_path (tests.test_clean_window_shadow.DailyCandidateShadowTests.test_daily_candidate_requires_valid_file_path) ... ERROR
+test_raw_day_handoff_text_not_accepted (tests.test_clean_window_shadow.DailyCandidateShadowTests.test_raw_day_handoff_text_not_accepted) ... ERROR
+test_send_turn_failure_does_not_commit_state_snapshot (tests.test_clean_window_shadow.DailyCandidateShadowTests.test_send_turn_failure_does_not_commit_state_snapshot) ... ERROR
+test_product_names_allowed (tests.test_day_handoff.DayHandoffAssistantVoiceMatcherTests.test_product_names_allowed) ... ok
+test_reviewed_handoff_topics_pass_validation (tests.test_day_handoff.DayHandoffAssistantVoiceMatcherTests.test_reviewed_handoff_topics_pass_validation) ... ok
+test_speaker_labels_rejected (tests.test_day_handoff.DayHandoffAssistantVoiceMatcherTests.test_speaker_labels_rejected) ... ok
+test_0359_belongs_to_previous_chat_day (tests.test_day_handoff.DayHandoffBoundaryTests.test_0359_belongs_to_previous_chat_day) ... ok
+test_0400_belongs_to_new_chat_day (tests.test_day_handoff.DayHandoffBoundaryTests.test_0400_belongs_to_new_chat_day) ... ok
+test_chat_day_window_uses_four_am_boundary (tests.test_day_handoff.DayHandoffBoundaryTests.test_chat_day_window_uses_four_am_boundary) ... ok
+test_reject_invalid_day_format (tests.test_day_handoff.DayHandoffBoundaryTests.test_reject_invalid_day_format) ... ok
+test_answered_question_not_open_loop (tests.test_day_handoff.DayHandoffExtractionTests.test_answered_question_not_open_loop) ... ok
+test_assistant_voice_not_in_any_yaml_field (tests.test_day_handoff.DayHandoffExtractionTests.test_assistant_voice_not_in_any_yaml_field) ... ok
+test_assistant_voice_not_in_decisions_or_last_topic (tests.test_day_handoff.DayHandoffExtractionTests.test_assistant_voice_not_in_decisions_or_last_topic) ... ok
+test_casual_message_not_confirmed_fact (tests.test_day_handoff.DayHandoffExtractionTests.test_casual_message_not_confirmed_fact) ... ok
+test_metadata_flags (tests.test_day_handoff.DayHandoffExtractionTests.test_metadata_flags) ... ok
+test_request_with不要_passes_validation (tests.test_day_handoff.DayHandoffExtractionTests.test_request_with不要_passes_validation) ... ok
+test_fetch_day_messages_uses_half_open_interval (tests.test_day_handoff.DayHandoffFetchTests.test_fetch_day_messages_uses_half_open_interval) ... ok
+test_parse_rejects_duplicate_key (tests.test_day_handoff.DayHandoffParserTests.test_parse_rejects_duplicate_key) ... ok
+test_parse_rejects_missing_metadata_key (tests.test_day_handoff.DayHandoffParserTests.test_parse_rejects_missing_metadata_key) ... ok
+test_parse_rejects_missing_required_key (tests.test_day_handoff.DayHandoffParserTests.test_parse_rejects_missing_required_key) ... ok
+test_parse_rejects_oversized_file (tests.test_day_handoff.DayHandoffParserTests.test_parse_rejects_oversized_file) ... ok
+test_parse_rejects_unknown_key (tests.test_day_handoff.DayHandoffParserTests.test_parse_rejects_unknown_key) ... ok
+test_read_does_not_follow_symlink_replacement (tests.test_day_handoff.DayHandoffSecurePathTests.test_read_does_not_follow_symlink_replacement) ... ERROR
+test_refuse_overwrite_existing_file (tests.test_day_handoff.DayHandoffSecurePathTests.test_refuse_overwrite_existing_file) ... ERROR
+test_reject_parent_directory_symlink (tests.test_day_handoff.DayHandoffSecurePathTests.test_reject_parent_directory_symlink) ... ERROR
+test_reject_path_outside_shadow_dir (tests.test_day_handoff.DayHandoffSecurePathTests.test_reject_path_outside_shadow_dir) ... ERROR
+test_reject_symlink (tests.test_day_handoff.DayHandoffSecurePathTests.test_reject_symlink) ... ERROR
+test_write_uses_secure_directory_and_permissions (tests.test_day_handoff.DayHandoffSecurePathTests.test_write_uses_secure_directory_and_permissions) ... ERROR
+test_assistant_voice_in_field_rejected (tests.test_day_handoff.DayHandoffValidationTests.test_assistant_voice_in_field_rejected) ... ok
+test_invalid_message_ids_and_count_rejected (tests.test_day_handoff.DayHandoffValidationTests.test_invalid_message_ids_and_count_rejected) ... ok
+test_invalid_sha256_rejected (tests.test_day_handoff.DayHandoffValidationTests.test_invalid_sha256_rejected) ... ok
+test_invalid_time_window_rejected (tests.test_day_handoff.DayHandoffValidationTests.test_invalid_time_window_rejected) ... ok
+test_missing_metadata_rejected (tests.test_day_handoff.DayHandoffValidationTests.test_missing_metadata_rejected) ... ok
+test_valid_fixture_passes (tests.test_day_handoff.DayHandoffValidationTests.test_valid_fixture_passes) ... ok
+test_wrong_extraction_mode_rejected (tests.test_day_handoff.DayHandoffValidationTests.test_wrong_extraction_mode_rejected) ... ok
+test_generate_yaml_from_temp_readonly_database (tests.test_generate_day_handoff.GenerateDayHandoffDbTests.test_generate_yaml_from_temp_readonly_database) ... ok
+test_missing_database_fails_without_creating_file (tests.test_generate_day_handoff.GenerateDayHandoffDbTests.test_missing_database_fails_without_creating_file) ... ok
+test_open_readonly_db_uses_ro_uri (tests.test_generate_day_handoff.GenerateDayHandoffDbTests.test_open_readonly_db_uses_ro_uri) ... ok
+test_script_does_not_import_gateway (tests.test_generate_day_handoff.GenerateDayHandoffSourceTests.test_script_does_not_import_gateway) ... ok
+System.Management.Automation.RemoteException
+======================================================================
+ERROR: setUpClass (tests.test_clean_window_shadow.CleanWindowShadowGatewayTests)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "D:\文档\HAYA Gardan\clean-window-diag-1-worktree\tests\test_clean_window_shadow.py", line 484, in setUpClass
+    os.makedirs('/opt/workspace/tools', exist_ok=True)
+  File "<frozen os>", line 215, in makedirs
+  File "<frozen os>", line 215, in makedirs
+  File "<frozen os>", line 225, in makedirs
+PermissionError: [WinError 5] 拒绝访问。: '/opt'
+System.Management.Automation.RemoteException
+======================================================================
+ERROR: test_ttl_purge_closes_session_resources (tests.test_clean_window_shadow.CleanWindowShadowSessionTests.test_ttl_purge_closes_session_resources)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "D:\文档\HAYA Gardan\clean-window-diag-1-worktree\tests\test_clean_window_shadow.py", line 331, in test_ttl_purge_closes_session_resources
+    os.makedirs(session.work_dir, exist_ok=True)
+  File "<frozen os>", line 215, in makedirs
+  File "<frozen os>", line 225, in makedirs
+PermissionError: [WinError 5] 拒绝访问。: '/tmp'
+System.Management.Automation.RemoteException
+======================================================================
+ERROR: test_clean_profile_unchanged (tests.test_clean_window_shadow.DailyCandidateShadowTests.test_clean_profile_unchanged)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "D:\文档\HAYA Gardan\clean-window-diag-1-worktree\tests\test_clean_window_shadow.py", line 600, in setUp
+    dh.ensure_shadow_handoff_dir()
+  File "D:\文档\HAYA Gardan\clean-window-diag-1-worktree\chat\day_handoff.py", line 595, in ensure_shadow_handoff_dir
+    _stat_owned_path(SHADOW_HANDOFF_DIR, expect_dir=True)
+  File "D:\文档\HAYA Gardan\clean-window-diag-1-worktree\chat\day_handoff.py", line 588, in _stat_owned_path
+    if st.st_uid != os.geteuid():
+                    ^^^^^^^^^^
+AttributeError: module 'os' has no attribute 'geteuid'. Did you mean: 'getpid'?
+System.Management.Automation.RemoteException
+======================================================================
+ERROR: test_daily_candidate_reinjects_on_cold_respawn (tests.test_clean_window_shadow.DailyCandidateShadowTests.test_daily_candidate_reinjects_on_cold_respawn)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "D:\文档\HAYA Gardan\clean-window-diag-1-worktree\tests\test_clean_window_shadow.py", line 600, in setUp
+    dh.ensure_shadow_handoff_dir()
+  File "D:\文档\HAYA Gardan\clean-window-diag-1-worktree\chat\day_handoff.py", line 595, in ensure_shadow_handoff_dir
+    _stat_owned_path(SHADOW_HANDOFF_DIR, expect_dir=True)
+  File "D:\文档\HAYA Gardan\clean-window-diag-1-worktree\chat\day_handoff.py", line 588, in _stat_owned_path
+    if st.st_uid != os.geteuid():
+                    ^^^^^^^^^^
+AttributeError: module 'os' has no attribute 'geteuid'. Did you mean: 'getpid'?
+System.Management.Automation.RemoteException
+======================================================================
+ERROR: test_daily_candidate_requires_valid_file_path (tests.test_clean_window_shadow.DailyCandidateShadowTests.test_daily_candidate_requires_valid_file_path)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "D:\文档\HAYA Gardan\clean-window-diag-1-worktree\tests\test_clean_window_shadow.py", line 600, in setUp
+    dh.ensure_shadow_handoff_dir()
+  File "D:\文档\HAYA Gardan\clean-window-diag-1-worktree\chat\day_handoff.py", line 595, in ensure_shadow_handoff_dir
+    _stat_owned_path(SHADOW_HANDOFF_DIR, expect_dir=True)
+  File "D:\文档\HAYA Gardan\clean-window-diag-1-worktree\chat\day_handoff.py", line 588, in _stat_owned_path
+    if st.st_uid != os.geteuid():
+                    ^^^^^^^^^^
+AttributeError: module 'os' has no attribute 'geteuid'. Did you mean: 'getpid'?
+System.Management.Automation.RemoteException
+======================================================================
+ERROR: test_raw_day_handoff_text_not_accepted (tests.test_clean_window_shadow.DailyCandidateShadowTests.test_raw_day_handoff_text_not_accepted)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "D:\文档\HAYA Gardan\clean-window-diag-1-worktree\tests\test_clean_window_shadow.py", line 600, in setUp
+    dh.ensure_shadow_handoff_dir()
+  File "D:\文档\HAYA Gardan\clean-window-diag-1-worktree\chat\day_handoff.py", line 595, in ensure_shadow_handoff_dir
+    _stat_owned_path(SHADOW_HANDOFF_DIR, expect_dir=True)
+  File "D:\文档\HAYA Gardan\clean-window-diag-1-worktree\chat\day_handoff.py", line 588, in _stat_owned_path
+    if st.st_uid != os.geteuid():
+                    ^^^^^^^^^^
+AttributeError: module 'os' has no attribute 'geteuid'. Did you mean: 'getpid'?
+System.Management.Automation.RemoteException
+======================================================================
+ERROR: test_send_turn_failure_does_not_commit_state_snapshot (tests.test_clean_window_shadow.DailyCandidateShadowTests.test_send_turn_failure_does_not_commit_state_snapshot)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "D:\文档\HAYA Gardan\clean-window-diag-1-worktree\tests\test_clean_window_shadow.py", line 600, in setUp
+    dh.ensure_shadow_handoff_dir()
+  File "D:\文档\HAYA Gardan\clean-window-diag-1-worktree\chat\day_handoff.py", line 595, in ensure_shadow_handoff_dir
+    _stat_owned_path(SHADOW_HANDOFF_DIR, expect_dir=True)
+  File "D:\文档\HAYA Gardan\clean-window-diag-1-worktree\chat\day_handoff.py", line 588, in _stat_owned_path
+    if st.st_uid != os.geteuid():
+                    ^^^^^^^^^^
+AttributeError: module 'os' has no attribute 'geteuid'. Did you mean: 'getpid'?
+System.Management.Automation.RemoteException
+======================================================================
+ERROR: test_read_does_not_follow_symlink_replacement (tests.test_day_handoff.DayHandoffSecurePathTests.test_read_does_not_follow_symlink_replacement)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "D:\文档\HAYA Gardan\clean-window-diag-1-worktree\tests\test_day_handoff.py", line 295, in setUp
+    dh.ensure_shadow_handoff_dir()
+  File "D:\文档\HAYA Gardan\clean-window-diag-1-worktree\chat\day_handoff.py", line 595, in ensure_shadow_handoff_dir
+    _stat_owned_path(SHADOW_HANDOFF_DIR, expect_dir=True)
+  File "D:\文档\HAYA Gardan\clean-window-diag-1-worktree\chat\day_handoff.py", line 588, in _stat_owned_path
+    if st.st_uid != os.geteuid():
+                    ^^^^^^^^^^
+AttributeError: module 'os' has no attribute 'geteuid'. Did you mean: 'getpid'?
+System.Management.Automation.RemoteException
+======================================================================
+ERROR: test_refuse_overwrite_existing_file (tests.test_day_handoff.DayHandoffSecurePathTests.test_refuse_overwrite_existing_file)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "D:\文档\HAYA Gardan\clean-window-diag-1-worktree\tests\test_day_handoff.py", line 295, in setUp
+    dh.ensure_shadow_handoff_dir()
+  File "D:\文档\HAYA Gardan\clean-window-diag-1-worktree\chat\day_handoff.py", line 595, in ensure_shadow_handoff_dir
+    _stat_owned_path(SHADOW_HANDOFF_DIR, expect_dir=True)
+  File "D:\文档\HAYA Gardan\clean-window-diag-1-worktree\chat\day_handoff.py", line 588, in _stat_owned_path
+    if st.st_uid != os.geteuid():
+                    ^^^^^^^^^^
+AttributeError: module 'os' has no attribute 'geteuid'. Did you mean: 'getpid'?
+System.Management.Automation.RemoteException
+======================================================================
+ERROR: test_reject_parent_directory_symlink (tests.test_day_handoff.DayHandoffSecurePathTests.test_reject_parent_directory_symlink)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "D:\文档\HAYA Gardan\clean-window-diag-1-worktree\tests\test_day_handoff.py", line 295, in setUp
+    dh.ensure_shadow_handoff_dir()
+  File "D:\文档\HAYA Gardan\clean-window-diag-1-worktree\chat\day_handoff.py", line 595, in ensure_shadow_handoff_dir
+    _stat_owned_path(SHADOW_HANDOFF_DIR, expect_dir=True)
+  File "D:\文档\HAYA Gardan\clean-window-diag-1-worktree\chat\day_handoff.py", line 588, in _stat_owned_path
+    if st.st_uid != os.geteuid():
+                    ^^^^^^^^^^
+AttributeError: module 'os' has no attribute 'geteuid'. Did you mean: 'getpid'?
+System.Management.Automation.RemoteException
+======================================================================
+ERROR: test_reject_path_outside_shadow_dir (tests.test_day_handoff.DayHandoffSecurePathTests.test_reject_path_outside_shadow_dir)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "D:\文档\HAYA Gardan\clean-window-diag-1-worktree\tests\test_day_handoff.py", line 295, in setUp
+    dh.ensure_shadow_handoff_dir()
+  File "D:\文档\HAYA Gardan\clean-window-diag-1-worktree\chat\day_handoff.py", line 595, in ensure_shadow_handoff_dir
+    _stat_owned_path(SHADOW_HANDOFF_DIR, expect_dir=True)
+  File "D:\文档\HAYA Gardan\clean-window-diag-1-worktree\chat\day_handoff.py", line 588, in _stat_owned_path
+    if st.st_uid != os.geteuid():
+                    ^^^^^^^^^^
+AttributeError: module 'os' has no attribute 'geteuid'. Did you mean: 'getpid'?
+System.Management.Automation.RemoteException
+======================================================================
+ERROR: test_reject_symlink (tests.test_day_handoff.DayHandoffSecurePathTests.test_reject_symlink)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "D:\文档\HAYA Gardan\clean-window-diag-1-worktree\tests\test_day_handoff.py", line 295, in setUp
+    dh.ensure_shadow_handoff_dir()
+  File "D:\文档\HAYA Gardan\clean-window-diag-1-worktree\chat\day_handoff.py", line 595, in ensure_shadow_handoff_dir
+    _stat_owned_path(SHADOW_HANDOFF_DIR, expect_dir=True)
+  File "D:\文档\HAYA Gardan\clean-window-diag-1-worktree\chat\day_handoff.py", line 588, in _stat_owned_path
+    if st.st_uid != os.geteuid():
+                    ^^^^^^^^^^
+AttributeError: module 'os' has no attribute 'geteuid'. Did you mean: 'getpid'?
+System.Management.Automation.RemoteException
+======================================================================
+ERROR: test_write_uses_secure_directory_and_permissions (tests.test_day_handoff.DayHandoffSecurePathTests.test_write_uses_secure_directory_and_permissions)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "D:\文档\HAYA Gardan\clean-window-diag-1-worktree\tests\test_day_handoff.py", line 295, in setUp
+    dh.ensure_shadow_handoff_dir()
+  File "D:\文档\HAYA Gardan\clean-window-diag-1-worktree\chat\day_handoff.py", line 595, in ensure_shadow_handoff_dir
+    _stat_owned_path(SHADOW_HANDOFF_DIR, expect_dir=True)
+  File "D:\文档\HAYA Gardan\clean-window-diag-1-worktree\chat\day_handoff.py", line 588, in _stat_owned_path
+    if st.st_uid != os.geteuid():
+                    ^^^^^^^^^^
+AttributeError: module 'os' has no attribute 'geteuid'. Did you mean: 'getpid'?
+System.Management.Automation.RemoteException
+----------------------------------------------------------------------
+Ran 66 tests in 0.310s
+System.Management.Automation.RemoteException
+FAILED (errors=13)
