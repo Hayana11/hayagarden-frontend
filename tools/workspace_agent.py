@@ -727,13 +727,23 @@ def _dispatch_mgmt_or_custom(name: str, args: dict[str, Any]) -> str:
     return _json({"error": "unknown_workspace_tool", "name": name})
 
 
-def call_tool(name: str, args: dict, caller: str = "fyodor_cc", conversation_id: str = "") -> str:
+def call_tool(
+    name: str,
+    args: dict,
+    caller: str = "fyodor_cc",
+    conversation_id: str = "",
+    window_identity: dict | None = None,
+) -> str:
     del caller
     args = args or {}
     if name == "shell_exec":
         return workspace_executor.run_exec(str(args.get("cmd") or ""), args.get("secrets"))
     if name == "ws_job":
-        return workspace_jobs.ws_job(args, conversation_id=conversation_id)
+        return workspace_jobs.ws_job(
+            args,
+            conversation_id=conversation_id,
+            window_identity=window_identity,
+        )
     if name == "workspace_app":
         return workspace_apps.workspace_app(args)
     if name == "mcp_search":

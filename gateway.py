@@ -28,6 +28,43 @@ _warmup_ombre_brain()
 
 def _workspace_job_event_hook(event):
     """Job 完成：入队 SSE/轮询事件，并写入 chat_messages（不触发新生成）。"""
+    if event.get('type') == 'job_finished':
+        try:
+            from chat.window_identity import (
+                REASON_OK,
+                evaluate_async_delivery,
+                log_stale_async_result,
+            )
+            reason, captured, current = evaluate_async_delivery(
+                event.get('window_identity'),
+                db_path=DB_PATH,
+            )
+            if reason != REASON_OK:
+                meta = event.get('meta') or {}
+                log_stale_async_result(
+                    source='workspace_job',
+                    reason=reason,
+                    job_id=meta.get('job_id'),
+                    captured_identity=captured or event.get('window_identity'),
+                    current_identity=current,
+                )
+                return
+        except Exception:
+            # Fail closed when soft window is on; preserve legacy when off.
+            try:
+                from chat.window_identity import soft_window_enabled, log_stale_async_result
+                if soft_window_enabled():
+                    meta = event.get('meta') or {}
+                    log_stale_async_result(
+                        source='workspace_job',
+                        reason='window_identity_unavailable',
+                        job_id=meta.get('job_id'),
+                        captured_identity=event.get('window_identity'),
+                        current_identity=None,
+                    )
+                    return
+            except Exception:
+                pass
     workspace_jobs.queue_event(event)
     if event.get('type') != 'job_finished':
         return
@@ -69,6 +106,33 @@ def _workspace_job_sse_payloads():
     for ev in workspace_jobs.drain_pending_events():
         if ev.get('type') != 'job_finished':
             continue
+        try:
+            from chat.window_identity import (
+                REASON_OK,
+                evaluate_async_delivery,
+                log_stale_async_result,
+            )
+            reason, captured, current = evaluate_async_delivery(
+                ev.get('window_identity'),
+                db_path=DB_PATH,
+            )
+            if reason != REASON_OK:
+                meta = ev.get('meta') or {}
+                log_stale_async_result(
+                    source='workspace_job',
+                    reason=reason,
+                    job_id=meta.get('job_id'),
+                    captured_identity=captured or ev.get('window_identity'),
+                    current_identity=current,
+                )
+                continue
+        except Exception:
+            try:
+                from chat.window_identity import soft_window_enabled
+                if soft_window_enabled():
+                    continue
+            except Exception:
+                pass
         meta = ev.get('meta') or {}
         yield {
             't': 'workspace_job',
@@ -2886,7 +2950,37 @@ def run_tool(name, args, caller='fyodor_cc'):
                 return r.read().decode()
         if workspace_agent.is_workspace_tool(name):
             _cid = getattr(_tool_ctx, 'conversation_id', '') or 'default'
-            return workspace_agent.call_tool(name, args, caller=caller, conversation_id=_cid)
+            _wi = None
+            if name == 'ws_job':
+                _action = str((args or {}).get('action') or 'status').strip().lower()
+                if _action == 'start':
+                    try:
+                        from chat.window_identity import (
+                            WindowIdentityUnavailable,
+                            capture_current_window_identity,
+                            soft_window_enabled,
+                        )
+                        if soft_window_enabled():
+                            try:
+                                _wi = capture_current_window_identity(db_path=DB_PATH)
+                            except WindowIdentityUnavailable:
+                                return json.dumps({
+                                    'error': 'window_identity_unavailable',
+                                    'detail': 'cannot start ws_job without current window identity',
+                                }, ensure_ascii=False)
+                    except Exception as exc:
+                        try:
+                            from chat.window_identity import soft_window_enabled as _swe
+                            if _swe():
+                                return json.dumps({
+                                    'error': 'window_identity_unavailable',
+                                    'detail': str(exc)[:300],
+                                }, ensure_ascii=False)
+                        except Exception:
+                            pass
+            return workspace_agent.call_tool(
+                name, args, caller=caller, conversation_id=_cid, window_identity=_wi,
+            )
         if name.startswith('codebase_'):
             return run_codebase_tool(name, args)
         return '未知工具: ' + name
@@ -5809,6 +5903,38 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
             'reason': 'unsupported_provider',
         }), 400
 
+    # Freeze window identity BEFORE system build / model call (step 7).
+    _wake_window_identity = None
+    try:
+        from chat.window_identity import (
+            WindowIdentityUnavailable,
+            capture_current_window_identity,
+            soft_window_enabled,
+        )
+        if soft_window_enabled():
+            try:
+                _wake_window_identity = capture_current_window_identity(db_path=DB_PATH)
+            except WindowIdentityUnavailable as exc:
+                return jsonify({
+                    'ok': False,
+                    'error': str(exc),
+                    'mode': mode,
+                    'provider': wake_provider,
+                    'reason': 'window_identity_unavailable',
+                }), 409
+    except Exception as exc:
+        try:
+            from chat.window_identity import soft_window_enabled as _swe
+            if _swe():
+                return jsonify({
+                    'ok': False,
+                    'error': str(exc),
+                    'mode': mode,
+                    'reason': 'window_identity_unavailable',
+                }), 409
+        except Exception:
+            pass
+
     # Authoritative idle: user_idle for longing / t2; effective for dice-era t.
     # Non-normal modes may proceed without a reliable clock, but never invent 999h.
     if clock.reliable and clock.user_idle_hours is not None:
@@ -5930,6 +6056,7 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
         desire_ledger_enabled=_get_desire_ledger_enabled(),
         cache_info=wake_cache_info,
         wake_run_id=wake_run_id,
+        window_identity=_wake_window_identity,
     )
     try:
         import internal_state_shadow as _shadow_wake

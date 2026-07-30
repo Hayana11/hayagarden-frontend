@@ -204,12 +204,10 @@ def build_system(
     # 2. 意识连续性：你醒着时做的事 (Phase 3)
     try:
         from wake.concern_resolution import filter_wake_rows, format_resolution_guard
-        _conn3 = get_db()
-        _wakes = _conn3.execute(
-            """SELECT woke_at, action, content, thoughts FROM wake_log
-               WHERE consumed=0 ORDER BY id ASC"""
-        ).fetchall()
-        _conn3.close()
+        from chat.window_identity import fetch_unconsumed_wakes_for_injection
+        _wakes = fetch_unconsumed_wakes_for_injection(
+            get_db, 'woke_at, action, content, thoughts',
+        )
         _wake_result = filter_wake_rows(_wakes, _concern_resolution)
         _applied_resolutions.extend(_wake_result.applied_resolutions)
         _wakes = _wake_result.kept
@@ -1470,14 +1468,10 @@ def _cc_collect_one_shot(get_db_fn, *, include_wake=True):
         except Exception:
             _cr_state = None
         try:
-            conn = get_db_fn()
-            try:
-                wakes = conn.execute(
-                    """SELECT id, woke_at, action, content FROM wake_log
-                       WHERE consumed=0 ORDER BY id ASC"""
-                ).fetchall()
-            finally:
-                conn.close()
+            from chat.window_identity import fetch_unconsumed_wakes_for_injection
+            wakes = fetch_unconsumed_wakes_for_injection(
+                get_db_fn, 'id, woke_at, action, content',
+            )
             items = []
             for w in wakes:
                 items.append({
