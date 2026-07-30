@@ -410,6 +410,517 @@ class ForgeSwitchContractTests(unittest.TestCase):
             )
 
 
+class StagedIdentityAndCursorTests(unittest.TestCase):
+    """A/B: formal identity continuity + DB cursor hot first turn."""
+
+    def setUp(self):
+        self.db = _tmp_db()
+        _init_chat_messages(self.db)
+        dc.ensure_schema(self.db)
+        self.forge_root = tempfile.mkdtemp(prefix='forge-id-')
+        self.hooks = cw.offline_switch_hooks(self.forge_root)
+        self.ctx = dc.get_or_create_daily_context(
+            local_day='2026-07-27',
+            db_path=self.db,
+            now=datetime.datetime(2026, 7, 27, 10, 0, 0),
+        )
+        dr.reset_bindings_for_tests()
+        self._flag_patch = mock.patch('chat.daily_context.enabled', return_value=True)
+        self._flag_patch.start()
+        self._cw_flag = mock.patch('chat.context_window.enabled', return_value=True)
+        self._cw_flag.start()
+
+    def tearDown(self):
+        self._flag_patch.stop()
+        self._cw_flag.stop()
+        dr.reset_bindings_for_tests()
+        try:
+            os.unlink(self.db)
+        except OSError:
+            pass
+
+    def _binding_hooks(self, staged):
+        killed = {'old': 0, 'staged': 0}
+        old = mock.MagicMock()
+        old._kill = mock.Mock(side_effect=lambda quiet=True: killed.__setitem__('old', killed['old'] + 1))
+        old.generation = 9
+
+        def prepare_staged(intent, forge_path):
+            staged.session_id = str(intent['target_session_id'])
+            staged.jsonl_path = forge_path
+            return staged
+
+        def take_handoff(s, result):
+            dr.bind_target_resident_after_switch(
+                staged_resident=s,
+                result=result,
+                tool_profile=dr.DAILY_TOOL_PROFILE,
+                db_path=self.db,
+            )
+            return old
+
+        def discard_staged(s):
+            killed['staged'] += 1
+            kill = getattr(s, '_kill', None)
+            if callable(kill):
+                kill(quiet=True)
+
+        hooks = cw.SwitchHooks(
+            prepare_staged=prepare_staged,
+            take_handoff=take_handoff,
+            discard_staged=discard_staged,
+            forge_cwd=self.hooks.forge_cwd,
+            claude_home=self.hooks.claude_home,
+        )
+        return hooks, old, killed
+
+    def test_A_ensure_alive_does_not_respawn_after_handoff(self):
+        ids = _seed_rounds(self.db, self.ctx, 2)
+        exact_full_system = 'EXACT_FULL_SYSTEM_FOR_DAILY'
+        exact_env = {
+            'CLAUDE_CODE_OAUTH_TOKEN': 'tok',
+            'PATH': os.environ.get('PATH', ''),
+        }
+        staged = mock.MagicMock()
+        staged.generation = 3
+        staged.session_id = None
+        staged.tool_profile = dr.DAILY_TOOL_PROFILE
+        staged._system_text = exact_full_system
+        staged._tool_profile = dr.DAILY_TOOL_PROFILE
+        staged._alive = mock.Mock(return_value=True)
+        staged._spawn = mock.Mock()
+        staged._kill = mock.Mock()
+        # Real ensure_alive decision path via a thin wrapper.
+        real = __import__('cc_resident').ResidentSession
+        # Use a real ResidentSession instance with mocked process alive.
+
+        class _Staged:
+            def __init__(self):
+                self.session_id = None
+                self.jsonl_path = None
+                self.generation = 3
+                self._tool_profile = dr.DAILY_TOOL_PROFILE
+                self._system_text = exact_full_system
+                self._spawn_calls = 0
+                self._kill_calls = 0
+                self._alive_flag = True
+                self._last_used = __import__('time').time()
+                self._last_round_context = 0
+                self._resident_turn_count = 0
+                self._turns_since_respawn = 0
+                self._lock = __import__('threading').RLock()
+                self._cold = False
+
+            @property
+            def tool_profile(self):
+                return self._tool_profile
+
+            def _alive(self):
+                return self._alive_flag
+
+            def _decide_respawn_reason(self, system_text, *, tool_profile='legacy'):
+                return real._decide_respawn_reason(
+                    self, system_text, tool_profile=tool_profile,
+                )
+
+            def ensure_alive(self, system_text, env, *, tool_profile='legacy'):
+                return real.ensure_alive(
+                    self, system_text, env, tool_profile=tool_profile,
+                )
+
+            def _spawn(self, system_text, env, *, reason='process_dead', tool_profile='legacy'):
+                self._spawn_calls += 1
+                self._system_text = system_text
+                self._tool_profile = tool_profile
+
+            def _kill(self, quiet=True):
+                self._kill_calls += 1
+
+        staged = _Staged()
+        hooks, old, killed = self._binding_hooks(staged)
+        before_gen = staged.generation
+        out = cw.switch_context_window(
+            source_context_id=int(self.ctx['id']),
+            source_context_epoch=int(self.ctx['context_epoch']),
+            count=0,
+            request_id=str(uuid.uuid4()),
+            db_path=self.db,
+            hooks=hooks,
+        )
+        target_sid = out['claude_session_id']
+        self.assertEqual(staged.session_id, target_sid)
+        files = list(Path(hooks.claude_home).rglob('*.jsonl'))
+        self.assertTrue(files)
+        before_bytes = files[0].read_bytes()
+        cold = staged.ensure_alive(
+            exact_full_system,
+            exact_env,
+            tool_profile=dr.DAILY_TOOL_PROFILE,
+        )
+        self.assertFalse(cold)
+        self.assertEqual(staged._spawn_calls, 0)
+        self.assertEqual(staged._kill_calls, 0)
+        self.assertEqual(staged.generation, before_gen)
+        self.assertEqual(staged.session_id, target_sid)
+        self.assertEqual(files[0].read_bytes(), before_bytes)
+        # Old closed only after committed success.
+        self.assertEqual(killed['old'], 1)
+        self.assertEqual(ids[-1], out['boundary_message_id'])
+
+    def _assert_first_turn_hot(self, *, count: int):
+        seeded = _seed_rounds(self.db, self.ctx, max(count, 1))
+        staged = mock.MagicMock()
+        staged.generation = 7
+        staged.session_id = None
+        staged._tool_profile = dr.DAILY_TOOL_PROFILE
+        staged.tool_profile = dr.DAILY_TOOL_PROFILE
+        staged._alive = mock.Mock(return_value=True)
+        staged._kill = mock.Mock()
+
+        hooks, old, killed = self._binding_hooks(staged)
+        out = cw.switch_context_window(
+            source_context_id=int(self.ctx['id']),
+            source_context_epoch=int(self.ctx['context_epoch']),
+            count=count,
+            request_id=str(uuid.uuid4()),
+            db_path=self.db,
+            hooks=hooks,
+        )
+        target_id = int(out['target_context_id'])
+        target_gen = int(out['resident_generation'])
+        db_cursor = dc.get_resident_history_cursor(
+            target_id, target_gen, db_path=self.db,
+        )
+        self.assertIsNotNone(db_cursor)
+        if count == 0:
+            self.assertEqual(db_cursor, int(out['boundary_message_id']))
+        else:
+            self.assertEqual(db_cursor, int(out['selected_message_ids'][-1]))
+
+        binding = dr.get_local_binding()
+        self.assertIsNotNone(binding)
+        self.assertEqual(binding.bound_cursor_message_id, db_cursor)
+        self.assertEqual(binding.tool_profile, dr.DAILY_TOOL_PROFILE)
+        self.assertEqual(binding.process_generation, 7)
+
+        # First formal message on target: must be hot, no carryover inject.
+        u = _insert(self.db, 'hayana', 'first-after-switch', '2026-07-27 16:00:00')
+        with mock.patch('chat.daily_history._build_state_text', return_value=('', 'none', {})):
+            plan = dr.prepare_daily_turn(
+                user_message_id=u,
+                db_path=self.db,
+                resident=staged,
+                static_system='S',
+                now=datetime.datetime(2026, 7, 27, 16, 0, 0),
+                wall_now=datetime.datetime(2026, 7, 27, 16, 0, 0),
+            )
+        self.assertFalse(plan.is_cold)
+        self.assertFalse(plan.is_respawn)
+        self.assertEqual(plan.manifest.get('turn_kind'), 'hot')
+        self.assertFalse(plan.manifest.get('carryover_injected_this_turn'))
+        staged._kill.assert_not_called()
+        return out, seeded
+
+    def test_B_count0_first_turn_hot_no_carryover_reinject(self):
+        self._assert_first_turn_hot(count=0)
+
+    def test_B_count3_first_turn_hot_no_carryover_reinject(self):
+        self._assert_first_turn_hot(count=3)
+
+    def test_B_empty_boundary0_bootstrap_not_fake_hot(self):
+        # No seeded messages → boundary watermark 0 → cursor bootstrap, not hot.
+        staged = mock.MagicMock()
+        staged.generation = 1
+        staged.session_id = 'sid'
+        staged._tool_profile = dr.DAILY_TOOL_PROFILE
+        result = {
+            'target_context_id': int(self.ctx['id']),
+            'target_context_epoch': int(self.ctx['context_epoch']),
+            'resident_generation': 1,
+            'selected_message_ids': [],
+            'boundary_message_id': 0,
+            'claude_session_id': 'sid',
+        }
+        binding = dr.bind_target_resident_after_switch(
+            staged_resident=staged,
+            result=result,
+            tool_profile=dr.DAILY_TOOL_PROFILE,
+            db_path=self.db,
+        )
+        self.assertIsNone(binding.bound_cursor_message_id)
+        self.assertIsNone(dc.get_resident_history_cursor(
+            int(self.ctx['id']), 1, db_path=self.db,
+        ))
+        plan_like = dr.DailyTurnPlan(
+            request_id='r', chat_id='default', local_day='2026-07-27',
+            context_id=int(self.ctx['id']),
+            context_epoch=int(self.ctx['context_epoch']),
+            resident_generation=1,
+            resident_key=binding.resident_key,
+            user_message_id=1, epoch_token={}, lease_owner='o',
+            is_cold=True, is_respawn=False, cursor_before=None,
+            assembly={}, manifest={}, db_path=self.db,
+            tool_profile=dr.DAILY_TOOL_PROFILE,
+        )
+        staged.generation = 1
+        self.assertFalse(dr._can_hot_turn(
+            plan=plan_like, resident=staged, db_cursor=None,
+        ))
+
+
+class PostCommitRecoveryTests(unittest.TestCase):
+    """C: pre/post-commit exception boundaries."""
+
+    def setUp(self):
+        self.db = _tmp_db()
+        _init_chat_messages(self.db)
+        dc.ensure_schema(self.db)
+        self.forge_root = tempfile.mkdtemp(prefix='forge-post-')
+        self.base_hooks = cw.offline_switch_hooks(self.forge_root)
+        self.ctx = dc.get_or_create_daily_context(
+            local_day='2026-07-27',
+            db_path=self.db,
+            now=datetime.datetime(2026, 7, 27, 10, 0, 0),
+        )
+        _seed_rounds(self.db, self.ctx, 1)
+        dr.reset_bindings_for_tests()
+        self._flag_patch = mock.patch('chat.daily_context.enabled', return_value=True)
+        self._flag_patch.start()
+        self._cw_flag = mock.patch('chat.context_window.enabled', return_value=True)
+        self._cw_flag.start()
+
+    def tearDown(self):
+        self._flag_patch.stop()
+        self._cw_flag.stop()
+        dr.reset_bindings_for_tests()
+        try:
+            os.unlink(self.db)
+        except OSError:
+            pass
+
+    def test_C1_take_handoff_fail_after_db_commit_keeps_pending(self):
+        req = str(uuid.uuid4())
+        discarded = {'n': 0}
+
+        def prepare_staged(intent, forge_path):
+            return self.base_hooks.prepare_staged(intent, forge_path)
+
+        def take_handoff(staged, result):
+            raise RuntimeError('take_handoff boom')
+
+        def discard_staged(staged):
+            discarded['n'] += 1
+            self.base_hooks.discard_staged(staged)
+
+        hooks = cw.SwitchHooks(
+            prepare_staged=prepare_staged,
+            take_handoff=take_handoff,
+            discard_staged=discard_staged,
+            forge_cwd=self.base_hooks.forge_cwd,
+            claude_home=self.base_hooks.claude_home,
+        )
+        with self.assertRaises(Exception) as ar:
+            cw.switch_context_window(
+                source_context_id=int(self.ctx['id']),
+                source_context_epoch=int(self.ctx['context_epoch']),
+                count=0,
+                request_id=req,
+                db_path=self.db,
+                hooks=hooks,
+            )
+        # Post-commit failures are re-raised as-is (or wrapped); intent stays pending.
+        self.assertIn('take_handoff boom', str(ar.exception))
+        conn = dc._connect(self.db)
+        try:
+            intent = conn.execute(
+                'SELECT status, orphan_jsonl_state FROM context_switch_intents WHERE request_id=?',
+                (req,),
+            ).fetchone()
+            self.assertEqual(intent['status'], cw.INTENT_HANDOFF_PENDING)
+            target = conn.execute(
+                'SELECT * FROM daily_contexts WHERE switch_request_id=?', (req,),
+            ).fetchone()
+            source = conn.execute(
+                'SELECT * FROM daily_contexts WHERE id=?', (int(self.ctx['id']),),
+            ).fetchone()
+        finally:
+            conn.close()
+        self.assertIsNotNone(target)
+        self.assertIsNotNone(source['closed_at'])
+        files = list(Path(hooks.claude_home).rglob('*.jsonl'))
+        self.assertTrue(files)
+        self.assertTrue(files[0].is_file())
+        # Formal message still gated.
+        u = _insert(self.db, 'hayana', 'blocked', '2026-07-27 17:00:00')
+        with self.assertRaises(dr.SwitchInProgressRuntimeError):
+            dr.prepare_daily_turn(user_message_id=u, db_path=self.db)
+        # Same request recovers without re-Forge.
+        forge_calls = {'n': 0}
+        import chat.context_window_forge as forge_mod
+        real = forge_mod.forge_target_session_from_db
+
+        def counting(*a, **k):
+            forge_calls['n'] += 1
+            return real(*a, **k)
+
+        recover_hooks = cw.offline_switch_hooks(tempfile.mkdtemp(prefix='rec-'))
+        # Point recovery at same forge cwd/home so JSONL is found.
+        recover_hooks = cw.SwitchHooks(
+            prepare_staged=self.base_hooks.prepare_staged,
+            take_handoff=lambda s, r: dr.bind_target_resident_after_switch(
+                staged_resident=s, result=r,
+                tool_profile=dr.DAILY_TOOL_PROFILE, db_path=self.db,
+            ),
+            discard_staged=self.base_hooks.discard_staged,
+            forge_cwd=self.base_hooks.forge_cwd,
+            claude_home=self.base_hooks.claude_home,
+        )
+        with mock.patch.object(forge_mod, 'forge_target_session_from_db', counting):
+            out = cw.switch_context_window(
+                source_context_id=int(self.ctx['id']),
+                source_context_epoch=int(self.ctx['context_epoch']),
+                count=0,
+                request_id=req,
+                db_path=self.db,
+                hooks=recover_hooks,
+            )
+        self.assertEqual(forge_calls['n'], 0)
+        self.assertEqual(int(out['target_context_id']), int(target['id']))
+        conn = dc._connect(self.db)
+        try:
+            st = conn.execute(
+                'SELECT status FROM context_switch_intents WHERE request_id=?', (req,),
+            ).fetchone()['status']
+        finally:
+            conn.close()
+        self.assertEqual(st, cw.INTENT_COMMITTED)
+
+    def test_C2_mark_committed_fail_keeps_staged_retry_only_commits(self):
+        req = str(uuid.uuid4())
+        staged_box = {'obj': None}
+        old = mock.MagicMock()
+        old_kill = mock.Mock()
+        old._kill = old_kill
+        kill_staged = mock.Mock()
+
+        def prepare_staged(intent, forge_path):
+            s = self.base_hooks.prepare_staged(intent, forge_path)
+            s._kill = kill_staged
+            s.generation = 4
+            s._tool_profile = dr.DAILY_TOOL_PROFILE
+            staged_box['obj'] = s
+            return s
+
+        def take_handoff(s, result):
+            dr.bind_target_resident_after_switch(
+                staged_resident=s,
+                result=result,
+                tool_profile=dr.DAILY_TOOL_PROFILE,
+                db_path=self.db,
+            )
+            return old
+
+        hooks = cw.SwitchHooks(
+            prepare_staged=prepare_staged,
+            take_handoff=take_handoff,
+            discard_staged=lambda s: kill_staged(quiet=True),
+            forge_cwd=self.base_hooks.forge_cwd,
+            claude_home=self.base_hooks.claude_home,
+        )
+
+        real_mark = cw.mark_intent_committed
+        calls = {'n': 0}
+
+        def boom_then_ok(request_id, **kwargs):
+            calls['n'] += 1
+            if calls['n'] == 1:
+                raise RuntimeError('mark committed boom')
+            return real_mark(request_id, **kwargs)
+
+        with mock.patch.object(cw, 'mark_intent_committed', side_effect=boom_then_ok):
+            with self.assertRaises(Exception):
+                cw.switch_context_window(
+                    source_context_id=int(self.ctx['id']),
+                    source_context_epoch=int(self.ctx['context_epoch']),
+                    count=0,
+                    request_id=req,
+                    db_path=self.db,
+                    hooks=hooks,
+                )
+            # After first failure: staged not killed, old not closed, pending.
+            kill_staged.assert_not_called()
+            old_kill.assert_not_called()
+            conn = dc._connect(self.db)
+            try:
+                st = conn.execute(
+                    'SELECT status FROM context_switch_intents WHERE request_id=?',
+                    (req,),
+                ).fetchone()['status']
+            finally:
+                conn.close()
+            self.assertEqual(st, cw.INTENT_HANDOFF_PENDING)
+            self.assertIsNotNone(dr.get_local_binding())
+            files = list(Path(hooks.claude_home).rglob('*.jsonl'))
+            self.assertTrue(files[0].is_file())
+
+            forge_calls = {'n': 0}
+            spawn_calls = {'n': 0}
+            import chat.context_window_forge as forge_mod
+            real_forge = forge_mod.forge_target_session_from_db
+
+            def counting_forge(*a, **k):
+                forge_calls['n'] += 1
+                return real_forge(*a, **k)
+
+            def prepare_again(intent, forge_path):
+                spawn_calls['n'] += 1
+                return prepare_staged(intent, forge_path)
+
+            # Binding already matches → recovery only marks committed.
+            retry_hooks = cw.SwitchHooks(
+                prepare_staged=prepare_again,
+                take_handoff=take_handoff,
+                discard_staged=lambda s: None,
+                forge_cwd=hooks.forge_cwd,
+                claude_home=hooks.claude_home,
+            )
+            with mock.patch.object(forge_mod, 'forge_target_session_from_db', counting_forge):
+                out = cw.switch_context_window(
+                    source_context_id=int(self.ctx['id']),
+                    source_context_epoch=int(self.ctx['context_epoch']),
+                    count=0,
+                    request_id=req,
+                    db_path=self.db,
+                    hooks=retry_hooks,
+                )
+        self.assertEqual(forge_calls['n'], 0)
+        self.assertEqual(spawn_calls['n'], 0)  # binding matched → skip prepare
+        self.assertEqual(calls['n'], 2)
+        old_kill.assert_called()  # closed only after committed
+        conn = dc._connect(self.db)
+        try:
+            st = conn.execute(
+                'SELECT status FROM context_switch_intents WHERE request_id=?', (req,),
+            ).fetchone()['status']
+        finally:
+            conn.close()
+        self.assertEqual(st, cw.INTENT_COMMITTED)
+        self.assertEqual(int(out['target_context_id']), int(
+            dc.get_latest_active_context('default', db_path=self.db)['id']
+        ))
+
+    def test_D_hooks_none_raises(self):
+        with self.assertRaises(cw.SwitchHooksRequiredError):
+            cw.switch_context_window(
+                source_context_id=int(self.ctx['id']),
+                source_context_epoch=int(self.ctx['context_epoch']),
+                count=0,
+                request_id=str(uuid.uuid4()),
+                db_path=self.db,
+                hooks=None,
+            )
+
+
 class FrontendRequestIdTests(unittest.TestCase):
     def test_controller_reuses_request_id_source(self):
         # Source-level assertion: pendingRequestId field exists in controller source.

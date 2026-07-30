@@ -16,6 +16,7 @@ from chat.context_window import (
     NoOpenContextWindowError,
     StaleSourceContextError,
     SwitchFailedError,
+    SwitchHooksRequiredError,
     SwitchInProgressError,
     WindowBusyError,
     current_window_summary,
@@ -153,6 +154,12 @@ def create_context_window_blueprint(
                 db_path=db_path,
             )
             return jsonify({'ok': True, **result})
+        except SwitchHooksRequiredError as exc:
+            return jsonify({
+                'ok': False,
+                'error': str(exc),
+                'code': 'switch_hooks_required',
+            }), 503
         except IdempotencyMismatchError as exc:
             return jsonify({'ok': False, 'error': str(exc), 'code': 'idempotency_mismatch'}), 409
         except StaleSourceContextError as exc:

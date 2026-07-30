@@ -135,6 +135,11 @@ _LOCAL_BINDING: Optional[LocalResidentBinding] = None
 def reset_bindings_for_tests() -> None:
     global _LOCAL_BINDING
     _LOCAL_BINDING = None
+    try:
+        from chat.context_window import clear_pending_old_resident_close_for_tests
+        clear_pending_old_resident_close_for_tests()
+    except Exception:
+        pass
 
 
 def get_local_binding() -> Optional[LocalResidentBinding]:
@@ -378,9 +383,53 @@ def close_local_resident_for_context_switch(
 
 _HANDOFF_LOCK = threading.Lock()
 
+# Empty source (boundary=0, no selected carryover): no positive DB watermark exists.
+# Bind leaves cursor unset; hot is impossible until a positive watermark is written.
+# Never claim hot with cursor=None.
+EMPTY_WINDOW_CURSOR_BOOTSTRAP = 'empty_window_cursor_bootstrap'
+
 
 def handoff_lock() -> threading.Lock:
     return _HANDOFF_LOCK
+
+
+def forged_history_watermark(result: dict[str, Any]) -> Optional[int]:
+    """Cursor must match forged history watermark.
+
+    - selected_message_ids present → last selected id
+    - count=0 with positive source boundary → that boundary id
+    - boundary=0 empty window → None (bootstrap / fail-closed for hot)
+    """
+    selected = result.get('selected_message_ids') or []
+    if selected:
+        return int(selected[-1])
+    boundary = int(result.get('boundary_message_id') or 0)
+    if boundary > 0:
+        return boundary
+    return None
+
+
+def target_resident_binding_matches(
+    result: dict[str, Any],
+    *,
+    session_id: Optional[str] = None,
+) -> bool:
+    binding = get_local_binding()
+    if binding is None:
+        return False
+    if int(binding.context_id) != int(result['target_context_id']):
+        return False
+    if int(binding.context_epoch) != int(result['target_context_epoch']):
+        return False
+    want_sid = str(
+        session_id
+        or result.get('claude_session_id')
+        or '',
+    ).strip()
+    have_sid = str(binding.claude_session_id or '').strip()
+    if want_sid and have_sid and want_sid != have_sid:
+        return False
+    return True
 
 
 def bind_target_resident_after_switch(
@@ -388,10 +437,11 @@ def bind_target_resident_after_switch(
     staged_resident: Any,
     result: dict[str, Any],
     chat_id: str = DEFAULT_CHAT_ID,
-    tool_profile: str = 'daily',
+    tool_profile: Optional[str] = None,
     db_path: Optional[str] = None,
 ) -> LocalResidentBinding:
-    """Establish LocalResidentBinding + daily_resident_owners for target window."""
+    """Establish LocalResidentBinding + owners + cursors for target window."""
+    profile = str(tool_profile or DAILY_TOOL_PROFILE)
     target_id = int(result['target_context_id'])
     target_epoch = int(result['target_context_epoch'])
     target_gen = int(result.get('resident_generation') or 1)
@@ -401,15 +451,13 @@ def bind_target_resident_after_switch(
         resident_generation=target_gen,
     )
     process_generation = int(getattr(staged_resident, 'generation', 1) or 1)
-    cursor = None
-    selected = result.get('selected_message_ids') or []
-    if selected:
-        cursor = int(selected[-1])
-    elif result.get('boundary_message_id'):
-        cursor = int(result['boundary_message_id']) or None
+    cursor = forged_history_watermark(result)
     session_id = result.get('claude_session_id') or getattr(
         staged_resident, 'session_id', None,
     )
+    # Keep staged tool_profile aligned with formal daily path.
+    if hasattr(staged_resident, '_tool_profile'):
+        staged_resident._tool_profile = profile
     binding = LocalResidentBinding(
         resident_key=key,
         context_id=target_id,
@@ -417,7 +465,7 @@ def bind_target_resident_after_switch(
         resident_generation=target_gen,
         bound_cursor_message_id=cursor,
         process_generation=process_generation,
-        tool_profile=str(tool_profile or 'daily'),
+        tool_profile=profile,
         claude_session_id=str(session_id) if session_id else None,
     )
     set_local_binding(binding)
@@ -448,6 +496,19 @@ def bind_target_resident_after_switch(
         raise
     finally:
         conn.close()
+
+    if cursor is not None:
+        dc.advance_resident_history_cursor(
+            target_id,
+            target_gen,
+            int(cursor),
+            db_path=db_path,
+        )
+    else:
+        logger.info(
+            'context switch empty-window cursor bootstrap context_id=%s gen=%s state=%s',
+            target_id, target_gen, EMPTY_WINDOW_CURSOR_BOOTSTRAP,
+        )
     return binding
 
 

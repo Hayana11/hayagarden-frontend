@@ -128,21 +128,47 @@ class ContextWindowRouteTests(unittest.TestCase):
             )
         self.assertEqual(resp.status_code, 400)
 
-    def test_switch_valid(self):
+    def test_switch_direct_route_fail_closed_without_hooks(self):
+        """Production Flask route must not auto-use offline hooks."""
         with mock.patch('context_window_routes.enabled', return_value=True):
             cur = self.client.get('/api/context-window/current', headers=self.auth).get_json()
+            source_id = cur['context_id']
+            source_epoch = cur['context_epoch']
             resp = self.client.post(
                 '/api/context-window/switch',
                 json={
-                    'source_context_id': cur['context_id'],
-                    'source_context_epoch': cur['context_epoch'],
+                    'source_context_id': source_id,
+                    'source_context_epoch': source_epoch,
                     'count': 0,
                     'request_id': str(uuid.uuid4()),
                 },
                 headers=self.auth,
             )
-        self.assertEqual(resp.status_code, 200)
-        self.assertTrue(resp.get_json().get('ok'))
+        self.assertEqual(resp.status_code, 503)
+        body = resp.get_json()
+        self.assertFalse(body.get('ok'))
+        self.assertEqual(body.get('code'), 'switch_hooks_required')
+        # Source still open; no target inserted; no committed intent.
+        open_ctx = dc.get_latest_active_context('default', db_path=self.db_path)
+        self.assertIsNotNone(open_ctx)
+        self.assertEqual(int(open_ctx['id']), int(source_id))
+        self.assertIsNone(open_ctx.get('closed_at'))
+        conn = __import__('sqlite3').connect(self.db_path)
+        try:
+            n_manual = conn.execute(
+                "SELECT COUNT(*) FROM daily_contexts WHERE window_mode='manual'"
+            ).fetchone()[0]
+            n_committed = conn.execute(
+                "SELECT COUNT(*) FROM context_switch_intents WHERE status='committed'"
+            ).fetchone()[0]
+            n_any = conn.execute(
+                'SELECT COUNT(*) FROM context_switch_intents'
+            ).fetchone()[0]
+        finally:
+            conn.close()
+        self.assertEqual(n_manual, 0)
+        self.assertEqual(n_committed, 0)
+        self.assertEqual(n_any, 0)
 
     def test_candidates_stale_source_409(self):
         with mock.patch('context_window_routes.enabled', return_value=True):

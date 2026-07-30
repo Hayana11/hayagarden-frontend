@@ -6464,11 +6464,15 @@ from pathlib import Path as _Path
 
 def _gw_build_switch_hooks():
     import logging
+    from chat.system_builder import build_cc_daily_static_parts
     claude_home = _Path(os.environ.get('HOME', '/root')) / '.claude'
 
     def prepare_staged(intent, forge_path):
-        system_text = '你是费奥多尔。保持简短。'
-        env = os.environ.copy()
+        static_parts = build_cc_daily_static_parts()
+        system_text = static_parts['full_system']
+        env = dict(os.environ)
+        env['CLAUDE_CODE_OAUTH_TOKEN'] = CC_TOKEN
+        env.pop('ANTHROPIC_API_KEY', None)
         staged = cc_resident.ResidentSession(
             CC_CWD, CC_ALLOWED_TOOLS, CC_CWD + '/cc-tools.json',
         )
@@ -6477,6 +6481,7 @@ def _gw_build_switch_hooks():
                 system_text,
                 env,
                 resume_session_id=str(intent['target_session_id']),
+                tool_profile=_daily_rt_for_switch.DAILY_TOOL_PROFILE,
             )
             staged.wait_staged_health(
                 jsonl_path=forge_path,
@@ -6500,20 +6505,32 @@ def _gw_build_switch_hooks():
         return staged
 
     def take_handoff(staged, result):
+        """Swap holder + bind target; return old resident for orchestrator close."""
         with _daily_rt_for_switch.handoff_lock():
+            if _daily_rt_for_switch.target_resident_binding_matches(
+                result,
+                session_id=str(
+                    getattr(staged, 'session_id', None)
+                    or result.get('claude_session_id')
+                    or '',
+                ),
+            ):
+                # Idempotent recovery: binding already target; ensure cursor/owner.
+                _daily_rt_for_switch.bind_target_resident_after_switch(
+                    staged_resident=staged or _CC_RESIDENT.get(),
+                    result=result,
+                    tool_profile=_daily_rt_for_switch.DAILY_TOOL_PROFILE,
+                    db_path=DB_PATH,
+                )
+                return None
             old = _CC_RESIDENT.swap(staged)
             _daily_rt_for_switch.bind_target_resident_after_switch(
                 staged_resident=staged,
                 result=result,
+                tool_profile=_daily_rt_for_switch.DAILY_TOOL_PROFILE,
                 db_path=DB_PATH,
             )
-        # Close old only after binding swap left the lock.
-        try:
-            kill = getattr(old, '_kill', None)
-            if callable(kill):
-                kill(quiet=True)
-        except Exception:
-            logging.getLogger(__name__).exception('old resident close after handoff failed')
+            return old
 
     def discard_staged(staged):
         try:

@@ -108,6 +108,14 @@ class SwitchFailedError(ContextWindowError):
         self.error_code = error_code
 
 
+class SwitchHooksRequiredError(ContextWindowError):
+    """Production switch path requires explicit SwitchHooks (fail-closed)."""
+
+    def __init__(self, message: Optional[str] = None):
+        super().__init__(message or 'switch_hooks_required')
+        self.error_code = 'switch_hooks_required'
+
+
 def enabled() -> bool:
     from chat.daily_context import enabled as daily_enabled
     return daily_enabled()
@@ -516,13 +524,15 @@ class SwitchHooks:
     return an opaque staged handle.
 
     ``take_handoff(staged, result)`` runs under the caller-provided handoff
-    lock semantics: swap formal resident holder to staged, bind target owner.
+    lock semantics: swap formal resident holder to staged, bind target owner,
+    and return the previous (old) resident handle without closing it.
+    The orchestrator closes the old handle only after ``mark_intent_committed``.
 
-    ``discard_staged(staged)`` kills a staged handle after failure.
+    ``discard_staged(staged)`` kills a staged handle after pre-commit failure.
     """
 
     prepare_staged: Callable[[dict[str, Any], Path], Any]
-    take_handoff: Callable[[Any, dict[str, Any]], None]
+    take_handoff: Callable[[Any, dict[str, Any]], Any]
     discard_staged: Callable[[Any], None]
     forge_cwd: str
     claude_home: Path
@@ -717,7 +727,10 @@ def _mark_orphan_best_effort(path: Optional[Path]) -> str:
 
 
 def offline_switch_hooks(work_root: str | Path) -> SwitchHooks:
-    """Test/default hooks: real DB Forge write, no Claude process."""
+    """Test-only hooks: real DB Forge write, no Claude process.
+
+    Must be passed explicitly. ``hooks=None`` never falls back here.
+    """
     root = Path(work_root)
     root.mkdir(parents=True, exist_ok=True)
     cwd = str(root / 'cwd')
@@ -730,6 +743,7 @@ def offline_switch_hooks(work_root: str | Path) -> SwitchHooks:
             self.session_id = session_id
             self.jsonl_path = jsonl_path
             self.generation = 1
+            self.tool_profile = 'text_only'
             self._alive = True
 
         def is_alive(self) -> bool:
@@ -737,6 +751,9 @@ def offline_switch_hooks(work_root: str | Path) -> SwitchHooks:
 
         def kill(self) -> None:
             self._alive = False
+
+        def _kill(self, quiet: bool = True) -> None:
+            self.kill()
 
     def prepare_staged(intent: dict[str, Any], forge_path: Path) -> Any:
         before = forge_path.read_bytes()
@@ -749,7 +766,8 @@ def offline_switch_hooks(work_root: str | Path) -> SwitchHooks:
             raise SwitchFailedError('staged_exited_during_health_window')
         return staged
 
-    def take_handoff(staged: Any, result: dict[str, Any]) -> None:
+    def take_handoff(staged: Any, result: dict[str, Any]) -> Any:
+        # Offline: no process swap; return None old-handle.
         return None
 
     def discard_staged(staged: Any) -> None:
@@ -763,6 +781,58 @@ def offline_switch_hooks(work_root: str | Path) -> SwitchHooks:
         forge_cwd=cwd,
         claude_home=claude_home,
     )
+
+
+def _require_switch_hooks(hooks: Optional[SwitchHooks]) -> SwitchHooks:
+    if hooks is None:
+        raise SwitchHooksRequiredError('switch_hooks_required')
+    return hooks
+
+
+def _close_old_resident_handle(old: Any) -> None:
+    if old is None:
+        return
+    try:
+        kill = getattr(old, '_kill', None)
+        if callable(kill):
+            kill(quiet=True)
+            return
+        kill2 = getattr(old, 'kill', None)
+        if callable(kill2):
+            kill2()
+    except Exception:
+        logger.exception('old resident close after committed failed')
+
+
+_PENDING_OLD_RESIDENT_CLOSE: Any = None
+
+
+def defer_old_resident_close(old: Any) -> None:
+    """Keep old resident until mark_intent_committed succeeds (incl. retries)."""
+    global _PENDING_OLD_RESIDENT_CLOSE
+    if old is not None:
+        _PENDING_OLD_RESIDENT_CLOSE = old
+
+
+def flush_old_resident_close() -> None:
+    global _PENDING_OLD_RESIDENT_CLOSE
+    old = _PENDING_OLD_RESIDENT_CLOSE
+    _PENDING_OLD_RESIDENT_CLOSE = None
+    _close_old_resident_handle(old)
+
+
+def clear_pending_old_resident_close_for_tests() -> None:
+    global _PENDING_OLD_RESIDENT_CLOSE
+    _PENDING_OLD_RESIDENT_CLOSE = None
+
+
+def _intent_status(db_path: Optional[str], request_id: str) -> Optional[str]:
+    conn = _connect(db_path)
+    try:
+        row = _intent_row(conn, request_id)
+        return str(row['status']) if row else None
+    finally:
+        conn.close()
 
 
 def reserve_or_load_intent(
@@ -1166,9 +1236,7 @@ def complete_handoff_pending_recovery(
 ) -> Optional[dict[str, Any]]:
     """Resume handoff_pending without re-Forge."""
     ensure_schema(db_path)
-    hooks = hooks or offline_switch_hooks(
-        Path('/tmp/context-switch-offline') / 'recovery'
-    )
+    hooks = _require_switch_hooks(hooks)
     conn = _connect(db_path)
     try:
         if request_id:
@@ -1184,10 +1252,6 @@ def complete_handoff_pending_recovery(
     if intent is None or str(intent.get('status')) != INTENT_HANDOFF_PENDING:
         return None
     target_id = int(intent['target_context_id'])
-    target = _row_to_dict(_connect(db_path).execute(
-        'SELECT * FROM daily_contexts WHERE id=?', (target_id,),
-    ).fetchone()) if False else None
-    # reopen properly
     c2 = _connect(db_path)
     try:
         target = _row_to_dict(c2.execute(
@@ -1201,26 +1265,40 @@ def complete_handoff_pending_recovery(
         c2.close()
     if target is None or source is None:
         return None
-    result = None
     c3 = _connect(db_path)
     try:
         result = _switch_result_from_target_conn(c3, source=source, target=target)
     finally:
         c3.close()
 
+    from chat import daily_runtime as daily_rt
     from tools.claude_forge_core import session_jsonl_path_for_cwd
+
     sid = str(target.get('claude_session_id') or intent.get('target_session_id') or '')
+    # Already swapped + bound to target: only patch committed, never re-Forge/respawn.
+    if daily_rt.target_resident_binding_matches(result, session_id=sid):
+        mark_intent_committed(str(intent['request_id']), db_path=db_path, now=now)
+        flush_old_resident_close()
+        return result
+
     forge_path = session_jsonl_path_for_cwd(
         hooks.forge_cwd, sid, claude_home=hooks.claude_home,
     )
     intent = dict(intent)
     intent['target_session_id'] = sid
     staged = hooks.prepare_staged(intent, forge_path)
+    old_handle = None
+    handoff_taken = False
     try:
-        hooks.take_handoff(staged, result)
+        old_handle = hooks.take_handoff(staged, result)
+        handoff_taken = True
+        defer_old_resident_close(old_handle)
         mark_intent_committed(str(intent['request_id']), db_path=db_path, now=now)
+        flush_old_resident_close()
     except Exception:
-        hooks.discard_staged(staged)
+        # Post-commit: keep handoff_pending. Do not discard if swap already done.
+        if not handoff_taken:
+            hooks.discard_staged(staged)
         raise
     return result
 
@@ -1244,10 +1322,7 @@ def switch_context_window(
     )
     from tools.claude_forge_core import session_jsonl_path_for_cwd, sha256_file
 
-    if hooks is None:
-        hooks = offline_switch_hooks(
-            Path('/tmp/context-switch-offline') / str(request_id or 'default')
-        )
+    hooks = _require_switch_hooks(hooks)
 
     # Idempotent committed replay via target row
     ensure_schema(db_path)
@@ -1337,6 +1412,9 @@ def switch_context_window(
 
     staged = None
     forge_path: Optional[Path] = None
+    post_db_commit = False
+    handoff_taken = False
+    old_handle = None
     try:
         if status in (INTENT_RESERVED, INTENT_FORGING) or (
             status == INTENT_READY and not intent.get('target_session_id')
@@ -1432,8 +1510,12 @@ def switch_context_window(
                 db_path=db_path,
                 now=now,
             )
-            hooks.take_handoff(staged, result)
+            post_db_commit = True
+            old_handle = hooks.take_handoff(staged, result)
+            handoff_taken = True
+            defer_old_resident_close(old_handle)
             mark_intent_committed(req_id, db_path=db_path, now=now)
+            flush_old_resident_close()
             return result
 
         if status == INTENT_COMMITTING:
@@ -1444,6 +1526,7 @@ def switch_context_window(
                 db_path=db_path,
                 now=now,
             )
+            post_db_commit = True
             if staged is None:
                 forge_path = session_jsonl_path_for_cwd(
                     hooks.forge_cwd,
@@ -1451,8 +1534,11 @@ def switch_context_window(
                     claude_home=hooks.claude_home,
                 )
                 staged = hooks.prepare_staged(intent, forge_path)
-            hooks.take_handoff(staged, result)
+            old_handle = hooks.take_handoff(staged, result)
+            handoff_taken = True
+            defer_old_resident_close(old_handle)
             mark_intent_committed(req_id, db_path=db_path, now=now)
+            flush_old_resident_close()
             return result
 
         if status in TERMINAL_FAILURE_STATUSES:
@@ -1467,11 +1553,17 @@ def switch_context_window(
         IdempotencyMismatchError,
         SwitchInProgressError,
         CarryoverMessageUnforgeableError,
+        SwitchHooksRequiredError,
     ):
-        if staged is not None:
+        if not post_db_commit and staged is not None and not handoff_taken:
             hooks.discard_staged(staged)
         raise
     except SwitchFailedError as exc:
+        if post_db_commit:
+            # Keep handoff_pending; retain JSONL; do not kill promoted staged.
+            if staged is not None and not handoff_taken:
+                hooks.discard_staged(staged)
+            raise
         if staged is not None:
             hooks.discard_staged(staged)
         orphan = _mark_orphan_best_effort(forge_path)
@@ -1480,18 +1572,24 @@ def switch_context_window(
             c.execute('BEGIN IMMEDIATE')
             live = _intent_row(c, req_id)
             if live is not None and str(live.get('status')) in ACTIVE_INTENT_STATUSES:
-                _fail_intent_conn(
-                    c,
-                    req_id,
-                    error_code=exc.error_code,
-                    orphan_jsonl_state='pending' if orphan != 'deleted' else orphan,
-                    now_s=_now_s(_shanghai_now(now)),
-                )
+                # Never fail/release once DB reached handoff_pending.
+                if str(live.get('status')) != INTENT_HANDOFF_PENDING:
+                    _fail_intent_conn(
+                        c,
+                        req_id,
+                        error_code=exc.error_code,
+                        orphan_jsonl_state='pending' if orphan != 'deleted' else orphan,
+                        now_s=_now_s(_shanghai_now(now)),
+                    )
             c.commit()
         finally:
             c.close()
         raise
     except Exception as exc:
+        if post_db_commit:
+            if staged is not None and not handoff_taken:
+                hooks.discard_staged(staged)
+            raise
         if staged is not None:
             hooks.discard_staged(staged)
         orphan = _mark_orphan_best_effort(forge_path)
@@ -1500,13 +1598,14 @@ def switch_context_window(
             c.execute('BEGIN IMMEDIATE')
             live = _intent_row(c, req_id)
             if live is not None and str(live.get('status')) in ACTIVE_INTENT_STATUSES:
-                _fail_intent_conn(
-                    c,
-                    req_id,
-                    error_code='switch_internal_error',
-                    orphan_jsonl_state='pending' if orphan != 'deleted' else orphan,
-                    now_s=_now_s(_shanghai_now(now)),
-                )
+                if str(live.get('status')) != INTENT_HANDOFF_PENDING:
+                    _fail_intent_conn(
+                        c,
+                        req_id,
+                        error_code='switch_internal_error',
+                        orphan_jsonl_state='pending' if orphan != 'deleted' else orphan,
+                        now_s=_now_s(_shanghai_now(now)),
+                    )
             c.commit()
         finally:
             c.close()

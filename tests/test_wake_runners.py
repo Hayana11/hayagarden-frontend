@@ -359,10 +359,29 @@ class WakeResidentSeparationTests(unittest.TestCase):
     def test_gateway_defines_separate_cc_wake_resident(self):
         src = (Path(ROOT) / 'gateway.py').read_text(encoding='utf-8')
         self.assertIn('_CC_WAKE_RESIDENT', src)
-        self.assertIn('_CC_RESIDENT = cc_resident.ResidentSession', src)
+        # Chat resident may be wrapped in _SwappableResident for seamless handoff.
+        self.assertTrue(
+            '_CC_RESIDENT = _SwappableResident(' in src
+            or '_CC_RESIDENT = cc_resident.ResidentSession' in src,
+            'chat resident must be ResidentSession or _SwappableResident holder',
+        )
         self.assertIn('_CC_WAKE_RESIDENT = cc_resident.ResidentSession', src)
         # Two separate constructions — wake must not alias the chat resident.
         self.assertNotIn('_CC_WAKE_RESIDENT = _CC_RESIDENT', src)
+        self.assertNotIn('_CC_WAKE_RESIDENT = _CC_RESIDENT.get()', src)
+        # Independent instances: chat and wake each construct ResidentSession.
+        chat_constructions = src.count(
+            'cc_resident.ResidentSession(CC_CWD, CC_ALLOWED_TOOLS'
+        )
+        wake_constructions = src.count(
+            '_CC_WAKE_RESIDENT = cc_resident.ResidentSession'
+        )
+        self.assertGreaterEqual(chat_constructions, 1)
+        self.assertEqual(wake_constructions, 1)
+        # Holder class must actually swap an inner ResidentSession, not wake.
+        if '_CC_RESIDENT = _SwappableResident(' in src:
+            self.assertIn('class _SwappableResident:', src)
+            self.assertIn('def swap(self, new_inner):', src)
 
     def test_two_resident_sessions_are_independent_objects(self):
         import cc_resident

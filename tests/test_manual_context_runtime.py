@@ -110,6 +110,13 @@ def _seed_formal_rounds(db: str, ctx: dict, count: int) -> list[int]:
     return ids
 
 
+
+def _offline_hooks():
+    import tempfile
+    return cw.offline_switch_hooks(tempfile.mkdtemp(prefix='cw-hooks-'))
+
+
+
 class ManualContextRuntimeTests(unittest.TestCase):
     def setUp(self):
         self.db = _tmp_db()
@@ -133,7 +140,8 @@ class ManualContextRuntimeTests(unittest.TestCase):
             count=3,
             request_id=str(uuid.uuid4()),
             db_path=self.db,
-        )
+        
+            hooks=_offline_hooks())
         target_id = int(switched['target_context_id'])
         target_epoch = int(switched['target_context_epoch'])
         expected_carryover = list(switched['selected_message_ids'])
@@ -173,7 +181,8 @@ class ManualContextRuntimeTests(unittest.TestCase):
             count=0,
             request_id=str(uuid.uuid4()),
             db_path=self.db,
-        )
+        
+            hooks=_offline_hooks())
         target1_id = int(out1['target_context_id'])
         uid1 = _insert(self.db, 'hayana', 'in manual 1', '2026-07-27 11:00:00')
         _map(self.db, target1_id, int(out1['target_context_epoch']), uid1, 'user')
@@ -185,7 +194,8 @@ class ManualContextRuntimeTests(unittest.TestCase):
             count=0,
             request_id=str(uuid.uuid4()),
             db_path=self.db,
-        )
+        
+            hooks=_offline_hooks())
         target2_id = int(out2['target_context_id'])
         uid = _insert(self.db, 'hayana', 'next send', '2026-07-27 12:00:00')
         plan = _prepare(self.db, uid)
@@ -236,7 +246,8 @@ class ManualContextRuntimeTests(unittest.TestCase):
             count=0,
             request_id=str(uuid.uuid4()),
             db_path=self.db,
-        )
+        
+            hooks=_offline_hooks())
         current = cw.get_current_context_window(db_path=self.db)
         conn = sqlite3.connect(self.db)
         conn.execute(
