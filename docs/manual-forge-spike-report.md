@@ -1,11 +1,40 @@
 # P-CONTEXT-WINDOW-SPIKE-0: Manual Forge Resume Feasibility
 
 **Status:** Isolation spike only — **not** authorized for production implementation.  
-**Verdict:** **NO-GO** (live resume hard gate not satisfied in this environment)  
-**Date:** 2026-07-29  
-**Claude Code:** `2.1.220`  
-**Repo HEAD:** `64f5bde7d7a69685938af411fa8660353667d1e0`  
+**Verdict:** **NO-GO** (`live_probe_status=NOT_RUN_NO_CREDENTIALS`)  
+**Spike revision:** `P-CONTEXT-WINDOW-SPIKE-0A` (Live Gate 假阳性窄修)  
+**Date:** 2026-07-30  
+**Claude Code (pinned):** `@anthropic-ai/claude-code@2.1.220`  
 **Touched production:** **否**
+
+> **证据归属：** 本报告记录的是**本地 structural-only 运行结果**。`tested_source_sha` 以 harness 运行时 `git rev-parse HEAD` 为准；**非** GitHub Actions 已验证结果（`ci_verified=false`）。
+
+---
+
+## SPIKE-0A 变更摘要
+
+| 项 | 修复 |
+|----|------|
+| Canary | 历史随机 `CANARY-<hex>`；live prompt 不含 canary |
+| Live gate | 9 项同时满足才 `API_ACCEPTED_FIRST_DELTA` |
+| 超时 | `readline` 改线程 + `kill` 回收，禁止挂死 |
+| 认证 | 仅 `ANTHROPIC_API_KEY` / `CLAUDE_CODE_OAUTH_TOKEN`；`--structural-only` 忽略宿主机凭证 |
+| 版本 | 锁定 `@2.1.220` + `DISABLE_AUTOUPDATER=1` |
+| Verdict | CASE 0/1 失败 → NO-GO；2A+2B 均失败 → NO-GO；缺 live CASE → 最多 CONDITIONAL GO |
+| 路径 | 写前 symlink/root 检查 + 原子 `os.replace` |
+| UUID/Tool | 全树旧 UUID 扫描；tool 顺序/格式/配对校验 |
+
+### Verdict truth table（修复后）
+
+| 条件 | Verdict |
+|------|---------|
+| `structural-only` 或 `NOT_RUN_NO_CREDENTIALS` | **NO-GO** |
+| CASE 0 或 CASE 1 live 失败 | **NO-GO** |
+| CASE 2A 与 2B 均 live 失败 | **NO-GO**（不得 GO） |
+| CASE 0+1 通过，其他必需 CASE 有失败 | **CONDITIONAL GO** |
+| 全部必需 live CASE 通过严格 gate | **GO** |
+
+必需 live CASE：`0, 1, 2A, 2B, 3A, 5B, 6, 7`
 
 ---
 

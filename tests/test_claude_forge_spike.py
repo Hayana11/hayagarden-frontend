@@ -14,6 +14,7 @@ if str(ROOT) not in sys.path:
 
 from tools.claude_forge_core import (
     ForgeOptions,
+    collect_event_uuids,
     forge_transcript,
     load_jsonl,
     new_uuid,
@@ -44,7 +45,12 @@ class ClaudeForgeSpikeTests(unittest.TestCase):
             src,
             ForgeOptions(new_session_id=new_sid, cwd='/tmp/claude-forge-spike-project'),
         )
-        result = validate_forged_transcript(forged.events, session_id=new_sid)
+        old_uuids = collect_event_uuids(src)
+        result = validate_forged_transcript(
+            forged.events,
+            session_id=new_sid,
+            old_uuids=old_uuids,
+        )
         self.assertTrue(result.ok, result.errors)
         self.assertEqual(forged.events[0]['parentUuid'], None)
         self.assertEqual(forged.events[0]['message']['content'], '测试消息 A')
@@ -129,11 +135,16 @@ class ClaudeForgeSpikeTests(unittest.TestCase):
             )
             self.assertEqual(proc.returncode, 2, proc.stdout + proc.stderr)
             data = json.loads(report_path.read_text(encoding='utf-8'))
+            self.assertTrue(data['structural_only'])
             self.assertFalse(data['auth_available'])
+            self.assertEqual(data['live_probe_status'], 'NOT_RUN_NO_CREDENTIALS')
             self.assertEqual(data['verdict'], 'NO-GO')
+            self.assertEqual(data['tested_source_sha'], data['head_sha'])
+            self.assertFalse(data['ci_verified'])
             self.assertFalse(data['touched_production'])
             case1 = next(c for c in data['cases'] if c['case_id'] == '1')
             self.assertTrue(case1['structure_ok'])
+            self.assertEqual(case1['state'], 'STRUCTURE_ONLY')
 
 
 if __name__ == '__main__':

@@ -7,6 +7,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import os
 import re
 import uuid
 from dataclasses import dataclass, field
@@ -103,11 +104,64 @@ def load_jsonl(path: Path) -> list[dict[str, Any]]:
     return events
 
 
-def dump_jsonl(path: Path, events: Sequence[Mapping[str, Any]]) -> str:
+def collect_event_uuids(events: Sequence[Mapping[str, Any]]) -> set[str]:
+    found: set[str] = set()
+    for evt in events:
+        uid = str(evt.get('uuid') or '')
+        if uid:
+            found.add(uid)
+    return found
+
+
+def apply_uuid_map_deep(obj: Any, uuid_map: dict[str, str]) -> Any:
+    """Recursively replace old UUID strings anywhere in the object tree."""
+    if isinstance(obj, dict):
+        return {k: apply_uuid_map_deep(v, uuid_map) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [apply_uuid_map_deep(v, uuid_map) for v in obj]
+    if isinstance(obj, str) and obj in uuid_map:
+        return uuid_map[obj]
+    return obj
+
+
+def verify_safe_output_path(path: Path, allowed_root: Path) -> None:
+    """Reject symlink escapes before writing forged JSONL."""
+    root = allowed_root.resolve()
+    if root.is_symlink():
+        raise ValueError('FORGE_OUTPUT_PATH:allowed_root_is_symlink')
+    candidate = path if path.is_absolute() else (allowed_root / path)
+    parent = candidate.parent
+    for part in [parent, candidate]:
+        if part.exists() and part.is_symlink():
+            raise ValueError(f'FORGE_SYMLINK:{part}')
+    resolved = candidate.resolve()
+    try:
+        resolved.relative_to(root)
+    except ValueError as exc:
+        raise ValueError(f'FORGE_OUTPUT_PATH:{resolved}') from exc
+
+
+def dump_jsonl(
+    path: Path,
+    events: Sequence[Mapping[str, Any]],
+    *,
+    allowed_output_root: Optional[Path] = None,
+) -> str:
     lines = [json.dumps(evt, ensure_ascii=False, separators=(',', ':')) for evt in events]
     text = '\n'.join(lines) + ('\n' if lines else '')
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text, encoding='utf-8')
+    if allowed_output_root is not None:
+        verify_safe_output_path(path, allowed_output_root)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = allowed_output_root / f'.forge-tmp-{new_uuid()}.jsonl'
+        try:
+            tmp.write_text(text, encoding='utf-8')
+            os.replace(tmp, path)
+        finally:
+            if tmp.exists() and not path.exists():
+                tmp.unlink(missing_ok=True)
+    else:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding='utf-8')
     return sha256_text(text)
 
 
@@ -369,6 +423,8 @@ def forge_transcript(
         for idx in range(1, len(forged)):
             forged[idx]['parentUuid'] = forged[idx - 1]['uuid']
 
+    forged = [apply_uuid_map_deep(evt, uuid_map) for evt in forged]
+
     return ForgeResult(
         events=forged,
         uuid_map=uuid_map,
@@ -409,15 +465,15 @@ def scan_unknown_uuid_strings(obj: Any, old_uuids: set[str], *, path: str = '$')
     if isinstance(obj, dict):
         for key, val in obj.items():
             child = f'{path}.{key}'
-            if key in UUID_REFERENCE_PATHS and isinstance(val, str) and val in old_uuids:
-                errors.append(f'FORGE_UUID_REFERENCE_UNKNOWN:{child}')
-            else:
-                errors.extend(scan_unknown_uuid_strings(val, old_uuids, path=child))
+            errors.extend(scan_unknown_uuid_strings(val, old_uuids, path=child))
     elif isinstance(obj, list):
         for idx, item in enumerate(obj):
             errors.extend(scan_unknown_uuid_strings(item, old_uuids, path=f'{path}[{idx}]'))
-    elif isinstance(obj, str) and obj in old_uuids:
-        errors.append(f'FORGE_UUID_REFERENCE_UNKNOWN:{path}')
+    elif isinstance(obj, str):
+        if obj in old_uuids:
+            errors.append(f'FORGE_UUID_REFERENCE_UNKNOWN:{path}')
+        elif UUID_RE.match(obj) and obj in old_uuids:
+            errors.append(f'FORGE_UUID_REFERENCE_UNKNOWN:{path}')
     return errors
 
 

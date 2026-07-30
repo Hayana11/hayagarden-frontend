@@ -1,15 +1,20 @@
 {
   "branch": "cursor/spike-claude-forge-resume-e370",
-  "head_sha": "64f5bde7d7a69685938af411fa8660353667d1e0",
+  "head_sha": "24656ca56b82b0f0e2d502f95b61ee11ceca14c5",
+  "tested_source_sha": "24656ca56b82b0f0e2d502f95b61ee11ceca14c5",
   "origin_main_sha": "64f5bde7d7a69685938af411fa8660353667d1e0",
   "claude_version": "2.1.220 (Claude Code)",
+  "claude_version_ok": true,
   "auth_available": false,
-  "auth_source": "missing",
-  "isolated_cwd": "/tmp/claude-forge-spike-a9_hijg1/isolated-project",
-  "claude_home": "/tmp/claude-forge-spike-a9_hijg1/claude-home",
+  "auth_source": "ignored_structural_only",
+  "live_probe_status": "NOT_RUN_NO_CREDENTIALS",
+  "ci_verified": false,
+  "isolated_cwd": "/tmp/claude-forge-spike-x3xqrat6/isolated-project",
+  "claude_home": "/tmp/claude-forge-spike-x3xqrat6/claude-home",
   "touched_production": false,
+  "structural_only": true,
   "verdict": "NO-GO",
-  "verdict_reason": "缺少隔离试验 API 凭证：云 Agent 环境无 ANTHROPIC_API_KEY / CLAUDE_CODE_OAUTH_TOKEN，无法完成 CASE 0–7 首次真实 resume 硬门。",
+  "verdict_reason": "live probe NOT_RUN_NO_CREDENTIALS — structural validation only; cannot upgrade to GO without strict live gate evidence.",
   "cases": [
     {
       "case_id": "0",
@@ -27,14 +32,17 @@
       "exit_code": null,
       "error_type": "",
       "error_detail": "",
-      "state": "BLOCKED_MISSING_CREDENTIALS",
-      "notes": "ANTHROPIC_API_KEY / CLAUDE_CODE_OAUTH_TOKEN not available in this environment"
+      "state": "NOT_RUN_NO_CREDENTIALS",
+      "notes": "NOT_RUN_NO_CREDENTIALS",
+      "canary": "",
+      "canary_matched": false,
+      "live_gate_failures": []
     },
     {
       "case_id": "1",
       "name": "minimal_plain_text_forge",
-      "source_sha256": "a152185b3c483238d6291c8a4839d1253b827714407039591aff68d54b643676",
-      "target_sha256": "a6c163b77af51b20b19e6ba47b0357d195421e0ce7253b79f5b6a3fddaa5e17e",
+      "source_sha256": "f6d9bcc8021135f157dd2e5fab476fc4df86ea95e20c1a3a5aefcde970d8094f",
+      "target_sha256": "614550e201077af5f1d8d7438967cf8021ca6a320cb8a2249ef89e4f7b1693a3",
       "event_count": 4,
       "first_type": "user",
       "last_type": "assistant",
@@ -47,13 +55,16 @@
       "error_type": "",
       "error_detail": "",
       "state": "STRUCTURE_ONLY",
-      "notes": "live resume skipped (no auth)"
+      "notes": "NOT_RUN_NO_CREDENTIALS",
+      "canary": "",
+      "canary_matched": false,
+      "live_gate_failures": []
     },
     {
       "case_id": "2A",
       "name": "signed_thinking_preserve",
-      "source_sha256": "6f73221b9e939642ceafe8a3f2c441354603b4c9cf84091ea0e916f0f4cfdbd0",
-      "target_sha256": "52a52fd8edf7a303b3db9519c53a2fd183bcbb3dc4be3c4bd53d7f2f82c62743",
+      "source_sha256": "0ab28d34fffa91af9323bd6c545a75f64965b82503d9b54ba6d88b9e698a11b9",
+      "target_sha256": "0cce5d8bb6efacde9b266ac02f087da4d62e084ca0e80b6370b25203abb9fa57",
       "event_count": 2,
       "first_type": "user",
       "last_type": "assistant",
@@ -66,13 +77,16 @@
       "error_type": "",
       "error_detail": "",
       "state": "STRUCTURE_ONLY",
-      "notes": "live resume skipped (no auth)"
+      "notes": "NOT_RUN_NO_CREDENTIALS",
+      "canary": "",
+      "canary_matched": false,
+      "live_gate_failures": []
     },
     {
       "case_id": "2B",
       "name": "signed_thinking_drop_block",
-      "source_sha256": "6f73221b9e939642ceafe8a3f2c441354603b4c9cf84091ea0e916f0f4cfdbd0",
-      "target_sha256": "4ac5cda42f0b109b5553f2494a5ffcfff8e01b17ae5d39b92699a9b271245f57",
+      "source_sha256": "0ab28d34fffa91af9323bd6c545a75f64965b82503d9b54ba6d88b9e698a11b9",
+      "target_sha256": "71dc5d3fa1a055724de3a920f8ab53c11d49769e5bb5b79970165a45083bb983",
       "event_count": 2,
       "first_type": "user",
       "last_type": "assistant",
@@ -85,13 +99,16 @@
       "error_type": "",
       "error_detail": "",
       "state": "STRUCTURE_ONLY",
-      "notes": "live resume skipped (no auth)"
+      "notes": "NOT_RUN_NO_CREDENTIALS",
+      "canary": "",
+      "canary_matched": false,
+      "live_gate_failures": []
     },
     {
       "case_id": "3A",
       "name": "tool_round_success",
-      "source_sha256": "10b576e84c7c4cc357f574d9fe5624592a65e872ce292840a01d728e3d2b0f83",
-      "target_sha256": "5c19b4c4cacffe9880c73aa9aad8fef120b7811ee119f94c665c2ccd69dd36f5",
+      "source_sha256": "e9b4f80a7929b19ff9560ab81e13073b6b35871bc1656d059fce75f0fbbe9511",
+      "target_sha256": "7b170e23941faaae5373bf0ffa635a7a691f5c8e7d69d99bedd56d0916d21e12",
       "event_count": 4,
       "first_type": "user",
       "last_type": "assistant",
@@ -104,13 +121,16 @@
       "error_type": "",
       "error_detail": "",
       "state": "STRUCTURE_ONLY",
-      "notes": "live resume skipped (no auth)"
+      "notes": "NOT_RUN_NO_CREDENTIALS",
+      "canary": "",
+      "canary_matched": false,
+      "live_gate_failures": []
     },
     {
       "case_id": "5B",
       "name": "sidechain_exclude",
-      "source_sha256": "1e6db8a411f65432ed8a444a519431f0d9f109ad4c5bee75f5acc0b610ad32df",
-      "target_sha256": "2ea48fc18ad3f8dfe8b03bf404edd2d86dffe578f87d16a706d199db37e60453",
+      "source_sha256": "01bb15a10eaf2cbfd1f73d4aa6c23f82c9590b86650a8593d26d79e87abc4dc1",
+      "target_sha256": "6f705be1f6eea37d29c9107c5a338a8b0b9841c82e509c591418af19874b1d83",
       "event_count": 1,
       "first_type": "user",
       "last_type": "user",
@@ -123,13 +143,16 @@
       "error_type": "",
       "error_detail": "",
       "state": "STRUCTURE_ONLY",
-      "notes": "live resume skipped (no auth)"
+      "notes": "NOT_RUN_NO_CREDENTIALS",
+      "canary": "",
+      "canary_matched": false,
+      "live_gate_failures": []
     },
     {
       "case_id": "6",
       "name": "summary_drop_uuid_scan",
-      "source_sha256": "868b2d2edb87a332ff0a3bc741430247f56ee213a972592e88c6688360e75ebb",
-      "target_sha256": "d82fc10442536746086d4586fc8c97a1561dbd23d99e88beaee80d71e4595f0e",
+      "source_sha256": "abdcd31791b399916e06800e65a2347e33976930ced8f5e1d021b7f3e954f625",
+      "target_sha256": "38f1a6749caac7f9d10959089ebcbac3548dcdeb8e0ea4a074b7c13434fa03e9",
       "event_count": 1,
       "first_type": "user",
       "last_type": "user",
@@ -142,13 +165,16 @@
       "error_type": "",
       "error_detail": "",
       "state": "STRUCTURE_ONLY",
-      "notes": "live resume skipped (no auth)"
+      "notes": "NOT_RUN_NO_CREDENTIALS",
+      "canary": "",
+      "canary_matched": false,
+      "live_gate_failures": []
     },
     {
       "case_id": "7",
       "name": "legacy_injection_strip",
-      "source_sha256": "e1b05ceb1fdf741ffa4d96b3940deb4441687cb45cdc5d978000da8daffaf517",
-      "target_sha256": "4ebb15fcf06e7feae6dd53ff6c5655fba0419a8093ec01283a74a63845644507",
+      "source_sha256": "da0cff296e31259628eb14a81b2bc86842745c4e4ba228545cc5daaeb5025313",
+      "target_sha256": "6397947b62fc65b00e11170b43759b2fde64f8a432ff0549240b82f6e77bf7a1",
       "event_count": 2,
       "first_type": "user",
       "last_type": "assistant",
@@ -161,7 +187,10 @@
       "error_type": "",
       "error_detail": "",
       "state": "STRUCTURE_ONLY",
-      "notes": "live resume skipped (no auth)"
+      "notes": "NOT_RUN_NO_CREDENTIALS",
+      "canary": "",
+      "canary_matched": false,
+      "live_gate_failures": []
     },
     {
       "case_id": "8",
@@ -178,9 +207,12 @@
       "transcript_grew": false,
       "exit_code": null,
       "error_type": "",
-      "error_detail": "FORGE_STRUCTURE:line_2_bad_parent;FORGE_THINKING_INVALID:empty_thinking",
+      "error_detail": "FORGE_THINKING_INVALID:empty_thinking",
       "state": "STRUCTURE_REJECT",
-      "notes": ""
+      "notes": "",
+      "canary": "",
+      "canary_matched": false,
+      "live_gate_failures": []
     },
     {
       "case_id": "8",
@@ -197,9 +229,12 @@
       "transcript_grew": false,
       "exit_code": null,
       "error_type": "",
-      "error_detail": "FORGE_STRUCTURE:line_2_bad_parent;FORGE_TOOL_PAIR:orphan_tool_use:toolu_[REDACTED]",
+      "error_detail": "FORGE_TOOL_PAIR:orphan_tool_use:toolu_[REDACTED]",
       "state": "STRUCTURE_REJECT",
-      "notes": ""
+      "notes": "",
+      "canary": "",
+      "canary_matched": false,
+      "live_gate_failures": []
     }
   ]
 }
