@@ -6,6 +6,7 @@ import os
 import sqlite3
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -129,21 +130,26 @@ def _count_chat(db: str, *, source_kind: str | None = None) -> int:
 
 
 def _workspace_hook_like(event: dict, db: str) -> bool:
-    """Mirror gateway._workspace_job_event_hook delivery decision + persist."""
-    reason, captured, current = wi.evaluate_async_delivery(
-        event.get('window_identity'), db_path=db,
-    )
-    if reason != wi.REASON_OK:
-        wi.log_stale_async_result(
-            source='workspace_job',
-            reason=reason,
-            job_id=(event.get('meta') or {}).get('job_id'),
-            captured_identity=captured or event.get('window_identity'),
-            current_identity=current,
-        )
-        return False
-    # queue + insert
+    """Mirror gateway._workspace_job_event_hook: atomic persist then queue (flag-on)."""
     import tools.workspace_jobs as wj
+
+    if wi.soft_window_enabled():
+        outcome = wi.persist_workspace_job_chat_if_current(event, db_path=db)
+        if not outcome.get('persisted'):
+            wi.log_stale_async_result(
+                source='workspace_job',
+                reason=outcome.get('reason') or wi.REASON_UNAVAILABLE,
+                job_id=(event.get('meta') or {}).get('job_id'),
+                captured_identity=(
+                    outcome.get('captured_identity') or event.get('window_identity')
+                ),
+                current_identity=outcome.get('current_identity'),
+            )
+            return False
+        wj.queue_event(event)
+        return True
+
+    # Flag-off legacy mirror
     wj.queue_event(event)
     meta = event.get('meta') or {}
     tc = [{
@@ -430,6 +436,117 @@ class CrossWindowLockStep7Tests(unittest.TestCase):
         self.assertEqual(n, 1)
         ids = wi.fetch_claimable_wake_ids(_get_db_fn(self.db))
         self.assertTrue(ids)
+
+    def test_atomic_job_persist_blocks_concurrent_canonical_switch(self):
+        """Regression: canonical cannot change between gate and INSERT."""
+        ctx_a = _open_ctx(self.db, epoch=1, gen=1)
+        identity_a = _identity_from_row(ctx_a)
+        order: list[str] = []
+        order_lock = threading.Lock()
+
+        def record(name: str) -> None:
+            with order_lock:
+                order.append(name)
+
+        gate_passed = threading.Event()
+        switch_trying = threading.Event()
+        errors: list[BaseException] = []
+
+        def switch_worker() -> None:
+            try:
+                self.assertTrue(gate_passed.wait(timeout=5), 'gate_passed timeout')
+                record('switch_attempted')
+                switch_trying.set()
+                conn2 = sqlite3.connect(self.db, timeout=30)
+                try:
+                    conn2.execute('BEGIN IMMEDIATE')
+                    record('switch_acquired')
+                    conn2.execute(
+                        "UPDATE daily_contexts SET closed_at='2026-07-30 13:00:00', "
+                        "close_reason='manual' WHERE id=?",
+                        (int(ctx_a['id']),),
+                    )
+                    now_s = '2026-07-30 13:00:01'
+                    conn2.execute(
+                        '''INSERT INTO daily_contexts (
+                            chat_id, local_day, timezone, boundary_hour, context_epoch,
+                            boundary_message_id, status, carryover_count, is_backfill,
+                            resident_generation, version, created_at, updated_at,
+                            window_mode, opened_at
+                        ) VALUES ('default', '2026-07-30', 'Asia/Shanghai', 4, 2, 0,
+                                  'PROVISIONAL', 0, 0, 3, 1, ?, ?, 'manual', ?)''',
+                        (now_s, now_s, now_s),
+                    )
+                    conn2.commit()
+                    record('switch_committed')
+                finally:
+                    conn2.close()
+            except BaseException as exc:  # noqa: BLE001 — surface in main thread
+                errors.append(exc)
+
+        def after_gate(_conn) -> None:
+            record('gate_passed')
+            gate_passed.set()
+            self.assertTrue(switch_trying.wait(timeout=5), 'switch_trying timeout')
+
+        def after_insert(_conn) -> None:
+            record('job_inserted')
+
+        def after_commit() -> None:
+            record('job_committed')
+
+        event = {
+            'type': 'job_finished',
+            'content': 'atomic job row',
+            'meta': {
+                'job_id': 'job_atomic00001',
+                'status': 'succeeded',
+                'exit_code': 0,
+                'name': 'atomic',
+            },
+            'window_identity': identity_a,
+            'log_tail': '',
+        }
+
+        switch_thread = threading.Thread(target=switch_worker, name='canonical-switch')
+        switch_thread.start()
+        outcome = wi.persist_workspace_job_chat_if_current(
+            event,
+            db_path=self.db,
+            after_gate_ok=after_gate,
+            after_insert=after_insert,
+            after_commit=after_commit,
+        )
+        switch_thread.join(timeout=10)
+        self.assertFalse(switch_thread.is_alive(), 'switch thread hung')
+        self.assertEqual(errors, [])
+        self.assertTrue(outcome.get('persisted'), outcome)
+        self.assertEqual(outcome.get('reason'), wi.REASON_OK)
+
+        # Strong ordering: job commit before switch acquires the write lock.
+        self.assertIn('job_committed', order)
+        self.assertIn('switch_acquired', order)
+        self.assertLess(
+            order.index('job_committed'),
+            order.index('switch_acquired'),
+            order,
+        )
+        for required in (
+            'gate_passed',
+            'switch_attempted',
+            'job_inserted',
+            'job_committed',
+            'switch_acquired',
+            'switch_committed',
+        ):
+            self.assertIn(required, order, order)
+
+        self.assertEqual(_count_chat(self.db, source_kind='workspace_job'), 1)
+        # After switch to B, pending event with A identity must be dropped.
+        import tools.workspace_jobs as wj
+        wj.queue_event(event)
+        self.assertEqual(_drain_deliverable(self.db), [])
+        self.assertEqual(_count_chat(self.db, source_kind='workspace_job'), 1)
 
 
 if __name__ == '__main__':

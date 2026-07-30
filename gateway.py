@@ -27,47 +27,60 @@ _warmup_ombre_brain()
 
 
 def _workspace_job_event_hook(event):
-    """Job 完成：入队 SSE/轮询事件，并写入 chat_messages（不触发新生成）。"""
-    if event.get('type') == 'job_finished':
+    """Job 完成：先原子写入 chat_messages（flag-on），再入队 SSE/轮询事件。"""
+    if event.get('type') != 'job_finished':
+        workspace_jobs.queue_event(event)
+        return
+
+    try:
+        from chat.window_identity import (
+            REASON_OK,
+            log_stale_async_result,
+            persist_workspace_job_chat_if_current,
+            soft_window_enabled,
+        )
+    except Exception:
+        # Import failure: preserve legacy best-effort path below only when flag off.
+        soft_window_enabled = lambda: False  # noqa: E731
+        persist_workspace_job_chat_if_current = None
+        log_stale_async_result = None
+        REASON_OK = 'ok'
+
+    if soft_window_enabled():
+        if persist_workspace_job_chat_if_current is None:
+            return
+        meta = event.get('meta') or {}
         try:
-            from chat.window_identity import (
-                REASON_OK,
-                evaluate_async_delivery,
-                log_stale_async_result,
-            )
-            reason, captured, current = evaluate_async_delivery(
-                event.get('window_identity'),
-                db_path=DB_PATH,
-            )
-            if reason != REASON_OK:
-                meta = event.get('meta') or {}
+            outcome = persist_workspace_job_chat_if_current(event, db_path=DB_PATH)
+        except Exception:
+            if log_stale_async_result is not None:
                 log_stale_async_result(
                     source='workspace_job',
-                    reason=reason,
+                    reason='window_identity_unavailable',
                     job_id=meta.get('job_id'),
-                    captured_identity=captured or event.get('window_identity'),
-                    current_identity=current,
+                    captured_identity=event.get('window_identity'),
+                    current_identity=None,
                 )
-                return
-        except Exception:
-            # Fail closed when soft window is on; preserve legacy when off.
-            try:
-                from chat.window_identity import soft_window_enabled, log_stale_async_result
-                if soft_window_enabled():
-                    meta = event.get('meta') or {}
-                    log_stale_async_result(
-                        source='workspace_job',
-                        reason='window_identity_unavailable',
-                        job_id=meta.get('job_id'),
-                        captured_identity=event.get('window_identity'),
-                        current_identity=None,
-                    )
-                    return
-            except Exception:
-                pass
-    workspace_jobs.queue_event(event)
-    if event.get('type') != 'job_finished':
+            return
+        if not outcome.get('persisted'):
+            if log_stale_async_result is not None:
+                log_stale_async_result(
+                    source='workspace_job',
+                    reason=outcome.get('reason') or 'window_identity_unavailable',
+                    job_id=meta.get('job_id'),
+                    captured_identity=(
+                        outcome.get('captured_identity') or event.get('window_identity')
+                    ),
+                    current_identity=outcome.get('current_identity'),
+                )
+            return
+        # Commit succeeded — queue only after durable chat write. Consumer still
+        # re-checks identity (post-commit switch must drop the event).
+        workspace_jobs.queue_event(event)
         return
+
+    # Flag off: legacy order (queue then best-effort insert, no window gate).
+    workspace_jobs.queue_event(event)
     try:
         meta = event.get('meta') or {}
         tc = [{

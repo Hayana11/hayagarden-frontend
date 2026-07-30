@@ -184,6 +184,106 @@ def evaluate_async_delivery(
     return REASON_OK, captured_norm, current_norm
 
 
+def persist_workspace_job_chat_if_current(
+    event: dict[str, Any],
+    *,
+    db_path: str,
+    chat_id: str = 'default',
+    after_gate_ok: Any = None,
+    after_insert: Any = None,
+    after_commit: Any = None,
+) -> dict[str, Any]:
+    """Atomically gate + INSERT workspace-job chat row (flag-on path).
+
+    Contract::
+
+        open connection → BEGIN IMMEDIATE → same-conn gate → INSERT → COMMIT
+
+    Returns ``{reason, captured_identity, current_identity, persisted}``.
+    Does not queue SSE/pending events — caller queues only after persisted=True.
+    """
+    import json as _json
+    import sqlite3
+
+    from chat.daily_context import ensure_schema
+
+    ensure_schema(db_path)
+    result: dict[str, Any] = {
+        'reason': REASON_UNAVAILABLE,
+        'captured_identity': None,
+        'current_identity': None,
+        'persisted': False,
+    }
+    conn = sqlite3.connect(db_path, timeout=30)
+    try:
+        conn.row_factory = sqlite3.Row
+        conn.execute('BEGIN IMMEDIATE')
+        reason, captured, current = gate_captured_against_conn(
+            conn, event.get('window_identity'), chat_id=chat_id,
+        )
+        result['reason'] = reason
+        result['captured_identity'] = captured
+        result['current_identity'] = current
+        if reason != REASON_OK:
+            conn.rollback()
+            return result
+
+        if after_gate_ok is not None:
+            after_gate_ok(conn)
+
+        cols = {str(r[1]) for r in conn.execute('PRAGMA table_info(chat_messages)')}
+        if 'source_kind' not in cols:
+            conn.rollback()
+            result['reason'] = REASON_UNAVAILABLE
+            logger.warning(
+                'reason=window_identity_unavailable source=workspace_job '
+                'detail=chat_messages.source_kind missing'
+            )
+            return result
+
+        meta = event.get('meta') or {}
+        tc = [{
+            'name': 'ws_job',
+            'args': {'action': 'status', 'id': meta.get('job_id')},
+            'result': _json.dumps({
+                'ok': True,
+                'job': meta,
+                'log_tail': event.get('log_tail', ''),
+            }, ensure_ascii=False),
+            'success': meta.get('status') == 'succeeded',
+            'job': meta,
+        }]
+        conn.execute(
+            "INSERT INTO chat_messages (author, content, tool_calls, source_kind) "
+            "VALUES ('assistant', ?, ?, 'workspace_job')",
+            (event.get('content', ''), _json.dumps(tc, ensure_ascii=False)),
+        )
+        if after_insert is not None:
+            after_insert(conn)
+        conn.commit()
+        result['persisted'] = True
+        if after_commit is not None:
+            after_commit()
+        return result
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        logger.exception(
+            'reason=window_identity_unavailable source=workspace_job '
+            'detail=atomic persist failed'
+        )
+        result['reason'] = REASON_UNAVAILABLE
+        result['persisted'] = False
+        return result
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
 def log_stale_async_result(
     *,
     source: str,
