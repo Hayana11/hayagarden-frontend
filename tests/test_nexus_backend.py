@@ -1534,5 +1534,103 @@ class NexusR3CodexSessionTests(unittest.TestCase):
         )
 
 
+
+
+class NexusLiveIsolationSmokeTests(unittest.TestCase):
+    """Real Codex sandbox smoke. Skip = BLOCKED_BEFORE_TEST, not FUNCTION_FAIL."""
+
+    def test_hayagarden_nexus_profile_read_write_isolation(self):
+        import codex_app_server as cas
+
+        binary = cas.find_codex()
+        if not binary:
+            self.skipTest(
+                "BLOCKED_BEFORE_TEST: Codex binary not installed in this environment"
+            )
+
+        with tempfile.TemporaryDirectory() as base:
+            root = Path(base)
+            workspace = root / "workspace"
+            outside = root / "outside"
+            fe = root / "fake-frontend"
+            home = root / "nexus-codex-home"
+            for path in (workspace, outside, fe, home):
+                path.mkdir()
+            (workspace / "in.txt").write_text("ws-sentinel-AAA\n", encoding="utf-8")
+            (outside / "secret.txt").write_text("outside-sentinel-BBB\n", encoding="utf-8")
+            (fe / "secret.txt").write_text("frontend-sentinel-CCC\n", encoding="utf-8")
+            (home / "auth-secret.txt").write_text("home-sentinel-DDD\n", encoding="utf-8")
+            (home / "config.toml").write_text(
+                "\n".join(
+                    [
+                        'default_permissions = "hayagarden_nexus"',
+                        "",
+                        "[permissions.hayagarden_nexus]",
+                        'description = "Nexus hard isolation smoke"',
+                        "",
+                        "[permissions.hayagarden_nexus.filesystem]",
+                        '":minimal" = "read"',
+                        f'"{home}" = "deny"',
+                        f'"{outside}" = "deny"',
+                        f'"{fe}" = "deny"',
+                        "",
+                        '[permissions.hayagarden_nexus.filesystem.":workspace_roots"]',
+                        '"." = "write"',
+                        "",
+                        "[permissions.hayagarden_nexus.network]",
+                        "enabled = false",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            env = dict(os.environ)
+            env["CODEX_HOME"] = str(home)
+
+            def run_cmd(args):
+                return subprocess.run(
+                    [
+                        binary,
+                        "sandbox",
+                        "-P",
+                        "hayagarden_nexus",
+                        "-C",
+                        str(workspace),
+                        "--",
+                        *args,
+                    ],
+                    capture_output=True,
+                    text=True,
+                    env=env,
+                    timeout=30,
+                )
+
+            read_ws = run_cmd(["/bin/cat", str(workspace / "in.txt")])
+            self.assertEqual(read_ws.returncode, 0, read_ws.stderr)
+            self.assertIn("ws-sentinel-AAA", read_ws.stdout)
+
+            out_path = workspace / "out.txt"
+            write_ws = run_cmd(["/bin/sh", "-c", f"echo wrote > '{out_path}'"])
+            self.assertEqual(write_ws.returncode, 0, write_ws.stderr)
+            self.assertEqual(out_path.read_text(encoding="utf-8").strip(), "wrote")
+
+            read_out = run_cmd(["/bin/cat", str(outside / "secret.txt")])
+            self.assertNotIn("outside-sentinel-BBB", read_out.stdout)
+            self.assertNotEqual(read_out.returncode, 0)
+
+            leak_path = outside / "leak.txt"
+            write_out = run_cmd(["/bin/sh", "-c", f"echo leak > '{leak_path}'"])
+            self.assertFalse(leak_path.exists())
+            self.assertNotEqual(write_out.returncode, 0)
+
+            read_home = run_cmd(["/bin/cat", str(home / "auth-secret.txt")])
+            self.assertNotIn("home-sentinel-DDD", read_home.stdout)
+            self.assertNotEqual(read_home.returncode, 0)
+
+            read_fe = run_cmd(["/bin/cat", str(fe / "secret.txt")])
+            self.assertNotIn("frontend-sentinel-CCC", read_fe.stdout)
+            self.assertNotEqual(read_fe.returncode, 0)
+
+
 if __name__ == "__main__":
     unittest.main()
