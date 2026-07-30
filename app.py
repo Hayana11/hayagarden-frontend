@@ -3263,6 +3263,22 @@ def _init_wake_tables():
     except sqlite3.OperationalError:
         pass
     try:
+        conn.execute("ALTER TABLE wake_log ADD COLUMN chat_id TEXT")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        conn.execute("ALTER TABLE wake_log ADD COLUMN context_id INTEGER")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        conn.execute("ALTER TABLE wake_log ADD COLUMN context_epoch INTEGER")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        conn.execute("ALTER TABLE wake_log ADD COLUMN resident_generation INTEGER")
+    except sqlite3.OperationalError:
+        pass
+    try:
         conn.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_wake_log_run_id "
             "ON wake_log(wake_run_id) WHERE wake_run_id IS NOT NULL AND wake_run_id != ''"
@@ -3284,16 +3300,21 @@ def pending_notification():
     取最新一条未推送的 action='message'，并把所有未推送的一并标记，
     避免她隔几小时打开时被一堆补发的旧通知刷屏。
     另外复用这个通道下发 command='screenshot' 让手机立刻截一张屏。"""
+    from chat.window_identity import fetch_pending_wake_notification_row, soft_window_enabled
+
     conn = get_db()
-    row = conn.execute(
-        "SELECT id, content, woke_at FROM wake_log "
-        "WHERE action='message' AND (notified IS NULL OR notified=0) "
-        "ORDER BY id DESC LIMIT 1"
-    ).fetchone()
+    row = fetch_pending_wake_notification_row(conn)
     if row:
-        conn.execute(
-            "UPDATE wake_log SET notified=1 WHERE action='message' AND (notified IS NULL OR notified=0)"
-        )
+        if soft_window_enabled():
+            # Only mark the matched current-window row; never wipe foreign wakes.
+            conn.execute(
+                "UPDATE wake_log SET notified=1 WHERE id=?",
+                (int(row['id']),),
+            )
+        else:
+            conn.execute(
+                "UPDATE wake_log SET notified=1 WHERE action='message' AND (notified IS NULL OR notified=0)"
+            )
 
     # 手机截屏指令：优先取 pending；若 dispatched 超过 2 分钟还没回传，重试下发一次
     sreq = conn.execute(

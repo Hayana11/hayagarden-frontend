@@ -208,7 +208,8 @@ def job_log_tail(job_id: str, lines: int = 80) -> str:
 
 
 def _write_runner(job_id: str, cmd: str, name: str, meta_path: Path, log_path: Path,
-                  *, notify: bool = True, conversation_id: str = "") -> Path:
+                  *, notify: bool = True, conversation_id: str = "",
+                  window_identity: dict[str, Any] | None = None) -> Path:
     _, _, runner_path = _job_paths(job_id)
     initial = {
         "id": job_id,
@@ -221,6 +222,8 @@ def _write_runner(job_id: str, cmd: str, name: str, meta_path: Path, log_path: P
         "conversation_id": conversation_id or "default",
         "notified": False,
     }
+    if window_identity is not None:
+        initial["window_identity"] = window_identity
     meta_path.write_text(_json(initial), encoding="utf-8")
     log_path.write_text("", encoding="utf-8")
     root = str(Path(workspace_executor.EXEC_CWD).resolve())
@@ -286,7 +289,11 @@ write_meta({{
     return runner_path
 
 
-def ws_job(arguments: dict[str, Any], conversation_id: str = "") -> str:
+def ws_job(
+    arguments: dict[str, Any],
+    conversation_id: str = "",
+    window_identity: dict[str, Any] | None = None,
+) -> str:
     action = str(arguments.get("action") or "status").strip().lower()
     _ensure_jobs_dir()
 
@@ -296,6 +303,20 @@ def ws_job(arguments: dict[str, Any], conversation_id: str = "") -> str:
                 "error": "exec_disabled",
                 "detail": "background jobs require EXEC_ENABLED=1",
             })
+        frozen_identity: dict[str, Any] | None = None
+        from chat.window_identity import (
+            normalize_window_identity,
+            soft_window_enabled,
+        )
+        if soft_window_enabled():
+            frozen_identity = normalize_window_identity(window_identity)
+            if frozen_identity is None:
+                return _json({
+                    "error": "window_identity_unavailable",
+                    "detail": "ws_job start requires a complete window_identity when soft window is on",
+                })
+        elif window_identity is not None:
+            frozen_identity = normalize_window_identity(window_identity)
         cmd = str(arguments.get("cmd") or "").strip()
         if not cmd:
             return _json({"error": "cmd_required"})
@@ -312,6 +333,7 @@ def ws_job(arguments: dict[str, Any], conversation_id: str = "") -> str:
         runner_path = _write_runner(
             job_id, cmd, name, meta_path, log_path,
             notify=notify, conversation_id=conversation_id,
+            window_identity=frozen_identity,
         )
         env = dict(workspace_executor.EXEC_ENV)
         try:
@@ -418,6 +440,7 @@ def _emit_job_finished(meta: dict[str, Any]) -> None:
             "exit_code": meta.get("exit_code"),
             "name": meta.get("name"),
         },
+        "window_identity": meta.get("window_identity"),
         "idempotency_key": f"{meta.get('id')}_done",
     })
 

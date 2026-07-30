@@ -17,14 +17,8 @@ _LARGE_RETURN_TOOLS = {
 
 def capture_pending_wake_ids(get_db_fn):
     """Snapshot wake rows that must be visible to the current user turn."""
-    conn = get_db_fn()
-    try:
-        rows = conn.execute(
-            "SELECT id FROM wake_log WHERE consumed=0 ORDER BY id ASC"
-        ).fetchall()
-        return [int(row["id"] if hasattr(row, "keys") else row[0]) for row in rows]
-    finally:
-        conn.close()
+    from chat.window_identity import fetch_claimable_wake_ids
+    return fetch_claimable_wake_ids(get_db_fn)
 
 
 def consume_wake_ids(get_db_fn, wake_ids):
