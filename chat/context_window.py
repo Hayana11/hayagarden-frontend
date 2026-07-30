@@ -529,6 +529,10 @@ class SwitchHooks:
     The orchestrator closes the old handle only after ``mark_intent_committed``.
 
     ``discard_staged(staged)`` kills a staged handle after pre-commit failure.
+
+    ``formal_holder`` is the production ``_CC_RESIDENT`` (or test equivalent).
+    Recovery may skip prepare only when this holder is provided and still
+    fully matches the target; offline hooks leave it ``None`` (fail-closed).
     """
 
     prepare_staged: Callable[[dict[str, Any], Path], Any]
@@ -536,6 +540,7 @@ class SwitchHooks:
     discard_staged: Callable[[Any], None]
     forge_cwd: str
     claude_home: Path
+    formal_holder: Any = None
 
 
 def _payload_hash(
@@ -808,10 +813,21 @@ _PENDING_OLD_RESIDENT_CLOSE: Any = None
 
 
 def defer_old_resident_close(old: Any) -> None:
-    """Keep old resident until mark_intent_committed succeeds (incl. retries)."""
+    """Keep old resident until mark_intent_committed succeeds (incl. retries).
+
+    Single-slot: the first deferred original must not be overwritten by a later
+    handle (e.g. a dead staged returned from retry swap). Superseded handles are
+    closed immediately.
+    """
     global _PENDING_OLD_RESIDENT_CLOSE
-    if old is not None:
+    if old is None:
+        return
+    if _PENDING_OLD_RESIDENT_CLOSE is None:
         _PENDING_OLD_RESIDENT_CLOSE = old
+        return
+    if old is _PENDING_OLD_RESIDENT_CLOSE:
+        return
+    _close_old_resident_handle(old)
 
 
 def flush_old_resident_close() -> None:
@@ -1275,9 +1291,17 @@ def complete_handoff_pending_recovery(
     from tools.claude_forge_core import session_jsonl_path_for_cwd
 
     sid = str(target.get('claude_session_id') or intent.get('target_session_id') or '')
-    # Already swapped + bound to target: only patch committed, never re-Forge/respawn.
-    if daily_rt.target_resident_binding_matches(
-        result, session_id=sid, db_path=db_path,
+    # Direct committed only when formal holder is live and fully matches.
+    # No holder (offline) or dead/mismatched holder → prepare/resume path.
+    holder = hooks.formal_holder
+    if (
+        holder is not None
+        and daily_rt.target_resident_binding_matches(
+            result,
+            session_id=sid,
+            holder=holder,
+            db_path=db_path,
+        )
     ):
         mark_intent_committed(str(intent['request_id']), db_path=db_path, now=now)
         flush_old_resident_close()

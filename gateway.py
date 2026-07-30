@@ -6533,6 +6533,7 @@ def _gw_build_switch_hooks():
         discard_staged=discard_staged,
         forge_cwd=CC_CWD,
         claude_home=claude_home,
+        formal_holder=_CC_RESIDENT,
     )
 
 

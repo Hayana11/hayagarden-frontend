@@ -876,13 +876,18 @@ class PostCommitRecoveryTests(unittest.TestCase):
                 spawn_calls['n'] += 1
                 return prepare_staged(intent, forge_path)
 
-            # Binding already matches → recovery only marks committed.
+            # Live formal holder + full match → recovery only marks committed.
+            class _LiveHolder:
+                def get(self):
+                    return staged_box['obj']
+
             retry_hooks = cw.SwitchHooks(
                 prepare_staged=prepare_again,
                 take_handoff=take_handoff,
                 discard_staged=lambda s: None,
                 forge_cwd=hooks.forge_cwd,
                 claude_home=hooks.claude_home,
+                formal_holder=_LiveHolder(),
             )
             with mock.patch.object(forge_mod, 'forge_target_session_from_db', counting_forge):
                 out = cw.switch_context_window(
@@ -1304,6 +1309,218 @@ class PartialSwapAtomicityTests(unittest.TestCase):
             expected_resident=staged_box2['obj'],
             db_path=self.db,
         ))
+
+
+class DeadStagedRecoveryTests(unittest.TestCase):
+    """Original FAIL: mark_committed fail then holder staged dies must re-prepare."""
+
+    def setUp(self):
+        self.db = _tmp_db()
+        _init_chat_messages(self.db)
+        dc.ensure_schema(self.db)
+        self.forge_root = tempfile.mkdtemp(prefix='forge-dead-')
+        self.base_hooks = cw.offline_switch_hooks(self.forge_root)
+        self.ctx = dc.get_or_create_daily_context(
+            local_day='2026-07-27',
+            db_path=self.db,
+            now=datetime.datetime(2026, 7, 27, 10, 0, 0),
+        )
+        _seed_rounds(self.db, self.ctx, 2)
+        dr.reset_bindings_for_tests()
+        self._flag_patch = mock.patch('chat.daily_context.enabled', return_value=True)
+        self._flag_patch.start()
+        self._cw_flag = mock.patch('chat.context_window.enabled', return_value=True)
+        self._cw_flag.start()
+
+    def tearDown(self):
+        self._flag_patch.stop()
+        self._cw_flag.stop()
+        dr.reset_bindings_for_tests()
+        try:
+            os.unlink(self.db)
+        except OSError:
+            pass
+
+    def test_dead_staged_after_mark_committed_failure_reprepares_before_commit(self):
+        req = str(uuid.uuid4())
+        old = _AliveResident(session_id='old-sid', generation=1, label='old')
+        holder = _SwappableResident(old)
+        staged_box = {'obj': None, 'prepare_n': 0}
+        forge_calls = {'n': 0}
+
+        def prepare_staged(intent, forge_path):
+            staged_box['prepare_n'] += 1
+            s = _AliveResident(
+                session_id=str(intent['target_session_id']),
+                generation=5 + staged_box['prepare_n'],
+                label='staged-%d' % staged_box['prepare_n'],
+            )
+            s.jsonl_path = forge_path
+            staged_box['obj'] = s
+            return s
+
+        def take_handoff(staged, result):
+            with dr.handoff_lock():
+                return dr.install_target_resident_after_swap(
+                    holder=holder,
+                    staged_resident=staged,
+                    result=result,
+                    tool_profile=dr.DAILY_TOOL_PROFILE,
+                    db_path=self.db,
+                )
+
+        def discard_staged(staged):
+            if staged is not None and holder.get() is staged:
+                raise AssertionError('discard while staged is formal holder')
+            if staged is not None:
+                staged._kill(quiet=True)
+
+        hooks = cw.SwitchHooks(
+            prepare_staged=prepare_staged,
+            take_handoff=take_handoff,
+            discard_staged=discard_staged,
+            forge_cwd=self.base_hooks.forge_cwd,
+            claude_home=self.base_hooks.claude_home,
+            formal_holder=holder,
+        )
+
+        import chat.context_window_forge as forge_mod
+        real_forge = forge_mod.forge_target_session_from_db
+
+        def counting_forge(*a, **k):
+            forge_calls['n'] += 1
+            return real_forge(*a, **k)
+
+        real_mark = cw.mark_intent_committed
+        mark_calls = {'n': 0}
+
+        def boom_then_ok(request_id, **kwargs):
+            mark_calls['n'] += 1
+            if mark_calls['n'] == 1:
+                raise RuntimeError('mark committed boom')
+            return real_mark(request_id, **kwargs)
+
+        with mock.patch.object(forge_mod, 'forge_target_session_from_db', counting_forge), \
+             mock.patch.object(cw, 'mark_intent_committed', side_effect=boom_then_ok):
+            with self.assertRaises(Exception) as ar:
+                cw.switch_context_window(
+                    source_context_id=int(self.ctx['id']),
+                    source_context_epoch=int(self.ctx['context_epoch']),
+                    count=0,
+                    request_id=req,
+                    db_path=self.db,
+                    hooks=hooks,
+                )
+            self.assertIn('mark committed boom', str(ar.exception))
+
+            binding = dr.get_local_binding()
+            self.assertIsNotNone(binding)
+            target_id = int(binding.context_id)
+            target_gen = int(binding.resident_generation)
+            owner = dc.get_resident_owner(target_id, target_gen, db_path=self.db)
+            cursor = dc.get_resident_history_cursor(target_id, target_gen, db_path=self.db)
+            self.assertIsNotNone(owner)
+            self.assertIsNotNone(cursor)
+            first_staged = staged_box['obj']
+            self.assertIs(holder.get(), first_staged)
+            self.assertTrue(first_staged._alive())
+            self.assertEqual(old.kill_calls, 0)
+
+            conn = dc._connect(self.db)
+            try:
+                st = conn.execute(
+                    'SELECT status FROM context_switch_intents WHERE request_id=?',
+                    (req,),
+                ).fetchone()['status']
+            finally:
+                conn.close()
+            self.assertEqual(st, cw.INTENT_HANDOFF_PENDING)
+            files = list(Path(hooks.claude_home).rglob('*.jsonl'))
+            self.assertTrue(files and files[0].is_file())
+            jsonl_bytes = files[0].read_bytes()
+
+            # Kill staged inside holder after successful handoff + mark fail.
+            first_staged._kill(quiet=True)
+            self.assertFalse(first_staged._alive())
+            self.assertIs(holder.get(), first_staged)
+
+            result_probe = {
+                'target_context_id': target_id,
+                'target_context_epoch': int(binding.context_epoch),
+                'resident_generation': target_gen,
+                'selected_message_ids': [],
+                'boundary_message_id': int(cursor),
+                'claude_session_id': str(binding.claude_session_id),
+            }
+            # Document the old bug: matcher without holder still True.
+            self.assertTrue(dr.target_resident_binding_matches(
+                result_probe,
+                session_id=str(binding.claude_session_id),
+                db_path=self.db,
+            ))
+            # Fixed recovery path must not use that result: with holder → False.
+            self.assertFalse(dr.target_resident_binding_matches(
+                result_probe,
+                session_id=str(binding.claude_session_id),
+                holder=holder,
+                db_path=self.db,
+            ))
+
+            prepare_before = staged_box['prepare_n']
+            forge_before = forge_calls['n']
+            self.assertEqual(prepare_before, 1)
+
+            out = cw.switch_context_window(
+                source_context_id=int(self.ctx['id']),
+                source_context_epoch=int(self.ctx['context_epoch']),
+                count=0,
+                request_id=req,
+                db_path=self.db,
+                hooks=hooks,
+            )
+
+        # Old bug was prepare_n 1→1; fixed must be 1→2.
+        self.assertEqual(forge_calls['n'], forge_before)
+        self.assertEqual(forge_calls['n'], 1)
+        self.assertEqual(staged_box['prepare_n'], 2)
+        new_staged = staged_box['obj']
+        self.assertIsNot(new_staged, first_staged)
+        self.assertTrue(new_staged._alive())
+        self.assertIs(holder.get(), new_staged)
+        self.assertEqual(old.kill_calls, 1)
+        self.assertEqual(mark_calls['n'], 2)
+
+        conn = dc._connect(self.db)
+        try:
+            st2 = conn.execute(
+                'SELECT status FROM context_switch_intents WHERE request_id=?',
+                (req,),
+            ).fetchone()['status']
+        finally:
+            conn.close()
+        self.assertEqual(st2, cw.INTENT_COMMITTED)
+        self.assertEqual(files[0].read_bytes(), jsonl_bytes)
+        self.assertTrue(dr.target_resident_binding_matches(
+            out,
+            session_id=out['claude_session_id'],
+            holder=holder,
+            expected_resident=new_staged,
+            db_path=self.db,
+        ))
+
+        # Formal first turn on target must be hot.
+        u = _insert(self.db, 'hayana', 'after-recovery', '2026-07-27 20:00:00')
+        with mock.patch('chat.daily_history._build_state_text', return_value=('', 'none', {})):
+            plan = dr.prepare_daily_turn(
+                user_message_id=u,
+                db_path=self.db,
+                resident=new_staged,
+                static_system='S',
+                now=datetime.datetime(2026, 7, 27, 20, 0, 0),
+                wall_now=datetime.datetime(2026, 7, 27, 20, 0, 0),
+            )
+        self.assertFalse(plan.is_cold)
+        self.assertEqual(plan.manifest.get('turn_kind'), 'hot')
 
 
 class FrontendRequestIdTests(unittest.TestCase):
