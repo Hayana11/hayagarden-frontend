@@ -2,6 +2,8 @@
 
 Flag-off data layer. No background threads. Runtime may call
 ``run_mapping_pass`` later; this module never starts processes or models.
+
+Write-lock scope: file I/O and Transcript Reader run *before* BEGIN IMMEDIATE.
 """
 from __future__ import annotations
 
@@ -18,7 +20,6 @@ from chat.claude_transcript_reader import (
     read_transcript_range,
 )
 from chat.session_registry import (
-    SCAN_STATUS_BLOCKED,
     SCAN_STATUS_READY,
     SessionRegistryConflict,
     SessionRegistryError,
@@ -107,7 +108,6 @@ def mapping_role_for_event(event: TranscriptEvent, *, is_canonical_user: bool) -
         return ROLE_ASSISTANT
     if event.event_role == EventRole.TOOL_RESULT_USER:
         return ROLE_TOOL_RESULT_USER
-    # SYSTEM / SUMMARY / META / UNKNOWN / unconfirmed CANDIDATE_USER — skip
     return None
 
 
@@ -118,8 +118,10 @@ def _assert_message_window(
     context_id: int,
     context_epoch: int,
     resident_generation: int,
+    expected_role: str,
 ) -> None:
     mid = int(message_id)
+    want_role = str(expected_role)
     row = conn.execute(
         'SELECT id FROM chat_messages WHERE id=?', (mid,),
     ).fetchone()
@@ -129,7 +131,7 @@ def _assert_message_window(
             error_code='message_missing',
         )
     dmc = conn.execute(
-        'SELECT context_id, context_epoch, resident_generation '
+        'SELECT context_id, context_epoch, resident_generation, role '
         'FROM daily_message_contexts WHERE message_id=?',
         (mid,),
     ).fetchone()
@@ -146,6 +148,11 @@ def _assert_message_window(
         raise MappingRejected(
             f'message_id {mid} window identity mismatch',
             error_code='message_window_mismatch',
+        )
+    if str(dmc['role']) != want_role:
+        raise MappingRejected(
+            f'message_id {mid} role={dmc["role"]!r} expected {want_role!r}',
+            error_code='message_role_mismatch',
         )
 
 
@@ -185,7 +192,6 @@ def _insert_mapping_row(conn: sqlite3.Connection, planned: dict[str, Any]) -> st
             )
         return uid
 
-    # Canonical user: reject if message already has a different user event.
     if str(planned['role']) == ROLE_USER:
         other = conn.execute(
             "SELECT event_uuid FROM chat_message_claude_events "
@@ -224,6 +230,61 @@ def _insert_mapping_row(conn: sqlite3.Connection, planned: dict[str, Any]) -> st
     return uid
 
 
+def _assert_planned_event_sessions(
+    events: Sequence[TranscriptEvent],
+    *,
+    registry_session_id: str,
+) -> None:
+    """Require every mapped event's JSONL sessionId to match Registry exactly."""
+    expected = str(registry_session_id or '').strip()
+    seen: set[str] = set()
+    for event in events:
+        sid = str(event.session_id or '').strip()
+        if not sid:
+            raise MappingRejected(
+                f'event {event.event_uuid} missing sessionId',
+                error_code='event_session_missing',
+            )
+        seen.add(sid)
+    if len(seen) > 1:
+        raise MappingRejected(
+            f'multiple event sessions in range: {sorted(seen)}',
+            error_code='multiple_event_sessions',
+        )
+    actual = next(iter(seen))
+    if actual != expected:
+        raise MappingRejected(
+            f'event sessionId {actual!r} != registry {expected!r}',
+            error_code='event_session_mismatch',
+        )
+
+
+def _assert_complete_terminal_round(graph: TranscriptGraph, rnd) -> None:
+    """Refuse incomplete JSONL deltas so scan_offset cannot swallow late rows."""
+    if not rnd.has_assistant:
+        raise MappingRejected(
+            'candidate round has no assistant',
+            error_code='incomplete_round_no_assistant',
+        )
+    if not rnd.event_uuids:
+        raise MappingRejected(
+            'candidate round empty',
+            error_code='incomplete_round_empty',
+        )
+    last_uid = rnd.event_uuids[-1]
+    last_evt = graph.by_uuid[last_uid]
+    if last_evt.event_role != EventRole.ASSISTANT or last_evt.is_sidechain:
+        raise MappingRejected(
+            'candidate round does not end on main-chain assistant',
+            error_code='incomplete_round_not_terminal_assistant',
+        )
+    if not _content_has_text(last_evt):
+        raise MappingRejected(
+            'terminal assistant has no non-empty text body',
+            error_code='incomplete_round_no_terminal_text',
+        )
+
+
 def _plan_mappings_for_graph(
     graph: TranscriptGraph,
     *,
@@ -259,7 +320,10 @@ def _plan_mappings_for_graph(
             'candidate round user mismatch', error_code='candidate_round_mismatch',
         )
 
+    _assert_complete_terminal_round(graph, rnd)
+
     planned: list[dict[str, Any]] = []
+    planned_events: list[TranscriptEvent] = []
     for uid in rnd.event_uuids:
         event = graph.by_uuid[uid]
         is_user = uid == user_uid
@@ -267,21 +331,50 @@ def _plan_mappings_for_graph(
         if role is None:
             continue
         message_id = int(user_message_id) if role == ROLE_USER else int(assistant_message_id)
+        # Persist the event's own JSONL sessionId (never overwrite mismatch).
+        event_sid = str(event.session_id or '').strip()
         planned.append({
             'event_uuid': uid,
             'message_id': message_id,
             'role': role,
-            'claude_session_id': claude_session_id,
+            'claude_session_id': event_sid,
             'context_id': int(context_id),
             'context_epoch': int(context_epoch),
             'resident_generation': int(resident_generation),
             'jsonl_byte_offset': event.byte_offset,
         })
+        planned_events.append(event)
+
     if not any(p['role'] == ROLE_USER for p in planned):
         raise MappingRejected(
             'canonical user mapping not planned', error_code='canonical_user_unplanned',
         )
+
+    _assert_planned_event_sessions(
+        planned_events, registry_session_id=claude_session_id,
+    )
     return planned
+
+
+def _verify_registry_identity(
+    registry: dict[str, Any],
+    req: MappingPassRequest,
+    *,
+    expected_start: int,
+) -> None:
+    if int(registry['context_epoch']) != int(req.context_epoch):
+        raise MappingRejected('context_epoch mismatch', error_code='epoch_mismatch')
+    if int(registry['resident_generation']) != int(req.resident_generation):
+        raise MappingRejected(
+            'resident_generation mismatch', error_code='generation_mismatch',
+        )
+    if str(registry['chat_id']) != str(req.chat_id).strip():
+        raise MappingRejected('chat_id mismatch', error_code='chat_id_mismatch')
+    if int(registry['scan_offset']) != int(expected_start):
+        raise MappingRejected(
+            'scan_offset != expected_start_offset',
+            error_code='scan_offset_cas_conflict',
+        )
 
 
 def _persist_blocked(
@@ -289,17 +382,78 @@ def _persist_blocked(
     context_id: int,
     resident_generation: int,
     error_code: str,
+    expected_offset: int,
     db_path: Optional[str],
 ) -> Optional[dict[str, Any]]:
+    """CAS-blocked write; on stale race return current snapshot without overwrite."""
     try:
         return mark_scan_blocked(
             context_id=int(context_id),
             resident_generation=int(resident_generation),
             error_code=error_code,
+            expected_offset=int(expected_offset),
             db_path=db_path,
         )
+    except SessionRegistryConflict:
+        return get_context_claude_session(
+            int(context_id), int(resident_generation), db_path=db_path,
+        )
     except SessionRegistryError:
-        return None
+        return get_context_claude_session(
+            int(context_id), int(resident_generation), db_path=db_path,
+        )
+
+
+def _phase1_plan(
+    req: MappingPassRequest,
+    *,
+    db_path: Optional[str],
+    start: int,
+    end: int,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Read Registry + JSONL and plan mappings. No SQLite write transaction."""
+    registry = get_context_claude_session(
+        int(req.context_id), int(req.resident_generation), db_path=db_path,
+    )
+    if registry is None:
+        raise MappingRejected('registry missing', error_code='registry_missing')
+    _verify_registry_identity(registry, req, expected_start=start)
+
+    transcript_path = str(registry['transcript_path'])
+    sid = str(registry['claude_session_id'])
+    try:
+        size = os.path.getsize(transcript_path)
+    except OSError as exc:
+        raise MappingRejected(
+            f'transcript unreadable: {exc}', error_code='transcript_unreadable',
+        ) from exc
+    if size < int(registry['scan_offset']) or size < start:
+        raise MappingRejected(
+            'transcript truncated below registered offset',
+            error_code='transcript_truncated',
+        )
+    if size < end:
+        raise MappingRejected(
+            'transcript shorter than observed_end_offset',
+            error_code='transcript_short',
+        )
+
+    try:
+        graph = read_transcript_range(transcript_path, start, end)
+    except TranscriptReaderError as exc:
+        code = exc.code.value if isinstance(exc.code, ReaderErrorCode) else 'reader_error'
+        raise MappingRejected(str(exc), error_code=code) from exc
+
+    planned = _plan_mappings_for_graph(
+        graph,
+        user_message_id=int(req.user_message_id),
+        assistant_message_id=int(req.assistant_message_id),
+        claude_session_id=sid,
+        context_id=int(req.context_id),
+        context_epoch=int(req.context_epoch),
+        resident_generation=int(req.resident_generation),
+    )
+    return dict(registry), planned
 
 
 def run_mapping_pass(
@@ -309,25 +463,49 @@ def run_mapping_pass(
 ) -> MappingPassResult:
     """Single offline mapping pass over an explicit JSONL byte range.
 
-    All mapping writes + scan_offset CAS happen in one DB transaction.
-    On failure: mapping batch rolled back, offset not advanced, BLOCKED persisted.
+    Phase 1 (no write lock): Registry snapshot, file size, Reader, plan.
+    Phase 2 (BEGIN IMMEDIATE): re-check identity/offset/roles, write, CAS.
     """
     dc.ensure_schema(db_path)
     req = request
     start = int(req.expected_start_offset)
     end = int(req.observed_end_offset)
+    registry_snapshot: Optional[dict[str, Any]] = None
+
     if start < 0 or end < start:
         reg = _persist_blocked(
             context_id=req.context_id,
             resident_generation=req.resident_generation,
             error_code='offset_invalid',
+            expected_offset=max(start, 0),
             db_path=db_path,
         )
         return MappingPassResult(ok=False, error_code='offset_invalid', registry=reg)
 
+    # ----- Phase 1: no SQLite write lock -----
+    phase1_registry: Optional[dict[str, Any]] = None
+    try:
+        phase1_registry, planned = _phase1_plan(
+            req, db_path=db_path, start=start, end=end,
+        )
+        registry_snapshot = dict(phase1_registry)
+    except (MappingRejected, MappingConflict) as exc:
+        code = getattr(exc, 'error_code', 'mapping_rejected')
+        reg = _persist_blocked(
+            context_id=req.context_id,
+            resident_generation=req.resident_generation,
+            error_code=str(code),
+            expected_offset=start,
+            db_path=db_path,
+        )
+        return MappingPassResult(
+            ok=False,
+            error_code=str(code),
+            registry=reg or registry_snapshot,
+        )
+
+    # ----- Phase 2: short write transaction -----
     conn = dc._connect(db_path)
-    planned: list[dict[str, Any]] = []
-    registry_snapshot: Optional[dict[str, Any]] = None
     try:
         conn.execute('BEGIN IMMEDIATE')
         registry = get_context_claude_session(
@@ -336,68 +514,37 @@ def run_mapping_pass(
         if registry is None:
             raise MappingRejected('registry missing', error_code='registry_missing')
         registry_snapshot = dict(registry)
+        _verify_registry_identity(registry, req, expected_start=start)
 
-        if int(registry['context_epoch']) != int(req.context_epoch):
-            raise MappingRejected('context_epoch mismatch', error_code='epoch_mismatch')
-        if int(registry['resident_generation']) != int(req.resident_generation):
+        # Path/session must still match what phase-1 planned against.
+        assert phase1_registry is not None
+        if str(registry['transcript_path']) != str(phase1_registry['transcript_path']):
+            raise MappingRejected('transcript_path changed', error_code='registry_changed')
+        if str(registry['claude_session_id']) != str(phase1_registry['claude_session_id']):
             raise MappingRejected(
-                'resident_generation mismatch', error_code='generation_mismatch',
+                'registry session changed between phases',
+                error_code='registry_changed',
             )
-        if str(registry['chat_id']) != str(req.chat_id).strip():
-            raise MappingRejected('chat_id mismatch', error_code='chat_id_mismatch')
-        if int(registry['scan_offset']) != start:
-            raise MappingRejected(
-                'scan_offset != expected_start_offset',
-                error_code='scan_offset_cas_conflict',
-            )
-
-        transcript_path = str(registry['transcript_path'])
-        sid = str(registry['claude_session_id'])
-        try:
-            size = os.path.getsize(transcript_path)
-        except OSError as exc:
-            raise MappingRejected(
-                f'transcript unreadable: {exc}', error_code='transcript_unreadable',
-            ) from exc
-        # Truncation / rewind refused — never auto-seek to file head.
-        if size < int(registry['scan_offset']) or size < start:
-            raise MappingRejected(
-                'transcript truncated below registered offset',
-                error_code='transcript_truncated',
-            )
-        if size < end:
-            raise MappingRejected(
-                'transcript shorter than observed_end_offset',
-                error_code='transcript_short',
-            )
+        for row in planned:
+            if str(row['claude_session_id']) != str(registry['claude_session_id']):
+                raise MappingRejected(
+                    'planned event session != registry',
+                    error_code='event_session_mismatch',
+                )
 
         _assert_message_window(
             conn, int(req.user_message_id),
             context_id=int(req.context_id),
             context_epoch=int(req.context_epoch),
             resident_generation=int(req.resident_generation),
+            expected_role=ROLE_USER,
         )
         _assert_message_window(
             conn, int(req.assistant_message_id),
             context_id=int(req.context_id),
             context_epoch=int(req.context_epoch),
             resident_generation=int(req.resident_generation),
-        )
-
-        try:
-            graph = read_transcript_range(transcript_path, start, end)
-        except TranscriptReaderError as exc:
-            code = exc.code.value if isinstance(exc.code, ReaderErrorCode) else 'reader_error'
-            raise MappingRejected(str(exc), error_code=code) from exc
-
-        planned = _plan_mappings_for_graph(
-            graph,
-            user_message_id=int(req.user_message_id),
-            assistant_message_id=int(req.assistant_message_id),
-            claude_session_id=sid,
-            context_id=int(req.context_id),
-            context_epoch=int(req.context_epoch),
-            resident_generation=int(req.resident_generation),
+            expected_role=ROLE_ASSISTANT,
         )
 
         mapped: list[str] = []
@@ -431,6 +578,7 @@ def run_mapping_pass(
             context_id=req.context_id,
             resident_generation=req.resident_generation,
             error_code=str(code),
+            expected_offset=start,
             db_path=db_path,
         )
         return MappingPassResult(
@@ -445,6 +593,7 @@ def run_mapping_pass(
             context_id=req.context_id,
             resident_generation=req.resident_generation,
             error_code=str(code),
+            expected_offset=start,
             db_path=db_path,
         )
         return MappingPassResult(

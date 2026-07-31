@@ -123,12 +123,47 @@ def _identity_mismatch(existing: dict[str, Any], expected: dict[str, Any]) -> Op
         else:
             if str(left) != str(right):
                 return key
-    # process_generation: NULL-tolerant; conflict only when both set and differ
     left_pg = existing.get('process_generation')
     right_pg = expected.get('process_generation')
     if left_pg is not None and right_pg is not None and int(left_pg) != int(right_pg):
         return 'process_generation'
     return None
+
+
+def _assert_daily_context_identity(
+    conn: sqlite3.Connection,
+    *,
+    context_id: int,
+    chat_id: str,
+    context_epoch: int,
+    resident_generation: int,
+) -> None:
+    """Fail closed unless daily_contexts row matches the claimed window identity."""
+    row = conn.execute(
+        'SELECT id, chat_id, context_epoch, resident_generation '
+        'FROM daily_contexts WHERE id=?',
+        (int(context_id),),
+    ).fetchone()
+    if row is None:
+        raise SessionRegistryError(
+            f'daily_contexts id={context_id} missing',
+            error_code='daily_context_missing',
+        )
+    if str(row['chat_id']) != str(chat_id):
+        raise SessionRegistryConflict(
+            'daily_contexts chat_id mismatch',
+            error_code='daily_context_mismatch',
+        )
+    if int(row['context_epoch']) != int(context_epoch):
+        raise SessionRegistryConflict(
+            'daily_contexts context_epoch mismatch',
+            error_code='daily_context_mismatch',
+        )
+    if int(row['resident_generation']) != int(resident_generation):
+        raise SessionRegistryConflict(
+            'daily_contexts resident_generation mismatch',
+            error_code='daily_context_mismatch',
+        )
 
 
 def register_context_claude_session(
@@ -150,6 +185,7 @@ def register_context_claude_session(
 
     ``scan_offset`` must be explicit (caller-supplied). ``transcript_path`` is
     derived from ``cwd`` + ``claude_session_id``; if provided it must match.
+    Window identity is verified against ``daily_contexts`` in the same TX.
     """
     dc.ensure_schema(db_path)
     cid = int(context_id)
@@ -196,6 +232,13 @@ def register_context_claude_session(
     conn = dc._connect(db_path)
     try:
         conn.execute('BEGIN IMMEDIATE')
+        _assert_daily_context_identity(
+            conn,
+            context_id=cid,
+            chat_id=chat,
+            context_epoch=epoch,
+            resident_generation=gen,
+        )
         by_key = get_context_claude_session(cid, gen, conn=conn)
         by_sid = get_context_claude_session_by_sid(sid, conn=conn)
 
@@ -217,7 +260,6 @@ def register_context_claude_session(
                     f'registry identity conflict on {mismatch}',
                     error_code='registry_identity_conflict',
                 )
-            # Idempotent success — do not rewrite scan cursor / status.
             conn.commit()
             return dict(by_key)
 
@@ -256,29 +298,42 @@ def mark_scan_blocked(
     context_id: int,
     resident_generation: int,
     error_code: str,
+    expected_offset: int,
     db_path: Optional[str] = None,
     conn: Optional[sqlite3.Connection] = None,
 ) -> dict[str, Any]:
-    """Persist BLOCKED status without advancing scan_offset."""
+    """Persist BLOCKED only when scan_offset still equals ``expected_offset``.
+
+    Stale mappers that lost a race must not overwrite a newer READY/advanced row.
+    """
     own = conn is None
     c = conn or dc._connect(db_path)
     now_s = dc._now_local_str()
+    exp = int(expected_offset)
     try:
         if own:
             c.execute('BEGIN IMMEDIATE')
         cur = c.execute(
             '''UPDATE context_claude_sessions
                SET scan_status=?, scan_error_code=?, updated_at=?
-               WHERE context_id=? AND resident_generation=?''',
+               WHERE context_id=? AND resident_generation=? AND scan_offset=?''',
             (
                 SCAN_STATUS_BLOCKED, str(error_code), now_s,
-                int(context_id), int(resident_generation),
+                int(context_id), int(resident_generation), exp,
             ),
         )
         if int(cur.rowcount or 0) != 1:
+            current = get_context_claude_session(
+                int(context_id), int(resident_generation), conn=c,
+            )
             if own:
                 c.rollback()
-            raise SessionRegistryNotFound()
+            if current is None:
+                raise SessionRegistryNotFound()
+            raise SessionRegistryConflict(
+                'stale mark_scan_blocked CAS mismatch',
+                error_code='scan_offset_cas_conflict',
+            )
         if own:
             c.commit()
         row = get_context_claude_session(
@@ -286,6 +341,8 @@ def mark_scan_blocked(
         )
         assert row is not None
         return row
+    except SessionRegistryError:
+        raise
     except Exception:
         if own:
             c.rollback()
@@ -349,7 +406,6 @@ def cas_advance_scan_offset(
                 int(context_id), int(resident_generation), exp,
             ),
         )
-        # Verify CAS wrote exactly one row
         check = get_context_claude_session(
             int(context_id), int(resident_generation), conn=c,
         )

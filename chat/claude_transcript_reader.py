@@ -414,17 +414,36 @@ def _open_readonly_file(path: Path) -> int:
 def read_transcript(path: Union[str, Path]) -> TranscriptGraph:
     """Parse a Claude JSONL transcript into a TranscriptGraph.
 
-    Opens the source file read-only. Never writes or truncates.
+    Opens the source file read-only and streams line-by-line (constant-ish
+    memory). Never writes or truncates. Does not load the whole file at once.
     """
     src = Path(path)
     fd = _open_readonly_file(src)
+    graph = TranscriptGraph(session_id='', source_path=str(src))
     try:
-        data = os.read(fd, os.fstat(fd).st_size)
+        with os.fdopen(fd, 'r', encoding='utf-8', closefd=True) as handle:
+            byte_offset = 0
+            for lineno, raw_line in enumerate(handle, 1):
+                line_bytes = raw_line.encode('utf-8')
+                line = raw_line.strip()
+                if line:
+                    try:
+                        obj = json.loads(line)
+                    except json.JSONDecodeError as exc:
+                        raise TranscriptReaderError(
+                            ReaderErrorCode.INVALID_JSON,
+                            f'line_{lineno}:{exc.msg}',
+                        ) from exc
+                    _ingest_json_object(
+                        graph, obj, lineno=lineno, byte_offset=byte_offset,
+                    )
+                byte_offset += len(line_bytes)
+    except TranscriptReaderError:
+        raise
     except OSError as exc:
         raise TranscriptReaderError(ReaderErrorCode.IO_ERROR, str(exc)) from exc
-    finally:
-        os.close(fd)
-    return _parse_transcript_bytes(data, base_offset=0, source_path=str(src))
+
+    return _finalize_graph(graph)
 
 
 def read_transcript_range(
@@ -437,6 +456,7 @@ def read_transcript_range(
     Fail-closed rules:
     - offsets must be non-negative ints with ``start <= end``
     - file size must be ``>= end_offset`` (truncation / short file refused)
+    - unless ``start == 0``, the byte immediately before start must be ``\\n``
     - range must not end mid-line when more file bytes follow the slice
     - never scans past ``end_offset`` (caller's observed end is authoritative)
     """
@@ -464,14 +484,24 @@ def read_transcript_range(
             return _finalize_graph(
                 TranscriptGraph(session_id='', source_path=str(src)),
             )
-        os.lseek(fd, start, os.SEEK_SET)
+        # Start must be on a line boundary (except offset 0).
+        if start > 0:
+            os.lseek(fd, start - 1, os.SEEK_SET)
+            prev = os.read(fd, 1)
+            if prev != b'\n':
+                raise TranscriptReaderError(
+                    ReaderErrorCode.RANGE_MID_LINE,
+                    f'start={start}:prev={prev!r}',
+                )
+        else:
+            os.lseek(fd, 0, os.SEEK_SET)
         data = os.read(fd, end - start)
         if len(data) != end - start:
             raise TranscriptReaderError(
                 ReaderErrorCode.IO_ERROR,
                 f'short_read:{len(data)}!={end - start}',
             )
-        # Mid-line cut: slice does not end with newline but file continues.
+        # Mid-line cut at end: slice does not end with newline but file continues.
         if end < size and (not data.endswith(b'\n')):
             raise TranscriptReaderError(
                 ReaderErrorCode.RANGE_MID_LINE,
