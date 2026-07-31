@@ -27,6 +27,11 @@ from chat.context_window import (
     parse_strict_query_positive_int,
     switch_context_window,
 )
+from chat.context_window_preview import (
+    PreviewDbUnavailableError,
+    parse_thinking_policy,
+    preview_context_window,
+)
 from chat.daily_context import DEFAULT_CHAT_ID
 from daily_context_routes import _default_token_from_env, _reject_non_default_chat_id
 
@@ -116,6 +121,77 @@ def create_context_window_blueprint(
             return jsonify({'ok': False, 'error': str(exc)}), 400
         except Exception as exc:
             logger.exception('context-window/carryover-candidates failed')
+            return jsonify({'ok': False, 'error': str(exc)}), 500
+
+    @blueprint.route('/api/context-window/preview', methods=['POST'])
+    def context_window_preview():
+        err = _auth_error()
+        if err:
+            return err
+        data = request.get_json(silent=True)
+        if not isinstance(data, dict):
+            return jsonify({'ok': False, 'error': 'invalid preview payload'}), 400
+        chat_id = str(data.get('chat_id') or request.args.get('chat_id') or DEFAULT_CHAT_ID)
+        cid_err = _reject_non_default_chat_id(chat_id)
+        if cid_err:
+            return cid_err
+        try:
+            source_context_id = parse_strict_json_positive_int(
+                'source_context_id', data.get('source_context_id'),
+            )
+            source_context_epoch = parse_strict_json_positive_int(
+                'source_context_epoch', data.get('source_context_epoch'),
+            )
+            count = parse_strict_json_carryover_count(data.get('count'))
+            preview_id = str(data['preview_id'])
+            thinking_policy = parse_thinking_policy(data.get('thinking_policy'))
+        except (KeyError, TypeError):
+            return jsonify({'ok': False, 'error': 'invalid preview payload'}), 400
+        except ValueError as exc:
+            return jsonify({'ok': False, 'error': str(exc)}), 400
+        try:
+            result = preview_context_window(
+                source_context_id=source_context_id,
+                source_context_epoch=source_context_epoch,
+                count=count,
+                preview_id=preview_id,
+                thinking_policy=thinking_policy,
+                chat_id=chat_id,
+                db_path=db_path,
+            )
+            return jsonify(result), 200
+        except StaleSourceContextError as exc:
+            return jsonify({
+                'ok': False, 'error': str(exc), 'code': 'stale_source_context',
+            }), 409
+        except NoOpenContextWindowError as exc:
+            return jsonify({
+                'ok': False, 'error': str(exc), 'code': 'no_open_context',
+            }), 409
+        except WindowBusyError as exc:
+            return jsonify({
+                'ok': False,
+                'error': str(exc),
+                'code': 'window_busy',
+                'retryable': True,
+            }), 423
+        except SwitchInProgressError as exc:
+            return jsonify({
+                'ok': False,
+                'error': str(exc),
+                'code': 'switch_in_progress',
+                'retryable': True,
+            }), 423
+        except PreviewDbUnavailableError as exc:
+            return jsonify({
+                'ok': False,
+                'error': str(exc),
+                'code': exc.error_code,
+            }), 503
+        except ValueError as exc:
+            return jsonify({'ok': False, 'error': str(exc)}), 400
+        except Exception as exc:
+            logger.exception('context-window/preview failed')
             return jsonify({'ok': False, 'error': str(exc)}), 500
 
     @blueprint.route('/api/context-window/switch', methods=['POST'])
