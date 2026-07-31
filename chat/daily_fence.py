@@ -10,9 +10,11 @@ Operation = tuple[str, tuple | list]
 _ALLOWED_KEYWORDS = frozenset({'INSERT', 'UPDATE', 'DELETE', 'REPLACE'})
 _FIRST_KEYWORD_RE = re.compile(r'^([A-Za-z_]+)')
 
+# Formal current only — never treat provisional manual_staged prepare rows as current.
 _CURRENT_ROW_SQL = (
     'SELECT id, context_epoch, resident_generation FROM daily_contexts '
-    'WHERE chat_id=? AND is_backfill=0 ORDER BY context_epoch DESC LIMIT 1'
+    "WHERE chat_id=? AND is_backfill=0 AND window_mode != 'manual_staged' "
+    'ORDER BY context_epoch DESC LIMIT 1'
 )
 
 

@@ -266,6 +266,14 @@ def _migration_checkpoint(stage: str) -> None:
         raise DailyContextError('migration fault injection: %s' % stage)
 
 
+# Staged prepare windows are never canonical / formal-current.
+WINDOW_MODE_MANUAL_STAGED = 'manual_staged'
+
+# Shared SQL fragments: non-backfill and not a staged prepare target.
+_FORMAL_CONTEXT_PRED = "is_backfill=0 AND window_mode != 'manual_staged'"
+_FORMAL_CONTEXT_PRED_C = "c.is_backfill=0 AND c.window_mode != 'manual_staged'"
+
+
 def _create_manual_window_indexes(conn: sqlite3.Connection) -> None:
     conn.execute(
         'CREATE INDEX IF NOT EXISTS idx_daily_contexts_chat_epoch '
@@ -284,6 +292,11 @@ def _create_manual_window_indexes(conn: sqlite3.Connection) -> None:
         'CREATE UNIQUE INDEX IF NOT EXISTS idx_daily_contexts_switch_idem_unique '
         'ON daily_contexts(chat_id, switch_request_id) '
         'WHERE switch_request_id IS NOT NULL'
+    )
+    # At most one uncleared manual_staged target per chat (prepare identity fence).
+    conn.execute(
+        'CREATE UNIQUE INDEX IF NOT EXISTS idx_daily_contexts_manual_staged_unique '
+        "ON daily_contexts(chat_id) WHERE window_mode='manual_staged'"
     )
 
 
@@ -460,6 +473,7 @@ def ensure_schema(db_path: Optional[str] = None) -> None:
     if path in _SCHEMA_READY and os.path.isfile(path):
         conn = _connect(path)
         try:
+            _ensure_manual_window_indexes(conn)
             _ensure_context_switch_forge_schema(conn)
             _ensure_session_registry_mapping_schema(conn)
             conn.commit()
@@ -762,7 +776,7 @@ def _max_epoch(conn: sqlite3.Connection, chat_id: str) -> int:
 def _active_epoch_high_water(conn: sqlite3.Connection, chat_id: str) -> int:
     row = conn.execute(
         'SELECT MAX(context_epoch) AS m FROM daily_contexts '
-        'WHERE chat_id=? AND is_backfill=0',
+        f'WHERE chat_id=? AND {_FORMAL_CONTEXT_PRED}',
         (chat_id,),
     ).fetchone()
     return int(row['m'] or 0) if row else 0
@@ -852,7 +866,7 @@ def _latest_active_context_row(
     chat_id: str,
 ) -> Optional[dict[str, Any]]:
     return _row_to_dict(conn.execute(
-        'SELECT * FROM daily_contexts WHERE chat_id=? AND is_backfill=0 '
+        f'SELECT * FROM daily_contexts WHERE chat_id=? AND {_FORMAL_CONTEXT_PRED} '
         'ORDER BY context_epoch DESC LIMIT 1',
         (str(chat_id),),
     ).fetchone())
@@ -890,9 +904,9 @@ def _rollover_lease_blocks_origin_conn(
 ) -> None:
     """Defer cross-day rollover while another context day holds an active turn lease."""
     rows = conn.execute(
-        '''SELECT c.local_day, l.expires_at FROM daily_resident_turn_leases l
+        f'''SELECT c.local_day, l.expires_at FROM daily_resident_turn_leases l
            INNER JOIN daily_contexts c ON c.id = l.context_id
-           WHERE c.chat_id=? AND c.is_backfill=0''',
+           WHERE c.chat_id=? AND {_FORMAL_CONTEXT_PRED_C}''',
         (str(chat_id),),
     ).fetchall()
     for row in rows:
@@ -2264,7 +2278,7 @@ def is_epoch_current(
     try:
         row = conn.execute(
             'SELECT id, context_epoch, resident_generation FROM daily_contexts '
-            'WHERE chat_id=? AND is_backfill=0 AND closed_at IS NULL '
+            f'WHERE chat_id=? AND {_FORMAL_CONTEXT_PRED} AND closed_at IS NULL '
             'ORDER BY context_epoch DESC LIMIT 1',
             (chat_id,),
         ).fetchone()
@@ -2388,7 +2402,7 @@ def get_latest_active_context(
     conn = _connect(db_path)
     try:
         return _row_to_dict(conn.execute(
-            'SELECT * FROM daily_contexts WHERE chat_id=? AND is_backfill=0 '
+            f'SELECT * FROM daily_contexts WHERE chat_id=? AND {_FORMAL_CONTEXT_PRED} '
             'ORDER BY context_epoch DESC LIMIT 1',
             (chat_id,),
         ).fetchone())
@@ -2451,7 +2465,7 @@ def has_active_provider_turn_lease(
             'SELECT l.context_id, l.resident_generation, l.expires_at '
             'FROM daily_resident_turn_leases l '
             'JOIN daily_contexts c ON c.id=l.context_id '
-            'WHERE c.chat_id=? AND c.is_backfill=0',
+            f'WHERE c.chat_id=? AND {_FORMAL_CONTEXT_PRED_C}',
             (chat_id,),
         ).fetchall()
         now_dt = now or (datetime.datetime.utcnow() + datetime.timedelta(hours=TZ_OFFSET_HOURS))
@@ -2516,7 +2530,7 @@ def claim_daily_resident_turn(
             conn.rollback()
             raise ConflictError('context epoch mismatch')
         latest = conn.execute(
-            'SELECT id FROM daily_contexts WHERE chat_id=? AND is_backfill=0 '
+            f'SELECT id FROM daily_contexts WHERE chat_id=? AND {_FORMAL_CONTEXT_PRED} '
             'ORDER BY context_epoch DESC LIMIT 1',
             (str(chat_id),),
         ).fetchone()
@@ -2783,7 +2797,8 @@ def renew_resident_turn_lease(
         cid = str(chat_id or epoch_token.get('chat_id') if epoch_token else '') or str(cur.get('chat_id') or '')
         latest = conn.execute(
             'SELECT id, context_epoch, resident_generation FROM daily_contexts '
-            'WHERE chat_id=? AND is_backfill=0 ORDER BY context_epoch DESC LIMIT 1',
+            f'WHERE chat_id=? AND {_FORMAL_CONTEXT_PRED} '
+            'ORDER BY context_epoch DESC LIMIT 1',
             (cid,),
         ).fetchone()
         if latest is None or int(latest['id']) != int(context_id):
@@ -2982,7 +2997,8 @@ def persist_daily_assistant_if_current(
             raise ConflictError('epoch/generation stale at persist')
         active = conn.execute(
             'SELECT context_epoch, resident_generation FROM daily_contexts '
-            'WHERE chat_id=? AND is_backfill=0 ORDER BY context_epoch DESC LIMIT 1',
+            f'WHERE chat_id=? AND {_FORMAL_CONTEXT_PRED} '
+            'ORDER BY context_epoch DESC LIMIT 1',
             (str(chat_id),),
         ).fetchone()
         if active is None or int(active['context_epoch']) != int(context_epoch):

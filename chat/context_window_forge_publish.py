@@ -287,6 +287,32 @@ def _selected_user_round_count(conn, intent: dict[str, Any]) -> int:
     return int(row[0] if row else 0)
 
 
+def verify_published_candidate_file(
+    *,
+    forge_cwd: str,
+    claude_home: Path,
+    target_session_id: str,
+    expected_sha256: str,
+    expected_size: int,
+) -> Optional[VerifiedFileIdentity]:
+    """Read-only public verify of a Forge-published candidate JSONL identity.
+
+    Does not touch ``context_switch_intents``, Registry, or resident state.
+    """
+    allowed_root = Path(claude_home).resolve(strict=False)
+    derived = derive_transcript_path(
+        cwd=forge_cwd,
+        claude_session_id=str(target_session_id),
+        claude_home=str(claude_home),
+    )
+    return _verify_bound_file(
+        path=Path(derived),
+        expected_sha256=str(expected_sha256),
+        expected_size=int(expected_size),
+        allowed_root=allowed_root,
+    )
+
+
 def _verify_bound_file(
     *,
     path: Path,
