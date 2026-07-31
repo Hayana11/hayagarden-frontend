@@ -5,10 +5,12 @@ Responsibilities:
 - parse line-by-line
 - preserve raw event objects
 - build UUID / parent / tool indexes
-- classify event roles (real user vs tool_result user vs meta)
+- classify event roles (candidate user vs tool_result user vs meta)
+- record sidechain impact on candidate rounds (whole-round exclusion later)
 - report illegal JSON / duplicate UUID with explicit errors
 
 Non-responsibilities (explicit):
+- confirming real kitten/user identity (requires app mapping at Transform)
 - round selection, rewriting, resume, DB mapping, mtime session pick, --continue
 """
 from __future__ import annotations
@@ -22,9 +24,9 @@ from pathlib import Path
 from typing import Any, Mapping, Optional, Union
 
 from chat.claude_transcript_model import (
+    CandidateConversationRound,
     EventRole,
     EventType,
-    RealConversationRound,
     ToolResultRef,
     ToolUseRef,
     TranscriptEvent,
@@ -78,13 +80,15 @@ def _classify_event(raw: Mapping[str, Any]) -> tuple[EventType, EventRole, bool]
         role = EventRole.SIDECHAIN if is_sidechain else EventRole.ASSISTANT
         return EventType.ASSISTANT, role, is_sidechain
     if etype_raw == 'system':
+        # Old system rows are never candidate users; Transform strips them.
         role = EventRole.SIDECHAIN if is_sidechain else EventRole.SYSTEM
         return EventType.SYSTEM, role, is_sidechain
     if etype_raw == 'user':
         if _is_tool_result_only_user(message):
             role = EventRole.SIDECHAIN if is_sidechain else EventRole.TOOL_RESULT_USER
         else:
-            role = EventRole.SIDECHAIN if is_sidechain else EventRole.REAL_USER
+            # Candidate only — mapping must confirm real kitten message later.
+            role = EventRole.SIDECHAIN if is_sidechain else EventRole.CANDIDATE_USER
         return EventType.USER, role, is_sidechain
     if etype_raw in {'queue-operation', 'last-prompt', 'result', 'file-history-snapshot'}:
         return EventType.UNKNOWN, EventRole.META, is_sidechain
@@ -124,55 +128,74 @@ def _extract_tool_refs(
     return uses, results
 
 
-def _build_real_rounds(events: list[TranscriptEvent]) -> list[RealConversationRound]:
-    rounds: list[RealConversationRound] = []
+def _build_candidate_rounds(events: list[TranscriptEvent]) -> list[CandidateConversationRound]:
+    """Assemble candidate rounds; record sidechain impact without pruning silently.
+
+    SYSTEM events are never attached to rounds (always stripped later).
+    Sidechain events whose parent is in the current round (main or already
+    impacted sidechain) mark the whole round as sidechain-affected.
+    """
+    rounds: list[CandidateConversationRound] = []
     current_uuids: list[str] = []
     current_user: Optional[str] = None
     current_tools: list[str] = []
+    current_side_impact: list[str] = []
     has_assistant = False
 
     def flush() -> None:
-        nonlocal current_uuids, current_user, current_tools, has_assistant
+        nonlocal current_uuids, current_user, current_tools, current_side_impact, has_assistant
         if current_user and current_uuids:
             rounds.append(
-                RealConversationRound(
-                    real_user_event_uuid=current_user,
+                CandidateConversationRound(
+                    candidate_user_event_uuid=current_user,
                     event_uuids=tuple(current_uuids),
                     tool_use_ids=tuple(current_tools),
                     has_assistant=has_assistant,
+                    sidechain_impact_uuids=tuple(current_side_impact),
                 )
             )
         current_uuids = []
         current_user = None
         current_tools = []
+        current_side_impact = []
         has_assistant = False
 
     for evt in events:
-        if evt.event_role == EventRole.REAL_USER and not evt.is_sidechain:
+        if evt.event_role == EventRole.CANDIDATE_USER and not evt.is_sidechain:
             flush()
             current_user = evt.event_uuid
             current_uuids = [evt.event_uuid]
             continue
+
         if current_user is None:
             continue
-        if evt.event_role in {
-            EventRole.ASSISTANT,
-            EventRole.TOOL_RESULT_USER,
-            EventRole.SYSTEM,
-        } and not evt.is_sidechain:
+
+        # Sidechain attached to this round → whole-round impact (do not fold in)
+        if evt.is_sidechain or evt.event_role == EventRole.SIDECHAIN:
+            parent = evt.parent_uuid
+            if parent and (
+                parent in current_uuids or parent in current_side_impact
+            ):
+                if evt.event_uuid not in current_side_impact:
+                    current_side_impact.append(evt.event_uuid)
+            continue
+
+        # Old SYSTEM never joins a migrateable round
+        if evt.event_role == EventRole.SYSTEM:
+            continue
+
+        if evt.event_role in {EventRole.ASSISTANT, EventRole.TOOL_RESULT_USER}:
             current_uuids.append(evt.event_uuid)
             if evt.event_role == EventRole.ASSISTANT:
                 has_assistant = True
             uses, _ = _extract_tool_refs(evt)
             for use in uses:
                 current_tools.append(use.tool_use_id)
-        elif evt.event_role in {EventRole.SUMMARY, EventRole.META, EventRole.UNKNOWN}:
-            # noise outside round chain — ignore for round assembly
             continue
-        elif evt.is_sidechain or evt.event_role == EventRole.SIDECHAIN:
+
+        if evt.event_role in {EventRole.SUMMARY, EventRole.META, EventRole.UNKNOWN}:
             continue
-        else:
-            continue
+
     flush()
     return rounds
 
@@ -200,7 +223,6 @@ def read_transcript(path: Union[str, Path]) -> TranscriptGraph:
     session_ids: set[str] = set()
 
     try:
-        # O_RDONLY only — never create/truncate
         fd = os.open(str(src), os.O_RDONLY)
     except OSError as exc:
         raise TranscriptReaderError(ReaderErrorCode.IO_ERROR, str(exc)) from exc
@@ -263,6 +285,8 @@ def read_transcript(path: Union[str, Path]) -> TranscriptGraph:
 
                 if etype == EventType.SUMMARY:
                     graph.summary_uuids.append(uid)
+                if etype == EventType.SYSTEM or erole == EventRole.SYSTEM:
+                    graph.system_uuids.append(uid)
                 if is_sidechain or erole == EventRole.SIDECHAIN:
                     graph.sidechain_uuids.append(uid)
                 if erole == EventRole.UNKNOWN:
@@ -294,7 +318,7 @@ def read_transcript(path: Union[str, Path]) -> TranscriptGraph:
         graph.session_id = sorted(session_ids)[0]
         graph.warnings.append(f'multiple_session_ids:{len(session_ids)}')
 
-    graph.real_rounds = _build_real_rounds(graph.events)
+    graph.candidate_rounds = _build_candidate_rounds(graph.events)
     return graph
 
 
@@ -326,7 +350,6 @@ def assert_source_unchanged(
             f'sha {before.sha256} -> {after.sha256}; '
             f'size {before.size} -> {after.size}'
         )
-    # byte-identical content check
     with open(before.path, 'rb') as a, open(target, 'rb') as b:
         if a.read() != b.read():
             raise AssertionError('source transcript byte content changed')

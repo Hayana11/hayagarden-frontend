@@ -11,9 +11,14 @@ from typing import Any, Mapping, Optional
 
 
 class EventRole(str, Enum):
-    """Logical role after structure inspection (not raw message.role alone)."""
+    """Logical role after structure inspection (not raw message.role alone).
 
-    REAL_USER = 'real_user'
+    Ordinary JSONL ``user`` rows that are not tool_result-only are only
+    *candidates*. Confirmed kitten/user identity requires an authoritative
+    application message-event mapping at Transform time.
+    """
+
+    CANDIDATE_USER = 'candidate_user'
     TOOL_RESULT_USER = 'tool_result_user'
     ASSISTANT = 'assistant'
     SYSTEM = 'system'
@@ -39,7 +44,7 @@ class ThinkingPolicy(str, Enum):
 
 
 class SidechainPolicy(str, Enum):
-    """Spike CASE 5B approved default is EXCLUDE."""
+    """Spike CASE 5B approved default is EXCLUDE (whole affected round)."""
 
     EXCLUDE = 'exclude'
     KEEP = 'keep'
@@ -95,18 +100,29 @@ class TranscriptEvent:
 
 
 @dataclass(frozen=True)
-class RealConversationRound:
-    """One complete real user turn and its assistant/tool logical chain."""
+class CandidateConversationRound:
+    """One candidate user turn and its main-chain assistant/tool logic.
 
-    real_user_event_uuid: str
+    Sidechain impact is recorded separately. When sidechain policy is EXCLUDE
+    and ``sidechain_impact_uuids`` is non-empty, Transform must drop the
+    *entire* round — not prune branches and keep a partial main chain.
+    """
+
+    candidate_user_event_uuid: str
     event_uuids: tuple[str, ...]
     tool_use_ids: tuple[str, ...] = ()
     has_assistant: bool = False
+    sidechain_impact_uuids: tuple[str, ...] = ()
 
     @property
-    def starts_with_real_user(self) -> bool:
-        return bool(self.real_user_event_uuid) and (
-            not self.event_uuids or self.event_uuids[0] == self.real_user_event_uuid
+    def has_sidechain_impact(self) -> bool:
+        return bool(self.sidechain_impact_uuids)
+
+    @property
+    def starts_with_candidate_user(self) -> bool:
+        return bool(self.candidate_user_event_uuid) and (
+            not self.event_uuids
+            or self.event_uuids[0] == self.candidate_user_event_uuid
         )
 
 
@@ -122,8 +138,9 @@ class TranscriptGraph:
     tool_results: dict[str, ToolResultRef] = field(default_factory=dict)
     summary_uuids: list[str] = field(default_factory=list)
     sidechain_uuids: list[str] = field(default_factory=list)
+    system_uuids: list[str] = field(default_factory=list)
     unknown_uuids: list[str] = field(default_factory=list)
-    real_rounds: list[RealConversationRound] = field(default_factory=list)
+    candidate_rounds: list[CandidateConversationRound] = field(default_factory=list)
     source_path: Optional[str] = None
     warnings: list[str] = field(default_factory=list)
 

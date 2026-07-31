@@ -271,6 +271,13 @@ def validate_transcript_events(
                     thinking = str(b.get('thinking') or '').strip()
                     if btype == 'thinking' and not thinking:
                         result.add(ValidatorErrorCode.THINKING, 'empty_thinking')
+                    # KEEP = preserve intact signed thinking, including signature
+                    if (
+                        btype == 'thinking'
+                        and options.thinking_policy == ThinkingPolicy.KEEP
+                        and not str(b.get('signature') or '').strip()
+                    ):
+                        result.add(ValidatorErrorCode.THINKING, 'missing_signature')
                     if btype == 'redacted_thinking' and not b.get('data'):
                         result.add(ValidatorErrorCode.THINKING, 'empty_redacted_thinking')
                 else:

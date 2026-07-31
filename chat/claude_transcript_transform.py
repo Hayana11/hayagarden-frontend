@@ -28,10 +28,6 @@ from chat.claude_transcript_model import (
     UnknownEventPolicy,
 )
 
-# Boundary primer constants aligned with production chat/context_window_forge.py
-BOUNDARY_PRIMER_USER = '[context-window-boundary]'
-BOUNDARY_PRIMER_ASSISTANT = '[context-window-ready]'
-
 STRIP_TOP_LEVEL_KEYS = frozenset({
     'requestId', 'request_id', 'promptId', 'prompt_id',
 })
@@ -45,6 +41,8 @@ class TransformErrorCode(str, Enum):
     INVALID_POLICY = 'TRANSFORM_INVALID_POLICY'
     EMPTY_SELECTION = 'TRANSFORM_EMPTY_SELECTION'
     BYTE_BUDGET = 'TRANSFORM_BYTE_BUDGET'
+    THINKING_INVALID = 'TRANSFORM_THINKING_INVALID'
+    UNCONFIRMED_USER = 'TRANSFORM_UNCONFIRMED_USER'
 
 
 class TransformError(ValueError):
@@ -69,6 +67,7 @@ class TransformRequest:
     cwd: str
     keep_rounds: int
     # authoritative app-message mapping: source event uuid -> plain user text
+    # Presence in this map is what confirms a candidate user as a real kitten message.
     user_canonical_by_event_uuid: Mapping[str, str]
     thinking_policy: ThinkingPolicy
     sidechain_policy: SidechainPolicy = SidechainPolicy.EXCLUDE
@@ -77,9 +76,8 @@ class TransformRequest:
     version: str = '2.1.220'
     max_output_bytes: Optional[int] = None
     max_output_tokens_estimate: Optional[int] = None
-    # optional validated primer candidate (not searched here)
+    # optional validated primer candidate (not searched here; not 0-round default)
     tool_primer_candidate: Optional[ToolPrimerCandidate] = None
-    use_boundary_primer_when_empty: bool = True
 
 
 @dataclass
@@ -89,7 +87,10 @@ class TransformResult:
     tool_id_map: dict[str, str] = field(default_factory=dict)
     selected_round_count: int = 0
     dropped_sidechain_uuids: list[str] = field(default_factory=list)
+    dropped_sidechain_round_user_uuids: list[str] = field(default_factory=list)
     dropped_summary_uuids: list[str] = field(default_factory=list)
+    dropped_system_uuids: list[str] = field(default_factory=list)
+    dropped_unconfirmed_user_uuids: list[str] = field(default_factory=list)
     dropped_noise_uuids: list[str] = field(default_factory=list)
     output_sha256: str = ''
     notes: list[str] = field(default_factory=list)
@@ -120,6 +121,23 @@ def _content_blocks(message: Mapping[str, Any]) -> list[dict[str, Any]]:
 
 def _filter_thinking(blocks: list[dict[str, Any]], policy: ThinkingPolicy) -> list[dict[str, Any]]:
     if policy == ThinkingPolicy.KEEP:
+        for b in blocks:
+            if b.get('type') == 'thinking':
+                if not str(b.get('thinking') or '').strip():
+                    raise TransformError(
+                        TransformErrorCode.THINKING_INVALID,
+                        'empty_thinking',
+                    )
+                if not str(b.get('signature') or '').strip():
+                    raise TransformError(
+                        TransformErrorCode.THINKING_INVALID,
+                        'missing_signature',
+                    )
+            if b.get('type') == 'redacted_thinking' and not b.get('data'):
+                raise TransformError(
+                    TransformErrorCode.THINKING_INVALID,
+                    'empty_redacted_thinking',
+                )
         return blocks
     if policy == ThinkingPolicy.DROP:
         return [
@@ -143,7 +161,6 @@ def _remap_tool_blocks(
                 raise TransformError(TransformErrorCode.TOOL_ORPHAN, 'empty_tool_use_id')
             new_id = tool_id_map.get(old_id)
             if new_id is None:
-                # deterministic remap from old id
                 new_id = 'toolu_' + hashlib.sha256(old_id.encode('utf-8')).hexdigest()[:20]
                 tool_id_map[old_id] = new_id
             b['id'] = new_id
@@ -171,69 +188,43 @@ def _strip_assistant_metadata(evt: dict[str, Any]) -> None:
         message.pop('usage', None)
 
 
-def _sidechain_excluded(graph: TranscriptGraph, policy: SidechainPolicy) -> set[str]:
-    if policy == SidechainPolicy.KEEP:
-        return set()
-    if policy != SidechainPolicy.EXCLUDE:
-        raise TransformError(TransformErrorCode.INVALID_POLICY, str(policy))
-    excluded = set(graph.sidechain_uuids)
-    changed = True
-    while changed:
-        changed = False
-        for evt in graph.events:
-            if evt.event_uuid in excluded:
-                continue
-            if evt.parent_uuid and evt.parent_uuid in excluded:
-                excluded.add(evt.event_uuid)
-                changed = True
-    return excluded
-
-
 def _is_auto_noise(evt: TranscriptEvent) -> bool:
     return evt.event_role in {EventRole.META, EventRole.UNKNOWN}
 
 
-def _select_rounds(graph: TranscriptGraph, keep_rounds: int, excluded: set[str]):
-    if keep_rounds < 0:
+def _select_confirmed_rounds(
+    graph: TranscriptGraph,
+    request: TransformRequest,
+) -> tuple[list, list[str], list[str]]:
+    """Return (eligible_tail, dropped_sidechain_round_users, dropped_unconfirmed)."""
+    if request.keep_rounds < 0:
         raise TransformError(TransformErrorCode.ROUND_BUDGET, 'negative')
-    eligible = [
-        rnd for rnd in graph.real_rounds
-        if rnd.real_user_event_uuid not in excluded
-        and all(uid not in excluded for uid in rnd.event_uuids)
-    ]
-    if keep_rounds == 0:
-        return []
-    return eligible[-keep_rounds:]
 
+    dropped_side_rounds: list[str] = []
+    dropped_unconfirmed: list[str] = []
+    eligible = []
 
-def _build_boundary_primer(req: TransformRequest) -> list[dict[str, Any]]:
-    u = str(uuid.uuid5(uuid.NAMESPACE_URL, f'{req.new_session_id}:boundary-user'))
-    a = str(uuid.uuid5(uuid.NAMESPACE_URL, f'{req.new_session_id}:boundary-assistant'))
-    return [
-        {
-            'type': 'user',
-            'uuid': u,
-            'parentUuid': None,
-            'timestamp': '1970-01-01T00:00:00.000Z',
-            'sessionId': req.new_session_id,
-            'cwd': req.cwd,
-            'version': req.version,
-            'message': {'role': 'user', 'content': BOUNDARY_PRIMER_USER},
-        },
-        {
-            'type': 'assistant',
-            'uuid': a,
-            'parentUuid': u,
-            'timestamp': '1970-01-01T00:00:00.001Z',
-            'sessionId': req.new_session_id,
-            'cwd': req.cwd,
-            'version': req.version,
-            'message': {
-                'role': 'assistant',
-                'content': [{'type': 'text', 'text': BOUNDARY_PRIMER_ASSISTANT}],
-            },
-        },
-    ]
+    for rnd in graph.candidate_rounds:
+        cand = rnd.candidate_user_event_uuid
+        if cand not in request.user_canonical_by_event_uuid:
+            dropped_unconfirmed.append(cand)
+            continue
+        if (
+            request.sidechain_policy == SidechainPolicy.EXCLUDE
+            and rnd.has_sidechain_impact
+        ):
+            dropped_side_rounds.append(cand)
+            continue
+        if request.sidechain_policy not in {
+            SidechainPolicy.EXCLUDE,
+            SidechainPolicy.KEEP,
+        }:
+            raise TransformError(TransformErrorCode.INVALID_POLICY, 'sidechain')
+        eligible.append(rnd)
+
+    if request.keep_rounds == 0:
+        return [], dropped_side_rounds, dropped_unconfirmed
+    return eligible[-request.keep_rounds:], dropped_side_rounds, dropped_unconfirmed
 
 
 def _emit_event(
@@ -255,10 +246,11 @@ def _emit_event(
         'version': req.version,
     }
 
-    if src.event_role == EventRole.REAL_USER:
+    if src.event_role == EventRole.CANDIDATE_USER:
         canonical = req.user_canonical_by_event_uuid.get(old_uid)
         if canonical is None:
-            raise TransformError(TransformErrorCode.MAPPING_MISSING, old_uid)
+            # Should not reach: unconfirmed rounds are filtered earlier
+            raise TransformError(TransformErrorCode.UNCONFIRMED_USER, old_uid)
         if not str(canonical).strip():
             raise TransformError(TransformErrorCode.MAPPING_EMPTY, old_uid)
         # never copy old user payload; rebuild from authoritative mapping only
@@ -287,12 +279,8 @@ def _emit_event(
         _strip_assistant_metadata(new_evt)
         return new_evt
 
-    if src.event_role == EventRole.SYSTEM:
-        message = copy.deepcopy(src.raw.get('message') or {})
-        new_evt['message'] = message
-        return new_evt
-
-    raise TransformError(TransformErrorCode.INVALID_POLICY, f'emit:{src.event_role}')
+    # SYSTEM and others must never be migrated
+    raise TransformError(TransformErrorCode.INVALID_POLICY, f'emit_forbidden:{src.event_role}')
 
 
 def _check_budgets(events: Sequence[Mapping[str, Any]], request: TransformRequest) -> None:
@@ -317,9 +305,9 @@ def transform_transcript(graph: TranscriptGraph, request: TransformRequest) -> T
     if request.thinking_policy not in {ThinkingPolicy.KEEP, ThinkingPolicy.DROP}:
         raise TransformError(TransformErrorCode.INVALID_POLICY, 'thinking')
 
-    excluded_side = _sidechain_excluded(graph, request.sidechain_policy)
     dropped_summary: list[str] = []
     dropped_noise: list[str] = []
+    dropped_system = list(graph.system_uuids)
 
     if request.summary_policy == SummaryPolicy.DROP:
         dropped_summary = list(graph.summary_uuids)
@@ -335,24 +323,33 @@ def transform_transcript(graph: TranscriptGraph, request: TransformRequest) -> T
         ):
             raise TransformError(TransformErrorCode.INVALID_POLICY, f'unknown:{evt.event_uuid}')
 
-    selected = _select_rounds(graph, request.keep_rounds, excluded_side)
+    selected, dropped_side_rounds, dropped_unconfirmed = _select_confirmed_rounds(
+        graph, request
+    )
+
+    # All sidechain event UUIDs (for audit); whole rounds dropped separately
+    sidechain_event_uuids = sorted(set(graph.sidechain_uuids))
+    for rnd in graph.candidate_rounds:
+        if rnd.candidate_user_event_uuid in dropped_side_rounds:
+            sidechain_event_uuids = sorted(
+                set(sidechain_event_uuids) | set(rnd.sidechain_impact_uuids)
+            )
 
     result = TransformResult(
         events=[],
-        dropped_sidechain_uuids=sorted(excluded_side),
+        dropped_sidechain_uuids=sidechain_event_uuids,
+        dropped_sidechain_round_user_uuids=dropped_side_rounds,
         dropped_summary_uuids=dropped_summary,
+        dropped_system_uuids=dropped_system,
+        dropped_unconfirmed_user_uuids=dropped_unconfirmed,
         dropped_noise_uuids=dropped_noise,
         selected_round_count=len(selected),
     )
 
     if not selected:
-        if request.keep_rounds == 0 and request.use_boundary_primer_when_empty:
-            result.events = _build_boundary_primer(request)
-            result.notes.append('boundary_primer_empty_selection')
-            result.output_sha256 = sha256_text(serialize_events(result.events))
-            _check_budgets(result.events, request)
-            return result
+        # 0-round and empty-after-filter both default to native cold / empty transcript
         if request.keep_rounds == 0:
+            result.notes.append('native_cold_empty_transcript')
             result.output_sha256 = sha256_text(serialize_events(result.events))
             return result
         raise TransformError(TransformErrorCode.EMPTY_SELECTION, 'no_eligible_rounds')
@@ -361,20 +358,32 @@ def transform_transcript(graph: TranscriptGraph, request: TransformRequest) -> T
     seen: set[str] = set()
     for rnd in selected:
         for uid in rnd.event_uuids:
-            if uid in seen or uid in excluded_side:
+            if uid in seen:
                 continue
             evt = graph.by_uuid.get(uid)
             if evt is None:
+                continue
+            # Never migrate SYSTEM / summary / meta / sidechain rows
+            if evt.event_role == EventRole.SYSTEM:
                 continue
             if evt.event_role == EventRole.SUMMARY and request.summary_policy == SummaryPolicy.DROP:
                 continue
             if _is_auto_noise(evt):
                 continue
+            if evt.is_sidechain or evt.event_role == EventRole.SIDECHAIN:
+                continue
             ordered_src.append(evt)
             seen.add(uid)
 
-    if not ordered_src or ordered_src[0].event_role != EventRole.REAL_USER:
-        raise TransformError(TransformErrorCode.EMPTY_SELECTION, 'must_start_with_real_user')
+    if not ordered_src or ordered_src[0].event_role != EventRole.CANDIDATE_USER:
+        raise TransformError(TransformErrorCode.EMPTY_SELECTION, 'must_start_with_confirmed_user')
+
+    # Confirm first event is mapped (belt and suspenders)
+    if ordered_src[0].event_uuid not in request.user_canonical_by_event_uuid:
+        raise TransformError(
+            TransformErrorCode.UNCONFIRMED_USER,
+            ordered_src[0].event_uuid,
+        )
 
     uuid_map: dict[str, str] = {}
     tool_id_map: dict[str, str] = {}
