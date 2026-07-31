@@ -493,7 +493,8 @@ class ContextWindowFirstTurnTests(unittest.TestCase):
         self.assertEqual(source.get('closed_at'), source_before.get('closed_at'))
         if expect_dirty:
             self.assertEqual(intent.get('orphan_jsonl_state'), 'precommit_dirty')
-            # Dirty may leave COMMITTING; must not pretend clean READY+lease-free success.
+            # Dirty must not roll back to READY (message may already be in Claude).
+            self.assertNotEqual(intent['status'], INTENT_READY)
             self.assertNotEqual(intent['status'], INTENT_COMMITTED)
         else:
             self.assertEqual(intent['status'], INTENT_READY)
@@ -605,11 +606,50 @@ class ContextWindowFirstTurnTests(unittest.TestCase):
         )
         abort_first_turn_clean(session2, hooks=self.hooks, db_path=self.db, now=NOW)
 
+        # Core helper fail-closed: stdin_sent forbids clean rollback.
+        session_gate = claim_and_start_first_turn(
+            switch_request_id=self.switch_request_id,
+            first_turn_request_id=self.first_turn_request_id,
+            user_content='可重试',
+            user_message_id=gateway_user_id,
+            hooks=self.hooks,
+            db_path=self.db,
+            now=NOW,
+        )
+        ft_mod.mark_first_turn_stdin_sent(session_gate)
+        with self.assertRaises(FirstTurnError) as ar_gate:
+            abort_first_turn_clean(
+                session_gate, hooks=self.hooks, db_path=self.db, now=NOW,
+            )
+        self.assertEqual(ar_gate.exception.error_code, 'FIRST_TURN_NOT_CLEAN')
+        ft_mod.mark_first_turn_precommit_dirty(session_gate, db_path=self.db, now=NOW)
+        conn = _connect(self.db)
+        try:
+            conn.execute('BEGIN IMMEDIATE')
+            conn.execute(
+                "UPDATE context_switch_intents SET status=?, orphan_jsonl_state=NULL, "
+                "first_turn_error_code=NULL, updated_at=? WHERE request_id=?",
+                (INTENT_READY, NOW.strftime('%Y-%m-%d %H:%M:%S'), self.switch_request_id),
+            )
+            conn.execute(
+                'DELETE FROM daily_resident_turn_leases WHERE context_id=?',
+                (target_id,),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
         class _FakeStaged:
             def __init__(self, mode: str, grow_path: Path | None = None):
                 self.mode = mode
                 self.grow_path = grow_path
                 self.killed = False
+                self.ack_called = False
+
+            def _ack(self, on_stdin_flushed) -> None:
+                if on_stdin_flushed is not None:
+                    self.ack_called = True
+                    on_stdin_flushed()
 
             def _grow(self) -> None:
                 if self.grow_path is None:
@@ -617,38 +657,70 @@ class ContextWindowFirstTurnTests(unittest.TestCase):
                 with self.grow_path.open('ab') as fh:
                     fh.write(b'{"type":"x"}\n')
 
-            def send_turn(self, content, commit_meta=None):
-                if self.mode == 'boom_first':
-                    raise RuntimeError('stdin boom before first event')
+            def send_turn(self, content, commit_meta=None, on_stdin_flushed=None):
+                if self.mode == 'boom_before_ack':
+                    raise RuntimeError('boom before stdin flush ack')
                     yield  # pragma: no cover
-                if self.mode == 'boom_first_after_grow':
+                if self.mode == 'ack_then_boom_no_jsonl':
+                    self._ack(on_stdin_flushed)
+                    raise RuntimeError('boom after ack, jsonl unchanged')
+                    yield  # pragma: no cover
+                if self.mode == 'boom_before_ack_jsonl_grown':
                     self._grow()
-                    raise RuntimeError('stdin boom after jsonl growth')
+                    raise RuntimeError('boom before ack but jsonl grew')
                     yield  # pragma: no cover
-                if self.mode == 'gen_exit_first':
+                if self.mode == 'gen_exit_before_ack':
                     raise GeneratorExit()
                     yield  # pragma: no cover
-                if self.mode == 'think_then_gen_exit':
-                    yield ('think', 'hold-secret')
-                    raise GeneratorExit()
-                if self.mode == 'think_then_gen_exit_grown':
-                    self._grow()
+                if self.mode == 'ack_think_then_gen_exit':
+                    self._ack(on_stdin_flushed)
                     yield ('think', 'hold-secret')
                     raise GeneratorExit()
                 if self.mode == 'done_before_text':
+                    self._ack(on_stdin_flushed)
                     yield ('done', ('', '', {}))
-                if self.mode == 'eof_before_text':
+                if self.mode == 'eof_before_ack':
                     return
                     yield  # pragma: no cover
                 if self.mode == 'think_then_done':
+                    self._ack(on_stdin_flushed)
                     yield ('think', 'hold-secret')
                     yield ('done', ('', '', {}))
+                if self.mode == 'tool_order':
+                    self._ack(on_stdin_flushed)
+                    yield ('think', 'hold-secret')
+                    yield ('tool_use', {
+                        'id': 'tu-1', 'name': 'Read', 'args': {'path': 'x'},
+                    })
+                    yield ('tool_result', {
+                        'tool_use_id': 'tu-1', 'result': 'file-ok', 'is_error': False,
+                    })
+                    yield ('text', '你好')
+                    yield ('done', ('你好', '', {}))
                 raise AssertionError(f'unknown fake mode {self.mode}')
 
             def _kill(self, quiet=True):
                 self.killed = True
 
         turn = {'user_message_id': gateway_user_id}
+
+        def _reset_ready_fixture() -> None:
+            conn = _connect(self.db)
+            try:
+                conn.execute('BEGIN IMMEDIATE')
+                conn.execute(
+                    "UPDATE context_switch_intents SET status=?, orphan_jsonl_state=NULL, "
+                    "first_turn_error_code=NULL, updated_at=? WHERE request_id=?",
+                    (INTENT_READY, NOW.strftime('%Y-%m-%d %H:%M:%S'), self.switch_request_id),
+                )
+                conn.execute(
+                    'DELETE FROM daily_resident_turn_leases WHERE context_id=?',
+                    (target_id,),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+            jsonl_path.write_bytes(jsonl_path.read_bytes()[:start_size])
 
         def _run_stream(fake, *, expect_generator_exit=False):
             hooks = self._gateway_first_turn_hooks(fake)
@@ -674,9 +746,11 @@ class ContextWindowFirstTurnTests(unittest.TestCase):
                         chunks.append(chunk)
                 return chunks, marked, complete
 
-        with self.subTest('A_first_iter_boom_jsonl_unchanged_clean'):
+        with self.subTest('1_ack_before_failure_clean'):
             self.assertEqual(jsonl_path.stat().st_size, start_size)
-            chunks, marked, complete = _run_stream(_FakeStaged('boom_first'))
+            fake = _FakeStaged('boom_before_ack')
+            chunks, marked, complete = _run_stream(fake)
+            self.assertFalse(fake.ack_called)
             marked.assert_not_called()
             complete.assert_not_called()
             joined = ''.join(chunks)
@@ -687,7 +761,6 @@ class ContextWindowFirstTurnTests(unittest.TestCase):
                 target_id=target_id,
                 gateway_user_id=gateway_user_id,
             )
-            # Same user_message_id retryable after clean.
             session_retry = claim_and_start_first_turn(
                 switch_request_id=self.switch_request_id,
                 first_turn_request_id=self.first_turn_request_id,
@@ -702,49 +775,58 @@ class ContextWindowFirstTurnTests(unittest.TestCase):
                 session_retry, hooks=self.hooks, db_path=self.db, now=NOW,
             )
 
-        with self.subTest('A2_first_iter_boom_jsonl_grown_dirty'):
-            chunks, marked, complete = _run_stream(
-                _FakeStaged('boom_first_after_grow', grow_path=jsonl_path),
-            )
-            marked.assert_not_called()
+        with self.subTest('2_ack_after_no_jsonl_must_dirty'):
+            # Most important: flush ack without JSONL growth must NOT clean-rollback.
+            fake = _FakeStaged('ack_then_boom_no_jsonl')
+            chunks, marked, complete = _run_stream(fake)
+            self.assertTrue(fake.ack_called)
+            marked.assert_called()
             complete.assert_not_called()
-            self.assertGreater(jsonl_path.stat().st_size, start_size)
+            self.assertEqual(jsonl_path.stat().st_size, start_size)
             self._assert_pre_first_text_clean(
                 source_before=source_before,
                 target_id=target_id,
                 gateway_user_id=gateway_user_id,
                 expect_dirty=True,
             )
-            # Reset dirty fixture JSONL and intent for later subTests: re-prepare path
-            # is heavy; instead truncate growth and force READY via clean helper if possible.
-            # Dirty cannot clean-abort; leave a fresh READY by re-seeding claim state.
-            # Narrow reset: rewrite intent back to READY and clear dirty markers for isolation.
-            conn = _connect(self.db)
-            try:
-                conn.execute('BEGIN IMMEDIATE')
-                conn.execute(
-                    "UPDATE context_switch_intents SET status=?, orphan_jsonl_state=NULL, "
-                    "first_turn_error_code=NULL, updated_at=? WHERE request_id=?",
-                    (INTENT_READY, NOW.strftime('%Y-%m-%d %H:%M:%S'), self.switch_request_id),
+            # abort_first_turn_clean must refuse once stdin_sent was marked.
+            with self.assertRaises(FirstTurnError) as ar:
+                # Reconstruct a session-like object is heavy; claim refuses dirty COMMITTING.
+                claim_and_start_first_turn(
+                    switch_request_id=self.switch_request_id,
+                    first_turn_request_id=str(uuid.uuid4()),
+                    user_content='可重试',
+                    user_message_id=gateway_user_id,
+                    hooks=self.hooks,
+                    db_path=self.db,
+                    now=NOW,
                 )
-                conn.execute(
-                    'DELETE FROM daily_resident_turn_leases WHERE context_id=?',
-                    (target_id,),
-                )
-                conn.commit()
-            finally:
-                conn.close()
-            # Restore JSONL size so later clean paths see non-growth.
-            raw = jsonl_path.read_bytes()[:start_size]
-            jsonl_path.write_bytes(raw)
+            self.assertIn(
+                ar.exception.error_code,
+                ('FIRST_TURN_INTENT_STATUS', 'FIRST_TURN_IN_PROGRESS', 'FIRST_TURN_REQUEST_CONFLICT'),
+            )
+            _reset_ready_fixture()
 
-        with self.subTest('B_generator_exit_before_first_text_clean'):
+        with self.subTest('2b_before_ack_jsonl_grown_dirty'):
             chunks, marked, complete = _run_stream(
-                _FakeStaged('think_then_gen_exit'),
+                _FakeStaged('boom_before_ack_jsonl_grown', grow_path=jsonl_path),
+            )
+            marked.assert_not_called()
+            complete.assert_not_called()
+            self._assert_pre_first_text_clean(
+                source_before=source_before,
+                target_id=target_id,
+                gateway_user_id=gateway_user_id,
+                expect_dirty=True,
+            )
+            _reset_ready_fixture()
+
+        with self.subTest('B_generator_exit_before_ack_clean'):
+            chunks, marked, complete = _run_stream(
+                _FakeStaged('gen_exit_before_ack'),
                 expect_generator_exit=True,
             )
-            # First successful next() marks stdin; JSONL unchanged → still clean.
-            marked.assert_called()
+            marked.assert_not_called()
             complete.assert_not_called()
             self.assertEqual(chunks, [])
             self._assert_pre_first_text_clean(
@@ -753,36 +835,23 @@ class ContextWindowFirstTurnTests(unittest.TestCase):
                 gateway_user_id=gateway_user_id,
             )
 
-        with self.subTest('B2_generator_exit_jsonl_grown_dirty'):
+        with self.subTest('B2_generator_exit_after_ack_dirty'):
             chunks, marked, complete = _run_stream(
-                _FakeStaged('think_then_gen_exit_grown', grow_path=jsonl_path),
+                _FakeStaged('ack_think_then_gen_exit'),
                 expect_generator_exit=True,
             )
+            marked.assert_called()
             complete.assert_not_called()
+            self.assertEqual(chunks, [])
             self._assert_pre_first_text_clean(
                 source_before=source_before,
                 target_id=target_id,
                 gateway_user_id=gateway_user_id,
                 expect_dirty=True,
             )
-            conn = _connect(self.db)
-            try:
-                conn.execute('BEGIN IMMEDIATE')
-                conn.execute(
-                    "UPDATE context_switch_intents SET status=?, orphan_jsonl_state=NULL, "
-                    "first_turn_error_code=NULL, updated_at=? WHERE request_id=?",
-                    (INTENT_READY, NOW.strftime('%Y-%m-%d %H:%M:%S'), self.switch_request_id),
-                )
-                conn.execute(
-                    'DELETE FROM daily_resident_turn_leases WHERE context_id=?',
-                    (target_id,),
-                )
-                conn.commit()
-            finally:
-                conn.close()
-            jsonl_path.write_bytes(jsonl_path.read_bytes()[:start_size])
+            _reset_ready_fixture()
 
-        with self.subTest('B3_gen_close_does_not_leave_committing_lease'):
+        with self.subTest('B3_gen_close_after_precommit'):
             fake = _FakeStaged('done_before_text')
             hooks = self._gateway_first_turn_hooks(fake)
             with mock.patch.object(gateway, 'DB_PATH', self.db), \
@@ -797,11 +866,14 @@ class ContextWindowFirstTurnTests(unittest.TestCase):
                 self.assertNotIn('"t": "text"', first)
                 complete.assert_not_called()
                 gen.close()
+            # Ack happened → dirty, not READY.
             self._assert_pre_first_text_clean(
                 source_before=source_before,
                 target_id=target_id,
                 gateway_user_id=gateway_user_id,
+                expect_dirty=True,
             )
+            _reset_ready_fixture()
 
         with self.subTest('C_done_before_first_text_no_complete'):
             chunks, marked, complete = _run_stream(_FakeStaged('think_then_done'))
@@ -815,11 +887,12 @@ class ContextWindowFirstTurnTests(unittest.TestCase):
                 source_before=source_before,
                 target_id=target_id,
                 gateway_user_id=gateway_user_id,
+                expect_dirty=True,
             )
+            _reset_ready_fixture()
 
-        with self.subTest('C2_eof_before_first_text_no_complete'):
-            chunks, marked, complete = _run_stream(_FakeStaged('eof_before_text'))
-            # Empty iterator: first next raises StopIteration before stdin marker.
+        with self.subTest('C2_eof_before_ack_no_complete'):
+            chunks, marked, complete = _run_stream(_FakeStaged('eof_before_ack'))
             marked.assert_not_called()
             complete.assert_not_called()
             joined = ''.join(chunks)
@@ -830,6 +903,34 @@ class ContextWindowFirstTurnTests(unittest.TestCase):
                 target_id=target_id,
                 gateway_user_id=gateway_user_id,
             )
+
+        with self.subTest('4_tool_result_order_after_handoff'):
+            chunks, marked, complete = _run_stream(_FakeStaged('tool_order'))
+            marked.assert_called()
+            complete.assert_called()
+            parsed = []
+            for ch in chunks:
+                if not ch.startswith('data: '):
+                    continue
+                body = ch[len('data: '):].strip()
+                parsed.append(json.loads(body))
+            types = [p.get('t') for p in parsed]
+            # No client-visible events before first text; order after handoff:
+            self.assertEqual(
+                types[:5],
+                ['think', 'tool_use', 'tool_result', 'tool_call', 'text'],
+            )
+            self.assertIn('done', types)
+            tr = next(p for p in parsed if p.get('t') == 'tool_result')
+            self.assertEqual(tr.get('idx'), 0)
+            self.assertEqual(tr['d'].get('name'), 'Read')
+            self.assertEqual(tr['d'].get('result'), 'file-ok')
+            self.assertTrue(tr['d'].get('success'))
+            # Ensure think/tool_* were not released before text in the stream prefix.
+            text_i = types.index('text')
+            self.assertEqual(types.index('think'), 0)
+            self.assertLess(types.index('tool_use'), text_i)
+            self.assertLess(types.index('tool_result'), text_i)
 
     def test_db_commit_then_swap_fail_recovery(self):
         """3) same-process HANDOFF_PENDING: first delta once, no second user/asst."""

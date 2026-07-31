@@ -124,34 +124,47 @@ Cross-process first-delta recovery is **not** implemented
 
 Reuse the staged resident from claim. External SSE stays `{"t","d"}` only.
 
-### Stdin marker
+### Authoritative stdin-flush ack
 
-Do **not** call `mark_first_turn_stdin_sent` before `send_turn`. Order:
+`ResidentSession.send_turn(..., on_stdin_flushed=None)` calls the optional
+callback **synchronously after successful `stdin.write + flush`**, and **before**
+`_commit_sent_context` / any stdout read. Write/flush failure skips the callback.
+Callback failure kills the resident and re-raises (message already sent).
 
-```text
-event_iter = iter(staged.send_turn(user))
-first_event = next(event_iter)   # stdin.write+flush already done inside send_turn
-mark_first_turn_stdin_sent(session)
-chain(first_event, event_iter)…
+Gateway:
+
+```python
+stdin_flushed = False
+
+def on_stdin_flushed():
+    nonlocal stdin_flushed
+    stdin_flushed = True
+    mark_first_turn_stdin_sent(session)
+
+event_iter = staged.send_turn(user, on_stdin_flushed=on_stdin_flushed)
 ```
 
-If the first `next()` fails and JSONL has not grown past `start_offset` → clean.
+Do **not** infer send success from first `next()` or JSONL growth alone.
 
 ### Unified pre-commit terminal
 
-`_gw_first_turn_precommit_terminal` is the only pre-DB-commit closer. Evidence:
+`_gw_first_turn_precommit_terminal` is the only pre-DB-commit closer.
+
+Priority:
 
 ```text
-jsonl_grew = current_size > session.start_offset
+DB committed > stdin flush ack > JSONL auxiliary evidence
 ```
 
 | State | Action |
 |-------|--------|
-| `not _db_committed` and not `jsonl_grew` | `abort_first_turn_clean` → READY, lease released, retryable |
-| `not _db_committed` and `jsonl_grew` | `mark_first_turn_precommit_dirty` (no model retry) |
 | `_db_committed` | no clean rollback; same-process HANDOFF_PENDING recover only |
+| `stdin_flushed` (or `session.stdin_sent`) | `mark_first_turn_precommit_dirty` — never READY |
+| not flushed and JSONL not grown | `abort_first_turn_clean` → READY, lease released, retryable |
+| not flushed but JSONL grown / unreadable | `mark_first_turn_precommit_dirty` |
 
-In-memory `stdin_sent` must not override a non-grown JSONL.
+`abort_first_turn_clean` fails closed when `session.stdin_sent` is true
+(`FIRST_TURN_NOT_CLEAN`).
 
 ### GeneratorExit / client disconnect
 
@@ -170,7 +183,12 @@ If provider `done` or iterator EOF arrives while `first_released` is false:
 
 Before first non-empty text: hold `think` / `tool_use` / `tool_result` /
 `trace_summary` inside the generator. On first text: ingest → wait DB+handoff →
-release held prefix in order → release first text → pass subsequent events.
+release held prefix in order (including `tool_result`) → release first text →
+pass subsequent events.
+
+`tool_result` SSE matches the formal CC chat stream (`t`/`d`/`idx`, plus
+compatible `tool_call` dup), with a local tool-call accumulator keyed by
+`tool_use_id`.
 
 Post-DB handoff failure: one same-process `recover_first_turn_handoff_pending`
 while the generator still holds `FirstTurnSession`. First text released once;

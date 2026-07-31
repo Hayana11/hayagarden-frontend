@@ -2606,5 +2606,111 @@ class ResidentPeekRespawnReasonTests(unittest.TestCase):
         self.assertEqual(rs.cwd, '/tmp/x')
 
 
+class SendTurnStdinFlushAckTests(unittest.TestCase):
+    """Narrow: on_stdin_flushed sits after write+flush, before commit/stdout."""
+
+    def _session_with_fake_proc(self, *, write_exc=None, flush_exc=None, lines=None):
+        order: list[str] = []
+        lines = list(lines if lines is not None else [])
+
+        class _Stdin:
+            def write(self, data):
+                order.append('write')
+                if write_exc is not None:
+                    raise write_exc
+
+            def flush(self):
+                order.append('flush')
+                if flush_exc is not None:
+                    raise flush_exc
+
+            def close(self):
+                order.append('stdin_close')
+
+        class _Stdout:
+            def readline(self):
+                order.append('stdout_read')
+                if not lines:
+                    return ''
+                return lines.pop(0)
+
+        rs = cc_resident.ResidentSession('/tmp/x', '', '/tmp/mcp.json')
+        proc = mock.Mock()
+        proc.poll.return_value = None
+        proc.stdin = _Stdin()
+        proc.stdout = _Stdout()
+        proc.terminate = mock.Mock()
+        proc.kill = mock.Mock()
+        proc.wait = mock.Mock(return_value=0)
+        rs._proc = proc
+        rs._session_id = 'sess-ack'
+        rs._system_text = 'SYS'
+        rs._tool_profile = cc_resident.TOOL_PROFILE_TEXT_ONLY
+        return rs, order, proc
+
+    def test_callback_order_after_flush_before_stdout(self):
+        rs, order, proc = self._session_with_fake_proc(lines=[])
+        with mock.patch.object(
+            rs, '_commit_sent_context', side_effect=lambda _m: order.append('commit'),
+        ), mock.patch.object(
+            rs, '_attach_jsonl_usage_with_retry', side_effect=lambda u, c: u,
+        ):
+            def _cb():
+                order.append('callback')
+
+            with self.assertRaises(cc_resident.ResidentError):
+                list(rs.send_turn('hi', on_stdin_flushed=_cb))
+        self.assertEqual(
+            order[:5],
+            ['write', 'flush', 'callback', 'commit', 'stdout_read'],
+        )
+
+    def test_default_none_callback_unchanged(self):
+        rs, order, proc = self._session_with_fake_proc(lines=[])
+        with mock.patch.object(
+            rs, '_commit_sent_context', side_effect=lambda _m: order.append('commit'),
+        ), mock.patch.object(
+            rs, '_attach_jsonl_usage_with_retry', side_effect=lambda u, c: u,
+        ):
+            with self.assertRaises(cc_resident.ResidentError):
+                list(rs.send_turn('hi'))
+        self.assertEqual(order[:4], ['write', 'flush', 'commit', 'stdout_read'])
+        self.assertNotIn('callback', order)
+
+    def test_write_failure_skips_callback(self):
+        rs, order, proc = self._session_with_fake_proc(
+            write_exc=BrokenPipeError('pipe'),
+        )
+        called = {'n': 0}
+
+        def _cb():
+            called['n'] += 1
+
+        with self.assertRaises(cc_resident.ResidentError):
+            list(rs.send_turn('hi', on_stdin_flushed=_cb))
+        self.assertEqual(called['n'], 0)
+        self.assertEqual(order[0], 'write')
+        self.assertNotIn('flush', order)
+        self.assertNotIn('callback', order)
+        self.assertIsNone(rs._proc)
+
+    def test_callback_failure_kills_and_reraises(self):
+        rs, order, proc = self._session_with_fake_proc(lines=[])
+
+        def _cb():
+            order.append('callback')
+            raise RuntimeError('ack boom')
+
+        with mock.patch.object(
+            rs, '_commit_sent_context', side_effect=lambda _m: order.append('commit'),
+        ):
+            with self.assertRaises(RuntimeError):
+                list(rs.send_turn('hi', on_stdin_flushed=_cb))
+        self.assertEqual(order[:3], ['write', 'flush', 'callback'])
+        self.assertNotIn('commit', order)
+        self.assertNotIn('stdout_read', order)
+        self.assertIsNone(rs._proc)
+
+
 if __name__ == '__main__':
     unittest.main()

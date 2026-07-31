@@ -4269,11 +4269,13 @@ def _gw_first_turn_jsonl_grew(session) -> bool:
         return True
 
 
-def _gw_first_turn_precommit_terminal(session, hooks, *, reason: str) -> str:
-    """Unified pre-DB-commit terminal: clean vs dirty from JSONL evidence only.
+def _gw_first_turn_precommit_terminal(
+    session, hooks, *, reason: str, stdin_flushed: bool = False,
+) -> str:
+    """Unified pre-DB-commit terminal.
 
+    Priority: DB committed > stdin flush ack > JSONL auxiliary evidence.
     Returns ``'clean'``, ``'dirty'``, ``'skipped_committed'``, or ``'failed'``.
-    Does not yield SSE. Safe to call more than once (no-op after success).
     """
     import logging
     from chat.context_window_first_turn import (
@@ -4289,23 +4291,27 @@ def _gw_first_turn_precommit_terminal(session, hooks, *, reason: str) -> str:
         return str(getattr(session, '_gw_precommit_terminal_result', 'failed'))
 
     log = logging.getLogger(__name__)
+
+    def _mark_dirty() -> str:
+        mark_first_turn_precommit_dirty(session, db_path=DB_PATH)
+        session._gw_precommit_terminal_done = True
+        session._gw_precommit_terminal_result = 'dirty'
+        return 'dirty'
+
     try:
+        # Authoritative flush ack: message already entered Claude → never clean.
+        if stdin_flushed or bool(getattr(session, 'stdin_sent', False)):
+            return _mark_dirty()
         if not _gw_first_turn_jsonl_grew(session):
             abort_first_turn_clean(session, hooks=hooks, db_path=DB_PATH)
             session._gw_precommit_terminal_done = True
             session._gw_precommit_terminal_result = 'clean'
             return 'clean'
-        mark_first_turn_precommit_dirty(session, db_path=DB_PATH)
-        session._gw_precommit_terminal_done = True
-        session._gw_precommit_terminal_result = 'dirty'
-        return 'dirty'
+        return _mark_dirty()
     except Exception:
         log.exception('first_turn precommit terminal failed reason=%s', reason)
         try:
-            mark_first_turn_precommit_dirty(session, db_path=DB_PATH)
-            session._gw_precommit_terminal_done = True
-            session._gw_precommit_terminal_result = 'dirty'
-            return 'dirty'
+            return _mark_dirty()
         except Exception:
             log.exception('first_turn dirty fallback failed reason=%s', reason)
             return 'failed'
@@ -4313,7 +4319,6 @@ def _gw_first_turn_precommit_terminal(session, hooks, *, reason: str) -> str:
 
 def _stream_cc_first_turn(_turn_data, _uc, intent: dict):
     """First-turn path: claim existing user → staged send → handoff on first text."""
-    import itertools
     import logging
     import uuid
     from chat.context_window_first_turn import (
@@ -4334,7 +4339,9 @@ def _stream_cc_first_turn(_turn_data, _uc, intent: dict):
     first_released = False
     text_acc = []
     thinking_acc = []
+    cc_tool_calls = []
     event_iter = None
+    stdin_flushed = False
     log = logging.getLogger(__name__)
 
     def _close_event_iter() -> None:
@@ -4348,6 +4355,59 @@ def _stream_cc_first_turn(_turn_data, _uc, intent: dict):
         except Exception:
             log.exception('first_turn event_iter close failed')
 
+    def _precommit(reason: str) -> str:
+        return _gw_first_turn_precommit_terminal(
+            session, hooks, reason=reason, stdin_flushed=stdin_flushed,
+        )
+
+    def _emit_tool_use(payload):
+        cc_tool_calls.append({
+            'id': payload.get('id'),
+            'name': payload.get('name'),
+            'args': payload.get('args'),
+            'result': '',
+            'success': True,
+        })
+        idx = len(cc_tool_calls) - 1
+        yield _sse_json({
+            't': 'tool_use',
+            'd': {
+                'name': payload.get('name'),
+                'args': _slim_args(payload.get('args')),
+            },
+            'idx': idx,
+        })
+
+    def _emit_tool_result(payload):
+        _ti = next(
+            (i for i in range(len(cc_tool_calls) - 1, -1, -1)
+             if cc_tool_calls[i].get('id') == payload.get('tool_use_id')),
+            len(cc_tool_calls) - 1,
+        )
+        if _ti < 0:
+            return
+        cc_tool_calls[_ti]['result'] = payload.get('result', '')
+        cc_tool_calls[_ti]['success'] = not payload.get('is_error')
+        _slim = {
+            **cc_tool_calls[_ti],
+            'args': _slim_args(cc_tool_calls[_ti].get('args')),
+            'result': str(cc_tool_calls[_ti].get('result') or '')[:2000],
+        }
+        yield _sse_json({'t': 'tool_result', 'd': _slim, 'idx': _ti})
+        # Compatibility event retained by formal CC chat stream.
+        yield _sse_json({'t': 'tool_call', 'd': _slim, 'dup': 1})
+
+    def _release_pending():
+        for pevt, ppard in pending:
+            if pevt == 'think':
+                thinking_acc.append(str(ppard or ''))
+                yield _sse_json({'t': 'think', 'd': ppard})
+            elif pevt == 'tool_use':
+                yield from _emit_tool_use(ppard)
+            elif pevt == 'tool_result':
+                yield from _emit_tool_result(ppard)
+        pending.clear()
+
     try:
         session = claim_and_start_first_turn(
             switch_request_id=switch_request_id,
@@ -4357,48 +4417,18 @@ def _stream_cc_first_turn(_turn_data, _uc, intent: dict):
             hooks=hooks,
             db_path=DB_PATH,
         )
-        event_iter = iter(session.staged.send_turn(_uc))
-        try:
-            first_event = next(event_iter)
-        except StopIteration:
-            _gw_first_turn_precommit_terminal(
-                session, hooks, reason='empty_send_turn',
-            )
-            pending.clear()
-            yield _sse_json({
-                't': 'err',
-                'd': '模型流中断，请稍后再试。',
-                'code': 'FIRST_TURN_EMPTY_STREAM',
-            })
-            yield _sse_json({'t': 'done', 'ok': False})
-            return
-        except GeneratorExit:
-            _close_event_iter()
-            _gw_first_turn_precommit_terminal(
-                session, hooks, reason='generator_exit_before_first_event',
-            )
-            pending.clear()
-            raise
-        except Exception as exc:
-            _close_event_iter()
-            _gw_first_turn_precommit_terminal(
-                session, hooks, reason='first_iter_failed',
-            )
-            pending.clear()
-            log.exception('first_turn first iteration failed')
-            yield _sse_json({
-                't': 'err',
-                'd': '换窗第一句失败，请稍后再试。',
-                'code': getattr(exc, 'error_code', None) or 'FIRST_TURN_STREAM_FAILED',
-            })
-            yield _sse_json({'t': 'done', 'ok': False})
-            return
-        else:
-            # First successful next() has passed send_turn stdin.write + flush.
+
+        def on_stdin_flushed():
+            nonlocal stdin_flushed
+            stdin_flushed = True
             mark_first_turn_stdin_sent(session)
 
+        event_iter = iter(session.staged.send_turn(
+            _uc, on_stdin_flushed=on_stdin_flushed,
+        ))
+
         try:
-            for evt, payload in itertools.chain((first_event,), event_iter):
+            for evt, payload in event_iter:
                 if evt in ('think', 'tool_use', 'tool_result'):
                     if not first_released:
                         pending.append((evt, payload))
@@ -4406,14 +4436,9 @@ def _stream_cc_first_turn(_turn_data, _uc, intent: dict):
                         thinking_acc.append(str(payload or ''))
                         yield _sse_json({'t': 'think', 'd': payload})
                     elif evt == 'tool_use':
-                        yield _sse_json({
-                            't': 'tool_use',
-                            'd': {
-                                'name': payload.get('name'),
-                                'args': _slim_args(payload.get('args')),
-                            },
-                        })
-                    # tool_result: keep local only (same as daily soft window)
+                        yield from _emit_tool_use(payload)
+                    elif evt == 'tool_result':
+                        yield from _emit_tool_result(payload)
                     continue
 
                 if evt == 'text':
@@ -4445,9 +4470,7 @@ def _stream_cc_first_turn(_turn_data, _uc, intent: dict):
                                     return
                             else:
                                 log.exception('first_turn ingest failed: %s', exc)
-                                _gw_first_turn_precommit_terminal(
-                                    session, hooks, reason='ingest_failed',
-                                )
+                                _precommit('ingest_failed')
                                 pending.clear()
                                 yield _sse_json({
                                     't': 'err',
@@ -4460,19 +4483,7 @@ def _stream_cc_first_turn(_turn_data, _uc, intent: dict):
                         else:
                             delta_released = delta.released_text
 
-                        for pevt, ppard in pending:
-                            if pevt == 'think':
-                                thinking_acc.append(str(ppard or ''))
-                                yield _sse_json({'t': 'think', 'd': ppard})
-                            elif pevt == 'tool_use':
-                                yield _sse_json({
-                                    't': 'tool_use',
-                                    'd': {
-                                        'name': ppard.get('name'),
-                                        'args': _slim_args(ppard.get('args')),
-                                    },
-                                })
-                        pending.clear()
+                        yield from _release_pending()
                         for part in delta_released:
                             text_acc.append(str(part or ''))
                             yield _sse_json({'t': 'text', 'd': part})
@@ -4490,9 +4501,7 @@ def _stream_cc_first_turn(_turn_data, _uc, intent: dict):
                 if evt == 'done':
                     if not first_released:
                         _close_event_iter()
-                        _gw_first_turn_precommit_terminal(
-                            session, hooks, reason='done_before_first_text',
-                        )
+                        _precommit('done_before_first_text')
                         pending.clear()
                         yield _sse_json({
                             't': 'err',
@@ -4567,17 +4576,13 @@ def _stream_cc_first_turn(_turn_data, _uc, intent: dict):
         except GeneratorExit:
             _close_event_iter()
             if session is not None and not first_released:
-                _gw_first_turn_precommit_terminal(
-                    session, hooks, reason='generator_exit',
-                )
+                _precommit('generator_exit')
             pending.clear()
             raise
 
         # Iterator EOF without provider done.
         if not first_released:
-            _gw_first_turn_precommit_terminal(
-                session, hooks, reason='eof_before_first_text',
-            )
+            _precommit('eof_before_first_text')
             pending.clear()
             yield _sse_json({
                 't': 'err',
@@ -4606,17 +4611,13 @@ def _stream_cc_first_turn(_turn_data, _uc, intent: dict):
     except GeneratorExit:
         _close_event_iter()
         if session is not None and not first_released:
-            _gw_first_turn_precommit_terminal(
-                session, hooks, reason='generator_exit_outer',
-            )
+            _precommit('generator_exit_outer')
         pending.clear()
         raise
     except Exception as exc:
         log.exception('first_turn stream failed')
         if session is not None and not first_released:
-            _gw_first_turn_precommit_terminal(
-                session, hooks, reason='stream_exception',
-            )
+            _precommit('stream_exception')
         pending.clear()
         yield _sse_json({
             't': 'err',
