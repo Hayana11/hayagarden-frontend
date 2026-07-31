@@ -42,6 +42,10 @@ class ReaderErrorCode(str, Enum):
     PATH_NOT_FILE = 'READER_PATH_NOT_FILE'
     PATH_SYMLINK = 'READER_PATH_SYMLINK'
     IO_ERROR = 'READER_IO_ERROR'
+    OFFSET_INVALID = 'READER_OFFSET_INVALID'
+    OFFSET_BEYOND_SIZE = 'READER_OFFSET_BEYOND_SIZE'
+    RANGE_MID_LINE = 'READER_RANGE_MID_LINE'
+    RANGE_DECODE = 'READER_RANGE_DECODE'
 
 
 class TranscriptReaderError(ValueError):
@@ -273,110 +277,8 @@ def file_sha256(path: Union[str, Path]) -> str:
     return digest.hexdigest()
 
 
-def read_transcript(path: Union[str, Path]) -> TranscriptGraph:
-    """Parse a Claude JSONL transcript into a TranscriptGraph.
-
-    Opens the source file read-only. Never writes or truncates.
-    """
-    src = Path(path)
-    if src.is_symlink():
-        raise TranscriptReaderError(ReaderErrorCode.PATH_SYMLINK, str(src))
-    if not src.is_file():
-        raise TranscriptReaderError(ReaderErrorCode.PATH_NOT_FILE, str(src))
-
-    graph = TranscriptGraph(session_id='', source_path=str(src))
-    session_ids: set[str] = set()
-
-    try:
-        fd = os.open(str(src), os.O_RDONLY)
-    except OSError as exc:
-        raise TranscriptReaderError(ReaderErrorCode.IO_ERROR, str(exc)) from exc
-
-    try:
-        with os.fdopen(fd, 'r', encoding='utf-8', closefd=True) as handle:
-            byte_offset = 0
-            for lineno, raw_line in enumerate(handle, 1):
-                line_bytes = raw_line.encode('utf-8')
-                line = raw_line.strip()
-                if not line:
-                    byte_offset += len(line_bytes)
-                    continue
-                try:
-                    obj = json.loads(line)
-                except json.JSONDecodeError as exc:
-                    raise TranscriptReaderError(
-                        ReaderErrorCode.INVALID_JSON,
-                        f'line_{lineno}:{exc.msg}',
-                    ) from exc
-                if not isinstance(obj, dict):
-                    raise TranscriptReaderError(
-                        ReaderErrorCode.NOT_OBJECT,
-                        f'line_{lineno}',
-                    )
-
-                uid = str(obj.get('uuid') or '')
-                if not uid:
-                    raise TranscriptReaderError(
-                        ReaderErrorCode.MISSING_UUID,
-                        f'line_{lineno}',
-                    )
-                if uid in graph.by_uuid:
-                    raise TranscriptReaderError(
-                        ReaderErrorCode.DUPLICATE_UUID,
-                        uid,
-                    )
-
-                etype, erole, is_sidechain = _classify_event(obj)
-                parent = obj.get('parentUuid')
-                parent_uuid = None if parent is None else str(parent)
-                sid = str(obj.get('sessionId') or '')
-                if sid:
-                    session_ids.add(sid)
-
-                event = TranscriptEvent(
-                    event_uuid=uid,
-                    parent_uuid=parent_uuid,
-                    session_id=sid,
-                    event_role=erole,
-                    event_type=etype,
-                    raw=obj,
-                    line_number=lineno,
-                    is_sidechain=is_sidechain,
-                    byte_offset=byte_offset,
-                )
-                graph.events.append(event)
-                graph.by_uuid[uid] = event
-                graph.children_by_parent.setdefault(parent_uuid, []).append(uid)
-
-                if etype == EventType.SUMMARY:
-                    graph.summary_uuids.append(uid)
-                if etype == EventType.SYSTEM or erole == EventRole.SYSTEM:
-                    graph.system_uuids.append(uid)
-                if is_sidechain or erole == EventRole.SIDECHAIN:
-                    graph.sidechain_uuids.append(uid)
-                if erole == EventRole.UNKNOWN:
-                    graph.unknown_uuids.append(uid)
-
-                uses, results = _extract_tool_refs(event)
-                for use in uses:
-                    if use.tool_use_id in graph.tool_uses:
-                        graph.warnings.append(
-                            f'duplicate_tool_use_id:{use.tool_use_id}'
-                        )
-                    graph.tool_uses[use.tool_use_id] = use
-                for result in results:
-                    if result.tool_use_id in graph.tool_results:
-                        graph.warnings.append(
-                            f'duplicate_tool_result_id:{result.tool_use_id}'
-                        )
-                    graph.tool_results[result.tool_use_id] = result
-
-                byte_offset += len(line_bytes)
-    except TranscriptReaderError:
-        raise
-    except OSError as exc:
-        raise TranscriptReaderError(ReaderErrorCode.IO_ERROR, str(exc)) from exc
-
+def _finalize_graph(graph: TranscriptGraph) -> TranscriptGraph:
+    session_ids = {e.session_id for e in graph.events if e.session_id}
     if len(session_ids) == 1:
         graph.session_id = next(iter(session_ids))
     elif len(session_ids) > 1:
@@ -391,6 +293,228 @@ def read_transcript(path: Union[str, Path]) -> TranscriptGraph:
     )
     graph.warnings.extend(side_warnings)
     return graph
+
+
+def _ingest_json_object(
+    graph: TranscriptGraph,
+    obj: Mapping[str, Any],
+    *,
+    lineno: int,
+    byte_offset: int,
+) -> None:
+    if not isinstance(obj, dict):
+        raise TranscriptReaderError(ReaderErrorCode.NOT_OBJECT, f'line_{lineno}')
+
+    uid = str(obj.get('uuid') or '')
+    if not uid:
+        raise TranscriptReaderError(ReaderErrorCode.MISSING_UUID, f'line_{lineno}')
+    if uid in graph.by_uuid:
+        raise TranscriptReaderError(ReaderErrorCode.DUPLICATE_UUID, uid)
+
+    etype, erole, is_sidechain = _classify_event(obj)
+    parent = obj.get('parentUuid')
+    parent_uuid = None if parent is None else str(parent)
+    sid = str(obj.get('sessionId') or '')
+
+    event = TranscriptEvent(
+        event_uuid=uid,
+        parent_uuid=parent_uuid,
+        session_id=sid,
+        event_role=erole,
+        event_type=etype,
+        raw=obj,
+        line_number=lineno,
+        is_sidechain=is_sidechain,
+        byte_offset=byte_offset,
+    )
+    graph.events.append(event)
+    graph.by_uuid[uid] = event
+    graph.children_by_parent.setdefault(parent_uuid, []).append(uid)
+
+    if etype == EventType.SUMMARY:
+        graph.summary_uuids.append(uid)
+    if etype == EventType.SYSTEM or erole == EventRole.SYSTEM:
+        graph.system_uuids.append(uid)
+    if is_sidechain or erole == EventRole.SIDECHAIN:
+        graph.sidechain_uuids.append(uid)
+    if erole == EventRole.UNKNOWN:
+        graph.unknown_uuids.append(uid)
+
+    uses, results = _extract_tool_refs(event)
+    for use in uses:
+        if use.tool_use_id in graph.tool_uses:
+            graph.warnings.append(f'duplicate_tool_use_id:{use.tool_use_id}')
+        graph.tool_uses[use.tool_use_id] = use
+    for result in results:
+        if result.tool_use_id in graph.tool_results:
+            graph.warnings.append(f'duplicate_tool_result_id:{result.tool_use_id}')
+        graph.tool_results[result.tool_use_id] = result
+
+
+def _parse_transcript_bytes(
+    data: bytes,
+    *,
+    base_offset: int,
+    source_path: str,
+    start_lineno: int = 1,
+) -> TranscriptGraph:
+    """Parse a contiguous UTF-8 JSONL byte slice into a TranscriptGraph."""
+    graph = TranscriptGraph(session_id='', source_path=source_path)
+    try:
+        text = data.decode('utf-8')
+    except UnicodeDecodeError as exc:
+        raise TranscriptReaderError(ReaderErrorCode.RANGE_DECODE, str(exc)) from exc
+
+    # Split keeping track of absolute byte offsets via UTF-8 lengths.
+    pos = 0
+    byte_pos = 0
+    lineno = start_lineno
+    length = len(text)
+    while pos < length:
+        nl = text.find('\n', pos)
+        if nl < 0:
+            raw_line = text[pos:]
+            line_end = length
+        else:
+            raw_line = text[pos:nl + 1]
+            line_end = nl + 1
+
+        line_bytes = raw_line.encode('utf-8')
+        abs_offset = base_offset + byte_pos
+        line = raw_line.strip()
+        if line:
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise TranscriptReaderError(
+                    ReaderErrorCode.INVALID_JSON,
+                    f'line_{lineno}:{exc.msg}',
+                ) from exc
+            _ingest_json_object(graph, obj, lineno=lineno, byte_offset=abs_offset)
+        pos = line_end
+        byte_pos += len(line_bytes)
+        lineno += 1
+        if nl < 0:
+            break
+
+    return _finalize_graph(graph)
+
+
+def _open_readonly_file(path: Path) -> int:
+    if path.is_symlink():
+        raise TranscriptReaderError(ReaderErrorCode.PATH_SYMLINK, str(path))
+    if not path.is_file():
+        raise TranscriptReaderError(ReaderErrorCode.PATH_NOT_FILE, str(path))
+    try:
+        return os.open(str(path), os.O_RDONLY)
+    except OSError as exc:
+        raise TranscriptReaderError(ReaderErrorCode.IO_ERROR, str(exc)) from exc
+
+
+def read_transcript(path: Union[str, Path]) -> TranscriptGraph:
+    """Parse a Claude JSONL transcript into a TranscriptGraph.
+
+    Opens the source file read-only and streams line-by-line (constant-ish
+    memory). Never writes or truncates. Does not load the whole file at once.
+    """
+    src = Path(path)
+    fd = _open_readonly_file(src)
+    graph = TranscriptGraph(session_id='', source_path=str(src))
+    try:
+        with os.fdopen(fd, 'r', encoding='utf-8', closefd=True) as handle:
+            byte_offset = 0
+            for lineno, raw_line in enumerate(handle, 1):
+                line_bytes = raw_line.encode('utf-8')
+                line = raw_line.strip()
+                if line:
+                    try:
+                        obj = json.loads(line)
+                    except json.JSONDecodeError as exc:
+                        raise TranscriptReaderError(
+                            ReaderErrorCode.INVALID_JSON,
+                            f'line_{lineno}:{exc.msg}',
+                        ) from exc
+                    _ingest_json_object(
+                        graph, obj, lineno=lineno, byte_offset=byte_offset,
+                    )
+                byte_offset += len(line_bytes)
+    except TranscriptReaderError:
+        raise
+    except OSError as exc:
+        raise TranscriptReaderError(ReaderErrorCode.IO_ERROR, str(exc)) from exc
+
+    return _finalize_graph(graph)
+
+
+def read_transcript_range(
+    path: Union[str, Path],
+    start_offset: int,
+    end_offset: int,
+) -> TranscriptGraph:
+    """Read-only parse of ``[start_offset, end_offset)`` bytes.
+
+    Fail-closed rules:
+    - offsets must be non-negative ints with ``start <= end``
+    - file size must be ``>= end_offset`` (truncation / short file refused)
+    - unless ``start == 0``, the byte immediately before start must be ``\\n``
+    - range must not end mid-line when more file bytes follow the slice
+    - never scans past ``end_offset`` (caller's observed end is authoritative)
+    """
+    try:
+        start = int(start_offset)
+        end = int(end_offset)
+    except (TypeError, ValueError) as exc:
+        raise TranscriptReaderError(ReaderErrorCode.OFFSET_INVALID, 'non_int') from exc
+    if start < 0 or end < 0 or end < start:
+        raise TranscriptReaderError(
+            ReaderErrorCode.OFFSET_INVALID,
+            f'{start}:{end}',
+        )
+
+    src = Path(path)
+    fd = _open_readonly_file(src)
+    try:
+        size = int(os.fstat(fd).st_size)
+        if size < start or size < end:
+            raise TranscriptReaderError(
+                ReaderErrorCode.OFFSET_BEYOND_SIZE,
+                f'size={size}:start={start}:end={end}',
+            )
+        if start == end:
+            return _finalize_graph(
+                TranscriptGraph(session_id='', source_path=str(src)),
+            )
+        # Start must be on a line boundary (except offset 0).
+        if start > 0:
+            os.lseek(fd, start - 1, os.SEEK_SET)
+            prev = os.read(fd, 1)
+            if prev != b'\n':
+                raise TranscriptReaderError(
+                    ReaderErrorCode.RANGE_MID_LINE,
+                    f'start={start}:prev={prev!r}',
+                )
+        else:
+            os.lseek(fd, 0, os.SEEK_SET)
+        data = os.read(fd, end - start)
+        if len(data) != end - start:
+            raise TranscriptReaderError(
+                ReaderErrorCode.IO_ERROR,
+                f'short_read:{len(data)}!={end - start}',
+            )
+        # Mid-line cut at end: slice does not end with newline but file continues.
+        if end < size and (not data.endswith(b'\n')):
+            raise TranscriptReaderError(
+                ReaderErrorCode.RANGE_MID_LINE,
+                f'end={end}:size={size}',
+            )
+    except TranscriptReaderError:
+        raise
+    except OSError as exc:
+        raise TranscriptReaderError(ReaderErrorCode.IO_ERROR, str(exc)) from exc
+    finally:
+        os.close(fd)
+
+    return _parse_transcript_bytes(data, base_offset=start, source_path=str(src))
 
 
 @dataclass(frozen=True)

@@ -461,6 +461,7 @@ def ensure_schema(db_path: Optional[str] = None) -> None:
         conn = _connect(path)
         try:
             _ensure_context_switch_forge_schema(conn)
+            _ensure_session_registry_mapping_schema(conn)
             conn.commit()
         finally:
             conn.close()
@@ -587,12 +588,67 @@ def ensure_schema(db_path: Optional[str] = None) -> None:
         _migrate_manual_window_schema(conn)
         _ensure_manual_window_indexes(conn)
         _ensure_context_switch_forge_schema(conn)
+        _ensure_session_registry_mapping_schema(conn)
         if _table_columns(conn, 'chat_messages'):
             ensure_chat_messages_source_kind(conn, record_cutover=True)
         conn.commit()
         _SCHEMA_READY.add(path)
     finally:
         conn.close()
+
+
+def _ensure_session_registry_mapping_schema(conn: sqlite3.Connection) -> None:
+    """P-CONTEXT-WINDOW v0.2: Session Registry + message-event Mapping (flag-off)."""
+    conn.execute(
+        '''CREATE TABLE IF NOT EXISTS context_claude_sessions (
+            context_id INTEGER NOT NULL,
+            context_epoch INTEGER NOT NULL,
+            resident_generation INTEGER NOT NULL,
+            chat_id TEXT NOT NULL,
+            claude_session_id TEXT NOT NULL,
+            transcript_path TEXT NOT NULL,
+            source TEXT NOT NULL,
+            process_generation INTEGER NULL,
+            scan_offset INTEGER NOT NULL DEFAULT 0,
+            scan_status TEXT NOT NULL DEFAULT 'READY',
+            scan_error_code TEXT NULL,
+            last_mapped_message_id INTEGER NULL,
+            created_at DATETIME NOT NULL DEFAULT (datetime('now', '+8 hours')),
+            updated_at DATETIME NOT NULL DEFAULT (datetime('now', '+8 hours')),
+            PRIMARY KEY (context_id, resident_generation)
+        )'''
+    )
+    conn.execute(
+        'CREATE UNIQUE INDEX IF NOT EXISTS uq_context_claude_sessions_sid '
+        'ON context_claude_sessions(claude_session_id)'
+    )
+    conn.execute(
+        '''CREATE TABLE IF NOT EXISTS chat_message_claude_events (
+            event_uuid TEXT NOT NULL PRIMARY KEY,
+            message_id INTEGER NOT NULL,
+            role TEXT NOT NULL,
+            claude_session_id TEXT NOT NULL,
+            context_id INTEGER NOT NULL,
+            context_epoch INTEGER NOT NULL,
+            resident_generation INTEGER NOT NULL,
+            jsonl_byte_offset INTEGER NULL,
+            created_at DATETIME NOT NULL DEFAULT (datetime('now', '+8 hours'))
+        )'''
+    )
+    conn.execute(
+        'CREATE INDEX IF NOT EXISTS idx_chat_message_claude_events_message '
+        'ON chat_message_claude_events(message_id)'
+    )
+    conn.execute(
+        'CREATE INDEX IF NOT EXISTS idx_chat_message_claude_events_session '
+        'ON chat_message_claude_events(claude_session_id)'
+    )
+    # Canonical user only: one frontend user message → at most one event.
+    # Assistant/tool intentionally allow one-to-many (no UNIQUE(message_id, role)).
+    conn.execute(
+        'CREATE UNIQUE INDEX IF NOT EXISTS uq_chat_message_claude_events_user_msg '
+        'ON chat_message_claude_events(message_id) WHERE role = \'user\''
+    )
 
 
 def _ensure_context_switch_forge_schema(conn: sqlite3.Connection) -> None:
