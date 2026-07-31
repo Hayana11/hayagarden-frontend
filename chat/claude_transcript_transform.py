@@ -192,6 +192,15 @@ def _is_auto_noise(evt: TranscriptEvent) -> bool:
     return evt.event_role in {EventRole.META, EventRole.UNKNOWN}
 
 
+def _require_sidechain_exclude(policy: object) -> None:
+    """v0.2 accepts only SidechainPolicy.EXCLUDE — no silent fallback."""
+    if policy is SidechainPolicy.EXCLUDE:
+        return
+    if isinstance(policy, SidechainPolicy) and policy == SidechainPolicy.EXCLUDE:
+        return
+    raise TransformError(TransformErrorCode.INVALID_POLICY, 'sidechain')
+
+
 def _select_confirmed_rounds(
     graph: TranscriptGraph,
     request: TransformRequest,
@@ -199,6 +208,8 @@ def _select_confirmed_rounds(
     """Return (eligible_tail, dropped_sidechain_round_users, dropped_unconfirmed)."""
     if request.keep_rounds < 0:
         raise TransformError(TransformErrorCode.ROUND_BUDGET, 'negative')
+
+    _require_sidechain_exclude(request.sidechain_policy)
 
     dropped_side_rounds: list[str] = []
     dropped_unconfirmed: list[str] = []
@@ -209,17 +220,10 @@ def _select_confirmed_rounds(
         if cand not in request.user_canonical_by_event_uuid:
             dropped_unconfirmed.append(cand)
             continue
-        if (
-            request.sidechain_policy == SidechainPolicy.EXCLUDE
-            and rnd.has_sidechain_impact
-        ):
+        # EXCLUDE: whole impacted round is dropped (never prune-and-keep)
+        if rnd.has_sidechain_impact:
             dropped_side_rounds.append(cand)
             continue
-        if request.sidechain_policy not in {
-            SidechainPolicy.EXCLUDE,
-            SidechainPolicy.KEEP,
-        }:
-            raise TransformError(TransformErrorCode.INVALID_POLICY, 'sidechain')
         eligible.append(rnd)
 
     if request.keep_rounds == 0:

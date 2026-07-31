@@ -14,6 +14,7 @@ from chat.claude_transcript_model import (
     SidechainPolicy,
     ThinkingPolicy,
 )
+from dataclasses import replace
 from chat.claude_transcript_reader import read_transcript
 from chat.claude_transcript_transform import (
     TransformError,
@@ -177,6 +178,26 @@ class TranscriptTransformTests(unittest.TestCase):
                 transform_transcript(g2, req)
             self.assertEqual(ctx.exception.code, TransformErrorCode.THINKING_INVALID)
 
+    def test_sidechain_policy_keep_not_executable(self) -> None:
+        """CASE S1: v0.2 has no executable Sidechain KEEP; illegal policy fails closed."""
+        self.assertEqual(list(SidechainPolicy), [SidechainPolicy.EXCLUDE])
+        self.assertFalse(hasattr(SidechainPolicy, 'KEEP'))
+        graph = read_transcript(FIXTURE / 'plain_two_rounds.jsonl')
+        req = TransformRequest(
+            new_session_id='newnewne-newn-newn-newn-newnewnewnew',
+            cwd='/tmp/out',
+            keep_rounds=1,
+            user_canonical_by_event_uuid=_mapping_for(graph),
+            thinking_policy=ThinkingPolicy.DROP,
+            sidechain_policy=SidechainPolicy.EXCLUDE,
+        )
+        # Forge a non-EXCLUDE policy without relying on a removed enum member
+        bad = replace(req, sidechain_policy='keep')  # type: ignore[arg-type]
+        with self.assertRaises(TransformError) as ctx:
+            transform_transcript(graph, bad)
+        self.assertEqual(ctx.exception.code, TransformErrorCode.INVALID_POLICY)
+        self.assertIn('sidechain', str(ctx.exception))
+
     def test_sidechain_excludes_entire_affected_round(self) -> None:
         graph = read_transcript(FIXTURE / 'sidechain.jsonl')
         mapping = _mapping_for(graph)
@@ -200,6 +221,31 @@ class TranscriptTransformTests(unittest.TestCase):
         self.assertEqual(texts, ['干净主链第二轮'])
         self.assertNotIn('主链消息-受sidechain影响', texts)
         self.assertTrue(all(e.get('isSidechain') is not True for e in result.events))
+
+    def test_delayed_sidechain_excludes_only_parent_round(self) -> None:
+        """CASE S2/S3: delayed sidechain + descendant → drop round 1, keep round 2."""
+        graph = read_transcript(FIXTURE / 'sidechain_delayed.jsonl')
+        mapping = _mapping_for(graph)
+        req = TransformRequest(
+            new_session_id='newnewne-newn-newn-newn-newnewnewnew',
+            cwd='/tmp/out',
+            keep_rounds=2,
+            user_canonical_by_event_uuid=mapping,
+            thinking_policy=ThinkingPolicy.DROP,
+        )
+        result = transform_transcript(graph, req)
+        self.assertEqual(result.selected_round_count, 1)
+        self.assertEqual(
+            result.dropped_sidechain_round_user_uuids,
+            ['d1111111-1111-1111-1111-111111111111'],
+        )
+        texts = [
+            e['message']['content']
+            for e in result.events
+            if e['type'] == 'user' and isinstance(e['message']['content'], str)
+        ]
+        self.assertEqual(texts, ['第二轮干净消息'])
+        self.assertNotIn('第一轮真实消息', texts)
 
     def test_sidechain_only_rounds_yield_empty_selection(self) -> None:
         """If every mapped round is sidechain-impacted, do not keep pruned main user."""

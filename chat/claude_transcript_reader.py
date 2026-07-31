@@ -6,7 +6,7 @@ Responsibilities:
 - preserve raw event objects
 - build UUID / parent / tool indexes
 - classify event roles (candidate user vs tool_result user vs meta)
-- record sidechain impact on candidate rounds (whole-round exclusion later)
+- attribute sidechain impact via full parent graph (order-independent)
 - report illegal JSON / duplicate UUID with explicit errors
 
 Non-responsibilities (explicit):
@@ -129,21 +129,19 @@ def _extract_tool_refs(
 
 
 def _build_candidate_rounds(events: list[TranscriptEvent]) -> list[CandidateConversationRound]:
-    """Assemble candidate rounds; record sidechain impact without pruning silently.
+    """Phase 1: assemble main-chain candidate rounds only.
 
-    SYSTEM events are never attached to rounds (always stripped later).
-    Sidechain events whose parent is in the current round (main or already
-    impacted sidechain) mark the whole round as sidechain-affected.
+    SYSTEM / summary / meta / sidechain never join ``event_uuids``.
+    Sidechain impact is attached later via ``_attach_sidechain_impacts``.
     """
     rounds: list[CandidateConversationRound] = []
     current_uuids: list[str] = []
     current_user: Optional[str] = None
     current_tools: list[str] = []
-    current_side_impact: list[str] = []
     has_assistant = False
 
     def flush() -> None:
-        nonlocal current_uuids, current_user, current_tools, current_side_impact, has_assistant
+        nonlocal current_uuids, current_user, current_tools, has_assistant
         if current_user and current_uuids:
             rounds.append(
                 CandidateConversationRound(
@@ -151,13 +149,12 @@ def _build_candidate_rounds(events: list[TranscriptEvent]) -> list[CandidateConv
                     event_uuids=tuple(current_uuids),
                     tool_use_ids=tuple(current_tools),
                     has_assistant=has_assistant,
-                    sidechain_impact_uuids=tuple(current_side_impact),
+                    sidechain_impact_uuids=(),
                 )
             )
         current_uuids = []
         current_user = None
         current_tools = []
-        current_side_impact = []
         has_assistant = False
 
     for evt in events:
@@ -170,14 +167,8 @@ def _build_candidate_rounds(events: list[TranscriptEvent]) -> list[CandidateConv
         if current_user is None:
             continue
 
-        # Sidechain attached to this round → whole-round impact (do not fold in)
+        # Sidechain deferred to phase-2 parent-graph attribution
         if evt.is_sidechain or evt.event_role == EventRole.SIDECHAIN:
-            parent = evt.parent_uuid
-            if parent and (
-                parent in current_uuids or parent in current_side_impact
-            ):
-                if evt.event_uuid not in current_side_impact:
-                    current_side_impact.append(evt.event_uuid)
             continue
 
         # Old SYSTEM never joins a migrateable round
@@ -198,6 +189,80 @@ def _build_candidate_rounds(events: list[TranscriptEvent]) -> list[CandidateConv
 
     flush()
     return rounds
+
+
+def _attach_sidechain_impacts(
+    events: list[TranscriptEvent],
+    candidate_rounds: list[CandidateConversationRound],
+    by_uuid: dict[str, TranscriptEvent],
+) -> tuple[list[CandidateConversationRound], list[str]]:
+    """Phase 2: attribute sidechain events via full parent graph (order-independent).
+
+    Walks each sidechain's ``parentUuid`` ancestors until a candidate main-chain
+    UUID is hit. Delayed / out-of-order sidechain rows still pollute their true
+    parent round. Missing parent → ``unattributed_sidechain:<uuid>``. Parent
+    cycle → ``sidechain_parent_cycle:<uuid>``. Neither migrates; neither
+    contaminates unrelated rounds.
+    """
+    main_to_round: dict[str, int] = {}
+    for idx, rnd in enumerate(candidate_rounds):
+        for uid in rnd.event_uuids:
+            main_to_round[uid] = idx
+
+    impacts: list[list[str]] = [[] for _ in candidate_rounds]
+    seen_impact: list[set[str]] = [set() for _ in candidate_rounds]
+    warnings: list[str] = []
+
+    for evt in events:
+        if not (evt.is_sidechain or evt.event_role == EventRole.SIDECHAIN):
+            continue
+
+        visited: set[str] = set()
+        cursor: TranscriptEvent = evt
+        attributed: Optional[int] = None
+        warning: Optional[str] = None
+
+        while True:
+            if cursor.event_uuid in visited:
+                warning = f'sidechain_parent_cycle:{evt.event_uuid}'
+                break
+            visited.add(cursor.event_uuid)
+
+            parent = cursor.parent_uuid
+            if parent is None:
+                warning = f'unattributed_sidechain:{evt.event_uuid}'
+                break
+            if parent not in by_uuid:
+                warning = f'unattributed_sidechain:{evt.event_uuid}'
+                break
+            if parent in main_to_round:
+                attributed = main_to_round[parent]
+                break
+            cursor = by_uuid[parent]
+
+        if warning is not None:
+            warnings.append(warning)
+            continue
+        if attributed is None:
+            warnings.append(f'unattributed_sidechain:{evt.event_uuid}')
+            continue
+        if evt.event_uuid in seen_impact[attributed]:
+            continue
+        seen_impact[attributed].add(evt.event_uuid)
+        impacts[attributed].append(evt.event_uuid)
+
+    updated: list[CandidateConversationRound] = []
+    for idx, rnd in enumerate(candidate_rounds):
+        updated.append(
+            CandidateConversationRound(
+                candidate_user_event_uuid=rnd.candidate_user_event_uuid,
+                event_uuids=rnd.event_uuids,
+                tool_use_ids=rnd.tool_use_ids,
+                has_assistant=rnd.has_assistant,
+                sidechain_impact_uuids=tuple(impacts[idx]),
+            )
+        )
+    return updated, warnings
 
 
 def file_sha256(path: Union[str, Path]) -> str:
@@ -318,7 +383,13 @@ def read_transcript(path: Union[str, Path]) -> TranscriptGraph:
         graph.session_id = sorted(session_ids)[0]
         graph.warnings.append(f'multiple_session_ids:{len(session_ids)}')
 
-    graph.candidate_rounds = _build_candidate_rounds(graph.events)
+    main_rounds = _build_candidate_rounds(graph.events)
+    graph.candidate_rounds, side_warnings = _attach_sidechain_impacts(
+        graph.events,
+        main_rounds,
+        graph.by_uuid,
+    )
+    graph.warnings.extend(side_warnings)
     return graph
 
 

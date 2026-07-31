@@ -44,10 +44,12 @@ class ThinkingPolicy(str, Enum):
 
 
 class SidechainPolicy(str, Enum):
-    """Spike CASE 5B approved default is EXCLUDE (whole affected round)."""
+    """v0.2 supports EXCLUDE only (whole affected round).
+
+    Sidechain KEEP is not supported in v0.2 — there is no executable KEEP entry.
+    """
 
     EXCLUDE = 'exclude'
-    KEEP = 'keep'
 
 
 class SummaryPolicy(str, Enum):
@@ -103,9 +105,9 @@ class TranscriptEvent:
 class CandidateConversationRound:
     """One candidate user turn and its main-chain assistant/tool logic.
 
-    Sidechain impact is recorded separately. When sidechain policy is EXCLUDE
-    and ``sidechain_impact_uuids`` is non-empty, Transform must drop the
-    *entire* round — not prune branches and keep a partial main chain.
+    Sidechain impact is recorded via full parent-graph attribution (order-
+    independent). Under ``SidechainPolicy.EXCLUDE``, a non-empty
+    ``sidechain_impact_uuids`` means Transform must drop the *entire* round.
     """
 
     candidate_user_event_uuid: str

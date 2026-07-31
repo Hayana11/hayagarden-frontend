@@ -69,6 +69,81 @@ class TranscriptReaderTests(unittest.TestCase):
             self.assertNotIn(uid, impacted.event_uuids)
         self.assertFalse(clean.has_sidechain_impact)
 
+    def test_delayed_sidechain_pollutes_parent_round_not_later(self) -> None:
+        """CASE S2/S3: sidechain after round 2 still attributes to round 1 via parent graph."""
+        graph = read_transcript(FIXTURE / 'sidechain_delayed.jsonl')
+        self.assertEqual(len(graph.candidate_rounds), 2)
+        r1, r2 = graph.candidate_rounds
+        self.assertTrue(r1.has_sidechain_impact)
+        self.assertFalse(r2.has_sidechain_impact)
+        # A + descendant B both on round 1
+        self.assertEqual(len(r1.sidechain_impact_uuids), 2)
+        self.assertEqual(
+            list(r1.sidechain_impact_uuids),
+            [
+                'd5555555-5555-5555-5555-555555555555',
+                'd6666666-6666-6666-6666-666666666666',
+            ],
+        )
+
+    def test_unattributed_and_cycle_sidechain_warnings(self) -> None:
+        """CASE S4: missing parent / cycle → warnings, no unrelated contamination."""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'bad_side.jsonl'
+            rows = [
+                {
+                    'type': 'user',
+                    'uuid': 'e1111111-1111-1111-1111-111111111111',
+                    'parentUuid': None,
+                    'sessionId': 's',
+                    'message': {'role': 'user', 'content': '干净轮'},
+                },
+                {
+                    'type': 'assistant',
+                    'uuid': 'e2222222-2222-2222-2222-222222222222',
+                    'parentUuid': 'e1111111-1111-1111-1111-111111111111',
+                    'sessionId': 's',
+                    'message': {'role': 'assistant', 'content': [{'type': 'text', 'text': 'ok'}]},
+                },
+                # missing parent
+                {
+                    'type': 'assistant',
+                    'uuid': 'e3333333-3333-3333-3333-333333333333',
+                    'parentUuid': 'eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee',
+                    'sessionId': 's',
+                    'isSidechain': True,
+                    'message': {'role': 'assistant', 'content': [{'type': 'text', 'text': 'orphan'}]},
+                },
+                # cycle: A→B→A
+                {
+                    'type': 'assistant',
+                    'uuid': 'e4444444-4444-4444-4444-444444444444',
+                    'parentUuid': 'e5555555-5555-5555-5555-555555555555',
+                    'sessionId': 's',
+                    'isSidechain': True,
+                    'message': {'role': 'assistant', 'content': [{'type': 'text', 'text': 'cycleA'}]},
+                },
+                {
+                    'type': 'assistant',
+                    'uuid': 'e5555555-5555-5555-5555-555555555555',
+                    'parentUuid': 'e4444444-4444-4444-4444-444444444444',
+                    'sessionId': 's',
+                    'isSidechain': True,
+                    'message': {'role': 'assistant', 'content': [{'type': 'text', 'text': 'cycleB'}]},
+                },
+            ]
+            path.write_text(''.join(json.dumps(r) + '\n' for r in rows), encoding='utf-8')
+            graph = read_transcript(path)
+            self.assertEqual(len(graph.candidate_rounds), 1)
+            self.assertFalse(graph.candidate_rounds[0].has_sidechain_impact)
+            self.assertIn(
+                'unattributed_sidechain:e3333333-3333-3333-3333-333333333333',
+                graph.warnings,
+            )
+            self.assertTrue(
+                any(w.startswith('sidechain_parent_cycle:') for w in graph.warnings)
+            )
+
     def test_system_not_in_round_event_uuids(self) -> None:
         graph = read_transcript(FIXTURE / 'system_in_round.jsonl')
         self.assertEqual(len(graph.system_uuids), 1)
