@@ -53,10 +53,12 @@ class SidechainPolicy(str, Enum):
 
 
 class SummaryPolicy(str, Enum):
-    """Spike: summary events are not migrated by default."""
+    """v0.2 supports DROP only — summary events are never migrated.
+
+    Summary KEEP is not supported in v0.2 — there is no executable KEEP entry.
+    """
 
     DROP = 'drop'
-    KEEP = 'keep'
 
 
 class UnknownEventPolicy(str, Enum):

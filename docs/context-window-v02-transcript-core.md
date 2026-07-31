@@ -15,11 +15,12 @@ Flag-off infrastructure only. Not wired into runtime, Preview, Manual Forge, or 
 
 1. Ordinary JSONL `user` rows are `CANDIDATE_USER` only. Confirmed kitten/user text comes solely from `user_canonical_by_event_uuid`.
 2. **SidechainPolicy v0.2 supports `EXCLUDE` only.** v0.2 does not support Sidechain KEEP. Illegal policy → `TRANSFORM_INVALID_POLICY` (no silent fallback).
-3. Sidechain impact uses the **full parent graph** (not JSONL line order). Delayed sidechain / descendants still pollute the true parent round; that whole confirmed round is dropped under EXCLUDE.
-4. Unattributed / cyclic sidechain → warnings `unattributed_sidechain:<uuid>` / `sidechain_parent_cycle:<uuid>`; never migrate; never contaminate unrelated rounds.
-5. `keep_rounds=0` defaults to **native cold / empty transcript** (no fabricated boundary user).
-6. Old `SYSTEM` events are never attached to rounds and never migrated.
-7. `ThinkingPolicy.KEEP` requires non-empty `signature` on signed thinking (transform + validator).
+3. **SummaryPolicy v0.2 supports `DROP` only.** v0.2 does not support Summary KEEP. Illegal policy → `TRANSFORM_INVALID_POLICY` (no silent fallback / no silent delete-while-claiming-KEEP).
+4. Sidechain impact uses the **full parent graph** (not JSONL line order). Delayed sidechain / descendants still pollute the true parent round; that whole confirmed round is dropped under EXCLUDE.
+5. Unattributed / cyclic sidechain → warnings `unattributed_sidechain:<uuid>` / `sidechain_parent_cycle:<uuid>`; never migrate; never contaminate unrelated rounds.
+6. `keep_rounds=0` defaults to **native cold / empty transcript** (no fabricated boundary user).
+7. Old `SYSTEM` events are never attached to rounds and never migrated.
+8. `ThinkingPolicy.KEEP` requires non-empty `signature` on signed thinking (transform + validator).
 
 ## Spike decision evidence (locatable)
 

@@ -12,6 +12,7 @@ if str(ROOT) not in sys.path:
 
 from chat.claude_transcript_model import (
     SidechainPolicy,
+    SummaryPolicy,
     ThinkingPolicy,
 )
 from dataclasses import replace
@@ -197,6 +198,25 @@ class TranscriptTransformTests(unittest.TestCase):
             transform_transcript(graph, bad)
         self.assertEqual(ctx.exception.code, TransformErrorCode.INVALID_POLICY)
         self.assertIn('sidechain', str(ctx.exception))
+
+    def test_summary_policy_keep_not_executable(self) -> None:
+        """v0.2 has no executable Summary KEEP; \"keep\" is not silently accepted."""
+        self.assertEqual(list(SummaryPolicy), [SummaryPolicy.DROP])
+        self.assertFalse(hasattr(SummaryPolicy, 'KEEP'))
+        graph = read_transcript(FIXTURE / 'summary_and_meta.jsonl')
+        req = TransformRequest(
+            new_session_id='newnewne-newn-newn-newn-newnewnewnew',
+            cwd='/tmp/out',
+            keep_rounds=1,
+            user_canonical_by_event_uuid=_mapping_for(graph),
+            thinking_policy=ThinkingPolicy.DROP,
+            summary_policy=SummaryPolicy.DROP,
+        )
+        bad = replace(req, summary_policy='keep')  # type: ignore[arg-type]
+        with self.assertRaises(TransformError) as ctx:
+            transform_transcript(graph, bad)
+        self.assertEqual(ctx.exception.code, TransformErrorCode.INVALID_POLICY)
+        self.assertIn('summary', str(ctx.exception))
 
     def test_sidechain_excludes_entire_affected_round(self) -> None:
         graph = read_transcript(FIXTURE / 'sidechain.jsonl')

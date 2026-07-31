@@ -201,6 +201,15 @@ def _require_sidechain_exclude(policy: object) -> None:
     raise TransformError(TransformErrorCode.INVALID_POLICY, 'sidechain')
 
 
+def _require_summary_drop(policy: object) -> None:
+    """v0.2 accepts only SummaryPolicy.DROP — no silent KEEP."""
+    if policy is SummaryPolicy.DROP:
+        return
+    if isinstance(policy, SummaryPolicy) and policy == SummaryPolicy.DROP:
+        return
+    raise TransformError(TransformErrorCode.INVALID_POLICY, 'summary')
+
+
 def _select_confirmed_rounds(
     graph: TranscriptGraph,
     request: TransformRequest,
@@ -309,14 +318,11 @@ def transform_transcript(graph: TranscriptGraph, request: TransformRequest) -> T
     if request.thinking_policy not in {ThinkingPolicy.KEEP, ThinkingPolicy.DROP}:
         raise TransformError(TransformErrorCode.INVALID_POLICY, 'thinking')
 
-    dropped_summary: list[str] = []
+    _require_summary_drop(request.summary_policy)
+
+    dropped_summary: list[str] = list(graph.summary_uuids)
     dropped_noise: list[str] = []
     dropped_system = list(graph.system_uuids)
-
-    if request.summary_policy == SummaryPolicy.DROP:
-        dropped_summary = list(graph.summary_uuids)
-    elif request.summary_policy != SummaryPolicy.KEEP:
-        raise TransformError(TransformErrorCode.INVALID_POLICY, 'summary')
 
     for evt in graph.events:
         if _is_auto_noise(evt):
@@ -370,7 +376,7 @@ def transform_transcript(graph: TranscriptGraph, request: TransformRequest) -> T
             # Never migrate SYSTEM / summary / meta / sidechain rows
             if evt.event_role == EventRole.SYSTEM:
                 continue
-            if evt.event_role == EventRole.SUMMARY and request.summary_policy == SummaryPolicy.DROP:
+            if evt.event_role == EventRole.SUMMARY:
                 continue
             if _is_auto_noise(evt):
                 continue
