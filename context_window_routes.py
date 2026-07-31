@@ -190,9 +190,13 @@ def create_context_window_blueprint(
             }), 503
         except ValueError as exc:
             return jsonify({'ok': False, 'error': str(exc)}), 400
-        except Exception as exc:
+        except Exception:
             logger.exception('context-window/preview failed')
-            return jsonify({'ok': False, 'error': str(exc)}), 500
+            return jsonify({
+                'ok': False,
+                'error': 'preview failed',
+                'code': 'preview_internal_error',
+            }), 500
 
     @blueprint.route('/api/context-window/switch', methods=['POST'])
     def context_window_switch():

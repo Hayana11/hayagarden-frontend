@@ -9,7 +9,7 @@ resident, first-turn commit, Capacity Swap, Canary, or real switch.
 |--------|--------|
 | `chat/context_window_preview.py` | Read-only Preview core |
 | `context_window_routes.py` | `POST /api/context-window/preview` |
-| `tests/test_context_window_preview.py` | Four focused cases |
+| `tests/test_context_window_preview.py` | Focused Preview cases |
 | This doc | Contract notes |
 
 Frozen (not modified): formal switch state machine in `chat/context_window.py`,
@@ -37,7 +37,7 @@ Request fields:
 
 | Status | Meaning |
 |--------|---------|
-| `READY` | ≥1 migratable round; Transform + Validator pass |
+| `READY` | ≥1 migratable round; Transform + Validator pass; prefix + fresh DB recheck ok |
 | `NATIVE_COLD` | `count=0`; empty candidate; no ordinary empty-events Validator |
 | `BLOCKED` | Dry-run completed; candidate unsafe (`ok=true`, HTTP 200) |
 
@@ -51,29 +51,34 @@ Request fields:
 - `BEGIN` only (never `BEGIN IMMEDIATE`)
 - Never `ensure_schema`, INSERT / UPDATE / DELETE / REPLACE / DDL
 
+`_close_preview_readonly` best-effort ROLLBACK + close (idempotent).
+
 ## Flow (count > 0)
 
 1. Snapshot source identity on a read-only connection (canonical open window,
-   no active lease / switch intent).
-2. Select formal app rounds via existing `_collect_context_formal_messages` /
-   `_select_rounds_locked`.
-3. Registry gate for `(context_id, resident_generation)`: READY, non-empty
-   session/path, `scan_offset > 0`, file size ≥ offset.
-4. `read_transcript_range(path, 0, scan_offset)` — never past offset / EOF scan.
-5. Build `user_canonical_by_event_uuid` from existing Mapping + `chat_messages`
-   (same rules as `get_user_canonical_by_event_uuid`; read-only conn).
-6. Reject cross-session / cross-generation selection:
-   `PREVIEW_SELECTED_ROUNDS_SPAN_SESSIONS` (no auto-shrink).
-7. Require app user UUID order == Transcript eligible-tail UUID order.
-8. In-memory `transform_transcript` + `validate_transcript_events`.
-9. Re-open a fresh read-only connection and re-check identity / Registry /
-   selected message IDs; any drift → `PREVIEW_SOURCE_CHANGED`.
+   no active lease / switch intent); select formal app rounds.
+2. Registry gate for `(context_id, resident_generation)`: READY, non-empty
+   session/path.
+3. **Safe** parse of `scan_offset` (`int(...)` never runs unchecked). Invalid /
+   non-positive → content BLOCKED `PREVIEW_REGISTRY_SCAN_OFFSET_INVALID` with
+   `source.scan_offset=None` (HTTP 200). Candidate UUID seed uses `0`.
+4. `prefix_before = _snapshot_transcript_prefix(path, scan_offset)` — exact
+   `[0, scan_offset)` SHA-256; no symlink follow; no read past offset.
+5. `read_transcript_range(path, 0, scan_offset)`.
+6. Canonical Mapping + selection consistency + Transform + Validator.
+7. `prefix_after` must match `prefix_before` (`end_offset` + `sha256`); else
+   `PREVIEW_SOURCE_CHANGED`. Bytes after `scan_offset` are ignored (EOF append ok).
+8. Close first connection. Open a **fresh** read-only connection and re-check
+   identity / Registry / selected message IDs; any drift → `PREVIEW_SOURCE_CHANGED`.
+9. Both prefix + fresh DB recheck must pass before `READY`.
 
 ## count = 0
 
-Still validates source identity / busy / switch intent. Skips Registry, JSONL,
-Mapping, Transform, and ordinary Validator. Returns `NATIVE_COLD` with
-`proof_kind='native_cold_contract'` and empty SHA-256.
+Still validates source identity / busy / switch intent on the first connection,
+then **closes** it and opens a second fresh read-only connection for
+`_recheck_after_read`. Skips Registry, JSONL, Mapping, Transform, and ordinary
+Validator. Returns `NATIVE_COLD` with `proof_kind='native_cold_contract'` and
+empty SHA-256. Identity drift → `PREVIEW_SOURCE_CHANGED`.
 
 ## Candidate session id
 
@@ -83,5 +88,15 @@ Stable UUID v5 over `preview_id` + source identity + `scan_offset` +
 
 ## Response hygiene
 
-Never expose `transcript_path`, absolute cwd, Claude home, or full transformed
-events. `dropped` returns counts only.
+Never expose `transcript_path`, absolute cwd, Claude home, full transformed
+events, or raw exception text. `dropped` returns counts only.
+
+BLOCKED responses:
+
+- no public `error_detail`
+- `validation.errors` contains only the safe Preview `error_code`
+- internal detail may be logged server-side only
+
+Unexpected route failures return HTTP 500 with fixed
+`{ok:false, error:'preview failed', code:'preview_internal_error'}` — never
+`str(exc)`.

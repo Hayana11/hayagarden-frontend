@@ -29,6 +29,7 @@ from chat.context_window_preview import (
     _open_preview_db_readonly,
     preview_context_window,
 )
+from chat.claude_transcript_reader import read_transcript_range as _real_read_range
 from chat.session_registry import (
     SCAN_STATUS_READY,
     get_context_claude_session,
@@ -222,18 +223,30 @@ class ContextWindowPreviewTests(unittest.TestCase):
         return result
 
     def test_native_cold_count_zero(self):
-        """1) count=0 → NATIVE_COLD; no Registry/JSONL/Mapping; DB unchanged."""
+        """1) count=0 → NATIVE_COLD; fresh recheck conn; no Registry/JSONL/Mapping."""
         before = _db_fingerprint(self.db)
-        out = preview_context_window(
-            source_context_id=self.context_id,
-            source_context_epoch=self.epoch,
-            count=0,
-            preview_id=self.preview_id,
-            thinking_policy=ThinkingPolicy.DROP,
-            chat_id='default',
-            db_path=self.db,
-            now=NOW,
-        )
+        opened: list[Any] = []
+        real_open = _open_preview_db_readonly
+
+        def _tracking_open(db_path: str):
+            conn = real_open(db_path)
+            opened.append(conn)
+            return conn
+
+        with mock.patch(
+            'chat.context_window_preview._open_preview_db_readonly',
+            side_effect=_tracking_open,
+        ):
+            out = preview_context_window(
+                source_context_id=self.context_id,
+                source_context_epoch=self.epoch,
+                count=0,
+                preview_id=self.preview_id,
+                thinking_policy=ThinkingPolicy.DROP,
+                chat_id='default',
+                db_path=self.db,
+                now=NOW,
+            )
         self.assertTrue(out['ok'])
         self.assertEqual(out['preview_status'], PREVIEW_STATUS_NATIVE_COLD)
         self.assertEqual(out['candidate']['event_count'], 0)
@@ -248,9 +261,16 @@ class ContextWindowPreviewTests(unittest.TestCase):
         self.assertEqual(out['selection']['selected_round_count'], 0)
         self.assertNotIn('transcript_path', json.dumps(out))
         self.assertNotIn(self.cwd, json.dumps(out))
+        self.assertNotIn('error_detail', out)
         self.assertEqual(_db_fingerprint(self.db), before)
-        # No JSONL created
+        # Fresh recheck: two distinct readonly connections
+        self.assertEqual(len(opened), 2)
+        self.assertIsNot(opened[0], opened[1])
+        # No JSONL created / no Registry required
         self.assertFalse(any(Path(self.home).rglob('*.jsonl')))
+        self.assertIsNone(
+            get_context_claude_session(self.context_id, self.gen, db_path=self.db),
+        )
 
     def test_plain_ready_respects_scan_offset(self):
         """2) READY for two rounds; decoy past scan_offset must not be read."""
@@ -545,6 +565,200 @@ class ContextWindowPreviewTests(unittest.TestCase):
             except Exception:
                 pass
             conn.close()
+
+    def _plain_two_round_fixture(self):
+        path = self._jsonl_path()
+        turn1 = [
+            _line('u1', 'user', session=SESSION_A, parent=None, content='第一轮用户'),
+            _line(
+                'a1', 'assistant', session=SESSION_A, parent='u1',
+                content=[{'type': 'text', 'text': '第一轮助手'}],
+            ),
+        ]
+        turn2 = [
+            _line('u2', 'user', session=SESSION_A, parent='a1', content='第二轮用户'),
+            _line(
+                'a2', 'assistant', session=SESSION_A, parent='u2',
+                content=[{'type': 'text', 'text': '第二轮助手'}],
+            ),
+        ]
+        end1 = _write_jsonl(path, turn1)
+        end2 = _append_jsonl(path, turn2)
+        self._register(session=SESSION_A, scan_offset=0)
+        u1 = _insert_msg(self.db, 'hayana', '第一轮用户')
+        a1 = _insert_msg(self.db, 'fyodor', '第一轮助手')
+        u2 = _insert_msg(self.db, 'hayana', '第二轮用户')
+        a2 = _insert_msg(self.db, 'fyodor', '第二轮助手')
+        for mid, role in ((u1, 'user'), (a1, 'assistant'), (u2, 'user'), (a2, 'assistant')):
+            _bind_msg(
+                self.db, mid, context_id=self.context_id,
+                epoch=self.epoch, gen=self.gen, role=role,
+            )
+        self._map_turn(user_id=u1, asst_id=a1, start=0, end=end1)
+        self._map_turn(user_id=u2, asst_id=a2, start=end1, end=end2)
+        return path, end2, (u1, a1, u2, a2)
+
+    def test_prefix_mutation_blocked(self):
+        """Prefix rewrite inside scan_offset → BLOCKED PREVIEW_SOURCE_CHANGED."""
+        path, end2, _ids = self._plain_two_round_fixture()
+        before_db = _db_fingerprint(self.db)
+        original = path.read_bytes()
+
+        def _mutate_after_read(p, start, end):
+            graph = _real_read_range(p, start, end)
+            raw = bytearray(path.read_bytes())
+            # Flip one byte inside the confirmed prefix (not past scan_offset).
+            idx = max(0, min(end2 - 1, 10))
+            raw[idx] = (raw[idx] + 1) % 256
+            path.write_bytes(bytes(raw))
+            return graph
+
+        try:
+            with mock.patch(
+                'chat.context_window_preview.read_transcript_range',
+                side_effect=_mutate_after_read,
+            ):
+                out = preview_context_window(
+                    source_context_id=self.context_id,
+                    source_context_epoch=self.epoch,
+                    count=2,
+                    preview_id=self.preview_id,
+                    thinking_policy=ThinkingPolicy.DROP,
+                    chat_id='default',
+                    db_path=self.db,
+                    now=NOW,
+                )
+            self.assertTrue(out['ok'], out)
+            self.assertEqual(out['preview_status'], PREVIEW_STATUS_BLOCKED, out)
+            self.assertEqual(out['error_code'], 'PREVIEW_SOURCE_CHANGED')
+            self.assertNotEqual(out.get('preview_status'), PREVIEW_STATUS_READY)
+            self.assertEqual(_db_fingerprint(self.db), before_db)
+        finally:
+            path.write_bytes(original)
+
+    def test_bad_scan_offset_blocked(self):
+        """Non-integer Registry scan_offset → content BLOCKED, no JSONL read."""
+        path, _end2, _ids = self._plain_two_round_fixture()
+        before_db = _db_fingerprint(self.db)
+        before_bytes = path.read_bytes()
+        conn = sqlite3.connect(self.db)
+        conn.execute(
+            'UPDATE context_claude_sessions SET scan_offset=? '
+            'WHERE context_id=? AND resident_generation=?',
+            ('not-an-int', self.context_id, self.gen),
+        )
+        conn.commit()
+        conn.close()
+        before_db = _db_fingerprint(self.db)
+
+        with mock.patch(
+            'chat.context_window_preview.read_transcript_range',
+            side_effect=AssertionError('must not read JSONL'),
+        ) as read_mock:
+            out = preview_context_window(
+                source_context_id=self.context_id,
+                source_context_epoch=self.epoch,
+                count=2,
+                preview_id=self.preview_id,
+                thinking_policy=ThinkingPolicy.DROP,
+                chat_id='default',
+                db_path=self.db,
+                now=NOW,
+            )
+        self.assertTrue(out['ok'], out)
+        self.assertEqual(out['preview_status'], PREVIEW_STATUS_BLOCKED)
+        self.assertEqual(out['error_code'], 'PREVIEW_REGISTRY_SCAN_OFFSET_INVALID')
+        self.assertIsNone(out['source']['scan_offset'])
+        self.assertEqual(out['validation']['errors'], [
+            'PREVIEW_REGISTRY_SCAN_OFFSET_INVALID',
+        ])
+        self.assertNotIn('error_detail', out)
+        read_mock.assert_not_called()
+        self.assertEqual(_db_fingerprint(self.db), before_db)
+        self.assertEqual(path.read_bytes(), before_bytes)
+
+    def test_response_privacy_no_path_leak(self):
+        """Filesystem / internal errors must not leak path or error_detail."""
+        secret = '/secret-preview-path/do-not-leak.jsonl'
+        self._register(session=SESSION_A, scan_offset=128)
+        conn = sqlite3.connect(self.db)
+        conn.execute(
+            'UPDATE context_claude_sessions SET transcript_path=?, scan_offset=? '
+            'WHERE context_id=? AND resident_generation=?',
+            (secret, 128, self.context_id, self.gen),
+        )
+        # Mark READY (register already READY when offset advanced via mapping;
+        # here force READY with bogus path).
+        conn.execute(
+            "UPDATE context_claude_sessions SET scan_status=? "
+            'WHERE context_id=? AND resident_generation=?',
+            (SCAN_STATUS_READY, self.context_id, self.gen),
+        )
+        conn.commit()
+        conn.close()
+
+        # Need at least one selected round so Registry path is exercised.
+        u = _insert_msg(self.db, 'hayana', '隐私探测')
+        a = _insert_msg(self.db, 'fyodor', '隐私探测回复')
+        _bind_msg(
+            self.db, u, context_id=self.context_id,
+            epoch=self.epoch, gen=self.gen, role='user',
+        )
+        _bind_msg(
+            self.db, a, context_id=self.context_id,
+            epoch=self.epoch, gen=self.gen, role='assistant',
+        )
+
+        out = preview_context_window(
+            source_context_id=self.context_id,
+            source_context_epoch=self.epoch,
+            count=1,
+            preview_id=self.preview_id,
+            thinking_policy=ThinkingPolicy.DROP,
+            chat_id='default',
+            db_path=self.db,
+            now=NOW,
+        )
+        blob = json.dumps(out)
+        self.assertTrue(out['ok'], out)
+        self.assertEqual(out['preview_status'], PREVIEW_STATUS_BLOCKED)
+        self.assertNotIn('/secret-preview-path', blob)
+        self.assertNotIn('do-not-leak.jsonl', blob)
+        self.assertNotIn(self.cwd, blob)
+        self.assertNotIn('transcript_path', blob)
+        self.assertNotIn('error_detail', out)
+
+        # Route unknown-exception path must also stay opaque.
+        from flask import Flask
+        from context_window_routes import create_context_window_blueprint
+
+        app = Flask(__name__)
+        app.register_blueprint(create_context_window_blueprint(
+            db_path=self.db, token_getter=lambda: 'tok',
+        ))
+        client = app.test_client()
+        with mock.patch('context_window_routes.enabled', return_value=True), mock.patch(
+            'context_window_routes.preview_context_window',
+            side_effect=RuntimeError('/secret-preview-path/internal'),
+        ):
+            resp = client.post(
+                '/api/context-window/preview',
+                headers={'Authorization': 'Bearer tok'},
+                json={
+                    'source_context_id': self.context_id,
+                    'source_context_epoch': self.epoch,
+                    'count': 0,
+                    'preview_id': self.preview_id,
+                },
+            )
+        self.assertEqual(resp.status_code, 500)
+        body = resp.get_json()
+        self.assertEqual(body.get('code'), 'preview_internal_error')
+        self.assertEqual(body.get('error'), 'preview failed')
+        text = resp.get_data(as_text=True)
+        self.assertNotIn('/secret-preview-path', text)
+        self.assertNotIn('do-not-leak', text)
+        self.assertNotIn('/secret-preview-path/internal', text)
 
 
 if __name__ == '__main__':
