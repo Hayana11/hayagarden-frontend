@@ -8,7 +8,6 @@ import {
   CARRYOVER_COUNTS,
   countLabel,
   flattenRoundMessageIds,
-  isCarryoverCount,
   normalizeMessageId,
   normalizeNonNegativeInt,
   normalizePositiveInt,
