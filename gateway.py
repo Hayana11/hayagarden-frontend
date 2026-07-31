@@ -4256,6 +4256,379 @@ def group_chat_stream():
     )
 
 
+def _sse_json(payload: dict) -> str:
+    return 'data: ' + json.dumps(payload, ensure_ascii=False) + SSE_END
+
+
+def _gw_first_turn_jsonl_grew(session) -> bool:
+    """True when candidate JSONL grew past claim-time start_offset."""
+    try:
+        return int(session.jsonl_path.stat().st_size) > int(session.start_offset)
+    except OSError:
+        # Fail closed: treat unreadable size as dirty.
+        return True
+
+
+def _gw_first_turn_precommit_terminal(
+    session, hooks, *, reason: str, stdin_flushed: bool = False,
+) -> str:
+    """Unified pre-DB-commit terminal.
+
+    Priority: DB committed > stdin flush ack > JSONL auxiliary evidence.
+    Returns ``'clean'``, ``'dirty'``, ``'skipped_committed'``, or ``'failed'``.
+    """
+    import logging
+    from chat.context_window_first_turn import (
+        abort_first_turn_clean,
+        mark_first_turn_precommit_dirty,
+    )
+
+    if session is None:
+        return 'failed'
+    if getattr(session, '_db_committed', False):
+        return 'skipped_committed'
+    if getattr(session, '_gw_precommit_terminal_done', False):
+        return str(getattr(session, '_gw_precommit_terminal_result', 'failed'))
+
+    log = logging.getLogger(__name__)
+
+    def _mark_dirty() -> str:
+        mark_first_turn_precommit_dirty(session, db_path=DB_PATH)
+        session._gw_precommit_terminal_done = True
+        session._gw_precommit_terminal_result = 'dirty'
+        return 'dirty'
+
+    try:
+        # Authoritative flush ack: message already entered Claude → never clean.
+        if stdin_flushed or bool(getattr(session, 'stdin_sent', False)):
+            return _mark_dirty()
+        if not _gw_first_turn_jsonl_grew(session):
+            abort_first_turn_clean(session, hooks=hooks, db_path=DB_PATH)
+            session._gw_precommit_terminal_done = True
+            session._gw_precommit_terminal_result = 'clean'
+            return 'clean'
+        return _mark_dirty()
+    except Exception:
+        log.exception('first_turn precommit terminal failed reason=%s', reason)
+        try:
+            return _mark_dirty()
+        except Exception:
+            log.exception('first_turn dirty fallback failed reason=%s', reason)
+            return 'failed'
+
+
+def _stream_cc_first_turn(_turn_data, _uc, intent: dict):
+    """First-turn path: claim existing user → staged send → handoff on first text."""
+    import logging
+    import uuid
+    from chat.context_window_first_turn import (
+        FirstTurnError,
+        claim_and_start_first_turn,
+        complete_first_turn_round,
+        ingest_first_turn_text_delta,
+        mark_first_turn_stdin_sent,
+        recover_first_turn_handoff_pending,
+    )
+
+    user_message_id = int(_turn_data['user_message_id'])
+    switch_request_id = str(intent['request_id'])
+    ft_req = str(intent.get('first_turn_request_id') or '').strip() or str(uuid.uuid4())
+    hooks = _gw_build_first_turn_hooks()
+    session = None
+    pending = []  # turn events held until first-text handoff
+    first_released = False
+    text_acc = []
+    thinking_acc = []
+    cc_tool_calls = []
+    event_iter = None
+    stdin_flushed = False
+    log = logging.getLogger(__name__)
+
+    def _close_event_iter() -> None:
+        nonlocal event_iter
+        if event_iter is None:
+            return
+        it = event_iter
+        event_iter = None
+        try:
+            it.close()
+        except Exception:
+            log.exception('first_turn event_iter close failed')
+
+    def _precommit(reason: str) -> str:
+        return _gw_first_turn_precommit_terminal(
+            session, hooks, reason=reason, stdin_flushed=stdin_flushed,
+        )
+
+    def _emit_tool_use(payload):
+        cc_tool_calls.append({
+            'id': payload.get('id'),
+            'name': payload.get('name'),
+            'args': payload.get('args'),
+            'result': '',
+            'success': True,
+        })
+        idx = len(cc_tool_calls) - 1
+        yield _sse_json({
+            't': 'tool_use',
+            'd': {
+                'name': payload.get('name'),
+                'args': _slim_args(payload.get('args')),
+            },
+            'idx': idx,
+        })
+
+    def _emit_tool_result(payload):
+        _ti = next(
+            (i for i in range(len(cc_tool_calls) - 1, -1, -1)
+             if cc_tool_calls[i].get('id') == payload.get('tool_use_id')),
+            len(cc_tool_calls) - 1,
+        )
+        if _ti < 0:
+            return
+        cc_tool_calls[_ti]['result'] = payload.get('result', '')
+        cc_tool_calls[_ti]['success'] = not payload.get('is_error')
+        _slim = {
+            **cc_tool_calls[_ti],
+            'args': _slim_args(cc_tool_calls[_ti].get('args')),
+            'result': str(cc_tool_calls[_ti].get('result') or '')[:2000],
+        }
+        yield _sse_json({'t': 'tool_result', 'd': _slim, 'idx': _ti})
+        # Compatibility event retained by formal CC chat stream.
+        yield _sse_json({'t': 'tool_call', 'd': _slim, 'dup': 1})
+
+    def _release_pending():
+        for pevt, ppard in pending:
+            if pevt == 'think':
+                thinking_acc.append(str(ppard or ''))
+                yield _sse_json({'t': 'think', 'd': ppard})
+            elif pevt == 'tool_use':
+                yield from _emit_tool_use(ppard)
+            elif pevt == 'tool_result':
+                yield from _emit_tool_result(ppard)
+        pending.clear()
+
+    try:
+        session = claim_and_start_first_turn(
+            switch_request_id=switch_request_id,
+            first_turn_request_id=ft_req,
+            user_content=_uc,
+            user_message_id=user_message_id,
+            hooks=hooks,
+            db_path=DB_PATH,
+        )
+
+        def on_stdin_flushed():
+            nonlocal stdin_flushed
+            stdin_flushed = True
+            mark_first_turn_stdin_sent(session)
+
+        event_iter = iter(session.staged.send_turn(
+            _uc, on_stdin_flushed=on_stdin_flushed,
+        ))
+
+        try:
+            for evt, payload in event_iter:
+                if evt in ('think', 'tool_use', 'tool_result'):
+                    if not first_released:
+                        pending.append((evt, payload))
+                    elif evt == 'think':
+                        thinking_acc.append(str(payload or ''))
+                        yield _sse_json({'t': 'think', 'd': payload})
+                    elif evt == 'tool_use':
+                        yield from _emit_tool_use(payload)
+                    elif evt == 'tool_result':
+                        yield from _emit_tool_result(payload)
+                    continue
+
+                if evt == 'text':
+                    chunk = str(payload or '')
+                    if not chunk.strip() and not first_released:
+                        continue
+                    if not first_released:
+                        try:
+                            delta = ingest_first_turn_text_delta(
+                                session, text=chunk, hooks=hooks, db_path=DB_PATH,
+                            )
+                        except Exception as exc:
+                            # Same-process: DB may be committed with handoff pending.
+                            if session._db_committed and not session._handoff_complete:
+                                try:
+                                    recovered = recover_first_turn_handoff_pending(
+                                        session, hooks=hooks, db_path=DB_PATH,
+                                    )
+                                    delta_released = recovered.released_text
+                                except Exception:
+                                    log.exception('first_turn handoff recover failed')
+                                    pending.clear()
+                                    yield _sse_json({
+                                        't': 'err',
+                                        'd': '换窗交接失败，请稍后再试。',
+                                        'code': 'FIRST_TURN_HANDOFF_RECOVER_FAILED',
+                                    })
+                                    yield _sse_json({'t': 'done', 'ok': False})
+                                    return
+                            else:
+                                log.exception('first_turn ingest failed: %s', exc)
+                                _precommit('ingest_failed')
+                                pending.clear()
+                                yield _sse_json({
+                                    't': 'err',
+                                    'd': '换窗第一句交接失败，请稍后再试。',
+                                    'code': getattr(exc, 'error_code', None)
+                                    or 'FIRST_TURN_INGEST_FAILED',
+                                })
+                                yield _sse_json({'t': 'done', 'ok': False})
+                                return
+                        else:
+                            delta_released = delta.released_text
+
+                        yield from _release_pending()
+                        for part in delta_released:
+                            text_acc.append(str(part or ''))
+                            yield _sse_json({'t': 'text', 'd': part})
+                        first_released = True
+                        continue
+
+                    delta = ingest_first_turn_text_delta(
+                        session, text=chunk, hooks=hooks, db_path=DB_PATH,
+                    )
+                    for part in delta.released_text:
+                        text_acc.append(str(part or ''))
+                        yield _sse_json({'t': 'text', 'd': part})
+                    continue
+
+                if evt == 'done':
+                    if not first_released:
+                        _close_event_iter()
+                        _precommit('done_before_first_text')
+                        pending.clear()
+                        yield _sse_json({
+                            't': 'err',
+                            'd': '换窗第一句未产生正文，请稍后再试。',
+                            'code': 'FIRST_TURN_DONE_BEFORE_TEXT',
+                        })
+                        yield _sse_json({'t': 'done', 'ok': False})
+                        return
+
+                    if isinstance(payload, tuple) and len(payload) >= 3:
+                        raw_text = payload[0]
+                        thinking = payload[1] if len(payload) > 1 else ''
+                        usage = payload[2] if isinstance(payload[2], dict) else {}
+                    else:
+                        raw_text = ''
+                        thinking = ''
+                        usage = {}
+                        if isinstance(payload, tuple):
+                            if len(payload) >= 1:
+                                raw_text = payload[0]
+                            if len(payload) >= 2:
+                                thinking = payload[1]
+                            if len(payload) >= 3 and isinstance(payload[2], dict):
+                                usage = payload[2]
+                        if not str(raw_text or '').strip():
+                            raw_text = ''.join(text_acc)
+                    assistant_text = (
+                        str(raw_text or '').strip() or ''.join(text_acc).strip()
+                    )
+                    if thinking:
+                        thinking_acc.append(str(thinking))
+                    try:
+                        end_offset = int(session.jsonl_path.stat().st_size)
+                    except OSError:
+                        end_offset = int(session.start_offset)
+                    try:
+                        done = complete_first_turn_round(
+                            session,
+                            assistant_content=assistant_text,
+                            end_offset=end_offset,
+                            db_path=DB_PATH,
+                        )
+                    except Exception as exc:
+                        log.exception(
+                            'first_turn complete failed assistant may exist',
+                        )
+                        yield _sse_json({
+                            't': 'err',
+                            'd': '回答已保存但收尾未完成，请勿重复发送。',
+                            'code': getattr(exc, 'error_code', None)
+                            or 'FIRST_TURN_COMPLETE_FAILED',
+                        })
+                        yield _sse_json({'t': 'done', 'ok': False})
+                        return
+                    if usage:
+                        _usage_evt = {'t': 'usage'}
+                        for _k in (
+                            'v', 'provider', 'num_rounds', 'input_tokens',
+                            'output_tokens', 'cache_read', 'cache_creation',
+                            'last_round_context', 'max_round_context',
+                            'resident_turn_count', 'respawn_reason',
+                        ):
+                            if _k in usage:
+                                _usage_evt[_k] = usage[_k]
+                        yield _sse_json(_usage_evt)
+                    log.info(
+                        'first_turn_complete assistant_id=%s',
+                        done.assistant_message_id,
+                    )
+                    yield _sse_json({'t': 'done', 'ok': True})
+                    return
+        except GeneratorExit:
+            _close_event_iter()
+            if session is not None and not first_released:
+                _precommit('generator_exit')
+            pending.clear()
+            raise
+
+        # Iterator EOF without provider done.
+        if not first_released:
+            _precommit('eof_before_first_text')
+            pending.clear()
+            yield _sse_json({
+                't': 'err',
+                'd': '模型流中断，请稍后再试。',
+                'code': 'FIRST_TURN_STREAM_END',
+            })
+            yield _sse_json({'t': 'done', 'ok': False})
+            return
+
+        # Post-commit incomplete stream: do not invent a second answer.
+        pending.clear()
+        yield _sse_json({
+            't': 'err',
+            'd': '模型流中断，请稍后再试。',
+            'code': 'FIRST_TURN_STREAM_END',
+        })
+        yield _sse_json({'t': 'done', 'ok': False})
+    except FirstTurnError as exc:
+        pending.clear()
+        yield _sse_json({
+            't': 'err',
+            'd': '换窗第一句未能开始，请稍后再试。',
+            'code': exc.error_code,
+        })
+        yield _sse_json({'t': 'done', 'ok': False})
+    except GeneratorExit:
+        _close_event_iter()
+        if session is not None and not first_released:
+            _precommit('generator_exit_outer')
+        pending.clear()
+        raise
+    except Exception as exc:
+        log.exception('first_turn stream failed')
+        if session is not None and not first_released:
+            _precommit('stream_exception')
+        pending.clear()
+        yield _sse_json({
+            't': 'err',
+            'd': '换窗第一句失败，请稍后再试。',
+            'code': getattr(exc, 'error_code', None) or 'FIRST_TURN_STREAM_FAILED',
+        })
+        yield _sse_json({'t': 'done', 'ok': False})
+    finally:
+        _close_event_iter()
+
+
 def _stream_cc_daily_soft_window(_turn_data, _uc):
     """Yield SSE event strings for DAILY_SOFT_WINDOW_ENABLED claude_code chat."""
     import hashlib
@@ -4263,7 +4636,45 @@ def _stream_cc_daily_soft_window(_turn_data, _uc):
     from moments_turn import DEFAULT_CONVERSATION_ID
     from chat import daily_context as _daily_ctx
     from chat import daily_runtime as _daily_rt
+    from chat import context_window as _cw
     from chat.system_builder import build_cc_daily_static_parts
+
+    # First-turn READY bypass — before ordinary prepare_daily_turn.
+    try:
+        intent = _cw.get_active_switch_intent(db_path=DB_PATH)
+    except Exception:
+        intent = None
+    if intent is not None:
+        st = str(intent.get('status') or '')
+        if st == _cw.INTENT_READY:
+            try:
+                current = _cw.get_current_context_window(db_path=DB_PATH)
+            except _cw.NoOpenContextWindowError:
+                current = None
+            if (
+                current is not None
+                and int(current['id']) == int(intent['source_context_id'])
+                and int(current['context_epoch']) == int(intent['source_context_epoch'])
+            ):
+                yield from _stream_cc_first_turn(_turn_data, _uc, intent)
+                return
+            yield _sse_json({
+                't': 'err',
+                'd': '换窗准备与当前窗口不一致，请关闭后重试。',
+                'code': 'FIRST_TURN_SOURCE_MISMATCH',
+            })
+            yield _sse_json({'t': 'done', 'ok': False})
+            return
+        if st in (_cw.INTENT_COMMITTING, _cw.INTENT_HANDOFF_PENDING):
+            # Cross-process / new request: no FirstTurnSession → no auto recover.
+            yield _sse_json({
+                't': 'err',
+                'd': '换窗正在交接中，请稍后再发。',
+                'code': 'FIRST_TURN_BUSY',
+                'retryable': True,
+            })
+            yield _sse_json({'t': 'done', 'ok': False})
+            return
 
     _daily_plan = None
     turn_terminal = False
@@ -6680,21 +7091,121 @@ def _gw_build_switch_hooks():
 _GW_SWITCH_HOOKS = _gw_build_switch_hooks()
 
 
-def _gw_run_seamless_switch(body: dict) -> dict:
-    return _cw_for_switch.switch_context_window(
-        source_context_id=int(body['source_context_id']),
-        source_context_epoch=int(body['source_context_epoch']),
-        count=int(body['count']),
-        request_id=str(body['request_id']),
-        chat_id=str(body.get('chat_id') or 'default'),
-        close_reason=_cw_for_switch.CLOSE_REASON_MANUAL,
-        db_path=DB_PATH,
-        hooks=_GW_SWITCH_HOOKS,
+def _gw_build_target_prepare_hooks():
+    """Target-prepare hooks: staged health only (no formal handoff)."""
+    from chat.context_window_target_prepare import TargetPrepareHooks
+
+    claude_home = _Path(os.environ.get('HOME', '/root')) / '.claude'
+    base = _gw_build_switch_hooks()
+
+    def prepare_staged(intent, forge_path, identity):
+        # identity re-checked inside Target prepare; reuse spawn/health.
+        return base.prepare_staged(intent, forge_path)
+
+    return TargetPrepareHooks(
+        prepare_staged=prepare_staged,
+        discard_staged=base.discard_staged,
+        forge_cwd=CC_CWD,
+        claude_home=claude_home,
     )
 
 
+def _gw_build_first_turn_hooks():
+    from chat.context_window_first_turn import FirstTurnHooks
+
+    base = _gw_build_switch_hooks()
+    return FirstTurnHooks(
+        prepare_staged=base.prepare_staged,
+        discard_staged=base.discard_staged,
+        formal_holder=_CC_RESIDENT,
+        forge_cwd=CC_CWD,
+        claude_home=_Path(os.environ.get('HOME', '/root')) / '.claude',
+    )
+
+
+def _gw_prepare_public_response(*, prepared, intent: dict) -> dict:
+    """Assemble prepare-only public response (no paths / no switched_at)."""
+    return {
+        'ok': True,
+        'prepare_status': str(prepared.prepare_status),
+        'request_id': str(prepared.request_id),
+        'source_context_id': int(intent['source_context_id']),
+        'source_context_epoch': int(intent['source_context_epoch']),
+        'source_resident_generation': int(intent['source_resident_generation']),
+        'target_context_id': int(prepared.target_context_id),
+        'target_context_epoch': int(prepared.target_context_epoch),
+        'candidate_session_id': str(prepared.candidate_session_id),
+        'jsonl_sha256': str(prepared.jsonl_sha256),
+        'jsonl_size': int(prepared.jsonl_size),
+        'staged_ready_at': str(prepared.staged_ready_at),
+        'recovered': bool(prepared.recovered),
+        'status': 'ready',
+    }
+
+
+def _gw_run_seamless_switch(body: dict) -> dict:
+    """Prepare-only switch: Forge publish → Target prepare → READY (not switched)."""
+    from chat.claude_transcript_model import ThinkingPolicy
+    from chat.context_window_forge_publish import (
+        ForgePublishError,
+        publish_context_window_forge_candidate,
+    )
+    from chat.context_window_target_prepare import (
+        TargetPrepareError,
+        prepare_context_window_target,
+    )
+
+    request_id = str(body['request_id'])
+    chat_id = str(body.get('chat_id') or 'default')
+    claude_home = _Path(os.environ.get('HOME', '/root')) / '.claude'
+    try:
+        publish_context_window_forge_candidate(
+            source_context_id=int(body['source_context_id']),
+            source_context_epoch=int(body['source_context_epoch']),
+            count=int(body['count']),
+            preview_id=request_id,
+            request_id=request_id,
+            thinking_policy=ThinkingPolicy.DROP,
+            forge_cwd=CC_CWD,
+            claude_home=claude_home,
+            chat_id=chat_id,
+            db_path=DB_PATH,
+        )
+        prepared = prepare_context_window_target(
+            request_id=request_id,
+            db_path=DB_PATH,
+            hooks=_gw_build_target_prepare_hooks(),
+        )
+    except ForgePublishError as exc:
+        raise _cw_for_switch.SwitchFailedError(
+            getattr(exc, 'error_code', None) or 'forge_publish_failed',
+            str(exc),
+        ) from exc
+    except TargetPrepareError as exc:
+        raise _cw_for_switch.SwitchFailedError(
+            getattr(exc, 'error_code', None) or 'target_prepare_failed',
+            str(exc),
+        ) from exc
+
+    intent = _cw_for_switch.get_active_switch_intent(chat_id, db_path=DB_PATH)
+    if intent is None or str(intent.get('request_id') or '') != request_id:
+        # Same request may already be READY; load by id.
+        conn = _cw_for_switch._connect(DB_PATH)
+        try:
+            intent = _cw_for_switch._intent_row(conn, request_id)
+        finally:
+            conn.close()
+    if intent is None or str(intent.get('status') or '') != _cw_for_switch.INTENT_READY:
+        raise _cw_for_switch.SwitchFailedError(
+            'prepare_not_ready', 'prepare did not reach ready',
+        )
+    return _gw_prepare_public_response(prepared=prepared, intent=intent)
+
+
 def _gw_close_resident_on_context_switch(result: dict) -> None:
-    # Legacy callback kept for tests; seamless path performs handoff itself.
+    # Prepare-only success has no switched_at; never close residents on prepare.
+    if 'switched_at' not in result:
+        return
     _daily_rt_for_switch.close_local_resident_for_context_switch(
         _CC_RESIDENT.get(),
         source_context_id=int(result['source_context_id']),

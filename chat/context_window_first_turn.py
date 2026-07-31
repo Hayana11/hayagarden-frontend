@@ -172,7 +172,67 @@ def _verify_message_claim(
         return
     raise FirstTurnError(
         'message mapped to another context',
-        error_code='FIRST_TURN_MESSAGE_CONFLICT',
+        error_code='FIRST_TURN_USER_CONTEXT_CONFLICT',
+    )
+
+
+def _claim_existing_user_message_conn(
+    conn: sqlite3.Connection,
+    *,
+    user_message_id: int,
+    user_content: str,
+    target_id: int,
+    target_epoch: int,
+    target_gen: int,
+    now_s: str,
+) -> int:
+    """Reuse Gateway-created chat_messages row; map to target; never INSERT."""
+    mid = int(user_message_id)
+    row = conn.execute(
+        'SELECT id, author, content FROM chat_messages WHERE id=?',
+        (mid,),
+    ).fetchone()
+    if row is None:
+        raise FirstTurnError(
+            'user message missing',
+            error_code='FIRST_TURN_USER_MESSAGE_MISSING',
+        )
+    msg = dict(row)
+    if str(msg.get('author') or '') != 'hayana':
+        raise FirstTurnError(
+            'user message author mismatch',
+            error_code='FIRST_TURN_USER_CONTENT_CONFLICT',
+        )
+    if str(msg.get('content') or '').strip() != str(user_content or '').strip():
+        raise FirstTurnError(
+            'user message content mismatch',
+            error_code='FIRST_TURN_USER_CONTENT_CONFLICT',
+        )
+    mapped = conn.execute(
+        'SELECT context_id, context_epoch, resident_generation FROM daily_message_contexts '
+        'WHERE message_id=?',
+        (mid,),
+    ).fetchone()
+    if mapped is None:
+        _map_user_message_conn(
+            conn,
+            message_id=mid,
+            context_id=target_id,
+            context_epoch=target_epoch,
+            resident_generation=target_gen,
+            now_s=now_s,
+        )
+        return mid
+    ex = dict(mapped)
+    if (
+        int(ex['context_id']) == int(target_id)
+        and int(ex['context_epoch']) == int(target_epoch)
+        and int(ex['resident_generation']) == int(target_gen)
+    ):
+        return mid
+    raise FirstTurnError(
+        'user message mapped to another context',
+        error_code='FIRST_TURN_USER_CONTEXT_CONFLICT',
     )
 
 
@@ -614,11 +674,16 @@ def claim_and_start_first_turn(
     switch_request_id: str,
     first_turn_request_id: str,
     user_content: str,
+    user_message_id: Optional[int] = None,
     hooks: Optional[FirstTurnHooks] = None,
     db_path: str,
     now: Optional[Any] = None,
 ) -> FirstTurnSession:
-    """Claim user message to target, lease, READY→COMMITTING, resume candidate."""
+    """Claim user message to target, lease, READY→COMMITTING, resume candidate.
+
+    When ``user_message_id`` is provided (Gateway path), reuse that row — never INSERT.
+    When omitted, keep the offline/test INSERT path.
+    """
     hooks = _require_hooks(hooks)
     ensure_schema(db_path)
     now_dt = _shanghai_now(now)
@@ -627,6 +692,7 @@ def claim_and_start_first_turn(
     if not ft_req:
         raise FirstTurnError('first_turn_request_id required', error_code='FIRST_TURN_REQUEST_ID')
     req_id = str(switch_request_id)
+    provided_uid = int(user_message_id) if user_message_id is not None else None
 
     conn = _connect(db_path)
     try:
@@ -657,14 +723,41 @@ def claim_and_start_first_turn(
         target_epoch = int(target['context_epoch'])
         target_gen = int(target['resident_generation'])
 
-        if existing_uid:
+        if existing_uid is not None:
             user_message_id = int(existing_uid)
-            _verify_message_claim(
+            if provided_uid is not None and provided_uid != user_message_id:
+                conn.rollback()
+                raise FirstTurnError(
+                    'user_message_id mismatch with intent',
+                    error_code='FIRST_TURN_USER_CONTENT_CONFLICT',
+                )
+            if provided_uid is not None:
+                user_message_id = _claim_existing_user_message_conn(
+                    conn,
+                    user_message_id=provided_uid,
+                    user_content=user_content,
+                    target_id=target_id,
+                    target_epoch=target_epoch,
+                    target_gen=target_gen,
+                    now_s=now_s,
+                )
+            else:
+                _verify_message_claim(
+                    conn,
+                    message_id=user_message_id,
+                    target_id=target_id,
+                    target_epoch=target_epoch,
+                    target_gen=target_gen,
+                )
+        elif provided_uid is not None:
+            user_message_id = _claim_existing_user_message_conn(
                 conn,
-                message_id=user_message_id,
+                user_message_id=provided_uid,
+                user_content=user_content,
                 target_id=target_id,
                 target_epoch=target_epoch,
                 target_gen=target_gen,
+                now_s=now_s,
             )
         else:
             user_message_id = _insert_user_message_conn(
@@ -842,7 +935,12 @@ def abort_first_turn_clean(
     db_path: str,
     now: Optional[Any] = None,
 ) -> None:
-    """Pre-commit clean failure: source unchanged, target staged, retry allowed."""
+    """Pre-commit clean failure: source unchanged, target staged, retry allowed.
+
+    Fail-closed: once the authoritative stdin-flush ack has marked
+    ``session.stdin_sent``, clean rollback to READY is forbidden (message may
+    already be in Claude). JSONL growth is an additional dirty gate.
+    """
     hooks = _require_hooks(hooks)
     if session.stdin_sent:
         raise FirstTurnError('stdin already sent', error_code='FIRST_TURN_NOT_CLEAN')

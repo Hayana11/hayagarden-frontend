@@ -521,13 +521,18 @@ class ResidentSession:
                 break
         return last_merged
 
-    def send_turn(self, content, commit_meta=None):
+    def send_turn(self, content, commit_meta=None, on_stdin_flushed=None):
         """Yield ('text'/'think'/'tool_use'/'tool_result'/'done', payload).
 
         done payload is (text, thinking, usage_dict, one_shot_claims).
         Flush 后只提交 state/group cursor；feedback/dream claims 经 done 带回，
         由 gateway 在 assistant 落库成功后再 consume。
         result.is_error / EOF / GeneratorExit（客户端断开）后 kill resident。
+
+        ``on_stdin_flushed`` (optional): sync callback after successful
+        ``stdin.write + flush``, before ``_commit_sent_context`` and any
+        stdout read. Not called if write/flush fails. If the callback raises,
+        the resident is killed and the exception is re-raised (message already sent).
         """
         proc = self._proc
         if proc is None or proc.poll() is not None:
@@ -552,6 +557,14 @@ class ResidentSession:
         except (BrokenPipeError, OSError) as e:
             self._kill(quiet=True)
             raise ResidentError('resident 进程管道已断: ' + str(e))
+
+        if on_stdin_flushed is not None:
+            try:
+                on_stdin_flushed()
+            except BaseException:
+                # Message already entered the pipe; fail closed — kill and re-raise.
+                self._kill(quiet=True)
+                raise
 
         # 信已塞进门缝：立刻提交 resident 游标（即使后续流中断也不重复塞）
         self._commit_sent_context(commit_meta)
