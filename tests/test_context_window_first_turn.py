@@ -11,7 +11,7 @@ import tempfile
 import unittest
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -28,6 +28,7 @@ from chat.context_window import (
     INTENT_HANDOFF_PENDING,
     INTENT_READY,
     _intent_row,
+    get_latest_last_good_checkpoint,
     resolve_canonical_context_row_conn,
 )
 from chat.context_window_first_turn import (
@@ -301,12 +302,25 @@ class ContextWindowFirstTurnTests(unittest.TestCase):
         finally:
             conn.close()
 
+    def _assert_last_good_empty(self, intent: Optional[dict[str, Any]] = None) -> None:
+        row = intent if intent is not None else self._intent()
+        for key in (
+            'last_good_context_id',
+            'last_good_context_epoch',
+            'last_good_resident_generation',
+            'last_good_history_cursor_message_id',
+            'last_good_recorded_at',
+        ):
+            self.assertIsNone(row.get(key), key)
+
     def test_happy_path_first_delta_commit_and_complete(self):
-        """1) prepare READY → reuse Gateway user id → first text handoff → complete."""
+        """1) prepare READY → first text → complete → target last-good checkpoint."""
         published = self._seed_source_and_forge()
         source_before = dc.get_daily_context_by_id(self.context_id, db_path=self.db)
         intent_before = self._intent()
         self.assertEqual(intent_before['status'], INTENT_READY)
+        self._assert_last_good_empty(intent_before)
+        self.assertIsNone(get_latest_last_good_checkpoint(db_path=self.db))
         self.assertEqual(
             dc.get_daily_context_by_id(
                 int(intent_before['target_context_id']), db_path=self.db,
@@ -314,6 +328,9 @@ class ContextWindowFirstTurnTests(unittest.TestCase):
             WINDOW_MODE_MANUAL_STAGED,
         )
         target_id = int(intent_before['target_context_id'])
+        target_epoch = int(
+            dc.get_daily_context_by_id(target_id, db_path=self.db)['context_epoch'],
+        )
         # Gateway chat_stream already inserted the formal user row.
         gateway_user_id = _insert_msg(self.db, 'hayana', '新房第一句')
 
@@ -330,6 +347,7 @@ class ContextWindowFirstTurnTests(unittest.TestCase):
         intent_committing = self._intent()
         self.assertEqual(intent_committing['status'], INTENT_COMMITTING)
         self.assertEqual(int(intent_committing['first_user_message_id']), gateway_user_id)
+        self._assert_last_good_empty(intent_committing)
 
         msg_ctx = dc.get_message_context(session.user_message_id, db_path=self.db)
         self.assertIsNotNone(msg_ctx)
@@ -354,6 +372,8 @@ class ContextWindowFirstTurnTests(unittest.TestCase):
         self.assertFalse(empty.db_committed)
 
         ft_mod.mark_first_turn_stdin_sent(session)
+        self._assert_last_good_empty()  # stdin Ack must not advance last-good
+
         first = ingest_first_turn_text_delta(
             session, text='你好', hooks=self.hooks, db_path=self.db, now=NOW,
         )
@@ -369,6 +389,7 @@ class ContextWindowFirstTurnTests(unittest.TestCase):
         intent_after = self._intent()
         self.assertEqual(intent_after['status'], INTENT_COMMITTED)
         self.assertIsNotNone(intent_after['first_delta_committed_at'])
+        self._assert_last_good_empty(intent_after)  # HANDOFF/COMMITTED pre-complete
 
         conn = _connect(self.db)
         try:
@@ -394,6 +415,7 @@ class ContextWindowFirstTurnTests(unittest.TestCase):
             now=NOW,
         )
         self.assertIsNone(self._intent().get('first_assistant_message_id'))
+        self._assert_last_good_empty()
 
         done = complete_first_turn_round(
             session,
@@ -410,6 +432,38 @@ class ContextWindowFirstTurnTests(unittest.TestCase):
         self.assertEqual(
             int(intent_done['first_assistant_message_id']), done.assistant_message_id,
         )
+        self.assertEqual(int(intent_done['last_good_context_id']), target_id)
+        self.assertEqual(int(intent_done['last_good_context_epoch']), target_epoch)
+        self.assertEqual(
+            int(intent_done['last_good_resident_generation']),
+            int(session.target_resident_generation),
+        )
+        self.assertEqual(
+            int(intent_done['last_good_history_cursor_message_id']),
+            done.assistant_message_id,
+        )
+        self.assertEqual(
+            intent_done['last_good_recorded_at'],
+            intent_done['first_turn_completed_at'],
+        )
+        # Source id must never be written into last-good.
+        self.assertNotEqual(int(intent_done['last_good_context_id']), self.context_id)
+
+        checkpoint = get_latest_last_good_checkpoint(db_path=self.db)
+        self.assertIsNotNone(checkpoint)
+        assert checkpoint is not None
+        self.assertEqual(int(checkpoint['context_id']), target_id)
+        self.assertEqual(int(checkpoint['context_epoch']), target_epoch)
+        self.assertEqual(
+            int(checkpoint['resident_generation']),
+            int(session.target_resident_generation),
+        )
+        self.assertEqual(
+            int(checkpoint['history_cursor_message_id']), done.assistant_message_id,
+        )
+        self.assertEqual(checkpoint['recorded_at'], intent_done['last_good_recorded_at'])
+        self.assertEqual(checkpoint['switch_request_id'], self.switch_request_id)
+
         asst_count = sqlite3.connect(self.db).execute(
             "SELECT COUNT(*) FROM chat_messages WHERE author='assistant' "
             "AND content=?",
@@ -417,26 +471,74 @@ class ContextWindowFirstTurnTests(unittest.TestCase):
         ).fetchone()[0]
         self.assertEqual(asst_count, 1)
 
-        # Retry after completed_at: still one assistant, same id.
+        # Retry after completed_at: still one assistant, same id; checkpoint stable.
+        recorded_before = intent_done['last_good_recorded_at']
         again = complete_first_turn_round(
             session,
             assistant_content='新房第一句回复',
             end_offset=int(published.jsonl_size) + 100,
             db_path=self.db,
-            now=NOW,
+            now=NOW + datetime.timedelta(minutes=5),
         )
         self.assertEqual(again.assistant_message_id, orphan_id)
+        intent_again = self._intent()
+        self.assertEqual(intent_again['last_good_recorded_at'], recorded_before)
+        self.assertEqual(
+            int(intent_again['last_good_history_cursor_message_id']), orphan_id,
+        )
         asst_count2 = sqlite3.connect(self.db).execute(
             "SELECT COUNT(*) FROM chat_messages WHERE author='assistant' "
             "AND content=?",
             ('新房第一句回复',),
         ).fetchone()[0]
         self.assertEqual(asst_count2, 1)
+        cp_again = get_latest_last_good_checkpoint(db_path=self.db)
+        self.assertEqual(cp_again, checkpoint)
 
         binding = dr.get_local_binding()
         self.assertIsNotNone(binding)
         assert binding is not None
         self.assertEqual(int(binding.context_id), target_id)
+
+        with self.subTest('legacy_completed_row_backfill_when_cursor_confirmed'):
+            # Simulate pre-upgrade completed row: completed_at set, last-good NULL.
+            conn = _connect(self.db)
+            try:
+                conn.execute(
+                    '''UPDATE context_switch_intents SET
+                       last_good_context_id=NULL,
+                       last_good_context_epoch=NULL,
+                       last_good_resident_generation=NULL,
+                       last_good_history_cursor_message_id=NULL,
+                       last_good_recorded_at=NULL
+                       WHERE request_id=?''',
+                    (self.switch_request_id,),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+            self._assert_last_good_empty()
+            cursor = dc.get_resident_history_cursor(
+                target_id, session.target_resident_generation, db_path=self.db,
+            )
+            self.assertEqual(int(cursor), orphan_id)
+            backfilled = complete_first_turn_round(
+                session,
+                assistant_content='新房第一句回复',
+                end_offset=int(published.jsonl_size) + 100,
+                db_path=self.db,
+                now=NOW + datetime.timedelta(minutes=10),
+            )
+            self.assertEqual(backfilled.assistant_message_id, orphan_id)
+            intent_bf = self._intent()
+            self.assertEqual(int(intent_bf['last_good_context_id']), target_id)
+            self.assertEqual(
+                intent_bf['last_good_recorded_at'],
+                intent_bf['first_turn_completed_at'],
+            )
+            self.assertNotEqual(
+                int(intent_bf['last_good_context_id']), self.context_id,
+            )
 
         # Public prepare whitelist must not contain server paths / switched_at.
         allowed_public = {
@@ -789,22 +891,114 @@ class ContextWindowFirstTurnTests(unittest.TestCase):
                 gateway_user_id=gateway_user_id,
                 expect_dirty=True,
             )
-            # abort_first_turn_clean must refuse once stdin_sent was marked.
+            self._assert_last_good_empty()
+            prepare_calls = {'n': 0}
+            orig_prepare = self.hooks.prepare_staged
+
+            def counting_prepare(intent, path):
+                prepare_calls['n'] += 1
+                return orig_prepare(intent, path)
+
+            gated = ft_mod.FirstTurnHooks(
+                prepare_staged=counting_prepare,
+                discard_staged=self.hooks.discard_staged,
+                formal_holder=self.hooks.formal_holder,
+                forge_cwd=self.hooks.forge_cwd,
+                claude_home=self.hooks.claude_home,
+            )
+            user_before = sqlite3.connect(self.db).execute(
+                'SELECT COUNT(*) FROM chat_messages WHERE content=?', ('可重试',),
+            ).fetchone()[0]
+            asst_before = sqlite3.connect(self.db).execute(
+                "SELECT COUNT(*) FROM chat_messages WHERE author='assistant'",
+            ).fetchone()[0]
             with self.assertRaises(FirstTurnError) as ar:
-                # Reconstruct a session-like object is heavy; claim refuses dirty COMMITTING.
                 claim_and_start_first_turn(
                     switch_request_id=self.switch_request_id,
-                    first_turn_request_id=str(uuid.uuid4()),
+                    first_turn_request_id=self.first_turn_request_id,
                     user_content='可重试',
                     user_message_id=gateway_user_id,
-                    hooks=self.hooks,
+                    hooks=gated,
                     db_path=self.db,
                     now=NOW,
                 )
-            self.assertIn(
-                ar.exception.error_code,
-                ('FIRST_TURN_INTENT_STATUS', 'FIRST_TURN_IN_PROGRESS', 'FIRST_TURN_REQUEST_CONFLICT'),
+            self.assertEqual(ar.exception.error_code, 'FIRST_TURN_PRECOMMIT_DIRTY')
+            self.assertEqual(prepare_calls['n'], 0)
+            user_after = sqlite3.connect(self.db).execute(
+                'SELECT COUNT(*) FROM chat_messages WHERE content=?', ('可重试',),
+            ).fetchone()[0]
+            asst_after = sqlite3.connect(self.db).execute(
+                "SELECT COUNT(*) FROM chat_messages WHERE author='assistant'",
+            ).fetchone()[0]
+            self.assertEqual(user_after, user_before)
+            self.assertEqual(asst_after, asst_before)
+            self._assert_last_good_empty()
+            _reset_ready_fixture()
+
+        with self.subTest('2B_ambiguous_committing_same_ids_refuse'):
+            # Core fail-closed: COMMITTING refuses re-claim even with same ids.
+            session_c = claim_and_start_first_turn(
+                switch_request_id=self.switch_request_id,
+                first_turn_request_id=self.first_turn_request_id,
+                user_content='可重试',
+                user_message_id=gateway_user_id,
+                hooks=self.hooks,
+                db_path=self.db,
+                now=NOW,
             )
+            self.assertEqual(self._intent()['status'], INTENT_COMMITTING)
+            self.assertNotEqual(
+                self._intent().get('orphan_jsonl_state'), 'precommit_dirty',
+            )
+            self._assert_last_good_empty()
+            prepare_calls = {'n': 0}
+            orig_prepare = self.hooks.prepare_staged
+
+            def counting_prepare_c(intent, path):
+                prepare_calls['n'] += 1
+                return orig_prepare(intent, path)
+
+            gated_c = ft_mod.FirstTurnHooks(
+                prepare_staged=counting_prepare_c,
+                discard_staged=self.hooks.discard_staged,
+                formal_holder=self.hooks.formal_holder,
+                forge_cwd=self.hooks.forge_cwd,
+                claude_home=self.hooks.claude_home,
+            )
+            with self.assertRaises(FirstTurnError) as ar:
+                claim_and_start_first_turn(
+                    switch_request_id=self.switch_request_id,
+                    first_turn_request_id=self.first_turn_request_id,
+                    user_content='可重试',
+                    user_message_id=gateway_user_id,
+                    hooks=gated_c,
+                    db_path=self.db,
+                    now=NOW,
+                )
+            self.assertEqual(ar.exception.error_code, 'FIRST_TURN_IN_PROGRESS')
+            self.assertEqual(prepare_calls['n'], 0)
+            self._assert_last_good_empty()
+            abort_first_turn_clean(
+                session_c, hooks=self.hooks, db_path=self.db, now=NOW,
+            )
+            self.assertEqual(self._intent()['status'], INTENT_READY)
+
+        with self.subTest('2C_clean_ready_same_user_retryable'):
+            session_r = claim_and_start_first_turn(
+                switch_request_id=self.switch_request_id,
+                first_turn_request_id=self.first_turn_request_id,
+                user_content='可重试',
+                user_message_id=gateway_user_id,
+                hooks=self.hooks,
+                db_path=self.db,
+                now=NOW,
+            )
+            self.assertEqual(session_r.user_message_id, gateway_user_id)
+            abort_first_turn_clean(
+                session_r, hooks=self.hooks, db_path=self.db, now=NOW,
+            )
+            self.assertEqual(self._intent()['status'], INTENT_READY)
+            self._assert_last_good_empty()
             _reset_ready_fixture()
 
         with self.subTest('2b_before_ack_jsonl_grown_dirty'):
@@ -969,6 +1163,7 @@ class ContextWindowFirstTurnTests(unittest.TestCase):
         intent_hp = self._intent()
         self.assertEqual(intent_hp['status'], INTENT_HANDOFF_PENDING)
         self.assertIsNotNone(intent_hp['first_delta_committed_at'])
+        self._assert_last_good_empty(intent_hp)  # HANDOFF must not advance last-good
         # First delta still held until same-process recover.
         self.assertFalse(session._handoff_complete)
 
@@ -979,6 +1174,7 @@ class ContextWindowFirstTurnTests(unittest.TestCase):
         self.assertEqual(self._intent()['status'], INTENT_COMMITTED)
         self.assertTrue(session._handoff_complete)
         self.assertEqual(int(self._intent()['target_context_id']), target_id)
+        self._assert_last_good_empty()  # recover ≠ complete; last-good still empty
         # Held first delta released exactly once on recovery.
         self.assertEqual(recovered.released_text, ('小猫，我',))
         again = recover_first_turn_handoff_pending(
@@ -1007,6 +1203,134 @@ class ContextWindowFirstTurnTests(unittest.TestCase):
             ('swap fail case',),
         ).fetchone()[0]
         self.assertEqual(user_rows, 1)
+        self.assertIsNone(get_latest_last_good_checkpoint(db_path=self.db))
+
+    def test_structural_canary_isolation(self):
+        """3) STRUCTURAL_CANARY_ONLY — temp DB/home/JSONL; fake resident; no flag/prod.
+
+        OWNER_CANARY_NOT_IMPLEMENTED / NIGHTLY_SCHEDULER_NOT_IMPLEMENTED.
+        """
+        # Isolation evidence: every path under this test's temp root.
+        self.assertTrue(self.db.startswith(self.tmp + os.sep) or self.db == self.tmp)
+        self.assertTrue(str(self.claude_home).startswith(self.tmp + os.sep))
+        self.assertTrue(self.cwd.startswith(self.tmp + os.sep))
+        self.assertTrue(str(self.hooks.claude_home).startswith(self.tmp + os.sep))
+        self.assertTrue(str(self.hooks.forge_cwd).startswith(self.tmp + os.sep))
+        # Flag untouched; production DB path must not equal this temp db.
+        self.assertNotIn('DAILY_SOFT_WINDOW_ENABLED', os.environ)
+        self.assertNotEqual(os.path.realpath(self.db), os.path.realpath(dc.DEFAULT_DB_PATH))
+
+        published = self._seed_source_and_forge()
+        jsonl = self._jsonl_path(str(self._intent()['target_session_id']))
+        self.assertTrue(str(jsonl).startswith(self.tmp + os.sep))
+        gateway_user_id = _insert_msg(self.db, 'hayana', 'structural canary')
+        session = claim_and_start_first_turn(
+            switch_request_id=self.switch_request_id,
+            first_turn_request_id=self.first_turn_request_id,
+            user_content='structural canary',
+            user_message_id=gateway_user_id,
+            hooks=self.hooks,
+            db_path=self.db,
+            now=NOW,
+        )
+        # Fake staged only (offline hooks); no live Claude process.
+        self.assertTrue(hasattr(session.staged, 'kill'))
+        self.assertTrue(session.staged.is_alive())
+        ft_mod.mark_first_turn_stdin_sent(session)
+        ingest_first_turn_text_delta(
+            session, text='canary-ok', hooks=self.hooks, db_path=self.db, now=NOW,
+        )
+        done = complete_first_turn_round(
+            session,
+            assistant_content='canary-ok-reply',
+            end_offset=int(published.jsonl_size) + 40,
+            db_path=self.db,
+            now=NOW,
+        )
+        cp = get_latest_last_good_checkpoint(db_path=self.db)
+        self.assertIsNotNone(cp)
+        assert cp is not None
+        self.assertEqual(int(cp['history_cursor_message_id']), done.assistant_message_id)
+        self.assertEqual(int(cp['context_id']), int(session.target_context_id))
+
+        with self.subTest('representative_failure_no_auto_repair_no_last_good_advance'):
+            # Second switch intent would need a full forge; instead force dirty on a
+            # fresh READY fixture and prove claim fail-closed without repair.
+            other_tmp, other_db, other_home, other_cwd = _tmp_workspace()
+            try:
+                _init_db(other_db)
+                with mock.patch.dict(os.environ, {'HOME': other_home}):
+                    ctx = dc.get_or_create_daily_context(
+                        chat_id='default', local_day='2026-07-31',
+                        db_path=other_db, now=NOW,
+                    )
+                    switch_id = str(uuid.uuid4())
+                    ft_req = str(uuid.uuid4())
+                    # Minimal READY intent without forge publish — prove dirty gate
+                    # isolation on a separate temp DB only.
+                    conn = _connect(other_db)
+                    try:
+                        conn.execute(
+                            '''INSERT INTO context_switch_intents (
+                                request_id, chat_id, payload_hash, status,
+                                source_context_id, source_context_epoch, source_version,
+                                source_resident_generation, source_boundary_message_id,
+                                carryover_count, selected_message_ids_json,
+                                orphan_jsonl_state, created_at, updated_at,
+                                first_turn_request_id, first_user_message_id
+                            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
+                            (
+                                switch_id, 'default', 'x', INTENT_COMMITTING,
+                                int(ctx['id']), int(ctx['context_epoch']),
+                                int(ctx['version']), int(ctx['resident_generation']),
+                                0, 0, '[]', 'precommit_dirty',
+                                NOW.strftime('%Y-%m-%d %H:%M:%S'),
+                                NOW.strftime('%Y-%m-%d %H:%M:%S'),
+                                ft_req, 1,
+                            ),
+                        )
+                        conn.commit()
+                    finally:
+                        conn.close()
+                    prepare_n = {'n': 0}
+                    fail_hooks = offline_first_turn_hooks(Path(other_tmp) / 'fail_hooks')
+
+                    def boom_prepare(intent, path):
+                        prepare_n['n'] += 1
+                        raise AssertionError('prepare must not run')
+
+                    fail_hooks = ft_mod.FirstTurnHooks(
+                        prepare_staged=boom_prepare,
+                        discard_staged=fail_hooks.discard_staged,
+                        formal_holder=fail_hooks.formal_holder,
+                        forge_cwd=other_cwd,
+                        claude_home=Path(other_home) / '.claude',
+                    )
+                    with self.assertRaises(FirstTurnError) as ar:
+                        claim_and_start_first_turn(
+                            switch_request_id=switch_id,
+                            first_turn_request_id=ft_req,
+                            user_content='no',
+                            user_message_id=1,
+                            hooks=fail_hooks,
+                            db_path=other_db,
+                            now=NOW,
+                        )
+                    self.assertEqual(ar.exception.error_code, 'FIRST_TURN_PRECOMMIT_DIRTY')
+                    self.assertEqual(prepare_n['n'], 0)
+                    self.assertIsNone(
+                        get_latest_last_good_checkpoint(db_path=other_db),
+                    )
+                    self.assertNotEqual(
+                        os.path.realpath(other_db),
+                        os.path.realpath(dc.DEFAULT_DB_PATH),
+                    )
+            finally:
+                shutil.rmtree(other_tmp, ignore_errors=True)
+
+        # Cleanup: discard staged resident from success path.
+        self.hooks.discard_staged(session.staged)
+        self.assertFalse(session.staged.is_alive())
 
     def test_gateway_prepare_only_runner_contract(self):
         """Source-level: seamless runner is prepare-only; public keys have no paths."""

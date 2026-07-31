@@ -646,6 +646,55 @@ def get_active_switch_intent(
         conn.close()
 
 
+def get_latest_last_good_checkpoint(
+    chat_id: str = DEFAULT_CHAT_ID,
+    *,
+    db_path: str,
+) -> Optional[dict[str, Any]]:
+    """Read-only latest complete target last-good checkpoint.
+
+    Returns None when no committed intent has a full five-field checkpoint.
+    Does not fall back to source identity, guess canonical context, start a
+    resident, or mutate any database state. Cold fallback is not implemented.
+    """
+    ensure_schema(db_path)
+    conn = _connect(db_path)
+    try:
+        row = conn.execute(
+            '''SELECT request_id,
+                      last_good_context_id,
+                      last_good_context_epoch,
+                      last_good_resident_generation,
+                      last_good_history_cursor_message_id,
+                      last_good_recorded_at
+               FROM context_switch_intents
+               WHERE chat_id=?
+                 AND status=?
+                 AND first_turn_completed_at IS NOT NULL
+                 AND last_good_context_id IS NOT NULL
+                 AND last_good_context_epoch IS NOT NULL
+                 AND last_good_resident_generation IS NOT NULL
+                 AND last_good_history_cursor_message_id IS NOT NULL
+                 AND last_good_recorded_at IS NOT NULL
+               ORDER BY last_good_recorded_at DESC, updated_at DESC
+               LIMIT 1''',
+            (str(chat_id), INTENT_COMMITTED),
+        ).fetchone()
+        if row is None:
+            return None
+        d = dict(row)
+        return {
+            'context_id': int(d['last_good_context_id']),
+            'context_epoch': int(d['last_good_context_epoch']),
+            'resident_generation': int(d['last_good_resident_generation']),
+            'history_cursor_message_id': int(d['last_good_history_cursor_message_id']),
+            'recorded_at': str(d['last_good_recorded_at']),
+            'switch_request_id': str(d['request_id']),
+        }
+    finally:
+        conn.close()
+
+
 def _update_intent_conn(
     conn: sqlite3.Connection,
     request_id: str,

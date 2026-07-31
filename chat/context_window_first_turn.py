@@ -697,28 +697,42 @@ def claim_and_start_first_turn(
     conn = _connect(db_path)
     try:
         conn.execute('BEGIN IMMEDIATE')
-        intent, target = _load_target_and_intent(conn, req_id)
+        intent = _intent_row(conn, req_id)
+        if intent is None:
+            conn.rollback()
+            raise FirstTurnError('intent missing', error_code='FIRST_TURN_INTENT_MISSING')
         status = str(intent.get('status') or '')
-        if status not in (INTENT_READY, INTENT_COMMITTING):
+
+        # Fail-closed gates after Intent load, before target work / mapping / lease.
+        if str(intent.get('orphan_jsonl_state') or '') == 'precommit_dirty':
+            conn.rollback()
+            raise FirstTurnError(
+                'first turn precommit dirty',
+                error_code='FIRST_TURN_PRECOMMIT_DIRTY',
+            )
+        if status == INTENT_COMMITTING:
+            # Ambiguous or in-flight: never re-claim / re-prepare / re-send,
+            # even when first_turn_request_id and user_message_id match.
+            conn.rollback()
+            raise FirstTurnError(
+                'first turn already in progress',
+                error_code='FIRST_TURN_IN_PROGRESS',
+            )
+        if status != INTENT_READY:
             conn.rollback()
             raise FirstTurnError('intent not ready', error_code='FIRST_TURN_INTENT_STATUS')
 
         existing_ft = intent.get('first_turn_request_id')
         existing_uid = intent.get('first_user_message_id')
-        if status == INTENT_COMMITTING:
-            if str(existing_ft or '') != ft_req:
-                conn.rollback()
-                raise FirstTurnError(
-                    'committing under another first turn',
-                    error_code='FIRST_TURN_IN_PROGRESS',
-                )
-        elif existing_ft and str(existing_ft) != ft_req:
+        if existing_ft and str(existing_ft) != ft_req:
             conn.rollback()
             raise FirstTurnError(
                 'first turn request mismatch',
                 error_code='FIRST_TURN_REQUEST_CONFLICT',
             )
 
+        # Target required only after dirty/COMMITTING gates (fail-closed first).
+        _, target = _load_target_and_intent(conn, req_id)
         target_id = int(target['id'])
         target_epoch = int(target['context_epoch'])
         target_gen = int(target['resident_generation'])
@@ -1074,6 +1088,48 @@ def recover_first_turn_handoff_pending(
     )
 
 
+def _last_good_checkpoint_complete(intent: dict[str, Any]) -> bool:
+    """True only when all five last-good fields are present (no half-set)."""
+    return (
+        intent.get('last_good_context_id') is not None
+        and intent.get('last_good_context_epoch') is not None
+        and intent.get('last_good_resident_generation') is not None
+        and intent.get('last_good_history_cursor_message_id') is not None
+        and intent.get('last_good_recorded_at') is not None
+    )
+
+
+def _last_good_fields_for_target(
+    session: FirstTurnSession,
+    *,
+    assistant_message_id: int,
+    recorded_at: str,
+) -> dict[str, Any]:
+    """Target checkpoint only — never source_context_id."""
+    return {
+        'last_good_context_id': int(session.target_context_id),
+        'last_good_context_epoch': int(session.target_context_epoch),
+        'last_good_resident_generation': int(session.target_resident_generation),
+        'last_good_history_cursor_message_id': int(assistant_message_id),
+        'last_good_recorded_at': str(recorded_at),
+    }
+
+
+def _target_cursor_matches_assistant_conn(
+    conn: sqlite3.Connection,
+    session: FirstTurnSession,
+    assistant_message_id: int,
+) -> bool:
+    row = conn.execute(
+        'SELECT history_cursor_message_id FROM daily_resident_cursors '
+        'WHERE context_id=? AND resident_generation=?',
+        (int(session.target_context_id), int(session.target_resident_generation)),
+    ).fetchone()
+    if row is None:
+        return False
+    return int(dict(row)['history_cursor_message_id']) == int(assistant_message_id)
+
+
 @_serialize_context_switch
 def complete_first_turn_round(
     session: FirstTurnSession,
@@ -1083,7 +1139,7 @@ def complete_first_turn_round(
     db_path: str,
     now: Optional[Any] = None,
 ) -> FirstTurnCompleteResult:
-    """Assistant persist + cursor CAS + lease release + completed_at."""
+    """Assistant persist + cursor CAS + lease release + completed_at + last-good."""
     if not session._handoff_complete:
         raise FirstTurnError('handoff incomplete', error_code='FIRST_TURN_HANDOFF_INCOMPLETE')
     ensure_schema(db_path)
@@ -1103,6 +1159,31 @@ def complete_first_turn_round(
             raise FirstTurnError('not committed', error_code='FIRST_TURN_INTENT_STATUS')
         if intent.get('first_turn_completed_at') and intent.get('first_assistant_message_id'):
             assistant_id = int(intent['first_assistant_message_id'])
+            if _last_good_checkpoint_complete(intent):
+                conn.commit()
+                return FirstTurnCompleteResult(
+                    assistant_message_id=assistant_id,
+                    cursor_advanced=False,
+                )
+            # Upgrade-compat: completed row missing last-good — backfill only when
+            # target resident cursor already equals first_assistant_message_id.
+            if not _target_cursor_matches_assistant_conn(conn, session, assistant_id):
+                conn.rollback()
+                raise FirstTurnError(
+                    'last-good backfill cursor unconfirmed',
+                    error_code='FIRST_TURN_LAST_GOOD_CURSOR_UNCONFIRMED',
+                )
+            recorded_at = str(intent['first_turn_completed_at'])
+            _update_intent_conn(
+                conn,
+                session.switch_request_id,
+                fields=_last_good_fields_for_target(
+                    session,
+                    assistant_message_id=assistant_id,
+                    recorded_at=recorded_at,
+                ),
+                now_s=now_s,
+            )
             conn.commit()
             return FirstTurnCompleteResult(
                 assistant_message_id=assistant_id,
@@ -1170,17 +1251,26 @@ def complete_first_turn_round(
         db_path=db_path,
     )
 
+    # Final txn: completed_at + five last-good fields together (never earlier).
     conn = _connect(db_path)
     try:
         conn.execute('BEGIN IMMEDIATE')
+        fields = {
+            'first_turn_end_offset': int(end_offset),
+            'first_turn_completed_at': now_s,
+            'first_turn_error_code': None,
+        }
+        fields.update(
+            _last_good_fields_for_target(
+                session,
+                assistant_message_id=int(assistant_id),
+                recorded_at=now_s,
+            ),
+        )
         _update_intent_conn(
             conn,
             session.switch_request_id,
-            fields={
-                'first_turn_end_offset': int(end_offset),
-                'first_turn_completed_at': now_s,
-                'first_turn_error_code': None,
-            },
+            fields=fields,
             now_s=now_s,
         )
         conn.commit()
