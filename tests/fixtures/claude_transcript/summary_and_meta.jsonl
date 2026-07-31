@@ -1,0 +1,5 @@
+{"type": "queue-operation", "uuid": "eeeeeee1-eeee-eeee-eeee-eeeeeeeeeee1", "sessionId": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "operation": "enqueue"}
+{"type": "user", "uuid": "ddddddd1-dddd-dddd-dddd-ddddddddddd1", "parentUuid": null, "timestamp": "2026-07-29T14:00:00.000Z", "sessionId": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "cwd": "/tmp/claude-transcript-core-synth", "message": {"role": "user", "content": "普通争吵后和好了"}}
+{"type": "assistant", "uuid": "ddddddd2-dddd-dddd-dddd-ddddddddddd2", "parentUuid": "ddddddd1-dddd-dddd-dddd-ddddddddddd1", "timestamp": "2026-07-29T14:00:01.000Z", "sessionId": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "cwd": "/tmp/claude-transcript-core-synth", "message": {"role": "assistant", "content": [{"type": "text", "text": "我还在。"}]}}
+{"type": "summary", "uuid": "ddddddd3-dddd-dddd-dddd-ddddddddddd3", "leafUuid": "ddddddd2-dddd-dddd-dddd-ddddddddddd2", "sessionId": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "summary": "旧摘要"}
+{"type": "last-prompt", "uuid": "eeeeeee2-eeee-eeee-eeee-eeeeeeeeeee2", "sessionId": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "prompt": "x"}
