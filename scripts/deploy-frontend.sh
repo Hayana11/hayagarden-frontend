@@ -43,6 +43,7 @@ git fetch --prune "$REMOTE"
 dirty="$(git status --porcelain --untracked-files=all -- . \
   ':(exclude)attachments.db' ':(exclude)attachments/**' \
   ':(exclude)client_errors.log' ':(exclude)static/uploads/**' \
+  ':(exclude)memories.db-shm' ':(exclude)memories.db-wal' \
   ':(exclude)memories.db.bak*')"
 if [[ -n "$dirty" ]]; then
   echo "$dirty" >&2
