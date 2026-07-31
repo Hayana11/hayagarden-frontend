@@ -722,6 +722,13 @@ def _ensure_context_switch_forge_schema(conn: sqlite3.Connection) -> None:
             ('first_assistant_message_id', 'INTEGER'),
             ('first_turn_completed_at', 'TEXT'),
             ('first_turn_error_code', 'TEXT'),
+            # Last-good target checkpoint (complete five-field unit; all NULL until
+            # complete_first_turn_round final txn). No separate table / state machine.
+            ('last_good_context_id', 'INTEGER'),
+            ('last_good_context_epoch', 'INTEGER'),
+            ('last_good_resident_generation', 'INTEGER'),
+            ('last_good_history_cursor_message_id', 'INTEGER'),
+            ('last_good_recorded_at', 'TEXT'),
         )
         for col_name, col_type in first_turn_cols:
             if col_name not in icols:
