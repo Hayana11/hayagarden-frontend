@@ -64,10 +64,17 @@ Registry binds immediately after the target row exists.
    - `intent.status=ready`
    - `intent.target_context_id=<target>`
    - `intent.staged_ready_at=<ts>`
+7. **Release doorway process** — after ready CAS, call `discard_staged`
+   exactly once (READY and ALREADY_READY). This stage does not retain a
+   staged handle registry; same-request retry re-`--resume` + health.
 
-`ready` means: candidate file, provisional doorplate, Registry, and
-health-restorable staged resident are prepared; **source remains the only
-formal window**.
+`ready` means: candidate file, provisional doorplate, Registry, and a
+just-verified staged health window are prepared; **source remains the only
+formal window**. The health process is not kept alive across stages.
+
+Runtime day resolvers `resolve_or_create_daily_context_for_origin` and
+`get_or_create_daily_context` use `_get_formal_daily_context` so a same-day
+`manual_staged` row is never returned as the chat context.
 
 ## Failure / recovery
 

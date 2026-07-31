@@ -162,9 +162,16 @@ class ContextWindowTargetPrepareTests(unittest.TestCase):
         # Build offline staged hooks against the same cwd/claude_home as Forge publish
         # (avoid a second Claude home tree that can trip PREVIEW_CWD_AMBIGUOUS).
         base_hooks = offline_target_prepare_hooks(Path(self.tmp) / 'hooks_logic')
+        self._discard_count = {'n': 0}
+        real_discard = base_hooks.discard_staged
+
+        def _counting_discard(staged: Any) -> None:
+            self._discard_count['n'] += 1
+            return real_discard(staged)
+
         self.hooks = prepare_mod.TargetPrepareHooks(
             prepare_staged=base_hooks.prepare_staged,
-            discard_staged=base_hooks.discard_staged,
+            discard_staged=_counting_discard,
             forge_cwd=self.cwd,
             claude_home=self.claude_home,
         )
@@ -300,11 +307,31 @@ class ContextWindowTargetPrepareTests(unittest.TestCase):
         self.assertTrue(out.jsonl_path.is_file())
         self.assertEqual(out.jsonl_sha256, published.jsonl_sha256)
         self.assertEqual(out.jsonl_size, published.jsonl_size)
+        self.assertEqual(self._discard_count['n'], 1)
 
         intent = self._intent()
         self.assertEqual(intent['status'], INTENT_READY)
         self.assertEqual(int(intent['target_context_id']), out.target_context_id)
         self.assertIsNotNone(intent['staged_ready_at'])
+
+        again = self._prepare()
+        self.assertEqual(again.prepare_status, PREPARE_STATUS_ALREADY_READY)
+        self.assertEqual(self._discard_count['n'], 2)
+
+        origin = dc.resolve_or_create_daily_context_for_origin(
+            chat_id='default',
+            origin_local_day='2026-07-31',
+            actual_wall_now=NOW,
+            db_path=self.db,
+        )
+        self.assertEqual(int(origin['id']), self.context_id)
+        got = dc.get_or_create_daily_context(
+            chat_id='default',
+            local_day='2026-07-31',
+            db_path=self.db,
+            now=NOW,
+        )
+        self.assertEqual(int(got['id']), self.context_id)
 
         target = dc.get_daily_context_by_id(out.target_context_id, db_path=self.db)
         self.assertEqual(target['window_mode'], WINDOW_MODE_MANUAL_STAGED)

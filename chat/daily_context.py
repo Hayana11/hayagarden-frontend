@@ -861,6 +861,25 @@ def get_daily_context(
     ).fetchone())
 
 
+def _get_formal_daily_context(
+    conn: sqlite3.Connection,
+    *,
+    chat_id: str,
+    local_day: str,
+) -> Optional[dict[str, Any]]:
+    """Day lookup for runtime resolvers — never returns manual_staged prepare rows.
+
+    Backfill rows for that day remain visible; only provisional prepare targets
+    are excluded.
+    """
+    return _row_to_dict(conn.execute(
+        '''SELECT * FROM daily_contexts
+           WHERE chat_id=? AND local_day=? AND window_mode != ?
+           ORDER BY context_epoch DESC LIMIT 1''',
+        (chat_id, local_day, WINDOW_MODE_MANUAL_STAGED),
+    ).fetchone())
+
+
 def _latest_active_context_row(
     conn: sqlite3.Connection,
     chat_id: str,
@@ -940,7 +959,9 @@ def resolve_or_create_daily_context_for_origin(
     conn = _connect(db_path)
     try:
         conn.execute('BEGIN IMMEDIATE')
-        existing = get_daily_context(conn, chat_id=chat_id, local_day=origin_local_day)
+        existing = _get_formal_daily_context(
+            conn, chat_id=chat_id, local_day=origin_local_day,
+        )
         latest = _latest_active_context_row(conn, chat_id)
         _rollover_lease_blocks_origin_conn(
             conn,
@@ -997,12 +1018,16 @@ def resolve_or_create_daily_context_for_origin(
                 (STATUS_PROVISIONAL, context_id),
             )
         conn.commit()
-        created = get_daily_context(conn, chat_id=chat_id, local_day=origin_local_day)
+        created = _get_formal_daily_context(
+            conn, chat_id=chat_id, local_day=origin_local_day,
+        )
         assert created is not None
         return created
     except sqlite3.IntegrityError:
         conn.rollback()
-        existing = get_daily_context(conn, chat_id=chat_id, local_day=origin_local_day)
+        existing = _get_formal_daily_context(
+            conn, chat_id=chat_id, local_day=origin_local_day,
+        )
         if existing is None:
             raise
         conn2 = _connect(db_path)
@@ -1096,7 +1121,9 @@ def get_or_create_daily_context(
     conn = _connect(db_path)
     try:
         conn.execute('BEGIN IMMEDIATE')
-        existing = get_daily_context(conn, chat_id=chat_id, local_day=local_day)
+        existing = _get_formal_daily_context(
+            conn, chat_id=chat_id, local_day=local_day,
+        )
         if existing is not None:
             conn.commit()
             return existing
@@ -1127,12 +1154,16 @@ def get_or_create_daily_context(
                 (STATUS_PROVISIONAL, context_id),
             )
         conn.commit()
-        created = get_daily_context(conn, chat_id=chat_id, local_day=local_day)
+        created = _get_formal_daily_context(
+            conn, chat_id=chat_id, local_day=local_day,
+        )
         assert created is not None
         return created
     except sqlite3.IntegrityError:
         conn.rollback()
-        existing = get_daily_context(conn, chat_id=chat_id, local_day=local_day)
+        existing = _get_formal_daily_context(
+            conn, chat_id=chat_id, local_day=local_day,
+        )
         if existing is None:
             raise
         return existing

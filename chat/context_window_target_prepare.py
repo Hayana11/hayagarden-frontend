@@ -713,6 +713,12 @@ def prepare_context_window_target(
         status = (
             PREPARE_STATUS_ALREADY_READY if entered_ready else PREPARE_STATUS_READY
         )
+        # Doorway health only — release the staged process after ready CAS.
+        # Do not retain handles across stages or leave orphan Claude children.
+        if staged_handle is not None:
+            handle = staged_handle
+            staged_handle = None
+            hooks.discard_staged(handle)
         return TargetPrepareResult(
             prepare_status=status,
             request_id=req_id,
