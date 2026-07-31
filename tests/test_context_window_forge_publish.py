@@ -9,6 +9,7 @@ import sqlite3
 import stat
 import sys
 import tempfile
+import threading
 import unittest
 import uuid
 from pathlib import Path
@@ -158,10 +159,12 @@ class ContextWindowForgePublishTests(unittest.TestCase):
         # Clear test hooks
         forge_mod._post_publish_hook = None
         forge_mod._finalize_fault_hook = None
+        forge_mod._before_owned_cleanup_hook = None
 
     def tearDown(self) -> None:
         forge_mod._post_publish_hook = None
         forge_mod._finalize_fault_hook = None
+        forge_mod._before_owned_cleanup_hook = None
         self._home_patch.stop()
         shutil.rmtree(self.tmp, ignore_errors=True)
 
@@ -258,7 +261,7 @@ class ContextWindowForgePublishTests(unittest.TestCase):
         )
 
     def test_plain_published(self):
-        """1) READY candidate → PUBLISHED; intent forging; no target/Registry."""
+        """1) READY candidate → PUBLISHED; one-shot temp unlink failure recovered."""
         _src_path, _end, ids = self._plain_two_rounds()
         before_contexts = sqlite3.connect(self.db).execute(
             'SELECT COUNT(*) FROM daily_contexts'
@@ -267,8 +270,20 @@ class ContextWindowForgePublishTests(unittest.TestCase):
             'SELECT COUNT(*) FROM context_claude_sessions'
         ).fetchone()[0]
 
-        # count=3 is an allowed carryover; with only 2 rounds → select both.
-        result = self._publish(count=3)
+        real_unlink = os.unlink
+        unlink_fails = {'n': 0}
+
+        def _flaky_unlink(path, *args, **kwargs):
+            name = path if isinstance(path, str) else str(path)
+            if '.forge-tmp-' in name and unlink_fails['n'] == 0:
+                unlink_fails['n'] += 1
+                raise OSError(errno.EIO, 'injected temp unlink failure')
+            return real_unlink(path, *args, **kwargs)
+
+        import errno
+        with mock.patch('os.unlink', side_effect=_flaky_unlink):
+            result = self._publish(count=3)
+        self.assertEqual(unlink_fails['n'], 1)
         self.assertEqual(result.publish_status, PUBLISH_STATUS_PUBLISHED)
         self.assertIsNotNone(result.jsonl_path)
         assert result.jsonl_path is not None
@@ -284,10 +299,8 @@ class ContextWindowForgePublishTests(unittest.TestCase):
         self.assertGreater(result.event_count, 0)
         self.assertEqual(result.selected_round_count, 2)
         self.assertFalse(result.recovered_existing_file)
-        # no temp residue
         parent = result.jsonl_path.parent
-        temps = list(parent.glob('.forge-tmp-*'))
-        self.assertEqual(temps, [])
+        self.assertEqual(list(parent.glob('.forge-tmp-*')), [])
 
         intent = self._intent()
         self.assertEqual(intent['status'], INTENT_FORGING)
@@ -308,23 +321,20 @@ class ContextWindowForgePublishTests(unittest.TestCase):
         ).fetchone()[0]
         self.assertEqual(after_contexts, before_contexts)
         self.assertEqual(after_reg, before_reg)
-        # only source registry remains
         reg = get_context_claude_session(
             self.context_id, self.gen, db_path=self.db,
         )
         self.assertIsNotNone(reg)
         self.assertEqual(reg['claude_session_id'], SESSION_A)
-
         ctx = dc.get_daily_context_by_id(self.context_id, db_path=self.db)
         self.assertIsNone(ctx.get('closed_at'))
         self.assertEqual(int(ctx['resident_generation']), self.gen)
-        # selected ids locked
         self.assertEqual(
             json.loads(intent['selected_message_ids_json']), list(ids),
         )
 
     def test_native_cold_bound(self):
-        """2) count=0 → NATIVE_COLD_BOUND; no JSONL; retry ALREADY_PUBLISHED."""
+        """2) NATIVE_COLD bind; persisted ALREADY without prepare after source change."""
         before_files = set(Path(self.home).rglob('*.jsonl'))
         projects_before = (
             set((self.claude_home / 'projects').rglob('*'))
@@ -353,13 +363,37 @@ class ContextWindowForgePublishTests(unittest.TestCase):
         self.assertEqual(int(intent['target_jsonl_size']), 0)
         self.assertEqual(intent['orphan_jsonl_state'], 'none')
         self.assertIsNone(intent['target_context_id'])
+        updated_at = intent['updated_at']
 
-        again = self._publish(count=0)
+        # Representative post-publish source change (version bump).
+        conn = sqlite3.connect(self.db)
+        conn.execute(
+            'UPDATE daily_contexts SET version=version+1 WHERE id=?',
+            (self.context_id,),
+        )
+        conn.commit()
+        conn.close()
+
+        prepare_calls = {'n': 0}
+
+        def _forbid_prepare(*_a, **_k):
+            prepare_calls['n'] += 1
+            raise AssertionError('prepare must not run on persisted ALREADY')
+
+        with mock.patch(
+            'chat.context_window_forge_publish.prepare_context_window_candidate',
+            side_effect=_forbid_prepare,
+        ):
+            again = self._publish(count=0)
         self.assertEqual(again.publish_status, PUBLISH_STATUS_ALREADY_PUBLISHED)
         self.assertEqual(again.candidate_session_id, result.candidate_session_id)
+        self.assertEqual(again.proof_kind, 'native_cold_contract')
+        self.assertEqual(prepare_calls['n'], 0)
+        intent2 = self._intent()
+        self.assertEqual(intent2['updated_at'], updated_at)
 
     def test_pending_crash_recovery(self):
-        """3) File written + finalize fails → same request recovers without rewrite."""
+        """3) Pending crash recovery + same-request concurrent serialize."""
         self._plain_two_rounds()
 
         def _fail_finalize():
@@ -387,9 +421,30 @@ class ContextWindowForgePublishTests(unittest.TestCase):
         sha1 = __import__('hashlib').sha256(path.read_bytes()).hexdigest()
 
         forge_mod._finalize_fault_hook = None
-        result = self._publish(count=3)
-        self.assertEqual(result.publish_status, PUBLISH_STATUS_PUBLISHED)
-        self.assertTrue(result.recovered_existing_file)
+        outcomes: list[Any] = []
+        errors: list[BaseException] = []
+
+        def _worker():
+            try:
+                outcomes.append(self._publish(count=3))
+            except BaseException as exc:  # noqa: BLE001 — capture for assertion
+                errors.append(exc)
+
+        t1 = threading.Thread(target=_worker)
+        t2 = threading.Thread(target=_worker)
+        t1.start()
+        t2.start()
+        t1.join()
+        t2.join()
+        self.assertEqual(errors, [])
+        self.assertEqual(len(outcomes), 2)
+        statuses = sorted(r.publish_status for r in outcomes)
+        self.assertEqual(
+            statuses,
+            sorted([PUBLISH_STATUS_PUBLISHED, PUBLISH_STATUS_ALREADY_PUBLISHED]),
+        )
+        for r in outcomes:
+            self.assertNotEqual(r.publish_status, 'FORGE_TARGET_EXISTS')
         st2 = path.stat()
         self.assertEqual(st2.st_ino, inode1)
         self.assertEqual(st2.st_mtime_ns, mtime1)
@@ -399,18 +454,16 @@ class ContextWindowForgePublishTests(unittest.TestCase):
         intent2 = self._intent()
         self.assertEqual(intent2['orphan_jsonl_state'], 'none')
         self.assertEqual(intent2['status'], INTENT_FORGING)
+        self.assertNotEqual(intent2['status'], INTENT_RELEASED)
+        self.assertNotEqual(intent2.get('orphan_jsonl_state'), 'foreign_exists')
 
     def test_foreign_target_and_source_change(self):
-        """4) Foreign final blocked; owned final deleted on source change."""
+        """4) Foreign blocked; owned delete; replacement inode → delete_blocked."""
         src_path, end2, _ids = self._plain_two_rounds()
+        original_src = src_path.read_bytes()
 
         with self.subTest('foreign_target'):
-            # Derive candidate path via a dry prepare-equivalent: publish once to
-            # learn session id is hard; instead place foreign file after prebind
-            # by monkeypatching exists check... Spec: pre-place different final.
-            # Compute candidate session via prepare helper.
             from chat.context_window_preview import prepare_context_window_candidate
-            # Reserve first so allowed intent works
             from chat.context_window import reserve_or_load_intent
             rid = str(uuid.uuid4())
             reserve_or_load_intent(
@@ -470,9 +523,9 @@ class ContextWindowForgePublishTests(unittest.TestCase):
             self.assertEqual(row['error_code'], 'FORGE_TARGET_EXISTS')
 
         with self.subTest('source_changed_deletes_owned'):
-            # Fresh request on same fixture
             rid2 = str(uuid.uuid4())
             self.request_id = rid2
+            src_path.write_bytes(original_src)
 
             def _mutate_source():
                 raw = bytearray(src_path.read_bytes())
@@ -496,10 +549,65 @@ class ContextWindowForgePublishTests(unittest.TestCase):
                 self.cwd, str(sid), claude_home=str(self.claude_home),
             ))
             self.assertFalse(gone.exists())
-            # source context untouched beyond prefix mutation in JSONL
             ctx_row = dc.get_daily_context_by_id(self.context_id, db_path=self.db)
             self.assertIsNone(ctx_row.get('closed_at'))
             self.assertEqual(int(ctx_row['resident_generation']), self.gen)
+
+        with self.subTest('replacement_inode_delete_blocked'):
+            src_path.write_bytes(original_src)
+            rid3 = str(uuid.uuid4())
+            self.request_id = rid3
+
+            def _fail_finalize():
+                raise ForgePublishError(
+                    'injected finalize failure',
+                    error_code='FORGE_DB_FINALIZE_FAILED',
+                )
+
+            forge_mod._finalize_fault_hook = _fail_finalize
+            with self.assertRaises(ForgePublishError) as ctx:
+                self._publish(count=3)
+            self.assertEqual(ctx.exception.error_code, 'FORGE_DB_FINALIZE_FAILED')
+            forge_mod._finalize_fault_hook = None
+
+            intent = self._intent()
+            self.assertEqual(intent['orphan_jsonl_state'], 'pending')
+            sid = str(intent['target_session_id'] or '')
+            final = Path(session_jsonl_path(
+                self.cwd, sid, claude_home=str(self.claude_home),
+            ))
+            self.assertTrue(final.is_file())
+            replacement = b'{"type":"replacement-inode"}\n'
+
+            def _swap_inode() -> None:
+                if final.exists():
+                    final.unlink()
+                final.write_bytes(replacement)
+                os.chmod(final, 0o600)
+
+            forge_mod._before_owned_cleanup_hook = _swap_inode
+
+            def _mutate_source_again():
+                raw = bytearray(src_path.read_bytes())
+                idx = min(10, max(0, end2 - 1))
+                raw[idx] = (raw[idx] + 2) % 256
+                src_path.write_bytes(bytes(raw))
+
+            forge_mod._post_publish_hook = _mutate_source_again
+            try:
+                with self.assertRaises(ForgePublishError) as ctx:
+                    self._publish(count=3)
+                self.assertEqual(ctx.exception.error_code, 'FORGE_SOURCE_CHANGED')
+            finally:
+                forge_mod._post_publish_hook = None
+                forge_mod._before_owned_cleanup_hook = None
+
+            intent2 = self._intent()
+            self.assertEqual(intent2['status'], INTENT_RELEASED)
+            self.assertEqual(intent2['error_code'], 'FORGE_SOURCE_CHANGED')
+            self.assertEqual(intent2['orphan_jsonl_state'], 'delete_blocked')
+            self.assertTrue(final.is_file())
+            self.assertEqual(final.read_bytes(), replacement)
 
 
 if __name__ == '__main__':

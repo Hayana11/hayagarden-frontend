@@ -23,6 +23,7 @@ from chat.context_window import (
     CLOSE_REASON_MANUAL,
     INTENT_FORGING,
     INTENT_RELEASED,
+    IdempotencyMismatchError,
     NoOpenContextWindowError,
     StaleSourceContextError,
     SwitchInProgressError,
@@ -30,8 +31,9 @@ from chat.context_window import (
     _claim_forge_owner,
     _intent_row,
     _now_s,
+    _payload_hash,
+    _serialize_context_switch,
     _shanghai_now,
-    _update_intent_conn,
     reserve_or_load_intent,
 )
 from chat.context_window_preview import (
@@ -51,9 +53,12 @@ PUBLISH_STATUS_PUBLISHED = 'PUBLISHED'
 PUBLISH_STATUS_NATIVE_COLD_BOUND = 'NATIVE_COLD_BOUND'
 PUBLISH_STATUS_ALREADY_PUBLISHED = 'ALREADY_PUBLISHED'
 
+EMPTY_SHA256 = hashlib.sha256(b'').hexdigest()
+
 # Narrow test hooks (default no-ops). Production never sets these.
 _post_publish_hook: Optional[Callable[[], None]] = None
 _finalize_fault_hook: Optional[Callable[[], None]] = None
+_before_owned_cleanup_hook: Optional[Callable[[], None]] = None
 
 
 class ForgePublishError(Exception):
@@ -63,11 +68,22 @@ class ForgePublishError(Exception):
 
 
 @dataclass(frozen=True)
+class VerifiedFileIdentity:
+    path: Path
+    st_dev: int
+    st_ino: int
+    size: int
+    sha256: str
+    event_count: int
+
+
+@dataclass(frozen=True)
 class PublishedFile:
     path: Path
     sha256: str
     size: int
     recovered_existing_file: bool
+    identity: VerifiedFileIdentity
 
 
 @dataclass(frozen=True)
@@ -151,6 +167,24 @@ def _bindings_all_unset(intent: dict[str, Any]) -> bool:
     )
 
 
+def _bindings_complete(intent: dict[str, Any]) -> bool:
+    if _is_unset(intent.get('preview_id')):
+        return False
+    if _is_unset(intent.get('thinking_policy')):
+        return False
+    if _is_unset(intent.get('target_session_id')):
+        return False
+    if _is_unset(intent.get('target_jsonl_sha256')):
+        return False
+    if intent.get('target_jsonl_size') is None:
+        return False
+    return True
+
+
+def _bindings_partial(intent: dict[str, Any]) -> bool:
+    return (not _bindings_all_unset(intent)) and (not _bindings_complete(intent))
+
+
 def _assert_intent_matches_artifact(
     intent: dict[str, Any],
     artifact: PreparedPreviewCandidate,
@@ -199,9 +233,17 @@ def _assert_intent_matches_artifact(
         )
 
 
+def _dir_flags() -> int:
+    flags = os.O_RDONLY
+    if hasattr(os, 'O_DIRECTORY'):
+        flags |= os.O_DIRECTORY
+    if hasattr(os, 'O_NOFOLLOW'):
+        flags |= os.O_NOFOLLOW
+    return flags
+
+
 def _resolve_under_root(path: Path, root: Path) -> Path:
     root_r = root.resolve(strict=False)
-    # Resolve parent; final may not exist yet.
     parent = path.parent.resolve(strict=False)
     try:
         parent.relative_to(root_r)
@@ -209,12 +251,7 @@ def _resolve_under_root(path: Path, root: Path) -> Path:
         raise ForgePublishError(
             'path escapes allowed root', error_code='FORGE_WRITE_FAILED',
         ) from exc
-    final = parent / path.name
-    if final.exists() and final.is_symlink():
-        raise ForgePublishError(
-            'final path is symlink', error_code='FORGE_WRITE_FAILED',
-        )
-    return final
+    return parent / path.name
 
 
 def _write_all(fd: int, payload: bytes) -> None:
@@ -225,6 +262,103 @@ def _write_all(fd: int, payload: bytes) -> None:
         if written <= 0:
             raise OSError(errno.EIO, 'short write')
         offset += written
+
+
+def _name_exists(dir_fd: int, name: str) -> bool:
+    try:
+        os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+        return True
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+
+
+def _selected_user_round_count(conn, intent: dict[str, Any]) -> int:
+    ids = _intent_selected_ids(intent)
+    if not ids:
+        return 0
+    placeholders = ','.join('?' for _ in ids)
+    row = conn.execute(
+        f'''SELECT COUNT(*) FROM daily_message_contexts
+            WHERE message_id IN ({placeholders}) AND role='user' ''',
+        tuple(ids),
+    ).fetchone()
+    return int(row[0] if row else 0)
+
+
+def _verify_bound_file(
+    *,
+    path: Path,
+    expected_sha256: str,
+    expected_size: int,
+    allowed_root: Path,
+) -> Optional[VerifiedFileIdentity]:
+    try:
+        final_path = _resolve_under_root(path, allowed_root)
+    except ForgePublishError:
+        return None
+    parent = final_path.parent
+    try:
+        dir_fd = os.open(str(parent), _dir_flags())
+    except OSError:
+        return None
+    try:
+        flags = os.O_RDONLY
+        if hasattr(os, 'O_NOFOLLOW'):
+            flags |= os.O_NOFOLLOW
+        try:
+            fd = os.open(final_path.name, flags, dir_fd=dir_fd)
+        except OSError:
+            return None
+        try:
+            st1 = os.fstat(fd)
+            if not stat.S_ISREG(st1.st_mode):
+                return None
+            if (st1.st_mode & 0o777) & ~0o600:
+                return None
+            if int(st1.st_size) != int(expected_size):
+                return None
+            digest = hashlib.sha256()
+            event_count = 0
+            pending = b''
+            while True:
+                chunk = os.read(fd, 65536)
+                if not chunk:
+                    break
+                digest.update(chunk)
+                pending += chunk
+                while True:
+                    nl = pending.find(b'\n')
+                    if nl < 0:
+                        break
+                    line = pending[:nl]
+                    pending = pending[nl + 1:]
+                    if line.strip():
+                        event_count += 1
+            if pending.strip():
+                event_count += 1
+            if digest.hexdigest() != expected_sha256:
+                return None
+            st2 = os.fstat(fd)
+            if (
+                int(st2.st_dev) != int(st1.st_dev)
+                or int(st2.st_ino) != int(st1.st_ino)
+                or int(st2.st_size) != int(st1.st_size)
+            ):
+                return None
+            return VerifiedFileIdentity(
+                path=final_path,
+                st_dev=int(st1.st_dev),
+                st_ino=int(st1.st_ino),
+                size=int(st1.st_size),
+                sha256=expected_sha256,
+                event_count=int(event_count),
+            )
+        finally:
+            os.close(fd)
+    finally:
+        os.close(dir_fd)
 
 
 def _publish_jsonl_noreplace(
@@ -264,13 +398,8 @@ def _publish_jsonl_noreplace(
 
     tmp_name = f'.forge-tmp-{uuid.uuid4().hex}'
     final_name = final_path.name
-    dir_flags = os.O_RDONLY
-    if hasattr(os, 'O_DIRECTORY'):
-        dir_flags |= os.O_DIRECTORY
-    if hasattr(os, 'O_NOFOLLOW'):
-        dir_flags |= os.O_NOFOLLOW
     try:
-        dir_fd = os.open(str(parent), dir_flags)
+        dir_fd = os.open(str(parent), _dir_flags())
     except OSError as exc:
         logger.info('forge open parent failed errno=%s', getattr(exc, 'errno', None))
         raise ForgePublishError(
@@ -278,6 +407,7 @@ def _publish_jsonl_noreplace(
         ) from None
 
     tmp_created = False
+    linked = False
     try:
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
         if hasattr(os, 'O_NOFOLLOW'):
@@ -317,32 +447,68 @@ def _publish_jsonl_noreplace(
             raise ForgePublishError(
                 'atomic publish failed', error_code='FORGE_WRITE_FAILED',
             ) from None
-
+        linked = True
         os.fsync(dir_fd)
+
         try:
             os.unlink(tmp_name, dir_fd=dir_fd)
+            os.fsync(dir_fd)
+            tmp_created = False
         except OSError:
+            # Keep tmp_created=True so finally retries.
             pass
-        tmp_created = False
-        os.fsync(dir_fd)
     finally:
         if tmp_created:
             try:
                 os.unlink(tmp_name, dir_fd=dir_fd)
-            except OSError:
-                pass
-            try:
                 os.fsync(dir_fd)
+                tmp_created = False
             except OSError:
                 pass
+
+        temp_still = _name_exists(dir_fd, tmp_name)
+        if temp_still:
+            if linked:
+                same_inode = False
+                try:
+                    tmp_st = os.stat(tmp_name, dir_fd=dir_fd, follow_symlinks=False)
+                    final_st = os.stat(final_name, dir_fd=dir_fd, follow_symlinks=False)
+                    same_inode = (
+                        int(tmp_st.st_dev) == int(final_st.st_dev)
+                        and int(tmp_st.st_ino) == int(final_st.st_ino)
+                    )
+                except OSError:
+                    same_inode = False
+                if same_inode:
+                    try:
+                        os.unlink(final_name, dir_fd=dir_fd)
+                        os.fsync(dir_fd)
+                    except OSError:
+                        pass
+                try:
+                    os.unlink(tmp_name, dir_fd=dir_fd)
+                    os.fsync(dir_fd)
+                except OSError:
+                    pass
+            else:
+                try:
+                    os.unlink(tmp_name, dir_fd=dir_fd)
+                    os.fsync(dir_fd)
+                except OSError:
+                    pass
+            os.close(dir_fd)
+            raise ForgePublishError(
+                'temp cleanup failed', error_code='FORGE_WRITE_FAILED',
+            )
         os.close(dir_fd)
 
-    verified = _verify_final_file(
-        final_path,
+    identity = _verify_bound_file(
+        path=final_path,
         expected_sha256=expected_sha256,
         expected_size=expected_size,
+        allowed_root=allowed_root,
     )
-    if not verified:
+    if identity is None:
         raise ForgePublishError(
             'final file verify failed', error_code='FORGE_FILE_VERIFY_FAILED',
         )
@@ -351,66 +517,212 @@ def _publish_jsonl_noreplace(
         sha256=expected_sha256,
         size=expected_size,
         recovered_existing_file=False,
+        identity=identity,
     )
 
 
-def _verify_final_file(
-    path: Path,
+def _release_pending_binding_cas(
     *,
-    expected_sha256: str,
-    expected_size: int,
-) -> bool:
+    db_path: str,
+    request_id: str,
+    fields: dict[str, Any],
+    error_code: str,
+    orphan_jsonl_state: str,
+    now_s: str,
+) -> None:
+    """Exact CAS release of forging+pending binding. No file I/O."""
+    ensure_schema(db_path)
+    conn = _connect(db_path)
     try:
-        st = os.lstat(path)
-    except OSError:
-        return False
-    if stat.S_ISLNK(st.st_mode):
-        return False
-    if not stat.S_ISREG(st.st_mode):
-        return False
-    if (st.st_mode & 0o777) & ~0o600:
-        return False
-    if int(st.st_size) != int(expected_size):
-        return False
-    h = hashlib.sha256()
-    with open(path, 'rb') as fh:
-        while True:
-            chunk = fh.read(65536)
-            if not chunk:
-                break
-            h.update(chunk)
-    return h.hexdigest() == expected_sha256
-
-
-def _delete_owned_final(path: Path, allowed_root: Path) -> bool:
-    try:
-        final_path = _resolve_under_root(path, allowed_root)
+        conn.execute('BEGIN IMMEDIATE')
+        cur = conn.execute(
+            '''UPDATE context_switch_intents
+               SET status=?, error_code=?, orphan_jsonl_state=?, updated_at=?
+               WHERE request_id=?
+                 AND status=?
+                 AND orphan_jsonl_state='pending'
+                 AND preview_id=?
+                 AND thinking_policy=?
+                 AND target_session_id=?
+                 AND target_jsonl_sha256=?
+                 AND target_jsonl_size=?
+                 AND target_context_id IS NULL
+                 AND staged_ready_at IS NULL''',
+            (
+                INTENT_RELEASED,
+                error_code,
+                orphan_jsonl_state,
+                now_s,
+                request_id,
+                INTENT_FORGING,
+                fields['preview_id'],
+                fields['thinking_policy'],
+                fields['target_session_id'],
+                fields['target_jsonl_sha256'],
+                fields['target_jsonl_size'],
+            ),
+        )
+        if cur.rowcount != 1:
+            conn.rollback()
+            raise ForgePublishError(
+                'release CAS failed', error_code='FORGE_DB_FINALIZE_FAILED',
+            )
+        conn.commit()
     except ForgePublishError:
-        return False
-    parent = final_path.parent
-    dir_flags = os.O_RDONLY
-    if hasattr(os, 'O_DIRECTORY'):
-        dir_flags |= os.O_DIRECTORY
-    if hasattr(os, 'O_NOFOLLOW'):
-        dir_flags |= os.O_NOFOLLOW
-    try:
-        dir_fd = os.open(str(parent), dir_flags)
-    except OSError:
-        return False
-    try:
-        try:
-            os.unlink(final_path.name, dir_fd=dir_fd)
-        except FileNotFoundError:
-            pass
-        except OSError:
-            return False
-        try:
-            os.fsync(dir_fd)
-        except OSError:
-            pass
-        return True
+        raise
+    except Exception:
+        conn.rollback()
+        raise
     finally:
-        os.close(dir_fd)
+        conn.close()
+
+
+def _release_and_cleanup_owned_pending(
+    *,
+    db_path: str,
+    request_id: str,
+    artifact: PreparedPreviewCandidate,
+    identity: VerifiedFileIdentity,
+    final_path: Path,
+    allowed_root: Path,
+    error_code: str,
+    now_s: str,
+) -> str:
+    """CAS-own pending binding, re-verify identity, then delete or delete_blocked."""
+    fields = _candidate_binding_fields(artifact)
+    ensure_schema(db_path)
+    conn = _connect(db_path)
+    try:
+        conn.execute('BEGIN IMMEDIATE')
+        live = _intent_row(conn, request_id)
+        if live is None or not (
+            str(live.get('status') or '') == INTENT_FORGING
+            and str(live.get('orphan_jsonl_state') or '') == 'pending'
+            and _bindings_match(live, fields)
+            and live.get('target_context_id') is None
+            and live.get('staged_ready_at') is None
+        ):
+            conn.rollback()
+            raise ForgePublishError(
+                'owned cleanup CAS failed', error_code='FORGE_DB_FINALIZE_FAILED',
+            )
+
+        if _before_owned_cleanup_hook is not None:
+            _before_owned_cleanup_hook()
+
+        current = _verify_bound_file(
+            path=final_path,
+            expected_sha256=identity.sha256,
+            expected_size=identity.size,
+            allowed_root=allowed_root,
+        )
+        identity_ok = (
+            current is not None
+            and int(current.st_dev) == int(identity.st_dev)
+            and int(current.st_ino) == int(identity.st_ino)
+            and int(current.size) == int(identity.size)
+            and current.sha256 == identity.sha256
+        )
+        if not identity_ok:
+            cur = conn.execute(
+                '''UPDATE context_switch_intents
+                   SET status=?, error_code=?, orphan_jsonl_state=?, updated_at=?
+                   WHERE request_id=?
+                     AND status=?
+                     AND orphan_jsonl_state='pending'
+                     AND preview_id=?
+                     AND thinking_policy=?
+                     AND target_session_id=?
+                     AND target_jsonl_sha256=?
+                     AND target_jsonl_size=?
+                     AND target_context_id IS NULL
+                     AND staged_ready_at IS NULL''',
+                (
+                    INTENT_RELEASED,
+                    error_code,
+                    'delete_blocked',
+                    now_s,
+                    request_id,
+                    INTENT_FORGING,
+                    fields['preview_id'],
+                    fields['thinking_policy'],
+                    fields['target_session_id'],
+                    fields['target_jsonl_sha256'],
+                    fields['target_jsonl_size'],
+                ),
+            )
+            if cur.rowcount != 1:
+                conn.rollback()
+                raise ForgePublishError(
+                    'release CAS failed', error_code='FORGE_DB_FINALIZE_FAILED',
+                )
+            conn.commit()
+            return 'delete_blocked'
+
+        # Identity matches — unlink under dir fd, then mark deleted.
+        try:
+            resolved = _resolve_under_root(final_path, allowed_root)
+            dir_fd = os.open(str(resolved.parent), _dir_flags())
+        except (OSError, ForgePublishError):
+            conn.rollback()
+            raise ForgePublishError(
+                'owned cleanup open failed', error_code='FORGE_DB_FINALIZE_FAILED',
+            ) from None
+        try:
+            try:
+                os.unlink(resolved.name, dir_fd=dir_fd)
+                os.fsync(dir_fd)
+            except OSError:
+                conn.rollback()
+                raise ForgePublishError(
+                    'owned cleanup unlink failed',
+                    error_code='FORGE_DB_FINALIZE_FAILED',
+                ) from None
+        finally:
+            os.close(dir_fd)
+
+        cur = conn.execute(
+            '''UPDATE context_switch_intents
+               SET status=?, error_code=?, orphan_jsonl_state=?, updated_at=?
+               WHERE request_id=?
+                 AND status=?
+                 AND orphan_jsonl_state='pending'
+                 AND preview_id=?
+                 AND thinking_policy=?
+                 AND target_session_id=?
+                 AND target_jsonl_sha256=?
+                 AND target_jsonl_size=?
+                 AND target_context_id IS NULL
+                 AND staged_ready_at IS NULL''',
+            (
+                INTENT_RELEASED,
+                error_code,
+                'deleted',
+                now_s,
+                request_id,
+                INTENT_FORGING,
+                fields['preview_id'],
+                fields['thinking_policy'],
+                fields['target_session_id'],
+                fields['target_jsonl_sha256'],
+                fields['target_jsonl_size'],
+            ),
+        )
+        if cur.rowcount != 1:
+            conn.rollback()
+            raise ForgePublishError(
+                'release CAS failed after unlink',
+                error_code='FORGE_DB_FINALIZE_FAILED',
+            )
+        conn.commit()
+        return 'deleted'
+    except ForgePublishError:
+        raise
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 
 def _prebind_candidate(
@@ -419,11 +731,9 @@ def _prebind_candidate(
     request_id: str,
     artifact: PreparedPreviewCandidate,
     now_s: str,
+    allow_create: bool,
 ) -> tuple[dict[str, Any], bool]:
-    """Bind candidate identity with orphan_jsonl_state='pending'.
-
-    Returns (intent_row, binding_created).
-    """
+    """Bind candidate identity with orphan_jsonl_state='pending'."""
     fields = _candidate_binding_fields(artifact)
     ensure_schema(db_path)
     conn = _connect(db_path)
@@ -444,6 +754,13 @@ def _prebind_candidate(
             live, artifact, count=int(live['carryover_count']),
         )
         if _bindings_all_unset(live):
+            if not allow_create:
+                conn.rollback()
+                raise ForgePublishError(
+                    'publisher not owner for first bind',
+                    error_code='FORGE_IN_PROGRESS',
+                )
+            from chat.context_window import _update_intent_conn
             _update_intent_conn(
                 conn,
                 request_id,
@@ -458,6 +775,12 @@ def _prebind_candidate(
             conn.commit()
             assert row is not None
             return row, True
+        if _bindings_partial(live):
+            conn.rollback()
+            raise ForgePublishError(
+                'partial candidate binding',
+                error_code='FORGE_INTENT_CANDIDATE_CONFLICT',
+            )
         if _bindings_match(live, fields):
             orphan = str(live.get('orphan_jsonl_state') or '')
             if orphan not in {'pending', 'none'}:
@@ -466,11 +789,6 @@ def _prebind_candidate(
                     'orphan state conflict',
                     error_code='FORGE_INTENT_CANDIDATE_CONFLICT',
                 )
-            if orphan == 'none':
-                # Already finalized — caller handles ALREADY_PUBLISHED.
-                conn.commit()
-                return live, False
-            # pending recovery path
             conn.commit()
             return live, False
         conn.rollback()
@@ -493,7 +811,10 @@ def _finalize_native_cold(
     request_id: str,
     artifact: PreparedPreviewCandidate,
     now_s: str,
+    allow_create: bool,
 ) -> dict[str, Any]:
+    from chat.context_window import _update_intent_conn
+
     fields = _candidate_binding_fields(artifact)
     ensure_schema(db_path)
     conn = _connect(db_path)
@@ -509,6 +830,12 @@ def _finalize_native_cold(
             live, artifact, count=int(live['carryover_count']),
         )
         if _bindings_all_unset(live):
+            if not allow_create:
+                conn.rollback()
+                raise ForgePublishError(
+                    'publisher not owner for first bind',
+                    error_code='FORGE_IN_PROGRESS',
+                )
             _update_intent_conn(
                 conn,
                 request_id,
@@ -518,6 +845,12 @@ def _finalize_native_cold(
                     'error_code': None,
                 },
                 now_s=now_s,
+            )
+        elif _bindings_partial(live):
+            conn.rollback()
+            raise ForgePublishError(
+                'partial candidate binding',
+                error_code='FORGE_INTENT_CANDIDATE_CONFLICT',
             )
         elif _bindings_match(live, fields):
             orphan = str(live.get('orphan_jsonl_state') or '')
@@ -638,36 +971,6 @@ def _finalize_published(
         conn.close()
 
 
-def _release_intent(
-    *,
-    db_path: str,
-    request_id: str,
-    error_code: str,
-    orphan_jsonl_state: str,
-    now_s: str,
-) -> None:
-    ensure_schema(db_path)
-    conn = _connect(db_path)
-    try:
-        conn.execute('BEGIN IMMEDIATE')
-        _update_intent_conn(
-            conn,
-            request_id,
-            status=INTENT_RELEASED,
-            fields={
-                'error_code': error_code,
-                'orphan_jsonl_state': orphan_jsonl_state,
-            },
-            now_s=now_s,
-        )
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        conn.close()
-
-
 def _recheck_source_after_publish(
     *,
     db_path: str,
@@ -687,6 +990,7 @@ def _recheck_source_after_publish(
         _select_rounds_locked,
         _is_resident_turn_active_conn,
     )
+    from chat.context_window import _last_formal_message_id
 
     now_dt = _shanghai_now(now)
     conn = _open_preview_db_readonly(db_path)
@@ -726,7 +1030,6 @@ def _recheck_source_after_publish(
             context_id=int(artifact.source_context_id),
             context_epoch=int(artifact.source_context_epoch),
         )
-        from chat.context_window import _last_formal_message_id
         if int(_last_formal_message_id(messages)) != int(
             artifact.source_boundary_message_id
         ):
@@ -771,8 +1074,8 @@ def _recheck_source_after_publish(
                 str(artifact.source_transcript_path),
                 int(artifact.source_scan_offset),
             )
-        except Exception as exc:
-            logger.info('forge source prefix recheck failed: %s', type(exc).__name__)
+        except Exception:
+            logger.info('forge source prefix recheck failed')
             raise ForgePublishError(
                 'source changed', error_code='FORGE_SOURCE_CHANGED',
             ) from None
@@ -782,6 +1085,121 @@ def _recheck_source_after_publish(
             )
 
 
+def _replay_persisted_published_binding(
+    *,
+    db_path: str,
+    request_id: str,
+    preview_id: str,
+    thinking_policy: ThinkingPolicy,
+    source_context_id: int,
+    source_context_epoch: int,
+    count: int,
+    chat_id: str,
+    forge_cwd: str,
+    claude_home: Path,
+) -> Optional[ForgePublishResult]:
+    """Return ALREADY_PUBLISHED from persisted binding without Preview/Transform."""
+    ensure_schema(db_path)
+    conn = _connect(db_path)
+    try:
+        live = _intent_row(conn, request_id)
+        if live is None:
+            return None
+        expected_hash = _payload_hash(
+            chat_id=chat_id,
+            source_id=int(source_context_id),
+            source_epoch=int(source_context_epoch),
+            count=int(count),
+            close_reason=CLOSE_REASON_MANUAL,
+        )
+        if str(live.get('payload_hash') or '') != expected_hash:
+            raise IdempotencyMismatchError('idempotency_mismatch')
+        if live.get('target_context_id') is not None or live.get('staged_ready_at') is not None:
+            raise ForgePublishError(
+                'target already advanced',
+                error_code='FORGE_INTENT_CANDIDATE_CONFLICT',
+            )
+        # Reserved/unset bindings are not a published replay (orphan defaults to
+        # 'none' at reserve time). Only complete published bindings replay.
+        if _bindings_all_unset(live):
+            return None
+        if _bindings_partial(live):
+            raise ForgePublishError(
+                'partial candidate binding',
+                error_code='FORGE_INTENT_CANDIDATE_CONFLICT',
+            )
+        if str(live.get('preview_id') or '') != preview_id:
+            raise ForgePublishError(
+                'preview_id conflict', error_code='FORGE_INTENT_CANDIDATE_CONFLICT',
+            )
+        if str(live.get('thinking_policy') or '') != thinking_policy.value:
+            raise ForgePublishError(
+                'thinking_policy conflict',
+                error_code='FORGE_INTENT_CANDIDATE_CONFLICT',
+            )
+        if str(live.get('status') or '') != INTENT_FORGING:
+            raise ForgePublishError(
+                'published binding not forging',
+                error_code='FORGE_INTENT_CANDIDATE_CONFLICT',
+            )
+        if str(live.get('orphan_jsonl_state') or '') != 'none':
+            return None
+
+        sid = str(live['target_session_id'])
+        sha = str(live['target_jsonl_sha256'])
+        size = int(live['target_jsonl_size'])
+        selected_rounds = _selected_user_round_count(conn, live)
+    finally:
+        conn.close()
+
+    # NATIVE_COLD persisted
+    if size == 0 and sha == EMPTY_SHA256:
+        return ForgePublishResult(
+            publish_status=PUBLISH_STATUS_ALREADY_PUBLISHED,
+            request_id=request_id,
+            preview_id=preview_id,
+            candidate_session_id=sid,
+            jsonl_path=None,
+            jsonl_sha256=sha,
+            jsonl_size=0,
+            event_count=0,
+            selected_round_count=selected_rounds,
+            proof_kind='native_cold_contract',
+            recovered_existing_file=False,
+        )
+
+    allowed_root = Path(claude_home).resolve(strict=False)
+    derived = derive_transcript_path(
+        cwd=forge_cwd,
+        claude_session_id=sid,
+        claude_home=str(claude_home),
+    )
+    identity = _verify_bound_file(
+        path=Path(derived),
+        expected_sha256=sha,
+        expected_size=size,
+        allowed_root=allowed_root,
+    )
+    if identity is None:
+        raise ForgePublishError(
+            'published file mismatch', error_code='FORGE_BOUND_FILE_MISMATCH',
+        )
+    return ForgePublishResult(
+        publish_status=PUBLISH_STATUS_ALREADY_PUBLISHED,
+        request_id=request_id,
+        preview_id=preview_id,
+        candidate_session_id=sid,
+        jsonl_path=identity.path,
+        jsonl_sha256=sha,
+        jsonl_size=size,
+        event_count=int(identity.event_count),
+        selected_round_count=selected_rounds,
+        proof_kind='published_binding_contract',
+        recovered_existing_file=False,
+    )
+
+
+@_serialize_context_switch
 def publish_context_window_forge_candidate(
     *,
     source_context_id: int,
@@ -813,6 +1231,22 @@ def publish_context_window_forge_candidate(
     now_dt = _shanghai_now(now)
     now_s = _now_s(now_dt)
 
+    # Persisted published replay — before reserve/prepare/Transform.
+    replay = _replay_persisted_published_binding(
+        db_path=db_path,
+        request_id=request_uuid,
+        preview_id=preview_uuid,
+        thinking_policy=thinking_policy,
+        source_context_id=int(source_context_id),
+        source_context_epoch=int(source_context_epoch),
+        count=int(count),
+        chat_id=chat_id,
+        forge_cwd=forge_cwd,
+        claude_home=claude_home,
+    )
+    if replay is not None:
+        return replay
+
     try:
         intent = reserve_or_load_intent(
             source_context_id=int(source_context_id),
@@ -824,6 +1258,8 @@ def publish_context_window_forge_candidate(
             db_path=db_path,
             now=now_dt,
         )
+    except IdempotencyMismatchError:
+        raise
     except (StaleSourceContextError, WindowBusyError, SwitchInProgressError) as exc:
         raise ForgePublishError(str(exc), error_code='FORGE_IN_PROGRESS') from exc
 
@@ -858,45 +1294,50 @@ def publish_context_window_forge_candidate(
         raise ForgePublishError(
             'forge ownership unavailable', error_code='FORGE_IN_PROGRESS',
         )
-    _ = claimed
 
-    # Fast path: already published
     fields = _candidate_binding_fields(artifact)
-    if (
-        _bindings_match(live, fields)
-        and str(live.get('orphan_jsonl_state') or '') == 'none'
-    ):
-        jsonl_path: Optional[Path] = None
-        if status == PREVIEW_STATUS_READY:
-            derived = derive_transcript_path(
-                cwd=forge_cwd,
-                claude_session_id=artifact.candidate_session_id,
-                claude_home=str(claude_home),
+    if not claimed:
+        # Follower: only pending crash recovery (or race-complete published).
+        if _bindings_all_unset(live):
+            raise ForgePublishError(
+                'publisher not owner', error_code='FORGE_IN_PROGRESS',
             )
-            jsonl_path = Path(derived)
-            if not _verify_final_file(
-                jsonl_path,
-                expected_sha256=artifact.output_sha256,
-                expected_size=artifact.serialized_bytes,
-            ):
-                raise ForgePublishError(
-                    'published file mismatch',
-                    error_code='FORGE_BOUND_FILE_MISMATCH',
-                )
-        return ForgePublishResult(
-            publish_status=PUBLISH_STATUS_ALREADY_PUBLISHED,
-            request_id=request_uuid,
-            preview_id=preview_uuid,
-            candidate_session_id=artifact.candidate_session_id,
-            jsonl_path=jsonl_path,
-            jsonl_sha256=artifact.output_sha256,
-            jsonl_size=int(artifact.serialized_bytes),
-            event_count=int(artifact.event_count),
-            selected_round_count=int(artifact.selected_round_count),
-            proof_kind=str(artifact.proof_kind),
-            recovered_existing_file=False,
-        )
+        if _bindings_partial(live):
+            raise ForgePublishError(
+                'partial candidate binding',
+                error_code='FORGE_INTENT_CANDIDATE_CONFLICT',
+            )
+        if not _bindings_match(live, fields):
+            raise ForgePublishError(
+                'candidate identity conflict',
+                error_code='FORGE_INTENT_CANDIDATE_CONFLICT',
+            )
+        orphan = str(live.get('orphan_jsonl_state') or '')
+        if orphan == 'none':
+            # Another owner finished while we prepared; replay without Transform again.
+            replay2 = _replay_persisted_published_binding(
+                db_path=db_path,
+                request_id=request_uuid,
+                preview_id=preview_uuid,
+                thinking_policy=thinking_policy,
+                source_context_id=int(source_context_id),
+                source_context_epoch=int(source_context_epoch),
+                count=int(count),
+                chat_id=chat_id,
+                forge_cwd=forge_cwd,
+                claude_home=claude_home,
+            )
+            if replay2 is not None:
+                return replay2
+            raise ForgePublishError(
+                'publisher not owner', error_code='FORGE_IN_PROGRESS',
+            )
+        if orphan != 'pending':
+            raise ForgePublishError(
+                'publisher not owner', error_code='FORGE_IN_PROGRESS',
+            )
 
+    allow_create = bool(claimed)
     allowed_root = Path(claude_home).resolve(strict=False)
 
     # ----- NATIVE_COLD -----
@@ -906,8 +1347,8 @@ def publish_context_window_forge_candidate(
             request_id=request_uuid,
             artifact=artifact,
             now_s=now_s,
+            allow_create=allow_create,
         )
-        # First success → NATIVE_COLD_BOUND. Repeat hits ALREADY_PUBLISHED above.
         return ForgePublishResult(
             publish_status=PUBLISH_STATUS_NATIVE_COLD_BOUND,
             request_id=request_uuid,
@@ -941,16 +1382,19 @@ def publish_context_window_forge_candidate(
         request_id=request_uuid,
         artifact=artifact,
         now_s=now_s,
+        allow_create=allow_create,
     )
     orphan = str(intent2.get('orphan_jsonl_state') or '')
     recovered = False
+    published: PublishedFile
 
     final_exists = final_path.exists() or final_path.is_symlink()
     if final_exists:
         if binding_created:
-            _release_intent(
+            _release_pending_binding_cas(
                 db_path=db_path,
                 request_id=request_uuid,
+                fields=fields,
                 error_code='FORGE_TARGET_EXISTS',
                 orphan_jsonl_state='foreign_exists',
                 now_s=_now_s(_shanghai_now(now)),
@@ -958,16 +1402,17 @@ def publish_context_window_forge_candidate(
             raise ForgePublishError(
                 'target already exists', error_code='FORGE_TARGET_EXISTS',
             )
-        # Recovery only when binding pre-existed as pending
         if orphan != 'pending' or not _bindings_match(intent2, fields):
             raise ForgePublishError(
                 'bound file mismatch', error_code='FORGE_BOUND_FILE_MISMATCH',
             )
-        if not _verify_final_file(
-            final_path,
+        identity = _verify_bound_file(
+            path=final_path,
             expected_sha256=artifact.output_sha256,
-            expected_size=artifact.serialized_bytes,
-        ):
+            expected_size=int(artifact.serialized_bytes),
+            allowed_root=allowed_root,
+        )
+        if identity is None:
             raise ForgePublishError(
                 'bound file mismatch', error_code='FORGE_BOUND_FILE_MISMATCH',
             )
@@ -977,11 +1422,9 @@ def publish_context_window_forge_candidate(
             sha256=artifact.output_sha256,
             size=int(artifact.serialized_bytes),
             recovered_existing_file=True,
+            identity=identity,
         )
     else:
-        if orphan == 'pending' and not binding_created and _bindings_match(intent2, fields):
-            # Pending but file missing — republish
-            pass
         try:
             published = _publish_jsonl_noreplace(
                 final_path=final_path,
@@ -992,9 +1435,10 @@ def publish_context_window_forge_candidate(
             )
         except ForgePublishError as exc:
             if exc.error_code == 'FORGE_TARGET_EXISTS' and binding_created:
-                _release_intent(
+                _release_pending_binding_cas(
                     db_path=db_path,
                     request_id=request_uuid,
+                    fields=fields,
                     error_code='FORGE_TARGET_EXISTS',
                     orphan_jsonl_state='foreign_exists',
                     now_s=_now_s(_shanghai_now(now)),
@@ -1014,24 +1458,16 @@ def publish_context_window_forge_candidate(
         )
     except ForgePublishError as exc:
         if exc.error_code == 'FORGE_SOURCE_CHANGED':
-            # Pre-bound matching identity ⇒ this request owns the candidate file.
-            if binding_created or _bindings_match(intent2, fields):
-                deleted = _delete_owned_final(final_path, allowed_root)
-                _release_intent(
-                    db_path=db_path,
-                    request_id=request_uuid,
-                    error_code='FORGE_SOURCE_CHANGED',
-                    orphan_jsonl_state='deleted' if deleted else 'delete_blocked',
-                    now_s=_now_s(_shanghai_now(now)),
-                )
-            else:
-                _release_intent(
-                    db_path=db_path,
-                    request_id=request_uuid,
-                    error_code='FORGE_SOURCE_CHANGED',
-                    orphan_jsonl_state='delete_blocked',
-                    now_s=_now_s(_shanghai_now(now)),
-                )
+            _release_and_cleanup_owned_pending(
+                db_path=db_path,
+                request_id=request_uuid,
+                artifact=artifact,
+                identity=published.identity,
+                final_path=final_path,
+                allowed_root=allowed_root,
+                error_code='FORGE_SOURCE_CHANGED',
+                now_s=_now_s(_shanghai_now(now)),
+            )
         raise
 
     try:
@@ -1042,7 +1478,6 @@ def publish_context_window_forge_candidate(
             now_s=_now_s(_shanghai_now(now)),
         )
     except ForgePublishError:
-        # Keep pending + published file for same-request recovery.
         raise
 
     return ForgePublishResult(
