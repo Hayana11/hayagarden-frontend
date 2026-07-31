@@ -712,9 +712,38 @@ def _ensure_context_switch_forge_schema(conn: sqlite3.Connection) -> None:
                 'ALTER TABLE context_switch_intents '
                 'ADD COLUMN target_jsonl_size INTEGER NULL'
             )
+        first_turn_cols = (
+            ('first_turn_request_id', 'TEXT'),
+            ('first_user_message_id', 'INTEGER'),
+            ('first_turn_started_at', 'TEXT'),
+            ('first_turn_start_offset', 'INTEGER'),
+            ('first_delta_committed_at', 'TEXT'),
+            ('first_turn_end_offset', 'INTEGER'),
+            ('first_assistant_message_id', 'INTEGER'),
+            ('first_turn_completed_at', 'TEXT'),
+            ('first_turn_error_code', 'TEXT'),
+        )
+        for col_name, col_type in first_turn_cols:
+            if col_name not in icols:
+                conn.execute(
+                    'ALTER TABLE context_switch_intents '
+                    'ADD COLUMN %s %s NULL' % (col_name, col_type)
+                )
     conn.execute(
         'CREATE INDEX IF NOT EXISTS idx_context_switch_intents_chat_status '
         'ON context_switch_intents(chat_id, status)'
+    )
+    conn.execute(
+        'CREATE UNIQUE INDEX IF NOT EXISTS '
+        'idx_context_switch_intents_first_turn_request_id '
+        'ON context_switch_intents(first_turn_request_id) '
+        'WHERE first_turn_request_id IS NOT NULL'
+    )
+    conn.execute(
+        'CREATE UNIQUE INDEX IF NOT EXISTS '
+        'idx_context_switch_intents_first_user_message_id '
+        'ON context_switch_intents(first_user_message_id) '
+        'WHERE first_user_message_id IS NOT NULL'
     )
 
 
