@@ -10,7 +10,7 @@ import socket
 import threading
 import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from typing import Any, Callable, Iterator, Optional
 
 import cc_resident
@@ -18,6 +18,7 @@ import cc_resident
 from chat import daily_context as dc
 from chat import daily_history as dh
 from chat import context_window as cw
+from chat.claude_event_mapping import MappingPassRequest, MappingPassResult, run_mapping_pass
 from chat.daily_context import (
     ConflictError,
     DEFAULT_CHAT_ID,
@@ -26,6 +27,13 @@ from chat.daily_context import (
     chat_day_for_timestamp,
     make_resident_key,
 )
+from chat.session_registry import (
+    SCAN_STATUS_BLOCKED,
+    SessionRegistryError,
+    get_context_claude_session,
+    register_context_claude_session,
+)
+from tools.cc_jsonl_usage import snapshot_session_jsonl
 
 logger = logging.getLogger(__name__)
 
@@ -126,6 +134,13 @@ class DailyTurnPlan:
     user_created_at: Optional[datetime.datetime] = None
     origin_local_day: str = ''
     turn_started_at: Optional[datetime.datetime] = None
+    transcript_cwd: str = ''
+    transcript_path: Optional[str] = None
+    transcript_start_offset: Optional[int] = None
+    transcript_end_offset: Optional[int] = None
+    transcript_claude_session_id: Optional[str] = None
+    transcript_process_generation: Optional[int] = None
+    transcript_observation_error_code: Optional[str] = None
     _resident_close_fn: Optional[Callable[[], None]] = field(default=None, repr=False)
 
 
@@ -869,6 +884,10 @@ def _build_manifest_base(
         'input_tokens': None,
         'output_tokens': None,
         'error_code': None,
+        'transcript_mapping_status': 'NOT_ATTEMPTED',
+        'transcript_mapping_error_code': None,
+        'transcript_mapping_event_count': 0,
+        'transcript_mapping_scan_offset': None,
     })
     return manifest
 
@@ -1184,6 +1203,307 @@ def prepare_daily_turn(
         raise
 
 
+def _registered_generation_requires_respawn(
+    plan: DailyTurnPlan,
+    resident: Any,
+    static_system: str,
+) -> bool:
+    """True when stdin must not proceed on the current resident_generation.
+
+    Registry absent → allow first session registration for this generation.
+    Registry present + upcoming/new Claude session → bump generation first.
+    """
+    registry = get_context_claude_session(
+        int(plan.context_id),
+        int(plan.resident_generation),
+        db_path=plan.db_path,
+    )
+    if registry is None:
+        return False
+
+    peek = getattr(resident, 'peek_respawn_reason', None)
+    reason = None
+    if callable(peek):
+        reason = peek(static_system, tool_profile=plan.tool_profile)
+    if reason:
+        return True
+
+    live_sid = str(getattr(resident, 'session_id', None) or '').strip()
+    reg_sid = str(registry.get('claude_session_id') or '').strip()
+    if not live_sid or live_sid != reg_sid:
+        return True
+    return False
+
+
+def reprepare_after_registered_session_change(
+    plan: DailyTurnPlan,
+    *,
+    resident: Optional[Any],
+    static_system: str = '',
+    static_system_sha256: str = '',
+    persona_sha256: str = '',
+    provider: str = 'claude_code',
+    model: str = '',
+) -> DailyTurnPlan:
+    """Bump resident_generation before a new Claude session under a registered gen."""
+    _release_lease(plan)
+    if resident is not None:
+        close_local_resident_if_bound(resident, expected_key=plan.resident_key)
+    if is_epoch_token_current(plan):
+        dc.respawn_daily_resident(plan.context_id, db_path=plan.db_path)
+    return prepare_daily_turn(
+        user_message_id=plan.user_message_id,
+        chat_id=plan.chat_id,
+        request_id=plan.request_id,
+        db_path=plan.db_path,
+        now=plan.user_created_at,
+        origin_local_day=plan.origin_local_day or plan.local_day,
+        lease_owner=plan.lease_owner,
+        resident=resident,
+        static_system=static_system,
+        static_system_sha256=static_system_sha256,
+        persona_sha256=persona_sha256,
+        provider=provider,
+        model=model,
+        _cold_reprepare=True,
+    )
+
+
+def _adopt_reprepared_plan_in_place(
+    current: DailyTurnPlan,
+    replacement: DailyTurnPlan,
+    *,
+    resident: Optional[Any],
+) -> DailyTurnPlan:
+    """Copy replacement state into ``current`` without changing object identity.
+
+    Gateway keeps the original DailyTurnPlan reference across stream → persist →
+    cursor CAS → Mapping. Reprepare must therefore mutate that same object.
+    """
+    for f in fields(DailyTurnPlan):
+        setattr(current, f.name, getattr(replacement, f.name))
+    if resident is not None:
+        key = current.resident_key
+        current._resident_close_fn = (
+            lambda k=key: close_local_resident_if_bound(
+                resident,
+                expected_key=k,
+            )
+        )
+    else:
+        current._resident_close_fn = None
+    return current
+
+
+def _capture_transcript_start(plan: DailyTurnPlan, resident: Any) -> None:
+    """Capture JSONL start offset after ensure_alive, before send_turn."""
+    try:
+        plan.transcript_cwd = str(getattr(resident, 'cwd', '') or '')
+        plan.transcript_process_generation = int(getattr(resident, 'generation', 0) or 0)
+        sid = str(getattr(resident, 'session_id', None) or '').strip() or None
+        plan.transcript_claude_session_id = sid
+        if sid:
+            snap = snapshot_session_jsonl(plan.transcript_cwd, sid)
+            if snap is None:
+                plan.transcript_observation_error_code = 'transcript_snapshot_failed'
+                return
+            plan.transcript_path = str(snap.get('path') or '') or None
+            plan.transcript_start_offset = int(snap.get('offset') or 0)
+        else:
+            # Cold session: session id arrives at done; start at byte 0.
+            plan.transcript_path = None
+            plan.transcript_start_offset = 0
+    except Exception:
+        logger.warning('transcript start capture failed', exc_info=True)
+        plan.transcript_observation_error_code = 'transcript_start_capture_failed'
+
+
+def _capture_transcript_end(plan: DailyTurnPlan, resident: Any) -> None:
+    """Capture JSONL end offset on done, before yielding done upstream."""
+    if plan.transcript_observation_error_code:
+        return
+    try:
+        sid = str(getattr(resident, 'session_id', None) or '').strip() or None
+        if not sid:
+            plan.transcript_observation_error_code = 'transcript_session_id_missing'
+            return
+        live_gen = int(getattr(resident, 'generation', 0) or 0)
+        if (
+            plan.transcript_process_generation is not None
+            and live_gen != int(plan.transcript_process_generation)
+        ):
+            plan.transcript_observation_error_code = 'transcript_process_generation_changed'
+            return
+        start_sid = str(plan.transcript_claude_session_id or '').strip() or None
+        if start_sid and start_sid != sid:
+            plan.transcript_observation_error_code = 'transcript_session_id_changed'
+            return
+        plan.transcript_claude_session_id = sid
+        snap = snapshot_session_jsonl(plan.transcript_cwd, sid)
+        if snap is None:
+            plan.transcript_observation_error_code = 'transcript_snapshot_failed'
+            return
+        end_path = str(snap.get('path') or '') or None
+        end_offset = int(snap.get('offset') or 0)
+        if plan.transcript_path and end_path and plan.transcript_path != end_path:
+            plan.transcript_observation_error_code = 'transcript_path_changed'
+            return
+        if plan.transcript_start_offset is None:
+            plan.transcript_observation_error_code = 'transcript_start_offset_missing'
+            return
+        if end_offset < int(plan.transcript_start_offset):
+            plan.transcript_observation_error_code = 'transcript_offset_invalid'
+            return
+        plan.transcript_path = end_path
+        plan.transcript_end_offset = end_offset
+    except Exception:
+        logger.warning('transcript end capture failed', exc_info=True)
+        plan.transcript_observation_error_code = 'transcript_end_capture_failed'
+
+
+def _set_transcript_mapping_manifest(
+    plan: DailyTurnPlan,
+    *,
+    status: str,
+    error_code: Optional[str] = None,
+    event_count: int = 0,
+    scan_offset: Optional[int] = None,
+) -> None:
+    plan.manifest['transcript_mapping_status'] = status
+    plan.manifest['transcript_mapping_error_code'] = error_code
+    plan.manifest['transcript_mapping_event_count'] = int(event_count)
+    plan.manifest['transcript_mapping_scan_offset'] = scan_offset
+
+
+def finalize_transcript_mapping_after_success(
+    plan: DailyTurnPlan,
+    *,
+    assistant_message_id: int,
+) -> dict[str, Any]:
+    """Register session + map events after assistant persist and cursor CAS.
+
+    Failures only update mapping manifest fields (BLOCKED). Never raises to
+    Gateway, never aborts the turn, never respawns or rolls back chat state.
+    """
+    try:
+        existing = get_context_claude_session(
+            int(plan.context_id),
+            int(plan.resident_generation),
+            db_path=plan.db_path,
+        )
+        if existing is not None and str(existing.get('scan_status') or '') == SCAN_STATUS_BLOCKED:
+            _set_transcript_mapping_manifest(
+                plan,
+                status='BLOCKED',
+                error_code=str(existing.get('scan_error_code') or 'registry_blocked'),
+                event_count=0,
+                scan_offset=(
+                    int(existing['scan_offset'])
+                    if existing.get('scan_offset') is not None
+                    else None
+                ),
+            )
+            return dict(plan.manifest)
+
+        if plan.transcript_observation_error_code:
+            _set_transcript_mapping_manifest(
+                plan,
+                status='BLOCKED',
+                error_code=str(plan.transcript_observation_error_code),
+                event_count=0,
+                scan_offset=None,
+            )
+            return dict(plan.manifest)
+
+        sid = str(plan.transcript_claude_session_id or '').strip()
+        if (
+            not sid
+            or not str(plan.transcript_cwd or '').strip()
+            or plan.transcript_start_offset is None
+            or plan.transcript_end_offset is None
+            or plan.transcript_process_generation is None
+        ):
+            _set_transcript_mapping_manifest(
+                plan,
+                status='BLOCKED',
+                error_code='transcript_observation_incomplete',
+                event_count=0,
+                scan_offset=None,
+            )
+            return dict(plan.manifest)
+
+        register_context_claude_session(
+            context_id=int(plan.context_id),
+            context_epoch=int(plan.context_epoch),
+            resident_generation=int(plan.resident_generation),
+            chat_id=str(plan.chat_id),
+            claude_session_id=sid,
+            cwd=str(plan.transcript_cwd),
+            source='daily_runtime',
+            scan_offset=int(plan.transcript_start_offset),
+            process_generation=int(plan.transcript_process_generation),
+            transcript_path=plan.transcript_path,
+            db_path=plan.db_path,
+        )
+
+        result: MappingPassResult = run_mapping_pass(
+            MappingPassRequest(
+                context_id=int(plan.context_id),
+                context_epoch=int(plan.context_epoch),
+                resident_generation=int(plan.resident_generation),
+                chat_id=str(plan.chat_id),
+                user_message_id=int(plan.user_message_id),
+                assistant_message_id=int(assistant_message_id),
+                expected_start_offset=int(plan.transcript_start_offset),
+                observed_end_offset=int(plan.transcript_end_offset),
+            ),
+            db_path=plan.db_path,
+        )
+        if result.ok:
+            _set_transcript_mapping_manifest(
+                plan,
+                status='MAPPED',
+                error_code=None,
+                event_count=len(result.mapped_event_uuids or []),
+                scan_offset=result.scan_offset,
+            )
+        else:
+            _set_transcript_mapping_manifest(
+                plan,
+                status='BLOCKED',
+                error_code=str(result.error_code or 'mapping_blocked'),
+                event_count=0,
+                scan_offset=(
+                    int(result.registry['scan_offset'])
+                    if result.registry and result.registry.get('scan_offset') is not None
+                    else None
+                ),
+            )
+    except SessionRegistryError as exc:
+        logger.warning(
+            'transcript registry/mapping blocked: %s',
+            getattr(exc, 'error_code', exc),
+            exc_info=True,
+        )
+        _set_transcript_mapping_manifest(
+            plan,
+            status='BLOCKED',
+            error_code=str(getattr(exc, 'error_code', None) or 'registry_error'),
+            event_count=0,
+            scan_offset=None,
+        )
+    except Exception as exc:
+        logger.warning('transcript mapping finalize failed: %s', exc, exc_info=True)
+        _set_transcript_mapping_manifest(
+            plan,
+            status='BLOCKED',
+            error_code='mapping_finalize_exception',
+            event_count=0,
+            scan_offset=None,
+        )
+    return dict(plan.manifest)
+
+
 def ensure_resident_and_stream(
     plan: DailyTurnPlan,
     *,
@@ -1191,6 +1511,7 @@ def ensure_resident_and_stream(
     env: dict[str, str],
     static_system: str,
     _reprep_depth: int = 0,
+    _registry_reprep_depth: int = 0,
 ) -> Iterator[tuple[str, Any]]:
     """Prepare resident process, handle hot→cold mismatch, stream one turn."""
     verify_epoch_token(plan)
@@ -1212,6 +1533,36 @@ def ensure_resident_and_stream(
         if binding is not None and not _binding_matches_plan(binding, plan):
             close_local_resident_if_bound(resident, expected_key=binding.resident_key)
 
+        # Generation/session door-lock: before ensure_alive (spawn) and stdin.
+        if _registered_generation_requires_respawn(plan, resident, static_system):
+            heartbeat.stop()
+            if _registry_reprep_depth >= 1:
+                # Second mismatch: drop the current (already-reprepared) lease.
+                _release_lease(plan)
+                raise DailyRuntimeError(
+                    'registered Claude session conflicts with resident_generation',
+                    error_code='registered_session_generation_mismatch',
+                )
+            replacement = reprepare_after_registered_session_change(
+                plan,
+                resident=resident,
+                static_system=static_system,
+                static_system_sha256=plan.manifest.get('static_system_sha256') or _sha256_text(static_system),
+                persona_sha256=plan.manifest.get('persona_sha256') or '',
+                provider=str(plan.manifest.get('provider') or 'claude_code'),
+                model=str(plan.manifest.get('model') or ''),
+            )
+            _adopt_reprepared_plan_in_place(plan, replacement, resident=resident)
+            yield from ensure_resident_and_stream(
+                plan,
+                resident=resident,
+                env=env,
+                static_system=static_system,
+                _reprep_depth=_reprep_depth,
+                _registry_reprep_depth=_registry_reprep_depth + 1,
+            )
+            return
+
         actual_cold = bool(
             resident.ensure_alive(static_system, env, tool_profile=plan.tool_profile)
         )
@@ -1224,7 +1575,7 @@ def ensure_resident_and_stream(
                     'resident cold respawn during hot plan',
                     error_code='hot_to_cold_mismatch',
                 )
-            new_plan = reprepare_after_hot_cold_mismatch(
+            replacement = reprepare_after_hot_cold_mismatch(
                 plan,
                 resident=resident,
                 static_system=static_system,
@@ -1233,12 +1584,14 @@ def ensure_resident_and_stream(
                 provider=str(plan.manifest.get('provider') or 'claude_code'),
                 model=str(plan.manifest.get('model') or ''),
             )
+            _adopt_reprepared_plan_in_place(plan, replacement, resident=resident)
             yield from ensure_resident_and_stream(
-                new_plan,
+                plan,
                 resident=resident,
                 env=env,
                 static_system=static_system,
                 _reprep_depth=_reprep_depth + 1,
+                _registry_reprep_depth=_registry_reprep_depth,
             )
             return
 
@@ -1259,6 +1612,7 @@ def ensure_resident_and_stream(
             bound_cursor_message_id=db_cursor,
             process_generation=int(getattr(resident, 'generation', 0) or 0),
             tool_profile=plan.tool_profile,
+            claude_session_id=str(getattr(resident, 'session_id', None) or '') or None,
         ))
         dc.upsert_resident_owner(
             plan.context_id,
@@ -1278,12 +1632,16 @@ def ensure_resident_and_stream(
         if heartbeat.failed:
             raise LeaseConflictError('lease heartbeat failed before send')
 
+        _capture_transcript_start(plan, resident)
+
         for evt, payload in resident.send_turn(content, commit_meta=commit_meta):
             if heartbeat.failed:
                 close_local_resident_if_bound(resident, expected_key=plan.resident_key)
                 raise LeaseHeartbeatTerminalFailure('lease heartbeat failed during stream')
             if evt == 'tool_use':
                 raise DailyWindowToolFencePending()
+            if evt == 'done':
+                _capture_transcript_end(plan, resident)
             yield evt, payload
 
         if heartbeat.stop():
@@ -1419,13 +1777,17 @@ def handle_provider_success(
         abort_daily_turn(plan, error_code='empty_provider_response')
         raise DailyRuntimeError('empty provider response', error_code='empty_provider_response')
     usage = usage or {}
-    return complete_daily_turn(
+    complete_daily_turn(
         plan,
         assistant_message_id=int(assistant_message_id),
         stop_reason=str(usage.get('stop_reason') or 'end_turn'),
         input_tokens=usage.get('input_tokens'),
         output_tokens=usage.get('output_tokens'),
         unexpected_save_marker=unexpected_save_marker,
+    )
+    # Mapping only after assistant persist (Gateway) + cursor CAS success above.
+    return finalize_transcript_mapping_after_success(
+        plan, assistant_message_id=int(assistant_message_id),
     )
 
 
