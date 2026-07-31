@@ -19,6 +19,8 @@ app/test-results/
 app/playwright-report/
 
 # Runtime state: backed up separately, never deploy from Git
+memories.db-shm
+memories.db-wal
 attachments.db
 attachments/
 client_errors.log
