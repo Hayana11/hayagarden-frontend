@@ -6,6 +6,7 @@ import datetime
 import hashlib
 import json
 import os
+import shutil
 import sqlite3
 import sys
 import tempfile
@@ -13,6 +14,8 @@ import threading
 import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+from typing import Any, Optional
 from unittest import mock
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
@@ -25,7 +28,14 @@ from chat import context_window as cw
 from chat import daily_context as dc
 from chat import daily_runtime as dr
 from chat.daily_context import ConflictError, DeferredError
+from chat.session_registry import (
+    SCAN_STATUS_BLOCKED,
+    SCAN_STATUS_READY,
+    get_context_claude_session,
+    register_context_claude_session,
+)
 from chat.system_builder import build_cc_daily_static_parts, build_cc_static_parts
+from tools.cc_jsonl_usage import session_jsonl_path
 
 
 def _tmp_db() -> str:
@@ -2077,6 +2087,479 @@ class DailyRuntimeCursorCASTests(unittest.TestCase):
             self.assertEqual(int(count), 1)
         finally:
             os.unlink(db)
+
+
+# ---------------------------------------------------------------------------
+# Runtime → Session Registry / Mapping R1 focused cases
+# ---------------------------------------------------------------------------
+
+_MAP_SESSION_HOT = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
+_MAP_SESSION_COLD = '11111111-2222-3333-4444-555555555555'
+_MAP_SESSION_AFTER_RESPAWN = '99999999-8888-7777-6666-555555555555'
+
+
+def _jsonl_line(
+    uuid: str,
+    typ: str,
+    *,
+    session: str,
+    parent: Optional[str],
+    content: Any,
+) -> str:
+    obj = {
+        'type': typ,
+        'uuid': uuid,
+        'parentUuid': parent,
+        'cwd': '/tmp/synth',
+        'sessionId': session,
+        'message': {
+            'role': 'user' if typ == 'user' else 'assistant',
+            'content': content,
+        },
+    }
+    return json.dumps(obj, ensure_ascii=False)
+
+
+def _append_jsonl(path: Path, lines: list[str]) -> int:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    raw = ''.join(
+        (line if line.endswith('\n') else line + '\n') for line in lines
+    ).encode('utf-8')
+    with path.open('ab') as fh:
+        fh.write(raw)
+    return path.stat().st_size
+
+
+def _write_jsonl(path: Path, lines: list[str]) -> int:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    raw = ''.join(
+        (line if line.endswith('\n') else line + '\n') for line in lines
+    ).encode('utf-8')
+    path.write_bytes(raw)
+    return len(raw)
+
+
+class _TranscriptHotResident(_FakeResident):
+    """Hot resident with pre-existing session + JSONL history prefix."""
+
+    def __init__(self, *, cwd: str, session_id: str, jsonl_path: Path, generation: int = 1):
+        super().__init__()
+        self.cwd = cwd
+        self.session_id = session_id
+        self.generation = generation
+        self._jsonl_path = jsonl_path
+        self._alive = True
+        self._cold = False
+        self.sent_generations: list[int] = []
+
+    def ensure_alive(self, system_text, env, tool_profile=cc_resident.TOOL_PROFILE_LEGACY):
+        self._spawn_args.append((system_text, tool_profile))
+        self._alive = True
+        self.tool_profile = tool_profile
+        return False
+
+    def peek_respawn_reason(self, system_text, *, tool_profile=cc_resident.TOOL_PROFILE_LEGACY):
+        return None
+
+    def send_turn(self, content, commit_meta=None):
+        self.sent.append(str(content))
+        self.sent_generations.append(int(self.generation))
+        _append_jsonl(self._jsonl_path, [
+            _jsonl_line('u-hot-1', 'user', session=self.session_id, parent=None, content='hot-user'),
+            _jsonl_line(
+                'a-hot-1', 'assistant', session=self.session_id, parent='u-hot-1',
+                content=[{'type': 'text', 'text': 'hot-asst'}],
+            ),
+        ])
+        yield ('text', 'hot reply')
+        yield ('done', ('hot reply', '', {'input_tokens': 3, 'output_tokens': 5}, {}))
+
+
+class _TranscriptColdResident(_FakeResident):
+    """Cold resident: session id empty before send; set + write JSONL before done."""
+
+    def __init__(self, *, cwd: str, new_session_id: str, jsonl_path: Path, generation: int = 1):
+        super().__init__()
+        self.cwd = cwd
+        self.session_id = None
+        self.generation = generation
+        self._new_session_id = new_session_id
+        self._jsonl_path = jsonl_path
+
+    def peek_respawn_reason(self, system_text, *, tool_profile=cc_resident.TOOL_PROFILE_LEGACY):
+        return None
+
+    def send_turn(self, content, commit_meta=None):
+        self.sent.append(str(content))
+        yield ('text', 'cold reply')
+        self.session_id = self._new_session_id
+        _write_jsonl(self._jsonl_path, [
+            _jsonl_line('u-cold-1', 'user', session=self.session_id, parent=None, content='cold-user'),
+            _jsonl_line(
+                'a-cold-1', 'assistant', session=self.session_id, parent='u-cold-1',
+                content=[{'type': 'text', 'text': 'cold-asst'}],
+            ),
+        ])
+        yield ('done', ('cold reply', '', {'input_tokens': 2, 'output_tokens': 4}, {}))
+
+
+class _RegisteredRespawnResident(_FakeResident):
+    """Registry exists; peek says process_dead — must bump gen before stdin."""
+
+    def __init__(self, *, cwd: str, old_session_id: str, new_session_id: str, jsonl_path: Path):
+        super().__init__()
+        self.cwd = cwd
+        self.session_id = old_session_id
+        self.generation = 1
+        self._new_session_id = new_session_id
+        self._jsonl_path = jsonl_path
+        self._peek_reason = 'process_dead'
+        self.ensure_alive_gens: list[int] = []
+        self.sent_gens: list[int] = []
+
+    def peek_respawn_reason(self, system_text, *, tool_profile=cc_resident.TOOL_PROFILE_LEGACY):
+        return self._peek_reason
+
+    def ensure_alive(self, system_text, env, tool_profile=cc_resident.TOOL_PROFILE_LEGACY):
+        # Track generation at ensure_alive time (must be the bumped one).
+        self.ensure_alive_gens.append(int(self.generation))
+        self._spawn_args.append((system_text, tool_profile))
+        self._alive = True
+        self.tool_profile = tool_profile
+        # Simulate spawn of a new Claude session under the new generation.
+        self.session_id = None
+        self.generation = int(self.generation) + 1
+        self._peek_reason = None
+        cold = self._cold
+        self._cold = False
+        return cold
+
+    def send_turn(self, content, commit_meta=None):
+        self.sent.append(str(content))
+        self.sent_gens.append(int(self.generation))
+        yield ('text', 'after-respawn')
+        self.session_id = self._new_session_id
+        _write_jsonl(self._jsonl_path, [
+            _jsonl_line('u-rs-1', 'user', session=self.session_id, parent=None, content='rs-user'),
+            _jsonl_line(
+                'a-rs-1', 'assistant', session=self.session_id, parent='u-rs-1',
+                content=[{'type': 'text', 'text': 'rs-asst'}],
+            ),
+        ])
+        yield ('done', ('after-respawn', '', {'input_tokens': 1, 'output_tokens': 2}, {}))
+
+
+class _MappingBlockedResident(_TranscriptColdResident):
+    """Writes JSONL with no candidate_user → Mapping BLOCKED after chat success."""
+
+    def send_turn(self, content, commit_meta=None):
+        self.sent.append(str(content))
+        yield ('text', 'blocked-map reply')
+        self.session_id = self._new_session_id
+        # Assistant-only event: mapping rejects (candidate_user_missing).
+        _write_jsonl(self._jsonl_path, [
+            _jsonl_line(
+                'a-only-1', 'assistant', session=self.session_id, parent=None,
+                content=[{'type': 'text', 'text': 'orphan'}],
+            ),
+        ])
+        yield ('done', ('blocked-map reply', '', {'input_tokens': 1, 'output_tokens': 1}, {}))
+
+
+class DailyRuntimeTranscriptMappingTests(unittest.TestCase):
+    def setUp(self):
+        dr.reset_bindings_for_tests()
+        self.tmp = tempfile.mkdtemp(prefix='rt-map-')
+        self.home = self.tmp
+        self.cwd = os.path.join(self.tmp, 'proj')
+        os.makedirs(self.cwd, exist_ok=True)
+        self.db = os.path.join(self.tmp, 'test.db')
+        _init_chat_messages(self.db)
+        self._home_patch = mock.patch.dict(os.environ, {'HOME': self.home})
+        self._home_patch.start()
+
+    def tearDown(self):
+        self._home_patch.stop()
+        dr.reset_bindings_for_tests()
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _prepare(self, uid, *, resident=None):
+        return _prepare_turn(self.db, uid, resident=resident, static_system='STATIC')
+
+    def _jsonl_for(self, session_id: str) -> Path:
+        path = session_jsonl_path(self.cwd, session_id)
+        assert path is not None
+        return Path(path)
+
+    def test_hot_path_maps_only_current_turn_range(self):
+        """1) Hot: start=EOF before write; map only this turn; manifest=MAPPED."""
+        prefix = [
+            _jsonl_line('u-pre', 'user', session=_MAP_SESSION_HOT, parent=None, content='prefix'),
+            _jsonl_line(
+                'a-pre', 'assistant', session=_MAP_SESSION_HOT, parent='u-pre',
+                content=[{'type': 'text', 'text': 'prefix-a'}],
+            ),
+        ]
+        jsonl_path = self._jsonl_for(_MAP_SESSION_HOT)
+        start_before = _write_jsonl(jsonl_path, prefix)
+
+        # Seed cold turn with plain fake (no JSONL) to establish cursor/owner.
+        uid0 = _insert(self.db, 'hayana', 'seed', '2026-07-27 09:59:00')
+        seed_resident = _FakeResident()
+        seed_resident.generation = 1
+        plan0 = self._prepare(uid0, resident=seed_resident)
+        list(dr.stream_daily_resident_turn(
+            plan0, resident=seed_resident, env={}, static_system='STATIC',
+        ))
+        aid0 = dr.persist_daily_assistant_for_plan(plan0, content='seed-asst')
+        dr.complete_daily_turn(plan0, assistant_message_id=aid0)
+
+        register_context_claude_session(
+            context_id=plan0.context_id,
+            context_epoch=plan0.context_epoch,
+            resident_generation=plan0.resident_generation,
+            chat_id=plan0.chat_id,
+            claude_session_id=_MAP_SESSION_HOT,
+            cwd=self.cwd,
+            source='daily_runtime',
+            scan_offset=start_before,
+            process_generation=1,
+            db_path=self.db,
+        )
+
+        resident = _TranscriptHotResident(
+            cwd=self.cwd, session_id=_MAP_SESSION_HOT, jsonl_path=jsonl_path, generation=1,
+        )
+        dr.set_local_binding(_binding_for_plan(plan0, cursor=aid0))
+        binding = dr.get_local_binding()
+        assert binding is not None
+        binding.process_generation = 1
+        binding.claude_session_id = _MAP_SESSION_HOT
+        dr.set_local_binding(binding)
+
+        uid = _insert(self.db, 'hayana', 'hot-map', '2026-07-27 10:00:00')
+        plan = self._prepare(uid, resident=resident)
+        self.assertFalse(plan.is_cold)
+        list(dr.stream_daily_resident_turn(
+            plan, resident=resident, env={}, static_system='STATIC',
+        ))
+        self.assertEqual(plan.transcript_start_offset, start_before)
+        self.assertGreaterEqual(int(plan.transcript_end_offset or -1), start_before)
+        self.assertEqual(plan.transcript_claude_session_id, _MAP_SESSION_HOT)
+        self.assertIsNone(plan.transcript_observation_error_code)
+
+        aid = dr.persist_daily_assistant_for_plan(plan, content='hot reply')
+        out = dr.handle_provider_success(
+            plan, assistant_message_id=aid, raw_text='hot reply',
+            usage={'input_tokens': 3, 'output_tokens': 5},
+        )
+        self.assertEqual(out['transcript_mapping_status'], 'MAPPED')
+        self.assertIsNone(out['transcript_mapping_error_code'])
+        self.assertGreaterEqual(int(out['transcript_mapping_event_count']), 2)
+        self.assertEqual(out['transcript_mapping_scan_offset'], plan.transcript_end_offset)
+
+        reg = get_context_claude_session(
+            plan.context_id, plan.resident_generation, db_path=self.db,
+        )
+        self.assertIsNotNone(reg)
+        self.assertEqual(reg['scan_status'], SCAN_STATUS_READY)
+        self.assertEqual(int(reg['scan_offset']), int(plan.transcript_end_offset))
+
+        conn = sqlite3.connect(self.db)
+        mapped = conn.execute(
+            'SELECT event_uuid FROM chat_message_claude_events ORDER BY jsonl_byte_offset'
+        ).fetchall()
+        cache = conn.execute(
+            'SELECT cache_info FROM chat_messages WHERE id=?', (aid,),
+        ).fetchone()[0]
+        conn.close()
+        uuids = {r[0] for r in mapped}
+        self.assertIn('u-hot-1', uuids)
+        self.assertIn('a-hot-1', uuids)
+        self.assertNotIn('u-pre', uuids)
+        self.assertNotIn('a-pre', uuids)
+        self.assertNotIn('transcript_path', str(cache or ''))
+        self.assertNotIn(str(jsonl_path), str(cache or ''))
+
+    def test_cold_path_registers_from_offset_zero(self):
+        """2) Cold: session empty before send; Registry at 0; user/asst mapped."""
+        jsonl_path = self._jsonl_for(_MAP_SESSION_COLD)
+        uid = _insert(self.db, 'hayana', 'cold-map', '2026-07-27 10:00:00')
+        resident = _TranscriptColdResident(
+            cwd=self.cwd, new_session_id=_MAP_SESSION_COLD, jsonl_path=jsonl_path,
+        )
+        plan = self._prepare(uid, resident=resident)
+        self.assertTrue(plan.is_cold)
+        list(dr.stream_daily_resident_turn(
+            plan, resident=resident, env={}, static_system='STATIC',
+        ))
+        self.assertEqual(plan.transcript_start_offset, 0)
+        self.assertEqual(plan.transcript_claude_session_id, _MAP_SESSION_COLD)
+        self.assertEqual(plan.transcript_path, str(jsonl_path))
+        self.assertGreater(int(plan.transcript_end_offset or 0), 0)
+        self.assertIsNone(plan.transcript_observation_error_code)
+
+        aid = dr.persist_daily_assistant_for_plan(plan, content='cold reply')
+        out = dr.handle_provider_success(
+            plan, assistant_message_id=aid, raw_text='cold reply',
+        )
+        self.assertEqual(out['transcript_mapping_status'], 'MAPPED')
+        reg = get_context_claude_session(
+            plan.context_id, plan.resident_generation, db_path=self.db,
+        )
+        self.assertIsNotNone(reg)
+        self.assertEqual(reg['claude_session_id'], _MAP_SESSION_COLD)
+        self.assertEqual(reg['source'], 'daily_runtime')
+        self.assertEqual(int(out['transcript_mapping_scan_offset']), int(plan.transcript_end_offset))
+
+        conn = sqlite3.connect(self.db)
+        rows = conn.execute(
+            'SELECT role, message_id FROM chat_message_claude_events ORDER BY role'
+        ).fetchall()
+        conn.close()
+        roles = {r[0]: r[1] for r in rows}
+        self.assertEqual(roles.get('user'), uid)
+        self.assertEqual(roles.get('assistant'), aid)
+
+    def test_registered_generation_respawn_before_stdin(self):
+        """3) Registered gen + peek process_dead → bump gen; no stdin on old gen."""
+        jsonl_path = self._jsonl_for(_MAP_SESSION_AFTER_RESPAWN)
+        uid = _insert(self.db, 'hayana', 'respawn-map', '2026-07-27 10:00:00')
+        plan = self._prepare(uid)
+        old_gen = int(plan.resident_generation)
+        register_context_claude_session(
+            context_id=plan.context_id,
+            context_epoch=plan.context_epoch,
+            resident_generation=old_gen,
+            chat_id=plan.chat_id,
+            claude_session_id=_MAP_SESSION_HOT,
+            cwd=self.cwd,
+            source='daily_runtime',
+            scan_offset=0,
+            process_generation=1,
+            db_path=self.db,
+        )
+        resident = _RegisteredRespawnResident(
+            cwd=self.cwd,
+            old_session_id=_MAP_SESSION_HOT,
+            new_session_id=_MAP_SESSION_AFTER_RESPAWN,
+            jsonl_path=jsonl_path,
+        )
+
+        held: dict[str, dr.DailyTurnPlan] = {}
+        real_reprep = dr.reprepare_after_registered_session_change
+
+        def _capture_reprep(*args, **kwargs):
+            new_plan = real_reprep(*args, **kwargs)
+            held['plan'] = new_plan
+            return new_plan
+
+        with mock.patch.object(config_store, 'get_bool', return_value=True), \
+             mock.patch('chat.daily_history._build_state_text', return_value=('', 'none', {})), \
+             mock.patch.object(
+                 dr, 'reprepare_after_registered_session_change', side_effect=_capture_reprep,
+             ):
+            events = list(dr.stream_daily_resident_turn(
+                plan, resident=resident, env={}, static_system='STATIC',
+            ))
+        self.assertTrue(any(e[0] == 'done' for e in events))
+        self.assertIn('plan', held)
+        new_plan = held['plan']
+        self.assertGreater(int(new_plan.resident_generation), old_gen)
+
+        # ensure_alive / stdin only after reprepare (never on registered old gen).
+        self.assertEqual(len(resident.ensure_alive_gens), 1)
+        self.assertEqual(len(resident.sent), 1)
+        self.assertEqual(resident.session_id, _MAP_SESSION_AFTER_RESPAWN)
+
+        old_reg = get_context_claude_session(plan.context_id, old_gen, db_path=self.db)
+        self.assertEqual(old_reg['claude_session_id'], _MAP_SESSION_HOT)
+
+        aid = dr.persist_daily_assistant_for_plan(new_plan, content='after-respawn')
+        out = dr.handle_provider_success(
+            new_plan, assistant_message_id=aid, raw_text='after-respawn',
+        )
+        self.assertEqual(out['transcript_mapping_status'], 'MAPPED')
+        new_reg = get_context_claude_session(
+            new_plan.context_id, new_plan.resident_generation, db_path=self.db,
+        )
+        self.assertIsNotNone(new_reg)
+        self.assertEqual(new_reg['claude_session_id'], _MAP_SESSION_AFTER_RESPAWN)
+        # One Claude session per resident_generation.
+        self.assertEqual(
+            get_context_claude_session(plan.context_id, old_gen, db_path=self.db)['claude_session_id'],
+            _MAP_SESSION_HOT,
+        )
+        self.assertNotEqual(old_reg['claude_session_id'], new_reg['claude_session_id'])
+
+    def test_mapping_blocked_does_not_fail_chat(self):
+        """4) Mapping BLOCKED after persist+cursor; chat still succeeds."""
+        jsonl_path = self._jsonl_for(_MAP_SESSION_COLD)
+        uid = _insert(self.db, 'hayana', 'block-map', '2026-07-27 10:00:00')
+        resident = _MappingBlockedResident(
+            cwd=self.cwd, new_session_id=_MAP_SESSION_COLD, jsonl_path=jsonl_path,
+        )
+        plan = self._prepare(uid, resident=resident)
+        list(dr.stream_daily_resident_turn(
+            plan, resident=resident, env={}, static_system='STATIC',
+        ))
+        self.assertIsNone(plan.transcript_observation_error_code)
+        aid = dr.persist_daily_assistant_for_plan(plan, content='blocked-map reply')
+        out = dr.handle_provider_success(
+            plan, assistant_message_id=aid, raw_text='blocked-map reply',
+        )
+        self.assertEqual(out['transcript_mapping_status'], 'BLOCKED')
+        self.assertIsNotNone(out['transcript_mapping_error_code'])
+        self.assertEqual(int(out['transcript_mapping_event_count']), 0)
+        self.assertTrue(out.get('cursor_cas_success'))
+        self.assertEqual(out.get('assistant_message_id'), aid)
+        self.assertTrue(plan.lease_released)
+        self.assertFalse(dc.is_resident_turn_active(
+            plan.context_id, plan.resident_generation, db_path=self.db, now=_FIXED_NOW,
+        ))
+
+        conn = sqlite3.connect(self.db)
+        asst = conn.execute(
+            "SELECT id, content FROM chat_messages WHERE author='assistant'"
+        ).fetchone()
+        map_count = conn.execute(
+            'SELECT COUNT(*) FROM chat_message_claude_events'
+        ).fetchone()[0]
+        conn.close()
+        self.assertEqual(int(asst[0]), aid)
+        self.assertEqual(asst[1], 'blocked-map reply')
+        self.assertEqual(int(map_count), 0)
+
+        reg = get_context_claude_session(
+            plan.context_id, plan.resident_generation, db_path=self.db,
+        )
+        self.assertIsNotNone(reg)
+        self.assertEqual(reg['scan_status'], SCAN_STATUS_BLOCKED)
+        self.assertEqual(int(reg['scan_offset']), 0)
+
+
+class ResidentPeekRespawnReasonTests(unittest.TestCase):
+    def test_peek_matches_decide_without_side_effects(self):
+        rs = cc_resident.ResidentSession('/tmp/x', '', '/tmp/mcp.json')
+        rs._proc = mock.Mock()
+        rs._proc.poll.return_value = None
+        rs._system_text = 'SYS'
+        rs._last_used = time.time()
+        rs._tool_profile = cc_resident.TOOL_PROFILE_TEXT_ONLY
+        rs._last_round_context = 0
+        rs._resident_turn_count = 0
+        rs._turns_since_respawn = 0
+        gen_before = rs.generation
+        sid_before = rs.session_id
+        reason = rs.peek_respawn_reason('SYS', tool_profile=cc_resident.TOOL_PROFILE_TEXT_ONLY)
+        self.assertIsNone(reason)
+        self.assertEqual(
+            rs.peek_respawn_reason('OTHER', tool_profile=cc_resident.TOOL_PROFILE_TEXT_ONLY),
+            'system_changed',
+        )
+        self.assertEqual(rs.generation, gen_before)
+        self.assertEqual(rs.session_id, sid_before)
+        self.assertEqual(rs.cwd, '/tmp/x')
 
 
 if __name__ == '__main__':

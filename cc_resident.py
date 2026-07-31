@@ -265,6 +265,14 @@ class ResidentSession:
                 self._spawn(system_text, env, reason=reason, tool_profile=tool_profile)
             return self._cold
 
+    def peek_respawn_reason(self, system_text, *, tool_profile=TOOL_PROFILE_LEGACY):
+        """Read-only: same reason as ``_decide_respawn_reason``, or None.
+
+        Does not spawn, kill, change generation, or write stdin.
+        """
+        with self._lock:
+            return self._decide_respawn_reason(system_text, tool_profile=tool_profile)
+
     def spawn_resumable(
         self,
         system_text,
@@ -855,6 +863,10 @@ class ResidentSession:
     @property
     def session_id(self):
         return self._session_id
+
+    @property
+    def cwd(self):
+        return self._cwd
 
     @property
     def system_text(self):
