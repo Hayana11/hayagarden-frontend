@@ -124,12 +124,53 @@ Cross-process first-delta recovery is **not** implemented
 
 Reuse the staged resident from claim. External SSE stays `{"t","d"}` only.
 
+### Stdin marker
+
+Do **not** call `mark_first_turn_stdin_sent` before `send_turn`. Order:
+
+```text
+event_iter = iter(staged.send_turn(user))
+first_event = next(event_iter)   # stdin.write+flush already done inside send_turn
+mark_first_turn_stdin_sent(session)
+chain(first_event, event_iter)…
+```
+
+If the first `next()` fails and JSONL has not grown past `start_offset` → clean.
+
+### Unified pre-commit terminal
+
+`_gw_first_turn_precommit_terminal` is the only pre-DB-commit closer. Evidence:
+
+```text
+jsonl_grew = current_size > session.start_offset
+```
+
+| State | Action |
+|-------|--------|
+| `not _db_committed` and not `jsonl_grew` | `abort_first_turn_clean` → READY, lease released, retryable |
+| `not _db_committed` and `jsonl_grew` | `mark_first_turn_precommit_dirty` (no model retry) |
+| `_db_committed` | no clean rollback; same-process HANDOFF_PENDING recover only |
+
+In-memory `stdin_sent` must not override a non-grown JSONL.
+
+### GeneratorExit / client disconnect
+
+Catch `GeneratorExit`, best-effort `event_iter.close()` (resident kill path),
+run the unified pre-commit terminal if first text not yet committed, clear
+unreleased pending SSE, **do not yield** `err`/`done`, re-raise.
+
+### Done / EOF before first text
+
+If provider `done` or iterator EOF arrives while `first_released` is false:
+
+- do not call `complete_first_turn_round`
+- do not insert assistant
+- do not send success `done`
+- unified clean/dirty terminal + single failure `err`
+
 Before first non-empty text: hold `think` / `tool_use` / `tool_result` /
 `trace_summary` inside the generator. On first text: ingest → wait DB+handoff →
 release held prefix in order → release first text → pass subsequent events.
-
-Pre-commit failure: `abort_first_turn_clean` when safe; else
-`mark_first_turn_precommit_dirty`; drop buffer; single client `err`.
 
 Post-DB handoff failure: one same-process `recover_first_turn_handoff_pending`
 while the generator still holds `FirstTurnSession`. First text released once;

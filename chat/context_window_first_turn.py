@@ -935,10 +935,13 @@ def abort_first_turn_clean(
     db_path: str,
     now: Optional[Any] = None,
 ) -> None:
-    """Pre-commit clean failure: source unchanged, target staged, retry allowed."""
+    """Pre-commit clean failure: source unchanged, target staged, retry allowed.
+
+    JSONL growth vs ``start_offset`` is the write-boundary evidence. The in-memory
+    ``stdin_sent`` marker must not override a non-grown JSONL (Gateway may mark
+    stdin only after the first successful ``send_turn`` iteration).
+    """
     hooks = _require_hooks(hooks)
-    if session.stdin_sent:
-        raise FirstTurnError('stdin already sent', error_code='FIRST_TURN_NOT_CLEAN')
     if _jsonl_size(session.jsonl_path) > int(session.start_offset):
         raise FirstTurnError('jsonl grew', error_code='FIRST_TURN_NOT_CLEAN')
     if session._db_committed:
