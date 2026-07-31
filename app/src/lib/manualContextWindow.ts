@@ -86,20 +86,20 @@ export type ContextWindowCandidatesResponse = {
 };
 
 export type ContextWindowSwitchResponse = {
+  ok: true;
+  prepare_status: 'READY' | 'ALREADY_READY';
+  request_id: string;
   source_context_id: number;
   source_context_epoch: number;
   source_resident_generation: number;
   target_context_id: number;
   target_context_epoch: number;
-  window_mode: string;
-  requested_round_count: CarryoverCount;
-  selected_round_count: number;
-  selected_message_count: number;
-  selected_message_ids: number[];
-  boundary_message_id: number;
-  resident_generation: number;
-  switched_at: string;
-  ok?: boolean;
+  candidate_session_id: string;
+  jsonl_sha256: string;
+  jsonl_size: number;
+  staged_ready_at: string;
+  recovered: boolean;
+  status: 'ready';
 };
 
 export function classifyManualWindowError(err: unknown): ManualWindowUiState {
@@ -218,48 +218,49 @@ export function parseContextWindowCandidates(raw: unknown): ContextWindowCandida
 export function parseContextWindowSwitch(raw: unknown): ContextWindowSwitchResponse | null {
   if (!raw || typeof raw !== 'object') return null;
   const r = raw as Record<string, unknown>;
+  if (r.ok !== true) return null;
+  if (r.prepare_status !== 'READY' && r.prepare_status !== 'ALREADY_READY') return null;
+  if (r.status !== 'ready') return null;
+  if (typeof r.request_id !== 'string' || !r.request_id.trim()) return null;
+  if (typeof r.candidate_session_id !== 'string' || !r.candidate_session_id.trim()) return null;
+  if (typeof r.jsonl_sha256 !== 'string' || !r.jsonl_sha256.trim()) return null;
+  if (typeof r.staged_ready_at !== 'string' || !r.staged_ready_at.trim()) return null;
+  if (typeof r.recovered !== 'boolean') return null;
   const source_context_id = normalizeMessageId(r.source_context_id);
   const source_context_epoch = normalizePositiveInt(r.source_context_epoch);
   const source_resident_generation = normalizePositiveInt(r.source_resident_generation);
   const target_context_id = normalizeMessageId(r.target_context_id);
   const target_context_epoch = normalizePositiveInt(r.target_context_epoch);
+  const jsonl_size = normalizeNonNegativeInt(r.jsonl_size);
   if (
     source_context_id === null ||
     source_context_epoch === null ||
     source_resident_generation === null ||
     target_context_id === null ||
-    target_context_epoch === null
+    target_context_epoch === null ||
+    jsonl_size === null
   ) {
     return null;
   }
-  if (typeof r.requested_round_count !== 'number' || !isCarryoverCount(r.requested_round_count)) {
+  // Reject legacy seamless fields so old payloads cannot pass silently.
+  if ('switched_at' in r || 'selected_message_ids' in r || 'window_mode' in r) {
     return null;
   }
-  const selected_round_count = normalizeNonNegativeInt(r.selected_round_count);
-  const selected_message_count = normalizeNonNegativeInt(r.selected_message_count);
-  if (selected_round_count === null || selected_message_count === null) return null;
-  if (!Array.isArray(r.selected_message_ids)) return null;
-  const selected_message_ids: number[] = [];
-  for (const id of r.selected_message_ids) {
-    const n = normalizeMessageId(id);
-    if (n === null) return null;
-    selected_message_ids.push(n);
-  }
   return {
-    ok: r.ok === undefined ? undefined : Boolean(r.ok),
+    ok: true,
+    prepare_status: r.prepare_status,
+    request_id: r.request_id,
     source_context_id,
     source_context_epoch,
     source_resident_generation,
     target_context_id,
     target_context_epoch,
-    window_mode: typeof r.window_mode === 'string' ? r.window_mode : '',
-    requested_round_count: r.requested_round_count,
-    selected_round_count,
-    selected_message_count,
-    selected_message_ids,
-    boundary_message_id: normalizeNonNegativeInt(r.boundary_message_id) ?? 0,
-    resident_generation: normalizePositiveInt(r.resident_generation) ?? 1,
-    switched_at: typeof r.switched_at === 'string' ? r.switched_at : '',
+    candidate_session_id: r.candidate_session_id,
+    jsonl_sha256: r.jsonl_sha256,
+    jsonl_size,
+    staged_ready_at: r.staged_ready_at,
+    recovered: r.recovered,
+    status: 'ready',
   };
 }
 

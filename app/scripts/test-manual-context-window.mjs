@@ -99,24 +99,88 @@ const client = {
     calls.switchBody = { src, count, requestId };
     const parsed = parseContextWindowSwitch({
       ok: true,
+      prepare_status: 'READY',
+      request_id: requestId,
       source_context_id: src.source_context_id,
       source_context_epoch: src.source_context_epoch,
       source_resident_generation: src.source_resident_generation,
       target_context_id: 8,
       target_context_epoch: 43,
-      window_mode: 'manual',
-      requested_round_count: count,
-      selected_round_count: count,
-      selected_message_count: count,
-      selected_message_ids: [],
-      boundary_message_id: 100,
-      resident_generation: 1,
-      switched_at: '2026-07-28 11:00:00',
+      candidate_session_id: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+      jsonl_sha256: 'a'.repeat(64),
+      jsonl_size: 1200,
+      staged_ready_at: '2026-07-28 11:00:00',
+      recovered: false,
+      status: 'ready',
     });
     if (!parsed) throw new Error('bad switch parse');
     return parsed;
   },
 };
+
+const prepareOk = parseContextWindowSwitch({
+  ok: true,
+  prepare_status: 'ALREADY_READY',
+  request_id: '11111111-1111-4111-8111-111111111111',
+  source_context_id: 7,
+  source_context_epoch: 42,
+  source_resident_generation: 1,
+  target_context_id: 8,
+  target_context_epoch: 43,
+  candidate_session_id: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+  jsonl_sha256: 'b'.repeat(64),
+  jsonl_size: 0,
+  staged_ready_at: '2026-07-28 11:00:00',
+  recovered: true,
+  status: 'ready',
+});
+assert.ok(prepareOk);
+assert.equal(prepareOk?.prepare_status, 'ALREADY_READY');
+assert.equal(prepareOk?.status, 'ready');
+ok('parse prepare response');
+
+assert.equal(
+  parseContextWindowSwitch({
+    ok: true,
+    prepare_status: 'READY',
+    request_id: 'x',
+    source_context_id: 7,
+    source_context_epoch: 42,
+    source_resident_generation: 1,
+    target_context_id: 8,
+    target_context_epoch: 43,
+    candidate_session_id: 'sid',
+    jsonl_sha256: 'c'.repeat(64),
+    jsonl_size: 1,
+    staged_ready_at: 't',
+    recovered: false,
+    status: 'ready',
+    switched_at: 'nope',
+  }),
+  null,
+);
+ok('reject legacy switched_at payload');
+
+assert.equal(
+  parseContextWindowSwitch({
+    ok: true,
+    prepare_status: 'READY',
+    request_id: 'x',
+    source_context_id: 7,
+    source_context_epoch: 42,
+    source_resident_generation: 1,
+    target_context_id: 8,
+    target_context_epoch: 43,
+    candidate_session_id: 'sid',
+    jsonl_sha256: 'c'.repeat(64),
+    // missing jsonl_size
+    staged_ready_at: 't',
+    recovered: false,
+    status: 'ready',
+  }),
+  null,
+);
+ok('reject incomplete prepare response');
 
 const ctrl = new ManualContextWindowController({ client });
 await ctrl.probeEnabled();
@@ -208,19 +272,20 @@ retryCtrl.client = {
       throw new HttpError(502, 'bad gateway', 'bad gateway');
     }
     return {
+      ok: true,
+      prepare_status: 'READY',
+      request_id: requestId,
       source_context_id: src.source_context_id,
       source_context_epoch: src.source_context_epoch,
       source_resident_generation: src.source_resident_generation,
       target_context_id: 9,
       target_context_epoch: 44,
-      window_mode: 'manual',
-      requested_round_count: count,
-      selected_round_count: 0,
-      selected_message_count: 0,
-      selected_message_ids: [],
-      boundary_message_id: 100,
-      resident_generation: 1,
-      switched_at: '2026-07-28 11:00:00',
+      candidate_session_id: 'bbbbbbbb-cccc-dddd-eeee-ffffffffffff',
+      jsonl_sha256: 'd'.repeat(64),
+      jsonl_size: 10,
+      staged_ready_at: '2026-07-28 11:00:00',
+      recovered: false,
+      status: 'ready',
     };
   },
 };

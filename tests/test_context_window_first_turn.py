@@ -302,29 +302,50 @@ class ContextWindowFirstTurnTests(unittest.TestCase):
             conn.close()
 
     def test_happy_path_first_delta_commit_and_complete(self):
-        """1) user→target, buffer first text, CAS, handoff, assistant, cursor."""
+        """1) prepare READY → reuse Gateway user id → first text handoff → complete."""
         published = self._seed_source_and_forge()
         source_before = dc.get_daily_context_by_id(self.context_id, db_path=self.db)
         intent_before = self._intent()
+        self.assertEqual(intent_before['status'], INTENT_READY)
+        self.assertEqual(
+            dc.get_daily_context_by_id(
+                int(intent_before['target_context_id']), db_path=self.db,
+            )['window_mode'],
+            WINDOW_MODE_MANUAL_STAGED,
+        )
         target_id = int(intent_before['target_context_id'])
+        # Gateway chat_stream already inserted the formal user row.
+        gateway_user_id = _insert_msg(self.db, 'hayana', '新房第一句')
 
         session = claim_and_start_first_turn(
             switch_request_id=self.switch_request_id,
             first_turn_request_id=self.first_turn_request_id,
             user_content='新房第一句',
+            user_message_id=gateway_user_id,
             hooks=self.hooks,
             db_path=self.db,
             now=NOW,
         )
-        self.assertEqual(session.user_message_id > 0, True)
+        self.assertEqual(session.user_message_id, gateway_user_id)
         intent_committing = self._intent()
         self.assertEqual(intent_committing['status'], INTENT_COMMITTING)
-        self.assertEqual(int(intent_committing['first_user_message_id']), session.user_message_id)
+        self.assertEqual(int(intent_committing['first_user_message_id']), gateway_user_id)
 
         msg_ctx = dc.get_message_context(session.user_message_id, db_path=self.db)
         self.assertIsNotNone(msg_ctx)
         assert msg_ctx is not None
         self.assertEqual(int(msg_ctx['context_id']), target_id)
+
+        # Source remains canonical before first non-empty text.
+        conn = _connect(self.db)
+        try:
+            canonical_pre = resolve_canonical_context_row_conn(
+                conn, chat_id='default', now=NOW,
+            )
+        finally:
+            conn.close()
+        self.assertEqual(int(canonical_pre['id']), self.context_id)
+        self.assertIsNone(source_before.get('closed_at'))
 
         empty = ingest_first_turn_text_delta(
             session, text='   ', hooks=self.hooks, db_path=self.db, now=NOW,
@@ -344,7 +365,6 @@ class ContextWindowFirstTurnTests(unittest.TestCase):
         target = dc.get_daily_context_by_id(target_id, db_path=self.db)
         self.assertEqual(target['window_mode'], WINDOW_MODE_MANUAL)
         self.assertIsNone(target.get('closed_at'))
-        self.assertEqual(source_before.get('closed_at'), None)
 
         intent_after = self._intent()
         self.assertEqual(intent_after['status'], INTENT_COMMITTED)
@@ -360,7 +380,7 @@ class ContextWindowFirstTurnTests(unittest.TestCase):
         user_count = sqlite3.connect(self.db).execute(
             'SELECT COUNT(*) FROM chat_messages WHERE author=?', ('hayana',),
         ).fetchone()[0]
-        self.assertEqual(user_count, 3)  # 2 seeded + 1 first-turn
+        self.assertEqual(user_count, 3)  # 2 seeded + 1 gateway user (no duplicate)
 
         # Crash window: assistant already mapped, intent missing first_assistant_message_id.
         orphan_id = dc.persist_daily_assistant_if_current(
@@ -418,12 +438,44 @@ class ContextWindowFirstTurnTests(unittest.TestCase):
         assert binding is not None
         self.assertEqual(int(binding.context_id), target_id)
 
+        # Public prepare whitelist must not contain server paths / switched_at.
+        allowed_public = {
+            'ok', 'prepare_status', 'request_id',
+            'source_context_id', 'source_context_epoch', 'source_resident_generation',
+            'target_context_id', 'target_context_epoch', 'candidate_session_id',
+            'jsonl_sha256', 'jsonl_size', 'staged_ready_at', 'recovered', 'status',
+        }
+        sample_public = {
+            'ok': True,
+            'prepare_status': 'READY',
+            'request_id': self.switch_request_id,
+            'source_context_id': self.context_id,
+            'source_context_epoch': self.epoch,
+            'source_resident_generation': self.gen,
+            'target_context_id': target_id,
+            'target_context_epoch': int(target['context_epoch']),
+            'candidate_session_id': str(published.candidate_session_id),
+            'jsonl_sha256': str(published.jsonl_sha256),
+            'jsonl_size': int(published.jsonl_size),
+            'staged_ready_at': str(intent_before.get('staged_ready_at') or 'x'),
+            'recovered': False,
+            'status': 'ready',
+        }
+        self.assertEqual(set(sample_public.keys()), allowed_public)
+        for key in (
+            'jsonl_path', 'cwd', 'claude_home', 'transcript', 'st_dev', 'st_ino',
+            'switched_at', 'staged_handle',
+        ):
+            self.assertNotIn(key, sample_public)
+
     def test_clean_failure_before_commit_retry_same_message(self):
-        """2) source unchanged, target staged; prepare failure auto READY; retry."""
+        """2) source canonical, target staged; same user_message_id retryable."""
         self._seed_source_and_forge()
         source_before = dc.get_daily_context_by_id(self.context_id, db_path=self.db)
         intent_before = self._intent()
         target_id = int(intent_before['target_context_id'])
+        gateway_user_id = _insert_msg(self.db, 'hayana', '可重试')
+        target_session_before = str(intent_before['target_session_id'])
 
         # Prepare-staged failure after claim must auto-return READY + release lease.
         boom_hooks = ft_mod.FirstTurnHooks(
@@ -440,14 +492,15 @@ class ContextWindowFirstTurnTests(unittest.TestCase):
                 switch_request_id=self.switch_request_id,
                 first_turn_request_id=self.first_turn_request_id,
                 user_content='可重试',
+                user_message_id=gateway_user_id,
                 hooks=boom_hooks,
                 db_path=self.db,
                 now=NOW,
             )
         intent_after_boom = self._intent()
         self.assertEqual(intent_after_boom['status'], INTENT_READY)
-        self.assertIsNotNone(intent_after_boom.get('first_user_message_id'))
-        user_id_first = int(intent_after_boom['first_user_message_id'])
+        self.assertEqual(int(intent_after_boom['first_user_message_id']), gateway_user_id)
+        self.assertEqual(str(intent_after_boom['target_session_id']), target_session_before)
         lease_n = sqlite3.connect(self.db).execute(
             'SELECT COUNT(*) FROM daily_resident_turn_leases '
             'WHERE context_id=? AND lease_owner=?',
@@ -458,12 +511,13 @@ class ContextWindowFirstTurnTests(unittest.TestCase):
         session = claim_and_start_first_turn(
             switch_request_id=self.switch_request_id,
             first_turn_request_id=self.first_turn_request_id,
-            user_content='可重试-ignored',
+            user_content='可重试',
+            user_message_id=gateway_user_id,
             hooks=self.hooks,
             db_path=self.db,
             now=NOW,
         )
-        self.assertEqual(session.user_message_id, user_id_first)
+        self.assertEqual(session.user_message_id, gateway_user_id)
         abort_first_turn_clean(session, hooks=self.hooks, db_path=self.db, now=NOW)
 
         source_after = dc.get_daily_context_by_id(self.context_id, db_path=self.db)
@@ -478,22 +532,27 @@ class ContextWindowFirstTurnTests(unittest.TestCase):
         session2 = claim_and_start_first_turn(
             switch_request_id=self.switch_request_id,
             first_turn_request_id=self.first_turn_request_id,
-            user_content='可重试-ignored-again',
+            user_content='可重试',
+            user_message_id=gateway_user_id,
             hooks=self.hooks,
             db_path=self.db,
             now=NOW,
         )
-        self.assertEqual(session2.user_message_id, user_id_first)
+        self.assertEqual(session2.user_message_id, gateway_user_id)
         user_rows = sqlite3.connect(self.db).execute(
-            'SELECT COUNT(*) FROM chat_messages WHERE content LIKE ?',
-            ('可重试%',),
+            'SELECT COUNT(*) FROM chat_messages WHERE content=?',
+            ('可重试',),
         ).fetchone()[0]
         self.assertEqual(user_rows, 1)
+        self.assertEqual(
+            int(self._intent()['target_context_id']), target_id,
+        )
 
     def test_db_commit_then_swap_fail_recovery(self):
-        """3) source closed, target formal, HANDOFF_PENDING recovery → COMMITTED."""
+        """3) same-process HANDOFF_PENDING: first delta once, no second user/asst."""
         self._seed_source_and_forge()
         target_id = int(self._intent()['target_context_id'])
+        gateway_user_id = _insert_msg(self.db, 'hayana', 'swap fail case')
         fail_once = {'n': 0}
 
         def owner_hook(_phase: str) -> None:
@@ -507,10 +566,12 @@ class ContextWindowFirstTurnTests(unittest.TestCase):
             switch_request_id=self.switch_request_id,
             first_turn_request_id=self.first_turn_request_id,
             user_content='swap fail case',
+            user_message_id=gateway_user_id,
             hooks=self.hooks,
             db_path=self.db,
             now=NOW,
         )
+        self.assertEqual(session.user_message_id, gateway_user_id)
         ft_mod.mark_first_turn_stdin_sent(session)
         with self.assertRaises(RuntimeError):
             ingest_first_turn_text_delta(
@@ -524,6 +585,8 @@ class ContextWindowFirstTurnTests(unittest.TestCase):
         intent_hp = self._intent()
         self.assertEqual(intent_hp['status'], INTENT_HANDOFF_PENDING)
         self.assertIsNotNone(intent_hp['first_delta_committed_at'])
+        # First delta still held until same-process recover.
+        self.assertFalse(session._handoff_complete)
 
         dr.set_owner_cursor_write_hook_for_tests(None)
         recovered = recover_first_turn_handoff_pending(
@@ -531,6 +594,7 @@ class ContextWindowFirstTurnTests(unittest.TestCase):
         )
         self.assertEqual(self._intent()['status'], INTENT_COMMITTED)
         self.assertTrue(session._handoff_complete)
+        self.assertEqual(int(self._intent()['target_context_id']), target_id)
         # Held first delta released exactly once on recovery.
         self.assertEqual(recovered.released_text, ('小猫，我',))
         again = recover_first_turn_handoff_pending(
@@ -548,11 +612,54 @@ class ContextWindowFirstTurnTests(unittest.TestCase):
                 switch_request_id=self.switch_request_id,
                 first_turn_request_id=str(uuid.uuid4()),
                 user_content='must not send again',
+                user_message_id=gateway_user_id,
                 hooks=self.hooks,
                 db_path=self.db,
                 now=NOW,
             )
         self.assertEqual(ar.exception.error_code, 'FIRST_TURN_INTENT_STATUS')
+        user_rows = sqlite3.connect(self.db).execute(
+            'SELECT COUNT(*) FROM chat_messages WHERE content=?',
+            ('swap fail case',),
+        ).fetchone()[0]
+        self.assertEqual(user_rows, 1)
+
+    def test_gateway_prepare_only_runner_contract(self):
+        """Source-level: seamless runner is prepare-only; public keys have no paths."""
+        import inspect
+        import gateway
+
+        src = inspect.getsource(gateway._gw_run_seamless_switch)
+        self.assertIn('publish_context_window_forge_candidate', src)
+        self.assertIn('prepare_context_window_target', src)
+        self.assertNotIn('switch_context_window(', src)
+        self.assertIn('ThinkingPolicy.DROP', src)
+        self.assertIn('preview_id=request_id', src)
+
+        prepared = mock.Mock(
+            prepare_status='READY',
+            request_id='req-1',
+            target_context_id=9,
+            target_context_epoch=2,
+            candidate_session_id='sid',
+            jsonl_sha256='a' * 64,
+            jsonl_size=12,
+            staged_ready_at='2026-07-31 12:00:00',
+            recovered=False,
+        )
+        intent = {
+            'source_context_id': 1,
+            'source_context_epoch': 1,
+            'source_resident_generation': 1,
+        }
+        public = gateway._gw_prepare_public_response(prepared=prepared, intent=intent)
+        self.assertEqual(public['status'], 'ready')
+        self.assertEqual(public['prepare_status'], 'READY')
+        for key in (
+            'jsonl_path', 'cwd', 'claude_home', 'switched_at', 'window_mode',
+            'selected_message_ids', 'st_dev', 'st_ino',
+        ):
+            self.assertNotIn(key, public)
 
 
 if __name__ == '__main__':
