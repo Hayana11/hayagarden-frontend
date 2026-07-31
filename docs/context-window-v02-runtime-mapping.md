@@ -23,16 +23,21 @@ Frozen (not modified): `gateway.py`, `session_registry.py`, `claude_event_mappin
    session (`peek_respawn_reason` non-null, or live `session_id` missing/mismatched),
    release lease → close resident → `respawn_daily_resident` → reprepare once.
    Same Registry session + no respawn reason may continue even if the plan looks
-   cold-like (empty cursor bootstrap). Second mismatch →
+   cold-like (empty cursor bootstrap). Second mismatch → release current lease →
    `DailyRuntimeError(registered_session_generation_mismatch)` and no stdin.
-2. **Start capture** (after `ensure_alive`, before `send_turn`): cwd, process
+2. **In-place plan adopt**: registered-session and hot→cold reprepare both call
+   `_adopt_reprepared_plan_in_place` so Gateway's original `DailyTurnPlan` object
+   keeps the same `id(plan)` while receiving the new context / generation / lease /
+   cursor / manifest / transcript fields. Recursion continues on that same object;
+   callers must not chase a hidden `new_plan`.
+3. **Start capture** (after `ensure_alive`, before `send_turn`): cwd, process
    generation, session id; hot path snapshots JSONL EOF as start offset; cold
    path uses start offset `0` and fills path at done.
-3. **End capture** (on `done`, before yield): require session id; re-snapshot;
+4. **End capture** (on `done`, before yield): require session id; re-snapshot;
    enforce path/session/generation consistency and `end >= start`. Observation
    failures only set `transcript_observation_error_code` — never abort a
    successful model reply.
-4. **Mapping** (only inside `handle_provider_success`, after
+5. **Mapping** (only inside `handle_provider_success`, after
    `complete_daily_turn` cursor CAS + lease release):
    `register_context_claude_session(source='daily_runtime')` then
    `run_mapping_pass`. Success → manifest `MAPPED`. Any registry/mapping

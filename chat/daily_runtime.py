@@ -10,7 +10,7 @@ import socket
 import threading
 import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from typing import Any, Callable, Iterator, Optional
 
 import cc_resident
@@ -1269,6 +1269,32 @@ def reprepare_after_registered_session_change(
     )
 
 
+def _adopt_reprepared_plan_in_place(
+    current: DailyTurnPlan,
+    replacement: DailyTurnPlan,
+    *,
+    resident: Optional[Any],
+) -> DailyTurnPlan:
+    """Copy replacement state into ``current`` without changing object identity.
+
+    Gateway keeps the original DailyTurnPlan reference across stream → persist →
+    cursor CAS → Mapping. Reprepare must therefore mutate that same object.
+    """
+    for f in fields(DailyTurnPlan):
+        setattr(current, f.name, getattr(replacement, f.name))
+    if resident is not None:
+        key = current.resident_key
+        current._resident_close_fn = (
+            lambda k=key: close_local_resident_if_bound(
+                resident,
+                expected_key=k,
+            )
+        )
+    else:
+        current._resident_close_fn = None
+    return current
+
+
 def _capture_transcript_start(plan: DailyTurnPlan, resident: Any) -> None:
     """Capture JSONL start offset after ensure_alive, before send_turn."""
     try:
@@ -1511,11 +1537,13 @@ def ensure_resident_and_stream(
         if _registered_generation_requires_respawn(plan, resident, static_system):
             heartbeat.stop()
             if _registry_reprep_depth >= 1:
+                # Second mismatch: drop the current (already-reprepared) lease.
+                _release_lease(plan)
                 raise DailyRuntimeError(
                     'registered Claude session conflicts with resident_generation',
                     error_code='registered_session_generation_mismatch',
                 )
-            new_plan = reprepare_after_registered_session_change(
+            replacement = reprepare_after_registered_session_change(
                 plan,
                 resident=resident,
                 static_system=static_system,
@@ -1524,8 +1552,9 @@ def ensure_resident_and_stream(
                 provider=str(plan.manifest.get('provider') or 'claude_code'),
                 model=str(plan.manifest.get('model') or ''),
             )
+            _adopt_reprepared_plan_in_place(plan, replacement, resident=resident)
             yield from ensure_resident_and_stream(
-                new_plan,
+                plan,
                 resident=resident,
                 env=env,
                 static_system=static_system,
@@ -1546,7 +1575,7 @@ def ensure_resident_and_stream(
                     'resident cold respawn during hot plan',
                     error_code='hot_to_cold_mismatch',
                 )
-            new_plan = reprepare_after_hot_cold_mismatch(
+            replacement = reprepare_after_hot_cold_mismatch(
                 plan,
                 resident=resident,
                 static_system=static_system,
@@ -1555,8 +1584,9 @@ def ensure_resident_and_stream(
                 provider=str(plan.manifest.get('provider') or 'claude_code'),
                 model=str(plan.manifest.get('model') or ''),
             )
+            _adopt_reprepared_plan_in_place(plan, replacement, resident=resident)
             yield from ensure_resident_and_stream(
-                new_plan,
+                plan,
                 resident=resident,
                 env=env,
                 static_system=static_system,

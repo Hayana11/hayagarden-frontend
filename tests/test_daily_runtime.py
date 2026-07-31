@@ -332,6 +332,9 @@ class DailyRuntimeTurnTests(unittest.TestCase):
             with mock.patch.object(config_store, 'get_bool', return_value=True), \
                  mock.patch('chat.daily_history._build_state_text', return_value=('STATE', 'snapshot', {'k': 'v'})):
                 plan = self._prepare(db, uid)
+                original_plan = plan
+                original_id = id(plan)
+                old_gen = int(plan.resident_generation)
                 plan.is_cold = False
                 plan.manifest['turn_kind'] = 'hot'
                 resident = _SurpriseColdResident()
@@ -339,9 +342,22 @@ class DailyRuntimeTurnTests(unittest.TestCase):
                 events = list(dr.stream_daily_resident_turn(
                     plan, resident=resident, env={}, static_system='STATIC',
                 ))
+                # Caller keeps the same plan object; identity is adopted in place.
+                self.assertIs(plan, original_plan)
+                self.assertEqual(id(plan), original_id)
+                self.assertGreater(int(plan.resident_generation), old_gen)
+                aid = dr.persist_daily_assistant_for_plan(plan, content='daily reply')
+                out = dr.handle_provider_success(
+                    plan, assistant_message_id=aid, raw_text='daily reply',
+                )
             self.assertTrue(any(e[0] == 'done' for e in events))
             self.assertEqual(len(resident.sent), 1)
             self.assertNotIn('新增正式对话', resident.sent[0])
+            self.assertEqual(out.get('assistant_message_id'), aid)
+            self.assertTrue(plan.lease_released)
+            self.assertFalse(dc.is_resident_turn_active(
+                plan.context_id, plan.resident_generation, db_path=db, now=_FIXED_NOW,
+            ))
         finally:
             os.unlink(db)
 
@@ -2422,10 +2438,12 @@ class DailyRuntimeTranscriptMappingTests(unittest.TestCase):
         self.assertEqual(roles.get('assistant'), aid)
 
     def test_registered_generation_respawn_before_stdin(self):
-        """3) Registered gen + peek process_dead → bump gen; no stdin on old gen."""
+        """3) Registered gen + peek process_dead → bump gen; caller plan adopted in place."""
         jsonl_path = self._jsonl_for(_MAP_SESSION_AFTER_RESPAWN)
         uid = _insert(self.db, 'hayana', 'respawn-map', '2026-07-27 10:00:00')
         plan = self._prepare(uid)
+        original_plan = plan
+        original_id = id(plan)
         old_gen = int(plan.resident_generation)
         register_context_claude_session(
             context_id=plan.context_id,
@@ -2446,26 +2464,16 @@ class DailyRuntimeTranscriptMappingTests(unittest.TestCase):
             jsonl_path=jsonl_path,
         )
 
-        held: dict[str, dr.DailyTurnPlan] = {}
-        real_reprep = dr.reprepare_after_registered_session_change
-
-        def _capture_reprep(*args, **kwargs):
-            new_plan = real_reprep(*args, **kwargs)
-            held['plan'] = new_plan
-            return new_plan
-
         with mock.patch.object(config_store, 'get_bool', return_value=True), \
-             mock.patch('chat.daily_history._build_state_text', return_value=('', 'none', {})), \
-             mock.patch.object(
-                 dr, 'reprepare_after_registered_session_change', side_effect=_capture_reprep,
-             ):
+             mock.patch('chat.daily_history._build_state_text', return_value=('', 'none', {})):
             events = list(dr.stream_daily_resident_turn(
                 plan, resident=resident, env={}, static_system='STATIC',
             ))
+
         self.assertTrue(any(e[0] == 'done' for e in events))
-        self.assertIn('plan', held)
-        new_plan = held['plan']
-        self.assertGreater(int(new_plan.resident_generation), old_gen)
+        self.assertIs(plan, original_plan)
+        self.assertEqual(id(plan), original_id)
+        self.assertGreater(int(plan.resident_generation), old_gen)
 
         # ensure_alive / stdin only after reprepare (never on registered old gen).
         self.assertEqual(len(resident.ensure_alive_gens), 1)
@@ -2475,22 +2483,58 @@ class DailyRuntimeTranscriptMappingTests(unittest.TestCase):
         old_reg = get_context_claude_session(plan.context_id, old_gen, db_path=self.db)
         self.assertEqual(old_reg['claude_session_id'], _MAP_SESSION_HOT)
 
-        aid = dr.persist_daily_assistant_for_plan(new_plan, content='after-respawn')
+        # Gateway contract: persist + Mapping on the same caller-held plan object.
+        aid = dr.persist_daily_assistant_for_plan(plan, content='after-respawn')
         out = dr.handle_provider_success(
-            new_plan, assistant_message_id=aid, raw_text='after-respawn',
+            plan, assistant_message_id=aid, raw_text='after-respawn',
         )
         self.assertEqual(out['transcript_mapping_status'], 'MAPPED')
+        self.assertTrue(plan.lease_released)
+        self.assertFalse(dc.is_resident_turn_active(
+            plan.context_id, plan.resident_generation, db_path=self.db, now=_FIXED_NOW,
+        ))
         new_reg = get_context_claude_session(
-            new_plan.context_id, new_plan.resident_generation, db_path=self.db,
+            plan.context_id, plan.resident_generation, db_path=self.db,
         )
         self.assertIsNotNone(new_reg)
         self.assertEqual(new_reg['claude_session_id'], _MAP_SESSION_AFTER_RESPAWN)
-        # One Claude session per resident_generation.
         self.assertEqual(
             get_context_claude_session(plan.context_id, old_gen, db_path=self.db)['claude_session_id'],
             _MAP_SESSION_HOT,
         )
         self.assertNotEqual(old_reg['claude_session_id'], new_reg['claude_session_id'])
+
+    def test_second_registry_mismatch_releases_lease_no_stdin(self):
+        """Second door-lock mismatch → error, no stdin, no leftover active lease."""
+        uid = _insert(self.db, 'hayana', 'second-mismatch', '2026-07-27 10:00:00')
+        plan = self._prepare(uid)
+        resident = _FakeResident()
+        resident.cwd = self.cwd
+        resident.session_id = _MAP_SESSION_HOT
+        resident.generation = 1
+
+        with mock.patch.object(config_store, 'get_bool', return_value=True), \
+             mock.patch('chat.daily_history._build_state_text', return_value=('', 'none', {})), \
+             mock.patch.object(
+                 dr, '_registered_generation_requires_respawn', return_value=True,
+             ):
+            with self.assertRaises(dr.DailyRuntimeError) as ctx:
+                list(dr.stream_daily_resident_turn(
+                    plan, resident=resident, env={}, static_system='STATIC',
+                ))
+
+        self.assertEqual(ctx.exception.error_code, 'registered_session_generation_mismatch')
+        self.assertEqual(len(resident.sent), 0)
+        self.assertTrue(plan.lease_released)
+        self.assertFalse(dc.is_resident_turn_active(
+            plan.context_id, plan.resident_generation, db_path=self.db, now=_FIXED_NOW,
+        ))
+        # Also no active lease on the original generation row if gen bumped once.
+        ctx_row = dc.get_daily_context_by_id(plan.context_id, db_path=self.db)
+        self.assertFalse(dc.is_resident_turn_active(
+            int(ctx_row['id']), int(ctx_row['resident_generation']),
+            db_path=self.db, now=_FIXED_NOW,
+        ))
 
     def test_mapping_blocked_does_not_fail_chat(self):
         """4) Mapping BLOCKED after persist+cursor; chat still succeeds."""
