@@ -88,11 +88,16 @@ assert_exit "fetch failure" 1 \
   env FRONTEND_ROOT="$REPO_PATH" DEPLOYED_SHA_FILE="$DEPLOYED_PATH" REMOTE=origin BRANCH=main \
   bash "$SCRIPT"
 
-# unexpected untracked file -> exit 1
-setup_deployed_repo untracked
+# SQLite WAL/SHM companions are runtime state; an additional unknown file still fails.
+setup_deployed_repo sqlite-runtime-companions
+: >"$REPO_PATH/memories.db-shm"
+: >"$REPO_PATH/memories.db-wal"
+assert_exit "SQLite runtime companions only" 0 \
+  env FRONTEND_ROOT="$REPO_PATH" DEPLOYED_SHA_FILE="$DEPLOYED_PATH" DEPLOY_REMOTE=origin DEPLOY_BRANCH=main \
+  bash "$SCRIPT"
 echo stray >"$REPO_PATH/UNEXPECTED.txt"
-assert_exit "unexpected untracked file" 1 \
-  env FRONTEND_ROOT="$REPO_PATH" DEPLOYED_SHA_FILE="$DEPLOYED_PATH" REMOTE=origin BRANCH=main \
+assert_exit "SQLite companions plus unexpected untracked file" 1 \
+  env FRONTEND_ROOT="$REPO_PATH" DEPLOYED_SHA_FILE="$DEPLOYED_PATH" DEPLOY_REMOTE=origin DEPLOY_BRANCH=main \
   bash "$SCRIPT"
 
 echo "Results: $PASS passed, $FAIL failed"

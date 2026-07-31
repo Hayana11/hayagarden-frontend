@@ -65,10 +65,16 @@ up separately and are never committed by the deploy script.
 Runtime state is not source code. The following paths are ignored and preserved
 outside Git during deployment:
 
+- `memories.db-shm` and `memories.db-wal`
 - `attachments.db` and `attachments/`
 - `client_errors.log`
 - `static/uploads/`
 - `memories.db.bak*`
+
+The SQLite WAL/SHM companions are transient runtime coordination files. They
+are ignored and excluded from source dirtiness, but are never copied or restored
+as independent backups. Database consistency still comes from SQLite's online
+`.backup` operation in `tools/backup.sh`.
 
 Before switching commits, the deploy script runs the regular backup, copies
 these paths to a timestamped `/opt/backups/frontend/predeploy-runtime-*`
