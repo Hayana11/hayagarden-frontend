@@ -159,6 +159,9 @@ class ContextContinuityTests(unittest.TestCase):
             os.path.join(ROOT, "scripts", "deploy-frontend.sh"),
             encoding="utf-8",
         ).read()
+        gitignore_source = open(
+            os.path.join(ROOT, ".gitignore"), encoding="utf-8"
+        ).read().splitlines()
 
         self.assertNotIn(
             "UPDATE wake_log SET consumed=1 WHERE consumed=0", gateway
@@ -189,6 +192,10 @@ class ContextContinuityTests(unittest.TestCase):
         self.assertIn("snapshot_runtime", deploy_source)
         self.assertIn("restore_runtime", deploy_source)
         self.assertIn("':(exclude)attachments.db'", deploy_source)
+        self.assertIn("':(exclude)memories.db-shm'", deploy_source)
+        self.assertIn("':(exclude)memories.db-wal'", deploy_source)
+        self.assertIn("memories.db-shm", gitignore_source)
+        self.assertIn("memories.db-wal", gitignore_source)
         self.assertIn("from PIL import Image", deploy_source)
         self.assertIn("import frontmatter", deploy_source)
         self.assertIn("requirements.txt", deploy_source)
