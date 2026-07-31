@@ -362,6 +362,19 @@ class ContextWindowFirstTurnTests(unittest.TestCase):
         ).fetchone()[0]
         self.assertEqual(user_count, 3)  # 2 seeded + 1 first-turn
 
+        # Crash window: assistant already mapped, intent missing first_assistant_message_id.
+        orphan_id = dc.persist_daily_assistant_if_current(
+            chat_id='default',
+            context_id=session.target_context_id,
+            context_epoch=session.target_context_epoch,
+            resident_generation=session.target_resident_generation,
+            lease_owner=self.first_turn_request_id,
+            content='新房第一句回复',
+            db_path=self.db,
+            now=NOW,
+        )
+        self.assertIsNone(self._intent().get('first_assistant_message_id'))
+
         done = complete_first_turn_round(
             session,
             assistant_content='新房第一句回复',
@@ -369,7 +382,7 @@ class ContextWindowFirstTurnTests(unittest.TestCase):
             db_path=self.db,
             now=NOW,
         )
-        self.assertGreater(done.assistant_message_id, 0)
+        self.assertEqual(done.assistant_message_id, orphan_id)
         self.assertTrue(done.cursor_advanced)
 
         intent_done = self._intent()
@@ -377,27 +390,80 @@ class ContextWindowFirstTurnTests(unittest.TestCase):
         self.assertEqual(
             int(intent_done['first_assistant_message_id']), done.assistant_message_id,
         )
+        asst_count = sqlite3.connect(self.db).execute(
+            "SELECT COUNT(*) FROM chat_messages WHERE author='assistant' "
+            "AND content=?",
+            ('新房第一句回复',),
+        ).fetchone()[0]
+        self.assertEqual(asst_count, 1)
+
+        # Retry after completed_at: still one assistant, same id.
+        again = complete_first_turn_round(
+            session,
+            assistant_content='新房第一句回复',
+            end_offset=int(published.jsonl_size) + 100,
+            db_path=self.db,
+            now=NOW,
+        )
+        self.assertEqual(again.assistant_message_id, orphan_id)
+        asst_count2 = sqlite3.connect(self.db).execute(
+            "SELECT COUNT(*) FROM chat_messages WHERE author='assistant' "
+            "AND content=?",
+            ('新房第一句回复',),
+        ).fetchone()[0]
+        self.assertEqual(asst_count2, 1)
+
         binding = dr.get_local_binding()
         self.assertIsNotNone(binding)
         assert binding is not None
         self.assertEqual(int(binding.context_id), target_id)
 
     def test_clean_failure_before_commit_retry_same_message(self):
-        """2) source unchanged, target staged, no delta, retry same message."""
+        """2) source unchanged, target staged; prepare failure auto READY; retry."""
         self._seed_source_and_forge()
         source_before = dc.get_daily_context_by_id(self.context_id, db_path=self.db)
         intent_before = self._intent()
         target_id = int(intent_before['target_context_id'])
 
+        # Prepare-staged failure after claim must auto-return READY + release lease.
+        boom_hooks = ft_mod.FirstTurnHooks(
+            prepare_staged=lambda intent, path: (_ for _ in ()).throw(
+                RuntimeError('staged prepare boom'),
+            ),
+            discard_staged=self.hooks.discard_staged,
+            formal_holder=self.hooks.formal_holder,
+            forge_cwd=self.hooks.forge_cwd,
+            claude_home=self.hooks.claude_home,
+        )
+        with self.assertRaises(RuntimeError):
+            claim_and_start_first_turn(
+                switch_request_id=self.switch_request_id,
+                first_turn_request_id=self.first_turn_request_id,
+                user_content='可重试',
+                hooks=boom_hooks,
+                db_path=self.db,
+                now=NOW,
+            )
+        intent_after_boom = self._intent()
+        self.assertEqual(intent_after_boom['status'], INTENT_READY)
+        self.assertIsNotNone(intent_after_boom.get('first_user_message_id'))
+        user_id_first = int(intent_after_boom['first_user_message_id'])
+        lease_n = sqlite3.connect(self.db).execute(
+            'SELECT COUNT(*) FROM daily_resident_turn_leases '
+            'WHERE context_id=? AND lease_owner=?',
+            (target_id, self.first_turn_request_id),
+        ).fetchone()[0]
+        self.assertEqual(lease_n, 0)
+
         session = claim_and_start_first_turn(
             switch_request_id=self.switch_request_id,
             first_turn_request_id=self.first_turn_request_id,
-            user_content='可重试',
+            user_content='可重试-ignored',
             hooks=self.hooks,
             db_path=self.db,
             now=NOW,
         )
-        user_id_first = session.user_message_id
+        self.assertEqual(session.user_message_id, user_id_first)
         abort_first_turn_clean(session, hooks=self.hooks, db_path=self.db, now=NOW)
 
         source_after = dc.get_daily_context_by_id(self.context_id, db_path=self.db)
@@ -412,7 +478,7 @@ class ContextWindowFirstTurnTests(unittest.TestCase):
         session2 = claim_and_start_first_turn(
             switch_request_id=self.switch_request_id,
             first_turn_request_id=self.first_turn_request_id,
-            user_content='可重试-ignored',
+            user_content='可重试-ignored-again',
             hooks=self.hooks,
             db_path=self.db,
             now=NOW,
@@ -448,7 +514,7 @@ class ContextWindowFirstTurnTests(unittest.TestCase):
         ft_mod.mark_first_turn_stdin_sent(session)
         with self.assertRaises(RuntimeError):
             ingest_first_turn_text_delta(
-                session, text='首句', hooks=self.hooks, db_path=self.db, now=NOW,
+                session, text='小猫，我', hooks=self.hooks, db_path=self.db, now=NOW,
             )
 
         source = dc.get_daily_context_by_id(self.context_id, db_path=self.db)
@@ -460,11 +526,17 @@ class ContextWindowFirstTurnTests(unittest.TestCase):
         self.assertIsNotNone(intent_hp['first_delta_committed_at'])
 
         dr.set_owner_cursor_write_hook_for_tests(None)
-        recover_first_turn_handoff_pending(
+        recovered = recover_first_turn_handoff_pending(
             session, hooks=self.hooks, db_path=self.db, now=NOW,
         )
         self.assertEqual(self._intent()['status'], INTENT_COMMITTED)
         self.assertTrue(session._handoff_complete)
+        # Held first delta released exactly once on recovery.
+        self.assertEqual(recovered.released_text, ('小猫，我',))
+        again = recover_first_turn_handoff_pending(
+            session, hooks=self.hooks, db_path=self.db, now=NOW,
+        )
+        self.assertEqual(again.released_text, ())
 
         released = ingest_first_turn_text_delta(
             session, text='尾句', hooks=self.hooks, db_path=self.db, now=NOW,

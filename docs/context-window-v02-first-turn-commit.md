@@ -88,7 +88,16 @@ on same candidate session.
 
 **Post-DB swap fail:** source stays closed, target formal, `HANDOFF_PENDING`,
 delta still held → `recover_first_turn_handoff_pending` resumes same session,
-no resend user.
+no resend user, and releases the buffered first text **exactly once**.
+
+**Prepare after claim fails** (JSONL path / `prepare_staged`): auto
+`COMMITTING→READY`, release lease, keep the single user message; same
+`first_turn_request_id` may retry.
+
+**Assistant idempotency:** `INSERT assistant` and
+`first_assistant_message_id` share one transaction; orphan recovery reclaims
+a single already-mapped target assistant after the first user message. Retry
+only repairs cursor — never inserts a second answer.
 
 ## Frozen intent fields
 

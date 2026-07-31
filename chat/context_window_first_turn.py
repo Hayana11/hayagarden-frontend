@@ -40,7 +40,7 @@ from chat.daily_context import (
     _row_to_dict,
     advance_resident_history_cursor,
     ensure_schema,
-    persist_daily_assistant_if_current,
+    get_resident_history_cursor,
     release_resident_turn_lease,
 )
 from chat.daily_runtime import (
@@ -67,13 +67,13 @@ class FirstTurnError(Exception):
 
 @dataclass(frozen=True)
 class FirstTurnHooks:
-  """Process-side first-turn hooks (staged resume + formal holder swap)."""
+    """Process-side first-turn hooks (staged resume + formal holder swap)."""
 
-  prepare_staged: Callable[[dict[str, Any], Path], Any]
-  discard_staged: Callable[[Any], None]
-  formal_holder: Any
-  forge_cwd: str
-  claude_home: Path
+    prepare_staged: Callable[[dict[str, Any], Path], Any]
+    discard_staged: Callable[[Any], None]
+    formal_holder: Any
+    forge_cwd: str
+    claude_home: Path
 
 
 @dataclass
@@ -91,6 +91,7 @@ class FirstTurnSession:
     _buffered_first_text: Optional[str] = None
     _db_committed: bool = False
     _handoff_complete: bool = False
+    _first_delta_released: bool = False
 
 
 @dataclass(frozen=True)
@@ -98,6 +99,12 @@ class FirstTurnDeltaResult:
     released_text: tuple[str, ...]
     db_committed: bool
     handoff_complete: bool
+
+
+@dataclass(frozen=True)
+class FirstTurnRecoverResult:
+    switch_result: dict[str, Any]
+    released_text: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -415,6 +422,159 @@ def _commit_first_turn_db_conn(
     )
 
 
+def _release_buffered_first_delta(session: FirstTurnSession) -> tuple[str, ...]:
+    """Release held first text exactly once after formal handoff completes."""
+    if session._first_delta_released:
+        return ()
+    held = session._buffered_first_text
+    session._first_delta_released = True
+    if held is None:
+        return ()
+    return (held,)
+
+
+def _rollback_claim_to_ready(
+    *,
+    switch_request_id: str,
+    first_turn_request_id: str,
+    target_context_id: int,
+    target_resident_generation: int,
+    db_path: str,
+    now: Optional[Any] = None,
+) -> None:
+    """Clean reclaim after post-claim prepare failure: READY + release lease."""
+    release_resident_turn_lease(
+        int(target_context_id),
+        int(target_resident_generation),
+        lease_owner=str(first_turn_request_id),
+        db_path=db_path,
+    )
+    now_s = _now_s(now)
+    conn = _connect(db_path)
+    try:
+        conn.execute('BEGIN IMMEDIATE')
+        live = _intent_row(conn, switch_request_id)
+        if live is not None and str(live.get('status') or '') == INTENT_COMMITTING:
+            if str(live.get('first_turn_request_id') or '') == str(first_turn_request_id):
+                _update_intent_conn(
+                    conn,
+                    switch_request_id,
+                    status=INTENT_READY,
+                    fields={'first_turn_error_code': None},
+                    now_s=now_s,
+                )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def _persist_first_assistant_idempotent(
+    conn: sqlite3.Connection,
+    *,
+    intent: dict[str, Any],
+    session: FirstTurnSession,
+    assistant_content: str,
+    chat_id: str,
+    now_dt: Any,
+    now_s: str,
+) -> int:
+    """Insert assistant + write first_assistant_message_id in one txn (crash-safe)."""
+    existing_aid = intent.get('first_assistant_message_id')
+    if existing_aid is not None:
+        return int(existing_aid)
+
+    user_mid = int(session.user_message_id)
+    orphans = conn.execute(
+        '''SELECT d.message_id FROM daily_message_contexts d
+           WHERE d.context_id=? AND d.context_epoch=? AND d.resident_generation=?
+             AND d.role='assistant' AND d.message_id>?
+           ORDER BY d.message_id ASC''',
+        (
+            int(session.target_context_id),
+            int(session.target_context_epoch),
+            int(session.target_resident_generation),
+            user_mid,
+        ),
+    ).fetchall()
+    if len(orphans) > 1:
+        raise FirstTurnError(
+            'multiple first-turn assistants',
+            error_code='FIRST_TURN_ASSISTANT_AMBIGUOUS',
+        )
+    if len(orphans) == 1:
+        assistant_id = int(orphans[0]['message_id'])
+        _update_intent_conn(
+            conn,
+            session.switch_request_id,
+            fields={'first_assistant_message_id': assistant_id},
+            now_s=now_s,
+        )
+        return assistant_id
+
+    row = conn.execute(
+        'SELECT id, context_epoch, resident_generation, is_backfill FROM daily_contexts WHERE id=?',
+        (int(session.target_context_id),),
+    ).fetchone()
+    if row is None or int(dict(row).get('is_backfill') or 0):
+        raise FirstTurnError('target not active', error_code='FIRST_TURN_TARGET_STALE')
+    current = dict(row)
+    if (
+        int(current['context_epoch']) != int(session.target_context_epoch)
+        or int(current['resident_generation']) != int(session.target_resident_generation)
+    ):
+        raise FirstTurnError('epoch/generation stale', error_code='FIRST_TURN_TARGET_STALE')
+    active = conn.execute(
+        'SELECT context_epoch FROM daily_contexts '
+        "WHERE chat_id=? AND is_backfill=0 AND window_mode != 'manual_staged' "
+        'ORDER BY context_epoch DESC LIMIT 1',
+        (str(chat_id),),
+    ).fetchone()
+    if active is None or int(active['context_epoch']) != int(session.target_context_epoch):
+        raise FirstTurnError('target not formal current', error_code='FIRST_TURN_TARGET_STALE')
+    lease = conn.execute(
+        'SELECT lease_owner, expires_at FROM daily_resident_turn_leases '
+        'WHERE context_id=? AND resident_generation=?',
+        (int(session.target_context_id), int(session.target_resident_generation)),
+    ).fetchone()
+    if lease is None or str(dict(lease)['lease_owner']) != session.first_turn_request_id:
+        raise FirstTurnError('lease mismatch', error_code='FIRST_TURN_LEASE_MISMATCH')
+    from chat.daily_context import _parse_local_dt
+    try:
+        exp_dt = _parse_local_dt(str(dict(lease)['expires_at']))
+    except ValueError:
+        exp_dt = now_dt
+    if exp_dt <= now_dt:
+        raise FirstTurnError('lease expired', error_code='FIRST_TURN_LEASE_EXPIRED')
+
+    cur = conn.execute(
+        "INSERT INTO chat_messages (author, content, thinking, tool_calls, cache_info, choices) "
+        "VALUES ('assistant', ?, '', '', '', '')",
+        (str(assistant_content),),
+    )
+    assistant_id = int(cur.lastrowid)
+    conn.execute(
+        'INSERT INTO daily_message_contexts '
+        '(message_id, context_id, context_epoch, resident_generation, role, created_at) '
+        'VALUES (?,?,?,?,?,?)',
+        (
+            assistant_id, int(session.target_context_id),
+            int(session.target_context_epoch),
+            int(session.target_resident_generation),
+            'assistant', now_s,
+        ),
+    )
+    _update_intent_conn(
+        conn,
+        session.switch_request_id,
+        fields={'first_assistant_message_id': assistant_id},
+        now_s=now_s,
+    )
+    return assistant_id
+
+
 def _complete_handoff_barrier(
   *,
   session: FirstTurnSession,
@@ -562,15 +722,32 @@ def claim_and_start_first_turn(
     finally:
         conn.close()
 
-    forge_path = session_jsonl_path_for_cwd(
-        hooks.forge_cwd,
-        str(intent['target_session_id']),
-        claude_home=hooks.claude_home,
-    )
-    if forge_path is None:
-        raise FirstTurnError('jsonl path missing', error_code='FIRST_TURN_JSONL_MISSING')
-    jsonl_path = Path(forge_path)
-    staged = hooks.prepare_staged(dict(intent), jsonl_path)
+    staged: Any = None
+    try:
+        forge_path = session_jsonl_path_for_cwd(
+            hooks.forge_cwd,
+            str(intent['target_session_id']),
+            claude_home=hooks.claude_home,
+        )
+        if forge_path is None:
+            raise FirstTurnError('jsonl path missing', error_code='FIRST_TURN_JSONL_MISSING')
+        jsonl_path = Path(forge_path)
+        staged = hooks.prepare_staged(dict(intent), jsonl_path)
+    except Exception:
+        try:
+            if staged is not None:
+                hooks.discard_staged(staged)
+        except Exception:
+            logger.exception('discard_staged after prepare failure')
+        _rollback_claim_to_ready(
+            switch_request_id=req_id,
+            first_turn_request_id=ft_req,
+            target_context_id=target_id,
+            target_resident_generation=target_gen,
+            db_path=db_path,
+            now=now,
+        )
+        raise
 
     return FirstTurnSession(
         switch_request_id=req_id,
@@ -651,7 +828,7 @@ def ingest_first_turn_text_delta(
         db_path=db_path,
         now=now,
     )
-    released = (session._buffered_first_text or '',)
+    released = _release_buffered_first_delta(session)
     return FirstTurnDeltaResult(
         released_text=released, db_committed=True, handoff_complete=True,
     )
@@ -739,8 +916,11 @@ def recover_first_turn_handoff_pending(
     hooks: Optional[FirstTurnHooks] = None,
     db_path: str,
     now: Optional[Any] = None,
-) -> dict[str, Any]:
-    """Resume HANDOFF_PENDING after post-DB swap failure; never resend user."""
+) -> FirstTurnRecoverResult:
+    """Resume HANDOFF_PENDING after post-DB swap failure; never resend user.
+
+    On success, releases the held first text delta exactly once.
+    """
     hooks = _require_hooks(hooks)
     ensure_schema(db_path)
     conn = _connect(db_path)
@@ -748,7 +928,25 @@ def recover_first_turn_handoff_pending(
         intent = _intent_row(conn, session.switch_request_id)
         if intent is None:
             raise FirstTurnError('intent missing', error_code='FIRST_TURN_INTENT_MISSING')
-        if str(intent.get('status') or '') != INTENT_HANDOFF_PENDING:
+        status = str(intent.get('status') or '')
+        if status == INTENT_COMMITTED and session._handoff_complete:
+            released = _release_buffered_first_delta(session)
+            source = _row_to_dict(conn.execute(
+                'SELECT * FROM daily_contexts WHERE id=?',
+                (int(intent['source_context_id']),),
+            ).fetchone())
+            target = _row_to_dict(conn.execute(
+                'SELECT * FROM daily_contexts WHERE id=?',
+                (int(intent['target_context_id']),),
+            ).fetchone())
+            assert source is not None and target is not None
+            switch_result = _switch_result_from_target_conn(
+                conn, source=source, target=target,
+            )
+            return FirstTurnRecoverResult(
+                switch_result=switch_result, released_text=released,
+            )
+        if status != INTENT_HANDOFF_PENDING:
             raise FirstTurnError('not handoff_pending', error_code='FIRST_TURN_INTENT_STATUS')
         source = _row_to_dict(conn.execute(
             'SELECT * FROM daily_contexts WHERE id=?',
@@ -772,7 +970,10 @@ def recover_first_turn_handoff_pending(
         db_path=db_path,
         now=now,
     )
-    return switch_result
+    released = _release_buffered_first_delta(session)
+    return FirstTurnRecoverResult(
+        switch_result=switch_result, released_text=released,
+    )
 
 
 @_serialize_context_switch
@@ -788,36 +989,49 @@ def complete_first_turn_round(
     if not session._handoff_complete:
         raise FirstTurnError('handoff incomplete', error_code='FIRST_TURN_HANDOFF_INCOMPLETE')
     ensure_schema(db_path)
-    now_s = _now_s(now)
+    now_dt = _shanghai_now(now)
+    now_s = _now_s(now_dt)
     chat_id = DEFAULT_CHAT_ID
 
     conn = _connect(db_path)
     try:
+        conn.execute('BEGIN IMMEDIATE')
         intent = _intent_row(conn, session.switch_request_id)
         if intent is None:
+            conn.rollback()
             raise FirstTurnError('intent missing', error_code='FIRST_TURN_INTENT_MISSING')
         if str(intent.get('status') or '') != INTENT_COMMITTED:
+            conn.rollback()
             raise FirstTurnError('not committed', error_code='FIRST_TURN_INTENT_STATUS')
+        if intent.get('first_turn_completed_at') and intent.get('first_assistant_message_id'):
+            assistant_id = int(intent['first_assistant_message_id'])
+            conn.commit()
+            return FirstTurnCompleteResult(
+                assistant_message_id=assistant_id,
+                cursor_advanced=False,
+            )
+        assistant_id = _persist_first_assistant_idempotent(
+            conn,
+            intent=intent,
+            session=session,
+            assistant_content=str(assistant_content),
+            chat_id=chat_id,
+            now_dt=now_dt,
+            now_s=now_s,
+        )
+        conn.commit()
+    except FirstTurnError:
+        raise
+    except Exception:
+        conn.rollback()
+        raise
     finally:
         conn.close()
 
-    existing_aid = intent.get('first_assistant_message_id')
-    if existing_aid:
-        assistant_id = int(existing_aid)
-    else:
-        assistant_id = persist_daily_assistant_if_current(
-            chat_id=chat_id,
-            context_id=session.target_context_id,
-            context_epoch=session.target_context_epoch,
-            resident_generation=session.target_resident_generation,
-            lease_owner=session.first_turn_request_id,
-            content=str(assistant_content),
-            db_path=db_path,
-            now=_shanghai_now(now),
-        )
-
     conn = _connect(db_path)
     try:
+        intent = _intent_row(conn, session.switch_request_id)
+        assert intent is not None
         source = _row_to_dict(conn.execute(
             'SELECT * FROM daily_contexts WHERE id=?',
             (int(intent['source_context_id']),),
@@ -831,14 +1045,25 @@ def complete_first_turn_round(
     finally:
         conn.close()
 
-    cursor_before = forged_history_watermark(switch_result)
-    cursor_result = advance_resident_history_cursor(
+    current_cursor = get_resident_history_cursor(
         session.target_context_id,
         session.target_resident_generation,
-        assistant_id,
-        expected_cursor=cursor_before,
         db_path=db_path,
     )
+    if current_cursor is not None and int(current_cursor) == int(assistant_id):
+        cursor_result = {
+            'history_cursor_message_id': int(assistant_id),
+            'advanced': False,
+        }
+    else:
+        cursor_before = forged_history_watermark(switch_result)
+        cursor_result = advance_resident_history_cursor(
+            session.target_context_id,
+            session.target_resident_generation,
+            assistant_id,
+            expected_cursor=cursor_before,
+            db_path=db_path,
+        )
 
     release_resident_turn_lease(
         session.target_context_id,
@@ -854,7 +1079,6 @@ def complete_first_turn_round(
             conn,
             session.switch_request_id,
             fields={
-                'first_assistant_message_id': int(assistant_id),
                 'first_turn_end_offset': int(end_offset),
                 'first_turn_completed_at': now_s,
                 'first_turn_error_code': None,
