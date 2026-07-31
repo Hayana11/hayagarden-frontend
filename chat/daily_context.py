@@ -681,6 +681,23 @@ def _ensure_context_switch_forge_schema(conn: sqlite3.Connection) -> None:
             updated_at TEXT NOT NULL
         )'''
     )
+    # Forge publish R1: nullable Preview identity fields (idempotent ADD COLUMN).
+    icols = _table_columns(conn, 'context_switch_intents')
+    if icols:
+        if 'preview_id' not in icols:
+            conn.execute(
+                'ALTER TABLE context_switch_intents ADD COLUMN preview_id TEXT NULL'
+            )
+        if 'thinking_policy' not in icols:
+            conn.execute(
+                'ALTER TABLE context_switch_intents '
+                'ADD COLUMN thinking_policy TEXT NULL'
+            )
+        if 'target_jsonl_size' not in icols:
+            conn.execute(
+                'ALTER TABLE context_switch_intents '
+                'ADD COLUMN target_jsonl_size INTEGER NULL'
+            )
     conn.execute(
         'CREATE INDEX IF NOT EXISTS idx_context_switch_intents_chat_status '
         'ON context_switch_intents(chat_id, status)'

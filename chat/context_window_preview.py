@@ -40,6 +40,7 @@ from chat.context_window import (
     _find_latest_legacy_bootstrap_conn,
     _find_open_manual_window_conn,
     _is_resident_turn_active_conn,
+    _last_formal_message_id,
     _select_rounds_locked,
     _shanghai_now,
 )
@@ -92,6 +93,40 @@ class _PrefixSnapshotError(Exception):
 class TranscriptPrefixSnapshot:
     end_offset: int
     sha256: str
+
+
+@dataclass(frozen=True)
+class PreparedPreviewCandidate:
+    preview_id: str
+    candidate_session_id: str
+
+    source_context_id: int
+    source_context_epoch: int
+    source_version: int
+    source_resident_generation: int
+    source_boundary_message_id: int
+
+    source_transcript_path: Optional[str]
+    source_scan_offset: int
+    source_prefix_sha256: Optional[str]
+
+    requested_round_count: int
+    selected_round_count: int
+    selected_message_ids: tuple[int, ...]
+
+    thinking_policy: ThinkingPolicy
+
+    serialized_jsonl: bytes
+    output_sha256: str
+    serialized_bytes: int
+    event_count: int
+    proof_kind: str
+
+
+@dataclass(frozen=True)
+class CandidatePreparation:
+    response: dict[str, Any]
+    artifact: Optional[PreparedPreviewCandidate]
 
 
 def _open_preview_db_readonly(db_path: str) -> sqlite3.Connection:
@@ -199,7 +234,17 @@ def _resolve_canonical_context_readonly_conn(
     raise NoOpenContextWindowError('no_open_context_window')
 
 
-def _has_active_switch_intent_conn(conn: sqlite3.Connection, chat_id: str) -> bool:
+def _has_active_switch_intent_conn(
+    conn: sqlite3.Connection,
+    chat_id: str,
+    *,
+    allowed_switch_request_id: Optional[str] = None,
+) -> bool:
+    """True if an active switch intent blocks Preview.
+
+    When ``allowed_switch_request_id`` is set, that exact request_id is ignored;
+    any *other* active intent still blocks.
+    """
     tables = {
         str(r[0])
         for r in conn.execute(
@@ -208,11 +253,22 @@ def _has_active_switch_intent_conn(conn: sqlite3.Connection, chat_id: str) -> bo
     }
     if 'context_switch_intents' not in tables:
         return False
-    row = conn.execute(
-        'SELECT 1 FROM context_switch_intents WHERE chat_id=? AND status IN (%s) LIMIT 1'
-        % ','.join('?' for _ in ACTIVE_INTENT_STATUSES),
-        (chat_id, *tuple(ACTIVE_INTENT_STATUSES)),
-    ).fetchone()
+    statuses = tuple(ACTIVE_INTENT_STATUSES)
+    placeholders = ','.join('?' for _ in statuses)
+    allowed = str(allowed_switch_request_id or '').strip()
+    if allowed:
+        row = conn.execute(
+            'SELECT 1 FROM context_switch_intents '
+            f'WHERE chat_id=? AND status IN ({placeholders}) AND request_id!=? '
+            'LIMIT 1',
+            (chat_id, *statuses, allowed),
+        ).fetchone()
+    else:
+        row = conn.execute(
+            'SELECT 1 FROM context_switch_intents '
+            f'WHERE chat_id=? AND status IN ({placeholders}) LIMIT 1',
+            (chat_id, *statuses),
+        ).fetchone()
     return row is not None
 
 
@@ -422,6 +478,7 @@ def _snapshot_source_identity(
     source_context_id: int,
     source_context_epoch: int,
     now_dt: datetime.datetime,
+    allowed_switch_request_id: Optional[str] = None,
 ) -> dict[str, Any]:
     current = _resolve_canonical_context_readonly_conn(conn, chat_id=chat_id)
     if (
@@ -435,7 +492,9 @@ def _snapshot_source_identity(
     gen = int(current.get('resident_generation') or 1)
     if _is_resident_turn_active_conn(conn, int(source_context_id), gen, now_dt):
         raise WindowBusyError('window_busy')
-    if _has_active_switch_intent_conn(conn, chat_id):
+    if _has_active_switch_intent_conn(
+        conn, chat_id, allowed_switch_request_id=allowed_switch_request_id,
+    ):
         raise SwitchInProgressError('switch_in_progress')
     messages = _collect_context_formal_messages(
         conn,
@@ -460,6 +519,7 @@ def _recheck_after_read(
     selected_message_ids: list[int],
     registry_snapshot: Optional[dict[str, Any]],
     now_dt: datetime.datetime,
+    allowed_switch_request_id: Optional[str] = None,
 ) -> Optional[str]:
     try:
         snap = _snapshot_source_identity(
@@ -468,6 +528,7 @@ def _recheck_after_read(
             source_context_id=source_context_id,
             source_context_epoch=source_context_epoch,
             now_dt=now_dt,
+            allowed_switch_request_id=allowed_switch_request_id,
         )
     except (StaleSourceContextError, WindowBusyError, SwitchInProgressError, NoOpenContextWindowError):
         return 'PREVIEW_SOURCE_CHANGED'
@@ -501,6 +562,33 @@ def preview_context_window(
     now: Optional[datetime.datetime] = None,
 ) -> dict[str, Any]:
     """Read-only Preview / dry-run for a candidate context-window switch."""
+    prep = prepare_context_window_candidate(
+        source_context_id=source_context_id,
+        source_context_epoch=source_context_epoch,
+        count=count,
+        preview_id=preview_id,
+        thinking_policy=thinking_policy,
+        chat_id=chat_id,
+        db_path=db_path,
+        now=now,
+        allowed_switch_request_id=None,
+    )
+    return prep.response
+
+
+def prepare_context_window_candidate(
+    *,
+    source_context_id: int,
+    source_context_epoch: int,
+    count: int,
+    preview_id: str,
+    thinking_policy: ThinkingPolicy,
+    chat_id: str = DEFAULT_CHAT_ID,
+    db_path: str,
+    now: Optional[datetime.datetime] = None,
+    allowed_switch_request_id: Optional[str] = None,
+) -> CandidatePreparation:
+    """Prepare Preview response + optional validated candidate artifact."""
     if thinking_policy not in (ThinkingPolicy.KEEP, ThinkingPolicy.DROP):
         raise ValueError('thinking_policy must be keep or drop')
     try:
@@ -512,9 +600,16 @@ def preview_context_window(
     source_id = int(source_context_id)
     source_epoch = int(source_context_epoch)
     requested = int(count)
+    allowed_rid = (
+        str(uuid.UUID(str(allowed_switch_request_id)))
+        if allowed_switch_request_id not in (None, '')
+        else None
+    )
 
     # Populated inside first readonly txn; used after close for fresh recheck.
     gen: int
+    source_version: int
+    boundary_id: int
     selection: dict[str, Any]
     selected_ids: list[int]
     content_by_id: dict[int, dict[str, Any]]
@@ -530,9 +625,12 @@ def preview_context_window(
             source_context_id=source_id,
             source_context_epoch=source_epoch,
             now_dt=now_dt,
+            allowed_switch_request_id=allowed_rid,
         )
         gen = int(snap['resident_generation'])
+        source_version = int(snap['context'].get('version') or 1)
         messages = snap['messages']
+        boundary_id = int(_last_formal_message_id(messages))
         selected_rounds, selected_ids, selected_round_count = _select_rounds_locked(
             messages, requested,
         )
@@ -939,21 +1037,33 @@ def preview_context_window(
                                                                         serialized = serialize_events(
                                                                             transform_result.events,
                                                                         )
+                                                                        serialized_bytes_blob = (
+                                                                            serialized.encode('utf-8')
+                                                                        )
                                                                         ready_bundle = {
                                                                             'candidate_sid': candidate_sid,
                                                                             'source_base': source_base,
                                                                             'registry_snapshot': registry_snapshot,
                                                                             'transform_result': transform_result,
                                                                             'validation': validation,
+                                                                            'serialized_jsonl': serialized_bytes_blob,
                                                                             'serialized_bytes': len(
-                                                                                serialized.encode('utf-8'),
+                                                                                serialized_bytes_blob,
+                                                                            ),
+                                                                            'output_sha256': (
+                                                                                transform_result.output_sha256
+                                                                            ),
+                                                                            'source_transcript_path': path,
+                                                                            'source_scan_offset': scan_offset,
+                                                                            'source_prefix_sha256': (
+                                                                                prefix_before.sha256
                                                                             ),
                                                                         }
     finally:
         _close_preview_readonly(conn)
 
     if early_blocked is not None:
-        return early_blocked
+        return CandidatePreparation(response=early_blocked, artifact=None)
 
     # Fresh readonly connection for final identity recheck (NATIVE_COLD and READY).
     conn2 = _open_preview_db_readonly(db_path)
@@ -986,17 +1096,21 @@ def preview_context_window(
                 selected_message_ids=[],
                 registry_snapshot=None,
                 now_dt=_shanghai_now(now),
+                allowed_switch_request_id=allowed_rid,
             )
             if err:
-                return _blocked(
-                    preview_id=preview_uuid,
-                    error_code=err,
-                    source=source_cold,
-                    selection=selection,
-                    candidate_session_id=candidate_sid,
+                return CandidatePreparation(
+                    response=_blocked(
+                        preview_id=preview_uuid,
+                        error_code=err,
+                        source=source_cold,
+                        selection=selection,
+                        candidate_session_id=candidate_sid,
+                    ),
+                    artifact=None,
                 )
             empty_sha = sha256_text('')
-            return {
+            response = {
                 'ok': True,
                 'preview_status': PREVIEW_STATUS_NATIVE_COLD,
                 'preview_id': preview_uuid,
@@ -1028,6 +1142,28 @@ def preview_context_window(
                 },
                 'warnings': [],
             }
+            artifact = PreparedPreviewCandidate(
+                preview_id=preview_uuid,
+                candidate_session_id=candidate_sid,
+                source_context_id=source_id,
+                source_context_epoch=source_epoch,
+                source_version=source_version,
+                source_resident_generation=gen,
+                source_boundary_message_id=boundary_id,
+                source_transcript_path=None,
+                source_scan_offset=0,
+                source_prefix_sha256=None,
+                requested_round_count=requested,
+                selected_round_count=0,
+                selected_message_ids=tuple(selected_ids),
+                thinking_policy=thinking_policy,
+                serialized_jsonl=b'',
+                output_sha256=empty_sha,
+                serialized_bytes=0,
+                event_count=0,
+                proof_kind='native_cold_contract',
+            )
+            return CandidatePreparation(response=response, artifact=artifact)
 
         assert ready_bundle is not None
         changed = _recheck_after_read(
@@ -1040,21 +1176,25 @@ def preview_context_window(
             selected_message_ids=selected_ids,
             registry_snapshot=ready_bundle['registry_snapshot'],
             now_dt=_shanghai_now(now),
+            allowed_switch_request_id=allowed_rid,
         )
         if changed:
-            return _blocked(
-                preview_id=preview_uuid,
-                error_code=changed,
-                source=ready_bundle['source_base'],
-                selection=selection,
-                candidate_session_id=ready_bundle['candidate_sid'],
+            return CandidatePreparation(
+                response=_blocked(
+                    preview_id=preview_uuid,
+                    error_code=changed,
+                    source=ready_bundle['source_base'],
+                    selection=selection,
+                    candidate_session_id=ready_bundle['candidate_sid'],
+                ),
+                artifact=None,
             )
     finally:
         _close_preview_readonly(conn2)
 
     transform_result = ready_bundle['transform_result']
     validation = ready_bundle['validation']
-    return {
+    response = {
         'ok': True,
         'preview_status': PREVIEW_STATUS_READY,
         'preview_id': preview_uuid,
@@ -1066,7 +1206,7 @@ def preview_context_window(
             'event_count': len(transform_result.events),
             'round_count': int(transform_result.selected_round_count),
             'serialized_bytes': ready_bundle['serialized_bytes'],
-            'output_sha256': transform_result.output_sha256,
+            'output_sha256': ready_bundle['output_sha256'],
             'proof_kind': validation.proof_kind,
         },
         'dropped': {
@@ -1090,6 +1230,28 @@ def preview_context_window(
         },
         'warnings': list(validation.warnings) + list(transform_result.notes),
     }
+    artifact = PreparedPreviewCandidate(
+        preview_id=preview_uuid,
+        candidate_session_id=str(ready_bundle['candidate_sid']),
+        source_context_id=source_id,
+        source_context_epoch=source_epoch,
+        source_version=source_version,
+        source_resident_generation=gen,
+        source_boundary_message_id=boundary_id,
+        source_transcript_path=str(ready_bundle['source_transcript_path']),
+        source_scan_offset=int(ready_bundle['source_scan_offset']),
+        source_prefix_sha256=str(ready_bundle['source_prefix_sha256']),
+        requested_round_count=requested,
+        selected_round_count=int(transform_result.selected_round_count),
+        selected_message_ids=tuple(int(x) for x in selected_ids),
+        thinking_policy=thinking_policy,
+        serialized_jsonl=bytes(ready_bundle['serialized_jsonl']),
+        output_sha256=str(ready_bundle['output_sha256']),
+        serialized_bytes=int(ready_bundle['serialized_bytes']),
+        event_count=len(transform_result.events),
+        proof_kind=str(validation.proof_kind),
+    )
+    return CandidatePreparation(response=response, artifact=artifact)
 
 
 def parse_thinking_policy(value: Any) -> ThinkingPolicy:
