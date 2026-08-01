@@ -4323,6 +4323,7 @@ def _stream_cc_first_turn(_turn_data, _uc, intent: dict):
     import uuid
     from chat.context_window_first_turn import (
         FirstTurnError,
+        abort_first_turn_postcommit,
         claim_and_start_first_turn,
         complete_first_turn_round,
         ingest_first_turn_text_delta,
@@ -4337,6 +4338,8 @@ def _stream_cc_first_turn(_turn_data, _uc, intent: dict):
     session = None
     pending = []  # turn events held until first-text handoff
     first_released = False
+    postcommit_terminalized = False
+    complete_started = False
     text_acc = []
     thinking_acc = []
     cc_tool_calls = []
@@ -4359,6 +4362,30 @@ def _stream_cc_first_turn(_turn_data, _uc, intent: dict):
         return _gw_first_turn_precommit_terminal(
             session, hooks, reason=reason, stdin_flushed=stdin_flushed,
         )
+
+    def _postcommit_terminal(reason: str) -> None:
+        """Release leftover first-turn lease after committed handoff abort.
+
+        Only for first_released paths where complete_first_turn_round has not
+        started. Once complete begins, fail-closed complete owns the outcome.
+        """
+        nonlocal postcommit_terminalized
+        if complete_started:
+            return
+        if postcommit_terminalized or not first_released or session is None:
+            return
+        if not (
+            getattr(session, '_db_committed', False)
+            and getattr(session, '_handoff_complete', False)
+        ):
+            return
+        try:
+            abort_first_turn_postcommit(session, db_path=DB_PATH)
+            postcommit_terminalized = True
+        except Exception:
+            log.exception(
+                'first_turn postcommit terminal failed reason=%s', reason,
+            )
 
     def _emit_tool_use(payload):
         cc_tool_calls.append({
@@ -4538,6 +4565,7 @@ def _stream_cc_first_turn(_turn_data, _uc, intent: dict):
                     except OSError:
                         end_offset = int(session.start_offset)
                     try:
+                        complete_started = True
                         done = complete_first_turn_round(
                             session,
                             assistant_content=assistant_text,
@@ -4575,7 +4603,9 @@ def _stream_cc_first_turn(_turn_data, _uc, intent: dict):
                     return
         except GeneratorExit:
             _close_event_iter()
-            if session is not None and not first_released:
+            if first_released:
+                _postcommit_terminal('generator_exit')
+            elif session is not None:
                 _precommit('generator_exit')
             pending.clear()
             raise
@@ -4593,6 +4623,8 @@ def _stream_cc_first_turn(_turn_data, _uc, intent: dict):
             return
 
         # Post-commit incomplete stream: do not invent a second answer.
+        _close_event_iter()
+        _postcommit_terminal('eof_after_first_text')
         pending.clear()
         yield _sse_json({
             't': 'err',
@@ -4610,13 +4642,19 @@ def _stream_cc_first_turn(_turn_data, _uc, intent: dict):
         yield _sse_json({'t': 'done', 'ok': False})
     except GeneratorExit:
         _close_event_iter()
-        if session is not None and not first_released:
+        if first_released:
+            _postcommit_terminal('generator_exit_outer')
+        elif session is not None:
             _precommit('generator_exit_outer')
         pending.clear()
         raise
     except Exception as exc:
         log.exception('first_turn stream failed')
-        if session is not None and not first_released:
+        _close_event_iter()
+        if first_released:
+            # Not FIRST_TURN_COMPLETE_FAILED (that path returns earlier, fail-closed).
+            _postcommit_terminal('stream_exception')
+        elif session is not None:
             _precommit('stream_exception')
         pending.clear()
         yield _sse_json({

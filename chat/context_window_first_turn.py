@@ -1049,6 +1049,148 @@ def abort_first_turn_clean(
         conn.close()
 
 
+FIRST_TURN_POSTCOMMIT_ABORT = 'FIRST_TURN_POSTCOMMIT_ABORT'
+
+
+@_serialize_context_switch
+def abort_first_turn_postcommit(
+    session: FirstTurnSession,
+    *,
+    db_path: str,
+    now: Optional[Any] = None,
+) -> None:
+    """Post-commit abort cleanup: release first-turn lease + bump generation.
+
+    Used when first-delta handoff already made target the formal current window,
+    but the assistant round never completed. Does not roll back the switch, does
+    not invent an assistant row / last-good checkpoint, and is idempotent so a
+    second call cannot bump generation twice.
+    """
+    if not session._db_committed or not session._handoff_complete:
+        raise FirstTurnError(
+            'postcommit abort requires committed handoff',
+            error_code='FIRST_TURN_HANDOFF_INCOMPLETE',
+        )
+
+    ensure_schema(db_path)
+    now_dt = _shanghai_now(now)
+    now_s = _now_s(now_dt)
+    target_id = int(session.target_context_id)
+    target_epoch = int(session.target_context_epoch)
+    old_gen = int(session.target_resident_generation)
+    lease_owner = str(session.first_turn_request_id)
+    expected_new_gen = old_gen + 1
+
+    conn = _connect(db_path)
+    try:
+        conn.execute('BEGIN IMMEDIATE')
+        intent = _intent_row(conn, session.switch_request_id)
+        if intent is None:
+            conn.rollback()
+            raise FirstTurnError('intent missing', error_code='FIRST_TURN_INTENT_MISSING')
+        if str(intent.get('status') or '') != INTENT_COMMITTED:
+            conn.rollback()
+            raise FirstTurnError(
+                'intent not committed', error_code='FIRST_TURN_INTENT_STATUS',
+            )
+
+        # Completed round: never touch generation / lease / checkpoints.
+        if intent.get('first_turn_completed_at'):
+            conn.commit()
+            return
+
+        target = _row_to_dict(conn.execute(
+            'SELECT * FROM daily_contexts WHERE id=?', (target_id,),
+        ).fetchone())
+        if target is None:
+            conn.rollback()
+            raise FirstTurnError('target missing', error_code='FIRST_TURN_TARGET_MISSING')
+        if int(target['context_epoch']) != target_epoch:
+            conn.rollback()
+            raise FirstTurnError(
+                'target epoch mismatch', error_code='FIRST_TURN_TARGET_STALE',
+            )
+        if target.get('closed_at') is not None:
+            conn.rollback()
+            raise FirstTurnError(
+                'target closed', error_code='FIRST_TURN_TARGET_STALE',
+            )
+        if str(target.get('window_mode') or '') != WINDOW_MODE_MANUAL:
+            conn.rollback()
+            raise FirstTurnError(
+                'target not manual current', error_code='FIRST_TURN_TARGET_STALE',
+            )
+
+        canonical = resolve_canonical_context_row_conn(
+            conn, chat_id=DEFAULT_CHAT_ID, now=now_dt,
+        )
+        if canonical is None or int(canonical['id']) != target_id:
+            conn.rollback()
+            raise FirstTurnError(
+                'target not formal current', error_code='FIRST_TURN_TARGET_STALE',
+            )
+
+        live_gen = int(target['resident_generation'])
+        already_aborted = (
+            str(intent.get('first_turn_error_code') or '') == FIRST_TURN_POSTCOMMIT_ABORT
+        )
+
+        # Confirmed prior postcommit abort: true no-op (no cursor/lease/error rewrite).
+        if live_gen == expected_new_gen and already_aborted:
+            conn.commit()
+            return
+
+        if live_gen != old_gen:
+            conn.rollback()
+            raise FirstTurnError(
+                'target generation mismatch', error_code='FIRST_TURN_TARGET_STALE',
+            )
+
+        # Exact first-turn lease delete (missing row is success).
+        conn.execute(
+            'DELETE FROM daily_resident_turn_leases '
+            'WHERE context_id=? AND resident_generation=? AND lease_owner=?',
+            (target_id, old_gen, lease_owner),
+        )
+
+        cur = conn.execute(
+            '''UPDATE daily_contexts
+               SET resident_generation=resident_generation+1,
+                   version=version+1,
+                   updated_at=?
+               WHERE id=? AND context_epoch=? AND resident_generation=?
+                 AND closed_at IS NULL AND window_mode=?''',
+            (now_s, target_id, target_epoch, old_gen, WINDOW_MODE_MANUAL),
+        )
+        if int(cur.rowcount or 0) != 1:
+            conn.rollback()
+            raise FirstTurnError(
+                'target generation CAS failed', error_code='FIRST_TURN_DB_CAS_FAILED',
+            )
+
+        # Defensive: new generation should have no cursor (same as respawn_daily_resident).
+        conn.execute(
+            'DELETE FROM daily_resident_cursors '
+            'WHERE context_id=? AND resident_generation=?',
+            (target_id, expected_new_gen),
+        )
+
+        _update_intent_conn(
+            conn,
+            session.switch_request_id,
+            fields={'first_turn_error_code': FIRST_TURN_POSTCOMMIT_ABORT},
+            now_s=now_s,
+        )
+        conn.commit()
+    except FirstTurnError:
+        raise
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
 def mark_first_turn_precommit_dirty(
     session: FirstTurnSession,
     *,
