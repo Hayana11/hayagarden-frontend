@@ -107,6 +107,31 @@ class OwnerCanaryIsolationTests(unittest.TestCase):
             self.assertTrue(ok)
             self.assertEqual(reason, ISOLATED_SUBSCRIPTION_AUTH_SOURCE)
 
+    def test_owner_probe_pins_temp_home_and_restores_process_home(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            claude_home = Path(tmp) / 'claude-home'
+            cwd = Path(tmp) / 'cwd'
+            claude_home.mkdir()
+            cwd.mkdir()
+            original_home = os.environ.get('HOME')
+            seen = {}
+
+            def fake_probe(_home, _cwd):
+                seen['HOME'] = os.environ.get('HOME')
+                return False, 'isolated_auth_not_logged_in'
+
+            with mock.patch.object(
+                admin, 'probe_isolated_subscription_auth', side_effect=fake_probe,
+            ):
+                ok, reason = admin._probe_isolated_subscription_auth_in_temp_home(
+                    claude_home, cwd,
+                )
+
+            self.assertFalse(ok)
+            self.assertEqual(reason, 'isolated_auth_not_logged_in')
+            self.assertEqual(seen['HOME'], str(Path(tmp) / 'fake-home'))
+            self.assertEqual(os.environ.get('HOME'), original_home)
+
     def test_confirm_live_environment_blocked_from_real_probe(self):
         """--confirm-live must call auth preflight; blocked reason is probe-derived."""
         with mock.patch.object(
@@ -160,7 +185,7 @@ class OwnerCanaryIsolationTests(unittest.TestCase):
         self.assertFalse(report['live_turn']['ENVIRONMENT_BLOCKED'])
 
     def test_confirm_live_login_reprobes_then_runs_cold_turn(self):
-        """Empty temp home may login natively, then the same home must prove Pro/Max."""
+        """Empty temp auth home may login natively, then the same home must prove Pro/Max."""
         live_ok = {
             'ok': True,
             'ENVIRONMENT_BLOCKED': False,
@@ -268,7 +293,7 @@ class OwnerCanaryIsolationTests(unittest.TestCase):
             self.assertIn('--claudeai', args[0])
             env = kwargs['env']
             self.assertEqual(env['CLAUDE_CONFIG_DIR'], str(home))
-            self.assertTrue(env['HOME'].startswith(str(home.parent)))
+            self.assertEqual(env['HOME'], str(Path(tmp) / 'fake-home'))
             self.assertNotIn('CLAUDE_CODE_OAUTH_TOKEN', env)
             self.assertNotIn('ANTHROPIC_API_KEY', env)
             self.assertNotIn('CLAUDE_CODE_USE_BEDROCK', env)
