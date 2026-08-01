@@ -33,8 +33,10 @@ from chat.context_window import (
     resolve_canonical_context_row_conn,
 )
 from chat.context_window_first_turn import (
+    FIRST_TURN_POSTCOMMIT_ABORT,
     FirstTurnError,
     abort_first_turn_clean,
+    abort_first_turn_postcommit,
     claim_and_start_first_turn,
     complete_first_turn_round,
     ingest_first_turn_text_delta,
@@ -578,6 +580,99 @@ class ContextWindowFirstTurnTests(unittest.TestCase):
             'switched_at', 'staged_handle',
         ):
             self.assertNotIn(key, sample_public)
+
+    def test_postcommit_client_abort_releases_lease_and_bumps_generation(self):
+        """Post-commit abort: release first-turn lease + bump gen once (idempotent)."""
+        self._seed_source_and_forge()
+        intent_ready = self._intent()
+        self.assertEqual(intent_ready['status'], INTENT_READY)
+        target_id = int(intent_ready['target_context_id'])
+        gateway_user_id = _insert_msg(self.db, 'hayana', 'postcommit abort 第一句')
+
+        session = claim_and_start_first_turn(
+            switch_request_id=self.switch_request_id,
+            first_turn_request_id=self.first_turn_request_id,
+            user_content='postcommit abort 第一句',
+            user_message_id=gateway_user_id,
+            hooks=self.hooks,
+            db_path=self.db,
+            now=NOW,
+        )
+        ft_mod.mark_first_turn_stdin_sent(session)
+        first = ingest_first_turn_text_delta(
+            session, text='你好', hooks=self.hooks, db_path=self.db, now=NOW,
+        )
+        self.assertTrue(first.db_committed)
+        self.assertTrue(first.handoff_complete)
+
+        intent_committed = self._intent()
+        self.assertEqual(intent_committed['status'], INTENT_COMMITTED)
+        target_before = dc.get_daily_context_by_id(target_id, db_path=self.db)
+        self.assertEqual(target_before['window_mode'], WINDOW_MODE_MANUAL)
+        self.assertIsNone(target_before.get('closed_at'))
+        old_gen = int(session.target_resident_generation)
+        self.assertEqual(int(target_before['resident_generation']), old_gen)
+        lease_n = sqlite3.connect(self.db).execute(
+            'SELECT COUNT(*) FROM daily_resident_turn_leases '
+            'WHERE context_id=? AND resident_generation=? AND lease_owner=?',
+            (target_id, old_gen, self.first_turn_request_id),
+        ).fetchone()[0]
+        self.assertEqual(lease_n, 1)
+
+        # Simulate client abort / stream end after first delta released.
+        abort_first_turn_postcommit(session, db_path=self.db, now=NOW)
+
+        lease_after = sqlite3.connect(self.db).execute(
+            'SELECT COUNT(*) FROM daily_resident_turn_leases '
+            'WHERE context_id=? AND resident_generation=? AND lease_owner=?',
+            (target_id, old_gen, self.first_turn_request_id),
+        ).fetchone()[0]
+        self.assertEqual(lease_after, 0)
+        self.assertFalse(
+            dc.has_active_provider_turn_lease('default', db_path=self.db, now=NOW),
+        )
+
+        target_after = dc.get_daily_context_by_id(target_id, db_path=self.db)
+        self.assertEqual(int(target_after['resident_generation']), old_gen + 1)
+        self.assertEqual(target_after['window_mode'], WINDOW_MODE_MANUAL)
+        self.assertIsNone(target_after.get('closed_at'))
+
+        intent_after = self._intent()
+        self.assertEqual(intent_after['status'], INTENT_COMMITTED)
+        self.assertEqual(
+            intent_after.get('first_turn_error_code'), FIRST_TURN_POSTCOMMIT_ABORT,
+        )
+        self.assertIsNone(intent_after.get('first_assistant_message_id'))
+        self.assertIsNone(intent_after.get('first_turn_completed_at'))
+        self.assertIsNone(intent_after.get('first_turn_end_offset'))
+        self._assert_last_good_empty(intent_after)
+
+        source_after = dc.get_daily_context_by_id(self.context_id, db_path=self.db)
+        self.assertIsNotNone(source_after.get('closed_at'))
+        conn = _connect(self.db)
+        try:
+            canonical = resolve_canonical_context_row_conn(
+                conn, chat_id='default', now=NOW,
+            )
+        finally:
+            conn.close()
+        self.assertEqual(int(canonical['id']), target_id)
+
+        # Second call must not bump again (N+1 stays N+1).
+        abort_first_turn_postcommit(session, db_path=self.db, now=NOW)
+        target_again = dc.get_daily_context_by_id(target_id, db_path=self.db)
+        self.assertEqual(int(target_again['resident_generation']), old_gen + 1)
+        intent_again = self._intent()
+        self.assertEqual(intent_again['status'], INTENT_COMMITTED)
+        self.assertEqual(
+            intent_again.get('first_turn_error_code'), FIRST_TURN_POSTCOMMIT_ABORT,
+        )
+        self.assertIsNone(intent_again.get('first_assistant_message_id'))
+        self.assertIsNone(intent_again.get('first_turn_completed_at'))
+        self._assert_last_good_empty(intent_again)
+        self.assertFalse(
+            dc.has_active_provider_turn_lease('default', db_path=self.db, now=NOW),
+        )
 
     def _assert_pre_first_text_clean(
         self, *, source_before, target_id, gateway_user_id, expect_dirty: bool = False,
