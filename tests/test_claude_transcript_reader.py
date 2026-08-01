@@ -193,6 +193,96 @@ class TranscriptReaderTests(unittest.TestCase):
                 read_transcript(path)
             self.assertEqual(ctx.exception.code, ReaderErrorCode.DUPLICATE_UUID)
 
+    def test_raw_bookkeeping_projected_without_type_allowlist(self) -> None:
+        """A: uuid-less non-conversation observations project before formal ingest.
+
+        Includes a type deliberately outside the terminated allowlist to prove
+        the shared boundary is structural, not a metadata type registry.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'boundary.jsonl'
+            u = 'b1111111-1111-1111-1111-111111111111'
+            a = 'b2222222-2222-2222-2222-222222222222'
+            rows = [
+                # Not on the terminated allowlist — must still project away.
+                {'type': 'future-claude-telemetry-v9', 'payload': {'x': 1}},
+                {'type': 'last-prompt', 'prompt': 'seed'},
+                {
+                    'type': 'assistant',
+                    'requestId': 'req-usage-obs',
+                    'message': {
+                        'role': 'assistant',
+                        'usage': {'input_tokens': 3, 'output_tokens': 1},
+                    },
+                },
+                {
+                    'type': 'user',
+                    'uuid': u,
+                    'parentUuid': None,
+                    'sessionId': 's-meta',
+                    'message': {'role': 'user', 'content': 'hello after bookkeeping'},
+                },
+                {
+                    'type': 'assistant',
+                    'uuid': a,
+                    'parentUuid': u,
+                    'sessionId': 's-meta',
+                    'message': {
+                        'role': 'assistant',
+                        'content': [{'type': 'text', 'text': 'ok'}],
+                    },
+                },
+            ]
+            path.write_text(
+                ''.join(json.dumps(r) + '\n' for r in rows),
+                encoding='utf-8',
+            )
+            graph = read_transcript(path)
+            self.assertEqual(len(graph.events), 2)
+            self.assertEqual(len(graph.candidate_rounds), 1)
+            self.assertEqual(list(graph.candidate_rounds[0].event_uuids), [u, a])
+            ignored = [
+                w for w in graph.warnings if w.startswith('ignored_raw_observation:')
+            ]
+            self.assertGreaterEqual(len(ignored), 3)
+            self.assertTrue(
+                any('future-claude-telemetry-v9' in w for w in ignored),
+                ignored,
+            )
+
+    def test_conversation_shaped_missing_uuid_rejected(self) -> None:
+        """B: conversation-shaped uuid-less rows remain fail-closed."""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'bad_user.jsonl'
+            path.write_text(
+                json.dumps({
+                    'type': 'user',
+                    'parentUuid': None,
+                    'sessionId': 's',
+                    'message': {'role': 'user', 'content': 'no uuid'},
+                }) + '\n',
+                encoding='utf-8',
+            )
+            with self.assertRaises(TranscriptReaderError) as ctx:
+                read_transcript(path)
+            self.assertEqual(ctx.exception.code, ReaderErrorCode.MISSING_UUID)
+
+            path2 = Path(tmp) / 'bad_assistant.jsonl'
+            path2.write_text(
+                json.dumps({
+                    'type': 'assistant',
+                    'sessionId': 's',
+                    'message': {
+                        'role': 'assistant',
+                        'content': [{'type': 'text', 'text': 'no uuid'}],
+                    },
+                }) + '\n',
+                encoding='utf-8',
+            )
+            with self.assertRaises(TranscriptReaderError) as ctx2:
+                read_transcript(path2)
+            self.assertEqual(ctx2.exception.code, ReaderErrorCode.MISSING_UUID)
+
 
 if __name__ == '__main__':
     unittest.main()

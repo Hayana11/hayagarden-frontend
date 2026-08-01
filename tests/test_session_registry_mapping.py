@@ -222,6 +222,39 @@ class SessionRegistryMappingTests(unittest.TestCase):
         canonical = get_user_canonical_by_event_uuid(['u-aaaa-0001'], db_path=self.db)
         self.assertEqual(canonical, {'u-aaaa-0001': '前端用户原文-alpha'})
 
+    def test_mapping_offset_zero_ignores_known_uuidless_metadata(self) -> None:
+        """Cold start (scan_offset=0) must share Reader metadata ignore semantics."""
+        self._register(scan_offset=0)
+        user_id, asst_id = self._seed_pair('前端用户原文-meta', '助手回复-meta')
+        path = self._transcript_path()
+        end = _write_jsonl(path, [
+            json.dumps(
+                {'type': 'file-history-snapshot', 'snapshot': {'trackedFileBackups': {}}},
+                ensure_ascii=False,
+            ),
+            json.dumps({'type': 'queue-operation', 'operation': 'dequeue'}, ensure_ascii=False),
+            _line('u-meta-0001', 'user', session=SESSION, parent=None, content='ignored-jsonl'),
+            _line(
+                'a-meta-0001', 'assistant', session=SESSION, parent='u-meta-0001',
+                content=[{'type': 'text', 'text': 'asst'}],
+            ),
+        ])
+        # Formal range reader from offset 0 must not raise MISSING_UUID.
+        graph = read_transcript_range(path, 0, end)
+        self.assertEqual(len(graph.candidate_rounds), 1)
+        result = run_mapping_pass(
+            MappingPassRequest(
+                context_id=self.context_id, context_epoch=self.epoch,
+                resident_generation=self.gen, chat_id='default',
+                user_message_id=user_id, assistant_message_id=asst_id,
+                expected_start_offset=0, observed_end_offset=end,
+            ),
+            db_path=self.db,
+        )
+        self.assertTrue(result.ok, result.error_code)
+        canonical = get_user_canonical_by_event_uuid(['u-meta-0001'], db_path=self.db)
+        self.assertEqual(canonical, {'u-meta-0001': '前端用户原文-meta'})
+
     # ---- 2) complex: tool 1:N + restart resume + idempotent ----
     def test_complex_tool_multimap_restart_resume_replay(self) -> None:
         self._register(scan_offset=0)
