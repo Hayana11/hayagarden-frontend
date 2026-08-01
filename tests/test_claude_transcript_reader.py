@@ -202,6 +202,9 @@ class TranscriptReaderTests(unittest.TestCase):
             rows = [
                 {'type': 'file-history-snapshot', 'snapshot': {'trackedFileBackups': {}}},
                 {'type': 'queue-operation', 'operation': 'dequeue'},
+                # Formal META types previously missing from uuid-less allowlist.
+                {'type': 'last-prompt', 'prompt': 'seed'},
+                {'type': 'result', 'subtype': 'success'},
                 {'type': 'agent-name', 'agentName': 'nightly'},
                 {'type': 'custom-title', 'customTitle': 'native'},
                 {'type': 'progress', 'data': {'type': 'hook_progress'}},
@@ -244,7 +247,9 @@ class TranscriptReaderTests(unittest.TestCase):
             )
             self.assertEqual(list(graph.candidate_rounds[0].event_uuids), [u, a])
             ignored = [w for w in graph.warnings if w.startswith('ignored_raw_metadata:')]
-            self.assertGreaterEqual(len(ignored), 7)
+            self.assertGreaterEqual(len(ignored), 9)
+            self.assertTrue(any(w.endswith(':last-prompt') for w in ignored))
+            self.assertTrue(any(w.endswith(':result') for w in ignored))
 
     def test_user_missing_uuid_still_rejected(self) -> None:
         """Conversational user without uuid remains fail-closed."""

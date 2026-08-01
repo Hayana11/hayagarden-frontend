@@ -56,12 +56,22 @@ class TranscriptReaderError(ValueError):
         self.detail = detail
 
 
-# Claude Code raw JSONL bookkeeping rows that may omit uuid. Keep this list
-# aligned with tools/claude_forge_live_gate.KNOWN_METADATA_TYPES (+ turn_duration
-# and assistant usage observations). Unknown uuid-less objects still fail closed.
-_IGNORABLE_RAW_METADATA_TYPES = frozenset({
-    'file-history-snapshot',
+# Types already classified as EventRole.META by _classify_event (and verified as
+# non-conversation bookkeeping by the old Forge Spike). Uuid-less allowlist must
+# stay aligned with this set — do not invent extra unknown types here.
+_FORMAL_META_EVENT_TYPES = frozenset({
     'queue-operation',
+    'last-prompt',
+    'result',
+    'file-history-snapshot',
+})
+
+# Claude Code raw JSONL bookkeeping rows that may omit uuid.
+# = formal META types ∪ live-gate KNOWN_METADATA_TYPES extras
+# (+ system/turn_duration and assistant usage observations below).
+# Unknown uuid-less objects still fail closed.
+_IGNORABLE_RAW_METADATA_TYPES = frozenset({
+    *_FORMAL_META_EVENT_TYPES,
     'agent-name',
     'custom-title',
     'progress',
@@ -150,7 +160,7 @@ def _classify_event(raw: Mapping[str, Any]) -> tuple[EventType, EventRole, bool]
             # Candidate only — mapping must confirm real kitten message later.
             role = EventRole.SIDECHAIN if is_sidechain else EventRole.CANDIDATE_USER
         return EventType.USER, role, is_sidechain
-    if etype_raw in {'queue-operation', 'last-prompt', 'result', 'file-history-snapshot'}:
+    if etype_raw in _FORMAL_META_EVENT_TYPES:
         return EventType.UNKNOWN, EventRole.META, is_sidechain
     return EventType.UNKNOWN, EventRole.UNKNOWN, is_sidechain
 

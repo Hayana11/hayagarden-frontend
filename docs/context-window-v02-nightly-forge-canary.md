@@ -25,12 +25,14 @@ python3 tools/context_window_admin.py nightly-forge-canary --confirm-live --logi
 10. Require text delta + success result + JSONL prefix unchanged + growth + append user/assistant
 11. Cleanup deletes entire temp root
 
-## Round 2 Reader note
+## Reader uuid-less metadata note (R2/R3)
 
 Formal `chat/claude_transcript_reader.py` ignores a narrow allowlist of Claude
-Code raw bookkeeping rows that omit `uuid` (`file-history-snapshot`,
-`queue-operation`, `agent-name`, `custom-title`, `progress`,
-`system/turn_duration`, assistant usage observation). Conversational /
+Code raw bookkeeping rows that omit `uuid`. The allowlist is aligned with
+types already classified as `EventRole.META` by `_classify_event`
+(`queue-operation`, `last-prompt`, `result`, `file-history-snapshot`) plus
+live-gate extras (`agent-name`, `custom-title`, `progress`),
+`system/turn_duration`, and assistant usage observation. Conversational /
 unknown uuid-less objects still raise `READER_MISSING_UUID`. Canary must not
 pre-filter metadata before the formal Reader.
 
