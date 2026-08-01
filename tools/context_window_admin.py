@@ -21,6 +21,8 @@ Owner Canary (temp resources only; never production paths):
 ``--login`` performs a one-time native Claude.ai subscription login inside the
 same ephemeral ``CLAUDE_CONFIG_DIR`` used by this Canary. It never imports the
 production OAuth token/config and the entire temp root is deleted at cleanup.
+The auth probe, login, and cold turn all share one temp ``HOME`` so OAuth state
+(e.g. ``~/.claude.json``) cannot fall back to the production home directory.
 
 Runs isolated subscription auth preflight; cold turn only when identity is
 confirmed; otherwise ENVIRONMENT_BLOCKED from the probe/login reason.
@@ -137,6 +139,36 @@ def _assert_isolated_temp_root(temp_root: Path) -> None:
         )
 
 
+def _temp_home_for_claude(claude_home: Path | str) -> Path:
+    fake_home = Path(claude_home).parent / 'fake-home'
+    fake_home.mkdir(parents=True, exist_ok=True)
+    return fake_home
+
+
+def _probe_isolated_subscription_auth_in_temp_home(
+    claude_home: Path | str,
+    isolated_cwd: Path | str,
+) -> tuple[bool, str]:
+    """Probe auth with HOME pinned to the same temp root as the cold turn.
+
+    Current Claude Code stores OAuth session state in user-home data such as
+    ``~/.claude.json`` in addition to ``CLAUDE_CONFIG_DIR``. The imported probe
+    copies ``os.environ``, so temporarily pinning HOME here makes probe/login/
+    cold-turn observe one isolated auth identity while restoring the process
+    environment immediately afterwards.
+    """
+    fake_home = _temp_home_for_claude(claude_home)
+    previous_home = os.environ.get('HOME')
+    os.environ['HOME'] = str(fake_home)
+    try:
+        return probe_isolated_subscription_auth(claude_home, isolated_cwd)
+    finally:
+        if previous_home is None:
+            os.environ.pop('HOME', None)
+        else:
+            os.environ['HOME'] = previous_home
+
+
 def _run_isolated_subscription_login(
     claude_home: Path | str,
     isolated_cwd: Path | str,
@@ -145,16 +177,14 @@ def _run_isolated_subscription_login(
 
     The subprocess inherits stdin/stdout/stderr so the owner can complete the
     official browser flow. Host API/OAuth/Bedrock/Vertex overlays stay removed.
-    HOME is also redirected into the temp root as a belt-and-suspenders guard.
+    HOME and CLAUDE_CONFIG_DIR both point inside the Canary temp root.
     """
     from tools.claude_forge_live_gate import CLAUDE_CODE_NPM_SPEC
 
     home = Path(claude_home)
     cwd = Path(isolated_cwd)
     env = isolated_owner_canary_env(home)
-    fake_home = home.parent / 'fake-home-login'
-    fake_home.mkdir(parents=True, exist_ok=True)
-    env['HOME'] = str(fake_home)
+    env['HOME'] = str(_temp_home_for_claude(home))
     try:
         proc = _auth_login_runner(
             [
@@ -195,7 +225,7 @@ def run_owner_canary(
     confirm_live + not structural_only: real isolated auth preflight, then cold
     turn when identity is confirmed; otherwise ENVIRONMENT_BLOCKED from probe.
     login_if_needed=True may run one official Claude.ai login inside the same
-    ephemeral CLAUDE_CONFIG_DIR, then re-probe before the cold turn.
+    ephemeral auth home, then re-probe before the cold turn.
     """
     if not confirm_live and not structural_only:
         return {
@@ -227,10 +257,12 @@ def run_owner_canary(
         cwd = temp_root / 'isolated-project'
         claude_home.mkdir(parents=True)
         cwd.mkdir(parents=True)
+        _temp_home_for_claude(claude_home)
         chat_id = 'owner-canary:%s' % uuid.uuid4()
         report['paths'] = {
             'db': db_path,
             'claude_home': str(claude_home),
+            'home': str(_temp_home_for_claude(claude_home)),
             'cwd': str(cwd),
             'chat_id': chat_id,
         }
@@ -318,13 +350,15 @@ def run_owner_canary(
             return report
 
         # Live path: real isolated auth preflight, optional ephemeral login,
-        # then cold turn only after the same temp CLAUDE_CONFIG_DIR proves identity.
+        # then cold turn only after the same temp HOME/config proves identity.
         if not confirm_live:
             report['ok'] = False
             report['error_code'] = 'CONFIRM_LIVE_REQUIRED'
             return report
 
-        auth_ok, auth_reason = probe_isolated_subscription_auth(claude_home, cwd)
+        auth_ok, auth_reason = _probe_isolated_subscription_auth_in_temp_home(
+            claude_home, cwd,
+        )
         initial_auth_reason = auth_reason
         if not auth_ok and login_if_needed:
             login = _run_isolated_subscription_login(claude_home, cwd)
@@ -334,6 +368,7 @@ def run_owner_canary(
                     'ok': False,
                     'reason': initial_auth_reason,
                     'claude_home': str(claude_home),
+                    'home': str(_temp_home_for_claude(claude_home)),
                     'cwd': str(cwd),
                     'login_attempted': True,
                 }
@@ -345,7 +380,9 @@ def run_owner_canary(
                 report['error_code'] = ENVIRONMENT_BLOCKED
                 report['ok'] = False
                 return report
-            auth_ok, auth_reason = probe_isolated_subscription_auth(claude_home, cwd)
+            auth_ok, auth_reason = _probe_isolated_subscription_auth_in_temp_home(
+                claude_home, cwd,
+            )
 
         report['auth_preflight'] = {
             'ok': auth_ok,
@@ -353,6 +390,7 @@ def run_owner_canary(
             'initial_reason': initial_auth_reason,
             'login_attempted': bool(report.get('auth_login')),
             'claude_home': str(claude_home),
+            'home': str(_temp_home_for_claude(claude_home)),
             'cwd': str(cwd),
         }
         if not auth_ok:
@@ -477,7 +515,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         '--login', action='store_true',
         help=(
             'if isolated auth is absent, run one native Claude.ai login inside '
-            'the ephemeral CLAUDE_CONFIG_DIR, then re-probe and continue'
+            'the ephemeral HOME/CLAUDE_CONFIG_DIR, then re-probe and continue'
         ),
     )
     can.add_argument(
