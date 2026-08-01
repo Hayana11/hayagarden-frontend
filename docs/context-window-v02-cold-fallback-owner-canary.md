@@ -7,7 +7,7 @@
 CONTRACT_PASS
 IMPLEMENTATION (this Draft PR)
 OWNER_CANARY structural path: PASS (temp DB/home/cwd; cleanup verified)
-OWNER live Claude cold turn: ENVIRONMENT_BLOCKED (not required for Draft)
+OWNER live Claude: auth preflight required; ENVIRONMENT_BLOCKED only from real probe
 NIGHTLY_NOT_AUTHORIZED
 NO_AUTOMATIC_CROSS_PROCESS_FIRST_DELTA_RECOVERY
 ```
@@ -18,7 +18,7 @@ Implemented:
 
 1. Owner-explicit abandon of a failed first-turn (`committing` / `handoff_pending`)
 2. Brand-new cold fallback recovery context from last-good target checkpoint
-3. One-shot isolated Owner Canary (structural; live Claude optional / gated)
+3. One-shot isolated Owner Canary — structural paths + live auth preflight / conditional cold turn
 
 Not implemented:
 
@@ -64,6 +64,14 @@ python3 tools/context_window_admin.py owner-canary --confirm-live
 
 Temp SQLite / Claude home / cwd only; refuses repo or `/opt/frontend` roots; never opens production DB. Cleanup deletes the temp root.
 
+`--confirm-live` **must**:
+
+1. Run isolated subscription auth preflight under `CLAUDE_CONFIG_DIR` (API/Bedrock/Vertex overlays cleared)
+2. If identity is confirmed → run the isolated cold turn on the recovery context
+3. If identity is not confirmed → return `ENVIRONMENT_BLOCKED` with the **probe reason** (not a hardcoded stub)
+
+`structural_only` is a test harness switch that skips live preflight/cold turn; it is not a production escape hatch and does not shrink the frozen live acceptance scope.
+
 ```text
 NIGHTLY_NOT_AUTHORIZED
 ```
@@ -76,10 +84,10 @@ Nightly requires a separate authorized phase after this implementation PASSes an
 |------|------|
 | `chat/daily_context.py` | Owner audit columns |
 | `chat/context_window.py` | `CLOSE_REASON_COLD_FALLBACK` |
-| `chat/context_window_fallback.py` | recover + inspect + canary fixture |
+| `chat/context_window_fallback.py` | recover + inspect + canary fixture + auth/cold helpers |
 | `tools/context_window_admin.py` | Owner CLI |
 | `tests/test_context_window_fallback.py` | Paths A/B |
-| `tests/test_context_window_owner_canary.py` | Path C structural |
+| `tests/test_context_window_owner_canary.py` | Path C structural + live preflight wiring |
 | This doc | Contract |
 
 Forbidden: `gateway.py`, `daily_runtime.py`, `session_registry.py`, `cc_resident.py`, frontend, CI, deploy, flag defaults.

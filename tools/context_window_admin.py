@@ -17,6 +17,8 @@ Owner Canary (temp resources only; never production paths):
 
   python3 tools/context_window_admin.py owner-canary --confirm-live
 
+Runs isolated subscription auth preflight; cold turn only when identity is
+confirmed; otherwise ENVIRONMENT_BLOCKED from the probe reason.
 NIGHTLY_NOT_AUTHORIZED / OWNER canary is one-shot. No scheduler.
 """
 from __future__ import annotations
@@ -37,11 +39,14 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from chat.context_window_fallback import (  # noqa: E402
+    ENVIRONMENT_BLOCKED,
     FALLBACK_PRECONDITION_FAILED,
     FallbackError,
     build_owner_canary_fixture,
     inspect_failed_first_turn,
+    probe_isolated_subscription_auth,
     recover_from_last_good,
+    run_isolated_cold_turn_after_recover,
 )
 from chat.daily_context import DEFAULT_CHAT_ID, DEFAULT_DB_PATH  # noqa: E402
 
@@ -130,8 +135,9 @@ def run_owner_canary(
 ) -> dict[str, Any]:
     """Isolated Owner Canary. Never accepts production paths as arguments.
 
-    structural_only=True skips the optional live Claude cold turn (unit tests).
-    confirm_live + not structural_only attempts a live isolated Claude turn.
+    structural_only=True skips live auth preflight and cold turn (unit tests).
+    confirm_live + not structural_only: real isolated auth preflight, then cold
+    turn when identity is confirmed; otherwise ENVIRONMENT_BLOCKED from probe.
     """
     if not confirm_live and not structural_only:
         return {
@@ -145,12 +151,13 @@ def run_owner_canary(
     report: dict[str, Any] = {
         'ok': False,
         'STRUCTURAL_CANARY_ONLY': bool(structural_only),
-        'OWNER_CANARY_NOT_IMPLEMENTED_LIVE': False,
         'NIGHTLY_NOT_AUTHORIZED': True,
         'temp_root': str(temp_root),
         'paths': {},
         'success_path': None,
         'reject_path': None,
+        'auth_preflight': None,
+        'live_turn': None,
         'cleanup': None,
     }
     staged_alive = None
@@ -244,24 +251,60 @@ def run_owner_canary(
                 'failed user leaked into recovery', error_code='FAIL',
             )
 
-        if confirm_live and not structural_only:
-            # Live Claude cold turn is optional and environment-gated.
-            # Production DB/home must remain untouched; use CLAUDE_CONFIG_DIR.
-            report['live_turn'] = {
-                'attempted': True,
-                'ENVIRONMENT_BLOCKED': True,
-                'detail': (
-                    'Live Claude cold turn requires an isolated subscription '
-                    'identity; this Draft keeps structural Owner Canary as the '
-                    'default verified path. Re-run with an authorized isolated '
-                    'login when available.'
-                ),
-            }
-            report['OWNER_CANARY_NOT_IMPLEMENTED_LIVE'] = True
-
-        report['ok'] = bool(
+        structural_ok = bool(
             report['success_path']['ok'] and report['reject_path']['ok']
         )
+        if structural_only:
+            report['ok'] = structural_ok
+            return report
+
+        # Live path: real isolated auth preflight, then cold turn if identity ok.
+        if not confirm_live:
+            report['ok'] = False
+            report['error_code'] = 'CONFIRM_LIVE_REQUIRED'
+            return report
+
+        auth_ok, auth_reason = probe_isolated_subscription_auth(claude_home, cwd)
+        report['auth_preflight'] = {
+            'ok': auth_ok,
+            'reason': auth_reason,
+            'claude_home': str(claude_home),
+            'cwd': str(cwd),
+        }
+        if not auth_ok:
+            report['live_turn'] = {
+                'attempted': False,
+                'ENVIRONMENT_BLOCKED': True,
+                'reason': auth_reason,
+            }
+            report['error_code'] = ENVIRONMENT_BLOCKED
+            report['ok'] = False
+            return report
+
+        live = run_isolated_cold_turn_after_recover(
+            db_path=db_path,
+            claude_home=claude_home,
+            cwd=cwd,
+            chat_id=chat_id,
+            recovery_context_id=result.fallback_context_id,
+            recovery_context_epoch=result.fallback_context_epoch,
+            failed_user_message_id=failed_uid,
+            carryover_message_ids=result.carryover_message_ids,
+        )
+        report['live_turn'] = live
+        if live.get('ENVIRONMENT_BLOCKED'):
+            report['error_code'] = ENVIRONMENT_BLOCKED
+            report['ok'] = False
+            return report
+        if not live.get('ok'):
+            report['error_code'] = str(live.get('error_code') or 'FAIL')
+            report['ok'] = False
+            return report
+        if live.get('failed_user_resent') or live.get('failed_user_assistant_forged'):
+            report['error_code'] = 'FAIL'
+            report['ok'] = False
+            return report
+        report['ok'] = structural_ok and bool(live.get('ok'))
         return report
     except FallbackError as exc:
         report['error_code'] = exc.error_code

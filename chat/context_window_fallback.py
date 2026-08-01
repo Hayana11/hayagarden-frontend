@@ -9,9 +9,12 @@ from __future__ import annotations
 import getpass
 import json
 import logging
+import os
+import subprocess
 import uuid
 from dataclasses import dataclass
-from typing import Any, Optional
+from pathlib import Path
+from typing import Any, Callable, Optional
 
 from chat.context_window import (
     ACTIVE_INTENT_STATUSES,
@@ -52,8 +55,25 @@ ERROR_ABANDONED = 'FIRST_TURN_ABANDONED_BY_OWNER'
 FALLBACK_PRECONDITION_FAILED = 'FALLBACK_PRECONDITION_FAILED'
 FALLBACK_CHECKPOINT_UNPROVEN = 'FALLBACK_CHECKPOINT_UNPROVEN'
 FALLBACK_HISTORY_INVALID = 'FALLBACK_HISTORY_INVALID'
+ENVIRONMENT_BLOCKED = 'ENVIRONMENT_BLOCKED'
+ISOLATED_SUBSCRIPTION_AUTH_SOURCE = 'ISOLATED_CLAUDE_APP_SUBSCRIPTION'
+AUTH_PROVIDER_OVERRIDE_VARS = (
+    'ANTHROPIC_API_KEY',
+    'ANTHROPIC_AUTH_TOKEN',
+    'CLAUDE_CODE_OAUTH_TOKEN',
+    'ANTHROPIC_BASE_URL',
+    'CLAUDE_CODE_USE_BEDROCK',
+    'CLAUDE_CODE_USE_VERTEX',
+)
+AUTH_STATUS_TIMEOUT_SECONDS = 60
+LIVE_COLD_TURN_TIMEOUT_SECONDS = 120
+FAILED_USER_CANARY_TEXT = 'FAILED_USER_DO_NOT_RESEND'
 
 _ALLOWED_FAILED_STATUSES = frozenset({INTENT_COMMITTING, INTENT_HANDOFF_PENDING})
+
+# Injectable in unit tests (real Owner Canary uses subprocess / Claude CLI).
+_auth_status_runner: Callable[..., Any] = subprocess.run
+_live_cold_turn_runner: Optional[Callable[..., dict[str, Any]]] = None
 
 
 class FallbackError(Exception):
@@ -951,3 +971,318 @@ def recover_from_last_good(
         raise
     finally:
         conn.close()
+
+
+def isolated_owner_canary_env(claude_home: Path | str) -> dict[str, str]:
+    """Env for Owner Canary Claude: CLAUDE_CONFIG_DIR only; strip API/Bedrock/Vertex."""
+    env = os.environ.copy()
+    for name in AUTH_PROVIDER_OVERRIDE_VARS:
+        env.pop(name, None)
+    env['CLAUDE_CONFIG_DIR'] = str(claude_home)
+    env['DISABLE_AUTOUPDATER'] = '1'
+    return env
+
+
+def _auth_status_explicitly_non_subscription(status: dict[str, Any]) -> bool:
+    discriminator_keys = (
+        'authMethod', 'auth_method', 'authType', 'auth_type',
+        'loginMethod', 'login_method', 'credentialSource', 'credential_source',
+        'provider', 'apiProvider', 'api_provider', 'backend', 'source',
+    )
+    rejected_markers = ('console', 'api-key', 'api_key', 'apikey', 'bedrock', 'vertex')
+    for key in discriminator_keys:
+        value = status.get(key)
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if any(marker in normalized for marker in rejected_markers):
+                return True
+    for key in ('useBedrock', 'useVertex', 'isApiKey', 'isConsole'):
+        if status.get(key) is True:
+            return True
+    return False
+
+
+def probe_isolated_subscription_auth(
+    claude_home: Path | str,
+    isolated_cwd: Path | str,
+) -> tuple[bool, str]:
+    """Real isolated subscription auth preflight for Owner Canary.
+
+    Clears API/Bedrock/Vertex overlays and queries ``claude auth status`` under
+    ``CLAUDE_CONFIG_DIR``. Does not treat host env tokens as Owner Canary auth.
+    """
+    from tools.claude_forge_live_gate import CLAUDE_CODE_NPM_SPEC
+
+    home = Path(claude_home)
+    cwd = Path(isolated_cwd)
+    env = isolated_owner_canary_env(home)
+    try:
+        proc = _auth_status_runner(
+            ['npx', '--yes', CLAUDE_CODE_NPM_SPEC, 'auth', 'status'],
+            cwd=str(cwd),
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=AUTH_STATUS_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except Exception:
+        return False, 'isolated_auth_status_command_failed'
+
+    raw_out = (getattr(proc, 'stdout', None) or '') or ''
+    status: Optional[dict[str, Any]] = None
+    try:
+        parsed = json.loads(raw_out)
+        if isinstance(parsed, dict):
+            status = parsed
+    except (TypeError, json.JSONDecodeError):
+        status = None
+
+    # Non-zero exit with parseable loggedIn=false is still a real probe result.
+    if status is None:
+        if int(getattr(proc, 'returncode', 1) or 1) != 0:
+            return False, 'isolated_auth_status_command_failed'
+        return False, 'isolated_auth_status_invalid'
+
+    if status.get('loggedIn') is not True:
+        return False, 'isolated_auth_not_logged_in'
+    subscription_type = status.get('subscriptionType')
+    if subscription_type is not None:
+        if (
+            not isinstance(subscription_type, str)
+            or subscription_type.strip().lower() not in {'pro', 'max'}
+        ):
+            return False, 'isolated_auth_wrong_subscription'
+    if _auth_status_explicitly_non_subscription(status):
+        return False, 'isolated_auth_wrong_subscription'
+    return True, ISOLATED_SUBSCRIPTION_AUTH_SOURCE
+
+
+def run_isolated_cold_turn_after_recover(
+    *,
+    db_path: str,
+    claude_home: Path | str,
+    cwd: Path | str,
+    chat_id: str,
+    recovery_context_id: int,
+    recovery_context_epoch: int,
+    failed_user_message_id: int,
+    carryover_message_ids: tuple[int, ...] | list[int],
+) -> dict[str, Any]:
+    """After owner recover: cold-start a new user turn under isolated Claude home.
+
+    Uses existing cold history assembly for recovery materials, then starts a
+    brand-new native Claude session (tools empty). Never resends the failed user.
+    """
+    if _live_cold_turn_runner is not None:
+        return _live_cold_turn_runner(
+            db_path=db_path,
+            claude_home=claude_home,
+            cwd=cwd,
+            chat_id=chat_id,
+            recovery_context_id=recovery_context_id,
+            recovery_context_epoch=recovery_context_epoch,
+            failed_user_message_id=failed_user_message_id,
+            carryover_message_ids=carryover_message_ids,
+        )
+
+    import sqlite3
+
+    from chat import daily_context as dc
+    from chat.daily_history import build_daily_window_context
+    from chat.daily_runtime import format_resident_turn_content
+    from scripts.spike_claude_forge_resume import _claude_cmd, _run_claude
+    from tools.claude_forge_live_gate import SYSTEM_PROMPT, parse_stdout_events
+
+    home = Path(claude_home)
+    work = Path(cwd)
+    if not str(home.resolve()).startswith(str(home.parent.resolve())):
+        return {
+            'ok': False,
+            'error_code': ENVIRONMENT_BLOCKED,
+            'ENVIRONMENT_BLOCKED': True,
+            'reason': 'claude_home_escape',
+        }
+
+    new_prompt = (
+        'Owner Canary cold fallback: reply with exactly OK_COLD_FALLBACK '
+        'and nothing else.'
+    )
+    conn = sqlite3.connect(db_path)
+    try:
+        cur = conn.execute(
+            "INSERT INTO chat_messages (author, content) VALUES ('hayana', ?)",
+            (new_prompt,),
+        )
+        conn.commit()
+        new_mid = int(cur.lastrowid)
+    finally:
+        conn.close()
+
+    dc.record_daily_message_context(
+        new_mid,
+        context_id=int(recovery_context_id),
+        context_epoch=int(recovery_context_epoch),
+        resident_generation=1,
+        role='user',
+        db_path=db_path,
+    )
+    daily_ctx = dc.get_daily_context_by_id(
+        int(recovery_context_id), db_path=db_path,
+    )
+    if daily_ctx is None:
+        return {
+            'ok': False,
+            'error_code': 'FAIL',
+            'reason': 'recovery_context_missing',
+        }
+
+    built = build_daily_window_context(
+        chat_id=chat_id,
+        daily_context=daily_ctx,
+        current_user_message_id=new_mid,
+        is_cold=True,
+        db_path=db_path,
+    )
+    cold_ids = [int(m['message_id']) for m in built.get('carryover_messages') or []]
+    if int(failed_user_message_id) in cold_ids:
+        return {
+            'ok': False,
+            'error_code': 'FAIL',
+            'reason': 'failed_user_in_cold_carryover',
+        }
+    if list(carryover_message_ids) and cold_ids != list(carryover_message_ids):
+        # Allow equality with recovery materials; mismatch is a hard fail.
+        if set(cold_ids) != set(int(x) for x in carryover_message_ids):
+            return {
+                'ok': False,
+                'error_code': 'FAIL',
+                'reason': 'cold_carryover_mismatch',
+                'cold_ids': cold_ids,
+            }
+
+    stdin_content = format_resident_turn_content(
+        assembly=built,
+        user_content=new_prompt,
+        is_cold=True,
+        is_respawn=False,
+    )
+    if FAILED_USER_CANARY_TEXT in stdin_content:
+        return {
+            'ok': False,
+            'error_code': 'FAIL',
+            'reason': 'failed_user_text_in_claude_stdin',
+        }
+
+    env = isolated_owner_canary_env(home)
+    # Ensure JSONL cannot land in production HOME/.claude by forcing HOME away.
+    # CLAUDE_CONFIG_DIR is authoritative for Claude Code config/project dirs.
+    env['HOME'] = str(home.parent / 'fake-home')
+    Path(env['HOME']).mkdir(parents=True, exist_ok=True)
+
+    payload = json.dumps(
+        {
+            'type': 'user',
+            'message': {'role': 'user', 'content': stdin_content},
+        },
+        ensure_ascii=False,
+    ) + '\n'
+    cmd = _claude_cmd(
+        '-p',
+        '--input-format', 'stream-json',
+        '--output-format', 'stream-json',
+        '--verbose',
+        '--include-partial-messages',
+        '--system-prompt', SYSTEM_PROMPT,
+        '--max-turns', '2',
+        '--tools', '',
+        '--allowedTools', '',
+    )
+    try:
+        create_run = _run_claude(
+            cmd=cmd,
+            cwd=str(work),
+            env=env,
+            stdin_payload=payload,
+            timeout_seconds=LIVE_COLD_TURN_TIMEOUT_SECONDS,
+        )
+    except Exception as exc:
+        return {
+            'ok': False,
+            'error_code': ENVIRONMENT_BLOCKED,
+            'ENVIRONMENT_BLOCKED': True,
+            'reason': 'claude_cold_turn_spawn_failed',
+            'detail': str(exc)[:500],
+        }
+
+    if not create_run.process_started:
+        return {
+            'ok': False,
+            'error_code': ENVIRONMENT_BLOCKED,
+            'ENVIRONMENT_BLOCKED': True,
+            'reason': 'claude_cold_turn_process_not_started',
+        }
+
+    raw = parse_stdout_events(create_run.stdout_lines)
+    assistant_text = str(raw.assistant_text or '').strip()
+    if create_run.exit_code != 0 or not raw.saw_text_delta or not raw.result_ok:
+        return {
+            'ok': False,
+            'error_code': 'FAIL',
+            'reason': 'claude_cold_turn_model_failed',
+            'exit_code': create_run.exit_code,
+            'saw_text_delta': bool(raw.saw_text_delta),
+            'result_ok': bool(raw.result_ok),
+            'assistant_text': assistant_text[:200],
+        }
+
+    # Persist assistant on recovery context only; never for failed user.
+    conn = sqlite3.connect(db_path)
+    try:
+        cur = conn.execute(
+            "INSERT INTO chat_messages (author, content) VALUES ('fyodor', ?)",
+            (assistant_text or 'OK_COLD_FALLBACK',),
+        )
+        conn.commit()
+        asst_mid = int(cur.lastrowid)
+    finally:
+        conn.close()
+    dc.record_daily_message_context(
+        asst_mid,
+        context_id=int(recovery_context_id),
+        context_epoch=int(recovery_context_epoch),
+        resident_generation=1,
+        role='assistant',
+        db_path=db_path,
+    )
+    dc.advance_resident_history_cursor(
+        int(recovery_context_id), 1, asst_mid, db_path=db_path,
+    )
+
+    asst_for_failed = sqlite3.connect(db_path).execute(
+        '''SELECT COUNT(*) FROM daily_message_contexts
+           WHERE context_id=? AND role='assistant' AND message_id>?''',
+        # failed target may differ; guard by message id after failed user globally
+        (int(recovery_context_id), int(failed_user_message_id)),
+    ).fetchone()[0]
+    # Also ensure no assistant mapped on the failed user message itself.
+    failed_asst = sqlite3.connect(db_path).execute(
+        '''SELECT COUNT(*) FROM daily_message_contexts d
+           JOIN chat_messages c ON c.id=d.message_id
+           WHERE d.role='assistant' AND c.id > ? AND c.content LIKE ?''',
+        (int(failed_user_message_id), '%' + FAILED_USER_CANARY_TEXT + '%'),
+    ).fetchone()[0]
+
+    return {
+        'ok': True,
+        'ENVIRONMENT_BLOCKED': False,
+        'new_user_message_id': new_mid,
+        'assistant_message_id': asst_mid,
+        'is_cold': True,
+        'carryover_contains_failed_user': False,
+        'failed_user_resent': False,
+        'failed_user_assistant_forged': bool(failed_asst),
+        'stdout_session_id': raw.stdout_session_id,
+        'assistant_text': assistant_text[:200],
+        'recovery_assistant_count_after_failed_uid': int(asst_for_failed),
+    }
