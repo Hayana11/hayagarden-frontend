@@ -56,11 +56,67 @@ class TranscriptReaderError(ValueError):
         self.detail = detail
 
 
+# Claude Code raw JSONL bookkeeping rows that may omit uuid. Keep this list
+# aligned with tools/claude_forge_live_gate.KNOWN_METADATA_TYPES (+ turn_duration
+# and assistant usage observations). Unknown uuid-less objects still fail closed.
+_IGNORABLE_RAW_METADATA_TYPES = frozenset({
+    'file-history-snapshot',
+    'queue-operation',
+    'agent-name',
+    'custom-title',
+    'progress',
+})
+
+
 def _content_blocks(message: Mapping[str, Any]) -> list[dict[str, Any]]:
     content = message.get('content')
     if isinstance(content, list):
         return [b for b in content if isinstance(b, dict)]
     return []
+
+
+def _is_assistant_usage_observation(obj: Mapping[str, Any]) -> bool:
+    """True for Claude assistant usage bookkeeping (not a conversation node).
+
+    Mirrors tools.claude_forge_live_gate.classify_raw_jsonl_event for the
+    uuid-less / non-canonical path: type=assistant + requestId + message.usage.
+    """
+    if str(obj.get('type') or '') != 'assistant':
+        return False
+    request_id = str(obj.get('requestId') or obj.get('request_id') or '').strip()
+    if not request_id:
+        return False
+    message = obj.get('message')
+    if not isinstance(message, dict):
+        return False
+    return isinstance(message.get('usage'), Mapping)
+
+
+def _is_ignorable_raw_metadata(obj: Mapping[str, Any]) -> bool:
+    """Return True when a uuid-less raw object is known non-conversation metadata.
+
+    Must stay narrow: never treat bare missing-uuid conversation events
+    (user / real assistant / tool rows / unknown types) as ignorable.
+    """
+    etype = str(obj.get('type') or '')
+    if etype in _IGNORABLE_RAW_METADATA_TYPES:
+        return True
+    if etype == 'system' and str(obj.get('subtype') or '') == 'turn_duration':
+        return True
+    if _is_assistant_usage_observation(obj):
+        return True
+    return False
+
+
+def _raw_metadata_kind(obj: Mapping[str, Any]) -> str:
+    etype = str(obj.get('type') or '')
+    if etype in _IGNORABLE_RAW_METADATA_TYPES:
+        return etype
+    if etype == 'system' and str(obj.get('subtype') or '') == 'turn_duration':
+        return 'system/turn_duration'
+    if _is_assistant_usage_observation(obj):
+        return 'assistant_usage_observation'
+    return etype or '<missing>'
 
 
 def _is_tool_result_only_user(message: Mapping[str, Any]) -> bool:
@@ -307,6 +363,13 @@ def _ingest_json_object(
 
     uid = str(obj.get('uuid') or '')
     if not uid:
+        # Known Claude raw bookkeeping may omit uuid; skip without entering the
+        # graph. Conversational / unknown uuid-less rows still fail closed.
+        if _is_ignorable_raw_metadata(obj):
+            graph.warnings.append(
+                f'ignored_raw_metadata:line_{lineno}:{_raw_metadata_kind(obj)}',
+            )
+            return
         raise TranscriptReaderError(ReaderErrorCode.MISSING_UUID, f'line_{lineno}')
     if uid in graph.by_uuid:
         raise TranscriptReaderError(ReaderErrorCode.DUPLICATE_UUID, uid)

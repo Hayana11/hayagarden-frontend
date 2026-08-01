@@ -193,6 +193,91 @@ class TranscriptReaderTests(unittest.TestCase):
                 read_transcript(path)
             self.assertEqual(ctx.exception.code, ReaderErrorCode.DUPLICATE_UUID)
 
+    def test_known_uuidless_metadata_ignored_before_conversation(self) -> None:
+        """Known Claude raw bookkeeping without uuid must not block Reader."""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'meta.jsonl'
+            u = 'b1111111-1111-1111-1111-111111111111'
+            a = 'b2222222-2222-2222-2222-222222222222'
+            rows = [
+                {'type': 'file-history-snapshot', 'snapshot': {'trackedFileBackups': {}}},
+                {'type': 'queue-operation', 'operation': 'dequeue'},
+                {'type': 'agent-name', 'agentName': 'nightly'},
+                {'type': 'custom-title', 'customTitle': 'native'},
+                {'type': 'progress', 'data': {'type': 'hook_progress'}},
+                {'type': 'system', 'subtype': 'turn_duration', 'durationMs': 1},
+                {
+                    'type': 'assistant',
+                    'requestId': 'req-usage-obs',
+                    'message': {
+                        'role': 'assistant',
+                        'usage': {'input_tokens': 3, 'output_tokens': 1},
+                    },
+                },
+                {
+                    'type': 'user',
+                    'uuid': u,
+                    'parentUuid': None,
+                    'sessionId': 's-meta',
+                    'message': {'role': 'user', 'content': 'hello after metadata'},
+                },
+                {
+                    'type': 'assistant',
+                    'uuid': a,
+                    'parentUuid': u,
+                    'sessionId': 's-meta',
+                    'message': {
+                        'role': 'assistant',
+                        'content': [{'type': 'text', 'text': 'ok'}],
+                    },
+                },
+            ]
+            path.write_text(
+                ''.join(json.dumps(r) + '\n' for r in rows),
+                encoding='utf-8',
+            )
+            graph = read_transcript(path)
+            self.assertEqual(len(graph.events), 2)
+            self.assertEqual(len(graph.candidate_rounds), 1)
+            self.assertEqual(
+                graph.candidate_rounds[0].candidate_user_event_uuid, u,
+            )
+            self.assertEqual(list(graph.candidate_rounds[0].event_uuids), [u, a])
+            ignored = [w for w in graph.warnings if w.startswith('ignored_raw_metadata:')]
+            self.assertGreaterEqual(len(ignored), 7)
+
+    def test_user_missing_uuid_still_rejected(self) -> None:
+        """Conversational user without uuid remains fail-closed."""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'bad_user.jsonl'
+            rows = [
+                {
+                    'type': 'user',
+                    'parentUuid': None,
+                    'sessionId': 's',
+                    'message': {'role': 'user', 'content': 'no uuid'},
+                },
+            ]
+            path.write_text(
+                ''.join(json.dumps(r) + '\n' for r in rows),
+                encoding='utf-8',
+            )
+            with self.assertRaises(TranscriptReaderError) as ctx:
+                read_transcript(path)
+            self.assertEqual(ctx.exception.code, ReaderErrorCode.MISSING_UUID)
+
+    def test_unknown_uuidless_object_still_rejected(self) -> None:
+        """Unknown uuid-less objects must not be silently skipped."""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'unknown.jsonl'
+            path.write_text(
+                json.dumps({'type': 'not-a-known-metadata', 'foo': 1}) + '\n',
+                encoding='utf-8',
+            )
+            with self.assertRaises(TranscriptReaderError) as ctx:
+                read_transcript(path)
+            self.assertEqual(ctx.exception.code, ReaderErrorCode.MISSING_UUID)
+
 
 if __name__ == '__main__':
     unittest.main()
