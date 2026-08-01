@@ -26,7 +26,12 @@ The auth probe, login, and cold turn all share one temp ``HOME`` so OAuth state
 
 Runs isolated subscription auth preflight; cold turn only when identity is
 confirmed; otherwise ENVIRONMENT_BLOCKED from the probe/login reason.
-NIGHTLY_NOT_AUTHORIZED / OWNER canary is one-shot. No scheduler.
+Owner Canary is one-shot. No scheduler.
+
+Nightly Forge Canary (temp resources only; owner-triggered, no cron):
+
+  python3 tools/context_window_admin.py nightly-forge-canary --confirm-live
+  python3 tools/context_window_admin.py nightly-forge-canary --confirm-live --login
 """
 from __future__ import annotations
 
@@ -56,6 +61,9 @@ from chat.context_window_fallback import (  # noqa: E402
     probe_isolated_subscription_auth,
     recover_from_last_good,
     run_isolated_cold_turn_after_recover,
+)
+from chat.context_window_nightly_forge import (  # noqa: E402
+    run_nightly_forge_canary,
 )
 from chat.daily_context import DEFAULT_CHAT_ID, DEFAULT_DB_PATH  # noqa: E402
 
@@ -480,6 +488,21 @@ def _cmd_owner_canary(args: argparse.Namespace) -> int:
     return 0 if report.get('ok') else 1
 
 
+def _cmd_nightly_forge_canary(args: argparse.Namespace) -> int:
+    report = run_nightly_forge_canary(
+        confirm_live=bool(args.confirm_live),
+        login_if_needed=bool(getattr(args, 'login', False)),
+        structural_only=bool(getattr(args, 'structural_only', False)),
+    )
+    _print(report)
+    if report.get('error_code') in {
+        'ENVIRONMENT_BLOCKED', 'PRODUCTION_PATH_TOUCHED',
+        'PRODUCTION_RESOURCE_CHANGED', 'ISOLATION_ESCAPE', 'CLEANUP_FAILED',
+    }:
+        return 3
+    return 0 if report.get('ok') else 1
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     p = argparse.ArgumentParser(description='Context Window owner admin (R0)')
     sub = p.add_subparsers(dest='cmd', required=True)
@@ -523,6 +546,23 @@ def main(argv: Optional[list[str]] = None) -> int:
         help=argparse.SUPPRESS,  # test/harness only; not a production flag
     )
 
+    night = sub.add_parser(
+        'nightly-forge-canary',
+        help='one-shot isolated Nightly Forge compatibility Canary (no cron)',
+    )
+    night.add_argument('--confirm-live', action='store_true', required=True)
+    night.add_argument(
+        '--login', action='store_true',
+        help=(
+            'if isolated auth is absent, run one native Claude.ai login inside '
+            'the ephemeral HOME/CLAUDE_CONFIG_DIR, then re-probe and continue'
+        ),
+    )
+    night.add_argument(
+        '--structural-only', action='store_true',
+        help=argparse.SUPPRESS,
+    )
+
     args = p.parse_args(argv)
     if args.cmd == 'inspect-first-turn':
         return _cmd_inspect(args)
@@ -530,6 +570,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         return _cmd_recover(args)
     if args.cmd == 'owner-canary':
         return _cmd_owner_canary(args)
+    if args.cmd == 'nightly-forge-canary':
+        return _cmd_nightly_forge_canary(args)
     return 2
 
 
