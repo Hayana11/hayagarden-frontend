@@ -7177,15 +7177,19 @@ def _gw_run_seamless_switch(body: dict) -> dict:
             hooks=_gw_build_target_prepare_hooks(),
         )
     except ForgePublishError as exc:
-        raise _cw_for_switch.SwitchFailedError(
-            getattr(exc, 'error_code', None) or 'forge_publish_failed',
-            str(exc),
-        ) from exc
+        code = getattr(exc, 'error_code', None) or 'forge_publish_failed'
+        # Structured pre-READY failure: terminalize before surfacing.
+        # If terminalize itself fails, raise PreReadyTerminalizeError → 500.
+        _cw_for_switch.terminalize_pre_ready_intent_failure(
+            request_id, error_code=str(code), db_path=DB_PATH,
+        )
+        raise _cw_for_switch.SwitchFailedError(code, str(exc)) from exc
     except TargetPrepareError as exc:
-        raise _cw_for_switch.SwitchFailedError(
-            getattr(exc, 'error_code', None) or 'target_prepare_failed',
-            str(exc),
-        ) from exc
+        code = getattr(exc, 'error_code', None) or 'target_prepare_failed'
+        _cw_for_switch.terminalize_pre_ready_intent_failure(
+            request_id, error_code=str(code), db_path=DB_PATH,
+        )
+        raise _cw_for_switch.SwitchFailedError(code, str(exc)) from exc
 
     intent = _cw_for_switch.get_active_switch_intent(chat_id, db_path=DB_PATH)
     if intent is None or str(intent.get('request_id') or '') != request_id:

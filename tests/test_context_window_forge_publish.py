@@ -23,7 +23,14 @@ if str(ROOT) not in sys.path:
 from chat import daily_context as dc
 from chat.claude_event_mapping import MappingPassRequest, run_mapping_pass
 from chat.claude_transcript_model import ThinkingPolicy
-from chat.context_window import INTENT_FORGING, INTENT_RELEASED, _intent_row
+from chat.context_window import (
+    INTENT_FORGING,
+    INTENT_RELEASED,
+    _intent_row,
+    get_active_switch_intent,
+    has_active_switch_intent,
+    terminalize_pre_ready_intent_failure,
+)
 from chat.context_window_forge_publish import (
     ForgePublishError,
     PUBLISH_STATUS_ALREADY_PUBLISHED,
@@ -608,6 +615,70 @@ class ContextWindowForgePublishTests(unittest.TestCase):
             self.assertEqual(intent2['orphan_jsonl_state'], 'delete_blocked')
             self.assertTrue(final.is_file())
             self.assertEqual(final.read_bytes(), replacement)
+
+    def test_preview_registry_missing_terminalizes_pre_ready(self):
+        """Incident replay: chat msgs exist, no Registry/mapping, count=3.
+
+        Preview correctly fail-closes with PREVIEW_REGISTRY_MISSING; Gateway
+        terminalize must release the reserved intent so chat is not locked.
+        """
+        # Formal chat rounds bound to source — but no Registry / mapping.
+        u1 = _insert_msg(self.db, 'hayana', '旧窗用户一')
+        a1 = _insert_msg(self.db, 'fyodor', '旧窗助手一')
+        u2 = _insert_msg(self.db, 'hayana', '旧窗用户二')
+        a2 = _insert_msg(self.db, 'fyodor', '旧窗助手二')
+        for mid, role in ((u1, 'user'), (a1, 'assistant'), (u2, 'user'), (a2, 'assistant')):
+            _bind_msg(
+                self.db, mid, context_id=self.context_id,
+                epoch=self.epoch, gen=self.gen, role=role,
+            )
+        source_before = dc.get_daily_context_by_id(self.context_id, db_path=self.db)
+        contexts_before = sqlite3.connect(self.db).execute(
+            'SELECT COUNT(*) FROM daily_contexts'
+        ).fetchone()[0]
+
+        with self.assertRaises(ForgePublishError) as ctx:
+            self._publish(count=3)
+        self.assertEqual(ctx.exception.error_code, 'PREVIEW_REGISTRY_MISSING')
+
+        # Mirror Gateway: terminalize before surfacing structured pre-READY error.
+        terminalize_pre_ready_intent_failure(
+            self.request_id,
+            error_code=ctx.exception.error_code,
+            db_path=self.db,
+            now=NOW,
+        )
+
+        intent = self._intent()
+        self.assertEqual(intent['status'], INTENT_RELEASED)
+        self.assertEqual(intent['error_code'], 'PREVIEW_REGISTRY_MISSING')
+        self.assertIsNone(intent.get('target_context_id'))
+        self.assertIsNone(intent.get('staged_ready_at'))
+        self.assertIsNone(intent.get('target_session_id'))
+        self.assertFalse(has_active_switch_intent('default', db_path=self.db))
+        self.assertIsNone(get_active_switch_intent('default', db_path=self.db))
+
+        source_after = dc.get_daily_context_by_id(self.context_id, db_path=self.db)
+        self.assertEqual(source_after.get('closed_at'), source_before.get('closed_at'))
+        self.assertEqual(int(source_after['version']), int(source_before['version']))
+        self.assertEqual(
+            int(source_after['resident_generation']),
+            int(source_before['resident_generation']),
+        )
+        self.assertEqual(
+            sqlite3.connect(self.db).execute(
+                'SELECT COUNT(*) FROM daily_contexts'
+            ).fetchone()[0],
+            contexts_before,
+        )
+        self.assertEqual(
+            sqlite3.connect(self.db).execute(
+                "SELECT COUNT(*) FROM daily_contexts WHERE window_mode='manual_staged'"
+            ).fetchone()[0],
+            0,
+        )
+        self.assertIsNone(intent.get('first_turn_request_id'))
+        self.assertIsNone(intent.get('first_user_message_id'))
 
 
 if __name__ == '__main__':

@@ -1302,13 +1302,17 @@ def publish_context_window_forge_candidate(
     )
     status = str(prep.response.get('preview_status') or '')
     if status not in (PREVIEW_STATUS_READY, PREVIEW_STATUS_NATIVE_COLD):
+        preview_code = str(prep.response.get('error_code') or '').strip()
         raise ForgePublishError(
-            'preview blocked', error_code='FORGE_PREVIEW_BLOCKED',
+            'preview blocked',
+            error_code=preview_code or 'FORGE_PREVIEW_BLOCKED',
         )
     artifact = prep.artifact
     if artifact is None:
+        preview_code = str(prep.response.get('error_code') or '').strip()
         raise ForgePublishError(
-            'preview blocked', error_code='FORGE_PREVIEW_BLOCKED',
+            'preview blocked',
+            error_code=preview_code or 'FORGE_PREVIEW_BLOCKED',
         )
 
     _assert_intent_matches_artifact(intent, artifact, count=int(count))

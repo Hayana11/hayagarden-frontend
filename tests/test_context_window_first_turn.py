@@ -1340,6 +1340,7 @@ class ContextWindowFirstTurnTests(unittest.TestCase):
         src = inspect.getsource(gateway._gw_run_seamless_switch)
         self.assertIn('publish_context_window_forge_candidate', src)
         self.assertIn('prepare_context_window_target', src)
+        self.assertIn('terminalize_pre_ready_intent_failure', src)
         self.assertNotIn('switch_context_window(', src)
         self.assertIn('ThinkingPolicy.DROP', src)
         self.assertIn('preview_id=request_id', src)
