@@ -4424,7 +4424,7 @@ def _stream_cc_first_turn(_turn_data, _uc, intent: dict):
             mark_first_turn_stdin_sent(session)
 
         event_iter = iter(session.staged.send_turn(
-            _uc, on_stdin_flushed=on_stdin_flushed,
+            session.user_content, on_stdin_flushed=on_stdin_flushed,
         ))
 
         try:

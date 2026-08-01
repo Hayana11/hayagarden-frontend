@@ -85,6 +85,7 @@ class FirstTurnSession:
     switch_request_id: str
     first_turn_request_id: str
     user_message_id: int
+    user_content: str
     target_context_id: int
     target_context_epoch: int
     target_resident_generation: int
@@ -189,8 +190,13 @@ def _claim_existing_user_message_conn(
     target_epoch: int,
     target_gen: int,
     now_s: str,
-) -> int:
-    """Reuse Gateway-created chat_messages row; map to target; never INSERT."""
+) -> tuple[int, str]:
+    """Reuse Gateway-created chat_messages row; map to target; never INSERT.
+
+    Canonical user text is always the DB row for ``user_message_id``.
+    Empty / missing request body is the production message-id-only contract.
+    Non-empty request body must match DB (fail closed on mismatch).
+    """
     mid = int(user_message_id)
     row = conn.execute(
         'SELECT id, author, content FROM chat_messages WHERE id=?',
@@ -207,7 +213,9 @@ def _claim_existing_user_message_conn(
             'user message author mismatch',
             error_code='FIRST_TURN_USER_CONTENT_CONFLICT',
         )
-    if str(msg.get('content') or '').strip() != str(user_content or '').strip():
+    canonical = str(msg.get('content') or '')
+    provided = str(user_content or '')
+    if provided.strip() and provided.strip() != canonical.strip():
         raise FirstTurnError(
             'user message content mismatch',
             error_code='FIRST_TURN_USER_CONTENT_CONFLICT',
@@ -226,18 +234,35 @@ def _claim_existing_user_message_conn(
             resident_generation=target_gen,
             now_s=now_s,
         )
-        return mid
+        return mid, canonical
     ex = dict(mapped)
     if (
         int(ex['context_id']) == int(target_id)
         and int(ex['context_epoch']) == int(target_epoch)
         and int(ex['resident_generation']) == int(target_gen)
     ):
-        return mid
+        return mid, canonical
     raise FirstTurnError(
         'user message mapped to another context',
         error_code='FIRST_TURN_USER_CONTEXT_CONFLICT',
     )
+
+
+def _load_user_message_content_conn(
+    conn: sqlite3.Connection,
+    *,
+    message_id: int,
+) -> str:
+    row = conn.execute(
+        'SELECT content FROM chat_messages WHERE id=?',
+        (int(message_id),),
+    ).fetchone()
+    if row is None:
+        raise FirstTurnError(
+            'user message missing',
+            error_code='FIRST_TURN_USER_MESSAGE_MISSING',
+        )
+    return str(dict(row).get('content') or '')
 
 
 def _insert_user_message_conn(
@@ -686,7 +711,8 @@ def claim_and_start_first_turn(
     """Claim user message to target, lease, READY→COMMITTING, resume candidate.
 
     When ``user_message_id`` is provided (Gateway path), reuse that row — never INSERT.
-    When omitted, keep the offline/test INSERT path.
+    DB row content is canonical (message-id-only requests may pass empty
+    ``user_content``). When omitted, keep the offline/test INSERT path.
     """
     hooks = _require_hooks(hooks)
     ensure_schema(db_path)
@@ -697,6 +723,7 @@ def claim_and_start_first_turn(
         raise FirstTurnError('first_turn_request_id required', error_code='FIRST_TURN_REQUEST_ID')
     req_id = str(switch_request_id)
     provided_uid = int(user_message_id) if user_message_id is not None else None
+    canonical_user_content = str(user_content or '')
 
     conn = _connect(db_path)
     try:
@@ -750,7 +777,7 @@ def claim_and_start_first_turn(
                     error_code='FIRST_TURN_USER_CONTENT_CONFLICT',
                 )
             if provided_uid is not None:
-                user_message_id = _claim_existing_user_message_conn(
+                user_message_id, canonical_user_content = _claim_existing_user_message_conn(
                     conn,
                     user_message_id=provided_uid,
                     user_content=user_content,
@@ -767,8 +794,11 @@ def claim_and_start_first_turn(
                     target_epoch=target_epoch,
                     target_gen=target_gen,
                 )
+                canonical_user_content = _load_user_message_content_conn(
+                    conn, message_id=int(user_message_id),
+                )
         elif provided_uid is not None:
-            user_message_id = _claim_existing_user_message_conn(
+            user_message_id, canonical_user_content = _claim_existing_user_message_conn(
                 conn,
                 user_message_id=provided_uid,
                 user_content=user_content,
@@ -789,6 +819,7 @@ def claim_and_start_first_turn(
                 resident_generation=target_gen,
                 now_s=now_s,
             )
+            canonical_user_content = str(user_content or '')
 
         reg = get_context_claude_session(target_id, target_gen, conn=conn)
         if reg is None:
@@ -887,6 +918,7 @@ def claim_and_start_first_turn(
         switch_request_id=req_id,
         first_turn_request_id=ft_req,
         user_message_id=int(user_message_id),
+        user_content=str(canonical_user_content),
         target_context_id=target_id,
         target_context_epoch=target_epoch,
         target_resident_generation=target_gen,
