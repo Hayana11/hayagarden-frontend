@@ -7018,12 +7018,29 @@ def _gw_build_switch_hooks():
     from chat.system_builder import build_cc_daily_static_parts
     claude_home = _Path(os.environ.get('HOME', '/root')) / '.claude'
 
-    def prepare_staged(intent, forge_path):
+    def _system_text_and_env():
+        # Shared production system/persona/memory/state chain for resume + cold.
         static_parts = build_cc_daily_static_parts()
         system_text = static_parts['full_system']
         env = dict(os.environ)
         env['CLAUDE_CODE_OAUTH_TOKEN'] = CC_TOKEN
         env.pop('ANTHROPIC_API_KEY', None)
+        return system_text, env
+
+    def _map_staged_resident_error(exc: Exception) -> Exception:
+        msg = str(exc)
+        for code in (
+            'staged_spawn_failed',
+            'staged_exited_during_health_window',
+            'staged_stderr_fatal',
+            'staged_jsonl_mutated_before_handoff',
+        ):
+            if code in msg:
+                return _cw_for_switch.SwitchFailedError(code, msg)
+        return _cw_for_switch.SwitchFailedError('staged_spawn_failed', msg)
+
+    def prepare_staged(intent, forge_path):
+        system_text, env = _system_text_and_env()
         staged = cc_resident.ResidentSession(
             CC_CWD, CC_ALLOWED_TOOLS, CC_CWD + '/cc-tools.json',
         )
@@ -7043,16 +7060,32 @@ def _gw_build_switch_hooks():
                 staged._kill(quiet=True)
             except Exception:
                 pass
-            msg = str(exc)
-            for code in (
-                'staged_spawn_failed',
-                'staged_exited_during_health_window',
-                'staged_stderr_fatal',
-                'staged_jsonl_mutated_before_handoff',
-            ):
-                if code in msg:
-                    raise _cw_for_switch.SwitchFailedError(code, msg) from exc
-            raise _cw_for_switch.SwitchFailedError('staged_spawn_failed', msg) from exc
+            raise _map_staged_resident_error(exc) from exc
+        return staged
+
+    def prepare_fresh(intent, forge_path):
+        # Native-cold: same system injection; fresh --session-id, never --resume.
+        # forge_path is the Registry-frozen future JSONL address (may not exist).
+        _ = forge_path
+        system_text, env = _system_text_and_env()
+        staged = cc_resident.ResidentSession(
+            CC_CWD, CC_ALLOWED_TOOLS, CC_CWD + '/cc-tools.json',
+        )
+        try:
+            staged.spawn_fresh_named(
+                system_text,
+                env,
+                session_id=str(intent['target_session_id']),
+                tool_profile=_daily_rt_for_switch.DAILY_TOOL_PROFILE,
+            )
+            # No candidate JSONL yet — health without file identity guard.
+            staged.wait_staged_health()
+        except cc_resident.ResidentError as exc:
+            try:
+                staged._kill(quiet=True)
+            except Exception:
+                pass
+            raise _map_staged_resident_error(exc) from exc
         return staged
 
     def take_handoff(staged, result):
@@ -7085,10 +7118,10 @@ def _gw_build_switch_hooks():
         forge_cwd=CC_CWD,
         claude_home=claude_home,
         formal_holder=_CC_RESIDENT,
-    )
+    ), prepare_fresh
 
 
-_GW_SWITCH_HOOKS = _gw_build_switch_hooks()
+_GW_SWITCH_HOOKS = _gw_build_switch_hooks()[0]
 
 
 def _gw_build_target_prepare_hooks():
@@ -7096,10 +7129,11 @@ def _gw_build_target_prepare_hooks():
     from chat.context_window_target_prepare import TargetPrepareHooks
 
     claude_home = _Path(os.environ.get('HOME', '/root')) / '.claude'
-    base = _gw_build_switch_hooks()
+    base, _prepare_fresh = _gw_build_switch_hooks()
 
     def prepare_staged(intent, forge_path, identity):
         # identity re-checked inside Target prepare; reuse spawn/health.
+        # Native-cold Target prepare never calls this (no Claude at READY).
         return base.prepare_staged(intent, forge_path)
 
     return TargetPrepareHooks(
@@ -7113,13 +7147,14 @@ def _gw_build_target_prepare_hooks():
 def _gw_build_first_turn_hooks():
     from chat.context_window_first_turn import FirstTurnHooks
 
-    base = _gw_build_switch_hooks()
+    base, prepare_fresh = _gw_build_switch_hooks()
     return FirstTurnHooks(
         prepare_staged=base.prepare_staged,
         discard_staged=base.discard_staged,
         formal_holder=_CC_RESIDENT,
         forge_cwd=CC_CWD,
         claude_home=_Path(os.environ.get('HOME', '/root')) / '.claude',
+        prepare_fresh=prepare_fresh,
     )
 
 

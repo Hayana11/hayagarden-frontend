@@ -29,6 +29,7 @@ from chat.context_window import (
     INTENT_READY,
     _intent_row,
     get_latest_last_good_checkpoint,
+    has_active_switch_intent,
     resolve_canonical_context_row_conn,
 )
 from chat.context_window_first_turn import (
@@ -41,8 +42,14 @@ from chat.context_window_first_turn import (
     recover_first_turn_handoff_pending,
 )
 import chat.context_window_first_turn as ft_mod
-from chat.context_window_forge_publish import publish_context_window_forge_candidate
+from chat.context_window_forge_publish import (
+    EMPTY_SHA256,
+    PUBLISH_STATUS_NATIVE_COLD_BOUND,
+    is_native_cold_binding,
+    publish_context_window_forge_candidate,
+)
 from chat.context_window_target_prepare import (
+    PREPARE_STATUS_READY,
     TargetPrepareHooks,
     offline_target_prepare_hooks,
     prepare_context_window_target,
@@ -187,6 +194,7 @@ class ContextWindowFirstTurnTests(unittest.TestCase):
             formal_holder=self.hooks.formal_holder,
             forge_cwd=self.cwd,
             claude_home=self.claude_home,
+            prepare_fresh=self.hooks.prepare_fresh,
         )
         ft_mod._after_db_commit_hook = None
         ft_mod._before_handoff_hook = None
@@ -618,7 +626,159 @@ class ContextWindowFirstTurnTests(unittest.TestCase):
             formal_holder=self.hooks.formal_holder,
             forge_cwd=self.hooks.forge_cwd,
             claude_home=self.hooks.claude_home,
+            prepare_fresh=lambda intent, path: fake_staged,
         )
+
+    def test_native_cold_zero_carryover_full_path(self):
+        """Round 1: count=0 NATIVE_COLD → Target READY → fresh first-turn → committed.
+
+        Source has no Registry/mapping. Cuts transcript carryover only; offline
+        prepare_fresh stands in for production system/persona/memory spawn.
+        """
+        source_before = dc.get_daily_context_by_id(self.context_id, db_path=self.db)
+        before_jsonl = set(Path(self.home).rglob('*.jsonl'))
+
+        published = publish_context_window_forge_candidate(
+            source_context_id=self.context_id,
+            source_context_epoch=self.epoch,
+            count=0,
+            preview_id=self.switch_request_id,
+            request_id=self.switch_request_id,
+            thinking_policy=ThinkingPolicy.DROP,
+            forge_cwd=self.cwd,
+            claude_home=self.claude_home,
+            chat_id='default',
+            db_path=self.db,
+            now=NOW,
+        )
+        self.assertEqual(published.publish_status, PUBLISH_STATUS_NATIVE_COLD_BOUND)
+        self.assertIsNone(published.jsonl_path)
+        self.assertEqual(published.jsonl_size, 0)
+        self.assertEqual(published.jsonl_sha256, EMPTY_SHA256)
+        self.assertEqual(set(Path(self.home).rglob('*.jsonl')), before_jsonl)
+
+        intent_forging = self._intent()
+        self.assertTrue(is_native_cold_binding(intent_forging))
+        self.assertEqual(int(intent_forging['carryover_count']), 0)
+        self.assertEqual(json.loads(intent_forging['selected_message_ids_json']), [])
+
+        prepare_calls = {'staged': 0}
+
+        def counting_prepare(intent, path, identity):
+            prepare_calls['staged'] += 1
+            raise AssertionError('cold Target prepare must not spawn/resume')
+
+        cold_prepare_hooks = TargetPrepareHooks(
+            prepare_staged=counting_prepare,
+            discard_staged=self.prepare_hooks.discard_staged,
+            forge_cwd=self.cwd,
+            claude_home=self.claude_home,
+        )
+        prepared = prepare_context_window_target(
+            request_id=self.switch_request_id,
+            db_path=self.db,
+            hooks=cold_prepare_hooks,
+            now=NOW,
+        )
+        self.assertEqual(prepare_calls['staged'], 0)
+        self.assertEqual(prepared.prepare_status, PREPARE_STATUS_READY)
+        self.assertEqual(prepared.jsonl_size, 0)
+        self.assertEqual(prepared.jsonl_sha256, EMPTY_SHA256)
+        self.assertFalse(prepared.jsonl_path.is_file())
+
+        intent_ready = self._intent()
+        self.assertEqual(intent_ready['status'], INTENT_READY)
+        self.assertIsNotNone(intent_ready['staged_ready_at'])
+        target_id = int(intent_ready['target_context_id'])
+        reg = get_context_claude_session(target_id, 1, db_path=self.db)
+        self.assertIsNotNone(reg)
+        assert reg is not None
+        self.assertEqual(reg['claude_session_id'], published.candidate_session_id)
+        self.assertEqual(int(reg['scan_offset']), 0)
+        self.assertEqual(reg['scan_status'], 'READY')
+        self.assertEqual(
+            Path(reg['transcript_path']).resolve(),
+            prepared.jsonl_path.resolve(),
+        )
+
+        source_mid = dc.get_daily_context_by_id(self.context_id, db_path=self.db)
+        self.assertEqual(source_mid.get('closed_at'), source_before.get('closed_at'))
+        self.assertEqual(int(source_mid['version']), int(source_before['version']))
+
+        calls = {'fresh': 0, 'staged': 0}
+        orig_fresh = self.hooks.prepare_fresh
+        orig_staged = self.hooks.prepare_staged
+
+        def counting_fresh(intent, path):
+            calls['fresh'] += 1
+            return orig_fresh(intent, path)
+
+        def counting_staged(intent, path):
+            calls['staged'] += 1
+            return orig_staged(intent, path)
+
+        cold_hooks = ft_mod.FirstTurnHooks(
+            prepare_staged=counting_staged,
+            discard_staged=self.hooks.discard_staged,
+            formal_holder=self.hooks.formal_holder,
+            forge_cwd=self.cwd,
+            claude_home=self.claude_home,
+            prepare_fresh=counting_fresh,
+        )
+        gateway_user_id = _insert_msg(self.db, 'hayana', '冷窗第一句')
+        session = claim_and_start_first_turn(
+            switch_request_id=self.switch_request_id,
+            first_turn_request_id=self.first_turn_request_id,
+            user_content='冷窗第一句',
+            user_message_id=gateway_user_id,
+            hooks=cold_hooks,
+            db_path=self.db,
+            now=NOW,
+        )
+        self.assertEqual(calls['fresh'], 1)
+        self.assertEqual(calls['staged'], 0)
+        self.assertEqual(session.start_offset, 0)
+        self.assertEqual(self._intent()['status'], INTENT_COMMITTING)
+
+        # Source still open before first non-empty text.
+        self.assertIsNone(
+            dc.get_daily_context_by_id(self.context_id, db_path=self.db).get('closed_at'),
+        )
+
+        ft_mod.mark_first_turn_stdin_sent(session)
+        first = ingest_first_turn_text_delta(
+            session, text='冷窗你好', hooks=cold_hooks, db_path=self.db, now=NOW,
+        )
+        self.assertEqual(first.released_text, ('冷窗你好',))
+        self.assertTrue(first.handoff_complete)
+
+        source_after = dc.get_daily_context_by_id(self.context_id, db_path=self.db)
+        self.assertIsNotNone(source_after.get('closed_at'))
+        target = dc.get_daily_context_by_id(target_id, db_path=self.db)
+        self.assertEqual(target['window_mode'], WINDOW_MODE_MANUAL)
+        self.assertIsNone(target.get('closed_at'))
+
+        intent_after = self._intent()
+        self.assertEqual(intent_after['status'], INTENT_COMMITTED)
+        self.assertFalse(has_active_switch_intent('default', db_path=self.db))
+        # Candidate JSONL still not pre-created by Forge/Target.
+        self.assertEqual(set(Path(self.home).rglob('*.jsonl')), before_jsonl)
+
+        # Production cold path: fresh-named uses --session-id; gateway wires prepare_fresh.
+        import inspect
+        import cc_resident
+        import gateway
+        gw_src = inspect.getsource(gateway._gw_build_switch_hooks)
+        self.assertIn('spawn_fresh_named', gw_src)
+        self.assertIn('prepare_fresh', inspect.getsource(gateway._gw_build_first_turn_hooks))
+        # prepare_fresh must not call spawn_resumable.
+        fresh_fn = [
+            block for block in gw_src.split('def ') if block.startswith('prepare_fresh')
+        ][0]
+        self.assertIn('spawn_fresh_named', fresh_fn)
+        self.assertNotIn('spawn_resumable', fresh_fn)
+        fresh_src = inspect.getsource(cc_resident.ResidentSession.spawn_fresh_named)
+        self.assertIn("'--session-id', session_id", fresh_src)
 
     def test_clean_failure_before_commit_retry_same_message(self):
         """2) source canonical, target staged; same user_message_id retryable.
