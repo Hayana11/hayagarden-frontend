@@ -19,14 +19,14 @@ Implemented:
 1. Owner-explicit abandon of a failed first-turn (`committing` / `handoff_pending`)
 2. Brand-new cold fallback recovery context from last-good target checkpoint
 3. One-shot isolated Owner Canary — structural paths + live auth preflight / conditional cold turn
-4. Optional one-time native Claude.ai login inside the **same ephemeral Canary `CLAUDE_CONFIG_DIR`** when isolated auth is absent
+4. Optional one-time native Claude.ai login inside the **same ephemeral Canary auth home** when isolated auth is absent
 
 Not implemented:
 
 - Resend failed user / forge missing assistant / guess JSONL
 - Reopen old source as canonical
 - Auto clear dirty / cross-process first-delta recovery
-- Import or reuse production `CLAUDE_CODE_OAUTH_TOKEN`, production `~/.claude`, API key, Bedrock or Vertex auth
+- Import or reuse production `CLAUDE_CODE_OAUTH_TOKEN`, production `~/.claude`, production `~/.claude.json`, API key, Bedrock or Vertex auth
 - Persistent second credential store / custom credential format
 - Nightly / cron / CI runner / monitoring
 - Capacity Swap / frontend / flag-on / real-user chat acceptance
@@ -67,7 +67,7 @@ Normal preflight-only behavior remains:
 python3 tools/context_window_admin.py owner-canary --confirm-live
 ```
 
-If the new ephemeral Claude home is not logged in, it returns probe-derived `ENVIRONMENT_BLOCKED` and does not start the cold turn.
+If the new ephemeral auth home is not logged in, it returns probe-derived `ENVIRONMENT_BLOCKED` and does not start the cold turn.
 
 For the one-shot real live acceptance, the owner may explicitly authorize native login:
 
@@ -75,15 +75,22 @@ For the one-shot real live acceptance, the owner may explicitly authorize native
 python3 tools/context_window_admin.py owner-canary --confirm-live --login
 ```
 
-Temp SQLite / Claude home / cwd only; refuses repo or `/opt/frontend` roots; never opens production DB. Cleanup deletes the entire temp root, including the login credentials and Canary JSONL.
+Temp SQLite / Claude config / OS home / cwd only; refuses repo or `/opt/frontend` roots; never opens production DB. Cleanup deletes the entire temp root, including login credentials and Canary JSONL.
+
+Claude Code keeps user configuration under its config directory but OAuth session state can also live in user-home data such as `~/.claude.json`. Therefore this Canary pins **both**:
+
+- `CLAUDE_CONFIG_DIR=<temp-root>/claude-home`
+- `HOME=<temp-root>/fake-home`
+
+for auth probe, native login, and live cold turn. This prevents the login or subsequent probe from falling back to production `/root/.claude.json` while still allowing the just-created ephemeral OAuth session to be seen by the next step.
 
 `--confirm-live` **must**:
 
-1. Run isolated subscription auth preflight under the ephemeral `CLAUDE_CONFIG_DIR` (API/OAuth/Bedrock/Vertex overlays cleared)
+1. Run isolated subscription auth preflight with temp `HOME` + temp `CLAUDE_CONFIG_DIR` (API/OAuth/Bedrock/Vertex overlays cleared)
 2. If identity is confirmed → run the isolated cold turn on the recovery context
 3. If identity is not confirmed and `--login` is absent → return `ENVIRONMENT_BLOCKED` with the probe reason
-4. If identity is not confirmed and `--login` is present → run official `claude auth login --claudeai` in that same ephemeral config dir, with `HOME` also redirected under the temp root
-5. Re-run `auth status`; only a proved Pro/Max subscription may proceed to the cold turn
+4. If identity is not confirmed and `--login` is present → run official `claude auth login --claudeai` with the same temp `HOME` + `CLAUDE_CONFIG_DIR`
+5. Re-run `auth status` under the same temp auth home; only a proved Pro/Max subscription may proceed to the cold turn
 6. Login command failure, post-login auth failure, or model process non-start remains `ENVIRONMENT_BLOCKED`; a model that actually starts and then fails is `FAIL`
 
 The login subprocess inherits the operator terminal/browser flow. It does **not** capture or print credential contents into the JSON report. It does not copy any production Claude config or token into the Canary.
