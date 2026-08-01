@@ -22,7 +22,9 @@ from chat.context_window import (
     _update_intent_conn,
 )
 from chat.context_window_forge_publish import (
+    EMPTY_SHA256,
     VerifiedFileIdentity,
+    is_native_cold_binding,
     verify_published_candidate_file,
 )
 from chat.daily_context import (
@@ -37,6 +39,7 @@ from chat.daily_context import (
     ensure_schema,
 )
 from chat.session_registry import (
+    SCAN_STATUS_READY,
     derive_transcript_path,
     register_context_claude_session,
 )
@@ -449,6 +452,61 @@ def _register_target_registry(
     )
 
 
+def _register_cold_target_registry(
+    *,
+    target: dict[str, Any],
+    intent: dict[str, Any],
+    forge_cwd: str,
+    claude_home: Path,
+    db_path: str,
+) -> tuple[dict[str, Any], Path]:
+    """Register future JSONL address for native-cold; file need not exist yet."""
+    derived = derive_transcript_path(
+        cwd=forge_cwd,
+        claude_session_id=str(intent['target_session_id']),
+        claude_home=str(claude_home),
+    )
+    if int(intent['target_jsonl_size']) != 0:
+        raise TargetPrepareError(
+            'cold binding size must be 0',
+            error_code='TARGET_BINDING_INCOMPLETE',
+        )
+    if str(intent.get('target_jsonl_sha256') or '') != EMPTY_SHA256:
+        raise TargetPrepareError(
+            'cold binding sha must be empty',
+            error_code='TARGET_BINDING_INCOMPLETE',
+        )
+    reg = register_context_claude_session(
+        context_id=int(target['id']),
+        context_epoch=int(target['context_epoch']),
+        resident_generation=int(target['resident_generation']),
+        chat_id=str(target['chat_id']),
+        claude_session_id=str(intent['target_session_id']),
+        cwd=forge_cwd,
+        source=REGISTRY_SOURCE,
+        scan_offset=0,
+        claude_home=str(claude_home),
+        transcript_path=derived,
+        db_path=db_path,
+    )
+    if int(reg['scan_offset']) != 0:
+        raise TargetPrepareError(
+            'cold registry scan_offset must be 0',
+            error_code='TARGET_IDENTITY_CONFLICT',
+        )
+    if str(reg.get('scan_status') or '') != SCAN_STATUS_READY:
+        raise TargetPrepareError(
+            'cold registry scan_status must be READY',
+            error_code='TARGET_IDENTITY_CONFLICT',
+        )
+    if str(reg.get('claude_session_id') or '') != str(intent['target_session_id']):
+        raise TargetPrepareError(
+            'cold registry session mismatch',
+            error_code='TARGET_IDENTITY_CONFLICT',
+        )
+    return reg, Path(derived)
+
+
 def _assert_registry_chain(
     *,
     reg: dict[str, Any],
@@ -530,6 +588,176 @@ def _mark_intent_ready_conn(
     return live
 
 
+def _prepare_native_cold_target(
+    *,
+    req_id: str,
+    intent0: dict[str, Any],
+    hooks: TargetPrepareHooks,
+    db_path: str,
+    now: Optional[Any],
+    now_s: str,
+    entered_ready: bool,
+) -> TargetPrepareResult:
+    """Native-cold prepare: DB target + Registry address only; no file / no Claude."""
+    target: Optional[dict[str, Any]] = None
+    recovered = False
+    jsonl_path: Optional[Path] = None
+    intent: dict[str, Any] = intent0
+    try:
+        conn = _connect(db_path)
+        try:
+            conn.execute('BEGIN IMMEDIATE')
+            intent = _load_forging_intent(conn, req_id)
+            if not is_native_cold_binding(intent):
+                raise TargetPrepareError(
+                    'cold prepare binding mismatch',
+                    error_code='TARGET_BINDING_INCOMPLETE',
+                )
+            chat_id = str(intent['chat_id'] or DEFAULT_CHAT_ID)
+            entered_ready = str(intent.get('status') or '') == INTENT_READY
+
+            existing = _find_target_by_request(
+                conn, chat_id=chat_id, request_id=req_id,
+            )
+            bound_tid = intent.get('target_context_id')
+            if existing is None and bound_tid is not None:
+                existing = _row_to_dict(conn.execute(
+                    'SELECT * FROM daily_contexts WHERE id=?',
+                    (int(bound_tid),),
+                ).fetchone())
+                if existing is not None:
+                    _assert_target_matches_intent(existing, intent)
+                else:
+                    raise TargetPrepareError(
+                        'bound target missing',
+                        error_code='TARGET_IDENTITY_CONFLICT',
+                    )
+
+            if existing is not None:
+                _assert_target_matches_intent(existing, intent)
+                target = existing
+                recovered = True
+            else:
+                if entered_ready:
+                    raise TargetPrepareError(
+                        'ready intent missing target',
+                        error_code='TARGET_IDENTITY_CONFLICT',
+                    )
+                target = _create_staged_target_conn(
+                    conn, intent=intent, now_s=now_s,
+                )
+                _update_intent_conn(
+                    conn,
+                    req_id,
+                    fields={'target_context_id': int(target['id'])},
+                    now_s=now_s,
+                )
+            conn.commit()
+        except TargetPrepareError:
+            conn.rollback()
+            raise
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+        if _after_target_hook is not None:
+            _after_target_hook()
+
+        assert target is not None
+        try:
+            _reg, jsonl_path = _register_cold_target_registry(
+                target=target,
+                intent=intent,
+                forge_cwd=hooks.forge_cwd,
+                claude_home=hooks.claude_home,
+                db_path=db_path,
+            )
+        except Exception as exc:
+            from chat.session_registry import SessionRegistryConflict, SessionRegistryError
+            if isinstance(exc, (SessionRegistryConflict, SessionRegistryError)):
+                raise TargetPrepareError(
+                    str(exc), error_code='TARGET_IDENTITY_CONFLICT',
+                ) from exc
+            raise
+
+        if _after_registry_hook is not None:
+            _after_registry_hook()
+
+        # Cold READY proves DB/Registry freeze only — never spawn/kill Claude here.
+        conn = _connect(db_path)
+        try:
+            conn.execute('BEGIN IMMEDIATE')
+            live = _mark_intent_ready_conn(
+                conn,
+                request_id=req_id,
+                target_id=int(target['id']),
+                now_s=_now_s(_shanghai_now(now)),
+            )
+            conn.commit()
+        except TargetPrepareError:
+            conn.rollback()
+            raise
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+        status = (
+            PREPARE_STATUS_ALREADY_READY if entered_ready else PREPARE_STATUS_READY
+        )
+        assert jsonl_path is not None
+        return TargetPrepareResult(
+            prepare_status=status,
+            request_id=req_id,
+            target_context_id=int(target['id']),
+            target_context_epoch=int(target['context_epoch']),
+            candidate_session_id=str(intent['target_session_id']),
+            jsonl_path=jsonl_path,
+            jsonl_sha256=EMPTY_SHA256,
+            jsonl_size=0,
+            staged_ready_at=str(live.get('staged_ready_at') or now_s),
+            recovered=bool(recovered),
+        )
+    except TargetPrepareCrash:
+        raise
+    except Exception:
+        if entered_ready:
+            raise
+        cleanup_conn = _connect(db_path)
+        try:
+            cleanup_conn.execute('BEGIN IMMEDIATE')
+            live = _intent_row(cleanup_conn, req_id)
+            if live is not None and str(live.get('status') or '') == INTENT_READY:
+                cleanup_conn.commit()
+                raise
+            tid = None
+            if live is not None and live.get('target_context_id') is not None:
+                tid = int(live['target_context_id'])
+            if tid is None and target is not None:
+                tid = int(target['id'])
+            if tid is not None:
+                _delete_staged_target_conn(
+                    cleanup_conn, target_id=tid, request_id=req_id,
+                )
+            _clear_intent_prepare_fields(
+                cleanup_conn, request_id=req_id, now_s=_now_s(_shanghai_now(now)),
+            )
+            cleanup_conn.commit()
+        except TargetPrepareError:
+            cleanup_conn.rollback()
+            raise
+        except Exception:
+            cleanup_conn.rollback()
+            logger.info('cold target prepare cleanup failed', exc_info=True)
+            raise
+        finally:
+            cleanup_conn.close()
+        raise
+
+
 @_serialize_context_switch
 def prepare_context_window_target(
     *,
@@ -570,6 +798,18 @@ def prepare_context_window_target(
         raise
     else:
         conn.close()
+
+    # Native-cold: freeze target + Registry address without JSONL / Claude spawn.
+    if is_native_cold_binding(intent0):
+        return _prepare_native_cold_target(
+            req_id=req_id,
+            intent0=intent0,
+            hooks=hooks,
+            db_path=db_path,
+            now=now,
+            now_s=now_s,
+            entered_ready=entered_ready,
+        )
 
     identity = verify_published_candidate_file(
         forge_cwd=hooks.forge_cwd,

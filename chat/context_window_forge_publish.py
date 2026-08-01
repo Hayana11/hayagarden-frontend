@@ -55,6 +55,25 @@ PUBLISH_STATUS_ALREADY_PUBLISHED = 'ALREADY_PUBLISHED'
 
 EMPTY_SHA256 = hashlib.sha256(b'').hexdigest()
 
+
+def is_native_cold_binding(intent: dict[str, Any]) -> bool:
+    """Canonical native-cold binding: zero carryover, empty transcript identity.
+
+    Only cuts old chat transcript inheritance. Does **not** mean skipping
+    persona / memory / state / relationship system injection.
+    """
+    try:
+        count = int(intent.get('carryover_count'))
+        size = int(intent.get('target_jsonl_size'))
+    except (TypeError, ValueError):
+        return False
+    if count != 0 or size != 0:
+        return False
+    if str(intent.get('target_jsonl_sha256') or '') != EMPTY_SHA256:
+        return False
+    return _intent_selected_ids(intent) == []
+
+
 # Narrow test hooks (default no-ops). Production never sets these.
 _post_publish_hook: Optional[Callable[[], None]] = None
 _finalize_fault_hook: Optional[Callable[[], None]] = None

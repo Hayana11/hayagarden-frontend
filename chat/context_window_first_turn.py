@@ -49,6 +49,7 @@ from chat.daily_runtime import (
     handoff_lock,
     install_target_resident_after_swap,
 )
+from chat.context_window_forge_publish import is_native_cold_binding
 from chat.session_registry import SCAN_STATUS_READY, get_context_claude_session
 from tools.claude_forge_core import session_jsonl_path_for_cwd
 
@@ -67,13 +68,16 @@ class FirstTurnError(Exception):
 
 @dataclass(frozen=True)
 class FirstTurnHooks:
-    """Process-side first-turn hooks (staged resume + formal holder swap)."""
+    """Process-side first-turn hooks (staged resume / fresh-named + formal swap)."""
 
     prepare_staged: Callable[[dict[str, Any], Path], Any]
     discard_staged: Callable[[Any], None]
     formal_holder: Any
     forge_cwd: str
     claude_home: Path
+    # Native-cold only: fresh ``--session-id`` spawn. Same system/persona/memory
+    # chain as prepare_staged; must not use --resume. Optional for non-cold tests.
+    prepare_fresh: Optional[Callable[[dict[str, Any], Path], Any]] = None
 
 
 @dataclass
@@ -831,15 +835,38 @@ def claim_and_start_first_turn(
 
     staged: Any = None
     try:
-        forge_path = session_jsonl_path_for_cwd(
-            hooks.forge_cwd,
-            str(intent['target_session_id']),
-            claude_home=hooks.claude_home,
-        )
-        if forge_path is None:
-            raise FirstTurnError('jsonl path missing', error_code='FIRST_TURN_JSONL_MISSING')
-        jsonl_path = Path(forge_path)
-        staged = hooks.prepare_staged(dict(intent), jsonl_path)
+        if is_native_cold_binding(intent):
+            # Cold: use Registry-frozen future path + fresh --session-id spawn.
+            # Still loads production system/persona/memory via prepare_fresh.
+            if int(reg['scan_offset']) != 0:
+                raise FirstTurnError(
+                    'cold registry scan_offset must be 0',
+                    error_code='FIRST_TURN_COLD_OFFSET',
+                )
+            if str(reg.get('scan_status') or '') != SCAN_STATUS_READY:
+                raise FirstTurnError(
+                    'cold registry not READY',
+                    error_code='FIRST_TURN_REGISTRY_NOT_READY',
+                )
+            jsonl_path = Path(str(reg['transcript_path']))
+            if hooks.prepare_fresh is None:
+                raise FirstTurnError(
+                    'prepare_fresh required for native cold',
+                    error_code='FIRST_TURN_HOOKS_REQUIRED',
+                )
+            staged = hooks.prepare_fresh(dict(intent), jsonl_path)
+        else:
+            forge_path = session_jsonl_path_for_cwd(
+                hooks.forge_cwd,
+                str(intent['target_session_id']),
+                claude_home=hooks.claude_home,
+            )
+            if forge_path is None:
+                raise FirstTurnError(
+                    'jsonl path missing', error_code='FIRST_TURN_JSONL_MISSING',
+                )
+            jsonl_path = Path(forge_path)
+            staged = hooks.prepare_staged(dict(intent), jsonl_path)
     except Exception:
         try:
             if staged is not None:
@@ -1328,6 +1355,10 @@ def offline_first_turn_hooks(work_root: str | Path) -> FirstTurnHooks:
             raise FirstTurnError('jsonl mutated', error_code='FIRST_TURN_JSONL_MUTATED')
         return staged
 
+    def prepare_fresh(intent: dict[str, Any], forge_path: Path) -> Any:
+        # File may not exist yet; only freeze named session identity.
+        return _OfflineStaged(str(intent['target_session_id']), forge_path)
+
     def discard_staged(staged: Any) -> None:
         if staged is not None and hasattr(staged, 'kill'):
             staged.kill()
@@ -1338,4 +1369,5 @@ def offline_first_turn_hooks(work_root: str | Path) -> FirstTurnHooks:
         formal_holder=_FakeHolder(),
         forge_cwd=cwd,
         claude_home=claude_home,
+        prepare_fresh=prepare_fresh,
     )

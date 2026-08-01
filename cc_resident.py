@@ -340,6 +340,86 @@ class ResidentSession:
                     self._tool_surface_snapshot = {}
             return self
 
+    def spawn_fresh_named(
+        self,
+        system_text,
+        env,
+        *,
+        session_id,
+        tool_profile=TOOL_PROFILE_LEGACY,
+        reason='forge_fresh_named',
+    ):
+        """Fresh Claude with ``--session-id`` (never ``--resume``).
+
+        Same process args / system prompt path as ``_spawn`` and
+        ``spawn_resumable``; only the session naming flag differs. Callers must
+        still supply the production system/persona/memory/state text — native
+        cold cuts transcript carryover, not system injection.
+        """
+        import uuid as _uuid
+
+        session_id = str(session_id or '').strip()
+        if not session_id:
+            raise ResidentError('session_id required')
+        try:
+            _uuid.UUID(session_id)
+        except (TypeError, ValueError) as exc:
+            raise ResidentError('session_id must be uuid') from exc
+        with self._lock:
+            if self._alive():
+                raise ResidentError('staged spawn on live session')
+            self._tool_profile = str(tool_profile or TOOL_PROFILE_LEGACY)
+            base_args = [
+                'claude', '-p',
+                '--input-format', 'stream-json',
+                '--output-format', 'stream-json',
+                '--verbose',
+                '--include-partial-messages',
+                '--system-prompt', system_text,
+                '--max-turns', '5',
+                '--tools', '',
+                '--thinking-display', 'summarized',
+                '--exclude-dynamic-system-prompt-sections',
+                '--session-id', session_id,
+            ]
+            if '--resume' in base_args:
+                raise ResidentError('fresh_named must not carry --resume')
+            if self._tool_profile == TOOL_PROFILE_TEXT_ONLY:
+                args = base_args + ['--allowedTools', '']
+            else:
+                args = base_args + [
+                    '--mcp-config', self._mcp_config_path,
+                    '--strict-mcp-config',
+                    '--allowedTools', self._allowed_tools,
+                ]
+            if '--resume' in args:
+                raise ResidentError('fresh_named must not carry --resume')
+            try:
+                self._proc = subprocess.Popen(
+                    args, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    text=True, bufsize=1, cwd=self._cwd, env=env,
+                )
+            except Exception as exc:
+                self._proc = None
+                raise ResidentError('staged_spawn_failed:%s' % exc) from exc
+            self._system_text = system_text
+            self._session_id = session_id
+            self._cold = True
+            self._generation += 1
+            self._reset_session_meta(respawn_reason=reason)
+            if self._tool_profile == TOOL_PROFILE_TEXT_ONLY:
+                self._tool_surface_snapshot = {}
+            else:
+                try:
+                    from tools.cc_tool_surface import capture_tool_surface_snapshot
+                    self._tool_surface_snapshot = capture_tool_surface_snapshot(
+                        self._allowed_tools,
+                        mcp_config_path=self._mcp_config_path,
+                    )
+                except Exception:
+                    self._tool_surface_snapshot = {}
+            return self
+
     def wait_staged_health(
         self,
         *,
