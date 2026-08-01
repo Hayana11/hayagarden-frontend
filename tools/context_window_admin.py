@@ -3,22 +3,27 @@
 
 Usage (production repair — local CLI only):
 
-  python3 tools/context_window_admin.py inspect-first-turn \\
+  python3 tools/context_window_admin.py inspect-first-turn \
     --request-id <failed_switch_request_id>
 
-  python3 tools/context_window_admin.py recover-from-last-good \\
-    --request-id <failed_switch_request_id> \\
-    --expected-status <committing|handoff_pending> \\
-    --expected-first-turn-request-id <first_turn_request_id> \\
-    --reason "<abandon reason>" \\
+  python3 tools/context_window_admin.py recover-from-last-good \
+    --request-id <failed_switch_request_id> \
+    --expected-status <committing|handoff_pending> \
+    --expected-first-turn-request-id <first_turn_request_id> \
+    --reason "<abandon reason>" \
     --confirm-abandon-failed-turn
 
 Owner Canary (temp resources only; never production paths):
 
   python3 tools/context_window_admin.py owner-canary --confirm-live
+  python3 tools/context_window_admin.py owner-canary --confirm-live --login
+
+``--login`` performs a one-time native Claude.ai subscription login inside the
+same ephemeral ``CLAUDE_CONFIG_DIR`` used by this Canary. It never imports the
+production OAuth token/config and the entire temp root is deleted at cleanup.
 
 Runs isolated subscription auth preflight; cold turn only when identity is
-confirmed; otherwise ENVIRONMENT_BLOCKED from the probe reason.
+confirmed; otherwise ENVIRONMENT_BLOCKED from the probe/login reason.
 NIGHTLY_NOT_AUTHORIZED / OWNER canary is one-shot. No scheduler.
 """
 from __future__ import annotations
@@ -27,6 +32,7 @@ import argparse
 import json
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import traceback
@@ -44,11 +50,14 @@ from chat.context_window_fallback import (  # noqa: E402
     FallbackError,
     build_owner_canary_fixture,
     inspect_failed_first_turn,
+    isolated_owner_canary_env,
     probe_isolated_subscription_auth,
     recover_from_last_good,
     run_isolated_cold_turn_after_recover,
 )
 from chat.daily_context import DEFAULT_CHAT_ID, DEFAULT_DB_PATH  # noqa: E402
+
+_auth_login_runner = subprocess.run
 
 
 def _print(obj: Any) -> None:
@@ -128,16 +137,65 @@ def _assert_isolated_temp_root(temp_root: Path) -> None:
         )
 
 
+def _run_isolated_subscription_login(
+    claude_home: Path | str,
+    isolated_cwd: Path | str,
+) -> dict[str, Any]:
+    """Interactive, one-shot Claude.ai login inside the ephemeral Canary home.
+
+    The subprocess inherits stdin/stdout/stderr so the owner can complete the
+    official browser flow. Host API/OAuth/Bedrock/Vertex overlays stay removed.
+    HOME is also redirected into the temp root as a belt-and-suspenders guard.
+    """
+    from tools.claude_forge_live_gate import CLAUDE_CODE_NPM_SPEC
+
+    home = Path(claude_home)
+    cwd = Path(isolated_cwd)
+    env = isolated_owner_canary_env(home)
+    fake_home = home.parent / 'fake-home-login'
+    fake_home.mkdir(parents=True, exist_ok=True)
+    env['HOME'] = str(fake_home)
+    try:
+        proc = _auth_login_runner(
+            [
+                'npx', '--yes', CLAUDE_CODE_NPM_SPEC,
+                'auth', 'login', '--claudeai',
+            ],
+            cwd=str(cwd),
+            env=env,
+            check=False,
+        )
+    except Exception as exc:
+        return {
+            'ok': False,
+            'reason': 'isolated_auth_login_command_failed',
+            'detail': str(exc)[:500],
+        }
+    exit_code = int(getattr(proc, 'returncode', 1) or 0)
+    return {
+        'ok': exit_code == 0,
+        'reason': (
+            'isolated_auth_login_completed'
+            if exit_code == 0
+            else 'isolated_auth_login_failed'
+        ),
+        'exit_code': exit_code,
+    }
+
+
 def run_owner_canary(
     *,
     confirm_live: bool,
     structural_only: bool = False,
+    login_if_needed: bool = False,
 ) -> dict[str, Any]:
     """Isolated Owner Canary. Never accepts production paths as arguments.
 
     structural_only=True skips live auth preflight and cold turn (unit tests).
     confirm_live + not structural_only: real isolated auth preflight, then cold
     turn when identity is confirmed; otherwise ENVIRONMENT_BLOCKED from probe.
+    login_if_needed=True may run one official Claude.ai login inside the same
+    ephemeral CLAUDE_CONFIG_DIR, then re-probe before the cold turn.
     """
     if not confirm_live and not structural_only:
         return {
@@ -157,6 +215,7 @@ def run_owner_canary(
         'success_path': None,
         'reject_path': None,
         'auth_preflight': None,
+        'auth_login': None,
         'live_turn': None,
         'cleanup': None,
     }
@@ -258,16 +317,41 @@ def run_owner_canary(
             report['ok'] = structural_ok
             return report
 
-        # Live path: real isolated auth preflight, then cold turn if identity ok.
+        # Live path: real isolated auth preflight, optional ephemeral login,
+        # then cold turn only after the same temp CLAUDE_CONFIG_DIR proves identity.
         if not confirm_live:
             report['ok'] = False
             report['error_code'] = 'CONFIRM_LIVE_REQUIRED'
             return report
 
         auth_ok, auth_reason = probe_isolated_subscription_auth(claude_home, cwd)
+        initial_auth_reason = auth_reason
+        if not auth_ok and login_if_needed:
+            login = _run_isolated_subscription_login(claude_home, cwd)
+            report['auth_login'] = login
+            if not login.get('ok'):
+                report['auth_preflight'] = {
+                    'ok': False,
+                    'reason': initial_auth_reason,
+                    'claude_home': str(claude_home),
+                    'cwd': str(cwd),
+                    'login_attempted': True,
+                }
+                report['live_turn'] = {
+                    'attempted': False,
+                    'ENVIRONMENT_BLOCKED': True,
+                    'reason': str(login.get('reason') or 'isolated_auth_login_failed'),
+                }
+                report['error_code'] = ENVIRONMENT_BLOCKED
+                report['ok'] = False
+                return report
+            auth_ok, auth_reason = probe_isolated_subscription_auth(claude_home, cwd)
+
         report['auth_preflight'] = {
             'ok': auth_ok,
             'reason': auth_reason,
+            'initial_reason': initial_auth_reason,
+            'login_attempted': bool(report.get('auth_login')),
             'claude_home': str(claude_home),
             'cwd': str(cwd),
         }
@@ -347,6 +431,7 @@ def _cmd_owner_canary(args: argparse.Namespace) -> int:
     report = run_owner_canary(
         confirm_live=bool(args.confirm_live),
         structural_only=bool(getattr(args, 'structural_only', False)),
+        login_if_needed=bool(getattr(args, 'login', False)),
     )
     _print(report)
     if report.get('error_code') in {
@@ -388,6 +473,13 @@ def main(argv: Optional[list[str]] = None) -> int:
         help='one-shot isolated Owner Canary (no production paths)',
     )
     can.add_argument('--confirm-live', action='store_true', required=True)
+    can.add_argument(
+        '--login', action='store_true',
+        help=(
+            'if isolated auth is absent, run one native Claude.ai login inside '
+            'the ephemeral CLAUDE_CONFIG_DIR, then re-probe and continue'
+        ),
+    )
     can.add_argument(
         '--structural-only', action='store_true',
         help=argparse.SUPPRESS,  # test/harness only; not a production flag
