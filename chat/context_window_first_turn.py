@@ -1134,29 +1134,9 @@ def abort_first_turn_postcommit(
         already_aborted = (
             str(intent.get('first_turn_error_code') or '') == FIRST_TURN_POSTCOMMIT_ABORT
         )
-        already_bumped = live_gen == expected_new_gen
 
-        # Exact first-turn lease delete (missing row is success).
-        conn.execute(
-            'DELETE FROM daily_resident_turn_leases '
-            'WHERE context_id=? AND resident_generation=? AND lease_owner=?',
-            (target_id, old_gen, lease_owner),
-        )
-
-        if already_bumped:
-            # Idempotent path: gen already N→N+1; do not bump again.
-            conn.execute(
-                'DELETE FROM daily_resident_cursors '
-                'WHERE context_id=? AND resident_generation=?',
-                (target_id, expected_new_gen),
-            )
-            if not already_aborted:
-                _update_intent_conn(
-                    conn,
-                    session.switch_request_id,
-                    fields={'first_turn_error_code': FIRST_TURN_POSTCOMMIT_ABORT},
-                    now_s=now_s,
-                )
+        # Confirmed prior postcommit abort: true no-op (no cursor/lease/error rewrite).
+        if live_gen == expected_new_gen and already_aborted:
             conn.commit()
             return
 
@@ -1165,6 +1145,13 @@ def abort_first_turn_postcommit(
             raise FirstTurnError(
                 'target generation mismatch', error_code='FIRST_TURN_TARGET_STALE',
             )
+
+        # Exact first-turn lease delete (missing row is success).
+        conn.execute(
+            'DELETE FROM daily_resident_turn_leases '
+            'WHERE context_id=? AND resident_generation=? AND lease_owner=?',
+            (target_id, old_gen, lease_owner),
+        )
 
         cur = conn.execute(
             '''UPDATE daily_contexts

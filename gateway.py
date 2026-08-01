@@ -4339,6 +4339,7 @@ def _stream_cc_first_turn(_turn_data, _uc, intent: dict):
     pending = []  # turn events held until first-text handoff
     first_released = False
     postcommit_terminalized = False
+    complete_started = False
     text_acc = []
     thinking_acc = []
     cc_tool_calls = []
@@ -4365,10 +4366,12 @@ def _stream_cc_first_turn(_turn_data, _uc, intent: dict):
     def _postcommit_terminal(reason: str) -> None:
         """Release leftover first-turn lease after committed handoff abort.
 
-        Only for first_released paths where complete_first_turn_round did not
-        succeed. Does not invent a partial assistant. Helper itself is idempotent.
+        Only for first_released paths where complete_first_turn_round has not
+        started. Once complete begins, fail-closed complete owns the outcome.
         """
         nonlocal postcommit_terminalized
+        if complete_started:
+            return
         if postcommit_terminalized or not first_released or session is None:
             return
         if not (
@@ -4562,6 +4565,7 @@ def _stream_cc_first_turn(_turn_data, _uc, intent: dict):
                     except OSError:
                         end_offset = int(session.start_offset)
                     try:
+                        complete_started = True
                         done = complete_first_turn_round(
                             session,
                             assistant_content=assistant_text,
