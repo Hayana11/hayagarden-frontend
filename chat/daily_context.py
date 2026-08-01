@@ -729,6 +729,16 @@ def _ensure_context_switch_forge_schema(conn: sqlite3.Connection) -> None:
             ('last_good_resident_generation', 'INTEGER'),
             ('last_good_history_cursor_message_id', 'INTEGER'),
             ('last_good_recorded_at', 'TEXT'),
+            # Owner cold-fallback audit (written only by recover_from_last_good).
+            ('owner_abandoned_at', 'TEXT'),
+            ('owner_abandon_reason', 'TEXT'),
+            ('owner_abandon_actor', 'TEXT'),
+            ('fallback_request_id', 'TEXT'),
+            ('fallback_checkpoint_switch_request_id', 'TEXT'),
+            ('fallback_history_cursor_message_id', 'INTEGER'),
+            ('fallback_context_id', 'INTEGER'),
+            ('fallback_context_epoch', 'INTEGER'),
+            ('fallback_committed_at', 'TEXT'),
         )
         for col_name, col_type in first_turn_cols:
             if col_name not in icols:
