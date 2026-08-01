@@ -352,6 +352,7 @@ class ContextWindowFirstTurnTests(unittest.TestCase):
             now=NOW,
         )
         self.assertEqual(session.user_message_id, gateway_user_id)
+        self.assertEqual(session.user_content, '新房第一句')
         intent_committing = self._intent()
         self.assertEqual(intent_committing['status'], INTENT_COMMITTING)
         self.assertEqual(int(intent_committing['first_user_message_id']), gateway_user_id)
@@ -628,6 +629,72 @@ class ContextWindowFirstTurnTests(unittest.TestCase):
             claude_home=self.hooks.claude_home,
             prepare_fresh=lambda intent, path: fake_staged,
         )
+
+    def test_message_id_only_uses_db_content_for_send_turn(self):
+        """LIVE_FAIL regression: FE stream sends user_message_id without body.
+
+        Canonical text must come from chat_messages and reach staged.send_turn.
+        Non-empty request mismatch still fails closed.
+        """
+        import gateway
+
+        self._seed_source_and_forge()
+        body = '爸爸爸爸！（探头，咪咪喵喵地跑来跑去。）'
+        gateway_user_id = _insert_msg(self.db, 'hayana', body)
+
+        with self.assertRaises(FirstTurnError) as ar:
+            claim_and_start_first_turn(
+                switch_request_id=self.switch_request_id,
+                first_turn_request_id=self.first_turn_request_id,
+                user_content='完全不同的正文',
+                user_message_id=gateway_user_id,
+                hooks=self.hooks,
+                db_path=self.db,
+                now=NOW,
+            )
+        self.assertEqual(ar.exception.error_code, 'FIRST_TURN_USER_CONTENT_CONFLICT')
+        self.assertEqual(self._intent()['status'], INTENT_READY)
+
+        session = claim_and_start_first_turn(
+            switch_request_id=self.switch_request_id,
+            first_turn_request_id=self.first_turn_request_id,
+            user_content='',  # production message-id-only contract
+            user_message_id=gateway_user_id,
+            hooks=self.hooks,
+            db_path=self.db,
+            now=NOW,
+        )
+        self.assertEqual(session.user_message_id, gateway_user_id)
+        self.assertEqual(session.user_content, body)
+        abort_first_turn_clean(session, hooks=self.hooks, db_path=self.db, now=NOW)
+        self.assertEqual(self._intent()['status'], INTENT_READY)
+
+        sent: list[str] = []
+
+        class _CaptureStaged:
+            def send_turn(self, content, commit_meta=None, on_stdin_flushed=None):
+                sent.append(str(content))
+                if on_stdin_flushed is not None:
+                    on_stdin_flushed()
+                yield ('text', '收到')
+                yield ('done', ('收到', '', {}))
+
+            def _kill(self, quiet=True):
+                return None
+
+        fake = _CaptureStaged()
+        hooks = self._gateway_first_turn_hooks(fake)
+        turn = {'user_message_id': gateway_user_id}
+        live_intent = self._intent()
+        with mock.patch.object(gateway, 'DB_PATH', self.db), \
+             mock.patch.object(gateway, '_gw_build_first_turn_hooks', return_value=hooks):
+            # Empty _uc mirrors production chat_stream after /api/chat/send.
+            chunks = list(gateway._stream_cc_first_turn(turn, '', live_intent))
+        self.assertEqual(sent, [body])
+        joined = ''.join(chunks)
+        self.assertIn('"t": "text"', joined)
+        self.assertIn('"ok": true', joined)
+        self.assertEqual(self._intent()['status'], INTENT_COMMITTED)
 
     def test_native_cold_zero_carryover_full_path(self):
         """Round 1: count=0 NATIVE_COLD → Target READY → fresh first-turn → committed.
