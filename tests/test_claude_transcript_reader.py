@@ -193,22 +193,20 @@ class TranscriptReaderTests(unittest.TestCase):
                 read_transcript(path)
             self.assertEqual(ctx.exception.code, ReaderErrorCode.DUPLICATE_UUID)
 
-    def test_known_uuidless_metadata_ignored_before_conversation(self) -> None:
-        """Known Claude raw bookkeeping without uuid must not block Reader."""
+    def test_raw_bookkeeping_projected_without_type_allowlist(self) -> None:
+        """A: uuid-less non-conversation observations project before formal ingest.
+
+        Includes a type deliberately outside the terminated allowlist to prove
+        the shared boundary is structural, not a metadata type registry.
+        """
         with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / 'meta.jsonl'
+            path = Path(tmp) / 'boundary.jsonl'
             u = 'b1111111-1111-1111-1111-111111111111'
             a = 'b2222222-2222-2222-2222-222222222222'
             rows = [
-                {'type': 'file-history-snapshot', 'snapshot': {'trackedFileBackups': {}}},
-                {'type': 'queue-operation', 'operation': 'dequeue'},
-                # Formal META types previously missing from uuid-less allowlist.
+                # Not on the terminated allowlist — must still project away.
+                {'type': 'future-claude-telemetry-v9', 'payload': {'x': 1}},
                 {'type': 'last-prompt', 'prompt': 'seed'},
-                {'type': 'result', 'subtype': 'success'},
-                {'type': 'agent-name', 'agentName': 'nightly'},
-                {'type': 'custom-title', 'customTitle': 'native'},
-                {'type': 'progress', 'data': {'type': 'hook_progress'}},
-                {'type': 'system', 'subtype': 'turn_duration', 'durationMs': 1},
                 {
                     'type': 'assistant',
                     'requestId': 'req-usage-obs',
@@ -222,7 +220,7 @@ class TranscriptReaderTests(unittest.TestCase):
                     'uuid': u,
                     'parentUuid': None,
                     'sessionId': 's-meta',
-                    'message': {'role': 'user', 'content': 'hello after metadata'},
+                    'message': {'role': 'user', 'content': 'hello after bookkeeping'},
                 },
                 {
                     'type': 'assistant',
@@ -242,46 +240,48 @@ class TranscriptReaderTests(unittest.TestCase):
             graph = read_transcript(path)
             self.assertEqual(len(graph.events), 2)
             self.assertEqual(len(graph.candidate_rounds), 1)
-            self.assertEqual(
-                graph.candidate_rounds[0].candidate_user_event_uuid, u,
-            )
             self.assertEqual(list(graph.candidate_rounds[0].event_uuids), [u, a])
-            ignored = [w for w in graph.warnings if w.startswith('ignored_raw_metadata:')]
-            self.assertGreaterEqual(len(ignored), 9)
-            self.assertTrue(any(w.endswith(':last-prompt') for w in ignored))
-            self.assertTrue(any(w.endswith(':result') for w in ignored))
+            ignored = [
+                w for w in graph.warnings if w.startswith('ignored_raw_observation:')
+            ]
+            self.assertGreaterEqual(len(ignored), 3)
+            self.assertTrue(
+                any('future-claude-telemetry-v9' in w for w in ignored),
+                ignored,
+            )
 
-    def test_user_missing_uuid_still_rejected(self) -> None:
-        """Conversational user without uuid remains fail-closed."""
+    def test_conversation_shaped_missing_uuid_rejected(self) -> None:
+        """B: conversation-shaped uuid-less rows remain fail-closed."""
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / 'bad_user.jsonl'
-            rows = [
-                {
+            path.write_text(
+                json.dumps({
                     'type': 'user',
                     'parentUuid': None,
                     'sessionId': 's',
                     'message': {'role': 'user', 'content': 'no uuid'},
-                },
-            ]
-            path.write_text(
-                ''.join(json.dumps(r) + '\n' for r in rows),
+                }) + '\n',
                 encoding='utf-8',
             )
             with self.assertRaises(TranscriptReaderError) as ctx:
                 read_transcript(path)
             self.assertEqual(ctx.exception.code, ReaderErrorCode.MISSING_UUID)
 
-    def test_unknown_uuidless_object_still_rejected(self) -> None:
-        """Unknown uuid-less objects must not be silently skipped."""
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / 'unknown.jsonl'
-            path.write_text(
-                json.dumps({'type': 'not-a-known-metadata', 'foo': 1}) + '\n',
+            path2 = Path(tmp) / 'bad_assistant.jsonl'
+            path2.write_text(
+                json.dumps({
+                    'type': 'assistant',
+                    'sessionId': 's',
+                    'message': {
+                        'role': 'assistant',
+                        'content': [{'type': 'text', 'text': 'no uuid'}],
+                    },
+                }) + '\n',
                 encoding='utf-8',
             )
-            with self.assertRaises(TranscriptReaderError) as ctx:
-                read_transcript(path)
-            self.assertEqual(ctx.exception.code, ReaderErrorCode.MISSING_UUID)
+            with self.assertRaises(TranscriptReaderError) as ctx2:
+                read_transcript(path2)
+            self.assertEqual(ctx2.exception.code, ReaderErrorCode.MISSING_UUID)
 
 
 if __name__ == '__main__':

@@ -3,13 +3,16 @@
 Responsibilities:
 - open source JSONL read-only
 - parse line-by-line
-- preserve raw event objects
+- shared raw→formal boundary (project non-conversation bookkeeping; fail-closed
+  on conversation-shaped uuid-less rows) before strict ingest
+- preserve raw event objects for canonical rows
 - build UUID / parent / tool indexes
 - classify event roles (candidate user vs tool_result user vs meta)
 - attribute sidechain impact via full parent graph (order-independent)
 - report illegal JSON / duplicate UUID with explicit errors
 
 Non-responsibilities (explicit):
+- maintaining a Claude raw metadata type allowlist
 - confirming real kitten/user identity (requires app mapping at Transform)
 - round selection, rewriting, resume, DB mapping, mtime session pick, --continue
 """
@@ -56,25 +59,13 @@ class TranscriptReaderError(ValueError):
         self.detail = detail
 
 
-# Types already classified as EventRole.META by _classify_event (and verified as
-# non-conversation bookkeeping by the old Forge Spike). Uuid-less allowlist must
-# stay aligned with this set — do not invent extra unknown types here.
+# Formal EventRole.META classification for uuid-bearing rows only.
+# Not used as the uuid-less safety gate (see shared raw boundary below).
 _FORMAL_META_EVENT_TYPES = frozenset({
     'queue-operation',
     'last-prompt',
     'result',
     'file-history-snapshot',
-})
-
-# Claude Code raw JSONL bookkeeping rows that may omit uuid.
-# = formal META types ∪ live-gate KNOWN_METADATA_TYPES extras
-# (+ system/turn_duration and assistant usage observations below).
-# Unknown uuid-less objects still fail closed.
-_IGNORABLE_RAW_METADATA_TYPES = frozenset({
-    *_FORMAL_META_EVENT_TYPES,
-    'agent-name',
-    'custom-title',
-    'progress',
 })
 
 
@@ -85,11 +76,17 @@ def _content_blocks(message: Mapping[str, Any]) -> list[dict[str, Any]]:
     return []
 
 
-def _is_assistant_usage_observation(obj: Mapping[str, Any]) -> bool:
-    """True for Claude assistant usage bookkeeping (not a conversation node).
+def _message_role(obj: Mapping[str, Any]) -> str:
+    message = obj.get('message')
+    if isinstance(message, dict):
+        return str(message.get('role') or '')
+    return ''
 
-    Mirrors tools.claude_forge_live_gate.classify_raw_jsonl_event for the
-    uuid-less / non-canonical path: type=assistant + requestId + message.usage.
+
+def _is_assistant_usage_observation(obj: Mapping[str, Any]) -> bool:
+    """Structural: assistant usage bookkeeping, not a conversation node.
+
+    type=assistant + requestId + message.usage — Claude often omits uuid here.
     """
     if str(obj.get('type') or '') != 'assistant':
         return False
@@ -102,31 +99,54 @@ def _is_assistant_usage_observation(obj: Mapping[str, Any]) -> bool:
     return isinstance(message.get('usage'), Mapping)
 
 
-def _is_ignorable_raw_metadata(obj: Mapping[str, Any]) -> bool:
-    """Return True when a uuid-less raw object is known non-conversation metadata.
+def _is_conversation_shaped(obj: Mapping[str, Any]) -> bool:
+    """True when a raw object looks like a formal conversation event.
 
-    Must stay narrow: never treat bare missing-uuid conversation events
-    (user / real assistant / tool rows / unknown types) as ignorable.
+    Used only on the uuid-less path: conversation-shaped → fail-closed;
+    otherwise treat as raw bookkeeping and project away before ingestion.
     """
-    etype = str(obj.get('type') or '')
-    if etype in _IGNORABLE_RAW_METADATA_TYPES:
-        return True
-    if etype == 'system' and str(obj.get('subtype') or '') == 'turn_duration':
-        return True
     if _is_assistant_usage_observation(obj):
+        return False
+    etype = str(obj.get('type') or '')
+    if etype in {'user', 'assistant'}:
+        return True
+    if _message_role(obj) in {'user', 'assistant'}:
         return True
     return False
 
 
-def _raw_metadata_kind(obj: Mapping[str, Any]) -> str:
-    etype = str(obj.get('type') or '')
-    if etype in _IGNORABLE_RAW_METADATA_TYPES:
-        return etype
-    if etype == 'system' and str(obj.get('subtype') or '') == 'turn_duration':
-        return 'system/turn_duration'
+def _raw_observation_kind(obj: Mapping[str, Any]) -> str:
+    """Diagnostic label only — never the authority for skip-vs-fail."""
     if _is_assistant_usage_observation(obj):
         return 'assistant_usage_observation'
-    return etype or '<missing>'
+    etype = str(obj.get('type') or '')
+    if etype == 'system' and str(obj.get('subtype') or ''):
+        return f'system/{obj.get("subtype")}'
+    return etype or 'raw_bookkeeping'
+
+
+def _project_raw_object(
+    obj: Mapping[str, Any],
+    *,
+    lineno: int,
+) -> Optional[Mapping[str, Any]]:
+    """Shared raw→formal boundary.
+
+    Returns the canonical object for strict formal ingestion, or None when the
+    row is raw bookkeeping to skip. Conversation-shaped uuid-less rows raise
+    READER_MISSING_UUID. Uuid-bearing rows always proceed to formal ingest.
+    """
+    if not isinstance(obj, dict):
+        raise TranscriptReaderError(ReaderErrorCode.NOT_OBJECT, f'line_{lineno}')
+
+    if str(obj.get('uuid') or ''):
+        return obj
+
+    if _is_conversation_shaped(obj):
+        raise TranscriptReaderError(ReaderErrorCode.MISSING_UUID, f'line_{lineno}')
+
+    # Non-conversation uuid-less observation: project away before formal ingest.
+    return None
 
 
 def _is_tool_result_only_user(message: Mapping[str, Any]) -> bool:
@@ -368,26 +388,24 @@ def _ingest_json_object(
     lineno: int,
     byte_offset: int,
 ) -> None:
-    if not isinstance(obj, dict):
-        raise TranscriptReaderError(ReaderErrorCode.NOT_OBJECT, f'line_{lineno}')
+    canonical = _project_raw_object(obj, lineno=lineno)
+    if canonical is None:
+        graph.warnings.append(
+            f'ignored_raw_observation:line_{lineno}:{_raw_observation_kind(obj)}',
+        )
+        return
 
-    uid = str(obj.get('uuid') or '')
+    uid = str(canonical.get('uuid') or '')
     if not uid:
-        # Known Claude raw bookkeeping may omit uuid; skip without entering the
-        # graph. Conversational / unknown uuid-less rows still fail closed.
-        if _is_ignorable_raw_metadata(obj):
-            graph.warnings.append(
-                f'ignored_raw_metadata:line_{lineno}:{_raw_metadata_kind(obj)}',
-            )
-            return
+        # Defensive: projection must fail-closed conversation-shaped uuid-less.
         raise TranscriptReaderError(ReaderErrorCode.MISSING_UUID, f'line_{lineno}')
     if uid in graph.by_uuid:
         raise TranscriptReaderError(ReaderErrorCode.DUPLICATE_UUID, uid)
 
-    etype, erole, is_sidechain = _classify_event(obj)
-    parent = obj.get('parentUuid')
+    etype, erole, is_sidechain = _classify_event(canonical)
+    parent = canonical.get('parentUuid')
     parent_uuid = None if parent is None else str(parent)
-    sid = str(obj.get('sessionId') or '')
+    sid = str(canonical.get('sessionId') or '')
 
     event = TranscriptEvent(
         event_uuid=uid,
@@ -395,7 +413,7 @@ def _ingest_json_object(
         session_id=sid,
         event_role=erole,
         event_type=etype,
-        raw=obj,
+        raw=canonical,
         line_number=lineno,
         is_sidechain=is_sidechain,
         byte_offset=byte_offset,
