@@ -144,6 +144,14 @@ class SwitchHooksRequiredError(ContextWindowError):
         self.error_code = 'switch_hooks_required'
 
 
+class PreReadyTerminalizeError(ContextWindowError):
+    """pre-READY intent could not be safely terminalized (must surface as 500)."""
+
+    def __init__(self, message: Optional[str] = None):
+        super().__init__(message or 'pre_ready_terminalize_failed')
+        self.error_code = 'pre_ready_terminalize_failed'
+
+
 def enabled() -> bool:
     from chat.daily_context import enabled as daily_enabled
     return daily_enabled()
@@ -735,6 +743,85 @@ def _fail_intent_conn(
     _update_intent_conn(
         conn, request_id, status=status, fields=fields, now_s=now_s,
     )
+
+
+def terminalize_pre_ready_intent_failure(
+    request_id: str,
+    *,
+    error_code: str,
+    db_path: Optional[str] = None,
+    now: Optional[datetime.datetime] = None,
+) -> Optional[dict[str, Any]]:
+    """Release a pre-READY intent after a known structured failure.
+
+    Allowed only for ``reserved`` / ``forging`` with empty ``staged_ready_at``
+    and no READY target. Already-terminal intents are idempotent no-ops.
+    Missing intent (reserve never succeeded) is also a no-op.
+
+    If a candidate JSONL was published, mark ``orphan_jsonl_state=pending``
+    without deleting the file. Raises ``PreReadyTerminalizeError`` when the
+    intent is past the pre-READY gate — callers must surface that as 500.
+    """
+    code = str(error_code or '').strip()
+    if not code:
+        raise PreReadyTerminalizeError('error_code required')
+    req_id = str(request_id or '').strip()
+    if not req_id:
+        raise PreReadyTerminalizeError('request_id required')
+    ensure_schema(db_path)
+    now_s = _now_s(_shanghai_now(now))
+    conn = _connect(db_path)
+    try:
+        conn.execute('BEGIN IMMEDIATE')
+        live = _intent_row(conn, req_id)
+        if live is None:
+            conn.commit()
+            return None
+        status = str(live.get('status') or '')
+        if status in TERMINAL_FAILURE_STATUSES:
+            conn.commit()
+            return live
+        if status not in (INTENT_RESERVED, INTENT_FORGING):
+            conn.rollback()
+            raise PreReadyTerminalizeError(
+                'intent not pre-ready: status=%s' % status,
+            )
+        if live.get('staged_ready_at'):
+            conn.rollback()
+            raise PreReadyTerminalizeError('staged_ready_at already set')
+        orphan_update: Optional[str] = None
+        orphan_now = str(live.get('orphan_jsonl_state') or 'none')
+        published = bool(live.get('target_session_id'))
+        if published and orphan_now == 'none':
+            # Candidate exists; do not delete — mark orphan pending for later.
+            orphan_update = 'pending'
+        _fail_intent_conn(
+            conn,
+            req_id,
+            error_code=code,
+            orphan_jsonl_state=orphan_update,
+            now_s=now_s,
+            release=True,
+        )
+        out = _intent_row(conn, req_id)
+        if out is None or str(out.get('status') or '') != INTENT_RELEASED:
+            conn.rollback()
+            raise PreReadyTerminalizeError('release CAS failed')
+        if str(out.get('error_code') or '') != code:
+            conn.rollback()
+            raise PreReadyTerminalizeError('error_code not retained')
+        conn.commit()
+        return out
+    except PreReadyTerminalizeError:
+        raise
+    except Exception as exc:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        raise PreReadyTerminalizeError(str(exc)) from exc
+    finally:
+        conn.close()
 
 
 def _select_rounds_locked(

@@ -26,8 +26,10 @@ from chat.claude_transcript_model import ThinkingPolicy
 from chat.context_window import (
     INTENT_FORGING,
     INTENT_READY,
+    INTENT_RELEASED,
     _intent_row,
     resolve_canonical_context_row_conn,
+    terminalize_pre_ready_intent_failure,
 )
 from chat.context_window_forge_publish import publish_context_window_forge_candidate
 from chat.context_window_target_prepare import (
@@ -516,10 +518,22 @@ class ContextWindowTargetPrepareTests(unittest.TestCase):
             ),
         )
 
+        # Mirror Gateway: structured TargetPrepareError must terminalize pre-READY.
+        terminalize_pre_ready_intent_failure(
+            self.request_id,
+            error_code=ctx.exception.error_code,
+            db_path=self.db,
+            now=NOW,
+        )
+
         intent = self._intent()
-        self.assertEqual(intent['status'], INTENT_FORGING)
+        self.assertEqual(intent['status'], INTENT_RELEASED)
+        self.assertEqual(intent['error_code'], ctx.exception.error_code)
+        self.assertNotEqual(intent['status'], INTENT_FORGING)
         self.assertIsNone(intent.get('target_context_id'))
         self.assertIsNone(intent.get('staged_ready_at'))
+        # Candidate JSONL was published — mark orphan pending; do not delete.
+        self.assertEqual(intent.get('orphan_jsonl_state'), 'pending')
         self.assertEqual(
             sqlite3.connect(self.db).execute(
                 "SELECT COUNT(*) FROM daily_contexts WHERE window_mode='manual_staged'"
