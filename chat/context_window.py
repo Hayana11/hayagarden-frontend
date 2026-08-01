@@ -48,6 +48,7 @@ WINDOW_MODE_MANUAL = 'manual'
 
 CLOSE_REASON_MANUAL = 'manual'
 CLOSE_REASON_CAPACITY_RESCUE = 'capacity_rescue'
+CLOSE_REASON_COLD_FALLBACK = 'cold_fallback'
 
 INTENT_RESERVED = 'reserved'
 INTENT_FORGING = 'forging'
