@@ -5,9 +5,9 @@
 
 ```text
 CONTRACT_PASS
-IMPLEMENTATION (this PR)
-OWNER_CANARY structural path verified in tests
-OWNER live Claude cold turn: ENVIRONMENT_BLOCKED / not required for Draft
+IMPLEMENTATION (this Draft PR)
+OWNER_CANARY structural path: PASS (temp DB/home/cwd; cleanup verified)
+OWNER live Claude cold turn: ENVIRONMENT_BLOCKED (not required for Draft)
 NIGHTLY_NOT_AUTHORIZED
 NO_AUTOMATIC_CROSS_PROCESS_FIRST_DELTA_RECOVERY
 ```
