@@ -6,7 +6,11 @@ import unittest
 from pathlib import Path
 
 from chat.daily_replica_ab import ReplicaContractError, build_daily_replica_pair
-from chat.daily_replica_runner import NativeSeed, run_daily_replica_pair
+from chat.daily_replica_runner import (
+    NativeSeed,
+    run_daily_replica_experiment,
+    run_daily_replica_production,
+)
 
 
 def _formatter(*, assembly, user_content, is_cold, is_respawn):
@@ -33,6 +37,7 @@ def _plan():
         persona_sha256='p',
         provider='claude_code',
         model='model',
+        tool_profile='text_only',
         allowed_tools_sha256='tools',
         mcp_config_sha256='mcp',
         formal_formatter=_formatter,
@@ -49,11 +54,11 @@ class FakeResident:
         self.prompt = None
         self.killed = False
 
-    def spawn_fresh_named(self, system, env, *, session_id, reason):
-        self.spawn = ('fresh', system, env, session_id, reason)
+    def spawn_fresh_named(self, system, env, *, session_id, tool_profile, reason):
+        self.spawn = ('fresh', system, env, session_id, tool_profile, reason)
 
-    def spawn_resumable(self, system, env, *, resume_session_id, reason):
-        self.spawn = ('resume', system, env, resume_session_id, reason)
+    def spawn_resumable(self, system, env, *, resume_session_id, tool_profile, reason):
+        self.spawn = ('resume', system, env, resume_session_id, tool_profile, reason)
 
     def send_turn(self, prompt, commit_meta=None):
         self.prompt = prompt
@@ -94,9 +99,9 @@ class DailyReplicaRunnerTests(unittest.TestCase):
             path.write_text('fresh', encoding='utf-8')
         return path
 
-    def test_runs_fresh_a_and_resumed_b_with_same_runtime_surface(self):
-        result = run_daily_replica_pair(
-            conn=object(),
+    def test_a_runs_alone_and_stops_before_seed_or_b(self):
+        seed_called = []
+        result = run_daily_replica_production(
             plan=_plan(),
             full_system='same-system',
             env={'TOKEN': 'same'},
@@ -104,25 +109,62 @@ class DailyReplicaRunnerTests(unittest.TestCase):
             claude_home=str(self.root),
             allowed_tools='same-tools',
             mcp_config_path='/opt/frontend/cc-tools.json',
+            tool_profile='text_only',
             resident_factory=self._resident_factory,
-            seed_builder=self._seed,
             session_id_factory=lambda: next(self.ids),
             session_path_resolver=self._session_path,
         )
         self.assertEqual(self.created[0].spawn[0], 'fresh')
-        self.assertEqual(self.created[1].spawn[0], 'resume')
-        self.assertEqual(self.created[0].cwd, self.created[1].cwd)
-        self.assertEqual(self.created[0].tools, self.created[1].tools)
-        self.assertEqual(self.created[0].mcp, self.created[1].mcp)
+        self.assertEqual(self.created[0].spawn[4], 'text_only')
         self.assertIn('HISTORY=', self.created[0].prompt)
-        self.assertNotIn('HISTORY=', self.created[1].prompt)
-        self.assertEqual(result.production.content, 'reply')
-        self.assertEqual(result.experiment.content, 'reply')
+        self.assertEqual(result.result.content, 'reply')
         self.assertTrue(result.manifest['runner_contract_ok'])
+        self.assertEqual(result.manifest['a_reproduction_gate'], 'AWAITING_OWNER_CONFIRMATION')
+        self.assertFalse(result.manifest['experiment_b_started'])
         self.assertFalse(result.manifest['formal_db_written'])
         self.assertFalse(result.manifest['formal_resident_swapped'])
         self.assertFalse((self.root / 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa.jsonl').exists())
-        self.assertFalse((self.root / 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb.jsonl').exists())
+
+    def test_b_gate_blocks_before_seed_or_resident_creation(self):
+        seed_called = []
+
+        def seed(**kwargs):
+            seed_called.append(True)
+            return self._seed(**kwargs)
+
+        with self.assertRaises(ReplicaContractError) as ctx:
+            run_daily_replica_experiment(
+                conn=object(), plan=_plan(), a_reproduction_confirmed=False,
+                full_system='same-system', env={}, cwd='/opt/frontend',
+                claude_home=str(self.root), allowed_tools='same-tools',
+                mcp_config_path='/opt/frontend/cc-tools.json',
+                tool_profile='text_only',
+                resident_factory=self._resident_factory, seed_builder=seed,
+                session_id_factory=lambda: next(self.ids),
+                session_path_resolver=self._session_path,
+            )
+        self.assertEqual(ctx.exception.error_code, 'REPLICA_A_GATE_REQUIRED')
+        self.assertEqual(seed_called, [])
+        self.assertEqual(self.created, [])
+
+    def test_b_resumes_only_after_explicit_a_confirmation(self):
+        result = run_daily_replica_experiment(
+            conn=object(), plan=_plan(), a_reproduction_confirmed=True,
+            full_system='same-system', env={'TOKEN': 'same'},
+            cwd='/opt/frontend', claude_home=str(self.root),
+            allowed_tools='same-tools', mcp_config_path='/opt/frontend/cc-tools.json',
+            tool_profile='text_only',
+            resident_factory=self._resident_factory, seed_builder=self._seed,
+            session_id_factory=lambda: next(self.ids),
+            session_path_resolver=self._session_path,
+        )
+        self.assertEqual(self.created[0].spawn[0], 'resume')
+        self.assertEqual(self.created[0].spawn[4], 'text_only')
+        self.assertNotIn('HISTORY=', self.created[0].prompt)
+        self.assertEqual(result.result.content, 'reply')
+        self.assertEqual(result.manifest['a_reproduction_gate'], 'CONFIRMED_BY_OWNER')
+        self.assertTrue(result.manifest['experiment_b_started'])
+        self.assertFalse((self.root / 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa.jsonl').exists())
 
     def test_tool_request_aborts_pair_and_cleans_both_residents(self):
         def factory(cwd, tools, mcp):
@@ -131,11 +173,12 @@ class DailyReplicaRunnerTests(unittest.TestCase):
             return obj
 
         with self.assertRaises(ReplicaContractError) as ctx:
-            run_daily_replica_pair(
-                conn=object(), plan=_plan(), full_system='same-system',
+            run_daily_replica_production(
+                plan=_plan(), full_system='same-system',
                 env={}, cwd='/opt/frontend', claude_home=str(self.root),
                 allowed_tools='same-tools', mcp_config_path='/opt/frontend/cc-tools.json',
-                resident_factory=factory, seed_builder=self._seed,
+                tool_profile='text_only',
+                resident_factory=factory,
                 session_id_factory=lambda: next(self.ids),
                 session_path_resolver=self._session_path,
             )
@@ -149,10 +192,12 @@ class DailyReplicaRunnerTests(unittest.TestCase):
             return NativeSeed('wrong', path, 'x', 2)
 
         with self.assertRaises(ReplicaContractError) as ctx:
-            run_daily_replica_pair(
-                conn=object(), plan=_plan(), full_system='same-system',
+            run_daily_replica_experiment(
+                conn=object(), plan=_plan(), a_reproduction_confirmed=True,
+                full_system='same-system',
                 env={}, cwd='/opt/frontend', claude_home=str(self.root),
                 allowed_tools='same-tools', mcp_config_path='/opt/frontend/cc-tools.json',
+                tool_profile='text_only',
                 resident_factory=self._resident_factory, seed_builder=bad_seed,
                 session_id_factory=lambda: next(self.ids),
                 session_path_resolver=self._session_path,
@@ -162,4 +207,3 @@ class DailyReplicaRunnerTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
-
