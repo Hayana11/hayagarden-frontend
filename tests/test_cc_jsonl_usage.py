@@ -479,6 +479,65 @@ class ResidentJsonlHookTests(unittest.TestCase):
         self.assertEqual(usage["cache_creation_1h"], 100)
         self.assertTrue(usage["jsonl_usage"]["stream_totals_match"])
 
+    def test_resident_idle_heartbeat_when_stdout_idle(self):
+        """MF-009 CASE 2: idle stdout yields heartbeat, then normal events follow."""
+        lines = [
+            json.dumps({
+                "type": "stream_event",
+                "event": {
+                    "type": "content_block_delta",
+                    "delta": {"type": "text_delta", "text": "hi"},
+                },
+            }),
+            json.dumps({"type": "result", "is_error": False}),
+        ]
+        resident = ResidentSession("/tmp/cc-test", "", "/tmp/mcp.json")
+        resident._proc = FakeProc(lines)
+        replay_result = replay.replay_jsonl_lines([])
+        select_calls = 0
+
+        def fake_select(rlist, wlist, xlist, timeout):
+            nonlocal select_calls
+            select_calls += 1
+            if select_calls == 1:
+                return [], [], []
+            return [rlist[0]], [], []
+
+        with (
+            mock.patch("select.select", fake_select),
+            mock.patch.object(replay, "snapshot_session_jsonl", return_value=None),
+            mock.patch.object(
+                replay, "replay_session_jsonl", return_value=replay_result
+            ),
+        ):
+            events = list(resident.send_turn("hello", idle_heartbeat_sec=0.1))
+
+        heartbeats = [payload for event, payload in events if event == "heartbeat"]
+        self.assertEqual(len(heartbeats), 1)
+        self.assertGreater(select_calls, 1)
+        texts = [payload for event, payload in events if event == "text"]
+        self.assertEqual(texts, ["hi"])
+        done = [payload for event, payload in events if event == "done"]
+        self.assertEqual(len(done), 1)
+
+    def test_resident_no_idle_heartbeat_by_default(self):
+        lines = [
+            json.dumps({"type": "result", "is_error": False}),
+        ]
+        resident = ResidentSession("/tmp/cc-test", "", "/tmp/mcp.json")
+        resident._proc = FakeProc(lines)
+        with (
+            mock.patch("select.select") as select_mock,
+            mock.patch.object(replay, "snapshot_session_jsonl", return_value=None),
+            mock.patch.object(
+                replay,
+                "replay_session_jsonl",
+                return_value=replay.replay_jsonl_lines([]),
+            ),
+        ):
+            list(resident.send_turn("hello"))
+        select_mock.assert_not_called()
+
     def test_resident_retries_until_all_jsonl_requests_arrive(self):
         resident = ResidentSession("/tmp/cc-test", "", "/tmp/mcp.json")
         resident._session_id = "65305691-efff-4fd6-9df5-2fc4ea4aa43f"

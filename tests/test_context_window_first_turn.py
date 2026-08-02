@@ -767,7 +767,13 @@ class ContextWindowFirstTurnTests(unittest.TestCase):
         sent: list[str] = []
 
         class _CaptureStaged:
-            def send_turn(self, content, commit_meta=None, on_stdin_flushed=None):
+            def send_turn(
+                self,
+                content,
+                commit_meta=None,
+                on_stdin_flushed=None,
+                idle_heartbeat_sec=None,
+            ):
                 sent.append(str(content))
                 if on_stdin_flushed is not None:
                     on_stdin_flushed()
@@ -790,6 +796,71 @@ class ContextWindowFirstTurnTests(unittest.TestCase):
         self.assertIn('"t": "text"', joined)
         self.assertIn('"ok": true', joined)
         self.assertEqual(self._intent()['status'], INTENT_COMMITTED)
+
+    def test_first_turn_idle_heartbeat_ping_no_commit(self):
+        """MF-009 CASE 1: heartbeat ping must not commit first delta or close source."""
+        import gateway
+
+        self._seed_source_and_forge()
+        source_before = dc.get_daily_context_by_id(self.context_id, db_path=self.db)
+        gateway_user_id = _insert_msg(self.db, 'hayana', 'heartbeat case')
+
+        class _FakeStaged:
+            def __init__(self):
+                self.killed = False
+                self.ack_called = False
+
+            def send_turn(
+                self,
+                content,
+                commit_meta=None,
+                on_stdin_flushed=None,
+                idle_heartbeat_sec=None,
+            ):
+                if on_stdin_flushed is not None:
+                    self.ack_called = True
+                    on_stdin_flushed()
+                yield ('heartbeat', None)
+                yield ('heartbeat', None)
+                yield ('text', '你好')
+                yield ('done', ('你好', '', {}))
+
+            def _kill(self, quiet=True):
+                self.killed = True
+
+        fake = _FakeStaged()
+        hooks = self._gateway_first_turn_hooks(fake)
+        turn = {'user_message_id': gateway_user_id}
+        live_intent = self._intent()
+
+        with mock.patch.object(gateway, 'DB_PATH', self.db), \
+             mock.patch.object(gateway, '_gw_build_first_turn_hooks', return_value=hooks):
+            gen = gateway._stream_cc_first_turn(turn, 'heartbeat case', live_intent)
+            first_chunk = next(gen)
+            self.assertIn('"t": "ping"', first_chunk)
+            self.assertNotIn('"t": "text"', first_chunk)
+
+            intent_after_first_ping = self._intent()
+            self.assertEqual(intent_after_first_ping['status'], INTENT_COMMITTING)
+            self.assertIsNone(intent_after_first_ping.get('first_delta_committed_at'))
+            source_mid = dc.get_daily_context_by_id(self.context_id, db_path=self.db)
+            self.assertEqual(source_mid.get('closed_at'), source_before.get('closed_at'))
+
+            rest = list(gen)
+
+        joined = first_chunk + ''.join(rest)
+        self.assertEqual(joined.count('"t": "ping"'), 2)
+        self.assertIn('"t": "text"', joined)
+        self.assertIn('"ok": true', joined)
+        self.assertTrue(fake.ack_called)
+
+        intent_after = self._intent()
+        self.assertEqual(intent_after['status'], INTENT_COMMITTED)
+        self.assertIsNotNone(intent_after['first_delta_committed_at'])
+        asst_count = sqlite3.connect(self.db).execute(
+            "SELECT COUNT(*) FROM chat_messages WHERE author='assistant'",
+        ).fetchone()[0]
+        self.assertGreaterEqual(asst_count, 1)
 
     def test_native_cold_zero_carryover_full_path(self):
         """Round 1: count=0 NATIVE_COLD → Target READY → fresh first-turn → committed.
@@ -1081,7 +1152,13 @@ class ContextWindowFirstTurnTests(unittest.TestCase):
                 with self.grow_path.open('ab') as fh:
                     fh.write(b'{"type":"x"}\n')
 
-            def send_turn(self, content, commit_meta=None, on_stdin_flushed=None):
+            def send_turn(
+                self,
+                content,
+                commit_meta=None,
+                on_stdin_flushed=None,
+                idle_heartbeat_sec=None,
+            ):
                 if self.mode == 'boom_before_ack':
                     raise RuntimeError('boom before stdin flush ack')
                     yield  # pragma: no cover
