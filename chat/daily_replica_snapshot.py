@@ -73,6 +73,27 @@ def _default_assembly_builder(**kwargs: Any) -> dict[str, Any]:
     return build_daily_window_context(**kwargs)
 
 
+def _truncate_snapshot_at_user_boundary(db_path: Path, user_message_id: int) -> None:
+    """Recreate the DB view that existed just before the selected turn ran."""
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.execute('BEGIN IMMEDIATE')
+        conn.execute(
+            'DELETE FROM daily_message_contexts WHERE message_id > ?',
+            (int(user_message_id),),
+        )
+        conn.execute(
+            'DELETE FROM chat_messages WHERE id > ?',
+            (int(user_message_id),),
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
 @dataclass
 class DailyReplicaSnapshot:
     temp_root: Path
@@ -146,6 +167,11 @@ def create_daily_replica_snapshot(
                 error_code='REPLICA_CURRENT_USER_EMPTY',
             )
 
+        # Production assembled this turn before its assistant reply or any
+        # later messages existed.  The copied DB is intentionally rewound to
+        # that same boundary; only the disposable snapshot is modified.
+        _truncate_snapshot_at_user_boundary(snapshot_db, mid)
+
         mapping = message_context_loader(mid, db_path=str(snapshot_db))
         if not mapping or str(mapping.get('role') or '') != 'user':
             raise ReplicaContractError(
@@ -210,6 +236,7 @@ def create_daily_replica_snapshot(
             'snapshot_contract_ok': True,
             'source_open_mode': 'ro',
             'source_db_written': False,
+            'snapshot_truncated_after_user': True,
             'snapshot_db_sha256': snapshot_sha,
             'user_message_id': mid,
             'context_id': identity[0],
