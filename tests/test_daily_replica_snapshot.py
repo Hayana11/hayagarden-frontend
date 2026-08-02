@@ -23,14 +23,22 @@ class DailyReplicaSnapshotTests(unittest.TestCase):
         self.root = Path(self.tmp.name)
         self.source = self.root / 'formal.sqlite3'
         conn = sqlite3.connect(str(self.source))
-        conn.execute('CREATE TABLE chat_messages (id INTEGER PRIMARY KEY, author TEXT, content TEXT)')
+        conn.execute(
+            'CREATE TABLE chat_messages ('
+            'id INTEGER PRIMARY KEY, author TEXT, content TEXT, image_url TEXT, '
+            'created_at TEXT)'
+        )
         conn.execute(
             'CREATE TABLE daily_message_contexts ('
             'message_id INTEGER PRIMARY KEY, context_id INTEGER, context_epoch INTEGER, '
             'resident_generation INTEGER, role TEXT)'
         )
-        conn.execute("INSERT INTO chat_messages VALUES (10, 'user', '咬你！')")
-        conn.execute("INSERT INTO chat_messages VALUES (11, 'assistant', '未来回复')")
+        conn.execute(
+            "INSERT INTO chat_messages VALUES (10, 'hayana', '咬你！', '', '2026-08-02 12:00:00')"
+        )
+        conn.execute(
+            "INSERT INTO chat_messages VALUES (11, 'assistant', '未来回复', '', '2026-08-02 12:01:00')"
+        )
         conn.execute("INSERT INTO daily_message_contexts VALUES (10, 7, 3, 2, 'user')")
         conn.execute("INSERT INTO daily_message_contexts VALUES (11, 7, 3, 2, 'assistant')")
         conn.commit()
@@ -131,12 +139,37 @@ class DailyReplicaSnapshotTests(unittest.TestCase):
 
     def test_non_user_message_fails_before_assembly(self):
         conn = sqlite3.connect(str(self.source))
-        conn.execute("INSERT INTO chat_messages VALUES (12, 'assistant', '回应')")
+        conn.execute(
+            "INSERT INTO chat_messages VALUES (12, 'assistant', '回应', '', '2026-08-02 12:02:00')"
+        )
         conn.commit()
         conn.close()
         with self.assertRaises(ReplicaContractError) as ctx:
             self._create(user_message_id=12)
         self.assertEqual(ctx.exception.error_code, 'REPLICA_USER_MESSAGE_INVALID')
+
+    def test_hayana_author_with_user_role_mapping_passes(self):
+        snapshot = self._create()
+        try:
+            self.assertEqual(snapshot.plan.manifest['current_user_sha256'], snapshot.plan.manifest['current_user_sha256'])
+            self.assertTrue(snapshot.manifest['session_start_isolation_ok'])
+            self.assertEqual(
+                snapshot.plan.manifest['frozen_session_start_sha256'],
+                snapshot.session_start.frozen_sha256,
+            )
+            self.assertIn('frozen_session_start_sha256', snapshot.plan.manifest)
+        finally:
+            snapshot.close()
+
+    def test_wrong_mapping_role_fails_closed(self):
+        def bad_mapping(message_id, *, db_path):
+            row = self._mapping(message_id, db_path=db_path)
+            row['role'] = 'assistant'
+            return row
+
+        with self.assertRaises(ReplicaContractError) as ctx:
+            self._create(message_context_loader=bad_mapping)
+        self.assertEqual(ctx.exception.error_code, 'REPLICA_MESSAGE_CONTEXT_MISSING')
 
 
 if __name__ == '__main__':

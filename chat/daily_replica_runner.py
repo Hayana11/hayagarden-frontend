@@ -18,6 +18,10 @@ from chat.daily_replica_ab import (
     ReplicaContractError,
     ReplicaVariantPlan,
 )
+from chat.daily_replica_session_start import (
+    ReplicaSessionStartBundle,
+    validate_session_start_bundle,
+)
 
 
 @dataclass(frozen=True)
@@ -204,6 +208,31 @@ def _validated_runtime_dependencies(
     )
 
 
+def _spawn_cwd(cwd: str, session_start: Optional[ReplicaSessionStartBundle]) -> str:
+    if session_start is not None:
+        return str(session_start.replica_cwd)
+    return str(cwd)
+
+
+def _spawn_env(
+    env: Mapping[str, str],
+    session_start: Optional[ReplicaSessionStartBundle],
+) -> dict[str, str]:
+    if session_start is None:
+        return dict(env)
+    validate_session_start_bundle(session_start)
+    return session_start.merge_env(env)
+
+
+def _spawn_claude_home(
+    claude_home: str,
+    session_start: Optional[ReplicaSessionStartBundle],
+) -> str:
+    if session_start is not None:
+        return str(session_start.claude_home)
+    return str(claude_home)
+
+
 def run_daily_replica_production(
     *,
     plan: DailyReplicaPairPlan,
@@ -214,6 +243,7 @@ def run_daily_replica_production(
     allowed_tools: str,
     mcp_config_path: str,
     tool_profile: str,
+    session_start: Optional[ReplicaSessionStartBundle] = None,
     resident_factory: Optional[ResidentFactory] = None,
     session_id_factory: Optional[SessionIdFactory] = None,
     session_path_resolver: Optional[SessionPathResolver] = None,
@@ -233,11 +263,16 @@ def run_daily_replica_production(
             'replica session id is empty',
             error_code='REPLICA_SESSION_ID_INVALID',
         )
-    session_path = session_path_resolver(str(cwd), session_id, str(claude_home))
-    resident = resident_factory(str(cwd), str(allowed_tools), str(mcp_config_path))
+    spawn_cwd = _spawn_cwd(cwd, session_start)
+    spawn_env = _spawn_env(env, session_start)
+    spawn_home = _spawn_claude_home(claude_home, session_start)
+    session_path = session_path_resolver(
+        spawn_cwd, session_id, spawn_home,
+    )
+    resident = resident_factory(spawn_cwd, str(allowed_tools), str(mcp_config_path))
     try:
         resident.spawn_fresh_named(
-            str(full_system), copy.deepcopy(dict(env)), session_id=session_id,
+            str(full_system), copy.deepcopy(spawn_env), session_id=session_id,
             tool_profile=str(tool_profile),
             reason='9a_replica_a',
         )
@@ -252,8 +287,14 @@ def run_daily_replica_production(
             'formal_resident_reused': False,
             'formal_resident_swapped': False,
             'formal_db_written': False,
-            'production_session_id': session_id,
+            'session_start_isolation_ok': bool(
+                session_start is not None and session_start.session_start_isolation_ok
+            ),
         })
+        if session_start is not None:
+            manifest['frozen_session_start_sha256'] = session_start.frozen_sha256
+            manifest['replica_settings_sha256'] = session_start.replica_settings_sha256
+            manifest['session_start_payload_sha256_a'] = session_start.frozen_sha256
         return ReplicaExecutionResult(result=result, manifest=manifest)
     finally:
         _kill_quietly(resident)
@@ -272,6 +313,7 @@ def run_daily_replica_experiment(
     allowed_tools: str,
     mcp_config_path: str,
     tool_profile: str,
+    session_start: Optional[ReplicaSessionStartBundle] = None,
     resident_factory: Optional[ResidentFactory] = None,
     seed_builder: Optional[NativeSeedBuilder] = None,
     session_id_factory: Optional[SessionIdFactory] = None,
@@ -299,14 +341,17 @@ def run_daily_replica_experiment(
             'replica session id is empty',
             error_code='REPLICA_SESSION_ID_INVALID',
         )
+    spawn_cwd = _spawn_cwd(cwd, session_start)
+    spawn_env = _spawn_env(env, session_start)
+    spawn_home = _spawn_claude_home(claude_home, session_start)
     seed: Optional[NativeSeed] = None
-    resident = resident_factory(str(cwd), str(allowed_tools), str(mcp_config_path))
+    resident = resident_factory(spawn_cwd, str(allowed_tools), str(mcp_config_path))
     try:
         seed = seed_builder(
             conn=conn,
             plan=plan,
-            cwd=str(cwd),
-            claude_home=str(claude_home),
+            cwd=spawn_cwd,
+            claude_home=spawn_home,
             session_id=session_id,
         )
         if str(seed.session_id) != session_id:
@@ -315,7 +360,7 @@ def run_daily_replica_experiment(
                 error_code='REPLICA_NATIVE_SESSION_MISMATCH',
             )
         resident.spawn_resumable(
-            str(full_system), copy.deepcopy(dict(env)),
+            str(full_system), copy.deepcopy(spawn_env),
             resume_session_id=session_id,
             tool_profile=str(tool_profile),
             reason='9a_replica_b',
@@ -331,10 +376,21 @@ def run_daily_replica_experiment(
             'formal_resident_reused': False,
             'formal_resident_swapped': False,
             'formal_db_written': False,
-            'experiment_session_id': session_id,
+            'session_start_isolation_ok': bool(
+                session_start is not None and session_start.session_start_isolation_ok
+            ),
             'native_seed_sha256': seed.sha256,
             'native_seed_event_count': int(seed.event_count),
         })
+        if session_start is not None:
+            manifest['frozen_session_start_sha256'] = session_start.frozen_sha256
+            manifest['replica_settings_sha256'] = session_start.replica_settings_sha256
+            manifest['session_start_payload_sha256_b'] = session_start.frozen_sha256
+            if manifest.get('session_start_payload_sha256_a') != session_start.frozen_sha256:
+                raise ReplicaContractError(
+                    'A/B SessionStart frozen payload hash mismatch',
+                    error_code='REPLICA_SESSION_START_HASH_MISMATCH',
+                )
         return ReplicaExecutionResult(result=result, manifest=manifest)
     finally:
         _kill_quietly(resident)

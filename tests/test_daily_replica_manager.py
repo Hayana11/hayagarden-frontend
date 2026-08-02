@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from chat.daily_replica_ab import ReplicaContractError, build_daily_replica_pair
 from chat.daily_replica_manager import DailyReplicaManager
 from chat.daily_replica_runner import ReplicaExecutionResult, ReplicaVariantResult
+from chat.daily_replica_session_start import prepare_replica_session_start_isolation
 
 
 def _formatter(*, assembly, user_content, is_cold, is_respawn):
@@ -39,6 +40,7 @@ class FakeSnapshot:
         self.db_path.write_bytes(b'')
         self.plan = _plan()
         self.manifest = {'snapshot_contract_ok': True}
+        self.session_start = prepare_replica_session_start_isolation(root / 'session-root')
         self.closed = False
 
     def close(self):

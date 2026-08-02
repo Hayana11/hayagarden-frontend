@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 
 from chat.daily_replica_ab import ReplicaContractError, build_daily_replica_pair
+from chat.daily_replica_session_start import prepare_replica_session_start_isolation
 from chat.daily_replica_runner import (
     NativeSeed,
     run_daily_replica_experiment,
@@ -53,12 +54,15 @@ class FakeResident:
         self.spawn = None
         self.prompt = None
         self.killed = False
+        self.spawn_env = None
 
     def spawn_fresh_named(self, system, env, *, session_id, tool_profile, reason):
         self.spawn = ('fresh', system, env, session_id, tool_profile, reason)
+        self.spawn_env = dict(env)
 
     def spawn_resumable(self, system, env, *, resume_session_id, tool_profile, reason):
         self.spawn = ('resume', system, env, resume_session_id, tool_profile, reason)
+        self.spawn_env = dict(env)
 
     def send_turn(self, prompt, commit_meta=None):
         self.prompt = prompt
@@ -184,6 +188,57 @@ class DailyReplicaRunnerTests(unittest.TestCase):
             )
         self.assertEqual(ctx.exception.error_code, 'REPLICA_TOOL_CALL_BLOCKED')
         self.assertTrue(all(r.killed for r in self.created))
+
+    def test_isolation_failure_blocks_before_resident_spawn(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bundle = prepare_replica_session_start_isolation(root)
+            bundle.frozen_path.write_text('changed', encoding='utf-8')
+            factory_calls = []
+
+            def factory(cwd, tools, mcp):
+                factory_calls.append(True)
+                return FakeResident(cwd, tools, mcp)
+
+            with self.assertRaises(ReplicaContractError) as ctx:
+                run_daily_replica_production(
+                    plan=_plan(),
+                    full_system='same-system',
+                    env={'TOKEN': 'same'},
+                    cwd='/opt/frontend',
+                    claude_home=str(self.root),
+                    allowed_tools='same-tools',
+                    mcp_config_path='/opt/frontend/cc-tools.json',
+                    tool_profile='text_only',
+                    session_start=bundle,
+                    resident_factory=factory,
+                    session_id_factory=lambda: next(self.ids),
+                    session_path_resolver=self._session_path,
+                )
+            self.assertEqual(ctx.exception.error_code, 'REPLICA_SESSION_START_HASH_MISMATCH')
+            self.assertEqual(factory_calls, [])
+
+    def test_session_start_isolation_env_applied_on_spawn(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bundle = prepare_replica_session_start_isolation(Path(tmp))
+            run_daily_replica_production(
+                plan=_plan(),
+                full_system='same-system',
+                env={'TOKEN': 'same'},
+                cwd='/opt/frontend',
+                claude_home=str(self.root),
+                allowed_tools='same-tools',
+                mcp_config_path='/opt/frontend/cc-tools.json',
+                tool_profile='text_only',
+                session_start=bundle,
+                resident_factory=self._resident_factory,
+                session_id_factory=lambda: next(self.ids),
+                session_path_resolver=self._session_path,
+            )
+            env = self.created[0].spawn_env
+            self.assertEqual(env['HOME'], str(bundle.fake_home))
+            self.assertEqual(env['CLAUDE_CONFIG_DIR'], str(bundle.claude_home))
+            self.assertEqual(self.created[0].cwd, str(bundle.replica_cwd))
 
     def test_seed_session_id_must_not_change(self):
         def bad_seed(**kwargs):

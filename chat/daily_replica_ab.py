@@ -149,6 +149,9 @@ def _material_payload(
     assembly: Mapping[str, Any],
     history: Sequence[NativeHistoryMessage],
     user_content: str,
+    frozen_session_start_sha256: str,
+    replica_settings_sha256: str,
+    session_start_isolation_ok: bool,
 ) -> dict[str, Any]:
     non_history = _non_history_assembly(assembly)
     return {
@@ -162,6 +165,9 @@ def _material_payload(
         'non_history_assembly_sha256': _sha256_json(non_history),
         'history_sha256': _sha256_json(_history_payload(history)),
         'current_user_sha256': _sha256_text(user_content),
+        'frozen_session_start_sha256': str(frozen_session_start_sha256 or ''),
+        'replica_settings_sha256': str(replica_settings_sha256 or ''),
+        'session_start_isolation_ok': bool(session_start_isolation_ok),
     }
 
 
@@ -176,6 +182,9 @@ def build_daily_replica_pair(
     tool_profile: str,
     allowed_tools_sha256: str,
     mcp_config_sha256: str,
+    frozen_session_start_sha256: str = '',
+    replica_settings_sha256: str = '',
+    session_start_isolation_ok: bool = False,
     formal_formatter: Optional[FormalFormatter] = None,
 ) -> DailyReplicaPairPlan:
     """Freeze one cold-birth material set and derive the A/B delivery plans.
@@ -223,6 +232,9 @@ def build_daily_replica_pair(
         assembly=frozen_assembly,
         history=history,
         user_content=current_user,
+        frozen_session_start_sha256=frozen_session_start_sha256,
+        replica_settings_sha256=replica_settings_sha256,
+        session_start_isolation_ok=session_start_isolation_ok,
     )
     common_sha = _sha256_json(material)
     assembly_manifest = dict(frozen_assembly.get('manifest') or {})
@@ -241,6 +253,9 @@ def build_daily_replica_pair(
         'non_history_assembly_sha256': material['non_history_assembly_sha256'],
         'history_sha256': material['history_sha256'],
         'current_user_sha256': material['current_user_sha256'],
+        'frozen_session_start_sha256': material['frozen_session_start_sha256'],
+        'replica_settings_sha256': material['replica_settings_sha256'],
+        'session_start_isolation_ok': material['session_start_isolation_ok'],
         'production_prompt_sha256': _sha256_text(production_prompt),
         'experiment_prompt_sha256': _sha256_text(direct_prompt),
         'history_message_count': len(history),

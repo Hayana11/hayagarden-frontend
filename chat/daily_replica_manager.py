@@ -141,6 +141,7 @@ class DailyReplicaManager:
                     allowed_tools=self.allowed_tools,
                     mcp_config_path=self.mcp_config_path,
                     tool_profile='text_only',
+                    session_start=snapshot.session_start,
                 )
             except Exception:
                 snapshot.close()
@@ -198,6 +199,7 @@ class DailyReplicaManager:
                         allowed_tools=self.allowed_tools,
                         mcp_config_path=self.mcp_config_path,
                         tool_profile='text_only',
+                        session_start=active.snapshot.session_start,
                     )
                 finally:
                     conn.close()

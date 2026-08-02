@@ -14,6 +14,12 @@ from chat.daily_replica_ab import (
     ReplicaContractError,
     build_daily_replica_pair,
 )
+from chat.daily_replica_session_start import (
+    ReplicaSessionStartBundle,
+    prepare_replica_session_start_isolation,
+    validate_session_start_bundle,
+)
+from chat.daily_context import _USER_AUTHORS
 
 
 SnapshotCopier = Callable[[str, str], None]
@@ -105,6 +111,8 @@ class DailyReplicaSnapshot:
     resident_generation: int
     snapshot_sha256: str
     manifest: Mapping[str, Any]
+    session_start: ReplicaSessionStartBundle
+    replica_cwd: Path
 
     def close(self) -> None:
         shutil.rmtree(self.temp_root, ignore_errors=True)
@@ -146,6 +154,12 @@ def create_daily_replica_snapshot(
     assembly_builder = assembly_builder or _default_assembly_builder
     try:
         copier(str(source_db_path), str(snapshot_db))
+        mapping = message_context_loader(mid, db_path=str(snapshot_db))
+        if not mapping or str(mapping.get('role') or '') != 'user':
+            raise ReplicaContractError(
+                'selected user message lacks formal Daily mapping',
+                error_code='REPLICA_MESSAGE_CONTEXT_MISSING',
+            )
         conn = sqlite3.connect(str(snapshot_db))
         conn.row_factory = sqlite3.Row
         try:
@@ -155,12 +169,21 @@ def create_daily_replica_snapshot(
             ).fetchone()
         finally:
             conn.close()
-        if row is None or str(row['author'] or '').strip().lower() != 'user':
+        if row is None:
             raise ReplicaContractError(
                 'selected message is not a formal user message',
                 error_code='REPLICA_USER_MESSAGE_INVALID',
             )
-        user_content = str(row['content'] or '')
+        author = str(row['author'] or '').strip().lower()
+        if author not in _USER_AUTHORS:
+            raise ReplicaContractError(
+                'selected message is not a formal user message',
+                error_code='REPLICA_USER_MESSAGE_INVALID',
+            )
+
+        from chat.daily_runtime import _fetch_user_message
+
+        user_content = str(_fetch_user_message(mid, db_path=str(snapshot_db))['content'] or '')
         if not user_content.strip():
             raise ReplicaContractError(
                 'selected user message is empty',
@@ -171,13 +194,6 @@ def create_daily_replica_snapshot(
         # later messages existed.  The copied DB is intentionally rewound to
         # that same boundary; only the disposable snapshot is modified.
         _truncate_snapshot_at_user_boundary(snapshot_db, mid)
-
-        mapping = message_context_loader(mid, db_path=str(snapshot_db))
-        if not mapping or str(mapping.get('role') or '') != 'user':
-            raise ReplicaContractError(
-                'selected user message lacks formal Daily mapping',
-                error_code='REPLICA_MESSAGE_CONTEXT_MISSING',
-            )
         context_id = int(mapping['context_id'])
         context = context_loader(context_id, db_path=str(snapshot_db))
         current = current_context_loader(db_path=str(snapshot_db))
@@ -219,6 +235,8 @@ def create_daily_replica_snapshot(
             inject_carryover=True,
             db_path=str(snapshot_db),
         )
+        session_start = prepare_replica_session_start_isolation(temp_root)
+        validate_session_start_bundle(session_start)
         plan = build_daily_replica_pair(
             assembly=assembly,
             user_content=user_content,
@@ -229,6 +247,9 @@ def create_daily_replica_snapshot(
             tool_profile=tool_profile,
             allowed_tools_sha256=allowed_tools_sha256,
             mcp_config_sha256=mcp_config_sha256,
+            frozen_session_start_sha256=session_start.frozen_sha256,
+            replica_settings_sha256=session_start.replica_settings_sha256,
+            session_start_isolation_ok=session_start.session_start_isolation_ok,
             formal_formatter=formal_formatter,
         )
         snapshot_sha = _sha256_file(snapshot_db)
@@ -243,6 +264,9 @@ def create_daily_replica_snapshot(
             'context_epoch': identity[1],
             'resident_generation': identity[2],
             'common_material_sha256': plan.manifest['common_material_sha256'],
+            'frozen_session_start_sha256': session_start.frozen_sha256,
+            'replica_settings_sha256': session_start.replica_settings_sha256,
+            'session_start_isolation_ok': session_start.session_start_isolation_ok,
         }
         return DailyReplicaSnapshot(
             temp_root=temp_root,
@@ -254,6 +278,8 @@ def create_daily_replica_snapshot(
             resident_generation=identity[2],
             snapshot_sha256=snapshot_sha,
             manifest=manifest,
+            session_start=session_start,
+            replica_cwd=session_start.replica_cwd,
         )
     except Exception:
         shutil.rmtree(temp_root, ignore_errors=True)
