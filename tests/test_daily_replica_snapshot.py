@@ -24,7 +24,15 @@ class DailyReplicaSnapshotTests(unittest.TestCase):
         self.source = self.root / 'formal.sqlite3'
         conn = sqlite3.connect(str(self.source))
         conn.execute('CREATE TABLE chat_messages (id INTEGER PRIMARY KEY, author TEXT, content TEXT)')
+        conn.execute(
+            'CREATE TABLE daily_message_contexts ('
+            'message_id INTEGER PRIMARY KEY, context_id INTEGER, context_epoch INTEGER, '
+            'resident_generation INTEGER, role TEXT)'
+        )
         conn.execute("INSERT INTO chat_messages VALUES (10, 'user', '咬你！')")
+        conn.execute("INSERT INTO chat_messages VALUES (11, 'assistant', '未来回复')")
+        conn.execute("INSERT INTO daily_message_contexts VALUES (10, 7, 3, 2, 'user')")
+        conn.execute("INSERT INTO daily_message_contexts VALUES (11, 7, 3, 2, 'assistant')")
         conn.commit()
         conn.close()
 
@@ -54,6 +62,18 @@ class DailyReplicaSnapshotTests(unittest.TestCase):
         self.assertTrue(kwargs['is_cold'])
         self.assertTrue(kwargs['inject_handoff'])
         self.assertTrue(kwargs['inject_carryover'])
+        conn = sqlite3.connect(kwargs['db_path'])
+        try:
+            ids = [int(r[0]) for r in conn.execute('SELECT id FROM chat_messages ORDER BY id')]
+            mapped = [
+                int(r[0]) for r in conn.execute(
+                    'SELECT message_id FROM daily_message_contexts ORDER BY message_id'
+                )
+            ]
+        finally:
+            conn.close()
+        self.assertEqual(ids, [10])
+        self.assertEqual(mapped, [10])
         return {
             'state': '【当前状态】灯关着',
             'current_day_history': [
@@ -91,6 +111,7 @@ class DailyReplicaSnapshotTests(unittest.TestCase):
             self.assertEqual(snapshot.plan.manifest['tool_profile'], 'text_only')
             self.assertEqual(snapshot.manifest['source_open_mode'], 'ro')
             self.assertFalse(snapshot.manifest['source_db_written'])
+            self.assertTrue(snapshot.manifest['snapshot_truncated_after_user'])
             root = snapshot.temp_root
         finally:
             snapshot.close()
@@ -110,11 +131,11 @@ class DailyReplicaSnapshotTests(unittest.TestCase):
 
     def test_non_user_message_fails_before_assembly(self):
         conn = sqlite3.connect(str(self.source))
-        conn.execute("INSERT INTO chat_messages VALUES (11, 'assistant', '回应')")
+        conn.execute("INSERT INTO chat_messages VALUES (12, 'assistant', '回应')")
         conn.commit()
         conn.close()
         with self.assertRaises(ReplicaContractError) as ctx:
-            self._create(user_message_id=11)
+            self._create(user_message_id=12)
         self.assertEqual(ctx.exception.error_code, 'REPLICA_USER_MESSAGE_INVALID')
 
 
