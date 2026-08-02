@@ -23,7 +23,7 @@ def main() -> int:
     DB_PATH = '/opt/frontend/memories.db'
     CC_CWD = '/opt/cc-gw'
     cc_token = ''
-    env_path = os.path.join(repo_root, '.env')
+    env_path = '/opt/frontend/.env'
     if os.path.isfile(env_path):
         with open(env_path, encoding='utf-8') as f:
             for line in f:
