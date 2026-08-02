@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import copy
 import json
+import select
 import subprocess
 import threading
 import time
@@ -601,7 +602,13 @@ class ResidentSession:
                 break
         return last_merged
 
-    def send_turn(self, content, commit_meta=None, on_stdin_flushed=None):
+    def send_turn(
+        self,
+        content,
+        commit_meta=None,
+        on_stdin_flushed=None,
+        idle_heartbeat_sec=None,
+    ):
         """Yield ('text'/'think'/'tool_use'/'tool_result'/'done', payload).
 
         done payload is (text, thinking, usage_dict, one_shot_claims).
@@ -664,9 +671,22 @@ class ResidentSession:
         current_round = None
         is_err = None
         saw_result = False
+        use_idle_heartbeat = (
+            idle_heartbeat_sec is not None and float(idle_heartbeat_sec) > 0
+        )
+        heartbeat_interval = float(idle_heartbeat_sec) if use_idle_heartbeat else 0.0
         try:
             try:
                 while True:
+                    if use_idle_heartbeat:
+                        ready, _, _ = select.select(
+                            [proc.stdout], [], [], heartbeat_interval,
+                        )
+                        if not ready:
+                            if proc.poll() is not None:
+                                break
+                            yield ('heartbeat', None)
+                            continue
                     raw_line = proc.stdout.readline()
                     if raw_line == '':
                         break

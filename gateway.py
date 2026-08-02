@@ -4451,11 +4451,18 @@ def _stream_cc_first_turn(_turn_data, _uc, intent: dict):
             mark_first_turn_stdin_sent(session)
 
         event_iter = iter(session.staged.send_turn(
-            session.user_content, on_stdin_flushed=on_stdin_flushed,
+            session.user_content,
+            on_stdin_flushed=on_stdin_flushed,
+            idle_heartbeat_sec=10.0,
         ))
 
         try:
             for evt, payload in event_iter:
+                if evt == 'heartbeat':
+                    if not first_released:
+                        yield _sse_json({'t': 'ping'})
+                    continue
+
                 if evt in ('think', 'tool_use', 'tool_result'):
                     if not first_released:
                         pending.append((evt, payload))
