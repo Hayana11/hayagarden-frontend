@@ -80,6 +80,7 @@ class DailyReplicaPairTests(unittest.TestCase):
             persona_sha256='persona-sha',
             provider='claude_code',
             model='claude-opus',
+            tool_profile='text_only',
             allowed_tools_sha256='tools-sha',
             mcp_config_sha256='mcp-sha',
             formal_formatter=_formal_formatter,
@@ -151,4 +152,3 @@ class DailyReplicaPairTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
-
