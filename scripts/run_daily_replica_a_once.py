@@ -45,25 +45,15 @@ def main() -> int:
         return str(cfg_get('MODEL') or '')
 
     allowed_tools = ','.join([
-        'Bash', 'Read', 'Write', 'Edit', 'Glob', 'Grep',
-        'WebFetch', 'WebSearch', 'Task', 'TodoWrite',
-        'mcp__home__exec_vps', 'mcp__home__search_memories',
-        'mcp__home__light_on', 'mcp__home__light_off',
-        'mcp__home__get_light_status', 'mcp__home__light_bedside_warm',
-        'mcp__home__light_bedside_neutral', 'mcp__home__set_brightness',
-        'mcp__home__set_color_temp', 'mcp__home__get_todos',
-        'mcp__home__add_todo', 'mcp__home__get_countdowns',
-        'mcp__home__collect_chat_moment', 'mcp__home__get_ledger',
-        'mcp__home__add_ledger', 'mcp__home__get_ledger_budget',
-        'mcp__记错本__record_evidence', 'mcp__记错本__list_candidates',
-        'mcp__记错本__promote_lesson', 'mcp__记错本__reject_candidate',
-        'mcp__记错本__list_lessons', 'mcp__记错本__search_lesson',
-        'mcp__记错本__deprecate_lesson', 'mcp__记错本__validate_edit',
-        'mcp__codebase__read_file', 'mcp__codebase__list_directory',
-        'mcp__codebase__search_code', 'mcp__codebase__find_references',
-        'mcp__codebase__patch', 'mcp__codebase__create_file',
-        'mcp__codebase__git_view', 'mcp__codebase__explain_history',
-        'mcp__codebase__describe_project',
+        'mcp__brain__breath', 'mcp__brain__grow', 'mcp__brain__hold',
+        'mcp__brain__pulse', 'mcp__brain__trace',
+        'mcp__codebase',
+        'mcp__home__light_on', 'mcp__home__light_off', 'mcp__home__get_light_status',
+        'mcp__home__light_bedside_warm', 'mcp__home__light_bedside_neutral',
+        'mcp__home__get_todos', 'mcp__home__add_todo', 'mcp__home__get_countdowns',
+        'mcp__home__get_ledger', 'mcp__home__add_ledger', 'mcp__home__get_ledger_budget',
+        'mcp__home__search_memories',
+        'mcp__home__collect_chat_moment',
     ])
 
     claude_home = os.path.join(os.environ.get('HOME', '/root'), '.claude')
