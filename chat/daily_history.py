@@ -133,17 +133,24 @@ def _build_state_text(
     is_cold: bool,
     last_snapshot: Optional[dict[str, str]] = None,
 ) -> tuple[str, str, dict[str, str]]:
-    from chat.system_builder import build_cc_state, format_state_diff, format_state_snapshot
+    from chat.persona_state_semantic import (
+        format_persona_semantic_diff,
+        format_persona_semantic_snapshot,
+        translate_raw_state_to_persona_semantic,
+    )
+    from chat.system_builder import build_cc_state
 
     raw = build_cc_state(lean=True)
     if not isinstance(raw, dict):
         raw = {}
     snapshot = {str(k): str(v) for k, v in raw.items()}
+    semantic_current = translate_raw_state_to_persona_semantic(snapshot)
     if is_cold or not last_snapshot:
-        text = format_state_snapshot(snapshot) if snapshot else ''
+        text = format_persona_semantic_snapshot(semantic_current)
         mode = 'snapshot' if text else 'none'
         return text, mode, snapshot
-    delta = format_state_diff(last_snapshot, snapshot)
+    semantic_previous = translate_raw_state_to_persona_semantic(last_snapshot)
+    delta = format_persona_semantic_diff(semantic_previous, semantic_current)
     if delta:
         return delta, 'delta', snapshot
     return '', 'none', snapshot

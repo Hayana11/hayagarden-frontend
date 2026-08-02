@@ -915,7 +915,7 @@ class HotTurnContentTests(unittest.TestCase):
         class FakeResident:
             def __init__(self):
                 self.last_state_snapshot = {
-                    'lights': '关',
+                    'lights': 'main=关 bedside=关',
                     'time_bucket': '当前时间段：23:00 左右',
                 }
                 self.last_state_send_snapshot = dict(self.last_state_snapshot)
@@ -945,7 +945,7 @@ class HotTurnContentTests(unittest.TestCase):
              mock.patch.object(gateway, 'CC_CWD', tempfile.mkdtemp()), \
              mock.patch.object(gateway, '_recall_memories', return_value=('', [])), \
              mock.patch('chat.system_builder.build_cc_state', return_value={
-                 'lights': '开',
+                 'lights': 'main=开 bedside=关',
                  'time_bucket': '当前时间段：23:00 左右',
              }), \
              mock.patch('chat.system_builder.build_cc_one_shot', return_value={
@@ -974,7 +974,8 @@ class HotTurnContentTests(unittest.TestCase):
         self.assertNotIn(note[:40], content)
         self.assertNotIn(cold_marker, content)
         self.assertNotIn('【当前状态】', content)
-        self.assertIn('【状态更新】', content)
+        self.assertIn('【此刻有一点变化】', content)
+        self.assertIn('主灯亮着', content)
 
     def test_relationship_is_dynamic_tail_and_static_system_is_unchanged(self):
         from chat.relationship_context import RelationshipContextResult
