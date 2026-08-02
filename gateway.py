@@ -4567,6 +4567,16 @@ def _stream_cc_first_turn(_turn_data, _uc, intent: dict):
                     )
                     if thinking:
                         thinking_acc.append(str(thinking))
+                    final_thinking = ''.join(thinking_acc).strip() or str(thinking or '')
+                    cache_info_json = ''
+                    if isinstance(usage, dict) and usage:
+                        # Persist public usage fields; strip internal _obs_* keys.
+                        _ci = {
+                            k: v for k, v in usage.items()
+                            if not str(k).startswith('_obs_')
+                        }
+                        if _ci:
+                            cache_info_json = json.dumps(_ci, ensure_ascii=False)
                     try:
                         end_offset = int(session.jsonl_path.stat().st_size)
                     except OSError:
@@ -4578,6 +4588,8 @@ def _stream_cc_first_turn(_turn_data, _uc, intent: dict):
                             assistant_content=assistant_text,
                             end_offset=end_offset,
                             db_path=DB_PATH,
+                            thinking=final_thinking,
+                            cache_info=cache_info_json,
                         )
                     except Exception as exc:
                         log.exception(

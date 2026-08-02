@@ -82,6 +82,7 @@ def _init_db(db: str) -> None:
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             author TEXT NOT NULL,
             content TEXT NOT NULL DEFAULT '',
+            image_url TEXT DEFAULT '',
             thinking TEXT DEFAULT '',
             tool_calls TEXT DEFAULT '',
             cache_info TEXT DEFAULT '',
@@ -1769,6 +1770,210 @@ class ContextWindowFirstTurnTests(unittest.TestCase):
         ):
             self.assertNotIn(key, public)
 
+    def test_complete_syncs_local_binding_and_next_turn_stays_hot(self):
+        """9A: after Forge first-turn complete, local cursor matches DB and next turn is hot."""
+        published = self._seed_source_and_forge()
+        intent = self._intent()
+        target_id = int(intent['target_context_id'])
+        gateway_user_id = _insert_msg(self.db, 'hayana', '新房第一句')
+
+        session = claim_and_start_first_turn(
+            switch_request_id=self.switch_request_id,
+            first_turn_request_id=self.first_turn_request_id,
+            user_content='新房第一句',
+            user_message_id=gateway_user_id,
+            hooks=self.hooks,
+            db_path=self.db,
+            now=NOW,
+        )
+        ft_mod.mark_first_turn_stdin_sent(session)
+        first = ingest_first_turn_text_delta(
+            session, text='第一句回复正文', hooks=self.hooks, db_path=self.db, now=NOW,
+        )
+        self.assertTrue(first.handoff_complete)
+
+        binding_before = dr.get_local_binding()
+        self.assertIsNotNone(binding_before)
+        watermark_before = binding_before.bound_cursor_message_id
+
+        usage = {
+            'v': 2,
+            'provider': 'claude_code',
+            'cache_read': 12698,
+            'cache_creation': 130,
+            'input_tokens': 3,
+            'output_tokens': 200,
+            'resident_turn_count': 1,
+        }
+        done = complete_first_turn_round(
+            session,
+            assistant_content='第一句回复正文',
+            end_offset=int(published.jsonl_size) + 50,
+            db_path=self.db,
+            now=NOW,
+            thinking='真实思考块',
+            cache_info=json.dumps(usage, ensure_ascii=False),
+        )
+        self.assertTrue(done.cursor_advanced)
+
+        db_cursor = dc.get_resident_history_cursor(
+            session.target_context_id,
+            session.target_resident_generation,
+            db_path=self.db,
+        )
+        binding = dr.get_local_binding()
+        self.assertIsNotNone(binding)
+        self.assertEqual(int(db_cursor), int(done.assistant_message_id))
+        self.assertEqual(int(binding.bound_cursor_message_id), int(done.assistant_message_id))
+        self.assertNotEqual(int(binding.bound_cursor_message_id), int(watermark_before or -1))
+
+        row = sqlite3.connect(self.db).execute(
+            'SELECT thinking, cache_info FROM chat_messages WHERE id=?',
+            (done.assistant_message_id,),
+        ).fetchone()
+        self.assertEqual(row[0], '真实思考块')
+        cache = json.loads(row[1])
+        self.assertEqual(int(cache['cache_read']), 12698)
+        self.assertEqual(int(cache['cache_creation']), 130)
+
+        # Next user message on same resident must stay hot (no formal history replay).
+        resident = self.hooks.formal_holder.get()
+        self.assertIsNotNone(resident)
+        u2 = _insert_msg(self.db, 'hayana', '第二句')
+        with mock.patch('chat.daily_context.enabled', return_value=True),              mock.patch('chat.context_window.enabled', return_value=True),              mock.patch('chat.daily_history._build_state_text', return_value=('', 'none', {})):
+            plan = dr.prepare_daily_turn(
+                user_message_id=u2,
+                db_path=self.db,
+                resident=resident,
+                static_system='S',
+                now=NOW + datetime.timedelta(minutes=1),
+                wall_now=NOW + datetime.timedelta(minutes=1),
+            )
+        self.assertFalse(plan.is_cold)
+        self.assertFalse(plan.is_respawn)
+        self.assertEqual(plan.manifest.get('turn_kind'), 'hot')
+        assembled = dr.format_resident_turn_content(
+            assembly=plan.assembly,
+            user_content=plan.user_content,
+            is_cold=plan.is_cold,
+            is_respawn=plan.is_respawn,
+        )
+        self.assertNotIn('以下是本聊天日内的正式对话记录：', assembled)
+        self.assertNotIn('请回复最后一条用户消息。', assembled)
+
 
 if __name__ == '__main__':
     unittest.main()
+
+class ResidentThinkingBackfillTests(unittest.TestCase):
+    """send_turn must surface assistant thinking blocks when deltas are absent."""
+
+    def test_assistant_thinking_block_backfills_think_event(self):
+        import cc_resident
+
+        class _FakeStdout:
+            def __init__(self, lines):
+                self._lines = list(lines)
+                self._i = 0
+
+            def readline(self):
+                if self._i >= len(self._lines):
+                    return ''
+                line = self._lines[self._i]
+                self._i += 1
+                return line
+
+            def close(self):
+                return None
+
+        class _FakeStdin:
+            def write(self, _data):
+                return None
+
+            def flush(self):
+                return None
+
+            def close(self):
+                return None
+
+        class _FakeProc:
+            def __init__(self, lines):
+                self.stdin = _FakeStdin()
+                self.stdout = _FakeStdout(lines)
+                self.stderr = _FakeStdout([])
+                self.pid = 4242
+
+            def poll(self):
+                return None
+
+        thinking = 'forge-first-turn-thinking'
+        text_body = 'forge-first-turn-text'
+        nl = chr(10)
+        lines = [
+            json.dumps({
+                'type': 'assistant',
+                'message': {
+                    'role': 'assistant',
+                    'content': [{'type': 'thinking', 'thinking': thinking}],
+                    'usage': {
+                        'input_tokens': 3,
+                        'output_tokens': 10,
+                        'cache_read_input_tokens': 100,
+                        'cache_creation_input_tokens': 20,
+                    },
+                },
+            }, ensure_ascii=False) + nl,
+            json.dumps({
+                'type': 'stream_event',
+                'event': {
+                    'type': 'content_block_delta',
+                    'delta': {'type': 'text_delta', 'text': text_body},
+                },
+            }, ensure_ascii=False) + nl,
+            json.dumps({
+                'type': 'assistant',
+                'message': {
+                    'role': 'assistant',
+                    'content': [{'type': 'text', 'text': text_body}],
+                    'usage': {
+                        'input_tokens': 3,
+                        'output_tokens': 10,
+                        'cache_read_input_tokens': 100,
+                        'cache_creation_input_tokens': 20,
+                    },
+                },
+            }, ensure_ascii=False) + nl,
+            json.dumps(
+                {'type': 'result', 'is_error': False, 'result': text_body},
+                ensure_ascii=False,
+            ) + nl,
+        ]
+
+        sess = cc_resident.ResidentSession('/tmp', '', '/tmp/x.json')
+        sess._proc = _FakeProc(lines)
+        sess._session_id = 'sess-test'
+        sess._cold = False
+        sess._generation = 1
+        sess._resident_turn_count = 0
+        sess._turns_since_respawn = 0
+        sess._pending_respawn_reason = None
+        sess._last_used = 0.0
+        sess._max_round_context = 0
+        sess._jsonl_replay_cursor = lambda *_a, **_k: None
+        sess._attach_jsonl_usage_with_retry = lambda usage, cursor: usage
+        sess._extract_one_shot_claims = lambda _meta: {}
+        sess._commit_sent_context = lambda _meta: None
+        sess._maybe_set_session_id = lambda _d: None
+        sess._kill = lambda quiet=False: None
+
+        events = list(sess.send_turn('hi'))
+        kinds = [e[0] for e in events]
+        self.assertIn('think', kinds)
+        self.assertIn('text', kinds)
+        self.assertIn('done', kinds)
+        think_payload = next(p for k, p in events if k == 'think')
+        self.assertEqual(think_payload, thinking)
+        done = next(p for k, p in events if k == 'done')
+        self.assertEqual(done[0], text_body)
+        self.assertEqual(done[1], thinking)
+        self.assertEqual(int(done[2].get('cache_read') or 0), 100)

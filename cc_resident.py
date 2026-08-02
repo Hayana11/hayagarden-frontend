@@ -790,7 +790,17 @@ class ResidentSession:
                                 current_round['cache_creation'], int(u.get('cache_creation_input_tokens') or 0)
                             )
                         for b in (msg.get('content') or []):
-                            if isinstance(b, dict) and b.get('type') == 'tool_use':
+                            if not isinstance(b, dict):
+                                continue
+                            # Summarized thinking often arrives as a complete assistant
+                            # block without thinking_delta stream events (common after
+                            # Forge --resume first turn). Backfill once if stream missed it.
+                            if b.get('type') == 'thinking':
+                                chunk = str(b.get('thinking') or '')
+                                if chunk and not think_acc:
+                                    think_acc.append(chunk)
+                                    yield ('think', chunk)
+                            elif b.get('type') == 'tool_use':
                                 if current_round is not None and not current_round.get('complete'):
                                     current_round['context_tokens'] = (
                                         int(current_round.get('input_tokens') or 0)

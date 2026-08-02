@@ -41,13 +41,16 @@ from chat.daily_context import (
     advance_resident_history_cursor,
     ensure_schema,
     get_resident_history_cursor,
+    make_resident_key,
     release_resident_turn_lease,
 )
 from chat.daily_runtime import (
     bind_target_resident_after_switch,
     forged_history_watermark,
+    get_local_binding,
     handoff_lock,
     install_target_resident_after_swap,
+    set_local_binding,
 )
 from chat.context_window_forge_publish import is_native_cold_binding
 from chat.session_registry import SCAN_STATUS_READY, get_context_claude_session
@@ -569,6 +572,8 @@ def _persist_first_assistant_idempotent(
     chat_id: str,
     now_dt: Any,
     now_s: str,
+    thinking: str = '',
+    cache_info: str = '',
 ) -> int:
     """Insert assistant + write first_assistant_message_id in one txn (crash-safe)."""
     existing_aid = intent.get('first_assistant_message_id')
@@ -640,8 +645,8 @@ def _persist_first_assistant_idempotent(
 
     cur = conn.execute(
         "INSERT INTO chat_messages (author, content, thinking, tool_calls, cache_info, choices) "
-        "VALUES ('assistant', ?, '', '', '', '')",
-        (str(assistant_content),),
+        "VALUES ('assistant', ?, ?, '', ?, '')",
+        (str(assistant_content), str(thinking or ''), str(cache_info or '')),
     )
     assistant_id = int(cur.lastrowid)
     conn.execute(
@@ -1331,6 +1336,29 @@ def _target_cursor_matches_assistant_conn(
     return int(dict(row)['history_cursor_message_id']) == int(assistant_message_id)
 
 
+def _sync_local_binding_cursor_after_first_turn(
+    session: FirstTurnSession,
+    *,
+    assistant_message_id: int,
+    chat_id: str = DEFAULT_CHAT_ID,
+) -> None:
+    """Align LocalResidentBinding cursor with DB after successful first-turn cursor state.
+
+    Mirrors complete_daily_turn: update only when the local binding matches this
+    target resident. Does not write owner cursor (claim refreshes owner later).
+    """
+    binding = get_local_binding()
+    expected_key = make_resident_key(
+        chat_id=chat_id,
+        context_epoch=int(session.target_context_epoch),
+        resident_generation=int(session.target_resident_generation),
+    )
+    if binding is None or str(binding.resident_key) != str(expected_key):
+        return
+    binding.bound_cursor_message_id = int(assistant_message_id)
+    set_local_binding(binding)
+
+
 @_serialize_context_switch
 def complete_first_turn_round(
     session: FirstTurnSession,
@@ -1339,8 +1367,10 @@ def complete_first_turn_round(
     end_offset: int,
     db_path: str,
     now: Optional[Any] = None,
+    thinking: str = '',
+    cache_info: str = '',
 ) -> FirstTurnCompleteResult:
-    """Assistant persist + cursor CAS + lease release + completed_at + last-good."""
+    """Assistant persist + cursor CAS + local binding sync + lease release + last-good."""
     if not session._handoff_complete:
         raise FirstTurnError('handoff incomplete', error_code='FIRST_TURN_HANDOFF_INCOMPLETE')
     ensure_schema(db_path)
@@ -1362,6 +1392,9 @@ def complete_first_turn_round(
             assistant_id = int(intent['first_assistant_message_id'])
             if _last_good_checkpoint_complete(intent):
                 conn.commit()
+                _sync_local_binding_cursor_after_first_turn(
+                    session, assistant_message_id=assistant_id, chat_id=chat_id,
+                )
                 return FirstTurnCompleteResult(
                     assistant_message_id=assistant_id,
                     cursor_advanced=False,
@@ -1386,6 +1419,9 @@ def complete_first_turn_round(
                 now_s=now_s,
             )
             conn.commit()
+            _sync_local_binding_cursor_after_first_turn(
+                session, assistant_message_id=assistant_id, chat_id=chat_id,
+            )
             return FirstTurnCompleteResult(
                 assistant_message_id=assistant_id,
                 cursor_advanced=False,
@@ -1398,6 +1434,8 @@ def complete_first_turn_round(
             chat_id=chat_id,
             now_dt=now_dt,
             now_s=now_s,
+            thinking=str(thinking or ''),
+            cache_info=str(cache_info or ''),
         )
         conn.commit()
     except FirstTurnError:
@@ -1444,6 +1482,11 @@ def complete_first_turn_round(
             expected_cursor=cursor_before,
             db_path=db_path,
         )
+
+    # Mirror complete_daily_turn: sync local cursor only after DB cursor is confirmed.
+    _sync_local_binding_cursor_after_first_turn(
+        session, assistant_message_id=int(assistant_id), chat_id=chat_id,
+    )
 
     release_resident_turn_lease(
         session.target_context_id,
