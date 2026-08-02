@@ -83,29 +83,44 @@ def _parse_mood_word(emotion_text: str) -> Optional[str]:
     if not match:
         return None
     word = match.group(1).strip()
-    if not word or word in ('平静', 'unknown'):
+    if not word or word == 'unknown':
         return None
     return word
 
 
 def _emotional_tone_sentence(emotion_text: str) -> Optional[str]:
-    mood = _parse_mood_word(emotion_text)
+    text = str(emotion_text or '').strip()
+    if not text:
+        return None
+    mood = _parse_mood_word(text)
+    if mood == '平静':
+        return '情绪整体平稳。'
     if mood:
         return f'情绪基调{mood}。'
-    return '情绪整体平稳。'
+    return None
 
 
-def _intimacy_score(emotion_pairs: dict[str, float], drive_pairs: dict[str, float]) -> float:
-    candidates = [
-        drive_pairs.get('libido', 0.0),
-        emotion_pairs.get('desire_p', 0.0),
-        emotion_pairs.get('desire_c', 0.0),
-        drive_pairs.get('attachment', 0.0),
-    ]
+def _intimacy_score(
+    emotion_pairs: dict[str, float],
+    drive_pairs: dict[str, float],
+) -> Optional[float]:
+    candidates: list[float] = []
+    if 'libido' in drive_pairs:
+        candidates.append(drive_pairs['libido'])
+    if 'desire_p' in emotion_pairs:
+        candidates.append(emotion_pairs['desire_p'])
+    if 'desire_c' in emotion_pairs:
+        candidates.append(emotion_pairs['desire_c'])
+    if 'attachment' in drive_pairs:
+        candidates.append(drive_pairs['attachment'])
+    if not candidates:
+        return None
     return max(candidates)
 
 
 def _mental_direction_sentence(drive_pairs: dict[str, float]) -> Optional[str]:
+    if 'curiosity' not in drive_pairs and 'reflection' not in drive_pairs:
+        return None
     curiosity = drive_pairs.get('curiosity', 0.0)
     reflection = drive_pairs.get('reflection', 0.0)
     curiosity_line = _tier_label(curiosity, _CURIOSITY_TIERS)
@@ -154,7 +169,11 @@ def _time_of_day_sentence(time_bucket_text: str) -> Optional[str]:
 
 def _light_phrase(token: str) -> str:
     token = str(token or '').strip().lower()
-    if token in ('关', 'off', '0', 'false', 'unknown', '未知', '暂不可读'):
+    if not token:
+        return '状态不明'
+    if token in ('unknown', '未知', '暂不可读'):
+        return '状态不明'
+    if token in ('关', 'off', '0', 'false'):
         return '关着'
     if token in ('开', 'on', '1', 'true'):
         return '亮着'
@@ -220,25 +239,31 @@ def translate_raw_state_to_persona_semantic(
     if tone:
         inner['emotional_tone'] = tone
 
-    fatigue_line = _tier_label(drive_pairs.get('fatigue', 0.0), _FATIGUE_TIERS)
-    if fatigue_line:
-        inner['bodily_energy'] = fatigue_line
+    if 'fatigue' in drive_pairs:
+        fatigue_line = _tier_label(drive_pairs['fatigue'], _FATIGUE_TIERS)
+        if fatigue_line:
+            inner['bodily_energy'] = fatigue_line
 
-    stress_line = _tier_label(drive_pairs.get('stress', 0.0), _STRESS_TIERS)
-    if stress_line:
-        inner['inner_tension'] = stress_line
+    if 'stress' in drive_pairs:
+        stress_line = _tier_label(drive_pairs['stress'], _STRESS_TIERS)
+        if stress_line:
+            inner['inner_tension'] = stress_line
 
-    longing_line = _tier_label(emotion_pairs.get('longing', 0.0), _LONGING_TIERS)
-    if longing_line:
-        inner['longing_pull'] = longing_line
+    if 'longing' in emotion_pairs:
+        longing_line = _tier_label(emotion_pairs['longing'], _LONGING_TIERS)
+        if longing_line:
+            inner['longing_pull'] = longing_line
 
-    intimacy_line = _tier_label(_intimacy_score(emotion_pairs, drive_pairs), _INTIMACY_TIERS)
-    if intimacy_line:
-        inner['intimacy_pull'] = intimacy_line
+    intimacy_value = _intimacy_score(emotion_pairs, drive_pairs)
+    if intimacy_value is not None:
+        intimacy_line = _tier_label(intimacy_value, _INTIMACY_TIERS)
+        if intimacy_line:
+            inner['intimacy_pull'] = intimacy_line
 
-    social_line = _tier_label(drive_pairs.get('social', 0.0), _SOCIAL_TIERS)
-    if social_line:
-        inner['social_openness'] = social_line
+    if 'social' in drive_pairs:
+        social_line = _tier_label(drive_pairs['social'], _SOCIAL_TIERS)
+        if social_line:
+            inner['social_openness'] = social_line
 
     mental_line = _mental_direction_sentence(drive_pairs)
     if mental_line:
