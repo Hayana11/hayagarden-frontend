@@ -37,9 +37,8 @@ class ReplicaVariantResult:
 
 
 @dataclass(frozen=True)
-class ReplicaPairResult:
-    production: ReplicaVariantResult
-    experiment: ReplicaVariantResult
+class ReplicaExecutionResult:
+    result: ReplicaVariantResult
     manifest: Mapping[str, Any]
 
 
@@ -186,9 +185,27 @@ def _run_one(resident: Any, variant: ReplicaVariantPlan) -> ReplicaVariantResult
     )
 
 
-def run_daily_replica_pair(
+def _validated_runtime_dependencies(
     *,
-    conn: Any,
+    plan: DailyReplicaPairPlan,
+    resident_factory: Optional[ResidentFactory] = None,
+    session_id_factory: Optional[SessionIdFactory] = None,
+    session_path_resolver: Optional[SessionPathResolver] = None,
+) -> tuple[ResidentFactory, SessionIdFactory, SessionPathResolver]:
+    if not plan.contract_ok:
+        raise ReplicaContractError(
+            'replica material contract is not valid',
+            error_code='REPLICA_CONTRACT_INVALID',
+        )
+    return (
+        resident_factory or _default_resident_factory,
+        session_id_factory or _default_session_id,
+        session_path_resolver or _default_session_path,
+    )
+
+
+def run_daily_replica_production(
+    *,
     plan: DailyReplicaPairPlan,
     full_system: str,
     env: Mapping[str, str],
@@ -196,82 +213,129 @@ def run_daily_replica_pair(
     claude_home: str,
     allowed_tools: str,
     mcp_config_path: str,
+    tool_profile: str,
+    resident_factory: Optional[ResidentFactory] = None,
+    session_id_factory: Optional[SessionIdFactory] = None,
+    session_path_resolver: Optional[SessionPathResolver] = None,
+) -> ReplicaExecutionResult:
+    """Run only production replica A, then stop and clean its transcript."""
+    resident_factory, session_id_factory, session_path_resolver = (
+        _validated_runtime_dependencies(
+            plan=plan,
+            resident_factory=resident_factory,
+            session_id_factory=session_id_factory,
+            session_path_resolver=session_path_resolver,
+        )
+    )
+    session_id = str(session_id_factory())
+    if not session_id:
+        raise ReplicaContractError(
+            'replica session id is empty',
+            error_code='REPLICA_SESSION_ID_INVALID',
+        )
+    session_path = session_path_resolver(str(cwd), session_id, str(claude_home))
+    resident = resident_factory(str(cwd), str(allowed_tools), str(mcp_config_path))
+    try:
+        resident.spawn_fresh_named(
+            str(full_system), copy.deepcopy(dict(env)), session_id=session_id,
+            tool_profile=str(tool_profile),
+            reason='9a_replica_a',
+        )
+        result = _run_one(resident, plan.production)
+        manifest = dict(plan.manifest)
+        manifest.update({
+            'runner_contract_ok': True,
+            'variant_run': 'production_a',
+            'tool_profile': str(tool_profile),
+            'a_reproduction_gate': 'AWAITING_OWNER_CONFIRMATION',
+            'experiment_b_started': False,
+            'formal_resident_reused': False,
+            'formal_resident_swapped': False,
+            'formal_db_written': False,
+            'production_session_id': session_id,
+        })
+        return ReplicaExecutionResult(result=result, manifest=manifest)
+    finally:
+        _kill_quietly(resident)
+        _unlink_quietly(session_path)
+
+
+def run_daily_replica_experiment(
+    *,
+    conn: Any,
+    plan: DailyReplicaPairPlan,
+    a_reproduction_confirmed: bool,
+    full_system: str,
+    env: Mapping[str, str],
+    cwd: str,
+    claude_home: str,
+    allowed_tools: str,
+    mcp_config_path: str,
+    tool_profile: str,
     resident_factory: Optional[ResidentFactory] = None,
     seed_builder: Optional[NativeSeedBuilder] = None,
     session_id_factory: Optional[SessionIdFactory] = None,
     session_path_resolver: Optional[SessionPathResolver] = None,
-) -> ReplicaPairResult:
-    """Run A then B without installing either as the formal resident."""
-    if not plan.contract_ok:
+) -> ReplicaExecutionResult:
+    """Run B only after an explicit owner decision that A reproduced 9A."""
+    if not a_reproduction_confirmed:
         raise ReplicaContractError(
-            'replica material contract is not valid',
-            error_code='REPLICA_CONTRACT_INVALID',
+            'experiment B requires explicit confirmation that A reproduced 9A',
+            error_code='REPLICA_A_GATE_REQUIRED',
         )
-    resident_factory = resident_factory or _default_resident_factory
+    resident_factory, session_id_factory, session_path_resolver = (
+        _validated_runtime_dependencies(
+            plan=plan,
+            resident_factory=resident_factory,
+            session_id_factory=session_id_factory,
+            session_path_resolver=session_path_resolver,
+        )
+    )
     seed_builder = seed_builder or build_native_seed_from_db
-    session_id_factory = session_id_factory or _default_session_id
-    session_path_resolver = session_path_resolver or _default_session_path
 
-    a_id = str(session_id_factory())
-    b_id = str(session_id_factory())
-    if not a_id or not b_id or a_id == b_id:
+    session_id = str(session_id_factory())
+    if not session_id:
         raise ReplicaContractError(
-            'replica session ids must be distinct',
+            'replica session id is empty',
             error_code='REPLICA_SESSION_ID_INVALID',
         )
-
-    a_path = session_path_resolver(str(cwd), a_id, str(claude_home))
     seed: Optional[NativeSeed] = None
-    resident_a = resident_factory(str(cwd), str(allowed_tools), str(mcp_config_path))
-    resident_b = resident_factory(str(cwd), str(allowed_tools), str(mcp_config_path))
+    resident = resident_factory(str(cwd), str(allowed_tools), str(mcp_config_path))
     try:
         seed = seed_builder(
             conn=conn,
             plan=plan,
             cwd=str(cwd),
             claude_home=str(claude_home),
-            session_id=b_id,
+            session_id=session_id,
         )
-        if str(seed.session_id) != b_id:
+        if str(seed.session_id) != session_id:
             raise ReplicaContractError(
                 'native seed session id changed',
                 error_code='REPLICA_NATIVE_SESSION_MISMATCH',
             )
-
-        resident_a.spawn_fresh_named(
-            str(full_system), copy.deepcopy(dict(env)), session_id=a_id,
-            reason='9a_replica_a',
-        )
-        result_a = _run_one(resident_a, plan.production)
-        _kill_quietly(resident_a)
-
-        resident_b.spawn_resumable(
+        resident.spawn_resumable(
             str(full_system), copy.deepcopy(dict(env)),
-            resume_session_id=b_id,
+            resume_session_id=session_id,
+            tool_profile=str(tool_profile),
             reason='9a_replica_b',
         )
-        result_b = _run_one(resident_b, plan.experiment)
-        _kill_quietly(resident_b)
-
+        result = _run_one(resident, plan.experiment)
         manifest = dict(plan.manifest)
         manifest.update({
             'runner_contract_ok': True,
+            'variant_run': 'experiment_b',
+            'tool_profile': str(tool_profile),
+            'a_reproduction_gate': 'CONFIRMED_BY_OWNER',
+            'experiment_b_started': True,
             'formal_resident_reused': False,
             'formal_resident_swapped': False,
             'formal_db_written': False,
-            'production_session_id': a_id,
-            'experiment_session_id': b_id,
+            'experiment_session_id': session_id,
             'native_seed_sha256': seed.sha256,
             'native_seed_event_count': int(seed.event_count),
         })
-        return ReplicaPairResult(
-            production=result_a,
-            experiment=result_b,
-            manifest=manifest,
-        )
+        return ReplicaExecutionResult(result=result, manifest=manifest)
     finally:
-        _kill_quietly(resident_a)
-        _kill_quietly(resident_b)
-        _unlink_quietly(a_path)
+        _kill_quietly(resident)
         _unlink_quietly(seed.jsonl_path if seed is not None else None)
-
