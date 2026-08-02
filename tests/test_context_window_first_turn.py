@@ -57,7 +57,7 @@ from chat.context_window_target_prepare import (
     prepare_context_window_target,
 )
 from chat.context_window import WINDOW_MODE_MANUAL
-from chat.daily_context import WINDOW_MODE_MANUAL_STAGED, _connect
+from chat.daily_context import ConflictError, WINDOW_MODE_MANUAL_STAGED, _connect
 from chat.session_registry import get_context_claude_session
 from tools.cc_jsonl_usage import session_jsonl_path
 
@@ -740,6 +740,248 @@ class ContextWindowFirstTurnTests(unittest.TestCase):
         )
         self.assertEqual(int(binding.bound_cursor_message_id), aid)
         self.assertEqual(int(db_cursor), aid)
+
+    def test_cursor_cas_failure_does_not_advance_binding_or_last_good(self):
+        """assistant 已落库后若 DB cursor CAS 失败：binding/last-good 不得单边前进。"""
+        published = self._seed_source_and_forge()
+        target_id = int(self._intent()['target_context_id'])
+        gateway_user_id = _insert_msg(self.db, 'hayana', 'CAS 失败句')
+
+        session = claim_and_start_first_turn(
+            switch_request_id=self.switch_request_id,
+            first_turn_request_id=self.first_turn_request_id,
+            user_content='CAS 失败句',
+            user_message_id=gateway_user_id,
+            hooks=self.hooks,
+            db_path=self.db,
+            now=NOW,
+        )
+        ft_mod.mark_first_turn_stdin_sent(session)
+        ingest_first_turn_text_delta(
+            session, text='会落库', hooks=self.hooks, db_path=self.db, now=NOW,
+        )
+
+        binding_before = dr.get_local_binding()
+        self.assertIsNotNone(binding_before)
+        assert binding_before is not None
+        watermark = int(binding_before.bound_cursor_message_id)
+        db_cursor_before = dc.get_resident_history_cursor(
+            target_id, session.target_resident_generation, db_path=self.db,
+        )
+        self.assertEqual(int(db_cursor_before), watermark)
+        self._assert_last_good_empty()
+
+        hayana_before = sqlite3.connect(self.db).execute(
+            "SELECT COUNT(*) FROM chat_messages WHERE author='hayana'",
+        ).fetchone()[0]
+        asst_before = sqlite3.connect(self.db).execute(
+            "SELECT COUNT(*) FROM chat_messages WHERE author='assistant'",
+        ).fetchone()[0]
+
+        with mock.patch(
+            'chat.context_window_first_turn.advance_resident_history_cursor',
+            side_effect=ConflictError('resident cursor CAS failed'),
+        ):
+            with self.assertRaises(ConflictError) as ar:
+                complete_first_turn_round(
+                    session,
+                    assistant_content='已保存的回答',
+                    end_offset=int(published.jsonl_size) + 50,
+                    db_path=self.db,
+                    now=NOW,
+                    thinking='这次思考要留下。',
+                    cache_info=json.dumps({'cache_read': 7, 'cache_creation': 3}),
+                )
+        self.assertIn('CAS failed', str(ar.exception))
+
+        intent_failed = self._intent()
+        self.assertEqual(intent_failed['status'], INTENT_COMMITTED)
+        self.assertIsNone(intent_failed.get('first_turn_completed_at'))
+        self._assert_last_good_empty(intent_failed)
+        self.assertIsNotNone(intent_failed.get('first_assistant_message_id'))
+        assistant_id = int(intent_failed['first_assistant_message_id'])
+
+        # Exactly one new assistant; no second answer invented.
+        hayana_after = sqlite3.connect(self.db).execute(
+            "SELECT COUNT(*) FROM chat_messages WHERE author='hayana'",
+        ).fetchone()[0]
+        asst_after = sqlite3.connect(self.db).execute(
+            "SELECT COUNT(*) FROM chat_messages WHERE author='assistant'",
+        ).fetchone()[0]
+        self.assertEqual(hayana_after, hayana_before)
+        self.assertEqual(asst_after, asst_before + 1)
+
+        row = sqlite3.connect(self.db).execute(
+            'SELECT content, thinking, cache_info FROM chat_messages WHERE id=?',
+            (assistant_id,),
+        ).fetchone()
+        self.assertEqual(row[0], '已保存的回答')
+        self.assertEqual(row[1], '这次思考要留下。')
+        self.assertEqual(json.loads(row[2]).get('cache_read'), 7)
+
+        # DB cursor + LocalResidentBinding stay on watermark — never one-sided.
+        db_cursor_after = dc.get_resident_history_cursor(
+            target_id, session.target_resident_generation, db_path=self.db,
+        )
+        binding_after = dr.get_local_binding()
+        self.assertIsNotNone(binding_after)
+        assert binding_after is not None
+        self.assertEqual(int(db_cursor_after), watermark)
+        self.assertEqual(int(binding_after.bound_cursor_message_id), watermark)
+        self.assertNotEqual(int(binding_after.bound_cursor_message_id), assistant_id)
+
+        # Lease remains held — completion did not falsely finish.
+        lease_n = sqlite3.connect(self.db).execute(
+            'SELECT COUNT(*) FROM daily_resident_turn_leases '
+            'WHERE context_id=? AND resident_generation=? AND lease_owner=?',
+            (
+                target_id,
+                session.target_resident_generation,
+                self.first_turn_request_id,
+            ),
+        ).fetchone()[0]
+        self.assertEqual(lease_n, 1)
+
+        with self.subTest('retry_after_cas_failure_succeeds_without_wiping_think'):
+            # Retry with empty thinking/cache must reuse the same assistant row.
+            recovered = complete_first_turn_round(
+                session,
+                assistant_content='不该覆盖的重试正文',
+                end_offset=int(published.jsonl_size) + 50,
+                db_path=self.db,
+                now=NOW + datetime.timedelta(seconds=30),
+                thinking='',
+                cache_info='',
+            )
+            self.assertEqual(recovered.assistant_message_id, assistant_id)
+            self.assertTrue(recovered.cursor_advanced)
+
+            intent_ok = self._intent()
+            self.assertIsNotNone(intent_ok.get('first_turn_completed_at'))
+            self.assertEqual(
+                int(intent_ok['last_good_history_cursor_message_id']), assistant_id,
+            )
+
+            row2 = sqlite3.connect(self.db).execute(
+                'SELECT content, thinking, cache_info FROM chat_messages WHERE id=?',
+                (assistant_id,),
+            ).fetchone()
+            self.assertEqual(row2[0], '已保存的回答')
+            self.assertEqual(row2[1], '这次思考要留下。')
+            self.assertEqual(json.loads(row2[2]).get('cache_read'), 7)
+
+            binding_ok = dr.get_local_binding()
+            db_ok = dc.get_resident_history_cursor(
+                target_id, session.target_resident_generation, db_path=self.db,
+            )
+            self.assertEqual(int(db_ok), assistant_id)
+            self.assertEqual(int(binding_ok.bound_cursor_message_id), assistant_id)
+
+            asst_final = sqlite3.connect(self.db).execute(
+                "SELECT COUNT(*) FROM chat_messages WHERE author='assistant'",
+            ).fetchone()[0]
+            self.assertEqual(asst_final, asst_before + 1)
+
+    def test_complete_idempotent_preserves_thinking_and_cache_info(self):
+        """重复 complete：不造第二份回答，不抹掉 Think/cache，cursor/last-good 稳定。"""
+        published = self._seed_source_and_forge()
+        target_id = int(self._intent()['target_context_id'])
+        gateway_user_id = _insert_msg(self.db, 'hayana', '幂等收尾句')
+
+        session = claim_and_start_first_turn(
+            switch_request_id=self.switch_request_id,
+            first_turn_request_id=self.first_turn_request_id,
+            user_content='幂等收尾句',
+            user_message_id=gateway_user_id,
+            hooks=self.hooks,
+            db_path=self.db,
+            now=NOW,
+        )
+        ft_mod.mark_first_turn_stdin_sent(session)
+        ingest_first_turn_text_delta(
+            session, text='幂等正文', hooks=self.hooks, db_path=self.db, now=NOW,
+        )
+
+        thinking = '第一次完整思考，不能被重试抹掉。'
+        cache_info = json.dumps({
+            'cache_read': 222,
+            'cache_creation': 11,
+        }, ensure_ascii=False)
+
+        first = complete_first_turn_round(
+            session,
+            assistant_content='幂等正文全文',
+            end_offset=int(published.jsonl_size) + 60,
+            db_path=self.db,
+            now=NOW,
+            thinking=thinking,
+            cache_info=cache_info,
+        )
+        self.assertTrue(first.cursor_advanced)
+
+        intent_done = self._intent()
+        recorded_at = intent_done['last_good_recorded_at']
+        self.assertEqual(
+            int(intent_done['last_good_history_cursor_message_id']),
+            first.assistant_message_id,
+        )
+
+        hayana_n = sqlite3.connect(self.db).execute(
+            "SELECT COUNT(*) FROM chat_messages WHERE author='hayana'",
+        ).fetchone()[0]
+        asst_n = sqlite3.connect(self.db).execute(
+            "SELECT COUNT(*) FROM chat_messages WHERE author='assistant'",
+        ).fetchone()[0]
+
+        # Network blip retry: empty thinking/cache must not wipe the first persist.
+        again = complete_first_turn_round(
+            session,
+            assistant_content='另一份不该写入的回答',
+            end_offset=int(published.jsonl_size) + 999,
+            db_path=self.db,
+            now=NOW + datetime.timedelta(minutes=3),
+            thinking='',
+            cache_info='',
+        )
+        self.assertEqual(again.assistant_message_id, first.assistant_message_id)
+        self.assertFalse(again.cursor_advanced)
+
+        intent_again = self._intent()
+        self.assertEqual(intent_again['last_good_recorded_at'], recorded_at)
+        self.assertEqual(
+            int(intent_again['last_good_history_cursor_message_id']),
+            first.assistant_message_id,
+        )
+        self.assertEqual(
+            int(intent_again['first_assistant_message_id']),
+            first.assistant_message_id,
+        )
+
+        hayana_again = sqlite3.connect(self.db).execute(
+            "SELECT COUNT(*) FROM chat_messages WHERE author='hayana'",
+        ).fetchone()[0]
+        asst_again = sqlite3.connect(self.db).execute(
+            "SELECT COUNT(*) FROM chat_messages WHERE author='assistant'",
+        ).fetchone()[0]
+        self.assertEqual(hayana_again, hayana_n)
+        self.assertEqual(asst_again, asst_n)
+
+        row = sqlite3.connect(self.db).execute(
+            'SELECT content, thinking, cache_info FROM chat_messages WHERE id=?',
+            (first.assistant_message_id,),
+        ).fetchone()
+        self.assertEqual(row[0], '幂等正文全文')
+        self.assertEqual(row[1], thinking)
+        self.assertEqual(row[2], cache_info)
+
+        db_cursor = dc.get_resident_history_cursor(
+            target_id, session.target_resident_generation, db_path=self.db,
+        )
+        binding = dr.get_local_binding()
+        self.assertIsNotNone(binding)
+        assert binding is not None
+        self.assertEqual(int(db_cursor), first.assistant_message_id)
+        self.assertEqual(int(binding.bound_cursor_message_id), first.assistant_message_id)
 
     def test_postcommit_client_abort_releases_lease_and_bumps_generation(self):
         """Post-commit abort: release first-turn lease + bump gen once (idempotent)."""
