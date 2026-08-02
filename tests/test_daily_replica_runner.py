@@ -152,16 +152,20 @@ class DailyReplicaRunnerTests(unittest.TestCase):
         self.assertEqual(self.created, [])
 
     def test_b_resumes_only_after_explicit_a_confirmation(self):
-        result = run_daily_replica_experiment(
-            conn=object(), plan=_plan(), a_reproduction_confirmed=True,
-            full_system='same-system', env={'TOKEN': 'same'},
-            cwd='/opt/frontend', claude_home=str(self.root),
-            allowed_tools='same-tools', mcp_config_path='/opt/frontend/cc-tools.json',
-            tool_profile='text_only',
-            resident_factory=self._resident_factory, seed_builder=self._seed,
-            session_id_factory=lambda: next(self.ids),
-            session_path_resolver=self._session_path,
-        )
+        with tempfile.TemporaryDirectory() as tmp:
+            bundle = prepare_replica_session_start_isolation(Path(tmp))
+            result = run_daily_replica_experiment(
+                conn=object(), plan=_plan(), a_reproduction_confirmed=True,
+                full_system='same-system', env={'TOKEN': 'same'},
+                cwd='/opt/frontend', claude_home=str(self.root),
+                allowed_tools='same-tools', mcp_config_path='/opt/frontend/cc-tools.json',
+                tool_profile='text_only',
+                session_start=bundle,
+                a_frozen_session_start_sha256=bundle.frozen_sha256,
+                resident_factory=self._resident_factory, seed_builder=self._seed,
+                session_id_factory=lambda: next(self.ids),
+                session_path_resolver=self._session_path,
+            )
         self.assertEqual(self.created[0].spawn[0], 'resume')
         self.assertEqual(self.created[0].spawn[4], 'text_only')
         self.assertNotIn('HISTORY=', self.created[0].prompt)
@@ -169,6 +173,38 @@ class DailyReplicaRunnerTests(unittest.TestCase):
         self.assertEqual(result.manifest['a_reproduction_gate'], 'CONFIRMED_BY_OWNER')
         self.assertTrue(result.manifest['experiment_b_started'])
         self.assertFalse((self.root / 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa.jsonl').exists())
+
+    def test_b_hash_mismatch_blocks_before_seed_and_resident(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bundle = prepare_replica_session_start_isolation(Path(tmp))
+            factory_calls = []
+            seed_calls = []
+
+            def factory(cwd, tools, mcp):
+                factory_calls.append(True)
+                return FakeResident(cwd, tools, mcp)
+
+            def seed(**kwargs):
+                seed_calls.append(True)
+                return self._seed(**kwargs)
+
+            with self.assertRaises(ReplicaContractError) as ctx:
+                run_daily_replica_experiment(
+                    conn=object(), plan=_plan(), a_reproduction_confirmed=True,
+                    full_system='same-system', env={},
+                    cwd='/opt/frontend', claude_home=str(self.root),
+                    allowed_tools='same-tools',
+                    mcp_config_path='/opt/frontend/cc-tools.json',
+                    tool_profile='text_only',
+                    session_start=bundle,
+                    a_frozen_session_start_sha256='not-the-a-hash',
+                    resident_factory=factory, seed_builder=seed,
+                    session_id_factory=lambda: next(self.ids),
+                    session_path_resolver=self._session_path,
+                )
+            self.assertEqual(ctx.exception.error_code, 'REPLICA_SESSION_START_HASH_MISMATCH')
+            self.assertEqual(factory_calls, [])
+            self.assertEqual(seed_calls, [])
 
     def test_tool_request_aborts_pair_and_cleans_both_residents(self):
         def factory(cwd, tools, mcp):
@@ -246,18 +282,22 @@ class DailyReplicaRunnerTests(unittest.TestCase):
             path.write_text('seed', encoding='utf-8')
             return NativeSeed('wrong', path, 'x', 2)
 
-        with self.assertRaises(ReplicaContractError) as ctx:
-            run_daily_replica_experiment(
-                conn=object(), plan=_plan(), a_reproduction_confirmed=True,
-                full_system='same-system',
-                env={}, cwd='/opt/frontend', claude_home=str(self.root),
-                allowed_tools='same-tools', mcp_config_path='/opt/frontend/cc-tools.json',
-                tool_profile='text_only',
-                resident_factory=self._resident_factory, seed_builder=bad_seed,
-                session_id_factory=lambda: next(self.ids),
-                session_path_resolver=self._session_path,
-            )
-        self.assertEqual(ctx.exception.error_code, 'REPLICA_NATIVE_SESSION_MISMATCH')
+        with tempfile.TemporaryDirectory() as tmp:
+            bundle = prepare_replica_session_start_isolation(Path(tmp))
+            with self.assertRaises(ReplicaContractError) as ctx:
+                run_daily_replica_experiment(
+                    conn=object(), plan=_plan(), a_reproduction_confirmed=True,
+                    full_system='same-system',
+                    env={}, cwd='/opt/frontend', claude_home=str(self.root),
+                    allowed_tools='same-tools', mcp_config_path='/opt/frontend/cc-tools.json',
+                    tool_profile='text_only',
+                    session_start=bundle,
+                    a_frozen_session_start_sha256=bundle.frozen_sha256,
+                    resident_factory=self._resident_factory, seed_builder=bad_seed,
+                    session_id_factory=lambda: next(self.ids),
+                    session_path_resolver=self._session_path,
+                )
+            self.assertEqual(ctx.exception.error_code, 'REPLICA_NATIVE_SESSION_MISMATCH')
 
 
 if __name__ == '__main__':

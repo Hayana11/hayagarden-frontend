@@ -9,14 +9,53 @@ from pathlib import Path
 
 from chat.daily_replica_ab import ReplicaContractError
 from chat.daily_replica_session_start import (
+    CONTEXT_INJECT_WRAPPER_PREFIX,
+    OMBRE_BREATH_WRAPPER_PREFIX,
     PRODUCTION_HOOK_MARKERS,
+    capture_readonly_production_session_start_visible,
     prepare_replica_session_start_isolation,
     read_static_session_start_payload,
+    resolve_replica_settings_path,
+    validate_session_start_against_a_hash,
     validate_session_start_bundle,
 )
 
 
 class DailyReplicaSessionStartTests(unittest.TestCase):
+    def test_settings_path_under_claude_config_dir(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bundle = prepare_replica_session_start_isolation(Path(tmp))
+            expected = resolve_replica_settings_path(bundle.claude_home)
+            self.assertEqual(bundle.settings_path.resolve(), expected.resolve())
+            self.assertTrue(bundle.settings_path.is_file())
+            settings = json.loads(bundle.settings_path.read_text(encoding='utf-8'))
+            command = settings['hooks']['SessionStart'][0]['hooks'][0]['command']
+            self.assertIn('static_session_start.py', command)
+            proc = subprocess.run(
+                command.split(),
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            self.assertEqual(proc.stdout, read_static_session_start_payload(bundle))
+
+    def test_freeze_production_hook_visible_format_readonly(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            ctx_file = root / 'session_context.txt'
+            ctx_file.write_text('ctx-body', encoding='utf-8')
+
+            visible = capture_readonly_production_session_start_visible(
+                context_file_path=ctx_file,
+                breath_runner=lambda: (
+                    OMBRE_BREATH_WRAPPER_PREFIX + 'ombre-mem'
+                ),
+            )
+            self.assertIn(OMBRE_BREATH_WRAPPER_PREFIX + 'ombre-mem', visible)
+            self.assertIn(CONTEXT_INJECT_WRAPPER_PREFIX + 'ctx-body', visible)
+            self.assertTrue(ctx_file.is_file())
+            self.assertEqual(ctx_file.read_text(encoding='utf-8'), 'ctx-body')
+
     def test_dynamic_capture_once_static_hook_stable_for_ab(self):
         calls = {'n': 0}
 
@@ -36,25 +75,6 @@ class DailyReplicaSessionStartTests(unittest.TestCase):
             b_payload = read_static_session_start_payload(bundle)
             self.assertEqual(a_payload, 'dynamic-1')
             self.assertEqual(a_payload, b_payload)
-            self.assertEqual(bundle.frozen_sha256, bundle.frozen_sha256)
-
-    def test_fake_consumable_source_not_deleted_by_static_hook(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            consumable = root / 'consumable.txt'
-            consumable.write_text('consume-me', encoding='utf-8')
-
-            def capturer() -> str:
-                return consumable.read_text(encoding='utf-8')
-
-            bundle = prepare_replica_session_start_isolation(
-                root,
-                material_capturer=capturer,
-            )
-            read_static_session_start_payload(bundle)
-            read_static_session_start_payload(bundle)
-            self.assertTrue(consumable.is_file())
-            self.assertEqual(consumable.read_text(encoding='utf-8'), 'consume-me')
 
     def test_replica_settings_do_not_reference_production_hooks(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -64,6 +84,19 @@ class DailyReplicaSessionStartTests(unittest.TestCase):
             for marker in PRODUCTION_HOOK_MARKERS:
                 self.assertNotIn(marker.lower(), lowered)
             self.assertIn('static_session_start.py', settings)
+
+    def test_validate_against_a_hash_exact_equality(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bundle = prepare_replica_session_start_isolation(Path(tmp))
+            validate_session_start_against_a_hash(
+                bundle, bundle.frozen_sha256,
+            )
+            with self.assertRaises(ReplicaContractError) as ctx:
+                validate_session_start_against_a_hash(bundle, 'wrong-hash')
+            self.assertEqual(
+                ctx.exception.error_code,
+                'REPLICA_SESSION_START_HASH_MISMATCH',
+            )
 
     def test_hash_mismatch_fails_closed_before_spawn(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -75,20 +108,6 @@ class DailyReplicaSessionStartTests(unittest.TestCase):
                 ctx.exception.error_code,
                 'REPLICA_SESSION_START_HASH_MISMATCH',
             )
-
-    def test_static_hook_emits_frozen_payload_via_subprocess(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            bundle = prepare_replica_session_start_isolation(
-                Path(tmp),
-                material_capturer=lambda: 'frozen-visible',
-            )
-            proc = subprocess.run(
-                ['python3', str(bundle.static_hook_path)],
-                capture_output=True,
-                text=True,
-                check=True,
-            )
-            self.assertEqual(proc.stdout, 'frozen-visible')
 
 
 if __name__ == '__main__':

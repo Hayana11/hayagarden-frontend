@@ -20,6 +20,7 @@ from chat.daily_replica_ab import (
 )
 from chat.daily_replica_session_start import (
     ReplicaSessionStartBundle,
+    validate_session_start_against_a_hash,
     validate_session_start_bundle,
 )
 
@@ -294,7 +295,6 @@ def run_daily_replica_production(
         if session_start is not None:
             manifest['frozen_session_start_sha256'] = session_start.frozen_sha256
             manifest['replica_settings_sha256'] = session_start.replica_settings_sha256
-            manifest['session_start_payload_sha256_a'] = session_start.frozen_sha256
         return ReplicaExecutionResult(result=result, manifest=manifest)
     finally:
         _kill_quietly(resident)
@@ -314,6 +314,7 @@ def run_daily_replica_experiment(
     mcp_config_path: str,
     tool_profile: str,
     session_start: Optional[ReplicaSessionStartBundle] = None,
+    a_frozen_session_start_sha256: Optional[str] = None,
     resident_factory: Optional[ResidentFactory] = None,
     seed_builder: Optional[NativeSeedBuilder] = None,
     session_id_factory: Optional[SessionIdFactory] = None,
@@ -334,6 +335,12 @@ def run_daily_replica_experiment(
         )
     )
     seed_builder = seed_builder or build_native_seed_from_db
+
+    if session_start is not None:
+        validate_session_start_against_a_hash(
+            session_start,
+            a_frozen_session_start_sha256,
+        )
 
     session_id = str(session_id_factory())
     if not session_id:
@@ -385,12 +392,6 @@ def run_daily_replica_experiment(
         if session_start is not None:
             manifest['frozen_session_start_sha256'] = session_start.frozen_sha256
             manifest['replica_settings_sha256'] = session_start.replica_settings_sha256
-            manifest['session_start_payload_sha256_b'] = session_start.frozen_sha256
-            if manifest.get('session_start_payload_sha256_a') != session_start.frozen_sha256:
-                raise ReplicaContractError(
-                    'A/B SessionStart frozen payload hash mismatch',
-                    error_code='REPLICA_SESSION_START_HASH_MISMATCH',
-                )
         return ReplicaExecutionResult(result=result, manifest=manifest)
     finally:
         _kill_quietly(resident)

@@ -200,6 +200,9 @@ class DailyReplicaManager:
                         mcp_config_path=self.mcp_config_path,
                         tool_profile='text_only',
                         session_start=active.snapshot.session_start,
+                        a_frozen_session_start_sha256=(
+                            active.snapshot.session_start.frozen_sha256
+                        ),
                     )
                 finally:
                     conn.close()
