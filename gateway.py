@@ -4742,19 +4742,31 @@ def _stream_cc_daily_soft_window(_turn_data, _uc):
 
     # COMMITTED is not an "active" switch status, but incomplete first-turn
     # finalize must still block ordinary daily turns (lease TTL-independent).
+    # Prefer DB-only recovery (no FirstTurnSession) before failing closed.
     try:
         _finalize_pending = _cw.get_first_turn_finalize_pending(db_path=DB_PATH)
     except Exception:
         _finalize_pending = None
     if _finalize_pending is not None:
-        yield _sse_json({
-            't': 'err',
-            'd': '换窗第一句收尾未完成，请先完成 finalize 再继续。',
-            'code': 'FIRST_TURN_FINALIZE_PENDING',
-            'retryable': True,
-        })
-        yield _sse_json({'t': 'done', 'ok': False})
-        return
+        try:
+            from chat.context_window_first_turn import (
+                recover_first_turn_finalize_pending as _recover_ft_finalize,
+            )
+            _healed = _recover_ft_finalize(db_path=DB_PATH)
+        except Exception:
+            logging.getLogger(__name__).exception(
+                'first_turn finalize recovery failed',
+            )
+            _healed = None
+        if _healed is None:
+            yield _sse_json({
+                't': 'err',
+                'd': '换窗第一句收尾未完成，请稍后再试。',
+                'code': 'FIRST_TURN_FINALIZE_PENDING',
+                'retryable': True,
+            })
+            yield _sse_json({'t': 'done', 'ok': False})
+            return
 
     _daily_plan = None
     turn_terminal = False

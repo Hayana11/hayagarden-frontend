@@ -23,6 +23,7 @@ from chat.context_window import (
     CLOSE_REASON_MANUAL,
     INTENT_FORGING,
     INTENT_RELEASED,
+    FirstTurnFinalizePendingError,
     IdempotencyMismatchError,
     NoOpenContextWindowError,
     StaleSourceContextError,
@@ -1305,6 +1306,10 @@ def publish_context_window_forge_candidate(
         )
     except IdempotencyMismatchError:
         raise
+    except FirstTurnFinalizePendingError as exc:
+        raise ForgePublishError(
+            str(exc), error_code='FIRST_TURN_FINALIZE_PENDING',
+        ) from exc
     except (StaleSourceContextError, WindowBusyError, SwitchInProgressError) as exc:
         raise ForgePublishError(str(exc), error_code='FORGE_IN_PROGRESS') from exc
 

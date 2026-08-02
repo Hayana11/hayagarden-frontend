@@ -12,6 +12,7 @@ from flask import Blueprint, jsonify, request
 from chat.context_window import (
     CLOSE_REASON_MANUAL,
     CarryoverMessageUnforgeableError,
+    FirstTurnFinalizePendingError,
     IdempotencyMismatchError,
     NoOpenContextWindowError,
     StaleSourceContextError,
@@ -257,6 +258,13 @@ def create_context_window_blueprint(
                 'ok': False,
                 'error': str(exc),
                 'code': 'switch_in_progress',
+                'retryable': True,
+            }), 423
+        except FirstTurnFinalizePendingError as exc:
+            return jsonify({
+                'ok': False,
+                'error': str(exc),
+                'code': 'FIRST_TURN_FINALIZE_PENDING',
                 'retryable': True,
             }), 423
         except WindowBusyError as exc:
