@@ -655,6 +655,35 @@ def get_active_switch_intent(
         conn.close()
 
 
+def get_first_turn_finalize_pending(
+    chat_id: str = DEFAULT_CHAT_ID,
+    *,
+    db_path: Optional[str] = None,
+) -> Optional[dict[str, Any]]:
+    """Return committed intent awaiting first-turn finalize (TTL-independent).
+
+    Contract: INTENT_COMMITTED + first_assistant_message_id set +
+    first_turn_completed_at NULL means ordinary daily turns must not proceed,
+    even if the first-turn resident lease has expired. Explicit finalize retry
+    writes completed_at + last-good and clears this gate.
+    """
+    ensure_schema(db_path)
+    conn = _connect(db_path)
+    try:
+        return _row_to_dict(conn.execute(
+            '''SELECT * FROM context_switch_intents
+               WHERE chat_id=?
+                 AND status=?
+                 AND first_assistant_message_id IS NOT NULL
+                 AND first_turn_completed_at IS NULL
+               ORDER BY updated_at DESC
+               LIMIT 1''',
+            (str(chat_id), INTENT_COMMITTED),
+        ).fetchone())
+    finally:
+        conn.close()
+
+
 def get_latest_last_good_checkpoint(
     chat_id: str = DEFAULT_CHAT_ID,
     *,

@@ -96,6 +96,15 @@ class SwitchInProgressRuntimeError(DailyRuntimeError):
         super().__init__(message, error_code='switch_in_progress', retryable=True)
 
 
+class FirstTurnFinalizePendingError(DailyRuntimeError):
+    def __init__(self, message: str = 'first-turn finalize pending'):
+        super().__init__(
+            message,
+            error_code='FIRST_TURN_FINALIZE_PENDING',
+            retryable=True,
+        )
+
+
 @dataclass
 class LocalResidentBinding:
     resident_key: str
@@ -1040,6 +1049,14 @@ def prepare_daily_turn(
         if manual_mode:
             if cw.has_active_switch_intent(chat_id, db_path=db_path):
                 raise SwitchInProgressRuntimeError('switch_in_progress')
+            # Fail-closed: committed first-turn with assistant persisted but
+            # checkpoint incomplete must block ordinary daily turns even after
+            # the temporary first-turn lease TTL (480s) expires.
+            pending = cw.get_first_turn_finalize_pending(chat_id, db_path=db_path)
+            if pending is not None:
+                raise FirstTurnFinalizePendingError(
+                    'first-turn finalize pending; explicit finalize retry required',
+                )
             try:
                 ctx = cw.get_current_context_window(
                     chat_id=chat_id,

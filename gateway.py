@@ -4740,6 +4740,22 @@ def _stream_cc_daily_soft_window(_turn_data, _uc):
             yield _sse_json({'t': 'done', 'ok': False})
             return
 
+    # COMMITTED is not an "active" switch status, but incomplete first-turn
+    # finalize must still block ordinary daily turns (lease TTL-independent).
+    try:
+        _finalize_pending = _cw.get_first_turn_finalize_pending(db_path=DB_PATH)
+    except Exception:
+        _finalize_pending = None
+    if _finalize_pending is not None:
+        yield _sse_json({
+            't': 'err',
+            'd': '换窗第一句收尾未完成，请先完成 finalize 再继续。',
+            'code': 'FIRST_TURN_FINALIZE_PENDING',
+            'retryable': True,
+        })
+        yield _sse_json({'t': 'done', 'ok': False})
+        return
+
     _daily_plan = None
     turn_terminal = False
     text, thinking = None, None
@@ -4961,6 +4977,16 @@ def _stream_cc_daily_soft_window(_turn_data, _uc):
         turn_terminal = True
         yield 'data: ' + json.dumps({
             't': 'err', 'd': str(exc), 'retryable': True, 'code': 'resident_turn_lease_conflict',
+        }) + SSE_END
+        yield 'data: ' + json.dumps({'t': 'done', 'ok': False}) + SSE_END
+        return None
+    except _daily_rt.FirstTurnFinalizePendingError as exc:
+        turn_terminal = True
+        yield 'data: ' + json.dumps({
+            't': 'err',
+            'd': str(exc),
+            'retryable': True,
+            'code': 'FIRST_TURN_FINALIZE_PENDING',
         }) + SSE_END
         yield 'data: ' + json.dumps({'t': 'done', 'ok': False}) + SSE_END
         return None

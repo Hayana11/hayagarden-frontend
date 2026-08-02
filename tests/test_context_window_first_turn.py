@@ -28,6 +28,7 @@ from chat.context_window import (
     INTENT_HANDOFF_PENDING,
     INTENT_READY,
     _intent_row,
+    get_first_turn_finalize_pending,
     get_latest_last_good_checkpoint,
     has_active_switch_intent,
     resolve_canonical_context_row_conn,
@@ -1076,6 +1077,9 @@ class ContextWindowFirstTurnTests(unittest.TestCase):
         self._assert_last_good_empty(intent_failed)
         self.assertIsNotNone(intent_failed.get('first_assistant_message_id'))
         assistant_id = int(intent_failed['first_assistant_message_id'])
+        pending = get_first_turn_finalize_pending(db_path=self.db)
+        self.assertIsNotNone(pending)
+        self.assertEqual(str(pending['request_id']), self.switch_request_id)
 
         # Cursor/binding may already be at assistant; lease must remain (atomic).
         db_cursor = dc.get_resident_history_cursor(
@@ -1103,8 +1107,8 @@ class ContextWindowFirstTurnTests(unittest.TestCase):
         self.assertEqual(row[1], '留下思考')
         self.assertEqual(json.loads(row[2]), ['是', '否'])
 
-        # First-turn lease was minted with fixture NOW; prepare_daily_turn claims
-        # with wall-clock lease_now. Keep the row live so the block is observable.
+        # Keep lease live so atomic retention is still observable; the ordinary
+        # turn gate is FIRST_TURN_FINALIZE_PENDING (not lease TTL).
         wall_now = datetime.datetime.utcnow() + datetime.timedelta(hours=dc.TZ_OFFSET_HOURS)
         live_exp = (wall_now + datetime.timedelta(minutes=10)).strftime('%Y-%m-%d %H:%M:%S')
         conn = _connect(self.db)
@@ -1127,7 +1131,7 @@ class ContextWindowFirstTurnTests(unittest.TestCase):
              mock.patch(
                  'chat.daily_history._build_state_text', return_value=('', 'none', {}),
              ):
-            with self.assertRaises(dr.LeaseConflictError):
+            with self.assertRaises(dr.FirstTurnFinalizePendingError) as ar:
                 dr.prepare_daily_turn(
                     user_message_id=second_user,
                     db_path=self.db,
@@ -1136,6 +1140,7 @@ class ContextWindowFirstTurnTests(unittest.TestCase):
                     now=wall_now,
                     wall_now=wall_now,
                 )
+            self.assertEqual(ar.exception.error_code, 'FIRST_TURN_FINALIZE_PENDING')
 
         # Explicit finalize retry heals checkpoint and releases lease.
         healed = complete_first_turn_round(
@@ -1154,6 +1159,7 @@ class ContextWindowFirstTurnTests(unittest.TestCase):
         self.assertEqual(
             int(intent_ok['last_good_history_cursor_message_id']), assistant_id,
         )
+        self.assertIsNone(get_first_turn_finalize_pending(db_path=self.db))
         lease_after = sqlite3.connect(self.db).execute(
             'SELECT COUNT(*) FROM daily_resident_turn_leases '
             'WHERE context_id=? AND resident_generation=? AND lease_owner=?',
@@ -1173,6 +1179,128 @@ class ContextWindowFirstTurnTests(unittest.TestCase):
         self.assertEqual(row2[0], '已保存的回答')
         self.assertEqual(row2[1], '留下思考')
         self.assertEqual(json.loads(row2[2]), ['是', '否'])
+
+    def test_final_checkpoint_failure_blocks_after_lease_ttl(self):
+        """final txn fail → lease TTL(+481s) 后仍挡；explicit finalize 才放行第二轮。"""
+        published = self._seed_source_and_forge()
+        target_id = int(self._intent()['target_context_id'])
+        gateway_user_id = _insert_msg(self.db, 'hayana', 'TTL 穿透句')
+
+        session = claim_and_start_first_turn(
+            switch_request_id=self.switch_request_id,
+            first_turn_request_id=self.first_turn_request_id,
+            user_content='TTL 穿透句',
+            user_message_id=gateway_user_id,
+            hooks=self.hooks,
+            db_path=self.db,
+            now=NOW,
+        )
+        ft_mod.mark_first_turn_stdin_sent(session)
+        ingest_first_turn_text_delta(
+            session, text='已出正文', hooks=self.hooks, db_path=self.db, now=NOW,
+        )
+
+        real_update = ft_mod._update_intent_conn
+        boom = {'n': 0}
+
+        def _boom_on_completed_at(conn, request_id, *, status=None, fields=None, now_s=None):
+            fields = fields or {}
+            if fields.get('first_turn_completed_at') is not None and boom['n'] == 0:
+                boom['n'] += 1
+                raise sqlite3.OperationalError('simulated final checkpoint failure')
+            return real_update(
+                conn, request_id, status=status, fields=fields, now_s=now_s,
+            )
+
+        with mock.patch.object(ft_mod, '_update_intent_conn', side_effect=_boom_on_completed_at):
+            with self.assertRaises(sqlite3.OperationalError):
+                complete_first_turn_round(
+                    session,
+                    assistant_content='TTL 失败后仍在的回答',
+                    end_offset=int(published.jsonl_size) + 40,
+                    db_path=self.db,
+                    now=NOW,
+                    thinking='留下思考',
+                    cache_info=json.dumps({'cache_read': 3}),
+                    choices=json.dumps(['续', '停'], ensure_ascii=False),
+                )
+
+        intent_failed = self._intent()
+        self.assertEqual(intent_failed.get('status'), INTENT_COMMITTED)
+        self.assertIsNone(intent_failed.get('first_turn_completed_at'))
+        self.assertIsNotNone(intent_failed.get('first_assistant_message_id'))
+        assistant_id = int(intent_failed['first_assistant_message_id'])
+        self._assert_last_good_empty(intent_failed)
+
+        # Simulate first-turn lease TTL elapsed: claim_daily_resident_turn would
+        # treat expires_at <= now as absent and re-claim — without the persist
+        # gate that would penetrate with a incomplete first-turn checkpoint.
+        wall_now = datetime.datetime.utcnow() + datetime.timedelta(hours=dc.TZ_OFFSET_HOURS)
+        expired_at = (wall_now - datetime.timedelta(seconds=1)).strftime('%Y-%m-%d %H:%M:%S')
+        conn = _connect(self.db)
+        try:
+            conn.execute(
+                'UPDATE daily_resident_turn_leases SET expires_at=?, updated_at=? '
+                'WHERE context_id=? AND resident_generation=? AND lease_owner=?',
+                (
+                    expired_at, expired_at, target_id,
+                    session.target_resident_generation, self.first_turn_request_id,
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        # Logical +481s past mint (lease TTL is 480s); wall_now also past expiry.
+        after_ttl = NOW + datetime.timedelta(seconds=481)
+        second_user = _insert_msg(self.db, 'hayana', 'TTL 后仍应被挡')
+        resident = self.hooks.formal_holder.get()
+        with mock.patch('chat.daily_context.enabled', return_value=True), \
+             mock.patch(
+                 'chat.daily_history._build_state_text', return_value=('', 'none', {}),
+             ):
+            with self.assertRaises(dr.FirstTurnFinalizePendingError) as ar:
+                dr.prepare_daily_turn(
+                    user_message_id=second_user,
+                    db_path=self.db,
+                    resident=resident,
+                    static_system='S',
+                    now=after_ttl,
+                    wall_now=wall_now,
+                )
+            self.assertEqual(ar.exception.error_code, 'FIRST_TURN_FINALIZE_PENDING')
+
+        # Explicit finalize clears the gate; ordinary second turn may proceed.
+        healed = complete_first_turn_round(
+            session,
+            assistant_content='',
+            end_offset=int(published.jsonl_size) + 40,
+            db_path=self.db,
+            now=after_ttl,
+            thinking='',
+            cache_info='',
+            choices='',
+        )
+        self.assertEqual(healed.assistant_message_id, assistant_id)
+        self.assertIsNotNone(self._intent().get('first_turn_completed_at'))
+        self.assertIsNone(get_first_turn_finalize_pending(db_path=self.db))
+
+        third_user = _insert_msg(self.db, 'hayana', 'finalize 后第二轮')
+        with mock.patch('chat.daily_context.enabled', return_value=True), \
+             mock.patch(
+                 'chat.daily_history._build_state_text', return_value=('', 'none', {}),
+             ):
+            plan = dr.prepare_daily_turn(
+                user_message_id=third_user,
+                db_path=self.db,
+                resident=resident,
+                static_system='S',
+                now=wall_now,
+                wall_now=wall_now,
+            )
+        self.assertEqual(int(plan.context_id), target_id)
+        self.assertFalse(plan.is_cold)
+        self.assertEqual(int(plan.cursor_before), assistant_id)
 
     def test_postcommit_client_abort_releases_lease_and_bumps_generation(self):
         """Post-commit abort: release first-turn lease + bump gen once (idempotent)."""
