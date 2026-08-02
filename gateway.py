@@ -4565,8 +4565,16 @@ def _stream_cc_first_turn(_turn_data, _uc, intent: dict):
                     assistant_text = (
                         str(raw_text or '').strip() or ''.join(text_acc).strip()
                     )
-                    if thinking:
-                        thinking_acc.append(str(thinking))
+                    # Prefer provider done thinking (full acc); fall back to streamed deltas.
+                    # Do not concatenate both — done already includes streamed think_acc.
+                    thinking_text = (
+                        str(thinking or '')
+                        if str(thinking or '').strip()
+                        else ''.join(thinking_acc)
+                    )
+                    cache_info_json = (
+                        json.dumps(usage, ensure_ascii=False) if usage else ''
+                    )
                     try:
                         end_offset = int(session.jsonl_path.stat().st_size)
                     except OSError:
@@ -4578,6 +4586,8 @@ def _stream_cc_first_turn(_turn_data, _uc, intent: dict):
                             assistant_content=assistant_text,
                             end_offset=end_offset,
                             db_path=DB_PATH,
+                            thinking=thinking_text,
+                            cache_info=cache_info_json,
                         )
                     except Exception as exc:
                         log.exception(
