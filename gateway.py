@@ -4510,11 +4510,11 @@ def _stream_cc_first_turn(_turn_data, _uc, intent: dict):
                         else:
                             delta_released = delta.released_text
 
+                        first_released = True
                         yield from _release_pending()
                         for part in delta_released:
                             text_acc.append(str(part or ''))
                             yield _sse_json({'t': 'text', 'd': part})
-                        first_released = True
                         continue
 
                     delta = ingest_first_turn_text_delta(
