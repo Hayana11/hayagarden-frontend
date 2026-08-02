@@ -604,6 +604,7 @@ def _persist_first_assistant_idempotent(
     now_s: str,
     thinking: str = '',
     cache_info: str = '',
+    choices: str = '',
 ) -> int:
     """Insert assistant + write first_assistant_message_id in one txn (crash-safe)."""
     existing_aid = intent.get('first_assistant_message_id')
@@ -675,8 +676,13 @@ def _persist_first_assistant_idempotent(
 
     cur = conn.execute(
         "INSERT INTO chat_messages (author, content, thinking, tool_calls, cache_info, choices) "
-        "VALUES ('assistant', ?, ?, '', ?, '')",
-        (str(assistant_content), str(thinking or ''), str(cache_info or '')),
+        "VALUES ('assistant', ?, ?, '', ?, ?)",
+        (
+            str(assistant_content),
+            str(thinking or ''),
+            str(cache_info or ''),
+            str(choices or ''),
+        ),
     )
     assistant_id = int(cur.lastrowid)
     conn.execute(
@@ -1376,6 +1382,7 @@ def complete_first_turn_round(
     now: Optional[Any] = None,
     thinking: str = '',
     cache_info: str = '',
+    choices: str = '',
 ) -> FirstTurnCompleteResult:
     """Assistant persist + cursor CAS + lease release + completed_at + last-good."""
     if not session._handoff_complete:
@@ -1436,6 +1443,7 @@ def complete_first_turn_round(
                 now_s=now_s,
                 thinking=str(thinking or ''),
                 cache_info=str(cache_info or ''),
+                choices=str(choices or ''),
             )
             conn.commit()
     except FirstTurnError:
@@ -1510,17 +1518,21 @@ def complete_first_turn_round(
             session, assistant_message_id=int(assistant_id),
         )
 
-    release_resident_turn_lease(
-        session.target_context_id,
-        session.target_resident_generation,
-        lease_owner=session.first_turn_request_id,
-        db_path=db_path,
-    )
-
-    # Final txn: completed_at + five last-good fields together (never earlier).
+    # Final txn: lease DELETE + completed_at + five last-good together.
+    # If this txn fails, lease DELETE rolls back with the checkpoint — next turn
+    # stays blocked until an explicit complete retry heals the checkpoint.
     conn = _connect(db_path)
     try:
         conn.execute('BEGIN IMMEDIATE')
+        conn.execute(
+            'DELETE FROM daily_resident_turn_leases '
+            'WHERE context_id=? AND resident_generation=? AND lease_owner=?',
+            (
+                int(session.target_context_id),
+                int(session.target_resident_generation),
+                str(session.first_turn_request_id),
+            ),
+        )
         fields = {
             'first_turn_end_offset': int(end_offset),
             'first_turn_completed_at': now_s,

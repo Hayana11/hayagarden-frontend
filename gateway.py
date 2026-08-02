@@ -4565,6 +4565,14 @@ def _stream_cc_first_turn(_turn_data, _uc, intent: dict):
                     assistant_text = (
                         str(raw_text or '').strip() or ''.join(text_acc).strip()
                     )
+                    # Same choices contract as ordinary daily CC persist.
+                    _ft_text, _ft_choices = _extract_choices(assistant_text)
+                    if _ft_choices and not _ft_text:
+                        _ft_text = '[选项: ' + ' / '.join(_ft_choices) + ']'
+                    choices_json = (
+                        json.dumps(_ft_choices, ensure_ascii=False)
+                        if _ft_choices else ''
+                    )
                     # Prefer provider done thinking (full acc); fall back to streamed deltas.
                     # Do not concatenate both — done already includes streamed think_acc.
                     thinking_text = (
@@ -4583,11 +4591,12 @@ def _stream_cc_first_turn(_turn_data, _uc, intent: dict):
                         complete_started = True
                         done = complete_first_turn_round(
                             session,
-                            assistant_content=assistant_text,
+                            assistant_content=_ft_text,
                             end_offset=end_offset,
                             db_path=DB_PATH,
                             thinking=thinking_text,
                             cache_info=cache_info_json,
+                            choices=choices_json,
                         )
                     except Exception as exc:
                         log.exception(
