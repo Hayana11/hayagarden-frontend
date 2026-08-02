@@ -20,6 +20,7 @@ from chat.context_window import (
     INTENT_READY,
     WINDOW_MODE_MANUAL,
     _collect_context_formal_messages,
+    _first_turn_finalize_pending_conn,
     _intent_row,
     _last_formal_message_id,
     _serialize_context_switch,
@@ -41,13 +42,16 @@ from chat.daily_context import (
     advance_resident_history_cursor,
     ensure_schema,
     get_resident_history_cursor,
+    make_resident_key,
     release_resident_turn_lease,
 )
 from chat.daily_runtime import (
     bind_target_resident_after_switch,
     forged_history_watermark,
+    get_local_binding,
     handoff_lock,
     install_target_resident_after_swap,
+    set_local_binding,
 )
 from chat.context_window_forge_publish import is_native_cold_binding
 from chat.session_registry import SCAN_STATUS_READY, get_context_claude_session
@@ -560,6 +564,51 @@ def _rollback_claim_to_ready(
         conn.close()
 
 
+def _sync_local_binding_cursor_for_identity(
+    *,
+    target_context_id: int,
+    target_context_epoch: int,
+    target_resident_generation: int,
+    assistant_message_id: int,
+) -> None:
+    """Mirror ``complete_daily_turn``: sync LocalResidentBinding after DB cursor commit.
+
+    Only touches the in-process binding for the target resident. Does not write
+    owner cursor — next ``claim_daily_resident_turn`` refreshes owner from DB.
+    """
+    binding = get_local_binding()
+    if binding is None:
+        return
+    expected_key = make_resident_key(
+        chat_id=DEFAULT_CHAT_ID,
+        context_epoch=int(target_context_epoch),
+        resident_generation=int(target_resident_generation),
+    )
+    if binding.resident_key != expected_key:
+        return
+    if int(binding.context_id) != int(target_context_id):
+        return
+    if int(binding.context_epoch) != int(target_context_epoch):
+        return
+    if int(binding.resident_generation) != int(target_resident_generation):
+        return
+    binding.bound_cursor_message_id = int(assistant_message_id)
+    set_local_binding(binding)
+
+
+def _sync_local_binding_cursor_after_first_turn(
+    session: FirstTurnSession,
+    *,
+    assistant_message_id: int,
+) -> None:
+    _sync_local_binding_cursor_for_identity(
+        target_context_id=int(session.target_context_id),
+        target_context_epoch=int(session.target_context_epoch),
+        target_resident_generation=int(session.target_resident_generation),
+        assistant_message_id=int(assistant_message_id),
+    )
+
+
 def _persist_first_assistant_idempotent(
     conn: sqlite3.Connection,
     *,
@@ -569,6 +618,9 @@ def _persist_first_assistant_idempotent(
     chat_id: str,
     now_dt: Any,
     now_s: str,
+    thinking: str = '',
+    cache_info: str = '',
+    choices: str = '',
 ) -> int:
     """Insert assistant + write first_assistant_message_id in one txn (crash-safe)."""
     existing_aid = intent.get('first_assistant_message_id')
@@ -640,8 +692,13 @@ def _persist_first_assistant_idempotent(
 
     cur = conn.execute(
         "INSERT INTO chat_messages (author, content, thinking, tool_calls, cache_info, choices) "
-        "VALUES ('assistant', ?, '', '', '', '')",
-        (str(assistant_content),),
+        "VALUES ('assistant', ?, ?, '', ?, ?)",
+        (
+            str(assistant_content),
+            str(thinking or ''),
+            str(cache_info or ''),
+            str(choices or ''),
+        ),
     )
     assistant_id = int(cur.lastrowid)
     conn.execute(
@@ -1300,6 +1357,24 @@ def _last_good_checkpoint_complete(intent: dict[str, Any]) -> bool:
     )
 
 
+def _last_good_fields_for_identity(
+    *,
+    target_context_id: int,
+    target_context_epoch: int,
+    target_resident_generation: int,
+    assistant_message_id: int,
+    recorded_at: str,
+) -> dict[str, Any]:
+    """Target checkpoint only — never source_context_id."""
+    return {
+        'last_good_context_id': int(target_context_id),
+        'last_good_context_epoch': int(target_context_epoch),
+        'last_good_resident_generation': int(target_resident_generation),
+        'last_good_history_cursor_message_id': int(assistant_message_id),
+        'last_good_recorded_at': str(recorded_at),
+    }
+
+
 def _last_good_fields_for_target(
     session: FirstTurnSession,
     *,
@@ -1307,13 +1382,13 @@ def _last_good_fields_for_target(
     recorded_at: str,
 ) -> dict[str, Any]:
     """Target checkpoint only — never source_context_id."""
-    return {
-        'last_good_context_id': int(session.target_context_id),
-        'last_good_context_epoch': int(session.target_context_epoch),
-        'last_good_resident_generation': int(session.target_resident_generation),
-        'last_good_history_cursor_message_id': int(assistant_message_id),
-        'last_good_recorded_at': str(recorded_at),
-    }
+    return _last_good_fields_for_identity(
+        target_context_id=int(session.target_context_id),
+        target_context_epoch=int(session.target_context_epoch),
+        target_resident_generation=int(session.target_resident_generation),
+        assistant_message_id=int(assistant_message_id),
+        recorded_at=str(recorded_at),
+    )
 
 
 def _target_cursor_matches_assistant_conn(
@@ -1339,6 +1414,9 @@ def complete_first_turn_round(
     end_offset: int,
     db_path: str,
     now: Optional[Any] = None,
+    thinking: str = '',
+    cache_info: str = '',
+    choices: str = '',
 ) -> FirstTurnCompleteResult:
     """Assistant persist + cursor CAS + lease release + completed_at + last-good."""
     if not session._handoff_complete:
@@ -1347,6 +1425,9 @@ def complete_first_turn_round(
     now_dt = _shanghai_now(now)
     now_s = _now_s(now_dt)
     chat_id = DEFAULT_CHAT_ID
+
+    completed_early = False
+    assistant_id = 0
 
     conn = _connect(db_path)
     try:
@@ -1362,44 +1443,43 @@ def complete_first_turn_round(
             assistant_id = int(intent['first_assistant_message_id'])
             if _last_good_checkpoint_complete(intent):
                 conn.commit()
-                return FirstTurnCompleteResult(
-                    assistant_message_id=assistant_id,
-                    cursor_advanced=False,
+                completed_early = True
+            else:
+                # Upgrade-compat: completed row missing last-good — backfill only when
+                # target resident cursor already equals first_assistant_message_id.
+                if not _target_cursor_matches_assistant_conn(conn, session, assistant_id):
+                    conn.rollback()
+                    raise FirstTurnError(
+                        'last-good backfill cursor unconfirmed',
+                        error_code='FIRST_TURN_LAST_GOOD_CURSOR_UNCONFIRMED',
+                    )
+                recorded_at = str(intent['first_turn_completed_at'])
+                _update_intent_conn(
+                    conn,
+                    session.switch_request_id,
+                    fields=_last_good_fields_for_target(
+                        session,
+                        assistant_message_id=assistant_id,
+                        recorded_at=recorded_at,
+                    ),
+                    now_s=now_s,
                 )
-            # Upgrade-compat: completed row missing last-good — backfill only when
-            # target resident cursor already equals first_assistant_message_id.
-            if not _target_cursor_matches_assistant_conn(conn, session, assistant_id):
-                conn.rollback()
-                raise FirstTurnError(
-                    'last-good backfill cursor unconfirmed',
-                    error_code='FIRST_TURN_LAST_GOOD_CURSOR_UNCONFIRMED',
-                )
-            recorded_at = str(intent['first_turn_completed_at'])
-            _update_intent_conn(
+                conn.commit()
+                completed_early = True
+        else:
+            assistant_id = _persist_first_assistant_idempotent(
                 conn,
-                session.switch_request_id,
-                fields=_last_good_fields_for_target(
-                    session,
-                    assistant_message_id=assistant_id,
-                    recorded_at=recorded_at,
-                ),
+                intent=intent,
+                session=session,
+                assistant_content=str(assistant_content),
+                chat_id=chat_id,
+                now_dt=now_dt,
                 now_s=now_s,
+                thinking=str(thinking or ''),
+                cache_info=str(cache_info or ''),
+                choices=str(choices or ''),
             )
             conn.commit()
-            return FirstTurnCompleteResult(
-                assistant_message_id=assistant_id,
-                cursor_advanced=False,
-            )
-        assistant_id = _persist_first_assistant_idempotent(
-            conn,
-            intent=intent,
-            session=session,
-            assistant_content=str(assistant_content),
-            chat_id=chat_id,
-            now_dt=now_dt,
-            now_s=now_s,
-        )
-        conn.commit()
     except FirstTurnError:
         raise
     except Exception:
@@ -1407,6 +1487,22 @@ def complete_first_turn_round(
         raise
     finally:
         conn.close()
+
+    if completed_early:
+        # Idempotent / backfill: heal stale local binding only when DB cursor confirms.
+        current_cursor = get_resident_history_cursor(
+            session.target_context_id,
+            session.target_resident_generation,
+            db_path=db_path,
+        )
+        if current_cursor is not None and int(current_cursor) == int(assistant_id):
+            _sync_local_binding_cursor_after_first_turn(
+                session, assistant_message_id=int(assistant_id),
+            )
+        return FirstTurnCompleteResult(
+            assistant_message_id=assistant_id,
+            cursor_advanced=False,
+        )
 
     conn = _connect(db_path)
     try:
@@ -1435,6 +1531,7 @@ def complete_first_turn_round(
             'history_cursor_message_id': int(assistant_id),
             'advanced': False,
         }
+        cursor_committed = True
     else:
         cursor_before = forged_history_watermark(switch_result)
         cursor_result = advance_resident_history_cursor(
@@ -1444,18 +1541,32 @@ def complete_first_turn_round(
             expected_cursor=cursor_before,
             db_path=db_path,
         )
+        # advance_resident_history_cursor raises on CAS failure; success ⇒ committed.
+        cursor_committed = (
+            int(cursor_result.get('history_cursor_message_id') or 0) == int(assistant_id)
+        )
 
-    release_resident_turn_lease(
-        session.target_context_id,
-        session.target_resident_generation,
-        lease_owner=session.first_turn_request_id,
-        db_path=db_path,
-    )
+    # Only after DB cursor equals assistant id — never ahead of CAS.
+    if cursor_committed:
+        _sync_local_binding_cursor_after_first_turn(
+            session, assistant_message_id=int(assistant_id),
+        )
 
-    # Final txn: completed_at + five last-good fields together (never earlier).
+    # Final txn: lease DELETE + completed_at + five last-good together.
+    # If this txn fails, lease DELETE rolls back with the checkpoint — next turn
+    # stays blocked until an explicit complete retry heals the checkpoint.
     conn = _connect(db_path)
     try:
         conn.execute('BEGIN IMMEDIATE')
+        conn.execute(
+            'DELETE FROM daily_resident_turn_leases '
+            'WHERE context_id=? AND resident_generation=? AND lease_owner=?',
+            (
+                int(session.target_context_id),
+                int(session.target_resident_generation),
+                str(session.first_turn_request_id),
+            ),
+        )
         fields = {
             'first_turn_end_offset': int(end_offset),
             'first_turn_completed_at': now_s,
@@ -1484,6 +1595,125 @@ def complete_first_turn_round(
     return FirstTurnCompleteResult(
         assistant_message_id=int(assistant_id),
         cursor_advanced=bool(cursor_result.get('advanced', True)),
+    )
+
+
+@_serialize_context_switch
+def recover_first_turn_finalize_pending(
+    *,
+    chat_id: str = DEFAULT_CHAT_ID,
+    db_path: str,
+    now: Optional[Any] = None,
+) -> Optional[FirstTurnCompleteResult]:
+    """DB-only finalize when assistant+cursor are already proven (no session).
+
+    Heals COMMITTED intents with ``first_assistant_message_id`` set but
+    ``first_turn_completed_at`` NULL by rewriting the same atomic final txn
+    (lease DELETE + completed_at + five last-good). Does not call the model,
+    resend the user message, or advance an unconfirmed cursor.
+
+    Returns ``FirstTurnCompleteResult`` on success, ``None`` when nothing is
+    pending or proof is insufficient (caller stays fail-closed).
+    """
+    ensure_schema(db_path)
+    now_dt = _shanghai_now(now)
+    now_s = _now_s(now_dt)
+
+    conn = _connect(db_path)
+    try:
+        conn.execute('BEGIN IMMEDIATE')
+        intent = _first_turn_finalize_pending_conn(conn, chat_id)
+        if intent is None:
+            conn.commit()
+            return None
+
+        request_id = str(intent.get('request_id') or '')
+        assistant_raw = intent.get('first_assistant_message_id')
+        ft_owner = str(intent.get('first_turn_request_id') or '').strip()
+        if not request_id or assistant_raw is None or not ft_owner:
+            conn.rollback()
+            return None
+        assistant_id = int(assistant_raw)
+
+        msg_ctx = _row_to_dict(conn.execute(
+            'SELECT * FROM daily_message_contexts WHERE message_id=?',
+            (assistant_id,),
+        ).fetchone())
+        if msg_ctx is None:
+            conn.rollback()
+            return None
+
+        # Intent stores target_context_id only; epoch/gen proven via
+        # assistant message-context + live target row.
+        target_id = int(intent['target_context_id'])
+        if int(msg_ctx['context_id']) != target_id:
+            conn.rollback()
+            return None
+        target_epoch = int(msg_ctx['context_epoch'])
+        target_gen = int(msg_ctx['resident_generation'])
+
+        target = _row_to_dict(conn.execute(
+            'SELECT * FROM daily_contexts WHERE id=?', (target_id,),
+        ).fetchone())
+        if target is None:
+            conn.rollback()
+            return None
+        if int(target['context_epoch']) != target_epoch:
+            conn.rollback()
+            return None
+        if int(target['resident_generation']) != target_gen:
+            conn.rollback()
+            return None
+
+        cursor_row = conn.execute(
+            'SELECT history_cursor_message_id FROM daily_resident_cursors '
+            'WHERE context_id=? AND resident_generation=?',
+            (target_id, target_gen),
+        ).fetchone()
+        if cursor_row is None:
+            conn.rollback()
+            return None
+        if int(dict(cursor_row)['history_cursor_message_id']) != assistant_id:
+            # Cursor not confirmed at assistant — do not invent last-good.
+            conn.rollback()
+            return None
+
+        # Same atomic final txn as complete_first_turn_round (no end_offset guess).
+        conn.execute(
+            'DELETE FROM daily_resident_turn_leases '
+            'WHERE context_id=? AND resident_generation=? AND lease_owner=?',
+            (target_id, target_gen, ft_owner),
+        )
+        fields = {
+            'first_turn_completed_at': now_s,
+            'first_turn_error_code': None,
+        }
+        fields.update(
+            _last_good_fields_for_identity(
+                target_context_id=target_id,
+                target_context_epoch=target_epoch,
+                target_resident_generation=target_gen,
+                assistant_message_id=assistant_id,
+                recorded_at=now_s,
+            ),
+        )
+        _update_intent_conn(conn, request_id, fields=fields, now_s=now_s)
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+    _sync_local_binding_cursor_for_identity(
+        target_context_id=target_id,
+        target_context_epoch=target_epoch,
+        target_resident_generation=target_gen,
+        assistant_message_id=assistant_id,
+    )
+    return FirstTurnCompleteResult(
+        assistant_message_id=assistant_id,
+        cursor_advanced=False,
     )
 
 

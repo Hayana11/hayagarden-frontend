@@ -124,6 +124,14 @@ class SwitchInProgressError(ContextWindowError):
     """Active switch intent blocks formal turns / concurrent switch (HTTP 423)."""
 
 
+class FirstTurnFinalizePendingError(ContextWindowError):
+    """Committed first-turn awaits finalize; block ordinary turns and new switches."""
+
+    def __init__(self, message: str = 'first-turn finalize pending'):
+        super().__init__(message)
+        self.error_code = 'FIRST_TURN_FINALIZE_PENDING'
+
+
 class CarryoverMessageUnforgeableError(ContextWindowError):
     """Locked selected messages cannot be forged (HTTP 409)."""
 
@@ -655,6 +663,44 @@ def get_active_switch_intent(
         conn.close()
 
 
+def _first_turn_finalize_pending_conn(
+    conn: sqlite3.Connection,
+    chat_id: str = DEFAULT_CHAT_ID,
+) -> Optional[dict[str, Any]]:
+    """Conn-scoped pending finalize lookup (same predicate as public helper)."""
+    return _row_to_dict(conn.execute(
+        '''SELECT * FROM context_switch_intents
+           WHERE chat_id=?
+             AND status=?
+             AND first_assistant_message_id IS NOT NULL
+             AND first_turn_completed_at IS NULL
+           ORDER BY updated_at DESC
+           LIMIT 1''',
+        (str(chat_id), INTENT_COMMITTED),
+    ).fetchone())
+
+
+def get_first_turn_finalize_pending(
+    chat_id: str = DEFAULT_CHAT_ID,
+    *,
+    db_path: Optional[str] = None,
+) -> Optional[dict[str, Any]]:
+    """Return committed intent awaiting first-turn finalize (TTL-independent).
+
+    Contract: INTENT_COMMITTED + first_assistant_message_id set +
+    first_turn_completed_at NULL means ordinary daily turns and new switch
+    reservations must not proceed, even if the first-turn resident lease has
+    expired. DB-only finalize recovery (or same-process complete retry) writes
+    completed_at + last-good and clears this gate.
+    """
+    ensure_schema(db_path)
+    conn = _connect(db_path)
+    try:
+        return _first_turn_finalize_pending_conn(conn, chat_id)
+    finally:
+        conn.close()
+
+
 def get_latest_last_good_checkpoint(
     chat_id: str = DEFAULT_CHAT_ID,
     *,
@@ -1054,6 +1100,15 @@ def reserve_or_load_intent(
                 raise IdempotencyMismatchError('idempotency_mismatch')
             conn.commit()
             return existing
+
+        # COMMITTED is not ACTIVE, but incomplete first-turn finalize must still
+        # block a new switch (same predicate as ordinary daily-turn gate).
+        pending = _first_turn_finalize_pending_conn(conn, chat_id)
+        if pending is not None:
+            conn.rollback()
+            raise FirstTurnFinalizePendingError(
+                'first-turn finalize pending; cannot reserve new switch',
+            )
 
         # Another active intent for this chat?
         other = conn.execute(
@@ -2217,6 +2272,7 @@ def switch_context_window(
         WindowBusyError,
         IdempotencyMismatchError,
         SwitchInProgressError,
+        FirstTurnFinalizePendingError,
         CarryoverMessageUnforgeableError,
         SwitchHooksRequiredError,
     ):

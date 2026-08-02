@@ -4565,8 +4565,24 @@ def _stream_cc_first_turn(_turn_data, _uc, intent: dict):
                     assistant_text = (
                         str(raw_text or '').strip() or ''.join(text_acc).strip()
                     )
-                    if thinking:
-                        thinking_acc.append(str(thinking))
+                    # Same choices contract as ordinary daily CC persist.
+                    _ft_text, _ft_choices = _extract_choices(assistant_text)
+                    if _ft_choices and not _ft_text:
+                        _ft_text = '[选项: ' + ' / '.join(_ft_choices) + ']'
+                    choices_json = (
+                        json.dumps(_ft_choices, ensure_ascii=False)
+                        if _ft_choices else ''
+                    )
+                    # Prefer provider done thinking (full acc); fall back to streamed deltas.
+                    # Do not concatenate both — done already includes streamed think_acc.
+                    thinking_text = (
+                        str(thinking or '')
+                        if str(thinking or '').strip()
+                        else ''.join(thinking_acc)
+                    )
+                    cache_info_json = (
+                        json.dumps(usage, ensure_ascii=False) if usage else ''
+                    )
                     try:
                         end_offset = int(session.jsonl_path.stat().st_size)
                     except OSError:
@@ -4575,9 +4591,12 @@ def _stream_cc_first_turn(_turn_data, _uc, intent: dict):
                         complete_started = True
                         done = complete_first_turn_round(
                             session,
-                            assistant_content=assistant_text,
+                            assistant_content=_ft_text,
                             end_offset=end_offset,
                             db_path=DB_PATH,
+                            thinking=thinking_text,
+                            cache_info=cache_info_json,
+                            choices=choices_json,
                         )
                     except Exception as exc:
                         log.exception(
@@ -4716,6 +4735,34 @@ def _stream_cc_daily_soft_window(_turn_data, _uc):
                 't': 'err',
                 'd': '换窗正在交接中，请稍后再发。',
                 'code': 'FIRST_TURN_BUSY',
+                'retryable': True,
+            })
+            yield _sse_json({'t': 'done', 'ok': False})
+            return
+
+    # COMMITTED is not an "active" switch status, but incomplete first-turn
+    # finalize must still block ordinary daily turns (lease TTL-independent).
+    # Prefer DB-only recovery (no FirstTurnSession) before failing closed.
+    try:
+        _finalize_pending = _cw.get_first_turn_finalize_pending(db_path=DB_PATH)
+    except Exception:
+        _finalize_pending = None
+    if _finalize_pending is not None:
+        try:
+            from chat.context_window_first_turn import (
+                recover_first_turn_finalize_pending as _recover_ft_finalize,
+            )
+            _healed = _recover_ft_finalize(db_path=DB_PATH)
+        except Exception:
+            logging.getLogger(__name__).exception(
+                'first_turn finalize recovery failed',
+            )
+            _healed = None
+        if _healed is None:
+            yield _sse_json({
+                't': 'err',
+                'd': '换窗第一句收尾未完成，请稍后再试。',
+                'code': 'FIRST_TURN_FINALIZE_PENDING',
                 'retryable': True,
             })
             yield _sse_json({'t': 'done', 'ok': False})
@@ -4942,6 +4989,16 @@ def _stream_cc_daily_soft_window(_turn_data, _uc):
         turn_terminal = True
         yield 'data: ' + json.dumps({
             't': 'err', 'd': str(exc), 'retryable': True, 'code': 'resident_turn_lease_conflict',
+        }) + SSE_END
+        yield 'data: ' + json.dumps({'t': 'done', 'ok': False}) + SSE_END
+        return None
+    except _daily_rt.FirstTurnFinalizePendingError as exc:
+        turn_terminal = True
+        yield 'data: ' + json.dumps({
+            't': 'err',
+            'd': str(exc),
+            'retryable': True,
+            'code': 'FIRST_TURN_FINALIZE_PENDING',
         }) + SSE_END
         yield 'data: ' + json.dumps({'t': 'done', 'ok': False}) + SSE_END
         return None

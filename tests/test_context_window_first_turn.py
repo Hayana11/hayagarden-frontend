@@ -27,9 +27,13 @@ from chat.context_window import (
     INTENT_COMMITTED,
     INTENT_HANDOFF_PENDING,
     INTENT_READY,
+    INTENT_RESERVED,
+    FirstTurnFinalizePendingError,
     _intent_row,
+    get_first_turn_finalize_pending,
     get_latest_last_good_checkpoint,
     has_active_switch_intent,
+    reserve_or_load_intent,
     resolve_canonical_context_row_conn,
 )
 from chat.context_window_first_turn import (
@@ -41,6 +45,7 @@ from chat.context_window_first_turn import (
     complete_first_turn_round,
     ingest_first_turn_text_delta,
     offline_first_turn_hooks,
+    recover_first_turn_finalize_pending,
     recover_first_turn_handoff_pending,
 )
 import chat.context_window_first_turn as ft_mod
@@ -57,7 +62,7 @@ from chat.context_window_target_prepare import (
     prepare_context_window_target,
 )
 from chat.context_window import WINDOW_MODE_MANUAL
-from chat.daily_context import WINDOW_MODE_MANUAL_STAGED, _connect
+from chat.daily_context import ConflictError, WINDOW_MODE_MANUAL_STAGED, _connect
 from chat.session_registry import get_context_claude_session
 from tools.cc_jsonl_usage import session_jsonl_path
 
@@ -86,6 +91,7 @@ def _init_db(db: str) -> None:
             tool_calls TEXT DEFAULT '',
             cache_info TEXT DEFAULT '',
             choices TEXT DEFAULT '',
+            image_url TEXT,
             source_kind TEXT NOT NULL DEFAULT 'chat',
             created_at TEXT NOT NULL DEFAULT (datetime('now', '+8 hours'))
         )'''
@@ -510,6 +516,13 @@ class ContextWindowFirstTurnTests(unittest.TestCase):
         self.assertIsNotNone(binding)
         assert binding is not None
         self.assertEqual(int(binding.context_id), target_id)
+        db_cursor_after = dc.get_resident_history_cursor(
+            target_id, session.target_resident_generation, db_path=self.db,
+        )
+        self.assertEqual(int(db_cursor_after), done.assistant_message_id)
+        self.assertEqual(
+            int(binding.bound_cursor_message_id), done.assistant_message_id,
+        )
 
         with self.subTest('legacy_completed_row_backfill_when_cursor_confirmed'):
             # Simulate pre-upgrade completed row: completed_at set, last-good NULL.
@@ -580,6 +593,902 @@ class ContextWindowFirstTurnTests(unittest.TestCase):
             'switched_at', 'staged_handle',
         ):
             self.assertNotIn(key, sample_public)
+
+    def test_first_turn_complete_syncs_binding_second_turn_hot(self):
+        """9A: complete advances DB+Local binding; next prepare is hot continuation."""
+        published = self._seed_source_and_forge()
+        target_id = int(self._intent()['target_context_id'])
+        gateway_user_id = _insert_msg(self.db, 'hayana', '新窗第一句')
+
+        session = claim_and_start_first_turn(
+            switch_request_id=self.switch_request_id,
+            first_turn_request_id=self.first_turn_request_id,
+            user_content='新窗第一句',
+            user_message_id=gateway_user_id,
+            hooks=self.hooks,
+            db_path=self.db,
+            now=NOW,
+        )
+        ft_mod.mark_first_turn_stdin_sent(session)
+        ingest_first_turn_text_delta(
+            session, text='第一句回复', hooks=self.hooks, db_path=self.db, now=NOW,
+        )
+
+        binding_after_handoff = dr.get_local_binding()
+        self.assertIsNotNone(binding_after_handoff)
+        assert binding_after_handoff is not None
+        watermark = binding_after_handoff.bound_cursor_message_id
+        self.assertIsNotNone(watermark)
+
+        done = complete_first_turn_round(
+            session,
+            assistant_content='第一句回复全文',
+            end_offset=int(published.jsonl_size) + 80,
+            db_path=self.db,
+            now=NOW,
+            thinking='我感觉到她换了新窗。',
+            cache_info=json.dumps({
+                'cache_read': 12698,
+                'cache_creation': 130,
+            }, ensure_ascii=False),
+        )
+
+        db_cursor = dc.get_resident_history_cursor(
+            target_id, session.target_resident_generation, db_path=self.db,
+        )
+        binding = dr.get_local_binding()
+        self.assertIsNotNone(binding)
+        assert binding is not None
+        self.assertEqual(int(db_cursor), done.assistant_message_id)
+        self.assertEqual(int(binding.bound_cursor_message_id), done.assistant_message_id)
+        self.assertNotEqual(int(binding.bound_cursor_message_id), int(watermark))
+
+        row = sqlite3.connect(self.db).execute(
+            'SELECT thinking, cache_info FROM chat_messages WHERE id=?',
+            (done.assistant_message_id,),
+        ).fetchone()
+        self.assertEqual(row[0], '我感觉到她换了新窗。')
+        cache = json.loads(row[1])
+        self.assertEqual(int(cache.get('cache_read') or 0), 12698)
+        self.assertEqual(int(cache.get('cache_creation') or 0), 130)
+
+        second_user = _insert_msg(self.db, 'hayana', '紧接着第二句')
+        resident = self.hooks.formal_holder.get()
+        self.assertIsNotNone(resident)
+        with mock.patch('chat.daily_context.enabled', return_value=True), \
+             mock.patch(
+                 'chat.daily_history._build_state_text', return_value=('', 'none', {}),
+             ):
+            plan = dr.prepare_daily_turn(
+                user_message_id=second_user,
+                db_path=self.db,
+                resident=resident,
+                static_system='S',
+                now=datetime.datetime(2026, 7, 31, 12, 1, 0),
+                wall_now=datetime.datetime(2026, 7, 31, 12, 1, 0),
+            )
+        self.assertFalse(plan.is_cold)
+        self.assertFalse(plan.is_respawn)
+        self.assertEqual(plan.manifest.get('turn_kind'), 'hot')
+
+        assembled = dr.format_resident_turn_content(
+            assembly=plan.assembly,
+            user_content=plan.user_content,
+            is_cold=plan.is_cold,
+            is_respawn=plan.is_respawn,
+        )
+        self.assertNotIn('请回复最后一条用户消息。', assembled)
+        self.assertNotIn('以下是本聊天日内的正式对话记录：', assembled)
+
+    def test_gateway_first_turn_persists_thinking_and_cache_usage(self):
+        """Gateway first-turn must persist streamed/done thinking + usage cache_info."""
+        os.makedirs('/opt/workspace/tools', exist_ok=True)
+        import gateway
+
+        self._seed_source_and_forge()
+        gateway_user_id = _insert_msg(self.db, 'hayana', '想想再说')
+
+        class _FakeStaged:
+            def send_turn(
+                self,
+                content,
+                commit_meta=None,
+                on_stdin_flushed=None,
+                idle_heartbeat_sec=None,
+            ):
+                if on_stdin_flushed is not None:
+                    on_stdin_flushed()
+                yield ('think', '先感受一下。')
+                yield ('text', '小猫。')
+                yield ('done', (
+                    '小猫。',
+                    '先感受一下。',
+                    {
+                        'cache_read': 100,
+                        'cache_creation': 20,
+                        'input_tokens': 120,
+                        'output_tokens': 8,
+                    },
+                ))
+
+            def _kill(self, quiet=True):
+                return None
+
+        hooks = self._gateway_first_turn_hooks(_FakeStaged())
+        turn = {'user_message_id': gateway_user_id}
+        with mock.patch.object(gateway, 'DB_PATH', self.db), \
+             mock.patch.object(gateway, '_gw_build_first_turn_hooks', return_value=hooks):
+            chunks = list(gateway._stream_cc_first_turn(turn, '想想再说', self._intent()))
+
+        joined = ''.join(chunks)
+        self.assertIn('"t": "think"', joined)
+        self.assertIn('"t": "usage"', joined)
+        self.assertIn('"ok": true', joined)
+        self.assertEqual(self._intent()['status'], INTENT_COMMITTED)
+
+        aid = int(self._intent()['first_assistant_message_id'])
+        row = sqlite3.connect(self.db).execute(
+            'SELECT thinking, cache_info FROM chat_messages WHERE id=?',
+            (aid,),
+        ).fetchone()
+        self.assertEqual(row[0], '先感受一下。')
+        cache = json.loads(row[1])
+        self.assertEqual(int(cache.get('cache_read') or 0), 100)
+        self.assertEqual(int(cache.get('cache_creation') or 0), 20)
+
+        binding = dr.get_local_binding()
+        self.assertIsNotNone(binding)
+        assert binding is not None
+        target_id = int(self._intent()['target_context_id'])
+        db_cursor = dc.get_resident_history_cursor(
+            target_id, 1, db_path=self.db,
+        )
+        self.assertEqual(int(binding.bound_cursor_message_id), aid)
+        self.assertEqual(int(db_cursor), aid)
+
+    def test_cursor_cas_failure_does_not_advance_binding_or_last_good(self):
+        """assistant 已落库后若 DB cursor CAS 失败：binding/last-good 不得单边前进。"""
+        published = self._seed_source_and_forge()
+        target_id = int(self._intent()['target_context_id'])
+        gateway_user_id = _insert_msg(self.db, 'hayana', 'CAS 失败句')
+
+        session = claim_and_start_first_turn(
+            switch_request_id=self.switch_request_id,
+            first_turn_request_id=self.first_turn_request_id,
+            user_content='CAS 失败句',
+            user_message_id=gateway_user_id,
+            hooks=self.hooks,
+            db_path=self.db,
+            now=NOW,
+        )
+        ft_mod.mark_first_turn_stdin_sent(session)
+        ingest_first_turn_text_delta(
+            session, text='会落库', hooks=self.hooks, db_path=self.db, now=NOW,
+        )
+
+        binding_before = dr.get_local_binding()
+        self.assertIsNotNone(binding_before)
+        assert binding_before is not None
+        watermark = int(binding_before.bound_cursor_message_id)
+        db_cursor_before = dc.get_resident_history_cursor(
+            target_id, session.target_resident_generation, db_path=self.db,
+        )
+        self.assertEqual(int(db_cursor_before), watermark)
+        self._assert_last_good_empty()
+
+        hayana_before = sqlite3.connect(self.db).execute(
+            "SELECT COUNT(*) FROM chat_messages WHERE author='hayana'",
+        ).fetchone()[0]
+        asst_before = sqlite3.connect(self.db).execute(
+            "SELECT COUNT(*) FROM chat_messages WHERE author='assistant'",
+        ).fetchone()[0]
+
+        with mock.patch(
+            'chat.context_window_first_turn.advance_resident_history_cursor',
+            side_effect=ConflictError('resident cursor CAS failed'),
+        ):
+            with self.assertRaises(ConflictError) as ar:
+                complete_first_turn_round(
+                    session,
+                    assistant_content='已保存的回答',
+                    end_offset=int(published.jsonl_size) + 50,
+                    db_path=self.db,
+                    now=NOW,
+                    thinking='这次思考要留下。',
+                    cache_info=json.dumps({'cache_read': 7, 'cache_creation': 3}),
+                )
+        self.assertIn('CAS failed', str(ar.exception))
+
+        intent_failed = self._intent()
+        self.assertEqual(intent_failed['status'], INTENT_COMMITTED)
+        self.assertIsNone(intent_failed.get('first_turn_completed_at'))
+        self._assert_last_good_empty(intent_failed)
+        self.assertIsNotNone(intent_failed.get('first_assistant_message_id'))
+        assistant_id = int(intent_failed['first_assistant_message_id'])
+
+        # Exactly one new assistant; no second answer invented.
+        hayana_after = sqlite3.connect(self.db).execute(
+            "SELECT COUNT(*) FROM chat_messages WHERE author='hayana'",
+        ).fetchone()[0]
+        asst_after = sqlite3.connect(self.db).execute(
+            "SELECT COUNT(*) FROM chat_messages WHERE author='assistant'",
+        ).fetchone()[0]
+        self.assertEqual(hayana_after, hayana_before)
+        self.assertEqual(asst_after, asst_before + 1)
+
+        row = sqlite3.connect(self.db).execute(
+            'SELECT content, thinking, cache_info FROM chat_messages WHERE id=?',
+            (assistant_id,),
+        ).fetchone()
+        self.assertEqual(row[0], '已保存的回答')
+        self.assertEqual(row[1], '这次思考要留下。')
+        self.assertEqual(json.loads(row[2]).get('cache_read'), 7)
+
+        # DB cursor + LocalResidentBinding stay on watermark — never one-sided.
+        db_cursor_after = dc.get_resident_history_cursor(
+            target_id, session.target_resident_generation, db_path=self.db,
+        )
+        binding_after = dr.get_local_binding()
+        self.assertIsNotNone(binding_after)
+        assert binding_after is not None
+        self.assertEqual(int(db_cursor_after), watermark)
+        self.assertEqual(int(binding_after.bound_cursor_message_id), watermark)
+        self.assertNotEqual(int(binding_after.bound_cursor_message_id), assistant_id)
+
+        # Lease remains held — completion did not falsely finish.
+        lease_n = sqlite3.connect(self.db).execute(
+            'SELECT COUNT(*) FROM daily_resident_turn_leases '
+            'WHERE context_id=? AND resident_generation=? AND lease_owner=?',
+            (
+                target_id,
+                session.target_resident_generation,
+                self.first_turn_request_id,
+            ),
+        ).fetchone()[0]
+        self.assertEqual(lease_n, 1)
+
+        with self.subTest('retry_after_cas_failure_succeeds_without_wiping_think'):
+            # Retry with empty thinking/cache must reuse the same assistant row.
+            recovered = complete_first_turn_round(
+                session,
+                assistant_content='不该覆盖的重试正文',
+                end_offset=int(published.jsonl_size) + 50,
+                db_path=self.db,
+                now=NOW + datetime.timedelta(seconds=30),
+                thinking='',
+                cache_info='',
+            )
+            self.assertEqual(recovered.assistant_message_id, assistant_id)
+            self.assertTrue(recovered.cursor_advanced)
+
+            intent_ok = self._intent()
+            self.assertIsNotNone(intent_ok.get('first_turn_completed_at'))
+            self.assertEqual(
+                int(intent_ok['last_good_history_cursor_message_id']), assistant_id,
+            )
+
+            row2 = sqlite3.connect(self.db).execute(
+                'SELECT content, thinking, cache_info FROM chat_messages WHERE id=?',
+                (assistant_id,),
+            ).fetchone()
+            self.assertEqual(row2[0], '已保存的回答')
+            self.assertEqual(row2[1], '这次思考要留下。')
+            self.assertEqual(json.loads(row2[2]).get('cache_read'), 7)
+
+            binding_ok = dr.get_local_binding()
+            db_ok = dc.get_resident_history_cursor(
+                target_id, session.target_resident_generation, db_path=self.db,
+            )
+            self.assertEqual(int(db_ok), assistant_id)
+            self.assertEqual(int(binding_ok.bound_cursor_message_id), assistant_id)
+
+            asst_final = sqlite3.connect(self.db).execute(
+                "SELECT COUNT(*) FROM chat_messages WHERE author='assistant'",
+            ).fetchone()[0]
+            self.assertEqual(asst_final, asst_before + 1)
+
+    def test_complete_idempotent_preserves_thinking_and_cache_info(self):
+        """重复 complete：不造第二份回答，不抹掉 Think/cache，cursor/last-good 稳定。"""
+        published = self._seed_source_and_forge()
+        target_id = int(self._intent()['target_context_id'])
+        gateway_user_id = _insert_msg(self.db, 'hayana', '幂等收尾句')
+
+        session = claim_and_start_first_turn(
+            switch_request_id=self.switch_request_id,
+            first_turn_request_id=self.first_turn_request_id,
+            user_content='幂等收尾句',
+            user_message_id=gateway_user_id,
+            hooks=self.hooks,
+            db_path=self.db,
+            now=NOW,
+        )
+        ft_mod.mark_first_turn_stdin_sent(session)
+        ingest_first_turn_text_delta(
+            session, text='幂等正文', hooks=self.hooks, db_path=self.db, now=NOW,
+        )
+
+        thinking = '第一次完整思考，不能被重试抹掉。'
+        cache_info = json.dumps({
+            'cache_read': 222,
+            'cache_creation': 11,
+        }, ensure_ascii=False)
+
+        first = complete_first_turn_round(
+            session,
+            assistant_content='幂等正文全文',
+            end_offset=int(published.jsonl_size) + 60,
+            db_path=self.db,
+            now=NOW,
+            thinking=thinking,
+            cache_info=cache_info,
+        )
+        self.assertTrue(first.cursor_advanced)
+
+        intent_done = self._intent()
+        recorded_at = intent_done['last_good_recorded_at']
+        self.assertEqual(
+            int(intent_done['last_good_history_cursor_message_id']),
+            first.assistant_message_id,
+        )
+
+        hayana_n = sqlite3.connect(self.db).execute(
+            "SELECT COUNT(*) FROM chat_messages WHERE author='hayana'",
+        ).fetchone()[0]
+        asst_n = sqlite3.connect(self.db).execute(
+            "SELECT COUNT(*) FROM chat_messages WHERE author='assistant'",
+        ).fetchone()[0]
+
+        # Network blip retry: empty thinking/cache must not wipe the first persist.
+        again = complete_first_turn_round(
+            session,
+            assistant_content='另一份不该写入的回答',
+            end_offset=int(published.jsonl_size) + 999,
+            db_path=self.db,
+            now=NOW + datetime.timedelta(minutes=3),
+            thinking='',
+            cache_info='',
+        )
+        self.assertEqual(again.assistant_message_id, first.assistant_message_id)
+        self.assertFalse(again.cursor_advanced)
+
+        intent_again = self._intent()
+        self.assertEqual(intent_again['last_good_recorded_at'], recorded_at)
+        self.assertEqual(
+            int(intent_again['last_good_history_cursor_message_id']),
+            first.assistant_message_id,
+        )
+        self.assertEqual(
+            int(intent_again['first_assistant_message_id']),
+            first.assistant_message_id,
+        )
+
+        hayana_again = sqlite3.connect(self.db).execute(
+            "SELECT COUNT(*) FROM chat_messages WHERE author='hayana'",
+        ).fetchone()[0]
+        asst_again = sqlite3.connect(self.db).execute(
+            "SELECT COUNT(*) FROM chat_messages WHERE author='assistant'",
+        ).fetchone()[0]
+        self.assertEqual(hayana_again, hayana_n)
+        self.assertEqual(asst_again, asst_n)
+
+        row = sqlite3.connect(self.db).execute(
+            'SELECT content, thinking, cache_info FROM chat_messages WHERE id=?',
+            (first.assistant_message_id,),
+        ).fetchone()
+        self.assertEqual(row[0], '幂等正文全文')
+        self.assertEqual(row[1], thinking)
+        self.assertEqual(row[2], cache_info)
+
+        db_cursor = dc.get_resident_history_cursor(
+            target_id, session.target_resident_generation, db_path=self.db,
+        )
+        binding = dr.get_local_binding()
+        self.assertIsNotNone(binding)
+        assert binding is not None
+        self.assertEqual(int(db_cursor), first.assistant_message_id)
+        self.assertEqual(int(binding.bound_cursor_message_id), first.assistant_message_id)
+
+    def test_gateway_first_turn_extracts_and_persists_choices(self):
+        """First-turn must strip [choices] from body and persist choices column."""
+        os.makedirs('/opt/workspace/tools', exist_ok=True)
+        import gateway
+
+        self._seed_source_and_forge()
+        gateway_user_id = _insert_msg(self.db, 'hayana', '给我选项')
+
+        class _FakeStaged:
+            def send_turn(
+                self,
+                content,
+                commit_meta=None,
+                on_stdin_flushed=None,
+                idle_heartbeat_sec=None,
+            ):
+                if on_stdin_flushed is not None:
+                    on_stdin_flushed()
+                body = '正文。\n[choices]A|B[/choices]'
+                yield ('text', body)
+                yield ('done', (body, '想了想选项。', {'cache_read': 1}))
+
+            def _kill(self, quiet=True):
+                return None
+
+        hooks = self._gateway_first_turn_hooks(_FakeStaged())
+        turn = {'user_message_id': gateway_user_id}
+        with mock.patch.object(gateway, 'DB_PATH', self.db), \
+             mock.patch.object(gateway, '_gw_build_first_turn_hooks', return_value=hooks):
+            chunks = list(gateway._stream_cc_first_turn(turn, '给我选项', self._intent()))
+
+        joined = ''.join(chunks)
+        self.assertIn('"ok": true', joined)
+        aid = int(self._intent()['first_assistant_message_id'])
+        row = sqlite3.connect(self.db).execute(
+            'SELECT content, choices, thinking FROM chat_messages WHERE id=?',
+            (aid,),
+        ).fetchone()
+        self.assertEqual(row[0], '正文。')
+        self.assertNotIn('[choices]', row[0])
+        self.assertEqual(json.loads(row[1]), ['A', 'B'])
+        self.assertEqual(row[2], '想了想选项。')
+
+    def test_final_checkpoint_failure_keeps_lease_blocks_next_turn(self):
+        """final txn 失败：lease 与 checkpoint 同退；下一轮被挡；重试 finalize 成功。"""
+        published = self._seed_source_and_forge()
+        target_id = int(self._intent()['target_context_id'])
+        gateway_user_id = _insert_msg(self.db, 'hayana', 'checkpoint 失败句')
+
+        session = claim_and_start_first_turn(
+            switch_request_id=self.switch_request_id,
+            first_turn_request_id=self.first_turn_request_id,
+            user_content='checkpoint 失败句',
+            user_message_id=gateway_user_id,
+            hooks=self.hooks,
+            db_path=self.db,
+            now=NOW,
+        )
+        ft_mod.mark_first_turn_stdin_sent(session)
+        ingest_first_turn_text_delta(
+            session, text='已出正文', hooks=self.hooks, db_path=self.db, now=NOW,
+        )
+
+        real_update = ft_mod._update_intent_conn
+        boom = {'n': 0}
+
+        def _boom_on_completed_at(conn, request_id, *, status=None, fields=None, now_s=None):
+            fields = fields or {}
+            if fields.get('first_turn_completed_at') is not None and boom['n'] == 0:
+                boom['n'] += 1
+                raise sqlite3.OperationalError('simulated final checkpoint failure')
+            return real_update(
+                conn, request_id, status=status, fields=fields, now_s=now_s,
+            )
+
+        with mock.patch.object(ft_mod, '_update_intent_conn', side_effect=_boom_on_completed_at):
+            with self.assertRaises(sqlite3.OperationalError):
+                complete_first_turn_round(
+                    session,
+                    assistant_content='已保存的回答',
+                    end_offset=int(published.jsonl_size) + 40,
+                    db_path=self.db,
+                    now=NOW,
+                    thinking='留下思考',
+                    cache_info=json.dumps({'cache_read': 9}),
+                    choices=json.dumps(['是', '否'], ensure_ascii=False),
+                )
+
+        intent_failed = self._intent()
+        self.assertIsNone(intent_failed.get('first_turn_completed_at'))
+        self._assert_last_good_empty(intent_failed)
+        self.assertIsNotNone(intent_failed.get('first_assistant_message_id'))
+        assistant_id = int(intent_failed['first_assistant_message_id'])
+        pending = get_first_turn_finalize_pending(db_path=self.db)
+        self.assertIsNotNone(pending)
+        self.assertEqual(str(pending['request_id']), self.switch_request_id)
+
+        # Cursor/binding may already be at assistant; lease must remain (atomic).
+        db_cursor = dc.get_resident_history_cursor(
+            target_id, session.target_resident_generation, db_path=self.db,
+        )
+        binding = dr.get_local_binding()
+        self.assertEqual(int(db_cursor), assistant_id)
+        self.assertEqual(int(binding.bound_cursor_message_id), assistant_id)
+        lease_n = sqlite3.connect(self.db).execute(
+            'SELECT COUNT(*) FROM daily_resident_turn_leases '
+            'WHERE context_id=? AND resident_generation=? AND lease_owner=?',
+            (
+                target_id,
+                session.target_resident_generation,
+                self.first_turn_request_id,
+            ),
+        ).fetchone()[0]
+        self.assertEqual(lease_n, 1)
+
+        row = sqlite3.connect(self.db).execute(
+            'SELECT content, thinking, choices FROM chat_messages WHERE id=?',
+            (assistant_id,),
+        ).fetchone()
+        self.assertEqual(row[0], '已保存的回答')
+        self.assertEqual(row[1], '留下思考')
+        self.assertEqual(json.loads(row[2]), ['是', '否'])
+
+        # Keep lease live so atomic retention is still observable; the ordinary
+        # turn gate is FIRST_TURN_FINALIZE_PENDING (not lease TTL).
+        wall_now = datetime.datetime.utcnow() + datetime.timedelta(hours=dc.TZ_OFFSET_HOURS)
+        live_exp = (wall_now + datetime.timedelta(minutes=10)).strftime('%Y-%m-%d %H:%M:%S')
+        conn = _connect(self.db)
+        try:
+            conn.execute(
+                'UPDATE daily_resident_turn_leases SET expires_at=?, updated_at=? '
+                'WHERE context_id=? AND resident_generation=? AND lease_owner=?',
+                (
+                    live_exp, live_exp, target_id,
+                    session.target_resident_generation, self.first_turn_request_id,
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        second_user = _insert_msg(self.db, 'hayana', '被挡住的第二句')
+        resident = self.hooks.formal_holder.get()
+        with mock.patch('chat.daily_context.enabled', return_value=True), \
+             mock.patch(
+                 'chat.daily_history._build_state_text', return_value=('', 'none', {}),
+             ):
+            with self.assertRaises(dr.FirstTurnFinalizePendingError) as ar:
+                dr.prepare_daily_turn(
+                    user_message_id=second_user,
+                    db_path=self.db,
+                    resident=resident,
+                    static_system='S',
+                    now=wall_now,
+                    wall_now=wall_now,
+                )
+            self.assertEqual(ar.exception.error_code, 'FIRST_TURN_FINALIZE_PENDING')
+
+        # Explicit finalize retry heals checkpoint and releases lease.
+        healed = complete_first_turn_round(
+            session,
+            assistant_content='',
+            end_offset=int(published.jsonl_size) + 40,
+            db_path=self.db,
+            now=NOW + datetime.timedelta(seconds=45),
+            thinking='',
+            cache_info='',
+            choices='',
+        )
+        self.assertEqual(healed.assistant_message_id, assistant_id)
+        intent_ok = self._intent()
+        self.assertIsNotNone(intent_ok.get('first_turn_completed_at'))
+        self.assertEqual(
+            int(intent_ok['last_good_history_cursor_message_id']), assistant_id,
+        )
+        self.assertIsNone(get_first_turn_finalize_pending(db_path=self.db))
+        lease_after = sqlite3.connect(self.db).execute(
+            'SELECT COUNT(*) FROM daily_resident_turn_leases '
+            'WHERE context_id=? AND resident_generation=? AND lease_owner=?',
+            (
+                target_id,
+                session.target_resident_generation,
+                self.first_turn_request_id,
+            ),
+        ).fetchone()[0]
+        self.assertEqual(lease_after, 0)
+
+        # Think/choices survive empty retry payload.
+        row2 = sqlite3.connect(self.db).execute(
+            'SELECT content, thinking, choices FROM chat_messages WHERE id=?',
+            (assistant_id,),
+        ).fetchone()
+        self.assertEqual(row2[0], '已保存的回答')
+        self.assertEqual(row2[1], '留下思考')
+        self.assertEqual(json.loads(row2[2]), ['是', '否'])
+
+    def test_final_checkpoint_failure_blocks_after_lease_ttl(self):
+        """final txn fail → lease TTL(+481s) 后仍挡；explicit finalize 才放行第二轮。"""
+        published = self._seed_source_and_forge()
+        target_id = int(self._intent()['target_context_id'])
+        gateway_user_id = _insert_msg(self.db, 'hayana', 'TTL 穿透句')
+
+        session = claim_and_start_first_turn(
+            switch_request_id=self.switch_request_id,
+            first_turn_request_id=self.first_turn_request_id,
+            user_content='TTL 穿透句',
+            user_message_id=gateway_user_id,
+            hooks=self.hooks,
+            db_path=self.db,
+            now=NOW,
+        )
+        ft_mod.mark_first_turn_stdin_sent(session)
+        ingest_first_turn_text_delta(
+            session, text='已出正文', hooks=self.hooks, db_path=self.db, now=NOW,
+        )
+
+        real_update = ft_mod._update_intent_conn
+        boom = {'n': 0}
+
+        def _boom_on_completed_at(conn, request_id, *, status=None, fields=None, now_s=None):
+            fields = fields or {}
+            if fields.get('first_turn_completed_at') is not None and boom['n'] == 0:
+                boom['n'] += 1
+                raise sqlite3.OperationalError('simulated final checkpoint failure')
+            return real_update(
+                conn, request_id, status=status, fields=fields, now_s=now_s,
+            )
+
+        with mock.patch.object(ft_mod, '_update_intent_conn', side_effect=_boom_on_completed_at):
+            with self.assertRaises(sqlite3.OperationalError):
+                complete_first_turn_round(
+                    session,
+                    assistant_content='TTL 失败后仍在的回答',
+                    end_offset=int(published.jsonl_size) + 40,
+                    db_path=self.db,
+                    now=NOW,
+                    thinking='留下思考',
+                    cache_info=json.dumps({'cache_read': 3}),
+                    choices=json.dumps(['续', '停'], ensure_ascii=False),
+                )
+
+        intent_failed = self._intent()
+        self.assertEqual(intent_failed.get('status'), INTENT_COMMITTED)
+        self.assertIsNone(intent_failed.get('first_turn_completed_at'))
+        self.assertIsNotNone(intent_failed.get('first_assistant_message_id'))
+        assistant_id = int(intent_failed['first_assistant_message_id'])
+        self._assert_last_good_empty(intent_failed)
+
+        # Simulate first-turn lease TTL elapsed: claim_daily_resident_turn would
+        # treat expires_at <= now as absent and re-claim — without the persist
+        # gate that would penetrate with a incomplete first-turn checkpoint.
+        wall_now = datetime.datetime.utcnow() + datetime.timedelta(hours=dc.TZ_OFFSET_HOURS)
+        expired_at = (wall_now - datetime.timedelta(seconds=1)).strftime('%Y-%m-%d %H:%M:%S')
+        conn = _connect(self.db)
+        try:
+            conn.execute(
+                'UPDATE daily_resident_turn_leases SET expires_at=?, updated_at=? '
+                'WHERE context_id=? AND resident_generation=? AND lease_owner=?',
+                (
+                    expired_at, expired_at, target_id,
+                    session.target_resident_generation, self.first_turn_request_id,
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        # Logical +481s past mint (lease TTL is 480s); wall_now also past expiry.
+        after_ttl = NOW + datetime.timedelta(seconds=481)
+        second_user = _insert_msg(self.db, 'hayana', 'TTL 后仍应被挡')
+        resident = self.hooks.formal_holder.get()
+        with mock.patch('chat.daily_context.enabled', return_value=True), \
+             mock.patch(
+                 'chat.daily_history._build_state_text', return_value=('', 'none', {}),
+             ):
+            with self.assertRaises(dr.FirstTurnFinalizePendingError) as ar:
+                dr.prepare_daily_turn(
+                    user_message_id=second_user,
+                    db_path=self.db,
+                    resident=resident,
+                    static_system='S',
+                    now=after_ttl,
+                    wall_now=wall_now,
+                )
+            self.assertEqual(ar.exception.error_code, 'FIRST_TURN_FINALIZE_PENDING')
+
+        # Explicit finalize clears the gate; ordinary second turn may proceed.
+        healed = complete_first_turn_round(
+            session,
+            assistant_content='',
+            end_offset=int(published.jsonl_size) + 40,
+            db_path=self.db,
+            now=after_ttl,
+            thinking='',
+            cache_info='',
+            choices='',
+        )
+        self.assertEqual(healed.assistant_message_id, assistant_id)
+        self.assertIsNotNone(self._intent().get('first_turn_completed_at'))
+        self.assertIsNone(get_first_turn_finalize_pending(db_path=self.db))
+
+        third_user = _insert_msg(self.db, 'hayana', 'finalize 后第二轮')
+        with mock.patch('chat.daily_context.enabled', return_value=True), \
+             mock.patch(
+                 'chat.daily_history._build_state_text', return_value=('', 'none', {}),
+             ):
+            plan = dr.prepare_daily_turn(
+                user_message_id=third_user,
+                db_path=self.db,
+                resident=resident,
+                static_system='S',
+                now=wall_now,
+                wall_now=wall_now,
+            )
+        self.assertEqual(int(plan.context_id), target_id)
+        self.assertFalse(plan.is_cold)
+        self.assertEqual(int(plan.cursor_before), assistant_id)
+
+    def test_db_only_finalize_recovery_across_request_boundary(self):
+        """final txn fail → drop FirstTurnSession → DB-only finalize clears gate."""
+        published = self._seed_source_and_forge()
+        target_id = int(self._intent()['target_context_id'])
+        gateway_user_id = _insert_msg(self.db, 'hayana', '跨请求收尾句')
+
+        session = claim_and_start_first_turn(
+            switch_request_id=self.switch_request_id,
+            first_turn_request_id=self.first_turn_request_id,
+            user_content='跨请求收尾句',
+            user_message_id=gateway_user_id,
+            hooks=self.hooks,
+            db_path=self.db,
+            now=NOW,
+        )
+        ft_mod.mark_first_turn_stdin_sent(session)
+        ingest_first_turn_text_delta(
+            session, text='已出正文', hooks=self.hooks, db_path=self.db, now=NOW,
+        )
+
+        real_update = ft_mod._update_intent_conn
+        boom = {'n': 0}
+
+        def _boom_on_completed_at(conn, request_id, *, status=None, fields=None, now_s=None):
+            fields = fields or {}
+            if fields.get('first_turn_completed_at') is not None and boom['n'] == 0:
+                boom['n'] += 1
+                raise sqlite3.OperationalError('simulated final checkpoint failure')
+            return real_update(
+                conn, request_id, status=status, fields=fields, now_s=now_s,
+            )
+
+        with mock.patch.object(ft_mod, '_update_intent_conn', side_effect=_boom_on_completed_at):
+            with self.assertRaises(sqlite3.OperationalError):
+                complete_first_turn_round(
+                    session,
+                    assistant_content='跨请求仍在的回答',
+                    end_offset=int(published.jsonl_size) + 40,
+                    db_path=self.db,
+                    now=NOW,
+                    thinking='留下思考',
+                    cache_info=json.dumps({'cache_read': 2}),
+                    choices=json.dumps(['好', '行'], ensure_ascii=False),
+                )
+
+        assistant_id = int(self._intent()['first_assistant_message_id'])
+        self.assertIsNotNone(get_first_turn_finalize_pending(db_path=self.db))
+        # Request/process boundary: discard the only FirstTurnSession handle.
+        session = None
+
+        healed = recover_first_turn_finalize_pending(
+            db_path=self.db,
+            now=NOW + datetime.timedelta(seconds=90),
+        )
+        self.assertIsNotNone(healed)
+        assert healed is not None
+        self.assertEqual(healed.assistant_message_id, assistant_id)
+        self.assertIsNone(get_first_turn_finalize_pending(db_path=self.db))
+        intent_ok = self._intent()
+        self.assertIsNotNone(intent_ok.get('first_turn_completed_at'))
+        self.assertEqual(
+            int(intent_ok['last_good_history_cursor_message_id']), assistant_id,
+        )
+        lease_after = sqlite3.connect(self.db).execute(
+            'SELECT COUNT(*) FROM daily_resident_turn_leases '
+            'WHERE context_id=? AND lease_owner=?',
+            (target_id, self.first_turn_request_id),
+        ).fetchone()[0]
+        self.assertEqual(lease_after, 0)
+
+        second_user = _insert_msg(self.db, 'hayana', '收尾后第二轮')
+        resident = self.hooks.formal_holder.get()
+        wall_now = datetime.datetime.utcnow() + datetime.timedelta(hours=dc.TZ_OFFSET_HOURS)
+        with mock.patch('chat.daily_context.enabled', return_value=True), \
+             mock.patch(
+                 'chat.daily_history._build_state_text', return_value=('', 'none', {}),
+             ):
+            plan = dr.prepare_daily_turn(
+                user_message_id=second_user,
+                db_path=self.db,
+                resident=resident,
+                static_system='S',
+                now=wall_now,
+                wall_now=wall_now,
+            )
+        self.assertEqual(int(plan.context_id), target_id)
+        self.assertFalse(plan.is_cold)
+        self.assertEqual(int(plan.cursor_before), assistant_id)
+
+    def test_finalize_pending_blocks_new_manual_switch(self):
+        """final txn fail → lease TTL 后仍拒新换窗；DB-only finalize 后才放行。"""
+        published = self._seed_source_and_forge()
+        target_id = int(self._intent()['target_context_id'])
+        target_row = dc.get_daily_context_by_id(target_id, db_path=self.db)
+        target_epoch = int(target_row['context_epoch'])
+        gateway_user_id = _insert_msg(self.db, 'hayana', '换窗绕过句')
+
+        session = claim_and_start_first_turn(
+            switch_request_id=self.switch_request_id,
+            first_turn_request_id=self.first_turn_request_id,
+            user_content='换窗绕过句',
+            user_message_id=gateway_user_id,
+            hooks=self.hooks,
+            db_path=self.db,
+            now=NOW,
+        )
+        ft_mod.mark_first_turn_stdin_sent(session)
+        ingest_first_turn_text_delta(
+            session, text='已出正文', hooks=self.hooks, db_path=self.db, now=NOW,
+        )
+
+        real_update = ft_mod._update_intent_conn
+        boom = {'n': 0}
+
+        def _boom_on_completed_at(conn, request_id, *, status=None, fields=None, now_s=None):
+            fields = fields or {}
+            if fields.get('first_turn_completed_at') is not None and boom['n'] == 0:
+                boom['n'] += 1
+                raise sqlite3.OperationalError('simulated final checkpoint failure')
+            return real_update(
+                conn, request_id, status=status, fields=fields, now_s=now_s,
+            )
+
+        with mock.patch.object(ft_mod, '_update_intent_conn', side_effect=_boom_on_completed_at):
+            with self.assertRaises(sqlite3.OperationalError):
+                complete_first_turn_round(
+                    session,
+                    assistant_content='换窗前残缺回答',
+                    end_offset=int(published.jsonl_size) + 40,
+                    db_path=self.db,
+                    now=NOW,
+                )
+
+        self.assertEqual(self._intent().get('status'), INTENT_COMMITTED)
+        self.assertIsNotNone(get_first_turn_finalize_pending(db_path=self.db))
+
+        # Expire first-turn lease (TTL +481s); switch must still be blocked.
+        wall_now = datetime.datetime.utcnow() + datetime.timedelta(hours=dc.TZ_OFFSET_HOURS)
+        expired_at = (wall_now - datetime.timedelta(seconds=1)).strftime('%Y-%m-%d %H:%M:%S')
+        conn = _connect(self.db)
+        try:
+            conn.execute(
+                'UPDATE daily_resident_turn_leases SET expires_at=?, updated_at=? '
+                'WHERE context_id=? AND resident_generation=? AND lease_owner=?',
+                (
+                    expired_at, expired_at, target_id,
+                    session.target_resident_generation, self.first_turn_request_id,
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        session = None
+
+        new_switch_id = str(uuid.uuid4())
+        with self.assertRaises(FirstTurnFinalizePendingError) as ar:
+            reserve_or_load_intent(
+                source_context_id=target_id,
+                source_context_epoch=target_epoch,
+                count=0,
+                request_id=new_switch_id,
+                db_path=self.db,
+                now=NOW + datetime.timedelta(seconds=481),
+            )
+        self.assertEqual(ar.exception.error_code, 'FIRST_TURN_FINALIZE_PENDING')
+
+        healed = recover_first_turn_finalize_pending(
+            db_path=self.db,
+            now=NOW + datetime.timedelta(seconds=500),
+        )
+        self.assertIsNotNone(healed)
+        self.assertIsNone(get_first_turn_finalize_pending(db_path=self.db))
+
+        reserved = reserve_or_load_intent(
+            source_context_id=target_id,
+            source_context_epoch=target_epoch,
+            count=0,
+            request_id=new_switch_id,
+            db_path=self.db,
+            now=NOW + datetime.timedelta(seconds=510),
+        )
+        self.assertEqual(reserved['status'], INTENT_RESERVED)
+        self.assertEqual(str(reserved['request_id']), new_switch_id)
 
     def test_postcommit_client_abort_releases_lease_and_bumps_generation(self):
         """Post-commit abort: release first-turn lease + bump gen once (idempotent)."""

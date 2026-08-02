@@ -228,6 +228,7 @@ def create_context_window_bff_blueprint(
         if switch_runner is not None:
             from chat.context_window import (
                 CarryoverMessageUnforgeableError,
+                FirstTurnFinalizePendingError,
                 IdempotencyMismatchError,
                 StaleSourceContextError,
                 SwitchFailedError,
@@ -301,6 +302,17 @@ def create_context_window_bff_blueprint(
                 return Response(
                     json.dumps({'ok': False, 'error': str(exc), 'code': exc.error_code}, ensure_ascii=False),
                     status=409,
+                    mimetype='application/json',
+                )
+            except FirstTurnFinalizePendingError as exc:
+                return Response(
+                    json.dumps({
+                        'ok': False,
+                        'error': str(exc),
+                        'code': 'FIRST_TURN_FINALIZE_PENDING',
+                        'retryable': True,
+                    }, ensure_ascii=False),
+                    status=423,
                     mimetype='application/json',
                 )
             except (WindowBusyError, SwitchInProgressError) as exc:
