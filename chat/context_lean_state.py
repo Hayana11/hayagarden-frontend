@@ -214,6 +214,32 @@ def build_state_lean_observation(
     }
 
 
+def _persona_visible_state_text(
+    raw_state: Mapping[str, str],
+    *,
+    is_cold: bool,
+    last_raw_snapshot: Optional[Mapping[str, Any]] = None,
+) -> tuple[str, str, str]:
+    """Build model-visible state text from raw backend snapshot (semantic layer)."""
+    from chat.persona_state_semantic import (
+        format_persona_semantic_diff,
+        format_persona_semantic_snapshot,
+        translate_raw_state_to_persona_semantic,
+    )
+
+    semantic_current = translate_raw_state_to_persona_semantic(raw_state)
+    if is_cold or not last_raw_snapshot:
+        state_text = format_persona_semantic_snapshot(semantic_current)
+        state_mode = 'snapshot' if state_text else 'none'
+        context_mode = 'full_anchor' if state_text else 'omitted'
+        return state_text, state_mode, context_mode
+    semantic_previous = translate_raw_state_to_persona_semantic(last_raw_snapshot)
+    state_text = format_persona_semantic_diff(semantic_previous, semantic_current)
+    state_mode = 'delta' if state_text else 'none'
+    context_mode = 'delta' if state_text else 'omitted'
+    return state_text, state_mode, context_mode
+
+
 def _legacy_state_context(
     *,
     raw_state: Mapping[str, str],
@@ -221,19 +247,16 @@ def _legacy_state_context(
     last_state_snapshot: Optional[Mapping[str, Any]],
     resident_generation: int = 0,
 ) -> StateContextResult:
-    from chat.system_builder import format_state_diff
-
     if is_cold:
-        state_text = format_state_snapshot(raw_state)
-        state_mode = 'snapshot' if state_text else 'none'
+        state_text, state_mode, context_mode = _persona_visible_state_text(
+            raw_state, is_cold=True,
+        )
     else:
-        state_text = format_state_diff(last_state_snapshot or {}, raw_state)
-        state_mode = 'delta' if state_text else 'none'
-    context_mode = {
-        'snapshot': 'full_anchor',
-        'delta': 'delta',
-        'none': 'omitted',
-    }.get(state_mode, 'omitted')
+        state_text, state_mode, context_mode = _persona_visible_state_text(
+            raw_state,
+            is_cold=False,
+            last_raw_snapshot=last_state_snapshot,
+        )
     return StateContextResult(
         state_text=state_text,
         state_mode=state_mode,
@@ -265,8 +288,9 @@ def assemble_legacy_full_fallback(
 ) -> StateContextResult:
     """True legacy fallback: full snapshot from lean=False raw state."""
     raw = normalize_state_dict(legacy_raw_state)
-    state_text = format_state_snapshot(raw)
-    state_mode = 'snapshot' if state_text else 'none'
+    state_text, state_mode, context_mode = _persona_visible_state_text(
+        raw, is_cold=True,
+    )
     version = compute_state_version(raw)
     observation = build_state_lean_observation(
         enabled=True,
@@ -362,13 +386,11 @@ def assemble_cc_state_context(
             or compute_state_version(cumulative_before)
         )
         previous_version = compute_state_version(cumulative_before)
-    state_text, state_mode, context_mode = format_lean_state_for_send(
-        cumulative_before,
-        effective_send_payload,
+    semantic_last_raw = {} if needs_reanchor else last_raw
+    state_text, state_mode, context_mode = _persona_visible_state_text(
+        raw,
         is_cold=send_is_cold,
-        anchor_version=anchor_version,
-        previous_version=previous_version,
-        current_version=current_version,
+        last_raw_snapshot=None if send_is_cold else semantic_last_raw,
     )
     changed_count = len(effective_send_payload)
 

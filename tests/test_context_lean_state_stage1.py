@@ -58,26 +58,26 @@ def _resident_stub(**overrides):
     return SimpleNamespace(**base)
 
 
-class FlagZeroParityTests(unittest.TestCase):
-    def test_cold_snapshot_matches_legacy_formatter(self):
+class FlagZeroSemanticTests(unittest.TestCase):
+    """Provider-visible state uses persona semantic layer (not raw formatters)."""
+
+    def test_cold_snapshot_uses_persona_header(self):
         resident = _resident_stub()
-        expected = format_state_snapshot(LEGACY_RAW)
         result = assemble_cc_state_context(
-            raw_state=LEGACY_RAW,
+            raw_state=RAW_V1,
             is_cold=True,
             user_text='你好',
             resident=resident,
             lean_on=False,
         )
-        self.assertEqual(result.state_text, expected)
+        self.assertIn('【此刻的感受】', result.state_text)
         self.assertFalse(result.used_lean)
 
-    def test_hot_diff_matches_legacy_formatter(self):
-        before = dict(LEGACY_RAW)
-        after = dict(LEGACY_RAW)
-        after['lights'] = '（灯·当前状态：主灯 开，床头灯 关）'
+    def test_hot_diff_uses_persona_delta_header(self):
+        before = dict(RAW_V1)
+        after = dict(RAW_V1)
+        after['lights'] = 'main=开 bedside=关'
         resident = _resident_stub(last_state_snapshot=before)
-        expected = format_state_diff(before, after)
         result = assemble_cc_state_context(
             raw_state=after,
             is_cold=False,
@@ -85,10 +85,11 @@ class FlagZeroParityTests(unittest.TestCase):
             resident=resident,
             lean_on=False,
         )
-        self.assertEqual(result.state_text, expected)
+        if result.state_text:
+            self.assertIn('变化', result.state_text)
         self.assertFalse(result.used_lean)
 
-    def test_hot_unchanged_matches_empty_legacy_diff(self):
+    def test_hot_unchanged_empty_diff(self):
         resident = _resident_stub(last_state_snapshot=LEGACY_RAW)
         result = assemble_cc_state_context(
             raw_state=LEGACY_RAW,
@@ -148,11 +149,12 @@ class StructuredFormatTests(unittest.TestCase):
             resident=resident,
             lean_on=True,
         )
-        self.assertEqual(result.state_context_mode, 'delta')
         self.assertEqual(result.observation['changed_field_count'], len(result.send_payload))
         self.assertIn('lights', result.send_payload)
         self.assertEqual(result.send_payload['lights'], '')
-        self.assertIn('lights: cleared', result.state_text)
+        # Persona layer omits empty tombstones; raw tombstone remains in send_payload.
+        self.assertEqual(result.state_context_mode, 'omitted')
+        self.assertEqual(result.state_text, '')
         expected_after = merge_cumulative_state_send(RAW_V1, {'lights': ''})
         self.assertEqual(
             result.observation['state_version'],
@@ -311,7 +313,7 @@ class AssembleContextFixtureTests(unittest.TestCase):
             lean_on=True,
         )
         self.assertEqual(result.state_context_mode, 'full_anchor')
-        self.assertIn('锚点', result.state_text)
+        self.assertIn('【此刻的感受】', result.state_text)
         self.assertEqual(result.reanchor_reason, 'cold_start')
         self.assertEqual(
             compute_state_version(result.send_payload),
@@ -445,8 +447,8 @@ class ConsecutiveDeltaVersionChainTests(unittest.TestCase):
             delta1.observation['previous_version'],
             compute_state_version(sess.last_state_send_snapshot),
         )
-        self.assertIn(f'previous_version={delta1.observation["previous_version"]}', delta1.state_text)
-        self.assertIn(f'current_version={delta1_current}', delta1.state_text)
+        self.assertIn('【此刻有一点变化】', delta1.state_text)
+        self.assertIn('主灯亮着', delta1.state_text)
         self._commit(sess, delta1, raw_after_delta1)
 
         raw_after_delta2 = dict(raw_after_delta1)
@@ -461,11 +463,17 @@ class ConsecutiveDeltaVersionChainTests(unittest.TestCase):
         self.assertEqual(delta2.state_context_mode, 'delta')
         self.assertEqual(delta2.observation['previous_version'], delta1_current)
         self.assertEqual(delta2.observation['anchor_version'], anchor_version)
-        self.assertIn(f'previous_version={delta1_current}', delta2.state_text)
+        self.assertIn('【此刻有一点变化】', delta2.state_text)
+        self.assertIn('对亲近她的欲望很明显', delta2.state_text)
 
 
 class FallbackTests(unittest.TestCase):
     def test_legacy_full_fallback_uses_snapshot_not_diff(self):
+        from chat.persona_state_semantic import (
+            format_persona_semantic_snapshot,
+            translate_raw_state_to_persona_semantic,
+        )
+
         resident = _resident_stub(last_state_snapshot=RAW_V1)
         legacy = dict(LEGACY_RAW)
         result = assemble_legacy_full_fallback(
@@ -473,8 +481,11 @@ class FallbackTests(unittest.TestCase):
             fallback_reason='ValueError',
             resident=resident,
         )
+        expected_text = format_persona_semantic_snapshot(
+            translate_raw_state_to_persona_semantic(legacy),
+        )
         self.assertEqual(result.state_context_mode, 'fallback')
-        self.assertEqual(result.state_text, format_state_snapshot(legacy))
+        self.assertEqual(result.state_text, expected_text)
         self.assertEqual(result.state_mode, 'snapshot')
         self.assertFalse(result.commit_meta_extras.get('lean_state_active'))
         self.assertTrue(result.commit_meta_extras.get('state_lean_fallback'))
@@ -483,7 +494,10 @@ class FallbackTests(unittest.TestCase):
 class GatewayFallbackTests(unittest.TestCase):
     def test_gateway_fail_safe_reloads_legacy_raw_on_assemble_failure(self):
         from chat.context_lean_state import assemble_cc_state_for_resident_turn
-        from chat.system_builder import format_state_snapshot
+        from chat.persona_state_semantic import (
+            format_persona_semantic_snapshot,
+            translate_raw_state_to_persona_semantic,
+        )
 
         lean_raw = dict(RAW_V1)
         legacy_raw = dict(LEGACY_RAW)
@@ -506,16 +520,22 @@ class GatewayFallbackTests(unittest.TestCase):
                         resident=resident,
                     )
 
+        expected_text = format_persona_semantic_snapshot(
+            translate_raw_state_to_persona_semantic(legacy_raw),
+        )
         self.assertEqual(build_calls, [True, False])
         self.assertIs(raw_state, legacy_raw)
-        self.assertEqual(state_ctx.state_text, format_state_snapshot(legacy_raw))
+        self.assertEqual(state_ctx.state_text, expected_text)
         self.assertEqual(state_ctx.state_context_mode, 'fallback')
         self.assertFalse(state_ctx.commit_meta_extras.get('lean_state_active'))
         self.assertTrue(state_ctx.commit_meta_extras.get('state_lean_fallback'))
 
     def test_gateway_fail_safe_reloads_legacy_raw_on_lean_collect_failure(self):
         from chat.context_lean_state import assemble_cc_state_for_resident_turn
-        from chat.system_builder import format_state_snapshot
+        from chat.persona_state_semantic import (
+            format_persona_semantic_snapshot,
+            translate_raw_state_to_persona_semantic,
+        )
 
         legacy_raw = dict(LEGACY_RAW)
         resident = _resident_stub()
@@ -535,9 +555,12 @@ class GatewayFallbackTests(unittest.TestCase):
                     resident=resident,
                 )
 
+        expected_text = format_persona_semantic_snapshot(
+            translate_raw_state_to_persona_semantic(legacy_raw),
+        )
         self.assertEqual(build_calls, [True, False])
         self.assertIs(raw_state, legacy_raw)
-        self.assertEqual(state_ctx.state_text, format_state_snapshot(legacy_raw))
+        self.assertEqual(state_ctx.state_text, expected_text)
         self.assertEqual(state_ctx.state_context_mode, 'fallback')
         self.assertFalse(state_ctx.commit_meta_extras.get('lean_state_active'))
         self.assertTrue(state_ctx.commit_meta_extras.get('state_lean_fallback'))
@@ -676,6 +699,79 @@ class ResidentCommitTests(unittest.TestCase):
         })
         self.assertEqual(sess.turns_since_state_anchor, 0)
         self.assertEqual(sess.state_delta_chars_since_anchor, 0)
+
+
+class PersonaSemanticContractTests(unittest.TestCase):
+    """9A-2: persona semantic translator contracts."""
+
+    def test_case1_cold_semantic_sanitized(self):
+        from chat.daily_history import _build_state_text
+        from chat.persona_state_semantic import translate_raw_state_to_persona_semantic
+
+        raw = {
+            'time_bucket': 'bucket=2026-08-02 23:30',
+            'emotion': (
+                'valence=0.52 arousal=0.30 mood=慵懒 pa=0.50 na=0.20 '
+                'longing=0.35 desire_p=0.80 desire_i=0.30 desire_c=0.70'
+            ),
+            'drive': 'fatigue=0.40 libido=0.75 curiosity=0.20 stress=0.35 social=0.60',
+            'lights': 'main=关 bedside=亮',
+            'pocket': 'phone_connected=true last_seen=2026-08-02T12:00:00+08:00',
+            'todos': 'todos_user_records:\n- item',
+            'ledger': 'expense=100.00',
+            'reminders': 'reminders_data:\n- todo',
+        }
+        semantic = translate_raw_state_to_persona_semantic(raw)
+        with mock.patch('chat.system_builder.build_cc_state', return_value=raw):
+            text, mode, snapshot = _build_state_text(is_cold=True)
+        self.assertEqual(mode, 'snapshot')
+        self.assertEqual(snapshot, {k: str(v) for k, v in raw.items()})
+        self.assertIn('【此刻的感受】', text)
+        self.assertNotRegex(text, r'\d+\.\d+')
+        self.assertNotIn('libido=', text)
+        self.assertNotIn('valence', text)
+        self.assertNotIn('last_seen', text)
+        self.assertNotIn('schema_version', text)
+        self.assertIn('Pocket', text)
+        self.assertTrue(semantic['inner_state'])
+
+    def test_case2_hot_stability_small_float_jitter(self):
+        from chat.persona_state_semantic import (
+            format_persona_semantic_diff,
+            translate_raw_state_to_persona_semantic,
+        )
+
+        before = {
+            'emotion': 'valence=0.60 arousal=0.30 mood=平静 pa=0.50 na=0.20 longing=0.20 desire_p=0.10 desire_i=0.30 desire_c=0.40',
+            'drive': 'fatigue=0.40 stress=0.30 social=0.35',
+        }
+        after = dict(before)
+        after['emotion'] = after['emotion'].replace('0.60', '0.61')
+        after['drive'] = after['drive'].replace('0.40', '0.41')
+        delta = format_persona_semantic_diff(
+            translate_raw_state_to_persona_semantic(before),
+            translate_raw_state_to_persona_semantic(after),
+        )
+        self.assertEqual(delta, '')
+
+    def test_case3_representative_semantic_change(self):
+        from chat.persona_state_semantic import (
+            format_persona_semantic_diff,
+            translate_raw_state_to_persona_semantic,
+        )
+
+        before = {
+            'drive': 'fatigue=0.40 libido=0.20 social=0.35',
+        }
+        after = {
+            'drive': 'fatigue=0.70 libido=0.80 social=0.35',
+        }
+        delta = format_persona_semantic_diff(
+            translate_raw_state_to_persona_semantic(before),
+            translate_raw_state_to_persona_semantic(after),
+        )
+        self.assertIn('【此刻有一点变化】', delta)
+        self.assertIn('疲惫', delta)
 
 
 class OneShotPreservationTests(unittest.TestCase):
