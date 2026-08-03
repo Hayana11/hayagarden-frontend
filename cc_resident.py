@@ -657,12 +657,14 @@ class ResidentSession:
         self._commit_sent_context(commit_meta)
 
         timed_out = [False]
+        # Runtime tunable via config_store; module default stays 360.
+        stream_timeout = _cfg_int('CC_STREAM_TIMEOUT', CC_STREAM_TIMEOUT)
 
         def _kill_on_timeout():
             timed_out[0] = True
             self._kill(quiet=True)
 
-        timer = threading.Timer(CC_STREAM_TIMEOUT, _kill_on_timeout)
+        timer = threading.Timer(stream_timeout, _kill_on_timeout)
         timer.daemon = True
         timer.start()
 
@@ -879,7 +881,7 @@ class ResidentSession:
 
         if timed_out[0]:
             raise ResidentError(
-                'claude code 调用超时 (%ds)，resident 进程已重启' % CC_STREAM_TIMEOUT,
+                'claude code 调用超时 (%ds)，resident 进程已重启' % stream_timeout,
                 usage=usage,
             )
         if not saw_result:
