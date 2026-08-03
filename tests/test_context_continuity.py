@@ -6,6 +6,7 @@ import sqlite3
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if ROOT not in sys.path:
@@ -26,6 +27,16 @@ is_pending_user_turn = _CONTEXT.is_pending_user_turn
 
 class ContextContinuityTests(unittest.TestCase):
     def setUp(self):
+        # Deploy preflight runs on the VPS where config_store may have
+        # DAILY_SOFT_WINDOW_ENABLED=1. These fixtures only create wake_log /
+        # chat_messages — force the legacy wake path so production flags cannot
+        # pull resolve_canonical_context_row_conn onto a missing daily_contexts.
+        self._soft_window_patch = mock.patch(
+            'chat.window_identity.soft_window_enabled', return_value=False,
+        )
+        self._soft_window_patch.start()
+        self.addCleanup(self._soft_window_patch.stop)
+
         self.tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
         self.tmp.close()
         conn = self.db()

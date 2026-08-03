@@ -115,12 +115,18 @@ def read_current_window_identity_conn(
     chat_id: str = 'default',
 ) -> dict[str, Any]:
     """Resolve identity on an already-open connection (for atomic check+write)."""
+    import sqlite3
+
     from chat.context_window import NoOpenContextWindowError, resolve_canonical_context_row_conn
 
     try:
         row = resolve_canonical_context_row_conn(conn, chat_id=chat_id)
     except NoOpenContextWindowError as exc:
         raise WindowIdentityUnavailable('no_open_context_window') from exc
+    except sqlite3.OperationalError as exc:
+        # Missing soft-window tables on a bare/fixture DB must stay fail-closed
+        # for wake claim, not crash the continuity path.
+        raise WindowIdentityUnavailable('window_schema_unavailable') from exc
     identity = identity_from_context_row(dict(row), chat_id=chat_id)
     normalized = normalize_window_identity(identity)
     if normalized is None:
