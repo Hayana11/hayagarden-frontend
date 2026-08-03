@@ -63,7 +63,7 @@ Bond 描述 **relationship baseline**：关系长期是什么样；它不是当�
 - `passion`：相对慢变的关系激情/吸引基础；不等于 libido。它可以成为 libido 或某些 Intent 的显式上游调制信息，但不能冒充当前需求值。
 - `commitment`：关系持续性、稳定性与承诺基础；不得被翻译为“当前想亲近”。
 
-Phase 1 迁移期保留现有规则层与异步评分层分别作用于 P/I 的双通道叠加，以避免迁移阶段顺手调参。两类处理必须分开记账并引用同一个用户 Root Event，后续凭真实数据决定是否降权。
+迁移期保留现有规则层与异步评分层分别作用于 P/I 的双通道叠加，以避免迁移阶段顺手调参。两类处理必须分开记账并引用同一个用户 Root Event，后续凭真实数据决定是否降权。
 
 ### 3.3 Drives
 
@@ -82,7 +82,7 @@ Drive 描述 **current deficit**：此刻缺什么、想得到什么；它不是
 - `attachment`：当前接近、确认连接、获得回应的关系需求缺口；不等于 Bond intimacy。
 - `libido`：当前身体/性相关需求缺口；不等于 Bond passion。
 
-因此以下状态都完全合法：
+以下状态都完全合法：
 
 ```text
 intimacy 高 + attachment 低
@@ -279,6 +279,7 @@ apply_outcome(event_id, intent, result)
 同一 Action outcome 只能结算一次：
 
 - 消费 Decision-time provenance；不得根据最终 action 事后猜 fired drive / intent。
+- provenance 缺失时 **fail closed**；不得 fallback 到 `Action → Drive / Intent` 推断。宁可留下可诊断的未结算/部分结算记录，也不能让 `infer_fired_drive_for_action()` 以新名字复活。
 - 降低被满足的驱动。
 - 增加 fatigue 成本。
 - 写回新的基准值和时间。
@@ -289,6 +290,22 @@ apply_outcome(event_id, intent, result)
 - attachment 先沿用旧 `-0.55`。
 - desire 中已有乘性 ratio 的维度按旧映射对拍。
 - attachment 乘性回落作为 candidate 并排记录，观察后再裁决。
+
+### 6.4 Provenance 反作弊验收
+
+迁移期 legacy Decision 的 provenance 必须在 Action 执行前冻结。
+
+至少增加一条 **metamorphic / 变形测试**：
+
+```text
+State Snapshot S
+→ Legacy Decision D
+→ freeze provenance P
+→ test harness 人为替换最终 Action / outcome A1 / A2
+→ P 必须保持不变
+```
+
+若同一状态快照与同一 Decision 下，`action=message` 时 provenance 变成 attachment、`action=explore` 时 provenance 又变成 curiosity，则判定为事后反推，测试失败。
 
 ## 7. State Authority 与旧器官退休
 
@@ -432,7 +449,7 @@ ISV3-1B 可以建设 Reviewed View / ModelContextGate 的**结构和过滤能力
 普通 Chat 默认 **零状态注入**。候选事实只有同时满足：
 
 - Relevant：与当前消息直接相关。
-- Non-inferable：模型无法从当前上下文自行知道。
+- Non-inferable：等价事实当前不存在于 model-visible context，模型不能仅靠当前可见聊天事实可靠恢复。
 - Salient：足够显著，确实会改变本轮体验。
 - Non-directive：只是事实，不是行为/文风/人格指令。
 
@@ -447,7 +464,21 @@ ISV3-1B 可以建设 Reviewed View / ModelContextGate 的**结构和过滤能力
 - Trace/Fixation 未来上线后跨轮心理连续事实合计最多 1–2 项。
 - `persona_state_semantic` 作为 Chat Prompt 生产路径最终退休；若 UI/diagnostics 需要数值→标签，可另作 UI formatter，但不得重新成为 Prompt formatter。
 
-### 9.4 Legacy Chat Exposure Removal ≠ New V3 Chat Exposure Rollout
+### 9.4 Gate Judge Contract：标准先冻，裁判后拍
+
+四关标准已经冻结，但“由谁、用什么算法裁决”**不是 ISV3-1B 的 State Authority 完工门**。
+
+Track C 正式灰度 Chat Exposure 前必须单独冻结 Gate Judge Contract，至少明确：
+
+- model-visible context 的边界是什么；哪些事实算已经可见。
+- Relevant 的判断来源：provenance / topic relation / 其他受控语义匹配。
+- Salient 的阈值、迟滞或其他稳定机制。
+- Non-directive 的结构/schema 白名单与验收规则。
+- 失败时是 fail closed 还是降级到零注入。
+
+第一版优先用**信息可见性**解释 Non-inferable，而不是每轮预测“某个具体模型到底聪不聪明”。是否增加模型 reranker 属于 Track C 后续实验，不是当前宪法。
+
+### 9.5 Legacy Chat Exposure Removal ≠ New V3 Chat Exposure Rollout
 
 ISV3-1B 可以：
 
@@ -531,9 +562,11 @@ Reviewed View / ModelContextGate 基础
 legacy compatibility / retirement path
 ```
 
+其中 provenance 的 Decision-time 冻结、fail-closed 与反作弊测试属于本轮 State Mutation / Settlement Authority 的验收内容。
+
 ### 11.2 Deferred after ISV3-1B
 
-以下属于后续**新能力**，不得成为 ISV3-1B 的完工前置条件：
+以下属于后续**新能力或软语义设计门**，不得成为 ISV3-1B 的完工前置条件：
 
 ```text
 Affect Trace
@@ -545,9 +578,11 @@ memory retrieval → Trace continuity
 Ombre fixed-30% removal
 advanced coupling
 new autonomous behavior semantics
+Track A Topic Identity / Semantic Match Contract
+Track C Gate Judge Contract / Chat Exposure rollout
 ```
 
-这些能力可以在当前文档冻结语义归属、预留接口、写 future TODO，但不得因此扩建本轮生产字段或动力学。
+这些能力可以在当前文档冻结语义归属、登记核心难题、预留接口、写 future TODO，但不得因此扩建本轮生产字段或动力学。
 
 ### 11.3 本轮明确不做
 
@@ -563,6 +598,8 @@ new autonomous behavior semantics
 - 不为替代 Ombre 30% 提前扩建 Affect Trace / memory retrieval continuity。
 - 不在本轮重命名 `/emotion_snapshot` endpoint。
 - 不为了回滚维持永久 legacy state 双写。
+- 不为了四关闸门提前引入“每轮额外模型审查”。
+- 不为了“同主题”提前拍死 embedding、阈值、topic schema 或数据库结构。
 
 ## 12. 后续工作分区
 
@@ -574,9 +611,62 @@ new autonomous behavior semantics
 
 在 Reviewed View / ModelContextGate 基础上独立 A/B；默认零状态注入，只有必要事实进入普通 Chat。
 
+正式灰度前必须完成 **Gate Judge Contract**：明确 Relevant / Non-inferable / Salient / Non-directive 的裁判机制、model-visible context 边界与失败策略。
+
 ### C. Future Internal-State Expansion
 
 按独立窄阶段逐步施工：Affect Trace → Thought/Fixation → Eventide → Body → Morning Baseline → memory retrieval continuity 等。所有新机制先 Shadow，再验收，再进入下游。
+
+Track A 的核心研究难题之一是 **Topic Identity / Semantic Match Contract**。“同主题”不是实现细节；它直接决定 Trace retrigger、flit→fixation feeding 与 memory retrieval continuity 是否会过松自激或过紧失效。开工前至少要区分 exact continuation、related-but-not-same、broad-category-only、joke/hypothetical/fiction，并分别控制 false positive / false negative；当前不冻结具体算法。
+
+### 12.1 Body 文本冲突的默认处理
+
+模型生成文本不是 Body sensor。未来 Body 上线后，若模型自由生成文本与权威 Body fact 不一致：
+
+- 默认视为生成层偏差。
+- 不据此反写 Body。
+- 不启动“文本一致性校正 → 状态写回”的反向因果闭环。
+- 可以作为 diagnostics / A/B 样本记录，但冲突文本本身不产生新的状态因果。
+
+### 12.2 Deferred 预设计的未来重审规则
+
+本文对 Affect Trace、Thought、Eventide、Body、Morning Baseline 等 deferred 器官给出了高精度预设计，但它们不是永久字段/算法规范。
+
+未来真正开工时，应基于当时仓库、实验结果和已冻结 invariants 重新评审。若新判断与本文件的旧预设计冲突：
+
+- 必须先显式更新本合同或对应 ADR，再施工。
+- 禁止代码以“实现方便”为由静默漂移，反向覆盖文档。
+
+以下仍属于上位 invariant，不因 deferred 细节重审而自动失效：
+
+- 单一权威 / 单一事实源。
+- Canonical Event provenance。
+- 不重复记账。
+- 不允许文本或 Action 事后反推制造反向因果。
+- 后台丰富，模型贫穷。
+- 状态只造成体验，不写导演指令。
+- Bond / Drive / Trace / Eventide / Longing 语义不得串线。
+
+## 13. 验收补充：防过注，也防失忆
+
+现有 Chat Exposure 验收除了防“注太多”，必须增加对称失败模式。
+
+### Q. 必要连续性不得漏注
+
+给定一条：
+
+- 仍存活；
+- 达到显著阈值；
+- 与当前输入强相关或被当前输入 retrigger；
+- 其存活状态/后效**无法从当前 model-visible context 恢复**；
+
+的跨轮 Trace，Reviewed View 不得为空；至少应输出一条最小连续性事实。
+
+若等价事实已经存在于当前模型可见上下文中，则继续遵守 Non-inferable，不要求重复注入。
+
+### R. Provenance 不得由最终 Action 反推
+
+对同一状态快照与同一 legacy Decision，在测试中替换最终 Action / outcome 后，Decision-time provenance 必须保持不变；若 provenance 随 Action 类型变化，测试失败。provenance 缺失时必须 fail closed，禁止 Action→Drive / Intent fallback。
 
 ---
 
