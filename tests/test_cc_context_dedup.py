@@ -735,6 +735,50 @@ class ResidentRespawnFileBootstrapTests(unittest.TestCase):
         self.assertTrue(captured['commit_meta'].get('hot_file_present'))
 
 
+class StreamTimeoutConfigTests(unittest.TestCase):
+    """CC_STREAM_TIMEOUT is runtime-tunable; default remains 360."""
+
+    def _timer_intervals_for_cfg(self, cfg_map):
+        ok_lines = [
+            json.dumps({
+                'type': 'result',
+                'is_error': False,
+                'result': 'ok',
+                'usage': {},
+            }),
+        ]
+        sess = ResidentSession('/tmp', '', '/tmp/cc-tools.json')
+        sess._proc = FakeProc(ok_lines)
+        sess._cold = False
+        intervals = []
+
+        class CapturingTimer:
+            def __init__(self, interval, _fn):
+                intervals.append(interval)
+
+            def start(self):
+                return None
+
+            def cancel(self):
+                return None
+
+        with mock.patch(
+            'cc_resident._cfg_int',
+            side_effect=lambda k, d: cfg_map.get(k, d),
+        ), mock.patch('cc_resident.threading.Timer', CapturingTimer):
+            list(sess.send_turn('hi', commit_meta={'state_snapshot': {}}))
+        return intervals
+
+    def test_stream_timeout_defaults_to_360(self):
+        self.assertEqual(self._timer_intervals_for_cfg({}), [360])
+
+    def test_stream_timeout_uses_runtime_config(self):
+        self.assertEqual(
+            self._timer_intervals_for_cfg({'CC_STREAM_TIMEOUT': 900}),
+            [900],
+        )
+
+
 class ResidentRespawnTests(unittest.TestCase):
     def test_turn_limit_triggers_before_next_send(self):
         sess = ResidentSession('/tmp', '', '/tmp/cc-tools.json')
