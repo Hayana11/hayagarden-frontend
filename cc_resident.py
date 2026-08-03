@@ -18,10 +18,22 @@ import time
 import config_store
 
 NL = chr(10)
-CC_STREAM_TIMEOUT = 360
+CC_STREAM_TIMEOUT = 360  # stall / inactivity seconds (runtime-tunable)
+CC_STREAM_HARD_TIMEOUT = 1800  # absolute per-turn ceiling (runtime-tunable)
 IDLE_REAP_SECONDS = 3 * 60 * 60
 TOOL_PROFILE_LEGACY = 'legacy'
 TOOL_PROFILE_TEXT_ONLY = 'text_only'
+
+# Claude stdout events that refresh the stall / inactivity deadline.
+# Gateway/SSE heartbeats are synthetic and must NOT be listed here.
+_CLAUDE_ACTIVITY_STREAM_EVENTS = frozenset({
+    'message_start',
+    'message_delta',
+})
+_CLAUDE_ACTIVITY_DELTA_TYPES = frozenset({
+    'thinking_delta',
+    'text_delta',
+})
 
 
 def _cfg_int(key, default):
@@ -29,6 +41,153 @@ def _cfg_int(key, default):
         return int(config_store.get_int(key, default))
     except Exception:
         return default
+
+
+def _claude_event_is_activity(d):
+    """True when a parsed Claude stdout event counts as real activity."""
+    if not isinstance(d, dict):
+        return False
+    t = d.get('type')
+    if t == 'system' and d.get('subtype') == 'init':
+        return True
+    if t in ('assistant', 'result'):
+        return True
+    if t == 'user':
+        for b in ((d.get('message') or {}).get('content') or []):
+            if isinstance(b, dict) and b.get('type') == 'tool_result':
+                return True
+        return False
+    if t == 'stream_event':
+        ev = d.get('event') or {}
+        ev_type = ev.get('type')
+        if ev_type in _CLAUDE_ACTIVITY_STREAM_EVENTS:
+            return True
+        if ev_type == 'content_block_delta':
+            delta = ev.get('delta') or {}
+            return delta.get('type') in _CLAUDE_ACTIVITY_DELTA_TYPES
+        # tool_use may also appear as a content_block_start name; treat
+        # content_block_start with tool_use as activity if present.
+        if ev_type == 'content_block_start':
+            block = ev.get('content_block') or {}
+            return block.get('type') == 'tool_use'
+        return False
+    return False
+
+
+class StreamWatchdog:
+    """Single-thread stall + hard deadline watchdog for one send_turn.
+
+    Stall timeout: no Claude activity for ``stall_timeout`` seconds.
+    Hard timeout: turn wall time exceeds ``hard_timeout`` regardless of activity.
+    Stale checks cannot kill after ``note_activity`` refreshes the stall deadline.
+    """
+
+    def __init__(
+        self,
+        *,
+        stall_timeout,
+        hard_timeout,
+        on_timeout,
+        is_proc_alive,
+        poll_cap_sec=0.2,
+    ):
+        self.stall_timeout = float(stall_timeout)
+        self.hard_timeout = float(hard_timeout)
+        self._on_timeout = on_timeout
+        self._is_proc_alive = is_proc_alive
+        self._poll_cap_sec = float(poll_cap_sec)
+        self._lock = threading.Lock()
+        now = time.monotonic()
+        self._started_at = now
+        self._last_activity_at = now
+        self._stopped = False
+        self._fired_reason = None  # 'stall' | 'hard'
+        self._thread = None
+
+    @property
+    def fired_reason(self):
+        with self._lock:
+            return self._fired_reason
+
+    def start(self):
+        self._thread = threading.Thread(
+            target=self._loop, name='cc-stream-watchdog', daemon=True,
+        )
+        self._thread.start()
+
+    def stop(self):
+        with self._lock:
+            self._stopped = True
+
+    def note_activity(self):
+        with self._lock:
+            if self._stopped or self._fired_reason is not None:
+                return
+            self._last_activity_at = time.monotonic()
+
+    def _try_fire(self, reason):
+        """Knock-window check then fire. Returns True if timeout committed.
+
+        Alive probe runs unlocked so ``note_activity`` can refresh a stall
+        deadline between the first observation and the final commit. A stale
+        fire after refresh must return False and must not kill.
+        """
+        with self._lock:
+            if self._stopped or self._fired_reason is not None:
+                return False
+            now = time.monotonic()
+            if reason == 'hard':
+                if (now - self._started_at) < self.hard_timeout:
+                    return False
+            else:
+                if (now - self._last_activity_at) < self.stall_timeout:
+                    return False
+        try:
+            alive = bool(self._is_proc_alive())
+        except Exception:
+            alive = False
+        if not alive:
+            # Process already gone — leave EOF handling to the reader loop.
+            return False
+        with self._lock:
+            if self._stopped or self._fired_reason is not None:
+                return False
+            now = time.monotonic()
+            if reason == 'hard':
+                if (now - self._started_at) < self.hard_timeout:
+                    return False
+            else:
+                # Activity refreshed while we knocked — stale fire abandoned.
+                if (now - self._last_activity_at) < self.stall_timeout:
+                    return False
+            self._fired_reason = reason
+            self._stopped = True
+        try:
+            self._on_timeout(reason)
+        except Exception:
+            pass
+        return True
+
+    def _loop(self):
+        while True:
+            with self._lock:
+                if self._stopped:
+                    return
+                now = time.monotonic()
+                stall_left = self.stall_timeout - (now - self._last_activity_at)
+                hard_left = self.hard_timeout - (now - self._started_at)
+            if hard_left <= 0:
+                if self._try_fire('hard'):
+                    return
+            elif stall_left <= 0:
+                if self._try_fire('stall'):
+                    return
+            wait = self._poll_cap_sec
+            if hard_left > 0:
+                wait = min(wait, hard_left)
+            if stall_left > 0:
+                wait = min(wait, stall_left)
+            time.sleep(max(0.01, wait))
 
 
 class ResidentError(RuntimeError):
@@ -656,17 +815,22 @@ class ResidentSession:
         # 信已塞进门缝：立刻提交 resident 游标（即使后续流中断也不重复塞）
         self._commit_sent_context(commit_meta)
 
-        timed_out = [False]
-        # Runtime tunable via config_store; module default stays 360.
-        stream_timeout = _cfg_int('CC_STREAM_TIMEOUT', CC_STREAM_TIMEOUT)
+        timeout_reason = [None]  # 'stall' | 'hard'
+        # Stall = inactivity; hard = absolute ceiling. Defaults stay 360 / 1800.
+        stall_timeout = _cfg_int('CC_STREAM_TIMEOUT', CC_STREAM_TIMEOUT)
+        hard_timeout = _cfg_int('CC_STREAM_HARD_TIMEOUT', CC_STREAM_HARD_TIMEOUT)
 
-        def _kill_on_timeout():
-            timed_out[0] = True
+        def _kill_on_timeout(reason):
+            timeout_reason[0] = reason
             self._kill(quiet=True)
 
-        timer = threading.Timer(stream_timeout, _kill_on_timeout)
-        timer.daemon = True
-        timer.start()
+        watchdog = StreamWatchdog(
+            stall_timeout=stall_timeout,
+            hard_timeout=hard_timeout,
+            on_timeout=_kill_on_timeout,
+            is_proc_alive=lambda: proc.poll() is None,
+        )
+        watchdog.start()
 
         think_acc, text_acc = [], []
         rounds = []
@@ -687,6 +851,7 @@ class ResidentSession:
                         if not ready:
                             if proc.poll() is not None:
                                 break
+                            # Synthetic SSE heartbeat — not Claude activity.
                             yield ('heartbeat', None)
                             continue
                     raw_line = proc.stdout.readline()
@@ -699,6 +864,10 @@ class ResidentSession:
                         d = json.loads(line)
                     except Exception:
                         continue
+                    # Refresh stall deadline before heavier event handling so a
+                    # concurrent watchdog knock observes the new activity.
+                    if _claude_event_is_activity(d):
+                        watchdog.note_activity()
                     self._maybe_set_session_id(d)
                     t = d.get('type')
                     if t == 'system' and d.get('subtype') == 'init':
@@ -838,11 +1007,15 @@ class ResidentSession:
                 self._kill(quiet=True)
                 raise
             except BaseException:
-                if self._proc is not None:
-                    self._kill(quiet=True)
-                raise
+                # Watchdog may close pipes mid-read; prefer typed timeout errors.
+                if timeout_reason[0] is not None:
+                    pass
+                else:
+                    if self._proc is not None:
+                        self._kill(quiet=True)
+                    raise
         finally:
-            timer.cancel()
+            watchdog.stop()
 
         if current_round is not None:
             current_round['context_tokens'] = (
@@ -879,9 +1052,14 @@ class ResidentSession:
         )
         usage['_obs_tool_count'] = surface.get('tool_count')
 
-        if timed_out[0]:
+        if timeout_reason[0] == 'stall':
             raise ResidentError(
-                'claude code 调用超时 (%ds)，resident 进程已重启' % stream_timeout,
+                'claude code 长时间无活动 (%ds)，resident 进程已重启' % stall_timeout,
+                usage=usage,
+            )
+        if timeout_reason[0] == 'hard':
+            raise ResidentError(
+                'claude code 单轮超过绝对上限 (%ds)，resident 进程已重启' % hard_timeout,
                 usage=usage,
             )
         if not saw_result:

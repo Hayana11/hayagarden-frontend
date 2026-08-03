@@ -9,6 +9,7 @@ import os
 import sqlite3
 import sys
 import tempfile
+import time
 import types
 import unittest
 from pathlib import Path
@@ -54,8 +55,11 @@ from chat.system_builder import (
 )
 from chat.context_budget import file_content_sha256, file_ref_key, merge_cumulative_state_send
 from cc_resident import (
+    CC_STREAM_HARD_TIMEOUT,
+    CC_STREAM_TIMEOUT,
     ResidentError,
     ResidentSession,
+    StreamWatchdog,
     empty_usage,
     normalize_cache_info,
     summarize_rounds,
@@ -735,48 +739,225 @@ class ResidentRespawnFileBootstrapTests(unittest.TestCase):
         self.assertTrue(captured['commit_meta'].get('hot_file_present'))
 
 
-class StreamTimeoutConfigTests(unittest.TestCase):
-    """CC_STREAM_TIMEOUT is runtime-tunable; default remains 360."""
+class _DelayedLineProc:
+    """Fake Claude subprocess whose stdout lines arrive with per-line delays."""
 
-    def _timer_intervals_for_cfg(self, cfg_map):
-        ok_lines = [
-            json.dumps({
-                'type': 'result',
-                'is_error': False,
-                'result': 'ok',
-                'usage': {},
-            }),
-        ]
+    def __init__(self, timed_lines, *, hang_after=False):
+        # timed_lines: list[(delay_before_line_sec, line_str)]
+        self._timed_lines = list(timed_lines)
+        self._idx = 0
+        self._hang_after = hang_after
+        self.stdin = io.StringIO()
+        self.stderr = io.StringIO()
+        self._code = None
+        self.kill_called = False
+        self.pid = 4242
+
+    def poll(self):
+        return self._code
+
+    def terminate(self):
+        self._code = -15
+
+    def kill(self):
+        self.kill_called = True
+        self._code = -9
+
+    def wait(self, timeout=None):
+        return self._code or 0
+
+    @property
+    def stdout(self):
+        return self
+
+    def readline(self):
+        if self._code is not None:
+            return ''
+        if self._idx >= len(self._timed_lines):
+            if not self._hang_after:
+                return ''
+            while self._code is None:
+                time.sleep(0.02)
+            return ''
+        delay, line = self._timed_lines[self._idx]
+        self._idx += 1
+        end = time.time() + float(delay)
+        while time.time() < end:
+            if self._code is not None:
+                return ''
+            time.sleep(min(0.02, max(0.0, end - time.time())))
+        return line + '\n'
+
+    def close(self):
+        return None
+
+
+def _thinking_line(text='…'):
+    return json.dumps({
+        'type': 'stream_event',
+        'event': {
+            'type': 'content_block_delta',
+            'delta': {'type': 'thinking_delta', 'thinking': text},
+        },
+    }, ensure_ascii=False)
+
+
+def _result_line(text='ok'):
+    return json.dumps({
+        'type': 'result',
+        'is_error': False,
+        'result': text,
+        'usage': {},
+    }, ensure_ascii=False)
+
+
+class StreamTimeoutConfigTests(unittest.TestCase):
+    """CC_STREAM_TIMEOUT = stall; CC_STREAM_HARD_TIMEOUT = absolute ceiling."""
+
+    def _watchdog_kwargs_for_cfg(self, cfg_map):
+        ok_lines = [_result_line()]
         sess = ResidentSession('/tmp', '', '/tmp/cc-tools.json')
         sess._proc = FakeProc(ok_lines)
         sess._cold = False
-        intervals = []
+        captured = []
 
-        class CapturingTimer:
-            def __init__(self, interval, _fn):
-                intervals.append(interval)
+        class CapturingWatchdog:
+            def __init__(self, **kwargs):
+                captured.append(dict(kwargs))
+                self._inner = StreamWatchdog(**kwargs)
 
             def start(self):
-                return None
+                return self._inner.start()
 
-            def cancel(self):
-                return None
+            def stop(self):
+                return self._inner.stop()
+
+            def note_activity(self):
+                return self._inner.note_activity()
+
+            @property
+            def fired_reason(self):
+                return self._inner.fired_reason
 
         with mock.patch(
             'cc_resident._cfg_int',
             side_effect=lambda k, d: cfg_map.get(k, d),
-        ), mock.patch('cc_resident.threading.Timer', CapturingTimer):
+        ), mock.patch('cc_resident.StreamWatchdog', CapturingWatchdog):
             list(sess.send_turn('hi', commit_meta={'state_snapshot': {}}))
-        return intervals
+        return captured
 
-    def test_stream_timeout_defaults_to_360(self):
-        self.assertEqual(self._timer_intervals_for_cfg({}), [360])
+    def test_case1_default_stall_timeout_360(self):
+        captured = self._watchdog_kwargs_for_cfg({})
+        self.assertEqual(len(captured), 1)
+        self.assertEqual(captured[0]['stall_timeout'], 360)
+        self.assertEqual(CC_STREAM_TIMEOUT, 360)
 
-    def test_stream_timeout_uses_runtime_config(self):
-        self.assertEqual(
-            self._timer_intervals_for_cfg({'CC_STREAM_TIMEOUT': 900}),
-            [900],
+    def test_case2_runtime_stall_config_900(self):
+        captured = self._watchdog_kwargs_for_cfg({'CC_STREAM_TIMEOUT': 900})
+        self.assertEqual(len(captured), 1)
+        self.assertEqual(captured[0]['stall_timeout'], 900)
+
+    def test_hard_timeout_default_1800(self):
+        captured = self._watchdog_kwargs_for_cfg({})
+        self.assertEqual(captured[0]['hard_timeout'], 1800)
+        self.assertEqual(CC_STREAM_HARD_TIMEOUT, 1800)
+
+    def test_hard_timeout_runtime_config(self):
+        captured = self._watchdog_kwargs_for_cfg({'CC_STREAM_HARD_TIMEOUT': 720})
+        self.assertEqual(captured[0]['hard_timeout'], 720)
+
+
+class StreamWatchdogSemanticsTests(unittest.TestCase):
+    """CASE 3–6: stall refresh, true stall, hard ceiling, stale race."""
+
+    def _cfg(self, stall, hard):
+        return {
+            'CC_STREAM_TIMEOUT': stall,
+            'CC_STREAM_HARD_TIMEOUT': hard,
+        }
+
+    def test_case3_sustained_thinking_survives_past_stall(self):
+        """Turn wall time > stall, but thinking keeps refreshing activity."""
+        stall = 0.18
+        hard = 5.0
+        # 6 thinking chunks * 0.05s gap ≈ 0.30s wall > stall; each gap < stall.
+        timed = [(0.05, _thinking_line(str(i))) for i in range(6)]
+        timed.append((0.02, _result_line('alive')))
+        sess = ResidentSession('/tmp', '', '/tmp/cc-tools.json')
+        fake = _DelayedLineProc(timed)
+        sess._proc = fake
+        sess._cold = False
+        with mock.patch(
+            'cc_resident._cfg_int',
+            side_effect=lambda k, d: self._cfg(stall, hard).get(k, d),
+        ):
+            events = list(sess.send_turn('hi', commit_meta={'state_snapshot': {}}))
+        kinds = [k for k, _ in events]
+        self.assertIn('think', kinds)
+        self.assertIn('done', kinds)
+        self.assertFalse(fake.kill_called)
+        self.assertIs(sess._proc, fake)
+
+    def test_case4_true_stall_kills_and_raises(self):
+        stall = 0.12
+        hard = 5.0
+        sess = ResidentSession('/tmp', '', '/tmp/cc-tools.json')
+        fake = _DelayedLineProc([], hang_after=True)
+        sess._proc = fake
+        sess._cold = False
+        with mock.patch(
+            'cc_resident._cfg_int',
+            side_effect=lambda k, d: self._cfg(stall, hard).get(k, d),
+        ):
+            with self.assertRaises(ResidentError) as ctx:
+                list(sess.send_turn('hi', commit_meta={'state_snapshot': {}}))
+        msg = str(ctx.exception)
+        self.assertIn('长时间无活动', msg)
+        self.assertIn('resident 进程已重启', msg)
+        self.assertIsNone(sess._proc)
+
+    def test_case5_hard_timeout_despite_continuous_activity(self):
+        stall = 5.0
+        hard = 0.25
+        # Keep thinking forever (hang after exhausting a few refreshes).
+        timed = [(0.04, _thinking_line(str(i))) for i in range(40)]
+        sess = ResidentSession('/tmp', '', '/tmp/cc-tools.json')
+        fake = _DelayedLineProc(timed, hang_after=True)
+        sess._proc = fake
+        sess._cold = False
+        with mock.patch(
+            'cc_resident._cfg_int',
+            side_effect=lambda k, d: self._cfg(stall, hard).get(k, d),
+        ):
+            with self.assertRaises(ResidentError) as ctx:
+                list(sess.send_turn('hi', commit_meta={'state_snapshot': {}}))
+        self.assertIn('绝对上限', str(ctx.exception))
+        self.assertIn('resident 进程已重启', str(ctx.exception))
+        self.assertIsNone(sess._proc)
+
+    def test_case6_stale_watchdog_race_does_not_kill(self):
+        killed = []
+
+        def on_timeout(reason):
+            killed.append(reason)
+
+        wd = StreamWatchdog(
+            stall_timeout=0.2,
+            hard_timeout=30.0,
+            on_timeout=on_timeout,
+            is_proc_alive=lambda: True,
+            poll_cap_sec=0.05,
         )
+        # Simulate: stall deadline already elapsed…
+        with wd._lock:
+            wd._last_activity_at = time.monotonic() - 1.0
+        # …but a fresh thinking activity arrives before the stale fire commits.
+        wd.note_activity()
+        fired = wd._try_fire('stall')
+        self.assertFalse(fired)
+        self.assertEqual(killed, [])
+        self.assertIsNone(wd.fired_reason)
+        wd.stop()
 
 
 class ResidentRespawnTests(unittest.TestCase):
