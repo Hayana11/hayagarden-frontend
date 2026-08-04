@@ -1560,7 +1560,10 @@ def config_get_model():
 @app.route('/api/config/model', methods=['POST'])
 def config_set_model():
     from chat.provider_router import resolve_provider
-    from chat.model_state import reject_cc_model_switch
+    from chat.model_state import (
+        ACTIVE_RELAY_NOT_FOUND,
+        reject_cc_model_switch,
+    )
     provider = resolve_provider('chat')
     rejected = reject_cc_model_switch(provider)
     if rejected:
@@ -1572,16 +1575,29 @@ def config_set_model():
     try:
         active_id = _active_relay_id()
         if active_id:
+            # Fail-closed: stale ACTIVE_RELAY must never report fake success.
+            # RelayManager treats missing row as "no active relay" and falls
+            # back to .env + global MODEL — UI must not claim a switch worked.
             conn = get_db()
-            conn.execute('UPDATE relay_presets SET default_model=? WHERE id=?', (new_model, active_id))
+            cur = conn.execute(
+                'UPDATE relay_presets SET default_model=? WHERE id=?',
+                (new_model, active_id),
+            )
+            updated = cur.rowcount
             conn.commit()
             conn.close()
+            if updated < 1:
+                return jsonify({
+                    'error': ACTIVE_RELAY_NOT_FOUND,
+                    'active_relay': active_id,
+                }), 409
             return jsonify({
                 'ok': True,
                 'provider': 'api_relay',
                 'model': new_model,
                 'configured_model': new_model,
                 'scope': 'active_relay',
+                'relay': active_id,
             })
         config_store.set('MODEL', new_model)
         return jsonify({
@@ -2724,6 +2740,15 @@ app.register_blueprint(create_relay_account_blueprint(
 
 @app.route('/api/config/relay-presets/<int:preset_id>', methods=['DELETE'])
 def delete_relay_preset(preset_id):
+    from chat.model_state import ACTIVE_RELAY_DELETE_NOT_ALLOWED
+    # Server-side guard: never leave a dangling ACTIVE_RELAY pointing at a
+    # deleted row (legacy api-test.html can delete without UI protection).
+    active_id = _active_relay_id()
+    if active_id and str(preset_id) == str(active_id):
+        return jsonify({
+            'error': ACTIVE_RELAY_DELETE_NOT_ALLOWED,
+            'active_relay': active_id,
+        }), 409
     _init_relay_account_credentials_table()
     conn = get_db()
     conn.execute('DELETE FROM relay_account_credentials WHERE preset_id=?', (preset_id,))

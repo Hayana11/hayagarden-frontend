@@ -333,9 +333,11 @@ export async function getModelCatalog(): Promise<ChatModelState> {
     configured_model?: string | null;
   }>('/api/config/model-catalog');
 
-  const provider = data.provider === 'claude_code' || data.provider === 'api_relay'
-    ? data.provider
-    : '';
+  const provider: ChatProvider | '' =
+    data.provider === 'claude_code' || data.provider === 'api_relay'
+      ? data.provider
+      : '';
+  const modelMode: 'default' | '' = data.model_mode === 'default' ? 'default' : '';
   const configured =
     data.configured_model === null || data.configured_model === undefined
       ? null
@@ -343,7 +345,7 @@ export async function getModelCatalog(): Promise<ChatModelState> {
 
   return {
     provider,
-    modelMode: data.model_mode === 'default' ? 'default' : '',
+    modelMode,
     configuredModel: provider === 'claude_code' ? null : configured,
     current: provider === 'claude_code' ? '' : (data.current || configured || ''),
     models: (data.models || []).flatMap((model) => {

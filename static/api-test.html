@@ -306,12 +306,15 @@ body{background:linear-gradient(160deg,var(--bg1) 0%,var(--bg2) 100%);background
 
 <script>
 var currentModel = '', currentKey = '', currentModels = [];
+var chatProvider = '';
+var modelMode = '';
+function isClaudeCodeProvider(){ return chatProvider === 'claude_code'; }
 
 async function init() {
   loadProvider();
   loadKeyStatus();
   loadRelayPresets();
-  loadModel();
+  await loadModel();
   pingLatency();
   loadModels();
 }
@@ -347,8 +350,13 @@ async function setProvider(p) {
     method: 'POST', headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({provider: p})
   });
-  if (r.ok) { curProvider = p; renderProvider(); toast('已切换到' + (p === 'claude_code' ? '订阅模式' : '中转 API') + '，网关重启中'); }
-  else { toast('切换失败'); }
+  if (r.ok) {
+    curProvider = p;
+    renderProvider();
+    toast('已切换到' + (p === 'claude_code' ? '订阅模式' : '中转 API') + '，网关重启中');
+    await loadModel();
+    loadModels();
+  } else { toast('切换失败'); }
 }
 function openTokenMo() { document.getElementById('token-mo').classList.add('show'); document.getElementById('token-inp').value = ''; }
 function closeTokenMo() { document.getElementById('token-mo').classList.remove('show'); }
@@ -431,7 +439,9 @@ async function loadRelayPresets() {
         + capsHint
         + '</div>'
         + actionEl
-        + '<button class="preset-del" onclick="deletePreset(' + p.id + ')" title="删除"><i class="ti ti-trash"></i></button>'
+        + (p.active
+          ? '<button class="preset-del" disabled title="正在使用的中转站不能删除" style="opacity:.35;cursor:not-allowed"><i class="ti ti-trash"></i></button>'
+          : '<button class="preset-del" onclick="deletePreset(' + p.id + ')" title="删除"><i class="ti ti-trash"></i></button>')
         + '</div>';
     }).join('');
   } catch(e) {
@@ -509,20 +519,50 @@ async function activatePreset(id) {
 
 async function deletePreset(id) {
   var r = await fetch('/api/config/relay-presets/' + id, {method: 'DELETE'});
+  var d = {};
+  try { d = await r.json(); } catch(e) {}
   if (r.ok) { loadRelayPresets(); toast('已删除'); }
-  else { toast('删除失败'); }
+  else if (d.error === 'ACTIVE_RELAY_DELETE_NOT_ALLOWED') toast('正在使用的中转站不能删除');
+  else toast('删除失败');
 }
 
-// ── Model ─────────────────────────────────────────────
+// ── Model (MODEL-1A: provider-aware) ──────────────────
+function applyModelUiMode() {
+  var pencil = document.querySelector('#model-display-row .pencil-btn');
+  if (pencil) pencil.style.display = isClaudeCodeProvider() ? 'none' : '';
+  var availCard = document.getElementById('models-list');
+  if (isClaudeCodeProvider()) {
+    if (availCard) {
+      availCard.innerHTML = '<div style="color:var(--hint);font-size:12px;padding:8px 0;">Claude Code 使用账号默认模型，本阶段不可切换</div>';
+    }
+    var preset = document.getElementById('preset-models-list');
+    if (preset) preset.innerHTML = '';
+  }
+}
 async function loadModel() {
   var r = await fetch('/api/config/model');
   var d = await r.json();
-  currentModel = d.model || '';
-  document.getElementById('cur-model-name').textContent = currentModel;
+  chatProvider = d.provider || '';
+  modelMode = d.model_mode || '';
+  if (isClaudeCodeProvider()) {
+    currentModel = '';
+    document.getElementById('cur-model-name').textContent = 'Claude Code · 默认';
+    document.getElementById('model-inp').value = '';
+    cancelModelEdit();
+    applyModelUiMode();
+    return;
+  }
+  currentModel = d.configured_model || d.model || '';
+  document.getElementById('cur-model-name').textContent = currentModel || '—';
   document.getElementById('model-inp').value = currentModel;
+  applyModelUiMode();
   renderPresetModels();
 }
 function startModelEdit() {
+  if (isClaudeCodeProvider()) {
+    toast('Claude Code 使用账号默认模型，本阶段不可切换');
+    return;
+  }
   document.getElementById('model-edit-row').style.display = 'flex';
   document.getElementById('model-display-row').style.display = 'none';
   document.getElementById('model-inp').focus();
@@ -531,10 +571,26 @@ function cancelModelEdit() {
   document.getElementById('model-edit-row').style.display = 'none';
   document.getElementById('model-display-row').style.display = 'flex';
 }
+function modelSwitchErrorToast(d) {
+  if (!d) { toast('切换失败'); return; }
+  if (d.error === 'CC_MODEL_SWITCH_NOT_AVAILABLE') {
+    toast('Claude Code 使用账号默认模型，本阶段不可切换');
+  } else if (d.error === 'ACTIVE_RELAY_NOT_FOUND') {
+    toast('当前中转站已失效，请重新选择中转站');
+  } else {
+    toast('切换失败');
+  }
+}
 async function saveModel() {
+  if (isClaudeCodeProvider()) {
+    toast('Claude Code 使用账号默认模型，本阶段不可切换');
+    return;
+  }
   var v = document.getElementById('model-inp').value.trim();
   if (!v) return;
   var r = await fetch('/api/config/model', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({model: v})});
+  var d = {};
+  try { d = await r.json(); } catch(e) {}
   if (r.ok) {
     currentModel = v;
     document.getElementById('cur-model-name').textContent = v;
@@ -545,14 +601,20 @@ async function saveModel() {
     toast('模型已更新');
     renderDynModels();
     renderPresetModels();
-  } else { toast('保存失败'); }
+  } else { modelSwitchErrorToast(d); }
 }
 
 async function switchModel(modelId) {
+  if (isClaudeCodeProvider()) {
+    toast('Claude Code 使用账号默认模型，本阶段不可切换');
+    return;
+  }
   var r = await fetch('/api/config/model', {
     method: 'POST', headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({model: modelId})
   });
+  var d = {};
+  try { d = await r.json(); } catch(e) {}
   if (r.ok) {
     currentModel = modelId;
     document.getElementById('cur-model-name').textContent = modelId;
@@ -560,12 +622,16 @@ async function switchModel(modelId) {
     toast('已切换到 ' + modelId + '，网关重启中');
     renderDynModels();
     renderPresetModels();
-  } else { toast('切换失败'); }
+  } else { modelSwitchErrorToast(d); }
 }
 
 // ── Dynamic Models ────────────────────────────────────
 async function loadModels() {
   var el = document.getElementById('models-list');
+  if (isClaudeCodeProvider()) {
+    applyModelUiMode();
+    return;
+  }
   el.innerHTML = '<div style="color:var(--hint);font-size:12px;text-align:center;padding:8px 0;">加载中…</div>';
   try {
     var r = await fetch('/api/config/models');
@@ -601,6 +667,7 @@ var TIER_COLOR = { flagship: '#7c6a8a', standard: '#3a7ad4', fast: '#0a8a5c' };
 
 function renderPresetModels() {
   var el = document.getElementById('preset-models-list');
+  if (isClaudeCodeProvider()) { el.innerHTML = ''; return; }
   el.innerHTML = PRESET_MODELS.map(function(p) {
     var isActive = p.id === currentModel;
     var col = TIER_COLOR[p.tier] || '#9a8a8a';
@@ -619,6 +686,7 @@ function renderPresetModels() {
 
 function renderDynModels() {
   var el = document.getElementById('models-list');
+  if (isClaudeCodeProvider()) { applyModelUiMode(); return; }
   if (!currentModels.length) return;
   el.innerHTML = currentModels.map(function(m) {
     var isActive = m === currentModel;

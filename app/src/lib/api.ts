@@ -473,8 +473,10 @@ export function fetchModelCatalog(): Promise<ChatModelCatalog> {
       model_mode?: string;
       configured_model?: string | null;
     }>('/api/config/model-catalog')
-    .then((r) => {
-      const provider = r.provider === 'claude_code' || r.provider === 'api_relay' ? r.provider : '';
+    .then((r): ChatModelCatalog => {
+      const provider: ChatModelProvider | '' =
+        r.provider === 'claude_code' || r.provider === 'api_relay' ? r.provider : '';
+      const modelMode: 'default' | '' = r.model_mode === 'default' ? 'default' : '';
       const configured =
         r.configured_model === null || r.configured_model === undefined
           ? null
@@ -483,11 +485,11 @@ export function fetchModelCatalog(): Promise<ChatModelCatalog> {
         models: r.models || [],
         current: provider === 'claude_code' ? '' : (r.current || configured || ''),
         provider,
-        modelMode: r.model_mode === 'default' ? 'default' : '',
+        modelMode,
         configuredModel: provider === 'claude_code' ? null : configured,
       };
     })
-    .catch(() => ({
+    .catch((): ChatModelCatalog => ({
       models: [],
       current: '',
       provider: '',

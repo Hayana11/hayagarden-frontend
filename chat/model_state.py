@@ -10,6 +10,8 @@ from __future__ import annotations
 from typing import Any
 
 CC_MODEL_SWITCH_NOT_AVAILABLE = 'CC_MODEL_SWITCH_NOT_AVAILABLE'
+ACTIVE_RELAY_NOT_FOUND = 'ACTIVE_RELAY_NOT_FOUND'
+ACTIVE_RELAY_DELETE_NOT_ALLOWED = 'ACTIVE_RELAY_DELETE_NOT_ALLOWED'
 
 
 def describe_chat_model_state(

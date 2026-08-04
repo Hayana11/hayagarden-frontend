@@ -129,6 +129,12 @@ export function SettingsScreen() {
     if (providerResult.status === 'fulfilled') {
       setProvider(providerResult.value.provider);
       setCcTokenSet(providerResult.value.ccTokenSet);
+      // MODEL-1A P2: provisional provider so CC hides relay pool even if catalog fails.
+      // Catalog success below overwrites with chat-model-authoritative provider.
+      setChatModelProvider(providerResult.value.provider);
+      if (providerResult.value.provider === 'claude_code') {
+        setCurrentModel('');
+      }
     }
     if (keyResult.status === 'fulfilled') {
       setKeyStatus(keyResult.value.status);
@@ -152,12 +158,14 @@ export function SettingsScreen() {
     }
     if (catalogResult.status === 'fulfilled') {
       setCatalog(catalogResult.value.models);
-      setChatModelProvider(catalogResult.value.provider);
-      setCurrentModel(
-        catalogResult.value.provider === 'claude_code'
-          ? ''
-          : catalogResult.value.current,
-      );
+      // Catalog is authoritative for chat-model space when available.
+      const catalogProvider = catalogResult.value.provider;
+      const fallbackProvider = providerResult.status === 'fulfilled'
+        ? providerResult.value.provider
+        : '';
+      const nextProvider = catalogProvider || fallbackProvider;
+      setChatModelProvider(nextProvider);
+      setCurrentModel(nextProvider === 'claude_code' ? '' : catalogResult.value.current);
     }
     if (availableResult.status === 'fulfilled') setAvailableModels(availableResult.value);
     if (groupStatusResult.status === 'fulfilled') setCodexStatus(groupStatusResult.value.agents.codex);
@@ -364,7 +372,14 @@ export function SettingsScreen() {
       setExpandedRelay(null);
       setConfirmDelete(null);
       showToast(`已删除 ${relay.name}`);
-    } catch { showToast('删除失败'); } finally { setBusy(''); }
+    } catch (err) {
+      const code = err instanceof HttpError
+        ? String((err.payload as { error?: string } | undefined)?.error || err.code || '')
+        : '';
+      showToast(code === 'ACTIVE_RELAY_DELETE_NOT_ALLOWED'
+        ? '正在使用的中转站不能删除'
+        : '删除失败');
+    } finally { setBusy(''); }
   };
 
   const validateRelayDraft = () => {

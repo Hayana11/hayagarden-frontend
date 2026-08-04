@@ -20,6 +20,8 @@ os.environ.setdefault(
 )
 
 from chat.model_state import (  # noqa: E402
+    ACTIVE_RELAY_DELETE_NOT_ALLOWED,
+    ACTIVE_RELAY_NOT_FOUND,
     CC_MODEL_SWITCH_NOT_AVAILABLE,
     describe_chat_model_state,
     reject_cc_model_switch,
@@ -266,6 +268,72 @@ class ConfigModelRouteTests(unittest.TestCase):
         self.assertEqual(stored, 'claude-sonnet-4-6')
         # Active-relay write must not spill into global MODEL (CC space later).
         self.assertEqual(self._cfg['MODEL'], before_global)
+
+    def test_catalog_claude_code_does_not_surface_relay_current(self):
+        self._set_chat_provider('claude_code')
+        resp = self.client.get('/api/config/model-catalog')
+        self.assertEqual(resp.status_code, 200)
+        data = resp.get_json()
+        self.assertEqual(data['provider'], 'claude_code')
+        self.assertEqual(data['model_mode'], 'default')
+        self.assertIsNone(data['configured_model'])
+        self.assertEqual(data['current'], '')
+        self.assertNotEqual(data.get('current'), 'claude-opus-4-6')
+
+    def test_catalog_api_relay_returns_active_relay_current(self):
+        self._set_chat_provider('api_relay')
+        resp = self.client.get('/api/config/model-catalog')
+        self.assertEqual(resp.status_code, 200)
+        data = resp.get_json()
+        self.assertEqual(data['provider'], 'api_relay')
+        self.assertEqual(data['configured_model'], 'claude-opus-4-6')
+        self.assertEqual(data['current'], 'claude-opus-4-6')
+
+    def test_post_stale_active_relay_fail_closed(self):
+        self._set_chat_provider('api_relay')
+        self._cfg['ACTIVE_RELAY'] = '999'
+        before_global = self._cfg['MODEL']
+        resp = self.client.post('/api/config/model', json={'model': 'claude-sonnet-4-6'})
+        self.assertEqual(resp.status_code, 409)
+        data = resp.get_json()
+        self.assertEqual(data['error'], ACTIVE_RELAY_NOT_FOUND)
+        self.assertEqual(data['active_relay'], '999')
+        self.assertEqual(self._cfg['MODEL'], before_global)
+        conn = sqlite3.connect(self.db_path)
+        stored = conn.execute(
+            'SELECT default_model FROM relay_presets WHERE id=2'
+        ).fetchone()[0]
+        conn.close()
+        self.assertEqual(stored, 'claude-opus-4-6')
+
+    def test_delete_active_relay_fail_closed(self):
+        self._cfg['ACTIVE_RELAY'] = '2'
+        resp = self.client.delete('/api/config/relay-presets/2')
+        self.assertEqual(resp.status_code, 409)
+        data = resp.get_json()
+        self.assertEqual(data['error'], ACTIVE_RELAY_DELETE_NOT_ALLOWED)
+        conn = sqlite3.connect(self.db_path)
+        still = conn.execute('SELECT id FROM relay_presets WHERE id=2').fetchone()
+        conn.close()
+        self.assertIsNotNone(still)
+        self.assertEqual(self._cfg['ACTIVE_RELAY'], '2')
+
+    def test_delete_inactive_relay_still_allowed(self):
+        conn = sqlite3.connect(self.db_path)
+        conn.execute(
+            'INSERT INTO relay_presets (id,name,url,default_model) VALUES (?,?,?,?)',
+            (5, 'spare', 'https://spare.example.com/v1/messages', 'claude-haiku'),
+        )
+        conn.commit()
+        conn.close()
+        self._cfg['ACTIVE_RELAY'] = '2'
+        resp = self.client.delete('/api/config/relay-presets/5')
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(resp.get_json().get('ok'))
+        conn = sqlite3.connect(self.db_path)
+        gone = conn.execute('SELECT id FROM relay_presets WHERE id=5').fetchone()
+        conn.close()
+        self.assertIsNone(gone)
 
 
 if __name__ == '__main__':
