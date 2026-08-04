@@ -188,7 +188,9 @@ class TouchOnceTests(unittest.TestCase):
         db_path = str(Path(tmp.name) / 'm.db')
         conn = sqlite3.connect(db_path)
         conn.execute(
-            'CREATE TABLE chat_messages (id INTEGER PRIMARY KEY, author TEXT, content TEXT)'
+            'CREATE TABLE chat_messages ('
+            'id INTEGER PRIMARY KEY, author TEXT, content TEXT, '
+            "created_at TEXT DEFAULT (datetime('now','+8 hours')))"
         )
         conn.execute(
             'CREATE TABLE moments_active_turn (conversation_id TEXT, turn_key TEXT, '

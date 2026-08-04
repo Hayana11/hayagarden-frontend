@@ -36,4 +36,5 @@ jobs:
             tests.test_internal_state_shadow_wiring \
             tests.test_interaction_state \
             tests.test_derived_longing_authority \
+            tests.test_affect_bond_authority \
             -v
