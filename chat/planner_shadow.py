@@ -23,6 +23,21 @@ _DRIVE_KEYS = frozenset({
     'duty', 'libido', 'stress', 'fatigue',
 })
 
+# Contract §4: contributors = participating Drive / Affect / Bond / Longing
+# factors from Decision-time V — not free-form provenance strings.
+_AFFECT_FACTORS = frozenset({
+    'affect.pa', 'affect.na', 'affect.valence', 'affect.arousal',
+    'affect.mood_word',
+})
+_BOND_FACTORS = frozenset({
+    'bond.intimacy', 'bond.passion', 'bond.commitment',
+})
+_LONGING_FACTORS = frozenset({'longing', 'longing_derived'})
+_CONTRIBUTOR_ALLOWLIST = (
+    _DRIVE_KEYS | _AFFECT_FACTORS | _BOND_FACTORS | _LONGING_FACTORS
+)
+
+_SHADOW_PROVIDER = 'api_relay'
 _DEFAULT_OBSERVE_PATH = '/opt/frontend/planner_shadow.jsonl'
 _SHADOW_TIMEOUT_SEC = 15
 _SHADOW_MAX_TOKENS = 700
@@ -37,7 +52,8 @@ _SHADOW_SYSTEM = """你是 Wake Planner Shadow：只做结构化行为决策，�
 5. 不要写最终用户消息正文；不要调用工具。
 6. 只输出一个 JSON 对象（不要 markdown 围栏外的解释）。
 7. primary_drive / contributors 必须来自当前 Decision-time 状态推理，禁止从 action 反推 Drive。
-8. source 必须是 "planner_shadow"；shadow_only 必须是 true。
+8. contributors 只能使用真实状态因子：八 Drive 名、affect.*、bond.*、longing/longing_derived。
+9. source 必须是 "planner_shadow"；shadow_only 必须是 true。
 
 输出 JSON schema：
 {
@@ -296,7 +312,21 @@ def validate_shadow_decision(
     contributors = raw.get('contributors') or []
     if not isinstance(contributors, list):
         return 'invalid', {'error': 'contributors_not_list', 'raw': dict(raw)}
-    contrib_out = [str(x) for x in contributors]
+    contrib_out: list[str] = []
+    for item in contributors:
+        token = str(item or '').strip()
+        if not token:
+            return 'invalid', {
+                'error': 'contributor_empty',
+                'raw': dict(raw),
+            }
+        if token not in _CONTRIBUTOR_ALLOWLIST:
+            return 'invalid', {
+                'error': 'contributor_not_state_factor',
+                'illegal_contributor': token,
+                'raw': dict(raw),
+            }
+        contrib_out.append(token)
 
     reason_codes = raw.get('reason_codes') or []
     if not isinstance(reason_codes, list):
@@ -368,12 +398,23 @@ def _parse_bool(value: Any, *, default: bool = False) -> bool:
     raise ValueError('blocked_not_bool')
 
 
+def resolve_shadow_relay_model_identity() -> str:
+    """Model identity of the isolated Shadow Relay thinker (not production K)."""
+    from relay.manager import RelayManager
+    mgr = RelayManager()
+    return str(mgr.model or '').strip() or 'relay:unset'
+
+
 def invoke_shadow_planner_relay(
     *,
     user_payload: str,
     timeout_sec: float = _SHADOW_TIMEOUT_SEC,
-) -> str:
-    """Isolated Relay one-shot. Never touches CC Wake resident / global relay."""
+) -> dict:
+    """Isolated Relay one-shot. Never touches CC Wake resident / global relay.
+
+    Returns ``{text, provider, model_identity}`` so observations attribute the
+    Decision to the Shadow thinker (always api_relay), not production Wake.
+    """
     from relay.manager import RelayManager
 
     # Fresh instance — do not mutate production relay singleton.
@@ -386,7 +427,31 @@ def invoke_shadow_planner_relay(
     }
     # Explicitly no tools — Shadow must not execute Wake tools.
     result = mgr.call(payload, timeout=timeout_sec)
-    return mgr.extract_text(result)
+    text = mgr.extract_text(result)
+    return {
+        'text': text,
+        'provider': _SHADOW_PROVIDER,
+        'model_identity': str(mgr.model or '').strip() or 'relay:unset',
+    }
+
+
+def _coerce_invoke_result(result: Any) -> tuple[str, str, str]:
+    """Normalize invoke_fn return → (text, shadow_provider, shadow_model)."""
+    if isinstance(result, dict):
+        text = result.get('text')
+        if text is None:
+            text = result.get('raw_text')
+        provider = str(result.get('provider') or _SHADOW_PROVIDER).strip()
+        model = str(result.get('model_identity') or '').strip()
+        if not model:
+            model = resolve_shadow_relay_model_identity()
+        return str(text or ''), provider or _SHADOW_PROVIDER, model
+    # Plain-text invoke_fn (tests) — Shadow thinker is still Relay.
+    return (
+        str(result or ''),
+        _SHADOW_PROVIDER,
+        resolve_shadow_relay_model_identity(),
+    )
 
 
 def run_shadow_attempt(
@@ -409,6 +474,8 @@ def run_shadow_attempt(
         attempt_id = new_decision_attempt_id()
     planner_decision_id = attempt_id
     captured_at = _now_str()
+    # provider/model_identity = who generated the Shadow Decision (Relay).
+    # Production Wake identity stays under capability.* for pairing context.
     base = {
         'record_kind': 'shadow_decision',
         'wake_run_id': wake_run_id,
@@ -417,10 +484,12 @@ def run_shadow_attempt(
         'state_version': int(planner_view.state_version),
         'observed_at': planner_view.observed_at,
         'captured_at': captured_at,
-        'provider': skill_view.provider,
-        'model_identity': skill_view.model_identity,
+        'provider': _SHADOW_PROVIDER,
+        'model_identity': 'relay:pending',
         'legacy_provenance': dict(legacy_provenance or {}),
         'capability': {
+            'production_provider': skill_view.provider,
+            'production_model_identity': skill_view.model_identity,
             'resolved_action_capability': list(skill_view.resolved_action_capability),
             'tool_allowlist': list(skill_view.tool_allowlist),
         },
@@ -449,7 +518,11 @@ def run_shadow_attempt(
             wake_run_id=wake_run_id,
         )
         invoker = invoke_fn or invoke_shadow_planner_relay
-        text = invoker(user_payload=user_payload, timeout_sec=timeout_sec)
+        text, shadow_provider, shadow_model = _coerce_invoke_result(
+            invoker(user_payload=user_payload, timeout_sec=timeout_sec),
+        )
+        base['provider'] = shadow_provider
+        base['model_identity'] = shadow_model
         parsed = _extract_json_object(text)
         if not parsed:
             rec = {
@@ -486,6 +559,12 @@ def run_shadow_attempt(
         append_shadow_observation(rec)
         return rec
     except Exception as exc:
+        # Best-effort: still attribute thinker as Relay if invoke never ran.
+        if base.get('model_identity') == 'relay:pending':
+            try:
+                base['model_identity'] = resolve_shadow_relay_model_identity()
+            except Exception:
+                base['model_identity'] = 'relay:unset'
         rec = {
             **base,
             'shadow_status': 'error',

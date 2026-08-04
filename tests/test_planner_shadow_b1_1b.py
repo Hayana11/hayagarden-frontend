@@ -578,6 +578,112 @@ class PlannerShadowB11BTests(unittest.TestCase):
         self.assertIn('none', self.skill.resolved_action_capability)
         self.assertIn('message', self.skill.resolved_action_capability)
 
+    def test_evidence_gitignore_shadow_jsonl(self):
+        """Runtime planner_shadow.jsonl must not dirty the production git worktree."""
+        gi = Path(ROOT, '.gitignore').read_text(encoding='utf-8')
+        self.assertIn('planner_shadow.jsonl', gi)
+
+    def test_evidence_shadow_model_identity_is_relay_not_production_k(self):
+        """Observation provider/model = Shadow Relay thinker, not production Wake K."""
+        with mock.patch(
+            'chat.cc_model.cc_model_snapshot',
+            return_value=(
+                'claude-opus-4-6',
+                'explicit:claude-opus-4-6',
+                ['--model', 'claude-opus-4-6'],
+            ),
+        ):
+            cc_skill = freeze_capability_skill_view(
+                wake_run_id='b11b-run-1',
+                provider='claude_code',
+                mode='normal',
+                prepared_tools=[{'name': 'recall_photo'}],
+                dry_run=False,
+                captured_at=T_OBS,
+            )
+        self.assertEqual(cc_skill.provider, 'claude_code')
+
+        def fake_invoke(*, user_payload, timeout_sec):
+            del user_payload, timeout_sec
+            return {
+                'text': json.dumps({
+                    'intent': 'reconnect_gently',
+                    'action_candidate': 'message',
+                    'confidence': 0.7,
+                    'primary_drive': 'attachment',
+                    'contributors': ['longing', 'bond.passion'],
+                    'blocked': False,
+                    'reason_codes': [],
+                    'wake_run_id': 'b11b-run-1',
+                    'state_version': int(self.view.state_version),
+                }),
+                'provider': 'api_relay',
+                'model_identity': 'shadow-relay-model-x',
+            }
+
+        rec = run_shadow_attempt(
+            planner_view=self.view,
+            skill_view=cc_skill,
+            wake_run_id='b11b-run-1',
+            decision_attempt_id=self.attempt_id,
+            invoke_fn=fake_invoke,
+        )
+        self.assertEqual(rec['shadow_status'], 'valid')
+        self.assertEqual(rec['provider'], 'api_relay')
+        self.assertEqual(rec['model_identity'], 'shadow-relay-model-x')
+        self.assertEqual(rec['capability']['production_provider'], 'claude_code')
+        self.assertEqual(
+            rec['capability']['production_model_identity'],
+            'explicit:claude-opus-4-6',
+        )
+        self.assertNotEqual(rec['provider'], 'claude_code')
+
+    def test_evidence_contributors_must_be_state_factors(self):
+        """contributors must be Drive/Affect/Bond/Longing factors — not free text."""
+        ok, decision = validate_shadow_decision(
+            {
+                'intent': 'reconnect',
+                'action_candidate': 'message',
+                'confidence': 0.6,
+                'primary_drive': 'attachment',
+                'contributors': ['longing', 'bond.passion', 'fatigue'],
+                'blocked': False,
+                'reason_codes': [],
+            },
+            planner_view=self.view,
+            skill_view=self.skill,
+            wake_run_id='b11b-run-1',
+            planner_decision_id='pd-ok',
+            decision_attempt_id='da-ok',
+            captured_at='2026-08-04 15:00:00',
+        )
+        self.assertEqual(ok, 'valid')
+        self.assertEqual(
+            decision['contributors'],
+            ['longing', 'bond.passion', 'fatigue'],
+        )
+
+        bad, err = validate_shadow_decision(
+            {
+                'intent': 'reconnect',
+                'action_candidate': 'message',
+                'confidence': 0.6,
+                'primary_drive': 'attachment',
+                'contributors': ['banana'],
+                'blocked': False,
+                'reason_codes': [],
+            },
+            planner_view=self.view,
+            skill_view=self.skill,
+            wake_run_id='b11b-run-1',
+            planner_decision_id='pd-bad',
+            decision_attempt_id='da-bad',
+            captured_at='2026-08-04 15:00:00',
+        )
+        self.assertEqual(bad, 'invalid')
+        self.assertEqual(err['error'], 'contributor_not_state_factor')
+        self.assertEqual(err['illegal_contributor'], 'banana')
+
     def test_gateway_seat_non_blocking_order(self):
         src = Path(ROOT, 'gateway.py').read_text(encoding='utf-8')
         locked = src.split('def _wake_decide_locked', 1)[1].split('\ndef ', 1)[0]
