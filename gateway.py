@@ -6220,8 +6220,13 @@ def _wake_build_system_for_plan(
     now,
     allow_side_effects,
     dry_run=False,
+    planner_state_view=None,
 ):
-    """Shared prompt assembly for inspect_only / dry_run / live."""
+    """Shared prompt assembly for inspect_only / dry_run / live.
+
+    B1-1A: when ``planner_state_view`` is set, DecisionClock hours and
+    state-derived prompt facts must already come from that frozen V.
+    """
     from wake.builder import append_system_text, build_prompt_suffix, inject_snippets
 
     include_rel = mode in ('normal', 'morning', 'nightwatch', 'ritual', 'self_trigger')
@@ -6256,6 +6261,7 @@ def _wake_build_system_for_plan(
         desire_driven=_get_desire_driven(),
         longing_enabled=_get_longing_enabled(),
         t_hours_override=t2_hours,
+        planner_state_view=planner_state_view,
     )
     surfaced_desire_ids = []
     if _get_desire_ledger_enabled() and mode in ('normal', 'nightwatch'):
@@ -6273,11 +6279,15 @@ def _wake_build_system_for_plan(
         except Exception:
             pass
 
-    # recall_photo nudge: live Relay only
+    # recall_photo nudge: live Relay only — B1-1A binds attachment to frozen V
+    # (same Decision-time snapshot). Must not re-read drives after freeze.
     if allow_side_effects and (not dry_run) and wake_provider == 'api_relay':
         try:
-            import drive_engine as _de_ph, gallery_store as _gs_ph
-            _att = _de_ph.get_drive().get('attachment', 0)
+            import gallery_store as _gs_ph
+            if planner_state_view is not None:
+                _att = float(planner_state_view.attachment())
+            else:
+                _att = 0.0
             if _att >= 0.45 and _gs_ph.count_photos() > 0 and mode in ('normal', 'nightwatch', 'ritual'):
                 system = append_system_text(system, (
                     '[此刻的思念]\n你现在对她的思念很浓（attachment=%.2f）。'
@@ -6326,15 +6336,34 @@ def _wake_inspect_only(data, mode, activity_desc, ritual_type):
         }), 400
 
     now = datetime.datetime.utcnow() + datetime.timedelta(hours=8)
-    clock = read_interaction_clock(get_db, now=now)
-    if clock.reliable and clock.user_idle_hours is not None:
-        t2_hours = float(clock.user_idle_hours)
-        t_hours = float(
-            clock.effective_idle_hours if clock.effective_idle_hours is not None else t2_hours
+    # inspect_only is not B1 comparison evidence, but Behavior-Decision modes
+    # still freeze a DecisionClock bundle so prompt facts do not reuse a
+    # separate GuardClock sample.
+    from chat.planner_state_view import (
+        BEHAVIOR_DECISION_MODES,
+        decision_hours_from_view,
+        freeze_planner_state_view,
+    )
+    planner_view = None
+    if mode in BEHAVIOR_DECISION_MODES:
+        planner_view = freeze_planner_state_view(
+            db_path=DB_PATH,
+            observed_at=now,
+            wake_run_id=wake_run_id or None,
         )
+        t2_hours, t_hours = decision_hours_from_view(planner_view)
     else:
-        t2_hours = 0.0
-        t_hours = 0.0
+        clock = read_interaction_clock(get_db, now=now)
+        if clock.reliable and clock.user_idle_hours is not None:
+            t2_hours = float(clock.user_idle_hours)
+            t_hours = float(
+                clock.effective_idle_hours
+                if clock.effective_idle_hours is not None
+                else t2_hours
+            )
+        else:
+            t2_hours = 0.0
+            t_hours = 0.0
 
     system, _, _decision_prov = _wake_build_system_for_plan(
         mode=mode,
@@ -6347,6 +6376,7 @@ def _wake_inspect_only(data, mode, activity_desc, ritual_type):
         now=now,
         allow_side_effects=False,
         dry_run=False,
+        planner_state_view=planner_view,
     )
     del _decision_prov
     msgs = [{'role': 'user', 'content': _wake_trigger_message(mode, ritual_type)}]
@@ -6416,10 +6446,11 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
         })
 
     now = datetime.datetime.utcnow() + datetime.timedelta(hours=8)
-    clock = read_interaction_clock(get_db, now=now)
+    # GuardClock: eligibility only — must not feed Decision / prompt state (B1-1A).
+    guard_clock = read_interaction_clock(get_db, now=now)
     min_idle = float(config_store.get_float('WAKE_MIN_IDLE_MINUTES', 30) or 30)
     skip_reason = wake_guard_reason(
-        clock,
+        guard_clock,
         mode=mode,
         min_idle_minutes=min_idle,
         chat_busy=_chat_is_generating(),
@@ -6474,24 +6505,44 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
         except Exception:
             pass
 
-    # Authoritative idle: user_idle for longing / t2; effective for dice-era t.
-    # Non-normal modes may proceed without a reliable clock, but never invent 999h.
-    if clock.reliable and clock.user_idle_hours is not None:
-        t2_hours = float(clock.user_idle_hours)
-        t_hours = float(clock.effective_idle_hours if clock.effective_idle_hours is not None else t2_hours)
+    # B1-1A Decision-time freeze: one SQLite snapshot → PlannerStateView V.
+    # DecisionClock from V is the sole clock for t_hours / t2 / Longing /
+    # legacy Decision / recall_photo. GuardClock stays eligibility-only.
+    from chat.planner_state_view import (
+        BEHAVIOR_DECISION_MODES,
+        decision_hours_from_view,
+        freeze_planner_state_view,
+    )
+    planner_view = None
+    if mode in BEHAVIOR_DECISION_MODES:
+        planner_view = freeze_planner_state_view(
+            db_path=DB_PATH,
+            observed_at=now,
+            wake_run_id=wake_run_id or None,
+        )
+        t2_hours, t_hours = decision_hours_from_view(planner_view)
     else:
-        t2_hours = 0.0
-        t_hours = 0.0
+        # dream / summarize: no decide/freeze; out of B1 comparison scope.
+        if guard_clock.reliable and guard_clock.user_idle_hours is not None:
+            t2_hours = float(guard_clock.user_idle_hours)
+            t_hours = float(
+                guard_clock.effective_idle_hours
+                if guard_clock.effective_idle_hours is not None
+                else t2_hours
+            )
+        else:
+            t2_hours = 0.0
+            t_hours = 0.0
 
     if live:
-        # drive定期flush：把当前实时值写回DB（防止积累时间过长撞顶）
+        # Stage D: _flush is a retired no-op. Do not get_drive() here — that
+        # would be a pre-Decision psychological-state read outside V.
         try:
             import drive_engine as _de_flush
-            _cur = _de_flush.get_drive()
-            _de_flush._flush(_cur)
+            _de_flush._flush({})
         except Exception:
             pass
-        # 心跳开始：V/A校准费佳驱动条
+        # 心跳开始：V/A校准费佳驱动条（non-authoritative compatibility only）
         if _get_desire_driven():
             try:
                 import desire as _des_wake, emotion_engine as _ee_wake
@@ -6514,6 +6565,7 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
         now=now,
         allow_side_effects=live,
         dry_run=dry_run,
+        planner_state_view=planner_view,
     )
     msgs = [{'role': 'user', 'content': _wake_trigger_message(mode, ritual_type)}]
     full_tools = _wake_full_tools_for_mode(mode)

@@ -274,15 +274,25 @@ def rest():
 # 决策：当前最强的需求是什么
 # ═══════════════════════════════════════════════════════════
 
-def decide() -> dict:
+def decide(drive: Optional[dict] = None) -> dict:
     """Decision-time snapshot for Wake prompt + Settlement provenance.
 
     返回 {fired, action, hint, blocked, drive, contributors}
     ``fired`` is the primary drive at this snapshot. Callers that need
     Settlement provenance must freeze via ``freeze_decision_provenance``
     before Action generation — never re-derive from the final Action.
+
+    B1-1A: when ``drive`` is provided (PlannerStateView.drives), Decision
+    consumes that exact map — no ``get_drive()`` / second V3 read.
+    Legacy WANT_ACTION / fatigue / threshold semantics are unchanged.
     """
-    drive = get_drive()
+    if drive is None:
+        drive = get_drive()
+    else:
+        drive = {
+            k: float(drive.get(k, 0.1) if drive.get(k) is not None else 0.1)
+            for k in DRIVE_KEYS
+        }
 
     if drive['fatigue'] >= FATIGUE_GATE:
         return {
