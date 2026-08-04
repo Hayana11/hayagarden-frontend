@@ -145,6 +145,7 @@ class CcModelHelperTests(unittest.TestCase):
     def test_catalog_uses_official_ids(self):
         ids = {row['id'] for row in CC_MODEL_CATALOG}
         self.assertIn('claude-sonnet-5', ids)
+        self.assertIn('claude-opus-5', ids)
         self.assertIn('claude-opus-4-8', ids)
         for mid in ids:
             self.assertFalse(mid.startswith('['), mid)
