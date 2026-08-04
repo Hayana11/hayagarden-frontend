@@ -568,3 +568,20 @@ button {
   color: #b8b0b8;
   padding: 2px 0;
 }
+
+/* ── Nexus 控制台 (ported from Nexus.dc.html) ── */
+@keyframes nexusFadeIn {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: none; }
+}
+
+.nexus-root input::placeholder {
+  color: var(--nx-ghost);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .nexus-root * {
+    animation: none !important;
+    transition: none !important;
+  }
+}
