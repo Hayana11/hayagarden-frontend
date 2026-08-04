@@ -6574,10 +6574,16 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
     # B1-1B: freeze CapabilitySkillView after tool prepare, then non-blocking
     # Planner Shadow dispatch. Production runner must not wait on Shadow.
     # Only comparison-eligible live Behavior attempts that already hold V.
+    # C2: one decision_attempt_id binds Shadow + production outcome.
+    decision_attempt_id = None
     if planner_view is not None and wake_run_id:
         try:
             from chat.capability_skill_view import freeze_capability_skill_view
-            from chat.planner_shadow import dispatch_planner_shadow
+            from chat.planner_shadow import (
+                dispatch_planner_shadow,
+                new_decision_attempt_id,
+            )
+            decision_attempt_id = new_decision_attempt_id()
             _skill_view = freeze_capability_skill_view(
                 wake_run_id=wake_run_id,
                 provider=wake_provider,
@@ -6590,6 +6596,7 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
                 planner_view=planner_view,
                 skill_view=_skill_view,
                 wake_run_id=wake_run_id,
+                decision_attempt_id=decision_attempt_id,
                 legacy_provenance=decision_provenance,
             )
         except Exception as _shadow_exc:
@@ -6597,6 +6604,33 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
             try:
                 app.logger.warning(
                     '[planner_shadow] dispatch skipped: %s', _shadow_exc,
+                )
+            except Exception:
+                pass
+
+    def _mark_production_attempt(
+        status: str,
+        *,
+        action: str | None = None,
+        reason: str | None = None,
+    ) -> None:
+        if not decision_attempt_id:
+            return
+        try:
+            from chat.planner_shadow import mark_production_attempt_outcome
+            mark_production_attempt_outcome(
+                wake_run_id=wake_run_id or '',
+                decision_attempt_id=decision_attempt_id,
+                status=status,
+                action=action,
+                reason=reason,
+                provider=wake_provider,
+            )
+        except Exception as _mark_exc:
+            try:
+                app.logger.warning(
+                    '[planner_shadow] production outcome mark skipped: %s',
+                    _mark_exc,
                 )
             except Exception:
                 pass
@@ -6627,6 +6661,8 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
             f'[wake] mode={mode} provider={wake_provider} '
             f'{type(e).__name__}: {e}\n{_tb.format_exc()}'
         )
+        # Failed production attempt → paired Shadow becomes orphan, not evidence.
+        _mark_production_attempt('failed', reason=str(e))
         # FALLBACK_PROVIDER=none: fail quietly — never silently switch lines.
         return jsonify({
             'error': str(e),
@@ -6640,6 +6676,10 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
         thoughts = thought_fallback(raw_text)
 
     if dry_run:
+        # No executor / Action commit — not accepted comparison evidence.
+        _mark_production_attempt(
+            'failed', action=action, reason='dry_run_no_action_commit',
+        )
         # No executor, no drive/desire/dream writes, no wake_run_id mark —
         # the same id may still be used for a real acceptance run.
         return jsonify({
@@ -6682,6 +6722,7 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
         settle_user_idle_hours=t2_hours,
     )
     _wake_run_id_mark(wake_run_id)
+    _mark_production_attempt('success', action=action)
 
     return jsonify({
         'ok': True,

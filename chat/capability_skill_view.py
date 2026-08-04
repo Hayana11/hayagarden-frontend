@@ -2,6 +2,8 @@
 
 Freezes only after provider + tools are resolved for this Wake attempt.
 Answers ``现在能做什么？`` — never Drive→Action commands.
+
+resolved_action_capability = parser ∩ mode ∩ provider contract ∩ executor.
 """
 
 from __future__ import annotations
@@ -12,6 +14,9 @@ from types import MappingProxyType
 from typing import Any, Mapping, Optional, Sequence
 
 _PARSER_ACTIONS = ('none', 'message', 'diary', 'explore')
+_BEHAVIOR_MODES = frozenset({
+    'normal', 'morning', 'nightwatch', 'ritual', 'self_trigger',
+})
 
 
 def _now_beijing() -> datetime.datetime:
@@ -40,11 +45,17 @@ def _tool_names(tools: Sequence[Any]) -> tuple[str, ...]:
     return tuple(names)
 
 
+def _isolated_relay_manager():
+    """Fresh RelayManager instance — never mutates the production global singleton."""
+    from relay.manager import RelayManager
+    return RelayManager()
+
+
 def resolve_model_identity(provider: str) -> str:
     """Resolved model truth for this Wake attempt (MODEL-1B compatible).
 
     claude_code → cc_model_snapshot identity (default / explicit:<id>)
-    api_relay   → current RelayManager.model
+    api_relay   → isolated RelayManager snapshot (not global relay._reload_env)
     """
     prov = str(provider or '').strip()
     if prov == 'claude_code':
@@ -52,21 +63,51 @@ def resolve_model_identity(provider: str) -> str:
         _raw, identity, _argv = cc_model_snapshot()
         return str(identity or 'default')
     if prov == 'api_relay':
-        from relay.manager import relay as _relay
-        _relay._reload_env()
-        return str(_relay.model or '').strip() or 'relay:unset'
+        mgr = _isolated_relay_manager()
+        return str(mgr.model or '').strip() or 'relay:unset'
     return f'unknown:{prov or "none"}'
 
 
-def _resolved_action_capability(*, provider: str, mode: str, dry_run: bool) -> tuple[str, ...]:
-    """parser ∩ mode ∩ provider ∩ executor — not bare parser enum alone.
+def _provider_content_policy(provider: str) -> str:
+    """How the provider Wake contract treats ACTION CONTENT.
 
-    Live Behavior Wake surfaces share the same action families; executor
-    requires non-empty CONTENT for message/diary (recorded in preconditions).
-    dry_run still may propose families but tools are empty (no side effects).
+    CC WAKE_CONTRACT: CONTENT only for message/explore; diary left empty
+    (then executor rejects empty diary) ⇒ diary not executor-resolved.
+    Relay: diary remains content-aligned executable capability (contract §3.2).
     """
-    del provider, mode, dry_run  # reserved for future provider-specific cuts
-    return tuple(_PARSER_ACTIONS)
+    if str(provider or '').strip() == 'claude_code':
+        return 'cc_content_message_explore_only'
+    return 'relay_content_aligned'
+
+
+def resolved_action_capability_for(
+    *,
+    provider: str,
+    mode: str,
+    dry_run: bool = False,
+) -> tuple[str, ...]:
+    """parser ∩ mode ∩ provider ∩ executor — not bare parser enum."""
+    del dry_run  # tools emptiness is separate; action families still decidable
+    prov = str(provider or '').strip()
+    wake_mode = str(mode or '').strip() or 'normal'
+
+    # Mode contract: Behavior-Decision modes expose wake action families.
+    # dream/summarize are outside B1 comparison; they do not claim diary/message.
+    if wake_mode not in _BEHAVIOR_MODES:
+        return ('none',)
+
+    allowed = set(_PARSER_ACTIONS)
+
+    # Executor preconditions: message/diary require non-empty CONTENT.
+    # An action family remains "resolved executable" only if the provider
+    # contract allows supplying that CONTENT.
+    policy = _provider_content_policy(prov)
+    if policy == 'cc_content_message_explore_only':
+        # CC contract tells model to leave diary CONTENT empty → executor reject.
+        allowed.discard('diary')
+
+    # Stable order matching parser enum.
+    return tuple(a for a in _PARSER_ACTIONS if a in allowed)
 
 
 @dataclass(frozen=True)
@@ -117,7 +158,8 @@ def freeze_capability_skill_view(
     wake_mode = str(mode or '').strip() or 'normal'
     tools = _tool_names(prepared_tools)
     model_identity = resolve_model_identity(prov)
-    actions = _resolved_action_capability(
+    policy = _provider_content_policy(prov)
+    actions = resolved_action_capability_for(
         provider=prov, mode=wake_mode, dry_run=bool(dry_run),
     )
     return CapabilitySkillView(
@@ -141,6 +183,7 @@ def freeze_capability_skill_view(
                 'wake_dry_run' if dry_run
                 else ('cc_wake' if prov == 'claude_code' else 'relay_wake')
             ),
+            'provider_content_policy': policy,
         }),
         preconditions=_proxy({
             'message_requires_non_empty_content': True,
@@ -148,6 +191,7 @@ def freeze_capability_skill_view(
             'explore_content_optional': True,
             'none_content_empty': True,
             'tools_callable': bool(tools) and not dry_run,
+            'diary_executor_resolved': 'diary' in actions,
         }),
         external_effect_class=_proxy({
             'none': 'no_external_effect',

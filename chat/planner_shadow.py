@@ -75,6 +75,84 @@ def append_shadow_observation(record: Mapping[str, Any]) -> None:
         _LOG.warning('planner_shadow observation write failed: %s', exc)
 
 
+def new_decision_attempt_id() -> str:
+    """Gateway-owned attempt identity shared by Shadow + production outcome."""
+    return str(uuid.uuid4())
+
+
+def mark_production_attempt_outcome(
+    *,
+    wake_run_id: str,
+    decision_attempt_id: str,
+    status: str,
+    action: Optional[str] = None,
+    reason: Optional[str] = None,
+    provider: Optional[str] = None,
+) -> None:
+    """Append production attempt outcome marker for C2 pairing / orphan rules.
+
+    Accepted comparison evidence requires:
+      shadow_decision (shadow_status=valid)
+      + production_outcome (status=success)
+      with the same decision_attempt_id.
+
+    Failed / missing production outcomes leave Shadow records as pending/orphan.
+    """
+    st = str(status or '').strip() or 'failed'
+    if st not in ('success', 'failed'):
+        st = 'failed'
+    append_shadow_observation({
+        'record_kind': 'production_outcome',
+        'wake_run_id': wake_run_id,
+        'decision_attempt_id': decision_attempt_id,
+        'production_status': st,
+        'action': action,
+        'reason': reason,
+        'provider': provider,
+        'captured_at': _now_str(),
+        'shadow_only': True,
+        'authoritative': False,
+    })
+
+
+def comparison_evidence_status(
+    *,
+    wake_run_id: str,
+    decision_attempt_id: str,
+    observations: Optional[list] = None,
+) -> str:
+    """Return accepted | orphan | pending for one attempt (test/helper)."""
+    rows = observations
+    if rows is None:
+        path = observation_path()
+        rows = []
+        if os.path.exists(path):
+            with open(path, encoding='utf-8') as fh:
+                for line in fh:
+                    line = line.strip()
+                    if line:
+                        rows.append(json.loads(line))
+    shadow_ok = False
+    prod = None
+    for row in rows:
+        if str(row.get('decision_attempt_id') or '') != str(decision_attempt_id):
+            continue
+        if str(row.get('wake_run_id') or '') != str(wake_run_id):
+            continue
+        kind = row.get('record_kind') or 'shadow_decision'
+        if kind == 'shadow_decision' and row.get('shadow_status') == 'valid':
+            shadow_ok = True
+        if kind == 'production_outcome':
+            prod = row.get('production_status')
+    if not shadow_ok:
+        return 'pending'
+    if prod == 'success':
+        return 'accepted'
+    if prod == 'failed':
+        return 'orphan'
+    return 'pending'
+
+
 def _view_to_dict(view: Any) -> dict:
     return {
         'state_version': int(view.state_version),
@@ -202,16 +280,20 @@ def validate_shadow_decision(
         return 'invalid', {'error': 'reason_codes_not_list', 'raw': dict(raw)}
     reasons = [str(x) for x in reason_codes]
 
-    blocked = bool(raw.get('blocked'))
+    try:
+        blocked = _parse_bool(raw.get('blocked'), default=False)
+    except ValueError:
+        return 'invalid', {'error': 'blocked_not_bool', 'raw': dict(raw)}
 
-    # Non-none action requires a valid provenance-bearing primary when blocked=false
-    # is not required by contract — but missing primary on non-none is allowed as
-    # null only when Action semantics permit; Shadow marks invalid if non-none and
-    # primary missing? Contract: "若存在必须是合法 Drive key" — null OK.
-    # "action_candidate != none but provenance missing" — for Shadow observation,
-    # treat missing primary on non-none as invalid (cannot invent from action).
-    if action != 'none' and primary is None and not blocked:
-        # still allow if blocked — quiet; for active propose, require primary
+    if blocked and action != 'none':
+        return 'invalid', {
+            'error': 'blocked_requires_none_action',
+            'raw': dict(raw),
+        }
+
+    # Active (non-none) proposals require Decision-time primary_drive.
+    # Never infer primary from action_candidate.
+    if action != 'none' and primary is None:
         return 'invalid', {
             'error': 'primary_drive_missing_for_active_action',
             'raw': dict(raw),
@@ -246,14 +328,33 @@ def validate_shadow_decision(
     return 'valid', decision
 
 
+def _parse_bool(value: Any, *, default: bool = False) -> bool:
+    """Strict-ish bool parse — string 'false' must not become True."""
+    if value is None:
+        return bool(default)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and value in (0, 1):
+        return bool(value)
+    if isinstance(value, str):
+        s = value.strip().lower()
+        if s in ('true', '1', 'yes'):
+            return True
+        if s in ('false', '0', 'no', ''):
+            return False
+    raise ValueError('blocked_not_bool')
+
+
 def invoke_shadow_planner_relay(
     *,
     user_payload: str,
     timeout_sec: float = _SHADOW_TIMEOUT_SEC,
 ) -> str:
-    """Isolated Relay one-shot. Never touches CC Wake resident / tools."""
-    from relay.manager import relay as _relay
+    """Isolated Relay one-shot. Never touches CC Wake resident / global relay."""
+    from relay.manager import RelayManager
 
+    # Fresh instance — do not mutate production relay singleton.
+    mgr = RelayManager()
     payload = {
         'max_tokens': _SHADOW_MAX_TOKENS,
         'system': _SHADOW_SYSTEM,
@@ -261,8 +362,8 @@ def invoke_shadow_planner_relay(
         'metadata': {'source': 'planner_shadow', 'shadow_only': True},
     }
     # Explicitly no tools — Shadow must not execute Wake tools.
-    result = _relay.call(payload, timeout=timeout_sec)
-    return _relay.extract_text(result)
+    result = mgr.call(payload, timeout=timeout_sec)
+    return mgr.extract_text(result)
 
 
 def run_shadow_attempt(
@@ -270,15 +371,23 @@ def run_shadow_attempt(
     planner_view: Any,
     skill_view: Any,
     wake_run_id: str,
+    decision_attempt_id: str,
     legacy_provenance: Optional[Mapping[str, Any]] = None,
     timeout_sec: float = _SHADOW_TIMEOUT_SEC,
     invoke_fn=None,
 ) -> dict:
-    """Synchronous Shadow attempt → observation record (caller may thread it)."""
-    attempt_id = str(uuid.uuid4())
+    """Synchronous Shadow attempt → observation record (caller may thread it).
+
+    ``decision_attempt_id`` must be created by gateway before dispatch and
+    shared with the production outcome marker (C2).
+    """
+    attempt_id = str(decision_attempt_id or '').strip()
+    if not attempt_id:
+        attempt_id = new_decision_attempt_id()
     planner_decision_id = attempt_id
     captured_at = _now_str()
     base = {
+        'record_kind': 'shadow_decision',
         'wake_run_id': wake_run_id,
         'decision_attempt_id': attempt_id,
         'planner_decision_id': planner_decision_id,
@@ -292,6 +401,7 @@ def run_shadow_attempt(
             'resolved_action_capability': list(skill_view.resolved_action_capability),
             'tool_allowlist': list(skill_view.tool_allowlist),
         },
+        'comparison_status': 'pending',
         'shadow_only': True,
         'authoritative': False,
     }
@@ -371,10 +481,13 @@ def dispatch_planner_shadow(
     planner_view: Any,
     skill_view: Any,
     wake_run_id: str,
+    decision_attempt_id: str,
     legacy_provenance: Optional[Mapping[str, Any]] = None,
     timeout_sec: float = _SHADOW_TIMEOUT_SEC,
 ) -> None:
     """Freeze/dispatch Shadow on a daemon thread. Never blocks production."""
+
+    attempt_id = str(decision_attempt_id or '').strip()
 
     def _worker():
         try:
@@ -382,6 +495,7 @@ def dispatch_planner_shadow(
                 planner_view=planner_view,
                 skill_view=skill_view,
                 wake_run_id=wake_run_id,
+                decision_attempt_id=attempt_id,
                 legacy_provenance=legacy_provenance,
                 timeout_sec=timeout_sec,
             )
@@ -400,10 +514,13 @@ def dispatch_planner_shadow(
         # Fail-open: also try to record dispatch failure without raising.
         try:
             append_shadow_observation({
+                'record_kind': 'shadow_decision',
                 'wake_run_id': wake_run_id,
+                'decision_attempt_id': attempt_id,
                 'shadow_status': 'error',
                 'error_category': 'dispatch_failed',
                 'error': str(exc)[:500],
+                'comparison_status': 'pending',
                 'shadow_only': True,
                 'authoritative': False,
             })

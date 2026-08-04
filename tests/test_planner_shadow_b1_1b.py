@@ -23,11 +23,18 @@ os.environ.setdefault(
 )
 
 import drive_engine as de
-from chat.capability_skill_view import freeze_capability_skill_view
+from chat.capability_skill_view import (
+    freeze_capability_skill_view,
+    resolved_action_capability_for,
+)
 from chat.planner_shadow import (
+    comparison_evidence_status,
     dispatch_planner_shadow,
+    mark_production_attempt_outcome,
+    new_decision_attempt_id,
     observation_path,
     run_shadow_attempt,
+    validate_shadow_decision,
 )
 from chat.planner_state_view import freeze_planner_state_view
 from tests.test_drive_authority import _production_bootstrap
@@ -64,6 +71,7 @@ class PlannerShadowB11BTests(unittest.TestCase):
             dry_run=False,
             captured_at=T_OBS,
         )
+        self.attempt_id = new_decision_attempt_id()
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -104,6 +112,7 @@ class PlannerShadowB11BTests(unittest.TestCase):
             planner_view=self.view,
             skill_view=self.skill,
             wake_run_id='b11b-run-1',
+            decision_attempt_id=self.attempt_id,
             legacy_provenance={
                 'source': 'drive_engine.decide',
                 'primary_drive': 'curiosity',
@@ -114,6 +123,7 @@ class PlannerShadowB11BTests(unittest.TestCase):
         self.assertEqual(rec['shadow_status'], 'valid')
         decision = rec['shadow_decision']
         self.assertEqual(decision['wake_run_id'], 'b11b-run-1')
+        self.assertEqual(decision['decision_attempt_id'], self.attempt_id)
         self.assertEqual(decision['state_version'], before_ver)
         self.assertEqual(decision['source'], 'planner_shadow')
         self.assertTrue(decision['shadow_only'])
@@ -122,6 +132,8 @@ class PlannerShadowB11BTests(unittest.TestCase):
         rows = self._read_observations()
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]['shadow_status'], 'valid')
+        self.assertEqual(rows[0]['decision_attempt_id'], self.attempt_id)
+        self.assertEqual(rows[0]['comparison_status'], 'pending')
         self.assertFalse(rows[0]['authoritative'])
         # No V3 mutation from Shadow observation path.
         conn = sqlite3.connect(self.db_path)
@@ -152,6 +164,7 @@ class PlannerShadowB11BTests(unittest.TestCase):
             planner_view=self.view,
             skill_view=self.skill,
             wake_run_id='b11b-run-1',
+            decision_attempt_id=self.attempt_id,
             invoke_fn=fake_invoke,
         )
         self.assertEqual(rec['shadow_status'], 'valid')
@@ -169,6 +182,7 @@ class PlannerShadowB11BTests(unittest.TestCase):
             planner_view=self.view,
             skill_view=self.skill,
             wake_run_id='b11b-run-1',
+            decision_attempt_id=self.attempt_id,
             invoke_fn=boom,
         )
         self.assertEqual(rec['shadow_status'], 'error')
@@ -191,16 +205,24 @@ class PlannerShadowB11BTests(unittest.TestCase):
                 planner_view=self.view,
                 skill_view=self.skill,
                 wake_run_id='b11b-run-1',
+                decision_attempt_id=self.attempt_id,
             )
         self.assertLess(time.time() - t0, 0.5)
 
-    def test_capability_view_model_identity_and_tools(self):
-        self.assertEqual(self.skill.provider, 'api_relay')
-        self.assertEqual(self.skill.frozen_after, 'prepare_tools_for_provider')
-        self.assertTrue(self.skill.immutable)
-        self.assertIn('web_search', self.skill.tool_allowlist)
-        self.assertIn('none', self.skill.resolved_action_capability)
-        self.assertIn('message', self.skill.resolved_action_capability)
+    def test_c1_capability_intersection_relay_vs_cc(self):
+        """C1: Relay advertises diary; CC must not under current content contract."""
+        relay_caps = resolved_action_capability_for(
+            provider='api_relay', mode='normal',
+        )
+        cc_caps = resolved_action_capability_for(
+            provider='claude_code', mode='normal',
+        )
+        self.assertIn('diary', relay_caps)
+        self.assertNotIn('diary', cc_caps)
+        self.assertIn('message', relay_caps)
+        self.assertIn('message', cc_caps)
+        # Frozen views must reflect the same intersection truth.
+        self.assertIn('diary', self.skill.resolved_action_capability)
         with mock.patch(
             'chat.cc_model.cc_model_snapshot',
             return_value=(
@@ -218,24 +240,216 @@ class PlannerShadowB11BTests(unittest.TestCase):
                 captured_at=T_OBS,
             )
         self.assertEqual(cc_skill.model_identity, 'explicit:claude-opus-4-6')
-        self.assertEqual(cc_skill.provider, 'claude_code')
+        self.assertNotIn('diary', cc_skill.resolved_action_capability)
+        self.assertFalse(cc_skill.preconditions['diary_executor_resolved'])
+        self.assertEqual(
+            cc_skill.mode_contract['provider_content_policy'],
+            'cc_content_message_explore_only',
+        )
+
+    def test_c2_attempt_pairing_accepted_vs_orphan(self):
+        """C2: shared attempt ID + success ⇒ accepted; failed ⇒ orphan."""
+
+        def fake_invoke(*, user_payload, timeout_sec):
+            del user_payload, timeout_sec
+            return json.dumps({
+                'intent': 'reconnect_gently',
+                'action_candidate': 'message',
+                'confidence': 0.7,
+                'primary_drive': 'attachment',
+                'contributors': [],
+                'blocked': False,
+                'reason_codes': [],
+                'wake_run_id': 'b11b-run-1',
+                'state_version': int(self.view.state_version),
+            })
+
+        attempt_ok = new_decision_attempt_id()
+        run_shadow_attempt(
+            planner_view=self.view,
+            skill_view=self.skill,
+            wake_run_id='b11b-run-1',
+            decision_attempt_id=attempt_ok,
+            invoke_fn=fake_invoke,
+        )
+        # Before production outcome → pending (not accepted evidence).
+        self.assertEqual(
+            comparison_evidence_status(
+                wake_run_id='b11b-run-1',
+                decision_attempt_id=attempt_ok,
+            ),
+            'pending',
+        )
+        mark_production_attempt_outcome(
+            wake_run_id='b11b-run-1',
+            decision_attempt_id=attempt_ok,
+            status='success',
+            action='message',
+            provider='api_relay',
+        )
+        self.assertEqual(
+            comparison_evidence_status(
+                wake_run_id='b11b-run-1',
+                decision_attempt_id=attempt_ok,
+            ),
+            'accepted',
+        )
+
+        attempt_fail = new_decision_attempt_id()
+        run_shadow_attempt(
+            planner_view=self.view,
+            skill_view=self.skill,
+            wake_run_id='b11b-run-1',
+            decision_attempt_id=attempt_fail,
+            invoke_fn=fake_invoke,
+        )
+        mark_production_attempt_outcome(
+            wake_run_id='b11b-run-1',
+            decision_attempt_id=attempt_fail,
+            status='failed',
+            reason='runner_500',
+            provider='api_relay',
+        )
+        self.assertEqual(
+            comparison_evidence_status(
+                wake_run_id='b11b-run-1',
+                decision_attempt_id=attempt_fail,
+            ),
+            'orphan',
+        )
+
+    def test_c3_relay_isolation_no_global_singleton(self):
+        """C3: K freeze / Shadow must not mutate production RelayManager singleton."""
+        from relay.manager import RelayManager
+        from relay import manager as relay_mod
+        import chat.capability_skill_view as csv
+        import chat.planner_shadow as ps
+
+        global_relay = relay_mod.relay
+        before_url = global_relay.api_url
+        before_model = global_relay.model
+        # Poison the singleton; isolated path must not read/write this object.
+        global_relay.api_url = 'https://poisoned.example/v1'
+        global_relay.model = 'poisoned-model'
+        global_relay.api_key = 'poisoned-key'
+
+        created = []
+
+        class TrackingRelay(RelayManager):
+            def __init__(self, *a, **kw):
+                super().__init__(*a, **kw)
+                created.append(self)
+
+            def call(self, payload, timeout=60, use_ws_model=False):
+                del payload, timeout, use_ws_model
+                return {'content': [{'type': 'text', 'text': '{}'}]}
+
+            def extract_text(self, result):
+                return '{}'
+
+        # resolve_model_identity / Shadow import RelayManager from relay.manager.
+        with mock.patch('relay.manager.RelayManager', TrackingRelay):
+            identity = csv.resolve_model_identity('api_relay')
+            ps.invoke_shadow_planner_relay(user_payload='{}', timeout_sec=1)
+        self.assertGreaterEqual(len(created), 2)
+        for inst in created:
+            self.assertIsNot(inst, global_relay)
+            self.assertNotEqual(inst.api_url, 'https://poisoned.example/v1')
+            self.assertNotEqual(inst.model, 'poisoned-model')
+        self.assertNotEqual(identity, 'poisoned-model')
+
+        # Production singleton must remain the same object (not replaced / cleared).
+        self.assertIs(relay_mod.relay, global_relay)
+        self.assertEqual(global_relay.api_url, 'https://poisoned.example/v1')
+        self.assertEqual(global_relay.model, 'poisoned-model')
+
+        # Restore for other tests in-process.
+        global_relay.api_url = before_url
+        global_relay.model = before_model
+
+        # Source-level: no import of the production singleton alias.
+        cap_src = Path(ROOT, 'chat/capability_skill_view.py').read_text(encoding='utf-8')
+        shadow_src = Path(ROOT, 'chat/planner_shadow.py').read_text(encoding='utf-8')
+        self.assertNotIn('from relay.manager import relay', cap_src)
+        self.assertNotIn('from relay.manager import relay', shadow_src)
+        self.assertIn('RelayManager()', shadow_src)
+
+    def test_blocked_bool_and_none_coupling(self):
+        """Optional hardening: blocked string 'false' ≠ True; blocked⇒none."""
+        ok, decision = validate_shadow_decision(
+            {
+                'intent': 'stay_quiet',
+                'action_candidate': 'none',
+                'confidence': 0.5,
+                'primary_drive': None,
+                'contributors': [],
+                'blocked': 'false',
+                'reason_codes': [],
+            },
+            planner_view=self.view,
+            skill_view=self.skill,
+            wake_run_id='b11b-run-1',
+            planner_decision_id='pd-1',
+            decision_attempt_id='da-1',
+            captured_at='2026-08-04 15:00:00',
+        )
+        self.assertEqual(ok, 'valid')
+        self.assertIs(decision['blocked'], False)
+
+        bad, err = validate_shadow_decision(
+            {
+                'intent': 'say_hi',
+                'action_candidate': 'message',
+                'confidence': 0.5,
+                'primary_drive': 'attachment',
+                'contributors': [],
+                'blocked': True,
+                'reason_codes': [],
+            },
+            planner_view=self.view,
+            skill_view=self.skill,
+            wake_run_id='b11b-run-1',
+            planner_decision_id='pd-2',
+            decision_attempt_id='da-2',
+            captured_at='2026-08-04 15:00:00',
+        )
+        self.assertEqual(bad, 'invalid')
+        self.assertEqual(err['error'], 'blocked_requires_none_action')
+
+    def test_capability_view_model_identity_and_tools(self):
+        self.assertEqual(self.skill.provider, 'api_relay')
+        self.assertEqual(self.skill.frozen_after, 'prepare_tools_for_provider')
+        self.assertTrue(self.skill.immutable)
+        self.assertIn('web_search', self.skill.tool_allowlist)
+        self.assertIn('none', self.skill.resolved_action_capability)
+        self.assertIn('message', self.skill.resolved_action_capability)
 
     def test_gateway_seat_non_blocking_order(self):
         src = Path(ROOT, 'gateway.py').read_text(encoding='utf-8')
         locked = src.split('def _wake_decide_locked', 1)[1].split('\ndef ', 1)[0]
         self.assertIn('freeze_capability_skill_view', locked)
         self.assertIn('dispatch_planner_shadow', locked)
+        self.assertIn('new_decision_attempt_id', locked)
+        self.assertIn('mark_production_attempt_outcome', locked)
         self.assertLess(
             locked.index('prepare_tools_for_provider'),
             locked.index('dispatch_planner_shadow'),
+        )
+        # Attempt ID must be minted before dispatch (not only imported nearby).
+        self.assertLess(
+            locked.index('decision_attempt_id = new_decision_attempt_id()'),
+            locked.index('dispatch_planner_shadow('),
         )
         self.assertLess(
             locked.index('dispatch_planner_shadow'),
             locked.index('get_wake_runner'),
         )
+        # Failed runner path must orphan the attempt.
+        self.assertIn("_mark_production_attempt('failed'", locked)
+        self.assertIn("_mark_production_attempt('success'", locked)
         # Shadow must not use CC Wake resident.
         shadow_src = Path(ROOT, 'chat/planner_shadow.py').read_text(encoding='utf-8')
-        self.assertIn('relay', shadow_src)
+        self.assertIn('RelayManager()', shadow_src)
         self.assertNotIn('ClaudeCodeWakeRunner', shadow_src)
         self.assertNotIn('_CC_WAKE_RESIDENT', shadow_src)
 
