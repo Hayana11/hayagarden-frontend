@@ -201,26 +201,50 @@ def discharge(fired_key: str):
     return None
 
 
-def infer_fired_drive_for_action(action: str, thoughts: str = '') -> Optional[str]:
-    """Infer which drive fired for a wake action without mutating state.
+_FIRED_PRIMARY_ENUM = frozenset({
+    'attachment', 'curiosity', 'reflection', 'social',
+    'duty', 'libido', 'stress',
+})
 
-    Uses authoritative V3 drive reads. Does not reconstruct Intent from
-    assistant wording; ``thoughts`` kept for signature compatibility only.
+
+def infer_fired_drive_for_action(action: str, thoughts: str = '') -> Optional[str]:
+    """Retired reverse-causality helper — NOT production provenance.
+
+    Stage D R3: Settlement must consume decision-time provenance frozen from
+    ``decide()`` before Action. This function must not be used to derive
+    ``fired_drive`` for ``wake_outcome``.
     """
-    del thoughts
-    if action == 'none':
-        return None
-    current = get_drive()
-    candidates = {k: current[k] for k in DRIVE_KEYS if k != 'fatigue'}
-    top_key = max(candidates, key=lambda k: candidates[k])
-    if action == 'explore':
-        for k in ['curiosity', 'reflection', 'social']:
-            if current[k] == candidates.get(top_key, 0):
-                top_key = k
-                break
-        else:
-            top_key = 'curiosity'
-    return top_key
+    del action, thoughts
+    return None
+
+
+def freeze_decision_provenance(decision: Optional[dict] = None) -> dict:
+    """Freeze decision-time drive provenance from a legacy ``decide()`` snapshot.
+
+    Must be captured before Action generation. Settlement consumes
+    ``primary_drive`` only; contributors are audit facts from the same
+    snapshot. Missing primary_drive means fail closed for non-none settlement.
+    """
+    snap = decision if isinstance(decision, dict) else decide()
+    drive = snap.get('drive') if isinstance(snap.get('drive'), dict) else get_drive()
+    candidates = {
+        k: float(drive.get(k, 0) or 0)
+        for k in DRIVE_KEYS
+        if k != 'fatigue' and float(drive.get(k, 0) or 0) >= TRIGGER_THRESHOLD
+    }
+    ordered = sorted(candidates.keys(), key=lambda k: (-candidates[k], k))
+    primary = snap.get('fired')
+    if primary is not None and primary not in _FIRED_PRIMARY_ENUM:
+        primary = None
+    contributors = [k for k in ordered if k != primary]
+    return {
+        'source': 'drive_engine.decide',
+        'captured_at': _now().strftime('%Y-%m-%d %H:%M:%S'),
+        'primary_drive': primary,
+        'contributors': contributors,
+        'blocked': bool(snap.get('blocked')),
+        'suggested_action': snap.get('action'),
+    }
 
 
 def discharge_by_action(action: str, thoughts: str = ''):
@@ -246,28 +270,39 @@ def rest():
 # ═══════════════════════════════════════════════════════════
 
 def decide() -> dict:
-    """
-    返回 {fired: key_or_None, action: str, hint: str, blocked: bool}
-    blocked=True 意味着 fatigue 超过阈值，什么都不做
+    """Decision-time snapshot for Wake prompt + Settlement provenance.
+
+    返回 {fired, action, hint, blocked, drive, contributors}
+    ``fired`` is the primary drive at this snapshot. Callers that need
+    Settlement provenance must freeze via ``freeze_decision_provenance``
+    before Action generation — never re-derive from the final Action.
     """
     drive = get_drive()
 
     if drive['fatigue'] >= FATIGUE_GATE:
-        return {'fired': None, 'action': 'none', 'hint': '太累了，歇着。', 'blocked': True, 'drive': drive}
+        return {
+            'fired': None, 'action': 'none', 'hint': '太累了，歇着。',
+            'blocked': True, 'drive': drive, 'contributors': [],
+        }
 
     candidates = {k: drive[k] for k in DRIVE_KEYS
                   if k != 'fatigue' and drive[k] >= TRIGGER_THRESHOLD}
 
     if not candidates:
-        return {'fired': None, 'action': 'none', 'hint': '', 'blocked': False, 'drive': drive}
+        return {
+            'fired': None, 'action': 'none', 'hint': '',
+            'blocked': False, 'drive': drive, 'contributors': [],
+        }
 
-    top_key = max(candidates, key=lambda k: candidates[k])
+    ordered = sorted(candidates.keys(), key=lambda k: (-candidates[k], k))
+    top_key = ordered[0]
     return {
         'fired':   top_key,
         'action':  WANT_ACTION.get(top_key, 'none'),
         'hint':    DRIVE_PROMPT_HINT.get(top_key, ''),
         'blocked': False,
         'drive':   drive,
+        'contributors': ordered[1:],
     }
 
 
@@ -290,9 +325,14 @@ def _label(v):
     return None
 
 
-def get_wake_snippet() -> str:
-    """注入到 wake prompt 的完整驱动条状态"""
-    drive = get_drive()
+def get_wake_snippet(decision: Optional[dict] = None) -> str:
+    """注入到 wake prompt 的完整驱动条状态。
+
+    Pass the same ``decide()`` snapshot used for provenance freeze so prompt
+    and Settlement share one Decision-time fact (no second grow/decide).
+    """
+    snap = decision if isinstance(decision, dict) else decide()
+    drive = snap.get('drive') if isinstance(snap.get('drive'), dict) else get_drive()
     lines = ['## 内在需求（驱动条）']
 
     if drive['fatigue'] >= FATIGUE_GATE:
@@ -319,12 +359,13 @@ def get_wake_snippet() -> str:
         else:
             lines.append(f'{key} {val:.2f}（{desc}）')
 
-    # 决策提示
-    decision = decide()
-    if decision['blocked']:
+    # 决策提示（使用同一 snapshot，不二次 decide）
+    if snap.get('blocked'):
         lines.append('\n→ 疲劳封顶，今天静默。')
-    elif decision['fired']:
-        lines.append(f'\n→ 当前最强需求：{decision["fired"]}，倾向于 {decision["action"]} 行为。')
+    elif snap.get('fired'):
+        lines.append(
+            f'\n→ 当前最强需求：{snap["fired"]}，倾向于 {snap.get("action", "none")} 行为。'
+        )
 
     return '\n'.join(lines)
 

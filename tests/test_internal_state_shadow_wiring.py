@@ -490,11 +490,9 @@ class WakeOutcomeWiringTests(unittest.TestCase):
             conn.commit()
         finally:
             conn.close()
-        # Without Stage D cutover, get_drive fail-closes to defaults; inference
-        # still returns a stable key for action='message'. Legacy discharge is
-        # a retired no-op and must not mutate production truth.
-        fired = de.infer_fired_drive_for_action('message')
-        self.assertIsInstance(fired, str)
+        # Stage D R3: Action→Drive inference is retired (always None).
+        # Legacy discharge remains a no-op and must not mutate production truth.
+        self.assertIsNone(de.infer_fired_drive_for_action('message'))
         before = de.get_drive()
         de.discharge_by_action('message')
         after = de.get_drive()

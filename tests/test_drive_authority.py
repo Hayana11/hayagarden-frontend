@@ -401,5 +401,169 @@ class DriveAuthorityTests(unittest.TestCase):
         )
 
 
+class DecisionTimeProvenanceTests(unittest.TestCase):
+    """Stage D R3 — Decision-time provenance contract (P1–P4)."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.db_path = str(Path(self.tmp.name) / 'memories.db')
+        self._prev_memories = os.environ.get('MEMORIES_DB')
+        self._prev_ee = ee.DB_PATH
+        self._prev_de = de.DB_PATH
+        self._prev_des = desire.DB_PATH
+        self._env = mock.patch.dict(os.environ, {
+            'MEMORIES_DB': self.db_path,
+            **SHADOW_ON,
+        }, clear=False)
+        self._env.start()
+        ee.DB_PATH = self.db_path
+        de.DB_PATH = self.db_path
+        desire.DB_PATH = self.db_path
+        _production_bootstrap(self.db_path)
+        self.assertTrue(da.ensure_authority_ready(self.db_path))
+
+    def tearDown(self):
+        self._env.stop()
+        ee.DB_PATH = self._prev_ee
+        de.DB_PATH = self._prev_de
+        desire.DB_PATH = self._prev_des
+        if self._prev_memories is None:
+            os.environ.pop('MEMORIES_DB', None)
+        else:
+            os.environ['MEMORIES_DB'] = self._prev_memories
+        self.tmp.cleanup()
+
+    def _v3(self):
+        return da.read_v3_state(self.db_path)
+
+    def test_p1_no_action_to_drive_inference_in_production_path(self):
+        """CASE P1: production Wake path must not derive provenance from Action."""
+        gateway_src = Path(ROOT, 'gateway.py').read_text(encoding='utf-8')
+        block = gateway_src.split('def _wake_decide_locked', 1)[1].split('\ndef ', 1)[0]
+        self.assertNotIn('infer_fired_drive_for_action', block)
+        self.assertIn('decision_provenance', block)
+        self.assertIn("primary_drive", block)
+        # Retired helper must not invent provenance from Action.
+        self.assertIsNone(de.infer_fired_drive_for_action('message'))
+        self.assertIsNone(de.infer_fired_drive_for_action('explore'))
+        self.assertIsNone(de.infer_fired_drive_for_action('none'))
+
+    def test_p2_decision_time_provenance_survives_post_action_state_shift(self):
+        """CASE P2: frozen primary_drive survives later drive-state changes."""
+        decision = {
+            'fired': 'curiosity',
+            'action': 'explore',
+            'hint': 'x',
+            'blocked': False,
+            'drive': {
+                'attachment': 0.2, 'curiosity': 0.80, 'reflection': 0.2,
+                'social': 0.2, 'duty': 0.2, 'libido': 0.1, 'stress': 0.1,
+                'fatigue': 0.2,
+            },
+            'contributors': [],
+        }
+        provenance = de.freeze_decision_provenance(decision)
+        self.assertEqual(provenance['source'], 'drive_engine.decide')
+        self.assertEqual(provenance['primary_drive'], 'curiosity')
+        self.assertIsInstance(provenance['captured_at'], str)
+
+        # Final Action is message, but Settlement must still discharge curiosity
+        # (frozen P), not re-infer from Action.
+        result = da.apply_wake_outcome_observation(
+            wake_run_id='stage-d-p2',
+            executor_action='message',
+            desire_action=None,
+            fired_drive=provenance['primary_drive'],
+            desire_driven=False,
+            user_idle_hours=1.0,
+            outcome_at='2026-08-04 10:30:00',
+            db_path=self.db_path,
+        )
+        self.assertEqual(result.status, 'applied')
+        diag = result.result or {}
+        before = diag['materialized_before']
+        after_fixed = diag['legacy_fixed_after']
+        self.assertLess(after_fixed['curiosity'], before['curiosity'])
+        self.assertAlmostEqual(after_fixed['social'], before['social'], places=4)
+        self.assertAlmostEqual(
+            after_fixed['curiosity'],
+            max(0.0, before['curiosity'] - 0.45),
+            places=4,
+        )
+
+    def test_p3_same_action_different_provenance_metamorphic(self):
+        """CASE P3: same Action + different P → different Settlement targets."""
+        r1 = da.apply_wake_outcome_observation(
+            wake_run_id='stage-d-p3-att',
+            executor_action='message',
+            desire_action=None,
+            fired_drive='attachment',
+            desire_driven=False,
+            user_idle_hours=0.5,
+            outcome_at='2026-08-04 13:00:00',
+            db_path=self.db_path,
+        )
+        self.assertEqual(r1.status, 'applied')
+        d1 = r1.result or {}
+        self.assertLess(
+            d1['legacy_fixed_after']['attachment'],
+            d1['materialized_before']['attachment'],
+        )
+        self.assertAlmostEqual(
+            d1['legacy_fixed_after']['social'],
+            d1['materialized_before']['social'],
+            places=4,
+        )
+
+        r2 = da.apply_wake_outcome_observation(
+            wake_run_id='stage-d-p3-soc',
+            executor_action='message',
+            desire_action=None,
+            fired_drive='social',
+            desire_driven=False,
+            user_idle_hours=0.5,
+            outcome_at='2026-08-04 13:05:00',
+            db_path=self.db_path,
+        )
+        self.assertEqual(r2.status, 'applied')
+        d2 = r2.result or {}
+        self.assertLess(
+            d2['legacy_fixed_after']['social'],
+            d2['materialized_before']['social'],
+        )
+        self.assertAlmostEqual(
+            d2['legacy_fixed_after']['attachment'],
+            d2['materialized_before']['attachment'],
+            places=4,
+        )
+
+    def test_p4_missing_provenance_fail_closed(self):
+        """CASE P4: non-none Action without provenance must not mutate V3."""
+        before = {k: float(self._v3()[k]) for k in DRIVE_KEYS}
+        ok = da.apply_wake_outcome_best_effort(
+            wake_run_id='stage-d-p4',
+            executor_action='message',
+            desire_action=None,
+            fired_drive=None,
+            desire_driven=False,
+            user_idle_hours=1.0,
+            outcome_at='2026-08-04 14:00:00',
+            db_path=self.db_path,
+        )
+        self.assertFalse(ok)
+        after = {k: float(self._v3()[k]) for k in DRIVE_KEYS}
+        self.assertEqual(before, after)
+        # No wake_outcome event consumed.
+        conn = store.open_store(self.db_path)
+        try:
+            row = conn.execute(
+                "SELECT 1 FROM internal_state_events "
+                "WHERE event_key='wake_outcome:stage-d-p4'"
+            ).fetchone()
+        finally:
+            conn.close()
+        self.assertIsNone(row)
+
+
 if __name__ == '__main__':
     unittest.main()

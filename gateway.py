@@ -6251,7 +6251,7 @@ def _wake_build_system_for_plan(
         'self_trigger_note': data.get('self_trigger_note', ''),
     }
     system = append_system_text(system, build_prompt_suffix(mode, _wake_ctx))
-    system = inject_snippets(
+    system, decision_provenance = inject_snippets(
         system, mode,
         desire_driven=_get_desire_driven(),
         longing_enabled=_get_longing_enabled(),
@@ -6286,7 +6286,7 @@ def _wake_build_system_for_plan(
                     '把画面和一句话一起发给她。这不是任务，是你自己想。' % _att))
         except Exception:
             pass
-    return system, surfaced_desire_ids
+    return system, surfaced_desire_ids, decision_provenance
 
 
 def _wake_trigger_message(mode, ritual_type):
@@ -6336,7 +6336,7 @@ def _wake_inspect_only(data, mode, activity_desc, ritual_type):
         t2_hours = 0.0
         t_hours = 0.0
 
-    system, _ = _wake_build_system_for_plan(
+    system, _, _decision_prov = _wake_build_system_for_plan(
         mode=mode,
         activity_desc=activity_desc,
         ritual_type=ritual_type,
@@ -6348,6 +6348,7 @@ def _wake_inspect_only(data, mode, activity_desc, ritual_type):
         allow_side_effects=False,
         dry_run=False,
     )
+    del _decision_prov
     msgs = [{'role': 'user', 'content': _wake_trigger_message(mode, ritual_type)}]
     plan = _wake_runners.inspect_wake_plan(
         mode=mode,
@@ -6491,7 +6492,7 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
             except Exception:
                 pass
 
-    system, surfaced_desire_ids = _wake_build_system_for_plan(
+    system, surfaced_desire_ids, decision_provenance = _wake_build_system_for_plan(
         mode=mode,
         activity_desc=activity_desc,
         ritual_type=ritual_type,
@@ -6566,16 +6567,11 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
     # action 执行：写 wake_log / chat_messages / diary；drive settlement → V3
     from wake.executor import execute as _wake_exec
     desire_driven = _get_desire_driven()
-    # Stage D: freeze decision-time fired_drive before executor (provenance).
-    # Does not reconstruct Intent from assistant text; uses current V3 drives
-    # + executor action type (existing settlement contract).
+    # Stage D R3: Settlement consumes Decision-time provenance frozen during
+    # prompt assembly (drive_engine.decide). Never Action→Drive inference.
     fired_drive = None
-    if wake_run_id and mode not in ('dream', 'summarize') and action != 'none':
-        try:
-            import drive_engine as _de_infer
-            fired_drive = _de_infer.infer_fired_drive_for_action(action)
-        except Exception:
-            fired_drive = None
+    if isinstance(decision_provenance, dict):
+        fired_drive = decision_provenance.get('primary_drive')
     _wake_exec(
         action, thoughts, c_text, mode,
         get_db_fn=get_db,

@@ -89,7 +89,22 @@ class WakeSystemCacheTests(unittest.TestCase):
         self.assertNotIn("cache_control", result[-1])
 
     def test_injected_snippets_do_not_flatten_blocks(self):
-        drive = types.SimpleNamespace(get_wake_snippet=lambda: "drive state")
+        decision = {
+            'fired': 'curiosity', 'action': 'explore', 'hint': '',
+            'blocked': False, 'drive': {'curiosity': 0.8}, 'contributors': [],
+        }
+        drive = types.SimpleNamespace(
+            decide=lambda: decision,
+            freeze_decision_provenance=lambda d: {
+                'source': 'drive_engine.decide',
+                'captured_at': '2026-08-04 12:00:00',
+                'primary_drive': d.get('fired'),
+                'contributors': [],
+                'blocked': False,
+                'suggested_action': d.get('action'),
+            },
+            get_wake_snippet=lambda decision=None: "drive state",
+        )
         desire = types.SimpleNamespace(
             get_wake_snippet=lambda t_hours_override=None: "desire state"
         )
@@ -99,10 +114,11 @@ class WakeSystemCacheTests(unittest.TestCase):
             "cache_control": {"type": "ephemeral"},
         }]
         with mock.patch.dict(sys.modules, {"drive_engine": drive, "desire": desire}):
-            result = inject_snippets(base, "normal", desire_driven=True)
+            result, provenance = inject_snippets(base, "normal", desire_driven=True)
         self.assertIsInstance(result, list)
         self.assertEqual(result[0]["cache_control"], {"type": "ephemeral"})
         self.assertEqual([row["text"] for row in result[1:]], ["drive state", "desire state"])
+        self.assertEqual(provenance['primary_drive'], 'curiosity')
 
 
 class WakeExecutorUsageTests(unittest.TestCase):

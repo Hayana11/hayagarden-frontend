@@ -249,6 +249,18 @@ def apply_wake_outcome_best_effort(
     outcome_at: Optional[str] = None,
     db_path: Optional[str] = None,
 ) -> bool:
+    """Best-effort Wake drive settlement.
+
+    Fail closed when non-``none`` action lacks decision-time ``fired_drive``.
+    Never invents Action→Drive provenance.
+    """
+    if str(executor_action or '').strip() != 'none' and not fired_drive:
+        _LOG.warning(
+            'apply_wake_outcome_best_effort skip: missing decision-time '
+            'provenance (wake_run_id=%s action=%s)',
+            wake_run_id, executor_action,
+        )
+        return False
     try:
         result = apply_wake_outcome_observation(
             wake_run_id=wake_run_id,

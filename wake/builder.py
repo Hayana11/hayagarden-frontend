@@ -108,17 +108,28 @@ def inject_snippets(system, mode: str,
 
     t_hours_override: Wake 权威空闲小时数。传入后 Longing 不再读可能停摆的
     desire_state.last_hayana_msg_time。
+
+    Returns ``(system, provenance)`` where provenance is the Decision-time
+    freeze from ``drive_engine.decide()`` (or None when unavailable / skipped).
+    Prompt text and Settlement share that same snapshot — no Action→Drive guess.
     """
+    provenance = None
     if mode in ('dream', 'summarize'):
-        return system
+        return system, provenance
 
     try:
         import drive_engine as _de
-        snip = _de.get_wake_snippet()
+        decision = None
+        if hasattr(_de, 'decide') and hasattr(_de, 'freeze_decision_provenance'):
+            decision = _de.decide()
+            provenance = _de.freeze_decision_provenance(decision)
+            snip = _de.get_wake_snippet(decision=decision)
+        else:
+            snip = _de.get_wake_snippet()
         if snip:
             system = append_system_text(system, snip)
     except Exception:
-        pass
+        provenance = None
 
     if desire_driven or longing_enabled:
         try:
@@ -129,4 +140,4 @@ def inject_snippets(system, mode: str,
         except Exception:
             pass
 
-    return system
+    return system, provenance
