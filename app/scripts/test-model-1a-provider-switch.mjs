@@ -24,10 +24,14 @@ function spaceFromProviderResponse(resp, opts = {}) {
   let currentModel = afterWrite.currentModel;
   let modelMode = afterWrite.modelMode;
   let refreshFailed = false;
+  // MODEL-1B: always drop previous provider catalog on space switch.
+  let catalog = [];
+  const priorCatalog = opts.priorCatalog || [];
 
   if (opts.catalogThrows) {
     refreshFailed = true;
-    // Keep unknown — do not invent default.
+    catalog = [];
+    // Keep unknown — do not invent default; do not keep prior catalog.
   } else if (opts.catalog) {
     chatModelProvider = opts.catalog.provider || chatModelProvider;
     if (opts.catalog.provider === 'claude_code') {
@@ -35,9 +39,14 @@ function spaceFromProviderResponse(resp, opts = {}) {
         ? opts.catalog.model_mode
         : 'unknown';
       currentModel = opts.catalog.configured_model || opts.catalog.current || '';
-    } else {
+      catalog = opts.catalog.models || [];
+    } else if (opts.catalog.provider === 'api_relay') {
       modelMode = '';
       currentModel = opts.catalog.current || currentModel;
+      catalog = opts.catalog.models || [];
+    } else {
+      refreshFailed = true;
+      catalog = [];
     }
   }
 
@@ -45,6 +54,7 @@ function spaceFromProviderResponse(resp, opts = {}) {
     ? ccChatModelLabel({
       modelMode,
       configuredModel: currentModel,
+      catalog,
       loading: !refreshFailed && modelMode === 'unknown',
     })
     : currentModel;
@@ -57,6 +67,8 @@ function spaceFromProviderResponse(resp, opts = {}) {
     modelMode,
     refreshFailed,
     label,
+    catalog,
+    priorCatalog,
   };
 }
 
@@ -64,7 +76,10 @@ function spaceFromProviderResponse(resp, opts = {}) {
 {
   const next = spaceFromProviderResponse(
     { provider: 'claude_code', effective_chat_provider: 'claude_code' },
-    { catalogThrows: true },
+    {
+      catalogThrows: true,
+      priorCatalog: [{ id: '[反重力量] claude-opus-4-6-thinking [不补]', label: 'Relay' }],
+    },
   );
   assert.equal(next.chatModelProvider, 'claude_code');
   assert.equal(next.currentModel, '');
@@ -72,16 +87,37 @@ function spaceFromProviderResponse(resp, opts = {}) {
   assert.equal(next.refreshFailed, true);
   assert.equal(next.label, 'Claude Code · 状态未知');
   assert.notEqual(next.label, 'Claude Code · 默认');
+  assert.deepEqual(next.catalog, []);
+  assert.equal(next.catalog.length, 0);
 }
 
-// 1b) explicit CC → relay → CC + catalog fail — must not show 默认
+// 1b) explicit CC → relay → CC + catalog fail — must not show 默认 or Relay models
 {
   const next = spaceFromProviderResponse(
     { provider: 'claude_code', effective_chat_provider: 'claude_code' },
-    { catalogThrows: true },
+    {
+      catalogThrows: true,
+      priorCatalog: [{ id: '[反重力量] claude-opus-4-6-thinking [不补]', label: 'Relay' }],
+    },
   );
   assert.notEqual(next.label, 'Claude Code · 默认');
   assert.match(next.label, /状态未知|读取中/);
+  assert.ok(!next.catalog.some((m) => String(m.id || '').includes('[')));
+}
+
+// 1b2) CC → Relay + catalog fail — must not keep CC models
+{
+  const next = spaceFromProviderResponse(
+    { provider: 'api_relay', effective_chat_provider: 'api_relay' },
+    {
+      relayModel: 'claude-sonnet-4-6',
+      catalogThrows: true,
+      priorCatalog: [{ id: 'claude-sonnet-5', label: 'Sonnet 5' }],
+    },
+  );
+  assert.equal(next.chatModelProvider, 'api_relay');
+  assert.deepEqual(next.catalog, []);
+  assert.ok(!next.catalog.some((m) => m.id === 'claude-sonnet-5'));
 }
 
 // 1c) catalog confirms explicit after provider write

@@ -20,12 +20,14 @@ os.environ['HAYAGARDEN_CONFIG_DB_PATH'] = str(
 
 from chat.cc_model import (  # noqa: E402
     CC_MODEL_CATALOG,
+    CC_MODEL_NOT_ALLOWED,
     cc_model_args,
     cc_model_identity,
     cc_model_mode,
     cc_model_snapshot,
     describe_cc_model_state,
     get_cc_chat_model,
+    is_allowed_cc_model,
     set_cc_chat_model,
 )
 from chat.model_state import describe_chat_model_state  # noqa: E402
@@ -86,6 +88,46 @@ class CcModelHelperTests(unittest.TestCase):
             self.assertEqual(store['CC_CHAT_MODEL'], '')
             self.assertEqual(cleared['model_mode'], 'default')
             self.assertIsNone(cleared['configured_model'])
+
+    def test_relay_alias_rejected_without_write(self):
+        """Relay-style aliases must never enter CC_CHAT_MODEL / --model."""
+        store = {'CC_CHAT_MODEL': 'claude-sonnet-5'}
+        writes = []
+
+        def _get(key, default=None):
+            return store.get(key, default)
+
+        def _set(key, value):
+            writes.append((key, value))
+            store[key] = value
+
+        alias = '[反重力量] claude-opus-4-6-thinking [不补]'
+        self.assertFalse(is_allowed_cc_model(alias))
+        with mock.patch.object(config_store, 'get', side_effect=_get), \
+             mock.patch.object(config_store, 'set', side_effect=_set):
+            out = set_cc_chat_model(alias)
+        self.assertEqual(out['ok'], False)
+        self.assertEqual(out['error'], CC_MODEL_NOT_ALLOWED)
+        self.assertEqual(out['rejected_model'], alias)
+        self.assertEqual(store['CC_CHAT_MODEL'], 'claude-sonnet-5')
+        self.assertEqual(writes, [])
+        self.assertEqual(out['configured_model'], 'claude-sonnet-5')
+
+    def test_empty_clears_to_default_without_catalog(self):
+        store = {'CC_CHAT_MODEL': 'claude-sonnet-5'}
+
+        def _get(key, default=None):
+            return store.get(key, default)
+
+        def _set(key, value):
+            store[key] = value
+
+        with mock.patch.object(config_store, 'get', side_effect=_get), \
+             mock.patch.object(config_store, 'set', side_effect=_set):
+            out = set_cc_chat_model('')
+        self.assertTrue(out.get('ok'))
+        self.assertEqual(store['CC_CHAT_MODEL'], '')
+        self.assertEqual(out['model_mode'], 'default')
 
     def test_never_reads_relay_keys(self):
         """CC helper must ignore MODEL / ACTIVE_RELAY."""

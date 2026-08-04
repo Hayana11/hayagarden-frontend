@@ -224,28 +224,39 @@ export function SettingsScreen() {
     }
     // MODEL-1A/1B: model space follows effective_chat_provider; CC model stays
     // unknown until catalog confirms (never invent "默认").
+    // Clear previous provider's model list before refresh — never show Relay
+    // aliases in the CC pool (or CC ids in Relay) if the new catalog fails.
     const local = chatModelSpaceAfterProviderWrite(cfg.effectiveChatProvider);
     setProvider(cfg.provider);
     setChatModelProvider(local.chatModelProvider);
     setCurrentModel(local.currentModel);
     setModelMode(local.modelMode);
+    setCatalog([]);
+    setAvailableModels([]);
     let refreshFailed = false;
     try {
-      const catalog = await getModelCatalog();
-      if (catalog.provider === 'claude_code' || catalog.provider === 'api_relay') {
-        setChatModelProvider(catalog.provider);
+      const catalogState = await getModelCatalog();
+      if (catalogState.provider === 'claude_code' || catalogState.provider === 'api_relay') {
+        setChatModelProvider(catalogState.provider);
       }
-      if (catalog.provider === 'claude_code') {
-        setModelMode(catalog.modelMode === 'explicit' || catalog.modelMode === 'default'
-          ? catalog.modelMode
+      if (catalogState.provider === 'claude_code') {
+        setCatalog(catalogState.models);
+        setModelMode(catalogState.modelMode === 'explicit' || catalogState.modelMode === 'default'
+          ? catalogState.modelMode
           : 'unknown');
-        setCurrentModel(catalog.configuredModel || catalog.current || '');
+        setCurrentModel(catalogState.configuredModel || catalogState.current || '');
+      } else if (catalogState.provider === 'api_relay') {
+        setCatalog(catalogState.models);
+        setModelMode(catalogState.modelMode || '');
+        setCurrentModel(catalogState.current);
       } else {
-        setModelMode(catalog.modelMode || '');
-        setCurrentModel(catalog.current);
+        refreshFailed = true;
+        if (local.chatModelProvider === 'claude_code') setModelMode('unknown');
       }
     } catch {
       refreshFailed = true;
+      setCatalog([]);
+      setAvailableModels([]);
       if (local.chatModelProvider === 'claude_code') setModelMode('unknown');
     }
     showToast(refreshFailed
@@ -270,6 +281,8 @@ export function SettingsScreen() {
     }
     // MODEL-1A/1B: if CHAT_PROVIDER still forces CC, keep CC space as unknown
     // until catalog confirms — do not invent "默认".
+    // Clear previous provider catalog first so a failed refresh cannot leak
+    // the other model space into the UI.
     const local = chatModelSpaceAfterProviderWrite(cfg.effectiveChatProvider, {
       relayModel: result.model,
     });
@@ -277,26 +290,35 @@ export function SettingsScreen() {
     setChatModelProvider(local.chatModelProvider);
     setCurrentModel(local.currentModel);
     setModelMode(local.modelMode);
+    setCatalog([]);
+    setAvailableModels([]);
     let refreshFailed = false;
     try {
       setRelays(await getRelayEndpoints());
     } catch { refreshFailed = true; }
     try {
-      const catalog = await getModelCatalog();
-      if (catalog.provider === 'claude_code' || catalog.provider === 'api_relay') {
-        setChatModelProvider(catalog.provider);
+      const catalogState = await getModelCatalog();
+      if (catalogState.provider === 'claude_code' || catalogState.provider === 'api_relay') {
+        setChatModelProvider(catalogState.provider);
       }
-      if (catalog.provider === 'claude_code') {
-        setModelMode(catalog.modelMode === 'explicit' || catalog.modelMode === 'default'
-          ? catalog.modelMode
+      if (catalogState.provider === 'claude_code') {
+        setCatalog(catalogState.models);
+        setModelMode(catalogState.modelMode === 'explicit' || catalogState.modelMode === 'default'
+          ? catalogState.modelMode
           : 'unknown');
-        setCurrentModel(catalog.configuredModel || catalog.current || '');
+        setCurrentModel(catalogState.configuredModel || catalogState.current || '');
+      } else if (catalogState.provider === 'api_relay') {
+        setCatalog(catalogState.models);
+        setModelMode(catalogState.modelMode || '');
+        setCurrentModel(catalogState.current || result.model || '');
       } else {
-        setModelMode(catalog.modelMode || '');
-        setCurrentModel(catalog.current || result.model || '');
+        refreshFailed = true;
+        if (local.chatModelProvider === 'claude_code') setModelMode('unknown');
       }
     } catch {
       refreshFailed = true;
+      setCatalog([]);
+      setAvailableModels([]);
       if (local.chatModelProvider === 'claude_code') setModelMode('unknown');
     }
     try {
@@ -304,9 +326,14 @@ export function SettingsScreen() {
       setKeyStatus(keyCheck.status);
       setHostRtt(keyCheck.hostRttMs);
     } catch { refreshFailed = true; }
-    try {
-      setAvailableModels(await getAvailableModels());
-    } catch { refreshFailed = true; }
+    if (local.chatModelProvider === 'api_relay') {
+      try {
+        setAvailableModels(await getAvailableModels());
+      } catch {
+        refreshFailed = true;
+        setAvailableModels([]);
+      }
+    }
     showToast(refreshFailed
       ? `已切换到 ${relay.name}，部分状态刷新失败`
       : `已切换：${relay.name}`);
@@ -336,8 +363,13 @@ export function SettingsScreen() {
         setModelMode(result.modelMode || 'explicit');
         setCurrentModel(result.configuredModel || model.id);
         showToast('下一条消息起生效');
-      } catch {
-        showToast('模型切换失败');
+      } catch (err) {
+        const code = err instanceof HttpError
+          ? String((err.payload as { error?: string } | undefined)?.error || err.code || '')
+          : '';
+        showToast(code === 'CC_MODEL_NOT_ALLOWED'
+          ? '该模型不属于 Claude Code 模型清单'
+          : '模型切换失败');
       } finally { setBusy(''); }
       return;
     }

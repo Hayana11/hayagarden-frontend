@@ -1566,15 +1566,20 @@ def config_set_model():
     data = request.get_json() or {}
     if provider == 'claude_code':
         # MODEL-1B: model=null / "" → default; non-empty → explicit CC_CHAT_MODEL.
+        # Non-catalog ids (incl. relay aliases) → 400, config unchanged.
+        from chat.cc_model import CC_MODEL_NOT_ALLOWED
         if 'model' not in data:
             return jsonify({'error': 'missing model'}), 400
         raw = data.get('model')
         if raw is not None and not isinstance(raw, str):
             return jsonify({'error': 'model must be string or null'}), 400
         try:
-            return jsonify(set_cc_chat_model(raw))
+            result = set_cc_chat_model(raw)
         except Exception as e:
             return jsonify({'error': str(e)}), 500
+        if result.get('error') == CC_MODEL_NOT_ALLOWED or result.get('ok') is False:
+            return jsonify(result), 400
+        return jsonify(result)
     new_model = (data.get('model') or '').strip()
     if not new_model:
         return jsonify({'error': 'empty model'}), 400

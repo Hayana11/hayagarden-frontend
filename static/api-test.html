@@ -360,6 +360,14 @@ async function setProvider(p) {
   chatProvider = effective;
   currentModel = '';
   modelMode = effective === 'claude_code' ? 'unknown' : '';
+  // MODEL-1B: clear previous provider model lists before refresh so a failed
+  // catalog load cannot paint the other space's models.
+  currentModels = [];
+  ccCatalog = [];
+  var modelsEl = document.getElementById('models-list');
+  if (modelsEl) modelsEl.innerHTML = '';
+  var presetEl = document.getElementById('preset-models-list');
+  if (presetEl) presetEl.innerHTML = '';
   document.getElementById('model-inp').value = '';
   cancelModelEdit();
   if (effective === 'claude_code') {
@@ -368,7 +376,6 @@ async function setProvider(p) {
   } else {
     // Clear CC residual label before refresh; unknown until loadModel succeeds.
     document.getElementById('cur-model-name').textContent = '读取中…';
-    renderPresetModels();
   }
   renderProvider();
   applyModelUiMode();
@@ -380,11 +387,28 @@ async function setProvider(p) {
     if (effective === 'claude_code') {
       modelMode = 'unknown';
       document.getElementById('cur-model-name').textContent = 'Claude Code · 状态未知';
+      currentModels = [];
+      ccCatalog = [];
+      if (modelsEl) modelsEl.innerHTML = '<div style="color:var(--hint);font-size:12px;padding:8px 0;">状态未知 · 暂无模型清单</div>';
     } else if (effective === 'api_relay') {
       document.getElementById('cur-model-name').textContent = '—';
+      currentModels = [];
+      ccCatalog = [];
     }
   }
-  if (!(await loadModels())) refreshFailed = true;
+  if (!(await loadModels())) {
+    refreshFailed = true;
+    if (effective === 'claude_code') {
+      currentModels = [];
+      // Keep ccCatalog empty on failure; never restore prior Relay list.
+      if (!ccCatalog.length && modelsEl) {
+        modelsEl.innerHTML = '<div style="color:var(--hint);font-size:12px;padding:8px 0;">状态未知 · 暂无模型清单</div>';
+      }
+    } else {
+      currentModels = [];
+      ccCatalog = [];
+    }
+  }
   toast(refreshFailed
     ? ('已切换到' + (p === 'claude_code' ? '订阅模式' : '中转 API') + '，部分状态刷新失败')
     : ('已切换到' + (p === 'claude_code' ? '订阅模式' : '中转 API') + '，网关重启中'));
@@ -609,6 +633,8 @@ function modelSwitchErrorToast(d) {
   if (!d) { toast('切换失败'); return; }
   if (d.error === 'ACTIVE_RELAY_NOT_FOUND') {
     toast('当前中转站已失效，请重新选择中转站');
+  } else if (d.error === 'CC_MODEL_NOT_ALLOWED') {
+    toast('该模型不属于 Claude Code 模型清单');
   } else {
     toast('切换失败');
   }
@@ -679,15 +705,28 @@ async function loadModels() {
     try {
       var cr = await fetch('/api/config/model-catalog');
       var cd = await cr.json();
+      if (!cr.ok || cd.provider !== 'claude_code') {
+        ccCatalog = [];
+        currentModels = [];
+        modelMode = 'unknown';
+        el.innerHTML = '<div style="color:var(--hint);font-size:12px;padding:8px 0;">状态未知 · 暂无模型清单</div>';
+        document.getElementById('cur-model-name').textContent = ccPillLabel();
+        return false;
+      }
       ccCatalog = cd.models || [];
-      chatProvider = cd.provider || chatProvider;
-      modelMode = cd.model_mode || modelMode || 'default';
-      currentModel = cd.configured_model || currentModel || '';
+      currentModels = [];
+      chatProvider = 'claude_code';
+      modelMode = (cd.model_mode === 'explicit' || cd.model_mode === 'default') ? cd.model_mode : 'unknown';
+      currentModel = cd.configured_model || '';
       document.getElementById('cur-model-name').textContent = ccPillLabel();
       renderCcModels();
       return true;
     } catch (e) {
-      el.innerHTML = '<div style="color:#c07070;font-size:12px;">Claude Code 模型清单获取失败</div>';
+      ccCatalog = [];
+      currentModels = [];
+      modelMode = 'unknown';
+      el.innerHTML = '<div style="color:var(--hint);font-size:12px;padding:8px 0;">状态未知 · 暂无模型清单</div>';
+      document.getElementById('cur-model-name').textContent = ccPillLabel();
       return false;
     }
   }
