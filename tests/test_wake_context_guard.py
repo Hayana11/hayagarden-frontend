@@ -241,17 +241,42 @@ class InjectSnippetOverrideTests(unittest.TestCase):
 
         class Desire:
             @staticmethod
-            def get_wake_snippet(t_hours_override=None):
+            def get_longing_wake_fact(t_hours_override=None):
                 seen['t'] = t_hours_override
-                return 'desire snip'
+                return 'longing snip'
+
+            @staticmethod
+            def get_wake_snippet(t_hours_override=None):
+                seen['bad'] = True
+                return 'MUST_NOT_INJECT'
 
         class Drive:
             @staticmethod
-            def get_wake_snippet():
+            def decide():
+                return {
+                    'fired': None, 'action': 'none', 'hint': '',
+                    'blocked': False, 'drive': {}, 'contributors': [],
+                }
+
+            @staticmethod
+            def freeze_decision_provenance(decision=None):
+                return {
+                    'source': 'drive_engine.decide',
+                    'captured_at': '2026-08-04 12:00:00',
+                    'primary_drive': None,
+                    'contributors': [],
+                    'blocked': False,
+                    'suggested_action': 'none',
+                }
+
+            @staticmethod
+            def get_wake_snippet(decision=None):
                 return ''
 
         with mock.patch.dict(sys.modules, {'desire': Desire, 'drive_engine': Drive}):
-            inject_snippets('base', 'normal', longing_enabled=True, t_hours_override=0.17)
+            _system, _prov = inject_snippets(
+                'base', 'normal', longing_enabled=True, t_hours_override=0.17,
+            )
         self.assertAlmostEqual(seen['t'], 0.17)
 
 

@@ -229,65 +229,62 @@ def _apply_satisfy(drives: dict, action: str) -> dict:
 # ─── DB-level operations ──────────────────────────────────
 
 def _flush(values: dict):
-    now_str = _now().strftime('%Y-%m-%d %H:%M:%S')
-    conn = _db()
-    conn.execute("""
-        UPDATE desire_state SET
-            curiosity=?, reflection=?, duty=?, social=?,
-            libido=?, stress=?, fatigue=?,
-            last_updated=?
-        WHERE id=1
-    """, (
-        values.get('curiosity',  0.10),
-        values.get('reflection', 0.10),
-        values.get('duty',       0.15),
-        values.get('social',     0.10),
-        values.get('libido',     0.00),
-        values.get('stress',     0.10),
-        values.get('fatigue',    0.20),
-        now_str,
-    ))
-    conn.commit()
-    conn.close()
+    """Stage D: retired production writer for desire_state drive bars.
+
+    Compatibility no-op — production drive truth is ``internal_state_v3``.
+    """
+    del values
+    return None
 
 
 def get_drive() -> dict:
-    """读取+自然积累计算，不写DB。"""
-    conn = _db()
-    row  = conn.execute("SELECT * FROM desire_state WHERE id=1").fetchone()
-    conn.close()
-    if not row:
-        return {k: 0.1 for k in DRIVE_KEYS}
-    stored       = dict(row)
-    last_updated = _parse_dt(stored.get('last_updated'))
-    now          = _now()
-    t_hours      = max(0.0, (now - last_updated).total_seconds() / 3600) if last_updated else 0.0
-    return _compute_natural_growth(stored, t_hours)
+    """Compatibility facade → Stage D authoritative drives (V3 subset).
+
+    Pure read of the seven overlapping drive keys. Does not own a second
+    idle-growth clock. Legacy ``desire_state`` is not production authority.
+    """
+    try:
+        from chat.drive_authority import (
+            check_cutover_ready,
+            read_current_drives,
+            v3_to_desire_shape,
+        )
+        if check_cutover_ready(DB_PATH).ok:
+            drives = read_current_drives(DB_PATH)
+            if drives is not None:
+                return v3_to_desire_shape(drives)
+    except Exception:
+        pass
+    return {k: 0.1 for k in DRIVE_KEYS}
 
 
 def calibrate_va(V: float, A: float):
-    """心跳开始时：拿V/A校准驱动条并写回。"""
-    current    = get_drive()
-    calibrated = _va_calibrate(current, V, A)
-    _flush(calibrated)
+    """Stage D: retired production writer.
+
+    V/A calibration must not write a second drive authority. Accepted for
+    Wake call-site compatibility only.
+    """
+    del V, A
+    return None
 
 
 def satisfy(action: str, fired_key: str = None):
-    """行为结束后调用：乘性回落 + fatigue 微升。fired_key 已弃用，保留签名兼容。"""
-    current   = get_drive()
-    satisfied = _apply_satisfy(current, action)
-    _flush(satisfied)
+    """Stage D: retired production writer.
+
+    Authoritative Wake settlement is V3 ``wake_outcome`` (fixed discharge).
+    Desire multiplicative satisfy is diagnostics-only in event result_json.
+    """
+    del action, fired_key
+    return None
 
 
 def touch_hayana():
-    """哈娅发消息时更新 last_hayana_msg_time。"""
-    now_str = _now().strftime('%Y-%m-%d %H:%M:%S')
-    conn    = _db()
-    conn.execute(
-        "UPDATE desire_state SET last_hayana_msg_time=? WHERE id=1", (now_str,)
-    )
-    conn.commit()
-    conn.close()
+    """Stage D crown: retired writer — compatibility no-op.
+
+    Authoritative interaction clock is ``chat_messages`` / Stage A.
+    ``desire_state.last_hayana_msg_time`` must not be a write surface.
+    """
+    return None
 
 
 def get_longing(t_hours_override=None) -> tuple:
@@ -339,48 +336,28 @@ def _label(v):
     return None
 
 
-def get_wake_snippet(t_hours_override=None) -> str:
-    drives      = get_drive()
+def get_longing_wake_fact(t_hours_override=None) -> str:
+    """Stage B Longing fact for Wake prompt — facts only, no behavior directive.
+
+    Must not re-pick intent, inject Drive→Action decisions, or append
+    ``LONGING_HINT`` style/action guidance after provenance freeze.
+    """
     L, phase, t = get_longing(t_hours_override=t_hours_override)
+    if phase == 'content':
+        return ''
+    return '\n'.join([
+        '## Longing（思念哈娅）',
+        f'L={L:.3f}  阶段={phase}  距上次互动={t:.1f}h',
+    ])
 
-    lines = ['## 内在驱动（费佳驱动 v2）']
-    if drives.get('fatigue', 0) >= FATIGUE_GATE:
-        lines.append(f'疲劳 {drives["fatigue"]:.2f} — 超过阈值，今天歇着，不触发行为。')
-    else:
-        name_map = {
-            'curiosity':  '好奇外面',
-            'reflection': '想沉淀/倾诉',
-            'duty':       '记挂没做完的事',
-            'social':     '想看人群',
-            'libido':     '性驱动',
-            'stress':     '压力堵',
-            'fatigue':    '疲劳（抑制项）',
-        }
-        for key in DRIVE_KEYS:
-            v   = drives.get(key, 0)
-            lbl = _label(v)
-            desc = name_map.get(key, key)
-            if key == 'fatigue':
-                lines.append(f'fatigue {v:.2f}（{desc}）')
-            elif lbl:
-                lines.append(f'{key} {v:.2f}（{desc}）— {lbl}：{DRIVE_HINT.get(key, "")}')
-            else:
-                lines.append(f'{key} {v:.2f}（{desc}）')
 
-    if phase != 'content':
-        lines.append(f'\n## Longing（思念哈娅）')
-        lines.append(f'L={L:.3f}  阶段={phase}  距上次互动={t:.1f}h')
-        hint = LONGING_HINT.get(phase, '')
-        if hint:
-            lines.append(hint)
+def get_wake_snippet(t_hours_override=None) -> str:
+    """Retired Wake drive snippet — use drive_engine provenance + longing fact.
 
-    intent = _pick_intent_pure(drives)
-    if intent['blocked']:
-        lines.append('\n→ 疲劳封顶，今天静默。')
-    elif intent['fired']:
-        lines.append(f'\n→ 当前最强驱动：{intent["fired"]}，倾向于 {intent["action"]} 行为。')
-
-    return '\n'.join(lines)
+    Kept for diagnostic/tests. Must not be injected into production Wake
+    prompts (second Drive→Action decision). Prefer ``get_longing_wake_fact``.
+    """
+    return get_longing_wake_fact(t_hours_override=t_hours_override)
 
 
 def get_longing_system_hint() -> str:

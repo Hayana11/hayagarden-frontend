@@ -317,10 +317,12 @@ class AffectBondAuthorityTests(unittest.TestCase):
         del mid
 
     def test_case7_no_drive_product_semantics_via_facade(self):
-        conn = sqlite3.connect(self.db_path)
-        conn.row_factory = sqlite3.Row
-        before = dict(conn.execute('SELECT * FROM drive_state WHERE id=1').fetchone())
-        conn.close()
+        """Bond facade must not invent Drive aliases (Stage D projection ok).
+
+        Stage C originally asserted drive_state was untouched. Stage D projects
+        V3 drive bases into drive_state after user_rule; that is one-way
+        compatibility, not Bond→Drive product semantics.
+        """
         mid = self._insert_user('抱抱', created_at='2026-08-04 16:10:00')
         aba.apply_scored_observation(
             message_id=mid,
@@ -331,11 +333,24 @@ class AffectBondAuthorityTests(unittest.TestCase):
             },
             scored_at='2026-08-04 16:10:05', db_path=self.db_path,
         )
+        desire = ee.get_desire()
+        self.assertEqual(set(desire.keys()), {'p', 'i', 'c'})
+        v3 = aba.read_v3_state(self.db_path)
+        self.assertIsNotNone(v3)
+        # No field alias: Bond intimacy/passion ≠ Drive attachment/libido.
+        self.assertNotAlmostEqual(
+            float(v3['intimacy']), float(v3['attachment']), places=4,
+        )
+        self.assertNotAlmostEqual(
+            float(v3['passion']), float(v3['libido']), places=4,
+        )
         conn = sqlite3.connect(self.db_path)
-        conn.row_factory = sqlite3.Row
-        after = dict(conn.execute('SELECT * FROM drive_state WHERE id=1').fetchone())
+        row = conn.execute(
+            'SELECT attachment, libido FROM drive_state WHERE id=1'
+        ).fetchone()
         conn.close()
-        self.assertEqual(before, after)
+        self.assertAlmostEqual(float(row[0]), float(v3['attachment']), places=4)
+        self.assertAlmostEqual(float(row[1]), float(v3['libido']), places=4)
 
 
 class CutoverGateTests(unittest.TestCase):

@@ -157,139 +157,112 @@ def _get_emotion_factors():
 
 
 # ═══════════════════════════════════════════════════════════
-# 懒积累：读取时根据时间差计算当前值
+# Stage D: production read = V3; legacy writers retired
 # ═══════════════════════════════════════════════════════════
 
 def get_drive() -> dict:
+    """Compatibility facade → Stage D authoritative eight drives (V3).
+
+    Pure read: never bootstraps or mutates. Time evolution is owned solely by
+    ``internal_state_events.materialize_drives``. Legacy ``drive_state`` is not
+    production authority.
     """
-    返回所有维度的实时值（含自然积累 + 情绪联动）
-    不写DB，纯读取计算
-    """
-    conn = _db()
-    row = conn.execute("SELECT * FROM drive_state WHERE id=1").fetchone()
-    conn.close()
-    if not row:
-        return {k: 0.1 for k in DRIVE_KEYS}
+    try:
+        from chat.drive_authority import (
+            check_cutover_ready,
+            read_current_drives,
+            v3_to_drive_engine_shape,
+        )
+        if check_cutover_ready(DB_PATH).ok:
+            drives = read_current_drives(DB_PATH)
+            if drives is not None:
+                return v3_to_drive_engine_shape(drives)
+    except Exception:
+        pass
+    return {k: 0.1 for k in DRIVE_KEYS}
 
-    stored = dict(row)
-    last_updated = _parse_dt(stored.get('last_updated'))
-    now = _now()
-
-    if last_updated:
-        t_hours = max(0.0, (now - last_updated).total_seconds() / 3600)
-    else:
-        t_hours = 0.0
-
-    factors = _get_emotion_factors()
-
-    result = {}
-    for key in DRIVE_KEYS:
-        base = float(stored.get(key, 0.1))
-
-        if key == 'fatigue':
-            eq = FATIGUE_EQ
-            k  = FATIGUE_K
-            val = eq + (base - eq) * math.exp(-k * t_hours)
-            na_adj = factors.get('na', 0.2) * 0.06
-            val += na_adj
-            result[key] = round(min(1.0, max(0.0, val)), 4)
-        else:
-            cap = DRIVE_CAP.get(key, 0.65)
-            gk  = DRIVE_GROWTH_K.get(key, 0.05)
-            if key in CAP_BOOST:
-                fk, coef = CAP_BOOST[key]
-                cap = min(0.92, cap + factors.get(fk, 0.0) * coef)
-            val = cap - (cap - base) * math.exp(-gk * t_hours)
-            result[key] = round(min(1.0, max(0.0, val)), 4)
-
-    return result
-
-
-# ═══════════════════════════════════════════════════════════
-# 写回：把当前实时值存DB（刷新 last_updated）
-# ═══════════════════════════════════════════════════════════
 
 def _flush(values: dict):
-    now_str = _now().strftime('%Y-%m-%d %H:%M:%S')
-    conn = _db()
-    conn.execute("""
-        UPDATE drive_state SET
-            attachment=?, curiosity=?, reflection=?, social=?,
-            duty=?, libido=?, stress=?, fatigue=?,
-            last_updated=?
-        WHERE id=1
-    """, (
-        values['attachment'], values['curiosity'],
-        values['reflection'], values['social'],
-        values['duty'],       values['libido'],
-        values['stress'],     values['fatigue'],
-        now_str,
-    ))
-    conn.commit()
-    conn.close()
+    """Stage D: retired production writer.
 
+    Legacy ``drive_state`` snapshot is not authority. Accepted for call-site
+    compatibility only; does not mutate V3 truth.
+    """
+    del values
+    return None
 
-# ═══════════════════════════════════════════════════════════
-# discharge：wake行为后降低对应维度
-# ═══════════════════════════════════════════════════════════
 
 def discharge(fired_key: str):
+    """Stage D: retired production writer.
+
+    Authoritative discharge is ``wake_outcome`` / ``user_rule`` on V3.
     """
-    唤醒行为完成后调用：
-    - fired_key 对应的 drive 降低 DISCHARGE 量
-    - fatigue 微升 FATIGUE_COST
-    """
-    current = get_drive()   # 先拿到积累后的实时值
-    if fired_key in DISCHARGE and fired_key != 'fatigue':
-        current[fired_key] = max(0.0, current[fired_key] - DISCHARGE[fired_key])
-    # fatigue 微升（消耗精力）
-    current['fatigue'] = min(1.0, current['fatigue'] + FATIGUE_COST)
-    _flush(current)
+    del fired_key
+    return None
+
+
+_FIRED_PRIMARY_ENUM = frozenset({
+    'attachment', 'curiosity', 'reflection', 'social',
+    'duty', 'libido', 'stress',
+})
 
 
 def infer_fired_drive_for_action(action: str, thoughts: str = '') -> Optional[str]:
-    """Infer which drive fired for a wake action without mutating state."""
-    if action == 'none':
-        return None
-    current = get_drive()
-    candidates = {k: current[k] for k in DRIVE_KEYS if k != 'fatigue'}
-    top_key = max(candidates, key=lambda k: candidates[k])
-    if action == 'explore':
-        for k in ['curiosity', 'reflection', 'social']:
-            if current[k] == candidates.get(top_key, 0):
-                top_key = k
-                break
-        else:
-            top_key = 'curiosity'
-    return top_key
+    """Retired reverse-causality helper — NOT production provenance.
+
+    Stage D R3: Settlement must consume decision-time provenance frozen from
+    ``decide()`` before Action. This function must not be used to derive
+    ``fired_drive`` for ``wake_outcome``.
+    """
+    del action, thoughts
+    return None
+
+
+def freeze_decision_provenance(decision: Optional[dict] = None) -> dict:
+    """Freeze decision-time drive provenance from a legacy ``decide()`` snapshot.
+
+    Must be captured before Action generation. Settlement consumes
+    ``primary_drive`` only; contributors are audit facts from the same
+    snapshot. Missing primary_drive means fail closed for non-none settlement.
+    """
+    snap = decision if isinstance(decision, dict) else decide()
+    drive = snap.get('drive') if isinstance(snap.get('drive'), dict) else get_drive()
+    candidates = {
+        k: float(drive.get(k, 0) or 0)
+        for k in DRIVE_KEYS
+        if k != 'fatigue' and float(drive.get(k, 0) or 0) >= TRIGGER_THRESHOLD
+    }
+    ordered = sorted(candidates.keys(), key=lambda k: (-candidates[k], k))
+    primary = snap.get('fired')
+    if primary is not None and primary not in _FIRED_PRIMARY_ENUM:
+        primary = None
+    contributors = [k for k in ordered if k != primary]
+    return {
+        'source': 'drive_engine.decide',
+        'captured_at': _now().strftime('%Y-%m-%d %H:%M:%S'),
+        'primary_drive': primary,
+        'contributors': contributors,
+        'blocked': bool(snap.get('blocked')),
+        'suggested_action': snap.get('action'),
+    }
 
 
 def discharge_by_action(action: str, thoughts: str = ''):
-    """
-    根据 wake 的 action 类型自动推断 fired_key
-    thoughts 里如果有 libido 相关词也算
-    """
-    if action == 'none':
-        # 决定不打扰她 = 在休息，fatigue 微降
-        _cur = get_drive()
-        _cur['fatigue'] = max(0.0, _cur['fatigue'] - 0.04)
-        _flush(_cur)
-        return
+    """Stage D: retired production writer.
 
-    top_key = infer_fired_drive_for_action(action, thoughts=thoughts)
-    if top_key is None:
-        return
-    current = get_drive()
-    current[top_key] = max(0.0, current[top_key] - DISCHARGE.get(top_key, 0.4))
-    current['fatigue'] = min(1.0, current['fatigue'] + FATIGUE_COST)
-    _flush(current)
+    Wake settlement must go through ``chat.drive_authority`` → V3
+    ``apply_outcome``. This entry no longer mutates production drives.
+    """
+    del action, thoughts
+    return None
 
 
 def rest():
-    """哈娅在线时，fatigue 缓慢恢复（她的存在缓解疲劳）"""
-    current = get_drive()
-    current['fatigue'] = max(0.0, current['fatigue'] - 0.12)
-    _flush(current)
+    """Stage D: retired production writer.
+
+    User-message fatigue restore is owned by Canonical ``user_rule`` on V3.
+    """
+    return None
 
 
 # ═══════════════════════════════════════════════════════════
@@ -297,28 +270,39 @@ def rest():
 # ═══════════════════════════════════════════════════════════
 
 def decide() -> dict:
-    """
-    返回 {fired: key_or_None, action: str, hint: str, blocked: bool}
-    blocked=True 意味着 fatigue 超过阈值，什么都不做
+    """Decision-time snapshot for Wake prompt + Settlement provenance.
+
+    返回 {fired, action, hint, blocked, drive, contributors}
+    ``fired`` is the primary drive at this snapshot. Callers that need
+    Settlement provenance must freeze via ``freeze_decision_provenance``
+    before Action generation — never re-derive from the final Action.
     """
     drive = get_drive()
 
     if drive['fatigue'] >= FATIGUE_GATE:
-        return {'fired': None, 'action': 'none', 'hint': '太累了，歇着。', 'blocked': True, 'drive': drive}
+        return {
+            'fired': None, 'action': 'none', 'hint': '太累了，歇着。',
+            'blocked': True, 'drive': drive, 'contributors': [],
+        }
 
     candidates = {k: drive[k] for k in DRIVE_KEYS
                   if k != 'fatigue' and drive[k] >= TRIGGER_THRESHOLD}
 
     if not candidates:
-        return {'fired': None, 'action': 'none', 'hint': '', 'blocked': False, 'drive': drive}
+        return {
+            'fired': None, 'action': 'none', 'hint': '',
+            'blocked': False, 'drive': drive, 'contributors': [],
+        }
 
-    top_key = max(candidates, key=lambda k: candidates[k])
+    ordered = sorted(candidates.keys(), key=lambda k: (-candidates[k], k))
+    top_key = ordered[0]
     return {
         'fired':   top_key,
         'action':  WANT_ACTION.get(top_key, 'none'),
         'hint':    DRIVE_PROMPT_HINT.get(top_key, ''),
         'blocked': False,
         'drive':   drive,
+        'contributors': ordered[1:],
     }
 
 
@@ -341,9 +325,14 @@ def _label(v):
     return None
 
 
-def get_wake_snippet() -> str:
-    """注入到 wake prompt 的完整驱动条状态"""
-    drive = get_drive()
+def get_wake_snippet(decision: Optional[dict] = None) -> str:
+    """注入到 wake prompt 的完整驱动条状态。
+
+    Pass the same ``decide()`` snapshot used for provenance freeze so prompt
+    and Settlement share one Decision-time fact (no second grow/decide).
+    """
+    snap = decision if isinstance(decision, dict) else decide()
+    drive = snap.get('drive') if isinstance(snap.get('drive'), dict) else get_drive()
     lines = ['## 内在需求（驱动条）']
 
     if drive['fatigue'] >= FATIGUE_GATE:
@@ -370,12 +359,13 @@ def get_wake_snippet() -> str:
         else:
             lines.append(f'{key} {val:.2f}（{desc}）')
 
-    # 决策提示
-    decision = decide()
-    if decision['blocked']:
+    # 决策提示（使用同一 snapshot，不二次 decide）
+    if snap.get('blocked'):
         lines.append('\n→ 疲劳封顶，今天静默。')
-    elif decision['fired']:
-        lines.append(f'\n→ 当前最强需求：{decision["fired"]}，倾向于 {decision["action"]} 行为。')
+    elif snap.get('fired'):
+        lines.append(
+            f'\n→ 当前最强需求：{snap["fired"]}，倾向于 {snap.get("action", "none")} 行为。'
+        )
 
     return '\n'.join(lines)
 

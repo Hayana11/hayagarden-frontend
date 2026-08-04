@@ -6251,7 +6251,7 @@ def _wake_build_system_for_plan(
         'self_trigger_note': data.get('self_trigger_note', ''),
     }
     system = append_system_text(system, build_prompt_suffix(mode, _wake_ctx))
-    system = inject_snippets(
+    system, decision_provenance = inject_snippets(
         system, mode,
         desire_driven=_get_desire_driven(),
         longing_enabled=_get_longing_enabled(),
@@ -6286,7 +6286,7 @@ def _wake_build_system_for_plan(
                     '把画面和一句话一起发给她。这不是任务，是你自己想。' % _att))
         except Exception:
             pass
-    return system, surfaced_desire_ids
+    return system, surfaced_desire_ids, decision_provenance
 
 
 def _wake_trigger_message(mode, ritual_type):
@@ -6336,7 +6336,7 @@ def _wake_inspect_only(data, mode, activity_desc, ritual_type):
         t2_hours = 0.0
         t_hours = 0.0
 
-    system, _ = _wake_build_system_for_plan(
+    system, _, _decision_prov = _wake_build_system_for_plan(
         mode=mode,
         activity_desc=activity_desc,
         ritual_type=ritual_type,
@@ -6348,6 +6348,7 @@ def _wake_inspect_only(data, mode, activity_desc, ritual_type):
         allow_side_effects=False,
         dry_run=False,
     )
+    del _decision_prov
     msgs = [{'role': 'user', 'content': _wake_trigger_message(mode, ritual_type)}]
     plan = _wake_runners.inspect_wake_plan(
         mode=mode,
@@ -6394,6 +6395,17 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
     wake_run_id = str(data.get('wake_run_id') or '').strip()
     # Live path only: flush drive / calibrate / dream consume / mark run_id.
     live = not dry_run
+
+    # Stage D N3: live settlement modes require outcome identity before any
+    # model call / Action write. dry_run / dream / summarize may omit it.
+    from wake.wake_run_id import missing_live_wake_run_id
+    if missing_live_wake_run_id(mode, dry_run=dry_run, wake_run_id=wake_run_id):
+        return jsonify({
+            'ok': False,
+            'error': 'wake_run_id required for live settlement wake',
+            'reason': 'missing_wake_run_id',
+            'mode': mode,
+        }), 400
 
     # dry_run must not mark — but a previously completed real run with the same
     # id should still skip.
@@ -6491,7 +6503,7 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
             except Exception:
                 pass
 
-    system, surfaced_desire_ids = _wake_build_system_for_plan(
+    system, surfaced_desire_ids, decision_provenance = _wake_build_system_for_plan(
         mode=mode,
         activity_desc=activity_desc,
         ritual_type=ritual_type,
@@ -6563,18 +6575,19 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
             'tools': [],
         })
 
-    # action 执行：写 wake_log / chat_messages / diary / discharge drive
+    # action 执行：wake_log / chat / diary + V3 wake_outcome 同事务
     from wake.executor import execute as _wake_exec
     desire_driven = _get_desire_driven()
+    # Stage D R3/N5: Settlement needs the Decision provenance *object*.
+    # primary_drive may be None for a valid Action=none freeze; that is not
+    # the same as freeze failure (decision_provenance is None).
+    provenance_present = isinstance(decision_provenance, dict)
     fired_drive = None
-    if wake_run_id and mode not in ('dream', 'summarize'):
-        try:
-            import internal_state_shadow as _shadow_wake
-            if _shadow_wake.is_shadow_enabled() and action != 'none':
-                import drive_engine as _de_infer
-                fired_drive = _de_infer.infer_fired_drive_for_action(action)
-        except Exception:
-            fired_drive = None
+    if provenance_present:
+        fired_drive = decision_provenance.get('primary_drive')
+    # Sole authoritative wake_outcome mutation path: executor txn.
+    # Cutover readiness is enforced inside apply_wake_outcome_on_conn
+    # on the same connection (Stage D N4). Shadow must not apply_outcome.
     _wake_exec(
         action, thoughts, c_text, mode,
         get_db_fn=get_db,
@@ -6584,20 +6597,10 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
         cache_info=wake_cache_info,
         wake_run_id=wake_run_id,
         window_identity=_wake_window_identity,
+        settle_fired_drive=fired_drive,
+        settle_provenance_present=provenance_present,
+        settle_user_idle_hours=t2_hours,
     )
-    try:
-        import internal_state_shadow as _shadow_wake
-        _shadow_wake.record_wake_outcome_shadow_if_enabled(
-            wake_run_id=wake_run_id,
-            mode=mode,
-            action=action,
-            fired_drive=fired_drive,
-            desire_driven=desire_driven,
-            user_idle_hours=t2_hours,
-            db_path=DB_PATH,
-        )
-    except Exception:
-        pass
     _wake_run_id_mark(wake_run_id)
 
     return jsonify({

@@ -1,16 +1,17 @@
-"""Internal State v3 — Phase 1A-1/1A-2/1A-3 业务事件（试管）
+"""Internal State v3 — Phase 1A-1/1A-2/1A-3 + Stage D drive events
 
 公开接口：
   - ``plan_user_message_transition`` / ``observe_user_message``
   - ``plan_scored_transition`` / ``observe_scored`` / ``get_scored_event_stats``
   - ``plan_outcome_transition`` / ``apply_outcome``
+  - ``materialize_bond`` / ``materialize_drives``
 
 严格不做：
   - 不接 gateway / app / chat / SSE / Wake / prompt / wake.executor
   - 不 import emotion_engine / drive_engine / desire / gateway / wake
   - 不调用 DeepSeek / 渐变脑 / score_async
   - 不启用 reunion boost / 新 attachment ratio 权威参数
-  - 不停止旧 discharge / satisfy（本 PR 无生产调用点）
+  - 不实现 Behavior Authority / Planner / Action Gate
 """
 
 from __future__ import annotations
@@ -333,6 +334,26 @@ def materialize_bond(state: Mapping[str, Any], observed_at: str) -> dict:
     and must not own a second τ table.
     """
     return _materialize_bond(state, observed_at)
+
+
+def materialize_drives(
+    state: Mapping[str, Any],
+    *,
+    observed_at: str,
+    longing_for_boost: float,
+    passion_for_boost: float,
+) -> dict:
+    """Canonical current eight-drive materialization (Stage D authority).
+
+    Sole production Drive time-evolution math. Compatibility facades must
+    delegate here and must not own a second growth/decay clock.
+    """
+    return _materialize_drives(
+        state,
+        created_at=observed_at,
+        longing_for_boost=longing_for_boost,
+        passion_for_boost=passion_for_boost,
+    )
 
 
 def _materialize_drives(
@@ -1527,12 +1548,15 @@ def apply_outcome(
     user_idle_hours: float,
     outcome_at: str,
     expected_state_version: Optional[int] = None,
+    join_transaction: bool = False,
 ) -> ApplyResult:
     """Wake 结算事件 ``wake_outcome:{wake_run_id}``：一票只进结算室一次。
 
     ``payload_json/hash`` 仅含稳定观察输入；``result_json`` 保存事务内
     基于最新 state 算出的 diagnostics（duplicate 回放原值，不重算覆盖）。
     version_conflict 不消费 key，重读版本后可同 key 重试。
+
+    ``join_transaction=True``：加入外层 Action 事务（见 store）。
     """
     rid = _require_wake_run_id(wake_run_id)
     exec_act = _require_executor_action(executor_action)
@@ -1584,6 +1608,7 @@ def apply_outcome(
         payload=payload,
         decide=decide,
         expected_state_version=expected_state_version,
+        join_transaction=join_transaction,
     )
 
 
@@ -1598,6 +1623,7 @@ __all__ = [
     'apply_outcome',
     'get_scored_event_stats',
     'materialize_bond',
+    'materialize_drives',
     'normalize_scored_scores',
     'observe_scored',
     'observe_user_message',

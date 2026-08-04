@@ -384,6 +384,9 @@ def _existing_event_result(
     )
 
 
+_JOIN_SAVEPOINT = 'isv3_cond_apply'
+
+
 def apply_conditional_state_update(
     conn: sqlite3.Connection,
     *,
@@ -393,6 +396,7 @@ def apply_conditional_state_update(
     payload: Mapping[str, Any],
     decide: Callable[[dict], ConditionalDecision],
     expected_state_version: Optional[int] = None,
+    join_transaction: bool = False,
 ) -> ApplyResult:
     """在同一 ``BEGIN IMMEDIATE`` 内由 ``decide(state)`` 裁决 applied / stale。
 
@@ -401,13 +405,23 @@ def apply_conditional_state_update(
       ``state_version_before == state_version_after``；原因写入 ``error``
     - ``version_conflict`` / 缺状态：**不消费** event_key
     - 同 key 幂等语义与 ``apply_state_update`` 一致
+
+    ``join_transaction=True``：加入调用方已有事务（SAVEPOINT），成功时
+    RELEASE、失败时 ROLLBACK TO，绝不 COMMIT/ROLLBACK 外层事务。供 Wake
+    Action outcome 与 ``wake_outcome`` 同事务原子提交。
     """
     if not event_key:
         raise StoreError('event_key required')
     if event_type is None or event_type == '':
         raise StoreError('event_type required')
 
-    _require_clean_write_connection(conn)
+    if join_transaction:
+        if not conn.in_transaction:
+            raise StoreError(
+                'join_transaction requires an active outer transaction'
+            )
+    else:
+        _require_clean_write_connection(conn)
 
     source_id_norm = _normalize_source_id(source_id)
     payload_obj = dict(payload)
@@ -415,8 +429,30 @@ def apply_conditional_state_update(
     p_hash = _payload_hash_from_json(p_json)
     now = _now_beijing()
 
+    def _finish_ok() -> None:
+        if join_transaction:
+            conn.execute(f'RELEASE {_JOIN_SAVEPOINT}')
+        else:
+            conn.execute('COMMIT')
+
+    def _finish_abort() -> None:
+        if join_transaction:
+            try:
+                conn.execute(f'ROLLBACK TO {_JOIN_SAVEPOINT}')
+            except sqlite3.Error:
+                pass
+            try:
+                conn.execute(f'RELEASE {_JOIN_SAVEPOINT}')
+            except sqlite3.Error:
+                pass
+        else:
+            _rollback(conn)
+
     try:
-        _begin_immediate(conn)
+        if join_transaction:
+            conn.execute(f'SAVEPOINT {_JOIN_SAVEPOINT}')
+        else:
+            _begin_immediate(conn)
 
         existing = _fetchone_dict(
             conn,
@@ -426,7 +462,7 @@ def apply_conditional_state_update(
             (event_key,),
         )
         if existing is not None:
-            conn.execute('COMMIT')
+            _finish_ok()
             return _existing_event_result(
                 existing,
                 event_type=event_type,
@@ -436,7 +472,7 @@ def apply_conditional_state_update(
 
         state = read_state(conn)
         if state is None:
-            _rollback(conn)
+            _finish_abort()
             return ApplyResult(
                 status='failed',
                 state_version_before=None,
@@ -452,7 +488,7 @@ def apply_conditional_state_update(
                 f'version conflict: expected {expected_state_version}, '
                 f'current {version_before}'
             )
-            _rollback(conn)
+            _finish_abort()
             return ApplyResult(
                 status='version_conflict',
                 state_version_before=version_before,
@@ -485,7 +521,7 @@ def apply_conditional_state_update(
                 (event_key, event_type, source_id_norm, p_json, p_hash,
                  version_before, version_before, now, decision.error, r_json),
             )
-            conn.execute('COMMIT')
+            _finish_ok()
             return ApplyResult(
                 status='stale_skipped',
                 state_version_before=version_before,
@@ -534,7 +570,7 @@ def apply_conditional_state_update(
             (event_key, event_type, source_id_norm, p_json, p_hash,
              version_before, version_after, now, r_json),
         )
-        conn.execute('COMMIT')
+        _finish_ok()
         return ApplyResult(
             status='applied',
             state_version_before=version_before,
@@ -543,7 +579,7 @@ def apply_conditional_state_update(
             result=result_obj,
         )
     except VersionConflictError as exc:
-        _rollback(conn)
+        _finish_abort()
         return ApplyResult(
             status='version_conflict',
             state_version_before=None,
@@ -552,7 +588,7 @@ def apply_conditional_state_update(
             error=str(exc),
         )
     except Exception:
-        _rollback(conn)
+        _finish_abort()
         raise
 
 

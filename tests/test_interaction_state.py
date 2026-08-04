@@ -146,7 +146,8 @@ class InteractionClockTests(unittest.TestCase):
 
 
 class TouchOnceTests(unittest.TestCase):
-    def test_touch_calls_emotion_desire_drive_once(self):
+    def test_touch_calls_emotion_desire_once_without_drive_writers(self):
+        """Stage D: touch only refreshes compatibility clocks; no drive writers."""
         calls = []
 
         class EE:
@@ -178,7 +179,9 @@ class TouchOnceTests(unittest.TestCase):
             'drive_engine': DE,
         }):
             touch_user_interaction(lambda: None)
-        self.assertEqual(calls, ['emotion', 'desire', 'rest', ('discharge', 'attachment')])
+        self.assertEqual(calls, ['emotion', 'desire'])
+        self.assertNotIn('rest', calls)
+        self.assertNotIn(('discharge', 'attachment'), calls)
 
     def test_insert_user_message_touches_once(self):
         import moments_turn

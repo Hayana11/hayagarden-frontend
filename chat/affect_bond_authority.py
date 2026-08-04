@@ -55,19 +55,20 @@ def read_v3_state(db_path: Optional[str] = None) -> Optional[dict]:
                 pass
 
 
-def check_cutover_ready(db_path: Optional[str] = None) -> SimpleNamespace:
-    """Fail-closed Stage C gate. Read-only — never bootstraps or mutates.
+def check_cutover_ready_on_conn(
+    conn,
+    db_path: Optional[str] = None,
+) -> SimpleNamespace:
+    """Read-only cutover gate on an open connection (no COMMIT/bootstrap).
 
-    Requires production bootstrap provenance, no unresolved proof gap, and
-    no watermark lag (``last_scored_message_id >= proof max`` when proof exists).
+    Same facts as ``check_cutover_ready``: bootstrap provenance, unresolved
+    proof gap, watermark lag. Safe to call inside an outer IMMEDIATE txn.
     """
     import internal_state_shadow as shadow
     import internal_state_store as store
 
     path = memories_db_path(db_path)
-    conn = None
     try:
-        conn = store.open_store(path)
         state, _event, gate = shadow._read_bootstrap_gate(conn)
         if gate == 'missing':
             return SimpleNamespace(
@@ -84,7 +85,6 @@ def check_cutover_ready(db_path: Optional[str] = None) -> SimpleNamespace:
                 ok=False, status='proof_gap',
                 error='unresolved score proof gap; refusing authority',
             )
-        # Watermark health: refuse lag when proof table can speak.
         if shadow.score_proof_schema_ready(conn):
             try:
                 proof_max = shadow.resolve_scored_watermark(conn)
@@ -106,6 +106,26 @@ def check_cutover_ready(db_path: Optional[str] = None) -> SimpleNamespace:
                         ),
                     )
         return SimpleNamespace(ok=True, status='ready', error=None)
+    except Exception as exc:
+        _LOG.warning('check_cutover_ready_on_conn failed: %s', exc)
+        return SimpleNamespace(
+            ok=False, status='failed', error=str(exc),
+        )
+
+
+def check_cutover_ready(db_path: Optional[str] = None) -> SimpleNamespace:
+    """Fail-closed Stage C gate. Read-only — never bootstraps or mutates.
+
+    Requires production bootstrap provenance, no unresolved proof gap, and
+    no watermark lag (``last_scored_message_id >= proof max`` when proof exists).
+    """
+    import internal_state_store as store
+
+    path = memories_db_path(db_path)
+    conn = None
+    try:
+        conn = store.open_store(path)
+        return check_cutover_ready_on_conn(conn, db_path=path)
     except Exception as exc:
         _LOG.warning('check_cutover_ready failed: %s', exc)
         return SimpleNamespace(
@@ -283,6 +303,11 @@ def apply_user_rule_observation(
                         project_v3_to_emotion_state(db_path)
                     except Exception:
                         pass
+                    try:
+                        from chat.drive_authority import project_v3_drive_compatibility
+                        project_v3_drive_compatibility(db_path)
+                    except Exception:
+                        pass
                 return last
         finally:
             if conn is not None:
@@ -327,6 +352,11 @@ def apply_scored_observation(
                 if last.status in ('applied', 'duplicate', 'stale_skipped'):
                     try:
                         project_v3_to_emotion_state(db_path)
+                    except Exception:
+                        pass
+                    try:
+                        from chat.drive_authority import project_v3_drive_compatibility
+                        project_v3_drive_compatibility(db_path)
                     except Exception:
                         pass
                 return last
