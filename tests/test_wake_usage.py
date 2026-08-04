@@ -106,7 +106,8 @@ class WakeSystemCacheTests(unittest.TestCase):
             get_wake_snippet=lambda decision=None: "drive state",
         )
         desire = types.SimpleNamespace(
-            get_wake_snippet=lambda t_hours_override=None: "desire state"
+            get_longing_wake_fact=lambda t_hours_override=None: "longing fact",
+            get_wake_snippet=lambda t_hours_override=None: "MUST_NOT_INJECT",
         )
         base = [{
             "type": "text",
@@ -117,7 +118,9 @@ class WakeSystemCacheTests(unittest.TestCase):
             result, provenance = inject_snippets(base, "normal", desire_driven=True)
         self.assertIsInstance(result, list)
         self.assertEqual(result[0]["cache_control"], {"type": "ephemeral"})
-        self.assertEqual([row["text"] for row in result[1:]], ["drive state", "desire state"])
+        texts = [row["text"] for row in result[1:]]
+        self.assertEqual(texts, ["drive state", "longing fact"])
+        self.assertNotIn("MUST_NOT_INJECT", texts)
         self.assertEqual(provenance['primary_drive'], 'curiosity')
 
 

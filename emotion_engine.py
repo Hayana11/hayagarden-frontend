@@ -237,13 +237,12 @@ def get_desire() -> dict:
 
 
 def touch_interaction():
-    """记录本次交互时间"""
-    conn = _db()
-    conn.execute(
-        "UPDATE emotion_state SET last_interaction=? WHERE id=1", (_now_str(),)
-    )
-    conn.commit()
-    conn.close()
+    """Stage D crown: retired writer — compatibility no-op.
+
+    Authoritative interaction clock is Stage A ``chat_messages``.
+    ``emotion_state.last_interaction`` is not a production write surface.
+    """
+    return None
 
 
 # ═══════════════════════════════════════════════════════════

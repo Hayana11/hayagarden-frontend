@@ -131,10 +131,18 @@ def inject_snippets(system, mode: str,
     except Exception:
         provenance = None
 
+    # Stage D final Blocker 3: do NOT inject desire.get_wake_snippet().
+    # That path re-reads drives and emits a second Drive→Action decision.
+    # Longing-only fact (Stage B) may still be appended when enabled.
     if desire_driven or longing_enabled:
         try:
             import desire as _des
-            snip = _des.get_wake_snippet(t_hours_override=t_hours_override)
+            if hasattr(_des, 'get_longing_wake_fact'):
+                snip = _des.get_longing_wake_fact(
+                    t_hours_override=t_hours_override,
+                )
+            else:
+                snip = ''
             if snip:
                 system = append_system_text(system, snip)
         except Exception:

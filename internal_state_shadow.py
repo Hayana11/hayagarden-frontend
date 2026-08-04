@@ -3732,36 +3732,23 @@ def apply_outcome_shadow(
     db_path: Optional[str] = None,
     environ: Optional[Mapping[str, str]] = None,
 ) -> ShadowResult:
-    """Shadow ``wake_outcome``。绝不抛向主流程。"""
-    try:
-        if not is_shadow_enabled(environ=environ):
-            return ShadowResult(ok=True, status='disabled')
-        frozen = dict(
-            wake_run_id=wake_run_id,
-            executor_action=executor_action,
-            desire_action=desire_action,
-            fired_drive=fired_drive,
-            desire_driven=desire_driven,
-            user_idle_hours=user_idle_hours,
-            outcome_at=outcome_at,
-        )
+    """Retired: must not apply authoritative ``wake_outcome``.
 
-        def make_runner(expected: Optional[int]):
-            def runner(conn: sqlite3.Connection) -> store.ApplyResult:
-                return events.apply_outcome(
-                    conn,
-                    expected_state_version=expected,
-                    **frozen,
-                )
-            return runner
-
-        return _shadow_call(
-            'apply_outcome_shadow', make_runner,
-            db_path=db_path, environ=environ,
-        )
-    except Exception as exc:  # noqa: BLE001
-        _record_error(f'apply_outcome_shadow: {exc}')
-        return ShadowResult(ok=False, status='failed', error=str(exc))
+    Stage D final Blocker 2 — Shadow is no longer a production mutation
+    entry. Canonical settlement is ``wake.executor`` →
+    ``drive_authority.apply_wake_outcome_on_conn``.
+    """
+    del (
+        wake_run_id, executor_action, desire_action, fired_drive,
+        desire_driven, user_idle_hours, outcome_at, db_path,
+    )
+    if not is_shadow_enabled(environ=environ):
+        return ShadowResult(ok=True, status='disabled')
+    return ShadowResult(
+        ok=True,
+        status='observe_only',
+        error='wake_outcome shadow apply retired; canonical executor path only',
+    )
 
 
 def record_wake_outcome_shadow_if_enabled(
@@ -3775,40 +3762,13 @@ def record_wake_outcome_shadow_if_enabled(
     db_path: Optional[str] = None,
     environ: Optional[Mapping[str, str]] = None,
 ) -> None:
-    """Best-effort wake_outcome capture after legacy executor succeeds."""
+    """Retired production hook — observe-only, never ``events.apply_outcome``."""
+    del action, fired_drive, desire_driven, user_idle_hours, db_path
     if not wake_run_id or mode in ('dream', 'summarize'):
         return
     if not is_shadow_enabled(environ=environ):
         return
-    path = isv3.memories_db_path(db_path)
-    try:
-        outcome_at = _now_beijing()
-        result = apply_outcome_shadow(
-            wake_run_id=wake_run_id,
-            executor_action=action,
-            desire_action=None,
-            fired_drive=fired_drive,
-            desire_driven=desire_driven,
-            user_idle_hours=float(user_idle_hours),
-            outcome_at=outcome_at,
-            db_path=path,
-            environ=environ,
-        )
-        if not result.ok:
-            mark_proof_gap_standalone(
-                db_path=path,
-                failed_message_id=None,
-                error_code='wake_outcome_capture_failed',
-            )
-    except Exception:
-        try:
-            mark_proof_gap_standalone(
-                db_path=path,
-                failed_message_id=None,
-                error_code='wake_outcome_capture_failed',
-            )
-        except Exception:
-            pass
+    # Intentionally no apply_outcome / no proof-gap from shadow settle.
 
 
 def emit_user_rule_if_enabled(

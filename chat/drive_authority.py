@@ -249,10 +249,11 @@ def apply_wake_outcome_best_effort(
     outcome_at: Optional[str] = None,
     db_path: Optional[str] = None,
 ) -> bool:
-    """Best-effort Wake drive settlement.
+    """Standalone best-effort Wake drive settlement (tests / recovery).
 
+    Production Wake path must settle inside ``wake.executor``'s Action
+    transaction via ``apply_wake_outcome_on_conn`` — not this helper.
     Fail closed when non-``none`` action lacks decision-time ``fired_drive``.
-    Never invents Action→Drive provenance.
     """
     if str(executor_action or '').strip() != 'none' and not fired_drive:
         _LOG.warning(
@@ -278,6 +279,57 @@ def apply_wake_outcome_best_effort(
     except Exception as exc:
         _LOG.warning('apply_wake_outcome_best_effort failed: %s', exc)
         return False
+
+
+def apply_wake_outcome_on_conn(
+    conn,
+    *,
+    wake_run_id: str,
+    executor_action: str,
+    desire_action: Optional[str],
+    fired_drive: Optional[str],
+    desire_driven: bool,
+    user_idle_hours: float,
+    outcome_at: Optional[str] = None,
+    max_version_retries: int = 3,
+) -> Any:
+    """Apply ``wake_outcome`` on an open Action transaction (SAVEPOINT join).
+
+    Caller owns BEGIN/COMMIT. Does not invent Action→Drive provenance.
+    Raises ``StoreError`` when non-``none`` lacks ``fired_drive``.
+    """
+    import internal_state_events as events
+    import internal_state_store as store
+
+    if str(executor_action or '').strip() != 'none' and not fired_drive:
+        raise store.StoreError(
+            'missing decision-time provenance; refusing wake_outcome'
+        )
+
+    at = outcome_at or _now_str()
+    last = None
+    for _ in range(max(1, int(max_version_retries))):
+        state = store.read_state(conn)
+        if state is None:
+            raise store.StoreError(
+                'internal_state_v3 missing; refusing wake_outcome on conn'
+            )
+        expected = int(state['state_version'])
+        last = events.apply_outcome(
+            conn,
+            wake_run_id=wake_run_id,
+            executor_action=executor_action,
+            desire_action=desire_action,
+            fired_drive=fired_drive,
+            desire_driven=desire_driven,
+            user_idle_hours=float(user_idle_hours),
+            outcome_at=at,
+            expected_state_version=expected,
+            join_transaction=True,
+        )
+        if last.status != 'version_conflict':
+            return last
+    return last
 
 
 def v3_to_drive_engine_shape(drives: Mapping[str, Any]) -> dict:

@@ -6564,7 +6564,7 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
             'tools': [],
         })
 
-    # action 执行：写 wake_log / chat_messages / diary；drive settlement → V3
+    # action 执行：wake_log / chat / diary + V3 wake_outcome 同事务
     from wake.executor import execute as _wake_exec
     desire_driven = _get_desire_driven()
     # Stage D R3: Settlement consumes Decision-time provenance frozen during
@@ -6572,6 +6572,14 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
     fired_drive = None
     if isinstance(decision_provenance, dict):
         fired_drive = decision_provenance.get('primary_drive')
+    # Sole authoritative wake_outcome mutation path: executor txn.
+    # Shadow must not apply_outcome (Blocker 2).
+    if wake_run_id and mode not in ('dream', 'summarize'):
+        try:
+            from chat.drive_authority import ensure_authority_ready
+            ensure_authority_ready(DB_PATH)
+        except Exception:
+            pass
     _wake_exec(
         action, thoughts, c_text, mode,
         get_db_fn=get_db,
@@ -6581,35 +6589,9 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
         cache_info=wake_cache_info,
         wake_run_id=wake_run_id,
         window_identity=_wake_window_identity,
+        settle_fired_drive=fired_drive,
+        settle_user_idle_hours=t2_hours,
     )
-    # Stage D production Wake settlement → internal_state_v3 wake_outcome
-    if wake_run_id and mode not in ('dream', 'summarize'):
-        try:
-            from chat.drive_authority import apply_wake_outcome_best_effort
-            apply_wake_outcome_best_effort(
-                wake_run_id=wake_run_id,
-                executor_action=action,
-                desire_action=None,
-                fired_drive=fired_drive,
-                desire_driven=desire_driven,
-                user_idle_hours=t2_hours,
-                db_path=DB_PATH,
-            )
-        except Exception:
-            pass
-    try:
-        import internal_state_shadow as _shadow_wake
-        _shadow_wake.record_wake_outcome_shadow_if_enabled(
-            wake_run_id=wake_run_id,
-            mode=mode,
-            action=action,
-            fired_drive=fired_drive,
-            desire_driven=desire_driven,
-            user_idle_hours=t2_hours,
-            db_path=DB_PATH,
-        )
-    except Exception:
-        pass
     _wake_run_id_mark(wake_run_id)
 
     return jsonify({

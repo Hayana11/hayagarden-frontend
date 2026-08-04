@@ -1,9 +1,11 @@
 """
 wake/executor.py
-执行 wake action：写 wake_log、发消息、写日记、discharge drive/desire。
+执行 wake action：写 wake_log、发消息、写日记；Drive Settlement 同事务。
 """
+import datetime
 import json
 import logging
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -15,6 +17,12 @@ def _table_columns(conn, table: str) -> set[str]:
         return set()
 
 
+def _now_beijing_str() -> str:
+    return (
+        datetime.datetime.utcnow() + datetime.timedelta(hours=8)
+    ).strftime('%Y-%m-%d %H:%M:%S')
+
+
 def execute(action: str, thoughts: str, content: str,
             mode: str, get_db_fn,
             desire_driven: bool = False,
@@ -22,13 +30,24 @@ def execute(action: str, thoughts: str, content: str,
             desire_ledger_enabled: bool = False,
             cache_info=None,
             wake_run_id: str = '',
-            window_identity=None):
+            window_identity=None,
+            settle_fired_drive=None,
+            settle_user_idle_hours: float = 0.0,
+            settle_outcome_at: Optional[str] = None):
     """
     action: 'none' | 'message' | 'diary' | 'explore'
     get_db_fn: callable，返回 sqlite3 connection（来自 gateway.get_db）
 
     When soft window is on, ``window_identity`` must be the identity frozen at
-    wake start. Re-validation and wake_log/chat writes share one IMMEDIATE txn.
+    wake start. Re-validation, wake_log/chat writes, and authoritative
+    ``wake_outcome`` share one IMMEDIATE txn when settlement is required.
+
+    Returns:
+      dict with keys:
+        delivered (bool): soft-window allowed real Action surfaces
+        settled (bool): V3 wake_outcome applied/duplicate/stale_skipped
+        settle_status (str|None)
+        gate_reason (str)
     """
     from chat.window_identity import (
         REASON_OK,
@@ -58,8 +77,20 @@ def execute(action: str, thoughts: str, content: str,
     deliver_chat = True
     gate_reason = REASON_OK
     current_norm = None
+    settled = False
+    settle_status = None
+    rid = str(wake_run_id or '').strip()
+    want_settle = bool(rid) and mode not in ('dream', 'summarize')
 
     try:
+        # Schema must exist before the Action txn (executescript commits).
+        if want_settle:
+            try:
+                import internal_state_store as store
+                store.ensure_schema(conn)
+            except Exception as exc:
+                logger.warning('wake settle schema ensure failed: %s', exc)
+
         ensure_wake_window_identity_columns(conn)
         wake_columns = _table_columns(conn, 'wake_log')
         msg_cols = _table_columns(conn, 'chat_messages')
@@ -93,7 +124,6 @@ def execute(action: str, thoughts: str, content: str,
             columns.append('cache_info')
             values.append(cache_info_json)
             placeholders.append('?')
-        rid = str(wake_run_id or '').strip()
         if rid and 'wake_run_id' in wake_columns:
             columns.append('wake_run_id')
             values.append(rid)
@@ -175,6 +205,30 @@ def execute(action: str, thoughts: str, content: str,
                 (content,)
             )
 
+        # Stage D final: Action delivered ⇒ Settlement in same txn.
+        # Gate-blocked Actions must NOT settle.
+        # Missing provenance / settle fault ⇒ raise so Action rolls back
+        # (retryable; never commit Action without durable settlement).
+        if deliver_chat and want_settle:
+            from chat.drive_authority import apply_wake_outcome_on_conn
+            settle_result = apply_wake_outcome_on_conn(
+                conn,
+                wake_run_id=rid,
+                executor_action=action,
+                desire_action=None,
+                fired_drive=settle_fired_drive,
+                desire_driven=bool(desire_driven),
+                user_idle_hours=float(settle_user_idle_hours or 0.0),
+                outcome_at=settle_outcome_at or _now_beijing_str(),
+            )
+            settle_status = getattr(settle_result, 'status', None)
+            if settle_status not in ('applied', 'duplicate', 'stale_skipped'):
+                raise RuntimeError(
+                    f'wake_outcome settle failed: status={settle_status!r} '
+                    f'error={getattr(settle_result, "error", None)!r}'
+                )
+            settled = True
+
         conn.commit()
     except Exception:
         try:
@@ -188,8 +242,15 @@ def execute(action: str, thoughts: str, content: str,
         except Exception:
             pass
 
+    result = {
+        'delivered': bool(deliver_chat),
+        'settled': bool(settled),
+        'settle_status': settle_status,
+        'gate_reason': gate_reason,
+    }
+
     if not deliver_chat:
-        return
+        return result
 
     if desire_ledger_enabled and mode in ('normal', 'nightwatch') and surfaced_desire_ids:
         try:
@@ -198,9 +259,7 @@ def execute(action: str, thoughts: str, content: str,
         except Exception:
             pass
 
-    # Stage D: legacy drive/desire writers are retired no-ops.
-    # Authoritative Wake drive settlement is gateway → drive_authority
-    # → V3 wake_outcome. Keep call sites for compatibility only.
+    # Legacy discharge/satisfy are Stage D retired no-ops (compat call sites).
     if mode not in ('dream', 'summarize'):
         try:
             import drive_engine as _de
@@ -214,3 +273,12 @@ def execute(action: str, thoughts: str, content: str,
                 _des.satisfy(action)
             except Exception:
                 pass
+
+    if settled:
+        try:
+            from chat.drive_authority import project_v3_drive_compatibility
+            project_v3_drive_compatibility()
+        except Exception:
+            pass
+
+    return result

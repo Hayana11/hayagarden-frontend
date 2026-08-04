@@ -705,6 +705,7 @@ class ProvenanceGateTests(unittest.TestCase):
             previous_user_at=scored_at, db_path=self.db_path, environ=ON,
         )
         self.assertEqual(r_user.status, 'applied', msg=r_user.error)
+        # Stage D final: shadow wake_outcome is observe-only (no V3 apply).
         r_out = shadow.apply_outcome_shadow(
             wake_run_id='wake-prov-1',
             executor_action='none',
@@ -716,7 +717,7 @@ class ProvenanceGateTests(unittest.TestCase):
             db_path=self.db_path,
             environ=ON,
         )
-        self.assertEqual(r_out.status, 'applied', msg=r_out.error)
+        self.assertEqual(r_out.status, 'observe_only', msg=r_out.error)
         self.assertTrue(
             shadow.get_shadow_health(
                 db_path=self.db_path, environ=ON).provenance_ok,
@@ -794,6 +795,7 @@ class ProvenanceGateTests(unittest.TestCase):
         finally:
             conn.close()
         before = self._snapshot_db()
+        # Retired shadow apply must not mutate even when provenance is invalid.
         denied = shadow.apply_outcome_shadow(
             wake_run_id='wake-bad',
             executor_action='none',
@@ -805,7 +807,7 @@ class ProvenanceGateTests(unittest.TestCase):
             db_path=self.db_path,
             environ=ON,
         )
-        self.assertEqual(denied.status, 'bootstrap_provenance_invalid')
+        self.assertEqual(denied.status, 'observe_only')
         self.assertEqual(self._snapshot_db(), before)
 
     def _snapshot_db(self):
@@ -892,7 +894,7 @@ class GuardTests(unittest.TestCase):
         self.assertFalse(forbidden & found, msg=f'{forbidden & found}')
 
     def test_wake_outcome_production_call_site_is_gateway_only(self):
-        """wake_outcome 仅 gateway 接线；wake/ 包与 app.py 不得 import shadow。"""
+        """Authoritative wake_outcome is executor txn; no shadow apply in prod."""
         for name in ('app.py',):
             path = Path(ROOT, name)
             if not path.exists():
@@ -906,8 +908,14 @@ class GuardTests(unittest.TestCase):
                 self.assertNotIn('internal_state_shadow', text)
                 self.assertNotIn('apply_outcome_shadow', text)
         gateway = Path(ROOT, 'gateway.py').read_text(encoding='utf-8', errors='replace')
-        self.assertIn('record_wake_outcome_shadow_if_enabled', gateway)
-        self.assertNotIn('apply_outcome_shadow', gateway)
+        decide = gateway.split('def _wake_decide_locked', 1)[1].split('\ndef ', 1)[0]
+        self.assertNotIn('record_wake_outcome_shadow_if_enabled', decide)
+        self.assertNotIn('apply_outcome_shadow', decide)
+        self.assertIn('settle_fired_drive=', decide)
+        self.assertIn(
+            'apply_wake_outcome_on_conn',
+            Path(ROOT, 'wake/executor.py').read_text(encoding='utf-8'),
+        )
 
     def test_public_ensure_bootstrapped_has_no_injection_kwargs(self):
         import inspect

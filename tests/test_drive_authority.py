@@ -565,5 +565,274 @@ class DecisionTimeProvenanceTests(unittest.TestCase):
         self.assertIsNone(row)
 
 
+class StageDFinalWiringTests(unittest.TestCase):
+    """Production wiring blockers after R3 provenance primitive PASS."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.db_path = str(Path(self.tmp.name) / 'memories.db')
+        self._prev_memories = os.environ.get('MEMORIES_DB')
+        self._prev_ee = ee.DB_PATH
+        self._prev_de = de.DB_PATH
+        self._env = mock.patch.dict(os.environ, {
+            'MEMORIES_DB': self.db_path,
+            **SHADOW_ON,
+        }, clear=False)
+        self._env.start()
+        ee.DB_PATH = self.db_path
+        de.DB_PATH = self.db_path
+        _production_bootstrap(self.db_path)
+        # Replace bootstrap stub wake_log with executor-capable schema.
+        conn = sqlite3.connect(self.db_path)
+        conn.executescript(
+            """
+            DROP TABLE IF EXISTS wake_log;
+            DROP TABLE IF EXISTS posts;
+            CREATE TABLE wake_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                thoughts TEXT, action TEXT, content TEXT, consumed INTEGER,
+                woke_at TEXT, wake_run_id TEXT, notified INTEGER,
+                chat_id TEXT, context_id INTEGER, context_epoch INTEGER,
+                resident_generation INTEGER, cache_info TEXT,
+                surfaced_desire_ids TEXT
+            );
+            CREATE TABLE posts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                type TEXT, content TEXT, layer TEXT, author TEXT, processed INTEGER
+            );
+            """
+        )
+        cols = {r[1] for r in conn.execute('PRAGMA table_info(chat_messages)')}
+        for col, typ in (
+            ('thinking', 'TEXT'),
+            ('cache_info', 'TEXT'),
+            ('source_kind', 'TEXT'),
+        ):
+            if col not in cols:
+                conn.execute(f'ALTER TABLE chat_messages ADD COLUMN {col} {typ}')
+        conn.commit()
+        conn.close()
+        self.assertTrue(da.ensure_authority_ready(self.db_path))
+
+    def tearDown(self):
+        self._env.stop()
+        ee.DB_PATH = self._prev_ee
+        de.DB_PATH = self._prev_de
+        if self._prev_memories is None:
+            os.environ.pop('MEMORIES_DB', None)
+        else:
+            os.environ['MEMORIES_DB'] = self._prev_memories
+        self.tmp.cleanup()
+
+    def _get_db(self):
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    def _v3(self):
+        return da.read_v3_state(self.db_path)
+
+    def test_b1_stale_window_does_not_settle(self):
+        """Blocker 1: gate-blocked Action must not mutate V3 drives."""
+        from wake.executor import execute
+        import chat.window_identity as wi
+
+        before = {k: float(self._v3()[k]) for k in DRIVE_KEYS}
+        identity = {
+            'chat_id': 'c1', 'context_id': 1,
+            'context_epoch': 1, 'resident_generation': 1,
+        }
+        with mock.patch.object(wi, 'soft_window_enabled', return_value=True), \
+             mock.patch.object(
+                 wi, 'gate_captured_against_conn',
+                 return_value=(wi.REASON_STALE, identity, None),
+             ), mock.patch.object(wi, 'ensure_wake_window_identity_columns'):
+            out = execute(
+                'message', 't', 'hello', 'normal', self._get_db,
+                wake_run_id='b1-stale',
+                window_identity=identity,
+                settle_fired_drive='curiosity',
+                settle_user_idle_hours=1.0,
+                settle_outcome_at='2026-08-04 15:00:00',
+            )
+        self.assertFalse(out['delivered'])
+        self.assertFalse(out['settled'])
+        after = {k: float(self._v3()[k]) for k in DRIVE_KEYS}
+        self.assertEqual(before, after)
+        conn = sqlite3.connect(self.db_path)
+        ev = conn.execute(
+            "SELECT 1 FROM internal_state_events "
+            "WHERE event_key='wake_outcome:b1-stale'"
+        ).fetchone()
+        msgs = conn.execute(
+            "SELECT COUNT(*) FROM chat_messages WHERE author='fyodor'"
+        ).fetchone()[0]
+        conn.close()
+        self.assertIsNone(ev)
+        self.assertEqual(msgs, 0)
+
+    def test_b1_settle_failure_rolls_back_action(self):
+        """Blocker 1: Action + Settlement atomic — settle fail ⇒ no Action."""
+        from wake.executor import execute
+
+        before_cur = float(self._v3()['curiosity'])
+        with mock.patch(
+            'chat.drive_authority.apply_wake_outcome_on_conn',
+            side_effect=RuntimeError('simulated settle fault'),
+        ):
+            with self.assertRaises(RuntimeError):
+                execute(
+                    'message', 't', 'hello-atomic', 'normal', self._get_db,
+                    wake_run_id='b1-atomic',
+                    settle_fired_drive='curiosity',
+                    settle_user_idle_hours=1.0,
+                    settle_outcome_at='2026-08-04 15:10:00',
+                )
+        conn = sqlite3.connect(self.db_path)
+        msgs = conn.execute(
+            "SELECT COUNT(*) FROM chat_messages WHERE content='hello-atomic'"
+        ).fetchone()[0]
+        wakes = conn.execute(
+            "SELECT COUNT(*) FROM wake_log WHERE wake_run_id='b1-atomic'"
+        ).fetchone()[0]
+        ev = conn.execute(
+            "SELECT 1 FROM internal_state_events "
+            "WHERE event_key='wake_outcome:b1-atomic'"
+        ).fetchone()
+        conn.close()
+        self.assertEqual(msgs, 0)
+        self.assertEqual(wakes, 0)
+        self.assertIsNone(ev)
+        self.assertAlmostEqual(float(self._v3()['curiosity']), before_cur, places=4)
+
+        # Retry with healthy settle succeeds once (recoverable).
+        out = execute(
+            'message', 't', 'hello-atomic', 'normal', self._get_db,
+            wake_run_id='b1-atomic',
+            settle_fired_drive='curiosity',
+            settle_user_idle_hours=1.0,
+            settle_outcome_at='2026-08-04 15:10:00',
+        )
+        self.assertTrue(out['delivered'])
+        self.assertTrue(out['settled'])
+        self.assertLess(float(self._v3()['curiosity']), before_cur)
+
+    def test_b1_normal_path_action_and_event_once(self):
+        """Blocker 1: happy path commits Action + wake_outcome once."""
+        from wake.executor import execute
+
+        before = float(self._v3()['attachment'])
+        out = execute(
+            'message', 't', 'once', 'normal', self._get_db,
+            wake_run_id='b1-once',
+            settle_fired_drive='attachment',
+            settle_user_idle_hours=0.5,
+            settle_outcome_at='2026-08-04 15:20:00',
+        )
+        self.assertTrue(out['delivered'])
+        self.assertTrue(out['settled'])
+        self.assertEqual(out['settle_status'], 'applied')
+        self.assertLess(float(self._v3()['attachment']), before)
+        conn = sqlite3.connect(self.db_path)
+        self.assertEqual(
+            conn.execute(
+                "SELECT COUNT(*) FROM chat_messages WHERE content='once'"
+            ).fetchone()[0],
+            1,
+        )
+        self.assertEqual(
+            conn.execute(
+                "SELECT COUNT(*) FROM internal_state_events "
+                "WHERE event_key='wake_outcome:b1-once'"
+            ).fetchone()[0],
+            1,
+        )
+        conn.close()
+
+    def test_b1_missing_provenance_rolls_back_action(self):
+        """Blocker 1: non-none without fired_drive must not commit Action."""
+        from wake.executor import execute
+
+        before = {k: float(self._v3()[k]) for k in DRIVE_KEYS}
+        with self.assertRaises(Exception):
+            execute(
+                'message', 't', 'no-prov', 'normal', self._get_db,
+                wake_run_id='b1-no-prov',
+                settle_fired_drive=None,
+                settle_user_idle_hours=1.0,
+                settle_outcome_at='2026-08-04 15:30:00',
+            )
+        conn = sqlite3.connect(self.db_path)
+        self.assertEqual(
+            conn.execute(
+                "SELECT COUNT(*) FROM chat_messages WHERE content='no-prov'"
+            ).fetchone()[0],
+            0,
+        )
+        self.assertEqual(
+            conn.execute(
+                "SELECT COUNT(*) FROM wake_log WHERE wake_run_id='b1-no-prov'"
+            ).fetchone()[0],
+            0,
+        )
+        self.assertIsNone(
+            conn.execute(
+                "SELECT 1 FROM internal_state_events "
+                "WHERE event_key='wake_outcome:b1-no-prov'"
+            ).fetchone()
+        )
+        conn.close()
+        self.assertEqual(before, {k: float(self._v3()[k]) for k in DRIVE_KEYS})
+
+    def test_b3_prompt_has_no_second_desire_drive_decision(self):
+        """Blocker 3: frozen drive decision only — no desire Drive→Action hint."""
+        from wake.builder import inject_snippets
+
+        decision = {
+            'fired': 'curiosity',
+            'action': 'explore',
+            'hint': 'x',
+            'blocked': False,
+            'drive': {
+                'attachment': 0.2, 'curiosity': 0.9, 'reflection': 0.1,
+                'social': 0.1, 'duty': 0.1, 'libido': 0.0, 'stress': 0.1,
+                'fatigue': 0.2,
+            },
+            'contributors': [],
+        }
+        drive = mock.Mock()
+        drive.decide.return_value = decision
+        drive.freeze_decision_provenance.return_value = {
+            'source': 'drive_engine.decide',
+            'captured_at': '2026-08-04 16:00:00',
+            'primary_drive': 'curiosity',
+            'contributors': [],
+            'blocked': False,
+            'suggested_action': 'explore',
+        }
+        drive.get_wake_snippet.return_value = (
+            '## 内在需求（驱动条）\n→ 当前最强需求：curiosity，倾向于 explore 行为。'
+        )
+        desire_mod = mock.Mock()
+        desire_mod.get_longing_wake_fact.return_value = (
+            '## Longing（思念哈娅）\nL=0.500  阶段=protest  距上次互动=5.0h'
+        )
+        desire_mod.get_wake_snippet.return_value = (
+            '## 内在驱动（费佳驱动 v2）\n'
+            '→ 当前最强驱动：social，倾向于 web_browse 行为。'
+        )
+        with mock.patch.dict(sys.modules, {
+            'drive_engine': drive, 'desire': desire_mod,
+        }):
+            system, prov = inject_snippets(
+                'base', 'normal', desire_driven=True, longing_enabled=True,
+            )
+        self.assertEqual(prov['primary_drive'], 'curiosity')
+        self.assertIn('当前最强需求：curiosity', system)
+        self.assertNotIn('当前最强驱动：social', system)
+        self.assertNotIn('倾向于 web_browse', system)
+        self.assertIn('Longing（思念哈娅）', system)
+
+
 if __name__ == '__main__':
     unittest.main()

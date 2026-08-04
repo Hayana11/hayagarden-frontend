@@ -1548,12 +1548,15 @@ def apply_outcome(
     user_idle_hours: float,
     outcome_at: str,
     expected_state_version: Optional[int] = None,
+    join_transaction: bool = False,
 ) -> ApplyResult:
     """Wake 结算事件 ``wake_outcome:{wake_run_id}``：一票只进结算室一次。
 
     ``payload_json/hash`` 仅含稳定观察输入；``result_json`` 保存事务内
     基于最新 state 算出的 diagnostics（duplicate 回放原值，不重算覆盖）。
     version_conflict 不消费 key，重读版本后可同 key 重试。
+
+    ``join_transaction=True``：加入外层 Action 事务（见 store）。
     """
     rid = _require_wake_run_id(wake_run_id)
     exec_act = _require_executor_action(executor_action)
@@ -1605,6 +1608,7 @@ def apply_outcome(
         payload=payload,
         decide=decide,
         expected_state_version=expected_state_version,
+        join_transaction=join_transaction,
     )
 
 

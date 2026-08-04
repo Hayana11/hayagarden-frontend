@@ -241,9 +241,14 @@ class InjectSnippetOverrideTests(unittest.TestCase):
 
         class Desire:
             @staticmethod
-            def get_wake_snippet(t_hours_override=None):
+            def get_longing_wake_fact(t_hours_override=None):
                 seen['t'] = t_hours_override
-                return 'desire snip'
+                return 'longing snip'
+
+            @staticmethod
+            def get_wake_snippet(t_hours_override=None):
+                seen['bad'] = True
+                return 'MUST_NOT_INJECT'
 
         class Drive:
             @staticmethod

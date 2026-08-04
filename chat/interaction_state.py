@@ -54,15 +54,14 @@ class InteractionClock:
 
 
 def touch_user_interaction(get_db_fn: Optional[Callable] = None) -> None:
-    """Update compatibility interaction clocks after a user message is persisted.
+    """Compatibility hook after a user message is persisted.
 
     Stage D: drive rest / attachment discharge are NOT applied here.
     Authoritative user-message drive settlement is Canonical ``user_rule``
-    on ``internal_state_v3``. This path only refreshes non-authoritative
-    legacy clocks (emotion last_interaction / desire last_hayana_msg_time).
+    on ``internal_state_v3``. Legacy ``emotion_engine.touch_interaction`` /
+    ``desire.touch_hayana`` are retired no-ops (no DB writes).
 
-    get_db_fn is accepted for call-site symmetry; current backends write via
-    their own DB helpers. Never raises into the chat path.
+    get_db_fn is accepted for call-site symmetry. Never raises into the chat path.
     """
     del get_db_fn  # reserved for future shared writes
     try:

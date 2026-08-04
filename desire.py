@@ -279,14 +279,12 @@ def satisfy(action: str, fired_key: str = None):
 
 
 def touch_hayana():
-    """哈娅发消息时更新 last_hayana_msg_time。"""
-    now_str = _now().strftime('%Y-%m-%d %H:%M:%S')
-    conn    = _db()
-    conn.execute(
-        "UPDATE desire_state SET last_hayana_msg_time=? WHERE id=1", (now_str,)
-    )
-    conn.commit()
-    conn.close()
+    """Stage D crown: retired writer — compatibility no-op.
+
+    Authoritative interaction clock is ``chat_messages`` / Stage A.
+    ``desire_state.last_hayana_msg_time`` must not be a write surface.
+    """
+    return None
 
 
 def get_longing(t_hours_override=None) -> tuple:
@@ -338,48 +336,32 @@ def _label(v):
     return None
 
 
-def get_wake_snippet(t_hours_override=None) -> str:
-    drives      = get_drive()
+def get_longing_wake_fact(t_hours_override=None) -> str:
+    """Stage B Longing fact for Wake prompt — no Drive→Action decision.
+
+    Must not re-pick intent or inject a second drive decision after
+    ``drive_engine.decide()`` provenance freeze.
+    """
     L, phase, t = get_longing(t_hours_override=t_hours_override)
-
-    lines = ['## 内在驱动（费佳驱动 v2）']
-    if drives.get('fatigue', 0) >= FATIGUE_GATE:
-        lines.append(f'疲劳 {drives["fatigue"]:.2f} — 超过阈值，今天歇着，不触发行为。')
-    else:
-        name_map = {
-            'curiosity':  '好奇外面',
-            'reflection': '想沉淀/倾诉',
-            'duty':       '记挂没做完的事',
-            'social':     '想看人群',
-            'libido':     '性驱动',
-            'stress':     '压力堵',
-            'fatigue':    '疲劳（抑制项）',
-        }
-        for key in DRIVE_KEYS:
-            v   = drives.get(key, 0)
-            lbl = _label(v)
-            desc = name_map.get(key, key)
-            if key == 'fatigue':
-                lines.append(f'fatigue {v:.2f}（{desc}）')
-            elif lbl:
-                lines.append(f'{key} {v:.2f}（{desc}）— {lbl}：{DRIVE_HINT.get(key, "")}')
-            else:
-                lines.append(f'{key} {v:.2f}（{desc}）')
-
-    if phase != 'content':
-        lines.append(f'\n## Longing（思念哈娅）')
-        lines.append(f'L={L:.3f}  阶段={phase}  距上次互动={t:.1f}h')
-        hint = LONGING_HINT.get(phase, '')
-        if hint:
-            lines.append(hint)
-
-    intent = _pick_intent_pure(drives)
-    if intent['blocked']:
-        lines.append('\n→ 疲劳封顶，今天静默。')
-    elif intent['fired']:
-        lines.append(f'\n→ 当前最强驱动：{intent["fired"]}，倾向于 {intent["action"]} 行为。')
-
+    if phase == 'content':
+        return ''
+    lines = [
+        '## Longing（思念哈娅）',
+        f'L={L:.3f}  阶段={phase}  距上次互动={t:.1f}h',
+    ]
+    hint = LONGING_HINT.get(phase, '')
+    if hint:
+        lines.append(hint)
     return '\n'.join(lines)
+
+
+def get_wake_snippet(t_hours_override=None) -> str:
+    """Retired Wake drive snippet — use drive_engine provenance + longing fact.
+
+    Kept for diagnostic/tests. Must not be injected into production Wake
+    prompts (second Drive→Action decision). Prefer ``get_longing_wake_fact``.
+    """
+    return get_longing_wake_fact(t_hours_override=t_hours_override)
 
 
 def get_longing_system_hint() -> str:
