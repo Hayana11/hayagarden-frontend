@@ -559,7 +559,13 @@ class WakeOutcomeWiringTests(unittest.TestCase):
         self.assertNotIn('apply_outcome_shadow', block)
         self.assertNotIn('apply_wake_outcome_best_effort', block)
         self.assertIn('settle_fired_drive=', block)
+        self.assertIn('settle_provenance_present=', block)
+        self.assertIn('missing_wake_run_id', block)
         self.assertIn('_wake_run_id_mark', block)
+        # Live wake_run_id required before model call.
+        req_idx = block.index('missing_wake_run_id')
+        runner_idx = block.index('get_wake_runner')
+        self.assertLess(req_idx, runner_idx)
         seen_idx = block.index('_wake_run_id_seen')
         settle_idx = block.index('settle_fired_drive=')
         self.assertLess(seen_idx, settle_idx)
@@ -587,7 +593,13 @@ class GatewayGuardTests(unittest.TestCase):
         self.assertNotIn('record_wake_outcome_shadow_if_enabled', decide)
         self.assertNotIn('apply_outcome_shadow', decide)
         self.assertIn('settle_fired_drive=', decide)
-        self.assertIn('apply_wake_outcome_on_conn', Path(ROOT, 'wake/executor.py').read_text())
+        self.assertIn('settle_provenance_present=', decide)
+        self.assertIn('missing_wake_run_id', decide)
+        exec_src = Path(ROOT, 'wake/executor.py').read_text()
+        self.assertIn('apply_wake_outcome_on_conn', exec_src)
+        self.assertIn('provenance_present=', exec_src)
+        da_src = Path(ROOT, 'chat/drive_authority.py').read_text()
+        self.assertIn('check_cutover_ready_on_conn', da_src)
 
     def test_score_txn_has_no_ensure_schema_call(self):
         src = Path(ROOT, 'emotion_engine.py').read_text(encoding='utf-8')

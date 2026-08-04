@@ -6396,6 +6396,16 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
     # Live path only: flush drive / calibrate / dream consume / mark run_id.
     live = not dry_run
 
+    # Stage D N3: live settlement modes require outcome identity before any
+    # model call / Action write. dry_run / dream / summarize may omit it.
+    if live and mode not in ('dream', 'summarize') and not wake_run_id:
+        return jsonify({
+            'ok': False,
+            'error': 'wake_run_id required for live settlement wake',
+            'reason': 'missing_wake_run_id',
+            'mode': mode,
+        }), 400
+
     # dry_run must not mark — but a previously completed real run with the same
     # id should still skip.
     if wake_run_id and _wake_run_id_seen(wake_run_id):
@@ -6567,19 +6577,16 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
     # action 执行：wake_log / chat / diary + V3 wake_outcome 同事务
     from wake.executor import execute as _wake_exec
     desire_driven = _get_desire_driven()
-    # Stage D R3: Settlement consumes Decision-time provenance frozen during
-    # prompt assembly (drive_engine.decide). Never Action→Drive inference.
+    # Stage D R3/N5: Settlement needs the Decision provenance *object*.
+    # primary_drive may be None for a valid Action=none freeze; that is not
+    # the same as freeze failure (decision_provenance is None).
+    provenance_present = isinstance(decision_provenance, dict)
     fired_drive = None
-    if isinstance(decision_provenance, dict):
+    if provenance_present:
         fired_drive = decision_provenance.get('primary_drive')
     # Sole authoritative wake_outcome mutation path: executor txn.
-    # Shadow must not apply_outcome (Blocker 2).
-    if wake_run_id and mode not in ('dream', 'summarize'):
-        try:
-            from chat.drive_authority import ensure_authority_ready
-            ensure_authority_ready(DB_PATH)
-        except Exception:
-            pass
+    # Cutover readiness is enforced inside apply_wake_outcome_on_conn
+    # on the same connection (Stage D N4). Shadow must not apply_outcome.
     _wake_exec(
         action, thoughts, c_text, mode,
         get_db_fn=get_db,
@@ -6590,6 +6597,7 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
         wake_run_id=wake_run_id,
         window_identity=_wake_window_identity,
         settle_fired_drive=fired_drive,
+        settle_provenance_present=provenance_present,
         settle_user_idle_hours=t2_hours,
     )
     _wake_run_id_mark(wake_run_id)

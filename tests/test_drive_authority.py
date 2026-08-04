@@ -750,7 +750,7 @@ class StageDFinalWiringTests(unittest.TestCase):
         conn.close()
 
     def test_b1_missing_provenance_rolls_back_action(self):
-        """Blocker 1: non-none without fired_drive must not commit Action."""
+        """Blocker 1: non-none without primary_drive must not commit Action."""
         from wake.executor import execute
 
         before = {k: float(self._v3()[k]) for k in DRIVE_KEYS}
@@ -759,6 +759,7 @@ class StageDFinalWiringTests(unittest.TestCase):
                 'message', 't', 'no-prov', 'normal', self._get_db,
                 wake_run_id='b1-no-prov',
                 settle_fired_drive=None,
+                settle_provenance_present=True,  # object ok; primary missing
                 settle_user_idle_hours=1.0,
                 settle_outcome_at='2026-08-04 15:30:00',
             )
@@ -847,6 +848,149 @@ class StageDFinalWiringTests(unittest.TestCase):
             conn.execute(
                 "SELECT 1 FROM internal_state_events "
                 "WHERE event_key='wake_outcome:b1-empty-diary'"
+            ).fetchone()
+        )
+        conn.close()
+        self.assertEqual(before, {k: float(self._v3()[k]) for k in DRIVE_KEYS})
+
+    def test_n3_live_wake_requires_wake_run_id_before_model(self):
+        """N3: live normal without wake_run_id → no model / no executor."""
+        import gateway
+
+        with gateway.app.app_context():
+            with mock.patch.object(gateway, '_ensure_wake_runners') as ensure, \
+                 mock.patch('wake.executor.execute') as exec_fn:
+                ensure.side_effect = AssertionError('model path must not run')
+                resp = gateway._wake_decide_locked(
+                    {'dry_run': False}, 'normal', '', None,
+                )
+        self.assertIsInstance(resp, tuple)
+        body, status = resp
+        self.assertEqual(status, 400)
+        payload = body.get_json()
+        self.assertEqual(payload.get('reason'), 'missing_wake_run_id')
+        self.assertFalse(payload.get('ok', True))
+        ensure.assert_not_called()
+        exec_fn.assert_not_called()
+        block = Path(ROOT, 'gateway.py').read_text(encoding='utf-8').split(
+            'def _wake_decide_locked', 1,
+        )[1].split('\ndef ', 1)[0]
+        self.assertLess(
+            block.index('missing_wake_run_id'),
+            block.index('get_wake_runner'),
+        )
+
+    def test_n4_proof_gap_refuses_txn_settlement(self):
+        """N4: unresolved proof gap must fail closed inside Action txn."""
+        from wake.executor import execute
+
+        conn = store.open_store(self.db_path)
+        try:
+            shadow.mark_proof_gap(
+                conn, failed_message_id=99, error_code='stage_d_n4_gap',
+                db_path=self.db_path,
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        ready = da.check_cutover_ready(self.db_path)
+        self.assertFalse(ready.ok)
+        self.assertEqual(ready.status, 'proof_gap')
+
+        before = {k: float(self._v3()[k]) for k in DRIVE_KEYS}
+        before_ver = int(self._v3()['state_version'])
+        with self.assertRaises(Exception):
+            execute(
+                'message', 't', 'gap-blocked', 'normal', self._get_db,
+                wake_run_id='n4-gap',
+                settle_fired_drive='curiosity',
+                settle_provenance_present=True,
+                settle_user_idle_hours=1.0,
+                settle_outcome_at='2026-08-04 16:00:00',
+            )
+        conn = sqlite3.connect(self.db_path)
+        self.assertEqual(
+            conn.execute(
+                "SELECT COUNT(*) FROM wake_log WHERE wake_run_id='n4-gap'"
+            ).fetchone()[0],
+            0,
+        )
+        self.assertEqual(
+            conn.execute(
+                "SELECT COUNT(*) FROM chat_messages WHERE content='gap-blocked'"
+            ).fetchone()[0],
+            0,
+        )
+        self.assertIsNone(
+            conn.execute(
+                "SELECT 1 FROM internal_state_events "
+                "WHERE event_key='wake_outcome:n4-gap'"
+            ).fetchone()
+        )
+        conn.close()
+        after = self._v3()
+        self.assertEqual(before, {k: float(after[k]) for k in DRIVE_KEYS})
+        self.assertEqual(before_ver, int(after['state_version']))
+
+    def test_n5_none_with_valid_null_primary_settles(self):
+        """N5: frozen provenance + primary=None + Action=none → settle OK."""
+        from wake.executor import execute
+
+        before_fat = float(self._v3()['fatigue'])
+        out = execute(
+            'none', 't', '', 'normal', self._get_db,
+            wake_run_id='n5-none-ok',
+            settle_fired_drive=None,
+            settle_provenance_present=True,
+            settle_user_idle_hours=0.5,
+            settle_outcome_at='2026-08-04 16:10:00',
+        )
+        self.assertTrue(out['delivered'])
+        self.assertTrue(out['settled'])
+        self.assertEqual(out['settle_status'], 'applied')
+        self.assertLess(float(self._v3()['fatigue']), before_fat)
+        conn = sqlite3.connect(self.db_path)
+        self.assertEqual(
+            conn.execute(
+                "SELECT COUNT(*) FROM wake_log WHERE wake_run_id='n5-none-ok'"
+            ).fetchone()[0],
+            1,
+        )
+        self.assertEqual(
+            conn.execute(
+                "SELECT COUNT(*) FROM internal_state_events "
+                "WHERE event_key='wake_outcome:n5-none-ok'"
+            ).fetchone()[0],
+            1,
+        )
+        conn.close()
+
+    def test_n5_none_without_provenance_object_fails_closed(self):
+        """N5: missing provenance object + Action=none → no mutation."""
+        from wake.executor import execute
+
+        before = {k: float(self._v3()[k]) for k in DRIVE_KEYS}
+        with self.assertRaises(Exception):
+            execute(
+                'none', 't', '', 'normal', self._get_db,
+                wake_run_id='n5-none-missing',
+                settle_fired_drive=None,
+                settle_provenance_present=False,
+                settle_user_idle_hours=0.5,
+                settle_outcome_at='2026-08-04 16:15:00',
+            )
+        conn = sqlite3.connect(self.db_path)
+        self.assertEqual(
+            conn.execute(
+                "SELECT COUNT(*) FROM wake_log "
+                "WHERE wake_run_id='n5-none-missing'"
+            ).fetchone()[0],
+            0,
+        )
+        self.assertIsNone(
+            conn.execute(
+                "SELECT 1 FROM internal_state_events "
+                "WHERE event_key='wake_outcome:n5-none-missing'"
             ).fetchone()
         )
         conn.close()

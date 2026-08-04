@@ -32,6 +32,7 @@ def execute(action: str, thoughts: str, content: str,
             wake_run_id: str = '',
             window_identity=None,
             settle_fired_drive=None,
+            settle_provenance_present: Optional[bool] = None,
             settle_user_idle_hours: float = 0.0,
             settle_outcome_at: Optional[str] = None):
     """
@@ -41,6 +42,10 @@ def execute(action: str, thoughts: str, content: str,
     When soft window is on, ``window_identity`` must be the identity frozen at
     wake start. Re-validation, wake_log/chat writes, and authoritative
     ``wake_outcome`` share one IMMEDIATE txn when settlement is required.
+
+    ``settle_provenance_present`` distinguishes a frozen Decision provenance
+    object (even when ``primary_drive`` is None for Action=none) from a total
+    freeze failure. Production gateway must pass this explicitly.
 
     Returns:
       dict with keys:
@@ -81,6 +86,12 @@ def execute(action: str, thoughts: str, content: str,
     settle_status = None
     rid = str(wake_run_id or '').strip()
     want_settle = bool(rid) and mode not in ('dream', 'summarize')
+    if settle_provenance_present is None:
+        # Compat for direct executor tests that only pass fired_drive.
+        # Production gateway always passes an explicit bool.
+        provenance_present = settle_fired_drive is not None
+    else:
+        provenance_present = bool(settle_provenance_present)
 
     try:
         # Schema must exist before the Action txn (executescript commits).
@@ -243,6 +254,7 @@ def execute(action: str, thoughts: str, content: str,
                 desire_driven=bool(desire_driven),
                 user_idle_hours=float(settle_user_idle_hours or 0.0),
                 outcome_at=settle_outcome_at or _now_beijing_str(),
+                provenance_present=provenance_present,
             )
             settle_status = getattr(settle_result, 'status', None)
             if settle_status not in ('applied', 'duplicate', 'stale_skipped'):

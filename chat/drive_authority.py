@@ -50,6 +50,12 @@ def check_cutover_ready(db_path: Optional[str] = None):
     return _check(db_path)
 
 
+def check_cutover_ready_on_conn(conn, db_path: Optional[str] = None):
+    """Same gate on an open Action connection (no COMMIT / bootstrap)."""
+    from chat.affect_bond_authority import check_cutover_ready_on_conn as _check
+    return _check(conn, db_path=db_path)
+
+
 def ensure_authority_ready(db_path: Optional[str] = None) -> bool:
     from chat.affect_bond_authority import ensure_authority_ready as _ensure
     return _ensure(db_path)
@@ -291,19 +297,34 @@ def apply_wake_outcome_on_conn(
     desire_driven: bool,
     user_idle_hours: float,
     outcome_at: Optional[str] = None,
+    provenance_present: bool = False,
+    db_path: Optional[str] = None,
     max_version_retries: int = 3,
 ) -> Any:
     """Apply ``wake_outcome`` on an open Action transaction (SAVEPOINT join).
 
     Caller owns BEGIN/COMMIT. Does not invent Action→Drive provenance.
-    Raises ``StoreError`` when non-``none`` lacks ``fired_drive``.
+    Enforces cutover readiness on this connection before mutation.
+    Raises ``StoreError`` when Decision provenance object is missing, or when
+    non-``none`` lacks ``fired_drive``.
     """
     import internal_state_events as events
     import internal_state_store as store
 
+    if not provenance_present:
+        raise store.StoreError(
+            'missing decision-time provenance object; refusing wake_outcome'
+        )
     if str(executor_action or '').strip() != 'none' and not fired_drive:
         raise store.StoreError(
-            'missing decision-time provenance; refusing wake_outcome'
+            'missing decision-time primary_drive; refusing wake_outcome'
+        )
+
+    ready = check_cutover_ready_on_conn(conn, db_path=db_path)
+    if not ready.ok:
+        raise store.StoreError(
+            f'drive authority not ready for wake_outcome: {ready.status}'
+            + (f' ({ready.error})' if ready.error else '')
         )
 
     at = outcome_at or _now_str()
