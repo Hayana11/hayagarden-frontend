@@ -48,8 +48,8 @@ ACTION_SATISFY = {
     'vent':       {'stress':     0.45},          # attachment 不在本表
 }
 
-LONGING_TAU = 18.0   # 基础特征时间（小时）
-LONGING_MAX = 0.85
+# Longing formula constants live only in internal_state (Stage B authority).
+# desire.get_longing delegates to internal_state.derived_longing_curve.
 
 WANT_ACTION = {
     'duty':       'none',        # 碎语
@@ -164,10 +164,10 @@ def _va_calibrate(drives: dict, V: float, A: float) -> dict:
 
 
 def _compute_longing_from_idle_hours(t_hours: float) -> float:
-    """Stage B τ18 curve from idle hours (no legacy timestamp)."""
-    t = max(0.0, float(t_hours))
-    L = LONGING_MAX * (1 - (1 + t / LONGING_TAU) ** (-0.8))
-    return round(min(L, 0.90), 3)
+    """Delegate only — formula body lives in internal_state.derived_longing_curve."""
+    from internal_state import derived_longing_curve
+    longing = derived_longing_curve(t_hours)
+    return 0.0 if longing is None else float(longing)
 
 
 def _compute_longing(last_hayana_dt) -> float:

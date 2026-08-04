@@ -228,6 +228,41 @@ class DerivedLongingAuthorityTests(unittest.TestCase):
         self.assertNotEqual(t, 999.0)
         self.assertLess(ee_l, 0.05)
 
+    def test_desire_delegates_to_derived_longing_curve(self):
+        """Single formula implementation: desire must not own a τ18 body."""
+        sentinel = 0.424
+        with mock.patch(
+            'internal_state.derived_longing_curve',
+            return_value=sentinel,
+        ) as curve:
+            L, phase, t = desire.get_longing(t_hours_override=18.0)
+        curve.assert_called()
+        # Called with the authoritative idle hours (override path).
+        self.assertTrue(
+            any(
+                args and float(args[0]) == 18.0
+                for args, _kwargs in curve.call_args_list
+            ),
+            curve.call_args_list,
+        )
+        self.assertEqual(L, sentinel)
+        self.assertEqual(t, 18.0)
+        self.assertEqual(phase, desire._longing_phase(sentinel))
+
+        # Clock path also delegates through the same curve.
+        self._set_user_at(self.now - datetime.timedelta(hours=6))
+        with mock.patch(
+            'internal_state.derived_longing_curve',
+            return_value=sentinel,
+        ) as curve2, mock.patch(
+            'chat.interaction_state._now_beijing',
+            return_value=self.now,
+        ):
+            L2, _, t2 = desire.get_longing()
+        curve2.assert_called()
+        self.assertEqual(L2, sentinel)
+        self.assertAlmostEqual(t2, 6.0, places=3)
+
 
 if __name__ == '__main__':
     unittest.main()
