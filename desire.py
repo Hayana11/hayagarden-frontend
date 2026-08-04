@@ -229,54 +229,53 @@ def _apply_satisfy(drives: dict, action: str) -> dict:
 # ─── DB-level operations ──────────────────────────────────
 
 def _flush(values: dict):
-    now_str = _now().strftime('%Y-%m-%d %H:%M:%S')
-    conn = _db()
-    conn.execute("""
-        UPDATE desire_state SET
-            curiosity=?, reflection=?, duty=?, social=?,
-            libido=?, stress=?, fatigue=?,
-            last_updated=?
-        WHERE id=1
-    """, (
-        values.get('curiosity',  0.10),
-        values.get('reflection', 0.10),
-        values.get('duty',       0.15),
-        values.get('social',     0.10),
-        values.get('libido',     0.00),
-        values.get('stress',     0.10),
-        values.get('fatigue',    0.20),
-        now_str,
-    ))
-    conn.commit()
-    conn.close()
+    """Stage D: retired production writer for desire_state drive bars.
+
+    Compatibility no-op — production drive truth is ``internal_state_v3``.
+    """
+    del values
+    return None
 
 
 def get_drive() -> dict:
-    """读取+自然积累计算，不写DB。"""
-    conn = _db()
-    row  = conn.execute("SELECT * FROM desire_state WHERE id=1").fetchone()
-    conn.close()
-    if not row:
-        return {k: 0.1 for k in DRIVE_KEYS}
-    stored       = dict(row)
-    last_updated = _parse_dt(stored.get('last_updated'))
-    now          = _now()
-    t_hours      = max(0.0, (now - last_updated).total_seconds() / 3600) if last_updated else 0.0
-    return _compute_natural_growth(stored, t_hours)
+    """Compatibility facade → Stage D authoritative drives (V3 subset).
+
+    Pure read of the seven overlapping drive keys. Does not own a second
+    idle-growth clock. Legacy ``desire_state`` is not production authority.
+    """
+    try:
+        from chat.drive_authority import (
+            check_cutover_ready,
+            read_current_drives,
+            v3_to_desire_shape,
+        )
+        if check_cutover_ready(DB_PATH).ok:
+            drives = read_current_drives(DB_PATH)
+            if drives is not None:
+                return v3_to_desire_shape(drives)
+    except Exception:
+        pass
+    return {k: 0.1 for k in DRIVE_KEYS}
 
 
 def calibrate_va(V: float, A: float):
-    """心跳开始时：拿V/A校准驱动条并写回。"""
-    current    = get_drive()
-    calibrated = _va_calibrate(current, V, A)
-    _flush(calibrated)
+    """Stage D: retired production writer.
+
+    V/A calibration must not write a second drive authority. Accepted for
+    Wake call-site compatibility only.
+    """
+    del V, A
+    return None
 
 
 def satisfy(action: str, fired_key: str = None):
-    """行为结束后调用：乘性回落 + fatigue 微升。fired_key 已弃用，保留签名兼容。"""
-    current   = get_drive()
-    satisfied = _apply_satisfy(current, action)
-    _flush(satisfied)
+    """Stage D: retired production writer.
+
+    Authoritative Wake settlement is V3 ``wake_outcome`` (fixed discharge).
+    Desire multiplicative satisfy is diagnostics-only in event result_json.
+    """
+    del action, fired_key
+    return None
 
 
 def touch_hayana():

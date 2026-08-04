@@ -6563,16 +6563,17 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
             'tools': [],
         })
 
-    # action 执行：写 wake_log / chat_messages / diary / discharge drive
+    # action 执行：写 wake_log / chat_messages / diary；drive settlement → V3
     from wake.executor import execute as _wake_exec
     desire_driven = _get_desire_driven()
+    # Stage D: freeze decision-time fired_drive before executor (provenance).
+    # Does not reconstruct Intent from assistant text; uses current V3 drives
+    # + executor action type (existing settlement contract).
     fired_drive = None
-    if wake_run_id and mode not in ('dream', 'summarize'):
+    if wake_run_id and mode not in ('dream', 'summarize') and action != 'none':
         try:
-            import internal_state_shadow as _shadow_wake
-            if _shadow_wake.is_shadow_enabled() and action != 'none':
-                import drive_engine as _de_infer
-                fired_drive = _de_infer.infer_fired_drive_for_action(action)
+            import drive_engine as _de_infer
+            fired_drive = _de_infer.infer_fired_drive_for_action(action)
         except Exception:
             fired_drive = None
     _wake_exec(
@@ -6585,6 +6586,21 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
         wake_run_id=wake_run_id,
         window_identity=_wake_window_identity,
     )
+    # Stage D production Wake settlement → internal_state_v3 wake_outcome
+    if wake_run_id and mode not in ('dream', 'summarize'):
+        try:
+            from chat.drive_authority import apply_wake_outcome_best_effort
+            apply_wake_outcome_best_effort(
+                wake_run_id=wake_run_id,
+                executor_action=action,
+                desire_action=None,
+                fired_drive=fired_drive,
+                desire_driven=desire_driven,
+                user_idle_hours=t2_hours,
+                db_path=DB_PATH,
+            )
+        except Exception:
+            pass
     try:
         import internal_state_shadow as _shadow_wake
         _shadow_wake.record_wake_outcome_shadow_if_enabled(

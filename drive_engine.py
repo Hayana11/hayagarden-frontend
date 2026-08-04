@@ -157,98 +157,57 @@ def _get_emotion_factors():
 
 
 # ═══════════════════════════════════════════════════════════
-# 懒积累：读取时根据时间差计算当前值
+# Stage D: production read = V3; legacy writers retired
 # ═══════════════════════════════════════════════════════════
 
 def get_drive() -> dict:
+    """Compatibility facade → Stage D authoritative eight drives (V3).
+
+    Pure read: never bootstraps or mutates. Time evolution is owned solely by
+    ``internal_state_events.materialize_drives``. Legacy ``drive_state`` is not
+    production authority.
     """
-    返回所有维度的实时值（含自然积累 + 情绪联动）
-    不写DB，纯读取计算
-    """
-    conn = _db()
-    row = conn.execute("SELECT * FROM drive_state WHERE id=1").fetchone()
-    conn.close()
-    if not row:
-        return {k: 0.1 for k in DRIVE_KEYS}
+    try:
+        from chat.drive_authority import (
+            check_cutover_ready,
+            read_current_drives,
+            v3_to_drive_engine_shape,
+        )
+        if check_cutover_ready(DB_PATH).ok:
+            drives = read_current_drives(DB_PATH)
+            if drives is not None:
+                return v3_to_drive_engine_shape(drives)
+    except Exception:
+        pass
+    return {k: 0.1 for k in DRIVE_KEYS}
 
-    stored = dict(row)
-    last_updated = _parse_dt(stored.get('last_updated'))
-    now = _now()
-
-    if last_updated:
-        t_hours = max(0.0, (now - last_updated).total_seconds() / 3600)
-    else:
-        t_hours = 0.0
-
-    factors = _get_emotion_factors()
-
-    result = {}
-    for key in DRIVE_KEYS:
-        base = float(stored.get(key, 0.1))
-
-        if key == 'fatigue':
-            eq = FATIGUE_EQ
-            k  = FATIGUE_K
-            val = eq + (base - eq) * math.exp(-k * t_hours)
-            na_adj = factors.get('na', 0.2) * 0.06
-            val += na_adj
-            result[key] = round(min(1.0, max(0.0, val)), 4)
-        else:
-            cap = DRIVE_CAP.get(key, 0.65)
-            gk  = DRIVE_GROWTH_K.get(key, 0.05)
-            if key in CAP_BOOST:
-                fk, coef = CAP_BOOST[key]
-                cap = min(0.92, cap + factors.get(fk, 0.0) * coef)
-            val = cap - (cap - base) * math.exp(-gk * t_hours)
-            result[key] = round(min(1.0, max(0.0, val)), 4)
-
-    return result
-
-
-# ═══════════════════════════════════════════════════════════
-# 写回：把当前实时值存DB（刷新 last_updated）
-# ═══════════════════════════════════════════════════════════
 
 def _flush(values: dict):
-    now_str = _now().strftime('%Y-%m-%d %H:%M:%S')
-    conn = _db()
-    conn.execute("""
-        UPDATE drive_state SET
-            attachment=?, curiosity=?, reflection=?, social=?,
-            duty=?, libido=?, stress=?, fatigue=?,
-            last_updated=?
-        WHERE id=1
-    """, (
-        values['attachment'], values['curiosity'],
-        values['reflection'], values['social'],
-        values['duty'],       values['libido'],
-        values['stress'],     values['fatigue'],
-        now_str,
-    ))
-    conn.commit()
-    conn.close()
+    """Stage D: retired production writer.
 
+    Legacy ``drive_state`` snapshot is not authority. Accepted for call-site
+    compatibility only; does not mutate V3 truth.
+    """
+    del values
+    return None
 
-# ═══════════════════════════════════════════════════════════
-# discharge：wake行为后降低对应维度
-# ═══════════════════════════════════════════════════════════
 
 def discharge(fired_key: str):
+    """Stage D: retired production writer.
+
+    Authoritative discharge is ``wake_outcome`` / ``user_rule`` on V3.
     """
-    唤醒行为完成后调用：
-    - fired_key 对应的 drive 降低 DISCHARGE 量
-    - fatigue 微升 FATIGUE_COST
-    """
-    current = get_drive()   # 先拿到积累后的实时值
-    if fired_key in DISCHARGE and fired_key != 'fatigue':
-        current[fired_key] = max(0.0, current[fired_key] - DISCHARGE[fired_key])
-    # fatigue 微升（消耗精力）
-    current['fatigue'] = min(1.0, current['fatigue'] + FATIGUE_COST)
-    _flush(current)
+    del fired_key
+    return None
 
 
 def infer_fired_drive_for_action(action: str, thoughts: str = '') -> Optional[str]:
-    """Infer which drive fired for a wake action without mutating state."""
+    """Infer which drive fired for a wake action without mutating state.
+
+    Uses authoritative V3 drive reads. Does not reconstruct Intent from
+    assistant wording; ``thoughts`` kept for signature compatibility only.
+    """
+    del thoughts
     if action == 'none':
         return None
     current = get_drive()
@@ -265,31 +224,21 @@ def infer_fired_drive_for_action(action: str, thoughts: str = '') -> Optional[st
 
 
 def discharge_by_action(action: str, thoughts: str = ''):
-    """
-    根据 wake 的 action 类型自动推断 fired_key
-    thoughts 里如果有 libido 相关词也算
-    """
-    if action == 'none':
-        # 决定不打扰她 = 在休息，fatigue 微降
-        _cur = get_drive()
-        _cur['fatigue'] = max(0.0, _cur['fatigue'] - 0.04)
-        _flush(_cur)
-        return
+    """Stage D: retired production writer.
 
-    top_key = infer_fired_drive_for_action(action, thoughts=thoughts)
-    if top_key is None:
-        return
-    current = get_drive()
-    current[top_key] = max(0.0, current[top_key] - DISCHARGE.get(top_key, 0.4))
-    current['fatigue'] = min(1.0, current['fatigue'] + FATIGUE_COST)
-    _flush(current)
+    Wake settlement must go through ``chat.drive_authority`` → V3
+    ``apply_outcome``. This entry no longer mutates production drives.
+    """
+    del action, thoughts
+    return None
 
 
 def rest():
-    """哈娅在线时，fatigue 缓慢恢复（她的存在缓解疲劳）"""
-    current = get_drive()
-    current['fatigue'] = max(0.0, current['fatigue'] - 0.12)
-    _flush(current)
+    """Stage D: retired production writer.
+
+    User-message fatigue restore is owned by Canonical ``user_rule`` on V3.
+    """
+    return None
 
 
 # ═══════════════════════════════════════════════════════════

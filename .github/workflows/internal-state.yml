@@ -37,5 +37,6 @@ jobs:
             tests.test_interaction_state \
             tests.test_derived_longing_authority \
             tests.test_affect_bond_authority \
+            tests.test_drive_authority \
             tests.test_gateway_shadow_module_resolution \
             -v

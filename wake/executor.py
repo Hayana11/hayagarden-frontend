@@ -198,7 +198,9 @@ def execute(action: str, thoughts: str, content: str,
         except Exception:
             pass
 
-    # Discharge drive / desire（dream/summarize 不 discharge）
+    # Stage D: legacy drive/desire writers are retired no-ops.
+    # Authoritative Wake drive settlement is gateway → drive_authority
+    # → V3 wake_outcome. Keep call sites for compatibility only.
     if mode not in ('dream', 'summarize'):
         try:
             import drive_engine as _de

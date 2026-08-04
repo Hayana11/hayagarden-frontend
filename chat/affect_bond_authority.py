@@ -283,6 +283,11 @@ def apply_user_rule_observation(
                         project_v3_to_emotion_state(db_path)
                     except Exception:
                         pass
+                    try:
+                        from chat.drive_authority import project_v3_drive_compatibility
+                        project_v3_drive_compatibility(db_path)
+                    except Exception:
+                        pass
                 return last
         finally:
             if conn is not None:
@@ -327,6 +332,11 @@ def apply_scored_observation(
                 if last.status in ('applied', 'duplicate', 'stale_skipped'):
                     try:
                         project_v3_to_emotion_state(db_path)
+                    except Exception:
+                        pass
+                    try:
+                        from chat.drive_authority import project_v3_drive_compatibility
+                        project_v3_drive_compatibility(db_path)
                     except Exception:
                         pass
                 return last

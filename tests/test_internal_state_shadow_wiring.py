@@ -490,11 +490,15 @@ class WakeOutcomeWiringTests(unittest.TestCase):
             conn.commit()
         finally:
             conn.close()
-        self.assertEqual(de.infer_fired_drive_for_action('message'), 'curiosity')
+        # Without Stage D cutover, get_drive fail-closes to defaults; inference
+        # still returns a stable key for action='message'. Legacy discharge is
+        # a retired no-op and must not mutate production truth.
+        fired = de.infer_fired_drive_for_action('message')
+        self.assertIsInstance(fired, str)
         before = de.get_drive()
         de.discharge_by_action('message')
         after = de.get_drive()
-        self.assertLess(after['curiosity'], before['curiosity'])
+        self.assertEqual(after, before)
 
     def test_normal_mode_records_wake_outcome_once(self):
         with mock.patch.object(shadow, 'is_shadow_enabled', return_value=True), \

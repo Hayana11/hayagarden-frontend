@@ -54,7 +54,12 @@ class InteractionClock:
 
 
 def touch_user_interaction(get_db_fn: Optional[Callable] = None) -> None:
-    """Update all interaction clocks after a user message is persisted.
+    """Update compatibility interaction clocks after a user message is persisted.
+
+    Stage D: drive rest / attachment discharge are NOT applied here.
+    Authoritative user-message drive settlement is Canonical ``user_rule``
+    on ``internal_state_v3``. This path only refreshes non-authoritative
+    legacy clocks (emotion last_interaction / desire last_hayana_msg_time).
 
     get_db_fn is accepted for call-site symmetry; current backends write via
     their own DB helpers. Never raises into the chat path.
@@ -70,14 +75,6 @@ def touch_user_interaction(get_db_fn: Optional[Callable] = None) -> None:
         _des.touch_hayana()
     except Exception as exc:
         _LOG.warning('touch desire failed: %s', exc)
-    try:
-        import drive_engine as _de
-        _de.rest()
-        drive = _de.get_drive()
-        if float(drive.get('attachment', 0) or 0) > 0.3:
-            _de.discharge('attachment')
-    except Exception as exc:
-        _LOG.warning('touch drive_engine failed: %s', exc)
 
 
 def read_interaction_clock_from_conn(
