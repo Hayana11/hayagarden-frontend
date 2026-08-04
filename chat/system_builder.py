@@ -168,30 +168,10 @@ def build_system(
     # ── BP3 · 动态内容（每次都变，不挂缓存标）───────────────────
     parts = []
 
-    # 0. 情绪快照 + 驱动条（emotion_engine + drive_engine）
-    try:
-        import emotion_engine as _ee
-        _emotion_snip = _ee.get_bp3_snippet()
-        if _emotion_snip:
-            parts.append(_emotion_snip)
-    except Exception:
-        pass
-    try:
-        import drive_engine as _de
-        _drive_bp3 = _de.get_bp3_snippet()
-        if _drive_bp3:
-            parts.append(_drive_bp3)
-    except Exception:
-        pass
-    # Longing系统隐性注入（对话时）
-    if config_store.get_bool('LONGING_ENABLED', True):
-        try:
-            import desire as _des_bp3
-            _longing_hint = _des_bp3.get_longing_system_hint()
-            if _longing_hint:
-                parts.append(_longing_hint)
-        except Exception:
-            pass
+    # Crown: ordinary Chat default zero psychological-state injection.
+    # Do NOT inject legacy emotion/drive BP3 snippets or Longing system hints
+    # (behavior/style directives). New V3 Chat Exposure remains OFF —
+    # removing legacy horns ≠ new broadcast.
 
     # 1. Handoff：自我锚点 + 用户/关系画像 + 近期连续性
     try:
@@ -976,30 +956,11 @@ def _cc_collect_state(get_db_fn, *, lean=False):
         'reminders': '',
         'recent_activity': '',
     }
-    try:
-        import emotion_engine as _ee
-        if lean:
-            state['emotion'] = _format_structured_emotion_snippet()
-        else:
-            state['emotion'] = (_ee.get_bp3_snippet() or '').strip()
-    except Exception:
-        pass
-    try:
-        import drive_engine as _de
-        if lean:
-            state['drive'] = _format_structured_drive_snippet()
-        else:
-            state['drive'] = (_de.get_bp3_snippet() or '').strip()
-    except Exception:
-        pass
-    if not lean and config_store.get_bool('LONGING_ENABLED', True):
-        try:
-            import desire as _des
-            state['drive'] = '\n'.join(
-                p for p in (state['drive'], (_des.get_longing_system_hint() or '').strip()) if p
-            )
-        except Exception:
-            pass
+    # Crown: Affect / Eight Drives / Longing do not enter ordinary Chat state
+    # blocks (lean or legacy). Helpers above remain for diagnostics only.
+    # New V3 Chat Exposure stays OFF.
+    state['emotion'] = ''
+    state['drive'] = ''
     try:
         req = urllib.request.Request('http://127.0.0.1:5052/light/status')
         with urllib.request.urlopen(req, timeout=3) as resp:

@@ -100,6 +100,11 @@ def _parse_dt(s):
 
 
 def ensure_table():
+    """Legacy schema helper for explicit call sites / tests only.
+
+    Crown: compatibility facade must not write on import. Production Drive /
+    Longing authority is V3 + derived clock — not ``desire_state``.
+    """
     conn = _db()
     conn.execute("""
         CREATE TABLE IF NOT EXISTS desire_state (
@@ -123,7 +128,7 @@ def ensure_table():
     conn.close()
 
 
-ensure_table()
+# Crown: no import-time ensure_table() write.
 
 
 # ─── Pure computation functions ────────────────────────────

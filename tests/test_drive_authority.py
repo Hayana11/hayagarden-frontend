@@ -267,6 +267,7 @@ class DriveAuthorityTests(unittest.TestCase):
             desire_driven=False,
             user_idle_hours=1.0,
             outcome_at='2026-08-04 10:00:00',
+            provenance_present=True,
             db_path=self.db_path,
         )
         self.assertEqual(result.status, 'applied')
@@ -283,6 +284,7 @@ class DriveAuthorityTests(unittest.TestCase):
                 desire_driven=False,
                 user_idle_hours=1.0,
                 outcome_at='2026-08-04 10:05:00',
+                provenance_present=True,
                 db_path=self.db_path,
             )
 
@@ -328,6 +330,7 @@ class DriveAuthorityTests(unittest.TestCase):
             desire_driven=False,
             user_idle_hours=0.5,
             outcome_at='2026-08-04 12:00:00',
+            provenance_present=True,
             db_path=self.db_path,
         )
         self.assertEqual(r1.status, 'applied')
@@ -340,6 +343,7 @@ class DriveAuthorityTests(unittest.TestCase):
             desire_driven=False,
             user_idle_hours=0.5,
             outcome_at='2026-08-04 12:00:00',
+            provenance_present=True,
             db_path=self.db_path,
         )
         self.assertEqual(r2.status, 'duplicate')
@@ -477,6 +481,7 @@ class DecisionTimeProvenanceTests(unittest.TestCase):
             desire_driven=False,
             user_idle_hours=1.0,
             outcome_at='2026-08-04 10:30:00',
+            provenance_present=True,
             db_path=self.db_path,
         )
         self.assertEqual(result.status, 'applied')
@@ -501,6 +506,7 @@ class DecisionTimeProvenanceTests(unittest.TestCase):
             desire_driven=False,
             user_idle_hours=0.5,
             outcome_at='2026-08-04 13:00:00',
+            provenance_present=True,
             db_path=self.db_path,
         )
         self.assertEqual(r1.status, 'applied')
@@ -523,6 +529,7 @@ class DecisionTimeProvenanceTests(unittest.TestCase):
             desire_driven=False,
             user_idle_hours=0.5,
             outcome_at='2026-08-04 13:05:00',
+            provenance_present=True,
             db_path=self.db_path,
         )
         self.assertEqual(r2.status, 'applied')
