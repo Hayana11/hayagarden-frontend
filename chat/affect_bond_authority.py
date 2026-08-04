@@ -6,8 +6,8 @@ mutated only through Canonical Event apply paths:
   user_rule:{message_id}   → Bond (keyword observation)
   user_scored:{message_id} → Affect + Bond (async scorer observation)
 
-``emotion_engine`` may evaluate (DeepSeek / rule / Ombre) and project
-compatibility snapshots, but must not own a second mutable heart.
+Cutover readiness reuses Shadow bootstrap provenance / proof-gap /
+watermark health. Getters are pure reads and never bootstrap.
 """
 
 from __future__ import annotations
@@ -17,12 +17,10 @@ import logging
 import os
 import sqlite3
 from types import SimpleNamespace
-from typing import Any, Callable, Mapping, Optional
+from typing import Any, Mapping, Optional
 
 _LOG = logging.getLogger('affect_bond_authority')
 
-_BOOTSTRAP_EVENT_KEY = 'bootstrap:initial'
-_BOOTSTRAP_SOURCE_ID = 'stage_c_affect_bond_authority'
 _DEFAULT_DB = '/opt/frontend/memories.db'
 
 
@@ -38,169 +36,10 @@ def _now_str() -> str:
     return _now_beijing().strftime('%Y-%m-%d %H:%M:%S')
 
 
-def _open(db_path: Optional[str] = None) -> sqlite3.Connection:
-    import internal_state_store as store
-    return store.open_store(memories_db_path(db_path))
-
-
-def _legacy_emotion_row(conn: sqlite3.Connection) -> Optional[dict]:
-    try:
-        row = conn.execute('SELECT * FROM emotion_state WHERE id=1').fetchone()
-    except Exception:
-        return None
-    if row is None:
-        return None
-    return dict(row) if hasattr(row, 'keys') else None
-
-
-def _cutover_watermark(conn: sqlite3.Connection) -> int:
-    """Positive watermark for Stage C bootstrap; never invents 0/None."""
-    import internal_state_store as store
-
-    try:
-        exists = conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' "
-            "AND name='internal_state_score_applied'"
-        ).fetchone()
-        if exists:
-            row = conn.execute(
-                'SELECT MAX(message_id) AS mid FROM internal_state_score_applied'
-            ).fetchone()
-            mid = row['mid'] if row is not None and hasattr(row, 'keys') else (
-                row[0] if row else None
-            )
-            if mid is not None:
-                return store.require_positive_message_id(
-                    int(mid), field='last_scored_message_id',
-                )
-    except Exception:
-        pass
-    try:
-        from chat.interaction_state import USER_AUTHOR_SQL
-        row = conn.execute(
-            f'SELECT MAX(id) AS mid FROM chat_messages WHERE {USER_AUTHOR_SQL}'
-        ).fetchone()
-        mid = row['mid'] if row is not None and hasattr(row, 'keys') else (
-            row[0] if row else None
-        )
-        if mid is not None:
-            return store.require_positive_message_id(
-                int(mid), field='last_scored_message_id',
-            )
-    except Exception:
-        pass
-    # Greenfield: allow first real message/score after clearing watermark.
-    return 1
-
-
-def _snapshot_from_legacy(emotion: Mapping[str, Any], observed_at: str):
-    return SimpleNamespace(
-        observed_at=observed_at,
-        affect=SimpleNamespace(
-            pa=float(emotion.get('pa') if emotion.get('pa') is not None else 0.5),
-            na=float(emotion.get('na') if emotion.get('na') is not None else 0.2),
-            valence=float(
-                emotion.get('valence') if emotion.get('valence') is not None else 0.6
-            ),
-            arousal=float(
-                emotion.get('arousal') if emotion.get('arousal') is not None else 0.3
-            ),
-            mood_word=emotion.get('mood_word') or '平静',
-        ),
-        bond=SimpleNamespace(
-            intimacy=float(
-                emotion.get('sternberg_i')
-                if emotion.get('sternberg_i') is not None else 0.3
-            ),
-            passion=float(
-                emotion.get('sternberg_p')
-                if emotion.get('sternberg_p') is not None else 0.0
-            ),
-            commitment=float(
-                emotion.get('sternberg_c')
-                if emotion.get('sternberg_c') is not None else 0.7
-            ),
-        ),
-        candidate_unified_drives=SimpleNamespace(
-            attachment=0.10, curiosity=0.20, reflection=0.10, social=0.10,
-            duty=0.15, libido=0.0, stress=0.10, fatigue=0.20,
-        ),
-        diagnostics=SimpleNamespace(source_timestamps={}),
-    )
-
-
-def ensure_authority_ready(db_path: Optional[str] = None) -> bool:
-    """Ensure ``internal_state_v3`` exists and is bootstrapped. Never raises."""
-    import internal_state_store as store
-
-    path = memories_db_path(db_path)
-    conn = None
-    try:
-        conn = store.open_store(path)
-        store.ensure_schema(conn)
-        state = store.read_state(conn)
-        if state is not None:
-            return True
-        emotion = _legacy_emotion_row(conn) or {}
-        observed = _now_str()
-        snap = _snapshot_from_legacy(emotion, observed)
-        watermark = _cutover_watermark(conn)
-        result = store.bootstrap_from_snapshot(
-            conn,
-            snap,
-            last_scored_message_id=watermark,
-            last_scored_message_id_source='stage_c_cutover_watermark',
-            capture_mode='stage_c_affect_bond_v1',
-            event_key=_BOOTSTRAP_EVENT_KEY,
-            source_id=_BOOTSTRAP_SOURCE_ID,
-        )
-        if result.status not in ('applied', 'duplicate'):
-            _LOG.warning(
-                'affect_bond bootstrap failed: %s (%s)',
-                result.status, result.error,
-            )
-            return False
-        # Greenfield: no prior score proof → clear watermark so first score applies.
-        try:
-            proof = conn.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' "
-                "AND name='internal_state_score_applied'"
-            ).fetchone()
-            has_proof = False
-            if proof:
-                has_proof = conn.execute(
-                    'SELECT 1 FROM internal_state_score_applied LIMIT 1'
-                ).fetchone() is not None
-            has_scored_event = conn.execute(
-                "SELECT 1 FROM internal_state_events "
-                "WHERE event_type='user_scored' LIMIT 1"
-            ).fetchone() is not None
-            if not has_proof and not has_scored_event:
-                conn.execute(
-                    'UPDATE internal_state_v3 '
-                    'SET last_scored_message_id=NULL WHERE id=1'
-                )
-                conn.commit()
-        except Exception as exc:
-            _LOG.warning('affect_bond watermark clear skipped: %s', exc)
-        return store.read_state(conn) is not None
-    except Exception as exc:
-        _LOG.warning('ensure_authority_ready failed: %s', exc)
-        return False
-    finally:
-        if conn is not None:
-            try:
-                conn.close()
-            except Exception:
-                pass
-
-
 def read_v3_state(db_path: Optional[str] = None) -> Optional[dict]:
-    """Authoritative Affect+Bond row, or None if unavailable."""
+    """Pure read of ``internal_state_v3``. Never bootstraps / ensures schema / mutates."""
     import internal_state_store as store
 
-    if not ensure_authority_ready(db_path):
-        return None
     conn = None
     try:
         conn = store.open_store(memories_db_path(db_path))
@@ -214,6 +53,130 @@ def read_v3_state(db_path: Optional[str] = None) -> Optional[dict]:
                 conn.close()
             except Exception:
                 pass
+
+
+def check_cutover_ready(db_path: Optional[str] = None) -> SimpleNamespace:
+    """Fail-closed Stage C gate. Read-only — never bootstraps or mutates.
+
+    Requires production bootstrap provenance, no unresolved proof gap, and
+    no watermark lag (``last_scored_message_id >= proof max`` when proof exists).
+    """
+    import internal_state_shadow as shadow
+    import internal_state_store as store
+
+    path = memories_db_path(db_path)
+    conn = None
+    try:
+        conn = store.open_store(path)
+        state, _event, gate = shadow._read_bootstrap_gate(conn)
+        if gate == 'missing':
+            return SimpleNamespace(
+                ok=False, status='bootstrap_missing',
+                error='internal_state_v3 bootstrap missing',
+            )
+        if gate == 'invalid':
+            return SimpleNamespace(
+                ok=False, status='bootstrap_provenance_invalid',
+                error='bootstrap present but provenance invalid; refusing authority',
+            )
+        if shadow.has_unresolved_proof_gap(conn, db_path=path):
+            return SimpleNamespace(
+                ok=False, status='proof_gap',
+                error='unresolved score proof gap; refusing authority',
+            )
+        # Watermark health: refuse lag when proof table can speak.
+        if shadow.score_proof_schema_ready(conn):
+            try:
+                proof_max = shadow.resolve_scored_watermark(conn)
+            except store.StoreError:
+                proof_max = None
+            last = None if state is None else state.get('last_scored_message_id')
+            if proof_max is not None and last is None:
+                return SimpleNamespace(
+                    ok=False, status='watermark_lag',
+                    error='proof watermark exists but state last_scored is NULL',
+                )
+            if proof_max is not None and last is not None:
+                if int(proof_max) > int(last):
+                    return SimpleNamespace(
+                        ok=False, status='watermark_lag',
+                        error=(
+                            f'watermark lag: proof_max={proof_max} > '
+                            f'last_scored={last}'
+                        ),
+                    )
+        return SimpleNamespace(ok=True, status='ready', error=None)
+    except Exception as exc:
+        _LOG.warning('check_cutover_ready failed: %s', exc)
+        return SimpleNamespace(
+            ok=False, status='failed', error=str(exc),
+        )
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
+def ensure_authority_ready(db_path: Optional[str] = None) -> bool:
+    """Stage C cutover gate for mutation paths.
+
+    Reuses ``internal_state_shadow.ensure_bootstrapped`` (production provenance,
+    no default-personality wash). Never clears watermarks. Never invents
+    ``{}`` → default Affect/Bond. Getters must not call this.
+    """
+    ready = check_cutover_ready(db_path)
+    if ready.ok:
+        return True
+
+    # Untrusted / damaged structural bootstrap must not be overwritten.
+    if ready.status == 'bootstrap_provenance_invalid':
+        _LOG.warning('ensure_authority_ready refuse: %s', ready.error)
+        return False
+    if ready.status in ('proof_gap', 'watermark_lag'):
+        _LOG.warning('ensure_authority_ready refuse: %s', ready.error)
+        return False
+
+    path = memories_db_path(db_path)
+    try:
+        import internal_state_shadow as shadow
+        result = shadow.ensure_bootstrapped(db_path=path)
+        if not result.ok and result.status != 'disabled':
+            _LOG.warning(
+                'ensure_authority_ready bootstrap: %s (%s)',
+                result.status, result.error,
+            )
+    except Exception as exc:
+        _LOG.warning('ensure_authority_ready bootstrap failed: %s', exc)
+
+    ready2 = check_cutover_ready(db_path)
+    if not ready2.ok:
+        _LOG.warning(
+            'ensure_authority_ready still not ready: %s (%s)',
+            ready2.status, ready2.error,
+        )
+    return bool(ready2.ok)
+
+
+def read_current_bond(
+    db_path: Optional[str] = None,
+    *,
+    observed_at: Optional[str] = None,
+) -> Optional[dict]:
+    """Canonical current Bond (intimacy/passion/commitment) from V3 state.
+
+    Materialization is owned by ``internal_state_events.materialize_bond``
+    (τ6 / τ96). Callers must not re-decay.
+    """
+    from internal_state_events import materialize_bond
+
+    if not check_cutover_ready(db_path).ok:
+        return None
+    v3 = read_v3_state(db_path)
+    if v3 is None:
+        return None
+    return materialize_bond(v3, observed_at or _now_str())
 
 
 def v3_to_legacy_emotion_shape(
@@ -289,35 +252,45 @@ def apply_user_rule_observation(
     created_at: str,
     previous_user_at: Optional[str],
     db_path: Optional[str] = None,
+    max_version_retries: int = 3,
 ) -> Any:
-    """Canonical Bond mutation for a user message (idempotent)."""
+    """Canonical Bond mutation for a user message (idempotent + version retry)."""
     import internal_state_events as events
     import internal_state_store as store
 
     if not ensure_authority_ready(db_path):
         raise store.StoreError('affect_bond authority not ready for user_rule')
-    conn = None
-    try:
-        conn = store.open_store(memories_db_path(db_path))
-        result = events.observe_user_message(
-            conn,
-            message_id=message_id,
-            text=text,
-            created_at=created_at,
-            previous_user_at=previous_user_at,
-        )
-        if result.status in ('applied', 'duplicate'):
-            try:
-                project_v3_to_emotion_state(db_path)
-            except Exception:
-                pass
-        return result
-    finally:
-        if conn is not None:
-            try:
-                conn.close()
-            except Exception:
-                pass
+
+    path = memories_db_path(db_path)
+    last = None
+    for _ in range(max(1, int(max_version_retries))):
+        conn = None
+        try:
+            conn = store.open_store(path)
+            state = store.read_state(conn)
+            expected = int(state['state_version']) if state else None
+            last = events.observe_user_message(
+                conn,
+                message_id=message_id,
+                text=text,
+                created_at=created_at,
+                previous_user_at=previous_user_at,
+                expected_state_version=expected,
+            )
+            if last.status != 'version_conflict':
+                if last.status in ('applied', 'duplicate', 'stale_skipped'):
+                    try:
+                        project_v3_to_emotion_state(db_path)
+                    except Exception:
+                        pass
+                return last
+        finally:
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+    return last
 
 
 def apply_scored_observation(

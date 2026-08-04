@@ -326,6 +326,15 @@ def _materialize_bond(state: Mapping[str, Any], created_at: str) -> dict:
     }
 
 
+def materialize_bond(state: Mapping[str, Any], observed_at: str) -> dict:
+    """Canonical current Bond materialization (passion τ6 / intimacy τ96).
+
+    Sole production Bond decay math. Compatibility facades must delegate here
+    and must not own a second τ table.
+    """
+    return _materialize_bond(state, observed_at)
+
+
 def _materialize_drives(
     state: Mapping[str, Any],
     *,
@@ -1588,6 +1597,7 @@ __all__ = [
     'LEGACY_FATIGUE_RESTORE',
     'apply_outcome',
     'get_scored_event_stats',
+    'materialize_bond',
     'normalize_scored_scores',
     'observe_scored',
     'observe_user_message',

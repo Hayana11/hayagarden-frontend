@@ -1139,6 +1139,7 @@ class MonotonicScoreGuardTests(unittest.TestCase):
 
 
 class SidecarFailClosedTests(unittest.TestCase):
+    @_skip_legacy_score_dualwrite
     def test_sidecar_open_failure_preserves_legacy_emotion(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
@@ -1204,6 +1205,7 @@ class SidecarFailClosedTests(unittest.TestCase):
         finally:
             conn.close()
 
+    @_skip_legacy_score_dualwrite
     def test_sidecar_fsync_failure_preserves_legacy_emotion(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
@@ -1232,6 +1234,7 @@ class SidecarFailClosedTests(unittest.TestCase):
         finally:
             conn.close()
 
+    @_skip_legacy_score_dualwrite
     def test_shadow_import_failure_and_sidecar_unwritable_preserves_legacy_emotion(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
@@ -2125,6 +2128,7 @@ class FallbackHistoryFinalizeTests(unittest.TestCase):
             conn.close()
         self.assertEqual(_history_count(self.db_path), before + 1)
 
+    @_skip_legacy_score_dualwrite
     def test_proof_schema_missing_sidecar_fail_updates_emotion_and_history_once(self):
         before = _history_count(self.db_path)
         with mock.patch.object(ee, '_deepseek_score', return_value=_deepseek_scores()), \
@@ -2143,6 +2147,7 @@ class FallbackHistoryFinalizeTests(unittest.TestCase):
             conn.close()
         self.assertEqual(_history_count(self.db_path), before + 1)
 
+    @_skip_legacy_score_dualwrite
     def test_proof_schema_missing_emotion_txn_fail_updates_emotion_and_history_once(self):
         conn = store.open_store(self.db_path)
         try:

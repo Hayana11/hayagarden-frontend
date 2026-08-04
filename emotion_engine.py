@@ -177,8 +177,9 @@ def _decay(value, stored_at_str, tau_hours, *, observed_at=None):
 def get_state() -> dict:
     """Compatibility facade → Stage C authoritative Affect+Bond (V3).
 
-    Affect/Bond fields are read from ``internal_state_v3``. Legacy
-    ``emotion_state`` may still supply non-authoritative extras such as
+    Pure read: never bootstraps or mutates. Only surfaces V3 when the Stage C
+    cutover gate is ready (trusted provenance / no gap / no watermark lag).
+    Legacy ``emotion_state`` may supply non-authoritative extras such as
     ``last_interaction`` for display only.
     """
     last_interaction = None
@@ -198,15 +199,16 @@ def get_state() -> dict:
         pass
     try:
         from chat.affect_bond_authority import (
-            read_v3_state, v3_to_legacy_emotion_shape,
+            check_cutover_ready, read_v3_state, v3_to_legacy_emotion_shape,
         )
-        v3 = read_v3_state(DB_PATH)
-        if v3 is not None:
-            return v3_to_legacy_emotion_shape(
-                v3,
-                last_interaction=last_interaction,
-                longing=get_longing(),
-            )
+        if check_cutover_ready(DB_PATH).ok:
+            v3 = read_v3_state(DB_PATH)
+            if v3 is not None:
+                return v3_to_legacy_emotion_shape(
+                    v3,
+                    last_interaction=last_interaction,
+                    longing=get_longing(),
+                )
     except Exception:
         pass
     return {
@@ -219,12 +221,19 @@ def get_state() -> dict:
 
 
 def get_desire() -> dict:
-    """Facade: decayed Bond I/P/C from authoritative V3 clocks."""
-    state = get_state()
-    p = _decay(state.get('sternberg_p', 0.0), state.get('p_updated_at'), TAU_P)
-    i = _decay(state.get('sternberg_i', 0.3), state.get('i_updated_at'), TAU_I)
-    c = state.get('sternberg_c', 0.7)  # C几乎不衰减
-    return {'p': round(p, 4), 'i': round(i, 4), 'c': round(c, 4)}
+    """Facade: map canonical V3 Bond materialization only — no local decay math."""
+    try:
+        from chat.affect_bond_authority import read_current_bond
+        bond = read_current_bond(DB_PATH)
+        if bond is not None:
+            return {
+                'p': round(float(bond['passion']), 4),
+                'i': round(float(bond['intimacy']), 4),
+                'c': round(float(bond['commitment']), 4),
+            }
+    except Exception:
+        pass
+    return {'p': 0.0, 'i': 0.3, 'c': 0.7}
 
 
 def touch_interaction():

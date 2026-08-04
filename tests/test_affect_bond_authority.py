@@ -9,6 +9,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 ROOT = str(Path(__file__).resolve().parents[1])
@@ -22,59 +23,112 @@ os.environ.setdefault(
 
 import emotion_engine as ee
 import internal_state_events as events
+import internal_state_shadow as shadow
 import internal_state_store as store
 from chat import affect_bond_authority as aba
+
+T_BOOT = datetime.datetime(2026, 8, 4, 9, 0, 0)
+T_BOOT_STR = '2026-08-04 09:00:00'
+WATERMARK_MID = 20
+SHADOW_ON = {shadow.SHADOW_ENABLED_ENV: '1'}
+
+
+def _seed_legacy(conn: sqlite3.Connection, *, chat_through: int = WATERMARK_MID) -> None:
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS chat_messages (
+            id INTEGER PRIMARY KEY, author TEXT, content TEXT, created_at TEXT
+        );
+        CREATE TABLE IF NOT EXISTS wake_log (
+            id INTEGER PRIMARY KEY, action TEXT, woke_at TEXT
+        );
+        CREATE TABLE IF NOT EXISTS emotion_state (
+            id INTEGER PRIMARY KEY,
+            pa REAL, na REAL, valence REAL, arousal REAL,
+            mood_word TEXT, longing REAL,
+            last_interaction TEXT, updated_at TEXT,
+            sternberg_i REAL, sternberg_p REAL, sternberg_c REAL,
+            p_updated_at TEXT, i_updated_at TEXT
+        );
+        CREATE TABLE IF NOT EXISTS drive_state (
+            id INTEGER PRIMARY KEY,
+            attachment REAL, curiosity REAL, reflection REAL, social REAL,
+            duty REAL, libido REAL, stress REAL, fatigue REAL,
+            last_updated TEXT
+        );
+        CREATE TABLE IF NOT EXISTS desire_state (
+            id INTEGER PRIMARY KEY,
+            curiosity REAL, reflection REAL, duty REAL, social REAL,
+            libido REAL, stress REAL, fatigue REAL,
+            last_updated TEXT, last_hayana_msg_time TEXT
+        );
+        DELETE FROM chat_messages;
+        DELETE FROM wake_log;
+        DELETE FROM emotion_state;
+        DELETE FROM drive_state;
+        DELETE FROM desire_state;
+        INSERT INTO emotion_state VALUES (
+            1, 0.5, 0.2, 0.6, 0.3, '平静', 0.1,
+            '2026-08-04 08:00:00', '2026-08-04 08:00:00',
+            0.3, 0.0, 0.7, '2026-08-04 08:00:00', '2026-08-04 08:00:00');
+        INSERT INTO drive_state VALUES (
+            1, 0.1, 0.2, 0.1, 0.1, 0.15, 0.0, 0.1, 0.2,
+            '2026-08-04 08:00:00');
+        INSERT INTO desire_state VALUES (
+            1, 0.1, 0.1, 0.15, 0.1, 0.0, 0.1, 0.2,
+            '2026-08-04 08:00:00', NULL);
+        """
+    )
+    for mid in range(1, chat_through + 1):
+        conn.execute(
+            "INSERT INTO chat_messages (id, author, content, created_at) "
+            "VALUES (?,?,?,?)",
+            (mid, 'hayana', f'm{mid}', '2026-08-04 08:00:00'),
+        )
+    conn.commit()
+
+
+def _production_bootstrap(db_path: str, *, watermark: int = WATERMARK_MID) -> None:
+    conn = store.open_store(db_path)
+    try:
+        _seed_legacy(conn, chat_through=watermark)
+        shadow.ensure_shadow_schema(conn)
+        conn.execute('BEGIN')
+        try:
+            shadow.record_score_proof_in_txn(
+                conn, watermark, applied_at=T_BOOT_STR,
+                source='stage_c_test', score_hash='boot',
+            )
+            conn.execute('COMMIT')
+        except Exception:
+            conn.execute('ROLLBACK')
+            raise
+    finally:
+        conn.close()
+    with mock.patch.object(shadow, '_now_beijing_dt', return_value=T_BOOT):
+        result = shadow.ensure_bootstrapped(db_path=db_path, environ=SHADOW_ON)
+    assert result.ok, result.error
+    ready = aba.check_cutover_ready(db_path)
+    assert ready.ok, (ready.status, ready.error)
 
 
 class AffectBondAuthorityTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.db_path = str(Path(self.tmp.name) / 'memories.db')
-        conn = sqlite3.connect(self.db_path)
-        conn.executescript(
-            """
-            CREATE TABLE chat_messages (
-                id INTEGER PRIMARY KEY, author TEXT, content TEXT,
-                created_at TEXT DEFAULT (datetime('now','+8 hours'))
-            );
-            CREATE TABLE emotion_state (
-                id INTEGER PRIMARY KEY CHECK (id = 1),
-                pa REAL DEFAULT 0.5, na REAL DEFAULT 0.2,
-                valence REAL DEFAULT 0.6, arousal REAL DEFAULT 0.3,
-                mood_word TEXT DEFAULT '平静', longing REAL DEFAULT 0.0,
-                sternberg_p REAL DEFAULT 0.0, sternberg_i REAL DEFAULT 0.3,
-                sternberg_c REAL DEFAULT 0.7,
-                p_updated_at TEXT, i_updated_at TEXT,
-                last_interaction TEXT, updated_at TEXT
-            );
-            INSERT INTO emotion_state (id) VALUES (1);
-            CREATE TABLE drive_state (
-                id INTEGER PRIMARY KEY CHECK (id = 1),
-                attachment REAL DEFAULT 0.1, curiosity REAL DEFAULT 0.2,
-                reflection REAL DEFAULT 0.1, social REAL DEFAULT 0.1,
-                duty REAL DEFAULT 0.15, libido REAL DEFAULT 0.0,
-                stress REAL DEFAULT 0.1, fatigue REAL DEFAULT 0.2,
-                last_updated TEXT
-            );
-            INSERT INTO drive_state (id) VALUES (1);
-            CREATE TABLE desire_state (
-                id INTEGER PRIMARY KEY CHECK (id = 1),
-                curiosity REAL, reflection REAL, duty REAL, social REAL,
-                libido REAL, stress REAL, fatigue REAL,
-                last_updated TEXT, last_hayana_msg_time TEXT
-            );
-            INSERT INTO desire_state (id) VALUES (1);
-            """
-        )
-        conn.commit()
-        conn.close()
         self._prev_memories = os.environ.get('MEMORIES_DB')
         self._prev_ee = ee.DB_PATH
-        os.environ['MEMORIES_DB'] = self.db_path
+        self._env = mock.patch.dict(os.environ, {
+            'MEMORIES_DB': self.db_path,
+            **SHADOW_ON,
+        }, clear=False)
+        self._env.start()
         ee.DB_PATH = self.db_path
+        _production_bootstrap(self.db_path)
         self.assertTrue(aba.ensure_authority_ready(self.db_path))
 
     def tearDown(self):
+        self._env.stop()
         ee.DB_PATH = self._prev_ee
         if self._prev_memories is None:
             os.environ.pop('MEMORIES_DB', None)
@@ -114,7 +168,6 @@ class AffectBondAuthorityTests(unittest.TestCase):
         )
         self.assertEqual(result.status, 'applied')
 
-        # Poison legacy emotion_state — must not change production Affect.
         conn = sqlite3.connect(self.db_path)
         conn.execute(
             "UPDATE emotion_state SET pa=0.01, na=0.99, valence=0.01, "
@@ -134,10 +187,12 @@ class AffectBondAuthorityTests(unittest.TestCase):
         mid = self._insert_user(
             '抱抱我好不好', created_at='2026-08-04 11:00:00',
         )
-        v3 = aba.read_v3_state(self.db_path)
-        self.assertIsNotNone(v3)
-        auth_i = float(v3['intimacy'])
-        auth_p = float(v3['passion'])
+        bond = aba.read_current_bond(
+            self.db_path, observed_at='2026-08-04 11:00:00',
+        )
+        self.assertIsNotNone(bond)
+        auth_i = float(bond['intimacy'])
+        auth_p = float(bond['passion'])
         self.assertGreater(auth_i, 0.3)
 
         conn = sqlite3.connect(self.db_path)
@@ -148,8 +203,8 @@ class AffectBondAuthorityTests(unittest.TestCase):
         conn.commit()
         conn.close()
 
-        desire = ee.get_desire()
-        # Facade follows V3, not poisoned legacy sternberg_*.
+        with mock.patch.object(aba, '_now_str', return_value='2026-08-04 11:00:00'):
+            desire = ee.get_desire()
         self.assertNotAlmostEqual(desire['i'], 0.01, places=2)
         self.assertAlmostEqual(desire['i'], auth_i, places=2)
         self.assertAlmostEqual(desire['p'], auth_p, places=2)
@@ -177,7 +232,6 @@ class AffectBondAuthorityTests(unittest.TestCase):
         self.assertEqual(before['state_version'], after['state_version'])
         self.assertEqual(before['pa'], after['pa'])
 
-        # user_rule retry also duplicate
         r3 = aba.apply_user_rule_observation(
             message_id=mid, text='想你',
             created_at='2026-08-04 12:00:00', previous_user_at=None,
@@ -218,12 +272,9 @@ class AffectBondAuthorityTests(unittest.TestCase):
         )
 
     def test_case5_ombre_has_no_write_authority(self):
-        # Ombre adapter is read-only observation; mutating its return must not
-        # invent a second Affect store — only blended scores enter V3 reducer.
-        # Timestamps must be after Stage C bootstrap wall-clock (state clocks).
         mid = self._insert_user('嗯', created_at='2026-08-04 16:00:00')
         with mock.patch.object(ee, '_deepseek_score', return_value={
-            'valence': 0.0,  # [-1,1] → 0.5 after map
+            'valence': 0.0,
             'arousal': 0.2,
             'mood_word': '平静',
             'passion_delta': 0.0,
@@ -232,9 +283,7 @@ class AffectBondAuthorityTests(unittest.TestCase):
                 mock.patch.object(ee, '_now_str', return_value='2026-08-04 16:00:05'):
             ee.score_and_update('excerpt', message_id=mid)
         v3 = aba.read_v3_state(self.db_path)
-        # 0.7*0.5 + 0.3*0.9 = 0.62
         self.assertAlmostEqual(float(v3['valence']), 0.62, places=2)
-        # No ombre_* columns / second state table.
         self.assertNotIn('ombre_valence', v3)
         conn = sqlite3.connect(self.db_path)
         tables = {
@@ -255,7 +304,6 @@ class AffectBondAuthorityTests(unittest.TestCase):
         self.assertEqual(before['intimacy'], after['intimacy'])
         self.assertEqual(before['state_version'], after['state_version'])
 
-        # Direct emotion_state UPDATE cannot change facade reads.
         conn = sqlite3.connect(self.db_path)
         conn.execute(
             "UPDATE emotion_state SET pa=0.11, valence=0.11, "
@@ -269,8 +317,6 @@ class AffectBondAuthorityTests(unittest.TestCase):
         del mid
 
     def test_case7_no_drive_product_semantics_via_facade(self):
-        # Production Drive authority remains drive_state; Stage C must not
-        # rewrite that table even while V3 Bond/Affect advance.
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
         before = dict(conn.execute('SELECT * FROM drive_state WHERE id=1').fetchone())
@@ -290,6 +336,270 @@ class AffectBondAuthorityTests(unittest.TestCase):
         after = dict(conn.execute('SELECT * FROM drive_state WHERE id=1').fetchone())
         conn.close()
         self.assertEqual(before, after)
+
+
+class CutoverGateTests(unittest.TestCase):
+    """Blocker 1 — fail-closed cutover / pure-read getter."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.db_path = str(Path(self.tmp.name) / 'gate.db')
+        self._env = mock.patch.dict(os.environ, {
+            'MEMORIES_DB': self.db_path,
+            **SHADOW_ON,
+        }, clear=False)
+        self._env.start()
+        self._prev_ee = ee.DB_PATH
+        ee.DB_PATH = self.db_path
+
+    def tearDown(self):
+        ee.DB_PATH = self._prev_ee
+        self._env.stop()
+        self.tmp.cleanup()
+
+    def test_untrusted_bootstrap_refused(self):
+        conn = store.open_store(self.db_path)
+        try:
+            _seed_legacy(conn)
+            shadow.ensure_shadow_schema(conn)
+        finally:
+            conn.close()
+        snap = SimpleNamespace(
+            observed_at=T_BOOT_STR,
+            affect=SimpleNamespace(
+                pa=0.55, na=0.25, valence=0.6, arousal=0.4, mood_word='平静'),
+            bond=SimpleNamespace(intimacy=0.5, passion=0.6, commitment=0.7),
+            candidate_unified_drives=SimpleNamespace(
+                attachment=0.5, curiosity=0.2, reflection=0.3, social=0.1,
+                duty=0.15, libido=0.1, stress=0.2, fatigue=0.4),
+            diagnostics=SimpleNamespace(
+                source_timestamps={},
+                source_health={
+                    'clock_reliable': True, 'clock_reason': 'ok',
+                    'emotion_state': True, 'drive_state': True,
+                    'desire_state': True,
+                },
+                warnings=(),
+            ),
+        )
+        r = shadow._ensure_bootstrapped_for_test(
+            db_path=self.db_path, environ=SHADOW_ON,
+            snapshot=snap, last_scored_message_id=WATERMARK_MID,
+        )
+        self.assertTrue(r.ok)
+        ready = aba.check_cutover_ready(self.db_path)
+        self.assertFalse(ready.ok)
+        self.assertEqual(ready.status, 'bootstrap_provenance_invalid')
+        self.assertFalse(aba.ensure_authority_ready(self.db_path))
+        # Getter must not bootstrap / wash — and must not treat untrusted as authority.
+        before = aba.read_v3_state(self.db_path)
+        self.assertIsNotNone(before)
+        state = ee.get_state()
+        self.assertAlmostEqual(state['pa'], 0.5, places=3)
+        after = aba.read_v3_state(self.db_path)
+        self.assertEqual(before['state_version'], after['state_version'])
+
+    def test_unresolved_gap_refused(self):
+        _production_bootstrap(self.db_path)
+        conn = store.open_store(self.db_path)
+        try:
+            shadow.mark_proof_gap(
+                conn, failed_message_id=99, error_code='unit_gap',
+                db_path=self.db_path,
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        ready = aba.check_cutover_ready(self.db_path)
+        self.assertFalse(ready.ok)
+        self.assertEqual(ready.status, 'proof_gap')
+        self.assertFalse(aba.ensure_authority_ready(self.db_path))
+
+    def test_missing_legacy_emotion_no_default_wash(self):
+        conn = store.open_store(self.db_path)
+        try:
+            _seed_legacy(conn)
+            shadow.ensure_shadow_schema(conn)
+            conn.execute('BEGIN')
+            shadow.record_score_proof_in_txn(
+                conn, WATERMARK_MID, applied_at=T_BOOT_STR,
+                source='stage_c_test', score_hash='boot',
+            )
+            conn.execute('COMMIT')
+            conn.execute('DELETE FROM emotion_state')
+            conn.commit()
+        finally:
+            conn.close()
+        with mock.patch.object(shadow, '_now_beijing_dt', return_value=T_BOOT):
+            r = shadow.ensure_bootstrapped(db_path=self.db_path, environ=SHADOW_ON)
+        self.assertFalse(r.ok)
+        self.assertIsNone(aba.read_v3_state(self.db_path))
+        self.assertFalse(aba.ensure_authority_ready(self.db_path))
+        conn = store.open_store(self.db_path)
+        try:
+            self.assertIsNone(store.read_state(conn))
+            self.assertIsNone(store.read_event(conn, 'bootstrap:initial'))
+        finally:
+            conn.close()
+
+    def test_chat_history_without_proof_delayed_score_not_resurrected(self):
+        # Chat history exists; no score proof → refuse cutover (no greenfield wash).
+        conn = store.open_store(self.db_path)
+        try:
+            _seed_legacy(conn, chat_through=100)
+            store.ensure_schema(conn)
+        finally:
+            conn.close()
+        self.assertFalse(aba.ensure_authority_ready(self.db_path))
+        self.assertIsNone(aba.read_v3_state(self.db_path))
+
+        # After a proper bootstrap at watermark=100, delayed mid=50 is stale.
+        conn = store.open_store(self.db_path)
+        try:
+            shadow.ensure_shadow_schema(conn)
+            conn.execute('BEGIN')
+            shadow.record_score_proof_in_txn(
+                conn, 100, applied_at=T_BOOT_STR,
+                source='stage_c_test', score_hash='boot100',
+            )
+            conn.execute('COMMIT')
+        finally:
+            conn.close()
+        with mock.patch.object(shadow, '_now_beijing_dt', return_value=T_BOOT):
+            r = shadow.ensure_bootstrapped(db_path=self.db_path, environ=SHADOW_ON)
+        self.assertTrue(r.ok, r.error)
+        stale = aba.apply_scored_observation(
+            message_id=50,
+            scores={
+                'valence': 0.1, 'arousal': 0.1, 'mood_word': '旧',
+                'passion_delta': 0.0, 'intimacy_delta': 0.0, 'source': 't',
+            },
+            scored_at='2026-08-04 10:00:00',
+            db_path=self.db_path,
+        )
+        self.assertEqual(stale.status, 'stale_skipped')
+        v3 = aba.read_v3_state(self.db_path)
+        self.assertEqual(int(v3['last_scored_message_id']), 100)
+
+    def test_read_v3_state_is_pure_read(self):
+        self.assertIsNone(aba.read_v3_state(self.db_path))
+        # Must not create schema/state as a side effect of get_state / read.
+        ee.get_state()
+        self.assertIsNone(aba.read_v3_state(self.db_path))
+        conn = sqlite3.connect(self.db_path)
+        try:
+            tables = {
+                r[0] for r in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).fetchall()
+            }
+        finally:
+            conn.close()
+        self.assertNotIn('internal_state_v3', tables)
+
+
+class UserRuleVersionRetryTests(unittest.TestCase):
+    """Blocker 2 — user_rule version_conflict limited retry."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.db_path = str(Path(self.tmp.name) / 'retry.db')
+        self._env = mock.patch.dict(os.environ, {
+            'MEMORIES_DB': self.db_path,
+            **SHADOW_ON,
+        }, clear=False)
+        self._env.start()
+        ee.DB_PATH = self.db_path
+        _production_bootstrap(self.db_path)
+
+    def tearDown(self):
+        self._env.stop()
+        self.tmp.cleanup()
+
+    def test_version_conflict_retries_then_applies_once(self):
+        mid = 101
+        conn = sqlite3.connect(self.db_path)
+        conn.execute(
+            "INSERT INTO chat_messages (id, author, content, created_at) "
+            "VALUES (?,?,?,?)",
+            (mid, 'hayana', '想你', '2026-08-04 14:00:00'),
+        )
+        conn.commit()
+        conn.close()
+
+        real_observe = events.observe_user_message
+        calls = {'n': 0}
+
+        def flaky(conn, **kwargs):
+            calls['n'] += 1
+            if calls['n'] == 1:
+                return store.ApplyResult(
+                    status='version_conflict',
+                    state_version_before=0,
+                    state_version_after=None,
+                    event_id=None,
+                    error='version conflict: expected 0, current 1',
+                )
+            return real_observe(conn, **kwargs)
+
+        before = aba.read_v3_state(self.db_path)
+        with mock.patch.object(events, 'observe_user_message', side_effect=flaky):
+            result = aba.apply_user_rule_observation(
+                message_id=mid,
+                text='想你',
+                created_at='2026-08-04 14:00:00',
+                previous_user_at='2026-08-04 08:00:00',
+                db_path=self.db_path,
+            )
+        self.assertEqual(result.status, 'applied')
+        self.assertEqual(calls['n'], 2)
+        after = aba.read_v3_state(self.db_path)
+        self.assertEqual(int(after['state_version']), int(before['state_version']) + 1)
+        conn = store.open_store(self.db_path)
+        try:
+            n = conn.execute(
+                "SELECT COUNT(*) FROM internal_state_events "
+                "WHERE event_key=?",
+                (f'user_rule:{mid}',),
+            ).fetchone()[0]
+        finally:
+            conn.close()
+        self.assertEqual(n, 1)
+
+
+class DesireDelegationTests(unittest.TestCase):
+    """Blocker 3 — get_desire delegates canonical Bond materialization."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.db_path = str(Path(self.tmp.name) / 'desire.db')
+        self._env = mock.patch.dict(os.environ, {
+            'MEMORIES_DB': self.db_path,
+            **SHADOW_ON,
+        }, clear=False)
+        self._env.start()
+        self._prev_ee = ee.DB_PATH
+        ee.DB_PATH = self.db_path
+        _production_bootstrap(self.db_path)
+
+    def tearDown(self):
+        ee.DB_PATH = self._prev_ee
+        self._env.stop()
+        self.tmp.cleanup()
+
+    def test_get_desire_delegates_to_materialize_bond(self):
+        sentinel = {
+            'passion': 0.424, 'intimacy': 0.313, 'commitment': 0.707,
+        }
+        with mock.patch(
+            'internal_state_events.materialize_bond',
+            return_value=sentinel,
+        ) as mat:
+            desire = ee.get_desire()
+        mat.assert_called()
+        self.assertEqual(desire['p'], 0.424)
+        self.assertEqual(desire['i'], 0.313)
+        self.assertEqual(desire['c'], 0.707)
 
 
 if __name__ == '__main__':
