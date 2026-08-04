@@ -23,11 +23,13 @@ from chat.cc_model import (  # noqa: E402
     cc_model_args,
     cc_model_identity,
     cc_model_mode,
+    cc_model_snapshot,
     describe_cc_model_state,
     get_cc_chat_model,
     set_cc_chat_model,
 )
 from chat.model_state import describe_chat_model_state  # noqa: E402
+import cc_resident  # noqa: E402
 import config_store  # noqa: E402
 
 
@@ -122,9 +124,9 @@ class CcModelHelperTests(unittest.TestCase):
 
 
 class SpawnEntryWiringTests(unittest.TestCase):
-    """All four production Claude spawn entries must call cc_model_args()."""
+    """Resident spawns use cc_model_snapshot(); legacy one-shot uses cc_model_args()."""
 
-    def _assert_calls_cc_model_args(self, path: Path, method_name: str):
+    def _assert_calls_helper(self, path: Path, method_name: str, helper_name: str):
         tree = ast.parse(path.read_text(encoding='utf-8'))
         found = False
 
@@ -137,50 +139,101 @@ class SpawnEntryWiringTests(unittest.TestCase):
                 for child in ast.walk(node):
                     if isinstance(child, ast.Call):
                         func = child.func
-                        if isinstance(func, ast.Name) and func.id == 'cc_model_args':
+                        if isinstance(func, ast.Name) and func.id == helper_name:
                             found = True
-                        elif isinstance(func, ast.Attribute) and func.attr == 'cc_model_args':
+                        elif isinstance(func, ast.Attribute) and func.attr == helper_name:
                             found = True
                 self.generic_visit(node)
 
             visit_AsyncFunctionDef = visit_FunctionDef
 
         Visitor().visit(tree)
-        self.assertTrue(found, '%s.%s must call cc_model_args()' % (path.name, method_name))
+        self.assertTrue(
+            found,
+            '%s.%s must call %s()' % (path.name, method_name, helper_name),
+        )
 
     def test_spawn_entries_wire_helper(self):
         resident = Path(ROOT) / 'cc_resident.py'
         gateway = Path(ROOT) / 'gateway.py'
-        self._assert_calls_cc_model_args(resident, '_spawn')
-        self._assert_calls_cc_model_args(resident, 'spawn_resumable')
-        self._assert_calls_cc_model_args(resident, 'spawn_fresh_named')
-        self._assert_calls_cc_model_args(gateway, '_cc_stream_gen')
+        self._assert_calls_helper(resident, '_spawn', 'cc_model_snapshot')
+        self._assert_calls_helper(resident, 'spawn_resumable', 'cc_model_snapshot')
+        self._assert_calls_helper(resident, 'spawn_fresh_named', 'cc_model_snapshot')
+        self._assert_calls_helper(gateway, '_cc_stream_gen', 'cc_model_args')
 
     def test_decide_respawn_checks_model_identity(self):
         src = (Path(ROOT) / 'cc_resident.py').read_text(encoding='utf-8')
         self.assertIn("return 'model_changed'", src)
-        self.assertIn('cc_model_identity()', src)
+        self.assertIn('stored_identity is not None', src)
         self.assertIn('_model_identity', src)
+
+    def test_snapshot_keeps_argv_and_identity_aligned(self):
+        with mock.patch.object(
+            config_store, 'get',
+            side_effect=fake_get({'CC_CHAT_MODEL': 'claude-sonnet-5'}),
+        ):
+            raw, identity, args = cc_model_snapshot()
+        self.assertEqual(raw, 'claude-sonnet-5')
+        self.assertEqual(identity, 'explicit:claude-sonnet-5')
+        self.assertEqual(args, ['--model', 'claude-sonnet-5'])
 
 
 class ModelChangedDecisionTests(unittest.TestCase):
+    def _alive_session(self, *, identity=None, turn_count=0):
+        sess = cc_resident.ResidentSession('/tmp', '', '/tmp/cc-tools.json')
+        proc = mock.Mock()
+        proc.poll.return_value = None
+        sess._proc = proc
+        sess._cold = False
+        sess._system_text = 'STATIC'
+        sess._last_used = 10**12
+        sess._resident_turn_count = turn_count
+        sess._last_round_context = 0
+        sess._turns_since_respawn = 0
+        sess._model_identity = identity
+        return sess
+
+    def test_none_identity_does_not_false_positive_model_changed(self):
+        """Pre-spawn / fake alive fixtures keep identity=None → skip model check."""
+        sess = self._alive_session(identity=None)
+        with mock.patch.object(config_store, 'get', side_effect=fake_get({'CC_CHAT_MODEL': ''})):
+            with mock.patch('cc_resident._cfg_int', side_effect=lambda k, d: {
+                'CC_MAX_RESIDENT_TURNS': 30,
+                'CC_CONTEXT_SOFT_LIMIT': 90_000,
+                'CC_CONTEXT_HARD_LIMIT': 120_000,
+                'CC_MIN_TURNS_BETWEEN_RESPAWNS': 5,
+            }.get(k, d)):
+                self.assertIsNone(sess._decide_respawn_reason('STATIC'))
+
+    def test_default_identity_matches_default_config(self):
+        sess = self._alive_session(identity='default')
+        with mock.patch.object(config_store, 'get', side_effect=fake_get({'CC_CHAT_MODEL': ''})):
+            with mock.patch('cc_resident._cfg_int', side_effect=lambda k, d: d):
+                self.assertIsNone(sess._decide_respawn_reason('STATIC'))
+
+    def test_turn_limit_when_model_unchanged(self):
+        sess = self._alive_session(identity='default', turn_count=2)
+        with mock.patch.object(config_store, 'get', side_effect=fake_get({'CC_CHAT_MODEL': ''})):
+            with mock.patch('cc_resident._cfg_int', side_effect=lambda k, d: {
+                'CC_MAX_RESIDENT_TURNS': 2,
+                'CC_CONTEXT_SOFT_LIMIT': 90_000,
+                'CC_CONTEXT_HARD_LIMIT': 120_000,
+                'CC_MIN_TURNS_BETWEEN_RESPAWNS': 5,
+            }.get(k, d)):
+                self.assertEqual(sess._decide_respawn_reason('STATIC'), 'turn_limit')
+
     def test_identity_mismatch_means_respawn(self):
-        """Simulate resident started as A, config now B → model_changed."""
-        resident_identity = 'explicit:claude-sonnet-5'
+        sess = self._alive_session(identity='explicit:claude-sonnet-5')
         with mock.patch.object(
             config_store, 'get',
             side_effect=fake_get({'CC_CHAT_MODEL': 'claude-opus-4-8'}),
         ):
-            requested = cc_model_identity()
-        self.assertNotEqual(requested, resident_identity)
-        self.assertEqual(requested, 'explicit:claude-opus-4-8')
+            self.assertEqual(sess._decide_respawn_reason('STATIC'), 'model_changed')
 
     def test_explicit_to_default_mismatch(self):
-        resident_identity = 'explicit:claude-sonnet-5'
+        sess = self._alive_session(identity='explicit:claude-sonnet-5')
         with mock.patch.object(config_store, 'get', side_effect=fake_get({'CC_CHAT_MODEL': ''})):
-            requested = cc_model_identity()
-        self.assertEqual(requested, 'default')
-        self.assertNotEqual(requested, resident_identity)
+            self.assertEqual(sess._decide_respawn_reason('STATIC'), 'model_changed')
 
 
 if __name__ == '__main__':

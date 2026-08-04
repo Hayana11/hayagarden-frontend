@@ -320,10 +320,10 @@ class ResidentSession:
         self._tool_surface_snapshot = {}
 
     def _spawn(self, system_text, env, *, reason='process_dead', tool_profile=TOOL_PROFILE_LEGACY):
-        from chat.cc_model import cc_model_args, cc_model_identity
+        from chat.cc_model import cc_model_snapshot
         self._kill(quiet=True)
         self._tool_profile = str(tool_profile or TOOL_PROFILE_LEGACY)
-        model_identity = cc_model_identity()
+        _model, model_identity, model_args = cc_model_snapshot()
         base_args = [
             'claude', '-p',
             '--input-format', 'stream-json',
@@ -335,7 +335,7 @@ class ResidentSession:
             '--tools', '',
             '--thinking-display', 'summarized',
             '--exclude-dynamic-system-prompt-sections',
-        ] + cc_model_args()
+        ] + model_args
         if self._tool_profile == TOOL_PROFILE_TEXT_ONLY:
             args = base_args + ['--allowedTools', '']
         else:
@@ -403,8 +403,11 @@ class ResidentSession:
             return 'process_dead'
         if str(tool_profile or TOOL_PROFILE_LEGACY) != str(self._tool_profile or TOOL_PROFILE_LEGACY):
             return 'tool_profile_changed'
-        # MODEL-1B: model config change takes effect next turn via respawn.
-        if cc_model_identity() != getattr(self, '_model_identity', None):
+        # MODEL-1B: only compare when this resident was actually spawned with an
+        # identity. Fake/pre-1B alive fixtures keep _model_identity=None and must
+        # still reach turn_limit / idle / system_changed contracts.
+        stored_identity = getattr(self, '_model_identity', None)
+        if stored_identity is not None and cc_model_identity() != stored_identity:
             return 'model_changed'
         if (time.time() - self._last_used) > IDLE_REAP_SECONDS:
             return 'idle'
@@ -458,12 +461,12 @@ class ResidentSession:
         resume_session_id = str(resume_session_id or '').strip()
         if not resume_session_id:
             raise ResidentError('resume_session_id required')
-        from chat.cc_model import cc_model_args, cc_model_identity
+        from chat.cc_model import cc_model_snapshot
         with self._lock:
             if self._alive():
                 raise ResidentError('staged spawn on live session')
             self._tool_profile = str(tool_profile or TOOL_PROFILE_LEGACY)
-            model_identity = cc_model_identity()
+            _model, model_identity, model_args = cc_model_snapshot()
             base_args = [
                 'claude', '-p',
                 '--input-format', 'stream-json',
@@ -476,7 +479,7 @@ class ResidentSession:
                 '--thinking-display', 'summarized',
                 '--exclude-dynamic-system-prompt-sections',
                 '--resume', resume_session_id,
-            ] + cc_model_args()
+            ] + model_args
             if self._tool_profile == TOOL_PROFILE_TEXT_ONLY:
                 args = base_args + ['--allowedTools', '']
             else:
@@ -537,12 +540,12 @@ class ResidentSession:
             _uuid.UUID(session_id)
         except (TypeError, ValueError) as exc:
             raise ResidentError('session_id must be uuid') from exc
-        from chat.cc_model import cc_model_args, cc_model_identity
+        from chat.cc_model import cc_model_snapshot
         with self._lock:
             if self._alive():
                 raise ResidentError('staged spawn on live session')
             self._tool_profile = str(tool_profile or TOOL_PROFILE_LEGACY)
-            model_identity = cc_model_identity()
+            _model, model_identity, model_args = cc_model_snapshot()
             base_args = [
                 'claude', '-p',
                 '--input-format', 'stream-json',
@@ -555,7 +558,7 @@ class ResidentSession:
                 '--thinking-display', 'summarized',
                 '--exclude-dynamic-system-prompt-sections',
                 '--session-id', session_id,
-            ] + cc_model_args()
+            ] + model_args
             if '--resume' in base_args:
                 raise ResidentError('fresh_named must not carry --resume')
             if self._tool_profile == TOOL_PROFILE_TEXT_ONLY:

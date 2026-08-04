@@ -1,0 +1,24 @@
+=== MODEL-1B CLI EVIDENCE ===
+date: 2026-08-04T07:27:00+00:00
+host: production VPS (via exec_vps)
+claude --version:
+2.1.186 (Claude Code)
+
+=== default (no --model) ===
+argv: claude -p --output-format text '只回复一个词：pong'
+response: pong
+exit: 0
+
+=== explicit --model claude-sonnet-5 ===
+argv: claude -p --output-format text --model claude-sonnet-5 '只回复一个词：pong'
+response: pong
+exit: 0
+
+=== explicit --model claude-opus-4-8 ===
+argv: claude -p --output-format text --model claude-opus-4-8 '只回复一个词：pong'
+response: pong
+exit: 0
+
+Note: Catalog IDs claude-sonnet-5 and claude-opus-4-8 accepted by this Claude Code
+install and completed a one-shot turn successfully. Production /opt/frontend was not
+modified; deploy was not run.

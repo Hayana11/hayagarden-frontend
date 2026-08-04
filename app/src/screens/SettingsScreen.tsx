@@ -4,6 +4,7 @@ import { HttpError } from '../lib/http';
 import { getGroupStatus, type AgentStatus } from '../lib/groupChat';
 import {
   activateRelayEndpoint,
+  ccChatModelLabel,
   chatModelSpaceAfterProviderWrite,
   clearRelayAccountCredentials,
   createRelayEndpoint,
@@ -86,7 +87,7 @@ export function SettingsScreen() {
   const [catalog, setCatalog] = useState<ConfigModel[]>([]);
   const [availableModels, setAvailableModels] = useState<string[]>([]);
   const [currentModel, setCurrentModel] = useState('');
-  const [modelMode, setModelMode] = useState<'default' | 'explicit' | ''>('');
+  const [modelMode, setModelMode] = useState<'default' | 'explicit' | 'unknown' | ''>('');
   const [officialExpanded, setOfficialExpanded] = useState(false);
   const [expandedRelay, setExpandedRelay] = useState<number | null>(null);
   const [relayFilter, setRelayFilter] = useState('');
@@ -163,12 +164,14 @@ export function SettingsScreen() {
         : '';
       const nextProvider = catalogProvider || fallbackProvider;
       setChatModelProvider(nextProvider);
-      setModelMode(catalogResult.value.modelMode || (nextProvider === 'claude_code' ? 'default' : ''));
-      setCurrentModel(
-        nextProvider === 'claude_code'
-          ? (catalogResult.value.configuredModel || catalogResult.value.current || '')
-          : catalogResult.value.current,
-      );
+      if (nextProvider === 'claude_code') {
+        const mode = catalogResult.value.modelMode;
+        setModelMode(mode === 'explicit' || mode === 'default' ? mode : 'unknown');
+        setCurrentModel(catalogResult.value.configuredModel || catalogResult.value.current || '');
+      } else {
+        setModelMode(catalogResult.value.modelMode || '');
+        setCurrentModel(catalogResult.value.current);
+      }
     }
     if (availableResult.status === 'fulfilled') setAvailableModels(availableResult.value);
     if (groupStatusResult.status === 'fulfilled') setCodexStatus(groupStatusResult.value.agents.codex);
@@ -183,12 +186,13 @@ export function SettingsScreen() {
   const currentReady = provider === 'claude_code' ? ccTokenSet : Boolean(activeRelay && keyStatus);
   const ccModelLabel = useMemo(() => {
     if (chatModelProvider !== 'claude_code') return currentModel || '—';
-    if (modelMode === 'explicit' && currentModel) {
-      const hit = catalog.find((model) => model.id === currentModel);
-      return `Claude Code · ${hit?.label || currentModel}`;
-    }
-    return 'Claude Code · 默认';
-  }, [catalog, chatModelProvider, currentModel, modelMode]);
+    return ccChatModelLabel({
+      modelMode,
+      configuredModel: currentModel,
+      catalog,
+      loading: busy === 'provider' || busy === 'load',
+    });
+  }, [busy, catalog, chatModelProvider, currentModel, modelMode]);
   const unifiedModels = useMemo(() => {
     const byId = new Map<string, ConfigModel>();
     for (const model of catalog) byId.set(model.id, model);
@@ -218,25 +222,31 @@ export function SettingsScreen() {
       setBusy('');
       return;
     }
-    // MODEL-1A: model space follows server effective_chat_provider, not POST body.
+    // MODEL-1A/1B: model space follows effective_chat_provider; CC model stays
+    // unknown until catalog confirms (never invent "默认").
     const local = chatModelSpaceAfterProviderWrite(cfg.effectiveChatProvider);
     setProvider(cfg.provider);
     setChatModelProvider(local.chatModelProvider);
     setCurrentModel(local.currentModel);
+    setModelMode(local.modelMode);
     let refreshFailed = false;
     try {
       const catalog = await getModelCatalog();
       if (catalog.provider === 'claude_code' || catalog.provider === 'api_relay') {
         setChatModelProvider(catalog.provider);
       }
-      setModelMode(catalog.modelMode || (catalog.provider === 'claude_code' ? 'default' : ''));
-      setCurrentModel(
-        catalog.provider === 'claude_code'
-          ? (catalog.configuredModel || catalog.current || '')
-          : catalog.current,
-      );
+      if (catalog.provider === 'claude_code') {
+        setModelMode(catalog.modelMode === 'explicit' || catalog.modelMode === 'default'
+          ? catalog.modelMode
+          : 'unknown');
+        setCurrentModel(catalog.configuredModel || catalog.current || '');
+      } else {
+        setModelMode(catalog.modelMode || '');
+        setCurrentModel(catalog.current);
+      }
     } catch {
       refreshFailed = true;
+      if (local.chatModelProvider === 'claude_code') setModelMode('unknown');
     }
     showToast(refreshFailed
       ? (cfg.effectiveChatProvider === 'claude_code'
@@ -258,13 +268,15 @@ export function SettingsScreen() {
       setBusy('');
       return;
     }
-    // MODEL-1A: if CHAT_PROVIDER still forces CC, keep CC model space.
+    // MODEL-1A/1B: if CHAT_PROVIDER still forces CC, keep CC space as unknown
+    // until catalog confirms — do not invent "默认".
     const local = chatModelSpaceAfterProviderWrite(cfg.effectiveChatProvider, {
       relayModel: result.model,
     });
     setProvider(cfg.provider);
     setChatModelProvider(local.chatModelProvider);
     setCurrentModel(local.currentModel);
+    setModelMode(local.modelMode);
     let refreshFailed = false;
     try {
       setRelays(await getRelayEndpoints());
@@ -274,13 +286,19 @@ export function SettingsScreen() {
       if (catalog.provider === 'claude_code' || catalog.provider === 'api_relay') {
         setChatModelProvider(catalog.provider);
       }
-      setModelMode(catalog.modelMode || (catalog.provider === 'claude_code' ? 'default' : ''));
-      setCurrentModel(
-        catalog.provider === 'claude_code'
-          ? (catalog.configuredModel || catalog.current || '')
-          : (catalog.current || result.model || ''),
-      );
-    } catch { refreshFailed = true; }
+      if (catalog.provider === 'claude_code') {
+        setModelMode(catalog.modelMode === 'explicit' || catalog.modelMode === 'default'
+          ? catalog.modelMode
+          : 'unknown');
+        setCurrentModel(catalog.configuredModel || catalog.current || '');
+      } else {
+        setModelMode(catalog.modelMode || '');
+        setCurrentModel(catalog.current || result.model || '');
+      }
+    } catch {
+      refreshFailed = true;
+      if (local.chatModelProvider === 'claude_code') setModelMode('unknown');
+    }
     try {
       const keyCheck = await getKeyStatusWithHostRtt();
       setKeyStatus(keyCheck.status);
@@ -297,7 +315,7 @@ export function SettingsScreen() {
 
   const switchCcDefault = async () => {
     if (chatModelProvider !== 'claude_code') return;
-    if (modelMode !== 'explicit') return;
+    if (modelMode === 'default') return;
     setBusy('model:default');
     try {
       await updateCurrentModel(null);
@@ -345,7 +363,8 @@ export function SettingsScreen() {
       if (chatModelProvider === 'claude_code') {
         const catalogState = await getModelCatalog();
         setCatalog(catalogState.models);
-        setModelMode(catalogState.modelMode || 'default');
+        const mode = catalogState.modelMode;
+        setModelMode(mode === 'explicit' || mode === 'default' ? mode : 'unknown');
         setCurrentModel(catalogState.configuredModel || catalogState.current || '');
         showToast('Claude Code 模型清单已刷新');
       } else {
@@ -657,10 +676,10 @@ export function SettingsScreen() {
           <h3>常用预设</h3>
           {chatModelProvider === 'claude_code' ? (
             <div className="config-preset-list">
-              <button type="button" onClick={() => void switchCcDefault()} disabled={Boolean(busy) || modelMode !== 'explicit'}>
+              <button type="button" onClick={() => void switchCcDefault()} disabled={Boolean(busy) || modelMode === 'default'}>
                 <i style={{ background: '#7c6a8a' }} />
                 <span><strong>默认（跟随 Claude Code）</strong><small>不传 --model</small></span>
-                {modelMode !== 'explicit' ? <em>使用中</em> : <b>切换</b>}
+                {modelMode === 'default' ? <em>使用中</em> : <b>切换</b>}
               </button>
               {catalog.filter((model) => model.primary).map((model) => (
                 <button type="button" key={model.id} onClick={() => void switchModel(model)} disabled={Boolean(busy)}>

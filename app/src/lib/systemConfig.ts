@@ -1,6 +1,8 @@
 import { http } from './http';
 
 export type ChatProvider = 'api_relay' | 'claude_code';
+/** CC model UI mode. `unknown` = provider known CC but model state not confirmed. */
+export type ChatModelMode = 'default' | 'explicit' | 'unknown' | '';
 
 export interface ProviderConfig {
   /** GW_PROVIDER config value (what /api/config/provider writes). */
@@ -31,18 +33,23 @@ function normalizeProviderConfig(data: {
   };
 }
 
-/** Immediate chat-model UI space for an effective chat provider (MODEL-1A).
- * Pass resolve_provider('chat') / effective_chat_provider — never the raw POST body. */
+/** Immediate chat-model UI space for an effective chat provider (MODEL-1A/1B).
+ * Pass resolve_provider('chat') / effective_chat_provider — never the raw POST body.
+ *
+ * MODEL-1B: entering Claude Code does NOT imply default. Until model-catalog /
+ * model GET confirms model_mode, UI must treat CC as unknown (never fake "默认").
+ */
 export function chatModelSpaceAfterProviderWrite(
   effectiveChatProvider: ChatProvider,
   opts?: { relayModel?: string | null },
-): { chatModelProvider: ChatProvider; currentModel: string } {
+): { chatModelProvider: ChatProvider; currentModel: string; modelMode: ChatModelMode } {
   if (effectiveChatProvider === 'claude_code') {
-    return { chatModelProvider: 'claude_code', currentModel: '' };
+    return { chatModelProvider: 'claude_code', currentModel: '', modelMode: 'unknown' };
   }
   return {
     chatModelProvider: 'api_relay',
     currentModel: String(opts?.relayModel || '').trim(),
+    modelMode: '',
   };
 }
 
@@ -355,14 +362,33 @@ export async function removeRelayEndpoint(id: number): Promise<void> {
   await http.del(`/api/config/relay-presets/${id}`);
 }
 
-export type ChatModelMode = 'default' | 'explicit' | '';
-
 export interface ChatModelState {
   models: ConfigModel[];
   current: string;
   provider: ChatProvider | '';
   modelMode: ChatModelMode;
   configuredModel: string | null;
+}
+
+/** Claude Code pill/label — never invent "默认" without server confirmation. */
+export function ccChatModelLabel(opts: {
+  modelMode: ChatModelMode;
+  configuredModel?: string | null;
+  catalog?: Array<{ id: string; label?: string }>;
+  loading?: boolean;
+}): string {
+  const mode = opts.modelMode;
+  if (mode === 'explicit') {
+    const id = String(opts.configuredModel || '').trim();
+    if (id) {
+      const hit = (opts.catalog || []).find((row) => row.id === id);
+      return `Claude Code · ${hit?.label || id}`;
+    }
+    return 'Claude Code · 状态未知';
+  }
+  if (mode === 'default') return 'Claude Code · 默认';
+  if (opts.loading) return 'Claude Code · 读取中…';
+  return 'Claude Code · 状态未知';
 }
 
 export async function getModelCatalog(): Promise<ChatModelState> {
@@ -388,7 +414,7 @@ export async function getModelCatalog(): Promise<ChatModelState> {
   const modelMode: ChatModelMode =
     data.model_mode === 'explicit' || data.model_mode === 'default'
       ? data.model_mode
-      : '';
+      : (provider === 'claude_code' ? 'unknown' : '');
   const configured =
     data.configured_model === null || data.configured_model === undefined
       ? null
@@ -396,7 +422,7 @@ export async function getModelCatalog(): Promise<ChatModelState> {
 
   return {
     provider,
-    modelMode: provider === 'claude_code' ? (modelMode || 'default') : modelMode,
+    modelMode,
     configuredModel: configured,
     current: configured || data.current || '',
     models: (data.models || []).flatMap((model) => {

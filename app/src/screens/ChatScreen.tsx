@@ -159,7 +159,7 @@ export function ChatScreen() {
   const [models, setModels] = useState<ModelCatalogEntry[]>([]);
   const [currentModel, setCurrentModel] = useState('');
   const [chatProvider, setChatProvider] = useState<'api_relay' | 'claude_code' | ''>('');
-  const [modelMode, setModelMode] = useState<'default' | 'explicit' | ''>('');
+  const [modelMode, setModelMode] = useState<'default' | 'explicit' | 'unknown' | ''>('');
 
   const [openThink, setOpenThink] = useState<Record<number, boolean>>({});
   const [openTools, setOpenTools] = useState<Record<string, boolean>>({});
@@ -539,7 +539,8 @@ export function ChatScreen() {
         const hit = models.find((m) => m.id === currentModel);
         return `Claude Code · ${hit?.label || currentModel}`;
       }
-      return 'Claude Code · 默认';
+      if (modelMode === 'default') return 'Claude Code · 默认';
+      return 'Claude Code · 读取中…';
     }
     const hit = models.find((m) => m.id === currentModel);
     return hit?.label || currentModel.replace(/^.*\]\s*/, '').slice(0, 22) || '模型';
@@ -1140,7 +1141,7 @@ export function ChatScreen() {
                     <div
                       onClick={async () => {
                         setModelPopOpen(false);
-                        if (modelMode !== 'explicit') return;
+                        if (modelMode === 'default') return;
                         const result = await setChatModel(null);
                         if (result.ok) {
                           setModelMode('default');
@@ -1148,9 +1149,9 @@ export function ChatScreen() {
                           showToast('下一条消息起生效');
                         } else showToast('切换失败');
                       }}
-                      style={{ cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 10, padding: '9px 10px', borderRadius: 12, background: modelMode !== 'explicit' ? 'var(--rosebg)' : 'transparent' }}
+                      style={{ cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 10, padding: '9px 10px', borderRadius: 12, background: modelMode === 'default' ? 'var(--rosebg)' : 'transparent' }}
                     >
-                      <span style={{ width: 8, height: 8, borderRadius: '50%', background: modelMode !== 'explicit' ? 'var(--rose)' : 'var(--ghost)', flexShrink: 0 }} />
+                      <span style={{ width: 8, height: 8, borderRadius: '50%', background: modelMode === 'default' ? 'var(--rose)' : 'var(--ghost)', flexShrink: 0 }} />
                       <div style={{ display: 'flex', flexDirection: 'column', minWidth: 0 }}>
                         <span style={{ fontSize: 14, color: 'var(--ink)' }}>默认（跟随 Claude Code）</span>
                         <span style={{ fontFamily: MONO, fontSize: 10.5, color: 'var(--ghost)' }}>不传 --model</span>

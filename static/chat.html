@@ -2724,16 +2724,22 @@ function _modelMeta(id){ return _modelCatalog.find(function(m){return m.id===id;
 function _modelLabel(id){ var m=_modelMeta(id); return m ? m.label : (id.replace(/\[[^\]]*\]/g,'').trim() || id); }
 function _ccPillLabel(){
   if(_modelMode === 'explicit' && _curModel) return 'Claude Code · '+_modelLabel(_curModel);
-  return 'Claude Code · 默认';
+  if(_modelMode === 'default') return 'Claude Code · 默认';
+  if(_modelMode === 'unknown') return 'Claude Code · 状态未知';
+  return 'Claude Code · 读取中…';
 }
 async function initModelPill() {
   try{
     var r=await fetch('/api/config/model-catalog'); var d=await r.json();
     _modelCatalog=d.models||[];
     _chatProvider=d.provider||'';
-    _modelMode=d.model_mode||'';
+    if(_chatProvider==='claude_code'){
+      _modelMode=(d.model_mode==='explicit'||d.model_mode==='default')?d.model_mode:'unknown';
+    } else {
+      _modelMode=d.model_mode||'';
+    }
     _curModel=d.configured_model||d.current||'';
-  }catch(e){}
+  }catch(e){ if(_chatProvider==='claude_code') _modelMode='unknown'; }
   renderModelSheet(false);
   updateModelPill();
   var t=document.getElementById('txt'); if(t&&!t.disabled) t.placeholder=getTimedPlaceholder();
@@ -2741,7 +2747,7 @@ async function initModelPill() {
 function renderModelSheet(showMore){
   var sheet=document.getElementById('model-sheet');
   if(_isClaudeCodeProvider()){
-    var defSel = _modelMode !== 'explicit';
+    var defSel = _modelMode === 'default';
     var html = '<button class="model-opt'+(defSel?' selected':'')+'" data-model="" onclick="selectModel(this)">'+
       '<span class="mo-dot" style="background:#7c6a8a"></span>默认（跟随 Claude Code）'+
       '<span class="mo-desc">不传 --model</span></button>';
@@ -2788,7 +2794,7 @@ async function selectModel(btn) {
   var body;
   if(_isClaudeCodeProvider()){
     // empty dataset → default (null); same explicit id → no-op
-    if((!m && _modelMode!=='explicit') || (m && m===_curModel && _modelMode==='explicit')) return;
+    if((!m && _modelMode==='default') || (m && m===_curModel && _modelMode==='explicit')) return;
     body = {model: m ? m : null};
   } else {
     if(m===_curModel) return;

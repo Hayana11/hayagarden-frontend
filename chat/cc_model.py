@@ -60,6 +60,18 @@ def get_cc_chat_model() -> str:
     return str(config_store.get(CC_CHAT_MODEL_KEY, '') or '').strip()
 
 
+def cc_model_snapshot(model: str | None = None) -> tuple[str, str, list[str]]:
+    """One read of CC_CHAT_MODEL → (raw_model, identity, argv_fragment).
+
+    Spawn paths must use this so argv and stored identity cannot diverge
+    across two separate DB reads.
+    """
+    value = get_cc_chat_model() if model is None else str(model or '').strip()
+    if not value:
+        return '', 'default', []
+    return value, 'explicit:%s' % value, ['--model', value]
+
+
 def cc_model_mode(model: str | None = None) -> str:
     value = get_cc_chat_model() if model is None else str(model or '').strip()
     return 'explicit' if value else 'default'
@@ -67,18 +79,14 @@ def cc_model_mode(model: str | None = None) -> str:
 
 def cc_model_identity(model: str | None = None) -> str:
     """Stable identity for resident reuse checks."""
-    value = get_cc_chat_model() if model is None else str(model or '').strip()
-    if not value:
-        return 'default'
-    return 'explicit:%s' % value
+    _value, identity, _args = cc_model_snapshot(model)
+    return identity
 
 
 def cc_model_args(model: str | None = None) -> list[str]:
     """CLI argv fragment: [] or ['--model', '<id>']."""
-    value = get_cc_chat_model() if model is None else str(model or '').strip()
-    if not value:
-        return []
-    return ['--model', value]
+    _value, _identity, args = cc_model_snapshot(model)
+    return args
 
 
 def describe_cc_model_state() -> dict[str, Any]:

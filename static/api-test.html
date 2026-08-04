@@ -359,10 +359,12 @@ async function setProvider(p) {
   curProvider = d.provider || p;
   chatProvider = effective;
   currentModel = '';
+  modelMode = effective === 'claude_code' ? 'unknown' : '';
   document.getElementById('model-inp').value = '';
   cancelModelEdit();
   if (effective === 'claude_code') {
-    document.getElementById('cur-model-name').textContent = 'Claude Code · 默认';
+    // MODEL-1B: never invent "默认" before model GET confirms model_mode.
+    document.getElementById('cur-model-name').textContent = 'Claude Code · 读取中…';
   } else {
     // Clear CC residual label before refresh; unknown until loadModel succeeds.
     document.getElementById('cur-model-name').textContent = '读取中…';
@@ -375,7 +377,10 @@ async function setProvider(p) {
     await loadModel();
   } catch (e) {
     refreshFailed = true;
-    if (effective === 'api_relay') {
+    if (effective === 'claude_code') {
+      modelMode = 'unknown';
+      document.getElementById('cur-model-name').textContent = 'Claude Code · 状态未知';
+    } else if (effective === 'api_relay') {
       document.getElementById('cur-model-name').textContent = '—';
     }
   }
@@ -559,7 +564,9 @@ function ccPillLabel() {
     var hit = ccCatalog.find(function(m){ return m.id === currentModel; });
     return 'Claude Code · ' + ((hit && hit.label) || currentModel);
   }
-  return 'Claude Code · 默认';
+  if (modelMode === 'default') return 'Claude Code · 默认';
+  if (modelMode === 'unknown') return 'Claude Code · 状态未知';
+  return 'Claude Code · 读取中…';
 }
 function applyModelUiMode() {
   var pencil = document.querySelector('#model-display-row .pencil-btn');
@@ -569,8 +576,8 @@ async function loadModel() {
   var r = await fetch('/api/config/model');
   var d = await r.json();
   chatProvider = d.provider || '';
-  modelMode = d.model_mode || (isClaudeCodeProvider() ? 'default' : '');
   if (isClaudeCodeProvider()) {
+    modelMode = (d.model_mode === 'explicit' || d.model_mode === 'default') ? d.model_mode : 'unknown';
     currentModel = d.configured_model || '';
     document.getElementById('cur-model-name').textContent = ccPillLabel();
     document.getElementById('model-inp').value = currentModel || '';
@@ -578,6 +585,7 @@ async function loadModel() {
     applyModelUiMode();
     return;
   }
+  modelMode = d.model_mode || '';
   currentModel = d.configured_model || d.model || '';
   document.getElementById('cur-model-name').textContent = currentModel || '—';
   document.getElementById('model-inp').value = currentModel;
@@ -721,7 +729,7 @@ var TIER_COLOR = { flagship: '#7c6a8a', standard: '#3a7ad4', fast: '#0a8a5c' };
 function renderCcModels() {
   var el = document.getElementById('models-list');
   var preset = document.getElementById('preset-models-list');
-  var defActive = modelMode !== 'explicit';
+  var defActive = modelMode === 'default';
   var defRight = defActive
     ? '<span class="mi-badge" style="background:var(--primary-bg);color:var(--primary);">使用中</span>'
     : '<button class="mi-switch" onclick="switchModel(null)">切换</button>';

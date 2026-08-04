@@ -454,7 +454,7 @@ export interface ModelCatalogEntry {
 }
 
 export type ChatModelProvider = 'api_relay' | 'claude_code';
-export type ChatModelMode = 'default' | 'explicit' | '';
+export type ChatModelMode = 'default' | 'explicit' | 'unknown' | '';
 
 export interface ChatModelCatalog {
   models: ModelCatalogEntry[];
@@ -478,7 +478,9 @@ export function fetchModelCatalog(): Promise<ChatModelCatalog> {
       const provider: ChatModelProvider | '' =
         r.provider === 'claude_code' || r.provider === 'api_relay' ? r.provider : '';
       const modelMode: ChatModelMode =
-        r.model_mode === 'explicit' || r.model_mode === 'default' ? r.model_mode : '';
+        r.model_mode === 'explicit' || r.model_mode === 'default'
+          ? r.model_mode
+          : (provider === 'claude_code' ? 'unknown' : '');
       const configured =
         r.configured_model === null || r.configured_model === undefined
           ? null
@@ -487,7 +489,7 @@ export function fetchModelCatalog(): Promise<ChatModelCatalog> {
         models: r.models || [],
         current: configured || r.current || '',
         provider,
-        modelMode: provider === 'claude_code' ? (modelMode || 'default') : modelMode,
+        modelMode,
         configuredModel: configured,
       };
     })
@@ -495,7 +497,7 @@ export function fetchModelCatalog(): Promise<ChatModelCatalog> {
       models: [],
       current: '',
       provider: '',
-      modelMode: '',
+      modelMode: 'unknown',
       configuredModel: null,
     }));
 }
