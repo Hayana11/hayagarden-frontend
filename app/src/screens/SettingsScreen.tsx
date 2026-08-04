@@ -130,10 +130,9 @@ export function SettingsScreen() {
     if (providerResult.status === 'fulfilled') {
       setProvider(providerResult.value.provider);
       setCcTokenSet(providerResult.value.ccTokenSet);
-      // MODEL-1A P2: provisional provider so CC hides relay pool even if catalog fails.
-      // Catalog success below overwrites with chat-model-authoritative provider.
-      setChatModelProvider(providerResult.value.provider);
-      if (providerResult.value.provider === 'claude_code') {
+      // MODEL-1A: model space follows effective chat provider, not GW alone.
+      setChatModelProvider(providerResult.value.effectiveChatProvider);
+      if (providerResult.value.effectiveChatProvider === 'claude_code') {
         setCurrentModel('');
       }
     }
@@ -162,7 +161,7 @@ export function SettingsScreen() {
       // Catalog is authoritative for chat-model space when available.
       const catalogProvider = catalogResult.value.provider;
       const fallbackProvider = providerResult.status === 'fulfilled'
-        ? providerResult.value.provider
+        ? providerResult.value.effectiveChatProvider
         : '';
       const nextProvider = catalogProvider || fallbackProvider;
       setChatModelProvider(nextProvider);
@@ -200,17 +199,17 @@ export function SettingsScreen() {
   const switchToClaude = async () => {
     if (!ccTokenSet) { showToast('Claude Code token 尚未在 VPS 配置'); return; }
     setBusy('provider');
+    let cfg: Awaited<ReturnType<typeof updateProvider>>;
     try {
-      await updateProvider('claude_code');
+      cfg = await updateProvider('claude_code');
     } catch {
       showToast('切换失败');
       setBusy('');
       return;
     }
-    // Provider write succeeded — enter CC model space immediately (MODEL-1A).
-    // Catalog refresh is supplemental and must not roll back this space.
-    const local = chatModelSpaceAfterProviderWrite('claude_code');
-    setProvider('claude_code');
+    // MODEL-1A: model space follows server effective_chat_provider, not POST body.
+    const local = chatModelSpaceAfterProviderWrite(cfg.effectiveChatProvider);
+    setProvider(cfg.provider);
     setChatModelProvider(local.chatModelProvider);
     setCurrentModel(local.currentModel);
     let refreshFailed = false;
@@ -224,7 +223,9 @@ export function SettingsScreen() {
       refreshFailed = true;
     }
     showToast(refreshFailed
-      ? '已切换到 Claude Code，部分状态刷新失败'
+      ? (cfg.effectiveChatProvider === 'claude_code'
+        ? '已切换到 Claude Code，部分状态刷新失败'
+        : 'GW 已写入，部分状态刷新失败')
       : '已切换：Claude Code 订阅');
     setBusy('');
   };
@@ -232,17 +233,20 @@ export function SettingsScreen() {
   const switchRelay = async (relay: RelayEndpoint) => {
     setBusy(`relay:${relay.id}`);
     let result: { model: string };
+    let cfg: Awaited<ReturnType<typeof updateProvider>>;
     try {
       result = await activateRelayEndpoint(relay.id);
-      await updateProvider('api_relay');
+      cfg = await updateProvider('api_relay');
     } catch {
       showToast('中转站切换失败');
       setBusy('');
       return;
     }
-    // Provider write succeeded — enter relay model space immediately (MODEL-1A).
-    const local = chatModelSpaceAfterProviderWrite('api_relay', { relayModel: result.model });
-    setProvider('api_relay');
+    // MODEL-1A: if CHAT_PROVIDER still forces CC, keep CC model space.
+    const local = chatModelSpaceAfterProviderWrite(cfg.effectiveChatProvider, {
+      relayModel: result.model,
+    });
+    setProvider(cfg.provider);
     setChatModelProvider(local.chatModelProvider);
     setCurrentModel(local.currentModel);
     let refreshFailed = false;

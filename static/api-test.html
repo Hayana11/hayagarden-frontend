@@ -350,16 +350,18 @@ async function setProvider(p) {
     method: 'POST', headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({provider: p})
   });
+  var d = {};
+  try { d = await r.json(); } catch (e) {}
   if (!r.ok) { toast('切换失败'); return; }
-  // Provider write succeeded — sync model-space vars + visible label immediately
-  // (MODEL-1A). loadModel() is supplemental; its failure must never leave the
-  // previous provider's model label on screen.
-  curProvider = p;
-  chatProvider = p;
+  // Provider write succeeded — model space follows effective_chat_provider
+  // (resolve_provider('chat')), not the POST body alone (CHAT_PROVIDER may win).
+  var effective = d.effective_chat_provider || p;
+  curProvider = d.provider || p;
+  chatProvider = effective;
   currentModel = '';
   document.getElementById('model-inp').value = '';
   cancelModelEdit();
-  if (p === 'claude_code') {
+  if (effective === 'claude_code') {
     document.getElementById('cur-model-name').textContent = 'Claude Code · 默认';
   } else {
     // Clear CC residual label before refresh; unknown until loadModel succeeds.
@@ -371,7 +373,12 @@ async function setProvider(p) {
   var refreshFailed = false;
   try {
     await loadModel();
-  } catch (e) { refreshFailed = true; }
+  } catch (e) {
+    refreshFailed = true;
+    if (effective === 'api_relay') {
+      document.getElementById('cur-model-name').textContent = '—';
+    }
+  }
   if (!(await loadModels())) refreshFailed = true;
   toast(refreshFailed
     ? ('已切换到' + (p === 'claude_code' ? '订阅模式' : '中转 API') + '，部分状态刷新失败')

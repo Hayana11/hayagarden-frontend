@@ -1853,9 +1853,15 @@ def _env_set(key, value):
         lines.append(key + '=' + value)
     open(path, 'w').write('\n'.join(lines) + '\n')
 
-@app.route('/api/config/provider', methods=['GET'])
-def config_get_provider():
-    provider = config_store.get('GW_PROVIDER', 'api_relay')
+def _provider_payload(gw_provider=None):
+    """GW config + effective chat provider (resolve_provider('chat')).
+
+    MODEL-1A: UI model space must follow effective_chat_provider, not the
+    bare GW_PROVIDER write value (CHAT_PROVIDER may still win).
+    """
+    from chat.provider_router import resolve_provider
+    gw = (gw_provider if gw_provider is not None else config_store.get('GW_PROVIDER', 'api_relay')) or 'api_relay'
+    gw = str(gw).strip() or 'api_relay'
     has_token = False
     try:
         for line in open('/opt/frontend/.env'):
@@ -1863,7 +1869,16 @@ def config_get_provider():
                 has_token = bool(line.split('=', 1)[1].strip())
     except Exception:
         pass
-    return jsonify({'provider': provider, 'cc_token_set': has_token})
+    return {
+        'provider': gw,
+        'effective_chat_provider': resolve_provider('chat'),
+        'cc_token_set': has_token,
+    }
+
+
+@app.route('/api/config/provider', methods=['GET'])
+def config_get_provider():
+    return jsonify(_provider_payload())
 
 @app.route('/api/config/provider', methods=['POST'])
 def config_set_provider():
@@ -1873,7 +1888,9 @@ def config_set_provider():
         return jsonify({'error': 'provider must be api_relay or claude_code'}), 400
     try:
         config_store.set('GW_PROVIDER', provider)
-        return jsonify({'ok': True, 'provider': provider})
+        payload = _provider_payload(gw_provider=provider)
+        payload['ok'] = True
+        return jsonify(payload)
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 

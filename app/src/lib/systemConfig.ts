@@ -3,17 +3,41 @@ import { http } from './http';
 export type ChatProvider = 'api_relay' | 'claude_code';
 
 export interface ProviderConfig {
+  /** GW_PROVIDER config value (what /api/config/provider writes). */
   provider: ChatProvider;
+  /** resolve_provider('chat') — authoritative for chat model space. */
+  effectiveChatProvider: ChatProvider;
   ccTokenSet: boolean;
 }
 
-/** Immediate chat-model UI space after a successful provider write (MODEL-1A).
- * Catalog/list refreshes must not gate this transition. */
+function asChatProvider(value: unknown): ChatProvider {
+  return value === 'claude_code' ? 'claude_code' : 'api_relay';
+}
+
+function normalizeProviderConfig(data: {
+  provider?: string;
+  effective_chat_provider?: string;
+  cc_token_set?: boolean;
+}): ProviderConfig {
+  const provider = asChatProvider(data.provider);
+  // Fall back to GW only when server omitted the field (old builds).
+  const effectiveChatProvider = data.effective_chat_provider === undefined
+    ? provider
+    : asChatProvider(data.effective_chat_provider);
+  return {
+    provider,
+    effectiveChatProvider,
+    ccTokenSet: Boolean(data.cc_token_set),
+  };
+}
+
+/** Immediate chat-model UI space for an effective chat provider (MODEL-1A).
+ * Pass resolve_provider('chat') / effective_chat_provider — never the raw POST body. */
 export function chatModelSpaceAfterProviderWrite(
-  provider: ChatProvider,
+  effectiveChatProvider: ChatProvider,
   opts?: { relayModel?: string | null },
 ): { chatModelProvider: ChatProvider; currentModel: string } {
-  if (provider === 'claude_code') {
+  if (effectiveChatProvider === 'claude_code') {
     return { chatModelProvider: 'claude_code', currentModel: '' };
   }
   return {
@@ -159,15 +183,22 @@ export interface PlaygroundResult {
 }
 
 export async function getProviderConfig(): Promise<ProviderConfig> {
-  const data = await http.get<{ provider?: string; cc_token_set?: boolean }>('/api/config/provider');
-  return {
-    provider: data.provider === 'claude_code' ? 'claude_code' : 'api_relay',
-    ccTokenSet: Boolean(data.cc_token_set),
-  };
+  const data = await http.get<{
+    provider?: string;
+    effective_chat_provider?: string;
+    cc_token_set?: boolean;
+  }>('/api/config/provider');
+  return normalizeProviderConfig(data);
 }
 
-export async function updateProvider(provider: ChatProvider): Promise<void> {
-  await http.post('/api/config/provider', { provider });
+export async function updateProvider(provider: ChatProvider): Promise<ProviderConfig> {
+  const data = await http.post<{
+    ok?: boolean;
+    provider?: string;
+    effective_chat_provider?: string;
+    cc_token_set?: boolean;
+  }>('/api/config/provider', { provider });
+  return normalizeProviderConfig(data);
 }
 
 export async function getKeyStatus(): Promise<KeyStatus> {
