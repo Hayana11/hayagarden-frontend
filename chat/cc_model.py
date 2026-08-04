@@ -26,9 +26,16 @@ CC_MODEL_CATALOG: list[dict[str, Any]] = [
         'dot': '#6a8a7c',
     },
     {
+        'id': 'claude-opus-5',
+        'label': 'Opus 5',
+        'desc': '新一代旗舰',
+        'primary': True,
+        'dot': '#8a5a72',
+    },
+    {
         'id': 'claude-opus-4-8',
         'label': 'Opus 4.8',
-        'desc': '新一代旗舰',
+        'desc': '上一代旗舰',
         'primary': True,
         'dot': '#8a6a7c',
     },
