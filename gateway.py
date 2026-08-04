@@ -6398,7 +6398,8 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
 
     # Stage D N3: live settlement modes require outcome identity before any
     # model call / Action write. dry_run / dream / summarize may omit it.
-    if live and mode not in ('dream', 'summarize') and not wake_run_id:
+    from wake.wake_run_id import missing_live_wake_run_id
+    if missing_live_wake_run_id(mode, dry_run=dry_run, wake_run_id=wake_run_id):
         return jsonify({
             'ok': False,
             'error': 'wake_run_id required for live settlement wake',

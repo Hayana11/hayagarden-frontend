@@ -854,31 +854,50 @@ class StageDFinalWiringTests(unittest.TestCase):
         self.assertEqual(before, {k: float(self._v3()[k]) for k in DRIVE_KEYS})
 
     def test_n3_live_wake_requires_wake_run_id_before_model(self):
-        """N3: live normal without wake_run_id → no model / no executor."""
-        import gateway
+        """N3: pure gate + gateway source order (no Flask/gateway import)."""
+        from wake.wake_run_id import missing_live_wake_run_id
 
-        with gateway.app.app_context():
-            with mock.patch.object(gateway, '_ensure_wake_runners') as ensure, \
-                 mock.patch('wake.executor.execute') as exec_fn:
-                ensure.side_effect = AssertionError('model path must not run')
-                resp = gateway._wake_decide_locked(
-                    {'dry_run': False}, 'normal', '', None,
-                )
-        self.assertIsInstance(resp, tuple)
-        body, status = resp
-        self.assertEqual(status, 400)
-        payload = body.get_json()
-        self.assertEqual(payload.get('reason'), 'missing_wake_run_id')
-        self.assertFalse(payload.get('ok', True))
-        ensure.assert_not_called()
-        exec_fn.assert_not_called()
+        self.assertTrue(
+            missing_live_wake_run_id('normal', dry_run=False, wake_run_id='')
+        )
+        self.assertTrue(
+            missing_live_wake_run_id('morning', dry_run=False, wake_run_id='  ')
+        )
+        self.assertTrue(
+            missing_live_wake_run_id(
+                'nightwatch', dry_run=False, wake_run_id='',
+            )
+        )
+        self.assertFalse(
+            missing_live_wake_run_id(
+                'normal', dry_run=False, wake_run_id='normal-2026-08-04-10:00',
+            )
+        )
+        self.assertFalse(
+            missing_live_wake_run_id('normal', dry_run=True, wake_run_id='')
+        )
+        self.assertFalse(
+            missing_live_wake_run_id('dream', dry_run=False, wake_run_id='')
+        )
+        self.assertFalse(
+            missing_live_wake_run_id('summarize', dry_run=False, wake_run_id='')
+        )
+
         block = Path(ROOT, 'gateway.py').read_text(encoding='utf-8').split(
             'def _wake_decide_locked', 1,
         )[1].split('\ndef ', 1)[0]
+        self.assertIn('missing_live_wake_run_id', block)
+        self.assertIn("'reason': 'missing_wake_run_id'", block)
         self.assertLess(
-            block.index('missing_wake_run_id'),
+            block.index('missing_live_wake_run_id'),
             block.index('get_wake_runner'),
         )
+        self.assertLess(
+            block.index('missing_live_wake_run_id'),
+            block.index('_wake_build_system_for_plan'),
+        )
+        # Must not re-inline the gate without the helper.
+        self.assertEqual(block.count('missing_live_wake_run_id'), 2)
 
     def test_n4_proof_gap_refuses_txn_settlement(self):
         """N4: unresolved proof gap must fail closed inside Action txn."""
