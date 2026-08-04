@@ -102,12 +102,14 @@ def append_system_text(system, text: str):
 def inject_snippets(system, mode: str,
                     desire_driven: bool = False,
                     longing_enabled: bool = False,
-                    t_hours_override=None):
+                    t_hours_override=None,
+                    planner_state_view=None):
     """
     向 system 注入 drive_engine 和 desire snippets（dream/summarize 模式跳过）。
 
-    t_hours_override: Wake 权威空闲小时数。传入后 Longing 不再读可能停摆的
-    desire_state.last_hayana_msg_time。
+    t_hours_override: DecisionClock user_idle hours for Longing fact.
+    When ``planner_state_view`` is set, legacy Decision consumes ``V.drives``
+    and Longing uses DecisionClock from V (B1-1A) — no second get_drive().
 
     Returns ``(system, provenance)`` where provenance is the Decision-time
     freeze from ``drive_engine.decide()`` (or None when unavailable / skipped).
@@ -117,11 +119,21 @@ def inject_snippets(system, mode: str,
     if mode in ('dream', 'summarize'):
         return system, provenance
 
+    view = planner_state_view
+    if view is not None and t_hours_override is None:
+        try:
+            t_hours_override = float(view.user_idle_hours)
+        except Exception:
+            t_hours_override = 0.0
+
     try:
         import drive_engine as _de
         decision = None
         if hasattr(_de, 'decide') and hasattr(_de, 'freeze_decision_provenance'):
-            decision = _de.decide()
+            if view is not None:
+                decision = _de.decide(drive=view.drives_for_engine())
+            else:
+                decision = _de.decide()
             provenance = _de.freeze_decision_provenance(decision)
             snip = _de.get_wake_snippet(decision=decision)
         else:
