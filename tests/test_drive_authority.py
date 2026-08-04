@@ -784,9 +784,78 @@ class StageDFinalWiringTests(unittest.TestCase):
         conn.close()
         self.assertEqual(before, {k: float(self._v3()[k]) for k in DRIVE_KEYS})
 
+    def test_b1_message_empty_content_no_settlement(self):
+        """Narrow B1: message + empty CONTENT must not settle unexecuted Action."""
+        from wake.executor import execute
+
+        before = {k: float(self._v3()[k]) for k in DRIVE_KEYS}
+        with self.assertRaises(RuntimeError):
+            execute(
+                'message', 't', '', 'normal', self._get_db,
+                wake_run_id='b1-empty-msg',
+                settle_fired_drive='curiosity',
+                settle_user_idle_hours=1.0,
+                settle_outcome_at='2026-08-04 15:40:00',
+            )
+        conn = sqlite3.connect(self.db_path)
+        self.assertEqual(
+            conn.execute(
+                "SELECT COUNT(*) FROM wake_log WHERE wake_run_id='b1-empty-msg'"
+            ).fetchone()[0],
+            0,
+        )
+        self.assertEqual(
+            conn.execute(
+                "SELECT COUNT(*) FROM chat_messages WHERE author='fyodor'"
+            ).fetchone()[0],
+            0,
+        )
+        self.assertIsNone(
+            conn.execute(
+                "SELECT 1 FROM internal_state_events "
+                "WHERE event_key='wake_outcome:b1-empty-msg'"
+            ).fetchone()
+        )
+        conn.close()
+        self.assertEqual(before, {k: float(self._v3()[k]) for k in DRIVE_KEYS})
+
+    def test_b1_diary_empty_content_no_settlement(self):
+        """Narrow B1: diary + empty CONTENT must not settle unexecuted Action."""
+        from wake.executor import execute
+
+        before = {k: float(self._v3()[k]) for k in DRIVE_KEYS}
+        with self.assertRaises(RuntimeError):
+            execute(
+                'diary', 't', '   ', 'normal', self._get_db,
+                wake_run_id='b1-empty-diary',
+                settle_fired_drive='reflection',
+                settle_user_idle_hours=1.0,
+                settle_outcome_at='2026-08-04 15:45:00',
+            )
+        conn = sqlite3.connect(self.db_path)
+        self.assertEqual(
+            conn.execute(
+                "SELECT COUNT(*) FROM wake_log WHERE wake_run_id='b1-empty-diary'"
+            ).fetchone()[0],
+            0,
+        )
+        self.assertEqual(
+            conn.execute("SELECT COUNT(*) FROM posts").fetchone()[0],
+            0,
+        )
+        self.assertIsNone(
+            conn.execute(
+                "SELECT 1 FROM internal_state_events "
+                "WHERE event_key='wake_outcome:b1-empty-diary'"
+            ).fetchone()
+        )
+        conn.close()
+        self.assertEqual(before, {k: float(self._v3()[k]) for k in DRIVE_KEYS})
+
     def test_b3_prompt_has_no_second_desire_drive_decision(self):
-        """Blocker 3: frozen drive decision only — no desire Drive→Action hint."""
+        """Blocker 3: frozen drive decision only — longing fact has no behavior hint."""
         from wake.builder import inject_snippets
+        import desire as real_desire
 
         decision = {
             'fired': 'curiosity',
@@ -813,25 +882,35 @@ class StageDFinalWiringTests(unittest.TestCase):
         drive.get_wake_snippet.return_value = (
             '## 内在需求（驱动条）\n→ 当前最强需求：curiosity，倾向于 explore 行为。'
         )
-        desire_mod = mock.Mock()
-        desire_mod.get_longing_wake_fact.return_value = (
-            '## Longing（思念哈娅）\nL=0.500  阶段=protest  距上次互动=5.0h'
-        )
-        desire_mod.get_wake_snippet.return_value = (
-            '## 内在驱动（费佳驱动 v2）\n'
-            '→ 当前最强驱动：social，倾向于 web_browse 行为。'
-        )
-        with mock.patch.dict(sys.modules, {
-            'drive_engine': drive, 'desire': desire_mod,
-        }):
+        # Real longing fact path (protest phase at 48h) — must not carry
+        # LONGING_HINT behavior/style directives.
+        with mock.patch.dict(sys.modules, {'drive_engine': drive}):
             system, prov = inject_snippets(
-                'base', 'normal', desire_driven=True, longing_enabled=True,
+                'base', 'normal',
+                desire_driven=True, longing_enabled=True,
+                t_hours_override=48.0,
             )
         self.assertEqual(prov['primary_drive'], 'curiosity')
         self.assertIn('当前最强需求：curiosity', system)
-        self.assertNotIn('当前最强驱动：social', system)
-        self.assertNotIn('倾向于 web_browse', system)
         self.assertIn('Longing（思念哈娅）', system)
+        self.assertIn('阶段=protest', system)
+        # Desire Drive→Action second decision must stay out of prompt.
+        self.assertNotIn('当前最强驱动', system)
+        self.assertNotIn('倾向于 web_browse', system)
+        # Longing fact must not carry LONGING_HINT behavior/style directives.
+        longing_forbidden = (
+            '主动找话题', '凑近', '话少一些', '倾向于',
+            '会主动', '安静等着', '防线会崩塌', '偶尔走神',
+        )
+        for phrase in longing_forbidden:
+            self.assertNotIn(phrase, system.split('## Longing', 1)[-1])
+        fact = real_desire.get_longing_wake_fact(t_hours_override=48.0)
+        self.assertIn('L=', fact)
+        self.assertIn('阶段=protest', fact)
+        for phrase in longing_forbidden:
+            self.assertNotIn(phrase, fact)
+        # Sanity: protest LONGING_HINT still exists in module, but fact omits it.
+        self.assertIn('主动找话题', real_desire.LONGING_HINT['protest'])
 
 
 if __name__ == '__main__':

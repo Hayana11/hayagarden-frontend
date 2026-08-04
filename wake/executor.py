@@ -111,6 +111,29 @@ def execute(action: str, thoughts: str, content: str,
                     current_identity=current_norm,
                 )
 
+        # Fail closed: message/diary without CONTENT must not commit an Action
+        # outcome or settle drives. Do not silently downgrade to ``none``
+        # (that would restore fatigue). explore is out of scope here.
+        content_text = str(content or '').strip()
+        if (
+            deliver_chat
+            and action == 'message'
+            and mode not in ('summarize', 'dream')
+            and not content_text
+        ):
+            raise RuntimeError(
+                'wake action rejected: message requires non-empty CONTENT'
+            )
+        if (
+            deliver_chat
+            and action == 'diary'
+            and mode != 'summarize'
+            and not content_text
+        ):
+            raise RuntimeError(
+                'wake action rejected: diary requires non-empty CONTENT'
+            )
+
         # 记录 wake_log（stale/unavailable 时写审计行：consumed=1, notified=1）
         columns = ['thoughts', 'action', 'content', 'consumed', 'woke_at']
         consumed_val = 1 if (flag_on and gate_reason != REASON_OK) else 0

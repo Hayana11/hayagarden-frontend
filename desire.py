@@ -337,22 +337,18 @@ def _label(v):
 
 
 def get_longing_wake_fact(t_hours_override=None) -> str:
-    """Stage B Longing fact for Wake prompt — no Drive→Action decision.
+    """Stage B Longing fact for Wake prompt — facts only, no behavior directive.
 
-    Must not re-pick intent or inject a second drive decision after
-    ``drive_engine.decide()`` provenance freeze.
+    Must not re-pick intent, inject Drive→Action decisions, or append
+    ``LONGING_HINT`` style/action guidance after provenance freeze.
     """
     L, phase, t = get_longing(t_hours_override=t_hours_override)
     if phase == 'content':
         return ''
-    lines = [
+    return '\n'.join([
         '## Longing（思念哈娅）',
         f'L={L:.3f}  阶段={phase}  距上次互动={t:.1f}h',
-    ]
-    hint = LONGING_HINT.get(phase, '')
-    if hint:
-        lines.append(hint)
-    return '\n'.join(lines)
+    ])
 
 
 def get_wake_snippet(t_hours_override=None) -> str:
