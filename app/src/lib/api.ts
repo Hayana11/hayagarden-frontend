@@ -454,16 +454,17 @@ export interface ModelCatalogEntry {
 }
 
 export type ChatModelProvider = 'api_relay' | 'claude_code';
+export type ChatModelMode = 'default' | 'explicit' | '';
 
 export interface ChatModelCatalog {
   models: ModelCatalogEntry[];
   current: string;
   provider: ChatModelProvider | '';
-  modelMode: 'default' | '';
+  modelMode: ChatModelMode;
   configuredModel: string | null;
 }
 
-// GET /api/config/model-catalog -> provider-aware current model (MODEL-1A)
+// GET /api/config/model-catalog -> provider-aware current model (MODEL-1A/1B)
 export function fetchModelCatalog(): Promise<ChatModelCatalog> {
   return http
     .get<{
@@ -476,17 +477,18 @@ export function fetchModelCatalog(): Promise<ChatModelCatalog> {
     .then((r): ChatModelCatalog => {
       const provider: ChatModelProvider | '' =
         r.provider === 'claude_code' || r.provider === 'api_relay' ? r.provider : '';
-      const modelMode: 'default' | '' = r.model_mode === 'default' ? 'default' : '';
+      const modelMode: ChatModelMode =
+        r.model_mode === 'explicit' || r.model_mode === 'default' ? r.model_mode : '';
       const configured =
         r.configured_model === null || r.configured_model === undefined
           ? null
           : String(r.configured_model);
       return {
         models: r.models || [],
-        current: provider === 'claude_code' ? '' : (r.current || configured || ''),
+        current: configured || r.current || '',
         provider,
-        modelMode,
-        configuredModel: provider === 'claude_code' ? null : configured,
+        modelMode: provider === 'claude_code' ? (modelMode || 'default') : modelMode,
+        configuredModel: configured,
       };
     })
     .catch((): ChatModelCatalog => ({
@@ -498,12 +500,36 @@ export function fetchModelCatalog(): Promise<ChatModelCatalog> {
     }));
 }
 
-// POST /api/config/model
-export function setChatModel(model: string): Promise<boolean> {
+export interface SetChatModelResult {
+  ok: boolean;
+  modelMode?: ChatModelMode;
+  configuredModel?: string | null;
+  effectiveFrom?: string;
+}
+
+// POST /api/config/model — CC accepts null for default
+export function setChatModel(model: string | null): Promise<SetChatModelResult> {
   return http
-    .post<{ ok: boolean }>('/api/config/model', { model })
-    .then((r) => Boolean(r.ok))
-    .catch(() => false);
+    .post<{
+      ok?: boolean;
+      model_mode?: string;
+      configured_model?: string | null;
+      effective_from?: string;
+    }>('/api/config/model', { model })
+    .then((r): SetChatModelResult => {
+      const modelMode: ChatModelMode | undefined =
+        r.model_mode === 'explicit' || r.model_mode === 'default' ? r.model_mode : undefined;
+      return {
+        ok: r.ok !== false,
+        modelMode,
+        configuredModel:
+          r.configured_model === undefined
+            ? undefined
+            : (r.configured_model === null ? null : String(r.configured_model)),
+        effectiveFrom: r.effective_from || undefined,
+      };
+    })
+    .catch((): SetChatModelResult => ({ ok: false }));
 }
 
 export interface LedgerEntryDraft {

@@ -355,11 +355,13 @@ export async function removeRelayEndpoint(id: number): Promise<void> {
   await http.del(`/api/config/relay-presets/${id}`);
 }
 
+export type ChatModelMode = 'default' | 'explicit' | '';
+
 export interface ChatModelState {
   models: ConfigModel[];
   current: string;
   provider: ChatProvider | '';
-  modelMode: 'default' | '';
+  modelMode: ChatModelMode;
   configuredModel: string | null;
 }
 
@@ -383,7 +385,10 @@ export async function getModelCatalog(): Promise<ChatModelState> {
     data.provider === 'claude_code' || data.provider === 'api_relay'
       ? data.provider
       : '';
-  const modelMode: 'default' | '' = data.model_mode === 'default' ? 'default' : '';
+  const modelMode: ChatModelMode =
+    data.model_mode === 'explicit' || data.model_mode === 'default'
+      ? data.model_mode
+      : '';
   const configured =
     data.configured_model === null || data.configured_model === undefined
       ? null
@@ -391,9 +396,9 @@ export async function getModelCatalog(): Promise<ChatModelState> {
 
   return {
     provider,
-    modelMode,
-    configuredModel: provider === 'claude_code' ? null : configured,
-    current: provider === 'claude_code' ? '' : (data.current || configured || ''),
+    modelMode: provider === 'claude_code' ? (modelMode || 'default') : modelMode,
+    configuredModel: configured,
+    current: configured || data.current || '',
     models: (data.models || []).flatMap((model) => {
       const id = model.id?.trim();
       if (!id) return [];
@@ -414,8 +419,26 @@ export async function getAvailableModels(): Promise<string[]> {
   return data.ok ? (data.models || []).filter(Boolean) : [];
 }
 
-export async function updateCurrentModel(model: string): Promise<void> {
-  await http.post('/api/config/model', { model });
+export async function updateCurrentModel(model: string | null): Promise<{
+  modelMode?: ChatModelMode;
+  configuredModel?: string | null;
+  effectiveFrom?: string;
+}> {
+  const data = await http.post<{
+    model_mode?: string;
+    configured_model?: string | null;
+    effective_from?: string;
+  }>('/api/config/model', { model });
+  return {
+    modelMode: data.model_mode === 'explicit' || data.model_mode === 'default'
+      ? data.model_mode
+      : undefined,
+    configuredModel:
+      data.configured_model === undefined
+        ? undefined
+        : (data.configured_model === null ? null : String(data.configured_model)),
+    effectiveFrom: data.effective_from || undefined,
+  };
 }
 
 export async function getConfigUsageSummary(): Promise<ConfigUsageSummary> {
