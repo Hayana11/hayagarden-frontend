@@ -240,13 +240,48 @@ def longing_emotion_legacy_curve(idle_hours: Optional[float]) -> Optional[float]
     return round(min(L, LONGING_EMOTION_CLAMP), 3)
 
 
-def longing_desire_legacy_curve(idle_hours: Optional[float]) -> Optional[float]:
-    """旧 desire 公式，τ=18，clamp 0.90"""
+def derived_longing_curve(idle_hours: Optional[float]) -> Optional[float]:
+    """Stage B authoritative Longing: L = 0.85*(1-(1+t/18)^(-0.8)), clamp<=0.90.
+
+    Pure function of authoritative ``user_idle_hours``. Returns None when idle
+    is unavailable (fail closed — never invents 999h).
+    """
     if idle_hours is None:
         return None
-    t = max(0.0, idle_hours)
+    t = max(0.0, float(idle_hours))
     L = LONGING_DESIRE_SCALE * (1 - (1 + t / LONGING_DESIRE_TAU) ** (-0.8))
     return round(min(L, LONGING_DESIRE_CLAMP), 3)
+
+
+# Migration alias: same math as Stage B authority; retained for shadow/event
+# diagnostics that still name the τ18 curve "desire legacy".
+longing_desire_legacy_curve = derived_longing_curve
+
+
+def read_derived_longing(
+    get_db_fn: Optional[Callable] = None,
+    now: Optional[datetime.datetime] = None,
+) -> Optional[float]:
+    """Production Longing authority: interaction clock → user_idle → τ18 curve.
+
+    Fail closed: returns None when the clock is unreliable. Does not read
+    ``emotion_state.last_interaction`` or ``desire_state.last_hayana_msg_time``.
+    """
+    db_fn = get_db_fn
+    if db_fn is None:
+        db_path = os.environ.get('MEMORIES_DB', '/opt/frontend/memories.db')
+
+        def _default_db():
+            conn = sqlite3.connect(db_path)
+            conn.row_factory = sqlite3.Row
+            return conn
+
+        db_fn = _default_db
+
+    clock = read_interaction_clock(db_fn, now=now)
+    if not clock.reliable or clock.user_idle_hours is None:
+        return None
+    return derived_longing_curve(float(clock.user_idle_hours))
 
 
 def longing_candidate_curve(idle_hours: Optional[float],
@@ -749,6 +784,7 @@ __all__ = [
     'INTENTS', 'FORBIDDEN_STYLE_TOKENS', 'DRIVE_KEYS',
     'DEFAULT_MEMORIES_DB',
     'longing_emotion_legacy_curve', 'longing_desire_legacy_curve',
+    'derived_longing_curve', 'read_derived_longing',
     'longing_candidate_curve', 'bond_from_emotion_row',
     'drives_from_raw', 'candidate_drives_from_raw', 'pick_candidate_intent',
     'compute_snapshot', 'capture_shadow_snapshot',
