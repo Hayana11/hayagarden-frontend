@@ -309,7 +309,15 @@ export async function removeRelayEndpoint(id: number): Promise<void> {
   await http.del(`/api/config/relay-presets/${id}`);
 }
 
-export async function getModelCatalog(): Promise<{ models: ConfigModel[]; current: string }> {
+export interface ChatModelState {
+  models: ConfigModel[];
+  current: string;
+  provider: ChatProvider | '';
+  modelMode: 'default' | '';
+  configuredModel: string | null;
+}
+
+export async function getModelCatalog(): Promise<ChatModelState> {
   const data = await http.get<{
     models?: Array<{
       id?: string;
@@ -319,11 +327,25 @@ export async function getModelCatalog(): Promise<{ models: ConfigModel[]; curren
       primary?: boolean;
       dot?: string;
     }>;
-    current?: string;
+    current?: string | null;
+    provider?: string;
+    model_mode?: string;
+    configured_model?: string | null;
   }>('/api/config/model-catalog');
 
+  const provider = data.provider === 'claude_code' || data.provider === 'api_relay'
+    ? data.provider
+    : '';
+  const configured =
+    data.configured_model === null || data.configured_model === undefined
+      ? null
+      : String(data.configured_model);
+
   return {
-    current: data.current || '',
+    provider,
+    modelMode: data.model_mode === 'default' ? 'default' : '',
+    configuredModel: provider === 'claude_code' ? null : configured,
+    current: provider === 'claude_code' ? '' : (data.current || configured || ''),
     models: (data.models || []).flatMap((model) => {
       const id = model.id?.trim();
       if (!id) return [];

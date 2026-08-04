@@ -19,6 +19,7 @@ import {
   saveRelayAccountCredentials,
   updateCurrentModel,
   updateProvider,
+  type ChatProvider,
   type ConfigModel,
   type EndpointCapabilities,
   type KeyStatus,
@@ -106,6 +107,7 @@ export function SettingsScreen() {
   const [testInput, setTestInput] = useState('');
   const [injectMemory, setInjectMemory] = useState(true);
   const [testResult, setTestResult] = useState<{ meta: string; thinking: string; text: string; error: boolean } | null>(null);
+  const [chatModelProvider, setChatModelProvider] = useState<ChatProvider | ''>('');
 
   const showToast = useCallback((message: string) => {
     setToast(message);
@@ -150,7 +152,12 @@ export function SettingsScreen() {
     }
     if (catalogResult.status === 'fulfilled') {
       setCatalog(catalogResult.value.models);
-      setCurrentModel(catalogResult.value.current);
+      setChatModelProvider(catalogResult.value.provider);
+      setCurrentModel(
+        catalogResult.value.provider === 'claude_code'
+          ? ''
+          : catalogResult.value.current,
+      );
     }
     if (availableResult.status === 'fulfilled') setAvailableModels(availableResult.value);
     if (groupStatusResult.status === 'fulfilled') setCodexStatus(groupStatusResult.value.agents.codex);
@@ -187,6 +194,10 @@ export function SettingsScreen() {
     try {
       await updateProvider('claude_code');
       setProvider('claude_code');
+      // MODEL-1A: chat model UI follows resolve_provider('chat'), not relay.
+      const catalog = await getModelCatalog();
+      setChatModelProvider(catalog.provider);
+      setCurrentModel(catalog.provider === 'claude_code' ? '' : catalog.current);
       showToast('已切换：Claude Code 订阅');
     } catch { showToast('切换失败'); } finally { setBusy(''); }
   };
@@ -198,7 +209,13 @@ export function SettingsScreen() {
       await updateProvider('api_relay');
       setProvider('api_relay');
       setRelays(await getRelayEndpoints());
-      if (result.model) setCurrentModel(result.model);
+      const catalog = await getModelCatalog();
+      setChatModelProvider(catalog.provider);
+      setCurrentModel(
+        catalog.provider === 'claude_code'
+          ? ''
+          : (catalog.current || result.model || ''),
+      );
       const keyCheck = await getKeyStatusWithHostRtt();
       setKeyStatus(keyCheck.status);
       setHostRtt(keyCheck.hostRttMs);
@@ -208,13 +225,24 @@ export function SettingsScreen() {
   };
 
   const switchModel = async (model: ConfigModel) => {
+    if (chatModelProvider === 'claude_code') {
+      showToast('Claude Code 模型切换将在下一阶段开放');
+      return;
+    }
     if (model.id === currentModel) return;
     setBusy(`model:${model.id}`);
     try {
       await updateCurrentModel(model.id);
       setCurrentModel(model.id);
       showToast(`已切换：${model.label}`);
-    } catch { showToast('模型切换失败'); } finally { setBusy(''); }
+    } catch (err) {
+      const code = err instanceof HttpError
+        ? String((err.payload as { error?: string } | undefined)?.error || err.code || '')
+        : '';
+      showToast(code === 'CC_MODEL_SWITCH_NOT_AVAILABLE'
+        ? 'Claude Code 模型切换将在下一阶段开放'
+        : '模型切换失败');
+    } finally { setBusy(''); }
   };
 
   const refreshModels = async () => {
@@ -369,7 +397,7 @@ export function SettingsScreen() {
       const result = await runPlayground(testInput.trim(), injectMemory);
       const tokens = `${fmtTokens(result.inputTokens)} in / ${fmtTokens(result.outputTokens)} out`;
       setTestResult({
-        meta: `${currentEndpointName} · ${currentModel || '默认模型'} · ${result.latencyMs || '—'}ms · ${tokens}`,
+        meta: `${currentEndpointName} · ${chatModelProvider === 'claude_code' ? 'Claude Code · 默认' : (currentModel || '默认模型')} · ${result.latencyMs || '—'}ms · ${tokens}`,
         thinking: result.thinking,
         text: result.content || result.error || '（空响应）',
         error: Boolean(result.error && !result.content),
@@ -397,7 +425,7 @@ export function SettingsScreen() {
           <div className="config-card-kicker"><span>CURRENT · 当前调用</span><span className={currentReady ? 'ready' : 'bad'}><i />{currentReady ? '就绪' : '配置不完整'}</span></div>
           <dl>
             <div><dt>端点</dt><dd>{currentEndpointName}</dd></div>
-            <div><dt>模型</dt><dd>{currentModel || '—'}</dd></div>
+            <div><dt>模型</dt><dd>{chatModelProvider === 'claude_code' ? 'Claude Code · 默认' : (currentModel || '—')}</dd></div>
             <div><dt>主站往返</dt><dd className="latency">{hostRtt === null ? '—' : `${hostRtt} ms`}</dd></div>
           </dl>
           <p>主站往返仅测网页到 VPS，不代表中转站延迟 · 聊天与下方「模型测试」均走此配置</p>
@@ -512,15 +540,25 @@ export function SettingsScreen() {
           <div className="config-card-heading"><h2>模型池</h2><button type="button" onClick={() => void refreshModels()}>{busy === 'models' ? '拉取中…' : '⟳ 统一拉取'}</button></div>
           <p>当前端点实时模型 + models.json 策展清单 · 共 {unifiedModels.length} 个</p>
           <h3>常用预设</h3>
-          <div className="config-preset-list">{catalog.filter((model) => model.primary).map((model) => <button type="button" key={model.id} onClick={() => void switchModel(model)}><i style={{ background: model.dot }} /><span><strong>{model.label}</strong><small>{activeRelay?.name || currentEndpointName} · {model.id}</small></span>{model.id === currentModel ? <em>使用中</em> : <b>切换</b>}</button>)}</div>
-          <input value={modelFilter} onChange={(event) => setModelFilter(event.target.value)} placeholder="搜索全部模型…" />
-          <div className="config-unified-list">{unifiedModels.map((model) => <button type="button" key={model.id} onClick={() => void switchModel(model)} disabled={Boolean(busy)}><i style={{ background: model.dot }} /><span>{activeRelay?.name || '策展'}</span><strong>{model.id}</strong>{model.id === currentModel ? <em>使用中</em> : <b>切换</b>}</button>)}{!unifiedModels.length && <div>当前端点没有返回模型</div>}</div>
+          {chatModelProvider === 'claude_code' ? (
+            <div className="config-preset-list">
+              <button type="button" disabled>
+                <i style={{ background: '#7c6a8a' }} />
+                <span><strong>Claude Code · 默认</strong><small>模型切换将在下一阶段开放</small></span>
+                <em>使用中</em>
+              </button>
+            </div>
+          ) : (
+            <div className="config-preset-list">{catalog.filter((model) => model.primary).map((model) => <button type="button" key={model.id} onClick={() => void switchModel(model)}><i style={{ background: model.dot }} /><span><strong>{model.label}</strong><small>{activeRelay?.name || currentEndpointName} · {model.id}</small></span>{model.id === currentModel ? <em>使用中</em> : <b>切换</b>}</button>)}</div>
+          )}
+          <input value={modelFilter} onChange={(event) => setModelFilter(event.target.value)} placeholder="搜索全部模型…" disabled={chatModelProvider === 'claude_code'} />
+          <div className="config-unified-list">{chatModelProvider === 'claude_code' ? <div>Claude Code 模式下不操作中转模型池</div> : unifiedModels.map((model) => <button type="button" key={model.id} onClick={() => void switchModel(model)} disabled={Boolean(busy)}><i style={{ background: model.dot }} /><span>{activeRelay?.name || '策展'}</span><strong>{model.id}</strong>{model.id === currentModel ? <em>使用中</em> : <b>切换</b>}</button>)}{chatModelProvider !== 'claude_code' && !unifiedModels.length && <div>当前端点没有返回模型</div>}</div>
         </section>
 
         <SectionLabel>PLAYGROUND · 模型测试</SectionLabel>
         <section className="config-card config-playground">
           <div className="config-card-heading"><h2>模型测试</h2><span>不写入正式对话</span></div>
-          <div className="config-playground-current"><i className={currentReady ? 'ready' : ''} /><span>当前：{currentEndpointName} · {currentModel || '默认模型'}</span></div>
+          <div className="config-playground-current"><i className={currentReady ? 'ready' : ''} /><span>当前：{currentEndpointName} · {chatModelProvider === 'claude_code' ? 'Claude Code · 默认' : (currentModel || '默认模型')}</span></div>
           <div className="config-playground-chips"><button type="button" className={injectMemory ? 'active memory' : ''} onClick={() => setInjectMemory((value) => !value)}>{injectMemory ? '✓ ' : ''}注入记忆</button><span>思考由当前线路决定</span></div>
           <div className="config-playground-input"><input value={testInput} onChange={(event) => setTestInput(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') void sendTest(); }} placeholder="说点什么试试……" /><button type="button" onClick={() => void sendTest()} disabled={busy === 'test'}>↑</button></div>
           {busy === 'test' && <div className="config-thinking">费佳思考中…</div>}

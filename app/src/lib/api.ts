@@ -453,12 +453,47 @@ export interface ModelCatalogEntry {
   dot?: string;
 }
 
-// GET /api/config/model-catalog -> { models, current }
-export function fetchModelCatalog(): Promise<{ models: ModelCatalogEntry[]; current: string }> {
+export type ChatModelProvider = 'api_relay' | 'claude_code';
+
+export interface ChatModelCatalog {
+  models: ModelCatalogEntry[];
+  current: string;
+  provider: ChatModelProvider | '';
+  modelMode: 'default' | '';
+  configuredModel: string | null;
+}
+
+// GET /api/config/model-catalog -> provider-aware current model (MODEL-1A)
+export function fetchModelCatalog(): Promise<ChatModelCatalog> {
   return http
-    .get<{ models: ModelCatalogEntry[]; current: string }>('/api/config/model-catalog')
-    .then((r) => ({ models: r.models || [], current: r.current || '' }))
-    .catch(() => ({ models: [], current: '' }));
+    .get<{
+      models?: ModelCatalogEntry[];
+      current?: string | null;
+      provider?: string;
+      model_mode?: string;
+      configured_model?: string | null;
+    }>('/api/config/model-catalog')
+    .then((r) => {
+      const provider = r.provider === 'claude_code' || r.provider === 'api_relay' ? r.provider : '';
+      const configured =
+        r.configured_model === null || r.configured_model === undefined
+          ? null
+          : String(r.configured_model);
+      return {
+        models: r.models || [],
+        current: provider === 'claude_code' ? '' : (r.current || configured || ''),
+        provider,
+        modelMode: r.model_mode === 'default' ? 'default' : '',
+        configuredModel: provider === 'claude_code' ? null : configured,
+      };
+    })
+    .catch(() => ({
+      models: [],
+      current: '',
+      provider: '',
+      modelMode: '',
+      configuredModel: null,
+    }));
 }
 
 // POST /api/config/model

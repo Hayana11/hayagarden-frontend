@@ -158,6 +158,7 @@ export function ChatScreen() {
   const [attachMenuOpen, setAttachMenuOpen] = useState(false);
   const [models, setModels] = useState<ModelCatalogEntry[]>([]);
   const [currentModel, setCurrentModel] = useState('');
+  const [chatProvider, setChatProvider] = useState<'api_relay' | 'claude_code' | ''>('');
 
   const [openThink, setOpenThink] = useState<Record<number, boolean>>({});
   const [openTools, setOpenTools] = useState<Record<string, boolean>>({});
@@ -251,12 +252,13 @@ export function ChatScreen() {
     }
   }, [refreshing, refetchLatest, showToast]);
 
-  // initial load + catalog
+  // initial load + catalog (MODEL-1A: provider-aware)
   useEffect(() => {
     refetchLatest();
     fetchModelCatalog().then((r) => {
       setModels(r.models);
-      setCurrentModel(r.current);
+      setChatProvider(r.provider);
+      setCurrentModel(r.provider === 'claude_code' ? '' : r.current);
     });
   }, [refetchLatest]);
 
@@ -530,9 +532,10 @@ export function ChatScreen() {
 
   const sectionCaption: CSSProperties = { fontFamily: DISPLAY, fontSize: 11, letterSpacing: 3, color: 'var(--ghost)' };
   const modelBadge = useMemo(() => {
+    if (chatProvider === 'claude_code') return 'Claude Code · 默认';
     const hit = models.find((m) => m.id === currentModel);
     return hit?.label || currentModel.replace(/^.*\]\s*/, '').slice(0, 22) || '模型';
-  }, [models, currentModel]);
+  }, [models, currentModel, chatProvider]);
 
   const canSend = Boolean(input.trim() || pendingFile || pendingImage) && !sending;
 
@@ -1124,7 +1127,12 @@ export function ChatScreen() {
               <div onClick={() => setModelPopOpen(false)} style={{ position: 'fixed', inset: 0, zIndex: 1 }} />
               <div style={{ position: 'absolute', bottom: 'calc(100% + 10px)', left: 0, zIndex: 2, width: 'min(330px,100%)', background: 'var(--card)', borderRadius: 18, boxShadow: '0 24px 60px var(--shadow2)', padding: 12, display: 'flex', flexDirection: 'column', gap: 4, animation: 'chatFadeIn .15s ease', maxHeight: '50vh', overflowY: 'auto' }}>
                 <div style={{ fontFamily: DISPLAY, fontSize: 10.5, letterSpacing: 2.5, color: 'var(--ghost)', padding: '8px 8px 4px' }}>模型 · MODELS</div>
-                {models.map((mo) => (
+                {chatProvider === 'claude_code' ? (
+                  <div style={{ padding: '10px 10px 6px', display: 'flex', flexDirection: 'column', gap: 6 }}>
+                    <span style={{ fontSize: 14, color: 'var(--ink)' }}>Claude Code · 默认</span>
+                    <span style={{ fontSize: 12, color: 'var(--faint)', lineHeight: 1.5 }}>Claude Code 模型切换将在下一阶段开放</span>
+                  </div>
+                ) : models.map((mo) => (
                   <div
                     key={mo.id}
                     onClick={async () => {
@@ -1146,8 +1154,10 @@ export function ChatScreen() {
                     {mo.thinking === 'none' && <span style={{ marginLeft: 'auto', fontSize: 10, color: 'var(--ghost)', background: 'var(--card2)', borderRadius: 999, padding: '2px 8px', flexShrink: 0 }}>无思考</span>}
                   </div>
                 ))}
-                {!models.length && <div style={{ fontSize: 12, color: 'var(--faint)', padding: '4px 10px' }}>模型清单还没拉到</div>}
-                <div style={{ fontSize: 10.5, color: 'var(--ghost)', borderTop: '1px solid var(--line)', marginTop: 6, padding: '8px 8px 2px' }}>清单来自 models.json · 切换全局生效</div>
+                {chatProvider !== 'claude_code' && !models.length && <div style={{ fontSize: 12, color: 'var(--faint)', padding: '4px 10px' }}>模型清单还没拉到</div>}
+                <div style={{ fontSize: 10.5, color: 'var(--ghost)', borderTop: '1px solid var(--line)', marginTop: 6, padding: '8px 8px 2px' }}>
+                  {chatProvider === 'claude_code' ? '当前聊天走 Claude Code · 与中转模型池隔离' : '清单来自 models.json · 切换作用于当前中转'}
+                </div>
               </div>
             </>
           )}
