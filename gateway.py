@@ -6571,6 +6571,36 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
         wake_provider, full_tools, mode, dry_run=dry_run,
     )
 
+    # B1-1B: freeze CapabilitySkillView after tool prepare, then non-blocking
+    # Planner Shadow dispatch. Production runner must not wait on Shadow.
+    # Only comparison-eligible live Behavior attempts that already hold V.
+    if planner_view is not None and wake_run_id:
+        try:
+            from chat.capability_skill_view import freeze_capability_skill_view
+            from chat.planner_shadow import dispatch_planner_shadow
+            _skill_view = freeze_capability_skill_view(
+                wake_run_id=wake_run_id,
+                provider=wake_provider,
+                mode=mode,
+                prepared_tools=_wake_tools,
+                dry_run=dry_run,
+                captured_at=now,
+            )
+            dispatch_planner_shadow(
+                planner_view=planner_view,
+                skill_view=_skill_view,
+                wake_run_id=wake_run_id,
+                legacy_provenance=decision_provenance,
+            )
+        except Exception as _shadow_exc:
+            # Fail-open: Shadow must never become a production Gate.
+            try:
+                app.logger.warning(
+                    '[planner_shadow] dispatch skipped: %s', _shadow_exc,
+                )
+            except Exception:
+                pass
+
     try:
         runner = _wake_runners.get_wake_runner(wake_provider)
         result = runner.run(_wake_runners.WakeRequest(
