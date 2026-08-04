@@ -22,3 +22,19 @@ exit: 0
 Note: Catalog IDs claude-sonnet-5 and claude-opus-4-8 accepted by this Claude Code
 install and completed a one-shot turn successfully. Production /opt/frontend was not
 modified; deploy was not run.
+
+=== resident A → B (isolated worktree a2eeb68, TEXT_ONLY) ===
+id_before: explicit:claude-sonnet-5
+peek: model_changed
+id_after: explicit:claude-opus-4-8
+generation: 1 → 2
+model_arg_before: claude-sonnet-5
+model_arg_after: claude-opus-4-8
+reply: ok
+
+=== resident explicit → default ===
+peek: model_changed
+identity: default
+has_model: false
+argv: [] (no --model)
+reply: ok
