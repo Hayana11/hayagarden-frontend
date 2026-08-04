@@ -213,19 +213,17 @@ def touch_interaction():
 # ═══════════════════════════════════════════════════════════
 
 def get_longing() -> float:
-    """L = 0.85 × (1 - (1 + t/8)^(-0.8))，t单位小时"""
-    state = get_state()
-    last_str = state.get('last_interaction') or ''
-    if not last_str:
-        return 0.0
+    """Compatibility facade → Stage B derived Longing (tau=18h).
+
+    Reads authoritative ``user_idle_hours`` only. Never uses
+    ``emotion_state.last_interaction``. Fail closed → 0.0 (no 999h).
+    """
     try:
-        last = _parse_dt(last_str)
-        if not last:
+        from internal_state import read_derived_longing
+        longing = read_derived_longing()
+        if longing is None:
             return 0.0
-        now = datetime.datetime.utcnow() + datetime.timedelta(hours=8)
-        t = max(0.0, (now - last).total_seconds() / 3600)
-        L = 0.85 * (1 - (1 + t / 8) ** (-0.8))
-        return round(min(L, 0.92), 3)
+        return float(longing)
     except Exception:
         return 0.0
 
@@ -387,19 +385,20 @@ def _bou_revert(pa: float, na: float) -> tuple:
 # ═══════════════════════════════════════════════════════════
 
 def _longing_from_last_interaction(last_str, *, observed_at: str) -> float:
-    """事务内思念：仅依赖已读到的 last_interaction，不再另开连接读库。"""
-    if not last_str:
-        return 0.0
+    """Column fill only — not Longing authority.
+
+    Production consumers must use ``get_longing()`` / ``read_derived_longing``.
+    This snapshot follows the same Stage B curve via the authoritative clock
+    at ``observed_at``; legacy ``last_interaction`` is ignored.
+    """
+    del last_str  # retired: must not drive production or snapshot longing
     try:
-        last = _parse_dt(last_str)
-        if not last:
-            return 0.0
+        from internal_state import read_derived_longing
         now = _parse_dt(observed_at)
-        if now is None:
+        longing = read_derived_longing(now=now)
+        if longing is None:
             return 0.0
-        t = max(0.0, (now - last).total_seconds() / 3600)
-        L = 0.85 * (1 - (1 + t / 8) ** (-0.8))
-        return round(min(L, 0.92), 3)
+        return float(longing)
     except Exception:
         return 0.0
 

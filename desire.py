@@ -163,12 +163,21 @@ def _va_calibrate(drives: dict, V: float, A: float) -> dict:
     return d
 
 
-def _compute_longing(last_hayana_dt) -> float:
-    if not last_hayana_dt:
-        return 0.0
-    t = max(0.0, (_now() - last_hayana_dt).total_seconds() / 3600)
+def _compute_longing_from_idle_hours(t_hours: float) -> float:
+    """Stage B τ18 curve from idle hours (no legacy timestamp)."""
+    t = max(0.0, float(t_hours))
     L = LONGING_MAX * (1 - (1 + t / LONGING_TAU) ** (-0.8))
     return round(min(L, 0.90), 3)
+
+
+def _compute_longing(last_hayana_dt) -> float:
+    """Retired path: last_hayana_msg_time must not author longing.
+
+    Kept as a thin wrapper for any stray internal call sites; always fail
+    closed to 0.0 rather than computing from the legacy timestamp.
+    """
+    del last_hayana_dt
+    return 0.0
 
 
 def _longing_phase(L: float) -> str:
@@ -282,30 +291,32 @@ def touch_hayana():
 
 
 def get_longing(t_hours_override=None) -> tuple:
-    """返回 (L, phase, t_hours)。
+    """Compatibility facade → Stage B derived Longing. Returns (L, phase, t_hours).
 
-    普通聊天可不传 override，继续读 desire_state.last_hayana_msg_time。
-    Wake 必须传入权威互动时钟算出的 user_idle_hours，避免旧字段停摆（如 335h）污染 prompt。
+    - With ``t_hours_override``: treat as authoritative ``user_idle_hours``
+      (Wake / tests that already hold the clock).
+    - Without override: read ``read_interaction_clock().user_idle_hours``.
+    Never reads ``desire_state.last_hayana_msg_time``. Never invents 999h.
+    Fail closed → (0.0, 'content', 0.0).
     """
     if t_hours_override is not None:
         try:
             t_hours = max(0.0, float(t_hours_override))
         except (TypeError, ValueError):
-            t_hours = 0.0
-        # Recompute L from the override hours (same curve as _compute_longing).
-        L = LONGING_MAX * (1 - (1 + t_hours / LONGING_TAU) ** (-0.8))
-        L = round(min(L, 0.90), 3)
+            return 0.0, 'content', 0.0
+        L = _compute_longing_from_idle_hours(t_hours)
         return L, _longing_phase(L), t_hours
 
-    conn     = _db()
-    row      = conn.execute("SELECT last_hayana_msg_time FROM desire_state WHERE id=1").fetchone()
-    conn.close()
-    last_str = row['last_hayana_msg_time'] if row else None
-    last_dt  = _parse_dt(last_str)
-    L        = _compute_longing(last_dt)
-    phase    = _longing_phase(L)
-    t_hours  = max(0.0, (_now() - last_dt).total_seconds() / 3600) if last_dt else 999.0
-    return L, phase, t_hours
+    try:
+        from chat.interaction_state import read_interaction_clock
+        clock = read_interaction_clock(_db)
+        if not clock.reliable or clock.user_idle_hours is None:
+            return 0.0, 'content', 0.0
+        t_hours = float(clock.user_idle_hours)
+        L = _compute_longing_from_idle_hours(t_hours)
+        return L, _longing_phase(L), t_hours
+    except Exception:
+        return 0.0, 'content', 0.0
 
 
 def get_reunion_boost(longing_before: float) -> float:
