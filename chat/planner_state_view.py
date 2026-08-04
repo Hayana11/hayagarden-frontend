@@ -5,7 +5,10 @@ derives Longing from C, materializes Bond/Drives at the same observed_at,
 then releases the DB transaction immediately. Callers carry only the
 frozen value object — never a live connection or open transaction.
 
-See ``docs/behavior_authority_b1_shadow_contract.md`` §3.1.
+Authoritative snapshot unavailable ⇒ raise ``PlannerStateViewUnavailable``.
+Never invent default Affect/Bond/Drives as a fake valid V.
+
+See ``docs/behavior_authority_b1_shadow_contract.md`` §3.1 / §1.1.
 """
 
 from __future__ import annotations
@@ -29,6 +32,14 @@ BEHAVIOR_DECISION_MODES = frozenset({
 })
 
 
+class PlannerStateViewUnavailable(Exception):
+    """No authoritative S+C snapshot ⇒ no valid PlannerStateView."""
+
+    def __init__(self, reason: str):
+        self.reason = str(reason or 'unavailable')
+        super().__init__(self.reason)
+
+
 def _now_beijing() -> datetime.datetime:
     return datetime.datetime.utcnow() + datetime.timedelta(hours=8)
 
@@ -39,6 +50,11 @@ def _now_str(dt: Optional[datetime.datetime] = None) -> str:
 
 def _mapping_proxy(data: Mapping[str, Any]) -> Mapping[str, Any]:
     return MappingProxyType(dict(data))
+
+
+def b1_1a_v_plumbing_eligible(*, mode: str, live: bool) -> bool:
+    """B8: V freeze only for live Behavior-Decision comparison-eligible attempts."""
+    return bool(live) and str(mode or '') in BEHAVIOR_DECISION_MODES
 
 
 @dataclass(frozen=True)
@@ -80,42 +96,19 @@ class PlannerStateView:
         return bool(self.interaction_clock.get('reliable'))
 
     def drives_for_engine(self) -> dict:
-        """Mutable copy shaped for ``drive_engine.decide(drive=...)``."""
-        return {k: float(self.drives.get(k, 0.1) or 0.1) for k in _DRIVE_KEYS}
+        """Mutable copy shaped for ``drive_engine.decide(drive=...)``.
+
+        Preserves legitimate ``0.0`` values — must not use ``x or 0.1``.
+        """
+        out = {}
+        for k in _DRIVE_KEYS:
+            raw = self.drives.get(k)
+            out[k] = float(raw if raw is not None else 0.1)
+        return out
 
     def attachment(self) -> float:
-        return float(self.drives.get('attachment', 0.0) or 0.0)
-
-
-def _fail_closed_view(
-    *,
-    observed_at: str,
-    wake_run_id: Optional[str],
-    reason: str,
-) -> PlannerStateView:
-    """Match legacy get_drive() fail-closed zeros (0.1) + idle 0.0."""
-    drives = {k: 0.1 for k in _DRIVE_KEYS}
-    return PlannerStateView(
-        state_version=0,
-        observed_at=observed_at,
-        wake_run_id=wake_run_id,
-        affect=_mapping_proxy({
-            'pa': 0.5, 'na': 0.2, 'valence': 0.6, 'arousal': 0.3,
-            'mood_word': '平静',
-        }),
-        bond=_mapping_proxy({
-            'intimacy': 0.3, 'passion': 0.0, 'commitment': 0.7,
-        }),
-        drives=_mapping_proxy(drives),
-        longing_derived=0.0,
-        interaction_clock=_mapping_proxy({
-            'user_idle_hours': 0.0,
-            'effective_idle_hours': 0.0,
-            'reliable': False,
-            'reason': reason,
-        }),
-        immutable=True,
-    )
+        raw = self.drives.get('attachment')
+        return float(raw if raw is not None else 0.0)
 
 
 def freeze_planner_state_view(
@@ -129,6 +122,9 @@ def freeze_planner_state_view(
     Causal order (hard):
       BEGIN → read S + C at T → derive L → materialize bond/drives
       → freeze V → END txn → close conn → return immutable V only.
+
+    Raises ``PlannerStateViewUnavailable`` when cutover is not ready, V3 row
+    is missing, or freeze fails. Never returns a synthetic default persona.
     """
     from chat.affect_bond_authority import (
         check_cutover_ready_on_conn,
@@ -158,10 +154,8 @@ def freeze_planner_state_view(
         if not ready.ok:
             conn.execute('ROLLBACK')
             began = False
-            return _fail_closed_view(
-                observed_at=observed_str,
-                wake_run_id=run_id,
-                reason=f'cutover_not_ready:{ready.status}',
+            raise PlannerStateViewUnavailable(
+                f'cutover_not_ready:{ready.status}'
             )
 
         state = store.read_state(conn)
@@ -170,11 +164,7 @@ def freeze_planner_state_view(
         if state is None:
             conn.execute('ROLLBACK')
             began = False
-            return _fail_closed_view(
-                observed_at=observed_str,
-                wake_run_id=run_id,
-                reason='v3_state_missing',
-            )
+            raise PlannerStateViewUnavailable('v3_state_missing')
 
         # Materialize from frozen Python copies of S+C while txn still open,
         # then release immediately — no live conn carried after return.
@@ -247,6 +237,8 @@ def freeze_planner_state_view(
         conn.execute('COMMIT')
         began = False
         return view
+    except PlannerStateViewUnavailable:
+        raise
     except Exception as exc:
         _LOG.warning('freeze_planner_state_view failed: %s', exc)
         if conn is not None and began:
@@ -255,11 +247,9 @@ def freeze_planner_state_view(
             except Exception:
                 pass
             began = False
-        return _fail_closed_view(
-            observed_at=observed_str,
-            wake_run_id=run_id,
-            reason=f'freeze_failed:{type(exc).__name__}',
-        )
+        raise PlannerStateViewUnavailable(
+            f'freeze_failed:{type(exc).__name__}'
+        ) from exc
     finally:
         if conn is not None:
             try:

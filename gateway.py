@@ -6336,34 +6336,18 @@ def _wake_inspect_only(data, mode, activity_desc, ritual_type):
         }), 400
 
     now = datetime.datetime.utcnow() + datetime.timedelta(hours=8)
-    # inspect_only is not B1 comparison evidence, but Behavior-Decision modes
-    # still freeze a DecisionClock bundle so prompt facts do not reuse a
-    # separate GuardClock sample.
-    from chat.planner_state_view import (
-        BEHAVIOR_DECISION_MODES,
-        decision_hours_from_view,
-        freeze_planner_state_view,
-    )
-    planner_view = None
-    if mode in BEHAVIOR_DECISION_MODES:
-        planner_view = freeze_planner_state_view(
-            db_path=DB_PATH,
-            observed_at=now,
-            wake_run_id=wake_run_id or None,
+    # B8: inspect_only is outside B1-1A V plumbing — pure inspection path.
+    clock = read_interaction_clock(get_db, now=now)
+    if clock.reliable and clock.user_idle_hours is not None:
+        t2_hours = float(clock.user_idle_hours)
+        t_hours = float(
+            clock.effective_idle_hours
+            if clock.effective_idle_hours is not None
+            else t2_hours
         )
-        t2_hours, t_hours = decision_hours_from_view(planner_view)
     else:
-        clock = read_interaction_clock(get_db, now=now)
-        if clock.reliable and clock.user_idle_hours is not None:
-            t2_hours = float(clock.user_idle_hours)
-            t_hours = float(
-                clock.effective_idle_hours
-                if clock.effective_idle_hours is not None
-                else t2_hours
-            )
-        else:
-            t2_hours = 0.0
-            t_hours = 0.0
+        t2_hours = 0.0
+        t_hours = 0.0
 
     system, _, _decision_prov = _wake_build_system_for_plan(
         mode=mode,
@@ -6376,7 +6360,7 @@ def _wake_inspect_only(data, mode, activity_desc, ritual_type):
         now=now,
         allow_side_effects=False,
         dry_run=False,
-        planner_state_view=planner_view,
+        planner_state_view=None,
     )
     del _decision_prov
     msgs = [{'role': 'user', 'content': _wake_trigger_message(mode, ritual_type)}]
@@ -6506,23 +6490,36 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
             pass
 
     # B1-1A Decision-time freeze: one SQLite snapshot → PlannerStateView V.
+    # B8: only live Behavior-Decision attempts (not dry_run / inspect_only).
     # DecisionClock from V is the sole clock for t_hours / t2 / Longing /
     # legacy Decision / recall_photo. GuardClock stays eligibility-only.
     from chat.planner_state_view import (
-        BEHAVIOR_DECISION_MODES,
+        PlannerStateViewUnavailable,
+        b1_1a_v_plumbing_eligible,
         decision_hours_from_view,
         freeze_planner_state_view,
     )
     planner_view = None
-    if mode in BEHAVIOR_DECISION_MODES:
-        planner_view = freeze_planner_state_view(
-            db_path=DB_PATH,
-            observed_at=now,
-            wake_run_id=wake_run_id or None,
-        )
+    if b1_1a_v_plumbing_eligible(mode=mode, live=live):
+        try:
+            planner_view = freeze_planner_state_view(
+                db_path=DB_PATH,
+                observed_at=now,
+                wake_run_id=wake_run_id or None,
+            )
+        except PlannerStateViewUnavailable as exc:
+            # A3: no authoritative S ⇒ no valid V; fail closed (no synthetic V,
+            # no silent get_drive fallback, no model call with invented state).
+            return jsonify({
+                'ok': False,
+                'error': f'planner state view unavailable: {exc.reason}',
+                'reason': 'planner_state_view_unavailable',
+                'detail': exc.reason,
+                'mode': mode,
+            }), 503
         t2_hours, t_hours = decision_hours_from_view(planner_view)
     else:
-        # dream / summarize: no decide/freeze; out of B1 comparison scope.
+        # dry_run / dream / summarize: non-B1-evidence paths; no V freeze.
         if guard_clock.reliable and guard_clock.user_idle_hours is not None:
             t2_hours = float(guard_clock.user_idle_hours)
             t_hours = float(
