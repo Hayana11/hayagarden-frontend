@@ -6590,6 +6590,7 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
                 mode=mode,
                 prepared_tools=_wake_tools,
                 dry_run=dry_run,
+                ritual_type=ritual_type,
                 captured_at=now,
             )
             dispatch_planner_shadow(
@@ -6708,21 +6709,36 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
     # Sole authoritative wake_outcome mutation path: executor txn.
     # Cutover readiness is enforced inside apply_wake_outcome_on_conn
     # on the same connection (Stage D N4). Shadow must not apply_outcome.
-    _wake_exec(
-        action, thoughts, c_text, mode,
-        get_db_fn=get_db,
-        desire_driven=desire_driven,
-        surfaced_desire_ids=surfaced_desire_ids,
-        desire_ledger_enabled=_get_desire_ledger_enabled(),
-        cache_info=wake_cache_info,
-        wake_run_id=wake_run_id,
-        window_identity=_wake_window_identity,
-        settle_fired_drive=fired_drive,
-        settle_provenance_present=provenance_present,
-        settle_user_idle_hours=t2_hours,
-    )
+    # C2: success only when Action/Settlement actually commits
+    # (delivered∧settled). Soft-window gate blocks return without raise.
+    try:
+        exec_out = _wake_exec(
+            action, thoughts, c_text, mode,
+            get_db_fn=get_db,
+            desire_driven=desire_driven,
+            surfaced_desire_ids=surfaced_desire_ids,
+            desire_ledger_enabled=_get_desire_ledger_enabled(),
+            cache_info=wake_cache_info,
+            wake_run_id=wake_run_id,
+            window_identity=_wake_window_identity,
+            settle_fired_drive=fired_drive,
+            settle_provenance_present=provenance_present,
+            settle_user_idle_hours=t2_hours,
+        )
+    except Exception as _exec_exc:
+        _mark_production_attempt(
+            'failed', action=action, reason=str(_exec_exc),
+        )
+        raise
     _wake_run_id_mark(wake_run_id)
-    _mark_production_attempt('success', action=action)
+    try:
+        from chat.planner_shadow import classify_production_outcome
+        _prod_status, _prod_reason = classify_production_outcome(exec_out)
+    except Exception:
+        _prod_status, _prod_reason = 'failed', 'classify_production_outcome_error'
+    _mark_production_attempt(
+        _prod_status, action=action, reason=_prod_reason or None,
+    )
 
     return jsonify({
         'ok': True,

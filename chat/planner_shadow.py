@@ -174,6 +174,7 @@ def _skill_to_dict(skill: Any) -> dict:
         'provider': skill.provider,
         'model_identity': skill.model_identity,
         'wake_mode': skill.wake_mode,
+        'ritual_type': getattr(skill, 'ritual_type', '') or '',
         'resolved_action_capability': list(skill.resolved_action_capability),
         'allowed_action_families': list(skill.allowed_action_families),
         'tool_allowlist': list(skill.tool_allowlist),
@@ -187,6 +188,28 @@ def _skill_to_dict(skill: Any) -> dict:
         'frozen_after': skill.frozen_after,
         'immutable': True,
     }
+
+
+def classify_production_outcome(
+    exec_out: Optional[Mapping[str, Any]],
+) -> tuple[str, str]:
+    """Map executor return → (production_status, reason) for C2 markers.
+
+    Accepted comparison evidence requires a real committed production attempt:
+    ``delivered=True`` and ``settled=True``. Soft-window gate blocks return
+    without raising and must become failed/orphan — never success.
+    """
+    if not isinstance(exec_out, Mapping):
+        return 'failed', 'executor_result_missing'
+    delivered = bool(exec_out.get('delivered'))
+    settled = bool(exec_out.get('settled'))
+    if delivered and settled:
+        return 'success', ''
+    gate = str(exec_out.get('gate_reason') or '').strip()
+    settle_status = exec_out.get('settle_status')
+    if not delivered:
+        return 'failed', f'gate_blocked:{gate or "unknown"}'
+    return 'failed', f'not_settled:{settle_status or gate or "unknown"}'
 
 
 def build_shadow_user_payload(

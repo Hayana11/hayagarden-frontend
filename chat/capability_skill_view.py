@@ -17,6 +17,7 @@ _PARSER_ACTIONS = ('none', 'message', 'diary', 'explore')
 _BEHAVIOR_MODES = frozenset({
     'normal', 'morning', 'nightwatch', 'ritual', 'self_trigger',
 })
+_SPECIAL_RITUAL_TYPES = frozenset({'solstice', 'birthday'})
 
 
 def _now_beijing() -> datetime.datetime:
@@ -80,23 +81,59 @@ def _provider_content_policy(provider: str) -> str:
     return 'relay_content_aligned'
 
 
+def mode_action_contract(
+    mode: str,
+    ritual_type: str = '',
+) -> tuple[tuple[str, ...], str]:
+    """Return (mode-allowed actions, contract_id) from real Wake prompt truth.
+
+    Mirrors ``wake.builder._load_template`` mode/ritual_type selection:
+    - nightwatch → NIGHTWATCH_DECISION_PROMPT (no explore)
+    - ritual solstice/birthday → message-only special ritual prompts
+    - ritual generic → WAKE_DECISION_PROMPT four-action set
+    - normal / morning / self_trigger → four-action Decision prompts
+    """
+    wake_mode = str(mode or '').strip() or 'normal'
+    rtype = str(ritual_type or '').strip().lower()
+
+    if wake_mode not in _BEHAVIOR_MODES:
+        return ('none',), 'non_behavior_mode'
+
+    if wake_mode == 'nightwatch':
+        return ('none', 'message', 'diary'), 'nightwatch_decision'
+
+    if wake_mode == 'ritual':
+        if rtype in _SPECIAL_RITUAL_TYPES:
+            # RITUAL_SOLSTICE / RITUAL_BIRTHDAY: "只输出消息"
+            return ('message',), f'ritual_{rtype}_message_only'
+        # Generic ritual falls back to WAKE_DECISION_PROMPT.
+        return tuple(_PARSER_ACTIONS), 'ritual_generic_wake_decision'
+
+    if wake_mode == 'morning':
+        return tuple(_PARSER_ACTIONS), 'morning_decision'
+
+    # normal / self_trigger share WAKE_DECISION_PROMPT four-action set.
+    return tuple(_PARSER_ACTIONS), f'{wake_mode}_wake_decision'
+
+
 def resolved_action_capability_for(
     *,
     provider: str,
     mode: str,
     dry_run: bool = False,
+    ritual_type: str = '',
 ) -> tuple[str, ...]:
     """parser ∩ mode ∩ provider ∩ executor — not bare parser enum."""
     del dry_run  # tools emptiness is separate; action families still decidable
     prov = str(provider or '').strip()
     wake_mode = str(mode or '').strip() or 'normal'
 
-    # Mode contract: Behavior-Decision modes expose wake action families.
-    # dream/summarize are outside B1 comparison; they do not claim diary/message.
+    mode_allowed, _contract_id = mode_action_contract(wake_mode, ritual_type)
     if wake_mode not in _BEHAVIOR_MODES:
         return ('none',)
 
-    allowed = set(_PARSER_ACTIONS)
+    # parser ∩ mode
+    allowed = set(mode_allowed) & set(_PARSER_ACTIONS)
 
     # Executor preconditions: message/diary require non-empty CONTENT.
     # An action family remains "resolved executable" only if the provider
@@ -119,6 +156,7 @@ class CapabilitySkillView:
     provider: str
     model_identity: str
     wake_mode: str
+    ritual_type: str
     resolved_action_capability: tuple[str, ...]
     tool_allowlist: tuple[str, ...]
     available_tools: tuple[str, ...]
@@ -147,6 +185,7 @@ def freeze_capability_skill_view(
     mode: str,
     prepared_tools: Sequence[Any],
     dry_run: bool = False,
+    ritual_type: str = '',
     captured_at: Optional[datetime.datetime] = None,
 ) -> CapabilitySkillView:
     """Freeze CapabilitySkillView after prepare_tools_for_provider."""
@@ -156,11 +195,16 @@ def freeze_capability_skill_view(
         run_id = None
     prov = str(provider or '').strip() or 'unknown'
     wake_mode = str(mode or '').strip() or 'normal'
+    rtype = str(ritual_type or '').strip().lower()
     tools = _tool_names(prepared_tools)
     model_identity = resolve_model_identity(prov)
     policy = _provider_content_policy(prov)
+    mode_allowed, mode_contract_id = mode_action_contract(wake_mode, rtype)
     actions = resolved_action_capability_for(
-        provider=prov, mode=wake_mode, dry_run=bool(dry_run),
+        provider=prov,
+        mode=wake_mode,
+        dry_run=bool(dry_run),
+        ritual_type=rtype,
     )
     return CapabilitySkillView(
         wake_run_id=run_id,
@@ -168,6 +212,7 @@ def freeze_capability_skill_view(
         provider=prov,
         model_identity=model_identity,
         wake_mode=wake_mode,
+        ritual_type=rtype,
         resolved_action_capability=actions,
         tool_allowlist=tools,
         available_tools=tools,
@@ -178,6 +223,9 @@ def freeze_capability_skill_view(
         }),
         mode_contract=_proxy({
             'mode': wake_mode,
+            'ritual_type': rtype,
+            'mode_contract_id': mode_contract_id,
+            'mode_action_vocabulary': list(mode_allowed),
             'dry_run': bool(dry_run),
             'capability_profile': (
                 'wake_dry_run' if dry_run
@@ -192,6 +240,7 @@ def freeze_capability_skill_view(
             'none_content_empty': True,
             'tools_callable': bool(tools) and not dry_run,
             'diary_executor_resolved': 'diary' in actions,
+            'explore_mode_resolved': 'explore' in actions,
         }),
         external_effect_class=_proxy({
             'none': 'no_external_effect',

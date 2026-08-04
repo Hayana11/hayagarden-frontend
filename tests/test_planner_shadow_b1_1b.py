@@ -25,14 +25,15 @@ os.environ.setdefault(
 import drive_engine as de
 from chat.capability_skill_view import (
     freeze_capability_skill_view,
+    mode_action_contract,
     resolved_action_capability_for,
 )
 from chat.planner_shadow import (
+    classify_production_outcome,
     comparison_evidence_status,
     dispatch_planner_shadow,
     mark_production_attempt_outcome,
     new_decision_attempt_id,
-    observation_path,
     run_shadow_attempt,
     validate_shadow_decision,
 )
@@ -247,6 +248,62 @@ class PlannerShadowB11BTests(unittest.TestCase):
             'cc_content_message_explore_only',
         )
 
+    def test_c1_mode_intersection_nightwatch_and_ritual(self):
+        """C1: mode contract excludes explore for nightwatch; ritual_type matters."""
+        nw_mode, nw_id = mode_action_contract('nightwatch')
+        self.assertEqual(nw_mode, ('none', 'message', 'diary'))
+        self.assertEqual(nw_id, 'nightwatch_decision')
+
+        nw_relay = resolved_action_capability_for(
+            provider='api_relay', mode='nightwatch',
+        )
+        self.assertEqual(nw_relay, ('none', 'message', 'diary'))
+        self.assertNotIn('explore', nw_relay)
+
+        nw_cc = resolved_action_capability_for(
+            provider='claude_code', mode='nightwatch',
+        )
+        self.assertEqual(nw_cc, ('none', 'message'))
+        self.assertNotIn('diary', nw_cc)
+        self.assertNotIn('explore', nw_cc)
+
+        generic = resolved_action_capability_for(
+            provider='api_relay', mode='ritual', ritual_type='',
+        )
+        self.assertIn('explore', generic)
+        self.assertIn('diary', generic)
+
+        solstice = resolved_action_capability_for(
+            provider='api_relay', mode='ritual', ritual_type='solstice',
+        )
+        birthday = resolved_action_capability_for(
+            provider='api_relay', mode='ritual', ritual_type='birthday',
+        )
+        self.assertEqual(solstice, ('message',))
+        self.assertEqual(birthday, ('message',))
+
+        # CC special ritual still message-only (provider diary cut is no-op).
+        solstice_cc = resolved_action_capability_for(
+            provider='claude_code', mode='ritual', ritual_type='solstice',
+        )
+        self.assertEqual(solstice_cc, ('message',))
+
+        frozen = freeze_capability_skill_view(
+            wake_run_id='b11b-run-1',
+            provider='api_relay',
+            mode='ritual',
+            ritual_type='birthday',
+            prepared_tools=[],
+            dry_run=False,
+            captured_at=T_OBS,
+        )
+        self.assertEqual(frozen.ritual_type, 'birthday')
+        self.assertEqual(frozen.resolved_action_capability, ('message',))
+        self.assertEqual(
+            frozen.mode_contract['mode_contract_id'],
+            'ritual_birthday_message_only',
+        )
+
     def test_c2_attempt_pairing_accepted_vs_orphan(self):
         """C2: shared attempt ID + success ⇒ accepted; failed ⇒ orphan."""
 
@@ -317,6 +374,103 @@ class PlannerShadowB11BTests(unittest.TestCase):
             ),
             'orphan',
         )
+
+    def test_c2_outcome_truth_gate_block_and_exception(self):
+        """C2: delivered=False/settled=False ⇒ orphan; exception marker ⇒ orphan."""
+        status, reason = classify_production_outcome({
+            'delivered': True,
+            'settled': True,
+            'gate_reason': 'ok',
+            'settle_status': 'applied',
+        })
+        self.assertEqual(status, 'success')
+        self.assertEqual(reason, '')
+
+        status, reason = classify_production_outcome({
+            'delivered': False,
+            'settled': False,
+            'gate_reason': 'stale',
+            'settle_status': None,
+        })
+        self.assertEqual(status, 'failed')
+        self.assertTrue(reason.startswith('gate_blocked:'))
+
+        def fake_invoke(*, user_payload, timeout_sec):
+            del user_payload, timeout_sec
+            return json.dumps({
+                'intent': 'reconnect_gently',
+                'action_candidate': 'message',
+                'confidence': 0.7,
+                'primary_drive': 'attachment',
+                'contributors': [],
+                'blocked': False,
+                'reason_codes': [],
+                'wake_run_id': 'b11b-run-1',
+                'state_version': int(self.view.state_version),
+            })
+
+        # Soft-window gate block must never become accepted evidence.
+        attempt_gate = new_decision_attempt_id()
+        run_shadow_attempt(
+            planner_view=self.view,
+            skill_view=self.skill,
+            wake_run_id='b11b-run-1',
+            decision_attempt_id=attempt_gate,
+            invoke_fn=fake_invoke,
+        )
+        gate_status, gate_reason = classify_production_outcome({
+            'delivered': False,
+            'settled': False,
+            'gate_reason': 'stale',
+        })
+        mark_production_attempt_outcome(
+            wake_run_id='b11b-run-1',
+            decision_attempt_id=attempt_gate,
+            status=gate_status,
+            action='message',
+            reason=gate_reason,
+            provider='api_relay',
+        )
+        self.assertEqual(
+            comparison_evidence_status(
+                wake_run_id='b11b-run-1',
+                decision_attempt_id=attempt_gate,
+            ),
+            'orphan',
+        )
+
+        # Executor exception/rollback path writes failed marker.
+        attempt_exc = new_decision_attempt_id()
+        run_shadow_attempt(
+            planner_view=self.view,
+            skill_view=self.skill,
+            wake_run_id='b11b-run-1',
+            decision_attempt_id=attempt_exc,
+            invoke_fn=fake_invoke,
+        )
+        mark_production_attempt_outcome(
+            wake_run_id='b11b-run-1',
+            decision_attempt_id=attempt_exc,
+            status='failed',
+            action='message',
+            reason='wake action rejected: message requires non-empty CONTENT',
+            provider='api_relay',
+        )
+        self.assertEqual(
+            comparison_evidence_status(
+                wake_run_id='b11b-run-1',
+                decision_attempt_id=attempt_exc,
+            ),
+            'orphan',
+        )
+
+        # Gateway must classify from executor result, not unconditional success.
+        locked = Path(ROOT, 'gateway.py').read_text(encoding='utf-8').split(
+            'def _wake_decide_locked', 1,
+        )[1].split('\ndef ', 1)[0]
+        self.assertIn('classify_production_outcome', locked)
+        self.assertIn('exec_out = _wake_exec(', locked)
+        self.assertIn("_mark_production_attempt(\n            'failed', action=action, reason=str(_exec_exc)", locked)
 
     def test_c3_relay_isolation_no_global_singleton(self):
         """C3: K freeze / Shadow must not mutate production RelayManager singleton."""
@@ -446,7 +600,9 @@ class PlannerShadowB11BTests(unittest.TestCase):
         )
         # Failed runner path must orphan the attempt.
         self.assertIn("_mark_production_attempt('failed'", locked)
-        self.assertIn("_mark_production_attempt('success'", locked)
+        # Success is classified from executor delivered∧settled, not unconditional.
+        self.assertIn('classify_production_outcome', locked)
+        self.assertIn('ritual_type=ritual_type', locked)
         # Shadow must not use CC Wake resident.
         shadow_src = Path(ROOT, 'chat/planner_shadow.py').read_text(encoding='utf-8')
         self.assertIn('RelayManager()', shadow_src)
