@@ -195,16 +195,26 @@ def apply_wake_outcome_observation(
     user_idle_hours: float,
     outcome_at: Optional[str] = None,
     db_path: Optional[str] = None,
+    provenance_present: bool = False,
     max_version_retries: int = 3,
 ) -> Any:
-    """Canonical Wake drive settlement (idempotent + version retry).
+    """Standalone Wake drive settlement for tests / offline recovery.
 
-    Requires decision-time ``fired_drive`` for non-``none`` actions (fail closed
-    inside ``apply_outcome``). Does not infer Intent/Drive from assistant text.
+    **Not a production Wake caller.** Live Wake must use
+    ``wake.executor`` → ``apply_wake_outcome_on_conn`` in the Action txn.
+    Requires ``provenance_present`` (N5) and non-``none`` ``fired_drive``.
     """
     import internal_state_events as events
     import internal_state_store as store
 
+    if not provenance_present:
+        raise store.StoreError(
+            'missing decision-time provenance object; refusing wake_outcome'
+        )
+    if str(executor_action or '').strip() != 'none' and not fired_drive:
+        raise store.StoreError(
+            'missing decision-time primary_drive; refusing wake_outcome'
+        )
     if not ensure_authority_ready(db_path):
         raise store.StoreError('drive authority not ready for wake_outcome')
 
@@ -254,17 +264,27 @@ def apply_wake_outcome_best_effort(
     user_idle_hours: float,
     outcome_at: Optional[str] = None,
     db_path: Optional[str] = None,
+    provenance_present: Optional[bool] = None,
 ) -> bool:
-    """Standalone best-effort Wake drive settlement (tests / recovery).
+    """Test / recovery helper only — never wire into production gateway.
 
-    Production Wake path must settle inside ``wake.executor``'s Action
-    transaction via ``apply_wake_outcome_on_conn`` — not this helper.
-    Fail closed when non-``none`` action lacks decision-time ``fired_drive``.
+    Crown audit: no production Wake caller. Prefer retiring call sites over
+    re-elevating this path. Aligns with N5 when ``provenance_present`` is set;
+    defaults to ``fired_drive is not None`` for older test callers.
     """
+    if provenance_present is None:
+        provenance_present = fired_drive is not None
+    if not provenance_present:
+        _LOG.warning(
+            'apply_wake_outcome_best_effort skip: missing decision-time '
+            'provenance object (wake_run_id=%s action=%s)',
+            wake_run_id, executor_action,
+        )
+        return False
     if str(executor_action or '').strip() != 'none' and not fired_drive:
         _LOG.warning(
             'apply_wake_outcome_best_effort skip: missing decision-time '
-            'provenance (wake_run_id=%s action=%s)',
+            'primary_drive (wake_run_id=%s action=%s)',
             wake_run_id, executor_action,
         )
         return False
@@ -278,6 +298,7 @@ def apply_wake_outcome_best_effort(
             user_idle_hours=user_idle_hours,
             outcome_at=outcome_at,
             db_path=db_path,
+            provenance_present=True,
         )
         return getattr(result, 'status', None) in (
             'applied', 'duplicate', 'stale_skipped',
