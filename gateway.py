@@ -6571,6 +6571,71 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
         wake_provider, full_tools, mode, dry_run=dry_run,
     )
 
+    # B1-1B: freeze CapabilitySkillView after tool prepare, then non-blocking
+    # Planner Shadow dispatch. Production runner must not wait on Shadow.
+    # Only comparison-eligible live Behavior attempts that already hold V.
+    # C2: one decision_attempt_id binds Shadow + production outcome.
+    decision_attempt_id = None
+    if planner_view is not None and wake_run_id:
+        try:
+            from chat.capability_skill_view import freeze_capability_skill_view
+            from chat.planner_shadow import (
+                dispatch_planner_shadow,
+                new_decision_attempt_id,
+            )
+            decision_attempt_id = new_decision_attempt_id()
+            _skill_view = freeze_capability_skill_view(
+                wake_run_id=wake_run_id,
+                provider=wake_provider,
+                mode=mode,
+                prepared_tools=_wake_tools,
+                dry_run=dry_run,
+                ritual_type=ritual_type,
+                captured_at=now,
+            )
+            dispatch_planner_shadow(
+                planner_view=planner_view,
+                skill_view=_skill_view,
+                wake_run_id=wake_run_id,
+                decision_attempt_id=decision_attempt_id,
+                legacy_provenance=decision_provenance,
+            )
+        except Exception as _shadow_exc:
+            # Fail-open: Shadow must never become a production Gate.
+            try:
+                app.logger.warning(
+                    '[planner_shadow] dispatch skipped: %s', _shadow_exc,
+                )
+            except Exception:
+                pass
+
+    def _mark_production_attempt(
+        status: str,
+        *,
+        action: str | None = None,
+        reason: str | None = None,
+    ) -> None:
+        if not decision_attempt_id:
+            return
+        try:
+            from chat.planner_shadow import mark_production_attempt_outcome
+            mark_production_attempt_outcome(
+                wake_run_id=wake_run_id or '',
+                decision_attempt_id=decision_attempt_id,
+                status=status,
+                action=action,
+                reason=reason,
+                provider=wake_provider,
+            )
+        except Exception as _mark_exc:
+            try:
+                app.logger.warning(
+                    '[planner_shadow] production outcome mark skipped: %s',
+                    _mark_exc,
+                )
+            except Exception:
+                pass
+
     try:
         runner = _wake_runners.get_wake_runner(wake_provider)
         result = runner.run(_wake_runners.WakeRequest(
@@ -6597,6 +6662,8 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
             f'[wake] mode={mode} provider={wake_provider} '
             f'{type(e).__name__}: {e}\n{_tb.format_exc()}'
         )
+        # Failed production attempt → paired Shadow becomes orphan, not evidence.
+        _mark_production_attempt('failed', reason=str(e))
         # FALLBACK_PROVIDER=none: fail quietly — never silently switch lines.
         return jsonify({
             'error': str(e),
@@ -6610,6 +6677,10 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
         thoughts = thought_fallback(raw_text)
 
     if dry_run:
+        # No executor / Action commit — not accepted comparison evidence.
+        _mark_production_attempt(
+            'failed', action=action, reason='dry_run_no_action_commit',
+        )
         # No executor, no drive/desire/dream writes, no wake_run_id mark —
         # the same id may still be used for a real acceptance run.
         return jsonify({
@@ -6638,20 +6709,36 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
     # Sole authoritative wake_outcome mutation path: executor txn.
     # Cutover readiness is enforced inside apply_wake_outcome_on_conn
     # on the same connection (Stage D N4). Shadow must not apply_outcome.
-    _wake_exec(
-        action, thoughts, c_text, mode,
-        get_db_fn=get_db,
-        desire_driven=desire_driven,
-        surfaced_desire_ids=surfaced_desire_ids,
-        desire_ledger_enabled=_get_desire_ledger_enabled(),
-        cache_info=wake_cache_info,
-        wake_run_id=wake_run_id,
-        window_identity=_wake_window_identity,
-        settle_fired_drive=fired_drive,
-        settle_provenance_present=provenance_present,
-        settle_user_idle_hours=t2_hours,
-    )
+    # C2: success only when Action/Settlement actually commits
+    # (delivered∧settled). Soft-window gate blocks return without raise.
+    try:
+        exec_out = _wake_exec(
+            action, thoughts, c_text, mode,
+            get_db_fn=get_db,
+            desire_driven=desire_driven,
+            surfaced_desire_ids=surfaced_desire_ids,
+            desire_ledger_enabled=_get_desire_ledger_enabled(),
+            cache_info=wake_cache_info,
+            wake_run_id=wake_run_id,
+            window_identity=_wake_window_identity,
+            settle_fired_drive=fired_drive,
+            settle_provenance_present=provenance_present,
+            settle_user_idle_hours=t2_hours,
+        )
+    except Exception as _exec_exc:
+        _mark_production_attempt(
+            'failed', action=action, reason=str(_exec_exc),
+        )
+        raise
     _wake_run_id_mark(wake_run_id)
+    try:
+        from chat.planner_shadow import classify_production_outcome
+        _prod_status, _prod_reason = classify_production_outcome(exec_out)
+    except Exception:
+        _prod_status, _prod_reason = 'failed', 'classify_production_outcome_error'
+    _mark_production_attempt(
+        _prod_status, action=action, reason=_prod_reason or None,
+    )
 
     return jsonify({
         'ok': True,
