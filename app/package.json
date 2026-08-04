@@ -12,6 +12,7 @@
     "test:daily-soft-window-machine": "vite-node scripts/test-daily-soft-window-machine.mjs",
     "test:manual-context-window": "vite-node scripts/test-manual-context-window.mjs",
     "test:period-cycle": "vite-node scripts/test-period-cycle.mjs",
+    "test:model-1a-provider-switch": "vite-node scripts/test-model-1a-provider-switch.mjs",
     "test:ledger": "vite-node scripts/test-ledger-integrity.mjs",
     "test:ledger:e2e": "playwright test e2e/ledger-integrity.spec.ts e2e/dash-ledger.spec.ts"
   },

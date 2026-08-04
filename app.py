@@ -1497,26 +1497,77 @@ def _active_relay_id():
     return (config_store.get('ACTIVE_RELAY', '') or '').strip()
 
 
-def _effective_relay_model():
+def _active_relay_row():
+    """Return (id, name, default_model) for ACTIVE_RELAY, or (None, None, None)."""
     active_id = _active_relay_id()
-    if active_id:
-        try:
-            conn = get_db()
-            row = conn.execute('SELECT default_model FROM relay_presets WHERE id=?', (active_id,)).fetchone()
-            conn.close()
-            if row and (row['default_model'] or '').strip():
-                return row['default_model'].strip()
-        except Exception:
-            pass
+    if not active_id:
+        return None, None, None
+    try:
+        conn = get_db()
+        row = conn.execute(
+            'SELECT id, name, default_model FROM relay_presets WHERE id=?',
+            (active_id,),
+        ).fetchone()
+        conn.close()
+        if not row:
+            return active_id, None, None
+        return (
+            str(row['id']),
+            (row['name'] or '').strip() or None,
+            (row['default_model'] or '').strip() or None,
+        )
+    except Exception:
+        return active_id, None, None
+
+
+def _effective_relay_model():
+    """Relay-space model only. Do not use for Claude Code chat UI."""
+    _id, _name, model = _active_relay_row()
+    if model:
+        return model
     return config_store.get('MODEL') or 'unknown'
+
+
+def _chat_model_payload():
+    """MODEL-1A: chat model state keyed by resolve_provider('chat')."""
+    from chat.provider_router import resolve_provider
+    from chat.model_state import describe_chat_model_state
+    provider = resolve_provider('chat')
+    if provider == 'claude_code':
+        return describe_chat_model_state('claude_code')
+    relay_id, relay_name, relay_model = _active_relay_row()
+    if not relay_model:
+        # No active relay default: keep prior fallback for relay space only.
+        relay_model = (config_store.get('MODEL') or '').strip() or None
+    return describe_chat_model_state(
+        'api_relay',
+        relay_id=relay_id,
+        relay_name=relay_name,
+        relay_model=relay_model,
+    )
 
 
 @app.route('/api/config/model', methods=['GET'])
 def config_get_model():
-    return jsonify({'model': _effective_relay_model(), 'global_model': config_store.get('MODEL') or ''})
+    payload = _chat_model_payload()
+    # Relay clients historically also read global_model; CC must not expose it
+    # as the current chat model (configured_model stays null).
+    if payload.get('provider') == 'api_relay':
+        payload = dict(payload)
+        payload['global_model'] = config_store.get('MODEL') or ''
+    return jsonify(payload)
 
 @app.route('/api/config/model', methods=['POST'])
 def config_set_model():
+    from chat.provider_router import resolve_provider
+    from chat.model_state import (
+        ACTIVE_RELAY_NOT_FOUND,
+        reject_cc_model_switch,
+    )
+    provider = resolve_provider('chat')
+    rejected = reject_cc_model_switch(provider)
+    if rejected:
+        return jsonify(rejected), 400
     data = request.get_json()
     new_model = (data.get('model') or '').strip()
     if not new_model:
@@ -1524,26 +1575,62 @@ def config_set_model():
     try:
         active_id = _active_relay_id()
         if active_id:
+            # Fail-closed: stale ACTIVE_RELAY must never report fake success.
+            # RelayManager treats missing row as "no active relay" and falls
+            # back to .env + global MODEL — UI must not claim a switch worked.
             conn = get_db()
-            conn.execute('UPDATE relay_presets SET default_model=? WHERE id=?', (new_model, active_id))
+            cur = conn.execute(
+                'UPDATE relay_presets SET default_model=? WHERE id=?',
+                (new_model, active_id),
+            )
+            updated = cur.rowcount
             conn.commit()
             conn.close()
-            return jsonify({'ok': True, 'model': new_model, 'scope': 'active_relay'})
+            if updated < 1:
+                return jsonify({
+                    'error': ACTIVE_RELAY_NOT_FOUND,
+                    'active_relay': active_id,
+                }), 409
+            return jsonify({
+                'ok': True,
+                'provider': 'api_relay',
+                'model': new_model,
+                'configured_model': new_model,
+                'scope': 'active_relay',
+                'relay': active_id,
+            })
         config_store.set('MODEL', new_model)
-        return jsonify({'ok': True, 'model': new_model, 'scope': 'global'})
+        return jsonify({
+            'ok': True,
+            'provider': 'api_relay',
+            'model': new_model,
+            'configured_model': new_model,
+            'scope': 'global',
+        })
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/config/model-catalog', methods=['GET'])
 def config_model_catalog():
-    """策展过的模型清单（models.json）+ 当前生效模型。
-    id 是 relay 的真实模型名；thinking 字段（extended/none）决定 gateway 是否传 thinking 参数。"""
+    """策展过的模型清单（models.json）+ 当前 chat-provider 模型状态。
+    id 是 relay 的真实模型名；thinking 字段（extended/none）决定 gateway 是否传 thinking 参数。
+    Claude Code 下 current/configured_model 不为 relay/global MODEL。"""
     try:
         with open('/opt/frontend/models.json') as f:
             catalog = json.load(f)
     except Exception:
         catalog = []
-    return jsonify({'models': catalog, 'current': _effective_relay_model() or ''})
+    state = _chat_model_payload()
+    current = state.get('configured_model') or ''
+    return jsonify({
+        'models': catalog,
+        'current': current,
+        'provider': state.get('provider'),
+        'model_mode': state.get('model_mode'),
+        'configured_model': state.get('configured_model'),
+        'relay': state.get('relay'),
+        'relay_name': state.get('relay_name'),
+    })
 
 @app.route('/api/config/key-status', methods=['GET'])
 def config_key_status():
@@ -1766,9 +1853,15 @@ def _env_set(key, value):
         lines.append(key + '=' + value)
     open(path, 'w').write('\n'.join(lines) + '\n')
 
-@app.route('/api/config/provider', methods=['GET'])
-def config_get_provider():
-    provider = config_store.get('GW_PROVIDER', 'api_relay')
+def _provider_payload(gw_provider=None):
+    """GW config + effective chat provider (resolve_provider('chat')).
+
+    MODEL-1A: UI model space must follow effective_chat_provider, not the
+    bare GW_PROVIDER write value (CHAT_PROVIDER may still win).
+    """
+    from chat.provider_router import resolve_provider
+    gw = (gw_provider if gw_provider is not None else config_store.get('GW_PROVIDER', 'api_relay')) or 'api_relay'
+    gw = str(gw).strip() or 'api_relay'
     has_token = False
     try:
         for line in open('/opt/frontend/.env'):
@@ -1776,7 +1869,16 @@ def config_get_provider():
                 has_token = bool(line.split('=', 1)[1].strip())
     except Exception:
         pass
-    return jsonify({'provider': provider, 'cc_token_set': has_token})
+    return {
+        'provider': gw,
+        'effective_chat_provider': resolve_provider('chat'),
+        'cc_token_set': has_token,
+    }
+
+
+@app.route('/api/config/provider', methods=['GET'])
+def config_get_provider():
+    return jsonify(_provider_payload())
 
 @app.route('/api/config/provider', methods=['POST'])
 def config_set_provider():
@@ -1786,7 +1888,9 @@ def config_set_provider():
         return jsonify({'error': 'provider must be api_relay or claude_code'}), 400
     try:
         config_store.set('GW_PROVIDER', provider)
-        return jsonify({'ok': True, 'provider': provider})
+        payload = _provider_payload(gw_provider=provider)
+        payload['ok'] = True
+        return jsonify(payload)
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
@@ -2653,6 +2757,15 @@ app.register_blueprint(create_relay_account_blueprint(
 
 @app.route('/api/config/relay-presets/<int:preset_id>', methods=['DELETE'])
 def delete_relay_preset(preset_id):
+    from chat.model_state import ACTIVE_RELAY_DELETE_NOT_ALLOWED
+    # Server-side guard: never leave a dangling ACTIVE_RELAY pointing at a
+    # deleted row (legacy api-test.html can delete without UI protection).
+    active_id = _active_relay_id()
+    if active_id and str(preset_id) == str(active_id):
+        return jsonify({
+            'error': ACTIVE_RELAY_DELETE_NOT_ALLOWED,
+            'active_relay': active_id,
+        }), 409
     _init_relay_account_credentials_table()
     conn = get_db()
     conn.execute('DELETE FROM relay_account_credentials WHERE preset_id=?', (preset_id,))

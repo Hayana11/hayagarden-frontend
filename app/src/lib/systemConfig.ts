@@ -3,8 +3,47 @@ import { http } from './http';
 export type ChatProvider = 'api_relay' | 'claude_code';
 
 export interface ProviderConfig {
+  /** GW_PROVIDER config value (what /api/config/provider writes). */
   provider: ChatProvider;
+  /** resolve_provider('chat') — authoritative for chat model space. */
+  effectiveChatProvider: ChatProvider;
   ccTokenSet: boolean;
+}
+
+function asChatProvider(value: unknown): ChatProvider {
+  return value === 'claude_code' ? 'claude_code' : 'api_relay';
+}
+
+function normalizeProviderConfig(data: {
+  provider?: string;
+  effective_chat_provider?: string;
+  cc_token_set?: boolean;
+}): ProviderConfig {
+  const provider = asChatProvider(data.provider);
+  // Fall back to GW only when server omitted the field (old builds).
+  const effectiveChatProvider = data.effective_chat_provider === undefined
+    ? provider
+    : asChatProvider(data.effective_chat_provider);
+  return {
+    provider,
+    effectiveChatProvider,
+    ccTokenSet: Boolean(data.cc_token_set),
+  };
+}
+
+/** Immediate chat-model UI space for an effective chat provider (MODEL-1A).
+ * Pass resolve_provider('chat') / effective_chat_provider — never the raw POST body. */
+export function chatModelSpaceAfterProviderWrite(
+  effectiveChatProvider: ChatProvider,
+  opts?: { relayModel?: string | null },
+): { chatModelProvider: ChatProvider; currentModel: string } {
+  if (effectiveChatProvider === 'claude_code') {
+    return { chatModelProvider: 'claude_code', currentModel: '' };
+  }
+  return {
+    chatModelProvider: 'api_relay',
+    currentModel: String(opts?.relayModel || '').trim(),
+  };
 }
 
 export interface KeyStatus {
@@ -144,15 +183,22 @@ export interface PlaygroundResult {
 }
 
 export async function getProviderConfig(): Promise<ProviderConfig> {
-  const data = await http.get<{ provider?: string; cc_token_set?: boolean }>('/api/config/provider');
-  return {
-    provider: data.provider === 'claude_code' ? 'claude_code' : 'api_relay',
-    ccTokenSet: Boolean(data.cc_token_set),
-  };
+  const data = await http.get<{
+    provider?: string;
+    effective_chat_provider?: string;
+    cc_token_set?: boolean;
+  }>('/api/config/provider');
+  return normalizeProviderConfig(data);
 }
 
-export async function updateProvider(provider: ChatProvider): Promise<void> {
-  await http.post('/api/config/provider', { provider });
+export async function updateProvider(provider: ChatProvider): Promise<ProviderConfig> {
+  const data = await http.post<{
+    ok?: boolean;
+    provider?: string;
+    effective_chat_provider?: string;
+    cc_token_set?: boolean;
+  }>('/api/config/provider', { provider });
+  return normalizeProviderConfig(data);
 }
 
 export async function getKeyStatus(): Promise<KeyStatus> {
@@ -309,7 +355,15 @@ export async function removeRelayEndpoint(id: number): Promise<void> {
   await http.del(`/api/config/relay-presets/${id}`);
 }
 
-export async function getModelCatalog(): Promise<{ models: ConfigModel[]; current: string }> {
+export interface ChatModelState {
+  models: ConfigModel[];
+  current: string;
+  provider: ChatProvider | '';
+  modelMode: 'default' | '';
+  configuredModel: string | null;
+}
+
+export async function getModelCatalog(): Promise<ChatModelState> {
   const data = await http.get<{
     models?: Array<{
       id?: string;
@@ -319,11 +373,27 @@ export async function getModelCatalog(): Promise<{ models: ConfigModel[]; curren
       primary?: boolean;
       dot?: string;
     }>;
-    current?: string;
+    current?: string | null;
+    provider?: string;
+    model_mode?: string;
+    configured_model?: string | null;
   }>('/api/config/model-catalog');
 
+  const provider: ChatProvider | '' =
+    data.provider === 'claude_code' || data.provider === 'api_relay'
+      ? data.provider
+      : '';
+  const modelMode: 'default' | '' = data.model_mode === 'default' ? 'default' : '';
+  const configured =
+    data.configured_model === null || data.configured_model === undefined
+      ? null
+      : String(data.configured_model);
+
   return {
-    current: data.current || '',
+    provider,
+    modelMode,
+    configuredModel: provider === 'claude_code' ? null : configured,
+    current: provider === 'claude_code' ? '' : (data.current || configured || ''),
     models: (data.models || []).flatMap((model) => {
       const id = model.id?.trim();
       if (!id) return [];
