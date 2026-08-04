@@ -1,10 +1,10 @@
 import os, re, sqlite3, json, base64, mimetypes, datetime, threading, time, sys as _sys, random, shutil, hmac
-if '/opt/frontend' not in _sys.path:
-    _sys.path.insert(0, '/opt/frontend')
+# Repo root must outrank tools/: tools/internal_state_shadow.py is a CLI stub and
+# must never shadow the authoritative root internal_state_shadow module (Stage C).
 if '/opt/frontend' not in _sys.path:
     _sys.path.insert(0, '/opt/frontend')
 if '/opt/frontend/tools' not in _sys.path:
-    _sys.path.insert(0, '/opt/frontend/tools')
+    _sys.path.append('/opt/frontend/tools')
 from flask import Flask, request, jsonify
 import urllib.request, urllib.error, urllib.parse
 from codebase.client import CODEBASE_TOOLS, CODEBASE_READ_TOOLS, run_codebase_tool
@@ -295,8 +295,9 @@ def _recall_memories(user_msg, limit=None):
         vec_scores = {}
         try:
             import sys as _sys
+            # append only — never insert(0): would shadow root internal_state_shadow
             if '/opt/frontend/tools' not in _sys.path:
-                _sys.path.insert(0, '/opt/frontend/tools')
+                _sys.path.append('/opt/frontend/tools')
             import embedding_tool as _emb
             vec_scores = dict(_emb.similar_posts(user_msg, top_k=8))
         except Exception:
