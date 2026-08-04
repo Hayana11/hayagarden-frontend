@@ -351,15 +351,20 @@ async function setProvider(p) {
     body: JSON.stringify({provider: p})
   });
   if (!r.ok) { toast('切换失败'); return; }
-  // Provider write succeeded — sync model-space vars immediately (MODEL-1A).
-  // loadModel() is supplemental; its failure must not leave chatProvider stale.
+  // Provider write succeeded — sync model-space vars + visible label immediately
+  // (MODEL-1A). loadModel() is supplemental; its failure must never leave the
+  // previous provider's model label on screen.
   curProvider = p;
   chatProvider = p;
+  currentModel = '';
+  document.getElementById('model-inp').value = '';
+  cancelModelEdit();
   if (p === 'claude_code') {
-    currentModel = '';
     document.getElementById('cur-model-name').textContent = 'Claude Code · 默认';
-    document.getElementById('model-inp').value = '';
-    cancelModelEdit();
+  } else {
+    // Clear CC residual label before refresh; unknown until loadModel succeeds.
+    document.getElementById('cur-model-name').textContent = '读取中…';
+    renderPresetModels();
   }
   renderProvider();
   applyModelUiMode();
@@ -367,9 +372,7 @@ async function setProvider(p) {
   try {
     await loadModel();
   } catch (e) { refreshFailed = true; }
-  try {
-    await loadModels();
-  } catch (e) { refreshFailed = true; }
+  if (!(await loadModels())) refreshFailed = true;
   toast(refreshFailed
     ? ('已切换到' + (p === 'claude_code' ? '订阅模式' : '中转 API') + '，部分状态刷新失败')
     : ('已切换到' + (p === 'claude_code' ? '订阅模式' : '中转 API') + '，网关重启中'));
@@ -642,11 +645,12 @@ async function switchModel(modelId) {
 }
 
 // ── Dynamic Models ────────────────────────────────────
+/** @returns {Promise<boolean>} true on success; false on fetch/parse/empty failure */
 async function loadModels() {
   var el = document.getElementById('models-list');
   if (isClaudeCodeProvider()) {
     applyModelUiMode();
-    return;
+    return true;
   }
   el.innerHTML = '<div style="color:var(--hint);font-size:12px;text-align:center;padding:8px 0;">加载中…</div>';
   try {
@@ -659,15 +663,17 @@ async function loadModels() {
       el.innerHTML = '<div style="color:var(--hint);font-size:12px;padding:8px 0;">' + escH(_hint) + '</div>';
       currentModels = [];
       renderPresetModels();
-      return;
+      return false;
     }
     currentModels = d.models;
     renderDynModels();
     renderPresetModels();
+    return true;
   } catch(e) {
     el.innerHTML = '<div style="color:#c07070;font-size:12px;">获取失败: ' + escH(e.message) + '</div>';
     currentModels = [];
     renderPresetModels();
+    return false;
   }
 }
 
