@@ -350,13 +350,29 @@ async function setProvider(p) {
     method: 'POST', headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({provider: p})
   });
-  if (r.ok) {
-    curProvider = p;
-    renderProvider();
-    toast('已切换到' + (p === 'claude_code' ? '订阅模式' : '中转 API') + '，网关重启中');
+  if (!r.ok) { toast('切换失败'); return; }
+  // Provider write succeeded — sync model-space vars immediately (MODEL-1A).
+  // loadModel() is supplemental; its failure must not leave chatProvider stale.
+  curProvider = p;
+  chatProvider = p;
+  if (p === 'claude_code') {
+    currentModel = '';
+    document.getElementById('cur-model-name').textContent = 'Claude Code · 默认';
+    document.getElementById('model-inp').value = '';
+    cancelModelEdit();
+  }
+  renderProvider();
+  applyModelUiMode();
+  var refreshFailed = false;
+  try {
     await loadModel();
-    loadModels();
-  } else { toast('切换失败'); }
+  } catch (e) { refreshFailed = true; }
+  try {
+    await loadModels();
+  } catch (e) { refreshFailed = true; }
+  toast(refreshFailed
+    ? ('已切换到' + (p === 'claude_code' ? '订阅模式' : '中转 API') + '，部分状态刷新失败')
+    : ('已切换到' + (p === 'claude_code' ? '订阅模式' : '中转 API') + '，网关重启中'));
 }
 function openTokenMo() { document.getElementById('token-mo').classList.add('show'); document.getElementById('token-inp').value = ''; }
 function closeTokenMo() { document.getElementById('token-mo').classList.remove('show'); }

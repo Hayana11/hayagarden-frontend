@@ -7,6 +7,21 @@ export interface ProviderConfig {
   ccTokenSet: boolean;
 }
 
+/** Immediate chat-model UI space after a successful provider write (MODEL-1A).
+ * Catalog/list refreshes must not gate this transition. */
+export function chatModelSpaceAfterProviderWrite(
+  provider: ChatProvider,
+  opts?: { relayModel?: string | null },
+): { chatModelProvider: ChatProvider; currentModel: string } {
+  if (provider === 'claude_code') {
+    return { chatModelProvider: 'claude_code', currentModel: '' };
+  }
+  return {
+    chatModelProvider: 'api_relay',
+    currentModel: String(opts?.relayModel || '').trim(),
+  };
+}
+
 export interface KeyStatus {
   maskedKey: string;
   source: string;

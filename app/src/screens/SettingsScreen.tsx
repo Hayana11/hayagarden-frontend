@@ -4,6 +4,7 @@ import { HttpError } from '../lib/http';
 import { getGroupStatus, type AgentStatus } from '../lib/groupChat';
 import {
   activateRelayEndpoint,
+  chatModelSpaceAfterProviderWrite,
   clearRelayAccountCredentials,
   createRelayEndpoint,
   getAvailableModels,
@@ -201,35 +202,76 @@ export function SettingsScreen() {
     setBusy('provider');
     try {
       await updateProvider('claude_code');
-      setProvider('claude_code');
-      // MODEL-1A: chat model UI follows resolve_provider('chat'), not relay.
+    } catch {
+      showToast('切换失败');
+      setBusy('');
+      return;
+    }
+    // Provider write succeeded — enter CC model space immediately (MODEL-1A).
+    // Catalog refresh is supplemental and must not roll back this space.
+    const local = chatModelSpaceAfterProviderWrite('claude_code');
+    setProvider('claude_code');
+    setChatModelProvider(local.chatModelProvider);
+    setCurrentModel(local.currentModel);
+    let refreshFailed = false;
+    try {
       const catalog = await getModelCatalog();
-      setChatModelProvider(catalog.provider);
+      if (catalog.provider === 'claude_code' || catalog.provider === 'api_relay') {
+        setChatModelProvider(catalog.provider);
+      }
       setCurrentModel(catalog.provider === 'claude_code' ? '' : catalog.current);
-      showToast('已切换：Claude Code 订阅');
-    } catch { showToast('切换失败'); } finally { setBusy(''); }
+    } catch {
+      refreshFailed = true;
+    }
+    showToast(refreshFailed
+      ? '已切换到 Claude Code，部分状态刷新失败'
+      : '已切换：Claude Code 订阅');
+    setBusy('');
   };
 
   const switchRelay = async (relay: RelayEndpoint) => {
     setBusy(`relay:${relay.id}`);
+    let result: { model: string };
     try {
-      const result = await activateRelayEndpoint(relay.id);
+      result = await activateRelayEndpoint(relay.id);
       await updateProvider('api_relay');
-      setProvider('api_relay');
+    } catch {
+      showToast('中转站切换失败');
+      setBusy('');
+      return;
+    }
+    // Provider write succeeded — enter relay model space immediately (MODEL-1A).
+    const local = chatModelSpaceAfterProviderWrite('api_relay', { relayModel: result.model });
+    setProvider('api_relay');
+    setChatModelProvider(local.chatModelProvider);
+    setCurrentModel(local.currentModel);
+    let refreshFailed = false;
+    try {
       setRelays(await getRelayEndpoints());
+    } catch { refreshFailed = true; }
+    try {
       const catalog = await getModelCatalog();
-      setChatModelProvider(catalog.provider);
+      if (catalog.provider === 'claude_code' || catalog.provider === 'api_relay') {
+        setChatModelProvider(catalog.provider);
+      }
       setCurrentModel(
         catalog.provider === 'claude_code'
           ? ''
           : (catalog.current || result.model || ''),
       );
+    } catch { refreshFailed = true; }
+    try {
       const keyCheck = await getKeyStatusWithHostRtt();
       setKeyStatus(keyCheck.status);
       setHostRtt(keyCheck.hostRttMs);
-      setAvailableModels(await getAvailableModels().catch(() => []));
-      showToast(`已切换：${relay.name}`);
-    } catch { showToast('中转站切换失败'); } finally { setBusy(''); }
+    } catch { refreshFailed = true; }
+    try {
+      setAvailableModels(await getAvailableModels());
+    } catch { refreshFailed = true; }
+    showToast(refreshFailed
+      ? `已切换到 ${relay.name}，部分状态刷新失败`
+      : `已切换：${relay.name}`);
+    setBusy('');
   };
 
   const switchModel = async (model: ConfigModel) => {
