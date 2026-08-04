@@ -24,14 +24,16 @@ Verified by static call-chain reading on `main` (files/functions below). Schedul
    - wake.wake_run_id.missing_live_wake_run_id  (live settlement modes require run id)
    - _wake_run_id_seen                           (dedup)
    - chat.interaction_state.read_interaction_clock + wake_guard_reason
+     → TODAY this early clock is both GuardClock (eligibility) AND reused as
+       model-visible t2_hours / t_hours / Longing override — see §3.1 GuardClock vs DecisionClock
    - wake.runners.select_wake_provider
    - chat.window_identity.capture_current_window_identity  (soft-window freeze)
-   - t2_hours / t_hours from authoritative clock (fail closed → 0.0; never invent 999h)
+   - t2_hours / t_hours from that early clock (fail closed → 0.0; never invent 999h)
 
 4. Context / prompt collection
    - gateway.py::_wake_build_system_for_plan
      → chat.system_builder.build_system(wake=True, …)   # Wake context; Chat BP3 state inject retired
-     → wake.builder.build_prompt_suffix
+     → wake.builder.build_prompt_suffix                 # TODAY writes GuardClock-derived t_hours/t2_hours into prompt
      → wake.builder.inject_snippets                       # Decision-time freeze lives here
 
 5. Authoritative V3 state snapshot (Drive materialization) — TODAY
@@ -46,8 +48,9 @@ Verified by static call-chain reading on `main` (files/functions below). Schedul
              (uses derived Longing boost + Bond passion boost)
    - Snapshot values are carried on decide()['drive']
    - NOTE: current get_drive / read_derived_longing may sample an independent clock
-     inside the Drive path; gateway already holds an earlier clock. This is why
-     §3.1 freezes a single causal epoch for B1-1 rather than “reuse decide() as-is”.
+     inside the Drive path; gateway already holds an earlier GuardClock; Longing fact
+     also uses t_hours_override=t2_hours from that GuardClock. This is why §3.1 freezes
+     one SQLite Decision-time snapshot + DecisionClock binding for B1-1.
 
 6. Legacy Decision
    - drive_engine.decide()
@@ -182,47 +185,97 @@ B1 freezes the two Decision-time input views below. It does **not** build a new 
 
 B1-1 **must** form an immutable `PlannerStateView` before Planner Shadow runs.
 
-Schema alone is insufficient. The **causal order** is hard contract:
+Schema alone is insufficient. The **causal order** and **SQLite snapshot semantics** are hard contract:
 
 ```text
 freeze observed_at T once
 ↓
-open one authoritative read epoch
+open one authoritative SQLite read epoch
+  = one connection
+  + one read transaction / snapshot
 ↓
-read:
-  V3 row S
+from that same snapshot, read:
+  V3 row S          (e.g. store.read_state(conn))
   interaction clock C at T
+                    (e.g. read_interaction_clock_from_conn(conn, now=T))
 ↓
 derive Longing L from C
 materialize Bond / Drives from S at T using L
 ↓
-freeze PlannerStateView V
+freeze PlannerStateView V  (DecisionClock C is bound inside V)
 ↓
 legacy Decision MUST consume V.drives
   (no get_drive / no second V3 read / no second clock)
 ↓
 freeze legacy provenance P
+↓
+all model-visible state/clock-derived production prompt facts
+MUST render from the same frozen V / C bundle
 ```
 
-Hard contract sentence:
+Hard contract sentences:
 
 ```text
+Authoritative Decision-time read epoch MUST be one SQLite
+snapshot on one connection / read transaction.
+
+V3 row S and interaction clock C must be read from that
+same snapshot. Same observed_at alone is insufficient.
+
 Legacy production Decision MUST consume the exact Drives
 contained in the frozen PlannerStateView.
 It may not obtain its Decision inputs through a second getter/read.
+
+All model-visible internal-state / interaction-clock-derived
+facts used by the production comparison baseline MUST be
+rendered from the same frozen Decision-time bundle V/C.
+
+A pre-gate GuardClock may decide wake eligibility,
+but it MUST NOT be reused as Decision/prompt state.
 ```
 
-Concrete API shape (`decide_from_snapshot()`, parameters on `decide()`, pure helper split, etc.) is deferred to B1-1. The causal order is **not** deferred.
+Concrete API shape (`decide_from_snapshot()`, `BEGIN` vs existing helpers, parameters on `decide()`, pure helper split, etc.) is deferred to B1-1. The causal order and **transaction / snapshot semantics** are **not** deferred.
+
+#### GuardClock vs DecisionClock (hard)
+
+```text
+GuardClock
+  → may be read earlier (today: wake_guard_reason path)
+  → only answers: may this Wake attempt proceed?
+  → MUST NOT supply model-visible t_hours / t2_hours
+  → MUST NOT supply Longing fact / other state-derived Wake prompt facts
+  → MUST NOT supply PlannerStateView / legacy Decision inputs
+
+DecisionClock C
+  → read inside the same SQLite snapshot as V3 row S
+  → sole clock allowed into:
+       PlannerStateView
+       legacy Decision inputs
+       model-visible t2_hours / t_hours
+       Longing fact (including get_longing_wake_fact override)
+       other state-derived Wake prompt facts
+       recall_photo nudge attachment (via V; §10.B)
+```
+
+Today's pollution pattern to eliminate in B1-1 plumbing (docs freeze only here):
+
+```text
+Guard / old prompt clock = C0
+atomic Planner epoch later = S1 + C1 → V1
+production prompt still uses C0 for t_hours / t2_hours / Longing fact
+→ Planner(C1) vs Legacy model(C0 + C1) — comparison invalid
+```
 
 Additional hard invariants:
 
 1. Affect / Bond / Eight Drives base state **must** share the same `state_version` from row `S`.
 2. All time-materialized values in the view **must** use the same `observed_at` `T`.
-3. Derived Longing and the authoritative interaction clock **must** be the `L` / `C` bound into `V` — not a later re-sample (including not the independent clock currently sampled inside `read_derived_longing` / `_longing_for_boost` after a separate gateway clock).
-4. After freeze, `V` is carried whole to the Shadow execution seat.
+3. Derived Longing and the authoritative interaction clock **must** be the `L` / `C` bound into `V` — not GuardClock, not a later re-sample, and not the independent clock currently sampled inside `read_derived_longing` / `_longing_for_boost`.
+4. After freeze, `V` (including DecisionClock) is carried whole to the Shadow execution seat **and** used to render production comparison-baseline prompt facts that depend on state/clock.
 5. After state-epoch freeze: **no** separate re-read of Drive / Affect / Bond / Longing for Planner or for legacy Decision inputs.
 6. Post-freeze multi-hop reads that create state-epoch drift are forbidden.
-7. `decision['drive']` / legacy provenance may equal `V.drives` as same-epoch evidence only when they were produced by consuming `V`; they must not authorize a second `decide()` / `get_drive()`.
+7. Separate SQLite connections / commits between reading `S` and `C` are forbidden for the Decision-time epoch (even if both stamp the same `observed_at`).
+8. `decision['drive']` / legacy provenance may equal `V.drives` as same-epoch evidence only when they were produced by consuming `V`; they must not authorize a second `decide()` / `get_drive()`.
 
 Frozen schema (semantics; concrete Python type deferred to B1-1):
 
@@ -345,8 +398,9 @@ Also forbidden for this view in B1:
 B1-0 freezes schema only. No runtime writer.
 
 ```text
-planner_decision_id     # unique id for this Shadow Decision observation
+planner_decision_id     # unique id for this Shadow Decision observation (per attempt)
 wake_run_id             # same Wake identity as production run (when present)
+decision_attempt_id     # identity of this Decision attempt (may equal planner_decision_id)
 captured_at             # Decision-time wall clock (Beijing string or equivalent existing convention)
 state_version           # V3 state_version observed at Decision-time (from PlannerStateView)
 
@@ -368,6 +422,7 @@ shadow_only = true
 
 | Field | Meaning |
 |---|---|
+| `planner_decision_id` / `decision_attempt_id` | Identifies **one Decision attempt**, not merely `wake_run_id`. Same `wake_run_id` may have multiple attempts before Action commit; pairing is per attempt (§6.1). |
 | `intent` | Goal-level desire (“reconnect”, “rest”, “survey environment”). **Not** `message`/`explore` buttons. |
 | `action_candidate` | Planner suggestion among **resolved** action capability for this run (§3.2), or explicit `none`. **Must still pass a future Action Gate before any production effect.** |
 | `primary_drive` | Primary deficit/motive inferred at Decision-time from allowed state. **Never** from final Action / assistant text. |
@@ -463,7 +518,61 @@ Production executes **legacy path only**.
 4. Shadow must not execute Shadow Action or apply Shadow Settlement.
 5. Shadow must not become a second V3 mutation entry (same class of bug Stage D closed for wake_outcome shadow).
 6. Shadow consumes only carried `PlannerStateView` + freeze-after-resolve `CapabilitySkillView` (plus legacy provenance evidence). Post-freeze V3 reread / second `decide()` is forbidden.
-7. Shadow comparison evidence is invalid while production baseline still uses a post-freeze internal-state reread to shape the model prompt (§10.B).
+7. Shadow comparison evidence is invalid while production baseline still uses a post-freeze internal-state reread (§10.B) or GuardClock-derived prompt facts (§3.1) instead of frozen `V/C`.
+
+### 6.1 Shadow Isolation Contract (hard — fail-open)
+
+Planner Shadow sits before `runner.run`, but it must remain observational. Fail-open semantics are **not** deferred:
+
+```text
+Planner Shadow failure / timeout / parse failure
+/ observation persistence failure
+→ MUST NOT block or alter production Wake.
+
+Production runner receives the same:
+  system
+  messages
+  tools
+  provider/runtime state
+as if Shadow were disabled.
+
+Shadow may not execute Wake tools or external effects.
+
+If model-backed:
+  Shadow must not mutate/reuse production runner conversational
+  or resident state (including Claude Code Wake resident session).
+
+Shadow execution must have a bounded budget;
+budget exhaustion → drop Shadow sample, continue production.
+```
+
+Exact timeout/budget numbers may be chosen in B1-1. **Fail-open vs fail-closed for Shadow is not choosable** — Shadow is fail-open; production continues.
+
+### 6.2 Observation pairing / orphan semantics (hard)
+
+`wake_run_id` alone is insufficient for comparison identity. The same `wake_run_id` may retry before Action commit:
+
+```text
+wake_run_id = X
+attempt 1 → Shadow D1 persisted → production model/executor failure
+attempt 2 → Shadow D2 persisted → production Action A2 commits
+```
+
+Hard contract:
+
+```text
+Shadow observation identity is per Decision attempt,
+not merely per wake_run_id.
+
+Every accepted comparison sample must unambiguously pair
+one frozen Shadow Decision with the production attempt/outcome
+from that same attempt.
+
+Orphan Shadow attempts after failed production runs
+must not be treated as comparison evidence.
+```
+
+`planner_decision_id` (and/or `decision_attempt_id`) satisfies attempt identity. Storage medium and whether observation is written only after production success are deferred to B1-1; pairing / orphan semantics are not.
 
 ---
 
@@ -471,21 +580,23 @@ Production executes **legacy path only**.
 
 When human-approved **and** §10.B prerequisite is satisfied, B1-1 may:
 
-1. Implement the §3.1 causal freeze order: one `observed_at` / one V3 row / one clock → Longing → materialize → freeze `PlannerStateView V`.
+1. Open one SQLite connection / read transaction snapshot; read `S` + DecisionClock `C` from that snapshot at `observed_at T`; derive `L`; materialize; freeze `PlannerStateView V` (§3.1).
 2. Make legacy production Decision consume **exact** `V.drives` (no second `get_drive` / V3 read / clock for Decision inputs). API naming deferred.
-3. Carry frozen `PlannerStateView` (+ legacy provenance) to the execution seat after tool prepare.
-4. After `prepare_tools_for_provider(...)`, freeze `CapabilitySkillView` from actual resolved provider/tool/mode/executor facts (§3.2).
-5. Run Planner Shadow on those frozen views only (no post-freeze V3 re-read; no second `decide()`).
-6. Emit a structured Shadow Decision matching §4.
-7. Persist a **Shadow observation** sufficient for human comparison (non-authoritative medium chosen in B1-1; must not be Canonical Event authority).
-8. Leave production Decision semantics / Action Gate / Settlement authority unchanged except the minimal same-snapshot plumbing required by §3.1 and the §10.B prerequisite cleanup.
-9. Keep `shadow_only=true`.
+3. Bind all model-visible state/clock-derived production prompt facts (`t_hours` / `t2_hours`, Longing fact, snapshot-bound recall_photo nudge, other state-derived Wake prompt facts) to frozen `V/C`. GuardClock remains eligibility-only.
+4. Carry frozen `PlannerStateView` (+ legacy provenance) to the execution seat after tool prepare.
+5. After `prepare_tools_for_provider(...)`, freeze `CapabilitySkillView` from actual resolved provider/tool/mode/executor facts (§3.2).
+6. Run Planner Shadow under §6.1 fail-open isolation on those frozen views only (no post-freeze V3 re-read; no second `decide()`; no production block on Shadow failure).
+7. Emit a structured Shadow Decision matching §4 with per-attempt identity (§6.2).
+8. Persist a **Shadow observation** sufficient for human comparison under §6.2 pairing rules (non-authoritative medium chosen in B1-1; must not be Canonical Event authority).
+9. Leave production Decision semantics / Action Gate / Settlement authority unchanged except the minimal same-snapshot + DecisionClock-binding plumbing required by §3.1 / §6 and the §10.B prerequisite cleanup.
+10. Keep `shadow_only=true`.
 
 Deferred to B1-1 implementation choice only (not open design for “whether”):
 
 - concrete Python form (`dataclass` / `TypedDict` / plain `dict`, etc.)
 - non-authoritative Shadow observation persistence medium
-- exact function names for “decide from snapshot”
+- exact function names for “decide from snapshot” / read-txn helper
+- numeric Shadow timeout / budget values (fail-open semantics already frozen)
 
 ---
 
@@ -496,11 +607,16 @@ Deferred to B1-1 implementation choice only (not open design for “whether”):
 - New Internal State (Track A) fields or engines
 - Track C Chat Exposure rollout
 - New memory layer / Topic Identity / Semantic Match
-- Prompt redesign for production Decision beyond the minimal §10.B snapshot-bind of recall_photo nudge
-- Changing Wake probability / scheduler
+- Prompt redesign for production Decision beyond: §10.B snapshot-bind of recall_photo nudge, and binding model-visible state/clock-derived facts to DecisionClock `V/C` (§3.1)
+- Changing Wake probability / scheduler / GuardClock eligibility policy (beyond not reusing GuardClock as Decision/prompt state)
 - Shadow Action execution or Shadow Settlement
+- Shadow fail-closed behavior that blocks `runner.run` / alters production inputs on Shadow error/timeout/persistence failure
+- Shadow mutating or reusing production runner conversational / resident state
+- Shadow executing Wake tools or external effects
+- Treating `wake_run_id`-only pairs (including orphan Shadow attempts) as accepted comparison evidence
 - Post-freeze re-read of Drive / Affect / Bond / Longing / clock / `state_version` for Planner or for legacy Decision inputs
 - Shadow re-calling `drive_engine.decide()` / `get_drive()` for its inputs
+- Reading V3 row `S` and DecisionClock `C` from different SQLite snapshots / connections / commits for the Decision-time epoch
 - Freezing `CapabilitySkillView` before actual `_wake_tools` prepare
 - Treating parser enum alone as resolved action capability
 - New Skill ontology / capability registry / DB / service / endpoint / tool system for CapabilitySkillView
@@ -526,7 +642,11 @@ Is provenance truly Decision-time (frozen before Action), never Action-posterior
 
 Do not require exhaustive edge coverage.
 
-Shadow vs legacy Action comparison is only valid after §10.B prerequisite (no production post-freeze state reread shaping the baseline prompt).
+Shadow vs legacy Action comparison is only valid when:
+
+- §10.B prerequisite holds (no production post-freeze state reread shaping the baseline prompt)
+- production model-visible state/clock-derived facts bind to DecisionClock `V/C` (§3.1), not GuardClock
+- comparison samples obey per-attempt pairing / orphan rules (§6.2)
 
 ---
 
@@ -535,9 +655,13 @@ Shadow vs legacy Action comparison is only valid after §10.B prerequisite (no p
 ### Already frozen (not open design)
 
 - **PlannerStateView causal order** — §3.1; legacy Decision must consume `V.drives`.
+- **One SQLite Decision-time snapshot** — same connection / read transaction for `S` and `C`; same `observed_at` alone is insufficient — §3.1.
+- **GuardClock vs DecisionClock** — GuardClock eligibility-only; all model-visible state/clock-derived baseline facts from frozen `V/C` — §3.1.
 - **CapabilitySkillView in B1** — freeze after `prepare_tools_for_provider`; resolved action capability intersection — §3.2.
 - **N5** — missing provenance object fail-closed for every settlement, including `Action=none` — §5.
 - **Execution seat** — after tool prepare, before `runner.run` — §2.
+- **Shadow Isolation** — fail-open; no production block; no tool/external effects; no resident-state reuse; bounded budget — §6.1.
+- **Per-attempt observation pairing** — not `wake_run_id`-only; orphans are not comparison evidence — §6.2.
 
 ### 10.B B1-1 BLOCKING PREREQUISITE (production post-freeze reread)
 
@@ -580,7 +704,7 @@ Until that prerequisite is done, Shadow vs legacy Action comparisons are baselin
 
 1. **Legacy `WANT_ACTION` fixed mapping** already shapes production Decision + prompt hint (“倾向于 X 行为”). Shadow vs legacy disagreement is informative; copying `WANT_ACTION` into Planner would fail Q2.
 2. **Live path pre-snapshot side effects** (`drive_engine._flush` no-op, `desire.calibrate_va`) run before `_wake_build_system_for_plan`. Confirm in B1-1 they do not mutate V3 authority (Stage D: flush is retired no-op; calibrate must remain non-authoritative).
-3. **B1-1 deferred only:** concrete Python packaging of the two views; non-authoritative Shadow observation persistence medium; exact snapshot-consume API names.
+3. **B1-1 deferred only:** concrete Python packaging of the two views; non-authoritative Shadow observation persistence medium; exact snapshot-consume / read-txn API names; numeric Shadow timeout/budget; whether observation persists only after production success.
 4. **Prerequisite grant evidence:** before starting B1-1, cite the human `👑 STATE AUTHORITY COMPLETE` grant; do not treat crown-cleanup merge metadata alone as that grant.
 
 ---
@@ -591,9 +715,9 @@ A credible execution seat exists:
 
 > after provider/tool resolve and before model Action, with room to carry a prior authoritative state freeze.
 
-Causal same-snapshot plumbing and the recall_photo post-freeze reread are **contract blockers for B1-1 validity**, not reasons to invent a second Shadow seat or to start Planner runtime in this PR.
+B1-1 validity still depends on implementing the frozen contracts (one SQLite Decision snapshot, DecisionClock-bound production prompt facts, Shadow fail-open isolation + per-attempt pairing) and the §10.B recall_photo prerequisite. Those are **not** reasons to invent a second Shadow seat or to start Planner runtime in this PR.
 
-**B1-0 remains docs-only.** This revision locks the four contract blockers; it does not authorize B1-1 start or merge.
+**B1-0 remains docs-only.** This revision locks B5/B6/B7; it does not authorize B1-1 start or merge.
 
 ---
 
@@ -602,7 +726,7 @@ Causal same-snapshot plumbing and the recall_photo post-freeze reread are **cont
 | Item | Value |
 |---|---|
 | Track | Behavior Authority / B1 Planner Shadow |
-| Phase | B1-0 contract freeze (narrow fix: causal epoch + capability timing + N5 + recall_photo blocker) |
+| Phase | B1-0 contract freeze (narrow fix: SQLite snapshot + DecisionClock prompt bind + Shadow isolation) |
 | Code changes | None (docs-only) |
 | Production Decision | Unchanged (legacy) |
 | Next | Human static re-review; do not start B1-1; do not merge until PASS |
