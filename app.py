@@ -1560,15 +1560,26 @@ def config_get_model():
 @app.route('/api/config/model', methods=['POST'])
 def config_set_model():
     from chat.provider_router import resolve_provider
-    from chat.model_state import (
-        ACTIVE_RELAY_NOT_FOUND,
-        reject_cc_model_switch,
-    )
+    from chat.model_state import ACTIVE_RELAY_NOT_FOUND
+    from chat.cc_model import set_cc_chat_model
     provider = resolve_provider('chat')
-    rejected = reject_cc_model_switch(provider)
-    if rejected:
-        return jsonify(rejected), 400
-    data = request.get_json()
+    data = request.get_json() or {}
+    if provider == 'claude_code':
+        # MODEL-1B: model=null / "" → default; non-empty → explicit CC_CHAT_MODEL.
+        # Non-catalog ids (incl. relay aliases) → 400, config unchanged.
+        from chat.cc_model import CC_MODEL_NOT_ALLOWED
+        if 'model' not in data:
+            return jsonify({'error': 'missing model'}), 400
+        raw = data.get('model')
+        if raw is not None and not isinstance(raw, str):
+            return jsonify({'error': 'model must be string or null'}), 400
+        try:
+            result = set_cc_chat_model(raw)
+        except Exception as e:
+            return jsonify({'error': str(e)}), 500
+        if result.get('error') == CC_MODEL_NOT_ALLOWED or result.get('ok') is False:
+            return jsonify(result), 400
+        return jsonify(result)
     new_model = (data.get('model') or '').strip()
     if not new_model:
         return jsonify({'error': 'empty model'}), 400
@@ -1612,15 +1623,25 @@ def config_set_model():
 
 @app.route('/api/config/model-catalog', methods=['GET'])
 def config_model_catalog():
-    """策展过的模型清单（models.json）+ 当前 chat-provider 模型状态。
-    id 是 relay 的真实模型名；thinking 字段（extended/none）决定 gateway 是否传 thinking 参数。
-    Claude Code 下 current/configured_model 不为 relay/global MODEL。"""
+    """Chat-provider model catalog + current state.
+    Claude Code uses CC_MODEL_CATALOG; api_relay uses models.json.
+    Never mixes the two spaces."""
+    from chat.cc_model import CC_MODEL_CATALOG
+    state = _chat_model_payload()
+    if state.get('provider') == 'claude_code':
+        current = state.get('configured_model') or ''
+        return jsonify({
+            'models': list(CC_MODEL_CATALOG),
+            'current': current,
+            'provider': 'claude_code',
+            'model_mode': state.get('model_mode'),
+            'configured_model': state.get('configured_model'),
+        })
     try:
         with open('/opt/frontend/models.json') as f:
             catalog = json.load(f)
     except Exception:
         catalog = []
-    state = _chat_model_payload()
     current = state.get('configured_model') or ''
     return jsonify({
         'models': catalog,

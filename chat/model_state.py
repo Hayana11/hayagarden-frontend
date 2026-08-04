@@ -1,15 +1,12 @@
-"""Provider-aware chat model state (MODEL-1A).
+"""Provider-aware chat model state (MODEL-1A / MODEL-1B).
 
-CC and api_relay keep independent model spaces. This module only describes
-and gates read/write of the chat model UI; it does not drive Claude Code
-`--model` (that is MODEL-1B).
+CC and api_relay keep independent model spaces.
 """
 
 from __future__ import annotations
 
 from typing import Any
 
-CC_MODEL_SWITCH_NOT_AVAILABLE = 'CC_MODEL_SWITCH_NOT_AVAILABLE'
 ACTIVE_RELAY_NOT_FOUND = 'ACTIVE_RELAY_NOT_FOUND'
 ACTIVE_RELAY_DELETE_NOT_ALLOWED = 'ACTIVE_RELAY_DELETE_NOT_ALLOWED'
 
@@ -27,13 +24,8 @@ def describe_chat_model_state(
     """
     provider = str(provider or '').strip().lower()
     if provider == 'claude_code':
-        return {
-            'provider': 'claude_code',
-            'model_mode': 'default',
-            'configured_model': None,
-            # Backward-compatible key: must not surface relay/global MODEL.
-            'model': None,
-        }
+        from chat.cc_model import describe_cc_model_state
+        return describe_cc_model_state()
 
     configured = (relay_model or '').strip() or None
     payload: dict[str, Any] = {
@@ -48,10 +40,3 @@ def describe_chat_model_state(
     if name:
         payload['relay_name'] = name
     return payload
-
-
-def reject_cc_model_switch(provider: str) -> dict[str, str] | None:
-    """Fail-closed gate for POST model changes under Claude Code."""
-    if str(provider or '').strip().lower() == 'claude_code':
-        return {'error': CC_MODEL_SWITCH_NOT_AVAILABLE}
-    return None

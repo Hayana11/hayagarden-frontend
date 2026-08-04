@@ -3683,6 +3683,7 @@ def _cc_stream_gen(full_system, prompt, env):
     MCP tools are whitelisted via CC_ALLOWED_TOOLS.
     """
     import subprocess, threading
+    from chat.cc_model import cc_model_args
     proc = subprocess.Popen(
         ['claude', '-p', prompt,
          '--output-format', 'stream-json',
@@ -3694,7 +3695,7 @@ def _cc_stream_gen(full_system, prompt, env):
          '--mcp-config', CC_CWD + '/cc-tools.json',
          '--strict-mcp-config',
          '--allowedTools', CC_ALLOWED_TOOLS,
-         '--exclude-dynamic-system-prompt-sections'],
+         '--exclude-dynamic-system-prompt-sections'] + cc_model_args(),
         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         text=True, bufsize=1, cwd=CC_CWD, env=env,
     )

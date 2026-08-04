@@ -2714,7 +2714,7 @@ function getTimedPlaceholder() {
   return '和岛聊聊……';
 }
 
-// ── Model selector (MODEL-1A: provider-aware) ──
+// ── Model selector (MODEL-1A/1B: provider-aware) ──
 var _modelCatalog = [];
 var _curModel = '';
 var _chatProvider = '';
@@ -2722,14 +2722,24 @@ var _modelMode = '';
 function _isClaudeCodeProvider(){ return _chatProvider === 'claude_code'; }
 function _modelMeta(id){ return _modelCatalog.find(function(m){return m.id===id;}) || null; }
 function _modelLabel(id){ var m=_modelMeta(id); return m ? m.label : (id.replace(/\[[^\]]*\]/g,'').trim() || id); }
+function _ccPillLabel(){
+  if(_modelMode === 'explicit' && _curModel) return 'Claude Code · '+_modelLabel(_curModel);
+  if(_modelMode === 'default') return 'Claude Code · 默认';
+  if(_modelMode === 'unknown') return 'Claude Code · 状态未知';
+  return 'Claude Code · 读取中…';
+}
 async function initModelPill() {
   try{
     var r=await fetch('/api/config/model-catalog'); var d=await r.json();
     _modelCatalog=d.models||[];
     _chatProvider=d.provider||'';
-    _modelMode=d.model_mode||'';
-    _curModel=_isClaudeCodeProvider() ? '' : (d.current||d.configured_model||'');
-  }catch(e){}
+    if(_chatProvider==='claude_code'){
+      _modelMode=(d.model_mode==='explicit'||d.model_mode==='default')?d.model_mode:'unknown';
+    } else {
+      _modelMode=d.model_mode||'';
+    }
+    _curModel=d.configured_model||d.current||'';
+  }catch(e){ if(_chatProvider==='claude_code') _modelMode='unknown'; }
   renderModelSheet(false);
   updateModelPill();
   var t=document.getElementById('txt'); if(t&&!t.disabled) t.placeholder=getTimedPlaceholder();
@@ -2737,7 +2747,18 @@ async function initModelPill() {
 function renderModelSheet(showMore){
   var sheet=document.getElementById('model-sheet');
   if(_isClaudeCodeProvider()){
-    sheet.innerHTML='<div class="model-opt" style="cursor:default;opacity:.85">Claude Code · 默认<span class="mo-desc">模型切换将在下一阶段开放</span></div>';
+    var defSel = _modelMode === 'default';
+    var html = '<button class="model-opt'+(defSel?' selected':'')+'" data-model="" onclick="selectModel(this)">'+
+      '<span class="mo-dot" style="background:#7c6a8a"></span>默认（跟随 Claude Code）'+
+      '<span class="mo-desc">不传 --model</span></button>';
+    html += _modelCatalog.map(function(m){
+      var sel = _modelMode==='explicit' && m.id===_curModel;
+      return '<button class="model-opt'+(sel?' selected':'')+'" data-model="'+escHtml(m.id)+'" onclick="selectModel(this)">'+
+        '<span class="mo-dot" style="background:'+escHtml(m.dot||'#8a8177')+'"></span>'+escHtml(m.label||m.id)+
+        (m.desc?'<span class="mo-desc">'+escHtml(m.desc)+'</span>':'')+
+      '</button>';
+    }).join('');
+    sheet.innerHTML=html;
     return;
   }
   var primary=_modelCatalog.filter(function(m){return m.primary;});
@@ -2761,27 +2782,33 @@ function renderModelSheet(showMore){
 }
 function updateModelPill() {
   document.getElementById('model-label').textContent=_isClaudeCodeProvider()
-    ? 'Claude Code · 默认'
+    ? _ccPillLabel()
     : (_modelLabel(_curModel)||'模型');
 }
 function toggleModelSheet() {
-  if(_isClaudeCodeProvider()){
-    var sheet=document.getElementById('model-sheet');
-    sheet.classList.toggle('show');
-    if(sheet.classList.contains('show')) renderModelSheet(false);
-    return;
-  }
   document.getElementById('model-sheet').classList.toggle('show');
+  if(document.getElementById('model-sheet').classList.contains('show')) renderModelSheet(false);
 }
 async function selectModel(btn) {
-  if(_isClaudeCodeProvider()) return;
   var m=btn.dataset.model; document.getElementById('model-sheet').classList.remove('show');
-  if(m===_curModel) return;
+  var body;
+  if(_isClaudeCodeProvider()){
+    // empty dataset → default (null); same explicit id → no-op
+    if((!m && _modelMode==='default') || (m && m===_curModel && _modelMode==='explicit')) return;
+    body = {model: m ? m : null};
+  } else {
+    if(m===_curModel) return;
+    body = {model: m};
+  }
   try{
-    var r=await fetch('/api/config/model',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model:m})});
+    var r=await fetch('/api/config/model',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
     var d=await r.json();
-    if(r.ok && (d.model||d.ok)){_curModel=d.model||m;renderModelSheet(false);updateModelPill();showToast('已切换到 '+_modelLabel(_curModel));}
-    else showToast((d && d.error) === 'CC_MODEL_SWITCH_NOT_AVAILABLE' ? 'Claude Code 模型切换将在下一阶段开放' : '切换失败');
+    if(r.ok && d.ok!==false){
+      _modelMode=d.model_mode||(_isClaudeCodeProvider()?(body.model?'explicit':'default'):'');
+      _curModel=d.configured_model||d.model||'';
+      renderModelSheet(false);updateModelPill();
+      showToast(_isClaudeCodeProvider() ? '下一条消息起生效' : ('已切换到 '+_modelLabel(_curModel)));
+    } else showToast('切换失败');
   }catch(e){showToast('切换失败');}
 }
 document.addEventListener('click',function(e){

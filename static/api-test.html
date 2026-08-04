@@ -359,14 +359,23 @@ async function setProvider(p) {
   curProvider = d.provider || p;
   chatProvider = effective;
   currentModel = '';
+  modelMode = effective === 'claude_code' ? 'unknown' : '';
+  // MODEL-1B: clear previous provider model lists before refresh so a failed
+  // catalog load cannot paint the other space's models.
+  currentModels = [];
+  ccCatalog = [];
+  var modelsEl = document.getElementById('models-list');
+  if (modelsEl) modelsEl.innerHTML = '';
+  var presetEl = document.getElementById('preset-models-list');
+  if (presetEl) presetEl.innerHTML = '';
   document.getElementById('model-inp').value = '';
   cancelModelEdit();
   if (effective === 'claude_code') {
-    document.getElementById('cur-model-name').textContent = 'Claude Code · 默认';
+    // MODEL-1B: never invent "默认" before model GET confirms model_mode.
+    document.getElementById('cur-model-name').textContent = 'Claude Code · 读取中…';
   } else {
     // Clear CC residual label before refresh; unknown until loadModel succeeds.
     document.getElementById('cur-model-name').textContent = '读取中…';
-    renderPresetModels();
   }
   renderProvider();
   applyModelUiMode();
@@ -375,11 +384,31 @@ async function setProvider(p) {
     await loadModel();
   } catch (e) {
     refreshFailed = true;
-    if (effective === 'api_relay') {
+    if (effective === 'claude_code') {
+      modelMode = 'unknown';
+      document.getElementById('cur-model-name').textContent = 'Claude Code · 状态未知';
+      currentModels = [];
+      ccCatalog = [];
+      if (modelsEl) modelsEl.innerHTML = '<div style="color:var(--hint);font-size:12px;padding:8px 0;">状态未知 · 暂无模型清单</div>';
+    } else if (effective === 'api_relay') {
       document.getElementById('cur-model-name').textContent = '—';
+      currentModels = [];
+      ccCatalog = [];
     }
   }
-  if (!(await loadModels())) refreshFailed = true;
+  if (!(await loadModels())) {
+    refreshFailed = true;
+    if (effective === 'claude_code') {
+      currentModels = [];
+      // Keep ccCatalog empty on failure; never restore prior Relay list.
+      if (!ccCatalog.length && modelsEl) {
+        modelsEl.innerHTML = '<div style="color:var(--hint);font-size:12px;padding:8px 0;">状态未知 · 暂无模型清单</div>';
+      }
+    } else {
+      currentModels = [];
+      ccCatalog = [];
+    }
+  }
   toast(refreshFailed
     ? ('已切换到' + (p === 'claude_code' ? '订阅模式' : '中转 API') + '，部分状态刷新失败')
     : ('已切换到' + (p === 'claude_code' ? '订阅模式' : '中转 API') + '，网关重启中'));
@@ -552,32 +581,35 @@ async function deletePreset(id) {
   else toast('删除失败');
 }
 
-// ── Model (MODEL-1A: provider-aware) ──────────────────
+// ── Model (MODEL-1A/1B: provider-aware) ──────────────────
+var ccCatalog = [];
+function ccPillLabel() {
+  if (modelMode === 'explicit' && currentModel) {
+    var hit = ccCatalog.find(function(m){ return m.id === currentModel; });
+    return 'Claude Code · ' + ((hit && hit.label) || currentModel);
+  }
+  if (modelMode === 'default') return 'Claude Code · 默认';
+  if (modelMode === 'unknown') return 'Claude Code · 状态未知';
+  return 'Claude Code · 读取中…';
+}
 function applyModelUiMode() {
   var pencil = document.querySelector('#model-display-row .pencil-btn');
   if (pencil) pencil.style.display = isClaudeCodeProvider() ? 'none' : '';
-  var availCard = document.getElementById('models-list');
-  if (isClaudeCodeProvider()) {
-    if (availCard) {
-      availCard.innerHTML = '<div style="color:var(--hint);font-size:12px;padding:8px 0;">Claude Code 使用账号默认模型，本阶段不可切换</div>';
-    }
-    var preset = document.getElementById('preset-models-list');
-    if (preset) preset.innerHTML = '';
-  }
 }
 async function loadModel() {
   var r = await fetch('/api/config/model');
   var d = await r.json();
   chatProvider = d.provider || '';
-  modelMode = d.model_mode || '';
   if (isClaudeCodeProvider()) {
-    currentModel = '';
-    document.getElementById('cur-model-name').textContent = 'Claude Code · 默认';
-    document.getElementById('model-inp').value = '';
+    modelMode = (d.model_mode === 'explicit' || d.model_mode === 'default') ? d.model_mode : 'unknown';
+    currentModel = d.configured_model || '';
+    document.getElementById('cur-model-name').textContent = ccPillLabel();
+    document.getElementById('model-inp').value = currentModel || '';
     cancelModelEdit();
     applyModelUiMode();
     return;
   }
+  modelMode = d.model_mode || '';
   currentModel = d.configured_model || d.model || '';
   document.getElementById('cur-model-name').textContent = currentModel || '—';
   document.getElementById('model-inp').value = currentModel;
@@ -586,7 +618,7 @@ async function loadModel() {
 }
 function startModelEdit() {
   if (isClaudeCodeProvider()) {
-    toast('Claude Code 使用账号默认模型，本阶段不可切换');
+    toast('请从下方 Claude Code 模型清单选择');
     return;
   }
   document.getElementById('model-edit-row').style.display = 'flex';
@@ -599,17 +631,17 @@ function cancelModelEdit() {
 }
 function modelSwitchErrorToast(d) {
   if (!d) { toast('切换失败'); return; }
-  if (d.error === 'CC_MODEL_SWITCH_NOT_AVAILABLE') {
-    toast('Claude Code 使用账号默认模型，本阶段不可切换');
-  } else if (d.error === 'ACTIVE_RELAY_NOT_FOUND') {
+  if (d.error === 'ACTIVE_RELAY_NOT_FOUND') {
     toast('当前中转站已失效，请重新选择中转站');
+  } else if (d.error === 'CC_MODEL_NOT_ALLOWED') {
+    toast('该模型不属于 Claude Code 模型清单');
   } else {
     toast('切换失败');
   }
 }
 async function saveModel() {
   if (isClaudeCodeProvider()) {
-    toast('Claude Code 使用账号默认模型，本阶段不可切换');
+    toast('请从下方 Claude Code 模型清单选择');
     return;
   }
   var v = document.getElementById('model-inp').value.trim();
@@ -631,23 +663,37 @@ async function saveModel() {
 }
 
 async function switchModel(modelId) {
+  var body = {model: modelId};
   if (isClaudeCodeProvider()) {
-    toast('Claude Code 使用账号默认模型，本阶段不可切换');
-    return;
+    if (modelId === null || modelId === '') {
+      if (modelMode !== 'explicit') return;
+      body = {model: null};
+    } else if (modelMode === 'explicit' && modelId === currentModel) {
+      return;
+    }
   }
   var r = await fetch('/api/config/model', {
     method: 'POST', headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({model: modelId})
+    body: JSON.stringify(body)
   });
   var d = {};
   try { d = await r.json(); } catch(e) {}
   if (r.ok) {
-    currentModel = modelId;
-    document.getElementById('cur-model-name').textContent = modelId;
-    document.getElementById('model-inp').value = modelId;
-    toast('已切换到 ' + modelId + '，网关重启中');
-    renderDynModels();
-    renderPresetModels();
+    if (isClaudeCodeProvider()) {
+      modelMode = d.model_mode || (body.model ? 'explicit' : 'default');
+      currentModel = d.configured_model || '';
+      document.getElementById('cur-model-name').textContent = ccPillLabel();
+      document.getElementById('model-inp').value = currentModel || '';
+      toast('下一条消息起生效');
+      renderCcModels();
+    } else {
+      currentModel = modelId;
+      document.getElementById('cur-model-name').textContent = modelId;
+      document.getElementById('model-inp').value = modelId;
+      toast('已切换到 ' + modelId + '，网关重启中');
+      renderDynModels();
+      renderPresetModels();
+    }
   } else { modelSwitchErrorToast(d); }
 }
 
@@ -656,8 +702,33 @@ async function switchModel(modelId) {
 async function loadModels() {
   var el = document.getElementById('models-list');
   if (isClaudeCodeProvider()) {
-    applyModelUiMode();
-    return true;
+    try {
+      var cr = await fetch('/api/config/model-catalog');
+      var cd = await cr.json();
+      if (!cr.ok || cd.provider !== 'claude_code') {
+        ccCatalog = [];
+        currentModels = [];
+        modelMode = 'unknown';
+        el.innerHTML = '<div style="color:var(--hint);font-size:12px;padding:8px 0;">状态未知 · 暂无模型清单</div>';
+        document.getElementById('cur-model-name').textContent = ccPillLabel();
+        return false;
+      }
+      ccCatalog = cd.models || [];
+      currentModels = [];
+      chatProvider = 'claude_code';
+      modelMode = (cd.model_mode === 'explicit' || cd.model_mode === 'default') ? cd.model_mode : 'unknown';
+      currentModel = cd.configured_model || '';
+      document.getElementById('cur-model-name').textContent = ccPillLabel();
+      renderCcModels();
+      return true;
+    } catch (e) {
+      ccCatalog = [];
+      currentModels = [];
+      modelMode = 'unknown';
+      el.innerHTML = '<div style="color:var(--hint);font-size:12px;padding:8px 0;">状态未知 · 暂无模型清单</div>';
+      document.getElementById('cur-model-name').textContent = ccPillLabel();
+      return false;
+    }
   }
   el.innerHTML = '<div style="color:var(--hint);font-size:12px;text-align:center;padding:8px 0;">加载中…</div>';
   try {
@@ -694,6 +765,35 @@ var PRESET_MODELS = [
 
 var TIER_COLOR = { flagship: '#7c6a8a', standard: '#3a7ad4', fast: '#0a8a5c' };
 
+function renderCcModels() {
+  var el = document.getElementById('models-list');
+  var preset = document.getElementById('preset-models-list');
+  var defActive = modelMode === 'default';
+  var defRight = defActive
+    ? '<span class="mi-badge" style="background:var(--primary-bg);color:var(--primary);">使用中</span>'
+    : '<button class="mi-switch" onclick="switchModel(null)">切换</button>';
+  var html = '<div class="model-item">'
+    + '<div class="mi-dot" style="background:#7c6a8a' + (defActive ? '' : '66') + '"></div>'
+    + '<div class="mi-name" style="flex:1">默认（跟随 Claude Code）'
+    + '<span style="font-size:9.5px;color:var(--hint);margin-left:5px;">不传 --model</span></div>'
+    + defRight + '</div>';
+  html += (ccCatalog || []).map(function(m) {
+    var isActive = modelMode === 'explicit' && m.id === currentModel;
+    var right = isActive
+      ? '<span class="mi-badge" style="background:var(--primary-bg);color:var(--primary);">使用中</span>'
+      : '<button class="mi-switch" onclick="switchModel(\'' + escH(m.id) + '\')">切换</button>';
+    return '<div class="model-item">'
+      + '<div class="mi-dot" style="background:' + escH(m.dot || '#9a8a8a') + (isActive ? '' : '66') + '"></div>'
+      + '<div class="mi-name" style="flex:1">'
+      + escH(m.label || m.id)
+      + '<span style="font-size:9.5px;color:var(--hint);margin-left:5px;">' + escH(m.id) + '</span>'
+      + '</div>'
+      + right + '</div>';
+  }).join('');
+  if (el) el.innerHTML = html;
+  if (preset) preset.innerHTML = '';
+}
+
 function renderPresetModels() {
   var el = document.getElementById('preset-models-list');
   if (isClaudeCodeProvider()) { el.innerHTML = ''; return; }
@@ -715,7 +815,7 @@ function renderPresetModels() {
 
 function renderDynModels() {
   var el = document.getElementById('models-list');
-  if (isClaudeCodeProvider()) { applyModelUiMode(); return; }
+  if (isClaudeCodeProvider()) { renderCcModels(); return; }
   if (!currentModels.length) return;
   el.innerHTML = currentModels.map(function(m) {
     var isActive = m === currentModel;

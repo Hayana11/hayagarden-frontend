@@ -64,6 +64,8 @@ _DEFAULTS = {
     'DAILY_SOFT_WINDOW_ENABLED': '0',
     # P-CONTEXT-WINDOW step5：staged --resume 无 stdin 健康窗（毫秒）。
     'CONTEXT_SWITCH_STAGED_HEALTH_MS': '2000',
+    # MODEL-1B：Claude Code 显式模型；空=跟随 CC 默认（不传 --model）。无 .env fallback。
+    'CC_CHAT_MODEL': '',
 }
 
 
