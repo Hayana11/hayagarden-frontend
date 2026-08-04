@@ -12,6 +12,62 @@ from tools import summary_title
 DB_PATH = '/opt/frontend/memories.db'
 
 VALID_LAYERS = ('core', 'long-term', 'recent')
+_DEDUP_TYPES = frozenset(('FACT', 'MEMORY', 'DIARY', 'THOUGHT', 'DAILY_SUMMARY'))
+
+
+def normalize_content(text):
+    """归一化正文，用于语义去重比较。"""
+    import re
+    t = re.sub(r'\s+', '', (text or '').strip())
+    return re.sub(r'[^\w\u4e00-\u9fff]', '', t)
+
+
+def _bigrams(text):
+    return {text[i:i + 2] for i in range(len(text) - 1)} if len(text) >= 2 else set()
+
+
+def is_near_duplicate(a_norm, b_norm):
+    """两条归一化正文是否应视为同一条记忆。"""
+    if not a_norm or not b_norm:
+        return False
+    if a_norm == b_norm:
+        return True
+    shorter, longer = (a_norm, b_norm) if len(a_norm) <= len(b_norm) else (b_norm, a_norm)
+    if len(shorter) >= 12 and shorter in longer:
+        return True
+    n = min(24, len(a_norm), len(b_norm))
+    if n >= 16 and a_norm[:n] == b_norm[:n]:
+        return True
+    if len(a_norm) >= 10 and len(b_norm) >= 10:
+        ba, bb = _bigrams(a_norm), _bigrams(b_norm)
+        if ba and bb:
+            overlap = len(ba & bb) / min(len(ba), len(bb))
+            if overlap >= 0.52:
+                return True
+    return False
+
+
+def find_duplicate_id(conn, content, type='MEMORY'):
+    """查找库内是否已有语义重复条目，返回 id 或 None。"""
+    norm = normalize_content(content)
+    if len(norm) < 10:
+        return None
+    if type in ('FACT', 'MEMORY'):
+        type_filter = ('FACT', 'MEMORY')
+    elif type in _DEDUP_TYPES:
+        type_filter = (type,)
+    else:
+        return None
+    placeholders = ','.join('?' * len(type_filter))
+    rows = conn.execute(
+        f"SELECT id, content FROM posts WHERE type IN ({placeholders}) "
+        "AND COALESCE(resolved, 0) = 0 ORDER BY id DESC LIMIT 300",
+        type_filter,
+    ).fetchall()
+    for row in rows:
+        if is_near_duplicate(norm, normalize_content(row['content'])):
+            return int(row['id'])
+    return None
 
 
 def _db():
@@ -30,6 +86,10 @@ def save_memory(content, type='MEMORY', author='fyodor', layer='recent',
     if layer not in VALID_LAYERS:
         layer = 'recent'
     conn = _db()
+    dup_id = find_duplicate_id(conn, content, type)
+    if dup_id is not None:
+        conn.close()
+        return dup_id
     post_cols = {r[1] for r in conn.execute("PRAGMA table_info(posts)").fetchall()}
     has_summary_title = 'summary_title' in post_cols
     has_valence = 'valence' in post_cols

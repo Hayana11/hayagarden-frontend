@@ -19,6 +19,7 @@ sys.path.insert(0, '/opt/frontend/tools')
 sys.path.insert(0, '/opt/frontend')
 import llm_lite
 import memory_tool
+from memory_tool import is_near_duplicate, normalize_content
 
 DB = '/opt/frontend/memories.db'
 MAX_FACTS_PER_DAY = 6
@@ -105,7 +106,8 @@ def extract(day, dry_run=False):
     for f in facts:
         if len(f) < 8:
             continue
-        if any(f[:20] in k or k[:20] in f for k in known):
+        fn = normalize_content(f)
+        if any(is_near_duplicate(fn, normalize_content(k)) for k in known):
             continue
         known.append(f)
         _log('FACT: %s' % f)
