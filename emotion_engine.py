@@ -175,27 +175,65 @@ def _decay(value, stored_at_str, tau_hours, *, observed_at=None):
 # ═══════════════════════════════════════════════════════════
 
 def get_state() -> dict:
-    conn = _db()
-    row = conn.execute("SELECT * FROM emotion_state WHERE id=1").fetchone()
-    conn.close()
-    if row:
-        return dict(row)
+    """Compatibility facade → Stage C authoritative Affect+Bond (V3).
+
+    Pure read: never bootstraps or mutates. Only surfaces V3 when the Stage C
+    cutover gate is ready (trusted provenance / no gap / no watermark lag).
+    Legacy ``emotion_state`` may supply non-authoritative extras such as
+    ``last_interaction`` for display only.
+    """
+    last_interaction = None
+    try:
+        conn = _db()
+        try:
+            row = conn.execute(
+                'SELECT last_interaction FROM emotion_state WHERE id=1'
+            ).fetchone()
+            if row is not None:
+                last_interaction = (
+                    row['last_interaction'] if hasattr(row, 'keys') else row[0]
+                )
+        finally:
+            conn.close()
+    except Exception:
+        pass
+    try:
+        from chat.affect_bond_authority import (
+            check_cutover_ready, read_v3_state, v3_to_legacy_emotion_shape,
+        )
+        if check_cutover_ready(DB_PATH).ok:
+            v3 = read_v3_state(DB_PATH)
+            if v3 is not None:
+                return v3_to_legacy_emotion_shape(
+                    v3,
+                    last_interaction=last_interaction,
+                    longing=get_longing(),
+                )
+    except Exception:
+        pass
     return {
         'pa': 0.5, 'na': 0.2, 'valence': 0.6, 'arousal': 0.3,
         'mood_word': '平静', 'longing': 0.0,
         'sternberg_i': 0.3, 'sternberg_p': 0.0, 'sternberg_c': 0.7,
         'p_updated_at': None, 'i_updated_at': None,
-        'last_interaction': None,
+        'last_interaction': last_interaction,
     }
 
 
 def get_desire() -> dict:
-    """返回实时衰减后的I/P/C值"""
-    state = get_state()
-    p = _decay(state.get('sternberg_p', 0.0), state.get('p_updated_at'), TAU_P)
-    i = _decay(state.get('sternberg_i', 0.3), state.get('i_updated_at'), TAU_I)
-    c = state.get('sternberg_c', 0.7)  # C几乎不衰减
-    return {'p': round(p, 4), 'i': round(i, 4), 'c': round(c, 4)}
+    """Facade: map canonical V3 Bond materialization only — no local decay math."""
+    try:
+        from chat.affect_bond_authority import read_current_bond
+        bond = read_current_bond(DB_PATH)
+        if bond is not None:
+            return {
+                'p': round(float(bond['passion']), 4),
+                'i': round(float(bond['intimacy']), 4),
+                'c': round(float(bond['commitment']), 4),
+            }
+    except Exception:
+        pass
+    return {'p': 0.0, 'i': 0.3, 'c': 0.7}
 
 
 def touch_interaction():
@@ -255,41 +293,19 @@ def rule_score_desire(user_msg: str) -> dict:
 
 
 def apply_desire_delta(p_delta: float, i_delta: float, c_delta: float = 0.0):
+    """Stage C: retired Bond writer.
+
+    Authoritative Bond mutations go through Canonical ``user_rule`` events.
+    This entry no longer mutates V3 or production Bond authority. Deltas are
+    accepted for call-site compatibility only.
     """
-    将desire delta写入DB（先读取衰减后的值，再叠加delta）
-    P和I的更新时间分别记录
-    """
-    state = get_state()
-    now = _now_str()
-
-    # 读当前衰减后的值
-    p_now = _decay(state.get('sternberg_p', 0.0), state.get('p_updated_at'), TAU_P)
-    i_now = _decay(state.get('sternberg_i', 0.3), state.get('i_updated_at'), TAU_I)
-    c_now = state.get('sternberg_c', 0.7)
-
-    new_p = max(0.0, min(1.0, p_now + p_delta))
-    new_i = max(0.0, min(1.0, i_now + i_delta))
-    new_c = max(0.0, min(1.0, c_now + c_delta))
-
-    conn = _db()
-    conn.execute("""
-        UPDATE emotion_state SET
-            sternberg_p=?, sternberg_i=?, sternberg_c=?,
-            p_updated_at=?, i_updated_at=?
-        WHERE id=1
-    """, (round(new_p, 4), round(new_i, 4), round(new_c, 4), now, now))
-    conn.commit()
-    conn.close()
+    del p_delta, i_delta, c_delta
+    return None
 
 
 def apply_desire_delta_async(p_delta: float, i_delta: float):
-    """非阻塞版本"""
-    t = threading.Thread(
-        target=apply_desire_delta,
-        args=(p_delta, i_delta),
-        daemon=True
-    )
-    t.start()
+    """Compatibility no-op — Bond authority is V3 user_rule only."""
+    apply_desire_delta(p_delta, i_delta)
 
 
 # ═══════════════════════════════════════════════════════════
@@ -555,347 +571,54 @@ def score_and_update(conversation_excerpt: str, *, message_id=None):
     frozen_p_delta = p_delta_ds
     frozen_i_delta = i_delta_ds
     frozen_message_id = message_id
-
-    # Strict disabled fast path: preserve the pre-Shadow scoring transaction and
-    # do not import/read/write any Shadow subsystem when SCORE_PROOF is off.
-    if str(os.environ.get('INTERNAL_STATE_V3_SCORE_PROOF_ENABLED', '0')).strip() != '1':
-        state = get_state()
-        new_pa = max(0.0, min(1.0, 0.75 * state['pa'] + 0.25 * frozen_v))
-        na_signal = frozen_a * (1 - frozen_v) * 0.5 + 0.05
-        new_na = max(0.0, min(1.0, 0.75 * state['na'] + 0.25 * na_signal))
-        new_pa, new_na = _bou_revert(new_pa, new_na)
-        p_now = _decay(state.get('sternberg_p', 0.0), state.get('p_updated_at'), TAU_P)
-        i_now = _decay(state.get('sternberg_i', 0.3), state.get('i_updated_at'), TAU_I)
-        scored_at = _now_str()
-        conn = _db()
-        try:
-            conn.execute(_EMOTION_UPDATE_SQL, (
-                round(new_pa, 4), round(new_na, 4), frozen_v, frozen_a,
-                frozen_mood, round(get_longing(), 4),
-                round(max(0.0, min(1.0, p_now + frozen_p_delta)), 4),
-                round(max(0.0, min(1.0, i_now + frozen_i_delta)), 4),
-                round(state.get('sternberg_c', 0.7), 4),
-                scored_at, scored_at, scored_at, scored_at,
-            ))
-            conn.commit()
-        finally:
-            conn.close()
-        try:
-            import emotion_history
-            emotion_history.append_snapshot(frozen_v, frozen_a, frozen_mood,
-                                            db_path=DB_PATH, source='score')
-        except Exception:
-            pass
-        return
-
-    proof_written = False
-    proof_enabled = False
-    applied_tr = None
+    scored_at = _now_str()
     scored_payload = {
         'valence': frozen_v,
         'arousal': frozen_a,
         'mood_word': frozen_mood,
         'passion_delta': frozen_p_delta,
         'intimacy_delta': frozen_i_delta,
-        'source': 'emotion_engine.score_and_update',
+        # Ombre may contribute to the blended V/A above as evaluator input;
+        # it never becomes a second Affect authority.
+        'source': (
+            'emotion_engine.score_and_update+ombre30'
+            if ob_v is not None else
+            'emotion_engine.score_and_update'
+        ),
     }
-    # SCORE_PROOF 开时：incident 无法持久化则放弃本轮 emotion（不中断聊天主流程）
-    proof_env = (
-        str(os.environ.get('INTERNAL_STATE_V3_SCORE_PROOF_ENABLED', '0')).strip()
-        == '1'
-    )
-    _shadow = None
-    abandon_emotion = False
+
+    # Stage C: sole Affect+Bond write sink is V3 user_scored. No emotion_state
+    # authority write. Missing message identity → fail closed (no invent).
+    mid_ok = None
     try:
-        import internal_state_shadow as _shadow
-        proof_enabled = _shadow.is_score_proof_enabled()
+        import internal_state_store as _store
+        mid_ok = _store.require_positive_message_id(
+            frozen_message_id, field='message_id',
+        )
     except Exception:
-        _shadow = None
-        proof_enabled = False
-        if proof_env:
-            try:
-                _write_shadow_unavailable_incident(
-                    message_id=frozen_message_id, scored_at=_now_str(),
-                )
-            except Exception:
-                # sidecar 也写不进 → 不得静默改 emotion
-                abandon_emotion = True
+        mid_ok = None
+    if mid_ok is None:
+        return
 
-    # ── 写入（proof 开启：单调门 + 事务内读 state 再 transition）────────────
-    conn = _db()
     try:
-        if abandon_emotion:
-            # Evidence channels are unavailable, but Shadow must not veto the
-            # authoritative legacy heartbeat. Fall through to legacy-only write.
-            proof_enabled = False
-        if proof_enabled and _shadow is not None:
-            conn.isolation_level = None
-            mid_ok = None
-            try:
-                import internal_state_store as _store
-                mid_ok = _store.require_positive_message_id(
-                    frozen_message_id, field='message_id',
-                )
-            except Exception:
-                mid_ok = None
+        from chat.affect_bond_authority import apply_scored_best_effort
+        apply_scored_best_effort(
+            message_id=mid_ok,
+            scores=scored_payload,
+            scored_at=scored_at,
+            db_path=DB_PATH,
+        )
+    except Exception:
+        return
 
-            _bad_mid = (
-                frozen_message_id
-                if isinstance(frozen_message_id, int)
-                and not isinstance(frozen_message_id, bool)
-                and frozen_message_id > 0
-                else None
-            )
-
-            def _apply_transition_locked(applied_at: str) -> dict:
-                state = _read_emotion_state_row(conn)
-                tr = _transition_from_state(
-                    state,
-                    final_v=frozen_v,
-                    final_a=frozen_a,
-                    mood_word=frozen_mood,
-                    p_delta=frozen_p_delta,
-                    i_delta=frozen_i_delta,
-                    applied_at=applied_at,
-                )
-                conn.execute(_EMOTION_UPDATE_SQL, _emotion_update_params(tr))
-                return tr
-
-            def _fallback_legacy_only() -> None:
-                nonlocal applied_tr
-                try:
-                    conn.rollback()
-                except Exception:
-                    pass
-                try:
-                    conn.execute('BEGIN IMMEDIATE')
-                    applied_tr = _apply_transition_locked(_now_str())
-                    conn.commit()
-                except Exception:
-                    try:
-                        conn.rollback()
-                    except Exception:
-                        pass
-
-            def _persist_shadow_gap(error_code: str, message_id=None) -> None:
-                try:
-                    _shadow.mark_proof_gap_standalone(
-                        db_path=DB_PATH,
-                        failed_message_id=message_id,
-                        error_code=error_code,
-                    )
-                except Exception:
-                    pass
-
-            proof_shadow_active = True
-            score_hash = None
-            schema_ready = False
-            incidents_ready = False
-            try:
-                score_hash = _shadow.compute_score_hash(scored_payload)
-            except Exception:
-                proof_shadow_active = False
-                _persist_shadow_gap('score_hash_failed', mid_ok)
-                _fallback_legacy_only()
-            else:
-                try:
-                    schema_ready = _shadow.score_proof_schema_ready(conn)
-                    incidents_ready = conn.execute(
-                        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
-                        (_shadow.GAP_INCIDENTS_TABLE,),
-                    ).fetchone() is not None
-                except Exception:
-                    proof_shadow_active = False
-                    _persist_shadow_gap('score_proof_schema_probe_failed', mid_ok)
-                    _fallback_legacy_only()
-
-            if proof_shadow_active:
-                if mid_ok is None:
-                    # incident 必须先持久化，才允许改 emotion
-                    try:
-                        if incidents_ready:
-                            conn.execute('BEGIN IMMEDIATE')
-                            applied_at = _now_str()
-                            _shadow.mark_proof_gap(
-                                conn,
-                                failed_message_id=_bad_mid,
-                                error_code='missing_or_invalid_message_id',
-                                db_path=DB_PATH,
-                            )
-                            applied_tr = _apply_transition_locked(applied_at)
-                            conn.commit()
-                        else:
-                            _shadow.append_gap_incident_sidecar(
-                                DB_PATH,
-                                failed_message_id=_bad_mid,
-                                error_code='missing_or_invalid_message_id',
-                            )
-                            conn.execute('BEGIN IMMEDIATE')
-                            applied_tr = _apply_transition_locked(_now_str())
-                            conn.commit()
-                    except Exception:
-                        try:
-                            conn.rollback()
-                        except Exception:
-                            pass
-                        # incident 未落地 → legacy-only，仍须写 history
-                        _fallback_legacy_only()
-                elif not schema_ready:
-                    # 表未准备：incident sidecar 必须成功，否则 legacy-only
-                    try:
-                        _shadow.append_gap_incident_sidecar(
-                            DB_PATH,
-                            failed_message_id=mid_ok,
-                            error_code='proof_schema_missing',
-                        )
-                    except Exception:
-                        _fallback_legacy_only()
-                    else:
-                        try:
-                            conn.execute('BEGIN IMMEDIATE')
-                            applied_tr = _apply_transition_locked(_now_str())
-                            conn.commit()
-                        except Exception:
-                            try:
-                                conn.rollback()
-                            except Exception:
-                                pass
-                            _fallback_legacy_only()
-                else:
-                    try:
-                        conn.execute('BEGIN IMMEDIATE')
-                        existing = _shadow.lookup_score_proof(conn, mid_ok)
-                        if existing is not None:
-                            prev_hash = existing.get('score_hash')
-                            if prev_hash is not None and str(prev_hash) == score_hash:
-                                conn.execute('ROLLBACK')
-                                return
-                            _shadow.mark_proof_gap(
-                                conn,
-                                failed_message_id=mid_ok,
-                                error_code='score_proof_payload_conflict',
-                                db_path=DB_PATH,
-                            )
-                            conn.commit()
-                            return
-
-                        # 跨 message 单调门：已有更高 message proof 时，迟到评分不得改 legacy
-                        max_mid = _shadow.max_score_proof_message_id(conn)
-                        if max_mid is not None and int(mid_ok) < int(max_mid):
-                            conn.execute('ROLLBACK')
-                            return
-
-                        applied_at = _now_str()
-                        applied_tr = _apply_transition_locked(applied_at)
-                        status = _shadow.record_score_proof_in_txn(
-                            conn,
-                            mid_ok,
-                            applied_at=applied_at,
-                            source=_shadow.PROOF_SOURCE_SCORE_AND_UPDATE,
-                            score_hash=score_hash,
-                        )
-                        if status == 'duplicate':
-                            conn.execute('ROLLBACK')
-                            return
-                        if _shadow.is_user_events_enabled():
-                            if not _shadow.outbox_schema_ready(conn):
-                                _shadow.mark_proof_gap(
-                                    conn,
-                                    failed_message_id=mid_ok,
-                                    error_code='outbox_capture_gap',
-                                    db_path=DB_PATH,
-                                )
-                            else:
-                                _shadow.enqueue_user_scored_in_txn(
-                                    conn,
-                                    message_id=mid_ok,
-                                    scores=scored_payload,
-                                    scored_at=applied_at,
-                                )
-                        conn.commit()
-                        proof_written = True
-                    except Exception:
-                        try:
-                            conn.rollback()
-                        except Exception:
-                            pass
-                        try:
-                            _shadow.mark_proof_gap_standalone(
-                                db_path=DB_PATH,
-                                failed_message_id=mid_ok,
-                                error_code='proof_txn_failed',
-                            )
-                        except Exception:
-                            pass
-                        # Shadow proof/outbox failure must not veto legacy emotion.
-                        legacy_conn = _db()
-                        try:
-                            legacy_conn.isolation_level = None
-                            legacy_conn.execute('BEGIN IMMEDIATE')
-                            fallback_at = _now_str()
-                            fallback = _transition_from_state(
-                                _read_emotion_state_row(legacy_conn),
-                                final_v=frozen_v, final_a=frozen_a,
-                                mood_word=frozen_mood, p_delta=frozen_p_delta,
-                                i_delta=frozen_i_delta, applied_at=fallback_at,
-                            )
-                            legacy_conn.execute(
-                                _EMOTION_UPDATE_SQL, _emotion_update_params(fallback),
-                            )
-                            legacy_conn.commit()
-                            applied_tr = fallback
-                        except Exception:
-                            try:
-                                legacy_conn.rollback()
-                            except Exception:
-                                pass
-                        finally:
-                            legacy_conn.close()
-        else:
-            conn.isolation_level = None
-            conn.execute('BEGIN IMMEDIATE')
-            try:
-                applied_at = _now_str()
-                applied_tr = _transition_from_state(
-                    _read_emotion_state_row(conn),
-                    final_v=frozen_v,
-                    final_a=frozen_a,
-                    mood_word=frozen_mood,
-                    p_delta=frozen_p_delta,
-                    i_delta=frozen_i_delta,
-                    applied_at=applied_at,
-                )
-                conn.execute(
-                    _EMOTION_UPDATE_SQL, _emotion_update_params(applied_tr),
-                )
-                conn.commit()
-            except Exception:
-                try:
-                    conn.rollback()
-                except Exception:
-                    pass
-                return
-    finally:
-        conn.close()
-
-    if applied_tr is not None:
-        try:
-            import emotion_history
-            emotion_history.append_snapshot(
-                applied_tr['valence'],
-                applied_tr['arousal'],
-                applied_tr['mood_word'],
-                db_path=DB_PATH,
-                source='score',
-            )
-        except Exception:
-            pass
-
-    if proof_written and _shadow is not None:
-        try:
-            _shadow.drain_shadow_outbox_best_effort(db_path=DB_PATH)
-        except Exception:
-            pass
+    try:
+        import emotion_history
+        emotion_history.append_snapshot(
+            frozen_v, frozen_a, frozen_mood,
+            db_path=DB_PATH, source='score',
+        )
+    except Exception:
+        pass
 
 
 def score_async(conversation_excerpt: str, *, message_id=None):

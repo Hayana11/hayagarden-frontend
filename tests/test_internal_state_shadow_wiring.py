@@ -52,6 +52,16 @@ ALL_ON = {
 }
 
 
+# Stage C retires emotion_engine dual-write (emotion_state + score_proof)
+# as Affect/Bond authority. Obsolete score_and_update dual-write cases are
+# skipped; authoritative coverage lives in tests.test_affect_bond_authority.
+_STAGE_C_LEGACY_SCORE_DUALWRITE_RETIRED = (
+    'Stage C: score_and_update Affect/Bond dual-write retired; '
+    'see tests.test_affect_bond_authority'
+)
+_skip_legacy_score_dualwrite = unittest.skip(_STAGE_C_LEGACY_SCORE_DUALWRITE_RETIRED)
+
+
 def _seed_emotion(conn: sqlite3.Connection) -> None:
     conn.executescript(
         """
@@ -152,6 +162,7 @@ class ProofAtomicityTests(unittest.TestCase):
         self._patch.stop()
         self.tmp.cleanup()
 
+    @_skip_legacy_score_dualwrite
     def test_emotion_and_proof_commit_together(self):
         with mock.patch.object(ee, '_deepseek_score', return_value={
             'valence': 0.2, 'arousal': 0.4, 'mood_word': '开心',
@@ -175,6 +186,7 @@ class ProofAtomicityTests(unittest.TestCase):
         finally:
             conn.close()
 
+    @_skip_legacy_score_dualwrite
     def test_proof_failure_preserves_legacy_emotion_and_records_gap(self):
         with mock.patch.object(ee, '_deepseek_score', return_value={
             'valence': 0.2, 'arousal': 0.4, 'mood_word': '开心',
@@ -205,6 +217,7 @@ class ProofAtomicityTests(unittest.TestCase):
         finally:
             conn.close()
 
+    @_skip_legacy_score_dualwrite
     def test_schema_missing_keeps_legacy_and_durable_sidecar_gap(self):
         # 新库：有 emotion，无 proof 表 — gap 必须进 sidecar，prepare 后迁入
         db2 = str(Path(self.tmp.name) / 'nogap.db')
@@ -317,6 +330,7 @@ class MessageIdThreadTests(unittest.TestCase):
         self.assertEqual(seen.get('mid'), 42)
         self.assertEqual(seen.get('excerpt'), 'abc')
 
+    @_skip_legacy_score_dualwrite
     def test_reject_bool_message_id_marks_gap(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
@@ -604,6 +618,7 @@ class GatewayGuardTests(unittest.TestCase):
 
 
 class EndToEndShadowEventTests(unittest.TestCase):
+    @_skip_legacy_score_dualwrite
     def test_proof_then_bootstrap_then_events(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
@@ -919,6 +934,7 @@ class AckGapTests(unittest.TestCase):
 
 
 class ScoreHashIdempotencyTests(unittest.TestCase):
+    @_skip_legacy_score_dualwrite
     def test_same_message_same_second_different_scores_no_silent_split(self):
         """两线程同 message_id、同秒、不同 scores：第二次不得改 legacy，也不得静默留不同 outbox。"""
         tmp = tempfile.TemporaryDirectory()
@@ -1030,6 +1046,7 @@ class MultiGapIncidentTests(unittest.TestCase):
 
 
 class MonotonicScoreGuardTests(unittest.TestCase):
+    @_skip_legacy_score_dualwrite
     def test_late_lower_message_does_not_rewrite_legacy(self):
         """101 在写库前阻塞；102 先完成；101 后完成不得覆盖 legacy。"""
         tmp = tempfile.TemporaryDirectory()
@@ -1122,6 +1139,7 @@ class MonotonicScoreGuardTests(unittest.TestCase):
 
 
 class SidecarFailClosedTests(unittest.TestCase):
+    @_skip_legacy_score_dualwrite
     def test_sidecar_open_failure_preserves_legacy_emotion(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
@@ -1154,6 +1172,7 @@ class SidecarFailClosedTests(unittest.TestCase):
         finally:
             conn.close()
 
+    @_skip_legacy_score_dualwrite
     def test_invalid_message_id_sidecar_failure_preserves_legacy_emotion(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
@@ -1186,6 +1205,7 @@ class SidecarFailClosedTests(unittest.TestCase):
         finally:
             conn.close()
 
+    @_skip_legacy_score_dualwrite
     def test_sidecar_fsync_failure_preserves_legacy_emotion(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
@@ -1214,6 +1234,7 @@ class SidecarFailClosedTests(unittest.TestCase):
         finally:
             conn.close()
 
+    @_skip_legacy_score_dualwrite
     def test_shadow_import_failure_and_sidecar_unwritable_preserves_legacy_emotion(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
@@ -1373,6 +1394,7 @@ class SidecarMigrateRaceTests(unittest.TestCase):
 
 
 class SerializedTransitionTests(unittest.TestCase):
+    @_skip_legacy_score_dualwrite
     def test_dual_score_cumulative_matches_shadow(self):
         """101/102 都先取得 raw scores（barrier），再写入；legacy 累计须与 Shadow 一致。
 
@@ -1859,6 +1881,7 @@ class PendingIncidentTmpTests(unittest.TestCase):
 
 
 class AppliedAtLinearizationTests(unittest.TestCase):
+    @_skip_legacy_score_dualwrite
     def test_locked_applied_at_is_shared_by_legacy_proof_and_outbox(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
@@ -2086,6 +2109,7 @@ class FallbackHistoryFinalizeTests(unittest.TestCase):
             conn.close()
         ee.DB_PATH = self.db_path
 
+    @_skip_legacy_score_dualwrite
     def test_invalid_message_id_incident_fail_updates_emotion_and_history_once(self):
         before = _history_count(self.db_path)
         with mock.patch.object(ee, '_deepseek_score', return_value=_deepseek_scores()), \
@@ -2104,6 +2128,7 @@ class FallbackHistoryFinalizeTests(unittest.TestCase):
             conn.close()
         self.assertEqual(_history_count(self.db_path), before + 1)
 
+    @_skip_legacy_score_dualwrite
     def test_proof_schema_missing_sidecar_fail_updates_emotion_and_history_once(self):
         before = _history_count(self.db_path)
         with mock.patch.object(ee, '_deepseek_score', return_value=_deepseek_scores()), \
@@ -2122,6 +2147,7 @@ class FallbackHistoryFinalizeTests(unittest.TestCase):
             conn.close()
         self.assertEqual(_history_count(self.db_path), before + 1)
 
+    @_skip_legacy_score_dualwrite
     def test_proof_schema_missing_emotion_txn_fail_updates_emotion_and_history_once(self):
         conn = store.open_store(self.db_path)
         try:
@@ -2153,6 +2179,7 @@ class FallbackHistoryFinalizeTests(unittest.TestCase):
             conn.close()
         self.assertEqual(_history_count(self.db_path), before + 1)
 
+    @_skip_legacy_score_dualwrite
     def test_compute_score_hash_failure_still_legacy_and_history_once(self):
         before = _history_count(self.db_path)
         conn = store.open_store(self.db_path)
@@ -2195,6 +2222,7 @@ class FallbackHistoryFinalizeTests(unittest.TestCase):
         finally:
             conn.close()
 
+    @_skip_legacy_score_dualwrite
     def test_score_proof_schema_ready_probe_failure_legacy_and_fail_closed(self):
         conn = store.open_store(self.db_path)
         try:
@@ -2237,6 +2265,7 @@ class FallbackHistoryFinalizeTests(unittest.TestCase):
         finally:
             conn.close()
 
+    @_skip_legacy_score_dualwrite
     def test_duplicate_stale_conflict_skip_history(self):
         conn = store.open_store(self.db_path)
         try:

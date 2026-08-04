@@ -181,32 +181,40 @@ def insert_user_message(
         )
     )
     try:
-        # previous_user_at：必须在插入本条之前读取，避免 longing 被算成 0
+        # previous_user_at：必须在插入本条之前读取，避免 longing 被算成 0。
+        # Stage C Bond authority needs clocks; tolerate fixtures missing created_at.
         from chat.interaction_state import USER_AUTHOR_SQL
-        if _user_events_requested:
+        try:
             prev = conn.execute(
-            f"SELECT created_at FROM chat_messages WHERE {USER_AUTHOR_SQL} "
-            "ORDER BY id DESC LIMIT 1"
-        ).fetchone()
+                f"SELECT created_at FROM chat_messages WHERE {USER_AUTHOR_SQL} "
+                "ORDER BY id DESC LIMIT 1"
+            ).fetchone()
             if prev is not None:
-                previous_user_at = prev['created_at'] if hasattr(prev, 'keys') else prev[0]
+                previous_user_at = (
+                    prev['created_at'] if hasattr(prev, 'keys') else prev[0]
+                )
                 previous_user_at = str(previous_user_at) if previous_user_at else None
+        except Exception:
+            previous_user_at = None
         cur = conn.execute(
             "INSERT INTO chat_messages (author,content) VALUES ('hayana',?)",
             (text,),
         )
         user_id = int(cur.lastrowid)
-        if _user_events_requested:
+        try:
             row = conn.execute(
-            "SELECT created_at FROM chat_messages WHERE id=?",
-            (user_id,),
-        ).fetchone()
+                "SELECT created_at FROM chat_messages WHERE id=?",
+                (user_id,),
+            ).fetchone()
             if row is not None:
                 created_at = row['created_at'] if hasattr(row, 'keys') else row[0]
                 created_at = str(created_at) if created_at else None
+        except Exception:
+            created_at = None
         capture_alert_failed = False
-        # Shadow user_rule outbox：与 chat INSERT 同事务；缺表则 outbox_capture_gap
-        # 聊天主流程不得阻断；证据全失败时记 sticky alert（status fail-closed）
+        # Optional Shadow outbox (flag-gated diagnostics). Stage C authority
+        # applies user_rule after commit via affect_bond_authority; same
+        # event_key is idempotent if both paths fire.
         if _user_events_requested and user_id is not None and created_at:
             try:
                 import internal_state_shadow as _shadow
@@ -270,6 +278,20 @@ def insert_user_message(
         touch_user_interaction(get_db_fn)
     except Exception:
         pass
+    # Stage C: authoritative Bond mutation (Canonical user_rule). Best-effort;
+    # chat must not fail if V3 apply has a transient error.
+    if user_id is not None and created_at:
+        try:
+            from chat.affect_bond_authority import apply_user_rule_best_effort
+            apply_user_rule_best_effort(
+                message_id=int(user_id),
+                text=text,
+                created_at=str(created_at),
+                previous_user_at=previous_user_at,
+                db_path=memories_db_path,
+            )
+        except Exception:
+            pass
     # commit 后立即 drain（失败行仍保留，可重放）
     if user_id is not None and created_at:
         try:
