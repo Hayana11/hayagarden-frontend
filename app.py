@@ -4360,11 +4360,20 @@ def set_ledger_budget():
 
 # ── Chat branches (regen + edit) ──────────────────────────
 
-from chat.cc_history_rewrite import serialize_history_rewrite
+from chat.cc_history_rewrite import (
+    note_durable_history_rewrite,
+    serialize_history_rewrite,
+)
 
 
 def invalidate_cc_resident_for_history_rewrite(reason):
-    """Single app-side bridge to the authoritative gateway resident."""
+    """Single app-side bridge to the authoritative gateway resident.
+
+    Once a history rewrite is durable, note a fail-closed barrier *before*
+    calling the bridge so a rejected/failed invalidation cannot leave a
+    stale hot resident eligible for reuse.
+    """
+    note_durable_history_rewrite(reason)
     result = _gw_json_request(
         'POST', '/internal/cc-resident/history-rewrite', {'reason': reason},
     )
@@ -4593,15 +4602,19 @@ def edit_message():
 
 
 @app.route('/api/chat/delete', methods=['POST'])
+@serialize_history_rewrite
 def delete_message():
     data = request.get_json() or {}
     msg_id = data.get('msg_id')
     if not msg_id:
         return jsonify({'error': 'msg_id required'}), 400
     conn = get_db()
-    conn.execute('DELETE FROM chat_messages WHERE id=?', (msg_id,))
+    cur = conn.execute('DELETE FROM chat_messages WHERE id=?', (msg_id,))
+    deleted = int(cur.rowcount or 0) > 0
     conn.commit()
     conn.close()
+    if deleted:
+        invalidate_cc_resident_for_history_rewrite('delete')
     return jsonify({'ok': True})
 
 

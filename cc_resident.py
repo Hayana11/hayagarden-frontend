@@ -401,6 +401,15 @@ class ResidentSession:
 
     def _decide_respawn_reason(self, system_text, *, tool_profile=TOOL_PROFILE_LEGACY):
         from chat.cc_model import cc_model_identity
+        # Durable history rewrite barrier: once DB rewrite committed, old hot
+        # reuse is forbidden even if app→gateway invalidation bridge failed.
+        try:
+            from chat.cc_history_rewrite import history_rewrite_barrier_reason
+            barrier = history_rewrite_barrier_reason()
+        except Exception:
+            barrier = None
+        if barrier:
+            return 'history_rewrite'
         if not self._alive():
             return self._next_spawn_reason or 'process_dead'
         if str(tool_profile or TOOL_PROFILE_LEGACY) != str(self._tool_profile or TOOL_PROFILE_LEGACY):
@@ -436,7 +445,19 @@ class ResidentSession:
         with self._lock:
             reason = self._decide_respawn_reason(system_text, tool_profile=tool_profile)
             if reason:
+                if reason == 'history_rewrite':
+                    self._system_text = None
+                    self._session_id = None
+                    self._model_identity = None
+                    self._cold = True
+                    self._next_spawn_reason = 'history_rewrite'
                 self._spawn(system_text, env, reason=reason, tool_profile=tool_profile)
+                if reason == 'history_rewrite':
+                    try:
+                        from chat.cc_history_rewrite import clear_history_rewrite_barrier
+                        clear_history_rewrite_barrier()
+                    except Exception:
+                        pass
             return self._cold
 
     def peek_respawn_reason(self, system_text, *, tool_profile=TOOL_PROFILE_LEGACY):

@@ -3166,6 +3166,7 @@ def invalidate_cc_resident_history_rewrite():
     reason = str(data.get('reason') or 'history_rewrite')[:80]
     resident = _CC_RESIDENT.get()
     resident.invalidate_for_history_rewrite(reason)
+    cc_history_rewrite.clear_history_rewrite_barrier()
     return jsonify({'ok': True, 'invalidated': True})
 
 # B1：独立 CC Wake resident——绝不复用上面的聊天 resident，避免半夜
