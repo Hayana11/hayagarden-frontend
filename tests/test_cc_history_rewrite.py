@@ -130,6 +130,7 @@ def _ensure_app_importable():
     root.mkdir(parents=True, exist_ok=True)
     (root / '.env').touch(exist_ok=True)
     conn = sqlite3.connect(str(root / 'memories.db'))
+    conn.row_factory = sqlite3.Row
     try:
         conn.execute('CREATE TABLE IF NOT EXISTS chat_messages (id INTEGER PRIMARY KEY, author TEXT, content TEXT)')
         conn.commit()
