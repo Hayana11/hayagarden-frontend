@@ -195,6 +195,12 @@ def delete_documents(
     ``ids`` are always user_upload message ids (never artifact ids).
     Illegal keys: skipped when ``strict_keys=False``; raise ValueError when True
     (route maps that to HTTP 400).
+
+    Order is fixed to avoid SQLite write locks:
+      1) parse / validate / dedupe
+      2) delete Artifacts first (own connections)
+      3) then one connection for all user-upload updates
+    Input key order must not affect success.
     """
     parsed: list[tuple[str, int]] = []
     raw_keys = list(keys or [])
@@ -209,17 +215,15 @@ def delete_documents(
             continue
         parsed.append(got)
 
-    legacy_ids: list[int] = []
     for mid in list(ids or [])[:MAX_DELETE_KEYS]:
         try:
             n = int(mid)
         except (TypeError, ValueError):
             continue
         if n > 0:
-            legacy_ids.append(n)
             parsed.append(('user_upload', n))
 
-    # Deduplicate while preserving order.
+    # Deduplicate while preserving first-seen order, then partition.
     seen = set()
     unique: list[tuple[str, int]] = []
     for item in parsed:
@@ -229,18 +233,22 @@ def delete_documents(
         unique.append(item)
     unique = unique[:MAX_DELETE_KEYS]
 
-    deleted_uploads = 0
+    artifact_ids = [item_id for source, item_id in unique if source == 'assistant_artifact']
+    upload_ids = [item_id for source, item_id in unique if source == 'user_upload']
+
     deleted_artifacts = 0
+    for aid in artifact_ids:
+        status = artifact_store.delete(aid, allow_stale_metadata=True)
+        if status in ('deleted', 'stale_cleared'):
+            deleted_artifacts += 1
+        # unlink_failed / not_found / bad_path → do not count as deleted
+
+    deleted_uploads = 0
     conn = _db()
     try:
-        for source, item_id in unique:
-            if source == 'user_upload':
-                if _delete_upload(conn, item_id):
-                    deleted_uploads += 1
-            else:
-                status = artifact_store.delete(item_id, allow_stale_metadata=True)
-                if status in ('deleted', 'stale_cleared'):
-                    deleted_artifacts += 1
+        for mid in upload_ids:
+            if _delete_upload(conn, mid):
+                deleted_uploads += 1
         conn.commit()
     finally:
         conn.close()

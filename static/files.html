@@ -176,10 +176,8 @@ function openItem(f){
   body.innerHTML='';
   var ifr=document.createElement('iframe');
   ifr.setAttribute('referrerpolicy','no-referrer');
-  // Server preview shell already sandboxes untrusted HTML; text previews are plain.
-  if(src==='assistant_artifact' || t==='html' || t==='htm' || t==='markdown' || t==='md'){
-    ifr.setAttribute('sandbox','allow-scripts');
-  }
+  // Outer frame stays trusted same-origin so server preview shell can
+  // fetch(/.../content). Untrusted HTML is sandboxed only inside that shell.
   body.appendChild(ifr);
   ifr.src=url;
   document.getElementById('ov').className='ov show';

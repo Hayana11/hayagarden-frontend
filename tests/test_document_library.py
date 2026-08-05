@@ -197,6 +197,85 @@ class DocumentLibraryTests(unittest.TestCase):
         self.assertIsNone(self.dl.parse_library_key('upload:0'))
         self.assertIsNone(self.dl.parse_library_key('file:1'))
 
+    def _assert_mixed_consistency(self, upload_id, artifact_id, upload_path, artifact_path):
+        self.assertFalse(Path(upload_path).exists())
+        self.assertFalse(Path(artifact_path).exists())
+        self.assertIsNone(self.as_.get(artifact_id))
+        conn = sqlite3.connect(self.db)
+        row = conn.execute(
+            'SELECT file_url, file_name FROM chat_messages WHERE id=?',
+            (upload_id,),
+        ).fetchone()
+        conn.close()
+        self.assertEqual(row[0], '')
+        self.assertEqual(row[1], '')
+
+    def test_m1_mixed_upload_then_artifact(self):
+        self._add_upload(21, 'u.txt', '2026-08-05 12:00:00')
+        meta = self.as_.save('html', 'A', '<p>a</p>')
+        upath = Path(self.files) / 'aabbccdd_u.txt'
+        apath = Path(self.store) / self.as_.get(meta['id'])['filename']
+        out = self.dl.delete_documents(
+            keys=['upload:21', 'artifact:%d' % meta['id']],
+            strict_keys=True,
+        )
+        self.assertEqual(out['deleted_uploads'], 1)
+        self.assertEqual(out['deleted_artifacts'], 1)
+        self._assert_mixed_consistency(21, meta['id'], upath, apath)
+
+    def test_m2_mixed_artifact_then_upload(self):
+        self._add_upload(22, 'v.txt', '2026-08-05 12:00:00')
+        meta = self.as_.save('markdown', 'B', '# b')
+        upath = Path(self.files) / 'aabbccdd_v.txt'
+        apath = Path(self.store) / self.as_.get(meta['id'])['filename']
+        out = self.dl.delete_documents(
+            keys=['artifact:%d' % meta['id'], 'upload:22'],
+            strict_keys=True,
+        )
+        self.assertEqual(out['deleted_uploads'], 1)
+        self.assertEqual(out['deleted_artifacts'], 1)
+        self._assert_mixed_consistency(22, meta['id'], upath, apath)
+
+    def test_m3_m4_m5_same_numeric_id_both_selected(self):
+        self._add_upload(33, 'w.txt', '2026-08-05 12:00:00')
+        conn = sqlite3.connect(self.db)
+        conn.execute(
+            "INSERT INTO artifacts (id, type, title, filename, size, created_at) "
+            "VALUES (33,'html','Same','a_sameid000033.html',2,'2026-08-05 12:01:00')"
+        )
+        Path(self.store, 'a_sameid000033.html').write_text('z', encoding='utf-8')
+        conn.commit()
+        conn.close()
+        upath = Path(self.files) / 'aabbccdd_w.txt'
+        apath = Path(self.store) / 'a_sameid000033.html'
+        try:
+            out = self.dl.delete_documents(
+                keys=['upload:33', 'artifact:33'],
+                strict_keys=True,
+            )
+        except sqlite3.OperationalError as exc:
+            self.fail('mixed delete raised sqlite lock: %s' % exc)
+        self.assertEqual(out['deleted_uploads'], 1)
+        self.assertEqual(out['deleted_artifacts'], 1)
+        self._assert_mixed_consistency(33, 33, upath, apath)
+
+    def test_m6_unlink_failed_not_counted(self):
+        self._add_upload(44, 'keep.txt', '2026-08-05 12:00:00')
+        meta = self.as_.save('html', 'Fail', '<p>f</p>')
+        with mock.patch.object(self.as_, 'delete', return_value='unlink_failed'):
+            out = self.dl.delete_documents(
+                keys=['upload:44', 'artifact:%d' % meta['id']],
+                strict_keys=True,
+            )
+        self.assertEqual(out['deleted_uploads'], 1)
+        self.assertEqual(out['deleted_artifacts'], 0)
+        # Artifact still present because delete reported unlink_failed (mocked).
+        self.assertIsNotNone(self.as_.get(meta['id']))
+        conn = sqlite3.connect(self.db)
+        row = conn.execute('SELECT file_url FROM chat_messages WHERE id=44').fetchone()
+        conn.close()
+        self.assertEqual(row[0], '')
+
 
 if __name__ == '__main__':
     unittest.main()

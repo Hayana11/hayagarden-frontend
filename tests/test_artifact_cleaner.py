@@ -245,6 +245,25 @@ class FilesHtmlContractTests(unittest.TestCase):
         self.assertNotIn('mdRender', html)
         self.assertNotIn('fetch(f.file_url)', html)
 
+    def test_p1_p5_outer_iframe_no_sandbox_double_layer(self):
+        """Outer files.html iframe must remain trusted; shell owns sandbox."""
+        root = Path(__file__).resolve().parents[1]
+        html = (root / 'static' / 'files.html').read_text(encoding='utf-8')
+        # P1/P2/P3: openItem must not set sandbox on the outer iframe.
+        self.assertNotIn("setAttribute('sandbox'", html)
+        self.assertNotIn('setAttribute("sandbox"', html)
+        # P5: no local markdown renderer / raw HTML fetch path.
+        self.assertNotIn('mdRender', html)
+        self.assertNotIn('fetch(f.file_url)', html)
+        self.assertNotIn('srcdoc', html)
+
+        from chat.attachment_contract import sandbox_preview_shell
+        shell = sandbox_preview_shell('/api/artifacts/1/content')
+        # P4: inner shell sandbox is allow-scripts only (no allow-same-origin).
+        self.assertIn('sandbox="allow-scripts"', shell)
+        self.assertNotIn('allow-same-origin', shell)
+        self.assertEqual(shell.count('sandbox='), 1)
+
 
 if __name__ == '__main__':
     unittest.main()
