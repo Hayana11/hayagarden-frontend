@@ -17,7 +17,7 @@
   --bg:#f8f8f6;--card:#fff;--text:#2a2020;--muted:#9a8a8a;
   --primary:#7c6a8a;--amber:#d4a574;--border:#ece6e0;
 }
-body{background:var(--bg);color:var(--text);font-family:-apple-system,'PingFang SC','HarmonyOS Sans SC','Noto Sans CJK SC','Noto Sans SC',sans-serif;min-height:100vh;max-width:480px;margin:0 auto;padding-bottom:calc(72px + env(safe-area-inset-bottom,0px));}
+body{background:var(--bg);color:var(--text);font-family:-apple-system,'PingFang SC','HarmonyOS Sans SC','Noto Sans CJK SC','Noto Sans SC',sans-serif;min-height:100vh;max-width:480px;margin:0 auto;padding-bottom:calc(72px + env(safe-area-inset-bottom,0px));-webkit-text-size-adjust:100%;text-size-adjust:100%;}
 
 /* Header */
 .hd{padding:44px 20px 16px;text-align:center;}
@@ -27,8 +27,9 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,'PingFang 
 .hd h1 .ha{color:var(--amber);}
 .hd .sub{font-size:12px;color:var(--muted);margin-top:7px;letter-spacing:.5px;}
 
-/* Stat cards */
-.stats{display:flex;gap:10px;padding:6px 20px 4px;}
+/* Stat cards — flex gap unsupported on Chrome <84 WebView */
+.stats{display:flex;padding:6px 20px 4px;}
+.stats .stat + .stat{margin-left:10px;}
 .stat{flex:1;background:var(--card);border:.5px solid var(--border);border-radius:14px;padding:16px 14px;text-align:center;}
 .stat .n{font-size:28px;font-weight:800;line-height:1.1;}
 .stat .n.p{color:var(--primary);}
@@ -43,7 +44,7 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,'PingFang 
 .miss-btn.beating{animation:beat .3s ease;}
 .miss-info{font-size:12px;color:var(--muted);margin-top:8px;}
 
-/* Memory grid */
+/* Memory grid — grid gap OK on Chrome 66+ */
 .sec{padding:16px 20px 4px;}
 .sec-t{font-size:11px;letter-spacing:3px;color:var(--muted);margin-bottom:10px;}
 .grid2{display:grid;grid-template-columns:1fr 1fr;gap:10px;}
@@ -65,8 +66,9 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,'PingFang 
 .hwd{font-size:9px;color:var(--muted);text-align:center;padding:2px 0;letter-spacing:.5px;}
 .hcell{aspect-ratio:1;display:flex;align-items:center;justify-content:center;font-size:11px;border-radius:8px;color:var(--text);}
 .hcell.today{background:var(--primary);color:#fff;font-weight:700;}
-.heat-legend{display:flex;align-items:center;justify-content:flex-end;gap:4px;margin-top:10px;font-size:10px;color:var(--muted);}
-.heat-legend .sq{width:12px;height:12px;border-radius:3px;border:.5px solid var(--border);}
+.heat-legend{display:flex;align-items:center;justify-content:flex-end;margin-top:10px;font-size:10px;color:var(--muted);}
+.heat-legend .sq{width:12px;height:12px;border-radius:3px;border:.5px solid var(--border);margin-left:4px;}
+.heat-legend .sq:first-of-type{margin-left:4px;}
 
 /* Diary generate button */
 .act-btn{display:block;margin:14px 20px 0;width:calc(100% - 40px);padding:13px;color:#fff;border:none;border-radius:12px;font-size:14px;cursor:pointer;font-family:inherit;transition:opacity .18s;letter-spacing:.3px;text-align:center;background:var(--amber);box-shadow:0 2px 10px rgba(212,165,116,.25);}
@@ -75,8 +77,8 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,'PingFang 
 
 /* Bottom nav */
 .bnav{position:fixed;bottom:0;left:50%;transform:translateX(-50%);width:100%;max-width:480px;background:rgba(255,255,255,.97);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);border-top:1px solid var(--border);display:flex;z-index:50;padding:7px 0 calc(7px + env(safe-area-inset-bottom,0px));}
-.ni{flex:1;display:flex;flex-direction:column;align-items:center;gap:3px;text-decoration:none;border:none;background:none;cursor:pointer;color:#b0a0aa;font-size:10px;letter-spacing:.4px;font-family:inherit;padding:4px 0;transition:color .18s;}
-.ni i{font-size:21px;}
+.ni{flex:1;display:flex;flex-direction:column;align-items:center;text-decoration:none;border:none;background:none;cursor:pointer;color:#b0a0aa;font-size:10px;letter-spacing:.4px;font-family:inherit;padding:4px 0;transition:color .18s;}
+.ni i{font-size:21px;margin-bottom:3px;}
 .ni.act{color:var(--primary);}
 
 /* Modals */

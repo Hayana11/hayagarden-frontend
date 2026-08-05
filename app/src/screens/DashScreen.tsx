@@ -99,11 +99,11 @@ export function DashScreen() {
   const periodPhase = period.status === 'ready' ? period.phase : period.status === 'error' ? '未连接' : '—';
 
   return (
-    <div style={{ padding: '26px 20px 110px', display: 'flex', flexDirection: 'column', gap: 16, position: 'relative' }}>
+    <div className="vstack vstack-16 screen-stack" style={{ position: 'relative' }}>
       {/* header */}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-          <div style={{ display: 'flex', alignItems: 'baseline', gap: 10 }}>
+        <div className="vstack vstack-6">
+          <div className="hstack-baseline hstack-10">
             <span style={{ fontFamily: "'Bodoni Moda',serif", fontStyle: 'italic', fontSize: 34, color: 'var(--color-rose)', letterSpacing: 1 }}>
               Fyodor
             </span>
@@ -117,13 +117,11 @@ export function DashScreen() {
       </div>
 
       {/* emotion status strip */}
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 8, padding: '0 4px' }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+      <div className="vstack vstack-8" style={{ padding: '0 4px' }}>
+        <div className="hstack hstack-10">
           <span
+            className="hstack hstack-7"
             style={{
-              display: 'flex',
-              alignItems: 'center',
-              gap: 7,
               background: 'rgba(183,110,121,0.10)',
               borderRadius: 14,
               padding: '4px 13px',
@@ -132,7 +130,7 @@ export function DashScreen() {
               letterSpacing: 2,
             }}
           >
-            <span style={{ width: 6, height: 6, borderRadius: '50%', background: 'var(--color-rose)', animation: 'livePulse 2s infinite' }} />
+            <span style={{ width: 6, height: 6, borderRadius: '50%', background: 'var(--color-rose)', animation: 'livePulse 2s infinite', flexShrink: 0 }} />
             <span>安然</span>
           </span>
           <span style={{ fontFamily: "'Bodoni Moda',serif", fontSize: 11, letterSpacing: 1, color: 'var(--color-text-faint)' }}>
@@ -153,7 +151,7 @@ export function DashScreen() {
           <span style={{ fontSize: 16, fontWeight: 600, letterSpacing: 2 }}>记忆库</span>
           <span style={{ color: 'var(--color-text-fainter)', fontSize: 18 }}>›</span>
         </div>
-        <div style={{ display: 'flex', gap: 26, marginTop: 16 }}>
+        <div className="hstack hstack-26" style={{ marginTop: 16 }}>
           <div>
             <span style={{ fontFamily: "'Bodoni Moda',serif", fontSize: 26, fontWeight: 500 }}>{memory?.core ?? '—'}</span>
             <span style={{ fontSize: 13, color: 'var(--color-text-mute)', marginLeft: 6 }}>核心</span>
@@ -250,11 +248,10 @@ export function DashScreen() {
                 flexDirection: 'column',
                 alignItems: 'center',
                 justifyContent: 'center',
-                gap: 1,
               }}
             >
-              <span style={{ fontFamily: "'Bodoni Moda',serif", fontSize: 13, fontWeight: 500, color: c.dColor }}>{c.d}</span>
-              <span style={{ fontSize: 9, color: c.nColor }}>{c.n}</span>
+              <span style={{ fontFamily: "'Bodoni Moda',serif", fontSize: 13, fontWeight: 500, color: c.dColor, lineHeight: 1.15 }}>{c.d}</span>
+              <span style={{ fontSize: 9, color: c.nColor, marginTop: 1 }}>{c.n}</span>
             </div>
           ))}
         </div>
@@ -262,8 +259,8 @@ export function DashScreen() {
 
       {/* usage: traffic-light bars (clickable) */}
       <Card onClick={() => navigate('/usage')} style={{ padding: '14px 18px' }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 10 }}>
-          <div style={{ minWidth: 0 }}>
+        <div className="hstack" style={{ justifyContent: 'space-between' }}>
+          <div style={{ minWidth: 0, marginRight: 10 }}>
             <div style={{ fontSize: 16, fontWeight: 600, letterSpacing: 2 }}>⛁ {usageAgentId === 'claude' ? 'Claude' : 'GPT'} 用量</div>
             <div style={{ fontSize: 10.5, color: 'var(--color-text-faint)', marginTop: 2, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
               {selectedAgentUsage?.available ? selectedAgentUsage.name : '暂无可读数据'} · {msgToday} 条 · {formatTokens(usage?.tokenToday ?? 0)} tok
@@ -281,7 +278,8 @@ export function DashScreen() {
       <div style={{ display: 'grid', gridTemplateColumns: '148px 1fr', gap: 12, alignItems: 'stretch' }}>
         <div
           onClick={() => navigate('/period')}
-          style={{ cursor: 'pointer', background: '#F9EDEA', borderRadius: 22, padding: '18px 16px', display: 'flex', flexDirection: 'column', gap: 6 }}
+          className="vstack vstack-6"
+          style={{ cursor: 'pointer', background: '#F9EDEA', borderRadius: 22, padding: '18px 16px' }}
         >
           <span style={{ fontSize: 18 }}>🌙</span>
           <span style={{ fontFamily: "'Bodoni Moda',serif", fontStyle: 'italic', fontSize: 17, color: 'var(--color-rose)', letterSpacing: 1 }}>
@@ -304,7 +302,7 @@ export function DashScreen() {
         </div>
         <Card style={{ padding: '16px 16px 12px', overflow: 'hidden' }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <div className="hstack hstack-8">
               <i className="ti ti-checkbox" style={{ fontSize: 24, color: '#8FAEC9' }} />
               <span style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 24, fontWeight: 600, letterSpacing: 1 }}>To-do</span>
             </div>
@@ -315,12 +313,13 @@ export function DashScreen() {
           <div style={{ fontFamily: "'Bodoni Moda',serif", fontSize: 11, color: 'var(--color-text-faint)', marginTop: 2 }}>
             {activeTodos} active · AI only
           </div>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 2, marginTop: 8 }}>
+          <div className="vstack vstack-2" style={{ marginTop: 8 }}>
             {todos.map((t) => (
               <div
                 key={t.id}
                 onClick={() => toggle(t.id)}
-                style={{ cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 10, padding: '7px 0', minWidth: 0 }}
+                className="hstack hstack-10"
+                style={{ cursor: 'pointer', padding: '7px 0', minWidth: 0 }}
               >
                 <div
                   style={{
@@ -362,7 +361,8 @@ export function DashScreen() {
       <div
         onClick={() => navigate('/ledger')}
         data-testid="dash-ledger-card"
-        style={{ cursor: 'pointer', background: '#E2EEE68E', borderRadius: 22, padding: '12px 16px', display: 'flex', alignItems: 'center', gap: 14 }}
+        className="hstack hstack-14"
+        style={{ cursor: 'pointer', background: '#E2EEE68E', borderRadius: 22, padding: '12px 16px' }}
       >
         <svg viewBox="0 0 96 96" style={{ width: 50, height: 50, flexShrink: 0 }}>
           <circle cx={48} cy={48} r={40} fill="none" stroke="#FFFFFF" strokeWidth={9} />
@@ -407,7 +407,7 @@ export function DashScreen() {
           <span style={{ fontSize: 15, fontWeight: 600, letterSpacing: 1, color: '#5f6469' }}>Recent</span>
           <span style={{ color: 'var(--color-text-fainter)', fontSize: 18 }}>›</span>
         </div>
-        <div style={{ marginTop: 8, display: 'flex', flexDirection: 'column', gap: 2 }}>
+        <div style={{ marginTop: 8 }} className="vstack vstack-2">
           {recentItems.length === 0 ? (
             <div style={{ fontSize: 12, color: 'var(--color-text-faint)' }}>暂无近期记录</div>
           ) : (
