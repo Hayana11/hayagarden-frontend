@@ -10,6 +10,7 @@ import { CarryoverModal } from '../components/dailySoftWindow';
 import { useManualContextWindow } from '../hooks/useManualContextWindow';
 import {
   editChatMessage,
+  editFinalize,
   fetchChatMessages,
   fetchModelCatalog,
   regenFinalize,
@@ -357,7 +358,10 @@ export function ChatScreen() {
   }, []);
 
   const runStream = useCallback(
-    async (userMessageId: number | null): Promise<boolean> => {
+    async (
+      userMessageId: number | null,
+      opts: { rewriteId?: string | null } = {},
+    ): Promise<boolean> => {
       liveRef.current = { thinking: '', text: '', tools: [], phase: 'wait' };
       setLive(liveRef.current);
       const ctrl = new AbortController();
@@ -385,6 +389,7 @@ export function ChatScreen() {
           onNotice: (s) => showToast(s),
         },
         ctrl,
+        { rewriteId: opts.rewriteId },
       );
       liveRef.current = null;
       setLive(null);
@@ -492,9 +497,14 @@ export function ChatScreen() {
         setSending(false);
         return;
       }
-      setMsgs((cur) => cur.filter((m) => m.id !== msgId));
-      const ok = await runStream(prep.userMessageId);
-      if (ok) await regenFinalize(prep.oldBranches);
+      // Keep old assistant visible until candidate activates.
+      const ok = await runStream(prep.userMessageId, { rewriteId: prep.rewriteId });
+      if (ok) {
+        // finalize retries transport-ambiguous / effects_pending internally (same rewrite_id).
+        const fin = await regenFinalize(prep.rewriteId);
+        if (!fin) showToast('重答结果未确认，正在刷新…');
+        else if (fin.effectsPending) showToast('重答已切换，收尾未完成，可再试一次');
+      }
       await refetchLatest();
       setSending(false);
     },
@@ -509,13 +519,26 @@ export function ChatScreen() {
       setChatError(null);
       setEditingId(null);
       const edit = await editChatMessage(msgId, content);
-      if (!edit.ok || edit.messageId === null) {
+      if (!edit.ok || !edit.rewriteId) {
         showToast('修改失败');
         setSending(false);
         return;
       }
-      await refetchLatest();
-      await runStream(edit.messageId);
+      // Active transcript stays intact until finalize succeeds.
+      const ok = await runStream(null, { rewriteId: edit.rewriteId });
+      if (ok) {
+        // finalize retries transport-ambiguous / effects_pending internally (same rewrite_id).
+        const fin = await editFinalize(edit.rewriteId);
+        if (!fin.ok) {
+          showToast(
+            fin.effectsPending
+              ? '修改已切换，收尾未完成，可再试一次'
+              : '修改结果未确认，正在刷新…',
+          );
+        } else if (fin.effectsPending) {
+          showToast('修改已切换，收尾未完成，可再试一次');
+        }
+      }
       await refetchLatest();
       setSending(false);
     },

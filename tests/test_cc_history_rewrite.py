@@ -311,33 +311,59 @@ class HistoryRewriteRouteTests(unittest.TestCase):
         return row_id
 
     def test_edit_invalidates_then_cold_bootstraps_only_edited_history(self):
+        from chat import rewrite_staging as _rw
         edit_id = self._insert('hayana', 'U1')
         self._insert('assistant', 'A1')
         self._insert('hayana', 'U2')
         self._insert('assistant', 'A2')
-        response = self.client.post('/api/chat/edit', json={'msg_id': edit_id, 'content': "U1'"})
+        # Prepare alone must not rewrite active history / invalidate.
+        prep = self.client.post('/api/chat/edit', json={'msg_id': edit_id, 'content': "U1'"})
+        self.assertEqual(prep.status_code, 200)
+        self.assertEqual(self.invalidation_calls, [])
+        rewrite_id = prep.get_json()['rewrite_id']
+        conn = self.get_db()
+        _rw.store_candidate(conn, rewrite_id, content='NEW_A1')
+        conn.commit()
+        conn.close()
+        response = self.client.post('/api/chat/edit/finalize', json={'rewrite_id': rewrite_id})
         self.assertEqual(response.status_code, 200)
         self.assertEqual(self.invalidation_calls, ['edit'])
-        self.assertEqual(self.history_at_invalidation, ["U1'"])
+        self.assertEqual(self.history_at_invalidation, ["U1'\nNEW_A1"])
         epoch = current_history_rewrite_epoch()
         self.assertTrue(epoch)
         history = _assert_next_generation_cold(self, self.resident, self.get_db)
-        self.assertIn("U1'", history)
-        for old in ('A1', 'U2', 'A2'):
-            self.assertNotIn(old, history)
+        self.assertEqual(history.split('\n'), ["U1'", 'NEW_A1'])
         self.assertEqual(current_history_rewrite_epoch(), epoch)
         self.assertEqual(self.resident._history_rewrite_epoch, epoch)
 
     def test_regenerate_invalidates_before_new_generation(self):
+        from chat import rewrite_staging as _rw
         self._insert('hayana', 'U1')
         assistant_id = self._insert('assistant', 'A1')
+        # Prepare is non-destructive: active A1 remains; no invalidate yet.
         response = self.client.post('/api/chat/regen/prepare', json={'msg_id': assistant_id})
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(self.invalidation_calls, ['regen_prepare'])
-        self.assertEqual(self.history_at_invalidation, ['U1'])
+        self.assertEqual(self.invalidation_calls, [])
+        rewrite_id = response.get_json()['rewrite_id']
+        conn = self.get_db()
+        rows = [dict(r) for r in conn.execute(
+            'SELECT id, author, content FROM chat_messages ORDER BY id'
+        ).fetchall()]
+        overlay = _rw.apply_history_overlay(
+            rows, _rw.load(conn, rewrite_id),
+        )
+        conn.close()
+        self.assertEqual([r['content'] for r in overlay], ['U1'])
+        # Activation of the new variant is the durable rewrite boundary.
+        conn = self.get_db()
+        _rw.store_candidate(conn, rewrite_id, content='NEW_A1')
+        conn.commit()
+        conn.close()
+        fin = self.client.post('/api/chat/regen/finalize', json={'rewrite_id': rewrite_id})
+        self.assertEqual(fin.status_code, 200)
+        self.assertEqual(self.invalidation_calls, ['regen_finalize'])
         history = _assert_next_generation_cold(self, self.resident, self.get_db)
-        self.assertIn('U1', history)
-        self.assertNotIn('A1', history)
+        self.assertEqual(history.split('\n'), ['U1', 'NEW_A1'])
 
     def test_branch_switch_invalidates_and_cold_uses_selected_answer(self):
         self._insert('hayana', 'U1')
@@ -400,13 +426,23 @@ class HistoryRewriteRouteTests(unittest.TestCase):
         _assert_hot_reuse(self, self.resident)
 
     def test_bridge_failure_after_durable_rewrite_fail_closed(self):
+        from chat import rewrite_staging as _rw
         edit_id = self._insert('hayana', 'U1')
         self._insert('assistant', 'A1')
+        prep = self.client.post(
+            '/api/chat/edit', json={'msg_id': edit_id, 'content': "U1'"},
+        )
+        self.assertEqual(prep.status_code, 200)
+        rewrite_id = prep.get_json()['rewrite_id']
+        conn = self.get_db()
+        _rw.store_candidate(conn, rewrite_id, content='NEW_A1')
+        conn.commit()
+        conn.close()
         with mock.patch.object(
             app_module, '_gw_json_request', return_value={'error': 'bridge refused'},
         ):
             response = self.client.post(
-                '/api/chat/edit', json={'msg_id': edit_id, 'content': "U1'"},
+                '/api/chat/edit/finalize', json={'rewrite_id': rewrite_id},
             )
         # Bridge is acceleration-only: committed rewrite stays API success.
         self.assertEqual(response.status_code, 200)
@@ -418,8 +454,7 @@ class HistoryRewriteRouteTests(unittest.TestCase):
         self.assertTrue(self.resident._alive())
         self.assertEqual(self.resident._session_id, 'old-world-session')
         history = _assert_next_generation_cold(self, self.resident, self.get_db)
-        self.assertIn("U1'", history)
-        self.assertNotIn('A1', history)
+        self.assertEqual(history.split('\n'), ["U1'", 'NEW_A1'])
         # Epoch is durable: cold catch-up must not clear it.
         self.assertEqual(current_history_rewrite_epoch(), epoch)
         self.assertEqual(self.resident._history_rewrite_epoch, epoch)

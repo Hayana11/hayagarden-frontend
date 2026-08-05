@@ -184,8 +184,253 @@ import group_chat_store
 import codex_app_server
 import cc_resident
 from chat import cc_history_rewrite
+from chat import rewrite_staging as rewrite_staging
 
 group_chat_store.ensure_schema(DB_PATH)
+try:
+    rewrite_staging.ensure_schema_for_path(DB_PATH)
+except Exception:
+    pass
+
+
+def _discard_staged_resident(reason: str = 'staged_rewrite_end') -> None:
+    """Kill the trial resident used for staged overlay generation.
+
+    Does NOT advance durable history-rewrite epoch — authoritative DB is still
+    the old active transcript until finalize succeeds.
+    """
+    try:
+        _CC_RESIDENT.invalidate_for_history_rewrite(str(reason or 'staged_rewrite_end'))
+    except Exception:
+        pass
+
+
+def _begin_staged_rewrite_generation(turn_data: dict) -> dict | None:
+    """Mark staging generating and cold-boot local resident for overlay history.
+
+    Active transcript is unchanged. Durable epoch is NOT advanced here — that
+    remains finalize's job after authoritative activation.
+    """
+    rewrite_id = str((turn_data or {}).get('rewrite_id') or '').strip()
+    if not rewrite_id:
+        return None
+    conn = get_db()
+    try:
+        staging = rewrite_staging.load(conn, rewrite_id)
+        if not staging:
+            raise ValueError('rewrite not found')
+        _st = str(staging.get('status') or '')
+        if (
+            _st in (
+                rewrite_staging.STATUS_FAILED,
+                rewrite_staging.STATUS_STALE,
+                rewrite_staging.STATUS_EFFECTS_DONE,
+            )
+            or rewrite_staging._status_transcript_locked(_st)
+        ):
+            raise ValueError(f"rewrite not reusable: {staging.get('status')}")
+        rewrite_staging.assert_active_matches_prepare(conn, staging)
+        rewrite_staging.mark_generating(conn, rewrite_id)
+        conn.commit()
+        staging = rewrite_staging.load(conn, rewrite_id) or staging
+    except rewrite_staging.StaleRewriteError:
+        try:
+            conn.commit()
+        except Exception:
+            pass
+        conn.close()
+        raise
+    except Exception:
+        conn.close()
+        raise
+    else:
+        conn.close()
+    # Local trial-brain only — do not note durable epoch yet.
+    _discard_staged_resident('staged_rewrite_begin')
+    if turn_data.get('user_message_id') is None and staging.get('user_message_id') is not None:
+        turn_data['user_message_id'] = staging.get('user_message_id')
+    turn_data['_rewrite_staging'] = staging
+    turn_data['_staged_rewrite_active'] = True
+    return staging
+
+
+def _peek_relay_staged_one_shots() -> tuple[dict, str]:
+    """Peek feedback/dream for Relay staged rewrite without consuming them.
+
+    Returns (claims_dict, inject_text). Inject text is empty when nothing pending.
+    """
+    claims = {'feedback_ids': [], 'dream_id': None}
+    pieces = []
+    try:
+        import command_store
+        fb_lines, fb_ids = command_store.peek_feedback()
+        if fb_lines:
+            claims['feedback_ids'] = list(fb_ids)
+            pieces.append(
+                '## 任务完成反馈\n' + '\n'.join('- ' + line for line in fb_lines)
+                + '\n（这是浮窗自己记录回传的，不是她手动告诉你的。她这次开口了，'
+                  '你可以顺嘴提一句——用时、快慢、有没有取消，按你的性子说，别像报数据。）'
+            )
+    except Exception:
+        pass
+    try:
+        from chat.system_builder import peek_dream_one_shot
+        dream_text, dream_id = peek_dream_one_shot(get_db)
+        if dream_text:
+            claims['dream_id'] = dream_id
+            pieces.append(dream_text)
+    except Exception:
+        pass
+    return claims, '\n\n'.join(p for p in pieces if p and p.strip())
+
+
+def _staged_side_effects_payload(
+    turn_data: dict,
+    *,
+    assistant_text: str,
+    wake_ids=None,
+    one_shot_claims=None,
+    conversation_id: str = 'hayana-chat',
+) -> dict:
+    """Freeze active-only claims with the candidate; replay only after activate."""
+    staging = (turn_data or {}).get('_rewrite_staging') or {}
+    memo_user = ''
+    if staging.get('operation') == rewrite_staging.OP_EDIT:
+        memo_user = (staging.get('edited_content') or '').strip()
+    elif staging.get('operation') == rewrite_staging.OP_REGEN:
+        uid = staging.get('user_message_id') or (turn_data or {}).get('user_message_id')
+        if uid is not None:
+            try:
+                conn = get_db()
+                try:
+                    row = conn.execute(
+                        'SELECT content FROM chat_messages WHERE id=?', (int(uid),),
+                    ).fetchone()
+                    if row is not None:
+                        memo_user = (
+                            row['content'] if hasattr(row, 'keys') else row[0]
+                        ) or ''
+                        memo_user = str(memo_user).strip()
+                finally:
+                    conn.close()
+            except Exception:
+                memo_user = ''
+    if not memo_user:
+        memo_user = ((turn_data or {}).get('content') or '').strip()
+    return {
+        'wake_ids': list(wake_ids or []),
+        'one_shot_claims': dict(one_shot_claims or {}),
+        'session_memo_user': memo_user,
+        'session_memo_assistant': (assistant_text or '').strip(),
+        'turn_key': str((turn_data or {}).get('turn_key') or ''),
+        'conversation_id': str(conversation_id or 'hayana-chat'),
+    }
+
+
+def _persist_turn_assistant(
+    turn_data: dict,
+    *,
+    content: str,
+    thinking: str = '',
+    tool_calls_json: str = '',
+    cache_info_json: str = '',
+    choices_json: str = '',
+    side_effects: dict | None = None,
+):
+    """Persist assistant text for a turn.
+
+    Staged rewrites store the candidate outside the active transcript.
+    Normal turns INSERT into chat_messages as before.
+    Returns assistant_message_id or None for staged candidates.
+
+    NOTE: for the normal path, ``conn.commit()`` of the assistant row happens
+    inside this helper before returning — callers must keep wake/one-shot
+    consume after this call (see tests.test_cc_context_dedup).
+    """
+    rewrite_id = str((turn_data or {}).get('rewrite_id') or '').strip()
+    text = (content or '').strip()
+    if not text:
+        return None
+    if rewrite_id:
+        conn = get_db()
+        try:
+            staging = rewrite_staging.load(conn, rewrite_id)
+            if not staging:
+                raise ValueError('rewrite not found')
+            rewrite_staging.assert_active_matches_prepare(conn, staging)
+            turn_data['_rewrite_staging'] = staging
+            effects = side_effects
+            if effects is None:
+                effects = (turn_data or {}).get('_staged_side_effects') or {}
+            rewrite_staging.store_candidate(
+                conn,
+                rewrite_id,
+                content=text,
+                thinking=thinking or '',
+                tool_calls=tool_calls_json or '',
+                cache_info=cache_info_json or '',
+                choices=choices_json or '',
+                side_effects=effects,
+            )
+            conn.commit()
+        except rewrite_staging.StaleRewriteError:
+            try:
+                conn.commit()
+            except Exception:
+                pass
+            raise
+        finally:
+            conn.close()
+        # Candidate durable ≠ active assistant durable: no scoring / wake /
+        # one-shot / session-memo side effects here — finalize replays frozen claims.
+        return None
+    conn = get_db()
+    cur = conn.execute(
+        "INSERT INTO chat_messages (author, content, thinking, tool_calls, cache_info, choices) "
+        "VALUES ('assistant', ?, ?, ?, ?, ?)",
+        (
+            text,
+            thinking or '',
+            tool_calls_json or '',
+            cache_info_json or '',
+            choices_json or '',
+        ),
+    )
+    conn.commit()
+    assistant_id = int(cur.lastrowid)
+    conn.close()
+    return assistant_id
+
+
+def _fail_staged_rewrite(turn_data: dict, error: str) -> None:
+    rewrite_id = str((turn_data or {}).get('rewrite_id') or '').strip()
+    if not rewrite_id:
+        return
+    staging = None
+    try:
+        conn = get_db()
+        try:
+            staging = rewrite_staging.load(conn, rewrite_id)
+            _st = str((staging or {}).get('status') or '')
+            if staging and _st != rewrite_staging.STATUS_STALE and not (
+                rewrite_staging._status_transcript_locked(_st)
+            ):
+                rewrite_staging.mark_failed(conn, rewrite_id, error)
+                conn.commit()
+                staging = rewrite_staging.load(conn, rewrite_id) or staging
+        finally:
+            conn.close()
+    except Exception:
+        pass
+    if staging:
+        try:
+            rewrite_staging.clear_staged_moments_pending(staging, DB_PATH)
+        except Exception:
+            pass
+    # Trial resident must not survive into the next normal turn.
+    _discard_staged_resident('staged_rewrite_failed')
+
+
 from chat.daily_context import ensure_schema_logged as _daily_context_ensure_schema
 _daily_context_ensure_schema(DB_PATH)
 
@@ -682,7 +927,7 @@ def _read_upload_file_body(static_dir, file_url):
     return None
 
 
-def build_messages(*, resident_file_hashes=None, history_stats_out=None, for_cc=False):
+def build_messages(*, resident_file_hashes=None, history_stats_out=None, for_cc=False, rewrite_id=None):
     from chat.context_lean import (
         lean_file_dedup_enabled,
         lean_history_enabled,
@@ -706,21 +951,55 @@ def build_messages(*, resident_file_hashes=None, history_stats_out=None, for_cc=
     from chat.history_legacy import assemble_legacy_history
     from chat.rolling_summary_store import get_summary
 
+    _rewrite_id = str(rewrite_id or '').strip()
+    _rewrite_staging = None
+    _rewrite_source_id = 0
+    if _rewrite_id:
+        conn = get_db()
+        try:
+            _rewrite_staging = rewrite_staging.load(conn, _rewrite_id)
+        finally:
+            conn.close()
+        if _rewrite_staging:
+            _rewrite_source_id = int(_rewrite_staging.get('source_message_id') or 0)
+
     _where = "date(created_at) >= date('now', '+8 hours', '-1 day')"
     conn = get_db()
     try:
-        _available = conn.execute(
-            "SELECT COUNT(*) FROM chat_messages WHERE " + _where
-        ).fetchone()[0] or 0
+        if _rewrite_source_id > 0:
+            _available = conn.execute(
+                "SELECT COUNT(*) FROM chat_messages WHERE " + _where + " AND id < ?",
+                (_rewrite_source_id,),
+            ).fetchone()[0] or 0
+        else:
+            _available = conn.execute(
+                "SELECT COUNT(*) FROM chat_messages WHERE " + _where
+            ).fetchone()[0] or 0
     except Exception:
         _available = 60
     finally:
         conn.close()
 
+    def _fetch_history_for_prompt(fetch_limit, min_id=0):
+        """Source-aware fetch for staged rewrite; tip window otherwise."""
+        if _rewrite_source_id > 0 and _rewrite_staging is not None:
+            rows, _avail = rewrite_staging.fetch_rewrite_prefix_rows(
+                get_db,
+                source_id=_rewrite_source_id,
+                fetch_limit=fetch_limit,
+                history_where=_where,
+                min_id=min_id or 0,
+            )
+            return rewrite_staging.apply_history_overlay(rows, _rewrite_staging)
+        rows, _ = fetch_history_rows(
+            get_db, fetch_limit=fetch_limit, min_id=min_id or 0,
+        )
+        return rows
+
     lean_history = lean_history_enabled()
     legacy_limit = legacy_block_limit(_available)
     if not lean_history:
-        rows, _ = fetch_history_rows(get_db, fetch_limit=legacy_limit)
+        rows = _fetch_history_for_prompt(legacy_limit)
         tool_fn = _format_tool_history if lean_tool_budget_enabled() else _format_tool_history_legacy
         msgs, legacy_stats = assemble_legacy_history(
             rows,
@@ -744,7 +1023,8 @@ def build_messages(*, resident_file_hashes=None, history_stats_out=None, for_cc=
                 'rolling_summary_text': '',
                 'rolling_summary_coverage_gap': False,
             })
-        if conversation_trimmed:
+        # Staged rewrite: never inject tip-based rolling summary (fork leak).
+        if conversation_trimmed and not _rewrite_id:
             rolling = get_summary('legacy_block')
             rolling_summary_text = (rolling.get('summary') or '').strip()
             if rolling_summary_text:
@@ -765,9 +1045,8 @@ def build_messages(*, resident_file_hashes=None, history_stats_out=None, for_cc=
         return msgs
 
     plan = resolve_fetch_plan(available_count=_available, for_cc=for_cc)
-    rows, _ = fetch_history_rows(
-        get_db,
-        fetch_limit=plan['fetch_limit'],
+    rows = _fetch_history_for_prompt(
+        plan['fetch_limit'],
         min_id=plan.get('relay_head_id') or 0,
     )
     file_hashes = resident_file_hashes if (lean_file_dedup_enabled() and for_cc) else set()
@@ -820,7 +1099,8 @@ def build_messages(*, resident_file_hashes=None, history_stats_out=None, for_cc=
         })
 
     budget = plan['history_token_budget'] or plan['relay_low_water']
-    inject_summary = should_inject_rolling_summary(
+    # Staged rewrite: skip tip-based rolling summary (may include post-fork world).
+    inject_summary = (not _rewrite_id) and should_inject_rolling_summary(
         conversation_content_trimmed=stats.conversation_content_trimmed,
         history_mode=plan['mode'],
         available_count=_available,
@@ -5098,6 +5378,14 @@ def chat_stream():
                 _turn_data = insert_user_message(
                     get_db, _turn_data, _uc, memories_db_path=DB_PATH, conversation_id=_conv,
                 )
+                _rewrite_id = str(_turn_data.get('rewrite_id') or '').strip()
+                if _rewrite_id:
+                    try:
+                        _begin_staged_rewrite_generation(_turn_data)
+                    except Exception as _rw_exc:
+                        yield 'data: ' + json.dumps({'t': 'err', 'd': f'rewrite prepare failed: {_rw_exc}'}) + SSE_END
+                        yield 'data: ' + json.dumps({'t': 'done', 'ok': False, 'rewrite_id': _rewrite_id}) + SSE_END
+                        return
                 # touch_user_interaction() runs inside insert_user_message after persist.
                 if _uc:
                     try:
@@ -5107,18 +5395,26 @@ def chat_stream():
                             _ee_s.apply_desire_delta_async(_d2['p_delta'], _d2['i_delta'])
                     except Exception:
                         pass
-                mode, reused = _gen_acquire_or_wait()
-                if mode == 'reused':
-                    text, thinking = reused
-                    if thinking:
-                        yield 'data: ' + json.dumps({'t': 'think', 'd': thinking}) + SSE_END
-                    if text:
-                        yield 'data: ' + json.dumps({'t': 'text', 'd': text}) + SSE_END
-                    yield 'data: ' + json.dumps({'t': 'done', 'ok': bool(text)}) + SSE_END
-                    return
+                if _rewrite_id:
+                    # Never reuse an unrelated prior result for staged rewrite.
+                    while True:
+                        mode, reused = _gen_acquire_or_wait()
+                        if mode == 'own':
+                            break
+                else:
+                    mode, reused = _gen_acquire_or_wait()
+                    if mode == 'reused':
+                        text, thinking = reused
+                        if thinking:
+                            yield 'data: ' + json.dumps({'t': 'think', 'd': thinking}) + SSE_END
+                        if text:
+                            yield 'data: ' + json.dumps({'t': 'text', 'd': text}) + SSE_END
+                        yield 'data: ' + json.dumps({'t': 'done', 'ok': bool(text)}) + SSE_END
+                        return
                 _turn_data = activate_turn(_turn_data, conversation_id=_conv, memories_db_path=DB_PATH)
                 from chat import daily_context as _daily_ctx
-                if _daily_ctx.enabled():
+                # Staged rewrite uses classic path so overlay + candidate persist stay atomic.
+                if _daily_ctx.enabled() and not _rewrite_id:
                     _daily_out = None
                     try:
                         for _chunk in _stream_cc_daily_soft_window(_turn_data, _uc):
@@ -5138,7 +5434,7 @@ def chat_stream():
                 cc_cache_read, cc_cache_create = 0, 0
                 cc_usage = None
                 _cc_one_shot_claims = {}
-                _is_user_turn = bool(_uc) or is_pending_user_turn(
+                _is_user_turn = bool(_uc) or bool(_rewrite_id) or is_pending_user_turn(
                     get_db, _turn_data.get('user_message_id')
                 )
                 # 只 snapshot wake ids，避免 build_system() 先把 one_shot 反馈 drain 掉
@@ -5161,6 +5457,7 @@ def chat_stream():
                         resident_file_hashes=_resident_files,
                         history_stats_out=_history_stats,
                         for_cc=True,
+                        rewrite_id=_rewrite_id or None,
                     )
                     cc_tool_calls = []
                     for evt, payload in _cc_resident_stream_gen(
@@ -5218,48 +5515,68 @@ def chat_stream():
                         _cc_text, _cc_choices = _extract_choices(text)
                         if _cc_choices and not _cc_text:
                             _cc_text = '[选项: ' + ' / '.join(_cc_choices) + ']'
-                        conn = get_db()
-                        cur = conn.execute(
-                            "INSERT INTO chat_messages (author, content, thinking, tool_calls, cache_info, choices) VALUES ('assistant', ?, ?, ?, ?, ?)",
-                            (_cc_text, thinking, json.dumps([{k: v for k, v in tc.items() if k != 'id'} for tc in cc_tool_calls], ensure_ascii=False) if cc_tool_calls else '', _cache_info_json,
-                             json.dumps(_cc_choices, ensure_ascii=False) if _cc_choices else '')
-                        )
-                        conn.commit()
-                        assistant_id = int(cur.lastrowid)
-                        conn.close()
-                        # one-shot 与 wake 同级：仅 assistant 落库成功后消费。
-                        # 优先用本轮注入快照的 wake_ids（与 bridge/background 一致）。
+                        _tool_json = json.dumps(
+                            [{k: v for k, v in tc.items() if k != 'id'} for tc in cc_tool_calls],
+                            ensure_ascii=False,
+                        ) if cc_tool_calls else ''
+                        _choices_json = json.dumps(_cc_choices, ensure_ascii=False) if _cc_choices else ''
                         if 'wake_ids' in _cc_one_shot_claims:
                             _consume_wake_ids = _cc_one_shot_claims.get('wake_ids') or []
                         else:
                             _consume_wake_ids = _wake_claim_ids
-                        consume_wake_ids(get_db, _consume_wake_ids)
-                        from chat.system_builder import consume_cc_one_shot_claims
-                        consume_cc_one_shot_claims(get_db, _cc_one_shot_claims)
-                        _write_session_memo(_uc, _cc_text)
-                        _persisted[0] = True
-                        try:
-                            from moments_persistence import after_assistant_persisted
-                            after_assistant_persisted(
-                                memories_db_path=DB_PATH,
-                                turn_data=_turn_data,
-                                assistant_message_id=assistant_id,
+                        if _rewrite_id:
+                            _turn_data['_staged_side_effects'] = _staged_side_effects_payload(
+                                _turn_data,
+                                assistant_text=_cc_text,
+                                wake_ids=_consume_wake_ids,
+                                one_shot_claims=_cc_one_shot_claims,
                                 conversation_id=_conv,
                             )
-                        except Exception:
-                            pass
-                        try:
-                            from chat.scoring_identity import trigger_turn_scoring
-                            trigger_turn_scoring(
-                                assistant_text=text,
-                                message_id=_turn_data.get('user_message_id'),
-                                get_db_fn=get_db,
-                            )
-                        except Exception:
-                            pass
+                        assistant_id = _persist_turn_assistant(
+                            _turn_data,
+                            content=_cc_text,
+                            thinking=thinking or '',
+                            tool_calls_json=_tool_json,
+                            cache_info_json=_cache_info_json or '',
+                            choices_json=_choices_json,
+                            side_effects=_turn_data.get('_staged_side_effects'),
+                        )
+                        # Candidate durable ≠ active assistant durable.
+                        # Wake / one-shot / session-memo only after active commit.
+                        if not _rewrite_id:
+                            # one-shot 与 wake 同级：仅 assistant 落库成功后消费。
+                            # 优先用本轮注入快照的 wake_ids（与 bridge/background 一致）。
+                            consume_wake_ids(get_db, _consume_wake_ids)
+                            from chat.system_builder import consume_cc_one_shot_claims
+                            consume_cc_one_shot_claims(get_db, _cc_one_shot_claims)
+                            _write_session_memo(_uc, _cc_text)
+                        _persisted[0] = True
+                        if assistant_id is not None:
+                            try:
+                                from moments_persistence import after_assistant_persisted
+                                after_assistant_persisted(
+                                    memories_db_path=DB_PATH,
+                                    turn_data=_turn_data,
+                                    assistant_message_id=assistant_id,
+                                    conversation_id=_conv,
+                                )
+                            except Exception:
+                                pass
+                            try:
+                                from chat.scoring_identity import trigger_turn_scoring
+                                trigger_turn_scoring(
+                                    assistant_text=text,
+                                    message_id=_turn_data.get('user_message_id'),
+                                    get_db_fn=get_db,
+                                )
+                            except Exception:
+                                pass
                 finally:
+                    # Trial resident must die before the next normal turn can hot-reuse it.
+                    if _rewrite_id:
+                        _discard_staged_resident('staged_rewrite_end')
                     _released[0] = True
-                    _gen_release((text, thinking) if text else None)
+                    _gen_release((text, thinking) if text and not _rewrite_id else None)
                 if cc_usage or cc_cache_read or cc_cache_create:
                     _usage_evt = {'t': 'usage', 'cache_read': cc_cache_read, 'cache_creation': cc_cache_create}
                     if cc_usage:
@@ -5269,11 +5586,17 @@ def chat_stream():
                             if _k in cc_usage:
                                 _usage_evt[_k] = cc_usage[_k]
                     yield 'data: ' + json.dumps(_usage_evt) + SSE_END
-                yield 'data: ' + json.dumps({'t': 'done', 'ok': bool(text)}) + SSE_END
+                _done = {'t': 'done', 'ok': bool(text)}
+                if _rewrite_id:
+                    _done['rewrite_id'] = _rewrite_id
+                if not text and _rewrite_id:
+                    _fail_staged_rewrite(_turn_data, 'empty generation')
+                yield 'data: ' + json.dumps(_done) + SSE_END
             except Exception as e:
                 if not _released[0]:
                     _released[0] = True
                     _gen_release(None)
+                _fail_staged_rewrite(_turn_data, str(e))
                 _partial = getattr(e, 'usage', None)
                 if isinstance(_partial, dict) and (
                     _partial.get('rounds') or _partial.get('cache_read') or _partial.get('cache_creation')
@@ -5286,6 +5609,8 @@ def chat_stream():
                         ) if k in _partial
                     }}) + SSE_END
                 yield 'data: ' + json.dumps({'t': 'err', 'd': str(e)}) + SSE_END
+                if _rewrite_id:
+                    yield 'data: ' + json.dumps({'t': 'done', 'ok': False, 'rewrite_id': _rewrite_id}) + SSE_END
             finally:
                 release_turn(
                     conversation_id=_conv,
@@ -5307,6 +5632,14 @@ def chat_stream():
             _turn_data = insert_user_message(
                 get_db, _turn_data, _uc, memories_db_path=DB_PATH, conversation_id=_conv,
             )
+            _rewrite_id = str(_turn_data.get('rewrite_id') or '').strip()
+            if _rewrite_id:
+                try:
+                    _begin_staged_rewrite_generation(_turn_data)
+                except Exception as _rw_exc:
+                    yield 'data: ' + json.dumps({'t': 'err', 'd': f'rewrite prepare failed: {_rw_exc}'}) + SSE_END
+                    yield 'data: ' + json.dumps({'t': 'done', 'ok': False, 'rewrite_id': _rewrite_id}) + SSE_END
+                    return
             # touch_user_interaction() runs inside insert_user_message after persist.
             if _uc:
                 try:
@@ -5316,15 +5649,21 @@ def chat_stream():
                         _ee_r.apply_desire_delta_async(_d_r['p_delta'], _d_r['i_delta'])
                 except Exception:
                     pass
-            mode, reused = _gen_acquire_or_wait()
-            if mode == 'reused':
-                text, thinking = reused
-                if thinking:
-                    yield 'data: ' + json.dumps({'t': 'think', 'd': thinking}) + SSE_END
-                if text:
-                    yield 'data: ' + json.dumps({'t': 'text', 'd': text}) + SSE_END
-                yield 'data: ' + json.dumps({'t': 'done', 'ok': bool(text)}) + SSE_END
-                return
+            if _rewrite_id:
+                while True:
+                    mode, reused = _gen_acquire_or_wait()
+                    if mode == 'own':
+                        break
+            else:
+                mode, reused = _gen_acquire_or_wait()
+                if mode == 'reused':
+                    text, thinking = reused
+                    if thinking:
+                        yield 'data: ' + json.dumps({'t': 'think', 'd': thinking}) + SSE_END
+                    if text:
+                        yield 'data: ' + json.dumps({'t': 'text', 'd': text}) + SSE_END
+                    yield 'data: ' + json.dumps({'t': 'done', 'ok': bool(text)}) + SSE_END
+                    return
             _turn_data = activate_turn(_turn_data, conversation_id=_conv, memories_db_path=DB_PATH)
             _tool_ctx.conversation_id = _conv
             for _jev in _workspace_job_sse_payloads():
@@ -5337,7 +5676,7 @@ def chat_stream():
             api_rounds = []
             cache_supported = None
             stream_started_at = time.monotonic()
-            _is_user_turn = bool(_uc) or is_pending_user_turn(
+            _is_user_turn = bool(_uc) or bool(_rewrite_id) or is_pending_user_turn(
                 get_db, _turn_data.get('user_message_id')
             )
             _wake_claim_ids = []
@@ -5372,42 +5711,66 @@ def chat_stream():
                 _pc, _choices = _extract_choices(p_text)
                 if _choices and not _pc:
                     _pc = '[选项: ' + ' / '.join(_choices) + ']'  # 不存空 content，Claude API 拒绝空消息
-                conn = get_db()
-                cur = conn.execute(
-                    "INSERT INTO chat_messages (author, content, thinking, tool_calls, cache_info, choices) VALUES ('assistant', ?, ?, ?, ?, ?)",
-                    (_pc, p_thinking, json.dumps(tool_calls_acc, ensure_ascii=False) if tool_calls_acc else '', _ci,
-                     json.dumps(_choices, ensure_ascii=False) if _choices else '')
-                )
-                conn.commit()
-                assistant_id = int(cur.lastrowid)
-                conn.close()
-                consume_wake_ids(get_db, _wake_claim_ids)
-                _persisted[0] = True
-                _write_session_memo(_uc, _pc)
-                try:
-                    from moments_persistence import after_assistant_persisted
-                    after_assistant_persisted(
-                        memories_db_path=DB_PATH,
-                        turn_data=_turn_data,
-                        assistant_message_id=assistant_id,
-                        conversation_id=getattr(_tool_ctx, 'conversation_id', _conv) or _conv,
-                    )
-                except Exception:
-                    pass
-                try:
-                    from chat.scoring_identity import trigger_turn_scoring
-                    trigger_turn_scoring(
+                if _rewrite_id:
+                    _turn_data['_staged_side_effects'] = _staged_side_effects_payload(
+                        _turn_data,
                         assistant_text=_pc,
-                        message_id=_turn_data.get('user_message_id'),
-                        get_db_fn=get_db,
+                        wake_ids=_wake_claim_ids,
+                        one_shot_claims=_turn_data.get('_relay_one_shot_claims') or {},
+                        conversation_id=_conv,
                     )
-                except Exception:
-                    pass
-            try:
-                (system, dynamic_context), _wake_claim_ids = build_system_with_wake_claim(
-                    build_system, get_db, user_turn=_is_user_turn, split_dynamic=True
+                assistant_id = _persist_turn_assistant(
+                    _turn_data,
+                    content=_pc,
+                    thinking=p_thinking or '',
+                    tool_calls_json=json.dumps(tool_calls_acc, ensure_ascii=False) if tool_calls_acc else '',
+                    cache_info_json=_ci,
+                    choices_json=json.dumps(_choices, ensure_ascii=False) if _choices else '',
+                    side_effects=_turn_data.get('_staged_side_effects'),
                 )
-                messages = build_messages()
+                # Candidate durable ≠ active assistant durable.
+                if not _rewrite_id:
+                    consume_wake_ids(get_db, _wake_claim_ids)
+                    _write_session_memo(_uc, _pc)
+                _persisted[0] = True
+                if assistant_id is not None:
+                    try:
+                        from moments_persistence import after_assistant_persisted
+                        after_assistant_persisted(
+                            memories_db_path=DB_PATH,
+                            turn_data=_turn_data,
+                            assistant_message_id=assistant_id,
+                            conversation_id=getattr(_tool_ctx, 'conversation_id', _conv) or _conv,
+                        )
+                    except Exception:
+                        pass
+                    try:
+                        from chat.scoring_identity import trigger_turn_scoring
+                        trigger_turn_scoring(
+                            assistant_text=_pc,
+                            message_id=_turn_data.get('user_message_id'),
+                            get_db_fn=get_db,
+                        )
+                    except Exception:
+                        pass
+            try:
+                # Staged Relay rewrite: never drain feedback / consume dream in prompt build.
+                _relay_one_shot_claims = {}
+                (system, dynamic_context), _wake_claim_ids = build_system_with_wake_claim(
+                    build_system,
+                    get_db,
+                    user_turn=_is_user_turn,
+                    split_dynamic=True,
+                    allow_side_effects=not bool(_rewrite_id),
+                )
+                if _rewrite_id:
+                    _relay_one_shot_claims, _relay_os_text = _peek_relay_staged_one_shots()
+                    _turn_data['_relay_one_shot_claims'] = _relay_one_shot_claims
+                    if _relay_os_text:
+                        dynamic_context = '\n\n'.join(
+                            p for p in (dynamic_context, _relay_os_text) if p and str(p).strip()
+                        )
+                messages = build_messages(rewrite_id=_rewrite_id or None)
                 _recall, _recall_items = _recall_memories(_uc) if _uc else ('', [])
                 if _recall:
                     yield 'data: ' + json.dumps({'t': 'memory_recall', 'd': {'count': len(_recall_items), 'items': _recall_items}}, ensure_ascii=False) + SSE_END
@@ -5590,8 +5953,10 @@ def chat_stream():
                             text, thinking = _rt, ''.join(think_acc)
                     except Exception:
                         pass
+                if _rewrite_id:
+                    _discard_staged_resident('staged_rewrite_end')
                 _released[0] = True
-                _gen_release((text, thinking) if text else None)
+                _gen_release((text, thinking) if text and not _rewrite_id else None)
             if tool_calls_acc and not thinking:
                 _ts = _summarize_traces_sync(tool_calls_acc)
                 if _ts:
@@ -5609,7 +5974,12 @@ def chat_stream():
                     cache_supported=cache_supported,
                 )
                 yield 'data: ' + json.dumps({'t': 'usage', **_usage_payload}, default=str) + SSE_END
-            yield 'data: ' + json.dumps({'t': 'done', 'ok': bool(text)}) + SSE_END
+            _done = {'t': 'done', 'ok': bool(text)}
+            if _rewrite_id:
+                _done['rewrite_id'] = _rewrite_id
+            if not text and _rewrite_id:
+                _fail_staged_rewrite(_turn_data, 'empty generation')
+            yield 'data: ' + json.dumps(_done) + SSE_END
         except urllib.error.HTTPError as e:
             _ecode = e.code
             _emsg  = e.read().decode()[:300]
@@ -5658,31 +6028,51 @@ def chat_stream():
                         _dt_clean, _dt_choices = _extract_choices(_dt)
                         if _dt_choices and not _dt_clean:
                             _dt_clean = '[选项: ' + ' / '.join(_dt_choices) + ']'
-                        _dbc = get_db()
-                        cur = _dbc.execute("INSERT INTO chat_messages (author,content,choices) VALUES ('assistant',?,?)",
-                                     (_dt_clean, json.dumps(_dt_choices, ensure_ascii=False) if _dt_choices else ''))
-                        _dbc.commit()
-                        assistant_id = int(cur.lastrowid)
-                        _dbc.close()
-                        try:
-                            from moments_persistence import after_assistant_persisted
-                            after_assistant_persisted(
-                                memories_db_path=DB_PATH,
-                                turn_data=_turn_data,
-                                assistant_message_id=assistant_id,
-                                conversation_id=getattr(_tool_ctx, 'conversation_id', _conv) or _conv,
+                        if _rewrite_id:
+                            # Same freeze contract as the primary Relay persist path.
+                            if not _turn_data.get('_relay_one_shot_claims'):
+                                _peek_claims, _ = _peek_relay_staged_one_shots()
+                                _turn_data['_relay_one_shot_claims'] = _peek_claims
+                            _turn_data['_staged_side_effects'] = _staged_side_effects_payload(
+                                _turn_data,
+                                assistant_text=_dt_clean,
+                                wake_ids=_wake_claim_ids,
+                                one_shot_claims=_turn_data.get('_relay_one_shot_claims') or {},
+                                conversation_id=_conv,
                             )
-                        except Exception:
-                            pass
+                        assistant_id = _persist_turn_assistant(
+                            _turn_data,
+                            content=_dt_clean,
+                            choices_json=json.dumps(_dt_choices, ensure_ascii=False) if _dt_choices else '',
+                            side_effects=_turn_data.get('_staged_side_effects'),
+                        )
+                        if assistant_id is not None:
+                            try:
+                                from moments_persistence import after_assistant_persisted
+                                after_assistant_persisted(
+                                    memories_db_path=DB_PATH,
+                                    turn_data=_turn_data,
+                                    assistant_message_id=assistant_id,
+                                    conversation_id=getattr(_tool_ctx, 'conversation_id', _conv) or _conv,
+                                )
+                            except Exception:
+                                pass
                         _persisted[0] = True
-                    yield 'data: ' + json.dumps({'t': 'done', 'ok': bool(_dt)}) + SSE_END
+                    _done = {'t': 'done', 'ok': bool(_dt)}
+                    if _rewrite_id:
+                        _done['rewrite_id'] = _rewrite_id
+                    yield 'data: ' + json.dumps(_done) + SSE_END
                 except Exception as _de:
+                    _fail_staged_rewrite(_turn_data, 'DeepSeek fallback失败: ' + str(_de))
                     yield 'data: ' + json.dumps({'t': 'err', 'd': 'DeepSeek fallback失败: ' + str(_de)}) + SSE_END
             else:
+                _fail_staged_rewrite(_turn_data, 'API %s: %s' % (_ecode, _emsg))
                 yield 'data: ' + json.dumps({'t': 'err', 'd': 'API %s: %s' % (_ecode, _emsg)}) + SSE_END
         except urllib.error.URLError:
+            _fail_staged_rewrite(_turn_data, '上游API超时，请重试')
             yield 'data: ' + json.dumps({'t': 'err', 'd': '上游API超时，请重试'}) + SSE_END
         except Exception as e:
+            _fail_staged_rewrite(_turn_data, str(e))
             yield 'data: ' + json.dumps({'t': 'err', 'd': str(e)}) + SSE_END
         finally:
             release_turn(

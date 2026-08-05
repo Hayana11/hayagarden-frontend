@@ -262,7 +262,12 @@ interface SseEvent {
  * POST /api/gw/chat/stream and dispatch SSE events. Resolves on done/err or
  * stream end. Idle-timeout safety: aborts if no event arrives for 150s.
  */
-export async function streamChatReply(userMessageId: number | null, handlers: StreamHandlers, ctrl: AbortController): Promise<StreamResult> {
+export async function streamChatReply(
+  userMessageId: number | null,
+  handlers: StreamHandlers,
+  ctrl: AbortController,
+  extra: { rewriteId?: string | null } = {},
+): Promise<StreamResult> {
   let safety: ReturnType<typeof setTimeout> | undefined;
   const armSafety = () => {
     clearTimeout(safety);
@@ -270,10 +275,13 @@ export async function streamChatReply(userMessageId: number | null, handlers: St
   };
   armSafety();
   try {
+    const body: Record<string, unknown> = {};
+    if (userMessageId) body.user_message_id = userMessageId;
+    if (extra.rewriteId) body.rewrite_id = extra.rewriteId;
     const resp = await fetch(sseUrl('/api/gw/chat/stream'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(userMessageId ? { user_message_id: userMessageId } : {}),
+      body: JSON.stringify(body),
       signal: ctrl.signal,
     });
     if (!resp.ok || !resp.body) return { ok: false, error: `stream failed: HTTP ${resp.status}` };
