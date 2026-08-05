@@ -290,9 +290,15 @@ class ResidentSession:
         self._last_used = 0.0
         self._generation = 0
         self._lock = threading.Lock()
+        self._next_spawn_reason = None
         self._tool_profile = TOOL_PROFILE_LEGACY
         # MODEL-1B: identity of the model argv this process was started with.
         self._model_identity = None
+        # Durable history-rewrite epoch bound at last successful spawn.
+        # Compared against the cross-process epoch before hot reuse so every
+        # gunicorn worker lazily invalidates after a rewrite, even when the
+        # app→gateway bridge only eagers one worker.
+        self._history_rewrite_epoch = ''
         self._reset_session_meta(respawn_reason=None)
 
     def _reset_session_meta(self, *, respawn_reason):
@@ -348,11 +354,20 @@ class ResidentSession:
             args, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, bufsize=1, cwd=self._cwd, env=env,
         )
+        # Bind epoch only after a successful spawn. A failed Popen must leave
+        # the prior (stale) binding so hot reuse stays forbidden.
+        try:
+            from chat.cc_history_rewrite import current_history_rewrite_epoch
+            bound_epoch = current_history_rewrite_epoch()
+        except Exception:
+            bound_epoch = '__unreadable__'
+        self._history_rewrite_epoch = bound_epoch
         self._system_text = system_text
         self._model_identity = model_identity
         self._session_id = None
         self._cold = True
         self._generation += 1
+        self._next_spawn_reason = None
         self._reset_session_meta(respawn_reason=reason)
         if self._tool_profile == TOOL_PROFILE_TEXT_ONLY:
             self._tool_surface_snapshot = {}
@@ -399,8 +414,18 @@ class ResidentSession:
 
     def _decide_respawn_reason(self, system_text, *, tool_profile=TOOL_PROFILE_LEGACY):
         from chat.cc_model import cc_model_identity
+        # Durable rewrite epoch: any resident spawned before the latest
+        # committed rewrite loses hot-reuse on every worker, lazily.
+        try:
+            from chat.cc_history_rewrite import current_history_rewrite_epoch
+            durable_epoch = current_history_rewrite_epoch()
+        except Exception:
+            durable_epoch = '__unreadable__'
+        bound_epoch = getattr(self, '_history_rewrite_epoch', None) or ''
+        if durable_epoch and durable_epoch != bound_epoch:
+            return 'history_rewrite'
         if not self._alive():
-            return 'process_dead'
+            return self._next_spawn_reason or 'process_dead'
         if str(tool_profile or TOOL_PROFILE_LEGACY) != str(self._tool_profile or TOOL_PROFILE_LEGACY):
             return 'tool_profile_changed'
         # MODEL-1B: only compare when this resident was actually spawned with an
@@ -434,6 +459,12 @@ class ResidentSession:
         with self._lock:
             reason = self._decide_respawn_reason(system_text, tool_profile=tool_profile)
             if reason:
+                if reason == 'history_rewrite':
+                    self._system_text = None
+                    self._session_id = None
+                    self._model_identity = None
+                    self._cold = True
+                    self._next_spawn_reason = 'history_rewrite'
                 self._spawn(system_text, env, reason=reason, tool_profile=tool_profile)
             return self._cold
 
@@ -496,6 +527,11 @@ class ResidentSession:
             except Exception as exc:
                 self._proc = None
                 raise ResidentError('staged_spawn_failed:%s' % exc) from exc
+            try:
+                from chat.cc_history_rewrite import current_history_rewrite_epoch
+                self._history_rewrite_epoch = current_history_rewrite_epoch()
+            except Exception:
+                self._history_rewrite_epoch = '__unreadable__'
             self._system_text = system_text
             self._model_identity = model_identity
             self._session_id = resume_session_id
@@ -1215,3 +1251,14 @@ class ResidentSession:
     def shutdown(self):
         with self._lock:
             self._kill()
+
+    def invalidate_for_history_rewrite(self, reason='history_rewrite'):
+        """Terminate the old-world resident and clear its reusable identity."""
+        with self._lock:
+            self._kill(quiet=True)
+            self._system_text = None
+            self._session_id = None
+            self._model_identity = None
+            self._cold = True
+            self._next_spawn_reason = str(reason or 'history_rewrite')
+            self._reset_session_meta(respawn_reason=self._next_spawn_reason)
