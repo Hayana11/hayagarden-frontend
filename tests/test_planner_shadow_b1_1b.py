@@ -528,6 +528,39 @@ class PlannerShadowB11BTests(unittest.TestCase):
         self.assertNotIn('from relay.manager import relay', shadow_src)
         self.assertIn('RelayManager()', shadow_src)
 
+    def test_shadow_relay_payload_omits_observation_metadata(self):
+        """Anthropic metadata allows only user_id; Shadow must send none."""
+        from relay.manager import RelayManager
+        import chat.planner_shadow as ps
+
+        captured = []
+
+        class CaptureRelay(RelayManager):
+            def __init__(self, *a, **kw):
+                super().__init__(*a, **kw)
+
+            def call(self, payload, timeout=60, use_ws_model=False):
+                del timeout, use_ws_model
+                captured.append(dict(payload))
+                return {'content': [{'type': 'text', 'text': '{}'}]}
+
+            def extract_text(self, result):
+                del result
+                return '{}'
+
+        with mock.patch('relay.manager.RelayManager', CaptureRelay):
+            ps.invoke_shadow_planner_relay(user_payload='{}', timeout_sec=1)
+
+        self.assertEqual(len(captured), 1)
+        payload = captured[0]
+        self.assertNotIn('metadata', payload)
+        # Observation semantics remain in Decision/JSONL source, not HTTP.
+        shadow_src = Path(ROOT, 'chat/planner_shadow.py').read_text(encoding='utf-8')
+        self.assertNotIn(
+            "'metadata': {'source': 'planner_shadow', 'shadow_only': True}",
+            shadow_src,
+        )
+
     def test_blocked_bool_and_none_coupling(self):
         """Optional hardening: blocked string 'false' ≠ True; blocked⇒none."""
         ok, decision = validate_shadow_decision(

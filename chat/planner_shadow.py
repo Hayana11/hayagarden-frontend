@@ -419,11 +419,12 @@ def invoke_shadow_planner_relay(
 
     # Fresh instance — do not mutate production relay singleton.
     mgr = RelayManager()
+    # Anthropic Messages metadata allows only user_id. Shadow observation
+    # fields (source / shadow_only) stay in Decision/JSONL — never in HTTP.
     payload = {
         'max_tokens': _SHADOW_MAX_TOKENS,
         'system': _SHADOW_SYSTEM,
         'messages': [{'role': 'user', 'content': user_payload}],
-        'metadata': {'source': 'planner_shadow', 'shadow_only': True},
     }
     # Explicitly no tools — Shadow must not execute Wake tools.
     result = mgr.call(payload, timeout=timeout_sec)
