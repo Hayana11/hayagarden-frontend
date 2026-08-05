@@ -138,3 +138,68 @@ def read_content(artifact_id):
             return meta, f.read()
     except Exception:
         return meta, None
+
+
+def list_recent(limit=200):
+    """Return newest artifacts first. ``limit`` clamped to 1..500."""
+    try:
+        lim = int(limit)
+    except (TypeError, ValueError):
+        lim = 200
+    lim = max(1, min(lim, 500))
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute(
+        'SELECT * FROM artifacts ORDER BY datetime(created_at) DESC, id DESC LIMIT ?',
+        (lim,),
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def delete(artifact_id, *, allow_stale_metadata=True):
+    """Delete one artifact's physical file (if present) and metadata row.
+
+    Returns a status string:
+      deleted | not_found | bad_path | unlink_failed | stale_cleared
+
+    ``allow_stale_metadata``: when the DB row exists but the file is already
+    gone (or path is unresolvable), still remove the metadata row. Used for
+    explicit user deletes and cleaner broken-row cleanup.
+    """
+    try:
+        aid = int(artifact_id)
+    except (TypeError, ValueError):
+        return 'not_found'
+    if aid <= 0:
+        return 'not_found'
+
+    meta = get(aid)
+    if not meta:
+        return 'not_found'
+
+    fpath = _artifact_path(meta.get('filename'))
+    if fpath is None:
+        if allow_stale_metadata:
+            _delete_row(aid)
+            return 'stale_cleared'
+        return 'bad_path'
+
+    file_existed = fpath.is_file()
+    if file_existed:
+        try:
+            fpath.unlink()
+        except OSError:
+            return 'unlink_failed'
+    elif not allow_stale_metadata:
+        return 'not_found'
+
+    _delete_row(aid)
+    return 'deleted' if file_existed else 'stale_cleared'
+
+
+def _delete_row(artifact_id):
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute('DELETE FROM artifacts WHERE id=?', (int(artifact_id),))
+    conn.commit()
+    conn.close()

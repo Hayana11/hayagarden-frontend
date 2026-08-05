@@ -777,46 +777,32 @@ def shop_import_state():
 
 @app.route('/api/files/list', methods=['GET'])
 def files_list():
-    """文档库：查消息表而非扫目录——天然带作者/时间/会话归属，且无孤儿索引。"""
-    conn = get_db()
-    rows = conn.execute(
-        "SELECT id, author, file_name, file_url, created_at, session_id FROM chat_messages "
-        "WHERE file_url != '' ORDER BY id DESC LIMIT 200"
-    ).fetchall()
-    conn.close()
-    return jsonify({'files': [dict(r) for r in rows]})
+    """Documents View: user uploads + assistant Artifacts (separate stores)."""
+    from chat.document_library import list_documents
+    return jsonify({'files': list_documents()})
 
 @app.route('/api/files/delete', methods=['POST'])
 def files_delete():
-    """删物理文件 + 清空消息的 file 字段（消息本体保留，只是不再是文件卡片）。
-    删物理文件使用严格 upload URL + resolve/relative_to 边界校验。"""
+    """Delete by library keys and/or legacy upload message ids.
+
+    New: ``{"keys":["upload:123","artifact:45"]}``
+    Legacy: ``{"ids":[123]}`` — always user_upload message ids only.
+    """
+    from chat.document_library import delete_documents
     data = request.get_json() or {}
-    ids = data.get('ids') or []
-    if not isinstance(ids, list) or not ids:
-        return jsonify({'error': 'ids required'}), 400
-    ids = ids[:50]
-    conn = get_db()
-    deleted = 0
-    for mid in ids:
-        try:
-            mid = int(mid)
-        except (ValueError, TypeError):
-            continue
-        row = conn.execute('SELECT file_url FROM chat_messages WHERE id=?', (mid,)).fetchone()
-        if not row or not row['file_url']:
-            continue
-        url = row['file_url']
-        p = resolve_uploaded_file_url(url, FILES_DIR)
-        if p is not None and p.is_file():
-            try:
-                p.unlink()
-            except OSError:
-                pass
-        conn.execute("UPDATE chat_messages SET file_url='', file_name='' WHERE id=?", (mid,))
-        deleted += 1
-    conn.commit()
-    conn.close()
-    return jsonify({'ok': True, 'deleted': deleted})
+    keys = data.get('keys')
+    ids = data.get('ids')
+    if not keys and not ids:
+        return jsonify({'error': 'keys or ids required'}), 400
+    if keys is not None and not isinstance(keys, list):
+        return jsonify({'error': 'keys must be a list'}), 400
+    if ids is not None and not isinstance(ids, list):
+        return jsonify({'error': 'ids must be a list'}), 400
+    try:
+        result = delete_documents(keys=keys or None, ids=ids or None, strict_keys=True)
+    except ValueError as exc:
+        return jsonify({'error': str(exc)}), 400
+    return jsonify(result)
 
 @app.route('/api/chat/messages', methods=['GET'])
 def get_chat_messages():
