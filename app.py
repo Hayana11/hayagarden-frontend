@@ -4453,6 +4453,13 @@ def regen_finalize():
     try:
         result = _rw.activate_regen(conn, rewrite_id)
         conn.commit()
+    except _rw.StaleRewriteError as exc:
+        try:
+            conn.commit()
+        except Exception:
+            pass
+        conn.close()
+        return jsonify({'error': str(exc), 'code': 'stale_rewrite'}), 409
     except KeyError as exc:
         conn.close()
         return jsonify({'error': str(exc)}), 404
@@ -4467,6 +4474,16 @@ def regen_finalize():
         conn.close()
         raise
     conn.close()
+    # Active assistant is now durable — scoring / side effects belong here.
+    try:
+        from chat.scoring_identity import trigger_turn_scoring
+        trigger_turn_scoring(
+            assistant_text=result.get('candidate_content') or '',
+            message_id=result.get('user_message_id'),
+            get_db_fn=get_db,
+        )
+    except Exception:
+        pass
     invalidate_cc_resident_for_history_rewrite('regen_finalize')
     return jsonify({
         'ok': True,
@@ -4557,6 +4574,13 @@ def edit_finalize():
     try:
         result = _rw.activate_edit(conn, rewrite_id)
         conn.commit()
+    except _rw.StaleRewriteError as exc:
+        try:
+            conn.commit()
+        except Exception:
+            pass
+        conn.close()
+        return jsonify({'error': str(exc), 'code': 'stale_rewrite'}), 409
     except KeyError as exc:
         conn.close()
         return jsonify({'error': str(exc)}), 404
@@ -4574,6 +4598,13 @@ def edit_finalize():
     try:
         from chat.interaction_state import touch_user_interaction
         touch_user_interaction(get_db)
+    except Exception:
+        pass
+    # Same post-commit outbox drain as insert_user_message for new user identity.
+    try:
+        import internal_state_shadow as _shadow
+        if _shadow.is_user_events_enabled():
+            _shadow.drain_shadow_outbox_best_effort(db_path=DB_PATH)
     except Exception:
         pass
     invalidate_cc_resident_for_history_rewrite('edit')

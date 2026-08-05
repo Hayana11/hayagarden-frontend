@@ -5,6 +5,7 @@ staging and activate/finalize commits the authoritative switch in one txn.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import secrets
 import time
@@ -16,6 +17,7 @@ STATUS_GENERATING = 'generating'
 STATUS_READY = 'ready'
 STATUS_ACTIVATED = 'activated'
 STATUS_FAILED = 'failed'
+STATUS_STALE = 'stale'
 
 OP_REGEN = 'regen'
 OP_EDIT = 'edit'
@@ -31,6 +33,9 @@ CREATE TABLE IF NOT EXISTS chat_rewrite_staging (
     old_branches_json TEXT,
     tail_archive_json TEXT,
     source_snapshot_json TEXT,
+    active_tip_id INTEGER,
+    source_revision TEXT,
+    tail_revision TEXT,
     candidate_content TEXT,
     candidate_thinking TEXT,
     candidate_tool_calls TEXT,
@@ -43,8 +48,20 @@ CREATE TABLE IF NOT EXISTS chat_rewrite_staging (
 """
 
 
+class StaleRewriteError(ValueError):
+    """Active transcript changed since prepare; activation must refuse."""
+
+
 def ensure_schema(conn) -> None:
     conn.execute(_SCHEMA_SQL)
+    cols = {r[1] for r in conn.execute('PRAGMA table_info(chat_rewrite_staging)')}
+    for col, decl in (
+        ('active_tip_id', 'INTEGER'),
+        ('source_revision', 'TEXT'),
+        ('tail_revision', 'TEXT'),
+    ):
+        if col not in cols:
+            conn.execute(f'ALTER TABLE chat_rewrite_staging ADD COLUMN {col} {decl}')
     conn.commit()
 
 
@@ -73,7 +90,7 @@ def _row_to_dict(row: Any) -> dict:
 
 
 def _dumps(obj: Any) -> str:
-    return json.dumps(obj, ensure_ascii=False, default=str)
+    return json.dumps(obj, ensure_ascii=False, default=str, sort_keys=True)
 
 
 def _loads(raw: Any, default):
@@ -85,6 +102,42 @@ def _loads(raw: Any, default):
         return json.loads(raw)
     except Exception:
         return default
+
+
+def _table_cols(conn, table: str) -> set[str]:
+    return {r[1] for r in conn.execute(f'PRAGMA table_info({table})')}
+
+
+def _hash_payload(obj: Any) -> str:
+    return hashlib.sha256(_dumps(obj).encode('utf-8')).hexdigest()
+
+
+def _revision_fields(row_d: Mapping[str, Any]) -> dict:
+    return {
+        'id': row_d.get('id'),
+        'author': row_d.get('author'),
+        'content': row_d.get('content'),
+        'thinking': row_d.get('thinking') or '',
+        'tool_calls': row_d.get('tool_calls') or '',
+        'branches': row_d.get('branches') or '',
+        'branch_idx': row_d.get('branch_idx') or 0,
+    }
+
+
+def source_revision_of(row_d: Mapping[str, Any]) -> str:
+    return _hash_payload(_revision_fields(row_d))
+
+
+def tail_revision_of(rows: list[Any]) -> str:
+    return _hash_payload([_revision_fields(_row_to_dict(r)) for r in rows])
+
+
+def active_tip_id(conn) -> int:
+    row = conn.execute('SELECT MAX(id) AS m FROM chat_messages').fetchone()
+    if row is None:
+        return 0
+    val = row['m'] if hasattr(row, 'keys') else row[0]
+    return int(val or 0)
 
 
 def load(conn, rewrite_id: str) -> Optional[dict]:
@@ -120,6 +173,10 @@ def mark_failed(conn, rewrite_id: str, error: str) -> None:
     _set_status(conn, rewrite_id, STATUS_FAILED, error=str(error or '')[:500])
 
 
+def mark_stale(conn, rewrite_id: str, error: str = 'active transcript changed') -> None:
+    _set_status(conn, rewrite_id, STATUS_STALE, error=str(error or '')[:500])
+
+
 def store_candidate(
     conn,
     rewrite_id: str,
@@ -136,8 +193,8 @@ def store_candidate(
     row = load(conn, rewrite_id)
     if not row:
         raise ValueError('rewrite not found')
-    if row.get('status') == STATUS_ACTIVATED:
-        raise ValueError('rewrite already activated')
+    if row.get('status') in (STATUS_ACTIVATED, STATUS_STALE):
+        raise ValueError(f"rewrite not writable: {row.get('status')}")
     _set_status(
         conn,
         rewrite_id,
@@ -149,6 +206,46 @@ def store_candidate(
         candidate_choices=choices or '',
         error='',
     )
+
+
+def assert_active_matches_prepare(conn, staging: Mapping[str, Any]) -> None:
+    """Refuse generation/activation if the active transcript moved since prepare."""
+    rewrite_id = str(staging.get('rewrite_id') or '')
+    source_id = int(staging.get('source_message_id') or 0)
+    expected_tip = int(staging.get('active_tip_id') or 0)
+    expected_source_rev = staging.get('source_revision') or ''
+    expected_tail_rev = staging.get('tail_revision') or ''
+
+    tip = active_tip_id(conn)
+    if tip != expected_tip:
+        if rewrite_id:
+            mark_stale(conn, rewrite_id, f'active tip changed {expected_tip}->{tip}')
+        raise StaleRewriteError('active transcript tip changed since prepare')
+
+    source = conn.execute(
+        'SELECT * FROM chat_messages WHERE id=?', (source_id,),
+    ).fetchone()
+    if not source:
+        if rewrite_id:
+            mark_stale(conn, rewrite_id, 'source message missing')
+        raise StaleRewriteError('source message missing since prepare')
+
+    source_rev = source_revision_of(_row_to_dict(source))
+    if expected_source_rev and source_rev != expected_source_rev:
+        if rewrite_id:
+            mark_stale(conn, rewrite_id, 'source revision changed')
+        raise StaleRewriteError('source message changed since prepare')
+
+    if staging.get('operation') == OP_EDIT:
+        live_tail = conn.execute(
+            'SELECT * FROM chat_messages WHERE id >= ? ORDER BY id ASC',
+            (source_id,),
+        ).fetchall()
+        live_rev = tail_revision_of(live_tail)
+        if expected_tail_rev and live_rev != expected_tail_rev:
+            if rewrite_id:
+                mark_stale(conn, rewrite_id, 'tail revision changed')
+            raise StaleRewriteError('active tail changed since prepare')
 
 
 def prepare_regen(conn, *, source_assistant_id: int) -> dict:
@@ -173,6 +270,8 @@ def prepare_regen(conn, *, source_assistant_id: int) -> dict:
 
     from chat.scoring_identity import find_user_message_before
     user_message_id = find_user_message_before(conn, int(source_assistant_id))
+    tip = active_tip_id(conn)
+    src_rev = source_revision_of(row_d)
 
     rewrite_id = secrets.token_hex(16)
     now = _now()
@@ -180,8 +279,9 @@ def prepare_regen(conn, *, source_assistant_id: int) -> dict:
         '''INSERT INTO chat_rewrite_staging (
             rewrite_id, operation, status, source_message_id, user_message_id,
             edited_content, old_branches_json, tail_archive_json, source_snapshot_json,
+            active_tip_id, source_revision, tail_revision,
             created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
         (
             rewrite_id,
             OP_REGEN,
@@ -192,6 +292,9 @@ def prepare_regen(conn, *, source_assistant_id: int) -> dict:
             _dumps(old_branches),
             None,
             _dumps(row_d),
+            tip,
+            src_rev,
+            src_rev,
             now,
             now,
         ),
@@ -225,6 +328,9 @@ def prepare_edit(conn, *, source_message_id: int, edited_content: str) -> dict:
         (int(source_message_id),),
     ).fetchall()
     tail_archive = [_row_to_dict(r) for r in tail_rows]
+    tip = active_tip_id(conn)
+    src_rev = source_revision_of(row_d)
+    tail_rev = tail_revision_of(tail_rows)
 
     rewrite_id = secrets.token_hex(16)
     now = _now()
@@ -232,8 +338,9 @@ def prepare_edit(conn, *, source_message_id: int, edited_content: str) -> dict:
         '''INSERT INTO chat_rewrite_staging (
             rewrite_id, operation, status, source_message_id, user_message_id,
             edited_content, old_branches_json, tail_archive_json, source_snapshot_json,
+            active_tip_id, source_revision, tail_revision,
             created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
         (
             rewrite_id,
             OP_EDIT,
@@ -244,6 +351,9 @@ def prepare_edit(conn, *, source_message_id: int, edited_content: str) -> dict:
             None,
             _dumps(tail_archive),
             _dumps(row_d),
+            tip,
+            src_rev,
+            tail_rev,
             now,
             now,
         ),
@@ -259,8 +369,8 @@ def prepare_edit(conn, *, source_message_id: int, edited_content: str) -> dict:
 def apply_history_overlay(rows: list[Any], staging: Mapping[str, Any]) -> list[Any]:
     """Return history rows as the model should see them for this staged rewrite.
 
-    regen: drop source assistant and everything after it.
-    edit: drop source user and everything after it; append synthetic edited user.
+    Caller should already fetch a source-aware prefix (id < source). This still
+    filters defensively and appends the synthetic edited user for edit.
     """
     op = staging.get('operation')
     source_id = int(staging.get('source_message_id') or 0)
@@ -294,8 +404,35 @@ def apply_history_overlay(rows: list[Any], staging: Mapping[str, Any]) -> list[A
     return list(rows)
 
 
-def _table_cols(conn, table: str) -> set[str]:
-    return {r[1] for r in conn.execute(f'PRAGMA table_info({table})')}
+def fetch_rewrite_prefix_rows(
+    get_db,
+    *,
+    source_id: int,
+    fetch_limit: int,
+    history_where: str,
+    min_id: int = 0,
+) -> tuple[list[Any], int]:
+    """Fetch recent history strictly before the rewrite source id."""
+    conn = get_db()
+    try:
+        available = conn.execute(
+            'SELECT COUNT(*) FROM chat_messages WHERE ' + history_where + ' AND id < ?',
+            (int(source_id),),
+        ).fetchone()[0] or 0
+        sql = (
+            'SELECT id, author, content, image_url, created_at, tool_calls, file_url, file_name '
+            'FROM chat_messages WHERE ' + history_where + ' AND id < ?'
+        )
+        params: list[Any] = [int(source_id)]
+        if min_id > 0:
+            sql += ' AND id >= ?'
+            params.append(int(min_id))
+        sql += ' ORDER BY id DESC LIMIT ?'
+        params.append(int(fetch_limit))
+        rows = list(reversed(conn.execute(sql, params).fetchall()))
+    finally:
+        conn.close()
+    return rows, int(available)
 
 
 def activate_regen(conn, rewrite_id: str) -> dict:
@@ -307,8 +444,12 @@ def activate_regen(conn, rewrite_id: str) -> dict:
         raise ValueError('not a regen rewrite')
     if row.get('status') == STATUS_ACTIVATED:
         raise ValueError('already activated')
+    if row.get('status') == STATUS_STALE:
+        raise StaleRewriteError('rewrite is stale')
     if row.get('status') != STATUS_READY or not (row.get('candidate_content') or '').strip():
         raise ValueError('candidate not ready')
+
+    assert_active_matches_prepare(conn, row)
 
     source_id = int(row['source_message_id'])
     source = conn.execute(
@@ -355,6 +496,8 @@ def activate_regen(conn, rewrite_id: str) -> dict:
         'assistant_message_id': source_id,
         'branch_idx': branch_idx,
         'total': len(all_branches),
+        'user_message_id': row.get('user_message_id'),
+        'candidate_content': new_branch['content'],
     }
 
 
@@ -367,8 +510,12 @@ def activate_edit(conn, rewrite_id: str) -> dict:
         raise ValueError('not an edit rewrite')
     if row.get('status') == STATUS_ACTIVATED:
         raise ValueError('already activated')
+    if row.get('status') == STATUS_STALE:
+        raise StaleRewriteError('rewrite is stale')
     if row.get('status') != STATUS_READY or not (row.get('candidate_content') or '').strip():
         raise ValueError('candidate not ready')
+
+    assert_active_matches_prepare(conn, row)
 
     source_id = int(row['source_message_id'])
     source = conn.execute(
@@ -377,18 +524,16 @@ def activate_edit(conn, rewrite_id: str) -> dict:
     if not source:
         raise KeyError('source message missing; refusing activate')
 
-    # Re-read live tail at activate time for archive fidelity; fall back to prepare snapshot.
-    live_tail = conn.execute(
-        'SELECT * FROM chat_messages WHERE id >= ? ORDER BY id ASC',
-        (source_id,),
-    ).fetchall()
-    if live_tail:
+    # Fingerprint matched: archive the prepare-time snapshot (not later tip).
+    tail_archive = _loads(row.get('tail_archive_json'), [])
+    if not tail_archive:
+        live_tail = conn.execute(
+            'SELECT * FROM chat_messages WHERE id >= ? ORDER BY id ASC',
+            (source_id,),
+        ).fetchall()
         tail_archive = [_row_to_dict(r) for r in live_tail]
-        original_content = _row_to_dict(source).get('content') or ''
-    else:
-        tail_archive = _loads(row.get('tail_archive_json'), [])
-        snap = _loads(row.get('source_snapshot_json'), {})
-        original_content = snap.get('content') or ''
+    snap = _loads(row.get('source_snapshot_json'), {})
+    original_content = snap.get('content') or _row_to_dict(source).get('content') or ''
 
     conn.execute(
         'INSERT INTO chat_edit_branches (fork_msg_id, original_content, messages_json) '
@@ -396,12 +541,25 @@ def activate_edit(conn, rewrite_id: str) -> dict:
         (source_id, original_content, _dumps(tail_archive)),
     )
 
-    snap = _loads(row.get('source_snapshot_json'), {})
     author = snap.get('author') or _row_to_dict(source).get('author') or 'hayana'
     image_url = snap.get('image_url') or ''
     file_url = snap.get('file_url') or ''
     file_name = snap.get('file_name') or ''
     edited = (row.get('edited_content') or '').strip()
+
+    previous_user_at = None
+    try:
+        from chat.interaction_state import USER_AUTHOR_SQL
+        prev = conn.execute(
+            f"SELECT created_at FROM chat_messages WHERE {USER_AUTHOR_SQL} "
+            "AND id < ? ORDER BY id DESC LIMIT 1",
+            (source_id,),
+        ).fetchone()
+        if prev is not None:
+            previous_user_at = prev['created_at'] if hasattr(prev, 'keys') else prev[0]
+            previous_user_at = str(previous_user_at) if previous_user_at else None
+    except Exception:
+        previous_user_at = None
 
     conn.execute('DELETE FROM chat_messages WHERE id >= ?', (source_id,))
     cols = _table_cols(conn, 'chat_messages')
@@ -420,6 +578,52 @@ def activate_edit(conn, rewrite_id: str) -> dict:
         user_vals,
     )
     new_user_id = int(cur_u.lastrowid)
+    created_at = None
+    row2 = conn.execute(
+        'SELECT created_at FROM chat_messages WHERE id=?', (new_user_id,),
+    ).fetchone()
+    if row2 is not None:
+        created_at = row2['created_at'] if hasattr(row2, 'keys') else row2[0]
+        created_at = str(created_at) if created_at else None
+
+    # Preserve prior edit-route Internal State user_rule capture in the same txn.
+    _user_events_requested = False
+    try:
+        import os
+        _user_events_requested = all(
+            str(os.environ.get(name, '0')).strip() == '1'
+            for name in (
+                'INTERNAL_STATE_V3_SHADOW_ENABLED',
+                'INTERNAL_STATE_V3_SCORE_PROOF_ENABLED',
+                'INTERNAL_STATE_V3_USER_EVENTS_ENABLED',
+            )
+        )
+    except Exception:
+        _user_events_requested = False
+    if _user_events_requested and created_at:
+        try:
+            import internal_state_shadow as _shadow
+            if _shadow.is_user_events_enabled():
+                try:
+                    _shadow.enqueue_user_rule_in_txn(
+                        conn,
+                        message_id=int(new_user_id),
+                        text=edited or '',
+                        created_at=created_at,
+                        previous_user_at=previous_user_at,
+                    )
+                except Exception:
+                    try:
+                        _shadow.mark_proof_gap(
+                            conn,
+                            failed_message_id=int(new_user_id),
+                            error_code='outbox_capture_gap',
+                        )
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
     asst_cols = ['author', 'content']
     asst_vals: list[Any] = ['assistant', row.get('candidate_content') or '']
     for col, val in (
@@ -441,6 +645,8 @@ def activate_edit(conn, rewrite_id: str) -> dict:
         'ok': True,
         'message_id': new_user_id,
         'assistant_message_id': new_assistant_id,
+        'created_at': created_at,
+        'edited_content': edited,
     }
 
 

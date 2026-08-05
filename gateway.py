@@ -193,11 +193,23 @@ except Exception:
     pass
 
 
-def _begin_staged_rewrite_generation(turn_data: dict) -> dict | None:
-    """Mark staging generating and invalidate resident for overlay history.
+def _discard_staged_resident(reason: str = 'staged_rewrite_end') -> None:
+    """Kill the trial resident used for staged overlay generation.
 
-    Active transcript is unchanged; only the in-memory resident worldline is
-    forced cold so generation does not hot-reuse the pre-rewrite view.
+    Does NOT advance durable history-rewrite epoch — authoritative DB is still
+    the old active transcript until finalize succeeds.
+    """
+    try:
+        _CC_RESIDENT.invalidate_for_history_rewrite(str(reason or 'staged_rewrite_end'))
+    except Exception:
+        pass
+
+
+def _begin_staged_rewrite_generation(turn_data: dict) -> dict | None:
+    """Mark staging generating and cold-boot local resident for overlay history.
+
+    Active transcript is unchanged. Durable epoch is NOT advanced here — that
+    remains finalize's job after authoritative activation.
     """
     rewrite_id = str((turn_data or {}).get('rewrite_id') or '').strip()
     if not rewrite_id:
@@ -210,21 +222,31 @@ def _begin_staged_rewrite_generation(turn_data: dict) -> dict | None:
         if staging.get('status') in (
             rewrite_staging.STATUS_ACTIVATED,
             rewrite_staging.STATUS_FAILED,
+            rewrite_staging.STATUS_STALE,
         ):
             raise ValueError(f"rewrite not reusable: {staging.get('status')}")
+        rewrite_staging.assert_active_matches_prepare(conn, staging)
         rewrite_staging.mark_generating(conn, rewrite_id)
         conn.commit()
-    finally:
+        staging = rewrite_staging.load(conn, rewrite_id) or staging
+    except rewrite_staging.StaleRewriteError:
+        try:
+            conn.commit()
+        except Exception:
+            pass
         conn.close()
-    reason = str(staging.get('operation') or 'history_rewrite')
-    cc_history_rewrite.note_durable_history_rewrite(reason)
-    try:
-        _CC_RESIDENT.invalidate_for_history_rewrite(reason)
+        raise
     except Exception:
-        pass
+        conn.close()
+        raise
+    else:
+        conn.close()
+    # Local trial-brain only — do not note durable epoch yet.
+    _discard_staged_resident('staged_rewrite_begin')
     if turn_data.get('user_message_id') is None and staging.get('user_message_id') is not None:
         turn_data['user_message_id'] = staging.get('user_message_id')
     turn_data['_rewrite_staging'] = staging
+    turn_data['_staged_rewrite_active'] = True
     return staging
 
 
@@ -242,6 +264,10 @@ def _persist_turn_assistant(
     Staged rewrites store the candidate outside the active transcript.
     Normal turns INSERT into chat_messages as before.
     Returns assistant_message_id or None for staged candidates.
+
+    NOTE: for the normal path, ``conn.commit()`` of the assistant row happens
+    inside this helper before returning — callers must keep wake/one-shot
+    consume after this call (see tests.test_cc_context_dedup).
     """
     rewrite_id = str((turn_data or {}).get('rewrite_id') or '').strip()
     text = (content or '').strip()
@@ -250,6 +276,10 @@ def _persist_turn_assistant(
     if rewrite_id:
         conn = get_db()
         try:
+            staging = rewrite_staging.load(conn, rewrite_id)
+            if not staging:
+                raise ValueError('rewrite not found')
+            rewrite_staging.assert_active_matches_prepare(conn, staging)
             rewrite_staging.store_candidate(
                 conn,
                 rewrite_id,
@@ -260,21 +290,16 @@ def _persist_turn_assistant(
                 choices=choices_json or '',
             )
             conn.commit()
-            staging = rewrite_staging.load(conn, rewrite_id) or {}
-        finally:
-            conn.close()
-        # Regen can score against the stable preceding user id; edit waits
-        # until activate creates the new user row.
-        if staging.get('operation') == rewrite_staging.OP_REGEN:
+        except rewrite_staging.StaleRewriteError:
             try:
-                from chat.scoring_identity import trigger_turn_scoring
-                trigger_turn_scoring(
-                    assistant_text=text,
-                    message_id=staging.get('user_message_id') or turn_data.get('user_message_id'),
-                    get_db_fn=get_db,
-                )
+                conn.commit()
             except Exception:
                 pass
+            raise
+        finally:
+            conn.close()
+        # Candidate durable ≠ active assistant durable: no scoring / wake /
+        # one-shot / session-memo side effects here.
         return None
     conn = get_db()
     cur = conn.execute(
@@ -301,12 +326,21 @@ def _fail_staged_rewrite(turn_data: dict, error: str) -> None:
     try:
         conn = get_db()
         try:
-            rewrite_staging.mark_failed(conn, rewrite_id, error)
-            conn.commit()
+            staging = rewrite_staging.load(conn, rewrite_id)
+            if staging and staging.get('status') not in (
+                rewrite_staging.STATUS_ACTIVATED,
+                rewrite_staging.STATUS_STALE,
+            ):
+                rewrite_staging.mark_failed(conn, rewrite_id, error)
+                conn.commit()
         finally:
             conn.close()
     except Exception:
         pass
+    # Trial resident must not survive into the next normal turn.
+    _discard_staged_resident('staged_rewrite_failed')
+
+
 from chat.daily_context import ensure_schema_logged as _daily_context_ensure_schema
 _daily_context_ensure_schema(DB_PATH)
 
@@ -827,35 +861,55 @@ def build_messages(*, resident_file_hashes=None, history_stats_out=None, for_cc=
     from chat.history_legacy import assemble_legacy_history
     from chat.rolling_summary_store import get_summary
 
-    def _apply_rewrite_rows(rows):
-        rid = str(rewrite_id or '').strip()
-        if not rid:
-            return rows
+    _rewrite_id = str(rewrite_id or '').strip()
+    _rewrite_staging = None
+    _rewrite_source_id = 0
+    if _rewrite_id:
         conn = get_db()
         try:
-            staging = rewrite_staging.load(conn, rid)
+            _rewrite_staging = rewrite_staging.load(conn, _rewrite_id)
         finally:
             conn.close()
-        if not staging:
-            return rows
-        return rewrite_staging.apply_history_overlay(rows, staging)
+        if _rewrite_staging:
+            _rewrite_source_id = int(_rewrite_staging.get('source_message_id') or 0)
 
     _where = "date(created_at) >= date('now', '+8 hours', '-1 day')"
     conn = get_db()
     try:
-        _available = conn.execute(
-            "SELECT COUNT(*) FROM chat_messages WHERE " + _where
-        ).fetchone()[0] or 0
+        if _rewrite_source_id > 0:
+            _available = conn.execute(
+                "SELECT COUNT(*) FROM chat_messages WHERE " + _where + " AND id < ?",
+                (_rewrite_source_id,),
+            ).fetchone()[0] or 0
+        else:
+            _available = conn.execute(
+                "SELECT COUNT(*) FROM chat_messages WHERE " + _where
+            ).fetchone()[0] or 0
     except Exception:
         _available = 60
     finally:
         conn.close()
 
+    def _fetch_history_for_prompt(fetch_limit, min_id=0):
+        """Source-aware fetch for staged rewrite; tip window otherwise."""
+        if _rewrite_source_id > 0 and _rewrite_staging is not None:
+            rows, _avail = rewrite_staging.fetch_rewrite_prefix_rows(
+                get_db,
+                source_id=_rewrite_source_id,
+                fetch_limit=fetch_limit,
+                history_where=_where,
+                min_id=min_id or 0,
+            )
+            return rewrite_staging.apply_history_overlay(rows, _rewrite_staging)
+        rows, _ = fetch_history_rows(
+            get_db, fetch_limit=fetch_limit, min_id=min_id or 0,
+        )
+        return rows
+
     lean_history = lean_history_enabled()
     legacy_limit = legacy_block_limit(_available)
     if not lean_history:
-        rows, _ = fetch_history_rows(get_db, fetch_limit=legacy_limit)
-        rows = _apply_rewrite_rows(rows)
+        rows = _fetch_history_for_prompt(legacy_limit)
         tool_fn = _format_tool_history if lean_tool_budget_enabled() else _format_tool_history_legacy
         msgs, legacy_stats = assemble_legacy_history(
             rows,
@@ -879,7 +933,8 @@ def build_messages(*, resident_file_hashes=None, history_stats_out=None, for_cc=
                 'rolling_summary_text': '',
                 'rolling_summary_coverage_gap': False,
             })
-        if conversation_trimmed:
+        # Staged rewrite: never inject tip-based rolling summary (fork leak).
+        if conversation_trimmed and not _rewrite_id:
             rolling = get_summary('legacy_block')
             rolling_summary_text = (rolling.get('summary') or '').strip()
             if rolling_summary_text:
@@ -900,12 +955,10 @@ def build_messages(*, resident_file_hashes=None, history_stats_out=None, for_cc=
         return msgs
 
     plan = resolve_fetch_plan(available_count=_available, for_cc=for_cc)
-    rows, _ = fetch_history_rows(
-        get_db,
-        fetch_limit=plan['fetch_limit'],
+    rows = _fetch_history_for_prompt(
+        plan['fetch_limit'],
         min_id=plan.get('relay_head_id') or 0,
     )
-    rows = _apply_rewrite_rows(rows)
     file_hashes = resident_file_hashes if (lean_file_dedup_enabled() and for_cc) else set()
     msgs, stats = assemble_history_from_rows(
         rows,
@@ -956,7 +1009,8 @@ def build_messages(*, resident_file_hashes=None, history_stats_out=None, for_cc=
         })
 
     budget = plan['history_token_budget'] or plan['relay_low_water']
-    inject_summary = should_inject_rolling_summary(
+    # Staged rewrite: skip tip-based rolling summary (may include post-fork world).
+    inject_summary = (not _rewrite_id) and should_inject_rolling_summary(
         conversation_content_trimmed=stats.conversation_content_trimmed,
         history_mode=plan['mode'],
         available_count=_available,
@@ -5384,16 +5438,19 @@ def chat_stream():
                             cache_info_json=_cache_info_json or '',
                             choices_json=_choices_json,
                         )
-                        # one-shot 与 wake 同级：仅 assistant 落库成功后消费。
-                        # 优先用本轮注入快照的 wake_ids（与 bridge/background 一致）。
-                        if 'wake_ids' in _cc_one_shot_claims:
-                            _consume_wake_ids = _cc_one_shot_claims.get('wake_ids') or []
-                        else:
-                            _consume_wake_ids = _wake_claim_ids
-                        consume_wake_ids(get_db, _consume_wake_ids)
-                        from chat.system_builder import consume_cc_one_shot_claims
-                        consume_cc_one_shot_claims(get_db, _cc_one_shot_claims)
-                        _write_session_memo(_uc, _cc_text)
+                        # Candidate durable ≠ active assistant durable.
+                        # Wake / one-shot / session-memo only after active commit.
+                        if not _rewrite_id:
+                            # one-shot 与 wake 同级：仅 assistant 落库成功后消费。
+                            # 优先用本轮注入快照的 wake_ids（与 bridge/background 一致）。
+                            if 'wake_ids' in _cc_one_shot_claims:
+                                _consume_wake_ids = _cc_one_shot_claims.get('wake_ids') or []
+                            else:
+                                _consume_wake_ids = _wake_claim_ids
+                            consume_wake_ids(get_db, _consume_wake_ids)
+                            from chat.system_builder import consume_cc_one_shot_claims
+                            consume_cc_one_shot_claims(get_db, _cc_one_shot_claims)
+                            _write_session_memo(_uc, _cc_text)
                         _persisted[0] = True
                         if assistant_id is not None:
                             try:
@@ -5416,6 +5473,9 @@ def chat_stream():
                             except Exception:
                                 pass
                 finally:
+                    # Trial resident must die before the next normal turn can hot-reuse it.
+                    if _rewrite_id:
+                        _discard_staged_resident('staged_rewrite_end')
                     _released[0] = True
                     _gen_release((text, thinking) if text and not _rewrite_id else None)
                 if cc_usage or cc_cache_read or cc_cache_create:
@@ -5560,9 +5620,11 @@ def chat_stream():
                     cache_info_json=_ci,
                     choices_json=json.dumps(_choices, ensure_ascii=False) if _choices else '',
                 )
-                consume_wake_ids(get_db, _wake_claim_ids)
+                # Candidate durable ≠ active assistant durable.
+                if not _rewrite_id:
+                    consume_wake_ids(get_db, _wake_claim_ids)
+                    _write_session_memo(_uc, _pc)
                 _persisted[0] = True
-                _write_session_memo(_uc, _pc)
                 if assistant_id is not None:
                     try:
                         from moments_persistence import after_assistant_persisted
@@ -5770,6 +5832,8 @@ def chat_stream():
                             text, thinking = _rt, ''.join(think_acc)
                     except Exception:
                         pass
+                if _rewrite_id:
+                    _discard_staged_resident('staged_rewrite_end')
                 _released[0] = True
                 _gen_release((text, thinking) if text and not _rewrite_id else None)
             if tool_calls_acc and not thinking:

@@ -594,19 +594,28 @@ class GatewayOneShotPersistWiringTests(unittest.TestCase):
     def test_consume_follows_commit_in_source(self):
         root = Path(__file__).resolve().parents[1]
         source = (root / 'gateway.py').read_text(encoding='utf-8')
+        # Assistant commit lives in _persist_turn_assistant (normal path).
+        helper_at = source.find('def _persist_turn_assistant')
+        self.assertGreater(helper_at, 0)
+        helper_chunk = source[helper_at:helper_at + 5000]
+        # Normal-path INSERT must commit before returning assistant_id.
+        insert_at = helper_chunk.find("INSERT INTO chat_messages")
+        self.assertGreater(insert_at, 0)
+        helper_commit_at = helper_chunk.find('conn.commit()', insert_at)
+        self.assertGreater(helper_commit_at, insert_at)
         marker = "for evt, payload in _cc_resident_stream_gen"
         idx = source.find(marker)
         self.assertGreater(idx, 0)
         chunk = source[idx:idx + 12000]
-        commit_at = chunk.find('conn.commit()')
+        persist_at = chunk.find('_persist_turn_assistant(')
         wake_at = chunk.find('consume_wake_ids(')
         oneshot_at = chunk.find('consume_cc_one_shot_claims(')
-        self.assertGreater(commit_at, 0)
-        self.assertGreater(wake_at, commit_at)
-        self.assertGreater(oneshot_at, commit_at)
+        self.assertGreater(persist_at, 0)
+        self.assertGreater(wake_at, persist_at)
+        self.assertGreater(oneshot_at, persist_at)
         cache_start = chunk.find('_cache_info_json')
         self.assertGreater(cache_start, 0)
-        self.assertNotIn('feedback_ids', chunk[cache_start:commit_at])
+        self.assertNotIn('feedback_ids', chunk[cache_start:persist_at])
 
 
 class ResidentCumulativeStateTests(unittest.TestCase):

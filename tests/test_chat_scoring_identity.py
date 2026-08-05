@@ -322,6 +322,11 @@ class EditRouteBehaviorTests(unittest.TestCase):
             ).fetchone()
             conn.close()
             self.assertEqual(row['content'], '新文字')
+            # Activation must preserve prior edit-route user_rule capture.
+            self.assertEqual(len(enqueued), 1)
+            self.assertEqual(enqueued[0]['message_id'], new_id)
+            self.assertEqual(enqueued[0]['text'], '新文字')
+            shadow.drain_shadow_outbox_best_effort.assert_called()
             ok = trigger_turn_scoring(
                 assistant_text='新回复',
                 message_id=new_id,

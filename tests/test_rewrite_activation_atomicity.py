@@ -309,6 +309,106 @@ class RewriteActivationAtomicityTests(unittest.TestCase):
         out = rw.apply_history_overlay(rows, edit)
         self.assertEqual([(r['author'], r['content']) for r in out], [('hayana', "U1'")])
 
+    def test_10_edit_finalize_rejects_when_active_grew(self):
+        """prepare → another normal turn → finalize must 409 and keep later msgs."""
+        u1 = self._insert('hayana', 'U1')
+        self._insert('assistant', 'A1')
+        prep = self.client.post(
+            '/api/chat/edit', json={'msg_id': u1, 'content': "U1'"},
+        ).get_json()
+        rid = prep['rewrite_id']
+        # Concurrent normal turn advances the active tip.
+        u3 = self._insert('hayana', 'U3')
+        a3 = self._insert('assistant', 'A3')
+        conn = self.get_db()
+        rw.store_candidate(conn, rid, content="A1'")
+        conn.commit()
+        conn.close()
+        before = self._active()
+        fin = self.client.post('/api/chat/edit/finalize', json={'rewrite_id': rid})
+        self.assertEqual(fin.status_code, 409)
+        self.assertEqual(fin.get_json().get('code'), 'stale_rewrite')
+        self.assertEqual(self._active(), before)
+        self.assertIn(('hayana', 'U3'), self._active())
+        self.assertIn(('assistant', 'A3'), self._active())
+        conn = self.get_db()
+        st = rw.load(conn, rid)
+        live_ids = [r[0] for r in rw.active_transcript(conn)]
+        conn.close()
+        self.assertEqual(st['status'], rw.STATUS_STALE)
+        self.assertIn(u3, live_ids)
+        self.assertIn(a3, live_ids)
+        self.assertEqual(self.invalidation_calls, [])
+
+    def test_11_regen_finalize_rejects_after_branch_switch(self):
+        """prepare regen → branch switch → finalize must 409, keep new selection."""
+        self._insert('hayana', 'U1')
+        a1 = self._insert(
+            'assistant', 'A1',
+            branches=json.dumps([
+                {'content': 'A1', 'thinking': '', 'tool_calls': ''},
+                {'content': "A1-alt", 'thinking': '', 'tool_calls': ''},
+            ]),
+            branch_idx=0,
+        )
+        prep = self.client.post('/api/chat/regen/prepare', json={'msg_id': a1}).get_json()
+        rid = prep['rewrite_id']
+        switched = self.client.post(
+            '/api/chat/branch/switch', json={'msg_id': a1, 'direction': 1},
+        )
+        self.assertEqual(switched.status_code, 200)
+        self.assertEqual(switched.get_json()['branch_idx'], 1)
+        conn = self.get_db()
+        rw.store_candidate(conn, rid, content="A1-stale-candidate")
+        conn.commit()
+        conn.close()
+        fin = self.client.post('/api/chat/regen/finalize', json={'rewrite_id': rid})
+        self.assertEqual(fin.status_code, 409)
+        self.assertEqual(fin.get_json().get('code'), 'stale_rewrite')
+        snap = self._snap_assistant(a1)
+        self.assertEqual(snap['content'], 'A1-alt')
+        self.assertEqual(snap['branch_idx'], 1)
+        self.assertNotEqual(snap['content'], 'A1-stale-candidate')
+        conn = self.get_db()
+        st = rw.load(conn, rid)
+        conn.close()
+        self.assertEqual(st['status'], rw.STATUS_STALE)
+
+    def test_12_source_aware_prefix_keeps_history_before_distant_edit(self):
+        """Edit far behind tip: prefix fetch must keep id < source, not tip window."""
+        ids = []
+        for i in range(1, 21):
+            ids.append(self._insert('hayana', f'U{i}'))
+            ids.append(self._insert('assistant', f'A{i}'))
+        # Edit U2 (early). Tip window of 5 would miss everything before source.
+        source_id = ids[2]  # U2 is 3rd insert? Wait: U1,A1,U2,... → index 2 is U2
+        self.assertEqual(source_id, 3)
+        prep = self.client.post(
+            '/api/chat/edit', json={'msg_id': source_id, 'content': "U2'"},
+        ).get_json()
+        rid = prep['rewrite_id']
+        conn = self.get_db()
+        staging = rw.load(conn, rid)
+        conn.close()
+
+        def get_db():
+            return self.get_db()
+
+        rows, available = rw.fetch_rewrite_prefix_rows(
+            get_db,
+            source_id=int(staging['source_message_id']),
+            fetch_limit=5,
+            history_where='1=1',
+        )
+        overlay = rw.apply_history_overlay(rows, staging)
+        contents = [r['content'] for r in overlay]
+        # Tip-window bug would fetch U18..A20 then filter id<3 → only U2'.
+        # Source-aware prefix keeps the real pre-fork window (U1/A1) + edit.
+        self.assertEqual(available, 2)
+        self.assertEqual(contents, ['U1', 'A1', "U2'"])
+        self.assertNotIn('U20', contents)
+        self.assertNotIn('A20', contents)
+
 
 if __name__ == '__main__':
     unittest.main()
