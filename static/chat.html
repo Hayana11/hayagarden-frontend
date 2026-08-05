@@ -2245,6 +2245,8 @@ async function copyBubble(btn) {
   showToast('已复制');
 }
 
+var pendingRewriteId = null;
+
 async function doRegen(msgId) {
   if(sending) return;
   sending = true; setSendBtn('stop');
@@ -2252,13 +2254,16 @@ async function doRegen(msgId) {
     var prep = await fetch('/api/chat/regen/prepare', {method:'POST',
       headers:{'Content-Type':'application/json'}, body:JSON.stringify({msg_id:msgId})});
     var pd = await prep.json();
-    if(!pd.ok){ sending=false; setSendBtn('send'); return; }
+    if(!pd.ok || !pd.rewrite_id){ sending=false; setSendBtn('send'); return; }
     showTyping('正在重新生成…','working');
     try {
+      pendingRewriteId = pd.rewrite_id;
+      pendingGwUserMessageId = pd.user_message_id || null;
       await streamReply();
       await fetch('/api/chat/regen/finalize', {method:'POST',
-        headers:{'Content-Type':'application/json'}, body:JSON.stringify({old_branches:pd.old_branches})});
+        headers:{'Content-Type':'application/json'}, body:JSON.stringify({rewrite_id:pd.rewrite_id})});
     } catch(e) { console.error('regen stream failed',e); }
+    finally { pendingRewriteId = null; }
     hideTyping();
     await loadMsgs(false);
     if(streamState.cacheRead||streamState.cacheCreate||streamState.cacheSupported!==null) appendCacheInfo();
@@ -2270,11 +2275,19 @@ async function doEdit(msgId, newContent) {
   if(sending) return;
   sending = true; setSendBtn('stop');
   try {
-    await fetch('/api/chat/edit', {method:'POST',
+    var er = await fetch('/api/chat/edit', {method:'POST',
       headers:{'Content-Type':'application/json'}, body:JSON.stringify({msg_id:msgId, content:newContent})});
-    await loadMsgs(false);
+    var ed = await er.json();
+    if(!ed.ok || !ed.rewrite_id){ sending=false; setSendBtn('send'); return; }
     showTyping('正在生成编辑后的回复…','working');
-    try { await streamReply(); } catch(e) { console.error('doEdit stream failed',e); }
+    try {
+      pendingRewriteId = ed.rewrite_id;
+      pendingGwUserMessageId = null;
+      await streamReply();
+      await fetch('/api/chat/edit/finalize', {method:'POST',
+        headers:{'Content-Type':'application/json'}, body:JSON.stringify({rewrite_id:ed.rewrite_id})});
+    } catch(e) { console.error('doEdit stream failed',e); }
+    finally { pendingRewriteId = null; }
     hideTyping();
     await loadMsgs(false);
     if(streamState.cacheRead||streamState.cacheCreate||streamState.cacheSupported!==null) appendCacheInfo();
@@ -2371,6 +2384,7 @@ async function streamReply(){
   _armSafety();
   setSendStatus('正在等待模型…','working');
   var turnBody=pendingGwUserMessageId?{user_message_id:pendingGwUserMessageId}:{};
+  if(typeof pendingRewriteId!=='undefined' && pendingRewriteId) turnBody.rewrite_id=pendingRewriteId;
   var resp=await fetch('/api/gw/chat/stream',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(turnBody),signal:ctrl.signal});
   if(!resp.ok||!resp.body) throw new Error('stream failed');
   var SSE_SEP=String.fromCharCode(10)+String.fromCharCode(10);

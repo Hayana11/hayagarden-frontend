@@ -397,15 +397,41 @@ export function uploadChatFile(file: File): Promise<{ fileUrl: string; fileName:
     .catch(() => null);
 }
 
-// POST /api/chat/edit — archives the tail as an edit branch, truncates after msg
+// POST /api/chat/edit — stage an edit rewrite (active transcript unchanged)
 export function editChatMessage(
   msgId: number,
   content: string,
-): Promise<{ ok: boolean; messageId: number | null }> {
+): Promise<{ ok: boolean; rewriteId: string | null; sourceMessageId: number | null }> {
   return http
-    .post<{ ok: boolean; message_id?: number }>('/api/chat/edit', { msg_id: msgId, content })
-    .then((r) => ({ ok: Boolean(r.ok), messageId: r.ok && r.message_id ? Number(r.message_id) : null }))
-    .catch(() => ({ ok: false, messageId: null }));
+    .post<{ ok: boolean; rewrite_id?: string; source_message_id?: number }>(
+      '/api/chat/edit',
+      { msg_id: msgId, content },
+    )
+    .then((r) => ({
+      ok: Boolean(r.ok),
+      rewriteId: r.ok && r.rewrite_id ? String(r.rewrite_id) : null,
+      sourceMessageId:
+        r.ok && r.source_message_id != null ? Number(r.source_message_id) : null,
+    }))
+    .catch(() => ({ ok: false, rewriteId: null, sourceMessageId: null }));
+}
+
+// POST /api/chat/edit/finalize — activate staged edit after candidate is ready
+export function editFinalize(
+  rewriteId: string,
+): Promise<{ ok: boolean; messageId: number | null; assistantMessageId: number | null }> {
+  return http
+    .post<{ ok: boolean; message_id?: number; assistant_message_id?: number }>(
+      '/api/chat/edit/finalize',
+      { rewrite_id: rewriteId },
+    )
+    .then((r) => ({
+      ok: Boolean(r.ok),
+      messageId: r.ok && r.message_id != null ? Number(r.message_id) : null,
+      assistantMessageId:
+        r.ok && r.assistant_message_id != null ? Number(r.assistant_message_id) : null,
+    }))
+    .catch(() => ({ ok: false, messageId: null, assistantMessageId: null }));
 }
 
 // POST /api/chat/branch/switch -> { branch_idx, total }
@@ -416,30 +442,43 @@ export function switchChatBranch(msgId: number, direction: 1 | -1): Promise<{ br
     .catch(() => null);
 }
 
-// POST /api/chat/regen/prepare -> { old_branches, user_message_id } (deletes the assistant row)
+// POST /api/chat/regen/prepare -> staged rewrite (does NOT delete the assistant)
 export function regenPrepare(
   msgId: number,
-): Promise<{ oldBranches: unknown[]; userMessageId: number | null } | null> {
+): Promise<{
+  rewriteId: string;
+  oldBranches: unknown[];
+  userMessageId: number | null;
+  sourceAssistantId: number | null;
+} | null> {
   return http
-    .post<{ ok: boolean; old_branches: unknown[]; user_message_id?: number }>(
-      '/api/chat/regen/prepare',
-      { msg_id: msgId },
-    )
+    .post<{
+      ok: boolean;
+      rewrite_id?: string;
+      old_branches: unknown[];
+      user_message_id?: number;
+      source_assistant_id?: number;
+    }>('/api/chat/regen/prepare', { msg_id: msgId })
     .then((r) =>
-      r.ok
+      r.ok && r.rewrite_id
         ? {
+            rewriteId: String(r.rewrite_id),
             oldBranches: r.old_branches,
             userMessageId: r.user_message_id != null ? Number(r.user_message_id) : null,
+            sourceAssistantId:
+              r.source_assistant_id != null ? Number(r.source_assistant_id) : null,
           }
         : null,
     )
     .catch(() => null);
 }
 
-// POST /api/chat/regen/finalize — stitches old branches onto the fresh reply
-export function regenFinalize(oldBranches: unknown[]): Promise<{ branchIdx: number; total: number } | null> {
+// POST /api/chat/regen/finalize — activate staged candidate onto source assistant
+export function regenFinalize(rewriteId: string): Promise<{ branchIdx: number; total: number } | null> {
   return http
-    .post<{ ok: boolean; branch_idx: number; total: number }>('/api/chat/regen/finalize', { old_branches: oldBranches })
+    .post<{ ok: boolean; branch_idx: number; total: number }>('/api/chat/regen/finalize', {
+      rewrite_id: rewriteId,
+    })
     .then((r) => (r.ok ? { branchIdx: r.branch_idx, total: r.total } : null))
     .catch(() => null);
 }

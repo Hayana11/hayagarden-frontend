@@ -78,6 +78,20 @@ _migrate_chat_columns()
 group_chat_store.ensure_schema(DB_PATH)
 context_usage_store.ensure_schema(DB_PATH)
 moments_store.ensure_schema(DB_PATH, gallery_store.DB_PATH)
+from chat.rewrite_staging import ensure_schema_for_path as _rewrite_staging_ensure_schema
+_rewrite_staging_ensure_schema(DB_PATH)
+# Legacy edit archives; create if missing (production already has it).
+try:
+    _eb = get_db()
+    _eb.execute(
+        'CREATE TABLE IF NOT EXISTS chat_edit_branches ('
+        'id INTEGER PRIMARY KEY AUTOINCREMENT, '
+        'fork_msg_id INTEGER, original_content TEXT, messages_json TEXT)'
+    )
+    _eb.commit()
+    _eb.close()
+except Exception:
+    pass
 from chat.daily_context import ensure_schema_logged as _daily_context_ensure_schema
 _daily_context_ensure_schema(DB_PATH)
 from wake.concern_resolution import ensure_concern_closure_schema_for_path
@@ -4395,68 +4409,71 @@ def invalidate_cc_resident_for_history_rewrite(reason):
 @app.route('/api/chat/regen/prepare', methods=['POST'])
 @serialize_history_rewrite
 def regen_prepare():
-    import json as _json
+    """Stage a regen rewrite. Must NOT mutate the active transcript."""
+    from chat import rewrite_staging as _rw
     data = request.get_json() or {}
     msg_id = data.get('msg_id')
     if not msg_id:
         return jsonify({'error': 'msg_id required'}), 400
     conn = get_db()
-    row = conn.execute('SELECT * FROM chat_messages WHERE id=?', (msg_id,)).fetchone()
-    if not row:
+    try:
+        prep = _rw.prepare_regen(conn, source_assistant_id=int(msg_id))
+        conn.commit()
+    except KeyError:
         conn.close()
         return jsonify({'error': 'not found'}), 404
-    # Build old_branches: if branches already exist reuse them, else init from current content
-    old_branches = []
-    existing = (row['branches'] or '').strip()
-    if existing:
-        try:
-            old_branches = _json.loads(existing)
-        except Exception:
-            old_branches = []
-    if not old_branches:
-        old_branches = [{
-            'content': row['content'],
-            'thinking': row['thinking'] or '',
-            'tool_calls': row['tool_calls'] or ''
-        }]
-    from chat.scoring_identity import find_user_message_before
-    user_message_id = find_user_message_before(conn, int(msg_id))
-    conn.execute('DELETE FROM chat_messages WHERE id=?', (msg_id,))
-    conn.commit()
+    except ValueError as exc:
+        conn.close()
+        return jsonify({'error': str(exc)}), 400
+    except Exception:
+        conn.close()
+        raise
     conn.close()
-    invalidate_cc_resident_for_history_rewrite('regen_prepare')
-    payload = {'ok': True, 'old_branches': old_branches}
-    if user_message_id is not None:
-        payload['user_message_id'] = user_message_id
+    payload = {
+        'ok': True,
+        'rewrite_id': prep['rewrite_id'],
+        'old_branches': prep['old_branches'],
+        'source_assistant_id': prep['source_assistant_id'],
+    }
+    if prep.get('user_message_id') is not None:
+        payload['user_message_id'] = prep['user_message_id']
     return jsonify(payload)
 
 
 @app.route('/api/chat/regen/finalize', methods=['POST'])
+@serialize_history_rewrite
 def regen_finalize():
-    import json as _json
+    """Activate staged regen candidate onto the original assistant row."""
+    from chat import rewrite_staging as _rw
     data = request.get_json() or {}
-    old_branches = data.get('old_branches', [])
+    rewrite_id = (data.get('rewrite_id') or '').strip()
+    if not rewrite_id:
+        return jsonify({'error': 'rewrite_id required'}), 400
     conn = get_db()
-    row = conn.execute(
-        "SELECT * FROM chat_messages WHERE author IN ('fyodor','assistant','claude') ORDER BY id DESC LIMIT 1"
-    ).fetchone()
-    if not row:
+    try:
+        result = _rw.activate_regen(conn, rewrite_id)
+        conn.commit()
+    except KeyError as exc:
         conn.close()
-        return jsonify({'error': 'no AI row'}), 404
-    new_branch = {
-        'content': row['content'],
-        'thinking': row['thinking'] or '',
-        'tool_calls': row['tool_calls'] or ''
-    }
-    all_branches = old_branches + [new_branch]
-    branch_idx = len(all_branches) - 1
-    conn.execute(
-        'UPDATE chat_messages SET branches=?, branch_idx=? WHERE id=?',
-        (_json.dumps(all_branches, ensure_ascii=False), branch_idx, row['id'])
-    )
-    conn.commit()
+        return jsonify({'error': str(exc)}), 404
+    except ValueError as exc:
+        conn.close()
+        return jsonify({'error': str(exc)}), 400
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        conn.close()
+        raise
     conn.close()
-    return jsonify({'ok': True, 'branch_idx': branch_idx, 'total': len(all_branches)})
+    invalidate_cc_resident_for_history_rewrite('regen_finalize')
+    return jsonify({
+        'ok': True,
+        'branch_idx': result['branch_idx'],
+        'total': result['total'],
+        'assistant_message_id': result['assistant_message_id'],
+    })
 
 
 @app.route('/api/chat/branch/switch', methods=['POST'])
@@ -4497,118 +4514,74 @@ def branch_switch():
 @app.route('/api/chat/edit', methods=['POST'])
 @serialize_history_rewrite
 def edit_message():
-    import json as _json
+    """Stage an edit rewrite. Must NOT mutate the active transcript."""
+    from chat import rewrite_staging as _rw
     data = request.get_json() or {}
     msg_id = data.get('msg_id')
     new_content = (data.get('content') or '').strip()
     if not msg_id or not new_content:
         return jsonify({'error': 'msg_id and content required'}), 400
     conn = get_db()
-    row = conn.execute('SELECT * FROM chat_messages WHERE id=?', (msg_id,)).fetchone()
-    if not row:
+    try:
+        prep = _rw.prepare_edit(
+            conn, source_message_id=int(msg_id), edited_content=new_content,
+        )
+        conn.commit()
+    except KeyError:
         conn.close()
         return jsonify({'error': 'not found'}), 404
-    # Save entire tail (this row + everything after) as an edit branch
-    tail_rows = conn.execute(
-        'SELECT * FROM chat_messages WHERE id >= ? ORDER BY id ASC', (msg_id,)
-    ).fetchall()
-    tail_json = _json.dumps([dict(r) for r in tail_rows], ensure_ascii=False, default=str)
-    conn.execute(
-        'INSERT INTO chat_edit_branches (fork_msg_id, original_content, messages_json) VALUES (?,?,?)',
-        (msg_id, row['content'], tail_json)
-    )
-    author = row['author']
-    image_url = row['image_url'] or ''
-    file_url = row['file_url'] or ''
-    file_name = row['file_name'] or ''
-    # New message identity: edited text must not reuse old shadow event key.
-    conn.execute('DELETE FROM chat_messages WHERE id >= ?', (msg_id,))
-    previous_user_at = None
-    created_at = None
-    new_message_id = None
-    _user_events_requested = all(
-        str(os.environ.get(name, '0')).strip() == '1'
-        for name in (
-            'INTERNAL_STATE_V3_SHADOW_ENABLED',
-            'INTERNAL_STATE_V3_SCORE_PROOF_ENABLED',
-            'INTERNAL_STATE_V3_USER_EVENTS_ENABLED',
-        )
-    )
-    if _user_events_requested and author not in ('fyodor', 'assistant', 'claude'):
-        from chat.interaction_state import USER_AUTHOR_SQL
-        prev = conn.execute(
-            f"SELECT created_at FROM chat_messages WHERE {USER_AUTHOR_SQL} "
-            "ORDER BY id DESC LIMIT 1"
-        ).fetchone()
-        if prev is not None:
-            previous_user_at = prev['created_at'] if hasattr(prev, 'keys') else prev[0]
-            previous_user_at = str(previous_user_at) if previous_user_at else None
-    cur = conn.execute(
-        "INSERT INTO chat_messages (author,content,image_url,file_url,file_name) "
-        "VALUES (?,?,?,?,?)",
-        (author, new_content, image_url, file_url, file_name),
-    )
-    new_message_id = cur.lastrowid
-    if _user_events_requested:
-        row2 = conn.execute(
-            "SELECT created_at FROM chat_messages WHERE id=?",
-            (new_message_id,),
-        ).fetchone()
-        if row2 is not None:
-            created_at = row2['created_at'] if hasattr(row2, 'keys') else row2[0]
-            created_at = str(created_at) if created_at else None
-    if (
-        _user_events_requested
-        and author not in ('fyodor', 'assistant', 'claude')
-        and new_message_id is not None
-        and created_at
-    ):
-        try:
-            import internal_state_shadow as _shadow
-            if _shadow.is_user_events_enabled():
-                try:
-                    _shadow.enqueue_user_rule_in_txn(
-                        conn,
-                        message_id=int(new_message_id),
-                        text=new_content or '',
-                        created_at=created_at,
-                        previous_user_at=previous_user_at,
-                    )
-                except Exception:
-                    try:
-                        _shadow.mark_proof_gap(
-                            conn,
-                            failed_message_id=int(new_message_id),
-                            error_code='outbox_capture_gap',
-                            db_path=DB_PATH,
-                        )
-                    except Exception:
-                        try:
-                            _shadow.mark_proof_gap_standalone(
-                                db_path=DB_PATH,
-                                failed_message_id=int(new_message_id),
-                                error_code='outbox_capture_gap',
-                            )
-                        except Exception:
-                            pass
-        except Exception:
-            pass
-    conn.commit()
+    except ValueError as exc:
+        conn.close()
+        return jsonify({'error': str(exc)}), 400
+    except Exception:
+        conn.close()
+        raise
     conn.close()
-    if author not in ('fyodor', 'assistant', 'claude'):
+    return jsonify({
+        'ok': True,
+        'rewrite_id': prep['rewrite_id'],
+        'source_message_id': prep['source_message_id'],
+    })
+
+
+@app.route('/api/chat/edit/finalize', methods=['POST'])
+@serialize_history_rewrite
+def edit_finalize():
+    """Atomically activate staged edit after candidate assistant is ready."""
+    from chat import rewrite_staging as _rw
+    data = request.get_json() or {}
+    rewrite_id = (data.get('rewrite_id') or '').strip()
+    if not rewrite_id:
+        return jsonify({'error': 'rewrite_id required'}), 400
+    conn = get_db()
+    try:
+        result = _rw.activate_edit(conn, rewrite_id)
+        conn.commit()
+    except KeyError as exc:
+        conn.close()
+        return jsonify({'error': str(exc)}), 404
+    except ValueError as exc:
+        conn.close()
+        return jsonify({'error': str(exc)}), 400
+    except Exception:
         try:
-            from chat.interaction_state import touch_user_interaction
-            touch_user_interaction(get_db)
+            conn.rollback()
         except Exception:
             pass
-        if new_message_id is not None and created_at:
-            try:
-                import internal_state_shadow as _shadow
-                _shadow.drain_shadow_outbox_best_effort(db_path=DB_PATH)
-            except Exception:
-                pass
+        conn.close()
+        raise
+    conn.close()
+    try:
+        from chat.interaction_state import touch_user_interaction
+        touch_user_interaction(get_db)
+    except Exception:
+        pass
     invalidate_cc_resident_for_history_rewrite('edit')
-    return jsonify({'ok': True, 'message_id': new_message_id})
+    return jsonify({
+        'ok': True,
+        'message_id': result['message_id'],
+        'assistant_message_id': result['assistant_message_id'],
+    })
 
 
 @app.route('/api/chat/delete', methods=['POST'])

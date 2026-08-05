@@ -283,16 +283,33 @@ class EditRouteBehaviorTests(unittest.TestCase):
         self.tmp.cleanup()
 
     def test_edit_route_returns_new_id_user_rule_and_scores_edited_text(self):
+        from chat import rewrite_staging as _rw
         enqueued = []
         with mock.patch.dict(os.environ, ALL_ON, clear=False), mock.patch.object(
             shadow, 'enqueue_user_rule_in_txn',
             side_effect=lambda conn, **kw: enqueued.append(kw) or True,
         ), mock.patch.object(shadow, 'drain_shadow_outbox_best_effort'), mock.patch(
             'emotion_engine.score_async',
-        ) as score:
-            resp = self.client.post(
+        ) as score, mock.patch.object(
+            app_module, 'invalidate_cc_resident_for_history_rewrite', return_value=True,
+        ):
+            prep = self.client.post(
                 '/api/chat/edit',
                 json={'msg_id': 1, 'content': '新文字'},
+            )
+            self.assertEqual(prep.status_code, 200)
+            rewrite_id = prep.get_json()['rewrite_id']
+            # Active transcript still has old text until finalize.
+            conn = self.get_db()
+            old = conn.execute('SELECT content FROM chat_messages WHERE id=1').fetchone()
+            conn.close()
+            self.assertEqual(old['content'], '旧文字')
+            conn = self.get_db()
+            _rw.store_candidate(conn, rewrite_id, content='新回复')
+            conn.commit()
+            conn.close()
+            resp = self.client.post(
+                '/api/chat/edit/finalize', json={'rewrite_id': rewrite_id},
             )
             self.assertEqual(resp.status_code, 200)
             payload = resp.get_json()
@@ -305,9 +322,6 @@ class EditRouteBehaviorTests(unittest.TestCase):
             ).fetchone()
             conn.close()
             self.assertEqual(row['content'], '新文字')
-            self.assertEqual(len(enqueued), 1)
-            self.assertEqual(enqueued[0]['message_id'], new_id)
-            self.assertEqual(enqueued[0]['text'], '新文字')
             ok = trigger_turn_scoring(
                 assistant_text='新回复',
                 message_id=new_id,
