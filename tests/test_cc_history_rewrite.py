@@ -128,6 +128,7 @@ def _assert_next_generation_cold(testcase, resident, get_db):
 def _ensure_app_importable():
     root = Path('/opt/frontend')
     root.mkdir(parents=True, exist_ok=True)
+    (root / '.env').touch(exist_ok=True)
     conn = sqlite3.connect(str(root / 'memories.db'))
     try:
         conn.execute('CREATE TABLE IF NOT EXISTS chat_messages (id INTEGER PRIMARY KEY, author TEXT, content TEXT)')
