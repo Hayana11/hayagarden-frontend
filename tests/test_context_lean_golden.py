@@ -43,7 +43,7 @@ def _baseline_assemble(
     img_block_fn=None,
     rolling_summary='',
 ):
-    """Frozen provider-visible messages from base 3ffed9ba build_messages."""
+    """Frozen provider-visible messages plus explicit attachment contract repairs."""
     window_base, window_block = 60, 20
     limit = available_count
     if available_count > window_base:
@@ -86,15 +86,27 @@ def _baseline_assemble(
         if r.content:
             blocks.append({'type': 'text', 'text': note + r.content})
         fu = r.file_url or ''
-        if fu and not is_ai and ri >= total - 6 and str(fu).startswith('/static/'):
-            body = read_file_fn(static_dir, fu) if read_file_fn else None
+        if fu and not is_ai and str(fu).startswith('/static/'):
+            fname = r.file_name or '附件'
+            body = (
+                read_file_fn(static_dir, fu)
+                if read_file_fn and ri >= total - 6 else None
+            )
             if body is not None:
                 if len(body) > 30000:
                     body = body[:30000] + '\n...(文件过长已截断)'
                 blocks.append({
                     'type': 'text',
-                    'text': '[用户发来文件: %s]\n```\n%s\n```' % (r.file_name or '附件', body),
+                    'text': '[用户发来文件: %s]\n```\n%s\n```' % (fname, body),
                 })
+            else:
+                variants = ('[文件: %s]' % fname, '[文件:%s]' % fname)
+                visible = '\n'.join(
+                    str(block.get('text') or '')
+                    for block in blocks if block.get('type') == 'text'
+                )
+                if not any(marker in visible for marker in variants):
+                    blocks.append({'type': 'text', 'text': '[文件: %s]' % fname})
         if is_ai and r.tool_calls:
             th = format_tool_history_legacy(r.tool_calls)
             if th:

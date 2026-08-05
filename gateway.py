@@ -663,29 +663,18 @@ def img_block(url, max_dim=1568):
 
 # 选择器：AI 在正文里输出 [choices]A|B|C[/choices]，保存时抽出存进 choices 列。
 # 用标签而非 tool call：沿用已有机制（贴纸/语音同思路），不打断流式、不多一轮 API 往返。
-_CHOICES_RE = re.compile(r'\[choices\](.*?)\[/choices\]', re.DOTALL)
-
 def _extract_choices(text):
-    """从正文抽出第一组 [choices]…[/choices] 选项，返回 (去标签后的正文, [选项...])。"""
-    if not text or '[choices]' not in text:
-        return text, []
-    found = []
-    def _repl(m):
-        opts = [o.strip() for o in m.group(1).split('|') if o.strip()]
-        if opts:
-            found.append(opts)
-        return ''
-    clean = _CHOICES_RE.sub(_repl, text).strip()
-    return clean, (found[0] if found else [])
+    from chat.choices_contract import extract_choices
+    return extract_choices(text)
 
 
 def _read_upload_file_body(static_dir, file_url):
-    if not file_url or not str(file_url).startswith('/static/'):
-        return None
     try:
-        fp = os.path.realpath(static_dir + str(file_url)[7:])
-        if fp.startswith(os.path.realpath(static_dir)) and os.path.exists(fp):
-            with open(fp, 'r', encoding='utf-8', errors='replace') as ff:
+        from chat.attachment_contract import resolve_uploaded_file_url
+        files_dir = os.path.join(static_dir, 'uploads', 'files')
+        fp = resolve_uploaded_file_url(str(file_url or ''), files_dir)
+        if fp is not None and fp.is_file():
+            with fp.open('r', encoding='utf-8', errors='replace') as ff:
                 return ff.read()
     except Exception:
         return None
@@ -7506,4 +7495,3 @@ app.register_blueprint(
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5051, debug=False)
-

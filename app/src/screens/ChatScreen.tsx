@@ -24,6 +24,7 @@ import {
   artifactTypeIcon,
   artifactTypeLabel,
   cacheLabel,
+  chatFilePreviewUrl,
   chatPlaceholder,
   fmtArtifactSize,
   fmtCostUsd,
@@ -38,6 +39,7 @@ import {
   type ChatToolCall,
 } from '../lib/chat';
 import type { SoftWindowUiState } from '../lib/dailySoftWindow';
+import { ComposerUploadCoordinator } from '../lib/composerUpload';
 import type { ReactElement } from 'react';
 
 const SETTINGS_KEY = 'fyodor-chat-settings';
@@ -148,6 +150,7 @@ export function ChatScreen() {
 
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
+  const [posting, setPosting] = useState(false);
   const [live, setLive] = useState<LiveState | null>(null);
   const [pendingFile, setPendingFile] = useState<{ fileUrl: string; fileName: string } | null>(null);
   const [pendingImage, setPendingImage] = useState<File | null>(null);
@@ -186,6 +189,15 @@ export function ChatScreen() {
   const abortRef = useRef<AbortController | null>(null);
   const toastTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
   const liveRef = useRef<LiveState | null>(null);
+  const postingRef = useRef(false);
+  const composerMutationRevisionRef = useRef(0);
+  const uploadCoordinatorRef = useRef(new ComposerUploadCoordinator(
+    () => composerMutationRevisionRef.current,
+    (file) => {
+      setPendingFile(file);
+      setPendingImage(null);
+    },
+  ));
 
   const effTheme = settings.theme === 'auto' ? (sysDark ? 'dark' : 'light') : settings.theme;
   const vars = effTheme === 'dark' ? DARK_VARS : LIGHT_VARS;
@@ -387,23 +399,40 @@ export function ChatScreen() {
     [scrollBottom, showToast, updateLive],
   );
 
-  const send = useCallback(async (overrideText?: string) => {
-    const text = (overrideText ?? input).trim();
-    if ((!text && !pendingFile && !pendingImage) || sending) return;
+  const send = useCallback(async () => {
+    const attempt = {
+      text: input.trim(),
+      file: pendingFile,
+      image: pendingImage,
+    };
+    if ((!attempt.text && !attempt.file && !attempt.image) || sending) return;
     setSending(true);
     setChatError(null);
-    if (!overrideText) setInput('');
+    setInput('');
     if (taRef.current) taRef.current.style.height = 'auto';
-    const extra = pendingImage ? { imageFile: pendingImage } : pendingFile ? { fileUrl: pendingFile.fileUrl, fileName: pendingFile.fileName } : {};
-    setPendingFile(null);
-    setPendingImage(null);
-    const messageId = await sendChatMessage(text, extra);
+    const extra = attempt.image
+      ? { imageFile: attempt.image }
+      : attempt.file
+        ? { fileUrl: attempt.file.fileUrl, fileName: attempt.file.fileName }
+        : {};
+    postingRef.current = true;
+    composerMutationRevisionRef.current += 1;
+    setPosting(true);
+    let messageId: number | null = null;
+    try {
+      messageId = await sendChatMessage(attempt.text, extra);
+    } finally {
+      postingRef.current = false;
+      setPosting(false);
+    }
     if (messageId === null) {
       showToast('发送失败');
-      if (!overrideText) setInput(text);
+      setInput((current) => current || attempt.text);
       setSending(false);
       return;
     }
+    setPendingFile((current) => (current === attempt.file ? null : current));
+    setPendingImage((current) => (current === attempt.image ? null : current));
     await refetchLatest();
     await runStream(messageId);
     await refetchLatest();
@@ -411,11 +440,46 @@ export function ChatScreen() {
     taRef.current?.focus();
   }, [input, pendingFile, pendingImage, sending, refetchLatest, runStream, showToast]);
 
+  const sendChoice = useCallback(async (text: string): Promise<boolean> => {
+    const choice = text.trim();
+    if (!choice || sending) return false;
+    setSending(true);
+    setChatError(null);
+    uploadCoordinatorRef.current.beginChoicePost();
+    postingRef.current = true;
+    setPosting(true);
+    let messageId: number | null = null;
+    try {
+      messageId = await sendChatMessage(choice);
+    } finally {
+      postingRef.current = false;
+      setPosting(false);
+      uploadCoordinatorRef.current.endChoicePost();
+    }
+    if (messageId === null) {
+      showToast('发送失败');
+      setSending(false);
+      return false;
+    }
+    await refetchLatest();
+    await runStream(messageId);
+    await refetchLatest();
+    setSending(false);
+    return true;
+  }, [sending, refetchLatest, runStream, showToast]);
+
   const chooseOption = useCallback(async (text: string, msgId: number) => {
     if (sending || isChoicesAnswered(msgId, msgs)) return;
     setPickedChoices((prev) => ({ ...prev, [msgId]: text }));
-    await send(text);
-  }, [msgs, send, sending]);
+    const sent = await sendChoice(text);
+    if (!sent) {
+      setPickedChoices((prev) => {
+        const next = { ...prev };
+        delete next[msgId];
+        return next;
+      });
+    }
+  }, [msgs, sendChoice, sending]);
 
   const redo = useCallback(
     async (msgId: number) => {
@@ -516,12 +580,13 @@ export function ChatScreen() {
   const onAttachFile = useCallback(
     async (f: File | undefined) => {
       setAttachMenuOpen(false);
-      if (!f) return;
-      const up = await uploadChatFile(f);
-      if (up) {
-        setPendingFile(up);
-        setPendingImage(null);
-      } else showToast('上传失败（只收 2MB 内文本类文件）');
+      if (!f || postingRef.current) return;
+      const mutationRevision = composerMutationRevisionRef.current;
+      const uploaded = await uploadCoordinatorRef.current.settle(
+        uploadChatFile(f),
+        mutationRevision,
+      );
+      if (!uploaded) showToast('上传失败（只收 2MB 内文本类文件）');
     },
     [showToast],
   );
@@ -701,6 +766,7 @@ export function ChatScreen() {
 
   function renderUserMsg(m: ChatMsg) {
     const editing = editingId === m.id;
+    const filePreview = chatFilePreviewUrl(m.fileUrl);
     return (
       <div id={`msg-${m.id}`} className={`chat-msg${flashId === m.id ? ' chat-flash' : ''}`} style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 7, borderRadius: 16 }}>
         {editing ? (
@@ -726,12 +792,17 @@ export function ChatScreen() {
             <div style={{ maxWidth: '82%', background: 'var(--bubble)', borderRadius: '18px 18px 6px 18px', padding: '12px 16px', boxShadow: '0 6px 16px var(--shadow)', display: 'flex', flexDirection: 'column', gap: 8 }}>
               {(m.fileName || m.imageUrl) && (
                 <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-                  {m.fileName && (
+                  {m.fileName && (filePreview ? (
+                    <a href={filePreview} target="_blank" rel="noopener noreferrer" style={{ display: 'flex', alignItems: 'center', gap: 6, background: 'var(--card)', borderRadius: 999, padding: '5px 11px', fontSize: 11.5, color: 'var(--ink2)', textDecoration: 'none' }}>
+                      <Svg d={IC.clip} size={11} sw={1.8} />
+                      {m.fileName}
+                    </a>
+                  ) : (
                     <span style={{ display: 'flex', alignItems: 'center', gap: 6, background: 'var(--card)', borderRadius: 999, padding: '5px 11px', fontSize: 11.5, color: 'var(--ink2)' }}>
                       <Svg d={IC.clip} size={11} sw={1.8} />
                       {m.fileName}
                     </span>
-                  )}
+                  ))}
                   {m.imageUrl && <img src={m.imageUrl} alt="" style={{ maxWidth: 200, maxHeight: 200, borderRadius: 12, objectFit: 'cover' }} />}
                 </div>
               )}
@@ -1214,7 +1285,7 @@ export function ChatScreen() {
             <>
               <div onClick={() => setAttachMenuOpen(false)} style={{ position: 'fixed', inset: 0, zIndex: 1 }} />
               <div style={{ position: 'absolute', bottom: 'calc(100% + 10px)', left: 0, zIndex: 2, width: 190, background: 'var(--card)', borderRadius: 16, boxShadow: '0 24px 60px var(--shadow2)', padding: 8, display: 'flex', flexDirection: 'column', gap: 2, animation: 'chatFadeIn .15s ease' }}>
-                <div onClick={() => { setAttachMenuOpen(false); imgInputRef.current?.click(); }} style={{ cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 10, padding: '10px 12px', borderRadius: 11 }}>
+                <div onClick={() => { if (!postingRef.current) { setAttachMenuOpen(false); imgInputRef.current?.click(); } }} style={{ cursor: posting ? 'default' : 'pointer', display: 'flex', alignItems: 'center', gap: 10, padding: '10px 12px', borderRadius: 11 }}>
                   <svg viewBox="0 0 24 24" width={15} height={15} fill="none" stroke="currentColor" strokeWidth={1.7} strokeLinecap="round" strokeLinejoin="round" style={{ color: 'var(--rose)' }}>
                     <rect x={3} y={3} width={18} height={18} rx={3} />
                     <circle cx={9} cy={9} r={2} />
@@ -1222,7 +1293,7 @@ export function ChatScreen() {
                   </svg>
                   <span style={{ fontSize: 13.5, color: 'var(--ink)' }}>上传图片</span>
                 </div>
-                <div onClick={() => { setAttachMenuOpen(false); fileInputRef.current?.click(); }} style={{ cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 10, padding: '10px 12px', borderRadius: 11 }}>
+                <div onClick={() => { if (!postingRef.current) { setAttachMenuOpen(false); fileInputRef.current?.click(); } }} style={{ cursor: posting ? 'default' : 'pointer', display: 'flex', alignItems: 'center', gap: 10, padding: '10px 12px', borderRadius: 11 }}>
                   <svg viewBox="0 0 24 24" width={15} height={15} fill="none" stroke="currentColor" strokeWidth={1.7} strokeLinecap="round" strokeLinejoin="round" style={{ color: 'var(--rose)' }}>
                     <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
                     <path d="M14 2v6h6" />
@@ -1232,8 +1303,8 @@ export function ChatScreen() {
               </div>
             </>
           )}
-          <input ref={imgInputRef} type="file" accept="image/*" style={{ display: 'none' }} onChange={(e) => { const f = e.target.files?.[0]; if (f) { setPendingImage(f); setPendingFile(null); } e.target.value = ''; }} />
-          <input ref={fileInputRef} type="file" style={{ display: 'none' }} onChange={(e) => { onAttachFile(e.target.files?.[0]); e.target.value = ''; }} />
+          <input ref={imgInputRef} type="file" accept="image/*" disabled={posting} style={{ display: 'none' }} onChange={(e) => { const f = e.target.files?.[0]; if (f && !postingRef.current) { setPendingImage(f); setPendingFile(null); } e.target.value = ''; }} />
+          <input ref={fileInputRef} type="file" disabled={posting} style={{ display: 'none' }} onChange={(e) => { if (!postingRef.current) void onAttachFile(e.target.files?.[0]); e.target.value = ''; }} />
 
           {(pendingFile || pendingImage) && (
             <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', padding: '0 4px 8px' }}>
@@ -1242,7 +1313,7 @@ export function ChatScreen() {
                   <Svg d={IC.clip} size={12} sw={1.8} />
                 </span>
                 <span style={{ fontSize: 12.5, color: 'var(--ink2)' }}>{pendingImage ? pendingImage.name : pendingFile?.fileName}</span>
-                <span onClick={() => { setPendingFile(null); setPendingImage(null); }} style={{ cursor: 'pointer', color: 'var(--ghost)', fontSize: 13, padding: '0 2px' }}>×</span>
+                <span role="button" aria-disabled={posting} onClick={() => { if (!postingRef.current) { setPendingFile(null); setPendingImage(null); } }} style={{ cursor: posting ? 'default' : 'pointer', color: 'var(--ghost)', fontSize: 13, padding: '0 2px' }}>×</span>
               </div>
             </div>
           )}
@@ -1251,13 +1322,16 @@ export function ChatScreen() {
             <textarea
               ref={taRef}
               value={input}
+              disabled={posting}
               onChange={(e) => {
+                if (postingRef.current) return;
                 setInput(e.target.value);
                 const ta = e.target;
                 ta.style.height = 'auto';
                 ta.style.height = `${Math.min(ta.scrollHeight, 120)}px`;
               }}
               onKeyDown={(e) => {
+                if (postingRef.current) return;
                 if (e.key === 'Enter' && !e.shiftKey && wide) {
                   e.preventDefault();
                   send();
@@ -1268,7 +1342,7 @@ export function ChatScreen() {
               style={{ width: '100%', border: 'none', background: 'transparent', fontSize: INPUT_FONT_SIZE, lineHeight: 1.6, color: 'var(--ink)', resize: 'none', maxHeight: 120, padding: '4px 8px 8px', display: 'block', overflowY: 'auto', fontFamily: SERIF, outline: 'none' }}
             />
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 2 }}>
-              <div onClick={() => setAttachMenuOpen(!attachMenuOpen)} style={{ cursor: 'pointer', width: 38, height: 38, borderRadius: '50%', background: 'var(--card2)', color: 'var(--mut)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+              <div onClick={() => { if (!postingRef.current) setAttachMenuOpen(!attachMenuOpen); }} style={{ cursor: posting ? 'default' : 'pointer', width: 38, height: 38, borderRadius: '50%', background: 'var(--card2)', color: 'var(--mut)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
                 <Svg d={IC.plus} size={17} sw={1.8} />
               </div>
               <div onClick={() => setModelPopOpen(!modelPopOpen)} style={{ cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 6, padding: '9px 13px', borderRadius: 999, background: 'var(--card2)', minWidth: 0 }}>

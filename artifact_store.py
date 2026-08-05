@@ -7,6 +7,7 @@ app.py（预览/下载端点）和 gateway.py（生成工具）都从这里读�
 import sqlite3
 import uuid
 import os
+from pathlib import Path
 
 DB_PATH = '/opt/frontend/memories.db'
 STORE_DIR = '/opt/frontend/artifacts'
@@ -17,6 +18,20 @@ MIME_BY_TYPE = {
     'markdown': 'text/markdown',
     'docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
 }
+
+
+def _artifact_path(filename):
+    """Resolve a stored basename without allowing traversal or sibling prefixes."""
+    name = str(filename or '')
+    if not name or '/' in name or '\\' in name or Path(name).name != name:
+        return None
+    base = Path(STORE_DIR).resolve()
+    candidate = (base / name).resolve()
+    try:
+        candidate.relative_to(base)
+    except ValueError:
+        return None
+    return candidate
 
 
 def _init_table():
@@ -76,7 +91,9 @@ def save(atype, title, content):
         raise ValueError('未知 artifact 类型: ' + str(atype))
     ext = EXT_BY_TYPE[atype]
     fname = 'a_' + uuid.uuid4().hex[:12] + '.' + ext
-    fpath = os.path.join(STORE_DIR, fname)
+    fpath = _artifact_path(fname)
+    if fpath is None:
+        raise ValueError('无效 artifact 文件名')
 
     if atype == 'docx':
         data = _markdown_to_docx_bytes(title, content)
@@ -113,7 +130,9 @@ def read_content(artifact_id):
     meta = get(artifact_id)
     if not meta:
         return None, None
-    fpath = os.path.join(STORE_DIR, meta['filename'])
+    fpath = _artifact_path(meta['filename'])
+    if fpath is None:
+        return meta, None
     try:
         with open(fpath, 'rb') as f:
             return meta, f.read()

@@ -8,6 +8,19 @@ from typing import Any, Callable, Optional
 from chat.history_boundary import compute_boundary_ids, legacy_block_limit, persist_history_boundary
 
 
+def _file_marker(filename: str) -> str:
+    return '[文件: %s]' % (filename or '附件')
+
+
+def _has_file_marker(blocks: list[dict[str, Any]], filename: str) -> bool:
+    name = filename or '附件'
+    markers = ('[文件: %s]' % name, '[文件:%s]' % name)
+    return any(
+        any(marker in str(block.get('text') or '') for marker in markers)
+        for block in blocks if block.get('type') == 'text'
+    )
+
+
 def assemble_legacy_history(
     rows: list[Any],
     *,
@@ -70,15 +83,18 @@ def assemble_legacy_history(
             blocks.append({'type': 'text', 'text': note + _legacy_row_get(r, 'content')})
 
         fu = _legacy_row_get(r, 'file_url')
-        if fu and not is_ai and ri >= total - 6 and str(fu).startswith('/static/'):
-            body = read_file_fn(static_dir, str(fu))
+        if fu and not is_ai and str(fu).startswith('/static/'):
+            fname = _legacy_row_get(r, 'file_name') or '附件'
+            body = read_file_fn(static_dir, str(fu)) if ri >= total - 6 else None
             if body is not None:
                 if len(body) > 30000:
                     body = body[:30000] + '\n...(文件过长已截断)'
                 blocks.append({
                     'type': 'text',
-                    'text': '[用户发来文件: %s]\n```\n%s\n```' % (_legacy_row_get(r, 'file_name') or '附件', body),
+                    'text': '[用户发来文件: %s]\n```\n%s\n```' % (fname, body),
                 })
+            elif not _has_file_marker(blocks, fname):
+                blocks.append({'type': 'text', 'text': _file_marker(fname)})
 
         if is_ai and _legacy_row_get(r, 'tool_calls'):
             th = format_tool_history_fn(_legacy_row_get(r, 'tool_calls'))
