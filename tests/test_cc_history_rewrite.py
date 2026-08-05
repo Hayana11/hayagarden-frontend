@@ -141,6 +141,14 @@ def _ensure_app_importable():
 
 _ensure_app_importable()
 sys.modules.setdefault('moments_cover', types.ModuleType('moments_cover'))
+if 'account_balance_routes' not in sys.modules:
+    from flask import Blueprint
+
+    account_routes = types.ModuleType('account_balance_routes')
+    account_routes.create_relay_account_blueprint = lambda **_kwargs: Blueprint(
+        'cc_history_rewrite_account_stub', __name__,
+    )
+    sys.modules['account_balance_routes'] = account_routes
 import app as app_module  # noqa: E402
 
 
