@@ -42,6 +42,7 @@ def _chat_schema(conn):
             file_url TEXT DEFAULT '',
             file_name TEXT DEFAULT '',
             choices TEXT DEFAULT '',
+            source_kind TEXT NOT NULL DEFAULT 'chat',
             created_at TEXT DEFAULT (datetime('now','+8 hours'))
         );
         CREATE TABLE chat_edit_branches (
