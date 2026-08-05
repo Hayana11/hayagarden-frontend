@@ -21,6 +21,8 @@ assert.deepEqual(normalize('abc'), []);
 assert.deepEqual(normalize([1, null, ' A ', '']), ['A']);
 assert.deepEqual(normalize(['A', 'B', 'C']), ['A', 'B', 'C']);
 assert.equal(normalize(['x'.repeat(121)]).length, 0);
+assert.deepEqual(normalize(['😀'.repeat(120)]), ['😀'.repeat(120)]);
+assert.equal(normalize(['😀'.repeat(121)]).length, 0);
 assert.equal(normalize(Array.from({ length: 12 }, (_, i) => String(i))).length, 8);
 
 assert.equal(
@@ -42,10 +44,52 @@ assert.match(composerSend, /image: pendingImage/);
 assert.match(composerSend, /setInput\(\(current\) => current \|\| attempt\.text\)/);
 const failureCheck = composerSend.indexOf('if (messageId === null)');
 assert.ok(failureCheck >= 0);
+const composerPostCall = composerSend.indexOf('sendChatMessage(attempt.text, extra)');
+assert.ok(composerSend.indexOf('postingRef.current = true') < composerPostCall);
+assert.ok(composerSend.indexOf('setPosting(true)') < composerPostCall);
+assert.ok(composerSend.indexOf('postingRef.current = false') > composerPostCall);
+assert.ok(composerSend.indexOf('setPosting(false)') > composerPostCall);
+assert.ok(composerSend.indexOf('setPosting(false)') < failureCheck);
 assert.ok(composerSend.indexOf('setPendingFile', failureCheck) > composerSend.indexOf('return;', failureCheck));
 assert.ok(composerSend.indexOf('setPendingImage', failureCheck) > composerSend.indexOf('return;', failureCheck));
 
 assert.match(choiceSend, /sendChatMessage\(choice\)/);
+const choicePostCall = choiceSend.indexOf('sendChatMessage(choice)');
+assert.ok(choiceSend.indexOf('postingRef.current = true') < choicePostCall);
+assert.ok(choiceSend.indexOf('setPosting(false)') > choicePostCall);
+assert.ok(choiceSend.indexOf('setPosting(false)') < choiceSend.indexOf('await refetchLatest()'));
 assert.doesNotMatch(choiceSend, /pendingFile|pendingImage|setInput|setPending/);
+
+const attachStart = screen.indexOf('const onAttachFile = useCallback');
+const renderStart = screen.indexOf('// ── message block renderers');
+const composerValue = screen.indexOf('value={input}');
+const composerTextareaStart = screen.lastIndexOf('<textarea', composerValue);
+const composerTextareaEnd = screen.indexOf('/>', composerValue);
+const composerUi = screen.slice(screen.indexOf('<input ref={imgInputRef}'), screen.indexOf('{/* ══ thinking drawer'));
+const attachHandler = screen.slice(attachStart, renderStart);
+const composerTextarea = screen.slice(composerTextareaStart, composerTextareaEnd);
+assert.match(attachHandler, /if \(!f \|\| postingRef\.current\) return/);
+assert.match(attachHandler, /postingRef\.current \|\| mutationRevision !== composerMutationRevisionRef\.current/);
+assert.ok((composerUi.match(/disabled=\{posting\}/g) || []).length >= 3);
+assert.match(composerUi, /if \(f && !postingRef\.current\)/);
+assert.match(composerUi, /if \(!postingRef\.current\) \{ setPendingFile\(null\); setPendingImage\(null\); \}/);
+assert.match(composerTextarea, /disabled=\{posting\}/);
+assert.match(composerTextarea, /if \(postingRef\.current\) return/);
+assert.doesNotMatch(composerTextarea, /disabled=\{sending\}/);
+
+// Pending POST mutations are rejected, so a failed attempt restores all three
+// composer fields without a newer text/file/image replacing the snapshot.
+const oldFile = { fileUrl: '/static/uploads/files/old.txt', fileName: 'old.txt' };
+const oldImage = { name: 'old.png' };
+const failedAttempt = { text: 'failed text', file: oldFile, image: oldImage };
+let composerState = { text: '', file: oldFile, image: oldImage };
+let posting = true;
+const mutateWhileAllowed = (next) => {
+  if (!posting) composerState = next;
+};
+mutateWhileAllowed({ text: 'new draft', file: { fileName: 'new.txt' }, image: { name: 'new.png' } });
+posting = false;
+composerState = { ...composerState, text: composerState.text || failedAttempt.text };
+assert.deepEqual(composerState, failedAttempt);
 
 console.log('FILE+CHOICES frontend contract: ok');

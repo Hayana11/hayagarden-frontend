@@ -20,7 +20,7 @@ from chat.choices_contract import extract_choices
 
 
 class ChoicesContractTests(unittest.TestCase):
-    def test_first_group_only_and_later_group_is_preserved(self):
+    def test_first_group_is_extracted_and_later_group_is_preserved(self):
         clean, choices = extract_choices('before [choices] A | B | C [/choices] after [choices]D|E[/choices]')
         self.assertEqual(choices, ['A', 'B', 'C'])
         self.assertIn('[choices]D|E[/choices]', clean)
@@ -31,6 +31,20 @@ class ChoicesContractTests(unittest.TestCase):
         clean, choices = extract_choices(raw)
         self.assertEqual(choices, ['A', 'B'])
         self.assertEqual(clean, '')
+
+    def test_invalid_first_group_does_not_scan_valid_second_group(self):
+        raw = '[choices]|' + ('x' * 121) + '|[/choices] after [choices]A|B[/choices]'
+        clean, choices = extract_choices(raw)
+        self.assertEqual(choices, [])
+        self.assertEqual(clean, raw)
+
+    def test_astral_unicode_uses_code_point_boundary(self):
+        clean, choices = extract_choices('[choices]' + ('😀' * 120) + '[/choices]')
+        self.assertEqual(choices, ['😀' * 120])
+        self.assertEqual(clean, '')
+
+        raw = '[choices]' + ('😀' * 121) + '[/choices]'
+        self.assertEqual(extract_choices(raw), (raw, []))
 
 
 class AttachmentPathTests(unittest.TestCase):

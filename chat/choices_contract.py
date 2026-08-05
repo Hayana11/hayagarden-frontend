@@ -10,7 +10,7 @@ _CHOICES_RE = re.compile(r'\[choices\](.*?)\[/choices\]', re.DOTALL)
 
 
 def extract_choices(text: str):
-    """Extract only the first valid selector; preserve every later block."""
+    """Inspect only the first selector; extract it if valid and preserve later blocks."""
     if not text or '[choices]' not in text:
         return text, []
     match = _CHOICES_RE.search(text)

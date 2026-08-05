@@ -88,7 +88,7 @@ export function normalizeChatChoices(value: unknown): string[] {
   return value
     .filter((item): item is string => typeof item === 'string')
     .map((item) => item.trim())
-    .filter((item) => item.length > 0 && item.length <= MAX_CHAT_CHOICE_LENGTH)
+    .filter((item) => [...item].length > 0 && [...item].length <= MAX_CHAT_CHOICE_LENGTH)
     .slice(0, MAX_CHAT_CHOICES);
 }
 
