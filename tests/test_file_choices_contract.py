@@ -8,13 +8,16 @@ from pathlib import Path
 
 from chat.attachment_contract import (
     MAX_IMAGE_INPUT_BYTES,
+    MAX_TEXT_FILE_BYTES,
     AttachmentValidationError,
     read_limited_upload,
+    render_markdown_preview_page,
     reencode_chat_image,
     resolve_uploaded_file_url,
     safe_child_path,
     sandbox_preview_shell,
     validate_uploaded_file_reference,
+    write_limited_text_upload,
 )
 from chat.choices_contract import extract_choices
 
@@ -64,13 +67,82 @@ class AttachmentPathTests(unittest.TestCase):
             self.assertIsNone(validate_uploaded_file_reference(url, '[choices]x[/choices].md', td))
 
 
-class HtmlSandboxTests(unittest.TestCase):
+class ArtifactSandboxTests(unittest.TestCase):
     def test_shell_uses_script_only_opaque_origin_sandbox(self):
         shell = sandbox_preview_shell('/api/artifacts/7/content')
         self.assertIn('sandbox="allow-scripts"', shell)
         self.assertNotIn('allow-same-origin', shell)
         self.assertIn(".srcdoc=String(data.content||'')", shell)
         self.assertNotIn('window.parent', shell)
+
+    def test_markdown_heading_table_and_code_render_inside_preview_page(self):
+        page = render_markdown_preview_page(
+            'Markdown preview',
+            '# Heading\n\n| A | B |\n|---|---|\n| 1 | 2 |\n\n```python\nprint(1)\n```',
+        )
+        self.assertIn('<h1>Heading</h1>', page)
+        self.assertIn('<table>', page)
+        self.assertIn('<pre><code class="language-python">', page)
+
+    def test_markdown_raw_script_is_delivered_only_to_opaque_sandbox_srcdoc(self):
+        page = render_markdown_preview_page(
+            'raw script',
+            '<script>parent.document.body.dataset.pwned = document.cookie;</script>',
+        )
+        self.assertIn('<script>parent.document.body.dataset.pwned = document.cookie;</script>', page)
+        shell = sandbox_preview_shell('/api/artifacts/8/content')
+        self.assertIn('sandbox="allow-scripts"', shell)
+        self.assertNotIn('allow-same-origin', shell)
+        self.assertIn(".srcdoc=String(data.content||'')", shell)
+
+    def test_html_and_markdown_artifacts_share_the_existing_sandbox_route(self):
+        source = (Path(__file__).parents[1] / 'app.py').read_text(encoding='utf-8')
+        preview = source[source.index('def artifact_preview'):source.index("@app.route('/api/artifacts/<int:aid>/content'")]
+        content = source[source.index('def artifact_html_content'):source.index('def _sandbox_preview_shell')]
+        self.assertIn("meta['type'] in {'html', 'markdown'}", preview)
+        self.assertIn("_sandbox_preview_shell('/api/artifacts/%d/content' % aid)", preview)
+        self.assertNotIn('Response(page', preview)
+        self.assertIn("meta['type'] == 'html'", content)
+        self.assertIn("meta['type'] == 'markdown'", content)
+        self.assertIn('render_markdown_preview_page', content)
+
+
+class TextUploadBoundedReadTests(unittest.TestCase):
+    def test_text_upload_within_limit_is_written(self):
+        with tempfile.TemporaryDirectory() as td:
+            destination = Path(td) / 'ok.txt'
+            written = write_limited_text_upload(io.BytesIO(b'hello'), destination)
+            self.assertEqual(written, 5)
+            self.assertEqual(destination.read_bytes(), b'hello')
+
+    def test_text_upload_over_limit_is_413_and_not_written(self):
+        with tempfile.TemporaryDirectory() as td:
+            destination = Path(td) / 'too-large.txt'
+            with self.assertRaises(AttachmentValidationError) as caught:
+                write_limited_text_upload(
+                    io.BytesIO(b'x' * (MAX_TEXT_FILE_BYTES + 1)),
+                    destination,
+                )
+            self.assertEqual(caught.exception.status, 413)
+            self.assertFalse(destination.exists())
+
+    def test_text_upload_requests_only_upper_bound_plus_one(self):
+        class LargeStream:
+            def __init__(self):
+                self.read_sizes = []
+
+            def read(self, size=-1):
+                self.read_sizes.append(size)
+                return b'x' * size
+
+        stream = LargeStream()
+        with tempfile.TemporaryDirectory() as td:
+            destination = Path(td) / 'bounded.txt'
+            with self.assertRaises(AttachmentValidationError) as caught:
+                write_limited_text_upload(stream, destination)
+            self.assertEqual(caught.exception.status, 413)
+            self.assertEqual(stream.read_sizes, [MAX_TEXT_FILE_BYTES + 1])
+            self.assertFalse(destination.exists())
 
 
 class ImageContractTests(unittest.TestCase):

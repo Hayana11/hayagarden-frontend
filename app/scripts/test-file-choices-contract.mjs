@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import { ComposerUploadCoordinator } from '../src/lib/composerUpload.ts';
 
 const screen = fs.readFileSync(new URL('../src/screens/ChatScreen.tsx', import.meta.url), 'utf8');
 const chat = fs.readFileSync(new URL('../src/lib/chat.ts', import.meta.url), 'utf8');
@@ -58,6 +59,9 @@ const choicePostCall = choiceSend.indexOf('sendChatMessage(choice)');
 assert.ok(choiceSend.indexOf('postingRef.current = true') < choicePostCall);
 assert.ok(choiceSend.indexOf('setPosting(false)') > choicePostCall);
 assert.ok(choiceSend.indexOf('setPosting(false)') < choiceSend.indexOf('await refetchLatest()'));
+assert.doesNotMatch(choiceSend, /composerMutationRevisionRef\.current \+= 1/);
+assert.match(choiceSend, /uploadCoordinatorRef\.current\.beginChoicePost\(\)/);
+assert.match(choiceSend, /uploadCoordinatorRef\.current\.endChoicePost\(\)/);
 assert.doesNotMatch(choiceSend, /pendingFile|pendingImage|setInput|setPending/);
 
 const attachStart = screen.indexOf('const onAttachFile = useCallback');
@@ -69,7 +73,7 @@ const composerUi = screen.slice(screen.indexOf('<input ref={imgInputRef}'), scre
 const attachHandler = screen.slice(attachStart, renderStart);
 const composerTextarea = screen.slice(composerTextareaStart, composerTextareaEnd);
 assert.match(attachHandler, /if \(!f \|\| postingRef\.current\) return/);
-assert.match(attachHandler, /postingRef\.current \|\| mutationRevision !== composerMutationRevisionRef\.current/);
+assert.match(attachHandler, /uploadCoordinatorRef\.current\.settle/);
 assert.ok((composerUi.match(/disabled=\{posting\}/g) || []).length >= 3);
 assert.match(composerUi, /if \(f && !postingRef\.current\)/);
 assert.match(composerUi, /if \(!postingRef\.current\) \{ setPendingFile\(null\); setPendingImage\(null\); \}/);
@@ -91,5 +95,56 @@ mutateWhileAllowed({ text: 'new draft', file: { fileName: 'new.txt' }, image: { 
 posting = false;
 composerState = { ...composerState, text: composerState.text || failedAttempt.text };
 assert.deepEqual(composerState, failedAttempt);
+
+function deferred() {
+  let resolve;
+  const promise = new Promise((done) => { resolve = done; });
+  return { promise, resolve };
+}
+
+async function exerciseChoiceUploadRace({ uploadDuringPost }) {
+  const file = { fileUrl: '/static/uploads/files/queued.txt', fileName: 'queued.txt' };
+  const upload = deferred();
+  const choicePost = deferred();
+  const sent = [];
+  const draft = 'keep this draft';
+  let revision = 7;
+  let pendingFile = null;
+  const coordinator = new ComposerUploadCoordinator(
+    () => revision,
+    (next) => { pendingFile = next; },
+  );
+
+  const uploadTask = coordinator.settle(upload.promise, revision);
+  coordinator.beginChoicePost();
+  const choiceTask = (async () => {
+    try {
+      sent.push({ content: 'Choice A' });
+      await choicePost.promise;
+    } finally {
+      coordinator.endChoicePost();
+    }
+  })();
+
+  if (uploadDuringPost) {
+    upload.resolve(file);
+    await uploadTask;
+    assert.equal(pendingFile, null);
+    choicePost.resolve(101);
+    await choiceTask;
+  } else {
+    choicePost.resolve(101);
+    await choiceTask;
+    upload.resolve(file);
+    await uploadTask;
+  }
+
+  assert.deepEqual(sent, [{ content: 'Choice A' }]);
+  assert.deepEqual(pendingFile, file);
+  assert.equal(draft, 'keep this draft');
+}
+
+await exerciseChoiceUploadRace({ uploadDuringPost: false });
+await exerciseChoiceUploadRace({ uploadDuringPost: true });
 
 console.log('FILE+CHOICES frontend contract: ok');

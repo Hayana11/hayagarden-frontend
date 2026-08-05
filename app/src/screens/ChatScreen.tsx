@@ -39,6 +39,7 @@ import {
   type ChatToolCall,
 } from '../lib/chat';
 import type { SoftWindowUiState } from '../lib/dailySoftWindow';
+import { ComposerUploadCoordinator } from '../lib/composerUpload';
 import type { ReactElement } from 'react';
 
 const SETTINGS_KEY = 'fyodor-chat-settings';
@@ -190,6 +191,13 @@ export function ChatScreen() {
   const liveRef = useRef<LiveState | null>(null);
   const postingRef = useRef(false);
   const composerMutationRevisionRef = useRef(0);
+  const uploadCoordinatorRef = useRef(new ComposerUploadCoordinator(
+    () => composerMutationRevisionRef.current,
+    (file) => {
+      setPendingFile(file);
+      setPendingImage(null);
+    },
+  ));
 
   const effTheme = settings.theme === 'auto' ? (sysDark ? 'dark' : 'light') : settings.theme;
   const vars = effTheme === 'dark' ? DARK_VARS : LIGHT_VARS;
@@ -437,8 +445,8 @@ export function ChatScreen() {
     if (!choice || sending) return false;
     setSending(true);
     setChatError(null);
+    uploadCoordinatorRef.current.beginChoicePost();
     postingRef.current = true;
-    composerMutationRevisionRef.current += 1;
     setPosting(true);
     let messageId: number | null = null;
     try {
@@ -446,6 +454,7 @@ export function ChatScreen() {
     } finally {
       postingRef.current = false;
       setPosting(false);
+      uploadCoordinatorRef.current.endChoicePost();
     }
     if (messageId === null) {
       showToast('发送失败');
@@ -573,12 +582,11 @@ export function ChatScreen() {
       setAttachMenuOpen(false);
       if (!f || postingRef.current) return;
       const mutationRevision = composerMutationRevisionRef.current;
-      const up = await uploadChatFile(f);
-      if (postingRef.current || mutationRevision !== composerMutationRevisionRef.current) return;
-      if (up) {
-        setPendingFile(up);
-        setPendingImage(null);
-      } else showToast('上传失败（只收 2MB 内文本类文件）');
+      const uploaded = await uploadCoordinatorRef.current.settle(
+        uploadChatFile(f),
+        mutationRevision,
+      );
+      if (!uploaded) showToast('上传失败（只收 2MB 内文本类文件）');
     },
     [showToast],
   );

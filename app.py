@@ -20,11 +20,13 @@ from chat.attachment_contract import (
     MAX_TEXT_FILE_BYTES,
     AttachmentValidationError,
     read_limited_upload,
+    render_markdown_preview_page,
     reencode_chat_image,
     resolve_uploaded_file_url,
     sandbox_preview_shell,
     safe_child_path,
     validate_uploaded_file_reference,
+    write_limited_text_upload,
 )
 
 app = Flask(__name__, static_folder='static')
@@ -132,27 +134,11 @@ def artifact_meta(aid):
 @app.route('/api/artifacts/<int:aid>/preview', methods=['GET'])
 def artifact_preview(aid):
     import artifact_store
-    from flask import Response
     meta, content = artifact_store.read_content(aid)
     if not meta or content is None:
         return jsonify({'error': 'not found'}), 404
-    if meta['type'] == 'html':
+    if meta['type'] in {'html', 'markdown'}:
         return _sandbox_preview_shell('/api/artifacts/%d/content' % aid)
-    if meta['type'] == 'markdown':
-        import markdown as _md
-        html_body = _md.markdown(content.decode('utf-8'), extensions=['fenced_code', 'tables'])
-        page = (
-            '<!DOCTYPE html><html><head><meta charset="utf-8">'
-            '<meta name="viewport" content="width=device-width,initial-scale=1">'
-            '<title>' + meta['title'].replace('<', '').replace('>', '') + '</title>'
-            '<style>body{font-family:-apple-system,"PingFang SC",sans-serif;max-width:720px;'
-            'margin:40px auto;padding:0 20px;line-height:1.7;color:#2a2020}'
-            'h1,h2,h3{color:#5a4a6a}pre{background:#f5f0e8;padding:12px;border-radius:8px;overflow-x:auto}'
-            'code{background:#f5f0e8;padding:1px 5px;border-radius:4px}'
-            'table{border-collapse:collapse}td,th{border:1px solid #ddd;padding:6px 10px}</style>'
-            '</head><body>' + html_body + '</body></html>'
-        )
-        return Response(page, mimetype='text/html')
     return jsonify({'error': 'docx 不支持在线预览，直接下载查看',
                      'download_url': '/api/artifacts/%d/download' % aid}), 400
 
@@ -163,9 +149,16 @@ def artifact_html_content(aid):
     meta, content = artifact_store.read_content(aid)
     if not meta or content is None:
         return jsonify({'error': 'not found'}), 404
-    if meta['type'] != 'html':
+    if meta['type'] == 'html':
+        preview_content = content.decode('utf-8', errors='replace')
+    elif meta['type'] == 'markdown':
+        preview_content = render_markdown_preview_page(
+            meta['title'],
+            content.decode('utf-8', errors='replace'),
+        )
+    else:
         return jsonify({'error': 'HTML content only'}), 400
-    response = jsonify({'content': content.decode('utf-8', errors='replace')})
+    response = jsonify({'content': preview_content})
     response.headers['X-Content-Type-Options'] = 'nosniff'
     return response
 
@@ -683,14 +676,17 @@ def upload_file():
     ext = os.path.splitext(orig)[1].lower()
     if ext not in ALLOWED_FILE_EXT:
         return jsonify({"error": "不支持的文件类型（只收文本类）"}), 400
-    data = f.read()
-    if len(data) > MAX_FILE_BYTES:
-        return jsonify({"error": "文件超过 2MB"}), 400
     safe = re.sub(r'[^\w\u4e00-\u9fff.\-]', '_', orig)
     fname = f"{uuid.uuid4().hex[:8]}_{safe}"
     os.makedirs(FILES_DIR, exist_ok=True)
-    with open(os.path.join(FILES_DIR, fname), 'wb') as out:
-        out.write(data)
+    try:
+        write_limited_text_upload(
+            f.stream,
+            os.path.join(FILES_DIR, fname),
+            max_bytes=MAX_FILE_BYTES,
+        )
+    except AttachmentValidationError as exc:
+        return jsonify({"error": str(exc)}), exc.status
     return jsonify({"ok": True, "file_url": f"/static/uploads/files/{fname}", "file_name": safe})
 
 

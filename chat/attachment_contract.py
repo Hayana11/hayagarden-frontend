@@ -6,6 +6,7 @@ import json
 import os
 import re
 import warnings
+from html import escape
 from pathlib import Path
 from typing import BinaryIO, Optional
 from urllib.parse import unquote, urlsplit
@@ -44,6 +45,27 @@ fetch(__CONTENT_URL__,{credentials:'same-origin'}).then(function(r){if(!r.ok)thr
 .then(function(data){document.getElementById('preview').srcdoc=String(data.content||'')})
 .catch(function(){document.getElementById('preview').hidden=true;document.getElementById('error').hidden=false});
 </script></body></html>'''.replace('__CONTENT_URL__', url_json)
+
+
+def render_markdown_preview_page(title: str, markdown_text: str) -> str:
+    """Render Markdown as a complete page for sandboxed ``iframe.srcdoc``."""
+    import markdown as markdown_lib
+
+    html_body = markdown_lib.markdown(
+        str(markdown_text),
+        extensions=['fenced_code', 'tables'],
+    )
+    return (
+        '<!DOCTYPE html><html><head><meta charset="utf-8">'
+        '<meta name="viewport" content="width=device-width,initial-scale=1">'
+        '<title>' + escape(str(title)) + '</title>'
+        '<style>body{font-family:-apple-system,"PingFang SC",sans-serif;max-width:720px;'
+        'margin:40px auto;padding:0 20px;line-height:1.7;color:#2a2020}'
+        'h1,h2,h3{color:#5a4a6a}pre{background:#f5f0e8;padding:12px;border-radius:8px;overflow-x:auto}'
+        'code{background:#f5f0e8;padding:1px 5px;border-radius:4px}'
+        'table{border-collapse:collapse}td,th{border:1px solid #ddd;padding:6px 10px}</style>'
+        '</head><body>' + html_body + '</body></html>'
+    )
 
 
 def _is_relative_to(candidate: Path, base: Path) -> bool:
@@ -118,6 +140,20 @@ def read_limited_upload(stream: BinaryIO, max_bytes: int = MAX_IMAGE_INPUT_BYTES
     if not data:
         raise AttachmentValidationError('图片为空')
     return data
+
+
+def write_limited_text_upload(
+    stream: BinaryIO,
+    destination: str | os.PathLike,
+    max_bytes: int = MAX_TEXT_FILE_BYTES,
+) -> int:
+    """Bound the application read before creating a stored text attachment."""
+    data = stream.read(max_bytes + 1)
+    if len(data) > max_bytes:
+        raise AttachmentValidationError('文件超过 2MB', 413)
+    with open(destination, 'wb') as output:
+        output.write(data)
+    return len(data)
 
 
 def reencode_chat_image(data: bytes) -> tuple[bytes, str, str]:
