@@ -500,8 +500,9 @@ export function ChatScreen() {
       // Keep old assistant visible until candidate activates.
       const ok = await runStream(prep.userMessageId, { rewriteId: prep.rewriteId });
       if (ok) {
+        // finalize retries transport-ambiguous / effects_pending internally (same rewrite_id).
         const fin = await regenFinalize(prep.rewriteId);
-        if (!fin) showToast('重答落库失败，已保留原回答');
+        if (!fin) showToast('重答结果未确认，正在刷新…');
         else if (fin.effectsPending) showToast('重答已切换，收尾未完成，可再试一次');
       }
       await refetchLatest();
@@ -526,9 +527,17 @@ export function ChatScreen() {
       // Active transcript stays intact until finalize succeeds.
       const ok = await runStream(null, { rewriteId: edit.rewriteId });
       if (ok) {
+        // finalize retries transport-ambiguous / effects_pending internally (same rewrite_id).
         const fin = await editFinalize(edit.rewriteId);
-        if (!fin.ok) showToast('修改落库失败，已保留原文');
-        else if (fin.effectsPending) showToast('修改已切换，收尾未完成，可再试一次');
+        if (!fin.ok) {
+          showToast(
+            fin.effectsPending
+              ? '修改已切换，收尾未完成，可再试一次'
+              : '修改结果未确认，正在刷新…',
+          );
+        } else if (fin.effectsPending) {
+          showToast('修改已切换，收尾未完成，可再试一次');
+        }
       }
       await refetchLatest();
       setSending(false);

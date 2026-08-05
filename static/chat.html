@@ -2247,6 +2247,41 @@ async function copyBubble(btn) {
 
 var pendingRewriteId = null;
 
+/** Same rewrite_id once more on effects_pending or transport-ambiguous failure (5xx/408/reject). Never retry 4xx/stale. */
+async function finalizeRewriteWithRetry(url, rewriteId) {
+  async function once() {
+    var fr = await fetch(url, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({rewrite_id: rewriteId}),
+    });
+    var body = await fr.json().catch(function () { return {}; });
+    return { httpOk: fr.ok, status: fr.status, body: body || {} };
+  }
+  function isRetryableStatus(status) {
+    return status === 408 || (status >= 500 && status <= 599);
+  }
+  function needsEffectsRetry(body) {
+    return !!(body && (body.effects_pending || body.code === 'effects_pending'));
+  }
+  var first;
+  try {
+    first = await once();
+  } catch (e) {
+    // fetch/network reject → one safe retry with the same rewrite_id
+    try { return (await once()).body; } catch (e2) { return {}; }
+  }
+  var shouldRetry = first.httpOk
+    ? needsEffectsRetry(first.body)
+    : isRetryableStatus(first.status);
+  if (!shouldRetry) return first.body;
+  try {
+    return (await once()).body;
+  } catch (e) {
+    return first.body;
+  }
+}
+
 async function doRegen(msgId) {
   if(sending) return;
   sending = true; setSendBtn('stop');
@@ -2260,14 +2295,7 @@ async function doRegen(msgId) {
       pendingRewriteId = pd.rewrite_id;
       pendingGwUserMessageId = pd.user_message_id || null;
       await streamReply();
-      async function _regenFinalizeOnce(){
-        var fr = await fetch('/api/chat/regen/finalize', {method:'POST',
-          headers:{'Content-Type':'application/json'}, body:JSON.stringify({rewrite_id:pd.rewrite_id})});
-        return fr.json().catch(function(){ return {}; });
-      }
-      var fin = await _regenFinalizeOnce();
-      // Transcript already locked: one safe retry if effects still pending.
-      if(fin && (fin.effects_pending || fin.code==='effects_pending')) fin = await _regenFinalizeOnce();
+      await finalizeRewriteWithRetry('/api/chat/regen/finalize', pd.rewrite_id);
     } catch(e) { console.error('regen stream failed',e); }
     finally { pendingRewriteId = null; }
     hideTyping();
@@ -2290,13 +2318,7 @@ async function doEdit(msgId, newContent) {
       pendingRewriteId = ed.rewrite_id;
       pendingGwUserMessageId = null;
       await streamReply();
-      async function _editFinalizeOnce(){
-        var fr = await fetch('/api/chat/edit/finalize', {method:'POST',
-          headers:{'Content-Type':'application/json'}, body:JSON.stringify({rewrite_id:ed.rewrite_id})});
-        return fr.json().catch(function(){ return {}; });
-      }
-      var fin = await _editFinalizeOnce();
-      if(fin && (fin.effects_pending || fin.code==='effects_pending')) fin = await _editFinalizeOnce();
+      await finalizeRewriteWithRetry('/api/chat/edit/finalize', ed.rewrite_id);
     } catch(e) { console.error('doEdit stream failed',e); }
     finally { pendingRewriteId = null; }
     hideTyping();

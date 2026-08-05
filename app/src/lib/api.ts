@@ -6,7 +6,7 @@
 // Every call falls back to the deterministic mock in ./mock if the request
 // fails, so the UI keeps working while endpoints are still being stood up
 // (same pattern the design used for the Open-Meteo weather call).
-import { http } from './http';
+import { HttpError, http } from './http';
 import { monthKey } from './format';
 import * as mock from './mock';
 import { entryToPayload, rowToEntry } from './ledger';
@@ -416,6 +416,33 @@ export function editChatMessage(
     .catch(() => ({ ok: false, rewriteId: null, sourceMessageId: null }));
 }
 
+/**
+ * First finalize failed in an ambiguous way: network drop, 5xx, or 408.
+ * Same rewrite_id retry is safe (activate or replay_only). Do NOT retry 4xx.
+ */
+export function isRetryableRewriteFinalizeFailure(err: unknown): boolean {
+  if (!(err instanceof HttpError)) return true;
+  if (err.status === 408) return true;
+  if (err.status >= 500 && err.status <= 599) return true;
+  return false;
+}
+
+export type RewriteFinalizeAttempt<T> =
+  | { status: 'ok'; effectsPending: boolean; value: T }
+  | { status: 'retryable_error' }
+  | { status: 'fatal_error' };
+
+/** Shared contract: effects_pending JSON **or** ambiguous transport failure → one retry. */
+export async function runRewriteFinalizeWithRetry<T>(
+  once: () => Promise<RewriteFinalizeAttempt<T>>,
+): Promise<RewriteFinalizeAttempt<T>> {
+  const first = await once();
+  const shouldRetry =
+    (first.status === 'ok' && first.effectsPending) || first.status === 'retryable_error';
+  if (!shouldRetry) return first;
+  return once();
+}
+
 type EditFinalizeResult = {
   ok: boolean;
   messageId: number | null;
@@ -423,7 +450,9 @@ type EditFinalizeResult = {
   effectsPending: boolean;
 };
 
-async function postEditFinalizeOnce(rewriteId: string): Promise<EditFinalizeResult> {
+async function postEditFinalizeOnce(
+  rewriteId: string,
+): Promise<RewriteFinalizeAttempt<EditFinalizeResult>> {
   try {
     const r = await http.post<{
       ok: boolean;
@@ -432,26 +461,31 @@ async function postEditFinalizeOnce(rewriteId: string): Promise<EditFinalizeResu
       effects_pending?: boolean;
       code?: string;
     }>('/api/chat/edit/finalize', { rewrite_id: rewriteId });
+    const effectsPending = Boolean(r.effects_pending) || r.code === 'effects_pending';
     return {
-      ok: Boolean(r.ok),
-      messageId: r.ok && r.message_id != null ? Number(r.message_id) : null,
-      assistantMessageId:
-        r.ok && r.assistant_message_id != null ? Number(r.assistant_message_id) : null,
-      effectsPending: Boolean(r.effects_pending) || r.code === 'effects_pending',
+      status: 'ok',
+      effectsPending,
+      value: {
+        ok: Boolean(r.ok),
+        messageId: r.ok && r.message_id != null ? Number(r.message_id) : null,
+        assistantMessageId:
+          r.ok && r.assistant_message_id != null ? Number(r.assistant_message_id) : null,
+        effectsPending,
+      },
     };
-  } catch {
-    return { ok: false, messageId: null, assistantMessageId: null, effectsPending: false };
+  } catch (err) {
+    return {
+      status: isRetryableRewriteFinalizeFailure(err) ? 'retryable_error' : 'fatal_error',
+    };
   }
 }
 
 // POST /api/chat/edit/finalize — activate staged edit after candidate is ready.
-// One safe retry when transcript is locked but effects are still pending.
+// One safe retry on effects_pending or transport-ambiguous failure.
 export async function editFinalize(rewriteId: string): Promise<EditFinalizeResult> {
-  let last = await postEditFinalizeOnce(rewriteId);
-  if (last.ok && last.effectsPending) {
-    last = await postEditFinalizeOnce(rewriteId);
-  }
-  return last;
+  const attempt = await runRewriteFinalizeWithRetry(() => postEditFinalizeOnce(rewriteId));
+  if (attempt.status === 'ok') return attempt.value;
+  return { ok: false, messageId: null, assistantMessageId: null, effectsPending: false };
 }
 
 // POST /api/chat/branch/switch -> { branch_idx, total }
@@ -499,7 +533,9 @@ type RegenFinalizeResult = {
   effectsPending: boolean;
 };
 
-async function postRegenFinalizeOnce(rewriteId: string): Promise<RegenFinalizeResult | null> {
+async function postRegenFinalizeOnce(
+  rewriteId: string,
+): Promise<RewriteFinalizeAttempt<RegenFinalizeResult>> {
   try {
     const r = await http.post<{
       ok: boolean;
@@ -508,25 +544,33 @@ async function postRegenFinalizeOnce(rewriteId: string): Promise<RegenFinalizeRe
       effects_pending?: boolean;
       code?: string;
     }>('/api/chat/regen/finalize', { rewrite_id: rewriteId });
-    if (!r.ok) return null;
+    if (!r.ok) {
+      // Non-throwing false body is unexpected; treat as fatal (no blind retry).
+      return { status: 'fatal_error' };
+    }
+    const effectsPending = Boolean(r.effects_pending) || r.code === 'effects_pending';
     return {
-      branchIdx: r.branch_idx,
-      total: r.total,
-      effectsPending: Boolean(r.effects_pending) || r.code === 'effects_pending',
+      status: 'ok',
+      effectsPending,
+      value: {
+        branchIdx: r.branch_idx,
+        total: r.total,
+        effectsPending,
+      },
     };
-  } catch {
-    return null;
+  } catch (err) {
+    return {
+      status: isRetryableRewriteFinalizeFailure(err) ? 'retryable_error' : 'fatal_error',
+    };
   }
 }
 
 // POST /api/chat/regen/finalize — activate staged candidate onto source assistant.
-// One safe retry when transcript is locked but effects are still pending.
+// One safe retry on effects_pending or transport-ambiguous failure.
 export async function regenFinalize(rewriteId: string): Promise<RegenFinalizeResult | null> {
-  let last = await postRegenFinalizeOnce(rewriteId);
-  if (last && last.effectsPending) {
-    last = await postRegenFinalizeOnce(rewriteId);
-  }
-  return last;
+  const attempt = await runRewriteFinalizeWithRetry(() => postRegenFinalizeOnce(rewriteId));
+  if (attempt.status === 'ok') return attempt.value;
+  return null;
 }
 
 export interface ModelCatalogEntry {
