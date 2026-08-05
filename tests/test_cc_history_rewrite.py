@@ -133,7 +133,7 @@ def _ensure_app_importable():
     conn = sqlite3.connect(str(root / 'memories.db'))
     conn.row_factory = sqlite3.Row
     try:
-        conn.execute('CREATE TABLE IF NOT EXISTS chat_messages (id INTEGER PRIMARY KEY, author TEXT, content TEXT)')
+        _chat_schema(conn)
         conn.commit()
     finally:
         conn.close()
