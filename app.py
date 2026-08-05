@@ -4480,7 +4480,15 @@ def regen_finalize():
         raise
     conn.close()
     staging = result.get('staging') or staging_for_cleanup or {}
-    # Active assistant is now durable — scoring + frozen side effects belong here.
+    mode = result.get('finalize_mode') or 'activate'
+    if mode == 'done':
+        return jsonify({
+            'ok': True,
+            'branch_idx': result['branch_idx'],
+            'total': result['total'],
+            'assistant_message_id': result['assistant_message_id'],
+        })
+    # Active assistant is durable — scoring + frozen side effects (retry-safe).
     try:
         from chat.scoring_identity import trigger_turn_scoring
         trigger_turn_scoring(
@@ -4496,7 +4504,8 @@ def regen_finalize():
         )
     except Exception:
         pass
-    invalidate_cc_resident_for_history_rewrite('regen_finalize')
+    if mode == 'activate':
+        invalidate_cc_resident_for_history_rewrite('regen_finalize')
     return jsonify({
         'ok': True,
         'branch_idx': result['branch_idx'],
@@ -4612,19 +4621,27 @@ def edit_finalize():
         raise
     conn.close()
     staging = result.get('staging') or staging_for_cleanup or {}
-    try:
-        from chat.interaction_state import touch_user_interaction
-        touch_user_interaction(get_db)
-    except Exception:
-        pass
-    # Same post-commit outbox drain as insert_user_message for new user identity.
-    try:
-        import internal_state_shadow as _shadow
-        if _shadow.is_user_events_enabled():
-            _shadow.drain_shadow_outbox_best_effort(db_path=DB_PATH)
-    except Exception:
-        pass
-    # Edit activate creates the durable user+assistant — score here (not in stream).
+    mode = result.get('finalize_mode') or 'activate'
+    if mode == 'done':
+        return jsonify({
+            'ok': True,
+            'message_id': result['message_id'],
+            'assistant_message_id': result['assistant_message_id'],
+        })
+    if mode == 'activate':
+        try:
+            from chat.interaction_state import touch_user_interaction
+            touch_user_interaction(get_db)
+        except Exception:
+            pass
+        # Same post-commit outbox drain as insert_user_message for new user identity.
+        try:
+            import internal_state_shadow as _shadow
+            if _shadow.is_user_events_enabled():
+                _shadow.drain_shadow_outbox_best_effort(db_path=DB_PATH)
+        except Exception:
+            pass
+    # Score + replay are retry-safe for activated_needs_replay resume.
     try:
         from chat.scoring_identity import trigger_turn_scoring
         trigger_turn_scoring(
@@ -4640,7 +4657,8 @@ def edit_finalize():
         )
     except Exception:
         pass
-    invalidate_cc_resident_for_history_rewrite('edit')
+    if mode == 'activate':
+        invalidate_cc_resident_for_history_rewrite('edit')
     return jsonify({
         'ok': True,
         'message_id': result['message_id'],

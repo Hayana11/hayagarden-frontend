@@ -525,6 +525,96 @@ class RewriteActivationAtomicityTests(unittest.TestCase):
             moments_calls[0]['assistant_message_id'],
             fin.get_json()['assistant_message_id'],
         )
+        conn = self.get_db()
+        st = rw.load(conn, rid)
+        conn.close()
+        self.assertEqual(st['status'], rw.STATUS_EFFECTS_DONE)
+
+    def test_15_finalize_resume_replays_without_remutating(self):
+        """activated_needs_replay → retry finalize only replays, never DELETE again."""
+        u1 = self._insert('hayana', 'U1')
+        self._insert('assistant', 'A1')
+        prep = self.client.post(
+            '/api/chat/edit', json={'msg_id': u1, 'content': "U1'"},
+        ).get_json()
+        rid = prep['rewrite_id']
+        effects = {
+            'wake_ids': [42],
+            'one_shot_claims': {'feedback_ids': [9], 'dream_id': None},
+            'session_memo_user': "U1'",
+            'session_memo_assistant': "A1'",
+            'turn_key': 'turn-resume',
+            'conversation_id': 'hayana-chat',
+        }
+        conn = self.get_db()
+        rw.store_candidate(conn, rid, content="A1'", side_effects=effects)
+        conn.commit()
+        conn.close()
+
+        # First finalize: mutate transcript, then simulate replay crash before effects_done.
+        with mock.patch.object(
+            rw, 'replay_side_effects_after_activate', side_effect=RuntimeError('boom'),
+        ), mock.patch('emotion_engine.score_async'):
+            fin1 = self.client.post('/api/chat/edit/finalize', json={'rewrite_id': rid})
+        self.assertEqual(fin1.status_code, 200)
+        after_activate = self._active()
+        self.assertEqual(after_activate, [('hayana', "U1'"), ('assistant', "A1'")])
+        conn = self.get_db()
+        st1 = rw.load(conn, rid)
+        conn.close()
+        self.assertEqual(st1['status'], rw.STATUS_ACTIVATED_NEEDS_REPLAY)
+
+        # Concurrent tip growth after activate must not be wiped by resume.
+        race_id = self._insert('hayana', 'AFTER')
+        wake_calls = []
+        with mock.patch(
+            'chat.context_continuity.consume_wake_ids',
+            side_effect=lambda get_db, ids: wake_calls.append(list(ids)),
+        ), mock.patch(
+            'chat.system_builder.consume_cc_one_shot_claims',
+        ), mock.patch.object(
+            rw, '_write_session_memo_best_effort',
+        ), mock.patch(
+            'moments_persistence.after_assistant_persisted',
+        ), mock.patch(
+            'emotion_engine.score_async',
+        ):
+            fin2 = self.client.post('/api/chat/edit/finalize', json={'rewrite_id': rid})
+        self.assertEqual(fin2.status_code, 200)
+        self.assertEqual(wake_calls, [[42]])
+        # Resume must not re-DELETE: AFTER tip survives.
+        self.assertEqual(
+            self._active(),
+            [('hayana', "U1'"), ('assistant', "A1'"), ('hayana', 'AFTER')],
+        )
+        self.assertIn(race_id, [r[0] for r in rw.active_transcript(self.get_db())])
+        conn = self.get_db()
+        st2 = rw.load(conn, rid)
+        conn.close()
+        self.assertEqual(st2['status'], rw.STATUS_EFFECTS_DONE)
+        # Third call is idempotent done.
+        fin3 = self.client.post('/api/chat/edit/finalize', json={'rewrite_id': rid})
+        self.assertEqual(fin3.status_code, 200)
+        self.assertEqual(
+            self._active(),
+            [('hayana', "U1'"), ('assistant', "A1'"), ('hayana', 'AFTER')],
+        )
+
+
+class RelayStagedPromptSideEffectTests(unittest.TestCase):
+    def test_build_system_allow_side_effects_false_does_not_drain_feedback(self):
+        from chat.system_builder import build_system
+        with mock.patch('gateway.get_db') as get_db, mock.patch(
+            'command_store.drain_feedback',
+        ) as drain, mock.patch(
+            'command_store.peek_feedback', return_value=(['x'], [1]),
+        ):
+            conn = mock.MagicMock()
+            conn.execute.return_value.fetchall.return_value = []
+            conn.execute.return_value.fetchone.return_value = None
+            get_db.return_value = conn
+            build_system(allow_side_effects=False, split_dynamic=True)
+        drain.assert_not_called()
 
 
 if __name__ == '__main__':

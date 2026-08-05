@@ -219,10 +219,14 @@ def _begin_staged_rewrite_generation(turn_data: dict) -> dict | None:
         staging = rewrite_staging.load(conn, rewrite_id)
         if not staging:
             raise ValueError('rewrite not found')
-        if staging.get('status') in (
-            rewrite_staging.STATUS_ACTIVATED,
-            rewrite_staging.STATUS_FAILED,
-            rewrite_staging.STATUS_STALE,
+        _st = str(staging.get('status') or '')
+        if (
+            _st in (
+                rewrite_staging.STATUS_FAILED,
+                rewrite_staging.STATUS_STALE,
+                rewrite_staging.STATUS_EFFECTS_DONE,
+            )
+            or rewrite_staging._status_transcript_locked(_st)
         ):
             raise ValueError(f"rewrite not reusable: {staging.get('status')}")
         rewrite_staging.assert_active_matches_prepare(conn, staging)
@@ -248,6 +252,36 @@ def _begin_staged_rewrite_generation(turn_data: dict) -> dict | None:
     turn_data['_rewrite_staging'] = staging
     turn_data['_staged_rewrite_active'] = True
     return staging
+
+
+def _peek_relay_staged_one_shots() -> tuple[dict, str]:
+    """Peek feedback/dream for Relay staged rewrite without consuming them.
+
+    Returns (claims_dict, inject_text). Inject text is empty when nothing pending.
+    """
+    claims = {'feedback_ids': [], 'dream_id': None}
+    pieces = []
+    try:
+        import command_store
+        fb_lines, fb_ids = command_store.peek_feedback()
+        if fb_lines:
+            claims['feedback_ids'] = list(fb_ids)
+            pieces.append(
+                '## 任务完成反馈\n' + '\n'.join('- ' + line for line in fb_lines)
+                + '\n（这是浮窗自己记录回传的，不是她手动告诉你的。她这次开口了，'
+                  '你可以顺嘴提一句——用时、快慢、有没有取消，按你的性子说，别像报数据。）'
+            )
+    except Exception:
+        pass
+    try:
+        from chat.system_builder import peek_dream_one_shot
+        dream_text, dream_id = peek_dream_one_shot(get_db)
+        if dream_text:
+            claims['dream_id'] = dream_id
+            pieces.append(dream_text)
+    except Exception:
+        pass
+    return claims, '\n\n'.join(p for p in pieces if p and p.strip())
 
 
 def _staged_side_effects_payload(
@@ -377,9 +411,9 @@ def _fail_staged_rewrite(turn_data: dict, error: str) -> None:
         conn = get_db()
         try:
             staging = rewrite_staging.load(conn, rewrite_id)
-            if staging and staging.get('status') not in (
-                rewrite_staging.STATUS_ACTIVATED,
-                rewrite_staging.STATUS_STALE,
+            _st = str((staging or {}).get('status') or '')
+            if staging and _st != rewrite_staging.STATUS_STALE and not (
+                rewrite_staging._status_transcript_locked(_st)
             ):
                 rewrite_staging.mark_failed(conn, rewrite_id, error)
                 conn.commit()
@@ -5682,7 +5716,7 @@ def chat_stream():
                         _turn_data,
                         assistant_text=_pc,
                         wake_ids=_wake_claim_ids,
-                        one_shot_claims={},
+                        one_shot_claims=_turn_data.get('_relay_one_shot_claims') or {},
                         conversation_id=_conv,
                     )
                 assistant_id = _persist_turn_assistant(
@@ -5720,9 +5754,22 @@ def chat_stream():
                     except Exception:
                         pass
             try:
+                # Staged Relay rewrite: never drain feedback / consume dream in prompt build.
+                _relay_one_shot_claims = {}
                 (system, dynamic_context), _wake_claim_ids = build_system_with_wake_claim(
-                    build_system, get_db, user_turn=_is_user_turn, split_dynamic=True
+                    build_system,
+                    get_db,
+                    user_turn=_is_user_turn,
+                    split_dynamic=True,
+                    allow_side_effects=not bool(_rewrite_id),
                 )
+                if _rewrite_id:
+                    _relay_one_shot_claims, _relay_os_text = _peek_relay_staged_one_shots()
+                    _turn_data['_relay_one_shot_claims'] = _relay_one_shot_claims
+                    if _relay_os_text:
+                        dynamic_context = '\n\n'.join(
+                            p for p in (dynamic_context, _relay_os_text) if p and str(p).strip()
+                        )
                 messages = build_messages(rewrite_id=_rewrite_id or None)
                 _recall, _recall_items = _recall_memories(_uc) if _uc else ('', [])
                 if _recall:
@@ -5981,10 +6028,23 @@ def chat_stream():
                         _dt_clean, _dt_choices = _extract_choices(_dt)
                         if _dt_choices and not _dt_clean:
                             _dt_clean = '[选项: ' + ' / '.join(_dt_choices) + ']'
+                        if _rewrite_id:
+                            # Same freeze contract as the primary Relay persist path.
+                            if not _turn_data.get('_relay_one_shot_claims'):
+                                _peek_claims, _ = _peek_relay_staged_one_shots()
+                                _turn_data['_relay_one_shot_claims'] = _peek_claims
+                            _turn_data['_staged_side_effects'] = _staged_side_effects_payload(
+                                _turn_data,
+                                assistant_text=_dt_clean,
+                                wake_ids=_wake_claim_ids,
+                                one_shot_claims=_turn_data.get('_relay_one_shot_claims') or {},
+                                conversation_id=_conv,
+                            )
                         assistant_id = _persist_turn_assistant(
                             _turn_data,
                             content=_dt_clean,
                             choices_json=json.dumps(_dt_choices, ensure_ascii=False) if _dt_choices else '',
+                            side_effects=_turn_data.get('_staged_side_effects'),
                         )
                         if assistant_id is not None:
                             try:

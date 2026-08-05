@@ -518,7 +518,8 @@ def build_system(
         pass
 
     # ── 任务完成反馈回流（只在聊天回复时，不在 wake 时；读完即清，只回流一次）──
-    if not wake:
+    # allow_side_effects=False（含 Relay staged rewrite）：禁止 drain，避免候选轮吃掉 one-shot。
+    if not wake and allow_side_effects:
         try:
             import command_store
             _fb = command_store.drain_feedback()

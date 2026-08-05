@@ -15,7 +15,10 @@ from typing import Any, Mapping, Optional
 STATUS_PREPARED = 'prepared'
 STATUS_GENERATING = 'generating'
 STATUS_READY = 'ready'
+# Legacy alias: treat as activated_needs_replay for resume.
 STATUS_ACTIVATED = 'activated'
+STATUS_ACTIVATED_NEEDS_REPLAY = 'activated_needs_replay'
+STATUS_EFFECTS_DONE = 'effects_done'
 STATUS_FAILED = 'failed'
 STATUS_STALE = 'stale'
 
@@ -42,11 +45,29 @@ CREATE TABLE IF NOT EXISTS chat_rewrite_staging (
     candidate_cache_info TEXT,
     candidate_choices TEXT,
     side_effects_json TEXT,
+    activation_result_json TEXT,
     error TEXT,
     created_at REAL,
     updated_at REAL
 )
 """
+
+
+def _status_transcript_locked(status: str) -> bool:
+    """True when active transcript mutation already committed."""
+    return status in (
+        STATUS_ACTIVATED,
+        STATUS_ACTIVATED_NEEDS_REPLAY,
+        STATUS_EFFECTS_DONE,
+    )
+
+
+def _status_effects_pending(status: str) -> bool:
+    return status in (STATUS_ACTIVATED, STATUS_ACTIVATED_NEEDS_REPLAY)
+
+
+def _status_effects_done(status: str) -> bool:
+    return status == STATUS_EFFECTS_DONE
 
 # Test-only hook: runs after fingerprint assert, still inside BEGIN IMMEDIATE.
 _activation_fence_hook = None
@@ -69,6 +90,7 @@ def ensure_schema(conn, *, commit: bool = True) -> None:
         ('source_revision', 'TEXT'),
         ('tail_revision', 'TEXT'),
         ('side_effects_json', 'TEXT'),
+        ('activation_result_json', 'TEXT'),
     ):
         if col not in cols:
             conn.execute(f'ALTER TABLE chat_rewrite_staging ADD COLUMN {col} {decl}')
@@ -214,7 +236,7 @@ def store_candidate(
     row = load(conn, rewrite_id)
     if not row:
         raise ValueError('rewrite not found')
-    if row.get('status') in (STATUS_ACTIVATED, STATUS_STALE):
+    if row.get('status') in (STATUS_STALE,) or _status_transcript_locked(str(row.get('status') or '')):
         raise ValueError(f"rewrite not writable: {row.get('status')}")
     effects = dict(side_effects or {})
     _set_status(
@@ -233,6 +255,34 @@ def store_candidate(
 
 def side_effects_of(staging: Mapping[str, Any]) -> dict:
     return dict(_loads(staging.get('side_effects_json'), {}) or {})
+
+
+def activation_result_of(staging: Mapping[str, Any]) -> dict:
+    return dict(_loads(staging.get('activation_result_json'), {}) or {})
+
+
+def mark_effects_done(conn, rewrite_id: str) -> None:
+    _set_status(conn, rewrite_id, STATUS_EFFECTS_DONE)
+
+
+def resume_activated_result(staging: Mapping[str, Any]) -> dict:
+    """Build activate-like result without mutating the active transcript."""
+    core = activation_result_of(staging)
+    if not core.get('assistant_message_id'):
+        raise ValueError('activated rewrite missing activation_result')
+    out = {
+        'ok': True,
+        'side_effects': side_effects_of(staging),
+        'staging': dict(staging),
+        'resumed': True,
+        'candidate_content': (
+            core.get('candidate_content')
+            or staging.get('candidate_content')
+            or ''
+        ),
+    }
+    out.update(core)
+    return out
 
 
 def clear_staged_moments_pending(staging: Mapping[str, Any], db_path: str) -> None:
@@ -254,12 +304,17 @@ def replay_side_effects_after_activate(
     *,
     get_db,
     db_path: str,
+    mark_done: bool = True,
 ) -> None:
     """Consume frozen active-only side effects after authoritative activation.
 
     Candidate generation only stores claims; this runs only after activate
-    commits the new active worldline.
+    commits the new active worldline. Safe to retry: wake consume is
+    ``consumed=0``-gated; Moments pop_pending is a no-op when empty.
+    On success, status advances to ``effects_done``.
     """
+    if _status_effects_done(str(staging.get('status') or '')):
+        return
     effects = side_effects_of(staging)
     wake_ids = effects.get('wake_ids') or []
     one_shot = effects.get('one_shot_claims') or {}
@@ -314,6 +369,16 @@ def replay_side_effects_after_activate(
             )
         except Exception:
             pass
+
+    if mark_done:
+        rewrite_id = str(staging.get('rewrite_id') or '').strip()
+        if rewrite_id:
+            conn = get_db()
+            try:
+                mark_effects_done(conn, rewrite_id)
+                conn.commit()
+            finally:
+                conn.close()
 
 
 def _write_session_memo_best_effort(user_msg: str, assistant_msg: str) -> None:
@@ -582,7 +647,13 @@ def fetch_rewrite_prefix_rows(
 
 
 def activate_regen(conn, rewrite_id: str) -> dict:
-    """Activate regen inside a reserved write transaction (BEGIN IMMEDIATE)."""
+    """Activate regen inside a reserved write transaction (BEGIN IMMEDIATE).
+
+    Status contract:
+      READY → (mutate) → activated_needs_replay
+      activated_needs_replay / legacy activated → resume, no transcript mutate
+      effects_done → resume done, no mutate / caller skips replay
+    """
     # DDL must not run inside the activation txn (ensure_schema commits).
     ensure_schema(conn, commit=True)
     _begin_immediate(conn)
@@ -592,11 +663,20 @@ def activate_regen(conn, rewrite_id: str) -> dict:
             raise KeyError('rewrite not found')
         if row.get('operation') != OP_REGEN:
             raise ValueError('not a regen rewrite')
-        if row.get('status') == STATUS_ACTIVATED:
-            raise ValueError('already activated')
-        if row.get('status') == STATUS_STALE:
+        status = str(row.get('status') or '')
+        if status == STATUS_STALE:
             raise StaleRewriteError('rewrite is stale')
-        if row.get('status') != STATUS_READY or not (row.get('candidate_content') or '').strip():
+        if _status_effects_done(status):
+            result = resume_activated_result(row)
+            result['finalize_mode'] = 'done'
+            conn.commit()
+            return result
+        if _status_effects_pending(status):
+            result = resume_activated_result(row)
+            result['finalize_mode'] = 'replay_only'
+            conn.commit()
+            return result
+        if status != STATUS_READY or not (row.get('candidate_content') or '').strip():
             raise ValueError('candidate not ready')
 
         assert_active_matches_prepare(conn, row)
@@ -643,16 +723,26 @@ def activate_regen(conn, rewrite_id: str) -> dict:
             f'UPDATE chat_messages SET {assignments} WHERE id=?',
             (*updates.values(), source_id),
         )
-        _set_status(conn, rewrite_id, STATUS_ACTIVATED)
-        result = {
-            'ok': True,
+        result_core = {
             'assistant_message_id': source_id,
             'branch_idx': branch_idx,
             'total': len(all_branches),
             'user_message_id': row.get('user_message_id'),
             'candidate_content': new_branch['content'],
-            'side_effects': side_effects_of(row),
-            'staging': row,
+        }
+        _set_status(
+            conn,
+            rewrite_id,
+            STATUS_ACTIVATED_NEEDS_REPLAY,
+            activation_result_json=_dumps(result_core),
+        )
+        row_after = load(conn, rewrite_id) or row
+        result = {
+            'ok': True,
+            **result_core,
+            'side_effects': side_effects_of(row_after),
+            'staging': row_after,
+            'finalize_mode': 'activate',
         }
         conn.commit()
         return result
@@ -674,7 +764,10 @@ def activate_regen(conn, rewrite_id: str) -> dict:
 
 
 def activate_edit(conn, rewrite_id: str) -> dict:
-    """Activate edit inside a reserved write transaction (BEGIN IMMEDIATE)."""
+    """Activate edit inside a reserved write transaction (BEGIN IMMEDIATE).
+
+    Same status contract as ``activate_regen`` — resume never re-DELETEs.
+    """
     ensure_schema(conn, commit=True)
     _begin_immediate(conn)
     try:
@@ -683,11 +776,20 @@ def activate_edit(conn, rewrite_id: str) -> dict:
             raise KeyError('rewrite not found')
         if row.get('operation') != OP_EDIT:
             raise ValueError('not an edit rewrite')
-        if row.get('status') == STATUS_ACTIVATED:
-            raise ValueError('already activated')
-        if row.get('status') == STATUS_STALE:
+        status = str(row.get('status') or '')
+        if status == STATUS_STALE:
             raise StaleRewriteError('rewrite is stale')
-        if row.get('status') != STATUS_READY or not (row.get('candidate_content') or '').strip():
+        if _status_effects_done(status):
+            result = resume_activated_result(row)
+            result['finalize_mode'] = 'done'
+            conn.commit()
+            return result
+        if _status_effects_pending(status):
+            result = resume_activated_result(row)
+            result['finalize_mode'] = 'replay_only'
+            conn.commit()
+            return result
+        if status != STATUS_READY or not (row.get('candidate_content') or '').strip():
             raise ValueError('candidate not ready')
 
         assert_active_matches_prepare(conn, row)
@@ -818,17 +920,27 @@ def activate_edit(conn, rewrite_id: str) -> dict:
             asst_vals,
         )
         new_assistant_id = int(cur_a.lastrowid)
-        _set_status(conn, rewrite_id, STATUS_ACTIVATED)
-        result = {
-            'ok': True,
+        result_core = {
             'message_id': new_user_id,
             'assistant_message_id': new_assistant_id,
             'created_at': created_at,
             'edited_content': edited,
             'candidate_content': row.get('candidate_content') or '',
             'user_message_id': new_user_id,
-            'side_effects': side_effects_of(row),
-            'staging': row,
+        }
+        _set_status(
+            conn,
+            rewrite_id,
+            STATUS_ACTIVATED_NEEDS_REPLAY,
+            activation_result_json=_dumps(result_core),
+        )
+        row_after = load(conn, rewrite_id) or row
+        result = {
+            'ok': True,
+            **result_core,
+            'side_effects': side_effects_of(row_after),
+            'staging': row_after,
+            'finalize_mode': 'activate',
         }
         conn.commit()
         return result
