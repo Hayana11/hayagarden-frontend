@@ -183,6 +183,7 @@ import tool_drawers
 import group_chat_store
 import codex_app_server
 import cc_resident
+from chat import cc_history_rewrite
 
 group_chat_store.ensure_schema(DB_PATH)
 from chat.daily_context import ensure_schema_logged as _daily_context_ensure_schema
@@ -3155,6 +3156,18 @@ _CC_RESIDENT = _SwappableResident(
     cc_resident.ResidentSession(CC_CWD, CC_ALLOWED_TOOLS, CC_CWD + '/cc-tools.json')
 )
 
+
+@app.route('/internal/cc-resident/history-rewrite', methods=['POST'])
+def invalidate_cc_resident_history_rewrite():
+    """Loopback-only authority for invalidating the formal chat resident."""
+    if request.remote_addr not in ('127.0.0.1', '::1'):
+        return jsonify({'error': 'loopback only'}), 403
+    data = request.get_json(silent=True) or {}
+    reason = str(data.get('reason') or 'history_rewrite')[:80]
+    resident = _CC_RESIDENT.get()
+    resident.invalidate_for_history_rewrite(reason)
+    return jsonify({'ok': True, 'invalidated': True})
+
 # B1：独立 CC Wake resident——绝不复用上面的聊天 resident，避免半夜
 # ACTION/THOUGHTS/工具检查混进白天私聊上下文。
 try:
@@ -5274,7 +5287,7 @@ def chat_stream():
                     turn_key=_turn_data.get('turn_key'),
                     persisted=_persisted[0],
                 )
-        return Response(stream_with_context(gen_cc()), mimetype='text/event-stream',
+        return Response(stream_with_context(cc_history_rewrite.guard_cc_generation(gen_cc())), mimetype='text/event-stream',
                         headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
     def generate():
         from moments_turn import prepare_turn, activate_turn, insert_user_message, release_turn, DEFAULT_CONVERSATION_ID
