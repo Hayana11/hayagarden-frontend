@@ -4367,20 +4367,29 @@ from chat.cc_history_rewrite import (
 
 
 def invalidate_cc_resident_for_history_rewrite(reason):
-    """Single app-side bridge to the authoritative gateway resident.
+    """Advance durable rewrite epoch, then best-effort eager-kill one worker.
 
-    Once a history rewrite is durable, advance the cross-process rewrite
-    epoch *before* the best-effort bridge call. Correctness is the durable
-    epoch (every worker lazily colds on mismatch); the bridge only eagers
-    whichever worker happens to receive the loopback request.
+    Correctness path: ``note_durable_history_rewrite`` (must succeed after a
+    committed DB rewrite). Acceleration path: loopback bridge to kill the
+    worker that happens to receive the request. Bridge failure must not turn
+    an already-committed rewrite into an API failure — other workers still
+    cold on epoch mismatch at the next ``ensure_alive``.
     """
+    import logging
+
     note_durable_history_rewrite(reason)
     result = _gw_json_request(
         'POST', '/internal/cc-resident/history-rewrite', {'reason': reason},
     )
     if not isinstance(result, dict) or result.get('ok') is not True:
         detail = result.get('error') if isinstance(result, dict) else result
-        raise RuntimeError('CC resident history invalidation failed: %s' % detail)
+        logging.getLogger(__name__).warning(
+            'CC resident history invalidation bridge failed '
+            '(durable epoch remains; lazy cold on mismatch): %s',
+            detail,
+        )
+        return False
+    return True
 
 
 @app.route('/api/chat/regen/prepare', methods=['POST'])

@@ -408,7 +408,9 @@ class HistoryRewriteRouteTests(unittest.TestCase):
             response = self.client.post(
                 '/api/chat/edit', json={'msg_id': edit_id, 'content': "U1'"},
             )
-        self.assertNotEqual(response.status_code, 200)
+        # Bridge is acceleration-only: committed rewrite stays API success.
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json().get('ok'), True)
         self.assertEqual(self.invalidation_calls, [])
         epoch = current_history_rewrite_epoch()
         self.assertTrue(epoch)
@@ -430,7 +432,8 @@ class HistoryRewriteRouteTests(unittest.TestCase):
             app_module, '_gw_json_request', return_value={'error': 'bridge refused'},
         ):
             response = self.client.post('/api/chat/delete', json={'msg_id': assistant_id})
-        self.assertNotEqual(response.status_code, 200)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json(), {'ok': True})
         self.assertEqual(self.invalidation_calls, [])
         epoch = current_history_rewrite_epoch()
         self.assertTrue(epoch)
