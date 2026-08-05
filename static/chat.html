@@ -2464,6 +2464,9 @@ async function streamReply(){
       try{ chunk=await reader.read(); }
       catch(re){
         if(re && re.name==='AbortError'){ streamAborted=true; break; }
+        // The gateway may have delivered SSE done before the browser reports
+        // a final read-side network error while closing the connection.
+        if(streamCompleted) break;
         throw re;
       }
       if(chunk.done) break;
