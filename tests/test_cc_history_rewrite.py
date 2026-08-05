@@ -10,6 +10,7 @@ import sys
 import tempfile
 import threading
 import time
+import types
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -136,6 +137,7 @@ def _ensure_app_importable():
 
 
 _ensure_app_importable()
+sys.modules.setdefault('moments_cover', types.ModuleType('moments_cover'))
 import app as app_module  # noqa: E402
 
 
