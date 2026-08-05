@@ -4360,7 +4360,21 @@ def set_ledger_budget():
 
 # ── Chat branches (regen + edit) ──────────────────────────
 
+from chat.cc_history_rewrite import serialize_history_rewrite
+
+
+def invalidate_cc_resident_for_history_rewrite(reason):
+    """Single app-side bridge to the authoritative gateway resident."""
+    result = _gw_json_request(
+        'POST', '/internal/cc-resident/history-rewrite', {'reason': reason},
+    )
+    if not isinstance(result, dict) or result.get('ok') is not True:
+        detail = result.get('error') if isinstance(result, dict) else result
+        raise RuntimeError('CC resident history invalidation failed: %s' % detail)
+
+
 @app.route('/api/chat/regen/prepare', methods=['POST'])
+@serialize_history_rewrite
 def regen_prepare():
     import json as _json
     data = request.get_json() or {}
@@ -4391,6 +4405,7 @@ def regen_prepare():
     conn.execute('DELETE FROM chat_messages WHERE id=?', (msg_id,))
     conn.commit()
     conn.close()
+    invalidate_cc_resident_for_history_rewrite('regen_prepare')
     payload = {'ok': True, 'old_branches': old_branches}
     if user_message_id is not None:
         payload['user_message_id'] = user_message_id
@@ -4426,6 +4441,7 @@ def regen_finalize():
 
 
 @app.route('/api/chat/branch/switch', methods=['POST'])
+@serialize_history_rewrite
 def branch_switch():
     import json as _json
     data = request.get_json() or {}
@@ -4454,10 +4470,13 @@ def branch_switch():
         )
         conn.commit()
     conn.close()
+    if new_idx != cur_idx:
+        invalidate_cc_resident_for_history_rewrite('branch_switch')
     return jsonify({'ok': True, 'branch_idx': new_idx, 'total': len(branches)})
 
 
 @app.route('/api/chat/edit', methods=['POST'])
+@serialize_history_rewrite
 def edit_message():
     import json as _json
     data = request.get_json() or {}
@@ -4569,6 +4588,7 @@ def edit_message():
                 _shadow.drain_shadow_outbox_best_effort(db_path=DB_PATH)
             except Exception:
                 pass
+    invalidate_cc_resident_for_history_rewrite('edit')
     return jsonify({'ok': True, 'message_id': new_message_id})
 
 
