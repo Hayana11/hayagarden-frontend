@@ -3165,9 +3165,14 @@ def invalidate_cc_resident_history_rewrite():
     data = request.get_json(silent=True) or {}
     reason = str(data.get('reason') or 'history_rewrite')[:80]
     resident = _CC_RESIDENT.get()
+    # Eager kill for this worker only. Do NOT clear/consume the durable
+    # rewrite epoch — other gunicorn workers must still observe mismatch.
     resident.invalidate_for_history_rewrite(reason)
-    cc_history_rewrite.clear_history_rewrite_barrier()
-    return jsonify({'ok': True, 'invalidated': True})
+    return jsonify({
+        'ok': True,
+        'invalidated': True,
+        'epoch': cc_history_rewrite.current_history_rewrite_epoch(),
+    })
 
 # B1：独立 CC Wake resident——绝不复用上面的聊天 resident，避免半夜
 # ACTION/THOUGHTS/工具检查混进白天私聊上下文。

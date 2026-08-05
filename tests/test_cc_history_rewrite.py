@@ -25,9 +25,9 @@ os.environ.setdefault(
 )
 
 from chat.cc_history_rewrite import (
-    clear_history_rewrite_barrier,
+    current_history_rewrite_epoch,
     guard_cc_generation,
-    history_rewrite_barrier_reason,
+    history_rewrite_epoch_reason,
     note_durable_history_rewrite,
     serialize_history_rewrite,
 )
@@ -90,7 +90,7 @@ class _FakeProc:
         return self.code or 0
 
 
-def _warm_resident():
+def _warm_resident(*, epoch=None):
     from cc_resident import ResidentSession
 
     resident = ResidentSession('/tmp', '', '/tmp/cc-tools.json')
@@ -99,6 +99,9 @@ def _warm_resident():
     resident._session_id = 'old-world-session'
     resident._cold = False
     resident._last_used = time.time()
+    if epoch is None:
+        epoch = current_history_rewrite_epoch()
+    resident._history_rewrite_epoch = epoch
     return resident
 
 
@@ -124,12 +127,29 @@ def _assert_next_generation_cold(testcase, resident, get_db):
         resident._cold = True
         resident._generation += 1
         resident._next_spawn_reason = None
+        resident._history_rewrite_epoch = current_history_rewrite_epoch()
         resident._reset_session_meta(respawn_reason=reason)
 
     with mock.patch.object(resident, '_spawn', side_effect=fake_spawn):
         testcase.assertTrue(resident.ensure_alive('system', {}))
     testcase.assertEqual(len(spawn_reasons), 1)
+    testcase.assertEqual(spawn_reasons[0], 'history_rewrite')
     return _authoritative_history(get_db)
+
+
+def _assert_hot_reuse(testcase, resident):
+    # After a cold spawn, ResidentSession stays `_cold=True` until a turn
+    # commits; simulate that warm state so ensure_alive's return value is
+    # meaningful while still asserting no respawn.
+    resident._cold = False
+    old_proc = resident._proc
+    old_generation = resident._generation
+    old_epoch = resident._history_rewrite_epoch
+    testcase.assertIsNone(resident.peek_respawn_reason('system'))
+    testcase.assertFalse(resident.ensure_alive('system', {}))
+    testcase.assertIs(resident._proc, old_proc)
+    testcase.assertEqual(resident._generation, old_generation)
+    testcase.assertEqual(resident._history_rewrite_epoch, old_epoch)
 
 
 def _ensure_app_importable():
@@ -196,6 +216,18 @@ def _import_gateway():
     return gateway
 
 
+def _reset_epoch_file():
+    path = (
+        os.environ.get('CC_HISTORY_REWRITE_EPOCH_PATH')
+        or os.environ.get('CC_HISTORY_REWRITE_BARRIER_PATH')
+    )
+    if path:
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
+
+
 _ensure_app_importable()
 sys.modules.setdefault('moments_cover', types.ModuleType('moments_cover'))
 if 'account_balance_routes' not in sys.modules:
@@ -218,28 +250,13 @@ class HistoryRewriteRouteTests(unittest.TestCase):
         _chat_schema(conn)
         conn.commit()
         conn.close()
-        self.resident = _warm_resident()
-        self.invalidation_calls = []
-        self.history_at_invalidation = []
-        self.barrier_path = str(Path(self.tmp.name) / 'rewrite.barrier')
-        clear_history_rewrite_barrier()
-
-        def bridge(method, path, body=None, timeout=5):
-            self.assertEqual(method, 'POST')
-            self.assertEqual(path, '/internal/cc-resident/history-rewrite')
-            self.invalidation_calls.append(body['reason'])
-            self.history_at_invalidation.append(_authoritative_history(self.get_db))
-            self.resident.invalidate_for_history_rewrite(body['reason'])
-            clear_history_rewrite_barrier()
-            return {'ok': True, 'invalidated': True}
-
+        self.epoch_path = str(Path(self.tmp.name) / 'rewrite.epoch')
         self.patches = [
             mock.patch.object(app_module, 'DB_PATH', self.db_path),
             mock.patch.object(app_module, 'get_db', self.get_db),
-            mock.patch.object(app_module, '_gw_json_request', side_effect=bridge),
             mock.patch.dict(os.environ, {
                 'CC_HISTORY_REWRITE_LOCK_PATH': str(Path(self.tmp.name) / 'rewrite.lock'),
-                'CC_HISTORY_REWRITE_BARRIER_PATH': self.barrier_path,
+                'CC_HISTORY_REWRITE_EPOCH_PATH': self.epoch_path,
                 'INTERNAL_STATE_V3_SHADOW_ENABLED': '0',
                 'INTERNAL_STATE_V3_SCORE_PROOF_ENABLED': '0',
                 'INTERNAL_STATE_V3_USER_EVENTS_ENABLED': '0',
@@ -247,12 +264,35 @@ class HistoryRewriteRouteTests(unittest.TestCase):
         ]
         for patcher in self.patches:
             patcher.start()
+        _reset_epoch_file()
+        self.resident = _warm_resident()
+        self.invalidation_calls = []
+        self.history_at_invalidation = []
+
+        def bridge(method, path, body=None, timeout=5):
+            self.assertEqual(method, 'POST')
+            self.assertEqual(path, '/internal/cc-resident/history-rewrite')
+            self.invalidation_calls.append(body['reason'])
+            self.history_at_invalidation.append(_authoritative_history(self.get_db))
+            # Eager kill only — durable epoch must remain for other workers.
+            self.resident.invalidate_for_history_rewrite(body['reason'])
+            return {
+                'ok': True,
+                'invalidated': True,
+                'epoch': current_history_rewrite_epoch(),
+            }
+
+        self.bridge_patch = mock.patch.object(
+            app_module, '_gw_json_request', side_effect=bridge,
+        )
+        self.bridge_patch.start()
         self.client = app_module.app.test_client()
 
     def tearDown(self):
+        self.bridge_patch.stop()
         for patcher in reversed(self.patches):
             patcher.stop()
-        clear_history_rewrite_barrier()
+        _reset_epoch_file()
         self.tmp.cleanup()
 
     def _insert(self, author, content, **extra):
@@ -279,10 +319,14 @@ class HistoryRewriteRouteTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(self.invalidation_calls, ['edit'])
         self.assertEqual(self.history_at_invalidation, ["U1'"])
+        epoch = current_history_rewrite_epoch()
+        self.assertTrue(epoch)
         history = _assert_next_generation_cold(self, self.resident, self.get_db)
         self.assertIn("U1'", history)
         for old in ('A1', 'U2', 'A2'):
             self.assertNotIn(old, history)
+        self.assertEqual(current_history_rewrite_epoch(), epoch)
+        self.assertEqual(self.resident._history_rewrite_epoch, epoch)
 
     def test_regenerate_invalidates_before_new_generation(self):
         self._insert('hayana', 'U1')
@@ -330,19 +374,15 @@ class HistoryRewriteRouteTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.get_json(), {'ok': True})
         self.assertEqual(self.invalidation_calls, [])
-        self.assertIsNone(history_rewrite_barrier_reason())
-        old_proc = self.resident._proc
-        self.assertFalse(self.resident.ensure_alive('system', {}))
-        self.assertIs(self.resident._proc, old_proc)
+        self.assertEqual(current_history_rewrite_epoch(), '')
+        _assert_hot_reuse(self, self.resident)
 
     def test_failed_edit_does_not_invalidate_hot_resident(self):
         response = self.client.post('/api/chat/edit', json={'msg_id': 999, 'content': 'missing'})
         self.assertEqual(response.status_code, 404)
         self.assertEqual(self.invalidation_calls, [])
-        self.assertIsNone(history_rewrite_barrier_reason())
-        old_proc = self.resident._proc
-        self.assertFalse(self.resident.ensure_alive('system', {}))
-        self.assertIs(self.resident._proc, old_proc)
+        self.assertEqual(current_history_rewrite_epoch(), '')
+        _assert_hot_reuse(self, self.resident)
 
     def test_branch_noop_does_not_invalidate_hot_resident(self):
         self._insert('hayana', 'U1')
@@ -356,10 +396,8 @@ class HistoryRewriteRouteTests(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 200)
         self.assertEqual(self.invalidation_calls, [])
-        self.assertIsNone(history_rewrite_barrier_reason())
-        old_proc = self.resident._proc
-        self.assertFalse(self.resident.ensure_alive('system', {}))
-        self.assertIs(self.resident._proc, old_proc)
+        self.assertEqual(current_history_rewrite_epoch(), '')
+        _assert_hot_reuse(self, self.resident)
 
     def test_bridge_failure_after_durable_rewrite_fail_closed(self):
         edit_id = self._insert('hayana', 'U1')
@@ -372,13 +410,18 @@ class HistoryRewriteRouteTests(unittest.TestCase):
             )
         self.assertNotEqual(response.status_code, 200)
         self.assertEqual(self.invalidation_calls, [])
-        self.assertEqual(history_rewrite_barrier_reason(), 'edit')
+        epoch = current_history_rewrite_epoch()
+        self.assertTrue(epoch)
+        self.assertEqual(history_rewrite_epoch_reason(), 'edit')
         self.assertTrue(self.resident._alive())
         self.assertEqual(self.resident._session_id, 'old-world-session')
         history = _assert_next_generation_cold(self, self.resident, self.get_db)
         self.assertIn("U1'", history)
         self.assertNotIn('A1', history)
-        self.assertIsNone(history_rewrite_barrier_reason())
+        # Epoch is durable: cold catch-up must not clear it.
+        self.assertEqual(current_history_rewrite_epoch(), epoch)
+        self.assertEqual(self.resident._history_rewrite_epoch, epoch)
+        _assert_hot_reuse(self, self.resident)
 
     def test_bridge_failure_after_durable_delete_fail_closed(self):
         self._insert('hayana', 'U1')
@@ -389,16 +432,109 @@ class HistoryRewriteRouteTests(unittest.TestCase):
             response = self.client.post('/api/chat/delete', json={'msg_id': assistant_id})
         self.assertNotEqual(response.status_code, 200)
         self.assertEqual(self.invalidation_calls, [])
-        self.assertEqual(history_rewrite_barrier_reason(), 'delete')
+        epoch = current_history_rewrite_epoch()
+        self.assertTrue(epoch)
+        self.assertEqual(history_rewrite_epoch_reason(), 'delete')
         history = _assert_next_generation_cold(self, self.resident, self.get_db)
         self.assertIn('U1', history)
         self.assertNotIn('A1', history)
+        self.assertEqual(current_history_rewrite_epoch(), epoch)
 
     def test_unrelated_normal_turn_still_reuses_hot_resident(self):
-        old_proc = self.resident._proc
-        self.assertFalse(self.resident.ensure_alive('system', {}))
-        self.assertIs(self.resident._proc, old_proc)
+        _assert_hot_reuse(self, self.resident)
         self.assertEqual(self.invalidation_calls, [])
+        self.assertEqual(current_history_rewrite_epoch(), '')
+
+
+class HistoryRewriteMultiWorkerEpochTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.epoch_path = str(Path(self.tmp.name) / 'rewrite.epoch')
+        self.env_patch = mock.patch.dict(os.environ, {
+            'CC_HISTORY_REWRITE_EPOCH_PATH': self.epoch_path,
+        }, clear=False)
+        self.env_patch.start()
+        _reset_epoch_file()
+
+    def tearDown(self):
+        self.env_patch.stop()
+        _reset_epoch_file()
+        self.tmp.cleanup()
+
+    def test_multi_worker_lazy_invalidation_and_unique_epochs(self):
+        def _cold(resident):
+            spawn_reasons = []
+
+            def fake_spawn(system_text, env, *, reason='process_dead', tool_profile='legacy'):
+                spawn_reasons.append(reason)
+                resident._proc = _FakeProc()
+                resident._system_text = system_text
+                resident._session_id = 'new-world-session'
+                resident._cold = True
+                resident._generation += 1
+                resident._next_spawn_reason = None
+                resident._history_rewrite_epoch = current_history_rewrite_epoch()
+                resident._reset_session_meta(respawn_reason=reason)
+
+            with mock.patch.object(resident, '_spawn', side_effect=fake_spawn):
+                self.assertTrue(resident.ensure_alive('system', {}))
+            self.assertEqual(spawn_reasons, ['history_rewrite'])
+            return spawn_reasons
+
+        pre_epoch = current_history_rewrite_epoch()
+        worker_a = _warm_resident(epoch=pre_epoch)
+        worker_b = _warm_resident(epoch=pre_epoch)
+        worker_c = _warm_resident(epoch=pre_epoch)
+
+        epoch1 = note_durable_history_rewrite('edit')
+        self.assertNotEqual(epoch1, pre_epoch)
+        worker_a.invalidate_for_history_rewrite('edit')
+        self.assertFalse(worker_a._alive())
+        self.assertTrue(worker_b._alive())
+        self.assertEqual(worker_b._history_rewrite_epoch, pre_epoch)
+        self.assertEqual(current_history_rewrite_epoch(), epoch1)
+
+        _cold(worker_b)
+        self.assertEqual(worker_b._history_rewrite_epoch, epoch1)
+        self.assertEqual(current_history_rewrite_epoch(), epoch1)
+        # B catching up must not clear epoch for still-stale C.
+        self.assertTrue(worker_c._alive())
+        self.assertEqual(worker_c._history_rewrite_epoch, pre_epoch)
+        _assert_hot_reuse(self, worker_b)
+
+        _cold(worker_c)
+        self.assertEqual(worker_c._history_rewrite_epoch, epoch1)
+        _assert_hot_reuse(self, worker_c)
+
+        # Same reason twice still advances a new unique epoch.
+        epoch2 = note_durable_history_rewrite('edit')
+        self.assertNotEqual(epoch2, epoch1)
+        self.assertEqual(history_rewrite_epoch_reason(), 'edit')
+        self.assertTrue(worker_b._alive())
+        _cold(worker_b)
+        self.assertEqual(worker_b._history_rewrite_epoch, epoch2)
+        self.assertEqual(current_history_rewrite_epoch(), epoch2)
+
+        # A second still-stale reconstruction also colds on epoch2.
+        stale_again = _warm_resident(epoch=epoch1)
+        self.assertTrue(stale_again._alive())
+        _cold(stale_again)
+        self.assertEqual(stale_again._history_rewrite_epoch, epoch2)
+
+    def test_failed_spawn_does_not_bind_new_epoch(self):
+        pre_epoch = current_history_rewrite_epoch()
+        resident = _warm_resident(epoch=pre_epoch)
+        epoch1 = note_durable_history_rewrite('delete')
+
+        def boom(*_a, **_k):
+            raise RuntimeError('spawn failed')
+
+        with mock.patch.object(resident, '_spawn', side_effect=boom):
+            with self.assertRaises(RuntimeError):
+                resident.ensure_alive('system', {})
+        self.assertEqual(resident._history_rewrite_epoch, pre_epoch)
+        self.assertEqual(current_history_rewrite_epoch(), epoch1)
+        self.assertNotEqual(resident._history_rewrite_epoch, epoch1)
 
 
 class HistoryRewriteLockTests(unittest.TestCase):
@@ -461,7 +597,7 @@ class HistoryRewriteLockTests(unittest.TestCase):
                  ), \
                  mock.patch.dict(os.environ, {
                      'CC_HISTORY_REWRITE_LOCK_PATH': str(Path(tmp) / 'guard.lock'),
-                     'CC_HISTORY_REWRITE_BARRIER_PATH': str(Path(tmp) / 'rewrite.barrier'),
+                     'CC_HISTORY_REWRITE_EPOCH_PATH': str(Path(tmp) / 'rewrite.epoch'),
                  }, clear=False):
                 client = app_module.app.test_client()
 
@@ -495,18 +631,22 @@ class HistoryRewriteLockTests(unittest.TestCase):
                 self.assertIsNone(gone)
 
 
-class HistoryRewriteBarrierTests(unittest.TestCase):
-    def test_barrier_note_and_clear(self):
+class HistoryRewriteEpochTests(unittest.TestCase):
+    def test_note_produces_unique_epochs_for_same_reason(self):
         with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
             os.environ,
-            {'CC_HISTORY_REWRITE_BARRIER_PATH': str(Path(tmp) / 'b.barrier')},
+            {'CC_HISTORY_REWRITE_EPOCH_PATH': str(Path(tmp) / 'e.epoch')},
             clear=False,
         ):
-            self.assertIsNone(history_rewrite_barrier_reason())
-            note_durable_history_rewrite('edit')
-            self.assertEqual(history_rewrite_barrier_reason(), 'edit')
-            clear_history_rewrite_barrier()
-            self.assertIsNone(history_rewrite_barrier_reason())
+            self.assertEqual(current_history_rewrite_epoch(), '')
+            self.assertIsNone(history_rewrite_epoch_reason())
+            e1 = note_durable_history_rewrite('edit')
+            e2 = note_durable_history_rewrite('edit')
+            self.assertTrue(e1)
+            self.assertTrue(e2)
+            self.assertNotEqual(e1, e2)
+            self.assertEqual(current_history_rewrite_epoch(), e2)
+            self.assertEqual(history_rewrite_epoch_reason(), 'edit')
 
 
 class HistoryRewriteSecurityTests(unittest.TestCase):
@@ -515,28 +655,33 @@ class HistoryRewriteSecurityTests(unittest.TestCase):
         cls.gateway = _import_gateway()
 
     def test_history_rewrite_endpoint_allows_loopback(self):
-        resident = _warm_resident()
-        holder = self.gateway._CC_RESIDENT
-        previous = holder.swap(resident)
-        barrier = str(Path(tempfile.gettempdir()) / 'cc-hrw-sec-loopback.barrier')
-        try:
+        with tempfile.TemporaryDirectory() as tmp:
+            epoch_path = str(Path(tmp) / 'sec.epoch')
             with mock.patch.dict(os.environ, {
-                'CC_HISTORY_REWRITE_BARRIER_PATH': barrier,
+                'CC_HISTORY_REWRITE_EPOCH_PATH': epoch_path,
             }, clear=False):
-                note_durable_history_rewrite('sec')
-                client = self.gateway.app.test_client()
-                response = client.post(
-                    '/internal/cc-resident/history-rewrite',
-                    json={'reason': 'sec'},
-                    environ_base={'REMOTE_ADDR': '127.0.0.1'},
-                )
-                self.assertEqual(response.status_code, 200)
-                self.assertEqual(response.get_json().get('ok'), True)
-                self.assertFalse(resident._alive())
-                self.assertIsNone(history_rewrite_barrier_reason())
-        finally:
-            holder.swap(previous)
-            clear_history_rewrite_barrier()
+                _reset_epoch_file()
+                resident = _warm_resident()
+                holder = self.gateway._CC_RESIDENT
+                previous = holder.swap(resident)
+                try:
+                    epoch = note_durable_history_rewrite('sec')
+                    client = self.gateway.app.test_client()
+                    response = client.post(
+                        '/internal/cc-resident/history-rewrite',
+                        json={'reason': 'sec'},
+                        environ_base={'REMOTE_ADDR': '127.0.0.1'},
+                    )
+                    self.assertEqual(response.status_code, 200)
+                    body = response.get_json() or {}
+                    self.assertEqual(body.get('ok'), True)
+                    self.assertEqual(body.get('epoch'), epoch)
+                    self.assertFalse(resident._alive())
+                    # Eager invalidate must not consume the durable epoch.
+                    self.assertEqual(current_history_rewrite_epoch(), epoch)
+                finally:
+                    holder.swap(previous)
+                    _reset_epoch_file()
 
     def test_history_rewrite_endpoint_rejects_non_loopback(self):
         resident = _warm_resident()

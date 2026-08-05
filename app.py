@@ -4369,9 +4369,10 @@ from chat.cc_history_rewrite import (
 def invalidate_cc_resident_for_history_rewrite(reason):
     """Single app-side bridge to the authoritative gateway resident.
 
-    Once a history rewrite is durable, note a fail-closed barrier *before*
-    calling the bridge so a rejected/failed invalidation cannot leave a
-    stale hot resident eligible for reuse.
+    Once a history rewrite is durable, advance the cross-process rewrite
+    epoch *before* the best-effort bridge call. Correctness is the durable
+    epoch (every worker lazily colds on mismatch); the bridge only eagers
+    whichever worker happens to receive the loopback request.
     """
     note_durable_history_rewrite(reason)
     result = _gw_json_request(
