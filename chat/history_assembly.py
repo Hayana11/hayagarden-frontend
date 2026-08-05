@@ -93,6 +93,19 @@ def _text_block(text: str, *, meta: Optional[dict[str, Any]] = None) -> dict[str
     return block
 
 
+def _file_marker(filename: str) -> str:
+    return '[文件: %s]' % (filename or '附件')
+
+
+def _has_file_marker(blocks: list[dict[str, Any]], filename: str) -> bool:
+    name = filename or '附件'
+    markers = ('[文件: %s]' % name, '[文件:%s]' % name)
+    return any(
+        any(marker in str(block.get('text') or '') for marker in markers)
+        for block in blocks if block.get('type') == 'text'
+    )
+
+
 def strip_internal_metadata(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for msg in messages:
@@ -495,9 +508,9 @@ def assemble_history_from_rows(
 
         fu = _row_get(r, 'file_url')
         if fu and not is_ai and str(fu).startswith('/static/'):
+            fname = _row_get(r, 'file_name') or '附件'
             body = read_file_fn(static_dir, str(fu))
             if body is not None:
-                fname = _row_get(r, 'file_name') or '附件'
                 full_sha = file_content_sha256(body)
                 ref_key = file_ref_key(str(fu), full_sha)
                 mode = 'full'
@@ -526,6 +539,26 @@ def assemble_history_from_rows(
                         'ref_key': ref_key,
                         'tokens_estimate': estimate_tokens(text),
                     })
+                elif not _has_file_marker(blocks, fname):
+                    marker = _file_marker(fname)
+                    blocks.append(_text_block(marker, meta={
+                        'kind': 'file',
+                        'mode': 'marker_only',
+                        'url': str(fu),
+                        'ref_key': ref_key,
+                        'content_sha256': full_sha,
+                    }))
+                    stats.file_injections.append({
+                        'url': str(fu),
+                        'mode': 'marker_only',
+                        'content_sha256': full_sha,
+                        'ref_key': ref_key,
+                        'tokens_estimate': estimate_tokens(marker),
+                    })
+            elif not _has_file_marker(blocks, fname):
+                blocks.append(_text_block(_file_marker(fname), meta={
+                    'kind': 'file', 'mode': 'marker_only', 'url': str(fu),
+                }))
 
         if is_ai and _row_get(r, 'tool_calls'):
             small, large, per_message, _ = _tool_caps()

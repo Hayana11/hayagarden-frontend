@@ -16,6 +16,7 @@ from chat.history_assembly import (
     strip_internal_metadata,
     trim_messages_to_text_budget,
 )
+from chat.history_legacy import assemble_legacy_history
 
 
 def _row(author, content, **kwargs):
@@ -159,6 +160,66 @@ class HistoryAssemblyTests(unittest.TestCase):
             resident_file_hashes={ref},
         )
         self.assertNotIn(ref, stats.committed_full_file_refs)
+        from chat.history_assembly import flatten_message_content
+        visible = flatten_message_content(msgs[0]['content'])
+        self.assertIn('此前 resident 已全文注入', visible)
+        self.assertNotIn('[文件: a.txt]', visible)
+
+    def test_old_file_keeps_marker_without_full_body(self):
+        url = '/static/uploads/files/abc_design.md'
+        rows = [_row('hayana', '爸爸看看这个', id=1, file_url=url, file_name='design.md')]
+        rows.extend(_row('assistant' if i % 2 else 'hayana', f'later {i}', id=i + 2) for i in range(7))
+        msgs, stats = assemble_history_from_rows(
+            rows,
+            available_count=len(rows),
+            history_mode='legacy_block',
+            static_dir='/tmp',
+            read_file_fn=lambda _static, u: 'SECRET BODY' if u == url else None,
+            img_block_fn=lambda *_a, **_k: None,
+            is_ai_author=lambda a: a in ('assistant', 'fyodor', 'claude'),
+        )
+        from chat.history_assembly import flatten_message_content
+        visible = '\n'.join(flatten_message_content(m['content']) for m in msgs)
+        self.assertIn('爸爸看看这个', visible)
+        self.assertIn('[文件: design.md]', visible)
+        self.assertNotIn('SECRET BODY', visible)
+        self.assertIn('marker_only', [item['mode'] for item in stats.file_injections])
+
+    def test_file_only_existing_marker_not_duplicated(self):
+        url = '/static/uploads/files/abc_design.md'
+        rows = [_row('hayana', '[文件:design.md]', id=1, file_url=url, file_name='design.md')]
+        rows.extend(_row('assistant' if i % 2 else 'hayana', f'later {i}', id=i + 2) for i in range(7))
+        msgs, _stats = assemble_history_from_rows(
+            rows,
+            available_count=len(rows),
+            history_mode='legacy_block',
+            static_dir='/tmp',
+            read_file_fn=lambda *_a, **_k: 'SECRET BODY',
+            img_block_fn=lambda *_a, **_k: None,
+            is_ai_author=lambda a: a in ('assistant', 'fyodor', 'claude'),
+        )
+        from chat.history_assembly import flatten_message_content
+        visible = '\n'.join(flatten_message_content(m['content']) for m in msgs)
+        self.assertEqual(visible.count('[文件:design.md]'), 1)
+        self.assertNotIn('[文件: design.md]', visible)
+
+    def test_legacy_old_file_keeps_same_marker_semantics(self):
+        url = '/static/uploads/files/abc_design.md'
+        rows = [_row('hayana', '爸爸看看这个', id=1, file_url=url, file_name='design.md')]
+        rows.extend(_row('assistant' if i % 2 else 'hayana', f'later {i}', id=i + 2) for i in range(7))
+        with mock.patch('chat.history_legacy.persist_history_boundary'):
+            msgs, _stats = assemble_legacy_history(
+                rows,
+                available_count=len(rows),
+                static_dir='/tmp',
+                read_file_fn=lambda _static, u: 'SECRET BODY' if u == url else None,
+                img_block_fn=lambda *_a, **_k: None,
+                format_tool_history_fn=lambda _raw: '',
+                is_ai_author=lambda a: a in ('assistant', 'fyodor', 'claude'),
+            )
+        visible = json.dumps(msgs, ensure_ascii=False)
+        self.assertIn('[文件: design.md]', visible)
+        self.assertNotIn('SECRET BODY', visible)
 
     def test_strip_internal_metadata_before_provider(self):
         msgs = [{

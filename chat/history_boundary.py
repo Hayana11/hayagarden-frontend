@@ -249,15 +249,15 @@ def boundary_rows_for_summary(
     from chat.context_lean import lean_file_dedup_enabled, lean_tool_budget_enabled
 
     if read_file_fn is None:
-        import os
         def read_file_fn(sd, url):
-            if not url or not str(url).startswith('/static/'):
-                return None
-            path = os.path.realpath(sd + str(url)[7:])
-            if not path.startswith(os.path.realpath(sd)) or not os.path.exists(path):
-                return None
             try:
-                with open(path, 'r', encoding='utf-8', errors='replace') as ff:
+                import os
+                from chat.attachment_contract import resolve_uploaded_file_url
+                files_dir = os.path.join(sd, 'uploads', 'files')
+                path = resolve_uploaded_file_url(str(url or ''), files_dir)
+                if path is None or not path.is_file():
+                    return None
+                with path.open('r', encoding='utf-8', errors='replace') as ff:
                     return ff.read()
             except Exception:
                 return None

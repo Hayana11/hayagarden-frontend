@@ -24,6 +24,7 @@ import {
   artifactTypeIcon,
   artifactTypeLabel,
   cacheLabel,
+  chatFilePreviewUrl,
   chatPlaceholder,
   fmtArtifactSize,
   fmtCostUsd,
@@ -387,23 +388,31 @@ export function ChatScreen() {
     [scrollBottom, showToast, updateLive],
   );
 
-  const send = useCallback(async (overrideText?: string) => {
-    const text = (overrideText ?? input).trim();
-    if ((!text && !pendingFile && !pendingImage) || sending) return;
+  const send = useCallback(async () => {
+    const attempt = {
+      text: input.trim(),
+      file: pendingFile,
+      image: pendingImage,
+    };
+    if ((!attempt.text && !attempt.file && !attempt.image) || sending) return;
     setSending(true);
     setChatError(null);
-    if (!overrideText) setInput('');
+    setInput('');
     if (taRef.current) taRef.current.style.height = 'auto';
-    const extra = pendingImage ? { imageFile: pendingImage } : pendingFile ? { fileUrl: pendingFile.fileUrl, fileName: pendingFile.fileName } : {};
-    setPendingFile(null);
-    setPendingImage(null);
-    const messageId = await sendChatMessage(text, extra);
+    const extra = attempt.image
+      ? { imageFile: attempt.image }
+      : attempt.file
+        ? { fileUrl: attempt.file.fileUrl, fileName: attempt.file.fileName }
+        : {};
+    const messageId = await sendChatMessage(attempt.text, extra);
     if (messageId === null) {
       showToast('发送失败');
-      if (!overrideText) setInput(text);
+      setInput((current) => current || attempt.text);
       setSending(false);
       return;
     }
+    setPendingFile((current) => (current === attempt.file ? null : current));
+    setPendingImage((current) => (current === attempt.image ? null : current));
     await refetchLatest();
     await runStream(messageId);
     await refetchLatest();
@@ -411,11 +420,36 @@ export function ChatScreen() {
     taRef.current?.focus();
   }, [input, pendingFile, pendingImage, sending, refetchLatest, runStream, showToast]);
 
+  const sendChoice = useCallback(async (text: string): Promise<boolean> => {
+    const choice = text.trim();
+    if (!choice || sending) return false;
+    setSending(true);
+    setChatError(null);
+    const messageId = await sendChatMessage(choice);
+    if (messageId === null) {
+      showToast('发送失败');
+      setSending(false);
+      return false;
+    }
+    await refetchLatest();
+    await runStream(messageId);
+    await refetchLatest();
+    setSending(false);
+    return true;
+  }, [sending, refetchLatest, runStream, showToast]);
+
   const chooseOption = useCallback(async (text: string, msgId: number) => {
     if (sending || isChoicesAnswered(msgId, msgs)) return;
     setPickedChoices((prev) => ({ ...prev, [msgId]: text }));
-    await send(text);
-  }, [msgs, send, sending]);
+    const sent = await sendChoice(text);
+    if (!sent) {
+      setPickedChoices((prev) => {
+        const next = { ...prev };
+        delete next[msgId];
+        return next;
+      });
+    }
+  }, [msgs, sendChoice, sending]);
 
   const redo = useCallback(
     async (msgId: number) => {
@@ -701,6 +735,7 @@ export function ChatScreen() {
 
   function renderUserMsg(m: ChatMsg) {
     const editing = editingId === m.id;
+    const filePreview = chatFilePreviewUrl(m.fileUrl);
     return (
       <div id={`msg-${m.id}`} className={`chat-msg${flashId === m.id ? ' chat-flash' : ''}`} style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 7, borderRadius: 16 }}>
         {editing ? (
@@ -726,12 +761,17 @@ export function ChatScreen() {
             <div style={{ maxWidth: '82%', background: 'var(--bubble)', borderRadius: '18px 18px 6px 18px', padding: '12px 16px', boxShadow: '0 6px 16px var(--shadow)', display: 'flex', flexDirection: 'column', gap: 8 }}>
               {(m.fileName || m.imageUrl) && (
                 <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-                  {m.fileName && (
+                  {m.fileName && (filePreview ? (
+                    <a href={filePreview} target="_blank" rel="noopener noreferrer" style={{ display: 'flex', alignItems: 'center', gap: 6, background: 'var(--card)', borderRadius: 999, padding: '5px 11px', fontSize: 11.5, color: 'var(--ink2)', textDecoration: 'none' }}>
+                      <Svg d={IC.clip} size={11} sw={1.8} />
+                      {m.fileName}
+                    </a>
+                  ) : (
                     <span style={{ display: 'flex', alignItems: 'center', gap: 6, background: 'var(--card)', borderRadius: 999, padding: '5px 11px', fontSize: 11.5, color: 'var(--ink2)' }}>
                       <Svg d={IC.clip} size={11} sw={1.8} />
                       {m.fileName}
                     </span>
-                  )}
+                  ))}
                   {m.imageUrl && <img src={m.imageUrl} alt="" style={{ maxWidth: 200, maxHeight: 200, borderRadius: 12, objectFit: 'cover' }} />}
                 </div>
               )}

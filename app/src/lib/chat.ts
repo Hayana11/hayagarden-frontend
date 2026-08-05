@@ -80,6 +80,26 @@ export interface ChatMessageRow {
   created_at?: string | null;
 }
 
+export const MAX_CHAT_CHOICES = 8;
+export const MAX_CHAT_CHOICE_LENGTH = 120;
+
+export function normalizeChatChoices(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter((item): item is string => typeof item === 'string')
+    .map((item) => item.trim())
+    .filter((item) => item.length > 0 && item.length <= MAX_CHAT_CHOICE_LENGTH)
+    .slice(0, MAX_CHAT_CHOICES);
+}
+
+export function chatFilePreviewUrl(fileUrl: string): string {
+  const prefix = '/static/uploads/files/';
+  if (!fileUrl.startsWith(prefix)) return '';
+  const name = fileUrl.slice(prefix.length);
+  if (!name || name === '.' || name === '..' || name.includes('/') || name.includes('\\')) return '';
+  return `/api/chat/files/${encodeURIComponent(name)}/preview`;
+}
+
 export function normalizeToolCall(tc: ChatToolCall): ChatToolCall {
   if (tc.artifact?.id) return tc;
   const name = tc.name || '';
@@ -158,7 +178,7 @@ export function rowToMsg(row: ChatMessageRow): ChatMsg {
     imageUrl: row.image_url || '',
     fileUrl: row.file_url || '',
     fileName: row.file_name || '',
-    choices: parseJson<string[]>(row.choices, []),
+    choices: normalizeChatChoices(parseJson<unknown>(row.choices, [])),
     ts: created.length >= 16 ? created.slice(11, 16) : '',
     dateKey: created.slice(0, 10),
     createdAt: created,

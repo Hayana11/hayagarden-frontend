@@ -15,6 +15,17 @@ from moments_routes import create_moments_blueprint
 from monopoly_rooms import MonopolyService
 from monopoly_routes import create_monopoly_blueprint
 from valence_scale import normalize_arousal, normalize_valence
+from chat.attachment_contract import (
+    ALLOWED_TEXT_FILE_EXTENSIONS,
+    MAX_TEXT_FILE_BYTES,
+    AttachmentValidationError,
+    read_limited_upload,
+    reencode_chat_image,
+    resolve_uploaded_file_url,
+    sandbox_preview_shell,
+    safe_child_path,
+    validate_uploaded_file_reference,
+)
 
 app = Flask(__name__, static_folder='static')
 DB_PATH = '/opt/frontend/memories.db'
@@ -41,9 +52,8 @@ def get_db():
 #   file_url 有值=文件卡片，choices 有值(JSON 数组)=选择器按钮组。
 # 幂等 migration，跑几次都安全。
 FILES_DIR = '/opt/frontend/static/uploads/files'
-ALLOWED_FILE_EXT = {'.md', '.txt', '.html', '.htm', '.py', '.js', '.json',
-                    '.csv', '.css', '.xml', '.yaml', '.yml', '.log', '.ini', '.sh'}
-MAX_FILE_BYTES = 2 * 1024 * 1024  # 2MB
+ALLOWED_FILE_EXT = set(ALLOWED_TEXT_FILE_EXTENSIONS)
+MAX_FILE_BYTES = MAX_TEXT_FILE_BYTES
 
 def _migrate_chat_columns():
     conn = get_db()
@@ -127,7 +137,7 @@ def artifact_preview(aid):
     if not meta or content is None:
         return jsonify({'error': 'not found'}), 404
     if meta['type'] == 'html':
-        return Response(content, mimetype='text/html')
+        return _sandbox_preview_shell('/api/artifacts/%d/content' % aid)
     if meta['type'] == 'markdown':
         import markdown as _md
         html_body = _md.markdown(content.decode('utf-8'), extensions=['fenced_code', 'tables'])
@@ -145,6 +155,27 @@ def artifact_preview(aid):
         return Response(page, mimetype='text/html')
     return jsonify({'error': 'docx 不支持在线预览，直接下载查看',
                      'download_url': '/api/artifacts/%d/download' % aid}), 400
+
+
+@app.route('/api/artifacts/<int:aid>/content', methods=['GET'])
+def artifact_html_content(aid):
+    import artifact_store
+    meta, content = artifact_store.read_content(aid)
+    if not meta or content is None:
+        return jsonify({'error': 'not found'}), 404
+    if meta['type'] != 'html':
+        return jsonify({'error': 'HTML content only'}), 400
+    response = jsonify({'content': content.decode('utf-8', errors='replace')})
+    response.headers['X-Content-Type-Options'] = 'nosniff'
+    return response
+
+
+def _sandbox_preview_shell(content_url):
+    """Same-origin shell; untrusted HTML runs only in an opaque sandbox origin."""
+    response = Response(sandbox_preview_shell(content_url), mimetype='text/html')
+    response.headers['X-Content-Type-Options'] = 'nosniff'
+    response.headers['Referrer-Policy'] = 'no-referrer'
+    return response
 
 @app.route('/api/artifacts/<int:aid>/download', methods=['GET'])
 def artifact_download(aid):
@@ -662,6 +693,42 @@ def upload_file():
         out.write(data)
     return jsonify({"ok": True, "file_url": f"/static/uploads/files/{fname}", "file_name": safe})
 
+
+@app.route('/api/chat/files/<filename>/preview', methods=['GET'])
+def uploaded_file_preview(filename):
+    path = safe_child_path(FILES_DIR, filename)
+    if path is None or not path.is_file() or path.suffix.lower() not in ALLOWED_FILE_EXT:
+        return jsonify({'error': 'not found'}), 404
+    if path.suffix.lower() in {'.html', '.htm'}:
+        import urllib.parse as _up
+        return _sandbox_preview_shell(
+            '/api/chat/files/%s/content' % _up.quote(filename, safe='')
+        )
+    try:
+        content = path.read_text(encoding='utf-8', errors='replace')
+    except OSError:
+        return jsonify({'error': 'not found'}), 404
+    response = Response(content, mimetype='text/plain')
+    response.headers['X-Content-Type-Options'] = 'nosniff'
+    return response
+
+
+@app.route('/api/chat/files/<filename>/content', methods=['GET'])
+def uploaded_html_content(filename):
+    path = safe_child_path(FILES_DIR, filename)
+    if (
+        path is None or not path.is_file()
+        or path.suffix.lower() not in {'.html', '.htm'}
+    ):
+        return jsonify({'error': 'not found'}), 404
+    try:
+        content = path.read_text(encoding='utf-8', errors='replace')
+    except OSError:
+        return jsonify({'error': 'not found'}), 404
+    response = jsonify({'content': content})
+    response.headers['X-Content-Type-Options'] = 'nosniff'
+    return response
+
 @app.route('/files')
 def files_page():
     return send_from_directory('/opt/frontend/static', 'files.html')
@@ -712,7 +779,7 @@ def files_list():
 @app.route('/api/files/delete', methods=['POST'])
 def files_delete():
     """删物理文件 + 清空消息的 file 字段（消息本体保留，只是不再是文件卡片）。
-    删物理文件防路径穿越：realpath 后再校验前缀，即使 DB 被塞恶意 url 也删不出 FILES_DIR。"""
+    删物理文件使用严格 upload URL + resolve/relative_to 边界校验。"""
     data = request.get_json() or {}
     ids = data.get('ids') or []
     if not isinstance(ids, list) or not ids:
@@ -729,13 +796,12 @@ def files_delete():
         if not row or not row['file_url']:
             continue
         url = row['file_url']
-        if url.startswith('/static/uploads/files/'):
-            p = os.path.realpath('/opt/frontend' + url)
-            if p.startswith(os.path.realpath(FILES_DIR)) and os.path.exists(p):
-                try:
-                    os.remove(p)
-                except OSError:
-                    pass
+        p = resolve_uploaded_file_url(url, FILES_DIR)
+        if p is not None and p.is_file():
+            try:
+                p.unlink()
+            except OSError:
+                pass
         conn.execute("UPDATE chat_messages SET file_url='', file_name='' WHERE id=?", (mid,))
         deleted += 1
     conn.commit()
@@ -900,6 +966,7 @@ def group_chat_clear():
 def send_chat():
     ct = request.content_type or ''
     file_url = file_name = ''
+    image_upload = None
     if 'application/json' in ct:
         data = request.get_json()
         author    = data.get('author', 'user')
@@ -913,13 +980,25 @@ def send_chat():
         image_url = ''
         file_url  = (request.form.get('file_url') or '').strip()
         file_name = (request.form.get('file_name') or '').strip()
-        if 'image' in request.files:
-            f = request.files['image']
-            ext   = os.path.splitext(f.filename)[1].lower() or '.jpg'
-            fname = f"img_{uuid.uuid4().hex[:8]}{ext}"
-            os.makedirs(UPLOAD_DIR, exist_ok=True)
-            f.save(os.path.join(UPLOAD_DIR, fname))
-            image_url = f"/static/uploads/{fname}"
+        image_upload = request.files.get('image')
+    if file_url:
+        validated = validate_uploaded_file_reference(file_url, file_name, FILES_DIR)
+        if validated is None:
+            return jsonify({'error': '无效的文件引用'}), 400
+        _file_path, file_name = validated
+    if file_url and image_upload is not None:
+        return jsonify({'error': '一次消息只能携带一种附件'}), 400
+    if image_upload is not None:
+        try:
+            raw_image = read_limited_upload(image_upload.stream)
+            image_data, image_ext, _image_mime = reencode_chat_image(raw_image)
+        except AttachmentValidationError as exc:
+            return jsonify({'error': str(exc)}), exc.status
+        fname = f"img_{uuid.uuid4().hex[:8]}{image_ext}"
+        os.makedirs(UPLOAD_DIR, exist_ok=True)
+        with open(os.path.join(UPLOAD_DIR, fname), 'wb') as out:
+            out.write(image_data)
+        image_url = f"/static/uploads/{fname}"
     if not content and not image_url and not file_url:
         return jsonify({"error":"empty"}), 400
     # 文件消息的 content 给个可读标记，历史回放给模型时能看懂自己发过什么
