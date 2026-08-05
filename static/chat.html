@@ -2260,8 +2260,14 @@ async function doRegen(msgId) {
       pendingRewriteId = pd.rewrite_id;
       pendingGwUserMessageId = pd.user_message_id || null;
       await streamReply();
-      await fetch('/api/chat/regen/finalize', {method:'POST',
-        headers:{'Content-Type':'application/json'}, body:JSON.stringify({rewrite_id:pd.rewrite_id})});
+      async function _regenFinalizeOnce(){
+        var fr = await fetch('/api/chat/regen/finalize', {method:'POST',
+          headers:{'Content-Type':'application/json'}, body:JSON.stringify({rewrite_id:pd.rewrite_id})});
+        return fr.json().catch(function(){ return {}; });
+      }
+      var fin = await _regenFinalizeOnce();
+      // Transcript already locked: one safe retry if effects still pending.
+      if(fin && (fin.effects_pending || fin.code==='effects_pending')) fin = await _regenFinalizeOnce();
     } catch(e) { console.error('regen stream failed',e); }
     finally { pendingRewriteId = null; }
     hideTyping();
@@ -2284,8 +2290,13 @@ async function doEdit(msgId, newContent) {
       pendingRewriteId = ed.rewrite_id;
       pendingGwUserMessageId = null;
       await streamReply();
-      await fetch('/api/chat/edit/finalize', {method:'POST',
-        headers:{'Content-Type':'application/json'}, body:JSON.stringify({rewrite_id:ed.rewrite_id})});
+      async function _editFinalizeOnce(){
+        var fr = await fetch('/api/chat/edit/finalize', {method:'POST',
+          headers:{'Content-Type':'application/json'}, body:JSON.stringify({rewrite_id:ed.rewrite_id})});
+        return fr.json().catch(function(){ return {}; });
+      }
+      var fin = await _editFinalizeOnce();
+      if(fin && (fin.effects_pending || fin.code==='effects_pending')) fin = await _editFinalizeOnce();
     } catch(e) { console.error('doEdit stream failed',e); }
     finally { pendingRewriteId = null; }
     hideTyping();

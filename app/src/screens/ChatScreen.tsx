@@ -502,6 +502,7 @@ export function ChatScreen() {
       if (ok) {
         const fin = await regenFinalize(prep.rewriteId);
         if (!fin) showToast('重答落库失败，已保留原回答');
+        else if (fin.effectsPending) showToast('重答已切换，收尾未完成，可再试一次');
       }
       await refetchLatest();
       setSending(false);
@@ -527,6 +528,7 @@ export function ChatScreen() {
       if (ok) {
         const fin = await editFinalize(edit.rewriteId);
         if (!fin.ok) showToast('修改落库失败，已保留原文');
+        else if (fin.effectsPending) showToast('修改已切换，收尾未完成，可再试一次');
       }
       await refetchLatest();
       setSending(false);

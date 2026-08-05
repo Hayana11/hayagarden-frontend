@@ -1208,8 +1208,12 @@ def consume_dream_one_shot(get_db_fn, dream_id):
         conn.close()
 
 
-def consume_cc_one_shot_claims(get_db_fn, claims):
-    """assistant 落库成功后消费 feedback / dream（与 wake 同级）。"""
+def consume_cc_one_shot_claims(get_db_fn, claims, *, strict: bool = False):
+    """assistant 落库成功后消费 feedback / dream（与 wake 同级）。
+
+    ``strict=True``：任一消费失败向上抛，供 staged-rewrite replay 决定是否
+    有资格标记 ``effects_done``。默认 ``False`` 保持旧路径 fail-open。
+    """
     claims = claims or {}
     feedback_ids = claims.get('feedback_ids') or []
     if feedback_ids:
@@ -1217,13 +1221,15 @@ def consume_cc_one_shot_claims(get_db_fn, claims):
             import command_store
             command_store.consume_feedback(feedback_ids)
         except Exception:
-            pass
+            if strict:
+                raise
     dream_id = claims.get('dream_id')
     if dream_id:
         try:
             consume_dream_one_shot(get_db_fn, dream_id)
         except Exception:
-            pass
+            if strict:
+                raise
 
 
 # Wake → Chat 连续对话桥：message 正文上限；不注入 THOUGHTS。

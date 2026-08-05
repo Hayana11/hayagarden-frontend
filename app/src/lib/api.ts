@@ -416,22 +416,42 @@ export function editChatMessage(
     .catch(() => ({ ok: false, rewriteId: null, sourceMessageId: null }));
 }
 
-// POST /api/chat/edit/finalize — activate staged edit after candidate is ready
-export function editFinalize(
-  rewriteId: string,
-): Promise<{ ok: boolean; messageId: number | null; assistantMessageId: number | null }> {
-  return http
-    .post<{ ok: boolean; message_id?: number; assistant_message_id?: number }>(
-      '/api/chat/edit/finalize',
-      { rewrite_id: rewriteId },
-    )
-    .then((r) => ({
+type EditFinalizeResult = {
+  ok: boolean;
+  messageId: number | null;
+  assistantMessageId: number | null;
+  effectsPending: boolean;
+};
+
+async function postEditFinalizeOnce(rewriteId: string): Promise<EditFinalizeResult> {
+  try {
+    const r = await http.post<{
+      ok: boolean;
+      message_id?: number;
+      assistant_message_id?: number;
+      effects_pending?: boolean;
+      code?: string;
+    }>('/api/chat/edit/finalize', { rewrite_id: rewriteId });
+    return {
       ok: Boolean(r.ok),
       messageId: r.ok && r.message_id != null ? Number(r.message_id) : null,
       assistantMessageId:
         r.ok && r.assistant_message_id != null ? Number(r.assistant_message_id) : null,
-    }))
-    .catch(() => ({ ok: false, messageId: null, assistantMessageId: null }));
+      effectsPending: Boolean(r.effects_pending) || r.code === 'effects_pending',
+    };
+  } catch {
+    return { ok: false, messageId: null, assistantMessageId: null, effectsPending: false };
+  }
+}
+
+// POST /api/chat/edit/finalize — activate staged edit after candidate is ready.
+// One safe retry when transcript is locked but effects are still pending.
+export async function editFinalize(rewriteId: string): Promise<EditFinalizeResult> {
+  let last = await postEditFinalizeOnce(rewriteId);
+  if (last.ok && last.effectsPending) {
+    last = await postEditFinalizeOnce(rewriteId);
+  }
+  return last;
 }
 
 // POST /api/chat/branch/switch -> { branch_idx, total }
@@ -473,14 +493,40 @@ export function regenPrepare(
     .catch(() => null);
 }
 
-// POST /api/chat/regen/finalize — activate staged candidate onto source assistant
-export function regenFinalize(rewriteId: string): Promise<{ branchIdx: number; total: number } | null> {
-  return http
-    .post<{ ok: boolean; branch_idx: number; total: number }>('/api/chat/regen/finalize', {
-      rewrite_id: rewriteId,
-    })
-    .then((r) => (r.ok ? { branchIdx: r.branch_idx, total: r.total } : null))
-    .catch(() => null);
+type RegenFinalizeResult = {
+  branchIdx: number;
+  total: number;
+  effectsPending: boolean;
+};
+
+async function postRegenFinalizeOnce(rewriteId: string): Promise<RegenFinalizeResult | null> {
+  try {
+    const r = await http.post<{
+      ok: boolean;
+      branch_idx: number;
+      total: number;
+      effects_pending?: boolean;
+      code?: string;
+    }>('/api/chat/regen/finalize', { rewrite_id: rewriteId });
+    if (!r.ok) return null;
+    return {
+      branchIdx: r.branch_idx,
+      total: r.total,
+      effectsPending: Boolean(r.effects_pending) || r.code === 'effects_pending',
+    };
+  } catch {
+    return null;
+  }
+}
+
+// POST /api/chat/regen/finalize — activate staged candidate onto source assistant.
+// One safe retry when transcript is locked but effects are still pending.
+export async function regenFinalize(rewriteId: string): Promise<RegenFinalizeResult | null> {
+  let last = await postRegenFinalizeOnce(rewriteId);
+  if (last && last.effectsPending) {
+    last = await postRegenFinalizeOnce(rewriteId);
+  }
+  return last;
 }
 
 export interface ModelCatalogEntry {

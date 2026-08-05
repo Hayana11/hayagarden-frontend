@@ -77,6 +77,10 @@ class StaleRewriteError(ValueError):
     """Active transcript changed since prepare; activation must refuse."""
 
 
+class RewriteEffectsError(RuntimeError):
+    """Critical post-activate side effects failed; must not mark effects_done."""
+
+
 def ensure_schema(conn, *, commit: bool = True) -> None:
     """Ensure staging DDL exists.
 
@@ -309,9 +313,12 @@ def replay_side_effects_after_activate(
     """Consume frozen active-only side effects after authoritative activation.
 
     Candidate generation only stores claims; this runs only after activate
-    commits the new active worldline. Safe to retry: wake consume is
-    ``consumed=0``-gated; Moments pop_pending is a no-op when empty.
-    On success, status advances to ``effects_done``.
+    commits the new active worldline *and* durable epoch has been ensured by
+    the caller. Safe to retry: wake/feedback consume are ``consumed=0``-gated;
+    Moments pop_pending is a no-op when empty.
+
+    Critical claims (wake / feedback / dream) must succeed before
+    ``effects_done``. Memo / Moments remain best-effort.
     """
     if _status_effects_done(str(staging.get('status') or '')):
         return
@@ -330,16 +337,18 @@ def replay_side_effects_after_activate(
     if not memo_asst:
         memo_asst = (staging.get('candidate_content') or '').strip()
 
+    critical_errors: list[BaseException] = []
     try:
         from chat.context_continuity import consume_wake_ids
         consume_wake_ids(get_db, wake_ids)
-    except Exception:
-        pass
+    except Exception as exc:
+        critical_errors.append(exc)
     try:
         from chat.system_builder import consume_cc_one_shot_claims
-        consume_cc_one_shot_claims(get_db, one_shot)
-    except Exception:
-        pass
+        consume_cc_one_shot_claims(get_db, one_shot, strict=True)
+    except Exception as exc:
+        critical_errors.append(exc)
+
     if memo_user and memo_asst:
         try:
             _write_session_memo_best_effort(memo_user, memo_asst)
@@ -369,6 +378,11 @@ def replay_side_effects_after_activate(
             )
         except Exception:
             pass
+
+    if critical_errors:
+        raise RewriteEffectsError(
+            f'critical rewrite side effects failed: {critical_errors[0]!r}'
+        ) from critical_errors[0]
 
     if mark_done:
         rewrite_id = str(staging.get('rewrite_id') or '').strip()

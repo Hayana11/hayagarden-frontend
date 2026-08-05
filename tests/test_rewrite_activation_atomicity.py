@@ -504,7 +504,7 @@ class RewriteActivationAtomicityTests(unittest.TestCase):
             side_effect=lambda get_db, ids: wake_calls.append(list(ids)),
         ), mock.patch(
             'chat.system_builder.consume_cc_one_shot_claims',
-            side_effect=lambda get_db, claims: oneshot_calls.append(dict(claims)),
+            side_effect=lambda get_db, claims, strict=False: oneshot_calls.append(dict(claims)),
         ), mock.patch.object(
             rw, '_write_session_memo_best_effort',
             side_effect=lambda u, a: memo_calls.append((u, a)),
@@ -557,6 +557,9 @@ class RewriteActivationAtomicityTests(unittest.TestCase):
         ), mock.patch('emotion_engine.score_async'):
             fin1 = self.client.post('/api/chat/edit/finalize', json={'rewrite_id': rid})
         self.assertEqual(fin1.status_code, 200)
+        body1 = fin1.get_json()
+        self.assertTrue(body1.get('effects_pending'))
+        self.assertEqual(body1.get('code'), 'effects_pending')
         after_activate = self._active()
         self.assertEqual(after_activate, [('hayana', "U1'"), ('assistant', "A1'")])
         conn = self.get_db()
@@ -581,6 +584,7 @@ class RewriteActivationAtomicityTests(unittest.TestCase):
         ):
             fin2 = self.client.post('/api/chat/edit/finalize', json={'rewrite_id': rid})
         self.assertEqual(fin2.status_code, 200)
+        self.assertFalse(fin2.get_json().get('effects_pending'))
         self.assertEqual(wake_calls, [[42]])
         # Resume must not re-DELETE: AFTER tip survives.
         self.assertEqual(
@@ -595,10 +599,157 @@ class RewriteActivationAtomicityTests(unittest.TestCase):
         # Third call is idempotent done.
         fin3 = self.client.post('/api/chat/edit/finalize', json={'rewrite_id': rid})
         self.assertEqual(fin3.status_code, 200)
+        self.assertFalse(fin3.get_json().get('effects_pending'))
         self.assertEqual(
             self._active(),
             [('hayana', "U1'"), ('assistant', "A1'"), ('hayana', 'AFTER')],
         )
+
+    def test_16_epoch_ensured_on_replay_only_after_first_invalidate_fails(self):
+        """If epoch fails after activation commit, resume must still note epoch."""
+        from chat.cc_history_rewrite import (
+            current_history_rewrite_epoch,
+            note_durable_history_rewrite,
+        )
+
+        u1 = self._insert('hayana', 'U1')
+        self._insert('assistant', 'A1')
+        prep = self.client.post(
+            '/api/chat/edit', json={'msg_id': u1, 'content': "U1'"},
+        ).get_json()
+        rid = prep['rewrite_id']
+        conn = self.get_db()
+        rw.store_candidate(conn, rid, content="A1'", side_effects={
+            'wake_ids': [],
+            'one_shot_claims': {},
+            'session_memo_user': "U1'",
+            'session_memo_assistant': "A1'",
+            'turn_key': '',
+            'conversation_id': 'hayana-chat',
+        })
+        conn.commit()
+        conn.close()
+
+        inv_calls = []
+
+        def flaky_invalidate(reason):
+            inv_calls.append(reason)
+            if len(inv_calls) == 1:
+                raise RuntimeError('epoch write failed')
+            note_durable_history_rewrite(reason)
+            return True
+
+        with mock.patch.object(
+            app_module, 'invalidate_cc_resident_for_history_rewrite',
+            side_effect=flaky_invalidate,
+        ), mock.patch('emotion_engine.score_async'):
+            fin1 = self.client.post('/api/chat/edit/finalize', json={'rewrite_id': rid})
+        self.assertEqual(fin1.status_code, 200)
+        self.assertTrue(fin1.get_json().get('effects_pending'))
+        self.assertEqual(self._active(), [('hayana', "U1'"), ('assistant', "A1'")])
+        self.assertEqual(current_history_rewrite_epoch(), '')
+        conn = self.get_db()
+        self.assertEqual(rw.load(conn, rid)['status'], rw.STATUS_ACTIVATED_NEEDS_REPLAY)
+        conn.close()
+
+        with mock.patch.object(
+            app_module, 'invalidate_cc_resident_for_history_rewrite',
+            side_effect=flaky_invalidate,
+        ), mock.patch('emotion_engine.score_async'):
+            fin2 = self.client.post('/api/chat/edit/finalize', json={'rewrite_id': rid})
+        self.assertEqual(fin2.status_code, 200)
+        self.assertFalse(fin2.get_json().get('effects_pending'))
+        self.assertTrue(current_history_rewrite_epoch())
+        self.assertEqual(len(inv_calls), 2)
+        conn = self.get_db()
+        self.assertEqual(rw.load(conn, rid)['status'], rw.STATUS_EFFECTS_DONE)
+        conn.close()
+
+    def test_17_wake_consume_failure_blocks_effects_done(self):
+        u1 = self._insert('hayana', 'U1')
+        self._insert('assistant', 'A1')
+        prep = self.client.post(
+            '/api/chat/edit', json={'msg_id': u1, 'content': "U1'"},
+        ).get_json()
+        rid = prep['rewrite_id']
+        conn = self.get_db()
+        rw.store_candidate(conn, rid, content="A1'", side_effects={
+            'wake_ids': [7],
+            'one_shot_claims': {},
+            'turn_key': '',
+        })
+        conn.commit()
+        conn.close()
+
+        wake_n = {'n': 0}
+
+        def flaky_wake(_get_db, ids):
+            wake_n['n'] += 1
+            if wake_n['n'] == 1:
+                raise RuntimeError('wake db down')
+            return len(ids or [])
+
+        with mock.patch(
+            'chat.context_continuity.consume_wake_ids', side_effect=flaky_wake,
+        ), mock.patch('emotion_engine.score_async'):
+            fin1 = self.client.post('/api/chat/edit/finalize', json={'rewrite_id': rid})
+        self.assertTrue(fin1.get_json().get('effects_pending'))
+        conn = self.get_db()
+        self.assertEqual(rw.load(conn, rid)['status'], rw.STATUS_ACTIVATED_NEEDS_REPLAY)
+        conn.close()
+
+        with mock.patch(
+            'chat.context_continuity.consume_wake_ids', side_effect=flaky_wake,
+        ), mock.patch('emotion_engine.score_async'):
+            fin2 = self.client.post('/api/chat/edit/finalize', json={'rewrite_id': rid})
+        self.assertFalse(fin2.get_json().get('effects_pending'))
+        self.assertEqual(wake_n['n'], 2)
+        conn = self.get_db()
+        self.assertEqual(rw.load(conn, rid)['status'], rw.STATUS_EFFECTS_DONE)
+        conn.close()
+
+    def test_18_feedback_consume_failure_blocks_effects_done(self):
+        u1 = self._insert('hayana', 'U1')
+        self._insert('assistant', 'A1')
+        prep = self.client.post(
+            '/api/chat/edit', json={'msg_id': u1, 'content': "U1'"},
+        ).get_json()
+        rid = prep['rewrite_id']
+        conn = self.get_db()
+        rw.store_candidate(conn, rid, content="A1'", side_effects={
+            'wake_ids': [],
+            'one_shot_claims': {'feedback_ids': [3], 'dream_id': None},
+            'turn_key': '',
+        })
+        conn.commit()
+        conn.close()
+
+        fb_n = {'n': 0}
+
+        def flaky_feedback(ids):
+            fb_n['n'] += 1
+            if fb_n['n'] == 1:
+                raise RuntimeError('feedback db down')
+            return len(ids or [])
+
+        with mock.patch(
+            'command_store.consume_feedback', side_effect=flaky_feedback,
+        ), mock.patch('emotion_engine.score_async'):
+            fin1 = self.client.post('/api/chat/edit/finalize', json={'rewrite_id': rid})
+        self.assertTrue(fin1.get_json().get('effects_pending'))
+        conn = self.get_db()
+        self.assertEqual(rw.load(conn, rid)['status'], rw.STATUS_ACTIVATED_NEEDS_REPLAY)
+        conn.close()
+
+        with mock.patch(
+            'command_store.consume_feedback', side_effect=flaky_feedback,
+        ), mock.patch('emotion_engine.score_async'):
+            fin2 = self.client.post('/api/chat/edit/finalize', json={'rewrite_id': rid})
+        self.assertFalse(fin2.get_json().get('effects_pending'))
+        self.assertEqual(fb_n['n'], 2)
+        conn = self.get_db()
+        self.assertEqual(rw.load(conn, rid)['status'], rw.STATUS_EFFECTS_DONE)
+        conn.close()
 
 
 class RelayStagedPromptSideEffectTests(unittest.TestCase):

@@ -4440,6 +4440,76 @@ def regen_prepare():
     return jsonify(payload)
 
 
+def _complete_rewrite_finalize(
+    *,
+    rw_mod,
+    result: dict,
+    staging: dict,
+    mode: str,
+    invalidate_reason: str,
+    score_message_id,
+    score_text: str,
+    activate_hooks=None,
+) -> dict:
+    """Post-activation completion: epoch → score → critical replay → effects_done.
+
+    ``activate`` and ``replay_only`` both must ensure durable epoch before
+    ``effects_done``. Returns payload including ``effects_pending`` when the
+    client should safely retry the same rewrite_id (no transcript remutate).
+    """
+    base = {
+        'ok': True,
+        'effects_pending': False,
+        'assistant_message_id': result.get('assistant_message_id'),
+    }
+    if result.get('branch_idx') is not None:
+        base['branch_idx'] = result['branch_idx']
+        base['total'] = result.get('total')
+    if result.get('message_id') is not None:
+        base['message_id'] = result['message_id']
+
+    if mode == 'done':
+        return base
+
+    if mode == 'activate' and callable(activate_hooks):
+        try:
+            activate_hooks()
+        except Exception:
+            pass
+
+    # Durable epoch is part of the resume contract — never only on first activate.
+    try:
+        invalidate_cc_resident_for_history_rewrite(invalidate_reason)
+    except Exception:
+        base['effects_pending'] = True
+        base['code'] = 'effects_pending'
+        return base
+
+    try:
+        from chat.scoring_identity import trigger_turn_scoring
+        trigger_turn_scoring(
+            assistant_text=score_text or '',
+            message_id=score_message_id,
+            get_db_fn=get_db,
+        )
+    except Exception:
+        pass
+
+    try:
+        rw_mod.replay_side_effects_after_activate(
+            staging, result, get_db=get_db, db_path=DB_PATH,
+        )
+    except rw_mod.RewriteEffectsError:
+        base['effects_pending'] = True
+        base['code'] = 'effects_pending'
+        return base
+    except Exception:
+        base['effects_pending'] = True
+        base['code'] = 'effects_pending'
+        return base
+    return base
+
+
 @app.route('/api/chat/regen/finalize', methods=['POST'])
 @serialize_history_rewrite
 def regen_finalize():
@@ -4481,37 +4551,16 @@ def regen_finalize():
     conn.close()
     staging = result.get('staging') or staging_for_cleanup or {}
     mode = result.get('finalize_mode') or 'activate'
-    if mode == 'done':
-        return jsonify({
-            'ok': True,
-            'branch_idx': result['branch_idx'],
-            'total': result['total'],
-            'assistant_message_id': result['assistant_message_id'],
-        })
-    # Active assistant is durable — scoring + frozen side effects (retry-safe).
-    try:
-        from chat.scoring_identity import trigger_turn_scoring
-        trigger_turn_scoring(
-            assistant_text=result.get('candidate_content') or '',
-            message_id=result.get('user_message_id'),
-            get_db_fn=get_db,
-        )
-    except Exception:
-        pass
-    try:
-        _rw.replay_side_effects_after_activate(
-            staging, result, get_db=get_db, db_path=DB_PATH,
-        )
-    except Exception:
-        pass
-    if mode == 'activate':
-        invalidate_cc_resident_for_history_rewrite('regen_finalize')
-    return jsonify({
-        'ok': True,
-        'branch_idx': result['branch_idx'],
-        'total': result['total'],
-        'assistant_message_id': result['assistant_message_id'],
-    })
+    payload = _complete_rewrite_finalize(
+        rw_mod=_rw,
+        result=result,
+        staging=staging,
+        mode=mode,
+        invalidate_reason='regen_finalize',
+        score_message_id=result.get('user_message_id'),
+        score_text=result.get('candidate_content') or '',
+    )
+    return jsonify(payload)
 
 
 @app.route('/api/chat/branch/switch', methods=['POST'])
@@ -4622,48 +4671,31 @@ def edit_finalize():
     conn.close()
     staging = result.get('staging') or staging_for_cleanup or {}
     mode = result.get('finalize_mode') or 'activate'
-    if mode == 'done':
-        return jsonify({
-            'ok': True,
-            'message_id': result['message_id'],
-            'assistant_message_id': result['assistant_message_id'],
-        })
-    if mode == 'activate':
+
+    def _edit_activate_hooks():
         try:
             from chat.interaction_state import touch_user_interaction
             touch_user_interaction(get_db)
         except Exception:
             pass
-        # Same post-commit outbox drain as insert_user_message for new user identity.
         try:
             import internal_state_shadow as _shadow
             if _shadow.is_user_events_enabled():
                 _shadow.drain_shadow_outbox_best_effort(db_path=DB_PATH)
         except Exception:
             pass
-    # Score + replay are retry-safe for activated_needs_replay resume.
-    try:
-        from chat.scoring_identity import trigger_turn_scoring
-        trigger_turn_scoring(
-            assistant_text=result.get('candidate_content') or '',
-            message_id=result.get('message_id'),
-            get_db_fn=get_db,
-        )
-    except Exception:
-        pass
-    try:
-        _rw.replay_side_effects_after_activate(
-            staging, result, get_db=get_db, db_path=DB_PATH,
-        )
-    except Exception:
-        pass
-    if mode == 'activate':
-        invalidate_cc_resident_for_history_rewrite('edit')
-    return jsonify({
-        'ok': True,
-        'message_id': result['message_id'],
-        'assistant_message_id': result['assistant_message_id'],
-    })
+
+    payload = _complete_rewrite_finalize(
+        rw_mod=_rw,
+        result=result,
+        staging=staging,
+        mode=mode,
+        invalidate_reason='edit',
+        score_message_id=result.get('message_id'),
+        score_text=result.get('candidate_content') or '',
+        activate_hooks=_edit_activate_hooks,
+    )
+    return jsonify(payload)
 
 
 @app.route('/api/chat/delete', methods=['POST'])
