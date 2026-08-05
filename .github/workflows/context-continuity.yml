@@ -13,8 +13,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - name: Install route test dependency
-        run: python -m pip install Flask
+      - name: Install route and image test dependencies
+        run: python -m pip install Flask Pillow
       - name: Prepare /opt/frontend for runtime modules
         run: |
           sudo mkdir -p /opt
