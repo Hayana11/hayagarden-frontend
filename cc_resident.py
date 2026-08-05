@@ -290,6 +290,7 @@ class ResidentSession:
         self._last_used = 0.0
         self._generation = 0
         self._lock = threading.Lock()
+        self._next_spawn_reason = None
         self._tool_profile = TOOL_PROFILE_LEGACY
         # MODEL-1B: identity of the model argv this process was started with.
         self._model_identity = None
@@ -353,6 +354,7 @@ class ResidentSession:
         self._session_id = None
         self._cold = True
         self._generation += 1
+        self._next_spawn_reason = None
         self._reset_session_meta(respawn_reason=reason)
         if self._tool_profile == TOOL_PROFILE_TEXT_ONLY:
             self._tool_surface_snapshot = {}
@@ -400,7 +402,7 @@ class ResidentSession:
     def _decide_respawn_reason(self, system_text, *, tool_profile=TOOL_PROFILE_LEGACY):
         from chat.cc_model import cc_model_identity
         if not self._alive():
-            return 'process_dead'
+            return self._next_spawn_reason or 'process_dead'
         if str(tool_profile or TOOL_PROFILE_LEGACY) != str(self._tool_profile or TOOL_PROFILE_LEGACY):
             return 'tool_profile_changed'
         # MODEL-1B: only compare when this resident was actually spawned with an
@@ -1215,3 +1217,14 @@ class ResidentSession:
     def shutdown(self):
         with self._lock:
             self._kill()
+
+    def invalidate_for_history_rewrite(self, reason='history_rewrite'):
+        """Terminate the old-world resident and clear its reusable identity."""
+        with self._lock:
+            self._kill(quiet=True)
+            self._system_text = None
+            self._session_id = None
+            self._model_identity = None
+            self._cold = True
+            self._next_spawn_reason = str(reason or 'history_rewrite')
+            self._reset_session_meta(respawn_reason=self._next_spawn_reason)
