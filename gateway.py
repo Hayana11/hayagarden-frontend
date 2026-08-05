@@ -250,6 +250,49 @@ def _begin_staged_rewrite_generation(turn_data: dict) -> dict | None:
     return staging
 
 
+def _staged_side_effects_payload(
+    turn_data: dict,
+    *,
+    assistant_text: str,
+    wake_ids=None,
+    one_shot_claims=None,
+    conversation_id: str = 'hayana-chat',
+) -> dict:
+    """Freeze active-only claims with the candidate; replay only after activate."""
+    staging = (turn_data or {}).get('_rewrite_staging') or {}
+    memo_user = ''
+    if staging.get('operation') == rewrite_staging.OP_EDIT:
+        memo_user = (staging.get('edited_content') or '').strip()
+    elif staging.get('operation') == rewrite_staging.OP_REGEN:
+        uid = staging.get('user_message_id') or (turn_data or {}).get('user_message_id')
+        if uid is not None:
+            try:
+                conn = get_db()
+                try:
+                    row = conn.execute(
+                        'SELECT content FROM chat_messages WHERE id=?', (int(uid),),
+                    ).fetchone()
+                    if row is not None:
+                        memo_user = (
+                            row['content'] if hasattr(row, 'keys') else row[0]
+                        ) or ''
+                        memo_user = str(memo_user).strip()
+                finally:
+                    conn.close()
+            except Exception:
+                memo_user = ''
+    if not memo_user:
+        memo_user = ((turn_data or {}).get('content') or '').strip()
+    return {
+        'wake_ids': list(wake_ids or []),
+        'one_shot_claims': dict(one_shot_claims or {}),
+        'session_memo_user': memo_user,
+        'session_memo_assistant': (assistant_text or '').strip(),
+        'turn_key': str((turn_data or {}).get('turn_key') or ''),
+        'conversation_id': str(conversation_id or 'hayana-chat'),
+    }
+
+
 def _persist_turn_assistant(
     turn_data: dict,
     *,
@@ -258,6 +301,7 @@ def _persist_turn_assistant(
     tool_calls_json: str = '',
     cache_info_json: str = '',
     choices_json: str = '',
+    side_effects: dict | None = None,
 ):
     """Persist assistant text for a turn.
 
@@ -280,6 +324,10 @@ def _persist_turn_assistant(
             if not staging:
                 raise ValueError('rewrite not found')
             rewrite_staging.assert_active_matches_prepare(conn, staging)
+            turn_data['_rewrite_staging'] = staging
+            effects = side_effects
+            if effects is None:
+                effects = (turn_data or {}).get('_staged_side_effects') or {}
             rewrite_staging.store_candidate(
                 conn,
                 rewrite_id,
@@ -288,6 +336,7 @@ def _persist_turn_assistant(
                 tool_calls=tool_calls_json or '',
                 cache_info=cache_info_json or '',
                 choices=choices_json or '',
+                side_effects=effects,
             )
             conn.commit()
         except rewrite_staging.StaleRewriteError:
@@ -299,7 +348,7 @@ def _persist_turn_assistant(
         finally:
             conn.close()
         # Candidate durable ≠ active assistant durable: no scoring / wake /
-        # one-shot / session-memo side effects here.
+        # one-shot / session-memo side effects here — finalize replays frozen claims.
         return None
     conn = get_db()
     cur = conn.execute(
@@ -323,6 +372,7 @@ def _fail_staged_rewrite(turn_data: dict, error: str) -> None:
     rewrite_id = str((turn_data or {}).get('rewrite_id') or '').strip()
     if not rewrite_id:
         return
+    staging = None
     try:
         conn = get_db()
         try:
@@ -333,10 +383,16 @@ def _fail_staged_rewrite(turn_data: dict, error: str) -> None:
             ):
                 rewrite_staging.mark_failed(conn, rewrite_id, error)
                 conn.commit()
+                staging = rewrite_staging.load(conn, rewrite_id) or staging
         finally:
             conn.close()
     except Exception:
         pass
+    if staging:
+        try:
+            rewrite_staging.clear_staged_moments_pending(staging, DB_PATH)
+        except Exception:
+            pass
     # Trial resident must not survive into the next normal turn.
     _discard_staged_resident('staged_rewrite_failed')
 
@@ -5430,6 +5486,18 @@ def chat_stream():
                             ensure_ascii=False,
                         ) if cc_tool_calls else ''
                         _choices_json = json.dumps(_cc_choices, ensure_ascii=False) if _cc_choices else ''
+                        if 'wake_ids' in _cc_one_shot_claims:
+                            _consume_wake_ids = _cc_one_shot_claims.get('wake_ids') or []
+                        else:
+                            _consume_wake_ids = _wake_claim_ids
+                        if _rewrite_id:
+                            _turn_data['_staged_side_effects'] = _staged_side_effects_payload(
+                                _turn_data,
+                                assistant_text=_cc_text,
+                                wake_ids=_consume_wake_ids,
+                                one_shot_claims=_cc_one_shot_claims,
+                                conversation_id=_conv,
+                            )
                         assistant_id = _persist_turn_assistant(
                             _turn_data,
                             content=_cc_text,
@@ -5437,16 +5505,13 @@ def chat_stream():
                             tool_calls_json=_tool_json,
                             cache_info_json=_cache_info_json or '',
                             choices_json=_choices_json,
+                            side_effects=_turn_data.get('_staged_side_effects'),
                         )
                         # Candidate durable ≠ active assistant durable.
                         # Wake / one-shot / session-memo only after active commit.
                         if not _rewrite_id:
                             # one-shot 与 wake 同级：仅 assistant 落库成功后消费。
                             # 优先用本轮注入快照的 wake_ids（与 bridge/background 一致）。
-                            if 'wake_ids' in _cc_one_shot_claims:
-                                _consume_wake_ids = _cc_one_shot_claims.get('wake_ids') or []
-                            else:
-                                _consume_wake_ids = _wake_claim_ids
                             consume_wake_ids(get_db, _consume_wake_ids)
                             from chat.system_builder import consume_cc_one_shot_claims
                             consume_cc_one_shot_claims(get_db, _cc_one_shot_claims)
@@ -5612,6 +5677,14 @@ def chat_stream():
                 _pc, _choices = _extract_choices(p_text)
                 if _choices and not _pc:
                     _pc = '[选项: ' + ' / '.join(_choices) + ']'  # 不存空 content，Claude API 拒绝空消息
+                if _rewrite_id:
+                    _turn_data['_staged_side_effects'] = _staged_side_effects_payload(
+                        _turn_data,
+                        assistant_text=_pc,
+                        wake_ids=_wake_claim_ids,
+                        one_shot_claims={},
+                        conversation_id=_conv,
+                    )
                 assistant_id = _persist_turn_assistant(
                     _turn_data,
                     content=_pc,
@@ -5619,6 +5692,7 @@ def chat_stream():
                     tool_calls_json=json.dumps(tool_calls_acc, ensure_ascii=False) if tool_calls_acc else '',
                     cache_info_json=_ci,
                     choices_json=json.dumps(_choices, ensure_ascii=False) if _choices else '',
+                    side_effects=_turn_data.get('_staged_side_effects'),
                 )
                 # Candidate durable ≠ active assistant durable.
                 if not _rewrite_id:

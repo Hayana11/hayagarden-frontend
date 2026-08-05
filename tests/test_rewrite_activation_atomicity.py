@@ -5,6 +5,8 @@ import json
 import os
 import sqlite3
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -408,6 +410,121 @@ class RewriteActivationAtomicityTests(unittest.TestCase):
         self.assertEqual(contents, ['U1', 'A1', "U2'"])
         self.assertNotIn('U20', contents)
         self.assertNotIn('A20', contents)
+
+    def test_13_edit_activate_write_fence_keeps_concurrent_send(self):
+        """Concurrent /api/chat/send during assert→DELETE must not be deleted.
+
+        BEGIN IMMEDIATE holds the write lock across fingerprint + mutate, so a
+        racing INSERT blocks until activate commits, then lands *after* the
+        rewrite and survives.
+        """
+        u1 = self._insert('hayana', 'U1')
+        self._insert('assistant', 'A1')
+        prep = self.client.post(
+            '/api/chat/edit', json={'msg_id': u1, 'content': "U1'"},
+        ).get_json()
+        rid = prep['rewrite_id']
+        conn = self.get_db()
+        rw.store_candidate(conn, rid, content="A1'")
+        conn.commit()
+        conn.close()
+
+        started = threading.Event()
+        finished = threading.Event()
+        inserted = {}
+
+        def race_hook(_conn):
+            def other():
+                started.set()
+                c2 = self.get_db()
+                try:
+                    cur = c2.execute(
+                        "INSERT INTO chat_messages (author, content) VALUES ('hayana', 'RACE')"
+                    )
+                    c2.commit()
+                    inserted['id'] = int(cur.lastrowid)
+                    inserted['ok'] = True
+                except Exception as exc:
+                    inserted['error'] = str(exc)
+                finally:
+                    c2.close()
+                    finished.set()
+
+            t = threading.Thread(target=other, daemon=True)
+            t.start()
+            self.assertTrue(started.wait(2.0))
+            # Other thread should be blocked on the IMMEDIATE write lock.
+            time.sleep(0.25)
+            self.assertFalse(finished.is_set())
+
+        prev_hook = rw._activation_fence_hook
+        rw._activation_fence_hook = race_hook
+        try:
+            fin = self.client.post('/api/chat/edit/finalize', json={'rewrite_id': rid})
+        finally:
+            rw._activation_fence_hook = prev_hook
+        self.assertEqual(fin.status_code, 200)
+        self.assertTrue(finished.wait(5.0))
+        self.assertTrue(inserted.get('ok'))
+        self.assertIn('id', inserted)
+        active = self._active()
+        self.assertEqual(active[0], ('hayana', "U1'"))
+        self.assertEqual(active[1], ('assistant', "A1'"))
+        self.assertIn(('hayana', 'RACE'), active)
+
+    def test_14_finalize_replays_frozen_side_effects(self):
+        """Claims frozen at candidate READY are consumed only after activate."""
+        u1 = self._insert('hayana', 'U1')
+        self._insert('assistant', 'A1')
+        prep = self.client.post(
+            '/api/chat/edit', json={'msg_id': u1, 'content': "U1'"},
+        ).get_json()
+        rid = prep['rewrite_id']
+        effects = {
+            'wake_ids': [11, 12],
+            'one_shot_claims': {'feedback_ids': [3], 'dream_id': 7},
+            'session_memo_user': "U1'",
+            'session_memo_assistant': "A1'",
+            'turn_key': 'turn-abc',
+            'conversation_id': 'hayana-chat',
+        }
+        conn = self.get_db()
+        rw.store_candidate(conn, rid, content="A1'", side_effects=effects)
+        conn.commit()
+        staged = rw.load(conn, rid)
+        conn.close()
+        self.assertEqual(rw.side_effects_of(staged)['wake_ids'], [11, 12])
+
+        wake_calls = []
+        oneshot_calls = []
+        memo_calls = []
+        moments_calls = []
+        with mock.patch(
+            'chat.context_continuity.consume_wake_ids',
+            side_effect=lambda get_db, ids: wake_calls.append(list(ids)),
+        ), mock.patch(
+            'chat.system_builder.consume_cc_one_shot_claims',
+            side_effect=lambda get_db, claims: oneshot_calls.append(dict(claims)),
+        ), mock.patch.object(
+            rw, '_write_session_memo_best_effort',
+            side_effect=lambda u, a: memo_calls.append((u, a)),
+        ), mock.patch(
+            'moments_persistence.after_assistant_persisted',
+            side_effect=lambda **kw: moments_calls.append(kw),
+        ), mock.patch(
+            'emotion_engine.score_async',
+        ):
+            fin = self.client.post('/api/chat/edit/finalize', json={'rewrite_id': rid})
+        self.assertEqual(fin.status_code, 200)
+        self.assertEqual(wake_calls, [[11, 12]])
+        self.assertEqual(oneshot_calls, [{'feedback_ids': [3], 'dream_id': 7}])
+        self.assertEqual(memo_calls, [("U1'", "A1'")])
+        self.assertEqual(len(moments_calls), 1)
+        self.assertEqual(moments_calls[0]['turn_data']['turn_key'], 'turn-abc')
+        self.assertEqual(
+            moments_calls[0]['assistant_message_id'],
+            fin.get_json()['assistant_message_id'],
+        )
 
 
 if __name__ == '__main__':

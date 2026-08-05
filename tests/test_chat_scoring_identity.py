@@ -292,6 +292,8 @@ class EditRouteBehaviorTests(unittest.TestCase):
             'emotion_engine.score_async',
         ) as score, mock.patch.object(
             app_module, 'invalidate_cc_resident_for_history_rewrite', return_value=True,
+        ), mock.patch.object(
+            _rw, 'replay_side_effects_after_activate',
         ):
             prep = self.client.post(
                 '/api/chat/edit',
@@ -327,12 +329,7 @@ class EditRouteBehaviorTests(unittest.TestCase):
             self.assertEqual(enqueued[0]['message_id'], new_id)
             self.assertEqual(enqueued[0]['text'], '新文字')
             shadow.drain_shadow_outbox_best_effort.assert_called()
-            ok = trigger_turn_scoring(
-                assistant_text='新回复',
-                message_id=new_id,
-                get_db_fn=self.get_db,
-            )
-            self.assertTrue(ok)
+            # Finalize itself must score the new user identity (not the test).
             score.assert_called_once()
             excerpt = score.call_args.args[0]
             self.assertIn('新文字', excerpt)

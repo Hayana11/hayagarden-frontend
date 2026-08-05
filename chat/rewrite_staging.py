@@ -41,37 +41,57 @@ CREATE TABLE IF NOT EXISTS chat_rewrite_staging (
     candidate_tool_calls TEXT,
     candidate_cache_info TEXT,
     candidate_choices TEXT,
+    side_effects_json TEXT,
     error TEXT,
     created_at REAL,
     updated_at REAL
 )
 """
 
+# Test-only hook: runs after fingerprint assert, still inside BEGIN IMMEDIATE.
+_activation_fence_hook = None
+
 
 class StaleRewriteError(ValueError):
     """Active transcript changed since prepare; activation must refuse."""
 
 
-def ensure_schema(conn) -> None:
+def ensure_schema(conn, *, commit: bool = True) -> None:
+    """Ensure staging DDL exists.
+
+    ``commit=True`` (default) for prepare/startup paths. Activation must call
+    this *before* ``BEGIN IMMEDIATE`` so DDL cannot commit the write fence.
+    """
     conn.execute(_SCHEMA_SQL)
     cols = {r[1] for r in conn.execute('PRAGMA table_info(chat_rewrite_staging)')}
     for col, decl in (
         ('active_tip_id', 'INTEGER'),
         ('source_revision', 'TEXT'),
         ('tail_revision', 'TEXT'),
+        ('side_effects_json', 'TEXT'),
     ):
         if col not in cols:
             conn.execute(f'ALTER TABLE chat_rewrite_staging ADD COLUMN {col} {decl}')
-    conn.commit()
+    if commit:
+        conn.commit()
 
 
 def ensure_schema_for_path(db_path: str) -> None:
     import sqlite3
     conn = sqlite3.connect(db_path)
     try:
-        ensure_schema(conn)
+        ensure_schema(conn, commit=True)
     finally:
         conn.close()
+
+
+def _begin_immediate(conn) -> None:
+    """Take a reserved write lock so fingerprint + mutate stay atomic."""
+    try:
+        conn.execute('ROLLBACK')
+    except Exception:
+        pass
+    conn.execute('BEGIN IMMEDIATE')
 
 
 def _now() -> float:
@@ -186,6 +206,7 @@ def store_candidate(
     tool_calls: str = '',
     cache_info: str = '',
     choices: str = '',
+    side_effects: Optional[Mapping[str, Any]] = None,
 ) -> None:
     text = (content or '').strip()
     if not text:
@@ -195,6 +216,7 @@ def store_candidate(
         raise ValueError('rewrite not found')
     if row.get('status') in (STATUS_ACTIVATED, STATUS_STALE):
         raise ValueError(f"rewrite not writable: {row.get('status')}")
+    effects = dict(side_effects or {})
     _set_status(
         conn,
         rewrite_id,
@@ -204,8 +226,132 @@ def store_candidate(
         candidate_tool_calls=tool_calls or '',
         candidate_cache_info=cache_info or '',
         candidate_choices=choices or '',
+        side_effects_json=_dumps(effects),
         error='',
     )
+
+
+def side_effects_of(staging: Mapping[str, Any]) -> dict:
+    return dict(_loads(staging.get('side_effects_json'), {}) or {})
+
+
+def clear_staged_moments_pending(staging: Mapping[str, Any], db_path: str) -> None:
+    """Drop orphan Moment pending left by a staged generation that never activated."""
+    effects = side_effects_of(staging)
+    turn_key = str(effects.get('turn_key') or '').strip()
+    if not turn_key or not db_path:
+        return
+    try:
+        import moments_intent
+        moments_intent.clear_pending(db_path, turn_key)
+    except Exception:
+        pass
+
+
+def replay_side_effects_after_activate(
+    staging: Mapping[str, Any],
+    result: Mapping[str, Any],
+    *,
+    get_db,
+    db_path: str,
+) -> None:
+    """Consume frozen active-only side effects after authoritative activation.
+
+    Candidate generation only stores claims; this runs only after activate
+    commits the new active worldline.
+    """
+    effects = side_effects_of(staging)
+    wake_ids = effects.get('wake_ids') or []
+    one_shot = effects.get('one_shot_claims') or {}
+    # Prefer frozen memo text; fall back to activated content.
+    memo_user = (effects.get('session_memo_user') or '').strip()
+    memo_asst = (effects.get('session_memo_assistant') or '').strip()
+    if not memo_asst:
+        memo_asst = (
+            (result.get('candidate_content') or result.get('edited_content') or '')
+        ).strip()
+        if staging.get('operation') == OP_EDIT and not memo_asst:
+            memo_asst = (result.get('candidate_content') or '').strip()
+    if not memo_asst:
+        memo_asst = (staging.get('candidate_content') or '').strip()
+
+    try:
+        from chat.context_continuity import consume_wake_ids
+        consume_wake_ids(get_db, wake_ids)
+    except Exception:
+        pass
+    try:
+        from chat.system_builder import consume_cc_one_shot_claims
+        consume_cc_one_shot_claims(get_db, one_shot)
+    except Exception:
+        pass
+    if memo_user and memo_asst:
+        try:
+            _write_session_memo_best_effort(memo_user, memo_asst)
+        except Exception:
+            pass
+
+    turn_key = str(effects.get('turn_key') or '').strip()
+    asst_id = result.get('assistant_message_id')
+    if turn_key and asst_id is not None:
+        try:
+            from moments_persistence import after_assistant_persisted
+            user_mid = result.get('message_id')
+            if user_mid is None:
+                user_mid = result.get('user_message_id')
+            if user_mid is None:
+                user_mid = staging.get('user_message_id')
+            after_assistant_persisted(
+                memories_db_path=db_path,
+                turn_data={
+                    'turn_key': turn_key,
+                    'user_message_id': user_mid,
+                },
+                assistant_message_id=int(asst_id),
+                conversation_id=str(
+                    effects.get('conversation_id') or 'hayana-chat'
+                ),
+            )
+        except Exception:
+            pass
+
+
+def _write_session_memo_best_effort(user_msg: str, assistant_msg: str) -> None:
+    """Mirror gateway session-memo write without importing the Flask app."""
+    import datetime as _dt
+    import logging as _mlog
+    import threading as _threading
+
+    if not (user_msg or '').strip() or not (assistant_msg or '').strip():
+        return
+
+    def _worker():
+        try:
+            import ombre_adapter
+            now = (_dt.datetime.utcnow() + _dt.timedelta(hours=8)).strftime('%m-%d %H:%M')
+            memo = (
+                f'[网页窗口 {now}] 她：{user_msg.strip()[:80]}… / '
+                f'我：{assistant_msg.strip()[:80]}…'
+            )
+            ombre_adapter.hold_memory(
+                memo,
+                tags='memo,网页窗口,跨端',
+                importance=4,
+                pinned=False,
+                timeout=10.0,
+                wall_timeout=11.0,
+            )
+        except Exception as exc:
+            _mlog.getLogger(__name__).error(
+                '[memo] staged-activate write failed: %s', exc, exc_info=True,
+            )
+
+    try:
+        _threading.Thread(
+            target=_worker, daemon=True, name='session-memo-rewrite',
+        ).start()
+    except Exception:
+        pass
 
 
 def assert_active_matches_prepare(conn, staging: Mapping[str, Any]) -> None:
@@ -436,218 +582,271 @@ def fetch_rewrite_prefix_rows(
 
 
 def activate_regen(conn, rewrite_id: str) -> dict:
-    ensure_schema(conn)
-    row = load(conn, rewrite_id)
-    if not row:
-        raise KeyError('rewrite not found')
-    if row.get('operation') != OP_REGEN:
-        raise ValueError('not a regen rewrite')
-    if row.get('status') == STATUS_ACTIVATED:
-        raise ValueError('already activated')
-    if row.get('status') == STATUS_STALE:
-        raise StaleRewriteError('rewrite is stale')
-    if row.get('status') != STATUS_READY or not (row.get('candidate_content') or '').strip():
-        raise ValueError('candidate not ready')
+    """Activate regen inside a reserved write transaction (BEGIN IMMEDIATE)."""
+    # DDL must not run inside the activation txn (ensure_schema commits).
+    ensure_schema(conn, commit=True)
+    _begin_immediate(conn)
+    try:
+        row = load(conn, rewrite_id)
+        if not row:
+            raise KeyError('rewrite not found')
+        if row.get('operation') != OP_REGEN:
+            raise ValueError('not a regen rewrite')
+        if row.get('status') == STATUS_ACTIVATED:
+            raise ValueError('already activated')
+        if row.get('status') == STATUS_STALE:
+            raise StaleRewriteError('rewrite is stale')
+        if row.get('status') != STATUS_READY or not (row.get('candidate_content') or '').strip():
+            raise ValueError('candidate not ready')
 
-    assert_active_matches_prepare(conn, row)
+        assert_active_matches_prepare(conn, row)
+        hook = _activation_fence_hook
+        if callable(hook):
+            hook(conn)
 
-    source_id = int(row['source_message_id'])
-    source = conn.execute(
-        'SELECT * FROM chat_messages WHERE id=?', (source_id,)
-    ).fetchone()
-    if not source:
-        raise KeyError('source assistant missing; refusing activate')
+        source_id = int(row['source_message_id'])
+        source = conn.execute(
+            'SELECT * FROM chat_messages WHERE id=?', (source_id,)
+        ).fetchone()
+        if not source:
+            raise KeyError('source assistant missing; refusing activate')
 
-    old_branches = _loads(row.get('old_branches_json'), [])
-    if not old_branches:
-        src = _row_to_dict(source)
-        old_branches = [{
-            'content': src.get('content') or '',
-            'thinking': src.get('thinking') or '',
-            'tool_calls': src.get('tool_calls') or '',
-        }]
-    new_branch = {
-        'content': row.get('candidate_content') or '',
-        'thinking': row.get('candidate_thinking') or '',
-        'tool_calls': row.get('candidate_tool_calls') or '',
-    }
-    all_branches = list(old_branches) + [new_branch]
-    branch_idx = len(all_branches) - 1
-    cols = _table_cols(conn, 'chat_messages')
-    updates = {
-        'content': new_branch['content'],
-        'thinking': new_branch['thinking'],
-        'tool_calls': new_branch['tool_calls'],
-        'branches': _dumps(all_branches),
-        'branch_idx': branch_idx,
-    }
-    if 'cache_info' in cols:
-        updates['cache_info'] = row.get('candidate_cache_info') or ''
-    if 'choices' in cols:
-        updates['choices'] = row.get('candidate_choices') or ''
-    assignments = ', '.join(f'{k}=?' for k in updates)
-    conn.execute(
-        f'UPDATE chat_messages SET {assignments} WHERE id=?',
-        (*updates.values(), source_id),
-    )
-    _set_status(conn, rewrite_id, STATUS_ACTIVATED)
-    return {
-        'ok': True,
-        'assistant_message_id': source_id,
-        'branch_idx': branch_idx,
-        'total': len(all_branches),
-        'user_message_id': row.get('user_message_id'),
-        'candidate_content': new_branch['content'],
-    }
+        old_branches = _loads(row.get('old_branches_json'), [])
+        if not old_branches:
+            src = _row_to_dict(source)
+            old_branches = [{
+                'content': src.get('content') or '',
+                'thinking': src.get('thinking') or '',
+                'tool_calls': src.get('tool_calls') or '',
+            }]
+        new_branch = {
+            'content': row.get('candidate_content') or '',
+            'thinking': row.get('candidate_thinking') or '',
+            'tool_calls': row.get('candidate_tool_calls') or '',
+        }
+        all_branches = list(old_branches) + [new_branch]
+        branch_idx = len(all_branches) - 1
+        cols = _table_cols(conn, 'chat_messages')
+        updates = {
+            'content': new_branch['content'],
+            'thinking': new_branch['thinking'],
+            'tool_calls': new_branch['tool_calls'],
+            'branches': _dumps(all_branches),
+            'branch_idx': branch_idx,
+        }
+        if 'cache_info' in cols:
+            updates['cache_info'] = row.get('candidate_cache_info') or ''
+        if 'choices' in cols:
+            updates['choices'] = row.get('candidate_choices') or ''
+        assignments = ', '.join(f'{k}=?' for k in updates)
+        conn.execute(
+            f'UPDATE chat_messages SET {assignments} WHERE id=?',
+            (*updates.values(), source_id),
+        )
+        _set_status(conn, rewrite_id, STATUS_ACTIVATED)
+        result = {
+            'ok': True,
+            'assistant_message_id': source_id,
+            'branch_idx': branch_idx,
+            'total': len(all_branches),
+            'user_message_id': row.get('user_message_id'),
+            'candidate_content': new_branch['content'],
+            'side_effects': side_effects_of(row),
+            'staging': row,
+        }
+        conn.commit()
+        return result
+    except StaleRewriteError:
+        try:
+            conn.commit()
+        except Exception:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+        raise
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        raise
 
 
 def activate_edit(conn, rewrite_id: str) -> dict:
-    ensure_schema(conn)
-    row = load(conn, rewrite_id)
-    if not row:
-        raise KeyError('rewrite not found')
-    if row.get('operation') != OP_EDIT:
-        raise ValueError('not an edit rewrite')
-    if row.get('status') == STATUS_ACTIVATED:
-        raise ValueError('already activated')
-    if row.get('status') == STATUS_STALE:
-        raise StaleRewriteError('rewrite is stale')
-    if row.get('status') != STATUS_READY or not (row.get('candidate_content') or '').strip():
-        raise ValueError('candidate not ready')
-
-    assert_active_matches_prepare(conn, row)
-
-    source_id = int(row['source_message_id'])
-    source = conn.execute(
-        'SELECT * FROM chat_messages WHERE id=?', (source_id,)
-    ).fetchone()
-    if not source:
-        raise KeyError('source message missing; refusing activate')
-
-    # Fingerprint matched: archive the prepare-time snapshot (not later tip).
-    tail_archive = _loads(row.get('tail_archive_json'), [])
-    if not tail_archive:
-        live_tail = conn.execute(
-            'SELECT * FROM chat_messages WHERE id >= ? ORDER BY id ASC',
-            (source_id,),
-        ).fetchall()
-        tail_archive = [_row_to_dict(r) for r in live_tail]
-    snap = _loads(row.get('source_snapshot_json'), {})
-    original_content = snap.get('content') or _row_to_dict(source).get('content') or ''
-
-    conn.execute(
-        'INSERT INTO chat_edit_branches (fork_msg_id, original_content, messages_json) '
-        'VALUES (?, ?, ?)',
-        (source_id, original_content, _dumps(tail_archive)),
-    )
-
-    author = snap.get('author') or _row_to_dict(source).get('author') or 'hayana'
-    image_url = snap.get('image_url') or ''
-    file_url = snap.get('file_url') or ''
-    file_name = snap.get('file_name') or ''
-    edited = (row.get('edited_content') or '').strip()
-
-    previous_user_at = None
+    """Activate edit inside a reserved write transaction (BEGIN IMMEDIATE)."""
+    ensure_schema(conn, commit=True)
+    _begin_immediate(conn)
     try:
-        from chat.interaction_state import USER_AUTHOR_SQL
-        prev = conn.execute(
-            f"SELECT created_at FROM chat_messages WHERE {USER_AUTHOR_SQL} "
-            "AND id < ? ORDER BY id DESC LIMIT 1",
-            (source_id,),
+        row = load(conn, rewrite_id)
+        if not row:
+            raise KeyError('rewrite not found')
+        if row.get('operation') != OP_EDIT:
+            raise ValueError('not an edit rewrite')
+        if row.get('status') == STATUS_ACTIVATED:
+            raise ValueError('already activated')
+        if row.get('status') == STATUS_STALE:
+            raise StaleRewriteError('rewrite is stale')
+        if row.get('status') != STATUS_READY or not (row.get('candidate_content') or '').strip():
+            raise ValueError('candidate not ready')
+
+        assert_active_matches_prepare(conn, row)
+        hook = _activation_fence_hook
+        if callable(hook):
+            hook(conn)
+
+        source_id = int(row['source_message_id'])
+        source = conn.execute(
+            'SELECT * FROM chat_messages WHERE id=?', (source_id,)
         ).fetchone()
-        if prev is not None:
-            previous_user_at = prev['created_at'] if hasattr(prev, 'keys') else prev[0]
-            previous_user_at = str(previous_user_at) if previous_user_at else None
-    except Exception:
-        previous_user_at = None
+        if not source:
+            raise KeyError('source message missing; refusing activate')
 
-    conn.execute('DELETE FROM chat_messages WHERE id >= ?', (source_id,))
-    cols = _table_cols(conn, 'chat_messages')
-    user_cols = ['author', 'content']
-    user_vals: list[Any] = [author, edited]
-    for col, val in (
-        ('image_url', image_url),
-        ('file_url', file_url),
-        ('file_name', file_name),
-    ):
-        if col in cols:
-            user_cols.append(col)
-            user_vals.append(val)
-    cur_u = conn.execute(
-        f"INSERT INTO chat_messages ({', '.join(user_cols)}) VALUES ({', '.join('?' for _ in user_cols)})",
-        user_vals,
-    )
-    new_user_id = int(cur_u.lastrowid)
-    created_at = None
-    row2 = conn.execute(
-        'SELECT created_at FROM chat_messages WHERE id=?', (new_user_id,),
-    ).fetchone()
-    if row2 is not None:
-        created_at = row2['created_at'] if hasattr(row2, 'keys') else row2[0]
-        created_at = str(created_at) if created_at else None
+        # Fingerprint matched: archive the prepare-time snapshot (not later tip).
+        tail_archive = _loads(row.get('tail_archive_json'), [])
+        if not tail_archive:
+            live_tail = conn.execute(
+                'SELECT * FROM chat_messages WHERE id >= ? ORDER BY id ASC',
+                (source_id,),
+            ).fetchall()
+            tail_archive = [_row_to_dict(r) for r in live_tail]
+        snap = _loads(row.get('source_snapshot_json'), {})
+        original_content = snap.get('content') or _row_to_dict(source).get('content') or ''
 
-    # Preserve prior edit-route Internal State user_rule capture in the same txn.
-    _user_events_requested = False
-    try:
-        import os
-        _user_events_requested = all(
-            str(os.environ.get(name, '0')).strip() == '1'
-            for name in (
-                'INTERNAL_STATE_V3_SHADOW_ENABLED',
-                'INTERNAL_STATE_V3_SCORE_PROOF_ENABLED',
-                'INTERNAL_STATE_V3_USER_EVENTS_ENABLED',
-            )
+        conn.execute(
+            'INSERT INTO chat_edit_branches (fork_msg_id, original_content, messages_json) '
+            'VALUES (?, ?, ?)',
+            (source_id, original_content, _dumps(tail_archive)),
         )
-    except Exception:
-        _user_events_requested = False
-    if _user_events_requested and created_at:
+
+        author = snap.get('author') or _row_to_dict(source).get('author') or 'hayana'
+        image_url = snap.get('image_url') or ''
+        file_url = snap.get('file_url') or ''
+        file_name = snap.get('file_name') or ''
+        edited = (row.get('edited_content') or '').strip()
+
+        previous_user_at = None
         try:
-            import internal_state_shadow as _shadow
-            if _shadow.is_user_events_enabled():
-                try:
-                    _shadow.enqueue_user_rule_in_txn(
-                        conn,
-                        message_id=int(new_user_id),
-                        text=edited or '',
-                        created_at=created_at,
-                        previous_user_at=previous_user_at,
-                    )
-                except Exception:
+            from chat.interaction_state import USER_AUTHOR_SQL
+            prev = conn.execute(
+                f"SELECT created_at FROM chat_messages WHERE {USER_AUTHOR_SQL} "
+                "AND id < ? ORDER BY id DESC LIMIT 1",
+                (source_id,),
+            ).fetchone()
+            if prev is not None:
+                previous_user_at = prev['created_at'] if hasattr(prev, 'keys') else prev[0]
+                previous_user_at = str(previous_user_at) if previous_user_at else None
+        except Exception:
+            previous_user_at = None
+
+        conn.execute('DELETE FROM chat_messages WHERE id >= ?', (source_id,))
+        cols = _table_cols(conn, 'chat_messages')
+        user_cols = ['author', 'content']
+        user_vals: list[Any] = [author, edited]
+        for col, val in (
+            ('image_url', image_url),
+            ('file_url', file_url),
+            ('file_name', file_name),
+        ):
+            if col in cols:
+                user_cols.append(col)
+                user_vals.append(val)
+        cur_u = conn.execute(
+            f"INSERT INTO chat_messages ({', '.join(user_cols)}) VALUES ({', '.join('?' for _ in user_cols)})",
+            user_vals,
+        )
+        new_user_id = int(cur_u.lastrowid)
+        created_at = None
+        row2 = conn.execute(
+            'SELECT created_at FROM chat_messages WHERE id=?', (new_user_id,),
+        ).fetchone()
+        if row2 is not None:
+            created_at = row2['created_at'] if hasattr(row2, 'keys') else row2[0]
+            created_at = str(created_at) if created_at else None
+
+        # Preserve prior edit-route Internal State user_rule capture in the same txn.
+        _user_events_requested = False
+        try:
+            import os
+            _user_events_requested = all(
+                str(os.environ.get(name, '0')).strip() == '1'
+                for name in (
+                    'INTERNAL_STATE_V3_SHADOW_ENABLED',
+                    'INTERNAL_STATE_V3_SCORE_PROOF_ENABLED',
+                    'INTERNAL_STATE_V3_USER_EVENTS_ENABLED',
+                )
+            )
+        except Exception:
+            _user_events_requested = False
+        if _user_events_requested and created_at:
+            try:
+                import internal_state_shadow as _shadow
+                if _shadow.is_user_events_enabled():
                     try:
-                        _shadow.mark_proof_gap(
+                        _shadow.enqueue_user_rule_in_txn(
                             conn,
-                            failed_message_id=int(new_user_id),
-                            error_code='outbox_capture_gap',
+                            message_id=int(new_user_id),
+                            text=edited or '',
+                            created_at=created_at,
+                            previous_user_at=previous_user_at,
                         )
                     except Exception:
-                        pass
+                        try:
+                            _shadow.mark_proof_gap(
+                                conn,
+                                failed_message_id=int(new_user_id),
+                                error_code='outbox_capture_gap',
+                            )
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+
+        asst_cols = ['author', 'content']
+        asst_vals: list[Any] = ['assistant', row.get('candidate_content') or '']
+        for col, val in (
+            ('thinking', row.get('candidate_thinking') or ''),
+            ('tool_calls', row.get('candidate_tool_calls') or ''),
+            ('cache_info', row.get('candidate_cache_info') or ''),
+            ('choices', row.get('candidate_choices') or ''),
+        ):
+            if col in cols:
+                asst_cols.append(col)
+                asst_vals.append(val)
+        cur_a = conn.execute(
+            f"INSERT INTO chat_messages ({', '.join(asst_cols)}) VALUES ({', '.join('?' for _ in asst_cols)})",
+            asst_vals,
+        )
+        new_assistant_id = int(cur_a.lastrowid)
+        _set_status(conn, rewrite_id, STATUS_ACTIVATED)
+        result = {
+            'ok': True,
+            'message_id': new_user_id,
+            'assistant_message_id': new_assistant_id,
+            'created_at': created_at,
+            'edited_content': edited,
+            'candidate_content': row.get('candidate_content') or '',
+            'user_message_id': new_user_id,
+            'side_effects': side_effects_of(row),
+            'staging': row,
+        }
+        conn.commit()
+        return result
+    except StaleRewriteError:
+        try:
+            conn.commit()
+        except Exception:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+        raise
+    except Exception:
+        try:
+            conn.rollback()
         except Exception:
             pass
-
-    asst_cols = ['author', 'content']
-    asst_vals: list[Any] = ['assistant', row.get('candidate_content') or '']
-    for col, val in (
-        ('thinking', row.get('candidate_thinking') or ''),
-        ('tool_calls', row.get('candidate_tool_calls') or ''),
-        ('cache_info', row.get('candidate_cache_info') or ''),
-        ('choices', row.get('candidate_choices') or ''),
-    ):
-        if col in cols:
-            asst_cols.append(col)
-            asst_vals.append(val)
-    cur_a = conn.execute(
-        f"INSERT INTO chat_messages ({', '.join(asst_cols)}) VALUES ({', '.join('?' for _ in asst_cols)})",
-        asst_vals,
-    )
-    new_assistant_id = int(cur_a.lastrowid)
-    _set_status(conn, rewrite_id, STATUS_ACTIVATED)
-    return {
-        'ok': True,
-        'message_id': new_user_id,
-        'assistant_message_id': new_assistant_id,
-        'created_at': created_at,
-        'edited_content': edited,
-    }
+        raise
 
 
 def active_transcript(conn) -> list[tuple]:

@@ -4450,15 +4450,20 @@ def regen_finalize():
     if not rewrite_id:
         return jsonify({'error': 'rewrite_id required'}), 400
     conn = get_db()
+    staging_for_cleanup = None
     try:
+        staging_for_cleanup = _rw.load(conn, rewrite_id)
+        # activate_* owns BEGIN IMMEDIATE + commit.
         result = _rw.activate_regen(conn, rewrite_id)
-        conn.commit()
     except _rw.StaleRewriteError as exc:
         try:
-            conn.commit()
+            if staging_for_cleanup is None:
+                staging_for_cleanup = _rw.load(conn, rewrite_id)
         except Exception:
             pass
         conn.close()
+        if staging_for_cleanup:
+            _rw.clear_staged_moments_pending(staging_for_cleanup, DB_PATH)
         return jsonify({'error': str(exc), 'code': 'stale_rewrite'}), 409
     except KeyError as exc:
         conn.close()
@@ -4474,13 +4479,20 @@ def regen_finalize():
         conn.close()
         raise
     conn.close()
-    # Active assistant is now durable — scoring / side effects belong here.
+    staging = result.get('staging') or staging_for_cleanup or {}
+    # Active assistant is now durable — scoring + frozen side effects belong here.
     try:
         from chat.scoring_identity import trigger_turn_scoring
         trigger_turn_scoring(
             assistant_text=result.get('candidate_content') or '',
             message_id=result.get('user_message_id'),
             get_db_fn=get_db,
+        )
+    except Exception:
+        pass
+    try:
+        _rw.replay_side_effects_after_activate(
+            staging, result, get_db=get_db, db_path=DB_PATH,
         )
     except Exception:
         pass
@@ -4571,15 +4583,19 @@ def edit_finalize():
     if not rewrite_id:
         return jsonify({'error': 'rewrite_id required'}), 400
     conn = get_db()
+    staging_for_cleanup = None
     try:
+        staging_for_cleanup = _rw.load(conn, rewrite_id)
         result = _rw.activate_edit(conn, rewrite_id)
-        conn.commit()
     except _rw.StaleRewriteError as exc:
         try:
-            conn.commit()
+            if staging_for_cleanup is None:
+                staging_for_cleanup = _rw.load(conn, rewrite_id)
         except Exception:
             pass
         conn.close()
+        if staging_for_cleanup:
+            _rw.clear_staged_moments_pending(staging_for_cleanup, DB_PATH)
         return jsonify({'error': str(exc), 'code': 'stale_rewrite'}), 409
     except KeyError as exc:
         conn.close()
@@ -4595,6 +4611,7 @@ def edit_finalize():
         conn.close()
         raise
     conn.close()
+    staging = result.get('staging') or staging_for_cleanup or {}
     try:
         from chat.interaction_state import touch_user_interaction
         touch_user_interaction(get_db)
@@ -4605,6 +4622,22 @@ def edit_finalize():
         import internal_state_shadow as _shadow
         if _shadow.is_user_events_enabled():
             _shadow.drain_shadow_outbox_best_effort(db_path=DB_PATH)
+    except Exception:
+        pass
+    # Edit activate creates the durable user+assistant — score here (not in stream).
+    try:
+        from chat.scoring_identity import trigger_turn_scoring
+        trigger_turn_scoring(
+            assistant_text=result.get('candidate_content') or '',
+            message_id=result.get('message_id'),
+            get_db_fn=get_db,
+        )
+    except Exception:
+        pass
+    try:
+        _rw.replay_side_effects_after_activate(
+            staging, result, get_db=get_db, db_path=DB_PATH,
+        )
     except Exception:
         pass
     invalidate_cc_resident_for_history_rewrite('edit')
