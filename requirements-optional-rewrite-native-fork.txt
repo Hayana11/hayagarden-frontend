@@ -12,4 +12,5 @@
 # Caution: claude-agent-sdk pulls mcp/pydantic/httpx/uvicorn (~300MB+) and must
 # not replace the Ombre MCP pin used elsewhere. Keep this install isolated or
 # review conflicts before enabling the flag.
-claude-agent-sdk>=0.1.51,<0.3
+# Pinned to the production-validated SDK release (fork_session contract).
+claude-agent-sdk==0.2.131
