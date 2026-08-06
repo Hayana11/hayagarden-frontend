@@ -3,7 +3,7 @@
 // (think/text/tool_use/tool_result/usage/done/err), inline branches
 // (branch/switch, regen prepare/finalize), edit-with-truncate, model catalog.
 // Mounted at /dash/chat, parallel to the legacy /chat page.
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import { Link } from 'react-router-dom';
 import { BottomNav } from '../components/BottomNav';
 import { CarryoverModal } from '../components/dailySoftWindow';
@@ -41,56 +41,65 @@ import {
 } from '../lib/chat';
 import type { SoftWindowUiState } from '../lib/dailySoftWindow';
 import { ComposerUploadCoordinator } from '../lib/composerUpload';
+import { ChatThemeQuickToggle, ChatThemeSegmented } from '../components/ChatThemeControl';
+import { attachChatTheme, loadChatSettings, patchChatSettings } from '../lib/chatTheme';
 import type { ReactElement } from 'react';
 
-const SETTINGS_KEY = 'fyodor-chat-settings';
 const FONT_SIZES = [13.5, 14.5, 16, 17.5, 19];
 const INPUT_FONT_SIZE = FONT_SIZES[0];
 const SERIF = "'Noto Serif SC', serif";
 const DISPLAY = "'Bodoni Moda', serif";
 const MONO = 'ui-monospace, Menlo, monospace';
 
-const LIGHT_VARS: Record<string, string> = {
-  '--bg': '#F7F1EE', '--card': '#FFFFFF', '--card2': '#F6EFEC', '--bubble': '#F0DFDB',
-  '--ink': '#4A3F3C', '--ink2': '#6B5A55', '--mut': '#8C7B76', '--faint': '#A99590', '--ghost': '#C4B4AF',
-  '--line': '#F0E6E2', '--rose': '#B76E79', '--deep': '#9C3B4A', '--rosebg': 'rgba(183,110,121,0.10)',
-  '--shadow': 'rgba(183,110,121,0.10)', '--shadow2': 'rgba(183,110,121,0.20)',
-  '--ok': '#7A9B6D', '--err': '#C25450', '--gold': '#D9A441',
-};
-const DARK_VARS: Record<string, string> = {
-  '--bg': '#211A18', '--card': '#2B2220', '--card2': '#362B28', '--bubble': '#3E2E30',
-  '--ink': '#EFE5E1', '--ink2': '#D9C9C3', '--mut': '#B4A19B', '--faint': '#93817C', '--ghost': '#6E5F5A',
-  '--line': '#3B302D', '--rose': '#C98A93', '--deep': '#D89AA2', '--rosebg': 'rgba(201,138,147,0.16)',
-  '--shadow': 'rgba(0,0,0,0.28)', '--shadow2': 'rgba(0,0,0,0.45)',
-  '--ok': '#8FAF80', '--err': '#D97B76', '--gold': '#DFB25E',
-};
-
-interface Settings {
-  theme: 'light' | 'dark' | 'auto';
+interface ChatPrefs {
   fontStep: number;
   thinkMode: 'auto' | 'drawer' | 'inline';
 }
 
-function loadSettings(): Settings {
-  try {
-    const s = JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}');
-    return {
-      theme: ['light', 'dark', 'auto'].includes(s.theme) ? s.theme : 'light',
-      fontStep: typeof s.fontStep === 'number' && s.fontStep >= 0 && s.fontStep <= 4 ? s.fontStep : 2,
-      thinkMode: ['auto', 'drawer', 'inline'].includes(s.thinkMode) ? s.thinkMode : 'auto',
-    };
-  } catch {
-    return { theme: 'light', fontStep: 2, thinkMode: 'auto' };
-  }
+function loadChatPrefs(): ChatPrefs {
+  const s = loadChatSettings();
+  return { fontStep: s.fontStep, thinkMode: s.thinkMode };
 }
 
 type LayoutDiagRow = { label: string; value: string };
 
+function fmtPx(n: number) {
+  return `${n.toFixed(2)}px`;
+}
+
+function readZoom(st: CSSStyleDeclaration): string {
+  const raw = (st as CSSStyleDeclaration & { zoom?: string }).zoom;
+  if (!raw || raw === 'normal' || raw === '1') return 'n/a';
+  return raw;
+}
+
+function readTextSizeAdjust(st: CSSStyleDeclaration): string {
+  const v = st.getPropertyValue('-webkit-text-size-adjust');
+  return v || 'n/a';
+}
+
+function pushElDiag(rows: LayoutDiagRow[], label: string, el: HTMLElement | null) {
+  if (!el) {
+    rows.push({ label: `${label} (missing)`, value: 'n/a' });
+    return;
+  }
+  const rect = el.getBoundingClientRect();
+  const st = getComputedStyle(el);
+  rows.push({ label: `${label} offsetWidth`, value: String(el.offsetWidth) });
+  rows.push({ label: `${label} clientWidth`, value: String(el.clientWidth) });
+  rows.push({ label: `${label} rect.width`, value: fmtPx(rect.width) });
+  rows.push({ label: `${label} computed zoom`, value: readZoom(st) });
+  rows.push({ label: `${label} computed transform`, value: st.transform === 'none' ? 'none' : st.transform });
+  rows.push({ label: `${label} -webkit-text-size-adjust`, value: readTextSizeAdjust(st) });
+}
+
 function collectLayoutDiagnostics(root: HTMLElement | null): LayoutDiagRow[] {
   const vv = window.visualViewport;
-  const testEl = document.getElementById('c78-layout-test-100');
-  const rootFont = root ? getComputedStyle(root).fontSize : 'n/a';
-  const testWidth = testEl ? `${testEl.getBoundingClientRect().width.toFixed(2)}px` : 'n/a';
+  const testEl = document.getElementById('c78-layout-test-100') as HTMLElement | null;
+  const appRoot = document.getElementById('root');
+  const { body } = document;
+  const html = document.documentElement;
+
   let noto = 'n/a';
   let bodoni = 'n/a';
   try {
@@ -99,21 +108,44 @@ function collectLayoutDiagnostics(root: HTMLElement | null): LayoutDiagRow[] {
   } catch {
     /* FontFaceSet unavailable */
   }
-  return [
+
+  const rows: LayoutDiagRow[] = [
     { label: 'window.innerWidth', value: String(window.innerWidth) },
     { label: 'window.innerHeight', value: String(window.innerHeight) },
-    { label: 'document.documentElement.clientWidth', value: String(document.documentElement.clientWidth) },
+    { label: 'document.documentElement.clientWidth', value: String(html.clientWidth) },
     { label: 'screen.width', value: String(window.screen.width) },
     { label: 'screen.height', value: String(window.screen.height) },
     { label: 'window.devicePixelRatio', value: String(window.devicePixelRatio) },
     { label: 'visualViewport?.width', value: vv ? String(vv.width) : 'n/a' },
     { label: 'visualViewport?.height', value: vv ? String(vv.height) : 'n/a' },
     { label: 'visualViewport?.scale', value: vv ? String(vv.scale) : 'n/a' },
-    { label: 'Chat root computed font-size', value: rootFont },
-    { label: '100px test element width', value: testWidth },
     { label: 'fonts.check Noto Serif SC', value: noto },
     { label: 'fonts.check Bodoni Moda', value: bodoni },
   ];
+
+  if (testEl) {
+    const rect = testEl.getBoundingClientRect();
+    rows.push({ label: 'test offsetWidth', value: String(testEl.offsetWidth) });
+    rows.push({ label: 'test clientWidth', value: String(testEl.clientWidth) });
+    rows.push({ label: 'test rect.width', value: fmtPx(rect.width) });
+    rows.push({
+      label: 'test rect/offset ratio',
+      value: testEl.offsetWidth ? (rect.width / testEl.offsetWidth).toFixed(4) : 'n/a',
+    });
+  } else {
+    rows.push({ label: 'test element', value: 'missing' });
+  }
+
+  pushElDiag(rows, 'chat-root', root);
+  pushElDiag(rows, '#root', appRoot);
+  pushElDiag(rows, 'body', body);
+  pushElDiag(rows, 'html', html);
+
+  if (root) {
+    rows.push({ label: 'Chat root computed font-size', value: getComputedStyle(root).fontSize });
+  }
+
+  return rows;
 }
 
 interface LiveState {
@@ -171,8 +203,7 @@ function CopyIcon({ size = 15 }: { size?: number }) {
 }
 
 export function ChatScreen() {
-  const [settings, setSettings] = useState<Settings>(loadSettings);
-  const [sysDark, setSysDark] = useState(() => window.matchMedia?.('(prefers-color-scheme: dark)').matches ?? false);
+  const [settings, setSettings] = useState<ChatPrefs>(loadChatPrefs);
   const [wide, setWide] = useState(() => window.innerWidth >= 900);
   const [compactToolbar, setCompactToolbar] = useState(() => window.innerWidth <= 360);
   const [genLockBusy, setGenLockBusy] = useState(false);
@@ -234,8 +265,6 @@ export function ChatScreen() {
     },
   ));
 
-  const effTheme = settings.theme === 'auto' ? (sysDark ? 'dark' : 'light') : settings.theme;
-  const vars = effTheme === 'dark' ? DARK_VARS : LIGHT_VARS;
   const effThinkMode = settings.thinkMode === 'auto' ? (wide ? 'inline' : 'drawer') : settings.thinkMode;
 
   const placeholder = useMemo(() => chatPlaceholder(new Date()), []);
@@ -245,16 +274,9 @@ export function ChatScreen() {
     return `今天 · ${now.getMonth() + 1}月${now.getDate()}日 ${dows[now.getDay()]}`;
   }, []);
 
-  const patchSettings = (p: Partial<Settings>) => {
-    setSettings((s) => {
-      const next = { ...s, ...p };
-      try {
-        localStorage.setItem(SETTINGS_KEY, JSON.stringify(next));
-      } catch {
-        // ignore quota errors
-      }
-      return next;
-    });
+  const patchSettings = (p: Partial<ChatPrefs>) => {
+    const merged = patchChatSettings(p);
+    setSettings({ fontStep: merged.fontStep, thinkMode: merged.thinkMode });
   };
 
   const showToast = useCallback((t: string) => {
@@ -311,20 +333,20 @@ export function ChatScreen() {
     });
   }, [refetchLatest]);
 
-  // media listeners
+  // media listeners (layout only — theme uses DOM data-chat-theme, not parent state)
   useEffect(() => {
-    const mq = window.matchMedia('(prefers-color-scheme: dark)');
-    const onMq = () => setSysDark(mq.matches);
-    mq.addEventListener?.('change', onMq);
     const onRs = () => {
       setWide(window.innerWidth >= 900);
       setCompactToolbar(window.innerWidth <= 360);
     };
     window.addEventListener('resize', onRs);
-    return () => {
-      mq.removeEventListener?.('change', onMq);
-      window.removeEventListener('resize', onRs);
-    };
+    return () => window.removeEventListener('resize', onRs);
+  }, []);
+
+  useLayoutEffect(() => {
+    const root = chatRootRef.current;
+    if (!root) return;
+    return attachChatTheme(root);
   }, []);
 
   useEffect(() => {
@@ -1048,7 +1070,6 @@ export function ChatScreen() {
       ref={chatRootRef}
       className="chat-root dash-fullscreen-page"
       style={{
-        ...(vars as CSSProperties),
         display: 'flex',
         flexDirection: 'column',
         background: 'var(--bg)',
@@ -1089,16 +1110,7 @@ export function ChatScreen() {
               <div onClick={() => setNavOpen(navOpen === 'wrench' ? null : 'wrench')} style={{ ...iconBtn, background: navOpen === 'wrench' ? 'var(--rosebg)' : 'transparent' }}>
                 <Svg d={IC.wrench} />
               </div>
-              <div onClick={() => patchSettings({ theme: effTheme === 'dark' ? 'light' : 'dark' })} style={iconBtn}>
-                {effTheme === 'light' ? (
-                  <Svg d={IC.moon} />
-                ) : (
-                  <svg viewBox="0 0 24 24" width={16} height={16} fill="none" stroke="currentColor" strokeWidth={1.6} strokeLinecap="round" strokeLinejoin="round">
-                    <circle cx={12} cy={12} r={4} />
-                    <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41" />
-                  </svg>
-                )}
-              </div>
+              <ChatThemeQuickToggle rootRef={chatRootRef} style={iconBtn} />
               <div onClick={() => setNavOpen(navOpen === 'font' ? null : 'font')} style={{ ...iconBtn, background: navOpen === 'font' ? 'var(--rosebg)' : 'transparent' }}>
                 <span style={{ fontFamily: DISPLAY, fontSize: 14, letterSpacing: 0.5 }}>Aa</span>
               </div>
@@ -1156,13 +1168,7 @@ export function ChatScreen() {
                         <div style={sectionCaption}>外观 · APPEARANCE</div>
                         <div className="vstack vstack-8">
                           <span style={{ fontSize: 13.5, color: 'var(--ink2)', letterSpacing: 1 }}>主题</span>
-                          <div className="hstack hstack-2" style={{ background: 'var(--card2)', borderRadius: 999, padding: 3 }}>
-                            {(['light', 'dark', 'auto'] as const).map((t) => (
-                              <div key={t} onClick={() => patchSettings({ theme: t })} style={segStyle(settings.theme === t)}>
-                                {t === 'light' ? '浅色' : t === 'dark' ? '深色' : '跟随系统'}
-                              </div>
-                            ))}
-                          </div>
+                          <ChatThemeSegmented rootRef={chatRootRef} segStyle={segStyle} />
                         </div>
                       </div>
                       <div style={{ height: 1, background: 'var(--line)' }} />

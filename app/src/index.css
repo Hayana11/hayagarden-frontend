@@ -341,6 +341,48 @@ button {
 }
 .chat-choice-btn.disabled { opacity: 0.55; cursor: default; }
 
+/* Fyodor Chat theme — applied via data-chat-theme on .chat-root (not React inline vars). */
+.chat-root[data-chat-theme="light"] {
+  --bg: #F7F1EE;
+  --card: #FFFFFF;
+  --card2: #F6EFEC;
+  --bubble: #F0DFDB;
+  --ink: #4A3F3C;
+  --ink2: #6B5A55;
+  --mut: #8C7B76;
+  --faint: #A99590;
+  --ghost: #C4B4AF;
+  --line: #F0E6E2;
+  --rose: #B76E79;
+  --deep: #9C3B4A;
+  --rosebg: rgba(183, 110, 121, 0.10);
+  --shadow: rgba(183, 110, 121, 0.10);
+  --shadow2: rgba(183, 110, 121, 0.20);
+  --ok: #7A9B6D;
+  --err: #C25450;
+  --gold: #D9A441;
+}
+.chat-root[data-chat-theme="dark"] {
+  --bg: #211A18;
+  --card: #2B2220;
+  --card2: #362B28;
+  --bubble: #3E2E30;
+  --ink: #EFE5E1;
+  --ink2: #D9C9C3;
+  --mut: #B4A19B;
+  --faint: #93817C;
+  --ghost: #6E5F5A;
+  --line: #3B302D;
+  --rose: #C98A93;
+  --deep: #D89AA2;
+  --rosebg: rgba(201, 138, 147, 0.16);
+  --shadow: rgba(0, 0, 0, 0.28);
+  --shadow2: rgba(0, 0, 0, 0.45);
+  --ok: #8FAF80;
+  --err: #D97B76;
+  --gold: #DFB25E;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .chat-root * { animation: none !important; transition: none !important; }
 }
