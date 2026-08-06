@@ -770,7 +770,7 @@ export function ChatScreen() {
           const last = i === paras.length - 1;
           if (bullet) {
             return (
-              <div key={i} className="hstack hstack-10" style={{ paddingLeft: 6 }}>
+              <div key={i} className="hstack-10" style={{ display: 'flex', paddingLeft: 6 }}>
                 <span style={{ color: 'var(--rose)', flexShrink: 0, lineHeight: 1.85, fontSize: '1em' }}>·</span>
                 <span style={{ fontSize: '1em', lineHeight: 1.85, letterSpacing: 0.3, color: 'var(--ink)' }}>{p.trim().replace(/^[-·•]\s+/, '')}</span>
               </div>
@@ -867,7 +867,7 @@ export function ChatScreen() {
         {renderChoices(m)}
         <div className="vstack vstack-7">
           <span style={{ fontFamily: DISPLAY, fontSize: 11, color: 'var(--ghost)', letterSpacing: 1, padding: '0 2px' }}>{m.ts}</span>
-          <div className="hstack hstack-2" style={{ flexWrap: 'wrap' }}>
+          <div className="flex-wrap-gap-2">
             <div onClick={() => copyText(m.text)} style={{ cursor: 'pointer', width: 31, height: 31, borderRadius: 10, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--faint)' }}>
               <CopyIcon />
             </div>
@@ -1452,7 +1452,7 @@ export function ChatScreen() {
               <Link to="/group-chat" onClick={() => setSidebarOpen(false)} className="hstack hstack-12" style={{ textDecoration: 'none', padding: '13px 14px', borderRadius: 16, background: 'linear-gradient(135deg,rgba(220,232,217,.72),rgba(220,232,245,.76))' }}>
                 <div className="hstack hstack-6" style={{ flexShrink: 0 }}>
                   <i style={{ width: 13, height: 13, borderRadius: '50%', background: '#91AD93' }} />
-                  <i style={{ width: 13, height: 13, borderRadius: '50%', background: '#8EACCF', marginLeft: -9, opacity: .88 }} />
+                  <i style={{ width: 13, height: 13, borderRadius: '50%', background: '#8EACCF', marginLeft: -3, opacity: .88 }} />
                 </div>
                 <div className="vstack vstack-2" style={{ minWidth: 0 }}>
                   <span style={{ fontSize: 14.5, color: 'var(--ink)', letterSpacing: 1 }}>群聊房间</span>

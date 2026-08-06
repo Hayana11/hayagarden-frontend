@@ -98,6 +98,13 @@ html, body {
 }
 .flex-wrap-gap-6 > * { margin: 3px; }
 
+.flex-wrap-gap-2 {
+  display: flex;
+  flex-wrap: wrap;
+  margin: -1px;
+}
+.flex-wrap-gap-2 > * { margin: 1px; }
+
 .flex-wrap-gap-y3-x7 {
   display: flex;
   flex-wrap: wrap;
@@ -134,7 +141,7 @@ html, body {
 
 /* Contacts — color-mix fallbacks for Chrome 78 */
 .contacts-monopoly-card {
-  background: linear-gradient(135deg, #FBF4F5, var(--card));
+  background: linear-gradient(135deg, var(--card2), var(--card));
   border: 1px solid rgba(183, 110, 121, 0.18);
 }
 @supports (background: color-mix(in srgb, red 50%, blue)) {
