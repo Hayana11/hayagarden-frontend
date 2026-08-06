@@ -1018,28 +1018,24 @@ export function ChatScreen() {
     );
   }
 
-  // date separators — memoized so theme-only toggles skip rebuilding the transcript tree
-  const messageNodes = useMemo(() => {
-    const rendered: ReactElement[] = [];
-    let lastDate = '';
-    msgs.forEach((m) => {
-      if (m.dateKey && m.dateKey !== lastDate) {
-        lastDate = m.dateKey;
-        const label = m.dateKey === new Date().toISOString().slice(0, 10) ? dateLabel : m.dateKey.replace(/-/g, '.');
-        rendered.push(
-          <div key={`d-${m.dateKey}`} style={{ textAlign: 'center', fontFamily: DISPLAY, fontSize: 12, letterSpacing: 2, color: 'var(--ghost)', padding: '2px 0' }}>
-            {label}
-          </div>,
-        );
-      }
+  const rendered: ReactElement[] = [];
+  let lastDate = '';
+  msgs.forEach((m) => {
+    if (m.dateKey && m.dateKey !== lastDate) {
+      lastDate = m.dateKey;
+      const label = m.dateKey === new Date().toISOString().slice(0, 10) ? dateLabel : m.dateKey.replace(/-/g, '.');
       rendered.push(
-        <div key={m.id}>
-          {m.role === 'user' ? renderUserMsg(m) : renderAssistantMsg(m)}
+        <div key={`d-${m.dateKey}`} style={{ textAlign: 'center', fontFamily: DISPLAY, fontSize: 12, letterSpacing: 2, color: 'var(--ghost)', padding: '2px 0' }}>
+          {label}
         </div>,
       );
-    });
-    return rendered;
-  }, [msgs, dateLabel, openThink, effThinkMode, pickedChoices, editingId, editText]);
+    }
+    rendered.push(
+      <div key={m.id}>
+        {m.role === 'user' ? renderUserMsg(m) : renderAssistantMsg(m)}
+      </div>,
+    );
+  });
 
   const toolbarIcon = compactToolbar ? 32 : 35;
   const modalUiState: SoftWindowUiState =
@@ -1196,7 +1192,7 @@ export function ChatScreen() {
                         {layoutDiag && (
                           <div className="vstack vstack-6" style={{ background: 'var(--card2)', borderRadius: 14, padding: '12px 14px', fontFamily: MONO, fontSize: 11, lineHeight: 1.55, color: 'var(--ink2)' }}>
                             {layoutDiag.map((row) => (
-                              <div key={row.label} style={{ display: 'flex', justifyContent: 'space-between', gap: 10 }}>
+                              <div key={row.label} className="hstack hstack-10" style={{ justifyContent: 'space-between' }}>
                                 <span style={{ color: 'var(--ghost)', flexShrink: 0 }}>{row.label}</span>
                                 <span style={{ textAlign: 'right', wordBreak: 'break-all' }}>{row.value}</span>
                               </div>
@@ -1255,7 +1251,7 @@ export function ChatScreen() {
               {loadingMore ? '加载中…' : '‹ 加载更早的对话 ›'}
             </div>
           )}
-          {messageNodes}
+          {rendered}
           {live && renderLive(live)}
           {chatError && (
             <div style={{ display: 'flex', justifyContent: 'center', padding: '6px 4px 2px' }}>

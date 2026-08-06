@@ -1205,7 +1205,7 @@ export function MomentsScreen() {
                             <span style={{ marginLeft: 'auto', fontFamily: DISPLAY, fontSize: 10.5, color: ghostC, flexShrink: 0, transition: 'color .9s ease' }}>{d.dateLabel}</span>
                           </div>
                           <span style={{ display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden', fontSize: 13.5, lineHeight: 1.95, color: textC, transition: 'color .9s ease', maskImage: 'linear-gradient(180deg,#000 52%,rgba(0,0,0,0.12) 100%)', WebkitMaskImage: 'linear-gradient(180deg,#000 52%,rgba(0,0,0,0.12) 100%)' }}>{d.content}</span>
-                          <div className="hstack hstack-8" style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap' }}>
+                          <div className="flex-wrap-gap-8" style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap' }}>
                             <span style={{ fontSize: 10, letterSpacing: 1.5, padding: '3px 10px', borderRadius: 999, background: chipBg, color: chipC, transition: 'all .9s ease' }}>{scene.label}</span>
                             <span style={{ fontSize: 10, letterSpacing: 1.5, padding: '3px 10px', borderRadius: 999, background: glowing ? 'rgba(255,255,255,0.1)' : 'var(--card2)', color: glowing ? 'rgba(245,235,225,0.88)' : 'var(--mut)', transition: 'all .9s ease' }}>{d.emotion}</span>
                             <span style={{ marginLeft: 'auto', fontSize: 11, color: ghostC, transition: 'color .9s ease', letterSpacing: 1 }}>进入梦境 →</span>
@@ -1434,7 +1434,7 @@ export function MomentsScreen() {
             <div className="hide-scrollbar" onClick={(e) => e.stopPropagation()} style={{ position: 'relative', width: '100%', maxWidth: 392, maxHeight: '80vh', overflowY: 'auto', borderRadius: 22, background: 'linear-gradient(172deg,#2E241D,#171009)', boxShadow: '0 40px 100px rgba(0,0,0,0.6)' }}>
               <div style={{ position: 'absolute', inset: 0, background: scene.glow, opacity: 0.16, pointerEvents: 'none' }} />
               <div className="vstack vstack-12" style={{ position: 'relative', padding: '24px 24px 22px', display: 'flex', flexDirection: 'column' }}>
-                <div className="hstack hstack-8" style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap' }}>
+                <div className="flex-wrap-gap-8" style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap' }}>
                   <span style={{ fontSize: 10, letterSpacing: 1.5, padding: '3px 10px', borderRadius: 999, background: 'rgba(223,178,94,0.14)', color: '#D9B87E' }}>{scene.label}</span>
                   <span style={{ fontFamily: DISPLAY, fontSize: 10.5, color: 'rgba(233,214,190,0.55)', marginLeft: 'auto' }}>{dreamOpen.dateLabel}</span>
                 </div>
