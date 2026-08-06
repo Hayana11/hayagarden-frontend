@@ -12,6 +12,12 @@ interface CapacitorGlobal {
   platform?: string;
 }
 
+const SAFE_DETAILS: LegacyNativeCompatDetails = {
+  isNativeCapacitor: false,
+  flexGapUnsupported: false,
+  legacyNativeCompat: false,
+};
+
 let cachedDetails: LegacyNativeCompatDetails | null = null;
 let bodyZoomRestore: string | null = null;
 let compatApplied = false;
@@ -22,11 +28,15 @@ function readCapacitorGlobal(): CapacitorGlobal | undefined {
 
 /** True when running inside a Capacitor native shell (not desktop browser). */
 export function isNativeCapacitor(): boolean {
-  const cap = readCapacitorGlobal();
-  if (!cap) return false;
-  if (typeof cap.isNativePlatform === 'function') return cap.isNativePlatform();
-  const platform = cap.getPlatform?.() ?? cap.platform;
-  return !!platform && platform !== 'web';
+  try {
+    const cap = readCapacitorGlobal();
+    if (!cap) return false;
+    if (typeof cap.isNativePlatform === 'function') return cap.isNativePlatform();
+    const platform = cap.getPlatform?.() ?? cap.platform;
+    return !!platform && platform !== 'web';
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -34,32 +44,42 @@ export function isNativeCapacitor(): boolean {
  * Chrome < 84 (legacy System WebView) reports no gap → children stack at 1px offset.
  */
 export function isFlexGapUnsupported(): boolean {
-  const host = document.createElement('div');
-  host.style.cssText = 'display:flex;flex-direction:column;gap:1px;position:absolute;visibility:hidden;pointer-events:none;top:-9999px;left:-9999px';
+  let host: HTMLDivElement | null = null;
+  try {
+    host = document.createElement('div');
+    host.style.cssText =
+      'display:flex;flex-direction:column;gap:1px;position:absolute;visibility:hidden;pointer-events:none;top:-9999px;left:-9999px';
 
-  const a = document.createElement('div');
-  a.style.cssText = 'width:1px;height:1px;flex-shrink:0';
-  const b = document.createElement('div');
-  b.style.cssText = 'width:1px;height:1px;flex-shrink:0';
+    const a = document.createElement('div');
+    a.style.cssText = 'width:1px;height:1px;flex-shrink:0';
+    const b = document.createElement('div');
+    b.style.cssText = 'width:1px;height:1px;flex-shrink:0';
 
-  host.append(a, b);
-  document.body.appendChild(host);
-  const gapPx = b.offsetTop - a.offsetTop;
-  host.remove();
-
-  return gapPx < 2;
+    host.append(a, b);
+    document.body.appendChild(host);
+    const gapPx = b.offsetTop - a.offsetTop;
+    return gapPx < 2;
+  } catch {
+    return false;
+  } finally {
+    host?.remove();
+  }
 }
 
 export function getLegacyNativeCompatDetails(): LegacyNativeCompatDetails {
   if (cachedDetails) return cachedDetails;
 
-  const native = isNativeCapacitor();
-  const flexGapUnsupported = isFlexGapUnsupported();
-  cachedDetails = {
-    isNativeCapacitor: native,
-    flexGapUnsupported,
-    legacyNativeCompat: native && flexGapUnsupported,
-  };
+  try {
+    const native = isNativeCapacitor();
+    const flexGapUnsupported = isFlexGapUnsupported();
+    cachedDetails = {
+      isNativeCapacitor: native,
+      flexGapUnsupported,
+      legacyNativeCompat: native && flexGapUnsupported,
+    };
+  } catch {
+    cachedDetails = { ...SAFE_DETAILS };
+  }
   return cachedDetails;
 }
 

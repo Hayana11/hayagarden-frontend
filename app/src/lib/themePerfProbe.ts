@@ -11,10 +11,13 @@ export interface ThemePerfRecord {
   raf2Ms: number;
 }
 
+type PerfListener = (record: ThemePerfRecord) => void;
+
 let probeMode: ThemeProbeMode = 'normal';
 let lastRecord: ThemePerfRecord | null = null;
 let pending: { t0: number; t1: number; mode: ThemeProbeMode } | null = null;
 let skipThemePerf = false;
+const perfListeners = new Set<PerfListener>();
 
 export function setSkipThemePerf(skip: boolean) {
   skipThemePerf = skip;
@@ -30,6 +33,18 @@ export function setThemeProbeMode(mode: ThemeProbeMode) {
 
 export function getLastThemePerf(): ThemePerfRecord | null {
   return lastRecord;
+}
+
+/** Subscribe to completed theme perf records (after rAF2). Isolated from ChatScreen state. */
+export function subscribeThemePerf(listener: PerfListener): () => void {
+  perfListeners.add(listener);
+  return () => perfListeners.delete(listener);
+}
+
+function emitThemePerf(record: ThemePerfRecord) {
+  for (const listener of perfListeners) {
+    listener(record);
+  }
 }
 
 export function beginThemePerfProbe(mode: ThemeProbeMode = probeMode): void {
@@ -48,7 +63,7 @@ export function flushThemePerfProbe(root: HTMLElement | null): void {
     const raf1At = performance.now();
     requestAnimationFrame(() => {
       const raf2At = performance.now();
-      lastRecord = {
+      const record: ThemePerfRecord = {
         mode,
         at: t0,
         applyMs: t1 - t0,
@@ -56,7 +71,9 @@ export function flushThemePerfProbe(root: HTMLElement | null): void {
         raf1Ms: raf1At - flushAt,
         raf2Ms: raf2At - t0,
       };
+      lastRecord = record;
       pending = null;
+      emitThemePerf(record);
     });
   });
 }

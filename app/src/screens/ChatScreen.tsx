@@ -42,11 +42,11 @@ import {
 import type { SoftWindowUiState } from '../lib/dailySoftWindow';
 import { ComposerUploadCoordinator } from '../lib/composerUpload';
 import { ChatThemeQuickToggle, ChatThemeSegmented } from '../components/ChatThemeControl';
-import { attachChatTheme, loadChatSettings, patchChatSettings, resolveEffectiveTheme, setChatTheme, subscribeChatTheme, type EffectiveTheme, type ThemeMode } from '../lib/chatTheme';
-import { getLegacyNativeCompatDetails, isLegacyNativeCompat } from '../lib/legacyNativeCompat';
+import { ThemePerfRows } from '../components/ThemePerfRows';
+import { attachChatTheme, loadChatSettings, patchChatSettings, resolveEffectiveTheme, setChatTheme, type EffectiveTheme, type ThemeMode } from '../lib/chatTheme';
+import { getLegacyNativeCompatDetails } from '../lib/legacyNativeCompat';
 import {
   countDescendants,
-  getLastThemePerf,
   setSkipThemePerf,
   setThemeProbeMode,
 } from '../lib/themePerfProbe';
@@ -161,17 +161,6 @@ function collectLayoutDiagnostics(
   rows.push({ label: 'chat-root descendant count', value: String(countDescendants(root)) });
   rows.push({ label: 'transcript descendant count', value: String(countDescendants(transcriptEl)) });
   rows.push({ label: 'rendered message count', value: String(messageCount) });
-
-  const perf = getLastThemePerf();
-  if (perf) {
-    rows.push({ label: 'theme probe mode', value: perf.mode });
-    rows.push({ label: 'theme apply ms', value: perf.applyMs.toFixed(2) });
-    rows.push({ label: 'theme flush ms', value: perf.flushMs.toFixed(2) });
-    rows.push({ label: 'theme rAF1 ms', value: perf.raf1Ms.toFixed(2) });
-    rows.push({ label: 'theme rAF2 total ms', value: perf.raf2Ms.toFixed(2) });
-  } else {
-    rows.push({ label: 'theme perf', value: 'no switch recorded yet' });
-  }
 
   if (root) {
     rows.push({ label: 'Chat root computed font-size', value: getComputedStyle(root).fontSize });
@@ -337,10 +326,9 @@ export function ChatScreen() {
         setSkipThemePerf(false);
         scroll.style.visibility = prevVisibility;
         setThemeProbeMode('normal');
-        refreshLayoutDiag();
       });
     });
-  }, [refreshLayoutDiag]);
+  }, []);
 
   const showToast = useCallback((t: string) => {
     setToast(t);
@@ -412,11 +400,15 @@ export function ChatScreen() {
     return attachChatTheme(root);
   }, []);
 
-  useEffect(() => {
-    return subscribeChatTheme(() => {
-      if (layoutDiag) refreshLayoutDiag();
-    });
-  }, [layoutDiag, refreshLayoutDiag]);
+  useLayoutEffect(() => {
+    const root = chatRootRef.current;
+    if (!root) return;
+    if (getLegacyNativeCompatDetails().legacyNativeCompat) {
+      root.setAttribute('data-chat-legacy-renderer', 'true');
+    } else {
+      root.removeAttribute('data-chat-legacy-renderer');
+    }
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -1129,7 +1121,6 @@ export function ChatScreen() {
   });
 
   const toolbarIcon = compactToolbar ? 32 : 35;
-  const legacyCompat = isLegacyNativeCompat();
   const modalUiState: SoftWindowUiState =
     manualWindow.uiState === 'probing' || manualWindow.uiState === 'idle'
       ? 'loading'
@@ -1139,7 +1130,6 @@ export function ChatScreen() {
     <div
       ref={chatRootRef}
       className="chat-root dash-fullscreen-page"
-      data-chat-legacy-renderer={legacyCompat ? 'true' : undefined}
       style={{
         display: 'flex',
         flexDirection: 'column',
@@ -1272,6 +1262,7 @@ export function ChatScreen() {
                         >
                           隐藏消息树测试主题
                         </div>
+                        <ThemePerfRows />
                         {layoutDiag && (
                           <div className="vstack vstack-6" style={{ background: 'var(--card2)', borderRadius: 14, padding: '12px 14px', fontFamily: MONO, fontSize: 11, lineHeight: 1.55, color: 'var(--ink2)' }}>
                             {layoutDiag.map((row) => (
