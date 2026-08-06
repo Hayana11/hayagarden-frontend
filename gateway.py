@@ -1001,6 +1001,7 @@ def build_messages(
     rewrite_id=None,
     cold_safe=False,
     history_token_budget_override=None,
+    commit_history_boundary=True,
 ):
     from chat.context_lean import (
         lean_file_dedup_enabled,
@@ -1149,10 +1150,11 @@ def build_messages(
         resident_file_hashes=file_hashes,
         apply_tool_budget=lean_tool_budget_enabled(),
     )
-    persist_history_boundary(
-        trimmed_up_to_id=stats.trimmed_up_to_id,
-        oldest_retained_message_id=stats.oldest_retained_message_id,
-    )
+    if commit_history_boundary:
+        persist_history_boundary(
+            trimmed_up_to_id=stats.trimmed_up_to_id,
+            oldest_retained_message_id=stats.oldest_retained_message_id,
+        )
     if plan['mode'] == 'relay_hysteresis' and stats.conversation_content_trimmed and stats.trimmed_up_to_id > 0:
         set_relay_history_trimmed_up_to_id(stats.trimmed_up_to_id)
     trimmed_up_to = effective_trimmed_up_to_id(
@@ -3656,9 +3658,10 @@ def _cc_resident_stream_gen(
       any stdin write. At most one deterministic rebuild (smaller history
       budget via ``rebuild_messages_fn``) is attempted; otherwise fail closed
       with ``ColdBootstrapOverflow`` — no stdin write, no provider call.
-      Fence C — a ``hard_context``-triggered cold must prove its estimate is
-      smaller than the previous cold bootstrap's; otherwise fail closed with
-      ``NoBenefitRespawnError`` instead of repeating an identical respawn.
+      Fence C — an *immediate* post-cold ``hard_context`` (storm window) must
+      prove its estimate shrank vs the preceding cold bootstrap; genuine hot
+      growth respawns are never blocked here. Fail closed with
+      ``NoBenefitRespawnError`` only for identical post-cold storms.
     """
     from chat.system_builder import (
         build_cc_cold_once,
@@ -3807,6 +3810,7 @@ def _cc_resident_stream_gen(
             effective_history_budget,
             estimate_text_tokens,
             estimate_whole_prompt,
+            should_refuse_no_benefit_hard_context_respawn,
         )
         from chat.context_lean import cc_history_token_budget
 
@@ -3846,18 +3850,46 @@ def _cc_resident_stream_gen(
                 estimate=cold_prompt_estimate,
                 target=cold_prompt_target_val,
                 history_budget=cold_history_budget_val,
+                cold_history_trimmed=cold_history_trimmed_flag,
             )
         cold_budget_overflow_flag = False
 
-        # Fence C: a hard_context respawn must prove the new cold bootstrap
-        # is actually smaller than the one that just tripped hard_context.
-        # No shrink evidence → refuse instead of looping identical respawns.
+        # Fence C: only refuse immediate post-cold hard_context storms where
+        # the rebuilt cold is not smaller than the preceding cold bootstrap.
         if pending_respawn_reason == 'hard_context':
-            baseline = int(getattr(_CC_RESIDENT, 'last_cold_bootstrap_estimate', 0) or 0)
-            if baseline > 0 and cold_prompt_estimate >= baseline:
+            pre_spawn_turns = getattr(_CC_RESIDENT, 'hard_context_pre_spawn_turns', None)
+            if should_refuse_no_benefit_hard_context_respawn(
+                pre_spawn_turns=pre_spawn_turns,
+                cold_prompt_estimate=cold_prompt_estimate,
+                last_cold_bootstrap_estimate=int(
+                    getattr(_CC_RESIDENT, 'last_cold_bootstrap_estimate', 0) or 0
+                ),
+                last_cold_bootstrap_generation=int(
+                    getattr(_CC_RESIDENT, 'last_cold_bootstrap_generation', 0) or 0
+                ),
+                current_generation=int(getattr(_CC_RESIDENT, 'generation', 0) or 0),
+            ):
+                baseline = int(getattr(_CC_RESIDENT, 'last_cold_bootstrap_estimate', 0) or 0)
                 raise NoBenefitRespawnError(
                     new_estimate=cold_prompt_estimate, baseline=baseline,
                 )
+            clear_storm = getattr(_CC_RESIDENT, 'clear_hard_context_pre_spawn_turns', None)
+            if callable(clear_storm):
+                clear_storm()
+
+        from chat.history_boundary import persist_history_boundary as _persist_history_boundary
+        _hist_boundary = history_stats or {}
+        if (
+            'trimmed_up_to_id' in _hist_boundary
+            or 'oldest_retained_message_id' in _hist_boundary
+        ):
+            _persist_history_boundary(
+                trimmed_up_to_id=int(_hist_boundary.get('trimmed_up_to_id') or 0),
+                oldest_retained_message_id=int(
+                    _hist_boundary.get('oldest_retained_message_id') or 0
+                ),
+            )
+
         note_cold_estimate = getattr(_CC_RESIDENT, 'note_cold_bootstrap_estimate', None)
         if callable(note_cold_estimate):
             note_cold_estimate(cold_prompt_estimate)
@@ -5655,6 +5687,7 @@ def chat_stream():
                         for_cc=True,
                         rewrite_id=_rewrite_id or None,
                         cold_safe=_cc_is_cold,
+                        commit_history_boundary=not _cc_is_cold,
                     )
 
                     def _rebuild_cc_messages(_new_history_budget, _rf=_resident_files, _rid=_rewrite_id):
@@ -5666,6 +5699,7 @@ def chat_stream():
                             rewrite_id=_rid or None,
                             cold_safe=True,
                             history_token_budget_override=_new_history_budget,
+                            commit_history_boundary=False,
                         )
                         return _rebuilt_msgs, _rebuilt_stats
 
@@ -5819,12 +5853,15 @@ def chat_stream():
                 _partial = getattr(e, 'usage', None)
                 if isinstance(_partial, dict) and (
                     _partial.get('rounds') or _partial.get('cache_read') or _partial.get('cache_creation')
+                    or _partial.get('cold_budget_overflow') is not None
                 ):
                     yield 'data: ' + json.dumps({'t': 'usage', **{
                         k: _partial.get(k) for k in (
                             'v', 'provider', 'num_rounds', 'input_tokens', 'output_tokens',
                             'cache_read', 'cache_creation', 'last_round_context',
                             'max_round_context', 'resident_turn_count', 'respawn_reason',
+                            'cold_budget_overflow', 'cold_prompt_estimate', 'cold_prompt_target',
+                            'cold_history_budget', 'cold_history_trimmed', 'cold_budget_mode',
                         ) if k in _partial
                     }}) + SSE_END
                 yield 'data: ' + json.dumps({'t': 'err', 'd': str(e)}) + SSE_END

@@ -4362,6 +4362,7 @@ def set_ledger_budget():
 
 from chat.cc_history_rewrite import (
     note_durable_history_rewrite,
+    note_durable_history_rewrite_with_meta,
     serialize_history_rewrite,
 )
 
@@ -4381,18 +4382,21 @@ def invalidate_cc_resident_for_history_rewrite(reason, idempotency_key=None):
     """
     import logging
 
-    epoch = note_durable_history_rewrite(reason, idempotency_key=idempotency_key)
-    result = _gw_json_request(
-        'POST', '/internal/cc-resident/history-rewrite', {'reason': reason},
+    meta = note_durable_history_rewrite_with_meta(
+        reason, idempotency_key=idempotency_key,
     )
-    if not isinstance(result, dict) or result.get('ok') is not True:
-        detail = result.get('error') if isinstance(result, dict) else result
-        logging.getLogger(__name__).warning(
-            'CC resident history invalidation bridge failed '
-            '(durable epoch remains; lazy cold on mismatch): %s',
-            detail,
+    epoch = str(meta.get('epoch') or '')
+    if meta.get('advanced'):
+        result = _gw_json_request(
+            'POST', '/internal/cc-resident/history-rewrite', {'reason': reason},
         )
-        return epoch
+        if not isinstance(result, dict) or result.get('ok') is not True:
+            detail = result.get('error') if isinstance(result, dict) else result
+            logging.getLogger(__name__).warning(
+                'CC resident history invalidation bridge failed '
+                '(durable epoch remains; lazy cold on mismatch): %s',
+                detail,
+            )
     return epoch
 
 
@@ -4494,11 +4498,16 @@ def _complete_rewrite_finalize(
             try:
                 conn = get_db()
                 try:
-                    rw_mod.persist_history_epoch_if_absent(conn, rewrite_id, str(epoch))
+                    if not rw_mod.persist_history_epoch_if_absent(conn, rewrite_id, str(epoch)):
+                        base['effects_pending'] = True
+                        base['code'] = 'effects_pending'
+                        return base
                 finally:
                     conn.close()
             except Exception:
-                pass
+                base['effects_pending'] = True
+                base['code'] = 'effects_pending'
+                return base
 
     try:
         from chat.scoring_identity import trigger_turn_scoring

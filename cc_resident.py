@@ -301,9 +301,13 @@ class ResidentSession:
         self._history_rewrite_epoch = ''
         # No-benefit respawn loop breaker (P0 cold-storm fix, Fence C).
         # Deliberately *not* reset by ``_reset_session_meta`` / ``_spawn`` —
-        # it must survive across the very respawn it is meant to gate so a
-        # ``hard_context`` cold can be compared against the previous one.
+        # the estimate/generation pair must survive across the respawn it gates.
         self._last_cold_bootstrap_estimate = 0
+        self._last_cold_bootstrap_generation = 0
+        # Captured in ``_decide_respawn_reason`` when returning ``hard_context``,
+        # *before* ``_spawn`` resets ``_turns_since_respawn``. Used to distinguish
+        # immediate post-cold storms from genuine hot growth respawns.
+        self._hard_context_pre_spawn_turns = None
         self._reset_session_meta(respawn_reason=None)
 
     def _reset_session_meta(self, *, respawn_reason):
@@ -450,6 +454,7 @@ class ResidentSession:
         min_between = _cfg_int('CC_MIN_TURNS_BETWEEN_RESPAWNS', 5)
 
         if self._last_round_context >= hard:
+            self._hard_context_pre_spawn_turns = int(self._turns_since_respawn or 0)
             return 'hard_context'
         if self._resident_turn_count >= max_turns:
             return 'turn_limit'
@@ -1205,14 +1210,32 @@ class ResidentSession:
         return self._pending_respawn_reason
 
     @property
+    def last_round_context(self):
+        return int(self._last_round_context or 0)
+
+    @property
+    def turns_since_respawn(self):
+        return int(self._turns_since_respawn or 0)
+
+    @property
+    def hard_context_pre_spawn_turns(self):
+        """Turns since respawn when ``hard_context`` was last decided, or None."""
+        val = self._hard_context_pre_spawn_turns
+        return None if val is None else int(val)
+
+    @property
     def last_cold_bootstrap_estimate(self):
         """Whole-prompt estimate of the most recent cold bootstrap sent.
 
-        Used only to gate a subsequent ``hard_context`` respawn (Fence C):
-        that respawn must prove its new estimate is smaller, or it fails
-        closed instead of repeating an identical oversized cold prompt.
+        Used only to gate an *immediate* post-cold ``hard_context`` storm
+        (Fence C) when paired with ``last_cold_bootstrap_generation``.
         """
         return self._last_cold_bootstrap_estimate
+
+    @property
+    def last_cold_bootstrap_generation(self):
+        """Resident generation that produced ``last_cold_bootstrap_estimate``."""
+        return int(self._last_cold_bootstrap_generation or 0)
 
     def note_cold_bootstrap_estimate(self, estimate):
         """Record the whole-prompt estimate for the cold bootstrap about to
@@ -1220,8 +1243,12 @@ class ResidentSession:
         updates the baseline (the content was decided regardless)."""
         try:
             self._last_cold_bootstrap_estimate = max(0, int(estimate or 0))
+            self._last_cold_bootstrap_generation = int(self._generation or 0)
         except (TypeError, ValueError):
             pass
+
+    def clear_hard_context_pre_spawn_turns(self):
+        self._hard_context_pre_spawn_turns = None
 
     @property
     def tool_profile(self):

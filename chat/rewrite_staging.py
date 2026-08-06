@@ -1007,7 +1007,13 @@ def persist_history_epoch_if_absent(conn, rewrite_id: str, epoch: str) -> bool:
         (epoch, _now(), rid),
     )
     conn.commit()
-    return int(cur.rowcount or 0) > 0
+    if int(cur.rowcount or 0) > 0:
+        return True
+    row = conn.execute(
+        'SELECT history_epoch FROM chat_rewrite_staging WHERE rewrite_id=?',
+        (rid,),
+    ).fetchone()
+    return bool(row and str(row['history_epoch'] if hasattr(row, 'keys') else row[0] or '').strip())
 
 
 def active_transcript(conn) -> list[tuple]:

@@ -13,6 +13,8 @@ Covers T1-T11 from the P0 history-rewrite cold-storm fix spec:
   T9  identical hard_context respawn after history_rewrite cold is refused
   T10 a first-ever hard_context (no baseline) is still allowed
   T11 estimator-miss fail-safe: an equal-size hard_context retry is refused
+  T18 genuine hot growth hard_context still allows bounded shrink
+  T20 cold overflow leaves history boundary unchanged and records overflow=True
 """
 from __future__ import annotations
 
@@ -252,12 +254,19 @@ class BuildMessagesColdSafeTests(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 class _FenceFakeResident:
-    def __init__(self, *, last_cold_bootstrap_estimate=0):
+    def __init__(
+        self,
+        *,
+        last_cold_bootstrap_estimate=0,
+        last_cold_bootstrap_generation=0,
+        generation=1,
+        hard_context_pre_spawn_turns=None,
+    ):
         self.last_state_snapshot = {}
         self.last_state_send_snapshot = {}
         self.last_group_message_id = 0
         self.group_cursor_initialized = True
-        self.generation = 1
+        self.generation = generation
         self.tool_surface_snapshot = {}
         self.committed_file_hashes = set()
         self.resident_pid = 4242
@@ -266,6 +275,8 @@ class _FenceFakeResident:
         self.allowed_tools = ''
         self.keepwarm_lease_expires_at = None
         self.last_cold_bootstrap_estimate = last_cold_bootstrap_estimate
+        self.last_cold_bootstrap_generation = last_cold_bootstrap_generation
+        self.hard_context_pre_spawn_turns = hard_context_pre_spawn_turns
         self.send_turn_calls = []
 
     def peek_idle_seconds(self):
@@ -273,6 +284,10 @@ class _FenceFakeResident:
 
     def note_cold_bootstrap_estimate(self, estimate):
         self.last_cold_bootstrap_estimate = int(estimate or 0)
+        self.last_cold_bootstrap_generation = int(self.generation or 0)
+
+    def clear_hard_context_pre_spawn_turns(self):
+        self.hard_context_pre_spawn_turns = None
 
     def send_turn(self, content, commit_meta=None):
         self.send_turn_calls.append(content)
@@ -443,6 +458,11 @@ class ColdPreflightFenceTests(unittest.TestCase):
         baseline = resident.last_cold_bootstrap_estimate
         self.assertGreater(baseline, 0)
 
+        # Simulate the hard_context spawn bumping generation and capturing storm
+        # window metadata from the immediately preceding cold.
+        resident.generation = 2
+        resident.hard_context_pre_spawn_turns = 1
+
         # Nothing changed: an immediate hard_context respawn with an identical
         # (non-shrinking) cold bootstrap must be refused, not repeated forever.
         with self.assertRaises(NoBenefitRespawnError):
@@ -477,12 +497,88 @@ class ColdPreflightFenceTests(unittest.TestCase):
         self._run(resident, messages, int_overrides=int_overrides, pending_respawn_reason=None)
         self.assertEqual(len(resident.send_turn_calls), 1)
 
+        resident.generation = 2
+        resident.hard_context_pre_spawn_turns = 1
+
         with self.assertRaises(NoBenefitRespawnError):
             self._run(
                 resident, messages, int_overrides=int_overrides,
                 pending_respawn_reason='hard_context',
             )
         self.assertEqual(len(resident.send_turn_calls), 1)
+
+
+    def test_t18_genuine_hot_growth_hard_context_allows_bounded_shrink(self):
+        """70k cold → many hot turns → 120k hard → 80k bounded cold must be allowed."""
+        resident = _FenceFakeResident(
+            last_cold_bootstrap_estimate=70_000,
+            last_cold_bootstrap_generation=1,
+            generation=12,
+            hard_context_pre_spawn_turns=15,
+        )
+        messages = _history_messages(2, row_chars=10, last_user_text='hi')
+        int_overrides = {
+            'CC_CONTEXT_HARD_LIMIT': 120_000, 'CC_CONTEXT_SOFT_LIMIT': 90_000,
+            'CC_COLD_BOOTSTRAP_SAFETY_MARGIN': 8000,
+        }
+        with contextlib.ExitStack() as stack:
+            for p in self._fence_patches(resident, int_overrides=int_overrides):
+                stack.enter_context(p)
+            stack.enter_context(mock.patch(
+                'chat.cold_bootstrap_budget.estimate_whole_prompt',
+                return_value=80_000,
+            ))
+            events = list(self.gateway._cc_resident_stream_gen(
+                messages,
+                user_turn=True,
+                is_cold=True,
+                history_stats={},
+                pending_respawn_reason='hard_context',
+            ))
+        self.assertEqual(len(resident.send_turn_calls), 1)
+        self.assertTrue(any(e == 'done' for e, _ in events))
+
+    def test_t20_cold_overflow_leaves_boundary_unchanged_and_records_overflow(self):
+        resident = _FenceFakeResident()
+        messages = _history_messages(2, row_chars=10, last_user_text='hi')
+        rebuild_calls = []
+
+        def _rebuild(new_budget):
+            rebuild_calls.append(new_budget)
+            return messages, {'conversation_content_trimmed': True}
+
+        import config_store
+        config_store.set('HISTORY_TRIMMED_UP_TO_ID', '11')
+        config_store.set('HISTORY_OLDEST_RETAINED_ID', '22')
+        before = {
+            'trimmed_up_to_id': config_store.get_int('HISTORY_TRIMMED_UP_TO_ID', 0),
+            'oldest_retained_message_id': config_store.get_int('HISTORY_OLDEST_RETAINED_ID', 0),
+        }
+
+        with contextlib.ExitStack() as stack:
+            for p in self._fence_patches(
+                resident,
+                int_overrides={'CC_CONTEXT_HARD_LIMIT': 100, 'CC_CONTEXT_SOFT_LIMIT': 80,
+                                'CC_COLD_BOOTSTRAP_SAFETY_MARGIN': 10,
+                                'HISTORY_TOKEN_BUDGET': 5000},
+            ):
+                stack.enter_context(p)
+            stack.enter_context(mock.patch('chat.system_builder.build_cc_static_parts', return_value={
+                'persona': 'STATIC', 'stable_note': '', 'save_instr': '',
+                'full_system': 'S' * 400,
+            }))
+            with self.assertRaises(ColdBootstrapOverflow) as ctx:
+                list(self.gateway._cc_resident_stream_gen(
+                    messages, user_turn=True, is_cold=True,
+                    rebuild_messages_fn=_rebuild,
+                ))
+        after = {
+            'trimmed_up_to_id': config_store.get_int('HISTORY_TRIMMED_UP_TO_ID', 0),
+            'oldest_retained_message_id': config_store.get_int('HISTORY_OLDEST_RETAINED_ID', 0),
+        }
+        self.assertEqual(after, before)
+        self.assertTrue(ctx.exception.usage.get('cold_budget_overflow'))
+        self.assertEqual(resident.send_turn_calls, [])
 
 
 if __name__ == '__main__':

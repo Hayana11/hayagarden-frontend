@@ -7,6 +7,7 @@ Covers T12-T17 from the spec:
   T15 a different rewrite advances to a different epoch
   T16 an older rewrite's late retry cannot roll back a newer epoch
   T17 legacy mutation semantics (delete / branch_switch) are unchanged
+  T19 marker persist fail → newer rewrite → old retry must not mint a third epoch
 """
 from __future__ import annotations
 
@@ -63,6 +64,7 @@ class RewriteEpochIdempotenceTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.db_path = str(Path(self.tmp.name) / 'epoch.db')
         self.epoch_path = str(Path(self.tmp.name) / 'epoch')
+        self.idempotency_path = str(Path(self.tmp.name) / 'idempotency.json')
         self.lock_path = str(Path(self.tmp.name) / 'lock')
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
@@ -87,6 +89,7 @@ class RewriteEpochIdempotenceTests(unittest.TestCase):
             mock.patch.object(app_module, '_gw_json_request', side_effect=fake_bridge),
             mock.patch.dict(os.environ, {
                 'CC_HISTORY_REWRITE_EPOCH_PATH': self.epoch_path,
+                'CC_HISTORY_REWRITE_IDEMPOTENCY_PATH': self.idempotency_path,
                 'CC_HISTORY_REWRITE_LOCK_PATH': self.lock_path,
             }, clear=False),
         ]
@@ -291,6 +294,46 @@ class RewriteEpochIdempotenceTests(unittest.TestCase):
         self.assertEqual(response2.status_code, 200)
         e3 = current_history_rewrite_epoch()
         self.assertNotEqual(e3, e2)
+
+    # T19 (hard test) ---------------------------------------------------
+    def test_t19_marker_persist_fail_then_newer_rewrite_retry_no_third_epoch(self):
+        u1 = self._insert('hayana', 'U1')
+        self._insert('assistant', 'A1')
+
+        rid1 = self._prep_and_ready_edit(u1, "U1'", "A1'")
+        real_persist = rw.persist_history_epoch_if_absent
+        persist_calls = {'n': 0}
+
+        def fail_first_persist(conn, rewrite_id, epoch):
+            persist_calls['n'] += 1
+            if persist_calls['n'] == 1:
+                return False
+            return real_persist(conn, rewrite_id, epoch)
+
+        with mock.patch.object(rw, 'persist_history_epoch_if_absent', side_effect=fail_first_persist):
+            fin1 = self.client.post('/api/chat/edit/finalize', json={'rewrite_id': rid1})
+        self.assertEqual(fin1.status_code, 200)
+        self.assertTrue(fin1.get_json().get('effects_pending'))
+        e1 = current_history_rewrite_epoch()
+        self.assertTrue(e1)
+        self.assertEqual(rw.history_epoch_of(self._staging(rid1)), '')
+
+        u2 = self._insert('hayana', 'U2')
+        self._insert('assistant', 'A2')
+        rid2 = self._prep_and_ready_edit(u2, "U2'", "A2'")
+        fin2 = self.client.post('/api/chat/edit/finalize', json={'rewrite_id': rid2})
+        self.assertEqual(fin2.status_code, 200)
+        e2 = current_history_rewrite_epoch()
+        self.assertTrue(e2)
+        self.assertNotEqual(e1, e2)
+        bridge_calls_after_b = len(self.bridge_calls)
+
+        fin1_retry = self.client.post('/api/chat/edit/finalize', json={'rewrite_id': rid1})
+        self.assertEqual(fin1_retry.status_code, 200)
+        self.assertFalse(fin1_retry.get_json().get('effects_pending'))
+        self.assertEqual(current_history_rewrite_epoch(), e2)
+        self.assertEqual(rw.history_epoch_of(self._staging(rid1)), e1)
+        self.assertEqual(len(self.bridge_calls), bridge_calls_after_b)
 
 
 if __name__ == '__main__':
