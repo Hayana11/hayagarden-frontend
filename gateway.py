@@ -7058,6 +7058,7 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
     # Only comparison-eligible live Behavior attempts that already hold V.
     # C2: one decision_attempt_id binds Shadow + production outcome.
     decision_attempt_id = None
+    _skill_view = None
     if planner_view is not None and wake_run_id:
         try:
             from chat.capability_skill_view import freeze_capability_skill_view
@@ -7117,6 +7118,108 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
                 )
             except Exception:
                 pass
+
+    _b2_plan = None
+    if (
+        live
+        and not dry_run
+        and planner_view is not None
+        and _skill_view is not None
+        and decision_attempt_id
+        and wake_run_id
+    ):
+        try:
+            from chat.behavior_authority_b2 import plan_b2_wake_action
+            _b2_plan = plan_b2_wake_action(
+                planner_view=planner_view,
+                skill_view=_skill_view,
+                wake_run_id=wake_run_id,
+                decision_attempt_id=decision_attempt_id,
+                get_db_fn=get_db,
+                now=now,
+                chat_busy_fn=_chat_is_generating,
+                wake_run_id_seen=_wake_run_id_seen,
+                min_idle_minutes=min_idle,
+                mode=mode,
+            )
+        except Exception as _b2_exc:
+            try:
+                app.logger.warning(
+                    '[behavior_authority_b2] plan skipped: %s', _b2_exc,
+                )
+            except Exception:
+                pass
+
+    if _b2_plan is not None and _b2_plan.route == 'blocked':
+        blocked_action = None
+        if isinstance(_b2_plan.planner_decision, dict):
+            blocked_action = _b2_plan.planner_decision.get('action_candidate')
+        _mark_production_attempt(
+            'failed',
+            action=blocked_action,
+            reason=f'b2_gate:{_b2_plan.gate_reason}',
+        )
+        return jsonify({
+            'ok': True,
+            'skipped': True,
+            'reason': f'b2_gate_blocked:{_b2_plan.gate_reason}',
+            'wake_run_id': wake_run_id,
+            'b2_gate': _b2_plan.gate_reason,
+        })
+
+    if _b2_plan is not None and _b2_plan.route == 'none_takeover':
+        from wake.executor import execute as _wake_exec
+        planner_provenance = _b2_plan.planner_provenance or {}
+        planner_decision = _b2_plan.planner_decision or {}
+        thoughts = str(planner_decision.get('intent') or '').strip()
+        wake_cache_info = {
+            'provider': wake_provider,
+            'source': 'wake',
+            'wake_run_id': wake_run_id,
+            'b2_authority': True,
+        }
+        try:
+            exec_out = _wake_exec(
+                'none',
+                thoughts,
+                '',
+                mode,
+                get_db_fn=get_db,
+                desire_driven=_get_desire_driven(),
+                surfaced_desire_ids=surfaced_desire_ids,
+                desire_ledger_enabled=_get_desire_ledger_enabled(),
+                cache_info=wake_cache_info,
+                wake_run_id=wake_run_id,
+                window_identity=_wake_window_identity,
+                settle_fired_drive=planner_provenance.get('primary_drive'),
+                settle_provenance_present=True,
+                settle_user_idle_hours=t2_hours,
+            )
+        except Exception as _b2_exec_exc:
+            _mark_production_attempt(
+                'failed', action='none', reason=str(_b2_exec_exc),
+            )
+            raise
+        _wake_run_id_mark(wake_run_id)
+        try:
+            from chat.planner_shadow import classify_production_outcome
+            _prod_status, _prod_reason = classify_production_outcome(exec_out)
+        except Exception:
+            _prod_status, _prod_reason = 'failed', 'classify_production_outcome_error'
+        _mark_production_attempt(
+            _prod_status, action='none', reason=_prod_reason or None,
+        )
+        return jsonify({
+            'ok': True,
+            'action': 'none',
+            'content': '',
+            'thoughts': thoughts,
+            'provider': wake_provider,
+            'model': None,
+            'wake_run_id': wake_run_id,
+            'b2_authority': True,
+            'b2_gate': _b2_plan.gate_reason,
+        })
 
     try:
         runner = _wake_runners.get_wake_runner(wake_provider)

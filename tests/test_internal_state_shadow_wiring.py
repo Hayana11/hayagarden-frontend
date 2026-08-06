@@ -547,9 +547,15 @@ class WakeOutcomeWiringTests(unittest.TestCase):
     def test_desire_driven_frozen_before_executor_and_reused(self):
         src = Path(ROOT, 'gateway.py').read_text(encoding='utf-8')
         block = src.split('def _wake_decide_locked', 1)[1].split('\ndef ', 1)[0]
-        self.assertEqual(block.count('desire_driven = _get_desire_driven()'), 1)
-        self.assertIn('desire_driven=desire_driven', block)
-        self.assertNotIn('desire_driven=_get_desire_driven()', block)
+        legacy_tail = block.split('get_wake_runner', 1)[1]
+        # Legacy executor: one freeze after runner, reused in execute().
+        self.assertEqual(legacy_tail.count('desire_driven = _get_desire_driven()'), 1)
+        self.assertIn('desire_driven=desire_driven', legacy_tail)
+        self.assertNotIn('desire_driven=_get_desire_driven()', legacy_tail)
+        # B2 none_takeover is a separate branch with its own read (not legacy timing).
+        b2_head, _ = block.split('get_wake_runner', 1)
+        self.assertIn("route == 'none_takeover'", b2_head)
+        self.assertIn('desire_driven=_get_desire_driven()', b2_head)
 
     def test_gateway_single_authoritative_wake_outcome_path(self):
         block = Path(ROOT, 'gateway.py').read_text(encoding='utf-8').split(
