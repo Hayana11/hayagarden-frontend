@@ -121,7 +121,10 @@ class RewriteNativeForkTest(unittest.TestCase):
         self.assertTrue(plan.eligible)
         self.assertEqual(plan.fork_event_uuid, 'ev-a0')
         self.assertEqual(plan.resend_content, 'U1')
+        self.assertEqual(plan.boundary_assistant_message_id, a0)
         self.assertEqual(plan.mapping_provenance.get('boundary_message_id'), a0)
+        self.assertEqual(plan.tool_profile, 'text_only')
+        self.assertEqual(plan.static_system_kind, 'daily')
 
     # T2
     def test_edit_resolves_previous_assistant_boundary(self):
@@ -138,7 +141,33 @@ class RewriteNativeForkTest(unittest.TestCase):
         self.assertTrue(plan.eligible)
         self.assertEqual(plan.fork_event_uuid, 'ev-a0')
         self.assertEqual(plan.resend_content, "U1'")
+        self.assertEqual(plan.boundary_assistant_message_id, a0)
         self.assertEqual(plan.mapping_provenance.get('boundary_message_id'), a0)
+
+    def test_partial_mapping_gap_does_not_skip_to_earlier_assistant(self):
+        """A0 unmapped must cold-fallback even if an earlier assistant is mapped."""
+        a_prev = self._insert_msg('assistant', 'A-1')
+        u0 = self._insert_msg('hayana', 'U0')
+        a0 = self._insert_msg('assistant', 'A0')
+        u1 = self._insert_msg('hayana', 'U1')
+        a1 = self._insert_msg('assistant', 'A1')
+        sid = 'sid-gap'
+        self._map(event_uuid='ev-a-1', message_id=a_prev, role='assistant', session=sid, offset=10)
+        self._map(event_uuid='ev-u0', message_id=u0, role='user', session=sid, offset=20)
+        # Intentionally no mapping for exact A0.
+        self._map(event_uuid='ev-u1', message_id=u1, role='user', session=sid, offset=40)
+        self._map(event_uuid='ev-a1', message_id=a1, role='assistant', session=sid, offset=50)
+        self._write_parent(sid)
+        plan = rnf.resolve_rewrite_native_fork(
+            self.conn,
+            {'operation': 'regen', 'source_message_id': a1, 'user_message_id': u1},
+            cwd=self.cwd,
+            claude_home=self.claude_home,
+        )
+        self.assertFalse(plan.eligible)
+        self.assertEqual(plan.reason, rnf.REASON_MAPPING_GAP)
+        self.assertEqual(plan.mapping_provenance.get('boundary_assistant_message_id'), a0)
+        self.assertNotEqual(plan.fork_event_uuid, 'ev-a-1')
 
     # T3
     def test_no_previous_assistant_ineligible(self):
@@ -356,9 +385,13 @@ class RewriteNativeForkTest(unittest.TestCase):
         class OkResident:
             def __init__(self):
                 self.spawned = None
+                self.tool_profile = None
+                self.system_text = None
 
             def spawn_resumable(self, system_text, env, *, resume_session_id, tool_profile='legacy', reason='x'):
                 self.spawned = resume_session_id
+                self.tool_profile = tool_profile
+                self.system_text = system_text
                 return self
 
             def wait_staged_health(self, **kwargs):
@@ -368,22 +401,29 @@ class RewriteNativeForkTest(unittest.TestCase):
                 pass
 
         resident = OkResident()
-        ok, meta = rnf.try_prepare_native_trial_resident(
-            staging={
-                'operation': 'regen',
-                'source_message_id': a1,
-                'user_message_id': staging['user_message_id'],
-            },
-            conn=self.conn,
-            cwd=self.cwd,
-            system_text='sys',
-            env={},
-            resident=resident,
-            claude_home=self.claude_home,
-            fork_session_fn=_fake_fork,
-        )
+        with mock.patch(
+            'chat.system_builder.build_cc_daily_static_parts',
+            return_value={'full_system': 'DAILY_STATIC_PROBE'},
+        ):
+            ok, meta = rnf.try_prepare_native_trial_resident(
+                staging={
+                    'operation': 'regen',
+                    'source_message_id': a1,
+                    'user_message_id': staging['user_message_id'],
+                },
+                conn=self.conn,
+                cwd=self.cwd,
+                system_text='CLASSIC_STATIC_SHOULD_NOT_WIN',
+                env={},
+                resident=resident,
+                claude_home=self.claude_home,
+                fork_session_fn=_fake_fork,
+            )
         self.assertTrue(ok)
         self.assertEqual(meta.get('rewrite_cache_mode'), rnf.MODE_NATIVE)
+        self.assertEqual(resident.tool_profile, 'text_only')
+        self.assertEqual(resident.system_text, 'DAILY_STATIC_PROBE')
+        self.assertEqual(meta.get('rewrite_cache_tool_profile'), 'text_only')
         after = [
             dict(r)
             for r in self.conn.execute(
@@ -461,12 +501,49 @@ class RewriteNativeForkTest(unittest.TestCase):
             reason='',
             parent_session_id='abc',
             fork_event_uuid='def',
+            tool_profile='text_only',
+            static_system_kind='daily',
         )
         obs = plan.observability()
         self.assertNotIn('cache_read', obs)
         self.assertEqual(obs['rewrite_cache_mode'], rnf.MODE_NATIVE)
         self.assertTrue(obs['rewrite_cache_parent_session_hash'])
         self.assertNotEqual(obs['rewrite_cache_parent_session_hash'], 'abc')
+        self.assertEqual(obs['rewrite_cache_tool_profile'], 'text_only')
+
+    def test_legacy_tool_profile_override_rejected(self):
+        _h, _a0, u1, a1 = self._chain_h_a0_u1_a1()
+
+        class _Result:
+            session_id = 'sid-child'
+
+        def _fake_fork(session_id, directory=None, up_to_message_id=None, title=None):
+            from tools.cc_jsonl_usage import session_jsonl_path
+            child = session_jsonl_path(self.cwd, 'sid-child', claude_home=self.claude_home)
+            child.parent.mkdir(parents=True, exist_ok=True)
+            child.write_bytes(b'child\n')
+            return _Result()
+
+        class GuardResident:
+            def spawn_resumable(self, *a, **k):
+                raise AssertionError('must not spawn with mismatched profile')
+
+            def invalidate_for_history_rewrite(self, reason='x'):
+                pass
+
+        ok, meta = rnf.try_prepare_native_trial_resident(
+            staging={'operation': 'regen', 'source_message_id': a1, 'user_message_id': u1},
+            conn=self.conn,
+            cwd=self.cwd,
+            system_text='sys',
+            env={},
+            resident=GuardResident(),
+            claude_home=self.claude_home,
+            fork_session_fn=_fake_fork,
+            tool_profile='legacy',
+        )
+        self.assertFalse(ok)
+        self.assertEqual(meta.get('rewrite_cache_fallback_reason'), rnf.REASON_PROFILE_UNSUPPORTED)
 
 
 if __name__ == '__main__':

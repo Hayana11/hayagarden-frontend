@@ -312,6 +312,8 @@ def _merge_rewrite_cache_meta(usage: dict | None, turn_data: dict | None) -> dic
         'rewrite_cache_parent_session_hash',
         'rewrite_cache_fork_event_hash',
         'rewrite_cache_child_session_hash',
+        'rewrite_cache_tool_profile',
+        'rewrite_cache_static_system_kind',
     ):
         if key in meta and meta[key] is not None:
             out[key] = meta[key]

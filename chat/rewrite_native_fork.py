@@ -26,12 +26,19 @@ MODE_COLD = 'cold_fallback'
 REASON_FLAG_OFF = 'flag_off'
 REASON_UNSUPPORTED_PROVIDER = 'unsupported_provider'
 REASON_MAPPING_MISSING = 'mapping_missing'
+REASON_MAPPING_GAP = 'mapping_gap'
 REASON_MAPPING_AMBIGUOUS = 'mapping_ambiguous'
 REASON_SESSION_MISMATCH = 'session_mismatch'
 REASON_EVENT_MISSING = 'event_missing'
 REASON_PARENT_TRANSCRIPT_MISSING = 'parent_transcript_missing'
 REASON_NO_SAFE_PRE_USER_BOUNDARY = 'no_safe_pre_user_boundary'
 REASON_UNSUPPORTED_BOUNDARY = 'unsupported_boundary'
+REASON_PROFILE_UNSUPPORTED = 'parent_profile_unsupported'
+
+# Soft Window is the only producer of chat_message_claude_events today.
+_AI_AUTHORS = ('fyodor', 'assistant', 'claude')
+_SOFT_WINDOW_TOOL_PROFILE = 'text_only'
+_SOFT_WINDOW_STATIC_KIND = 'daily'
 REASON_SDK_UNAVAILABLE = 'sdk_unavailable'
 REASON_FORK_FAILED = 'fork_failed'
 REASON_PARENT_MUTATED = 'parent_mutated'
@@ -50,8 +57,11 @@ class NativeForkPlan:
     fork_event_uuid: str = ''
     source_message_id: int = 0
     rewrite_user_message_id: int = 0
+    boundary_assistant_message_id: int = 0
     resend_content: str = ''
     parent_transcript_path: str = ''
+    tool_profile: str = ''
+    static_system_kind: str = ''
     mapping_provenance: dict[str, Any] = field(default_factory=dict)
 
     def observability(self) -> dict[str, Any]:
@@ -64,6 +74,10 @@ class NativeForkPlan:
             out['rewrite_cache_parent_session_hash'] = _redact_id(self.parent_session_id)
         if self.fork_event_uuid:
             out['rewrite_cache_fork_event_hash'] = _redact_id(self.fork_event_uuid)
+        if self.tool_profile:
+            out['rewrite_cache_tool_profile'] = self.tool_profile
+        if self.static_system_kind:
+            out['rewrite_cache_static_system_kind'] = self.static_system_kind
         return out
 
 
@@ -150,24 +164,34 @@ def _user_mapping_rows(conn, message_id: int) -> list[dict[str, Any]]:
     )
 
 
-def _assistant_boundary_rows(
-    conn,
-    *,
-    before_message_id: int,
-    claude_session_id: str,
-) -> list[dict[str, Any]]:
-    """Canonical previous-assistant candidates for fork (same session, id < user)."""
+def _assistant_mapping_rows(conn, message_id: int) -> list[dict[str, Any]]:
+    """Assistant mapping rows for one exact DB message id (no earlier fallback)."""
     return _rows_as_dicts(
         conn,
         '''SELECT event_uuid, message_id, role, claude_session_id,
                   context_id, context_epoch, resident_generation, jsonl_byte_offset
            FROM chat_message_claude_events
-           WHERE role='assistant'
-             AND message_id < ?
-             AND claude_session_id=?
-           ORDER BY message_id DESC, jsonl_byte_offset DESC, event_uuid ASC''',
-        (int(before_message_id), str(claude_session_id)),
+           WHERE message_id=? AND role='assistant'
+           ORDER BY jsonl_byte_offset DESC, event_uuid ASC''',
+        (int(message_id),),
     )
+
+
+def _db_previous_assistant_id(conn, before_message_id: int) -> Optional[int]:
+    """True A0 from active chat_messages: last AI row strictly before rewrite user."""
+    row = conn.execute(
+        '''SELECT id FROM chat_messages
+           WHERE id < ?
+             AND author IN ('fyodor', 'assistant', 'claude')
+           ORDER BY id DESC
+           LIMIT 1''',
+        (int(before_message_id),),
+    ).fetchone()
+    if not row:
+        return None
+    if isinstance(row, Mapping):
+        return int(row['id'])
+    return int(row[0])
 
 
 def resolve_rewrite_native_fork(
@@ -257,37 +281,56 @@ def resolve_rewrite_native_fork(
         if len(sessions_on_user) != 1 or parent_sid not in sessions_on_user:
             return _reject(REASON_SESSION_MISMATCH, detail='user_multi_session')
 
-        boundary_rows = _assistant_boundary_rows(
-            conn,
-            before_message_id=rewrite_user_id,
-            claude_session_id=parent_sid,
-        )
-        if not boundary_rows:
+        # Exact DB boundary first — never walk to an earlier mapped assistant.
+        a0_id = _db_previous_assistant_id(conn, rewrite_user_id)
+        if a0_id is None:
             return _reject(REASON_NO_SAFE_PRE_USER_BOUNDARY)
 
-        # Top message_id bucket only; refuse if that bucket spans sessions (defensive).
-        top_mid = int(boundary_rows[0]['message_id'])
-        top_bucket = [r for r in boundary_rows if int(r['message_id']) == top_mid]
-        top_sessions = {str(r.get('claude_session_id') or '') for r in top_bucket}
-        if top_sessions != {parent_sid}:
-            return _reject(REASON_SESSION_MISMATCH, detail='boundary_session_mismatch')
+        a0_maps = _assistant_mapping_rows(conn, a0_id)
+        if not a0_maps:
+            return _reject(
+                REASON_MAPPING_GAP,
+                detail='a0_mapping_missing',
+                boundary_assistant_message_id=a0_id,
+            )
 
-        # Inclusive fork at the latest assistant event of the previous turn.
-        fork_row = top_bucket[0]
+        a0_sessions = {str(r.get('claude_session_id') or '') for r in a0_maps}
+        if a0_sessions != {parent_sid}:
+            return _reject(
+                REASON_SESSION_MISMATCH,
+                detail='a0_session_mismatch',
+                boundary_assistant_message_id=a0_id,
+            )
+
+        # Inclusive fork at latest assistant event of the exact A0 message.
+        fork_row = a0_maps[0]
         fork_uuid = str(fork_row.get('event_uuid') or '').strip()
         if not fork_uuid:
             return _reject(REASON_EVENT_MISSING, detail='boundary_uuid_missing')
 
-        # Ambiguous: multiple distinct terminal assistant uuids at same offset identity.
-        # Same message may have several assistant rows (tool rounds); we take the
-        # highest jsonl_byte_offset (ORDER BY DESC). If offsets tie with different
-        # uuids, refuse rather than guessing.
+        # Same message may have several assistant rows (tool rounds); take the
+        # highest jsonl_byte_offset. Offset ties with different uuids → refuse.
         tied = [
-            r for r in top_bucket
+            r for r in a0_maps
             if r.get('jsonl_byte_offset') == fork_row.get('jsonl_byte_offset')
         ]
         if len({str(r.get('event_uuid')) for r in tied}) > 1:
             return _reject(REASON_MAPPING_AMBIGUOUS, detail='boundary_offset_tie')
+
+        # Mapping rows are Soft Window-only today → preserve text_only + daily static.
+        # Unknown/empty context identity is fail-closed (do not guess legacy MCP).
+        context_id = fork_row.get('context_id')
+        user_context_id = user_map.get('context_id')
+        if context_id is None or user_context_id is None:
+            return _reject(REASON_PROFILE_UNSUPPORTED, detail='missing_context_id')
+        if int(context_id) != int(user_context_id):
+            return _reject(REASON_SESSION_MISMATCH, detail='context_id_mismatch')
+        if int(fork_row.get('context_epoch') or -1) != int(user_map.get('context_epoch') or -2):
+            return _reject(REASON_SESSION_MISMATCH, detail='context_epoch_mismatch')
+        if int(fork_row.get('resident_generation') or -1) != int(
+            user_map.get('resident_generation') or -2
+        ):
+            return _reject(REASON_SESSION_MISMATCH, detail='resident_generation_mismatch')
 
         path = session_jsonl_path(cwd, parent_sid, claude_home=claude_home)
         if path is None or not path.is_file():
@@ -306,13 +349,17 @@ def resolve_rewrite_native_fork(
             fork_event_uuid=fork_uuid,
             source_message_id=source_message_id,
             rewrite_user_message_id=rewrite_user_id,
+            boundary_assistant_message_id=a0_id,
             resend_content=resend_content,
             parent_transcript_path=str(path),
+            tool_profile=_SOFT_WINDOW_TOOL_PROFILE,
+            static_system_kind=_SOFT_WINDOW_STATIC_KIND,
             mapping_provenance={
                 'user_event_uuid_hash': _redact_id(user_event),
-                'boundary_message_id': top_mid,
-                'context_id': fork_row.get('context_id'),
-                'resident_generation': fork_row.get('resident_generation'),
+                'boundary_message_id': a0_id,
+                'context_id': int(context_id),
+                'context_epoch': int(fork_row.get('context_epoch') or 0),
+                'resident_generation': int(fork_row.get('resident_generation') or 0),
             },
         )
     except Exception as exc:
@@ -454,6 +501,14 @@ def execute_native_fork(
     )
 
 
+def _system_text_for_plan(plan: NativeForkPlan, fallback_system_text: str) -> str:
+    """Parent Soft Window → daily text-only static; never invent a mixed profile."""
+    if plan.static_system_kind == _SOFT_WINDOW_STATIC_KIND:
+        from chat.system_builder import build_cc_daily_static_parts
+        return build_cc_daily_static_parts()['full_system']
+    return fallback_system_text
+
+
 def try_prepare_native_trial_resident(
     *,
     staging: Mapping[str, Any],
@@ -464,9 +519,13 @@ def try_prepare_native_trial_resident(
     resident,
     claude_home: Optional[str] = None,
     fork_session_fn: Optional[Callable[..., Any]] = None,
-    tool_profile: str = 'legacy',
+    tool_profile: Optional[str] = None,
 ) -> tuple[bool, dict[str, Any]]:
-    """Resolve+fork+spawn_resumable on trial resident. Never raises to caller."""
+    """Resolve+fork+spawn_resumable on trial resident. Never raises to caller.
+
+    ``tool_profile`` argument is ignored when the plan carries a parent profile;
+    callers must not force legacy MCP onto Soft Window parents.
+    """
     meta: dict[str, Any] = {
         'rewrite_cache_mode': MODE_COLD,
         'rewrite_cache_fallback_reason': REASON_FLAG_OFF,
@@ -482,6 +541,22 @@ def try_prepare_native_trial_resident(
         if not plan.eligible:
             return False, meta
 
+        child_profile = str(plan.tool_profile or '').strip()
+        if not child_profile:
+            return False, {
+                **meta,
+                'rewrite_cache_mode': MODE_COLD,
+                'rewrite_cache_fallback_reason': REASON_PROFILE_UNSUPPORTED,
+            }
+        # Explicit override only allowed when it matches the resolved parent profile.
+        if tool_profile is not None and str(tool_profile) != child_profile:
+            return False, {
+                **meta,
+                'rewrite_cache_mode': MODE_COLD,
+                'rewrite_cache_fallback_reason': REASON_PROFILE_UNSUPPORTED,
+                'detail': 'tool_profile_override_mismatch',
+            }
+
         execution = execute_native_fork(
             plan,
             cwd=cwd,
@@ -492,12 +567,13 @@ def try_prepare_native_trial_resident(
         if not execution.ok:
             return False, meta
 
+        spawn_system = _system_text_for_plan(plan, system_text)
         try:
             resident.spawn_resumable(
-                system_text,
+                spawn_system,
                 dict(env),
                 resume_session_id=execution.child_session_id,
-                tool_profile=tool_profile,
+                tool_profile=child_profile,
                 reason='rewrite_native_fork',
             )
             # Child JSONL identity guard during health window.
