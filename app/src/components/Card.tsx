@@ -29,9 +29,5 @@ export function Card({
 }
 
 export function ScreenLayout({ children }: { children: ReactNode }) {
-  return (
-    <div style={{ padding: '26px 20px 110px', display: 'flex', flexDirection: 'column', gap: 16 }}>
-      {children}
-    </div>
-  );
+  return <div className="vstack vstack-16 screen-stack">{children}</div>;
 }
