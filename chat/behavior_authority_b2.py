@@ -41,7 +41,7 @@ _BLOCK_PRIORITY = (
 class B2WakePlan:
     """Routing outcome for one Wake attempt after authoritative Planner input."""
 
-    route: str  # legacy | blocked | none_takeover
+    route: str  # legacy | blocked | none_takeover | message_takeover
     gate_reason: Optional[str] = None
     planner_decision: Optional[dict] = None
     planner_provenance: Optional[dict] = None
@@ -162,6 +162,48 @@ def plan_b2_wake_action(
         return B2WakePlan(route='legacy')
 
     action = str(decision.get('action_candidate') or '').strip()
+
+    if action == 'message':
+        from chat.behavior_authority_b3 import (
+            effective_b3_enabled,
+            evaluate_message_gate,
+        )
+        if not effective_b3_enabled():
+            return B2WakePlan(route='legacy')
+        # B3 ownership established; post-ownership failures must not legacy.
+        try:
+            chat_busy = bool(chat_busy_fn()) if chat_busy_fn is not None else False
+            verdict, gate_reason = evaluate_message_gate(
+                planner_decision=decision,
+                skill_view=skill_view,
+                wake_run_id=wake_run_id,
+                get_db_fn=get_db_fn,
+                now=now,
+                chat_busy=chat_busy,
+                wake_run_id_seen=wake_run_id_seen,
+                min_idle_minutes=min_idle_minutes,
+                mode=mode,
+            )
+        except Exception as exc:
+            _LOG.warning('b3 owned gate evaluation failed: %s', exc)
+            return B2WakePlan(
+                route='blocked',
+                gate_reason='precondition_failed',
+                planner_decision=decision,
+            )
+        if verdict == _GATE_BLOCK:
+            return B2WakePlan(
+                route='blocked',
+                gate_reason=gate_reason,
+                planner_decision=decision,
+            )
+        return B2WakePlan(
+            route='message_takeover',
+            gate_reason=gate_reason,
+            planner_decision=decision,
+            planner_provenance=freeze_provenance_from_planner_decision(decision),
+        )
+
     if not is_owned_action(action):
         return B2WakePlan(route='legacy')
 
