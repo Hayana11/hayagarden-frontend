@@ -383,6 +383,11 @@ button {
   --gold: #DFB25E;
 }
 
+/* Legacy native Chat: quarantine descendant transitions on theme flip (keep @keyframes). */
+.chat-root[data-chat-legacy-renderer="true"] * {
+  transition: none !important;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .chat-root * { animation: none !important; transition: none !important; }
 }

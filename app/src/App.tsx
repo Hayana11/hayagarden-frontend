@@ -18,6 +18,7 @@ import { ProfileScreen } from './screens/ProfileScreen';
 import { MonopolyRoomScreen } from './screens/MonopolyRoomScreen';
 import { DailySoftWindowPreviewScreen } from './screens/DailySoftWindowPreviewScreen';
 import { ManualContextWindowPreviewScreen } from './screens/ManualContextWindowPreviewScreen';
+import { useLegacyNativeCompat } from './hooks/useLegacyNativeCompat';
 import { MONOPOLY_ROOM_PATH, ROUTES, isFullscreenPath } from './navigation';
 
 function Shell() {
@@ -61,6 +62,7 @@ function Shell() {
 }
 
 export default function App() {
+  useLegacyNativeCompat();
   const basename = window.location.pathname.startsWith('/dash') ? '/dash' : undefined;
 
   return (

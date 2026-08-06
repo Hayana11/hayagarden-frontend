@@ -1,5 +1,7 @@
 /** Fyodor Chat theme — DOM + localStorage only; must not live in ChatScreen React state. */
 
+import { beginThemePerfProbe, flushThemePerfProbe } from './themePerfProbe';
+
 export const CHAT_SETTINGS_KEY = 'fyodor-chat-settings';
 
 export type ThemeMode = 'light' | 'dark' | 'auto';
@@ -117,9 +119,11 @@ export function attachChatTheme(root: HTMLElement): Detach {
 }
 
 export function setChatTheme(root: HTMLElement | null, theme: ThemeMode): EffectiveTheme {
+  beginThemePerfProbe();
   patchChatSettings({ theme });
   if (root) applyChatThemeToRoot(root, theme);
   emitChatThemeChange();
+  if (root) flushThemePerfProbe(root);
   return resolveEffectiveTheme(theme);
 }
 
