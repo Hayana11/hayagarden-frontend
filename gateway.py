@@ -206,10 +206,13 @@ def _discard_staged_resident(reason: str = 'staged_rewrite_end') -> None:
 
 
 def _begin_staged_rewrite_generation(turn_data: dict) -> dict | None:
-    """Mark staging generating and cold-boot local resident for overlay history.
+    """Mark staging generating and prepare trial resident for overlay history.
 
     Active transcript is unchanged. Durable epoch is NOT advanced here — that
     remains finalize's job after authoritative activation.
+
+    R0: optionally try native session fork (flag OFF by default). Any failure
+    leaves rewrite_cache_mode=cold_fallback; caller then uses #204 cold bootstrap.
     """
     rewrite_id = str((turn_data or {}).get('rewrite_id') or '').strip()
     if not rewrite_id:
@@ -251,7 +254,68 @@ def _begin_staged_rewrite_generation(turn_data: dict) -> dict | None:
         turn_data['user_message_id'] = staging.get('user_message_id')
     turn_data['_rewrite_staging'] = staging
     turn_data['_staged_rewrite_active'] = True
+    turn_data['_rewrite_cache_meta'] = {
+        'rewrite_cache_mode': 'cold_fallback',
+        'rewrite_cache_fallback_reason': 'flag_off',
+    }
+    turn_data['_rewrite_native_fork_ready'] = False
     return staging
+
+
+def _try_staged_rewrite_native_fork(turn_data: dict, *, system_text: str, env: dict) -> bool:
+    """Opportunistic native fork for staged CC rewrite. Fail → cold path."""
+    if not turn_data.get('_staged_rewrite_active'):
+        return False
+    staging = turn_data.get('_rewrite_staging') or {}
+    if not staging:
+        return False
+    try:
+        from chat.rewrite_native_fork import try_prepare_native_trial_resident
+        conn = get_db()
+        try:
+            ok, meta = try_prepare_native_trial_resident(
+                staging=staging,
+                conn=conn,
+                cwd=CC_CWD,
+                system_text=system_text,
+                env=env,
+                resident=_CC_RESIDENT,
+                claude_home=str(
+                    __import__('pathlib').Path(os.environ.get('HOME', '/root')) / '.claude'
+                ),
+            )
+        finally:
+            conn.close()
+        turn_data['_rewrite_cache_meta'] = dict(meta or {})
+        turn_data['_rewrite_native_fork_ready'] = bool(ok)
+        return bool(ok)
+    except Exception:
+        turn_data['_rewrite_cache_meta'] = {
+            'rewrite_cache_mode': 'cold_fallback',
+            'rewrite_cache_fallback_reason': 'resolver_error',
+        }
+        turn_data['_rewrite_native_fork_ready'] = False
+        try:
+            _discard_staged_resident('rewrite_native_fork_error')
+        except Exception:
+            pass
+        return False
+
+
+def _merge_rewrite_cache_meta(usage: dict | None, turn_data: dict | None) -> dict:
+    """Attach rewrite-cache observability without inventing cache hits."""
+    out = dict(usage or {})
+    meta = (turn_data or {}).get('_rewrite_cache_meta') or {}
+    for key in (
+        'rewrite_cache_mode',
+        'rewrite_cache_fallback_reason',
+        'rewrite_cache_parent_session_hash',
+        'rewrite_cache_fork_event_hash',
+        'rewrite_cache_child_session_hash',
+    ):
+        if key in meta and meta[key] is not None:
+            out[key] = meta[key]
+    return out
 
 
 def _peek_relay_staged_one_shots() -> tuple[dict, str]:
@@ -5446,7 +5510,18 @@ def chat_stream():
                     _cc_env = dict(os.environ)
                     _cc_env['CLAUDE_CODE_OAUTH_TOKEN'] = CC_TOKEN
                     _cc_env.pop('ANTHROPIC_API_KEY', None)
-                    _cc_is_cold = _CC_RESIDENT.ensure_alive(_static_parts['full_system'], _cc_env)
+                    # R0 native fork (flagged): resume child trial → hot delta only.
+                    # Else #204 cold bootstrap via ensure_alive.
+                    if _rewrite_id and _try_staged_rewrite_native_fork(
+                        _turn_data,
+                        system_text=_static_parts['full_system'],
+                        env=_cc_env,
+                    ):
+                        _cc_is_cold = False
+                    else:
+                        _cc_is_cold = _CC_RESIDENT.ensure_alive(
+                            _static_parts['full_system'], _cc_env,
+                        )
                     _resident_files = (
                         set()
                         if _cc_is_cold else
@@ -5503,6 +5578,8 @@ def chat_stream():
                                     'cache_creation': cc_cache_create,
                                 }
                             text = _cc_save_markers(raw_text)
+                    if _rewrite_id:
+                        cc_usage = _merge_rewrite_cache_meta(cc_usage, _turn_data)
                     if text:
                         _cache_info_json = (
                             json.dumps(cc_usage, ensure_ascii=False)
@@ -5512,6 +5589,11 @@ def chat_stream():
                                 'cache_creation': cc_cache_create,
                             }, ensure_ascii=False) if (cc_cache_read or cc_cache_create) else ''
                         )
+                        if _rewrite_id and not _cache_info_json:
+                            _cache_info_json = json.dumps(
+                                _merge_rewrite_cache_meta({}, _turn_data),
+                                ensure_ascii=False,
+                            )
                         _cc_text, _cc_choices = _extract_choices(text)
                         if _cc_choices and not _cc_text:
                             _cc_text = '[选项: ' + ' / '.join(_cc_choices) + ']'
