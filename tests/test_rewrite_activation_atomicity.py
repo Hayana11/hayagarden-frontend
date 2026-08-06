@@ -65,11 +65,10 @@ class RewriteActivationAtomicityTests(unittest.TestCase):
         self.get_db = get_db
         self.invalidation_calls = []
 
-        def fake_invalidate(reason):
+        def fake_invalidate(reason, idempotency_key=None):
             self.invalidation_calls.append(reason)
             from chat.cc_history_rewrite import note_durable_history_rewrite
-            note_durable_history_rewrite(reason)
-            return True
+            return note_durable_history_rewrite(reason, idempotency_key=idempotency_key)
 
         self.patches = [
             mock.patch.object(app_module, 'DB_PATH', self.db_path),
@@ -632,12 +631,11 @@ class RewriteActivationAtomicityTests(unittest.TestCase):
 
         inv_calls = []
 
-        def flaky_invalidate(reason):
+        def flaky_invalidate(reason, idempotency_key=None):
             inv_calls.append(reason)
             if len(inv_calls) == 1:
                 raise RuntimeError('epoch write failed')
-            note_durable_history_rewrite(reason)
-            return True
+            return note_durable_history_rewrite(reason, idempotency_key=idempotency_key)
 
         with mock.patch.object(
             app_module, 'invalidate_cc_resident_for_history_rewrite',

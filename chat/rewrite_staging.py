@@ -95,6 +95,9 @@ def ensure_schema(conn, *, commit: bool = True) -> None:
         ('tail_revision', 'TEXT'),
         ('side_effects_json', 'TEXT'),
         ('activation_result_json', 'TEXT'),
+        # Durable history-rewrite epoch handoff marker (P0 idempotence fix).
+        # Nullable/additive; set at most once per rewrite_id, then read-only.
+        ('history_epoch', 'TEXT'),
     ):
         if col not in cols:
             conn.execute(f'ALTER TABLE chat_rewrite_staging ADD COLUMN {col} {decl}')
@@ -973,6 +976,38 @@ def activate_edit(conn, rewrite_id: str) -> dict:
         except Exception:
             pass
         raise
+
+
+def history_epoch_of(staging: Mapping[str, Any]) -> str:
+    """Durable history-rewrite epoch already handed off for this rewrite, or ''.
+
+    Once set, this value is a read-only fact for the rewrite's lifetime —
+    callers must never overwrite it, even when a newer rewrite has since
+    advanced the global epoch further (see ``persist_history_epoch_if_absent``).
+    """
+    return str((staging or {}).get('history_epoch') or '').strip()
+
+
+def persist_history_epoch_if_absent(conn, rewrite_id: str, epoch: str) -> bool:
+    """Best-effort, once-only persist of the durable epoch handoff marker.
+
+    Only writes when the column is still empty for this rewrite_id — never
+    overwrites an existing value. This is what makes epoch advancement
+    per-rewrite idempotent across effects_pending / replay_only retries, and
+    guarantees an older rewrite's retry can never roll back a newer epoch
+    (it simply never gets a chance to write once its own marker is set).
+    """
+    rid = str(rewrite_id or '').strip()
+    epoch = str(epoch or '').strip()
+    if not rid or not epoch:
+        return False
+    cur = conn.execute(
+        "UPDATE chat_rewrite_staging SET history_epoch=?, updated_at=? "
+        "WHERE rewrite_id=? AND (history_epoch IS NULL OR history_epoch='')",
+        (epoch, _now(), rid),
+    )
+    conn.commit()
+    return int(cur.rowcount or 0) > 0
 
 
 def active_transcript(conn) -> list[tuple]:

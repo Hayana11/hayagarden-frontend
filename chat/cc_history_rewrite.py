@@ -54,7 +54,11 @@ def _read_epoch_record():
     if not epoch:
         return {'epoch': '__unreadable__', 'reason': 'history_rewrite'}
     reason = str(data.get('reason') or 'history_rewrite')[:80] or 'history_rewrite'
-    return {'epoch': epoch, 'reason': reason}
+    record = {'epoch': epoch, 'reason': reason}
+    idempotency_key = data.get('idempotency_key')
+    if idempotency_key:
+        record['idempotency_key'] = str(idempotency_key)
+    return record
 
 
 def current_history_rewrite_epoch():
@@ -77,14 +81,34 @@ def history_rewrite_epoch_reason():
 history_rewrite_barrier_reason = history_rewrite_epoch_reason
 
 
-def note_durable_history_rewrite(reason='history_rewrite'):
+def note_durable_history_rewrite(reason='history_rewrite', idempotency_key=None):
     """Advance the durable rewrite epoch after a committed history rewrite.
 
-    Each call produces a unique epoch token. Reason is observational only and
-    must never be used as the version identity. The epoch is never cleared by
-    a single worker's invalidate/cold success — workers catch up lazily by
-    binding their resident to the latest epoch after a successful spawn.
+    Each call produces a unique epoch token and returns it (unchanged
+    contract — always a plain epoch string, never a tuple/dict). Reason is
+    observational only and must never be used as the version identity. The
+    epoch is never cleared by a single worker's invalidate/cold success —
+    workers catch up lazily by binding their resident to the latest epoch
+    after a successful spawn.
+
+    ``idempotency_key`` (optional, e.g. ``"rewrite:<rewrite_id>"``): when
+    given and it matches the key already stored on the current epoch record,
+    this call is a no-op retry — it returns the *existing* epoch instead of
+    minting a new one. This covers effects/replay retries for one committed
+    rewrite (same rewrite_id must advance the epoch at most once) as well as
+    the crash-recovery case where the epoch file was written but the
+    per-rewrite durable marker was not yet persisted by the caller.
+
+    Callers that never pass ``idempotency_key`` (branch_switch, delete,
+    legacy edit paths) keep the original behavior exactly: every call mints
+    a brand-new epoch, because each such call represents a genuinely new
+    authoritative mutation.
     """
+    key = str(idempotency_key or '').strip() or None
+    if key is not None:
+        current = _read_epoch_record()
+        if current and current.get('idempotency_key') == key:
+            return str(current.get('epoch') or '')
     path = _epoch_path()
     parent = os.path.dirname(path)
     if parent:
@@ -95,6 +119,8 @@ def note_durable_history_rewrite(reason='history_rewrite'):
         'reason': str(reason or 'history_rewrite')[:80] or 'history_rewrite',
         'ts': time.time(),
     }
+    if key is not None:
+        record['idempotency_key'] = key
     payload = (json.dumps(record, separators=(',', ':'), ensure_ascii=True) + '\n').encode('utf-8')
     tmp = path + '.tmp'
     with open(tmp, 'wb') as handle:
