@@ -101,6 +101,7 @@ html, body {
 .flex-wrap-gap-2 {
   display: flex;
   flex-wrap: wrap;
+  align-items: center;
   margin: -1px;
 }
 .flex-wrap-gap-2 > * { margin: 1px; }
