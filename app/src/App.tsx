@@ -18,21 +18,11 @@ import { ProfileScreen } from './screens/ProfileScreen';
 import { MonopolyRoomScreen } from './screens/MonopolyRoomScreen';
 import { DailySoftWindowPreviewScreen } from './screens/DailySoftWindowPreviewScreen';
 import { ManualContextWindowPreviewScreen } from './screens/ManualContextWindowPreviewScreen';
-
-const FULLSCREEN_PATHS = new Set([
-  '/chat',
-  '/settings',
-  '/group-chat',
-  '/moments',
-  '/contacts',
-  '/codex-chat',
-  '/profile',
-  '/daily-soft-window',
-]);
+import { MONOPOLY_ROOM_PATH, ROUTES, isFullscreenPath } from './navigation';
 
 function Shell() {
   const location = useLocation();
-  const fullscreen = FULLSCREEN_PATHS.has(location.pathname) || location.pathname.startsWith('/monopoly/');
+  const fullscreen = isFullscreenPath(location.pathname);
 
   useEffect(() => {
     document.documentElement.classList.toggle('dash-fullscreen', fullscreen);
@@ -41,22 +31,22 @@ function Shell() {
 
   const routes = (
     <Routes>
-      <Route path="/" element={<DashScreen />} />
-      <Route path="/memory" element={<MemoryScreen />} />
-      <Route path="/usage" element={<UsageScreen />} />
-      <Route path="/reading" element={<ReadingScreen />} />
-      <Route path="/ledger" element={<LedgerScreen />} />
-      <Route path="/period" element={<PeriodScreen />} />
-      <Route path="/chat" element={<ChatScreen />} />
-      <Route path="/settings" element={<SettingsScreen />} />
-      <Route path="/group-chat" element={<GroupChatScreen />} />
-      <Route path="/moments" element={<MomentsScreen />} />
-      <Route path="/contacts" element={<ContactsScreen />} />
-      <Route path="/codex-chat" element={<CodexChatScreen />} />
-      <Route path="/profile" element={<ProfileScreen />} />
-      <Route path="/monopoly/:roomId" element={<MonopolyRoomScreen />} />
-      <Route path="/daily-soft-window" element={<DailySoftWindowPreviewScreen />} />
-      <Route path="/manual-context-window" element={<ManualContextWindowPreviewScreen />} />
+      <Route path={ROUTES.dash} element={<DashScreen />} />
+      <Route path={ROUTES.memory} element={<MemoryScreen />} />
+      <Route path={ROUTES.usage} element={<UsageScreen />} />
+      <Route path={ROUTES.reading} element={<ReadingScreen />} />
+      <Route path={ROUTES.ledger} element={<LedgerScreen />} />
+      <Route path={ROUTES.period} element={<PeriodScreen />} />
+      <Route path={ROUTES.chat} element={<ChatScreen />} />
+      <Route path={ROUTES.settings} element={<SettingsScreen />} />
+      <Route path={ROUTES.groupChat} element={<GroupChatScreen />} />
+      <Route path={ROUTES.moments} element={<MomentsScreen />} />
+      <Route path={ROUTES.contacts} element={<ContactsScreen />} />
+      <Route path={ROUTES.codexChat} element={<CodexChatScreen />} />
+      <Route path={ROUTES.profile} element={<ProfileScreen />} />
+      <Route path={MONOPOLY_ROOM_PATH} element={<MonopolyRoomScreen />} />
+      <Route path={ROUTES.dailySoftWindow} element={<DailySoftWindowPreviewScreen />} />
+      <Route path={ROUTES.manualContextWindow} element={<ManualContextWindowPreviewScreen />} />
     </Routes>
   );
 

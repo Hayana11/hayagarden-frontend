@@ -207,8 +207,10 @@ def index():
     return redirect('/dash', code=302)
 
 @app.route('/dash')
+@app.route('/dash/')
 def dash():
     # Prefer the new React build when deployed; fallback to legacy static dash.
+    # Explicit /dash/ (in addition to /dash) — do not rely on app-wide strict_slashes.
     if os.path.exists(os.path.join(APP_DIST_DIR, 'index.html')):
         resp = send_from_directory(APP_DIST_DIR, 'index.html')
         resp.headers['Cache-Control'] = 'no-store, must-revalidate'
@@ -217,6 +219,14 @@ def dash():
 
 @app.route('/dash/<path:subpath>')
 def dash_subpath(subpath):
+    """SPA deep-link fallback for React BrowserRouter under /dash.
+
+    Real files under app/dist (JS/CSS/assets) are served as-is.
+    Any other /dash/* path returns index.html so client routing can resolve
+    /dash/contacts, /dash/chat, /dash/settings, etc.
+
+    Does not register under /api, /read, /board, or /static.
+    """
     if not os.path.exists(os.path.join(APP_DIST_DIR, 'index.html')):
         return send_from_directory('/opt/frontend/static', 'dash.html')
     asset_path = os.path.join(APP_DIST_DIR, subpath)
