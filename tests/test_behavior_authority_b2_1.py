@@ -353,6 +353,54 @@ class BehaviorAuthorityB21Tests(unittest.TestCase):
         conn.close()
         self.assertEqual(before_ver, after_ver)
 
+    def test_post_ownership_reality_exception_fail_closed(self):
+        """Post-ownership Gate fact failure → blocked; no legacy fallback."""
+        view4 = freeze_planner_state_view(
+            db_path=self.db_path,
+            observed_at=T_OBS,
+            wake_run_id='b21-run-4',
+        )
+        skill4 = freeze_capability_skill_view(
+            wake_run_id='b21-run-4',
+            provider='api_relay',
+            mode='normal',
+            prepared_tools=[{'name': 'web_search'}],
+            dry_run=False,
+            captured_at=T_OBS,
+        )
+
+        def _boom_busy():
+            raise RuntimeError('fresh chat_busy read failed')
+
+        with mock.patch(
+            'chat.behavior_authority_b2.consumer_enabled', return_value=True,
+        ):
+            plan = plan_b2_wake_action(
+                planner_view=view4,
+                skill_view=skill4,
+                wake_run_id='b21-run-4',
+                decision_attempt_id='da-b21-4',
+                get_db_fn=self._get_db,
+                now=T_OBS,
+                chat_busy_fn=_boom_busy,
+                invoke_fn=self._none_invoke_for('b21-run-4'),
+            )
+        self.assertEqual(plan.route, 'blocked')
+        self.assertEqual(plan.gate_reason, 'precondition_failed')
+        self.assertEqual(
+            plan.planner_decision.get('action_candidate'), 'none',
+        )
+
+        locked = Path(ROOT, 'gateway.py').read_text(encoding='utf-8').split(
+            'def _wake_decide_locked', 1,
+        )[1].split('\ndef ', 1)[0]
+        self.assertLess(
+            locked.index("route == 'blocked'"),
+            locked.index('get_wake_runner'),
+        )
+        legacy_tail = locked.split('get_wake_runner', 1)[1]
+        self.assertNotIn('b2_gate_blocked', legacy_tail)
+
 
 if __name__ == '__main__':
     unittest.main()

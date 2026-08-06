@@ -7167,8 +7167,6 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
             'b2_gate': _b2_plan.gate_reason,
         })
 
-    desire_driven = _get_desire_driven()
-
     if _b2_plan is not None and _b2_plan.route == 'none_takeover':
         from wake.executor import execute as _wake_exec
         planner_provenance = _b2_plan.planner_provenance or {}
@@ -7187,7 +7185,7 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
                 '',
                 mode,
                 get_db_fn=get_db,
-                desire_driven=desire_driven,
+                desire_driven=_get_desire_driven(),
                 surfaced_desire_ids=surfaced_desire_ids,
                 desire_ledger_enabled=_get_desire_ledger_enabled(),
                 cache_info=wake_cache_info,
@@ -7285,6 +7283,7 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
 
     # action 执行：wake_log / chat / diary + V3 wake_outcome 同事务
     from wake.executor import execute as _wake_exec
+    desire_driven = _get_desire_driven()
     # Stage D R3/N5: Settlement needs the Decision provenance *object*.
     # primary_drive may be None for a valid Action=none freeze; that is not
     # the same as freeze failure (decision_provenance is None).

@@ -165,20 +165,29 @@ def plan_b2_wake_action(
     if not is_owned_action(action):
         return B2WakePlan(route='legacy')
 
-    # Fresh chat activity fact after Planner returns (not at plan entry).
-    chat_busy = bool(chat_busy_fn()) if chat_busy_fn is not None else False
+    # Ownership established for owned none; post-ownership reality failures must
+    # not bubble to gateway fail-open legacy fallback.
+    try:
+        chat_busy = bool(chat_busy_fn()) if chat_busy_fn is not None else False
+        verdict, gate_reason = evaluate_action_gate(
+            planner_decision=decision,
+            skill_view=skill_view,
+            wake_run_id=wake_run_id,
+            get_db_fn=get_db_fn,
+            now=now,
+            chat_busy=chat_busy,
+            wake_run_id_seen=wake_run_id_seen,
+            min_idle_minutes=min_idle_minutes,
+            mode=mode,
+        )
+    except Exception as exc:
+        _LOG.warning('b2 owned gate evaluation failed: %s', exc)
+        return B2WakePlan(
+            route='blocked',
+            gate_reason='precondition_failed',
+            planner_decision=decision,
+        )
 
-    verdict, gate_reason = evaluate_action_gate(
-        planner_decision=decision,
-        skill_view=skill_view,
-        wake_run_id=wake_run_id,
-        get_db_fn=get_db_fn,
-        now=now,
-        chat_busy=chat_busy,
-        wake_run_id_seen=wake_run_id_seen,
-        min_idle_minutes=min_idle_minutes,
-        mode=mode,
-    )
     if verdict == _GATE_BLOCK:
         return B2WakePlan(route='blocked', gate_reason=gate_reason, planner_decision=decision)
 
