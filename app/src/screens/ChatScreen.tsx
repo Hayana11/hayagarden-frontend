@@ -84,6 +84,38 @@ function loadSettings(): Settings {
   }
 }
 
+type LayoutDiagRow = { label: string; value: string };
+
+function collectLayoutDiagnostics(root: HTMLElement | null): LayoutDiagRow[] {
+  const vv = window.visualViewport;
+  const testEl = document.getElementById('c78-layout-test-100');
+  const rootFont = root ? getComputedStyle(root).fontSize : 'n/a';
+  const testWidth = testEl ? `${testEl.getBoundingClientRect().width.toFixed(2)}px` : 'n/a';
+  let noto = 'n/a';
+  let bodoni = 'n/a';
+  try {
+    noto = document.fonts.check('12px "Noto Serif SC"') ? 'true' : 'false';
+    bodoni = document.fonts.check('12px "Bodoni Moda"') ? 'true' : 'false';
+  } catch {
+    /* FontFaceSet unavailable */
+  }
+  return [
+    { label: 'window.innerWidth', value: String(window.innerWidth) },
+    { label: 'window.innerHeight', value: String(window.innerHeight) },
+    { label: 'document.documentElement.clientWidth', value: String(document.documentElement.clientWidth) },
+    { label: 'screen.width', value: String(window.screen.width) },
+    { label: 'screen.height', value: String(window.screen.height) },
+    { label: 'window.devicePixelRatio', value: String(window.devicePixelRatio) },
+    { label: 'visualViewport?.width', value: vv ? String(vv.width) : 'n/a' },
+    { label: 'visualViewport?.height', value: vv ? String(vv.height) : 'n/a' },
+    { label: 'visualViewport?.scale', value: vv ? String(vv.scale) : 'n/a' },
+    { label: 'Chat root computed font-size', value: rootFont },
+    { label: '100px test element width', value: testWidth },
+    { label: 'fonts.check Noto Serif SC', value: noto },
+    { label: 'fonts.check Bodoni Moda', value: bodoni },
+  ];
+}
+
 interface LiveState {
   thinking: string;
   text: string;
@@ -178,12 +210,14 @@ export function ChatScreen() {
   const [refreshing, setRefreshing] = useState(false);
   const [chatError, setChatError] = useState<{ message: string; hint: string } | null>(null);
   const [pickedChoices, setPickedChoices] = useState<Record<number, string>>({});
+  const [layoutDiag, setLayoutDiag] = useState<LayoutDiagRow[] | null>(null);
 
   const manualWindow = useManualContextWindow();
   const switchBlocked =
     sending || live !== null || genLockBusy || manualWindow.submitting;
 
   const scrollRef = useRef<HTMLDivElement>(null);
+  const chatRootRef = useRef<HTMLDivElement>(null);
   const taRef = useRef<HTMLTextAreaElement>(null);
   const imgInputRef = useRef<HTMLInputElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -984,7 +1018,6 @@ export function ChatScreen() {
     );
   }
 
-  // date separators
   const rendered: ReactElement[] = [];
   let lastDate = '';
   msgs.forEach((m) => {
@@ -1012,6 +1045,7 @@ export function ChatScreen() {
 
   return (
     <div
+      ref={chatRootRef}
       className="chat-root dash-fullscreen-page"
       style={{
         ...(vars as CSSProperties),
@@ -1021,9 +1055,9 @@ export function ChatScreen() {
         color: 'var(--ink)',
         fontFamily: SERIF,
         fontSize: FONT_SIZES[settings.fontStep],
-        transition: 'background .3s,color .3s',
       }}
     >
+      <div id="c78-layout-test-100" aria-hidden style={{ position: 'absolute', width: 100, height: 1, visibility: 'hidden', pointerEvents: 'none' }} />
       {/* ══ top nav ══ */}
       <div style={{ flexShrink: 0, position: 'relative', zIndex: 40 }}>
         <div style={{ background: 'rgba(255,255,255,0.97)', boxShadow: '0 6px 18px var(--shadow)', position: 'relative', zIndex: 3 }}>
@@ -1145,6 +1179,26 @@ export function ChatScreen() {
                           </div>
                           <span style={{ fontSize: 11.5, color: 'var(--ghost)' }}>移动端默认抽屉，桌面端默认原地展开</span>
                         </div>
+                      </div>
+                      <div style={{ height: 1, background: 'var(--line)' }} />
+                      <div className="vstack vstack-12">
+                        <div style={sectionCaption}>诊断 · LAYOUT (临时)</div>
+                        <div
+                          onClick={() => setLayoutDiag(collectLayoutDiagnostics(chatRootRef.current))}
+                          style={{ ...segStyle(false), flex: 'none', padding: '10px 14px' }}
+                        >
+                          采集布局读数
+                        </div>
+                        {layoutDiag && (
+                          <div className="vstack vstack-6" style={{ background: 'var(--card2)', borderRadius: 14, padding: '12px 14px', fontFamily: MONO, fontSize: 11, lineHeight: 1.55, color: 'var(--ink2)' }}>
+                            {layoutDiag.map((row) => (
+                              <div key={row.label} className="hstack hstack-10" style={{ justifyContent: 'space-between' }}>
+                                <span style={{ color: 'var(--ghost)', flexShrink: 0 }}>{row.label}</span>
+                                <span style={{ textAlign: 'right', wordBreak: 'break-all' }}>{row.value}</span>
+                              </div>
+                            ))}
+                          </div>
+                        )}
                       </div>
                     </>
                   )}
@@ -1338,7 +1392,7 @@ export function ChatScreen() {
             </div>
           )}
 
-          <div style={{ background: 'var(--card)', borderRadius: 26, boxShadow: '0 14px 40px var(--shadow2)', padding: '12px 12px 10px', transition: 'background .3s' }}>
+          <div style={{ background: 'var(--card)', borderRadius: 26, boxShadow: '0 14px 40px var(--shadow2)', padding: '12px 12px 10px' }}>
             <textarea
               ref={taRef}
               value={input}

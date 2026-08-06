@@ -13,9 +13,9 @@
   -webkit-overflow-scrolling: touch;
   display: flex;
   flex-direction: column;
-  gap: 22px;
   padding: calc(env(safe-area-inset-top, 0px) + 18px) 18px calc(env(safe-area-inset-bottom, 0px) + 28px);
 }
+.profile-root .profile-page > * + * { margin-top: 22px; }
 
 .profile-header {
   display: grid;
@@ -75,8 +75,8 @@
 .profile-section {
   display: flex;
   flex-direction: column;
-  gap: 12px;
 }
+.profile-section > * + * { margin-top: 12px; }
 
 .profile-section-title {
   color: var(--mut);
@@ -94,8 +94,8 @@
 .profile-name-row {
   display: flex;
   align-items: center;
-  gap: 14px;
 }
+.profile-name-row > * + * { margin-left: 14px; }
 
 .profile-name-label {
   width: 72px;
@@ -128,7 +128,6 @@
 .profile-nav-row {
   display: flex;
   align-items: center;
-  gap: 14px;
   width: 100%;
   padding: 16px 18px;
   border: 0;
@@ -138,6 +137,7 @@
   text-align: left;
   cursor: pointer;
 }
+.profile-nav-row > * + * { margin-left: 14px; }
 
 .profile-nav-row:active {
   background: var(--bubble);
@@ -197,9 +197,9 @@
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  gap: 12px;
   margin-bottom: 12px;
 }
+.profile-card-top > * + * { margin-left: 12px; }
 
 .profile-switch {
   width: 50px;
@@ -286,7 +286,6 @@
 .profile-hero {
   display: flex;
   align-items: center;
-  gap: 18px;
   padding: 20px;
   border: 1px solid var(--line);
   border-radius: 28px;
@@ -295,6 +294,7 @@
     linear-gradient(135deg, var(--card), var(--card2));
   box-shadow: 0 16px 38px var(--shadow);
 }
+.profile-hero > * + * { margin-left: 18px; }
 
 .profile-avatar {
   width: 74px;
@@ -344,7 +344,6 @@
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 4px;
   padding: 13px 8px;
   border: 1px solid var(--line);
   border-radius: 18px;
@@ -353,6 +352,7 @@
   font-size: 11px;
   letter-spacing: 0.5px;
 }
+.profile-meta-card > * + * { margin-top: 4px; }
 
 .profile-meta-card strong {
   color: var(--ink);
@@ -369,8 +369,8 @@
   display: flex;
   align-items: flex-end;
   justify-content: space-between;
-  gap: 14px;
 }
+.profile-persona-heading > * + * { margin-left: 14px; }
 
 .profile-reload-button {
   flex: none;

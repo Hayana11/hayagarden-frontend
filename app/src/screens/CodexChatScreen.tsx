@@ -224,7 +224,7 @@ export function CodexChatScreen() {
         ...(vars as CSSProperties),
         display: 'flex', flexDirection: 'column',
         background: 'var(--bg)', color: 'var(--ink)', fontFamily: SERIF,
-        fontSize: FONT_SIZES[settings.fontStep], transition: 'background .3s,color .3s',
+        fontSize: FONT_SIZES[settings.fontStep],
       }}
     >
       {/* top nav */}
