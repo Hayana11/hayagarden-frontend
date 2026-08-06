@@ -139,7 +139,7 @@ def plan_b2_wake_action(
     decision_attempt_id: str,
     get_db_fn: Callable,
     now: datetime.datetime,
-    chat_busy: bool = False,
+    chat_busy_fn: Optional[Callable[[], bool]] = None,
     wake_run_id_seen: Callable[[str], bool] = lambda _rid: False,
     min_idle_minutes: float = 30.0,
     mode: str = 'normal',
@@ -164,6 +164,9 @@ def plan_b2_wake_action(
     action = str(decision.get('action_candidate') or '').strip()
     if not is_owned_action(action):
         return B2WakePlan(route='legacy')
+
+    # Fresh chat activity fact after Planner returns (not at plan entry).
+    chat_busy = bool(chat_busy_fn()) if chat_busy_fn is not None else False
 
     verdict, gate_reason = evaluate_action_gate(
         planner_decision=decision,

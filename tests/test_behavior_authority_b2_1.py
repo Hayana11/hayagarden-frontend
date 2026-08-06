@@ -150,8 +150,6 @@ class BehaviorAuthorityB21Tests(unittest.TestCase):
                 decision_attempt_id='da-b21-1',
                 get_db_fn=self._get_db,
                 now=T_OBS,
-                chat_busy=False,
-                wake_run_id_seen=lambda _rid: False,
                 invoke_fn=self._none_invoke_for('b21-run-1'),
             )
         self.assertEqual(plan.route, 'none_takeover')
@@ -320,7 +318,7 @@ class BehaviorAuthorityB21Tests(unittest.TestCase):
                 decision_attempt_id='da-b21-3',
                 get_db_fn=self._get_db,
                 now=T_OBS,
-                chat_busy=True,
+                chat_busy_fn=lambda: True,
                 invoke_fn=self._none_invoke_for('b21-run-3'),
             )
         self.assertEqual(plan.route, 'blocked')
