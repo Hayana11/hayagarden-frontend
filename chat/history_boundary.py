@@ -172,6 +172,7 @@ def resolve_fetch_plan(
     for_cc: bool,
     lean_history: Optional[bool] = None,
     history_mode: Optional[str] = None,
+    history_token_budget: Optional[int] = None,
 ) -> dict[str, Any]:
     if history_mode is not None:
         mode = str(history_mode)
@@ -195,10 +196,15 @@ def resolve_fetch_plan(
                 'relay_head_id': relay_history_head_id(),
             }
         if mode == 'cc_token_budget':
+            budget = (
+                cc_history_token_budget()
+                if history_token_budget is None
+                else max(0, int(history_token_budget))
+            )
             return {
                 'mode': 'cc_token_budget',
                 'fetch_limit': max(available_count, _WINDOW_BASE + _WINDOW_BLOCK),
-                'history_token_budget': cc_history_token_budget(),
+                'history_token_budget': budget,
                 'relay_high_water': 0,
                 'relay_low_water': 0,
                 'relay_head_id': 0,

@@ -299,6 +299,11 @@ class ResidentSession:
         # gunicorn worker lazily invalidates after a rewrite, even when the
         # app→gateway bridge only eagers one worker.
         self._history_rewrite_epoch = ''
+        # No-benefit respawn loop breaker (P0 cold-storm fix, Fence C).
+        # Deliberately *not* reset by ``_reset_session_meta`` / ``_spawn`` —
+        # it must survive across the very respawn it is meant to gate so a
+        # ``hard_context`` cold can be compared against the previous one.
+        self._last_cold_bootstrap_estimate = 0
         self._reset_session_meta(respawn_reason=None)
 
     def _reset_session_meta(self, *, respawn_reason):
@@ -1198,6 +1203,25 @@ class ResidentSession:
     @property
     def pending_respawn_reason(self):
         return self._pending_respawn_reason
+
+    @property
+    def last_cold_bootstrap_estimate(self):
+        """Whole-prompt estimate of the most recent cold bootstrap sent.
+
+        Used only to gate a subsequent ``hard_context`` respawn (Fence C):
+        that respawn must prove its new estimate is smaller, or it fails
+        closed instead of repeating an identical oversized cold prompt.
+        """
+        return self._last_cold_bootstrap_estimate
+
+    def note_cold_bootstrap_estimate(self, estimate):
+        """Record the whole-prompt estimate for the cold bootstrap about to
+        be sent. Called before ``send_turn`` so a failure to send still
+        updates the baseline (the content was decided regardless)."""
+        try:
+            self._last_cold_bootstrap_estimate = max(0, int(estimate or 0))
+        except (TypeError, ValueError):
+            pass
 
     @property
     def tool_profile(self):
