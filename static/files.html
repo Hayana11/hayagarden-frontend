@@ -59,7 +59,31 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,'PingFang 
 var FILES=[], manage=false, sel={};
 function esc(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
 function fmtTime(dt){var s=String(dt||'');return s.slice(0,16).replace('T',' ');}
-function extOf(name){var p=String(name||'').split('.');return p.length>1?p[p.length-1].toLowerCase():'';}
+function libKey(f){return f.library_key || ('upload:'+f.id);}
+function typeLabel(f){
+  var src=f.source||'user_upload';
+  var t=String(f.artifact_type||f.file_type||'').toLowerCase();
+  if(src==='assistant_artifact'){
+    if(t==='html') return 'HTML';
+    if(t==='markdown'||t==='md') return 'Markdown';
+    if(t==='docx') return 'Word';
+    return (t||'Artifact').toUpperCase();
+  }
+  if(t==='html'||t==='htm') return 'HTML';
+  if(t==='md'||t==='markdown') return 'Markdown';
+  return (t||'文件').toUpperCase();
+}
+function whoLabel(f){
+  if((f.source||'')==='assistant_artifact') return '费佳 · 生成';
+  return '哈娅 · 上传';
+}
+function iconFor(f){
+  var t=String(f.artifact_type||f.file_type||'').toLowerCase();
+  if(t==='html'||t==='htm') return 'ti-brand-html5';
+  if(t==='markdown'||t==='md') return 'ti-markdown';
+  if(t==='docx') return 'ti-file-word';
+  return 'ti-file-text';
+}
 function load(){
   fetch('/api/files/list').then(function(r){return r.json();}).then(function(d){
     FILES=(d&&d.files)||[]; render();
@@ -71,17 +95,19 @@ function render(){
   box.className='list'+(manage?' manage':'');
   var html='';
   FILES.forEach(function(f){
-    var ext=extOf(f.file_name||f.file_url);
-    var who=(String(f.author).toLowerCase()==='hayana')?'哈娅':'费佳';
-    var selCls=sel[f.id]?' sel':'';
-    html+='<div class="fcard'+selCls+'" data-id="'+f.id+'" onclick="onCard('+f.id+')">'+
+    var key=libKey(f);
+    var selCls=sel[key]?' sel':'';
+    html+='<div class="fcard'+selCls+'" data-key="'+esc(key)+'">'+
       '<div class="fcheck"><i class="ti ti-check"></i></div>'+
-      '<div class="ficon"><i class="ti ti-file-text"></i></div>'+
+      '<div class="ficon"><i class="ti '+iconFor(f)+'"></i></div>'+
       '<div class="finfo"><div class="fname">'+esc(f.file_name||'文件')+'</div>'+
-        '<div class="fmeta">'+esc((ext?ext.toUpperCase()+' · ':'')+who+' · '+fmtTime(f.created_at))+'</div></div>'+
+        '<div class="fmeta">'+esc(typeLabel(f)+' · '+whoLabel(f)+' · '+fmtTime(f.created_at))+'</div></div>'+
     '</div>';
   });
   box.innerHTML=html;
+  Array.prototype.forEach.call(box.querySelectorAll('.fcard'), function(el){
+    el.onclick=function(){ onCard(el.getAttribute('data-key')); };
+  });
 }
 function toggleManage(){
   manage=!manage; sel={};
@@ -89,13 +115,17 @@ function toggleManage(){
   document.getElementById('mng').textContent=manage?'完成':'管理';
   updateBar(); render();
 }
-function onCard(id){
+function findByKey(key){
+  for(var i=0;i<FILES.length;i++){ if(libKey(FILES[i])===key) return FILES[i]; }
+  return null;
+}
+function onCard(key){
   if(manage){
-    if(sel[id]) delete sel[id]; else sel[id]=true;
+    if(sel[key]) delete sel[key]; else sel[key]=true;
     updateBar(); render();
   } else {
-    var f=null; FILES.forEach(function(x){if(x.id===id)f=x;});
-    if(f) preview(f);
+    var f=findByKey(key);
+    if(f) openItem(f);
   }
 }
 function updateBar(){
@@ -105,67 +135,54 @@ function updateBar(){
   document.getElementById('delbtn').disabled=(n===0);
 }
 function delSelected(){
-  var ids=Object.keys(sel).map(function(x){return parseInt(x,10);});
-  if(!ids.length) return;
-  if(!confirm('删除选中的 '+ids.length+' 个文件？（聊天记录保留，只删文件本身）')) return;
-  fetch('/api/files/delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ids:ids})})
-    .then(function(r){return r.json();}).then(function(){ sel={}; manage=false; toggleManageReset(); load(); });
+  var keys=Object.keys(sel);
+  if(!keys.length) return;
+  var hasArtifact=keys.some(function(k){return k.indexOf('artifact:')===0;});
+  var msg='删除选中的 '+keys.length+' 个文件？\n聊天记录正文会保留。';
+  if(hasArtifact){
+    msg+='\n\n删除 AI 生成文件后，历史聊天里的对应 Artifact 卡片可能无法再次打开。';
+  }
+  if(!confirm(msg)) return;
+  fetch('/api/files/delete',{
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({keys:keys})
+  }).then(function(r){return r.json();}).then(function(){
+    sel={}; manage=false; toggleManageReset(); load();
+  });
 }
 function toggleManageReset(){
   document.getElementById('mng').className='hd-btn';
   document.getElementById('mng').textContent='管理';
   updateBar();
 }
-function preview(f){
-  var ext=extOf(f.file_name||f.file_url);
+function openItem(f){
+  var src=f.source||'user_upload';
+  var t=String(f.artifact_type||f.file_type||'').toLowerCase();
+  // DOCX Artifact: download only (server preview returns 400).
+  if(src==='assistant_artifact' && t==='docx'){
+    location.href=f.download_url||('/api/artifacts/'+f.id+'/download');
+    return;
+  }
+  var url=f.preview_url||'';
+  if(!url){
+    document.getElementById('ovt').textContent=f.file_name||'文件';
+    document.getElementById('ovb').innerHTML='<pre>无预览地址</pre>';
+    document.getElementById('ov').className='ov show';
+    return;
+  }
   document.getElementById('ovt').textContent=f.file_name||'文件';
-  var body=document.getElementById('ovb'); body.innerHTML='<pre>加载中…</pre>';
+  var body=document.getElementById('ovb');
+  body.innerHTML='';
+  var ifr=document.createElement('iframe');
+  ifr.setAttribute('referrerpolicy','no-referrer');
+  // Outer frame stays trusted same-origin so server preview shell can
+  // fetch(/.../content). Untrusted HTML is sandboxed only inside that shell.
+  body.appendChild(ifr);
+  ifr.src=url;
   document.getElementById('ov').className='ov show';
-  fetch(f.file_url).then(function(r){return r.text();}).then(function(txt){
-    if(ext==='html'||ext==='htm'){
-      var ifr=document.createElement('iframe');
-      ifr.setAttribute('sandbox','allow-scripts');
-      body.innerHTML=''; body.appendChild(ifr); ifr.srcdoc=txt;
-    } else if(ext==='md'){
-      var ifr2=document.createElement('iframe');
-      ifr2.setAttribute('sandbox','');
-      body.innerHTML=''; body.appendChild(ifr2); ifr2.srcdoc=mdRender(txt);
-    } else {
-      body.innerHTML='<pre>'+esc(txt)+'</pre>';
-    }
-  }).catch(function(){ body.innerHTML='<pre>预览失败</pre>'; });
 }
 function closeOv(){ document.getElementById('ov').className='ov'; document.getElementById('ovb').innerHTML=''; }
-// 60 行极简 md 渲染器（标题/粗斜体/代码块/列表/引用/链接）
-function mdRender(md){
-  var lines=String(md).replace(/\r/g,'').split('\n');
-  var out=[], inCode=false, inList=false;
-  function inline(t){
-    t=esc(t);
-    t=t.replace(/`([^`]+)`/g,'<code>$1</code>');
-    t=t.replace(/\*\*([^*]+)\*\*/g,'<b>$1</b>');
-    t=t.replace(/\*([^*]+)\*/g,'<i>$1</i>');
-    t=t.replace(/\[([^\]]+)\]\((https?:[^)]+)\)/g,'<a href="$2" target="_blank" rel="noopener">$1</a>');
-    return t;
-  }
-  for(var i=0;i<lines.length;i++){
-    var l=lines[i];
-    if(/^```/.test(l)){ if(inCode){out.push('</pre>');inCode=false;} else {if(inList){out.push('</ul>');inList=false;}out.push('<pre class="cb">');inCode=true;} continue; }
-    if(inCode){ out.push(esc(l)); continue; }
-    var mh=l.match(/^(#{1,4})\s+(.*)$/);
-    if(mh){ if(inList){out.push('</ul>');inList=false;} var lv=mh[1].length; out.push('<h'+lv+'>'+inline(mh[2])+'</h'+lv+'>'); continue; }
-    var ml=l.match(/^\s*[-*]\s+(.*)$/);
-    if(ml){ if(!inList){out.push('<ul>');inList=true;} out.push('<li>'+inline(ml[1])+'</li>'); continue; }
-    if(inList){out.push('</ul>');inList=false;}
-    var mq=l.match(/^>\s?(.*)$/);
-    if(mq){ out.push('<blockquote>'+inline(mq[1])+'</blockquote>'); continue; }
-    if(l.trim()===''){ out.push('<br>'); continue; }
-    out.push('<p>'+inline(l)+'</p>');
-  }
-  if(inCode)out.push('</pre>'); if(inList)out.push('</ul>');
-  var css='<style>body{font-family:-apple-system,"PingFang SC","Noto Sans SC",sans-serif;padding:16px;line-height:1.7;color:#2a2020;max-width:100%;}h1,h2,h3,h4{color:#5a4a6a;}pre.cb{background:#f5f0e8;padding:12px;border-radius:8px;overflow-x:auto;}code{background:#f5f0e8;padding:1px 5px;border-radius:4px;}blockquote{border-left:3px solid #d4a574;margin:8px 0;padding:2px 12px;color:#7a6a6a;}a{color:#b07d4a;}p{margin:6px 0;}</style>';
-  return css+out.join('\n');
-}
 load();
 </script>
 </body>

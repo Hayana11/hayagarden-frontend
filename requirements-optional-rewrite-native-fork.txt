@@ -1,0 +1,16 @@
+# Optional dependency for Rewrite Cache Fork R0 (CC_REWRITE_NATIVE_FORK_ENABLED).
+#
+# Default production path does NOT need this file. With the flag OFF (default),
+# staged regen/edit keep the #204 source-aware cold bootstrap.
+#
+# Install only when intentionally enabling native fork on a host that already
+# runs Claude Code (same HOME / transcript store as the gateway resident):
+#
+#   python3.11 -m pip install --break-system-packages \
+#     -r requirements-optional-rewrite-native-fork.txt
+#
+# Caution: claude-agent-sdk pulls mcp/pydantic/httpx/uvicorn (~300MB+) and must
+# not replace the Ombre MCP pin used elsewhere. Keep this install isolated or
+# review conflicts before enabling the flag.
+# Pinned to the production-validated SDK release (fork_session contract).
+claude-agent-sdk==0.2.131
