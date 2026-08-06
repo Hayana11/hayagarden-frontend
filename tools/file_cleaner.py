@@ -133,6 +133,13 @@ def run():
     finally:
         conn.close()
 
+    # Artifact lifecycle (separate store; never touches user-upload policy).
+    try:
+        from tools import artifact_cleaner
+        artifact_cleaner.run()
+    except Exception as exc:
+        _log('artifact cleaner failed: %s' % exc)
+
 
 if __name__ == '__main__':
     run()

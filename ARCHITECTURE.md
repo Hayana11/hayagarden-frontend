@@ -46,6 +46,7 @@ chat.html send()
   - **工具结果回注历史的截断旋钮**：`TOOL_INJECT_MAX`（本地工具，默认2000）、`TOOL_INJECT_MAX_MCP`（外部/大返回工具 web_search/browse_github/read_webpage/get_activity_summary，默认8000）。build_messages() 把 assistant 的 tool_calls 列压成“[上一轮我调用的工具与结果]”注回对话历史，否则模型下轮会失忆（工具结果不进后续上下文的旧 bug）。
   - **滚动摘要旋钮**：`ROLLING_LIVE_N`（实时窗口条数，默认60）、`ROLLING_HORIZON_DAYS`（回溯天数，默认3）、`ROLLING_MAX_CHARS`（摘要上限，默认700）。
   - **文件清理旋钮**：`FILE_CLEAN_CAP_MB`（文件目录总占用上限 MB，默认200）、`FILE_CLEAN_ORPHAN_GRACE_MIN`（孤儿文件宽限分钟，默认60）。
+  - **Artifact 清理旋钮**：`ARTIFACT_CLEAN_ORPHAN_GRACE_MIN`（未引用/物理孤儿宽限分钟，默认1440=24h）、`ARTIFACT_CLEAN_CAP_MB`（仅淘汰 **未引用** Artifact 的容量上限 MB，默认500；已引用 Artifact 永不因 cap 删除）。
 - **.env**（/opt/frontend/.env）：只做兜底和密钥（ANTHROPIC_API_KEY=relay的key、CLAUDE_CODE_OAUTH_TOKEN、BOARD_TOKEN_FYODOR、DEEPSEEK_API_KEY）。**代码不许写 .env**。
 - **models.json**：策展模型清单（label/desc/thinking/primary/dot）。gateway 按 thinking 字段决定传不传 thinking 参数。
 - **relay_presets 表**：中转站列表（url/key/capabilities 覆盖）。当前主力 relay id=10（68886868.xyz）。relay 无 haiku 通道；轻量摘要用 `[按量3] deepseek-v3.2`。
@@ -156,7 +157,7 @@ chat_messages（含 thinking/thinking_summary/tool_calls/cache_info/**file_url/f
   每块 DeepSeek 压要点（map），再合成日摘要（reduce），量大的日子给 200-400 字。
   不再采样丢内容；claude CLI 只做 DeepSeek 不可用时的兜底。
 - **滚动对话摘要** `tools/rolling_summary.py`（每 15 分钟）：build_messages 的实时窗口封顶 60 条；同一天聊得很长时，早于窗口又不够格进日摘要（summarizer.py 只管过去的天）的那段会丢。本脚本把“比窗口早、但在 HORIZON_DAYS 内”的历史用 DeepSeek 压成一段，存 rolling_summary；build_messages 在 len(rows)>=60 时注入到开头。生成走后台，不占对话热路径。
-- **用户文件清理** `tools/file_cleaner.py`（每晚 03:30）：① 孤儿文件（磁盘上无任何 chat_messages.file_url 引用，且超 GRACE 分钟）直接删；② 总占用超 CAP_MB 时从最老开始删物理文件 + 清空对应消息的 file 字段（消息保留）。图片附件另有 attachment_store 的 30张/7天自清。
+- **用户文件清理** `tools/file_cleaner.py`（每晚 03:30）：① 孤儿文件（磁盘上无任何 chat_messages.file_url 引用，且超 GRACE 分钟）直接删；② 总占用超 CAP_MB 时从最老开始删物理文件 + 清空对应消息的 file 字段（消息保留）。图片附件另有 attachment_store 的 30张/7天自清。同一次 job 调用 `tools/artifact_cleaner.py`：只清 **未引用 / 物理孤儿 / 破损 metadata** 的 Artifact；`chat_messages.tool_calls` 仍引用的 Artifact **永久保留**，即便超过 `ARTIFACT_CLEAN_CAP_MB` 也只记 warning、不删历史。
 
 ## 文件收发 + 选择器（“哪个字段有值就是哪种气泡”）
 
@@ -164,4 +165,4 @@ chat_messages（含 thinking/thinking_summary/tool_calls/cache_info/**file_url/f
 - **用户发文件**：`POST /api/chat/upload_file`（扩展名白名单 + 2MB + 文件名安全化加随机前缀，存 `/static/uploads/files/`）→ `/api/chat/send` 带 file_url/file_name。build_messages() 把最近 6 条文件全文注入上下文（最多 30000 字截断），更早只留 `[文件:x]` 标记（抄图片降级策略）。
 - **AI 发文件**：走已有 artifacts 工具 create_html/create_markdown/create_document（成品性内容不要贴气泡）。
 - **选择器**：AI 在正文写 `[choices]A|B|C[/choices]`（标签驱动，非 tool call，不打断流式），gateway `_extract_choices` 在**每一条保存路径**（relay 流式/claude_code/deepseek 降级）抽出存 choices 列、正文去标签（空正文给 `[选项: ...]` 免得 Claude API 拒空 content）。前端按钮可点性 = 这组选项之后没有用户消息；点击=把选项文本当普通消息发出。
-- **文档库**：`/files`（static/files.html）查 chat_messages 而非扫目录；`/api/files/delete` 删物理文件 + 清空 file 字段（realpath 防穿越）；html 预览用 `sandbox="allow-scripts"` iframe（无 allow-same-origin，碰不到登录态）。
+- **文档库**：`/files`（static/files.html）是 **Documents View** 联合视图：`user_upload`（chat_messages.file_url）+ `assistant_artifact`（artifacts 表）。底层存储仍分离，禁止互相搬迁。列表项用稳定 `library_key`（`upload:<message_id>` / `artifact:<artifact_id>`）避免数字 id 碰撞。`GET /api/files/list` 合并倒序；`POST /api/files/delete` 支持 `keys`（新）与 legacy `ids`（仅 upload）。手动删 Artifact 会删物理文件+metadata（历史卡片可能无法再打开，UI 需确认）；自动 cleaner 绝不能删仍被 tool_calls 引用的 Artifact。HTML/Markdown 预览走 #199 安全 sandbox（`/api/artifacts/<id>/preview`、`/api/chat/files/<name>/preview`），禁止 raw HTML 同源直开。
