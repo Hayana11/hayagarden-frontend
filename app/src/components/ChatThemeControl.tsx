@@ -3,6 +3,7 @@ import {
   loadChatSettings,
   resolveEffectiveTheme,
   setChatTheme,
+  subscribeChatTheme,
   toggleChatThemeQuick,
   type EffectiveTheme,
   type ThemeMode,
@@ -28,10 +29,6 @@ function SvgSun({ size = 16 }: { size?: number }) {
   );
 }
 
-function syncEffectiveFromStorage(): EffectiveTheme {
-  return resolveEffectiveTheme(loadChatSettings().theme);
-}
-
 /** Header quick toggle — state is local; DOM theme via data-chat-theme on chat root. */
 export function ChatThemeQuickToggle({
   rootRef,
@@ -40,20 +37,14 @@ export function ChatThemeQuickToggle({
   rootRef: RefObject<HTMLElement | null>;
   style?: CSSProperties;
 }) {
-  const [effective, setEffective] = useState<EffectiveTheme>(syncEffectiveFromStorage);
+  const [effective, setEffective] = useState<EffectiveTheme>(
+    () => resolveEffectiveTheme(loadChatSettings().theme),
+  );
 
-  useEffect(() => {
-    const mq = window.matchMedia('(prefers-color-scheme: dark)');
-    const onMq = () => {
-      if (loadChatSettings().theme === 'auto') setEffective(syncEffectiveFromStorage());
-    };
-    mq.addEventListener?.('change', onMq);
-    return () => mq.removeEventListener?.('change', onMq);
-  }, []);
+  useEffect(() => subscribeChatTheme(({ effective: e }) => setEffective(e)), []);
 
   const onClick = useCallback(() => {
-    const next = toggleChatThemeQuick(rootRef.current);
-    setEffective(next);
+    toggleChatThemeQuick(rootRef.current);
   }, [rootRef]);
 
   return (
@@ -73,20 +64,10 @@ export function ChatThemeSegmented({
 }) {
   const [mode, setMode] = useState<ThemeMode>(() => loadChatSettings().theme);
 
-  useEffect(() => {
-    const mq = window.matchMedia('(prefers-color-scheme: dark)');
-    const onMq = () => {
-      if (loadChatSettings().theme === 'auto') {
-        if (rootRef.current) setChatTheme(rootRef.current, 'auto');
-      }
-    };
-    mq.addEventListener?.('change', onMq);
-    return () => mq.removeEventListener?.('change', onMq);
-  }, [rootRef]);
+  useEffect(() => subscribeChatTheme(({ mode: m }) => setMode(m)), []);
 
   const pick = useCallback((t: ThemeMode) => {
     setChatTheme(rootRef.current, t);
-    setMode(t);
   }, [rootRef]);
 
   return (

@@ -138,20 +138,8 @@ function collectLayoutDiagnostics(root: HTMLElement | null): LayoutDiagRow[] {
 
   pushElDiag(rows, 'chat-root', root);
   pushElDiag(rows, '#root', appRoot);
-  if (body) {
-    rows.push({ label: 'body clientWidth', value: String(body.clientWidth) });
-    rows.push({ label: 'body rect.width', value: fmtPx(body.getBoundingClientRect().width) });
-    const bst = getComputedStyle(body);
-    rows.push({ label: 'body computed zoom', value: readZoom(bst) });
-    rows.push({ label: 'body computed transform', value: bst.transform === 'none' ? 'none' : bst.transform });
-    rows.push({ label: 'body -webkit-text-size-adjust', value: readTextSizeAdjust(bst) });
-  }
-  rows.push({ label: 'html clientWidth', value: String(html.clientWidth) });
-  rows.push({ label: 'html rect.width', value: fmtPx(html.getBoundingClientRect().width) });
-  const hst = getComputedStyle(html);
-  rows.push({ label: 'html computed zoom', value: readZoom(hst) });
-  rows.push({ label: 'html computed transform', value: hst.transform === 'none' ? 'none' : hst.transform });
-  rows.push({ label: 'html -webkit-text-size-adjust', value: readTextSizeAdjust(hst) });
+  pushElDiag(rows, 'body', body);
+  pushElDiag(rows, 'html', html);
 
   if (root) {
     rows.push({ label: 'Chat root computed font-size', value: getComputedStyle(root).fontSize });

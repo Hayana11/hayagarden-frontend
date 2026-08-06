@@ -11,11 +11,19 @@ export interface FyodorChatSettings {
   thinkMode: 'auto' | 'drawer' | 'inline';
 }
 
+export interface ChatThemeState {
+  mode: ThemeMode;
+  effective: EffectiveTheme;
+}
+
 const DEFAULTS: FyodorChatSettings = {
   theme: 'light',
   fontStep: 2,
   thinkMode: 'auto',
 };
+
+type ChatThemeListener = (state: ChatThemeState) => void;
+const listeners = new Set<ChatThemeListener>();
 
 export function loadChatSettings(): FyodorChatSettings {
   try {
@@ -49,6 +57,24 @@ export function resolveEffectiveTheme(theme: ThemeMode = loadChatSettings().them
   return theme;
 }
 
+function getChatThemeState(): ChatThemeState {
+  const mode = loadChatSettings().theme;
+  return { mode, effective: resolveEffectiveTheme(mode) };
+}
+
+function emitChatThemeChange() {
+  const state = getChatThemeState();
+  for (const listener of listeners) {
+    listener(state);
+  }
+}
+
+/** Subscribe to theme mode/effective changes (setChatTheme, system auto, central matchMedia). */
+export function subscribeChatTheme(listener: ChatThemeListener): () => void {
+  listeners.add(listener);
+  return () => listeners.delete(listener);
+}
+
 export function applyChatThemeToRoot(root: HTMLElement, theme?: ThemeMode) {
   const mode = theme ?? loadChatSettings().theme;
   root.setAttribute('data-chat-theme', resolveEffectiveTheme(mode));
@@ -57,19 +83,32 @@ export function applyChatThemeToRoot(root: HTMLElement, theme?: ThemeMode) {
 
 type Detach = () => void;
 const detachByRoot = new WeakMap<HTMLElement, Detach>();
+const attachedRoots = new Set<HTMLElement>();
+
+let systemThemeMq: MediaQueryList | null = null;
+
+function onSystemThemeChange() {
+  if (loadChatSettings().theme !== 'auto') return;
+  for (const root of attachedRoots) {
+    applyChatThemeToRoot(root);
+  }
+  emitChatThemeChange();
+}
+
+function ensureSystemThemeListener() {
+  if (systemThemeMq) return;
+  systemThemeMq = window.matchMedia('(prefers-color-scheme: dark)');
+  systemThemeMq.addEventListener?.('change', onSystemThemeChange);
+}
 
 export function attachChatTheme(root: HTMLElement): Detach {
   applyChatThemeToRoot(root);
+  attachedRoots.add(root);
+  ensureSystemThemeListener();
   detachByRoot.get(root)?.();
 
-  const mq = window.matchMedia('(prefers-color-scheme: dark)');
-  const onMq = () => {
-    if (loadChatSettings().theme === 'auto') applyChatThemeToRoot(root);
-  };
-  mq.addEventListener?.('change', onMq);
-
   const detach = () => {
-    mq.removeEventListener?.('change', onMq);
+    attachedRoots.delete(root);
     detachByRoot.delete(root);
   };
   detachByRoot.set(root, detach);
@@ -79,6 +118,7 @@ export function attachChatTheme(root: HTMLElement): Detach {
 export function setChatTheme(root: HTMLElement | null, theme: ThemeMode): EffectiveTheme {
   patchChatSettings({ theme });
   if (root) applyChatThemeToRoot(root, theme);
+  emitChatThemeChange();
   return resolveEffectiveTheme(theme);
 }
 
