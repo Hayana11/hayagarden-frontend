@@ -102,10 +102,11 @@ function ensureSystemThemeListener() {
 }
 
 export function attachChatTheme(root: HTMLElement): Detach {
+  detachByRoot.get(root)?.();
+
   applyChatThemeToRoot(root);
   attachedRoots.add(root);
   ensureSystemThemeListener();
-  detachByRoot.get(root)?.();
 
   const detach = () => {
     attachedRoots.delete(root);
