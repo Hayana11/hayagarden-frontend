@@ -117,7 +117,7 @@ export function ContactsScreen() {
       style={{
         ...(vars as CSSProperties),
         display: 'flex', flexDirection: 'column',
-        background: 'var(--bg)', color: 'var(--ink)', fontFamily: SERIF, transition: 'background .3s,color .3s',
+        background: 'var(--bg)', color: 'var(--ink)', fontFamily: SERIF,
       }}
     >
       <div style={{ flexShrink: 0, background: 'rgba(255,255,255,0.97)', boxShadow: '0 6px 18px var(--shadow)' }}>

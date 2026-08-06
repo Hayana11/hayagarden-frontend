@@ -57,7 +57,9 @@ html, body {
   align-items: baseline;
 }
 .hstack-26 > * + * { margin-left: 26px; }
+.hstack-18 > * + * { margin-left: 18px; }
 .hstack-14 > * + * { margin-left: 14px; }
+.hstack-11 > * + * { margin-left: 11px; }
 .hstack-12 > * + * { margin-left: 12px; }
 .hstack-10 > * + * { margin-left: 10px; }
 .hstack-8 > * + * { margin-left: 8px; }
@@ -70,10 +72,12 @@ html, body {
 .hstack-1 > * + * { margin-left: 1px; }
 
 .vstack-26 > * + * { margin-top: 26px; }
+.vstack-22 > * + * { margin-top: 22px; }
 .vstack-20 > * + * { margin-top: 20px; }
 .vstack-18 > * + * { margin-top: 18px; }
 .vstack-14 > * + * { margin-top: 14px; }
 .vstack-12 > * + * { margin-top: 12px; }
+.vstack-11 > * + * { margin-top: 11px; }
 .vstack-10 > * + * { margin-top: 10px; }
 .vstack-9 > * + * { margin-top: 9px; }
 .vstack-7 > * + * { margin-top: 7px; }
@@ -84,6 +88,13 @@ html, body {
 .vstack-1 > * + * { margin-top: 1px; }
 
 /* flex-wrap gap fallbacks (Chrome <84) — negative margin on container */
+.flex-wrap-gap-10 {
+  display: flex;
+  flex-wrap: wrap;
+  margin: -5px;
+}
+.flex-wrap-gap-10 > * { margin: 5px; }
+
 .flex-wrap-gap-8 {
   display: flex;
   flex-wrap: wrap;
@@ -409,8 +420,10 @@ button {
 /* ── Fyodor Config handoff ── */
 .config-root:not(.dash-fullscreen-page) { min-height: 100vh; background: #F7F1EE; color: #4A3F3C; }
 .config-root.dash-fullscreen-page { background: #F7F1EE; color: #4A3F3C; }
-.config-screen { max-width: 430px; margin: 0 auto; padding: 26px 20px 60px; display: flex; flex-direction: column; gap: 16px; }
-.config-header { display: flex; align-items: center; gap: 14px; }
+.config-screen { max-width: 430px; margin: 0 auto; padding: 26px 20px 60px; display: flex; flex-direction: column; }
+.config-screen > * + * { margin-top: 16px; }
+.config-header { display: flex; align-items: center; }
+.config-header > * + * { margin-left: 14px; }
 .config-header > button:first-child { width: 38px; height: 38px; border-radius: 50%; background: #fff; box-shadow: 0 6px 18px rgba(183,110,121,.1); display: grid; place-items: center; font-size: 20px; color: #8C7B76; cursor: pointer; flex-shrink: 0; }
 .config-header h1 { margin: 0; font-size: 22px; font-weight: 600; letter-spacing: 3px; }
 .config-back-chat { margin-left: auto; padding: 8px 16px; border-radius: 999px; background: #fff; box-shadow: 0 6px 18px rgba(183,110,121,.1); color: #8C7B76; font-size: 12.5px; letter-spacing: 1px; cursor: pointer; white-space: nowrap; }
@@ -419,83 +432,106 @@ button {
 .config-section-label { display: flex; justify-content: space-between; align-items: baseline; padding: 10px 4px 0; font: 11px var(--font-serif-display); letter-spacing: 3px; color: #B9A8A2; }
 .config-section-label > span:last-child:not(:first-child) { letter-spacing: 0; color: #A99590; }
 .config-section-link { padding: 5px 10px; border-radius: 999px; background: rgba(183,110,121,.09); color: #9C3B4A; font: 11px var(--font-serif-cn); letter-spacing: .5px; text-decoration: none; white-space: nowrap; }
-.config-card-kicker { display: flex; justify-content: space-between; align-items: center; gap: 10px; font: 10px var(--font-serif-display); letter-spacing: 3px; color: #B9A8A2; }
-.config-card-kicker > span:last-child { display: flex; align-items: center; gap: 6px; font-family: var(--font-serif-cn); font-size: 11.5px; letter-spacing: 0; }
+.config-card-kicker { display: flex; justify-content: space-between; align-items: center; font: 10px var(--font-serif-display); letter-spacing: 3px; color: #B9A8A2; }
+.config-card-kicker > * + * { margin-left: 10px; }
+.config-card-kicker > span:last-child { display: flex; align-items: center; font-family: var(--font-serif-cn); font-size: 11.5px; letter-spacing: 0; }
+.config-card-kicker > span:last-child > * + * { margin-left: 6px; }
 .config-card-kicker > span:last-child i { width: 7px; height: 7px; border-radius: 50%; background: currentColor; animation: livePulse 2s infinite; }
 .config-card-kicker .ready { color: #7A9B6D; }
 .config-card-kicker .bad { color: #C25450; }
-.config-current dl { margin: 13px 0 0; display: flex; flex-direction: column; gap: 9px; }
-.config-current dl > div { display: flex; justify-content: space-between; align-items: baseline; gap: 14px; }
+.config-current dl { margin: 13px 0 0; display: flex; flex-direction: column; }
+.config-current dl > * + * { margin-top: 9px; }
+.config-current dl > div { display: flex; justify-content: space-between; align-items: baseline; }
+.config-current dl > div > * + * { margin-left: 14px; }
 .config-current dt { color: #A99590; font-size: 12px; letter-spacing: 1px; flex-shrink: 0; }
 .config-current dd { margin: 0; min-width: 0; text-align: right; font: 13px var(--font-mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .config-current dd.latency { color: #7A9B6D; }
 .config-current p { margin: 11px 0 0; color: #C4B4AF; font-size: 11px; line-height: 1.55; }
-.config-card-heading { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; }
+.config-card-heading { display: flex; justify-content: space-between; align-items: baseline; }
+.config-card-heading > * + * { margin-left: 10px; }
 .config-card-heading h2 { margin: 0; font-size: 16px; font-weight: 600; letter-spacing: 2px; }
 .config-card-heading > span { color: #A99590; font: 11px var(--font-serif-display); letter-spacing: 1px; }
 .config-day-detail { margin-top: 14px; color: #9C3B4A; font-size: 12px; letter-spacing: .5px; line-height: 1.55; }
 .config-card-heading > button { padding: 6px 14px; border: 1px solid #E4D4CC; border-radius: 999px; color: #8C7B76; font-size: 12px; letter-spacing: 1px; cursor: pointer; }
-.config-segmented { display: flex; gap: 2px; margin-top: 14px; padding: 3px; border-radius: 999px; background: #F6EFEC; }
+.config-segmented { display: flex; margin-top: 14px; padding: 3px; border-radius: 999px; background: #F6EFEC; }
+.config-segmented > * + * { margin-left: 2px; }
 .config-segmented button { flex: 1; padding: 7px 0; border-radius: 999px; color: #8C7B76; font-size: 12.5px; cursor: pointer; }
 .config-segmented button.active { background: #fff; color: #9C3B4A; box-shadow: 0 3px 8px rgba(183,110,121,.15); }
-.config-week-bars { display: flex; align-items: flex-end; gap: 10px; height: 168px; margin-top: 18px; padding: 0 2px; }
-.config-week-bars button { flex: 1; height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: flex-end; gap: 6px; cursor: pointer; min-width: 0; }
+.config-week-bars { display: flex; align-items: flex-end; height: 168px; margin-top: 18px; padding: 0 2px; }
+.config-week-bars > * + * { margin-left: 10px; }
+.config-week-bars button { flex: 1; height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: flex-end; cursor: pointer; min-width: 0; }
+.config-week-bars button > * + * { margin-top: 6px; }
 .config-week-bars span, .config-week-bars small { color: #8C7B76; font: 10px var(--font-mono); white-space: nowrap; }
 .config-week-bars i { width: 100%; max-width: 30px; min-height: 8px; border-radius: 8px 8px 3px 3px; background: #D2939B; }
 .config-week-bars i.selected { background: #9C3B4A; }
 .config-month-grid { display: grid; grid-template-columns: repeat(7,1fr); gap: 10px 6px; margin-top: 18px; }
-.config-month-grid button { display: flex; flex-direction: column; align-items: center; gap: 5px; min-width: 0; cursor: pointer; }
+.config-month-grid button { display: flex; flex-direction: column; align-items: center; min-width: 0; cursor: pointer; }
+.config-month-grid button > * + * { margin-top: 5px; }
 .config-month-grid button > span { position: relative; width: 100%; height: 46px; border-radius: 12px; background: #F3ECE8; overflow: hidden; }
 .config-month-grid button > span.selected { outline: 1.5px solid #9C3B4A; outline-offset: 1.5px; }
 .config-month-grid i { position: absolute; left: 0; right: 0; bottom: 0; min-height: 5%; background: #D2939B; }
 .config-month-grid em { position: absolute; inset: 0; display: grid; place-items: center; color: #7A625E; font: 500 9.5px var(--font-mono); font-style: normal; }
 .config-month-grid small { color: #B9A8A2; font: 10px var(--font-mono); white-space: nowrap; }
 .config-day-detail { margin-top: 14px; color: #9C3B4A; font-size: 12px; letter-spacing: .5px; }
-.config-usage-summary { display: flex; flex-wrap: wrap; gap: 6px 18px; align-items: baseline; margin-top: 12px; padding-top: 12px; border-top: 1px solid #F0E6E2; color: #8C7B76; font-size: 12.5px; }
+.config-usage-summary { display: flex; flex-wrap: wrap; align-items: baseline; margin: -3px -9px; margin-top: 9px; padding-top: 12px; border-top: 1px solid #F0E6E2; color: #8C7B76; font-size: 12.5px; }
+.config-usage-summary > * { margin: 3px 9px; }
 .config-usage-summary b { color: #4A3F3C; font-family: var(--font-mono); }
 .config-endpoint { padding: 18px 20px; opacity: .98; }
 .config-endpoint.current { border: 1px solid #F2E2DC; }
-.config-endpoint-summary { width: 100%; display: flex; align-items: center; gap: 11px; text-align: left; cursor: pointer; min-width: 0; }
+.config-endpoint-summary { width: 100%; display: flex; align-items: center; text-align: left; cursor: pointer; min-width: 0; }
+.config-endpoint-summary > * + * { margin-left: 11px; }
 .config-endpoint-summary > i { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; background: #D8CCC7; }
 .config-endpoint-summary > i.online { background: #7A9B6D; animation: livePulse 2s infinite; }
 .config-endpoint-summary > i.saved { background: #D2939B; }
-.config-endpoint-summary > span { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
-.config-endpoint-summary strong { display: flex; align-items: center; gap: 7px; min-width: 0; font-size: 15px; letter-spacing: 1px; }
+.config-endpoint-summary > span { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.config-endpoint-summary > span > * + * { margin-top: 3px; }
+.config-endpoint-summary strong { display: flex; align-items: center; min-width: 0; font-size: 15px; letter-spacing: 1px; }
+.config-endpoint-summary strong > * + * { margin-left: 7px; }
 .config-endpoint-summary span > small { color: #A99590; font: 11.5px var(--font-mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.config-endpoint-summary > em { display: flex; flex-direction: column; gap: 3px; align-items: flex-end; flex-shrink: 0; color: #7A9B6D; font: 12.5px var(--font-mono); font-style: normal; }
+.config-endpoint-summary > em { display: flex; flex-direction: column; align-items: flex-end; flex-shrink: 0; color: #7A9B6D; font: 12.5px var(--font-mono); font-style: normal; }
+.config-endpoint-summary > em > * + * { margin-top: 3px; }
 .config-endpoint-summary > em small { max-width: 125px; color: #C4B4AF; font: 10px var(--font-serif-cn); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .config-endpoint-summary > b { color: #C4B4AF; font-size: 13px; transition: transform .2s; }
 .config-endpoint-summary > b.open { transform: rotate(180deg); }
 .config-role { padding: 2px 7px; border: 1px solid #EADCD6; border-radius: 999px; color: #A99590; font: 10px var(--font-serif-display); letter-spacing: 1px; flex-shrink: 0; }
-.config-endpoint-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 12px; }
-.config-cap-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.config-endpoint-row { display: flex; flex-wrap: wrap; align-items: center; margin: -3px; margin-top: 9px; }
+.config-endpoint-row > * { margin: 3px; }
+.config-cap-chips { display: flex; flex-wrap: wrap; margin: -3px; }
+.config-cap-chips > * { margin: 3px; }
 .config-cap-chips span { padding: 3px 10px; border-radius: 999px; font-size: 10.5px; letter-spacing: 1px; white-space: nowrap; }
 .config-cap-chips .on { background: rgba(122,155,109,.1); color: #7A9B6D; }
 .config-cap-chips .off { background: #F6EFEC; color: #C4B4AF; }
 .config-endpoint-row > button, .config-current-badge { margin-left: auto; padding: 5px 13px; border: 1px solid #E4D4CC; border-radius: 999px; color: #8C7B76; font-size: 11.5px; letter-spacing: 1px; cursor: pointer; white-space: nowrap; }
 .config-current-badge { border: 0; background: rgba(183,110,121,.12); color: #9C3B4A; }
-.config-effort { display: flex; align-items: center; gap: 12px; margin-top: 14px; }
+.config-effort { display: flex; align-items: center; margin-top: 14px; }
+.config-effort > * + * { margin-left: 12px; }
 .config-effort > span { color: #8C7B76; font-size: 12.5px; letter-spacing: 1px; }
-.config-effort > div { flex: 1; display: flex; gap: 2px; padding: 3px; border-radius: 999px; background: #F6EFEC; }
+.config-effort > div { flex: 1; display: flex; padding: 3px; border-radius: 999px; background: #F6EFEC; }
+.config-effort > div > * + * { margin-left: 2px; }
 .config-effort button { flex: 1; padding: 6px 0; border-radius: 999px; color: #8C7B76; font: 11px var(--font-mono); letter-spacing: 1.5px; }
 .config-effort button.active { background: #fff; color: #9C3B4A; box-shadow: 0 3px 8px rgba(183,110,121,.15); }
 .config-effort button:disabled { color: #C4B4AF; cursor: not-allowed; opacity: .72; }
 .config-effort > small { color: #C4B4AF; font-size: 10px; white-space: nowrap; }
 .config-endpoint-expanded { margin-top: 15px; padding-top: 14px; border-top: 1px solid #F0E6E2; }
-.config-expanded-title { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; }
+.config-expanded-title { display: flex; justify-content: space-between; align-items: baseline; }
+.config-expanded-title > * + * { margin-left: 10px; }
 .config-expanded-title strong { font-size: 13px; letter-spacing: 1px; }
 .config-expanded-title span { color: #C4B4AF; font-size: 10.5px; white-space: nowrap; }
 .config-endpoint-expanded > input, .config-model-pool > input { width: 100%; margin-top: 10px; padding: 9px 15px; border: 0; border-radius: 999px; outline: none; background: #F6EFEC; color: #4A3F3C; font: 12px var(--font-mono); }
-.config-model-chips { display: flex; flex-wrap: wrap; gap: 6px; max-height: 142px; margin-top: 10px; overflow-y: auto; }
+.config-model-chips { display: flex; flex-wrap: wrap; margin: -3px; max-height: 142px; margin-top: 10px; overflow-y: auto; }
+.config-model-chips > * { margin: 3px; }
+.config-key-row { display: flex; align-items: center; margin-top: 12px; padding: 11px 14px; border-radius: 14px; background: #F6EFEC; }
+.config-key-row > * + * { margin-left: 10px; }
+.config-endpoint-actions { display: flex; flex-wrap: wrap; margin: -4px; margin-top: 10px; }
+.config-endpoint-actions > * { margin: 4px; }
+.config-endpoint-actions button { padding: 7px 14px; border-radius: 999px; background: #F6EFEC; color: #6B5A55; font-size: 12.5px; letter-spacing: 1px; cursor: pointer; }
 .config-model-chips span { padding: 4px 10px; border-radius: 999px; background: #F6EFEC; color: #6B5A55; font: 11px var(--font-mono); }
-.config-key-row { display: flex; align-items: center; gap: 10px; margin-top: 12px; padding: 11px 14px; border-radius: 14px; background: #F6EFEC; }
 .config-key-row span { color: #A99590; font: 9.5px var(--font-serif-display); letter-spacing: 2px; }
 .config-key-row b { flex: 1; min-width: 0; color: #6B5A55; font: 12px var(--font-mono); text-align: right; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.config-endpoint-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
-.config-endpoint-actions button { padding: 7px 14px; border-radius: 999px; background: #F6EFEC; color: #6B5A55; font-size: 12.5px; letter-spacing: 1px; cursor: pointer; }
 .config-endpoint-actions button.danger { background: rgba(194,84,80,.08); color: #C25450; }
 .config-balance { margin-bottom: 13px; padding: 14px; border-radius: 16px; background: linear-gradient(135deg, rgba(111,155,114,.13), rgba(246,239,236,.72)); }
-.config-balance > div:first-child { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.config-balance > div:first-child { display: flex; align-items: baseline; justify-content: space-between; }
+.config-balance > div:first-child > * + * { margin-left: 12px; }
 .config-balance > div:first-child span { color: #7F9D7D; font-size: 11px; letter-spacing: 1px; }
 .config-balance > div:first-child strong { color: #4F7454; font: 22px var(--font-serif-display); }
 .config-balance dl { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 8px; margin: 12px 0 0; }
@@ -503,7 +539,8 @@ button {
 .config-balance dt { color: #A28F89; font-size: 9.5px; }
 .config-balance dd { margin: 3px 0 0; color: #675752; font: 11px var(--font-mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .config-balance > small { display: block; margin-top: 9px; color: #A28F89; font-size: 9.5px; }
-.config-balance.unavailable { display: flex; align-items: center; justify-content: space-between; gap: 12px; background: #F6EFEC; }
+.config-balance.unavailable { display: flex; align-items: center; justify-content: space-between; background: #F6EFEC; }
+.config-balance.unavailable > * + * { margin-left: 12px; }
 .config-balance.unavailable span { color: #A28F89; font-size: 10.5px; }
 .config-balance.unavailable strong { color: #7E6C67; font-size: 11px; text-align: right; }
 .config-account-balance { background: linear-gradient(135deg, rgba(206,164,111,.16), rgba(246,239,236,.72)); }
@@ -515,15 +552,19 @@ button {
 .config-account-fields { display: grid; grid-template-columns: minmax(90px,.55fr) minmax(0,1.45fr); gap: 8px; }
 .config-account-auth label { color: #8D7A74; font-size: 10px; }
 .config-account-auth input { width: 100%; margin-top: 5px; padding: 9px 10px; border: 0; border-radius: 10px; outline: none; background: #F6EFEC; color: #4A3F3C; font: 11px var(--font-mono); }
-.config-credential-kind { display: flex; gap: 7px; margin-bottom: 10px; }
+.config-credential-kind { display: flex; margin-bottom: 10px; }
+.config-credential-kind > * + * { margin-left: 7px; }
 .config-credential-kind button { flex: 1; padding: 7px 8px; border-radius: 10px; background: #F6EFEC; color: #9A8781; font-size: 10px; cursor: pointer; }
 .config-credential-kind button.active { background: #E4EEDF; color: #59735C; box-shadow: inset 0 0 0 1px rgba(111,155,114,.18); }
-.config-account-auth footer { display: flex; gap: 8px; margin-top: 10px; }
+.config-account-auth footer { display: flex; margin-top: 10px; }
+.config-account-auth footer > * + * { margin-left: 8px; }
 .config-account-auth button { padding: 7px 12px; border-radius: 999px; background: #EEE3DE; color: #6B5A55; font-size: 11px; cursor: pointer; }
 .config-account-auth button[type="submit"] { background: #8EAA89; color: #fff; }
 .config-intel { margin-top: 11px; }
-.config-intel-summary { display: flex; flex-wrap: wrap; gap: 7px; }
-.config-intel-summary span { display: inline-flex; align-items: center; gap: 5px; padding: 5px 9px; border-radius: 999px; background: #F6EFEC; color: #786762; font-size: 10.5px; }
+.config-intel-summary { display: flex; flex-wrap: wrap; margin: -3.5px; }
+.config-intel-summary > * { margin: 3.5px; }
+.config-intel-summary span { display: inline-flex; align-items: center; padding: 5px 9px; border-radius: 999px; background: #F6EFEC; color: #786762; font-size: 10.5px; }
+.config-intel-summary span > * + * { margin-left: 5px; }
 .config-intel-summary i, .config-intel-model > i { width: 7px; height: 7px; border-radius: 50%; background: #D5C9C5; }
 .config-intel-summary i.ok, .config-intel-model > i.online { background: #6F9B72; box-shadow: 0 0 0 3px rgba(111,155,114,.12); }
 .config-intel-summary i.unknown, .config-intel-model > i.unknown { background: #D1A45E; }
@@ -537,15 +578,18 @@ button {
 .config-intel-model em { color: #87736D; font-size: 10.5px; font-style: normal; text-align: right; }
 .config-intel-model em small { margin-top: 1px; }
 .config-intel-models > p, .config-intel-note { margin: 9px 2px 0; color: #A99590; font-size: 10.5px; line-height: 1.6; }
-.config-priority { display: flex; align-items: center; gap: 8px; margin-top: 15px; color: #8C7B76; font-size: 12.5px; }
+.config-priority { display: flex; align-items: center; margin-top: 15px; color: #8C7B76; font-size: 12.5px; }
+.config-priority > * + * { margin-left: 8px; }
 .config-priority > button.on { width: 42px; height: 23px; padding: 0; border-radius: 999px; background: #B76E79; position: relative; }
 .config-priority > button.on i { position: absolute; top: 2px; left: 21px; width: 19px; height: 19px; border-radius: 50%; background: #fff; box-shadow: 0 1px 4px rgba(0,0,0,.2); }
 .config-priority em { margin-left: auto; color: #C4B4AF; font-size: 10px; font-style: normal; }
 .config-priority > button:not(.on) { width: 28px; height: 28px; border-radius: 10px; background: #F6EFEC; color: #DCC9C2; }
 .config-priority > button.locked-switch { width: 42px; height: 23px; padding: 0; border-radius: 999px; background: #E4D8D3; position: relative; flex-shrink: 0; cursor: pointer; }
 .config-priority > button.locked-switch i { position: absolute; top: 2px; left: 2px; width: 19px; height: 19px; border-radius: 50%; background: #fff; box-shadow: 0 1px 4px rgba(0,0,0,.16); }
-.config-failover { display: flex; align-items: center; gap: 14px; padding: 16px 20px; }
-.config-failover > div { flex: 1; display: flex; flex-direction: column; gap: 3px; }
+.config-failover { display: flex; align-items: center; padding: 16px 20px; }
+.config-failover > * + * { margin-left: 14px; }
+.config-failover > div { flex: 1; display: flex; flex-direction: column; }
+.config-failover > div > * + * { margin-top: 3px; }
 .config-failover strong { font-size: 14.5px; letter-spacing: 1px; }
 .config-failover span { color: #A99590; font-size: 11.5px; }
 .config-failover > button { width: 42px; height: 23px; border-radius: 999px; background: #E4D8D3; position: relative; cursor: pointer; }
@@ -555,34 +599,41 @@ button {
 .config-model-pool > p { margin: 7px 0 0; color: #A99590; font-size: 11.5px; }
 .config-model-pool h3 { margin: 14px 0 4px; color: #C4B4AF; font: 10px var(--font-serif-display); letter-spacing: 2.5px; }
 .config-preset-list { display: flex; flex-direction: column; }
-.config-preset-list button { display: flex; align-items: center; gap: 9px; padding: 10px 2px; border-bottom: 1px solid #F5EDE9; text-align: left; cursor: pointer; }
+.config-preset-list button { display: flex; align-items: center; padding: 10px 2px; border-bottom: 1px solid #F5EDE9; text-align: left; cursor: pointer; }
+.config-preset-list button > * + * { margin-left: 9px; }
 .config-preset-list button > i, .config-unified-list button > i { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
-.config-preset-list button > span { flex: 1; min-width: 0; display: flex; align-items: center; gap: 7px; }
+.config-preset-list button > span { flex: 1; min-width: 0; display: flex; align-items: center; }
+.config-preset-list button > span > * + * { margin-left: 7px; }
 .config-preset-list strong { font-size: 13px; letter-spacing: .5px; }
 .config-preset-list small { min-width: 0; color: #B9A8A2; font: 11px var(--font-mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .config-preset-list em, .config-preset-list b, .config-unified-list em, .config-unified-list b { padding: 4px 12px; border-radius: 999px; font-size: 11px; font-style: normal; font-weight: 400; letter-spacing: 1px; flex-shrink: 0; }
 .config-preset-list em, .config-unified-list em { background: rgba(183,110,121,.12); color: #9C3B4A; }
 .config-preset-list b, .config-unified-list b { border: 1px solid #E4D4CC; color: #8C7B76; }
 .config-unified-list { display: flex; flex-direction: column; max-height: 300px; margin-top: 6px; overflow-y: auto; }
-.config-unified-list button { display: flex; align-items: center; gap: 9px; padding: 9px 2px; border-bottom: 1px solid #F5EDE9; text-align: left; cursor: pointer; }
+.config-unified-list button { display: flex; align-items: center; padding: 9px 2px; border-bottom: 1px solid #F5EDE9; text-align: left; cursor: pointer; }
+.config-unified-list button > * + * { margin-left: 9px; }
 .config-unified-list button > span { padding: 2px 8px; border-radius: 999px; background: #F6EFEC; color: #8C7B76; font-size: 10px; letter-spacing: 1px; white-space: nowrap; }
 .config-unified-list button > strong { flex: 1; min-width: 0; font: 12px var(--font-mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .config-unified-list > div { padding: 10px 2px; color: #C4B4AF; font-size: 12px; }
 .config-playground { padding: 20px; }
-.config-playground-current { display: flex; align-items: center; gap: 8px; margin-top: 12px; padding: 10px 14px; border-radius: 14px; background: #F6EFEC; }
+.config-playground-current { display: flex; align-items: center; margin-top: 12px; padding: 10px 14px; border-radius: 14px; background: #F6EFEC; }
+.config-playground-current > * + * { margin-left: 8px; }
 .config-playground-current i { width: 7px; height: 7px; border-radius: 50%; background: #C25450; }
 .config-playground-current i.ready { background: #7A9B6D; }
 .config-playground-current span { min-width: 0; color: #6B5A55; font: 12px var(--font-mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.config-playground-chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.config-playground-chips { display: flex; flex-wrap: wrap; margin: -4px; margin-top: 8px; }
+.config-playground-chips > * { margin: 4px; }
 .config-playground-chips button, .config-playground-chips span { padding: 6px 13px; border-radius: 999px; background: #F6EFEC; color: #8C7B76; font-size: 12px; letter-spacing: 1px; }
 .config-playground-chips button { cursor: pointer; }
 .config-playground-chips button.active { background: rgba(183,110,121,.12); color: #9C3B4A; }
-.config-playground-input { display: flex; gap: 9px; margin-top: 15px; }
+.config-playground-input { display: flex; margin-top: 15px; }
+.config-playground-input > * + * { margin-left: 9px; }
 .config-playground-input input { flex: 1; min-width: 0; padding: 12px 17px; border: 0; border-radius: 999px; outline: none; background: #F6EFEC; color: #4A3F3C; font-size: 14px; }
 .config-playground-input button { width: 44px; height: 44px; border-radius: 50%; background: #9C3B4A; color: #FBF3F0; font-size: 18px; cursor: pointer; }
 .config-playground-input button:disabled { opacity: .55; }
 .config-thinking { margin-top: 14px; color: #A99590; font-size: 12.5px; letter-spacing: 1px; animation: livePulse 1.2s infinite; }
-.config-test-result { display: flex; flex-direction: column; gap: 8px; margin-top: 14px; }
+.config-test-result { display: flex; flex-direction: column; margin-top: 14px; }
+.config-test-result > * + * { margin-top: 8px; }
 .config-test-result > small { color: #A99590; font: 11px var(--font-mono); }
 .config-test-result > div { padding: 9px 13px; border-radius: 12px; background: rgba(138,122,181,.08); color: #8A7AB5; font-size: 12px; line-height: 1.7; }
 .config-test-result > p { margin: 0; padding: 12px 15px; border-radius: 16px 16px 16px 6px; background: #F6EFEC; font-size: 14px; line-height: 1.8; white-space: pre-wrap; }
@@ -590,15 +641,18 @@ button {
 .config-api-note { margin-top: 4px; color: #C4B4AF; font-size: 12px; letter-spacing: 1px; text-align: center; line-height: 1.6; }
 .config-sheet-wrap { position: fixed; inset: 0; z-index: 100; }
 .config-sheet-backdrop { position: absolute; inset: 0; width: 100%; background: rgba(74,63,60,.35); backdrop-filter: blur(2px); }
-.config-sheet { position: absolute; left: 50%; bottom: 0; transform: translateX(-50%); width: 100%; max-width: 430px; padding: 14px 24px calc(30px + env(safe-area-inset-bottom,0px)); border-radius: 26px 26px 0 0; background: #FBF7F5; box-shadow: 0 -14px 50px rgba(74,63,60,.25); display: flex; flex-direction: column; gap: 12px; animation: chatSheetUp .25s ease; }
-.config-sheet > i { width: 40px; height: 4px; margin: 0 auto; border-radius: 2px; background: #E4D4CC; }
-.config-sheet h2 { margin: 4px 0 0; font-size: 16px; letter-spacing: 3px; }
-.config-sheet label { display: flex; flex-direction: column; gap: 6px; color: #8C7B76; font-size: 12px; letter-spacing: 1px; }
+.config-sheet { position: absolute; left: 50%; bottom: 0; transform: translateX(-50%); width: 100%; max-width: 430px; padding: 14px 24px calc(30px + env(safe-area-inset-bottom,0px)); border-radius: 26px 26px 0 0; background: #FBF7F5; box-shadow: 0 -14px 50px rgba(74,63,60,.25); display: flex; flex-direction: column; animation: chatSheetUp .25s ease; }
+.config-sheet > * + * { margin-top: 12px; }
+.config-sheet label { display: flex; flex-direction: column; color: #8C7B76; font-size: 12px; letter-spacing: 1px; }
+.config-sheet label > * + * { margin-top: 6px; }
 .config-sheet input { padding: 12px 15px; border: 0; border-radius: 14px; outline: none; background: #fff; color: #4A3F3C; box-shadow: 0 4px 14px rgba(183,110,121,.08); font: 13px var(--font-mono); }
 .config-sheet > p { margin: 0; font-size: 12.5px; }
 .config-sheet > p.ok { color: #7A9B6D; }
 .config-sheet > p.bad { color: #C25450; }
-.config-sheet > div { display: flex; gap: 10px; margin-top: 6px; }
+.config-sheet > i { width: 40px; height: 4px; margin: 0 auto; border-radius: 2px; background: #E4D4CC; }
+.config-sheet h2 { margin: 4px 0 0; font-size: 16px; letter-spacing: 3px; }
+.config-sheet > div { display: flex; margin-top: 6px; }
+.config-sheet > div > * + * { margin-left: 10px; }
 .config-sheet > div button { flex: 1; padding: 12px 0; border-radius: 999px; background: #F0DFDB; color: #6B5A55; font-size: 14px; letter-spacing: 2px; cursor: pointer; }
 .config-sheet > div button:last-child { background: #9C3B4A; color: #FBF3F0; }
 .config-toast { position: fixed; left: 50%; bottom: 34px; z-index: 120; transform: translateX(-50%); max-width: calc(100vw - 40px); padding: 10px 20px; border-radius: 999px; background: rgba(74,63,60,.92); color: #F7F1EE; font-size: 13px; letter-spacing: 1px; white-space: nowrap; animation: chatFadeIn .2s ease; }
@@ -606,7 +660,8 @@ button {
   .config-screen { padding-left: 16px; padding-right: 16px; }
   .config-back-chat { padding-left: 12px; padding-right: 12px; }
   .config-endpoint-summary > em small { max-width: 92px; }
-  .config-preset-list button > span { flex-direction: column; align-items: flex-start; gap: 1px; }
+  .config-preset-list button > span { flex-direction: column; align-items: flex-start; }
+  .config-preset-list button > span > * + * { margin-left: 0; margin-top: 1px; }
   .config-account-fields { grid-template-columns: 1fr; }
 }
 @media (prefers-reduced-motion: reduce) {
