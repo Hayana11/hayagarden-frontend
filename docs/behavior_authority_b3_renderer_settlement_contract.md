@@ -25,45 +25,71 @@ B3-0 is **contract + insertion audit only**. B3-1 is the first integrated **mess
 
 ### 1.1 Additive ownership (frozen)
 
-Production today:
+Production today (B2 code):
 
 ```text
-existing B2 owned actions = { none }
+B2_OWNED_ACTIONS = { none }
+BEHAVIOR_AUTHORITY_B2_CONSUMER_ENABLED  # default 0, fail-safe OFF
 ```
 
-B3 is **additive only**. B3-1 newly owns one language action:
+B3 adds language ownership **only when B3 consumer is also enabled** (see §1.2). B3-1 newly owns:
 
 ```text
+B3_OWNED_ACTIONS = { message }
 B3-1 newly-owned action = message only
-effective owned actions after B3-1 = { none, message }
 ```
 
-Implementation must expand allowlist incrementally, e.g.:
-
-```text
-_OWNED_ACTIONS = frozenset({'none', 'message'})
-```
+**Do not** implement a single static allowlist such as `_OWNED_ACTIONS = frozenset({'none', 'message'})` without flag pairing — owned actions and flags must match.
 
 **Forbidden:**
 
 ```text
 _OWNED_ACTIONS = frozenset({'message'})     # drops none
 replace {none} with {message}
+B3 message owned while B3 consumer flag is OFF
 ```
 
-**Routing after B3-1 (both paths coexist):**
+**Routing when flags and ownership align (B2=1, B3=1):**
 
-| Owned action | Path |
-|--------------|------|
-| `none` | **No Renderer** → existing B2 `none_takeover` → `wake.executor.execute('none', …)` |
-| `message` | Gate ALLOW → **Renderer** → `wake.executor.execute('message', …, rendered_content)` |
+| Action | Owned by | Path |
+|--------|----------|------|
+| `none` | B2 | **No Renderer** → `none_takeover` → `wake.executor.execute('none', …)` |
+| `message` | B3 | Gate ALLOW → **Renderer** → `wake.executor.execute('message', …, rendered_content)` |
+| other | — | legacy `get_wake_runner()` |
 
-**Rollback / flag rules:**
+B3-1 may add `message` ownership + Renderer in one PR, but must **not** modify B2 `none` semantics and must **not** add `diary` / `explore`.
 
-- B3 consumer flag OFF → legacy for non-owned actions; **B2 `none` authority must remain** when B2 consumer is ON.
-- B3 rollback must not silently remove `none` from owned actions or revert `none` to legacy-only behavior.
+### 1.2 B2 × B3 consumer flags (frozen truth table)
 
-B3-1 may incrementally add `message` ownership in the same PR as Renderer runtime, but must **not** modify B2 `none` semantics and must **not** add `diary` / `explore`.
+B3 is an **incremental layer on B2 Planner/Gate authority**. B3 cannot operate alone.
+
+**New flag (B3-1):**
+
+```text
+BEHAVIOR_AUTHORITY_B3_CONSUMER_ENABLED
+default = 0
+fail-safe → OFF (missing / parse error → OFF)
+```
+
+**Effective enablement:**
+
+```text
+effective_b3_enabled = B2_consumer_enabled() AND B3_consumer_enabled()
+```
+
+B2 flag OFF → entire `plan_b2_wake_action()` returns `legacy` today; B3 has no authority path.
+
+| `BEHAVIOR_AUTHORITY_B2_CONSUMER_ENABLED` | `BEHAVIOR_AUTHORITY_B3_CONSUMER_ENABLED` | Production routing |
+|------------------------------------------|------------------------------------------|-------------------|
+| 0 | 0 | **legacy** for all actions |
+| 1 | 0 | **B2 `none` owned** → `none_takeover` or `blocked`; **`message` → legacy** |
+| 1 | 1 | **B2 `none` owned** + **B3 `message` owned** (Renderer path) |
+| 0 | 1 | **fail-safe:** treat as B3 disabled → **`message` → legacy**; no B2 authority |
+
+**Rollback:**
+
+- B3 flag OFF (B2 still ON) → `message` returns to legacy; **`none` B2 authority unchanged**.
+- B2 flag OFF → all Behavior Authority consumer paths off; full legacy Wake.
 
 ---
 
@@ -220,7 +246,7 @@ B3-0 does **not** create a new Event framework. B3-1 failure paths should use ex
 ```text
 gateway._wake_decide_locked()
   …
-  _b2_plan = plan_b2_wake_action(...)     # owned: none + message after B3-1
+  _b2_plan = plan_b2_wake_action(...)     # B2 none; B3 message when effective_b3_enabled
   if blocked → return                    # terminal; no Renderer
   if none_takeover → executor (existing B2 path; no Renderer)
   if message_takeover → Renderer → wake.executor.execute('message', …)
@@ -231,7 +257,7 @@ gateway._wake_decide_locked()
 
 ```text
 After:  B2/B3 ownership + Gate ALLOW for owned `message`
-Before: wake.executor.execute('message', thoughts, rendered_content, …)
+Before: wake.executor.execute('message', str(intent), rendered_content, …)
 Not in: get_wake_runner() loop, inject_snippets(), drive_engine.decide(), Shadow thread
 
 Owned `none`: no Renderer; existing `none_takeover` path unchanged.
@@ -246,8 +272,8 @@ Renderer receives **frozen** Planner Decision fields + allowlisted Persona/conti
 **B3-1 = one complete `message` takeover slice** in a single Draft PR:
 
 ```text
-retain none ownership
-+ add message ownership ({ none, message })
+retain B2 none ownership (B2 flag semantics unchanged)
++ add B3 message ownership (only when effective_b3_enabled)
 + message Gate reality handling (user_active vs cooldown split)
 + Renderer runtime
 + existing wake.executor.execute('message', …)
@@ -264,44 +290,69 @@ retain none ownership
 
 ## 3.2 Owned `message` Gate reality semantics (frozen for B3-1)
 
-When `action_candidate = message` and B2/B3 ownership is established, Gate evaluates **independent reality facts** after Planner returns. Gate must **not** map merged `effective_idle_hours < threshold` alone to `user_active` for owned `message`.
+When `action_candidate = message`, B3 ownership is established (`effective_b3_enabled`), and Gate runs after Planner returns. Gate must **not** map merged `effective_idle_hours < threshold` alone to `user_active` for owned `message`.
 
 ### Known limitation (current `wake_guard_reason`)
 
-Today `effective_idle = min(user_idle, wake_message_idle)` and `recent_interaction` does not distinguish user activity vs recent autonomous wake message. **B3-1 owned `message` Gate must not rely on that merged shortcut.**
+Today `effective_idle_hours = min(user_idle, wake_message_idle)` and `recent_interaction` does not distinguish user activity vs recent autonomous wake message. **B3-1 owned `message` Gate must not rely on that merged shortcut.**
 
-Use separate facts from `InteractionClock` / fresh `chat_busy_fn`:
+Use separate facts from `InteractionClock` / fresh `chat_busy_fn`. **All idle comparisons use minutes** (`min_idle_minutes` from `WAKE_MIN_IDLE_MINUTES`; `InteractionClock.user_idle_minutes` property exists).
 
-| Fact source | Fields |
-|-------------|--------|
-| User activity | `last_user_at`, `user_idle_hours`, `chat_busy_fn()` |
-| Wake message spacing | `last_wake_message_at`, wake-message idle hours |
-| Duplicate | `wake_run_id_seen(wake_run_id)` |
-| Capability | frozen `CapabilitySkillView.resolved_action_capability` |
+### Mode scope (do not change special-mode behavior)
 
-### Block reason definitions (owned `message`)
+Apply the user/cooldown split **only** for modes that already use the idle floor in `wake_guard_reason` today: `normal`, `morning` (and empty mode default). Modes that bypass the idle floor (`self_trigger`, `nightwatch`, `ritual`, `dream`, `summarize`, etc.) must **not** gain new B3 idle-floor behavior in B3-1.
 
-| Reason | When | Notes |
-|--------|------|-------|
-| `duplicate` | `wake_run_id` already consumed for this attempt | Same as B2 |
-| `user_active` | `chat_busy_fn()` is true **OR** `user_idle_hours < user_activity_idle_floor` | True user/chat activity only |
-| `tool_unavailable` | `message` not in resolved capability allowlist | Same pattern as B2 |
-| `cooldown` | User **not** `user_active` (per above), but autonomous wake `message` sent too recently: `wake_message_idle < message_cooldown_floor` | **Not** `user_active` |
-| `precondition_failed` | Clock unreliable, ownership pairing failure, Gate evaluation exception after ownership | Fail closed |
+### Frozen evaluation (owned `message`, idle-floor modes only)
 
-**`user_active` means:** chat is generating, or latest real **user** interaction is within the user-activity idle floor (`WAKE_MIN_IDLE_MINUTES` / `min_idle_minutes` passed to Gate).
+Let `min_idle_minutes` = existing config (`WAKE_MIN_IDLE_MINUTES`, gateway-passed floor).
 
-**`cooldown` means:** user is **not** actively chatting and user idle floor is satisfied, but `last_wake_message_at` is too recent for another unsolicited autonomous `message` (wake-message idle below `message_cooldown_floor`).
+```text
+user_active :=
+    chat_busy_fn() is true
+    OR clock.user_idle_minutes < min_idle_minutes
 
-**Critical:** recent `last_wake_message_at` alone → `cooldown`, **not** `user_active`, when user idle floor is satisfied and `chat_busy` is false.
+wake_message_idle_minutes :=
+    if clock.last_wake_message_at is None → no wake-message cooldown
+    else (now - clock.last_wake_message_at).total_seconds() / 60.0
 
-If user is genuinely active **and** message is in cooldown simultaneously → still:
+cooldown :=
+    user_active is false
+    AND wake_message_idle_minutes is not None
+    AND wake_message_idle_minutes < min_idle_minutes
+```
+
+**No new cooldown config.** `message_cooldown_floor` **reuses** `min_idle_minutes`. B3-1 only **splits** the legacy combined test:
+
+```text
+min(user idle, wake-message idle) < min_idle_minutes  →  recent_interaction
+```
+
+into:
+
+```text
+user < min_idle_minutes        → user_active
+wake message < min_idle_minutes → cooldown   (only when user not active)
+```
+
+Time behavior unchanged; reason classification corrected.
+
+### Block reason mapping
+
+| Reason | When |
+|--------|------|
+| `duplicate` | `wake_run_id_seen(wake_run_id)` |
+| `user_active` | `user_active` predicate above |
+| `tool_unavailable` | `message` not in `resolved_action_capability` |
+| `cooldown` | `cooldown` predicate above |
+| `precondition_failed` | Clock unreliable (`not clock.reliable`), ownership/Gate exception after ownership, etc. |
+
+**Critical:** recent `last_wake_message_at` alone → `cooldown`, **not** `user_active`, when `user_active` is false.
+
+If `user_active` and `cooldown` would both apply → still:
 
 ```text
 BLOCK / user_active
 ```
-
-(priority below).
 
 ### Reason priority (unchanged)
 
@@ -313,9 +364,11 @@ duplicate
 → precondition_failed
 ```
 
-Gate must **not** read Drive / Affect / Bond to relax cooldown or user-active floors.
+Gate must **not** read Drive / Affect / Bond to relax floors.
 
-**`none` Gate:** keeps existing B2 semantics (including `none` always allowed in capability union); B3-1 does not redefine `none` Gate beyond preserving current behavior.
+**`none` Gate:** keeps existing B2 semantics; B3-1 does not redefine `none` Gate.
+
+**Duplicate:** remains **before** Renderer and executor (`wake_run_id_seen`); no second idempotency state machine in B3-0/B3-1.
 
 ---
 
@@ -325,7 +378,10 @@ Gate must **not** read Drive / Affect / Bond to relax cooldown or user-active fl
 
 ```text
 wake.executor.execute(
-  action, thoughts, rendered_content, …,
+  'message',
+  str(planner_decision['intent'] or ''),   # thoughts — see §5.4
+  rendered_content,
+  …,
   settle_fired_drive=planner_provenance['primary_drive'],
   settle_provenance_present=True,
   wake_run_id=…,
@@ -339,55 +395,76 @@ Renderer success alone must **not** call Settlement. Only executor txn success (
 
 ## 5. Frozen Renderer contract
 
-### 5.1 Renderer input (concept → existing names)
+### 5.1 `RendererInput` (frozen bundle name and fields)
 
-| Concept field | Frozen existing name / source | Notes |
-|---------------|------------------------------|-------|
-| `selected_intent` | `intent` | From authoritative Planner Decision |
-| `selected_action` | `action_candidate` | After Gate ALLOW; immutable |
-| `content_target` | **NAMING_DECISION_REQUIRED** | Recommended freeze: `content_target` enum (`wake_message` \| `wake_diary`) mapping to executor surface |
-| `persona_context` | Persona text from `read_persona()` or frozen BP1 persona slot | Not full `build_system()` |
-| `continuity_facts` | **NAMING_DECISION_REQUIRED** | Recommended freeze: `continuity_facts` as short allowlisted text blob; source may include trimmed `relationship_context` — not full Internal State View |
-| `decision_identity` | `wake_run_id`, `decision_attempt_id`, `planner_decision_id`, `state_version`, `captured_at` | Bind Renderer output to one attempt |
+Runtime bundle name: **`RendererInput`** (dataclass or typed dict in B3 module).
 
-Do not introduce parallel names (`selected_intent` as a new DB column) in B3-0; map concepts to Planner Decision dict keys at runtime in B3-1.
+| Field | Frozen source | Notes |
+|-------|---------------|-------|
+| `selected_intent` | `planner_decision['intent']` | Immutable after Gate ALLOW |
+| `selected_action` | `planner_decision['action_candidate']` | Must be `message` for B3-1 |
+| `content_target` | **`wake_message`** for B3-1 | Frozen enum value for B3-1 slice (`wake_diary` reserved for later) |
+| `persona_context` | `read_persona()` or frozen BP1 persona string | Not full `build_system()` |
+| `continuity_facts` | `build_relationship_context(get_db_fn).text` only | See §5.4 |
+| `decision_identity` | `wake_run_id`, `decision_attempt_id`, `planner_decision_id`, `state_version`, `captured_at` | Correlation only |
 
-### 5.2 Renderer output
+Map to Planner Decision dict keys at runtime; do not add parallel DB columns in B3-1.
 
-| Concept | Frozen recommendation |
-|---------|----------------------|
-| Language payload | **NAMING_DECISION_REQUIRED** — recommended runtime name: `rendered_content` (maps to executor `content` parameter and legacy `CONTENT:` semantics) |
+### 5.2 Renderer output (frozen)
 
-Renderer returns **only** rendered text (and optional non-authoritative diagnostics). Must not return:
+Output field name: **`rendered_content`** (str).
+
+Renderer returns **only** `rendered_content` (plus optional non-authoritative diagnostics). Must not return:
 
 - new `intent` / `action_candidate`
 - Gate verdict or reason
 - drive / affect / thought mutations
 - Settlement instructions
 - tool choices or next-action suggestions
+- hidden `thoughts` text (thoughts come from Planner `intent` at executor — §5.4)
 
 ### 5.3 Renderer visibility allowlist
 
 **May read:**
 
-- Persona (`prompts/persona.md` or equivalent frozen BP1 persona string)
+- Persona (`read_persona()` / frozen BP1 persona string)
 - `intent`, `action_candidate` (frozen)
-- `content_target` (surface hint)
-- `continuity_facts` (short, pre-approved text — e.g. relationship snippet, mode label, non-numeric continuity)
-- `decision_identity` (correlation only; not for re-planning)
+- `content_target` (`wake_message` in B3-1)
+- `continuity_facts` from `build_relationship_context(...).text` only
+- `decision_identity` (correlation only)
 
 **Must not read:**
 
-- Raw eight drives numeric vector as planning input
-- Raw Affect PA/NA/V/A / `mood_word` as numeric planning input
+- Raw eight drives numeric vector
+- Raw Affect PA/NA/V/A / `mood_word` as numeric input
 - Full Thought Pool / Trace pools
 - Full `PlannerStateView` / `internal_state_v3` row
 - `CapabilitySkillView` for re-selecting action
-- Gate block reasons as “try another action” hints
+- Gate block reasons as replan hints
 - `drive_engine.decide()` or `inject_snippets()` output
 - Shadow JSONL observations
+- V3 / Affect / Thought Pool / raw memory buckets beyond the single `continuity_facts` text contract
 
-If a continuity fact is derived from V3, it must be **pre-digested to short text** before Renderer — no numeric state re-injection.
+### 5.4 Executor wire contract (frozen)
+
+B3-1 `message_takeover` executor call:
+
+```text
+thoughts = str(planner_decision['intent'] or '')
+content  = rendered_content
+```
+
+- Planner has no separate `thoughts` field; Renderer does **not** generate thoughts.
+- Same semantics as B2 `none`: intent is audit text in `wake_log.thoughts`.
+- Renderer generates **only** `rendered_content` for `chat_messages.content`.
+
+**`continuity_facts` source (frozen):**
+
+```text
+continuity_facts = build_relationship_context(get_db_fn).text
+```
+
+That helper’s existing contract: relationship facts / recent continuity only; filters imperative coaching phrases; final `.text` does not inject mood numerics; length capped (400 chars). **No** alternate “may include” sources in B3-1.
 
 ---
 
@@ -446,7 +523,7 @@ Reuse `wake_outcome:{wake_run_id}` — **do not** add a second settlement key fo
 
 **B3-1 newly-owned action:** `message` only.
 
-**Effective owned actions after B3-1:** `{ none, message }` (additive; `none` unchanged).
+**Effective owned actions when B2=1 and B3=1:** `{ none, message }` (additive; `none` unchanged).
 
 **Why `message` (unique first language slice):**
 
@@ -466,7 +543,7 @@ Reuse `wake_outcome:{wake_run_id}` — **do not** add a second settlement key fo
 
 ### Case 1｜Language happy path
 
-Valid Planner `action_candidate=message` → Gate ALLOW → Renderer emits text only → `wake.executor.execute('message', …, rendered_content)` succeeds → Settlement consumes **original** Planner Decision-time provenance (`planner_authority` source).
+Valid Planner `action_candidate=message` → Gate ALLOW → Renderer emits `rendered_content` only → `wake.executor.execute('message', str(intent), rendered_content, …)` succeeds → Settlement consumes **original** Planner Decision-time provenance (`planner_authority` source).
 
 ### Case 2｜Renderer failure safe stop
 
@@ -492,22 +569,35 @@ No Case 4–6 in B3-1.
 
 ---
 
-## 11. NAMING summary
+## 11. Frozen names (B3-1)
 
-### Frozen existing names (use in B3-1)
+### Planner / Settlement (existing — reuse)
 
-`intent`, `action_candidate`, `primary_drive`, `contributors`, `blocked`, `reason_codes`, `captured_at`, `state_version`, `wake_run_id`, `decision_attempt_id`, `planner_decision_id`, `source` (`planner_authority`), `settle_fired_drive`, `settle_provenance_present`, `executor_action`, `freeze_provenance_from_planner_decision`, `wake_outcome:{wake_run_id}`, `CONTENT` (legacy parser field only — Renderer output maps to executor `content`).
+`intent`, `action_candidate`, `primary_drive`, `contributors`, `blocked`, `reason_codes`, `captured_at`, `state_version`, `wake_run_id`, `decision_attempt_id`, `planner_decision_id`, `source` (`planner_authority`), `settle_fired_drive`, `settle_provenance_present`, `executor_action`, `freeze_provenance_from_planner_decision`, `wake_outcome:{wake_run_id}`.
 
-### NAMING_DECISION_REQUIRED (single recommendation each)
+Legacy parser field `CONTENT` maps to executor `content`; B3 uses `rendered_content` until executor call.
 
-| Concept | Recommended B3-1 name |
-|---------|---------------------|
-| Renderer input bundle | `RendererInput` (dataclass or typed dict in new module) |
-| Language output | `rendered_content` |
-| Surface hint | `content_target` (`wake_message` \| `wake_diary`) |
-| Short continuity blob | `continuity_facts` (plain text, allowlist-curated) |
+### B3 Renderer / flags (frozen in B3-1)
 
-Do not implement alternate aliases in parallel.
+| Name | Role |
+|------|------|
+| `RendererInput` | Renderer input bundle |
+| `rendered_content` | Renderer output text |
+| `content_target` | Surface hint; B3-1 value `wake_message` |
+| `continuity_facts` | `build_relationship_context(...).text` |
+| `BEHAVIOR_AUTHORITY_B3_CONSUMER_ENABLED` | B3 consumer flag; default `0` |
+| `B2_OWNED_ACTIONS` | `{ none }` — unchanged |
+| `B3_OWNED_ACTIONS` | `{ message }` |
+| `effective_b3_enabled` | `B2_consumer_enabled() AND B3_consumer_enabled()` |
+
+### Executor wire (frozen)
+
+```text
+thoughts = str(planner_decision['intent'] or '')
+content  = rendered_content
+```
+
+Do not introduce alternate aliases for the above in B3-1.
 
 ---
 
@@ -520,11 +610,13 @@ Insertion points for Renderer and Settlement are **uniquely determined** from cu
 
 No BLOCKED. Event Authority has a **GAP** for discrete action success/failure Events — documented, not blocking B3-1 `message` slice.
 
-**B3-0 RESULT: PASS** (audit complete; B3-1 message takeover contract ready for implementation).
+**B3-0 RESULT: PASS** (frozen contract; B3-1 message takeover ready for implementation).
 
-**Post narrow-fix checklist:**
+**Frozen contract checklist:**
 
-- Effective ownership: `{ none, message }` — not `{ message }` alone.
-- `none` → no Renderer → existing B2 `none_takeover`.
-- `message` → Gate ALLOW → Renderer → executor → Settlement.
-- Owned `message` Gate uses separate `user_active` vs `cooldown` facts (not merged `effective_idle → user_active` only).
+- B2/B3 flag truth table + `BEHAVIOR_AUTHORITY_B3_CONSUMER_ENABLED` (default OFF).
+- `B2_OWNED_ACTIONS = { none }`; `B3_OWNED_ACTIONS = { message }`; `effective_b3_enabled = B2 AND B3`.
+- Owned `message` Gate: minutes + `min_idle_minutes` for both user_active and cooldown; idle-floor modes only.
+- Frozen names: `RendererInput`, `rendered_content`, `content_target`, `continuity_facts`; no `NAMING_DECISION_REQUIRED`.
+- Executor: `thoughts = intent`; `continuity_facts = build_relationship_context(...).text`.
+- `none` → no Renderer; `message` → Renderer → executor → Settlement when B2=1 and B3=1.
