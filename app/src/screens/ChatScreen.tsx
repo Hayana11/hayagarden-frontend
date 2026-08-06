@@ -42,7 +42,15 @@ import {
 import type { SoftWindowUiState } from '../lib/dailySoftWindow';
 import { ComposerUploadCoordinator } from '../lib/composerUpload';
 import { ChatThemeQuickToggle, ChatThemeSegmented } from '../components/ChatThemeControl';
-import { attachChatTheme, loadChatSettings, patchChatSettings } from '../lib/chatTheme';
+import { ThemePerfRows } from '../components/ThemePerfRows';
+import { attachChatTheme, loadChatSettings, patchChatSettings, resolveEffectiveTheme, setChatTheme, type EffectiveTheme, type ThemeMode } from '../lib/chatTheme';
+import { getLegacyNativeCompatDetails } from '../lib/legacyNativeCompat';
+import {
+  countDescendants,
+  setSkipThemePerf,
+  setThemeProbeMode,
+  subscribeThemePerf,
+} from '../lib/themePerfProbe';
 import type { ReactElement } from 'react';
 
 const FONT_SIZES = [13.5, 14.5, 16, 17.5, 19];
@@ -93,7 +101,11 @@ function pushElDiag(rows: LayoutDiagRow[], label: string, el: HTMLElement | null
   rows.push({ label: `${label} -webkit-text-size-adjust`, value: readTextSizeAdjust(st) });
 }
 
-function collectLayoutDiagnostics(root: HTMLElement | null): LayoutDiagRow[] {
+function collectLayoutDiagnostics(
+  root: HTMLElement | null,
+  transcriptEl: HTMLElement | null,
+  messageCount: number,
+): LayoutDiagRow[] {
   const vv = window.visualViewport;
   const testEl = document.getElementById('c78-layout-test-100') as HTMLElement | null;
   const appRoot = document.getElementById('root');
@@ -109,7 +121,13 @@ function collectLayoutDiagnostics(root: HTMLElement | null): LayoutDiagRow[] {
     /* FontFaceSet unavailable */
   }
 
+  const compat = getLegacyNativeCompatDetails();
+
   const rows: LayoutDiagRow[] = [
+    { label: 'legacyNativeCompat', value: String(compat.legacyNativeCompat) },
+    { label: 'isNativeCapacitor', value: String(compat.isNativeCapacitor) },
+    { label: 'flexGapUnsupported', value: String(compat.flexGapUnsupported) },
+    { label: 'body data-legacy-native-compat', value: document.body.getAttribute('data-legacy-native-compat') ?? 'n/a' },
     { label: 'window.innerWidth', value: String(window.innerWidth) },
     { label: 'window.innerHeight', value: String(window.innerHeight) },
     { label: 'document.documentElement.clientWidth', value: String(html.clientWidth) },
@@ -140,6 +158,10 @@ function collectLayoutDiagnostics(root: HTMLElement | null): LayoutDiagRow[] {
   pushElDiag(rows, '#root', appRoot);
   pushElDiag(rows, 'body', body);
   pushElDiag(rows, 'html', html);
+
+  rows.push({ label: 'chat-root descendant count', value: String(countDescendants(root)) });
+  rows.push({ label: 'transcript descendant count', value: String(countDescendants(transcriptEl)) });
+  rows.push({ label: 'rendered message count', value: String(messageCount) });
 
   if (root) {
     rows.push({ label: 'Chat root computed font-size', value: getComputedStyle(root).fontSize });
@@ -279,6 +301,55 @@ export function ChatScreen() {
     setSettings({ fontStep: merged.fontStep, thinkMode: merged.thinkMode });
   };
 
+  const refreshLayoutDiag = useCallback(() => {
+    setLayoutDiag(collectLayoutDiagnostics(chatRootRef.current, scrollRef.current, msgs.length));
+  }, [msgs.length]);
+
+  const runHiddenTranscriptThemeProbe = useCallback(() => {
+    const root = chatRootRef.current;
+    const scroll = scrollRef.current;
+    if (!root || !scroll) return;
+
+    const originalMode = loadChatSettings().theme;
+    const effective = resolveEffectiveTheme(originalMode);
+    const probeTarget: EffectiveTheme = effective === 'dark' ? 'light' : 'dark';
+    const prevDisplay = scroll.style.display;
+
+    let unsub: (() => void) | null = null;
+    let restored = false;
+
+    const restore = () => {
+      if (restored) return;
+      restored = true;
+      unsub?.();
+      unsub = null;
+      try {
+        setSkipThemePerf(true);
+        setChatTheme(root, originalMode);
+      } catch {
+        /* fail-safe: still restore DOM/mode below */
+      } finally {
+        setSkipThemePerf(false);
+        scroll.style.display = prevDisplay;
+        setThemeProbeMode('normal');
+      }
+    };
+
+    try {
+      scroll.style.display = 'none';
+      setThemeProbeMode('transcript-hidden');
+
+      unsub = subscribeThemePerf((record) => {
+        if (record.mode !== 'transcript-hidden') return;
+        restore();
+      });
+
+      setChatTheme(root, probeTarget as ThemeMode);
+    } catch {
+      restore();
+    }
+  }, []);
+
   const showToast = useCallback((t: string) => {
     setToast(t);
     clearTimeout(toastTimer.current);
@@ -347,6 +418,16 @@ export function ChatScreen() {
     const root = chatRootRef.current;
     if (!root) return;
     return attachChatTheme(root);
+  }, []);
+
+  useLayoutEffect(() => {
+    const root = chatRootRef.current;
+    if (!root) return;
+    if (getLegacyNativeCompatDetails().legacyNativeCompat) {
+      root.setAttribute('data-chat-legacy-renderer', 'true');
+    } else {
+      root.removeAttribute('data-chat-legacy-renderer');
+    }
   }, []);
 
   useEffect(() => {
@@ -1190,11 +1271,18 @@ export function ChatScreen() {
                       <div className="vstack vstack-12">
                         <div style={sectionCaption}>诊断 · LAYOUT (临时)</div>
                         <div
-                          onClick={() => setLayoutDiag(collectLayoutDiagnostics(chatRootRef.current))}
+                          onClick={refreshLayoutDiag}
                           style={{ ...segStyle(false), flex: 'none', padding: '10px 14px' }}
                         >
                           采集布局读数
                         </div>
+                        <div
+                          onClick={runHiddenTranscriptThemeProbe}
+                          style={{ ...segStyle(false), flex: 'none', padding: '10px 14px' }}
+                        >
+                          隐藏消息树测试主题
+                        </div>
+                        <ThemePerfRows />
                         {layoutDiag && (
                           <div className="vstack vstack-6" style={{ background: 'var(--card2)', borderRadius: 14, padding: '12px 14px', fontFamily: MONO, fontSize: 11, lineHeight: 1.55, color: 'var(--ink2)' }}>
                             {layoutDiag.map((row) => (
