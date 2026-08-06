@@ -579,6 +579,65 @@ def run_shadow_attempt(
         return rec
 
 
+def run_authoritative_planner_decision(
+    *,
+    planner_view: Any,
+    skill_view: Any,
+    wake_run_id: str,
+    decision_attempt_id: str,
+    timeout_sec: float = _SHADOW_TIMEOUT_SEC,
+    invoke_fn=None,
+) -> tuple[str, dict]:
+    """Synchronous production Planner Decision for B2 consumer.
+
+    Does not read or write JSONL observations. Never blocks on Shadow threads.
+    Returns (status, decision_or_error) where status is valid | invalid | error.
+    """
+    attempt_id = str(decision_attempt_id or '').strip()
+    if not attempt_id:
+        attempt_id = new_decision_attempt_id()
+    planner_decision_id = attempt_id
+    captured_at = _now_str()
+
+    if (
+        str(planner_view.wake_run_id or '') != str(wake_run_id)
+        or str(skill_view.wake_run_id or '') != str(wake_run_id)
+    ):
+        return 'invalid', {'error': 'wake_run_id_pairing'}
+
+    try:
+        user_payload = build_shadow_user_payload(
+            planner_view=planner_view,
+            skill_view=skill_view,
+            wake_run_id=wake_run_id,
+        )
+        invoker = invoke_fn or invoke_shadow_planner_relay
+        text, _shadow_provider, _shadow_model = _coerce_invoke_result(
+            invoker(user_payload=user_payload, timeout_sec=timeout_sec),
+        )
+        parsed = _extract_json_object(text)
+        if not parsed:
+            return 'invalid', {'error': 'parse_failure'}
+        status, decision = validate_shadow_decision(
+            parsed,
+            planner_view=planner_view,
+            skill_view=skill_view,
+            wake_run_id=wake_run_id,
+            planner_decision_id=planner_decision_id,
+            decision_attempt_id=attempt_id,
+            captured_at=captured_at,
+        )
+        if status != 'valid':
+            return status, decision
+        decision = dict(decision)
+        decision['source'] = 'planner_authority'
+        decision['shadow_only'] = False
+        decision['authoritative'] = True
+        return 'valid', decision
+    except Exception as exc:
+        return 'error', {'error': type(exc).__name__, 'detail': str(exc)[:500]}
+
+
 def dispatch_planner_shadow(
     *,
     planner_view: Any,
