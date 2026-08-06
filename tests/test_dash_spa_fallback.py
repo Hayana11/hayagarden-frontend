@@ -1,7 +1,8 @@
 """Dash SPA deep-link fallback contract (Phase 1 navigation).
 
-Mirrors production /dash and /dash/<path> serving rules without importing the
-full app.py (which binds /opt/frontend at import time).
+Mirrors production /dash, /dash/, and /dash/<path> serving rules without
+importing the full app.py (which binds /opt/frontend at import time).
+Production app.py must register both /dash and /dash/ explicitly.
 """
 
 from __future__ import annotations

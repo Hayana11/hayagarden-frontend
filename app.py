@@ -207,8 +207,10 @@ def index():
     return redirect('/dash', code=302)
 
 @app.route('/dash')
+@app.route('/dash/')
 def dash():
     # Prefer the new React build when deployed; fallback to legacy static dash.
+    # Explicit /dash/ (in addition to /dash) — do not rely on app-wide strict_slashes.
     if os.path.exists(os.path.join(APP_DIST_DIR, 'index.html')):
         resp = send_from_directory(APP_DIST_DIR, 'index.html')
         resp.headers['Cache-Control'] = 'no-store, must-revalidate'
