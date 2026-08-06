@@ -49,6 +49,7 @@ import {
   countDescendants,
   setSkipThemePerf,
   setThemeProbeMode,
+  subscribeThemePerf,
 } from '../lib/themePerfProbe';
 import type { ReactElement } from 'react';
 
@@ -312,22 +313,41 @@ export function ChatScreen() {
     const originalMode = loadChatSettings().theme;
     const effective = resolveEffectiveTheme(originalMode);
     const probeTarget: EffectiveTheme = effective === 'dark' ? 'light' : 'dark';
+    const prevDisplay = scroll.style.display;
 
-    const prevVisibility = scroll.style.visibility;
-    scroll.style.visibility = 'hidden';
+    let unsub: (() => void) | null = null;
+    let restored = false;
 
-    setThemeProbeMode('transcript-hidden');
-    setChatTheme(root, probeTarget as ThemeMode);
-
-    requestAnimationFrame(() => {
-      requestAnimationFrame(() => {
+    const restore = () => {
+      if (restored) return;
+      restored = true;
+      unsub?.();
+      unsub = null;
+      try {
         setSkipThemePerf(true);
         setChatTheme(root, originalMode);
+      } catch {
+        /* fail-safe: still restore DOM/mode below */
+      } finally {
         setSkipThemePerf(false);
-        scroll.style.visibility = prevVisibility;
+        scroll.style.display = prevDisplay;
         setThemeProbeMode('normal');
+      }
+    };
+
+    try {
+      scroll.style.display = 'none';
+      setThemeProbeMode('transcript-hidden');
+
+      unsub = subscribeThemePerf((record) => {
+        if (record.mode !== 'transcript-hidden') return;
+        restore();
       });
-    });
+
+      setChatTheme(root, probeTarget as ThemeMode);
+    } catch {
+      restore();
+    }
   }, []);
 
   const showToast = useCallback((t: string) => {
