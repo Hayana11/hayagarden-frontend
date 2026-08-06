@@ -1,51 +1,51 @@
-import { useLocation } from 'react-router-dom';
+import { NavLink, useLocation } from 'react-router-dom';
+import { NAV_ITEMS, resolveActiveNavKey, type NavItem } from '../navigation';
 
-type NavKey = 'dash' | 'chat' | 'read' | 'board';
+function NavAnchor({
+  item,
+  active,
+}: {
+  item: NavItem;
+  active: boolean;
+}) {
+  const className = `ni${active ? ' act' : ''}`;
+  const ariaCurrent = active ? ('page' as const) : undefined;
+  const content = (
+    <>
+      <i className={`ti ${item.icon}`} />
+      <span>{item.label}</span>
+    </>
+  );
 
-const ICONS: Record<NavKey, string> = {
-  dash: 'ti-layout-dashboard',
-  chat: 'ti-message-2',
-  read: 'ti-book',
-  board: 'ti-clipboard-list',
-};
+  if (item.kind === 'spa') {
+    return (
+      <NavLink to={item.to} className={className} aria-current={ariaCurrent} end={item.to === '/'}>
+        {content}
+      </NavLink>
+    );
+  }
 
-function inDashApp() {
-  return typeof window !== 'undefined' && window.location.pathname.startsWith('/dash');
-}
-
-function navItems() {
-  const dash = inDashApp();
-  return (['dash', 'chat', 'read', 'board'] as const).map((key) => ({
-    key,
-    href: key === 'dash' ? '/dash' : key === 'chat' ? (dash ? '/dash/contacts' : '/contacts') : `/${key === 'read' ? 'read' : 'board'}`,
-    icon: ICONS[key],
-    label: key,
-  }));
-}
-
-function activeKey(pathname: string): NavKey {
-  if (pathname === '/chat' || pathname === '/contacts') return 'chat';
-  if (pathname === '/reading') return 'read';
-  return 'dash';
+  // static | external — full document navigation (or future system browser)
+  return (
+    <a
+      className={className}
+      href={item.href}
+      aria-current={ariaCurrent}
+      {...(item.kind === 'external' ? { target: '_blank', rel: 'noopener noreferrer' } : {})}
+    >
+      {content}
+    </a>
+  );
 }
 
 export function BottomNav({ embedded = false }: { embedded?: boolean }) {
   const location = useLocation();
-  const active = activeKey(location.pathname);
+  const active = resolveActiveNavKey(location.pathname);
 
   if (!embedded && location.pathname.startsWith('/memory')) return null;
 
-  const items = navItems();
-  const links = items.map((item) => (
-    <a
-      key={item.key}
-      className={`ni${active === item.key ? ' act' : ''}`}
-      href={item.href}
-      aria-current={active === item.key ? 'page' : undefined}
-    >
-      <i className={`ti ${item.icon}`} />
-      <span>{item.label}</span>
-    </a>
+  const links = NAV_ITEMS.map((item) => (
+    <NavAnchor key={item.key} item={item} active={active === item.key} />
   ));
 
   if (embedded) {
