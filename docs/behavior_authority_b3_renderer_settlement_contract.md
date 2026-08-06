@@ -19,9 +19,51 @@ B3 adds **language rendering** and **Decision-time provenance Settlement** for o
 - re-running Gate;
 - reading raw Drives / Affect / Thought Pool in Renderer;
 - inventing a second executor or Settlement stack;
-- expanding B2 owned allowlist in the same PR as Renderer runtime.
+- **removing, replacing, or degrading B2 `none` authority** (additive ownership only).
 
-B3-0 is **contract + insertion audit only**. B3-1 is the first minimal language-action implementation slice.
+B3-0 is **contract + insertion audit only**. B3-1 is the first integrated **message takeover** slice (ownership + Gate + Renderer + executor + Settlement in one Draft PR).
+
+### 1.1 Additive ownership (frozen)
+
+Production today:
+
+```text
+existing B2 owned actions = { none }
+```
+
+B3 is **additive only**. B3-1 newly owns one language action:
+
+```text
+B3-1 newly-owned action = message only
+effective owned actions after B3-1 = { none, message }
+```
+
+Implementation must expand allowlist incrementally, e.g.:
+
+```text
+_OWNED_ACTIONS = frozenset({'none', 'message'})
+```
+
+**Forbidden:**
+
+```text
+_OWNED_ACTIONS = frozenset({'message'})     # drops none
+replace {none} with {message}
+```
+
+**Routing after B3-1 (both paths coexist):**
+
+| Owned action | Path |
+|--------------|------|
+| `none` | **No Renderer** → existing B2 `none_takeover` → `wake.executor.execute('none', …)` |
+| `message` | Gate ALLOW → **Renderer** → `wake.executor.execute('message', …, rendered_content)` |
+
+**Rollback / flag rules:**
+
+- B3 consumer flag OFF → legacy for non-owned actions; **B2 `none` authority must remain** when B2 consumer is ON.
+- B3 rollback must not silently remove `none` from owned actions or revert `none` to legacy-only behavior.
+
+B3-1 may incrementally add `message` ownership in the same PR as Renderer runtime, but must **not** modify B2 `none` semantics and must **not** add `diary` / `explore`.
 
 ---
 
@@ -73,7 +115,7 @@ B3-0 is **contract + insertion audit only**. B3-1 is the first minimal language-
 | Stage | Location | Behavior |
 |-------|----------|----------|
 | Plan + Gate | `chat.behavior_authority_b2.plan_b2_wake_action()` | Consumer OFF → `legacy` |
-| Ownership today | `B2_OWNED_ACTIONS = { none }` | Non-owned → `legacy` |
+| Ownership today (B2, production) | `B2_OWNED_ACTIONS = { none }` | Non-owned → `legacy` |
 | Ownership established | Valid Planner + `action_candidate ∈ owned` | Post-ownership exceptions → `blocked` + `precondition_failed` (no gateway fail-open) |
 | Gate ALLOW `none` | `gateway._wake_decide_locked` route `none_takeover` | Skips `get_wake_runner`; calls `wake.executor.execute('none', ...)` |
 | Gate BLOCK | `route == 'blocked'` | Early return; **no** runner, **no** executor, **no** legacy |
@@ -178,22 +220,102 @@ B3-0 does **not** create a new Event framework. B3-1 failure paths should use ex
 ```text
 gateway._wake_decide_locked()
   …
-  _b2_plan = plan_b2_wake_action(...)     # future: owned language actions too
+  _b2_plan = plan_b2_wake_action(...)     # owned: none + message after B3-1
   if blocked → return                    # terminal; no Renderer
-  if none_takeover → executor (existing)
-  if language_takeover → **Renderer here** → wake.executor.execute(...)
-  else legacy → get_wake_runner() …       # unchanged until slice flag expands
+  if none_takeover → executor (existing B2 path; no Renderer)
+  if message_takeover → Renderer → wake.executor.execute('message', …)
+  else legacy → get_wake_runner() …       # non-owned actions only
 ```
 
 **Precise slice:**
 
 ```text
-After:  B2 ownership + Gate ALLOW for owned language action
-Before: wake.executor.execute(action, thoughts, rendered_content, …)
+After:  B2/B3 ownership + Gate ALLOW for owned `message`
+Before: wake.executor.execute('message', thoughts, rendered_content, …)
 Not in: get_wake_runner() loop, inject_snippets(), drive_engine.decide(), Shadow thread
+
+Owned `none`: no Renderer; existing `none_takeover` path unchanged.
 ```
 
 Renderer receives **frozen** Planner Decision fields + allowlisted Persona/continuity — not live V re-read.
+
+---
+
+## 3.1 B3-1 integrated slice boundary (frozen)
+
+**B3-1 = one complete `message` takeover slice** in a single Draft PR:
+
+```text
+retain none ownership
++ add message ownership ({ none, message })
++ message Gate reality handling (user_active vs cooldown split)
++ Renderer runtime
++ existing wake.executor.execute('message', …)
++ existing V3 Settlement
+```
+
+**Why one PR:** `message` ownership without Renderer has no production value (executor requires non-empty `content`). Splitting ownership and Renderer into separate interim PRs only adds temporary states.
+
+**B3-1 newly-owned action:** `message` only.
+
+**Not in B3-1:** `diary`, `explore`, second language action, B2 Case expansion, new infrastructure.
+
+---
+
+## 3.2 Owned `message` Gate reality semantics (frozen for B3-1)
+
+When `action_candidate = message` and B2/B3 ownership is established, Gate evaluates **independent reality facts** after Planner returns. Gate must **not** map merged `effective_idle_hours < threshold` alone to `user_active` for owned `message`.
+
+### Known limitation (current `wake_guard_reason`)
+
+Today `effective_idle = min(user_idle, wake_message_idle)` and `recent_interaction` does not distinguish user activity vs recent autonomous wake message. **B3-1 owned `message` Gate must not rely on that merged shortcut.**
+
+Use separate facts from `InteractionClock` / fresh `chat_busy_fn`:
+
+| Fact source | Fields |
+|-------------|--------|
+| User activity | `last_user_at`, `user_idle_hours`, `chat_busy_fn()` |
+| Wake message spacing | `last_wake_message_at`, wake-message idle hours |
+| Duplicate | `wake_run_id_seen(wake_run_id)` |
+| Capability | frozen `CapabilitySkillView.resolved_action_capability` |
+
+### Block reason definitions (owned `message`)
+
+| Reason | When | Notes |
+|--------|------|-------|
+| `duplicate` | `wake_run_id` already consumed for this attempt | Same as B2 |
+| `user_active` | `chat_busy_fn()` is true **OR** `user_idle_hours < user_activity_idle_floor` | True user/chat activity only |
+| `tool_unavailable` | `message` not in resolved capability allowlist | Same pattern as B2 |
+| `cooldown` | User **not** `user_active` (per above), but autonomous wake `message` sent too recently: `wake_message_idle < message_cooldown_floor` | **Not** `user_active` |
+| `precondition_failed` | Clock unreliable, ownership pairing failure, Gate evaluation exception after ownership | Fail closed |
+
+**`user_active` means:** chat is generating, or latest real **user** interaction is within the user-activity idle floor (`WAKE_MIN_IDLE_MINUTES` / `min_idle_minutes` passed to Gate).
+
+**`cooldown` means:** user is **not** actively chatting and user idle floor is satisfied, but `last_wake_message_at` is too recent for another unsolicited autonomous `message` (wake-message idle below `message_cooldown_floor`).
+
+**Critical:** recent `last_wake_message_at` alone → `cooldown`, **not** `user_active`, when user idle floor is satisfied and `chat_busy` is false.
+
+If user is genuinely active **and** message is in cooldown simultaneously → still:
+
+```text
+BLOCK / user_active
+```
+
+(priority below).
+
+### Reason priority (unchanged)
+
+```text
+duplicate
+→ user_active
+→ tool_unavailable
+→ cooldown
+→ precondition_failed
+```
+
+Gate must **not** read Drive / Affect / Bond to relax cooldown or user-active floors.
+
+**`none` Gate:** keeps existing B2 semantics (including `none` always allowed in capability union); B3-1 does not redefine `none` Gate beyond preserving current behavior.
 
 ---
 
@@ -315,24 +437,28 @@ Reuse `wake_outcome:{wake_run_id}` — **do not** add a second settlement key fo
 - New CI / runner / canary / monitor solely for B3
 - Track C Chat Exposure bundled into B3
 - Re-opening B2 Case expansion or `explore` executor invention in B3-0/B3-1
+- Removing `none` from owned actions or routing owned `none` through Renderer
+- B3 flag/rollback that drops B2 `none_takeover` while B2 consumer remains enabled
 
 ---
 
 ## 8. RECOMMENDED_B3_1_SLICE
 
-**Action:** `message`
+**B3-1 newly-owned action:** `message` only.
 
-**Why (unique):**
+**Effective owned actions after B3-1:** `{ none, message }` (additive; `none` unchanged).
+
+**Why `message` (unique first language slice):**
 
 1. Real executor exists (`wake.executor.execute` → `chat_messages`, `source_kind='wake'`).
 2. Clear Settlement (`wake_outcome`, requires `primary_drive` — exercises full provenance path).
 3. No new tool infrastructure (unlike `explore`, whose research happens in runner tool loop).
 4. Full chain Planner → Gate → Renderer → executor → Settlement without new surfaces.
 5. User-visible but flag-gated and revertible (mirror B2 consumer flag pattern).
-6. `diary` is structurally similar but second surface (`posts`); one action only for B3-1.
+6. `diary` deferred — second surface (`posts`); not in B3-1.
 7. `explore` **rejected** — no independent post-Planner explore executor; would require new tool loop (B2-0 audit confirmed).
 
-**B3-1 owned allowlist start:** `{ message }` only (extend diary/explore in later slices).
+**B3-1 one integrated PR:** message ownership + message Gate semantics + Renderer + executor + Settlement (see §3.1). Extend `diary` / `explore` in later slices only.
 
 ---
 
@@ -356,7 +482,7 @@ No Case 4–6 in B3-1.
 
 ## 10. Explicit non-goals (B3-0 / B3-1 boundary)
 
-- B2 expansion (`none` Case families, canary, monitoring)
+- B2 `none` Case-family expansion, canary, or monitoring (B2 is closed; **`none` authority must remain**)
 - `diary` / `explore` takeover in B3-1
 - New Event schema or self/world action Event framework
 - Gateway behavior change in B3-0 (this document only)
@@ -394,4 +520,11 @@ Insertion points for Renderer and Settlement are **uniquely determined** from cu
 
 No BLOCKED. Event Authority has a **GAP** for discrete action success/failure Events — documented, not blocking B3-1 `message` slice.
 
-**B3-0 RESULT: PASS** (audit complete; implementation deferred to B3-1).
+**B3-0 RESULT: PASS** (audit complete; B3-1 message takeover contract ready for implementation).
+
+**Post narrow-fix checklist:**
+
+- Effective ownership: `{ none, message }` — not `{ message }` alone.
+- `none` → no Renderer → existing B2 `none_takeover`.
+- `message` → Gate ALLOW → Renderer → executor → Settlement.
+- Owned `message` Gate uses separate `user_active` vs `cooldown` facts (not merged `effective_idle → user_active` only).
