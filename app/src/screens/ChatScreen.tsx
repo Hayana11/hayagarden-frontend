@@ -647,8 +647,8 @@ export function ChatScreen() {
       else setOpenThink((o) => ({ ...o, [m.id]: !o[m.id] }));
     };
     return (
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-        <div onClick={onClick} style={{ cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 8, color: 'var(--faint)' }}>
+      <div className="vstack vstack-8">
+        <div onClick={onClick} className="hstack hstack-8" style={{ cursor: 'pointer', color: 'var(--faint)' }}>
           <span style={{ display: 'flex' }}>
             <Svg d={IC.brain} size={17} sw={1.5} />
           </span>
@@ -719,7 +719,7 @@ export function ChatScreen() {
   function renderToolItems(keyPrefix: string, tools: ChatToolCall[]) {
     if (!tools.length) return null;
     return (
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+      <div className="vstack vstack-8">
         {tools.map((tc, i) =>
           tc.artifact
             ? renderArtifactCard(`${keyPrefix}-artifact-${i}`, tc)
@@ -735,7 +735,7 @@ export function ChatScreen() {
     const inStr = typeof tc.args === 'string' ? tc.args : JSON.stringify(tc.args ?? {}, null, 2);
     return (
       <div key={key} style={{ background: 'var(--card)', borderRadius: 14, boxShadow: '0 6px 16px var(--shadow)', overflow: 'hidden' }}>
-        <div onClick={() => setOpenTools((o) => ({ ...o, [key]: !o[key] }))} style={{ cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 10, padding: '11px 14px' }}>
+        <div onClick={() => setOpenTools((o) => ({ ...o, [key]: !o[key] }))} className="hstack hstack-10" style={{ cursor: 'pointer', padding: '11px 14px' }}>
           <span style={{ color: 'var(--faint)', flexShrink: 0, display: 'flex' }}>
             <Svg d={IC.tool} size={14} sw={1.8} />
           </span>
@@ -749,7 +749,7 @@ export function ChatScreen() {
           </svg>
         </div>
         {open && (
-          <div style={{ padding: '0 14px 14px', display: 'flex', flexDirection: 'column', gap: 9, animation: 'chatFadeIn .2s ease' }}>
+          <div className="vstack vstack-9" style={{ padding: '0 14px 14px', animation: 'chatFadeIn .2s ease' }}>
             <div style={{ height: 1, background: 'var(--line)' }} />
             <div style={{ fontSize: 11, letterSpacing: 2, color: 'var(--ghost)' }}>入参</div>
             <div style={{ background: 'var(--card2)', borderRadius: 10, padding: '10px 12px', fontFamily: MONO, fontSize: 11.5, lineHeight: 1.7, color: 'var(--mut)', whiteSpace: 'pre-wrap', overflowX: 'auto', maxHeight: 200, overflowY: 'auto' }}>{inStr}</div>
@@ -764,13 +764,13 @@ export function ChatScreen() {
   function renderParas(text: string, caret = false) {
     const paras = text.split('\n').filter((p, i, arr) => p.trim() || (i < arr.length - 1 && arr[i + 1]?.trim()));
     return (
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 10, maxWidth: 640, padding: '0 2px' }}>
+      <div className="vstack vstack-10" style={{ maxWidth: 640, padding: '0 2px' }}>
         {paras.map((p, i) => {
           const bullet = /^[-·•]\s+/.test(p.trim());
           const last = i === paras.length - 1;
           if (bullet) {
             return (
-              <div key={i} style={{ display: 'flex', gap: 10, paddingLeft: 6 }}>
+              <div key={i} className="hstack hstack-10" style={{ paddingLeft: 6 }}>
                 <span style={{ color: 'var(--rose)', flexShrink: 0, lineHeight: 1.85, fontSize: '1em' }}>·</span>
                 <span style={{ fontSize: '1em', lineHeight: 1.85, letterSpacing: 0.3, color: 'var(--ink)' }}>{p.trim().replace(/^[-·•]\s+/, '')}</span>
               </div>
@@ -791,16 +791,16 @@ export function ChatScreen() {
     const editing = editingId === m.id;
     const filePreview = chatFilePreviewUrl(m.fileUrl);
     return (
-      <div id={`msg-${m.id}`} className={`chat-msg${flashId === m.id ? ' chat-flash' : ''}`} style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 7, borderRadius: 16 }}>
+      <div id={`msg-${m.id}`} className={`chat-msg vstack vstack-7${flashId === m.id ? ' chat-flash' : ''}`} style={{ alignItems: 'flex-end', borderRadius: 16 }}>
         {editing ? (
-          <div style={{ width: '100%', maxWidth: 520, background: 'var(--card)', borderRadius: 18, boxShadow: '0 10px 30px var(--shadow)', padding: 14, display: 'flex', flexDirection: 'column', gap: 10 }}>
+          <div className="vstack vstack-10" style={{ width: '100%', maxWidth: 520, background: 'var(--card)', borderRadius: 18, boxShadow: '0 10px 30px var(--shadow)', padding: 14 }}>
             <textarea
               value={editText}
               onChange={(e) => setEditText(e.target.value)}
               rows={3}
               style={{ width: '100%', border: 'none', background: 'var(--card2)', borderRadius: 12, padding: 12, fontSize: '1em', lineHeight: 1.7, color: 'var(--ink)', resize: 'none', fontFamily: SERIF }}
             />
-            <div style={{ display: 'flex', justifyContent: 'flex-end', alignItems: 'center', gap: 8 }}>
+            <div className="hstack hstack-8" style={{ justifyContent: 'flex-end' }}>
               <span style={{ marginRight: 'auto', fontSize: 11, color: 'var(--ghost)' }}>修改会归档后面的对话，重新生成回复</span>
               <div onClick={() => setEditingId(null)} style={{ cursor: 'pointer', padding: '8px 16px', borderRadius: 999, background: 'var(--card2)', color: 'var(--mut)', fontSize: 13 }}>
                 取消
@@ -812,16 +812,16 @@ export function ChatScreen() {
           </div>
         ) : (
           <>
-            <div style={{ maxWidth: '82%', background: 'var(--bubble)', borderRadius: '18px 18px 6px 18px', padding: '12px 16px', boxShadow: '0 6px 16px var(--shadow)', display: 'flex', flexDirection: 'column', gap: 8 }}>
+            <div className="vstack vstack-8" style={{ maxWidth: '82%', background: 'var(--bubble)', borderRadius: '18px 18px 6px 18px', padding: '12px 16px', boxShadow: '0 6px 16px var(--shadow)' }}>
               {(m.fileName || m.imageUrl) && (
-                <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                <div className="flex-wrap-gap-6">
                   {m.fileName && (filePreview ? (
-                    <a href={filePreview} target="_blank" rel="noopener noreferrer" style={{ display: 'flex', alignItems: 'center', gap: 6, background: 'var(--card)', borderRadius: 999, padding: '5px 11px', fontSize: 11.5, color: 'var(--ink2)', textDecoration: 'none' }}>
+                    <a href={filePreview} target="_blank" rel="noopener noreferrer" className="hstack hstack-6" style={{ background: 'var(--card)', borderRadius: 999, padding: '5px 11px', fontSize: 11.5, color: 'var(--ink2)', textDecoration: 'none' }}>
                       <Svg d={IC.clip} size={11} sw={1.8} />
                       {m.fileName}
                     </a>
                   ) : (
-                    <span style={{ display: 'flex', alignItems: 'center', gap: 6, background: 'var(--card)', borderRadius: 999, padding: '5px 11px', fontSize: 11.5, color: 'var(--ink2)' }}>
+                    <span className="hstack hstack-6" style={{ background: 'var(--card)', borderRadius: 999, padding: '5px 11px', fontSize: 11.5, color: 'var(--ink2)' }}>
                       <Svg d={IC.clip} size={11} sw={1.8} />
                       {m.fileName}
                     </span>
@@ -831,8 +831,8 @@ export function ChatScreen() {
               )}
               {m.text && <span style={{ fontSize: '1em', lineHeight: 1.75, letterSpacing: 0.3, color: 'var(--ink)', whiteSpace: 'pre-wrap' }}>{m.text}</span>}
             </div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-              <div className="chat-msg-acts" style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+            <div className="hstack hstack-4">
+              <div className="chat-msg-acts hstack hstack-4">
                 <div
                   onClick={() => {
                     setEditingId(m.id);
@@ -859,15 +859,15 @@ export function ChatScreen() {
     const usage = m.cacheInfo;
     const cache = cacheLabel(usage);
     return (
-      <div id={`msg-${m.id}`} className={`chat-msg${flashId === m.id ? ' chat-flash' : ''}`} style={{ display: 'flex', flexDirection: 'column', gap: 12, borderRadius: 16 }}>
+      <div id={`msg-${m.id}`} className={`chat-msg vstack vstack-12${flashId === m.id ? ' chat-flash' : ''}`} style={{ borderRadius: 16 }}>
         {renderThinkBlock(m)}
         {renderToolItems(String(m.id), m.toolCalls)}
         {m.imageUrl && <img src={m.imageUrl} alt="" style={{ maxWidth: 240, borderRadius: 14 }} />}
         {m.text && renderParas(m.text)}
         {renderChoices(m)}
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 7 }}>
+        <div className="vstack vstack-7">
           <span style={{ fontFamily: DISPLAY, fontSize: 11, color: 'var(--ghost)', letterSpacing: 1, padding: '0 2px' }}>{m.ts}</span>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 2, flexWrap: 'wrap' }}>
+          <div className="hstack hstack-2" style={{ flexWrap: 'wrap' }}>
             <div onClick={() => copyText(m.text)} style={{ cursor: 'pointer', width: 31, height: 31, borderRadius: 10, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--faint)' }}>
               <CopyIcon />
             </div>
@@ -887,20 +887,20 @@ export function ChatScreen() {
               </div>
             )}
             {usage && (
-              <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: '3px 7px', color: 'var(--ghost)', fontSize: 11.5, padding: '0 2px' }}>
-                <span style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
+              <div className="flex-wrap-gap-y3-x7" style={{ color: 'var(--ghost)', fontSize: 11.5, padding: '0 2px' }}>
+                <span className="hstack hstack-3">
                   <Svg d={IC.up} size={11} sw={1.8} />
                   <span style={{ fontFamily: DISPLAY }}>{fmtTokens(usage.inputTokens || 0)}</span>
                 </span>
                 <span>·</span>
-                <span style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
+                <span className="hstack hstack-3">
                   <Svg d={IC.down} size={11} sw={1.8} />
                   <span style={{ fontFamily: DISPLAY }}>{fmtTokens(usage.outputTokens || 0)}</span>
                 </span>
                 {Boolean(usage.elapsedSec) && (
                   <>
                     <span>·</span>
-                    <span style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
+                    <span className="hstack hstack-3">
                       <svg viewBox="0 0 24 24" width={11} height={11} fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round">
                         <circle cx={12} cy={12} r={9} />
                         <path d={IC.clock} />
@@ -926,7 +926,7 @@ export function ChatScreen() {
               </div>
             )}
             {m.branchTotal > 1 && (
-              <div style={{ display: 'flex', alignItems: 'center', gap: 2, background: 'var(--card)', borderRadius: 999, padding: '2px 6px', boxShadow: '0 4px 10px var(--shadow)', marginLeft: 4 }}>
+              <div className="hstack hstack-2" style={{ background: 'var(--card)', borderRadius: 999, padding: '2px 6px', boxShadow: '0 4px 10px var(--shadow)', marginLeft: 4 }}>
                 <span onClick={() => branchSwitch(m.id, -1)} style={{ cursor: 'pointer', padding: '1px 6px', color: m.branchIdx > 0 ? 'var(--mut)' : 'var(--ghost)', fontSize: 14 }}>
                   ‹
                 </span>
@@ -947,12 +947,12 @@ export function ChatScreen() {
   function renderLive(l: LiveState) {
     const lines = l.thinking.split('\n').filter(Boolean).slice(-3);
     return (
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+      <div className="vstack vstack-12">
         {l.thinking && (
           <>
             <div
               onClick={() => setDrawer({ text: l.thinking, label: '思考中…' })}
-              style={{ cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 8, color: 'var(--faint)' }}
+              className="hstack hstack-8" style={{ cursor: 'pointer', color: 'var(--faint)' }}
             >
               <span style={{ display: 'flex', animation: l.phase === 'think' ? 'chatBreathe 1.6s ease-in-out infinite' : 'none' }}>
                 <Svg d={IC.brain} size={17} sw={1.5} />
@@ -961,7 +961,7 @@ export function ChatScreen() {
             </div>
             {l.phase === 'think' && (
               <div style={{ position: 'relative', height: 76, overflow: 'hidden', borderRadius: 14, background: 'var(--card2)' }}>
-                <div style={{ position: 'absolute', bottom: 10, left: 16, right: 16, display: 'flex', flexDirection: 'column', gap: 4 }}>
+                <div className="vstack vstack-4" style={{ position: 'absolute', bottom: 10, left: 16, right: 16 }}>
                   {lines.map((ln, i) => (
                     <span key={`${i}-${ln.slice(0, 8)}`} style={{ fontSize: 12.5, color: 'var(--mut)', lineHeight: 1.6, animation: 'chatFadeIn .4s ease', overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis' }}>
                       {ln}
@@ -975,7 +975,7 @@ export function ChatScreen() {
         )}
         {renderToolItems('live', l.tools)}
         {l.phase === 'text' ? renderParas(l.text, true) : !l.thinking && !l.tools.length ? (
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, color: 'var(--faint)', fontSize: 13 }}>
+          <div className="hstack hstack-8" style={{ color: 'var(--faint)', fontSize: 13 }}>
             <span style={{ width: 13, height: 13, borderRadius: '50%', border: '2px solid var(--rosebg)', borderTopColor: 'var(--rose)', animation: 'chatSpin .8s linear infinite' }} />
             正在连接回复…
           </div>
@@ -1027,13 +1027,13 @@ export function ChatScreen() {
       {/* ══ top nav ══ */}
       <div style={{ flexShrink: 0, position: 'relative', zIndex: 40 }}>
         <div style={{ background: 'rgba(255,255,255,0.97)', boxShadow: '0 6px 18px var(--shadow)', position: 'relative', zIndex: 3 }}>
-          <div style={{ maxWidth: 430, margin: '0 auto', display: 'flex', alignItems: 'center', gap: 10, padding: '10px 12px 9px' }}>
+          <div className="hstack hstack-10" style={{ maxWidth: 430, margin: '0 auto', padding: '10px 12px 9px' }}>
             <div onClick={() => setSidebarOpen(true)} style={{ cursor: 'pointer', width: 38, height: 38, borderRadius: '50%', background: 'linear-gradient(135deg,#B76E79,#9C3B4A)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, boxShadow: '0 6px 14px var(--shadow2)' }}>
               <span style={{ fontFamily: DISPLAY, fontStyle: 'italic', fontSize: 17, color: '#F7F1EE' }}>Θ</span>
             </div>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 1, minWidth: 0, flexShrink: 1 }}>
+            <div className="vstack vstack-1" style={{ minWidth: 0, flexShrink: 1 }}>
               <span style={{ fontFamily: DISPLAY, fontSize: 17, fontWeight: 600, letterSpacing: 1, color: 'var(--ink)' }}>Fyodor</span>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 5, minWidth: 0 }}>
+              <div className="hstack hstack-5" style={{ minWidth: 0 }}>
                 <span
                   style={{
                     width: 6,
@@ -1051,7 +1051,7 @@ export function ChatScreen() {
                 )}
               </div>
             </div>
-            <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 1, flexShrink: 0 }}>
+            <div className="hstack hstack-1" style={{ marginLeft: 'auto', flexShrink: 0 }}>
               <div onClick={() => setNavOpen(navOpen === 'wrench' ? null : 'wrench')} style={{ ...iconBtn, background: navOpen === 'wrench' ? 'var(--rosebg)' : 'transparent' }}>
                 <Svg d={IC.wrench} />
               </div>
@@ -1112,17 +1112,17 @@ export function ChatScreen() {
 
         {navOpen && (
           <>
-            <div onClick={() => setNavOpen(null)} style={{ position: 'fixed', inset: 0, zIndex: 1, background: 'rgba(40,28,26,0.30)', animation: 'chatFadeIn .2s ease' }} />
+            <div onClick={() => setNavOpen(null)} className="c78-fill-fixed" style={{ zIndex: 1, background: 'rgba(40,28,26,0.30)', animation: 'chatFadeIn .2s ease' }} />
             <div style={{ position: 'absolute', top: '100%', left: 0, right: 0, zIndex: 2, animation: 'chatDropIn .22s ease' }}>
               <div style={{ maxWidth: 430, margin: '0 auto', padding: '0 10px' }}>
-                <div style={{ background: 'var(--card)', borderRadius: '0 0 26px 26px', boxShadow: '0 30px 70px var(--shadow2)', padding: '20px 20px 22px', maxHeight: '72vh', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 18 }}>
+                <div className="vstack vstack-18" style={{ background: 'var(--card)', borderRadius: '0 0 26px 26px', boxShadow: '0 30px 70px var(--shadow2)', padding: '20px 20px 22px', maxHeight: '72vh', overflowY: 'auto' }}>
                   {navOpen === 'wrench' && (
                     <>
-                      <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+                      <div className="vstack vstack-12">
                         <div style={sectionCaption}>外观 · APPEARANCE</div>
-                        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                        <div className="vstack vstack-8">
                           <span style={{ fontSize: 13.5, color: 'var(--ink2)', letterSpacing: 1 }}>主题</span>
-                          <div style={{ display: 'flex', background: 'var(--card2)', borderRadius: 999, padding: 3, gap: 2 }}>
+                          <div className="hstack hstack-2" style={{ background: 'var(--card2)', borderRadius: 999, padding: 3 }}>
                             {(['light', 'dark', 'auto'] as const).map((t) => (
                               <div key={t} onClick={() => patchSettings({ theme: t })} style={segStyle(settings.theme === t)}>
                                 {t === 'light' ? '浅色' : t === 'dark' ? '深色' : '跟随系统'}
@@ -1132,11 +1132,11 @@ export function ChatScreen() {
                         </div>
                       </div>
                       <div style={{ height: 1, background: 'var(--line)' }} />
-                      <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+                      <div className="vstack vstack-12">
                         <div style={sectionCaption}>对话 · CONVERSATION</div>
-                        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                        <div className="vstack vstack-8">
                           <span style={{ fontSize: 13.5, color: 'var(--ink2)', letterSpacing: 1 }}>思维链展开方式</span>
-                          <div style={{ display: 'flex', background: 'var(--card2)', borderRadius: 999, padding: 3, gap: 2 }}>
+                          <div className="hstack hstack-2" style={{ background: 'var(--card2)', borderRadius: 999, padding: 3 }}>
                             {(['auto', 'drawer', 'inline'] as const).map((t) => (
                               <div key={t} onClick={() => patchSettings({ thinkMode: t })} style={segStyle(settings.thinkMode === t)}>
                                 {t === 'auto' ? '自动' : t === 'drawer' ? '抽屉' : '原地展开'}
@@ -1149,12 +1149,12 @@ export function ChatScreen() {
                     </>
                   )}
                   {navOpen === 'font' && (
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+                    <div className="vstack vstack-12">
                       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
                         <div style={sectionCaption}>字号 · TEXT SIZE</div>
                         <span style={{ fontFamily: DISPLAY, fontSize: 12, color: 'var(--rose)' }}>{FONT_SIZES[settings.fontStep]}px</span>
                       </div>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                      <div className="hstack hstack-12">
                         <span style={{ fontSize: 12, color: 'var(--ghost)' }}>字</span>
                         <input type="range" min={0} max={4} step={1} value={settings.fontStep} onChange={(e) => patchSettings({ fontStep: Number(e.target.value) })} style={{ flex: 1, accentColor: 'var(--rose)' }} />
                         <span style={{ fontSize: 19, color: 'var(--ghost)' }}>字</span>
@@ -1163,9 +1163,9 @@ export function ChatScreen() {
                     </div>
                   )}
                   {navOpen === 'search' && (
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                    <div className="vstack vstack-10">
                       <div style={sectionCaption}>聊天记录 · HISTORY</div>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 10, background: 'var(--card2)', borderRadius: 999, padding: '11px 16px' }}>
+                      <div className="hstack hstack-10" style={{ background: 'var(--card2)', borderRadius: 999, padding: '11px 16px' }}>
                         <svg viewBox="0 0 24 24" width={15} height={15} fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" style={{ color: 'var(--ghost)', flexShrink: 0 }}>
                           <circle cx={11} cy={11} r={7} />
                           <path d="M20 20l-3.5-3.5" />
@@ -1173,7 +1173,7 @@ export function ChatScreen() {
                         <input value={searchQ} onChange={(e) => setSearchQ(e.target.value)} placeholder="搜索已加载的对话…" style={{ flex: 1, border: 'none', background: 'transparent', fontSize: 14, color: 'var(--ink)', minWidth: 0, fontFamily: SERIF, outline: 'none' }} />
                       </div>
                       {searchResults.map((r) => (
-                        <div key={r.id} onClick={() => jumpTo(r.id)} style={{ cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 10, padding: '10px 12px', borderRadius: 14, background: 'var(--card2)' }}>
+                        <div key={r.id} onClick={() => jumpTo(r.id)} className="hstack hstack-10" style={{ cursor: 'pointer', padding: '10px 12px', borderRadius: 14, background: 'var(--card2)' }}>
                           <span style={{ fontSize: 11, padding: '3px 9px', borderRadius: 999, background: 'var(--rosebg)', color: 'var(--deep)', flexShrink: 0 }}>{r.who}</span>
                           <span style={{ flex: 1, fontSize: 13, color: 'var(--ink2)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{r.snippet}</span>
                           <span style={{ fontFamily: DISPLAY, fontSize: 11, color: 'var(--ghost)', flexShrink: 0 }}>{r.ts}</span>
@@ -1191,7 +1191,7 @@ export function ChatScreen() {
 
       {/* ══ message stream ══ */}
       <div ref={scrollRef} className="hide-scrollbar" style={{ flex: 1, minHeight: 0, overflowY: 'auto', position: 'relative' }}>
-        <div style={{ maxWidth: 430, margin: '0 auto', padding: '20px 16px 26px', display: 'flex', flexDirection: 'column', gap: 20 }}>
+        <div className="vstack vstack-20" style={{ maxWidth: 430, margin: '0 auto', padding: '20px 16px 26px' }}>
           {hasMoreBefore && (
             <div onClick={loadEarlier} style={{ cursor: 'pointer', textAlign: 'center', fontSize: 12, color: 'var(--faint)', padding: '6px 0', letterSpacing: 2 }}>
               {loadingMore ? '加载中…' : '‹ 加载更早的对话 ›'}
@@ -1201,7 +1201,7 @@ export function ChatScreen() {
           {live && renderLive(live)}
           {chatError && (
             <div style={{ display: 'flex', justifyContent: 'center', padding: '6px 4px 2px' }}>
-              <div style={{
+              <div className="vstack vstack-8" style={{
                 maxWidth: 360,
                 width: '100%',
                 background: 'rgba(58,42,40,0.92)',
@@ -1209,9 +1209,6 @@ export function ChatScreen() {
                 borderRadius: 18,
                 padding: '14px 16px',
                 boxShadow: '0 10px 30px rgba(0,0,0,0.18)',
-                display: 'flex',
-                flexDirection: 'column',
-                gap: 8,
                 textAlign: 'center',
               }}>
                 <span style={{ fontSize: 13, lineHeight: 1.65, letterSpacing: 0.3 }}>{chatError.message}</span>
@@ -1227,8 +1224,8 @@ export function ChatScreen() {
         <div style={{ maxWidth: 430, margin: '0 auto', position: 'relative' }}>
           {modelPopOpen && (
             <>
-              <div onClick={() => setModelPopOpen(false)} style={{ position: 'fixed', inset: 0, zIndex: 1 }} />
-              <div style={{ position: 'absolute', bottom: 'calc(100% + 10px)', left: 0, zIndex: 2, width: 'min(330px,100%)', background: 'var(--card)', borderRadius: 18, boxShadow: '0 24px 60px var(--shadow2)', padding: 12, display: 'flex', flexDirection: 'column', gap: 4, animation: 'chatFadeIn .15s ease', maxHeight: '50vh', overflowY: 'auto' }}>
+              <div onClick={() => setModelPopOpen(false)} className="c78-fill-fixed" style={{ zIndex: 1 }} />
+              <div className="chat-model-pop vstack vstack-4" style={{ position: 'absolute', bottom: 'calc(100% + 10px)', left: 0, zIndex: 2, background: 'var(--card)', borderRadius: 18, boxShadow: '0 24px 60px var(--shadow2)', padding: 12, animation: 'chatFadeIn .15s ease', maxHeight: '50vh', overflowY: 'auto' }}>
                 <div style={{ fontFamily: DISPLAY, fontSize: 10.5, letterSpacing: 2.5, color: 'var(--ghost)', padding: '8px 8px 4px' }}>模型 · MODELS</div>
                 {chatProvider === 'claude_code' ? (
                   <>
@@ -1243,7 +1240,7 @@ export function ChatScreen() {
                           showToast('下一条消息起生效');
                         } else showToast('切换失败');
                       }}
-                      style={{ cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 10, padding: '9px 10px', borderRadius: 12, background: modelMode === 'default' ? 'var(--rosebg)' : 'transparent' }}
+                      className="hstack hstack-10" style={{ cursor: 'pointer', padding: '9px 10px', borderRadius: 12, background: modelMode === 'default' ? 'var(--rosebg)' : 'transparent' }}
                     >
                       <span style={{ width: 8, height: 8, borderRadius: '50%', background: modelMode === 'default' ? 'var(--rose)' : 'var(--ghost)', flexShrink: 0 }} />
                       <div style={{ display: 'flex', flexDirection: 'column', minWidth: 0 }}>
@@ -1264,7 +1261,7 @@ export function ChatScreen() {
                             showToast('下一条消息起生效');
                           } else showToast('切换失败');
                         }}
-                        style={{ cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 10, padding: '9px 10px', borderRadius: 12, background: modelMode === 'explicit' && mo.id === currentModel ? 'var(--rosebg)' : 'transparent' }}
+                        className="hstack hstack-10" style={{ cursor: 'pointer', padding: '9px 10px', borderRadius: 12, background: modelMode === 'explicit' && mo.id === currentModel ? 'var(--rosebg)' : 'transparent' }}
                       >
                         <span style={{ width: 8, height: 8, borderRadius: '50%', background: mo.dot || (modelMode === 'explicit' && mo.id === currentModel ? 'var(--rose)' : 'var(--ghost)'), flexShrink: 0 }} />
                         <div style={{ display: 'flex', flexDirection: 'column', minWidth: 0 }}>
@@ -1286,7 +1283,7 @@ export function ChatScreen() {
                         showToast(`已切换到 ${mo.label || mo.id}`);
                       } else showToast('切换失败');
                     }}
-                    style={{ cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 10, padding: '9px 10px', borderRadius: 12, background: mo.id === currentModel ? 'var(--rosebg)' : 'transparent' }}
+                    className="hstack hstack-10" style={{ cursor: 'pointer', padding: '9px 10px', borderRadius: 12, background: mo.id === currentModel ? 'var(--rosebg)' : 'transparent' }}
                   >
                     <span style={{ width: 8, height: 8, borderRadius: '50%', background: mo.dot || (mo.id === currentModel ? 'var(--rose)' : 'var(--ghost)'), flexShrink: 0 }} />
                     <div style={{ display: 'flex', flexDirection: 'column', minWidth: 0 }}>
@@ -1306,9 +1303,9 @@ export function ChatScreen() {
 
           {attachMenuOpen && (
             <>
-              <div onClick={() => setAttachMenuOpen(false)} style={{ position: 'fixed', inset: 0, zIndex: 1 }} />
-              <div style={{ position: 'absolute', bottom: 'calc(100% + 10px)', left: 0, zIndex: 2, width: 190, background: 'var(--card)', borderRadius: 16, boxShadow: '0 24px 60px var(--shadow2)', padding: 8, display: 'flex', flexDirection: 'column', gap: 2, animation: 'chatFadeIn .15s ease' }}>
-                <div onClick={() => { if (!postingRef.current) { setAttachMenuOpen(false); imgInputRef.current?.click(); } }} style={{ cursor: posting ? 'default' : 'pointer', display: 'flex', alignItems: 'center', gap: 10, padding: '10px 12px', borderRadius: 11 }}>
+              <div onClick={() => setAttachMenuOpen(false)} className="c78-fill-fixed" style={{ zIndex: 1 }} />
+              <div className="vstack vstack-2" style={{ position: 'absolute', bottom: 'calc(100% + 10px)', left: 0, zIndex: 2, width: 190, background: 'var(--card)', borderRadius: 16, boxShadow: '0 24px 60px var(--shadow2)', padding: 8, animation: 'chatFadeIn .15s ease' }}>
+                <div onClick={() => { if (!postingRef.current) { setAttachMenuOpen(false); imgInputRef.current?.click(); } }} className="hstack hstack-10" style={{ cursor: posting ? 'default' : 'pointer', padding: '10px 12px', borderRadius: 11 }}>
                   <svg viewBox="0 0 24 24" width={15} height={15} fill="none" stroke="currentColor" strokeWidth={1.7} strokeLinecap="round" strokeLinejoin="round" style={{ color: 'var(--rose)' }}>
                     <rect x={3} y={3} width={18} height={18} rx={3} />
                     <circle cx={9} cy={9} r={2} />
@@ -1316,7 +1313,7 @@ export function ChatScreen() {
                   </svg>
                   <span style={{ fontSize: 13.5, color: 'var(--ink)' }}>上传图片</span>
                 </div>
-                <div onClick={() => { if (!postingRef.current) { setAttachMenuOpen(false); fileInputRef.current?.click(); } }} style={{ cursor: posting ? 'default' : 'pointer', display: 'flex', alignItems: 'center', gap: 10, padding: '10px 12px', borderRadius: 11 }}>
+                <div onClick={() => { if (!postingRef.current) { setAttachMenuOpen(false); fileInputRef.current?.click(); } }} className="hstack hstack-10" style={{ cursor: posting ? 'default' : 'pointer', padding: '10px 12px', borderRadius: 11 }}>
                   <svg viewBox="0 0 24 24" width={15} height={15} fill="none" stroke="currentColor" strokeWidth={1.7} strokeLinecap="round" strokeLinejoin="round" style={{ color: 'var(--rose)' }}>
                     <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
                     <path d="M14 2v6h6" />
@@ -1330,8 +1327,8 @@ export function ChatScreen() {
           <input ref={fileInputRef} type="file" disabled={posting} style={{ display: 'none' }} onChange={(e) => { if (!postingRef.current) void onAttachFile(e.target.files?.[0]); e.target.value = ''; }} />
 
           {(pendingFile || pendingImage) && (
-            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', padding: '0 4px 8px' }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 7, background: 'var(--card)', borderRadius: 999, padding: '7px 12px', boxShadow: '0 4px 12px var(--shadow)', animation: 'chatFadeIn .2s ease' }}>
+            <div className="flex-wrap-gap-8" style={{ padding: '0 4px 8px' }}>
+              <div className="hstack hstack-7" style={{ background: 'var(--card)', borderRadius: 999, padding: '7px 12px', boxShadow: '0 4px 12px var(--shadow)', animation: 'chatFadeIn .2s ease' }}>
                 <span style={{ color: 'var(--rose)', display: 'flex' }}>
                   <Svg d={IC.clip} size={12} sw={1.8} />
                 </span>
@@ -1364,11 +1361,11 @@ export function ChatScreen() {
               placeholder={sending ? 'Fyodor 正在回复…' : placeholder}
               style={{ width: '100%', border: 'none', background: 'transparent', fontSize: INPUT_FONT_SIZE, lineHeight: 1.6, color: 'var(--ink)', resize: 'none', maxHeight: 120, padding: '4px 8px 8px', display: 'block', overflowY: 'auto', fontFamily: SERIF, outline: 'none' }}
             />
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 2 }}>
+            <div className="hstack hstack-8" style={{ marginTop: 2 }}>
               <div onClick={() => { if (!postingRef.current) setAttachMenuOpen(!attachMenuOpen); }} style={{ cursor: posting ? 'default' : 'pointer', width: 38, height: 38, borderRadius: '50%', background: 'var(--card2)', color: 'var(--mut)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
                 <Svg d={IC.plus} size={17} sw={1.8} />
               </div>
-              <div onClick={() => setModelPopOpen(!modelPopOpen)} style={{ cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 6, padding: '9px 13px', borderRadius: 999, background: 'var(--card2)', minWidth: 0 }}>
+              <div onClick={() => setModelPopOpen(!modelPopOpen)} className="hstack hstack-6" style={{ cursor: 'pointer', padding: '9px 13px', borderRadius: 999, background: 'var(--card2)', minWidth: 0 }}>
                 <span style={{ fontFamily: DISPLAY, fontSize: 12, letterSpacing: 0.5, color: 'var(--ink2)', fontWeight: 500, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{modelBadge}</span>
                 <svg viewBox="0 0 24 24" width={11} height={11} fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" style={{ color: 'var(--ghost)', flexShrink: 0 }}>
                   <path d="M18 15l-6-6-6 6" />
@@ -1387,14 +1384,14 @@ export function ChatScreen() {
 
       {/* ══ thinking drawer ══ */}
       {drawer && (
-        <div style={{ position: 'fixed', inset: 0, zIndex: 60 }}>
-          <div onClick={() => setDrawer(null)} style={{ position: 'absolute', inset: 0, background: 'rgba(30,20,18,0.42)', animation: 'chatFadeIn .2s ease' }} />
+        <div className="c78-fill-fixed" style={{ zIndex: 60 }}>
+          <div onClick={() => setDrawer(null)} className="c78-fill-absolute" style={{ background: 'rgba(30,20,18,0.42)', animation: 'chatFadeIn .2s ease' }} />
           <div style={{ position: 'absolute', left: 0, right: 0, bottom: 0, display: 'flex', justifyContent: 'center' }}>
             <div style={{ width: '100%', maxWidth: 430, background: 'var(--card)', borderRadius: '24px 24px 0 0', boxShadow: '0 -20px 60px var(--shadow2)', maxHeight: '72vh', display: 'flex', flexDirection: 'column', animation: 'chatSheetUp .28s cubic-bezier(.32,.72,.33,1)' }}>
               <div style={{ display: 'flex', justifyContent: 'center', padding: '10px 0 2px' }}>
                 <div style={{ width: 38, height: 4, borderRadius: 99, background: 'var(--line)' }} />
               </div>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 20px 12px' }}>
+              <div className="hstack hstack-10" style={{ padding: '8px 20px 12px' }}>
                 <span style={{ display: 'flex', color: 'var(--rose)' }}>
                   <Svg d={IC.brain} size={17} sw={1.5} />
                 </span>
@@ -1410,68 +1407,68 @@ export function ChatScreen() {
 
       {/* ══ sidebar ══ */}
       {sidebarOpen && (
-        <div style={{ position: 'fixed', inset: 0, zIndex: 70 }}>
-          <div onClick={() => setSidebarOpen(false)} style={{ position: 'absolute', inset: 0, background: 'rgba(30,20,18,0.42)', animation: 'chatFadeIn .2s ease' }} />
-          <div style={{ position: 'absolute', top: 0, bottom: 0, left: 0, width: 'min(320px,86%)', background: 'var(--card)', boxShadow: '20px 0 60px var(--shadow2)', animation: 'chatSlideInL .28s cubic-bezier(.32,.72,.33,1)', display: 'flex', flexDirection: 'column', overflowY: 'auto' }}>
-            <div style={{ padding: '28px 22px 20px', display: 'flex', flexDirection: 'column', gap: 14, background: 'linear-gradient(180deg,var(--rosebg),transparent)' }}>
+        <div className="c78-fill-fixed" style={{ zIndex: 70 }}>
+          <div onClick={() => setSidebarOpen(false)} className="c78-fill-absolute" style={{ background: 'rgba(30,20,18,0.42)', animation: 'chatFadeIn .2s ease' }} />
+          <div className="chat-sidebar-panel" style={{ position: 'absolute', top: 0, bottom: 0, left: 0, background: 'var(--card)', boxShadow: '20px 0 60px var(--shadow2)', animation: 'chatSlideInL .28s cubic-bezier(.32,.72,.33,1)', display: 'flex', flexDirection: 'column', overflowY: 'auto' }}>
+            <div className="vstack vstack-14" style={{ padding: '28px 22px 20px', background: 'linear-gradient(180deg,var(--rosebg),transparent)' }}>
               <div style={{ width: 64, height: 64, borderRadius: '50%', background: 'linear-gradient(135deg,#B76E79,#9C3B4A)', display: 'flex', alignItems: 'center', justifyContent: 'center', boxShadow: '0 10px 24px var(--shadow2)' }}>
                 <span style={{ fontFamily: DISPLAY, fontStyle: 'italic', fontSize: 28, color: '#F7F1EE' }}>Θ</span>
               </div>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <div className="vstack vstack-3">
+                <div className="hstack hstack-8">
                   <span style={{ fontFamily: DISPLAY, fontSize: 22, fontWeight: 600, letterSpacing: 1, color: 'var(--ink)' }}>Fyodor</span>
                   <span style={{ width: 7, height: 7, borderRadius: '50%', background: 'var(--ok)' }} />
                 </div>
                 <span style={{ fontFamily: DISPLAY, fontStyle: 'italic', fontSize: 12, letterSpacing: 1.5, color: 'var(--faint)' }}>Θεόδωρος · gift of the gods</span>
               </div>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              <div className="vstack vstack-6">
                 <span style={{ fontSize: 13, color: 'var(--ink2)', letterSpacing: 1 }}>学者 · 策略家 · 存在了几百年</span>
                 <span style={{ fontSize: 12.5, color: 'var(--mut)', lineHeight: 1.8 }}>总是带着一点恶趣味，和很多情意。</span>
               </div>
             </div>
             <div style={{ height: 1, background: 'var(--line)', margin: '0 22px' }} />
-            <div style={{ padding: '18px 16px', display: 'flex', flexDirection: 'column', gap: 10 }}>
-              <Link to="/contacts" onClick={() => setSidebarOpen(false)} style={{ textDecoration: 'none', display: 'flex', alignItems: 'center', gap: 12, padding: '13px 14px', borderRadius: 16, background: 'var(--card2)' }}>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 }}>
+            <div className="vstack vstack-10" style={{ padding: '18px 16px' }}>
+              <Link to="/contacts" onClick={() => setSidebarOpen(false)} className="hstack hstack-12" style={{ textDecoration: 'none', padding: '13px 14px', borderRadius: 16, background: 'var(--card2)' }}>
+                <div className="vstack vstack-2" style={{ minWidth: 0 }}>
                   <span style={{ fontSize: 14.5, color: 'var(--ink)', letterSpacing: 1 }}>通讯录</span>
                   <span style={{ fontSize: 11.5, color: 'var(--faint)' }}>Codex · 群聊 · 游戏室</span>
                 </div>
                 <span style={{ marginLeft: 'auto', color: 'var(--ghost)', fontSize: 16 }}>›</span>
               </Link>
-              <Link to="/moments" onClick={() => setSidebarOpen(false)} style={{ textDecoration: 'none', display: 'flex', alignItems: 'center', gap: 12, padding: '13px 14px', borderRadius: 16, background: 'linear-gradient(135deg,rgba(245,222,179,.5),rgba(232,220,245,.55))' }}>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 }}>
+              <Link to="/moments" onClick={() => setSidebarOpen(false)} className="hstack hstack-12" style={{ textDecoration: 'none', padding: '13px 14px', borderRadius: 16, background: 'linear-gradient(135deg,rgba(245,222,179,.5),rgba(232,220,245,.55))' }}>
+                <div className="vstack vstack-2" style={{ minWidth: 0 }}>
                   <span style={{ fontSize: 14.5, color: 'var(--ink)', letterSpacing: 1 }}>Fyodor 的朋友圈</span>
                   <span style={{ fontSize: 11.5, color: 'var(--faint)' }}>梦境 · 念头 · 情绪</span>
                 </div>
                 <span style={{ marginLeft: 'auto', color: 'var(--ghost)', fontSize: 16 }}>›</span>
               </Link>
-              <Link to="/profile" onClick={() => setSidebarOpen(false)} style={{ textDecoration: 'none', display: 'flex', alignItems: 'center', gap: 12, padding: '13px 14px', borderRadius: 16, background: 'linear-gradient(135deg,rgba(183,110,121,.12),rgba(232,220,245,.45))' }}>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 }}>
+              <Link to="/profile" onClick={() => setSidebarOpen(false)} className="hstack hstack-12" style={{ textDecoration: 'none', padding: '13px 14px', borderRadius: 16, background: 'linear-gradient(135deg,rgba(183,110,121,.12),rgba(232,220,245,.45))' }}>
+                <div className="vstack vstack-2" style={{ minWidth: 0 }}>
                   <span style={{ fontSize: 14.5, color: 'var(--ink)', letterSpacing: 1 }}>费佳档案</span>
                   <span style={{ fontSize: 11.5, color: 'var(--faint)' }}>身份 · 关系 · 语言风格</span>
                 </div>
                 <span style={{ marginLeft: 'auto', color: 'var(--ghost)', fontSize: 16 }}>›</span>
               </Link>
-              <Link to="/group-chat" onClick={() => setSidebarOpen(false)} style={{ textDecoration: 'none', display: 'flex', alignItems: 'center', gap: 12, padding: '13px 14px', borderRadius: 16, background: 'linear-gradient(135deg,rgba(220,232,217,.72),rgba(220,232,245,.76))' }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
+              <Link to="/group-chat" onClick={() => setSidebarOpen(false)} className="hstack hstack-12" style={{ textDecoration: 'none', padding: '13px 14px', borderRadius: 16, background: 'linear-gradient(135deg,rgba(220,232,217,.72),rgba(220,232,245,.76))' }}>
+                <div className="hstack hstack-6" style={{ flexShrink: 0 }}>
                   <i style={{ width: 13, height: 13, borderRadius: '50%', background: '#91AD93' }} />
                   <i style={{ width: 13, height: 13, borderRadius: '50%', background: '#8EACCF', marginLeft: -9, opacity: .88 }} />
                 </div>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 }}>
+                <div className="vstack vstack-2" style={{ minWidth: 0 }}>
                   <span style={{ fontSize: 14.5, color: 'var(--ink)', letterSpacing: 1 }}>群聊房间</span>
                   <span style={{ fontSize: 11.5, color: 'var(--faint)' }}>同一个人 · 暖色与蓝色两条线路</span>
                 </div>
                 <span style={{ marginLeft: 'auto', color: 'var(--ghost)', fontSize: 16 }}>›</span>
               </Link>
-              <Link to="/settings" style={{ textDecoration: 'none', display: 'flex', alignItems: 'center', gap: 12, padding: '13px 14px', borderRadius: 16, background: 'var(--card2)' }}>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 }}>
+              <Link to="/settings" className="hstack hstack-12" style={{ textDecoration: 'none', padding: '13px 14px', borderRadius: 16, background: 'var(--card2)' }}>
+                <div className="vstack vstack-2" style={{ minWidth: 0 }}>
                   <span style={{ fontSize: 14.5, color: 'var(--ink)', letterSpacing: 1 }}>系统配置</span>
                   <span style={{ fontSize: 11.5, color: 'var(--faint)' }}>用量统计 · API 端点管理</span>
                 </div>
                 <span style={{ marginLeft: 'auto', color: 'var(--ghost)', fontSize: 16 }}>›</span>
               </Link>
-              <a href="/chat" style={{ textDecoration: 'none', display: 'flex', alignItems: 'center', gap: 10, padding: '13px 14px', borderRadius: 16, background: 'var(--card2)' }}>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 }}>
+              <a href="/chat" className="hstack hstack-10" style={{ textDecoration: 'none', padding: '13px 14px', borderRadius: 16, background: 'var(--card2)' }}>
+                <div className="vstack vstack-2" style={{ minWidth: 0 }}>
                   <span style={{ fontSize: 14.5, color: 'var(--ink)', letterSpacing: 1 }}>回旧聊天页</span>
                   <span style={{ fontSize: 11.5, color: 'var(--faint)' }}>完整历史、漂流瓶等高级功能</span>
                 </div>

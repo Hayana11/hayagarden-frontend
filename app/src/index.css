@@ -58,9 +58,99 @@ html, body {
 }
 .hstack-26 > * + * { margin-left: 26px; }
 .hstack-14 > * + * { margin-left: 14px; }
+.hstack-12 > * + * { margin-left: 12px; }
 .hstack-10 > * + * { margin-left: 10px; }
 .hstack-8 > * + * { margin-left: 8px; }
 .hstack-7 > * + * { margin-left: 7px; }
+.hstack-6 > * + * { margin-left: 6px; }
+.hstack-5 > * + * { margin-left: 5px; }
+.hstack-4 > * + * { margin-left: 4px; }
+.hstack-3 > * + * { margin-left: 3px; }
+.hstack-2 > * + * { margin-left: 2px; }
+.hstack-1 > * + * { margin-left: 1px; }
+
+.vstack-26 > * + * { margin-top: 26px; }
+.vstack-20 > * + * { margin-top: 20px; }
+.vstack-18 > * + * { margin-top: 18px; }
+.vstack-14 > * + * { margin-top: 14px; }
+.vstack-12 > * + * { margin-top: 12px; }
+.vstack-10 > * + * { margin-top: 10px; }
+.vstack-9 > * + * { margin-top: 9px; }
+.vstack-7 > * + * { margin-top: 7px; }
+.vstack-6 > * + * { margin-top: 6px; }
+.vstack-5 > * + * { margin-top: 5px; }
+.vstack-4 > * + * { margin-top: 4px; }
+.vstack-3 > * + * { margin-top: 3px; }
+.vstack-1 > * + * { margin-top: 1px; }
+
+/* flex-wrap gap fallbacks (Chrome <84) — negative margin on container */
+.flex-wrap-gap-8 {
+  display: flex;
+  flex-wrap: wrap;
+  margin: -4px;
+}
+.flex-wrap-gap-8 > * { margin: 4px; }
+
+.flex-wrap-gap-6 {
+  display: flex;
+  flex-wrap: wrap;
+  margin: -3px;
+}
+.flex-wrap-gap-6 > * { margin: 3px; }
+
+.flex-wrap-gap-y3-x7 {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  margin: -3px -3.5px;
+}
+.flex-wrap-gap-y3-x7 > * { margin: 3px 3.5px; }
+
+/* Chrome <87: no inset shorthand */
+.c78-fill-fixed {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
+}
+.c78-fill-absolute {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
+}
+
+/* Chrome <79: no CSS min() — width: 86%; max-width: 320px equivalent */
+.chat-sidebar-panel {
+  width: 86%;
+  max-width: 320px;
+}
+.chat-model-pop {
+  width: 100%;
+  max-width: 330px;
+}
+
+/* Contacts — color-mix fallbacks for Chrome 78 */
+.contacts-monopoly-card {
+  background: linear-gradient(135deg, #FBF4F5, var(--card));
+  border: 1px solid rgba(183, 110, 121, 0.18);
+}
+@supports (background: color-mix(in srgb, red 50%, blue)) {
+  .contacts-monopoly-card {
+    background: linear-gradient(135deg, color-mix(in srgb, var(--rose) 14%, var(--card)), var(--card));
+    border: 1px solid color-mix(in srgb, var(--rose) 18%, transparent);
+  }
+}
+.contacts-monopoly-badge {
+  background: rgba(183, 110, 121, 0.12);
+}
+@supports (background: color-mix(in srgb, red 50%, blue)) {
+  .contacts-monopoly-badge {
+    background: color-mix(in srgb, var(--rose) 12%, transparent);
+  }
+}
 
 .screen-stack {
   padding: 26px 20px calc(96px + env(safe-area-inset-bottom, 0px));
@@ -167,8 +257,8 @@ button {
   padding: 11px 12px;
   display: flex;
   align-items: center;
-  gap: 10px;
 }
+.chat-artifact-card > * + * { margin-left: 10px; }
 .chat-artifact-icon {
   width: 34px;
   height: 34px;

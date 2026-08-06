@@ -41,12 +41,16 @@ function ContactRow({ to, avatar, avatarBg, name, subtitle, dot }: {
   to: string; avatar: React.ReactNode; avatarBg: string; name: string; subtitle: string; dot?: 'ok' | 'off';
 }) {
   return (
-    <Link to={to} style={{ textDecoration: 'none', display: 'flex', alignItems: 'center', gap: 14, padding: '14px 16px', borderRadius: 18, background: 'var(--card)', boxShadow: '0 6px 16px var(--shadow)' }}>
+    <Link
+      to={to}
+      className="hstack hstack-14"
+      style={{ textDecoration: 'none', padding: '14px 16px', borderRadius: 18, background: 'var(--card)', boxShadow: '0 6px 16px var(--shadow)' }}
+    >
       <div style={{ width: 46, height: 46, borderRadius: '50%', background: avatarBg, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, boxShadow: '0 6px 14px var(--shadow2)' }}>
         {avatar}
       </div>
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 3, minWidth: 0, flex: 1 }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
+      <div className="vstack vstack-3" style={{ minWidth: 0, flex: 1 }}>
+        <div className="hstack hstack-7">
           <span style={{ fontFamily: DISPLAY, fontSize: 15.5, fontWeight: 600, letterSpacing: 1, color: 'var(--ink)' }}>{name}</span>
           {dot && <span style={{ width: 6, height: 6, borderRadius: '50%', background: dot === 'ok' ? 'var(--ok)' : 'var(--ghost)', flexShrink: 0 }} />}
         </div>
@@ -59,7 +63,12 @@ function ContactRow({ to, avatar, avatarBg, name, subtitle, dot }: {
 
 function GameCard({ title, hint, onLocked }: { title: string; hint: string; onLocked: () => void }) {
   return (
-    <button type="button" onClick={onLocked} style={{ cursor: 'pointer', border: 'none', textAlign: 'left', display: 'flex', flexDirection: 'column', gap: 8, padding: '16px 16px 14px', borderRadius: 18, background: 'var(--card2)', opacity: 0.82 }}>
+    <button
+      type="button"
+      onClick={onLocked}
+      className="vstack vstack-8"
+      style={{ cursor: 'pointer', border: 'none', textAlign: 'left', padding: '16px 16px 14px', borderRadius: 18, background: 'var(--card2)', opacity: 0.82 }}
+    >
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
         <span style={{ fontFamily: DISPLAY, fontSize: 14.5, fontWeight: 600, letterSpacing: 1, color: 'var(--ink2)' }}>{title}</span>
         <span style={{ fontSize: 10.5, color: 'var(--ghost)', border: '1px solid var(--line)', borderRadius: 999, padding: '2px 9px' }}>敬请期待</span>
@@ -112,7 +121,7 @@ export function ContactsScreen() {
       }}
     >
       <div style={{ flexShrink: 0, background: 'rgba(255,255,255,0.97)', boxShadow: '0 6px 18px var(--shadow)' }}>
-        <div style={{ maxWidth: 430, margin: '0 auto', display: 'flex', alignItems: 'center', gap: 10, padding: '14px 16px 12px' }}>
+        <div className="hstack hstack-10" style={{ maxWidth: 430, margin: '0 auto', padding: '14px 16px 12px' }}>
           <span style={{ fontFamily: DISPLAY, fontSize: 18, fontWeight: 600, letterSpacing: 2, color: 'var(--ink)' }}>通讯录</span>
           <button type="button" onClick={() => patchSettings({ theme: effTheme === 'dark' ? 'light' : 'dark' })} aria-label="切换主题" style={{ marginLeft: 'auto', cursor: 'pointer', border: 'none', background: 'transparent', width: 34, height: 34, borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--mut)' }}>
             {effTheme === 'light' ? (
@@ -125,10 +134,10 @@ export function ContactsScreen() {
       </div>
 
       <div className="hide-scrollbar" style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
-        <div style={{ maxWidth: 430, margin: '0 auto', padding: '20px 16px 24px', display: 'flex', flexDirection: 'column', gap: 26 }}>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+        <div className="vstack vstack-26" style={{ maxWidth: 430, margin: '0 auto', padding: '20px 16px 24px' }}>
+          <div className="vstack vstack-12">
             <div style={{ fontFamily: DISPLAY, fontSize: 11, letterSpacing: 3, color: 'var(--ghost)', padding: '0 2px' }}>聊天 · CHAT</div>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+            <div className="vstack vstack-10">
               <ContactRow
                 to="/chat"
                 avatar={<span style={{ fontFamily: DISPLAY, fontStyle: 'italic', fontSize: 19, color: '#F7F1EE' }}>Θ</span>}
@@ -160,22 +169,21 @@ export function ContactsScreen() {
             </div>
           </div>
 
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+          <div className="vstack vstack-12">
             <div style={{ fontFamily: DISPLAY, fontSize: 11, letterSpacing: 3, color: 'var(--ghost)', padding: '0 2px' }}>游戏室 · GAMES</div>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+            <div className="vstack vstack-10">
               <Link
                 to="/monopoly/new"
+                className="vstack vstack-9 contacts-monopoly-card"
                 style={{
-                  position: 'relative', overflow: 'hidden', textDecoration: 'none', display: 'flex',
-                  flexDirection: 'column', gap: 9, padding: '17px 16px 15px', borderRadius: 18,
-                  background: 'linear-gradient(135deg, color-mix(in srgb, var(--rose) 14%, var(--card)), var(--card))',
-                  border: '1px solid color-mix(in srgb, var(--rose) 18%, transparent)',
+                  position: 'relative', overflow: 'hidden', textDecoration: 'none',
+                  padding: '17px 16px 15px', borderRadius: 18,
                   boxShadow: '0 8px 20px var(--shadow)',
                 }}
               >
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
+                <div className="hstack hstack-12" style={{ justifyContent: 'space-between' }}>
                   <span style={{ fontFamily: DISPLAY, fontSize: 15.5, fontWeight: 600, letterSpacing: 1.2, color: 'var(--ink)' }}>葡萄海大富翁</span>
-                  <span style={{ fontSize: 10.5, color: 'var(--deep)', background: 'color-mix(in srgb, var(--rose) 12%, transparent)', borderRadius: 999, padding: '3px 9px' }}>可以玩了</span>
+                  <span className="contacts-monopoly-badge" style={{ fontSize: 10.5, color: 'var(--deep)', borderRadius: 999, padding: '3px 9px' }}>可以玩了</span>
                 </div>
                 <span style={{ fontSize: 12, color: 'var(--mut)', lineHeight: 1.65 }}>双人棋局 · 三人聊天。骰子、任务和两位房间伙伴都在等你。</span>
                 <span style={{ alignSelf: 'flex-end', color: 'var(--rose)', fontSize: 12, letterSpacing: 1 }}>进入游戏室 →</span>
