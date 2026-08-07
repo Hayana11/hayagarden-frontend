@@ -7426,6 +7426,106 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
             'b2_gate': _b2_plan.gate_reason,
         })
 
+    if _b2_plan is not None and _b2_plan.route == 'message_takeover':
+        from chat.behavior_authority_b3 import (
+            build_renderer_input,
+            invoke_renderer,
+            validate_rendered_content,
+        )
+        planner_provenance = _b2_plan.planner_provenance or {}
+        planner_decision = _b2_plan.planner_decision or {}
+        thoughts = str(planner_decision.get('intent') or '').strip()
+        try:
+            renderer_input = build_renderer_input(
+                planner_decision=planner_decision,
+                get_db_fn=get_db,
+                wake_run_id=wake_run_id,
+                decision_attempt_id=decision_attempt_id or '',
+            )
+            render_out = invoke_renderer(renderer_input=renderer_input)
+            rendered_content = validate_rendered_content(
+                str(render_out.get('text') or ''),
+            )
+        except Exception as _b3_render_exc:
+            _mark_production_attempt(
+                'failed',
+                action='message',
+                reason=f'b3_renderer:{_b3_render_exc}',
+            )
+            return jsonify({
+                'ok': True,
+                'skipped': True,
+                'reason': f'b3_renderer_failed:{_b3_render_exc}',
+                'wake_run_id': wake_run_id,
+                'b3_gate': _b2_plan.gate_reason,
+            })
+        renderer_provider = str(render_out.get('provider') or '').strip()
+        renderer_model = str(render_out.get('model_identity') or '').strip()
+        # Record the Renderer that actually produced language, not a silent provider.
+        wake_cache_info = {
+            'provider': renderer_provider or wake_provider,
+            'source': 'wake',
+            'wake_run_id': wake_run_id,
+            'b3_authority': True,
+        }
+        if renderer_model:
+            wake_cache_info['model'] = renderer_model
+        from wake.executor import execute as _wake_exec
+        try:
+            exec_out = _wake_exec(
+                'message',
+                thoughts,
+                rendered_content,
+                mode,
+                get_db_fn=get_db,
+                desire_driven=_get_desire_driven(),
+                surfaced_desire_ids=surfaced_desire_ids,
+                desire_ledger_enabled=_get_desire_ledger_enabled(),
+                cache_info=wake_cache_info,
+                wake_run_id=wake_run_id,
+                window_identity=_wake_window_identity,
+                settle_fired_drive=planner_provenance.get('primary_drive'),
+                settle_provenance_present=True,
+                settle_user_idle_hours=t2_hours,
+            )
+        except Exception as _b3_exec_exc:
+            _mark_production_attempt(
+                'failed', action='message', reason=str(_b3_exec_exc),
+            )
+            raise
+        _wake_run_id_mark(wake_run_id)
+        try:
+            from chat.planner_shadow import classify_production_outcome
+            _prod_status, _prod_reason = classify_production_outcome(exec_out)
+        except Exception:
+            _prod_status, _prod_reason = 'failed', 'classify_production_outcome_error'
+        _mark_production_attempt(
+            _prod_status, action='message', reason=_prod_reason or None,
+        )
+        # Rendered ≠ Delivered: only delivered∧settled may expose message/content.
+        # Soft-window stale/unavailable returns normally with delivered=False —
+        # treat as terminal stop; never fall through to legacy.
+        if _prod_status != 'success':
+            return jsonify({
+                'ok': True,
+                'skipped': True,
+                'reason': f'b3_executor_failed:{_prod_reason or "unknown"}',
+                'wake_run_id': wake_run_id,
+                'b3_gate': _b2_plan.gate_reason,
+                'b3_authority': True,
+            })
+        return jsonify({
+            'ok': True,
+            'action': 'message',
+            'content': rendered_content,
+            'thoughts': thoughts,
+            'provider': renderer_provider or wake_provider,
+            'model': renderer_model or None,
+            'wake_run_id': wake_run_id,
+            'b3_authority': True,
+            'b3_gate': _b2_plan.gate_reason,
+        })
+
     try:
         runner = _wake_runners.get_wake_runner(wake_provider)
         result = runner.run(_wake_runners.WakeRequest(
