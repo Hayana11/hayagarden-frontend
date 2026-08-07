@@ -24,6 +24,12 @@
   --font-serif-cn: 'Noto Serif SC', serif;
   --font-serif-display: 'Bodoni Moda', serif;
   --font-mono: 'Space Grotesk', sans-serif;
+  /* Shared nav design tokens (global bottom nav + future page tab bars) */
+  --nav-active: var(--color-primary);
+  --nav-muted: #b0a0aa;
+  --nav-label-size: 10px;
+  --nav-icon-size: 21px;
+  --global-nav-reserve-height: 96px;
 }
 
 html, body {
@@ -190,7 +196,49 @@ html, body {
 }
 
 .screen-stack {
-  padding: 26px 20px calc(96px + env(safe-area-inset-bottom, 0px));
+  padding: 26px 20px calc(var(--global-nav-reserve-height) + env(safe-area-inset-bottom, 0px));
+}
+
+/* AppFrame — unified React shell (no viewport scaling) */
+.app-frame--standard-nav {
+  min-height: 100vh;
+}
+
+.app-frame--fullscreen-embedded {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  width: 100%;
+  max-width: 480px;
+  margin-left: auto;
+  margin-right: auto;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.app-frame--fullscreen-embedded .app-frame__page {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* Minimal page-tab tokens — shared language with global nav, not wired into NAV_ITEMS */
+.page-tab-bar {
+  display: flex;
+  gap: 0;
+}
+.page-tab-item {
+  color: var(--nav-muted);
+  font-size: var(--nav-label-size);
+  letter-spacing: 0.4px;
+}
+.page-tab-item.act {
+  color: var(--nav-active);
 }
 
 #root {
@@ -733,8 +781,9 @@ button {
   .config-root *, .config-root *::before, .config-root *::after { animation: none !important; transition: none !important; }
 }
 
-/* Unified bottom nav — matches legacy static pages */
-.bnav {
+/* Canonical GlobalBottomNav scope — fixed positioning only on fixed variant */
+.bnav,
+.global-bottom-nav--fixed {
   position: fixed;
   left: 0;
   right: 0;
@@ -743,7 +792,8 @@ button {
   pointer-events: none;
 }
 
-.bnav::before {
+.bnav::before,
+.global-bottom-nav--fixed::before {
   content: '';
   position: absolute;
   left: 0;
@@ -763,7 +813,8 @@ button {
   box-shadow: 0 10px 24px rgba(183, 110, 121, 0.14);
 }
 
-.bnav-inner {
+.bnav-inner,
+.global-bottom-nav__inner {
   pointer-events: auto;
   max-width: 480px;
   margin: 0 auto;
@@ -776,7 +827,8 @@ button {
   padding: 7px 0 calc(7px + env(safe-area-inset-bottom, 0px));
 }
 
-.ni {
+.ni,
+.global-bottom-nav__item {
   flex: 1;
   display: flex;
   flex-direction: column;
@@ -785,36 +837,28 @@ button {
   border: none;
   background: none;
   cursor: pointer;
-  color: #b0a0aa;
-  font-size: 10px;
+  color: var(--nav-muted);
+  font-size: var(--nav-label-size);
   letter-spacing: 0.4px;
   font-family: inherit;
   padding: 4px 0;
   min-width: 0;
 }
 
-.ni i {
-  font-size: 21px;
+.ni i,
+.global-bottom-nav__icon {
+  font-size: var(--nav-icon-size);
   line-height: 1;
   margin-bottom: 3px; /* flex gap fallback for Chrome <84 */
 }
 
-.ni.act {
-  color: var(--color-primary);
+.ni.act,
+.global-bottom-nav__item.act {
+  color: var(--nav-active);
 }
 
-/* Chat page — inline bottom nav (matches legacy /chat) */
-.bnav-embedded {
+/* Embedded placement — flex flow only; visuals live on __inner */
+.bnav-embedded,
+.global-bottom-nav--embedded {
   flex-shrink: 0;
-  display: flex;
-  background: rgba(255, 255, 255, 0.97);
-  backdrop-filter: blur(14px);
-  -webkit-backdrop-filter: blur(14px);
-  border-top: 0.5px solid var(--line, var(--color-border));
-  padding: 8px 0 calc(8px + env(safe-area-inset-bottom, 0px));
-}
-
-.bnav-embedded .ni {
-  color: #b8b0b8;
-  padding: 2px 0;
 }

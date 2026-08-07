@@ -6,7 +6,6 @@
 // doesn't exist for the solo codex room, so this screen doesn't pretend it does.
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { BottomNav } from '../components/BottomNav';
 import {
   clearGroupRoom,
   getGroupMessages,
@@ -219,7 +218,7 @@ export function CodexChatScreen() {
 
   return (
     <div
-      className="chat-root dash-fullscreen-page"
+      className="chat-root app-frame__page"
       style={{
         ...(vars as CSSProperties),
         display: 'flex', flexDirection: 'column',
@@ -448,7 +447,6 @@ export function CodexChatScreen() {
         </div>
       )}
 
-      <BottomNav embedded />
     </div>
   );
 }

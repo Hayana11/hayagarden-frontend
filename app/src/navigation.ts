@@ -4,8 +4,8 @@
  * BrowserRouter basename `/dash` is applied by React Router — SPA `to` values
  * must be logical paths (e.g. `/contacts`), never hand-prefixed `/dash/...`.
  *
- * Scope: ROUTES / NAV_ITEMS are the single source for the Dash React SPA
- * BottomNav only. Legacy static pages (`static/read.html`, `static/board.html`)
+ * Scope: ROUTES / NAV_ITEMS / ROUTE_META are the single source for the Dash React SPA
+ * shell chrome and BottomNav. Legacy static pages (`static/read.html`, `static/board.html`)
  * still keep their own HTML bottom bars; those are not driven by this file.
  * Unify them only when those pages migrate into the SPA — do not claim that
  * editing NAV_ITEMS alone updates the whole site navigation.
@@ -33,6 +33,62 @@ export type SpaRoute = (typeof ROUTES)[keyof typeof ROUTES];
 
 /** Dynamic monopoly room path — kept explicit (param segment). */
 export const MONOPOLY_ROOM_PATH = '/monopoly/:roomId';
+
+export type RouteChrome = 'standard' | 'fullscreen';
+export type GlobalNavPlacement = 'fixed' | 'embedded';
+
+export type RouteMeta = {
+  chrome: RouteChrome;
+  globalNav: boolean;
+  globalNavPlacement?: GlobalNavPlacement;
+};
+
+/**
+ * Per-route shell chrome metadata. Keys mirror ROUTES — paths are never duplicated.
+ * Dynamic `/monopoly/:roomId` uses MONOPOLY_ROUTE_META below.
+ */
+export const ROUTE_META = {
+  dash: { chrome: 'standard', globalNav: true, globalNavPlacement: 'fixed' },
+  memory: { chrome: 'standard', globalNav: false },
+  usage: { chrome: 'standard', globalNav: true, globalNavPlacement: 'fixed' },
+  reading: { chrome: 'standard', globalNav: true, globalNavPlacement: 'fixed' },
+  ledger: { chrome: 'standard', globalNav: true, globalNavPlacement: 'fixed' },
+  period: { chrome: 'standard', globalNav: true, globalNavPlacement: 'fixed' },
+  manualContextWindow: { chrome: 'standard', globalNav: true, globalNavPlacement: 'fixed' },
+  contacts: { chrome: 'fullscreen', globalNav: true, globalNavPlacement: 'embedded' },
+  chat: { chrome: 'fullscreen', globalNav: true, globalNavPlacement: 'embedded' },
+  codexChat: { chrome: 'fullscreen', globalNav: true, globalNavPlacement: 'embedded' },
+  settings: { chrome: 'fullscreen', globalNav: false },
+  groupChat: { chrome: 'fullscreen', globalNav: false },
+  moments: { chrome: 'fullscreen', globalNav: false },
+  profile: { chrome: 'fullscreen', globalNav: false },
+  dailySoftWindow: { chrome: 'fullscreen', globalNav: false },
+} as const satisfies Record<keyof typeof ROUTES, RouteMeta>;
+
+/** Chrome for dynamic monopoly room routes (`/monopoly/:roomId`). */
+export const MONOPOLY_ROUTE_META: RouteMeta = { chrome: 'fullscreen', globalNav: false };
+
+const DEFAULT_ROUTE_META: RouteMeta = {
+  chrome: 'standard',
+  globalNav: true,
+  globalNavPlacement: 'fixed',
+};
+
+const ROUTE_PATH_TO_KEY = Object.fromEntries(
+  Object.entries(ROUTES).map(([key, path]) => [path, key]),
+) as Record<SpaRoute, keyof typeof ROUTES>;
+
+/** Resolve shell chrome for a React Router pathname (basename already stripped). */
+export function resolveRouteMeta(pathname: string): RouteMeta {
+  if (pathname.startsWith('/monopoly/')) return MONOPOLY_ROUTE_META;
+  const key = ROUTE_PATH_TO_KEY[pathname as SpaRoute];
+  if (key) return ROUTE_META[key];
+  return DEFAULT_ROUTE_META;
+}
+
+export function isFullscreenPath(pathname: string): boolean {
+  return resolveRouteMeta(pathname).chrome === 'fullscreen';
+}
 
 export type NavKind = 'spa' | 'static' | 'external';
 
@@ -65,7 +121,7 @@ export type NavItem =
 
 /**
  * Visible Dash SPA bottom-nav surface (dash / chat / read / board).
- * Add or replace SPA items here (e.g. group-chat) — BottomNav and
+ * Add or replace SPA items here (e.g. group-chat) — GlobalBottomNav and
  * resolveActiveNavKey stay generic. Does not rewrite legacy static HTML navs.
  */
 export const NAV_ITEMS = [
@@ -104,22 +160,6 @@ export const NAV_ITEMS = [
 ] as const satisfies readonly NavItem[];
 
 export type NavKey = (typeof NAV_ITEMS)[number]['key'];
-
-/** Paths that use the fullscreen shell (no AppShell chrome / bottom nav). */
-export const FULLSCREEN_PATHS: readonly string[] = [
-  ROUTES.chat,
-  ROUTES.settings,
-  ROUTES.groupChat,
-  ROUTES.moments,
-  ROUTES.contacts,
-  ROUTES.codexChat,
-  ROUTES.profile,
-  ROUTES.dailySoftWindow,
-];
-
-export function isFullscreenPath(pathname: string): boolean {
-  return FULLSCREEN_PATHS.includes(pathname) || pathname.startsWith('/monopoly/');
-}
 
 function activePathsFor(item: (typeof NAV_ITEMS)[number]): readonly string[] {
   if ('activePaths' in item && item.activePaths) return item.activePaths;
