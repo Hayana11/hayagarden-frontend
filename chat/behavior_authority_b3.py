@@ -232,6 +232,12 @@ def build_renderer_user_payload(renderer_input: RendererInput) -> str:
 
 
 def _extract_json_object(text: str) -> Optional[dict]:
+    """Parse Renderer reply as exactly one JSON object.
+
+    Allows the whole response to be bare JSON, or exactly one markdown JSON
+    fence. Rejects prefix/suffix control text (e.g. ``ACTION: diary`` before
+    a JSON object) — do not slice out an inner ``{...}``.
+    """
     raw = (text or '').strip()
     if not raw:
         return None
@@ -239,25 +245,18 @@ def _extract_json_object(text: str) -> Optional[dict]:
         obj = json.loads(raw)
         if isinstance(obj, dict):
             return obj
+        return None
     except Exception:
         pass
-    fence = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', raw, re.DOTALL)
-    if fence:
-        try:
-            obj = json.loads(fence.group(1))
-            if isinstance(obj, dict):
-                return obj
-        except Exception:
-            pass
-    start = raw.find('{')
-    end = raw.rfind('}')
-    if start >= 0 and end > start:
-        try:
-            obj = json.loads(raw[start:end + 1])
-            if isinstance(obj, dict):
-                return obj
-        except Exception:
-            pass
+    fence = re.fullmatch(r'```(?:json)?\s*(\{.*\})\s*```', raw, re.DOTALL)
+    if not fence:
+        return None
+    try:
+        obj = json.loads(fence.group(1))
+        if isinstance(obj, dict):
+            return obj
+    except Exception:
+        return None
     return None
 
 

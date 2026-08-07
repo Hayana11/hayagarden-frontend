@@ -7502,6 +7502,18 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
         _mark_production_attempt(
             _prod_status, action='message', reason=_prod_reason or None,
         )
+        # Rendered ≠ Delivered: only delivered∧settled may expose message/content.
+        # Soft-window stale/unavailable returns normally with delivered=False —
+        # treat as terminal stop; never fall through to legacy.
+        if _prod_status != 'success':
+            return jsonify({
+                'ok': True,
+                'skipped': True,
+                'reason': f'b3_executor_failed:{_prod_reason or "unknown"}',
+                'wake_run_id': wake_run_id,
+                'b3_gate': _b2_plan.gate_reason,
+                'b3_authority': True,
+            })
         return jsonify({
             'ok': True,
             'action': 'message',

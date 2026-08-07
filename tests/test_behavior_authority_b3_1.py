@@ -450,6 +450,13 @@ class BehaviorAuthorityB31Tests(unittest.TestCase):
         with self.assertRaises(ValueError):
             validate_rendered_content(str(render_out.get('text') or ''))
 
+        # Prefix control text must not be sliced away into a fake-valid JSON.
+        with self.assertRaises(ValueError):
+            validate_rendered_content(
+                'ACTION: diary\n'
+                + json.dumps({'rendered_content': '今晚想和你说句话。'}, ensure_ascii=False),
+            )
+
         conn = sqlite3.connect(self.db_path)
         before_ver = int(
             conn.execute(
@@ -567,6 +574,76 @@ class BehaviorAuthorityB31Tests(unittest.TestCase):
             0,
         )
         conn.close()
+
+        # Soft-window normal-return failure: delivered=False must not become
+        # success reality (Rendered ≠ Delivered). Gateway branch terminal-stops.
+        import chat.window_identity as wi
+        from chat.planner_shadow import classify_production_outcome
+
+        soft_identity = {
+            'chat_id': 'c1',
+            'context_id': 1,
+            'context_epoch': 1,
+            'resident_generation': 1,
+        }
+        with mock.patch.object(wi, 'soft_window_enabled', return_value=True), \
+             mock.patch.object(
+                 wi, 'gate_captured_against_conn',
+                 return_value=(wi.REASON_STALE, soft_identity, None),
+             ), mock.patch.object(wi, 'ensure_wake_window_identity_columns'):
+            soft_out = execute(
+                'message',
+                str(plan.planner_decision.get('intent') or ''),
+                rendered,
+                'normal',
+                self._get_db,
+                wake_run_id='b31-run-3-soft',
+                window_identity=soft_identity,
+                settle_fired_drive=provenance.get('primary_drive'),
+                settle_provenance_present=True,
+                settle_user_idle_hours=3.0,
+            )
+        self.assertFalse(soft_out['delivered'])
+        self.assertFalse(soft_out['settled'])
+        soft_status, soft_reason = classify_production_outcome(soft_out)
+        self.assertEqual(soft_status, 'failed')
+        self.assertTrue(soft_reason.startswith('gate_blocked:'))
+
+        conn = sqlite3.connect(self.db_path)
+        self.assertEqual(
+            conn.execute(
+                "SELECT COUNT(*) FROM chat_messages WHERE content=?",
+                (rendered,),
+            ).fetchone()[0],
+            0,
+        )
+        self.assertEqual(
+            conn.execute(
+                "SELECT COUNT(*) FROM internal_state_events "
+                "WHERE event_key='wake_outcome:b31-run-3-soft'",
+            ).fetchone()[0],
+            0,
+        )
+        conn.close()
+
+        locked = Path(ROOT, 'gateway.py').read_text(encoding='utf-8').split(
+            'def _wake_decide_locked', 1,
+        )[1].split('\ndef ', 1)[0]
+        msg_block = locked.split("route == 'message_takeover'", 1)[1]
+        self.assertIn('b3_executor_failed', msg_block)
+        self.assertIn("_prod_status != 'success'", msg_block)
+        self.assertLess(
+            msg_block.index('b3_executor_failed'),
+            msg_block.index('get_wake_runner'),
+        )
+        # Failed response must not expose rendered_content as delivered body.
+        failed_slice = msg_block.split("_prod_status != 'success'", 1)[1]
+        failed_return = failed_slice.split('return jsonify', 1)[1].split(
+            'return jsonify', 1,
+        )[0]
+        self.assertIn('skipped', failed_return)
+        self.assertNotIn('rendered_content', failed_return)
+        self.assertNotIn("'content':", failed_return)
 
 
 if __name__ == '__main__':
