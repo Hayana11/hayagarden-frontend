@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
+import { PageHeader } from '../components/PageHeader';
 import { HttpError } from '../lib/http';
 import { getGroupStatus, type AgentStatus } from '../lib/groupChat';
 import {
@@ -577,11 +578,14 @@ export function SettingsScreen() {
   return (
     <div className="config-root dash-fullscreen-page">
       <main className="config-screen hide-scrollbar">
-        <header className="config-header">
-          <button type="button" onClick={() => navigate('/chat')}>‹</button>
-          <h1>系统配置</h1>
-          <button type="button" className="config-back-chat" onClick={() => navigate('/chat')}>返回聊天</button>
-        </header>
+        <PageHeader
+          title="系统配置"
+          onBack={() => navigate('/chat')}
+          backLabel="返回聊天"
+          aside={(
+            <button type="button" className="config-back-chat" onClick={() => navigate('/chat')}>返回聊天</button>
+          )}
+        />
 
         {warning && <div className="config-warning">{warning}</div>}
 

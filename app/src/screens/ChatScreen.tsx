@@ -1305,7 +1305,7 @@ export function ChatScreen() {
       {/* ══ top nav ══ */}
       <div style={{ flexShrink: 0, position: 'relative', zIndex: 40 }}>
         <div style={{ background: 'rgba(255,255,255,0.97)', boxShadow: '0 6px 18px var(--shadow)', position: 'relative', zIndex: 3 }}>
-          <div className="hstack hstack-10" style={{ maxWidth: 430, margin: '0 auto', padding: '10px 12px 9px' }}>
+          <div className="page-header-toolbar">
             <div onClick={() => setSidebarOpen(true)} style={{ cursor: 'pointer', width: 38, height: 38, borderRadius: '50%', background: 'linear-gradient(135deg,#B76E79,#9C3B4A)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, boxShadow: '0 6px 14px var(--shadow2)' }}>
               <span style={{ fontFamily: FONT_DISPLAY, fontStyle: 'italic', fontSize: 17, color: '#F7F1EE' }}>Θ</span>
             </div>

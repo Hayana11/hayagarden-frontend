@@ -90,8 +90,10 @@ function AgentQuotaCard({ agent, now }: { agent: AgentUsageSummary; now: Date })
   return (
     <Card style={{ padding: 22, border: `1px solid ${agent.available ? `${colors.primary}20` : '#F0E7E3'}` }}>
       <div className="usage-agent-heading">
-        <span className="usage-agent-dot" style={{ backgroundColor: agent.available ? colors.primary : '#D8CCC7' }} />
-        <div>
+        <div className="usage-agent-dot-slot" aria-hidden="true">
+          <span className="usage-agent-dot" style={{ backgroundColor: agent.available ? colors.primary : '#D8CCC7' }} />
+        </div>
+        <div className="usage-agent-title-block">
           <strong>{agent.name} 额度</strong>
           <small>{isClaude ? '官方订阅 · Claude Code' : '官方订阅 · GPT / Codex'}</small>
         </div>
