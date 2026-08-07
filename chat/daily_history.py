@@ -168,13 +168,17 @@ def build_daily_window_context(
     inject_handoff: bool = True,
     inject_carryover: bool = True,
     db_path: Optional[str] = None,
+    history_token_budget: Optional[int] = None,
 ) -> dict[str, Any]:
     """Assemble provider context layers for one daily epoch turn.
 
     Order: static → handoff → carryover → state → current-day history.
 
     Resident history:
-    - cold_like (cold or respawn): replay full epoch history (excluding current user)
+    - cold_like (cold or respawn): fetch full epoch history (excluding current
+      user), then select a newest complete-round suffix under
+      ``HISTORY_TOKEN_BUDGET`` / ``history_token_budget`` for the resident
+      bootstrap. DB history and membership are never mutated.
     - hot: only messages after resident cursor; fail closed if cursor missing
 
     Does not persist resident cursor — caller must invoke
@@ -228,6 +232,14 @@ def build_daily_window_context(
         context_id=context_id,
         context_epoch=int(ctx.get('context_epoch') or 0),
     )
+
+    cold_history_stats: dict[str, Any] = {}
+    if cold_like:
+        from chat.daily_cold_history import select_newest_complete_rounds_under_budget
+        current_day_history, cold_history_stats = select_newest_complete_rounds_under_budget(
+            current_day_history,
+            history_token_budget=history_token_budget,
+        )
 
     if current_day_history:
         replayed_through_message_id = int(current_day_history[-1]['message_id'])
@@ -297,6 +309,8 @@ def build_daily_window_context(
         'daily_summary_injected': False,
         'weekly_summary_injected': False,
     }
+    if cold_history_stats:
+        manifest.update(cold_history_stats)
 
     return {
         'static': static_system,

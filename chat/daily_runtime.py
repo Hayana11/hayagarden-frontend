@@ -925,6 +925,7 @@ def _assemble_plan(
     user_created_at: Optional[datetime.datetime] = None,
     origin_local_day: str = '',
     turn_started_at: Optional[datetime.datetime] = None,
+    history_token_budget: Optional[int] = None,
 ) -> DailyTurnPlan:
     context_id = int(refreshed['id'])
     context_epoch = int(refreshed['context_epoch'])
@@ -955,6 +956,7 @@ def _assemble_plan(
         inject_handoff=cold_like,
         inject_carryover=cold_like,
         db_path=db_path,
+        history_token_budget=history_token_budget,
     )
     manifest = _build_manifest_base(
         plan_fields={
@@ -1521,6 +1523,150 @@ def finalize_transcript_mapping_after_success(
     return dict(plan.manifest)
 
 
+def _rebuild_daily_assembly_with_history_budget(
+    plan: DailyTurnPlan,
+    *,
+    static_system: str,
+    history_token_budget: int,
+    resident: Optional[Any],
+    is_cold: bool,
+    is_respawn: bool,
+) -> dict[str, Any]:
+    """Re-run cold assembly with a smaller history budget (Fence B rebuild)."""
+    refreshed = dc.get_daily_context_by_id(plan.context_id, db_path=plan.db_path)
+    if not refreshed:
+        raise DailyRuntimeError(
+            'daily context missing during cold rebuild',
+            error_code='daily_context_missing',
+        )
+    last_state: Optional[dict[str, str]] = None
+    cold_like = bool(is_cold or is_respawn)
+    assembly = dh.build_daily_window_context(
+        chat_id=plan.chat_id,
+        daily_context=refreshed,
+        current_user_message_id=int(plan.user_message_id),
+        static_system=static_system,
+        is_cold=is_cold,
+        is_respawn=is_respawn,
+        last_state_snapshot=last_state,
+        inject_handoff=cold_like,
+        inject_carryover=cold_like,
+        db_path=plan.db_path,
+        history_token_budget=history_token_budget,
+    )
+    return assembly
+
+
+def _apply_daily_cold_prompt_fence(
+    plan: DailyTurnPlan,
+    *,
+    resident: Any,
+    static_system: str,
+    content: str,
+    is_cold: bool,
+    is_respawn: bool,
+) -> str:
+    """Whole-prompt Fence B/C for Daily cold/respawn — reuses #218 helpers."""
+    from chat.cold_bootstrap_budget import (
+        ColdBootstrapOverflow,
+        NoBenefitRespawnError,
+        cold_prompt_target,
+        effective_history_budget,
+        estimate_text_tokens,
+        estimate_whole_prompt,
+        should_refuse_no_benefit_hard_context_respawn,
+    )
+    from chat.context_lean import cc_history_token_budget
+
+    cold_prompt_target_val = cold_prompt_target()
+    cold_history_budget_val = int(
+        (plan.assembly.get('manifest') or {}).get('cold_history_budget')
+        or cc_history_token_budget()
+    )
+    cold_history_trimmed_flag = bool(
+        (plan.assembly.get('manifest') or {}).get('cold_history_trimmed')
+    )
+    cold_prompt_estimate = estimate_whole_prompt(static_system, content)
+
+    if cold_prompt_estimate > cold_prompt_target_val:
+        history = plan.assembly.get('current_day_history') or []
+        history_tokens_est = estimate_text_tokens(_format_history_messages(history))
+        non_history_est = max(0, cold_prompt_estimate - history_tokens_est)
+        new_budget = effective_history_budget(
+            default_history_budget=cold_history_budget_val,
+            non_history_estimate=non_history_est,
+            cold_target=cold_prompt_target_val,
+        )
+        rebuilt = _rebuild_daily_assembly_with_history_budget(
+            plan,
+            static_system=static_system,
+            history_token_budget=new_budget,
+            resident=resident,
+            is_cold=is_cold,
+            is_respawn=is_respawn,
+        )
+        plan.assembly = rebuilt
+        content = format_resident_turn_content(
+            assembly=plan.assembly,
+            user_content=plan.user_content,
+            is_cold=is_cold,
+            is_respawn=is_respawn,
+        )
+        cold_prompt_estimate = estimate_whole_prompt(static_system, content)
+        cold_history_budget_val = new_budget
+        cold_history_trimmed_flag = bool(
+            (plan.assembly.get('manifest') or {}).get('cold_history_trimmed')
+        )
+        plan.manifest.update(dict(plan.assembly.get('manifest') or {}))
+
+    if cold_prompt_estimate > cold_prompt_target_val:
+        plan.manifest['cold_budget_overflow'] = True
+        plan.manifest['cold_prompt_estimate'] = int(cold_prompt_estimate)
+        plan.manifest['cold_prompt_target'] = int(cold_prompt_target_val)
+        plan.manifest['cold_history_budget'] = int(cold_history_budget_val)
+        plan.manifest['cold_budget_mode'] = 'token_budget'
+        raise ColdBootstrapOverflow(
+            estimate=cold_prompt_estimate,
+            target=cold_prompt_target_val,
+            history_budget=cold_history_budget_val,
+            cold_history_trimmed=cold_history_trimmed_flag,
+        )
+
+    pending_respawn_reason = getattr(resident, 'pending_respawn_reason', None)
+    if pending_respawn_reason == 'hard_context':
+        pre_spawn_turns = getattr(resident, 'hard_context_pre_spawn_turns', None)
+        if should_refuse_no_benefit_hard_context_respawn(
+            pre_spawn_turns=pre_spawn_turns,
+            cold_prompt_estimate=cold_prompt_estimate,
+            last_cold_bootstrap_estimate=int(
+                getattr(resident, 'last_cold_bootstrap_estimate', 0) or 0
+            ),
+            last_cold_bootstrap_generation=int(
+                getattr(resident, 'last_cold_bootstrap_generation', 0) or 0
+            ),
+            current_generation=int(getattr(resident, 'generation', 0) or 0),
+        ):
+            baseline = int(getattr(resident, 'last_cold_bootstrap_estimate', 0) or 0)
+            raise NoBenefitRespawnError(
+                new_estimate=cold_prompt_estimate, baseline=baseline,
+            )
+        clear_storm = getattr(resident, 'clear_hard_context_pre_spawn_turns', None)
+        if callable(clear_storm):
+            clear_storm()
+
+    note_cold_estimate = getattr(resident, 'note_cold_bootstrap_estimate', None)
+    if callable(note_cold_estimate):
+        note_cold_estimate(cold_prompt_estimate)
+
+    plan.manifest['cold_prompt_estimate'] = int(cold_prompt_estimate)
+    plan.manifest['cold_prompt_target'] = int(cold_prompt_target_val)
+    plan.manifest['cold_history_budget'] = int(cold_history_budget_val)
+    plan.manifest['cold_history_trimmed'] = bool(cold_history_trimmed_flag)
+    plan.manifest['cold_budget_mode'] = 'token_budget'
+    plan.manifest['cold_budget_overflow'] = False
+    return content
+
+
 def ensure_resident_and_stream(
     plan: DailyTurnPlan,
     *,
@@ -1618,6 +1764,15 @@ def ensure_resident_and_stream(
             is_cold=plan.is_cold or actual_cold,
             is_respawn=plan.is_respawn,
         )
+        if plan.is_cold or plan.is_respawn or actual_cold:
+            content = _apply_daily_cold_prompt_fence(
+                plan,
+                resident=resident,
+                static_system=static_system,
+                content=content,
+                is_cold=plan.is_cold or actual_cold,
+                is_respawn=plan.is_respawn,
+            )
         db_cursor = dc.get_resident_history_cursor(
             plan.context_id, plan.resident_generation, db_path=plan.db_path,
         )
