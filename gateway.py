@@ -5209,6 +5209,7 @@ def _stream_cc_daily_soft_window(_turn_data, _uc):
     from chat import daily_context as _daily_ctx
     from chat import daily_runtime as _daily_rt
     from chat import context_window as _cw
+    from chat import cold_bootstrap_budget as _cbb
     from chat.system_builder import build_cc_daily_static_parts
 
     # First-turn READY bypass — before ordinary prepare_daily_turn.
@@ -5548,6 +5549,32 @@ def _stream_cc_daily_soft_window(_turn_data, _uc):
         turn_terminal = True
         yield 'data: ' + json.dumps({
             't': 'err', 'd': str(exc), 'code': 'epoch_mismatch', 'retryable': False,
+        }) + SSE_END
+        yield 'data: ' + json.dumps({'t': 'done', 'ok': False}) + SSE_END
+        return None
+    except (_cbb.ColdBootstrapOverflow, _cbb.NoBenefitRespawnError) as exc:
+        if _daily_plan:
+            _daily_rt.abort_daily_turn(
+                _daily_plan,
+                error_code=getattr(exc, 'respawn_reason', None) or type(exc).__name__,
+                resident=_CC_RESIDENT,
+                respawn=False,
+            )
+        turn_terminal = True
+        _usage = getattr(exc, 'usage', None) or {}
+        if isinstance(_usage, dict) and _usage.get('cold_budget_overflow') is not None:
+            yield 'data: ' + json.dumps({'t': 'usage', **{
+                k: _usage.get(k) for k in (
+                    'respawn_reason', 'cold_budget_overflow', 'cold_prompt_estimate',
+                    'cold_prompt_target', 'cold_history_budget', 'cold_history_trimmed',
+                    'cold_budget_mode',
+                ) if k in _usage
+            }}) + SSE_END
+        yield 'data: ' + json.dumps({
+            't': 'err',
+            'd': str(exc),
+            'code': getattr(exc, 'respawn_reason', None) or type(exc).__name__,
+            'retryable': False,
         }) + SSE_END
         yield 'data: ' + json.dumps({'t': 'done', 'ok': False}) + SSE_END
         return None
