@@ -1233,7 +1233,7 @@ export function MomentsScreen() {
                     {data?.mood ? (
                       <>
                         <div style={{ position: 'relative', width: 74, height: 74, flexShrink: 0 }}>
-                          <div style={{ position: 'absolute', inset: 4, borderRadius: '50%', background: `radial-gradient(circle at 32% 28%, rgba(255,242,238,0.92), ${moodColor} 74%)`, boxShadow: 'inset -8px -10px 18px rgba(0,0,0,0.16),inset 6px 8px 16px rgba(255,255,255,0.4)' }} />
+                          <div style={{ position: 'absolute', top: 4, right: 4, bottom: 4, left: 4, borderRadius: '50%', background: `radial-gradient(circle at 32% 28%, rgba(255,242,238,0.92), ${moodColor} 74%)`, boxShadow: 'inset -8px -10px 18px rgba(0,0,0,0.16),inset 6px 8px 16px rgba(255,255,255,0.4)' }} />
                         </div>
                         <div className="vstack vstack-7" style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column' }}>
                           <span style={{ fontSize: 18, fontWeight: 600, letterSpacing: 2, color: 'var(--ink)' }}>{data.mood.moodWord}</span>
@@ -1295,7 +1295,7 @@ export function MomentsScreen() {
                     {(data?.emotionMemories || []).length === 0 ? (
                       <div style={{ padding: '20px 4px', fontSize: 12.5, color: 'var(--faint)', lineHeight: 1.8 }}>还没有关联出情绪读数的记忆。</div>
                     ) : (
-                      <div style={{ position: 'relative', aspectRatio: '1/1', background: 'var(--card2)', borderRadius: 16, marginTop: 14 }}>
+                      <div className="moments-va-plot">
                         <div style={{ position: 'absolute', left: 0, right: 0, top: '50%', height: 1, background: 'var(--line)' }} />
                         <div style={{ position: 'absolute', top: 0, bottom: 0, left: '50%', width: 1, background: 'var(--line)' }} />
                         <span style={{ position: 'absolute', bottom: 10, left: 12, fontSize: 10.5, color: 'var(--ghost)' }}>← 不愉悦</span>
