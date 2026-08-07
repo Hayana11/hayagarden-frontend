@@ -17,6 +17,7 @@
     "test:legacy-transcript-window": "vite-node scripts/test-legacy-transcript-window.mjs",
     "test:react-shell-architecture": "vite-node scripts/test-react-shell-architecture.mjs",
     "test:typography-semantics": "vite-node scripts/test-typography-semantics.mjs",
+    "test:usage-chrome78-runtime": "vite-node scripts/test-usage-chrome78-runtime.mjs",
     "test:rewrite-finalize-retry": "vite-node scripts/test-rewrite-finalize-retry.mjs",
     "test:ledger": "vite-node scripts/test-ledger-integrity.mjs",
     "test:ledger:e2e": "playwright test e2e/ledger-integrity.spec.ts e2e/dash-ledger.spec.ts"

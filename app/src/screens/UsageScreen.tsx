@@ -5,6 +5,7 @@ import { UsageWindowBar } from '../components/UsageWindowBar';
 import { useUsage } from '../hooks/useUsage';
 import { getDailyUsage, type DailyUsage, type DailyUsageResult } from '../lib/systemConfig';
 import { formatResetHint, formatTokens } from '../lib/formatDisplay';
+import { lastItem } from '../lib/lastItem';
 import type { AgentUsageSummary } from '../types';
 
 const AGENT_COLORS = {
@@ -157,7 +158,7 @@ export function UsageScreen() {
       .then((result) => {
         if (!alive) return;
         setDailyUsage(result);
-        setSelectedDay((current) => current || result.days.at(-1)?.date || '');
+        setSelectedDay((current) => current || lastItem(result.days)?.date || '');
       })
       .catch(() => {
         if (alive) setDailyUsage((current) => ({ ...current, days: [] }));
@@ -168,7 +169,7 @@ export function UsageScreen() {
   const daily = dailyUsage.days;
   const dailyMode = dailyUsage.mode;
   const shownDaily = useMemo(() => range === 7 ? daily.slice(-7) : daily, [daily, range]);
-  const selectedUsage = shownDaily.find((item) => item.date === selectedDay) || shownDaily.at(-1);
+  const selectedUsage = shownDaily.find((item) => item.date === selectedDay) || lastItem(shownDaily);
   const maxDaily = Math.max(1, ...shownDaily.map((item) => dailyMetric(item, dailyMode)));
   const totalRequests = shownDaily.reduce((sum, item) => sum + item.count, 0);
   const relays = uniqueRelays(dailyUsage.relays);
@@ -217,8 +218,8 @@ export function UsageScreen() {
       <Card style={{ padding: 22 }}>
         <div className="config-card-heading"><h2>用量日历</h2><span>按天 · 对话请求</span></div>
         <div className="config-segmented">
-          <button type="button" className={range === 7 ? 'active' : ''} onClick={() => { setRange(7); setSelectedDay(daily.at(-1)?.date || ''); }}>一周</button>
-          <button type="button" className={range === 30 ? 'active' : ''} onClick={() => { setRange(30); setSelectedDay(daily.at(-1)?.date || ''); }}>一个月</button>
+          <button type="button" className={range === 7 ? 'active' : ''} onClick={() => { setRange(7); setSelectedDay(lastItem(daily)?.date || ''); }}>一周</button>
+          <button type="button" className={range === 30 ? 'active' : ''} onClick={() => { setRange(30); setSelectedDay(lastItem(daily)?.date || ''); }}>一个月</button>
         </div>
         {range === 7 ? (
           <div className="config-week-bars">
