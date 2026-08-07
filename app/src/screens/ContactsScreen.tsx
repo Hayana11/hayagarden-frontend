@@ -120,17 +120,15 @@ export function ContactsScreen() {
       }}
     >
       <div style={{ flexShrink: 0, background: 'rgba(255,255,255,0.97)', boxShadow: '0 6px 18px var(--shadow)' }}>
-        <div className="page-header-toolbar">
-          <h1 className="page-header-toolbar__title">通讯录</h1>
-          <div className="page-header-toolbar__aside">
-          <button type="button" onClick={() => patchSettings({ theme: effTheme === 'dark' ? 'light' : 'dark' })} aria-label="切换主题" style={{ cursor: 'pointer', border: 'none', background: 'transparent', width: 34, height: 34, borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--mut)' }}>
+        <div className="hstack hstack-10" style={{ maxWidth: 430, margin: '0 auto', padding: '14px 16px 12px' }}>
+          <span style={{ fontFamily: FONT_CN, fontSize: 18, fontWeight: 600, letterSpacing: 2, color: 'var(--ink)' }}>通讯录</span>
+          <button type="button" onClick={() => patchSettings({ theme: effTheme === 'dark' ? 'light' : 'dark' })} aria-label="切换主题" style={{ marginLeft: 'auto', cursor: 'pointer', border: 'none', background: 'transparent', width: 34, height: 34, borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--mut)' }}>
             {effTheme === 'light' ? (
               <svg viewBox="0 0 24 24" width={16} height={16} fill="none" stroke="currentColor" strokeWidth={1.6} strokeLinecap="round" strokeLinejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" /></svg>
             ) : (
               <svg viewBox="0 0 24 24" width={16} height={16} fill="none" stroke="currentColor" strokeWidth={1.6} strokeLinecap="round" strokeLinejoin="round"><circle cx={12} cy={12} r={4} /><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41" /></svg>
             )}
           </button>
-          </div>
         </div>
       </div>
 
