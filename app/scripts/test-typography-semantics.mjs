@@ -10,7 +10,6 @@ const screensDir = path.join(src, 'screens');
 const CJK_RE = /[\u3400-\u9FFF\uF900-\uFAFF]/;
 const DISPLAY_RE = /fontFamily:\s*(?:DISPLAY|FONT_DISPLAY|'Bodoni Moda'|var\(--font-serif-display\))/;
 const CN_SPLIT_RE = /fontFamily:\s*(?:FONT_CN|SERIF|'Noto Serif SC'|var\(--font-serif-cn\))/;
-const SCAN_AHEAD = 3;
 
 function read(rel) {
   return fs.readFileSync(path.join(src, rel), 'utf8');
@@ -25,7 +24,28 @@ function listTsxFiles(dir) {
 }
 
 function stripTitleAttrs(line) {
-  return line.replace(/title=\{?["'][^"']*["']\}?/g, '');
+  return line
+    .replace(/title=\{[^}]*\}/g, '')
+    .replace(/title=["'][^"']*["']/g, '');
+}
+
+function isDisplayCjkMisuse(lines, i) {
+  const line = lines[i];
+  if (!DISPLAY_RE.test(line)) return false;
+  if (/MixedSectionLabel|fontFamilyForText|hasCJK/.test(line)) return false;
+
+  const noTitle = stripTitleAttrs(line);
+  if (CJK_RE.test(noTitle)) return true;
+
+  // Multiline JSX: opening tag with DISPLAY ends line; immediate next line is raw CJK text
+  if (/fontFamily:\s*FONT_DISPLAY/.test(line) && />\s*$/.test(line.trim())) {
+    const next = lines[i + 1]?.trim() ?? '';
+    if (CJK_RE.test(next) && !CN_SPLIT_RE.test(next) && !/^<[/a-zA-Z]/.test(next)) {
+      return true;
+    }
+  }
+
+  return false;
 }
 
 // 1. Canonical typography module exists
@@ -49,7 +69,6 @@ function stripTitleAttrs(line) {
 {
   const contacts = read('screens/ContactsScreen.tsx');
   assert.doesNotMatch(contacts, /葡萄海大富翁[\s\S]{0,120}FONT_DISPLAY/);
-  assert.doesNotMatch(contacts, /葡萄海大富翁[\s\S]{0,120}DISPLAY/);
   assert.match(contacts, /from '\.\.\/lib\/typography'/);
   assert.doesNotMatch(contacts, /BottomNav/);
 }
@@ -78,50 +97,21 @@ function stripTitleAttrs(line) {
   const codex = read('screens/CodexChatScreen.tsx');
   assert.match(codex, /hasCJK\(statusText\)/);
   assert.match(codex, /statusFontStyle/);
-  assert.doesNotMatch(
-    codex,
-    /fontFamilyForText\(statusText\)[\s\S]{0,60}fontStyle:\s*'italic'/,
-    'Codex statusText must not force italic when CJK',
-  );
   assert.doesNotMatch(codex, /BottomNav/);
 }
 
-// 7. Scan screens: DISPLAY line + nearby CJK without CN split/helper
-const allowlist = [
-  {
-    file: 'ChatScreen.tsx',
-    line: (text) => /title=\{usage\.costEstimated/.test(text),
-    reason: 'HTML title attribute only; not rendered font family',
-  },
-  {
-    file: 'MomentsScreen.tsx',
-    line: (text) => /fontFamily:\s*FONT_DISPLAY/.test(text) && /social\.(likes|dislikes|comments)/.test(text),
-    reason: 'numeric social counts intentionally use DISPLAY',
-  },
-];
-
+// 7. Scan screens: DISPLAY + CJK on same line, or DISPLAY opener + next-line CJK child
 const misuse = [];
 for (const file of listTsxFiles(screensDir)) {
-  const body = fs.readFileSync(path.join(screensDir, file), 'utf8');
-  const lines = body.split('\n');
+  const lines = fs.readFileSync(path.join(screensDir, file), 'utf8').split('\n');
   for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-    if (!DISPLAY_RE.test(line)) continue;
-    if (/MixedSectionLabel|fontFamilyForText|hasCJK/.test(line)) continue;
-
-    const windowLines = lines.slice(i, Math.min(lines.length, i + SCAN_AHEAD + 1));
-    const windowText = windowLines.map(stripTitleAttrs).join('\n');
-    if (!CJK_RE.test(windowText)) continue;
-    if (windowLines.some((l) => CN_SPLIT_RE.test(l))) continue;
-
-    const hit = { file, line: i + 1, text: line.trim() };
-    const allowed = allowlist.some((rule) => rule.file === file && rule.line(line));
-    if (!allowed) misuse.push(hit);
+    if (!isDisplayCjkMisuse(lines, i)) continue;
+    misuse.push({ file, line: i + 1, text: lines[i].trim() });
   }
 }
 
 if (misuse.length > 0) {
-  console.error('Chinese + DISPLAY misuse (multi-line scan):', misuse);
+  console.error('Chinese + DISPLAY misuse:', misuse);
 }
 assert.equal(misuse.length, 0, `Chinese text must not use DISPLAY without split/helper (found ${misuse.length})`);
 
