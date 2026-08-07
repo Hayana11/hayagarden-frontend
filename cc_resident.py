@@ -299,6 +299,15 @@ class ResidentSession:
         # gunicorn worker lazily invalidates after a rewrite, even when the
         # app→gateway bridge only eagers one worker.
         self._history_rewrite_epoch = ''
+        # No-benefit respawn loop breaker (P0 cold-storm fix, Fence C).
+        # Deliberately *not* reset by ``_reset_session_meta`` / ``_spawn`` —
+        # the estimate/generation pair must survive across the respawn it gates.
+        self._last_cold_bootstrap_estimate = 0
+        self._last_cold_bootstrap_generation = 0
+        # Captured in ``_decide_respawn_reason`` when returning ``hard_context``,
+        # *before* ``_spawn`` resets ``_turns_since_respawn``. Used to distinguish
+        # immediate post-cold storms from genuine hot growth respawns.
+        self._hard_context_pre_spawn_turns = None
         self._reset_session_meta(respawn_reason=None)
 
     def _reset_session_meta(self, *, respawn_reason):
@@ -357,10 +366,13 @@ class ResidentSession:
         # Bind epoch only after a successful spawn. A failed Popen must leave
         # the prior (stale) binding so hot reuse stays forbidden.
         try:
-            from chat.cc_history_rewrite import current_history_rewrite_epoch
-            bound_epoch = current_history_rewrite_epoch()
+            from chat.cc_history_rewrite import (
+                current_history_rewrite_epoch,
+                sanitize_bound_epoch,
+            )
+            bound_epoch = sanitize_bound_epoch(current_history_rewrite_epoch())
         except Exception:
-            bound_epoch = '__unreadable__'
+            bound_epoch = ''
         self._history_rewrite_epoch = bound_epoch
         self._system_text = system_text
         self._model_identity = model_identity
@@ -417,11 +429,17 @@ class ResidentSession:
         # Durable rewrite epoch: any resident spawned before the latest
         # committed rewrite loses hot-reuse on every worker, lazily.
         try:
-            from chat.cc_history_rewrite import current_history_rewrite_epoch
+            from chat.cc_history_rewrite import (
+                current_history_rewrite_epoch,
+                is_unreadable_epoch,
+                sanitize_bound_epoch,
+            )
             durable_epoch = current_history_rewrite_epoch()
         except Exception:
-            durable_epoch = '__unreadable__'
-        bound_epoch = getattr(self, '_history_rewrite_epoch', None) or ''
+            raise ResidentError('durable_history_epoch_unreadable')
+        if is_unreadable_epoch(durable_epoch):
+            raise ResidentError('durable_history_epoch_unreadable')
+        bound_epoch = sanitize_bound_epoch(getattr(self, '_history_rewrite_epoch', None) or '')
         if durable_epoch and durable_epoch != bound_epoch:
             return 'history_rewrite'
         if not self._alive():
@@ -445,6 +463,7 @@ class ResidentSession:
         min_between = _cfg_int('CC_MIN_TURNS_BETWEEN_RESPAWNS', 5)
 
         if self._last_round_context >= hard:
+            self._hard_context_pre_spawn_turns = int(self._turns_since_respawn or 0)
             return 'hard_context'
         if self._resident_turn_count >= max_turns:
             return 'turn_limit'
@@ -528,10 +547,15 @@ class ResidentSession:
                 self._proc = None
                 raise ResidentError('staged_spawn_failed:%s' % exc) from exc
             try:
-                from chat.cc_history_rewrite import current_history_rewrite_epoch
-                self._history_rewrite_epoch = current_history_rewrite_epoch()
+                from chat.cc_history_rewrite import (
+                    current_history_rewrite_epoch,
+                    sanitize_bound_epoch,
+                )
+                self._history_rewrite_epoch = sanitize_bound_epoch(
+                    current_history_rewrite_epoch(),
+                )
             except Exception:
-                self._history_rewrite_epoch = '__unreadable__'
+                self._history_rewrite_epoch = ''
             self._system_text = system_text
             self._model_identity = model_identity
             self._session_id = resume_session_id
@@ -1198,6 +1222,47 @@ class ResidentSession:
     @property
     def pending_respawn_reason(self):
         return self._pending_respawn_reason
+
+    @property
+    def last_round_context(self):
+        return int(self._last_round_context or 0)
+
+    @property
+    def turns_since_respawn(self):
+        return int(self._turns_since_respawn or 0)
+
+    @property
+    def hard_context_pre_spawn_turns(self):
+        """Turns since respawn when ``hard_context`` was last decided, or None."""
+        val = self._hard_context_pre_spawn_turns
+        return None if val is None else int(val)
+
+    @property
+    def last_cold_bootstrap_estimate(self):
+        """Whole-prompt estimate of the most recent cold bootstrap sent.
+
+        Used only to gate an *immediate* post-cold ``hard_context`` storm
+        (Fence C) when paired with ``last_cold_bootstrap_generation``.
+        """
+        return self._last_cold_bootstrap_estimate
+
+    @property
+    def last_cold_bootstrap_generation(self):
+        """Resident generation that produced ``last_cold_bootstrap_estimate``."""
+        return int(self._last_cold_bootstrap_generation or 0)
+
+    def note_cold_bootstrap_estimate(self, estimate):
+        """Record the whole-prompt estimate for the cold bootstrap about to
+        be sent. Called before ``send_turn`` so a failure to send still
+        updates the baseline (the content was decided regardless)."""
+        try:
+            self._last_cold_bootstrap_estimate = max(0, int(estimate or 0))
+            self._last_cold_bootstrap_generation = int(self._generation or 0)
+        except (TypeError, ValueError):
+            pass
+
+    def clear_hard_context_pre_spawn_turns(self):
+        self._hard_context_pre_spawn_turns = None
 
     @property
     def tool_profile(self):

@@ -993,7 +993,16 @@ def _read_upload_file_body(static_dir, file_url):
     return None
 
 
-def build_messages(*, resident_file_hashes=None, history_stats_out=None, for_cc=False, rewrite_id=None):
+def build_messages(
+    *,
+    resident_file_hashes=None,
+    history_stats_out=None,
+    for_cc=False,
+    rewrite_id=None,
+    cold_safe=False,
+    history_token_budget_override=None,
+    commit_history_boundary=True,
+):
     from chat.context_lean import (
         lean_file_dedup_enabled,
         lean_history_enabled,
@@ -1064,7 +1073,12 @@ def build_messages(*, resident_file_hashes=None, history_stats_out=None, for_cc=
 
     lean_history = lean_history_enabled()
     legacy_limit = legacy_block_limit(_available)
-    if not lean_history:
+    # Cold safety must not depend on the Context Lean rollout flag: a CC cold
+    # bootstrap always gets token-budget history assembly, even when
+    # CONTEXT_LEAN_HISTORY_ENABLED is off. Hot turns and non-CC callers keep
+    # the existing lean-gated behavior unchanged.
+    _force_cc_token_budget = bool(for_cc and cold_safe)
+    if not lean_history and not _force_cc_token_budget:
         rows = _fetch_history_for_prompt(legacy_limit)
         tool_fn = _format_tool_history if lean_tool_budget_enabled() else _format_tool_history_legacy
         msgs, legacy_stats = assemble_legacy_history(
@@ -1110,7 +1124,12 @@ def build_messages(*, resident_file_hashes=None, history_stats_out=None, for_cc=
             msgs.insert(0, {'role': 'user', 'content': '...'})
         return msgs
 
-    plan = resolve_fetch_plan(available_count=_available, for_cc=for_cc)
+    plan = resolve_fetch_plan(
+        available_count=_available,
+        for_cc=for_cc,
+        history_mode='cc_token_budget' if _force_cc_token_budget else None,
+        history_token_budget=history_token_budget_override,
+    )
     rows = _fetch_history_for_prompt(
         plan['fetch_limit'],
         min_id=plan.get('relay_head_id') or 0,
@@ -1131,10 +1150,11 @@ def build_messages(*, resident_file_hashes=None, history_stats_out=None, for_cc=
         resident_file_hashes=file_hashes,
         apply_tool_budget=lean_tool_budget_enabled(),
     )
-    persist_history_boundary(
-        trimmed_up_to_id=stats.trimmed_up_to_id,
-        oldest_retained_message_id=stats.oldest_retained_message_id,
-    )
+    if commit_history_boundary:
+        persist_history_boundary(
+            trimmed_up_to_id=stats.trimmed_up_to_id,
+            oldest_retained_message_id=stats.oldest_retained_message_id,
+        )
     if plan['mode'] == 'relay_hysteresis' and stats.conversation_content_trimmed and stats.trimmed_up_to_id > 0:
         set_relay_history_trimmed_up_to_id(stats.trimmed_up_to_id)
     trimmed_up_to = effective_trimmed_up_to_id(
@@ -1164,7 +1184,11 @@ def build_messages(*, resident_file_hashes=None, history_stats_out=None, for_cc=
             'rolling_summary_coverage_gap': False,
         })
 
-    budget = plan['history_token_budget'] or plan['relay_low_water']
+    budget = plan['history_token_budget']
+    if plan['mode'] == 'cc_token_budget' and (budget is None or budget <= 0):
+        budget = 1
+    elif not budget:
+        budget = plan['relay_low_water']
     # Staged rewrite: skip tip-based rolling summary (may include post-fork world).
     inject_summary = (not _rewrite_id) and should_inject_rolling_summary(
         conversation_content_trimmed=stats.conversation_content_trimmed,
@@ -3617,7 +3641,10 @@ def _format_group_chat_recap(rows, *, cold=False):
     return head + NL.join(lines) + NL + NL
 
 
-def _cc_resident_stream_gen(messages, *, user_turn=True, history_stats=None, is_cold=None):
+def _cc_resident_stream_gen(
+    messages, *, user_turn=True, history_stats=None, is_cold=None,
+    rebuild_messages_fn=None, pending_respawn_reason=None,
+):
     """常驻 CC：静态 system 只在 spawn 时贴墙；热轮只发差量。
 
     构建顺序：
@@ -3625,6 +3652,20 @@ def _cc_resident_stream_gen(messages, *, user_turn=True, history_stats=None, is_
       2) 得知 is_cold 后，每轮构建 state / one-shot
       3) 仅 is_cold 时构建 cold_once
     严禁把 TreeGPT / api_relay 的缓存策略混进这里。
+
+    Cold-only P0 fences (rewrite cold-storm fix):
+      Fence A — history already assembled via token-budget mode when the
+      caller passed ``cold_safe=True`` to ``build_messages`` (independent of
+      the Context Lean rollout flag).
+      Fence B — whole-prompt preflight below: estimate(full_system) +
+      estimate(actual cold content) must fit ``cold_prompt_target()`` before
+      any stdin write. At most one deterministic rebuild (smaller history
+      budget via ``rebuild_messages_fn``) is attempted; otherwise fail closed
+      with ``ColdBootstrapOverflow`` — no stdin write, no provider call.
+      Fence C — an *immediate* post-cold ``hard_context`` (storm window) must
+      prove its estimate shrank vs the preceding cold bootstrap; genuine hot
+      growth respawns are never blocked here. Fail closed with
+      ``NoBenefitRespawnError`` only for identical post-cold storms.
     """
     from chat.system_builder import (
         build_cc_cold_once,
@@ -3728,6 +3769,13 @@ def _cc_resident_stream_gen(messages, *, user_turn=True, history_stats=None, is_
     group_text = ''
     history_bootstrap_text = ''
     recall_text = recall_blk.strip() if recall_blk else ''
+    # Cold budget observability (None on hot turns — never dilute averages).
+    cold_prompt_estimate = None
+    cold_prompt_target_val = None
+    cold_history_budget_val = None
+    cold_history_trimmed_flag = None
+    cold_budget_mode_val = None
+    cold_budget_overflow_flag = None
     if is_cold:
         cold_text = format_cold_once(cold_once)
         if cold_text:
@@ -3746,16 +3794,112 @@ def _cc_resident_stream_gen(messages, *, user_turn=True, history_stats=None, is_
         if one_shot_text:
             pieces.append(one_shot_text)
         prefix = ('\n\n'.join(p for p in pieces if p) + '\n\n') if pieces else ''
-        # 冷启动全程只在这里调用一次 messages_to_text（可能含图片 Relay 描图）
-        convo = messages_to_text(messages)
-        history_bootstrap_text = '以下是你们今天到目前为止的对话记录：' + NL + NL + convo
-        if relationship_text:
-            history_bootstrap_text += NL + NL + relationship_text
-        # 不在 assistant 历史中的最新 message：bridge 紧贴“请回复”
-        if wake_reply_bridge:
-            history_bootstrap_text += NL + NL + wake_reply_bridge
-        history_bootstrap_text += NL + NL + '请回复最后一条消息。'
-        content = prefix + history_bootstrap_text
+
+        def _assemble_cold_content(msgs):
+            # Cold content assembly: one messages_to_text per message plan version.
+            convo = messages_to_text(msgs)
+            hb_text = '以下是你们今天到目前为止的对话记录：' + NL + NL + convo
+            if relationship_text:
+                hb_text += NL + NL + relationship_text
+            # 不在 assistant 历史中的最新 message：bridge 紧贴“请回复”
+            if wake_reply_bridge:
+                hb_text += NL + NL + wake_reply_bridge
+            hb_text += NL + NL + '请回复最后一条消息。'
+            return prefix + hb_text, hb_text, convo
+
+        from chat.cold_bootstrap_budget import (
+            ColdBootstrapOverflow,
+            NoBenefitRespawnError,
+            cold_prompt_target,
+            effective_history_budget,
+            estimate_text_tokens,
+            estimate_whole_prompt,
+            should_refuse_no_benefit_hard_context_respawn,
+        )
+        from chat.context_lean import cc_history_token_budget
+
+        content, history_bootstrap_text, convo_text = _assemble_cold_content(messages)
+        cold_prompt_target_val = cold_prompt_target()
+        cold_budget_mode_val = 'token_budget'
+        cold_history_budget_val = cc_history_token_budget()
+        cold_history_trimmed_flag = bool((history_stats or {}).get('conversation_content_trimmed'))
+        cold_prompt_estimate = estimate_whole_prompt(full_system, content)
+
+        # Fence B: whole-prompt preflight. At most one deterministic rebuild
+        # with a smaller history budget, reusing the same token-budget
+        # history assembly — never a model retry, never a raw string slice.
+        if cold_prompt_estimate > cold_prompt_target_val and rebuild_messages_fn is not None:
+            history_tokens_est = estimate_text_tokens(convo_text)
+            non_history_est = max(0, cold_prompt_estimate - history_tokens_est)
+            new_budget = effective_history_budget(
+                default_history_budget=cold_history_budget_val,
+                non_history_estimate=non_history_est,
+                cold_target=cold_prompt_target_val,
+            )
+            rebuilt_messages, rebuilt_stats = rebuild_messages_fn(new_budget)
+            rebuilt_content, rebuilt_history_bootstrap_text, _rebuilt_convo = (
+                _assemble_cold_content(rebuilt_messages)
+            )
+            rebuilt_estimate = estimate_whole_prompt(full_system, rebuilt_content)
+            messages = rebuilt_messages
+            content, history_bootstrap_text = rebuilt_content, rebuilt_history_bootstrap_text
+            cold_prompt_estimate = rebuilt_estimate
+            cold_history_budget_val = new_budget
+            if history_stats is not None and isinstance(rebuilt_stats, dict):
+                history_stats.clear()
+                history_stats.update(rebuilt_stats)
+                cold_history_trimmed_flag = bool(rebuilt_stats.get('conversation_content_trimmed'))
+
+        if cold_prompt_estimate > cold_prompt_target_val:
+            cold_budget_overflow_flag = True
+            raise ColdBootstrapOverflow(
+                estimate=cold_prompt_estimate,
+                target=cold_prompt_target_val,
+                history_budget=cold_history_budget_val,
+                cold_history_trimmed=cold_history_trimmed_flag,
+            )
+        cold_budget_overflow_flag = False
+
+        # Fence C: only refuse immediate post-cold hard_context storms where
+        # the rebuilt cold is not smaller than the preceding cold bootstrap.
+        if pending_respawn_reason == 'hard_context':
+            pre_spawn_turns = getattr(_CC_RESIDENT, 'hard_context_pre_spawn_turns', None)
+            if should_refuse_no_benefit_hard_context_respawn(
+                pre_spawn_turns=pre_spawn_turns,
+                cold_prompt_estimate=cold_prompt_estimate,
+                last_cold_bootstrap_estimate=int(
+                    getattr(_CC_RESIDENT, 'last_cold_bootstrap_estimate', 0) or 0
+                ),
+                last_cold_bootstrap_generation=int(
+                    getattr(_CC_RESIDENT, 'last_cold_bootstrap_generation', 0) or 0
+                ),
+                current_generation=int(getattr(_CC_RESIDENT, 'generation', 0) or 0),
+            ):
+                baseline = int(getattr(_CC_RESIDENT, 'last_cold_bootstrap_estimate', 0) or 0)
+                raise NoBenefitRespawnError(
+                    new_estimate=cold_prompt_estimate, baseline=baseline,
+                )
+            clear_storm = getattr(_CC_RESIDENT, 'clear_hard_context_pre_spawn_turns', None)
+            if callable(clear_storm):
+                clear_storm()
+
+        from chat.history_boundary import persist_history_boundary as _persist_history_boundary
+        _hist_boundary = history_stats or {}
+        if (
+            'trimmed_up_to_id' in _hist_boundary
+            or 'oldest_retained_message_id' in _hist_boundary
+        ):
+            _persist_history_boundary(
+                trimmed_up_to_id=int(_hist_boundary.get('trimmed_up_to_id') or 0),
+                oldest_retained_message_id=int(
+                    _hist_boundary.get('oldest_retained_message_id') or 0
+                ),
+            )
+
+        note_cold_estimate = getattr(_CC_RESIDENT, 'note_cold_bootstrap_estimate', None)
+        if callable(note_cold_estimate):
+            note_cold_estimate(cold_prompt_estimate)
+
         commit_meta = {
             'state_snapshot': raw_state,
             'feedback_ids': list(one_shot.get('feedback_ids') or []),
@@ -3906,6 +4050,14 @@ def _cc_resident_stream_gen(messages, *, user_turn=True, history_stats=None, is_
         is_cold=is_cold,
     )
     obs_breakdown.update(state_lean_observation)
+    obs_breakdown.update({
+        'cold_prompt_estimate': cold_prompt_estimate,
+        'cold_prompt_target': cold_prompt_target_val,
+        'cold_history_budget': cold_history_budget_val,
+        'cold_history_trimmed': cold_history_trimmed_flag,
+        'cold_budget_mode': cold_budget_mode_val,
+        'cold_budget_overflow': cold_budget_overflow_flag,
+    })
     # 回归：观测不得改变即将送入 resident 的字节（list 用 deepcopy 快照）
     if original_system.encode('utf-8') != full_system.encode('utf-8'):
         raise RuntimeError('cc observability mutated system prompt')
@@ -5514,6 +5666,7 @@ def chat_stream():
                     _cc_env.pop('ANTHROPIC_API_KEY', None)
                     # R0 native fork (flagged): resume child trial → hot delta only.
                     # Else #204 cold bootstrap via ensure_alive.
+                    _cc_pending_respawn_reason = None
                     if _rewrite_id and _try_staged_rewrite_native_fork(
                         _turn_data,
                         system_text=_static_parts['full_system'],
@@ -5524,6 +5677,10 @@ def chat_stream():
                         _cc_is_cold = _CC_RESIDENT.ensure_alive(
                             _static_parts['full_system'], _cc_env,
                         )
+                        if _cc_is_cold:
+                            _cc_pending_respawn_reason = getattr(
+                                _CC_RESIDENT, 'pending_respawn_reason', None,
+                            )
                     _resident_files = (
                         set()
                         if _cc_is_cold else
@@ -5535,13 +5692,31 @@ def chat_stream():
                         history_stats_out=_history_stats,
                         for_cc=True,
                         rewrite_id=_rewrite_id or None,
+                        cold_safe=_cc_is_cold,
+                        commit_history_boundary=not _cc_is_cold,
                     )
+
+                    def _rebuild_cc_messages(_new_history_budget, _rf=_resident_files, _rid=_rewrite_id):
+                        _rebuilt_stats: dict = {}
+                        _rebuilt_msgs = build_messages(
+                            resident_file_hashes=_rf,
+                            history_stats_out=_rebuilt_stats,
+                            for_cc=True,
+                            rewrite_id=_rid or None,
+                            cold_safe=True,
+                            history_token_budget_override=_new_history_budget,
+                            commit_history_boundary=False,
+                        )
+                        return _rebuilt_msgs, _rebuilt_stats
+
                     cc_tool_calls = []
                     for evt, payload in _cc_resident_stream_gen(
                         messages,
                         user_turn=_is_user_turn,
                         history_stats=_history_stats,
                         is_cold=_cc_is_cold,
+                        rebuild_messages_fn=_rebuild_cc_messages if _cc_is_cold else None,
+                        pending_respawn_reason=_cc_pending_respawn_reason,
                     ):
                         if evt == 'text':
                             yield 'data: ' + json.dumps({'t': 'text', 'd': payload}) + SSE_END
@@ -5684,12 +5859,15 @@ def chat_stream():
                 _partial = getattr(e, 'usage', None)
                 if isinstance(_partial, dict) and (
                     _partial.get('rounds') or _partial.get('cache_read') or _partial.get('cache_creation')
+                    or _partial.get('cold_budget_overflow') is not None
                 ):
                     yield 'data: ' + json.dumps({'t': 'usage', **{
                         k: _partial.get(k) for k in (
                             'v', 'provider', 'num_rounds', 'input_tokens', 'output_tokens',
                             'cache_read', 'cache_creation', 'last_round_context',
                             'max_round_context', 'resident_turn_count', 'respawn_reason',
+                            'cold_budget_overflow', 'cold_prompt_estimate', 'cold_prompt_target',
+                            'cold_history_budget', 'cold_history_trimmed', 'cold_budget_mode',
                         ) if k in _partial
                     }}) + SSE_END
                 yield 'data: ' + json.dumps({'t': 'err', 'd': str(e)}) + SSE_END

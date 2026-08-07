@@ -4371,12 +4371,15 @@ def set_ledger_budget():
 # ── Chat branches (regen + edit) ──────────────────────────
 
 from chat.cc_history_rewrite import (
+    HistoryRewriteStateUnreadable,
+    is_unreadable_epoch,
     note_durable_history_rewrite,
+    note_durable_history_rewrite_with_meta,
     serialize_history_rewrite,
 )
 
 
-def invalidate_cc_resident_for_history_rewrite(reason):
+def invalidate_cc_resident_for_history_rewrite(reason, idempotency_key=None):
     """Advance durable rewrite epoch, then best-effort eager-kill one worker.
 
     Correctness path: ``note_durable_history_rewrite`` (must succeed after a
@@ -4384,22 +4387,29 @@ def invalidate_cc_resident_for_history_rewrite(reason):
     worker that happens to receive the request. Bridge failure must not turn
     an already-committed rewrite into an API failure — other workers still
     cold on epoch mismatch at the next ``ensure_alive``.
+
+    ``idempotency_key`` (optional): forwarded to ``note_durable_history_rewrite``
+    so a retry for the same rewrite_id reuses the already-minted epoch
+    instead of advancing a new one. Returns the epoch string (new or reused).
     """
     import logging
 
-    note_durable_history_rewrite(reason)
-    result = _gw_json_request(
-        'POST', '/internal/cc-resident/history-rewrite', {'reason': reason},
+    meta = note_durable_history_rewrite_with_meta(
+        reason, idempotency_key=idempotency_key,
     )
-    if not isinstance(result, dict) or result.get('ok') is not True:
-        detail = result.get('error') if isinstance(result, dict) else result
-        logging.getLogger(__name__).warning(
-            'CC resident history invalidation bridge failed '
-            '(durable epoch remains; lazy cold on mismatch): %s',
-            detail,
+    epoch = str(meta.get('epoch') or '')
+    if meta.get('advanced'):
+        result = _gw_json_request(
+            'POST', '/internal/cc-resident/history-rewrite', {'reason': reason},
         )
-        return False
-    return True
+        if not isinstance(result, dict) or result.get('ok') is not True:
+            detail = result.get('error') if isinstance(result, dict) else result
+            logging.getLogger(__name__).warning(
+                'CC resident history invalidation bridge failed '
+                '(durable epoch remains; lazy cold on mismatch): %s',
+                detail,
+            )
+    return epoch
 
 
 @app.route('/api/chat/regen/prepare', methods=['POST'])
@@ -4452,6 +4462,15 @@ def _complete_rewrite_finalize(
     ``activate`` and ``replay_only`` both must ensure durable epoch before
     ``effects_done``. Returns payload including ``effects_pending`` when the
     client should safely retry the same rewrite_id (no transcript remutate).
+
+    Durable epoch handoff is per-rewrite idempotent (P0 cold-storm fix): one
+    committed authoritative rewrite advances the global epoch at most once.
+    ``effects_pending`` / ``replay_only`` retries for the *same* rewrite_id
+    must not mint a second epoch or eager-kill a resident again — #201's
+    stale-resident fence already holds via the epoch minted on first
+    activation. ``staging.history_epoch`` is the once-only, read-only marker
+    that records this; an older rewrite's retry can never roll back a newer
+    rewrite's epoch because it simply finds its own marker already set.
     """
     base = {
         'ok': True,
@@ -4473,13 +4492,34 @@ def _complete_rewrite_finalize(
         except Exception:
             pass
 
-    # Durable epoch is part of the resume contract — never only on first activate.
-    try:
-        invalidate_cc_resident_for_history_rewrite(invalidate_reason)
-    except Exception:
-        base['effects_pending'] = True
-        base['code'] = 'effects_pending'
-        return base
+    # Durable epoch is part of the resume contract — never only on first
+    # activate. But mint/eager-kill at most once per rewrite_id: skip
+    # entirely once a prior attempt already recorded the handoff.
+    rewrite_id = str(staging.get('rewrite_id') or '').strip()
+    if not rw_mod.history_epoch_of(staging):
+        idempotency_key = ('rewrite:%s' % rewrite_id) if rewrite_id else None
+        try:
+            epoch = invalidate_cc_resident_for_history_rewrite(
+                invalidate_reason, idempotency_key=idempotency_key,
+            )
+        except Exception:
+            base['effects_pending'] = True
+            base['code'] = 'effects_pending'
+            return base
+        if rewrite_id and epoch and not is_unreadable_epoch(epoch):
+            try:
+                conn = get_db()
+                try:
+                    if not rw_mod.persist_history_epoch_if_absent(conn, rewrite_id, str(epoch)):
+                        base['effects_pending'] = True
+                        base['code'] = 'effects_pending'
+                        return base
+                finally:
+                    conn.close()
+            except Exception:
+                base['effects_pending'] = True
+                base['code'] = 'effects_pending'
+                return base
 
     try:
         from chat.scoring_identity import trigger_turn_scoring
