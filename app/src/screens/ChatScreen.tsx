@@ -46,6 +46,18 @@ import { ThemePerfRows } from '../components/ThemePerfRows';
 import { attachChatTheme, loadChatSettings, patchChatSettings, resolveEffectiveTheme, setChatTheme, type EffectiveTheme, type ThemeMode } from '../lib/chatTheme';
 import { getLegacyNativeCompatDetails } from '../lib/legacyNativeCompat';
 import {
+  clampTranscriptWindow,
+  followLatestAfterSearchJump,
+  isTranscriptWindowAtLatest,
+  latestTranscriptWindow,
+  shiftTranscriptWindowNewer,
+  shiftTranscriptWindowOlder,
+  transcriptWindowAfterPrepend,
+  transcriptWindowAroundIndex,
+  windowSize,
+  type TranscriptWindow,
+} from '../lib/legacyTranscriptWindow';
+import {
   countDescendants,
   setSkipThemePerf,
   setThemeProbeMode,
@@ -104,7 +116,11 @@ function pushElDiag(rows: LayoutDiagRow[], label: string, el: HTMLElement | null
 function collectLayoutDiagnostics(
   root: HTMLElement | null,
   transcriptEl: HTMLElement | null,
-  messageCount: number,
+  counts: {
+    loadedCount: number;
+    mountedCount: number;
+    window: TranscriptWindow | null;
+  },
 ): LayoutDiagRow[] {
   const vv = window.visualViewport;
   const testEl = document.getElementById('c78-layout-test-100') as HTMLElement | null;
@@ -160,8 +176,17 @@ function collectLayoutDiagnostics(
   pushElDiag(rows, 'html', html);
 
   rows.push({ label: 'chat-root descendant count', value: String(countDescendants(root)) });
-  rows.push({ label: 'transcript descendant count', value: String(countDescendants(transcriptEl)) });
-  rows.push({ label: 'rendered message count', value: String(messageCount) });
+  rows.push({ label: 'mounted transcript descendant count', value: String(countDescendants(transcriptEl)) });
+  rows.push({ label: 'loaded message count', value: String(counts.loadedCount) });
+  rows.push({ label: 'mounted message count', value: String(counts.mountedCount) });
+  rows.push({ label: 'loaded transcript logical count', value: String(counts.loadedCount) });
+  if (counts.window) {
+    rows.push({ label: 'legacy window start index', value: String(counts.window.start) });
+    rows.push({ label: 'legacy window end index', value: String(counts.window.end) });
+    rows.push({ label: 'legacy window size', value: String(windowSize(counts.window)) });
+  } else {
+    rows.push({ label: 'legacy window', value: 'n/a (modern full render)' });
+  }
 
   if (root) {
     rows.push({ label: 'Chat root computed font-size', value: getComputedStyle(root).fontSize });
@@ -264,10 +289,16 @@ export function ChatScreen() {
   const [chatError, setChatError] = useState<{ message: string; hint: string } | null>(null);
   const [pickedChoices, setPickedChoices] = useState<Record<number, string>>({});
   const [layoutDiag, setLayoutDiag] = useState<LayoutDiagRow[] | null>(null);
+  const [txWin, setTxWin] = useState<TranscriptWindow>({ start: 0, end: 0 });
 
   const manualWindow = useManualContextWindow();
   const switchBlocked =
     sending || live !== null || genLockBusy || manualWindow.submitting;
+
+  const legacyCompat = useMemo(() => getLegacyNativeCompatDetails().legacyNativeCompat, []);
+  const followLatestRef = useRef(true);
+  const pendingAnchorIdRef = useRef<number | null>(null);
+  const pendingJumpIdRef = useRef<number | null>(null);
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const chatRootRef = useRef<HTMLDivElement>(null);
@@ -302,8 +333,17 @@ export function ChatScreen() {
   };
 
   const refreshLayoutDiag = useCallback(() => {
-    setLayoutDiag(collectLayoutDiagnostics(chatRootRef.current, scrollRef.current, msgs.length));
-  }, [msgs.length]);
+    setLayoutDiag(collectLayoutDiagnostics(chatRootRef.current, scrollRef.current, {
+      loadedCount: msgs.length,
+      mountedCount: legacyCompat ? windowSize(txWin) : msgs.length,
+      window: legacyCompat ? txWin : null,
+    }));
+  }, [msgs.length, legacyCompat, txWin]);
+
+  const pinTranscriptToLatest = useCallback(() => {
+    followLatestRef.current = true;
+    if (legacyCompat) setTxWin(latestTranscriptWindow(msgs.length));
+  }, [legacyCompat, msgs.length]);
 
   const runHiddenTranscriptThemeProbe = useCallback(() => {
     const root = chatRootRef.current;
@@ -382,6 +422,7 @@ export function ChatScreen() {
     setSending(false);
     try {
       const unlock = await forceUnlockChatGenLock();
+      pinTranscriptToLatest();
       await refetchLatest();
       const online = await fetchChatGatewayOnline();
       setEndpointOnline(online);
@@ -391,7 +432,7 @@ export function ChatScreen() {
     } finally {
       setRefreshing(false);
     }
-  }, [refreshing, refetchLatest, showToast]);
+  }, [refreshing, refetchLatest, showToast, pinTranscriptToLatest]);
 
   // initial load + catalog (MODEL-1A/1B: provider-aware)
   useEffect(() => {
@@ -423,12 +464,42 @@ export function ChatScreen() {
   useLayoutEffect(() => {
     const root = chatRootRef.current;
     if (!root) return;
-    if (getLegacyNativeCompatDetails().legacyNativeCompat) {
+    if (legacyCompat) {
       root.setAttribute('data-chat-legacy-renderer', 'true');
     } else {
       root.removeAttribute('data-chat-legacy-renderer');
     }
-  }, []);
+  }, [legacyCompat]);
+
+  // Legacy DOM window: follow latest or clamp when loaded msgs length changes.
+  useLayoutEffect(() => {
+    if (!legacyCompat) return;
+    setTxWin((w) => (
+      followLatestRef.current
+        ? latestTranscriptWindow(msgs.length)
+        : clampTranscriptWindow(w.start, w.end, msgs.length)
+    ));
+  }, [msgs.length, legacyCompat]);
+
+  // Deterministic scroll after window shift / search jump (post-commit).
+  useLayoutEffect(() => {
+    if (!legacyCompat) return;
+    const jumpId = pendingJumpIdRef.current;
+    if (jumpId != null) {
+      pendingJumpIdRef.current = null;
+      pendingAnchorIdRef.current = null;
+      const el = document.getElementById(`msg-${jumpId}`);
+      const c = scrollRef.current;
+      if (el && c) c.scrollTo({ top: Math.max(0, el.offsetTop - 80), behavior: 'smooth' });
+      return;
+    }
+    const anchorId = pendingAnchorIdRef.current;
+    if (anchorId == null) return;
+    pendingAnchorIdRef.current = null;
+    const el = document.getElementById(`msg-${anchorId}`);
+    const c = scrollRef.current;
+    if (el && c) c.scrollTop = Math.max(0, el.offsetTop - 80);
+  }, [txWin, msgs, legacyCompat]);
 
   useEffect(() => {
     let cancelled = false;
@@ -475,14 +546,15 @@ export function ChatScreen() {
               const fresh = page.messages.filter((m) => !known.has(m.id));
               return fresh.length ? [...c2, ...fresh] : c2;
             });
-            scrollBottom(true);
+            // Legacy browsing older window: do not yank to latest on background poll.
+            if (!legacyCompat || followLatestRef.current) scrollBottom(true);
           }
         });
         return cur;
       });
     }, 10000);
     return () => clearInterval(iv);
-  }, [sending, scrollBottom]);
+  }, [sending, scrollBottom, legacyCompat]);
 
   useEffect(() => () => {
     abortRef.current?.abort();
@@ -499,6 +571,9 @@ export function ChatScreen() {
       userMessageId: number | null,
       opts: { rewriteId?: string | null } = {},
     ): Promise<boolean> => {
+      // Invariant: any path entering live streaming pins the DOM window to latest
+      // so live replies never render under an old browsing window.
+      pinTranscriptToLatest();
       liveRef.current = { thinking: '', text: '', tools: [], phase: 'wait' };
       setLive(liveRef.current);
       const ctrl = new AbortController();
@@ -538,7 +613,7 @@ export function ChatScreen() {
       }
       return res.ok;
     },
-    [scrollBottom, showToast, updateLive],
+    [scrollBottom, showToast, updateLive, pinTranscriptToLatest],
   );
 
   const send = useCallback(async () => {
@@ -575,12 +650,13 @@ export function ChatScreen() {
     }
     setPendingFile((current) => (current === attempt.file ? null : current));
     setPendingImage((current) => (current === attempt.image ? null : current));
+    pinTranscriptToLatest();
     await refetchLatest();
     await runStream(messageId);
     await refetchLatest();
     setSending(false);
     taRef.current?.focus();
-  }, [input, pendingFile, pendingImage, sending, refetchLatest, runStream, showToast]);
+  }, [input, pendingFile, pendingImage, sending, refetchLatest, runStream, showToast, pinTranscriptToLatest]);
 
   const sendChoice = useCallback(async (text: string): Promise<boolean> => {
     const choice = text.trim();
@@ -603,12 +679,13 @@ export function ChatScreen() {
       setSending(false);
       return false;
     }
+    pinTranscriptToLatest();
     await refetchLatest();
     await runStream(messageId);
     await refetchLatest();
     setSending(false);
     return true;
-  }, [sending, refetchLatest, runStream, showToast]);
+  }, [sending, refetchLatest, runStream, showToast, pinTranscriptToLatest]);
 
   const chooseOption = useCallback(async (text: string, msgId: number) => {
     if (sending || isChoicesAnswered(msgId, msgs)) return;
@@ -635,6 +712,7 @@ export function ChatScreen() {
         return;
       }
       // Keep old assistant visible until candidate activates.
+      // runStream pins latest before live mounts (mutation invariant).
       const ok = await runStream(prep.userMessageId, { rewriteId: prep.rewriteId });
       if (ok) {
         // finalize retries transport-ambiguous / effects_pending internally (same rewrite_id).
@@ -662,6 +740,7 @@ export function ChatScreen() {
         return;
       }
       // Active transcript stays intact until finalize succeeds.
+      // runStream pins latest before live mounts (mutation invariant).
       const ok = await runStream(null, { rewriteId: edit.rewriteId });
       if (ok) {
         // finalize retries transport-ambiguous / effects_pending internally (same rewrite_id).
@@ -685,9 +764,12 @@ export function ChatScreen() {
   const branchSwitch = useCallback(
     async (msgId: number, dir: 1 | -1) => {
       const r = await switchChatBranch(msgId, dir);
-      if (r) await refetchLatest(false);
+      if (!r) return;
+      // Authoritative msgs replacement invalidates old index windows on legacy.
+      if (legacyCompat) pinTranscriptToLatest();
+      await refetchLatest(false);
     },
-    [refetchLatest],
+    [refetchLatest, legacyCompat, pinTranscriptToLatest],
   );
 
   const copyText = useCallback(
@@ -701,22 +783,77 @@ export function ChatScreen() {
   const loadEarlier = useCallback(async () => {
     if (loadingMore || !msgs.length) return;
     setLoadingMore(true);
-    const page = await fetchChatMessages({ before: msgs[0].id, limit: 80 });
-    setMsgs((cur) => [...page.messages, ...cur]);
-    setHasMoreBefore(page.hasMoreBefore);
-    setLoadingMore(false);
-  }, [loadingMore, msgs]);
+    try {
+      const page = await fetchChatMessages({ before: msgs[0].id, limit: 80 });
+      const prepended = page.messages.length;
+      const newTotal = msgs.length + prepended;
+      if (legacyCompat) {
+        followLatestRef.current = false;
+        pendingAnchorIdRef.current = msgs[0]?.id ?? null;
+        setTxWin(transcriptWindowAfterPrepend(prepended, newTotal));
+      }
+      setMsgs((cur) => [...page.messages, ...cur]);
+      setHasMoreBefore(page.hasMoreBefore);
+    } finally {
+      setLoadingMore(false);
+    }
+  }, [loadingMore, msgs, legacyCompat]);
+
+  const showEarlierLoaded = useCallback(() => {
+    if (!legacyCompat) {
+      void loadEarlier();
+      return;
+    }
+    if (txWin.start > 0) {
+      pendingAnchorIdRef.current = msgs[txWin.start]?.id ?? null;
+      followLatestRef.current = false;
+      setTxWin((w) => shiftTranscriptWindowOlder(w, msgs.length));
+      return;
+    }
+    if (hasMoreBefore) void loadEarlier();
+  }, [legacyCompat, txWin.start, msgs, hasMoreBefore, loadEarlier]);
+
+  const showNewerLoaded = useCallback(() => {
+    if (!legacyCompat) return;
+    const next = shiftTranscriptWindowNewer(txWin, msgs.length);
+    followLatestRef.current = isTranscriptWindowAtLatest(next, msgs.length);
+    if (followLatestRef.current) {
+      setTxWin(latestTranscriptWindow(msgs.length));
+      scrollBottom();
+      return;
+    }
+    pendingAnchorIdRef.current = msgs[Math.max(txWin.start, next.start)]?.id ?? null;
+    setTxWin(next);
+  }, [legacyCompat, txWin, msgs, scrollBottom]);
+
+  const goToLatestWindow = useCallback(() => {
+    pinTranscriptToLatest();
+    scrollBottom();
+  }, [pinTranscriptToLatest, scrollBottom]);
 
   const jumpTo = useCallback((id: number) => {
     setNavOpen(null);
     setFlashId(id);
-    setTimeout(() => {
-      const el = document.getElementById(`msg-${id}`);
-      const c = scrollRef.current;
-      if (el && c) c.scrollTo({ top: Math.max(0, el.offsetTop - 80), behavior: 'smooth' });
-    }, 250);
+    if (legacyCompat) {
+      const idx = msgs.findIndex((m) => m.id === id);
+      if (idx < 0) {
+        setTimeout(() => setFlashId((f) => (f === id ? null : f)), 2200);
+        return;
+      }
+      const next = transcriptWindowAroundIndex(idx, msgs.length);
+      // Intent-based: geometric "window touches tail" must not auto-follow.
+      followLatestRef.current = followLatestAfterSearchJump(idx, msgs.length);
+      pendingJumpIdRef.current = id;
+      setTxWin(next);
+    } else {
+      setTimeout(() => {
+        const el = document.getElementById(`msg-${id}`);
+        const c = scrollRef.current;
+        if (el && c) c.scrollTo({ top: Math.max(0, el.offsetTop - 80), behavior: 'smooth' });
+      }, 250);
+    }
     setTimeout(() => setFlashId((f) => (f === id ? null : f)), 2200);
-  }, []);
+  }, [legacyCompat, msgs]);
 
   const searchResults = useMemo(() => {
     const q = searchQ.trim().toLowerCase();
@@ -1121,14 +1258,22 @@ export function ChatScreen() {
     );
   }
 
+  // Modern: all loaded msgs. Legacy: bounded DOM window only (msgs state stays full).
+  const visibleMsgs = legacyCompat ? msgs.slice(txWin.start, txWin.end) : msgs;
+  const atLatestWindow = !legacyCompat || isTranscriptWindowAtLatest(txWin, msgs.length);
+  const canShowEarlierLoaded = legacyCompat && txWin.start > 0;
+  const canFetchEarlier = (!legacyCompat && hasMoreBefore) || (legacyCompat && txWin.start === 0 && hasMoreBefore);
+  const canShowNewerLoaded = legacyCompat && !atLatestWindow;
+
   const rendered: ReactElement[] = [];
   let lastDate = '';
-  msgs.forEach((m) => {
+  visibleMsgs.forEach((m) => {
+    // First visible message always gets a date separator (even mid-day slice).
     if (m.dateKey && m.dateKey !== lastDate) {
       lastDate = m.dateKey;
       const label = m.dateKey === new Date().toISOString().slice(0, 10) ? dateLabel : m.dateKey.replace(/-/g, '.');
       rendered.push(
-        <div key={`d-${m.dateKey}`} style={{ textAlign: 'center', fontFamily: DISPLAY, fontSize: 12, letterSpacing: 2, color: 'var(--ghost)', padding: '2px 0' }}>
+        <div key={`d-${m.dateKey}-${m.id}`} style={{ textAlign: 'center', fontFamily: DISPLAY, fontSize: 12, letterSpacing: 2, color: 'var(--ghost)', padding: '2px 0' }}>
           {label}
         </div>,
       );
@@ -1340,13 +1485,36 @@ export function ChatScreen() {
       {/* ══ message stream ══ */}
       <div ref={scrollRef} className="hide-scrollbar" style={{ flex: 1, minHeight: 0, overflowY: 'auto', position: 'relative' }}>
         <div className="vstack vstack-20" style={{ maxWidth: 430, margin: '0 auto', padding: '20px 16px 26px' }}>
-          {hasMoreBefore && (
-            <div onClick={loadEarlier} style={{ cursor: 'pointer', textAlign: 'center', fontSize: 12, color: 'var(--faint)', padding: '6px 0', letterSpacing: 2 }}>
-              {loadingMore ? '加载中…' : '‹ 加载更早的对话 ›'}
+          {(canShowEarlierLoaded || canFetchEarlier) && (
+            <div
+              onClick={showEarlierLoaded}
+              style={{ cursor: 'pointer', textAlign: 'center', fontSize: 12, color: 'var(--faint)', padding: '6px 0', letterSpacing: 2 }}
+            >
+              {loadingMore
+                ? '加载中…'
+                : canShowEarlierLoaded
+                  ? '‹ 显示更早的已加载对话 ›'
+                  : '‹ 加载更早的对话 ›'}
             </div>
           )}
           {rendered}
           {live && renderLive(live)}
+          {canShowNewerLoaded && (
+            <div className="vstack vstack-8" style={{ padding: '4px 0 2px' }}>
+              <div
+                onClick={showNewerLoaded}
+                style={{ cursor: 'pointer', textAlign: 'center', fontSize: 12, color: 'var(--faint)', letterSpacing: 2 }}
+              >
+                显示更新的已加载对话 ›
+              </div>
+              <div
+                onClick={goToLatestWindow}
+                style={{ cursor: 'pointer', textAlign: 'center', fontSize: 12, color: 'var(--ghost)', letterSpacing: 2 }}
+              >
+                回到最近对话
+              </div>
+            </div>
+          )}
           {chatError && (
             <div style={{ display: 'flex', justifyContent: 'center', padding: '6px 4px 2px' }}>
               <div className="vstack vstack-8" style={{
