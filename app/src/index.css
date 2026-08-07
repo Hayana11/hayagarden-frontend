@@ -857,20 +857,8 @@ button {
   color: var(--nav-active);
 }
 
-/* Chat page — inline bottom nav (matches legacy /chat) */
+/* Embedded placement — flex flow only; visuals live on __inner */
 .bnav-embedded,
 .global-bottom-nav--embedded {
   flex-shrink: 0;
-  display: flex;
-  background: rgba(255, 255, 255, 0.97);
-  backdrop-filter: blur(14px);
-  -webkit-backdrop-filter: blur(14px);
-  border-top: 0.5px solid var(--line, var(--color-border));
-  padding: 8px 0 calc(8px + env(safe-area-inset-bottom, 0px));
-}
-
-.bnav-embedded .ni,
-.global-bottom-nav--embedded .global-bottom-nav__item {
-  color: #b8b0b8;
-  padding: 2px 0;
 }

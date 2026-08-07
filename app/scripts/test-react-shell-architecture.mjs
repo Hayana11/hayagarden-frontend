@@ -96,9 +96,50 @@ function read(rel) {
 
   const bottom = read('components/GlobalBottomNav.tsx');
   assert.match(bottom, /global-bottom-nav--fixed/);
-  const embeddedBranch = bottom.slice(bottom.indexOf("if (variant === 'embedded')"), bottom.indexOf('return (\n    <nav className="bnav global-bottom-nav'));
-  assert.match(embeddedBranch, /global-bottom-nav--embedded/);
-  assert.doesNotMatch(embeddedBranch, /global-bottom-nav--fixed/);
+  assert.match(bottom, /global-bottom-nav--embedded/);
+  const embeddedOnly = bottom.slice(
+    bottom.indexOf("if (variant === 'embedded')"),
+    bottom.indexOf("  return (\n    <nav className=\"bnav global-bottom-nav global-bottom-nav--fixed\""),
+  );
+  assert.doesNotMatch(embeddedOnly, /global-bottom-nav--fixed/);
+}
+
+// 9. Both placement variants share canonical __inner DOM; placement must not fork visuals
+{
+  const bottom = read('components/GlobalBottomNav.tsx');
+  assert.match(bottom, /const inner = <div className="[^"]*global-bottom-nav__inner"/);
+  assert.match(bottom, /if \(variant === 'embedded'\)[\s\S]*\{inner\}/);
+  assert.match(bottom, /global-bottom-nav--fixed[\s\S]*\{inner\}/);
+
+  const css = fs.readFileSync(path.join(root, 'src/index.css'), 'utf8');
+  const navBlock = css.slice(css.indexOf('/* Canonical GlobalBottomNav'));
+
+  const embeddedRule = navBlock.match(/\.global-bottom-nav--embedded\s*\{([^}]*)\}/);
+  assert.ok(embeddedRule, 'expected .global-bottom-nav--embedded rule');
+  const embeddedBody = embeddedRule[1];
+  assert.doesNotMatch(embeddedBody, /\bcolor\s*:/);
+  assert.doesNotMatch(embeddedBody, /\bfont(-size|-family)?\s*:/);
+  assert.doesNotMatch(embeddedBody, /\bpadding\s*:/);
+  assert.doesNotMatch(embeddedBody, /\bborder/);
+  assert.doesNotMatch(embeddedBody, /\bbackground/);
+
+  assert.doesNotMatch(
+    navBlock,
+    /\.global-bottom-nav--embedded[\s\S]*?\.global-bottom-nav__item[\s\S]*?\bcolor\s*:/,
+    'embedded variant must not override item color',
+  );
+  assert.doesNotMatch(
+    navBlock,
+    /\.global-bottom-nav--embedded[\s\S]*?\.global-bottom-nav__item[\s\S]*?\bpadding\s*:/,
+    'embedded variant must not override item padding',
+  );
+
+  assert.match(navBlock, /\.global-bottom-nav__item\.act\s*\{[\s\S]*?var\(--nav-active\)/);
+  assert.doesNotMatch(
+    navBlock,
+    /\.global-bottom-nav--embedded[\s\S]*?\.global-bottom-nav__item\.act[\s\S]*?\bcolor\s*:/,
+    'embedded variant must not override active color',
+  );
 }
 
 console.log('test-react-shell-architecture: ok');

@@ -51,17 +51,19 @@ export function GlobalBottomNav({ variant = 'fixed' }: { variant?: GlobalBottomN
     <NavAnchor key={item.key} item={item} active={active === item.key} />
   ));
 
+  const inner = <div className="bnav-inner global-bottom-nav__inner">{links}</div>;
+
   if (variant === 'embedded') {
     return (
       <nav className="bnav-embedded global-bottom-nav global-bottom-nav--embedded" aria-label="主导航">
-        {links}
+        {inner}
       </nav>
     );
   }
 
   return (
     <nav className="bnav global-bottom-nav global-bottom-nav--fixed" aria-label="主导航">
-      <div className="bnav-inner global-bottom-nav__inner">{links}</div>
+      {inner}
     </nav>
   );
 }
