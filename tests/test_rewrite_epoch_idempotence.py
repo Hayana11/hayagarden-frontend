@@ -9,6 +9,7 @@ Covers T12-T17 from the spec:
   T17 legacy mutation semantics (delete / branch_switch) are unchanged
   T19 marker persist fail → newer rewrite → old retry must not mint a third epoch
   T21 split index persist fail after global epoch → B then A retry must not mint E3
+  T22 unreadable durable state → finalize effects_pending, no marker, resident fail-closed
 """
 from __future__ import annotations
 
@@ -23,10 +24,13 @@ from unittest import mock
 import app as app_module
 from chat import rewrite_staging as rw
 from chat.cc_history_rewrite import (
+    HistoryRewriteStateUnreadable,
     current_history_rewrite_epoch,
+    is_unreadable_epoch,
     note_durable_history_rewrite,
 )
 from chat import cc_history_rewrite as chr
+from cc_resident import ResidentError, ResidentSession
 
 
 def _schema(conn: sqlite3.Connection) -> None:
@@ -390,6 +394,47 @@ class RewriteEpochIdempotenceTests(unittest.TestCase):
         self.assertEqual(durable['epoch'], e2)
         self.assertEqual(durable['idempotency_index'][key_a]['epoch'], e1)
         self.assertEqual(durable['idempotency_index']['rewrite:%s' % rid2]['epoch'], e2)
+
+    # T22 -----------------------------------------------------------------
+    def test_t22_unreadable_state_finalize_and_resident_fail_closed(self):
+        with open(self.epoch_path, 'w', encoding='utf-8') as handle:
+            json.dump({
+                'epoch': '__unreadable__',
+                'reason': 'history_rewrite',
+                'idempotency_index': {},
+            }, handle)
+
+        u1 = self._insert('hayana', 'U1')
+        self._insert('assistant', 'A1')
+        rid = self._prep_and_ready_edit(u1, "U1'", "A1'")
+        bridge_before = len(self.bridge_calls)
+
+        fin = self.client.post('/api/chat/edit/finalize', json={'rewrite_id': rid})
+        self.assertEqual(fin.status_code, 200)
+        body = fin.get_json()
+        self.assertTrue(body.get('effects_pending'))
+        self.assertEqual(rw.history_epoch_of(self._staging(rid)), '')
+        self.assertEqual(len(self.bridge_calls), bridge_before)
+
+        with self.assertRaises(HistoryRewriteStateUnreadable):
+            note_durable_history_rewrite('edit', idempotency_key='rewrite:%s' % rid)
+
+        resident = ResidentSession(tempfile.mkdtemp(), '', '/tmp/mcp.json')
+        resident._history_rewrite_epoch = '__unreadable__'
+        resident._cold = False
+        mock_proc = mock.MagicMock()
+        mock_proc.poll.return_value = None
+        resident._proc = mock_proc
+        resident._system_text = 'sys'
+
+        with mock.patch(
+            'chat.cc_history_rewrite.current_history_rewrite_epoch',
+            return_value='__unreadable__',
+        ):
+            with self.assertRaises(ResidentError) as ctx:
+                resident.ensure_alive('sys', {})
+        self.assertIn('durable_history_epoch_unreadable', str(ctx.exception))
+        self.assertIs(resident._proc, mock_proc)
 
 
 if __name__ == '__main__':

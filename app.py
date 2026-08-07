@@ -4361,6 +4361,8 @@ def set_ledger_budget():
 # ── Chat branches (regen + edit) ──────────────────────────
 
 from chat.cc_history_rewrite import (
+    HistoryRewriteStateUnreadable,
+    is_unreadable_epoch,
     note_durable_history_rewrite,
     note_durable_history_rewrite_with_meta,
     serialize_history_rewrite,
@@ -4494,7 +4496,7 @@ def _complete_rewrite_finalize(
             base['effects_pending'] = True
             base['code'] = 'effects_pending'
             return base
-        if rewrite_id and epoch:
+        if rewrite_id and epoch and not is_unreadable_epoch(epoch):
             try:
                 conn = get_db()
                 try:

@@ -366,10 +366,13 @@ class ResidentSession:
         # Bind epoch only after a successful spawn. A failed Popen must leave
         # the prior (stale) binding so hot reuse stays forbidden.
         try:
-            from chat.cc_history_rewrite import current_history_rewrite_epoch
-            bound_epoch = current_history_rewrite_epoch()
+            from chat.cc_history_rewrite import (
+                current_history_rewrite_epoch,
+                sanitize_bound_epoch,
+            )
+            bound_epoch = sanitize_bound_epoch(current_history_rewrite_epoch())
         except Exception:
-            bound_epoch = '__unreadable__'
+            bound_epoch = ''
         self._history_rewrite_epoch = bound_epoch
         self._system_text = system_text
         self._model_identity = model_identity
@@ -426,11 +429,17 @@ class ResidentSession:
         # Durable rewrite epoch: any resident spawned before the latest
         # committed rewrite loses hot-reuse on every worker, lazily.
         try:
-            from chat.cc_history_rewrite import current_history_rewrite_epoch
+            from chat.cc_history_rewrite import (
+                current_history_rewrite_epoch,
+                is_unreadable_epoch,
+                sanitize_bound_epoch,
+            )
             durable_epoch = current_history_rewrite_epoch()
         except Exception:
-            durable_epoch = '__unreadable__'
-        bound_epoch = getattr(self, '_history_rewrite_epoch', None) or ''
+            raise ResidentError('durable_history_epoch_unreadable')
+        if is_unreadable_epoch(durable_epoch):
+            raise ResidentError('durable_history_epoch_unreadable')
+        bound_epoch = sanitize_bound_epoch(getattr(self, '_history_rewrite_epoch', None) or '')
         if durable_epoch and durable_epoch != bound_epoch:
             return 'history_rewrite'
         if not self._alive():
@@ -538,10 +547,15 @@ class ResidentSession:
                 self._proc = None
                 raise ResidentError('staged_spawn_failed:%s' % exc) from exc
             try:
-                from chat.cc_history_rewrite import current_history_rewrite_epoch
-                self._history_rewrite_epoch = current_history_rewrite_epoch()
+                from chat.cc_history_rewrite import (
+                    current_history_rewrite_epoch,
+                    sanitize_bound_epoch,
+                )
+                self._history_rewrite_epoch = sanitize_bound_epoch(
+                    current_history_rewrite_epoch(),
+                )
             except Exception:
-                self._history_rewrite_epoch = '__unreadable__'
+                self._history_rewrite_epoch = ''
             self._system_text = system_text
             self._model_identity = model_identity
             self._session_id = resume_session_id

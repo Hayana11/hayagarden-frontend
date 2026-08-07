@@ -23,6 +23,24 @@ _IDEMPOTENCY_NAME = 'hayagarden-cc-history-rewrite.idempotency.json'
 _UNREADABLE_EPOCH = '__unreadable__'
 
 
+class HistoryRewriteStateUnreadable(RuntimeError):
+    """Durable rewrite epoch state exists but cannot be read or trusted.
+
+    Callers must fail closed: no epoch mint/reuse, no staging handoff marker,
+    no eager resident invalidation treated as success.
+    """
+
+
+def is_unreadable_epoch(epoch) -> bool:
+    return str(epoch or '').strip() == _UNREADABLE_EPOCH
+
+
+def sanitize_bound_epoch(epoch) -> str:
+    """Never bind the unreadable sentinel as a resident durable epoch."""
+    epoch = str(epoch or '').strip()
+    return '' if is_unreadable_epoch(epoch) else epoch
+
+
 def _lock_path():
     return os.environ.get(_LOCK_ENV) or os.path.join(tempfile.gettempdir(), _LOCK_NAME)
 
@@ -215,8 +233,8 @@ def note_durable_history_rewrite_with_meta(reason='history_rewrite', idempotency
     was minted or an existing idempotency record was reused."""
     key = str(idempotency_key or '').strip() or None
     state = _read_durable_state()
-    if state and str(state.get('epoch') or '') == _UNREADABLE_EPOCH:
-        return {'epoch': _UNREADABLE_EPOCH, 'advanced': False, 'reused': False}
+    if state and is_unreadable_epoch(state.get('epoch')):
+        raise HistoryRewriteStateUnreadable('durable history rewrite epoch unreadable')
 
     if key is not None:
         if state:
