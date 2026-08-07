@@ -115,4 +115,56 @@ if (misuse.length > 0) {
 }
 assert.equal(misuse.length, 0, `Chinese text must not use DISPLAY without split/helper (found ${misuse.length})`);
 
+// 8. CJK + FONT_CN must not use synthetic italic
+function cnItalicMisuse(lines, i) {
+  const line = lines[i];
+  if (!CN_SPLIT_RE.test(line) || !/fontStyle:\s*['"]italic['"]/.test(line)) return false;
+  const noTitle = stripTitleAttrs(line);
+  if (CJK_RE.test(noTitle)) return true;
+  // Multiline: opening tag with FONT_CN + italic; next line is CJK text
+  if (/fontFamily:\s*FONT_CN/.test(line) && />\s*$/.test(line.trim())) {
+    const next = lines[i + 1]?.trim() ?? '';
+    if (CJK_RE.test(next) && !/^<[/a-zA-Z]/.test(next)) return true;
+  }
+  return false;
+}
+
+function assertNoCnItalicInFile(rel, label) {
+  const lines = read(rel).split('\n');
+  const hits = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (!cnItalicMisuse(lines, i)) continue;
+    hits.push({ line: i + 1, text: lines[i].trim() });
+  }
+  assert.equal(hits.length, 0, `${label}: FONT_CN + italic on CJK (found ${hits.length})`);
+}
+
+// Moments — end-of-feed marker
+{
+  const moments = read('screens/MomentsScreen.tsx');
+  const block = moments.slice(moments.indexOf('— 流到这里就停了 —') - 200, moments.indexOf('— 流到这里就停了 —') + 80);
+  assert.match(block, /fontFamily:\s*FONT_CN/);
+  assert.doesNotMatch(block, /fontStyle:\s*['"]italic['"]/);
+}
+
+// Moments — Corridor title split: Latin italic on DISPLAY only, Chinese normal on FONT_CN
+{
+  const moments = read('screens/MomentsScreen.tsx');
+  const idx = moments.indexOf('The Corridor');
+  const block = moments.slice(Math.max(0, idx - 120), idx + 280);
+  assert.match(block, /FONT_DISPLAY,\s*fontStyle:\s*['"]italic['"]/);
+  assert.match(block, /FONT_CN,\s*fontStyle:\s*['"]normal['"]/);
+  const outer = block.match(/<span style=\{\{ fontSize: 12, letterSpacing: 2, color: 'var\(--dream\)' \}\}>/)?.[0] ?? '';
+  assert.doesNotMatch(outer, /fontStyle/, 'Corridor outer wrapper must not set italic');
+}
+
+// Ledger — memory/read association labels
+assertNoCnItalicInFile('screens/LedgerScreen.tsx', 'Ledger');
+
+// Codex — status CJK guard remains
+{
+  const codex = read('screens/CodexChatScreen.tsx');
+  assert.match(codex, /hasCJK\(statusText\)\s*\?\s*'normal'\s*:\s*'italic'/);
+}
+
 console.log('test-typography-semantics: ok');

@@ -1102,7 +1102,7 @@ export function MomentsScreen() {
                     </div>
                   )}
                   {feedItems.length > 0 && !feedHasMore && (
-                    <div style={{ textAlign: 'center', padding: '18px 0 4px', fontFamily: FONT_CN, fontStyle: 'italic', fontSize: 11.5, letterSpacing: 2, color: 'var(--ghost)' }}>
+                    <div style={{ textAlign: 'center', padding: '18px 0 4px', fontFamily: FONT_CN, fontSize: 11.5, letterSpacing: 2, color: 'var(--ghost)' }}>
                       — 流到这里就停了 —
                     </div>
                   )}
@@ -1182,9 +1182,9 @@ export function MomentsScreen() {
               {tab === 'dream' && (
                 <div className="vstack vstack-12">
                   <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', padding: '0 4px' }}>
-                    <span style={{ fontStyle: 'italic', fontSize: 12, letterSpacing: 2, color: 'var(--dream)' }}>
-                      <span style={{ fontFamily: FONT_DISPLAY }}>The Corridor</span>
-                      <span style={{ fontFamily: FONT_CN }}> · 梦的走廊</span>
+                    <span style={{ fontSize: 12, letterSpacing: 2, color: 'var(--dream)' }}>
+                      <span style={{ fontFamily: FONT_DISPLAY, fontStyle: 'italic' }}>The Corridor</span>
+                      <span style={{ fontFamily: FONT_CN, fontStyle: 'normal' }}> · 梦的走廊</span>
                     </span>
                     <span style={{ fontSize: 10.5, color: 'var(--ghost)' }}>按住看光 · 点击进入</span>
                   </div>
