@@ -37,3 +37,4 @@ jobs:
           npm run test:manual-context-window
           npm run test:legacy-transcript-window
           npm run test:react-shell-architecture
+          npm run test:typography-semantics

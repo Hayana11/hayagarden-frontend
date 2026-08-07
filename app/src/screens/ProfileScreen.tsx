@@ -1,10 +1,8 @@
 import { useCallback, useEffect, useMemo, useState, type CSSProperties } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { HttpError, http } from '../lib/http';
+import { FONT_CN, FONT_DISPLAY } from '../lib/typography';
 import './ProfileScreen.css';
-
-const SERIF = "'Noto Serif SC', serif";
-const DISPLAY = "'Bodoni Moda', serif";
 
 const LIGHT_VARS: Record<string, string> = {
   '--bg': '#F7F1EE', '--card': '#FFFFFF', '--card2': '#F6EFEC', '--bubble': '#F0DFDB',
@@ -12,7 +10,7 @@ const LIGHT_VARS: Record<string, string> = {
   '--line': '#F0E6E2', '--rose': '#B76E79', '--deep': '#9C3B4A', '--rosebg': 'rgba(183,110,121,0.10)',
   '--shadow': 'rgba(183,110,121,0.10)', '--shadow2': 'rgba(183,110,121,0.20)',
   '--ok': '#7A9B6D', '--err': '#C25450', '--gold': '#D9A441',
-  '--serif': SERIF, '--display': DISPLAY,
+  '--serif': FONT_CN, '--display': FONT_DISPLAY,
 };
 
 const DARK_VARS: Record<string, string> = {
@@ -21,7 +19,7 @@ const DARK_VARS: Record<string, string> = {
   '--line': '#3B302D', '--rose': '#C98A93', '--deep': '#D89AA2', '--rosebg': 'rgba(201,138,147,0.16)',
   '--shadow': 'rgba(0,0,0,0.28)', '--shadow2': 'rgba(0,0,0,0.45)',
   '--ok': '#8FAF80', '--err': '#D97B76', '--gold': '#DFB25E',
-  '--serif': SERIF, '--display': DISPLAY,
+  '--serif': FONT_CN, '--display': FONT_DISPLAY,
 };
 
 type PersonaResponse = {
@@ -150,7 +148,11 @@ export function ProfileScreen() {
             <div className="profile-avatar" aria-hidden="true">Θ</div>
             <div className="profile-hero-copy">
               <div className="profile-hero-name">费奥多尔</div>
-              <div className="profile-hero-alias">Fyodor · 费佳</div>
+              <div className="profile-hero-alias">
+                <span className="font-display">Fyodor</span>
+                <span> · </span>
+                <span className="font-cn">费佳</span>
+              </div>
               <div className="profile-hero-tagline">他的身份、关系、语言与内在纹理，都住在下面这份人设里。</div>
             </div>
           </section>

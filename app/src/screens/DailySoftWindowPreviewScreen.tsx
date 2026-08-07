@@ -9,9 +9,7 @@ import {
   setMockScenario,
   type SoftWindowMockScenario,
 } from '../lib/dailySoftWindow';
-
-const SERIF = "'Noto Serif SC', serif";
-const DISPLAY = "'Bodoni Moda', serif";
+import { FONT_CN, FONT_DISPLAY } from '../lib/typography';
 
 const LIGHT_VARS: Record<string, string> = {
   '--bg': '#F7F1EE',
@@ -82,7 +80,7 @@ export function DailySoftWindowPreviewScreen() {
         flexDirection: 'column',
         background: 'var(--bg)',
         color: 'var(--ink)',
-        fontFamily: SERIF,
+        fontFamily: FONT_CN,
       }}
     >
       <header
@@ -100,10 +98,11 @@ export function DailySoftWindowPreviewScreen() {
               ‹
             </Link>
             <div style={{ minWidth: 0 }}>
-              <div style={{ fontFamily: DISPLAY, fontSize: 11, letterSpacing: 2, color: 'var(--ghost)' }}>
-                FE-R1 · MOCK · 预览专用 · 正式聊天走 BFF 探针
+              <div style={{ fontSize: 11, letterSpacing: 2, color: 'var(--ghost)' }}>
+                <span style={{ fontFamily: FONT_DISPLAY }}>FE-R1 · MOCK</span>
+                <span style={{ fontFamily: FONT_CN }}> · 预览专用 · 正式聊天走 BFF 探针</span>
               </div>
-              <div style={{ fontFamily: SERIF, fontSize: 16, fontWeight: 600, letterSpacing: 1 }}>新的一天</div>
+              <div style={{ fontFamily: FONT_CN, fontSize: 16, fontWeight: 600, letterSpacing: 1 }}>新的一天</div>
             </div>
           </div>
           <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
@@ -117,7 +116,7 @@ export function DailySoftWindowPreviewScreen() {
                   borderRadius: 999,
                   padding: '5px 10px',
                   fontSize: 11,
-                  fontFamily: DISPLAY,
+                  fontFamily: FONT_DISPLAY,
                   letterSpacing: 0.5,
                   cursor: 'pointer',
                   background: scenario === s.id ? 'var(--rose)' : 'var(--card2)',
@@ -144,7 +143,7 @@ export function DailySoftWindowPreviewScreen() {
                   <div
                     style={{
                       textAlign: 'center',
-                      fontFamily: DISPLAY,
+                      fontFamily: FONT_DISPLAY,
                       fontSize: 12,
                       letterSpacing: 2,
                       color: 'var(--ghost)',
@@ -200,7 +199,7 @@ export function DailySoftWindowPreviewScreen() {
               padding: '12px 12px 10px',
             }}
           >
-            <div style={{ fontSize: 14, color: 'var(--ghost)', padding: '4px 8px 10px', fontFamily: SERIF }}>
+            <div style={{ fontSize: 14, color: 'var(--ghost)', padding: '4px 8px 10px', fontFamily: FONT_CN }}>
               和岛聊聊…（仅预览；不调用 live API。点 ↑ = 模拟锁 0 轮）
             </div>
             <div style={{ display: 'flex', justifyContent: 'flex-end' }}>

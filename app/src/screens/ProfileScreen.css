@@ -26,7 +26,7 @@
 }
 
 .profile-title {
-  font-family: var(--display);
+  font-family: var(--font-serif-display);
   font-size: 22px;
   font-weight: 600;
   letter-spacing: 1px;
@@ -324,8 +324,14 @@
 .profile-hero-alias {
   margin-top: 3px;
   color: var(--rose);
-  font: italic 13px/1.4 var(--display);
+  font-size: 13px;
+  line-height: 1.4;
   letter-spacing: 1.4px;
+}
+
+.profile-hero-alias .font-display {
+  font-family: var(--font-serif-display);
+  font-style: italic;
 }
 
 .profile-hero-tagline {
