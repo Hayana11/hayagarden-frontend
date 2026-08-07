@@ -1233,7 +1233,7 @@ export function MomentsScreen() {
                     {data?.mood ? (
                       <>
                         <div style={{ position: 'relative', width: 74, height: 74, flexShrink: 0 }}>
-                          <div style={{ position: 'absolute', inset: 4, borderRadius: '50%', background: `radial-gradient(circle at 32% 28%, rgba(255,242,238,0.92), ${moodColor} 74%)`, boxShadow: 'inset -8px -10px 18px rgba(0,0,0,0.16),inset 6px 8px 16px rgba(255,255,255,0.4)' }} />
+                          <div style={{ position: 'absolute', top: 4, right: 4, bottom: 4, left: 4, borderRadius: '50%', background: `radial-gradient(circle at 32% 28%, rgba(255,242,238,0.92), ${moodColor} 74%)`, boxShadow: 'inset -8px -10px 18px rgba(0,0,0,0.16),inset 6px 8px 16px rgba(255,255,255,0.4)' }} />
                         </div>
                         <div className="vstack vstack-7" style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column' }}>
                           <span style={{ fontSize: 18, fontWeight: 600, letterSpacing: 2, color: 'var(--ink)' }}>{data.mood.moodWord}</span>
@@ -1264,20 +1264,20 @@ export function MomentsScreen() {
                     <div style={{ position: 'relative', height: 110, marginTop: 14, borderRadius: 14, background: 'var(--card2)', overflow: 'hidden' }}>
                       <div style={{ position: 'absolute', left: 14, right: 14, top: '50%', height: 1, background: 'var(--line)' }} />
                       {historyLoading ? (
-                        <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 11.5, color: 'var(--ghost)' }}>读取中…</div>
+                        <div className="c78-fill-absolute" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 11.5, color: 'var(--ghost)' }}>读取中…</div>
                       ) : historyError ? (
                         <div className="vstack vstack-10 c78-fill-absolute" style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: '0 20px' }}>
                           <span style={{ fontSize: 11.5, color: 'var(--err)', letterSpacing: 1, textAlign: 'center' }}>情绪历史读取失败</span>
                           <div onClick={() => setHistoryReloadKey((key) => key + 1)} style={{ cursor: 'pointer', padding: '6px 14px', borderRadius: 999, background: 'var(--card)', color: 'var(--mut)', fontSize: 12, letterSpacing: 1 }}>重试</div>
                         </div>
                       ) : historyChart ? (
-                        <svg viewBox={`0 0 ${historyChart.w} ${historyChart.h}`} preserveAspectRatio="none" style={{ position: 'absolute', inset: '12px 14px', width: 'calc(100% - 28px)', height: 'calc(100% - 24px)' }}>
+                        <svg viewBox={`0 0 ${historyChart.w} ${historyChart.h}`} preserveAspectRatio="none" style={{ position: 'absolute', top: 12, right: 14, bottom: 12, left: 14, width: 'calc(100% - 28px)', height: 'calc(100% - 24px)' }}>
                           <path d={historyChart.line} fill="none" stroke="var(--rose)" strokeWidth={2.2} strokeLinecap="round" />
                         </svg>
                       ) : (
-                        <span style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 11.5, color: 'var(--ghost)', letterSpacing: 1, textAlign: 'center', padding: '0 20px' }}>
+                        <div className="c78-fill-absolute" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 11.5, color: 'var(--ghost)', letterSpacing: 1, textAlign: 'center', padding: '0 20px' }}>
                           还没有连续的情绪记录<br />对话评分后会自动积累
-                        </span>
+                        </div>
                       )}
                       {historyChart?.last && (
                         <span style={{ position: 'absolute', right: 12, bottom: 8, fontFamily: DISPLAY, fontSize: 10, color: 'var(--ghost)' }}>
@@ -1295,7 +1295,7 @@ export function MomentsScreen() {
                     {(data?.emotionMemories || []).length === 0 ? (
                       <div style={{ padding: '20px 4px', fontSize: 12.5, color: 'var(--faint)', lineHeight: 1.8 }}>还没有关联出情绪读数的记忆。</div>
                     ) : (
-                      <div style={{ position: 'relative', aspectRatio: '1/1', background: 'var(--card2)', borderRadius: 16, marginTop: 14 }}>
+                      <div className="moments-va-plot">
                         <div style={{ position: 'absolute', left: 0, right: 0, top: '50%', height: 1, background: 'var(--line)' }} />
                         <div style={{ position: 'absolute', top: 0, bottom: 0, left: '50%', width: 1, background: 'var(--line)' }} />
                         <span style={{ position: 'absolute', bottom: 10, left: 12, fontSize: 10.5, color: 'var(--ghost)' }}>← 不愉悦</span>

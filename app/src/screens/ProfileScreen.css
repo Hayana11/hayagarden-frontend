@@ -183,6 +183,7 @@
   background: transparent;
   color: var(--ink);
   font: 400 16.5px/1.6 var(--serif);
+  min-height: 48vh;
   min-height: 48dvh;
 }
 
@@ -399,6 +400,7 @@
 .profile-persona-editor {
   display: block;
   width: 100%;
+  min-height: 58vh;
   min-height: 58dvh;
   resize: vertical;
   border: 0;
