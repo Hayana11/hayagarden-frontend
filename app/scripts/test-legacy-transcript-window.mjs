@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 import {
   LEGACY_WINDOW_SIZE,
   LEGACY_WINDOW_STEP,
@@ -7,6 +8,7 @@ import {
   shiftTranscriptWindowNewer,
   transcriptWindowAfterPrepend,
   transcriptWindowAroundIndex,
+  followLatestAfterSearchJump,
   isTranscriptWindowAtLatest,
   clampTranscriptWindow,
   windowSize,
@@ -92,6 +94,44 @@ assert.ok(isTranscriptWindowAtLatest(latestTranscriptWindow(80), 80));
 {
   const head = shiftTranscriptWindowOlder({ start: 0, end: 20 }, 80);
   assert.deepEqual(head, { start: 0, end: 20 });
+}
+
+// 10. search-near-tail: geometric latest window ≠ follow-latest intent
+{
+  const idx = 70;
+  const around = transcriptWindowAroundIndex(idx, 80);
+  assert.ok(isTranscriptWindowAtLatest(around, 80), 'around idx 70 touches tail geometrically');
+  assert.equal(followLatestAfterSearchJump(idx, 80), false, 'search jump to 70 must not follow');
+  assert.equal(followLatestAfterSearchJump(79, 80), true, 'jump to newest message may follow');
+  assert.equal(followLatestAfterSearchJump(0, 80), false);
+}
+
+// 11. mutation-from-old-window: runStream pins latest before live mounts
+{
+  const screen = fs.readFileSync(new URL('../src/screens/ChatScreen.tsx', import.meta.url), 'utf8');
+  const runStreamStart = screen.indexOf('const runStream = useCallback');
+  const runStreamBody = screen.slice(runStreamStart, screen.indexOf('const send = useCallback'));
+  assert.ok(runStreamStart >= 0);
+  assert.match(runStreamBody, /pinTranscriptToLatest\(\)/, 'runStream must pin latest before streaming');
+
+  const redoStart = screen.indexOf('const redo = useCallback');
+  const redoBody = screen.slice(redoStart, screen.indexOf('const saveEdit = useCallback'));
+  const redoPin = redoBody.indexOf('pinTranscriptToLatest()');
+  const redoStream = redoBody.indexOf('runStream(');
+  assert.ok(redoStream >= 0, 'redo calls runStream');
+  // No late pin after stream in redo (invariant lives in runStream)
+  assert.equal(redoPin, -1, 'redo must not late-pin after stream');
+
+  const editStart = screen.indexOf('const saveEdit = useCallback');
+  const editBody = screen.slice(editStart, screen.indexOf('const branchSwitch = useCallback'));
+  const editPin = editBody.indexOf('pinTranscriptToLatest()');
+  const editStream = editBody.indexOf('runStream(');
+  assert.ok(editStream >= 0, 'saveEdit calls runStream');
+  assert.equal(editPin, -1, 'saveEdit must not late-pin after stream');
+
+  const branchStart = screen.indexOf('const branchSwitch = useCallback');
+  const branchBody = screen.slice(branchStart, screen.indexOf('const copyText = useCallback'));
+  assert.match(branchBody, /legacyCompat.*pinTranscriptToLatest|pinTranscriptToLatest[\s\S]*refetchLatest\(false\)/);
 }
 
 console.log('test-legacy-transcript-window: ok');

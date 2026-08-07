@@ -47,6 +47,7 @@ import { attachChatTheme, loadChatSettings, patchChatSettings, resolveEffectiveT
 import { getLegacyNativeCompatDetails } from '../lib/legacyNativeCompat';
 import {
   clampTranscriptWindow,
+  followLatestAfterSearchJump,
   isTranscriptWindowAtLatest,
   latestTranscriptWindow,
   shiftTranscriptWindowNewer,
@@ -570,6 +571,9 @@ export function ChatScreen() {
       userMessageId: number | null,
       opts: { rewriteId?: string | null } = {},
     ): Promise<boolean> => {
+      // Invariant: any path entering live streaming pins the DOM window to latest
+      // so live replies never render under an old browsing window.
+      pinTranscriptToLatest();
       liveRef.current = { thinking: '', text: '', tools: [], phase: 'wait' };
       setLive(liveRef.current);
       const ctrl = new AbortController();
@@ -609,7 +613,7 @@ export function ChatScreen() {
       }
       return res.ok;
     },
-    [scrollBottom, showToast, updateLive],
+    [scrollBottom, showToast, updateLive, pinTranscriptToLatest],
   );
 
   const send = useCallback(async () => {
@@ -708,6 +712,7 @@ export function ChatScreen() {
         return;
       }
       // Keep old assistant visible until candidate activates.
+      // runStream pins latest before live mounts (mutation invariant).
       const ok = await runStream(prep.userMessageId, { rewriteId: prep.rewriteId });
       if (ok) {
         // finalize retries transport-ambiguous / effects_pending internally (same rewrite_id).
@@ -715,11 +720,10 @@ export function ChatScreen() {
         if (!fin) showToast('重答结果未确认，正在刷新…');
         else if (fin.effectsPending) showToast('重答已切换，收尾未完成，可再试一次');
       }
-      pinTranscriptToLatest();
       await refetchLatest();
       setSending(false);
     },
-    [sending, refetchLatest, runStream, showToast, pinTranscriptToLatest],
+    [sending, refetchLatest, runStream, showToast],
   );
 
   const saveEdit = useCallback(
@@ -736,6 +740,7 @@ export function ChatScreen() {
         return;
       }
       // Active transcript stays intact until finalize succeeds.
+      // runStream pins latest before live mounts (mutation invariant).
       const ok = await runStream(null, { rewriteId: edit.rewriteId });
       if (ok) {
         // finalize retries transport-ambiguous / effects_pending internally (same rewrite_id).
@@ -750,19 +755,21 @@ export function ChatScreen() {
           showToast('修改已切换，收尾未完成，可再试一次');
         }
       }
-      pinTranscriptToLatest();
       await refetchLatest();
       setSending(false);
     },
-    [editText, sending, refetchLatest, runStream, showToast, pinTranscriptToLatest],
+    [editText, sending, refetchLatest, runStream, showToast],
   );
 
   const branchSwitch = useCallback(
     async (msgId: number, dir: 1 | -1) => {
       const r = await switchChatBranch(msgId, dir);
-      if (r) await refetchLatest(false);
+      if (!r) return;
+      // Authoritative msgs replacement invalidates old index windows on legacy.
+      if (legacyCompat) pinTranscriptToLatest();
+      await refetchLatest(false);
     },
-    [refetchLatest],
+    [refetchLatest, legacyCompat, pinTranscriptToLatest],
   );
 
   const copyText = useCallback(
@@ -834,7 +841,8 @@ export function ChatScreen() {
         return;
       }
       const next = transcriptWindowAroundIndex(idx, msgs.length);
-      followLatestRef.current = isTranscriptWindowAtLatest(next, msgs.length);
+      // Intent-based: geometric "window touches tail" must not auto-follow.
+      followLatestRef.current = followLatestAfterSearchJump(idx, msgs.length);
       pendingJumpIdRef.current = id;
       setTxWin(next);
     } else {

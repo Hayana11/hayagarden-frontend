@@ -35,3 +35,4 @@ jobs:
           npm run test:daily-soft-window
           npm run test:daily-soft-window-machine
           npm run test:manual-context-window
+          npm run test:legacy-transcript-window

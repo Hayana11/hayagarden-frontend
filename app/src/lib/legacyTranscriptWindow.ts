@@ -86,3 +86,11 @@ export function transcriptWindowAroundIndex(index: number, total: number): Trans
   }
   return { start, end };
 }
+
+/**
+ * Search jump follow intent: only chase latest when the target itself is the
+ * newest message. Geometric "window touches tail" must NOT imply follow-latest.
+ */
+export function followLatestAfterSearchJump(index: number, total: number): boolean {
+  return total > 0 && index === total - 1;
+}
