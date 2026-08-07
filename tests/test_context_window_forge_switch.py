@@ -1761,9 +1761,12 @@ class ForgeDbMultimodalLiveResumeTests(unittest.TestCase):
 
     def test_live_resume_reads_db_forged_image(self):
         from scripts.spike_claude_forge_resume import (
-            _claude_cmd,
             _resume_probe_from_run,
             _run_claude,
+        )
+        from tools.claude_forge_live_gate import (
+            parse_stdout_events,
+            verify_jsonl_prefix_unchanged,
         )
 
         root = tempfile.mkdtemp(prefix='forge-vision-live-')
@@ -1805,15 +1808,18 @@ class ForgeDbMultimodalLiveResumeTests(unittest.TestCase):
                 conn.close()
         path = forged.jsonl_path
         before_bytes = path.read_bytes()
-        before_events = load_jsonl(path)
+        events = load_jsonl(path)
+        user_content = events[0]['message']['content']
+        self.assertIsInstance(user_content, list)
+        self.assertTrue(any(b.get('type') == 'image' for b in user_content))
         env = _live_resume_claude_env(Path(hooks.claude_home))
         prompt = '上一窗口那张图片中央写了什么？只回答那串文字，不要解释。'
         payload = json.dumps(
             {'type': 'user', 'message': {'role': 'user', 'content': prompt}},
             ensure_ascii=False,
         ) + '\n'
-        cmd = _claude_cmd(
-            '-p',
+        cmd = [
+            'claude', '-p',
             '--resume', forged.target_session_id,
             '--input-format', 'stream-json',
             '--output-format', 'stream-json',
@@ -1822,7 +1828,7 @@ class ForgeDbMultimodalLiveResumeTests(unittest.TestCase):
             '--max-turns', '3',
             '--tools', '',
             '--allowedTools', '',
-        )
+        ]
         timeout = float(os.environ.get('HAYA_VISION_PROBE_TIMEOUT', '300'))
         run = _run_claude(
             cmd=cmd,
@@ -1831,15 +1837,20 @@ class ForgeDbMultimodalLiveResumeTests(unittest.TestCase):
             stdin_payload=payload,
             timeout_seconds=timeout,
         )
-        probe = _resume_probe_from_run(
-            run=run,
-            session_id=forged.target_session_id,
-            canary=VISION_MARKER,
-            before_bytes=before_bytes,
-            before_events=before_events,
-            jsonl_path=path,
+        raw = parse_stdout_events(run.stdout_lines)
+        after_bytes = path.read_bytes()
+        self.assertTrue(run.process_started, run.stderr_text)
+        self.assertFalse(run.timed_out, run.stderr_text)
+        self.assertEqual(run.exit_code, 0, run.stderr_text)
+        self.assertTrue(raw.saw_text_delta, raw)
+        self.assertTrue(raw.result_ok, raw)
+        self.assertTrue(verify_jsonl_prefix_unchanged(before_bytes, after_bytes))
+        self.assertGreater(len(after_bytes), len(before_bytes))
+        self.assertEqual(
+            raw.assistant_text.strip(),
+            VISION_MARKER,
+            {'assistant_text': raw.assistant_text, 'stderr': run.stderr_text[:500]},
         )
-        self.assertTrue(probe.get('canary_matched'), probe)
 
 
 if __name__ == '__main__':
