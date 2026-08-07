@@ -19,9 +19,9 @@
 
 .profile-header {
   display: grid;
-  grid-template-columns: 52px 1fr 52px;
+  grid-template-columns: 38px 1fr 38px;
   align-items: center;
-  min-height: 56px;
+  min-height: 44px;
   flex: none;
 }
 
@@ -45,8 +45,8 @@
 .profile-round-button,
 .profile-save-button,
 .profile-back-button {
-  width: 44px;
-  height: 44px;
+  width: 38px;
+  height: 38px;
   border-radius: 50%;
   display: grid;
   place-items: center;

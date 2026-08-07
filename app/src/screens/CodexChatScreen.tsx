@@ -231,7 +231,7 @@ export function CodexChatScreen() {
       {/* top nav */}
       <div style={{ flexShrink: 0, position: 'relative', zIndex: 40 }}>
         <div style={{ background: 'var(--card)', boxShadow: '0 6px 18px var(--shadow)', position: 'relative', zIndex: 3 }}>
-          <div style={{ maxWidth: 430, margin: '0 auto', display: 'flex', alignItems: 'center', gap: 10, padding: '10px 12px 9px' }}>
+          <div className="page-header-toolbar">
             <div onClick={() => setSidebarOpen(true)} style={{ cursor: 'pointer', width: 38, height: 38, borderRadius: '50%', background: 'linear-gradient(135deg,#5C8AC0,#2F5A87)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, boxShadow: '0 6px 14px var(--shadow2)' }}>
               <span style={{ fontFamily: FONT_DISPLAY, fontStyle: 'italic', fontSize: 15, color: '#EEF2F6' }}>C</span>
             </div>
