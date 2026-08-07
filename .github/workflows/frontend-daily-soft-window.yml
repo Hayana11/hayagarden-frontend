@@ -39,3 +39,4 @@ jobs:
           npm run test:react-shell-architecture
           npm run test:typography-semantics
           npm run test:usage-chrome78-runtime
+          npm run test:page-header-geometry
