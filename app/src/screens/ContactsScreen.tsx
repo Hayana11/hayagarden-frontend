@@ -3,7 +3,6 @@
 // honest locked placeholder (no backend for 谁是卧底/飞行棋 exists yet).
 import { useEffect, useState, type CSSProperties } from 'react';
 import { Link } from 'react-router-dom';
-import { BottomNav } from '../components/BottomNav';
 import { getGroupStatus, type AgentStatus } from '../lib/groupChat';
 
 const SETTINGS_KEY = 'fyodor-chat-settings';
@@ -113,7 +112,7 @@ export function ContactsScreen() {
 
   return (
     <div
-      className="dash-fullscreen-page"
+      className="app-frame__page"
       style={{
         ...(vars as CSSProperties),
         display: 'flex', flexDirection: 'column',
@@ -194,8 +193,6 @@ export function ContactsScreen() {
           </div>
         </div>
       </div>
-
-      <BottomNav embedded />
 
       {toast && (
         <div style={{ position: 'fixed', left: 0, right: 0, bottom: 28, zIndex: 80, display: 'flex', justifyContent: 'center', pointerEvents: 'none' }}>

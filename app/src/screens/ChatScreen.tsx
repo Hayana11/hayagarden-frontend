@@ -5,7 +5,6 @@
 // Mounted at /dash/chat, parallel to the legacy /chat page.
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import { Link } from 'react-router-dom';
-import { BottomNav } from '../components/BottomNav';
 import { CarryoverModal } from '../components/dailySoftWindow';
 import { useManualContextWindow } from '../hooks/useManualContextWindow';
 import {
@@ -1294,7 +1293,7 @@ export function ChatScreen() {
   return (
     <div
       ref={chatRootRef}
-      className="chat-root dash-fullscreen-page"
+      className="chat-root app-frame__page"
       style={{
         display: 'flex',
         flexDirection: 'column',
@@ -1821,7 +1820,6 @@ export function ChatScreen() {
         </div>
       )}
 
-      <BottomNav embedded />
     </div>
   );
 }

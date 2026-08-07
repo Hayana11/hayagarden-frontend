@@ -36,3 +36,4 @@ jobs:
           npm run test:daily-soft-window-machine
           npm run test:manual-context-window
           npm run test:legacy-transcript-window
+          npm run test:react-shell-architecture

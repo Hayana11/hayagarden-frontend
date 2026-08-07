@@ -1,7 +1,5 @@
-import { useEffect } from 'react';
-import { BrowserRouter, Routes, Route, useLocation } from 'react-router-dom';
-import { AppShell } from './components/AppShell';
-import { BottomNav } from './components/BottomNav';
+import { BrowserRouter, Routes, Route } from 'react-router-dom';
+import { AppFrame } from './components/AppFrame';
 import { DashScreen } from './screens/DashScreen';
 import { MemoryScreen } from './screens/MemoryScreen';
 import { UsageScreen } from './screens/UsageScreen';
@@ -19,18 +17,10 @@ import { MonopolyRoomScreen } from './screens/MonopolyRoomScreen';
 import { DailySoftWindowPreviewScreen } from './screens/DailySoftWindowPreviewScreen';
 import { ManualContextWindowPreviewScreen } from './screens/ManualContextWindowPreviewScreen';
 import { useLegacyNativeCompat } from './hooks/useLegacyNativeCompat';
-import { MONOPOLY_ROOM_PATH, ROUTES, isFullscreenPath } from './navigation';
+import { MONOPOLY_ROOM_PATH, ROUTES } from './navigation';
 
-function Shell() {
-  const location = useLocation();
-  const fullscreen = isFullscreenPath(location.pathname);
-
-  useEffect(() => {
-    document.documentElement.classList.toggle('dash-fullscreen', fullscreen);
-    return () => document.documentElement.classList.remove('dash-fullscreen');
-  }, [fullscreen]);
-
-  const routes = (
+function AppRoutes() {
+  return (
     <Routes>
       <Route path={ROUTES.dash} element={<DashScreen />} />
       <Route path={ROUTES.memory} element={<MemoryScreen />} />
@@ -50,15 +40,6 @@ function Shell() {
       <Route path={ROUTES.manualContextWindow} element={<ManualContextWindowPreviewScreen />} />
     </Routes>
   );
-
-  if (fullscreen) return routes;
-
-  return (
-    <AppShell>
-      {routes}
-      <BottomNav />
-    </AppShell>
-  );
 }
 
 export default function App() {
@@ -67,7 +48,9 @@ export default function App() {
 
   return (
     <BrowserRouter basename={basename}>
-      <Shell />
+      <AppFrame>
+        <AppRoutes />
+      </AppFrame>
     </BrowserRouter>
   );
 }
