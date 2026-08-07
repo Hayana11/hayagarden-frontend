@@ -17,15 +17,17 @@ _EPOCH_ENV = 'CC_HISTORY_REWRITE_EPOCH_PATH'
 # Backward-compatible alias used by earlier barrier-path tests/env.
 _EPOCH_ENV_LEGACY = 'CC_HISTORY_REWRITE_BARRIER_PATH'
 _EPOCH_NAME = 'hayagarden-cc-history-rewrite.epoch'
+# Legacy split-file idempotency store (pre-unified-state). Read-only migration.
 _IDEMPOTENCY_ENV = 'CC_HISTORY_REWRITE_IDEMPOTENCY_PATH'
 _IDEMPOTENCY_NAME = 'hayagarden-cc-history-rewrite.idempotency.json'
+_UNREADABLE_EPOCH = '__unreadable__'
 
 
 def _lock_path():
     return os.environ.get(_LOCK_ENV) or os.path.join(tempfile.gettempdir(), _LOCK_NAME)
 
 
-def _epoch_path():
+def _state_path():
     return (
         os.environ.get(_EPOCH_ENV)
         or os.environ.get(_EPOCH_ENV_LEGACY)
@@ -33,92 +35,158 @@ def _epoch_path():
     )
 
 
-def _idempotency_path():
+def _legacy_idempotency_path():
     return (
         os.environ.get(_IDEMPOTENCY_ENV)
         or os.path.join(tempfile.gettempdir(), _IDEMPOTENCY_NAME)
     )
 
 
-def _read_idempotency_index():
-    path = _idempotency_path()
+def _empty_state():
+    return {
+        'epoch': '',
+        'reason': 'history_rewrite',
+        'idempotency_index': {},
+    }
+
+
+def _unreadable_state():
+    return {
+        'epoch': _UNREADABLE_EPOCH,
+        'reason': 'history_rewrite',
+        'idempotency_index': {},
+    }
+
+
+def _read_legacy_idempotency_index():
+    """Best-effort migration from the short-lived split idempotency file."""
+    path = _legacy_idempotency_path()
     try:
         with open(path, 'rb') as handle:
             raw = handle.read().decode('utf-8', 'ignore').strip()
     except FileNotFoundError:
         return {}
     except OSError:
-        return {}
+        return None
     if not raw:
         return {}
     try:
         data = json.loads(raw)
     except Exception:
-        return {}
-    return data if isinstance(data, dict) else {}
+        return None
+    if not isinstance(data, dict):
+        return None
+    out = {}
+    for key, entry in data.items():
+        if not isinstance(entry, dict):
+            continue
+        epoch = str(entry.get('epoch') or '').strip()
+        if epoch:
+            out[str(key)] = {'epoch': epoch, 'ts': entry.get('ts')}
+    return out
 
 
-def _lookup_idempotency_epoch(idempotency_key):
-    key = str(idempotency_key or '').strip()
-    if not key:
-        return ''
-    entry = _read_idempotency_index().get(key)
-    if not isinstance(entry, dict):
-        return ''
-    return str(entry.get('epoch') or '').strip()
+def _normalize_state(data):
+    """Ensure idempotency_index exists and backfill the current key if needed.
+
+    Covers legacy single-record files and the brief split-file window where
+    the global epoch advanced but a separate idempotency index write failed.
+    """
+    if not isinstance(data, dict):
+        return _unreadable_state()
+    epoch = str(data.get('epoch') or '').strip()
+    if not epoch:
+        return _empty_state()
+    reason = str(data.get('reason') or 'history_rewrite')[:80] or 'history_rewrite'
+    index = data.get('idempotency_index')
+    if not isinstance(index, dict):
+        index = {}
+    else:
+        index = dict(index)
+    legacy = _read_legacy_idempotency_index()
+    if legacy is None:
+        return _unreadable_state()
+    for key, entry in legacy.items():
+        if key not in index and isinstance(entry, dict):
+            epoch_val = str(entry.get('epoch') or '').strip()
+            if epoch_val:
+                index[key] = {'epoch': epoch_val, 'ts': entry.get('ts')}
+    key = data.get('idempotency_key')
+    if key:
+        key = str(key)
+        if key not in index and epoch != _UNREADABLE_EPOCH:
+            index[key] = {'epoch': epoch, 'ts': data.get('ts', time.time())}
+    return {
+        'epoch': epoch,
+        'reason': reason,
+        'ts': data.get('ts'),
+        'idempotency_key': str(key) if key else None,
+        'idempotency_index': index,
+    }
 
 
-def _persist_idempotency_epoch(idempotency_key, epoch):
-    key = str(idempotency_key or '').strip()
-    epoch = str(epoch or '').strip()
-    if not key or not epoch:
-        return False
-    path = _idempotency_path()
-    parent = os.path.dirname(path)
-    if parent:
-        os.makedirs(parent, exist_ok=True)
-    index = _read_idempotency_index()
-    existing = index.get(key)
-    if isinstance(existing, dict) and str(existing.get('epoch') or '').strip():
-        return str(existing.get('epoch') or '').strip() == epoch
-    index[key] = {'epoch': epoch, 'ts': time.time()}
-    payload = (json.dumps(index, separators=(',', ':'), ensure_ascii=True) + '\n').encode('utf-8')
-    tmp = path + '.tmp'
-    with open(tmp, 'wb') as handle:
-        handle.write(payload)
-        handle.flush()
-        os.fsync(handle.fileno())
-    os.replace(tmp, path)
-    return True
-
-
-def _read_epoch_record():
-    path = _epoch_path()
+def _read_durable_state():
+    path = _state_path()
     try:
         with open(path, 'rb') as handle:
             raw = handle.read().decode('utf-8', 'ignore').strip()
     except FileNotFoundError:
         return None
     except OSError:
-        # Unreadable durable epoch must not fail-open into stale hot reuse.
-        return {'epoch': '__unreadable__', 'reason': 'history_rewrite'}
+        return _unreadable_state()
     if not raw:
         return None
     try:
         data = json.loads(raw)
     except Exception:
         # Legacy single-line reason barrier → treat as opaque epoch token.
-        return {'epoch': raw, 'reason': raw[:80]}
+        return _normalize_state({'epoch': raw, 'reason': raw[:80]})
     if not isinstance(data, dict):
-        return {'epoch': str(data), 'reason': 'history_rewrite'}
-    epoch = str(data.get('epoch') or '').strip()
+        return _normalize_state({'epoch': str(data), 'reason': 'history_rewrite'})
+    if not str(data.get('epoch') or '').strip():
+        return _unreadable_state()
+    return _normalize_state(data)
+
+
+def _atomic_write_durable_state(state):
+    path = _state_path()
+    parent = os.path.dirname(path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    payload = (json.dumps(state, separators=(',', ':'), ensure_ascii=True) + '\n').encode('utf-8')
+    tmp = path + '.tmp'
+    with open(tmp, 'wb') as handle:
+        handle.write(payload)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(tmp, path)
+
+
+def _lookup_idempotency_epoch(state, idempotency_key):
+    key = str(idempotency_key or '').strip()
+    if not key or not isinstance(state, dict):
+        return ''
+    index = state.get('idempotency_index') or {}
+    entry = index.get(key)
+    if not isinstance(entry, dict):
+        return ''
+    return str(entry.get('epoch') or '').strip()
+
+
+def _read_epoch_record():
+    state = _read_durable_state()
+    if not state:
+        return None
+    epoch = str(state.get('epoch') or '').strip()
     if not epoch:
-        return {'epoch': '__unreadable__', 'reason': 'history_rewrite'}
-    reason = str(data.get('reason') or 'history_rewrite')[:80] or 'history_rewrite'
-    record = {'epoch': epoch, 'reason': reason}
-    idempotency_key = data.get('idempotency_key')
-    if idempotency_key:
-        record['idempotency_key'] = str(idempotency_key)
+        return None
+    record = {
+        'epoch': epoch,
+        'reason': state.get('reason') or 'history_rewrite',
+    }
+    key = state.get('idempotency_key')
+    if key:
+        record['idempotency_key'] = str(key)
     return record
 
 
@@ -146,37 +214,30 @@ def note_durable_history_rewrite_with_meta(reason='history_rewrite', idempotency
     """Like ``note_durable_history_rewrite`` but also reports whether a new epoch
     was minted or an existing idempotency record was reused."""
     key = str(idempotency_key or '').strip() or None
+    state = _read_durable_state()
+    if state and str(state.get('epoch') or '') == _UNREADABLE_EPOCH:
+        return {'epoch': _UNREADABLE_EPOCH, 'advanced': False, 'reused': False}
+
     if key is not None:
-        stored_epoch = _lookup_idempotency_epoch(key)
-        if stored_epoch:
-            return {'epoch': stored_epoch, 'advanced': False, 'reused': True}
-        current = _read_epoch_record()
-        if current and current.get('idempotency_key') == key:
-            epoch = str(current.get('epoch') or '').strip()
-            if epoch:
-                _persist_idempotency_epoch(key, epoch)
-                return {'epoch': epoch, 'advanced': False, 'reused': True}
-    path = _epoch_path()
-    parent = os.path.dirname(path)
-    if parent:
-        os.makedirs(parent, exist_ok=True)
+        if state:
+            stored_epoch = _lookup_idempotency_epoch(state, key)
+            if stored_epoch:
+                return {'epoch': stored_epoch, 'advanced': False, 'reused': True}
+
     epoch = secrets.token_hex(16)
-    record = {
+    index = dict((state or {}).get('idempotency_index') or {})
+    if key is not None:
+        if key not in index:
+            index[key] = {'epoch': epoch, 'ts': time.time()}
+    new_state = {
         'epoch': epoch,
         'reason': str(reason or 'history_rewrite')[:80] or 'history_rewrite',
         'ts': time.time(),
+        'idempotency_index': index,
     }
     if key is not None:
-        record['idempotency_key'] = key
-    payload = (json.dumps(record, separators=(',', ':'), ensure_ascii=True) + '\n').encode('utf-8')
-    tmp = path + '.tmp'
-    with open(tmp, 'wb') as handle:
-        handle.write(payload)
-        handle.flush()
-        os.fsync(handle.fileno())
-    os.replace(tmp, path)
-    if key is not None:
-        _persist_idempotency_epoch(key, epoch)
+        new_state['idempotency_key'] = key
+    _atomic_write_durable_state(new_state)
     return {'epoch': epoch, 'advanced': True, 'reused': False}
 
 
@@ -194,10 +255,10 @@ def note_durable_history_rewrite(reason='history_rewrite', idempotency_key=None)
     given, a durable per-key record is consulted first. If that key already
     owns an epoch (even when a newer rewrite has since advanced the global
     epoch), this call returns the *existing* epoch instead of minting a new
-    one. This covers effects/replay retries for one committed rewrite (same
-    rewrite_id must advance the epoch at most once) as well as the
-    crash-recovery case where the epoch file was written but the per-rewrite
-    staging marker was not yet persisted by the caller.
+    one. The current epoch, reason, and the full idempotency index live in
+    one durable state file and are committed atomically (temp + fsync +
+    os.replace) so there is no split-brain between a global epoch advance and
+    its per-rewrite idempotency record.
 
     Callers that never pass ``idempotency_key`` (branch_switch, delete,
     legacy edit paths) keep the original behavior exactly: every call mints

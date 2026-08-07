@@ -8,6 +8,7 @@ Covers T12-T17 from the spec:
   T16 an older rewrite's late retry cannot roll back a newer epoch
   T17 legacy mutation semantics (delete / branch_switch) are unchanged
   T19 marker persist fail → newer rewrite → old retry must not mint a third epoch
+  T21 split index persist fail after global epoch → B then A retry must not mint E3
 """
 from __future__ import annotations
 
@@ -21,7 +22,11 @@ from unittest import mock
 
 import app as app_module
 from chat import rewrite_staging as rw
-from chat.cc_history_rewrite import current_history_rewrite_epoch, note_durable_history_rewrite
+from chat.cc_history_rewrite import (
+    current_history_rewrite_epoch,
+    note_durable_history_rewrite,
+)
+from chat import cc_history_rewrite as chr
 
 
 def _schema(conn: sqlite3.Connection) -> None:
@@ -64,7 +69,6 @@ class RewriteEpochIdempotenceTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.db_path = str(Path(self.tmp.name) / 'epoch.db')
         self.epoch_path = str(Path(self.tmp.name) / 'epoch')
-        self.idempotency_path = str(Path(self.tmp.name) / 'idempotency.json')
         self.lock_path = str(Path(self.tmp.name) / 'lock')
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
@@ -89,7 +93,6 @@ class RewriteEpochIdempotenceTests(unittest.TestCase):
             mock.patch.object(app_module, '_gw_json_request', side_effect=fake_bridge),
             mock.patch.dict(os.environ, {
                 'CC_HISTORY_REWRITE_EPOCH_PATH': self.epoch_path,
-                'CC_HISTORY_REWRITE_IDEMPOTENCY_PATH': self.idempotency_path,
                 'CC_HISTORY_REWRITE_LOCK_PATH': self.lock_path,
             }, clear=False),
         ]
@@ -334,6 +337,59 @@ class RewriteEpochIdempotenceTests(unittest.TestCase):
         self.assertEqual(current_history_rewrite_epoch(), e2)
         self.assertEqual(rw.history_epoch_of(self._staging(rid1)), e1)
         self.assertEqual(len(self.bridge_calls), bridge_calls_after_b)
+
+    # T21 (hard test) ---------------------------------------------------
+    def test_t21_split_index_persist_fail_no_third_epoch(self):
+        """Simulate the pre-unified crash: global epoch E1/key=A committed but the
+        idempotency index entry for A was never persisted. B must still advance
+        to E2, and A's retry must reuse E1 — never mint E3."""
+        u1 = self._insert('hayana', 'U1')
+        self._insert('assistant', 'A1')
+        rid1 = self._prep_and_ready_edit(u1, "U1'", "A1'")
+        key_a = 'rewrite:%s' % rid1
+        minted = {}
+
+        def split_write_without_index(state):
+            minted['epoch'] = str(state.get('epoch') or '')
+            minted['reason'] = state.get('reason')
+            minted['ts'] = state.get('ts')
+            # Old dual-file failure mode: global epoch lands, index does not.
+            with open(self.epoch_path, 'w', encoding='utf-8') as handle:
+                json.dump({
+                    'epoch': minted['epoch'],
+                    'reason': minted['reason'],
+                    'idempotency_key': key_a,
+                    'ts': minted['ts'],
+                }, handle)
+
+        with mock.patch.object(chr, '_atomic_write_durable_state', side_effect=split_write_without_index):
+            fin1 = self.client.post('/api/chat/edit/finalize', json={'rewrite_id': rid1})
+        self.assertEqual(fin1.status_code, 200)
+        e1 = minted.get('epoch') or current_history_rewrite_epoch()
+        self.assertTrue(e1)
+
+        u2 = self._insert('hayana', 'U2')
+        self._insert('assistant', 'A2')
+        rid2 = self._prep_and_ready_edit(u2, "U2'", "A2'")
+        fin2 = self.client.post('/api/chat/edit/finalize', json={'rewrite_id': rid2})
+        self.assertEqual(fin2.status_code, 200)
+        e2 = current_history_rewrite_epoch()
+        self.assertTrue(e2)
+        self.assertNotEqual(e1, e2)
+        bridge_calls_after_b = len(self.bridge_calls)
+
+        fin1_retry = self.client.post('/api/chat/edit/finalize', json={'rewrite_id': rid1})
+        self.assertEqual(fin1_retry.status_code, 200)
+        self.assertEqual(current_history_rewrite_epoch(), e2)
+        self.assertEqual(rw.history_epoch_of(self._staging(rid1)), e1)
+        self.assertEqual(len(self.bridge_calls), bridge_calls_after_b)
+
+        # Unified state must now contain both keys atomically.
+        with open(self.epoch_path, encoding='utf-8') as handle:
+            durable = json.load(handle)
+        self.assertEqual(durable['epoch'], e2)
+        self.assertEqual(durable['idempotency_index'][key_a]['epoch'], e1)
+        self.assertEqual(durable['idempotency_index']['rewrite:%s' % rid2]['epoch'], e2)
 
 
 if __name__ == '__main__':
