@@ -255,6 +255,61 @@ def _remap_tool_blocks(
     return out
 
 
+def _is_viable_image_block(block: Mapping[str, Any]) -> bool:
+    """True when an image block is self-contained and safe to keep in forged JSONL."""
+    if not isinstance(block, Mapping) or block.get('type') != 'image':
+        return False
+    src = block.get('source')
+    if not isinstance(src, Mapping):
+        return False
+    if src.get('type') != 'base64':
+        return False
+    data = src.get('data')
+    media = str(src.get('media_type') or '')
+    if not data or not isinstance(data, str):
+        return False
+    if media not in {'image/png', 'image/jpeg', 'image/webp', 'image/jpg'}:
+        return False
+    return True
+
+
+def _apply_canonical_preserving_images(
+    content: Any,
+    canonical_text: str,
+) -> Any:
+    """Replace user text with canonical text; keep viable image blocks.
+
+    text-only (str or single text block) → plain ``str`` for CASE 7 compat.
+    multimodal → list with canonical text block + preserved images.
+    Invalid/empty image blocks are dropped (safe degrade), never rewritten empty.
+    """
+    if not isinstance(content, list):
+        return canonical_text
+
+    images: list[dict[str, Any]] = []
+    other: list[dict[str, Any]] = []
+    for block in content:
+        if not isinstance(block, dict):
+            continue
+        btype = block.get('type')
+        if btype == 'text':
+            continue
+        if btype == 'image':
+            if _is_viable_image_block(block):
+                images.append(copy.deepcopy(block))
+            continue
+        other.append(copy.deepcopy(block))
+
+    if not images and not other:
+        return canonical_text
+
+    blocks: list[dict[str, Any]] = [{'type': 'text', 'text': canonical_text}]
+    blocks.extend(images)
+    # Non-image non-text blocks (e.g. tool_result) keep relative order after images.
+    blocks.extend(other)
+    return blocks
+
+
 def _rebuild_user_event(
     evt: dict[str, Any],
     *,
@@ -268,7 +323,9 @@ def _rebuild_user_event(
         if _has_legacy_injection(_message_text(content)):
             stripped.append(str(out.get('uuid') or ''))
         message['role'] = 'user'
-        message['content'] = canonical_text
+        message['content'] = _apply_canonical_preserving_images(
+            content, canonical_text,
+        )
         return out
     if isinstance(content, list):
         message['content'] = _remap_tool_blocks(content, {})
@@ -376,7 +433,12 @@ def forge_transcript(
             if canonical is not None:
                 if _has_legacy_injection(_message_text(content)):
                     stripped.append(old_uid)
-                message = {'role': 'user', 'content': canonical}
+                message = {
+                    'role': 'user',
+                    'content': _apply_canonical_preserving_images(
+                        content, canonical,
+                    ),
+                }
             elif isinstance(content, list):
                 message['content'] = _remap_tool_blocks(content, tool_id_map)
             new_evt['message'] = message

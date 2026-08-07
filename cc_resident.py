@@ -874,7 +874,21 @@ class ResidentSession:
         idle_seconds_before_turn = self.peek_idle_seconds()
         respawn_reason = self._pending_respawn_reason
         one_shot_claims = self._extract_one_shot_claims(commit_meta)
-        payload = json.dumps({'type': 'user', 'message': {'role': 'user', 'content': content}}, ensure_ascii=False)
+        # content may be str (text-only) or multimodal list (text + image blocks).
+        # Validate before any stdin write so a bad vision turn never pollutes
+        # the resident session / Claude transcript.
+        try:
+            from chat.cc_vision_bridge import (
+                VisionBridgeError,
+                assert_claude_user_content_safe,
+            )
+            assert_claude_user_content_safe(content)
+        except VisionBridgeError as exc:
+            raise ResidentError('vision input rejected: ' + str(exc)) from exc
+        payload = json.dumps(
+            {'type': 'user', 'message': {'role': 'user', 'content': content}},
+            ensure_ascii=False,
+        )
         try:
             proc.stdin.write(payload + NL)
             proc.stdin.flush()
