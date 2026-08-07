@@ -4190,18 +4190,25 @@ def _cc_stream_gen(full_system, prompt, env):
     """
     import subprocess, threading
     from chat.cc_model import cc_model_args
+    from chat.cc_runtime import ClaudeRuntimeError, claude_cmd, require_pinned_claude_version
+    try:
+        require_pinned_claude_version(env=env, cwd=CC_CWD)
+    except ClaudeRuntimeError as exc:
+        raise RuntimeError('claude_runtime:%s' % exc) from exc
     proc = subprocess.Popen(
-        ['claude', '-p', prompt,
-         '--output-format', 'stream-json',
-         '--verbose',
-         '--include-partial-messages',
-         '--system-prompt', full_system,
-         '--max-turns', '5',
-         '--tools', '',
-         '--mcp-config', CC_CWD + '/cc-tools.json',
-         '--strict-mcp-config',
-         '--allowedTools', CC_ALLOWED_TOOLS,
-         '--exclude-dynamic-system-prompt-sections'] + cc_model_args(),
+        claude_cmd(
+            '-p', prompt,
+            '--output-format', 'stream-json',
+            '--verbose',
+            '--include-partial-messages',
+            '--system-prompt', full_system,
+            '--max-turns', '5',
+            '--tools', '',
+            '--mcp-config', CC_CWD + '/cc-tools.json',
+            '--strict-mcp-config',
+            '--allowedTools', CC_ALLOWED_TOOLS,
+            '--exclude-dynamic-system-prompt-sections',
+        ) + cc_model_args(),
         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         text=True, bufsize=1, cwd=CC_CWD, env=env,
     )
@@ -4586,7 +4593,8 @@ _GROUP_CHAT_LOCK = threading.Lock()
 
 def _group_chat_agent_status(agent):
     if agent == 'claude':
-        ready = bool(CC_TOKEN and shutil.which('claude'))
+        from chat.cc_runtime import pinned_runtime_available
+        ready = bool(CC_TOKEN and pinned_runtime_available(cwd=CC_CWD))
         return {
             'ready': ready,
             'detail': '可以回复' if ready else '暖色线路尚未就绪',
