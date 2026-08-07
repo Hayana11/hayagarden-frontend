@@ -15,6 +15,8 @@ Covers T1-T11 from the P0 history-rewrite cold-storm fix spec:
   T11 estimator-miss fail-safe: an equal-size hard_context retry is refused
   T18 genuine hot growth hard_context still allows bounded shrink
   T20 cold overflow leaves history boundary unchanged and records overflow=True
+  T23 zero remaining history budget trims to minimum via real build_messages
+  T24 cold preflight serializes each message plan at most once
 """
 from __future__ import annotations
 
@@ -46,7 +48,11 @@ except OSError:
     pass
 
 from cc_resident import empty_usage
-from chat.cold_bootstrap_budget import ColdBootstrapOverflow, NoBenefitRespawnError
+from chat.cold_bootstrap_budget import (
+    ColdBootstrapOverflow,
+    NoBenefitRespawnError,
+    effective_history_budget,
+)
 from chat import rewrite_staging as rw
 
 
@@ -439,7 +445,7 @@ class ColdPreflightFenceTests(unittest.TestCase):
                     messages, user_turn=True, is_cold=True,
                     rebuild_messages_fn=_rebuild,
                 ))
-        self.assertEqual(rebuild_calls, [0])
+        self.assertEqual(rebuild_calls, [1])
         self.assertEqual(resident.send_turn_calls, [])
 
     def test_t9_identical_hard_context_respawn_after_history_rewrite_refused(self):
@@ -578,6 +584,157 @@ class ColdPreflightFenceTests(unittest.TestCase):
         }
         self.assertEqual(after, before)
         self.assertTrue(ctx.exception.usage.get('cold_budget_overflow'))
+        self.assertEqual(resident.send_turn_calls, [])
+
+    def test_effective_history_budget_zero_remaining_is_minimum_safe(self):
+        self.assertEqual(
+            effective_history_budget(
+                default_history_budget=24_000,
+                non_history_estimate=90_000,
+                cold_target=70_000,
+            ),
+            1,
+        )
+
+    def test_t24_each_message_plan_serialized_once(self):
+        resident = _FenceFakeResident()
+        big_messages = _history_messages(40, row_chars=100, last_user_text='hi')
+        small_messages = _history_messages(2, row_chars=10, last_user_text='hi')
+        serialize_calls = {'original': 0, 'rebuilt': 0}
+        real_mtt = self.gateway.messages_to_text
+
+        def _rebuild(new_budget):
+            return small_messages, {'conversation_content_trimmed': True}
+
+        def _tracking_mtt(msgs):
+            text = real_mtt(msgs)
+            if len(msgs) > 10:
+                serialize_calls['original'] += 1
+            else:
+                serialize_calls['rebuilt'] += 1
+            return text
+
+        with contextlib.ExitStack() as stack:
+            for p in self._fence_patches(
+                resident,
+                int_overrides={'CC_CONTEXT_HARD_LIMIT': 1000, 'CC_CONTEXT_SOFT_LIMIT': 700,
+                                'CC_COLD_BOOTSTRAP_SAFETY_MARGIN': 100,
+                                'HISTORY_TOKEN_BUDGET': 5000},
+            ):
+                stack.enter_context(p)
+            stack.enter_context(
+                mock.patch.object(self.gateway, 'messages_to_text', side_effect=_tracking_mtt),
+            )
+            self._run(
+                resident, big_messages,
+                int_overrides={'CC_CONTEXT_HARD_LIMIT': 1000, 'CC_CONTEXT_SOFT_LIMIT': 700,
+                                'CC_COLD_BOOTSTRAP_SAFETY_MARGIN': 100,
+                                'HISTORY_TOKEN_BUDGET': 5000},
+                rebuild_messages_fn=_rebuild,
+            )
+        self.assertEqual(serialize_calls['original'], 1)
+        self.assertEqual(serialize_calls['rebuilt'], 1)
+
+
+class ZeroBudgetRebuildTests(unittest.TestCase):
+    def setUp(self):
+        self.gateway = _import_gateway()
+        self.tmp = tempfile.TemporaryDirectory()
+        self.db_path = _make_chat_db(self.tmp.name)
+        rows = []
+        for i in range(25):
+            rows.append(('hayana', 'U%d ' % i + 'x' * 400))
+            rows.append(('assistant', 'A%d ' % i + 'y' * 400))
+        self.ids = _insert_rows(self.db_path, rows)
+        self.latest_user = 'LATEST_USER_UNIQUE'
+        _insert_rows(self.db_path, [('hayana', self.latest_user)])
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _get_db(self):
+        def get_db():
+            conn = sqlite3.connect(self.db_path)
+            conn.row_factory = sqlite3.Row
+            return conn
+        return get_db
+
+    def test_t23_zero_remaining_budget_trims_via_real_build_messages(self):
+        resident = _FenceFakeResident()
+        rebuild_budgets = []
+        rebuilt_msg_counts = []
+        latest_user_hits = []
+
+        gateway = self.gateway
+
+        def _real_rebuild(new_budget):
+            rebuild_budgets.append(new_budget)
+            rebuilt_stats = {}
+            rebuilt_msgs = gateway.build_messages(
+                for_cc=True,
+                cold_safe=True,
+                history_stats_out=rebuilt_stats,
+                history_token_budget_override=new_budget,
+                commit_history_boundary=False,
+            )
+            rebuilt_msg_counts.append(len(rebuilt_msgs))
+            latest_user_hits.append(
+                sum(
+                    1 for m in rebuilt_msgs
+                    if m.get('role') == 'user' and self.latest_user in str(m.get('content') or '')
+                )
+            )
+            return rebuilt_msgs, rebuilt_stats
+
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(mock.patch.object(gateway, 'get_db', self._get_db()))
+            stack.enter_context(mock.patch.object(gateway, '_CC_RESIDENT', resident))
+            stack.enter_context(mock.patch.object(gateway, 'CC_TOKEN', 'tok'))
+            stack.enter_context(mock.patch.object(gateway, 'CC_CWD', tempfile.mkdtemp()))
+            stack.enter_context(mock.patch.object(gateway, '_recall_memories', return_value=('', [])))
+            stack.enter_context(mock.patch.object(gateway, '_fetch_group_chat_rows', return_value=([], None)))
+            stack.enter_context(mock.patch('chat.system_builder.build_cc_state', return_value={}))
+            stack.enter_context(mock.patch('chat.system_builder.build_cc_one_shot', return_value={
+                'wake_nonmessage_background': '', 'wake_message_background': '',
+                'wake_reply_bridge': '', 'wake_ids': [], 'wake_items': [],
+                'task_feedback': '', 'dream_flash': '',
+                'feedback_ids': [], 'dream_id': None,
+            }))
+            stack.enter_context(mock.patch('chat.system_builder.build_cc_cold_once', return_value={}))
+            for p in _cfg_patches(
+                int_overrides={
+                    'CC_CONTEXT_HARD_LIMIT': 100,
+                    'CC_CONTEXT_SOFT_LIMIT': 80,
+                    'CC_COLD_BOOTSTRAP_SAFETY_MARGIN': 10,
+                    'HISTORY_TOKEN_BUDGET': 24_000,
+                },
+                bool_overrides={'CONTEXT_LEAN_HISTORY_ENABLED': False},
+            ):
+                stack.enter_context(p)
+            stack.enter_context(mock.patch('chat.system_builder.build_cc_static_parts', return_value={
+                'persona': 'STATIC', 'stable_note': '', 'save_instr': '',
+                'full_system': 'S' * 400,
+            }))
+            history_stats = {}
+            messages = gateway.build_messages(
+                for_cc=True,
+                cold_safe=True,
+                history_stats_out=history_stats,
+                commit_history_boundary=False,
+            )
+            with self.assertRaises(ColdBootstrapOverflow):
+                list(gateway._cc_resident_stream_gen(
+                    messages,
+                    user_turn=True,
+                    is_cold=True,
+                    history_stats=history_stats,
+                    rebuild_messages_fn=_real_rebuild,
+                ))
+
+        self.assertEqual(rebuild_budgets, [1])
+        self.assertEqual(len(rebuilt_msg_counts), 1)
+        self.assertLess(rebuilt_msg_counts[0], len(messages))
+        self.assertEqual(latest_user_hits, [1])
         self.assertEqual(resident.send_turn_calls, [])
 
 

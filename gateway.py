@@ -1184,7 +1184,11 @@ def build_messages(
             'rolling_summary_coverage_gap': False,
         })
 
-    budget = plan['history_token_budget'] or plan['relay_low_water']
+    budget = plan['history_token_budget']
+    if plan['mode'] == 'cc_token_budget' and (budget is None or budget <= 0):
+        budget = 1
+    elif not budget:
+        budget = plan['relay_low_water']
     # Staged rewrite: skip tip-based rolling summary (may include post-fork world).
     inject_summary = (not _rewrite_id) and should_inject_rolling_summary(
         conversation_content_trimmed=stats.conversation_content_trimmed,
@@ -3792,7 +3796,7 @@ def _cc_resident_stream_gen(
         prefix = ('\n\n'.join(p for p in pieces if p) + '\n\n') if pieces else ''
 
         def _assemble_cold_content(msgs):
-            # 冷启动全程只在这里调用一次 messages_to_text（可能含图片 Relay 描图）
+            # Cold content assembly: one messages_to_text per message plan version.
             convo = messages_to_text(msgs)
             hb_text = '以下是你们今天到目前为止的对话记录：' + NL + NL + convo
             if relationship_text:
@@ -3801,7 +3805,7 @@ def _cc_resident_stream_gen(
             if wake_reply_bridge:
                 hb_text += NL + NL + wake_reply_bridge
             hb_text += NL + NL + '请回复最后一条消息。'
-            return prefix + hb_text, hb_text
+            return prefix + hb_text, hb_text, convo
 
         from chat.cold_bootstrap_budget import (
             ColdBootstrapOverflow,
@@ -3814,7 +3818,7 @@ def _cc_resident_stream_gen(
         )
         from chat.context_lean import cc_history_token_budget
 
-        content, history_bootstrap_text = _assemble_cold_content(messages)
+        content, history_bootstrap_text, convo_text = _assemble_cold_content(messages)
         cold_prompt_target_val = cold_prompt_target()
         cold_budget_mode_val = 'token_budget'
         cold_history_budget_val = cc_history_token_budget()
@@ -3825,7 +3829,7 @@ def _cc_resident_stream_gen(
         # with a smaller history budget, reusing the same token-budget
         # history assembly — never a model retry, never a raw string slice.
         if cold_prompt_estimate > cold_prompt_target_val and rebuild_messages_fn is not None:
-            history_tokens_est = estimate_text_tokens(messages_to_text(messages))
+            history_tokens_est = estimate_text_tokens(convo_text)
             non_history_est = max(0, cold_prompt_estimate - history_tokens_est)
             new_budget = effective_history_budget(
                 default_history_budget=cold_history_budget_val,
@@ -3833,7 +3837,9 @@ def _cc_resident_stream_gen(
                 cold_target=cold_prompt_target_val,
             )
             rebuilt_messages, rebuilt_stats = rebuild_messages_fn(new_budget)
-            rebuilt_content, rebuilt_history_bootstrap_text = _assemble_cold_content(rebuilt_messages)
+            rebuilt_content, rebuilt_history_bootstrap_text, _rebuilt_convo = (
+                _assemble_cold_content(rebuilt_messages)
+            )
             rebuilt_estimate = estimate_whole_prompt(full_system, rebuilt_content)
             messages = rebuilt_messages
             content, history_bootstrap_text = rebuilt_content, rebuilt_history_bootstrap_text

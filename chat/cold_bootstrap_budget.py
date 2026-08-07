@@ -90,12 +90,16 @@ def effective_history_budget(
     """Dynamic remaining-history budget for a deterministic rebuild.
 
     Never exceeds ``cold_target`` minus everything else already mandatory in
-    the cold prompt (persona/state/cold_once/current user/...). Does not
-    enforce a "keep at least N history tokens" floor — that floor must never
-    be allowed to push the whole prompt back over the target.
+    the cold prompt (persona/state/cold_once/current user/...). When no
+    history tokens remain, returns ``1`` — the minimum safe trim budget.
+    ``history_assembly`` treats ``history_token_budget <= 0`` as *disable*
+    token trimming, so zero must never be returned here.
     """
     remaining = max(0, int(cold_target) - int(non_history_estimate))
-    return max(0, min(int(default_history_budget), remaining))
+    capped = min(int(default_history_budget), remaining)
+    if capped <= 0:
+        return 1
+    return capped
 
 
 def is_immediate_post_cold_hard_context(pre_spawn_turns) -> bool:
