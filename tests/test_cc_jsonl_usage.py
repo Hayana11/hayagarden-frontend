@@ -732,6 +732,14 @@ class ToolSurfaceFingerprintTests(unittest.TestCase):
             resident = ResidentSession(tmp, "mcp__home__light_on", "/tmp/mcp.json")
             with (
                 mock.patch("cc_resident.subprocess.Popen", return_value=FakeProc([])),
+                mock.patch(
+                    "chat.cc_runtime.require_pinned_claude_version",
+                    return_value="2.1.220",
+                ),
+                mock.patch(
+                    "chat.cc_runtime.claude_cmd",
+                    side_effect=lambda *a, **k: ["claude", *a],
+                ),
                 mock.patch.object(
                     surface,
                     "capture_tool_surface_snapshot",

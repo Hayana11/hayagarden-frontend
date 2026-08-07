@@ -817,7 +817,9 @@ class ResidentGenerationTests(unittest.TestCase):
         from cc_resident import ResidentSession
         sess = ResidentSession("/tmp", "tool_a", "/tmp/cc-tools.json")
         self.assertEqual(sess.generation, 0)
-        with mock.patch("subprocess.Popen", return_value=FakeProc([])):
+        with mock.patch("subprocess.Popen", return_value=FakeProc([])), \
+             mock.patch("chat.cc_runtime.require_pinned_claude_version", return_value="2.1.220"), \
+             mock.patch("chat.cc_runtime.claude_cmd", side_effect=lambda *a, **k: ["claude", *a]):
             sess._spawn("S", {}, reason="process_dead")
             sess._spawn("S", {}, reason="idle")
         self.assertEqual(sess.generation, 2)
@@ -845,7 +847,9 @@ class IdleBeforeLastUsedTests(unittest.TestCase):
             }),
             json.dumps({"type": "result", "is_error": False, "result": "ok"}),
         ]
-        with mock.patch("subprocess.Popen", return_value=FakeProc(lines)):
+        with mock.patch("subprocess.Popen", return_value=FakeProc(lines)), \
+             mock.patch("chat.cc_runtime.require_pinned_claude_version", return_value="2.1.220"), \
+             mock.patch("chat.cc_runtime.claude_cmd", side_effect=lambda *a, **k: ["claude", *a]):
             sess._spawn("S", {}, reason="process_dead")
         # first success
         out = list(sess.send_turn("hello"))

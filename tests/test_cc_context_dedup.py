@@ -638,7 +638,9 @@ class ResidentFileRefTests(unittest.TestCase):
         body = 'file-a'
         ref = file_ref_key('/static/a.txt', file_content_sha256(body))
         sess._committed_file_hashes = {ref}
-        with mock.patch('subprocess.Popen', return_value=FakeProc([])):
+        with mock.patch('subprocess.Popen', return_value=FakeProc([])), \
+             mock.patch('chat.cc_runtime.require_pinned_claude_version', return_value='2.1.220'), \
+             mock.patch('chat.cc_runtime.claude_cmd', side_effect=lambda *a, **k: ['claude', *a]):
             sess._spawn('STATIC', {}, reason='turn_limit')
         self.assertEqual(sess.committed_file_hashes, set())
 
@@ -996,7 +998,9 @@ class ResidentRespawnTests(unittest.TestCase):
         sess._resident_turn_count = 9
         sess._last_rel_fingerprint = 'rel-v2:old'
         sess._turns_since_rel_sent = 6
-        with mock.patch('subprocess.Popen', return_value=FakeProc([])):
+        with mock.patch('subprocess.Popen', return_value=FakeProc([])), \
+             mock.patch('chat.cc_runtime.require_pinned_claude_version', return_value='2.1.220'), \
+             mock.patch('chat.cc_runtime.claude_cmd', side_effect=lambda *a, **k: ['claude', *a]):
             sess._spawn('STATIC', {}, reason='turn_limit')
         self.assertEqual(sess.last_state_snapshot, {})
         self.assertEqual(sess.last_group_message_id, 0)
