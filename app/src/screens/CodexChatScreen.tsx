@@ -6,6 +6,7 @@
 // doesn't exist for the solo codex room, so this screen doesn't pretend it does.
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
+import { MixedSectionLabel } from '../components/MixedSectionLabel';
 import {
   clearGroupRoom,
   getGroupMessages,
@@ -15,11 +16,10 @@ import {
   type AgentStatus,
   type GroupMessage,
 } from '../lib/groupChat';
+import { FONT_CN, FONT_DISPLAY, fontFamilyForText, hasCJK } from '../lib/typography';
 
 const SETTINGS_KEY = 'fyodor-chat-settings';
 const FONT_SIZES = [13.5, 14.5, 16, 17.5, 19];
-const SERIF = "'Noto Serif SC', serif";
-const DISPLAY = "'Bodoni Moda', serif";
 
 const LIGHT_VARS: Record<string, string> = {
   '--bg': '#EEF2F6', '--card': '#FFFFFF', '--card2': '#EAF0F6', '--bubble': '#DCE6F2',
@@ -215,6 +215,8 @@ export function CodexChatScreen() {
 
   const canSend = Boolean(draft.trim()) && !busy;
   const placeholder = status.ready ? '跟蓝色线路说点什么…' : '蓝色线路还没就绪，消息会先留在这里…';
+  const statusText = status.detail || '蓝色线路';
+  const statusFontStyle = hasCJK(statusText) ? 'normal' : 'italic';
 
   return (
     <div
@@ -222,7 +224,7 @@ export function CodexChatScreen() {
       style={{
         ...(vars as CSSProperties),
         display: 'flex', flexDirection: 'column',
-        background: 'var(--bg)', color: 'var(--ink)', fontFamily: SERIF,
+        background: 'var(--bg)', color: 'var(--ink)', fontFamily: FONT_CN,
         fontSize: FONT_SIZES[settings.fontStep],
       }}
     >
@@ -231,14 +233,14 @@ export function CodexChatScreen() {
         <div style={{ background: 'var(--card)', boxShadow: '0 6px 18px var(--shadow)', position: 'relative', zIndex: 3 }}>
           <div style={{ maxWidth: 430, margin: '0 auto', display: 'flex', alignItems: 'center', gap: 10, padding: '10px 12px 9px' }}>
             <div onClick={() => setSidebarOpen(true)} style={{ cursor: 'pointer', width: 38, height: 38, borderRadius: '50%', background: 'linear-gradient(135deg,#5C8AC0,#2F5A87)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, boxShadow: '0 6px 14px var(--shadow2)' }}>
-              <span style={{ fontFamily: DISPLAY, fontStyle: 'italic', fontSize: 15, color: '#EEF2F6' }}>C</span>
+              <span style={{ fontFamily: FONT_DISPLAY, fontStyle: 'italic', fontSize: 15, color: '#EEF2F6' }}>C</span>
             </div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 1, minWidth: 0, flexShrink: 1 }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
-                <span style={{ fontFamily: DISPLAY, fontSize: 17, fontWeight: 600, letterSpacing: 1, color: 'var(--ink)' }}>Codex</span>
+                <span style={{ fontFamily: FONT_DISPLAY, fontSize: 17, fontWeight: 600, letterSpacing: 1, color: 'var(--ink)' }}>Codex</span>
                 <span style={{ width: 6, height: 6, borderRadius: '50%', background: status.ready ? 'var(--ok)' : 'var(--ghost)', flexShrink: 0 }} />
               </div>
-              <span style={{ fontFamily: DISPLAY, fontStyle: 'italic', fontSize: 10.5, letterSpacing: 1, color: 'var(--faint)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{status.detail || '蓝色线路'}</span>
+              <span style={{ fontFamily: fontFamilyForText(statusText), fontStyle: statusFontStyle, fontSize: 10.5, letterSpacing: 1, color: 'var(--faint)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{statusText}</span>
             </div>
             <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 1, flexShrink: 0 }}>
               <div onClick={() => patchSettings({ theme: effTheme === 'dark' ? 'light' : 'dark' })} style={iconBtn}>
@@ -249,7 +251,7 @@ export function CodexChatScreen() {
                 )}
               </div>
               <div onClick={() => setNavOpen(navOpen === 'font' ? null : 'font')} style={{ ...iconBtn, background: navOpen === 'font' ? 'var(--bluebg)' : 'transparent' }}>
-                <span style={{ fontFamily: DISPLAY, fontSize: 14, letterSpacing: 0.5 }}>Aa</span>
+                <span style={{ fontFamily: FONT_DISPLAY, fontSize: 14, letterSpacing: 0.5 }}>Aa</span>
               </div>
               <div onClick={() => setNavOpen(navOpen === 'search' ? null : 'search')} style={{ ...iconBtn, background: navOpen === 'search' ? 'var(--bluebg)' : 'transparent' }}>
                 <svg viewBox="0 0 24 24" width={16} height={16} fill="none" stroke="currentColor" strokeWidth={1.6} strokeLinecap="round"><circle cx={11} cy={11} r={7} /><path d="M20 20l-3.5-3.5" /></svg>
@@ -270,8 +272,8 @@ export function CodexChatScreen() {
                   {navOpen === 'font' && (
                     <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
                       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                        <div style={{ fontFamily: DISPLAY, fontSize: 11, letterSpacing: 3, color: 'var(--ghost)' }}>字号 · TEXT SIZE</div>
-                        <span style={{ fontFamily: DISPLAY, fontSize: 12, color: 'var(--blue)' }}>{['XS', 'S', 'M', 'L', 'XL'][settings.fontStep]}</span>
+                        <MixedSectionLabel cn="字号" en="TEXT SIZE" />
+                        <span style={{ fontFamily: FONT_DISPLAY, fontSize: 12, color: 'var(--blue)' }}>{['XS', 'S', 'M', 'L', 'XL'][settings.fontStep]}</span>
                       </div>
                       <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
                         <span style={{ fontSize: 12, color: 'var(--ghost)' }}>字</span>
@@ -282,10 +284,10 @@ export function CodexChatScreen() {
                   )}
                   {navOpen === 'search' && (
                     <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-                      <div style={{ fontFamily: DISPLAY, fontSize: 11, letterSpacing: 3, color: 'var(--ghost)' }}>聊天记录 · HISTORY</div>
+                      <MixedSectionLabel cn="聊天记录" en="HISTORY" />
                       <div style={{ display: 'flex', alignItems: 'center', gap: 10, background: 'var(--card2)', borderRadius: 999, padding: '11px 16px' }}>
                         <svg viewBox="0 0 24 24" width={15} height={15} fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" style={{ color: 'var(--ghost)', flexShrink: 0 }}><circle cx={11} cy={11} r={7} /><path d="M20 20l-3.5-3.5" /></svg>
-                        <input value={searchQ} onChange={(e) => setSearchQ(e.target.value)} placeholder="搜索已加载的对话…" style={{ flex: 1, border: 'none', background: 'transparent', fontSize: 14, color: 'var(--ink)', minWidth: 0, fontFamily: SERIF, outline: 'none' }} />
+                        <input value={searchQ} onChange={(e) => setSearchQ(e.target.value)} placeholder="搜索已加载的对话…" style={{ flex: 1, border: 'none', background: 'transparent', fontSize: 14, color: 'var(--ink)', minWidth: 0, fontFamily: FONT_CN, outline: 'none' }} />
                       </div>
                       {searchResults.map((r) => (
                         <div key={r.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 12px', borderRadius: 14, background: 'var(--card2)' }}>
@@ -326,7 +328,7 @@ export function CodexChatScreen() {
               <div style={{ maxWidth: '82%', background: m.author === 'user' ? 'var(--bubble)' : 'var(--card)', borderRadius: m.author === 'user' ? '18px 18px 6px 18px' : '18px 18px 18px 6px', padding: '12px 16px', boxShadow: '0 6px 16px var(--shadow)', display: 'flex', flexDirection: 'column', gap: 6 }}>
                 <BubbleText text={m.content} />
               </div>
-              <span style={{ fontFamily: DISPLAY, fontSize: 11, color: 'var(--ghost)', letterSpacing: 1, padding: '0 4px' }}>{timeLabel(m.created_at)}</span>
+              <span style={{ fontFamily: FONT_DISPLAY, fontSize: 11, color: 'var(--ghost)', letterSpacing: 1, padding: '0 4px' }}>{timeLabel(m.created_at)}</span>
             </div>
           ))}
           {streamingText !== null && (
@@ -368,7 +370,7 @@ export function CodexChatScreen() {
               rows={1}
               placeholder={placeholder}
               disabled={busy}
-              style={{ width: '100%', border: 'none', background: 'transparent', fontSize: '1em', lineHeight: 1.6, color: 'var(--ink)', resize: 'none', maxHeight: 120, padding: '4px 8px 8px', display: 'block', overflowY: 'auto', fontFamily: SERIF, outline: 'none' }}
+              style={{ width: '100%', border: 'none', background: 'transparent', fontSize: '1em', lineHeight: 1.6, color: 'var(--ink)', resize: 'none', maxHeight: 120, padding: '4px 8px 8px', display: 'block', overflowY: 'auto', fontFamily: FONT_CN, outline: 'none' }}
             />
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 2 }}>
               <span style={{ fontSize: 11.5, color: 'var(--ghost)', letterSpacing: 1 }}>蓝色线路 · Codex</span>
@@ -392,14 +394,14 @@ export function CodexChatScreen() {
           <div style={{ position: 'absolute', top: 0, bottom: 0, left: 0, width: 'min(320px,86%)', background: 'var(--card)', boxShadow: '20px 0 60px var(--shadow2)', animation: 'chatSlideInL .28s cubic-bezier(.32,.72,.33,1)', display: 'flex', flexDirection: 'column', overflowY: 'auto' }}>
             <div style={{ padding: '28px 22px 20px', display: 'flex', flexDirection: 'column', gap: 14, background: 'linear-gradient(180deg,var(--bluebg),transparent)' }}>
               <div style={{ width: 64, height: 64, borderRadius: '50%', background: 'linear-gradient(135deg,#5C8AC0,#2F5A87)', display: 'flex', alignItems: 'center', justifyContent: 'center', boxShadow: '0 10px 24px var(--shadow2)' }}>
-                <span style={{ fontFamily: DISPLAY, fontStyle: 'italic', fontSize: 24, color: '#EEF2F6' }}>C</span>
+                <span style={{ fontFamily: FONT_DISPLAY, fontStyle: 'italic', fontSize: 24, color: '#EEF2F6' }}>C</span>
               </div>
               <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                  <span style={{ fontFamily: DISPLAY, fontSize: 22, fontWeight: 600, letterSpacing: 1, color: 'var(--ink)' }}>Codex</span>
+                  <span style={{ fontFamily: FONT_DISPLAY, fontSize: 22, fontWeight: 600, letterSpacing: 1, color: 'var(--ink)' }}>Codex</span>
                   <span style={{ width: 7, height: 7, borderRadius: '50%', background: status.ready ? 'var(--ok)' : 'var(--ghost)' }} />
                 </div>
-                <span style={{ fontFamily: DISPLAY, fontStyle: 'italic', fontSize: 12, letterSpacing: 1.5, color: 'var(--faint)' }}>{status.detail || '蓝色线路'}</span>
+                <span style={{ fontFamily: fontFamilyForText(statusText), fontStyle: statusFontStyle, fontSize: 12, letterSpacing: 1.5, color: 'var(--faint)' }}>{statusText}</span>
               </div>
             </div>
             <div style={{ height: 1, background: 'var(--line)', margin: '0 22px' }} />

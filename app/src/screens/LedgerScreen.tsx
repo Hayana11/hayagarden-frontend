@@ -37,6 +37,7 @@ import {
 } from '../lib/ledger';
 import { monthKey } from '../lib/format';
 import type { LedgerEntry, LedgerTrendPoint, LedgerWho, MemoryItem } from '../types';
+import { FONT_CN } from '../lib/typography';
 
 const DISPLAY = 'var(--font-serif-display)';
 const WEEKDAY_EN = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
@@ -751,7 +752,7 @@ export function LedgerScreen() {
                               {e.note && <div style={{ fontSize: 13, color: 'var(--color-text-mute)', lineHeight: 1.7 }}>{e.note}</div>}
                               {(e.mem || e.read) && (
                                 <div style={{ background: '#F9F3F0', borderRadius: 12, padding: '10px 13px' }}>
-                                  <div style={{ fontFamily: DISPLAY, fontStyle: 'italic', fontSize: 11, color: 'var(--color-rose-pink)', letterSpacing: 1 }}>
+                                  <div style={{ fontFamily: FONT_CN, fontSize: 11, color: 'var(--color-rose-pink)', letterSpacing: 1 }}>
                                     {e.mem ? '关联记忆' : '关联共读'}
                                   </div>
                                   <div style={{ fontSize: 13, color: 'var(--color-text-soft)', marginTop: 4, lineHeight: 1.7 }}>{e.mem || e.read}</div>
@@ -832,7 +833,7 @@ export function LedgerScreen() {
             <Card style={{ padding: 22 }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
                 <span style={{ fontSize: 15, fontWeight: 600, letterSpacing: 2 }}>最近六个月</span>
-                <span style={{ fontFamily: DISPLAY, fontSize: 12, color: 'var(--color-text-faint)' }}>总支出趋势</span>
+                <span style={{ fontFamily: FONT_CN, fontSize: 12, color: 'var(--color-text-faint)' }}>总支出趋势</span>
               </div>
               {trendLoading ? (
                 <div data-testid="ledger-trend-loading" style={{ marginTop: 18, fontSize: 13, color: 'var(--color-text-mute)' }}>趋势加载中…</div>
@@ -1286,7 +1287,7 @@ export function LedgerScreen() {
             {form.mem && !form.memOpen && (
               <div style={{ background: '#FFFFFF', borderRadius: 12, padding: '10px 13px', marginTop: 12, display: 'flex', gap: 10, alignItems: 'flex-start' }}>
                 <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontFamily: DISPLAY, fontStyle: 'italic', fontSize: 10, color: 'var(--color-rose-pink)', letterSpacing: 1 }}>已关联记忆</div>
+                  <div style={{ fontFamily: FONT_CN, fontSize: 10, color: 'var(--color-rose-pink)', letterSpacing: 1 }}>已关联记忆</div>
                   <div style={{ fontSize: 13, color: 'var(--color-text-soft)', marginTop: 3, lineHeight: 1.6 }}>{form.mem}</div>
                 </div>
                 <span
@@ -1302,7 +1303,7 @@ export function LedgerScreen() {
                 {form.mem && form.memSel === null && (
                   <div style={{ background: '#F9F3F0', borderRadius: 12, padding: '10px 13px', border: '1.5px solid var(--color-rose)' }}>
                     <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
-                      <div style={{ fontFamily: DISPLAY, fontStyle: 'italic', fontSize: 10, color: 'var(--color-rose-pink)', letterSpacing: 1 }}>已关联（不在最近候选）</div>
+                      <div style={{ fontFamily: FONT_CN, fontSize: 10, color: 'var(--color-rose-pink)', letterSpacing: 1 }}>已关联（不在最近候选）</div>
                       <span onClick={() => patchForm({ mem: undefined, memSel: null })} style={{ cursor: 'pointer', fontSize: 12, color: 'var(--color-rose-deep)' }}>取消</span>
                     </div>
                     <div style={{ fontSize: 13, color: 'var(--color-text-soft)', marginTop: 3, lineHeight: 1.6 }}>{form.mem}</div>
@@ -1330,7 +1331,7 @@ export function LedgerScreen() {
             {form.readOn && (
               <div style={{ background: '#FFFFFF', borderRadius: 12, padding: '10px 13px', marginTop: 12 }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
-                  <div style={{ fontFamily: DISPLAY, fontStyle: 'italic', fontSize: 10, color: 'var(--color-rose-pink)', letterSpacing: 1 }}>关联共读</div>
+                  <div style={{ fontFamily: FONT_CN, fontSize: 10, color: 'var(--color-rose-pink)', letterSpacing: 1 }}>关联共读</div>
                   <span
                     onClick={() => patchForm({ readOn: false, read: undefined })}
                     style={{ cursor: 'pointer', fontSize: 12, color: 'var(--color-rose-deep)' }}

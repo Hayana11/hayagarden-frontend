@@ -33,11 +33,9 @@ import {
   type MoodState,
 } from '../lib/moments';
 import { HttpError } from '../lib/http';
+import { FONT_CN, FONT_DISPLAY, FONT_MONO, fontFamilyForText, hasCJK } from '../lib/typography';
 
 const SETTINGS_KEY = 'fyodor-chat-settings';
-const SERIF = "'Noto Serif SC', serif";
-const DISPLAY = "'Bodoni Moda', serif";
-const MONO = 'ui-monospace, Menlo, monospace';
 
 const LIGHT_VARS: Record<string, string> = {
   '--bg': '#F7F1EE', '--card': '#FFFFFF', '--card2': '#F6EFEC', '--bubble': '#F0DFDB',
@@ -226,9 +224,12 @@ function RepostCard({ entry }: { entry: FeedEntry }) {
       ) : null}
       <div className="vstack vstack-10" style={{ borderRadius: 16, background: 'var(--card2)', padding: '12px 13px' }}>
         {sourceLabel ? (
-          <span style={{ fontFamily: DISPLAY, fontSize: 10.5, color: 'var(--ghost)', letterSpacing: 1 }}>{sourceLabel} · 聊天记录</span>
+          <span style={{ fontSize: 10.5, color: 'var(--ghost)', letterSpacing: 1 }}>
+            <span style={{ fontFamily: fontFamilyForText(sourceLabel) }}>{sourceLabel}</span>
+            <span style={{ fontFamily: FONT_CN }}> · 聊天记录</span>
+          </span>
         ) : (
-          <span style={{ fontFamily: DISPLAY, fontSize: 10.5, color: 'var(--ghost)', letterSpacing: 1 }}>聊天记录</span>
+          <span style={{ fontFamily: FONT_CN, fontSize: 10.5, color: 'var(--ghost)', letterSpacing: 1 }}>聊天记录</span>
         )}
         {messages.map((m) => (
           <div key={m.messageId} className="vstack vstack-4" style={{ display: 'flex', flexDirection: 'column', alignItems: m.role === 'haya' ? 'flex-start' : 'flex-end' }}>
@@ -289,7 +290,7 @@ function DateRail({ dateLabel, visible }: { dateLabel: string; visible: boolean 
   if (!dateLabel) {
     return (
       <div style={{ width: 54, flexShrink: 0, display: 'flex', flexDirection: 'column', alignItems: 'flex-start', paddingTop: 1 }}>
-        <span style={{ fontFamily: DISPLAY, fontSize: 20, fontWeight: 600, lineHeight: 1, color: 'var(--ghost)', letterSpacing: 0.5 }}>—</span>
+        <span style={{ fontFamily: FONT_DISPLAY, fontSize: 20, fontWeight: 600, lineHeight: 1, color: 'var(--ghost)', letterSpacing: 0.5 }}>—</span>
       </div>
     );
   }
@@ -298,30 +299,38 @@ function DateRail({ dateLabel, visible }: { dateLabel: string; visible: boolean 
   let secondary: string | null = null;
   let primarySize = 34;
 
+  let primaryFont = FONT_DISPLAY;
+  let secondaryFont = FONT_CN;
+
   if (dateLabel === '今天') {
     primary = '今天';
     primarySize = 24;
+    primaryFont = FONT_CN;
   } else if (dateLabel === '昨天') {
     primary = '昨天';
     primarySize = 22;
+    primaryFont = FONT_CN;
   } else {
     const match = dateLabel.match(/^(\d+)月(\d+)日$/);
     if (match) {
       primary = match[2];
       secondary = `${match[1]}月`;
+      primaryFont = FONT_DISPLAY;
+      secondaryFont = FONT_CN;
     } else {
       primary = dateLabel;
       primarySize = 24;
+      primaryFont = fontFamilyForText(dateLabel);
     }
   }
 
   return (
     <div style={{ width: 54, flexShrink: 0, display: 'flex', flexDirection: 'column', alignItems: 'flex-start', paddingTop: 1 }}>
-      <span style={{ fontFamily: DISPLAY, fontSize: primarySize, fontWeight: 600, lineHeight: 1, color: 'var(--mut)', letterSpacing: 0.5 }}>
+      <span style={{ fontFamily: primaryFont, fontSize: primarySize, fontWeight: 600, lineHeight: 1, color: 'var(--mut)', letterSpacing: 0.5 }}>
         {primary}
       </span>
       {secondary && (
-        <span style={{ fontFamily: DISPLAY, fontSize: 11, color: 'var(--ghost)', marginTop: 4, letterSpacing: 0.5 }}>
+        <span style={{ fontFamily: secondaryFont, fontSize: 11, color: 'var(--ghost)', marginTop: 4, letterSpacing: 0.5 }}>
           {secondary}
         </span>
       )}
@@ -445,15 +454,15 @@ function SocialRow({
       <div className={dense ? "hstack hstack-14" : "hstack hstack-18"} style={{ display: 'flex', alignItems: 'center', padding: dense ? '0 2px' : undefined }}>
         <div onClick={() => void handleReact('like')} className="hstack hstack-5" style={iconStyle(social.myReaction === 'like')} title="赞">
           <svg viewBox="0 0 24 24" width={size} height={size} fill={social.myReaction === 'like' ? 'currentColor' : 'none'} stroke="currentColor" strokeWidth={1.7} strokeLinecap="round" strokeLinejoin="round"><path d="M7 10v12H4a1 1 0 0 1-1-1V11a1 1 0 0 1 1-1h3zm0 0l4.5-7a2.4 2.4 0 0 1 2.4 2.4V9h5a2 2 0 0 1 2 2.3l-1.2 8A2 2 0 0 1 17.7 21H7" /></svg>
-          <span style={{ fontFamily: DISPLAY, fontSize: 11.5 }}>{social.likes}</span>
+          <span style={{ fontFamily: FONT_DISPLAY, fontSize: 11.5 }}>{social.likes}</span>
         </div>
         <div onClick={() => void handleReact('dislike')} className="hstack hstack-5" style={iconStyle(social.myReaction === 'dislike')} title="踩">
           <svg viewBox="0 0 24 24" width={size} height={size} fill={social.myReaction === 'dislike' ? 'currentColor' : 'none'} stroke="currentColor" strokeWidth={1.7} strokeLinecap="round" strokeLinejoin="round" style={{ transform: 'rotate(180deg)' }}><path d="M7 10v12H4a1 1 0 0 1-1-1V11a1 1 0 0 1 1-1h3zm0 0l4.5-7a2.4 2.4 0 0 1 2.4 2.4V9h5a2 2 0 0 1 2 2.3l-1.2 8A2 2 0 0 1 17.7 21H7" /></svg>
-          <span style={{ fontFamily: DISPLAY, fontSize: 11.5 }}>{social.dislikes}</span>
+          <span style={{ fontFamily: FONT_DISPLAY, fontSize: 11.5 }}>{social.dislikes}</span>
         </div>
         <div onClick={() => void toggleComments()} className="hstack hstack-5" style={iconStyle(commentsOpen)} title="评论">
           <svg viewBox="0 0 24 24" width={size} height={size} fill="none" stroke="currentColor" strokeWidth={1.7} strokeLinecap="round" strokeLinejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" /></svg>
-          <span style={{ fontFamily: DISPLAY, fontSize: 11.5 }}>{social.comments}</span>
+          <span style={{ fontFamily: FONT_DISPLAY, fontSize: 11.5 }}>{social.comments}</span>
         </div>
       </div>
       {commentsOpen && (
@@ -964,7 +973,7 @@ export function MomentsScreen() {
   };
 
   return (
-    <div className="hide-scrollbar dash-fullscreen-page dash-scroll-page" style={{ ...(vars as CSSProperties), background: 'var(--bg)', color: 'var(--ink)', fontFamily: SERIF }}>
+    <div className="hide-scrollbar dash-fullscreen-page dash-scroll-page" style={{ ...(vars as CSSProperties), background: 'var(--bg)', color: 'var(--ink)', fontFamily: FONT_CN }}>
       <div style={{ width: '100%', background: 'var(--bg)' }}>
         {/* ── cover ── */}
         <input ref={coverInputRef} type="file" accept="image/*" style={{ display: 'none' }} onChange={(e) => void onCoverFile(e)} />
@@ -994,7 +1003,7 @@ export function MomentsScreen() {
         <div style={{ background: 'var(--card)', boxShadow: '0 6px 18px var(--shadow)' }}>
           <div className="hstack hstack-14" style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'flex-end', padding: '12px 18px 14px' }}>
             <div className="vstack vstack-4" style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', paddingTop: 8, minWidth: 0 }}>
-              <span style={{ fontFamily: DISPLAY, fontSize: 21, fontWeight: 600, letterSpacing: 1.5, color: 'var(--ink)' }}>Fyodor</span>
+              <span style={{ fontFamily: FONT_DISPLAY, fontSize: 21, fontWeight: 600, letterSpacing: 1.5, color: 'var(--ink)' }}>Fyodor</span>
               <div className="hstack hstack-6" style={{ display: 'flex', alignItems: 'center' }}>
                 <span style={{ width: 18, height: 18, borderRadius: '50%', background: data?.mood ? 'var(--rosebg)' : 'var(--card2)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: data?.mood ? 'var(--rose)' : 'var(--ghost)', flexShrink: 0, animation: data?.mood ? 'chatBreathe 3s ease-in-out infinite' : 'none' }}>
                   {data?.mood && <MoodIcon kind={moodIconKind(data.mood)} />}
@@ -1005,7 +1014,7 @@ export function MomentsScreen() {
               </div>
             </div>
             <div style={{ width: 74, height: 74, borderRadius: '50%', background: 'linear-gradient(135deg,#B76E79,#9C3B4A)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, marginTop: -34, border: '3px solid var(--card)', boxShadow: '0 10px 24px var(--shadow2)', position: 'relative', zIndex: 3 }}>
-              <span style={{ fontFamily: DISPLAY, fontStyle: 'italic', fontSize: 30, color: '#F7F1EE' }}>Θ</span>
+              <span style={{ fontFamily: FONT_DISPLAY, fontStyle: 'italic', fontSize: 30, color: '#F7F1EE' }}>Θ</span>
             </div>
           </div>
           <div style={{ display: 'flex', borderTop: '1px solid var(--line)', padding: '4px 2px 6px' }}>
@@ -1076,7 +1085,7 @@ export function MomentsScreen() {
                         <div className="hstack hstack-10" style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between' }}>
                           <SocialRow itemKey={f.itemKey} social={f.social} dense onSocialChange={patchFeedSocial} onToast={flashToast} onAuthRequired={requestOwnerUnlock} />
                           {f.timeLabel ? (
-                            <span style={{ fontFamily: DISPLAY, fontSize: 11, color: 'var(--ghost)', flexShrink: 0, letterSpacing: 0.5 }}>
+                            <span style={{ fontFamily: fontFamilyForText(f.timeLabel), fontSize: 11, color: 'var(--ghost)', flexShrink: 0, letterSpacing: 0.5 }}>
                               {f.timeLabel}
                             </span>
                           ) : null}
@@ -1087,13 +1096,13 @@ export function MomentsScreen() {
                   {feedItems.length > 0 && feedHasMore && (
                     <div
                       onClick={() => void loadMore()}
-                      style={{ textAlign: 'center', padding: '10px 0 4px', fontFamily: DISPLAY, fontSize: 12, letterSpacing: 2, color: feedLoadingMore ? 'var(--ghost)' : 'var(--rose)', cursor: feedLoadingMore ? 'default' : 'pointer' }}
+                      style={{ textAlign: 'center', padding: '10px 0 4px', fontFamily: FONT_CN, fontSize: 12, letterSpacing: 2, color: feedLoadingMore ? 'var(--ghost)' : 'var(--rose)', cursor: feedLoadingMore ? 'default' : 'pointer' }}
                     >
                       {feedLoadingMore ? '正在继续打捞…' : '加载更多'}
                     </div>
                   )}
                   {feedItems.length > 0 && !feedHasMore && (
-                    <div style={{ textAlign: 'center', padding: '18px 0 4px', fontFamily: DISPLAY, fontStyle: 'italic', fontSize: 11.5, letterSpacing: 2, color: 'var(--ghost)' }}>
+                    <div style={{ textAlign: 'center', padding: '18px 0 4px', fontFamily: FONT_CN, fontSize: 11.5, letterSpacing: 2, color: 'var(--ghost)' }}>
                       — 流到这里就停了 —
                     </div>
                   )}
@@ -1132,7 +1141,7 @@ export function MomentsScreen() {
                       <div className="hstack hstack-10" style={{ borderTop: '1px solid var(--line)', paddingTop: 10, display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between' }}>
                         <SocialRow itemKey={f.itemKey} social={f.social} onSocialChange={patchFeedSocial} onToast={flashToast} onAuthRequired={requestOwnerUnlock} />
                         {f.timeLabel ? (
-                          <span style={{ fontFamily: DISPLAY, fontSize: 11.5, color: 'var(--ghost)', flexShrink: 0, letterSpacing: 0.5 }}>
+                          <span style={{ fontFamily: fontFamilyForText(f.timeLabel || ''), fontSize: 11.5, color: 'var(--ghost)', flexShrink: 0, letterSpacing: 0.5 }}>
                             {f.timeLabel}
                           </span>
                         ) : null}
@@ -1142,7 +1151,7 @@ export function MomentsScreen() {
                   {postsItems.length > 0 && postsHasMore && (
                     <div
                       onClick={() => void loadMore('posts')}
-                      style={{ textAlign: 'center', padding: '10px 0 4px', fontFamily: DISPLAY, fontSize: 12, letterSpacing: 2, color: postsLoadingMore ? 'var(--ghost)' : 'var(--rose)', cursor: postsLoadingMore ? 'default' : 'pointer' }}
+                      style={{ textAlign: 'center', padding: '10px 0 4px', fontFamily: FONT_CN, fontSize: 12, letterSpacing: 2, color: postsLoadingMore ? 'var(--ghost)' : 'var(--rose)', cursor: postsLoadingMore ? 'default' : 'pointer' }}
                     >
                       {postsLoadingMore ? '正在继续读取…' : '加载更多'}
                     </div>
@@ -1161,7 +1170,7 @@ export function MomentsScreen() {
                         <img src={galleryPhotoUrl(g.pid)} alt={g.note} style={{ width: '100%', display: 'block', objectFit: 'cover' }} loading="lazy" />
                         <div className="hstack hstack-6" style={{ padding: '9px 12px' }}>
                           <span style={{ fontSize: 11, color: 'var(--faint)', flex: 1, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{g.note || g.summary || '未命名'}</span>
-                          <span style={{ fontFamily: DISPLAY, fontSize: 10, color: 'var(--ghost)', flexShrink: 0 }}>{g.time.slice(5, 10)}</span>
+                          <span style={{ fontFamily: FONT_DISPLAY, fontSize: 10, color: 'var(--ghost)', flexShrink: 0 }}>{g.time.slice(5, 10)}</span>
                         </div>
                       </div>
                     ))}
@@ -1173,7 +1182,10 @@ export function MomentsScreen() {
               {tab === 'dream' && (
                 <div className="vstack vstack-12">
                   <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', padding: '0 4px' }}>
-                    <span style={{ fontFamily: DISPLAY, fontStyle: 'italic', fontSize: 12, letterSpacing: 2, color: 'var(--dream)' }}>The Corridor · 梦的走廊</span>
+                    <span style={{ fontSize: 12, letterSpacing: 2, color: 'var(--dream)' }}>
+                      <span style={{ fontFamily: FONT_DISPLAY, fontStyle: 'italic' }}>The Corridor</span>
+                      <span style={{ fontFamily: FONT_CN, fontStyle: 'normal' }}> · 梦的走廊</span>
+                    </span>
                     <span style={{ fontSize: 10.5, color: 'var(--ghost)' }}>按住看光 · 点击进入</span>
                   </div>
                   {dreams.length === 0 && <EmptyState title="还没有记下的梦" hint="费佳做梦的时候，会自己写下来。" />}
@@ -1201,8 +1213,8 @@ export function MomentsScreen() {
                         <div style={{ position: 'absolute', inset: '-18%', background: scene.glow, opacity: glowOp, transition: 'opacity 1.6s ease', animation: 'chatFogDrift 9.5s ease-in-out infinite alternate', pointerEvents: 'none' }} />
                         <div className="vstack vstack-8" style={{ position: 'relative', padding: '15px 16px', display: 'flex', flexDirection: 'column' }}>
                           <div className="hstack hstack-8" style={{ display: 'flex', alignItems: 'baseline' }}>
-                            <span style={{ fontFamily: DISPLAY, fontStyle: 'italic', fontSize: 12, letterSpacing: 1, color: titleC, transition: 'color .9s ease' }}>{d.title}</span>
-                            <span style={{ marginLeft: 'auto', fontFamily: DISPLAY, fontSize: 10.5, color: ghostC, flexShrink: 0, transition: 'color .9s ease' }}>{d.dateLabel}</span>
+                            <span style={{ fontFamily: fontFamilyForText(d.title), fontStyle: hasCJK(d.title) ? 'normal' : 'italic', fontSize: 12, letterSpacing: 1, color: titleC, transition: 'color .9s ease' }}>{d.title}</span>
+                            <span style={{ marginLeft: 'auto', fontFamily: fontFamilyForText(d.dateLabel), fontSize: 10.5, color: ghostC, flexShrink: 0, transition: 'color .9s ease' }}>{d.dateLabel}</span>
                           </div>
                           <span style={{ display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden', fontSize: 13.5, lineHeight: 1.95, color: textC, transition: 'color .9s ease', maskImage: 'linear-gradient(180deg,#000 52%,rgba(0,0,0,0.12) 100%)', WebkitMaskImage: 'linear-gradient(180deg,#000 52%,rgba(0,0,0,0.12) 100%)' }}>{d.content}</span>
                           <div className="flex-wrap-gap-8" style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap' }}>
@@ -1218,7 +1230,7 @@ export function MomentsScreen() {
                     <div
                       ref={dreamSentinelRef}
                       onClick={() => void loadMoreDreams()}
-                      style={{ textAlign: 'center', padding: '10px 0 4px', fontFamily: DISPLAY, fontSize: 12, letterSpacing: 2, color: dreamsLoadingMore ? 'var(--ghost)' : 'var(--dream)', cursor: dreamsLoadingMore ? 'default' : 'pointer' }}
+                      style={{ textAlign: 'center', padding: '10px 0 4px', fontFamily: FONT_CN, fontSize: 12, letterSpacing: 2, color: dreamsLoadingMore ? 'var(--ghost)' : 'var(--dream)', cursor: dreamsLoadingMore ? 'default' : 'pointer' }}
                     >
                       {dreamsLoadingMore ? '梦还在继续涌上来…' : '下滑加载更多 · 或点这里'}
                     </div>
@@ -1238,8 +1250,16 @@ export function MomentsScreen() {
                         <div className="vstack vstack-7" style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column' }}>
                           <span style={{ fontSize: 18, fontWeight: 600, letterSpacing: 2, color: 'var(--ink)' }}>{data.mood.moodWord}</span>
                           <div className="flex-wrap-gap-8" style={{ display: 'flex', flexWrap: 'wrap' }}>
-                            <span style={{ fontFamily: DISPLAY, fontSize: 11, color: 'var(--rose)', background: 'var(--rosebg)', borderRadius: 999, padding: '3px 10px' }}>V 愉悦 {data.mood.valence >= 0 ? '+' : ''}{data.mood.valence.toFixed(2)}</span>
-                            <span style={{ fontFamily: DISPLAY, fontSize: 11, color: 'var(--gold)', background: 'rgba(217,164,65,0.12)', borderRadius: 999, padding: '3px 10px' }}>A 唤醒 {data.mood.arousal.toFixed(2)}</span>
+                            <span style={{ fontSize: 11, color: 'var(--rose)', background: 'var(--rosebg)', borderRadius: 999, padding: '3px 10px' }}>
+                              <span style={{ fontFamily: FONT_DISPLAY }}>V </span>
+                              <span style={{ fontFamily: FONT_CN }}>愉悦 </span>
+                              <span style={{ fontFamily: FONT_DISPLAY }}>{data.mood.valence >= 0 ? '+' : ''}{data.mood.valence.toFixed(2)}</span>
+                            </span>
+                            <span style={{ fontSize: 11, color: 'var(--gold)', background: 'rgba(217,164,65,0.12)', borderRadius: 999, padding: '3px 10px' }}>
+                              <span style={{ fontFamily: FONT_DISPLAY }}>A </span>
+                              <span style={{ fontFamily: FONT_CN }}>唤醒 </span>
+                              <span style={{ fontFamily: FONT_DISPLAY }}>{data.mood.arousal.toFixed(2)}</span>
+                            </span>
                           </div>
                           {data.mood.updatedAt && <span style={{ fontSize: 11, color: 'var(--ghost)' }}>更新于 {data.mood.updatedAt}</span>}
                         </div>
@@ -1280,8 +1300,11 @@ export function MomentsScreen() {
                         </div>
                       )}
                       {historyChart?.last && (
-                        <span style={{ position: 'absolute', right: 12, bottom: 8, fontFamily: DISPLAY, fontSize: 10, color: 'var(--ghost)' }}>
-                          最近 {historyChart.last.day} · V {historyChart.last.valence >= 0 ? '+' : ''}{historyChart.last.valence.toFixed(2)}
+                        <span style={{ position: 'absolute', right: 12, bottom: 8, fontSize: 10, color: 'var(--ghost)' }}>
+                          <span style={{ fontFamily: FONT_CN }}>最近 </span>
+                          <span style={{ fontFamily: FONT_DISPLAY }}>{historyChart.last.day}</span>
+                          <span style={{ fontFamily: FONT_CN }}> · </span>
+                          <span style={{ fontFamily: FONT_DISPLAY }}>V {historyChart.last.valence >= 0 ? '+' : ''}{historyChart.last.valence.toFixed(2)}</span>
                         </span>
                       )}
                     </div>
@@ -1290,7 +1313,7 @@ export function MomentsScreen() {
                   <div style={{ background: 'var(--card)', borderRadius: 20, padding: 16, boxShadow: '0 6px 16px var(--shadow)' }}>
                     <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between' }}>
                       <span style={{ fontSize: 14, fontWeight: 600, letterSpacing: 1.5, color: 'var(--ink)' }}>触发过情绪的记忆</span>
-                      <span style={{ fontFamily: DISPLAY, fontSize: 10, letterSpacing: 1.5, color: 'var(--ghost)' }}>VALENCE × AROUSAL</span>
+                      <span style={{ fontFamily: FONT_DISPLAY, fontSize: 10, letterSpacing: 1.5, color: 'var(--ghost)' }}>VALENCE × AROUSAL</span>
                     </div>
                     {(data?.emotionMemories || []).length === 0 ? (
                       <div style={{ padding: '20px 4px', fontSize: 12.5, color: 'var(--faint)', lineHeight: 1.8 }}>还没有关联出情绪读数的记忆。</div>
@@ -1320,7 +1343,7 @@ export function MomentsScreen() {
                       <div className="vstack vstack-10" style={{ marginTop: 14, background: 'var(--card2)', borderRadius: 14, padding: '13px 15px', display: 'flex', flexDirection: 'column' }}>
                         <div className="hstack hstack-8" style={{ display: 'flex', alignItems: 'baseline' }}>
                           <span style={{ fontSize: 12.5, fontWeight: 600, color: 'var(--ink)' }}>{moodSel.emotion}</span>
-                          <span style={{ fontFamily: DISPLAY, fontSize: 10.5, color: 'var(--ghost)' }}>{moodSel.time}</span>
+                          <span style={{ fontFamily: FONT_DISPLAY, fontSize: 10.5, color: 'var(--ghost)' }}>{moodSel.time}</span>
                           {moodSel.domain && <span style={{ fontSize: 10.5, color: 'var(--faint)' }}>· {moodSel.domain}</span>}
                         </div>
                         <span style={{ fontSize: 12, color: 'var(--ink2)', lineHeight: 1.8 }}>{moodSel.note}</span>
@@ -1342,7 +1365,7 @@ export function MomentsScreen() {
                                 style={{ flex: 1, accentColor: 'var(--rose)', opacity: moodSel.path ? 1 : 0.5, cursor: moodSel.path ? 'pointer' : 'not-allowed' }}
                                 onChange={(e) => setMoodDraft((draft) => draft ? { ...draft, valence: Number(e.target.value) } : draft)}
                               />
-                              <span style={{ fontFamily: DISPLAY, fontSize: 11.5, color: 'var(--rose)', width: 40, textAlign: 'right', flexShrink: 0 }}>{moodDraft.valence >= 0 ? '+' : ''}{moodDraft.valence.toFixed(2)}</span>
+                              <span style={{ fontFamily: FONT_DISPLAY, fontSize: 11.5, color: 'var(--rose)', width: 40, textAlign: 'right', flexShrink: 0 }}>{moodDraft.valence >= 0 ? '+' : ''}{moodDraft.valence.toFixed(2)}</span>
                             </div>
                             <div className="hstack hstack-10">
                               <span style={{ fontSize: 11.5, color: 'var(--mut)', width: 50, flexShrink: 0 }}>A 唤醒</span>
@@ -1356,7 +1379,7 @@ export function MomentsScreen() {
                                 style={{ flex: 1, accentColor: 'var(--gold)', opacity: moodSel.path ? 1 : 0.5, cursor: moodSel.path ? 'pointer' : 'not-allowed' }}
                                 onChange={(e) => setMoodDraft((draft) => draft ? { ...draft, arousal: Number(e.target.value) } : draft)}
                               />
-                              <span style={{ fontFamily: DISPLAY, fontSize: 11.5, color: 'var(--gold)', width: 40, textAlign: 'right', flexShrink: 0 }}>{moodDraft.arousal.toFixed(2)}</span>
+                              <span style={{ fontFamily: FONT_DISPLAY, fontSize: 11.5, color: 'var(--gold)', width: 40, textAlign: 'right', flexShrink: 0 }}>{moodDraft.arousal.toFixed(2)}</span>
                             </div>
                             <div className="hstack hstack-8" style={{ display: 'flex' }}>
                               <div onClick={resetMoodDraft} style={{ cursor: moodSel.path ? 'pointer' : 'not-allowed', flex: 1, textAlign: 'center', padding: '9px 0', borderRadius: 999, background: 'var(--card)', color: 'var(--mut)', fontSize: 12.5, letterSpacing: 1 }}>还原</div>
@@ -1387,7 +1410,7 @@ export function MomentsScreen() {
                           <div className="hstack hstack-10" style={{ display: 'flex', alignItems: 'center', padding: '13px 15px' }}>
                             <div onClick={() => setDrawerOpen((o) => ({ ...o, [tg.id]: !o[tg.id] }))} className="hstack hstack-10" style={{ cursor: 'pointer', display: 'flex', alignItems: 'center', flex: 1, minWidth: 0 }}>
                               <span style={{ fontSize: 13.5, color: 'var(--ink)', letterSpacing: 1 }}>{tg.label}</span>
-                              <span style={{ fontFamily: MONO, fontSize: 11, color: 'var(--ghost)' }}>{tg.tools.length}</span>
+                              <span style={{ fontFamily: FONT_MONO, fontSize: 11, color: 'var(--ghost)' }}>{tg.tools.length}</span>
                               <svg viewBox="0 0 24 24" width={12} height={12} fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" style={{ color: 'var(--ghost)', transition: 'transform .2s', transform: `rotate(${open ? 180 : 0}deg)` }}>
                                 <path d="M6 9l6 6 6-6" />
                               </svg>
@@ -1403,7 +1426,7 @@ export function MomentsScreen() {
                             <div className="vstack vstack-8" style={{ padding: '0 15px 14px', display: 'flex', flexDirection: 'column' }}>
                               {tg.tools.map((t) => (
                                 <div key={t.name} className="hstack hstack-10" style={{ display: 'flex', alignItems: 'center', padding: '7px 10px', borderRadius: 10, background: 'var(--card2)' }}>
-                                  <span style={{ fontFamily: MONO, fontSize: 11, color: t.enabled ? 'var(--ink2)' : 'var(--ghost)', flex: 1, minWidth: 0, wordBreak: 'break-all' }}>{t.name}</span>
+                                  <span style={{ fontFamily: FONT_MONO, fontSize: 11, color: t.enabled ? 'var(--ink2)' : 'var(--ghost)', flex: 1, minWidth: 0, wordBreak: 'break-all' }}>{t.name}</span>
                                   <LockToggle
                                     on={t.enabled}
                                     disabled={Boolean(toolBusy)}
@@ -1436,12 +1459,12 @@ export function MomentsScreen() {
               <div className="vstack vstack-12" style={{ position: 'relative', padding: '24px 24px 22px', display: 'flex', flexDirection: 'column' }}>
                 <div className="flex-wrap-gap-8" style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap' }}>
                   <span style={{ fontSize: 10, letterSpacing: 1.5, padding: '3px 10px', borderRadius: 999, background: 'rgba(223,178,94,0.14)', color: '#D9B87E' }}>{scene.label}</span>
-                  <span style={{ fontFamily: DISPLAY, fontSize: 10.5, color: 'rgba(233,214,190,0.55)', marginLeft: 'auto' }}>{dreamOpen.dateLabel}</span>
+                  <span style={{ fontFamily: fontFamilyForText(dreamOpen.dateLabel), fontSize: 10.5, color: 'rgba(233,214,190,0.55)', marginLeft: 'auto' }}>{dreamOpen.dateLabel}</span>
                 </div>
-                <span style={{ fontFamily: DISPLAY, fontStyle: 'italic', fontSize: 16, letterSpacing: 1, color: '#E8D3B0', lineHeight: 1.5 }}>{dreamOpen.title}</span>
+                <span style={{ fontFamily: fontFamilyForText(dreamOpen.title), fontStyle: hasCJK(dreamOpen.title) ? 'normal' : 'italic', fontSize: 16, letterSpacing: 1, color: '#E8D3B0', lineHeight: 1.5 }}>{dreamOpen.title}</span>
                 <div className="flex-wrap-gap-10" style={{ display: 'flex', flexWrap: 'wrap' }}>
-                  <span style={{ fontFamily: DISPLAY, fontSize: 10.5, color: 'rgba(233,214,190,0.62)', letterSpacing: 1 }}>V {dreamOpen.valence >= 0 ? '+' : ''}{dreamOpen.valence.toFixed(2)}</span>
-                  <span style={{ fontFamily: DISPLAY, fontSize: 10.5, color: 'rgba(233,214,190,0.62)', letterSpacing: 1 }}>A {dreamOpen.arousal.toFixed(2)}</span>
+                  <span style={{ fontFamily: FONT_DISPLAY, fontSize: 10.5, color: 'rgba(233,214,190,0.62)', letterSpacing: 1 }}>V {dreamOpen.valence >= 0 ? '+' : ''}{dreamOpen.valence.toFixed(2)}</span>
+                  <span style={{ fontFamily: FONT_DISPLAY, fontSize: 10.5, color: 'rgba(233,214,190,0.62)', letterSpacing: 1 }}>A {dreamOpen.arousal.toFixed(2)}</span>
                 </div>
                 <div style={{ fontSize: 14, lineHeight: 2.05, color: '#EFE2D3', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{body}</div>
                 <div className="hstack hstack-10" style={{ display: 'flex', alignItems: 'center', marginTop: 4 }}>
@@ -1460,7 +1483,10 @@ export function MomentsScreen() {
           <img src={galleryPhotoUrl(lightbox.pid)} alt={lightbox.note} style={{ width: 'min(560px,92vw)', maxHeight: '70vh', objectFit: 'contain', borderRadius: 20, boxShadow: '0 40px 100px rgba(0,0,0,0.5)' }} />
           <div className="vstack vstack-4" style={{ alignItems: 'center' }}>
             <span style={{ fontSize: 13, color: 'rgba(247,237,234,0.9)', letterSpacing: 1 }}>{lightbox.note || lightbox.summary || '未命名'}</span>
-            <span style={{ fontFamily: DISPLAY, fontSize: 11, color: 'rgba(247,237,234,0.5)' }}>{lightbox.time} · 点击任意处关闭</span>
+            <span style={{ fontSize: 11, color: 'rgba(247,237,234,0.5)' }}>
+              <span style={{ fontFamily: FONT_DISPLAY }}>{lightbox.time}</span>
+              <span style={{ fontFamily: FONT_CN }}> · 点击任意处关闭</span>
+            </span>
           </div>
         </div>
       )}

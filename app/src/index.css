@@ -32,6 +32,19 @@
   --global-nav-reserve-height: 96px;
 }
 
+/* Canonical typography utility aliases — families defined once in :root above */
+.font-cn {
+  font-family: var(--font-serif-cn);
+}
+
+.font-display {
+  font-family: var(--font-serif-display);
+}
+
+.font-mono {
+  font-family: var(--font-mono);
+}
+
 html, body {
   margin: 0;
   padding: 0;

@@ -19,9 +19,10 @@ import {
 } from '../lib/cycle';
 import type { PeriodDayRecord, PeriodDays, PeriodSettings } from '../types';
 import { bumpEditGeneration, schedulePeriodDaySave, shouldReloadAfterFailedSave } from '../lib/periodSave';
+import { FONT_CN, FONT_DISPLAY } from '../lib/typography';
 
 const WEEKDAY_EN = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-const DISPLAY = 'var(--font-serif-display)';
+const DISPLAY = FONT_DISPLAY;
 
 const sectionLabelStyle: CSSProperties = {
   fontSize: 12,
@@ -385,7 +386,7 @@ export function PeriodScreen() {
 
         <div style={{ display: 'flex', alignItems: 'baseline', gap: 7, marginTop: 6 }}>
           {heroPre && <span style={{ fontSize: 16, color: 'var(--color-text-soft)', letterSpacing: 1 }}>{heroPre}</span>}
-          <span style={{ fontFamily: DISPLAY, fontSize: 48, fontWeight: 600, color: inPeriod ? 'var(--color-rose-deep)' : 'var(--color-text)', lineHeight: 1 }}>
+          <span style={{ fontFamily: hasAnchor ? DISPLAY : FONT_CN, fontSize: 48, fontWeight: 600, color: inPeriod ? 'var(--color-rose-deep)' : 'var(--color-text)', lineHeight: 1 }}>
             {hasAnchor ? cycleDay : '暂无记录'}
           </span>
           {hasAnchor && <span style={{ fontSize: 16, color: 'var(--color-text-soft)' }}>天</span>}

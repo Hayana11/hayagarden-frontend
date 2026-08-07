@@ -3,11 +3,11 @@
 // honest locked placeholder (no backend for 谁是卧底/飞行棋 exists yet).
 import { useEffect, useState, type CSSProperties } from 'react';
 import { Link } from 'react-router-dom';
+import { MixedSectionLabel } from '../components/MixedSectionLabel';
 import { getGroupStatus, type AgentStatus } from '../lib/groupChat';
+import { FONT_CN, FONT_DISPLAY, fontFamilyForText } from '../lib/typography';
 
 const SETTINGS_KEY = 'fyodor-chat-settings';
-const SERIF = "'Noto Serif SC', serif";
-const DISPLAY = "'Bodoni Moda', serif";
 const LOCKED = '这个游戏还没有做，以后一起玩~';
 
 const LIGHT_VARS: Record<string, string> = {
@@ -50,7 +50,7 @@ function ContactRow({ to, avatar, avatarBg, name, subtitle, dot }: {
       </div>
       <div className="vstack vstack-3" style={{ minWidth: 0, flex: 1 }}>
         <div className="hstack hstack-7">
-          <span style={{ fontFamily: DISPLAY, fontSize: 15.5, fontWeight: 600, letterSpacing: 1, color: 'var(--ink)' }}>{name}</span>
+          <span style={{ fontFamily: fontFamilyForText(name), fontSize: 15.5, fontWeight: 600, letterSpacing: 1, color: 'var(--ink)' }}>{name}</span>
           {dot && <span style={{ width: 6, height: 6, borderRadius: '50%', background: dot === 'ok' ? 'var(--ok)' : 'var(--ghost)', flexShrink: 0 }} />}
         </div>
         <span style={{ fontSize: 12, color: 'var(--faint)', letterSpacing: 0.5, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{subtitle}</span>
@@ -69,7 +69,7 @@ function GameCard({ title, hint, onLocked }: { title: string; hint: string; onLo
       style={{ cursor: 'pointer', border: 'none', textAlign: 'left', padding: '16px 16px 14px', borderRadius: 18, background: 'var(--card2)', opacity: 0.82 }}
     >
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-        <span style={{ fontFamily: DISPLAY, fontSize: 14.5, fontWeight: 600, letterSpacing: 1, color: 'var(--ink2)' }}>{title}</span>
+        <span style={{ fontFamily: FONT_CN, fontSize: 14.5, fontWeight: 600, letterSpacing: 1, color: 'var(--ink2)' }}>{title}</span>
         <span style={{ fontSize: 10.5, color: 'var(--ghost)', border: '1px solid var(--line)', borderRadius: 999, padding: '2px 9px' }}>敬请期待</span>
       </div>
       <span style={{ fontSize: 12, color: 'var(--faint)', lineHeight: 1.6 }}>{hint}</span>
@@ -116,12 +116,12 @@ export function ContactsScreen() {
       style={{
         ...(vars as CSSProperties),
         display: 'flex', flexDirection: 'column',
-        background: 'var(--bg)', color: 'var(--ink)', fontFamily: SERIF,
+        background: 'var(--bg)', color: 'var(--ink)', fontFamily: FONT_CN,
       }}
     >
       <div style={{ flexShrink: 0, background: 'rgba(255,255,255,0.97)', boxShadow: '0 6px 18px var(--shadow)' }}>
         <div className="hstack hstack-10" style={{ maxWidth: 430, margin: '0 auto', padding: '14px 16px 12px' }}>
-          <span style={{ fontFamily: DISPLAY, fontSize: 18, fontWeight: 600, letterSpacing: 2, color: 'var(--ink)' }}>通讯录</span>
+          <span style={{ fontFamily: FONT_CN, fontSize: 18, fontWeight: 600, letterSpacing: 2, color: 'var(--ink)' }}>通讯录</span>
           <button type="button" onClick={() => patchSettings({ theme: effTheme === 'dark' ? 'light' : 'dark' })} aria-label="切换主题" style={{ marginLeft: 'auto', cursor: 'pointer', border: 'none', background: 'transparent', width: 34, height: 34, borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--mut)' }}>
             {effTheme === 'light' ? (
               <svg viewBox="0 0 24 24" width={16} height={16} fill="none" stroke="currentColor" strokeWidth={1.6} strokeLinecap="round" strokeLinejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" /></svg>
@@ -135,11 +135,11 @@ export function ContactsScreen() {
       <div className="hide-scrollbar" style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
         <div className="vstack vstack-26" style={{ maxWidth: 430, margin: '0 auto', padding: '20px 16px 24px' }}>
           <div className="vstack vstack-12">
-            <div style={{ fontFamily: DISPLAY, fontSize: 11, letterSpacing: 3, color: 'var(--ghost)', padding: '0 2px' }}>聊天 · CHAT</div>
+            <MixedSectionLabel cn="聊天" en="CHAT" />
             <div className="vstack vstack-10">
               <ContactRow
                 to="/chat"
-                avatar={<span style={{ fontFamily: DISPLAY, fontStyle: 'italic', fontSize: 19, color: '#F7F1EE' }}>Θ</span>}
+                avatar={<span style={{ fontFamily: FONT_DISPLAY, fontStyle: 'italic', fontSize: 19, color: '#F7F1EE' }}>Θ</span>}
                 avatarBg="linear-gradient(135deg,#B76E79,#9C3B4A)"
                 name="Fyodor"
                 subtitle="暖色 · 单独聊天"
@@ -147,7 +147,7 @@ export function ContactsScreen() {
               />
               <ContactRow
                 to="/codex-chat"
-                avatar={<span style={{ fontFamily: DISPLAY, fontStyle: 'italic', fontSize: 17, color: '#EEF2F6' }}>C</span>}
+                avatar={<span style={{ fontFamily: FONT_DISPLAY, fontStyle: 'italic', fontSize: 17, color: '#EEF2F6' }}>C</span>}
                 avatarBg="linear-gradient(135deg,#5C8AC0,#2F5A87)"
                 name="Codex"
                 subtitle={codexStatus.detail || (codexStatus.ready ? '可以回复' : '待接入')}
@@ -169,7 +169,7 @@ export function ContactsScreen() {
           </div>
 
           <div className="vstack vstack-12">
-            <div style={{ fontFamily: DISPLAY, fontSize: 11, letterSpacing: 3, color: 'var(--ghost)', padding: '0 2px' }}>游戏室 · GAMES</div>
+            <MixedSectionLabel cn="游戏室" en="GAMES" />
             <div className="vstack vstack-10">
               <Link
                 to="/monopoly/new"
@@ -181,7 +181,7 @@ export function ContactsScreen() {
                 }}
               >
                 <div className="hstack hstack-12" style={{ justifyContent: 'space-between' }}>
-                  <span style={{ fontFamily: DISPLAY, fontSize: 15.5, fontWeight: 600, letterSpacing: 1.2, color: 'var(--ink)' }}>葡萄海大富翁</span>
+                  <span style={{ fontFamily: FONT_CN, fontSize: 15.5, fontWeight: 600, letterSpacing: 1.2, color: 'var(--ink)' }}>葡萄海大富翁</span>
                   <span className="contacts-monopoly-badge" style={{ fontSize: 10.5, color: 'var(--deep)', borderRadius: 999, padding: '3px 9px' }}>可以玩了</span>
                 </div>
                 <span style={{ fontSize: 12, color: 'var(--mut)', lineHeight: 1.65 }}>双人棋局 · 三人聊天。骰子、任务和两位房间伙伴都在等你。</span>
