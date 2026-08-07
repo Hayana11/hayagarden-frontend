@@ -379,6 +379,7 @@ def _resume_probe_from_run(
         old_uuids=old_uuids,
     )
     return {
+        'pass': gate.passed,
         'process_started': run.process_started,
         'first_delta': raw.saw_text_delta,
         'result_ok': raw.result_ok,

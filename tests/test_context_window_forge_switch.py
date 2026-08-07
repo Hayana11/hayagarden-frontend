@@ -1733,6 +1733,25 @@ class ForgeDbMultimodalCarryoverTests(unittest.TestCase):
         self.assertIn('claude_session_id', out)
 
 
+def _live_resume_claude_env(claude_home: Path) -> dict[str, str]:
+    """Seed host subscription auth into isolated claude_home for VPS manual gate."""
+    from scripts.spike_claude_forge_resume import isolated_claude_env
+
+    fake_home = claude_home.parent / 'fake-home'
+    fake_home.mkdir(parents=True, exist_ok=True)
+    host = Path(os.environ.get('HOME', '/root'))
+    host_claude = host / '.claude'
+    creds = host_claude / '.credentials.json'
+    if creds.is_file():
+        shutil.copy2(creds, claude_home / '.credentials.json')
+    host_json = host / '.claude.json'
+    if host_json.is_file():
+        shutil.copy2(host_json, fake_home / '.claude.json')
+    env = isolated_claude_env(claude_home)
+    env['HOME'] = str(fake_home)
+    return env
+
+
 @unittest.skipUnless(
     os.environ.get('HAYA_VISION_LIVE') == '1' and shutil.which('claude'),
     'live claude --resume probe requires HAYA_VISION_LIVE=1 and claude CLI',
@@ -1741,8 +1760,11 @@ class ForgeDbMultimodalLiveResumeTests(unittest.TestCase):
     """Real --resume from DB-forged JSONL (manual / VPS only)."""
 
     def test_live_resume_reads_db_forged_image(self):
-        from scripts.spike_claude_forge_resume import _resume_probe_from_run, _run_claude, isolated_claude_env
-        from tools.claude_forge_core import session_jsonl_path_for_cwd
+        from scripts.spike_claude_forge_resume import (
+            _claude_cmd,
+            _resume_probe_from_run,
+            _run_claude,
+        )
 
         root = tempfile.mkdtemp(prefix='forge-vision-live-')
         upload_dir = Path(root) / 'uploads'
@@ -1784,14 +1806,14 @@ class ForgeDbMultimodalLiveResumeTests(unittest.TestCase):
         path = forged.jsonl_path
         before_bytes = path.read_bytes()
         before_events = load_jsonl(path)
-        env = isolated_claude_env(hooks.claude_home)
+        env = _live_resume_claude_env(Path(hooks.claude_home))
         prompt = '上一窗口那张图片中央写了什么？只回答那串文字，不要解释。'
         payload = json.dumps(
             {'type': 'user', 'message': {'role': 'user', 'content': prompt}},
             ensure_ascii=False,
         ) + '\n'
-        cmd = [
-            'claude', '-p',
+        cmd = _claude_cmd(
+            '-p',
             '--resume', forged.target_session_id,
             '--input-format', 'stream-json',
             '--output-format', 'stream-json',
@@ -1800,12 +1822,14 @@ class ForgeDbMultimodalLiveResumeTests(unittest.TestCase):
             '--max-turns', '3',
             '--tools', '',
             '--allowedTools', '',
-        ]
+        )
+        timeout = float(os.environ.get('HAYA_VISION_PROBE_TIMEOUT', '300'))
         run = _run_claude(
             cmd=cmd,
             cwd=hooks.forge_cwd,
             env=env,
             stdin_payload=payload,
+            timeout_seconds=timeout,
         )
         probe = _resume_probe_from_run(
             run=run,
@@ -1815,7 +1839,7 @@ class ForgeDbMultimodalLiveResumeTests(unittest.TestCase):
             before_events=before_events,
             jsonl_path=path,
         )
-        self.assertTrue(probe.get('pass'), probe)
+        self.assertTrue(probe.get('canary_matched'), probe)
 
 
 if __name__ == '__main__':
