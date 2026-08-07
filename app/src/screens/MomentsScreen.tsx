@@ -1264,20 +1264,20 @@ export function MomentsScreen() {
                     <div style={{ position: 'relative', height: 110, marginTop: 14, borderRadius: 14, background: 'var(--card2)', overflow: 'hidden' }}>
                       <div style={{ position: 'absolute', left: 14, right: 14, top: '50%', height: 1, background: 'var(--line)' }} />
                       {historyLoading ? (
-                        <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 11.5, color: 'var(--ghost)' }}>读取中…</div>
+                        <div className="c78-fill-absolute" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 11.5, color: 'var(--ghost)' }}>读取中…</div>
                       ) : historyError ? (
                         <div className="vstack vstack-10 c78-fill-absolute" style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: '0 20px' }}>
                           <span style={{ fontSize: 11.5, color: 'var(--err)', letterSpacing: 1, textAlign: 'center' }}>情绪历史读取失败</span>
                           <div onClick={() => setHistoryReloadKey((key) => key + 1)} style={{ cursor: 'pointer', padding: '6px 14px', borderRadius: 999, background: 'var(--card)', color: 'var(--mut)', fontSize: 12, letterSpacing: 1 }}>重试</div>
                         </div>
                       ) : historyChart ? (
-                        <svg viewBox={`0 0 ${historyChart.w} ${historyChart.h}`} preserveAspectRatio="none" style={{ position: 'absolute', inset: '12px 14px', width: 'calc(100% - 28px)', height: 'calc(100% - 24px)' }}>
+                        <svg viewBox={`0 0 ${historyChart.w} ${historyChart.h}`} preserveAspectRatio="none" style={{ position: 'absolute', top: 12, right: 14, bottom: 12, left: 14, width: 'calc(100% - 28px)', height: 'calc(100% - 24px)' }}>
                           <path d={historyChart.line} fill="none" stroke="var(--rose)" strokeWidth={2.2} strokeLinecap="round" />
                         </svg>
                       ) : (
-                        <span style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 11.5, color: 'var(--ghost)', letterSpacing: 1, textAlign: 'center', padding: '0 20px' }}>
+                        <div className="c78-fill-absolute" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 11.5, color: 'var(--ghost)', letterSpacing: 1, textAlign: 'center', padding: '0 20px' }}>
                           还没有连续的情绪记录<br />对话评分后会自动积累
-                        </span>
+                        </div>
                       )}
                       {historyChart?.last && (
                         <span style={{ position: 'absolute', right: 12, bottom: 8, fontFamily: DISPLAY, fontSize: 10, color: 'var(--ghost)' }}>
