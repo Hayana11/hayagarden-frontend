@@ -336,11 +336,16 @@ class ResidentSession:
 
     def _spawn(self, system_text, env, *, reason='process_dead', tool_profile=TOOL_PROFILE_LEGACY):
         from chat.cc_model import cc_model_snapshot
+        from chat.cc_runtime import ClaudeRuntimeError, claude_cmd, require_pinned_claude_version
         self._kill(quiet=True)
         self._tool_profile = str(tool_profile or TOOL_PROFILE_LEGACY)
+        try:
+            require_pinned_claude_version(env=env, cwd=self._cwd)
+        except ClaudeRuntimeError as exc:
+            raise ResidentError('claude_runtime:%s' % exc) from exc
         _model, model_identity, model_args = cc_model_snapshot()
-        base_args = [
-            'claude', '-p',
+        base_args = claude_cmd(
+            '-p',
             '--input-format', 'stream-json',
             '--output-format', 'stream-json',
             '--verbose',
@@ -350,7 +355,7 @@ class ResidentSession:
             '--tools', '',
             '--thinking-display', 'summarized',
             '--exclude-dynamic-system-prompt-sections',
-        ] + model_args
+        ) + model_args
         if self._tool_profile == TOOL_PROFILE_TEXT_ONLY:
             args = base_args + ['--allowedTools', '']
         else:
@@ -512,13 +517,18 @@ class ResidentSession:
         if not resume_session_id:
             raise ResidentError('resume_session_id required')
         from chat.cc_model import cc_model_snapshot
+        from chat.cc_runtime import ClaudeRuntimeError, claude_cmd, require_pinned_claude_version
         with self._lock:
             if self._alive():
                 raise ResidentError('staged spawn on live session')
             self._tool_profile = str(tool_profile or TOOL_PROFILE_LEGACY)
+            try:
+                require_pinned_claude_version(env=env, cwd=self._cwd)
+            except ClaudeRuntimeError as exc:
+                raise ResidentError('claude_runtime:%s' % exc) from exc
             _model, model_identity, model_args = cc_model_snapshot()
-            base_args = [
-                'claude', '-p',
+            base_args = claude_cmd(
+                '-p',
                 '--input-format', 'stream-json',
                 '--output-format', 'stream-json',
                 '--verbose',
@@ -529,7 +539,7 @@ class ResidentSession:
                 '--thinking-display', 'summarized',
                 '--exclude-dynamic-system-prompt-sections',
                 '--resume', resume_session_id,
-            ] + model_args
+            ) + model_args
             if self._tool_profile == TOOL_PROFILE_TEXT_ONLY:
                 args = base_args + ['--allowedTools', '']
             else:
@@ -601,13 +611,18 @@ class ResidentSession:
         except (TypeError, ValueError) as exc:
             raise ResidentError('session_id must be uuid') from exc
         from chat.cc_model import cc_model_snapshot
+        from chat.cc_runtime import ClaudeRuntimeError, claude_cmd, require_pinned_claude_version
         with self._lock:
             if self._alive():
                 raise ResidentError('staged spawn on live session')
             self._tool_profile = str(tool_profile or TOOL_PROFILE_LEGACY)
+            try:
+                require_pinned_claude_version(env=env, cwd=self._cwd)
+            except ClaudeRuntimeError as exc:
+                raise ResidentError('claude_runtime:%s' % exc) from exc
             _model, model_identity, model_args = cc_model_snapshot()
-            base_args = [
-                'claude', '-p',
+            base_args = claude_cmd(
+                '-p',
                 '--input-format', 'stream-json',
                 '--output-format', 'stream-json',
                 '--verbose',
@@ -618,7 +633,7 @@ class ResidentSession:
                 '--thinking-display', 'summarized',
                 '--exclude-dynamic-system-prompt-sections',
                 '--session-id', session_id,
-            ] + model_args
+            ) + model_args
             if '--resume' in base_args:
                 raise ResidentError('fresh_named must not carry --resume')
             if self._tool_profile == TOOL_PROFILE_TEXT_ONLY:

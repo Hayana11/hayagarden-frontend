@@ -896,7 +896,8 @@ def _group_chat_secret_present(name):
 
 @app.route('/api/group-chat/status', methods=['GET'])
 def group_chat_status():
-    claude_ready = bool(shutil.which('claude') and _group_chat_secret_present(
+    from chat.cc_runtime import pinned_runtime_available
+    claude_ready = bool(pinned_runtime_available() and _group_chat_secret_present(
         'CLAUDE_CODE_OAUTH_TOKEN'
     ))
     codex_status = codex_app_server.runtime_status()

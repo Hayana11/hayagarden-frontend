@@ -44,7 +44,8 @@ dirty="$(git status --porcelain --untracked-files=all -- . \
   ':(exclude)attachments.db' ':(exclude)attachments/**' \
   ':(exclude)client_errors.log' ':(exclude)static/uploads/**' \
   ':(exclude)memories.db-shm' ':(exclude)memories.db-wal' \
-  ':(exclude)memories.db.bak*')"
+  ':(exclude)memories.db.bak*' \
+  ':(exclude).claude-runtime' ':(exclude).claude-runtime/**')"
 if [[ -n "$dirty" ]]; then
   echo "$dirty" >&2
   fail "production worktree has local changes. Commit/recover them on a branch; never overwrite them."
@@ -97,13 +98,14 @@ trap cleanup EXIT
 git worktree add --detach "$staging" "$target_sha"
 (
   cd "$staging"
-  "$PYTHON" -m py_compile app.py gateway.py monopoly_engine.py monopoly_store.py monopoly_rooms.py monopoly_routes.py monopoly_agents.py codex_app_server.py chat/context_continuity.py account_balance_routes.py context_usage_routes.py context_usage_store.py tools/context_usage_collector.py relay/credential_vault.py relay/channel_intelligence.py user_profile.py
+  "$PYTHON" -m py_compile app.py gateway.py monopoly_engine.py monopoly_store.py monopoly_rooms.py monopoly_routes.py monopoly_agents.py codex_app_server.py chat/context_continuity.py chat/cc_runtime.py cc_resident.py account_balance_routes.py context_usage_routes.py context_usage_store.py tools/context_usage_collector.py relay/credential_vault.py relay/channel_intelligence.py user_profile.py
   "$PYTHON" -m unittest discover -s tests -p 'test_context_continuity.py'
   "$PYTHON" -m unittest tests.test_channel_intelligence tests.test_credential_vault tests.test_account_balance_routes
   "$PYTHON" -m unittest tests.test_context_usage
   "$PYTHON" -m unittest tests.test_user_profile
   "$PYTHON" -m unittest tests.test_monopoly_backend
-  bash -n scripts/deploy-frontend.sh
+  "$PYTHON" -m unittest tests.test_cc_runtime -v
+  bash -n scripts/deploy-frontend.sh scripts/ensure-claude-runtime.sh
 )
 if [[ "$build_dashboard" -eq 1 ]]; then
   (
@@ -175,6 +177,8 @@ clear_runtime_for_checkout
 git checkout --detach -f "$target_sha"
 restore_runtime
 install_dashboard
+# Project-local Claude Code pin (not PATH /usr/bin/claude). Fail closed before restart.
+bash "$ROOT/scripts/ensure-claude-runtime.sh" "$ROOT"
 systemctl restart "${SERVICES[@]}"
 health_ok=0
 for attempt in 1 2 3 4 5; do
@@ -198,6 +202,12 @@ if [[ "$health_ok" -ne 1 ]]; then
   echo "Health check failed after 5 attempts." >&2
   false
 fi
+# Post-deploy runtime pin check (fail closed → rollback via ERR trap).
+"$PYTHON" - <<'PY'
+from chat.cc_runtime import EXPECTED_CLAUDE_CODE_VERSION, require_pinned_claude_version
+actual = require_pinned_claude_version()
+print('deploy claude runtime ok:', actual, '(expected', EXPECTED_CLAUDE_CODE_VERSION + ')')
+PY
 
 mkdir -p "$STATE_DIR"
 printf '%s\n' "$target_sha" > "$STATE_DIR/DEPLOYED_SHA"
