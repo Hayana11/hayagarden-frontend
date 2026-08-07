@@ -60,7 +60,7 @@ export function GlobalBottomNav({ variant = 'fixed' }: { variant?: GlobalBottomN
   }
 
   return (
-    <nav className="bnav global-bottom-nav" aria-label="主导航">
+    <nav className="bnav global-bottom-nav global-bottom-nav--fixed" aria-label="主导航">
       <div className="bnav-inner global-bottom-nav__inner">{links}</div>
     </nav>
   );

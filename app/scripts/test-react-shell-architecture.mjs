@@ -81,4 +81,24 @@ function read(rel) {
   assert.match(frame, /GlobalBottomNav/);
 }
 
+// 8. Embedded nav must not inherit fixed viewport positioning
+{
+  const css = fs.readFileSync(path.join(root, 'src/index.css'), 'utf8');
+  const navBlock = css.slice(css.indexOf('/* Canonical GlobalBottomNav'));
+  assert.doesNotMatch(
+    navBlock,
+    /\.global-bottom-nav\s*\{[\s\S]*?position:\s*fixed/,
+    'base .global-bottom-nav must not be position:fixed (use --fixed modifier)',
+  );
+  assert.match(navBlock, /\.global-bottom-nav--fixed\s*\{[\s\S]*?position:\s*fixed/);
+  assert.match(navBlock, /\.global-bottom-nav--embedded[\s\S]*?flex-shrink:\s*0/);
+  assert.doesNotMatch(navBlock, /\.global-bottom-nav--embedded[\s\S]*?position:\s*fixed/);
+
+  const bottom = read('components/GlobalBottomNav.tsx');
+  assert.match(bottom, /global-bottom-nav--fixed/);
+  const embeddedBranch = bottom.slice(bottom.indexOf("if (variant === 'embedded')"), bottom.indexOf('return (\n    <nav className="bnav global-bottom-nav'));
+  assert.match(embeddedBranch, /global-bottom-nav--embedded/);
+  assert.doesNotMatch(embeddedBranch, /global-bottom-nav--fixed/);
+}
+
 console.log('test-react-shell-architecture: ok');

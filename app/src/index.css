@@ -781,9 +781,9 @@ button {
   .config-root *, .config-root *::before, .config-root *::after { animation: none !important; transition: none !important; }
 }
 
-/* Canonical GlobalBottomNav scope — single definition (.bnav aliases .global-bottom-nav) */
+/* Canonical GlobalBottomNav scope — fixed positioning only on fixed variant */
 .bnav,
-.global-bottom-nav {
+.global-bottom-nav--fixed {
   position: fixed;
   left: 0;
   right: 0;
@@ -793,7 +793,7 @@ button {
 }
 
 .bnav::before,
-.global-bottom-nav::before {
+.global-bottom-nav--fixed::before {
   content: '';
   position: absolute;
   left: 0;
