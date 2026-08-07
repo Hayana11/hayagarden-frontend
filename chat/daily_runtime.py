@@ -135,6 +135,7 @@ class DailyTurnPlan:
     assembly: dict[str, Any]
     manifest: dict[str, Any]
     user_content: str = ''
+    user_image_url: str = ''
     lease_acquired: bool = False
     lease_released: bool = False
     db_path: Optional[str] = None
@@ -223,12 +224,14 @@ def _fetch_user_message(message_id: int, *, db_path: Optional[str] = None) -> di
         if row is None:
             raise DailyRuntimeError('user message not found: %s' % message_id, error_code='user_message_missing')
         content = str(row['content'] or '').strip()
-        if not content and str(row['image_url'] or '').strip():
+        image_url = str(row['image_url'] or '').strip()
+        if not content and image_url:
             content = '[image]'
         created_at = str(row['created_at'] or '').strip()
         return {
             'id': int(row['id']),
             'content': content,
+            'image_url': image_url,
             'created_at': created_at,
         }
     finally:
@@ -261,8 +264,20 @@ def format_resident_turn_content(
     user_content: str,
     is_cold: bool,
     is_respawn: bool,
-) -> str:
+    user_image_url: str = '',
+) -> Any:
+    """Assemble resident turn content.
+
+    text-only → ``str`` (unchanged contract)
+    with image → multimodal list accepted by Claude Code stream-json
+    """
     cold_like = bool(is_cold or is_respawn)
+    image_url = str(user_image_url or '').strip()
+    # Real vision input replaces the textual [image] placeholder.
+    turn_user_text = str(user_content or '')
+    if image_url and turn_user_text.strip() == '[image]':
+        turn_user_text = ''
+
     prefix_parts: list[str] = []
     if cold_like:
         handoff = str(assembly.get('day_handoff') or '').strip()
@@ -285,17 +300,25 @@ def format_resident_turn_content(
             + '请回复最后一条用户消息。'
         )
         if prefix:
-            return prefix + NL + NL + body + NL + NL + str(user_content or '')
-        return body + NL + NL + str(user_content or '')
-    if history:
+            text = prefix + NL + NL + body + NL + NL + turn_user_text
+        else:
+            text = body + NL + NL + turn_user_text
+    elif history:
         history_text = _format_history_messages(history)
         replay = '【新增正式对话】' + NL + history_text + NL + NL
         if prefix:
-            return prefix + NL + NL + replay + str(user_content or '')
-        return replay + str(user_content or '')
-    if prefix:
-        return prefix + NL + NL + str(user_content or '')
-    return str(user_content or '')
+            text = prefix + NL + NL + replay + turn_user_text
+        else:
+            text = replay + turn_user_text
+    elif prefix:
+        text = prefix + NL + NL + turn_user_text
+    else:
+        text = turn_user_text
+
+    if not image_url:
+        return text
+    from chat.cc_vision_bridge import build_claude_user_content
+    return build_claude_user_content(text=text, image_refs=[image_url])
 
 
 def _binding_matches_plan(binding: Optional[LocalResidentBinding], plan: DailyTurnPlan) -> bool:
@@ -926,6 +949,7 @@ def _assemble_plan(
     origin_local_day: str = '',
     turn_started_at: Optional[datetime.datetime] = None,
     history_token_budget: Optional[int] = None,
+    user_image_url: str = '',
 ) -> DailyTurnPlan:
     context_id = int(refreshed['id'])
     context_epoch = int(refreshed['context_epoch'])
@@ -996,6 +1020,7 @@ def _assemble_plan(
         assembly=assembly,
         manifest=manifest,
         user_content=user_content,
+        user_image_url=str(user_image_url or ''),
         lease_acquired=lease_acquired,
         db_path=db_path,
         user_created_at=user_created_at,
@@ -1193,6 +1218,7 @@ def prepare_daily_turn(
             refreshed=refreshed,
             user_message_id=int(user_message_id),
             user_content=str(user_row.get('content') or ''),
+            user_image_url=str(user_row.get('image_url') or ''),
             is_cold=is_cold,
             is_respawn=is_respawn,
             turn_kind=turn_kind,
@@ -1562,10 +1588,10 @@ def _apply_daily_cold_prompt_fence(
     *,
     resident: Any,
     static_system: str,
-    content: str,
+    content: Any,
     is_cold: bool,
     is_respawn: bool,
-) -> str:
+) -> Any:
     """Whole-prompt Fence B/C for Daily cold/respawn — reuses #218 helpers."""
     from chat.cold_bootstrap_budget import (
         ColdBootstrapOverflow,
@@ -1611,6 +1637,7 @@ def _apply_daily_cold_prompt_fence(
             user_content=plan.user_content,
             is_cold=is_cold,
             is_respawn=is_respawn,
+            user_image_url=plan.user_image_url,
         )
         cold_prompt_estimate = estimate_whole_prompt(static_system, content)
         cold_history_budget_val = new_budget
@@ -1758,12 +1785,23 @@ def ensure_resident_and_stream(
             )
             return
 
-        content = format_resident_turn_content(
-            assembly=plan.assembly,
-            user_content=plan.user_content,
-            is_cold=plan.is_cold or actual_cold,
-            is_respawn=plan.is_respawn,
-        )
+        try:
+            content = format_resident_turn_content(
+                assembly=plan.assembly,
+                user_content=plan.user_content,
+                is_cold=plan.is_cold or actual_cold,
+                is_respawn=plan.is_respawn,
+                user_image_url=plan.user_image_url,
+            )
+        except Exception as exc:
+            from chat.cc_vision_bridge import VisionBridgeError
+            if isinstance(exc, VisionBridgeError):
+                # Fail closed before stdin — do not leave a broken vision turn
+                # in the resident session.
+                raise DailyRuntimeError(
+                    str(exc), error_code=getattr(exc, 'code', 'vision_bridge_error'),
+                ) from exc
+            raise
         if plan.is_cold or plan.is_respawn or actual_cold:
             content = _apply_daily_cold_prompt_fence(
                 plan,

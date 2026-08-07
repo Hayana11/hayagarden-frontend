@@ -1,9 +1,11 @@
 """Focused contract tests for seamless Forge context-window switch (step5)."""
 from __future__ import annotations
 
+import base64
 import datetime
 import json
 import os
+import shutil
 import sqlite3
 import sys
 import tempfile
@@ -16,9 +18,12 @@ ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
+from PIL import Image, ImageDraw, ImageFont
+
 from chat import context_window as cw
 from chat import daily_context as dc
 from chat import daily_runtime as dr
+from chat.cc_vision_bridge import VisionBridgeError, resolve_image_bytes
 from chat.context_window_forge import (
     CarryoverUnforgeableError,
     build_events_from_selected_messages,
@@ -26,6 +31,52 @@ from chat.context_window_forge import (
 )
 from tools.claude_forge_core import load_jsonl, sha256_file
 from tools.claude_forge_validator import validate_forged_transcript
+
+ASSISTANT_IMAGE_ACK = '收到这张图片。'
+
+
+def _random_vision_marker() -> str:
+    """Pixel-only canary. Must never appear in filename/DB text/prompt/JSONL text."""
+    return 'VISION-%s' % os.urandom(16).hex()
+
+
+def _make_vision_png(path: Path, text: str) -> None:
+    img = Image.new('RGB', (480, 120), 'white')
+    draw = ImageDraw.Draw(img)
+    try:
+        font = ImageFont.truetype(
+            '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf', 22,
+        )
+    except Exception:
+        font = ImageFont.load_default()
+    draw.text((16, 40), text, fill='black', font=font)
+    img.save(path, format='PNG')
+
+
+def _jsonl_text_blobs(events: list) -> str:
+    parts: list[str] = []
+    for evt in events:
+        msg = evt.get('message') or {}
+        content = msg.get('content')
+        if isinstance(content, str):
+            parts.append(content)
+        elif isinstance(content, list):
+            for block in content:
+                if isinstance(block, dict) and block.get('type') == 'text':
+                    parts.append(str(block.get('text') or ''))
+    return '\n'.join(parts)
+
+
+def _assert_marker_absent_from_textual_metadata(
+    test: unittest.TestCase,
+    *,
+    marker: str,
+    events: list,
+    path: Path,
+) -> None:
+    test.assertNotIn(marker, path.name)
+    test.assertNotIn(marker, str(path))
+    test.assertNotIn(marker, _jsonl_text_blobs(events))
 
 
 def _tmp_db() -> str:
@@ -59,6 +110,25 @@ def _insert(db: str, author: str, content: str, created_at: str) -> int:
     cur = conn.execute(
         'INSERT INTO chat_messages (author, content, created_at, source_kind) VALUES (?,?,?,?)',
         (author, content, created_at, 'chat'),
+    )
+    mid = int(cur.lastrowid)
+    conn.commit()
+    conn.close()
+    return mid
+
+
+def _insert_with_image(
+    db: str,
+    author: str,
+    content: str,
+    image_url: str,
+    created_at: str,
+) -> int:
+    conn = sqlite3.connect(db)
+    cur = conn.execute(
+        'INSERT INTO chat_messages (author, content, image_url, created_at, source_kind) '
+        'VALUES (?,?,?,?,?)',
+        (author, content, image_url, created_at, 'chat'),
     )
     mid = int(cur.lastrowid)
     conn.commit()
@@ -1551,6 +1621,310 @@ class UnforgeableOrderTests(unittest.TestCase):
         finally:
             conn.close()
             os.unlink(db)
+
+
+class ForgeDbMultimodalCarryoverTests(unittest.TestCase):
+    """DB-authoritative manual window Forge must preserve vision blocks."""
+
+    def setUp(self):
+        self.db = _tmp_db()
+        _init_chat_messages(self.db)
+        dc.ensure_schema(self.db)
+        self.forge_root = tempfile.mkdtemp(prefix='forge-vision-')
+        self.hooks = cw.offline_switch_hooks(self.forge_root)
+        self.upload_dir = Path(self.forge_root) / 'uploads'
+        self.upload_dir.mkdir(parents=True)
+        self.pixel_marker = _random_vision_marker()
+        self.png_name = 'img_%s.png' % uuid.uuid4().hex
+        _make_vision_png(self.upload_dir / self.png_name, self.pixel_marker)
+        self.image_ref = '/static/uploads/%s' % self.png_name
+        self.assertNotIn(self.pixel_marker, self.png_name)
+        self.assertNotIn(self.pixel_marker, self.image_ref)
+        self.ctx = dc.get_or_create_daily_context(
+            local_day='2026-07-27',
+            db_path=self.db,
+            now=datetime.datetime(2026, 7, 27, 10, 0, 0),
+        )
+        self._resolve_patch = mock.patch(
+            'chat.cc_vision_bridge.resolve_image_bytes',
+            side_effect=lambda ref, **kw: resolve_image_bytes(
+                ref,
+                upload_dir=str(self.upload_dir),
+                attach_dir=str(self.upload_dir),
+            ),
+        )
+        self._resolve_patch.start()
+
+    def tearDown(self):
+        self._resolve_patch.stop()
+        try:
+            os.unlink(self.db)
+        except OSError:
+            pass
+
+    def _forge_one_round(self, user_content: str, *, image_url: str = ''):
+        ts_u = '2026-07-27 10:00:00'
+        ts_a = '2026-07-27 10:01:00'
+        if image_url:
+            u = _insert_with_image(self.db, 'hayana', user_content, image_url, ts_u)
+        else:
+            u = _insert(self.db, 'hayana', user_content, ts_u)
+        a = _insert(self.db, 'fyodor', ASSISTANT_IMAGE_ACK, ts_a)
+        _map(self.db, int(self.ctx['id']), int(self.ctx['context_epoch']), u, 'user')
+        _map(self.db, int(self.ctx['id']), int(self.ctx['context_epoch']), a, 'assistant')
+        conn = dc._connect(self.db)
+        try:
+            return forge_target_session_from_db(
+                conn,
+                selected_message_ids=[u, a],
+                cwd=self.hooks.forge_cwd,
+                claude_home=self.hooks.claude_home,
+            )
+        finally:
+            conn.close()
+
+    def test_A_db_forge_text_plus_image_carryover(self):
+        forged = self._forge_one_round('看看这个', image_url=self.image_ref)
+        events = load_jsonl(forged.jsonl_path)
+        user_content = events[0]['message']['content']
+        self.assertIsInstance(user_content, list)
+        text_blocks = [b for b in user_content if b.get('type') == 'text']
+        img_blocks = [b for b in user_content if b.get('type') == 'image']
+        self.assertEqual(len(text_blocks), 1)
+        self.assertEqual(text_blocks[0]['text'], '看看这个')
+        self.assertEqual(len(img_blocks), 1)
+        self.assertEqual(img_blocks[0]['source']['type'], 'base64')
+        self.assertTrue(img_blocks[0]['source']['data'])
+        _assert_marker_absent_from_textual_metadata(
+            self,
+            marker=self.pixel_marker,
+            events=events,
+            path=forged.jsonl_path,
+        )
+        vr = validate_forged_transcript(events, session_id=forged.target_session_id)
+        self.assertTrue(vr.ok, vr.errors)
+
+    def test_B_db_forge_image_only_carryover(self):
+        forged = self._forge_one_round('', image_url=self.image_ref)
+        events = load_jsonl(forged.jsonl_path)
+        user_content = events[0]['message']['content']
+        self.assertIsInstance(user_content, list)
+        self.assertEqual(len(user_content), 1)
+        self.assertEqual(user_content[0]['type'], 'image')
+        self.assertTrue(user_content[0]['source']['data'])
+        self.assertNotIn({'type': 'text', 'text': ''}, user_content)
+        _assert_marker_absent_from_textual_metadata(
+            self,
+            marker=self.pixel_marker,
+            events=events,
+            path=forged.jsonl_path,
+        )
+
+    def test_C_db_forge_text_only_regression(self):
+        forged = self._forge_one_round('今天天气怎么样')
+        events = load_jsonl(forged.jsonl_path)
+        self.assertEqual(events[0]['message']['content'], '今天天气怎么样')
+        self.assertIsInstance(events[0]['message']['content'], str)
+        self.assertEqual(
+            events[1]['message']['content'],
+            [{'type': 'text', 'text': ASSISTANT_IMAGE_ACK}],
+        )
+
+    def test_D_db_forge_bad_image_degrades_or_fails_closed(self):
+        bad_ref = '/static/uploads/missing.png'
+        forged = self._forge_one_round('看看这个', image_url=bad_ref)
+        events = load_jsonl(forged.jsonl_path)
+        self.assertEqual(events[0]['message']['content'], '看看这个')
+
+        with self.assertRaises(CarryoverUnforgeableError):
+            self._forge_one_round('', image_url=bad_ref)
+
+    def test_E_switch_seam_uses_db_forge_multimodal(self):
+        base = datetime.datetime(2026, 7, 27, 10, 0, 0)
+        for i in range(2):
+            ts_u = (base + datetime.timedelta(minutes=i * 2)).strftime('%Y-%m-%d %H:%M:%S')
+            ts_a = (base + datetime.timedelta(minutes=i * 2 + 1)).strftime('%Y-%m-%d %H:%M:%S')
+            u = _insert(self.db, 'hayana', 'user-%d' % i, ts_u)
+            a = _insert(self.db, 'fyodor', 'asst-%d' % i, ts_a)
+            _map(self.db, int(self.ctx['id']), int(self.ctx['context_epoch']), u, 'user')
+            _map(self.db, int(self.ctx['id']), int(self.ctx['context_epoch']), a, 'assistant')
+        ts_u = (base + datetime.timedelta(minutes=4)).strftime('%Y-%m-%d %H:%M:%S')
+        ts_a = (base + datetime.timedelta(minutes=5)).strftime('%Y-%m-%d %H:%M:%S')
+        u = _insert_with_image(self.db, 'hayana', '看看这个', self.image_ref, ts_u)
+        a = _insert(self.db, 'fyodor', ASSISTANT_IMAGE_ACK, ts_a)
+        _map(self.db, int(self.ctx['id']), int(self.ctx['context_epoch']), u, 'user')
+        _map(self.db, int(self.ctx['id']), int(self.ctx['context_epoch']), a, 'assistant')
+
+        with mock.patch('chat.context_window.enabled', return_value=True):
+            out = cw.switch_context_window(
+                source_context_id=int(self.ctx['id']),
+                source_context_epoch=int(self.ctx['context_epoch']),
+                count=3,
+                request_id=str(uuid.uuid4()),
+                db_path=self.db,
+                hooks=self.hooks,
+            )
+        jsonl_files = list(Path(self.hooks.claude_home).rglob('*.jsonl'))
+        self.assertTrue(jsonl_files)
+        events = load_jsonl(jsonl_files[0])
+        image_events = [
+            evt['message']['content']
+            for evt in events
+            if evt.get('type') == 'user' and isinstance(evt['message']['content'], list)
+            and any(b.get('type') == 'image' for b in evt['message']['content'])
+        ]
+        self.assertEqual(len(image_events), 1)
+        user_content = image_events[0]
+        self.assertTrue(any(
+            b.get('type') == 'text' and b.get('text') == '看看这个'
+            for b in user_content
+        ))
+        self.assertIn('claude_session_id', out)
+
+
+def _live_resume_claude_env(claude_home: Path) -> dict[str, str]:
+    """Seed host subscription auth into isolated claude_home for VPS manual gate."""
+    from scripts.spike_claude_forge_resume import isolated_claude_env
+
+    fake_home = claude_home.parent / 'fake-home'
+    fake_home.mkdir(parents=True, exist_ok=True)
+    host = Path(os.environ.get('HOME', '/root'))
+    host_claude = host / '.claude'
+    creds = host_claude / '.credentials.json'
+    if creds.is_file():
+        shutil.copy2(creds, claude_home / '.credentials.json')
+    host_json = host / '.claude.json'
+    if host_json.is_file():
+        shutil.copy2(host_json, fake_home / '.claude.json')
+    env = isolated_claude_env(claude_home)
+    env['HOME'] = str(fake_home)
+    return env
+
+
+@unittest.skipUnless(
+    os.environ.get('HAYA_VISION_LIVE') == '1' and shutil.which('claude'),
+    'live claude --resume probe requires HAYA_VISION_LIVE=1 and claude CLI',
+)
+class ForgeDbMultimodalLiveResumeTests(unittest.TestCase):
+    """Real --resume from DB-forged JSONL (manual / VPS only).
+
+    Pixel canary is randomized at runtime and must appear only in PNG pixels.
+    Round-2 differential gates showed native --resume PASS but DB-forged
+    text-only resume FAIL (DB_FORGE_BASELINE); this opt-in gate remains the
+    final vision acceptance check once that baseline is fixed outside this PR.
+    """
+
+    def test_live_resume_reads_db_forged_image(self):
+        import hashlib
+
+        from scripts.spike_claude_forge_resume import _run_claude
+        from tools.claude_forge_live_gate import (
+            parse_stdout_events,
+            verify_jsonl_prefix_unchanged,
+        )
+
+        marker = _random_vision_marker()
+        root = tempfile.mkdtemp(prefix='forge-vision-live-')
+        upload_dir = Path(root) / 'uploads'
+        upload_dir.mkdir(parents=True)
+        png_name = 'img_%s.png' % uuid.uuid4().hex
+        png_path = upload_dir / png_name
+        _make_vision_png(png_path, marker)
+        png_sha = hashlib.sha256(png_path.read_bytes()).hexdigest()
+        image_ref = '/static/uploads/%s' % png_name
+        self.assertNotIn(marker, png_name)
+        self.assertNotIn(marker, image_ref)
+        hooks = cw.offline_switch_hooks(root)
+        db = _tmp_db()
+        _init_chat_messages(db)
+        dc.ensure_schema(db)
+        ctx = dc.get_or_create_daily_context(
+            local_day='2026-07-27',
+            db_path=db,
+            now=datetime.datetime(2026, 7, 27, 10, 0, 0),
+        )
+        ts_u = '2026-07-27 10:00:00'
+        ts_a = '2026-07-27 10:01:00'
+        u = _insert_with_image(db, 'hayana', '看看这个', image_ref, ts_u)
+        a = _insert(db, 'fyodor', ASSISTANT_IMAGE_ACK, ts_a)
+        self.assertNotIn(marker, ASSISTANT_IMAGE_ACK)
+        _map(db, int(ctx['id']), int(ctx['context_epoch']), u, 'user')
+        _map(db, int(ctx['id']), int(ctx['context_epoch']), a, 'assistant')
+        with mock.patch(
+            'chat.cc_vision_bridge.resolve_image_bytes',
+            side_effect=lambda ref, **kw: resolve_image_bytes(
+                ref, upload_dir=str(upload_dir), attach_dir=str(upload_dir),
+            ),
+        ):
+            conn = dc._connect(db)
+            try:
+                forged = forge_target_session_from_db(
+                    conn,
+                    selected_message_ids=[u, a],
+                    cwd=hooks.forge_cwd,
+                    claude_home=hooks.claude_home,
+                )
+            finally:
+                conn.close()
+        path = forged.jsonl_path
+        before_bytes = path.read_bytes()
+        events = load_jsonl(path)
+        user_content = events[0]['message']['content']
+        self.assertIsInstance(user_content, list)
+        types = [b.get('type') for b in user_content if isinstance(b, dict)]
+        self.assertEqual(types, ['text', 'image'])
+        img = next(b for b in user_content if b.get('type') == 'image')
+        self.assertTrue(img['source']['data'])
+        decoded = base64.b64decode(img['source']['data'])
+        self.assertEqual(hashlib.sha256(decoded).hexdigest(), png_sha)
+        _assert_marker_absent_from_textual_metadata(
+            self, marker=marker, events=events, path=path,
+        )
+        env = _live_resume_claude_env(Path(hooks.claude_home))
+        prompt = '上一窗口那张图片中央写了什么？只回答图片中的文字。'
+        self.assertNotIn(marker, prompt)
+        payload = json.dumps(
+            {'type': 'user', 'message': {'role': 'user', 'content': prompt}},
+            ensure_ascii=False,
+        ) + '\n'
+        cmd = [
+            'claude', '-p',
+            '--resume', forged.target_session_id,
+            '--input-format', 'stream-json',
+            '--output-format', 'stream-json',
+            '--verbose',
+            '--include-partial-messages',
+            '--max-turns', '3',
+            '--tools', '',
+            '--allowedTools', '',
+        ]
+        # Keep default modest: longer timeouts cannot locate DB Forge baseline hangs.
+        timeout = float(os.environ.get('HAYA_VISION_PROBE_TIMEOUT', '90'))
+        run = _run_claude(
+            cmd=cmd,
+            cwd=hooks.forge_cwd,
+            env=env,
+            stdin_payload=payload,
+            timeout_seconds=timeout,
+        )
+        raw = parse_stdout_events(run.stdout_lines)
+        after_bytes = path.read_bytes()
+        self.assertTrue(run.process_started, run.stderr_text)
+        self.assertFalse(run.timed_out, run.stderr_text)
+        self.assertEqual(run.exit_code, 0, run.stderr_text)
+        self.assertTrue(raw.saw_text_delta, raw)
+        self.assertTrue(raw.result_ok, raw)
+        self.assertTrue(verify_jsonl_prefix_unchanged(before_bytes, after_bytes))
+        self.assertGreater(len(after_bytes), len(before_bytes))
+        self.assertEqual(
+            raw.assistant_text.strip(),
+            marker,
+            {
+                'assistant_text': raw.assistant_text,
+                'pixel_sha256': png_sha,
+                'stderr': run.stderr_text[:500],
+            },
+        )
 
 
 if __name__ == '__main__':

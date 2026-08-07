@@ -18,6 +18,7 @@ from chat.daily_context import (
     _table_columns,
     is_formal_chat_message,
 )
+from chat.cc_vision_bridge import VisionBridgeError, build_claude_user_content
 from tools.claude_forge_core import (
     build_minimal_text_session,
     new_uuid,
@@ -85,10 +86,33 @@ def _fetch_messages_by_ids(
     return ordered
 
 
+def _row_image_url(row: Any) -> str:
+    if hasattr(row, 'keys') and 'image_url' in row.keys():
+        return str(row['image_url'] or '').strip()
+    return ''
+
+
+def _user_content_for_row(row: Any) -> Any:
+    """Build forged user message.content — text str or multimodal list."""
+    raw_text = str(row['content'] or '').strip()
+    image_url = _row_image_url(row)
+    if not image_url:
+        text = _message_display_content(row)
+        if not text:
+            raise CarryoverUnforgeableError('empty_content:%s' % int(row['id']))
+        return text
+    try:
+        return build_claude_user_content(text=raw_text, image_refs=[image_url])
+    except VisionBridgeError as exc:
+        if raw_text:
+            return raw_text
+        raise CarryoverUnforgeableError('vision_unresolvable:%s' % exc.code) from exc
+
+
 def _event_for_role(
     *,
     role: str,
-    text: str,
+    content: Any,
     event_uuid: str,
     parent: Optional[str],
     session_id: str,
@@ -96,9 +120,9 @@ def _event_for_role(
     timestamp: str,
 ) -> dict[str, Any]:
     if role == 'user':
-        content: Any = text
+        user_content = content
     else:
-        content = [{'type': 'text', 'text': text}]
+        user_content = [{'type': 'text', 'text': str(content)}]
     return {
         'type': role,
         'uuid': event_uuid,
@@ -107,7 +131,7 @@ def _event_for_role(
         'sessionId': session_id,
         'cwd': cwd,
         'version': FORGE_VERSION,
-        'message': {'role': role, 'content': content},
+        'message': {'role': role, 'content': user_content},
     }
 
 
@@ -143,9 +167,13 @@ def build_events_from_selected_messages(
         role = _role_for_author(str(row['author'] or ''))
         if role not in ('user', 'assistant'):
             raise CarryoverUnforgeableError('bad_role:%s' % int(row['id']))
-        text = _message_display_content(row)
-        if not text:
-            raise CarryoverUnforgeableError('empty_content:%s' % int(row['id']))
+        if role == 'user':
+            message_content = _user_content_for_row(row)
+        else:
+            text = _message_display_content(row)
+            if not text:
+                raise CarryoverUnforgeableError('empty_content:%s' % int(row['id']))
+            message_content = text
 
         if role == 'user':
             if saw_user_in_round and not saw_assistant_in_round:
@@ -162,7 +190,7 @@ def build_events_from_selected_messages(
         eid = new_uuid()
         events.append(_event_for_role(
             role=role,
-            text=text,
+            content=message_content,
             event_uuid=eid,
             parent=parent,
             session_id=target_session_id,
