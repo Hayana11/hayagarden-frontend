@@ -328,6 +328,7 @@ export function ChatScreen() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const abortRef = useRef<AbortController | null>(null);
   const toastTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
+  const mountedRef = useRef(true);
   const liveRef = useRef<LiveState | null>(null);
   const postingRef = useRef(false);
   const warmUpInflightRef = useRef<Promise<void> | null>(null);
@@ -446,6 +447,7 @@ export function ChatScreen() {
     markChatColdStart('catalog_start');
     void ensureModelCatalog().then((r) => {
       markChatColdStart('catalog_ready');
+      if (!mountedRef.current) return;
       applyCatalog(r);
     });
   }, [applyCatalog]);
@@ -467,15 +469,18 @@ export function ChatScreen() {
       if (warmGen !== coldStartRaceRef.current.warmUpGen) return;
       if (anchorGen !== coldStartRaceRef.current.historyGen) return;
       if (!followLatestRef.current) return;
+      if (!mountedRef.current) return;
 
       const { mergedCount } = planWarmUpCommit(msgsRef.current, warmPage.messages);
 
       setMsgs((latest) => {
+        if (!mountedRef.current) return latest;
         if (anchorGen !== coldStartRaceRef.current.historyGen) return latest;
         if (!followLatestRef.current) return latest;
         return mergeOlderChatMessages(latest, warmPage.messages);
       });
 
+      if (!mountedRef.current) return;
       if (anchorGen !== coldStartRaceRef.current.historyGen) return;
       if (!followLatestRef.current) return;
 
@@ -497,6 +502,7 @@ export function ChatScreen() {
     earliestId?: number;
     loadedCount: number;
   }) => {
+    if (!mountedRef.current) return;
     if (!tryConsumeDeferredInit(coldStartRaceRef.current)) return;
     markChatColdStart('first_history_paint_scheduled');
     setInitialHistoryReady(true);
@@ -514,10 +520,12 @@ export function ChatScreen() {
     cancelInFlightWarmUp();
     const page = await fetchChatMessages({ limit: CHAT_AUTHORITATIVE_LIMIT });
     if (gen !== coldStartRaceRef.current.historyGen) return;
+    if (!mountedRef.current) return;
     onAuthoritativeHistorySuccess(coldStartRaceRef.current, page.messages.length);
     setMsgs(page.messages);
     setHasMoreBefore(page.hasMoreBefore);
     scheduleAfterFirstPaint(() => {
+      if (!mountedRef.current) return;
       ensureDeferredColdStartInit({ loadedCount: page.messages.length });
     });
     if (toBottom) scrollBottom();
@@ -582,20 +590,21 @@ export function ChatScreen() {
     const loadInitial = async () => {
       const limit = legacyCompat ? CHAT_LEGACY_INITIAL_LIMIT : CHAT_AUTHORITATIVE_LIMIT;
       const page = await fetchChatMessages({ limit });
-      if (cancelled) return;
+      if (cancelled || !mountedRef.current) return;
 
       const superseded = gen !== coldStartRaceRef.current.historyGen;
       if (!superseded) {
         if (hasAuthoritativeCoverage(page.messages.length)) {
           onAuthoritativeHistorySuccess(coldStartRaceRef.current, page.messages.length);
         }
+        if (!mountedRef.current) return;
         setMsgs(page.messages);
         setHasMoreBefore(page.hasMoreBefore);
         scrollBottom();
         markChatColdStart('initial_history_ready');
 
         scheduleAfterFirstPaint(() => {
-          if (cancelled) return;
+          if (cancelled || !mountedRef.current) return;
           ensureDeferredColdStartInit({
             anchorGen: gen,
             earliestId: page.messages[0]?.id,
@@ -723,6 +732,10 @@ export function ChatScreen() {
   }, [sending, scrollBottom, legacyCompat]);
 
   useEffect(() => () => {
+    mountedRef.current = false;
+    cancelInFlightWarmUpState(coldStartRaceRef.current);
+    bumpHistoryGenState(coldStartRaceRef.current);
+    warmUpInflightRef.current = null;
     abortRef.current?.abort();
     clearTimeout(toastTimer.current);
   }, []);

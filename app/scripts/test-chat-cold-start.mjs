@@ -242,4 +242,47 @@ assert.deepEqual(
   assert.deepEqual(plan.merged, [{ id: 23 }, { id: 24 }, { id: 25 }, { id: 26 }]);
 }
 
+// O. cold-start lifecycle / unmount guard
+{
+  assert.match(screen, /const mountedRef = useRef\(true\)/);
+
+  const cleanupBlock = screen.slice(
+    screen.indexOf('useEffect(() => () => {'),
+    screen.indexOf('const updateLive = useCallback'),
+  );
+  assert.match(cleanupBlock, /mountedRef\.current = false/);
+  assert.match(cleanupBlock, /cancelInFlightWarmUpState\(coldStartRaceRef\.current\)/);
+  assert.match(cleanupBlock, /bumpHistoryGenState\(coldStartRaceRef\.current\)/);
+
+  const warmBlock = screen.slice(
+    screen.indexOf('const runLegacyWarmUp = useCallback'),
+    screen.indexOf('const ensureDeferredColdStartInit = useCallback'),
+  );
+  assert.match(warmBlock, /if \(!mountedRef\.current\) return/);
+  assert.match(warmBlock, /setMsgs\([\s\S]*if \(!mountedRef\.current\) return latest/);
+
+  const catalogBlock = screen.slice(
+    screen.indexOf('const startModelCatalog = useCallback'),
+    screen.indexOf('const runLegacyWarmUp = useCallback'),
+  );
+  assert.match(catalogBlock, /if \(!mountedRef\.current\) return[\s\S]*applyCatalog\(r\)/);
+
+  const deferredBlock = screen.slice(
+    screen.indexOf('const ensureDeferredColdStartInit = useCallback'),
+    screen.indexOf('const refetchLatest = useCallback'),
+  );
+  assert.match(deferredBlock, /if \(!mountedRef\.current\) return/);
+
+  const refetchBlock = screen.slice(
+    screen.indexOf('const refetchLatest = useCallback'),
+    screen.indexOf('const flushLegacyWarmUp = useCallback'),
+  );
+  assert.match(refetchBlock, /if \(!mountedRef\.current\) return[\s\S]*setMsgs\(page\.messages\)/);
+  assert.match(refetchBlock, /scheduleAfterFirstPaint\([\s\S]*if \(!mountedRef\.current\) return/);
+
+  assert.equal(CHAT_LEGACY_INITIAL_LIMIT, 24);
+  assert.equal(CHAT_LEGACY_WARMUP_LIMIT, 56);
+  assert.equal(CHAT_AUTHORITATIVE_LIMIT, 80);
+}
+
 console.log('test:chat-cold-start — all checks passed');
