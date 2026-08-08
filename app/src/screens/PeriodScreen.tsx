@@ -493,26 +493,26 @@ export function PeriodScreen() {
             </div>
           ))}
         </div>
-        <div style={{ display: 'flex', gap: 13, marginTop: 14, fontSize: 10, color: 'var(--color-text-faint)', flexWrap: 'wrap' }}>
-          <span style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+        <div className="period-calendar-legend">
+          <span>
             <span style={{ width: 9, height: 9, borderRadius: 3, background: 'var(--color-rose)' }} />
-            已记录经期
+            <span>已记录经期</span>
           </span>
-          <span style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+          <span>
             <span style={{ width: 9, height: 9, borderRadius: 3, background: '#F1DCDE' }} />
-            预测经期
+            <span>预测经期</span>
           </span>
-          <span style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+          <span>
             <span style={{ width: 9, height: 9, borderRadius: 3, background: '#F3E7CE' }} />
-            预测排卵
+            <span>预测排卵</span>
           </span>
-          <span style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+          <span>
             <span style={{ width: 9, height: 9, borderRadius: 3, background: '#FFFFFF', border: '1.5px solid var(--color-amber)' }} />
-            今天
+            <span>今天</span>
           </span>
-          <span style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+          <span>
             <span style={{ color: 'var(--color-rose-pink)', fontSize: 11, lineHeight: 1 }}>♥</span>
-            亲密
+            <span>亲密</span>
           </span>
         </div>
       </Card>
@@ -538,7 +538,7 @@ export function PeriodScreen() {
         ) : (
           <>
             <div style={sectionLabelStyle}>是否来月经？</div>
-            <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
+            <div className="period-record-row">
               <YesNoButton label="没有" tone="green" on={selRec.came === false} onClick={() => updateDay(selDate, { came: false })} />
               <YesNoButton label="来了" tone="rose" on={selRec.came === true} onClick={() => updateDay(selDate, { came: true })} />
             </div>
@@ -546,19 +546,19 @@ export function PeriodScreen() {
             {selRec.came === true && (
               <>
                 <div style={sectionLabelStyle}>出血量</div>
-                <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
+                <div className="period-record-row">
                   {FLOW_LEVELS.map((l) => (
                     <Chip key={l} label={l} grow on={selRec.flow === l} onClick={() => updateDay(selDate, { flow: l })} />
                   ))}
                 </div>
                 <div style={sectionLabelStyle}>疼痛</div>
-                <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
+                <div className="period-record-row">
                   {PAIN_LEVELS.map((l) => (
                     <Chip key={l} label={l} grow on={selRec.pain === l} onClick={() => updateDay(selDate, { pain: l })} />
                   ))}
                 </div>
                 <div style={sectionLabelStyle}>特殊情况</div>
-                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 10 }}>
+                <div className="period-record-wrap">
                   {CYCLE_EXTRAS.map((l) => (
                     <Chip key={l} label={l} on={(selRec.extras || []).includes(l)} onClick={() => toggleInList(selDate, 'extras', l)} />
                   ))}
@@ -569,7 +569,7 @@ export function PeriodScreen() {
             {selRec.came === false && (
               <>
                 <div style={sectionLabelStyle}>状态</div>
-                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 10 }}>
+                <div className="period-record-wrap">
                   {CYCLE_STATES.map((l) => (
                     <Chip key={l} label={l} on={(selRec.states || []).includes(l)} onClick={() => toggleInList(selDate, 'states', l)} />
                   ))}
@@ -578,7 +578,7 @@ export function PeriodScreen() {
             )}
 
             <div style={sectionLabelStyle}>是否色色了？</div>
-            <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
+            <div className="period-record-row">
               <YesNoButton label="没有" tone="green" on={selRec.sex === false} onClick={() => updateDay(selDate, { sex: false })} />
               <YesNoButton label="♥ 有" tone="pink" on={selRec.sex === true} onClick={() => updateDay(selDate, { sex: true })} />
             </div>

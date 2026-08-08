@@ -803,7 +803,7 @@ export function LedgerScreen() {
         {/* ══════════ 统计 ══════════ */}
         {tab === '统计' && (
           entriesUnavailablePane ?? (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+          <div className="ledger-stats-stack">
             <Card style={{ padding: 22 }}>
               <div style={{ fontSize: 15, fontWeight: 600, letterSpacing: 2 }}>本月构成</div>
               <div style={{ display: 'flex', alignItems: 'center', gap: 20, marginTop: 16 }}>

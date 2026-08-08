@@ -122,4 +122,80 @@ function filterConsoleBlock(memory) {
   assert.doesNotMatch(navCss, /background:\s*rgba\(255,\s*255,\s*255/);
 }
 
+// F. Ledger statistics stack (G2 residual)
+{
+  const ledger = readSrc('screens/LedgerScreen.tsx');
+  const statsBlock = ledger.slice(
+    ledger.indexOf("tab === '统计'"),
+    ledger.indexOf("tab === '日历'"),
+  );
+  assert.match(statsBlock, /className="ledger-stats-stack"/);
+  assert.doesNotMatch(
+    statsBlock,
+    /ledger-stats-stack[\s\S]*?gap:\s*16/,
+  );
+  assert.doesNotMatch(
+    statsBlock,
+    /flexDirection:\s*'column'[\s\S]*?gap:\s*16/,
+  );
+
+  const css = readSrc('index.css');
+  assert.match(css, /\.ledger-stats-stack > \* \+ \* \{[\s\S]*?margin-top:\s*16px/);
+}
+
+// G. Period calendar legend + record editor (G2 residual)
+{
+  const period = readSrc('screens/PeriodScreen.tsx');
+  const recordBlock = period.slice(
+    period.indexOf('选中日期记录卡'),
+    period.indexOf('最近周期卡'),
+  );
+
+  assert.match(period, /className="period-calendar-legend"/);
+  assert.doesNotMatch(period, /period-calendar-legend[\s\S]*?gap:\s*13/);
+  assert.match(period, /period-calendar-legend[\s\S]*?<span>已记录经期<\/span>/);
+  assert.match(period, /period-calendar-legend[\s\S]*?<span>亲密<\/span>/);
+
+  assert.match(recordBlock, /className="period-record-row"/);
+  assert.match(recordBlock, /className="period-record-wrap"/);
+  assert.doesNotMatch(recordBlock, /period-record-row[\s\S]*?gap:\s*8/);
+  assert.doesNotMatch(recordBlock, /period-record-wrap[\s\S]*?gap:\s*8/);
+
+  const css = readSrc('index.css');
+  assert.match(css, /\.period-calendar-legend > \* \{[\s\S]*?margin-right:\s*13px/);
+  assert.match(css, /\.period-calendar-legend > \* > \* \+ \* \{[\s\S]*?margin-left:\s*5px/);
+  assert.match(css, /\.period-record-row > \* \+ \* \{[\s\S]*?margin-left:\s*8px/);
+  assert.match(css, /\.period-record-wrap > \* \{[\s\S]*?margin:\s*4px/);
+}
+
+// H. Memory filter console vertical spacing (G2 residual)
+{
+  const memory = readSrc('screens/MemoryScreen.tsx');
+  const css = readSrc('index.css');
+
+  assert.match(memory, /className="memory-filter-console"/);
+  assert.match(memory, /ScreenLayout/);
+  assert.match(readSrc('components/Card.tsx'), /vstack vstack-16 screen-stack/);
+  assert.doesNotMatch(css, /\.memory-filter-console\s*\{[^}]*margin-top:\s*-/);
+  assert.doesNotMatch(css, /\.memory-filter-console\s*\{[^}]*margin-top:\s*-4px/);
+}
+
+// I. Usage month grid square cells (G2 residual)
+{
+  const css = readSrc('index.css');
+  const monthGrid = css.slice(
+    css.indexOf('.config-month-grid {'),
+    css.indexOf('.config-usage-summary'),
+  );
+
+  assert.doesNotMatch(monthGrid, /height:\s*46px/);
+  assert.match(monthGrid, /\.config-month-grid button > span::before[\s\S]*?padding-top:\s*100%/);
+  assert.doesNotMatch(monthGrid, /aspect-ratio/);
+  assert.doesNotMatch(monthGrid, /\.config-month-grid em\s*\{[^}]*\binset\s*:\s*0/);
+  assert.match(
+    monthGrid,
+    /\.config-month-grid em\s*\{[^}]*top:\s*0[^}]*right:\s*0[^}]*bottom:\s*0[^}]*left:\s*0/,
+  );
+}
+
 console.log('test:chrome78-geometry-sweep — all checks passed');
