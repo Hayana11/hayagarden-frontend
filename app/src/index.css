@@ -606,10 +606,25 @@ button {
   margin-top: 14px;
 }
 
+.memory-filter-pill {
+  display: flex;
+  align-items: center;
+}
+
+.memory-filter-pill > * + * {
+  margin-left: 6px;
+}
+
+.memory-filter-pill--tag > * + * {
+  margin-left: 5px;
+}
+
 .calendar-legend-row {
   display: flex;
   flex-wrap: wrap;
   margin-top: 14px;
+  margin-right: -14px;
+  margin-bottom: -14px;
   font-size: 10px;
   color: var(--color-text-faint);
 }
@@ -618,7 +633,7 @@ button {
   display: flex;
   align-items: center;
   margin-right: 14px;
-  margin-bottom: 6px;
+  margin-bottom: 14px;
 }
 
 .calendar-legend-row > * > * + * {

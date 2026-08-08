@@ -1,4 +1,4 @@
-/* Canonical static bottom nav — values from app/src/index.css GlobalBottomNav */
+/* Chat-style static bottom nav — values from static/chat.html (Chrome78-safe, no flex gap) */
 .bnav {
   position: fixed;
   left: 50%;
@@ -8,11 +8,11 @@
   max-width: 480px;
   z-index: 50;
   display: flex;
-  background: rgba(255, 255, 255, 0.97);
+  background: rgba(245, 243, 238, 0.97);
   backdrop-filter: blur(14px);
   -webkit-backdrop-filter: blur(14px);
-  border-top: 1px solid #ece6e0;
-  padding: 7px 0 calc(7px + env(safe-area-inset-bottom, 0px));
+  border-top: 0.5px solid rgba(210, 185, 155, 0.2);
+  padding: 8px 0 calc(8px + env(safe-area-inset-bottom, 0px));
 }
 
 .ni {
@@ -24,11 +24,11 @@
   border: none;
   background: none;
   cursor: pointer;
-  color: #b0a0aa;
+  color: #b8b0b8;
   font-size: 10px;
   letter-spacing: 0.4px;
   font-family: inherit;
-  padding: 4px 0;
+  padding: 2px 0;
   min-width: 0;
   transition: color 0.18s;
 }
@@ -41,6 +41,10 @@
 
 .ni.act {
   color: #7c6a8a;
+}
+
+html[data-theme=dark] .bnav {
+  background: rgba(26, 22, 21, 0.97);
 }
 
 html[data-theme=dark] .ni {

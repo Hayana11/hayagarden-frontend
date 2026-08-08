@@ -147,9 +147,9 @@ html[data-theme=dark] .lvl-P2{background:var(--primary-light);}
 html[data-theme=dark] .cat-btn{background:#4a2535;color:#f0a0b8;}
 
 /* ── side panel ── */
-.panel-overlay{position:fixed;top:0;right:0;bottom:0;left:0;background:rgba(0,0,0,.35);z-index:50;opacity:0;pointer-events:none;transition:opacity .25s;}
+.panel-overlay{position:fixed;top:0;right:0;bottom:0;left:0;background:rgba(0,0,0,.35);z-index:60;opacity:0;pointer-events:none;transition:opacity .25s;}
 .panel-overlay.show{opacity:1;pointer-events:auto;}
-.side-panel{position:fixed;top:0;right:0;height:100%;width:82%;max-width:400px;background:var(--card);z-index:51;transform:translateX(105%);transition:transform .3s cubic-bezier(.4,0,.2,1);overflow-y:auto;display:flex;flex-direction:column;box-shadow:-4px 0 24px rgba(0,0,0,.12);}
+.side-panel{position:fixed;top:0;right:0;height:100%;width:82%;max-width:400px;background:var(--card);z-index:61;transform:translateX(105%);transition:transform .3s cubic-bezier(.4,0,.2,1);overflow-y:auto;display:flex;flex-direction:column;box-shadow:-4px 0 24px rgba(0,0,0,.12);}
 .side-panel.show{transform:translateX(0);}
 .panel-hd{display:flex;align-items:center;justify-content:space-between;padding:52px 16px 12px;border-bottom:1px solid var(--border);flex-shrink:0;}
 .panel-title{font-family:Georgia,serif;font-size:15px;color:var(--text);letter-spacing:.3px;}
@@ -274,7 +274,7 @@ html[data-theme=dark] .cat-btn{background:#4a2535;color:#f0a0b8;}
 
 <nav class="bnav">
   <a class="ni" href="/dash"><i class="ti ti-layout-dashboard"></i><span>dash</span></a>
-  <a class="ni" href="/contacts"><i class="ti ti-message-2"></i><span>chat</span></a>
+  <a class="ni" href="/dash/contacts"><i class="ti ti-message-2"></i><span>chat</span></a>
   <a class="ni" href="/read"><i class="ti ti-book"></i><span>read</span></a>
   <a class="ni act" href="/board"><i class="ti ti-clipboard-list"></i><span>board</span></a>
 </nav>

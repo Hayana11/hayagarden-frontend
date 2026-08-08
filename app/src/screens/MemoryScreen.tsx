@@ -1477,7 +1477,8 @@ export function MemoryScreen() {
               data-filter-pill
               onPointerDown={(e) => e.stopPropagation()}
               onClick={t.pick}
-              style={{ cursor: 'pointer', flexShrink: 0, display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, letterSpacing: 1, borderRadius: 999, padding: '6px 14px', background: t.active ? 'rgba(183,110,121,0.12)' : '#FFFFFF', color: t.active ? '#9C3B4A' : '#8C7B76', border: `1px solid ${t.active ? 'rgba(183,110,121,0.4)' : '#EFE3DE'}`, fontWeight: t.active ? 600 : 400 }}
+              className="memory-filter-pill"
+              style={{ cursor: 'pointer', flexShrink: 0, fontSize: 12, letterSpacing: 1, borderRadius: 999, padding: '6px 14px', background: t.active ? 'rgba(183,110,121,0.12)' : '#FFFFFF', color: t.active ? '#9C3B4A' : '#8C7B76', border: `1px solid ${t.active ? 'rgba(183,110,121,0.4)' : '#EFE3DE'}`, fontWeight: t.active ? 600 : 400 }}
             >
               <span>{t.label}</span>
               <span style={{ fontFamily: "'Bodoni Moda',serif", fontSize: 11, opacity: 0.75 }}>{t.n}</span>
@@ -1496,7 +1497,8 @@ export function MemoryScreen() {
               data-filter-pill
               onPointerDown={(e) => e.stopPropagation()}
               onClick={t.pick}
-              style={{ cursor: 'pointer', flexShrink: 0, display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, letterSpacing: 1, borderRadius: 999, padding: '6px 14px', background: t.active ? 'rgba(183,110,121,0.12)' : '#FFFFFF', color: t.active ? '#9C3B4A' : '#8C7B76', border: `1px solid ${t.active ? 'rgba(183,110,121,0.4)' : '#EFE3DE'}`, fontWeight: t.active ? 600 : 400 }}
+              className="memory-filter-pill"
+              style={{ cursor: 'pointer', flexShrink: 0, fontSize: 12, letterSpacing: 1, borderRadius: 999, padding: '6px 14px', background: t.active ? 'rgba(183,110,121,0.12)' : '#FFFFFF', color: t.active ? '#9C3B4A' : '#8C7B76', border: `1px solid ${t.active ? 'rgba(183,110,121,0.4)' : '#EFE3DE'}`, fontWeight: t.active ? 600 : 400 }}
             >
               {t.emoji && <span style={{ fontSize: 12 }}>{t.emoji}</span>}
               <span>{t.label}</span>
@@ -1517,7 +1519,8 @@ export function MemoryScreen() {
                 data-filter-pill
                 onPointerDown={(e) => e.stopPropagation()}
                 onClick={t.pick}
-                style={{ cursor: 'pointer', flexShrink: 0, display: 'flex', alignItems: 'center', gap: 5, fontSize: 11, letterSpacing: 1, borderRadius: 10, padding: '4px 11px', background: t.bg, color: t.color, border: `1px solid ${t.border}`, fontWeight: t.bold ? 600 : 400, opacity: t.stale && !t.bold ? 0.5 : 1 }}
+                className="memory-filter-pill memory-filter-pill--tag"
+                style={{ cursor: 'pointer', flexShrink: 0, fontSize: 11, letterSpacing: 1, borderRadius: 10, padding: '4px 11px', background: t.bg, color: t.color, border: `1px solid ${t.border}`, fontWeight: t.bold ? 600 : 400, opacity: t.stale && !t.bold ? 0.5 : 1 }}
               >
                 <span>#{t.label}</span>
                 <span style={{ fontFamily: "'Bodoni Moda',serif", fontSize: 10, opacity: 0.75 }}>{t.n}</span>
