@@ -731,13 +731,18 @@ export function ChatScreen() {
     return () => clearInterval(iv);
   }, [sending, scrollBottom, legacyCompat]);
 
-  useEffect(() => () => {
-    mountedRef.current = false;
-    cancelInFlightWarmUpState(coldStartRaceRef.current);
-    bumpHistoryGenState(coldStartRaceRef.current);
-    warmUpInflightRef.current = null;
-    abortRef.current?.abort();
-    clearTimeout(toastTimer.current);
+  // Cold-start lifecycle: setup resets mounted for StrictMode dev replay (setup→cleanup→setup).
+  useEffect(() => {
+    mountedRef.current = true;
+
+    return () => {
+      mountedRef.current = false;
+      cancelInFlightWarmUpState(coldStartRaceRef.current);
+      bumpHistoryGenState(coldStartRaceRef.current);
+      warmUpInflightRef.current = null;
+      abortRef.current?.abort();
+      clearTimeout(toastTimer.current);
+    };
   }, []);
 
   const updateLive = useCallback((fn: (l: LiveState) => LiveState) => {

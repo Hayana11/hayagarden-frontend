@@ -242,17 +242,19 @@ assert.deepEqual(
   assert.deepEqual(plan.merged, [{ id: 23 }, { id: 24 }, { id: 25 }, { id: 26 }]);
 }
 
-// O. cold-start lifecycle / unmount guard
+// O. cold-start lifecycle / unmount guard (StrictMode setup→cleanup→setup safe)
 {
   assert.match(screen, /const mountedRef = useRef\(true\)/);
 
-  const cleanupBlock = screen.slice(
-    screen.indexOf('useEffect(() => () => {'),
+  const lifecycleBlock = screen.slice(
+    screen.indexOf('// Cold-start lifecycle:'),
     screen.indexOf('const updateLive = useCallback'),
   );
-  assert.match(cleanupBlock, /mountedRef\.current = false/);
-  assert.match(cleanupBlock, /cancelInFlightWarmUpState\(coldStartRaceRef\.current\)/);
-  assert.match(cleanupBlock, /bumpHistoryGenState\(coldStartRaceRef\.current\)/);
+  assert.match(lifecycleBlock, /mountedRef\.current = true/);
+  assert.match(lifecycleBlock, /mountedRef\.current = false/);
+  assert.match(lifecycleBlock, /cancelInFlightWarmUpState\(coldStartRaceRef\.current\)/);
+  assert.match(lifecycleBlock, /bumpHistoryGenState\(coldStartRaceRef\.current\)/);
+  assert.match(lifecycleBlock, /StrictMode/);
 
   const warmBlock = screen.slice(
     screen.indexOf('const runLegacyWarmUp = useCallback'),
