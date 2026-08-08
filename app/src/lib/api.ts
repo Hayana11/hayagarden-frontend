@@ -594,6 +594,34 @@ export interface ChatModelCatalog {
 }
 
 // GET /api/config/model-catalog -> provider-aware current model (MODEL-1A/1B)
+let modelCatalogInflight: Promise<ChatModelCatalog> | null = null;
+
+function normalizeModelCatalog(r: {
+  models?: ModelCatalogEntry[];
+  current?: string | null;
+  provider?: string;
+  model_mode?: string;
+  configured_model?: string | null;
+}): ChatModelCatalog {
+  const provider: ChatModelProvider | '' =
+    r.provider === 'claude_code' || r.provider === 'api_relay' ? r.provider : '';
+  const modelMode: ChatModelMode =
+    r.model_mode === 'explicit' || r.model_mode === 'default'
+      ? r.model_mode
+      : (provider === 'claude_code' ? 'unknown' : '');
+  const configured =
+    r.configured_model === null || r.configured_model === undefined
+      ? null
+      : String(r.configured_model);
+  return {
+    models: r.models || [],
+    current: configured || r.current || '',
+    provider,
+    modelMode,
+    configuredModel: configured,
+  };
+}
+
 export function fetchModelCatalog(): Promise<ChatModelCatalog> {
   return http
     .get<{
@@ -603,25 +631,7 @@ export function fetchModelCatalog(): Promise<ChatModelCatalog> {
       model_mode?: string;
       configured_model?: string | null;
     }>('/api/config/model-catalog')
-    .then((r): ChatModelCatalog => {
-      const provider: ChatModelProvider | '' =
-        r.provider === 'claude_code' || r.provider === 'api_relay' ? r.provider : '';
-      const modelMode: ChatModelMode =
-        r.model_mode === 'explicit' || r.model_mode === 'default'
-          ? r.model_mode
-          : (provider === 'claude_code' ? 'unknown' : '');
-      const configured =
-        r.configured_model === null || r.configured_model === undefined
-          ? null
-          : String(r.configured_model);
-      return {
-        models: r.models || [],
-        current: configured || r.current || '',
-        provider,
-        modelMode,
-        configuredModel: configured,
-      };
-    })
+    .then((r) => normalizeModelCatalog(r))
     .catch((): ChatModelCatalog => ({
       models: [],
       current: '',
@@ -629,6 +639,16 @@ export function fetchModelCatalog(): Promise<ChatModelCatalog> {
       modelMode: 'unknown',
       configuredModel: null,
     }));
+}
+
+/** Single in-flight catalog fetch — safe for cold start + model UI open. */
+export function ensureModelCatalog(): Promise<ChatModelCatalog> {
+  if (!modelCatalogInflight) {
+    modelCatalogInflight = fetchModelCatalog().finally(() => {
+      modelCatalogInflight = null;
+    });
+  }
+  return modelCatalogInflight;
 }
 
 export interface SetChatModelResult {

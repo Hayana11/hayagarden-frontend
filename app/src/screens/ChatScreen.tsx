@@ -11,13 +11,14 @@ import {
   editChatMessage,
   editFinalize,
   fetchChatMessages,
-  fetchModelCatalog,
+  ensureModelCatalog,
   regenFinalize,
   regenPrepare,
   sendChatMessage,
   setChatModel,
   switchChatBranch,
   uploadChatFile,
+  type ChatModelCatalog,
   type ModelCatalogEntry,
 } from '../lib/api';
 import {
@@ -44,6 +45,14 @@ import { ChatThemeQuickToggle, ChatThemeSegmented } from '../components/ChatThem
 import { ThemePerfRows } from '../components/ThemePerfRows';
 import { attachChatTheme, loadChatSettings, patchChatSettings, resolveEffectiveTheme, setChatTheme, type EffectiveTheme, type ThemeMode } from '../lib/chatTheme';
 import { getLegacyNativeCompatDetails } from '../lib/legacyNativeCompat';
+import {
+  CHAT_AUTHORITATIVE_LIMIT,
+  CHAT_LEGACY_INITIAL_LIMIT,
+  CHAT_LEGACY_WARMUP_LIMIT,
+  markChatColdStart,
+  mergeOlderChatMessages,
+  scheduleAfterFirstPaint,
+} from '../lib/chatColdStart';
 import {
   clampTranscriptWindow,
   followLatestAfterSearchJump,
@@ -283,6 +292,7 @@ export function ChatScreen() {
   const [flashId, setFlashId] = useState<number | null>(null);
   const [liked, setLiked] = useState<Record<number, 1 | -1>>({});
   const [endpointOnline, setEndpointOnline] = useState<boolean | null>(null);
+  const [initialHistoryReady, setInitialHistoryReady] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [chatError, setChatError] = useState<{ message: string; hint: string } | null>(null);
   const [pickedChoices, setPickedChoices] = useState<Record<number, string>>({});
@@ -307,6 +317,10 @@ export function ChatScreen() {
   const toastTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
   const liveRef = useRef<LiveState | null>(null);
   const postingRef = useRef(false);
+  const historyGenRef = useRef(0);
+  const warmUpGenRef = useRef(0);
+  const warmUpDoneRef = useRef(false);
+  const warmUpInflightRef = useRef<Promise<void> | null>(null);
   const composerMutationRevisionRef = useRef(0);
   const uploadCoordinatorRef = useRef(new ComposerUploadCoordinator(
     () => composerMutationRevisionRef.current,
@@ -401,12 +415,96 @@ export function ChatScreen() {
     });
   }, []);
 
+  const invalidateWarmUp = useCallback(() => {
+    warmUpGenRef.current += 1;
+    warmUpDoneRef.current = false;
+    warmUpInflightRef.current = null;
+  }, []);
+
+  const bumpHistoryGen = useCallback(() => ++historyGenRef.current, []);
+
+  const applyCatalog = useCallback((r: ChatModelCatalog) => {
+    setModels(r.models);
+    setChatProvider(r.provider);
+    setModelMode(r.modelMode);
+    setCurrentModel(r.configuredModel || r.current || '');
+  }, []);
+
   const refetchLatest = useCallback(async (toBottom = true) => {
-    const page = await fetchChatMessages({ limit: 80 });
+    const gen = bumpHistoryGen();
+    invalidateWarmUp();
+    const page = await fetchChatMessages({ limit: CHAT_AUTHORITATIVE_LIMIT });
+    if (gen !== historyGenRef.current) return;
     setMsgs(page.messages);
     setHasMoreBefore(page.hasMoreBefore);
     if (toBottom) scrollBottom();
-  }, [scrollBottom]);
+  }, [scrollBottom, bumpHistoryGen, invalidateWarmUp]);
+
+  const runLegacyWarmUp = useCallback(async (anchorGen: number, earliestId: number) => {
+    if (!legacyCompat || warmUpDoneRef.current) return;
+    if (warmUpInflightRef.current) return warmUpInflightRef.current;
+
+    const warmGen = ++warmUpGenRef.current;
+    markChatColdStart('background_warm_start');
+
+    const task = (async () => {
+      const warmPage = await fetchChatMessages({
+        before: earliestId,
+        limit: CHAT_LEGACY_WARMUP_LIMIT,
+      });
+      if (warmGen !== warmUpGenRef.current) return;
+      if (anchorGen !== historyGenRef.current) return;
+      if (!followLatestRef.current) return;
+
+      setMsgs((cur) => {
+        if (anchorGen !== historyGenRef.current) return cur;
+        if (!followLatestRef.current) return cur;
+        return mergeOlderChatMessages(cur, warmPage.messages);
+      });
+      setHasMoreBefore((prev) => (
+        anchorGen !== historyGenRef.current ? prev : warmPage.hasMoreBefore
+      ));
+      warmUpDoneRef.current = true;
+      markChatColdStart('background_warm_ready');
+    })().finally(() => {
+      if (warmUpInflightRef.current === task) warmUpInflightRef.current = null;
+    });
+
+    warmUpInflightRef.current = task;
+    return task;
+  }, [legacyCompat]);
+
+  const flushLegacyWarmUp = useCallback(async () => {
+    if (!legacyCompat || warmUpDoneRef.current) return;
+    const earliestId = msgs[0]?.id;
+    if (!earliestId) return;
+    const anchorGen = historyGenRef.current;
+    await runLegacyWarmUp(anchorGen, earliestId);
+  }, [legacyCompat, msgs, runLegacyWarmUp]);
+
+  const startModelCatalog = useCallback(() => {
+    markChatColdStart('catalog_start');
+    void ensureModelCatalog().then((r) => {
+      markChatColdStart('catalog_ready');
+      applyCatalog(r);
+    });
+  }, [applyCatalog]);
+
+  const toggleModelPop = useCallback(() => {
+    setModelPopOpen((open) => {
+      const next = !open;
+      if (next) startModelCatalog();
+      return next;
+    });
+  }, [startModelCatalog]);
+
+  const toggleSearchNav = useCallback(() => {
+    setNavOpen((open) => {
+      const next = open === 'search' ? null : 'search';
+      if (next === 'search' && legacyCompat) void flushLegacyWarmUp();
+      return next;
+    });
+  }, [legacyCompat, flushLegacyWarmUp]);
 
   const refreshChat = useCallback(async () => {
     if (refreshing) return;
@@ -432,16 +530,39 @@ export function ChatScreen() {
     }
   }, [refreshing, refetchLatest, showToast, pinTranscriptToLatest]);
 
-  // initial load + catalog (MODEL-1A/1B: provider-aware)
+  // Cold start: history first; catalog + gateway probes deferred until first batch ready.
   useEffect(() => {
-    refetchLatest();
-    fetchModelCatalog().then((r) => {
-      setModels(r.models);
-      setChatProvider(r.provider);
-      setModelMode(r.modelMode);
-      setCurrentModel(r.configuredModel || r.current || '');
-    });
-  }, [refetchLatest]);
+    let cancelled = false;
+    const gen = bumpHistoryGen();
+    invalidateWarmUp();
+    markChatColdStart('chat_mount');
+    markChatColdStart('initial_history_start');
+
+    const loadInitial = async () => {
+      const limit = legacyCompat ? CHAT_LEGACY_INITIAL_LIMIT : CHAT_AUTHORITATIVE_LIMIT;
+      const page = await fetchChatMessages({ limit });
+      if (cancelled || gen !== historyGenRef.current) return;
+
+      setMsgs(page.messages);
+      setHasMoreBefore(page.hasMoreBefore);
+      scrollBottom();
+      markChatColdStart('initial_history_ready');
+
+      scheduleAfterFirstPaint(() => {
+        if (cancelled || gen !== historyGenRef.current) return;
+        markChatColdStart('first_history_paint_scheduled');
+        setInitialHistoryReady(true);
+        startModelCatalog();
+        if (legacyCompat) {
+          const earliestId = page.messages[0]?.id;
+          if (earliestId) void runLegacyWarmUp(gen, earliestId);
+        }
+      });
+    };
+
+    void loadInitial();
+    return () => { cancelled = true; };
+  }, [legacyCompat, scrollBottom, bumpHistoryGen, invalidateWarmUp, startModelCatalog, runLegacyWarmUp]);
 
   // media listeners (layout only — theme uses DOM data-chat-theme, not parent state)
   useEffect(() => {
@@ -500,6 +621,7 @@ export function ChatScreen() {
   }, [txWin, msgs, legacyCompat]);
 
   useEffect(() => {
+    if (!initialHistoryReady) return;
     let cancelled = false;
     const pollLock = async () => {
       try {
@@ -517,10 +639,11 @@ export function ChatScreen() {
       cancelled = true;
       clearInterval(id);
     };
-  }, [sending, live]);
+  }, [initialHistoryReady, sending, live]);
 
-  // gateway reachability — breathing status under the name
+  // gateway reachability — breathing status under the name (first probe after history ready)
   useEffect(() => {
+    if (!initialHistoryReady) return;
     let cancelled = false;
     const check = async () => {
       const online = await fetchChatGatewayOnline();
@@ -529,7 +652,7 @@ export function ChatScreen() {
     void check();
     const iv = setInterval(() => { void check(); }, 20000);
     return () => { cancelled = true; clearInterval(iv); };
-  }, []);
+  }, [initialHistoryReady]);
 
   // poll for new messages (e.g. wake messages from the api-side) when idle
   useEffect(() => {
@@ -780,9 +903,11 @@ export function ChatScreen() {
 
   const loadEarlier = useCallback(async () => {
     if (loadingMore || !msgs.length) return;
+    invalidateWarmUp();
+    bumpHistoryGen();
     setLoadingMore(true);
     try {
-      const page = await fetchChatMessages({ before: msgs[0].id, limit: 80 });
+      const page = await fetchChatMessages({ before: msgs[0].id, limit: CHAT_AUTHORITATIVE_LIMIT });
       const prepended = page.messages.length;
       const newTotal = msgs.length + prepended;
       if (legacyCompat) {
@@ -795,7 +920,7 @@ export function ChatScreen() {
     } finally {
       setLoadingMore(false);
     }
-  }, [loadingMore, msgs, legacyCompat]);
+  }, [loadingMore, msgs, legacyCompat, invalidateWarmUp, bumpHistoryGen]);
 
   const showEarlierLoaded = useCallback(() => {
     if (!legacyCompat) {
@@ -1337,7 +1462,7 @@ export function ChatScreen() {
               <div onClick={() => setNavOpen(navOpen === 'font' ? null : 'font')} style={{ ...iconBtn, background: navOpen === 'font' ? 'var(--rosebg)' : 'transparent' }}>
                 <span style={{ fontFamily: FONT_DISPLAY, fontSize: 14, letterSpacing: 0.5 }}>Aa</span>
               </div>
-              <div onClick={() => setNavOpen(navOpen === 'search' ? null : 'search')} style={{ ...iconBtn, width: toolbarIcon, height: toolbarIcon, background: navOpen === 'search' ? 'var(--rosebg)' : 'transparent' }}>
+              <div onClick={toggleSearchNav} style={{ ...iconBtn, width: toolbarIcon, height: toolbarIcon, background: navOpen === 'search' ? 'var(--rosebg)' : 'transparent' }}>
                 <svg viewBox="0 0 24 24" width={16} height={16} fill="none" stroke="currentColor" strokeWidth={1.6} strokeLinecap="round" strokeLinejoin="round">
                   <circle cx={12} cy={12} r={9} />
                   <path d={IC.clock} />
@@ -1678,7 +1803,7 @@ export function ChatScreen() {
               <div onClick={() => { if (!postingRef.current) setAttachMenuOpen(!attachMenuOpen); }} style={{ cursor: posting ? 'default' : 'pointer', width: 38, height: 38, borderRadius: '50%', background: 'var(--card2)', color: 'var(--mut)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
                 <Svg d={IC.plus} size={17} sw={1.8} />
               </div>
-              <div onClick={() => setModelPopOpen(!modelPopOpen)} className="hstack hstack-6" style={{ cursor: 'pointer', padding: '9px 13px', borderRadius: 999, background: 'var(--card2)', minWidth: 0 }}>
+              <div onClick={toggleModelPop} className="hstack hstack-6" style={{ cursor: 'pointer', padding: '9px 13px', borderRadius: 999, background: 'var(--card2)', minWidth: 0 }}>
                 <span style={{ fontFamily: fontFamilyForText(modelBadge), fontSize: 12, letterSpacing: 0.5, color: 'var(--ink2)', fontWeight: 500, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{modelBadge}</span>
                 <svg viewBox="0 0 24 24" width={11} height={11} fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" style={{ color: 'var(--ghost)', flexShrink: 0 }}>
                   <path d="M18 15l-6-6-6 6" />

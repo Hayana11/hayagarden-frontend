@@ -20,6 +20,7 @@
     "test:usage-chrome78-runtime": "vite-node scripts/test-usage-chrome78-runtime.mjs",
     "test:page-header-geometry": "vite-node scripts/test-page-header-geometry.mjs",
     "test:chrome78-geometry-sweep": "vite-node scripts/test-chrome78-geometry-sweep.mjs",
+    "test:chat-cold-start": "vite-node scripts/test-chat-cold-start.mjs",
     "test:rewrite-finalize-retry": "vite-node scripts/test-rewrite-finalize-retry.mjs",
     "test:ledger": "vite-node scripts/test-ledger-integrity.mjs",
     "test:ledger:e2e": "playwright test e2e/ledger-integrity.spec.ts e2e/dash-ledger.spec.ts"
