@@ -122,7 +122,7 @@ function filterConsoleBlock(memory) {
   assert.doesNotMatch(navCss, /background:\s*rgba\(255,\s*255,\s*255/);
 }
 
-// F. Ledger statistics stack (G2 residual)
+// F. Ledger statistics stack + inner stats tab (G2 residual)
 {
   const ledger = readSrc('screens/LedgerScreen.tsx');
   const statsBlock = ledger.slice(
@@ -130,17 +130,25 @@ function filterConsoleBlock(memory) {
     ledger.indexOf("tab === '日历'"),
   );
   assert.match(statsBlock, /className="ledger-stats-stack"/);
-  assert.doesNotMatch(
-    statsBlock,
-    /ledger-stats-stack[\s\S]*?gap:\s*16/,
-  );
-  assert.doesNotMatch(
-    statsBlock,
-    /flexDirection:\s*'column'[\s\S]*?gap:\s*16/,
-  );
+  assert.match(statsBlock, /className="ledger-stats-donut-row"/);
+  assert.match(statsBlock, /className="ledger-stats-cat-list"/);
+  assert.match(statsBlock, /className="ledger-stats-cat-row"/);
+  assert.match(statsBlock, /className="ledger-stats-mode-toggle"/);
+  assert.match(statsBlock, /ledger-stats-week-bars/);
+  assert.match(statsBlock, /ledger-stats-week-col/);
+  assert.match(statsBlock, /className="ledger-stats-bar-list"/);
+  assert.doesNotMatch(statsBlock, /\bgap\s*:/);
 
   const css = readSrc('index.css');
   assert.match(css, /\.ledger-stats-stack > \* \+ \* \{[\s\S]*?margin-top:\s*16px/);
+  assert.match(css, /\.ledger-stats-donut-row > \* \+ \* \{[\s\S]*?margin-left:\s*20px/);
+  assert.match(css, /\.ledger-stats-cat-list > \* \+ \* \{[\s\S]*?margin-top:\s*8px/);
+  assert.match(css, /\.ledger-stats-cat-row > \* \+ \* \{[\s\S]*?margin-left:\s*8px/);
+  assert.match(css, /\.ledger-stats-mode-toggle > \* \+ \* \{[\s\S]*?margin-left:\s*4px/);
+  assert.match(css, /\.ledger-stats-week-bars > \* \+ \* \{[\s\S]*?margin-left:\s*16px/);
+  assert.match(css, /\.ledger-stats-week-bars--tight > \* \+ \* \{[\s\S]*?margin-left:\s*10px/);
+  assert.match(css, /\.ledger-stats-week-col > \* \+ \* \{[\s\S]*?margin-top:\s*6px/);
+  assert.match(css, /\.ledger-stats-bar-list > \* \+ \* \{[\s\S]*?margin-top:\s*13px/);
 }
 
 // G. Period calendar legend + record editor (G2 residual)

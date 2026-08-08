@@ -605,6 +605,88 @@ button {
   margin-top: 16px;
 }
 
+.ledger-stats-donut-row {
+  display: flex;
+  align-items: center;
+  margin-top: 16px;
+}
+
+.ledger-stats-donut-row > * + * {
+  margin-left: 20px;
+}
+
+.ledger-stats-cat-list {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.ledger-stats-cat-list > * + * {
+  margin-top: 8px;
+}
+
+.ledger-stats-cat-row {
+  display: flex;
+  align-items: center;
+  font-size: 13px;
+}
+
+.ledger-stats-cat-row > * + * {
+  margin-left: 8px;
+}
+
+.ledger-stats-mode-toggle {
+  display: flex;
+  background: var(--color-bg);
+  border-radius: 10px;
+  padding: 3px;
+}
+
+.ledger-stats-mode-toggle > * + * {
+  margin-left: 4px;
+}
+
+.ledger-stats-week-bars {
+  display: flex;
+  align-items: flex-end;
+  height: 120px;
+  margin-top: 18px;
+  padding: 0 6px;
+}
+
+.ledger-stats-week-bars > * + * {
+  margin-left: 16px;
+}
+
+.ledger-stats-week-bars--tight > * + * {
+  margin-left: 10px;
+}
+
+.ledger-stats-week-col {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-end;
+  height: 100%;
+  min-width: 0;
+}
+
+.ledger-stats-week-col > * + * {
+  margin-top: 6px;
+}
+
+.ledger-stats-bar-list {
+  display: flex;
+  flex-direction: column;
+  margin-top: 16px;
+}
+
+.ledger-stats-bar-list > * + * {
+  margin-top: 13px;
+}
+
 .period-calendar-legend {
   display: flex;
   flex-wrap: wrap;
