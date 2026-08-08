@@ -1,0 +1,52 @@
+/* Canonical static bottom nav — values from app/src/index.css GlobalBottomNav */
+.bnav {
+  position: fixed;
+  left: 50%;
+  transform: translateX(-50%);
+  bottom: 0;
+  width: 100%;
+  max-width: 480px;
+  z-index: 50;
+  display: flex;
+  background: rgba(255, 255, 255, 0.97);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  border-top: 1px solid #ece6e0;
+  padding: 7px 0 calc(7px + env(safe-area-inset-bottom, 0px));
+}
+
+.ni {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-decoration: none;
+  border: none;
+  background: none;
+  cursor: pointer;
+  color: #b0a0aa;
+  font-size: 10px;
+  letter-spacing: 0.4px;
+  font-family: inherit;
+  padding: 4px 0;
+  min-width: 0;
+  transition: color 0.18s;
+}
+
+.ni i {
+  font-size: 21px;
+  line-height: 1;
+  margin-bottom: 3px;
+}
+
+.ni.act {
+  color: #7c6a8a;
+}
+
+html[data-theme=dark] .ni {
+  color: #6a5f5f;
+}
+
+html[data-theme=dark] .ni.act {
+  color: #7c6a8a;
+}

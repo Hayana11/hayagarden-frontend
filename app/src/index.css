@@ -552,10 +552,18 @@ button {
   .chat-root * { animation: none !important; transition: none !important; }
 }
 
+.drag-scroll-row-outer {
+  display: flex;
+  align-items: center;
+}
+
+.drag-scroll-row-outer > * + * {
+  margin-left: 8px;
+}
+
 .drag-scroll-row {
   display: flex;
   align-items: center;
-  gap: 8px;
   overflow-x: auto;
   padding: 2px;
   flex: 1;
@@ -571,8 +579,50 @@ button {
   display: none;
 }
 
+.drag-scroll-row > * + * {
+  margin-left: 8px;
+}
+
 .drag-scroll-row:active {
   cursor: grabbing;
+}
+
+.memory-filter-console {
+  display: flex;
+  flex-direction: column;
+  margin-top: -4px;
+}
+
+.memory-filter-console > * + * {
+  margin-top: 8px;
+}
+
+.ledger-explore-stack {
+  display: flex;
+  flex-direction: column;
+}
+
+.ledger-explore-stack > * + * {
+  margin-top: 14px;
+}
+
+.calendar-legend-row {
+  display: flex;
+  flex-wrap: wrap;
+  margin-top: 14px;
+  font-size: 10px;
+  color: var(--color-text-faint);
+}
+
+.calendar-legend-row > * {
+  display: flex;
+  align-items: center;
+  margin-right: 14px;
+  margin-bottom: 6px;
+}
+
+.calendar-legend-row > * > * + * {
+  margin-left: 5px;
 }
 
 .memory-search-input::placeholder {

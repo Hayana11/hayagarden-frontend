@@ -1335,7 +1335,6 @@ export function MemoryScreen() {
   }
 
   return (
-    <div style={{ zoom: 1.07 }}>
     <ScreenLayout>
       <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
         <BackHeader title="记忆库" />
@@ -1465,7 +1464,7 @@ export function MemoryScreen() {
       </Card>
 
       {/* unified filter console */}
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: -4 }}>
+      <div className="memory-filter-console">
         <DragScrollRow
           label={
             <span style={{ flexShrink: 0, fontFamily: "'Bodoni Moda',serif", fontSize: 10, letterSpacing: 3, color: '#B9A8A2', width: 34 }}>状态</span>
@@ -1534,7 +1533,6 @@ export function MemoryScreen() {
 
       {renderDrawer()}
     </ScreenLayout>
-    </div>
   );
 }
 
