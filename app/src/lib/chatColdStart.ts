@@ -93,11 +93,19 @@ export function needsLegacyWarmUp(
   return loadedCount > 0;
 }
 
-/** Run deferred init at most once — even if initial gen was superseded. */
+/** Run deferred init at most once — only after usable history is applied. */
 export function tryConsumeDeferredInit(state: ColdStartRaceState): boolean {
   if (state.deferredInitDone) return false;
   state.deferredInitDone = true;
   return true;
+}
+
+export function shouldMarkWarmUpSatisfiedAfterPage(
+  loadedCountAfterMerge: number,
+  hasMoreBefore: boolean,
+): boolean {
+  if (hasAuthoritativeCoverage(loadedCountAfterMerge)) return true;
+  return !hasMoreBefore;
 }
 
 export function onAuthoritativeHistorySuccess(

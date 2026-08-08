@@ -11,6 +11,7 @@ import {
   editChatMessage,
   editFinalize,
   fetchChatMessages,
+  fetchChatMessagesOrNull,
   ensureModelCatalog,
   regenFinalize,
   regenPrepare,
@@ -59,6 +60,7 @@ import {
   needsLegacyWarmUp,
   onAuthoritativeHistorySuccess,
   scheduleAfterFirstPaint,
+  shouldMarkWarmUpSatisfiedAfterPage,
   tryConsumeDeferredInit,
   type ColdStartRaceState,
 } from '../lib/chatColdStart';
@@ -453,23 +455,30 @@ export function ChatScreen() {
     markChatColdStart('background_warm_start');
 
     const task = (async () => {
-      const warmPage = await fetchChatMessages({
+      const warmPage = await fetchChatMessagesOrNull({
         before: earliestId,
         limit: CHAT_LEGACY_WARMUP_LIMIT,
       });
+      if (!warmPage) return;
       if (warmGen !== coldStartRaceRef.current.warmUpGen) return;
       if (anchorGen !== coldStartRaceRef.current.historyGen) return;
       if (!followLatestRef.current) return;
 
+      let mergedCount = 0;
+      let committed = false;
       setMsgs((cur) => {
         if (anchorGen !== coldStartRaceRef.current.historyGen) return cur;
         if (!followLatestRef.current) return cur;
-        return mergeOlderChatMessages(cur, warmPage.messages);
+        const merged = mergeOlderChatMessages(cur, warmPage.messages);
+        mergedCount = merged.length;
+        committed = true;
+        return merged;
       });
-      setHasMoreBefore((prev) => (
-        anchorGen !== coldStartRaceRef.current.historyGen ? prev : warmPage.hasMoreBefore
-      ));
-      markWarmUpSatisfiedState(coldStartRaceRef.current);
+      if (!committed) return;
+      setHasMoreBefore(warmPage.hasMoreBefore);
+      if (shouldMarkWarmUpSatisfiedAfterPage(mergedCount, warmPage.hasMoreBefore)) {
+        markWarmUpSatisfiedState(coldStartRaceRef.current);
+      }
       markChatColdStart('background_warm_ready');
     })().finally(() => {
       if (warmUpInflightRef.current === task) warmUpInflightRef.current = null;
@@ -580,16 +589,16 @@ export function ChatScreen() {
         setHasMoreBefore(page.hasMoreBefore);
         scrollBottom();
         markChatColdStart('initial_history_ready');
-      }
 
-      scheduleAfterFirstPaint(() => {
-        if (cancelled) return;
-        ensureDeferredColdStartInit({
-          anchorGen: coldStartRaceRef.current.historyGen,
-          earliestId: superseded ? undefined : page.messages[0]?.id,
-          loadedCount: superseded ? CHAT_AUTHORITATIVE_LIMIT : page.messages.length,
+        scheduleAfterFirstPaint(() => {
+          if (cancelled) return;
+          ensureDeferredColdStartInit({
+            anchorGen: gen,
+            earliestId: page.messages[0]?.id,
+            loadedCount: page.messages.length,
+          });
         });
-      });
+      }
     };
 
     void loadInitial();

@@ -11,6 +11,7 @@ import {
   mergeOlderChatMessages,
   needsLegacyWarmUp,
   onAuthoritativeHistorySuccess,
+  shouldMarkWarmUpSatisfiedAfterPage,
   tryConsumeDeferredInit,
 } from '../src/lib/chatColdStart.ts';
 
@@ -81,9 +82,12 @@ assert.equal(CHAT_LEGACY_WARMUP_LIMIT, 56);
     screen.indexOf('const runLegacyWarmUp = useCallback'),
     screen.indexOf('const ensureDeferredColdStartInit = useCallback'),
   );
+  assert.match(warmBlock, /fetchChatMessagesOrNull/);
+  assert.match(warmBlock, /if \(!warmPage\) return/);
   assert.match(warmBlock, /warmGen !== coldStartRaceRef\.current\.warmUpGen/);
   assert.match(warmBlock, /anchorGen !== coldStartRaceRef\.current\.historyGen/);
   assert.match(warmBlock, /mergeOlderChatMessages/);
+  assert.match(warmBlock, /shouldMarkWarmUpSatisfiedAfterPage/);
   assert.match(warmBlock, /followLatestRef\.current/);
 }
 
@@ -141,20 +145,22 @@ assert.deepEqual(
   assert.match(loadBlock, /if \(gen !== coldStartRaceRef\.current\.historyGen\) return/);
 }
 
-// K. deferred init survives authoritative supersede of initial gen
+// K. superseded initial must not schedule deferred init; authoritative apply owns it
 {
   const mountBlock = screen.slice(
     screen.indexOf('// Cold start: history first'),
     screen.indexOf('// media listeners'),
   );
   assert.match(mountBlock, /const superseded = gen !== coldStartRaceRef\.current\.historyGen/);
-  assert.match(mountBlock, /ensureDeferredColdStartInit/);
-  assert.doesNotMatch(mountBlock, /scheduleAfterFirstPaint\([\s\S]*gen !== coldStartRaceRef/);
+  assert.match(mountBlock, /if \(!superseded\)[\s\S]*scheduleAfterFirstPaint[\s\S]*ensureDeferredColdStartInit/);
+  assert.doesNotMatch(mountBlock, /superseded \? CHAT_AUTHORITATIVE_LIMIT/);
+  assert.doesNotMatch(mountBlock, /loadedCount:\s*superseded/);
 
   const refetchBlock = screen.slice(
     screen.indexOf('const refetchLatest = useCallback'),
     screen.indexOf('const flushLegacyWarmUp = useCallback'),
   );
+  assert.match(refetchBlock, /setMsgs\(page\.messages\)/);
   assert.match(refetchBlock, /ensureDeferredColdStartInit/);
 }
 
@@ -174,23 +180,29 @@ assert.deepEqual(
   assert.match(flushBlock, /hasAuthoritativeCoverage\(msgs\.length\)/);
 }
 
+// M. warm-up uses strict fetch that distinguishes failure from empty page
+{
+  assert.match(api, /export function fetchChatMessagesOrNull/);
+  assert.match(api, /\.catch\(\(\) => null\)/);
+}
+
 // ── Executable race simulations (coordinator helpers) ──
 
-// Blocker 1: initial gen superseded → deferred init still runs once via refetch path
+// Blocker 1a: superseded initial must not fake-ready before authoritative history applied
 {
   const race = createColdStartRaceState();
-  const initialGen = bumpHistoryGenState(race);
-  bumpHistoryGenState(race); // send → authoritative refetch
-  assert.equal(isHistoryGenCurrent(race, initialGen), false);
-  assert.equal(tryConsumeDeferredInit(race), true);
-  assert.equal(tryConsumeDeferredInit(race), false);
+  bumpHistoryGenState(race); // initial gen=1
+  bumpHistoryGenState(race); // authoritative requested gen=2
+  assert.equal(race.deferredInitDone, false);
+  assert.equal(tryConsumeDeferredInit(race), true); // authoritative history applied
+  assert.equal(race.deferredInitDone, true);
 }
 
 // Blocker 2: stale loadEarlier response must not apply
 {
   const race = createColdStartRaceState();
   const loadGen = bumpHistoryGenState(race);
-  bumpHistoryGenState(race); // authoritative refetch supersedes
+  bumpHistoryGenState(race);
   assert.equal(isHistoryGenCurrent(race, loadGen), false);
 }
 
@@ -203,13 +215,17 @@ assert.deepEqual(
   assert.equal(hasAuthoritativeCoverage(CHAT_AUTHORITATIVE_LIMIT), true);
 }
 
-// Warm-up complete then authoritative refetch keeps satisfied
+// Warm-up transient failure must not mark satisfied
 {
   const race = createColdStartRaceState();
-  race.warmUpSatisfied = true;
-  onAuthoritativeHistorySuccess(race, CHAT_AUTHORITATIVE_LIMIT);
-  assert.equal(race.warmUpSatisfied, true);
-  assert.equal(needsLegacyWarmUp(true, race, 24), false);
+  assert.equal(shouldMarkWarmUpSatisfiedAfterPage(24, true), false);
+  assert.equal(race.warmUpSatisfied, false);
+}
+
+// Legitimate warm-up end-of-history marks satisfied
+{
+  assert.equal(shouldMarkWarmUpSatisfiedAfterPage(24, false), true);
+  assert.equal(shouldMarkWarmUpSatisfiedAfterPage(CHAT_AUTHORITATIVE_LIMIT, true), true);
 }
 
 console.log('test:chat-cold-start — all checks passed');

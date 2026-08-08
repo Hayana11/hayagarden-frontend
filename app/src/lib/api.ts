@@ -344,6 +344,18 @@ export interface ChatPage {
   hasMoreAfter: boolean;
 }
 
+function mapChatPage(r: {
+  messages?: ChatMessageRow[];
+  has_more_before?: boolean;
+  has_more_after?: boolean;
+}): ChatPage {
+  return {
+    messages: (r.messages || []).map(rowToMsg),
+    hasMoreBefore: Boolean(r.has_more_before),
+    hasMoreAfter: Boolean(r.has_more_after),
+  };
+}
+
 // GET /api/chat/messages?limit=&before=&after= -> { messages, has_more_before, has_more_after }
 export function fetchChatMessages(opts: { limit?: number; before?: number; after?: number } = {}): Promise<ChatPage> {
   return http
@@ -352,12 +364,22 @@ export function fetchChatMessages(opts: { limit?: number; before?: number; after
       before: opts.before,
       after: opts.after,
     })
-    .then((r) => ({
-      messages: (r.messages || []).map(rowToMsg),
-      hasMoreBefore: Boolean(r.has_more_before),
-      hasMoreAfter: Boolean(r.has_more_after),
-    }))
+    .then((r) => mapChatPage(r))
     .catch(() => ({ messages: [], hasMoreBefore: false, hasMoreAfter: false }));
+}
+
+/** Background warm-up: null on transport failure (distinct from legitimate empty page). */
+export function fetchChatMessagesOrNull(
+  opts: { limit?: number; before?: number; after?: number } = {},
+): Promise<ChatPage | null> {
+  return http
+    .get<{ messages: ChatMessageRow[]; has_more_before: boolean; has_more_after: boolean }>('/api/chat/messages', {
+      limit: opts.limit ?? 80,
+      before: opts.before,
+      after: opts.after,
+    })
+    .then((r) => mapChatPage(r))
+    .catch(() => null);
 }
 
 // POST /api/chat/send -> { ok, message_id }. Images go as multipart (backend
