@@ -1,0 +1,56 @@
+/* Chat-style static bottom nav — values from static/chat.html (Chrome78-safe, no flex gap) */
+.bnav {
+  position: fixed;
+  left: 50%;
+  transform: translateX(-50%);
+  bottom: 0;
+  width: 100%;
+  max-width: 480px;
+  z-index: 50;
+  display: flex;
+  background: rgba(245, 243, 238, 0.97);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  border-top: 0.5px solid rgba(210, 185, 155, 0.2);
+  padding: 8px 0 calc(8px + env(safe-area-inset-bottom, 0px));
+}
+
+.ni {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-decoration: none;
+  border: none;
+  background: none;
+  cursor: pointer;
+  color: #b8b0b8;
+  font-size: 10px;
+  letter-spacing: 0.4px;
+  font-family: inherit;
+  padding: 2px 0;
+  min-width: 0;
+  transition: color 0.18s;
+}
+
+.ni i {
+  font-size: 21px;
+  line-height: 1;
+  margin-bottom: 3px;
+}
+
+.ni.act {
+  color: #7c6a8a;
+}
+
+html[data-theme=dark] .bnav {
+  background: rgba(26, 22, 21, 0.97);
+}
+
+html[data-theme=dark] .ni {
+  color: #6a5f5f;
+}
+
+html[data-theme=dark] .ni.act {
+  color: #7c6a8a;
+}

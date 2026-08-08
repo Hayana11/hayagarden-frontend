@@ -45,7 +45,7 @@ export function DragScrollRow({ label, children, style }: DragScrollRowProps) {
   }
 
   return (
-    <div style={{ display: 'flex', alignItems: 'center', gap: 8, ...style }}>
+    <div className="drag-scroll-row-outer" style={style}>
       {label}
       <div
         ref={trackRef}

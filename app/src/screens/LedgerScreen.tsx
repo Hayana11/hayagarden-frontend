@@ -977,21 +977,26 @@ export function LedgerScreen() {
                   );
                 })}
               </div>
-              <div style={{ display: 'flex', gap: 14, marginTop: 14, fontSize: 10, color: 'var(--color-text-faint)', flexWrap: 'wrap' }}>
-                <span style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
-                  <span style={{ width: 9, height: 9, borderRadius: 3, background: '#F3E7CE' }} />低
+              <div className="calendar-legend-row">
+                <span>
+                  <span style={{ width: 9, height: 9, borderRadius: 3, background: '#F3E7CE' }} />
+                  <span>低</span>
                 </span>
-                <span style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
-                  <span style={{ width: 9, height: 9, borderRadius: 3, background: '#E8C6C9' }} />中
+                <span>
+                  <span style={{ width: 9, height: 9, borderRadius: 3, background: '#E8C6C9' }} />
+                  <span>中</span>
                 </span>
-                <span style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
-                  <span style={{ width: 9, height: 9, borderRadius: 3, background: 'var(--color-rose)' }} />高
+                <span>
+                  <span style={{ width: 9, height: 9, borderRadius: 3, background: 'var(--color-rose)' }} />
+                  <span>高</span>
                 </span>
-                <span style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
-                  <span style={{ width: 5, height: 5, borderRadius: '50%', background: 'var(--color-green-deep)' }} />有收入
+                <span>
+                  <span style={{ width: 5, height: 5, borderRadius: '50%', background: 'var(--color-green-deep)' }} />
+                  <span>有收入</span>
                 </span>
-                <span style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
-                  <span style={{ width: 5, height: 5, borderRadius: '50%', background: 'var(--color-violet)' }} />有记忆
+                <span>
+                  <span style={{ width: 5, height: 5, borderRadius: '50%', background: 'var(--color-violet)' }} />
+                  <span>有记忆</span>
                 </span>
               </div>
             </Card>
@@ -1027,7 +1032,7 @@ export function LedgerScreen() {
         {/* ══════════ 探索 ══════════ */}
         {tab === '探索' && (
           entriesUnavailablePane ?? (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+          <div className="ledger-explore-stack">
             <Card style={{ padding: 20, cursor: 'pointer' }} onClick={() => setLaterOpen(!laterOpen)}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                 <span style={{ fontSize: 15, fontWeight: 600, letterSpacing: 2 }}>后来</span>
