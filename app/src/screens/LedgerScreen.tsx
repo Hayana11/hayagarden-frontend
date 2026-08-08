@@ -803,10 +803,10 @@ export function LedgerScreen() {
         {/* ══════════ 统计 ══════════ */}
         {tab === '统计' && (
           entriesUnavailablePane ?? (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+          <div className="ledger-stats-stack">
             <Card style={{ padding: 22 }}>
               <div style={{ fontSize: 15, fontWeight: 600, letterSpacing: 2 }}>本月构成</div>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 20, marginTop: 16 }}>
+              <div className="ledger-stats-donut-row">
                 <svg viewBox="0 0 140 140" style={{ width: 128, height: 128, flexShrink: 0 }}>
                   {donutSegs.map((s, i) => (
                     <circle key={i} cx={70} cy={70} r={54} fill="none" stroke={s.color} strokeWidth={16} strokeDasharray={s.dash} strokeDashoffset={s.offset} transform="rotate(-90 70 70)" />
@@ -818,9 +818,9 @@ export function LedgerScreen() {
                     {donutTop ? catOf(donutTop[0]).name : ''}
                   </text>
                 </svg>
-                <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 8 }}>
+                <div className="ledger-stats-cat-list">
                   {catTotals.slice(0, 6).map(([id, v]) => (
-                    <div key={id} style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13 }}>
+                    <div key={id} className="ledger-stats-cat-row">
                       <span style={{ width: 8, height: 8, borderRadius: 3, background: catOf(id).color, flexShrink: 0 }} />
                       <span style={{ color: 'var(--color-text-soft)' }}>{catOf(id).name}</span>
                       <span style={{ fontFamily: DISPLAY, color: 'var(--color-text-faint)', marginLeft: 'auto' }}>{Math.round((v / (spend || 1)) * 100)}%</span>
@@ -859,7 +859,7 @@ export function LedgerScreen() {
             <Card style={{ padding: 22 }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                 <span style={{ fontSize: 15, fontWeight: 600, letterSpacing: 2 }}>分布</span>
-                <span style={{ display: 'flex', gap: 4, background: 'var(--color-bg)', borderRadius: 10, padding: 3 }}>
+                <span className="ledger-stats-mode-toggle">
                   {(['week', 'cat'] as const).map((m) => (
                     <span
                       key={m}
@@ -879,9 +879,9 @@ export function LedgerScreen() {
                 </span>
               </div>
               {barMode === 'week' ? (
-                <div style={{ display: 'flex', alignItems: 'flex-end', gap: weeks.length > 4 ? 10 : 16, height: 120, marginTop: 18, padding: '0 6px' }}>
+                <div className={`ledger-stats-week-bars${weeks.length > 4 ? ' ledger-stats-week-bars--tight' : ''}`}>
                   {weeks.map((v, i) => (
-                    <div key={i} style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 6, justifyContent: 'flex-end', height: '100%' }}>
+                    <div key={i} className="ledger-stats-week-col">
                       <span style={{ fontFamily: DISPLAY, fontSize: 10, color: 'var(--color-text-faint)' }}>{v ? `¥${fmtAmount(Math.round(v))}` : ''}</span>
                       <div style={{ width: '100%', maxWidth: 34, height: Math.max(Math.round((v / wMax) * 84), v ? 8 : 3), background: v ? (i % 2 ? 'var(--color-amber)' : 'var(--color-rose)') : '#F0E6E2', borderRadius: '7px 7px 3px 3px' }} />
                       <span style={{ fontSize: 10, color: 'var(--color-text-faint)', textAlign: 'center', lineHeight: 1.3 }}>{weekLabels[i]}</span>
@@ -889,7 +889,7 @@ export function LedgerScreen() {
                   ))}
                 </div>
               ) : (
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 13, marginTop: 16 }}>
+                <div className="ledger-stats-bar-list">
                   {catTotals.map(([id, v]) => (
                     <div key={id}>
                       <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13 }}>
