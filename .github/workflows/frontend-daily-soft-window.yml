@@ -41,3 +41,4 @@ jobs:
           npm run test:usage-chrome78-runtime
           npm run test:page-header-geometry
           npm run test:chrome78-geometry-sweep
+          npm run test:chat-cold-start
