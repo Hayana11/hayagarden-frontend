@@ -46,6 +46,15 @@ export function mergeOlderChatMessages<T extends { id: number }>(
   return [...fresh, ...current];
 }
 
+/** Pure warm-up plan — compute merge coverage before scheduling React state updates. */
+export function planWarmUpCommit<T extends { id: number }>(
+  current: T[],
+  older: T[],
+): { merged: T[]; mergedCount: number } {
+  const merged = mergeOlderChatMessages(current, older);
+  return { merged, mergedCount: merged.length };
+}
+
 // ── Cold-start race coordinator (pure, unit-testable) ──
 
 export type ColdStartRaceState = {

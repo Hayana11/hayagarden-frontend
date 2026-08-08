@@ -59,6 +59,7 @@ import {
   mergeOlderChatMessages,
   needsLegacyWarmUp,
   onAuthoritativeHistorySuccess,
+  planWarmUpCommit,
   scheduleAfterFirstPaint,
   shouldMarkWarmUpSatisfiedAfterPage,
   tryConsumeDeferredInit,
@@ -316,6 +317,7 @@ export function ChatScreen() {
 
   const legacyCompat = useMemo(() => getLegacyNativeCompatDetails().legacyNativeCompat, []);
   const followLatestRef = useRef(true);
+  const msgsRef = useRef<ChatMsg[]>([]);
   const pendingAnchorIdRef = useRef<number | null>(null);
   const pendingJumpIdRef = useRef<number | null>(null);
 
@@ -340,6 +342,8 @@ export function ChatScreen() {
   ));
 
   const effThinkMode = settings.thinkMode === 'auto' ? (wide ? 'inline' : 'drawer') : settings.thinkMode;
+
+  msgsRef.current = msgs;
 
   const placeholder = useMemo(() => chatPlaceholder(new Date()), []);
   const dateLabel = useMemo(() => {
@@ -464,17 +468,17 @@ export function ChatScreen() {
       if (anchorGen !== coldStartRaceRef.current.historyGen) return;
       if (!followLatestRef.current) return;
 
-      let mergedCount = 0;
-      let committed = false;
-      setMsgs((cur) => {
-        if (anchorGen !== coldStartRaceRef.current.historyGen) return cur;
-        if (!followLatestRef.current) return cur;
-        const merged = mergeOlderChatMessages(cur, warmPage.messages);
-        mergedCount = merged.length;
-        committed = true;
-        return merged;
+      const { mergedCount } = planWarmUpCommit(msgsRef.current, warmPage.messages);
+
+      setMsgs((latest) => {
+        if (anchorGen !== coldStartRaceRef.current.historyGen) return latest;
+        if (!followLatestRef.current) return latest;
+        return mergeOlderChatMessages(latest, warmPage.messages);
       });
-      if (!committed) return;
+
+      if (anchorGen !== coldStartRaceRef.current.historyGen) return;
+      if (!followLatestRef.current) return;
+
       setHasMoreBefore(warmPage.hasMoreBefore);
       if (shouldMarkWarmUpSatisfiedAfterPage(mergedCount, warmPage.hasMoreBefore)) {
         markWarmUpSatisfiedState(coldStartRaceRef.current);

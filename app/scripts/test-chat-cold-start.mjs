@@ -11,6 +11,7 @@ import {
   mergeOlderChatMessages,
   needsLegacyWarmUp,
   onAuthoritativeHistorySuccess,
+  planWarmUpCommit,
   shouldMarkWarmUpSatisfiedAfterPage,
   tryConsumeDeferredInit,
 } from '../src/lib/chatColdStart.ts';
@@ -84,6 +85,9 @@ assert.equal(CHAT_LEGACY_WARMUP_LIMIT, 56);
   );
   assert.match(warmBlock, /fetchChatMessagesOrNull/);
   assert.match(warmBlock, /if \(!warmPage\) return/);
+  assert.match(warmBlock, /planWarmUpCommit/);
+  assert.doesNotMatch(warmBlock, /let committed/);
+  assert.doesNotMatch(warmBlock, /let mergedCount/);
   assert.match(warmBlock, /warmGen !== coldStartRaceRef\.current\.warmUpGen/);
   assert.match(warmBlock, /anchorGen !== coldStartRaceRef\.current\.historyGen/);
   assert.match(warmBlock, /mergeOlderChatMessages/);
@@ -226,6 +230,16 @@ assert.deepEqual(
 {
   assert.equal(shouldMarkWarmUpSatisfiedAfterPage(24, false), true);
   assert.equal(shouldMarkWarmUpSatisfiedAfterPage(CHAT_AUTHORITATIVE_LIMIT, true), true);
+}
+
+// N. warm-up commit planned before setMsgs — no updater side effects
+{
+  const plan = planWarmUpCommit(
+    [{ id: 25 }, { id: 26 }],
+    [{ id: 23 }, { id: 24 }],
+  );
+  assert.equal(plan.mergedCount, 4);
+  assert.deepEqual(plan.merged, [{ id: 23 }, { id: 24 }, { id: 25 }, { id: 26 }]);
 }
 
 console.log('test:chat-cold-start — all checks passed');
