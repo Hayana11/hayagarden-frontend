@@ -46,12 +46,21 @@ import { ThemePerfRows } from '../components/ThemePerfRows';
 import { attachChatTheme, loadChatSettings, patchChatSettings, resolveEffectiveTheme, setChatTheme, type EffectiveTheme, type ThemeMode } from '../lib/chatTheme';
 import { getLegacyNativeCompatDetails } from '../lib/legacyNativeCompat';
 import {
+  bumpHistoryGenState,
+  cancelInFlightWarmUpState,
   CHAT_AUTHORITATIVE_LIMIT,
   CHAT_LEGACY_INITIAL_LIMIT,
   CHAT_LEGACY_WARMUP_LIMIT,
+  createColdStartRaceState,
+  hasAuthoritativeCoverage,
   markChatColdStart,
+  markWarmUpSatisfiedState,
   mergeOlderChatMessages,
+  needsLegacyWarmUp,
+  onAuthoritativeHistorySuccess,
   scheduleAfterFirstPaint,
+  tryConsumeDeferredInit,
+  type ColdStartRaceState,
 } from '../lib/chatColdStart';
 import {
   clampTranscriptWindow,
@@ -317,10 +326,8 @@ export function ChatScreen() {
   const toastTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
   const liveRef = useRef<LiveState | null>(null);
   const postingRef = useRef(false);
-  const historyGenRef = useRef(0);
-  const warmUpGenRef = useRef(0);
-  const warmUpDoneRef = useRef(false);
   const warmUpInflightRef = useRef<Promise<void> | null>(null);
+  const coldStartRaceRef = useRef<ColdStartRaceState>(createColdStartRaceState());
   const composerMutationRevisionRef = useRef(0);
   const uploadCoordinatorRef = useRef(new ComposerUploadCoordinator(
     () => composerMutationRevisionRef.current,
@@ -415,13 +422,12 @@ export function ChatScreen() {
     });
   }, []);
 
-  const invalidateWarmUp = useCallback(() => {
-    warmUpGenRef.current += 1;
-    warmUpDoneRef.current = false;
+  const bumpHistoryGen = useCallback(() => bumpHistoryGenState(coldStartRaceRef.current), []);
+
+  const cancelInFlightWarmUp = useCallback(() => {
+    cancelInFlightWarmUpState(coldStartRaceRef.current);
     warmUpInflightRef.current = null;
   }, []);
-
-  const bumpHistoryGen = useCallback(() => ++historyGenRef.current, []);
 
   const applyCatalog = useCallback((r: ChatModelCatalog) => {
     setModels(r.models);
@@ -430,21 +436,20 @@ export function ChatScreen() {
     setCurrentModel(r.configuredModel || r.current || '');
   }, []);
 
-  const refetchLatest = useCallback(async (toBottom = true) => {
-    const gen = bumpHistoryGen();
-    invalidateWarmUp();
-    const page = await fetchChatMessages({ limit: CHAT_AUTHORITATIVE_LIMIT });
-    if (gen !== historyGenRef.current) return;
-    setMsgs(page.messages);
-    setHasMoreBefore(page.hasMoreBefore);
-    if (toBottom) scrollBottom();
-  }, [scrollBottom, bumpHistoryGen, invalidateWarmUp]);
+  const startModelCatalog = useCallback(() => {
+    markChatColdStart('catalog_start');
+    void ensureModelCatalog().then((r) => {
+      markChatColdStart('catalog_ready');
+      applyCatalog(r);
+    });
+  }, [applyCatalog]);
 
   const runLegacyWarmUp = useCallback(async (anchorGen: number, earliestId: number) => {
-    if (!legacyCompat || warmUpDoneRef.current) return;
+    const race = coldStartRaceRef.current;
+    if (!legacyCompat || race.warmUpSatisfied) return;
     if (warmUpInflightRef.current) return warmUpInflightRef.current;
 
-    const warmGen = ++warmUpGenRef.current;
+    const warmGen = cancelInFlightWarmUpState(race);
     markChatColdStart('background_warm_start');
 
     const task = (async () => {
@@ -452,19 +457,19 @@ export function ChatScreen() {
         before: earliestId,
         limit: CHAT_LEGACY_WARMUP_LIMIT,
       });
-      if (warmGen !== warmUpGenRef.current) return;
-      if (anchorGen !== historyGenRef.current) return;
+      if (warmGen !== coldStartRaceRef.current.warmUpGen) return;
+      if (anchorGen !== coldStartRaceRef.current.historyGen) return;
       if (!followLatestRef.current) return;
 
       setMsgs((cur) => {
-        if (anchorGen !== historyGenRef.current) return cur;
+        if (anchorGen !== coldStartRaceRef.current.historyGen) return cur;
         if (!followLatestRef.current) return cur;
         return mergeOlderChatMessages(cur, warmPage.messages);
       });
       setHasMoreBefore((prev) => (
-        anchorGen !== historyGenRef.current ? prev : warmPage.hasMoreBefore
+        anchorGen !== coldStartRaceRef.current.historyGen ? prev : warmPage.hasMoreBefore
       ));
-      warmUpDoneRef.current = true;
+      markWarmUpSatisfiedState(coldStartRaceRef.current);
       markChatColdStart('background_warm_ready');
     })().finally(() => {
       if (warmUpInflightRef.current === task) warmUpInflightRef.current = null;
@@ -474,21 +479,44 @@ export function ChatScreen() {
     return task;
   }, [legacyCompat]);
 
+  const ensureDeferredColdStartInit = useCallback((opts: {
+    anchorGen?: number;
+    earliestId?: number;
+    loadedCount: number;
+  }) => {
+    if (!tryConsumeDeferredInit(coldStartRaceRef.current)) return;
+    markChatColdStart('first_history_paint_scheduled');
+    setInitialHistoryReady(true);
+    startModelCatalog();
+    if (
+      opts.earliestId
+      && needsLegacyWarmUp(legacyCompat, coldStartRaceRef.current, opts.loadedCount)
+    ) {
+      void runLegacyWarmUp(opts.anchorGen ?? coldStartRaceRef.current.historyGen, opts.earliestId);
+    }
+  }, [legacyCompat, startModelCatalog, runLegacyWarmUp]);
+
+  const refetchLatest = useCallback(async (toBottom = true) => {
+    const gen = bumpHistoryGen();
+    cancelInFlightWarmUp();
+    const page = await fetchChatMessages({ limit: CHAT_AUTHORITATIVE_LIMIT });
+    if (gen !== coldStartRaceRef.current.historyGen) return;
+    onAuthoritativeHistorySuccess(coldStartRaceRef.current, page.messages.length);
+    setMsgs(page.messages);
+    setHasMoreBefore(page.hasMoreBefore);
+    scheduleAfterFirstPaint(() => {
+      ensureDeferredColdStartInit({ loadedCount: page.messages.length });
+    });
+    if (toBottom) scrollBottom();
+  }, [scrollBottom, bumpHistoryGen, cancelInFlightWarmUp, ensureDeferredColdStartInit]);
+
   const flushLegacyWarmUp = useCallback(async () => {
-    if (!legacyCompat || warmUpDoneRef.current) return;
+    const race = coldStartRaceRef.current;
+    if (!legacyCompat || race.warmUpSatisfied || hasAuthoritativeCoverage(msgs.length)) return;
     const earliestId = msgs[0]?.id;
     if (!earliestId) return;
-    const anchorGen = historyGenRef.current;
-    await runLegacyWarmUp(anchorGen, earliestId);
+    await runLegacyWarmUp(race.historyGen, earliestId);
   }, [legacyCompat, msgs, runLegacyWarmUp]);
-
-  const startModelCatalog = useCallback(() => {
-    markChatColdStart('catalog_start');
-    void ensureModelCatalog().then((r) => {
-      markChatColdStart('catalog_ready');
-      applyCatalog(r);
-    });
-  }, [applyCatalog]);
 
   const toggleModelPop = useCallback(() => {
     setModelPopOpen((open) => {
@@ -534,35 +562,39 @@ export function ChatScreen() {
   useEffect(() => {
     let cancelled = false;
     const gen = bumpHistoryGen();
-    invalidateWarmUp();
+    cancelInFlightWarmUp();
     markChatColdStart('chat_mount');
     markChatColdStart('initial_history_start');
 
     const loadInitial = async () => {
       const limit = legacyCompat ? CHAT_LEGACY_INITIAL_LIMIT : CHAT_AUTHORITATIVE_LIMIT;
       const page = await fetchChatMessages({ limit });
-      if (cancelled || gen !== historyGenRef.current) return;
+      if (cancelled) return;
 
-      setMsgs(page.messages);
-      setHasMoreBefore(page.hasMoreBefore);
-      scrollBottom();
-      markChatColdStart('initial_history_ready');
+      const superseded = gen !== coldStartRaceRef.current.historyGen;
+      if (!superseded) {
+        if (hasAuthoritativeCoverage(page.messages.length)) {
+          onAuthoritativeHistorySuccess(coldStartRaceRef.current, page.messages.length);
+        }
+        setMsgs(page.messages);
+        setHasMoreBefore(page.hasMoreBefore);
+        scrollBottom();
+        markChatColdStart('initial_history_ready');
+      }
 
       scheduleAfterFirstPaint(() => {
-        if (cancelled || gen !== historyGenRef.current) return;
-        markChatColdStart('first_history_paint_scheduled');
-        setInitialHistoryReady(true);
-        startModelCatalog();
-        if (legacyCompat) {
-          const earliestId = page.messages[0]?.id;
-          if (earliestId) void runLegacyWarmUp(gen, earliestId);
-        }
+        if (cancelled) return;
+        ensureDeferredColdStartInit({
+          anchorGen: coldStartRaceRef.current.historyGen,
+          earliestId: superseded ? undefined : page.messages[0]?.id,
+          loadedCount: superseded ? CHAT_AUTHORITATIVE_LIMIT : page.messages.length,
+        });
       });
     };
 
     void loadInitial();
     return () => { cancelled = true; };
-  }, [legacyCompat, scrollBottom, bumpHistoryGen, invalidateWarmUp, startModelCatalog, runLegacyWarmUp]);
+  }, [legacyCompat, scrollBottom, bumpHistoryGen, cancelInFlightWarmUp, ensureDeferredColdStartInit]);
 
   // media listeners (layout only — theme uses DOM data-chat-theme, not parent state)
   useEffect(() => {
@@ -903,11 +935,12 @@ export function ChatScreen() {
 
   const loadEarlier = useCallback(async () => {
     if (loadingMore || !msgs.length) return;
-    invalidateWarmUp();
-    bumpHistoryGen();
+    const gen = bumpHistoryGen();
+    cancelInFlightWarmUp();
     setLoadingMore(true);
     try {
       const page = await fetchChatMessages({ before: msgs[0].id, limit: CHAT_AUTHORITATIVE_LIMIT });
+      if (gen !== coldStartRaceRef.current.historyGen) return;
       const prepended = page.messages.length;
       const newTotal = msgs.length + prepended;
       if (legacyCompat) {
@@ -920,7 +953,7 @@ export function ChatScreen() {
     } finally {
       setLoadingMore(false);
     }
-  }, [loadingMore, msgs, legacyCompat, invalidateWarmUp, bumpHistoryGen]);
+  }, [loadingMore, msgs, legacyCompat, bumpHistoryGen, cancelInFlightWarmUp]);
 
   const showEarlierLoaded = useCallback(() => {
     if (!legacyCompat) {

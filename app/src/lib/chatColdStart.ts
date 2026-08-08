@@ -45,3 +45,67 @@ export function mergeOlderChatMessages<T extends { id: number }>(
   if (curEarliest !== undefined && fresh.some((m) => m.id >= curEarliest)) return current;
   return [...fresh, ...current];
 }
+
+// ── Cold-start race coordinator (pure, unit-testable) ──
+
+export type ColdStartRaceState = {
+  historyGen: number;
+  warmUpGen: number;
+  warmUpSatisfied: boolean;
+  deferredInitDone: boolean;
+};
+
+export function createColdStartRaceState(): ColdStartRaceState {
+  return { historyGen: 0, warmUpGen: 0, warmUpSatisfied: false, deferredInitDone: false };
+}
+
+export function bumpHistoryGenState(state: ColdStartRaceState): number {
+  state.historyGen += 1;
+  return state.historyGen;
+}
+
+export function isHistoryGenCurrent(state: ColdStartRaceState, requestGen: number): boolean {
+  return requestGen === state.historyGen;
+}
+
+/** Invalidate only in-flight warm-up — does not clear satisfied coverage. */
+export function cancelInFlightWarmUpState(state: ColdStartRaceState): number {
+  state.warmUpGen += 1;
+  return state.warmUpGen;
+}
+
+export function markWarmUpSatisfiedState(state: ColdStartRaceState): void {
+  state.warmUpSatisfied = true;
+}
+
+export function hasAuthoritativeCoverage(loadedCount: number): boolean {
+  return loadedCount >= CHAT_AUTHORITATIVE_LIMIT;
+}
+
+export function needsLegacyWarmUp(
+  legacyCompat: boolean,
+  state: ColdStartRaceState,
+  loadedCount: number,
+): boolean {
+  if (!legacyCompat) return false;
+  if (state.warmUpSatisfied) return false;
+  if (hasAuthoritativeCoverage(loadedCount)) return false;
+  return loadedCount > 0;
+}
+
+/** Run deferred init at most once — even if initial gen was superseded. */
+export function tryConsumeDeferredInit(state: ColdStartRaceState): boolean {
+  if (state.deferredInitDone) return false;
+  state.deferredInitDone = true;
+  return true;
+}
+
+export function onAuthoritativeHistorySuccess(
+  state: ColdStartRaceState,
+  loadedCount: number,
+): void {
+  cancelInFlightWarmUpState(state);
+  if (hasAuthoritativeCoverage(loadedCount)) {
+    markWarmUpSatisfiedState(state);
+  }
+}
