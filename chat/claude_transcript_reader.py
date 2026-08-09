@@ -21,7 +21,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from pathlib import Path
 from typing import Any, Mapping, Optional, Union
@@ -218,6 +218,55 @@ def _extract_tool_refs(
     return uses, results
 
 
+def _has_sidechain_between(
+    parent_evt: TranscriptEvent,
+    child_evt: TranscriptEvent,
+    events: list[TranscriptEvent],
+) -> bool:
+    parent_off = int(parent_evt.byte_offset or 0)
+    child_off = int(child_evt.byte_offset or 0)
+    for evt in events:
+        off = int(evt.byte_offset or 0)
+        if off <= parent_off or off >= child_off:
+            continue
+        if evt.is_sidechain or evt.event_role == EventRole.SIDECHAIN:
+            return True
+    return False
+
+
+def _is_user_continuation(
+    evt: TranscriptEvent,
+    *,
+    by_uuid: dict[str, TranscriptEvent],
+    events: list[TranscriptEvent],
+) -> bool:
+    if evt.event_role != EventRole.CANDIDATE_USER or evt.is_sidechain:
+        return False
+    parent = by_uuid.get(evt.parent_uuid or '')
+    if (
+        parent is None
+        or parent.event_role != EventRole.CANDIDATE_USER
+        or parent.is_sidechain
+    ):
+        return False
+    return not _has_sidechain_between(parent, evt, events)
+
+
+def _reclassify_user_continuations(
+    events: list[TranscriptEvent],
+) -> tuple[list[TranscriptEvent], dict[str, TranscriptEvent]]:
+    """Parent-chained main-chain users stay in the same candidate round."""
+    by_uuid = {evt.event_uuid: evt for evt in events}
+    updated: list[TranscriptEvent] = []
+    new_by_uuid: dict[str, TranscriptEvent] = {}
+    for evt in events:
+        if _is_user_continuation(evt, by_uuid=by_uuid, events=events):
+            evt = replace(evt, event_role=EventRole.USER_CONTINUATION)
+        updated.append(evt)
+        new_by_uuid[evt.event_uuid] = evt
+    return updated, new_by_uuid
+
+
 def _build_candidate_rounds(events: list[TranscriptEvent]) -> list[CandidateConversationRound]:
     """Phase 1: assemble main-chain candidate rounds only.
 
@@ -265,7 +314,11 @@ def _build_candidate_rounds(events: list[TranscriptEvent]) -> list[CandidateConv
         if evt.event_role == EventRole.SYSTEM:
             continue
 
-        if evt.event_role in {EventRole.ASSISTANT, EventRole.TOOL_RESULT_USER}:
+        if evt.event_role in {
+            EventRole.ASSISTANT,
+            EventRole.TOOL_RESULT_USER,
+            EventRole.USER_CONTINUATION,
+        }:
             current_uuids.append(evt.event_uuid)
             if evt.event_role == EventRole.ASSISTANT:
                 has_assistant = True
@@ -370,6 +423,13 @@ def _finalize_graph(graph: TranscriptGraph) -> TranscriptGraph:
     elif len(session_ids) > 1:
         graph.session_id = sorted(session_ids)[0]
         graph.warnings.append(f'multiple_session_ids:{len(session_ids)}')
+
+    events, by_uuid = _reclassify_user_continuations(graph.events)
+    graph.events = events
+    graph.by_uuid = by_uuid
+    graph.children_by_parent = {}
+    for evt in events:
+        graph.children_by_parent.setdefault(evt.parent_uuid, []).append(evt.event_uuid)
 
     main_rounds = _build_candidate_rounds(graph.events)
     graph.candidate_rounds, side_warnings = _attach_sidechain_impacts(
