@@ -4951,6 +4951,126 @@ def _stream_cc_first_turn(_turn_data, _uc, intent: dict):
                 yield from _emit_tool_result(ppard)
         pending.clear()
 
+    def _assistant_payload_from_done(payload):
+        if isinstance(payload, tuple) and len(payload) >= 3:
+            raw_text = payload[0]
+            thinking = payload[1] if len(payload) > 1 else ''
+            usage = payload[2] if isinstance(payload[2], dict) else {}
+        else:
+            raw_text = ''
+            thinking = ''
+            usage = {}
+            if isinstance(payload, tuple):
+                if len(payload) >= 1:
+                    raw_text = payload[0]
+                if len(payload) >= 2:
+                    thinking = payload[1]
+                if len(payload) >= 3 and isinstance(payload[2], dict):
+                    usage = payload[2]
+            if not str(raw_text or '').strip():
+                raw_text = ''.join(text_acc)
+        assistant_text = (
+            str(raw_text or '').strip() or ''.join(text_acc).strip()
+        )
+        _ft_text, _ft_choices = _extract_choices(assistant_text)
+        if _ft_choices and not _ft_text:
+            _ft_text = '[选项: ' + ' / '.join(_ft_choices) + ']'
+        choices_json = (
+            json.dumps(_ft_choices, ensure_ascii=False)
+            if _ft_choices else ''
+        )
+        thinking_text = (
+            str(thinking or '')
+            if str(thinking or '').strip()
+            else ''.join(thinking_acc)
+        )
+        cache_info_json = (
+            json.dumps(usage, ensure_ascii=False) if usage else ''
+        )
+        return _ft_text, thinking_text, cache_info_json, choices_json, usage
+
+    _DRAIN_COMPLETED = 'DRAIN_COMPLETED'
+    _DRAIN_DONE_FINALIZE_PENDING = 'DRAIN_DONE_FINALIZE_PENDING'
+    _DRAIN_INCOMPLETE = 'DRAIN_INCOMPLETE'
+
+    def _detach_avoids_postcommit_abort(drain_result: str) -> bool:
+        return drain_result in (_DRAIN_COMPLETED, _DRAIN_DONE_FINALIZE_PENDING)
+
+    def _complete_first_turn_silent(payload) -> str:
+        """Persist assistant + finalize when client already detached."""
+        nonlocal complete_started
+        if complete_started or session is None or not first_released:
+            return _DRAIN_INCOMPLETE
+        _ft_text, thinking_text, cache_info_json, choices_json, _usage = (
+            _assistant_payload_from_done(payload)
+        )
+        try:
+            end_offset = int(session.jsonl_path.stat().st_size)
+        except OSError:
+            end_offset = int(session.start_offset)
+        complete_started = True
+        try:
+            done = complete_first_turn_round(
+                session,
+                assistant_content=_ft_text,
+                end_offset=end_offset,
+                db_path=DB_PATH,
+                thinking=thinking_text,
+                cache_info=cache_info_json,
+                choices=choices_json,
+            )
+        except Exception:
+            log.exception(
+                'first_turn silent complete failed after client detach',
+            )
+            return _DRAIN_DONE_FINALIZE_PENDING
+        log.info(
+            'first_turn_silent_complete assistant_id=%s',
+            done.assistant_message_id,
+        )
+        return _DRAIN_COMPLETED
+
+    def _drain_first_turn_after_client_detach() -> str:
+        """Keep consuming staged resident after SSE drop; avoid killing mid-round."""
+        nonlocal event_iter
+        if event_iter is None or complete_started or not first_released:
+            return _DRAIN_INCOMPLETE
+        try:
+            for evt, payload in event_iter:
+                if evt == 'text':
+                    chunk = str(payload or '')
+                    if not chunk.strip():
+                        continue
+                    text_acc.append(chunk)
+                    try:
+                        ingest_first_turn_text_delta(
+                            session, text=chunk, hooks=hooks, db_path=DB_PATH,
+                        )
+                    except Exception:
+                        pass
+                elif evt == 'done':
+                    result = _complete_first_turn_silent(payload)
+                    event_iter = None
+                    return result
+            return _DRAIN_INCOMPLETE
+        except Exception:
+            log.exception('first_turn detach drain failed')
+            return _DRAIN_INCOMPLETE
+
+    def _handle_client_detach() -> bool:
+        """Return True when detach must not POSTCOMMIT_ABORT."""
+        drain_result = _drain_first_turn_after_client_detach()
+        if _detach_avoids_postcommit_abort(drain_result):
+            pending.clear()
+            return True
+        _close_event_iter()
+        if first_released:
+            _postcommit_terminal('client_detach')
+        elif session is not None:
+            _precommit('client_detach')
+        pending.clear()
+        return False
+
     try:
         session = claim_and_start_first_turn(
             switch_request_id=switch_request_id,
@@ -5061,43 +5181,8 @@ def _stream_cc_first_turn(_turn_data, _uc, intent: dict):
                         yield _sse_json({'t': 'done', 'ok': False})
                         return
 
-                    if isinstance(payload, tuple) and len(payload) >= 3:
-                        raw_text = payload[0]
-                        thinking = payload[1] if len(payload) > 1 else ''
-                        usage = payload[2] if isinstance(payload[2], dict) else {}
-                    else:
-                        raw_text = ''
-                        thinking = ''
-                        usage = {}
-                        if isinstance(payload, tuple):
-                            if len(payload) >= 1:
-                                raw_text = payload[0]
-                            if len(payload) >= 2:
-                                thinking = payload[1]
-                            if len(payload) >= 3 and isinstance(payload[2], dict):
-                                usage = payload[2]
-                        if not str(raw_text or '').strip():
-                            raw_text = ''.join(text_acc)
-                    assistant_text = (
-                        str(raw_text or '').strip() or ''.join(text_acc).strip()
-                    )
-                    # Same choices contract as ordinary daily CC persist.
-                    _ft_text, _ft_choices = _extract_choices(assistant_text)
-                    if _ft_choices and not _ft_text:
-                        _ft_text = '[选项: ' + ' / '.join(_ft_choices) + ']'
-                    choices_json = (
-                        json.dumps(_ft_choices, ensure_ascii=False)
-                        if _ft_choices else ''
-                    )
-                    # Prefer provider done thinking (full acc); fall back to streamed deltas.
-                    # Do not concatenate both — done already includes streamed think_acc.
-                    thinking_text = (
-                        str(thinking or '')
-                        if str(thinking or '').strip()
-                        else ''.join(thinking_acc)
-                    )
-                    cache_info_json = (
-                        json.dumps(usage, ensure_ascii=False) if usage else ''
+                    _ft_text, thinking_text, cache_info_json, choices_json, usage = (
+                        _assistant_payload_from_done(payload)
                     )
                     try:
                         end_offset = int(session.jsonl_path.stat().st_size)
@@ -5144,12 +5229,8 @@ def _stream_cc_first_turn(_turn_data, _uc, intent: dict):
                     yield _sse_json({'t': 'done', 'ok': True})
                     return
         except GeneratorExit:
-            _close_event_iter()
-            if first_released:
-                _postcommit_terminal('generator_exit')
-            elif session is not None:
-                _precommit('generator_exit')
-            pending.clear()
+            if _handle_client_detach():
+                raise
             raise
 
         # Iterator EOF without provider done.
@@ -5164,7 +5245,11 @@ def _stream_cc_first_turn(_turn_data, _uc, intent: dict):
             yield _sse_json({'t': 'done', 'ok': False})
             return
 
-        # Post-commit incomplete stream: do not invent a second answer.
+        # Post-commit incomplete stream: drain before killing staged resident.
+        if _detach_avoids_postcommit_abort(_drain_first_turn_after_client_detach()):
+            pending.clear()
+            return
+
         _close_event_iter()
         _postcommit_terminal('eof_after_first_text')
         pending.clear()
@@ -5183,12 +5268,8 @@ def _stream_cc_first_turn(_turn_data, _uc, intent: dict):
         })
         yield _sse_json({'t': 'done', 'ok': False})
     except GeneratorExit:
-        _close_event_iter()
-        if first_released:
-            _postcommit_terminal('generator_exit_outer')
-        elif session is not None:
-            _precommit('generator_exit_outer')
-        pending.clear()
+        if _handle_client_detach():
+            raise
         raise
     except Exception as exc:
         log.exception('first_turn stream failed')
