@@ -61,6 +61,7 @@ def _init_db(db: str) -> None:
             thinking TEXT DEFAULT '',
             tool_calls TEXT DEFAULT '',
             source_kind TEXT NOT NULL DEFAULT 'chat',
+            image_url TEXT DEFAULT '',
             created_at TEXT NOT NULL DEFAULT (datetime('now', '+8 hours'))
         )'''
     )
@@ -74,6 +75,20 @@ def _insert_msg(db: str, author: str, content: str) -> int:
     cur = conn.execute(
         'INSERT INTO chat_messages (author, content) VALUES (?,?)',
         (author, content),
+    )
+    conn.commit()
+    mid = int(cur.lastrowid)
+    conn.close()
+    return mid
+
+
+def _insert_msg_with_image(
+    db: str, author: str, content: str, image_url: str,
+) -> int:
+    conn = sqlite3.connect(db)
+    cur = conn.execute(
+        'INSERT INTO chat_messages (author, content, image_url) VALUES (?,?,?)',
+        (author, content, image_url),
     )
     conn.commit()
     mid = int(cur.lastrowid)
@@ -354,6 +369,150 @@ class ContextWindowPreviewTests(unittest.TestCase):
         # DB + scan-range bytes unchanged (decoy may remain after offset)
         self.assertEqual(_db_fingerprint(self.db), before_db)
         self.assertEqual(path.read_bytes()[:end2], scan_prefix)
+
+    def test_ready_preview_skips_user_continuation_in_vision_round(self):
+        """Parent-chained vision user maps + transforms to DB canonical only."""
+        path = self._jsonl_path()
+        turn = [
+            _line(
+                'u-vision', 'user', session=SESSION_A, parent=None,
+                content='x' * 5000,
+            ),
+            _line(
+                'u-text', 'user', session=SESSION_A, parent='u-vision',
+                content='short-text',
+            ),
+            _line(
+                'a-part', 'assistant', session=SESSION_A, parent='u-text',
+                content=[{'type': 'text', 'text': 'part'}],
+            ),
+            _line(
+                'a-final', 'assistant', session=SESSION_A, parent='a-part',
+                content=[{'type': 'text', 'text': 'final'}],
+            ),
+        ]
+        end = _write_jsonl(path, turn)
+        self._register(session=SESSION_A, scan_offset=0)
+
+        user_id = _insert_msg(self.db, 'hayana', 'db-vision-user')
+        asst_id = _insert_msg(self.db, 'fyodor', 'db-vision-asst')
+        for mid, role in ((user_id, 'user'), (asst_id, 'assistant')):
+            _bind_msg(
+                self.db, mid, context_id=self.context_id,
+                epoch=self.epoch, gen=self.gen, role=role,
+            )
+        self._map_turn(user_id=user_id, asst_id=asst_id, start=0, end=end)
+
+        out = preview_context_window(
+            source_context_id=self.context_id,
+            source_context_epoch=self.epoch,
+            count=1,
+            preview_id=self.preview_id,
+            thinking_policy=ThinkingPolicy.DROP,
+            chat_id='default',
+            db_path=self.db,
+            now=NOW,
+        )
+        self.assertTrue(out['ok'], out)
+        self.assertEqual(out['preview_status'], PREVIEW_STATUS_READY, out)
+        self.assertEqual(out['selection']['selected_round_count'], 1)
+        self.assertEqual(out['selection']['selected_message_ids'], [user_id, asst_id])
+        self.assertTrue(out['validation']['ok'])
+        blob = json.dumps(out)
+        self.assertNotIn('short-text', blob)
+        self.assertNotIn('u-text', blob)
+
+    def test_ready_preview_vision_round_preserves_db_image_block(self):
+        """DB text+image_url must survive Preview→Transform for vision-split rounds."""
+        from chat.cc_vision_bridge import resolve_image_bytes
+        from chat.claude_transcript_transform import transform_transcript as real_transform
+        from tests.test_context_window_forge_switch import _make_vision_png
+
+        upload_dir = Path(self.tmp) / 'uploads'
+        upload_dir.mkdir(parents=True)
+        png_name = 'preview_vision.png'
+        _make_vision_png(upload_dir / png_name, 'pixel-marker')
+        image_ref = '/static/uploads/%s' % png_name
+
+        path = self._jsonl_path()
+        turn = [
+            _line(
+                'u-vision', 'user', session=SESSION_A, parent=None,
+                content='x' * 5000,
+            ),
+            _line(
+                'u-text', 'user', session=SESSION_A, parent='u-vision',
+                content='native-only-prompt',
+            ),
+            _line(
+                'a-final', 'assistant', session=SESSION_A, parent='u-text',
+                content=[{'type': 'text', 'text': 'reply'}],
+            ),
+        ]
+        end = _write_jsonl(path, turn)
+        self._register(session=SESSION_A, scan_offset=0)
+
+        user_id = _insert_msg_with_image(
+            self.db, 'hayana', '看看这个', image_ref,
+        )
+        asst_id = _insert_msg(self.db, 'fyodor', 'reply')
+        for mid, role in ((user_id, 'user'), (asst_id, 'assistant')):
+            _bind_msg(
+                self.db, mid, context_id=self.context_id,
+                epoch=self.epoch, gen=self.gen, role=role,
+            )
+        self._map_turn(user_id=user_id, asst_id=asst_id, start=0, end=end)
+
+        captured: dict[str, Any] = {}
+
+        def _spy_transform(graph, request):
+            captured['canonical'] = dict(request.user_canonical_by_event_uuid)
+            result = real_transform(graph, request)
+            captured['events'] = result.events
+            return result
+
+        with mock.patch(
+            'chat.cc_vision_bridge.resolve_image_bytes',
+            side_effect=lambda ref, **kw: resolve_image_bytes(
+                ref,
+                upload_dir=str(upload_dir),
+                attach_dir=str(upload_dir),
+            ),
+        ), mock.patch(
+            'chat.context_window_preview.transform_transcript',
+            side_effect=_spy_transform,
+        ):
+            out = preview_context_window(
+                source_context_id=self.context_id,
+                source_context_epoch=self.epoch,
+                count=1,
+                preview_id=self.preview_id,
+                thinking_policy=ThinkingPolicy.DROP,
+                chat_id='default',
+                db_path=self.db,
+                now=NOW,
+            )
+
+        self.assertTrue(out['ok'], out)
+        self.assertEqual(out['preview_status'], PREVIEW_STATUS_READY, out)
+        canonical = captured['canonical']['u-vision']
+        self.assertIsInstance(canonical, list)
+        img_blocks = [b for b in canonical if b.get('type') == 'image']
+        text_blocks = [b for b in canonical if b.get('type') == 'text']
+        self.assertEqual(len(img_blocks), 1)
+        self.assertEqual(len(text_blocks), 1)
+        self.assertEqual(text_blocks[0]['text'], '看看这个')
+        forged_user = captured['events'][0]['message']['content']
+        self.assertIsInstance(forged_user, list)
+        self.assertEqual(
+            [b.get('type') for b in forged_user],
+            ['text', 'image'],
+        )
+        self.assertNotIn('native-only-prompt', json.dumps(captured['events']))
+        self.assertEqual(
+            captured['events'][1]['parentUuid'],
+            captured['events'][0]['uuid'],
+        )
 
     def test_complex_ready_thinking_tool_sidechain(self):
         """3) Complex READY: sidechain excluded; keep thinking + tool pair."""

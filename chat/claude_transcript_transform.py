@@ -66,9 +66,9 @@ class TransformRequest:
     new_session_id: str
     cwd: str
     keep_rounds: int
-    # authoritative app-message mapping: source event uuid -> plain user text
-    # Presence in this map is what confirms a candidate user as a real kitten message.
-    user_canonical_by_event_uuid: Mapping[str, str]
+    # authoritative app-message mapping: source event uuid -> canonical user
+    # payload (plain str or multimodal content block list from DB).
+    user_canonical_by_event_uuid: Mapping[str, Any]
     thinking_policy: ThinkingPolicy
     sidechain_policy: SidechainPolicy = SidechainPolicy.EXCLUDE
     summary_policy: SummaryPolicy = SummaryPolicy.DROP
@@ -264,10 +264,21 @@ def _emit_event(
         if canonical is None:
             # Should not reach: unconfirmed rounds are filtered earlier
             raise TransformError(TransformErrorCode.UNCONFIRMED_USER, old_uid)
-        if not str(canonical).strip():
-            raise TransformError(TransformErrorCode.MAPPING_EMPTY, old_uid)
+        if isinstance(canonical, str):
+            if not canonical.strip():
+                raise TransformError(TransformErrorCode.MAPPING_EMPTY, old_uid)
+            user_content: Any = canonical
+        elif isinstance(canonical, list):
+            if not canonical:
+                raise TransformError(TransformErrorCode.MAPPING_EMPTY, old_uid)
+            user_content = copy.deepcopy(canonical)
+        else:
+            raise TransformError(
+                TransformErrorCode.INVALID_POLICY,
+                f'bad_canonical_type:{type(canonical).__name__}',
+            )
         # never copy old user payload; rebuild from authoritative mapping only
-        new_evt['message'] = {'role': 'user', 'content': str(canonical)}
+        new_evt['message'] = {'role': 'user', 'content': user_content}
         return new_evt
 
     if src.event_role == EventRole.TOOL_RESULT_USER:
@@ -381,6 +392,8 @@ def transform_transcript(graph: TranscriptGraph, request: TransformRequest) -> T
             if _is_auto_noise(evt):
                 continue
             if evt.is_sidechain or evt.event_role == EventRole.SIDECHAIN:
+                continue
+            if evt.event_role == EventRole.USER_CONTINUATION:
                 continue
             ordered_src.append(evt)
             seen.add(uid)

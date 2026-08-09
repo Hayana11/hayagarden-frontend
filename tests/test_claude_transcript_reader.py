@@ -58,6 +58,55 @@ class TranscriptReaderTests(unittest.TestCase):
         self.assertEqual(len(graph.candidate_rounds), 1)
         self.assertEqual(len(graph.candidate_rounds[0].event_uuids), 4)
 
+    def test_parent_chained_user_is_continuation_not_new_round(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'vision_split.jsonl'
+            rows = [
+                {
+                    'type': 'user',
+                    'uuid': 'v1111111-1111-1111-1111-111111111111',
+                    'parentUuid': None,
+                    'sessionId': 's',
+                    'message': {'role': 'user', 'content': 'x' * 128},
+                },
+                {
+                    'type': 'user',
+                    'uuid': 'v2222222-2222-2222-2222-222222222222',
+                    'parentUuid': 'v1111111-1111-1111-1111-111111111111',
+                    'sessionId': 's',
+                    'message': {'role': 'user', 'content': 'short prompt'},
+                },
+                {
+                    'type': 'assistant',
+                    'uuid': 'v3333333-3333-3333-3333-333333333333',
+                    'parentUuid': 'v2222222-2222-2222-2222-222222222222',
+                    'sessionId': 's',
+                    'message': {
+                        'role': 'assistant',
+                        'content': [{'type': 'text', 'text': 'reply'}],
+                    },
+                },
+            ]
+            path.write_text(
+                '\n'.join(json.dumps(r, ensure_ascii=False) for r in rows) + '\n',
+                encoding='utf-8',
+            )
+            graph = read_transcript(path)
+            self.assertEqual(len(graph.candidate_rounds), 1)
+            self.assertEqual(
+                graph.candidate_rounds[0].candidate_user_event_uuid,
+                'v1111111-1111-1111-1111-111111111111',
+            )
+            self.assertIn(
+                'v2222222-2222-2222-2222-222222222222',
+                graph.candidate_rounds[0].event_uuids,
+            )
+            roles = {e.event_uuid: e.event_role for e in graph.events}
+            self.assertEqual(
+                roles['v2222222-2222-2222-2222-222222222222'],
+                EventRole.USER_CONTINUATION,
+            )
+
     def test_sidechain_marks_whole_round_impact(self) -> None:
         graph = read_transcript(FIXTURE / 'sidechain.jsonl')
         self.assertEqual(len(graph.candidate_rounds), 2)

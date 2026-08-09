@@ -672,6 +672,82 @@ class SessionRegistryMappingTests(unittest.TestCase):
         self.assertEqual(int(bad.registry['scan_offset']), 0)
         self.assertEqual(bad.registry['scan_status'], SCAN_STATUS_BLOCKED)
 
+    def test_parent_chained_user_continuation_maps_single_round(self) -> None:
+        """Vision split: main user + parent-chained text user must map as one round."""
+        prefix = [
+            _line('u-prev', 'user', session=SESSION, parent=None, content='prev'),
+            _line(
+                'a-prev', 'assistant', session=SESSION, parent='u-prev',
+                content=[{'type': 'text', 'text': 'prev-a'}],
+            ),
+        ]
+        self._register(scan_offset=0)
+        path = self._transcript_path()
+        start_before = _write_jsonl(path, prefix)
+        conn = sqlite3.connect(self.db)
+        conn.execute(
+            'UPDATE context_claude_sessions SET scan_offset=? '
+            'WHERE context_id=? AND resident_generation=?',
+            (start_before, self.context_id, self.gen),
+        )
+        conn.commit()
+        conn.close()
+        user_id, asst_id = self._seed_pair('vision-user-text', 'vision-asst-reply')
+        vision_blob = 'x' * 5000
+        delta = [
+            _line(
+                'u-vision', 'user', session=SESSION, parent='a-prev',
+                content=vision_blob,
+            ),
+            _line(
+                'u-text', 'user', session=SESSION, parent='u-vision',
+                content='short-text',
+            ),
+            _line(
+                'a-part', 'assistant', session=SESSION, parent='u-text',
+                content=[{'type': 'text', 'text': 'part'}],
+            ),
+            _line(
+                'a-final', 'assistant', session=SESSION, parent='a-part',
+                content=[{'type': 'text', 'text': 'final'}],
+            ),
+        ]
+        with path.open('ab') as handle:
+            handle.write(
+                ''.join(
+                    line if line.endswith('\n') else line + '\n' for line in delta
+                ).encode('utf-8')
+            )
+        end = path.stat().st_size
+
+        graph = read_transcript_range(path, start_before, end)
+        from chat.claude_transcript_model import EventRole
+        cands = [
+            e for e in graph.events
+            if e.event_role == EventRole.CANDIDATE_USER and not e.is_sidechain
+        ]
+        self.assertEqual(len(cands), 1)
+        self.assertEqual(len(graph.candidate_rounds), 1)
+
+        ok = run_mapping_pass(
+            MappingPassRequest(
+                context_id=self.context_id, context_epoch=self.epoch,
+                resident_generation=self.gen, chat_id='default',
+                user_message_id=user_id, assistant_message_id=asst_id,
+                expected_start_offset=start_before, observed_end_offset=end,
+            ),
+            db_path=self.db,
+        )
+        self.assertTrue(ok.ok, ok.error_code)
+        self.assertEqual(
+            get_user_canonical_by_event_uuid(['u-vision'], db_path=self.db),
+            {'u-vision': 'vision-user-text'},
+        )
+        reg = get_context_claude_session(self.context_id, self.gen, db_path=self.db)
+        self.assertEqual(reg['scan_status'], SCAN_STATUS_READY)
+        self.assertEqual(int(reg['scan_offset']), end)
+        self.assertEqual(int(reg['last_mapped_message_id']), asst_id)
+
     def test_fail_closed_epoch_mismatch_and_event_conflict(self) -> None:
         self._register(scan_offset=0)
         user_id, asst_id = self._seed_pair('canon', 'a')

@@ -19,6 +19,9 @@ class EventRole(str, Enum):
     """
 
     CANDIDATE_USER = 'candidate_user'
+    # Main-chain user row whose parent is another main-chain user (vision split,
+    # prompt continuation). Not a new DB round boundary.
+    USER_CONTINUATION = 'user_continuation'
     TOOL_RESULT_USER = 'tool_result_user'
     ASSISTANT = 'assistant'
     SYSTEM = 'system'
