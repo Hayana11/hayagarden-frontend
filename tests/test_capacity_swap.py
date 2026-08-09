@@ -82,13 +82,6 @@ def _mapping_ids_plain_two_rounds(graph):
     return canonical, mid_to_event, event_to_mid
 
 
-def _formal_messages_tool_round():
-    return [
-        {'id': 10, 'author': 'hayana', 'content': '读取测试文件', 'image_url': ''},
-        {'id': 11, 'author': 'assistant', 'content': '文件内容是 hello', 'image_url': ''},
-    ]
-
-
 def _mapping_ids_tool_round(graph):
     event_to_mid = {
         'aaaaaaa1-aaaa-aaaa-aaaa-aaaaaaaaaaa1': 10,
@@ -256,6 +249,47 @@ class CapacitySwapCoreTests(unittest.TestCase):
         for line in cand.serialized_jsonl.splitlines():
             if line.strip():
                 json.loads(line)
+
+    def test_token_budget_tail_full_chain_rejects_round_per_round_sum_would_accept(self) -> None:
+        """Per-round token sums can under-estimate the forged multi-round chain."""
+        graph = read_transcript(FIXTURE / 'plain_two_rounds.jsonl')
+        mapping = _mapping_for(graph)
+        budget = 330
+        req = TransformRequest(
+            new_session_id=CANDIDATE_SID,
+            cwd=CWD,
+            keep_rounds=0,
+            user_canonical_by_event_uuid=mapping,
+            thinking_policy=ThinkingPolicy.DROP,
+            selection_policy=SelectionPolicy.TOKEN_BUDGET_TAIL,
+            tail_token_budget=budget,
+        )
+        from chat.claude_transcript_transform import (
+            _eligible_confirmed_rounds,
+            _estimate_rounds_token_count,
+        )
+
+        eligible, _, _ = _eligible_confirmed_rounds(graph, req)
+        per_round_sum = sum(
+            _estimate_rounds_token_count(graph, [rnd], req) for rnd in eligible
+        )
+        both_tokens = _estimate_rounds_token_count(graph, eligible, req)
+        self.assertLessEqual(per_round_sum, budget)
+        self.assertGreater(both_tokens, budget)
+
+        result = transform_transcript(graph, req)
+        self.assertEqual(result.selected_round_count, 1)
+        from chat.claude_transcript_transform import estimate_serialized_token_count
+        final_tail_tokens = estimate_serialized_token_count(result.events)
+        self.assertLessEqual(final_tail_tokens, budget)
+        user_texts = [
+            evt['message']['content']
+            for evt in result.events
+            if evt.get('type') == 'user'
+            and isinstance((evt.get('message') or {}).get('content'), str)
+        ]
+        self.assertIn('今天想你了', user_texts)
+        self.assertNotIn('对不起，我刚才语气不好', user_texts)
 
     def test_token_budget_tail_selection_in_transform(self) -> None:
         graph = read_transcript(FIXTURE / 'plain_two_rounds.jsonl')

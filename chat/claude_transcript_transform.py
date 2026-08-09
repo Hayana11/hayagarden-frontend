@@ -327,16 +327,17 @@ def _emit_forged_chain(
     return forged, uuid_map, tool_id_map
 
 
-def _estimate_rounds_serialized_bytes(
+def _estimate_rounds_token_count(
     graph: TranscriptGraph,
     rounds: Sequence[CandidateConversationRound],
     request: TransformRequest,
 ) -> int:
+    """Token estimate for a forged tail chain (same contract as ``_check_budgets``)."""
     ordered = _ordered_source_events_for_rounds(graph, rounds)
     if not ordered:
         return 0
     forged, _, _ = _emit_forged_chain(ordered, request)
-    return len(serialize_events(forged).encode('utf-8'))
+    return estimate_serialized_token_count(forged)
 
 
 def _select_confirmed_rounds_by_budget(
@@ -351,16 +352,12 @@ def _select_confirmed_rounds_by_budget(
         raise TransformError(TransformErrorCode.ROUND_BUDGET, 'negative_tail_budget')
 
     selected: list[CandidateConversationRound] = []
-    total_tokens = 0
     for rnd in reversed(eligible):
-        rnd_bytes = _estimate_rounds_serialized_bytes(graph, [rnd], request)
-        rnd_tokens = max(1, rnd_bytes // 4) if rnd_bytes else 0
-        if rnd_tokens > budget:
-            break
-        if total_tokens + rnd_tokens > budget:
+        trial = [rnd] + selected
+        trial_tokens = _estimate_rounds_token_count(graph, trial, request)
+        if trial_tokens > budget:
             break
         selected.insert(0, rnd)
-        total_tokens += rnd_tokens
     return selected
 
 
