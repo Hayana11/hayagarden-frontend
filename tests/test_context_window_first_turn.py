@@ -1937,6 +1937,15 @@ class ContextWindowFirstTurnTests(unittest.TestCase):
         target_session_before = str(intent_before['target_session_id'])
         jsonl_path = self._jsonl_path(str(intent_before['target_session_id']))
         start_size = jsonl_path.stat().st_size
+        baseline_asst_max_id = sqlite3.connect(self.db).execute(
+            "SELECT MAX(id) FROM chat_messages WHERE author='assistant'",
+        ).fetchone()[0]
+        target_gen_baseline = int(
+            dc.get_daily_context_by_id(target_id, db_path=self.db)['resident_generation'],
+        )
+        target_cursor_baseline = dc.get_resident_history_cursor(
+            target_id, target_gen_baseline, db_path=self.db,
+        )
 
         # Prepare-staged failure after claim must auto-return READY + release lease.
         boom_hooks = ft_mod.FirstTurnHooks(
@@ -2120,22 +2129,68 @@ class ContextWindowFirstTurnTests(unittest.TestCase):
         turn = {'user_message_id': gateway_user_id}
 
         def _reset_ready_fixture() -> None:
+            intent = self._intent()
+            aid = intent.get('first_assistant_message_id')
             conn = _connect(self.db)
             try:
                 conn.execute('BEGIN IMMEDIATE')
+                if aid:
+                    conn.execute(
+                        'DELETE FROM chat_messages WHERE id=?', (int(aid),),
+                    )
+                if baseline_asst_max_id is not None:
+                    conn.execute(
+                        "DELETE FROM chat_messages WHERE author='assistant' AND id > ?",
+                        (int(baseline_asst_max_id),),
+                    )
                 conn.execute(
                     "UPDATE context_switch_intents SET status=?, orphan_jsonl_state=NULL, "
-                    "first_turn_error_code=NULL, updated_at=? WHERE request_id=?",
-                    (INTENT_READY, NOW.strftime('%Y-%m-%d %H:%M:%S'), self.switch_request_id),
+                    "first_turn_error_code=NULL, first_turn_completed_at=NULL, "
+                    "first_assistant_message_id=NULL, first_turn_end_offset=NULL, "
+                    "first_user_message_id=NULL, last_good_context_id=NULL, "
+                    "last_good_context_epoch=NULL, last_good_resident_generation=NULL, "
+                    "last_good_history_cursor_message_id=NULL, last_good_recorded_at=NULL, "
+                    "updated_at=? WHERE request_id=?",
+                    (
+                        INTENT_READY,
+                        NOW.strftime('%Y-%m-%d %H:%M:%S'),
+                        self.switch_request_id,
+                    ),
                 )
                 conn.execute(
                     'DELETE FROM daily_resident_turn_leases WHERE context_id=?',
                     (target_id,),
                 )
+                conn.execute(
+                    'UPDATE daily_contexts SET closed_at=NULL WHERE id=?',
+                    (self.context_id,),
+                )
+                conn.execute(
+                    'UPDATE daily_contexts SET window_mode=? WHERE id=?',
+                    (WINDOW_MODE_MANUAL_STAGED, target_id),
+                )
                 conn.commit()
             finally:
                 conn.close()
+            if target_cursor_baseline is not None:
+                dc.set_resident_history_cursor(
+                    target_id,
+                    target_gen_baseline,
+                    int(target_cursor_baseline),
+                    db_path=self.db,
+                )
+            else:
+                conn = _connect(self.db)
+                try:
+                    conn.execute(
+                        'DELETE FROM daily_resident_cursors WHERE context_id=?',
+                        (target_id,),
+                    )
+                    conn.commit()
+                finally:
+                    conn.close()
             jsonl_path.write_bytes(jsonl_path.read_bytes()[:start_size])
+            dr.reset_bindings_for_tests()
 
         def _run_stream(fake, *, expect_generator_exit=False):
             hooks = self._gateway_first_turn_hooks(fake)
@@ -2358,37 +2413,6 @@ class ContextWindowFirstTurnTests(unittest.TestCase):
             )
             _reset_ready_fixture()
 
-        with self.subTest('B2b_client_detach_drains_to_complete'):
-            hooks = self._gateway_first_turn_hooks(_FakeStaged('partial_then_done'))
-            complete = mock.Mock(wraps=ft_mod.complete_first_turn_round)
-            live_intent = self._intent()
-            with mock.patch.object(gateway, 'DB_PATH', self.db), \
-                 mock.patch.object(gateway, '_gw_build_first_turn_hooks', return_value=hooks), \
-                 mock.patch(
-                     'chat.context_window_first_turn.complete_first_turn_round', complete,
-                 ), \
-                 mock.patch(
-                     'chat.context_window_first_turn.abort_first_turn_postcommit',
-                 ) as postcommit_abort:
-                gen = gateway._stream_cc_first_turn(turn, '可重试', live_intent)
-                saw_text = False
-                try:
-                    while True:
-                        chunk = next(gen)
-                        if '"t": "text"' in chunk:
-                            saw_text = True
-                            break
-                finally:
-                    self.assertTrue(saw_text)
-                    with self.assertRaises(GeneratorExit):
-                        gen.close()
-                complete.assert_called_once()
-                postcommit_abort.assert_not_called()
-            intent_after = self._intent()
-            self.assertEqual(intent_after['status'], INTENT_COMMITTED)
-            self.assertIsNone(intent_after.get('first_turn_error_code'))
-            _reset_ready_fixture()
-
         with self.subTest('B3_gen_close_after_precommit'):
             fake = _FakeStaged('done_before_text')
             hooks = self._gateway_first_turn_hooks(fake)
@@ -2469,6 +2493,151 @@ class ContextWindowFirstTurnTests(unittest.TestCase):
             self.assertEqual(types.index('think'), 0)
             self.assertLess(types.index('tool_use'), text_i)
             self.assertLess(types.index('tool_result'), text_i)
+
+    def _partial_then_done_fake(self):
+        class _FakeStaged:
+            def __init__(self):
+                self.killed = False
+
+            def send_turn(
+                self,
+                content,
+                commit_meta=None,
+                on_stdin_flushed=None,
+                idle_heartbeat_sec=None,
+            ):
+                if on_stdin_flushed is not None:
+                    on_stdin_flushed()
+                yield ('text', 'partial')
+                yield ('text', ' full')
+                yield ('done', ('partial full', '', {}))
+
+            def _kill(self, quiet=True):
+                self.killed = True
+
+        return _FakeStaged()
+
+    def test_B2b_client_detach_drains_to_complete(self):
+        """PR #233: online chunks + detach drain complete without POSTCOMMIT_ABORT."""
+        import gateway
+
+        self._seed_source_and_forge()
+        gateway_user_id = _insert_msg(self.db, 'hayana', '可重试')
+        turn = {'user_message_id': gateway_user_id}
+        fake = self._partial_then_done_fake()
+        hooks = self._gateway_first_turn_hooks(fake)
+        complete = mock.Mock(wraps=ft_mod.complete_first_turn_round)
+        live_intent = self._intent()
+        with mock.patch.object(gateway, 'DB_PATH', self.db), \
+             mock.patch.object(gateway, '_gw_build_first_turn_hooks', return_value=hooks), \
+             mock.patch(
+                 'chat.context_window_first_turn.complete_first_turn_round', complete,
+             ), \
+             mock.patch(
+                 'chat.context_window_first_turn.abort_first_turn_postcommit',
+             ) as postcommit_abort:
+            gen = gateway._stream_cc_first_turn(turn, '可重试', live_intent)
+            text_seen = []
+            try:
+                while len(text_seen) < 2:
+                    chunk = next(gen)
+                    if not chunk.startswith('data: '):
+                        continue
+                    body = json.loads(chunk[len('data: '):].strip())
+                    if body.get('t') == 'text':
+                        text_seen.append(body.get('d'))
+            finally:
+                self.assertEqual(text_seen, ['partial', ' full'])
+                gen.close()
+            complete.assert_called_once()
+            postcommit_abort.assert_not_called()
+            self.assertFalse(fake.killed)
+        intent_after = self._intent()
+        self.assertEqual(intent_after['status'], INTENT_COMMITTED)
+        self.assertIsNotNone(intent_after.get('first_turn_completed_at'))
+        self.assertIsNone(intent_after.get('first_turn_error_code'))
+        aid = int(intent_after['first_assistant_message_id'])
+        row = sqlite3.connect(self.db).execute(
+            'SELECT content FROM chat_messages WHERE id=?', (aid,),
+        ).fetchone()
+        self.assertEqual(row[0], 'partial full')
+
+    def test_B2c_detach_finalize_pending_no_abort(self):
+        """PR #233: provider done + finalize txn fail must not POSTCOMMIT_ABORT."""
+        import gateway
+
+        self._seed_source_and_forge()
+        gateway_user_id = _insert_msg(self.db, 'hayana', '可重试')
+        turn = {'user_message_id': gateway_user_id}
+        target_id = int(self._intent()['target_context_id'])
+        fake = self._partial_then_done_fake()
+        hooks = self._gateway_first_turn_hooks(fake)
+        gen_before = int(
+            dc.get_daily_context_by_id(target_id, db_path=self.db)['resident_generation'],
+        )
+        asst_before = sqlite3.connect(self.db).execute(
+            "SELECT COUNT(*) FROM chat_messages WHERE author='assistant'",
+        ).fetchone()[0]
+        real_update = ft_mod._update_intent_conn
+        boom = {'n': 0}
+
+        def _boom_on_completed_at(
+            conn, request_id, *, status=None, fields=None, now_s=None,
+        ):
+            fields = fields or {}
+            if (
+                fields.get('first_turn_completed_at') is not None
+                and boom['n'] == 0
+            ):
+                boom['n'] += 1
+                raise sqlite3.OperationalError(
+                    'simulated final checkpoint failure',
+                )
+            return real_update(
+                conn, request_id, status=status, fields=fields, now_s=now_s,
+            )
+
+        with mock.patch.object(gateway, 'DB_PATH', self.db), \
+             mock.patch.object(gateway, '_gw_build_first_turn_hooks', return_value=hooks), \
+             mock.patch.object(
+                 ft_mod, '_update_intent_conn', side_effect=_boom_on_completed_at,
+             ), \
+             mock.patch(
+                 'chat.context_window_first_turn.abort_first_turn_postcommit',
+             ) as postcommit_abort:
+            gen = gateway._stream_cc_first_turn(turn, '可重试', self._intent())
+            saw_text = False
+            try:
+                while True:
+                    chunk = next(gen)
+                    if '"t": "text"' in chunk:
+                        saw_text = True
+                        break
+            finally:
+                self.assertTrue(saw_text)
+                gen.close()
+            postcommit_abort.assert_not_called()
+            self.assertFalse(fake.killed)
+        intent_after = self._intent()
+        self.assertIsNone(intent_after.get('first_turn_completed_at'))
+        self.assertIsNone(intent_after.get('first_turn_error_code'))
+        self.assertIsNotNone(intent_after.get('first_assistant_message_id'))
+        pending = get_first_turn_finalize_pending(db_path=self.db)
+        self.assertIsNotNone(pending)
+        self.assertEqual(str(pending['request_id']), self.switch_request_id)
+        gen_after = int(
+            dc.get_daily_context_by_id(target_id, db_path=self.db)['resident_generation'],
+        )
+        self.assertEqual(gen_after, gen_before)
+        asst_after = sqlite3.connect(self.db).execute(
+            "SELECT COUNT(*) FROM chat_messages WHERE author='assistant'",
+        ).fetchone()[0]
+        self.assertEqual(asst_after, asst_before + 1)
+        aid = int(intent_after['first_assistant_message_id'])
+        row = sqlite3.connect(self.db).execute(
+            'SELECT content FROM chat_messages WHERE id=?', (aid,),
+        ).fetchone()
+        self.assertEqual(row[0], 'partial full')
 
     def test_db_commit_then_swap_fail_recovery(self):
         """3) same-process HANDOFF_PENDING: first delta once, no second user/asst."""

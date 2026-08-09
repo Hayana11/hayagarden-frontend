@@ -4989,11 +4989,18 @@ def _stream_cc_first_turn(_turn_data, _uc, intent: dict):
         )
         return _ft_text, thinking_text, cache_info_json, choices_json, usage
 
-    def _complete_first_turn_silent(payload) -> bool:
+    _DRAIN_COMPLETED = 'DRAIN_COMPLETED'
+    _DRAIN_DONE_FINALIZE_PENDING = 'DRAIN_DONE_FINALIZE_PENDING'
+    _DRAIN_INCOMPLETE = 'DRAIN_INCOMPLETE'
+
+    def _detach_avoids_postcommit_abort(drain_result: str) -> bool:
+        return drain_result in (_DRAIN_COMPLETED, _DRAIN_DONE_FINALIZE_PENDING)
+
+    def _complete_first_turn_silent(payload) -> str:
         """Persist assistant + finalize when client already detached."""
         nonlocal complete_started
         if complete_started or session is None or not first_released:
-            return False
+            return _DRAIN_INCOMPLETE
         _ft_text, thinking_text, cache_info_json, choices_json, _usage = (
             _assistant_payload_from_done(payload)
         )
@@ -5001,8 +5008,8 @@ def _stream_cc_first_turn(_turn_data, _uc, intent: dict):
             end_offset = int(session.jsonl_path.stat().st_size)
         except OSError:
             end_offset = int(session.start_offset)
+        complete_started = True
         try:
-            complete_started = True
             done = complete_first_turn_round(
                 session,
                 assistant_content=_ft_text,
@@ -5016,19 +5023,18 @@ def _stream_cc_first_turn(_turn_data, _uc, intent: dict):
             log.exception(
                 'first_turn silent complete failed after client detach',
             )
-            complete_started = False
-            return False
+            return _DRAIN_DONE_FINALIZE_PENDING
         log.info(
             'first_turn_silent_complete assistant_id=%s',
             done.assistant_message_id,
         )
-        return True
+        return _DRAIN_COMPLETED
 
-    def _drain_first_turn_after_client_detach() -> bool:
+    def _drain_first_turn_after_client_detach() -> str:
         """Keep consuming staged resident after SSE drop; avoid killing mid-round."""
         nonlocal event_iter
         if event_iter is None or complete_started or not first_released:
-            return False
+            return _DRAIN_INCOMPLETE
         try:
             for evt, payload in event_iter:
                 if evt == 'text':
@@ -5043,18 +5049,18 @@ def _stream_cc_first_turn(_turn_data, _uc, intent: dict):
                     except Exception:
                         pass
                 elif evt == 'done':
-                    if _complete_first_turn_silent(payload):
-                        event_iter = None
-                        return True
-                    return False
-            return False
+                    result = _complete_first_turn_silent(payload)
+                    event_iter = None
+                    return result
+            return _DRAIN_INCOMPLETE
         except Exception:
             log.exception('first_turn detach drain failed')
-            return False
+            return _DRAIN_INCOMPLETE
 
     def _handle_client_detach() -> bool:
-        """Return True when post-handoff round finalized without POSTCOMMIT_ABORT."""
-        if _drain_first_turn_after_client_detach():
+        """Return True when detach must not POSTCOMMIT_ABORT."""
+        drain_result = _drain_first_turn_after_client_detach()
+        if _detach_avoids_postcommit_abort(drain_result):
             pending.clear()
             return True
         _close_event_iter()
@@ -5240,7 +5246,7 @@ def _stream_cc_first_turn(_turn_data, _uc, intent: dict):
             return
 
         # Post-commit incomplete stream: drain before killing staged resident.
-        if _drain_first_turn_after_client_detach():
+        if _detach_avoids_postcommit_abort(_drain_first_turn_after_client_detach()):
             pending.clear()
             return
 
