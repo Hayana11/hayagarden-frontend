@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -11,6 +12,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from chat.claude_transcript_model import (
+    EventRole,
     SidechainPolicy,
     SummaryPolicy,
     ThinkingPolicy,
@@ -346,6 +348,84 @@ class TranscriptTransformTests(unittest.TestCase):
         transform_transcript(graph, req)
         after = [e.raw_copy() for e in graph.events]
         self.assertEqual(after, snapshot)
+
+    def test_user_continuation_skipped_db_canonical_user_only(self) -> None:
+        """Vision split: continuation stays in graph but is not forged."""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'vision_split.jsonl'
+            rows = [
+                {
+                    'type': 'user',
+                    'uuid': 'v1111111-1111-1111-1111-111111111111',
+                    'parentUuid': None,
+                    'sessionId': 's',
+                    'message': {'role': 'user', 'content': 'x' * 128},
+                },
+                {
+                    'type': 'user',
+                    'uuid': 'v2222222-2222-2222-2222-222222222222',
+                    'parentUuid': 'v1111111-1111-1111-1111-111111111111',
+                    'sessionId': 's',
+                    'message': {'role': 'user', 'content': 'continuation-prompt'},
+                },
+                {
+                    'type': 'assistant',
+                    'uuid': 'v3333333-3333-3333-3333-333333333333',
+                    'parentUuid': 'v2222222-2222-2222-2222-222222222222',
+                    'sessionId': 's',
+                    'message': {
+                        'role': 'assistant',
+                        'content': [{'type': 'text', 'text': 'part'}],
+                    },
+                },
+                {
+                    'type': 'assistant',
+                    'uuid': 'v4444444-4444-4444-4444-444444444444',
+                    'parentUuid': 'v3333333-3333-3333-3333-333333333333',
+                    'sessionId': 's',
+                    'message': {
+                        'role': 'assistant',
+                        'content': [{'type': 'text', 'text': 'final'}],
+                    },
+                },
+            ]
+            path.write_text(
+                '\n'.join(json.dumps(r, ensure_ascii=False) for r in rows) + '\n',
+                encoding='utf-8',
+            )
+            graph = read_transcript(path)
+            self.assertEqual(
+                graph.by_uuid['v2222222-2222-2222-2222-222222222222'].event_role,
+                EventRole.USER_CONTINUATION,
+            )
+            req = TransformRequest(
+                new_session_id='newnewne-newn-newn-newn-newnewnewnew',
+                cwd='/tmp/out',
+                keep_rounds=1,
+                user_canonical_by_event_uuid={
+                    'v1111111-1111-1111-1111-111111111111': 'db-canonical-user',
+                },
+                thinking_policy=ThinkingPolicy.DROP,
+            )
+            result = transform_transcript(graph, req)
+            self.assertEqual(result.selected_round_count, 1)
+            self.assertEqual(len(result.events), 3)
+            self.assertEqual(
+                result.events[0]['message']['content'],
+                'db-canonical-user',
+            )
+            self.assertEqual(result.events[0]['parentUuid'], None)
+            self.assertEqual(
+                result.events[1]['parentUuid'],
+                result.events[0]['uuid'],
+            )
+            self.assertEqual(
+                result.events[2]['parentUuid'],
+                result.events[1]['uuid'],
+            )
+            payload = serialize_events(result.events)
+            self.assertNotIn('continuation-prompt', payload)
+            self.assertNotIn('v2222222-2222-2222-2222-222222222222', payload)
 
 
 if __name__ == '__main__':

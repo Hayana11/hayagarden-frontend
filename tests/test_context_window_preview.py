@@ -355,6 +355,58 @@ class ContextWindowPreviewTests(unittest.TestCase):
         self.assertEqual(_db_fingerprint(self.db), before_db)
         self.assertEqual(path.read_bytes()[:end2], scan_prefix)
 
+    def test_ready_preview_skips_user_continuation_in_vision_round(self):
+        """Parent-chained vision user maps + transforms to DB canonical only."""
+        path = self._jsonl_path()
+        turn = [
+            _line(
+                'u-vision', 'user', session=SESSION_A, parent=None,
+                content='x' * 5000,
+            ),
+            _line(
+                'u-text', 'user', session=SESSION_A, parent='u-vision',
+                content='short-text',
+            ),
+            _line(
+                'a-part', 'assistant', session=SESSION_A, parent='u-text',
+                content=[{'type': 'text', 'text': 'part'}],
+            ),
+            _line(
+                'a-final', 'assistant', session=SESSION_A, parent='a-part',
+                content=[{'type': 'text', 'text': 'final'}],
+            ),
+        ]
+        end = _write_jsonl(path, turn)
+        self._register(session=SESSION_A, scan_offset=0)
+
+        user_id = _insert_msg(self.db, 'hayana', 'db-vision-user')
+        asst_id = _insert_msg(self.db, 'fyodor', 'db-vision-asst')
+        for mid, role in ((user_id, 'user'), (asst_id, 'assistant')):
+            _bind_msg(
+                self.db, mid, context_id=self.context_id,
+                epoch=self.epoch, gen=self.gen, role=role,
+            )
+        self._map_turn(user_id=user_id, asst_id=asst_id, start=0, end=end)
+
+        out = preview_context_window(
+            source_context_id=self.context_id,
+            source_context_epoch=self.epoch,
+            count=1,
+            preview_id=self.preview_id,
+            thinking_policy=ThinkingPolicy.DROP,
+            chat_id='default',
+            db_path=self.db,
+            now=NOW,
+        )
+        self.assertTrue(out['ok'], out)
+        self.assertEqual(out['preview_status'], PREVIEW_STATUS_READY, out)
+        self.assertEqual(out['selection']['selected_round_count'], 1)
+        self.assertEqual(out['selection']['selected_message_ids'], [user_id, asst_id])
+        self.assertTrue(out['validation']['ok'])
+        blob = json.dumps(out)
+        self.assertNotIn('short-text', blob)
+        self.assertNotIn('u-text', blob)
+
     def test_complex_ready_thinking_tool_sidechain(self):
         """3) Complex READY: sidechain excluded; keep thinking + tool pair."""
         from chat.claude_transcript_reader import read_transcript_range

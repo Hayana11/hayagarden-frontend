@@ -382,6 +382,8 @@ def transform_transcript(graph: TranscriptGraph, request: TransformRequest) -> T
                 continue
             if evt.is_sidechain or evt.event_role == EventRole.SIDECHAIN:
                 continue
+            if evt.event_role == EventRole.USER_CONTINUATION:
+                continue
             ordered_src.append(evt)
             seen.add(uid)
 
