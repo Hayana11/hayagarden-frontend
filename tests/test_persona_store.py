@@ -110,6 +110,40 @@ class PersonaStoreTests(unittest.TestCase):
         self.assertEqual(persona_store.read_persona(), 'USER_EDIT_B')
         self.assertEqual(self.repo.read_text(encoding='utf-8'), 'C')
 
+    def test_T14_bootstrap_race_create_once(self):
+        """A reads seed; B creates USER_EDIT; A must not overwrite with seed."""
+        self.repo.write_bytes(b'SEED')
+        self.assertFalse(self.runtime.exists())
+        real_read_bytes = Path.read_bytes
+        raced = {'n': 0}
+
+        def read_bytes_then_race(path_self):
+            data = real_read_bytes(path_self)
+            if (
+                path_self.resolve() == self.repo.resolve()
+                and raced['n'] == 0
+            ):
+                raced['n'] += 1
+                persona_store.write_persona('USER_EDIT')
+            return data
+
+        with mock.patch.object(Path, 'read_bytes', read_bytes_then_race):
+            persona_store.ensure_runtime_persona()
+
+        self.assertEqual(self.runtime.read_text(encoding='utf-8'), 'USER_EDIT')
+        self.assertNotEqual(self.runtime.read_bytes(), b'SEED')
+
+    def test_T15_bootstrap_byte_exact_crlf(self):
+        seed = b'LINE1\r\nLINE2\r\n'
+        self.repo.write_bytes(seed)
+        persona_store.ensure_runtime_persona()
+        runtime_bytes = self.runtime.read_bytes()
+        self.assertEqual(runtime_bytes, seed)
+        self.assertEqual(
+            hashlib.sha256(seed).hexdigest(),
+            hashlib.sha256(runtime_bytes).hexdigest(),
+        )
+
 
 class PersonaApiTests(unittest.TestCase):
     """Exercise the same GET/POST contract as app.py /api/persona handlers."""
@@ -213,6 +247,91 @@ class PersonaBackupContractTests(unittest.TestCase):
         self.assertIn('/var/lib/hayagarden/persona.md', script)
         self.assertIn('runtime/persona.md', script)
         self.assertIn('mkdir -p "$TMP/runtime"', script)
+
+
+class PersonaActiveReaderFailClosedTests(unittest.TestCase):
+    def test_T16_chat_reply_persona_failure_no_provider(self):
+        """Mirror app.py chat_reply fail-closed contract without importing app."""
+        from flask import Flask, jsonify
+
+        app = Flask(__name__)
+        calls = {'n': 0}
+
+        @app.route('/api/chat/reply', methods=['POST'])
+        def chat_reply():
+            try:
+                persona_store.read_persona()
+            except persona_store.PersonaStoreError as e:
+                return jsonify({"ok": False, "error": str(e)}), 500
+            calls['n'] += 1
+            return jsonify({"ok": True})
+
+        src = (ROOT / 'app.py').read_text(encoding='utf-8')
+        self.assertIn('except PersonaStoreError as e:', src)
+        self.assertNotIn(
+            "persona = '你是费奥多尔，一个渊博冷静却深情的人。'",
+            src,
+        )
+
+        with mock.patch.object(
+            persona_store,
+            'read_persona',
+            side_effect=persona_store.PersonaStoreError('runtime empty'),
+        ):
+            resp = app.test_client().post('/api/chat/reply')
+        self.assertEqual(resp.status_code, 500)
+        self.assertFalse(resp.get_json().get('ok'))
+        self.assertEqual(calls['n'], 0)
+
+    def test_T17_auto_diary_fail_closed(self):
+        import auto_diary
+
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        runtime = Path(tmp.name) / 'persona.md'
+        runtime.write_text('   \n', encoding='utf-8')
+        repo = Path(tmp.name) / 'seed.md'
+        repo.write_text('SEED', encoding='utf-8')
+
+        with mock.patch.object(persona_store, 'RUNTIME_PERSONA_PATH', str(runtime)), \
+             mock.patch.object(persona_store, 'REPO_PERSONA_FALLBACK_PATH', str(repo)), \
+             mock.patch.object(auto_diary, 'today_diary_exists', return_value=False), \
+             mock.patch.object(
+                 auto_diary, 'fetch_today_messages',
+                 return_value=[{'author': 'hayana', 'content': 'hi'}],
+             ), \
+             mock.patch.object(auto_diary, 'call_api') as call_api, \
+             mock.patch.object(auto_diary, 'load_key', return_value='k'):
+            with self.assertRaises(persona_store.PersonaStoreError):
+                auto_diary.generate()
+            call_api.assert_not_called()
+
+    def test_T18_thought_gen_fail_closed(self):
+        import importlib.util
+
+        path = ROOT / 'tools' / 'thought_gen.py'
+        spec = importlib.util.spec_from_file_location('thought_gen_under_test', path)
+        assert spec and spec.loader
+        thought_gen = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(thought_gen)
+
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        runtime = Path(tmp.name) / 'persona.md'
+        runtime.write_text('   \n', encoding='utf-8')
+        repo = Path(tmp.name) / 'seed.md'
+        repo.write_text('SEED', encoding='utf-8')
+
+        with mock.patch.object(persona_store, 'RUNTIME_PERSONA_PATH', str(runtime)), \
+             mock.patch.object(persona_store, 'REPO_PERSONA_FALLBACK_PATH', str(repo)), \
+             mock.patch.object(thought_gen, 'today_exists', return_value=False), \
+             mock.patch.object(thought_gen, 'get_unsaid_thoughts', return_value=['x']), \
+             mock.patch.object(thought_gen, 'get_emotional_buckets', return_value=[]), \
+             mock.patch.object(thought_gen, 'get_last_messages', return_value=[]), \
+             mock.patch.object(thought_gen.subprocess, 'run') as run:
+            with self.assertRaises(persona_store.PersonaStoreError):
+                thought_gen.generate()
+            run.assert_not_called()
 
 
 if __name__ == '__main__':

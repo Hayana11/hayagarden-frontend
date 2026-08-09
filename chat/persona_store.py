@@ -41,11 +41,23 @@ def _is_usable_persona(text: str) -> bool:
     return bool(str(text).strip())
 
 
+def _fsync_dir(path: Path) -> None:
+    try:
+        dir_fd = os.open(str(path), os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(dir_fd)
+    finally:
+        os.close(dir_fd)
+
+
 def ensure_runtime_persona() -> Path:
     """Bootstrap runtime authority from repo seed when absent.
 
-    If the runtime file already exists, leave it untouched even when the repo
-    seed has changed.
+    Uses atomic create-once (O_CREAT|O_EXCL). If another worker or frontend
+    save creates the runtime file first, this returns without overwriting.
+    Seed bytes are copied byte-for-byte (no newline normalization).
     """
     runtime = _runtime_path()
     if runtime.exists():
@@ -53,7 +65,7 @@ def ensure_runtime_persona() -> Path:
 
     fallback = _fallback_path()
     try:
-        seed = _read_text(fallback)
+        seed_bytes = fallback.read_bytes()
     except FileNotFoundError as exc:
         raise PersonaStoreError(
             f'persona runtime missing and repo fallback absent: {fallback}',
@@ -63,12 +75,41 @@ def ensure_runtime_persona() -> Path:
             f'persona runtime missing and repo fallback unreadable: {fallback}',
         ) from exc
 
-    if not _is_usable_persona(seed):
+    try:
+        seed_text = seed_bytes.decode('utf-8')
+    except UnicodeDecodeError as exc:
+        raise PersonaStoreError(
+            f'persona runtime missing and repo fallback not utf-8: {fallback}',
+        ) from exc
+    if not _is_usable_persona(seed_text):
         raise PersonaStoreError(
             f'persona runtime missing and repo fallback empty: {fallback}',
         )
 
-    write_persona(seed)
+    runtime.parent.mkdir(parents=True, exist_ok=True)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    try:
+        fd = os.open(str(runtime), flags, 0o644)
+    except FileExistsError:
+        # Another worker / frontend save won the race — never overwrite.
+        return runtime
+
+    try:
+        with os.fdopen(fd, 'wb') as fh:
+            fh.write(seed_bytes)
+            fh.flush()
+            os.fsync(fh.fileno())
+        _fsync_dir(runtime.parent)
+    except Exception:
+        try:
+            runtime.unlink(missing_ok=True)
+        except TypeError:
+            if runtime.exists():
+                runtime.unlink()
+        except OSError:
+            pass
+        raise
+
     return runtime
 
 
@@ -122,15 +163,7 @@ def write_persona(content: str) -> None:
             runtime.chmod(0o644)
         except OSError:
             pass
-        try:
-            dir_fd = os.open(str(runtime.parent), os.O_RDONLY)
-        except OSError:
-            dir_fd = -1
-        if dir_fd >= 0:
-            try:
-                os.fsync(dir_fd)
-            finally:
-                os.close(dir_fd)
+        _fsync_dir(runtime.parent)
     except Exception:
         try:
             tmp_path.unlink(missing_ok=True)

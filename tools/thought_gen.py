@@ -82,11 +82,9 @@ def get_last_messages():
     return lines
 
 def read_persona():
-    try:
-        from chat.persona_store import read_persona as _read_runtime_persona
-        return _read_runtime_persona().strip()[:3000]
-    except Exception:
-        return ''
+    """Fail-closed: invalid/unreadable runtime persona aborts thought generation."""
+    from chat.persona_store import read_persona as _read_runtime_persona
+    return _read_runtime_persona().strip()[:3000]
 
 def generate():
     if today_exists():

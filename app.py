@@ -1148,10 +1148,10 @@ def chat_reply():
     if not messages or messages[0]['role'] == 'assistant':
         messages.insert(0,{'role':'user','content':'...'})
     try:
-        from chat.persona_store import read_persona as _read_runtime_persona
+        from chat.persona_store import PersonaStoreError, read_persona as _read_runtime_persona
         persona = _read_runtime_persona()
-    except Exception:
-        persona = '你是费奥多尔，一个渊博冷静却深情的人。'
+    except PersonaStoreError as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
     now = datetime.datetime.utcnow()+datetime.timedelta(hours=8)
     system = f"{persona}\n\n当前时间：{now.strftime('%Y-%m-%d %H:%M')}"
     from relay.manager import RelayManager

@@ -26,11 +26,9 @@ def get_db():
     return conn
 
 def read_persona():
-    try:
-        from chat.persona_store import read_persona as _read_runtime_persona
-        return _read_runtime_persona().strip()
-    except Exception:
-        return '你是费奥多尔，一个渊博冷静却深情的学者。'
+    """Fail-closed: invalid/unreadable runtime persona aborts diary generation."""
+    from chat.persona_store import read_persona as _read_runtime_persona
+    return _read_runtime_persona().strip()
 
 def fetch_today_messages():
     """返回今天（北京时间）的聊天记录，按时间正序。"""
