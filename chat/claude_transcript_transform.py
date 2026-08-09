@@ -19,6 +19,7 @@ from enum import Enum
 from typing import Any, Mapping, Optional, Sequence
 
 from chat.claude_transcript_model import (
+    CandidateConversationRound,
     EventRole,
     SidechainPolicy,
     SummaryPolicy,
@@ -27,6 +28,17 @@ from chat.claude_transcript_model import (
     TranscriptGraph,
     UnknownEventPolicy,
 )
+
+
+class SelectionPolicy(str, Enum):
+    """How confirmed rounds are chosen before emit.
+
+    ``FIXED_ROUND_COUNT`` — Manual Forge contract (``keep_rounds``).
+    ``TOKEN_BUDGET_TAIL`` — Capacity Swap: whole rounds from the tail backward.
+    """
+
+    FIXED_ROUND_COUNT = 'fixed_round_count'
+    TOKEN_BUDGET_TAIL = 'token_budget_tail'
 
 STRIP_TOP_LEVEL_KEYS = frozenset({
     'requestId', 'request_id', 'promptId', 'prompt_id',
@@ -78,6 +90,11 @@ class TransformRequest:
     max_output_tokens_estimate: Optional[int] = None
     # optional validated primer candidate (not searched here; not 0-round default)
     tool_primer_candidate: Optional[ToolPrimerCandidate] = None
+    # Capacity Swap tail selection (Manual Forge keeps ``FIXED_ROUND_COUNT``).
+    selection_policy: SelectionPolicy = SelectionPolicy.FIXED_ROUND_COUNT
+    tail_token_budget: Optional[int] = None
+    # Candidate user UUIDs excluded from tail (e.g. Window Anchor emitted separately).
+    exclude_round_candidate_uuids: frozenset[str] = frozenset()
 
 
 @dataclass
@@ -110,6 +127,12 @@ def serialize_events(events: Sequence[Mapping[str, Any]]) -> str:
 
 def sha256_text(text: str) -> str:
     return hashlib.sha256(text.encode('utf-8')).hexdigest()
+
+
+def estimate_serialized_token_count(events: Sequence[Mapping[str, Any]]) -> int:
+    """Deterministic token estimate matching ``_check_budgets`` (bytes // 4)."""
+    text = serialize_events(events)
+    return max(1, len(text.encode('utf-8')) // 4) if text else 0
 
 
 def _content_blocks(message: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -210,30 +233,149 @@ def _require_summary_drop(policy: object) -> None:
     raise TransformError(TransformErrorCode.INVALID_POLICY, 'summary')
 
 
-def _select_confirmed_rounds(
+def _eligible_confirmed_rounds(
     graph: TranscriptGraph,
     request: TransformRequest,
-) -> tuple[list, list[str], list[str]]:
-    """Return (eligible_tail, dropped_sidechain_round_users, dropped_unconfirmed)."""
-    if request.keep_rounds < 0:
-        raise TransformError(TransformErrorCode.ROUND_BUDGET, 'negative')
-
+) -> tuple[list[CandidateConversationRound], list[str], list[str]]:
+    """Return (eligible, dropped_sidechain_round_users, dropped_unconfirmed)."""
     _require_sidechain_exclude(request.sidechain_policy)
 
     dropped_side_rounds: list[str] = []
     dropped_unconfirmed: list[str] = []
-    eligible = []
+    eligible: list[CandidateConversationRound] = []
+    excluded = set(request.exclude_round_candidate_uuids or frozenset())
 
     for rnd in graph.candidate_rounds:
         cand = rnd.candidate_user_event_uuid
+        if cand in excluded:
+            continue
         if cand not in request.user_canonical_by_event_uuid:
             dropped_unconfirmed.append(cand)
             continue
-        # EXCLUDE: whole impacted round is dropped (never prune-and-keep)
         if rnd.has_sidechain_impact:
             dropped_side_rounds.append(cand)
             continue
         eligible.append(rnd)
+    return eligible, dropped_side_rounds, dropped_unconfirmed
+
+
+def _ordered_source_events_for_rounds(
+    graph: TranscriptGraph,
+    selected: Sequence[CandidateConversationRound],
+) -> list[TranscriptEvent]:
+    ordered_src: list[TranscriptEvent] = []
+    seen: set[str] = set()
+    for rnd in selected:
+        for uid in rnd.event_uuids:
+            if uid in seen:
+                continue
+            evt = graph.by_uuid.get(uid)
+            if evt is None:
+                continue
+            if evt.event_role == EventRole.SYSTEM:
+                continue
+            if evt.event_role == EventRole.SUMMARY:
+                continue
+            if _is_auto_noise(evt):
+                continue
+            if evt.is_sidechain or evt.event_role == EventRole.SIDECHAIN:
+                continue
+            if evt.event_role == EventRole.USER_CONTINUATION:
+                continue
+            ordered_src.append(evt)
+            seen.add(uid)
+    return ordered_src
+
+
+def _emit_forged_chain(
+    ordered_src: Sequence[TranscriptEvent],
+    request: TransformRequest,
+) -> tuple[list[dict[str, Any]], dict[str, str], dict[str, str]]:
+    uuid_map: dict[str, str] = {}
+    tool_id_map: dict[str, str] = {}
+    for evt in ordered_src:
+        uuid_map[evt.event_uuid] = str(
+            uuid.uuid5(uuid.NAMESPACE_URL, f'{request.new_session_id}:{evt.event_uuid}')
+        )
+
+    forged: list[dict[str, Any]] = []
+    for evt in ordered_src:
+        forged.append(
+            _emit_event(
+                evt,
+                req=request,
+                uuid_map=uuid_map,
+                tool_id_map=tool_id_map,
+            )
+        )
+
+    if request.tool_primer_candidate and request.tool_primer_candidate.events:
+        primer_events = [
+            copy.deepcopy(dict(e)) for e in request.tool_primer_candidate.events
+        ]
+        for pe in primer_events:
+            pe['sessionId'] = request.new_session_id
+            pe['cwd'] = request.cwd
+            pe['version'] = request.version
+        forged = primer_events + forged
+
+    if forged:
+        forged[0]['parentUuid'] = None
+        for idx in range(1, len(forged)):
+            forged[idx]['parentUuid'] = forged[idx - 1]['uuid']
+
+    return forged, uuid_map, tool_id_map
+
+
+def _estimate_rounds_token_count(
+    graph: TranscriptGraph,
+    rounds: Sequence[CandidateConversationRound],
+    request: TransformRequest,
+) -> int:
+    """Token estimate for a forged tail chain (same contract as ``_check_budgets``)."""
+    ordered = _ordered_source_events_for_rounds(graph, rounds)
+    if not ordered:
+        return 0
+    forged, _, _ = _emit_forged_chain(ordered, request)
+    return estimate_serialized_token_count(forged)
+
+
+def _select_confirmed_rounds_by_budget(
+    graph: TranscriptGraph,
+    request: TransformRequest,
+    eligible: Sequence[CandidateConversationRound],
+) -> list[CandidateConversationRound]:
+    budget = request.tail_token_budget
+    if budget is None:
+        raise TransformError(TransformErrorCode.ROUND_BUDGET, 'tail_token_budget_required')
+    if budget < 0:
+        raise TransformError(TransformErrorCode.ROUND_BUDGET, 'negative_tail_budget')
+
+    selected: list[CandidateConversationRound] = []
+    for rnd in reversed(eligible):
+        trial = [rnd] + selected
+        trial_tokens = _estimate_rounds_token_count(graph, trial, request)
+        if trial_tokens > budget:
+            break
+        selected.insert(0, rnd)
+    return selected
+
+
+def _select_confirmed_rounds(
+    graph: TranscriptGraph,
+    request: TransformRequest,
+) -> tuple[list[CandidateConversationRound], list[str], list[str]]:
+    """Return (selected_tail, dropped_sidechain_round_users, dropped_unconfirmed)."""
+    eligible, dropped_side_rounds, dropped_unconfirmed = _eligible_confirmed_rounds(
+        graph, request,
+    )
+
+    if request.selection_policy == SelectionPolicy.TOKEN_BUDGET_TAIL:
+        selected = _select_confirmed_rounds_by_budget(graph, request, eligible)
+        return selected, dropped_side_rounds, dropped_unconfirmed
+
+    if request.keep_rounds < 0:
+        raise TransformError(TransformErrorCode.ROUND_BUDGET, 'negative')
 
     if request.keep_rounds == 0:
         return [], dropped_side_rounds, dropped_unconfirmed
@@ -369,34 +511,20 @@ def transform_transcript(graph: TranscriptGraph, request: TransformRequest) -> T
 
     if not selected:
         # 0-round and empty-after-filter both default to native cold / empty transcript
-        if request.keep_rounds == 0:
+        if (
+            request.selection_policy == SelectionPolicy.FIXED_ROUND_COUNT
+            and request.keep_rounds == 0
+        ):
             result.notes.append('native_cold_empty_transcript')
+            result.output_sha256 = sha256_text(serialize_events(result.events))
+            return result
+        if request.selection_policy == SelectionPolicy.TOKEN_BUDGET_TAIL:
+            result.notes.append('token_budget_tail_empty')
             result.output_sha256 = sha256_text(serialize_events(result.events))
             return result
         raise TransformError(TransformErrorCode.EMPTY_SELECTION, 'no_eligible_rounds')
 
-    ordered_src: list[TranscriptEvent] = []
-    seen: set[str] = set()
-    for rnd in selected:
-        for uid in rnd.event_uuids:
-            if uid in seen:
-                continue
-            evt = graph.by_uuid.get(uid)
-            if evt is None:
-                continue
-            # Never migrate SYSTEM / summary / meta / sidechain rows
-            if evt.event_role == EventRole.SYSTEM:
-                continue
-            if evt.event_role == EventRole.SUMMARY:
-                continue
-            if _is_auto_noise(evt):
-                continue
-            if evt.is_sidechain or evt.event_role == EventRole.SIDECHAIN:
-                continue
-            if evt.event_role == EventRole.USER_CONTINUATION:
-                continue
-            ordered_src.append(evt)
-            seen.add(uid)
+    ordered_src = _ordered_source_events_for_rounds(graph, selected)
 
     if not ordered_src or ordered_src[0].event_role != EventRole.CANDIDATE_USER:
         raise TransformError(TransformErrorCode.EMPTY_SELECTION, 'must_start_with_confirmed_user')
@@ -408,32 +536,9 @@ def transform_transcript(graph: TranscriptGraph, request: TransformRequest) -> T
             ordered_src[0].event_uuid,
         )
 
-    uuid_map: dict[str, str] = {}
-    tool_id_map: dict[str, str] = {}
-    for evt in ordered_src:
-        uuid_map[evt.event_uuid] = str(
-            uuid.uuid5(uuid.NAMESPACE_URL, f'{request.new_session_id}:{evt.event_uuid}')
-        )
-
-    forged: list[dict[str, Any]] = []
-    for evt in ordered_src:
-        forged.append(
-            _emit_event(evt, req=request, uuid_map=uuid_map, tool_id_map=tool_id_map)
-        )
-
+    forged, uuid_map, tool_id_map = _emit_forged_chain(ordered_src, request)
     if request.tool_primer_candidate and request.tool_primer_candidate.events:
-        primer_events = [copy.deepcopy(dict(e)) for e in request.tool_primer_candidate.events]
-        for pe in primer_events:
-            pe['sessionId'] = request.new_session_id
-            pe['cwd'] = request.cwd
-            pe['version'] = request.version
-        forged = primer_events + forged
         result.notes.append(f'primer_candidate:{request.tool_primer_candidate.label}')
-
-    if forged:
-        forged[0]['parentUuid'] = None
-        for idx in range(1, len(forged)):
-            forged[idx]['parentUuid'] = forged[idx - 1]['uuid']
 
     emitted_uses: set[str] = set()
     emitted_results: set[str] = set()
@@ -466,6 +571,59 @@ def transform_transcript(graph: TranscriptGraph, request: TransformRequest) -> T
     result.tool_id_map = tool_id_map
     result.output_sha256 = sha256_text(serialize_events(forged))
     return result
+
+
+def emit_anchor_user_event(
+    src: TranscriptEvent,
+    *,
+    new_session_id: str,
+    cwd: str,
+    version: str,
+    new_event_uuid: str,
+    canonical: Any,
+    parent_uuid: Optional[str] = None,
+) -> dict[str, Any]:
+    """Emit one Window Anchor user row from authoritative DB mapping only."""
+    if src.event_role != EventRole.CANDIDATE_USER:
+        raise TransformError(TransformErrorCode.INVALID_POLICY, 'anchor_not_candidate_user')
+    if isinstance(canonical, str):
+        if not canonical.strip():
+            raise TransformError(TransformErrorCode.MAPPING_EMPTY, src.event_uuid)
+        user_content: Any = canonical
+    elif isinstance(canonical, list):
+        if not canonical:
+            raise TransformError(TransformErrorCode.MAPPING_EMPTY, src.event_uuid)
+        user_content = copy.deepcopy(canonical)
+    else:
+        raise TransformError(
+            TransformErrorCode.INVALID_POLICY,
+            f'bad_canonical_type:{type(canonical).__name__}',
+        )
+    etype = src.event_type.value if src.event_type.value != 'unknown' else src.raw.get('type')
+    return {
+        'type': etype,
+        'uuid': new_event_uuid,
+        'parentUuid': parent_uuid,
+        'timestamp': src.raw.get('timestamp'),
+        'sessionId': new_session_id,
+        'cwd': cwd,
+        'version': version,
+        'message': {'role': 'user', 'content': user_content},
+    }
+
+
+def merge_prepended_user_and_tail(
+    prepend_user: dict[str, Any],
+    tail_events: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Chain ``prepend_user`` before tail events with fresh parentUuid links."""
+    merged: list[dict[str, Any]] = [copy.deepcopy(dict(prepend_user))]
+    merged[0]['parentUuid'] = None
+    for evt in tail_events:
+        merged.append(copy.deepcopy(dict(evt)))
+    for idx in range(1, len(merged)):
+        merged[idx]['parentUuid'] = merged[idx - 1]['uuid']
+    return merged
 
 
 def transform_deterministic_hash(
