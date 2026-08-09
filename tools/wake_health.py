@@ -65,9 +65,10 @@ def main():
     except Exception as e:
         errors.append(f'bot_config.py 加载失败: {e}')
 
-    # ── 2. persona.md ─────────────────────────────────────────────
+    # ── 2. runtime persona authority ──────────────────────────────
     try:
-        persona = open('/opt/frontend/prompts/persona.md').read()
+        from chat.persona_store import read_persona as _read_runtime_persona
+        persona = _read_runtime_persona()
         if len(persona) < 1000:
             errors.append(f'persona.md 内容不足: 只有 {len(persona)} 字符')
     except Exception as e:

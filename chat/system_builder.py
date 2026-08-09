@@ -22,10 +22,9 @@ NL = chr(10)
 
 
 def read_persona():
-    try:
-        return open('/opt/frontend/prompts/persona.md').read().strip()
-    except Exception:
-        return '你是费奥多尔，一个渊博冷静却深情的学者。'
+    """Read production persona from runtime authority (not the Git seed)."""
+    from chat.persona_store import read_persona as _read_runtime_persona
+    return _read_runtime_persona().strip()
 
 
 def build_shared_context_details(

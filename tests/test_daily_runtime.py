@@ -172,14 +172,16 @@ class DailyRuntimeFlagOffTests(unittest.TestCase):
             self.assertIsNone(dr.get_local_binding())
 
     def test_legacy_static_unchanged(self):
-        legacy = build_cc_static_parts()
+        with mock.patch('chat.system_builder.read_persona', return_value='PERSONA_FIXED'):
+            legacy = build_cc_static_parts()
         self.assertIn('[[SAVE', legacy['save_instr'])
         self.assertIn('你拥有真实的工具', legacy['stable_note'])
 
 
 class DailyStaticProfileTests(unittest.TestCase):
     def test_daily_static_excludes_tools_and_save(self):
-        parts = build_cc_daily_static_parts()
+        with mock.patch('chat.system_builder.read_persona', return_value='PERSONA_FIXED'):
+            parts = build_cc_daily_static_parts()
         full = parts['full_system']
         self.assertNotIn('[[SAVE', full)
         self.assertNotIn('你拥有真实的工具', full)

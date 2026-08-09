@@ -1148,9 +1148,10 @@ def chat_reply():
     if not messages or messages[0]['role'] == 'assistant':
         messages.insert(0,{'role':'user','content':'...'})
     try:
-        persona = open('/opt/frontend/prompts/persona.md').read()
-    except:
-        persona = '你是费奥多尔，一个渊博冷静却深情的人。'
+        from chat.persona_store import PersonaStoreError, read_persona as _read_runtime_persona
+        persona = _read_runtime_persona()
+    except PersonaStoreError as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
     now = datetime.datetime.utcnow()+datetime.timedelta(hours=8)
     system = f"{persona}\n\n当前时间：{now.strftime('%Y-%m-%d %H:%M')}"
     from relay.manager import RelayManager
@@ -1241,7 +1242,8 @@ def drift_check():
     results = []
     for b in bottles:
         try:
-            persona = open('/opt/frontend/prompts/persona.md').read()
+            from chat.persona_store import read_persona as _read_runtime_persona
+            persona = _read_runtime_persona()
             now_dt = datetime.datetime.utcnow() + datetime.timedelta(hours=8)
             system = (persona + "\n\n当前时间：" + now_dt.strftime('%Y-%m-%d %H:%M') +
                       "\n\n哈娅给你写了一封漂流瓶。请以费奥多尔的口吻回复，简短有温度。")
@@ -1357,21 +1359,29 @@ def set_setting(key):
 
 @app.route('/api/persona', methods=['GET'])
 def get_persona():
+    from chat.persona_store import PersonaStoreError, read_persona as _read_runtime_persona
     try:
-        text = open('/opt/frontend/prompts/persona.md').read()
+        text = _read_runtime_persona()
         return jsonify({"ok": True, "content": text})
+    except PersonaStoreError as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
 
 @app.route('/api/persona', methods=['POST'])
 def save_persona():
     import subprocess
-    data = request.get_json()
+    from chat.persona_store import PersonaStoreError, write_persona as _write_runtime_persona
+    data = request.get_json(silent=True) or {}
     content = data.get('content', '')
+    if not str(content).strip():
+        return jsonify({"ok": False, "error": "persona content must be non-empty"}), 400
     try:
-        open('/opt/frontend/prompts/persona.md', 'w').write(content)
+        _write_runtime_persona(content)
         subprocess.Popen(['systemctl', 'restart', 'frontend-gw'])
         return jsonify({"ok": True})
+    except PersonaStoreError as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
 

@@ -7,7 +7,7 @@ const path          = require('path');
 const XIAOKE_TOKEN  = 'MTUxNTY2MjIyODY1OTg5NjM0MA.GdtR3K.benAOK0NfDpH9ne0Hu_tW1dE53lpI3kel7dUjs';
 const CHANNEL_ID    = '1515664908489064530';
 const CLAUDE        = '/usr/bin/claude';
-const PERSONA_PATH  = '/opt/frontend/prompts/persona.md';
+const PERSONA_PATH  = '/var/lib/hayagarden/persona.md';
 const BREATH_DIR    = '/opt/ombre-brain/buckets/permanent/呼吸间';
 const SESSION_FILE  = '/opt/frontend/tools/.discord-session-id';
 

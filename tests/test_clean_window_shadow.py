@@ -170,8 +170,6 @@ class CleanWindowShadowSessionTests(unittest.TestCase):
 
     def test_static_parity_with_production_builder(self):
         from chat.system_builder import build_cc_static_parts
-        parts = build_cc_static_parts()
-        prod_sha = _sha(parts['full_system'])
         resident = _FakeResident()
         mgr = cws.CleanWindowManager(
             cc_cwd='/tmp/cc-gw',
@@ -180,9 +178,12 @@ class CleanWindowShadowSessionTests(unittest.TestCase):
             get_provider=lambda: 'claude_code',
             get_model=lambda: 'test-model',
         )
-        with mock.patch.object(config_store, 'get_bool', return_value=True), \
+        with mock.patch('chat.system_builder.read_persona', return_value='PERSONA_FIXED'), \
+             mock.patch.object(config_store, 'get_bool', return_value=True), \
              mock.patch('cc_resident.ResidentSession', return_value=resident), \
              mock.patch('chat.clean_window_shadow.tempfile.mkdtemp', return_value='/tmp/clean-shadow-test'):
+            parts = build_cc_static_parts()
+            prod_sha = _sha(parts['full_system'])
             started = mgr.start()
             self.assertEqual(started['static_system_sha256'], prod_sha)
             self.assertEqual(
