@@ -2086,6 +2086,11 @@ class ContextWindowFirstTurnTests(unittest.TestCase):
                     self._ack(on_stdin_flushed)
                     yield ('think', 'hold-secret')
                     raise GeneratorExit()
+                if self.mode == 'partial_then_done':
+                    self._ack(on_stdin_flushed)
+                    yield ('text', 'partial')
+                    yield ('text', ' full')
+                    yield ('done', ('partial full', '', {}))
                 if self.mode == 'done_before_text':
                     self._ack(on_stdin_flushed)
                     yield ('done', ('', '', {}))
@@ -2351,6 +2356,37 @@ class ContextWindowFirstTurnTests(unittest.TestCase):
                 gateway_user_id=gateway_user_id,
                 expect_dirty=True,
             )
+            _reset_ready_fixture()
+
+        with self.subTest('B2b_client_detach_drains_to_complete'):
+            hooks = self._gateway_first_turn_hooks(_FakeStaged('partial_then_done'))
+            complete = mock.Mock(wraps=ft_mod.complete_first_turn_round)
+            live_intent = self._intent()
+            with mock.patch.object(gateway, 'DB_PATH', self.db), \
+                 mock.patch.object(gateway, '_gw_build_first_turn_hooks', return_value=hooks), \
+                 mock.patch(
+                     'chat.context_window_first_turn.complete_first_turn_round', complete,
+                 ), \
+                 mock.patch(
+                     'chat.context_window_first_turn.abort_first_turn_postcommit',
+                 ) as postcommit_abort:
+                gen = gateway._stream_cc_first_turn(turn, '可重试', live_intent)
+                saw_text = False
+                try:
+                    while True:
+                        chunk = next(gen)
+                        if '"t": "text"' in chunk:
+                            saw_text = True
+                            break
+                finally:
+                    self.assertTrue(saw_text)
+                    with self.assertRaises(GeneratorExit):
+                        gen.close()
+                complete.assert_called_once()
+                postcommit_abort.assert_not_called()
+            intent_after = self._intent()
+            self.assertEqual(intent_after['status'], INTENT_COMMITTED)
+            self.assertIsNone(intent_after.get('first_turn_error_code'))
             _reset_ready_fixture()
 
         with self.subTest('B3_gen_close_after_precommit'):
