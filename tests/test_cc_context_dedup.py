@@ -687,7 +687,8 @@ class ResidentRespawnFileBootstrapTests(unittest.TestCase):
             return [{'role': 'user', 'content': 'hi'}]
 
         from chat.system_builder import build_cc_static_parts
-        parts = build_cc_static_parts()
+        with mock.patch('chat.system_builder.read_persona', return_value='PERSONA_FIXED'):
+            parts = build_cc_static_parts()
         is_cold = fake.ensure_alive(parts['full_system'], {})
         resident_files = set() if is_cold else fake.committed_file_hashes
         with mock.patch.object(gateway, 'build_messages', side_effect=fake_build_messages):

@@ -24,6 +24,10 @@ cp -r /opt/frontend/attachments    "$TMP/attachments" 2>/dev/null || true
 cp /opt/frontend/client_errors.log "$TMP/"            2>/dev/null || true
 cp -r /opt/co-reading/data       "$TMP/co-reading-data" 2>/dev/null || true
 
+# Runtime persona authority lives outside the Git worktree.
+mkdir -p "$TMP/runtime"
+cp /var/lib/hayagarden/persona.md "$TMP/runtime/persona.md" 2>/dev/null || true
+
 cp -r /var/lib/spicy-monopoly    "$TMP/spicy-monopoly-data" 2>/dev/null || true
 
 tar -czf "$BACKUP_DIR/frontend-$STAMP.tar.gz" -C "$TMP" .

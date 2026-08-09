@@ -4,7 +4,6 @@ import os, sqlite3, json, datetime, re, urllib.request, urllib.error
 
 DB_PATH  = '/opt/frontend/memories.db'
 ENV_PATH = '/opt/frontend/.env'
-PERSONA  = '/opt/frontend/prompts/persona.md'
 API_URL  = None  # 从 .env 读取，见 call_api()
 MODEL    = 'claude-opus-4-6'
 
@@ -28,7 +27,8 @@ def get_db():
 
 def read_persona():
     try:
-        return open(PERSONA).read().strip()
+        from chat.persona_store import read_persona as _read_runtime_persona
+        return _read_runtime_persona().strip()
     except Exception:
         return '你是费奥多尔，一个渊博冷静却深情的学者。'
 

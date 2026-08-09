@@ -9,7 +9,6 @@ if '/opt/frontend' not in sys.path:
     sys.path.insert(0, '/opt/frontend')
 
 DB_PATH     = '/opt/frontend/memories.db'
-PERSONA     = '/opt/frontend/prompts/persona.md'
 BUCKET_DIR  = '/opt/ombre-brain/buckets/dynamic'
 CLAUDE_BIN  = '/usr/bin/claude'
 
@@ -84,7 +83,8 @@ def get_last_messages():
 
 def read_persona():
     try:
-        return open(PERSONA).read().strip()[:3000]
+        from chat.persona_store import read_persona as _read_runtime_persona
+        return _read_runtime_persona().strip()[:3000]
     except Exception:
         return ''
 
