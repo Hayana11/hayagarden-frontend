@@ -288,23 +288,50 @@ def _get_registry_conn(
     ).fetchone())
 
 
+def _canonical_user_payload_from_db(*, content: str, image_url: str) -> Any:
+    """DB-authoritative user body for Transform (text str or multimodal list)."""
+    from chat.cc_vision_bridge import VisionBridgeError, build_claude_user_content
+
+    raw_text = str(content or '').strip()
+    image_ref = str(image_url or '').strip()
+    if not image_ref:
+        return raw_text
+    try:
+        return build_claude_user_content(text=raw_text, image_refs=[image_ref])
+    except VisionBridgeError:
+        if raw_text:
+            return raw_text
+        raise
+
+
 def _get_user_canonical_readonly_conn(
     conn: sqlite3.Connection,
     event_uuids: Sequence[str],
-) -> dict[str, str]:
-    """Same semantics as ``get_user_canonical_by_event_uuid`` without ensure_schema."""
+) -> dict[str, Any]:
+    """Load mapped canonical user payloads from DB (text or multimodal)."""
     uids = [str(u).strip() for u in event_uuids if str(u or '').strip()]
     if not uids:
         return {}
     placeholders = ','.join('?' for _ in uids)
+    cols = {
+        str(r[1])
+        for r in conn.execute('PRAGMA table_info(chat_messages)').fetchall()
+    }
+    image_col = 'm.image_url' if 'image_url' in cols else "'' AS image_url"
     rows = conn.execute(
-        f'''SELECT e.event_uuid AS event_uuid, m.content AS content
+        f'''SELECT e.event_uuid AS event_uuid, m.content AS content, {image_col}
             FROM chat_message_claude_events e
             JOIN chat_messages m ON m.id = e.message_id
             WHERE e.role = 'user' AND e.event_uuid IN ({placeholders})''',
         tuple(uids),
     ).fetchall()
-    return {str(r['event_uuid']): str(r['content'] or '') for r in rows}
+    out: dict[str, Any] = {}
+    for row in rows:
+        out[str(row['event_uuid'])] = _canonical_user_payload_from_db(
+            content=str(row['content'] or ''),
+            image_url=str(row['image_url'] or ''),
+        )
+    return out
 
 
 def _mapping_rows_for_messages_conn(
@@ -802,263 +829,275 @@ def prepare_context_window_candidate(
                                 rnd.candidate_user_event_uuid
                                 for rnd in graph.candidate_rounds
                             ]
-                            canonical_map = _get_user_canonical_readonly_conn(
-                                conn, candidate_user_uuids,
-                            )
-                            mapping_rows = _mapping_rows_for_messages_conn(
-                                conn, selected_ids,
-                            )
-                            if not mapping_rows and selected_ids:
-                                early_blocked = _blk('PREVIEW_MAPPING_MISSING')
-                            else:
-                                sessions = {
-                                    str(r['claude_session_id']) for r in mapping_rows
-                                }
-                                gens = {
-                                    int(r['resident_generation']) for r in mapping_rows
-                                }
-                                if len(sessions) > 1 or (gens and gens != {gen}):
-                                    early_blocked = _blk(
-                                        'PREVIEW_SELECTED_ROUNDS_SPAN_SESSIONS',
+                            try:
+                                canonical_map = _get_user_canonical_readonly_conn(
+                                    conn, candidate_user_uuids,
+                                )
+                            except Exception as exc:
+                                from chat.cc_vision_bridge import VisionBridgeError
+                                if isinstance(exc, VisionBridgeError):
+                                    logger.info(
+                                        'preview canonical vision build failed code=%s',
+                                        getattr(exc, 'code', type(exc).__name__),
                                     )
-                                elif sessions and sessions != {sid}:
-                                    early_blocked = _blk(
-                                        'PREVIEW_SELECTED_ROUNDS_SPAN_SESSIONS',
-                                    )
+                                    early_blocked = _blk('PREVIEW_TRANSFORM_FAILED')
                                 else:
-                                    by_message: dict[int, list[dict[str, Any]]] = {}
-                                    for row in mapping_rows:
-                                        by_message.setdefault(
-                                            int(row['message_id']), [],
-                                        ).append(row)
-
-                                    mapping_ok = True
-                                    for mid in selected_ids:
-                                        info = content_by_id.get(int(mid))
-                                        rows = by_message.get(int(mid)) or []
-                                        if not rows:
-                                            early_blocked = _blk(
-                                                'PREVIEW_MAPPING_MISSING',
-                                                f'message_id={mid}',
-                                            )
-                                            mapping_ok = False
-                                            break
-                                        identity_bad = False
-                                        for row in rows:
-                                            if (
-                                                int(row['context_id']) != source_id
-                                                or int(row['context_epoch']) != source_epoch
-                                                or int(row['resident_generation']) != gen
-                                                or str(row['claude_session_id']) != sid
-                                            ):
-                                                early_blocked = _blk(
-                                                    'PREVIEW_MAPPING_IDENTITY_MISMATCH',
-                                                    f'message_id={mid}',
-                                                )
-                                                identity_bad = True
-                                                break
-                                        if identity_bad:
-                                            mapping_ok = False
-                                            break
-                                        if info and info['role'] == 'user':
-                                            user_rows = [
-                                                r for r in rows if str(r['role']) == 'user'
-                                            ]
-                                            if len(user_rows) != 1:
-                                                early_blocked = _blk(
-                                                    'PREVIEW_MAPPING_USER_CARDINALITY',
-                                                    f'message_id={mid}',
-                                                )
-                                                mapping_ok = False
-                                                break
-                                            if str(user_rows[0]['event_uuid']) not in canonical_map:
-                                                early_blocked = _blk(
-                                                    'PREVIEW_MAPPING_CANONICAL_MISSING',
-                                                    f'message_id={mid}',
-                                                )
-                                                mapping_ok = False
-                                                break
-                                        elif info and info['role'] == 'assistant':
-                                            asst_rows = [
-                                                r for r in rows
-                                                if str(r['role']) in _MAPPING_ASSISTANT_ROLES
-                                            ]
-                                            if not asst_rows:
-                                                early_blocked = _blk(
-                                                    'PREVIEW_MAPPING_ASSISTANT_MISSING',
-                                                    f'message_id={mid}',
-                                                )
-                                                mapping_ok = False
-                                                break
-
-                                    if mapping_ok:
-                                        eligible = []
-                                        for rnd in graph.candidate_rounds:
-                                            cand = rnd.candidate_user_event_uuid
-                                            if cand not in canonical_map:
-                                                continue
-                                            if rnd.has_sidechain_impact:
-                                                continue
-                                            eligible.append(rnd)
-                                        transcript_tail = (
-                                            eligible[-selected_round_count:]
-                                            if selected_round_count else []
+                                    raise
+                            if early_blocked is None:
+                                mapping_rows = _mapping_rows_for_messages_conn(
+                                    conn, selected_ids,
+                                )
+                                if not mapping_rows and selected_ids:
+                                    early_blocked = _blk('PREVIEW_MAPPING_MISSING')
+                                else:
+                                    sessions = {
+                                        str(r['claude_session_id']) for r in mapping_rows
+                                    }
+                                    gens = {
+                                        int(r['resident_generation']) for r in mapping_rows
+                                    }
+                                    if len(sessions) > 1 or (gens and gens != {gen}):
+                                        early_blocked = _blk(
+                                            'PREVIEW_SELECTED_ROUNDS_SPAN_SESSIONS',
                                         )
-                                        app_user_ids = [
-                                            int(mid) for mid in selected_ids
-                                            if content_by_id.get(int(mid), {}).get('role')
-                                            == 'user'
-                                        ]
-                                        app_user_event_uuids: list[str] = []
-                                        sel_mismatch = False
-                                        for mid in app_user_ids:
-                                            user_rows = [
-                                                r for r in by_message.get(int(mid), [])
-                                                if str(r['role']) == 'user'
-                                            ]
-                                            if len(user_rows) != 1:
+                                    elif sessions and sessions != {sid}:
+                                        early_blocked = _blk(
+                                            'PREVIEW_SELECTED_ROUNDS_SPAN_SESSIONS',
+                                        )
+                                    else:
+                                        by_message: dict[int, list[dict[str, Any]]] = {}
+                                        for row in mapping_rows:
+                                            by_message.setdefault(
+                                                int(row['message_id']), [],
+                                            ).append(row)
+
+                                        mapping_ok = True
+                                        for mid in selected_ids:
+                                            info = content_by_id.get(int(mid))
+                                            rows = by_message.get(int(mid)) or []
+                                            if not rows:
                                                 early_blocked = _blk(
-                                                    'PREVIEW_SELECTION_MAPPING_MISMATCH',
+                                                    'PREVIEW_MAPPING_MISSING',
                                                     f'message_id={mid}',
                                                 )
-                                                sel_mismatch = True
+                                                mapping_ok = False
                                                 break
-                                            app_user_event_uuids.append(
-                                                str(user_rows[0]['event_uuid']),
+                                            identity_bad = False
+                                            for row in rows:
+                                                if (
+                                                    int(row['context_id']) != source_id
+                                                    or int(row['context_epoch']) != source_epoch
+                                                    or int(row['resident_generation']) != gen
+                                                    or str(row['claude_session_id']) != sid
+                                                ):
+                                                    early_blocked = _blk(
+                                                        'PREVIEW_MAPPING_IDENTITY_MISMATCH',
+                                                        f'message_id={mid}',
+                                                    )
+                                                    identity_bad = True
+                                                    break
+                                            if identity_bad:
+                                                mapping_ok = False
+                                                break
+                                            if info and info['role'] == 'user':
+                                                user_rows = [
+                                                    r for r in rows if str(r['role']) == 'user'
+                                                ]
+                                                if len(user_rows) != 1:
+                                                    early_blocked = _blk(
+                                                        'PREVIEW_MAPPING_USER_CARDINALITY',
+                                                        f'message_id={mid}',
+                                                    )
+                                                    mapping_ok = False
+                                                    break
+                                                if str(user_rows[0]['event_uuid']) not in canonical_map:
+                                                    early_blocked = _blk(
+                                                        'PREVIEW_MAPPING_CANONICAL_MISSING',
+                                                        f'message_id={mid}',
+                                                    )
+                                                    mapping_ok = False
+                                                    break
+                                            elif info and info['role'] == 'assistant':
+                                                asst_rows = [
+                                                    r for r in rows
+                                                    if str(r['role']) in _MAPPING_ASSISTANT_ROLES
+                                                ]
+                                                if not asst_rows:
+                                                    early_blocked = _blk(
+                                                        'PREVIEW_MAPPING_ASSISTANT_MISSING',
+                                                        f'message_id={mid}',
+                                                    )
+                                                    mapping_ok = False
+                                                    break
+
+                                        if mapping_ok:
+                                            eligible = []
+                                            for rnd in graph.candidate_rounds:
+                                                cand = rnd.candidate_user_event_uuid
+                                                if cand not in canonical_map:
+                                                    continue
+                                                if rnd.has_sidechain_impact:
+                                                    continue
+                                                eligible.append(rnd)
+                                            transcript_tail = (
+                                                eligible[-selected_round_count:]
+                                                if selected_round_count else []
                                             )
-                                        if not sel_mismatch:
-                                            transcript_user_uuids = [
-                                                r.candidate_user_event_uuid
-                                                for r in transcript_tail
+                                            app_user_ids = [
+                                                int(mid) for mid in selected_ids
+                                                if content_by_id.get(int(mid), {}).get('role')
+                                                == 'user'
                                             ]
-                                            if app_user_event_uuids != transcript_user_uuids:
-                                                early_blocked = _blk(
-                                                    'PREVIEW_SELECTION_MAPPING_MISMATCH',
+                                            app_user_event_uuids: list[str] = []
+                                            sel_mismatch = False
+                                            for mid in app_user_ids:
+                                                user_rows = [
+                                                    r for r in by_message.get(int(mid), [])
+                                                    if str(r['role']) == 'user'
+                                                ]
+                                                if len(user_rows) != 1:
+                                                    early_blocked = _blk(
+                                                        'PREVIEW_SELECTION_MAPPING_MISMATCH',
+                                                        f'message_id={mid}',
+                                                    )
+                                                    sel_mismatch = True
+                                                    break
+                                                app_user_event_uuids.append(
+                                                    str(user_rows[0]['event_uuid']),
                                                 )
-                                            else:
-                                                allowed_event_uuids: set[str] = set()
-                                                for rnd in transcript_tail:
-                                                    allowed_event_uuids.update(rnd.event_uuids)
-                                                outside = False
-                                                for mid in selected_ids:
-                                                    for row in by_message.get(int(mid), []):
-                                                        if str(row['event_uuid']) not in allowed_event_uuids:
-                                                            early_blocked = _blk(
-                                                                'PREVIEW_MAPPING_EVENT_OUTSIDE_SELECTION',
-                                                                f"event_uuid={row['event_uuid']}",
-                                                            )
-                                                            outside = True
-                                                            break
-                                                    if outside:
-                                                        break
-                                                if not outside:
-                                                    cwds: set[str] = set()
+                                            if not sel_mismatch:
+                                                transcript_user_uuids = [
+                                                    r.candidate_user_event_uuid
+                                                    for r in transcript_tail
+                                                ]
+                                                if app_user_event_uuids != transcript_user_uuids:
+                                                    early_blocked = _blk(
+                                                        'PREVIEW_SELECTION_MAPPING_MISMATCH',
+                                                    )
+                                                else:
+                                                    allowed_event_uuids: set[str] = set()
                                                     for rnd in transcript_tail:
-                                                        for uid in rnd.event_uuids:
-                                                            evt = graph.by_uuid.get(uid)
-                                                            if evt is None:
-                                                                continue
-                                                            cwd_val = str(
-                                                                evt.raw.get('cwd') or '',
-                                                            ).strip()
-                                                            if cwd_val:
-                                                                cwds.add(cwd_val)
-                                                    if len(cwds) != 1:
-                                                        early_blocked = _blk(
-                                                            'PREVIEW_CWD_AMBIGUOUS',
-                                                        )
-                                                    else:
-                                                        cwd = next(iter(cwds))
-                                                        try:
-                                                            transform_result = transform_transcript(
-                                                                graph,
-                                                                TransformRequest(
-                                                                    new_session_id=candidate_sid,
-                                                                    cwd=cwd,
-                                                                    keep_rounds=selected_round_count,
-                                                                    user_canonical_by_event_uuid=canonical_map,
-                                                                    thinking_policy=thinking_policy,
-                                                                    sidechain_policy=SidechainPolicy.EXCLUDE,
-                                                                    summary_policy=SummaryPolicy.DROP,
-                                                                    unknown_event_policy=UnknownEventPolicy.DROP,
-                                                                    tool_primer_candidate=None,
-                                                                    version='2.1.220',
-                                                                ),
-                                                            )
-                                                        except TransformError as exc:
-                                                            logger.info(
-                                                                'preview transform failed code=%s',
-                                                                getattr(exc, 'code', type(exc).__name__),
-                                                            )
+                                                        allowed_event_uuids.update(rnd.event_uuids)
+                                                    outside = False
+                                                    for mid in selected_ids:
+                                                        for row in by_message.get(int(mid), []):
+                                                            if str(row['event_uuid']) not in allowed_event_uuids:
+                                                                early_blocked = _blk(
+                                                                    'PREVIEW_MAPPING_EVENT_OUTSIDE_SELECTION',
+                                                                    f"event_uuid={row['event_uuid']}",
+                                                                )
+                                                                outside = True
+                                                                break
+                                                        if outside:
+                                                            break
+                                                    if not outside:
+                                                        cwds: set[str] = set()
+                                                        for rnd in transcript_tail:
+                                                            for uid in rnd.event_uuids:
+                                                                evt = graph.by_uuid.get(uid)
+                                                                if evt is None:
+                                                                    continue
+                                                                cwd_val = str(
+                                                                    evt.raw.get('cwd') or '',
+                                                                ).strip()
+                                                                if cwd_val:
+                                                                    cwds.add(cwd_val)
+                                                        if len(cwds) != 1:
                                                             early_blocked = _blk(
-                                                                'PREVIEW_TRANSFORM_FAILED',
+                                                                'PREVIEW_CWD_AMBIGUOUS',
                                                             )
                                                         else:
-                                                            validation = validate_transcript_events(
-                                                                transform_result.events,
-                                                                ValidatorOptions(
-                                                                    session_id=candidate_sid,
-                                                                    thinking_policy=thinking_policy,
-                                                                    forbid_sidechain=True,
-                                                                    forbid_summary=True,
-                                                                    expected_round_count=selected_round_count,
-                                                                    max_round_count=selected_round_count,
-                                                                    old_uuids=set(graph.by_uuid.keys()),
-                                                                    unknown_event_mode='reject',
-                                                                ),
-                                                            )
-                                                            if not validation.ok:
+                                                            cwd = next(iter(cwds))
+                                                            try:
+                                                                transform_result = transform_transcript(
+                                                                    graph,
+                                                                    TransformRequest(
+                                                                        new_session_id=candidate_sid,
+                                                                        cwd=cwd,
+                                                                        keep_rounds=selected_round_count,
+                                                                        user_canonical_by_event_uuid=canonical_map,
+                                                                        thinking_policy=thinking_policy,
+                                                                        sidechain_policy=SidechainPolicy.EXCLUDE,
+                                                                        summary_policy=SummaryPolicy.DROP,
+                                                                        unknown_event_policy=UnknownEventPolicy.DROP,
+                                                                        tool_primer_candidate=None,
+                                                                        version='2.1.220',
+                                                                    ),
+                                                                )
+                                                            except TransformError as exc:
                                                                 logger.info(
-                                                                    'preview validator rejected errors=%s',
-                                                                    list(validation.errors)[:5],
+                                                                    'preview transform failed code=%s',
+                                                                    getattr(exc, 'code', type(exc).__name__),
                                                                 )
                                                                 early_blocked = _blk(
-                                                                    'PREVIEW_VALIDATOR_REJECTED',
-                                                                    warnings=list(validation.warnings),
+                                                                    'PREVIEW_TRANSFORM_FAILED',
                                                                 )
                                                             else:
-                                                                try:
-                                                                    prefix_after = _snapshot_transcript_prefix(
-                                                                        path, scan_offset,
+                                                                validation = validate_transcript_events(
+                                                                    transform_result.events,
+                                                                    ValidatorOptions(
+                                                                        session_id=candidate_sid,
+                                                                        thinking_policy=thinking_policy,
+                                                                        forbid_sidechain=True,
+                                                                        forbid_summary=True,
+                                                                        expected_round_count=selected_round_count,
+                                                                        max_round_count=selected_round_count,
+                                                                        old_uuids=set(graph.by_uuid.keys()),
+                                                                        unknown_event_mode='reject',
+                                                                    ),
+                                                                )
+                                                                if not validation.ok:
+                                                                    logger.info(
+                                                                        'preview validator rejected errors=%s',
+                                                                        list(validation.errors)[:5],
                                                                     )
-                                                                except _PrefixSnapshotError as exc:
-                                                                    early_blocked = _blk(exc.code)
+                                                                    early_blocked = _blk(
+                                                                        'PREVIEW_VALIDATOR_REJECTED',
+                                                                        warnings=list(validation.warnings),
+                                                                    )
                                                                 else:
-                                                                    if (
-                                                                        prefix_after.end_offset
-                                                                        != prefix_before.end_offset
-                                                                        or prefix_after.sha256
-                                                                        != prefix_before.sha256
-                                                                    ):
-                                                                        early_blocked = _blk(
-                                                                            'PREVIEW_SOURCE_CHANGED',
+                                                                    try:
+                                                                        prefix_after = _snapshot_transcript_prefix(
+                                                                            path, scan_offset,
                                                                         )
+                                                                    except _PrefixSnapshotError as exc:
+                                                                        early_blocked = _blk(exc.code)
                                                                     else:
-                                                                        serialized = serialize_events(
-                                                                            transform_result.events,
-                                                                        )
-                                                                        serialized_bytes_blob = (
-                                                                            serialized.encode('utf-8')
-                                                                        )
-                                                                        ready_bundle = {
-                                                                            'candidate_sid': candidate_sid,
-                                                                            'source_base': source_base,
-                                                                            'registry_snapshot': registry_snapshot,
-                                                                            'transform_result': transform_result,
-                                                                            'validation': validation,
-                                                                            'serialized_jsonl': serialized_bytes_blob,
-                                                                            'serialized_bytes': len(
-                                                                                serialized_bytes_blob,
-                                                                            ),
-                                                                            'output_sha256': (
-                                                                                transform_result.output_sha256
-                                                                            ),
-                                                                            'source_transcript_path': path,
-                                                                            'source_scan_offset': scan_offset,
-                                                                            'source_prefix_sha256': (
-                                                                                prefix_before.sha256
-                                                                            ),
-                                                                        }
+                                                                        if (
+                                                                            prefix_after.end_offset
+                                                                            != prefix_before.end_offset
+                                                                            or prefix_after.sha256
+                                                                            != prefix_before.sha256
+                                                                        ):
+                                                                            early_blocked = _blk(
+                                                                                'PREVIEW_SOURCE_CHANGED',
+                                                                            )
+                                                                        else:
+                                                                            serialized = serialize_events(
+                                                                                transform_result.events,
+                                                                            )
+                                                                            serialized_bytes_blob = (
+                                                                                serialized.encode('utf-8')
+                                                                            )
+                                                                            ready_bundle = {
+                                                                                'candidate_sid': candidate_sid,
+                                                                                'source_base': source_base,
+                                                                                'registry_snapshot': registry_snapshot,
+                                                                                'transform_result': transform_result,
+                                                                                'validation': validation,
+                                                                                'serialized_jsonl': serialized_bytes_blob,
+                                                                                'serialized_bytes': len(
+                                                                                    serialized_bytes_blob,
+                                                                                ),
+                                                                                'output_sha256': (
+                                                                                    transform_result.output_sha256
+                                                                                ),
+                                                                                'source_transcript_path': path,
+                                                                                'source_scan_offset': scan_offset,
+                                                                                'source_prefix_sha256': (
+                                                                                    prefix_before.sha256
+                                                                                ),
+                                                                            }
     finally:
         _close_preview_readonly(conn)
 
