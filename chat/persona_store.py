@@ -55,9 +55,11 @@ def _fsync_dir(path: Path) -> None:
 def ensure_runtime_persona() -> Path:
     """Bootstrap runtime authority from repo seed when absent.
 
-    Uses atomic create-once (O_CREAT|O_EXCL). If another worker or frontend
-    save creates the runtime file first, this returns without overwriting.
-    Seed bytes are copied byte-for-byte (no newline normalization).
+    Writes seed bytes into a private tmp file, then publishes with
+    ``os.link(tmp, runtime)`` (create-once). If another worker or frontend
+    save already established the runtime, returns without modifying it.
+    Never unlinks or truncates the final runtime path — failure cleanup
+    only removes this bootstrap's own tmp.
     """
     runtime = _runtime_path()
     if runtime.exists():
@@ -87,30 +89,36 @@ def ensure_runtime_persona() -> Path:
         )
 
     runtime.parent.mkdir(parents=True, exist_ok=True)
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-    try:
-        fd = os.open(str(runtime), flags, 0o644)
-    except FileExistsError:
-        # Another worker / frontend save won the race — never overwrite.
-        return runtime
-
+    fd, tmp_name = tempfile.mkstemp(
+        prefix='.persona.bootstrap.',
+        suffix='.tmp',
+        dir=str(runtime.parent),
+    )
+    tmp_path = Path(tmp_name)
     try:
         with os.fdopen(fd, 'wb') as fh:
             fh.write(seed_bytes)
             fh.flush()
             os.fsync(fh.fileno())
-        _fsync_dir(runtime.parent)
-    except Exception:
         try:
-            runtime.unlink(missing_ok=True)
-        except TypeError:
-            if runtime.exists():
-                runtime.unlink()
+            os.chmod(tmp_name, 0o644)
         except OSError:
             pass
-        raise
-
-    return runtime
+        try:
+            os.link(tmp_name, str(runtime))
+        except FileExistsError:
+            # Another worker / frontend save won — never modify runtime.
+            return runtime
+        _fsync_dir(runtime.parent)
+        return runtime
+    finally:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except TypeError:
+            if tmp_path.exists():
+                tmp_path.unlink()
+        except OSError:
+            pass
 
 
 def read_persona() -> str:

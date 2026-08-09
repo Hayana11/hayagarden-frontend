@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import sys
 import tempfile
 import unittest
@@ -143,6 +144,57 @@ class PersonaStoreTests(unittest.TestCase):
             hashlib.sha256(seed).hexdigest(),
             hashlib.sha256(runtime_bytes).hexdigest(),
         )
+
+    def test_T19_bootstrap_failure_after_concurrent_save_keeps_runtime(self):
+        """Concurrent USER_EDIT must survive bootstrap post-publish failure."""
+        self.repo.write_bytes(b'SEED')
+        real_link = os.link
+
+        def link_then_concurrent_save_then_fail(src, dst):
+            real_link(src, dst)
+            persona_store.write_persona('USER_EDIT')
+            raise OSError('simulated bootstrap post-write failure')
+
+        with mock.patch.object(os, 'link', side_effect=link_then_concurrent_save_then_fail):
+            with self.assertRaises(OSError):
+                persona_store.ensure_runtime_persona()
+
+        self.assertTrue(self.runtime.exists())
+        self.assertEqual(self.runtime.read_text(encoding='utf-8'), 'USER_EDIT')
+
+    def test_T20_incomplete_bootstrap_does_not_expose_runtime(self):
+        """Runtime path stays absent until full tmp write + fsync + link."""
+        seed = b'FULL_SEED_BYTES'
+        self.repo.write_bytes(seed)
+        real_fsync = os.fsync
+        real_link = os.link
+        observed = {'runtime_during_tmp_fsync': None, 'linked': False}
+
+        def fsync_assert_absent(fd):
+            # Capture only the first fsync (tmp file) before publish.
+            if observed['runtime_during_tmp_fsync'] is None:
+                observed['runtime_during_tmp_fsync'] = self.runtime.exists()
+            return real_fsync(fd)
+
+        def link_assert_ready(src, dst):
+            self.assertFalse(self.runtime.exists())
+            self.assertEqual(Path(src).read_bytes(), seed)
+            observed['linked'] = True
+            return real_link(src, dst)
+
+        with mock.patch.object(os, 'fsync', side_effect=fsync_assert_absent), \
+             mock.patch.object(os, 'link', side_effect=link_assert_ready):
+            persona_store.ensure_runtime_persona()
+
+        self.assertIs(observed['runtime_during_tmp_fsync'], False)
+        self.assertTrue(observed['linked'])
+        self.assertEqual(self.runtime.read_bytes(), seed)
+
+    def test_bootstrap_never_unlinks_runtime(self):
+        src = Path(persona_store.__file__).read_text(encoding='utf-8')
+        # Final authority must never be deleted by bootstrap cleanup.
+        self.assertNotIn('runtime.unlink', src)
+        self.assertNotIn('runtime_path.unlink', src)
 
 
 class PersonaApiTests(unittest.TestCase):
