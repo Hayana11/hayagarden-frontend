@@ -141,7 +141,7 @@ function read(rel) {
   );
 }
 
-// 10. GlobalBottomNav old-Chat visual parity (canonical = static/static-nav.css)
+// 10. GlobalBottomNav final product contract + legacy native physical parity
 {
   const appRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
   const repoRoot = path.dirname(appRoot);
@@ -150,47 +150,72 @@ function read(rel) {
   const navBlock = css.slice(css.indexOf('/* Canonical GlobalBottomNav'));
   const bottom = read('components/GlobalBottomNav.tsx');
   const nav = read('navigation.ts');
+  const legacyCompat = read('lib/legacyNativeCompat.ts');
 
-  // A. static remains canonical source
-  assert.match(staticNav, /background:\s*rgba\(245,\s*243,\s*238,\s*0\.97\)/);
-  assert.match(staticNav, /border-top:\s*0\.5px solid rgba\(210,\s*185,\s*155,\s*0\.2\)/);
-
-  // B. React shared inner matches canonical
-  assert.match(navBlock, /\.global-bottom-nav__inner[\s\S]*?background:\s*rgba\(245,\s*243,\s*238,\s*0\.97\)/);
-  assert.match(navBlock, /border-top:\s*0\.5px solid rgba\(210,\s*185,\s*155,\s*0\.2\)/);
-  assert.match(navBlock, /padding:\s*8px 0 calc\(8px \+ env\(safe-area-inset-bottom,\s*0px\)\)/);
-  assert.match(navBlock, /backdrop-filter:\s*blur\(14px\)/);
-
-  // C. item inactive styling
+  // 11.1 Final colors
+  assert.match(staticNav, /\.bnav\s*\{[\s\S]*?background:\s*#fef4f5/);
+  assert.match(navBlock, /\.global-bottom-nav__inner[\s\S]*?background:\s*#fef4f5/);
+  assert.match(staticNav, /\.ni\.act\s*\{[\s\S]*?color:\s*#d27790/);
+  assert.match(navBlock, /\.global-bottom-nav__item\.act[\s\S]*?color:\s*#d27790/);
   assert.match(navBlock, /\.global-bottom-nav__item[\s\S]*?color:\s*#b8b0b8/);
+
+  // 11.2 Base dimensions (static + React base, unscaled canonical)
+  assert.match(staticNav, /padding:\s*8px 0 calc\(8px \+ env\(safe-area-inset-bottom/);
+  assert.match(staticNav, /\.ni\s*\{[\s\S]*?padding:\s*2px 0/);
+  assert.match(staticNav, /\.ni\s*\{[\s\S]*?font-size:\s*10px/);
+  assert.match(staticNav, /\.ni i\s*\{[\s\S]*?font-size:\s*21px/);
+  assert.match(staticNav, /margin-bottom:\s*3px/);
+  assert.match(staticNav, /border-top:\s*0\.5px solid/);
+
+  assert.match(navBlock, /padding:\s*8px 0 calc\(8px \+ env\(safe-area-inset-bottom,\s*0px\)\)/);
   assert.match(navBlock, /\.global-bottom-nav__item[\s\S]*?font-size:\s*10px/);
   assert.match(navBlock, /\.global-bottom-nav__item[\s\S]*?padding:\s*2px 0/);
-
-  // D. icon
   assert.match(navBlock, /\.global-bottom-nav__icon[\s\S]*?font-size:\s*21px/);
-  assert.match(navBlock, /margin-bottom:\s*3px/);
+  assert.match(navBlock, /border-top:\s*0\.5px solid rgba\(210,\s*185,\s*155,\s*0\.2\)/);
+  assert.match(navBlock, /backdrop-filter:\s*blur\(14px\)/);
 
-  // E. active
-  assert.match(navBlock, /\.global-bottom-nav__item\.act[\s\S]*?color:\s*#7c6a8a/);
+  // 11.3 Legacy native compensation (body zoom 0.8 → metric ×1.25)
+  assert.match(
+    navBlock,
+    /body\[data-legacy-native-compat='true'\]\s*\.global-bottom-nav__inner[\s\S]*?padding:\s*10px 0 calc\(10px \+ env\(safe-area-inset-bottom,\s*0px\)\)/,
+  );
+  assert.match(
+    navBlock,
+    /body\[data-legacy-native-compat='true'\]\s*\.global-bottom-nav__inner[\s\S]*?border-top-width:\s*0\.625px/,
+  );
+  assert.match(
+    navBlock,
+    /body\[data-legacy-native-compat='true'\]\s*\.global-bottom-nav__item[\s\S]*?font-size:\s*12\.5px/,
+  );
+  assert.match(
+    navBlock,
+    /body\[data-legacy-native-compat='true'\]\s*\.global-bottom-nav__item[\s\S]*?padding:\s*2\.5px 0/,
+  );
+  assert.match(
+    navBlock,
+    /body\[data-legacy-native-compat='true'\]\s*\.global-bottom-nav__icon[\s\S]*?font-size:\s*26\.25px/,
+  );
+  assert.match(
+    navBlock,
+    /body\[data-legacy-native-compat='true'\]\s*\.global-bottom-nav__icon[\s\S]*?margin-bottom:\s*3\.75px/,
+  );
 
-  // F. no fixed gradient
+  // 11.4 Scale authority frozen — body zoom 0.8; no nav zoom/scale layer
+  assert.match(legacyCompat, /body\.style\.zoom\s*=\s*'0\.8'/);
+  assert.doesNotMatch(navBlock, /zoom:\s*1\.25/);
+  assert.doesNotMatch(navBlock, /transform:\s*scale\(1\.25\)/);
+
+  // No fixed gradient
   assert.doesNotMatch(navBlock, /\.global-bottom-nav--fixed::before/);
-  assert.doesNotMatch(navBlock, /height:\s*26px/);
-  assert.doesNotMatch(navBlock, /linear-gradient\(\s*to top,\s*rgba\(255,\s*255,\s*255/);
 
-  // G. embedded has no visual overrides (covered in section 9)
-
-  // H. shared inner DOM
+  // 11.5 Routing frozen
   assert.match(bottom, /global-bottom-nav__inner/);
-
-  // I/J. routing frozen
   const navBlockTs = nav.slice(nav.indexOf('export const NAV_ITEMS'));
   const navKeys = [...navBlockTs.matchAll(/key:\s*'([^']+)'/g)].map((m) => m[1]);
   assert.deepEqual(navKeys, ['dash', 'chat', 'read', 'board']);
   assert.match(nav, /to:\s*ROUTES\.contacts/);
   assert.match(nav, /activePaths:\s*\[ROUTES\.contacts,\s*ROUTES\.chat\]/);
 
-  // K. no flex gap in nav visual block
   assert.doesNotMatch(navBlock, /\.global-bottom-nav[\s\S]*?\bgap\s*:/);
 }
 
