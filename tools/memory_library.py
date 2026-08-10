@@ -7,6 +7,11 @@ from tools import summary_title
 # Thoughts/dreams stay in posts for 朋友圈, but are not part of 记忆库.
 LIBRARY_TYPES = ('MEMORY', 'DIARY', 'FACT', 'DAILY_SUMMARY')
 
+CONTENT_HEAD_LEN = 800
+EXCERPT_MAX_LEN = 320
+TITLE_CAND_CORNER_LEN = 18
+TITLE_CAND_BOOK_LEN = 14
+
 # Optional emoji/name hints — unknown tags and types still get dynamic topics.
 TAG_HINTS = {
     '日常': {'emoji': '🍞', 'name': '日常', 'desc': '账目、天气、日常琐事与随口一提的小事。'},
@@ -48,18 +53,6 @@ def _author_who(author):
     if a in ('haya', 'haya11'):
         return '哈娅'
     return '费佳'
-
-
-def _title_from_content(content):
-    text = (content or '').strip()
-    if not text:
-        return '未命名记忆'
-    line = text.split('\n')[0].strip()
-    line = re.sub(r'^#+\s*', '', line)
-    line = re.sub(r'^【[^】]+】\s*', '', line).strip()
-    if len(line) > 52:
-        return line[:52] + '…'
-    return line or '未命名记忆'
 
 
 def _post_weight(row):
@@ -116,58 +109,96 @@ def _ai_blurb(name, entries):
     return f'{span}共 {len(entries)} 条记忆' + (f'，其中 {core_n} 条是核心级。' if core_n else '。')
 
 
-def build_memory_library(conn, limit=500):
+def _make_excerpt(content_head):
+    text = re.sub(r'\s+', ' ', (content_head or '').replace('\n', ' ')).strip()
+    if len(text) <= EXCERPT_MAX_LEN:
+        return text
+    return text[:EXCERPT_MAX_LEN]
+
+
+def _index_title_source(row):
+    """Bounded title source for index rows — never loads full content into Python."""
+    content_head = (row['content_head'] if 'content_head' in row.keys() else row.get('content') or '').strip()
+    if (row['summary_title'] or '').strip():
+        return content_head
+    parts = [content_head]
+    for key in ('title_cand_lcorner', 'title_cand_lcorner2', 'title_cand_book'):
+        if key in row.keys():
+            frag = (row[key] or '').strip()
+            if frag and frag not in content_head:
+                parts.append(frag)
+    return '\n'.join(parts)
+
+
+def _library_select_sql(summary_expr, *, content_mode):
     placeholders = ','.join('?' * len(LIBRARY_TYPES))
-    post_cols = {r[1] for r in conn.execute("PRAGMA table_info(posts)").fetchall()}
-    summary_expr = 'summary_title' if 'summary_title' in post_cols else "'' AS summary_title"
-    rows = conn.execute(
-        f"""SELECT id, type, content, author, created_at, pinned, tags, layer, importance, {summary_expr}
+    if content_mode == 'head':
+        content_expr = f"""substr(content, 1, {CONTENT_HEAD_LEN}) AS content_head,
+            CASE WHEN instr(content, '「') > 0 THEN substr(content, instr(content, '「'), {TITLE_CAND_CORNER_LEN}) ELSE '' END AS title_cand_lcorner,
+            CASE WHEN instr(content, '『') > 0 THEN substr(content, instr(content, '『'), {TITLE_CAND_CORNER_LEN}) ELSE '' END AS title_cand_lcorner2,
+            CASE WHEN instr(content, '《') > 0 THEN substr(content, instr(content, '《'), {TITLE_CAND_BOOK_LEN}) ELSE '' END AS title_cand_book"""
+    else:
+        content_expr = 'content'
+    return (
+        f"""SELECT id, type, {content_expr}, author, created_at, pinned, tags, layer, importance, {summary_expr}
             FROM posts
             WHERE type IN ({placeholders}) AND COALESCE(resolved, 0) = 0
             ORDER BY created_at DESC, id DESC
-            LIMIT ?""",
-        (*LIBRARY_TYPES, limit),
-    ).fetchall()
+            LIMIT ?"""
+    )
 
-    entries = []
-    topic_labels = {}
-    topic_types = {}
-    assoc_by_id = {}
 
-    for row in rows:
-        tags, assocs = _parse_tags(row['tags'])
-        created = (row['created_at'] or '').strip()
-        date_part, _, time_part = created.partition(' ')
-        ptype = (row['type'] or 'MEMORY').strip()
-        topic_key = _topic_key_for_row(row, tags)
-        if tags:
-            topic_labels.setdefault(topic_key, tags[0])
-        else:
-            topic_labels.setdefault(topic_key, TYPE_HINTS.get(ptype, TYPE_HINTS['MEMORY'])['name'])
-            topic_types.setdefault(topic_key, ptype)
+def _fetch_library_rows(conn, limit=500, *, content_mode='full'):
+    post_cols = {r[1] for r in conn.execute("PRAGMA table_info(posts)").fetchall()}
+    summary_expr = 'summary_title' if 'summary_title' in post_cols else "'' AS summary_title"
+    sql = _library_select_sql(summary_expr, content_mode=content_mode)
+    return conn.execute(sql, (*LIBRARY_TYPES, limit)).fetchall()
 
-        titles = summary_title.entry_titles(row['content'], row['summary_title'])
-        entry = {
-            'id': int(row['id']),
-            'date': date_part or created[:10],
-            'time': (time_part or '00:00')[:5],
-            'weight': _post_weight(row),
-            'title': titles['title'],
-            'summaryTitle': titles['summaryTitle'],
-            'preview': titles['preview'],
-            'who': _author_who(row['author']),
-            'topics': [topic_key],
-            'tags': tags[:8],
-            'content': (row['content'] or '').strip(),
-            'links': [],
-        }
-        entries.append(entry)
-        assoc_by_id[entry['id']] = set(assocs)
 
+def _entry_base_from_row(row, *, include_content=False):
+    tags, assocs = _parse_tags(row['tags'])
+    created = (row['created_at'] or '').strip()
+    date_part, _, time_part = created.partition(' ')
+    ptype = (row['type'] or 'MEMORY').strip()
+    topic_key = _topic_key_for_row(row, tags)
+
+    if include_content:
+        content_source = (row['content'] or '').strip()
+        title_src = content_source
+    else:
+        content_source = (row['content_head'] if 'content_head' in row.keys() else row['content'] or '').strip()
+        title_src = _index_title_source(row)
+
+    titles = summary_title.entry_titles(title_src, row['summary_title'])
+    if not include_content:
+        titles = dict(titles)
+        titles['preview'] = summary_title.truncate_preview(content_source, titles['summaryTitle'])
+    entry = {
+        'id': int(row['id']),
+        'date': date_part or created[:10],
+        'time': (time_part or '00:00')[:5],
+        'weight': _post_weight(row),
+        'title': titles['title'],
+        'summaryTitle': titles['summaryTitle'],
+        'preview': titles['preview'],
+        'who': _author_who(row['author']),
+        'topics': [topic_key],
+        'tags': tags[:8],
+        'links': [],
+    }
+    if include_content:
+        entry['content'] = (row['content'] or '').strip()
+    else:
+        entry['excerpt'] = _make_excerpt(content_source)
+    return entry, assocs, topic_key, tags, ptype
+
+
+def _compute_links_pair_scan(entries, assoc_by_id):
     for a in entries:
         shared = []
         a_assocs = assoc_by_id.get(a['id'], set())
         if not a_assocs:
+            a['links'] = []
             continue
         for b in entries:
             if b['id'] == a['id']:
@@ -178,14 +209,37 @@ def build_memory_library(conn, limit=500):
         shared.sort(key=lambda x: x[1], reverse=True)
         a['links'] = [sid for sid, _ in shared[:4]]
 
+
+def _compute_links_inverted(entries, assoc_by_id):
+    id_to_index = {e['id']: i for i, e in enumerate(entries)}
+    assoc_to_ids = defaultdict(set)
+    for entry_id, assocs in assoc_by_id.items():
+        for assoc in assocs:
+            assoc_to_ids[assoc].add(entry_id)
+
+    for entry in entries:
+        entry_id = entry['id']
+        assocs = assoc_by_id.get(entry_id, set())
+        if not assocs:
+            entry['links'] = []
+            continue
+        overlap_counts = defaultdict(int)
+        for assoc in assocs:
+            for other_id in assoc_to_ids[assoc]:
+                if other_id != entry_id:
+                    overlap_counts[other_id] += 1
+        ranked = sorted(
+            overlap_counts.items(),
+            key=lambda item: (-item[1], id_to_index[item[0]]),
+        )
+        entry['links'] = [other_id for other_id, _ in ranked[:4]]
+
+
+def _build_topics(entries, topic_labels, topic_types):
     by_topic = defaultdict(list)
     for e in entries:
         by_topic[e['topics'][0]].append(e)
 
-    # Each entry belongs to exactly one topic (topics = [topic_key]), so two
-    # different topics' entry-id sets are always disjoint — an overlap
-    # computed on ids can never be positive. Use shared tags across each
-    # topic's entries instead, which is the signal that actually exists.
     topic_tagsets = {k: {tag for e in group for tag in e['tags']} for k, group in by_topic.items()}
 
     topics = []
@@ -206,5 +260,103 @@ def build_memory_library(conn, limit=500):
             'ai': _ai_blurb(meta['name'], group),
             'related': related,
         })
+    return topics
 
+
+def _assemble_library(entries, topic_labels, topic_types, assoc_by_id, *, use_inverted_links=True):
+    if use_inverted_links:
+        _compute_links_inverted(entries, assoc_by_id)
+    else:
+        _compute_links_pair_scan(entries, assoc_by_id)
+    topics = _build_topics(entries, topic_labels, topic_types)
     return {'topics': topics, 'entries': entries}
+
+
+def build_memory_library_index(conn, limit=500):
+    rows = _fetch_library_rows(conn, limit, content_mode='head')
+    entries = []
+    topic_labels = {}
+    topic_types = {}
+    assoc_by_id = {}
+
+    for row in rows:
+        entry, assocs, topic_key, tags, ptype = _entry_base_from_row(row, include_content=False)
+        if tags:
+            topic_labels.setdefault(topic_key, tags[0])
+        else:
+            topic_labels.setdefault(topic_key, TYPE_HINTS.get(ptype, TYPE_HINTS['MEMORY'])['name'])
+            topic_types.setdefault(topic_key, ptype)
+        entries.append(entry)
+        assoc_by_id[entry['id']] = set(assocs)
+
+    lib = _assemble_library(entries, topic_labels, topic_types, assoc_by_id, use_inverted_links=True)
+    return {'version': 1, **lib}
+
+
+def build_memory_library(conn, limit=500):
+    rows = _fetch_library_rows(conn, limit, content_mode='full')
+    entries = []
+    topic_labels = {}
+    topic_types = {}
+    assoc_by_id = {}
+
+    for row in rows:
+        entry, assocs, topic_key, tags, ptype = _entry_base_from_row(row, include_content=True)
+        if tags:
+            topic_labels.setdefault(topic_key, tags[0])
+        else:
+            topic_labels.setdefault(topic_key, TYPE_HINTS.get(ptype, TYPE_HINTS['MEMORY'])['name'])
+            topic_types.setdefault(topic_key, ptype)
+        entries.append(entry)
+        assoc_by_id[entry['id']] = set(assocs)
+
+    return _assemble_library(entries, topic_labels, topic_types, assoc_by_id, use_inverted_links=True)
+
+
+def get_memory_library_entry_detail(conn, pid):
+    row = conn.execute(
+        """SELECT id, type, content, resolved
+           FROM posts WHERE id = ?""",
+        (int(pid),),
+    ).fetchone()
+    if not row:
+        return None
+    ptype = (row['type'] or '').strip()
+    if ptype not in LIBRARY_TYPES or int(row['resolved'] or 0) != 0:
+        return None
+    return {'id': int(row['id']), 'content': (row['content'] or '').strip()}
+
+
+def search_memory_library(conn, query, limit=4):
+    q = (query or '').strip()
+    if not q:
+        return {'results': []}
+    try:
+        limit_n = int(limit)
+    except (TypeError, ValueError):
+        limit_n = 4
+    limit_n = max(1, min(limit_n, 20))
+
+    rows = _fetch_library_rows(conn, 500, content_mode='full')
+    ql = q.lower()
+    results = []
+    for row in rows:
+        tags, _ = _parse_tags(row['tags'])
+        who = _author_who(row['author'])
+        titles = summary_title.entry_titles(row['content'], row['summary_title'])
+        haystack = (titles['summaryTitle'] + (row['content'] or '') + ''.join(tags) + who).lower()
+        if ql not in haystack:
+            continue
+        created = (row['created_at'] or '').strip()
+        date_part, _, _ = created.partition(' ')
+        results.append({
+            'id': int(row['id']),
+            'summaryTitle': titles['summaryTitle'],
+            'preview': titles['preview'],
+            'date': date_part or created[:10],
+            'who': who,
+            'tags': tags[:8],
+            'topics': [_topic_key_for_row(row, tags)],
+            'weight': _post_weight(row),
+        })
+    return {'results': results[:limit_n]}

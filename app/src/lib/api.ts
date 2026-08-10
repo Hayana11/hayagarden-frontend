@@ -19,7 +19,10 @@ import type {
   LedgerWho,
   MemoryCalendar,
   MemoryDayEntry,
+  MemoryEntryDetail,
   MemoryLibrary,
+  MemoryLibraryIndex,
+  MemorySearchResult,
   MemorySummary,
   PeriodDayRecord,
   PeriodDays,
@@ -104,9 +107,52 @@ export function fetchMemoryDayEntries(
   );
 }
 
-// GET /api/memories/library -> MemoryLibrary (all topics + entries, for search/timeline/topic/star views)
+// GET /api/memories/library -> MemoryLibrary (legacy full payload)
 export function fetchMemoryLibrary(): Promise<MemoryLibrary> {
   return withFallback(() => http.get<MemoryLibrary>('/api/memories/library'), mock.mockMemoryLibrary);
+}
+
+/** Memory index reads only fall back to demo mock under an explicit DEV mock flag. */
+export function memoryIndexReadsAllowMock(): boolean {
+  return Boolean(import.meta.env.DEV) && import.meta.env.VITE_MEMORY_USE_MOCK === '1';
+}
+
+// GET /api/memories/library/index -> index-only cold-start payload
+export function fetchMemoryLibraryIndex(): Promise<MemoryLibraryIndex> {
+  if (!memoryIndexReadsAllowMock()) {
+    return http.get<MemoryLibraryIndex>('/api/memories/library/index');
+  }
+  return withFallback(
+    () => http.get<MemoryLibraryIndex>('/api/memories/library/index'),
+    () => {
+      const full = mock.mockMemoryLibrary();
+      return {
+        version: 1,
+        topics: full.topics,
+        entries: full.entries.map(({ content: _c, ...rest }) => ({
+          ...rest,
+          excerpt: (rest.preview || '').slice(0, 320),
+        })),
+      };
+    },
+  );
+}
+
+// GET /api/memories/library/entry/<id>
+export function fetchMemoryEntryContent(id: number): Promise<MemoryEntryDetail | null> {
+  return http
+    .get<MemoryEntryDetail>(`/api/memories/library/entry/${id}`)
+    .catch(() => null);
+}
+
+// GET /api/memories/library/search?q=&limit=
+export function searchMemoryEntries(query: string, limit = 4): Promise<MemorySearchResult[]> {
+  const q = query.trim();
+  if (!q) return Promise.resolve([]);
+  return http
+    .get<{ results: MemorySearchResult[] }>('/api/memories/library/search', { q, limit })
+    .then((r) => r.results || [])
+    .catch(() => []);
 }
 
 // GET /api/messages/heatmap?month=YYYY-MM -> Heatmap (chat_messages counted per day)

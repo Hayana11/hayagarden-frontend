@@ -437,6 +437,38 @@ def memories_library():
     finally:
         conn.close()
 
+@app.route('/api/memories/library/index', methods=['GET'])
+def memories_library_index():
+    from tools import memory_library
+    conn = get_db()
+    try:
+        return jsonify(memory_library.build_memory_library_index(conn))
+    finally:
+        conn.close()
+
+@app.route('/api/memories/library/entry/<int:pid>', methods=['GET'])
+def memories_library_entry(pid):
+    from tools import memory_library
+    conn = get_db()
+    try:
+        detail = memory_library.get_memory_library_entry_detail(conn, pid)
+        if detail is None:
+            return jsonify({'error': 'not found'}), 404
+        return jsonify(detail)
+    finally:
+        conn.close()
+
+@app.route('/api/memories/library/search', methods=['GET'])
+def memories_library_search():
+    from tools import memory_library
+    q = (request.args.get('q') or '').strip()
+    limit = request.args.get('limit', 4)
+    conn = get_db()
+    try:
+        return jsonify(memory_library.search_memory_library(conn, q, limit=limit))
+    finally:
+        conn.close()
+
 @app.route('/api/posts/calendar/day', methods=['GET'])
 def posts_calendar_day():
     date_str = (request.args.get('date') or '').strip()

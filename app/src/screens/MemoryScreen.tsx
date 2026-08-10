@@ -3,8 +3,17 @@ import { useEffect, useRef, useState } from 'react';
 import { BackHeader } from '../components/BackHeader';
 import { Card, ScreenLayout } from '../components/Card';
 import { DragScrollRow } from '../components/DragScrollRow';
+import { useMemoryEntryContent } from '../hooks/useMemoryEntryContent';
 import { useMemoryLibrary } from '../hooks/useMemoryLibrary';
+import { searchMemoryEntries } from '../lib/api';
 import { dateKey, seeded } from '../lib/format';
+import {
+  canCommitSearchResults,
+  createMemoryDetailCaches,
+  MEMORY_SEARCH_DEBOUNCE_MS,
+  markMemoryPerf,
+  type MemoryDetailCaches,
+} from '../lib/memoryColdStart';
 import {
   constellationColor,
   formatDateDot,
@@ -18,7 +27,7 @@ import {
   type MemoryState,
   type MoonInfo,
 } from '../lib/memoryLib';
-import type { MemoryEntry, MemoryWeight } from '../types';
+import type { MemoryIndexEntry, MemorySearchResult, MemoryTopic, MemoryWeight } from '../types';
 
 type ViewMode = 'time' | 'topic' | 'star';
 type StateFilter = MemoryState | 'all';
@@ -69,8 +78,12 @@ function toTs(dateStr: string): number {
 }
 
 export function MemoryScreen() {
-  const library = useMemoryLibrary();
+  const { library } = useMemoryLibrary();
   const now = new Date();
+  const [searchResults, setSearchResults] = useState<MemorySearchResult[]>([]);
+  const [searchResultQuery, setSearchResultQuery] = useState('');
+  const searchGenRef = useRef(0);
+  const detailCachesRef = useRef(createMemoryDetailCaches());
 
   const [view, setView] = useState<ViewMode>('time');
   const [query, setQuery] = useState('');
@@ -113,6 +126,28 @@ export function MemoryScreen() {
     }
   }, [view]);
 
+  useEffect(() => {
+    const q = query.trim();
+    const gen = ++searchGenRef.current;
+    setSearchResults([]);
+    setSearchResultQuery('');
+
+    if (!q) return;
+
+    const timer = window.setTimeout(() => {
+      const requestQuery = q;
+      const requestGen = gen;
+      markMemoryPerf('memory_search_start');
+      searchMemoryEntries(requestQuery, 4).then((results) => {
+        if (!canCommitSearchResults(requestGen, searchGenRef.current, requestQuery, query)) return;
+        markMemoryPerf('memory_search_ready');
+        setSearchResults(results);
+        setSearchResultQuery(requestQuery);
+      });
+    }, MEMORY_SEARCH_DEBOUNCE_MS);
+    return () => window.clearTimeout(timer);
+  }, [query]);
+
   if (!library) {
     return (
       <ScreenLayout>
@@ -126,14 +161,14 @@ export function MemoryScreen() {
 
   const whoChips = chips.filter((c) => c.type === 'who');
   const tagChips = chips.filter((c) => c.type === 'tag');
-  const whoOk = (m: MemoryEntry) => whoChips.every((c) => m.who === c.value);
-  const tagOk = (m: MemoryEntry) => tagChips.every((c) => m.tags.includes(c.value));
-  const stateOk = (m: MemoryEntry) => fState === 'all' || memoryState(m.weight) === fState;
-  const topicOk = (m: MemoryEntry) => fTopic === 'all' || m.topics.includes(fTopic);
-  const facetScope = (m: MemoryEntry) => stateOk(m) && topicOk(m) && whoOk(m);
+  const whoOk = (m: MemoryIndexEntry) => whoChips.every((c) => m.who === c.value);
+  const tagOk = (m: MemoryIndexEntry) => tagChips.every((c) => m.tags.includes(c.value));
+  const stateOk = (m: MemoryIndexEntry) => fState === 'all' || memoryState(m.weight) === fState;
+  const topicOk = (m: MemoryIndexEntry) => fTopic === 'all' || m.topics.includes(fTopic);
+  const facetScope = (m: MemoryIndexEntry) => stateOk(m) && topicOk(m) && whoOk(m);
   const filtered = entries.filter((m) => facetScope(m) && tagOk(m));
-  const stateCountOk = (m: MemoryEntry) => topicOk(m) && whoOk(m) && tagOk(m);
-  const topicCountOk = (m: MemoryEntry) => stateOk(m) && whoOk(m) && tagOk(m);
+  const stateCountOk = (m: MemoryIndexEntry) => topicOk(m) && whoOk(m) && tagOk(m);
+  const topicCountOk = (m: MemoryIndexEntry) => stateOk(m) && whoOk(m) && tagOk(m);
 
   function pushFrame(frame: DrawerFrame) {
     setStack((s) => [...s, frame]);
@@ -182,10 +217,14 @@ export function MemoryScreen() {
       const i = t.toLowerCase().indexOf(ql);
       return i < 0 ? { pre: t, hit: '', post: '' } : { pre: t.slice(0, i), hit: t.slice(i, i + q.length), post: t.slice(i + q.length) };
     };
-    const memHits: Suggest[] = entries
-      .filter((m) => (m.summaryTitle + m.content + m.tags.join('') + m.who).toLowerCase().includes(ql))
-      .slice(0, 4)
-      .map((m) => ({ icon: '●', iconColor: '#D9C6C0', meta: formatDateDot(m.date), pick: () => pushFrame({ type: 'mem', id: m.id }), ...highlight(m.summaryTitle) }));
+    const activeSearchResults = searchResultQuery === q ? searchResults : [];
+    const memHits: Suggest[] = activeSearchResults.map((m) => ({
+      icon: '●',
+      iconColor: '#D9C6C0',
+      meta: formatDateDot(m.date),
+      pick: () => pushFrame({ type: 'mem', id: m.id }),
+      ...highlight(m.summaryTitle),
+    }));
     const topicHits: Suggest[] = topics
       .filter((t) => (t.name + t.desc).toLowerCase().includes(ql))
       .slice(0, 3)
@@ -281,7 +320,7 @@ export function MemoryScreen() {
 
   // ── 月相（时间线） ──
   const sortedFiltered = [...filtered].sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0));
-  const dayGroups = new Map<string, MemoryEntry[]>();
+  const dayGroups = new Map<string, MemoryIndexEntry[]>();
   sortedFiltered.forEach((m) => {
     if (!dayGroups.has(m.date)) dayGroups.set(m.date, []);
     dayGroups.get(m.date)!.push(m);
@@ -333,7 +372,7 @@ export function MemoryScreen() {
         time: m.time,
         title: m.summaryTitle ?? m.title,
         titleColor: titleColor(m.weight),
-        preview: (m.content || '').replace(/\s+/g, ' ').trim(),
+        preview: m.preview,
         pick: () => pushFrame({ type: 'mem', id: m.id }),
       })),
       pick: () => pushFrame({ type: 'day', date }),
@@ -382,7 +421,7 @@ export function MemoryScreen() {
   const replayYearLabel = replayActive ? new Date(replayTs).getFullYear().toString() : '现在';
   const yearsAvailable = [...new Set(filtered.map((m) => m.date.slice(0, 4)))].sort();
 
-  function isObserved(m: MemoryEntry): boolean {
+  function isObserved(m: MemoryIndexEntry): boolean {
     if (observeMode === 'weight') return m.weight >= 4;
     if (observeMode === 'topic') return observeValue ? m.topics.includes(observeValue) : true;
     if (observeMode === 'who') return observeValue ? m.who === observeValue : true;
@@ -1020,7 +1059,7 @@ export function MemoryScreen() {
                     <MoonIcon info={moonInfo(m.weight)} />
                   </div>
                   <div style={{ borderLeft: '2px solid #D6A5A1', background: '#FBF4F1', borderRadius: '0 10px 10px 0', padding: '10px 12px', fontSize: 13, lineHeight: 1.9, color: '#6B5A55', marginTop: 10 }}>
-                    {m.content}
+                    {m.excerpt}
                   </div>
                   <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 10 }}>
                     {m.tags.map((tag) => {
@@ -1108,7 +1147,7 @@ export function MemoryScreen() {
                     maskImage: 'linear-gradient(to right, #000 75%, transparent 100%)',
                   }}
                 >
-                  {(m.content || '').replace(/\s+/g, ' ').trim()}
+                  {m.excerpt}
                 </div>
               </div>
             </div>
@@ -1148,130 +1187,6 @@ export function MemoryScreen() {
                   </div>
                 );
               })}
-            </div>
-          </>
-        )}
-      </>
-    );
-  }
-
-  function renderMemDetail(id: number) {
-    const m = entries.find((x) => x.id === id);
-    if (!m) return null;
-    const same = entries.filter((x) => x.date === m.date && x.id !== m.id).sort((a, b) => (a.time < b.time ? -1 : 1));
-    const links = m.links.map((lid) => entries.find((x) => x.id === lid)).filter((x): x is MemoryEntry => Boolean(x));
-    return (
-      <>
-        <div style={{ fontSize: 21, fontWeight: 600, lineHeight: 1.6 }}>{m.summaryTitle ?? m.title}</div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 10, flexWrap: 'wrap' }}>
-          <span style={{ fontFamily: "'Bodoni Moda',serif", fontSize: 12, color: '#8C7B76', letterSpacing: 1 }}>
-            {formatDateDot(m.date)} · {weekdayCN(m.date)} · {m.time}
-          </span>
-          <span style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
-            <span style={{ width: 7, height: 7, borderRadius: '50%', background: m.who === '费佳' ? '#8A7AB5' : '#D9A441' }} />
-            <span style={{ fontSize: 12, color: '#8C7B76' }}>{m.who}</span>
-          </span>
-          <span style={{ display: 'flex', alignItems: 'center', gap: 6, marginLeft: 'auto' }}>
-            <MoonIcon info={moonInfo(m.weight)} />
-            <span style={{ display: 'flex', gap: 3 }}>
-              {[1, 2, 3, 4, 5].map((i) => (
-                <span key={i} style={{ width: 11, height: 6, borderRadius: 3, background: i <= m.weight ? '#B76E79' : '#F0E2DD' }} />
-              ))}
-            </span>
-            <span style={{ fontFamily: "'Bodoni Moda',serif", fontSize: 12, color: '#8C7B76' }}>{m.weight}</span>
-          </span>
-        </div>
-        <SectionDivider label="正文" />
-        <div style={{ fontSize: 14, lineHeight: 2, color: '#5E524E', marginTop: 10 }}>{m.content}</div>
-        <SectionDivider label="标签" />
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 10 }}>
-          {m.tags.map((tag) => {
-            const col = tagColor(tag);
-            return (
-              <span key={tag} style={{ fontSize: 11, borderRadius: 10, padding: '4px 10px', background: col.bg, color: col.color, letterSpacing: 1 }}>
-                #{tag}
-              </span>
-            );
-          })}
-        </div>
-        <SectionDivider label="所属主题" />
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 10 }}>
-          {m.topics.map((k) => {
-            const t = topicByKey.get(k);
-            if (!t) return null;
-            return (
-              <span
-                key={k}
-                onClick={() => pushFrame({ type: 'topic', key: k })}
-                style={{ cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 6, background: '#FFFFFF', borderRadius: 999, padding: '6px 14px', boxShadow: '0 4px 12px rgba(183,110,121,0.08)', fontSize: 13 }}
-              >
-                <span>{t.emoji}</span>
-                <span>{t.name}</span>
-                <span style={{ color: '#C4B4AF' }}>›</span>
-              </span>
-            );
-          })}
-        </div>
-        {same.length > 0 && (
-          <>
-            <SectionDivider label={`同日其他记忆 · ${same.length}`} marginTop={22} />
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginTop: 10 }}>
-              {same.map((sm) => (
-                <div key={sm.id} onClick={() => pushFrame({ type: 'mem', id: sm.id })} className="card-hover" style={{ cursor: 'pointer', background: '#FFFFFF', borderRadius: 14, boxShadow: '0 6px 18px rgba(183,110,121,0.07)', padding: 12 }}>
-                  <div style={{ fontFamily: "'Bodoni Moda',serif", fontSize: 10, color: '#A99590' }}>{sm.time}</div>
-                  <div
-                    style={{
-                      fontSize: 13,
-                      fontWeight: 600,
-                      color: titleColor(sm.weight),
-                      marginTop: 4,
-                      lineHeight: 1.5,
-                      display: '-webkit-box',
-                      WebkitLineClamp: 1,
-                      WebkitBoxOrient: 'vertical',
-                      overflow: 'hidden',
-                    }}
-                  >
-                    {sm.summaryTitle}
-                  </div>
-                  <div style={{ fontSize: 11, color: '#A99590', marginTop: 4, lineHeight: 1.6, display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>
-                    {sm.content}
-                  </div>
-                </div>
-              ))}
-            </div>
-          </>
-        )}
-        {links.length > 0 && (
-          <>
-            <SectionDivider label="可能关联 · 语义相似" marginTop={22} />
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginTop: 10 }}>
-              {links.map((lk, i) => (
-                <div key={lk.id} onClick={() => pushFrame({ type: 'mem', id: lk.id })} className="card-hover" style={{ cursor: 'pointer', background: '#FAF2EF', borderRadius: 14, padding: 12 }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', fontFamily: "'Bodoni Moda',serif", fontSize: 10, color: '#A99590' }}>
-                    <span>{formatDateDot(lk.date)}</span>
-                    <span style={{ color: '#8A7AB5' }}>{92 - i * 7}%</span>
-                  </div>
-                  <div
-                    style={{
-                      fontSize: 13,
-                      fontWeight: 600,
-                      color: '#8A7AB5',
-                      marginTop: 4,
-                      lineHeight: 1.5,
-                      display: '-webkit-box',
-                      WebkitLineClamp: 1,
-                      WebkitBoxOrient: 'vertical',
-                      overflow: 'hidden',
-                    }}
-                  >
-                    {lk.summaryTitle}
-                  </div>
-                  <div style={{ fontSize: 11, color: '#A99590', marginTop: 4, lineHeight: 1.6, display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>
-                    {lk.content}
-                  </div>
-                </div>
-              ))}
             </div>
           </>
         )}
@@ -1327,7 +1242,16 @@ export function MemoryScreen() {
           <div style={{ flex: 1, overflowY: 'auto', padding: '4px 22px 34px' }}>
             {drawerFrame.type === 'day' && renderDayDetail(drawerFrame.date)}
             {drawerFrame.type === 'topic' && renderTopicDetail(drawerFrame.key)}
-            {drawerFrame.type === 'mem' && renderMemDetail(drawerFrame.id)}
+            {drawerFrame.type === 'mem' && (
+              <MemDetailPanel
+                key={drawerFrame.id}
+                id={drawerFrame.id}
+                entries={entries}
+                topicByKey={topicByKey}
+                pushFrame={pushFrame}
+                detailCaches={detailCachesRef.current}
+              />
+            )}
           </div>
         </div>
       </>
@@ -1568,5 +1492,144 @@ function SectionDivider({ label, marginTop = 20 }: { label: string; marginTop?: 
       <span style={{ fontFamily: "'Bodoni Moda',serif", fontSize: 11, letterSpacing: 3, color: '#B9A8A2', flexShrink: 0 }}>{label}</span>
       <span style={{ flex: 1, height: 1, background: '#F0E6E2' }} />
     </div>
+  );
+}
+
+function MemDetailPanel({
+  id,
+  entries,
+  topicByKey,
+  pushFrame,
+  detailCaches,
+}: {
+  id: number;
+  entries: MemoryIndexEntry[];
+  topicByKey: Map<string, MemoryTopic>;
+  pushFrame: (frame: DrawerFrame) => void;
+  detailCaches: MemoryDetailCaches;
+}) {
+  const m = entries.find((x) => x.id === id);
+  const { content, loading } = useMemoryEntryContent(id, detailCaches);
+  if (!m) return null;
+  const same = entries.filter((x) => x.date === m.date && x.id !== m.id).sort((a, b) => (a.time < b.time ? -1 : 1));
+  const links = m.links.map((lid) => entries.find((x) => x.id === lid)).filter((x): x is MemoryIndexEntry => Boolean(x));
+  return (
+    <>
+      <div style={{ fontSize: 21, fontWeight: 600, lineHeight: 1.6 }}>{m.summaryTitle ?? m.title}</div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 10, flexWrap: 'wrap' }}>
+        <span style={{ fontFamily: "'Bodoni Moda',serif", fontSize: 12, color: '#8C7B76', letterSpacing: 1 }}>
+          {formatDateDot(m.date)} · {weekdayCN(m.date)} · {m.time}
+        </span>
+        <span style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+          <span style={{ width: 7, height: 7, borderRadius: '50%', background: m.who === '费佳' ? '#8A7AB5' : '#D9A441' }} />
+          <span style={{ fontSize: 12, color: '#8C7B76' }}>{m.who}</span>
+        </span>
+        <span style={{ display: 'flex', alignItems: 'center', gap: 6, marginLeft: 'auto' }}>
+          <MoonIcon info={moonInfo(m.weight)} />
+          <span style={{ display: 'flex', gap: 3 }}>
+            {[1, 2, 3, 4, 5].map((i) => (
+              <span key={i} style={{ width: 11, height: 6, borderRadius: 3, background: i <= m.weight ? '#B76E79' : '#F0E2DD' }} />
+            ))}
+          </span>
+          <span style={{ fontFamily: "'Bodoni Moda',serif", fontSize: 12, color: '#8C7B76' }}>{m.weight}</span>
+        </span>
+      </div>
+      <SectionDivider label="正文" />
+      <div style={{ fontSize: 14, lineHeight: 2, color: '#5E524E', marginTop: 10 }}>
+        {loading ? '正文读取中…' : content ?? ''}
+      </div>
+      <SectionDivider label="标签" />
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 10 }}>
+        {m.tags.map((tag) => {
+          const col = tagColor(tag);
+          return (
+            <span key={tag} style={{ fontSize: 11, borderRadius: 10, padding: '4px 10px', background: col.bg, color: col.color, letterSpacing: 1 }}>
+              #{tag}
+            </span>
+          );
+        })}
+      </div>
+      <SectionDivider label="所属主题" />
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 10 }}>
+        {m.topics.map((k) => {
+          const t = topicByKey.get(k);
+          if (!t) return null;
+          return (
+            <span
+              key={k}
+              onClick={() => pushFrame({ type: 'topic', key: k })}
+              style={{ cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 6, background: '#FFFFFF', borderRadius: 999, padding: '6px 14px', boxShadow: '0 4px 12px rgba(183,110,121,0.08)', fontSize: 13 }}
+            >
+              <span>{t.emoji}</span>
+              <span>{t.name}</span>
+              <span style={{ color: '#C4B4AF' }}>›</span>
+            </span>
+          );
+        })}
+      </div>
+      {same.length > 0 && (
+        <>
+          <SectionDivider label={`同日其他记忆 · ${same.length}`} marginTop={22} />
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginTop: 10 }}>
+            {same.map((sm) => (
+              <div key={sm.id} onClick={() => pushFrame({ type: 'mem', id: sm.id })} className="card-hover" style={{ cursor: 'pointer', background: '#FFFFFF', borderRadius: 14, boxShadow: '0 6px 18px rgba(183,110,121,0.07)', padding: 12 }}>
+                <div style={{ fontFamily: "'Bodoni Moda',serif", fontSize: 10, color: '#A99590' }}>{sm.time}</div>
+                <div
+                  style={{
+                    fontSize: 13,
+                    fontWeight: 600,
+                    color: titleColor(sm.weight),
+                    marginTop: 4,
+                    lineHeight: 1.5,
+                    display: '-webkit-box',
+                    WebkitLineClamp: 1,
+                    WebkitBoxOrient: 'vertical',
+                    overflow: 'hidden',
+                  }}
+                >
+                  {sm.summaryTitle}
+                </div>
+                <div style={{ fontSize: 11, color: '#A99590', marginTop: 4, lineHeight: 1.6, display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>
+                  {sm.excerpt}
+                </div>
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+      {links.length > 0 && (
+        <>
+          <SectionDivider label="可能关联 · 语义相似" marginTop={22} />
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginTop: 10 }}>
+            {links.map((lk, i) => (
+              <div key={lk.id} onClick={() => pushFrame({ type: 'mem', id: lk.id })} className="card-hover" style={{ cursor: 'pointer', background: '#FAF2EF', borderRadius: 14, padding: 12 }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', fontFamily: "'Bodoni Moda',serif", fontSize: 10, color: '#A99590' }}>
+                  <span>{formatDateDot(lk.date)}</span>
+                  <span style={{ color: '#8A7AB5' }}>{92 - i * 7}%</span>
+                </div>
+                <div
+                  style={{
+                    fontSize: 13,
+                    fontWeight: 600,
+                    color: '#8A7AB5',
+                    marginTop: 4,
+                    lineHeight: 1.5,
+                    display: '-webkit-box',
+                    WebkitLineClamp: 1,
+                    WebkitBoxOrient: 'vertical',
+                    overflow: 'hidden',
+                  }}
+                >
+                  {lk.summaryTitle}
+                </div>
+                <div style={{ fontSize: 11, color: '#A99590', marginTop: 4, lineHeight: 1.6, display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>
+                  {lk.excerpt}
+                </div>
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+    </>
   );
 }

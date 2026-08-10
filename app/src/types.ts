@@ -231,6 +231,44 @@ export interface MemoryEntry {
   links: number[];
 }
 
+/** Index row for cold-start — no full `content`. */
+export interface MemoryIndexEntry {
+  id: number;
+  date: string;
+  time: string;
+  weight: MemoryWeight;
+  title: string;
+  summaryTitle: string;
+  preview: string;
+  excerpt: string;
+  who: string;
+  topics: string[];
+  tags: string[];
+  links: number[];
+}
+
+export interface MemoryLibraryIndex {
+  version: number;
+  topics: MemoryTopic[];
+  entries: MemoryIndexEntry[];
+}
+
+export interface MemorySearchResult {
+  id: number;
+  summaryTitle: string;
+  preview: string;
+  date: string;
+  who: string;
+  tags: string[];
+  topics: string[];
+  weight: MemoryWeight;
+}
+
+export interface MemoryEntryDetail {
+  id: number;
+  content: string;
+}
+
 export interface MemoryLibrary {
   topics: MemoryTopic[];
   entries: MemoryEntry[];
