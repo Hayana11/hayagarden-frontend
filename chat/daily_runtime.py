@@ -1156,7 +1156,12 @@ def prepare_daily_turn(
         )
 
         if resident is not None:
-            _close_stale_local_resident(resident, expected_key=resident_key)
+            # Capacity Swap reprepare is a known brief handoff state: the live
+            # process may already be target gen N+1 while LocalResidentBinding
+            # is still source gen N. Do not apply the ordinary stale-resident
+            # kill here — target binding is committed only after Registry publish.
+            if not _capacity_swap_reprepare:
+                _close_stale_local_resident(resident, expected_key=resident_key)
 
         db_cursor = dc.get_resident_history_cursor(
             context_id, resident_generation, db_path=db_path,
@@ -1504,10 +1509,12 @@ def install_capacity_swap_into_live_resident(
          relationship dedupe cannot leak into the new generation
       3) copy staged tool-surface after reset
 
-    Returns ``{old_proc, old_attrs}`` for deferred close / pre-flush rollback.
+    Returns ``{old_proc, old_attrs, old_binding}`` for deferred close /
+    pre-flush rollback (process + LocalResidentBinding restored together).
     """
     old_attrs = _snapshot_capacity_swap_live_resident(live_resident)
     old_proc = old_attrs.get('_proc', getattr(live_resident, '_proc', None))
+    old_binding = get_local_binding()
 
     for attr in _CAPACITY_SWAP_PROCESS_IDENTITY:
         if hasattr(staged_resident, attr) and hasattr(live_resident, attr):
@@ -1575,7 +1582,11 @@ def install_capacity_swap_into_live_resident(
         staged_resident._proc = None
     except Exception:
         pass
-    return {'old_proc': old_proc, 'old_attrs': old_attrs}
+    return {
+        'old_proc': old_proc,
+        'old_attrs': old_attrs,
+        'old_binding': old_binding,
+    }
 
 
 def rollback_capacity_swap_install(
@@ -1583,7 +1594,7 @@ def rollback_capacity_swap_install(
     live_resident: Any,
     install_state: Optional[dict[str, Any]],
 ) -> None:
-    """Restore pre-install live resident and kill the staged/new process."""
+    """Restore pre-install live resident + binding; kill the staged/new process."""
     if not install_state:
         return
     new_proc = getattr(live_resident, '_proc', None)
@@ -1605,6 +1616,10 @@ def rollback_capacity_swap_install(
                 new_proc.kill()
         except Exception:
             pass
+    # Restore LocalResidentBinding with the old resident so we never leave
+    # gen1 process paired with a gen2 binding (or the reverse) after rollback.
+    if 'old_binding' in install_state:
+        set_local_binding(install_state.get('old_binding'))
 
 
 def close_deferred_capacity_swap_old_proc(old_proc: Any) -> None:
@@ -2194,6 +2209,18 @@ def _attempt_capacity_swap_before_stdin(
             cwd=cwd,
             claude_home=claude_home,
         )
+        # Commit target LocalResidentBinding before returning ok so the recursive
+        # door never sees gen1 binding against a gen2 plan/process.
+        set_local_binding(LocalResidentBinding(
+            resident_key=str(plan.resident_key),
+            context_id=int(plan.context_id),
+            context_epoch=int(plan.context_epoch),
+            resident_generation=int(plan.resident_generation),
+            bound_cursor_message_id=plan.cursor_before,
+            process_generation=int(getattr(resident, 'generation', 0) or 0),
+            tool_profile=str(plan.tool_profile),
+            claude_session_id=str(getattr(resident, 'session_id', None) or '') or None,
+        ))
     except Exception as exc:
         logger.info(
             'capacity swap post-install failed code=%s; rolling back to old resident',

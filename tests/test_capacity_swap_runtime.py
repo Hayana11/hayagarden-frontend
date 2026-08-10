@@ -372,6 +372,125 @@ class CapacitySwapRuntimeContractTests(unittest.TestCase):
             CAPACITY_BOUNDARY_REPRESENTATION,
         )
 
+    def test_real_seam_binding_survives_reprepare_to_recursive_door(self):
+        """LIVE_FAIL regression: gen1 binding must not kill staged gen2 before send.
+
+        Real Runtime seam — mock ONLY run_capacity_swap_handoff. Do not mock
+        reprepare_after_capacity_swap / prepare_daily_turn / stale close / door.
+        """
+        uid = _insert(self.db, 'hayana', 'real-seam-bind', '2026-07-27 10:00:00')
+        plan = _prepare(self.db, uid)
+        src_ctx = int(plan.context_id)
+        src_epoch = int(plan.context_epoch)
+        src_gen = int(plan.resident_generation)
+        register_context_claude_session(
+            context_id=src_ctx,
+            context_epoch=src_epoch,
+            resident_generation=src_gen,
+            chat_id=plan.chat_id,
+            claude_session_id='sid-seam-old',
+            cwd=self.tmp,
+            source='daily_runtime',
+            scan_offset=10,
+            process_generation=1,
+            db_path=self.db,
+        )
+        # Source gen1 LocalResidentBinding — the LIVE_FAIL precondition.
+        dr.set_local_binding(dr.LocalResidentBinding(
+            resident_key=plan.resident_key,
+            context_id=src_ctx,
+            context_epoch=src_epoch,
+            resident_generation=src_gen,
+            bound_cursor_message_id=plan.cursor_before,
+            process_generation=1,
+            tool_profile=plan.tool_profile,
+            claude_session_id='sid-seam-old',
+        ))
+        self.assertEqual(dr.get_local_binding().resident_generation, src_gen)
+
+        class _Proc:
+            def __init__(self):
+                self.alive = True
+                self.killed = False
+
+            def poll(self):
+                return None if self.alive else 0
+
+            def kill(self):
+                self.killed = True
+                self.alive = False
+
+        old_proc = _Proc()
+        new_proc = _Proc()
+        resident = _DoorResident('turn_limit', session_id='sid-seam-old')
+        resident.cwd = self.tmp
+        resident._proc = old_proc
+        resident.generation = 1
+
+        new_sid = '77777777-7777-7777-7777-777777777777'
+        staged = _DoorResident(None, session_id=new_sid)
+        staged.generation = 2
+        staged._proc = new_proc
+        cand = _candidate(
+            source_context_id=src_ctx,
+            source_context_epoch=src_epoch,
+            source_resident_generation=src_gen,
+            target_resident_generation=src_gen + 1,
+            candidate_session_id=new_sid,
+            trigger_reason='turn_limit',
+        )
+        jsonl_path = session_jsonl_path(self.tmp, new_sid)
+        assert jsonl_path is not None
+        Path(jsonl_path).parent.mkdir(parents=True, exist_ok=True)
+        Path(jsonl_path).write_text(cand.serialized_jsonl, encoding='utf-8')
+        handoff = CapacitySwapRuntimeResult(
+            ok=True,
+            candidate=cand,
+            source_context_id=src_ctx,
+            source_context_epoch=src_epoch,
+            source_resident_generation=src_gen,
+            target_resident_generation=src_gen + 1,
+            candidate_session_id=new_sid,
+            jsonl_path=str(jsonl_path),
+            jsonl_sha256='deadbeef',
+            effective_system=with_capacity_boundary_suffix('STATIC_PERSONA'),
+        )
+        setattr(handoff, 'staged_resident', staged)
+
+        with mock.patch.object(config_store, 'get_bool', return_value=True), \
+             mock.patch('chat.daily_history._build_state_text', return_value=('', 'none', {})), \
+             mock.patch.object(dr, 'run_capacity_swap_handoff', return_value=handoff):
+            events = list(dr.stream_daily_resident_turn(
+                plan, resident=resident, env={}, static_system='STATIC_PERSONA',
+            ))
+
+        self.assertTrue(any(e[0] == 'done' for e in events))
+        self.assertEqual(resident.send_count, 1)
+        # New staged process must survive until CURRENT user send (not stale-killed).
+        self.assertFalse(new_proc.killed)
+        self.assertTrue(bool(getattr(resident, '_alive', True)))
+        self.assertEqual(int(plan.resident_generation), src_gen + 1)
+        self.assertEqual(int(plan.context_id), src_ctx)
+        self.assertEqual(int(plan.context_epoch), src_epoch)
+
+        binding = dr.get_local_binding()
+        self.assertIsNotNone(binding)
+        self.assertEqual(int(binding.resident_generation), src_gen + 1)
+        self.assertEqual(binding.resident_key, plan.resident_key)
+        self.assertEqual(binding.claude_session_id, new_sid)
+        self.assertEqual(int(binding.process_generation), int(resident.generation))
+        self.assertEqual(int(resident.generation), 2)
+        self.assertEqual(resident.session_id, new_sid)
+
+        reg = get_context_claude_session(src_ctx, src_gen + 1, db_path=self.db)
+        self.assertIsNotNone(reg)
+        self.assertEqual(reg['source'], CAPACITY_SWAP_REGISTRY_SOURCE)
+        self.assertNotEqual(
+            plan.manifest.get('error_code'),
+            'registered_session_generation_mismatch',
+        )
+        self.assertNotEqual(plan.manifest.get('error_code'), 'process_dead')
+
     # ----- Test C: boundary persistence -----
 
     def test_c_suffix_persistent_and_absent_from_jsonl(self):
@@ -809,6 +928,18 @@ class CapacitySwapRuntimeContractTests(unittest.TestCase):
             process_generation=1,
             db_path=self.db,
         )
+        # Source gen1 binding — rollback must restore this with old resident.
+        source_binding = dr.LocalResidentBinding(
+            resident_key=plan.resident_key,
+            context_id=src_ctx,
+            context_epoch=src_epoch,
+            resident_generation=src_gen,
+            bound_cursor_message_id=plan.cursor_before,
+            process_generation=1,
+            tool_profile=plan.tool_profile,
+            claude_session_id='sid-flush-old',
+        )
+        dr.set_local_binding(source_binding)
 
         class _Proc:
             def __init__(self):
@@ -827,11 +958,13 @@ class CapacitySwapRuntimeContractTests(unittest.TestCase):
                 super().__init__(*a, **k)
                 self.fail_preflush_once = True
                 self.attempt_count = 0
+                self.binding_at_first_send = None
 
             def send_turn(self, content, commit_meta=None, on_stdin_flushed=None):
                 self.attempt_count += 1
                 if self.fail_preflush_once:
                     self.fail_preflush_once = False
+                    self.binding_at_first_send = dr.get_local_binding()
                     proc = getattr(self, '_proc', None)
                     if proc is not None:
                         proc.kill()
@@ -878,9 +1011,22 @@ class CapacitySwapRuntimeContractTests(unittest.TestCase):
         )
         setattr(handoff, 'staged_resident', staged)
 
+        rollback_obs: dict = {}
+        _orig_rollback = dr._rollback_capacity_swap_if_unflushed
+
+        def _observe_rollback(p, *, resident):
+            rollback_obs['binding_before'] = dr.get_local_binding()
+            rollback_obs['session_before'] = getattr(resident, 'session_id', None)
+            out = _orig_rollback(p, resident=resident)
+            rollback_obs['binding_after'] = dr.get_local_binding()
+            rollback_obs['session_after'] = getattr(resident, 'session_id', None)
+            rollback_obs['proc_after'] = getattr(resident, '_proc', None)
+            return out
+
         with mock.patch.object(config_store, 'get_bool', return_value=True), \
              mock.patch('chat.daily_history._build_state_text', return_value=('', 'none', {})), \
-             mock.patch.object(dr, 'run_capacity_swap_handoff', return_value=handoff):
+             mock.patch.object(dr, 'run_capacity_swap_handoff', return_value=handoff), \
+             mock.patch.object(dr, '_rollback_capacity_swap_if_unflushed', side_effect=_observe_rollback):
             events = list(dr.stream_daily_resident_turn(
                 plan, resident=resident, env={}, static_system='STATIC_PERSONA',
             ))
@@ -891,6 +1037,25 @@ class CapacitySwapRuntimeContractTests(unittest.TestCase):
         self.assertTrue(plan.manifest.get('capacity_swap_pre_flush_rollback'))
         self.assertTrue(plan.manifest.get('capacity_swap_pre_flush_cold_fallback'))
         self.assertTrue(new_proc.killed)
+
+        # CapSwap had advanced binding to gen2 before CURRENT user pre-flush fail.
+        self.assertIsNotNone(resident.binding_at_first_send)
+        self.assertEqual(
+            int(resident.binding_at_first_send.resident_generation), src_gen + 1,
+        )
+        self.assertEqual(resident.binding_at_first_send.claude_session_id, new_sid)
+        # Rollback restores old resident + old gen1 binding together.
+        self.assertTrue(rollback_obs)
+        before_b = rollback_obs['binding_before']
+        after_b = rollback_obs['binding_after']
+        self.assertIsNotNone(before_b)
+        self.assertEqual(int(before_b.resident_generation), src_gen + 1)
+        self.assertIsNotNone(after_b)
+        self.assertEqual(int(after_b.resident_generation), src_gen)
+        self.assertEqual(after_b.claude_session_id, 'sid-flush-old')
+        self.assertEqual(after_b.resident_key, source_binding.resident_key)
+        self.assertEqual(rollback_obs['session_after'], 'sid-flush-old')
+        self.assertIs(rollback_obs['proc_after'], old_proc)
 
         # Identity: CapSwap target Registry may remain as history, but must not be current.
         cap_reg = get_context_claude_session(src_ctx, src_gen + 1, db_path=self.db)
