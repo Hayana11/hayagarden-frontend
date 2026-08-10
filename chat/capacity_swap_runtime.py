@@ -605,7 +605,10 @@ def publish_capacity_swap_candidate_jsonl(
     cwd: str,
     claude_home: Optional[str] = None,
 ) -> tuple[Path, str]:
-    """Atomic publish of candidate JSONL (reuse forge writer). Source never written."""
+    """Atomic publish of candidate JSONL with 0600 + allowed-root fence.
+
+    Source transcript is never written. Does not change Manual Forge defaults.
+    """
     events = [
         json.loads(line)
         for line in (candidate.serialized_jsonl or '').splitlines()
@@ -624,14 +627,52 @@ def publish_capacity_swap_candidate_jsonl(
             error_code='boundary_system_event_forbidden',
         )
 
+    home = Path(claude_home) if claude_home else (Path.home() / '.claude')
+    try:
+        from tools.claude_forge_core import verify_work_root, verify_safe_output_path
+        allowed_root = verify_work_root(home)
+    except Exception as exc:
+        raise CapacitySwapRuntimeError(
+            f'capacity swap allowed root rejected: {exc}',
+            error_code='publish_path_fence_failed',
+        ) from exc
+
     out_path = Path(derive_transcript_path(
         cwd=cwd,
         claude_session_id=candidate.candidate_session_id,
-        claude_home=claude_home,
+        claude_home=str(home),
     ))
+    try:
+        verify_safe_output_path(out_path, allowed_root)
+    except Exception as exc:
+        raise CapacitySwapRuntimeError(
+            f'capacity swap output path rejected: {exc}',
+            error_code='publish_path_fence_failed',
+        ) from exc
+
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    digest = atomic_write_jsonl_fsync(out_path, events)
-    # Prefer tools.claude_forge_core.sha256_file when available.
+    try:
+        os.chmod(out_path.parent, 0o700)
+    except OSError:
+        pass
+
+    digest = atomic_write_jsonl_fsync(
+        out_path,
+        events,
+        mode=0o600,
+        allowed_root=allowed_root,
+    )
+    mode = out_path.stat().st_mode & 0o777
+    if mode & ~0o600:
+        try:
+            out_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise CapacitySwapRuntimeError(
+            f'capacity swap jsonl mode {oct(mode)} violates 0600',
+            error_code='publish_mode_not_0600',
+        )
+
     try:
         from tools.claude_forge_core import sha256_file as _sha
         file_sha = _sha(out_path)

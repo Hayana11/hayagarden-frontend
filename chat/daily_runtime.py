@@ -1352,50 +1352,65 @@ def reprepare_after_capacity_swap(
     model: str = '',
     cursor_watermark: Optional[int] = None,
 ) -> DailyTurnPlan:
-    """Same-context gen bump already done; re-claim lease without cold history replay."""
+    """Same-context gen bump already done; re-claim lease without cold history replay.
+
+    Cursor/owner seed is mandatory. Any seed failure fail-closes — callers must
+    treat this as Capacity Swap failure and fall back (last-good / cold). Never
+    continue into ``_capacity_swap_reprepare`` hot-like assembly without a seed.
+    """
     _release_lease(plan)
     # Seed cursor for the new generation so hot assembly does not replay forged rounds.
     watermark = cursor_watermark if cursor_watermark is not None else plan.cursor_before
     if watermark is None:
         # No prior cursor (rare): pin just before CURRENT user so hot assembly is legal.
         watermark = max(0, int(plan.user_message_id) - 1)
-    if watermark is not None:
+
+    refreshed = dc.get_daily_context_by_id(plan.context_id, db_path=plan.db_path) or {}
+    gen = int(refreshed.get('resident_generation') or 0)
+    if gen <= 0:
+        raise DailyRuntimeError(
+            'capacity swap cursor seed: resident_generation missing',
+            error_code='capacity_swap_cursor_seed_failed',
+        )
+    try:
+        dc.upsert_resident_owner(
+            plan.context_id,
+            gen,
+            worker_id=WORKER_ID,
+            resident_key=make_resident_key(
+                chat_id=plan.chat_id,
+                context_epoch=int(refreshed.get('context_epoch') or plan.context_epoch),
+                resident_generation=gen,
+            ),
+            bound_cursor_message_id=int(watermark),
+            process_generation=int(getattr(resident, 'generation', 0) or 0) if resident else None,
+            db_path=plan.db_path,
+        )
+        conn = dc._connect(plan.db_path)
         try:
-            refreshed = dc.get_daily_context_by_id(plan.context_id, db_path=plan.db_path) or {}
-            gen = int(refreshed.get('resident_generation') or 0)
-            if gen > 0:
-                dc.upsert_resident_owner(
-                    plan.context_id,
-                    gen,
-                    worker_id=WORKER_ID,
-                    resident_key=make_resident_key(
-                        chat_id=plan.chat_id,
-                        context_epoch=int(refreshed.get('context_epoch') or plan.context_epoch),
-                        resident_generation=gen,
-                    ),
-                    bound_cursor_message_id=int(watermark),
-                    process_generation=int(getattr(resident, 'generation', 0) or 0) if resident else None,
-                    db_path=plan.db_path,
-                )
-                conn = dc._connect(plan.db_path)
-                try:
-                    conn.execute(
-                        'INSERT INTO daily_resident_cursors '
-                        '(context_id, resident_generation, history_cursor_message_id) '
-                        'VALUES (?,?,?) '
-                        'ON CONFLICT(context_id, resident_generation) DO UPDATE SET '
-                        'history_cursor_message_id=excluded.history_cursor_message_id, '
-                        "updated_at=datetime('now','+8 hours')",
-                        (int(plan.context_id), gen, int(watermark)),
-                    )
-                    conn.commit()
-                except Exception:
-                    conn.rollback()
-                    raise
-                finally:
-                    conn.close()
+            conn.execute(
+                'INSERT INTO daily_resident_cursors '
+                '(context_id, resident_generation, history_cursor_message_id) '
+                'VALUES (?,?,?) '
+                'ON CONFLICT(context_id, resident_generation) DO UPDATE SET '
+                'history_cursor_message_id=excluded.history_cursor_message_id, '
+                "updated_at=datetime('now','+8 hours')",
+                (int(plan.context_id), gen, int(watermark)),
+            )
+            conn.commit()
         except Exception:
-            logger.exception('capacity swap cursor seed failed')
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+    except DailyRuntimeError:
+        raise
+    except Exception as exc:
+        logger.exception('capacity swap cursor seed failed')
+        raise DailyRuntimeError(
+            'capacity swap cursor seed failed',
+            error_code='capacity_swap_cursor_seed_failed',
+        ) from exc
 
     return prepare_daily_turn(
         user_message_id=plan.user_message_id,
@@ -1415,33 +1430,45 @@ def reprepare_after_capacity_swap(
     )
 
 
+_CAPACITY_SWAP_INSTALL_ATTRS = (
+    '_proc', '_system_text', '_session_id', '_cold', '_generation',
+    '_tool_profile', '_model_identity', '_history_rewrite_epoch',
+    '_pending_respawn_reason', '_tool_surface_snapshot',
+    '_resident_turn_count', '_last_round_context', '_max_round_context',
+    '_turns_since_respawn', '_last_used',
+)
+_CAPACITY_SWAP_INSTALL_PUBLIC = ('session_id', 'generation', 'tool_profile', 'cwd')
+
+
 def install_capacity_swap_into_live_resident(
     *,
     live_resident: Any,
     staged_resident: Any,
-) -> Any:
-    """Install staged process onto live holder; kill previous live process.
+) -> dict[str, Any]:
+    """Install staged process onto live holder WITHOUT killing the old process.
 
-    Returns the previous live ``_proc`` handle (if any) for optional deferred
-    close. Callers that need pre-flush rollback should defer killing old until
-    after stdin flush; this helper closes old immediately after transfer when
-    both share ResidentSession shape.
+    Returns install state for deferred close / rollback:
+    ``{old_proc, old_attrs}``. Caller must:
+    - on later failure before commit: ``rollback_capacity_swap_install``
+    - on success: keep ``old_proc`` until CURRENT user stdin flush, then
+      ``close_deferred_capacity_swap_old_proc``
     """
-    old_proc = getattr(live_resident, '_proc', None)
-    for attr in (
-        '_proc', '_system_text', '_session_id', '_cold', '_generation',
-        '_tool_profile', '_model_identity', '_history_rewrite_epoch',
-        '_pending_respawn_reason', '_tool_surface_snapshot',
-        '_resident_turn_count', '_last_round_context', '_max_round_context',
-        '_turns_since_respawn', '_last_used',
-    ):
+    old_attrs: dict[str, Any] = {}
+    for attr in _CAPACITY_SWAP_INSTALL_ATTRS + _CAPACITY_SWAP_INSTALL_PUBLIC:
+        if hasattr(live_resident, attr):
+            try:
+                old_attrs[attr] = getattr(live_resident, attr)
+            except Exception:
+                pass
+    old_proc = old_attrs.get('_proc', getattr(live_resident, '_proc', None))
+
+    for attr in _CAPACITY_SWAP_INSTALL_ATTRS:
         if hasattr(staged_resident, attr) and hasattr(live_resident, attr):
             try:
                 setattr(live_resident, attr, getattr(staged_resident, attr))
             except Exception:
                 pass
-    # Public mirrors used by fakes / tests
-    for attr in ('session_id', 'generation', 'tool_profile', 'cwd'):
+    for attr in _CAPACITY_SWAP_INSTALL_PUBLIC:
         if hasattr(staged_resident, attr):
             try:
                 setattr(live_resident, attr, getattr(staged_resident, attr))
@@ -1451,14 +1478,48 @@ def install_capacity_swap_into_live_resident(
         staged_resident._proc = None
     except Exception:
         pass
-    # Close superseded process if it is distinct.
-    if old_proc is not None and old_proc is not getattr(live_resident, '_proc', None):
+    return {'old_proc': old_proc, 'old_attrs': old_attrs}
+
+
+def rollback_capacity_swap_install(
+    *,
+    live_resident: Any,
+    install_state: Optional[dict[str, Any]],
+) -> None:
+    """Restore pre-install live resident and kill the staged/new process."""
+    if not install_state:
+        return
+    new_proc = getattr(live_resident, '_proc', None)
+    old_proc = install_state.get('old_proc')
+    old_attrs = dict(install_state.get('old_attrs') or {})
+    for attr, value in old_attrs.items():
         try:
-            if getattr(old_proc, 'poll', lambda: None)() is None:
-                old_proc.kill()
+            setattr(live_resident, attr, value)
         except Exception:
             pass
-    return live_resident
+    if old_proc is not None:
+        try:
+            live_resident._proc = old_proc
+        except Exception:
+            pass
+    if new_proc is not None and new_proc is not old_proc:
+        try:
+            if getattr(new_proc, 'poll', lambda: None)() is None:
+                new_proc.kill()
+        except Exception:
+            pass
+
+
+def close_deferred_capacity_swap_old_proc(old_proc: Any) -> None:
+    """Kill superseded last-good process after stdin flush (exactly-once locked)."""
+    if old_proc is None:
+        return
+    try:
+        poll = getattr(old_proc, 'poll', None)
+        if callable(poll) and poll() is None:
+            old_proc.kill()
+    except Exception:
+        pass
 
 
 def _default_capacity_swap_staged_hooks(live_resident: Any) -> CapacitySwapStagedHooks:
@@ -1927,8 +1988,9 @@ def _attempt_capacity_swap_before_stdin(
     """Run Capacity Swap handoff before CURRENT user stdin. Never sends the user.
 
     On success: bumps generation, registers source=capacity_swap, installs staged
-    into live resident, adopta capacity-swap reprepare plan (no cold history).
-    On failure: leaves old resident alive and returns ok=False for cold fallback.
+    into live resident (old proc deferred), adopts capacity-swap reprepare plan.
+    Old last-good process is NOT killed until CURRENT user stdin flush.
+    On failure after install: rollback live to old proc, then return ok=False.
     """
     if not is_capacity_swap_reason(trigger_reason):
         return {'ok': False, 'error_code': 'trigger_not_capacity'}
@@ -1958,6 +2020,17 @@ def _attempt_capacity_swap_before_stdin(
     source_epoch = int(plan.context_epoch)
     source_gen = int(plan.resident_generation)
     watermark = plan.cursor_before
+    install_state: Optional[dict[str, Any]] = None
+
+    def _fail_kill_staged(code: str, **extra: Any) -> dict[str, Any]:
+        try:
+            if hasattr(staged, '_kill'):
+                staged._kill(quiet=True)
+        except Exception:
+            pass
+        out = {'ok': False, 'error_code': code}
+        out.update(extra)
+        return out
 
     # Generation bump (same context_id / epoch).
     if is_epoch_token_current(plan):
@@ -1965,22 +2038,15 @@ def _attempt_capacity_swap_before_stdin(
     refreshed = dc.get_daily_context_by_id(plan.context_id, db_path=plan.db_path) or {}
     target_gen = int(refreshed.get('resident_generation') or 0)
     if target_gen != int(handoff.target_resident_generation):
-        # Fail closed — do not leave a half-committed identity.
-        try:
-            if hasattr(staged, '_kill'):
-                staged._kill(quiet=True)
-        except Exception:
-            pass
-        return {
-            'ok': False,
-            'error_code': 'generation_cas_mismatch',
-            'source_generation': source_gen,
-            'target_generation': target_gen,
-        }
+        return _fail_kill_staged(
+            'generation_cas_mismatch',
+            source_generation=source_gen,
+            target_generation=target_gen,
+        )
     if int(refreshed.get('id') or 0) != source_ctx:
-        return {'ok': False, 'error_code': 'context_id_drift'}
+        return _fail_kill_staged('context_id_drift')
     if int(refreshed.get('context_epoch') or 0) != source_epoch:
-        return {'ok': False, 'error_code': 'context_epoch_drift'}
+        return _fail_kill_staged('context_epoch_drift')
 
     cwd = str(getattr(resident, 'cwd', '') or plan.transcript_cwd or '')
     try:
@@ -1994,46 +2060,66 @@ def _attempt_capacity_swap_before_stdin(
         )
     except Exception as exc:
         logger.info('capacity swap registry failed: %s', type(exc).__name__)
-        try:
-            if hasattr(staged, '_kill'):
-                staged._kill(quiet=True)
-        except Exception:
-            pass
-        return {'ok': False, 'error_code': 'registry_register_failed', 'detail': str(exc)}
+        return _fail_kill_staged('registry_register_failed', detail=str(exc))
 
-    install_capacity_swap_into_live_resident(
+    # Transfer staged → live WITHOUT killing old last-good process.
+    install_state = install_capacity_swap_into_live_resident(
         live_resident=resident, staged_resident=staged,
     )
+    deferred_old = install_state.get('old_proc')
 
-    effective = str(handoff.effective_system or with_capacity_boundary_suffix(static_system))
-    replacement = reprepare_after_capacity_swap(
-        plan,
-        resident=resident,
-        static_system=effective,
-        static_system_sha256=_sha256_text(effective),
-        persona_sha256=plan.manifest.get('persona_sha256') or '',
-        provider=str(plan.manifest.get('provider') or 'claude_code'),
-        model=str(plan.manifest.get('model') or ''),
-        cursor_watermark=watermark,
-    )
-    _adopt_reprepared_plan_in_place(plan, replacement, resident=resident)
-    plan.manifest['capacity_swap'] = True
-    plan.manifest['capacity_swap_reason'] = trigger_reason
-    plan.manifest['capacity_swap_source_generation'] = source_gen
-    plan.manifest['capacity_boundary_representation'] = CAPACITY_BOUNDARY_REPRESENTATION
+    try:
+        effective = str(handoff.effective_system or with_capacity_boundary_suffix(static_system))
+        replacement = reprepare_after_capacity_swap(
+            plan,
+            resident=resident,
+            static_system=effective,
+            static_system_sha256=_sha256_text(effective),
+            persona_sha256=plan.manifest.get('persona_sha256') or '',
+            provider=str(plan.manifest.get('provider') or 'claude_code'),
+            model=str(plan.manifest.get('model') or ''),
+            cursor_watermark=watermark,
+        )
+        _adopt_reprepared_plan_in_place(plan, replacement, resident=resident)
+        plan.manifest['capacity_swap'] = True
+        plan.manifest['capacity_swap_reason'] = trigger_reason
+        plan.manifest['capacity_swap_source_generation'] = source_gen
+        plan.manifest['capacity_boundary_representation'] = CAPACITY_BOUNDARY_REPRESENTATION
 
-    # Identity freeze checks
-    if int(plan.context_id) != source_ctx or int(plan.context_epoch) != source_epoch:
-        return {'ok': False, 'error_code': 'identity_drift_after_reprepare'}
-    if int(plan.resident_generation) != target_gen:
-        return {'ok': False, 'error_code': 'generation_drift_after_reprepare'}
+        if int(plan.context_id) != source_ctx or int(plan.context_epoch) != source_epoch:
+            raise DailyRuntimeError(
+                'identity drift after capacity swap reprepare',
+                error_code='identity_drift_after_reprepare',
+            )
+        if int(plan.resident_generation) != target_gen:
+            raise DailyRuntimeError(
+                'generation drift after capacity swap reprepare',
+                error_code='generation_drift_after_reprepare',
+            )
+    except Exception as exc:
+        logger.info(
+            'capacity swap post-install failed code=%s; rolling back to old resident',
+            getattr(exc, 'error_code', type(exc).__name__),
+        )
+        rollback_capacity_swap_install(
+            live_resident=resident, install_state=install_state,
+        )
+        return {
+            'ok': False,
+            'error_code': str(getattr(exc, 'error_code', None) or 'capacity_swap_post_install_failed'),
+            'detail': str(exc),
+            'rolled_back_to_last_good': True,
+        }
 
+    # Success: keep old proc until CURRENT user stdin flush (exactly-once gate).
+    plan._capacity_swap_deferred_old_proc = deferred_old  # type: ignore[attr-defined]
     return {
         'ok': True,
         'effective_system': effective,
         'candidate_session_id': handoff.candidate_session_id,
         'target_generation': target_gen,
         'source_generation': source_gen,
+        'deferred_old_proc': deferred_old,
     }
 
 
@@ -2251,6 +2337,11 @@ def ensure_resident_and_stream(
 
         def _mark_stdin_flushed() -> None:
             plan._current_user_stdin_flushed = True  # type: ignore[attr-defined]
+            # Exactly-once locked: old last-good process may now be closed.
+            deferred = getattr(plan, '_capacity_swap_deferred_old_proc', None)
+            if deferred is not None:
+                close_deferred_capacity_swap_old_proc(deferred)
+                plan._capacity_swap_deferred_old_proc = None  # type: ignore[attr-defined]
 
         send_kwargs: dict[str, Any] = {'commit_meta': commit_meta}
         try:
@@ -2271,6 +2362,13 @@ def ensure_resident_and_stream(
                 raise DailyWindowToolFencePending()
             if evt == 'done':
                 _capture_transcript_end(plan, resident)
+                # Safety net if send_turn lacked on_stdin_flushed (test fakes).
+                if getattr(plan, '_capacity_swap_deferred_old_proc', None) is not None:
+                    if getattr(plan, '_current_user_stdin_flushed', False):
+                        close_deferred_capacity_swap_old_proc(
+                            getattr(plan, '_capacity_swap_deferred_old_proc', None),
+                        )
+                        plan._capacity_swap_deferred_old_proc = None  # type: ignore[attr-defined]
             yield evt, payload
 
         if heartbeat.stop():

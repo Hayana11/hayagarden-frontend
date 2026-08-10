@@ -507,6 +507,190 @@ class CapacitySwapRuntimeContractTests(unittest.TestCase):
             'daily_runtime',
         )
 
+    # ----- Narrow-fix regressions (Owner review blockers) -----
+
+    def test_cursor_seed_failure_fail_closed(self):
+        """Cursor/owner seed failure must not continue into hot-like reprepare."""
+        uid = _insert(self.db, 'hayana', 'seed-fail', '2026-07-27 10:00:00')
+        plan = _prepare(self.db, uid)
+        dc.respawn_daily_resident(plan.context_id, db_path=self.db)
+        with mock.patch.object(dc, 'upsert_resident_owner', side_effect=RuntimeError('boom')):
+            with self.assertRaises(dr.DailyRuntimeError) as ctx:
+                dr.reprepare_after_capacity_swap(
+                    plan,
+                    resident=_DoorResident(None),
+                    static_system='STATIC_PERSONA',
+                    cursor_watermark=0,
+                )
+        self.assertEqual(ctx.exception.error_code, 'capacity_swap_cursor_seed_failed')
+
+        # _attempt must roll back to old resident when post-install seed fails.
+        src_ctx = int(plan.context_id)
+        src_epoch = int(plan.context_epoch)
+        src_gen = int(plan.resident_generation)
+        # Reset gen for a clean attempt: use current after previous bump.
+        refreshed = dc.get_daily_context_by_id(plan.context_id, db_path=self.db) or {}
+        plan.resident_generation = int(refreshed['resident_generation'])
+        plan.epoch_token = dict(plan.epoch_token)
+        plan.epoch_token['resident_generation'] = plan.resident_generation
+        src_gen = int(plan.resident_generation)
+
+        register_context_claude_session(
+            context_id=src_ctx,
+            context_epoch=src_epoch,
+            resident_generation=src_gen,
+            chat_id=plan.chat_id,
+            claude_session_id='sid-old-seed',
+            cwd=self.tmp,
+            source='daily_runtime',
+            scan_offset=10,
+            process_generation=1,
+            db_path=self.db,
+        )
+
+        class _Proc:
+            def __init__(self):
+                self.alive = True
+                self.killed = False
+
+            def poll(self):
+                return None if self.alive else 0
+
+            def kill(self):
+                self.killed = True
+                self.alive = False
+
+        old_proc = _Proc()
+        new_proc = _Proc()
+        resident = _DoorResident('soft_context', session_id='sid-old-seed')
+        resident.cwd = self.tmp
+        resident._proc = old_proc
+
+        new_sid = '33333333-3333-3333-3333-333333333333'
+        staged = _DoorResident(None, session_id=new_sid)
+        staged.generation = 2
+        staged._proc = new_proc
+        cand = _candidate(
+            source_context_id=src_ctx,
+            source_context_epoch=src_epoch,
+            source_resident_generation=src_gen,
+            target_resident_generation=src_gen + 1,
+            candidate_session_id=new_sid,
+        )
+        jsonl_path = session_jsonl_path(self.tmp, new_sid)
+        assert jsonl_path is not None
+        Path(jsonl_path).parent.mkdir(parents=True, exist_ok=True)
+        Path(jsonl_path).write_text(cand.serialized_jsonl, encoding='utf-8')
+        handoff = CapacitySwapRuntimeResult(
+            ok=True,
+            candidate=cand,
+            source_context_id=src_ctx,
+            source_context_epoch=src_epoch,
+            source_resident_generation=src_gen,
+            target_resident_generation=src_gen + 1,
+            candidate_session_id=new_sid,
+            jsonl_path=str(jsonl_path),
+            jsonl_sha256='deadbeef',
+            effective_system=with_capacity_boundary_suffix('STATIC_PERSONA'),
+        )
+        setattr(handoff, 'staged_resident', staged)
+
+        with mock.patch.object(config_store, 'get_bool', return_value=True), \
+             mock.patch.object(dr, 'run_capacity_swap_handoff', return_value=handoff), \
+             mock.patch.object(dc, 'upsert_resident_owner', side_effect=RuntimeError('seed-boom')):
+            out = dr._attempt_capacity_swap_before_stdin(
+                plan,
+                resident=resident,
+                static_system='STATIC_PERSONA',
+                env={},
+                trigger_reason='soft_context',
+            )
+        self.assertFalse(out.get('ok'), out)
+        self.assertEqual(out.get('error_code'), 'capacity_swap_cursor_seed_failed')
+        self.assertTrue(out.get('rolled_back_to_last_good'))
+        self.assertIs(resident._proc, old_proc)
+        self.assertFalse(old_proc.killed)
+        self.assertTrue(new_proc.killed)
+
+    def test_install_defers_old_proc_kill_until_explicit_close(self):
+        """Old last-good proc must survive install; only deferred close kills it."""
+
+        class _Proc:
+            def __init__(self):
+                self.killed = False
+
+            def poll(self):
+                return None
+
+            def kill(self):
+                self.killed = True
+
+        old_proc = _Proc()
+        new_proc = _Proc()
+        live = _DoorResident(None, session_id='old')
+        live._proc = old_proc
+        live.session_id = 'old'
+        staged = _DoorResident(None, session_id='new')
+        staged._proc = new_proc
+        staged.session_id = 'new'
+        staged.generation = 9
+
+        state = dr.install_capacity_swap_into_live_resident(
+            live_resident=live, staged_resident=staged,
+        )
+        self.assertIs(state['old_proc'], old_proc)
+        self.assertFalse(old_proc.killed)
+        self.assertIs(live._proc, new_proc)
+        self.assertEqual(live.session_id, 'new')
+        self.assertIsNone(staged._proc)
+
+        # Rollback restores old and kills new.
+        dr.rollback_capacity_swap_install(live_resident=live, install_state=state)
+        self.assertIs(live._proc, old_proc)
+        self.assertEqual(live.session_id, 'old')
+        self.assertTrue(new_proc.killed)
+        self.assertFalse(old_proc.killed)
+
+        # Deferred close is the only intentional kill of old.
+        live2 = _DoorResident(None, session_id='old2')
+        old2 = _Proc()
+        new2 = _Proc()
+        live2._proc = old2
+        staged2 = _DoorResident(None, session_id='new2')
+        staged2._proc = new2
+        state2 = dr.install_capacity_swap_into_live_resident(
+            live_resident=live2, staged_resident=staged2,
+        )
+        self.assertFalse(old2.killed)
+        dr.close_deferred_capacity_swap_old_proc(state2['old_proc'])
+        self.assertTrue(old2.killed)
+
+    def test_capacity_swap_publish_mode_0600_and_path_fence(self):
+        from chat.capacity_swap_runtime import publish_capacity_swap_candidate_jsonl
+
+        home = Path(self.tmp) / '.claude'
+        cwd = str(Path(self.tmp) / 'proj')
+        os.makedirs(cwd, exist_ok=True)
+        cand = _candidate(candidate_session_id='44444444-4444-4444-4444-444444444444')
+        path, digest = publish_capacity_swap_candidate_jsonl(
+            cand, cwd=cwd, claude_home=str(home),
+        )
+        self.assertTrue(path.exists())
+        mode = path.stat().st_mode & 0o777
+        self.assertEqual(mode & ~0o600, 0, oct(mode))
+        self.assertTrue(digest)
+
+        # Path fence: refuse escape outside allowed claude home.
+        with mock.patch(
+            'chat.capacity_swap_runtime.derive_transcript_path',
+            return_value=str(Path(self.tmp) / 'escape' / 'evil.jsonl'),
+        ):
+            with self.assertRaises(CapacitySwapRuntimeError) as ctx:
+                publish_capacity_swap_candidate_jsonl(
+                    cand, cwd=cwd, claude_home=str(home),
+                )
+        self.assertEqual(ctx.exception.error_code, 'publish_path_fence_failed')
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -25,6 +25,7 @@ from tools.claude_forge_core import (
     session_jsonl_path_for_cwd,
     sha256_file,
     sha256_text,
+    verify_safe_output_path,
     verify_work_root,
 )
 from tools.claude_forge_validator import validate_forged_transcript
@@ -208,9 +209,21 @@ def build_events_from_selected_messages(
     return events
 
 
-def atomic_write_jsonl_fsync(path: Path, events: Sequence[dict[str, Any]]) -> str:
-    """tmp → flush → fsync → rename (and fsync directory)."""
+def atomic_write_jsonl_fsync(
+    path: Path,
+    events: Sequence[dict[str, Any]],
+    *,
+    mode: int = 0o644,
+    allowed_root: Optional[Path] = None,
+) -> str:
+    """tmp → flush → fsync → rename (and fsync directory).
+
+    ``mode`` defaults to ``0o644`` to preserve Manual Forge / legacy callers.
+    Capacity Swap must pass ``mode=0o600`` with ``allowed_root`` set.
+    """
     path = Path(path)
+    if allowed_root is not None:
+        verify_safe_output_path(path, Path(allowed_root))
     path.parent.mkdir(parents=True, exist_ok=True)
     lines = [json.dumps(evt, ensure_ascii=False, separators=(',', ':')) for evt in events]
     text = '\n'.join(lines) + ('\n' if lines else '')
@@ -218,13 +231,23 @@ def atomic_write_jsonl_fsync(path: Path, events: Sequence[dict[str, Any]]) -> st
     digest = sha256_text(text)
     tmp = path.parent / ('.forge-tmp-%s.jsonl' % new_uuid())
     flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
-    fd = os.open(str(tmp), flags, 0o644)
+    if hasattr(os, 'O_NOFOLLOW'):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(str(tmp), flags, int(mode))
     try:
         os.write(fd, data)
         os.fsync(fd)
     finally:
         os.close(fd)
+    try:
+        os.chmod(str(tmp), int(mode))
+    except OSError:
+        pass
     os.replace(str(tmp), str(path))
+    try:
+        os.chmod(str(path), int(mode))
+    except OSError:
+        pass
     dir_fd = os.open(str(path.parent), os.O_RDONLY)
     try:
         os.fsync(dir_fd)
