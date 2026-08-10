@@ -206,4 +206,32 @@ function filterConsoleBlock(memory) {
   );
 }
 
+// J. Memory star map — Chrome78-safe absolute canvas (no inset shorthand)
+{
+  const memory = readSrc('screens/MemoryScreen.tsx');
+  const starBlock = memory.slice(
+    memory.indexOf('function renderStarView()'),
+    memory.indexOf('function renderDayDetail('),
+  );
+
+  assert.match(starBlock, /height:\s*460/);
+
+  const transformCanvas = starBlock.match(
+    /position:\s*'absolute',\s*top:\s*0,\s*right:\s*0,\s*bottom:\s*0,\s*left:\s*0,\s*transform:/,
+  );
+  assert.ok(transformCanvas, 'star transform canvas must use top/right/bottom/left: 0');
+
+  assert.doesNotMatch(starBlock, /\binset:\s*0/);
+
+  assert.match(starBlock, /left:\s*`\$\{s\.x\}%`/);
+  assert.match(starBlock, /top:\s*`\$\{s\.y\}%`/);
+
+  assert.match(memory, /topicLayout\.set\(t\.key,\s*\{\s*x:\s*50\s*\+\s*Math\.cos\(angle\)\s*\*\s*28/);
+  assert.match(memory, /y:\s*50\s*\+\s*Math\.sin\(angle\)\s*\*\s*26/);
+  assert.match(memory, /const angle = i \* 2\.4 \+ seeded\(m\.id\) \* 0\.8/);
+  assert.match(memory, /const radius = i === 0 \? 0 : 7 \+ \(i % 3\) \* 5/);
+  assert.match(memory, /Math\.max\(8,\s*Math\.min\(92/);
+  assert.match(memory, /Math\.max\(10,\s*Math\.min\(88/);
+}
+
 console.log('test:chrome78-geometry-sweep — all checks passed');

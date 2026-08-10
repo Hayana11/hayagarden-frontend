@@ -799,8 +799,8 @@ export function MemoryScreen() {
           onPointerUp={onStarPointerUp}
           onPointerCancel={onStarPointerUp}
         >
-          <div style={{ position: 'absolute', inset: 0, transform: `translate(${starPan.x}px, ${starPan.y}px) scale(${zoom})`, transformOrigin: '50% 50%' }}>
-            <svg viewBox="0 0 100 100" preserveAspectRatio="none" style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', pointerEvents: 'none' }}>
+          <div style={{ position: 'absolute', top: 0, right: 0, bottom: 0, left: 0, transform: `translate(${starPan.x}px, ${starPan.y}px) scale(${zoom})`, transformOrigin: '50% 50%' }}>
+            <svg viewBox="0 0 100 100" preserveAspectRatio="none" style={{ position: 'absolute', top: 0, right: 0, bottom: 0, left: 0, width: '100%', height: '100%', pointerEvents: 'none' }}>
               <path d={constellationPaths.join('')} stroke="rgba(255,255,255,0.16)" strokeWidth={1} fill="none" vectorEffect="non-scaling-stroke" />
               <path d={linkPaths.join('')} stroke="rgba(233,194,117,0.4)" strokeWidth={1} strokeDasharray="3 4" fill="none" vectorEffect="non-scaling-stroke" />
             </svg>
@@ -872,7 +872,7 @@ export function MemoryScreen() {
                 setTelescopeStep('menu');
               }}
               onPointerDown={(e) => e.stopPropagation()}
-              style={{ position: 'absolute', inset: 0, zIndex: 4 }}
+              style={{ position: 'absolute', top: 0, right: 0, bottom: 0, left: 0, zIndex: 4 }}
             />
           )}
           <div onPointerDown={(e) => e.stopPropagation()} style={{ position: 'absolute', top: 14, right: 14, zIndex: 5 }}>
