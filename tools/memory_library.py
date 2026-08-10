@@ -9,6 +9,8 @@ LIBRARY_TYPES = ('MEMORY', 'DIARY', 'FACT', 'DAILY_SUMMARY')
 
 CONTENT_HEAD_LEN = 800
 EXCERPT_MAX_LEN = 320
+TITLE_CAND_CORNER_LEN = 18
+TITLE_CAND_BOOK_LEN = 14
 
 # Optional emoji/name hints — unknown tags and types still get dynamic topics.
 TAG_HINTS = {
@@ -114,10 +116,27 @@ def _make_excerpt(content_head):
     return text[:EXCERPT_MAX_LEN]
 
 
+def _index_title_source(row):
+    """Bounded title source for index rows — never loads full content into Python."""
+    content_head = (row['content_head'] if 'content_head' in row.keys() else row.get('content') or '').strip()
+    if (row['summary_title'] or '').strip():
+        return content_head
+    parts = [content_head]
+    for key in ('title_cand_lcorner', 'title_cand_lcorner2', 'title_cand_book'):
+        if key in row.keys():
+            frag = (row[key] or '').strip()
+            if frag and frag not in content_head:
+                parts.append(frag)
+    return '\n'.join(parts)
+
+
 def _library_select_sql(summary_expr, *, content_mode):
     placeholders = ','.join('?' * len(LIBRARY_TYPES))
     if content_mode == 'head':
-        content_expr = f'substr(content, 1, {CONTENT_HEAD_LEN}) AS content_head'
+        content_expr = f"""substr(content, 1, {CONTENT_HEAD_LEN}) AS content_head,
+            CASE WHEN instr(content, '「') > 0 THEN substr(content, instr(content, '「'), {TITLE_CAND_CORNER_LEN}) ELSE '' END AS title_cand_lcorner,
+            CASE WHEN instr(content, '『') > 0 THEN substr(content, instr(content, '『'), {TITLE_CAND_CORNER_LEN}) ELSE '' END AS title_cand_lcorner2,
+            CASE WHEN instr(content, '《') > 0 THEN substr(content, instr(content, '《'), {TITLE_CAND_BOOK_LEN}) ELSE '' END AS title_cand_book"""
     else:
         content_expr = 'content'
     return (
@@ -136,7 +155,7 @@ def _fetch_library_rows(conn, limit=500, *, content_mode='full'):
     return conn.execute(sql, (*LIBRARY_TYPES, limit)).fetchall()
 
 
-def _entry_base_from_row(row, *, include_content=False, title_content=None):
+def _entry_base_from_row(row, *, include_content=False):
     tags, assocs = _parse_tags(row['tags'])
     created = (row['created_at'] or '').strip()
     date_part, _, time_part = created.partition(' ')
@@ -145,11 +164,15 @@ def _entry_base_from_row(row, *, include_content=False, title_content=None):
 
     if include_content:
         content_source = (row['content'] or '').strip()
+        title_src = content_source
     else:
         content_source = (row['content_head'] if 'content_head' in row.keys() else row['content'] or '').strip()
+        title_src = _index_title_source(row)
 
-    title_src = title_content if title_content is not None else content_source
     titles = summary_title.entry_titles(title_src, row['summary_title'])
+    if not include_content:
+        titles = dict(titles)
+        titles['preview'] = summary_title.truncate_preview(content_source, titles['summaryTitle'])
     entry = {
         'id': int(row['id']),
         'date': date_part or created[:10],
@@ -251,33 +274,13 @@ def _assemble_library(entries, topic_labels, topic_types, assoc_by_id, *, use_in
 
 def build_memory_library_index(conn, limit=500):
     rows = _fetch_library_rows(conn, limit, content_mode='head')
-    blank_title_ids = [
-        int(row['id'])
-        for row in rows
-        if not (row['summary_title'] or '').strip()
-    ]
-    full_content_by_id = {}
-    if blank_title_ids:
-        placeholders = ','.join('?' * len(blank_title_ids))
-        for row in conn.execute(
-            f'SELECT id, content FROM posts WHERE id IN ({placeholders})',
-            blank_title_ids,
-        ):
-            full_content_by_id[int(row['id'])] = (row['content'] or '').strip()
-
     entries = []
     topic_labels = {}
     topic_types = {}
     assoc_by_id = {}
 
     for row in rows:
-        pid = int(row['id'])
-        title_content = full_content_by_id.get(pid)
-        entry, assocs, topic_key, tags, ptype = _entry_base_from_row(
-            row,
-            include_content=False,
-            title_content=title_content,
-        )
+        entry, assocs, topic_key, tags, ptype = _entry_base_from_row(row, include_content=False)
         if tags:
             topic_labels.setdefault(topic_key, tags[0])
         else:

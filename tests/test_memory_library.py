@@ -161,7 +161,7 @@ class MemoryLibraryIndexContractTests(unittest.TestCase):
         for entry in full["entries"]:
             self.assertNotIn("excerpt", entry)
 
-    def test_index_title_fallback_uses_full_content_when_summary_title_blank(self):
+    def test_index_title_fallback_uses_bounded_sql_when_summary_title_blank(self):
         pad = "。" * 850
         body = f"普通开头{pad}《真正标题》"
         self.db_path, self.conn = _make_posts_db([
@@ -175,6 +175,36 @@ class MemoryLibraryIndexContractTests(unittest.TestCase):
         self.assertEqual(idx_entry["summaryTitle"], legacy_entry["summaryTitle"])
         self.assertEqual(idx_entry["title"], legacy_entry["title"])
         self.assertEqual(idx_entry["preview"], legacy_entry["preview"])
+
+    def test_index_cold_path_never_selects_full_content(self):
+        pad = "。" * 850
+        body = f"普通开头{pad}《真正标题》"
+        self.db_path, self.conn = _make_posts_db([
+            ("MEMORY", body, "haya", "2026-07-20 10:00:00", "日常", "recent", 3, 0, ""),
+        ])
+        executed = []
+
+        def trace(sql):
+            executed.append(sql)
+
+        self.conn.set_trace_callback(trace)
+        memory_library.build_memory_library_index(self.conn)
+        self.conn.set_trace_callback(None)
+
+        self.assertGreater(len(executed), 0)
+        for sql in executed:
+            normalized = ' '.join(sql.split())
+            self.assertNotRegex(
+                normalized,
+                r'SELECT id, content FROM posts',
+                msg=f'unexpected full-content fetch: {sql}',
+            )
+            if 'FROM posts' in normalized and 'substr(content' not in normalized:
+                self.assertNotIn(
+                    ' content,',
+                    normalized.replace('content_head', '').replace('content_mode', ''),
+                    msg=f'unbounded content column in index SQL: {sql}',
+                )
 
     def test_inverted_links_match_pair_scan(self):
         rows = memory_library._fetch_library_rows(self.conn, 500, content_mode='head')
@@ -237,10 +267,11 @@ class MemoryLibrarySearchTests(unittest.TestCase):
     def test_search_finds_keyword_only_in_deep_content(self):
         prefix = "可见标题"
         deep_keyword = "深埋关键词"
-        body = prefix + ("。" * 500) + deep_keyword
+        body = prefix + ("x" * 1100) + deep_keyword
         self.db_path, self.conn = _make_posts_db([
             ("MEMORY", body, "haya", "2026-07-20 10:00:00", "日常", "recent", 3, 0, "可见标题"),
         ])
+        self.assertGreater(body.index(deep_keyword), 1100)
         results = memory_library.search_memory_library(self.conn, deep_keyword, limit=4)["results"]
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0]["summaryTitle"], "可见标题")

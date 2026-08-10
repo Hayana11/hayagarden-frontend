@@ -112,8 +112,16 @@ export function fetchMemoryLibrary(): Promise<MemoryLibrary> {
   return withFallback(() => http.get<MemoryLibrary>('/api/memories/library'), mock.mockMemoryLibrary);
 }
 
+/** Memory index reads only fall back to demo mock under an explicit DEV mock flag. */
+export function memoryIndexReadsAllowMock(): boolean {
+  return Boolean(import.meta.env.DEV) && import.meta.env.VITE_MEMORY_USE_MOCK === '1';
+}
+
 // GET /api/memories/library/index -> index-only cold-start payload
 export function fetchMemoryLibraryIndex(): Promise<MemoryLibraryIndex> {
+  if (!memoryIndexReadsAllowMock()) {
+    return http.get<MemoryLibraryIndex>('/api/memories/library/index');
+  }
   return withFallback(
     () => http.get<MemoryLibraryIndex>('/api/memories/library/index'),
     () => {

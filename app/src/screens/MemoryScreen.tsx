@@ -7,7 +7,13 @@ import { useMemoryEntryContent } from '../hooks/useMemoryEntryContent';
 import { useMemoryLibrary } from '../hooks/useMemoryLibrary';
 import { searchMemoryEntries } from '../lib/api';
 import { dateKey, seeded } from '../lib/format';
-import { canCommitSearchResults, MEMORY_SEARCH_DEBOUNCE_MS, markMemoryPerf } from '../lib/memoryColdStart';
+import {
+  canCommitSearchResults,
+  createMemoryDetailCaches,
+  MEMORY_SEARCH_DEBOUNCE_MS,
+  markMemoryPerf,
+  type MemoryDetailCaches,
+} from '../lib/memoryColdStart';
 import {
   constellationColor,
   formatDateDot,
@@ -77,6 +83,7 @@ export function MemoryScreen() {
   const [searchResults, setSearchResults] = useState<MemorySearchResult[]>([]);
   const [searchResultQuery, setSearchResultQuery] = useState('');
   const searchGenRef = useRef(0);
+  const detailCachesRef = useRef(createMemoryDetailCaches());
 
   const [view, setView] = useState<ViewMode>('time');
   const [query, setQuery] = useState('');
@@ -1242,6 +1249,7 @@ export function MemoryScreen() {
                 entries={entries}
                 topicByKey={topicByKey}
                 pushFrame={pushFrame}
+                detailCaches={detailCachesRef.current}
               />
             )}
           </div>
@@ -1492,14 +1500,16 @@ function MemDetailPanel({
   entries,
   topicByKey,
   pushFrame,
+  detailCaches,
 }: {
   id: number;
   entries: MemoryIndexEntry[];
   topicByKey: Map<string, MemoryTopic>;
   pushFrame: (frame: DrawerFrame) => void;
+  detailCaches: MemoryDetailCaches;
 }) {
   const m = entries.find((x) => x.id === id);
-  const { content, loading } = useMemoryEntryContent(id);
+  const { content, loading } = useMemoryEntryContent(id, detailCaches);
   if (!m) return null;
   const same = entries.filter((x) => x.date === m.date && x.id !== m.id).sort((a, b) => (a.time < b.time ? -1 : 1));
   const links = m.links.map((lid) => entries.find((x) => x.id === lid)).filter((x): x is MemoryIndexEntry => Boolean(x));

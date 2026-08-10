@@ -1,6 +1,11 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import { canCommitSearchResults } from '../src/lib/memoryColdStart.ts';
+import {
+  canCommitDetailContent,
+  canCommitSearchResults,
+  createMemoryDetailCaches,
+  loadMemoryDetailContent,
+} from '../src/lib/memoryColdStart.ts';
 
 const screenPath = new URL('../src/screens/MemoryScreen.tsx', import.meta.url);
 const apiPath = new URL('../src/lib/api.ts', import.meta.url);
@@ -43,6 +48,61 @@ const types = fs.readFileSync(typesPath, 'utf8');
   assert.match(detailHook, /fetchMemoryEntryContent/);
   assert.match(api, /export function fetchMemoryEntryContent/);
   assert.match(screen, /正文读取中/);
+  assert.match(screen, /detailCachesRef/);
+  assert.match(screen, /createMemoryDetailCaches/);
+}
+
+// D1. Production index fetch rejects normally; mock only under explicit DEV flag
+{
+  assert.match(api, /export function memoryIndexReadsAllowMock/);
+  assert.match(api, /VITE_MEMORY_USE_MOCK/);
+  const fetchBlock = api.slice(
+    api.indexOf('export function fetchMemoryLibraryIndex'),
+    api.indexOf('export function fetchMemoryEntryContent'),
+  );
+  assert.match(fetchBlock, /if \(!memoryIndexReadsAllowMock\(\)\)/);
+  assert.match(fetchBlock, /return http\.get<MemoryLibraryIndex>\('\/api\/memories\/library\/index'\)/);
+  const prodPath = fetchBlock.split('if (!memoryIndexReadsAllowMock()')[0]
+    + fetchBlock.match(/if \(!memoryIndexReadsAllowMock\(\)\) \{[\s\S]*?\n  \}/)?.[0];
+  assert.ok(prodPath);
+  assert.doesNotMatch(prodPath, /withFallback/);
+
+  const revalidateCatch = hook.slice(
+    hook.indexOf('markMemoryPerf(\'memory_revalidate_start\')'),
+    hook.indexOf('return () => {\n        mountedRef.current = false;\n      };\n    }\n\n    const gen'),
+  );
+  assert.match(revalidateCatch, /\.catch\(\(\) =>/);
+  assert.doesNotMatch(revalidateCatch, /setLibrary\(null\)/);
+  assert.doesNotMatch(revalidateCatch, /mock/);
+}
+
+// D2. Detail success reuse within MemoryScreen scope (executable simulation)
+{
+  let fetchCount = 0;
+  const caches = createMemoryDetailCaches();
+  const fetchFn = async (id) => {
+    fetchCount += 1;
+    return `body-${id}`;
+  };
+
+  await loadMemoryDetailContent(caches, 42, fetchFn);
+  assert.equal(fetchCount, 1);
+
+  const immediate = await loadMemoryDetailContent(caches, 42, fetchFn);
+  assert.equal(immediate, 'body-42');
+  assert.equal(fetchCount, 1);
+
+  const freshScope = createMemoryDetailCaches();
+  await loadMemoryDetailContent(freshScope, 42, fetchFn);
+  assert.equal(fetchCount, 2);
+}
+
+// D3. Stale detail guard when switching A → B
+{
+  assert.equal(canCommitDetailContent(1, 1, 1, 2), false);
+  assert.equal(canCommitDetailContent(1, 2, 1, 1), false);
+  assert.equal(canCommitDetailContent(2, 2, 7, 7), true);
+  assert.match(detailHook, /canCommitDetailContent/);
 }
 
 // E. Memory search hits use server full-text search
@@ -64,13 +124,9 @@ const types = fs.readFileSync(typesPath, 'utf8');
   assert.match(screen, /activeSearchResults/);
   assert.match(screen, /key=\{drawerFrame\.id\}/);
 
-  // stale generation after clear
   assert.equal(canCommitSearchResults(1, 2, '猫', ''), false);
-  // stale generation after query change
   assert.equal(canCommitSearchResults(1, 2, '猫', '猫'), false);
-  // query drift while same generation (A → AB before response)
   assert.equal(canCommitSearchResults(2, 2, '猫', '猫猫'), false);
-  // valid commit
   assert.equal(canCommitSearchResults(3, 3, '猫猫', '猫猫'), true);
 }
 
@@ -102,6 +158,7 @@ const types = fs.readFileSync(typesPath, 'utf8');
     assert.doesNotMatch(src, /localStorage/);
     assert.doesNotMatch(src, /sessionStorage/);
     assert.doesNotMatch(src, /indexedDB/i);
+    assert.doesNotMatch(src, /caches\.open/i);
   }
 }
 
@@ -120,11 +177,12 @@ const types = fs.readFileSync(typesPath, 'utf8');
   assert.match(screen, /markMemoryPerf\('memory_search_ready'\)/);
 }
 
-// In-flight dedupe (detail: no module-level full-content cache)
+// Detail cache is MemoryScreen-scoped, not module lifetime
 {
   assert.match(hook, /memoryIndexInflight/);
-  assert.match(detailHook, /inflight\.get\(id\)/);
-  assert.doesNotMatch(detailHook, /contentCache/);
+  assert.match(detailHook, /loadMemoryDetailContent/);
+  assert.doesNotMatch(detailHook, /^const contentCache/m);
+  assert.doesNotMatch(detailHook, /module-level/i);
 }
 
 console.log('test:memory-cold-start — all checks passed');
