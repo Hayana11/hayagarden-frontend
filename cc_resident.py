@@ -457,7 +457,10 @@ class ResidentSession:
         stored_identity = getattr(self, '_model_identity', None)
         if stored_identity is not None and cc_model_identity() != stored_identity:
             return 'model_changed'
-        if (time.time() - self._last_used) > IDLE_REAP_SECONDS:
+        # Never-used residents (_last_used == 0) have no idle age — peek_idle_seconds
+        # returns None. Only reap after a real successful use older than IDLE_REAP.
+        idle_seconds = self.peek_idle_seconds()
+        if idle_seconds is not None and idle_seconds > IDLE_REAP_SECONDS:
             return 'idle'
         if system_text != self._system_text:
             return 'system_changed'

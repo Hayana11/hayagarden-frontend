@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import datetime
+import copy
 import hashlib
 import logging
 import os
@@ -11,6 +12,7 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass, field, fields
+from pathlib import Path
 from typing import Any, Callable, Iterator, Optional
 
 import cc_resident
@@ -32,6 +34,19 @@ from chat.session_registry import (
     SessionRegistryError,
     get_context_claude_session,
     register_context_claude_session,
+)
+from chat.capacity_swap_runtime import (
+    CAPACITY_BOUNDARY_REPRESENTATION,
+    CAPACITY_BOUNDARY_SYSTEM_SUFFIX_V1,
+    CapacitySwapStagedHooks,
+    effective_static_system_for_registry,
+    is_capacity_swap_reason,
+    note_same_context_last_good,
+    register_capacity_swap_generation,
+    resolve_finalize_registry_source,
+    run_capacity_swap_handoff,
+    try_restore_same_context_last_good,
+    with_capacity_boundary_suffix,
 )
 from tools.cc_jsonl_usage import snapshot_session_jsonl
 
@@ -1046,6 +1061,7 @@ def prepare_daily_turn(
     provider: str = 'claude_code',
     model: str = '',
     _cold_reprepare: bool = False,
+    _capacity_swap_reprepare: bool = False,
 ) -> DailyTurnPlan:
     if not dc.enabled():
         raise DailyRuntimeError('DAILY_SOFT_WINDOW_ENABLED=0', error_code='daily_disabled')
@@ -1140,7 +1156,12 @@ def prepare_daily_turn(
         )
 
         if resident is not None:
-            _close_stale_local_resident(resident, expected_key=resident_key)
+            # Capacity Swap reprepare is a known brief handoff state: the live
+            # process may already be target gen N+1 while LocalResidentBinding
+            # is still source gen N. Do not apply the ordinary stale-resident
+            # kill here — target binding is committed only after Registry publish.
+            if not _capacity_swap_reprepare:
+                _close_stale_local_resident(resident, expected_key=resident_key)
 
         db_cursor = dc.get_resident_history_cursor(
             context_id, resident_generation, db_path=db_path,
@@ -1207,8 +1228,15 @@ def prepare_daily_turn(
             resident=resident or object(),
             db_cursor=db_cursor,
         )
-        is_respawn = _cold_reprepare
-        turn_kind = 'respawn' if is_respawn else ('hot' if not is_cold else 'cold')
+        if _capacity_swap_reprepare:
+            # Same-context Capacity Swap: forged transcript already carries history.
+            # Force hot-like assembly (no cold history / carryover / handoff replay).
+            is_cold = False
+            is_respawn = False
+            turn_kind = 'capacity_swap'
+        else:
+            is_respawn = _cold_reprepare
+            turn_kind = 'respawn' if is_respawn else ('hot' if not is_cold else 'cold')
 
         plan = _assemble_plan(
             req_id=req_id,
@@ -1258,26 +1286,391 @@ def _registered_generation_requires_respawn(
     Registry absent → allow first session registration for this generation.
     Registry present + upcoming/new Claude session → bump generation first.
     """
+    decision = peek_registered_respawn_decision(plan, resident, static_system)
+    return bool(decision.get('requires_respawn'))
+
+
+def peek_registered_respawn_decision(
+    plan: DailyTurnPlan,
+    resident: Any,
+    static_system: str,
+) -> dict[str, Any]:
+    """Read-only door-lock decision with concrete reason (capacity vs generic).
+
+    Uses effective_system for capacity_swap generations so suffix persistence
+    does not spuriously trip ``system_changed``.
+    """
     registry = get_context_claude_session(
         int(plan.context_id),
         int(plan.resident_generation),
         db_path=plan.db_path,
     )
     if registry is None:
-        return False
+        return {
+            'requires_respawn': False,
+            'reason': None,
+            'registry': None,
+            'effective_system': str(static_system or ''),
+            'capacity_swap': False,
+        }
 
+    effective = effective_static_system_for_registry(static_system, registry)
     peek = getattr(resident, 'peek_respawn_reason', None)
     reason = None
     if callable(peek):
-        reason = peek(static_system, tool_profile=plan.tool_profile)
+        reason = peek(effective, tool_profile=plan.tool_profile)
+
     if reason:
-        return True
+        return {
+            'requires_respawn': True,
+            'reason': reason,
+            'registry': registry,
+            'effective_system': effective,
+            'capacity_swap': is_capacity_swap_reason(reason),
+        }
 
     live_sid = str(getattr(resident, 'session_id', None) or '').strip()
     reg_sid = str(registry.get('claude_session_id') or '').strip()
     if not live_sid or live_sid != reg_sid:
-        return True
-    return False
+        return {
+            'requires_respawn': True,
+            'reason': 'session_identity_mismatch',
+            'registry': registry,
+            'effective_system': effective,
+            'capacity_swap': False,
+        }
+    return {
+        'requires_respawn': False,
+        'reason': None,
+        'registry': registry,
+        'effective_system': effective,
+        'capacity_swap': False,
+    }
+
+
+def reprepare_after_capacity_swap(
+    plan: DailyTurnPlan,
+    *,
+    resident: Optional[Any],
+    static_system: str = '',
+    static_system_sha256: str = '',
+    persona_sha256: str = '',
+    provider: str = 'claude_code',
+    model: str = '',
+    cursor_watermark: Optional[int] = None,
+) -> DailyTurnPlan:
+    """Same-context gen bump already done; re-claim lease without cold history replay.
+
+    Cursor/owner seed is mandatory. Any seed failure fail-closes — callers must
+    treat this as Capacity Swap failure and fall back (last-good / cold). Never
+    continue into ``_capacity_swap_reprepare`` hot-like assembly without a seed.
+    """
+    _release_lease(plan)
+    # Seed cursor for the new generation so hot assembly does not replay forged rounds.
+    watermark = cursor_watermark if cursor_watermark is not None else plan.cursor_before
+    if watermark is None:
+        # No prior cursor (rare): pin just before CURRENT user so hot assembly is legal.
+        watermark = max(0, int(plan.user_message_id) - 1)
+
+    refreshed = dc.get_daily_context_by_id(plan.context_id, db_path=plan.db_path) or {}
+    gen = int(refreshed.get('resident_generation') or 0)
+    if gen <= 0:
+        raise DailyRuntimeError(
+            'capacity swap cursor seed: resident_generation missing',
+            error_code='capacity_swap_cursor_seed_failed',
+        )
+    try:
+        dc.upsert_resident_owner(
+            plan.context_id,
+            gen,
+            worker_id=WORKER_ID,
+            resident_key=make_resident_key(
+                chat_id=plan.chat_id,
+                context_epoch=int(refreshed.get('context_epoch') or plan.context_epoch),
+                resident_generation=gen,
+            ),
+            bound_cursor_message_id=int(watermark),
+            process_generation=int(getattr(resident, 'generation', 0) or 0) if resident else None,
+            db_path=plan.db_path,
+        )
+        conn = dc._connect(plan.db_path)
+        try:
+            conn.execute(
+                'INSERT INTO daily_resident_cursors '
+                '(context_id, resident_generation, history_cursor_message_id) '
+                'VALUES (?,?,?) '
+                'ON CONFLICT(context_id, resident_generation) DO UPDATE SET '
+                'history_cursor_message_id=excluded.history_cursor_message_id, '
+                "updated_at=datetime('now','+8 hours')",
+                (int(plan.context_id), gen, int(watermark)),
+            )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+    except DailyRuntimeError:
+        raise
+    except Exception as exc:
+        logger.exception('capacity swap cursor seed failed')
+        raise DailyRuntimeError(
+            'capacity swap cursor seed failed',
+            error_code='capacity_swap_cursor_seed_failed',
+        ) from exc
+
+    return prepare_daily_turn(
+        user_message_id=plan.user_message_id,
+        chat_id=plan.chat_id,
+        request_id=plan.request_id,
+        db_path=plan.db_path,
+        now=plan.user_created_at,
+        origin_local_day=plan.origin_local_day or plan.local_day,
+        lease_owner=plan.lease_owner,
+        resident=resident,
+        static_system=static_system,
+        static_system_sha256=static_system_sha256,
+        persona_sha256=persona_sha256,
+        provider=provider,
+        model=model,
+        _capacity_swap_reprepare=True,
+    )
+
+
+# Process/session identity transferred from staged (the new Claude process).
+_CAPACITY_SWAP_PROCESS_IDENTITY = (
+    '_proc', '_system_text', '_session_id', '_cold', '_generation',
+    '_tool_profile', '_model_identity', '_history_rewrite_epoch', '_last_used',
+)
+_CAPACITY_SWAP_PUBLIC_MIRRORS = (
+    'session_id', 'generation', 'tool_profile', 'cwd', '_peek_reason',
+)
+# Generation-scoped runtime metadata owned by ResidentSession._reset_session_meta.
+# Adoption must NOT keep the old live values of these across CapSwap.
+_CAPACITY_SWAP_GENERATION_META = (
+    '_resident_turn_count',
+    '_last_round_context',
+    '_max_round_context',
+    '_pending_respawn_reason',
+    '_turns_since_respawn',
+    '_last_state_snapshot',
+    '_last_state_send_snapshot',
+    '_last_successful_lean_state',
+    '_last_state_anchor_generation',
+    '_last_state_schema_version',
+    '_turns_since_state_anchor',
+    '_state_delta_chars_since_anchor',
+    '_last_state_anchor_version',
+    '_committed_file_hashes',
+    '_pending_file_hashes',
+    '_last_group_message_id',
+    '_group_cursor_initialized',
+    '_last_rel_fingerprint',
+    '_turns_since_rel_sent',
+    '_last_rel_mood',
+    '_keepwarm_lease_expires_at',
+    '_tool_surface_snapshot',
+)
+
+
+def _snapshot_resident_attr(value: Any) -> Any:
+    if isinstance(value, (dict, list, set)):
+        return copy.deepcopy(value)
+    return value
+
+
+def _snapshot_capacity_swap_live_resident(live_resident: Any) -> dict[str, Any]:
+    attrs = (
+        _CAPACITY_SWAP_PROCESS_IDENTITY
+        + _CAPACITY_SWAP_PUBLIC_MIRRORS
+        + _CAPACITY_SWAP_GENERATION_META
+    )
+    out: dict[str, Any] = {}
+    for attr in attrs:
+        if hasattr(live_resident, attr):
+            try:
+                out[attr] = _snapshot_resident_attr(getattr(live_resident, attr))
+            except Exception:
+                pass
+    return out
+
+
+def install_capacity_swap_into_live_resident(
+    *,
+    live_resident: Any,
+    staged_resident: Any,
+) -> dict[str, Any]:
+    """Adopt staged Claude process into the live holder without killing old proc.
+
+    Single adoption semantic:
+      1) transfer process/session identity from staged
+      2) reset generation-scoped runtime meta via ``_reset_session_meta``
+         (same helper staged spawn uses) so old-generation state/file/group/
+         relationship dedupe cannot leak into the new generation
+      3) copy staged tool-surface after reset
+
+    Returns ``{old_proc, old_attrs, old_binding}`` for deferred close /
+    pre-flush rollback (process + LocalResidentBinding restored together).
+    """
+    old_attrs = _snapshot_capacity_swap_live_resident(live_resident)
+    old_proc = old_attrs.get('_proc', getattr(live_resident, '_proc', None))
+    old_binding = get_local_binding()
+
+    for attr in _CAPACITY_SWAP_PROCESS_IDENTITY:
+        if hasattr(staged_resident, attr) and hasattr(live_resident, attr):
+            try:
+                setattr(live_resident, attr, getattr(staged_resident, attr))
+            except Exception:
+                pass
+    for attr in _CAPACITY_SWAP_PUBLIC_MIRRORS:
+        if hasattr(staged_resident, attr):
+            try:
+                setattr(live_resident, attr, getattr(staged_resident, attr))
+            except Exception:
+                pass
+
+    reset = getattr(live_resident, '_reset_session_meta', None)
+    if callable(reset):
+        reason = getattr(staged_resident, '_pending_respawn_reason', None) or 'capacity_swap'
+        reset(respawn_reason=reason)
+        if hasattr(staged_resident, '_tool_surface_snapshot'):
+            try:
+                live_resident._tool_surface_snapshot = copy.deepcopy(
+                    getattr(staged_resident, '_tool_surface_snapshot') or {},
+                )
+            except Exception:
+                live_resident._tool_surface_snapshot = {}
+    else:
+        # Test fakes: prefer staged generation meta; otherwise clear old-gen values.
+        for attr in _CAPACITY_SWAP_GENERATION_META:
+            if hasattr(staged_resident, attr):
+                try:
+                    setattr(
+                        live_resident,
+                        attr,
+                        _snapshot_resident_attr(getattr(staged_resident, attr)),
+                    )
+                except Exception:
+                    pass
+            elif hasattr(live_resident, attr):
+                try:
+                    if attr.endswith('_hashes'):
+                        setattr(live_resident, attr, set())
+                    elif attr.endswith('_snapshot') or attr == '_tool_surface_snapshot':
+                        setattr(live_resident, attr, {})
+                    elif attr == '_last_state_anchor_generation':
+                        setattr(live_resident, attr, -1)
+                    elif attr in {
+                        '_last_group_message_id',
+                        '_turns_since_respawn',
+                        '_turns_since_state_anchor',
+                        '_state_delta_chars_since_anchor',
+                        '_turns_since_rel_sent',
+                        '_resident_turn_count',
+                        '_last_round_context',
+                        '_max_round_context',
+                    }:
+                        setattr(live_resident, attr, 0)
+                    elif attr in {'_group_cursor_initialized', '_last_successful_lean_state'}:
+                        setattr(live_resident, attr, False)
+                    else:
+                        setattr(live_resident, attr, None)
+                except Exception:
+                    pass
+
+    try:
+        staged_resident._proc = None
+    except Exception:
+        pass
+    return {
+        'old_proc': old_proc,
+        'old_attrs': old_attrs,
+        'old_binding': old_binding,
+    }
+
+
+def rollback_capacity_swap_install(
+    *,
+    live_resident: Any,
+    install_state: Optional[dict[str, Any]],
+) -> None:
+    """Restore pre-install live resident + binding; kill the staged/new process."""
+    if not install_state:
+        return
+    new_proc = getattr(live_resident, '_proc', None)
+    old_proc = install_state.get('old_proc')
+    old_attrs = dict(install_state.get('old_attrs') or {})
+    for attr, value in old_attrs.items():
+        try:
+            setattr(live_resident, attr, _snapshot_resident_attr(value))
+        except Exception:
+            pass
+    if old_proc is not None:
+        try:
+            live_resident._proc = old_proc
+        except Exception:
+            pass
+    if new_proc is not None and new_proc is not old_proc:
+        try:
+            if getattr(new_proc, 'poll', lambda: None)() is None:
+                new_proc.kill()
+        except Exception:
+            pass
+    # Restore LocalResidentBinding with the old resident so we never leave
+    # gen1 process paired with a gen2 binding (or the reverse) after rollback.
+    if 'old_binding' in install_state:
+        set_local_binding(install_state.get('old_binding'))
+
+
+def close_deferred_capacity_swap_old_proc(old_proc: Any) -> None:
+    """Kill superseded last-good process after stdin flush (exactly-once locked)."""
+    if old_proc is None:
+        return
+    try:
+        poll = getattr(old_proc, 'poll', None)
+        if callable(poll) and poll() is None:
+            old_proc.kill()
+    except Exception:
+        pass
+
+
+def _default_capacity_swap_staged_hooks(live_resident: Any) -> CapacitySwapStagedHooks:
+    """Production hooks: spawn a sibling ResidentSession for staged --resume."""
+    import cc_resident as _cc
+
+    def spawn_and_health(
+        system_text,
+        env,
+        *,
+        resume_session_id,
+        jsonl_path,
+        expected_sha256,
+    ):
+        cwd = str(getattr(live_resident, 'cwd', '') or '')
+        allowed = str(getattr(live_resident, '_allowed_tools', '') or '')
+        mcp = str(getattr(live_resident, '_mcp_config_path', '') or (cwd + '/cc-tools.json'))
+        staged = _cc.ResidentSession(cwd, allowed, mcp)
+        try:
+            staged.spawn_resumable(
+                system_text,
+                env,
+                resume_session_id=str(resume_session_id),
+                tool_profile=DAILY_TOOL_PROFILE,
+                reason='capacity_swap',
+            )
+            staged.wait_staged_health(
+                jsonl_path=jsonl_path,
+                expected_sha256=expected_sha256,
+            )
+        except Exception:
+            try:
+                staged._kill(quiet=True)
+            except Exception:
+                pass
+            raise
+        return staged
+
+    return CapacitySwapStagedHooks(spawn_and_health=spawn_and_health)
 
 
 def reprepare_after_registered_session_change(
@@ -1484,7 +1877,7 @@ def finalize_transcript_mapping_after_success(
             chat_id=str(plan.chat_id),
             claude_session_id=sid,
             cwd=str(plan.transcript_cwd),
-            source='daily_runtime',
+            source=resolve_finalize_registry_source(existing, default='daily_runtime'),
             scan_offset=int(plan.transcript_start_offset),
             process_generation=int(plan.transcript_process_generation),
             transcript_path=plan.transcript_path,
@@ -1694,6 +2087,225 @@ def _apply_daily_cold_prompt_fence(
     return content
 
 
+def _attempt_capacity_swap_before_stdin(
+    plan: DailyTurnPlan,
+    *,
+    resident: Any,
+    static_system: str,
+    env: dict[str, str],
+    trigger_reason: str,
+    staged_hooks: Optional[CapacitySwapStagedHooks] = None,
+    claude_home: Optional[str] = None,
+) -> dict[str, Any]:
+    """Run Capacity Swap handoff before CURRENT user stdin. Never sends the user.
+
+    Commit order (frozen for failure safety):
+      generation +1 → install staged (keep old) → cursor/reprepare → identity
+      → register Registry source=capacity_swap → success
+    Registry is the pre-stdin commit flag; failures before it leave no target
+    Registry row. Old last-good proc stays until CURRENT user stdin flush.
+    """
+    if not is_capacity_swap_reason(trigger_reason):
+        return {'ok': False, 'error_code': 'trigger_not_capacity'}
+
+    hooks = staged_hooks or _default_capacity_swap_staged_hooks(resident)
+    handoff = run_capacity_swap_handoff(
+        plan=plan,
+        trigger_reason=trigger_reason,
+        static_system=static_system,
+        env=env,
+        live_resident=resident,
+        staged_hooks=hooks,
+        claude_home=claude_home,
+    )
+    if not handoff.ok or handoff.candidate is None:
+        return {
+            'ok': False,
+            'error_code': handoff.error_code or 'capacity_swap_failed',
+            'warnings': list(handoff.warnings),
+        }
+
+    staged = getattr(handoff, 'staged_resident', None)
+    if staged is None:
+        return {'ok': False, 'error_code': 'staged_missing'}
+
+    source_ctx = int(plan.context_id)
+    source_epoch = int(plan.context_epoch)
+    source_gen = int(plan.resident_generation)
+    watermark = plan.cursor_before
+    install_state: Optional[dict[str, Any]] = None
+
+    def _fail_kill_staged(code: str, **extra: Any) -> dict[str, Any]:
+        try:
+            if hasattr(staged, '_kill'):
+                staged._kill(quiet=True)
+        except Exception:
+            pass
+        out = {'ok': False, 'error_code': code}
+        out.update(extra)
+        return out
+
+    # Generation bump (same context_id / epoch). Registry not yet published.
+    if is_epoch_token_current(plan):
+        dc.respawn_daily_resident(plan.context_id, db_path=plan.db_path)
+    refreshed = dc.get_daily_context_by_id(plan.context_id, db_path=plan.db_path) or {}
+    target_gen = int(refreshed.get('resident_generation') or 0)
+    if target_gen != int(handoff.target_resident_generation):
+        return _fail_kill_staged(
+            'generation_cas_mismatch',
+            source_generation=source_gen,
+            target_generation=target_gen,
+        )
+    if int(refreshed.get('id') or 0) != source_ctx:
+        return _fail_kill_staged('context_id_drift')
+    if int(refreshed.get('context_epoch') or 0) != source_epoch:
+        return _fail_kill_staged('context_epoch_drift')
+
+    cwd = str(getattr(resident, 'cwd', '') or plan.transcript_cwd or '')
+
+    # Transfer staged → live WITHOUT killing old last-good process.
+    install_state = install_capacity_swap_into_live_resident(
+        live_resident=resident, staged_resident=staged,
+    )
+
+    try:
+        effective = str(handoff.effective_system or with_capacity_boundary_suffix(static_system))
+        replacement = reprepare_after_capacity_swap(
+            plan,
+            resident=resident,
+            static_system=effective,
+            static_system_sha256=_sha256_text(effective),
+            persona_sha256=plan.manifest.get('persona_sha256') or '',
+            provider=str(plan.manifest.get('provider') or 'claude_code'),
+            model=str(plan.manifest.get('model') or ''),
+            cursor_watermark=watermark,
+        )
+        _adopt_reprepared_plan_in_place(plan, replacement, resident=resident)
+        plan.manifest['capacity_swap'] = True
+        plan.manifest['capacity_swap_reason'] = trigger_reason
+        plan.manifest['capacity_swap_source_generation'] = source_gen
+        plan.manifest['capacity_boundary_representation'] = CAPACITY_BOUNDARY_REPRESENTATION
+
+        if int(plan.context_id) != source_ctx or int(plan.context_epoch) != source_epoch:
+            raise DailyRuntimeError(
+                'identity drift after capacity swap reprepare',
+                error_code='identity_drift_after_reprepare',
+            )
+        if int(plan.resident_generation) != target_gen:
+            raise DailyRuntimeError(
+                'generation drift after capacity swap reprepare',
+                error_code='generation_drift_after_reprepare',
+            )
+
+        # Registry publication is the pre-stdin commit point (after seed/identity).
+        register_capacity_swap_generation(
+            plan=plan,
+            candidate=handoff.candidate,
+            process_generation=int(getattr(resident, 'generation', 0) or 0),
+            scan_offset=(
+                int(Path(str(handoff.jsonl_path)).stat().st_size)
+                if handoff.jsonl_path else 0
+            ),
+            cwd=cwd,
+            claude_home=claude_home,
+        )
+        # Commit target LocalResidentBinding before returning ok so the recursive
+        # door never sees gen1 binding against a gen2 plan/process.
+        set_local_binding(LocalResidentBinding(
+            resident_key=str(plan.resident_key),
+            context_id=int(plan.context_id),
+            context_epoch=int(plan.context_epoch),
+            resident_generation=int(plan.resident_generation),
+            bound_cursor_message_id=plan.cursor_before,
+            process_generation=int(getattr(resident, 'generation', 0) or 0),
+            tool_profile=str(plan.tool_profile),
+            claude_session_id=str(getattr(resident, 'session_id', None) or '') or None,
+        ))
+    except Exception as exc:
+        logger.info(
+            'capacity swap post-install failed code=%s; rolling back to old resident',
+            getattr(exc, 'error_code', type(exc).__name__),
+        )
+        rollback_capacity_swap_install(
+            live_resident=resident, install_state=install_state,
+        )
+        err = str(getattr(exc, 'error_code', None) or '')
+        if not err and 'registry' in type(exc).__name__.lower():
+            err = 'registry_register_failed'
+        if not err:
+            err = 'capacity_swap_post_install_failed'
+        # SessionRegistryError carries error_code.
+        if hasattr(exc, 'error_code') and getattr(exc, 'error_code', None):
+            # Prefer capacity_swap_cursor_seed_failed / identity_* over generic.
+            err = str(exc.error_code)
+            if err in {'registry_identity_conflict', 'session_bound_elsewhere',
+                       'registry_integrity', 'source_required', 'cwd_required',
+                       'session_id_required', 'path_derive_failed',
+                       'invalid_identity', 'scan_offset_required',
+                       'scan_offset_invalid', 'transcript_path_mismatch',
+                       'chat_id_required'}:
+                err = 'registry_register_failed'
+        return {
+            'ok': False,
+            'error_code': err,
+            'detail': str(exc),
+            'rolled_back_to_last_good': True,
+            'target_generation_unregistered': True,
+            'target_generation': target_gen,
+        }
+
+    # Success: retain full install_state until CURRENT user stdin flush.
+    plan._capacity_swap_install_state = install_state  # type: ignore[attr-defined]
+    plan._capacity_swap_deferred_old_proc = install_state.get('old_proc')  # type: ignore[attr-defined]
+    return {
+        'ok': True,
+        'effective_system': effective,
+        'candidate_session_id': handoff.candidate_session_id,
+        'target_generation': target_gen,
+        'source_generation': source_gen,
+        'deferred_old_proc': install_state.get('old_proc'),
+        'install_state': install_state,
+    }
+
+
+def _rollback_capacity_swap_if_unflushed(
+    plan: DailyTurnPlan,
+    *,
+    resident: Any,
+) -> bool:
+    """If CapSwap installed but CURRENT user not yet flushed, restore old live.
+
+    Returns True when a rollback was performed.
+    """
+    if bool(getattr(plan, '_current_user_stdin_flushed', False)):
+        return False
+    install_state = getattr(plan, '_capacity_swap_install_state', None)
+    if not install_state:
+        return False
+    logger.info('capacity swap pre-flush failure; rolling back install to old resident')
+    rollback_capacity_swap_install(
+        live_resident=resident, install_state=install_state,
+    )
+    plan._capacity_swap_install_state = None  # type: ignore[attr-defined]
+    plan._capacity_swap_deferred_old_proc = None  # type: ignore[attr-defined]
+    plan.manifest['capacity_swap_pre_flush_rollback'] = True
+    return True
+
+
+def _commit_capacity_swap_after_stdin_flush(plan: DailyTurnPlan) -> None:
+    """After successful stdin flush: lock exactly-once and close deferred old proc."""
+    plan._current_user_stdin_flushed = True  # type: ignore[attr-defined]
+    install_state = getattr(plan, '_capacity_swap_install_state', None)
+    old_proc = None
+    if install_state:
+        old_proc = install_state.get('old_proc')
+    if old_proc is None:
+        old_proc = getattr(plan, '_capacity_swap_deferred_old_proc', None)
+    close_deferred_capacity_swap_old_proc(old_proc)
+    plan._capacity_swap_install_state = None  # type: ignore[attr-defined]
+    plan._capacity_swap_deferred_old_proc = None  # type: ignore[attr-defined]
+
+
 def ensure_resident_and_stream(
     plan: DailyTurnPlan,
     *,
@@ -1724,7 +2336,9 @@ def ensure_resident_and_stream(
             close_local_resident_if_bound(resident, expected_key=binding.resident_key)
 
         # Generation/session door-lock: before ensure_alive (spawn) and stdin.
-        if _registered_generation_requires_respawn(plan, resident, static_system):
+        door = peek_registered_respawn_decision(plan, resident, static_system)
+        effective_system = str(door.get('effective_system') or static_system)
+        if door.get('requires_respawn'):
             heartbeat.stop()
             if _registry_reprep_depth >= 1:
                 # Second mismatch: drop the current (already-reprepared) lease.
@@ -1733,6 +2347,66 @@ def ensure_resident_and_stream(
                     'registered Claude session conflicts with resident_generation',
                     error_code='registered_session_generation_mismatch',
                 )
+
+            if door.get('capacity_swap'):
+                # Capacity-only path: same context_id/epoch, generation +1, SYSTEM_SUFFIX_V1.
+                swap = _attempt_capacity_swap_before_stdin(
+                    plan,
+                    resident=resident,
+                    static_system=static_system,
+                    env=env,
+                    trigger_reason=str(door.get('reason') or ''),
+                )
+                if swap.get('ok'):
+                    effective_system = str(swap.get('effective_system') or effective_system)
+                    yield from ensure_resident_and_stream(
+                        plan,
+                        resident=resident,
+                        env=env,
+                        static_system=effective_system,
+                        _reprep_depth=_reprep_depth,
+                        _registry_reprep_depth=_registry_reprep_depth + 1,
+                    )
+                    return
+                # Pre-stdin failure → same-context last-good → existing cold (order frozen).
+                logger.info(
+                    'capacity swap failed pre-stdin code=%s; trying same-context last-good',
+                    swap.get('error_code'),
+                )
+                flushed = bool(getattr(plan, '_current_user_stdin_flushed', False))
+                try:
+                    lg = try_restore_same_context_last_good(
+                        plan=plan,
+                        live_resident=resident,
+                        current_user_stdin_flushed=flushed,
+                    )
+                except Exception as exc:
+                    # After stdin flush: fail closed (no cold resend).
+                    from chat.capacity_swap_runtime import CapacitySwapRuntimeError
+                    if isinstance(exc, CapacitySwapRuntimeError) and exc.error_code == 'current_user_already_sent':
+                        raise DailyRuntimeError(
+                            'capacity swap failed after stdin flush; refuse resend',
+                            error_code='current_user_already_sent',
+                        ) from exc
+                    raise
+                plan.manifest['capacity_swap_failed'] = True
+                plan.manifest['capacity_swap_error_code'] = swap.get('error_code')
+                plan.manifest['capacity_swap_last_good'] = dict(lg)
+                if lg.get('ok'):
+                    yield from ensure_resident_and_stream(
+                        plan,
+                        resident=resident,
+                        env=env,
+                        static_system=static_system,
+                        _reprep_depth=_reprep_depth,
+                        _registry_reprep_depth=_registry_reprep_depth + 1,
+                    )
+                    return
+                logger.info(
+                    'same-context last-good not sendable code=%s; falling back to cold reprepare',
+                    lg.get('error_code'),
+                )
+
             replacement = reprepare_after_registered_session_change(
                 plan,
                 resident=resident,
@@ -1754,7 +2428,7 @@ def ensure_resident_and_stream(
             return
 
         actual_cold = bool(
-            resident.ensure_alive(static_system, env, tool_profile=plan.tool_profile)
+            resident.ensure_alive(effective_system, env, tool_profile=plan.tool_profile)
         )
         if not plan.is_cold and not plan.is_respawn and actual_cold:
             heartbeat.stop()
@@ -1844,15 +2518,99 @@ def ensure_resident_and_stream(
 
         _capture_transcript_start(plan, resident)
 
-        for evt, payload in resident.send_turn(content, commit_meta=commit_meta):
-            if heartbeat.failed:
-                close_local_resident_if_bound(resident, expected_key=plan.resident_key)
-                raise LeaseHeartbeatTerminalFailure('lease heartbeat failed during stream')
-            if evt == 'tool_use':
-                raise DailyWindowToolFencePending()
-            if evt == 'done':
-                _capture_transcript_end(plan, resident)
-            yield evt, payload
+        def _mark_stdin_flushed() -> None:
+            _commit_capacity_swap_after_stdin_flush(plan)
+
+        send_kwargs: dict[str, Any] = {'commit_meta': commit_meta}
+        try:
+            import inspect
+            params = inspect.signature(resident.send_turn).parameters
+            if 'on_stdin_flushed' in params or any(
+                p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()
+            ):
+                send_kwargs['on_stdin_flushed'] = _mark_stdin_flushed
+        except (TypeError, ValueError):
+            pass
+
+        try:
+            for evt, payload in resident.send_turn(content, **send_kwargs):
+                if heartbeat.failed:
+                    close_local_resident_if_bound(resident, expected_key=plan.resident_key)
+                    raise LeaseHeartbeatTerminalFailure('lease heartbeat failed during stream')
+                if evt == 'tool_use':
+                    raise DailyWindowToolFencePending()
+                if evt == 'done':
+                    _capture_transcript_end(plan, resident)
+                    # Safety net: stream completed without on_stdin_flushed hook.
+                    if getattr(plan, '_capacity_swap_install_state', None) is not None:
+                        _commit_capacity_swap_after_stdin_flush(plan)
+                yield evt, payload
+        except Exception as exc:
+            # Post-flush: CURRENT user already sent → fail closed, never resend.
+            if bool(getattr(plan, '_current_user_stdin_flushed', False)):
+                raise
+            # Pre-flush CapSwap failure: restore old live, then continue frozen
+            # fallback (last-good → cold) so CURRENT user can still send once.
+            rolled = _rollback_capacity_swap_if_unflushed(plan, resident=resident)
+            if not rolled:
+                raise
+            logger.info(
+                'capacity swap pre-flush send failed (%s); continuing last-good→cold fallback',
+                type(exc).__name__,
+            )
+            pre_flush_meta = {
+                'capacity_swap_pre_flush_rollback': True,
+                'capacity_swap_pre_flush_send_error': type(exc).__name__,
+            }
+            heartbeat.stop()
+
+            flushed = bool(getattr(plan, '_current_user_stdin_flushed', False))
+            lg = try_restore_same_context_last_good(
+                plan=plan,
+                live_resident=resident,
+                current_user_stdin_flushed=flushed,
+            )
+            pre_flush_meta['capacity_swap_last_good'] = dict(lg)
+            if lg.get('ok'):
+                plan.manifest.update(pre_flush_meta)
+                yield from ensure_resident_and_stream(
+                    plan,
+                    resident=resident,
+                    env=env,
+                    static_system=static_system,
+                    _reprep_depth=_reprep_depth,
+                    _registry_reprep_depth=_registry_reprep_depth + 1,
+                )
+                return
+
+            # Demote CapSwap target generation to non-current history via cold
+            # reprepare (existing path). No second CapSwap; CURRENT user once.
+            # Strip capacity suffix — cold is a new non-capacity_swap generation.
+            cold_system = str(static_system or '')
+            if CAPACITY_BOUNDARY_SYSTEM_SUFFIX_V1 in cold_system:
+                cold_system = cold_system.replace(CAPACITY_BOUNDARY_SYSTEM_SUFFIX_V1, '')
+            replacement = reprepare_after_registered_session_change(
+                plan,
+                resident=resident,
+                static_system=cold_system,
+                static_system_sha256=_sha256_text(cold_system),
+                persona_sha256=plan.manifest.get('persona_sha256') or '',
+                provider=str(plan.manifest.get('provider') or 'claude_code'),
+                model=str(plan.manifest.get('model') or ''),
+            )
+            _adopt_reprepared_plan_in_place(plan, replacement, resident=resident)
+            # Re-apply after adopt — replacement.manifest would otherwise wipe flags.
+            plan.manifest.update(pre_flush_meta)
+            plan.manifest['capacity_swap_pre_flush_cold_fallback'] = True
+            yield from ensure_resident_and_stream(
+                plan,
+                resident=resident,
+                env=env,
+                static_system=cold_system,
+                _reprep_depth=_reprep_depth,
+                _registry_reprep_depth=_registry_reprep_depth + 1,
+            )
+            return
 
         if heartbeat.stop():
             close_local_resident_if_bound(resident, expected_key=plan.resident_key)
@@ -1996,9 +2754,34 @@ def handle_provider_success(
         unexpected_save_marker=unexpected_save_marker,
     )
     # Mapping only after assistant persist (Gateway) + cursor CAS success above.
-    return finalize_transcript_mapping_after_success(
+    manifest = finalize_transcript_mapping_after_success(
         plan, assistant_message_id=int(assistant_message_id),
     )
+    # Same-context last-good: only after full success (result + persist + JSONL + cursor).
+    end_off = plan.transcript_end_offset
+    start_off = plan.transcript_start_offset
+    sid = str(plan.transcript_claude_session_id or '').strip()
+    jsonl_grew = (
+        start_off is not None
+        and end_off is not None
+        and int(end_off) > int(start_off)
+        and bool(sid)
+    )
+    if jsonl_grew:
+        existing = get_context_claude_session(
+            int(plan.context_id),
+            int(plan.resident_generation),
+            db_path=plan.db_path,
+        )
+        note_same_context_last_good(
+            context_id=int(plan.context_id),
+            context_epoch=int(plan.context_epoch),
+            resident_generation=int(plan.resident_generation),
+            claude_session_id=sid,
+            source=resolve_finalize_registry_source(existing, default='daily_runtime'),
+            transcript_end_offset=int(end_off) if end_off is not None else None,
+        )
+    return manifest
 
 
 def handle_provider_failure(
