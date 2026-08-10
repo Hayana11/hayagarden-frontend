@@ -11,6 +11,7 @@ import shutil
 import sqlite3
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from typing import Optional
@@ -1225,6 +1226,64 @@ class CapacitySwapRuntimeContractTests(unittest.TestCase):
         self.assertEqual(live._pending_respawn_reason, 'capacity_swap')
         self.assertIsNotNone(state['old_attrs'].get('_committed_file_hashes'))
         self.assertIn('deadbeef', state['old_attrs']['_committed_file_hashes'])
+
+
+class NeverUsedIdleReapContractTests(unittest.TestCase):
+    """LIVE_FAIL #2: never-used (_last_used=0) must not trip idle reap."""
+
+    def _alive_matched_session(self, *, last_used: float) -> cc_resident.ResidentSession:
+        sess = cc_resident.ResidentSession(self.tmp, '', os.path.join(self.tmp, 'cc-tools.json'))
+        proc = mock.Mock()
+        proc.poll.return_value = None
+        sess._proc = proc
+        sess._cold = False
+        sess._system_text = 'STATIC_PERSONA'
+        sess._tool_profile = cc_resident.TOOL_PROFILE_TEXT_ONLY
+        sess._model_identity = None
+        sess._history_rewrite_epoch = ''
+        sess._last_used = float(last_used)
+        sess._resident_turn_count = 0
+        sess._last_round_context = 0
+        sess._turns_since_respawn = 0
+        sess._pending_respawn_reason = 'capacity_swap'
+        return sess
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix='cap-swap-idle-')
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_never_used_last_used_zero_is_not_idle(self):
+        sess = self._alive_matched_session(last_used=0.0)
+        self.assertIsNone(sess.peek_idle_seconds())
+        with mock.patch('cc_resident._cfg_int', side_effect=lambda k, d: d), \
+             mock.patch(
+                 'chat.cc_history_rewrite.current_history_rewrite_epoch',
+                 return_value='',
+             ):
+            reason = sess.peek_respawn_reason(
+                'STATIC_PERSONA',
+                tool_profile=cc_resident.TOOL_PROFILE_TEXT_ONLY,
+            )
+        self.assertNotEqual(reason, 'idle')
+        self.assertIsNone(reason)
+
+    def test_real_idle_after_successful_use_still_reaps(self):
+        aged = time.time() - cc_resident.IDLE_REAP_SECONDS - 1.0
+        sess = self._alive_matched_session(last_used=aged)
+        self.assertIsNotNone(sess.peek_idle_seconds())
+        self.assertGreater(sess.peek_idle_seconds(), cc_resident.IDLE_REAP_SECONDS)
+        with mock.patch('cc_resident._cfg_int', side_effect=lambda k, d: d), \
+             mock.patch(
+                 'chat.cc_history_rewrite.current_history_rewrite_epoch',
+                 return_value='',
+             ):
+            reason = sess.peek_respawn_reason(
+                'STATIC_PERSONA',
+                tool_profile=cc_resident.TOOL_PROFILE_TEXT_ONLY,
+            )
+        self.assertEqual(reason, 'idle')
 
 
 if __name__ == '__main__':
