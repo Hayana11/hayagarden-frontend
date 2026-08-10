@@ -136,11 +136,15 @@ class WakeCcToolsTests(unittest.TestCase):
     def test_allowlist_has_no_brain_and_matches_capability(self):
         csv = cc_wake_allowed_tools(None)
         self.assertNotIn('brain', csv)
+        self.assertIn('mcp__home__get_light_status', csv)
+        self.assertNotIn('mcp__home__light_on', csv)
+        self.assertNotIn('mcp__home__light_off', csv)
         for mcp in CC_WAKE_WRITE_MCP:
             self.assertIn(mcp, csv)
         self.assertIn('add_todo', CC_WAKE_CAPABILITY_TEXT)
         self.assertIn('位置', CC_WAKE_CAPABILITY_TEXT)
         self.assertIn('不可用：codebase patch/create_file', CC_WAKE_CAPABILITY_TEXT)
+        self.assertIn('不得调用 light_on', CC_WAKE_CAPABILITY_TEXT)
 
     def test_codebase_allowlist_is_per_tool_readonly_not_bare_server(self):
         parts = cc_wake_allowed_tools(None).split(',')

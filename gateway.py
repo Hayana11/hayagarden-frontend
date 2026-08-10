@@ -6591,7 +6591,12 @@ WAKE_TOOLS = [
     },
     {
         'name': 'get_light_status',
-        'description': '查询次卧灯当前开关与色温档位。醒来时先看灯是关是开、暖光还是中性光，再决定要不要远程帮她调。',
+        'description': (
+            '只读查询次卧主灯和床头灯当前开关状态。'
+            '当前可靠读取能力仅为 power，不读取亮度或色温。'
+            '查询失败表示暂时不可读取，不代表设备损坏。'
+            'Wake 只能查看，不能修改灯。'
+        ),
         'input_schema': {'type': 'object', 'properties': {}},
     },
     {

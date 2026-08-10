@@ -140,8 +140,8 @@ def status():
     def _fn():
         m, b = _load_dids()
         return {
-            "main":    lc.light_status(m),
-            "bedside": lc.light_status(b),
+            "main":    lc.light_status(m, zone="main"),
+            "bedside": lc.light_status(b, zone="bedside"),
         }
     return _wrap(_fn)
 

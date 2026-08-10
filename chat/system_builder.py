@@ -256,20 +256,7 @@ def build_system(
             '排查系统问题优先用 codebase_describe_project 和 codebase_search_code。'
             '对话与wake里都可以自然使用，随心所欲。）'
         )
-    try:
-        _lreq = urllib.request.Request('http://127.0.0.1:5052/light/status')
-        with urllib.request.urlopen(_lreq, timeout=3) as _lr:
-            _ls = json.loads(_lr.read()).get('result', {})
-        def _fmt_l(l):
-            if not l.get('power'): return '关'
-            p = ['开']
-            if l.get('brightness'): p.append(str(l['brightness']) + '%')
-            if l.get('color_temp'): p.append(str(l['color_temp']) + 'K')
-            return ' '.join(p)
-        _ms = _fmt_l(_ls.get('main', {})); _bs = _fmt_l(_ls.get('bedside', {}))
-        parts.append(f'（灯·当前状态：主灯 {_ms}，床头灯 {_bs}。操作灯前先看这里——关着的灯不要再去"调暗"，会重新开起来。）')
-    except Exception:
-        pass
+    # Lights are Home/tool capability — not auto-injected into Chat/Wake system prompts.
 
     # 4b. Pocket 手机浏览器在线状态（BP3 动态，不污染缓存）
     # CC Wake / dry_run 无 Pocket —— 不注入，避免暗示可用。
@@ -961,21 +948,8 @@ def _cc_collect_state(get_db_fn, *, lean=False):
     # New V3 Chat Exposure stays OFF.
     state['emotion'] = ''
     state['drive'] = ''
-    try:
-        req = urllib.request.Request('http://127.0.0.1:5052/light/status')
-        with urllib.request.urlopen(req, timeout=3) as resp:
-            ls = json.loads(resp.read()).get('result', {})
-        ms = _fmt_light_status(ls.get('main', {}))
-        bs = _fmt_light_status(ls.get('bedside', {}))
-        if lean:
-            state['lights'] = f'main={ms} bedside={bs}'
-        else:
-            state['lights'] = (
-                f'（灯·当前状态：主灯 {ms}，床头灯 {bs}。'
-                '操作灯前先看这里——关着的灯不要再去"调暗"，会重新开起来。）'
-            )
-    except Exception:
-        state['lights'] = 'main=unknown bedside=unknown' if lean else '（灯·当前状态：暂不可读）'
+    # Lights omitted from resident state — use get_light_status when explicitly needed.
+    state['lights'] = ''
     try:
         if lean:
             from gateway import _pocket_structured_snippet

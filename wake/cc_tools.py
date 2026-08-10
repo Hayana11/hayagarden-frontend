@@ -68,12 +68,8 @@ CC_WAKE_WRITE_LOGICAL = (
     'add_ledger',
 )
 
-# Explicit writable MCP (no WAKE_TOOLS twin for light switches).
+# Writable MCP for CC Wake — lights are read-only (get_light_status); no autonomous write.
 CC_WAKE_WRITE_MCP = (
-    'mcp__home__light_on',
-    'mcp__home__light_off',
-    'mcp__home__light_bedside_warm',
-    'mcp__home__light_bedside_neutral',
     'mcp__home__add_todo',
     'mcp__home__add_ledger',
 )
@@ -94,8 +90,8 @@ CC_WAKE_CAPABILITY_TEXT = (
     'get_ledger、get_ledger_budget、以及 codebase 只读工具'
     '（mcp__codebase__describe_project / read_file / list_directory / search_code / '
     'find_references / git_view）。\n'
-    '可写可用：light_on、light_off、light_bedside_warm、light_bedside_neutral、'
-    'add_todo、add_ledger。\n'
+    '可写可用：add_todo、add_ledger。\n'
+    '灯：仅只读 get_light_status；Wake 不得调用 light_on/light_off 或床头灯模式切换。\n'
     '不可用：codebase patch/create_file、codebase explain_history（内部会打中转站）、'
     '位置、手机状态、留言板、联网搜索、GitHub、Playwright 读网页、Pocket、截图、相册、'
     'desire 工具、self_trigger、wake_settings、发文件/选择器。\n'
@@ -166,7 +162,7 @@ def cc_wake_allowed_tools(tools: Sequence[dict] | None = None) -> str:
             for tool in tools
             if isinstance(tool, dict)
         }
-        restricted = set(CC_WAKE_WRITE_MCP)  # light switches stay (no logical twin)
+        restricted = set(CC_WAKE_WRITE_MCP)
         for logical, mcp in WAKE_TO_CC_MCP.items():
             if logical in allowed_logical:
                 restricted.add(mcp)
@@ -211,7 +207,7 @@ def cc_wake_nudge_text(
     lines = [
         '【Wake 工具边界】与上方「Wake·Claude Code 工具面」一致：',
         '只读：' + '、'.join(readonly) + '、codebase 只读（不含 patch/create_file）。',
-        '可写：灯控（on/off/bedside）、add_todo、add_ledger。',
+        '可写：add_todo、add_ledger。灯仅可只读 get_light_status，不可改灯。',
         '不可用：位置、设备、留言板、相册、截图、联网搜索——不要假装查过。',
     ]
     if float(t_hours or 0.0) >= 1.0:
