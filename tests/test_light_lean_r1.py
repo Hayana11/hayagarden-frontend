@@ -43,6 +43,27 @@ class WakeLightAllowlistTests(unittest.TestCase):
         self.assertNotIn('灯控（on/off', text)
 
 
+class RelayWakeToolsLightContractTests(unittest.TestCase):
+    def test_wake_tools_read_only_light_status_contract(self):
+        from gateway import WAKE_TOOLS
+
+        names = [str(t.get('name') or '') for t in WAKE_TOOLS]
+        self.assertIn('get_light_status', names)
+        for forbidden in ('light_on', 'light_off', 'light_warm', 'light_neutral'):
+            self.assertNotIn(forbidden, names)
+
+        desc = next(t['description'] for t in WAKE_TOOLS if t['name'] == 'get_light_status')
+        self.assertIn('只读', desc)
+        self.assertIn('power', desc)
+        self.assertIn('不能修改灯', desc)
+        self.assertIn('不读取亮度或色温', desc)
+        self.assertNotIn('暖光', desc)
+        self.assertNotIn('中性光', desc)
+        self.assertNotIn('远程帮她调', desc)
+        self.assertNotIn('决定要不要', desc)
+        self.assertNotIn('色温档位', desc)
+
+
 class NoAutoLightInjectionTests(unittest.TestCase):
     def test_build_system_does_not_fetch_light_status(self):
         from chat import system_builder
