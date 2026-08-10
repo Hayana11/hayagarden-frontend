@@ -580,11 +580,9 @@ class LeanFactsOnlyCollectionTests(unittest.TestCase):
              mock.patch('chat.system_builder._format_structured_drive_snippet', return_value='attachment=0.55'), \
              mock.patch('urllib.request.urlopen') as urlopen_mock, \
              mock.patch('config_store.get_bool', return_value=False):
-            urlopen_mock.return_value.__enter__.return_value.read.return_value = (
-                b'{"result":{"main":{},"bedside":{}}}'
-            )
             state = _cc_collect_state(get_db, lean=True)
 
+        urlopen_mock.assert_not_called()
         for key in self._SYSTEM_FIELD_KEYS:
             value = state.get(key) or ''
             if value:
@@ -592,9 +590,7 @@ class LeanFactsOnlyCollectionTests(unittest.TestCase):
                     lean_system_field_is_facts_only(value),
                     msg=f'{key} still carries behavior instructions: {value!r}',
                 )
-        self.assertEqual(state['lights'], 'main=关 bedside=关')
-        self.assertNotIn('操作', state['lights'])
-        self.assertNotIn('不要', state['lights'])
+        self.assertEqual(state['lights'], '')
 
     def test_lean_user_records_preserve_raw_text_without_behavior_prefix(self):
         import sqlite3

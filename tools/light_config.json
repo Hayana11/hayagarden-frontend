@@ -3,5 +3,9 @@
   "bedroom2_bedside_did": "1124131223",
   "prop_map": {
     "power": {"siid": 2, "piid": 1}
+  },
+  "zones": {
+    "main": {"supported_query_props": ["power"]},
+    "bedside": {"supported_query_props": ["power"]}
   }
 }
